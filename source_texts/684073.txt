@@ -1,0 +1,769 @@
+VOX P ROG: 3D Spatial Reasoning
+through Voxel Programming
+Zhichao Zhai1 , Menglei Zhao1 , Guikun Chen1 , Zihao Yan2 ,
+Kanzhi Wu2 , Wenguan Wang1 , Jun Xiao1,†
+1
+arXiv:2610.30127v2 [cs.CV] 31 Oct 2026
+2
+Zhejiang University
+vivo Mobile Communication Co., Ltd., Shenzhen, China
+Language models’ abilities to interpret tasks and generate programs offer a promising basis for 3D
+spatial reasoning. Yet following spatial instructions in 3D scenes requires programs to construct
+geometric references that language leaves implicit. In this work, we introduce VOX P ROG, which
+formulates 3D object placement through voxel programming: a language model translates task interpretations into executable programs over local voxel views of scene surfaces. Because these views
+index surface geometry on regular grids with explicit coordinates and neighborhood relations, an
+evidence program can isolate task-relevant regions and boundaries directly from scene meshes, and
+a downstream pose program can measure the resulting geometry to compute a target SE(3) pose.
+Visual and numerical feedback from execution lets the model inspect intermediate selections and
+candidate placements to iteratively revise its code. To evaluate open-ended placement across functional use, geometric fit, and contextual arrangements, we introduce the 71-task VOX P ROG-Bench
+benchmark along with an evaluation suite pairing perceptual Intent Alignment and 3D Physical
+Validity. Across VOX P ROG-Bench and external benchmarks, VOX P ROG consistently outperforms
+relation-based, keypoint-based, and mesh-based baselines. Code will be released.
+Project homepage: voxprog.github.io
+1
+Introduction
+Natural-language spatial instructions often specify goals whose geometric requirements must be inferred
+from the scene (Song et al., 2025; Chen et al., 2024; Cheng et al., 2024). Placing a bottle inside an open
+display holder requires identifying the holder’s receiving structure and determining how the bottle should
+be positioned and oriented to fit within it. Similarly, extending a row of cups requires inferring the direction
+and spacing of the existing arrangement to derive the next placement target. Here, the geometric references
+that define the goal are themselves outcomes of spatial computation over the 3D scene.
+Existing approaches are limited by both the task requirements their interfaces can express and the geometric
+computations their representations support. Predefined task interfaces couple task coverage to task-specific
+implementations, limiting generalization to new spatial requirements (Gao et al., 2025; Huang et al., 2023b;
+Ichter et al., 2023). Geometric representations present a different difficulty: sparse keypoints can leave
+extended contact regions and local surface shapes under-specified (Huang et al., 2025b; Hua et al., 2025;
+Manuelli et al., 2022; Sundaresan et al., 2023; Fang et al., 2024), while raw meshes require programs
+to organize irregular surface elements into the regions and references a task needs. Open-ended spatial
+reasoning therefore requires both programmatic computation that adapts to free-form instructions and a
+structured 3D surface representation that exposes scene geometry directly to code.
+To this end, we formulate voxel programming, in which a language model expresses its understanding of a
+spatial task as a program that constructs and operates on local voxel views (Fig. 1). By discretizing object
+surfaces onto regular grids at task-appropriate resolutions, local voxel views expose spatial coordinates
+and neighborhood relations directly as array operations. Generated programs can index these grids to
+isolate contact regions, extract boundaries, and measure local extent and orientation, turning a uniform grid
+representation into task-specific geometric references for 6-DoF pose computation.
+VOX P ROG realizes this formulation through a two-stage programming pipeline grounded by visual anchors
+and execution feedback. Starting from the instruction and raycast visual anchors, the model first writes an
+†
+Corresponding author: Jun Xiao.
+1
+VoxProg: 3D Spatial Reasoning
+through Voxel Programming
+Z
+X
+VLM Agent
+Code
+Voxel Grid
+Y
+3D Pose
+Figure 1: 3D spatial reasoning through voxel programming. Given a free-form spatial instruction, VOX P ROG
+synthesizes executable Python programs that construct task-relevant surface references over local voxel views and
+compute target 6-DoF object placements. The surrounding scenes illustrate the diverse object geometries, part-level
+support structures, and multi-object spatial arrangements encountered in everyday placement tasks.
+evidence program to construct the surface regions required by the task, such as a dish rack’s dividers and
+bottom support rails, and to specify the spatial relations they must satisfy. Conditioned on this constructed
+evidence, a pose program then queries the selected geometry to compute the moved object’s target pose. At
+both stages, numerical diagnostics and rendered views from program execution allow the model to verify
+intermediate geometry, revise faulty selections, and iteratively refine its generated code.
+We evaluate VOX P ROG on VOX P ROG-Bench, a new benchmark of 71 open-ended placement tasks where
+target poses depend on part-level affordances, 3D shape compatibility, and surrounding layouts. Because
+valid placements must satisfy both semantic intent and physical plausibility, our evaluation suite pairs a
+perceptual ranking metric, IA Rank Score, with 3D Physical Validity checks for static support and object interpenetration. IA Rank Score measures how consistently a method’s rendered result outranks competitors
+in similarity to the ground-truth arrangement. Across VOX P ROG-Bench, VOX P ROG substantially outperforms relation-based, keypoint-based, and mesh-based baselines, achieving its largest margin on geometric
+tasks where object contours govern fit and clearance. Ablation studies further show that constructing explicit geometric evidence before pose synthesis improves both physical validity and intent alignment over
+direct mesh programming, while local voxel views further improve intent alignment across all 71 tasks.
+Contributions. ❶ We formulate voxel programming and develop VOX P ROG, a two-stage system that
+constructs task-relevant surface geometry via local voxel views to compute 3D object placements. ❷ We
+introduce VOX P ROG-Bench, a benchmark of 71 language-guided 3D placement tasks spanning functional,
+geometric, and contextual arrangements. ❸ We propose a complementary evaluation protocol combining
+perceptual intent ranking (IA Rank Score) with 3D geometric verification (Physical Validity).
+2
+Related Work
+Spatial Task Specification. Language-guided placement has been studied through layout prediction, rearrangement search, and geometric optimization. Scene graphs encode inter-object relations for scene
+synthesis (Chen et al., 2025; Zhai et al., 2023; Lin & Mu, 2024; Hu et al., 2024b), while scene-layout
+and object-placement methods map language to spatial configurations (Feng et al., 2023; Yang et al., 2024;
+Öcal et al., 2025; Sun et al., 2025; Huang et al., 2025a; Abdelreheem et al., 2025; Zhang et al., 2024; Kuang
+et al., 2026). Rearrangement methods coordinate multi-object structures using learned spatial priors (Liu
+et al., 2022; 2023; Tang et al., 2024; Wei et al., 2023; Xu et al., 2024) or pattern-guided search (Chang
+et al., 2024). At a finer scale, object manipulation methods formulate 6-DoF pose optimization over sparse
+2
+semantic keypoints, directional axes, and part-level affordances (Manuelli et al., 2022; Hua et al., 2025;
+Huang et al., 2025b; Qi et al., 2025; Pan et al., 2025; Zhu et al., 2025).
+While layout, surface-constraint, and keypoint formulations parameterize placement over bounding boxes,
+planar support patches, or sparse point and axis primitives, open-ended tasks often hinge on extended surface structures (such as receiving slots, angled ledges, curved rims, or recessed compartments) whose relevant regions depend on the instruction and paired objects. VOX P ROG therefore treats geometric reference
+construction as an explicit, programmable stage of task specification: generated code composes spatial selections and neighborhood operations over local voxel views, retaining both the selected voxel regions and
+their clipped source-mesh patches for downstream pose measurement so that the same 3D object geometry
+can be segmented and parameterized differently across placement tasks.
+Language Models for Spatial Computation. Executable programs let language models delegate quantitative calculation and visual queries to external interpreters (Gao et al., 2023; Chen et al., 2023; Gupta
+& Kembhavi, 2023; Surís et al., 2023; Hu et al., 2024a). In robotics, generated code sequences task
+plans (Singh et al., 2023), composes perception calls with control primitives (Liang et al., 2023; Mu et al.,
+2024; Li et al., 2024), and synthesizes 3D value maps over workspace grids for motion planning (Huang
+et al., 2023a). Recent methods further incorporate geometric processing via part-mask refinement (Tang
+et al., 2026), primitive fitting (Lin et al., 2026), and frame-grounded tool calls (Chen et al., 2026).
+In most programmatic frameworks, however, 3D perception remains encapsulated behind fixed API calls
+that return object centroids, bounding boxes, or pre-segmented masks (Liang et al., 2023; Mu et al., 2024),
+or operates on coarse workspace grids to score trajectories (Huang et al., 2023a). We develop voxel programming so that generated code can inspect and dissect 3D object surfaces directly at the part level.
+By discretizing candidate objects into local voxel views at task-chosen resolutions, VOX P ROG turns 3D
+surface inspection into regular-grid array programming while retaining exact correspondence with the underlying mesh triangles. Generated code can thus construct custom surface witnesses on demand, verify
+them through visual and numerical execution feedback, and measure both discrete grid bounds and clipped
+source-mesh patches to solve for precise, physically valid 6-DoF object placements.
+3
+Method
+Given a natural-language instruction I (e.g., “Place the single plate in an open slot of the empty dish
+rack with its rim supported”) and a 3D scene S = {on }N
+n=1 with known object meshes and initial poses,
+VOX P ROG synthesizes and executes Python programs to compute a target placement pose T ∈ SE(3).
+Rather than mapping language directly to 6-DoF coordinates in a single step, VOX P ROG decouples geometric reference construction from pose calculation: an evidence program Pe isolates task-relevant surface
+regions on the moved and reference objects, and a pose program Pp measures these constructed surface
+regions and their relational constraints to solve for the moved object’s final rigid transformation.
+Fig. 2 illustrates this pipeline on an upright plate-placement task. The model first organizes the required
+spatial references into a directed evidence graph and grounds visible cues into 3D surface anchors (§3.1).
+Operating on local voxel views of scene meshes (§3.2), the evidence program constructs the rack’s adjacent
+dividers, lower support rails, and slot region while refining its selections through visual and geometric
+selection checks and program revision (§3.3). The verified evidence record and relational claims are then
+passed to the pose program, which queries both discrete voxel bounds and clipped source-mesh patches to
+align, center, and seat the plate upright within the target receiving slot (§3.4).
+3.1
+Task Interpretation and Visual Grounding
+An LLM formalizes its understanding of the instruction as a directed evidence graph G = (V, E). Each
+node v ∈ V specifies either a visible semantic anchor or a derived geometric region to construct, along with
+its functional role in the task; each directed edge (u, v) ∈ E indicates that constructing v depends on the
+location or geometry of u. In Fig. 2, visual cues on the plate and dish rack initiate a dependency chain that
+extracts the plate’s outer rim alongside the rack’s adjacent dividers, support rails, and slot region.
+Each node in G is routed according to how its geometry can be acquired. For a directly visible semantic
+cue, Locate queries a VLM for a 2D pixel coordinate in the rendered scene image and casts a camera ray
+against the scene mesh to recover a 3D surface point as a spatial anchor in A. References that cannot be
+reduced to a single clickable pixel, such as an interior slot region, a recessed support ledge, or an occluded
+underside, are passed to the evidence program together with their descriptions and upstream 3D anchors,
+which localize where on the object mesh the program should inspect and slice the surface.
+3
+1 Interpret + ground
+2 Program task geometry
+Place the single plate in an open slot of
+the empty dish rack with its rim supported.
+{} Evidence program Pe
+Dividers D, E
+Support S
+Voxel detail
+Voxel view U
+Source mesh:
+Continuous surface
+Retained geometry
+Slot B
+Dividers D, E
+U = VoxelView(rack, h)
+dish rack
+Selected voxels:
+Dividers D, E
+R.D: Plane normal n
+D, E = loops(U)
+S = lower_rails(U, D, E)
+plate
+B = slot_region(D, E, S)
+Support S
+R.S: Depth & height y, z
+Support S
+R = source_patches(U,
+Slot B (D, E + S)
+D, B, S)
+G, A
+Evidence graph G
+R
+R.B: Slot mid­span x
+Revise Pe
+Slot span (R.B)
+Slot B (D, E + S)
+Evidence inspection
+place in
+slot (C)
+Candidate selection
+Selection checks
+Part identity
+Plate cue A
+Plate rim
+Slot B
+Rack mesh
+Dividers D, E
+Support S
+Verified selection
+Program revision
+{} Revise selection rules
+Region completeness
+Adjust voxel resolution
+Unwanted geometry
+Re­run the program
+R, C
+3 Synthesize pose
+4 Output pose
+Apply T
+{} Pose program Pp
+Align with
+T
+dividers
+Depth + height
+Center
+in slot
+n = plane_normal( R.D )
+x = mid_span( R.B , n)
+y,z = depth_and_top( R.S )
+T = align_and_seat(plate,n,x,y,z)
+Figure 2: Overview of VOX P ROG on upright plate placement. (1) The model parses the instruction into a directed
+evidence graph G and grounds visible cues into 3D surface anchors A. (2) An evidence program Pe operates on local
+voxel views to isolate the rack’s dividers D, E, support rails S, and slot region B in R along with relational constraints
+C, refining its selections through visual and geometric checks. (3–4) A pose program Pp queries the discrete voxel
+bounds and clipped source-mesh patches in R to solve for and apply the target pose T ∈ SE(3).
+3.2
+Voxel Programming
+Generated programs operate on scene geometry through local voxel views. Given a source mesh s and voxel
+size h > 0, U = VoxelView(s, h) discretizes the surface of s onto a regular 3D grid at resolution h. On
+this grid, the view exposes occupied surface cells as integer coordinate arrays (N, 3) alongside directional
+exposure masks and connected-component queries, while a rigid grid-to-world transform maps selected
+voxel indices and local bounds back to continuous 3D coordinates for downstream geometric computation.
+Each constructed geometric reference forms a witness in the evidence record R. To construct a witness v,
+the evidence program instantiates a local view Uv on source geometry sv at resolution hv and evaluates a
+programmatic binary mask mv over its surface cells to obtain the selected surface cells Wv :
+Wv = {c ∈ Uv : mv (c) = 1}.
+Uv = VoxelView(sv , hv ),
+(1)
+Because Uv is a regular grid, the program can compose mv through standard array operations (axis-aligned
+slicing, proximity filters around visual anchors or upstream witnesses, directional exposure queries, and
+connected-component labeling) to isolate witnesses such as the rack’s adjacent dividers D, E, lower support
+rails S, and combined slot region B in Fig. 2. For each witness v, the entry R.v in R stores these selected
+cells Wv , their parent view Uv , the source object sv , and the provenance edges from G.
+Parameterizing the voxel size hv per view allows the evidence program to match discretization scale to local
+geometric structure without voxelizing the entire 3D scene at a uniform fine resolution. A program can use
+coarse grids to localize broad object surfaces and switch to a finer resolution hv when resolving thin wire
+dividers, narrow receiving slots, or shallow rims that would merge on a coarse grid, while retaining exact
+geometric correspondence with the underlying triangles of the source object mesh.
+3.3
+Evidence Program Generation and Refinement
+Conditioned on the instruction, evidence graph G, scene S, and grounded anchors A, the LLM generates
+an executable evidence program Pe following the topological order of G:
+(R, C) = Pe (S, A),
+(2)
+where R stores the constructed witnesses and C specifies the target spatial relations among them (e.g.,
+placing the plate’s rim in slot B between dividers D, E while resting on support rails S in Fig. 2). Following
+the dependencies in G allows downstream witnesses to be defined relative to earlier selections.
+4
+To tie each witness to its functional role before writing code, the model first states explicit geometric
+inclusion and exclusion criteria for each target witness (such as excluding adjacent rack loops or vertical
+side walls). When a structural question remains unresolved, the model can execute lightweight probes via
+the same voxel API to print numerical statistics (such as voxel counts, component counts, and coordinate
+spans) and inspect rendered diagnostic views of intermediate voxel selections.
+Once a complete candidate Pe is executed, geometric checks and a VLM critic inspect each constructed
+witness for part identity, region completeness, and the absence of unwanted geometry (Fig. 2, center).
+When a candidate selection leaks into adjacent structure or remains incomplete, this feedback guides the
+model to revise its programmatic selection rules or adjust the voxel resolution hv and re-run Pe .
+3.4
+Pose Program Generation and Refinement
+Given the verified evidence record R and relational specification C, the LLM generates an executable pose
+program Pp to compute the moved object’s target rigid transformation:
+T = Pp (R, S, Tcur ),
+T ∈ SE(3),
+(3)
+where Tcur is the moved object’s current world-frame pose (initialized at T0 ) and S provides the scene
+meshes and initial poses. Every witness enters Pp as concrete geometry rather than pre-fitted point or
+vector constants, so Pp derives all required positions, axes, and offsets directly from R under C.
+Beyond discrete grid coordinates, each witness entry R.v in R also exposes the continuous source-mesh
+patch clipped to its selected voxels Wv , preserving exact face correspondence and outward surface normals.
+As shown in Fig. 2 (step 3), Pp combines discrete grid bounds with continuous mesh surfaces to solve
+accurately for the target pose T on the original object geometry, computing the divider plane normal n
+from R.D, the slot mid-span x from R.B, and the support depth and height y, z from R.S.
+Because all witnesses in R remain fixed in world coordinates at the initial scene state, Pp maps any initial
+world-space point x on the moved object (at initial pose T0 ) to its position under a candidate pose T as
+e,
+e′ = T T0−1 x
+x
+(4)
+e denotes homogeneous coordinates. After each execution of Pp , the candidate pose T updates Tcur
+where x
+in the 3D scene while R stays recorded in the initial scene state without recomputing evidence geometry,
+and the model receives a rendered observation of the resulting candidate placement together with numerical
+contact and clearance diagnostics to guide iterative revision of the pose program Pp .
+4
+Experiments
+We evaluate VOX P ROG on VOX P ROG-Bench against relation-, keypoint-, and mesh-based baselines (§4.1–
+§4.2), ablate staged reference construction and local voxel views alongside external tasks from RoboCasa
+and Open6DOR v2 (§4.3), and analyze physical and perceptual failure modes (§4.4).
+4.1
+Experimental Setup
+Benchmark. We evaluate on VOX P ROG-Bench, a benchmark of 71 individually curated language-guided
+3D placement tasks. Each case presents an initial tabletop scene and a free-form instruction specifying the
+desired placement of an object. We emphasize diverse instructions that call for fine-grained reasoning about
+functional object parts, geometric fit, and contextual arrangements. Although an instruction can involve
+multiple spatial cues, we assign each case to one category according to its primary spatial requirement:
+• Functional (28 cases): The placement must support a specific use, such as placing a cup beneath a
+grinder chute to catch grounds, returning headphones to a stand, or orienting a funnel for pouring.
+• Geometric (14 cases): The placement depends directly on object contours, such as nesting an oval bowl
+inside a matching container or fitting a baking tray into a narrow box at an angle.
+• Contextual (29 cases): The placement takes its spatial cues from the surrounding multi-object arrangement, such as completing a missing place setting or restoring a symmetric tabletop layout.
+Scenes are assembled from generated 3D assets through randomized placement and manual refinement.
+Detailed instructions, object geometry, and scene context make the intended arrangement well defined, with
+one manually annotated ground-truth 6-DoF pose per task. All methods receive the scene meshes, initial
+poses, instruction, and target-object identity; ground-truth poses and renderings serve only for evaluation.
+5
+IA Rank Score (%) ↑
+Physical Validity (%) ↑
+Method
+Overall
+Func.
+Geom.
+Context.
+Overall
+Func.
+Geom.
+Context.
+G EN M ANIP
+G EN S IM 2- K PAM
+D IRECT M ESH
+25.59
+42.72
+48.59
+25.00
+34.52
+53.57
+32.14
+35.71
+44.05
+22.99
+54.02
+45.98
+73.2
+77.5
+87.3
+67.9
+78.6
+75.0
+92.9
+85.7
+100.0
+69.0
+72.4
+93.1
+VOX P ROG
+83.10
+86.90
+88.10
+77.01
+95.8
+92.9
+100.0
+96.6
+Table 1: Quantitative results on VOX P ROG-Bench. We report IA Rank Score (↑) and Physical Validity (%, ↑) across
+all 71 placement tasks and within the Functional (28), Geometric (14), and Contextual (29) task categories. Best results
+in each column are highlighted in bold (shaded) and second-best results are underlined.
+Evaluation Suite. We design an evaluation suite around two complementary requirements of object placement: realizing the intended spatial arrangement and maintaining physical plausibility. We evaluate Intent
+Alignment via visual comparison with ground truth and Physical Validity via 3D geometric checks.
+Intent Alignment measures perceptual similarity using DreamSim (Fu et al., 2023) between full-scene renderings of the predicted and ground-truth placements under matched cameras and lighting. Within each
+case, we rank the M compared methods by increasing DreamSim distance and assign rank r the score
+100(M − r)/(M − 1), using average ranks for ties. Averaging over cases gives the IA Rank Score (0–100;
+higher is better), which measures how consistently a method outranks its competitors across tasks. Each
+task contributes equally; scores are compared within the same method pool.
+Physical Validity assesses whether the final placement establishes plausible static support and avoids interpenetration with surrounding scene objects. We report the percentage of evaluated task placements whose
+final 3D meshes satisfy both static support-contact and collision-clearance checks.
+Baselines. We compare VOX P ROG against three language-guided placement approaches. G EN M ANIP
+(Gao et al., 2025) constructs placements using predefined spatial relations between target and anchor objects. G EN S IM 2- K PAM (Hua et al., 2025; Manuelli et al., 2022) specifies placement targets through predicted semantic keypoints together with geometric point and axis constraints. D IRECT M ESH generates
+Blender Python code for placement and executes it through Blender-MCP1 .
+Model Configuration. All compared methods use GPT-5.6-Sol under a shared inference configuration for
+both language-guided code generation and visual grounding across all evaluated tasks.
+4.2
+Results on the Task Suite
+Quantitative Results. VOX P ROG achieves the highest IA Rank Score overall (83.10) and across all three
+task groups, alongside the highest Physical Validity at 95.8% (Table 1), outperforming D IRECT M ESH
+(48.59 / 87.3%), G EN S IM 2- K PAM (42.72 / 77.5%), and G EN M ANIP (25.59 / 73.2%). Although D IRECT
+M ESH also writes task-specific Python code over explicit scene meshes, VOX P ROG improves its IA Rank
+Score by 34.51 points and Physical Validity by 8.5 points: code generation alone remains brittle without an
+intermediate representation that isolates the surfaces relevant to the instruction.
+Breaking down performance by category reveals how different representations behave under distinct spatial
+demands. On Functional tasks, VOX P ROG reaches 86.90 versus 53.57 for D IRECT M ESH and 34.52 for
+G EN S IM 2- K PAM (with Physical Validity rising from 75.0% and 78.6% to 92.9%), as functional use requires isolating mating parts, such as a chute outlet or headphone arch, rather than whole-object bounding
+boxes or sparse keypoints. On Contextual tasks, the strongest baseline shifts from D IRECT M ESH (45.98)
+to G EN S IM 2- K PAM (54.02), while VOX P ROG retains a clear lead at 77.01. The largest margin occurs on
+Geometric tasks: VOX P ROG reaches an IA Rank Score of 88.10 versus 44.05 for D IRECT M ESH, although
+both attain 100.0% Physical Validity. The difference lies in resolving the local contours and clearances that
+distinguish the intended fit from other physically valid configurations.
+Qualitative Results. Fig. 3 exposes the gap between locating an object and identifying its functional contact region. In the headphone case (b), all three baselines bring the earcups against the stand or wrap the
+headphones around its post, missing the inner headband support specified by the instruction. VOX P ROG
+matches the inner arch to the curved crown, establishing the intended part-level contact.
+1
+https://github.com/ahujasid/blender-mcp
+6
+Instruction
+a
+Sneaker
+Initial scene
+GENMANIP
+GENSIM2-KPAM
+DIRECT MESH
+VOXPROG (OURS)
+Initial
+Place the
+sneaker on the
+sloped stand, toe
+forward.
+b
+Headphones
+Initial
+Rest the inner
+headband on the
+stand’s curved
+top.
+c
+Sponge
+Initial
+Place the sponge
+on the designated
+draining tray.
+d
+VR headset
+Initial
+Put the headset
+on its stand,
+headband behind
+the front shell.
+e
+Plate
+Initial
+Place the plate in
+a rack slot, with
+its rim supported.
+Moved object / part
+Reference object / region
+Figure 3: Qualitative comparisons on VOX P ROG-Bench. Representative placements of a sneaker (a), headphones
+(b), a dish sponge (c), a VR headset (d), and a plate (e) across G EN M ANIP, G EN S IM 2- K PAM, D IRECT M ESH, and
+VOX P ROG. Colored highlights mark the moved object or part and the reference object or region in both the instruction
+text and rendered scenes; terracotta borders highlight VOX P ROG’s final object placements.
+On the sloped stand (a), G EN M ANIP leaves the sneaker above the support and G EN S IM 2- K PAM turns
+it across the ramp. VOX P ROG aligns the sole with the incline and keeps the toe facing forward. For the
+VR headset (d), G EN M ANIP and G EN S IM 2- K PAM leave the headset above the cradle or in front of the
+stand, while VOX P ROG positions it over the stand with the headband behind the front shell. Explicit surface
+references connect these local contact and orientation requirements to pose computation.
+4.3
+Ablation and External Evaluation
+Effect of Voxel Programming. To separate the effect of staged reference construction from that of local
+voxel views, we compare D IRECT M ESH, M ESH E VIDENCE, and VOX P ROG across all 71 tasks in Table 2.
+D IRECT M ESH writes a single placement program directly over the scene meshes; M ESH E VIDENCE shares
+VOX P ROG’s two-stage pipeline and execution feedback but constructs witness regions through direct mesh
+operations on vertices and faces; VOX P ROG constructs witnesses on local voxel views while retaining
+access to the clipped source-mesh surfaces during pose computation.
+Within this three-method comparison, moving from single-stage D IRECT M ESH to the staged M ESH E VI DENCE pipeline raises Physical Validity from 87.3% to 95.8% and more than doubles the IA Rank Score
+from 26.76 to 56.34. When a single program must simultaneously locate task-relevant surface geometry
+and compute 6-DoF coordinates over raw scene meshes, imprecise region selection directly degrades the
+resulting placement pose; introducing an explicit evidence stage allows candidate surface regions to be
+constructed, verified, and revised through execution feedback before downstream pose synthesis.
+7
+Replacing direct mesh selection with local voxel views
+IA Rank
+Physical
+raises the IA Rank Score from 56.34 to 66.90 while main- Method
+Score (%) ↑
+Validity (%) ↑
+taining 95.8% Physical Validity. Regular grid indexing
+26.76
+87.3
+and neighborhood operations help resolve the intended D IRECT M ESH
+M
+ESH
+E
+VIDENCE
+56.34
+95.8
+receiving side of a structure. In Fig. 4, M ESH E VIDENCE
+66.90
+95.8
+places the tablet behind the stand’s supports, which ob- VOX P ROG
+struct its screen, whereas VOX P ROG seats it in front with
+Table 2: Ablation of voxel programming. Results
+the display unobstructed and facing the user.
+across all 71 placement tasks on VOX P ROG-Bench.
+External Placement Tasks. We evaluate generalization
+on 19 tasks adapted from RoboCasa (Nasiriany et al., Place the tablet on its stand,
+2024) and 13 from Open6DOR v2 (Ding et al., 2024; Qi in landscape, with the screen facing forward.
+et al., 2025), formulated as final-state 3D placement probMESH EVIDENCE
+VOXPROG (ours)
+lems under matched inputs (Fig. 5). On RoboCasa, where
+appliances and cabinets introduce semi-enclosed boundaries, VOX P ROG achieves an IA Rank Score of 87.72
+against 26.32–45.61 for the baselines, while maintaining
+94.7% Physical Validity compared with 26.3%–42.1%
+for the baselines. On Open6DOR v2, VOX P ROG leads
+in IA Rank Score (61.54 vs. 57.69 for D IRECT M ESH)
+and raises Physical Validity to 92.3% versus 46.2% for
+D IRECT M ESH: while broad directional instructions ad- Figure 4: Tablet placement ablation. The supports
+mit many 2D-plausible overhead positions, the baselines obstruct the screen in M ESH E VIDENCE; VOX P ROG
+keeps the display clear and facing forward.
+often leave objects floating or interpenetrating in 3D.
+RoboCasa
+Open6DOR v2
+IA Rank Score (%) ↑
+IA Rank Score (%) ↑
+26.32
+GENMANIP
+40.35
+GENSIM2-KPAM
+0
+50
+100
+0
+31.6
+61.5
+50
+46.2
+DIRECT MESH
+94.7
+VOXPROG
+100
+69.2
+GENMANIP
+GENSIM2-KPAM
+42.1
+0
+50
+Physical Validity (%) ↑
+26.3
+DIRECT MESH
+61.54
+VOXPROG
+Physical Validity (%) ↑
+GENMANIP
+57.69
+DIRECT MESH
+87.72
+VOXPROG
+34.62
+GENSIM2-KPAM
+45.61
+DIRECT MESH
+GENSIM2-KPAM
+46.15
+GENMANIP
+92.3
+VOXPROG
+100
+0
+50
+100
+Figure 5: External benchmark evaluation. IA Rank Score (↑) and Physical Validity (↑) on 19 kitchen tasks adapted
+from RoboCasa and 13 tabletop placement tasks from Open6DOR v2 across all four compared methods.
+In the mug task (Fig. 6a), G EN M ANIP leaves the mug beside the dispenser, while G EN S IM 2- K PAM and
+D IRECT M ESH leave it interpenetrating the drip tray. VOX P ROG centers the opening beneath the nozzle
+and rests the base on the tray, jointly satisfying the alignment and support required to receive coffee. The
+SD-card task (c) exposes a complementary contact failure: G EN M ANIP and D IRECT M ESH leave the card
+floating above the USB drive, whereas VOX P ROG seats it on the top surface.
+4.4
+Failure Analysis
+Physical Failure Profiles. Fig. 7a decomposes physical rejections on VOX P ROG-Bench into support
+and interpenetration failures. G EN M ANIP incurs 19 rejections (11 support, 8 intersection), versus 16
+for G EN S IM 2- K PAM (13 intersection, 3 support). These patterns are consistent with coarse relation offsets leaving support contact under-specified and sparse point-and-axis constraints leaving surface clearance
+under-constrained. D IRECT M ESH has 9 rejections (6 intersection, 3 support), while both staged variants
+cut rejections to 3 (3 intersection for M ESH E VIDENCE; 2 intersection, 1 support for VOX P ROG).
+8
+Instruction
+a
+Initial scene
+GENMANIP
+GENSIM2-KPAM
+DIRECT MESH
+VOXPROG (OURS)
+Coffee mug
+Place the mug
+under the
+coffee dispenser .
+b
+Cereal box
+Place the cereal
+in the cabinet .
+c
+SD card
+Place the SD card
+on top of the
+USB .
+Moved object
+Goal reference
+Figure 6: Qualitative results on external benchmarks. Mug (a) and cereal-box (b) placement from RoboCasa,
+and SD-card placement (c) from Open6DOR v2, comparing G EN M ANIP, G EN S IM 2- K PAM, D IRECT M ESH, and
+VOX P ROG. Colored contours mark the moved object and goal reference; terracotta borders highlight VOX P ROG.
+Visually Ambiguous Contact. The pot-lid case in Fig. 7b
+illustrates why 2D visual inspection alone cannot establish
+physical validity in 3D object placement. From the primary
+camera view, the lid appears properly seated: it stands upright with its handle facing outward, its circular contour centered between the side supports, and its lower rim aligned
+over the receiving rack. A side view of the same final pose
+reveals, however, that the lid remains suspended above the
+rack, separated by a clear vertical gap from both the base
+tray and the inclined backrest. Here, the rack’s opaque front
+frame provides a strong visual cue to the destination while
+occluding the recessed region where support contact should
+occur. Because 2D projection overlap along the viewing ray
+can conceal 3D separation under self-occlusion, a singleview visual comparison can accept a physically unsupported
+placement even when the target object and its apparent relation to the reference structure look aligned in image space.
+Pairing perceptual evaluation with 3D geometric verification
+addresses this ambiguity by checking local 3D support contact and interpenetration conditions between the placed object and surrounding scene meshes, making the distinction
+between apparent 2D seating in the rendered camera view
+and actual physical support in the 3D scene explicit.
+5
+(a) Physical failure categories
+Intersection
+Support
+GENMANIP
+8
+13
+DIRECT MESH
+6
+MESH EVIDENCE
+3
+VOXPROG
+2 1
+3
+0
+3
+3
+3
+19
+11
+GENSIM2-KPAM
+5
+16
+9
+10
+15
+20
+Number of cases
+(b) Support failure
+Original view
+Side view
+Figure 7: Failure profiles and contact checks.
+(a) Physical rejections on VOX P ROG-Bench. (b)
+A lid seated from the front floats from the side.
+Conclusion
+We presented VOX P ROG, a framework for 3D spatial reasoning that formulates language-guided object
+placement through voxel programming. Rather than parameterizing tasks over fixed spatial relations or
+sparse keypoint primitives, VOX P ROG treats the geometric references required by an instruction as intermediate surface structures constructed by executable code. By coupling regular-grid selection over local voxel
+views with exact surface normals and patches from the underlying meshes, our two-stage pipeline enables
+a language model to isolate functional contact regions, verify them through visual and geometric feedback,
+and solve for physically valid SE(3) poses. Across the 71-task VOX P ROG-Bench benchmark and external
+tasks from RoboCasa and Open6DOR v2, VOX P ROG consistently outperforms relation-based, keypointbased, and mesh-based baselines in both intent alignment and physical validity. Coupling such programmable surface witnesses with downstream motion generation provides a natural direction for extending
+fine-grained geometric reasoning from target placement specification to full manipulation execution.
+9
+References
+Ahmed Abdelreheem, Filippo Aleotti, Jamie Watson, Zawar Qureshi, Abdelrahman Eldesokey, Peter
+Wonka, Gabriel Brostow, Sara Vicente, and Guillermo Garcia-Hernando. PlaceIt3D: Language-guided
+object placement in real 3D scenes. In ICCV, pp. 6645–6655, 2025.
+Haonan Chang, Kai Gao, Kowndinya Boyalakuntla, Alex Lee, Baichuan Huang, Jingjin Yu, and Abdeslam
+Boularias. LGMCTS: Language-guided monte-carlo tree search for executable semantic object rearrangement. In IROS, pp. 13607–13612, 2024.
+Boyuan Chen, Zhuo Xu, Sean Kirmani, Brain Ichter, Dorsa Sadigh, Leonidas Guibas, and Fei Xia. SpatialVLM: Endowing vision-language models with spatial reasoning capabilities. In CVPR, pp. 14455–
+14465, 2024.
+Minglin Chen, Rongkun Yang, Qibin Hu, Kaiwen Xue, Shunbo Zhou, and Yulan Guo. Graph2Scene:
+Versatile 3D indoor scene generation with interaction-aware scene graph. In IROS, pp. 11313–11320,
+2025.
+Wenhu Chen, Xueguang Ma, Xinyi Wang, and William W. Cohen. Program of Thoughts prompting: Disentangling computation from reasoning for numerical reasoning tasks. Transactions on Machine Learning
+Research, 2023.
+Zeren Chen, Xiaoya Lu, Zhijie Zheng, Pengrui Li, Lehan He, Yijin Zhou, Jing Shao, Bohan Zhuang, and
+Lu Sheng. Geometrically-constrained agent for spatial reasoning. In CVPR, pp. 38689–38699, 2026.
+An-Chieh Cheng, Hongxu Yin, Yang Fu, Qiushan Guo, Ruihan Yang, Jan Kautz, Xiaolong Wang, and Sifei
+Liu. SpatialRGPT: Grounded spatial reasoning in vision-language models. In NeurIPS, pp. 135062–
+135093, 2024.
+Yufei Ding, Haoran Geng, Chaoyi Xu, Xiaomeng Fang, Jiazhao Zhang, Songlin Wei, Qiyu Dai, Zhizheng
+Zhang, and He Wang. Open6DOR: Benchmarking open-instruction 6-DoF object rearrangement and a
+VLM-based approach. In IROS, pp. 7359–7366, 2024.
+Kuan Fang, Fangchen Liu, Pieter Abbeel, and Sergey Levine. MOKA: Open-world robotic manipulation
+through mark-based visual prompting. In RSS, 2024.
+Weixi Feng, Wanrong Zhu, Tsu-jui Fu, Varun Jampani, Arjun Akula, Xuehai He, Sugato Basu, Xin Eric
+Wang, and William Yang Wang. LayoutGPT: Compositional visual planning and generation with large
+language models. In NeurIPS, pp. 18225–18250, 2023.
+Stephanie Fu, Netanel Tamir, Shobhita Sundaram, Lucy Chai, Richard Zhang, Tali Dekel, and Phillip Isola.
+DreamSim: Learning new dimensions of human visual similarity using synthetic data. In NeurIPS, pp.
+50742–50768, 2023.
+Luyu Gao, Aman Madaan, Shuyan Zhou, Uri Alon, Pengfei Liu, Yiming Yang, Jamie Callan, and Graham
+Neubig. PAL: Program-aided language models. In ICML, pp. 10764–10799, 2023.
+Ning Gao, Yilun Chen, Shuai Yang, Xinyi Chen, Yang Tian, Hao Li, Haifeng Huang, Hanqing Wang, Tai
+Wang, and Jiangmiao Pang. GenManip: LLM-driven simulation for generalizable instruction-following
+manipulation. In CVPR, pp. 12187–12198, 2025.
+Tanmay Gupta and Aniruddha Kembhavi. Visual programming: Compositional visual reasoning without
+training. In CVPR, pp. 14953–14962, 2023.
+Yushi Hu, Weijia Shi, Xingyu Fu, Dan Roth, Mari Ostendorf, Luke Zettlemoyer, Noah A. Smith, and Ranjay
+Krishna. Visual Sketchpad: Sketching as a visual chain of thought for multimodal language models. In
+NeurIPS, pp. 139348–139379, 2024a.
+Ziniu Hu, Ahmet Iscen, Aashi Jain, Thomas Kipf, Yisong Yue, David A Ross, Cordelia Schmid, and Alireza
+Fathi. SceneCraft: An LLM agent for synthesizing 3D scenes as Blender code. In ICML, pp. 19252–
+19282, 2024b.
+Pu Hua, Minghuan Liu, Annabella Macaluso, Yunfeng Lin, Weinan Zhang, Huazhe Xu, and Lirui Wang.
+GenSim2: Scaling robot data generation with multi-modal and reasoning LLMs. In CoRL, pp. 5030–
+5066, 2025.
+10
+Ian Huang, Yanan Bao, Karen Truong, Howard Zhou, Cordelia Schmid, Leonidas Guibas, and Alireza
+Fathi. FirePlace: Geometric refinements of LLM common sense reasoning for 3D object placement. In
+CVPR, pp. 13466–13476, 2025a.
+Wenlong Huang, Chen Wang, Ruohan Zhang, Yunzhu Li, Jiajun Wu, and Li Fei-Fei. VoxPoser: Composable 3D value maps for robotic manipulation with language models. In CoRL, pp. 540–562, 2023a.
+Wenlong Huang, Fei Xia, Ted Xiao, Harris Chan, Jacky Liang, Pete Florence, Andy Zeng, Jonathan Tompson, Igor Mordatch, Yevgen Chebotar, Pierre Sermanet, Tomas Jackson, Noah Brown, Linda Luu, Sergey
+Levine, Karol Hausman, and Brian Ichter. Inner Monologue: Embodied reasoning through planning with
+language models. In CoRL, pp. 1769–1782, 2023b.
+Wenlong Huang, Chen Wang, Yunzhu Li, Ruohan Zhang, and Li Fei-Fei. ReKep: Spatio-temporal reasoning of relational keypoint constraints for robotic manipulation. In CoRL, pp. 4573–4602, 2025b.
+Brian Ichter, Anthony Brohan, Yevgen Chebotar, Chelsea Finn, Karol Hausman, Alexander Herzog, Daniel
+Ho, Julian Ibarz, Alex Irpan, Eric Jang, Ryan Julian, Dmitry Kalashnikov, Sergey Levine, Yao Lu, Carolina Parada, Kanishka Rao, Pierre Sermanet, Alexander T Toshev, Vincent Vanhoucke, Fei Xia, Ted
+Xiao, Peng Xu, Mengyuan Yan, Noah Brown, Michael Ahn, Omar Cortes, Nicolas Sievers, Clayton Tan,
+Sichun Xu, Diego Reyes, Jarek Rettinghouse, Jornell Quiambao, Peter Pastor, Linda Luu, Kuang-Huei
+Lee, Yuheng Kuang, Sally Jesmonth, Nikhil J. Joshi, Kyle Jeffrey, Rosario Jauregui Ruano, Jasmine Hsu,
+Keerthana Gopalakrishnan, Byron David, Andy Zeng, and Chuyuan Kelly Fu. Do as I can, not as I say:
+Grounding language in robotic affordances. In CoRL, pp. 287–318, 2023.
+Zhengfei Kuang, Rui Lin, Long Zhao, Gordon Wetzstein, Saining Xie, and Sanghyun Woo. VULCAN:
+Tool-augmented multi agents for iterative 3D object arrangement. In CVPR, pp. 23763–23773, 2026.
+Chengshu Li, Jacky Liang, Andy Zeng, Xinyun Chen, Karol Hausman, Dorsa Sadigh, Sergey Levine,
+Li Fei-Fei, Fei Xia, and Brian Ichter. Chain of Code: Reasoning with a language model-augmented code
+emulator. In ICML, pp. 28259–28277, 2024.
+Jacky Liang, Wenlong Huang, Fei Xia, Peng Xu, Karol Hausman, Brian Ichter, Pete Florence, and Andy
+Zeng. Code as policies: Language model programs for embodied control. In ICRA, pp. 9493–9500,
+2023.
+Chenguo Lin and Yadong Mu. InstructScene: Instruction-driven 3D indoor scene synthesis with semantic
+graph prior. In ICLR, pp. 25687–25718, 2024.
+Zefu Lin, Rongxu Cui, Hanning Chen, Xiangyu Wang, Junjia Xu, Xiaojuan Jin, Wenbo Chen, Hui Zhou,
+Lue Fan, Wenling Li, and Zhaoxiang Zhang. EmbodiedCoder: Parameterized embodied mobile manipulation via modern coding model. In ICRA, pp. 7759–7766, 2026.
+Weiyu Liu, Chris Paxton, Tucker Hermans, and Dieter Fox. StructFormer: Learning spatial structure for
+language-guided semantic rearrangement of novel objects. In ICRA, pp. 6322–6329, 2022.
+Weiyu Liu, Yilun Du, Tucker Hermans, Sonia Chernova, and Chris Paxton. StructDiffusion: Languageguided creation of physically-valid structures using unseen objects. In RSS, 2023.
+Lucas Manuelli, Wei Gao, Peter Florence, and Russ Tedrake. kPAM: Keypoint affordances for categorylevel robotic manipulation. In Robotics Research, pp. 132–157. Springer, 2022.
+Yao Mu, Junting Chen, Qing-Long Zhang, Shoufa Chen, Qiaojun Yu, Chongjian Ge, Runjian Chen, Zhixuan Liang, Mengkang Hu, Chaofan Tao, Peize Sun, Haibao Yu, Chao Yang, Wenqi Shao, Wenhai Wang,
+Jifeng Dai, Yu Qiao, Mingyu Ding, and Ping Luo. RoboCodeX: multimodal code generation for robotic
+behavior synthesis. In ICML, pp. 36434–36454, 2024.
+Soroush Nasiriany, Abhiram Maddukuri, Lance Zhang, Adeet Parikh, Aaron Lo, Abhishek Joshi, Ajay
+Mandlekar, and Yuke Zhu. RoboCasa: Large-scale simulation of household tasks for generalist robots.
+In RSS, 2024.
+Başak Melis Öcal, Maxim Tatarchenko, Sezer Karaoğlu, and Theo Gevers. SceneTeller: Language-to-3D
+scene generation. In ECCV, pp. 362–378, 2025.
+11
+Mingjie Pan, Jiyao Zhang, Tianshu Wu, Yinghao Zhao, Wenlong Gao, and Hao Dong. OmniManip: Towards general robotic manipulation via object-centric interaction primitives as spatial constraints. In
+CVPR, pp. 17359–17369, 2025.
+Zekun Qi, Wenyao Zhang, Yufei Ding, Runpei Dong, Xinqiang Yu, Jingwen Li, Lingyun Xu, Baoyu Li,
+Xialin He, Guofan Fan, Jiazhao Zhang, Jiawei He, Jiayuan Gu, Xin Jin, Kaisheng Ma, Zhizheng Zhang,
+He Wang, and Li Yi. SoFar: Language-grounded orientation bridges spatial reasoning and object manipulation. In NeurIPS, pp. 76367–76412, 2025.
+Ishika Singh, Valts Blukis, Arsalan Mousavian, Ankit Goyal, Danfei Xu, Jonathan Tremblay, Dieter Fox,
+Jesse Thomason, and Animesh Garg. ProgPrompt: Generating situated robot task plans using large
+language models. In ICRA, pp. 11523–11530, 2023.
+Chan Hee Song, Valts Blukis, Jonathan Tremblay, Stephen Tyree, Yu Su, and Stan Birchfield. RoboSpatial:
+Teaching spatial understanding to 2D and 3D vision-language models for robotics. In CVPR, pp. 15768–
+15780, 2025.
+Fan-Yun Sun, Weiyu Liu, Siyi Gu, Dylan Lim, Goutam Bhat, Federico Tombari, Manling Li, Nick Haber,
+and Jiajun Wu. LayoutVLM: Differentiable optimization of 3D layout via vision-language models. In
+CVPR, pp. 29469–29478, 2025.
+Priya Sundaresan, Suneel Belkhale, Dorsa Sadigh, and Jeannette Bohg. KITE: Keypoint-conditioned policies for semantic manipulation. In CoRL, pp. 1006–1021, 2023.
+Dídac Surís, Sachit Menon, and Carl Vondrick. ViperGPT: Visual inference via Python execution for
+reasoning. In ICCV, pp. 11888–11898, 2023.
+Jiapeng Tang, Yinyu Nie, Lev Markhasin, Angela Dai, Justus Thies, and Matthias Nießner. DiffuScene:
+Denoising diffusion models for generative indoor scene synthesis. In CVPR, pp. 20507–20518, 2024.
+Weiliang Tang, Jia-Hui Pan, Yun-Hui Liu, Masayoshi Tomizuka, Li Erran Li, Chi-Wing Fu, and Mingyu
+Ding. Geometric constraints as general interfaces for robot manipulation. In IROS, 2026.
+Qiuhong Anna Wei, Sijie Ding, Jeong Joon Park, Rahul Sajnani, Adrien Poulenard, Srinath Sridhar, and
+Leonidas Guibas. LEGO-Net: Learning regular rearrangements of objects in rooms. In CVPR, pp.
+19037–19047, 2023.
+Yiqing Xu, Jiayuan Mao, Yilun Du, Tomás Lozano-Pérez, Leslie Pack Kaelbling, and David Hsu. Set It
+Up!: Functional object arrangement with compositional generative models. In RSS, 2024.
+Yue Yang, Fan-Yun Sun, Luca Weihs, Eli VanderBilt, Alvaro Herrasti, Winson Han, Jiajun Wu, Nick Haber,
+Ranjay Krishna, Lingjie Liu, Chris Callison-Burch, Mark Yatskar, Aniruddha Kembhavi, and Christopher Clark. Holodeck: Language guided generation of 3D embodied AI environments. In CVPR, pp.
+16227–16237, 2024.
+Guangyao Zhai, Evin Pınar Örnek, Shun-Cheng Wu, Yan Di, Federico Tombari, Nassir Navab, and Benjamin Busam. CommonScenes: Generating commonsense 3D indoor scenes with scene graph diffusion.
+In NeurIPS, pp. 30026–30038, 2023.
+Qihang Zhang, Chaoyang Wang, Aliaksandr Siarohin, Peiye Zhuang, Yinghao Xu, Ceyuan Yang, Dahua
+Lin, Bolei Zhou, Sergey Tulyakov, and Hsin-Ying Lee. Towards text-guided 3D scene composition. In
+CVPR, pp. 6829–6838, 2024.
+Zhihao Zhu, Yifan Zheng, Siyu Pan, Yaohui Jin, and Yao Mu. PASG: A closed-loop framework for automated geometric primitive extraction and semantic anchoring in robotic manipulation. In ICCV, pp.
+8950–8960, 2025.
+12

@@ -1,0 +1,244 @@
+--- v001.md
++++ v002.md
+@@ -7,9 +7,9 @@
+ 
+ ## How it works
+-**Inputs:** Conditional covariance matrix $\Sigma_{cond}$ (derived from conditioning on time $t$ and view direction $d$), spatial-temporal correlation block $\Sigma_{pt}$, temporal scale $\Sigma_t$, and standard 3DGS scene parameters (means, opacities, colors) [S1].
++**Inputs:** Conditional covariance matrix $\Sigma_{cond}$ (derived from conditioning on time $t$ and view direction $d$), spatial-temporal correlation block $\Sigma_{pt}$, temporal scale $\Sigma_t$, standard 3DGS scene parameters (means, opacities, colors), and camera parameters [S1].
+ **Outputs:** Projected 2D Gaussians for rasterization and updated Gaussian attributes (split/pruned) based on conditional metrics [S1].
+ 
+ ### Data Structures
+-The method operates on the conditional covariance matrix $\Sigma_{cond}$, which is a $7 \times 7$ symmetric positive-definite matrix representing the joint distribution of spatial, temporal, and angular dimensions [S1]. It is decomposed into orthogonal matrix $U$ and diagonal matrix $D$ [S1].
++The method operates on the conditional covariance matrix $\Sigma_{cond}$, a $7 \times 7$ symmetric positive-definite matrix representing the joint distribution of spatial, temporal, and angular dimensions [S1]. It is decomposed into an orthogonal matrix $U$ and a diagonal matrix $D$ [S1].
+ 
+ ### Algorithm Steps
+@@ -18,5 +18,5 @@
+     Perform Singular Value Decomposition (SVD) on the conditional covariance matrix:
+     $$ \Sigma_{cond} = U D U^T $$
+-    where $U$ is an orthogonal matrix and $D$ is a diagonal matrix containing singular values [S1].
++    where $U$ is an orthogonal matrix and $D$ is a diagonal matrix containing the singular values [S1].
+     Define the rotation matrix $R$ as:
+     $$ R = U $$
+@@ -28,9 +28,9 @@
+ 
+ 2.  **Conditional Gaussian Splitting:**
+-    Quantify spatial-temporal correlation using the magnitude of the off-diagonal block $\Sigma_{pt}$, which captures interaction between spatial and temporal components [S1].
++    Quantify spatial-temporal correlation using the magnitude of the off-diagonal block $\Sigma_{pt}$, which captures the interaction between spatial and temporal components [S1].
+     Split a Gaussian if both conditions are met:
+-    *   The magnitude of $\Sigma_{pt}$ exceeds a threshold of $0.05$ (relative to screen extent) [S1].
++    *   The magnitude of $\Sigma_{pt}$ exceeds a threshold of $0.05$ relative to the screen extent [S1].
+     *   The normalized temporal scale (derived from $\Sigma_t$) is larger than $0.25$ [S1].
+-    This criterion ensures regions with significant motion dynamics are densely represented [S1].
++    This criterion ensures that regions with significant motion dynamics are densely represented [S1].
+ 
+ 3.  **Rendering Pipeline:**
+@@ -38,5 +38,5 @@
+     *   **Projection:** Project the resulting conditional 3D Gaussian mean and covariance onto the image plane using standard perspective projection to yield 2D Gaussians [S1].
+     *   **Rasterization:** Splat the 2D Gaussians onto the image canvas using a differentiable rasterization routine [S1].
+-    *   **Compositing:** Compute final pixel colors by aggregating contributions in a depth-aware, opacity-blended manner [S1].
++    *   **Compositing:** Compute final pixel colors by aggregating the contributions of all Gaussians in a depth-aware, opacity-blended manner [S1].
+ 
+ 4.  **Pruning and Optimization:**
+@@ -44,11 +44,7 @@
+ 
+ ### Parameters
+-*   **Splitting Thresholds:** Spatial-temporal correlation threshold = $0.05$; Normalized temporal scale threshold = $0.25$ [S1].
++*   **Splitting Thresholds:** Spatial-temporal correlation threshold = $0.05$ (relative to screen extent); Normalized temporal scale threshold = $0.25$ [S1].
+ *   **Pruning Threshold:** $\tau_{min} = 0.01$ [S1].
+-*   **Modulation Parameters:** Directional ($\lambda_d$) and temporal ($\lambda_t$) modulation parameters are initially set to:
+-    *   $0.5$ for 7DGS-PBR
+-    *   $0.05$ for D-NeRF
+-    *   $0.1$ for Technicolor
+-    These parameters become trainable after 15,000 iterations [S1].
++*   **Modulation Parameters:** Directional ($\lambda_d$) and temporal ($\lambda_t$) modulation parameters are initially set to $0.5$ for 7DGS-PBR, $0.05$ for D-NeRF, and $0.1$ for Technicolor, and become trainable after 15,000 iterations [S1].
+ *   **Initialization:** Scenes (except Technicolor) use 100,000 randomly initialized points within a bounding cube; Technicolor uses COLMAP sparse reconstructions; specific scenes (heart1, heart2) use marching cubes following DDGS [S1].
+ 
+@@ -56,86 +52,115 @@
+ 
+ ```python
++def diag(M):
++    """Extract diagonal elements of a square matrix."""
++    return [M[i][i] for i in range(len(M))]
++
++def det(M):
++    """Compute determinant of a square matrix (standard linear algebra operation)."""
++    # Implemented via LU decomposition or cofactor expansion in practice
++    pass
++
++def svd(M):
++    """Compute Singular Value Decomposition (standard linear algebra operation)."""
++    # Returns U, D_diag, Vt such that M = U @ diag(D_diag) @ Vt
++    pass
++
++def normalize_temporal_scale(sigma_t):
++    """Normalize temporal scale by dividing by the maximum eigenvalue of sigma_t [G]."""
++    eigenvalues = [sigma_t[i][i] for i in range(len(sigma_t))]
++    max_eig = max(eigenvalues)
++    return max_eig if max_eig > 1e-6 else 1.0
++
++def conditional_slice(gaussian_7d):
++    """Extract 3D spatial mean and 3x3 covariance from the 7D conditional representation [G]."""
++    # Assumes 7D representation is ordered as [x, y, z, t, theta, phi, psi]
++    spatial_mean = gaussian_7d.mean[:3]
++    spatial_cov = gaussian_7d.cov[:3, :3]
++    return {'mean': spatial_mean, 'cov': spatial_cov, 'opacity': gaussian_7d.opacity, 'color': gaussian_7d.color}
++
++def perspective_project(mean_3d, cov_3d, K, R_ext, t_ext):
++    """Project 3D Gaussian mean and covariance to 2D image plane."""
++    # Transform mean to camera coordinates
++    mean_cam = R_ext @ mean_3d + t_ext
++    # Perspective projection
++    x, y, z = mean_cam
++    if z <= 0.01:
++        return None, None
++    u = K[0][0] * (x / z) + K[0][2]
++    v = K[1][1] * (y / z) + K[1][2]
++    mean_2d = [u, v]
++    # Jacobian of perspective projection
++    J = [[K[0][0]/z, 0, -K[0][0]*x/z**2],
++         [0, K[1][1]/z, -K[1][1]*y/z**2]]
++    # Transform covariance
++    cov_2d = J @ cov_3d @ [row[:] for row in J]
++    return mean_2d, cov_2d
++
++def differentiable_rasterize(projected_gaussians, image_shape, K):
++    """Depth-sorted alpha compositing of 2D Gaussians."""
++    image = [[0.0, 0.0, 0.0] for _ in range(image_shape[0])]
++    alpha_map = [[0.0 for _ in range(image_shape[1])] for _ in range(image_shape[0])]
++    # Sort Gaussians by depth (z-coordinate)
++    projected_gaussians.sort(key=lambda g: g['z'])
++    for g in projected_gaussians:
++        u, v = g['mean']
++        cov = g['cov']
++        det_cov = cov[0][0]*cov[1][1] - cov[0][1]*cov[1][0]
++        if det_cov <= 0:
++            continue
++        inv_cov = [[cov[1][1]/det_cov, -cov[0][1]/det_cov],
++                   [-cov[1][0]/det_cov, cov[0][0]/det_cov]]
++        for y in range(max(0, int(v)-50), min(image_shape[0], int(v)+50)):
++            for x in range(max(0, int(u)-50), min(image_shape[1], int(u)+50)):
++                dx, dy = x - u, y - v
++                exponent = -0.5 * (dx*inv_cov[0][0]*dx + 2*dx*inv_cov[0][1]*dy + dy*inv_cov[1][1]*dy)
++                if exponent > 0:
++                    continue
++                sigma = math.exp(exponent)
++                alpha = g['opacity'] * sigma
++                if alpha < 1e-4:
++                    continue
++                r, g_c, b = g['color']
++                alpha_map[y][x] = alpha_map[y][x] + alpha * (1 - alpha_map[y][x])
++                image[y][x][0] = image[y][x][0] + r * alpha * (1 - alpha_map[y][x])
++                image[y][x][1] = image[y][x][1] + g_c * alpha * (1 - alpha_map[y][x])
++                image[y][x][2] = image[y][x][2] + b * alpha * (1 - alpha_map[y][x])
++    return image
++
+ def extract_scale_rotation(sigma_cond):
+-    """
+-    Extracts scale and rotation from conditional covariance matrix.
+-    Args:
+-        sigma_cond: 7x7 conditional covariance matrix.
+-    Returns:
+-        R: 7x7 rotation matrix (right-handed).
+-        S: 7x1 scale vector.
+-    """
+-    # SVD Decomposition
+-    U, D, _ = svd(sigma_cond)
+-    
+-    # Define rotation and scale
++    """Extract scale and rotation from conditional covariance matrix."""
++    U, D_vals, Vt = svd(sigma_cond)
+     R = U
+-    S = diag(D)
+-    
+-    # Ensure right-handed coordinate system
++    S = diag(D_vals)
+     det_R = det(R)
+     if det_R < 0:
+-        R[:, 3] = -R[:, 3]
+-        
++        R[:, 3] = [-val for val in R[:, 3]]
+     return R, S
+ 
+ def check_splitting_criteria(sigma_pt, sigma_t, screen_extent):
+-    """
+-    Determines if a Gaussian should be split based on temporal cues.
+-    Args:
+-        sigma_pt: Off-diagonal block capturing spatial-temporal correlation.
+-        sigma_t: Temporal scale component.
+-        screen_extent: Normalization factor for screen extent.
+-    Returns:
+-        bool: True if splitting criteria are met.
+-    """
+-    # Quantify spatial-temporal correlation
++    """Determine if a Gaussian should be split based on temporal cues."""
+     correlation_magnitude = abs(sigma_pt)
+-    
+-    # Thresholds
+     corr_threshold = 0.05 * screen_extent
+     temp_scale_threshold = 0.25
+-    
+-    # Normalize temporal scale (derived from sigma_t)
+-    # Note: Exact normalization formula for sigma_t is not specified in sources [G]
+-    normalized_temp_scale = normalize_temporal_scale(sigma_t) 
+-    
+-    # Check conditions
+-    if correlation_magnitude > corr_threshold and normalized_temp_scale > temp_scale_threshold:
+-        return True
+-    return False
++    normalized_temp_scale = normalize_temporal_scale(sigma_t)
++    return correlation_magnitude > corr_threshold and normalized_temp_scale > temp_scale_threshold
+ 
+ def render_conditional_gaussians(gaussians, camera_params):
+-    """
+-    Renders conditional 3D Gaussians using standard 3DGS pipeline.
+-    Args:
+-        gaussians: List of conditional 3D Gaussians (converted from 7DGS).
+-        camera_params: Camera intrinsic and extrinsic matrices.
+-    Returns:
+-        image: Rendered image tensor.
+-    """
+-    # Conditional Slicing (Implementation details in Section 4.2 of [S1])
+-    # Convert 7DGS to 3DGS-compatible format
+-    conditional_3d_gaussians = conditional_slice(gaussians)
+-    
+-    # Project to 2D
++    """Render conditional 3D Gaussians using standard 3DGS pipeline."""
+     projected_gaussians = []
+-    for g in conditional_3d_gaussians:
+-        mean_2d, cov_2d = perspective_project(g.mean, g.cov, camera_params)
+-        projected_gaussians.append({'mean': mean_2d, 'cov': cov_2d, 'opacity': g.opacity, 'color': g.color})
+-        
+-    # Differentiable Rasterization
+-    image = differentiable_rasterize(projected_gaussians, camera_params.image_shape)
+-    
++    for g in gaussians:
++        g_3d = conditional_slice(g)
++        mean_2d, cov_2d = perspective_project(g_3d['mean'], g_3d['cov'], 
++                                              camera_params.K, camera_params.R_ext, camera_params.t_ext)
++        if mean_2d is not None:
++            g_3d['mean'] = mean_2d
++            g_3d['cov'] = cov_2d
++            g_3d['z'] = camera_params.R_ext @ g_3d['mean'] + camera_params.t_ext
++            projected_gaussians.append(g_3d)
++    image = differentiable_rasterize(projected_gaussians, camera_params.image_shape, camera_params.K)
+     return image
+ 
+ def update_pruning_threshold(current_opacity, tau_min=0.01):
+-    """
+-    Applies pruning based on modified opacity threshold.
+-    Args:
+-        current_opacity: Current opacity of the Gaussian.
+-        tau_min: Minimum opacity threshold (increased to 0.01).
+-    Returns:
+-        bool: True if Gaussian should be pruned.
+-    """
++    """Apply pruning based on modified opacity threshold."""
+     return current_opacity < tau_min
+ ```
+@@ -143,5 +168,5 @@
+ ## Operating characteristics
+ *   **Compatibility:** Fully compatible with existing 3DGS training pipelines, loss functions, and optimizers [S1].
+-*   **Performance:** Evaluated on NVIDIA Tesla V100 GPU (16GB memory) [S1]. Batch size of 4 with downscaling factor of 2 (except Technicolor, which uses batch size 1 and no downscaling) [S1].
++*   **Performance:** Evaluated on a single NVIDIA Tesla V100 GPU (16GB memory) [S1]. Uses a batch size of 4 with a downscaling factor of 2, except for Technicolor which uses a batch size of 1 and no downscaling [S1].
+ *   **Strengths:** Integrates seamlessly with 3DGS infrastructure, leveraging adaptive density control and efficient rasterization with minimal modifications [S1].
+ *   **Limitations:** Requires specific initialization strategies for different datasets (random points, COLMAP, marching cubes) [S1].

@@ -1,0 +1,70 @@
+# Normal Consistency
+## Overview
+Normal Consistency (NC) is a metric for 3D surface reconstruction that measures the angular deviation between estimated surface normals and ground truth normals [S1]. It quantifies how well the orientation of the reconstructed surface aligns with the underlying geometry, serving as a complementary measure to distance-based metrics like Chamfer Distance [S1]. Unlike distance metrics that assess positional accuracy, NC specifically evaluates surface orientation fidelity [S1].
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** A set of $N$ points on the estimated surface, their corresponding estimated surface normals $\{N_i\}_{i=1}^N$, and the ground truth surface normals $\{N_i^*\}_{i=1}^N$ at the corresponding locations [S1].
+- **Output:** A scalar percentage value representing the average normal consistency error [S1].
+**Data Structures:**
+- $N_i$: Estimated surface normal vector for the $i$-th point [S1].
+- $N_i^*$: Ground truth surface normal vector for the $i$-th point [S1].
+- $N$: Total number of points on the surface [S1].
+**Steps:**
+1. For each point $i$ from $1$ to $N$, compute the cosine similarity between the estimated normal $N_i$ and the ground truth normal $N_i^*$: $\cos(N_i, N_i^*) = N_i \cdot N_i^*$ (assuming $N_i$ and $N_i^*$ are unit vectors) [G].
+2. Compute the error term for each point: $1 - \cos(N_i, N_i^*)$ [S1].
+3. Sum the error terms for all $N$ points and divide by $N$ to obtain the mean error [S1].
+4. Multiply the mean error by $100$ to express the result as a percentage [S1].
+**Formula:**
+$$ \text{NC} = \frac{1}{N} \sum_{i=1}^N (1 - \cos(N_i, N_i^*)) \times 100\% $$ [S1]
+**Parameters:**
+- $N_i, N_i^*$: Estimated and ground truth surface normals for the $i$-th point [S1].
+- $N$: Number of points on the surface [S1].
+**Edge Cases and Pitfalls:**
+- The normalization term $\frac{1}{N}$ ensures the metric is independent of the number of points on the surface [S1].
+- If normals are not normalized to unit length, the cosine similarity calculation must explicitly divide by the magnitudes of the vectors [G].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+def normal_consistency(estimated_normals, ground_truth_normals):
+    n = len(estimated_normals)
+    total_error = 0.0
+    for i in range(n):
+        dot = estimated_normals[i][0] * ground_truth_normals[i][0] + \
+              estimated_normals[i][1] * ground_truth_normals[i][1] + \
+              estimated_normals[i][2] * ground_truth_normals[i][2]
+        error = 1.0 - dot
+        total_error += error
+    mean_error = total_error / n
+    return mean_error * 100.0
+```
+## Subtopics
+
+### Angular Normal Error Metric
+Measures surface orientation accuracy by comparing ground truth mesh normals with network-computed SDF gradients (normalized) at sampled surface points [S2, unofficial]. It computes the angular difference in degrees [S2, unofficial].
+- **Formula:** $\theta = \arccos( | \mathbf{n}_{mesh} \cdot \mathbf{n}_{net} | ) \times \frac{180}{\pi}$ where $\mathbf{n}_{mesh}$ and $\mathbf{n}_{net}$ are normalized mesh and network normals [S2, unofficial].
+- **Parameters:** $n\_samples$: 2097152 (default number of surface points); $batch\_size$: 16384 (processing chunk size) [S2, unofficial].
+- **Steps:** Sample points and get face normals. Scale points by `training_data.R`. Batch process with `batch_size = 16384`: enable gradients, compute SDF, compute normals via `net.normal(batch_points)`, normalize gradients [S2, unofficial]. Concatenate normals. Normalize mesh normals. Compute dot products, clamp to [-1, 1], apply `acos(abs(dot))`, convert to degrees [S2, unofficial]. Compute MAE, Std, Max, Median [S2, unofficial].
+- **Code:**
+  ```python
+  import math
+  def angular_normal_error(mesh_normals, net_normals):
+      angular_differences_deg = []
+      for n1, n2 in zip(mesh_normals, net_normals):
+          dot = n1[0]*n2[0] + n1[1]*n2[1] + n1[2]*n2[2]
+          dot = max(-1.0, min(1.0, dot))
+          rad = math.acos(abs(dot))
+          deg = rad * (180.0 / math.pi)
+          angular_differences_deg.append(deg)
+      return angular_differences_deg
+  ```
+- **Pitfall:** Dot products may exceed [-1, 1] due to floating point precision. Clamped to [-1.0, 1.0] before `acos` to avoid NaNs [S2, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+## Background
+Normal Consistency was introduced as a standard metric for evaluating 3D surface reconstruction tasks [S1].
+## Sources
+[S1] Self-Supervised Dual Contouring, https://doi.org/10.1109/cvpr52733.2024.00448, fetched 2026-10-26
+[S2] naver-ai/TetraSDF, https://github.com/naver-ai/TetraSDF, fetched 2026-10-27 (unofficial)

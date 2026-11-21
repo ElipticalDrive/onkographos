@@ -1,0 +1,165 @@
+--- v002.md
++++ v003.md
+@@ -7,9 +7,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volume texture representing the current iteration's scalar field.
+-*   **Output:** A set of 3D coordinates (and associated scale values) denoting scale maxima, stored as the "scale abstraction" on the CPU [S1][S2, unofficial].
++*   **Input:** A 3D volume texture representing the current iteration's scalar field [S1][S2, unofficial].
++*   **Output:** A set of 3D coordinates denoting scale maxima, stored as the "scale abstraction" on the CPU [S1][S2, unofficial].
+ 
+ **Data Structures:**
+-The algorithm uses a 3D texture for the scalar field and a 4-channel pixel buffer (RGBA) to encode state for maxima detection. The pixel encoding layout is fixed as follows [S1][S2, unofficial]:
++The algorithm uses a 3D texture for the scalar field and a 4-channel pixel buffer (RGBA) to encode state for maxima detection [S1][S2, unofficial]. The pixel encoding layout is fixed as follows [S1][S2, unofficial]:
+ *   **Red (R):** $L(x; t+1)$ — The scalar value at the next iteration.
+ *   **Green (G):** $\nabla^2 L(x; t+1)$ — The Laplacian at the next iteration.
+@@ -17,14 +17,12 @@
+ *   **Alpha (A):** $\nabla^2 L(x; t-1)$ — The Laplacian at the previous iteration.
+ 
+-Here, $x$ is the spatial coordinate, $t$ is the current iteration index (scale level), and $L(x;t)$ is the diffused scalar value at iteration $t$.
++Here, $x$ is the spatial coordinate, $t$ is the current iteration index (scale level), and $L(x;t)$ is the diffused scalar value at iteration $t$ [S2, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** Load the input volume into a 3D texture. Initialize the iteration counter $t = 0$.
++1.  **Initialization:** Load the input volume into a 3D texture [G]. Initialize the iteration counter $t = 0$ [G].
+ 2.  **Diffusion and Derivative Computation:** For each active voxel, solve the diffusion equation (Eq. 4 in [S1]) to compute the new scalar value $L(x; t+1)$ and its second spatial derivatives (Laplacian $\nabla^2 L(x; t+1)$) [S1][S2, unofficial]. This is implemented in a pixel shader [S1].
+-3.  **State Encoding:** Write the computed values into the 4-channel pixel buffer according to the layout defined above. The previous iteration's Laplacian ($\nabla^2 L(x; t-1)$) is already present in the Alpha channel from the previous step, and the current Laplacian ($\nabla^2 L(x; t)$) is in the Blue channel [S1][S2, unofficial].
+-4.  **Maxima Detection:** Compare the current Laplacian value (Blue channel) against the Laplacian values of its spatial neighbors at iterations $t-1$ (Alpha), $t$ (Blue), and $t+1$ (Green) [S1][S2, unofficial].
+-    *   If $\nabla^2 L(x; t)$ is the maximum among these values, the pixel is identified as a scale maximum.
+-    *   Write the coordinate and scale information to an output buffer [S1][S2, unofficial].
+-5.  **Ping-Pong Swap:** Use a ping-pong approach with two 3D textures to avoid simultaneous read/write conflicts on the same texture slice [S1][S2, unofficial]. The output of the current iteration becomes the input for the next.
++3.  **State Encoding:** Write the computed values into the 4-channel pixel buffer according to the layout defined above [S1][S2, unofficial]. The previous iteration's Laplacian ($\nabla^2 L(x; t-1)$) is already present in the Alpha channel from the previous step, and the current Laplacian ($\nabla^2 L(x; t)$) is in the Blue channel [S1][S2, unofficial].
++4.  **Maxima Detection:** Compare the current Laplacian value (Blue channel) against the Laplacian values of its spatial neighbors at iterations $t-1$ (Alpha), $t$ (Blue), and $t+1$ (Green) [S1][S2, unofficial]. If $\nabla^2 L(x; t)$ is the maximum among these values, mark the pixel as a scale maximum [S1][S2, unofficial].
++5.  **Ping-Pong Swap:** Use a ping-pong approach with two 3D textures to avoid simultaneous read/write conflicts on the same texture slice [S1][S2, unofficial]. The output of the current iteration becomes the input for the next [S1].
+ 6.  **Iteration:** Increment $t$ and repeat steps 2–5 until the desired scale range is covered [S1][S2, unofficial].
+ 7.  **Readback:** Read the pixels denoting scale maxima back to the CPU and store them as the scale abstraction [S1][S2, unofficial].
+@@ -32,81 +30,57 @@
+ **Pseudocode:**
+ ```python
+-# Assume input_volume is a 3D texture
+-# output_maxima is a list of (x, y, z, t) tuples
+-# scale_field is a 3D texture used for ping-pong buffering
+-# prev_laplacian_texture is a 3D texture storing Laplacian values from t-1
+-
+-t = 0
+-# Initialize prev_laplacian_texture with zeros or boundary conditions
+-# Initialize scale_field with input_volume
+-
+-while t < max_iterations:
+-    # Create temporary textures for current and next iteration
+-    curr_laplacian_texture = new_3d_texture()
+-    next_scalar_texture = new_3d_texture()
++def gpu_laplacian_scale_space_maxima_detection(input_volume, max_iterations, get_spatial_neighbors):
++    # Initialize ping-pong textures for scalar field
++    texture_prev = input_volume
++    texture_curr = new_3d_texture_like(input_volume)
++    texture_next = new_3d_texture_like(input_volume)
+     
+-    # Process each voxel in parallel (simulated here as a loop)
+-    for each voxel x in volume:
+-        # 1. Solve diffusion equation to get L(x; t+1)
+-        # Eq. 4 from [S1] implies a Gaussian blur or heat equation step
+-        L_next = solve_diffusion(scale_field[x], prev_laplacian_texture[x])
++    # Initialize 4-channel buffer for Laplacian history per voxel
++    # Channels: R=L(t+1), G=Lap(t+1), B=Lap(t), A=Lap(t-1)
++    history_buffer = new_3d_texture_rgba_like(input_volume)
++    
++    output_maxima = []
++    t = 0
++    
++    while t < max_iterations:
++        texture_next.clear()
++        history_buffer.clear()
+         
+-        # 2. Compute Laplacian at t+1
+-        # Using 6-point stencil from parent [Laplacian Grid Computation](3160-laplacian-grid-computation.md)
+-        Lap_next = compute_laplacian(next_scalar_texture, x)
++        # Parallel voxel processing (simulated sequentially for clarity)
++        for x in input_volume:
++            # 1. Solve diffusion equation to get L(x; t+1) [Eq. 4 in [S1]]
++            L_next = solve_diffusion(texture_prev[x])
++            
++            # 2. Compute Laplacian at t+1 using 6-point stencil from parent article
++            Lap_next = compute_laplacian_6point(texture_next, x)
++            
++            # 3. Retrieve current and previous Laplacians
++            Lap_curr = compute_laplacian_6point(texture_curr, x)
++            Lap_prev = history_buffer[x].A
++            
++            # 4. Encode into RGBA buffer
++            history_buffer[x] = (L_next, Lap_next, Lap_curr, Lap_prev)
++            
++            # 5. Maxima Detection
++            # Compare center's current Laplacian (B) against neighbors' A, B, G
++            is_max = True
++            for neighbor in get_spatial_neighbors(x):
++                n_A = history_buffer[neighbor].A
++                n_B = history_buffer[neighbor].B
++                n_G = history_buffer[neighbor].G
++                if Lap_curr < n_A or Lap_curr < n_B or Lap_curr < n_G:
++                    is_max = False
++                    break
++            
++            if is_max:
++                output_maxima.append((x, t))
+         
+-        # 3. Retrieve Laplacian at t (current) and t-1 (previous)
+-        # Note: In the first iteration, Lap_current might be the Laplacian of the input
+-        Lap_current = compute_laplacian(scale_field, x)
+-        Lap_prev = prev_laplacian_texture[x]
++        # Ping-pong swap for next iteration
++        texture_prev = texture_curr
++        texture_curr = texture_next
++        t += 1
+         
+-        # 4. Encode into RGBA buffer for next step's comparison
+-        # R: L(x; t+1), G: Lap_next, B: Lap_current, A: Lap_prev
+-        pixel_buffer[x] = (L_next, Lap_next, Lap_current, Lap_prev)
+-        
+-        # 5. Maxima Detection
+-        # Check if Lap_current is max among neighbors in t-1, t, t+1
+-        # Neighbors in space are checked against their respective temporal Laplacians
+-        is_max = True
+-        for neighbor in spatial_neighbors(x):
+-            # Get Laplacian of neighbor at t-1 (Alpha), t (Blue), t+1 (Green)
+-            # Note: The source [S1][S2, unofficial] implies comparing the center pixel's 
+-            # current Laplacian against the neighbors' Laplacians across time.
+-            # Specifically: "maximum of the Laplacian of the neighbors in iterations t-1, t and t+1"
+-            # This phrasing is slightly ambiguous. Standard scale-space maxima detection 
+-            # compares L(x,t) against L(x',t) for spatial neighbors x' and L(x,t') for temporal neighbors t'.
+-            # The source says: "value of the Laplacian at a given iteration (Blue) is the maximum 
+-            # of the Laplacian of the neighbors in iterations t-1, t and t+1 (GBA channels)".
+-            # This implies a 3D spatial neighborhood check where each neighbor's temporal history is available.
+-            
+-            # Retrieve neighbor's Laplacians from the encoded buffer of the neighbor
+-            n_Lap_t_minus_1 = pixel_buffer[neighbor].A
+-            n_Lap_t = pixel_buffer[neighbor].B
+-            n_Lap_t_plus_1 = pixel_buffer[neighbor].G
+-            
+-            # The center pixel's current Laplacian is pixel_buffer[x].B
+-            # The condition is that pixel_buffer[x].B is the maximum among 
+-            # the set of Laplacians: {n_Lap_t_minus_1, n_Lap_t, n_Lap_t_plus_1} for all spatial neighbors?
+-            # Or does it mean L(x,t) > L(x_neighbor, t) AND L(x,t) > L(x, t+1) AND L(x,t) > L(x, t-1)?
+-            # Source [S1]: "maximum of the Laplacian of the neighbors in iterations t-1, t and t+1"
+-            # This suggests comparing the center's current Laplacian against the neighbors' Laplacians at all three time steps.
+-            
+-            if pixel_buffer[x].B < n_Lap_t_minus_1 or \
+-               pixel_buffer[x].B < n_Lap_t or \
+-               pixel_buffer[x].B < n_Lap_t_plus_1:
+-                is_max = False
+-                break
+-        
+-        if is_max:
+-            output_maxima.append((x, t))
+-            
+-    # Update textures for next iteration
+-    prev_laplacian_texture = curr_laplacian_texture # Or store Lap_current
+-    scale_field = next_scalar_texture
+-    t += 1
+-
+-# Readback output_maxima to CPU
++    return output_maxima
+ ```
+-*[G] The pseudocode clarifies the "neighbors in iterations" logic. Standard scale-space maxima detection usually compares $L(x,t)$ against $L(x',t)$ for spatial neighbors $x'$ and $L(x,t')$ for temporal neighbors $t'$. The source text explicitly mentions comparing the Blue channel (current Laplacian) against GBA channels (next, current, previous Laplacians) of the *neighbors*. This implies a 3D spatial neighborhood where each neighbor's temporal history is used. If the source meant comparing the center pixel's temporal history against its spatial neighbors' current values, the encoding would be different. Given the explicit channel mapping, the implementation checks if the center's current Laplacian is greater than the neighbors' Laplacians at $t-1, t, t+1$.]*
+ 
+ **Parameters:**

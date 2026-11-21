@@ -1,0 +1,87 @@
+# Memory-Saving Ray Sampling
+
+Also called: Full-Ray Training Optimization
+
+## Overview
+Memory-Saving Ray Sampling is a technique that enables training neural radiance fields (NeRF) on all rays simultaneously, avoiding the need to downsample ray counts due to out-of-memory (OOM) constraints [S1]. Unlike sibling methods that may require sparse sampling or precomputed buffers, this approach allows full-resolution ray processing without degradation in stylization quality [S1]. It specifically addresses the trade-off where reducing sampled ray numbers to save memory increases noise and degrades results [S1].
+
+## How it works
+The method relies on the assumption that the primary memory bottleneck in training is the storage of intermediate features or embeddings for all rays in a batch, rather than the ray geometry itself. By ensuring that all rays are processed, it avoids the noise introduced by sparse sampling [S1].
+
+**Inputs and Outputs:**
+- Input: A batch of rays covering the full image resolution (e.g., $W \times H$ rays).
+- Output: Gradients and loss values computed using all rays.
+
+**Data Structures:**
+- Ray buffer: Stores origin and direction for all pixels in the current image.
+- Feature embeddings: 3D or 2D embeddings associated with the scene representation.
+
+**Steps:**
+1. Select an image from the training dataset.
+2. Generate rays for every pixel in the image (full resolution).
+3. Sample points along these rays.
+4. Compute radiance and density using the neural network.
+5. Render the image and compute the loss.
+6. Backpropagate gradients.
+
+**Parameters:**
+- Ray count: Equal to the total number of pixels in the source image ($W \times H$).
+- Typical values: Not specified in sources, but implied to be full resolution (e.g., $512 \times 512$ or higher).
+
+**Edge cases and pitfalls:**
+- OOM errors may occur if the system does not have sufficient VRAM to hold all intermediate activations for all rays [S1].
+- Reducing ray counts to fit memory leads to increased noise and degraded stylization quality [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def memory_saving_ray_sampling(image, nerf_model, optimizer):
+    # Get image dimensions
+    height, width = image.shape[:2]
+    
+    # Generate rays for ALL pixels (full resolution)
+    # This is the key difference from sparse sampling methods
+    rays = generate_rays_for_all_pixels(height, width)
+    
+    # Sample points along rays
+    points = sample_points_along_rays(rays)
+    
+    # Forward pass
+    densities, colors = nerf_model(points)
+    
+    # Render image
+    rendered_image = ray_march(rays, densities, colors)
+    
+    # Compute loss
+    loss = compute_loss(rendered_image, image)
+    
+    # Backward pass
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    
+    return loss
+```
+
+## Subtopics
+
+### Feature Vector Sampling for Memory Management
+A strategy to prevent OOM errors during training by randomly sampling feature vectors instead of feeding all embeddings [S2]. For 3D embeddings with $F=8$, randomly sample 150K feature vectors $\theta_s$ per iteration [S2]. For 3D embeddings with $F=1, 2, 4$, randomly sample 200K feature vectors $\theta_s$ per iteration [S2]. For 2D embeddings, feed all embeddings together in one iteration without random sampling [S2]. This is used in conjunction with memory-saving techniques to manage VRAM usage [S2].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Significantly reduced compared to naive full-batch training by avoiding OOM, but higher than sparse sampling methods [S1, S2].
+- **Measured Performance:** In NeRF-Art, this method achieved better stylization quality than AvatarCLIP, which used sparse rays ($112 \times 112$) due to OOM constraints [S1].
+- **Scaling:** Scales with image resolution; requires sufficient VRAM to hold all ray intermediates [S1].
+- **Strengths:** Avoids noise from sparse sampling; enables full-resolution training [S1].
+- **Limitations:** Requires high VRAM; may still require auxiliary strategies like feature vector sampling for very large scenes [S2].
+- **When to use:** When VRAM allows full-ray processing and high-quality stylization is critical [S1].
+- **When not:** When VRAM is severely limited and sparse sampling is unavoidable [S1].
+
+## Background
+Originated in the context of text-driven NeRF stylization, specifically in NeRF-Art [S1]. It was developed to overcome the limitations of methods like AvatarCLIP, which suffered from noise due to sparse ray sampling [S1]. The technique is part of a broader effort to optimize memory usage in NeRF training [S1, S2].
+
+## Sources
+[S1] NeRF-Art: Text-Driven Neural Radiance Fields Stylization, https://doi.org/10.1109/tvcg.2023.3283400, fetched 2026-10-26
+[S2] How Far can we Compress Instant-NGP-Based NeRF?, https://doi.org/10.1109/cvpr52733.2024.01921, fetched 2026-10-26

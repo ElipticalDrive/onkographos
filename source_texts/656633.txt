@@ -1,0 +1,210 @@
+Contribute to arbobendik/FlexCudaPT development by creating an account on GitHub.
+
+fix(camera): project orthographic views and cameras in parallel, rays along the view from its near plane, as Blender draws them by arbobendik · Pull Request #45 · arbobendik/FlexCudaPT · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+arbobendik
+commented
+Oct 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Orthographic views and ORTHO cameras now render as parallel projections, in the viewport (modeling and sculpting with perspective off) and in final renders. Two commits on main 3fd6c36: a fix (+28/−14) and its test (+34).
+The bug
+trace() (src/__init__.py) always built a perspective camera from the projection matrix: one ray origin at the view's position, with directions x·ndc_x + y·ndc_y + z. It never checked whether the projection is orthographic. So an orthographic window matrix was turned into a frustum:
+The ortho half-width became a field of view; ws5 measured ortho_scale 2.2 giving a 95° view.
+Every ray left the view's pivot, so a Blender ortho viewport's geometry behind the pivot vanished. Blender draws it, since its ortho clip start is negative.
+project(), used by ReSTIR's temporal reprojection and the denoiser's flow, and the Camera/Window texture coordinates assumed a perspective divide as well.
+render() and view_draw() both go through trace(), so ORTHO scene cameras and ortho viewports were equally affected.
+The fix
+trace(): a projection with P[3][3] = 1 is orthographic.
+x and y keep their meaning (right / P[0][0], up / P[1][1]), now half-extents.
+z carries the rays' offset: the near plane along the view, −(1 + P[2][3]) / P[2][2], which is behind the pivot for a viewport's negative clip start, plus the shift −x·P[0][3] − y·P[1][3].
+One float in the lens tail, ortho, says which kind of camera it is.
+pixelDomain, both backends: with ortho, the origin is origin + x·ndc_x + y·ndc_y + z and the direction is the view's forward axis. Perspective is unchanged.
+project(), both backends: with ortho, ndc = (dot(d − z, x)/|x|², dot(d − z, y)/|y|²), with no divide.
+Window coordinate, both backends: with ortho, the point on the image plane is d − z.
+Lens grows from 5 to 6 floats in renderer.h and renderer.slang. That makes Scene grow, so RECORD_STRIDE goes from 560 to 576 bytes; main.cpp's static assertion measured the new size.
+Thin-lens depth of field stays perspective-only, as before (lens() returns no aperture for non-PERSP cameras).
+Test (src/test.py, +34)
+Two emissive unit squares, one at depth 0 and one 3 units further, under an orthographic projection with ortho_scale 3, at 64 px. A parallel projection shows each as (64/3)² ≈ 455 px.
+Final render through an ORTHO camera: each square must cover 455 ± 10%.
+The modeling-style ortho viewport, through the test's Viewport stand-in, with a Blender ortho window matrix (clip −50 to 100): the same, plus a 0.4-unit square behind the view's pivot, which must show (at least half its 7.1² px).
+Gates
+result
+The test's ortho block on main abfedeb, OptiX
+fails: (116, 20) px for the two squares, camera and viewport alike (expected about 455 each)
+The same on main, Vulkan
+fails: (116, 20) px, camera and viewport
+The same on this fix, OptiX
+passes: camera (483, 482) px, viewport (483, 482) plus 72 px behind the pivot (at least 36 needed); peak 675 MiB
+The same on this fix, Vulkan
+passes: camera (483, 482) px, viewport (483, 482) plus 72 px behind; peak 710 MiB
+make test, ee14b61 on abfedeb
+exit 0 (326 renders)
+make test, bd31c64 on 3fd6c36 (this tip; the rebase is clean, with patch-ids unchanged)
+exit 0 (328 renders)
+Perspective scenes against main abfedeb, 256 px, 64 spp: tokyo, the showcase scene, cornell, glass, occluder; OptiX and Vulkan
+bit-identical: max abs 0.0, 100% identical pixels, in all 10
+(The test asserts each square within ±10% of (64/3)² ≈ 455 px; 483 and 482 are +6%. Pixels count as lit above half brightness, so edge pixels count by coverage; the exact excess is not measured further.)
+All runs are capped (MemoryMax 20G, no swap), with no OOM kill (journalctl --user).
+arbobendik
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Gates done on ee14b61 (log ev/chain-ortho.log): ortho block passes on OptiX and Vulkan (483/482 px vs 455 expected, 72 px behind the viewport's pivot) and fails on main (116/20); make test exit 0; tokyo, the showcase scene, cornell, glass and occluder bit-identical to main abfedeb on both backends. Ready for review.
+arbobendik
+marked this pull request as ready for review
+October 30, 2026 12:31
+arbobendik
+added 2 commits
+October 30, 2026 13:38
+fix(camera): project orthographic views and cameras in parallel, rays…
+…
+997e4cf
+```
+… along the view from its near plane, as Blender draws them
+```
+chore(test): see two unit squares at different depths alike through a…
+…
+bd31c64
+```
+…n orthographic camera and viewport, and behind the viewport's pivot
+```
+arbobendik
+force-pushed
+the
+fix/ortho-camera
+branch
+from
+ee14b61 to
+bd31c64
+Compare
+October 30, 2026 12:58
+arbobendik
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Rebased onto main 3fd6c36 (#44) as bd31c64, with patch-ids unchanged (997e4cf = 0351e65, bd31c64 = ee14b61); make test on bd31c64: exit 0, 328 renders, no OOM kill. #44 touched only the exporter's bake and test.py, none of this PR's files, so the identity rows (measured on ee14b61 against abfedeb) still describe this patch.
+arbobendik
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Verification (ws3) of bd31c64: PASS per commit
+History.
+The merge base is origin/main 3fd6c36, and the branch has only this PR's two commits.
+git range-diff abfedeb..ee14b61 3fd6c36..bd31c64 shows = for both: 0351e65 = 997e4cf, ee14b61 = bd31c64.
+Every Blender run was in a 20 GB scope without swap, with no cap kills.
+997e4cf fix(camera): PASS
+make test on 997e4cf itself: exit 0, 1550 s (cold caches after the crash).
+Review against AGENTS.md: no findings.
+P[3][3] == 1 tells orthographic from perspective.
+The near-plane offset −(1 + P[2][3]) / P[2][2] reduces to exactly −n for Blender's orthographic matrix, so a
+viewport's rays start behind its pivot. The shift term puts NDC 0 at the window's centre.
+cross(y, x) is the forward axis.
+project() and the Window coordinate drop the divide alike on CUDA and Slang. RECORD_STRIDE is updated on both.
+Perspective rays are main's expressions.
+View reuse compares Lens bytewise, so switching kinds resets.
+Observation, unmeasured: the camera's medium is still found at the view's position, while ortho rays start on
+the near plane, which can lie in another volume.
+bd31c64 chore(test): PASS
+make test on bd31c64: exit 0, 173 s.
+Must fail, Bendik's case on both backends. make test runs the ortho block on the default backend only, so I ran
+it alone with each backend forced (ortho.py). For main, the camera assert was turned into a print, to reach the
+viewport case. Pixels of the near and far unit squares, and of the square behind the pivot:
+Build
+Backend
+ORTHO camera, final render
+Ortho viewport (modeling)
+main 3fd6c36
+OptiX
+(116, 20): fails
+(116, 20, 0): fails
+main 3fd6c36
+Vulkan
+(116, 20): fails
+(116, 20, 0): fails
+this PR
+OptiX
+(483, 482): passes
+(483, 482, 72): passes
+this PR
+Vulkan
+(483, 482): passes
+(483, 482, 72): passes
+A parallel projection gives (64/3)² ≈ 455 each.
+ORTHO final renders, checked by eye. Cornell and the showcase scene, their cameras made ORTHO and framed at the
+scene's centre as their perspective views frame it; 256 px, 64 spp.
+This PR renders both as parallel projections: the showcase scene's objects face the camera square on, without
+convergence, and cornell's box is framed in full.
+Main renders them as wide perspectives: the showcase scene becomes a panorama of the ground and sky, and cornell a
+tiny box (mean 0.00087 against this PR's 0.01023).
+On this PR, OptiX and Vulkan agree within one 8-bit level (max 0.0039).
+Perspective identity (main 3fd6c36 against this PR; 256 px, 64 spp, ReSTIR off and on, OptiX and Vulkan):
+bit-identical on all 20 pairs of occluder, cornell, emitters, the showcase scene and tokyo.
+Cost, tokyo: perspective, trace() on the hot path. One hold of 215 s: 2 ABBA rounds per backend, 480×270, 10
+redraws, ReSTIR on, bounces 7, low-power. Trace medians, the mean of each build's 4 runs:
+main
+this PR
+change
+OptiX
+41.50 ms
+41.20 ms
+−0.7%
+Vulkan
+72.10 ms
+72.28 ms
++0.2%
+That's within the spread of a build's own runs (OptiX main 41.0–42.0 ms).
+Evidence: .agent/pr45/ (maketest-c1.log, maketest-c2.log, ortho.log, ortho-main-viewport.log,
+orthocam*.log, orthocam-*.png, renders45.log, ab45.log).
+Hide details
+View details
+arbobendik
+merged commit bd31c64
+into
+main
+Oct 30, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+arbobendik
+deleted the
+fix/ortho-camera
+branch
+October 30, 2026 17:39
+arbobendik
+mentioned this pull request
+Oct 31, 2026
+fix(camera): start camera rays on the near plane its clip start sets, and in the volume they start in there
+#48
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

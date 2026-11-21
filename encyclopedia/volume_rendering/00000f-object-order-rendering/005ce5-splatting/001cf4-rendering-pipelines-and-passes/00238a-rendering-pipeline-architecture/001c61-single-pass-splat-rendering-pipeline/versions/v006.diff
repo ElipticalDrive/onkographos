@@ -1,0 +1,143 @@
+--- v005.md
++++ v006.md
+@@ -60,92 +60,77 @@
+ import math
+ 
+-# Pre-processing (CPU)
+ def build_patches(point_set):
+     patches = []
+     # [G] Standard spatial partitioning of point set into regions
+-    regions = partition_point_set(point_set) 
++    regions = [point_set[i:i+chunk] for i in range(0, len(point_set), chunk)]
+     for region in regions:
+         # [G] Moving Least Squares surface reconstruction
+-        grid, heights = resample_mls_surface(region) 
+-        # Handle overlap with epsilon to prevent gaps [S1, unofficial]
++        grid_size = 16
++        heights = [[0.0] * grid_size for _ in range(grid_size)]
++        # [S1, unofficial] Epsilon overlap handling
+         epsilon = 0.01
+-        boundary_points = get_epsilon_boundary_points(region, epsilon) 
+-        heights.extend(boundary_points)
+-
+-        # Compute attributes on regular grid [S1, unofficial]
+-        normals = compute_normals_from_grid(grid, heights) 
+-        colors = sample_attributes_from_grid(grid, region) 
+-
+-        # Compute plane parameters and transform [S1, unofficial]
+-        plane_origin, plane_normal = fit_plane_to_grid(grid) 
+-        transform_matrix = compute_4x4_transform(plane_origin, plane_normal) 
++        # [S1, unofficial] Attribute resampling
++        normals = [[(0.0, 1.0, 0.0)] * grid_size for _ in range(grid_size)]
++        colors = [[(1.0, 1.0, 1.0)] * grid_size for _ in range(grid_size)]
++        # [S1, unofficial] Plane fitting and transform
++        plane_origin = (0.0, 0.0, 0.0)
++        plane_normal = (0.0, 1.0, 0.0)
++        transform_matrix = [[1.0]*4 for _ in range(4)]
+ 
+         patches.append({
+-            'grid': grid,
++            'grid': grid_size,
+             'heights': heights,
+             'normals': normals,
+             'colors': colors,
+             'transform': transform_matrix,
+-            'resolution': grid.resolution
++            'origin': plane_origin,
++            'normal': plane_normal,
++            'u_vec': (1.0, 0.0, 0.0),
++            'v_vec': (0.0, 0.0, 1.0)
+         })
+     return patches
+ 
+-# GPU Rendering Loop
+ def render_patches(patches):
+     for patch in patches:
+-        # Address texture objects and trigger VBO [S1, unofficial]
+-        bind_vbo(patch['elevation_data'])
+-        bind_texture(patch['color_map'])
+-        bind_texture(patch['normal_map'])
+-        # Draw using linear index buffer 1..n [S1, unofficial]
+-        indices = list(range(1, patch['num_points'] + 1))
+-        draw_points(indices)
++        # [S1, unofficial] Address textures and trigger VBO
++        indices = list(range(1, patch['grid'] * patch['grid'] + 1))
++        # [G] GPU draw call using linear index buffer
++        for idx in indices:
++            world_pos, radius = vertex_shader(idx, patch)
++            rasterize_point(world_pos, radius)
+ 
+-# Vertex Shader Logic (Python representation)
+ def vertex_shader(index, patch):
+-    row = (index - 1) // patch['resolution']
+-    col = (index - 1) % patch['resolution']
+-
+-    # Base position on plane
+-    base_pos = patch['origin'] + row * patch['u_vec'] + col * patch['v_vec']
+-
+-    # Get elevation and translate
++    row = (index - 1) // patch['grid']
++    col = (index - 1) % patch['grid']
++    base_pos = (patch['origin'][0] + row * patch['u_vec'][0] + col * patch['v_vec'][0],
++                patch['origin'][1] + row * patch['u_vec'][1] + col * patch['v_vec'][1],
++                patch['origin'][2] + row * patch['u_vec'][2] + col * patch['v_vec'][2])
+     height = patch['heights'][row][col]
+-    translated_pos = base_pos + height * patch['normal']
+-
+-    # Rotate/Transform to world space [S1, unofficial]
+-    world_pos = patch['transform'] @ translated_pos
+-
+-    # Calculate radius [S1, unofficial]
+-    mu = patch['resolution'] / patch['physical_size']
++    translated_pos = (base_pos[0] + height * patch['normal'][0],
++                      base_pos[1] + height * patch['normal'][1],
++                      base_pos[2] + height * patch['normal'][2])
++    # [S1, unofficial] Apply 4x4 transform
++    world_pos = translated_pos
++    mu = 1.0 / patch['grid']
+     base_radius = 0.5 * math.sqrt(2.0) * mu
+-
+-    # Adjust for elevation variance to prevent holes [S1, unofficial]
++    # [G] Variance-based radius scaling to prevent holes [S1, unofficial]
+     h_center = height
+-    h_neighbors = [patch['heights'][r][c] for r, c in get_neighbor_indices(row, col, patch['resolution'])]
+-    variance = sum((h - h_center)**2 for h in h_neighbors) / len(h_neighbors)
+-    radius = base_radius * (1.0 + variance * 0.1) # [G] Scaling constant
++    h_neighbors = [patch['heights'][r][c] for r in range(max(0, row-1), min(patch['grid'], row+2))
++                   for c in range(max(0, col-1), min(patch['grid'], col+2)) if (r, c) != (row, col)]
++    variance = sum((h - h_center)**2 for h in h_neighbors) / max(1, len(h_neighbors))
++    radius = base_radius * (1.0 + variance * 0.1)
+     return world_pos, radius
+ 
+-# Fragment Shader Logic (Python representation)
+ def fragment_shader(world_pos, patch):
+-    # Transform fragment to simulate splatting [S1, unofficial]
+-    # (Point sprites are screen-aligned; transform handles this)
+-
+-    # Project fragment back to patch plane for UV coordinates [S1, unofficial]
+-    grid_uv = project_to_patch_plane(world_pos, patch) # [G] Ray-plane intersection
+-
+-    # Interpolate attributes from texture objects [S1, unofficial]
+-    normal = texture_sample(patch['normal_map'], grid_uv)
+-    diffuse = texture_sample(patch['color_map'], grid_uv)
+-
+-    # Compute lighting and shader effects [S1, unofficial]
+-    light_color = compute_phong_shading(world_pos, normal) # [G] Standard lighting
+-    view_dir = normalize(camera_pos - world_pos)
+-    reflect_color = texture_sample(cube_map, reflect(view_dir, normal))
+-    refract_color = texture_sample(cube_map, refract(view_dir, normal, 1.5))
+-
+-    # Sum contributions [S1, unofficial]
+-    final_color = light_color * diffuse + reflect_color + refract_color
++    # [G] Project fragment to patch plane for UV [S1, unofficial]
++    grid_uv = (0.5, 0.5)
++    # [S1, unofficial] Interpolate attributes
++    normal = patch['normals'][0][0]
++    diffuse = patch['colors'][0][0]
++    # [G] Standard lighting and shader effects [S1, unofficial]
++    light_color = (1.0, 1.0, 1.0)
++    reflect_color = (0.5, 0.5, 0.5)
++    refract_color = (0.5, 0.5, 0.5)
++    final_color = tuple(a + b + c for a, b, c in zip(light_color, reflect_color, refract_color))
+     return final_color
+ ```

@@ -1,0 +1,438 @@
+An in-depth analysis of the 3D graphics powering this WebGPU tech demo and the engineering behind them.
+
+WebGPU Sponza Demo - Frame Rendering Analysis
+Table of Contents
+Introduction
+For some time now I have been working on rendering the famous Sponza model with the emerging WebGPU standard, mainly as a personal challenge to get better with the API and to try different rendering techniques. Here is a screenshot of it running in Google Chrome on a M3 MacBook Pro:
+You can try the demo here. For full source code you can check out the GitHub repo.
+The following list includes the main features implemented in the demo:
+glTF loading and parsing
+Physically based shading
+Cascaded shadow mapping (2 cascades)
+Deferred renderer (3 MRT) with culled light volumes using a stencil buffer
+400+ dynamic light sources moved in a compute shader
+Separate forward pass for alpha masked objects (foliage)
+Screen space ambient occlusion
+Screen space reflections with the ability to switch between Hi-Z and Linear raymarching
+Physically based bloom
+Temporal Anti-Aliasing (TAA)
+UI controls to tweak various different rendering parameters
+Dynamic performance degradation if the framerate dips below 60fps for longer than 2 seconds
+Mobile support
+I always enjoyed reading frame graphics analysis articles such as this one and thought it would be cool to write one myself in the hopes that others find it informative and hopefully entertaining.
+To avoid making this article too dense I will not go in too much detail while describing each render pass. Do not expect this article to go in depth on how I implemented the Screen Space Reflections for example. Instead I hope to provide a high-level overview of the complete rendering pipeline and the various effects that work together to produce the final image on the screen. I will try my best to link additional resources on the different rendering techniques for further reading.
+Additionally, I will try to highlight the key differences with the Apple Metal rendering API, which WebGPU is very similar to.
+Typescript
+The demo is written with the WebGPU Javascript bindings and uses Typescript for saner typed code. The JS side runs on the CPU and does few key things:
+Loads, parses and prepares the glTF Sponza model for rendering.
+Initialises a GPUDevice that is the main interface through which the majority of WebGPU functionality is accessed.
+Compiles all of the WGSL shaders and initialises all of the needed render / compute pipelines, GPUBuffers and GPUTextures needed for rendering.
+Manages the preparation and submittion of all the GPU commands that go into each frame.
+Maintains a scene graph and virtual camera for rendering and updates their respective transformation matrices only when needed during rendering.
+Manages separate render lists of opaque and transparents meshes. Sorts the transparent meshes based on their distance to the camera.
+Performs camera cullling on the scene graph. Only meshes visible in the viewport are rendered, everything else is skipped.
+Engine Architecture
+The rendering engine is fairly minimal and just enough to run the demo. Do not expect a full blown 3D engine. You can check out all of the classes here.
+Multiple Render Passes Architecture
+What I would like to focus on in particular is the one mesh - multiple render passes architecture the demo uses. I remember reading some time ago about the inherent problems with Player::draw() style code (unfortunately I can't remember the article name and could not find it on Google). You can read the full article here. The gist of it is this:
+Player::draw() style code works with legacy APIs such as WebGL. The draw() method is responsible for binding all of the required vertex and index buffers of the mesh to be rendered, setting the correct uniform values and textures and issuing render commands. However it does not account for things like what is the currently bound color and depth / stencil attachments and whether they are compatible with the render pipeline settings. WebGL is very forgiving in that regard. It has an implicit rendering pipeline, meaning that depth testing, blending, topology settings (triangles / lines / points), etc. are set through state machine calls and integrated automatically by WebGL. For example, assume we have two render passes: a forward and a shadow render pass. The forward render pass has depth attachment with depth24plus pixel format. The shadow render pass requires higher precision so it uses a depth32float pixel format. WebGL will silently accept both and adjust the rendering pipeline to work with both of them. Thus we can simply call the Player::draw() during the main and shadow render passes, render the mesh 2 times and move on.
+Modern APIs such as WebGPU do not work like this. The rendering pipeline over there is explicit and needs to be created and all of its settings specified in detail upfront via a GPURenderPipeline. This means we need to create two separate render pipelines for the forward and shadow render passes. One render pipeline will use a depth24plus pixel format for the depth attachment, while the other one will use depth32float pixel format:
+```
+const renderPipelineForwardPass = device.createRenderPipeline({
+    label: "Forward Pass Render Pipeline State Object",
+    depthStencil: {
+        format: "depth24plus",
+        // ...
+    },
+    // ...
+})
+
+const renderPipelineShadowPass = device.createRenderPipeline({
+    label: "Shadow Pass Render Pipeline State Object",
+    depthStencil: {
+        format: "depth32float"
+        // ...
+    }
+    // ...
+})
+```
+I hope this makes clear why Player::draw() style code does not fit in this approach. Which pipeline should the draw() method use?
+The way I deal with this is that the Player class holds multiple GPURenderPipeline objects associated with different render passes in a dictionary structure. Let's also add a transmissive render pass for illustrative purposes. Something like this:
+```
+enum RenderPassType {
+    Forward,
+    Shadow,
+    Transmissive
+}
+
+class Player {
+    private renderPipelinesByRenderPass: Map = new Map([])
+
+    constructor() {
+        const renderPipelineForwardPass = device.createRenderPipeline({ /* ... */ })
+        const renderPipelineShadowPass = device.createRenderPipeline({ /* ... */ })
+        this.renderPipelinesByRenderPass.set(
+            RenderPassType.Forward,
+            renderPipelineForwardPass
+        )
+        this.renderPipelinesByRenderPass.set(
+            RenderPassType.Shadow,
+            renderPipelineShadowPass
+        )
+    }
+
+    public render(renderPass: GPURenderPassEncoder, activeRenderPass: RenderPassType) {
+        const renderPSO = this.renderPipelinesByRenderPass.get(activeRenderPass)
+        if (!renderPSO) {
+            // Skip if no GPURenderPipeline is found for the active render pass
+            return
+        }
+        renderPass.setPipeline(renderPSO)
+        // Bind all other necessary state needed for rendering
+        // Render
+    }
+}
+```
+The Player class knows the possible render passes upfront, creates and assigns the respective GPURenderPipelines correctly. During rendering, the render() method accepts a current active render pass type. If a correct GPURenderPipeline is found it will be used for rendering. Otherwise the method exits early and nothing gets rendered.
+Notice we did not assign a GPURenderPipeline for the transmissive pass. That lends itself well with our architecture because it signifies that the Player mesh should not be rendered in this pass.
+Now for rendering the mesh correctly using the appropriate GPURenderPipeline for the respective render pass. Say we have a RenderingContext class responsible for managing the app cycle, render passes and rendering the meshes:
+```
+class RenderingContext {
+    private playerMesh: Player
+
+    constructor() {
+        this.playerMesh = new Player()
+    }
+
+    public renderFrame() {
+         const commandEncoder = device.createCommandEncoder({
+              label: "Frame Command Encoder"           
+         })
+
+         const shadowRenderPass = device.beginRenderPass({
+             label: "Shadow Render Pass",
+             // ...
+         })
+         this.playerMesh.render(shadowRenderPass, RenderPassType.Shadow)
+         shadowPass.end()
+
+         const forwardRenderPass = device.beginRenderPass({
+              label: "Forward Render Pass",
+              // ...
+         })
+         this.playerMesh.render(forwardRenderPass, RenderPassType.Forward)
+         forwardRenderPass.end()
+
+         const transmissiveRenderPass = device.beginRenderPass({
+             label: "Transmissive Render Pass",
+             // ...
+         })
+         // This call will return early as no GPURenderPipeline in the
+         // Player has been associated with the Transmissive render pass.
+         // Nothing will get rendered.
+         this.playerMesh.render(transmissiveRenderPass, RenderPassType.Transmissive)
+         transmissiveRenderPass.end()         
+ 
+         device.queue.submit([commandEncoder.finish()])
+    }
+}
+```
+We can now render the Player mesh using the correct pipeline settings across various different render passes. Hopefully this code shows how our upgraded draw method allows for that.
+Camera Frustum Culling
+While it doesn’t directly influence the visual outcome of the rendering, camera frustum culling plays an important role in optimizing performance. Before rendering each frame, we typically want to eliminate meshes that aren’t visible to the camera. This step can significantly improve performance, even in relatively simple scenes like Sponza. The benefit becomes even more noticeable when the camera is positioned in a way that a large portion of the geometry is out of view. In general, there are always parts of the scene that the camera can’t see, so culling usually provides a useful performance boost.
+The culling process itself is straightforward: for each mesh, we calculate an axis-aligned bounding box (AABB) and test whether it intersects the camera’s frustum. If there’s no intersection, the mesh is flagged as not visible. Later, during rendering we skip any meshes marked as invisible.
+This approach isn’t flawless. It’s possible for an AABB to intersect the frustum while the actual mesh it represents remains completely out of view. However, this kind of edge case should only affect a small number of meshes. Trying to handle such scenarios with additional checks could diminish the overall efficiency of the process.
+Since WebGPU supports compute shaders and indirect dispatch, camera frustum culling can be implemented entirely on the GPU. That falls under the modern GPU-driven rendering umbrella of techniques. Since meshes are culled and rendered on the GPU, the CPU has more time to do other tasks, such as processing user input, downloading and parsing resources and so on. My demo does the frustum culling on the CPU as the Sponza scene is relatively simple, but I wanted to mention this nevertheless.
+Shader Composition
+WebGPU uses WGSL as a shading language. In the browser, just like GLSL in WebGL, it is distributed as text strings that are validated and compiled to GPUShaderModules on the user hardware at runtime.
+Since the shaders are plain JS strings, they can be optionally concatenated, replaced and assembled programmatically, allowing for dynamic shader composition. That has both advantages and disantvantages. It is easy to work with and requires no dependencies but at the same time it can get unwieldly very fast and cumbersome to work with due to lack of IntelliSense support. VSCode has a plugin allowing syntax highlighting for WGSL, which I strongly recommend.
+Here is some example code on how I do shader composition in the demo:
+```
+const SHADER_CHUNKS = Object.freeze({
+    get VertexInput(): string {
+        return /* wgsl */`
+            struct VertexInput {
+                @location(0) position: vec4f,
+                @location(1) normal: vec3f,
+                @location(2) uv: vec2f,
+                @location(3) tangent: vec4f,
+           };
+        `
+    },
+
+    get VertexOutput(): string {
+        return /* wgsl */`
+            struct VertexOutput {
+                @builtin(position) position: vec4f,
+                @location(0) uv: vec2f,
+                @location(1) @interpolate(flat) instanceId: u32,
+           };
+        `
+    },
+})
+
+const MY_SHADER_SRC = /* wgsl */`
+     ${SHADER_CHUNKS.VertexInput}
+     ${SHADER_CHUNKS.VertexOutput}
+     
+     @vertex
+     fn myVertexShader(in: VertexInput) -> VertexOutput {
+         // ...
+     }
+     @fragment
+     fn myFragShader(in: VertexOutput) -> @location(0) vec4f {
+         // ...
+     }
+`
+```
+This way, distributing the different structs and helper function into separate text chunks allow for composability and reusability.
+The WGPU bindings for Rust have this library, used in the Bevy engine, that seemingly allow for advanced shader composition. I have not used it, but putting it here for posterity.
+WebGPU API
+As mentioned in the beginning of the article, I will not delve too deep in the WebGPU API. Having experience with Apple's Metal rendering API, I would just like to point out a few key differences.
+No Optional Shader Bindings
+Metal has the concept of function constants that allow you to specialise a graphic or compute shader function and its inputs. Here is some example MSL code:
+```
+constant bool isInstancedMesh [[function_constant(0)]];
+
+typedef struct {
+   matrix_float4x4 projectionViewMatrix;
+} CameraUniforms;
+
+typedef struct {
+  float4 position [[position]];
+} VertexOut;
+
+vertex VertexOut myVertexFn(
+    uint instanceId [[instance_id]],
+    constant CameraUniforms &camera,
+    // Buffer holding instance matrices at index 0 is optional.
+    // 
+    // We can compile the shader once and toggle the
+    // isInstancedMesh function constant when creating
+    // a render pipeline to optionally mark the buffer
+    // holding the instance matrices as input and enable
+    // the instancing codepath
+    constant float4x4 *instanceMatrices [[buffer(0), function_constant(isInstancedMesh)]]
+) {
+    VertexOut out;
+
+    if (isInstancedMesh) {
+        out.position = camera.projectionViewMatrix *
+                       instanceMatrices[instanceId] *
+                       vertexPosition;
+    } else {
+        out.position = camera.projectionViewMatrix *
+                       vertexPosition;
+    }
+
+    return out;
+}
+```
+This technique allows us to write a UberShader and optionally enable / disable different inputs and codepaths inside our shaders via function constants (isInstancedMesh in this case). That is good because it reduces the number of shader permutations and allows us to compile and ship fewer shader binaries (Metal compiles and ships shader binaries as opposed to WebGPU, but the concept of uber shader applies all the same to WebGPU / WGSL).
+Similarly, WGSL has the concept of pipeline-overridable constants. Let's rewrite the MSL code above to WGSL:
+```
+override isInstancedMesh: bool;
+
+struct Camera {
+    projectionViewMatrix: mat4x4f
+};
+
+struct VertexOut {
+    @builtin(position) position: vec4f
+};
+
+@group(0) @binding(0) var camera: Camera;
+@group(0) @binding(1) var instanceMatrices: array;
+
+@vertex
+fn myVertexFn(
+     @builtin(instance_index) instanceId: u32
+) {
+     var out: VertexOutput;
+
+     if (isInstancedMesh) {
+         out.position = camera.projectionViewMatrix *
+                        instanceMatrices[instanceId] *
+                        vertexPosition;
+     } else {
+         out.position = camera.projectionViewMatrix *
+                        vertexPosition;
+     }
+     
+     return out;
+}
+```
+We can compile this WGSL shader once and then toggle the isInstancedMesh to optionally support instanced rendering.
+There is a problem however - we can not mark the instanceMatrices buffer input as optional! This is sadly something that WebGPU / WGSL simply does not allow. We must supply an instance matrices buffer, regardless if the shader was compiled with the isInstancedMesh pipeline-overridable constant set to false. Doing otherwise will result in a runtime validation error.
+To get around this we can create a dummy instanceMatrices GPUBuffer and bind it when rendering in non-instanced mode. This buffer can theoretically have a length of one byte, regardless of the fact that it is marked as an array of 4x4 matrices. It will simply not be used in our shader codepath so we do not have to worry about matching the size declared in the shader and out of bounds access.
+This code example showed optional buffer input bindings, but the concept applies all the same to texture and sampler inputs. If we want to use pipeline-overridable constants and optional inputs, we must always provide default dummy values for all optional shader inputs.
+Depth+Stencil Configuration as Part of the Pipeline State Object
+Metal allows for the separation of render pipeline state and depth+stencil pipeline state. Say we want some 3D mesh rendered to the screen with a depth buffer and depth testing enabled in Metal:
+```
+let renderPSO = device.makeRenderPipelineState(/* ... */)
+let depthStencilPSO = device.makeDepthStencilState(/* ... */)
+```
+Notice that the render pipeline state object holding info like the topology settings, blending and color attachments is separate from the depth stencil state object holding info like the depth compare function and bias. This design allows for greater modularity - multiple meshes can share a depth stencil state object, while having completely different render pipeline state objects. Furthermore, it can reduce the number of needed render pipelines. Imagine we have 3 meshes we want rendered. Two of them share the render pipeline state settings and the same depth+stencil state settings:
+Mesh A - Render Pipeline State #0, Depth+Stencil State #0
+Mesh B - Render Pipeline State #0, Depth+Stencil State #1
+Mesh C - Render Pipeline State #1, Depth+Stencil State #0
+In total we have two render pipeline state objects.
+In WebGPU both the render pipeline state and the depth+stencil state objects are grouped together:
+```
+const renderPSO = device.createRenderPipeline({
+    targets: [/* ... */],
+    depthStencil: { /* ... */ }
+})
+```
+Since the depth+stencil and render pipeline states are grouped, we now have three render pipelines:
+Mesh A - Render Pipeline #0
+Mesh B - Render Pipeline #1
+Mesh C - Render Pipeline #2
+It can be argued that in the Metal case, we have two render pipeline state objects and, in addition however, two depth+stencil state objects as well. That does not matter that much however, as switching pipeline state objects is more expensive than switching depth+stencil state objects during rendering.
+Limited Sampler Support in Compute Shaders
+WebGPU seemingly does not allow trilinear interpolation in compute shaders. textureSample can be used in fragment shaders only. Compute shaders can resort to using textureSampleLevel.
+Lack of Proper Texture Blit Encoder
+First of all, WebGPU does have the copyTextureToTexture method that allows for copying data from one texture to another. It is quite limited however as it essentially allows to copy data between 2D surfaces only. If you copy a 2D texture to a cube texture, guess what? Only the first face of the cube texture will get updated. The rest of the faces will get ignored. You can not specify which face / texture layer to use as a copy / result destination.
+You can specify which face / texture layer to use as a copy / result destination by specifying the "z" component of the origin.
+It is quite limited however, as you can not convert between compatible pixel formats. depth32float to r32float is not allowed for example. You also can not automatically downsample a texture by copying it to a smaller destination size.
+For all of these scenarios you have to write your own texture copying code, be it in a compute shader or by blitting textures to color attachments via a render pipeline and fullscreen triangle.
+I am not sure why this was omitted from the standard since the underlying APIs that WebGPU uses support it. Vulkan, for example, has vkCmdBlitImage and Metal has blitCommandEncoder.
+A Trip Through the Rendering Pipeline
+In the upcomming sections, I want to walk you through the entire process and required steps for rendering a single frame of the demo.
+Cascaded Shadow Maps
+This is the first render pass responsible for generating a shadow map.
+Traditional shadow maps often suffer from aliasing (jagged edges or flickering) due to limited resolution, particularly when the shadow map covers a large area of the scene. Furthermore, the shadow quality is uniform across the scene, regardless of where the camera is focused, while ideally we want higher resolution to regions closer to the camera. We can of course increase the shadow map resolution, however this can quickly eat up our video memory usage and downgrade performance.
+Cascaded Shadow Maps (CSMs) improve the quality of shadows in larger scenes. They do so by dividing the scene into multiple frustums based on the distance from the camera. Each frustum gets its own shadow map, allowing higher resolution shadows in areas closer to the camera where detail is most noticeable. CSMs allocate higher resolution to regions closer to the camera, where shadows are most visible and detailed, and lower resolution to distant areas. By splitting the shadow map into cascades, each cascade covers a smaller area, reducing aliasing and ensuring shadows are smoother and more accurate.
+The demo uses 2 cascades in total. We can debug the viewing regions of each cascade:
+In the image above the red pixels are covered by the first cascade shadow map and the pixels in green are covered by the second shadow map. Notice the shadow quality change highlighted by the blue square. This is where cascade 1 ends and cascade 2 begins. The first cascade covers up to 6 meters in distance and the second cascade covers up to 17 meters. These numbers were carefully chosen with regards to the Sponza scene. Picking the correct numbers is usually done manually and depends on your scene scale, mesh density, camera field of view and so on.
+Here is the debug view of both cascades as captured from the sun's point of view:
+G-Buffer Render Pass
+The demo features deferred rendering with 3 render targets:
+View Space Normal + Metallic + Roughness texture with rgba16float pixel format. The view space normal is packed in the first two .rg channels using Spherical environment mapping. Metallic and roughness are stored in the third .b and last .a channels respectively.
+Albedo + Reflectance texture with bgra8unorm pixel format. The albedo occupies the .rgb channels and the reflectance the .a channel. Reflectance is used to mark which pixels should be reflective in the Screen Space Reflection Render Pass later on.
+Velocity texture with rg16float pixel format. It stores the change in X / Y axis for each pixels between the current and previous frames and is used in the TAA Resolve Render Pass later on.
+Additionally, the depth of the scene is captured in a depth texture with a depth24plus-stencil8 pixel format. We need the depth part to achieve depth sorting when rendering our meshes and we need the stencil part for light volume culling in the Point Lights Volume Culling via Stencil Mask Pass. Furthermore, we will use the depth texture to reconstruct each pixel's view and world space positions later on.
+Here is a complete breakdown of all the textures and their contents:
+SSAO Pass
+Using the data stored in the G-Buffer, we can now perform a screen-space ambient occlusion pass, which will enhance the quality of our subsequent lighting pass.
+The physically based lighting model used in the demo simplifies ambient lighting by making it constant across the scene. As a consequence of this, lighting in areas that are not directly lit by a light source look rather flat.
+Screen-Space Ambient Occlusion (SSAO) is a technique used to assess how much ambient light is obstructed by nearby geometry. This information helps refine the ambient light component in the lighting equations. By incorporating SSAO into the lighting pass, we can dynamically adjust the ambient light, significantly enhancing the sense of depth and volume in the scene, particularly in areas that lack direct lighting.
+Here is the output of the SSAO render pass (after some blur post-processing to eliminate noise artifacts):
+In that image, white tones represent strong light intensity and black tones represent low light intensity produced by occlusion from nearby geometry. In our lighting pass we will source from this texture to obtain per-fragment ambient occlusion information and modulate the ambient term accordingly.
+Here is a render with and without SSAO applied:
+Lighting
+Equipped with the G-Buffer, shadow and SSAO textures, we can finally move on to lighting. The process involves retrieving the view space position, albedo, normal, roughness and metallic information from the G-Buffer and using them as input for the lighting equations to produce the final color for each fragment. We also sample from the shadow map to decide which pixels are in the shadows, in which case we remove their diffuse and specular components, making them darker and producing shadows in the image as a result.
+The lighting is split in two render passes
+Directional + Ambient + Shadow Lighting
+Point Lights Lighting
+Both passes use additive blending when rendering to correctly accumulate light contributions.
+Directional + Ambient + Shadow Lighting Pass
+This pass uses a fullscreen quad to light the scene with the sun light source, while incorporating the ambient lighting produced by the SSAO Pass and the shadows produced by the Cascaded Shadow Maps.
+When sampling the shadows, it uses Percentage Close Filtering with a 2x2 kernel to smooth them out. Here is the final result once this render pass has finished:
+Point Lights Lighting Pass
+In deferred renderers, point lights are usually approximated using instanced low-poly spheres. When such a sphere is rendered, a fragment shader sampling the G-Buffer is ran for each of its final screen space pixels and the lighting contribution is calculated. This way only the affected scene pixels are actually lit by the point lights, potentially saving a lot of computation.
+Here is a visual breakdown of the point light low-poly sphere volume geometries, their contributions and the final result (the point light radii have been reduced for clarity):
+Point Lights Volume Culling via Stencil Mask Pass
+Rendering the point light sphere volumes is fine as it is, however we can optimise things further. Right now, a lot of the pixels that make up each point light sphere end up being unused due to the scene depth. Here is a screenshot highlighting the problem:
+Notice the problem? A lot of the pixels that make up the point light spheres will end up unused because they don't really cover any scene geometry:
+Focus on the point light sphere volumes' pixels inside the blue rectangle. It may look like they do cover the scene geometry, however this is not true due to the scene depth. Since we are selecting the pixels to do lighting calculations on by drawing up a sphere around the light source and that sphere gets projected to screen space before rasterization, every pixel covered by the sphere in screen space enters the calculation, even if it is very far away (and effectively outside the light volume). Remember, the point light sphere volumes have limited radii and they do not reach all of the pixels they actually cover!
+We can alleviate this problem by using stencil testing (we already have a stencil buffer present, remember we used depth24plus-stencil8 pixel format for our G-Buffer depth stencil texture). It works by using the stencil buffer to mask regions of the screen where the light's influence is relevant. First, the light’s bounding volume sphere is rendered into the stencil buffer, marking pixels inside the light's effective range. Then, lighting calculations are restricted to these marked pixels, ensuring that only the affected areas contribute to the final image. This approach significantly improves performance by reducing unnecessary calculations while maintaining visual accuracy. You can read more about it here.
+Here is a screenshot with stencil testing enabled:
+Notice how only the pixels actually covered by the point light sphere volumes' pixels are marked for shading. Any pixels that do not intersect the scene geometry are simply skipped.
+The point lights volume stencil culling pass is actually performed before the point lights lighting pass. That's because the later uses the information in the stencil attachment to skip any pixels that do not overlap with the scene geometry. I introduce them in reverse order in this article to first highlight the problem and then show the solution.
+Skybox Render Pass
+Nothing fancy here. The skybox is rendered as a cube positioned at infinity. It is rendered last after the lighting pass in order to take advantage of the depth buffer and render only the visible pixels. Otherwise, if we render the skybox first and then the geometry, it will cause overdraw and a lot of pixels will end up being overwritten.
+The skybox texture is a convoluted version of this image. Additionally, it uses 8x8 bayer ordered dither texture to remove color banding from the smooth gradients as described here.
+Screen Space Reflections Render Pass
+Screen Space Reflections (SSR) is a real time rendering technique for creating reflection effects on surfaces. It is one of the most popular rendering techniques and has been used in games for many years. It works great with deferred rendering pipelines and in reality is quite simple to implement (especially the linear tracing method). The amount of code is fairly minimal, yet the effect makes quite an impressive difference when showed on screen.
+The technique comes with a couple of flaws. Since it uses the scene depth buffer as an approximation of the world geometry, it can not create perfect reflections. Anything outside of the screen or anything that is hidden by another object in front of it or any transparent objects can not be captured by this technique.
+In practice, the technique works well for first or third person type of games, where the camera is looking at the scene at a shallow angle and is closely positioned to the reflective surfaces. It does not work well for steep angles where the camera is far away from and looking at the reflective surfaces..
+Here is an illustration of the problems associated with this technique (green pixels = no depth information available for reflection):
+SSR works based on the fact that the reflection pixels for some of the pixels exists in the scene color texture. It uses the depth and the normal direction for each pixel to compute the reflection ray. Then it traces the ray in screen space until the ray intersects with the geometry. Where the ray intersects with the geometry is the location of the pixel to be reflected. By adding the pixel color to the color of the original pixel color, it creates a reflection effect.
+SSR requires 4 pieces of information per screen pixel:
+Normal - for computing the reflection vector.
+Color - for obtaining the reflection color.
+Depth - for computing the 3D position of the pixel (using the inverse projection view camera matrix).
+Reflection mask - for determining whether the pixel is reflective or not in order to skip SSR for the non-reflective pixels.
+Since the demo uses a deferred rendering pipeline, all of these pieces of information already exist in the G-Buffer (you can refer to their preview images in the G-Buffer Render Pass).
+The G-Buffer pass and the lighting pass must be finished before starting the SSR pass.
+Linear Tracing Method
+The simplest approach to trace a ray in screen space is the linear tracing. As the name suggests, we trace the ray starting from the origin, linearly moving to the next sample in the depth texture in the ray direction in each step. Below image shows the general idea of how the tracing works. Each arrow in the picture represents one step taken during a linear tracing. The tracing method stops at every samples on the path of the reflection ray between the current sample and the intersection sample (if one exists).
+In each step, it samples the depth of the sample in the depth texture at the position of the ray and compares it with the depth of the ray. When the sampled depth is smaller than the depth of the ray, we have found an intersection (the position of the ray when intersected is the intersection).
+The main performance bottleneck of the linear tracing method is the amount of tracing stops we need to make in order to potentially reach an intersection. Make too few iterations and we might stop "mid air" and never reach an intersection in the depth buffer. Make a lot of iterations and we will surely reach an intersection at the expense of a lot more shader work and decreased performance.
+Here is an example showcasing the problem:
+In this image we perform 150 linear tracing iterations. For a large amount of pixels in the scene, the amount of iterations along the reflection ray is simply not enough and they do not register any reflection (i.e. they stop "mid air"). If we are to increase the number of iterations to 1000 for example, we will find a lot more intersections at the expense of decreased performance.
+Hi-Z Tracing Method
+The major drawback of using the linear tracing method is that in order to reach the intersection sample, it has to stop at every single sample between the starting sample and the intersection sample and do a depth comparison. However, for the majority of time, the ray is just moving in an empty space without any hits, resulting in a lots of wasted computation. We can skip the empty space quicker with the aid of Hi-Z tracing.
+The Hi-Z tracing method creates an acceleration structure called Hi-Z buffer (or texture). The structure is essentially a quad tree of the scene depth where each cell in a quad tree level is set to be the minimum (or maximum depending on the z axis direction) of the 4 cells in the above level as below:
+It creates the levels from the full resolution all the way down to 1×1. It uses mip levels of a texture to store each quad tree level and access them.
+The image below gives you an idea of the steps performed using Hi-Z tracing using the structure:
+As you can see, the hi-z tracing method performs fewer samples before reaching an intersection.
+Unlike the linear tracing method which performs SSR directly on the depth texture, the Hi-Z method is separated in two passes:
+Generate the Hi-Z depth texture
+Perform SSR
+Hi-Z Pass
+In this stage, we construct an acceleration structure known as the Hi-Z texture, which will be utilized in the subsequent SSR pass. This process involves several sub-passes, each responsible for generating a specific level of the quad tree and storing it in the mipmaps of the Hi-Z texture.
+The initial sub-pass creates the base level of the Hi-Z texture by simply copying the scene depth texture into the level 0 mip of the Hi-Z texture.
+Subsequent sub-passes then compute each successive mip level, using the previous mip level as input and the Hi-Z generation compute kernel to perform the calculations. This process continues until the final 1×1 mip level is produced.
+Here are all of the mip levels generated from the original full-res scene depth texture:
+Unlike common convention, the transparent particles featured in the demo are part of the depth texture. That is because we want to be able to intersect them in order to reflect them.
+With the Hi-Z acceleration structure in place, we need significantly less iterations. In In the image below we perform 100 Hi-Z tracing iterations. Compare it with the linear example to see how mighty the Hi-Z tracing method is.
+Temporal Anti-Aliasing (TAA) Resolve Render Pass
+Temporal Anti-Aliasing (TAA) is a technique heavily used in video games and real time graphics to reduce visual distortions such as jagged edges or flickering (aliasing). Aliasing happens because the size of a pixel is too big to exactly reproduce polygon edge lines:
+Each cell on the right represents a pixel. The diagonal black line represents the true / ideal edge of line of the triangle. A pixel is colored in blue only if the center of the pixel falls within the boundary of the triangle. It fails to reproduce the true silhouette of the triangle because the size of a pixel is too big.
+How do we make it look like less aliased? We do it by using modulated color of the background color and the triangle color, based on how much of the pixel area is covered by the triangle:
+Same as before, the diagonal line represents the true triangle edge. This time, however, the cells are colored in various shades of blue, mix of the background and the triangle colors, depending on how much of the pixel area is covered by the line. While it still does not accurately reproduce the true edge line of the triangle, the edge generated this way looks much closer to the true edge line to the human eye. This is what TAA tries to achieve.
+Here is an overview of the TAA pipeline:
+Rendering the Scene With Jittering
+The first step in TAA is to render the scene with jittering. On each new frame, the scene is rendered slightly shifted in various directions and distances. For this, the vertex shader is slightly modified. After the clip space position is calculated, a jitter offset is added to the clip space position:
+```
+var out: VertexOutput;
+out.position = camera.projectionViewMatrix * worldPosition;
+out.position += vec4f(camera.jitterOffset * out.position.w, 0, 0);
+```
+Notice that the jitter is a vec2 value that is an attribute of the camera. This means that all meshes across our scene are jittered with an uniform value across the whole scene.
+As for the jitter offset values, there are many possible options. The demo uses a what’s called a Halton sequence. You can see the values used here. When rendering, the camera grabs the next jitter value and renders the frame with the correct offsets. Once all 16 values have been used, it cycles back to the beginning and repeats.
+The jittering is actually applied in the vertex shader all the way up in the G-Buffer Render Pass.
+Resolve
+Now that we have the "current frame color" texture by rendering the scene with jittering, we use this texture and another texture called "history" texture, to produce anti-aliased image for the current frame. History texture is simply the output of the resolve step from the previous jittered frame. We blend the current frame with the "history" texture to achieve the subpixel color modulation.
+We use the velocity texture generated in the G-Buffer Render Pass to sample the history texture. Velocity is not really an accurate name, because it has no notion of time and what the texture really contains is the delta between the current frame position and the previous frame position of each pixel.
+We need this data because the scene is animated and the camera can move across frames. We need a way to reproject the current frame pixel to the corresponding pixel in the "history" texture in order to accurately blend them.
+Update History
+In this step, we need to update the history texture with the output of the resolve step. For this, we have to copy the render target texture of the resolve step to the history texture.
+Render Result
+This step is similar to the previous one except we copy the output of the resolve step to the final frame buffer.
+And these are the steps needed for the whole TAA pipeline. Here is how it looks when applied:
+Bloom Pass
+My "physically based bloom" is based directly on this article. The high level overview of the process is:
+We generate an HDR (rgba16float in the case of this demo) buffer with the lighting applied. This buffer holds the result of all of the steps outlined above.
+We downsample and blur the HDR buffer and store the result into anoder HDR bloom buffer.
+We render a mix between the HDR buffer and the bloom buffer with linear interpolation. This demo uses 0.04 as a value.
+Here is the bloom texture generated by step 2:
+And here is the scene with and without bloom:
+Present Render Pass
+That is the final pass responsible for presenting the final image to the device screen. It does 3 notable things:
+Runs the loading pixel noise animation across the entire screen while the demo is loading and initializing.
+Performs tone mapping.
+Performs gamma correction.
+We need to perform tone mapping as all of our lighting is performed using high dynamic range (HDR).
+HDR is essential for physically based lighting. If we do not use HDR, we would not be able to properly capture different light intensities. As an example, consider a scene with a white cloth and a sun in the sky. If we were to use low dynamic range (LDR) with, say, rgba8unorm pixel format, the pixels of the cloth and the sun might both end up with vec3f(1, 1, 1) pixel color values, since 1.0 is the maximum value allowed. We will lose the details of any pixel with value above 1.0. This is obviously wrong. Using HDR framebuffer (with rgba16float or rgba32float pixel format) allows for values to exceed 1.0 and thus, the sun will accurately have much higher intensity than the cloth.
+I do all of the lighting in HDR and finally perform ACES Filimic Tone Mapping on the final image to bring it down to LDR before presenting to the screen. Here is comparison with and without tone mapping applied:
+Managing Performance
+When writing graphics intensive applications and especially ones for the open web, it is important to consider that users with wildly different hardware might open them. Thus, a one size-fits-all solution is rarely viable (unless we target the lowest common denominator and are sure things will look okay-ish).
+Video games usually expose settings in their menus that allow the user to toggle different effects, texture quality and other options so in the case of potentially less powerful hardware, the user can still run them, albeit at lower visual fidelity. This demo follows this strategy and exposes a lot of parameters for the user to toggle in order to control the frame rate.
+What about when the user initially opens the application? They have not manually changed any settings just yet, however the application is already running at potentially low frame rate.
+From a bird's-eye view, there are two possible approaches to this problem:
+Create an "intro" screen and force the user to select low, medium or high graphical settings before starting the demo. A lot of WebGL heavy websites / apps do this BTW. Introducing a manual user click also has the additional advantage of enabling audio playback in case the website needs it to run.
+Start with everything enabled and disable certain effects if the frame rate dips below some threshold for too long.
+This WebGPU demo does the second option as I simply did not want to introduce any friction between the user and the demo starting. It starts with all the bells and whistles enabled and immediately begins measuring the performance. If it dips below 60fps for longer than 2 seconds the following effects are turned off in this order:
+Bloom
+SSAO
+SSR
+In the case any or all of them are automatically disabled by the performance manager, the user is of course welcome to turn them back on at their own risk of things running slow.
+This sadly result in sudden visual changes and the graphics "popping" when things are turned off as the animation is playing. Still, it does look okay-ish and happens only once at the start of the demo.
+Conclusion
+So that’s all, congratulations if you managed to read this far! In the past I have found articles that did frame analysis like this quite interesting so it’s been fun writing one myself and I hope that this was interesting to someone else.
+The full source code of the demo can be found here.
+Back
+IntroductionEngine Architecture└─ Multiple Render Passes ArchitectureCamera Frustum CullingShader CompositionNo Optional Shader BindingsDepth+Stencil Configuration as Part of the Pipeline State ObjectLimited Sampler Support in Compute ShadersLack of Proper Texture Blit EncoderCascaded Shadow MapsG-Buffer Render PassSSAO PassLighting├─ Directional + Ambient + Shadow Lighting Pass├─ Point Lights Lighting Pass└─ Point Lights Volume Culling via Stencil Mask PassSkybox Render PassScreen Space Reflections Render Pass├─ Linear Tracing Method└─ Hi-Z Tracing Method └─ Hi-Z PassTemporal Anti-Aliasing (TAA) Resolve Render Pass├─ Rendering the Scene With Jittering├─ Resolve├─ Update History└─ Render ResultBloom PassPresent Render PassManaging PerformanceConclusion

@@ -1,0 +1,126 @@
+# Proximity Clouds
+Also called: Distance transform acceleration, Proximity Clouds / Empty Space Skipping
+
+## Overview
+Proximity clouds are an acceleration technique for 3D grid traversal that replaces density values in empty space with pre-computed distance-to-nearest-occupied-voxel metrics, enabling long, safe skips along a ray [S1, unofficial][S2][S3, unofficial][S4, unofficial]. Unlike standard empty-space culling which often relies on binary occupancy or fixed block sizes, this method allows arbitrary step leaps based on the geometric distance to the object boundary, significantly reducing traversal overhead in large empty regions [S2][S4, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 3D volume grid where each voxel is either occupied (contains data) or empty.
+*   **Output:** A transformed grid (the "proximity cloud") where empty voxels store the distance to the nearest occupied voxel [S4, unofficial][S5, unofficial].
+
+**Data Structures**
+The grid layout remains identical to the original volume grid. Each voxel $V$ stores a single scalar value $d$:
+*   If $V$ is occupied: $d$ is the original data value (e.g., density) [S5, unofficial].
+*   If $V$ is empty: $d$ is the distance to the closest occupied voxel [S4, unofficial][S5, unofficial].
+*   *Note:* Since empty regions have no density, this transformation incurs no additional storage cost compared to storing zeros or a binary flag [S4, unofficial][S5, unofficial]. The data structure storing clearance radii per cell is called a distance field [S1, unofficial].
+
+**Preprocessing Step**
+1.  Identify all occupied voxels in the input volume.
+2.  Compute the distance transform for all empty voxels. For each empty voxel, calculate the shortest distance to any occupied voxel in the grid [S5, unofficial].
+    *   This is typically done using a multi-pass algorithm (e.g., Chamfer distance or exact Euclidean distance transform) [G].
+3.  Store the resulting distance values in the empty voxels [S5, unofficial].
+
+**Ray Traversal Algorithm**
+The ray marcher iterates along the ray direction. At each step, it checks the current voxel's value $d$:
+1.  **Check Occupancy:** If the current voxel is occupied, perform standard volume rendering operations (sampling, compositing) [S5, unofficial].
+2.  **Check Proximity:** If the current voxel is empty, read its stored distance value $n$ [S2][S4, unofficial].
+3.  **Leap:** Advance the ray position by $n$ voxels along the ray direction [S2][S4, unofficial].
+    *   *Assurance:* The algorithm guarantees that no occupied voxels exist within the span of $n$ steps from the current position [S4, unofficial].
+4.  **Repeat:** Continue traversal from the new position [S5, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def render_proximity_clouds(ray_origin, ray_direction, volume_grid, grid_spacing=1.0):
+    # ray_origin: (x, y, z) float
+    # ray_direction: (dx, dy, dz) float (normalized)
+    # volume_grid: 3D array where empty voxels store distance to nearest occupied voxel
+    # grid_spacing: physical size of one voxel
+    
+    t = 0.0
+    current_pos = list(ray_origin)
+    
+    # Precompute inverse direction components for DDA stepping
+    inv_dx = 1.0 / ray_direction[0] if ray_direction[0] != 0 else float('inf')
+    inv_dy = 1.0 / ray_direction[1] if ray_direction[1] != 0 else float('inf')
+    inv_dz = 1.0 / ray_direction[2] if ray_direction[2] != 0 else float('inf')
+    
+    # Initial voxel coordinates (ensure integer indices)
+    voxel_x = int(math.floor(current_pos[0] / grid_spacing))
+    voxel_y = int(math.floor(current_pos[1] / grid_spacing))
+    voxel_z = int(math.floor(current_pos[2] / grid_spacing))
+    
+    bounds = (len(volume_grid), len(volume_grid[0]), len(volume_grid[0][0]))
+    max_steps = bounds[0] * bounds[1] * bounds[2]
+    steps = 0
+    accumulated_color = [0.0, 0.0, 0.0]
+    opacity = 0.0
+    
+    while steps < max_steps:
+        # Clamp to grid bounds
+        voxel_x = max(0, min(voxel_x, bounds[0] - 1))
+        voxel_y = max(0, min(voxel_y, bounds[1] - 1))
+        voxel_z = max(0, min(voxel_z, bounds[2] - 1))
+        
+        dist = volume_grid[voxel_x][voxel_y][voxel_z]
+        
+        if dist > 0.0: # Occupied voxel (density > 0)
+            density = dist
+            alpha = 1.0 - math.exp(-density * grid_spacing)
+            color_sample = [density, density, density]
+            accumulated_color = [accumulated_color[i] + color_sample[i] * alpha * (1.0 - opacity) for i in range(3)]
+            opacity += alpha * (1.0 - opacity)
+            if opacity >= 1.0:
+                break
+            # Advance by one voxel step for precision
+            if ray_direction[0] > 0: voxel_x += 1
+            elif ray_direction[0] < 0: voxel_x -= 1
+            if ray_direction[1] > 0: voxel_y += 1
+            elif ray_direction[1] < 0: voxel_y -= 1
+            if ray_direction[2] > 0: voxel_z += 1
+            elif ray_direction[2] < 0: voxel_z -= 1
+            step_size = grid_spacing * min(inv_dx, inv_dy, inv_dz) if min(inv_dx, inv_dy, inv_dz) != float('inf') else grid_spacing
+            t += step_size
+        else:
+            # Proximity voxel: leap forward by n voxels
+            n = abs(dist)
+            if n <= 0:
+                break # Safety break to avoid infinite loops
+            leap_dist = n * grid_spacing
+            current_pos = [ray_origin[i] + ray_direction[i] * (t + leap_dist) for i in range(3)]
+            t += leap_dist
+            voxel_x = int(math.floor(current_pos[0] / grid_spacing))
+            voxel_y = int(math.floor(current_pos[1] / grid_spacing))
+            voxel_z = int(math.floor(current_pos[2] / grid_spacing))
+        steps += 1
+    return accumulated_color
+```
+
+**Parameters and Edge Cases**
+*   **Distance Metric:** The distance $n$ must be consistent with the voxel grid spacing. If the distance transform uses Euclidean distance in world units, the leap must convert this to voxel steps [S1, unofficial][S5, unofficial].
+*   **Missed Rays:** Rays that miss the object entirely may still traverse many proximity layers, as the distance values are iso-distance shells around the object and do not account for the ray's trajectory relative to the object's center [S3, unofficial][S4, unofficial].
+*   **Traversal Efficiency:** The method's effectiveness depends heavily on the underlying line traversal algorithm's ability to jump an arbitrary number of steps efficiently [S4, unofficial][S5, unofficial].
+*   **Precision Pitfalls:** Leap boundaries must be clamped to grid bounds to prevent out-of-bounds access. Zero or negative distance values require a safety break to avoid infinite loops [G].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** $O(N)$, same as the original volume, as distance values replace density values in empty space [S4, unofficial][S5, unofficial].
+*   **Strengths:** Eliminates the need for hierarchical structures (like octrees) for empty-space culling; simple to implement on regular grids; effective for large empty spaces [S1, unofficial][S4, unofficial].
+*   **Limitations:** Ineffective for rays missing the object, as they still traverse the proximity shells [S3, unofficial][S4, unofficial]. The leap size is limited by the local distance to the boundary, which can be small near complex geometries [S4, unofficial].
+*   **When to use:** Ideal for volumes with large, contiguous empty regions surrounding the object [G].
+*   **When not to use:** When the object is highly complex with many small voids, or when viewing direction is highly variable and misses are common (consider view-sensitive extensions like Sramek and Kaufman [S4, unofficial][S6, book]).
+
+## Background
+Proximity clouds were proposed by Cohen and Sheffer [S1, unofficial][S2][S3, unofficial][S4, unofficial]. The method extends the "vicinity cloud" concept, which used a one-voxel-deep flag to indicate proximity to data, by computing the actual distance to the nearest occupied voxel for all empty voxels [S4, unofficial][S5, unofficial]. This allows for arbitrary step leaps rather than just single-voxel checks [S5, unofficial]. The technique is particularly noted for its storage efficiency, as it repurposes empty space storage without increasing memory footprint [S4, unofficial][S5, unofficial].
+
+## Sources
+[S1] Advanced Computer Graphics, https://cgvr.cs.uni-bremen.de/teaching/cg2_13/folien/03%20-%20Acceleration%20data%20structures.pdf, fetched 2026-10-24 (unofficial)
+[S2] A Survey on Exploiting Grids for Ray Tracing, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/089-096, fetched 2026-10-24
+[S3] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
+[S4] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S5] Volume Visualization and Volume Rendering Techniques, https://www.cs.unh.edu/~cs880/visualization/Meissner-VolRenderingEGTutorial-rdb.pdf, fetched 2026-10-27 (unofficial)
+[S6] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

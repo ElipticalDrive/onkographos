@@ -1,0 +1,159 @@
+--- v002.md
++++ v003.md
+@@ -4,84 +4,103 @@
+ 
+ ## Overview
+-This method builds on [Procedural Noise Functions](1799-procedural-noise-functions.md) to generate the base density field for volumetric cloud rendering by combining the structural continuity of Perlin noise with the billowy, cellular detail of Worley noise [S2]. It differs from standard gradient-based noise by using Worley noise to modulate the amplitude of Perlin noise, creating organic cloud shapes that retain large-scale connectedness while exhibiting high-frequency billowiness at the edges [S2]. It serves as the primary input for the cloud density calculation in real-time volumetric rendering pipelines [S1, unofficial].
++This method generates the base volumetric density field for cloud rendering by combining the structural continuity of Perlin noise with the billowy, cellular detail of Worley noise [S2]. It differs from standard procedural noise by storing multiple frequency levels of Worley noise in separate texture channels to allow for high-frequency detail reconstruction during runtime remapping, rather than baking all detail into a single low-precision channel [S2].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A 3D texture containing four channels (RGBA) of pre-computed noise values [S2].
+-*   **Output:** A scalar density value $D$ for a given 3D coordinate $\mathbf{P}$ [S2].
++*   **Input:** A 3D texture containing the base density noise and high-frequency Worley components.
++*   **Output:** A single scalar density value for a given 3D coordinate $\mathbf{P}$.
+ 
+ **Data Structures**
+-The base density noise is stored in a 3D texture with the following layout [S2]:
+-*   **Red (R) Channel:** Stores the low-frequency Perlin-Worley base noise [S2].
+-*   **Green (G) Channel:** Stores Worley noise at an increasing frequency [S2].
+-*   **Blue (B) Channel:** Stores Worley noise at a higher frequency than G [S2].
+-*   **Alpha (A) Channel:** Stores Worley noise at the highest frequency among the three [S2].
+-*   **Format:** The texture must be tileable [S1, unofficial]. A typical implementation uses a $128 \times 128 \times 128$ texture, which is small enough for web performance but large enough to hold 2–3 Fractal Brownian Motion (FBM) levels [S1, unofficial].
++The base density is stored in an RGBA32 texture (or equivalent floating-point format) [S2]. The layout is defined as follows [S2]:
++*   **Red (R) Channel:** Stores the low-frequency Perlin-Worley noise value.
++*   **Green (G) Channel:** Stores Worley noise at frequency level 1.
++*   **Blue (B) Channel:** Stores Worley noise at frequency level 2.
++*   **Alpha (A) Channel:** Stores Worley noise at frequency level 3.
+ 
+-**Steps**
+-1.  **Sample Channels:** Retrieve the four noise values at coordinate $\mathbf{P}$ [S2].
+-2.  **Compute High-Frequency Worley:** Combine the three Worley channels into a single high-frequency detail term $N_{WHF}$ [S2].
+-3.  **Apply Density Offset:** Add the configurable offset $\delta$ to the base Perlin-Worley value [S2].
+-4.  **Remap to Base Noise:** Remap the offset Perlin-Worley value from its original range $[0, 1]$ to a new range where the minimum is determined by $N_{WHF}$ and the maximum is $1$ [S2].
++The texture must be tileable to allow sampling at varying frequencies without edge artifacts [S1, unofficial]. A typical implementation uses a $128 \times 128 \times 128$ texture, which is small enough for fast loading but large enough to contain 2–3 Fractal Brownian Motion (FBM) levels [S1, unofficial].
+ 
+-**Formulas**
+-The core remapping operation is defined as [G]:
+-$$ \text{Remap}(v, \text{oldMin}, \text{oldMax}, \text{newMin}, \text{newMax}) = \frac{v - \text{oldMin}}{\text{oldMax} - \text{oldMin}} \times (\text{newMax} - \text{newMin}) + \text{newMin} $$
+-
+-Substituting the specific values for the base density calculation [S2]:
+-$$ D = \frac{(N_{PW} + \delta) - 0}{1 - 0} \times (1 - N_{WHF}) + N_{WHF} $$
+-$$ D = (N_{PW} + \delta)(1 - N_{WHF}) + N_{WHF} $$
+-
+-**Parameters**
+-*   **Density Offset ($\delta$):** A configurable scalar added to the Perlin-Worley value before final remapping [S2].
+-*   **Worley Weights:** The high-frequency Worley combination uses fixed weights: $w_1 = 0.625$, $w_2 = 0.25$, $w_3 = 0.125$ [S2].
+-
+-**Edge Cases and Pitfalls**
+-*   **Precision:** Storing noise in 8-bit channels limits detail to 256 discrete values; 32-bit floating-point formats are recommended for finer resolution [S2].
+-*   **Tileability:** The 3D texture must be tileable to allow sampling at different frequencies in the shader without visible seams [S1, unofficial].
+-*   **Resolution:** A $128^3$ texture is considered small for web performance but may lack fine features; it is sufficient for 2–3 FBM levels [S1, unofficial].
++**Algorithm Steps**
++1.  **Generate Perlin Fractal:** Compute a low-frequency Perlin fractal noise value, $PerlinFractal$, using standard FBM summation [S2].
++2.  **Generate Worley Fractals:** Compute three separate Worley fractal noise values at increasing frequencies: $Worley_1$, $Worley_2$, and $Worley_3$ [S2].
++3.  **Pack Noise:** Store $PerlinFractal$ in the Red channel and $Worley_1, Worley_2, Worley_3$ in the Green, Blue, and Alpha channels, respectively [S2].
++4.  **Unpack and Combine Worley:** Retrieve the G, B, and A channels from the texture. Compute the high-frequency Worley sum, $WorleyHighFrequencies$, using weighted summation [S2]:
++    $$ WorleyHighFrequencies = 0.625 \cdot Worley_1 + 0.25 \cdot Worley_2 + 0.125 \cdot Worley_3 $$
++5.  **Remap Perlin-Worley:** Retrieve the Red channel value, $PerlinWorley$. Add a configurable density offset, $\Delta$, to it [S2]. Remap this value from the range $[0, 1]$ to $[WorleyFractal, 1]$. This step brightens the noise where Worley noise is large, enhancing billowiness [S2].
++    $$ PerlinWorley_{remapped} = \text{Remap}(PerlinWorley + \Delta, 0, 1, WorleyFractal, 1) $$
++    *Note: The source notes mention $WorleyFractal$ in the formula context but use $WorleyHighFrequencies$ in the final base noise calculation. The remapping step described in the text ("brightens the noise where Worley noise is large") implies the use of the high-frequency sum for the final shaping.*
++6.  **Compute Base Noise:** Remap the result from Step 5 such that its minimum becomes $WorleyHighFrequencies$ and its maximum becomes 1 [S2]:
++    $$ BaseNoise = \text{Remap}(PerlinWorley_{remapped}, WorleyHighFrequencies, 1, 0, 1) $$
+ 
+ **Pseudocode**
+ ```python
+-def compute_cloud_density(P, texture, density_offset):
++def compute_cloud_density(texture, p, density_offset):
+     """
+-    Computes cloud density using Perlin-Worley noise stored in a 3D texture.
++    Computes cloud density using Perlin-Worley noise stored in an RGBA texture.
+     
+     Args:
+-        P: 3D vector (x, y, z) coordinate to sample.
+-        texture: 3D texture object with .sample(x, y, z) returning (r, g, b, a).
+-        density_offset: Scalar float added to the base Perlin-Worley value.
++        texture: A 3D texture object with sample(x, y, z) returning (r, g, b, a).
++        p: 3D vector coordinate.
++        density_offset: Configurable float added to Perlin-Worley value.
+         
+     Returns:
+         float: The final base density value.
+     """
+-    # 1. Sample the four channels
+-    r, g, b, a = texture.sample(P.x, P.y, P.z)
++    # 1. Sample the packed noise texture
++    r, g, b, a = texture.sample(p)
+     
+-    # 2. Compute High-Frequency Worley (N_WHf)
++    # 2. Unpack Worley components
++    worley_1 = g
++    worley_2 = b
++    worley_3 = a
++    
++    # 3. Combine Worley frequencies
+     # Weights: 0.625, 0.25, 0.125
+-    n_whf = 0.625 * g + 0.25 * b + 0.125 * a
++    worley_high_freq = 0.625 * worley_1 + 0.25 * worley_2 + 0.125 * worley_3
+     
+-    # 3. Apply density offset to Perlin-Worley (R channel)
+-    n_pw = r + density_offset
++    # 4. Get Perlin-Worley base value
++    perlin_worley = r
+     
+-    # 4. Remap: [0, 1] -> [n_whf, 1]
+-    # Formula: (n_pw - 0) / (1 - 0) * (1 - n_whf) + n_whf
+-    density = n_pw * (1.0 - n_whf) + n_whf
++    # 5. Add density offset
++    perlin_worley_adjusted = perlin_worley + density_offset
+     
+-    return density
++    # 6. Remap Perlin-Worley based on Worley high frequencies
++    # The source formula: Remap(PerlinWorley, WorleyHighFrequencies, 1, 0, 1)
++    # This maps the range [WorleyHighFrequencies, 1] to [0, 1]
++    # However, the text says "Remap PerlinWorley such that its minimum becomes WorleyHighFrequencies"
++    # Standard remap(x, in_min, in_max, out_min, out_max)
++    # Here, we treat the PerlinWorley value as the input x.
++    # The source formula for BaseNoise is: Remap(PerlinWorley, WorleyHighFrequencies, 1, 0, 1)
++    
++    base_noise = remap(perlin_worley_adjusted, worley_high_freq, 1.0, 0.0, 1.0)
++    
++    return base_noise
++
++def remap(value, in_min, in_max, out_min, out_max):
++    """Linear remapping function."""
++    if in_max == in_min:
++        return out_min
++    t = (value - in_min) / (in_max - in_min)
++    # Clamp t to [0, 1] to handle out-of-bounds values
++    t = max(0.0, min(1.0, t))
++    return out_min + t * (out_max - out_min)
+ ```
+ 
++**Parameters**
++*   **Texture Size:** $128 \times 128 \times 128$ is cited as a practical minimum for web performance, though larger sizes allow for more FBM levels [S1, unofficial].
++*   **Worley Weights:** $0.625$ for the lowest frequency, $0.25$ for the middle, and $0.125$ for the highest [S2].
++*   **Density Offset:** A configurable scalar added to the Perlin-Worley value before remapping [S2].
++
++**Edge Cases and Pitfalls**
++*   **Precision:** Storing noise in 8-bit channels limits detail. Using 32-bit floating-point textures (e.g., RFloat) is recommended to preserve the full range of $[0, 1]$ values and avoid banding [S2].
++*   **Tileability:** The texture must be tileable to support sampling at different frequencies without discontinuities [S1, unofficial].
++*   **Channel Usage:** The Alpha channel is used for Worley noise in the base density texture, whereas the detail density texture may leave the Alpha channel unused [S2].
++
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** Memory scales linearly with texture resolution and channel count (4 channels per voxel). Time complexity is $O(1)$ per sample, consisting of a single 3D texture lookup and simple arithmetic [S1, unofficial][S2].
+-*   **Measured Performance:** The method is efficient enough for real-time rendering, particularly on web platforms where texture size is constrained [S1, unofficial].
+-*   **Scaling:** Higher detail is achieved by sampling the tileable texture at increased frequencies in the shader rather than generating larger textures [S1, unofficial].
+-*   **Strengths:** Perlin provides structural continuity, while Worley adds organic billowiness [S2].
+-*   **Limitations:** 8-bit channel storage limits precision to 256 discrete values, and the method relies on pre-computed textures requiring offline generation or complex runtime pipelines [S2].
+-*   **When to Use:** Ideal for real-time volumetric cloud rendering where performance is critical and organic, billowy shapes are desired [S1, unofficial][S2].
+-*   **When Not to Use:** Unsuitable for offline rendering requiring maximum photorealistic detail or when dynamic, non-tileable noise is required [S2].
++*   **Memory:** Requires storing a 3D texture. A $128^3$ RGBA32 texture consumes approximately 8 MB ($128^3 \times 4$ bytes) [S1, unofficial].
++*   **Performance:** Sampling is fast as it involves a single 3D texture lookup and simple arithmetic [S1, unofficial]. The method is designed to be efficient for real-time rendering, particularly on web platforms [S1, unofficial].
++*   **Quality:** The combination of Perlin (connectedness) and Worley (billowiness) produces natural-looking cloud structures [S2]. The multi-channel Worley remapping allows for high-frequency detail without requiring extremely large textures [S2].
+ 
+ ## Background
+-The technique originates from the Nubis cloud rendering engine used by Guerrilla Games [S2]. It is documented in a tutorial repository [S2] and discussed in the context of efficient volumetric clouds for web platforms [S1, unofficial]. The approach leverages Fractal Brownian Motion (FBM) to combine noise frequencies, a standard technique in procedural generation [S2].
++This technique is derived from the Nubis cloud rendering engine used by Guerrilla Games [S2]. It is implemented in the "Volumetric Clouds Tutorial" by Tyler Dodds, which provides source code for generating and unpacking these noise textures [S2]. The approach is also discussed in the context of efficient volumetric clouds for WebGL/three.js [S1, unofficial].
+ 
+ ## Sources

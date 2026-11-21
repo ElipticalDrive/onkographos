@@ -1,0 +1,394 @@
+--- v012.md
++++ v013.md
+@@ -4,106 +4,113 @@
+ 
+ ## Overview
+-Empty-space skipping (ESS) is a volume rendering acceleration technique that minimizes computation by skipping the sampling of empty space in a volumetric dataset [S3, S4, S5, unofficial]. It solves the problem of wasted cycles spent evaluating transparent or low-density regions, which constitute the majority of samples in sparse volumes [S6, S8, unofficial]. Unlike [Opacity-based Early Termination](7920-opacity-based-early-termination.md), which stops a ray after it has accumulated sufficient opacity, ESS prevents the ray from entering or traversing regions known to be empty before sampling occurs [S1, S7, unofficial]. It sets itself apart from [Bounding Volume Culling](1239-bounding-volume-culling.md) by operating on fine-grained internal volume structures (like octrees or occupancy grids) rather than just the object's exterior bounding box [S6, unofficial].
++Empty-space skipping (ESS) is a volume rendering acceleration technique that minimizes computation by skipping the sampling of empty or transparent regions in a volumetric dataset [S1, S3, S5, unofficial]. It solves the problem of wasted cycles spent evaluating radiance fields or transfer functions in areas that contribute zero or negligible opacity to the final image [S3, S6, unofficial]. Unlike [Opacity-based Early Termination](7920-opacity-based-early-termination.md), which stops a ray after it has accumulated sufficient opacity, ESS prevents the ray from entering or traversing empty regions entirely, often by using a separate data structure (e.g., octree, occupancy grid, or distance map) to "jump" over transparent space [S2, S4, S8, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   Volume dataset (3D texture or grid).
+-*   Transfer function (TF) mapping scalar values to color/opacity.
+-*   Ray parameters: origin $\mathbf{o}$, direction $\mathbf{d}$, near/far clipping planes.
+-*   Acceleration structure encoding empty space (e.g., octree, occupancy grid, distance map, or bounding hull) [S1, S2, S3, S4, S7, unofficial].
++*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
++*   Volume dataset $V$ (scalar or color values).
++*   Transfer function $TF$ (mapping scalar values to color/opacity).
++*   Empty-space data structure $D$ (e.g., occupancy grid, octree, distance map, or bounding hull).
++*   Parameters: `sampling_factor` (step size control), `alpha_thre` (opacity threshold for empty), `early_stop_eps` (transmittance threshold for termination).
+ 
+ **Outputs:**
+-*   Final pixel color $C_{acc}$ and accumulated opacity $\alpha_{acc}$.
+-*   Reduced number of volume samples evaluated.
++*   Accumulated color $C_{acc}$ and opacity $\alpha_{acc}$ for the pixel.
+ 
+ **Data Structures:**
+-The specific layout depends on the variant. Common layouts include:
+-1.  **Octree/BSP:** Nodes store conservative min/max scalar values for the region [S7, S8, unofficial].
+-2.  **Occupancy Grid:** A 3D texture or array where each voxel stores a binary flag (occupied/empty) or a distance value [S4, S5, unofficial][S13].
+-3.  **Distance Map:** Stores the distance to the nearest non-empty voxel for each cell [S4, unofficial].
+-4.  **Brick Classification:** An array of 32-bit integers per brick, storing state (empty, saturated, sampled) [S15].
++1.  **Occupancy/Distance Map:** A 3D texture or grid where each voxel stores a binary occupancy flag or a distance value to the nearest non-empty region [S4, S5, unofficial].
++    *   *Layout:* `texOccupancyMap` or `texDistanceMap` accessed via `texelFetch`.
++2.  **Octree/Hierarchy:** Nodes store min/max scalar bounds or statistical information to determine if a sub-volume contains relevant data [S7, S8, unofficial].
++3.  **Coarse Resolution Texture:** A 3D RGB texture, typically $1/8$ the size of the original volume, storing min (R) and max (G) scalar values for disjoint blocks (e.g., $8^3$) [S7, unofficial].
++4.  **CT Texture:** A 2D texture mapping (min, max) pairs to a boolean indicating if the range contains non-zero color after transfer function application [S7, unofficial].
+ 
+ **Algorithm Steps:**
+-The general process involves traversing the acceleration structure to determine safe jump distances or skipping regions entirely.
+-
+-1.  **Initialize Ray:** Start casting rays. If a bounding hull is used, start at the first hit of non-transparent data rather than the near clipping plane [S1, S3, unofficial].
+-2.  **Query Acceleration Structure:** At the current ray position (or step interval), query the empty-space data structure [S4, S8, unofficial].
+-    *   *Octree/BSP:* Check if the current node's min/max bounds fall outside the transfer function's opacity range [S7, S8, unofficial].
+-    *   *Occupancy/Distance:* Fetch the occupancy flag or distance value [S4, S5, unofficial].
+-3.  **Determine Skip:**
+-    *   If the region is determined to be empty (e.g., opacity $< \alpha_{thre}$ or distance $> 0$), calculate a skip delta $\Delta i$ [S4, S5, unofficial].
+-    *   For distance maps, the skip delta is derived from the stored distance value [S4, unofficial].
+-    *   For occupancy grids, the ray jumps to the next occupied voxel [S5, unofficial].
+-    *   For brick classification, leap over the entire brick [S15].
+-4.  **Advance Ray:** Update the ray parameter $t$ or sample index $i$ by the skip delta [S4, unofficial][S15].
+-5.  **Sample Non-Empty Region:** If the region is not empty, perform standard volume sampling (texture fetch, transfer function lookup, lighting, compositing) [S4, unofficial][S15].
+-6.  **Early Termination:** After sampling, check if accumulated opacity exceeds a threshold $\tau$ (e.g., 0.95) or transmittance drops below $\epsilon$ [S4, S5, unofficial]. If so, terminate the ray [S7920-opacity-based-early-termination.md].
+-7.  **Repeat:** Continue until the far clipping plane is reached or the ray is terminated.
+-
+-**Pseudocode (Block/Chebyshev ESS Variant):**
+-This implementation follows the logic from [S4, unofficial], using a distance map for skipping.
++
++1.  **Initialization:**
++    *   Calculate step vector and number of steps based on ray length and `sampling_factor` [S4, unofficial]:
++        $$ n_{steps} = \lceil \text{dim}_{max} \cdot \text{ray\_length} \cdot \text{sampling\_factor} \rceil $$
++        $$ \text{step\_vector} = \frac{\mathbf{d}}{\|\mathbf{d}\|} \cdot \frac{\text{ray\_length}}{n_{steps} - 1} $$
++    *   Initialize distance map lookup parameters, including block size and volume-to-distance-map scaling factors [S4, unofficial].
++    *   Handle degenerate rays (infinite, NaN, or length $> \sqrt{3}$) by terminating immediately [S4, unofficial].
++
++2.  **Ray Marching Loop:**
++    For each sample index $i$:
++    *   **Position Calculation:** Compute sampling position with optional dithering to reduce banding [S4, unofficial]:
++        $$ \mathbf{p}_i = \mathbf{o} + (i + \text{random}) \cdot \text{step\_vector} $$
++        Where `random` is derived from fragment coordinates or a noise texture [S4, unofficial].
++    *   **Empty Space Query:**
++        *   *Method A (Distance/Occupancy Map):* Map $\mathbf{p}_i$ to distance map coordinates. Fetch distance/occupancy value. Calculate step delta to skip empty regions [S4, unofficial].
++            *   If `essType == 1` (Block ESS): Use block-based step delta.
++            *   If `essType == 2` (Chebyshev ESS): Use distance-based step delta.
++            *   Update loop index: $i \leftarrow i + \max(1, \lceil \min(\Delta x, \Delta y, \Delta z) \rceil)$.
++            *   *Backtracking:* If distance is 0 (empty space reached but no skip possible), backtrack slightly to ensure coverage [S4, unofficial].
++        *   *Method B (Octree/Hierarchy):* Traverse the hierarchy. If the current node is fully transparent (based on min/max bounds or occupancy), jump to the next non-empty region boundary [S8, unofficial].
++        *   *Method C (Coarse Texture):* Sample the coarse resolution texture at $\mathbf{p}_i$. Use R/G components to index the CT texture. If non-empty space is found, proceed; if empty, skip the segment [S7, unofficial].
++    *   **Volume Sampling:**
++        *   If the region is non-empty, sample the volume intensity at $\mathbf{p}_i$ [S4, unofficial].
++        *   Apply Transfer Function: Lookup color and opacity. Apply gamma correction to alpha if enabled [S4, unofficial].
++        *   Compute Gradient: Calculate gradient for lighting (e.g., using tetrahedron technique or pre-computed gradient map) [S4, unofficial].
++        *   Lighting: Compute diffuse and specular lighting based on the gradient normal and light direction [S4, unofficial].
++    *   **Compositing:**
++        *   Update accumulated color and opacity using front-to-back blending [S4, unofficial]:
++            $$ C_{acc} = C_{acc} + C_i \cdot \alpha_i \cdot (1 - \alpha_{acc}) $$
++            $$ \alpha_{acc} = \alpha_{acc} + \alpha_i \cdot (1 - \alpha_{acc}) $$
++    *   **Early Termination:**
++        *   If $\alpha_{acc} > 0.98$ (or predefined threshold) and early ray termination is enabled, break the loop [S4, unofficial].
++        *   If transmittance $T < \text{early\_stop\_eps}$ (e.g., $10^{-4}$), terminate [S5, unofficial].
++
++3.  **Edge Cases and Pitfalls:**
++    *   **Transfer Function Dependency:** Standard ESS depends on the transfer function. If the TF changes, the empty-space data structure (e.g., occupancy grid or min/max bounds) may become invalid and require reconstruction [S1, unofficial][S15].
++    *   **Intermediate Pass Overhead:** In some GPU implementations, an intermediate pass is required to check for empty space and update z-values for early-z testing. This pass cannot be discarded even if early ray termination is active, as the alpha channel is used for termination flags, not empty-space flags [S7, unofficial].
++    *   **Backtracking:** When backtracking due to empty space detection, the index must be clamped to the minimum valid index to prevent moving backwards beyond the last occupied step [S4, unofficial].
++
++**Pseudocode:**
+ 
+ ```python
+-def render_ray(ray_origin, ray_dir, volume_size, volume_texture, tf_texture, 
+-               distance_map_texture, dim_distance_map, sampling_factor, 
+-               dithering_mode, ess_type, early_ray_termination):
++def empty_space_skipping_raymarch(ray_origin, ray_dir, volume, tf, occupancy_map, params):
+     """
+-    Renders a single ray using Empty-Space Skipping with a distance map.
++    Renders a single ray using empty-space skipping.
+     """
+-    # 1. Initialize ray parameters
+-    ray_length = length(ray_dir) # Assuming ray_dir is normalized or length is known
+-    # Calculate number of steps for full resolution
+-    n_steps = int(ceil(volume_size * ray_length * sampling_factor))
+-    if n_steps < 2:
+-        n_steps = 2
+-    step_vector = normalize(ray_dir) * ray_length / (n_steps - 1)
+-    
+-    # Precompute distance map lookup parameters
+-    dim_dist = texture_size(distance_map_texture) # xyz
+-    block_size = ceil(volume_size / dim_dist)
+-    volume_to_dist_map = volume_size / (block_size * dim_dist)
+-    step_dist_texel = step_vector * volume_size / block_size
++    # Parameters
++    sampling_factor = params['sampling_factor']
++    alpha_thre = params['alpha_thre'] # e.g., 1e-2
++    early_stop_eps = params['early_stop_eps'] # e.g., 1e-4
++    ess_type = params['ess_type'] # 1=Block, 2=Chebyshev
++    
++    # Initialization
++    ray_length = length(ray_dir)
++    if ray_length == 0 or isnan(ray_length) or ray_length > sqrt(3):
++        return vec4(0.0) # Degenerate ray
++    
++    n_steps = int(ceil(volume.dim_max * ray_length * sampling_factor))
++    step_vector = normalize(ray_dir) * (ray_length / (n_steps - 1))
++    
++    # Distance map setup (if using distance-based ESS)
++    dim_dist_map = occupancy_map.size()
++    block_size = ceil(volume.size() / dim_dist_map)
++    vol_to_dist_map = volume.size() / (block_size * dim_dist_map)
++    step_dist_texel = step_vector * vol_to_dist_map
+     step_dist_texel_inv = 1.0 / step_dist_texel
+     
+-    # Determine distance map index based on ray direction signs (6 faces)
+-    distance_map_idx = 0
+-    if ray_dir.z < 0: distance_map_idx += 1
+-    if ray_dir.y < 0: distance_map_idx += 2
+-    if ray_dir.x < 0: distance_map_idx += 4
+-    
+-    # Initialize accumulators
+-    out_color = vec4(0.0)
+-    out_color.a = 0.0
+-    
+-    # Dithering random value
+-    if dithering_mode == 1:
+-        random = fract(sin(gl_frag_coord.x * 12.9898 + gl_frag_coord.y * 78.233) * 43758.5453)
+-    elif dithering_mode == 2:
+-        random = texture(tex_noise, gl_frag_coord.xy / 256).r
+-    else:
+-        random = 0.0
+-        
+-    i = 0
+-    i_min = 0 # Minimum index to prevent backtracking beyond start
+-    
+-    while i < n_steps:
+-        # 2. Calculate sampling position
++    # Dithering
++    random = fract(sin(gl_FragCoord.x * 12.9898 + gl_FragCoord.y * 78.233) * 43758.5453)
++    
++    acc_color = vec4(0.0)
++    acc_alpha = 0.0
++    
++    for i in range(n_steps):
++        # Calculate sampling position
+         sampling_pos = ray_origin + float(i + random) * step_vector
+         
+-        # 3. Map to distance map coordinates
+-        pos_dist_map = volume_to_dist_map * sampling_pos
+-        u = pos_dist_map * dim_dist
+-        u_i = ivec3(clamp(floor(u), ivec3(0), dim_dist - 1))
+-        
+-        # 4. Fetch distance/occupancy value
+-        # Note: In a real implementation, texelFetch would be used on the specific distance map texture
+-        # Here we assume a generic fetch function
+-        dist = fetch_distance(distance_map_texture, u_i, distance_map_idx)
+-        
+-        # 5. Calculate step delta for skipping
+-        # r is fractional offset for block ESS
+-        r = clamp(u_i - u, -1.0, 0.0)
+-        
++        # Map to distance map coordinates
++        pos_dist_map = vol_to_dist_map * sampling_pos
++        u = pos_dist_map * dim_dist_map
++        u_i = ivec3(clamp(floor(u), ivec3(0), dim_dist_map - 1))
++        
++        # Fetch occupancy/distance
++        dist = occupancy_map.fetch(u_i).x
++        
++        # Calculate skip delta
+         if ess_type == 1: # Block ESS
++            r = clamp(u_i - u, -1.0, 0.0)
+             i_delta_xyz = (step(0.0, step_dist_texel_inv) + r) * step_dist_texel_inv
+         elif ess_type == 2: # Chebyshev ESS
+@@ -114,136 +121,93 @@
+         i_delta = max(1, int(ceil(min(min(i_delta_xyz.x, i_delta_xyz.y), i_delta_xyz.z))))
+         
+-        # Handle case where distance is 0 (empty space reached but no skip possible or backtracking needed)
++        # Handle backtracking if empty space detected but no skip possible
+         if dist == 0:
+             i_delta_backwards = -int(ceil(sampling_factor))
+-            skipping = False
+-            i = max(i + i_delta_backwards, i_min)
+-            # Continue to sample this point or skip logic might need adjustment
+-            # For simplicity, we proceed to sample if dist==0 implies non-empty or boundary
+-        else:
+-            i += i_delta
+-            # If we skipped, we might need to adjust sampling_pos for the next iteration
+-            # The loop continues, and the next iteration will use the new i
+-            # However, standard ESS jumps i, so we must ensure we don't skip the actual sample point
+-            # In many implementations, if dist > 0, we jump i by i_delta, effectively skipping samples.
+-            # If we want to sample the boundary, we might need to adjust.
+-            # Based on [S4, unofficial], if dist > 0, we skip. If dist == 0, we backtrack/sample.
+-            # Let's assume if dist > 0, we skip the block.
+-            if dist > 0:
+-                continue # Skip the rest of the loop body for this iteration
+-        
+-        # If we are here, we are sampling a non-empty region (or dist was 0)
+-        # 6. Sample Volume
+-        # Get voxel value
+-        voxel_value = get_volume_intensity(sampling_pos, volume_size)
+-        
+-        # Transfer function lookup
+-        color = texture(tf_texture, vec2(voxel_value, 0.5)).rgba
++            i = max(i + i_delta_backwards, 0)
++            continue
++            
++        i += i_delta
++        
++        # Sample Volume
++        voxel_value = volume.sample(sampling_pos)
++        color = tf.apply(voxel_value)
+         
+         # Gamma correction
+-        color.a = pow(color.a, 2.2) # Typical gamma
+-        
+-        # Gradient/Lighting (simplified)
+-        gradient = get_gradient(sampling_pos, volume_size, voxel_value)
++        if params['gamma_correction']:
++            color.a = pow(color.a, params['gamma'])
++            
++        # Lighting (simplified)
++        gradient = volume.compute_gradient(sampling_pos, voxel_value)
+         normal = -normalize(gradient.xyz)
+-        # Lighting calculation omitted for brevity, assuming color.rgb is modulated
+-        
+-        # 7. Composite
+-        # Front-to-back compositing
+-        # alpha_i is color.a
+-        # C_i is color.rgb
+-        # T = 1 - alpha_acc
+-        alpha_i = color.a
+-        C_i = color.rgb
+-        
+-        # Update accumulators
+-        # C_acc = C_acc + C_i * alpha_i * (1 - alpha_acc)
+-        # alpha_acc = alpha_acc + alpha_i * (1 - alpha_acc)
+-        
+-        contribution = C_i * alpha_i * (1.0 - out_color.a)
+-        out_color.rgb += contribution
+-        out_color.a += alpha_i * (1.0 - out_color.a)
+-        
+-        # 8. Early Ray Termination
+-        if early_ray_termination and out_color.a > 0.98:
+-            out_color.a = 1.0
++        light = normalize(params['light_direction'])
++        diffuse = max(0.0, dot(normal, light))
++        color.rgb = color.rgb * (1.0 + diffuse)
++        
++        # Compositing
++        color.a = clamp(1.0 * (1.0 - pow(1.0 - color.a, 1.0/sampling_factor)), 0.0, 1.0)
++        color.rgb *= color.a
++        acc_color = acc_color + (1.0 - acc_alpha) * color
++        acc_alpha = acc_alpha + color.a * (1.0 - acc_alpha)
++        
++        # Early Termination
++        if acc_alpha > 0.98:
++            acc_color.a = 1.0
+             break
+             
+-    return out_color
++    return acc_color
+ ```
+ 
+-**Parameters:**
+-*   `sampling_factor`: Controls step size relative to volume dimensions. Typical values depend on resolution [S4, unofficial].
+-*   `alpha_thre`: Opacity threshold for empty space. Typical value: $10^{-2}$ [S5, unofficial].
+-*   `early_stop_eps`: Transmittance threshold for early termination. Typical value: $10^{-4}$ [S5, unofficial].
+-*   `essType`: Integer flag for ESS variant (1=Block, 2=Chebyshev) [S4, unofficial].
+-*   `ditheringMode`: Integer flag for ray dithering (1=Procedural, 2=Texture) [S4, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Degenerate Rays:** Rays with infinite length, NaN components, or length $> \sqrt{3}$ should be terminated immediately to prevent performance regressions [S4, unofficial].
+-*   **Backtracking:** When empty space is detected but the skip delta would move the ray backwards or beyond the last occupied step, clamp the index to `i_min` [S4, unofficial].
+-*   **Transfer Function Dependency:** Standard ESS depends on the transfer function. If the TF changes, the acceleration structure (e.g., occupancy grid or brick classification) may become invalid and require recomputation [S1, unofficial][S15].
+-*   **Intermediate Pass Overhead:** In multi-pass rendering, empty-space detection must be performed even if early ray termination is active, because the intermediate pass modifies z-values for depth testing. The alpha channel cannot be used for this flag as it indicates early termination [S7, unofficial].
+-*   **Dense Regions:** In dense volumes (e.g., cosmic web), coarse checks may rarely prove a cell empty, adding texture load overhead with no skip payoff, causing net regression [S16, unofficial].
+-
+ ## Subtopics
+ 
+ ### [Ray Marcher with Macrocell Empty Space Skipping](1009-ray-marcher-with-macrocell-empty-space-skipping.md)
+-Uses fixed, uniform macrocells with precomputed boolean occupancy flags. Chosen for simplicity and fixed-grid traversal.
++Uses fixed, uniform macrocells with precomputed boolean occupancy flags. Sets itself apart by using a static grid hierarchy rather than dynamic trees.
+ 
+ ### [Empty Space Skipping with Orthogonal BSP Tree](1054-empty-space-skipping-with-orthogonal-bsp-tree.md)
+-Uses an orthogonal BSP tree for visibility sorting and skipping sub-volumes. Chosen for lit rendering optimization and arbitrary slicing planes.
++Partitions volume into sub-volumes based on voxel properties into an orthogonal BSP tree. Sets itself apart by optimizing lit rendering via visibility sorting and separating surface/interior voxels.
+ 
+ ### [Empty Space Skipping with Octree](1610-empty-space-skipping-with-octree.md)
+-Uses an octree with conservative min/max scalar values. Chosen for isosurface rendering and hierarchical pruning.
++Uses an octree storing conservative min/max scalar value estimates. Sets itself apart by using hierarchical ranges to prune nodes for isosurface rendering.
+ 
+ ### [Spatial Skipping (Occupancy Grid)](1614-spatial-skipping-occupancy-grid.md)
+-Uses a simple voxel-based occupancy grid with a density threshold. Chosen for explicit, binary occupancy tracking.
+-
+-### [Parallel Ray Casting with Segment Lists](2565-parallel-ray-casting-with-segment-lists.md)
+-Combines spatial decomposition with segment lists for parallel ray-space culling. Chosen for multi-processor/MPI distribution.
++Uses a simple, explicit voxel-based occupancy grid with a conservative density threshold. Sets itself apart by using binary occupancy rather than hierarchical structures.
+ 
+ ### [Free Space Skipping](4656-free-space-skipping.md)
+-Uses learned, continuous density fields (coarse/fine voxel grids) to sculpt free space dynamically. Chosen for neural rendering and dynamic training.
++Relies on learned, continuous density fields (e.g., in NeRFs) to sculpt free space dynamically. Sets itself apart from static bounding volumes by using neural network predictions.
+ 
+ ### [Parallel Tree-Construction for Empty-Space Skipping](5037-parallel-tree-construction-for-empty-space-skipping.md)
+-Rebuilds acceleration structures on the GPU at interactive rates. Chosen for dynamic transfer function changes.
++Enables run-time re-construction of acceleration structures on the GPU to accommodate dynamic transfer function changes.
+ 
+ ### [Transfer-Function Independent Empty-Space Skipping](5038-transfer-function-independent-empty-space-skipping.md)
+-Stores visibility independent of TF. Chosen for real-time TF adjustments without structural overhead.
++Stores visibility information independent of the transfer function, avoiding reconstruction after TF changes.
+ 
+ ### [SparseLeap](5152-sparseleap.md)
+-Hybrid object-order/image-order method using rasterized occupancy geometry. Chosen for large, sparse volumes with fine structures to reduce fragmentation.
++A hybrid object-order/image-order method that rasterizes occupancy geometry to merge segments. Sets itself apart by reducing fragmentation and enabling linear list traversal.
+ 
+ ### [Homogeneity Acceleration](5754-homogeneity-acceleration.md)
+-Approximates uniform, non-empty regions instead of sampling voxel-by-voxel. Chosen for regions with data but no internal variation.
+-
+-### [SparseLeap Ray-Casting with Occupancy Misses](9818-sparseleap-ray-casting-with-occupancy-misses.md)
+-Separates metadata from volume data, handling occupancy misses in a ray-guided list. Chosen for optimized brick evaluation.
++Approximates the contribution of uniform, non-empty regions instead of sampling them voxel-by-voxel. Sets itself apart by handling regions with data but no internal variation.
+ 
+ ### Brick Classification and Empty Space Skipping
+-Classifies bricks into skipped (empty), early termination (saturated), or sampled (dense) categories using a shared 32-bit integer array per brick. It leaps over empty bricks. Pitfall: Metadata becomes invalid on TF change, requiring background recomputation; unprocessed bricks are treated as 'missing' and filtered by empty checks [S15].
++A technique that classifies bricks into three categories (skipped/empty, early termination/saturated, or sampled densely) to bypass large sets of work, maintaining state in a shared array on GPU and host memory [S15]. It maintains a table of brick state shared on both GPU and host memories. If a brick is identified as empty, the renderer leaps over that space instead of sampling it [S15]. The brick classification metadata is stored as an array consisting of one 32-bit integer per brick of the dataset [S15]. When the transfer function changes, metadata becomes invalid, and the system offloads recomputation to a background thread; until complete, unprocessed bricks are considered 'missing', causing the renderer to request potentially empty bricks which are then filtered by the empty check [S15]. The test platform can process about 7.5 million bricks per second for metadata updates [S15].
+ 
+ ### TF-Adaptive Empty-Space Skip
+-Skips cells provably contributing zero opacity by checking if the cell's stored max deviation is below a cutoff derived from live contrast/trim uniforms. It consults a coarse-to-fine pyramid and lands back on the fixed step grid. Pitfall: In dense structures, the overhead of pyramid checks can cause net regression (+47% volume, +65% scalar-volume) [S16, unofficial].
+-
+-### Hierarchical Bounding Box Tree for Empty-Space Skipping
+-Optimizes ray casting for large-scale aerosols (smoke, fog) by avoiding sampling empty spaces and invalid voxels using a hierarchical bounding box tree. It combines an illumination model for color rendering. Chosen for real-time rendering of large-scale aerosols [S17].
++A raymarch acceleration technique that skips volume cells provably contributing zero opacity by checking if the cell's stored max deviation is below a cutoff derived from live contrast/trim uniforms [S16, unofficial]. It declares binding 5 (the max pyramid) in the fragment shader and consults it coarse-to-fine: checking pyramid level 1, then level 0, before paying for a full-res sample [S16, unofficial]. When a skip occurs, it lands back on the fixed step grid defined by $t_{min} + \text{jitter} + k \cdot \text{stepLength}$ to ensure every surviving sample stays bit-identical to the un-accelerated march [S16, unofficial]. The cutoff is calculated as $\text{cutoff} = (\text{deadband} - 0.05)$, where deadband is derived from `applyContrastWindow`. If cell max deviation < cutoff, the cell is skipped [S16, unofficial]. In dense cosmic-web structures (volume-inside pose), the coarse+fine pyramid check rarely proves a cell empty, adding two textureLoad+slab-test pairs per step with no skip payoff, causing a net regression (+47% volume, +65% scalar-volume per-layer) [S16, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the acceleration structure. Octree traversal is $O(\log N)$ for skipping, but worst-case is $O(N)$ if the volume is dense [S6, unofficial]. Occupancy grid lookup is $O(1)$ [S5, unofficial].
+-*   **Memory Complexity:** Requires additional storage for the acceleration structure. E.g., an occupancy grid adds storage proportional to the volume resolution [S13]. A 300-frame video occupancy volume requires ~8 MB [S13]. Brick classification adds one 32-bit integer per brick [S15].
++*   **Time Complexity:** Depends on the data structure. Octree traversal is $O(\log N)$ for skipping, but overhead exists for tree traversal. Occupancy grids allow $O(1)$ lookups.
++*   **Memory Complexity:** Requires additional storage for the empty-space data structure (e.g., occupancy grid, octree, or distance map). Storage for occupancy volumes of a 300-frame video is about 8 MB [S13].
+ *   **Measured Performance:**
+-    *   RC-β (with ESS) significantly outperforms RC-α (early termination only) and RC (no acceleration). E.g., Head dataset: 23.4 fps (RC-β) vs 14.4 fps (RC-α) vs 4.8 fps (RC) [S7, unofficial].
+-    *   Provides a 2.3x to 5x performance gain in some implementations [S12, unofficial].
+-    *   ESS increases rendering speed of a single shared MLP model from 1345 ms to 133 ms (Table 2, rows 5-6) [S13].
+-    *   Improves rendering speed by 6 times while adding only 5 MB to storage cost [S13].
+-*   **Strengths:** Reduces the number of samples evaluated, especially in sparse volumes. Can be combined with early termination [S7, unofficial].
+-*   **Limitations:** Depends on the transfer function (unless TF-independent structures are used) [S1, unofficial]. Overhead of querying the acceleration structure can negate benefits in dense regions [S16, unofficial]. Requires precomputation or online updates [S15].
+-*   **When to Use:** Sparse volumes, large datasets where empty space dominates, interactive applications requiring high frame rates.
+-*   **When Not to Use:** Dense volumes where most samples are non-empty, or when the overhead of maintaining the acceleration structure exceeds the savings from skipping [S16, unofficial].
++    *   RC-β (with empty-space skipping) significantly outperforms RC-α (early termination only) and RC (no acceleration). For a Head dataset: 23.4 fps (RC-β) vs 14.4 fps (RC-α) vs 4.8 fps (RC) [S7, unofficial].
++    *   Provides a 2.3x to 5x performance gain in general cases [S12, unofficial].
++    *   ESS increases rendering speed of a single shared MLP model from 1345 ms to 133 ms, improving speed by 6 times while adding only 5 MB to storage cost [S13].
++*   **Strengths:** Significantly reduces the number of samples evaluated, especially in sparse volumes or volumes with large transparent regions [S6, unofficial][S13].
++*   **Limitations:**
++    *   Dependent on the transfer function; changes require data structure reconstruction [S1, unofficial][S15].
++    *   Overhead of intermediate passes for empty-space detection can negate gains in semi-transparent data sets (loss of ~30% performance) [S7, unofficial].
++    *   In dense structures, the overhead of checking the empty-space structure can exceed the cost of sampling [S16, unofficial].
++*   **When to Use:** Sparse volumes, large transparent regions, interactive applications requiring high frame rates.
++*   **When Not to Use:** Dense, fully opaque volumes where every sample contributes, or when transfer functions change frequently and reconstruction overhead is prohibitive.
+ 
+ ## Background
+-Empty-space skipping was introduced as a fundamental optimization for volume raycasting to address the computational cost of sampling transparent regions [S1, unofficial][S10, book]. Early methods used bounding boxes or hulls to limit ray traversal [S3, unofficial]. The technique evolved to use hierarchical structures like octrees and BSP trees for finer-grained skipping [S6, S8, unofficial]. In the context of neural rendering, ESS has been adapted to prune empty and occluded regions during training and inference using occupancy grids [S5, unofficial][S13]. It is widely used in GPU-based volume raycasting to improve performance and quality [S9].
++Empty-space skipping was introduced as a fundamental optimization for volume raycasting to address the computational waste of sampling transparent regions [S1, S3, unofficial][S10, book]. Early work by Levoy (1990) and Zuiderveld (1992) proposed hierarchical representations and distance fields to adapt step sizes [S10, book]. The technique has been widely adopted in GPU-based rendering, with implementations by Klein et al. and Lee and Shin exploiting spatial coherence and frame-to-frame coherence [S9]. Modern implementations extend this to neural radiance fields (NeRFs) using occupancy grids (e.g., Instant-NGP, NerfAcc) to prune empty space during training and inference [S5, unofficial][S13].
+ 
+ ## Sources
+@@ -263,4 +227,3 @@
+ [S14] Faster Neural Radiance Fields Inference — Chris Choy, https://chrischoy.org/posts/nerfs/, fetched 2026-10-29 (unofficial)
+ [S15] An Analysis of Scalable GPU-Based Ray-Guided Volume Rendering, https://pmc.ncbi.nlm.nih.gov/articles/PMC4260263/, fetched 2026-10-26
+-[S16] feat(volumes): raymarch acceleration — GPU pyramids, TF-adaptive skipping, cone LOD, https://github.com/rulkens/skymap/pull/556, fetched 2026-10-28 (unofficial)
+-[S17] (PDF) A Comparison between GPU-based Volume Ray Casting ..., https://www.researchgate.net/publication/321454253_A_Comparison_between_GPU-based_Volume_Ray_Casting_Implementations_Fragment_Shader_Compute_Shader_OpenCL_and_CUDA, fetched 2026-10-26+[S16] feat(volumes): raymarch acceleration — GPU pyramids, TF-adaptive skipping, cone LOD, https://github.com/rulkens/skymap/pull/556, fetched 2026-10-28 (unofficial)

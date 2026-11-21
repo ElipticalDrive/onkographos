@@ -1,0 +1,152 @@
+# DCT-based Volume Rendering
+
+Also called: DCT Volume Rendering, DCT-based encoding, DCT-based out-of-core volume rendering, DCT-based volume compression, Discrete Cosine Transform (DCT) Volume Rendering
+
+## Overview
+DCT-based Volume Rendering is a technique for rendering large volumetric datasets that exceed main memory capacity by compressing the data using the Discrete Cosine Transform (DCT) and decoding it during the rendering process [S1]. Unlike Hartley Transform for Memory Reduction [895-hartley-transform-for-memory-reduction.md], which supports direct rendering from the transform domain, DCT requires on-demand decompression of data blocks before rendering [S3]. The method enables out-of-core rendering of massive time-series data by storing only a subset of DCT coefficients per block [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar volume $V$ of size $N_x \times N_y \times N_z$, potentially consisting of a sequence of time steps [S1].
+*   **Output:** A 2D projection image rendered to the screen [G].
+
+**Data Structures:**
+The volume is divided into non-overlapping 3D blocks (windows) of size $W \times W \times W$ [S1]. For each block, a subset of the DCT coefficients is stored [S1].
+*   **Coefficient Storage:** The selected coefficients are quantized and packed into an 8-bit integer value [S1].
+*   **Decoding Map:** A mapping table is pre-computed that associates each possible 8-bit index value with the corresponding decoded scalar value for each time frame, minimizing mean square error [S1].
+
+**Parameters:**
+*   **Window Size ($W$):** The dimensions of the block over which the DCT is applied. A typical example uses $W=4$ [S1].
+*   **Coefficients Stored ($K$):** The number of DCT coefficients retained per block. A typical example stores the first 3 coefficients [S1].
+*   **Compression Ratio:** Determined by $K$ relative to the total number of coefficients in a block ($W^3$). Higher compression yields lower quality but higher frame rates [S1].
+
+**Steps:**
+
+1.  **Encoding (Pre-processing):**
+    1.  Divide the input volume into $W \times W \times W$ blocks.
+    2.  Apply the 3D DCT to each block. The 3D DCT of a block $f(x,y,z)$ is defined as:
+        $$ C(u,v,w) = \alpha(u)\alpha(v)\alpha(w) \sum_{x=0}^{W-1} \sum_{y=0}^{W-1} \sum_{z=0}^{W-1} f(x,y,z) \cos\left[\frac{\pi(2x+1)u}{2W}\right] \cos\left[\frac{\pi(2y+1)v}{2W}\right] \cos\left[\frac{\pi(2z+1)w}{2W}\right] $$
+        where $\alpha(u) = \sqrt{1/W}$ if $u=0$ and $\sqrt{2/W}$ otherwise [G].
+    3.  Select the first $K$ coefficients (typically low-frequency components).
+    4.  Quantize these coefficients and map them to an 8-bit index.
+    5.  Pre-compute a decoding palette: For each possible 8-bit index and each time step, calculate the inverse DCT of the stored coefficients to determine the representative scalar value that minimizes mean square error [S1].
+
+2.  **Rendering (Per Frame):**
+    1.  **Block Selection:** Determine which volume blocks intersect the current view frustum or ray casting path [G].
+    2.  **Decompression:** Retrieve the 8-bit indices for the active blocks. Use the pre-computed decoding map to expand these indices into the actual scalar values for the current time step. This step is performed on-demand [S3].
+    3.  **Rendering:** Render the decompressed data using standard volume rendering techniques. The implementation described in the primary source uses an extension of OpenGL that allows the palette of all textures to be changed at once to decode the compressed values efficiently [S1].
+    4.  **Geometry:** The volume is rendered using object-aligned textured polygons (e.g., 256 polygons) in an out-of-core fashion [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def dct_3d_block(block):
+    """Computes the 3D DCT of a WxWxW block."""
+    W = block.shape[0]
+    coeffs = np.zeros((W, W, W))
+    for u in range(W):
+        for v in range(W):
+            for w in range(W):
+                alpha_u = np.sqrt(1.0 / W) if u == 0 else np.sqrt(2.0 / W)
+                alpha_v = np.sqrt(1.0 / W) if v == 0 else np.sqrt(2.0 / W)
+                alpha_w = np.sqrt(1.0 / W) if w == 0 else np.sqrt(2.0 / W)
+                sum_val = 0.0
+                for x in range(W):
+                    for y in range(W):
+                        for z in range(W):
+                            sum_val += block[x, y, z] * \
+                                       np.cos(np.pi * (2 * x + 1) * u / (2 * W)) * \
+                                       np.cos(np.pi * (2 * y + 1) * v / (2 * W)) * \
+                                       np.cos(np.pi * (2 * z + 1) * w / (2 * W))
+                coeffs[u, v, w] = alpha_u * alpha_v * alpha_w * sum_val
+    return coeffs
+
+def encode_volume(volume, W=4, K=3):
+    """Encodes the volume into compressed indices and builds the decoding map."""
+    compressed_data = {}
+    decoding_map = {}
+    num_time_steps = volume.shape[2]
+
+    for t in range(num_time_steps):
+        current_vol = volume[:, :, t]
+        for bx in range(0, current_vol.shape[0], W):
+            for by in range(0, current_vol.shape[1], W):
+                for bz in range(0, current_vol.shape[2], W):
+                    block = current_vol[bx:bx+W, by:by+W, bz:bz+W]
+                    coeffs = dct_3d_block(block)
+                    selected = coeffs.flatten()[:K]
+                    # Quantize to 8-bit index
+                    index = int(np.clip(np.mean(selected) * 100, 0, 255))
+                    compressed_data[(bx, by, bz, t)] = index
+
+                    # Pre-compute decoding map: inverse DCT of selected coefficients
+                    inv_coeffs = np.zeros((W, W, W))
+                    inv_coeffs.flatten()[:K] = selected
+                    decoded_block = np.zeros_like(block)
+                    for x in range(W):
+                        for y in range(W):
+                            for z in range(W):
+                                val = 0.0
+                                for u in range(W):
+                                    for v in range(W):
+                                        for w in range(W):
+                                            alpha_u = np.sqrt(1.0 / W) if u == 0 else np.sqrt(2.0 / W)
+                                            alpha_v = np.sqrt(1.0 / W) if v == 0 else np.sqrt(2.0 / W)
+                                            alpha_w = np.sqrt(1.0 / W) if w == 0 else np.sqrt(2.0 / W)
+                                            val += alpha_u * alpha_v * alpha_w * inv_coeffs[u, v, w] * \
+                                                   np.cos(np.pi * (2 * x + 1) * u / (2 * W)) * \
+                                                   np.cos(np.pi * (2 * y + 1) * v / (2 * W)) * \
+                                                   np.cos(np.pi * (2 * z + 1) * w / (2 * W))
+                                decoded_block[x, y, z] = val
+                    decoding_map[(index, t)] = decoded_block
+    return compressed_data, decoding_map
+
+def render_frame(compressed_data, decoding_map, view_params, current_time_step):
+    """Renders a frame by decompressing visible blocks on demand."""
+    visible_blocks = []
+    for block_key in compressed_data.keys():
+        # Standard frustum culling: check if block bounding box intersects view frustum
+        if block_key[0] < view_params.max_x and block_key[1] < view_params.max_y and block_key[2] < view_params.max_z:
+            visible_blocks.append(block_key)
+
+    decompressed_blocks = {}
+    for block_key in visible_blocks:
+        index = compressed_data[block_key]
+        decoded_block = decoding_map[(index, current_time_step)]
+        decompressed_blocks[block_key] = decoded_block
+
+    # Render using 256 object-aligned textured polygons
+    for block_key, block_data in decompressed_blocks.items():
+        # Map block data to texture coordinates and project to screen
+        render_textured_polygon(block_data, view_params)
+    return decompressed_blocks
+
+def render_textured_polygon(block_data, view_params):
+    """Projects a decompressed block onto the screen using object-aligned polygons."""
+    # Standard rasterization of textured quads
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **No Direct Rendering:** DCT does not support direct rendering from the compression domain; data must be decompressed before rendering [S3].
+*   **Precision Loss:** Quantizing coefficients to 8-bit values introduces compression artifacts. The trade-off between compression ratio and quality must be managed by the user [S1].
+*   **Boundary Conditions:** DCT assumes periodic boundary conditions within each block. Discontinuities at block boundaries can cause artifacts [G].
+
+## Operating characteristics
+*   **Time Complexity:** Encoding is $O(N^3)$ for the full volume, but typically performed offline. Rendering complexity depends on the number of visible blocks and the cost of on-demand decompression. The primary source reports rendering performance of 6.8 frames/s for a $256^3$ dataset with 1492 time steps on an AMD 1.2 GHz Athlon and GeForce 3 [S1].
+*   **Memory Complexity:** Significantly reduced compared to in-core storage. The example uses 64 MB texture memory to render a dataset that would require much more if uncompressed [S1].
+*   **Performance:** Out-of-core DCT rendering achieved 6.8 frames/s, compared to 11.5 frames/s for a memory-resident subset of uncompressed data and 25.8 frames/s for in-core compressed data [S1].
+*   **Strengths:** Enables visualization of very large time-series datasets that do not fit in main memory. Offers flexibility in choosing compression ratios for speed vs. quality [S1].
+*   **Limitations:** Requires on-demand decompression of data blocks before rendering, as direct rendering from the compression domain is not supported [S3].
+
+## Background
+DCT-based Volume Rendering was developed by Yeo et al. [YL95] as a strategy to decompress blocks of data on demand for rendering [S3]. It is chosen in practice because it offers independent bases as well as fast forward and inverse transforms [S3]. The method is particularly useful for out-of-core rendering of large volumetric datasets [S1].
+
+## Sources
+[S1] Recent advances in hardware-accelerated volume rendering, https://doi.org/10.1016/s0097-8493(03)00146-8, fetched 2026-10-26
+[S2] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S3] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

@@ -1,0 +1,132 @@
+# SDF Depth Buffer Integration
+
+Also called: Depth Writing with Hit Detection, Raymarching with Depth Buffer Output, Sphere Tracing for Depth Output, Sphere Tracing with Depth Buffer Output
+
+## Overview
+SDF Depth Buffer Integration is a technique that extends sphere tracing by explicitly writing the computed surface hit point's depth to the hardware depth buffer (`SV_Depth`) [S1, S2, S3, unofficial]. This allows ray-marched SDF geometry to participate in standard depth testing, ensuring correct occlusion between sphere-traced objects and rasterized geometry [S2, S3, unofficial]. Without this integration, the depth buffer records the depth of the proxy mesh face (e.g., a bounding cube) rather than the actual ray-marched surface, leading to incorrect occlusion where rasterized objects behind the SDF surface appear in front, or vice versa [S2, S3, unofficial]. It builds on [Distance-field ray marching](21-distance-field-ray-marching.md) [S3, unofficial].
+
+## How it works
+The method operates in the fragment shader, extending the standard sphere tracing loop to output both color and depth [S2, S3, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** Vertex shader output struct `v2f` containing clip-space position, object-space local position (ray origin), and object-space view direction (ray direction) [S3, unofficial].
+*   **Output:** `SV_TARGET` (color) and `SV_Depth` (depth value) [S3, unofficial].
+
+**Data Structures:**
+The vertex-to-fragment struct `v2f` layout is:
+*   `position` (`SV_POSITION`): Clip-space vertex position [S3, unofficial].
+*   `localPosition` (`TEXCOORD0`): Object-space vertex position, used as the ray origin [S3, unofficial].
+*   `viewDirection` (`TEXCOORD1`): Object-space vector from camera to vertex, un-normalized [S3, unofficial].
+
+**Parameters:**
+*   `MAX_STEPS`: Maximum ray march iterations. Typical value: 32 [S2, S3, unofficial].
+*   `THICKNESS`: SDF value threshold for hit detection. Typical value: 0.001 [S2, S3, unofficial].
+*   `NORMAL_EPSILON`: Offset for finite difference normal estimation. Typical value: 0.01 [S2, S3, unofficial].
+
+**Steps:**
+1.  **Vertex Shader Setup:**
+    *   Calculate `localPosition` as the vertex position in object space [S3, unofficial].
+    *   Calculate `viewDirection` as `vertex - objectSpaceCameraPos` in object space [S3, unofficial].
+    *   Calculate `position` using `UnityObjectToClipPos(vertex)` [S3, unofficial].
+2.  **Fragment Shader Initialization:**
+    *   Extract `pos` from `localPosition` [S3, unofficial].
+    *   Normalize `viewDirection` to get `dir` [S3, unofficial].
+    *   Initialize `progress` (accumulated distance) to 0 [S3, unofficial].
+    *   Initialize `hitsurface` flag to `false` [S3, unofficial].
+3.  **Ray Marching Loop:**
+    *   Iterate up to `MAX_STEPS` [S3, unofficial].
+    *   Calculate sample point: `samplePoint = pos + dir * progress` [S2, unofficial].
+    *   Evaluate SDF: `distance = scene(samplePoint)` [S3, unofficial].
+    *   **Hit Check:** If `distance < THICKNESS`, set `hitsurface = true` and `break` [S3, unofficial].
+    *   **Step:** Advance ray: `progress = progress + distance` [S3, unofficial].
+4.  **Miss Handling:**
+    *   If `!hitsurface`, execute `discard`. This prevents writing to `SV_TARGET` or `SV_Depth` and avoids driver differences associated with `clip(-1)` [S2, S3, unofficial].
+5.  **Color Calculation:**
+    *   Compute surface color using `samplePoint` (normal estimation, lighting) and write to `SV_TARGET` [S2, S3, unofficial].
+6.  **Depth Calculation:**
+    *   Transform `samplePoint` to clip space: `tracedClipPos = UnityObjectToClipPos(float4(samplePoint, 1.0))` [S1, S2, S3, unofficial].
+    *   Compute NDC depth: `depth = tracedClipPos.z / tracedClipPos.w` [S1, S2, S3, unofficial].
+    *   Write `depth` to `SV_Depth` [S1, S2, S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Vertex Shader
+def vert(vertex, world_to_object, world_space_camera_pos):
+    # Clip-space position for rasterization
+    position = model_view_projection_matrix * float4(vertex, 1.0)
+    # Ray origin in object space
+    local_position = vertex
+    # Ray direction in object space (un-normalized to preserve interpolation precision)
+    object_space_camera_pos = world_to_object * float4(world_space_camera_pos, 1.0)
+    view_direction = vertex - object_space_camera_pos
+    return v2f(position, local_position, view_direction)
+
+# Fragment Shader
+def frag(i):
+    pos = i.localPosition
+    dir = normalize(i.view_direction)
+    progress = 0.0
+    sample_point = vec3(0.0)
+    hitsurface = False
+
+    for _ in range(MAX_STEPS):
+        sample_point = pos + dir * progress
+        distance = scene(sample_point)
+        if distance < THICKNESS:
+            hitsurface = True
+            break
+        progress += distance
+
+    if not hitsurface:
+        return  # discard pixel
+
+    # Compute surface color via normal estimation and diffuse lighting [S2, S3, unofficial]
+    color = render_surface(sample_point)
+    
+    # Transform hit point to clip space
+    traced_clip_pos = model_view_projection_matrix * float4(sample_point, 1.0)
+    # Perspective divide for NDC depth
+    depth = traced_clip_pos.z / traced_clip_pos.w
+    return color, depth
+```
+
+**Edge Cases and Pitfalls:**
+*   **Proxy Mesh Depth:** Without explicit depth output, the GPU records the proxy mesh depth, causing incorrect occlusion [S2, S3, unofficial].
+*   **Early-Z Optimization:** Writing `SV_Depth` disables the GPU's early-Z optimization for affected pixels because the hardware cannot know the depth before the fragment shader runs [S2, unofficial].
+*   **Discard vs Clip:** Using `clip(-1)` can cause issues with depth buffering or sorting; `discard` is preferred [S3, unofficial].
+*   **Unnormalized View Direction:** The view direction is stored un-normalized in `TEXCOORD1` to avoid precision loss in interpolation, but must be normalized in the fragment shader [S3, unofficial].
+*   **Render Queue:** The shader should use `Queue=Geometry+1` to render after standard opaque geometry, ensuring rasterized meshes write depth first [S2, S3, unofficial]. `DisableBatching=True` is required as batching breaks the object-to-world transform used for ray setup [S2, S3, unofficial]. `IgnoreProjector=True` avoids projector interference [S2, S3, unofficial].
+
+## Subtopics
+
+### Near-Far Depth Extraction
+A pixel shader technique to extract the near and far depth values of active cells for ray marching [S5, unofficial]. It uses alpha blending to simultaneously store the smallest depth in the RGB channels and the largest depth in the Alpha channel [S5, unofficial]. The view space Z component (`input.projPos.w`) is output to the Red channel for the smallest depth and to the Alpha channel for the largest depth [S5, unofficial]. The hardware's output merger keeps the smallest value for color components (RGB) and the largest value for the alpha component when blending, allowing extraction of both near and far depths in a single pass [S5, unofficial].
+
+### Viewport Clipping for Screen-Space Rays
+Clips the ray segment to the viewport boundaries to avoid accessing out-of-bounds depth buffer texels [S6, unofficial]. Viewport bounds are defined as `xMax=csZBufferSize.x-0.5`, `xMin=0.5`, `yMax=csZBufferSize.y-0.5`, `yMin=0.5` [S6, unofficial]. Alpha for Y clipping is calculated as `(P1.y - ((P1.y > yMax) ? yMax : yMin)) / (P1.y - P0.y)` if `P1.y` is out of bounds [S6, unofficial]. Alpha for X clipping is calculated similarly, taking the maximum alpha [S6, unofficial]. Endpoints are interpolated to the clipped position: `P1 = lerp(P1, P0, alpha)`, `k1 = lerp(k1, k0, alpha)`, `Q1 = lerp(Q1, Q0, alpha)` [S6, unofficial]. `P0` is assumed to be in the viewport, and `P1-P0` is never zero when clipping is required, avoiding division by zero [S6, unofficial].
+
+### Depth Composition Integration
+Integration of KRS ray-casting into incrementally rendered scenes using the depth buffer [S7]. The depth buffer is used for early termination of rays [S7]. Depth is output from the ray casting shader if necessary, e.g., for transparent geometry rendering or deferred shading [S7].
+
+## Operating characteristics
+*   **Time Complexity:** Linear in the number of ray march steps (`MAX_STEPS`) per pixel [S2, S3, unofficial].
+*   **Memory Complexity:** Constant per pixel for the depth buffer write [S2, unofficial].
+*   **Performance:** Writing `SV_Depth` disables early-Z optimization, which can impact performance on fill-rate limited hardware [S2, unofficial].
+*   **Strengths:** Ensures correct occlusion between SDF geometry and rasterized geometry [S2, S3, unofficial].
+*   **Limitations:** Disables early-Z; requires careful render queue management (`Geometry+1`) [S2, S3, unofficial].
+*   **When to Use:** When SDF geometry needs to occlude or be occluded by rasterized geometry [S2, S3, unofficial].
+*   **When Not to Use:** When SDF geometry is rendered last and does not need to interact with depth from other geometry, or when early-Z performance is critical and occlusion is not required [S2, unofficial].
+
+## Background
+The method was introduced in Tutorial 045 of the Ronja Tutorials series, extending previous sphere tracing tutorials (043, 044) to address the depth buffer problem [S1, S2, S3, unofficial]. It is implemented in Unity using HLSL/CG [S3, unofficial]. The technique is part of the broader field of signed distance field rendering and ray marching [S1, S2, S3, unofficial].
+
+## Sources
+[S1] Sphere Tracing and Ray Marching, https://deepwiki.com/ronja-tutorials/ShaderTutorials/5-sphere-tracing-and-ray-marching, fetched 2026-10-27 (unofficial)
+[S2] Sphere Tracing with Depth Buffer Output, https://deepwiki.com/ronja-tutorials/ShaderTutorials/5.3-sphere-tracing-with-depth-buffer-output, fetched 2026-10-27 (unofficial)
+[S3] Assets/045_SphereTracingDepth/SphereTracingDepth.shader, https://github.com/ronja-tutorials/ShaderTutorials/blob/31899f7b/Assets/045_SphereTracingDepth/SphereTracingDepth.shader, fetched 2026-10-27 (unofficial)
+[S4] GitHub - mlavik1/UnityVolumeRendering: Volume rendering, implemented in ..., https://github.com/mlavik1/UnityVolumeRendering, fetched 2026-10-28 (unofficial)
+[S5] pengliu916/DynamicVolumeRayCasting, https://github.com/pengliu916/DynamicVolumeRayCasting, fetched 2026-10-26 (unofficial)
+[S6] Efficient GPU screen-space ray tracing, https://jcgt.org/published/0003/04/04/paper.pdf, fetched 2026-10-25 (unofficial)
+[S7] Kernel-Reflection Sequences, https://doi.org/10.2312/stag.20161364, fetched 2026-10-26

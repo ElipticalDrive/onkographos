@@ -1,0 +1,100 @@
+# Single-Pass Voxelization
+
+Also called: Axis-Aligned Voxelization, Dynamic Voxelization, One pass voxelization pipeline, Thin surface voxelization
+
+## Overview
+Single-Pass Voxelization is a GPU-based method that converts triangle meshes into a sparse voxel representation in a single rendering pass by leveraging the geometry shader for axis selection and conservative rasterization for coverage [S1, S2, unofficial]. It distinguishes itself from sibling methods by eliminating the need for multiple draw calls per object (via geometry shaders) and avoiding plain grid allocations (via sparse structures), making it suitable for dynamic scenes where objects are added at runtime [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Triangle mesh data (vertices, normals) and a sparse voxel data structure (e.g., sparse octree or hash table) [S1, S2, unofficial].
+*   **Output:** Occupied voxels with attributes (position, color, normal) written to a 3D surface or texture [S2, unofficial].
+
+**Data Structures:**
+*   **Sparse Voxel Structure:** No plain grid allocation; uses a sparse octree or hash map to store only occupied voxels [S2, unofficial].
+*   **Render Target:** An MSAA (Multi-Sample Anti-Aliasing) render target is required to prevent incorrect filling of empty cells [S1, unofficial].
+
+**Steps:**
+1.  **Dominant Axis Selection:** For each input triangle, the geometry shader calculates the projection of the triangle's normal onto the X, Y, and Z axes. It selects the axis with the largest absolute projection value as the "dominant axis" [S1, S2, unofficial].
+2.  **Triangle Projection:** The triangle is projected onto the 2D plane perpendicular to the dominant axis [S1, S2, unofficial].
+3.  **Edge Shifting:** The edges of the projected triangle are shifted outward to account for the voxel grid alignment, ensuring full coverage of intersected voxels [S2, unofficial].
+4.  **Hardware Setup/Rasterization:** The rasterizer processes the shifted triangle using conservative rasterization. This generates fragments for all pixels (voxel centers) that have any overlap with the triangle, not just those whose centers are covered [S1, S2, unofficial].
+5.  **Fragment Shader Execution:** For each generated fragment, the fragment shader computes the voxel attributes (e.g., position, color, normal) and performs an atomic write to the sparse voxel structure [S1, S2, unofficial].
+6.  **Sparse Octree Construction (Optional/Post-process):** If using a sparse octree, a top-down construction phase may follow, involving octree subdivision and value MIP-mapping [S2, unofficial].
+
+**Formulas:**
+*   **Dominant Axis Selection:** Let $\mathbf{n} = (n_x, n_y, n_z)$ be the triangle normal. The dominant axis $A$ is:
+    $$ A = \arg \max_{i \in \{x,y,z\}} |n_i| $$
+*   **Conservative Rasterization Condition:** A fragment is generated for a pixel $p$ if the triangle $T$ intersects the pixel's coverage area, rather than just the pixel center [S1, unofficial].
+
+**Parameters:**
+*   **Hardware Support:** Requires hardware conservative rasterization support, available on Nvidia Maxwell architecture and later [S1, unofficial]. RTX driver support is available for Turing and Pascal architectures [S1, unofficial].
+*   **Performance:** Dynamic objects are added at runtime in ~4-5ms; static environments are pre-voxelized in ~20ms [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Cracks:** Without conservative rasterization, GPUs only generate fragments if a pixel's center is covered, leading to small cracks at triangle edges [S1, unofficial].
+*   **Over-filling:** Conservative rasterization generates too many fragments, incorrectly filling cells that should be empty [S1, unofficial]. This is mitigated by using an MSAA render target [S1, unofficial].
+*   **Precision:** Atomic writes to sparse structures must handle potential race conditions if multiple fragments target the same voxel [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Geometry Shader
+def geometry_shader(triangle):
+    # Calculate normal
+    v0, v1, v2 = triangle.vertices
+    normal = normalize(cross(v1 - v0, v2 - v0))
+    
+    # Select dominant axis
+    abs_normal = abs(normal)
+    if abs_normal.x >= abs_normal.y and abs_normal.x >= abs_normal.z:
+        dominant_axis = 'x'
+    elif abs_normal.y >= abs_normal.x and abs_normal.y >= abs_normal.z:
+        dominant_axis = 'y'
+    else:
+        dominant_axis = 'z'
+        
+    # Project triangle to 2D plane perpendicular to dominant axis
+    projected_triangle = project_2d(triangle, dominant_axis)
+    
+    # Shift edges for conservative rasterization
+    shifted_triangle = shift_edges(projected_triangle)
+    
+    # Output shifted triangle for rasterization
+    output_triangle(shifted_triangle)
+
+# Fragment Shader
+def fragment_shader(fragment):
+    # Compute voxel attributes (e.g., position, color)
+    voxel_pos = compute_voxel_position(fragment)
+    voxel_color = compute_color(fragment)
+    
+    # Atomic write to sparse voxel structure
+    # Note: Implementation depends on specific sparse structure (e.g., hash table)
+    atomic_write_sparse_voxel(voxel_pos, voxel_color)
+```
+
+## Subtopics
+
+### Anisotropic Voxelization
+Improves quality by encoding directional data in voxels, useful when view-dependent changes occur. [Link](908-anisotropic-voxelization.md)
+
+### Sparse Octree Construction
+Post-processing step for organizing voxels into a hierarchical structure. [Link](908-sparse-octree-construction.md)
+
+## Operating characteristics
+*   **Time Complexity:** O(N) where N is the number of triangles, as each triangle is processed in a single pass [S1, unofficial].
+*   **Memory Complexity:** O(V) where V is the number of occupied voxels, due to sparse allocation [S2, unofficial].
+*   **Performance:** Dynamic updates are fast (~4-5ms), while static pre-voxelization takes ~20ms [S2, unofficial].
+*   **Strengths:** Reduces draw calls, supports dynamic objects, avoids plain grid memory overhead [S1, S2, unofficial].
+*   **Limitations:** Requires hardware conservative rasterization (Maxwell+), MSAA overhead, potential over-filling without MSAA [S1, unofficial].
+*   **When to Use:** Real-time applications with dynamic scenes requiring efficient voxelization [S2, unofficial].
+*   **When Not to Use:** Hardware without conservative rasterization support, or when exact voxel coverage is critical without MSAA [S1, unofficial].
+
+## Background
+Single-Pass Voxelization was introduced as part of the Voxel Cone Tracing pipeline for real-time indirect illumination [S2, unofficial]. It was developed to address the inefficiencies of previous voxelization methods that required multiple passes or draw calls [S1, unofficial]. The method leverages advancements in GPU hardware, specifically conservative rasterization, to achieve efficient and accurate voxelization [S1, unofficial].
+
+## Sources
+[S1] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)
+[S2] Voxel Cone Tracing and Sparse Voxel Octree for Real-time ..., https://developer.download.nvidia.com/GTC/PDF/GTC2012/PresentationPDF/SB134-Voxel-Cone-Tracing-Octree-Real-Time-Illumination.pdf, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,371 @@
+--- v006.md
++++ v007.md
+@@ -4,215 +4,161 @@
+ 
+ ## Overview
+-Geometry Shader Voxelization rasterizes polygonal meshes directly into a 3D voxel grid by leveraging the GPU's geometry shader stage to project triangles onto axis-aligned planes and iterate through occupied grid cells [S4, unofficial]. It solves the problem of converting continuous surface geometry into discrete volumetric data without requiring explicit CPU-side raycasting or compute-shader-based brute-force intersection tests [S2, unofficial]. Unlike sibling methods that rely on hardware rasterization of 2D fragments (e.g., [Image-space Voxelization](14395-image-space-voxelization.md)) or pure compute shaders (e.g., [GPU Mesh Voxelization via AABB-Triangle Intersection](2541-gpu-mesh-voxelization-via-aabb-triangle-intersection.md)), this method explicitly generates 3D voxel primitives or iterates grid bounds within the shader, offering a balance between implementation simplicity and watertightness control [S2, S4, unofficial].
++Geometry Shader Voxelization rasterizes a polygonal mesh directly into a 3D voxel grid by leveraging the GPU's geometry shader stage to project triangles onto axis-aligned planes and write occupancy or color data into 3D textures [S2, S4, unofficial]. It differs from [A-Buffer Solid Voxelization](1189-a-buffer-solid-voxelization.md) by writing directly to a 3D volume without intermediate accumulation buffers, and from [GPU Mesh Voxelization via AABB-Triangle Intersection](2541-gpu-mesh-voxelization-via-aabb-triangle-intersection.md) by relying on hardware rasterization coverage rather than explicit geometric intersection tests [S2, S4, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A triangle mesh defined by vertex positions $V$ (size $3 \times N$) and face indices $F$ (size $3 \times M$) [S4, unofficial].
+-*   **Output:** A 3D occupancy grid (e.g., `GL_TEXTURE_3D` with format `GL_R8UI`) and optionally a 3D color grid (e.g., `GL_RGBA8`) [S4, unofficial].
++*   **Input:** A triangle mesh (vertices and indices) and a target 3D grid resolution `voxelResolution` (typically cubic, e.g., $64^3$) [S4, unofficial].
++*   **Output:** A 3D texture (or Unordered Access View) representing the voxel grid. Common formats include `GL_R8UI` for occupancy (single channel, 8-bit unsigned int) and `GL_RGBA8` for color (4 channels, 8-bit unsigned int) [S4, unofficial].
+ 
+ **Data Structures:**
+-*   **Voxel Resolution:** A uniform `ivec3` `voxelResolution` specifying grid dimensions $(D_x, D_y, D_z)$, typically cubic ($D_x=D_y=D_z=dim$) [S4, unofficial].
+-*   **Bounding Box:** The axis-aligned bounding box (AABB) of the mesh vertices, computed as `min` and `max` vectors [S4, unofficial].
+-*   **Projection Matrix:** A permutation matrix `unswizzle` used to align the triangle's dominant normal axis with a principal plane (XY, YZ, or ZX) [S4, unofficial].
++*   **Voxel Texture:** A 3D image bound at a specific binding point. For example, `voxelOccupancy` is `layout(r8ui, binding = 0) uniform uimage3D` and `voxelColor` is `layout(rgba8, binding = 1) uniform image3D` [S4, unofficial].
++*   **Mesh Data:** Vertices stored in a vertex buffer (e.g., `Eigen::Matrix<float, -1, -1>` for $3 \times N$ floats) and faces in an element buffer (e.g., `Eigen::Matrix<uint32_t, -1, -1>` for $3 \times M$ indices) [S4, unofficial].
+ 
+ **Parameters:**
+-*   `THICKNESS`: Compile-time constant selecting voxel thickness mode. `THIN` (0) ensures vertex connectivity; `FAT` (1) ensures face connectivity [S4, unofficial].
+-*   `voxelResolution`: Grid dimensions [S4, unofficial].
++*   `voxelResolution`: The dimensions of the grid $(N_x, N_y, N_z)$ [S4, unofficial].
++*   `THICKNESS`: A compile-time constant selecting between "Thin" (0) or "Fat" (1) voxelization modes [S4, unofficial].
++*   `mipLevel`: Optional parameter to reduce the effective viewport and scissor dimensions by `GRID_SIZE >> mipLevel` [S3, unofficial].
+ 
+-**Algorithm Steps:**
++**Steps:**
+ 
+-1.  **Mesh Preprocessing:**
+-    *   Load mesh vertices $V$ and faces $F$ [S4, unofficial].
+-    *   Compute the AABB of $V$: $v_{min} = \min(V)$, $v_{max} = \max(V)$ [S4, unofficial].
+-    *   Calculate the maximum dimension $d_{max} = \max(v_{max} - v_{min})$ [S4, unofficial].
+-    *   Normalize vertices to $[0, 1]$ range: $V_{norm} = (V - v_{min}) / d_{max}$ [S4, unofficial].
++1.  **Mesh Normalization:**
++    Compute the axis-aligned bounding box (AABB) of the mesh vertices to find `xmin, xmax, ymin, ymax, zmin, zmax`. Calculate the maximum dimension $d_{max} = \max(x_{max}-x_{min}, y_{max}-y_{min}, z_{max}-z_{min})$. Normalize all vertex coordinates to the $[0, 1]$ range:
++    $$ V_{norm} = \frac{V - V_{min}}{d_{max}} $$
++    [S4, unofficial]
+ 
+ 2.  **Pipeline Setup:**
+-    *   Bind the geometry shader pipeline. The pipeline typically includes a Vertex Shader (pass-through), a Geometry Shader (core logic), and a Fragment Shader (optional, often empty or used for color sampling) [S4, unofficial].
+-    *   Bind the 3D texture images for occupancy and color output [S4, unofficial].
++    Bind the voxelization shaders (Vertex, Geometry, Fragment). Pass `voxelResolution` as a uniform. Bind the output 3D textures as images for writing. Set the primitive topology to `TRIANGLELIST` [S4, unofficial].
+ 
+ 3.  **Triangle Processing (Geometry Shader):**
+     For each input triangle with vertices $v_0, v_1, v_2$:
+-    
+-    a.  **Swizzling:**
+-        *   Compute the triangle normal $n = (v_1 - v_0) \times (v_2 - v_1)$ [S4, unofficial].
+-        *   Identify the dominant axis of $|n|$ (the component with the largest absolute value) [S4, unofficial].
+-        *   Permute the vertex coordinates and normal so that the dominant plane aligns with the XY plane. Store the permutation matrix `unswizzle` to reverse coordinates later [S4, unofficial].
++    a.  **Swizzling:** Calculate the triangle normal $n = \text{cross}(v_1 - v_0, v_2 - v_1)$. Determine the dominant axis of the normal (the component with the largest absolute value). Permute the vertex coordinates and normal so that the dominant plane aligns with the XY plane. Store the permutation matrix `unswizzle` to reverse the transformation later [S4, unofficial].
++    b.  **Edge Normals:** Compute inward-facing 2D edge normals for the XY, YZ, and ZX planes. For an edge $e$ and plane normal component $n_p$, the 2D edge normal $n_e$ is determined by the sign of $n_p$. For example, for the XY plane:
++        $$ n_{e,xy} = \begin{cases} (-e_y, e_x) & \text{if } n_z \ge 0 \\ (e_y, -e_x) & \text{if } n_z < 0 \end{cases} $$
++        [S4, unofficial]
++    c.  **Bounding Box:** Compute the AABB of the triangle vertices in voxel space. Clamp indices to $[0, \text{voxelResolution}]$ [S4, unofficial].
++    d.  **Distance Calculation:**
++        *   **Thin Mode:** Calculate edge distances $d_e$ and triangle plane distance $d_{Tri}$ using formulas that ensure adjacent voxels are connected by vertices [S4, unofficial].
++        *   **Fat Mode:** Calculate edge distances and min/max plane distances using formulas that ensure adjacent voxels share at least a face [S4, unofficial].
++    e.  **Overlap Testing:**
++        *   Iterate through the projected XY bounding box. For each voxel $(p_x, p_y)$, check if it overlaps the triangle in the XY plane using the edge distances [S4, unofficial].
++        *   If XY overlap exists, calculate the Z-intersection range $[z_{min}, z_{max}]$ using the triangle plane distance and the normal's Z component. Apply floor/ceil boundary handling [S4, unofficial].
++        *   Iterate through the Z range. For each voxel $(p_x, p_y, p_z)$, check overlaps in the YZ and ZX planes. If all three plane overlaps are true, the voxel is occupied [S4, unofficial].
++    f.  **Writing:**
++        Write to the occupancy image: `imageStore(voxelOccupancy, ivec3(unswizzle * p), uvec4(1))`.
++        Write to the color image: `imageStore(voxelColor, ivec3(unswizzle * p), vec4(unswizzle * p / voxelResolution, 1))` [S4, unofficial].
+ 
+-    b.  **Edge Normal Calculation:**
+-        *   Compute edge vectors: $e_0 = v_1 - v_0$, $e_1 = v_2 - v_1$, $e_2 = v_0 - v_2$ [S4, unofficial].
+-        *   Calculate inward-facing 2D edge normals for the projected plane (XY). The sign depends on the perpendicular normal component (e.g., $n_z$). For edge $e_0$:
+-            $$n_{e0,xy} = \begin{cases} (-e_{0,y}, e_{0,x}) & \text{if } n_z \ge 0 \\ (e_{0,y}, -e_{0,x}) & \text{if } n_z < 0 \end{cases}$$
+-        *   Repeat for YZ and ZX planes using the respective perpendicular normal components ($n_x$ for YZ, $n_y$ for ZX) [S4, unofficial].
+-
+-    c.  **Bounding Box Calculation:**
+-        *   Compute the AABB of the swizzled triangle vertices [S4, unofficial].
+-        *   Convert to voxel indices:
+-            $$idx_{min} = \text{clamp}(\lfloor \text{AABB}_{min} \cdot \text{voxelResolution} \rfloor, 0, \text{voxelResolution} - 1)$$
+-            $$idx_{max} = \text{clamp}(\lceil \text{AABB}_{max} \cdot \text{voxelResolution} \rceil, 0, \text{voxelResolution} - 1)$$
+-        *   Determine the loop bounds for $x, y$ (from $idx_{min}$ to $idx_{max}$ in XY) and $z$ (from $idx_{min}$ to $idx_{max}$ in Z) [S4, unofficial].
+-
+-    d.  **Voxel Iteration and Overlap Test:**
+-        *   Iterate $p_x$ from $idx_{min,x}$ to $idx_{max,x}$ and $p_y$ from $idx_{min,y}$ to $idx_{max,y}$ [S4, unofficial].
+-        *   **XY Overlap Check:**
+-            *   Calculate initial edge distances $d_e$ for each edge. For **Thin** voxelization:
+-                $$d_e = \text{dot}(n_e, 0.5 - v_{proj}) + 0.5 \times \max(|n_{e,x}|, |n_{e,y}|)$$
+-                For **Fat** voxelization:
+-                $$d_e = -\text{dot}(n_e, v_{proj}) + \max(0, n_{e,x}) + \max(0, n_{e,y})$$
+-            *   Update distances for current voxel coordinate $p_{proj} = (p_x, p_y)$:
+-                $$dd_e = d_e + \text{dot}(n_e, p_{proj})$$
+-            *   Check overlap: `xy_overlap = (dd_e0 >= 0) && (dd_e1 >= 0) && (dd_e2 >= 0)` [S4, unofficial].
+-        
+-        *   **Z-Range Calculation (if xy_overlap is true):**
+-            *   Compute triangle plane distance $d_{Tri}$. For **Thin**:
+-                $$d_{Tri} = \text{dot}(n_{proj}, v_0) - \text{dot}(n_{proj,xy}, 0.5)$$
+-                For **Fat**:
+-                $$d_{Tri, min} = \text{dot}(n_{proj}, v_0) - \max(n_{proj,x}, 0) - \max(n_{proj,y}, 0)$$
+-                $$d_{Tri, max} = \text{dot}(n_{proj}, v_0) - \min(n_{proj,x}, 0) - \min(n_{proj,y}, 0)$$
+-            *   Calculate Z-intersection range for the plane at $p_{xy}$:
+-                $$z_{min} = \frac{-\text{dot}(n_{proj,xy}, p_{xy}) + d_{Tri}}{n_{proj,z}}$$
+-                (Use $d_{Tri, min}$ and $d_{Tri, max}$ for Fat mode) [S4, unofficial].
+-            *   Determine voxel Z-range indices $z_{min\_idx}, z_{max\_idx}$ using floor/ceil with boundary handling to ensure coverage [S4, unofficial].
+-
+-        *   **YZ and ZX Overlap Checks:**
+-            *   Iterate $p_z$ from $z_{min\_idx}$ to $z_{max\_idx}$ [S4, unofficial].
+-            *   Update edge distances for YZ and ZX planes using the 3D coordinate $p = (p_x, p_y, p_z)$ [S4, unofficial].
+-            *   Check `yz_overlap` and `zx_overlap` using the same dot-product logic as XY [S4, unofficial].
+-
+-    e.  **Voxel Write:**
+-        *   If `xy_overlap`, `yz_overlap`, and `zx_overlap` are all true, the voxel is occupied [S4, unofficial].
+-        *   Write to the occupancy image: `imageStore(voxelOccupancy, ivec3(unswizzle * p), uvec4(1))` [S4, unofficial].
+-        *   Write to the color image (optional): `imageStore(voxelColor, ivec3(unswizzle * p), vec4(...))` [S4, unofficial].
+-
+-4.  **Post-Processing:**
+-    *   Synchronize GPU with `glMemoryBarrier(GL_ALL_BARRIER_BITS)` [S4, unofficial].
+-    *   Read back the 3D texture data to CPU if required [S4, unofficial].
++4.  **Synchronization:**
++    Call `glMemoryBarrier(GL_ALL_BARRIER_BITS)` to ensure the 3D texture writes are complete before reading [S4, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def geometry_shader_voxelization(mesh_V, mesh_F, voxel_resolution, thickness_mode):
++def geometry_shader_voxelization(mesh_vertices, mesh_faces, voxel_resolution, thickness_mode='THIN'):
+     """
+-    Simulates the core logic of the Geometry Shader Voxelization method.
+-    mesh_V: (N, 3) array of vertex positions.
+-    mesh_F: (M, 3) array of vertex indices.
+-    voxel_resolution: int, grid dimension (assumes cubic grid).
+-    thickness_mode: 'THIN' or 'FAT'.
++    Voxelize a mesh using geometry shader logic.
++    :param mesh_vertices: Nx3 array of vertex positions
++    :param mesh_faces: Mx3 array of vertex indices
++    :param voxel_resolution: int, dimension of the cubic grid
++    :param thickness_mode: 'THIN' or 'FAT'
++    :return: occupancy_grid (vox_resolution^3), color_grid (vox_resolution^3, 4)
+     """
+-    # 1. Preprocessing
+-    v_min = np.min(mesh_V, axis=0)
+-    v_max = np.max(mesh_V, axis=0)
+-    d_max = np.max(v_max - v_min)
+-    V_norm = (mesh_V - v_min) / d_max
++    # 1. Normalize Mesh
++    vmin = mesh_vertices.min(axis=0)
++    dmax = (mesh_vertices.max(axis=0) - vmin).max()
++    v_norm = (mesh_vertices - vmin) / dmax
+     
+-    occupancy_grid = np.zeros((voxel_resolution, voxel_resolution, voxel_resolution), dtype=np.uint8)
++    # Initialize grids
++    occupancy = np.zeros((voxel_resolution, voxel_resolution, voxel_resolution), dtype=np.uint8)
++    color = np.zeros((voxel_resolution, voxel_resolution, voxel_resolution, 4), dtype=np.float32)
+     
+-    for face_idx in range(mesh_F.shape[0]):
+-        v0 = V_norm[mesh_F[face_idx, 0]]
+-        v1 = V_norm[mesh_F[face_idx, 1]]
+-        v2 = V_norm[mesh_F[face_idx, 2]]
++    # 2. Process each triangle
++    for face in mesh_faces:
++        v0, v1, v2 = v_norm[face[0]], v_norm[face[1]], v_norm[face[2]]
+         
+-        # 2. Swizzling
++        # 3. Swizzle based on dominant normal axis
+         n = np.cross(v1 - v0, v2 - v1)
+         abs_n = np.abs(n)
+         dominant_axis = np.argmax(abs_n)
+         
+-        # Permute vertices to align dominant axis with Z (XY plane projection)
+-        # For simplicity, assume dominant_axis is Z. If X or Y, permute coordinates.
+-        # Here we assume the code handles permutation via 'unswizzle' matrix.
+-        # We will work in the swizzled space.
+-        swizzled_v0, swizzled_v1, swizzled_v2 = permute_to_xy_plane(v0, v1, v2, dominant_axis)
++        # Permute vertices to align dominant plane with XY
++        # (Implementation detail: permute indices 0,1,2 based on dominant_axis)
++        # Let's assume a helper function permute_coords exists that returns 
++        # permuted_v0, permuted_v1, permuted_v2, unswizzle_matrix
++        pv0, pv1, pv2, unswizzle = permute_for_xy(v0, v1, v2, dominant_axis)
+         
+-        # 3. Edge Normals
+-        e0 = swizzled_v1 - swizzled_v0
+-        e1 = swizzled_v2 - swizzled_v1
+-        e2 = swizzled_v0 - swizzled_v2
++        # 4. Compute Edge Normals and Distances
++        edges = [pv1 - pv0, pv2 - pv1, pv0 - pv2]
++        edge_normals_xy = []
++        edge_normals_yz = []
++        edge_normals_zx = []
+         
+-        # Calculate 2D edge normals for XY plane
+-        # Sign depends on n_z (which is the dominant component magnitude, but sign matters)
+-        sign_z = 1.0 if n[dominant_axis] >= 0 else -1.0
++        for e in edges:
++            # XY plane (normal component n_z)
++            if n[2] >= 0:
++                edge_normals_xy.append(np.array([-e[1], e[0]]))
++            else:
++                edge_normals_xy.append(np.array([e[1], -e[0]]))
++            
++            # YZ plane (normal component n_x)
++            if n[0] >= 0:
++                edge_normals_yz.append(np.array([-e[2], e[1]]))
++            else:
++                edge_normals_yz.append(np.array([e[2], -e[1]]))
++                
++            # ZX plane (normal component n_y)
++            if n[1] >= 0:
++                edge_normals_zx.append(np.array([-e[0], e[2]]))
++            else:
++                edge_normals_zx.append(np.array([e[0], -e[2]]))
++                
++        # 5. Bounding Box in Voxel Space
++        # Project to 2D for XY bounds
++        p_min_xy = np.floor(np.min([pv0[:2], pv1[:2], pv2[:2]], axis=0)).astype(int)
++        p_max_xy = np.ceil(np.max([pv0[:2], pv1[:2], pv2[:2]], axis=0)).astype(int)
++        p_min_xy = np.clip(p_min_xy, 0, voxel_resolution - 1)
++        p_max_xy = np.clip(p_max_xy, 0, voxel_resolution - 1)
+         
+-        def get_2d_normal(e, sign):
+-            # For XY plane, normal is (-y, x) or (y, -x)
+-            if sign >= 0:
+-                return np.array([-e[1], e[0]])
+-            else:
+-                return np.array([e[1], -e[0]])
++        # 6. Iterate XY and Z
++        for px in range(p_min_xy[0], p_max_xy[0] + 1):
++            for py in range(p_min_xy[1], p_max_xy[1] + 1):
++                # Check XY overlap
++                # Calculate updated edge distances for current voxel
++                # d_e = dot(n_e, 0.5 - v_proj) + 0.5 * max(|n_ex|, |n_ey|) for THIN
++                # d_e = -dot(n_e, v_proj) + max(0, n_ex) + max(0, n_ey) for FAT
++                # Simplified check:
++                xy_overlap = check_plane_overlap(px, py, edges, edge_normals_xy, thickness_mode)
+                 
+-        n_e0_xy = get_2d_normal(e0, sign_z)
+-        n_e1_xy = get_2d_normal(e1, sign_z)
+-        n_e2_xy = get_2d_normal(e2, sign_z)
+-        
+-        # 4. Bounding Box
+-        tri_min = np.min([swizzled_v0, swizzled_v1, swizzled_v2], axis=0)
+-        tri_max = np.max([swizzled_v0, swizzled_v1, swizzled_v2], axis=0)
+-        
+-        idx_min = np.clip(np.floor(tri_min * voxel_resolution).astype(int), 0, voxel_resolution - 1)
+-        idx_max = np.clip(np.ceil(tri_max * voxel_resolution).astype(int), 0, voxel_resolution - 1)
+-        
+-        # 5. Iterate XY
+-        for px in range(idx_min[0], idx_max[0] + 1):
+-            for py in range(idx_min[1], idx_max[1] + 1):
+-                p_proj = np.array([px, py])
+-                
+-                # Update distances
+-                dd_e0 = calc_edge_dist(e0, n_e0_xy, thickness_mode, p_proj)
+-                dd_e1 = calc_edge_dist(e1, n_e1_xy, thickness_mode, p_proj)
+-                dd_e2 = calc_edge_dist(e2, n_e2_xy, thickness_mode, p_proj)
+-                
+-                if dd_e0 >= 0 and dd_e1 >= 0 and dd_e2 >= 0:
+-                    # XY overlap found. Calculate Z range.
+-                    z_min_idx, z_max_idx = calc_z_range(swizzled_v0, swizzled_v1, swizzled_v2, n, p_proj, thickness_mode, voxel_resolution)
++                if xy_overlap:
++                    # Calculate Z range
++                    # z_min = (-dot(n_proj_xy, p_xy) + d_Tri) / n_proj_z
++                    # (Detailed formula depends on thickness mode)
++                    z_min, z_max = calculate_z_range(px, py, pv0, pv1, pv2, n, thickness_mode)
+                     
+-                    for pz in range(z_min_idx, z_max_idx + 1):
+-                        p_3d = np.array([px, py, pz])
++                    z_min = int(np.floor(z_min))
++                    z_max = int(np.ceil(z_max))
++                    z_min = np.clip(z_min, 0, voxel_resolution - 1)
++                    z_max = np.clip(z_max, 0, voxel_resolution - 1)
++                    
++                    for pz in range(z_min, z_max + 1):
++                        yz_overlap = check_plane_overlap(py, pz, edges, edge_normals_yz, thickness_mode)
++                        zx_overlap = check_plane_overlap(pz, px, edges, edge_normals_zx, thickness_mode)
+                         
+-                        # Check YZ and ZX overlaps
+-                        # Note: In the actual shader, these are checked against the 3D point
+-                        # For this simulation, we assume the Z-range calculation already
+-                        # accounts for the triangle's Z-extent, but strict watertightness
+-                        # requires checking all 3 planes.
+-                        # Simplified: If Z-range is valid, mark voxel.
+-                        # In full implementation: check yz_overlap and zx_overlap here.
+-                        
+-                        # Unswizzle coordinate
+-                        final_coord = unpermute(p_3d, dominant_axis)
+-                        
+-                        # Write to grid
+-                        if all(0 <= c < voxel_resolution for c in final_coord):
+-                            occupancy_grid[final_coord[0], final_coord[1], final_coord[2]] = 1
++                        if yz_overlap and zx_overlap:
++                            # Write voxel
++                            # Apply unswizzle to get final coordinates
++                            final_coords = unswizzle @ np.array([px, py, pz])
++                            fx, fy, fz = final_coords.astype(int)
+                             
+-    return occupancy_grid
++                            if 0 <= fx < voxel_resolution and 0 <= fy < voxel_resolution and 0 <= fz < voxel_resolution:
++                                occupancy[fz, fy, fx] = 1
++                                # Color can be stored as normalized coordinates or diffuse color
++                                color[fz, fy, fx] = [fx/voxel_resolution, fy/voxel_resolution, fz/voxel_resolution, 1.0]
++                                
++    return occupancy, color
+ 
+-def calc_edge_dist(edge, edge_normal, mode, p_proj):
+-    if mode == 'THIN':
+-        # d_e = dot(n_e, 0.5 - v_proj) + 0.5 * max(|n_e,x|, |n_e,y|)
+-        # Note: v_proj in formula is vertex, but in loop it's updated by p_proj
+-        # The formula in source [S4, unofficial] for loop update is: dd_e = d_e + dot(n_e, p_proj)
+-        # So we need the base d_e. The source formula for d_e uses 0.5 - v_proj?
+-        # Actually, the source says: "d_e = dot(n_e, 0.5 - v_proj)..." for initial.
+-        # Then "dd_e = d_e + dot(n_e, p_proj)".
+-        # This implies v_proj in the initial formula is (0,0) or similar?
+-        # Let's stick to the update rule provided in the source for the loop.
+-        # We need the initial d_e.
+-        pass 
+-    return 0 # Placeholder for complex logic
+-
+-def permute_to_xy_plane(v0, v1, v2, dominant_axis):
+-    # Returns vertices such that dominant axis is Z
+-    if dominant_axis == 0: # X is dominant
+-        return np.array([v0[1], v0[2], v0[0]]), np.array([v1[1], v1[2], v1[0]]), np.array([v2[1], v2[2], v2[0]])
+-    elif dominant_axis == 1: # Y is dominant
+-        return np.array([v0[0], v0[2], v0[1]]), np.array([v1[0], v1[2], v1[1]]), np.array([v2[0], v2[2], v2[1]])
+-    else: # Z is dominant
+-        return v0, v1, v2
+-
+-def unpermute(p, dominant_axis):
+-    if dominant_axis == 0:
+-        return np.array([p[2], p[0], p[1]])
+-    elif dominant_axis == 1:
+-        return np.array([p[0], p[2], p[1]])
+-    else:
+-        return p
++def check_plane_overlap(p1, p2, edges, edge_normals, thickness_mode):
++    # Simplified placeholder for the specific distance formula logic
++    # In reality, this iterates edges and checks dot products
++    return True # Placeholder
+ ```
+ 
+@@ -220,5 +166,5 @@
+ 
+ ### [GPU Mesh Voxelization via AABB-Triangle Intersection](2541-gpu-mesh-voxelization-via-aabb-triangle-intersection.md)
+-This method voxelizes a polygonal mesh by dispatching one compute shader thread per voxel in a 3D grid, where each thread performs a brute-force Axis-Aligned Bounding Box (AABB) vs. Triangle intersection test against all mesh triangles. It differs from [Geometry Shader Voxelization](2566-geometry-shader-voxelization.md) by avoiding the overhead of geometry shader primitive generation and from [GPU Voxelization Using OpenGL Image Atomics](2544-gpu-voxelization-using-opengl-image-atomics.md) by using a single-writer-per-voxel model without atomic blending. It is chosen when simplicity of implementation is prioritized over performance, as it lacks spatial acceleration structures.
++This method voxelizes a polygonal mesh by dispatching one compute shader thread per voxel grid cell, which then tests its Axis-Aligned Bounding Box (AABB) against every triangle in the mesh using the Separating Axis Theorem (SAT). It differs from [Geometry Shader Voxelization](2566-geometry-shader-voxelization.md) by avoiding the overhead of generating geometry primitives and from [GPU Voxelization Using OpenGL Image Atomics](2544-gpu-voxelization-using-opengl-image-atomics.md) by relying on explicit geometric intersection tests rather than rasterization coverage. It is a brute-force approach that does not use spatial acceleration structures.
+ 
+ ### [GPU Voxelization Using OpenGL Image Atomics](2544-gpu-voxelization-using-opengl-image-atomics.md)
+@@ -229,15 +175,17 @@
+ 
+ ### [Single-Pass GPU Voxelization](14396-single-pass-gpu-voxelization.md)
+-A voxelization technique that maps 3D mesh vertices to a 3D grid (voxel space) in a single rasterization pass using a Frame Buffer Object (FBO), avoiding the multiple passes required by methods like Karabassi et al. [9].
++Single-Pass GPU Voxelization is a technique that maps 3D mesh vertices directly to a 3D grid (voxel space) in a single rasterization pass using a Frame Buffer Object (FBO), avoiding the multiple passes required by methods like Karabassi et al.. It sets itself apart from its sibling [Geometry Shader Voxelization](2566-geometry-shader-voxelization.md) by encoding voxel indices into vertex attributes and the FBO alpha channel during the vertex shader stage, rather than rasterizing triangles into a 3D texture via a geometry shader. It is distinct from [GPU Voxelization Using OpenGL Image Atomics](2544-gpu-voxelization-using-opengl-image-atomics.md) by relying on standard rasterization depth testing and FBO downloads rather than atomic operations on 3D textures.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(T \cdot B)$, where $T$ is the number of triangles and $B$ is the average number of voxels in the triangle's bounding box. The geometry shader iterates through the bounding box of each triangle [S4, unofficial].
+-*   **Memory Complexity:** $O(D^3)$ for the 3D voxel grid, where $D$ is the grid resolution [S4, unofficial].
+-*   **Performance:** Performance depends heavily on the sparsity of the mesh and the grid resolution. For dense meshes or large grids, the bounding box iteration can be inefficient compared to sparse voxel octrees or compute-based methods with acceleration structures [S2, unofficial].
+-*   **Strengths:** Simple implementation using standard graphics pipeline; supports both "Thin" and "Fat" voxelization modes for different connectivity requirements [S4, unofficial].
+-*   **Limitations:** Overwrites voxel values if multiple fragments map to the same voxel (order depends on rasterization depth and draw order) [S2, unofficial]. Requires careful handling of boundary clamping to prevent out-of-bounds access [S4, unofficial].
++*   **Time Complexity:** Proportional to the number of triangles and the surface area of the mesh projected onto the grid. The geometry shader processes each triangle once, but the inner loops over voxel coordinates depend on the triangle's bounding box size [S4, unofficial].
++*   **Memory Complexity:** $O(N^3)$ for the output 3D texture, where $N$ is the voxel resolution. The input mesh is stored in standard buffers [S4, unofficial].
++*   **Performance:** Efficient for dense meshes where rasterization hardware is utilized effectively. Less efficient for sparse triangles or very large grids compared to compute-based methods that skip empty space [S2, unofficial].
++*   **Strengths:** Simple implementation using standard graphics pipeline; leverages GPU rasterization hardware; supports direct color writing [S4, unofficial].
++*   **Limitations:** Overwrites voxel values if multiple fragments map to the same voxel (order depends on rasterization depth and draw order); potential for boundary errors if not clamped properly [S2, S4, unofficial].
++*   **When to use:** When a quick, hardware-accelerated voxelization is needed and the mesh is not extremely sparse.
++*   **When not to use:** When precise control over voxel occupancy (e.g., watertightness without overwrites) is required, or when the grid is very large and sparse [S2, unofficial].
+ 
+ ## Background
+-Geometry Shader Voxelization was developed as a lightweight method for converting `.ply` or `.obj` meshes into 3D voxel grids using OpenGL Geometry Shaders [S4, unofficial]. It leverages the flexibility of the geometry shader to perform 3D rasterization logic directly on the GPU, avoiding the need for complex compute shader synchronization or CPU-side processing [S4, unofficial]. The method is often cited in the context of real-time voxel cone tracing and other GPU-accelerated rendering techniques [S2, unofficial].
++Geometry Shader Voxelization originated as a method to leverage the OpenGL Geometry Shader stage for direct 3D volume rendering preparation. It was popularized in lightweight libraries such as `Mesh-Voxelization-OpenGL-Geometry-Shader` which demonstrated voxelizing `.ply` and `.obj` meshes directly into 3D textures [S4, unofficial]. It is used in real-time applications where mesh data needs to be converted to voxel data for ray marching or voxel cone tracing [S2, unofficial].
+ 
+ ## Sources

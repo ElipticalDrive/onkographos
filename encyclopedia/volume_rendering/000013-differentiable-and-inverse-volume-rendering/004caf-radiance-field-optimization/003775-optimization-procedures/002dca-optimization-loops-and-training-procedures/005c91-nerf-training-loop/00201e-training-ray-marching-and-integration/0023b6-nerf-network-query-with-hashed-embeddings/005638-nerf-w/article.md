@@ -1,0 +1,308 @@
+# NeRF-W
+Also called: NeRF in the Wild
+
+## Overview
+NeRF-W extends Neural Radiance Fields to handle unconstrained internet photo collections by modeling temporal modifications, specifically variable illuminations and transient objects (people, cars, occlusions) [S1, S2, unofficial]. It distinguishes itself from standard NeRF by introducing per-image appearance embeddings to handle photometric variations and a secondary transient MLP head to model dynamic content, allowing the rendering of static geometry while accounting for scene changes [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ images $\{I_i\}_{i=1}^N$ with known camera poses (intrinsics and extrinsics) [S1, S2, unofficial].
+*   **Outputs:** A continuous 3D representation capable of rendering novel views of the static scene geometry, independent of transient objects and lighting conditions [S1, S2, unofficial].
+
+**Data Structures:**
+1.  **Appearance Embedding ($L_i^{(a)}$):** A learnable vector of fixed dimension associated with each input image $i$. This vector captures per-image lighting, exposure, and white balance variations [S1, S2, unofficial].
+2.  **Transient Embedding ($L_i^{(\tau)}$):** A learnable vector of fixed dimension associated with each input image $i$. This vector controls the appearance of transient objects specific to that view [S1, unofficial].
+3.  **Networks:**
+    *   $\text{MLP}_{\theta_1}$: Takes 3D position $\mathbf{x} = (x, y, z)$ as input. Outputs density $\sigma$ and the appearance latent vector $L_i^{(a)}$ [S1, unofficial].
+    *   $\text{MLP}_{\theta_2}$: Takes viewing direction $\mathbf{d}$ and the appearance latent vector $L_i^{(a)}$ as input. Outputs the RGB color $\mathbf{c}$ for the static scene [S1, unofficial].
+    *   $\text{MLP}_{\theta_3}$: Takes the transient latent vector $L_i^{(\tau)}$ (and potentially position/direction, though sources emphasize $L_i^{(\tau)}$) as input. Outputs the color and density for transient objects [S1, S2, unofficial].
+
+**Numbered Steps:**
+
+1.  **Initialization:** Initialize $\text{MLP}_{\theta_1}, \text{MLP}_{\theta_2}, \text{MLP}_{\theta_3}$ and the set of appearance embeddings $\{L_i^{(a)}\}_{i=1}^N$ and transient embeddings $\{L_i^{(\tau)}\}_{i=1}^N$ [S1, S2, unofficial].
+2.  **Ray Sampling:** For each training image $i$, generate rays through each pixel. Sample $N_c$ coarse points and $N_f$ fine points along each ray [S1, unofficial].
+3.  **Static Feature Query:** For each sample point $\mathbf{x}_n$ on a ray from image $i$:
+    *   Query $\text{MLP}_{\theta_1}(\mathbf{x}_n)$ to obtain density $\sigma_n$ and appearance embedding $L_i^{(a)}$ [S1, unofficial].
+    *   Query $\text{MLP}_{\theta_2}(\mathbf{d}_n, L_i^{(a)})$ to obtain static color $\mathbf{c}_n^{\text{static}}$ [S1, unofficial].
+4.  **Transient Feature Query:** For each sample point $\mathbf{x}_n$ on a ray from image $i$:
+    *   Query $\text{MLP}_{\theta_3}(L_i^{(\tau)})$ (or combined with position/direction if implied by architecture, but sources specify $L_i^{(\tau)}$) to obtain transient color $\mathbf{c}_n^{\text{transient}}$ and transient density $\sigma_n^{\text{transient}}$ [S1, S2, unofficial].
+5.  **Volume Rendering (Static):** Compute the expected static color $C_i^{\text{static}}(\mathbf{r})$ for ray $\mathbf{r}$ using alpha compositing over the static samples [S2, unofficial]:
+    $$ C_i^{\text{static}}(\mathbf{r}) = \sum_{n=1}^{N} T_n \alpha_n \mathbf{c}_n^{\text{static}} $$
+    where $\alpha_n = 1 - \exp(-\sigma_n \delta_n)$, $T_n = \exp(-\sum_{j=1}^{n-1} \sigma_j \delta_j)$, and $\delta_n$ is the distance between samples [S1, S2, unofficial].
+6.  **Volume Rendering (Transient):** Compute the expected transient color $C_i^{\text{transient}}(\mathbf{r})$ similarly using transient densities and colors [S2, unofficial]:
+    $$ C_i^{\text{transient}}(\mathbf{r}) = \sum_{n=1}^{N} T_n^{\text{trans}} \alpha_n^{\text{trans}} \mathbf{c}_n^{\text{transient}} $$
+    where $\alpha_n^{\text{trans}} = 1 - \exp(-\sigma_n^{\text{transient}} \delta_n)$ and $T_n^{\text{trans}}$ is the transmittance for transient components [S2, unofficial].
+7.  **Combined Rendering:** The final expected color $C_i(\mathbf{r})$ is the sum of the static and transient components [S2, unofficial]:
+    $$ C_i(\mathbf{r}) = C_i^{\text{static}}(\mathbf{r}) + C_i^{\text{transient}}(\mathbf{r}) $$
+    Note: Sources indicate that at test time, the transient component is discarded, rendering only $C_i^{\text{static}}(\mathbf{r})$ [S2, unofficial].
+8.  **Uncertainty Weighting:** Predict per-ray uncertainty $\beta$ to downweight unreliable pixels during training [S2, unofficial]. The loss function incorporates this uncertainty to handle photometric inconsistencies and transient artifacts [S2, unofficial].
+9.  **Optimization:** Minimize the difference between rendered colors $C_i(\mathbf{r})$ and ground truth image pixels $I_i(\mathbf{r})$, updating network weights and embeddings [S1, S2, unofficial].
+
+**Formulas:**
+*   **Image-Dependent Radiance:** NeRF-W replaces image-independent radiance with image-dependent radiance $C_i(\mathbf{x}, \mathbf{d})$, introducing dependency on image index $i$ [S2, unofficial].
+*   **Alpha Compositing:** The standard volume rendering integral approximation used for both static and transient components [S1, S2, unofficial].
+*   **Uncertainty:** Per-ray uncertainty $\beta$ is predicted and used to weight the loss or compositing [S2, unofficial].
+
+**Parameters:**
+*   $N_c$: Number of coarse samples. Not given in the sources.
+*   $N_f$: Number of fine samples. Not given in the sources.
+*   Embedding Dimension: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Sparse Views:** Degraded quality in rarely observed areas (e.g., ground surfaces) and poor reconstruction for oblique viewing angles [S2, unofficial].
+*   **Camera Calibration:** Blurry artifacts occur if camera poses are inaccurate, inheriting NeRF's sensitivity to calibration errors [S2, unofficial].
+*   **Residual Artifacts:** May leave residual artifacts when removing occlusions; uncertainty estimation can mask static scene errors [S2, unofficial].
+*   **Specular Surfaces:** Struggles with specular/reflective surfaces [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class NeRF_W:
+    def __init__(self, num_images, embedding_dim, hidden_dim=256):
+        """
+        Initialize NeRF-W model.
+        :param num_images: Number of input images N
+        :param embedding_dim: Dimension of appearance and transient embeddings
+        :param hidden_dim: Hidden layer size for MLPs
+        """
+        super().__init__()
+        # Network 1: Position -> Density + Appearance Embedding
+        self.mlp_theta1 = nn.Sequential(
+            nn.Linear(3, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1 + embedding_dim) # 1 for sigma, rest for L_a
+        )
+        
+        # Network 2: Direction + Appearance Embedding -> Static Color
+        self.mlp_theta2 = nn.Sequential(
+            nn.Linear(3 + embedding_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 3) # RGB
+        )
+        
+        # Network 3: Transient Embedding -> Transient Color + Density
+        # Note: Source [S1, unofficial] says MLP_theta3 takes L_i^(tau). 
+        # Source [S2, unofficial] implies it renders transient objects. 
+        # We assume it outputs color and potentially density for compositing.
+        self.mlp_theta3 = nn.Sequential(
+            nn.Linear(embedding_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 4) # RGB + sigma for transient
+        )
+        
+        # Learnable Embeddings
+        self.appearance_embeddings = nn.Embedding(num_images, embedding_dim)
+        self.transient_embeddings = nn.Embedding(num_images, embedding_dim)
+        
+        # Uncertainty head (predicted per ray or pixel, simplified here as a scalar per ray for weighting)
+        self.uncertainty_head = nn.Linear(1, 1) # Placeholder for uncertainty prediction mechanism
+
+    def query_static(self, positions, directions, image_indices):
+        """
+        Query static component of the scene.
+        :param positions: (N_rays, N_samples, 3)
+        :param directions: (N_rays, N_samples, 3)
+        :param image_indices: (N_rays,)
+        :return: sigma_static (N_rays, N_samples), color_static (N_rays, N_samples, 3)
+        """
+        # Get appearance embedding for each ray's image
+        # image_indices shape: (N_rays,)
+        # appearance_embeddings shape: (N_images, embedding_dim)
+        # We need to broadcast to (N_rays, N_samples, embedding_dim)
+        # Since embedding is per-image, it is constant along the ray for a given image
+        app_emb = self.appearance_embeddings(image_indices) # (N_rays, embedding_dim)
+        app_emb_expanded = app_emb.unsqueeze(1).expand(-1, positions.shape[1], -1) # (N_rays, N_samples, embedding_dim)
+        
+        # MLP_theta1: Position -> (sigma, app_emb)
+        # Note: Source [S1, unofficial] says MLP_theta1 outputs density AND appearance latent vector.
+        # However, we already have the appearance embedding from the embedding table.
+        # The source implies MLP_theta1 *outputs* L_i^(a). This suggests L_i^(a) might be 
+        # predicted or refined by the network, or the embedding is an initial guess.
+        # Standard interpretation: The embedding is learned, and MLP_theta1 uses it.
+        # But Source [S1, unofficial] says "MLP_theta1 ... outputs density sigma and appearance latent vector L_i^(a)".
+        # This implies the network *predicts* the embedding or refines it. 
+        # Let's follow Source [S1, unofficial] strictly: MLP_theta1 outputs L_i^(a).
+        # This means we don't use self.appearance_embeddings directly in the forward pass of MLP_theta1?
+        # Or does MLP_theta1 output the *residual*? 
+        # Re-reading [S1, unofficial]: "MLP_theta1 takes 3D position ... and outputs density sigma and appearance latent vector L_i^(a)".
+        # This contradicts the "learnable embedding vector" description if it's purely positional.
+        # Usually, in NeRF-W, the embedding is an input to the color network.
+        # Let's assume the standard NeRF-W architecture: 
+        # 1. Embedding is looked up. 
+        # 2. Position goes to MLP_theta1 to get sigma.
+        # 3. Direction + Embedding goes to MLP_theta2 to get color.
+        # Source [S1, unofficial] phrasing is slightly ambiguous: "MLP_theta1 ... outputs ... L_i^(a)".
+        # It might mean the *system* outputs L_i^(a) via the embedding table, and MLP_theta1 outputs sigma.
+        # Or MLP_theta1 predicts the embedding. 
+        # Given [S2, unofficial] "Each image gets an appearance embedding vector (trained alongside the model)", 
+        # it is a learnable parameter. 
+        # If MLP_theta1 outputs it, it would be position-dependent, which contradicts "per-image".
+        # Therefore, MLP_theta1 likely outputs sigma, and the embedding is separate.
+        # However, to be safe and follow [S1, unofficial] literally:
+        # If MLP_theta1 outputs L_i^(a), then L_i^(a) is a function of x. 
+        # But [S2, unofficial] says "dependency on image index i". 
+        # Let's stick to the most common implementation which aligns with [S2, unofficial]'s "image-dependent radiance":
+        # The embedding is per-image. 
+        # We will assume MLP_theta1 outputs sigma, and the embedding is retrieved.
+        # If the source strictly means MLP_theta1 outputs the embedding, it would be weird.
+        # Let's look at [S1, unofficial] again: "MLP_theta1 connects a 3D position to a density value sigma and MLP_theta2 predicts a RGB color from a viewing direction d and a latent vector MLP_theta1 (x, y, z)."
+        # This sentence structure is broken in the source. "latent vector MLP_theta1 (x,y,z)" likely means "latent vector produced by MLP_theta1".
+        # But then MLP_theta2 takes that latent vector.
+        # If the latent vector is produced by MLP_theta1 from position, it is position-dependent.
+        # But [S2, unofficial] says "per-image appearance embedding".
+        # Resolution: The "latent vector" in [S1, unofficial] refers to the appearance embedding $L_i^{(a)}$.
+        # The source likely means: The system provides $L_i^{(a)}$ (via embedding table). 
+        # MLP_theta1 outputs sigma. MLP_theta2 takes d and $L_i^{(a)}$.
+        # We will implement it this way, as it is the standard NeRF-W approach and consistent with [S2, unofficial].
+        
+        # Get sigma from position
+        sigma_input = positions # (N_rays, N_samples, 3)
+        out1 = self.mlp_theta1(sigma_input) # (N_rays, N_samples, 1 + embedding_dim)
+        sigma = out1[:, :, 0:1] # (N_rays, N_samples, 1)
+        
+        # Get static color
+        # Concatenate direction and appearance embedding
+        # directions: (N_rays, N_samples, 3)
+        # app_emb_expanded: (N_rays, N_samples, embedding_dim)
+        concat_input = torch.cat([directions, app_emb_expanded], dim=-1) # (N_rays, N_samples, 3 + embedding_dim)
+        color_static = self.mlp_theta2(concat_input) # (N_rays, N_samples, 3)
+        
+        return sigma, color_static
+
+    def query_transient(self, image_indices):
+        """
+        Query transient component.
+        :param image_indices: (N_rays,)
+        :return: sigma_transient (N_rays, N_samples, 1), color_transient (N_rays, N_samples, 3)
+        Note: Transient embedding is per-image. 
+        """
+        trans_emb = self.transient_embeddings(image_indices) # (N_rays, embedding_dim)
+        # Expand to match ray samples if needed, or assume transient is constant along ray?
+        # Usually transient objects are spatial, so we might need position.
+        # Source [S1, unofficial] says "MLP_theta3 takes transient latent vector L_i^(tau)".
+        # It does not mention position. This implies transient appearance is view-dependent only?
+        # Or it's a simplified model. We follow the source.
+        # If no position, we can't do spatial compositing easily. 
+        # However, [S2, unofficial] says "renders both static and transient components (density + color)".
+        # If MLP_theta3 only takes L_i^(tau), it outputs a single color/density per ray?
+        # Or per sample? If per sample, it needs position.
+        # Let's assume MLP_theta3 takes L_i^(tau) and outputs color/density for the whole ray or per sample if position is added.
+        # Given the ambiguity, and [S1, unofficial] saying "MLP_theta3 takes ... L_i^(tau)", we will pass only the embedding.
+        # This implies the transient component is uniform along the ray or the network handles it implicitly.
+        # This is a significant simplification. 
+        # Alternative: MLP_theta3 takes L_i^(tau) and position. 
+        # Source [S1, unofficial] does not explicitly say "and position" for MLP_theta3.
+        # We will implement as taking only L_i^(tau) as per source text, but note this is unusual.
+        # Actually, looking at [S1, unofficial]: "MLP_theta3 is introduced to render scenes with transient objects ... thanks to L_i^(tau)".
+        # It doesn't specify inputs beyond L_i^(tau).
+        # We will assume it outputs color and density.
+        
+        # Expand embedding to (N_rays, N_samples, embedding_dim) for consistency with ray sampling
+        trans_emb_expanded = trans_emb.unsqueeze(1).expand(-1, 1, -1) # (N_rays, 1, embedding_dim)
+        # If we assume transient is constant along ray, we can just use this.
+        # If we need per-sample, we might need to repeat or use position.
+        # Let's assume per-sample query is not supported by this specific source description for MLP_theta3.
+        # We will return constant values along the ray for transient.
+        
+        out3 = self.mlp_theta3(trans_emb_expanded) # (N_rays, 1, 4)
+        # Expand to N_samples
+        out3 = out3.expand(-1, positions.shape[1], -1) # (N_rays, N_samples, 4)
+        
+        sigma_transient = out3[:, :, 3:4]
+        color_transient = out3[:, :, 0:3]
+        
+        return sigma_transient, color_transient
+
+    def render(self, rays, image_indices):
+        """
+        Render a batch of rays.
+        :param rays: Dictionary containing 'positions', 'directions', 'distances'
+        :param image_indices: Indices of the images for each ray
+        :return: Rendered color, uncertainty
+        """
+        positions = rays['positions']
+        directions = rays['directions']
+        dists = rays['distances'] # (N_rays, N_samples)
+        
+        # Query Static
+        sigma_static, color_static = self.query_static(positions, directions, image_indices)
+        
+        # Query Transient
+        sigma_transient, color_transient = self.query_transient(image_indices)
+        
+        # Alpha Compositing for Static
+        alpha_static = 1.0 - torch.exp(-sigma_static.squeeze(-1) * dists) # (N_rays, N_samples)
+        transmittance_static = torch.cumprod(torch.cat([torch.ones_like(alpha_static[:, 0:1]), 1.0 - alpha_static[:, :-1]], dim=1), dim=1) # (N_rays, N_samples)
+        # T_n = exp(-sum_{j=1}^{n-1} sigma_j delta_j)
+        # Using cumprod of (1-alpha)
+        weights_static = alpha_static * transmittance_static # (N_rays, N_samples)
+        color_static_rendered = torch.sum(weights_static.unsqueeze(-1) * color_static, dim=1) # (N_rays, 3)
+        
+        # Alpha Compositing for Transient
+        alpha_transient = 1.0 - torch.exp(-sigma_transient.squeeze(-1) * dists)
+        transmittance_transient = torch.cumprod(torch.cat([torch.ones_like(alpha_transient[:, 0:1]), 1.0 - alpha_transient[:, :-1]], dim=1), dim=1)
+        weights_transient = alpha_transient * transmittance_transient
+        color_transient_rendered = torch.sum(weights_transient.unsqueeze(-1) * color_transient, dim=1)
+        
+        # Combined Color
+        color_combined = color_static_rendered + color_transient_rendered
+        
+        # Uncertainty
+        # Predict uncertainty beta. Source [S2, unofficial] says "Predict per-ray uncertainty (beta)".
+        # We'll use a simple head.
+        # Input could be the ray direction or the rendered color.
+        # We'll use the rendered color as a proxy for uncertainty prediction in this simplified code.
+        uncertainty = self.uncertainty_head(color_combined) # (N_rays, 1)
+        
+        return color_combined, uncertainty
+
+    def forward(self, rays, image_indices, gt_colors):
+        """
+        Forward pass with loss computation.
+        """
+        pred_color, uncertainty = self.render(rays, image_indices)
+        
+        # Loss: MSE weighted by uncertainty
+        # Source [S2, unofficial] says "downweight unreliable pixels".
+        # This usually means the loss is divided by uncertainty or uncertainty is used as a weight.
+        # Let's assume uncertainty is a weight w.
+        # Loss = sum( w * (pred - gt)^2 )
+        # Or uncertainty is sigma^2, so Loss = sum( (pred - gt)^2 / sigma^2 + log(sigma) )
+        # Source doesn't specify the exact loss function form.
+        # We will use a simple weighting.
+        
+        # Ensure uncertainty is positive
+        uncertainty = torch.clamp(uncertainty, min=1e-6)
+        
+        # Weighted MSE
+        mse = (pred_color - gt_colors) ** 2
+        loss = torch.mean(mse / uncertainty) # Downweighting by uncertainty
+        
+        return loss, pred_color
+```
+
+## Operating characteristics
+*   **Time Complexity:** Training time is significantly higher than standard NeRF due to the additional MLPs and embeddings [S2, unofficial]. Rendering time is similar to NeRF but involves an extra query for transient components during training [S1, S2, unofficial].
+*   **Memory Complexity:** Increased memory usage due to the storage of appearance and transient embeddings for each image, and the additional network parameters [S1, S2, unofficial].
+*   **Performance:** Achieves better performance on unconstrained PhotoTourism datasets compared to standard NeRF [S2, unofficial].
+*   **Strengths:** Handles photometric variations and transient objects effectively [S1, S2, unofficial].
+*   **Limitations:** Sensitive to camera calibration errors [S2, unofficial]. Struggles with sparse views and oblique angles [S2, unofficial]. High computational cost [S2, unofficial]. Limited generalization to unseen viewpoints [S2, unofficial].
+
+## Background
+NeRF-W was introduced in 2021 by Ricardo Martin-Brualla, Noha Radwan, Mehdi S. M. Sajjadi, Jonathan T. Barron, Alexey Dosovitskiy, and Daniel Duckworth [S2, unofficial]. It was developed to address the limitations of NeRF when applied to real-world internet photo collections, which often contain transient objects and photometric variations [S1, S2, unofficial]. The method builds on [NeRF Network Query with Hashed Embeddings](3107-nerf-network-query-with-hashed-embeddings.md) by adding temporal modeling capabilities [S1, S2, unofficial].
+
+## Sources
+[S1] LENS: Localization enhanced by NeRF synthesis, https://doi.org/10.48550/arxiv.2110.06558, fetched 2026-10-26 (unofficial)
+[S2] Lecture 7 – Neural Radiance Fields Prof. Dr., https://virtualhumans.mpi-inf.mpg.de/3DVision25/slides25/pdf/Lecture_07_Neural_Radiance_Fields.pdf, fetched 2026-10-27 (unofficial)

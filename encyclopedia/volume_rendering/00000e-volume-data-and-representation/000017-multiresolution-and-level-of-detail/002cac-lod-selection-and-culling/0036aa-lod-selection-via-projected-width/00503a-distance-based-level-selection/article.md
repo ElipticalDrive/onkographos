@@ -1,0 +1,156 @@
+# Distance-Based Level Selection
+
+Also called: Level Mapping
+
+## Overview
+Distance-Based Level Selection is a mechanism that selects the octree resolution level for each anchor point based on its Euclidean distance from the camera, ensuring closer areas use higher detail and distant areas use simplified representations [S1]. It solves the problem of static LOD allocation by adapting resolution to view-dependent importance. Unlike [LoD Selection via Projected Width](7837-lod-selection-via-projected-width.md), which relies on screen-space footprint, this method uses geometric distance to determine the appropriate octree level, providing a view-dependent hierarchy that balances rendering cost and visual fidelity [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Camera position ($C$), octree branching factor ($fork$), reference distance ($standard\_dist$), bias parameter ($extra\_level$), and a list of anchor points with their 3D positions.
+*   **Outputs:** An integer level index for each anchor point, and optionally a boolean visibility mask.
+
+**Data Structures:**
+*   `_anchor`: Tensor of 3D positions (shape: $[N, 3]$).
+*   `_level`: Tensor of integer levels (shape: $[N]$).
+*   `_anchor_mask`: Boolean visibility mask (shape: $[N]$).
+
+**Steps:**
+1.  **Calculate Distance:** Compute the Euclidean distance between the camera position and each anchor point.
+2.  **Compute Floating-Point Level:** Convert the distance to a continuous level value using a logarithmic formula.
+3.  **Map to Integer Level:** Round the floating-point level to an integer using a specified strategy (round, floor, ceil, or progressive).
+4.  **Filter Visible Anchors:** Create a boolean mask to filter out anchors that are too far or too close for the selected resolution.
+
+**Formulas:**
+The predicted floating-point level is calculated as [S1]:
+$$pred\_level = \frac{\log_2(standard\_dist / dist)}{\log_2(fork)} + extra\_level$$
+
+Where:
+*   $pred\_level$: The predicted floating-point level.
+*   $standard\_dist$: A reference distance (typically the distance at which the base layer is visible).
+*   $dist$: The Euclidean distance from the camera to the anchor point.
+*   $fork$: The branching factor of the octree (typically 2).
+*   $extra\_level$: A bias parameter to shift the LOD selection threshold.
+
+**Parameters:**
+*   $fork$: The branching factor of the tree, determining subdivisions per level. Typical value: 2 [S1].
+*   $extra\_level$: A bias parameter added to the calculated level.
+*   $base\_layer$: The coarsest layer of the octree, corresponding to LOD 0 [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def distance_based_level_selection(camera_position, anchor_positions, fork=2.0, standard_dist=10.0, extra_level=0.0, mapping_strategy='round'):
+    """
+    Selects the octree level for each anchor based on distance from the camera.
+    
+    Args:
+        camera_position: 3D vector (x, y, z)
+        anchor_positions: Nx3 tensor of anchor coordinates
+        fork: Branching factor of the octree (default 2)
+        standard_dist: Reference distance for level calculation
+        extra_level: Bias parameter for level shifting
+        mapping_strategy: 'round', 'floor', 'ceil', or 'progressive'
+        
+    Returns:
+        levels: Nx1 tensor of integer levels
+    """
+    # Step 1: Calculate Euclidean distance
+    # diff = anchor_positions - camera_position
+    # dist = np.linalg.norm(diff, axis=1)
+    dist = np.sqrt(np.sum((anchor_positions - camera_position)**2, axis=1))
+    
+    # Avoid division by zero or log of zero/negative
+    dist = np.maximum(dist, 1e-6)
+    
+    # Step 2: Convert distance to floating-point level
+    # pred_level = log2(standard_dist / dist) / log2(fork) + extra_level
+    pred_level = (np.log2(standard_dist / dist) / np.log2(fork)) + extra_level
+    
+    # Step 3: Map to integer level
+    if mapping_strategy == 'round':
+        levels = np.round(pred_level).astype(int)
+    elif mapping_strategy == 'floor':
+        levels = np.floor(pred_level).astype(int)
+    elif mapping_strategy == 'ceil':
+        levels = np.ceil(pred_level).astype(int)
+    elif mapping_strategy == 'progressive':
+        # Progressive strategy returns float for interpolation, 
+        # but for basic selection, it might still return int or handle blending elsewhere.
+        # Based on [S1], progressive is a strategy for smooth transitions, 
+        # often implying the fractional part is used for blending rather than hard selection.
+        # For this function, we return the float to allow caller to handle blending,
+        # or we can clamp to int if strict integer levels are required.
+        # Given the context of "Level Selection", we return the float for progressive logic.
+        return pred_level
+    else:
+        raise ValueError(f"Unknown mapping strategy: {mapping_strategy}")
+        
+    return levels
+
+def set_anchor_mask(camera_position, anchor_positions, fork=2.0, standard_dist=10.0, extra_level=0.0):
+    """
+    Creates a boolean visibility mask for anchor points based on their computed LOD level.
+    
+    Args:
+        camera_position: 3D vector
+        anchor_positions: Nx3 tensor
+        fork: Branching factor
+        standard_dist: Reference distance
+        extra_level: Bias parameter
+        
+    Returns:
+        anchor_mask: Boolean tensor of shape (N,)
+    """
+    # Compute distances
+    dist = np.sqrt(np.sum((anchor_positions - camera_position)**2, axis=1))
+    dist = np.maximum(dist, 1e-6)
+    
+    # Compute floating point level
+    pred_level = (np.log2(standard_dist / dist) / np.log2(fork)) + extra_level
+    
+    # Map to integer level (using round as default for mask generation)
+    levels = np.round(pred_level).astype(int)
+    
+    # Create boolean mask
+    # The mask indicates if the anchor should be visible based on level criteria.
+    # Typically, anchors with levels within the valid octree range are visible.
+    # Assuming valid levels are >= 0.
+    anchor_mask = levels >= 0
+    
+    return anchor_mask
+```
+
+**Edge Cases and Pitfalls:**
+*   **Zero Distance:** If an anchor is at the camera position, $dist=0$, causing $\log(1/0)$ to be undefined. Guard against this by clamping $dist$ to a minimum value (e.g., $10^{-6}$) [G].
+*   **Negative Levels:** Anchors very far away may result in negative levels. These should be filtered out or clamped to the coarsest level (LOD 0) [G].
+*   **Precision:** Floating-point precision in the logarithmic calculation may cause jitter in level selection for anchors at similar distances. Using `progressive` transitions can mitigate visual popping [S1].
+
+## Subtopics
+
+### [Progressive Level Transitions](14190-progressive-level-transitions.md)
+Progressive Level Transitions is a technique used in volume rendering to eliminate sudden visual discontinuities (popping artifacts) when switching between different levels of detail (LOD) in an octree-based representation. It solves the problem of abrupt changes in opacity and geometry by interpolating Gaussian properties between adjacent integer resolution levels using the fractional part of the computed distance-based level. Unlike standard LOD selection which performs a hard switch, this method ensures continuous visual transitions, which is particularly critical for scenes with moving cameras.
+
+### Automatic Level Adaptation
+Automatic Level Adaptation is a mechanism to automatically determine the optimal number of octree levels based on the scene's distance distribution relative to the camera, avoiding manual tuning. It calculates distance statistics for each camera position, determines appropriate min and max distances, and computes the optimal number of levels using the formula: $levels = \frac{\log_2(dist\_max / dist\_min)}{\log_2(fork)} + 1$ if the levels parameter is not explicitly specified [S1].
+
+### Anchor Masking
+Anchor Masking is a process that creates a boolean visibility mask for anchor points based on their computed LOD level, filtering out anchors that are too far or too close for the selected resolution. It computes the distance from each anchor to the camera, converts distances to level values, and creates a boolean mask where True indicates the anchor should be visible. This mask is then used to filter anchors before passing them to the renderer [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of anchor points, as each anchor requires a constant-time distance calculation and logarithmic evaluation.
+*   **Memory Complexity:** $O(N)$ to store the anchor positions, levels, and masks.
+*   **Strengths:** Simple to implement; view-dependent; adapts to camera movement; reduces rendering cost for distant objects.
+*   **Limitations:** May cause popping artifacts if not combined with progressive transitions; requires careful tuning of $standard\_dist$ and $extra\_level$ for different scenes.
+*   **When to Use:** Scenes with significant depth variation and moving cameras where screen-space projection is expensive or inaccurate.
+*   **When Not to Use:** Static scenes with uniform depth distribution where simpler LOD strategies suffice.
+
+## Background
+Distance-Based Level Selection is a core component of the LOD system in Octree-GS, a method for 3D Gaussian Splatting using octree structures. It was introduced in the Octree-GS project by city-super [S1]. The method leverages the hierarchical nature of octrees to provide efficient rendering of large-scale 3D scenes by dynamically adjusting the resolution based on the viewer's proximity to the content.
+
+## Sources
+[S1] Level of Detail System | city-super/Octree-GS | DeepWiki, https://deepwiki.com/city-super/Octree-GS/2.3-level-of-detail-system, fetched 2026-10-28

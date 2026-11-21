@@ -1,0 +1,232 @@
+--- v006.md
++++ v007.md
+@@ -6,19 +6,19 @@
+ 
+ ## How it works
+-The method processes rays in batches, launching separate CUDA kernels for ray generation, intersection, neural inference, and composition. It repeats these steps until all rays have either converged (alpha $\ge$ nearly_one) or are determined to be resumable but exhausted [S1, unofficial].
++The method processes rays in batches, launching separate CUDA kernels for ray generation, intersection, neural inference, and composition [S1, unofficial]. It repeats these steps until all rays have either converged (alpha $\ge$ nearly_one) or are determined to be resumable but exhausted [S1, unofficial].
+ 
+ ### Inputs and Outputs
+ *   **Inputs**:
+-    *   Camera parameters (origin, direction, frame index).
+-    *   Neural network model (or ground truth data if no network is provided).
+-    *   Transfer function (color and alpha mapping).
++    *   Camera parameters (origin, direction, frame index) [S1, unofficial].
++    *   Neural network model (or ground truth data if no network is provided) [S1, unofficial].
++    *   Transfer function (color and alpha mapping) [S1, unofficial].
+     *   Rendering mode (e.g., `SHADOW`, `GRADIENT_SHADING`, `SINGLE_SHADE_HEURISTIC`) [S1, unofficial].
+-    *   Parameters: `N_ITERS` (samples per kernel launch), `numCoordsPerSample` (4 for gradient shading, 1 otherwise) [S1, unofficial].
++    *   Parameters: `N_ITERS` (samples per kernel launch iteration), `numCoordsPerSample` (4 for gradient shading, 1 otherwise) [S1, unofficial].
+ *   **Outputs**:
+-    *   Final pixel color and alpha buffer.
++    *   Final pixel color and alpha buffer [S1, unofficial].
+     *   Intermediate state for shadow rays (highest alpha/color/org) [S1, unofficial].
+ 
+ ### Data Structures
+-*   **params.counter**: A GPU buffer tracking the number of active rays. Initialized to zero using `cudaMemsetAsync` [S1, unofficial].
++*   **params.counter**: A GPU buffer tracking the number of active rays [S1, unofficial]. Initialized to zero using `cudaMemsetAsync` [S1, unofficial].
+ *   **params.inference_output**: A buffer of float values containing the neural network output (sample value) at indices `[numRays * k + i]` [S1, unofficial].
+ *   **RayMarchingIter**: Payload structure saved for active rays, containing current ray state (origin, direction, current alpha, color, transmittance) [S1, unofficial].
+@@ -32,9 +32,9 @@
+ 
+ 2.  **Main Loop**:
+-    *   Check if any rays remain active by asynchronously copying `params.counter` to host memory and synchronizing. If count > 0, continue [S1, unofficial].
+-    *   Launch `iterative_intersect_kernel<MODE>` with `N_ITERS` to compute sample coordinates for active rays. If `GRADIENT_SHADING`, compute gradient sample points by adding `gradientStep` to the current position [S1, unofficial].
+-    *   Perform neural network inference: Call `iterative_sampling_batch_inference` with input size `numCoordsPerSample * numRays`. If no network is provided, launch `iterative_sampling_groundtruth_kernel` [S1, unofficial].
++    *   Check if any rays remain active by asynchronously copying `params.counter` to host memory and synchronizing [S1, unofficial]. If count > 0, continue [S1, unofficial].
++    *   Launch `iterative_intersect_kernel<MODE>` with `N_ITERS` to compute sample coordinates for active rays [S1, unofficial]. If `GRADIENT_SHADING`, compute gradient sample points by adding `gradientStep` to the current position [S1, unofficial].
++    *   Perform neural network inference: Call `iterative_sampling_batch_inference` with input size `numCoordsPerSample * numRays` [S1, unofficial]. If no network is provided, launch `iterative_sampling_groundtruth_kernel` [S1, unofficial].
+     *   Reset `params.counter` to zero for the next iteration's compaction check [S1, unofficial].
+-    *   Launch `iterative_compose_kernel<MODE>` with `N_ITERS` to classify, shade, and blend samples for active rays. Rays that are not yet fully opaque (alpha < nearly_one) and are resumable are saved for the next iteration [S1, unofficial].
++    *   Launch `iterative_compose_kernel<MODE>` with `N_ITERS` to classify, shade, and blend samples for active rays [S1, unofficial]. Rays that are not yet fully opaque (alpha < nearly_one) and are resumable are saved for the next iteration [S1, unofficial].
+ 
+ 3.  **Finalization**:
+@@ -45,25 +45,25 @@
+ **Ray Generation (`iterative_raygen_kernel_camera`)**:
+ *   Generate random jitter using `RandomTEA` seeded by `params.frame_index` and ray index `i` [S1, unofficial].
+-*   Compute ray origin and direction. If the ray intersects the volume, initialize `RayMarchingIter` and save the payload; otherwise, write a default color if `SINGLE_SHADE_HEURISTIC` is not active [S1, unofficial].
++*   Compute ray origin and direction [S1, unofficial]. If the ray intersects the volume, initialize `RayMarchingIter` and save the payload; otherwise, write a default color if `SINGLE_SHADE_HEURISTIC` is not active [S1, unofficial].
+ 
+ **Ray Generation (`iterative_raygen_kernel_shadow`)**:
+-*   Use pre-computed `highest_org` and `jitter_ssh` from the previous camera pass. Create a shadow ray. If it intersects and the highest alpha > 0, save the payload; otherwise, write the existing shading color [S1, unofficial].
++*   Use pre-computed `highest_org` and `jitter_ssh` from the previous camera pass [S1, unofficial]. Create a shadow ray [S1, unofficial]. If it intersects and the highest alpha > 0, save the payload; otherwise, write the existing shading color [S1, unofficial].
+ 
+ **Intersection (`iterative_intersect_kernel`)**:
+ *   For each sample `k`, compute the object space position `c` using linear interpolation:
+     $$ c = \text{lerp}(\text{jitter}, t.x, t.y) $$
+-    where $t$ is the ray parameter range [S1, unofficial].
++    where $t.x$ and $t.y$ are the ray parameter bounds [S1, unofficial].
+ *   If `GRADIENT_SHADING`, compute gradient sample points $g_x, g_y, g_z$ by adding `gradientStep` to $c$, and store them in the inference input buffer [S1, unofficial].
+ 
+ **Composition (`iterative_compose_kernel`)**:
+-*   Retrieve sample value from `params.inference_output`.
++*   Retrieve sample value from `params.inference_output` [S1, unofficial].
+ *   Apply transfer function to get `sampleColor` and `sampleAlpha` [S1, unofficial].
+ *   Apply `opacityCorrection` [S1, unofficial].
+ *   If `GRADIENT_SHADING`:
+-    *   Compute normal $N_o$ from gradients and sample value.
+-    *   Transform to world space $N_w$.
++    *   Compute normal $N_o$ from gradients and sample value [S1, unofficial].
++    *   Transform to world space $N_w$ [S1, unofficial].
+     *   Calculate `shadingColor` and lerp with `sampleColor` using `shadingScale` [S1, unofficial].
+ *   If `SINGLE_SHADE_HEURISTIC`:
+-    *   Track the highest alpha sample. If `ssh.highest_alpha < (1.f - ray.alpha) * sampleAlpha`, update `ssh.highest_org`, `ssh.highest_color`, and `ssh.highest_alpha` [S1, unofficial].
++    *   Track the highest alpha sample [S1, unofficial]. If `ssh.highest_alpha < (1.f - ray.alpha) * sampleAlpha`, update `ssh.highest_org`, `ssh.highest_color`, and `ssh.highest_alpha` [S1, unofficial].
+ *   Perform volume blending:
+     $$ tr = 1.f - ray.alpha $$
+@@ -71,5 +71,5 @@
+     $$ ray.color += tr * sampleColor * sampleAlpha $$
+     [S1, unofficial]
+-*   Continue iteration if $k < N\_ITERS$ and $ray.alpha < nearly\_one$. If the ray is finished:
++*   Continue iteration if $k < N\_ITERS$ and $ray.alpha < nearly\_one$ [S1, unofficial]. If the ray is finished:
+     *   For `SHADOW` mode, lerp `shadingColor` with `final_highest_color * shadingColor.w * transmittance` [S1, unofficial].
+     *   For `SINGLE_SHADE_HEURISTIC`, save final highest org/color/alpha and `shading_color` [S1, unofficial].
+@@ -79,38 +79,96 @@
+ 
+ ```python
+-def iterative_ray_marching(camera, volume, transfer_function, mode, N_ITERS):
+-    # Initialize counter
+-    params.counter = cuda_memset_async(0)
+-    
+-    # Initial Ray Generation
+-    if mode == SHADOW:
+-        iterative_raygen_kernel_shadow(camera, params)
+-    else:
+-        iterative_raygen_kernel_camera(camera, params)
+-        
+-    # Main Loop
+-    while True:
+-        # Check active rays
+-        active_count = host_sync(params.counter)
+-        if active_count == 0:
++def iterative_ray_marching(camera, volume, transfer_function, mode, N_ITERS, nearly_one):
++    # State initialization
++    active_rays = []
++    counter = 0
++    inference_input = []
++    inference_output = []
++
++    # 1. Ray Generation
++    for i in range(camera.num_rays):
++        jitter = random_tea(camera.frame_index, i)
++        origin, direction = camera.compute_ray(i, jitter)
++        hit = volume.intersect(origin, direction)
++        if hit:
++            ray_state = {
++                'origin': origin, 'direction': direction,
++                'alpha': 0.0, 'color': [0.0, 0.0, 0.0],
++                't_min': hit.t_min, 't_max': hit.t_max,
++                'jitter': jitter, 'finished': False,
++                'highest_alpha': 0.0, 'highest_color': [0.0, 0.0, 0.0], 'highest_org': origin
++            }
++            active_rays.append(ray_state)
++            counter += 1
++        else:
++            camera.framebuffer[i] = camera.default_color if mode != 'SINGLE_SHADE_HEURISTIC' else [0.0, 0.0, 0.0, 0.0]
++
++    # 2. Main Iterative Loop
++    while counter > 0:
++        # Check active rays (async copy & sync simulated)
++        if counter == 0:
+             break
+-            
+-        # Intersection
+-        iterative_intersect_kernel<mode>(params, N_ITERS)
+-        
+-        # Neural Inference
++
++        # 3. Intersection Kernel
++        inference_input = []
++        for ray in active_rays:
++            for k in range(N_ITERS):
++                t_x = ray.t_min + k * ray.step_size
++                t_y = ray.t_max
++                c = lerp(ray.jitter, t_x, t_y)
++                if mode == 'GRADIENT_SHADING':
++                    gx = c + gradient_step
++                    gy = c + gradient_step
++                    gz = c + gradient_step
++                    inference_input.extend([c, gx, gy, gz])
++                else:
++                    inference_input.append(c)
++
++        # 4. Neural Inference
+         if volume.is_network():
+-            iterative_sampling_batch_inference(params, N_ITERS)
++            inference_output = neural_network_forward(inference_input)
+         else:
+-            iterative_sampling_groundtruth_kernel(params, N_ITERS)
+-            
+-        # Reset counter for compaction
+-        params.counter = cuda_memset_async(0)
+-        
+-        # Composition
+-        iterative_compose_kernel<mode>(params, N_ITERS, transfer_function)
+-        
+-    # Final Write
+-    write_final_results(params)
++            inference_output = ground_truth_lookup(inference_input)
++
++        # 5. Reset counter for compaction
++        counter = 0
++        next_active_rays = []
++
++        # 6. Composition Kernel
++        for ray in active_rays:
++            for k in range(N_ITERS):
++                sample_val = inference_output.pop(0)
++                sample_color, sample_alpha = transfer_function.apply(sample_val)
++                sample_alpha = opacity_correction(sample_alpha)
++
++                if mode == 'GRADIENT_SHADING':
++                    shading_color = phong_shading(sample_color, sample_val)
++                    sample_color = lerp(sample_color, shading_color, shading_scale)
++
++                if mode == 'SINGLE_SHADE_HEURISTIC':
++                    if ray.highest_alpha < (1.0 - ray.alpha) * sample_alpha:
++                        ray.highest_alpha = (1.0 - ray.alpha) * sample_alpha
++                        ray.highest_color = sample_color
++                        ray.highest_org = ray.origin
++
++                tr = 1.0 - ray.alpha
++                ray.alpha += tr * sample_alpha
++                ray.color += tr * sample_color * sample_alpha
++
++                if ray.alpha >= nearly_one or k == N_ITERS - 1:
++                    ray.finished = True
++                    if mode == 'SHADOW':
++                        ray.color = lerp(ray.color, ray.highest_color * ray.shading_color.w * tr, 0.5)
++                    elif mode == 'SINGLE_SHADE_HEURISTIC':
++                        ray.final_highest = (ray.highest_org, ray.highest_color, ray.highest_alpha)
++                        ray.final_shading = ray.shading_color
++                    camera.framebuffer[ray.pixel_index] = ray.color + [ray.alpha]
++                else:
++                    counter += 1
++                    next_active_rays.append(ray)
++
++        active_rays = next_active_rays
++
++    return camera.framebuffer
+ ```
+ 
+@@ -124,13 +182,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Depends on the number of active rays and the depth of the volume. Each iteration processes `N_ITERS` samples per ray. Rays that do not converge quickly require multiple kernel launches, increasing overhead compared to single-pass methods.
+-*   **Memory Complexity**: Requires buffers for active ray state, inference inputs/outputs, and the counter. The separation of kernels allows for efficient memory reuse but adds synchronization overhead.
+-*   **Strengths**: Handles variable ray depths and complex occlusion dynamically. Suitable for scenes with varying density where some rays converge quickly and others require many samples.
+-*   **Limitations**: Kernel launch overhead for each iteration. Potential for "wired errors" if kernels are merged. Requires careful tuning of `N_ITERS` to balance between launch overhead and per-kernel work.
+-*   **When to Use**: Scenes with high variance in ray depth or density, where fixed-step methods might waste samples or fail to converge.
+-*   **When Not to Use**: Simple, uniform volumes where single-pass methods are sufficient and faster.
++*   **Time Complexity**: Not given in the sources. Each iteration processes `N_ITERS` samples per ray [S1, unofficial]. Rays that do not converge quickly require multiple kernel launches, increasing overhead compared to single-pass methods [S1, unofficial].
++*   **Memory Complexity**: Not given in the sources. Requires buffers for active ray state, inference inputs/outputs, and the counter [S1, unofficial]. The separation of kernels allows for efficient memory reuse but adds synchronization overhead [S1, unofficial].
++*   **Strengths**: Handles variable ray depths and complex occlusion dynamically [S1, unofficial]. Suitable for scenes with varying density where some rays converge quickly and others require many samples [S1, unofficial].
++*   **Limitations**: Kernel launch overhead for each iteration [S1, unofficial]. Potential for "wired errors" if kernels are merged [S1, unofficial]. Requires careful tuning of `N_ITERS` to balance between launch overhead and per-kernel work [S1, unofficial].
++*   **When to Use**: Scenes with high variance in ray depth or density, where fixed-step methods might waste samples or fail to converge [S1, unofficial].
++*   **When Not to Use**: Simple, uniform volumes where single-pass methods are sufficient and faster [S1, unofficial].
+ 
+ ## Background
+-Iterative Ray Marching with Neural Volume Inference is part of the `instantvnr` library by VIDILabs [S1, unofficial]. It is designed to provide flexible and efficient neural volume rendering on GPUs, supporting various shading modes and integration strategies. The method addresses the challenge of handling rays that do not fully converge in a single pass, which is common in neural volume rendering due to the implicit nature of the data.
++Iterative Ray Marching with Neural Volume Inference is part of the `instantvnr` library by VIDILabs [S1, unofficial]. It is designed to provide flexible and efficient neural volume rendering on GPUs, supporting various shading modes and integration strategies [S1, unofficial]. The method addresses the challenge of handling rays that do not fully converge in a single pass, which is common in neural volume rendering due to the implicit nature of the data [S1, unofficial].
+ 
+ ## Sources

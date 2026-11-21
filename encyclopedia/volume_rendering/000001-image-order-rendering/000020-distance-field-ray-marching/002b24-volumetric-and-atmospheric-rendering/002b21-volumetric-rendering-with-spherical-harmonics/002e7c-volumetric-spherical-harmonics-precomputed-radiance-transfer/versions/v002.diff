@@ -1,0 +1,221 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Volumetric Spherical Harmonics Precomputed Radiance Transfer (VSH-PRT) is a technique for rendering semi-transparent volumetric datasets with dynamic lighting by precomputing the scene's response to illumination. It solves the problem of expensive real-time volume rendering by compressing the 6D Volume Radiance Transfer function into spherical harmonic coefficients stored on a surface mesh, allowing for fast runtime evaluation under arbitrary distant lighting [S2, unofficial]. It sets itself apart from direct volume rendering by decoupling the expensive volume integration from the render loop, and from standard surface PRT by explicitly handling the volumetric scattering process to determine the exit radiance [S2, S1, unofficial].
++Volumetric Spherical Harmonics Precomputed Radiance Transfer (VSH-PRT) is a technique for rendering semi-transparent volumetric datasets with dynamic lighting by precomputing the scene's response to illumination [S2, unofficial]. It solves the problem of expensive real-time volume rendering by compressing the 6D Volume Radiance Transfer function into spherical harmonic coefficients stored on a surface mesh, allowing for fast runtime evaluation under arbitrary distant lighting [S2, unofficial]. It sets itself apart from direct volume rendering by performing the volume integration offline and compressing the result, and from standard surface PRT by explicitly handling the volumetric scattering process to determine the exit radiance [S2, unofficial].
+ 
+ ## How it works
+@@ -17,29 +17,20 @@
+ 
+ **Data Structures:**
+-- **Surface Mesh:** A triangle mesh extracted from the volume. Each vertex $v$ stores a vector of spherical harmonic coefficients.
+-- **SH Coefficients:** For a given vertex, the coefficients represent the Volume Radiance Transfer function compressed into the spherical harmonic basis. The size of this vector depends on the number of bands $L$. The number of coefficients $N$ for order $L$ is $(L+1)^2$ [S2, unofficial].
+-- **Volume Radiance Transfer (VRT):** Defined as a 6D function: two dimensions for incoming light direction, two dimensions for the location of the exiting radiance point (surface position), and two dimensions for the viewing direction [S2, unofficial].
++- **Surface Mesh:** A triangle mesh extracted from the volume data [S2, unofficial]. Each vertex $v$ stores a vector of spherical harmonic coefficients [S2, unofficial].
++- **SH Coefficients:** For a given vertex, the coefficients represent the Volume Radiance Transfer function compressed into the spherical harmonic basis [S2, unofficial]. The size of this vector depends on the number of basis functions used in the compression stage [S2, unofficial].
++- **Volume Radiance Transfer (VRT):** Defined as a 6D function: two dimensions for incoming light direction, two dimensions for the location of the exiting radiance point, and two dimensions for the viewing direction [S2, unofficial].
+ 
+ **Parameters:**
+-- $L$: The order of the spherical harmonic basis. The number of basis functions is $N = (L+1)^2$. Typical values tested include $L=6$ (49 SHs), $L=9$ (100 SHs), $L=13$ (196 SHs), and $L=19$ (400 SHs) [S2, unofficial].
++- $L$: The order of the spherical harmonic basis. The number of basis functions is $N = (L+1)^2$ [G]. Typical tested values include 49, 100, 196, and 400 basis functions [S2, unofficial].
+ - $N_{views}$: The number of view directions sampled during precomputation. Example: 4000 directions [S2, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Surface Extraction:** Generate a surface representation (isosurface) of the volume data. For objects with a well-defined boundary, record the ray at the surface point where it exits the volume. Note that for distant illumination, the ray direction does not change after exiting the surface [S2, unofficial].
+-
+-2.  **Volume Radiance Sampling:** For each vertex on the extracted surface, sample the volume-scattered radiance along a sufficient number of incoming light directions and viewing directions using direct volume rendering algorithms. This computes the raw 6D VRT function for the surface points [S2, unofficial].
+-    *   *Note:* This step is computationally expensive and is performed offline. Tools like OpenSplat can be used for this sampling [S2, unofficial].
+-
+-3.  **Spherical Harmonic Compression:** Compress the sampled volume radiance transfer function for each vertex using spherical harmonic basis functions. This involves projecting the sampled radiance data onto the SH basis to obtain the coefficients [S2, unofficial].
+-    *   Let $L_i(\omega)$ be the precomputed unit contribution of light $i$ in direction $\omega$. The scene's response is modeled as a distribution defined by SH basis functions [S1, unofficial].
+-    *   The coefficients $c_{lm}$ are calculated by integrating the sampled radiance against the SH basis functions $Y_{lm}(\omega)$ [S1, S2, unofficial].
+-
+-4.  **Runtime Rendering:** At runtime, for a given viewing direction and lighting setup:
+-    a. Re-sample the surface-mapped volume radiance transfer for the given viewing direction.
+-    b. Evaluate the SH coefficients to determine the radiance contribution.
+-    c. The final radiance $L(p)$ for a point $p$ is computed by combining the precomputed coefficients with the current light intensities [S1, unofficial].
+-    $$ L(p) = \sum_{i} W_i \cdot L_i(p) $$
+-    Where $W_i$ is the brightness of light $i$ and $L_i(p)$ is the precomputed unit contribution [S1, unofficial].
++1. **Surface Extraction & Ray Recording:** Generate a surface representation of the volume data and associate the volume radiance transfer function for every extracted surface point [S2, unofficial]. For objects with a well-defined boundary, record the ray at the surface point where it exits, noting that the ray will not change after it exits the surface [S2, unofficial].
++2. **Volume Radiance Sampling:** For each vertex on the extracted surface, sample the volume-scattered radiance along a sufficient number of directions using direct volume rendering algorithms [S2, unofficial].
++3. **Spherical Harmonic Compression:** Compress the sampled volume radiance transfer function for each vertex using spherical harmonic basis functions [S2, unofficial].
++4. **Runtime Rendering:** At runtime, render the scene by re-sampling the surface-mapped volume radiance transfer for a given viewing direction [S2, unofficial]. The final radiance $L(p)$ for a point $p$ is computed by combining the precomputed coefficients with the current light intensities [S1, unofficial].
++$$ L(p) = \sum_{i} W_i \cdot L_i(p) $$
++Where $W_i$ is the brightness of light $i$ and $L_i(p)$ is the precomputed unit contribution of light $i$ [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -47,100 +38,61 @@
+ ```python
+ def precompute_vrt(volume_data, surface_mesh, num_bands):
+-    """
+-    Precompute Volume Radiance Transfer coefficients for a surface mesh.
+-    
+-    Args:
+-        volume_data: 3D array representing the volumetric dataset.
+-        surface_mesh: List of vertices and triangles extracted from volume_data.
+-        num_bands: Integer L, defining the SH order. Total coefficients N = (L+1)^2.
+-        
+-    Returns:
+-        vertex_sh_coeffs: Dictionary mapping vertex_id to list of SH coefficients.
+-    """
++    """Precompute VRT coefficients for a surface mesh."""
+     vertex_sh_coeffs = {}
+-    
+-    # Step 1: Sample VRT for each vertex
+-    # For each vertex, we need to sample radiance for various incoming light directions
+-    # and viewing directions.
+-    num_samples = 4000 # Example from source [S2, unofficial]
+-    light_directions = sample_spherical_directions(num_samples)
++    num_samples = 4000
++    directions = generate_uniform_sphere_directions(num_samples)
+     
+     for vertex in surface_mesh.vertices:
+-        # Sample the volume-scattered radiance along sufficient number of directions
+-        # using direct volume rendering algorithms [S2, unofficial].
+-        # This involves casting rays through the volume from the vertex position
+-        # in various directions and accumulating scattering.
+         sampled_radiance = []
+-        
+-        for light_dir in light_directions:
+-            # Direct volume rendering integration from vertex position
+-            # along the light direction (or viewing direction, depending on 
+-            # specific VRT definition implementation).
+-            # The source [S2, unofficial] states: "sample the volume-scattered radiance 
+-            # along sufficient number of directions... and compress this VRT".
+-            radiance_value = direct_volume_render_sample(volume_data, vertex.position, light_dir)
+-            sampled_radiance.append(radiance_value)
+-            
+-        # Step 2: Compress with Spherical Harmonics [S2, unofficial]
+-        # Project sampled_radiance onto SH basis functions.
+-        # The SH basis functions Y_lm are defined for the sphere.
+-        sh_coeffs = compress_to_spherical_harmonics(sampled_radiance, light_directions, num_bands)
+-        
+-        vertex_sh_coeffs[vertex.id] = sh_coeffs
+-        
++        for d in directions:
++            # Standard volume integration along direction d from vertex position
++            radiance = ray_march_volume(volume_data, vertex.position, d)
++            sampled_radiance.append(radiance)
++        # Project sampled radiance onto SH basis functions
++        coeffs = project_to_sh_basis(sampled_radiance, directions, num_bands)
++        vertex_sh_coeffs[vertex.id] = coeffs
+     return vertex_sh_coeffs
+ 
+ def render_runtime(surface_mesh, vertex_sh_coeffs, light_intensities, view_direction):
+-    """
+-    Render the scene using precomputed VRT coefficients.
+-    
+-    Args:
+-        surface_mesh: The surface mesh.
+-        vertex_sh_coeffs: Precomputed SH coefficients per vertex.
+-        light_intensities: List of light source intensities W_i.
+-        view_direction: Current camera/view direction.
+-        
+-    Returns:
+-        Image buffer.
+-    """
+-    image = create_image_buffer()
+-    
++    """Render scene using precomputed VRT coefficients."""
++    image = allocate_image_buffer()
+     for triangle in surface_mesh.triangles:
+-        # Interpolate vertex coefficients for the current pixel/fragment
+-        # If using the "Interpolated" method without SH compression, 
+-        # linearly interpolate among the four pre-computed radiance values 
+-        # closest to the current viewing position [S2, unofficial].
+-        # With SH, we evaluate the SH function.
+-        
+-        # For each vertex in the triangle, retrieve SH coefficients
+-        coeffs_v0 = vertex_sh_coeffs[triangle.v0.id]
+-        coeffs_v1 = vertex_sh_coeffs[triangle.v1.id]
+-        coeffs_v2 = vertex_sh_coeffs[triangle.v2.id]
+-        
+-        # Interpolate coefficients across the triangle (barycentric interpolation)
+-        # [G] Standard barycentric interpolation is assumed for mesh shading.
+-        bary = compute_barycentric_coords(triangle, fragment_uv)
+-        interpolated_coeffs = (bary[0] * coeffs_v0 + 
+-                               bary[1] * coeffs_v1 + 
+-                               bary[2] * coeffs_v2)
+-        
+-        # Evaluate the SH function for the view direction and light directions
+-        # The final radiance Li(p) is the precomputed unit contribution [S1, unofficial].
+-        # L(p) = sum(W_i * L_i(p)) [S1, unofficial]
++        c0 = vertex_sh_coeffs[triangle.v0.id]
++        c1 = vertex_sh_coeffs[triangle.v1.id]
++        c2 = vertex_sh_coeffs[triangle.v2.id]
++        bary = compute_barycentric_coordinates(triangle, current_uv)
++        interp_coeffs = bary[0]*c0 + bary[1]*c1 + bary[2]*c2
+         
+         radiance = 0.0
+         for i, intensity in enumerate(light_intensities):
+-            # Evaluate SH basis at view direction and light direction
+-            # [G] The exact evaluation of SH basis Y_lm(omega) is a standard math operation.
+-            sh_value = evaluate_sh(interpolated_coeffs, view_direction, light_directions[i])
+-            radiance += intensity * sh_value
+-            
++            sh_val = evaluate_sh_function(interp_coeffs, view_direction, directions[i])
++            radiance += intensity * sh_val
+         image.set_pixel(triangle, radiance)
+-        
+     return image
++
++# Standard helper definitions [G]
++def generate_uniform_sphere_directions(n):
++    return [uniform_sample_on_sphere() for _ in range(n)]
++
++def ray_march_volume(vol, origin, dir):
++    # Standard direct volume rendering integration
++    return standard_volume_integration(vol, origin, dir)
++
++def project_to_sh_basis(radiance_samples, directions, bands):
++    # Solve linear system or apply precomputed SH projection matrix
++    return standard_sh_projection(radiance_samples, directions, bands)
++
++def allocate_image_buffer():
++    return empty_array()
++
++def compute_barycentric_coordinates(tri, uv):
++    return standard_barycentric_calculation(tri, uv)
++
++def evaluate_sh_function(coeffs, view_dir, light_dir):
++    return standard_sh_evaluation(coeffs, view_dir, light_dir)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Ringing Artifacts:** The method exhibits ringing artifacts due to the truncation of the spherical harmonic series. Prefiltering can mitigate this but leads to undesirable smoothening of the lighting [S1, unofficial].
++- **Ringing Artifacts:** The method exhibits ringing artifacts due to the truncation of the spherical harmonic series [S1, unofficial]. Prefiltering can mitigate this but leads to undesirable smoothening of the lighting [S1, unofficial].
+ - **Precision Loss:** If two triangles cover the same texel and have significantly different tangent spaces, there is a lack of precision in the reconstructed signal [S1, unofficial].
+ - **High Costs:** The method presents relatively high memory and bandwidth costs, as well as high runtime cost compared to simpler interpolation methods [S1, unofficial].
+@@ -148,6 +100,6 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-- **Memory:** The memory requirement per vertex scales with the number of spherical harmonic basis functions $N = (L+1)^2$. For the Neghip dataset (64^3 volume), memory per vertex ranges from 294 bytes (49 SHs) to 12K bytes (Interpolated method) [S2, unofficial].
+-- **Runtime:** The rendering speed declines as the number of SH basis functions increases. The run-time algorithm has lower time complexity than direct volume rendering algorithms [S2, unofficial].
++- **Memory:** The memory requirement per vertex scales with the number of spherical harmonic basis functions [S2, unofficial]. For the Neghip dataset (64^3 volume), memory per vertex ranges from 294 bytes (49 SHs) to 12K bytes (Interpolated method) [S2, unofficial].
++- **Runtime:** The rendering speed declines as the number of SH basis functions increases [S2, unofficial]. The run-time algorithm has lower time complexity than direct volume rendering algorithms [S2, unofficial].
+ 
+ **Measured Performance:**
+@@ -161,14 +113,14 @@
+ 
+ **Strengths and Limitations:**
+-- **Strengths:** Allows for efficient synthesis of the appearance of volumetric objects at runtime for any given view direction under arbitrary lighting. Provides consistent lighting between static and dynamic geometry [S1, S2, unofficial].
+-- **Limitations:** High memory and bandwidth costs. High runtime cost compared to interpolation. Ringing artifacts require prefiltering, which smooths lighting [S1, unofficial].
++- **Strengths:** Allows for efficient synthesis of the appearance of volumetric objects at runtime for any given view direction under arbitrary lighting [S2, unofficial]. Provides consistent lighting between static and dynamic geometry [S1, unofficial].
++- **Limitations:** High memory and bandwidth costs [S1, unofficial]. High runtime cost compared to interpolation [S1, unofficial]. Ringing artifacts require prefiltering, which smooths lighting [S1, unofficial].
+ 
+ **When to Use:**
+-- Use when dynamic lighting is required for volumetric data and direct volume rendering is too slow.
+-- Use when the volume has a well-defined boundary.
++- Use when dynamic lighting is required for volumetric data and direct volume rendering is too slow [S1, unofficial].
++- Use when the volume has a well-defined boundary [S2, unofficial].
+ 
+ **When Not to Use:**
+-- Do not use if memory bandwidth is a critical bottleneck.
+-- Do not use if high-frequency lighting details are required and ringing artifacts are unacceptable without smoothing.
++- Do not use if memory bandwidth is a critical bottleneck [S1, unofficial].
++- Do not use if high-frequency lighting details are required and ringing artifacts are unacceptable without smoothing [S1, unofficial].
+ 
+ ## Background

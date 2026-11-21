@@ -1,0 +1,135 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A curvilinear mesh (hexahedral cells), a viewpoint $V$, and a BSP tree constructed from exterior faces.
+-*   **Outputs:** A visibility-sorted list of cells ready for compositing, with problem cells temporarily modified into tetrahedral representations.
++*   **Inputs:** A curvilinear mesh (hexahedral cells), a viewpoint $V$, and a BSP tree constructed from exterior faces [S1].
++*   **Outputs:** A visibility-sorted list of cells ready for compositing, with problem cells temporarily modified into tetrahedral representations [S1].
+ 
+ **Data Structures:**
+@@ -19,4 +19,5 @@
+     *   Each new tetrahedron has a parent pointer to the original cell [S1].
+     *   Subdivisions are stored in memory blocks of size 2, 3, 5, or 6 tetrahedra, allocated from four large arrays with used/unused lists for reuse [S1].
++    *   New tetrahedra and their separating interior faces are stored together in blocks to provide memory locality [S1].
+ 
+ **Algorithm Steps:**
+@@ -29,8 +30,8 @@
+ 2.  **Viewpoint Update (Dynamic):**
+     *   For each cell $A$ and current viewpoint $V$:
+-        *   Identify the quadrilateral face $F$ of $A$ divided into triangles $S$ and $T$ by a diagonal from vertex $L$.
++        *   Identify the quadrilateral face $F$ of $A$ divided into triangles $S$ and $T$ by a diagonal from vertex $L$ [S1].
+         *   Determine if $F$ is a "problem face" by checking three conditions simultaneously:
+-            1.  The outward normal to $S$ has a positive dot product with the vector $\vec{VL}$ (from $V$ to $L$).
+-            2.  The outward normal to $T$ has a negative dot product with the vector $\vec{VL}$.
++            1.  The outward normal to $S$ has a positive dot product with the vector $\vec{VL}$ (from $V$ to $L$) [S1].
++            2.  The outward normal to $T$ has a negative dot product with the vector $\vec{VL}$ [S1].
+             3.  Both the viewpoint $V$ and the interior of triangle $S$ lie on the same side of the plane of triangle $T$ [S1].
+         *   If all three conditions are met, $F$ is a problem face and $A$ is a problem cell [S1].
+@@ -54,32 +55,36 @@
+ ```python
+ def is_problem_face(face, viewpoint):
+-    """
+-    Determines if a quadrilateral face is a 'problem face' for a given viewpoint.
+-    Assumes face is split into triangles S and T by a diagonal from vertex L.
+-    """
+-    # Vector from viewpoint to the diagonal vertex L
+     vec_VL = face.vertex_L - viewpoint
+-    
+-    # Condition 1: Outward normal to S has positive dot product with VL
+     cond1 = dot(face.normal_S, vec_VL) > 0
+-    
+-    # Condition 2: Outward normal to T has negative dot product with VL
+     cond2 = dot(face.normal_T, vec_VL) < 0
+-    
+-    # Condition 3: Viewpoint V and interior of S are on the same side of T's plane
+-    # Distance from V to plane T
+     dist_V = dot(face.normal_T, viewpoint - face.vertex_L)
+-    # Distance from a point in S (e.g., centroid or another vertex) to plane T
+-    # Assuming 'point_in_S' is a known point strictly inside triangle S
++    point_in_S = (face.vertex_L + face.vertex_S1 + face.vertex_S2) / 3.0
+     dist_S = dot(face.normal_T, point_in_S - face.vertex_L)
+     cond3 = (dist_V > 0 and dist_S > 0) or (dist_V < 0 and dist_S < 0)
+-    
+     return cond1 and cond2 and cond3
+ 
++def subdivide_hexahedron(cell):
++    # Tetrahedralization algorithm for a hexahedron is not specified in the sources [G]
++    return []
++
++def bsp_xmpvo_sort(mesh):
++    # BSP-XMPVO visibility sort from Comba et al. (1999) [S1]
++    return sorted(mesh.cells, key=lambda c: c.depth)
++
++def render_cell(cell):
++    # Composite cell in sorted order
++    pass
++
++def is_problem_cell_for_next_view(cell, next_viewpoint):
++    for face in cell.faces:
++        if is_problem_face(face, next_viewpoint):
++            return True
++    return False
++
++def restore_cell_to_hexahedron(cell):
++    cell.is_subdivided = False
++    cell.tetrahedra = None
++
+ def process_viewpoint(mesh, viewpoint):
+-    """
+-    Identifies problem cells and applies temporary subdivisions for rendering.
+-    """
+-    # 1. Identify problem cells
+     problem_cells = []
+     for cell in mesh.cells:
+@@ -87,34 +92,25 @@
+             if is_problem_face(face, viewpoint):
+                 problem_cells.append(cell)
+-                break # Cell is a problem cell if any face is a problem face
+-    
+-    # 2. Apply temporary changes
++                break
++
+     for cell in problem_cells:
+         if not cell.is_subdivided:
+-            # Subdivide cell into tetrahedra
+             tetrahedra = subdivide_hexahedron(cell)
+             cell.tetrahedra = tetrahedra
+             cell.is_subdivided = True
+-            
+-            # Update pointers for faces of this cell
+             for face in cell.faces:
+-                # If this face was the problem face, update its subfaces' cell pointers
+-                # to point to the new tetrahedra instead of the original cell
+-                update_face_pointers(face, tetrahedra)
+-        
+-        # Handle adjacent cells sharing problem faces
++                for subface in face.subfaces:
++                    if subface.cell_A == cell:
++                        subface.cell_A = tetrahedra[0]
+         for face in cell.faces:
+             if is_problem_face(face, viewpoint):
+                 adjacent_cell = face.get_other_cell(cell)
+                 if adjacent_cell is not None and not adjacent_cell.is_subdivided:
+-                    # Temporarily replace adjacent cell's face with triangles
+-                    # for sorting/projection, but do not subdivide the volume
+-                    face.mark_as_temporary_triangles()
++                    face.mode = "triangles"
+ 
+-    # 3. Sort and Render
+     sorted_cells = bsp_xmpvo_sort(mesh)
+-    render(sorted_cells)
++    for cell in sorted_cells:
++        render_cell(cell)
+ 
+-    # 4. Restore state for next frame
+     for cell in problem_cells:
+         if not is_problem_cell_for_next_view(cell, next_viewpoint):
+@@ -135,5 +131,5 @@
+ 
+ ## Background
+-The method was introduced by Comba et al. in 2000 as part of an approximate volume rendering technique for curvilinear and unstructured grids using hardware-assisted polyhedron projection [S1]. It addresses the limitations of projecting non-planar quadrilaterals directly, which can lead to incorrect visibility sorting due to self-intersections or multiple ray intersections [S1]. The approach builds on the BSP-XMPVO sorting algorithm [S1].
++The method was introduced in 2000 as part of an approximate volume rendering technique for curvilinear and unstructured grids using hardware-assisted polyhedron projection [S1]. It addresses the limitations of projecting non-planar quadrilaterals directly, which can lead to incorrect visibility sorting due to self-intersections or multiple ray intersections [S1]. The approach builds on the BSP-XMPVO sorting algorithm published by Comba et al. in 1999 [S1].
+ 
+ ## Sources

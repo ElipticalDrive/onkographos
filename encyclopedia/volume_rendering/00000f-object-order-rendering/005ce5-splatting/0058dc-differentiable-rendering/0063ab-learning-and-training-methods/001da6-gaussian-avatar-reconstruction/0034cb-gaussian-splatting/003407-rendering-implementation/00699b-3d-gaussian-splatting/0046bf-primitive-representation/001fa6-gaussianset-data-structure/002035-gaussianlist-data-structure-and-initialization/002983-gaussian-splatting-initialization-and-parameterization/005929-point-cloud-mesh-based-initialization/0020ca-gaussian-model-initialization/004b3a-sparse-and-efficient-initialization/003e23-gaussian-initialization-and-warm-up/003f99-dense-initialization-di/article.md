@@ -1,0 +1,176 @@
+# Dense Initialization (DI)
+
+Also called: EDGS Dense Initialization
+
+## Overview
+Dense Initialization (DI) is a Gaussian initialization strategy that generates millions of small Gaussians to densely cover all visible surfaces at the outset, rather than starting with a sparse set and progressively refining it [S1]. It solves the problem of slow convergence and the computational overhead of iterative densification stages used in standard 3D Gaussian Splatting [S1]. DI sets itself apart from its nearest alternative, Surface from Motion initialization with iterative densification, by eliminating the need for densification entirely through high-density matching, which also benefits ray tracing performance by reducing the workload of irrelevant primitives [S1].
+
+## How it works
+**Inputs:** A set of input images, Structure-from-Motion (SfM) camera poses, and a dense matching network (e.g., RoMa) [S1].
+**Outputs:** A list of 3D Gaussian primitives [S1].
+
+**Data Structures:**
+The output is a list of Gaussian objects, each containing:
+- Position $\mu \in \mathbb{R}^3$
+- Scale $s \in \mathbb{R}$ (isotropic)
+- Rotation $q \in \mathbb{R}^4$ (quaternion)
+- Color $c \in \mathbb{R}^3$
+- Opacity $\alpha \in \mathbb{R}$
+
+**Steps:**
+1. **Reference Frame Selection:** Subsample the input images to a fixed set of reference images [S1].
+2. **Neighbor Selection:** For each reference image, identify a small set of nearest neighbor views based on camera pose distance [S1].
+3. **Dense Matching:** Use a dense matching network to find pixel correspondences between each reference image and its selected neighbors [S1].
+4. **Triangulation:** Triangulate the 2D pixel correspondences into 3D points using the known SfM camera poses [S1].
+5. **Gaussian Creation:** For each 3D point, create a Gaussian primitive [S1].
+    - **Position:** The triangulated 3D point [S1].
+    - **Scale:** Isotropic, set to $0.0005 \times d$, where $d$ is the distance from the 3D point to the reference camera that produced it [S1].
+    - **Rotation:** Initialized to an identity quaternion or view-aligned orientation [G].
+    - **Color:** The color of the corresponding pixel in the reference image [S1].
+    - **Opacity:** Initialized to a standard learned value, as the source does not specify an explicit initialization value [G].
+6. **Optional Binning:** Apply Initialization Binning to remove redundant Gaussians (see Subtopics) [S1].
+
+**Parameters:**
+- Matches per reference frame: 25,000 [S1].
+- Total reference frames: 180 [S1].
+- Neighbors per reference frame: 3 [S1].
+- Initial Gaussian scale factor: 0.0005 [S1].
+
+**Edge Cases and Pitfalls:**
+- **Redundancy:** DI can create highly redundant Gaussians when reference views are similar [S1]. This is mitigated by Initialization Binning [S1].
+- **Scene Size:** The binning parameter (if used) may require adjustment for scenes larger than the standard 3DGS benchmarks [S1].
+- **Computational Cost:** While DI speeds up convergence, the high initial Gaussian count increases BVH update times and rasterization overhead compared to sparse initialization [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+class Gaussian:
+    def __init__(self, position, scale, rotation, color, opacity):
+        self.position = position
+        self.scale = scale
+        self.rotation = rotation
+        self.color = color
+        self.opacity = opacity
+
+def euclidean_distance(a, b):
+    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+
+def triangulate_pixels(pixel1, pose1, pixel2, pose2, intrinsics):
+    """Standard linear triangulation using camera intrinsics [G]."""
+    # Convert pixels to normalized coordinates
+    u1, v1 = pixel1
+    u2, v2 = pixel2
+    K_inv = np.linalg.inv(intrinsics)
+    ray1 = K_inv @ np.array([u1, v1, 1.0])
+    ray2 = K_inv @ np.array([u2, v2, 1.0])
+    # Solve for intersection using least squares
+    A = np.vstack([pose1.rotation @ ray1, pose2.rotation @ ray2])
+    b = -np.array([np.dot(pose1.rotation @ ray1, pose1.translation),
+                   np.dot(pose2.rotation @ ray2, pose2.translation)])
+    point_3d, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    return point_3d
+
+def select_reference_frames(num_images, num_ref):
+    """Uniform subsampling of reference frames [G]."""
+    step = max(1, num_images // num_ref)
+    return list(range(0, num_images, step))[:num_ref]
+
+def find_nearest_neighbors(query_translation, all_translations, k, exclude_index):
+    """Find k nearest neighbor camera translations [G]."""
+    distances = []
+    for i, trans in enumerate(all_translations):
+        if i == exclude_index:
+            continue
+        dist = euclidean_distance(query_translation, trans)
+        distances.append((dist, i))
+    distances.sort(key=lambda x: x[0])
+    return [idx for _, idx in distances[:k]]
+
+def dense_initialization(images, camera_poses, matching_network, intrinsics, 
+                         num_ref_frames=180, matches_per_ref=25000, 
+                         neighbors_per_ref=3, scale_factor=0.0005):
+    """
+    Performs Dense Initialization (DI) to create a set of Gaussians.
+    """
+    # Step 1: Select reference frames
+    ref_indices = select_reference_frames(len(images), num_ref_frames)
+    ref_images = [images[i] for i in ref_indices]
+    ref_poses = [camera_poses[i] for i in ref_indices]
+    all_translations = [pose.translation for pose in camera_poses]
+    
+    gaussians = []
+    
+    # Step 2 & 3: For each reference frame, find neighbors and match
+    for i, (ref_img, ref_pose) in enumerate(zip(ref_images, ref_poses)):
+        neighbor_indices = find_nearest_neighbors(ref_pose.translation, all_translations, neighbors_per_ref, i)
+        neighbor_images = [images[idx] for idx in neighbor_indices]
+        neighbor_poses = [camera_poses[idx] for idx in neighbor_indices]
+        
+        # Perform dense matching between reference and neighbors
+        matches = matching_network.match(ref_img, neighbor_images)
+        
+        # Limit matches to the specified count
+        if len(matches) > matches_per_ref:
+            matches = matches[:matches_per_ref]
+            
+        # Step 4: Triangulate 3D points
+        for match in matches:
+            ref_pixel = match.ref_pixel
+            neighbor_idx = match.neighbor_idx
+            neighbor_pixel = match.neighbor_pixel
+            
+            n_pose = neighbor_poses[neighbor_idx]
+            point_3d = triangulate_pixels(ref_pixel, ref_pose, neighbor_pixel, n_pose, intrinsics)
+            
+            # Step 5: Create Gaussian
+            dist = euclidean_distance(point_3d, ref_pose.translation)
+            
+            # Opacity initialization not specified in sources [G]
+            gaussian = Gaussian(
+                position=point_3d,
+                scale=scale_factor * dist,
+                rotation=np.array([1.0, 0.0, 0.0, 0.0]), # Identity quaternion [G]
+                color=ref_img[ref_pixel],
+                opacity=0.0
+            )
+            gaussians.append(gaussian)
+            
+    return gaussians
+```
+
+## Subtopics
+
+### Initialization Binning
+Initialization Binning is a post-initialization step to remove duplicate or redundant Gaussians created by DI by voxelizing positions and averaging properties within grid cells [S1]. It is chosen when DI results in excessive redundancy, particularly when reference views are similar [S1]. It sets itself apart from other pruning methods by operating at initialization rather than during training [S1].
+- **Definition:** Voxelize all Gaussian positions at a fixed grid [S1]. The grid cell size is defined by parameter `bin`, and the scene radius is defined as 1.1 times the maximum distance from the average camera center to any other camera center [S1].
+- **Steps:**
+    1. Calculate the scene radius $R_{scene} = 1.1 \times \max_{i,j} \|c_i - c_j\|$, where $c_i$ are camera centers [S1].
+    2. Define grid cell size `bin` (typical value: 0.04) [S1].
+    3. For each Gaussian, determine its voxel index based on its position and the grid defined by $R_{scene}$ and `bin` [S1].
+    4. For each voxel containing multiple Gaussians, average their position, color, and scale properties [S1].
+- **Parameters:** `bin` = 0.04 [S1].
+- **Pitfalls:** A single `bin` value of 0.04 works well for standard 3DGS benchmark scenes but may require adjustment for larger scenes [S1].
+- **Performance:** With binning, initial Gaussian count is reduced by over 15% (e.g., 3.97M to 3.27M in GRay) with minimal impact on PSNR (26.49 to 26.47) and LPIPS (0.234 to 0.236) [S1].
+
+## Operating characteristics
+- **Time Complexity:** DI initialization takes only a few minutes to run [S1]. However, the high Gaussian count increases BVH update times significantly (e.g., 11.4 ms for DI vs 0.9 ms for Sparse Initialization in 3DGRT) [S1].
+- **Memory Complexity:** Memory usage is proportional to the number of Gaussians, which is in the millions (e.g., ~3.97M for DI vs ~0.11M for SI) [S1].
+- **Measured Performance:**
+    - **Rasterization:** DI slows down rasterization because small Gaussians overlap tiles, wasting computation [S1].
+    - **Ray Tracing:** DI speeds up ray tracing because the cost is governed by true intersections, which benefits from small Gaussians [S1].
+    - **Training Time:** Training with OBBs under DI takes 40 minutes 5 seconds, compared to 1 hour 22 minutes 12 seconds with Icosahedrons [S1].
+    - **FPS:** FPS with OBBs under DI is 131, compared to 145 with Icosahedrons [S1].
+- **Strengths:** Faster convergence by iteration count; eliminates the need for densification; benefits ray tracing performance [S1].
+- **Limitations:** Slower rasterization; higher BVH update times; higher initial memory usage [S1].
+- **When to Use:** When ray tracing is the primary rendering method; when fast convergence is desired; when densification overhead is prohibitive [S1].
+- **When Not to Use:** When rasterization performance is critical, as DI slows down rasterization due to small Gaussians overlapping tiles [S1].
+
+## Background
+Dense Initialization (DI) was proposed by Kotovenko et al. [2025] in the EDGS paper as a superior alternative to Surface from Motion initialization with iterative densification [S1]. It leverages dense matching networks (notably RoMa) to predict millions of small Gaussians densely covering all visible surfaces at the outset [S1]. The method was introduced to address the inefficiencies of sparse initialization and the computational cost of densification stages in standard 3D Gaussian Splatting [S1].
+
+## Sources
+[S1] GRay: Ray Tracing 3D Gaussians Near the Speed of Splats, https://doi.org/10.1145/3804496, fetched 2026-10-29

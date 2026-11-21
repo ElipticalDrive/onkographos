@@ -1,0 +1,102 @@
+# Predicted Normal Loss
+Also called: Predicted Normal Consistency Loss
+## Overview
+Predicted Normal Loss is a regularization term used in differentiable volume rendering and inverse rendering to enforce geometric consistency between surface normals predicted by a neural network and normals rendered from the volume field. It addresses the problem of geometric inconsistency where explicit normal predictions may diverge from the implicit geometry defined by the density or signed distance function (SDF) field. It sets itself apart from [Normal Ray Alignment Loss](4202-normal-ray-alignment-loss.md) by comparing two neural predictions (predicted vs. rendered) rather than aligning with ray directions, and from [Normal Ground Truth Alignment Loss](4232-normal-ground-truth-alignment-loss.md) by not requiring external ground-truth normal annotations.
+## How it works
+**Inputs and Outputs:**
+- Inputs: Predicted surface normals $\mathbf{n}_{pred}$ (output of a normal head), rendered surface normals $\mathbf{n}_{render}$ (computed via differentiable volume rendering), and a scalar weight multiplier $\lambda_{pred}$.
+- Output: A scalar loss value $L_{pred}$ representing the discrepancy between the two normal fields.
+
+**Data Structures:**
+- $\mathbf{n}_{pred}$: Tensor of shape $(H, W, 3)$ containing unit normal vectors for each pixel.
+- $\mathbf{n}_{render}$: Tensor of shape $(H, W, 3)$ containing unit normal vectors derived from the volume rendering equation.
+- $\lambda_{pred}$: Scalar float, typically denoted as `pred_normal_loss_mult` in implementation [S1, unofficial].
+
+**Steps:**
+1. **Compute Rendered Normals:** Calculate $\mathbf{n}_{render}$ for each ray $\mathbf{r}$ by integrating the normal contributions along the ray, weighted by the opacity and transmittance. This typically involves computing the gradient of the density field $\nabla \sigma$ or using the normal head's output aggregated through the rendering integral.
+2. **Compute Loss:** Calculate the difference between $\mathbf{n}_{pred}$ and $\mathbf{n}_{render}$. The standard metric is the cosine distance or L2 norm.
+3. **Weight and Accumulate:** Multiply the loss by the multiplier $\lambda_{pred}$ and add to the total loss.
+
+**Formula:**
+The loss is defined as:
+$$
+L_{pred} = \lambda_{pred} \cdot \frac{1}{N} \sum_{i=1}^{N} (1 - \mathbf{n}_{pred, i} \cdot \mathbf{n}_{render, i})
+$$
+where $N$ is the number of pixels, $\mathbf{n}_{pred, i}$ is the predicted normal at pixel $i$, and $\mathbf{n}_{render, i}$ is the rendered normal at pixel $i$. The dot product $\mathbf{n}_{pred, i} \cdot \mathbf{n}_{render, i}$ measures alignment, with 1 indicating perfect alignment.
+
+**Parameters:**
+- `pred_normal_loss_mult` ($\lambda_{pred}$): The multiplier for the predicted normal loss in the total loss computation [S1, unofficial]. Typical values are not specified in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Ensure normals are normalized before computing the dot product to avoid scale-dependent errors.
+- **Boundaries:** At depth discontinuities or occlusions, rendered normals may be noisy or undefined. Masking or robust loss functions may be required.
+- **Degenerate Input:** If the density field is flat, gradients may vanish, leading to undefined rendered normals.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def predicted_normal_loss(n_pred: Tensor, n_render: Tensor, lambda_pred: float) -> Tensor:
+    """
+    Computes the Predicted Normal Loss.
+    
+    Args:
+        n_pred: Predicted normals, shape (H, W, 3), normalized.
+        n_render: Rendered normals, shape (H, W, 3), normalized.
+        lambda_pred: Multiplier for the loss.
+        
+    Returns:
+        Scalar loss value.
+    """
+    # Compute cosine similarity
+    dot_product = torch.sum(n_pred * n_render, dim=-1)
+    # Clip to handle numerical errors
+    dot_product = torch.clamp(dot_product, -1.0, 1.0)
+    # Compute loss as 1 - cosine similarity
+    loss_per_pixel = 1.0 - dot_product
+    # Average over all pixels
+    mean_loss = torch.mean(loss_per_pixel)
+    # Apply multiplier
+    total_loss = lambda_pred * mean_loss
+    return total_loss
+```
+## Subtopics
+
+### [Density Gradient Normal Loss](9575-density-gradient-normal-loss.md)
+The Density Gradient Normal Loss is a regularization term used in differentiable volume rendering and inverse rendering to enforce geometric consistency between predicted surface normals and the underlying density or signed distance function (SDF) field. It constrains the network's explicit normal predictions to align with the negative gradient of the scalar field, ensuring that the predicted normals are consistent with the implicit geometry defined by the field. It differs from sibling methods like [Monocular Normal Regularization](13425-monocular-normal-regularization.md) by deriving the target normal directly from the learned field's gradient rather than relying solely on external monocular cues or rendered normal maps without field consistency checks.
+
+### [Monocular Normal Regularization](13425-monocular-normal-regularization.md)
+Monocular Normal Regularization is a geometric supervision technique that constrains the predicted surface normals of a volume rendering or radiance field optimization by comparing them against smooth normal estimates derived from a pretrained monocular vision model. Unlike methods that derive ground-truth normals from the gradients of rendered depth maps—which are often noisy and artifact-prone in complex scenes—this method leverages the semantic and geometric priors of foundation models to provide stable, smooth normal cues. It sets itself apart from sibling methods like [Predicted Normal Loss](7713-predicted-normal-loss.md) by replacing the rendered normal (which may be inconsistent with the underlying geometry) with an external monocular prediction, thereby decoupling the supervision signal from the noisy differentiable rendering pipeline.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time: $O(N)$ where $N$ is the number of pixels, as it involves a per-pixel comparison.
+- Memory: $O(N)$ to store the normal tensors.
+
+**Measured Performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Scales linearly with resolution.
+
+**Strengths and Limitations:**
+- Strengths: Provides geometric consistency without external data; differentiable end-to-end.
+- Limitations: Relies on the quality of rendered normals, which can be noisy in complex scenes.
+
+**When to Use:**
+- Use when explicit normal predictions are available and consistency with the rendered geometry is desired.
+
+**When Not to Use:**
+- Avoid when ground-truth normals are available and more accurate supervision is needed.
+## Background
+**Origin:**
+- The method is used in the GANeRF framework [S1, unofficial].
+
+**History and Development:**
+- The method is part of the broader effort to improve geometric consistency in neural radiance fields.
+
+**Where it is Used:**
+- Used in differentiable volume rendering for 3D reconstruction and novel view synthesis.
+
+## Sources
+[S1] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)

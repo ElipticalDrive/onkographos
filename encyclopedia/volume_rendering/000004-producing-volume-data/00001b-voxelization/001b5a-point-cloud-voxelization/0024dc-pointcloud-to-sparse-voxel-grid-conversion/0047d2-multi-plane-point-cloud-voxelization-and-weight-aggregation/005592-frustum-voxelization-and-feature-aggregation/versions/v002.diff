@@ -1,0 +1,229 @@
+--- v001.md
++++ v002.md
+@@ -4,56 +4,191 @@
+ 
+ ## Overview
+-Frustum Voxelization and Feature Aggregation is a pre-processing method that maps a 3D point cloud into a structured 3D volume aligned with the camera frustum, enabling efficient feature extraction for neural rendering. It solves the problem of irregular point cloud distribution by discretizing the view volume into a grid of frustum voxels and aggregating point features into these cells using distance-based weights. Unlike [Multi-Plane Point Cloud Voxelization and Weight Aggregation](12101-multi-plane-point-cloud-voxelization-and-weight-aggregation.md), which projects points onto parallel planes, this method restricts points to a camera frustum bounded by near and far depth planes, providing a more geometrically accurate representation for perspective views.
++Frustum Voxelization and Feature Aggregation is a pre-processing method that maps a 3D point cloud into a structured 3D volume aligned with the camera frustum to facilitate multi-plane rendering. It solves the problem of organizing sparse, unstructured point cloud data into a dense grid suitable for convolutional neural networks by assigning points to voxels based on their spatial proximity to pixel centers and depth planes. It differs from its parent method, [Multi-Plane Point Cloud Voxelization and Weight Aggregation](12101-multi-plane-point-cloud-voxelization-and-weight-aggregation.md), by explicitly defining the voxel grid boundaries using the camera's near and far clipping planes and calculating aggregation weights based on both parallel (pixel-space) and vertical (depth) distances, rather than simple depth binning.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- **Input:** A 3D point cloud $C = \{p_i\}$, where each point $p_i$ has 3D coordinates $(x_i, y_i, z_i)$ and feature vector $f_i$. Camera parameters (intrinsics and extrinsics) defining the view frustum.
+-- **Output:** A 3D tensor of aggregated features with dimensions $P \times H \times W \times D_{feat}$, where $P$ is the number of depth planes, $H$ and $W$ are image height and width, and $D_{feat}$ is the feature dimension.
++**Inputs:**
++*   A set of 3D points $X = \{x_i\}$, where each point $i$ has a 3D position, RGB color, and viewpoint direction.
++*   Camera parameters defining the viewing frustum (projection matrix, image dimensions $H \times W$).
++*   Hyperparameters: Number of depth planes $P$, and blending exponents $a, b$.
++
++**Outputs:**
++*   A frustum voxel grid of dimensions $P \times H \times W$.
++*   Aggregated features for each voxel, computed by weighting the input point features.
+ 
+ **Data Structures:**
+-- **Frustum Volume:** A 3D array with dimensions $(P, H, W)$. Each cell $(p, h, w)$ corresponds to a voxel in the camera frustum.
+-- **Point Features:** Each point $i$ has an initial feature vector of dimension 11, initialized as:
+-  - 5 dimensions: 0.5 (placeholder or positional encoding)
+-  - 3 dimensions: RGB color values
+-  - 3 dimensions: Viewpoint direction vector
+-  - Only the first 8 dimensions are updated during training [S1].
++The frustum volume is a 3D array with dimensions $(P, H, W)$.
++*   $P$: Number of depth planes (slices along the z-axis).
++*   $H$: Height of the image resolution.
++*   $W$: Width of the image resolution.
++Each voxel $(p, h, w)$ stores aggregated feature vectors. The initial feature dimension is 11, initialized to 0.5 for the first 5 dimensions, followed by 3 RGB values and 3 viewpoint direction components. Only the first 8 dimensions are updated during training [S1].
+ 
+ **Steps:**
+-1. **Frustum Definition:** Define the camera frustum using the minimum depth $z_{min}$ and maximum depth $z_{max}$ of the projected point cloud. The frustum length is $l = z_{max} - z_{min}$ [S1].
+-2. **Voxelization:** Divide the frustum into $P$ uniform slices along the z-axis. Each slice corresponds to a depth plane $p \in \{0, \dots, P-1\}$. The spatial resolution is $H \times W$, matching the image dimensions. This creates $P \times H \times W$ frustum voxels [S1].
+-3. **Point Projection:** For each point $i$, project its 3D coordinates onto the image plane to determine the pixel coordinates $(h_i, w_i)$. Determine the depth plane index $p_i$ based on the point's depth $z_i$ relative to the frustum bounds.
+-4. **Distance Calculation:** For each point $i$ assigned to voxel $(p, h, w)$, calculate two distances:
+-   - $D1(p,h,w)_i$: The Euclidean distance between the point's projection on the image plane and the center of the pixel $(h, w)$. $D1 \in (0, 1/\sqrt{2})$ [S1].
+-   - $D2(p,h,w)_i$: The depth difference between the point and the minimum depth point in the voxel. $D2 \in (0, l)$ [S1].
+-5. **Weight Calculation:** Compute the aggregation weight $w(p,h,w)_i$ for point $i$ in voxel $(p, h, w)$ using the formula:
+-   $$w(p,h,w)_i = (1 - D1(p,h,w)_i)^a \times \left(\frac{1}{1 + D2(p,h,w)_i}\right)^b$$
+-   where $a$ and $b$ are hyperparameters controlling the influence of parallel and vertical distances, respectively [S1].
+-6. **Feature Aggregation:** For each voxel $(p, h, w)$, aggregate the features of all points $i$ assigned to it:
+-   $$F(p,h,w) = \frac{\sum_{i \in Voxel(p,h,w)} w(p,h,w)_i \cdot f_i}{\sum_{i \in Voxel(p,h,w)} w(p,h,w)_i}$$
+-   If no points are assigned to a voxel, the feature vector is initialized to zero or a default value [G].
+ 
+-**Parameters:**
+-- $P$: Number of depth planes. Typical values: 32 [S1].
+-- $H, W$: Image height and width. Typical values: $480 \times 640$ for ScanNet, $512 \times 640$ for Matterport 3D [S1].
+-- $a, b$: Blending weight exponents. Typical values: $a=1, b=1$ [S1].
++1.  **Define Frustum Bounds:** Determine the minimum depth $d_{min}$ and maximum depth $d_{max}$ of the projected point cloud. These define the near and far planes of the frustum. The total length of the frustum along the z-axis is $l = d_{max} - d_{min}$ [S1].
++
++2.  **Voxelize the Frustum:** Divide the frustum region into $P$ uniform slices along the z-axis. This creates $P$ depth planes. Combined with the image grid of size $H \times W$, this results in $P \times H \times W$ frustum voxels [S1].
++
++3.  **Project Points to Voxels:** For each point $i$ in the point cloud:
++    *   Project the 3D point onto the 2D image plane to obtain pixel coordinates $(h_i, w_i)$.
++    *   Determine the depth plane index $p_i$ corresponding to the point's depth $z_i$ relative to the frustum bounds.
++    *   Identify the target voxel $(p_i, h_i, w_i)$.
++
++4.  **Calculate Distances:** For each point $i$ assigned to voxel $(p, h, w)$, calculate two distance metrics [S1]:
++    *   $D1(p,h,w)_i$: The Euclidean distance in the parallel direction (image plane) between the point's 2D projection and the center of the pixel $(h, w)$. The value range is $D1 \in (0, 1/\sqrt{2})$ [S1].
++    *   $D2(p,h,w)_i$: The depth difference between the point and the minimum depth point (near plane) of the specific voxel. The value range is $D2 \in (0, l)$ [S1].
++
++5.  **Compute Aggregation Weights:** Calculate the weight $w(p,h,w)_i$ for point $i$ in voxel $(p, h, w)$ using the following formula [S1]:
++    $$ w(p,h,w)_i = (1 - D1(p,h,w)_i)^a \times \left(\frac{1}{1 + D2(p,h,w)_i}\right)^b $$
++    *   $a$: Controls the blending weight in the parallel direction. Typical value: $a=1$ [S1].
++    *   $b$: Controls the blending weight in the vertical (depth) direction. Typical value: $b=1$ [S1].
++
++6.  **Aggregate Features:** For each voxel $(p, h, w)$, compute the aggregated feature vector $F_{p,h,w}$ by summing the features of all points $i$ assigned to that voxel, weighted by $w(p,h,w)_i$. Normalize if necessary to maintain feature scale [G].
++
++**Pseudocode:**
++
++```python
++import numpy as np
++
++def frustum_voxelization_and_aggregation(points, camera_params, P, a=1, b=1):
++    """
++    points: List of dicts with keys 'xyz', 'rgb', 'view_dir'
++    camera_params: Object with 'H', 'W', 'project' method
++    P: Number of depth planes
++    a, b: Blending exponents
++    """
++    H = camera_params.H
++    W = camera_params.W
++    
++    # Step 1: Define Frustum Bounds
++    # Project all points to find min/max depth
++    depths = []
++    for pt in points:
++        proj = camera_params.project(pt['xyz'])
++        if proj is not None:
++            depths.append(proj['z'])
++    
++    if not depths:
++        return np.zeros((P, H, W, 11)) # Empty grid
++        
++    d_min = min(depths)
++    d_max = max(depths)
++    l = d_max - d_min
++    
++    # Step 2: Initialize Grid
++    # Features: 5 initial (0.5) + 3 RGB + 3 view_dir = 11 dims
++    grid = np.zeros((P, H, W, 11))
++    
++    # Step 3 & 4 & 5 & 6: Process Points
++    for pt in points:
++        proj = camera_params.project(pt['xyz'])
++        if proj is None:
++            continue
++            
++        h, w = int(proj['h']), int(proj['w'])
++        z = proj['z']
++        
++        # Clamp to image bounds
++        if not (0 <= h < H and 0 <= w < W):
++            continue
++            
++        # Determine depth plane index p
++        # Uniform split along z-axis from d_min to d_max
++        # p = floor((z - d_min) / l * P)
++        # Note: Source says "uniformly split", implying linear mapping
++        p_float = (z - d_min) / l * P
++        p = int(p_float)
++        
++        # Clamp p to valid range [0, P-1]
++        if p < 0: p = 0
++        if p >= P: p = P - 1
++        
++        # Calculate D1: Distance to pixel center in parallel direction
++        # Pixel center is at (h + 0.5, w + 0.5)
++        # proj['h'] and proj['w'] are continuous coordinates
++        dx = proj['h'] - (h + 0.5)
++        dy = proj['w'] - (w + 0.5)
++        D1 = np.sqrt(dx**2 + dy**2)
++        
++        # Calculate D2: Depth difference from minimum depth point in this voxel
++        # The minimum depth of the voxel is determined by the frustum near plane
++        # and the specific slice. However, source defines D2 as depth difference 
++        # between point and minimum depth point IN THIS VOXEL.
++        # Since voxels are uniform slices, the min depth of voxel p is d_min + p * (l/P).
++        # But source says "minimum depth point in this voxel" which might refer to 
++        # the near plane of the frustum if D2 is global, or local.
++        # Re-reading: "D2... is the depth difference between point and minimum depth point in this voxel."
++        # Given D2 range (0, l), and l is total frustum length, it implies D2 is relative to the 
++        # start of the frustum or the specific slice? 
++        # Source: "D2... is the depth difference between point and minimum depth point in this voxel."
++        # If it were global, it would be (z - d_min). If local, it would be (z - (d_min + p*l/P)).
++        # The range D2 in (0, l) suggests it might be global or the voxel depth range is l? 
++        # No, voxel depth range is l/P. 
++        # Let's look at the formula: (1/(1+D2))^b. If D2 is small, weight is high.
++        # If D2 is global (z - d_min), points far away have low weight.
++        # If D2 is local (z - z_voxel_min), points at the back of the voxel have low weight.
++        # Source text: "D2... is the depth difference between point and minimum depth point in this voxel."
++        # This phrasing strongly suggests local minimum depth of the voxel.
++        # However, the range D2 in (0, l) is stated. If local, max D2 is l/P.
++        # Contradiction? "D2 in (0, l)". l is total length.
++        # Perhaps D2 is simply (z - d_min)? 
++        # Let's check the pitfall: "When b -> inf, it turns into z-buffer". 
++        # Z-buffer picks closest point to camera. Closest to camera means smallest z.
++        # If D2 = z - d_min, then smallest z gives smallest D2, highest weight. Correct.
++        # If D2 = z - z_voxel_min, then within a voxel, closest to voxel front gets highest weight.
++        # But z-buffer is global. 
++        # Let's re-read carefully: "D2... is the depth difference between point and minimum depth point in this voxel."
++        # If the voxel is defined by the frustum slice, its minimum depth is fixed.
++        # If D2 is local, the weight depends on position within the slice.
++        # If D2 is global, the weight depends on absolute depth.
++        # The range (0, l) is the key. l is the total frustum length.
++        # If D2 were local, the range would be (0, l/P).
++        # Therefore, D2 must be (z - d_min), i.e., distance from the near plane of the frustum.
++        # Why does the text say "in this voxel"? It might be a slight imprecision in the source text 
++        # or implies that for points in the voxel, we measure from the voxel's near plane?
++        # But if D2 range is (0, l), it must be global.
++        # Let's assume D2 = z - d_min based on the range constraint and z-buffer behavior.
++        # [G] Implementation note: If source text "in this voxel" is strict, D2 = z - (d_min + p*l/P).
++        # But range (0,l) contradicts this. We follow the range and z-buffer hint.
++        D2 = z - d_min
++        
++        # Calculate Weight
++        # D1 range (0, 1/sqrt(2))
++        # D2 range (0, l)
++        weight = (1 - D1)**a * (1 / (1 + D2))**b
++        
++        # Aggregate
++        # Feature vector: 5 initial (0.5) + 3 RGB + 3 view_dir
++        feat = np.zeros(11)
++        feat[:5] = 0.5
++        feat[5:8] = pt['rgb']
++        feat[8:11] = pt['view_dir']
++        
++        grid[p, h, w] += weight * feat
++        
++    return grid
++```
+ 
+ **Edge Cases and Pitfalls:**
+-- If $b \to \infty$, the method degenerates to selecting the closest point via z-buffer, which is not robust against geometry errors and causes temporal jitters [S1].
+-- Precision issues may arise if $D1$ or $D2$ are not normalized correctly. Ensure $D1$ is bounded by $(0, 1/\sqrt{2})$ and $D2$ by $(0, l)$ [S1].
++*   If $b$ approaches infinity, the term $(1/(1+D2))^b$ becomes a step function that selects only the point with the minimum $D2$ (closest to the near plane/camera) in each voxel, degenerating into a z-buffer selection method [S1]. This is not robust against geometry noise and causes temporal jitter [S1].
++*   Precision issues may arise if $D1$ or $D2$ are not normalized or clamped correctly, leading to weights outside valid ranges.
++*   Points outside the frustum bounds ($z < d_{min}$ or $z > d_{max}$) must be discarded or handled explicitly to avoid index errors [S1].
+ 
+ ## Subtopics
+ 
+ ### [Multi-plane Neural Rendering](15529-multi-plane-neural-rendering.md)
+-A rendering technique using a U-Net-like 3D CNN backbone to predict multi-plane RGB images and blending weights, which are composited to form the final output image. It builds on the aggregated features from Frustum Voxelization and Feature Aggregation.
++Uses a 3D CNN to predict RGB and weights from the aggregated frustum voxels. Choose this when you need to handle projection errors from geometry noise via learned convolutions.
++
++### [Multi-Plane Image (MPI) Rendering from Point Clouds](12104-multi-plane-image-mpi-rendering-from-point-clouds.md)
++Standard MPI rendering. Choose this for simpler compositing without the 3D convolutional backbone.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of points and voxels. The aggregation step requires iterating over all points and updating voxel features.
+-- **Memory Complexity:** $O(P \times H \times W \times D_{feat})$ for storing the frustum volume.
+-- **Performance:** Training takes approximately 41.5 hours per scene on a GeForce 1080 Ti [S1].
+-- **Strengths:** Efficiently handles sparse point clouds by restricting them to the camera frustum. The distance-based weighting provides smooth feature aggregation.
+-- **Limitations:** Sensitive to the choice of $b$; large values lead to z-buffer-like behavior. Requires careful initialization of point features.
++*   **Time Complexity:** Linear with respect to the number of points $N$ for voxelization and aggregation $O(N)$. The subsequent 3D CNN processing is $O(P \cdot H \cdot W)$.
++*   **Memory Complexity:** $O(P \cdot H \cdot W \cdot D)$, where $D$ is the feature dimension (11). For ScanNet ($32 \times 480 \times 640$), this is manageable on modern GPUs.
++*   **Performance:** Trained on GeForce 1080 Ti, taking ~41.5 hours per scene [S1].
++*   **Strengths:** Handles sparse point clouds efficiently; 3D convolutions naturally mitigate projection errors from geometry noise [S1].
++*   **Limitations:** Sensitive to the choice of $b$; high $b$ leads to jitter. Requires careful tuning of $a$ and $b$ [S1].
+ 
+ ## Background
+-Frustum Voxelization and Feature Aggregation was introduced in "Neural Point Cloud Rendering via Multi-Plane Projection" [S1]. It is part of a pipeline that combines point cloud rendering with neural networks to generate high-quality novel views. The method addresses the limitations of direct point cloud rendering by providing a structured representation that can be processed by 3D CNNs.
++Originated in the paper "Neural Point Cloud Rendering via Multi-Plane Projection" (CVPR 2020) [S1]. It builds upon the concept of multi-plane rendering but introduces a specific voxelization scheme aligned with the camera frustum to enable effective 3D convolutional processing of point cloud features.
+ 
+ ## Sources

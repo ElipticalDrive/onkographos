@@ -1,0 +1,140 @@
+--- v004.md
++++ v005.md
+@@ -4,87 +4,84 @@
+ 
+ ## Overview
+-Grid Resolution Calculation determines the discrete dimensions $(N_x, N_y, N_z)$ of a uniform 3D voxel grid based on the spatial extent of the scene and a target density parameter. It solves the problem of mapping continuous world coordinates to a finite integer array, ensuring the grid covers the bounding volume while maintaining aspect-ratio consistency. Unlike [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md) which modifies existing data, or [Coordinate Grid Generation](1273-coordinate-grid-generation.md) which defines cell boundaries, this method establishes the fundamental topology of the voxelization output. It differs from [Grid Resolution Selection via Lambda](3270-grid-resolution-selection-via-lambda.md) by using a direct aspect-ratio scaling from a single axis target rather than an energy-minimization approach based on primitive counts.
++Grid Resolution Calculation determines the discrete dimensions $(N_x, N_y, N_z)$ of a uniform 3D voxel grid based on the scene's bounding box geometry and a target voxel density. It solves the problem of mapping continuous world-space extents to a finite integer grid, ensuring that the resulting cells maintain a specific aspect ratio relative to the bounding box. It differs from its siblings by providing a static, proportional scaling method [S1, unofficial], whereas variants like [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md) or [Adaptive Voxel Spacing] adjust resolution dynamically based on quality parameters or local detail [S2, unofficial].
+ 
+ ## How it works
+-The method calculates integer grid dimensions by anchoring one axis (typically Y) to a user-defined or heuristic target, then scaling the other axes (X, Z) proportionally to the scene's bounding box dimensions.
+-
+ **Inputs:**
+-*   `target_voxels_y`: Integer target number of voxels along the Y-axis.
+-*   `size`: A 3D vector $(size.x, size.y, size.z)$ representing the width, height, and depth of the scene's bounding box.
++- `size`: A 3D vector $(size.x, size.y, size.z)$ representing the dimensions of the scene bounding box in world units.
++- `voxels_on_y`: An integer scalar representing the desired number of voxels along the Y-axis.
+ 
+ **Outputs:**
+-*   `grid_dims`: A 3D integer vector $(N_x, N_y, N_z)$ representing the number of voxels in each dimension.
++- `grid`: A 3D integer vector $(N_x, N_y, N_z)$ representing the number of voxels in each dimension.
+ 
+ **Data Structures:**
+-*   `size`: `struct { float x, y, z; }`
+-*   `grid_dims`: `struct { int x, y, z; }`
++- `size`: `vec3` (float).
++- `voxels_on_y`: `int` or `float`.
++- `grid`: `uvec3` (unsigned integer).
+ 
+ **Steps:**
+-1.  Set the Y-dimension of the grid to the target value:
+-    $$N_y = \text{target\_voxels\_y}$$
+-2.  Calculate the X-dimension by scaling the target Y-count by the ratio of the bounding box width to height, rounding up to the nearest integer:
+-    $$N_x = \lceil N_y \times \frac{size.x}{size.y} \rceil$$
+-3.  Calculate the Z-dimension by scaling the target Y-count by the ratio of the bounding box depth to height, rounding up to the nearest integer:
+-    $$N_z = \lceil N_y \times \frac{size.z}{size.y} \rceil$$
++1. Set the Y-dimension resolution directly to the target value:
++   $$N_y = \text{voxels\_on\_y}$$
++2. Calculate the X-dimension resolution by scaling the target Y-count by the aspect ratio of the bounding box in X relative to Y, then rounding up:
++   $$N_x = \lceil N_y \times \frac{size.x}{size.y} \rceil$$
++3. Calculate the Z-dimension resolution by scaling the target Y-count by the aspect ratio of the bounding box in Z relative to Y, then rounding up:
++   $$N_z = \lceil N_y \times \frac{size.z}{size.y} \rceil$$
+ 
+ **Pseudocode:**
+ ```python
+-def calculate_grid_resolution(target_voxels_y: int, size_x: float, size_y: float, size_z: float) -> tuple:
++def calculate_grid_resolution(size: Vec3, voxels_on_y: int) -> UVec3:
+     """
+-    Calculate grid dimensions based on a target Y-resolution and bounding box aspect ratios.
++    Calculate grid resolution based on bounding box size and target Y voxels.
+     
+     Args:
+-        target_voxels_y: Desired number of voxels along the Y-axis.
+-        size_x: Width of the scene bounding box.
+-        size_y: Height of the scene bounding box.
+-        size_z: Depth of the scene bounding box.
++        size: Bounding box dimensions (x, y, z).
++        voxels_on_y: Target number of voxels along the Y-axis.
+         
+     Returns:
+-        A tuple (N_x, N_y, N_z) representing the grid dimensions.
++        Grid dimensions (nx, ny, nz).
+     """
+-    if size_y == 0:
+-        raise ValueError("Bounding box height (size_y) cannot be zero.")
++    ny = voxels_on_y
++    
++    # Calculate nx and nz based on aspect ratios, rounding up to ensure full coverage
++    # Using math.ceil equivalent for integer arithmetic
++    nx = int(ny * (size.x / size.y))
++    if (ny * size.x) % size.y != 0:
++        nx += 1
+         
+-    N_y = target_voxels_y
+-    
+-    # Calculate X and Z dimensions preserving aspect ratio
+-    # Using ceiling to ensure the entire bounding box is covered
+-    N_x = int(N_y * (size_x / size_y))
+-    if N_x * size_y < N_y * size_x: # Check if ceiling is needed
+-        N_x += 1
++    nz = int(ny * (size.z / size.y))
++    if (ny * size.z) % size.y != 0:
++        nz += 1
+         
+-    N_z = int(N_y * (size_z / size_y))
+-    if N_z * size_y < N_y * size_z: # Check if ceiling is needed
+-        N_z += 1
+-        
+-    return (N_x, N_y, N_z)
++    return UVec3(nx, ny, nz)
+ ```
+ 
+-**Parameters:**
+-*   `target_voxels_y`: Typical values depend on memory constraints and desired detail. Not given in the sources.
+-*   `size`: Derived from the scene's bounding box.
+-
+-**Edge Cases:**
+-*   **Zero Dimension:** If `size.y` is zero, the calculation is undefined. A guard must check for this [G].
+-*   **Non-Uniform Scaling:** The method assumes uniform scaling relative to the bounding box. If the bounding box is degenerate (e.g., a flat plane with $size.z \approx 0$), $N_z$ will be small, potentially leading to sparse grids.
++**Edge Cases and Pitfalls:**
++- **Zero Division:** If `size.y` is zero or near-zero, the aspect ratios become undefined. A guard clause should check for `size.y > epsilon` [G].
++- **Rounding Direction:** The source uses `ceil` (rounding up) [S1, unofficial]. Rounding down may leave parts of the bounding box uncovered. Rounding up may introduce slight empty space at the boundaries.
++- **Integer Overflow:** For very large bounding boxes or high voxel counts, intermediate calculations like `ny * size.x` may overflow standard 32-bit integers if not handled carefully [G].
+ 
+ ## Subtopics
+ 
+-### [Grid Resolution Selection via Lambda](3270-grid-resolution-selection-via-lambda.md)
+-Determines grid cells based on scene bounding box volume, primitive count, and a scaling factor $\lambda$. It balances build time and traversal efficiency by approximating cubic cells to minimize ray tracing cost. Choose this when optimizing for rendering performance rather than simple aspect-ratio preservation. Link: [Grid Resolution Selection via Lambda](3270-grid-resolution-selection-via-lambda.md).
++### Adaptive Voxel Spacing
++This variant adjusts voxel grid resolution dynamically using a quality parameter to balance performance and detail [S2, unofficial]. It differs from the static proportional method by allowing runtime adjustment of voxel sizes based on user input or scene complexity.
+ 
+-### Adaptive Voxel Spacing
+-Adjusts voxel grid resolution dynamically using a quality parameter (0.0f to 3.0f) to balance performance and detail. It calculates voxel sizes directly rather than integer counts, allowing for non-uniform scaling between axes (e.g., different multipliers for X/Y vs Z). Choose this for interactive applications where users adjust detail in real-time. Link: [Adaptive Voxel Spacing](3270-grid-resolution-selection-via-lambda.md) (Note: No separate article exists, but it is a variant of resolution calculation).
++- **Definition:** Adjusts voxel grid resolution dynamically using a quality parameter to balance performance and detail [S2, unofficial].
++- **Steps:**
++  1. Define a quality parameter ranging from $0.0f$ to $3.0f$, adjustable by key presses (+/-) [S2, unofficial].
++  2. Calculate X and Y voxel sizes using the formula:
++     $$\text{voxel\_size}_{x,y} = \frac{2.0f \times vw.aspx}{vw.xdim} \times (1.0f + \text{quality} \times 4.0f)$$
++  3. Calculate Z voxel size using the formula:
++     $$\text{voxel\_size}_z = \frac{2.0f \times vw.aspz}{200.0f} \times (1.0f + \text{quality})$$
++  4. Iterate through the world space using these calculated voxel sizes to draw or process voxels [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ arithmetic operations.
+-*   **Memory Complexity:** $O(1)$ auxiliary space.
+-*   **Strengths:** Simple to implement; guarantees aspect-ratio preservation of the bounding box; deterministic output.
+-*   **Limitations:** Does not account for scene content density (empty space vs. complex geometry); may produce unnecessarily large grids for sparse scenes compared to [Occupancy Voxel Creation](2628-occupancy-voxel-creation.md).
+-*   **When to use:** When a uniform grid is required and the primary constraint is memory budget per axis or simple aspect-ratio fidelity.
+-*   **When not to use:** When the scene has highly variable density or when traversal performance is the primary bottleneck (use [Grid Resolution Selection via Lambda](3270-grid-resolution-selection-via-lambda.md) or [Bucket-based LBVH construction](5163-bucket-based-lbvh-construction.md) instead).
++- **Time Complexity:** $O(1)$ for the calculation of grid dimensions given the bounding box and target Y count.
++- **Memory Complexity:** $O(1)$ auxiliary space. The resulting grid size determines the memory footprint of the subsequent voxelization, but the calculation itself uses constant memory.
++- **Strengths:** Simple to implement; ensures the grid aspect ratio matches the scene bounding box; easy to control resolution via a single scalar (`voxels_on_y`).
++- **Limitations:** Does not account for local scene complexity; uniform resolution may waste memory in empty regions or lack detail in dense regions.
++- **When to use:** When a uniform grid is required and the scene bounding box is known in advance.
++- **When not to use:** When adaptive resolution or sparse structures are needed.
+ 
+ ## Background
+-This method is a standard technique in voxelization pipelines, often found in real-time rendering engines and 3D modeling tools. The specific implementation cited here is derived from open-source voxelizer projects [S1, unofficial] and holographic fractal renderers [S2, unofficial]. It serves as the foundational step before [Voxel Grid Optimization](4131-voxel-grid-optimization.md) techniques are applied.
++The method is implemented in the `voxelizer` project by loryruta [S1, unofficial]. It is used in the context of voxel-based rendering and ray tracing, where a uniform grid is constructed to represent the scene geometry for efficient traversal.
+ 
+ ## Sources

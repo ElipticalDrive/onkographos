@@ -1,0 +1,158 @@
+3D & AR SDK for Android (Jetpack Compose + Filament), Apple (SwiftUI + RealityKit), Web, Flutter and React Native. Opens glTF/GLB, 3MF, STL, OBJ and PLY on Android and USDZ on Apple, at real size in AR. Assistant-ready: in-repo MCP server, AGENTS.md and llms.txt — no assistant-specific setup. - fix(arsceneview): give StreetscapeGeometryNode a real AABB, skip empty meshes by ThomasGorisse · Pull Request #4260 · sceneview/sceneview
+
+fix(arsceneview): give StreetscapeGeometryNode a real AABB, skip empty meshes by ThomasGorisse · Pull Request #4260 · sceneview/sceneview · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ThomasGorisse
+commented
+Oct 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Crash
+Crashlytics, SceneView Demo 4.51.0-main (2026-10-01). The same signature shows up on Play in 4.38.0, 4.39.0 and 4.47.0. Filament aborts in RenderableManager.Builder.build with this message:
+AABB can't be empty, unless culling is disabled and the object is not a shadow caster/receiver
+Trace: MeshNode.kt:86 <- StreetscapeGeometryNode.kt:51 <- SceneMeshNode.kt:118 <- ARSceneScope.kt <- ARSceneGeometryDemo.kt (AR Scene Geometry sample).
+Cause
+StreetscapeGeometryNode built its MeshNode without a boundingBox. MeshNode then turned culling off but left Filament's default receiveShadows(true). Filament's precondition rejects an empty AABB on a shadow receiver. Every Streetscape geometry that ARCore delivered (only in VPS-covered areas) killed the app, so the low crash volume reflects VPS coverage, not rarity.
+Fix
+StreetscapeGeometryNode computes the AABB from the mesh vertices (computeStreetscapeAabb):
+It skips non-finite vertices.
+It clamps the read to the buffer limit and leaves the buffer position unchanged.
+It floors every half-extent at 1 mm. Filament's Box::isEmpty() is length2(halfExtent) == 0, so only a mesh collapsed to one point would be empty; the floor covers that case and gives flat terrain tiles a non-zero thickness.
+The renderable lives in StreetscapeMeshRenderable (internal), which the node drives with ARCore's mesh. That split lets the build / rebuild / drop path run on real Filament in an instrumented test without a Geospatial session.
+Empty meshes build no renderable. If there are no vertices or fewer than 3 indices, meshNode is null. On update(), the node rebuilds or drops the renderable when ARCore changes the vertex or index count, so a geometry that becomes empty or non-empty later is handled too.
+Breaking (source): meshNode is now MeshNode?. It is null while the mesh is empty. The JVM signature is unchanged and apiCheck passes, but Kotlin callers that dereference it need ?.. A rebuild replaces the instance, so changes made directly on it (visibility, layer, material, touchability) are lost; the KDoc says so and points to meshMaterialInstance / builder, which every rebuild re-applies. The changelog fragment lists this under Changed.
+Cost of the change check. update(trackable) only runs when ARCore lists the geometry in the frame's updated trackables, and an unchanged mesh costs one getMesh() plus two size reads; the vertex and index buffers are only read on a rebuild. I kept the check on every reported update rather than gating it on pose or tracking changes, so a refined mesh is never missed.
+MeshNode without a box now disables castShadows and receiveShadows as well as culling. Any future caller that omits the box gets a non-shadowed renderable instead of a native abort. With a box, culling(true) is set explicitly. The user builder lambda still runs last, so callers can override all of this.
+Audit of the other MeshNode builders
+No change needed in DepthMeshNode, PointCloudNode, AugmentedFaceNode or ShadowReceiverPlaneNode: they either pass a box or already disable culling and shadows.
+No change needed in the ARSceneScope composables either.
+The MeshNode change covers any remaining no-box path.
+Tests
+Instrumented, real Filament:
+MeshNodeBoundingBoxTest (:sceneview): a box-less MeshNode builds, and it neither casts nor receives shadows; a boxed one keeps its box and default shadow receiving; the user builder still runs last. A regression here is a native abort, so the test process would die. Passes in CI (:sceneview:connectedDebugAndroidTest, Android library render tests job on 7062e2e). Locally the emulator could not start the test process: the host was overloaded (load average above 300) and every launch hit a startup ANR, before any test code ran.
+StreetscapeMeshRenderableTest (:arsceneview): an empty mesh builds nothing; a flat terrain tile builds with its computed box; the same counts keep the instance; changed counts rebuild it and destroy the old one; a mesh that becomes empty is dropped and rebuilt when it comes back; unchanged counts never read the buffers. 6/6 pass on emulator-5554 (test APK installed with adb install, run with am instrument).
+JVM: StreetscapeGeometryAabbTest keeps the 9 pure tests of the box math and the empty-mesh decision (empty and non-empty vertex lists). The two source-string tests are gone.
+:arsceneview:testDebugUnitTest, apiCheck (both modules), detekt (:arsceneview, :sceneview) pass.
+Screen (emulator-5554, smoke only)
+These captures come from the first commit. After the review fixes, the sample's launch hit the same host-load startup ANR (no FATAL or AABB line in logcat); the screen path is unchanged, since the emulator never reaches a Streetscape mesh.
+The Scene Geometry sample opens through the sceneview://demo/ar-scene-mesh deep link with camera and location granted. The emulator cannot run Geospatial/VPS, so the sample shows its "Couldn't start AR" state with Try again and the outdoor-VPS explanation banner. The process stays alive, and logcat has no FATAL, AABB or Precondition line.
+Light
+Dark
+needs-device
+Proof for this PR (merge basis):
+MeshNodeBoundingBoxTest, 3/3 tests, passes in CI on real Filament: :sceneview:connectedDebugAndroidTest, in the "Android library render tests (emulator)" job.
+StreetscapeMeshRenderableTest passes 6/6 locally on emulator-5554, with the test APK built by :arsceneview:assembleDebugAndroidTest and installed with adb -s emulator-5554 install -r -d:
+```
+$ adb -s emulator-5554 shell am instrument -w -e class io.github.sceneview.ar.node.StreetscapeMeshRenderableTest io.github.sceneview.ar.test/androidx.test.runner.AndroidJUnitRunner
+io.github.sceneview.ar.node.StreetscapeMeshRenderableTest:......
+
+Time: 74.653
+
+OK (6 tests)
+```
+To follow, non-blocking: an outdoor check on the Pixel 4a in a VPS-covered zone, rendering terrain and building meshes through geometry updates. The emulator never produces Streetscape geometry.
+No issue is linked: there is no GitHub issue for this Crashlytics crash yet.
+🤖 Generated with Claude Code
+ThomasGorisse
+and others
+added 4 commits
+October 2, 2026 00:34
+fix(arsceneview): give StreetscapeGeometryNode a real AABB, skip empt…
+…
+dc8a85a
+```
+…y meshes
+
+StreetscapeGeometryNode built its MeshNode without a bounding box. MeshNode
+then disabled culling but kept Filament's default receiveShadows(true), and
+RenderableManager.Builder.build aborts ("AABB can't be empty, unless culling
+is disabled and the object is not a shadow caster/receiver") - so every
+Streetscape geometry ARCore delivered killed the AR Scene Geometry sample
+(Crashlytics 4.51.0-main, Play 4.38-4.47).
+
+- StreetscapeGeometryNode computes the AABB from the mesh vertices (half
+  extents clamped to 1 mm so flat terrain stays non-empty) and passes it.
+- An empty mesh (no vertex or no whole triangle) builds no renderable;
+  meshNode is now nullable. A geometry update that changes the vertex or
+  index count rebuilds the renderable, or drops it if the mesh became empty.
+- MeshNode without a box now disables shadow casting and receiving as well
+  as culling, so the no-box path can no longer hit the abort.
+
+DepthMeshNode, PointCloudNode, AugmentedFaceNode and ShadowReceiverPlaneNode
+already set a box or disable culling and shadows: unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs(changelog): add fragment for #4260
+…
+f243d1a
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(arsceneview): address review on Streetscape AABB fix
+…
+7062e2e
+```
+- Move the Streetscape renderable build/rebuild/drop into
+  StreetscapeMeshRenderable so it runs on real Filament without an
+  ARCore session; StreetscapeGeometryNode delegates to it.
+- Replace the source-string tests with instrumented tests on real
+  Filament: MeshNodeBoundingBoxTest (box-less MeshNode builds with
+  culling and shadows off) and StreetscapeMeshRenderableTest (empty,
+  flat tile, rebuild on count change, drop on empty, no buffer read
+  when unchanged).
+- Document that a rebuild replaces meshNode and drops direct changes.
+- Fix the Box::isEmpty comment (length2(halfExtent) == 0) and the
+  SceneMeshNode / SceneScope comments on box-less meshes.
+- Changelog: add the source-breaking meshNode nullability as Changed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(arsceneview): clear meshNode before rebuilding; document nullable…
+…
+5b9a3ba
+```
+… meshNode
+
+A build that throws must not leave a destroyed MeshNode referenced.
+llms.txt notes that StreetscapeGeometryNode.meshNode is MeshNode?.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+ThomasGorisse
+merged commit 88fc25e
+into
+main
+Oct 2, 2026
+23 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+ThomasGorisse
+deleted the
+fix/streetscape-empty-aabb
+branch
+October 2, 2026 00:41
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

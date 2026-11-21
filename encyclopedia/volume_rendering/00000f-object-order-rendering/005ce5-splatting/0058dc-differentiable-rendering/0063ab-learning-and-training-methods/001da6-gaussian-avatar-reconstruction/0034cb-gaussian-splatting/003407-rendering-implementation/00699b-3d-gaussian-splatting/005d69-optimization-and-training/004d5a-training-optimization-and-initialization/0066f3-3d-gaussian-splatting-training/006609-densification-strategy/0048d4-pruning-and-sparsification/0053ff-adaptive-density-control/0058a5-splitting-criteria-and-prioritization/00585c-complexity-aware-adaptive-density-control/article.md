@@ -1,0 +1,190 @@
+# Complexity-Aware Adaptive Density Control
+
+Also called: Complexity-Aware Density Control, Complexity-Aware Level of Details, Complexity-Guided Relocation
+
+## Overview
+Complexity-Aware Adaptive Density Control is a training optimization method for 3D Gaussian Splatting that replaces opacity-only heuristics with a composite importance score incorporating image complexity, scale, and opacity [S1, unofficial]. It solves the problem where standard densification concentrates primitives in already-resolved high-opacity regions while neglecting unresolved complex areas, and where low-complexity regions degrade prematurely under budget constraints [S1, unofficial]. It sets itself apart from siblings like [Multi-View Density Control Criterion](5663-multi-view-density-control-criterion.md) by explicitly modeling spatial complexity as a surrogate for reconstruction error to guide relocation and pruning, rather than relying solely on gradient magnitude or multi-view consistency [S1, unofficial].
+
+## How it works
+The method operates by maintaining a per-Gaussian complexity field, updating it online during training, and using it to bias both the relocation of new primitives and the retention of existing ones under varying capacity budgets.
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Current set of 3D Gaussians $G = \{g_j\}$.
+    *   Training view $i$ with image $I_i$.
+    *   Rendered image $E(I_i^\tau)$ at capacity factor $\tau \in (0, 1]$.
+    *   Rendered image $E(I_i^{full})$ at full capacity $\tau=1$.
+    *   Complexity map $C_i^{2D}$ for view $i$, computed via delentropy [S1, unofficial].
+*   **Outputs:**
+    *   Updated complexity values $C_j$ for each Gaussian.
+    *   Relocation probabilities $p(g_j)$ for densification.
+    *   Importance scores $S(g_j)$ for pruning/retention.
+
+### Data Structures
+*   **Gaussian $g_j$:**
+    *   $\mu_j \in \mathbb{R}^3$: Mean position.
+    *   $\alpha_j \in [0, 1]$: Opacity.
+    *   $s(g_j) \in [0, 1]$: Max-normalized scale (derived from covariance eigenvalues).
+    *   $C_j \in \mathbb{R}$: Raw complexity value (exponential moving average).
+    *   $\tilde{C}_j \in [0, 1]$: Min-max normalized complexity.
+
+### Numbered Steps
+
+1.  **Complexity Map Computation:** For the current training view $i$, compute the 2D complexity map $C_i^{2D}(u)$ using delentropy [S1, unofficial].
+2.  **Complexity Update:** For each Gaussian $g_j$ whose mean $\mu_j$ projects into the current view's frustum:
+    *   Project $\mu_j$ to image plane coordinates $u_j = \pi_i(\mu_j)$.
+    *   Retrieve complexity $C_i^{2D}(u_j)$.
+    *   Update $C_j$ using exponential moving average with learning rate $\eta \in (0, 1]$:
+        $$ C_j \leftarrow (1 - \eta) C_j + \eta C_i^{2D}(u_j) $$
+    *   [G] Initialize $C_j = 0$ for new Gaussians.
+3.  **Normalization:** Compute $\tilde{C}_j$ by min-max normalizing $C_j$ across the current batch or training history to the range $[0, 1]$ [S1, unofficial].
+4.  **Relocation Sampling (Densification):** When densifying, sample a source Gaussian $g_j$ to split/relocate with probability:
+    $$ p(g_j) = \alpha_j \cdot \exp(\tilde{C}_j) $$
+    *   Apply complexity dropout: with probability $\delta = 0.2$, set $\tilde{C}_j = 0$ before computing $p(g_j)$ [S1, unofficial]. This prevents collapse onto fixed complex regions by allowing opacity-only scoring for a fraction of candidates.
+5.  **Importance Scoring (Pruning/LoD):** For a given capacity budget $\tau$, compute the importance score $S(g_j)$ to determine retention:
+    $$ S(g_j) = \alpha_j + \lambda \cdot \frac{s(g_j)}{\exp(\tilde{C}_j)} $$
+    *   $\lambda = 2$ is a fixed scalar weight [S1, unofficial].
+    *   Gaussians with the highest $S(g_j)$ are retained up to the budget limit.
+6.  **Variance Loss Minimization:** To ensure uniform degradation across levels of detail, minimize the spatial variance of the reconstruction error residual:
+    $$ \Delta_i(u) = E(I_i^{full})(u) - E(I_i^{\tau})(u) $$
+    $$ L_{var} = \text{Var}_{u \in \Omega} \Delta_i(u) $$
+    *   The total training loss combines L1+D-SSIM on full and budgeted renders with this variance term:
+        $$ \mathcal{L}_{total} = \text{Average}(\mathcal{L}_{L1+D-SSIM}) + \lambda_{var} L_{var} $$
+    *   [G] $\lambda_{var}$ is a hyperparameter balancing the variance term.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def update_complexity(gaussians, view_i, eta):
+    """
+    Update complexity field for Gaussians visible in view_i.
+    """
+    # Compute 2D complexity map for the view (delentropy)
+    complexity_map = compute_delentropy_complexity(view_i.image)
+    
+    for g in gaussians:
+        # Project mean to image plane
+        u = project_to_image(g.mean, view_i.camera_params)
+        
+        # Check if within frustum
+        if is_in_frustum(u, view_i):
+            # Get complexity at pixel
+            c_2d = complexity_map[u.y, u.x]
+            # Exponential moving average update
+            g.complexity_raw = (1 - eta) * g.complexity_raw + eta * c_2d
+
+def normalize_complexity(gaussians):
+    """
+    Min-max normalize complexity to [0, 1].
+    """
+    if not gaussians:
+        return
+    min_c = min(g.complexity_raw for g in gaussians)
+    max_c = max(g.complexity_raw for g in gaussians)
+    range_c = max_c - min_c
+    if range_c == 0:
+        for g in gaussians:
+            g.complexity_norm = 0.0
+    else:
+        for g in gaussians:
+            g.complexity_norm = (g.complexity_raw - min_c) / range_c
+
+def sample_relocation(gaussians, dropout_prob=0.2):
+    """
+    Sample a Gaussian for relocation/densification based on complexity-aware probability.
+    """
+    if not gaussians:
+        return None
+    
+    # Apply dropout: set complexity to 0 with probability dropout_prob
+    weights = []
+    for g in gaussians:
+        c_norm = g.complexity_norm
+        if np.random.rand() < dropout_prob:
+            c_norm = 0.0
+        # p(g) = alpha * exp(C_tilde)
+        w = g.opacity * np.exp(c_norm)
+        weights.append(w)
+    
+    # Normalize weights to sum to 1
+    total_w = sum(weights)
+    if total_w == 0:
+        return gaussians[np.random.randint(len(gaussians))]
+    
+    probs = [w / total_w for w in weights]
+    idx = np.random.choice(len(gaussians), p=probs)
+    return gaussians[idx]
+
+def compute_importance_score(gaussian, lambda_weight=2.0):
+    """
+    Compute importance score for pruning/LoD selection.
+    S(g) = alpha + lambda * scale / exp(C_tilde)
+    """
+    c_norm = gaussian.complexity_norm
+    # Avoid division by zero or extreme values if exp is too large/small
+    # Note: exp(C_tilde) is in [1, e] since C_tilde in [0, 1]
+    score = gaussian.opacity + lambda_weight * (gaussian.scale_normalized / np.exp(c_norm))
+    return score
+
+def select_primitives_for_budget(gaussians, budget_ratio):
+    """
+    Select Gaussians to retain based on importance score and budget.
+    """
+    if not gaussians:
+        return []
+    
+    # Compute scores
+    scored_gaussians = []
+    for g in gaussians:
+        s = compute_importance_score(g)
+        scored_gaussians.append((s, g))
+    
+    # Sort by score descending
+    scored_gaussians.sort(key=lambda x: x[0], reverse=True)
+    
+    # Select top K
+    k = int(len(gaussians) * budget_ratio)
+    selected = [g for s, g in scored_gaussians[:k]]
+    return selected
+
+def compute_variance_loss(render_full, render_budgeted):
+    """
+    Compute spatial variance of reconstruction error residual.
+    L_var = Var(E(I_full) - E(I_budgeted))
+    """
+    residual = render_full - render_budgeted
+    # Variance over all pixels u in Omega
+    var_loss = np.var(residual)
+    return var_loss
+```
+
+### Parameters
+*   $\eta \in (0, 1]$: Learning rate for complexity exponential moving average [S1, unofficial].
+*   $\lambda = 2$: Fixed scalar weight for the scale term in importance score [S1, unofficial].
+*   $\delta = 0.2$: Complexity dropout probability [S1, unofficial].
+*   $\lambda_{var}$: Weight for the variance loss term (Not given in the sources).
+
+### Edge Cases and Pitfalls
+*   **Complexity Collapse:** Without dropout ($\delta=0$), Gaussians may collapse onto fixed complex regions. Dropout $\delta=0.2$ mitigates this [S1, unofficial].
+*   **Normalization Range:** $\tilde{C}_j$ must be normalized to $[0, 1]$ for the exponential term to behave as intended (mimicking exponential growth of particle count) [S1, unofficial].
+*   **Budget Variation:** The scoring function assumes the optimizer varies $\tau$ during training. At $\tau=1$, all primitives are available; at $\tau<1$, only top-scoring primitives are used, which may shift optimization support [S1, unofficial].
+*   **Scale Normalization:** $s(g_j)$ must be max-normalized to ensure consistent weighting across different scenes or training stages [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Adds overhead for computing delentropy complexity maps and updating per-Gaussian complexity fields. Complexity update is $O(N)$ per view where $N$ is the number of Gaussians. Relocation and pruning remain $O(N)$ due to sorting/scoring.
+*   **Memory Complexity:** Requires storing $C_j$ and $\tilde{C}_j$ per Gaussian, adding minimal memory overhead.
+*   **Performance:** Outperforms baselines like OctreeGS, FlexGS, 3DGS-MCMC, LightGaussian, and MGS at lower capacity budgets (e.g., 10%, 1%, 0.1%) while maintaining comparable quality at full capacity [S1, unofficial].
+*   **Strengths:** Prevents premature degradation of low-complexity regions; ensures uniform degradation across LoDs; avoids over-concentration in complex areas.
+*   **Limitations:** Requires computing delentropy complexity maps; sensitive to normalization of complexity and scale; requires varying $\tau$ during training for optimal LoD-awareness.
+*   **When to Use:** When training 3D Gaussian Splatting models with variable capacity budgets or when uniform quality degradation across different levels of detail is required.
+*   **When Not to Use:** If computational resources are extremely limited and delentropy computation is prohibitive; if fixed capacity is used without LoD variation.
+
+## Background
+Complexity-Aware Adaptive Density Control was introduced in the paper "KoalaGS: Complexity-Aware Continuous Level of Detail for Gaussian Splatting" [S1, unofficial]. It addresses limitations in standard 3DGS variants that rely on opacity as a proxy for reconstruction error, which leads to under-served unresolved regions and poor degradation at low budgets [S1, unofficial]. The method builds on the idea that complexity is a surrogate for reconstruction error and integrates it into the density control mechanism for both densification and pruning [S1, unofficial].
+
+## Sources
+[S1] KoalaGS: Complexity-Aware Continuous Level of Detail for Gaussian Splatting, https://arxiv.org/abs/2610.28615, fetched 2026-10-26 (unofficial)

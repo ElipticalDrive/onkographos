@@ -1,0 +1,77 @@
+# Multimodal Illumination Model
+
+Also called: Multimodal Volume Illumination
+
+## Overview
+The Multimodal Illumination Model is an extension of the standard volume rendering integral that incorporates multiple data modalities by treating single- and multi-volumes as mixed media with different compounds, utilizing accumulation-level intermixing [S1, unofficial]. It sets itself apart from standard single-modality illumination by explicitly summing absorption and scattering contributions across $n$ distinct modalities within the radiance transfer equation, allowing for physically consistent lighting of heterogeneous volumetric data [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:**
+    *   $n$: The number of modalities minus 1 (used in summations).
+    *   $x_e$: The eye point (camera position) where radiance is measured.
+    *   $\vec{\tilde{u}}_o$: The outgoing direction towards the eye.
+    *   $x_l$: The exit point where the ray along direction $-\vec{\tilde{u}}_o$ leaves the volume.
+    *   $s_i(x)$: A function sampling the intensities of modality $i$ at position $x$.
+    *   $\tau(s_i(x))$: The absorption coefficient for modality $i$ at location $x$.
+    *   $\iota(s_k(x))$: The radiance emitted from position $x$ for modality $k$.
+    *   $g$: The anisotropy parameter of the Henyey-Greenstein phase function.
+*   **Outputs:**
+    *   $I(x_e, \vec{\tilde{u}}_o)$: The final radiance reaching the eye point in direction $\vec{\tilde{u}}_o$.
+
+**Data Structures**
+Not given in the sources. The method assumes access to scalar fields $s_i(x)$ for each modality $i \in \{0, \dots, n\}$ and derived absorption/emission coefficients.
+
+**Formulas**
+The total radiance $I(x_e, \vec{\tilde{u}}_o)$ is computed as [S1, unofficial]:
+
+$$
+I(x_e, \vec{\tilde{u}}_o) = T(x_l, x_e) \cdot I(x_l, \vec{\tilde{u}}_o) + \int_{x_l}^{x_e} T(x_0, x_e) \cdot \sum_{i=0}^{n} \tau(s_i(x_0)) \cdot \rho_i(x_0, \vec{\tilde{u}}_o) \, d\vec{\tilde{u}}_i \, dx_0
+$$
+
+Where:
+*   $T(x_0, x_1)$ is the extinction between two points $x_0$ and $x_1$, accounting for multiple modalities [S1, unofficial]:
+    $$
+    T(x_0, x_1) = e^{-\int_{0}^{x_1} \int_{0}^{n} \tau(s_i(x_0)) \, d\vec{\tilde{u}}_i \, dx_0}
+    $$
+*   $\rho_j(x, \vec{\tilde{u}}_o)$ is the scattering term for modality $j$ at $x$ towards $\vec{\tilde{u}}_o$, incorporating illumination computation [S1, unofficial]:
+    $$
+    \rho_j(x, \vec{\tilde{u}}_o) = \int_{\Omega} \phi(s_j(x), \vec{\tilde{u}}_i, \vec{\tilde{u}}_o) \cdot (T(x_l, x) \cdot I(x_l, \vec{\tilde{u}}_i)) \, d\vec{\tilde{u}}_i + \int_{\Omega} \int_{x_l}^{x} T(x_0, x) \cdot \left(\sum_{k=0}^{n} \tau(s_k(x_0)) \cdot \iota(s_k(x_0)) \, d\vec{\tilde{u}}_i\right) \, dx_0 \, d\vec{\tilde{u}}_i
+    $$
+*   $\phi(s_j(x), \vec{\tilde{u}}_i, \vec{\tilde{u}}_o)$ is the scattering function at $x$. It is linearly dependent on the gradient magnitude [S1, unofficial]:
+    *   For low magnitude gradients, it uses the Henyey-Greenstein phase function with anisotropy parameter $g$.
+    *   For higher magnitude gradients, it uses standard gradient-based volume shading.
+    *   The response is linearly interpolated between these two regimes.
+
+**Steps**
+1.  Determine the ray origin $x_e$ and direction $\vec{\tilde{u}}_o$.
+2.  Trace the ray backwards along $-\vec{\tilde{u}}_o$ to find the exit point $x_l$ where the ray leaves the volume.
+3.  Compute the extinction $T(x_0, x_e)$ for sample points $x_0$ along the ray from $x_l$ to $x_e$, summing absorption $\tau(s_i(x_0))$ across all $n+1$ modalities.
+4.  For each sample point $x_0$, compute the scattering contribution $\rho_i(x_0, \vec{\tilde{u}}_o)$ for each modality $i$. This involves:
+    a. Integrating over incoming light directions $\Omega$.
+    b. Evaluating the scattering function $\phi$, which interpolates between Henyey-Greenstein (low gradient) and gradient-based shading (high gradient).
+    c. Combining transmitted background radiance $I(x_l, \vec{\tilde{u}}_i)$ and emitted radiance $\iota$.
+5.  Sum the products of extinction, absorption, and scattering for all modalities.
+6.  Integrate along the ray from $x_l$ to $x_e$ to obtain final radiance $I(x_e, \vec{\tilde{u}}_o)$.
+
+**Parameters**
+*   $g$: Anisotropy parameter for Henyey-Greenstein. Manually adapted [S1, unofficial].
+*   Gradient-based shading intensities: Manually adapted [S1, unofficial].
+*   Fixed values are noted as capable of obtaining convincing results, but specific defaults are not provided [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Performance:** Solving Equation 2 (the scattering integral) for every sample point $x$ during rendering with multiple modalities results in a massive increase in necessary computation time, often making interactive experience impossible [S1, unofficial].
+*   **Gradient Interpolation:** The choice of threshold for "low" vs "high" magnitude gradients affects the visual result and must be tuned [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** High. The method involves nested integrals over space and light directions for multiple modalities. The source explicitly states that solving the full equations for multiple modalities makes interactive frame rates impossible due to the massive increase in computation time [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources. The text mentions a general trade-off in volumetric illumination algorithms between memory complexity and rendering speed, but does not specify the memory footprint of this specific model [S1, unofficial].
+*   **Strengths:** Physically consistent illumination for heterogeneous multi-modal data; reduces sampling costs by minimizing sampling operations through order-dependent techniques (though the full model is expensive) [S1, unofficial].
+*   **Limitations:** Computationally prohibitive for interactive rendering when using the full multi-modality scattering integral [S1, unofficial].
+*   **When to use:** When high-quality, physically based illumination of multi-modal volumetric data is required and interactive speed is not a constraint.
+
+## Background
+The Multimodal Illumination Model was introduced by Sunden et al. in 2015 [S1, unofficial]. It builds on the single scattering model proposed by Max [40] and Max and Chen [41]. The approach is based on the observation that single- and multi-volumes can be treated as mixed media with different compounds, a concept identified by Cai and Sakas [13]. The method focuses on accumulation-level intermixing as a general strategy to intermix illumination with opacity and intensity [S1, unofficial].
+
+## Sources
+[S1] Multimodal Volume Illumination, https://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/viscom/2015/sunden15multimodal.pdf, fetched 2026-10-29 (unofficial)

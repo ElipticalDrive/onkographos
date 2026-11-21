@@ -1,0 +1,28 @@
+# Method-Specific Training Pipelines
+
+
+## Overview
+This family encompasses specific training configurations and optimization loops for Neural Radiance Fields (NeRF) that deviate from standard baseline implementations to address specific challenges such as motion blur, single-image synthesis, or stratified scene structures. Unlike generic NeRF training, these methods integrate domain-specific constraints—such as physical image formation models for blurred inputs or generative adversarial networks for unsupervised learning—directly into the optimization loop.
+
+## Shared principles
+The articles in this family share the core mechanism of optimizing NeRF parameters ($\theta$) via gradient descent, typically using the Adam optimizer. However, they differ fundamentally in the loss functions, input data structures, and auxiliary variables optimized. Commonalities include:
+1.  **Differentiable Rendering:** All methods rely on the differentiability of the volume rendering equation to backpropagate gradients from image space to scene representation.
+2.  **Iterative Optimization:** Training proceeds over a fixed number of iterations or until convergence, updating parameters to minimize a specific loss metric (photometric, adversarial, or perceptual).
+3.  **Ray Sampling:** All methods involve sampling points along camera rays to query the NeRF density and color fields. The number of samples and sampling strategy (e.g., stratified, uniform) are hyperparameters tuned per method.
+
+## Subtopics
+
+### [BAD-NeRF](13523-bad-nerf.md)
+BAD-NeRF reconstructs 3D scenes and recovers camera poses from motion-blurred images. It differs from standard NeRF by explicitly modeling the camera's exposure time. Instead of assuming sharp images, it jointly optimizes the NeRF parameters and the continuous camera motion trajectory (start and end poses) for each image. It synthesizes blurred images by rendering and averaging a sequence of sharp intermediate views along the interpolated trajectory. Choose this method when inputs are motion-blurred and accurate pose estimation is required.
+
+### [Pix2NeRF Training Configuration](14803-pix2nerf-training-configuration.md)
+Pix2NeRF is an unsupervised method for translating a single input image into a NeRF using a pre-trained $\pi$-GAN. It differs from inverse rendering methods like BAD-NeRF by not requiring multi-view supervision or test-time optimization against ground-truth views. It achieves a super-resolution effect by training at 64×64 resolution while rendering at 128×128. Choose this method for single-image 3D reconstruction where multi-view data is unavailable.
+
+### Strata-NeRF Training Configuration
+Strata-NeRF optimizes NeRFs for stratified scenes (e.g., multi-level buildings) using a specific configuration derived from Mip-NeRF 360. It uses the "360.gin" configuration file, which employs a contract function to map input coordinates onto a ball of radius 2, handling large scenes better than the "blender 256.gin" configuration. It uses a vector codebook in a "Latent Generator" network. Choose this method for large-scale, multi-level synthetic or real-world scenes where standard NeRF configurations fail to capture global structure.
+
+## Background
+The concept of method-specific training pipelines emerged as NeRF applications expanded beyond simple synthetic scenes to complex real-world scenarios involving motion blur , single-image synthesis [S1], and large-scale stratified environments [S1]. BAD-NeRF was introduced to handle the physical reality of camera exposure times, which standard NeRF ignores . Pix2NeRF addressed the lack of multi-view data by leveraging generative priors [S1]. Strata-NeRF adapted Mip-NeRF 360's architecture to handle the specific challenges of stratified scenes, such as occlusion and scale variations across levels [S1].
+
+## Sources
+[S1] Strata-NeRF : Neural Radiance Fields for Stratified Scenes, https://arxiv.org/abs/2308.10337v1, fetched 2026-10-26

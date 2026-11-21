@@ -1,0 +1,416 @@
+Complete rework of the meshing algorithm:
+
+Fast binary greedy meshing
+Smart multi-threading for chunk generation
+Small terrain generation tweaks
+
+Mesh by HaSYxD · Pull Request #29 · DailyWind00/ft_vox · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Mesh
+#29
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Merged
+HaSYxD
+merged 6 commits into
+main
+from
+Mesh
+Aug 3, 2025
+Uh oh!
+There was an error while loading. Please reload this page.
+Merged
+Mesh
+#29
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+6 commits
+Select commit
+Hold shift + click to select a range
+7be5f65
+complete rework of the mesh generation system. Ground work to allow f…
+HaSYxD Jul 31, 2025
+ce4399e
+Code clean-up and finishing-up in preparation for the greedy meshing …
+HaSYxD Jul 31, 2025
+158d137
+implemented binary greedy meshing algorythm
+HaSYxD Aug 1, 2025
+221d99c
+slighly modified the chunk generation routine to allow for more than …
+HaSYxD Aug 2, 2025
+cd78c3f
+minor tweaks and improvement in preparation for PR
+HaSYxD Aug 3, 2025
+bb32792
+minor fix
+HaSYxD Aug 3, 2025
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Previous commit
+Next
+Next commit
+implemented binary greedy meshing algorythm
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+HaSYxD
+committed
+Aug 1, 2025
+commit 158d137c869c72bd6a521b377e674869451e8f51
+There are no files selected for viewing
+150 changes: 113 additions & 37 deletions
+150
+includes/classes/MeshGeneration.cpp
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -100,8 +100,8 @@ static inline void updateArea(AreaType &area, size_t old_size, size_t current_si
+// }
+}
+// function to quickly count the number of trailing zeros in a binary number representation
+static int trailing_zeros(uint64_t x)
+// function to quickly count the number of trailing zeros in a 64-bit binary number representation
+static int trailing_zeros64(uint64_t x)
+{
+int n = 1;
+Expand Down
+Expand Up
+@@ -129,34 +129,108 @@ static int trailing_zeros(uint64_t x)
+return n - (x & 1);
+}
+// function to quickly count the number of trailing ones in a binary number representation
+static int trailing_ones(uint64_t x)
+// function to quickly count the number of trailing ones in a 64-bit binary number representation
+static int trailing_ones64(uint64_t x)
+{
+return trailing_zeros(~x);
+return trailing_zeros64(~x);
+}
+// function to quickly count the number of trailing zeros in a 32-bit binary number representation
+static int trailing_zeros32(uint64_t x)
+{
+int n = 1;
+if (!x) return 32;
+if ((x & 0x0000FFFF) == 0) {
+n = n + 16;
+x = x >> 16;
+}
+if ((x & 0x000000FF) == 0) {
+n = n + 8;
+x = x >> 8;
+}
+if ((x & 0x0000000F) == 0) {
+n = n + 4;
+x = x >> 4;
+}
+if ((x & 0x00000003) == 0) {
+n = n + 2;
+x = x >> 2;
+}
+return n - (x & 1);
+}
+// function to quickly count the number of trailing ones in a 32-bit binary number representation
+static int trailing_ones32(uint64_t x)
+{
+return trailing_zeros32(~x);
+}
+static DATA_TYPE constructFace(const glm::ivec3 &pos, const uint8_t &blockID, const glm::ivec2 &size)
+{
+DATA_TYPE data = 0;
+data |= (pos.x & 0x1F); // X
+data |= (pos.y & 0x1F) << 5; // Y
+data |= (pos.z & 0x1F) << 10; // Z
+data |= (blockID & 0x7F) << 15; // Block ID
+data |= (size.x & 0x1F) << 22; // Face length
+data |= (size.y & 0x1F) << 27; // Face length
+return (data);
+}
+static uint64_t binMap(const uint64_t &x, const uint64_t &count)
+{
+int res = 0;
+for (uint64_t i = 0; i < count; i++)
+res |= x << i;
+return (res);
+}
+// Binary greedy meshing algorythme
+Comment thread
+Copilot
+AI
+Aug 3, 2025
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+"algorythme" should be spelled "algorithm".
+Suggested change
+// Binary greedy meshing algorythme
+// Binary greedy meshing algorithm
+Copilot uses AI. Check for mistakes.
+// Will quickly construte a mesh plane from a binary plane
+static void binaryGreedyMeshing(std::vector<DATA_TYPE> *vertices, uint64_t plane[(CHUNK_WIDTH + 2) * (CHUNK_WIDTH + 2)], const uint8_t &blockID, const uint8_t &axis)
+static void binaryGreedyMeshing(std::vector<DATA_TYPE> *vertices, uint32_t plane[CHUNK_WIDTH], const uint32_t &depth, const uint8_t &blockID, const uint8_t &axis)
+{
+for (int i = 0; i < CHUNK_WIDTH * CHUNK_WIDTH; i++) {
+for (int j = 0; j < CHUNK_WIDTH; j++) {
+if (!(1 & (plane[i] >> j)))
+for (int i = 0; i < CHUNK_WIDTH; i++) {
+int col = 0;
+while (col < CHUNK_WIDTH ) {
+col += trailing_zeros32(plane[i] >> col);
+if (col >= CHUNK_WIDTH)
+continue ;
+glm::ivec3 pos = {j, i / CHUNK_WIDTH, i % CHUNK_WIDTH};
+if (axis == 1)
+pos = {i % CHUNK_WIDTH, j, i / CHUNK_WIDTH};
+else if (axis == 2)
+pos = {i % CHUNK_WIDTH, i / CHUNK_WIDTH, j};
+DATA_TYPE data = 0;
+data |= (pos.x & 0x1F); // X
+data |= (pos.y & 0x1F) << 5; // Y
+data |= (pos.z & 0x1F) << 10; // Z
+data |= (blockID & 0x7F) << 15; // Block ID
+data |= (0 & 0x1F) << 22; // Face length
+data |= (0 & 0x1F) << 27; // Face length
+vertices->push_back(data);
+int height = trailing_ones32(plane[i] >> col);
+int width = 1;
+uint32_t h = binMap(0x1, height);
+uint32_t heightMask = h << col;
+while (i + width < CHUNK_WIDTH ) {
+uint64_t next = (plane[i + width] >> col) & h;
+if (h != next)
+break ;
+plane[i + width] = plane[i + width] & ~heightMask;
+width++;
+}
+glm::ivec3 pos = {0, 0, 0};
+glm::ivec2 size = {0, 0};
+if (axis == 0) {
+pos = {depth, i, col};
+size = {height - 1, width - 1};
+}
+else if (axis == 1){
+pos = {col, depth, i};
+size = {width - 1, height - 1};
+}
+else if (axis == 2) {
+pos = {col, i, depth};
+size = {height - 1, width - 1};
+}
+vertices->push_back(constructFace(pos, blockID, size));
+col += height;
+}
+}
+}
+Expand All
+@@ -173,7 +247,7 @@ static void constructXAxisMesh(std::vector<DATA_TYPE> (&vertices)[6], uint64_t (
+xAxisBitmask[i] |= (uint64_t)0x1 << (CHUNK_WIDTH + 1);
+}
+std::map<uint8_t, uint64_t[(CHUNK_WIDTH + 2) * (CHUNK_HEIGHT + 2)]> binaryPlaneHM[2];
+std::map<uint8_t, uint32_t[CHUNK_WIDTH][CHUNK_WIDTH]> binaryPlaneHM[2];
+for (int i = 0; i < CHUNK_WIDTH * CHUNK_WIDTH; i++) {
+// Culling facing forwardX
+uint64_t forwardXCol = xAxisBitmask[i] & ~(xAxisBitmask[i] >> 1);
+Expand All
+@@ -189,17 +263,17 @@ static void constructXAxisMesh(std::vector<DATA_TYPE> (&vertices)[6], uint64_t (
+uint8_t id = BLOCK_AT(chunk.chunk, j, i / CHUNK_WIDTH, i % CHUNK_WIDTH);
+if (1 & (backwardXCol >> j))
+binaryPlaneHM[0][id][i] |= (uint64_t)0x1 << j;
+binaryPlaneHM[0][id][j][i / CHUNK_WIDTH] |= (uint32_t)0x1 << (i % CHUNK_WIDTH);
+if (1 & (forwardXCol >> j))
+binaryPlaneHM[1][id][i] |= (uint64_t)0x1 << j;
+binaryPlaneHM[1][id][j][i / CHUNK_WIDTH] |= (uint32_t)0x1 << (i % CHUNK_WIDTH);
+}
+}
+// Execute the binary greedy meshing algorythme for the X axis
+for (int i = 0; i < 2; i++)
+for (auto &[key, value] : binaryPlaneHM[i])
+binaryGreedyMeshing(&vertices[i], value, key, 0);
+for (int j = 0; j < CHUNK_WIDTH; j++)
+binaryGreedyMeshing(&vertices[i], value[j], j, key, 0);
+}
+static void constructYAxisMesh(std::vector<DATA_TYPE> (&vertices)[6], uint64_t (&yAxisBitmask)[(CHUNK_WIDTH + 2) * (CHUNK_WIDTH + 2)], ChunkData &chunk, ChunkData *neightboursChunks[6])
+Expand All
+@@ -214,7 +288,7 @@ static void constructYAxisMesh(std::vector<DATA_TYPE> (&vertices)[6], uint64_t (
+yAxisBitmask[i] |= (uint64_t)0x1 << (CHUNK_HEIGHT + 1);
+}
+std::map<uint8_t, uint64_t[(CHUNK_WIDTH + 2) * (CHUNK_HEIGHT + 2)]> binaryPlaneHM[2];
+std::map<uint8_t, uint32_t[CHUNK_WIDTH][CHUNK_HEIGHT]> binaryPlaneHM[2];
+for (int i = 0; i < CHUNK_WIDTH * CHUNK_WIDTH; i++) {
+// Culling facing forwardX
+uint64_t forwardYCol = yAxisBitmask[i] & ~(yAxisBitmask[i] >> 1);
+Expand All
+@@ -230,16 +304,17 @@ static void constructYAxisMesh(std::vector<DATA_TYPE> (&vertices)[6], uint64_t (
+uint8_t id = BLOCK_AT(chunk.chunk, i % CHUNK_WIDTH, j, i / CHUNK_WIDTH);
+if (1 & (backwardYCol >> j))
+binaryPlaneHM[0][id][i] |= (uint64_t)0x1 << j;
+binaryPlaneHM[0][id][j][i / CHUNK_WIDTH] |= (uint64_t)0x1 << (i % CHUNK_WIDTH);
+if (1 & (forwardYCol >> j))
+binaryPlaneHM[1][id][i] |= (uint64_t)0x1 << j;
+binaryPlaneHM[1][id][j][i / CHUNK_WIDTH] |= (uint64_t)0x1 << (i % CHUNK_WIDTH);
+}
+}
+// Execute the binary greedy meshing algorythme for the X axis
+Comment thread
+Copilot
+AI
+Aug 3, 2025
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+"algorythme" should be spelled "algorithm".
+Suggested change
+// Execute the binary greedy meshing algorythme for the X axis
+// Execute the binary greedy meshing algorithm for the X axis
+Copilot uses AI. Check for mistakes.
+for (int i = 0; i < 2; i++)
+for (auto &[key, value] : binaryPlaneHM[i])
+binaryGreedyMeshing(&vertices[i + 2], value, key, 1);
+for (int j = 0; j < CHUNK_WIDTH; j++)
+binaryGreedyMeshing(&vertices[i + 2], value[j], j, key, 1);
+}
+static void constructZAxisMesh(std::vector<DATA_TYPE> (&vertices)[6], uint64_t (&zAxisBitmask)[(CHUNK_WIDTH + 2) * (CHUNK_WIDTH + 2)], ChunkData &chunk, ChunkData *neightboursChunks[6])
+Expand All
+@@ -253,8 +328,8 @@ static void constructZAxisMesh(std::vector<DATA_TYPE> (&vertices)[6], uint64_t (
+if (isNeightbourLoaded(neightboursChunks[1]) && BLOCK_AT(neightboursChunks[1]->chunk, x, y, 0))
+zAxisBitmask[i] |= (uint64_t)0x1 << (CHUNK_WIDTH + 1);
+}
+std::map<uint8_t, uint64_t[(CHUNK_WIDTH + 2) * (CHUNK_HEIGHT + 2)]> binaryPlaneHM[2];
+std::map<uint8_t, uint32_t[CHUNK_WIDTH][CHUNK_HEIGHT]> binaryPlaneHM[2];
+for (int i = 0; i < CHUNK_WIDTH * CHUNK_WIDTH; i++) {
+// Culling facing forwardX
+uint64_t forwardZCol = zAxisBitmask[i] & ~(zAxisBitmask[i] >> 1);
+Expand All
+@@ -270,16 +345,17 @@ static void constructZAxisMesh(std::vector<DATA_TYPE> (&vertices)[6], uint64_t (
+uint8_t id = BLOCK_AT(chunk.chunk, i % CHUNK_WIDTH, i / CHUNK_WIDTH, j);
+if (1 & (backwardZCol >> j))
+binaryPlaneHM[0][id][i] |= (uint64_t)0x1 << j;
+binaryPlaneHM[0][id][j][i / CHUNK_WIDTH] |= (uint64_t)0x1 << (i % CHUNK_WIDTH);
+if (1 & (forwardZCol >> j))
+binaryPlaneHM[1][id][i] |= (uint64_t)0x1 << j;
+binaryPlaneHM[1][id][j][i / CHUNK_WIDTH] |= (uint64_t)0x1 << (i % CHUNK_WIDTH);
+}
+}
+// Execute the binary greedy meshing algorythme for the X axis
+Comment thread
+Copilot
+AI
+Aug 3, 2025
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+"algorythme" should be spelled "algorithm".
+Suggested change
+// Execute the binary greedy meshing algorythme for the X axis
+// Execute the binary greedy meshing algorithm for the X axis
+Copilot uses AI. Check for mistakes.
+for (int i = 0; i < 2; i++)
+for (auto &[key, value] : binaryPlaneHM[i])
+binaryGreedyMeshing(&vertices[i + 4], value, key, 2);
+for (int j = 0; j < CHUNK_WIDTH; j++)
+binaryGreedyMeshing(&vertices[i + 4], value[j], j, key, 2);
+}
+// Create/update the mesh of the given chunk
+Expand Down
+10 changes: 3 additions & 7 deletions
+10
+shaders/VoxelGeometrie_vert.glsl
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -41,16 +41,16 @@ vec3 contructBlock(const vec2 len)
+finalQuad.z *= len.x;
+finalQuad.y *= len.y;
+finalQuad.y -= len.y - 1;
+finalQuad.x += len.y - 1;
+// finalQuad.y -= len.y - 1;
+// finalQuad.x += len.y - 1;
+uv = UVs;
+}
+else if (face == 0) {
+finalQuad = quad.yxz;
+finalQuad.z *= len.x;
+finalQuad.y *= len.y;
+finalQuad.y -= len.y - 1;
+// finalQuad.y -= len.y - 1;
+finalQuad.x = 0;
+uv = UVs.yx;
+}
+Expand All
+@@ -75,16 +75,12 @@ vec3 contructBlock(const vec2 len)
+finalQuad = quad.zxy;
+finalQuad.x *= len.x;
+finalQuad.y *= len.y;
+finalQuad.y -= len.y - 1;
+finalQuad.z += len.y - 1;
+uv = UVs.yx;
+}
+else if (face == 4) {
+finalQuad = quad.xzy;
+finalQuad.x *= len.x;
+finalQuad.y *= len.y;
+finalQuad.y -= len.y - 1;
+finalQuad.z += len.y - 1;
+finalQuad.z = 0;
+uv = UVs;
+}
+Expand Down
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

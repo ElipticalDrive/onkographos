@@ -1,0 +1,233 @@
+c++ - Unable to create image from compressed texture data (S3TC) - Stack Overflow
+Collectives™ on Stack Overflow
+Find centralized, trusted content and collaborate around the technologies you use most.
+Learn more about Collectives
+Teams
+Q&A for work
+Connect and share knowledge within a single location that is structured and easy to search.
+Learn more about Teams
+Unable to create image from compressed texture data (S3TC)
+Ask Question
+Asked
+9 years ago
+Modified
+9 years ago
+Viewed
+3k times
+9
+I've been trying to load compressed images with S3TC (BC/DXT) compression in Vulkan, but so far I haven't had much luck.
+Here is what the Vulkan specification says about compressed images:
+https://www.khronos.org/registry/dataformat/specs/1.1/dataformat.1.1.html#S3TC:
+Compressed texture images stored using the S3TC compressed image formats are represented as a collection of 4×4 texel blocks, where each block contains 64 or 128 bits of texel data. The image is encoded as a normal 2D raster image in which each 4×4 block is treated as a single pixel.
+https://www.khronos.org/registry/vulkan/specs/1.0/xhtml/vkspec.html#resources-images:
+For images created with linear tiling, rowPitch, arrayPitch and depthPitch describe the layout of the subresource in linear memory. For uncompressed formats, rowPitch is the number of bytes between texels with the same x coordinate in adjacent rows (y coordinates differ by one). arrayPitch is the number of bytes between texels with the same x and y coordinate in adjacent array layers of the image (array layer values differ by one). depthPitch is the number of bytes between texels with the same x and y coordinate in adjacent slices of a 3D image (z coordinates differ by one). Expressed as an addressing formula, the starting byte of a texel in the subresource has address:
+// (x,y,z,layer) are in texel coordinates
+address(x,y,z,layer) = layerarrayPitch + zdepthPitch + yrowPitch + xtexelSize + offset
+For compressed formats, the rowPitch is the number of bytes between compressed blocks in adjacent rows. arrayPitch is the number of bytes between blocks in adjacent array layers. depthPitch is the number of bytes between blocks in adjacent slices of a 3D image.
+// (x,y,z,layer) are in block coordinates
+address(x,y,z,layer) = layerarrayPitch + zdepthPitch + yrowPitch + xblockSize + offset;
+arrayPitch is undefined for images that were not created as arrays. depthPitch is defined only for 3D images.
+For color formats, the aspectMask member of VkImageSubresource must be VK_IMAGE_ASPECT_COLOR_BIT. For depth/stencil formats, aspect must be either VK_IMAGE_ASPECT_DEPTH_BIT or VK_IMAGE_ASPECT_STENCIL_BIT. On implementations that store depth and stencil aspects separately, querying each of these subresource layouts will return a different offset and size representing the region of memory used for that aspect. On implementations that store depth and stencil aspects interleaved, the same offset and size are returned and represent the interleaved memory allocation.
+My image is a normal 2D image (0 layers, 1 mipmap), so there's no arrayPitch or depthPitch. Since S3TC compression is directly supported by the hardware, it should be possible to use the image data without decompressing it first. In OpenGL this can be done using glCompressedTexImage2D, and this has worked for me in the past.
+In OpenGL I've used GL_COMPRESSED_RGBA_S3TC_DXT1_EXT as image format, for Vulkan I'm using VK_FORMAT_BC1_RGBA_UNORM_BLOCK, which should be equivalent.
+Here's my code for mapping the image data:
+```
+auto dds = load_dds("img.dds");
+auto *srcData = static_cast<uint8_t*>(dds.data());
+auto *destData = static_cast<uint8_t*>(vkImageMapPtr); // Pointer to mapped memory of VkImage
+destData += layout.offset(); // layout = VkImageLayout of the image
+assert((w %4) == 0);
+assert((h %4) == 0);
+assert(blockSize == 8); // S3TC BC1
+auto wBlocks = w /4;
+auto hBlocks = h /4;
+for(auto y=decltype(hBlocks){0};y<hBlocks;++y)
+{
+    auto *rowDest = destData +y *layout.rowPitch(); // rowPitch is 0
+    auto *rowSrc = srcData +y *(wBlocks *blockSize);
+    for(auto x=decltype(wBlocks){0};x<wBlocks;++x)
+    {
+        auto *pxDest = rowDest +x *blockSize;
+        auto *pxSrc = rowSrc +x *blockSize; // 4x4 image block
+        memcpy(pxDest,pxSrc,blockSize); // 64Bit per block
+    }
+}
+```
+And here's the code for initializing the image:
+```
+vk::Device device = ...; // Initialization
+vk::AllocationCallbacks allocatorCallbacks = ...; // Initialization
+[...] // Load the dds data
+uint32_t width = dds.width();
+uint32_t height = dds.height();
+auto format = dds.format(); // = vk::Format::eBc1RgbaUnormBlock;
+
+vk::Extent3D extent(width,height,1);
+
+vk::ImageCreateInfo imageInfo(
+    vk::ImageCreateFlagBits(0),
+    vk::ImageType::e2D,format,
+    extent,1,1,
+    vk::SampleCountFlagBits::e1,
+    vk::ImageTiling::eLinear,
+    vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eColorAttachment,
+    vk::SharingMode::eExclusive,
+    0,nullptr,
+    vk::ImageLayout::eUndefined
+);
+
+vk::Image img = nullptr;
+device.createImage(&imageInfo,&allocatorCallbacks,&img);
+
+vk::MemoryRequirements memRequirements;
+device.getImageMemoryRequirements(img,&memRequirements);
+uint32_t typeIndex = 0;
+get_memory_type(memRequirements.memoryTypeBits(),vk::MemoryPropertyFlagBits::eHostVisible,typeIndex); // -> typeIndex is set to 1
+auto szMem = memRequirements.size();
+vk::MemoryAllocateInfo memAlloc(szMem,typeIndex);
+vk::DeviceMemory mem;
+device.allocateMemory(&memAlloc,&allocatorCallbacks,&mem); // Note: Using the default allocation (nullptr) doesn't change anything
+device.bindImageMemory(img,mem,0);
+
+uint32_t mipLevel = 0;
+vk::ImageSubresource resource(
+    vk::ImageAspectFlagBits::eColor,
+    mipLevel,
+    0
+);
+vk::SubresourceLayout layout;
+device.getImageSubresourceLayout(img,&resource,&layout);
+
+auto *srcData = device.mapMemory(mem,0,szMem,vk::MemoryMapFlagBits(0));
+[...] // Map the dds-data (See code from first post)
+device.unmapMemory(mem);
+```
+The code runs without issues, however the resulting image isn't correct. This is the source image:
+And this is the result:
+I'm certain that the problem lies in the first code snipped I've posted, however, in case it doesn't, I've written a small adaption of the triangle demo from the Vulkan SDK which produces the same result. It can be downloaded here. The source-code is included, all I've changed from the triangle demo are the "demo_prepare_texture_image"-function in tri.c (Lines 803 to 903) and the "dds.cpp" and "dds.h" files. "dds.cpp" contains the code for loading the dds, and mapping the image memory.
+I'm using gli to load the dds-data (Which is supposed to "work perfectly with Vulkan"), which is also included in the download above. To build the project, the Vulkan SDK include directory has to be added to the "tri" project, and the path to the dds has to be changed (tri.c, Line 809).
+The source image ("x64/Debug/test.dds" in the project) uses DXT1 compression. I've tested in on different hardware as well, with the same result.
+Any example code for initializing/mapping compressed images would also help a lot.
+c++
+image
+image-compression
+vulkan
+Share
+Improve this question
+Follow
+edited Mar 21, 2016 at 18:26
+genpfault
+52.2k1212 gold badges9191 silver badges151151 bronze badges
+asked Mar 21, 2016 at 17:48
+SilverlanSilverlan
+2,81155 gold badges3636 silver badges6969 bronze badges
+Add a comment
+|
+1 Answer
+1
+Sorted by:
+Reset to default
+Highest score (default)
+Trending (recent votes count more)
+Date modified (newest first)
+Date created (oldest first)
+3
++100
+Your problem is actually quite simple - in the demo_prepare_textures function, the first line, there is a variable tex_format, which is set to VK_FORMAT_B8G8R8A8_UNORM (which is what it is in the original sample). This eventually gets used to create the VkImageView. If you just change this to VK_FORMAT_BC1_RGBA_UNORM_BLOCK, it displays the texture correctly on the triangle.
+As an aside - you can verify that your texture loaded correctly, with RenderDoc, which comes with the Vulkan SDK installation. Doing a capture of it, the and looking in the TextureViewer tab, the Inputs tab shows that your texture looks identical to the one on disk, even with the incorrect format.
+Share
+Improve this answer
+Follow
+edited Mar 29, 2016 at 1:54
+answered Mar 25, 2016 at 11:10
+MuertoExcobitoMuertoExcobito
+10k22 gold badges4242 silver badges8585 bronze badges
+5
+If I change the format, the resulting image is even more messed up (sciolyte.com/sharex/2016-03-25_15-35-40.gif). RenderDoc crashes immediately after trying to run any program through it. Did the demo actually work for you with that change? Did you change anything else?
+– Silverlan
+Commented
+Mar 25, 2016 at 14:37
+If it's working for you, could you please provide your code with the changes? I still haven't gotten it to work on my side.
+– Silverlan
+Commented
+Mar 27, 2016 at 21:10
+1
+Other than the loading path of the DDS, and some project settings to use my installed Vulkan 1.0.5 SDK, and the VS 120 toolchain, I did not change anything else from the tri_dds.zip download. Perhaps a driver issue? Maybe attach your vulkaninfo?
+– MuertoExcobito
+Commented
+Mar 29, 2016 at 1:53
+As it turns out, it seems to be indeed a driver issue. I've tested in on two different AMD systems (Image was corrupt on both) and two Nvidia systems (Image showed up perfectly fine on both). I've reported it to AMD, still waiting for a response.
+– Silverlan
+Commented
+Mar 29, 2016 at 19:15
+Apparently AMD drivers are much more sensitive to resource transitions being done correctly (whereas Nvidia are very forgiving), which might explain it. I haven't tested them myself.
+– MuertoExcobito
+Commented
+Mar 30, 2016 at 2:37
+Add a comment
+|
+Start asking to get answers
+Find the answer to your question by asking.
+Ask question
+Explore related questions
+c++
+image
+image-compression
+vulkan
+See similar questions with these tags.
+The Overflow Blog
+Open-source AI: Are younger developers leading the way?
+Bottom of the first: A veteran VC’s take on the AI landscape
+Featured on Meta
+Changes to reporting for the [status-review] escalation process
+Policy: Generative AI (e.g., ChatGPT) is banned
+A discussion about closed (and potentially useful) posts on Stack Overflow
+Related
+0
+Vulkan: Compressed image formats and mipmapping
+441
+Saving image from PHP URL
+1
+Is it normal for your gpu device not to support three channel formats?
+1
+Vulkan - At vkQueuePresentKHR, the validation layer throws an error message regarding the image layout
+2
+How are you supposed to make the mip map images for block compressed formats?
+0
+What kind of texture compression/encoding is this? Run-Length encoding? Is there a way for Uploading to Open Gl?
+1
+How can I read a 3D image with R8_UINT format and SAMPLED_IMAGE descriptor type in a glsl shader?
+429
+How to generate a Dockerfile from an image?
+384
+Get image data URL in JavaScript?
+528
+How to embed image or picture in jupyter notebook, either from a local machine or from a web resource?
+Hot Network Questions
+The Oreo Problem: How to find the Excess
+Table of contents: adding period conditionally
+Why am I known as a user?
+I need just a word...
+When can MI5 take over a police case?
+In my city, magic prevents people from harboring ill intent in their minds. Is there any reasonable need for a police force of any kind?
+Question about JEPP LOW ENROUTE
+A Question on the Scale Matrix for Inverse-Wishart Prior
+My former university is trying to have its name removed from my papers (probably as revenge for whistleblowing). How to proceed?
+What does "ol’ Dragon Eyes" mean in "Offerings" by Michael ByungJu Kim?
+A German word for "inner sanctum'
+Is the expression “dumber than a sack of bricks” in common usage?
+What is the use of 'circēnsis' here? What does it mean, exactly?
+Should I confront my baby's grandmother about constantly saying that she loves my baby more than I do?
+Is "escort" primarily associated with paid companionship in modern English?
+Why are there no window functions in digital signal processing which concave upward?
+How to secure a SharkBite assembly to the back of a cabinet
+Post hoc tests give no results
+How to safely handle thread join when interrupt signal (SIGINT) may arrive during join()?
+Does neutral wire carry power?
+Orthodox-written Children's Novels with good message
+A simple-looking inequality for orthogonal vectors
+Do you need to hold the Lantern of Revealing for it to work?
+Place 1 through 7 into the circle to make equal sums
+more hot questions
+Question feed
+lang-cpp

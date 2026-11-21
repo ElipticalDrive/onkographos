@@ -1,0 +1,490 @@
+Что я сделал ?
+Реализовал новый pipeline генерации мешей: BackendSelector, MeshData, IVoxelDataProvider, JobSystem и compute shader алгоритм.
+Добавил HLSL shader и Occlusion Culling.
+Реализовал поддержку теней и обновил их расчет через трипланарные ddx/ddy.
+Исправил появление вырожденных мешей после сварки чанков.
+Добавил MeshBuilderConfig для настройки генерации.
+CaveGenerator: очистка мешей из памяти, перегенерация и hot-reload настроек.
+Что я добавил ?
+
+ Новый функционал (feature)
+ Исправление бага (fix)
+ Рефакторинг
+ UI/UX
+
+Как я это протестировал ?
+
+ Запускал в редакторе
+ Проверил на целевой платформе (билд) (обязательно! без этого не приму)
+ Проверил что не сломал чужой функционал
+
+Скриншоты / видео
+(если применимо — особенно для UI и визуальных изменений)
+Я исправил какой-то Issue ?
+Closes #
+Чеклист перед мерджем
+
+ Код соответствует конвенциям проекта
+ Нет закомментированного кода и Debug.Log (Есть на будущее)
+ Все тяжелые файлы и ассеты на гугл диске ?
+ Нет конфликтов с main
+
+Feature/marching cubes mesh generator by micromaxd303 · Pull Request #11 · micromaxd303/UnityProjectRift · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Feature/marching cubes mesh generator
+#11
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Merged
+micromaxd303
+merged 15 commits into
+main
+from
+feature/Marching-Cubes-Mesh-Generator
+Sep 22, 2026
+Uh oh!
+There was an error while loading. Please reload this page.
+Merged
+Feature/marching cubes mesh generator
+#11
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+15 commits
+Select commit
+Hold shift + click to select a range
+8995af2
+feat: BackendSelector with recommendations
+micromaxd303 Mar 10, 2026
+0ae64fd
+feat: add MeshData and IVoxelDataProvider
+micromaxd303 Mar 10, 2026
+82bbb2a
+feat: comput shader algorithm implement
+micromaxd303 Mar 11, 2026
+0328af7
+feat: JobSystem implementation
+micromaxd303 Mar 11, 2026
+ef1528c
+feat: hlsl shader and Occlusion Culling
+micromaxd303 Mar 11, 2026
+4ae4f53
+feat: occlusion culling fix
+micromaxd303 Mar 11, 2026
+091b018
+fix: degenerate mesh fix
+micromaxd303 Mar 11, 2026
+48f7026
+feat: shadows added
+micromaxd303 Mar 11, 2026
+fcfc71d
+refactoring: Removed normal calculation.
+micromaxd303 Mar 11, 2026
+3cb6285
+Merge branch 'main' into feature/Marching-Cubes-Mesh-Generator
+micromaxd303 May 7, 2026
+511d9d0
+fix: small centering fixes
+micromaxd303 Sep 21, 2026
+bb42ddc
+Merge branch 'feature/Marching-Cubes-Mesh-Generator' of https://githu…
+micromaxd303 Sep 21, 2026
+0b645a3
+feat: Mitchel Sampler added
+micromaxd303 Sep 21, 2026
+f097bd5
+Merge branch 'feature/Marching-Cubes-Mesh-Generator' of https://githu…
+micromaxd303 Sep 21, 2026
+3c2036a
+feat: MeshBuilder config Implemented
+micromaxd303 Sep 22, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Previous commit
+Next
+Next commit
+feat: hlsl shader and Occlusion Culling
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+micromaxd303
+committed
+Mar 11, 2026
+commit ef1528c7efa4f218b780dd70bb4151d78b3e468f
+There are no files selected for viewing
+10 changes: 8 additions & 2 deletions
+10
+Assets/Scripts/CaveLocationGenerator/Cave.shader
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -61,7 +61,13 @@ Shader "Custom/Triplanar"
+half4 frag(Varyings IN) : SV_Target
+{
+float3 n = abs(IN.worldNormal);
+// Геометрическая нормаль для triplanar
+float3 worldPosDdx = ddx(IN.worldPos);
+float3 worldPosDdy = ddy(IN.worldPos);
+float3 flatNormal = normalize(cross(worldPosDdy, worldPosDdx));
+// Triplanar blend по flat нормали
+float3 n = abs(flatNormal);
+n = pow(n, _Sharpness);
+n /= (n.x + n.y + n.z);
+Expand All
+@@ -73,7 +79,7 @@ Shader "Custom/Triplanar"
+half4 color = texX * n.x + texY * n.y + texZ * n.z;
+// Простое освещение
+// Сглаженная нормаль для освещения
+Light mainLight = GetMainLight();
+float NdotL = saturate(dot(normalize(IN.worldNormal), mainLight.direction));
+float3 lighting = mainLight.color * NdotL + unity_AmbientSky.rgb;
+Expand Down
+130 changes: 66 additions & 64 deletions
+130
+Assets/Scripts/CaveLocationGenerator/CaveGenerator.cs
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -1,93 +1,95 @@
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+public class CaveGenerator : MonoBehaviour
+{
+public MarchingCubesConfig config;
+public ComputeShader shader;
+public Material material;
+[Header("Config")]
+[SerializeField] private MarchingCubesConfig config;
+[SerializeField] private ComputeShader marchingCubesShader;
+[SerializeField] private Material caveMaterial;
+[Header("Debug")]
+[SerializeField] private bool drawGizmos;
+private IPlatformProvider _platformProvider;
+private BackendSelector _backendSelector;
+[Header("Culling")]
+[SerializeField] private bool enableCulling = true;
+private ChunkCuller _culler;
+private IMarchingCubesBackend _backend;
+private IVoxelDataProvider _voxelDataProvider;
+private IMarchingCubesBackend back;
+private MeshBuilder _meshBuilder;
+private Dictionary<Vector3Int, float[]> _chunks = new();
+private Dictionary<Vector3Int, GameObject> _chunkObjects = new();
+private bool _isGenerated;
+// Start is called once before the first execution of Update after the MonoBehaviour is created
+void Start()
+private void Start()
+{
+_platformProvider = new PlatformProvider();
+_backendSelector = new BackendSelector(_platformProvider);
+_voxelDataProvider = new VoxelDataGenerator(config);
+_meshBuilder = new MeshBuilder(caveMaterial, transform);
+_backend = CreateBackend();
+_backend.Initialize(config);
+}
+private void Update()
+{
+if (Input.GetKeyDown(KeyCode.G))
+{
+Generate();
+}
+}
+public void Generate()
+{
+ClearExisting();
+//back = new ComputeShaderBackend(shader);
+var meshes = _backend.GenerateMesh(_voxelDataProvider);
+_chunkObjects = _meshBuilder.Build(meshes);
+back = new JobSystemBackend();
+back.Initialize(config);
+if (enableCulling)
+{
+if (_culler == null)
+_culler = gameObject.AddComponent<ChunkCuller>();
+_culler.RegisterChunks(_chunkObjects);
+}
+_meshBuilder = new MeshBuilder(material, gameObject.transform);
+Debug.Log($"Generated {_chunkObjects.Count} chunks");
+}
+// Update is called once per frame
+void Update()
+private void ClearExisting()
+{
+if (Input.GetKeyDown(KeyCode.Space))
+foreach (var (_, go) in _chunkObjects)
+{
+BackendRecommendation bckRec = _backendSelector.Recommend(config);
+Debug.Log(bckRec.BackendType);
+Debug.Log(bckRec.GraphicsAPI);
+Debug.Log(bckRec.Reason);
+Debug.Log("----");
+if (go != null)
+Destroy(go);
+}
+if (Input.GetKeyDown(KeyCode.G))
+{
+_chunks.Clear();
+for (int x = 0; x < config.WorldSize.x; x++)
+for (int y = 0; y < config.WorldSize.y; y++)
+for (int z = 0; z < config.WorldSize.z; z++)
+{
+var coord = new Vector3Int(x, y, z);
+_chunks[coord] = _voxelDataProvider.Generate(coord);
+}
+var meshes = back.GenerateMesh(_voxelDataProvider);
+_meshBuilder.Build(meshes);
+back.Dispose();
+}
+_chunkObjects.Clear();
+_isGenerated = false;
+}
+private IMarchingCubesBackend CreateBackend()
+{
+var platform = new PlatformProvider();
+var selector = new BackendSelector(platform);
+var recommendation = selector.Recommend(config);
+Debug.Log($"Backend: {recommendation.BackendType} | " +
+$"API: {recommendation.GraphicsAPI} | " +
+$"Reason: {recommendation.Reason}");
+if (recommendation.BackendType == MarchingCubesConfig.BackendType.ComputeShader)
+return new ComputeShaderBackend(marchingCubesShader);
+return new JobSystemBackend();
+}
+private void OnDisable()
+{
+back.Dispose();
+_backend?.Dispose();
+}
+private void OnDrawGizmos()
+private void OnDestroy()
+{
+foreach (var (coord, data) in _chunks)
+{
+VoxelDebug.DrawGizmos(data, coord, config.ChunkSize, config.SurfaceLevel);
+}
+ClearExisting();
+_backend?.Dispose();
+}
+}
+}
+8 changes: 8 additions & 0 deletions
+8
+Assets/Scripts/CaveLocationGenerator/Culling.meta
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Load diff
+Some generated files are not rendered by default. Learn more about how customized files appear on GitHub.
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+148 changes: 148 additions & 0 deletions
+148
+Assets/Scripts/CaveLocationGenerator/Culling/ChunkCuller.cs
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -0,0 +1,148 @@
+using System.Collections.Generic;
+using UnityEngine;
+public class ChunkCuller : MonoBehaviour
+{
+[SerializeField, Range(0.1f, 1f)]
+private float _updateInterval = 0.1f;
+[SerializeField, Range(1, 8)]
+private int _raysPerChunk = 3;
+[SerializeField]
+private float _maxDistance = 200f;
+[SerializeField, Range(1f, 20f)]
+private float _frustumBuffer = 5f;
+private Camera _camera;
+private Dictionary<Vector3Int, GameObject> _chunkObjects = new();
+private float _nextUpdate;
+public void RegisterChunks(Dictionary<Vector3Int, GameObject> chunks)
+{
+_chunkObjects = chunks;
+foreach (var (_, go) in _chunkObjects)
+SetChunkVisible(go, true);
+}
+private void Start()
+{
+_camera = Camera.main;
+}
+private void Update()
+{
+if (_chunkObjects.Count == 0)
+return;
+UpdateFrustumCulling();
+if (Time.time >= _nextUpdate)
+{
+_nextUpdate = Time.time + _updateInterval;
+UpdateOcclusionCulling();
+}
+}
+private void UpdateFrustumCulling()
+{
+Vector3 camPos = _camera.transform.position;
+var planes = GeometryUtility.CalculateFrustumPlanes(_camera);
+for (int i = 0; i < planes.Length; i++)
+planes[i].distance += _frustumBuffer;
+foreach (var (_, go) in _chunkObjects)
+{
+if (go == null) continue;
+var renderer = go.GetComponent<MeshRenderer>();
+if (renderer == null) continue;
+bool inFrustum = GeometryUtility.TestPlanesAABB(planes, renderer.bounds)
+&& Vector3.Distance(camPos, renderer.bounds.center) <= _maxDistance;
+if (!inFrustum)
+renderer.enabled = false;
+else if (!renderer.enabled)
+renderer.enabled = true;
+}
+}
+private void UpdateOcclusionCulling()
+{
+Vector3 camPos = _camera.transform.position;
+foreach (var (_, go) in _chunkObjects)
+{
+if (go == null) continue;
+var renderer = go.GetComponent<MeshRenderer>();
+if (renderer == null || !renderer.enabled) continue;
+if (!IsChunkVisible(camPos, renderer.bounds, go))
+renderer.enabled = false;
+}
+}
+private bool IsChunkVisible(Vector3 camPos, Bounds bounds, GameObject self)
+{
+Vector3[] testPoints = GetTestPoints(bounds);
+for (int i = 0; i < testPoints.Length; i++)
+{
+Vector3 dir = testPoints[i] - camPos;
+float dist = dir.magnitude;
+if (dist < 0.1f)
+return true;
+if (Physics.Raycast(camPos, dir.normalized, out RaycastHit hit, dist))
+{
+if (hit.collider.gameObject == self)
+return true;
+}
+else
+{
+return true;
+}
+}
+return false;
+}
+private Vector3[] GetTestPoints(Bounds b)
+{
+Vector3 c = b.center;
+Vector3 e = b.extents;
+return _raysPerChunk switch
+{
+1 => new[] { c },
+2 => new[] { c, c + Vector3.up * e.y },
+3 => new[] { c, c + Vector3.up * e.y, c - Vector3.up * e.y },
+4 => new[]
+{
+c,
+c + Vector3.up * e.y,
+c + Vector3.right * e.x,
+c + Vector3.forward * e.z
+},
+_ => new[]
+{
+c,
+c + Vector3.up * e.y,
+c - Vector3.up * e.y,
+c + Vector3.right * e.x,
+c + Vector3.forward * e.z
+}
+};
+}
+private void SetChunkVisible(GameObject go, bool visible)
+{
+var renderer = go.GetComponent<MeshRenderer>();
+if (renderer != null && renderer.enabled != visible)
+renderer.enabled = visible;
+}
+}
+2 changes: 2 additions & 0 deletions
+2
+Assets/Scripts/CaveLocationGenerator/Culling/ChunkCuller.cs.meta
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Load diff
+Some generated files are not rendered by default. Learn more about how customized files appear on GitHub.
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

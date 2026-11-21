@@ -1,0 +1,159 @@
+--- v001.md
++++ v002.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-Opacity compensation methods are techniques used in volume rendering to correct inaccuracies introduced by approximations in splatting or compositing, ensuring that the final image accurately represents the underlying data density and structure [S1, unofficial]. These methods solve the problem of premature occlusion or incorrect surface appearance by adjusting the opacity contribution of individual samples based on specific criteria such as value proximity, depth, or statistical uncertainty. Unlike standard volume rendering which applies a fixed transfer function, these methods dynamically modulate opacity to preserve internal features or enhance surface clarity [S2, unofficial][S3].
++Opacity compensation methods are techniques used in volume rendering to correct inaccuracies introduced by approximations in splatting or compositing, ensuring that the final image accurately represents the underlying data density and structure [S1, unofficial]. These methods solve the problem of premature occlusion or incorrect surface appearance by adjusting the opacity contribution of individual samples based on specific criteria such as value proximity, depth, or statistical uncertainty [S2, unofficial][S3][S4, unofficial]. Unlike standard volume rendering which applies a fixed transfer function, these methods dynamically modulate opacity to preserve internal features or enhance surface clarity [S2, unofficial][S3].
+ 
+ ## How it works
+ ### Inputs and Outputs
+-*   **Inputs:** Sample values ($v$), sample depths ($d$), target values, allowable deviations, statistical moments (mean $\mu$, covariance $\Sigma$), and rendering parameters (max opacity, modulation factors).
+-*   **Outputs:** Compensated opacity ($\alpha$), potentially compensated mean color ($\mu_{cond}$) and covariance ($\Sigma_{cond}$).
++*   **Inputs:** Sample values ($v$), sample depths ($d$), target values, allowable deviations, statistical moments (mean $\mu$, covariance $\Sigma$), and rendering parameters (max opacity, modulation factors) [S2, unofficial][S3][S4, unofficial].
++*   **Outputs:** Compensated opacity ($\alpha$), potentially compensated mean color ($\mu_{cond}$) and covariance ($\Sigma_{cond}$) [S2, unofficial][S3][S4, unofficial].
+ 
+ ### Data Structures
+-No specific complex data structures are required beyond standard sample buffers containing position, value, and depth. For statistical methods (UBS), covariance matrices ($\Sigma$) and Cholesky factors ($\hat{L}$) are required.
++No specific complex data structures are required beyond standard sample buffers containing position, value, and depth. For statistical methods (UBS), covariance matrices ($\Sigma$) and Cholesky factors ($\hat{L}$) are required [S4, unofficial].
+ 
+ ### Formulas and Parameters
+@@ -29,5 +29,5 @@
+ 
+ **Logic:**
+-1.  Calculate the absolute difference $|v - v_{target}|$.
++1.  Calculate the absolute difference $|v - v_{target}|$ [S2, unofficial].
+ 2.  If $|v - v_{target}| > \delta_{allow}$, assign $\alpha = 0.0$ [S2, unofficial].
+ 3.  Otherwise, compute $\alpha$ using the formula above [S2, unofficial].
+@@ -88,71 +88,77 @@
+ 
+ ```python
++import math
++import numpy as np
++
++def solve_triangular(L, b):
++    """Solves Lx = b for x, where L is lower triangular (forward substitution)."""
++    n = len(b)
++    x = [0.0] * n
++    for i in range(n):
++        s = b[i]
++        for j in range(i):
++            s -= L[i][j] * x[j]
++        x[i] = s / L[i][i]
++    return x
++
++def solve(A, b):
++    """Solves Ax = b using standard linear algebra routines (e.g., LU decomposition)."""
++    return np.linalg.solve(A, b)
++
++def inv(M):
++    """Computes the inverse of matrix M using standard linear algebra routines."""
++    return np.linalg.inv(M)
++
++def diag(v):
++    """Creates a diagonal matrix from vector v."""
++    return np.diag(v)
++
++def prod(lst):
++    """Computes the product of elements in a list."""
++    result = 1.0
++    for x in lst:
++        result *= x
++    return result
++
++def tanh(x):
++    """Hyperbolic tangent."""
++    return math.tanh(x)
++
+ def compute_viper_opacity(value, target, allowable_deviation, opacity_max):
+-    """
+-    Computes opacity using the VIPER formula.
+-    """
++    """Computes opacity using the VIPER formula."""
+     diff = abs(value - target)
+     if diff > allowable_deviation:
+         return 0.0
+-    # Formula: alpha_max * (1.0 - diff / allowable_deviation)
+-    # Note: The source formula divides by 1.0 in the denominator explicitly,
+-    # which simplifies to the standard linear falloff.
+-    alpha = opacity_max * (1.0 - (diff / allowable_deviation))
+-    return alpha
++    return opacity_max * (1.0 - (diff / allowable_deviation))
+ 
+ def compute_depth_modulation(depth_current, depth_previous):
+-    """
+-    Computes the modulation factor beta for depth measure.
+-    """
++    """Computes the modulation factor beta for depth measure."""
+     sample_step = depth_current - depth_previous
+-    # Beta is 1 - sample_step. 
+-    # Pitfall: Beta < 1 always, so full opacity is never reached.
+     beta = 1.0 - sample_step
+     return beta
+ 
+-def compute_ubs_slicing(delta, L_q_hat, alpha, beta_raw, mu_p, Sigma_pp, Sigma_pq, Sigma_qq):
+-    """
+-    Computes opacity, mean, and covariance compensation using UBS.
+-    """
+-    # 1. Compute Cholesky inverse term
+-    # L_q_hat * L_q_hat^T = Sigma_qq
+-    # Z_UBS = L_q_hat^-1 * delta
+-    # Implementation note: Solve L_q_hat * Z = delta for Z
+-    Z_UBS = solve_triangular(L_q_hat, delta, lower=True)
++def compute_ubs_slicing(delta, L_q_hat, alpha, beta_raw, mu_p, Sigma_pp, Sigma_pq, Sigma_qq, Sigma_qp):
++    """Computes opacity, mean, and covariance compensation using UBS."""
++    # 1. Z_UBS = L_q_hat^-1 * delta
++    Z_UBS = solve_triangular(L_q_hat, delta)
+     
+-    # 2. Compute d_i
+-    # d_i = tanh((z_i^UBS)^2)
+-    d_i = tanh(Z_UBS ** 2)
++    # 2. d_i = tanh((z_i^UBS)^2)
++    d_i = [tanh(z**2) for z in Z_UBS]
+     
+-    # 3. Compute modulation factors
+-    # beta_i = 4 * exp(beta_raw_i)
+-    beta_i = 4.0 * exp(beta_raw)
+-    # Lambda_beta = min(beta/4, 1)
++    # 3. Modulation factors
++    beta_i = 4.0 * math.exp(beta_raw)
+     Lambda_beta = min(beta_i / 4.0, 1.0)
+-    # Lambda_B is used in mean calculation (assumed similar to Lambda_beta or beta_i based on context)
+-    # The source uses Lambda_B in mean and Lambda_beta in covariance. 
+-    # Assuming Lambda_B corresponds to the modulation applied to the mean regression.
+-    Lambda_B = Lambda_beta 
++    Lambda_B = Lambda_beta
+     
+-    # 4. Compute alpha_cond
+-    # alpha_cond = alpha * product((1 - d_i)^beta_i)
+-    # Note: d_i is a vector, beta_i is a scalar or vector. 
+-    # Assuming element-wise operation for the product over C components.
+-    term = (1.0 - d_i) ** beta_i
++    # 4. alpha_cond = alpha * product((1 - d_i)^beta_i)
++    term = [(1.0 - d) ** beta_i for d in d_i]
+     alpha_cond = alpha * prod(term)
+     
+-    # 5. Compute mu_cond
+-    # mu_cond = mu_p + Sigma_pq * Sigma_qq^-1 * diag(Lambda_B) * delta
+-    # Solve Sigma_qq * x = delta for x
++    # 5. mu_cond = mu_p + Sigma_pq * Sigma_qq^-1 * diag(Lambda_B) * delta
+     x = solve(Sigma_qq, delta)
+-    # Apply diagonal coupling
+     x_coupled = diag(Lambda_B) @ x
+-    # Matrix multiplication
+     mu_cond = mu_p + (Sigma_pq @ x_coupled)
+     
+-    # 6. Compute Sigma_cond
+-    # Sigma_cond = Sigma_pp - Sigma_pq * Sigma_qq^-1 * diag(Lambda_beta) * Sigma_qp
+-    # Solve Sigma_qq * y = Sigma_qp columns for y
+-    # Or compute inverse explicitly if small
++    # 6. Sigma_cond = Sigma_pp - Sigma_pq * Sigma_qq^-1 * diag(Lambda_beta) * Sigma_qp
+     Sigma_qq_inv = inv(Sigma_qq)
+     coupling_term = Sigma_qq_inv @ diag(Lambda_beta) @ Sigma_qp
+@@ -174,5 +180,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** VIPER is $O(1)$ per sample and is noted as computationally faster than Levy's method [S2, unofficial]. Depth Measure is $O(1)$ per sample [S3]. UBS involves matrix operations (Cholesky solve, inversion) which are generally more expensive, scaling with the dimensionality of the covariance matrix [S4, unofficial].
++*   **Time Complexity:** VIPER is noted as computationally faster than Levy's method [S2, unofficial]. Depth Measure complexity is Not given in the sources. UBS involves matrix operations (Cholesky solve, inversion) which are generally more expensive, scaling with the dimensionality of the covariance matrix [S4, unofficial].
+ *   **Memory Complexity:** VIPER and Depth Measure require minimal additional memory (scalar values) [S2, unofficial][S3]. UBS requires storage for covariance matrices and their factors [S4, unofficial].
+ *   **Strengths:** VIPER provides bright, clear surface rendering [S2, unofficial]. Depth Measure reveals occluded internal structures and preserves local contrast [S3]. UBS provides statistically grounded opacity and parameter compensation [S4, unofficial].

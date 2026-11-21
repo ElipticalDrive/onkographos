@@ -1,0 +1,130 @@
+# Reference View Aggregator Transformer
+
+Also called: RVA Transformer, Final Aggregation Transformer
+
+## Overview
+The Reference View Aggregator Transformer is the final stage in a multi-view neural rendering pipeline that predicts the color of a target ray by aggregating information from $K$ reference views. Unlike methods that aggregate features in an abstract latent space and then project to color, this method blends actual pixel colors from all epipolar line samples across all reference views, weighted by learned attention mechanisms. This direct blending of input pixel values is argued to improve generalization to novel scenes compared to feature-space aggregation [S1].
+
+## How it works
+**Inputs:**
+- $r^0$: The target ray token (output from previous stage).
+- $\{f_{2'}^k \mid 1 \le k \le K\}$: Per-reference-view feature vectors, where each $f_{2'}^k$ is a $C_2$-dimensional vector summarizing $M$ samples along the epipolar line for view $k$.
+- $\{c_k \mid 1 \le k \le K\}$: Camera relative positional encodings for each reference view.
+- $\{\mathfrak{c}_k^m \mid 1 \le k \le K, 1 \le m \le M\}$: Pixel colors at the $m$-th sample along the epipolar line of view $k$.
+- $\{\alpha_k^m \mid 1 \le k \le K, 1 \le m \le M\}$: Attention weights from the previous stage (epipolar line aggregation).
+
+**Outputs:**
+- $\mathfrak{c}$: The predicted color of the target ray.
+
+**Data Structures:**
+- The transformer input is a set of tokens. For each reference view $k$, a token is formed by concatenating the per-view feature $f_{2'}^k$ and the positional encoding $c_k$.
+- The transformer $T_3$ processes these tokens along with the target ray token $r^0$.
+- The output of $T_3$ is a set of features $\{f_3^0, f_3^1, \dots, f_3^K\}$, where $f_3^0$ corresponds to the target ray token and $f_3^k$ corresponds to the $k$-th reference view token.
+
+**Parameters:**
+- $K$: Number of reference views. Typical value: 10 [S1].
+- $M$: Number of samples along each epipolar line. Typical value: 20 [S1].
+- $W_2$: Learnable weight matrix used to compute blending weights.
+- Transformer blocks: 8 blocks per transformer, feature dimension 256 [S1].
+
+**Steps:**
+1. **Construct Transformer Input:** Form the input set for transformer $T_3$ by combining the target ray token $r^0$ with the concatenated features and positional encodings for each reference view:
+   $$
+   \text{Input} = \{r^0\} \cup \left\{ [f_{2'}^k \;\|\; c_k] \;\Big|\; 1 \le k \le K \right\}
+   $$
+   where $\|$ denotes concatenation [S1].
+
+2. **Transform:** Pass the input set through the transformer $T_3$ to obtain output features:
+   $$
+   \{f_3^0, f_3^1, \dots, f_3^K\} = T_3(\text{Input})
+   $$
+   Here, $f_3^0$ is the feature associated with the target ray, and $f_3^k$ is the feature associated with reference view $k$ [S1].
+
+3. **Compute Blending Weights:** Calculate the attention weight $\beta_k$ for each reference view $k$ using a learned weight matrix $W_2$ applied to the concatenation of the target ray feature $f_3^0$ and the reference view feature $f_3^k$, normalized via softmax:
+   $$
+   \beta_k = \frac{\exp(W_2 [f_3^0 \;\|\; f_3^k])}{\sum_{k'=1}^K \exp(W_2 [f_3^0 \;\|\; f_3^{k'}])}
+   $$
+   where $W_2$ is a learnable weight matrix [S1].
+
+4. **Aggregate Colors:** Compute the final predicted color $\mathfrak{c}$ by blending the pixel colors $\mathfrak{c}_k^m$ from all reference views and all epipolar line samples. The blending uses the view-level weights $\beta_k$ and the sample-level weights $\alpha_k^m$ from the previous stage:
+   $$
+   \mathfrak{c} = \sum_{k=1}^K \beta_k \left( \sum_{m=1}^M \alpha_k^m \mathfrak{c}_k^m \right)
+   $$
+   where $\mathfrak{c}_k^m$ is the pixel color at the $m$-th sample along the epipolar line of view $k$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def reference_view_aggregator_transformer(
+    r0: Tensor,           # Target ray token, shape (C,)
+    f_2_prime: List[Tensor], # Per-view features, list of K tensors, each shape (C2,)
+    c_k: List[Tensor],     # Positional encodings, list of K tensors, each shape (P,)
+    colors: List[List[Tensor]], # colors[k][m] is pixel color at m-th sample of view k, shape (3,)
+    alpha: List[List[Tensor]]   # alpha[k][m] is attention weight for m-th sample of view k, scalar
+):
+    K = len(f_2_prime)
+    
+    # Step 1: Construct input tokens
+    # Concatenate per-view feature with positional encoding
+    view_tokens = []
+    for k in range(K):
+        # Concatenate along the last dimension
+        token = torch.cat([f_2_prime[k], c_k[k]], dim=-1)
+        view_tokens.append(token)
+    
+    # Input set includes target ray token and all view tokens
+    input_tokens = [r0] + view_tokens
+    
+    # Step 2: Transform
+    # T3 is a transformer with 8 blocks, feature dim 256
+    # Output features: f_3[0] is for r0, f_3[k] is for view k
+    f_3 = transformer_T3(input_tokens)
+    
+    f_3_0 = f_3[0] # Target ray feature
+    f_3_views = f_3[1:] # List of K view features
+    
+    # Step 3: Compute blending weights beta_k
+    # W2 is a learnable weight matrix
+    beta = []
+    for k in range(K):
+        # Concatenate target ray feature and view feature
+        concat_feat = torch.cat([f_3_0, f_3_views[k]], dim=-1)
+        # Apply linear transformation
+        score = torch.matmul(concat_feat, W2) # Assuming W2 is applied as linear projection
+        beta.append(score)
+    
+    # Softmax normalization over K views
+    beta_tensor = torch.stack(beta)
+    beta_normalized = softmax(beta_tensor, dim=0)
+    
+    # Step 4: Aggregate colors
+    # colors[k][m] is shape (3,), alpha[k][m] is scalar
+    total_color = torch.zeros(3)
+    for k in range(K):
+        view_color_sum = torch.zeros(3)
+        for m in range(M):
+            # M is number of samples, typically 20
+            view_color_sum += alpha[k][m] * colors[k][m]
+        total_color += beta_normalized[k] * view_color_sum
+        
+    return total_color
+```
+
+**Edge Cases and Pitfalls:**
+- The number of reference views $K$ and samples $M$ must be consistent with the training configuration (typically $K=10, M=20$) [S1].
+- The positional encodings $c_k$ must be computed consistently with the camera poses of the reference views.
+- The weights $\alpha_k^m$ are assumed to be available from the previous stage (epipolar line aggregation) [S1].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the transformer size (8 blocks, 256 features) and the number of views $K$ and samples $M$. The attention computation is $O(K^2)$ for the view-level attention and $O(K \cdot M)$ for the color aggregation.
+- **Memory Complexity:** Stores features for $K$ views and $M$ samples per view.
+- **Strengths:** Direct blending of pixel colors improves generalization to novel scenes compared to feature-space aggregation [S1].
+- **Limitations:** Requires access to pixel colors from all reference views and epipolar line samples. Performance depends on the quality of the reference views and the accuracy of the attention weights.
+- **When to use:** When generalization to unseen scenes is a priority and sufficient reference views are available.
+
+## Background
+The Reference View Aggregator Transformer is part of the Generalizable Patch-Based Neural Rendering method [S1]. It was introduced to address the limitations of previous methods like LFNR, which aggregated features in latent space. The method was trained on datasets such as LLFF, Google scanned objects, Spaces, and RealEstate10K [S1]. Training involves 250k iterations with Adam optimizer, initial learning rate $3 \cdot 10^{-4}$, and takes approximately 24 hours on 32 TPUs [S1].
+
+## Sources
+[S1] Generalizable Patch-Based Neural Rendering, https://doi.org/10.1007/978-3-031-19824-3_10, fetched 2026-10-26

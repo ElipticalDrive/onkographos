@@ -1,0 +1,99 @@
+I have the following issue when running PngCompression on my customed data: File "/home/zikai/Desktop/ParamGS/process_data/compress.py", line 71, in <module> compression_method.compress(save_path, splats) File "/home/zikai/anaconda3/envs...
+
+PngCompression issue · Issue #787 · nerfstudio-project/gsplat · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+PngCompression issue #787
+New issue
+Copy link
+New issue
+Copy link
+Open
+#1063
+Open
+PngCompression issue#787
+#1063
+Copy link
+Description
+andrewsilver1997
+opened on Aug 21, 2025
+Issue body actions
+I have the following issue when running PngCompression on my customed data:
+```
+  File "/home/zikai/Desktop/ParamGS/process_data/compress.py", line 71, in <module>
+    compression_method.compress(save_path, splats)
+  File "/home/zikai/anaconda3/envs/paramgs/lib/python3.10/site-packages/gsplat/compression/png_compression.py", line 106, in compress
+    meta[param_name] = compress_fn(
+  File "/home/zikai/anaconda3/envs/paramgs/lib/python3.10/site-packages/gsplat/compression/png_compression.py", line 363, in _compress_kmeans
+    labels = kmeans.fit(x)
+  File "/home/zikai/anaconda3/envs/paramgs/lib/python3.10/site-packages/torchpq/clustering/KMeans.py", line 415, in fit
+    centroids = self.initialize_centroids(data)
+  File "/home/zikai/anaconda3/envs/paramgs/lib/python3.10/site-packages/torchpq/clustering/KMeans.py", line 272, in initialize_centroids
+    random_index = np.random.choice(
+  File "numpy/random/mtrand.pyx", line 1001, in numpy.random.mtrand.RandomState.choice
+ValueError: Cannot take a larger sample than population when 'replace=False'
+```
+In my case I have only 50000 gaussians (12MB), the problem happened when compressing shN where kmeans is applied. I noticed n_clusters is hardcoded here, is there any way to parse n_clusters? I hardcoded it to 100 in the lib, then I had another problem:
+```
+Traceback (most recent call last):
+  File "/home/zikai/Desktop/ParamGS/process_data/compress.py", line 71, in <module>
+    compression_method.compress(save_path, splats)
+  File "/home/zikai/anaconda3/envs/paramgs/lib/python3.10/site-packages/gsplat/compression/png_compression.py", line 106, in compress
+    meta[param_name] = compress_fn(
+  File "/home/zikai/anaconda3/envs/paramgs/lib/python3.10/site-packages/gsplat/compression/png_compression.py", line 363, in _compress_kmeans
+    labels = kmeans.fit(x)
+  File "/home/zikai/anaconda3/envs/paramgs/lib/python3.10/site-packages/torchpq/clustering/KMeans.py", line 418, in fit
+    maxsims, labels = self.get_labels(data, centroids) #top1 search
+  File "/home/zikai/anaconda3/envs/paramgs/lib/python3.10/site-packages/torchpq/clustering/KMeans.py", line 332, in get_labels
+    if required < remaining:
+UnboundLocalError: local variable 'required' referenced before assignment
+```
+the same problem also happened when I compressed some public dataset with much more gaussians (127MB). Thank you in advance
+👀React with 👀1Reacted by Zhiyuan Yu
+Activity
+Daceyyreal commented on Sep 16, 2026
+Daceyyreal
+on Sep 16, 2026
+More actions
+I looked into both errors (gsplat main 28e794c, torchpq 0.3.0.6, the latest release on PyPI, whose clustering/KMeans.py line numbers match your traceback).
+1. ValueError: Cannot take a larger sample than population
+_compress_kmeans hard-codes n_clusters=65536, and PngCompression has no way to change it. torchpq picks the initial centroids with np.random.choice(n_data, size=[self.n_clusters], replace=False) (KMeans.py:272), so any scene with fewer than 65,536 Gaussians fails. Here there are 50,000.
+2. UnboundLocalError: ... 'required' (after lowering n_clusters)
+This one is in torchpq. gsplat creates KMeans(..., distance="manhattan"). On CPU tensors, KMeans.get_labels takes the data.device.type == "cpu" branch (KMeans.py:323), which only assigns required for "euclidean" and "cosine"/"inner" (KMeans.py:328-331). With "manhattan", if required < remaining: (KMeans.py:332) raises. torchpq documents manhattan as GPU-only (KMeans.py:40), and CUDA tensors take the max_sim_cuda path instead (KMeans.py:307). So this happens whenever the splats passed to compress are on the CPU, whatever the number of Gaussians.
+Both reproduce with torchpq 0.3.0.6's KMeans.py on CPU input of shape [45, N], as _compress_kmeans builds it (only the cupy kernel imports stubbed, no CUDA):
+```
+n_clusters=65536, N=50000 -> ValueError: Cannot take a larger sample than population when 'replace=False'
+    at KMeans.py:415 fit, KMeans.py:272 initialize_centroids
+n_clusters=100, N=5000    -> UnboundLocalError: cannot access local variable 'required' where it is not associated with a value
+    at KMeans.py:418 fit, KMeans.py:332 get_labels
+```
+Possible fixes in gsplat:
+Clamp n_clusters to the number of Gaussians in _compress_kmeans.
+If the number of Gaussians is <= n_clusters, skip k-means and store each Gaussian's quantized shN as its own centroid (labels = arange(N)). The .npz layout and _decompress_kmeans stay the same.
+Expose n_clusters as a PngCompression argument, checked against the number of Gaussians.
+For the CPU case, _compress_kmeans could move shN to CUDA for clustering when available, or raise a clear error that torchpq's manhattan k-means needs CUDA.
+Which direction would you prefer? I'm happy to open a PR.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

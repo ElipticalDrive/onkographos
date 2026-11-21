@@ -1,0 +1,297 @@
+# Hardware-Aware Hyperparameter Tuning
+
+Also called: Hyperparameter Selection, XPR Hyperparameter Selection, automatic hyperparameter tuning
+
+## Overview
+Hardware-Aware Hyperparameter Tuning is an automatic process that determines optimal performance parameters (tile size, unroll factor, number of bins, batch divisor) for a specific scene and view set on a target hardware device, ensuring correctness and performance without manual tuning [S1, unofficial]. It sets itself apart from sibling methods like [GPU CSG Ray Tracing with Uniform Grid Index](4098-gpu-csg-ray-tracing-with-uniform-grid-index.md) by focusing on compile-time configuration of shader batch sizes and bin layouts rather than geometric traversal optimization or cache locality [S1, unofficial].
+
+## How it works
+The method operates in two distinct phases: profiling to establish safety bounds, and a sequential search to optimize performance parameters.
+
+### Inputs and Outputs
+**Inputs:**
+*   The set of target views to be rendered.
+*   The trained primitive parameters (e.g., Gaussian splats).
+*   The target hardware device (GPU or TPU).
+
+**Outputs:**
+*   Optimal tile size.
+*   Optimal unroll factor $U$.
+*   Optimal number of bins $L$.
+*   Optimal batch divisor $D$.
+*   Data-aware assignment of tiles to bins.
+*   Global bounds $M$ and $I$ sufficient for all target views.
+
+### Data Structures
+The method relies on the following parameters, defined in the search space [S1, unofficial]:
+
+| Parameter | Description | Search Space (GPU) | Search Space (TPU) |
+| :--- | :--- | :--- | :--- |
+| Tile size | Resolution of the tile grid | $\{8 \times 8, 16 \times 16\}$ | $\{16 \times 16, 32 \times 32\}$ |
+| $P_{max}$ | Global accuracy/speed tuning knob | $\{4096, 8192\}$ | $\{4096, 8192\}$ |
+| $L$ | Number of bins | $\{2, 4, 6, 8\}$ | $\{2, 4, 6, 8\}$ |
+| $D$ | Batch divisor | $\{1, 2, 4, 8\}$ | $\{1, 2, 4, 8\}$ |
+| $U$ | XLA unroll factor | $\{1, 2, 4, 8, 16, 32\}$ | $\{1, 2, 4, 8, 16, 32\}$ |
+
+Bin upper bounds are also selected from hardware-specific sets [S1, unofficial]:
+*   **GPU:** $\{64, 128, 256, 512, 768, 1024, 2048\}$
+*   **TPU:** $\{256, 512, 768, 1024, 1280, 1536, 2048\}$
+
+### Steps
+
+#### Phase 1: Profiling and Bounds
+1.  **Render Forward:** Render every target view exactly once using a forward-only pass (no gradients).
+2.  **Record Metrics:** For each view, record:
+    *   $M$: The maximum number of primitives intersecting any tile.
+    *   $I$: The maximum number of primitives intersecting any pixel (or relevant intersection count).
+    *   The number of primitives each tile intersects.
+3.  **Set Global Bounds:** Set the global $M$ and $I$ to the observed maxima across all views. This guarantees bounds are sufficient without safety margins [S1, unofficial].
+
+#### Phase 2: Sequential Parameter Search
+The search proceeds in five sequential phases. Each phase benchmarks candidates and selects the best performer.
+
+1.  **Phase 1: Tile Size**
+    *   Search space: Two candidates (hardware-specific).
+    *   Action: Profile each candidate. Different tile sizes change the tile grid topology, requiring separate profiling [S1, unofficial].
+
+2.  **Phase 2: Unroll Factor $U$**
+    *   Search space: $\{1, 2, 4, 8, 16, 32\}$.
+    *   Action: Benchmark all six candidates exhaustively.
+
+3.  **Phase 3: Number of Bins $L$**
+    *   Search space: $\{2, 4, 6, 8\}$.
+    *   Action: Benchmark all four candidates exhaustively.
+    *   Tie-Breaker: If candidates are tied within a 2% noise tolerance, re-benchmark the lowest and highest tied candidates with additional runs to break the tie [S1, unofficial].
+
+4.  **Phase 4: Re-search Unroll Factor $U$**
+    *   Trigger: Executed whenever $L$ shifts the bin layout.
+    *   Reason: A larger unrolled scan body shifts the tradeoff between instruction-level parallelism and register pressure.
+    *   Action: Search $U$ again from the six candidates [S1, unofficial].
+
+5.  **Phase 5: Batch Divisor $D$**
+    *   Search space: $\{1, 2, 4, 8\}$.
+    *   Action: Search up to four candidates.
+    *   Preference: Prefer $D=4$ within noise tolerance [S1, unofficial].
+
+#### Phase 3: Data-Aware Assignment
+*   Compute the assignment of tiles to bins based on the worst-case cumulative counts of primitives across all views recorded in Phase 1. This ensures that the bin capacity accommodates the maximum load [S1, unofficial].
+
+### Formulas
+The shader batch size $b_l$ for a bin with trip count $P_l$ is derived as [S1, unofficial]:
+
+$$ b_l = \lfloor P_l / D \rfloor $$
+
+The result is then rounded to the nearest multiple of the unroll factor $U$.
+
+### Parameters and Typical Values
+*   **Tile Size:** Depends on hardware. GPU: $\{8 \times 8, 16 \times 16\}$. TPU: $\{16 \times 16, 32 \times 32\}$ [S1, unofficial].
+*   **Number of Bins ($L$):** Affects performance significantly. Increasing bins initially increases FPS by reducing redundant computation. Beyond an optimal count, FPS drops due to reduced SM occupancy and increased launch overhead [S1, unofficial].
+*   **Batch Divisor ($D$):** Controls the granularity of early exit in the blend loop. Smaller $D$ checks exit conditions less frequently (lower overhead, more wasted work). Larger $D$ enables tighter early termination (higher overhead) [S1, unofficial].
+*   **Unroll Factor ($U$):** Specifies the XLA unroll factor for the inner loop over primitive entries in each shader batch [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Insufficient Bounds:** Any view whose $M$ or $I$ values exceed the chosen bounds can produce incorrect rendered images or a drop in accuracy. Profiling all target views is strictly necessary [S1, unofficial].
+*   **Noise in Benchmarking:** The 2% noise tolerance in Phase 3 is critical to avoid selecting suboptimal parameters due to measurement variance [S1, unofficial].
+*   **One-Time Cost:** The selection process takes only a few minutes and is a one-time cost, negligible relative to training time [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hardware_aware_hyperparameter_tuning(target_views, primitives, device_type):
+    """
+    Determines optimal hyperparameters for XPR rendering on a specific device.
+    
+    Args:
+        target_views: List of view configurations to render.
+        primitives: Trained primitive parameters (e.g., Gaussians).
+        device_type: 'GPU' or 'TPU'.
+        
+    Returns:
+        config: Dictionary containing optimal tile_size, U, L, D, bin_assignment, M, I.
+    """
+    
+    # --- Phase 1: Profiling ---
+    
+    # Initialize global bounds
+    M_global = 0
+    I_global = 0
+    
+    # Dictionary to store per-tile primitive counts across all views
+    # Key: (view_id, tile_id), Value: list of primitive indices
+    tile_primitives = {}
+    
+    for view in target_views:
+        # Render forward pass (no gradients)
+        # This step records M, I, and tile intersections
+        # Implementation detail: Use the renderer's forward-only mode
+        render_result = render_forward(view, primitives)
+        
+        # Extract metrics for this view
+        M_view = render_result.max_primitives_per_tile
+        I_view = render_result.max_primitives_per_pixel
+        tile_intersections = render_result.tile_primitive_counts
+        
+        # Update global bounds
+        if M_view > M_global:
+            M_global = M_view
+        if I_view > I_global:
+            I_global = I_view
+            
+        # Store tile intersections for bin assignment
+        for tile_id, prim_indices in tile_intersections.items():
+            tile_primitives[(view.id, tile_id)] = prim_indices
+            
+    # --- Phase 2: Sequential Search ---
+    
+    # Define search spaces based on device
+    if device_type == 'GPU':
+        tile_candidates = [(8, 8), (16, 16)]
+    elif device_type == 'TPU':
+        tile_candidates = [(16, 16), (32, 32)]
+    else:
+        raise ValueError("Unsupported device type")
+        
+    U_candidates = [1, 2, 4, 8, 16, 32]
+    L_candidates = [2, 4, 6, 8]
+    D_candidates = [1, 2, 4, 8]
+    
+    best_tile = None
+    best_U = None
+    best_L = None
+    best_D = None
+    
+    # Phase 1: Tile Size
+    best_tile_fps = -1
+    for tile_size in tile_candidates:
+        # Profile with this tile size
+        # Note: Different tile sizes change the tile grid, so full profiling is needed
+        fps = benchmark_tile_size(tile_size, M_global, I_global, tile_primitives)
+        if fps > best_tile_fps:
+            best_tile_fps = fps
+            best_tile = tile_size
+            
+    # Phase 2: Unroll Factor U (Initial)
+    best_U_fps = -1
+    for U in U_candidates:
+        # Benchmark U with default L (e.g., L=4) and D (e.g., D=4)
+        # This is a preliminary check; final U depends on L
+        fps = benchmark_unroll(U, L=4, D=4, best_tile, M_global, I_global)
+        if fps > best_U_fps:
+            best_U_fps = fps
+            best_U = U
+            
+    # Phase 3: Number of Bins L
+    best_L_fps = -1
+    best_L_candidates = []
+    
+    for L in L_candidates:
+        fps = benchmark_bins(L, best_U, 4, best_tile, M_global, I_global)
+        if fps > best_L_fps:
+            best_L_fps = fps
+            best_L_candidates = [L]
+        elif abs(fps - best_L_fps) / best_L_fps < 0.02: # 2% noise tolerance
+            best_L_candidates.append(L)
+            
+    # Tie-breaker for L
+    if len(best_L_candidates) > 1:
+        # Re-benchmark lowest and highest tied candidates
+        low_L = min(best_L_candidates)
+        high_L = max(best_L_candidates)
+        
+        fps_low = benchmark_bins(low_L, best_U, 4, best_tile, M_global, I_global, runs=10)
+        fps_high = benchmark_bins(high_L, best_U, 4, best_tile, M_global, I_global, runs=10)
+        
+        if fps_low > fps_high:
+            best_L = low_L
+        else:
+            best_L = high_L
+    else:
+        best_L = best_L_candidates[0]
+        
+    # Phase 4: Re-search Unroll Factor U at chosen L
+    best_U_final_fps = -1
+    for U in U_candidates:
+        # Benchmark U with the chosen L
+        fps = benchmark_unroll(U, best_L, 4, best_tile, M_global, I_global)
+        if fps > best_U_final_fps:
+            best_U_final_fps = fps
+            best_U = U
+            
+    # Phase 5: Batch Divisor D
+    best_D_final_fps = -1
+    best_D = 4 # Default preference
+    
+    # Search D candidates, preferring D=4
+    # Sort candidates to check D=4 first or handle preference logic
+    sorted_D = sorted(D_candidates, key=lambda x: (0 if x == 4 else 1, x))
+    
+    for D in sorted_D:
+        fps = benchmark_batch_divisor(D, best_U, best_L, best_tile, M_global, I_global)
+        if fps > best_D_final_fps:
+            best_D_final_fps = fps
+            best_D = D
+        elif abs(fps - best_D_final_fps) / best_D_final_fps < 0.02:
+            # If tied within noise, prefer D=4
+            if best_D == 4:
+                continue
+            else:
+                best_D = D
+                
+    # --- Phase 3: Data-Aware Assignment ---
+    
+    # Compute bin assignment based on worst-case cumulative counts
+    bin_assignment = compute_bin_assignment(tile_primitives, best_L, M_global)
+    
+    # Return configuration
+    config = {
+        'tile_size': best_tile,
+        'U': best_U,
+        'L': best_L,
+        'D': best_D,
+        'bin_assignment': bin_assignment,
+        'M': M_global,
+        'I': I_global
+    }
+    
+    return config
+
+def benchmark_tile_size(tile_size, M, I, tile_primitives):
+    # Placeholder for actual benchmarking logic
+    # Returns FPS
+    return 0.0
+
+def benchmark_unroll(U, L, D, tile_size, M, I):
+    # Placeholder for actual benchmarking logic
+    return 0.0
+
+def benchmark_bins(L, U, D, tile_size, M, I):
+    # Placeholder for actual benchmarking logic
+    return 0.0
+
+def benchmark_batch_divisor(D, U, L, tile_size, M, I):
+    # Placeholder for actual benchmarking logic
+    return 0.0
+
+def compute_bin_assignment(tile_primitives, L, M):
+    # Compute data-aware assignment of tiles to bins
+    # based on worst-case cumulative counts across all views
+    # Implementation detail: Distribute tiles to L bins to balance load
+    # respecting the max capacity M
+    return {}
+```
+
+## Operating characteristics
+*   **Time Complexity:** The profiling phase requires one forward render per target view. The search phase involves a small constant number of benchmarks (2 tile sizes, 6 U candidates, 4 L candidates, 6 U candidates again, up to 4 D candidates). The total time is a few minutes, which is negligible relative to training time [S1, unofficial].
+*   **Memory Complexity:** Depends on the storage of tile-primitive counts during profiling. The bin assignment is computed from worst-case cumulative counts [S1, unofficial].
+*   **Performance:** On an L40 GPU with the 360 dataset, XPR-4K achieves SSIM 0.87 and LPIPS 0.182. XPR-8K achieves SSIM 0.87 and LPIPS 0.182. LinPrim achieves SSIM 0.86 and LPIPS 0.190 for 360, and SSIM 0.83 and LPIPS 0.195 for 360 with XPR-8K [S1, unofficial].
+*   **Scaling:** Increasing the number of bins initially increases FPS by reducing redundant computation. Beyond an optimal count, FPS drops due to reduced SM occupancy and increased launch overheads [S1, unofficial].
+*   **Strengths:** Automatic configuration eliminates manual tuning. Data-aware bin assignment optimizes for specific scene geometry.
+*   **Limitations:** Requires profiling all target views. Performance is sensitive to the noise tolerance in benchmarking [S1, unofficial].
+
+## Background
+Hardware-Aware Hyperparameter Tuning was introduced as part of the XPR (Extensible Cross-Platform Point-Based Differentiable Renderer) framework [S1, unofficial]. It addresses the need for efficient rendering on diverse hardware (GPU, TPU) by automatically selecting parameters that balance instruction-level parallelism, register pressure, and early termination granularity [S1, unofficial].
+
+## Sources
+[S1] XPR: An Extensible Cross-Platform Point-Based Differentiable Renderer, https://doi.org/10.48550/arxiv.2606.11529, fetched 2026-10-26 (unofficial)

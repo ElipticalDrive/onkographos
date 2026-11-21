@@ -1,0 +1,207 @@
+# Discrete Ray Tracing
+
+Also called: Discrete Ray Casting, 3D DDA Voxel Traversal, Naive Voxel-Raycasting
+
+## Overview
+Discrete Ray Tracing (DRT) is a volume rendering technique that approximates continuous viewing rays with discrete, voxel-connected paths (voxelization) to traverse a 3D scalar field [S7, unofficial]. Unlike methods that rely on geometric primitives or acceleration structures, DRT directly samples the voxel grid using a 3D Digital Differential Analyzer (DDA) or Bresenham-like algorithm, guaranteeing that voxels are visited in the exact order of intersection [S1, unofficial]. This approach limits intersection tests to Pythagorean complexity rather than cubic, ensuring the first opaque voxel found is the closest [S1, unofficial]. It is distinguished from [Fixed Step Ray Marching](3136-fixed-step-ray-marching.md) by its adaptive step size (always moving to the next voxel boundary) and from [Exponential Approximation Method](2079-exponential-approximation-method.md) by its explicit traversal of every voxel along the ray path without skipping [S1, S7, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D voxel grid (scalar field) $V$ of dimensions $W \times H \times D$; camera parameters (position, view vectors, near/far planes); transfer function $T(v) \rightarrow (r, g, b, \alpha)$; projection type (surface, maximum, sum, or composite) [S1, S4, S7, unofficial].
+*   **Output:** A 2D image where each pixel $(x, y)$ holds the accumulated color and opacity [S4, unofficial].
+
+**Data Structures:**
+*   **Voxel Grid:** A 3D array $V[i, j, k]$ where indices are integers. A voxel is defined as an index in an axis-aligned grid, not a geometric cube with independent position [S1, unofficial].
+*   **Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$. In DRT, the ray is represented as a sequence of integer voxel coordinates $(i, j, k)$ [S7, unofficial].
+*   **Pixel Accumulator:** A 4-tuple $(R, G, B, A)$ initialized to $(0, 0, 0, 0)$ [S4, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Ray Setup:**
+    For each pixel $(x, y)$ in the image plane:
+    *   Calculate the ray direction $\mathbf{d}$ using bilinear interpolation of the four viewport corner normals [S1, unofficial].
+    *   Set ray origin $\mathbf{o}$ to the camera position (for perspective) or a point on the near plane (for orthographic) [S1, S4, unofficial].
+    *   *Note:* For orthographic projection along the Z-axis, $\mathbf{d} = (0, 0, 1)$ and $\mathbf{o} = (x/W, y/H, \text{near\_plane})$ [S4, unofficial].
+
+2.  **Voxelization (Ray Traversal):**
+    Generate a discrete path of voxels intersected by the ray. This is done using a 3D DDA algorithm [S1, S7, unofficial].
+    *   Initialize current voxel coordinates $(i, j, k)$ to the voxel containing $\mathbf{o}$:
+        $$ i = \lfloor \mathbf{o}_x \cdot W - 0.5 \rfloor, \quad j = \lfloor \mathbf{o}_y \cdot H - 0.5 \rfloor, \quad k = \lfloor \mathbf{o}_z \cdot D - 0.5 \rfloor $$
+        The $-0.5$ offset centers the sampling within the voxel [S4, unofficial].
+    *   Determine the step direction $(\Delta i, \Delta j, \Delta k) \in \{-1, 0, 1\}$ based on the sign of $\mathbf{d}$ [S1, unofficial].
+    *   Calculate the distance to the next voxel boundary in each axis:
+        $$ t_{i} = \frac{(i + 0.5 + \text{sign}(\Delta i)/2) - \mathbf{o}_x}{\mathbf{d}_x} \quad \text{(if } \mathbf{d}_x \neq 0 \text{)} $$
+        (Similar formulas for $t_j, t_k$) [S1, G, unofficial].
+    *   While the ray is within the volume bounds:
+        1.  Sample the scalar value $v = V[i, j, k]$ [S4, unofficial].
+        2.  Apply the transfer function to get color $\mathbf{c} = (r, g, b)$ and opacity $\alpha$ [S4, unofficial].
+        3.  Composite the sample into the pixel accumulator using the front-to-back over operator [S4, unofficial]:
+            $$ \mathbf{C}_{out} = \mathbf{C}_{in} + (1 - A_{in}) \cdot \mathbf{c} \cdot \alpha $$
+            $$ A_{out} = A_{in} + (1 - A_{in}) \cdot \alpha $$
+        4.  If using surface projection, stop at the first non-transparent voxel [S7, unofficial].
+        5.  Advance to the next voxel:
+            *   Find the axis with the smallest positive $t$ (distance to next boundary).
+            *   Increment/decrement the coordinate on that axis by 1.
+            *   Update the boundary distance for that axis [S1, G, unofficial].
+
+3.  **Projection Variants:**
+    *   **Composite:** Accumulate all samples along the ray using the over operator [S4, unofficial].
+    *   **Maximum:** Store the maximum scalar value encountered [S7, unofficial].
+    *   **Sum/Average:** Accumulate scalar values (X-ray simulation) [S7, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def discrete_ray_tracing(volume, width, height, depth, camera_pos, view_vectors):
+    """
+    volume: 3D numpy array (W, H, D)
+    camera_pos: (ox, oy, oz)
+    view_vectors: dict with 'upperLeft', 'upperRight', 'lowerLeft', 'lowerRight' (Vec3)
+    """
+    image = np.zeros((height, width, 4)) # RGBA
+    
+    # Precompute inverse dimensions
+    inv_h = 1.0 / height
+    inv_w = 1.0 / width
+    
+    # Calculate corner normals
+    ul_n = normalize(view_vectors['upperLeft'])
+    ur_n = normalize(view_vectors['upperRight'])
+    ll_n = normalize(view_vectors['lowerLeft'])
+    lr_n = normalize(view_vectors['lowerRight'])
+    
+    # Y-direction deltas
+    left_y_delta = (ll_n - ul_n) * inv_h
+    right_y_delta = (lr_n - ur_n) * inv_h
+    
+    # Initialize interpolation variables
+    left_normal = ul_n
+    right_normal = ur_n
+    
+    for y in range(height):
+        # X-direction delta for current row
+        x_delta = (right_normal - left_normal) * inv_w
+        
+        # Current ray direction starts at left normal
+        ray_dir = left_normal
+        
+        for x in range(width):
+            # 1. Setup Ray
+            # Orthographic assumption for simplicity as per S4, or perspective via camera_pos
+            # S4 uses: ray_origin = (x/width, y/height, near_plane)
+            # S1 uses: ray.origin = camera.GetPosition()
+            # We assume a generic ray setup where origin is fixed or calculated per pixel.
+            # For this implementation, we assume the ray direction is sufficient for traversal
+            # if we map the ray to voxel space directly.
+            
+            # 2. Voxelization (3D DDA)
+            # Determine starting voxel. Assuming ray starts at (0,0,0) in voxel space for traversal logic
+            # or mapped from world space.
+            # S4: voxel_coord = floor(scaled_coord - 0.5)
+            # Here we simulate the traversal of a ray defined by dir through the volume.
+            
+            # Simplified DDA for a ray from (0,0,0) in direction (dx, dy, dz)
+            # In practice, origin is mapped to voxel indices.
+            # Let's assume we have a function get_voxel_path(ray) that yields (i,j,k)
+            
+            # Accumulator
+            acc_r, acc_g, acc_b, acc_a = 0.0, 0.0, 0.0, 0.0
+            
+            # Traverse voxels
+            # Note: Real DDA requires calculating t_max and t_delta for each axis.
+            # This is a conceptual representation of the loop structure.
+            for i, j, k in get_voxel_path(ray_dir, volume.shape):
+                # 3. Sample
+                val = volume[i, j, k]
+                
+                # 4. Transfer Function (Gaussian Mixtures from S4)
+                r = 1.0 * np.exp(-((val - 9.0)**2) / 1.0) + 0.1 * np.exp(-((val - 3.0)**2) / 0.1) + 0.1 * np.exp(-((val + 3.0)**2) / 0.5)
+                g = 1.0 * np.exp(-((val - 9.0)**2) / 1.0) + 1.0 * np.exp(-((val - 3.0)**2) / 0.1) + 0.1 * np.exp(-((val + 3.0)**2) / 0.5)
+                b = 0.1 * np.exp(-((val - 9.0)**2) / 1.0) + 0.1 * np.exp(-((val - 3.0)**2) / 0.1) + 1.0 * np.exp(-((val + 3.0)**2) / 0.5)
+                a = 0.6 * np.exp(-((val - 9.0)**2) / 1.0) + 0.1 * np.exp(-((val - 3.0)**2) / 0.1) + 0.01 * np.exp(-((val + 3.0)**2) / 0.5)
+                
+                # 5. Composite (Over Operator)
+                # S4: pixel_color[0:3] += (1 - pixel_color[3]) * color * opacity
+                acc_r += (1.0 - acc_a) * r * a
+                acc_g += (1.0 - acc_a) * g * a
+                acc_b += (1.0 - acc_a) * b * a
+                acc_a += (1.0 - acc_a) * a
+                
+                # Optimization: Stop if fully opaque
+                if acc_a >= 1.0:
+                    break
+            
+            # 6. Store Result
+            image[y, x] = [acc_r, acc_g, acc_b, acc_a]
+            
+            # Increment X
+            ray_dir += x_delta
+            
+        # Increment Y
+        left_normal += left_y_delta
+        right_normal += right_y_delta
+        
+    return image
+
+def get_voxel_path(direction, shape):
+    """
+    Yields voxel indices (i, j, k) along the ray defined by direction.
+    Uses 3D DDA.
+    """
+    # Initialize current voxel
+    # Assuming ray starts at origin (0,0,0) for this helper
+    i, j, k = 0, 0, 0
+    
+    # Step directions
+    step_i = 1 if direction[0] > 0 else -1
+    step_j = 1 if direction[1] > 0 else -1
+    step_k = 1 if direction[2] > 0 else -1
+    
+    # Distances to next boundaries
+    # t_max for each axis
+    # t_delta for each step
+    # This is a standard 3D DDA implementation [G]
+    
+    # ... (Standard DDA logic omitted for brevity, but required for implementation) ...
+    
+    # Placeholder for the actual DDA loop logic which is complex to write out fully without
+    # defining helper functions for t_max/t_delta updates.
+    # The key is that it yields i, j, k in order of intersection.
+    pass 
+```
+
+**Edge Cases and Pitfalls:**
+*   **Aliasing:** Using nearest-neighbor sampling (flooring coordinates) can result in blocky artifacts at low resolutions [S4, unofficial].
+*   **Connectivity:** The choice of 6-, 18-, or 26-connected paths affects accuracy and performance. 6-connected paths contain almost twice as many voxels as 26-connected paths. 26-connected paths are faster but may miss intersections detected by 6-connected paths [S7, unofficial].
+*   **Performance:** High number of texture accesses and multiplications per ray leads to low frame rates for large or sparse volumes [S2, unofficial].
+*   **Voxel Definition:** Voxels are indices, not geometric cubes. They do not move [S1, unofficial].
+
+## Subtopics
+
+### [Cube-3 Hybrid Ray-Casting](3143-cube-3-hybrid-ray-casting.md)
+A hardware-oriented hybrid algorithm for real-time visualization of high-resolution volumes ($512^3$). It ensures each voxel is read at most once per projection using a Cubic Frame Buffer and global communication network, exploiting spatial coherency. Choose when memory bandwidth is the bottleneck and hardware support for skewed memory organization exists.
+
+### [Volumetric Ray Tracing (RRT)](71-volumetric-ray-tracing.md)
+Extends DRT with global illumination. Casts secondary rays for shadows/reflections when encountering object voxels. Precomputes view-independent attributes (normals, visibility bits) to optimize shading. Choose when photorealistic lighting is required for volumetric data.
+
+## Operating characteristics
+*   **Time Complexity:** $O(n)$, where $n$ is the number of voxels traversed along the ray [S2, unofficial]. In the worst case, $n$ is proportional to the volume dimension in the view direction.
+*   **Memory Complexity:** $O(1)$ auxiliary space per ray (excluding the volume storage) [S2, unofficial].
+*   **Performance:** Suitable for small, dense voxel entities (e.g., $50^3$ or $100^3$) where modifications are frequent and acceleration structures cannot be updated efficiently [S2, unofficial]. Performance degrades significantly for large, sparse volumes due to the lack of acceleration structures [S2, unofficial].
+*   **Strengths:** Simple implementation; no need for acceleration structures; guarantees closest intersection; insensitive to scene complexity (only one primitive type: voxel) [S7, unofficial].
+*   **Limitations:** Low frame rates for large datasets; aliasing artifacts; no geometric primitives support without voxelization [S2, S4, unofficial].
+
+## Background
+Discrete Ray Tracing was proposed by Yagel, Cohen, and Kaufman as a method for fast parallel implementation of volume rendering [S3, S7, unofficial]. It emerged from the need to render 3D sampled datasets (like MRI or fluid dynamics simulations) directly without approximating them with geometric surfaces [S5, unofficial]. The method leverages the 3D DDA algorithm, originally used in computer graphics for line rasterization, to traverse voxel grids efficiently [S1, unofficial]. It is a foundational technique in volume graphics, bridging the gap between object-order and image-order rendering [S7, S8, unofficial].
+
+## Sources
+[S1] Casting Rays: Voxel Rendering Using Discrete Ray Tracing, https://castingrays.blogspot.com/2014/01/voxel-rendering-using-discrete-ray.html, fetched 2026-10-24 (unofficial)
+[S2] Raycasting-basiertes Voxelrendering, https://serwiss.bib.hs-hannover.de/frontdoor/index/index/docId/2250, fetched 2026-10-25 (unofficial)
+[S3] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)
+[S4] SREESUBBARAYUDU/Parallel_Volume_Rendering, https://github.com/SREESUBBARAYUDU/Parallel_Volume_Rendering, fetched 2026-10-27 (unofficial)
+[S5] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
+[S6] Volume Rendering Volume Rendering, https://docslib.org/doc/1400821/volume-rendering, fetched 2026-10-28 (unofficial)
+[S7] PDF Volume Visualization: Principles and Advances, https://courses.cs.duke.edu/spring03/cps296.8/papers/KaufmanVolumeVisualization.pdf, fetched 2026-10-28 (unofficial)
+[S8] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,140 @@
+# Monte Carlo Ambient Occlusion with Distance Mapping
+
+Also called: Random Ray Casting AO
+
+## Overview
+Monte Carlo Ambient Occlusion with Distance Mapping is a precomputation method that estimates the ambient occlusion factor at a surface point by numerically integrating visibility over the hemisphere using random ray casting and a distance mapping function [S1, unofficial]. It differs from screen-space approaches like SSAO by relying on explicit geometric queries via a distance field rather than depth buffers, and from pure statistical methods by using a specific distance-based visibility function $v(p, l_i)$ to weight occlusion contributions [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Point position $p$ on the surface.
+*   Surface normal vector $\mathbf{n}$ at $p$.
+*   Number of random samples $N$.
+*   Distance mapping function $v(p, l_i)$, which returns a floating-point value representing the occlusion contribution for a ray cast in direction $l_i$ from $p$.
+
+**Outputs:**
+*   Ambient occlusion factor $k_A(p)$, a floating-point value in $[0, 1]$.
+
+**Data Structures:**
+*   The distance mapping function $v$ is typically implemented as a query into a Signed Distance Field (SDF) or a voxel grid. The exact layout depends on the underlying geometry representation (e.g., trilinear interpolation on a voxel grid or analytical evaluation of an SDF). Not given in the sources.
+
+**Steps:**
+1.  **Biasing:** Offset the starting point $p$ slightly along the normal $\mathbf{n}$ to prevent self-intersection artifacts (acne) caused by floating-point precision errors. Let the biased point be $p' = p + \epsilon \mathbf{n}$, where $\epsilon$ is a small bias value [G].
+2.  **Sampling:** Generate $N$ random direction vectors $l_i$ uniformly distributed over the hemisphere defined by $\mathbf{n}$.
+3.  **Visibility Query:** For each direction $l_i$, evaluate the distance mapping function $v(p', l_i)$. This function returns a value based on the distance to the nearest geometry along the ray.
+4.  **Weighting:** Compute the cosine weight $(\mathbf{n} \cdot l_i)^+$ for each sample, where $(\cdot)^+$ denotes the positive part (i.e., $\max(0, \mathbf{n} \cdot l_i)$).
+5.  **Accumulation:** Sum the products of the distance mapping value and the cosine weight for all samples.
+6.  **Normalization:** Divide the sum by $N$ to obtain the final occlusion factor.
+
+**Formula:**
+The ambient occlusion factor $k_A(p)$ is calculated as:
+
+$$k_A(p) = \frac{1}{N} \sum_{i=1}^N v(p, l_i) (\mathbf{n} \cdot l_i)^+$$
+
+Where:
+*   $k_A(p)$ is the ambient occlusion factor for position $p$.
+*   $N$ is the number of random samples.
+*   $v(p, l_i)$ is the distance mapping function returning a floating-point value.
+*   $l_i$ is the $i$-th random direction vector.
+*   $\mathbf{n}$ is the surface normal vector.
+
+**Parameters:**
+*   $N$: Integer representing the number of random samples. Typical values are not given in the sources.
+*   $v(p, l_i)$: The distance mapping function. Its specific implementation depends on the geometry representation.
+*   $l_i$: 3D vector representing the $i$-th random direction.
+*   $\mathbf{n}$: 3D vector representing the surface normal.
+
+**Edge Cases and Pitfalls:**
+*   **Halo Effect:** Since the standard Monte Carlo method described is not cosine-weighted in the ray distribution itself (only in the final weight), it may account for occlusion that should not be accounted for, leading to blackened edges around objects, known as the halo effect [S1, unofficial].
+*   **Self-Intersection:** Without proper biasing, rays cast from $p$ may intersect the surface at $p$ itself due to precision errors, leading to incorrect occlusion values [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def monte_carlo_ao_with_distance_mapping(p, n, N, distance_mapping_function):
+    """
+    Computes ambient occlusion using Monte Carlo integration with a distance mapping function.
+    
+    Args:
+        p: 3D vector, the surface point.
+        n: 3D vector, the surface normal at p.
+        N: Integer, number of random samples.
+        distance_mapping_function: Function taking (point, direction) and returning a float.
+        
+    Returns:
+        Float, the ambient occlusion factor k_A(p).
+    """
+    # Biasing to prevent self-intersection
+    epsilon = 0.001  # Small bias value [G]
+    p_biased = p + epsilon * n
+    
+    occlusion_sum = 0.0
+    
+    for i in range(N):
+        # Generate random direction l_i in the hemisphere defined by n
+        # Implementation of hemisphere sampling is not specified in sources [G]
+        l_i = sample_hemisphere(n)
+        
+        # Evaluate distance mapping function
+        v = distance_mapping_function(p_biased, l_i)
+        
+        # Compute cosine weight
+        cosine_weight = max(0.0, dot(n, l_i))
+        
+        # Accumulate
+        occlusion_sum += v * cosine_weight
+        
+    # Normalize
+    k_A = occlusion_sum / N
+    
+    return k_A
+
+def sample_hemisphere(n):
+    """
+    Generates a random direction vector uniformly distributed in the hemisphere
+    defined by the normal n.
+    """
+    # Generate random point on unit sphere
+    # Using standard rejection sampling or spherical coordinates
+    # Not fully specified in sources [G]
+    u = random_uniform(0, 1)
+    v = random_uniform(0, 1)
+    
+    theta = 2 * pi * u
+    phi = acos(1 - 2 * v)
+    
+    # Convert to Cartesian coordinates
+    x = sin(phi) * cos(theta)
+    y = sin(phi) * sin(theta)
+    z = cos(phi)
+    
+    local_dir = vector(x, y, z)
+    
+    # Rotate local_dir to align with n
+    # This requires constructing a basis from n [G]
+    return rotate_to_normal(local_dir, n)
+```
+
+## Subtopics
+
+### Volumetric Obscurance (Loos and Sloan)
+Volumetric Obscurance is a Monte Carlo integration formulation of screen-space AO that integrates analytically in the z-dimension to reduce sample count [S1, unofficial]. It differs from standard Monte Carlo AO by computing the integral through random sampling only in the xy-dimension and integrating analytically in the z-dimension, which requires a lower amount of samples to achieve the same image quality as Crytek's method [S1, unofficial]. The formula is $v_A(p) = \int_{x \in X} \rho(d(p, x)) O(x) dx$, where $X$ is a 3D spherical neighborhood, $\rho$ is a distance mapping function, and $O(x)$ is the occupancy function [S1, unofficial]. The distance mapping function can be substituted for a constant function because it has little impact on visual quality [S1, unofficial].
+
+### Malley's Method
+Malley's Method is an approximation that substitutes the cosine weight factor with importance sampling by imbuing the cosine weight into the ray cast distribution, making rays more likely to be sent in the direction of the surface normal [S1, unofficial]. It differs from standard Monte Carlo AO by casting rays unevenly (biased towards the surface normal) instead of evenly along the hemisphere, reducing the need for a separate cosine weight factor [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ per point, where $N$ is the number of samples.
+*   **Memory Complexity:** Depends on the storage of the distance mapping function (e.g., SDF or voxel grid). Not given in the sources.
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Provides accurate occlusion based on explicit geometry; can be precomputed.
+*   **Limitations:** Susceptible to the halo effect if not properly weighted; requires efficient distance mapping queries; sample count affects noise and accuracy.
+*   **When to use:** When explicit geometric accuracy is required and precomputation is feasible.
+*   **When not to use:** When real-time performance with low sample counts is critical and the halo effect is unacceptable without additional techniques.
+
+## Background
+Monte Carlo methods are the most common way to precompute ambient occlusion, where either the visibility function approach or the obscurance distance mapping function approach can be used [S1, unofficial]. The method described is based on the equation $k_A(p) = \frac{1}{N} \sum_{i=1}^N v(p, l_i) (\mathbf{n} \cdot l_i)^+$ [S1, unofficial]. Kontkanen and Laine relied on the reciprocal of a quadratic polynomial to encode how ambient occlusion changes with distance [S1, unofficial]. Loos and Sloan expanded upon Crytek's approach and formulated it as a Monte Carlo integration, giving it the name Volumetric Obscurance [S1, unofficial].
+
+## Sources
+[S1] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)

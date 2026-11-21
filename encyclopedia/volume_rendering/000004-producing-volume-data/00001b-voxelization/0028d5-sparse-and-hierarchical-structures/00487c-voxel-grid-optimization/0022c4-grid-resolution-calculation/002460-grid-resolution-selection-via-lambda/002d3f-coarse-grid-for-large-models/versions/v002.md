@@ -1,0 +1,45 @@
+# Coarse Grid for Large Models
+Also called: Lambda 1 for Large Models
+
+## Overview
+This method selects a significantly coarser voxel grid resolution (lower $\lambda$) for very large triangle models to minimize grid rebuild time, accepting increased ray traversal overhead to achieve better aggregate frame rates [S1, S2]. It differs from the standard [Grid Resolution Selection via Lambda](3270-grid-resolution-selection-via-lambda.md) approach, which targets moderate scenes with $\lambda \approx 5$, by prioritizing build speed over traversal efficiency for models exceeding several million triangles [S1, S2].
+
+## How it works
+The method modifies the grid resolution parameter $\lambda$ based on the triangle count of the scene [S1, S2]. It does not alter the grid construction algorithm itself but changes the input parameter to the [Grid Resolution Selection via Lambda](3270-grid-resolution-selection-via-lambda.md) method [S1, S2].
+
+**Inputs:**
+- Triangle count of the model ($N_{tri}$) [G].
+- Scene bounding box (used by the parent lambda selection method) [G].
+
+**Outputs:**
+- Grid resolution parameters ($\lambda_x, \lambda_y, \lambda_z$) passed to the grid builder [G].
+
+**Logic:**
+1. Determine if the model is significantly large (several million triangles) [S1, S2].
+2. For moderate-sized scenes, use the default $\lambda \approx 5$ [S1, S2].
+3. For significantly larger models, set $\lambda = 1$ for all dimensions [S1, S2].
+4. Construct the grid using the selected $\lambda$ [S1, S2].
+
+**Parameters:**
+- $\lambda = 1$: The coarse resolution factor for large models [S1, S2].
+- $\lambda = 5$: The default resolution factor for moderate models [S1, S2].
+
+**Edge Cases:**
+- For the 10 million triangle Thai Statue, grid rebuild at $\lambda = 5$ takes three times longer than tracing rays, making $\lambda = 1$ optimal for aggregate performance [S1, S2].
+- The total rendering time including rebuild at $\lambda = 1$ is less than 1.5 seconds per frame [S1, S2].
+- Multi-threaded rebuild can further reduce rebuild time [S1, S2].
+- For the 2.2 million triangle Soda Hall model, $\lambda = 1$ rebuilds in 110ms on a single thread and achieves 3.5 frames per second including rebuild [S1, S2].
+
+## Operating characteristics
+- **Time Complexity:** Grid rebuild time decreases significantly with lower $\lambda$ [S1, S2].
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** For the 2.2 million triangle Soda Hall model, $\lambda = 1$ achieves 3.5 frames per second including rebuild (110ms rebuild time) [S1, S2].
+- **Strengths:** Enables interactive frame rates for extremely large models by balancing build and render costs [S1, S2].
+- **Limitations:** Increased ray traversal time due to lower grid resolution [S1, S2]. For moderate-sized scenes, the default $\lambda \approx 5$ remains optimal [S1, S2].
+
+## Background
+This technique is described in the paper "Ray Tracing Animated Scenes using Coherent Grid Traversal" by Wald et al. (2005/2006) [S1, S2]. It addresses the scalability issues of grid-based ray tracing when applied to models with millions of triangles, where the cost of building a fine grid outweighs the benefits of faster ray traversal [S1, S2].
+
+## Sources
+[S1] Ray Tracing Animated Scenes using Coherent Grid Traversal, https://www.sci.utah.edu/~thiago/papers/grid.pdf, fetched 2026-10-25
+[S2] Ray Tracing Animated Scenes using Coherent Grid Traversal, https://www.sci.utah.edu/~wald/Publications/2006/CGT/grid.pdf, fetched 2026-10-25

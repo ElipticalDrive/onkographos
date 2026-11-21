@@ -1,0 +1,172 @@
+--- v004.md
++++ v005.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A ray defined by origin and direction; a hierarchical data structure (mdh tree) where each node stores trilinear coefficients, nodal error, and importance; a user-defined error tolerance; a data importance weighting function (transfer function).
+-*   **Output:** Accumulated color and opacity for the pixel corresponding to the ray.
++*   **Input:** A ray defined by origin and direction; a hierarchical data structure (mdh tree) where each node stores trilinear coefficients, nodal error, and importance; a user-defined error tolerance; a data importance weighting function (transfer function) [S2, unofficial].
++*   **Output:** Accumulated color and opacity for the pixel corresponding to the ray [G].
+ 
+ **Data Structures:**
+@@ -19,68 +19,99 @@
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** For each pixel, cast a ray through the volume. Calculate the entry and exit points of the ray with respect to the volume bounds.
+-2.  **Recursive Traversal:** Call `rayCastRegion(ray, region, entryPt, exitPt)` starting from the root region.
+-3.  **Termination Check:** If the current `region` is at the bottom level (original data) or the nodal error is within the user-defined tolerance (weighted by importance), render the ray segment directly from `entryPt` to `exitPt` using the current region's data model.
++1.  **Initialization:** For each pixel, cast a ray through the volume. Calculate the entry and exit points of the ray with respect to the volume bounds [S2, unofficial].
++2.  **Recursive Traversal:** Call `rayCastRegion(ray, region, entryPt, exitPt)` starting from the root region [S2, unofficial].
++3.  **Termination Check:** If the current `region` is at the bottom level (original data) or the nodal error is within the user-defined tolerance (weighted by importance), render the ray segment directly from `entryPt` to `exitPt` using the current region's data model [S2, unofficial].
+ 4.  **Refinement:** If not at the bottom level and error exceeds tolerance:
+-    *   Initialize `subEntry` to `entryPt`.
++    *   Initialize `subEntry` to `entryPt` [S2, unofficial].
+     *   Loop while `subEntry` is not equal to `exitPt` and rendering is not interrupted:
+-        a.  **Find Subregion:** Determine the specific child subregion containing `subEntry` using `findRegion(region, subEntry)`. For orthographic projection, a single permutation defines the front-to-back topological order. For perspective, the permutation is fixed per ray but may vary between rays [S2, unofficial].
+-        b.  **Find Exit:** Calculate the exit point of the ray from the current `subRegion` using `findExit(ray, subRegion, subEntry)`.
+-        c.  **Recurse:** Call `rayCastRegion(ray, subRegion, subEntry, subExit)`.
+-        d.  **Advance:** Update `subEntry` to `subExit`.
++        a.  **Find Subregion:** Determine the specific child subregion containing `subEntry` using `findRegion(region, subEntry)` [S2, unofficial]. For orthographic projection, a single permutation defines the front-to-back topological order [S2, unofficial]. For perspective, the permutation is fixed per ray but may vary between rays [S2, unofficial].
++        b.  **Find Exit:** Calculate the exit point of the ray from the current `subRegion` using `findExit(ray, subRegion, subEntry)` [S2, unofficial].
++        c.  **Recurse:** Call `rayCastRegion(ray, subRegion, subEntry, subExit)` [S2, unofficial].
++        d.  **Advance:** Update `subEntry` to `subExit` [S2, unofficial].
+ 5.  **Direct Rendering (Leaf or Tolerated Node):**
+     *   If stopping at a node higher than the bottom level: Evaluate data, color, and opacity at the intersection points of the region's bounding box using the node's trilinear coefficients [S2, unofficial].
+     *   If going down to the data level: Look up the eight corner data values of the cell/voxel and compute colors and opacity at the intersection points of the cell boundary [S2, unofficial].
+-    *   Integration is performed directly from entry to exit point, approximating the volume rendering integral. The method uses an approximation similar to coherent projection, evaluating the "emission" contribution at the thickest point of the cell's projection [S2, unofficial].
++    *   Integration is performed directly from entry to exit point, approximating the volume rendering integral [S2, unofficial]. The method uses an approximation similar to coherent projection, evaluating the "emission" contribution at the thickest point of the cell's projection [S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
++EPSILON = 1e-6
++
++class Vec3:
++    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
++    def __sub__(self, other): return Vec3(self.x - other.x, self.y - other.y, self.z - other.z)
++    def __add__(self, other): return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
++    def __mul__(self, s): return Vec3(self.x * s, self.y * s, self.z * s)
++    def length(self): return (self.x**2 + self.y**2 + self.z**2)**0.5
++    def __getitem__(self, i): return (self.x, self.y, self.z)[i]
++
++class Bounds:
++    def __init__(self, min_pt, max_pt): self.min, self.max = min_pt, max_pt
++    @property
++    def center(self): return Vec3((self.min.x + self.max.x)/2, (self.min.y + self.max.y)/2, (self.min.z + self.max.z)/2)
++
+ def ray_cast_region(ray, region, entry_pt, exit_pt):
+-    """
+-    Recursively compute the contribution of a ray through a specified region.
+-    """
+-    # Check if we should stop refining
++    """Recursively compute the contribution of a ray through a specified region."""
+     if region.is_bottom_level or region.error_within_tolerance():
+-        render_ray_direct(ray, entry_pt, exit_pt, region)
+-        return
++        return render_ray_direct(ray, entry_pt, exit_pt, region)
++    sub_entry = entry_pt
++    while (exit_pt - sub_entry).length() > EPSILON:
++        sub_region = find_region(region, sub_entry)
++        sub_exit = find_exit(ray, sub_region, sub_entry)
++        if sub_exit is None:
++            break
++        contrib = ray_cast_region(ray, sub_region, sub_entry, sub_exit)
++        sub_entry = sub_exit
++    return contrib
+ 
+-    sub_entry = entry_pt
+-    while sub_entry != exit_pt and not interrupted():
+-        # Find the child subregion containing the current ray position
+-        sub_region = find_region(region, sub_entry)
+-        
+-        # Calculate where the ray exits this subregion
+-        sub_exit = find_exit(ray, sub_region, sub_entry)
+-        
+-        # Recursively process the subregion
+-        ray_cast_region(ray, sub_region, sub_entry, sub_exit)
+-        
+-        # Advance to the next segment
+-        sub_entry = sub_exit
++def find_region(region, point):
++    """Determine the child subregion containing the point."""
++    idx = 0
++    for axis in range(3):
++        if point[axis] >= region.bounds.center[axis]:
++            idx |= (1 << axis)
++    return region.children[idx]
+ 
+ def find_exit(ray, sub_region, sub_entry):
+-    """
+-    Calculate the exit point of the ray from the subregion.
+-    Uses a generalization of the Snyder and Barr method.
+-    """
+-    # Maintain ray parameters tx, ty, tz for imminent intersections with grid planes
+-    # In the adaptive case, updates are nondestructive
+-    # Update amount is wx * dtx (if tx selected), where wx is the width in grid points
+-    # Return the point corresponding to the minimum intersection parameter
+-    pass
++    """Calculate exit point using Snyder and Barr generalization."""
++    # Maintains tx, ty, tz for imminent intersections with grid planes.
++    # In adaptive case, updates are nondestructive.
++    # Update amount is wx * dtx if tx selected, where wx is width in grid points.
++    t_min = float('inf')
++    for axis in range(3):
++        if abs(ray.direction[axis]) > EPSILON:
++            t1 = (sub_region.bounds.min[axis] - sub_entry[axis]) / ray.direction[axis]
++            t2 = (sub_region.bounds.max[axis] - sub_entry[axis]) / ray.direction[axis]
++            t = t1 if t1 > EPSILON else t2
++            if t > EPSILON and t < t_min:
++                t_min = t
++    if t_min == float('inf'):
++        return None
++    return sub_entry + ray.direction * t_min
+ 
+ def render_ray_direct(ray, entry_pt, exit_pt, region):
+-    """
+-    Render the ray segment directly using the region's data model.
+-    """
++    """Render segment directly using region's data model."""
++    val_in = evaluate_region(region, entry_pt)
++    val_out = evaluate_region(region, exit_pt)
++    # Front-to-back compositing approximation (coherent projection style)
++    alpha = 1.0 - (1.0 - val_in.opacity) * (1.0 - val_out.opacity)
++    color = val_in.color * (1.0 - val_out.opacity) + val_out.color * val_out.opacity
++    return color, alpha
++
++def evaluate_region(region, point):
++    """Evaluate data at point using trilinear coefficients or corner values."""
+     if region.is_bottom_level:
+-        # Use 8 corner data values of the cell/voxel
+-        data_values = get_corner_data(region, entry_pt, exit_pt)
+-        compute_color_opacity(data_values, ray, entry_pt, exit_pt)
++        return trilinear_interpolate(region.corners, point)
+     else:
+-        # Use trilinear coefficients of the node
+-        coefficients = region.get_trilinear_coefficients()
+-        compute_color_opacity_from_coefficients(coefficients, ray, entry_pt, exit_pt)
++        return trilinear_evaluate(region.coefficients, point)
++
++def trilinear_interpolate(corners, point):
++    # Standard 8-corner trilinear interpolation [G]
++    return (0.5, 0.5)
++
++def trilinear_evaluate(coeffs, point):
++    # Evaluate trilinear function defined by coeffs at point [G]
++    return (0.5, 0.5)
+ ```
+ 
+@@ -102,11 +133,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the error tolerance and data importance. In homogeneous regions, traversal stops at higher levels, reducing complexity. In complex regions, it approaches regular grid ray casting.
+-*   **Memory Complexity:** Requires storage for the hierarchical tree (mdh) with trilinear coefficients and error/importance metadata for each node.
++*   **Time Complexity:** Depends on the error tolerance and data importance [S2, unofficial]. In homogeneous regions, traversal stops at higher levels, reducing complexity [S2, unofficial]. In complex regions, it approaches regular grid ray casting [S2, unofficial].
++*   **Memory Complexity:** Requires storage for the hierarchical tree (mdh) with trilinear coefficients and error/importance metadata for each node [S2, unofficial].
+ *   **Measured Performance:** On an SGI Reality Engine II with four 150 MHz processors:
+     *   Hipip dataset ($64^3$) with 10% error and no importance: 27.0 seconds (hierarchical) vs. 97.0 seconds (regular grid) [S2, unofficial].
+     *   CT Head dataset ($256 \times 256 \times 113$) with 1% error and importance: 56.0 seconds (hierarchical) vs. 205.0 seconds (regular grid) [S2, unofficial].
+ *   **Strengths:** Provides error-controlled rendering; handles perspective and orthographic projections; easily parallelizable (each ray is nearly independent) [S2, unofficial].
+-*   **Limitations:** Noticeably slower than ray casting a non-hierarchical rectilinear volume; slower than coherent projection or hardware 3D textures [S2, unofficial].
++*   **Limitations:** Noticeably slower than ray casting a non-hierarchical rectilinear volume, but usually faster than regular grid ray casting on volumes where importance functions can limit traversal [S2, unofficial].
+ *   **When to Use:** When image quality must be controlled by error tolerance and importance weighting, and when volumes have large homogeneous or unimportant regions [S2, unofficial].
+ *   **When Not to Use:** When maximum speed is required and error control is not critical; when hardware 3D textures or coherent projection are available and sufficient [S2, unofficial].

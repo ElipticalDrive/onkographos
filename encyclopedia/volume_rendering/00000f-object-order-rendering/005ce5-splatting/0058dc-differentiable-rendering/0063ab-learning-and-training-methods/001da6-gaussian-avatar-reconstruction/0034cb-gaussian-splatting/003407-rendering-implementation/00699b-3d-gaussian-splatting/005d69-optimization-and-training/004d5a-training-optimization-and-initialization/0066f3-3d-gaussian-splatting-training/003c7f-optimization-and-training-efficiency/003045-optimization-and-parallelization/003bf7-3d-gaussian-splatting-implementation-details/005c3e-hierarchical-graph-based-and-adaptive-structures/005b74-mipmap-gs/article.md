@@ -1,0 +1,138 @@
+# Mipmap-GS
+
+Also called: Mipmap-Gaussian Splatting
+
+## Overview
+Mipmap-GS is a test-time adaptation method that deforms pre-trained 3D Gaussians into scale-adaptive primitives to eliminate aliasing artifacts (zoom-in spikes and zoom-out thickness) caused by fixed Gaussian distributions at varying zoom factors [S1]. Unlike methods that apply post-processing filters or hierarchical level-of-detail selection, Mipmap-GS self-adjusts primitive properties and distribution by optimizing against scale-specific mipmap-like pseudo ground-truth, effectively informing the Gaussians of the new sampling rate [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of single-scale trained base Gaussians $G = \{G_k\}_{k=1}^K$, where each Gaussian $G_k$ is defined by mean $\mathbf{\mu}$, covariance $\mathbf{\Sigma}$ (derived from scale $\mathbf{s}$ and rotation $\mathbf{q}$), opacity $\alpha$, and spherical harmonics coefficients $\mathbf{c}$ [S1, Parent]. A set of viewpoints $V = \{v_j\}$ and a target zoom factor $N$ [S1].
+*   **Output:** Optimized Gaussians $G_{opt} = \{G^{opt}_k\}_{k=1}^K$ adapted to the scale defined by $N$ [S1].
+
+**Data Structures:**
+The Gaussian representation follows the standard 3DGS layout [Parent]:
+*   $\mathbf{\mu} \in \mathbb{R}^3$: Mean position.
+*   $\mathbf{s} \in \mathbb{R}^3$: Scale vector.
+*   $\mathbf{q} \in \mathbb{R}^4$: Rotation quaternion.
+*   $\alpha \in [0, 1]$: Opacity.
+*   $\mathbf{c}$: Spherical harmonics coefficients.
+No additional data structures are introduced; the method modifies the parameters of the existing Gaussian primitives [S1].
+
+**Parameters:**
+*   $N$: The zoom factor. For zoom-in, $N > 1$ (upsampling); for zoom-out, $N < 1$ (downsampling) [S1].
+*   $S$: Number of adaptation iterations. Typically 1,000 (1K) iterations are sufficient for convergence [S1].
+*   $\beta$: Learning rate for the optimization step [S1].
+*   $r(x)$: The mipmap resizing function. For zoom-in, super-resolution methods like SwinIR are used [S1]. For zoom-out, bilinear interpolation is used [S1].
+
+**Algorithm Steps:**
+1.  **Base Rendering:** Render the base Gaussians $G$ at the basic scale ($\times 1$) for a randomly selected viewpoint $v_j$ to obtain the base image $\hat{x}_j$ [S1].
+2.  **Pseudo-GT Construction:** Apply the resizing function $r(\cdot)$ to $\hat{x}_j$ to generate the scale-specific pseudo ground-truth $\hat{y}_j = r(\hat{x}_j)$ [S1].
+    *   If zoom-in ($N > 1$), upsample $\hat{x}_j$ by factor $N$ using super-resolution [S1].
+    *   If zoom-out ($N < 1$), downsample $\hat{x}_j$ by factor $1/N$ using bilinear interpolation [S1].
+3.  **Adaptive Rendering:** Render the current optimized Gaussians $G^{(i)}$ (initially $G^{(0)} = G$) at the target scale to produce the rendered image $x_j$ [S1]. Note: The rendering equation remains the standard alpha-blending, but the Gaussians $G^{(i)}$ have been deformed [S1, Parent].
+4.  **Loss Calculation:** Compute the scale-aware guidance loss $L$ between the rendered image $x_j$ and the pseudo-GT $\hat{y}_j$ [S1]:
+    $$ L(x_j, \hat{y}_j) = \| x_j - \hat{y}_j \|_2^2 $$
+    where $\| \cdot \|_2^2$ denotes the squared L2 norm [S1].
+5.  **Optimization Step:** Update the Gaussians using gradient descent [S1]:
+    $$ G^{(i+1)} = G^{(i)} - \beta \nabla_{G^{(i)}} L(x_j, \hat{y}_j) $$
+6.  **Pruning/Densification:** If the iteration count $i$ is a multiple of 100, perform densification or pruning operations to maintain a compact representation [S1].
+7.  **Repeat:** Iterate steps 1-6 for $S$ iterations.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mipmap_gs_optimize(base_gaussians, viewpoints, zoom_factor, num_iterations, learning_rate):
+    """
+    Deforms base Gaussians to adapt to a specific zoom scale.
+    
+    Args:
+        base_gaussians: List of Gaussian primitives {G_k}.
+        viewpoints: List of camera viewpoints {v_j}.
+        zoom_factor: Float N. >1 for zoom-in, <1 for zoom-out.
+        num_iterations: Integer S (typically 1000).
+        learning_rate: Float beta.
+        
+    Returns:
+        optimized_gaussians: List of deformed Gaussian primitives.
+    """
+    # Initialize current Gaussians as a copy of base Gaussians
+    current_gaussians = copy(base_gaussians)
+    
+    for i in range(num_iterations):
+        # 1. Select a random viewpoint
+        v_j = random_choice(viewpoints)
+        
+        # 2. Render base Gaussians at basic scale (x1) to get base image
+        # This uses the original, undeformed base_gaussians
+        base_image = render(base_gaussians, v_j, scale=1.0)
+        
+        # 3. Construct pseudo-GT using mipmap resizing function r(x)
+        # For zoom-in: super-resolution (e.g., SwinIR)
+        # For zoom-out: bilinear downsampling
+        pseudo_gt = resize_mipmap(base_image, zoom_factor)
+        
+        # 4. Render current (deformed) Gaussians at the target scale
+        # The rendering process implicitly handles the scale change via 
+        # the deformed Gaussian parameters or explicit scale factor in rasterizer
+        rendered_image = render(current_gaussians, v_j, scale=zoom_factor)
+        
+        # 5. Compute L2 loss between rendered image and pseudo-GT
+        loss = l2_loss(rendered_image, pseudo_gt)
+        
+        # 6. Compute gradients and update Gaussians
+        gradients = compute_gradients(loss, current_gaussians)
+        current_gaussians = update_gaussians(current_gaussians, gradients, learning_rate)
+        
+        # 7. Active pruning/densification every 100 iterations
+        if i % 100 == 0:
+            current_gaussians = densify_or_prune(current_gaussians)
+            
+    return current_gaussians
+
+def resize_mipmap(image, zoom_factor):
+    """
+    Applies mipmap-like resizing.
+    """
+    if zoom_factor > 1.0:
+        # Zoom-in: Upsample using super-resolution
+        # Note: SwinIR is referenced in sources, but for implementation 
+        # a generic super-resolution model or high-quality interpolation is used.
+        return super_resolution_upsample(image, zoom_factor)
+    else:
+        # Zoom-out: Downsample using bilinear interpolation
+        target_height = int(image.height * zoom_factor)
+        target_width = int(image.width * zoom_factor)
+        return bilinear_resize(image, target_width, target_height)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Zoom-in Spikes:** Caused by varying shrinkage bias leading to confusion during accumulation when sampling rates change [S1]. The method addresses this by deforming Gaussians rather than relying on constant dilation [S1].
+*   **Zoom-out Thickness:** Caused by constant dilation leading to excessively wide coverage and thick structures [S1]. The method addresses this by adapting Gaussian size and opacity to the lower resolution [S1].
+*   **High-Frequency Loss:** Unlike Mip-Splatting which uses smoothing filters that suppress high-frequency components, Mipmap-GS preserves finer details by using pseudo-GT derived from the base rendering [S1].
+*   **Pruning Strategy:** Unlike standard 3DGS which stops pruning halfway, Mipmap-GS performs active pruning throughout the entire optimization process to ensure a compact representation, especially important for zoom-out where fewer Gaussians are needed [S1].
+
+## Subtopics
+
+### TraGraph-GS
+Uses a graph-based structure to manage Gaussian connectivity and optimization. [Link](14454-tragraph-gs.md)
+
+### FlexGS
+Introduces flexible primitives to handle complex geometry. [Link](16110-flexgs.md)
+
+### Hierarchical Anchor Coupling
+Uses a hierarchical structure with anchors to couple Gaussians for multi-scale rendering. [Link](17260-hierarchical-anchor-coupling.md)
+
+## Operating characteristics
+*   **Time Complexity:** The method requires $O(S \cdot J)$ rendering and optimization steps, where $S$ is the number of iterations (1K) and $J$ is the number of viewpoints sampled per iteration [S1]. It is significantly faster than training from scratch, requiring only 3% of the iterations [S1].
+*   **Memory Complexity:** Memory usage is comparable to standard 3DGS, potentially reduced due to active pruning during optimization [S1].
+*   **Measured Performance:** On the NeRF Synthetic dataset, Mipmap-GS outperforms standard 3DGS by an average of 9.25 dB PSNR for zoom-in and 10.40 dB for zoom-out [S1]. At $\times 1/2$ zoom-out on NeRF Synthetic, it achieves SSIM 0.971, PSNR 32.71, LPIPS 0.026, compared to 3DGS SSIM 0.951, PSNR 27.14, LPIPS 0.031 [S1]. On Mip-NeRF 360 at $\times 1/2$ zoom-out, it achieves SSIM 0.854, PSNR 28.57, compared to 3DGS SSIM 0.774, PSNR 26.66 [S1].
+*   **Strengths:** Plug-in module compatible with any 3DGS model; test-time adaptation without retraining; preserves high-frequency details better than filtering-based methods [S1].
+*   **Limitations:** Requires test-time optimization for each new scale; performance depends on the quality of the super-resolution/downsampling function [S1].
+
+## Background
+Mipmap-GS was proposed to address the aliasing and blurriness issues in 3D Gaussian Splatting when zooming in or out [S1]. Traditional methods like Mip-Splatting use heuristic 2D/3D filters that suppress high frequencies, while hierarchical methods like Octree-GS use level-of-detail selection which can be sensitive to hyperparameters [S1]. Mipmap-GS introduces a scale-aware guidance loss that deforms Gaussians to match the target scale, inspired by the mipmap technique but applied dynamically at test time [S1].
+
+## Sources
+[S1] Mipmap-GS: Let Gaussians Deform with Scale-Specific Mipmap for Anti-Aliasing Rendering, https://doi.org/10.1109/3dv66043.2025.00091, fetched 2026-10-27

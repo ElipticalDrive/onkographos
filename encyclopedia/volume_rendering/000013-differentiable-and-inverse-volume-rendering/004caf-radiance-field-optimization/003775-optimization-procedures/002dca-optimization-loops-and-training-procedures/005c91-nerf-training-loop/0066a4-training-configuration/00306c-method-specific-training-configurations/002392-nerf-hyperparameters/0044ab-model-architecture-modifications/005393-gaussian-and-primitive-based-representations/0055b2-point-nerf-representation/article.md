@@ -1,0 +1,143 @@
+# Point-NeRF Representation
+
+Also called: Neural point cloud, Point-based radiance field
+
+## Overview
+Point-NeRF is a method that represents a continuous volumetric radiance field using a discrete neural point cloud, avoiding the computational cost of ray sampling in empty space by leveraging classical point clouds to approximate scene geometry [S1]. It differs from global MLP-based NeRFs by regressing density and radiance from local neighborhood features rather than querying a single global network, and from Gaussian Splatting by using point-based aggregation with inverse distance weighting rather than explicit Gaussian projection [S1].
+
+## How it works
+**Inputs:** A set of $N$ neural points $\mathcal{P}$, a camera ray defined by origin and direction, and rendering parameters (number of shading samples $M$, neighborhood radius $R$, number of neighbors $K$).
+**Outputs:** Pixel color $C$ computed via volume rendering.
+
+**Data Structures:**
+The scene is represented by a neural point cloud $\mathcal{P} = \{ (p_i, f_i, \gamma_i) \mid i = 1, \dots, N \}$ [S1]:
+*   $p_i \in \mathbb{R}^3$: The 3D spatial location of the $i$-th point.
+*   $f_i \in \mathbb{R}^D$: A neural feature vector encoding local scene content (dimension $D$ is a hyperparameter).
+*   $\gamma_i \in [0, 1]$: A scale confidence value representing the likelihood that the point is near an actual scene surface [S1].
+
+**Algorithm:**
+1.  **Ray Marching:** For each pixel, march a ray through the scene. Sample $M$ shading points $\{x_j \mid j = 1, \dots, M\}$ along the ray [S1].
+2.  **Neighborhood Query:** For each shading point $x_j$ and viewing direction $d_j$, query the $K$ nearest neural points from $\mathcal{P}$ within a radius $R$ [S1]. Let this set be $\mathcal{N}_j$.
+3.  **Per-Point Processing:** For each neighbor $i \in \mathcal{N}_j$, compute a processed feature vector $f_{i,x_j}$ using an MLP $F$ [S1]:
+    $$ f_{i,x_j} = F(f_i, x_j - p_i) $$
+    The input to $F$ is the concatenation of the point's feature $f_i$ and the relative position vector $x_j - p_i$. This makes the network invariant to point translation [S1].
+4.  **Feature Aggregation:** Aggregate the processed features $f_{i,x_j}$ into a single feature $f_{x_j}$ using inverse distance weighting, weighted by the confidence $\gamma_i$ [S1]:
+    $$ f_{x_j} = \sum_{i \in \mathcal{N}_j} \gamma_i \frac{w_i}{\sum_{k \in \mathcal{N}_j} w_k} f_{i,x_j}, \quad \text{where } w_i = \frac{1}{\|p_i - x_j\|} $$
+    If $\sum w_k = 0$ (e.g., no neighbors found), $f_{x_j}$ is undefined or handled as a default (e.g., zero vector) [G].
+5.  **Radiance Regression:** Regress the view-dependent radiance $r_j$ and volume density $\sigma_j$ from the aggregated feature $f_{x_j}$ and viewing direction $d_j$ using an MLP $R$ [S1]:
+    $$ r_j = R(f_{x_j}, d_j) $$
+    Note: The source defines the regression function as $(\sigma, r) = \text{Point-NeRF}(x, d, \dots)$ [S1]. Typically, $\sigma$ is derived from $f_{x_j}$ via a separate head or MLP, while $r$ is derived from $f_{x_j}$ and $d_j$. The source explicitly states $r = R(f_x, d)$ [S1]. The density $\sigma$ is not explicitly defined by a separate formula in the provided text but is part of the regression output [S1].
+6.  **Volume Rendering:** Accumulate the radiance using the volume rendering equation [S1]:
+    $$ C = \sum_{j=1}^{M} \tau_j (1 - \exp(-\sigma_j \Delta_j)) r_j $$
+    where $\tau_j = \exp\left(-\sum_{t=1}^{j-1} \sigma_t \Delta_t\right)$ is the transmittance, and $\Delta_j$ is the distance between adjacent shading samples [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_pixel(ray_origin, ray_direction, neural_points, M, R, K, MLP_F, MLP_R):
+    """
+    Render a single pixel using Point-NeRF.
+    
+    Args:
+        ray_origin: 3D vector, origin of the ray.
+        ray_direction: 3D vector, direction of the ray.
+        neural_points: List of tuples (p_i, f_i, gamma_i).
+        M: Number of shading samples along the ray.
+        R: Radius for neighborhood query.
+        K: Number of neighbors to query.
+        MLP_F: Neural network for per-point processing.
+        MLP_R: Neural network for radiance regression.
+        
+    Returns:
+        Pixel color C.
+    """
+    # 1. Sample shading points along the ray
+    # Assume a fixed step size or adaptive sampling. 
+    # For simplicity, assume uniform sampling over a range [t_min, t_max].
+    t_values = linspace(t_min, t_max, M)
+    shading_points = [ray_origin + t * ray_direction for t in t_values]
+    
+    pixel_color = 0.0
+    transmittance = 1.0
+    
+    for j, x_j in enumerate(shading_points):
+        # 2. Query K nearest neighbors within radius R
+        neighbors = query_neighbors(x_j, neural_points, K, R)
+        
+        if not neighbors:
+            # No neighbors found, contribution is zero or background
+            continue
+            
+        # 3. Per-point processing and 4. Feature aggregation
+        aggregated_feature = 0.0
+        weight_sum = 0.0
+        
+        for (p_i, f_i, gamma_i) in neighbors:
+            # Relative position
+            rel_pos = x_j - p_i
+            
+            # Process feature
+            f_i_x = MLP_F(concat(f_i, rel_pos))
+            
+            # Inverse distance weight
+            dist = norm(p_i - x_j)
+            if dist == 0:
+                w_i = infinity # Handle degenerate case, e.g., clamp or use epsilon
+            else:
+                w_i = 1.0 / dist
+                
+            # Weighted aggregation
+            weight_sum += gamma_i * w_i
+            aggregated_feature += gamma_i * w_i * f_i_x
+            
+        if weight_sum == 0:
+            continue
+            
+        aggregated_feature = aggregated_feature / weight_sum
+        
+        # 5. Radiance regression
+        # Note: Source defines r = R(f_x, d). Density sigma is also predicted.
+        # Assuming MLP_R outputs both sigma and r, or separate heads.
+        # For this pseudocode, assume MLP_R returns (sigma, r).
+        sigma_j, r_j = MLP_R(concat(aggregated_feature, ray_direction))
+        
+        # 6. Volume rendering accumulation
+        # Delta_j is distance to next sample. For last sample, assume small delta or 0.
+        if j < M - 1:
+            delta_j = norm(shading_points[j+1] - shading_points[j])
+        else:
+            delta_j = 0.0 # Or a small epsilon
+            
+        alpha_j = 1.0 - exp(-sigma_j * delta_j)
+        
+        pixel_color += transmittance * alpha_j * r_j
+        transmittance *= (1.0 - alpha_j)
+        
+    return pixel_color
+```
+
+**Parameters:**
+*   $M$: Number of shading samples per ray. Not given in the sources.
+*   $R$: Neighborhood query radius. Not given in the sources.
+*   $K$: Number of neighbors to query. Not given in the sources.
+*   $D$: Dimension of feature vector $f_i$. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **No Neighbors:** If a shading point has no neighbors within radius $R$, the aggregation step fails. A fallback (e.g., zero feature, background color) is needed [G].
+*   **Zero Distance:** If a shading point coincides with a neural point ($p_i = x_j$), the inverse distance weight becomes infinite. This should be handled by clamping or using a small epsilon [G].
+*   **Precision:** Floating-point precision in distance calculations and exponentiation in volume rendering can affect stability [G].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time depends on $M$ (samples per ray), $K$ (neighbors), and the cost of MLP evaluations. Querying neighbors is $O(N \log N)$ or $O(N)$ depending on spatial indexing. Aggregation is $O(K)$. MLP evaluation is constant per point. Overall, it is generally faster than global NeRFs for sparse scenes because it avoids sampling empty space [S1].
+*   **Memory Complexity:** $O(N \cdot D)$ to store the neural point cloud [S1].
+*   **Strengths:** Faster optimization and rendering than global NeRFs; leverages existing point cloud reconstruction methods (e.g., COLMAP); can prune/grow points to fix holes and outliers [S1].
+*   **Limitations:** Quality depends on the initial point cloud quality; may struggle with highly complex geometry if $K$ is small or $R$ is inappropriate [S1].
+*   **When to use:** When fast per-scene optimization is desired, and a good initial point cloud is available.
+*   **When not to use:** When no initial point cloud is available, or for scenes with very dense, complex geometry where local neighborhoods are insufficient [S1].
+
+## Background
+Point-NeRF was introduced by Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu, Kalyan Sunkavalli, and Ulrich Neumann from USC and Adobe Research [S1]. It was presented at CVPR 2022 [S1]. The method builds on the idea of neural point clouds [S1].
+
+## Sources
+[S1] Point-NeRF: Point-based Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00536, fetched 2026-10-26

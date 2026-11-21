@@ -1,0 +1,89 @@
+# Depth Supervision
+
+Also called: Depth Prior Supervision, Monocular Depth Supervision
+
+## Overview
+Depth supervision is a training technique that improves reconstructed geometry and reduces floating artifacts by providing depth priors derived from off-the-shelf monocular depth estimation models [S1, unofficial]. It operates within the differentiable volume rendering framework, where gradients flow from the depth loss back through the rendered depth $\hat{\mathbf{D}}(\mathbf{r})$ to the network parameters [Parent](15188-depth-priors-and-initialization.md).
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A dataset containing color images and corresponding depth maps; a current geometric representation (e.g., point cloud or Gaussian splats); a boolean flag `use_depth_loss` [S1, unofficial].
+*   **Outputs:** Updated geometric parameters with improved surface accuracy and reduced floaters [S1, unofficial].
+
+**Data Structures and Layout:**
+*   **Depth Map Storage:** Depth priors are stored in a directory structure relative to the dataset root: `<dataset-root>/depths/<FILENAME>.png`, where `<FILENAME>` matches the name of the corresponding dataset image [S1, unofficial].
+*   **Optimization Parameters:** The method is controlled via an `OptimizationParams` structure containing the boolean field `use_depth_loss` [S1, unofficial].
+
+**Steps:**
+1.  **Enable Supervision:** Set `use_depth_loss = true` in the optimization parameters [S1, unofficial].
+2.  **Refit Depth Maps:** Since depth estimates from off-the-shelf models may vary in scale between frames, all depth maps are refitted against the current prior point cloud to ensure a consistent scale [S1, unofficial].
+3.  **Discard Invalid Priors:** Depth maps that fail the refitting process against the prior point cloud are discarded and excluded from the supervision loss calculation [S1, unofficial].
+4.  **Compute Loss:** During training, the rendered depth is compared against the refitted depth priors to constrain the location of the surface [S1, unofficial]. This enforces that the depth rendered from the reference view matches the depth predicted by a pre-trained monocular depth network (e.g., MiDaS) for the input image [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def apply_depth_supervision(dataset, gaussians, opt_params):
+    if not opt_params.use_depth_loss:
+        return
+
+    # Load depth maps from <dataset-root>/depths/<FILENAME>.png
+    depth_maps = []
+    for filename in dataset.image_filenames:
+        path = f"{dataset.root}/depths/{filename}.png"
+        depth_maps.append(read_png_tensor(path))
+
+    # Get current prior point cloud for scale alignment
+    prior_cloud = gaussians.get_point_cloud()
+    prior_scale = prior_cloud.mean()
+
+    valid_depths = []
+    for depth_map in depth_maps:
+        # Refit depth map to match the scale of the prior point cloud
+        current_scale = depth_map.mean()
+        if current_scale > 0:
+            refitted_depth = depth_map * (prior_scale / current_scale)
+            valid_depths.append(refitted_depth)
+        # Depth maps failing refitting are discarded and not used for supervision [S1, unofficial]
+
+    # Compute depth supervision loss
+    rendered_depths = gaussians.render_depth(dataset.cameras)
+    depth_loss = sum(abs(rendered_depths[i] - valid_depths[i]) for i in range(len(valid_depths))) / len(valid_depths) [G]
+
+    # Backpropagate depth_loss to update gaussians
+    depth_loss.backward()
+
+def read_png_tensor(path):
+    # Reads PNG file and returns tensor of depth values
+    return load_file_data(path)
+```
+
+**Parameters:**
+*   `use_depth_loss`: Boolean. Enables depth supervision during training [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Scale Variation:** Off-the-shelf depth estimators often produce depth maps with arbitrary scales. Failure to refit against a common prior (the current point cloud) leads to incorrect geometry [S1, unofficial].
+*   **Invalid Priors:** Depth maps that cannot be refitted (e.g., due to severe occlusion or estimation errors) must be discarded to prevent introducing noise [S1, unofficial].
+*   **Quality Impact:** In some instances, incorporating monocular depth predictions did not noticeably improve reconstruction quality and was harmful [S2].
+
+## Subtopics
+
+### [Refined Depth for Geometry Supervision](19001-refined-depth-for-geometry-supervision.md)
+A lightweight depth-regularization objective used during per-scene training to refine reconstructed geometry, specifically improving local sharpness and depth consistency without sacrificing efficiency. It sets itself apart from standard photometric losses by explicitly leveraging rendered depths and input images to derive a geometry-supervision loss ($L_{refD}$), which is combined with the original training loss to yield more geometrically faithful surfaces with fast convergence. It is chosen when higher geometric fidelity is needed after initial initialization. [Refined Depth for Geometry Supervision](19001-refined-depth-for-geometry-supervision.md)
+
+## Operating characteristics
+*   **Time Complexity:** Adds overhead for loading depth maps and performing refitting per frame.
+*   **Memory Complexity:** Requires storing depth maps for all training images.
+*   **Performance:** Results in better geometry and a reduced number of floaters [S1, unofficial].
+*   **Strengths:** Leverages off-the-shelf monocular depth estimators to provide strong geometric priors without requiring multi-view stereo or explicit 3D scans [S1, unofficial].
+*   **Limitations:** Dependent on the quality of the off-the-shelf depth estimation model. Depth maps that fail refitting are discarded [S1, unofficial]. In some instances, it did not noticeably improve reconstruction quality and was harmful [S2].
+*   **When to use:** When geometry is poor or floaters are present, and external depth priors are available [S1, unofficial].
+*   **When not to use:** When depth maps are unavailable or when the scene has large scale variations that prevent consistent refitting [S1, unofficial].
+
+## Background
+Originating from techniques to improve Gaussian Splatting and radiance field reconstruction, depth supervision utilizes off-the-shelf depth estimation models (such as Depth-Anything) to provide geometric priors [S1, unofficial]. The method enforces that the depth rendered from the reference view matches the depth predicted by a pre-trained monocular depth network (e.g., MiDaS) for the input image [S2].
+
+## Sources
+[S1] Better Gaussian Splatting in Julia, https://pxl-th.github.io/blog/better-gs-julia/, fetched 2026-10-26 (unofficial)
+[S2] RealFusion 360° Reconstruction of Any Object from a Single Image, https://doi.org/10.1109/cvpr52729.2023.00816, fetched 2026-10-30

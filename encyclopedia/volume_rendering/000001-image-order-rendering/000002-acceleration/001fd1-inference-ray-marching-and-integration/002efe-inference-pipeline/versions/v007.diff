@@ -1,0 +1,137 @@
+--- v006.md
++++ v007.md
+@@ -1,90 +1,79 @@
+ # Inference Pipeline
++
+ Also called: Inference Module
++
+ ## Overview
+-The Inference Pipeline renders images from a trained dense point cloud (specifically Gaussian Splatting models) and new camera poses without requiring further optimization [S1, unofficial]. It differs from its sibling [Inference Ray Compositing](3790-inference-ray-compositing.md) by focusing on the complete evaluation loop including rasterization and output generation, rather than just the compositing step. It also differs from [Sparse Ray Marching (Training)](3890-sparse-ray-marching-training.md) by operating in a fixed, post-training state.
++The Inference Pipeline renders images from a trained dense point cloud (specifically Gaussian Splatting models) and new camera poses without requiring further optimization [S1, unofficial]. It differs from its sibling [Inference Ray Compositing](3790-inference-ray-compositing.md) by executing the full evaluation loop including rasterization, FPS calculation, and video generation, whereas the sibling focuses specifically on the ray-compositing math [S1, unofficial]. It is distinct from [Sparse Ray Marching (Training)](3890-sparse-ray-marching-training.md) as it operates on a fully trained, dense representation rather than a sparse, evolving one [S1, unofficial].
++
+ ## How it works
+ **Inputs:**
+-1.  `DensePointCloudWithExtraFeatures`: The trained model data, including Gaussian parameters (position, covariance, opacity, spherical harmonics coefficients) and any additional learned features [S1, unofficial].
+-2.  `NewCameraPose`: The extrinsic and intrinsic parameters defining the view for which the image is to be rendered [S1, unofficial].
++1. `DensePointCloudWithExtraFeatures`: The trained set of 3D Gaussians, including position, covariance, opacity, and color coefficients.
++2. `NewCameraPose`: The extrinsic and intrinsic parameters for the target view.
+ 
+ **Outputs:**
+-1.  `Image`: The final rendered color image [S1, unofficial].
++1. `Image`: The rendered RGB image.
++2. (Optional) Depth maps and colored depth maps, depending on the specific variant invoked [S1, unofficial].
+ 
+ **Data Structures:**
+-*   `Gaussian`: A structure containing position ($\mathbf{p}$), covariance matrix ($\Sigma$), opacity ($\alpha$), and spherical harmonics coefficients ($\mathbf{c}$) [S1, unofficial].
+-*   `Camera`: A structure containing view matrix ($\mathbf{V}$), projection matrix ($\mathbf{P}$), and resolution dimensions [S1, unofficial].
++*   **Gaussian Point**: Defined by position $\mathbf{p}$, a $3 \times 3$ covariance matrix $\Sigma$ (or its Cholesky factor), opacity $\alpha$, and spherical harmonic coefficients for view-dependent color.
++*   **Camera Pose**: A $4 \times 4$ transformation matrix $T_{world \to camera}$ and intrinsic matrix $K$.
+ 
+ **Steps:**
+-1.  **Initialization**: Load the `DensePointCloudWithExtraFeatures` into memory. Initialize the rasterizer with the resolution defined by `NewCameraPose` [S1, unofficial].
+-2.  **Projection**: For each Gaussian in the point cloud, project its center $\mathbf{p}$ from world space to screen space using the view and projection matrices from `NewCameraPose` [S1, unofficial].
+-3.  **Culling**: Prune points that are occluded by other geometry or are too close to the camera to be validly rendered [S1, unofficial]. This step ensures only visible and geometrically valid Gaussians contribute to the final image.
+-4.  **Rasterization**: Use the rasterizer to map the projected Gaussians to screen pixels. This involves sorting Gaussians by depth and compositing their contributions based on opacity and color [S1, unofficial].
+-5.  **Output Generation**: Generate the final `Image` from the rasterized data. Optionally, generate depth maps and colored depth maps for visualization purposes [S1, unofficial].
++1.  **Initialization**: Load the trained `DensePointCloudWithExtraFeatures` and the `NewCameraPose` into the Inference Module [S1, unofficial].
++2.  **Rasterization**: Pass the point cloud and camera pose to a rasterizer. The rasterizer projects the 3D Gaussians onto the 2D image plane, handling visibility and overlap [S1, unofficial].
++3.  **Compositing**: The rasterizer outputs the final `Image` by compositing the projected Gaussians according to their depth and opacity [S1, unofficial].
++4.  **Post-Processing (Variant Dependent)**:
++    *   If rendering for visualization, prune points occluded by or too close to the camera [S1, unofficial].
++    *   Save rendered images, depth maps, and colored depth maps [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def inference_pipeline(point_cloud: DensePointCloudWithExtraFeatures, camera_pose: NewCameraPose) -> Image:
++def inference_pipeline(dense_point_cloud, camera_pose):
+     """
+-    Renders an image from a trained dense point cloud and new camera pose.
++    Renders an image from a trained dense point cloud and camera pose.
++    
++    Args:
++        dense_point_cloud: List of Gaussian objects with position, covariance, opacity, color.
++        camera_pose: Object containing world-to-camera transformation and intrinsics.
++        
++    Returns:
++        image: Rendered RGB image.
+     """
+-    # Step 1: Initialize rasterizer with camera resolution
+-    rasterizer = Rasterizer(camera_pose.resolution)
++    # Step 1: Input validation and loading [S1, unofficial]
++    # dense_point_cloud and camera_pose are assumed to be loaded
+     
+-    # Step 2: Project Gaussians to screen space
+-    projected_gaussians = []
+-    for gaussian in point_cloud.gaussians:
+-        # Project center to screen space
+-        screen_pos = project_to_screen(gaussian.position, camera_pose.view_matrix, camera_pose.projection_matrix)
+-        
+-        # Step 3: Culling - check if point is valid and not occluded
+-        if is_valid_and_visible(gaussian, screen_pos, camera_pose):
+-            projected_gaussians.append(GaussianProjection(
+-                position=screen_pos,
+-                covariance=project_covariance(gaussian.covariance, camera_pose.view_matrix),
+-                opacity=gaussian.opacity,
+-                color=gaussian.color,
+-                original_index=gaussian.id
+-            ))
++    # Step 2: Rasterization [S1, unofficial]
++    # The rasterizer projects 3D Gaussians to 2D screen space
++    projected_gaussians = rasterizer.project(dense_point_cloud, camera_pose)
+     
+-    # Sort by depth for correct compositing
+-    projected_gaussians.sort(key=lambda g: g.position.z)
++    # Step 3: Output Image [S1, unofficial]
++    # Compositing is handled within the rasterizer or immediately after
++    image = rasterizer.composite(projected_gaussians)
+     
+-    # Step 4: Rasterize
+-    # The rasterizer handles the compositing of Gaussians to pixels
+-    image = rasterizer.render(projected_gaussians, camera_pose)
+-    
+-    # Step 5: Output
+     return image
+ ```
+ 
+-**Parameters:**
+-*   `point_cloud`: The trained model. Size depends on the training dataset. Typical values for the number of Gaussians range from 5,000 to 30,000 or more [S1, unofficial].
+-*   `camera_pose`: Defines the view. No specific typical values, but must be consistent with the training coordinate system.
+-
+ **Edge Cases and Pitfalls:**
+-*   **Occlusion**: Incorrect culling can lead to artifacts. The method prunes points occluded by or too close to the camera [S1, unofficial].
+-*   **Precision**: Floating-point precision in projection and rasterization can affect quality, especially for distant or small Gaussians.
+-*   **Degenerate Input**: If the point cloud is empty or the camera pose is invalid, the pipeline should handle these gracefully, potentially returning a blank image or an error.
++*   **Pruning**: Points that are occluded or too close to the camera must be explicitly pruned to avoid artifacts or invalid depth data [S1, unofficial].
++*   **View-Dependent Color**: The color MLP must be re-evaluated whenever the viewing angle shifts to account for scene colors changing with viewing direction [S2].
+ 
+ ## Subtopics
+ 
+ ### [Depth Map Rendering and Visualization](8160-depth-map-rendering-and-visualization.md)
+-Renders a set of views from a trained dense point cloud, specifically Gaussian Splatting models, and saves rendered images, depth maps, and colored depth maps. It differs from the parent [Inference Pipeline](5924-inference-pipeline.md) by focusing specifically on the extraction and visualization of depth data and the pruning of invalid geometry, rather than the full evaluation loop including FPS calculation and video generation.
++Renders a set of views from a trained dense point cloud, prunes points occluded by or too close to the camera, and saves rendered images, depth maps, and colored depth maps. It differs from the parent [Inference Pipeline](5924-inference-pipeline.md) by focusing specifically on the extraction and visualization of depth data and the pruning of invalid geometry, rather than the full evaluation loop including FPS calculation and video generation.
+ 
+ ### Runtime Inference with Control Encoding
+-After training, uses only the forward flow to render images [S2]. Passes control encoding to the MLPs to determine the object to be rendered at runtime [S2]. Invokes the MLPs whenever a change in the encoding is necessary [S2]. Re-evaluates the color MLP whenever the viewing angle shifts to account for scene colors changing with viewing direction [S2]. For other MLPs, predicts $k$ parameters for each anchor point instead of inferring for every viewing direction [S2].
++After training, uses only the forward flow to render images [S2]. Passes a control encoding to the MLPs to determine the object to be rendered at runtime [S2]. Invokes the MLPs whenever a change in the encoding is necessary [S2]. Re-evaluates the color MLP whenever the viewing angle shifts to account for scene colors changing with viewing direction [S2]. For other MLPs, predicts $k$ parameters for each anchor point instead of inferring for every viewing direction [S2].
+ 
+ ## Operating characteristics
+-**Time Complexity:** Linear with respect to the number of Gaussians and pixels, $O(N \cdot P)$, where $N$ is the number of Gaussians and $P$ is the number of pixels [S1, unofficial].
+-**Memory Complexity:** Linear with respect to the number of Gaussians, $O(N)$, to store the point cloud data [S1, unofficial].
+-**Measured Performance:** Not given in the sources.
+-**Scaling:** Scales with the number of Gaussians and resolution.
+-**Strengths:** Real-time rendering capability, no optimization required at inference time [S1, unofficial][S2].
+-**Limitations:** Requires pre-training, memory intensive for large point clouds [S1, unofficial].
+-**When to use:** When real-time rendering of trained Gaussian Splatting models is required [S1, unofficial][S2].
+-**When not to use:** When dynamic scene changes require re-optimization [S1, unofficial].
++*   **Time Complexity**: Depends on the number of Gaussians and the rasterizer efficiency. The color MLP must be re-evaluated per viewing direction, while other MLPs predict $k$ parameters per anchor point, reducing per-pixel computation [S2].
++*   **Memory Complexity**: Stores the full dense point cloud and MLP weights.
++*   **Strengths**: Real-time rendering capability; supports context translation (e.g., style changes) via control encoding without retraining [S2].
++*   **Limitations**: Requires a trained dense point cloud; control encoding changes may require MLP re-evaluation [S2].
++*   **When to use**: When real-time rendering of trained Gaussian Splatting models is required, especially with dynamic context or style changes [S2].
++*   **When not to use**: When optimization during inference is needed, or when the scene is not represented as a dense point cloud [S1, unofficial].
+ 
+ ## Background
+-Originated in the context of 3D Gaussian Splatting for real-time rendering [S1, unofficial][S2]. Used in applications such as Gaming, E-Commerce, and Industrial visualization [S2].
++The Inference Pipeline is a component of Gaussian Splatting rendering systems, enabling real-time visualization of trained models. It was developed to allow efficient rendering without the computational overhead of training or optimization [S1, unofficial]. The concept of using control encodings for runtime context translation was introduced in "Shape-Shifting Splats: Realtime Context Translation for Gaussian Splatting in VR" [S2].
+ 
+ ## Sources

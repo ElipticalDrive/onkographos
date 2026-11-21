@@ -1,0 +1,132 @@
+# Depth Buffer Sign Determination
+
+Also called: Point Map Visibility Sign Determination, Sign Flipping for Voxel Corners
+
+## Overview
+Depth Buffer Sign Determination determines the inside/outside sign of Signed Distance Field (SDF) voxel corners by projecting them into camera space and comparing their depth against a rendered depth buffer of the surface [S1, S2, unofficial]. It sets apart from sibling methods like Normal-Based Sign Determination by relying on geometric occlusion rather than surface normals, thereby avoiding "bubble artifacts" caused by noisy normals or tiny triangles [S2, unofficial]. However, it is less accurate on non-watertight geometry [S2, unofficial].
+
+## How it works
+**Inputs:**
+- A set of camera poses (intrinsic and extrinsic parameters) [S1, unofficial].
+- A point map $P_{world}$ representing the surface (e.g., from scanning or reconstruction) [S1, unofficial].
+- A depth buffer (z-buffer) rendered from $P_{world}$ for each camera [S2, unofficial].
+- Voxel corners to be signed [S1, unofficial].
+
+**Outputs:**
+- A sign (+1 for outside, -1 for inside) for each voxel corner [S1, unofficial].
+
+**Data Structures:**
+- **Depth Buffer:** A 2D array storing the minimum depth value for each pixel $(u, v)$ across all surface points projected to that pixel.
+- **Point Map:** A set of 3D points $p_{world}$ representing the mesh surface [S1, unofficial].
+
+**Steps:**
+1. **Projection:** Project all voxel corners and the surface point map $P_{world}$ into the image plane of each camera using the camera projection matrix [S1, unofficial].
+2. **Visibility Check:** For each voxel corner, determine if it is "visible" to any camera. A corner is considered visible (and thus outside) if:
+   - Its depth $d_{corner}$ is less than the depth $d_{surface}$ stored in the depth buffer at the corresponding pixel location [S1, unofficial].
+   - This implies the corner is closer to the camera than the nearest surface point, meaning it is not occluded by the surface [S1, unofficial].
+3. **Frustum Check:** If a voxel corner is never projected to any valid pixel in any camera's view (i.e., it lies outside all camera frustums), it is also marked as visible/outside [S1, unofficial].
+4. **Sign Assignment:**
+   - If the corner is visible by any camera (via depth comparison or frustum check), its sign is set to positive (outside) [S1, S2, unofficial].
+   - Otherwise, the sign remains negative (inside) [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def determine_sign_depth(voxel_corners, cameras, depth_buffers, point_map):
+    """
+    Determine the sign of voxel corners using depth buffer visibility.
+    
+    Args:
+        voxel_corners: Nx3 array of voxel corner coordinates.
+        cameras: List of camera objects with 'project' and 'frustum_contains' methods.
+        depth_buffers: List of 2D arrays (HxW) storing min depth for each pixel.
+        point_map: Nx3 array of surface points (used to generate depth buffers if not pre-rendered).
+        
+    Returns:
+        signs: Nx1 array of +1 (outside) or -1 (inside).
+    """
+    signs = np.ones(len(voxel_corners)) # Default to inside (-1) or outside? 
+    # Note: S1 says "flip corner sign to positive if...". 
+    # S2 says "sign is positive if it is seen by any of the cameras".
+    # We assume initial sign is negative (inside) and flip to positive (outside) if visible.
+    signs = -np.ones(len(voxel_corners)) 
+    
+    for i, corner in enumerate(voxel_corners):
+        is_visible = False
+        
+        for cam_idx, camera in enumerate(cameras):
+            # Project corner to image space
+            u, v, d_corner = camera.project(corner)
+            
+            # Check if corner is within image bounds
+            if not camera.is_in_bounds(u, v):
+                continue
+                
+            # Check if corner is within camera frustum (optional but implied by "never projected")
+            # If not projected to any pixel, it's outside all frustums -> visible/outside
+            # However, standard projection usually handles frustum culling.
+            # S1 says: "any voxel corner that is never projected to any camera ... is also flipped"
+            # This implies if the projection fails or is out of bounds, it's outside.
+            # But we are inside the loop checking specific cameras.
+            # Let's refine: If it's not visible in ANY camera, it's outside.
+            
+            # Get depth from buffer at this pixel
+            d_surface = depth_buffers[cam_idx][v, u]
+            
+            # Compare depths
+            # S1: "distance to the camera is less than the distance of the nearest P_world point"
+            if d_corner < d_surface:
+                is_visible = True
+                break
+        
+        # If not visible in any camera, check if it was outside all frustums
+        # S1: "any voxel corner that is never projected to any camera ... is also flipped"
+        # This case is handled if we consider "never projected" as a separate condition.
+        # If the corner was never projected to ANY camera (loop finished without is_visible),
+        # we need to check if it was simply out of bounds for all cameras.
+        
+        if not is_visible:
+            # Check if corner is outside all frustums
+            outside_all = True
+            for camera in cameras:
+                if camera.frustum_contains(corner):
+                    outside_all = False
+                    break
+            
+            if outside_all:
+                is_visible = True
+        
+        if is_visible:
+            signs[i] = 1 # Positive/Outside
+            
+    return signs
+```
+
+**Parameters:**
+- `sign_method='depth'`: Selects this algorithm in implementations like `mesh_to_sdf` [S2, unofficial].
+- `scan_count`, `scan_resolution`: Parameters for generating the point map/depth buffer [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Holes in Mesh:** The method fails on non-watertight meshes. If a mesh has holes, a camera may see "inside" the mesh through the hole, causing the depth buffer to record a deeper surface point. This leads to ray-shaped artifacts in the SDF volume [S2, unofficial].
+- **Precision:** Depth buffer precision limits the accuracy of the occlusion test [S2, unofficial].
+
+## Subtopics
+
+### Normal-Based Sign Determination
+Uses surface normals and dot products to determine sign. More robust to holes but prone to bubble artifacts on noisy geometry. Choose when mesh is watertight and normals are reliable. [Normal-Based Sign Determination](16359-normal-based-sign-determination.md)
+
+## Operating characteristics
+- **Time Complexity:** Proportional to the number of voxel corners multiplied by the number of cameras. Projection and depth lookup are $O(1)$ per corner per camera.
+- **Memory Complexity:** Requires storing depth buffers for all cameras. Size depends on image resolution and number of cameras.
+- **Strengths:** Avoids bubble artifacts associated with normal-based methods [S2, unofficial].
+- **Limitations:** Fails on non-watertight meshes (holes) [S2, unofficial]. Less accurate than normal-based methods in some cases [S2, unofficial].
+- **When to use:** When the mesh is watertight and normal-based methods produce artifacts.
+- **When not to use:** When the mesh has holes or is non-watertight [S2, unofficial].
+
+## Background
+Originating from sparse voxel rasterization techniques for surface reconstruction [S1, unofficial], this method was adapted for SDF generation in tools like `mesh_to_sdf` [S2, unofficial]. It addresses the issue of "cone shaped artifacts" produced by normal-based voting on meshes with tiny triangles or inconsistent normals [S2, unofficial].
+
+## Sources
+[S1] SVRecon: Sparse Voxel Rasterization for Surface Reconstruction, https://doi.org/10.48550/arxiv.2511.17364, fetched 2026-10-26 (unofficial)
+[S2] mesh_to_sdf, https://github.com/marian42/mesh_to_sdf, fetched 2026-10-28 (unofficial)

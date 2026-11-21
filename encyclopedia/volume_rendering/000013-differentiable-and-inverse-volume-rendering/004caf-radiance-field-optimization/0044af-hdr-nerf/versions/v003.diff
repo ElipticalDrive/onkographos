@@ -1,0 +1,69 @@
+--- v002.md
++++ v003.md
+@@ -40,5 +40,5 @@
+ $$
+ 
+-The tone mapper models the Camera Response Function (CRF). The relationship between pixel value $Z$, irradiance $H$ (approximated as radiance $\mathbf{e}$), and exposure time $\Delta t$ is [S2]:
++The tone mapper models the Camera Response Function (CRF) [S2]. The relationship between pixel value $Z$, irradiance $H$ (approximated as radiance $\mathbf{e}$), and exposure time $\Delta t$ is [S2]:
+ 
+ $$
+@@ -84,5 +84,5 @@
+     """Standard NeRF positional encoding [G]."""
+     scales = torch.tensor([2**i for i in range(min_deg, max_deg)])
+-    xb = torch.reshape((x * scales)[:, None, :], (x.shape[0], -1, x.shape[2]))
++    xb = torch.reshape((x.float()[:, None, :] * scales[None, :, None]), (x.shape[0], -1, x.shape[1]))
+     freq_bands = 2 * torch.pi * xb
+     enc = torch.cat((torch.sin(freq_bands), torch.cos(freq_bands)), dim=-1)
+@@ -116,12 +116,20 @@
+         return self.net(torch.cat([log_e, log_dt], dim=1))
+ 
+-def volume_rendering(rays_o, rays_d, near, far, radiance_field, tone_mapper_r, tone_mapper_g, tone_mapper_b, dt, num_samples):
++def volume_rendering(rays_o, rays_d, near, far, radiance_field, tone_mapper_r, tone_mapper_g, tone_mapper_b, dt, num_samples, coarse_weights=None):
+     """Renders a ray using discrete volume integration [S2]."""
+-    t_vals = torch.linspace(0., 1., num_samples)
+-    z_vals = near * (1. - t_vals) + far * t_vals
++    if coarse_weights is None:
++        t_vals = torch.linspace(0., 1., num_samples)
++        z_vals = near * (1. - t_vals) + far * t_vals
++    else:
++        # Importance sampling from coarse weights [G]
++        z_vals_mid = (z_vals[:-1] + z_vals[1:]) / 2.0
++        z_vals = torch.cat([z_vals[:1], z_vals_mid, z_vals[-1:]], dim=-1)
++        z_vals = z_vals * coarse_weights + (1. - coarse_weights) * z_vals
+     pts = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * z_vals.unsqueeze(2)
+-    pts_enc = pos_enc(pts)
++    pts_flat = pts.reshape(-1, 3)
++    pts_enc = pos_enc(pts_flat)
+     rays_d_enc = pos_enc(rays_d)
+     input_pts = torch.cat([pts_enc, rays_d_enc.unsqueeze(1).expand(-1, num_samples, -1)], dim=-1)
++    input_pts = input_pts.reshape(pts.shape[0], -1, input_pts.shape[1])
+ 
+     e, sigma = radiance_field(input_pts)
+@@ -133,5 +141,5 @@
+ 
+     log_e = torch.log(e + 1e-8)
+-    log_dt = torch.log(dt + 1e-8)
++    log_dt = torch.log(dt + 1e-8).unsqueeze(0).expand(log_e.shape[0], 1)
+     log_c_r = tone_mapper_r(torch.cat([log_e[:,:,0:1], log_dt], dim=1))
+     log_c_g = tone_mapper_g(torch.cat([log_e[:,:,1:2], log_dt], dim=1))
+@@ -145,10 +153,10 @@
+     """Single training step [S2]."""
+     # Coarse rendering
+-    C_coarse, sigma_coarse, _ = volume_rendering(rays_o, rays_d, near, far, radiance_field, tone_mapper_r, tone_mapper_g, tone_mapper_b, dt, 64)
++    C_coarse, sigma_coarse, weights_coarse = volume_rendering(rays_o, rays_d, near, far, radiance_field, tone_mapper_r, tone_mapper_g, tone_mapper_b, dt, 64)
+     # Fine rendering (coarse densities bias fine sampling [S2])
+-    C_fine, sigma_fine, _ = volume_rendering(rays_o, rays_d, near, far, radiance_field, tone_mapper_r, tone_mapper_g, tone_mapper_b, dt, 128)
++    C_fine, sigma_fine, _ = volume_rendering(rays_o, rays_d, near, far, radiance_field, tone_mapper_r, tone_mapper_g, tone_mapper_b, dt, 128, weights_coarse)
+     
+     # Color Reconstruction Loss
+-    loss_c = torch.mean((C_coarse - gt_colors)**2) + torch.mean((C_fine - gt_colors)**2)
++    loss_c = torch.sum((C_coarse - gt_colors)**2) + torch.sum((C_fine - gt_colors)**2)
+     
+     # Unit Exposure Loss: evaluate tone mapper at log_radiance=0, log_exposure=0
+@@ -170,5 +178,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Training requires 200K iterations on a single NVIDIA V100 GPU, taking approximately one day [S2].
+-*   **Memory Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources [S2].
+ *   **Performance:**
+     *   **Synthetic Scenes:** PSNR 39.07, SSIM 0.973, LPIPS 0.026 for LDR-OE (exposures $t_1, t_3, t_5$) [S2].

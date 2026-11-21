@@ -1,0 +1,279 @@
+--- v003.md
++++ v004.md
+@@ -36,5 +36,5 @@
+ 
+ 2.  **Yang Grid Angular Domain:**
+-    The Yang grid is an offset version of the Yin grid. Its axis is located at the equator of the Yin grid. The coordinate transformation from Yang to Yin is defined by the matrix $M$:
++    The Yang grid is an offset version of the Yin grid [S1]. Its axis is located at the equator of the Yin grid [S1]. The coordinate transformation from Yang to Yin is defined by the matrix $M$:
+     $$ \begin{bmatrix} x^{\text{Yin}} \\ y^{\text{Yin}} \\ z^{\text{Yin}} \end{bmatrix} = M \begin{bmatrix} x^{\text{Yang}} \\ y^{\text{Yang}} \\ z^{\text{Yang}} \end{bmatrix}, \quad M = \begin{bmatrix} -1 & 0 & 0 \\ 0 & 0 & 1 \\ 0 & 1 & 0 \end{bmatrix} $$
+     [S1]
+@@ -68,6 +68,6 @@
+ **Hierarchical Sampling**
+ To efficiently sample sparse occupied regions without allocating additional memory for a coarse grid, the method exploits the dense geometry feature grid $G_\sigma$ [S1]:
+-1.  **Coarse Sampling:** Sample $N_c$ points along the ray.
+-2.  **Coarse Density Estimation:** Obtain density $\sigma$ from a coarser version of $G_\sigma$. This coarser grid is obtained on-the-fly by applying a non-learnable convolution to $G_\sigma$ [S1].
++1.  **Coarse Sampling:** Sample $N_c$ points along the ray [S1].
++2.  **Coarse Density Estimation:** Obtain density $\sigma$ from a coarser version of $G_\sigma$ obtained on-the-fly by applying a non-learnable convolution [S1].
+ 3.  **Fine Sampling:** Use importance sampling based on the coarse density estimate to sample $N_f$ fine points [S1].
+ 
+@@ -77,169 +77,100 @@
+ import numpy as np
+ 
+-def get_balanced_spherical_grid_params(N_theta_yin, N_phi_yin, N_r_yin, r0, k, R_max):
+-    """
+-    Calculate grid parameters for Yin and Yang grids.
+-    """
+-    # Angular partition sizes for Yin grid
+-    delta_theta_yin = (np.pi / 2) / N_theta_yin
+-    delta_phi_yin = (3 * np.pi / 2) / N_phi_yin
+-    
+-    # Yang grid uses same partition sizes as Yin (implied by symmetry and minimal overlap)
+-    delta_theta_yang = delta_theta_yin
+-    delta_phi_yang = delta_phi_yin
+-    
+-    # Radial partitions for Yin grid
+-    # r_i = r0 * k^(i-1)
+-    # Max radius check: r0 * k^(N_r - 1) should be <= R_max
+-    radial_indices_yin = np.arange(1, N_r_yin + 1)
+-    radial_scales_yin = r0 * (k ** (radial_indices_yin - 1))
+-    
+-    # Yang grid radial partitions are identical in structure
+-    radial_scales_yang = radial_scales_yin
+-    
+-    return {
+-        'delta_theta_yin': delta_theta_yin,
+-        'delta_phi_yin': delta_phi_yin,
+-        'delta_theta_yang': delta_theta_yang,
+-        'delta_phi_yang': delta_phi_yang,
+-        'radial_scales_yin': radial_scales_yin,
+-        'radial_scales_yang': radial_scales_yang,
+-        'R_max': R_max
+-    }
++def compute_grid_params(N_theta, N_phi, N_r, r0, k):
++    """Compute angular partition sizes and radial scale boundaries."""
++    delta_theta = (np.pi / 2) / N_theta
++    delta_phi = (3 * np.pi / 2) / N_phi
++    radial_scales = r0 * (k ** np.arange(N_r))
++    return delta_theta, delta_phi, radial_scales
+ 
+-def transform_yang_to_yin_coords(x_yang, y_yang, z_yang):
+-    """
+-    Transform coordinates from Yang grid basis to Yin grid basis.
+-    M = [[-1, 0, 0], [0, 0, 1], [0, 1, 0]]
+-    """
+-    x_yin = -x_yang
+-    y_yin = z_yang
+-    z_yin = y_yang
+-    return x_yin, y_yin, z_yin
++def yang_to_yin_transform(x, y, z):
++    """Apply coordinate transformation matrix M from Yang to Yin basis."""
++    return -x, z, y
+ 
+-def spherical_to_cartesian(r, theta, phi):
+-    """
+-    Convert spherical coordinates to Cartesian.
+-    theta: colatitude, phi: longitude
+-    """
+-    x = r * np.sin(theta) * np.cos(phi)
+-    y = r * np.sin(theta) * np.sin(phi)
+-    z = r * np.cos(theta)
+-    return x, y, z
++def cartesian_to_spherical(x, y, z):
++    """Convert Cartesian coordinates to spherical (r, theta, phi)."""
++    r = np.sqrt(x**2 + y**2 + z**2)
++    theta = np.arccos(np.clip(z / r, -1.0, 1.0)) if r > 0 else 0.0
++    phi = np.arctan2(y, x)
++    return r, theta, phi
+ 
+-def get_grid_index_for_point(x, y, z, grid_params, grid_type='Yin'):
+-    """
+-    Determine which grid cell (theta, phi, r) a point falls into.
+-    Returns indices or None if outside bounds.
+-    """
+-    # Convert to spherical
+-    r = np.sqrt(x**2 + y**2 + z**2)
+-    theta = np.arccos(z / r) if r > 0 else 0
+-    phi = np.arctan2(y, x)
+-    
+-    # Handle phi range [-pi, pi] to match grid definition if necessary
+-    # Grid phi range is -3pi/4 to 3pi/4
+-    
+-    if grid_type == 'Yin':
+-        # Yin bounds
+-        if not (np.pi/4 <= theta <= 3*np.pi/4):
+-            return None
+-        if not (-3*np.pi/4 <= phi <= 3*np.pi/4):
+-            return None
+-        
+-        # Calculate indices
+-        # theta range is pi/2 (pi/4 to 3pi/4)
+-        # phi range is 3pi/2 (-3pi/4 to 3pi/4)
+-        
+-        idx_theta = int((theta - np.pi/4) / grid_params['delta_theta_yin'])
+-        idx_phi = int((phi - (-3*np.pi/4)) / grid_params['delta_phi_yin'])
+-        
+-        # Radial index
+-        # Find i such that r_i <= r < r_{i+1}
+-        # r_i = r0 * k^(i-1)
+-        # If r < r0, interval is r0.
+-        if r < grid_params['radial_scales_yin'][0]:
+-            idx_r = 0
+-        else:
+-            # Solve r = r0 * k^(i-1) => i-1 = log(r/r0)/log(k) => i = 1 + log(r/r0)/log(k)
+-            # Use floor for lower bound index
+-            idx_r = int(1 + np.log(r / grid_params['radial_scales_yin'][0]) / np.log(grid_params['radial_scales_yin'][1] / grid_params['radial_scales_yin'][0]))
+-            
+-            # Clamp to max
+-            if idx_r >= len(grid_params['radial_scales_yin']):
+-                idx_r = len(grid_params['radial_scales_yin']) - 1
+-                
+-        return (idx_r, idx_theta, idx_phi)
+-        
+-    elif grid_type == 'Yang':
+-        # Transform point to Yin basis
+-        x_yin, y_yin, z_yin = transform_yang_to_yin_coords(x, y, z)
+-        # Recalculate spherical for transformed point
+-        r_yin = np.sqrt(x_yin**2 + y_yin**2 + z_yin**2)
+-        theta_yin = np.arccos(z_yin / r_yin) if r_yin > 0 else 0
+-        phi_yin = np.arctan2(y_yin, x_yin)
+-        
+-        # Check Yin bounds on transformed point
+-        if not (np.pi/4 <= theta_yin <= 3*np.pi/4):
+-            return None
+-        if not (-3*np.pi/4 <= phi_yin <= 3*np.pi/4):
+-            return None
+-            
+-        idx_theta = int((theta_yin - np.pi/4) / grid_params['delta_theta_yin'])
+-        idx_phi = int((phi_yin - (-3*np.pi/4)) / grid_params['delta_phi_yin'])
+-        
+-        # Radial index for Yang is same scale
+-        if r_yin < grid_params['radial_scales_yang'][0]:
+-            idx_r = 0
+-        else:
+-            idx_r = int(1 + np.log(r_yin / grid_params['radial_scales_yang'][0]) / np.log(grid_params['radial_scales_yang'][1] / grid_params['radial_scales_yang'][0]))
+-            if idx_r >= len(grid_params['radial_scales_yang']):
+-                idx_r = len(grid_params['radial_scales_yang']) - 1
+-                
+-        return (idx_r, idx_theta, idx_phi)
+-        
+-    return None
++def get_grid_indices(x, y, z, delta_theta, delta_phi, radial_scales, grid_type='Yin'):
++    """Determine grid cell indices for a point, handling Yin/Yang bounds."""
++    if grid_type == 'Yang':
++        x, y, z = yang_to_yin_transform(x, y, z)
++    r, theta, phi = cartesian_to_spherical(x, y, z)
+ 
+-def interpolate_grid_value(grid_tensor, idx_r, idx_theta, idx_phi, x, y, z, grid_params, grid_type='Yin'):
+-    """
+-    Trilinear interpolation from the grid tensor.
+-    """
+-    # Get grid cell bounds for interpolation weights
+-    # This requires retrieving the specific r, theta, phi bounds for the indices
+-    # For brevity, assuming helper functions get_bounds() exist
+-    
+-    # 1. Determine bounds
+-    if grid_type == 'Yin':
+-        r_min = grid_params['radial_scales_yin'][idx_r] if idx_r > 0 else grid_params['radial_scales_yin'][0] # Simplified
+-        r_max = grid_params['radial_scales_yin'][idx_r + 1] if idx_r + 1 < len(grid_params['radial_scales_yin']) else grid_params['R_max']
+-        # Theta/Phi bounds calculation similar to index derivation
+-        theta_min = np.pi/4 + idx_theta * grid_params['delta_theta_yin']
+-        theta_max = theta_min + grid_params['delta_theta_yin']
+-        phi_min = -3*np.pi/4 + idx_phi * grid_params['delta_phi_yin']
+-        phi_max = phi_min + grid_params['delta_phi_yin']
++    # Check Yin bounds (applies to both grids after transform)
++    if not (np.pi/4 <= theta <= 3*np.pi/4):
++        return None
++    if not (-3*np.pi/4 <= phi <= 3*np.pi/4):
++        return None
++
++    # Angular indices (uniform partitioning)
++    idx_theta = int((theta - np.pi/4) / delta_theta)
++    idx_phi = int((phi + 3*np.pi/4) / delta_phi)
++
++    # Radial index (exponential partitioning)
++    if r < radial_scales[0]:
++        idx_r = 0
+     else:
+-        # Transform point to Yin basis for bounds lookup
+-        x_yin, y_yin, z_yin = transform_yang_to_yin_coords(x, y, z)
+-        r_yin = np.sqrt(x_yin**2 + y_yin**2 + z_yin**2)
+-        theta_yin = np.arccos(z_yin / r_yin)
+-        phi_yin = np.arctan2(y_yin, x_yin)
+-        
+-        r_min = grid_params['radial_scales_yang'][idx_r]
+-        r_max = grid_params['radial_scales_yang'][idx_r + 1]
+-        theta_min = np.pi/4 + idx_theta * grid_params['delta_theta_yin']
+-        theta_max = theta_min + grid_params['delta_theta_yin']
+-        phi_min = -3*np.pi/4 + idx_phi * grid_params['delta_phi_yin']
+-        phi_max = phi_min + grid_params['delta_phi_yin']
+-        
+-    # 2. Compute interpolation weights (normalized 0-1)
+-    # Note: Exact weight calculation depends on non-linear radial spacing
+-    # For radial, use log-space or direct ratio if linear approximation is acceptable for [G]
+-    # Standard trilinear assumes linear spacing. For exponential radial, 
+-    # one might interpolate in log(r) space or use the specific cell boundaries.
+-    # Here we assume standard trilinear on the tensor indices for the [G] implementation detail.
+-    
+-    # ... (Standard trilinear interpolation logic using grid_tensor values at 8 corners) ...
+-    
+-    return interpolated_value
++        idx_r = int(np.log(r / radial_scales[0]) / np.log(radial_scales[1] / radial_scales[0]))
++        idx_r = min(idx_r, len(radial_scales) - 1)
++
++    return idx_r, idx_theta, idx_phi
++
++def trilinear_interpolate(grid_tensor, idx_r, idx_theta, idx_phi, x, y, z, delta_theta, delta_phi, radial_scales, grid_type='Yin'):
++    """Perform trilinear interpolation from the feature grid tensor."""
++    if grid_type == 'Yang':
++        x, y, z = yang_to_yin_transform(x, y, z)
++    r, theta, phi = cartesian_to_spherical(x, y, z)
++
++    # Clamp indices to valid interpolation range
++    idx_r = max(0, min(idx_r, len(radial_scales) - 2))
++    idx_theta = max(0, min(idx_theta, grid_tensor.shape[1] - 2))
++    idx_phi = max(0, min(idx_phi, grid_tensor.shape[2] - 2))
++
++    # Cell boundaries
++    r_min = radial_scales[idx_r]
++    r_max = radial_scales[idx_r + 1]
++    theta_min = np.pi/4 + idx_theta * delta_theta
++    theta_max = theta_min + delta_theta
++    phi_min = -3*np.pi/4 + idx_phi * delta_phi
++    phi_max = phi_min + delta_phi
++
++    # Compute interpolation weights (0 to 1)
++    w_r = (r - r_min) / (r_max - r_min) if r_max != r_min else 0.0
++    w_theta = (theta - theta_min) / (theta_max - theta_min) if theta_max != theta_min else 0.0
++    w_phi = (phi - phi_min) / (phi_max - phi_min) if phi_max != phi_min else 0.0
++
++    # Fetch 8 corner values with boundary clamping
++    def get_val(dr, dt, dp):
++        ir = idx_r + dr
++        it = idx_theta + dt
++        ip = idx_phi + dp
++        ir = max(0, min(ir, grid_tensor.shape[0] - 1))
++        it = max(0, min(it, grid_tensor.shape[1] - 1))
++        ip = max(0, min(ip, grid_tensor.shape[2] - 1))
++        return grid_tensor[ir, it, ip]
++
++    v000 = get_val(0, 0, 0)
++    v001 = get_val(0, 0, 1)
++    v010 = get_val(0, 1, 0)
++    v011 = get_val(0, 1, 1)
++    v100 = get_val(1, 0, 0)
++    v101 = get_val(1, 0, 1)
++    v110 = get_val(1, 1, 0)
++    v111 = get_val(1, 1, 1)
++
++    # Trilinear interpolation
++    v00 = v000 * (1 - w_phi) + v001 * w_phi
++    v01 = v010 * (1 - w_phi) + v011 * w_phi
++    v10 = v100 * (1 - w_phi) + v101 * w_phi
++    v11 = v110 * (1 - w_phi) + v111 * w_phi
++
++    v0 = v00 * (1 - w_theta) + v01 * w_theta
++    v1 = v10 * (1 - w_theta) + v11 * w_theta
++
++    return v0 * (1 - w_r) + v1 * w_r
+ ```
+ 

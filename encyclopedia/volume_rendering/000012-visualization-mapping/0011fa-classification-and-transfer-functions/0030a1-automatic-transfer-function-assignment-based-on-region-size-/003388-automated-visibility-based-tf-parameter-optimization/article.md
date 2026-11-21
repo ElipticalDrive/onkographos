@@ -1,0 +1,180 @@
+# Automated Visibility-Based TF Parameter Optimization
+
+Also called: Visibility-Based TF Parameter Optimization, visibility-driven TF tuning
+
+## Overview
+Automated Visibility-Based TF Parameter Optimization is an iterative method that adjusts transfer function (TF) parameters to minimize the difference between user-specified target visibility and the actual resultant visibility of Structures of Interest (SOIs) in a volume rendering. It solves the problem of manual fine-tuning by automatically prioritizing specific anatomical regions based on clinical or user-defined importance, ensuring that critical structures are not occluded by others [S1, unofficial][S2]. Unlike static TF assignment methods, this approach dynamically optimizes opacity parameters to enforce visibility priorities during DVR generation [S1, unofficial].
+
+## How it works
+**Inputs:**
+1.  Initial Transfer Function $\theta$: A set of opacity parameters defining tent-shaped components for each SOI [S2].
+2.  Target Visibility Thresholds ($VT_m$): A scalar value for each SOI $m$ representing its desired prominence, where $VT \in [0, 1]$ [S1, unofficial][S2].
+3.  Volume Data: The 3D scalar field to be rendered.
+4.  Viewpoint $h$: The camera position for front-to-back ray casting [S2].
+
+**Outputs:**
+Optimized TF parameters $\theta^*$ that minimize the visibility tolerance error [S2].
+
+**Data Structures:**
+*   **SOI List:** A collection of $M$ Structures of Interest. Each SOI $m$ has an associated $VT_m$.
+*   **TF Representation:** Composed of individual tent-shape components, one for each SOI, defined by apex opacity parameters $\theta$ [S1, unofficial][S2].
+*   **Visibility Accumulator:** For each ray, a front-to-back accumulation buffer is maintained to compute voxel visibility [S2].
+
+**Algorithm Steps:**
+
+1.  **Initialize:** Set initial TF parameters $\theta$ (e.g., from a knowledge database or default values) [S1, unofficial][S2].
+2.  **Compute Resultant Visibility ($VR_m$):** For each SOI $m$:
+    a.  Cast rays from viewpoint $h$ through the volume.
+    b.  For each voxel $p$ in the volume, compute the accumulated opacity $A(p)$ using front-to-back composition:
+        $$ A(p) = A(p - \Delta p) + (1.0 - A(p - \Delta p)) \cdot O(p) $$
+        where $O(p)$ is the opacity of voxel $p$ defined by the current TF, and $\Delta p$ is the sampling step size [S2].
+    c.  Compute the visibility contribution $F(p)$ for voxel $p$, representing the probability that $p$ is visible (not occluded by front voxels):
+        $$ F(p) = e^{-\int_{h}^{p} A(g) dg} $$
+        In discrete implementation, this is approximated by the accumulated transmittance from the viewpoint to $p$ [S2].
+    d.  Calculate the resultant visibility $VR_m$ for SOI $m$ by summing the weighted opacities of all voxels $p$ belonging to SOI $m$:
+        $$ VR_m = \sum_{p \in SOI_m} O(p) \cdot F(p) $$
+        [S2]
+3.  **Compute Energy Function ($E$):** Calculate the total visibility tolerance error across all $M$ SOIs:
+    $$ E(\theta) = \sum_{m=1}^{M} (VT_m - VR_m)^2 $$
+    [S2]
+4.  **Optimize:** Use the downhill simplex method to adjust $\theta$ to minimize $E(\theta)$ [S2]. The iteration continues until convergence (minimum energy) is reached [S2].
+5.  **Output:** The optimized TF parameters $\theta^*$ [S2].
+
+**Parameters:**
+*   $VT_m$: Visibility threshold for SOI $m$. Example values: $0.7$ for bones, $0.3$ for lungs [S1, unofficial]. Can be uniformly set or user-defined [S2].
+*   $\theta$: Opacity parameters of tent apexes [S2].
+*   $M$: Total number of SOIs [S2].
+*   $\Delta p$: Sampling step size [S2].
+
+**Pitfalls:**
+*   The optimization landscape may contain multiple local minima. The downhill simplex method is preferred over gradient-based methods like gradient descent for this reason [S2].
+*   False-positive SOIs retrieved from a knowledge database may require manual elimination, as the optimization only adjusts parameters for existing components [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def optimize_visibility_tf(volume, sois, vt_targets, viewpoint, step_size, max_iterations=100, tolerance=1e-4):
+    """
+    Optimizes TF parameters to match target visibilities for SOIs.
+    
+    Args:
+        volume: 3D array of scalar values.
+        sois: List of SOI objects, each containing a set of voxel indices.
+        vt_targets: List of target visibility values (VT) for each SOI.
+        viewpoint: 3D vector for camera position.
+        step_size: Sampling step size for ray casting.
+        max_iterations: Maximum number of optimization iterations.
+        tolerance: Convergence threshold for energy change.
+        
+    Returns:
+        optimized_theta: Optimized TF parameters.
+    """
+    # Initialize TF parameters (e.g., tent apex opacities)
+    # Note: The exact initialization of theta depends on the TF representation (tent shapes)
+    # [G] Assuming a simple initialization where all tent apexes start at a default opacity
+    theta = initialize_tf_parameters(sois) 
+    
+    # Initialize simplex for downhill simplex method
+    # [G] Simplex is a set of M+1 vertices in parameter space, where M is dimension of theta
+    simplex = initialize_simplex(theta)
+    
+    prev_energy = float('inf')
+    
+    for iteration in range(max_iterations):
+        # 1. Compute Resultant Visibility (VR) for each SOI
+        vr_values = []
+        for m, soi in enumerate(sois):
+            vr_m = 0.0
+            for p in soi.voxel_indices:
+                # Compute opacity O(p) from current TF
+                o_p = evaluate_tf(theta, volume[p])
+                
+                # Compute visibility F(p) via front-to-back composition
+                # [G] This requires ray casting from viewpoint to p
+                # For efficiency, this is often precomputed or approximated
+                # Here we assume a function that returns accumulated transmittance to p
+                f_p = compute_front_to_back_visibility(volume, viewpoint, p, step_size, theta)
+                
+                vr_m += o_p * f_p
+            vr_values.append(vr_m)
+            
+        # 2. Compute Energy Function E
+        energy = 0.0
+        for m in range(len(sois)):
+            energy += (vt_targets[m] - vr_values[m]) ** 2
+            
+        # Check convergence
+        if abs(prev_energy - energy) < tolerance:
+            break
+        prev_energy = energy
+        
+        # 3. Optimize using Downhill Simplex
+        # [G] The simplex method modifies the vertices of the simplex in theta space
+        # to find the minimum of the energy function.
+        simplex = downhill_simplex_step(simplex, energy_function, volume, sois, vt_targets, viewpoint, step_size)
+        
+        # Update theta to the best vertex in the simplex
+        theta = get_best_simplex_vertex(simplex)
+        
+    return theta
+
+def evaluate_tf(theta, scalar_value):
+    """
+    Evaluates the opacity O(p) for a given scalar value using the current TF parameters.
+    [G] Assumes tent-shaped TF components.
+    """
+    # Implementation depends on specific TF representation
+    # For tent shapes, this involves linear interpolation between apexes
+    pass
+
+def compute_front_to_back_visibility(volume, viewpoint, target_voxel, step_size, theta):
+    """
+    Computes F(p) for a voxel p by casting a ray from viewpoint to p.
+    """
+    # [G] This is a simplified representation. In practice, this involves
+    # iterating along the ray and accumulating opacity.
+    accumulated_opacity = 0.0
+    ray_direction = normalize(target_voxel - viewpoint)
+    current_pos = viewpoint
+    
+    while distance(current_pos, target_voxel) > 0:
+        # Sample volume at current_pos
+        scalar = sample_volume(volume, current_pos)
+        opacity = evaluate_tf(theta, scalar)
+        
+        # Update accumulated opacity
+        # A(p) = A(p - delta_p) + (1.0 - A(p - delta_p)) * O(p)
+        accumulated_opacity = accumulated_opacity + (1.0 - accumulated_opacity) * opacity
+        
+        current_pos += ray_direction * step_size
+        
+    # F(p) is the transmittance to p, i.e., e^(-accumulated_opacity)
+    # In discrete form, if A(p) represents accumulated opacity, F(p) = 1 - A(p) is not quite right.
+    # The formula given is F(p) = exp(- integral A(g) dg).
+    # In discrete terms, if A(p) is the accumulated opacity up to p, then F(p) is the transmittance.
+    # Let's assume accumulated_opacity here is the integral of opacity.
+    return exp(-accumulated_opacity)
+```
+
+## Subtopics
+
+### Visibility Histogram Refinement
+A technique that combines visibility histograms with a non-assisted approach to refine transfer function specifications, revealing regions hidden from the observer's position. The user first performs a preliminary TF specification, which is then refined to make visible structures that were previously occluded [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The optimization is iterative, with each iteration requiring a full volume rendering pass to compute visibility for all SOIs. The downhill simplex method adds overhead proportional to the number of TF parameters. No explicit complexity formula is given in the sources [S2].
+*   **Memory Complexity:** Requires storage for the volume data, SOI voxel indices, and TF parameters. Visibility computation may require temporary buffers for ray casting [S2].
+*   **Performance:** Evaluated on the 3D-IRCADb-01 dataset (20 CT volumes of the upper abdomen) [S2]. The method effectively prioritizes visibility of specific SOIs (e.g., bones over lungs) without manual tuning [S1, unofficial].
+*   **Strengths:** Automates TF fine-tuning, handles multiple local minima effectively, allows user-defined visibility priorities [S1, unofficial][S2].
+*   **Limitations:** Requires initial TF components (e.g., from a knowledge database); false positives may need manual removal; convergence is not guaranteed to be global [S1, unofficial][S2].
+*   **When to Use:** When automatic prioritization of specific anatomical structures is needed, and manual TF tuning is time-consuming or inconsistent [S1, unofficial].
+*   **When Not to Use:** When real-time interactive TF editing is required, as the optimization may be too slow [S2].
+
+## Background
+The method was proposed by Younhyun Jung et al. in the context of a Transfer Function Design for Medical Volume Data Using a Knowledge Database [S2]. It builds upon earlier work on visibility-based TF parameter optimization [9, 10] cited in the paper [S2]. The approach is part of a broader effort to automate TF design using retrieved SOI features from a knowledge database [S1, unofficial][S2].
+
+## Sources
+[S1] A Transfer Function Design Using A Knowledge Database based on Deep Image and Primitive Intensity Profile Features Retrieval, https://arxiv.org/abs/2209.06421v1, fetched 2026-10-26 (unofficial)
+[S2] A Transfer Function Design for Medical Volume Data Using a Knowledge Database Based on Deep Image and Primitive Intensity Profile Features Retrieval, https://doi.org/10.1007/s11390-024-3419-7, fetched 2026-10-27
+[S3] A volume exploration approach based on clustering and dimensional reduction to support the definition of multidimensional transfer functions, http://hdl.handle.net/11449/153618, fetched 2026-10-26 (unofficial)

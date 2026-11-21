@@ -1,0 +1,288 @@
+--- v001.md
++++ v002.md
+@@ -4,174 +4,144 @@
+ 
+ ## Overview
+-PlenOctree Compression is a file-size reduction strategy designed to make PlenOctrees feasible for in-browser rendering by minimizing occupied voxels and applying direct compression to the tree structure [S1, unofficial]. It distinguishes itself from general value compression [6-value-compression.md] by specifically targeting the spherical harmonic (SH) coefficients of PlenOctrees using median-cut quantization and DEFLATE encoding, and from sparse structures [5-sparse-structures.md] by compressing the entire tree including pointers rather than just the data values.
++PlenOctree Compression is a file-size reduction strategy designed to make PlenOctrees feasible for in-browser rendering by minimizing occupied voxels and applying direct compression to the tree structure [S1, unofficial]. It distinguishes itself from general value compression [6-value-compression.md] by specifically targeting the spherical harmonic (SH) coefficients of PlenOctrees using median-cut quantization and DEFLATE encoding, and from sparse structures [5-sparse-structures.md] by compressing the entire tree including pointers rather than just the data values [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** An uncompressed PlenOctree containing SH coefficients (RGB vectors) and density ($\sigma$) values.
+-**Outputs:** A compressed binary file containing the quantized codebooks, leaf pointers, and DEFLATE-compressed tree structure.
++**Inputs:** An uncompressed PlenOctree containing SH coefficients (RGB vectors) and density ($\sigma$) values [S1, unofficial].
++**Outputs:** A compressed binary file containing the quantized codebooks, leaf pointers, and DEFLATE-compressed tree structure [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Codebook:** A lookup table of size $2^{16} \times 3$ storing RGB colors. Data type: `float16` (IEEE 754 half-precision). One codebook is stored per SH basis function.
+-2.  **Leaf Pointers:** For each leaf node in the PlenOctree, a pointer to an index in the corresponding SH basis function's codebook. Data type: `int16` (16-bit signed integer).
+-3.  **Tree Structure:** The full PlenOctree hierarchy, including internal node pointers and leaf data (pointers and $\sigma$), compressed as a byte stream.
++1. **Codebook:** A lookup table of size $2^{16} \times 3$ storing RGB colors [S1, unofficial]. Data type: `float16` (IEEE 754 half-precision) [S1, unofficial]. One codebook is stored per SH basis function [S1, unofficial].
++2. **Leaf Pointers:** For each leaf node in the PlenOctree, a pointer to an index in the corresponding SH basis function's codebook [S1, unofficial]. Data type: `int16` (16-bit signed integer) [S1, unofficial].
++3. **Tree Structure:** The full PlenOctree hierarchy, including internal node pointers and leaf data (pointers and $\sigma$), compressed as a byte stream [S1, unofficial].
+ 
+ **Parameters:**
+-*   **SH Degree:** Limited to degree 2 (SH-9). This reduces the number of coefficients per voxel compared to SH-16 or SH-25 [S1, unofficial].
+-*   **Bounding Box:** A looser bounding box is used during the initial PlenOctree construction to reduce the total number of occupied voxels [S1, unofficial].
+-*   **Quantization Levels:** $2^{16}$ (65,536) colors.
++* **SH Degree:** Limited to degree 2 (SH-9) [S1, unofficial]. This reduces the number of coefficients per voxel compared to SH-16 or SH-25 [S1, unofficial].
++* **Bounding Box:** A looser bounding box is used during the initial PlenOctree construction to reduce the total number of occupied voxels [S1, unofficial].
++* **Quantization Levels:** $2^{16}$ (65,536) colors [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Quantize SH Coefficients:**
+-    *   For each voxel in the PlenOctree, retain the density value $\sigma$ as a standard floating-point value (no quantization specified for $\sigma$).
+-    *   For each SH basis function $m$, extract the RGB coefficient vector $\mathbf{k}_m \in \mathbb{R}^3$.
+-    *   Apply the **median-cut algorithm** to quantize all $\mathbf{k}_m$ vectors across the entire tree into $2^{16}$ representative colors.
+-    *   Generate a codebook of size $2^{16} \times 3$ for each SH basis function.
+-    *   Replace each voxel's $\mathbf{k}_m$ with an index (pointer) into the corresponding codebook. The index is stored as an `int16`.
+-2.  **Compress Tree:**
+-    *   Serialize the entire PlenOctree structure, including internal nodes, leaf pointers (to codebooks), and $\sigma$ values.
+-    *   Apply the **DEFLATE algorithm** (as implemented in ZLIB) to the serialized byte stream [S1, unofficial].
+-3.  **Store:**
+-    *   Save the DEFLATE-compressed tree stream.
+-    *   Save the codebooks (one per SH basis function) as `float16` arrays.
++1. **Quantize SH Coefficients:**
++   * For each voxel in the PlenOctree, retain the density value $\sigma$ as a standard floating-point value (no quantization specified for $\sigma$) [S1, unofficial].
++   * For each SH basis function $m$, extract the RGB coefficient vector $\mathbf{k}_m \in \mathbb{R}^3$ [S1, unofficial].
++   * Apply the **median-cut algorithm** to quantize all $\mathbf{k}_m$ vectors across the entire tree into $2^{16}$ representative colors [S1, unofficial].
++   * Generate a codebook of size $2^{16} \times 3$ for each SH basis function [S1, unofficial].
++   * Replace each voxel's $\mathbf{k}_m$ with an index (pointer) into the corresponding codebook. The index is stored as an `int16` [S1, unofficial].
++2. **Compress Tree:**
++   * Serialize the entire PlenOctree structure, including internal nodes, leaf pointers (to codebooks), and $\sigma$ values [S1, unofficial].
++   * Apply the **DEFLATE algorithm** (as implemented in ZLIB) to the serialized byte stream [S1, unofficial].
++3. **Store:**
++   * Save the DEFLATE-compressed tree stream [S1, unofficial].
++   * Save the codebooks (one per SH basis function) as `float16` arrays [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++import struct
+ import zlib
+-import numpy as np
++import math
+ 
+-def compress_plenoctree(tree):
++def median_cut_quantize(colors, num_colors):
++    """Standard median-cut color quantization [G]."""
++    if not colors:
++        return [[0.0, 0.0, 0.0] for _ in range(num_colors)]
++    boxes = [list(range(len(colors)))]
++    while len(boxes) < num_colors:
++        max_range = -1.0
++        max_idx = -1
++        max_dim = -1
++        for i, box in enumerate(boxes):
++            if not box: continue
++            min_c = [min(colors[j][d] for j in box) for d in range(3)]
++            max_c = [max(colors[j][d] for j in box) for d in range(3)]
++            rng = [max_c[d] - min_c[d] for d in range(3)]
++            dim = rng.index(max(rng))
++            if rng[dim] > max_range:
++                max_range = rng[dim]
++                max_idx = i
++                max_dim = dim
++        box = boxes.pop(max_idx)
++        box_sorted = sorted(box, key=lambda idx: colors[idx][max_dim])
++        mid = len(box_sorted) // 2
++        boxes.append(box_sorted[:mid])
++        boxes.append(box_sorted[mid:])
++    codebook = []
++    for box in boxes:
++        if box:
++            avg = [sum(colors[j][d] for j in box) / len(box) for d in range(3)]
++            codebook.append(avg)
++        else:
++            codebook.append([0.0, 0.0, 0.0])
++    while len(codebook) < num_colors:
++        codebook.append([0.0, 0.0, 0.0])
++    return codebook
++
++def compress_plenoctree(tree_leaves, num_sh_basis=9, num_colors=65536):
+     """
+     Compress a PlenOctree using SH-9, median-cut quantization, and DEFLATE.
+-    
+     Args:
+-        tree: A PlenOctree object containing nodes with:
+-              - sigma: density value (float)
+-              - sh_coeffs: list of RGB vectors for each SH basis function (degree 2 -> 9 coeffs)
+-    
++        tree_leaves: list of dicts with keys 'sigma' (float), 'sh_coeffs' (list of 9 RGB vectors)
++        num_sh_basis: number of SH basis functions (default 9 for SH-9)
++        num_colors: quantization levels (default 2^16)
+     Returns:
+-        compressed_data: bytes, the DEFLATE-compressed tree stream
+-        codebooks: dict, mapping SH_basis_index -> numpy array of shape (65536, 3), dtype float16
++        compressed_data: bytes, DEFLATE-compressed tree stream
++        codebooks: dict mapping basis_idx -> list of [r, g, b] (num_colors, 3)
+     """
+-    num_sh_basis = 9  # SH-9
+-    num_colors = 65536 # 2^16
+-    
+-    # Initialize codebooks and pointers storage
+-    # codebooks[basis_idx] will store the final 2^16 x 3 codebook
+-    codebooks = {i: None for i in range(num_sh_basis)}
+-    
+-    # Step 1: Collect all RGB coefficients for each SH basis function to build codebooks
+-    # We need to run median-cut on the global set of coefficients for each basis
++    # Step 1: Collect coefficients and build codebooks
+     all_coeffs = {i: [] for i in range(num_sh_basis)}
+-    
+-    # Traverse tree to collect coefficients
+-    for node in tree.all_leaves():
+-        for basis_idx in range(num_sh_basis):
+-            rgb = node.sh_coeffs[basis_idx] # Shape (3,)
+-            all_coeffs[basis_idx].append(rgb)
+-            
+-    # Build codebooks using median-cut for each basis
+-    for basis_idx in range(num_sh_basis):
+-        coeffs_array = np.array(all_coeffs[basis_idx], dtype=np.float32)
+-        # Median-cut algorithm implementation [G]
+-        # 1. Start with bounding box of all colors
+-        # 2. Repeatedly split the largest dimension of the largest box until 2^16 boxes
+-        # 3. Center of each box is a codebook entry
+-        codebook = median_cut_quantize(coeffs_array, num_colors)
+-        codebooks[basis_idx] = codebook.astype(np.float16)
+-        
++    for leaf in tree_leaves:
++        for b in range(num_sh_basis):
++            all_coeffs[b].append(leaf['sh_coeffs'][b])
++
++    codebooks = {}
++    for b in range(num_sh_basis):
++        codebooks[b] = median_cut_quantize(all_coeffs[b], num_colors)
++
+     # Step 2: Replace coefficients with pointers
+-    # Create a new tree structure with pointers instead of raw RGB
+-    compressed_tree_nodes = []
+-    
+-    for node in tree.all_leaves():
+-        new_node = Node()
+-        new_node.sigma = node.sigma # Keep sigma as is
+-        
+-        # Quantize each SH basis coefficient to nearest codebook entry
+-        new_node.pointers = []
+-        for basis_idx in range(num_sh_basis):
+-            rgb = node.sh_coeffs[basis_idx]
+-            # Find index in codebook[basis_idx] closest to rgb [G]
+-            # Euclidean distance in RGB space
+-            codebook = codebooks[basis_idx]
+-            dists = np.linalg.norm(codebook - rgb, axis=1)
+-            idx = np.argmin(dists)
+-            new_node.pointers.append(idx)
+-            
+-        compressed_tree_nodes.append(new_node)
+-        
+-    # Step 3: Serialize and Compress
+-    # Serialize the tree structure (pointers and sigma) into a byte stream
+-    # The exact serialization format is not specified, but must include pointers and sigma [G]
+-    # Assuming a simple binary layout: [sigma (float32), ptr0 (int16), ..., ptr8 (int16)] per leaf
+-    # Plus internal node structure. For this example, we assume a flat list of leaves for simplicity
+-    # or a standard tree serialization. The source says "entire tree, including pointers".
+-    
+-    # Placeholder for tree serialization logic [G]
+-    # In practice, this would serialize the node hierarchy.
+-    # Here we serialize just the leaf data for demonstration of the compression step.
+     leaf_data = []
+-    for node in compressed_tree_nodes:
+-        leaf_data.append(node.sigma)
+-        leaf_data.extend(node.pointers)
+-        
+-    # Convert to bytes
+-    # sigma: float32 (4 bytes), pointers: int16 (2 bytes each)
+-    # Total per leaf: 4 + 9*2 = 22 bytes
+-    byte_stream = np.array(leaf_data, dtype=np.float32).tobytes() # Simplified: only sigma for demo
+-    # Note: The pointers must be included in the actual byte stream.
+-    # Correct serialization would pack sigma and pointers together.
+-    
+-    # Re-do serialization properly
+-    packed = bytearray()
+-    for node in compressed_tree_nodes:
+-        packed.extend(node.sigma.to_bytes(4, byteorder='little', signed=False)) # Assuming float32
+-        for ptr in node.pointers:
+-            packed.extend(ptr.to_bytes(2, byteorder='little', signed=True))
+-            
+-    # Step 4: Apply DEFLATE
+-    compressed_data = zlib.compress(bytes(packed))
+-    
++    for leaf in tree_leaves:
++        sigma = leaf['sigma']
++        pointers = []
++        for b in range(num_sh_basis):
++            rgb = leaf['sh_coeffs'][b]
++            # Find index in codebook[b] closest to rgb [G]
++            best_idx = -1
++            best_dist = float('inf')
++            for idx, cb_rgb in enumerate(codebooks[b]):
++                dist = math.sqrt(sum((rgb[d] - cb_rgb[d])**2 for d in range(3)))
++                if dist < best_dist:
++                    best_dist = dist
++                    best_idx = idx
++            pointers.append(best_idx)
++        leaf_data.append((sigma, pointers))
++
++    # Step 3: Serialize tree structure
++    # Layout per leaf: sigma (float32, 4B) + 9 pointers (int16, 2B each) = 22 bytes
++    # The source specifies compressing the entire tree, including pointers [S1, unofficial].
++    byte_stream = bytearray()
++    for sigma, pointers in leaf_data:
++        byte_stream.extend(struct.pack('<f', sigma))
++        for ptr in pointers:
++            byte_stream.extend(struct.pack('<h', ptr))
++
++    # Step 4: Apply DEFLATE compression
++    compressed_data = zlib.compress(bytes(byte_stream))
+     return compressed_data, codebooks
+-
+-def median_cut_quantize(colors, num_colors):
+-    """
+-    Standard median-cut algorithm for color quantization.
+-    """
+-    # Implementation of median-cut [G]
+-    # 1. Sort colors by each dimension
+-    # 2. Create initial box containing all colors
+-    # 3. Loop until num_colors boxes:
+-    #    a. Find box with largest range (max - min) in any dimension
+-    #    b. Split that box along the dimension with the largest range
+-    #    c. Split point is the median of the colors in that dimension
+-    # 4. Compute centroid of each box
+-    pass
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Using `float16` for codebooks reduces memory but may introduce quantization error in the codebook values themselves. The source specifies `float16` [S1, unofficial].
+-*   **Pointer Size:** `int16` limits the codebook size to 65,536 entries. If more colors are needed, this method cannot scale without changing the pointer type.
+-*   **Decompression:** The entire tree must be fully decompressed before rendering in the web renderer [S1, unofficial].
++* **Precision:** Using `float16` for codebooks reduces memory but may introduce quantization error in the codebook values themselves [S1, unofficial].
++* **Pointer Size:** `int16` limits the codebook size to 65,536 entries. If more colors are needed, this method cannot scale without changing the pointer type [S1, unofficial].
++* **Decompression:** The entire tree must be fully decompressed before rendering in the web renderer [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Compression Ratio:** Reduces file size by 20-30 times compared to the uncompressed PlenOctree [S1, unofficial].
+-*   **Performance (SH-9):**
+-    *   File Size: 1.00 GB
+-    *   Rendering FPS: 262
+-    *   PSNR: 31.44
+-    *   SSIM: 0.951
+-    *   LPIPS: 0.065
+-    [S1, unofficial]
+-*   **Comparison with Higher SH Degrees:**
+-    *   SH-16: 1.93 GB, 168 FPS, PSNR 31.57, SSIM 0.952, LPIPS 0.063
+-    *   SH-25: 2.68 GB, 128 FPS, PSNR 31.56, SSIM 0.951, LPIPS 0.063
+-    [S1, unofficial]
+-*   **Strengths:** Significant file size reduction enabling in-browser rendering; simple compression pipeline (median-cut + DEFLATE); high rendering FPS due to reduced data transfer and simpler SH evaluation.
+-*   **Limitations:** Lossy compression (quantization); requires full decompression before rendering; SH-9 may lose high-frequency detail compared to SH-16/25, though the PSNR drop is minimal (0.13 dB).
+-*   **When to use:** When in-browser rendering of NeRFs is required and bandwidth/storage is a constraint.
+-*   **When not to use:** When maximum visual fidelity is required and bandwidth is not a constraint (use SH-16/25).
++* **Compression Ratio:** Reduces file size by 20-30 times compared to the uncompressed PlenOctree [S1, unofficial].
++* **Performance (SH-9):** File Size: 1.00 GB, Rendering FPS: 262, PSNR: 31.44, SSIM: 0.951, LPIPS: 0.065 [S1, unofficial].
++* **Comparison with Higher SH Degrees:** SH-16: 1.93 GB, 168 FPS, PSNR 31.57, SSIM 0.952, LPIPS 0.063; SH-25: 2.68 GB, 128 FPS, PSNR 31.56, SSIM 0.951, LPIPS 0.063 [S1, unofficial].
++* **Strengths:** Significant file size reduction enabling in-browser rendering; simple compression pipeline (median-cut + DEFLATE); high rendering FPS due to reduced data transfer and simpler SH evaluation [S1, unofficial].
++* **Limitations:** Lossy compression (quantization); requires full decompression before rendering; SH-9 may lose high-frequency detail compared to SH-16/25, though the PSNR drop is minimal (0.13 dB) [S1, unofficial].
++* **When to use:** When in-browser rendering of NeRFs is required and bandwidth/storage is a constraint [S1, unofficial].
++* **When not to use:** When maximum visual fidelity is required and bandwidth is not a constraint (use SH-16/25) [S1, unofficial].
+ 
+ ## Background
+-PlenOctree Compression was introduced in the paper "PlenOctrees For Real-time Rendering of Neural Radiance Fields (NeRFs)" by Yu et al. [S1, unofficial]. The method was developed to address the large file sizes of PlenOctrees, which were originally too large for efficient in-browser viewing. The approach combines established techniques (median-cut quantization, DEFLATE compression) with specific adaptations for PlenOctree data structures (SH coefficients, tree pointers).
++PlenOctree Compression was introduced in the paper "PlenOctrees For Real-time Rendering of Neural Radiance Fields (NeRFs)" by Yu et al. [S1, unofficial]. The method was developed to address the large file sizes of PlenOctrees, which were originally too large for efficient in-browser viewing [S1, unofficial]. The approach combines established techniques (median-cut quantization, DEFLATE compression) with specific adaptations for PlenOctree data structures (SH coefficients, tree pointers) [S1, unofficial].
+ 
+ ## Sources

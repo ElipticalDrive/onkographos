@@ -1,0 +1,68 @@
+# vtkSlicerGPURayCastVolumeMapper
+
+Also called: GPGPU Ray Cast Mapper
+
+## Overview
+Renders a volume using ray casting on a 3D texture [S1, unofficial]. It builds on [GPU Multi-Volume Ray Casting Mapper](2461-gpu-multi-volume-ray-casting-mapper.md) to provide a specific implementation for the 3D Slicer environment, supporting adaptive sampling, masking, and AMR modes via the parent's pipeline hooks. It is distinguished from its siblings by its specific integration with CTK transfer functions and its handling of specific OpenGL uniform layouts for ray casting parameters [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Volume data (scalar or vector), volume property (opacity and color transfer functions), camera state, and clipping planes.
+*   **Output:** A 2D image rendered to the framebuffer.
+
+**Data Structures:**
+The mapper maintains specific OpenGL handles and uniform buffers to communicate with the GPU shaders [S1, unofficial]:
+*   `double VolumeBBoxVertices[8][3]`: Stores the 8 vertices of the volume's bounding box, each with 3 coordinates (x, y, z).
+*   `double VolumeBBoxVerticesColor[8][3]`: Stores the 8 bounding box vertices with associated color values, each with 3 coordinates.
+*   `GLfloat ParaMatrix[16]`: A 4x4 matrix uniform containing ray casting parameters (e.g., view-projection transformations).
+*   `GLfloat ParaMatrix1[16]`: A second 4x4 matrix uniform for additional ray casting parameters.
+*   `GLuint Volume1Index`: OpenGL handle for the volume texture.
+*   `GLuint ColorLookupIndex`: OpenGL handle for the color lookup table (CLUT).
+*   `GLuint RayCastVertexShader`: OpenGL handle for the vertex shader.
+*   `GLuint RayCastFragmentShader`: OpenGL handle for the fragment shader.
+*   `GLuint RayCastProgram`: OpenGL handle for the linked shader program.
+
+**Parameters:**
+*   `DistanceColorBlending` (float, default 0.0): Controls depth-based color blending. A value of 0.0 implies no blending; non-zero values make closer voxels brighter and farther voxels darker [S1, unofficial].
+*   `DepthPeelingThreshold` (float): Threshold used for depth peeling operations to handle transparency sorting [S1, unofficial].
+*   `ICPEScale` (float): Scale parameter for the ICPE (likely a specific compositing or blending algorithm variant) [S1, unofficial].
+*   `Clipping` (int): Boolean flag (0 or 1) to enable or disable clipping planes [S1, unofficial].
+*   `Technique` (int): Integer selector to choose between different rendering techniques supported by the mapper [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Initialization:** Create OpenGL shaders (`RayCastVertexShader`, `RayCastFragmentShader`) and link them into `RayCastProgram` [S1, unofficial].
+2.  **Data Upload:** Upload volume data to `Volume1Index` (3D texture) and color transfer function data to `ColorLookupIndex` [S1, unofficial].
+3.  **Uniform Setup:**
+    *   Compute and upload `ParaMatrix` and `ParaMatrix1` based on the current camera and view volume [S1, unofficial].
+    *   Upload `VolumeBBoxVertices` and `VolumeBBoxVerticesColor` to define the rendering bounds [S1, unofficial].
+    *   Set `DistanceColorBlending`, `DepthPeelingThreshold`, `ICPEScale`, `Clipping`, and `Technique` uniforms [S1, unofficial].
+4.  **Rendering:** Execute the `RayCastProgram`. The vertex shader generates geometry (likely a quad or volume-aligned box), and the fragment shader performs ray casting through the 3D texture, applying the color and opacity transfer functions [S1, unofficial].
+5.  **Post-Processing:** Apply depth peeling if `DepthPeelingThreshold` is active to handle transparency [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Hardware Support:** Hardware rendering is unsupported if the input data has more than one independent component [S1, unofficial].
+*   **Extensions:** Rendering fails if the hardware lacks required OpenGL extensions [S1, unofficial].
+*   **Precision:** Calculations are computed using 8 bits per RGBA channel. 15-bit float compositing is not supported [S1, unofficial].
+
+## Subtopics
+
+### vtkSlicerGPUVolumeMapper
+An abstract superclass for GPU volume rendering using 3D texture mapping in the fragment shader. Actual rendering work is delegated to `vtkSlicerGPURayCastVolumeTextureMapper3D` [S1, unofficial].
+*   **Supported Input:** Any data type, one component, or two/four non-independent components. Supports composite blending and intermixed opaque geometry. Multiple volumes can be rendered if sorted back-to-front [S1, unofficial].
+*   **Resolution Limits:** Internal volume resolution is resampled to a power of two in each direction. It is capped at 128x256x256 voxels for 1 or 2 component data, or 128x128x256 voxels for 4 component data [S1, unofficial].
+*   **Pitfalls:** Resolution limits are hardcoded after a `GL_PROXY_TEXTURE3D` check because some graphics drivers falsely report support despite lacking texture memory [S1, unofficial]. It does not support more than one independent component or maximum intensity projection [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Supports multiple volumes, adaptive sampling, and masking via the parent class. Integrates with 3D Slicer's transfer function widgets [S1, unofficial].
+*   **Limitations:** Limited to single independent component data. No maximum intensity projection support. Precision limited to 8-bit per channel compositing [S1, unofficial].
+*   **When to use:** When using 3D Slicer and requiring GPU-accelerated ray casting for single-component scalar volumes with transparency.
+*   **When not to use:** For multi-component vector data, maximum intensity projection, or when higher precision compositing (15-bit float) is required [S1, unofficial].
+
+## Background
+The `vtkSlicerGPURayCastVolumeMapper` is part of the VolumeRenderer module within the 3D Slicer ecosystem, specifically leveraging the CTK (Common Toolkit) libraries for transfer function management [S1, unofficial]. It was developed to provide a GPU-accelerated alternative to CPU-based volume rendering within the Slicer platform.
+
+## Sources
+[S1] jszgz/VolumeRenderer, https://github.com/jszgz/VolumeRenderer, fetched 2026-10-27 (unofficial)

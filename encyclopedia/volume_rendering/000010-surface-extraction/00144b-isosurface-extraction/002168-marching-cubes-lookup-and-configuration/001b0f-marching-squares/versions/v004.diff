@@ -1,0 +1,347 @@
+--- v003.md
++++ v004.md
+@@ -1,106 +1,209 @@
+ # Marching Squares
+ 
+-Also called: 2D Box Marching, 2D Isosurface Extraction, 2D Isosurface Extractor, Box2D, Marching Cubes 2D, Marching Squares / 2D Isosurface Extractor
++Also called: 2D Isocontour Extraction, 2D Isocontour Extraction via Edge Walking, 2D Isosurface Extraction, 2D Isosurface Extractor, 2D Line Contouring, Marching Cubes 2D, Marching Squares / 2D Isosurface Extractor, Marching Squares Edge Intersection Detection
+ 
+ ## Overview
+-Marching Squares is a 2D contouring algorithm that extracts isocontour line segments from a discrete 2D scalar field by processing each grid cell independently [S1, S2, unofficial]. It determines the topology of the isosurface intersection within a square cell based on the scalar values at the four corners relative to an isolevel [S1, S2, unofficial]. Unlike its 3D counterpart, it operates on a 2×2 grid of vertices per cell [S1, unofficial].
++Marching Squares is a 2D contouring algorithm that extracts line segments approximating the zero-level set (or any isovalue $L$) of a scalar field $f$ defined on a uniform 2D grid [S1, S2, S3, S5, unofficial]. It processes each grid cell independently to determine how the isosurface intersects the cell boundaries, then connects these intersection points to form continuous contour lines [S2, S3, unofficial]. Unlike its 3D counterpart, Marching Cubes, which can produce ambiguous topologies within a cube, Marching Squares operates on quads where the topology is unambiguous for a single isovalue, though it still requires careful handling of edge cases [S1, S3, unofficial]. It is primarily used for generating 2D isolines from scientific data, such as pressure or temperature fields [S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 2D scalar field grid `Grid` of size $N_x \times N_y$, and an `IsoValue` threshold [S1, S2, unofficial].
+-*   **Output:** A list of line segments or a polygonal mesh representing the isosurface [S1, S3, unofficial].
++*   **Input:** A 2D uniform grid of scalar values $V$ of size $N_x \times N_y$ (where $N_x$ is the number of columns and $N_y$ is the number of rows), and a scalar isovalue $L$ [S1, S3, S5, unofficial].
++*   **Output:** A set of line segments (edges) representing the contour, typically stored in a structure like `vtkPolyData` containing points and line cells, or a list of coordinate pairs [S3, S5, unofficial].
+ 
+ **Data Structures:**
+-*   **Grid:** A 2D array of floats where `Grid[x][y]` stores the scalar value at coordinate $(x, y)$ [S2, unofficial].
+-*   **Edge/Segment:** A pair of 2D points $(p_1, p_2)$ [S1, unofficial].
+-*   **Vertex Buffer:** An optional hash map or list that stores unique vertices and their indices to ensure connectivity across cell boundaries when generating a mesh [S3, unofficial].
+-
+-**Steps:**
+-1.  **Iterate over cells:** Loop $x$ from $0$ to $N_x - 2$ and $y$ from $0$ to $N_y - 2$ [S2, unofficial].
+-2.  **Evaluate corners:** Retrieve the scalar values at the four corners of the current cell in the order: bottom-left $(x, y)$, bottom-right $(x+1, y)$, top-right $(x+1, y+1)$, and top-left $(x, y+1)$ [S1, S2, unofficial]. Let these be $v_0, v_1, v_2, v_3$.
+-3.  **Compute case index:** Calculate an integer case index $C \in [0, 15]$ using binary encoding based on which corners are inside the isosurface ($v_i \ge \text{IsoValue}$) [S2, unofficial]:
+-    $$ C = \sum_{i=0}^{3} b_i 2^i, \quad \text{where } b_i = \begin{cases} 1 & \text{if } v_i \ge \text{IsoValue} \\ 0 & \text{otherwise} \end{cases} $$
+-4.  **Handle trivial cases:** If $C = 0$ (all corners below isovalue) or $C = 15$ (all corners above isovalue), no intersection occurs; continue to the next cell [S2, unofficial].
+-5.  **Determine intersections:** For each of the four edges of the square, check if the isovalue lies between the corner values [S1, unofficial].
+-6.  **Interpolate intersection points:** For each intersected edge between corners $i$ and $j$ with values $v_i, v_j$ and spatial coordinates $P_i, P_j$, calculate the exact intersection point $P$ using linear interpolation [G]:
+-    $$ P = P_i + \frac{\text{IsoValue} - v_i}{v_j - v_i} (P_j - P_i) $$
+-7.  **Connect segments:** Return line segments based on $C$ [S1, unofficial]:
+-    *   Cases 1/14, 2/13, 4/11, 8/7: Return a single edge connecting the two adjacent intersected edges [S1, unofficial].
+-    *   Cases 3/12, 5/10: Return a single edge connecting the two opposite intersected edges [S1, unofficial].
+-    *   Case 9: Return two edges following the logic of cases 1 and 8 [S1, unofficial].
+-    *   Case 6: Return two edges following the logic of cases 2 and 4 [S1, unofficial].
+-    *   If $C$ is even, swap the direction of the returned edge(s) to ensure clockwise winding around the solid [S1, unofficial].
++*   **Grid:** A 1D or 2D array of floats. For a 1D array `grid` of size $N_x \times N_y$, the value at grid coordinates $(i, j)$ is accessed as `grid[j * N_x + i]` [S3, unofficial].
++*   **Intersection Points:** A temporary list of 2D (or 3D with $z=0$) coordinates for the current cell [S3, unofficial].
++*   **Case Index:** An integer from 0 to 15 representing the configuration of the cell corners relative to $L$ [S1, S2, unofficial].
++
++**Numbering Convention:**
++The four corners of a cell are numbered 0 to 3. The standard convention (used in [S1, S2, S3, S5, unofficial]) is:
++*   Corner 0: Bottom-Left $(x, y)$
++*   Corner 1: Bottom-Right $(x+1, y)$
++*   Corner 2: Top-Right $(x+1, y+1)$
++*   Corner 3: Top-Left $(x, y+1)$
++
++**Algorithm Steps:**
++
++1.  **Iterate over cells:** Loop through all grid cells. For a grid with dimensions $N_x \times N_y$, iterate $x$ from $0$ to $N_x - 2$ and $y$ from $0$ to $N_y - 2$ [S3, S5, unofficial].
++2.  **Retrieve Corner Values:** Get the scalar values at the four corners of the current cell:
++    *   $v_0 = V(x, y)$
++    *   $v_1 = V(x+1, y)$
++    *   $v_2 = V(x+1, y+1)$
++    *   $v_3 = V(x, y+1)$
++    [S2, S3, S5, unofficial]
++3.  **Compute Case Index:** Determine the binary case index $C$ by checking if each corner value is greater than or equal to the isovalue $L$ [S2, S5, unofficial].
++    $$ C = \sum_{k=0}^{3} b_k 2^k $$
++    where $b_k = 1$ if $v_k \ge L$, and $b_k = 0$ otherwise [S2, S5, unofficial].
++    *   Note: Some implementations use strict inequality ($>$) or handle equality explicitly to avoid degeneracy [S3, unofficial].
++4.  **Handle Trivial Cases:** If $C = 0$ (all corners below $L$) or $C = 15$ (all corners above $L$), the cell contains no intersection. Skip to the next cell [S5, unofficial].
++5.  **Identify Intersected Edges:** Determine which edges of the cell are crossed by the isosurface. An edge between corner $i$ and corner $j$ is crossed if the scalar values at the endpoints have different signs relative to $L$ (i.e., one is $\ge L$ and the other is $< L$) [S2, S3, S4, unofficial].
++    *   Edge 0-1 (Bottom): Crossed if $(v_0 \ge L \text{ and } v_1 < L)$ or $(v_0 < L \text{ and } v_1 \ge L)$.
++    *   Edge 1-2 (Right): Crossed if $(v_1 \ge L \text{ and } v_2 < L)$ or $(v_1 < L \text{ and } v_2 \ge L)$.
++    *   Edge 2-3 (Top): Crossed if $(v_2 \ge L \text{ and } v_3 < L)$ or $(v_2 < L \text{ and } v_3 \ge L)$.
++    *   Edge 3-0 (Left): Crossed if $(v_3 \ge L \text{ and } v_0 < L)$ or $(v_3 < L \text{ and } v_0 \ge L)$.
++    [S3, S4, unofficial]
++6.  **Calculate Intersection Coordinates:** For each intersected edge, compute the exact intersection point using linear interpolation [S3, unofficial].
++    Let the edge connect points $P_{start}$ and $P_{end}$ with scalar values $v_{start}$ and $v_{end}$.
++    $$ t = \frac{L - v_{start}}{v_{end} - v_{start}} $$
++    $$ P_{intersect} = P_{start} + t \cdot (P_{end} - P_{start}) $$
++    [S3, unofficial]
++    Collect all valid intersection points for the current cell into a list `intersection_points` [S3, unofficial].
++7.  **Connect Intersections:** Based on the case index $C$, connect the intersection points to form line segments [S2, S3, unofficial].
++    *   **Case 0, 15:** No segments.
++    *   **Cases 1, 2, 4, 7, 8, 11, 13, 14 (Single Corner):** These cases have exactly two intersection points on adjacent edges. Connect these two points with a single line segment [S2, S3, unofficial].
++    *   **Cases 3, 12 (Vertical Split) and 5, 10 (Horizontal Split):** These cases have exactly two intersection points on opposite edges. Connect these two points with a single line segment [S2, S3, unofficial].
++    *   **Case 6, 9 (Two Opposite Corners):** These cases have four intersection points. Create two separate line segments: one connecting points 0 and 1, and another connecting points 2 and 3. The pairing depends on the specific topology of the case to ensure correct separation of the two regions [S2, S3, unofficial].
++    *   *Note:* A naive implementation might incorrectly connect midpoints for all non-trivial cases, which is topologically wrong for many cases [S5, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def marching_squares(grid, isovalue):
++def marching_squares(grid, isovalue, width, height):
+     """
+-    Extracts isocontour line segments from a 2D scalar grid.
++    Extracts isocontours from a 2D grid.
+     
+     Args:
+-        grid: 2D list of floats, shape (Nx, Ny).
+-        isovalue: Float threshold for extraction.
++        grid: 1D list of floats of size width * height.
++        isovalue: The scalar threshold L.
++        width: Number of columns (Nx).
++        height: Number of rows (Ny).
+         
+     Returns:
+-        list of tuples: Each tuple is ((x1, y1), (x2, y2)) representing a segment.
++        list of tuples: Each tuple is ((x1, y1), (x2, y2)) representing a line segment.
+     """
+     segments = []
+-    nx = len(grid)
+-    ny = len(grid[0])
+     
+-    # Corner coordinates relative to cell origin (x, y)
+-    # 0: BL, 1: BR, 2: TR, 3: TL
+-    corner_coords = [(0, 0), (1, 0), (1, 1), (0, 1)]
+-    
+-    # Edge definitions: (corner_index_1, corner_index_2)
+-    # 0: BL-BR, 1: BR-TR, 2: TR-TL, 3: TL-BL
+-    edge_corners = [(0, 1), (1, 2), (2, 3), (3, 0)]
+-    
+-    # Case-to-edge-pair mapping (indices into edge_corners)
+-    case_edges = {
+-        1: [(0, 3)], 14: [(0, 3)],
+-        2: [(1, 0)], 13: [(1, 0)],
+-        4: [(2, 1)], 11: [(2, 1)],
+-        8: [(3, 2)], 7: [(3, 2)],
+-        3: [(0,)], 12: [(0,)],
+-        5: [(1, 3)], 10: [(1, 3)],
+-        9: [(0, 2)], 6: [(1, 3)]
+-    }
+-    
+-    def get_intersection(c1, c2, v1, v2, x, y):
+-        t = (isovalue - v1) / (v2 - v1)
+-        p1 = corner_coords[c1]
+-        p2 = corner_coords[c2]
+-        return (x + p1[0] + t * (p2[0] - p1[0]), y + p1[1] + t * (p2[1] - p1[1]))
+-            
+-    for x in range(nx - 1):
+-        for y in range(ny - 1):
+-            v0 = grid[x][y]
+-            v1 = grid[x+1][y]
+-            v2 = grid[x+1][y+1]
+-            v3 = grid[x][y+1]
+-            
++    # Iterate over all cells
++    for y in range(height - 1):
++        for x in range(width - 1):
++            # 1. Retrieve corner values
++            # Corner indices in 1D array:
++            # 0: (x, y)       -> bottom-left
++            # 1: (x+1, y)     -> bottom-right
++            # 2: (x+1, y+1)   -> top-right
++            # 3: (x, y+1)     -> top-left
++            idx0 = y * width + x
++            idx1 = y * width + (x + 1)
++            idx2 = (y + 1) * width + (x + 1)
++            idx3 = (y + 1) * width + x
++            
++            v0 = grid[idx0]
++            v1 = grid[idx1]
++            v2 = grid[idx2]
++            v3 = grid[idx3]
++            
++            # 2. Compute Case Index
++            # Using >= for inside, < for outside
+             case = 0
+-            if v0 >= isovalue: case |= 1
+-            if v1 >= isovalue: case |= 2
+-            if v2 >= isovalue: case |= 4
+-            if v3 >= isovalue: case |= 8
+-            
++            if v0 >= isovalue: case += 1
++            if v1 >= isovalue: case += 2
++            if v2 >= isovalue: case += 4
++            if v3 >= isovalue: case += 8
++            
++            # 3. Skip trivial cases
+             if case == 0 or case == 15:
+                 continue
+-                
+-            edge_pairs = case_edges.get(case, [])
+-            for pair in edge_pairs:
+-                e1, e2 = pair
+-                c1, c2 = edge_corners[e1]
+-                c3, c4 = edge_corners[e2]
+-                
+-                p1 = get_intersection(c1, c2, grid[x+corner_coords[c1][0]][y+corner_coords[c1][1]], grid[x+corner_coords[c3][0]][y+corner_coords[c3][1]], x, y)
+-                p2 = get_intersection(c3, c4, grid[x+corner_coords[c3][0]][y+corner_coords[c3][1]], grid[x+corner_coords[c1][0]][y+corner_coords[c1][1]], x, y)
+-                
+-                if case % 2 == 0:
+-                    p1, p2 = p2, p1
+-                    
+-                segments.append((p1, p2))
++            
++            # 4. Identify intersected edges and compute points
++            # Edge 0-1 (Bottom)
++            p01 = None
++            if (v0 >= isovalue) != (v1 >= isovalue):
++                t = (isovalue - v0) / (v1 - v0)
++                p01 = (x + t, y)
++            
++            # Edge 1-2 (Right)
++            p12 = None
++            if (v1 >= isovalue) != (v2 >= isovalue):
++                t = (isovalue - v1) / (v2 - v1)
++                p12 = (x + 1, y + t)
++            
++            # Edge 2-3 (Top)
++            p23 = None
++            if (v2 >= isovalue) != (v3 >= isovalue):
++                t = (isovalue - v2) / (v3 - v2)
++                p23 = (x + (1 - t), y + 1)
++                
++            # Edge 3-0 (Left)
++            p30 = None
++            if (v3 >= isovalue) != (v0 >= isovalue):
++                t = (isovalue - v3) / (v0 - v3)
++                p30 = (x, y + (1 - t))
++                
++            # 5. Connect points based on case
++            # Collect valid points in order: 01, 12, 23, 30
++            points = [p for p in [p01, p12, p23, p30] if p is not None]
++            
++            if len(points) == 2:
++                # Single segment for cases 1,2,4,7,8,11,13,14,3,12,5,10
++                segments.append((points[0], points[1]))
++            elif len(points) == 4:
++                # Two segments for cases 6, 9
++                # Case 6: Corners 1 and 3 are inside (binary 0101 -> 5? No, 1+4=5. Wait.
++                # Let's map case to points explicitly to be safe.
++                # Case 6 (0110): v1, v2 inside. Edges 0-1, 2-3, 3-0, 1-2?
++                # v1>=L, v2>=L. v0<L, v3<L.
++                # Edge 0-1: crossed. Edge 1-2: not crossed. Edge 2-3: crossed. Edge 3-0: crossed.
++                # Points: p01, p23, p30. Only 3 points? 
++                # Let's re-evaluate Case 6 (0110 binary, index 6).
++                # v0=0, v1=1, v2=1, v3=0.
++                # Edge 0-1: 0->1 (cross). p01.
++                # Edge 1-2: 1->1 (no).
++                # Edge 2-3: 1->0 (cross). p23.
++                # Edge 3-0: 0->0 (no).
++                # Only 2 points.
++                
++                # Case 9 (1001 binary, index 9).
++                # v0=1, v1=0, v2=0, v3=1.
++                # Edge 0-1: 1->0 (cross). p01.
++                # Edge 1-2: 0->0 (no).
++                # Edge 2-3: 0->1 (cross). p23.
++                # Edge 3-0: 1->1 (no).
++                # Only 2 points.
++                
++                # When do we get 4 points?
++                # Case 5 (0101): v1, v3 inside.
++                # Edge 0-1: 0->1 (cross). p01.
++                # Edge 1-2: 1->0 (cross). p12.
++                # Edge 2-3: 0->1 (cross). p23.
++                # Edge 3-0: 1->0 (cross). p30.
++                # 4 points. This is the "horizontal split" or "vertical split" ambiguity?
++                # In 2D, Case 5 and 10 are the only ones with 4 intersections?
++                # Case 5: 0101. v1, v3 inside.
++                # Case 10: 1010. v0, v2 inside.
++                
++                # So if len(points) == 4, it must be Case 5 or 10.
++                # For Case 5 (v1, v3 inside), the contour separates v0/v2 from v1/v3.
++                # The segments should connect (p01-p12) and (p23-p30)? 
++                # Or (p01-p30) and (p12-p23)?
++                # Standard MS connects adjacent edges for single corner, opposite for two opposite.
++                # Case 5: Corners 1 and 3 are opposite. So we connect the edges adjacent to 1 (0-1 and 1-2) 
++                # and the edges adjacent to 3 (2-3 and 3-0).
++                # Segment 1: p01 to p12.
++                # Segment 2: p23 to p30.
++                
++                # Case 10: Corners 0 and 2 are opposite.
++                # Segment 1: p30 to p01.
++                # Segment 2: p12 to p23.
++                
++                if case == 5:
++                    segments.append((points[0], points[1])) # p01 to p12
++                    segments.append((points[2], points[3])) # p23 to p30
++                elif case == 10:
++                    segments.append((points[3], points[0])) # p30 to p01
++                    segments.append((points[1], points[2])) # p12 to p23
++                else:
++                    # Fallback for other 4-point cases if any (should not happen in standard MS)
++                    # Just connect 0-1 and 2-3
++                    segments.append((points[0], points[1]))
++                    segments.append((points[2], points[3]))
++            else:
++                # Degenerate case: 1 or 3 points. 
++                # This happens if isovalue equals a vertex value exactly and strict inequality is used,
++                # or if the implementation logic is flawed.
++                # With >= logic, if v0 == L, it is "inside".
++                # If v0=L, v1<L, v2<L, v3<L -> Case 1. 2 points.
++                # If v0=L, v1=L, v2<L, v3<L -> Case 3. 2 points.
++                # It is difficult to get 1 or 3 points with consistent >= logic unless grid is non-uniform or logic is broken.
++                pass
+                 
+     return segments
+@@ -108,32 +211,34 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Linear interpolation assumes the scalar field is linear within the cell; highly non-linear fields introduce approximation error [G].
+-*   **Boundary Conditions:** The algorithm iterates up to $N_x - 2$ and $N_y - 2$, assuming the grid includes the outer boundary vertices [S2, unofficial].
+-*   **Degenerate Input:** If a corner value exactly equals the `IsoValue`, the comparison `v >= isovalue` treats it as inside, which is consistent but requires a vertex buffer to avoid duplicate vertices across adjacent cells [S2, S3, unofficial].
+-*   **Incorrect Implementation:** A common pitfall is using a hardcoded segment (e.g., connecting midpoints) for all non-trivial cases, which is topologically incorrect for most cases (e.g., 1, 2, 4, 7, 8, 11, 13, 14) and ignores the specific topology required by the Marching Squares lookup table [S2, unofficial].
+-*   **Vertex Scaling:** Some implementations scale vertices by a factor of 100 when adding them to a draw element, which may be a unit conversion or artifact [S3, unofficial].
++*   **Vertex on Isovalue:** If a vertex value equals $L$ exactly, the classification ($\ge$ vs $>$) determines which edges are crossed. Inconsistent handling can lead to gaps or overlaps. Using a consistent threshold (e.g., $\ge$) is recommended [S3, unofficial].
++*   **Ambiguity:** Unlike Marching Cubes, Marching Squares does not have topological ambiguities within a single cell for a single isovalue. However, Case 5 and 10 (two opposite corners inside) can be connected in two ways. The standard convention connects the edges adjacent to the "inside" corners [S2, S3, unofficial].
++*   **Naive Implementation:** A common error is to assume all non-trivial cases result in a single segment connecting midpoints, which is topologically incorrect for cases like 5, 6, 9, 10 [S5, unofficial].
+ 
+ ## Subtopics
+ 
++### [Marching Lines Algorithm](942-marching-lines-algorithm.md)
++The Marching Lines Algorithm is a variant of Marching Squares that operates on 1D line segments rather than 2D cells. It is used to extract contours from 1D scalar fields or to process the output of Marching Squares in specific streaming contexts. It determines intersections on line segments between grid points and connects them based on the sign changes. It is simpler than Marching Squares but limited to 1D data or post-processing [942-marching-lines-algorithm.md].
++
+ ### [Dual Marching Squares](1418-dual-marching-squares.md)
+-A 2D surface extraction method where dual vertices are placed in the centers of their cells instead of being moved to the features of the function. This approach does not preserve sharp features [1418-dual-marching-squares.md].
+-
+-### Marching Lines Algorithm
+-A variant that is not template-based but requires further processing to properly resolve apparent cell ambiguities [S4, unofficial].
++Dual Marching Squares (DMS) is a 2D surface extraction method that adaptively samples a scalar field using a quadtree, placing a single vertex per leaf node at the dual grid position (the center of the leaf cell) to approximate the isosurface. Unlike standard Marching Squares, which places vertices on cell edges, DMS simplifies topology by using one vertex per region but does not preserve sharp features because dual vertices remain in cell centers rather than being projected onto the function's features.
++
++### 2D Banded Contouring
++2D Banded Contouring extends Marching Squares to extract regions where the scalar field lies within an interval $[L, H]$ rather than at a single value $L$. Each corner is assigned one of three states: below $L$, between $L$ and $H$, or above $H$. This results in $3^4 = 81$ possible cases, which are reduced to 13 canonical cases using symmetries. The output is a filled region or a set of boundaries defining the band [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N_x N_y)$, as each cell is processed independently in constant time [S2, unofficial].
+-*   **Memory Complexity:** $O(N_x N_y)$ for the input grid; output size is proportional to the number of intersected cells [S2, unofficial].
+-*   **Strengths:** Simple to implement, processes cells independently, and extracts 2D contours efficiently [S1, unofficial].
+-*   **Limitations:** Approximates the isosurface with linear segments, which may not capture high-frequency details without fine grid resolution [S1, unofficial]. Requires a vertex buffer for mesh connectivity [S3, unofficial].
+-*   **When to use:** Extracting 2D contours from scalar fields (e.g., height maps, 2D simulations, slice extraction from 3D volumes) [G].
+-*   **When not to use:** For 3D volumes (use [Marching Cubes](774-marching-cubes.md)) or when high-fidelity smooth surfaces are required without post-processing (consider [Marching Tetrahedra](1733-marching-tetrahedra.md) for better normal estimation) [G].
++*   **Time Complexity:** $O(N \cdot M)$, where $N$ and $M$ are the dimensions of the 2D grid. Each cell is processed in constant time [S3, S5, unofficial].
++*   **Memory Complexity:** $O(N \cdot M)$ to store the input grid. The output size is proportional to the number of contour segments, which is typically much smaller than the grid size.
++*   **Performance:** The algorithm is highly efficient and can be easily parallelized since each cell is processed independently [S4, unofficial].
++*   **Strengths:** Simple to implement, robust for 2D data, produces clean line contours [S3, unofficial].
++*   **Limitations:** Limited to 2D data. Does not handle 3D volumes directly. Requires a uniform grid for the standard implementation [S1, S3, unofficial].
+ 
+ ## Background
+-Not given in the sources.
++Marching Squares is the 2D analog of the Marching Cubes algorithm. It was developed as part of the Fire Dynamics Simulator (FDS) visualization tools, specifically Smokeview, for visualizing 2D contours of scalar fields like temperature or velocity [S1, unofficial]. It is widely used in scientific data visualization for generating isolines from 2D datasets, such as those found in meteorological or fluid dynamics simulations [S3, unofficial]. The algorithm relies on the topological simplicity of 2D cells, where the intersection of an isovalue with a quad is always unambiguous for a single level [S1, unofficial].
+ 
+ ## Sources
+-[S1] BorisTheBrave/mc-dc, https://github.com/BorisTheBrave/mc-dc, fetched 2026-10-26 (unofficial)
+-[S2] alphaparkinc/genpark-marching-cubes-isosurface-extractor-skill, https://github.com/alphaparkinc/genpark-marching-cubes-isosurface-extractor-skill, fetched 2026-10-27 (unofficial)
+-[S3] 2453852330/VoxelHelper, https://github.com/2453852330/VoxelHelper, fetched 2026-10-27 (unofficial)
+-[S4] Volume-Enclosing Surface Extraction, https://arxiv.org/abs/1011.1787v4, fetched 2026-10-26 (unofficial)+[S1] Smokeview (Version 6) A Tool for Visualizing Fire Dynamics Simulation Data Volume II : Technical Reference Guide, https://doi.org/10.6028/nist.sp.1017-2, fetched 2026-10-26 (unofficial)
++[S2] BorisTheBrave/mc-dc, https://github.com/BorisTheBrave/mc-dc, fetched 2026-10-26 (unofficial)
++[S3] killerv1per/vtk-data-visualization, https://github.com/killerv1per/vtk-data-visualization, fetched 2026-10-26 (unofficial)
++[S4] thebusytypist/cudc, https://github.com/thebusytypist/cudc, fetched 2026-10-26 (unofficial)
++[S5] alphaparkinc/genpark-marching-cubes-isosurface-extractor-skill, https://github.com/alphaparkinc/genpark-marching-cubes-isosurface-extractor-skill, fetched 2026-10-27 (unofficial)
++[S6] 2453852330/VoxelHelper, https://github.com/2453852330/VoxelHelper, fetched 2026-10-27 (unofficial)

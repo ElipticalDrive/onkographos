@@ -1,0 +1,315 @@
+--- v002.md
++++ v003.md
+@@ -40,7 +40,7 @@
+ 
+ **Formulas:**
+-For floating-point function values, they are first normalized to the range $[-0.5, 0.5]$. Let $x_0, \dots, x_n$ be the sequence of function values for relevant vertices on a slice. Let $p$ be the isovalue.
+-
+-1.  Encode the quantization of the first value $x_0$ and its sign relative to $p$. Let $\tilde{x}_0$ be the quantized value of $x_0$ [S1].
++For floating-point function values, they are first normalized to the range $[-0.5, 0.5]$ [S1]. Let $x_0, \dots, x_n$ be the sequence of function values for relevant vertices on a slice [S1]. Let $p$ be the isovalue.
++
++1.  Encode the quantization of the first value $x_0$ and its sign relative to $p$ [S1]. Let $\tilde{x}_0$ be the quantized value of $x_0$ [S1].
+ 2.  For $i = 0, \dots, n - 1$:
+     $$ \Delta_i = x_{i+1} - \tilde{x}_i $$
+@@ -50,5 +50,5 @@
+     where $\tilde{\Delta}_i$ is the quantized value of $\Delta_i$ [S1].
+ 
+-The correction term $\Delta_i = x_{i+1} - \tilde{x}_i$ is used instead of $x_{i+1} - x_i$ to prevent the accumulation of quantization errors [S1]. An extra sign bit is stored for every relevant vertex to indicate the sign of its function value $x$ relative to $p$. This handles quantization errors that might cause a sign flip (e.g., $x < p$ becomes $\tilde{x} > p$), which would alter the isosurface topology [S1].
++The correction term $\Delta_i = x_{i+1} - \tilde{x}_i$ is used instead of $x_{i+1} - x_i$ to prevent the accumulation of quantization errors [S1]. An extra sign bit is stored for every relevant vertex to indicate the sign of its function value $x$ relative to $p$ [S1]. This handles quantization errors that might cause a sign flip (e.g., $x < p$ becomes $\tilde{x} > p$), which would alter the isosurface topology [S1].
+ 
+ **Parameters:**
+@@ -58,5 +58,5 @@
+ 
+ **Pitfalls and Edge Cases:**
+-*   **Sign Flip:** Quantization error may cause the sign of a function value $x$ relative to the isovalue $p$ to flip (e.g., $x < p$ becomes $\tilde{x} > p$). This changes the isosurface topology. The method handles this by storing an extra sign bit per relevant vertex. During decoding, if a decompressed value has a sign flip against the isovalue, it is shifted by one quantization unit left or right to recover the correct sign [S1].
++*   **Sign Flip:** Quantization error may cause the sign of a function value $x$ relative to the isovalue $p$ to flip (e.g., $x < p$ becomes $\tilde{x} > p$) [S1]. The method handles this by storing an extra sign bit per relevant vertex [S1]. During decoding, if a decompressed value has a sign flip against the isovalue, it is shifted by one quantization unit left or right to recover the correct sign [S1].
+ *   **Memory Usage:** The algorithm requires only two slices and one layer in main memory at any time, enabling incremental processing [S1].
+ 
+@@ -69,46 +69,32 @@
+     isovalue: float or int
+     quantization_bits: int
++    Returns: list of encoded bitstreams per slice/layer
+     """
+     n1, n2, n3 = volume.shape
+-    output_stream = []
+-    
+-    # Read first slice
++    stream = []
+     slice_prev = volume[:, 0, :]
+-    
++
+     # Encode first slice relevant vertices and values
+-    relevant_vertices_prev = create_bitmap(slice_prev, isovalue)
+-    encode_relevant_indices(relevant_vertices_prev, output_stream)
+-    encode_function_values(slice_prev, relevant_vertices_prev, isovalue, quantization_bits, output_stream)
+-    
++    relevant_prev = create_vertex_bitmap(slice_prev, isovalue)
++    stream.append(entropy_encode_scanline(relevant_prev))
++    stream.append(encode_function_values(slice_prev, relevant_prev, isovalue, quantization_bits))
++
+     for k in range(1, n2):
+         slice_curr = volume[:, k, :]
+-        
+-        # Mark valid cells in layer between slice_prev and slice_curr
+         valid_cells = create_cell_bitmap(slice_prev, slice_curr, isovalue)
+-        
++
+         # Encode valid cell indices for the layer
+-        encode_valid_cell_indices(valid_cells, output_stream)
+-        
+-        # Mark relevant vertices on current slice
+-        relevant_vertices_curr = create_bitmap(slice_curr, isovalue)
+-        
+-        # Encode relevant vertex indices for current slice
+-        encode_relevant_indices(relevant_vertices_curr, output_stream)
+-        
+-        # Encode function values for current slice
+-        encode_function_values(slice_curr, relevant_vertices_curr, isovalue, quantization_bits, output_stream)
+-        
+-        # Shift slices
++        stream.append(entropy_encode_scanline(valid_cells))
++
++        # Encode relevant vertex indices and values for current slice
++        relevant_curr = create_vertex_bitmap(slice_curr, isovalue)
++        stream.append(entropy_encode_scanline(relevant_curr))
++        stream.append(encode_function_values(slice_curr, relevant_curr, isovalue, quantization_bits))
++
+         slice_prev = slice_curr
+-        
+-    # Encode last slice
+-    last_slice = volume[:, n2 - 1, :]
+-    relevant_vertices_last = create_bitmap(last_slice, isovalue)
+-    encode_relevant_indices(relevant_vertices_last, output_stream)
+-    encode_function_values(last_slice, relevant_vertices_last, isovalue, quantization_bits, output_stream)
+-    
+-    return output_stream
+-
+-def create_bitmap(slice_data, isovalue):
++
++    return stream
++
++def create_vertex_bitmap(slice_data, isovalue):
+     """Returns 2D array of 0/1 where 1 indicates a relevant vertex."""
+     h, w = slice_data.shape
+@@ -126,18 +112,14 @@
+     for x in range(h - 1):
+         for z in range(w - 1):
+-            v00 = slice_prev[x, z]
+-            v01 = slice_prev[x, z + 1]
+-            v10 = slice_curr[x, z]
+-            v11 = slice_curr[x, z + 1]
+-            if (v00 > isovalue) != (v00 < isovalue) or \
+-               (v01 > isovalue) != (v01 < isovalue) or \
+-               (v10 > isovalue) != (v10 < isovalue) or \
+-               (v11 > isovalue) != (v11 < isovalue):
++            vals = [slice_prev[x, z], slice_prev[x, z + 1], slice_curr[x, z], slice_curr[x, z + 1]]
++            if not all(v > isovalue for v in vals) and not all(v < isovalue for v in vals):
+                 cells[x][z] = 1
+     return cells
+ 
+-def scan_line_convert(bitmap):
+-    """Flattens 2D bitmap into a 1D list of bits."""
+-    return [bit for row in bitmap for bit in row]
++def entropy_encode_scanline(bitmap):
++    """Flattens 2D bitmap into a 1D list of bits and compresses it."""
++    bits = [bit for row in bitmap for bit in row]
++    # Standard adaptive arithmetic coder or Z-Coder [G]
++    return bits
+ 
+ def quantize(value, bits):
+@@ -146,39 +128,25 @@
+     return int(round(value * scale))
+ 
+-def entropy_encode(bit_sequence):
+-    """Compresses bit sequence using a standard entropy coder [S1]."""
+-    # Placeholder for adaptive arithmetic coder or Z-Coder [S1]
+-    return bit_sequence
+-
+-def entropy_decode(bit_sequence):
+-    """Decompresses bit sequence using a standard entropy coder [S1]."""
+-    return bit_sequence
+-
+-def encode_relevant_indices(vertices, stream):
+-    """Converts 2D bitmap to bit sequence and entropy encodes it."""
+-    bits = scan_line_convert(vertices)
+-    stream.append(entropy_encode(bits))
+-
+ def encode_function_values(slice_data, vertices, isovalue, q_bits, stream):
+     """Encodes function values using predictive difference coding."""
+-    # Extract values in scan-line order
+     values = []
+     for x in range(len(vertices)):
+         for z in range(len(vertices[0])):
+             if vertices[x][z] == 1:
+-                values.append(slice_data[x, z])
++                values.append(slice_data[x, z] - isovalue)
+     
+     if not values:
+-        return
+-        
+-    # Normalize to [-0.5, 0.5]
+-    normalized = [v - isovalue for v in values]
+-    
+-    # Encode first value
++        return stream
++        
++    # Normalize to [-0.5, 0.5] [S1]
++    max_abs = max(abs(v) for v in values) if max(abs(v) for v in values) != 0 else 1
++    normalized = [v / max_abs * 0.5 for v in values]
++    
++    # Encode first value and sign [S1]
+     x0 = normalized[0]
+     sign_x0 = 1 if x0 >= 0 else -1
+     quantized_x0 = quantize(x0, q_bits)
+-    stream.append(entropy_encode([sign_x0]))
+-    stream.append(entropy_encode([quantized_x0]))
++    stream.append(sign_x0)
++    stream.append(quantized_x0)
+     
+     prev_quantized = quantized_x0
+@@ -186,12 +154,14 @@
+     for i in range(len(normalized) - 1):
+         x_next = normalized[i + 1]
++        sign_next = 1 if x_next >= 0 else -1
+         delta = x_next - prev_quantized
+-        sign_next = 1 if x_next >= 0 else -1
+         quantized_delta = quantize(delta, q_bits)
+         
+-        stream.append(entropy_encode([sign_next]))
+-        stream.append(entropy_encode([quantized_delta]))
++        stream.append(sign_next)
++        stream.append(quantized_delta)
+         
+         prev_quantized = prev_quantized + quantized_delta
++        
++    return stream
+ 
+ def decode_edge_index_encoding(encoded_stream, volume_dims, isovalue, quantization_bits):
+@@ -199,90 +169,77 @@
+     triangles = []
+     n1, n2, n3 = volume_dims
++    idx = 0
+     
+     # Decode first slice
+-    relevant_vertices_prev = decode_relevant_indices(encoded_stream)
+-    function_values_prev = decode_function_values(encoded_stream, isovalue, quantization_bits)
+-    
+-    # Map indices to actual coordinates and values
+-    vertex_data_prev = map_indices_to_vertices(relevant_vertices_prev, function_values_prev)
++    relevant_prev = decode_bitmap(encoded_stream[idx], n1, n3); idx += 1
++    values_prev = decode_function_values(encoded_stream[idx], isovalue, quantization_bits); idx += 1
++    
++    vertex_data_prev = [(x, z, values_prev[i]) for i, (x, z) in enumerate([(x, z) for x in range(n1) for z in range(n3) if relevant_prev[x][z] == 1])]
+     
+     for k in range(1, n2):
+-        # Decode valid cells for layer k-1
+-        valid_cells = decode_valid_cell_indices(encoded_stream)
+-        
+-        # Decode current slice vertices
+-        relevant_vertices_curr = decode_relevant_indices(encoded_stream)
+-        function_values_curr = decode_function_values(encoded_stream, isovalue, quantization_bits)
+-        vertex_data_curr = map_indices_to_vertices(relevant_vertices_curr, function_values_curr)
+-        
+-        # Combine vertex data for the layer
++        valid_cells = decode_bitmap(encoded_stream[idx], n1 - 1, n3 - 1); idx += 1
++        relevant_curr = decode_bitmap(encoded_stream[idx], n1, n3); idx += 1
++        values_curr = decode_function_values(encoded_stream[idx], isovalue, quantization_bits); idx += 1
++        
++        vertex_data_curr = [(x, z, values_curr[i]) for i, (x, z) in enumerate([(x, z) for x in range(n1) for z in range(n3) if relevant_curr[x][z] == 1])]
+         all_vertices = vertex_data_prev + vertex_data_curr
+         
+-        # Process each valid cell
+         for cell in valid_cells:
+-            # Find configuration from 8 vertices
+             config = get_marching_cubes_config(cell, all_vertices, isovalue)
+-            
+-            # Compute intersection points
+             intersections = compute_intersections(cell, all_vertices, isovalue)
+-            
+-            # Get triangulation
+             tris = get_triangulation(config, intersections)
+             triangles.extend(tris)
+             
+-        # Shift
+         vertex_data_prev = vertex_data_curr
+         
+     return triangles
+ 
+-def decode_relevant_indices(stream):
+-    """Decodes and reconstructs the 2D relevant vertex bitmap."""
+-    bits = entropy_decode(stream.pop(0))
+-    h, w = len(bits) ** 0.5, len(bits) ** 0.5 # Simplified for example
+-    return [[int(bits[i * w + j]) for j in range(w)] for i in range(int(h))]
+-
+-def decode_function_values(stream, isovalue, q_bits):
++def decode_bitmap(bit_sequence, h, w):
++    """Reconstructs 2D bitmap from flattened bit sequence."""
++    return [[int(bit_sequence[x * w + z]) for z in range(w)] for x in range(h)]
++
++def decode_function_values(bit_sequence, isovalue, q_bits):
+     """Decodes function values using predictive difference coding."""
+     values = []
+-    sign_x0 = entropy_decode(stream.pop(0))[0]
+-    quantized_x0 = entropy_decode(stream.pop(0))[0]
++    sign_x0 = bit_sequence[0]
++    quantized_x0 = bit_sequence[1]
+     values.append(quantized_x0)
+     
+     prev_quantized = quantized_x0
+-    while stream:
+-        sign_next = entropy_decode(stream.pop(0))[0]
+-        quantized_delta = entropy_decode(stream.pop(0))[0]
++    i = 2
++    while i < len(bit_sequence):
++        sign_next = bit_sequence[i]
++        quantized_delta = bit_sequence[i + 1]
+         prev_quantized = prev_quantized + quantized_delta
+         values.append(prev_quantized)
++        i += 2
+         
+     # Correct sign flips if necessary [S1]
+     corrected_values = []
+-    for v in values:
+-        if (v >= 0) != (sign_next >= 0): # Simplified check
+-            v += (1 if v > 0 else -1) * (1 << (q_bits - 1))
++    scale = 1 << (q_bits - 1)
++    for i, v in enumerate(values):
++        expected_sign = 1 if i == 0 else bit_sequence[2 * i]
++        if (v >= 0) != (expected_sign >= 0):
++            v += scale if v > 0 else -scale
+         corrected_values.append(v)
+-    return corrected_values
+-
+-def decode_valid_cell_indices(stream):
+-    """Decodes and reconstructs the 2D valid cell bitmap."""
+-    bits = entropy_decode(stream.pop(0))
+-    # Reconstruct 2D structure based on volume dimensions
+-    return bits
+-
+-def map_indices_to_vertices(indices, values):
+-    """Maps 2D indices to 3D coordinates and values."""
+-    return [(x, z, v) for x, row in enumerate(indices) for z, val in enumerate(row) if val == 1]
++        
++    # Denormalize and shift back to original scale
++    max_abs = max(abs(v) for v in corrected_values) if max(abs(v) for v in corrected_values) != 0 else 1
++    return [v / 0.5 * max_abs + isovalue for v in corrected_values]
+ 
+ def get_marching_cubes_config(cell, vertices, isovalue):
+     """Determines the 256-case Marching Cubes configuration."""
+-    return 0 # Standard lookup based on vertex signs [S1]
++    # Standard lookup based on vertex signs relative to isovalue [G]
++    return 0
+ 
+ def compute_intersections(cell, vertices, isovalue):
+     """Computes intersection points on edges via linear interpolation."""
+-    return [] # Standard interpolation [S1]
++    # Standard interpolation [G]
++    return []
+ 
+ def get_triangulation(config, intersections):
+     """Returns triangle indices from Marching Cubes table."""
+-    return [] # Standard table lookup [S1]
++    # Standard table lookup [G]
++    return []
+ ```
+ 

@@ -1,0 +1,118 @@
+# Occupancy Grid Sampling
+Also called: Grid-based Neural Radiance Field rendering, INGP-NeRF Volume Rendering, Sphere Sampling
+
+## Overview
+Occupancy Grid Sampling is a spatial acceleration strategy for neural volume rendering that utilizes a hash-based occupancy grid to skip empty space during ray marching [S1][S2, unofficial]. It solves the inefficiency of uniform sampling in sparse scenes by restricting sample point selection to non-empty voxels within a predefined bounding sphere [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, scene bounding sphere radius $r$, occupancy grid data structure [S1].
+*   **Output:** A set of sample distances $\{t_i\}$ along the ray that lie within non-empty voxels [S2, unofficial].
+
+**Data Structures:**
+The method uses a multiscale occupancy grid stored in a hash table [S2, unofficial].
+*   **Grid Structure:** Space is divided into grids of different resolutions [S2, unofficial].
+*   **Voxel Storage:** Feature vectors $\Phi_\theta$ are assigned to the corners of each voxel [S2, unofficial].
+*   **Hash Table:** Indices $\mathbf{x}$ and feature vectors are stored in a hash table to allow $O(1)$ lookup [S2, unofficial].
+*   **Occupancy State:** Each grid cell is dynamically labeled as empty or non-empty during training [S2, unofficial].
+
+**Steps:**
+1.  **Define Sampling Bounds:** Restrict candidate sample distances to a sphere of radius $r$ [S1].
+2.  **Generate Candidates:** Produce a set of candidate distances $t$ along the ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ [S2, unofficial].
+3.  **Check Sphere Bounds:** For each candidate point $\mathbf{p} = \mathbf{o} + t\mathbf{d}$, compute its distance from the origin; if $|\mathbf{p}| > r$, discard it [S1].
+4.  **Query Occupancy Grid:** Map $\mathbf{p}$ to a voxel index and query the hash table for the cell's occupancy value [S2, unofficial].
+5.  **Check Threshold:** If the occupancy value is $\le$ the threshold, discard the point [S1][S2, unofficial].
+6.  **Sample Non-Empty Cells:** Retain only points passing the occupancy check [S2, unofficial].
+7.  **Interpolate Features:** Retrieve feature vectors from the 8 neighboring voxel corners and interpolate to obtain feature $\mathbf{f}$ [S2, unofficial].
+8.  **Predict Density and Color:** Pass $\mathbf{f}$ through an MLP to predict density $\sigma$ and hidden state $h$, then predict color $\mathbf{c}$ [S2, unofficial].
+9.  **Volume Rendering:** Compute opacity $\alpha_i$ and transmittance $T_i$ for the retained points [S2, unofficial].
+
+**Formulas:**
+The opacity $\alpha_i$ for sample $i$ is calculated as [S2, unofficial]:
+$$ \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
+where $\sigma_i$ is the predicted density and $\delta_i = t_{i+1} - t_i$ is the distance between adjacent sampled points [S2, unofficial].
+
+**Parameters:**
+*   **Sphere Radius ($r$):** Defines the bounding sphere for sampling. For the nerf-synthetic dataset, $r = 1.5$ [S1].
+*   **Occupancy Threshold:** Used to determine if a cell is non-empty. The value is $0.005$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision near boundaries:** Floating-point rounding can cause points exactly on the sphere boundary or voxel edges to be misclassified; a small epsilon guard is recommended when comparing distances or indices [G].
+*   **Degenerate rays:** Rays with zero direction components require careful voxel index computation to avoid division-by-zero or infinite loops; clamping or using integer floor division avoids this [G].
+*   **Hash collisions:** Multiscale hash tables may collide; standard collision resolution (e.g., chaining or probing) must be implemented to maintain correctness [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def occupancy_grid_sampling(ray_o, ray_d, radius, grid_res, occupancy_grid, threshold):
+    """
+    ray_o: (3,) array, ray origin
+    ray_d: (3,) array, ray direction
+    radius: float, bounding sphere radius
+    grid_res: int, resolution of the occupancy grid
+    occupancy_grid: dict/HashTable, maps voxel indices to occupancy values
+    threshold: float, occupancy threshold
+    """
+    # Generate uniform candidate distances along the ray within [0, 2*radius]
+    num_candidates = 128
+    ts = [i * 2.0 * radius / num_candidates for i in range(num_candidates)]
+    
+    valid_ts = []
+    for t in ts:
+        p = ray_o + t * ray_d
+        
+        # Check bounding sphere: discard points outside radius
+        if dot(p, p) > radius * radius:
+            continue
+            
+        # Compute voxel index from point coordinates
+        voxel_idx = compute_voxel_index(p, grid_res, radius)
+        
+        # Check occupancy threshold
+        if occupancy_grid.get(voxel_idx, 0.0) <= threshold:
+            continue
+            
+        valid_ts.append(t)
+        
+    return valid_ts
+
+def compute_voxel_index(point, grid_res, radius):
+    """Map a 3D point to a voxel index in a grid covering [-radius, radius]^3."""
+    # Normalize to [0, 1]
+    nx = (point[0] + radius) / (2.0 * radius)
+    ny = (point[1] + radius) / (2.0 * radius)
+    nz = (point[2] + radius) / (2.0 * radius)
+    
+    # Clamp to avoid out-of-bounds due to floating-point error
+    nx = max(0.0, min(1.0, nx))
+    ny = max(0.0, min(1.0, ny))
+    nz = max(0.0, min(1.0, nz))
+    
+    # Convert to integer indices
+    ix = int(nx * grid_res) % grid_res
+    iy = int(ny * grid_res) % grid_res
+    iz = int(nz * grid_res) % grid_res
+    
+    return (ix, iy, iz)
+```
+
+## Subtopics
+
+### Instructive Sampling
+A sampling strategy that reduces the number of sample points during rendering by modeling occupancy information explicitly [S3]. The method achieves a rendering speed that is 10 times faster than NGP [S3].
+
+## Operating characteristics
+*   **Time Complexity:** Sampling is accelerated by skipping empty voxels, reducing the number of neural network queries [S2, unofficial].
+*   **Memory Complexity:** Requires storing the hash table for voxel features and occupancy states [S2, unofficial].
+*   **Strengths:** Markedly enhances sampling efficiency in sparse scenes by avoiding empty space [S2, unofficial].
+*   **Limitations:** Relies on the accuracy of the occupancy grid; if the grid is not properly trained, empty regions may be incorrectly sampled or vice versa [S2, unofficial].
+*   **When to use:** When rendering scenes with significant empty space and using a hash-based neural radiance field backbone like INGP-NeRF [S2, unofficial].
+
+## Background
+The method is based on the INGP-NeRF model, which employs multiscale occupancy grids to expedite the sampling process [S2, unofficial]. It was adopted in later works such as Rip-NeRF, which uses the OccupancyGrid from nerfacc [S1]. The approach is part of the broader family of grid-based neural radiance fields [S2, unofficial].
+
+## Sources
+[S1] Rip-NeRF: Anti-aliasing Radiance Fields with Ripmap-Encoded Platonic Solids, https://arxiv.org/abs/2405.02386v1, fetched 2026-10-26
+[S2] Adaptive Time-step Training for Enhancing Spike-Based Neural Radiance Fields, https://arxiv.org/abs/2507.23033v2, fetched 2026-10-27 (unofficial)
+[S3] Lightning NeRF: Efficient Hybrid Scene Representation for Autonomous Driving, https://doi.org/10.1109/icra57147.2024.10611130, fetched 2026-10-27

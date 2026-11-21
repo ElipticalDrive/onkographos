@@ -1,0 +1,172 @@
+Static recompilation runtime libraries for PlayStation 3 titles.  - rsx engine: block-compressed (DXT) 3D textures go up as volumes by n0madic · Pull Request #585 · sp00nznet/ps3recomp
+
+rsx engine: block-compressed (DXT) 3D textures go up as volumes by n0madic · Pull Request #585 · sp00nznet/ps3recomp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+n0madic
+commented
+Oct 25, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+A texture unit whose SET_TEXTURE_FORMAT dimension is 3 (with a depth in CONTROL3) is a volume. The 3D path added in 1ba3657 takes uncompressed formats only, so a DXT volume still went up as a 2D texture made of its first slice-sized bytes. The fragment program, given the unit in the volume mask, declared it Texture3D all the same.
+A retail title draws its explosion smoke from 256x256x16 DXT5 volumes in main memory (SET_TEXTURE_FORMAT 0x0001883A: dimension 3, DXT45; depth 16), the animation running along the third coordinate. Compressed volumes whose sides are powers of two are stored in NVIDIA's VTC order: the slices go in groups of four, and within a group the four slices' blocks at one position follow each other. Read as one 2D image, the first 64 KB are four slices interleaved block by block, and one of the volumes holds a near-empty first group whose every fourth block is opaque black. The smoke drew as dark translucent squares with hard edges.
+Change
+eng_texture_upload: block-compressed formats take the 3D path too.
+A level whose width and height are powers of two is in VTC order. eng_unvtc_3d_slice lays a slice out of it into the staging rows (the depth % 4 slices left over form a smaller last group). It is written from the NV_texture_compression_vtc spec alone, cited in the source. For full groups it is the spec's blockIndex. For the last group the spec's formula stores the slices one after another, which contradicts its prose (4x4x2 and 4x4x3 blocks) when depth % 4 >= 2; the prose is followed.
+Any other level is slice after slice, as RPCS3 treats it.
+Metal texture_upload_3d: a block-compressed slice spans its block rows. bytesPerImage was row bytes times texel rows, four times the slice. That was harmless while each upload is one slice, but not what the call means.
+Tests
+test_rsx_draw_engine, a new group with a stub backend that has the 3D calls:
+an 8x8x6 DXT5 volume (a group of four and a group of two) goes up as six slices, every block where its slice put it;
+a 12x4x2 DXT5 volume (not a power of two) goes up slice after slice;
+a 16x16x8 DXT1 volume with three levels (8, 4 and 2 slices) goes up level by level, each out of its own VTC order.
+Each check fails without the change. A VTC order without the last group's own stride also fails, and so do levels not a whole level apart.
+engine_up became engine_up_with(backend) so a group can bring the engine up on its own backend.
+The group passes under ASan, with clang and with gcc.
+In the title, a per-draw capture traced the squares to the draws that sample those volumes. Their bytes, taken out of VTC order, are the smoke's slices.
+Provenance
+The first version of eng_unvtc_3d_slice() was a port of RPCS3's copy_unmodified_block_vtc; the licence review held the PR for those eight lines. 53d9ecd rewrites them (the earlier version is still in this branch's history, so a squash merge would keep it out of master's) from the Khronos spec alone, without the earlier code in view, and drops the RPCS3 link. A standalone check compared the new function with a direct implementation of the spec's blockIndex for every block of eleven volumes (depth % 4 of 0 or 1) and with the prose layout for depths 1-7, 10 and 11, at 8 and 16 bytes per block, under ASan and UBSan. The three volume tests above pass unchanged.
+v0.18.0 merged in (acc93bb): the volume path keeps master's !into condition (no 3D path for an upload into an existing texture). On this branch (macOS arm64) ctest passes (22 of 22) and so do the tools/test_*.py scripts (120 of 120).
+rsx engine: block-compressed (DXT) 3D textures go up as volumes
+…
+97ccca2
+```
+A unit whose SET_TEXTURE_FORMAT dimension is 3 with a DXT format went up
+as a 2D texture made of the volume's first slice-sized bytes, while the
+fragment program, given the unit in the volume mask, declared it Texture3D:
+the 3D path took uncompressed formats only. A retail title's explosion smoke
+is a 256x256x16 DXT5 volume; read that way its first 64 KB (four slices'
+blocks interleaved) drew dark translucent squares where the smoke was.
+
+- eng_texture_upload: block-compressed formats take the 3D path. A level
+  whose width and height are powers of two is stored in NVIDIA's VTC order
+  (slices in groups of four, the four slices' blocks at one position next
+  to each other, the depth % 4 slices left over grouped the same way);
+  eng_unvtc_3d_slice lays a slice out of it, ported from RPCS3's
+  copy_unmodified_block_vtc (linked at a fixed commit). Any other level is
+  slice after slice.
+- Metal texture_upload_3d: a block-compressed slice spans its block rows
+  (bytesPerImage was row bytes x texel rows, four times the slice).
+
+test_rsx_draw_engine: an 8x8x6 DXT5 volume (a group of four, a group of
+two), a 12x4x2 one (slice after slice) and a 16x16x8 DXT1 volume with three
+levels go up slice by slice with every block where its slice put it.
+```
+sp00nznet
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Licence and provenance review — held on eight lines, and the cheapest hold in this batch to clear
+Thank you for declaring the origin in the source. You wrote "Ported from RPCS3's copy_unmodified_block_vtc" with a pinned permalink, which is exactly what CONTRIBUTING.md asks for, and it is the reason this surfaced in review rather than after a release. The problem is the source, not the disclosure.
+Why it's held
+eng_unvtc_3d_slice() in libs/video/rsx_draw_engine.c is declared a port of RPCS3's copy_unmodified_block_vtc (TextureUtils.cpp#L279-L339). RPCS3 is GPL-2.0, and CONTRIBUTING.md applies the rule regardless of size — "even rewritten line by line". Eight lines is still eight lines from a GPL file.
+The way through is already in your own comment
+The same comment cites the Khronos NV_texture_compression_vtc extension, and that spec specifies the layout independently and completely: slices in groups of four, the four slices' blocks at one position following each other within a group, and the depth % 4 remainder forming a smaller last group with its own stride. Rewrite the eight lines from that spec alone, cite the spec, drop the RPCS3 link, and this lands.
+What is not in question
+The rest of the PR is unaffected, and it is a real bug fix I want: block-compressed formats taking the 3D path in eng_texture_upload, the power-of-two VTC condition, the Metal texture_upload_3d bytesPerImage correction, and the three volume tests (8×8×6 DXT5, 12×4×2 non-power-of-two, 16×16×8 DXT1 with three levels). The failure analysis — every fourth block opaque black because the first 64 KB are four interleaved slices — is well traced.
+Of the three licence holds in this batch this is the smallest by a wide margin. Re-source the eight lines and it goes in.
+sp00nznet
+mentioned this pull request
+Oct 26, 2026
+unify the open PRs for v0.18.0
+#594
+Merged
+sp00nznet
+added a commit
+that referenced
+this pull request
+Oct 26, 2026
+v0.18.0: version bump, changelog, contributor credit
+…
+1b72752
+```
+CMakeLists.txt said VERSION 0.11.0 -- six releases stale. It has been
+invisible because release.yml derives the artifact version from the tag,
+but message(STATUS "ps3recomp runtime v${PROJECT_VERSION}") printed
+0.11.0 on every configure since September.
+
+README.md carries the last three releases, so adding v0.18.0 rotates
+v0.15.0 "Seventy-Six" down into CHANGELOG.md, above v0.14.0. That is the
+same move that put v0.14.0 there.
+
+The entry covers the 153 in-release PRs from ten contributors. 153, not
+154: SIL-10 diffed #512 against #550 and found #550's 27 SSE4.1 helpers
+to be a strict subset of #512's ~72, independently converged on the same
+implementations. #512 is in, #550 has a written review, and #550's
+linux.yml test step is carried onto #512 anyway, credited to its author.
+
+CONTRIBUTORS.md gains five names -- @rigaz29, @MaChInEgUn3, @xuxinsss,
+@feanor-noldorin, @Tzeentchnet -- and v0.18.0 entries for @tekulvw,
+@erikomis, @undecuple, @n0madic and @Kurtisone. Not credited here, and
+deliberately: @DriifterSelf (#586 is out pending a split) and
+@dawoodtogoo2020-code (#447 is a licence block). #569 and #585 are
+blocked and are not credited to @n0madic.
+
+The release name follows the house pattern of spelling out the PR count,
+as v0.15.0 "Seventy-Six", v0.16.0 "Forty-Four" and v0.17.0
+"Thirty-Three" did.
+```
+rsx engine: VTC slice gather written from the NV_texture_compression_…
+…
+53d9ecd
+```
+…vtc spec
+
+eng_unvtc_3d_slice() is rewritten from the Khronos NV_texture_compression_vtc
+specification alone, which the comment now cites as the only source (the
+RPCS3 link is gone). Block i of slice z is at
+(4 * floor(z / 4) * blocks + i * n + z % 4) * block_bytes, n the layer count
+of z's group: 4, or d % 4 for the last group. For full groups that is the
+spec's blockIndex formula; for the last group the formula stores the slices
+one after another, which contradicts the spec's prose (4x4x2 and 4x4x3
+blocks) for d % 4 >= 2, and the prose is followed, as before.
+
+The rewrite was made without the earlier code in view. A standalone check
+compares it with a direct implementation of the spec's blockIndex for every
+block of eleven volumes (d % 4 == 0 or 1) and with the prose layout for
+d = 1..7, 10 and 11, at 8 and 16 bytes per block, under ASan and UBSan.
+The three volume tests in test_rsx_draw_engine pass unchanged.
+```
+n0madic
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Author
+Thank you. Re-sourced in 53d9ecd: eng_unvtc_3d_slice() is rewritten from NV_texture_compression_vtc alone, without the earlier code in view, and the RPCS3 link is gone. The spec is now the only source the comment cites.
+One thing the spec itself is inconsistent about, noted in the comment: for the depth % 4 slices left over, its blockIndex formula stores them one slice after another, while its prose says they form 4x4x2 or 4x4x3 blocks (layers interleaved). The function follows the prose for that last group, as before; full groups are the formula exactly. The three volume tests pass unchanged. The Provenance section of the description lists the extra standalone check.
+Merge v0.18.0 (master 4e8f3ca) into feat/compressed-volume-textures
+…
+acc93bb
+```
+Conflicts resolved in rsx_draw_engine.c and test_rsx_draw_engine.c against
+sp00nznet#439/sp00nznet#460/sp00nznet#465 and engine_up_with; see the PR description for details.
+```
+n0madic
+mentioned this pull request
+Oct 26, 2026
+Metal: a Quit item in the app menu, and no alert sound on a key press
+#613
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

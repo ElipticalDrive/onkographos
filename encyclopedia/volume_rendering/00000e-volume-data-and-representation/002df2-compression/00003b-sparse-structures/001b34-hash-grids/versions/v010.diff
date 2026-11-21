@@ -1,0 +1,294 @@
+--- v009.md
++++ v010.md
+@@ -1,195 +1,132 @@
+ # Hash Grids
+ 
+-Also called: Coordinate Hashing, Vertex Hashing for Voxel Grid, Perfect Hashing via Row Displacement, Sparse Grid with Row Displacement
++Also called: Coordinate Hashing, Vertex Hashing for Voxel Grid
+ 
+ ## Overview
+-Hash Grids are a sparse data structure for volume rendering that maps 3D spatial coordinates to a compact, collision-free hash table using a perfect hash function derived from row displacement compression [S1][S2, S3, unofficial]. Unlike standard open-addressing hash tables that store keys or handle collisions via chaining, this method computes a static offset for each spatial dimension (row) such that non-zero elements map to unique indices in a linear array [S1]. This eliminates the need for collision resolution logic during rendering, allowing for $O(1)$ access to voxel data while storing only occupied cells [S2, S3, unofficial].
++Hash Grids map 3D spatial coordinates to a compact, sparse data structure to enable efficient storage and retrieval of volumetric features or geometry. Unlike dense voxel grids, which waste memory on empty space, Hash Grids use a hash function to map non-empty cells to a linear array, achieving constant-time access with minimal memory overhead [S1][S2, unofficial]. This method is distinct from tree-based structures (like Octrees) by avoiding pointer overhead and traversal costs, and from brick maps by using a flat array with displacement compression or modular hashing [S1][S2, unofficial]. It is primarily used in real-time ray tracing and neural rendering to accelerate lookups for sparse scenes or feature embeddings [S1][S5, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- A set of volumetric items (e.g., triangles, particles, or voxel centers) with 3D positions or bounding boxes [S2, S3, unofficial].
+-- Scene bounding box (min/max coordinates) [S2, S3, unofficial].
+-- Grid dimensions $M_x, M_y, M_z$ (determined by a heuristic based on item count and bounding box volume) [S2, S3, unofficial].
++Hash Grids generally fall into two implementation categories based on the hashing strategy: **Perfect Hashing via Row Displacement** (for static, pre-computed grids) and **Modular Multiplicative Hashing** (for dynamic or neural rendering grids).
+ 
+-**Outputs:**
+-- Four static arrays: $L$ (Item List), $H$ (Hash Table), $O$ (Offset Table), and $D$ (Domain Bits) [S2, S3, unofficial].
++### Inputs and Outputs
++*   **Inputs:** 3D coordinates $(x, y, z)$, grid dimensions $(M_x, M_y, M_z)$, and optionally a hash table size $T$ or number of non-empty cells $N_{nz}$.
++*   **Outputs:** A bucket index in the hash table $H$, or a feature value stored at that index.
+ 
+-**Data Structures:**
+-1.  **Array $L$ (Item List):** 1D array of machine words containing the actual data (indices, values, or pointers) for all non-empty cells [S2, S3, unofficial].
+-2.  **Array $H$ (Hash Table):** Linearized and hashed 3D array of machine word indexes into $L$. The item list size for a cell $i$ is given by $H[i] - H[i+1]$ [S2, S3, unofficial].
+-3.  **Array $O$ (Offset Table):** Linearized 2D array of machine word indexes into $H$, with size $M_y \times M_z$ [S2, S3, unofficial].
+-4.  **Array $D$ (Domain Bits):** 1D bit array of size $N = M_x \times M_y \times M_z$. $D[k] = 1$ if the cell at linear index $k$ contains data, $0$ otherwise [S2, S3, unofficial].
++### Data Structures
+ 
+-**Coordinate Mapping:**
+-3D coordinates $(x, y, z)$ are mapped to a 1D linear index $d(x, y, z)$ using row-major ordering [S2, S3, unofficial]:
+-$$ d(x, y, z) = ((M_y \times z) + y) \times M_x + x $$
++#### 1. Perfect Hashing (Static Sparse Matrix)
++Used for static geometry where the set of occupied cells is known beforehand. It uses four static arrays [S1][S2, unofficial]:
++*   **Array L:** 1D array of machine words containing indexes of all cell items (features/geometry).
++*   **Array H:** Linearized and hashed 3D array of machine word indexes into L. The item list size for cell $i$ is $H[i] - H[i+1]$.
++*   **Array O:** Offset table, a linearized 2D array of machine word indexes into H. Size is $M_y \times M_z$.
++*   **Array D:** Domain bits, a bit array of size $N = M_x \times M_y \times M_z$. $D[d(x,y,z)] = 1$ if the cell is non-empty, $0$ otherwise.
+ 
+-**Construction Algorithm (Row Displacement Compression):**
+-The goal is to compute offsets $O$ such that for every non-zero element $C(i, j)$ in a conceptual sparse matrix $C$ (where $i$ is the row index $(y,z)$ and $j$ is the column index $x$), the hash function $h(i, j) = O[i] + j$ maps to a unique position in $H$ without collisions [S1].
++#### 2. Modular Hashing (Dynamic/Neural)
++Used for dynamic updates or neural feature grids (e.g., Instant NGP).
++*   **Hash Table:** A 1D array of size $T = 2^{\text{log2\_hashmap\_size}}$.
++*   **Coordinates:** Input tensor of shape $(N, D)$, where $D \le 7$ [S5, unofficial].
+ 
+-1.  **Compute Bounding Box:** Determine the scene's bounding box and calculate grid dimensions $M_x, M_y, M_z$ [S2, S3, unofficial].
+-2.  **Initialize Domain Bits:** Allocate $D$ of size $N = M_x M_y M_z$. Initialize all bits to 0 [S2, S3, unofficial].
+-3.  **Mark Occupied Cells:** For each item, determine which grid cells its bounding box intersects. For each intersected cell with linear index $k$, set $D[k] = 1$ [S2, S3, unofficial].
+-4.  **Allocate Offset Table:** Allocate $O$ of size $M_y \times M_z$ [S2, S3, unofficial].
+-5.  **Allocate Temporary Buffer:** Allocate a temporary bit array $bH$ of size $2 \times (\text{number of non-empty cells})$, initialized to 0. This buffer helps track occupied slots in the hash table during displacement [S2, unofficial].
+-6.  **Compute Offsets (Row Displacement):**
+-    - Iterate through each row $i$ (from $0$ to $M_y M_z - 1$) [S1][S2, S3, unofficial].
+-    - For row $i$, identify the set of column indices $J_i = \{ x \mid D[d(x, i_y, i_z)] = 1 \}$, where $i = i_y M_z + i_z$ [S1][S2, S3, unofficial].
+-    - Find the smallest offset $O[i]$ such that for all $x \in J_i$, the target hash index $H_{idx} = O[i] + x$ is not marked in $bH$ [S1][S2, S3, unofficial].
+-    - Mark all $bH[O[i] + x]$ as 1 for $x \in J_i$ [S1][S2, S3, unofficial].
+-    - Record $O[i]$ in the offset table [S1][S2, S3, unofficial].
+-7.  **Populate Hash Table $H$:**
+-    - Initialize $H$ with zeros or appropriate defaults [S2, S3, unofficial].
+-    - For each row $i$ and each occupied column $x \in J_i$:
+-        - Calculate hash index $h = O[i] + x$ [S1].
+-        - Store the item data index (from $L$) at $H[h]$ [S1][S2, S3, unofficial].
+-8.  **Populate Item List $L$:**
+-    - $L$ contains the actual data values. The mapping from grid cell to data is $L[H[d(x,y,z)]]$ if $D[d(x,y,z)] == 1$ [S2, S3, unofficial].
++### Algorithm: Perfect Hash Construction (Row Displacement)
++This algorithm computes a collision-free hash function for a static sparse 3D matrix [S1][S2, unofficial].
+ 
+-**Lookup:**
+-To retrieve data for coordinate $(x, y, z)$:
+-1.  Compute linear index $k = d(x, y, z)$ [S2, S3, unofficial].
+-2.  If $D[k] == 0$, the cell is empty [S2, S3, unofficial].
+-3.  If $D[k] == 1$, retrieve the offset $O[y \cdot M_z + z]$ [S2, S3, unofficial].
+-4.  Compute hash index $h = O[y \cdot M_z + z] + x$ [S1].
+-5.  Retrieve data from $L[H[h]]$ (or directly from $H$ if $H$ stores values, depending on implementation variant) [S1][S2, S3, unofficial].
++1.  **Compute Bounding Box:** Determine the scene's bounding box.
++2.  **Determine Dimensions:** Calculate grid dimensions $M_x, M_y, M_z$ using a grid heuristic [S2, unofficial].
++3.  **Initialize Domain Bits:** Allocate Array $D$ of size $N = M_x M_y M_z$. Initialize all bits to 0.
++4.  **Mark Occupied Cells:** For each item (e.g., triangle or voxel) in the scene:
++    *   Determine which grid cells its bounding box intersects.
++    *   For each intersected cell $(x, y, z)$, set $D[d(x, y, z)] = 1$.
++    *   The 1D index is calculated as:
++        $$d(x, y, z) = ((M_y \times z) + y) \times M_x) + x$$
++5.  **Allocate Offset Table:** Allocate Array $O$ of size $M_y \times M_z$.
++6.  **Allocate Temporary Buffer:** Allocate a temporary bit array $bH$ of size $2 \times N_{nz}$ (where $N_{nz}$ is the count of non-empty cells), initialized to 0.
++7.  **Compute Offsets (Row Displacement):**
++    *   For each row $(y, z)$ in the grid:
++        *   Find the smallest offset $O[y, z]$ starting from the previous row's offset.
++        *   Check for collisions in the hash table $H$ for the cells in this row (indices $d(0, y, z)$ to $d(M_x-1, y, z)$).
++        *   If a collision occurs (bit in $bH$ is set), increment the offset and re-check.
++        *   Once a collision-free offset is found, mark the corresponding positions in $bH$ as used.
++8.  **Populate Hash Table:** Copy non-zero elements from the sparse matrix $C$ to $H$ using the computed offsets. The hash function is $h(i, j) = O[i] + j$ [S1].
+ 
+-**Pseudocode:**
+-```python
+-def build_hash_grid(items, grid_dims):
+-    Mx, My, Mz = grid_dims
+-    N = Mx * My * Mz
+-    
+-    # 1. Initialize Domain Bits D
+-    D = [0] * N
+-    
+-    # 2. Mark occupied cells
+-    for item in items:
+-        # Discretize item bounds to grid indices
+-        x_min, y_min, z_min, x_max, y_max, z_max = discretize_bounds(item.bounds, grid_dims)
+-        for x in range(x_min, x_max + 1):
+-            for y in range(y_min, y_max + 1):
+-                for z in range(z_min, z_max + 1):
+-                    if 0 <= x < Mx and 0 <= y < My and 0 <= z < Mz:
+-                        k = ((My * z) + y) * Mx + x
+-                        D[k] = 1
+-            
+-    num_occupied = sum(D)
+-    
+-    # 3. Allocate Offset Table O
+-    O = [0] * (My * Mz)
+-    
+-    # 4. Allocate temporary bit array bH
+-    bH = [0] * (2 * num_occupied)
+-    
+-    # 5. Compute Offsets using Row Displacement
+-    for row_idx in range(My * Mz):
+-        y = row_idx // Mz
+-        z = row_idx % Mz
+-        
+-        # Clear bH for current row tracking
+-        bH = [0] * len(bH)
+-        
+-        occupied_x = []
+-        for x in range(Mx):
+-            k = ((My * z) + y) * Mx + x
+-            if D[k]:
+-                occupied_x.append(x)
+-                
+-        if not occupied_x:
+-            O[row_idx] = 0
+-            continue
+-            
+-        start_offset = O[row_idx - 1] + 1 if row_idx > 0 else 0
+-        
+-        found = False
+-        offset = start_offset
+-        while not found:
+-            collision = False
+-            for x in occupied_x:
+-                if bH[offset + x]:
+-                    collision = True
+-                    break
+-            if not collision:
+-                for x in occupied_x:
+-                    bH[offset + x] = 1
+-                O[row_idx] = offset
+-                found = True
+-            else:
+-                offset += 1
+-                
+-    # 6. Populate Hash Table H and Item List L
+-    H = [0] * len(bH)
+-    L = []
+-    L_index_counter = 0
+-    
+-    for row_idx in range(My * Mz):
+-        y = row_idx // Mz
+-        z = row_idx % Mz
+-        offset = O[row_idx]
+-        
+-        for x in range(Mx):
+-            k = ((My * z) + y) * Mx + x
+-            if D[k]:
+-                hash_idx = offset + x
+-                # [G] Standard step: store actual voxel data or index
+-                L.append(item_data) 
+-                H[hash_idx] = L_index_counter
+-                L_index_counter += 1
+-                
+-    return L, H, O, D
+-```
++### Algorithm: Modular Hashing (Dynamic/Neural)
++This method hashes coordinates to a bucket index using a multiplicative hash with prime constants [S4, S5, unofficial].
+ 
+-**Parameters:**
+-- `grid_dims` ($M_x, M_y, M_z$): Determined by a heuristic balancing memory usage and collision probability during construction [S2, S3, unofficial].
+-- `log2_hashmap_size`: In dynamic variants (like [S5, unofficial]), this defines the table size $T = 2^{\text{log2\_hashmap\_size}}$ [S5, unofficial].
++1.  **Define Primes:** Use a pre-defined array of prime numbers for each dimension.
++    ```python
++    primes = [1, 2654435761, 805459861, 3674653429, 2097192037, 1434869437, 2165219737]
++    ```
++2.  **Hash Function:**
++    For a coordinate vector $\mathbf{p} = (p_0, p_1, \dots, p_{D-1})$ and hash table size $T = 2^{\text{log2\_hashmap\_size}}$:
++    ```python
++    def hash(coords, log2_hashmap_size):
++        # coords: tensor of shape (N, D)
++        # log2_hashmap_size: integer
++        T = 1 << log2_hashmap_size
++        # Example for 3D:
++        # hash_val = ((coords[:, 0] * primes[1]) ^ 
++        #             (coords[:, 1] * primes[2]) ^ 
++        #             (coords[:, 2] * primes[3])) % T
++        # Note: The exact folding logic (XOR vs Sum) and modulo operation 
++        # must be implemented. Sources indicate XOR folding with primes [S4, S5, unofficial].
++        pass
++    ```
++    *   **Formula:** A common implementation is:
++        $$h(\mathbf{p}) = \left( \bigoplus_{i=0}^{D-1} (p_i \times \text{primes}[i+1]) \right) \pmod T$$
++        Where $\oplus$ is bitwise XOR [S4, S5, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-- **Construction Time:** The row displacement algorithm can have worst-case time complexity $O(M^{3/2})$ or worse if many rows require large displacements to find non-colliding offsets [S1].
+-- **Static Data:** This method is designed for static scenes. Updating the grid (adding/removing items) requires rebuilding the hash table [S2, S3, unofficial].
+-- **Memory Overhead:** The temporary buffer $bH$ and the domain bits $D$ add overhead. The hash table $H$ must be sized to accommodate the maximum possible displacement [S2, S3, unofficial].
+-- **Precision:** Coordinate mapping relies on integer arithmetic. Floating-point positions must be discretized to grid indices before hashing [S2, S3, unofficial].
++### Parameters
++*   **Grid Dimensions ($M_x, M_y, M_z$):** Determined by scene bounding box and desired resolution [S2, unofficial].
++*   **Hash Table Size ($T$):** For modular hashing, $T = 2^{\text{log2\_hashmap\_size}}$. Typical values for neural rendering are $2^{18}$ to $2^{24}$ [S5, unofficial].
++*   **Primes:** Large prime numbers to ensure uniform distribution [S4, S5, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Hash Collisions (Modular):** In modular hashing, different coordinates may map to the same bucket. This causes feature interference. Mitigation strategies include using larger hash tables, multiple hash levels (Multi-Level Hashed Grids), or hash fusion techniques [S1, S8].
++*   **Hash Collisions (Perfect):** Row displacement guarantees no collisions for the *static* set of occupied cells. If new cells are added, the hash function is invalid and must be recomputed [S1].
++*   **Memory Leaks:** In implementations using chaining (e.g., Integer Hash Map with Chaining), failure to call the destructor leads to memory leaks [S6, unofficial].
++*   **Inverse Mapping:** Standard hash functions are unidirectional ($n \to \theta$). Retrieving original indices ($\theta \to n$) requires storing a reverse map, which consumes significant memory (e.g., 5 GB for large voxel sets) [S8].
+ 
+ ## Subtopics
+ 
+-### [Voxel World Data Structure](1101-voxel-world-data-structure.md)
+-A sparse representation that stores voxel existence using a hash set of integer-based 3D vectors (`IVec3`). It solves the problem of efficiently tracking occupied grid positions in a voxel world while ensuring strict grid alignment. It builds on [Hash Grids](936-hash-grids.md) by applying hash-based lookup to discrete integer coordinates rather than continuous floating-point positions.
+-
+ ### [Hash Grid Loss](2093-hash-grid-loss.md)
+-A compression-oriented regularization term used within sparse volume representations to minimize the bit consumption of binary hash grids during encoding. It differs from standard reconstruction losses by optimizing the statistical distribution of the hash grid values themselves, encouraging a more concentrated grid structure that yields higher compression ratios at the cost of reconstruction fidelity.
++A compression-oriented regularization term that minimizes the bit consumption of binary hash grids during encoding. It optimizes the statistical distribution of hash grid values to encourage a concentrated grid structure, yielding higher compression ratios at the cost of reconstruction fidelity.
+ 
+ ### [Dual Point Map Insertion with Linear Probing](3043-dual-point-map-insertion-with-linear-probing.md)
+-This method stores dual points in a hash table using linear probing to handle collisions, mapping unique point identifiers to their 3D positions via a combined 64-bit key-value pair. It builds on the hashing strategy of [Hash Grids](936-hash-grids.md) by hashing vertex positions to bucket indices [G].
++Stores dual points in a hash table using linear probing to handle collisions. It maps unique point identifiers to 3D positions via a combined 64-bit key-value pair, building on the hashing strategy of Hash Grids by hashing vertex positions to bucket indices.
+ 
+ ### [Multi-Level Hashed Grid Construction](3402-multi-level-hashed-grid-construction.md)
+-A method for rapidly building an acceleration structure that combines the render-time performance of multi-level grids with the low memory footprint of hashed grids. It solves the problem of high memory consumption in classic multi-level array grids and the poor traversal performance of one-level hashed grids for large, sparse scanned scenes. It differs from [Hash Grids](936-hash-grids.md) by adding macrocells to skip empty regions during traversal, and from [Voxel World Data Structure](1101-voxel-world-data-structure.md) by using row displacement compression to eliminate empty cells entirely.
++Combines the render-time performance of multi-level grids with the low memory footprint of hashed grids. It adds macrocells to skip empty regions during traversal, solving the high memory consumption of classic multi-level array grids and the poor traversal performance of one-level hashed grids for large, sparse scanned scenes.
+ 
+ ### [Universal Hash Optimization](3456-universal-hash-optimization.md)
+-A technique used within Sparse Voxel Octree (SVO) structures to mitigate hash collisions in the underlying hash table. It replaces standard deterministic hashing with a randomized universal hash function, ensuring that distinct non-isomorphic nodes are distributed uniformly across hash table buckets. This reduces the average number of equality checks required during lookups, thereby improving search performance compared to naive hashing methods that may cluster nodes in specific buckets.
++Mitigates hash collisions in Sparse Voxel Octree (SVO) structures by replacing deterministic hashing with a randomized universal hash function. This ensures distinct non-isomorphic nodes are distributed uniformly across hash table buckets, reducing the average number of equality checks required during lookups.
+ 
+-### [SpatialHash3D](5113-spatialhash3d.md)
+-A spatial index structure that uses a uniform 3D hash grid to enable efficient nearest-neighbor and radius-based queries for static datasets, providing O(1) cell lookup. It is distinguished from sibling structures like KD-trees or Octrees by its simplicity and predictable performance for static data, where implementation complexity is low and radius queries are straightforward.
++### SpatialHash3D
++A spatial index structure using a uniform 3D hash grid for efficient nearest-neighbor and radius-based queries on static datasets. It provides O(1) cell lookup with low implementation complexity, distinguished from KD-trees or Octrees by its simplicity and predictable performance for static data [S1].
+ 
+ ### [3D Coordinate Packing](5755-3d-coordinate-packing.md)
+-A method for encoding three-dimensional spatial coordinates into a single integer key to serve as an index in hash maps or sparse data structures. It solves the problem of efficiently mapping 3D voxel positions to a 1D bucket index for sparse volume representation. Unlike general-purpose hash functions like those in [Hash Grids](936-hash-grids.md), this method preserves spatial locality through bit-shifting, allowing for deterministic reconstruction of coordinates from the key. It differs from [Voxel World Data Structure](1101-voxel-world-data-structure.md) by focusing on the low-level bit manipulation for hashing rather than high-level world management.
++Encodes 3D spatial coordinates into a single integer key to serve as an index in hash maps. Unlike general-purpose hash functions, it preserves spatial locality through bit-shifting, allowing deterministic reconstruction of coordinates from the key.
+ 
+ ### [Hash Grid with Multiple Hash Functions](7678-hash-grid-with-multiple-hash-functions.md)
+-This method extends the standard Hash Grid by assigning a distinct hash function to each leaf node in the spatial hierarchy, thereby reducing hash collisions that occur when different regions of space map to the same warp space coordinates. While the parent [Hash Grids](936-hash-grids.md) uses a single global hash function for all vertices, this variant conditions the hashing parameters on the leaf node index, allowing points from different leaf nodes that occupy the same voxel in the shared warp space to be stored in different buckets.
++Extends the standard Hash Grid by assigning a distinct hash function to each leaf node in the spatial hierarchy. This reduces hash collisions caused by feature vector interference, ensuring geometrically distinct regions maintain independent feature spaces.
+ 
+ ### Integer Hash Map with Chaining
+-A hash table implementation for integer keys using open addressing via chaining. Supports hashing 2 or 4 integer keys into a single index, with separate structures for storing associated integer or float data [S6, unofficial]. Key generation for 2 keys masks each key to 10 bits, shifts k1 left by 10, ORs with k2, and masks to 20 bits [S6, unofficial]. For 4 keys, masks to 5 bits and shifts accordingly [S6, unofficial]. Lookup traverses the chain at `table[ind]` comparing keys [S6, unofficial]. Insertion prepends a new node to the chain [S6, unofficial]. Pitfall: Memory leaks if the destructor is not called, as it must iterate all buckets and delete nodes [S6, unofficial].
++A hash table implementation for integer keys using open addressing via chaining. It supports hashing 2 or 4 integer keys into a single index, with separate structures for storing associated integer or float data. Key generation involves masking and shifting bits (e.g., 10 bits per key for 2 keys) [S6, unofficial].
+ 
+ ### Hash Map Operations
+ CUDA implementations for hash map insertion and lookup operations, including 3D specific variants and one where the 3D index is used as the value [S7, unofficial].
+ 
++### Hash Fusion with Occupancy Grid
++A technique to address hash collision issues by estimating individual probabilities for vertices corresponding to a feature vector. It calculates an Area of Effect (AOE) for each vertex to weigh the probability prediction, computing a final weighted probability $p_i = \sum_{k=1}^K w_i^k \times p_i^k$ [S8].
++
++### Inverse Hash Mapping
++A mechanism to retrieve original voxel indices from feature embeddings. It requires traversing all voxels during initialization to store corresponding embeddings, consuming significant GPU memory (e.g., 5 GB) [S8].
++
+ ## Operating characteristics
+-- **Time Complexity:** Construction is $O(M^{3/2})$ in the worst case for row displacement, but typically faster for sparse data [S1]. Lookup is $O(1)$ [S2, S3, unofficial].
+-- **Memory Complexity:** $O(N)$ where $N$ is the number of grid cells, but effectively $O(\text{non-empty cells})$ due to the perfect hash avoiding empty cell storage [S2, S3, unofficial]. The domain bits $D$ add $N$ bits overhead [S2, S3, unofficial].
+-- **Performance:** Offers constant-time access to voxel data while storing only occupied cells [S2, S3, unofficial].
+-- **Strengths:** Low memory overhead for static scenes, fast lookup, no collision resolution during rendering [S2, S3, unofficial].
+-- **Limitations:** Static data only (rebuilding required for updates), construction complexity [S1][S2, unofficial].
++*   **Time Complexity:** Lookup is O(1) for both perfect hashing (after construction) and modular hashing [S1][S2, unofficial]. Construction of perfect hash is O(M^{3/2}) in the worst case [S1].
++*   **Memory Complexity:** Proportional to the number of non-empty cells $N_{nz}$ for perfect hashing, plus the domain bits $N$ [S1][S2, unofficial]. For modular hashing, proportional to the hash table size $T$ [S5, unofficial].
++*   **Performance:** Hash Grids offer significant memory savings over dense grids for sparse scenes. Test results show memory usage scaling with triangle count (e.g., 18.67 MB for 1.09M triangles in the Buddha scene) [S2, unofficial].
++*   **Strengths:** Constant-time access, low memory overhead for sparse data, simple implementation [S1][S2, unofficial].
++*   **Limitations:** Perfect hashing is static; modular hashing suffers from collisions; inverse mapping is expensive [S1, S8].
+ 
+ ## Background
+-The method was introduced in 1977 by Aho and Ullman as a compaction scheme for transition diagrams of deterministic finite automata [S1]. It was later adapted for sparse matrix compression and 3D grid hashing in computer graphics, notably by Lagae and Dutre (2008) for ray tracing acceleration structures [S1][S2, S3, unofficial]. It is used in static volume rendering and ray tracing to accelerate access to sparse voxel data [S1][S2, S3, unofficial].
++Hash Grids were introduced in 1977 by Aho and Ullman as a compaction scheme for transition diagrams of deterministic finite automata [S1]. The row displacement compression algorithm was later adapted for sparse 3D matrix compression in computer graphics by Lagae and Dutre (2008) [S1][S2, unofficial]. The method has since been widely adopted in ray tracing acceleration structures and neural rendering (e.g., Instant NGP) for efficient feature storage [S1][S5, unofficial].
+ 
+ ## Sources
+@@ -200,3 +137,4 @@
+ [S5] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
+ [S6] aewallin/dualcontouring, https://github.com/aewallin/dualcontouring, fetched 2026-10-26 (unofficial)
+-[S7] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)+[S7] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)
++[S8] How Far can we Compress Instant-NGP-Based NeRF?, https://doi.org/10.1109/cvpr52733.2024.01921, fetched 2026-10-26

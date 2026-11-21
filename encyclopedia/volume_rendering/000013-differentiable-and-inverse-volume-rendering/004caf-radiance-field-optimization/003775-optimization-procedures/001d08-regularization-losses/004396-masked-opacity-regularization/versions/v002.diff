@@ -1,0 +1,133 @@
+--- v001.md
++++ v002.md
+@@ -3,63 +3,57 @@
+ 
+ ## Overview
+-Masked Opacity Regularization is a constraint applied during the optimization of radiance fields (specifically 3D Gaussian Splatting) to prevent large Gaussians from interfering with visibility tests and causing gradient explosion [S1, unofficial]. It differs from conventional mask regularization by only pushing opacity outside a binary mask to zero, while leaving opacity inside the mask unconstrained, thereby avoiding the degradation of BRDF parameter training and visibility test accuracy [S1, unofficial].
++Masked opacity regularization is a technique used in differentiable volume rendering to prevent large primitives (such as Gaussians) from saturating visibility tests and causing gradient explosion during inverse rendering [S1, unofficial]. It differs from conventional mask regularization by only penalizing opacity outside a specified binary mask, leaving opacity inside the mask unconstrained, thereby avoiding the degradation of BRDF parameter training and visibility accuracy [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   Input: A binary visibility mask $M$ (where $M_i=1$ if Gaussian $i$ is inside the mask, $0$ otherwise) and the current opacity logits $o_i$ for each Gaussian $i$.
+-*   Output: A scalar regularization loss value $\mathcal{L}_{mask}$.
++**Inputs and outputs:**
++- Input: A binary mask $M$ (where $M(\mathbf{x})=1$ inside the region of interest, $0$ outside) and the opacity $\alpha_i$ (or opacity logit $\alpha'_i$) for each primitive $i$.
++- Output: A scalar regularization loss value $L_{mask}$.
+ 
+-**Data Structures:**
+-*   $M$: A boolean or integer array of size $N$ (number of Gaussians).
+-*   $o$: A float array of size $N$ containing opacity logits.
++**Data structures:**
++- The mask $M$ is typically a 2D image or a spatial query function mapping primitive centers to binary values.
++- Opacity is stored as a scalar per primitive.
+ 
+ **Steps:**
+-1.  For each Gaussian $i$ from $1$ to $N$:
+-    a.  Compute the opacity $\alpha_i$ from the logit $o_i$ using the sigmoid function:
+-        $$ \alpha_i = \sigma(o_i) = \frac{1}{1 + \exp(-o_i)} $$
+-    b.  If the Gaussian is outside the mask ($M_i = 0$):
+-        i.  Compute the penalty term. The goal is to drive $\alpha_i$ toward 0. A common implementation for this specific regularization (as described in Phys3DGS) is a squared error or L2 penalty on the opacity itself for masked-out regions [S1, unofficial].
+-        $$ \text{penalty}_i = \alpha_i^2 $$
+-        *(Note: The source [S1, unofficial] describes the intent "pushing that of Gaussians outside of the mask toward zero" but does not provide the explicit mathematical formula for the loss term, only the conceptual approach. In practice, this is often implemented as $\alpha_i^2$ or $(\alpha_i - 0)^2$.)*
+-    c.  If the Gaussian is inside the mask ($M_i = 1$):
+-        i.  The penalty is 0 (opacity is unconstrained).
+-        $$ \text{penalty}_i = 0 $$
+-2.  Sum the penalties:
+-    $$ \mathcal{L}_{mask} = \sum_{i=1}^{N} \text{penalty}_i $$
++1. For each primitive $i$ with center $\mathbf{c}_i$ and opacity $\alpha_i$:
++   a. Determine if the primitive lies inside the mask: $m_i = M(\mathbf{c}_i)$.
++   b. If $m_i = 0$ (outside mask), compute the penalty for non-zero opacity.
++   c. If $m_i = 1$ (inside mask), no penalty is applied [S1, unofficial].
++2. Aggregate the penalties over all primitives.
++
++**Formula:**
++The loss is defined as the sum of squared opacities for primitives outside the mask:
++$$
++L_{mask} = \sum_{i: m_i=0} \alpha_i^2
++$$
++Or, if operating on opacity logits $\alpha'_i$ (where $\alpha_i = \sigma(\alpha'_i)$):
++$$
++L_{mask} = \sum_{i: m_i=0} \sigma(\alpha'_i)^2
++$$
++where $\sigma$ is the sigmoid function [S1, unofficial].
+ 
+ **Parameters:**
+-*   None explicitly defined in the source for the mask regularization itself, other than the binary mask definition.
++- Weight $\lambda_{mask}$: A hyperparameter scaling the regularization term. Typical values are not specified in the source [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Conventional Mask Regularization Pitfall:** Pushing opacity *inside* the mask to one (and outside to zero) hurts the training of BRDF parameters and adversely affects visibility tests [S1, unofficial]. This method avoids that by *not* constraining opacity inside the mask.
+-*   **Gradient Explosion:** Large Gaussians with high opacity can block gradients from reaching deeper structures. This regularization helps mitigate this by ensuring only relevant (masked) Gaussians contribute significantly to the scene representation without forcing artificial saturation [S1, unofficial].
++**Edge cases and pitfalls:**
++- Conventional mask regularization pushes opacity *inside* the mask to one. This approach is avoided because it hurts the training of BRDF parameters and adversely affects visibility tests [S1, unofficial].
++- The regularization is applied throughout the entire training process, including specific stages such as hybrid representation building and PBR training [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def masked_opacity_regularization(opacities: List[float], mask: List[bool]) -> float:
++def masked_opacity_regularization(opacities, mask):
+     """
+-    Computes the masked opacity regularization loss.
++    opacities: Tensor of shape (N,), containing opacity alpha_i for N primitives.
++    mask: Tensor of shape (N,), binary mask where 1 indicates inside region, 0 outside.
++    Returns: Scalar loss value.
++    """
++    # Identify primitives outside the mask
++    outside_mask = (mask == 0)
+     
+-    Args:
+-        opacities: List of opacity logits (o_i) for N Gaussians.
+-        mask: List of booleans (M_i) indicating if Gaussian i is inside the mask.
+-        
+-    Returns:
+-        Scalar loss value.
+-    """
+-    loss = 0.0
+-    for i in range(len(opacities)):
+-        # Compute sigmoid opacity from logit
+-        o_i = opacities[i]
+-        alpha_i = 1.0 / (1.0 + math.exp(-o_i))
+-        
+-        # If outside the mask, penalize opacity to push it to zero
+-        if not mask[i]:
+-            # Conventional approach pushes inside to 1 and outside to 0.
+-            # This method only constrains outside to 0, leaving inside unconstrained.
+-            # Source [S1, unofficial] implies a penalty on opacity for masked-out Gaussians.
+-            # A standard implementation for "pushing to zero" is alpha^2.
+-            loss += alpha_i ** 2
+-            
++    # Get opacities for primitives outside the mask
++    opacities_outside = opacities[outside_mask]
++    
++    # Compute squared sum of these opacities
++    loss = torch.sum(opacities_outside ** 2)
++    
+     return loss
+ ```
+@@ -67,18 +61,17 @@
+ ## Subtopics
+ 
+-### Opacity Regularization
+-A related but distinct regularization term used in compact 3D Gaussian Splatting (e.g., GlobalSplat) to prevent front splats from saturating too early [S2]. Unlike Masked Opacity Regularization which uses a spatial mask, this method penalizes mean opacity and opacity logits exceeding a threshold globally [S2]. It helps gradient flow to deeper parts of the representation, which is critical when a small number of Gaussians must explain both visible and hidden structures [S2]. The loss is defined as $\mathcal{L}_{\mathrm {opacity}} = \frac {1}{N}\sum _{n=1}^{N}\alpha _n + \frac {1}{N}\sum _{n=1}^{N}\max (o_n - t,0)^2$, where $t = \log \frac {\alpha _{\max }}{1-\alpha _{\max }}$ and $\alpha_{\max} = 0.2$ [S2].
++### [Opacity Regularization](16547-opacity-regularization.md)
++A specific instance of masked opacity regularization that applies to the global mean and logit distribution rather than spatial masks, preventing front splats from saturating early.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$, where $N$ is the number of Gaussians, as it requires a single pass over all Gaussians to compute the loss.
+-*   **Memory Complexity:** $O(1)$ auxiliary memory (excluding the input arrays).
+-*   **Strengths:** Prevents gradient explosion caused by large, opaque Gaussians; improves stability in inverse rendering tasks involving BRDFs; avoids the pitfalls of forcing opacity to 1 inside masks.
+-*   **Limitations:** Requires a pre-computed or dynamically generated visibility mask; does not address opacity saturation globally (unlike Opacity Regularization).
+-*   **When to use:** Inverse rendering pipelines where BRDF parameters are being optimized and visibility tests are sensitive to artificial opacity saturation [S1, unofficial].
++- **Time complexity:** Linear in the number of primitives $N$, as it requires iterating over all primitives to check mask membership and summing squared values.
++- **Memory complexity:** $O(N)$ to store the mask and opacity values.
++- **Strengths:** Prevents gradient explosion from large Gaussians interfering with visibility tests; preserves BRDF training quality by not constraining opacity inside the mask [S1, unofficial].
++- **Limitations:** Requires a high-quality binary mask; performance depends on the accuracy of the mask extraction [S1, unofficial].
++- **When to use:** Inverse rendering tasks where physical parameters (like BRDF) need to be optimized alongside geometry, and where conventional mask regularization degrades results [S1, unofficial].
+ 
+ ## Background
+-Originated in the context of Physically-based 3D Gaussian Splatting for Inverse Rendering (Phys3DGS) [S1, unofficial]. The method was developed to address issues where conventional mask regularization (pushing opacity inside masks to 1) degraded the quality of BRDF parameter training and visibility tests. It is applied throughout the entire training process, including in hybrid representations involving mesh-Gaussian combinations [S1, unofficial].
++Originated in Phys3DGS for physically-based 3D Gaussian Splatting for inverse rendering [S1, unofficial]. It addresses the issue that conventional mask regularization (pushing opacity inside the mask to one) harms BRDF parameter training and visibility tests [S1, unofficial]. The method is applied throughout the entire training process, including stages for building mesh-3DGS hybrid representations and PBR training [S1, unofficial].
+ 
+ ## Sources
+-[S1] Phys3DGS: Physically-based 3D Gaussian Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2409.10335, fetched 2026-10-26 (unofficial)
+-[S2] GlobalSplat: Efficient Feed-Forward 3D Gaussian Splatting via Global Scene Tokens, https://doi.org/10.1007/978-3-032-37595-7_10, fetched 2026-10-29+[S1] Phys3DGS: Physically-based 3D Gaussian Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2409.10335, fetched 2026-10-26 (unofficial)

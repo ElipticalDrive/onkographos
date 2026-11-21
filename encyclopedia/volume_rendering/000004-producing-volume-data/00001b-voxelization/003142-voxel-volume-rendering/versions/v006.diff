@@ -1,0 +1,254 @@
+--- v005.md
++++ v006.md
+@@ -4,24 +4,27 @@
+ 
+ ## Overview
+-Voxel volume rendering visualizes a 3D scalar field by projecting light absorption and emission through a discrete voxel grid, revealing internal density variations without surface extraction [S1, S2, unofficial]. It differs from isosurface methods by rendering the entire volume data rather than a single thresholded boundary, and from analytic methods by operating on pre-computed discrete samples [S1, S2, unofficial]. The method calculates opacity and color at voxel locations, which visualizes sharp transitions as vague transitions within a unit cell, appearing as small vague cubes [S1, unofficial]. It supports two distinct visual styles: "block mode," which snaps raymarching to voxel centers for a crisp block-model look, and "smooth compositing," which interpolates values for a continuous appearance [S3, unofficial].
++Voxel volume rendering visualizes a 3D scalar field by projecting light absorption and emission through a discrete voxel grid, revealing internal density variations without surface extraction [S1, unofficial][S3, unofficial]. It differs from isosurface methods by rendering the entire volume data rather than a single thresholded boundary, and from analytic methods by operating on pre-computed discrete samples [S1, unofficial][S3, unofficial]. The method supports two distinct visual styles: "block mode," which snaps raymarching to voxel centers for a crisp, discrete appearance, and "smooth compositing," which interpolates values for a continuous look [S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D scalar field represented as a voxel grid (e.g., `Float32Array` of size $N_x \times N_y \times N_z$) [S2, S3, unofficial].
++*   **Input:** A 3D scalar field represented as a voxel grid (e.g., `Float32Array` of size $N_x \times N_y \times N_z$) [S3, unofficial].
+ *   **Input:** Camera parameters (position, focal point, view-up vector) [S2, unofficial].
+-*   **Input:** Transfer function parameters (display min/max, opacity, threshold, color gradient) [S2, S3, unofficial].
+-*   **Output:** A 2D rendered image [S2, unofficial].
++*   **Input:** Transfer function parameters (display min/max, opacity, threshold, color gradient) [S3, unofficial].
++*   **Output:** A 2D rendered image (e.g., PNG) [S2, unofficial].
+ 
+ **Data Structures:**
+-1.  **Voxel Grid:** A 1D array of 32-bit floats representing the scalar value at each voxel. Memory usage scales as $N^3 \times 4$ bytes (e.g., $64^3 \approx 1$ MB, $128^3 \approx 8$ MB, $256^3 \approx 64$ MB) [S2, S3, unofficial].
++1.  **Voxel Grid:** A 1D array of 32-bit floats representing the scalar value at each voxel. Memory usage scales as $N^3 \times 4$ bytes (e.g., $64^3 \approx 1$ MB, $128^3 \approx 8$ MB, $256^3 \approx 64$ MB) [S3, unofficial].
+ 2.  **3D Texture:** The voxel grid is uploaded to GPU memory as a `Data3DTexture` (or equivalent 3D texture object) [S3, unofficial].
+-3.  **Transfer Function:** A mapping from scalar value to color and opacity, typically implemented as a two-stop linear interpolation or threshold-based cutoff in the shader [S1, S2, S3, unofficial].
++3.  **Transfer Function:** A mapping from scalar value to color and opacity. In the shader-driven approach, this is often a simple two-stop linear interpolation or threshold-based cutoff [S3, unofficial].
+ 
+ **Steps:**
+-1.  **Data Preparation:** Evaluate the scalar field onto a regular grid. If using procedural generation (e.g., IDW interpolation), compute values for each voxel center $(x_i, y_j, z_k)$ [S3, unofficial].
++1.  **Data Preparation:** Evaluate the scalar field onto a regular grid of dimensions $(N_x, N_y, N_z)$ [S3, unofficial].
+ 2.  **Texture Upload:** Upload the scalar array to the GPU as a 3D texture [S3, unofficial].
+ 3.  **Geometry Setup:** Create a unit cube (or bounding box of the volume) to serve as the rendering primitive [S3, unofficial].
+ 4.  **Ray Marching:** For each pixel in the output image, cast a ray through the volume. The ray is parameterized by $t$, where $P(t) = O + tD$ ($O$ is origin, $D$ is direction) [G].
+-5.  **Sampling:** For each step along the ray: determine the 3D texture coordinate corresponding to the ray's current position [G]. Sample the texture. If "block mode" is enabled, snap the coordinate to the nearest voxel center (nearest-neighbor filtering). If "smooth" mode is enabled, use trilinear interpolation [S3, unofficial]. Check for sentinel values (e.g., $< -1e29$) indicating empty space or nodata. Skip these voxels [S3, unofficial].
++5.  **Sampling:** For each step along the ray:
++    *   Determine the 3D texture coordinate corresponding to the ray's current position [G].
++    *   Sample the texture. If "block mode" is enabled, snap the coordinate to the nearest voxel center (nearest-neighbor filtering). If "smooth" mode is enabled, use trilinear interpolation [S3, unofficial].
++    *   Check for sentinel values (e.g., $< -1e29$) indicating empty space or nodata. Skip these voxels [S3, unofficial].
+ 6.  **Compositing:** Apply front-to-back compositing. For each step $i$ with sample value $v_i$, compute color $C_i$ and opacity $\alpha_i$ using the transfer function. Update the accumulated color $C_{acc}$ and opacity $\alpha_{acc}$:
+     $$
+@@ -40,108 +43,112 @@
+ 
+ ```python
+-# Standard math helpers [G]
+-def clamp(v, lo, hi): return max(lo, min(hi, v))
+-def lerp(a, b, t): return a + (b - a) * t
+-
+-def ray_march_volume(ray_origin, ray_direction, voxel_grid, dims, bounds, params):
+-    # bounds: [min_x, min_y, min_z, max_x, max_y, max_z]
+-    # dims: [Nx, Ny, Nz]
+-    # voxel_grid: 1D array of size Nx*Ny*Nz
+-    # params: {block_mode, display_min, display_max, opacity, threshold, color_start, color_end}
+-
+-    # 1. Ray-box intersection to find entry/exit t
+-    t_min, t_max = compute_ray_box_intersection(ray_origin, ray_direction, bounds)
+-    if t_min > t_max:
+-        return [0.0, 0.0, 0.0, 0.0]
+-
+-    # 2. Calculate step size based on voxel dimensions
+-    voxel_size_x = (bounds[3] - bounds[0]) / dims[0]
+-    voxel_size_y = (bounds[4] - bounds[1]) / dims[1]
+-    voxel_size_z = (bounds[5] - bounds[2]) / dims[2]
+-    step_size = min(voxel_size_x, voxel_size_y, voxel_size_z)
+-
+-    # 3. Initialize accumulators
++def ray_march_volume(ray_origin, ray_direction, voxel_grid, dims, voxel_size, params):
++    # Initialize accumulators
+     acc_color = [0.0, 0.0, 0.0, 0.0]
+     acc_alpha = 0.0
+ 
+-    # 4. March along ray
++    # Calculate ray bounds within the volume using slab method
++    t_min = 0.0
++    t_max = float('inf')
++    for i in range(3):
++        if abs(ray_direction[i]) > 1e-6:
++            t1 = (-voxel_size * dims[i] - ray_origin[i]) / ray_direction[i]
++            t2 = (0.0 - ray_origin[i]) / ray_direction[i]
++            t_enter = min(t1, t2)
++            t_exit = max(t1, t2)
++            t_min = max(t_min, t_enter)
++            t_max = min(t_max, t_exit)
++        else:
++            if ray_origin[i] < 0.0 or ray_origin[i] >= voxel_size * dims[i]:
++                return acc_color  # Ray parallel to axis and outside volume
++
++    if t_min >= t_max:
++        return acc_color  # Ray misses volume
++
++    # Step size: typically equal to or slightly smaller than voxel size
++    step = params.step_size if params.step_size > 0 else voxel_size * 0.9
++
+     t = t_min
+-    while t <= t_max:
+-        # Current world position
+-        pos_x = ray_origin[0] + ray_direction[0] * t
+-        pos_y = ray_origin[1] + ray_direction[1] * t
+-        pos_z = ray_origin[2] + ray_direction[2] * t
++    while t < t_max:
++        # Current position in world space
++        pos = [ray_origin[i] + ray_direction[i] * t for i in range(3)]
+ 
+-        # Map to voxel indices
+-        ix = int((pos_x - bounds[0]) / voxel_size_x)
+-        iy = int((pos_y - bounds[1]) / voxel_size_y)
+-        iz = int((pos_z - bounds[2]) / voxel_size_z)
++        # Convert to grid indices
++        gx = pos[0] / voxel_size
++        gy = pos[1] / voxel_size
++        gz = pos[2] / voxel_size
+ 
+         # Check bounds
+-        if not (0 <= ix < dims[0] and 0 <= iy < dims[1] and 0 <= iz < dims[2]):
+-            t += step_size
++        if gx < 0 or gx >= dims[0] or gy < 0 or gy >= dims[1] or gz < 0 or gz >= dims[2]:
++            t += step
+             continue
+ 
+-        # Sample value
+-        idx = ix + iy * dims[0] + iz * dims[0] * dims[1]
+-        voxel_val = voxel_grid[idx]
++        # Sample voxel value
++        if params.block_mode:
++            # Snap to nearest voxel center
++            ix = int(round(gx))
++            iy = int(round(gy))
++            iz = int(round(gz))
++            idx = ix + iy * dims[0] + iz * dims[0] * dims[1]
++            voxel_val = voxel_grid[idx]
++        else:
++            # Trilinear interpolation
++            ix = int(gx)
++            iy = int(gy)
++            iz = int(gz)
++            fx = gx - ix
++            fy = gy - iy
++            fz = gz - iz
++            ix = max(0, min(ix, dims[0] - 1))
++            iy = max(0, min(iy, dims[1] - 1))
++            iz = max(0, min(iz, dims[2] - 1))
++            v000 = voxel_grid[ix + iy*dims[0] + iz*dims[0]*dims[1]]
++            v100 = voxel_grid[(ix+1) + iy*dims[0] + iz*dims[0]*dims[1]]
++            v010 = voxel_grid[ix + (iy+1)*dims[0] + iz*dims[0]*dims[1]]
++            v110 = voxel_grid[(ix+1) + (iy+1)*dims[0] + iz*dims[0]*dims[1]]
++            v001 = voxel_grid[ix + iy*dims[0] + (iz+1)*dims[0]*dims[1]]
++            v101 = voxel_grid[(ix+1) + iy*dims[0] + (iz+1)*dims[0]*dims[1]]
++            v011 = voxel_grid[ix + (iy+1)*dims[0] + (iz+1)*dims[0]*dims[1]]
++            v111 = voxel_grid[(ix+1) + (iy+1)*dims[0] + (iz+1)*dims[0]*dims[1]]
++            c00 = v000 * (1-fx) + v100 * fx
++            c10 = v010 * (1-fx) + v110 * fx
++            c01 = v001 * (1-fx) + v101 * fx
++            c11 = v011 * (1-fx) + v111 * fx
++            b0 = c00 * (1-fy) + c10 * fy
++            b1 = c01 * (1-fy) + c11 * fy
++            voxel_val = b0 * (1-fz) + b1 * fz
+ 
+-        # Check sentinel
++        # Check for nodata sentinel
+         if voxel_val < -1e29:
+-            t += step_size
++            t += step
+             continue
+ 
+         # Apply threshold
+         if voxel_val < params.threshold:
+-            t += step_size
++            t += step
+             continue
+ 
+-        # Transfer function
+-        normalized_val = clamp((voxel_val - params.display_min) / (params.display_max - params.display_min), 0.0, 1.0)
+-        color = lerp(params.color_start, params.color_end, normalized_val)
++        # Transfer function: map scalar to color and opacity
++        normalized_val = max(0.0, min(1.0, (voxel_val - params.display_min) / (params.display_max - params.display_min)))
++        color = [params.color_start[j] * (1 - normalized_val) + params.color_end[j] * normalized_val for j in range(3)]
+         opacity = params.opacity * normalized_val
+ 
+         # Front-to-back compositing
+         alpha_contribution = opacity * (1.0 - acc_alpha)
+-        acc_color[0] += color[0] * alpha_contribution
+-        acc_color[1] += color[1] * alpha_contribution
+-        acc_color[2] += color[2] * alpha_contribution
+-        acc_alpha += alpha_contribution
++        acc_color = [acc_color[j] + color[j] * alpha_contribution for j in range(3)]
++        acc_alpha = acc_alpha + alpha_contribution
+ 
+-        t += step_size
++        t += step
+ 
+     return acc_color
+-
+-def compute_ray_box_intersection(origin, direction, bounds):
+-    # Standard slab method [G]
+-    tmin = (bounds[0] - origin[0]) / direction[0] if direction[0] != 0 else -float('inf')
+-    tmax = (bounds[3] - origin[0]) / direction[0] if direction[0] != 0 else float('inf')
+-    if tmin > tmax: tmin, tmax = tmax, tmin
+-
+-    tymin = (bounds[1] - origin[1]) / direction[1] if direction[1] != 0 else -float('inf')
+-    tymax = (bounds[4] - origin[1]) / direction[1] if direction[1] != 0 else float('inf')
+-    if tymin > tymax: tymin, tymax = tymax, tymin
+-
+-    if (tmin > tymax) or (tymin > tmax): return 0.0, 0.0
+-    if tymin > tmin: tmin = tymin
+-    if tymax < tmax: tmax = tymax
+-
+-    tzmin = (bounds[2] - origin[2]) / direction[2] if direction[2] != 0 else -float('inf')
+-    tzmax = (bounds[5] - origin[2]) / direction[2] if direction[2] != 0 else float('inf')
+-    if tzmin > tzmax: tzmin, tzmax = tzmax, tzmin
+-
+-    if (tmin > tzmax) or (tzmin > tmax): return 0.0, 0.0
+-    if tzmin > tmin: tmin = tzmin
+-    if tzmax < tmax: tmax = tzmax
+-
+-    return max(0.0, tmin), max(0.0, tmax)
+ ```
+ 
+ **Parameters:**
+ *   `dims`: Voxel grid dimensions $(N_x, N_y, N_z)$. Typical: $[64, 64, 64]$ [S3, unofficial].
+-*   `displayMin/Max`: Range of scalar values mapped to the color transfer function. Typical: $0$ to $500$ [S3, unofficial].
++*   `displayMin/Max`: Range of scalar values mapped to the color transfer function. Typical: $[0, 500]$ [S3, unofficial].
+ *   `opacity`: Global volume opacity. Typical: $0.4$ [S3, unofficial].
+ *   `threshold`: Minimum scalar value to render (alpha cutoff). Typical: $0.1$ [S3, unofficial].
+-*   `ImageResolution`: Output image dimensions in pixels. Typical: $[1600, 1200]$ for production figures, $[1000, 800]$ for animation frames [S2, unofficial].
++*   `ImageResolution`: Output image size. Typical: $[1600, 1200]$ [S2, unofficial].
++*   `step_size`: Re-sampling distance along rays. Typically equal to or slightly smaller than voxel size [S1, unofficial].
+ 
+ ## Subtopics
+@@ -151,17 +158,20 @@
+ 
+ ### [Super resolution volume rendering](15901-super-resolution-volume-rendering.md)
+-Visualizes sharp surfaces located between voxels by calculating and shading the intermediate difference volume gradient at re-sampling locations, rather than interpolating voxel opacities. It solves the problem of low perceived resolution in standard voxel volume rendering, where classification at voxel locations causes semi-transparent artifacts and limits detail to the voxel size. It sets itself apart by performing classification and shading at arbitrary re-sampling locations on the ray instead of at discrete voxel centers, and from the Simple Shader by explicitly computing volume gradients for shading at these intermediate points.
++Visualizes sharp surfaces located between voxels by calculating and shading the intermediate difference volume gradient at re-sampling locations, rather than interpolating voxel opacities. It solves the problem of low perceived resolution in standard voxel volume rendering, where classification at voxel locations causes semi-transparent artifacts and limits detail to the voxel size. Choose this when high perceived resolution and sharp surface rendering are required over standard voxel interpolation.
++
++### GPU Volume Ray Casting with Transform Support
++A rendering technique that displays volumetric data on the GPU via a fragment shader using volume ray casting. It extends the base volume shader to support independent translation, rotation, and scaling of the volume, which the original shader did not support. Choose this when dynamic volumetric transformations are needed without camera-relative rendering. [S4]
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering times heavily depend on the number of voxels in the dataset and the number of ray steps [S1, unofficial].
+-*   **Memory Complexity:** $O(N_x N_y N_z)$ for the voxel grid storage [S2, S3, unofficial].
+-*   **Performance:** A $64^3$ grid uses ~1 MB of memory; $256^3$ uses ~64 MB [S3, unofficial]. Real-time tweaking of display parameters (opacity, threshold) is possible without re-uploading the texture, as these are uniform updates in the shader [S3, unofficial].
+-*   **Strengths:** Direct visualization of internal structures; supports real-time parameter adjustment; simple implementation in modern graphics APIs (e.g., Three.js) [S2, S3, unofficial].
+-*   **Limitations:** Block mode can appear aliased; smooth mode requires interpolation which may blur sharp features; decreasing the re-sampling distance has little effect on perceived image quality [S1, S3, unofficial].
+-*   **When to use:** When internal density variations are important and surface extraction is not desired [S1, unofficial]. When real-time parameter tweaking is needed [S2, S3, unofficial].
++*   **Time Complexity:** $O(P \cdot S)$, where $P$ is the number of pixels and $S$ is the number of ray steps per pixel. Rendering times heavily depend on the number of voxels in the dataset [S1, unofficial].
++*   **Memory Complexity:** $O(N_x N_y N_z)$ for the voxel grid storage. Memory usage scales as $N^3 \times 4$ bytes (e.g., $64^3 \approx 1$ MB, $128^3 \approx 8$ MB, $256^3 \approx 64$ MB) [S3, unofficial].
++*   **Performance:** Real-time tweaking of display parameters (opacity, threshold, color gradient) is possible without re-uploading the texture, as these are uniform-only updates in the shader [S3, unofficial].
++*   **Strengths:** Direct visualization of internal structures; supports real-time parameter adjustment; simple implementation in modern graphics APIs (e.g., Three.js) [S3, unofficial].
++*   **Limitations:** Block mode can appear aliased; smooth mode requires interpolation which may blur sharp features; decreasing the re-sampling distance has little effect on perceived image quality, and oversampling the opacity field in the k-direction does not decrease spatial error [S1, unofficial].
++*   **When to use:** When internal density variations are important and surface extraction is not desired [S1, unofficial]. When real-time parameter tweaking is needed [S3, unofficial].
+ *   **When not to use:** When high-fidelity surface geometry is required (use isosurfaces instead) [S1, unofficial].
+ 
+ ## Background
+-Voxel volume rendering is a standard technique in scientific visualization, often implemented in tools like ParaView and VTK [S2, unofficial]. It allows for the visualization of complex 3D scalar fields, such as concentration data or velocity fields, by leveraging 3D textures and ray marching in shaders [S2, unofficial]. The method has been adapted for various domains, including geological modeling (e.g., drill-hole sample interpolation) and fluid dynamics [S1, S2, unofficial]. The spatial error bound for this method is maximal for a point of the iso-surface located in the centre of a unit cell, and is of the order $E_{\text{voxel}} \approx (\sqrt{dx^2 + dy^2 + dz^2}) / 2$ [S1, unofficial]. Improving the error bound by a factor of two increases dataset sizes by a factor of eight, while reducing it by a factor of ten increases dataset size by a factor of 1000 [S1, unofficial]. GPU implementations extend the base volume shader to support independent translation, rotation, and scaling of the volumetric data [S4].
++Voxel volume rendering is a standard technique in scientific visualization, often implemented in tools like ParaView and VTK [S2, unofficial]. It allows for the visualization of complex 3D scalar fields, such as concentration data or velocity fields, by leveraging 3D textures and ray marching in shaders [S3, unofficial]. The method has been adapted for various domains, including geological modeling (e.g., drill-hole sample interpolation) and fluid dynamics [S1, unofficial][S3, unofficial].
+ 
+ ## Sources

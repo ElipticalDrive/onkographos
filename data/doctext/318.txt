@@ -1,0 +1,2074 @@
+-- INSTALLATION --
+
+This is a ROS package. Compile it with catkin.
+
+-- BASIC USAGE --
+
+Set the parameters:
+  voxel_resolution (float): resolution of the voxel grid (edge of each voxel)
+  sensor_range_max (float): max range of the sensor
+  sphere_radius (float): radius of the view sphere
+  horizontal_resolution (uint): horizontal resolution of the sensor (lower to increase speed)
+  vertical_resolution (uint): vertical resolution of the sensor (lower to increase speed)
+  half_fov_horizontal (float): horizontal HFOV of the sensor
+  half_fov_vertical (float): vertical HFOV of the sensor
+  latitude_max, latitude_min (float): latitude range when sampling the view sphere (deg)
+  longitude_max, longitude_min (float): longitude range when sampling the view sphere (deg)
+  zrotation_max, zrotation_min (float): range of the camera rotation around the z-axis when sampling the view sphere (deg)
+  latitude_step, longitude_step, zrotation_step (float): steps when sampling the view sphere (deg)
+  occupied_voxel_weight, unknown_voxel_weight (float): weight of unknown and occupied voxels in the objective function
+
+Send the current point of interest, i.e. the center of the view sphere, to topic:
+
+  /basic_next_best_view/poi (geometry_msgs/PointStamped)
+
+Send the current occupancy voxel grid to the topic:
+
+  /basic_next_best_view/occupancy (sensor_msgs/PointCloud2)
+
+This message must be obtained from a pcl::PointCloud<pcl::PointXYZI>.
+If the intensity I of a point is:
+  I < 0: the point is empty
+  I > 0: the point is occupied
+  I = 0: the point is unknown
+Missing points in the voxel grid are considered empty.
+
+Call the Execute action. Fill the basic_request field with:
+  type = REQUEST_GET_BEST_POSES
+  has_index_range = false
+
+The action will return an array of poses in the field basic_response.best_poses, ordered from the fittest (at index 0), based on the number of unknown and/or known voxels visible from that pose, depending on the metric.
+
+-- ADVANCED USAGE --
+
+TODO
+
+-- CREDITS --
+
+basic_next_best_view by Dario Lodi Rizzini and Riccardo Monica, RIMLab, Department of Information Engineering, University of Parma, Italy.
+http://www.rimlab.ce.unipr.it/
+
+Developed for the paper:
+Global Registration of Mid-Range 3D Observations and Short Range Next Best Views,
+Jacopo Aleotti, Dario Lodi Rizzini, Riccardo Monica and Stefano Caselli,
+IEEE/RSJ International Conference on Intelligent Robots and Systems, 2014
+
+Released under the BSD license.
+
+2014-12-02
+
+### src/RayTracer.cpp
+```
+/*
+ * Copyright (c) 2013-2014, Dario Lodi Rizzini, Riccardo Monica
+ *   RIMLab, Department of Information Engineering, University of Parma, Italy
+ *   http://www.rimlab.ce.unipr.it/
+ *
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted
+ * provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions
+ * and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of
+ * conditions and the following disclaimer in the documentation and/or other materials provided with
+ * the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to
+ * endorse or promote products derived from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+ * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#include "RayTracer.h"
+#include <cassert>
+#include <algorithm>    // std::copy_if
+#include <iterator>     // std::back_insert_iterator
+
+// http://ray-tracer-concept.blogspot.it/2011/11/ray-box-intersection.html
+bool intersectRayBox(const Eigen::Vector3f& rayo,const Eigen::Vector3f& rayd,
+                     const Eigen::Vector3f& bmin,const Eigen::Vector3f& bmax,
+                     Eigen::Vector3f& rayi)
+{
+  Eigen::Vector3f bnear;
+  Eigen::Vector3f bfar;
+  // Checks for intersection testing on each direction coordinate
+  // Computes 
+  float t1, t2, tnear = -1e+6f, tfar = 1e+6f; //, tCube;
+  bool intersectFlag = true;
+  for (int i = 0; i < 3; ++i) {
+//    std::cout << "coordinate " << i << ": bmin " << bmin(i) << ", bmax " << bmax(i) << std::endl; 
+    assert(bmin(i) <= bmax(i));
+    if (::fabs(rayd(i)) < 1e-6) {   // Ray parallel to axis i-th
+      if (rayo(i) < bmin(i) || rayo(i) > bmax(i)) {
+        intersectFlag = false;
+      }
+    }
+    else {
+      // Finds the nearest and the farthest vertices of the box from the ray origin
+      if (::fabs(bmin(i) - rayo(i)) < ::fabs(bmax(i) - rayo(i))) {
+        bnear(i) = bmin(i);
+        bfar(i) = bmax(i);
+      }
+      else {
+        bnear(i) = bmax(i);
+        bfar(i) = bmin(i);
+      }
+//      std::cout << "  bnear " << bnear(i) << ", bfar " << bfar(i) << std::endl;
+      // Finds the distance parameters t1 and t2 of the two ray-box intersections:
+      // t1 must be the closest to the ray origin rayo. 
+      t1 = (bnear(i) - rayo(i)) / rayd(i);
+      t2 = (bfar(i) - rayo(i)) / rayd(i);
+      if (t1 > t2) {
+        std::swap(t1,t2);
+      } 
+      // The two intersection values are used to saturate tnear and tfar
+      if (t1 > tnear) {
+        tnear = t1;
+      }
+      if (t2 < tfar) {
+        tfar = t2;
+      }
+//      std::cout << "  t1 " << t1 << ", t2 " << t2 << ", tnear " << tnear << ", tfar " << tfar 
+//        << "  tnear > tfar? " << (tnear > tfar) << ", tfar < 0? " << (tfar < 0) << std::endl;
+      if(tnear > tfar) {
+         intersectFlag = false;
+      }
+      if(tfar < 0) {
+       intersectFlag = false;
+      }
+    }
+  }
+  if (intersectFlag == true) {
+    rayi = rayo + rayd * tnear;
+//    std::cout << " intersection rayi:\n" << rayi << std::endl;
+  }
+  // Checks whether intersection occurs or not
+  return intersectFlag;
+}
+
+bool targetViewpoint(const Eigen::Vector3f& rayo,const Eigen::Vector3f& target,const Eigen::Vector3f& down,
+                     Eigen::Affine3f& transf)
+{
+  // uz: versor pointing toward the destination
+  Eigen::Vector3f uz = target - rayo;
+  if (std::abs(uz.norm()) < 1e-3) {
+    std::cout << __FILE__ << "," << __LINE__ << ": target point on ray origin!" << std::endl;
+    return false;
+  }
+  uz.normalize();
+  //std::cout << "uz " << uz.transpose() << ", norm " << uz .norm() << std::endl;
+  // ux: versor pointing toward the ground
+  Eigen::Vector3f ux = down - down.dot(uz) * uz;  
+  if (std::abs(ux.norm()) < 1e-3) {
+    std::cout << __FILE__ << "," << __LINE__ << ": ray to target toward ground direction!" << std::endl;
+    return false;
+  }
+  ux.normalize();
+  //std::cout << "ux " << ux.transpose() << ", norm " << ux.norm() << std::endl;
+  Eigen::Vector3f uy = uz.cross(ux);
+  //std::cout << "uy " << uy.transpose() << ", norm " << uy.norm() << std::endl;
+  Eigen::Matrix3f rot;
+  rot << ux.x(), uy.x(), uz.x(),
+         ux.y(), uy.y(), uz.y(),
+         ux.z(), uy.z(), uz.z();
+  transf.setIdentity();
+  transf.translate(rayo);
+  transf.rotate(rot);
+  //std::cout << __FILE__ << "\nrotation\n" << rot << "\ntranslation\n" << rayo << "\naffine\n" << transf.matrix() << std::endl;
+  return true;
+}
+
+// --------------------------------------------------------
+// RAY TRACING
+// --------------------------------------------------------
+
+PinholeRayTracer::PinholeRayTracer()
+ : viewpoint_(), hfov_(HFOV), vfov_(VFOV), hsize_(HSIZE), vsize_(VSIZE), res_(RES), rangeMax_(RANGE_MAX)
+{
+  viewpoint_ = Eigen::Affine3f::Identity();
+  //std::cout << "************************\nviewpoint\n" << viewpoint_.matrix() << std::endl;
+}
+
+PinholeRayTracer::~PinholeRayTracer()
+{
+}
+
+void PinholeRayTracer::setViewpoint(const Eigen::Affine3f& vp)
+{
+  viewpoint_ = vp;
+  //std::cout << "************************\nCHANGED viewpoint\n" << viewpoint_.matrix() << std::endl;
+}
+
+Eigen::Affine3f PinholeRayTracer::getViewPoint() const
+{
+  return viewpoint_;
+}
+
+void PinholeRayTracer::setHalfFoV(float hfov,float vfov)
+{
+  hfov_ = hfov;
+  vfov_ = vfov;
+}
+
+float PinholeRayTracer::getHFoV() const
+{
+  return hfov_;
+}
+
+float PinholeRayTracer::getVFoV() const
+{
+  return vfov_;
+}
+
+void PinholeRayTracer::setImageSize(int hsize,float vsize)
+{
+  hsize_ = hsize;
+  vsize_ = vsize;
+}
+
+int PinholeRayTracer::getHSize() const
+{
+  return hsize_;
+}
+
+int PinholeRayTracer::getVSize() const
+{
+  return vsize_;
+}
+
+
+void PinholeRayTracer::setBoxRes(float res)
+{
+  res_ = res;
+}
+
+float PinholeRayTracer::getBoxRes() const
+{
+  return res_;
+}
+
+void PinholeRayTracer::setRangeMax(float rmax)
+{
+  rangeMax_ = rmax;
+}
+
+float PinholeRayTracer::getRangeMax() const
+{
+  return rangeMax_;
+}
+
+void PinholeRayTracer::castRays(std::vector<Eigen::Vector3f>& rayds)
+{
+  // Approximation: the field of view is sampled using equal division of tangent.
+  Eigen::Vector3f rayd;
+  float dh = tan(hfov_) / hsize_;
+  float dv = tan(vfov_) / vsize_;
+  Eigen::Matrix3f rot = viewpoint_.rotation();
+  for (int h =-hsize_/2; h <= hsize_/2; ++h) {
+    for (int v = -vsize_/2; v <= vsize_/2; ++v) {
+      rayd << dv * v, dh * h, 1.0;
+      if (h==0 && v ==0) {
+        //std::cout << "CENTRAL RAY\n" << rayd.transpose() << std::endl;
+      }
+      rayd = rot * rayd;
+      rayds.push_back(rayd);
+      if (h==0 && v ==0) {
+        //std::cout << "ROTATION\n" << rot.matrix() << std::endl;
+        //std::cout << "h " << h << ", v " << v << ", rayd " << rayd.transpose() << std::endl;
+      }
+      //std::cout << "h " << h << ", v " << v << ", rayd " << rayd.transpose() << std::endl;
+    }
+  }
+}
+
+std::ostream& operator<<(std::ostream& out,const PinholeRayTracer& prt)
+{
+  out << "viewpoint:\n" << prt.viewpoint_.matrix() << std::endl
+      << "hfov: " << prt.hfov_ << " rad" << std::endl
+      << "vfox: " << prt.vfov_ << " rad" << std::endl
+      << "hsize: " << prt.hsize_ << std::endl
+      << "vsize: " << prt.vsize_ << std::endl
+      << "res: " << prt.res_ << std::endl;
+  return out;
+}
+
+// --------------------------------------------------------
+// KINEMATIC FILTER
+// --------------------------------------------------------
+
+
+// IMPLEMENTATION OF NoKinematicFilter
+
+bool NoKinematicFilter::isFeasible(const Eigen::Affine3f& transform)
+{
+  return true;
+}
+
+void NoKinematicFilter::selectFeasible(const std::vector<Eigen::Affine3f>& candidates,std::vector<Eigen::Affine3f>& feasibles)
+{
+  feasibles.clear();
+  //std::copy_if(candidates.begin(),candidates.end(),std::back_inserter(feasibles),&ComauKinematicFilter::isFeasible);
+  std::vector<Eigen::Affine3f>::const_iterator it;
+  for (it = candidates.begin(); it != candidates.end(); ++it) {
+    feasibles.push_back(*it);
+  }
+}
+```
+
+### src/RayTracer.h
+```
+/*
+ * Copyright (c) 2013-2014, Dario Lodi Rizzini, Riccardo Monica
+ *   RIMLab, Department of Information Engineering, University of Parma, Italy
+ *   http://www.rimlab.ce.unipr.it/
+ *
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted
+ * provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions
+ * and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of
+ * conditions and the following disclaimer in the documentation and/or other materials provided with
+ * the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to
+ * endorse or promote products derived from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+ * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#ifndef RAY_TRCAER_H
+#define RAY_TRACER_H
+
+#include <iostream>
+#include <pcl/point_types.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_traits.h>
+#include <pcl/PointIndices.h>
+#include <pcl/common/centroid.h>
+#include <pcl/io/io.h>
+#include <pcl/octree/octree.h>
+#include <pcl/octree/octree_search.h>
+#include <Eigen/Dense>
+
+// --------------------------------------------------------
+// GENERAL FUNCTIONS
+// --------------------------------------------------------
+
+/** Checks whether a ray with origin o and direction d. 
+ * @param rayo origin of the ray
+ * @param rayd direction of the ray
+ * @param bmin minimum coordinates of the box vertices
+ * @param bmax maximum coordinates of the box vertices
+ */ 
+bool intersectRayBox(const Eigen::Vector3f& rayo,const Eigen::Vector3f& rayd,
+                     const Eigen::Vector3f& bmin,const Eigen::Vector3f& bmax,
+                     Eigen::Vector3f& rayi);
+
+/** Checks whether a ray with origin o and direction d. 
+ * @param rayo origin of the ray
+ * @param rayd destination point to observe
+ * @param ground a vector pointing to bottom of the camera
+ */
+bool targetViewpoint(const Eigen::Vector3f& rayo,const Eigen::Vector3f& target,const Eigen::Vector3f& down,
+                     Eigen::Affine3f& transf);
+
+// --------------------------------------------------------
+// OCCUPANCY POLICY
+// Occupancy policy allows to convert the information stored inside 
+// the points of a point cloud to the free/occupied/unknown information
+// --------------------------------------------------------
+
+/** Occupancy policy allows to check whether a point representing a box is free, occupied or 
+ * unknown according to the conventional values of field intensity. 
+ */
+struct SignedIntensityOccupancyPolicy
+{
+  enum OccupancyStatus { FREE = 0, OCCUPIED, UNKNOWN };
+  static const float EPS = 1e-4;
+
+  template <typename PointT>
+  OccupancyStatus getOccupancyStatus(const PointT& p);
+};
+
+struct ProbabilisticOccupancyPolicy
+{
+  enum OccupancyStatus { FREE = 0, OCCUPIED, UNKNOWN };
+  static const float TOLLERANCE = 0.2;
+
+  template <typename PointT>
+  OccupancyStatus getOccupancyStatus(const PointT& p);
+};
+
+// --------------------------------------------------------
+// RAY TRACING
+// --------------------------------------------------------
+
+template <typename PointT>
+struct ViewpointDistance
+{
+  typedef typename pcl::PointCloud<PointT>::const_iterator ConstIterator;
+  Eigen::Vector3f rayo;
+
+  //ViewpointDistance(Eigen::Vector3f r,const pcl::PointCloud<PointT>& c) : rayo(r), cloud(c) { }
+
+  bool operator()(ConstIterator it1,ConstIterator it2) 
+  {
+    Eigen::Vector3f v1(it1->x,it1->y,it1->z);
+    Eigen::Vector3f v2(it2->x,it2->y,it2->z);
+    return ((v1-rayo).norm() < (v2-rayo).norm());
+  }
+};
+
+/** Class to perform ray tracing from a given viepoint.
+ * The simulated camera is oriented as follows:
+ * -axis Z: along the optical axis of the camera (orthogonal to image plane);
+ * -axis X: pointing towards the bottom/ground;
+ * -axis Y: according to right-hand rule. 
+ */
+//template <typename OccupancyPolicy>
+class PinholeRayTracer
+{
+public:
+  // Default values
+  static const float RES = 0.02f;
+  static const float RANGE_MAX = 100000.0f;
+  static const float HFOV = M_PI * 160.0f / 180.0f;
+  static const float VFOV = M_PI * 160.0f / 180.0f;
+  static const int HSIZE = 6; //320;
+  static const int VSIZE = 4; //240;
+
+  /** Default constructor. 
+   */
+  PinholeRayTracer();
+  
+  /** Destructor. 
+   */
+  ~PinholeRayTracer();
+  
+  /** Sets the viewpoint of the ray-casting (the reference frame). 
+   */
+  void setViewpoint(const Eigen::Affine3f& vp);
+
+  /** Gets the viewpoint of the ray-casting (the reference frame). 
+   */
+  Eigen::Affine3f getViewPoint() const;
+
+  /** Sets the FoV angles: horizontal, along y axis, and vertical)
+   */
+  void setHalfFoV(float hf,float vf);
+
+  /** Gets half horizontal FoV. 
+   */
+  float getHFoV() const;
+
+  /** Gets half vertical FoV. 
+   */
+  float getVFoV() const;
+
+  /** Sets the image size. 
+   */
+  void setImageSize(int hsize,float vsize);
+
+  /** Gets half horizontal image size.
+   */
+  int getHSize() const;
+
+  /** Gets half vertical image size.
+   */
+  int getVSize() const;
+
+  /** Sets the resolution, i.e. the size of the box.
+   */
+  void setBoxRes(float res);
+
+  /** Gets box resolution.
+   */
+  float getBoxRes() const;
+  
+  /** Sets maximum range of the sensor.
+   */
+  void setRangeMax(float res);
+
+  /** Gets maximum range of the sensor.
+   */  
+  float getRangeMax() const;
+
+  /** Creates rays.
+   */
+  void castRays(std::vector<Eigen::Vector3f>& rayds);
+
+//  /** Computes the number of occupied and unknown boxes observed from the 
+//   */
+//  template <typename PointT>
+//  void evaluate(const pcl::PointCloud<PointT>& occmap,int& occupied,int& unknown);
+
+  /** Finds and returns the indices of the intersected boxes in the given occupancy map.
+   * The occupancy map is represented by a point cloud. 
+   */
+  template <typename PointT>
+  void evaluate(pcl::octree::OctreePointCloudSearch<PointT>& octree_search,pcl::PointIndices& indices);
+
+  /** Prints internal status of ray caster.
+   */
+  friend std::ostream& operator<<(std::ostream& out,const PinholeRayTracer& prt);
+
+private:
+  Eigen::Affine3f viewpoint_;
+  float hfov_;
+  float vfov_;
+  float hsize_;
+  float vsize_;
+  float res_;
+  float rangeMax_;
+// OccupancyPolicy occupancyChecker_;
+};
+
+// --------------------------------------------------------
+// KINEMATIC FILTER
+// --------------------------------------------------------
+
+/** This KinematicFilter accepts all the possible robot configurations. 
+ */
+class NoKinematicFilter
+{
+public:
+  /** Checks whether the configuration is feasible.
+   */
+  static bool isFeasible(const Eigen::Affine3f& transform);
+
+  /**
+   */
+  static void selectFeasible(const std::vector<Eigen::Affine3f>& candidates,std::vector<Eigen::Affine3f>& feasibles);
+};
+
+#include "impl/RayTracer.hpp"
+
+#endif
+```
+
+### src/basic_next_best_view.cpp
+```
+/*
+ * Copyright (c) 2013-2014, Riccardo Monica
+ *   RIMLab, Department of Information Engineering, University of Parma, Italy
+ *   http://www.rimlab.ce.unipr.it/
+ *
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted
+ * provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions
+ * and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of
+ * conditions and the following disclaimer in the documentation and/or other materials provided with
+ * the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to
+ * endorse or promote products derived from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+ * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// ROS
+#include <ros/ros.h>
+#include <sensor_msgs/PointCloud2.h>
+#include <geometry_msgs/PointStamped.h>
+#include <geometry_msgs/Pose.h>
+#include <geometry_msgs/PoseArray.h>
+#include <std_msgs/UInt32MultiArray.h>
+#include <std_msgs/Float64MultiArray.h>
+#include <std_msgs/MultiArrayDimension.h>
+#include <std_msgs/UInt32.h>
+#include <std_msgs/Empty.h>
+#include <actionlib/server/simple_action_server.h>
+#include <pcl_conversions/pcl_conversions.h>
+#include <eigen_conversions/eigen_msg.h>
+
+// PCL
+#include <pcl/point_types.h>
+#include <pcl/point_cloud.h>
+#include <pcl/visualization/pcl_visualizer.h>
+#include <pcl/visualization/point_cloud_handlers.h>
+
+// STL
+#include <vector>
+#include <deque>
+
+// Eigen
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
+#include <Eigen/StdVector>
+
+// Boost
+#include <boost/thread/mutex.hpp>
+#include <boost/thread/thread.hpp>
+#include <boost/shared_ptr.hpp>
+
+// Custom
+#include <basic_next_best_view/BasicRequest.h>
+#include <basic_next_best_view/VoxelFilter.h>
+#include <basic_next_best_view/BasicResponse.h>
+#include <basic_next_best_view/ExecuteAction.h>
+#include "basic_next_best_view.h"
+#include "basic_viewpoint_evaluator.h"
+
+typedef boost::shared_ptr<pcl::visualization::PCLVisualizer> ViewerPtr;
+
+class BaseNBVHandler
+{
+public:
+  typedef unsigned int uint;
+  typedef typename actionlib::SimpleActionServer<basic_next_best_view::ExecuteAction> ExecuteActionServer;
+  typedef typename boost::shared_ptr<ExecuteActionServer> ExecuteActionServerPtr;
+
+  BaseNBVHandler(ros::NodeHandle & nh): m_nh(nh)
+  {
+    std::string temp_string;
+    double temp_double;
+    int temp_int;
+    BasicViewpointEvaluator::MinMaxStep temp_minmaxstep;
+
+    m_nh.param<std::string>(PARAM_NAME_OCCUPANCY_TOPIC,temp_string,PARAM_DEFAULT_OCCUPANCY_TOPIC);
+    m_occupancy_subscriber = m_nh.subscribe(temp_string,1,&BaseNBVHandler::onOccupancyCloud,this);
+
+    m_nh.param<std::string>(PARAM_NAME_POI_TOPIC,temp_string,PARAM_DEFAULT_POI_TOPIC);
+    m_poi_subscriber = m_nh.subscribe(temp_string,1,&BaseNBVHandler::onPOI,this);
+
+    m_nh.param<std::string>(PARAM_NAME_VOXEL_FILTER_TOPIC,temp_string,PARAM_DEFAULT_VOXEL_FILTER_TOPIC);
+    m_voxel_filter_subscriber = m_nh.subscribe(temp_string,1,&BaseNBVHandler::onVoxelFilter,this);
+
+    m_nh.param<double>(PARAM_NAME_VOXEL_RESOLUTION,temp_double,PARAM_DEFAULT_VOXEL_RESOLUTION);
+    m_evaluator.setVoxelResolution(temp_double);
+    m_nh.param<double>(PARAM_NAME_SENSOR_RANGE_MAX,temp_double,PARAM_DEFAULT_SENSOR_RANGE_MAX);
+    m_evaluator.setSensorRangeMax(temp_double);
+    m_nh.param<double>(PARAM_NAME_SPHERE_RADIUS,temp_double,PARAM_DEFAULT_SPHERE_RADIUS);
+    m_evaluator.setSphereRadius(temp_double);
+
+    m_nh.param<int>(PARAM_NAME_VERTICAL_RES,temp_int,PARAM_DEFAULT_VERTICAL_RES);
+    m_evaluator.setVerticalRes(temp_int);
+    m_nh.param<int>(PARAM_NAME_HORIZONTAL_RES,temp_int,PARAM_DEFAULT_HORIZONTAL_RES);
+    m_evaluator.setHorizontalRes(temp_int);
+
+    m_nh.param<double>(PARAM_NAME_HALF_FOV_HOR,temp_double,PARAM_DEFAULT_HALF_FOV_HOR);
+    m_evaluator.setHalfHorizontalFOV(temp_double * M_PI / 180.0);
+    m_nh.param<double>(PARAM_NAME_HALF_FOV_VER,temp_double,PARAM_DEFAULT_HALF_FOV_VER);
+    m_evaluator.setHalfVerticalFOV(temp_double * M_PI / 180.0);
+
+    m_nh.param<double>(PARAM_NAME_LATITUDE_MAX,temp_double,PARAM_DEFAULT_LATITUDE_MAX);
+    temp_minmaxstep.max = temp_double * M_PI / 180.0;
+    m_nh.param<double>(PARAM_NAME_LATITUDE_MIN,temp_double,PARAM_DEFAULT_LATITUDE_MIN);
+    temp_minmaxstep.min = temp_double * M_PI / 180.0;
+    m_nh.param<double>(PARAM_NAME_LATITUDE_STEP,temp_double,PARAM_DEFAULT_LATITUDE_STEP);
+    temp_minmaxstep.step = temp_double * M_PI / 180.0;
+    m_evaluator.setLatitudeSampling(temp_minmaxstep);
+
+    m_nh.param<double>(PARAM_NAME_LONGITUDE_MAX,temp_double,PARAM_DEFAULT_LONGITUDE_MAX);
+    temp_minmaxstep.max = temp_double * M_PI / 180.0;
+    m_nh.param<double>(PARAM_NAME_LONGITUDE_MIN,temp_double,PARAM_DEFAULT_LONGITUDE_MIN);
+    temp_minmaxstep.min = temp_double * M_PI / 180.0;
+    m_nh.param<double>(PARAM_NAME_LONGITUDE_STEP,temp_double,PARAM_DEFAULT_LONGITUDE_STEP);
+    temp_minmaxstep.step = temp_double * M_PI / 180.0;
+    m_evaluator.setLongitudeSampling(temp_minmaxstep);
+
+    m_nh.param<double>(PARAM_NAME_ZROTATION_MAX,temp_double,PARAM_DEFAULT_ZROTATION_MAX);
+    temp_minmaxstep.max = temp_double * M_PI / 180.0;
+    m_nh.param<double>(PARAM_NAME_ZROTATION_MIN,temp_double,PARAM_DEFAULT_ZROTATION_MIN);
+    temp_minmaxstep.min = temp_double * M_PI / 180.0;
+    m_nh.param<double>(PARAM_NAME_ZROTATION_STEP,temp_double,PARAM_DEFAULT_ZROTATION_STEP);
+    temp_minmaxstep.step = temp_double * M_PI / 180.0;
+    m_evaluator.setZRotationSampling(temp_minmaxstep);
+
+    m_nh.param<std::string>(PARAM_NAME_EXECUTE_ACTION,temp_string,PARAM_DEFAULT_EXECUTE_ACTION);
+    m_execute_action_server = ExecuteActionServerPtr(
+      new ExecuteActionServer(m_nh,temp_string,boost::bind(&BaseNBVHandler::onExecuteAction,this,_1),false));
+
+    m_nh.param<std::string>(PARAM_NAME_WORLD_FRAME,m_world_frame,PARAM_DEFAULT_WORLD_FRAME);
+
+    m_nh.param<std::string>(PARAM_NAME_ACK_TOPIC,temp_string,PARAM_DEFAULT_ACK_TOPIC);
+    m_ack_publisher = m_nh.advertise<std_msgs::Empty>(temp_string,10);
+
+    m_nh.param<double>(PARAM_NAME_UNKNOWN_WEIGHT,temp_double,PARAM_DEFAULT_UNKNOWN_WEIGHT);
+    m_evaluator.setUnknownWeight(temp_double);
+    m_nh.param<double>(PARAM_NAME_OCCUPIED_WEIGHT,temp_double,PARAM_DEFAULT_OCCUPIED_WEIGHT);
+    m_evaluator.setOccupiedWeight(temp_double);
+
+    m_evaluator.setTerminationCondition(*this);
+
+    // scope only
+    {
+      boost::mutex::scoped_lock lock(m_worker_mutex);
+      m_is_terminated = false;
+      m_is_running = false;
+    }
+
+    m_execute_action_server->start();
+  }
+
+  virtual ~BaseNBVHandler()
+  {
+    // scope only
+    {
+      boost::mutex::scoped_lock lock(m_worker_mutex);
+      m_is_terminated = true;
+    }
+
+    if (m_execute_action_server)
+      m_execute_action_server->shutdown();
+  }
+
+  /// Callback to receive the occupancy grid computed as a point cloud
+  void onOccupancyCloud(const sensor_msgs::PointCloud2 & cloud_msg)
+  {
+    ROS_INFO("basic_next_best_view: occupancy cloud received.");
+
+    boost::mutex::scoped_lock lock(m_worker_mutex);
+    if (m_is_running)
+    {
+      ROS_ERROR("basic_next_best_view: attempted to change parameters while running!");
+      return;
+    }
+
+    BasicViewpointEvaluator::PointCloudXYZI::Ptr cloud =
+      BasicViewpointEvaluator::PointCloudXYZI::Ptr(new BasicViewpointEvaluator::PointCloudXYZI);
+    pcl::fromROSMsg(cloud_msg,*cloud);
+    m_evaluator.setOccupancyCloud(cloud);
+
+    m_ack_publisher.publish(std_msgs::Empty());
+  }
+
+  void onPOI(const geometry_msgs::Point & pt)
+  {
+    ROS_INFO("basic_next_best_view: POI received.");
+    boost::mutex::scoped_lock lock(m_worker_mutex);
+    if (m_is_running)
+    {
+      ROS_ERROR("basic_next_best_view: attempted to change parameters while running!");
+      return;
+    }
+
+    Eigen::Vector3f poi;
+    poi.x() = pt.x;
+    poi.y() = pt.y;
+    poi.z() = pt.z;
+    m_evaluator.setPOI(poi);
+
+    m_ack_publisher.publish(std_msgs::Empty());
+  }
+
+  void onCandidates(const geometry_msgs::PoseArray & poses)
+  {
+    ROS_INFO("basic_next_best_view: Candidates received.");
+    boost::mutex::scoped_lock lock(m_worker_mutex);
+    if (m_is_running)
+    {
+      ROS_ERROR("basic_next_best_view: attempted to change parameters while running!");
+      return;
+    }
+
+    std::vector<Eigen::Affine3f> sensor_poses;
+    for (uint i = 0; i < poses.poses.size(); i++)
+      sensor_poses.push_back(_FromROSPoseToEigen(poses.poses[i]));
+    m_evaluator.setSensorPoses(sensor_poses);
+
+    m_ack_publisher.publish(std_msgs::Empty());
+  }
+
+  class TBBoxVoxelFilter: public BasicViewpointEvaluator::IVoxelFilter
+  {
+    public:
+    TBBoxVoxelFilter(const Eigen::Vector3f & bbox_min,const Eigen::Vector3f & bbox_max):
+      m_bbox_min(bbox_min),m_bbox_max(bbox_max) {}
+
+    virtual bool Evaluate(BasicViewpointEvaluator::PointCloudXYZI::Ptr cloud,uint pidx,
+      const Eigen::Affine3f & /*viewpoint*/)
+    {
+      const pcl::PointXYZI & pt = (*cloud)[pidx];
+      Eigen::Vector3f ept(pt.x,pt.y,pt.z);
+      return ept.x() <= m_bbox_max.x() && ept.y() <= m_bbox_max.y() && ept.z() <= m_bbox_max.z() &&
+        ept.x() >= m_bbox_min.x() && ept.y() >= m_bbox_min.y() && ept.z() >= m_bbox_min.z();
+    }
+
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+
+    private:
+    Eigen::Vector3f m_bbox_min,m_bbox_max;
+  };
+
+  class TSphereVoxelFilter: public BasicViewpointEvaluator::IVoxelFilter
+  {
+    public:
+    TSphereVoxelFilter(const Eigen::Vector3f & center,float radius):
+      m_center(center),m_radius(radius) {}
+
+    virtual bool Evaluate(BasicViewpointEvaluator::PointCloudXYZI::Ptr cloud,uint pidx,
+      const Eigen::Affine3f & /*viewpoint*/)
+    {
+      const pcl::PointXYZI & pt = (*cloud)[pidx];
+      Eigen::Vector3f ept(pt.x,pt.y,pt.z);
+      return (ept - m_center).norm() < m_radius;
+    }
+
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+
+    private:
+    Eigen::Vector3f m_center;
+    float m_radius;
+  };
+
+  void onVoxelFilter(const basic_next_best_view::VoxelFilter & filter)
+  {
+    ROS_INFO("basic_next_best_view: voxel filter received.");
+    boost::mutex::scoped_lock lock(m_worker_mutex);
+    if (m_is_running)
+    {
+      ROS_ERROR("basic_next_best_view: attempted to change parameters while running!");
+      return;
+    }
+
+    if (filter.type == filter.FILTER_NONE)
+    {
+      ROS_INFO("basic_next_best_view: voxel filter disabled.");
+      m_evaluator.setVoxelFilter(BasicViewpointEvaluator::IVoxelFilter::Ptr());
+      m_ack_publisher.publish(std_msgs::Empty());
+    }
+    else if (filter.type == filter.FILTER_BOUNDING_BOX)
+    {
+      ROS_INFO("basic_next_best_view: voxel filter: bounding box.");
+      Eigen::Vector3f bbox_min,bbox_max;
+      for (uint i = 0; i < 3; i++)
+        bbox_min[i] = filter.bbox_min[i];
+      for (uint i = 0; i < 3; i++)
+        bbox_max[i] = filter.bbox_max[i];
+
+      m_evaluator.setVoxelFilter(BasicViewpointEvaluator::IVoxelFilter::Ptr(
+        new TBBoxVoxelFilter(bbox_min,bbox_max)));
+
+      m_ack_publisher.publish(std_msgs::Empty());
+    }
+    else if (filter.type == filter.FILTER_SPHERE)
+    {
+      ROS_INFO("basic_next_best_view: voxel filter: sphere.");
+      Eigen::Vector3f center;
+      for (uint i = 0; i < 3; i++)
+        center[i] = filter.center[i];
+      float radius = filter.radius;
+      m_evaluator.setVoxelFilter(BasicViewpointEvaluator::IVoxelFilter::Ptr(
+        new TSphereVoxelFilter(center,radius)));
+
+      m_ack_publisher.publish(std_msgs::Empty());
+    }
+    else
+      ROS_ERROR("basic_next_best_view: unknown voxel filter type: %u",uint(filter.type));
+  }
+
+  void onExecuteAction(basic_next_best_view::ExecuteGoalConstPtr goal)
+  {
+    const basic_next_best_view::BasicRequest & request = goal->request;
+
+    // scope only
+    {
+      boost::mutex::scoped_lock lock(m_worker_mutex);
+      if (m_is_running)
+      {
+        ROS_ERROR("basic_next_best_view: Received request, but already running!");
+        m_execute_action_server->setAborted();
+        return;
+      }
+
+      if (m_is_terminated)
+      {
+        m_execute_action_server->setAborted();
+        return;
+      }
+
+      m_is_running = true;
+    }
+
+    basic_next_best_view::ExecuteResultPtr result(new basic_next_best_view::ExecuteResult);
+    basic_next_best_view::BasicResponse & response = result->response;
+    response.ok = false;
+
+    if (request.type == request.REQUEST_NOOP)
+      requestNoopWorker(request,response);
+    else if (request.type == request.REQUEST_GET_POSE_LIST)
+      requestPoseListWorker(request,response);
+    else if (request.type == request.REQUEST_GET_BEST_INDICES)
+      requestBestIndicesWorker(request,response);
+    else if (request.type == request.REQUEST_GET_BEST_POSES)
+      requestBestPosesWorker(request,response);
+    else if (request.type == request.REQUEST_GET_POSE_WEIGHTS)
+      requestPoseWeightWorker(request,response);
+    else if (request.type == request.REQUEST_GET_POSE_COUNT)
+      requestPoseCountWorker(request,response);
+    else if (request.type == request.REQUEST_GET_UNK_COUNT)
+      requestUnknownCountWorker(request,response);
+    else
+      ROS_ERROR("basic_next_best_view: unknown request type: %u.",uint(request.type));
+
+    if (response.ok)
+      m_execute_action_server->setSucceeded(*result);
+      else
+        m_execute_action_server->setAborted(*result);
+
+    // scope only
+    {
+      boost::mutex::scoped_lock lock(m_worker_mutex);
+      m_is_running = false;
+    }
+  }
+
+  void requestNoopWorker(const basic_next_best_view::BasicRequest & request,basic_next_best_view::BasicResponse & response)
+  {
+    ROS_INFO("basic_next_best_view: noop.");
+    response.ok = true;
+  }
+
+  void requestPoseListWorker(const basic_next_best_view::BasicRequest & request,basic_next_best_view::BasicResponse & response)
+  {
+    ROS_INFO("basic_next_best_view: pose list.");
+
+    const std::vector<Eigen::Affine3f> * sensor_poses = m_evaluator.getCandidates();
+
+    if (isTerminated())
+      return;
+
+    if (!sensor_poses)
+    {
+      ROS_ERROR("basic_next_best_view: Couldn't compute poses!");
+      return;
+    }
+
+    geometry_msgs::PoseArray & pose_array = response.pose_list;
+    pose_array.header.stamp = ros::Time::now();
+    pose_array.header.frame_id = m_world_frame;
+
+    uint size = (*sensor_poses).size();
+    pose_array.poses.reserve(size);
+    for (uint i = 0; i < size; i++)
+      {
+      // apply index filter
+      if (request.has_index_range && (i < request.start_from_index || i >= request.end_before_index))
+        continue;
+
+      pose_array.poses.push_back(_FromEigenToROSPose((*sensor_poses)[i]));
+      }
+
+    response.ok = true;
+  }
+
+  void requestPoseCountWorker(const basic_next_best_view::BasicRequest & request,basic_next_best_view::BasicResponse & response)
+  {
+    ROS_INFO("basic_next_best_view: pose count.");
+
+    const std::vector<Eigen::Affine3f> * sensor_poses = m_evaluator.getCandidates();
+
+    if (isTerminated())
+      return;
+
+    if (!sensor_poses)
+    {
+      ROS_ERROR("basic_next_best_view: Couldn't compute poses!");
+      return;
+    }
+
+    uint count = sensor_poses->size();
+
+    response.pose_count = count;
+    response.ok = true;
+  }
+
+  void requestBestIndicesWorker(const basic_next_best_view::BasicRequest & request,basic_next_best_view::BasicResponse & response)
+  {
+    ROS_INFO("basic_next_best_view: best indices.");
+
+    const std::vector<uint> * indices = m_evaluator.getOrderedPoseIndices();
+
+    if (isTerminated())
+      return;
+
+    if (!indices)
+    {
+      ROS_ERROR("basic_next_best_view: Couldn't order poses!");
+      return;
+    }
+
+    std_msgs::UInt32MultiArray & message = response.index_list;
+
+    uint size = indices->size();
+    uint counter = 0;
+    message.data.reserve(size);
+    for (uint i = 0; i < size; i++)
+      {
+      // apply index filter
+      if (request.has_index_range && (i < request.start_from_index || i >= request.end_before_index))
+        continue;
+
+      message.data.push_back((*indices)[i]);
+      counter++;
+      }
+
+    std_msgs::MultiArrayDimension dim;
+    dim.label = "indices";
+    dim.size = counter;
+    dim.stride = 1;
+    message.layout.data_offset = 0;
+    message.layout.dim.push_back(dim);
+
+    response.ok = true;
+  }
+
+  void requestBestPosesWorker(const basic_next_best_view::BasicRequest & request,basic_next_best_view::BasicResponse & response)
+  {
+    ROS_INFO("basic_next_best_view: best poses.");
+
+    const std::vector<Eigen::Affine3f> * sensor_poses = m_evaluator.getCandidates();
+    const std::vector<uint> * indices = m_evaluator.getOrderedPoseIndices();
+
+    if (isTerminated())
+      return;
+
+    if (!sensor_poses || !indices)
+    {
+      ROS_ERROR("basic_next_best_view: Couldn't compute weights!");
+      return;
+    }
+
+    geometry_msgs::PoseArray & pose_array = response.best_poses;
+    pose_array.header.stamp = ros::Time::now();
+    pose_array.header.frame_id = m_world_frame;
+
+    uint size = indices->size();
+    pose_array.poses.reserve(size);
+    for (uint i = 0; i < size; i++)
+      {
+      // apply index filter
+      if (request.has_index_range && (i < request.start_from_index || i >= request.end_before_index))
+        continue;
+
+      pose_array.poses.push_back(_FromEigenToROSPose((*sensor_poses)[(*indices)[i]]));
+      }
+
+    response.ok = true;
+  }
+
+  void requestPoseWeightWorker(const basic_next_best_view::BasicRequest & request,basic_next_best_view::BasicResponse & response)
+  {
+    ROS_INFO("basic_next_best_view: pose weights.");
+
+    const std::vector<BasicViewpointEvaluator::Weight> * weights = m_evaluator.getWeights();
+
+    if (isTerminated())
+      return;
+
+    if (!weights)
+    {
+      ROS_ERROR("basic_next_best_view: Couldn't compute weights!");
+      return;
+    }
+
+    std_msgs::Float64MultiArray & message = response.weight_list;
+
+    uint size = (*weights).size();
+    uint counter = 0;
+    message.data.reserve(size);
+    for (uint i = 0; i < size; i++)
+      {
+      // apply index filter
+      if (request.has_index_range && (i < request.start_from_index || i >= request.end_before_index))
+        continue;
+
+      message.data.push_back((*weights)[i]);
+      counter++;
+      }
+
+    std_msgs::MultiArrayDimension dim;
+    dim.label = "weights";
+    dim.size = counter;
+    dim.stride = 1;
+    message.layout.data_offset = 0;
+    message.layout.dim.push_back(dim);
+
+    response.ok = true;
+  }
+
+  void requestUnknownCountWorker(const basic_next_best_view::BasicRequest & request,basic_next_best_view::BasicResponse & response)
+  {
+    ROS_INFO("basic_next_best_view: pose weights.");
+
+    BasicViewpointEvaluator::UintVectorConstPtr unknown = m_evaluator.getUnknownCount();
+
+    if (isTerminated())
+      return;
+
+    if (!unknown)
+    {
+      ROS_ERROR("basic_next_best_view: Couldn't compute unknown!");
+      return;
+    }
+
+    std_msgs::UInt32MultiArray & message = response.unknown_count;
+
+    uint size = unknown->size();
+    uint counter = 0;
+    message.data.reserve(size);
+    for (uint i = 0; i < size; i++)
+      {
+      // apply index filter
+      if (request.has_index_range && (i < request.start_from_index || i >= request.end_before_index))
+        continue;
+
+      message.data.push_back((*unknown)[i]);
+      counter++;
+      }
+
+    std_msgs::MultiArrayDimension dim;
+    dim.label = "unknown_count";
+    dim.size = counter;
+    dim.stride = 1;
+    message.layout.data_offset = 0;
+    message.layout.dim.push_back(dim);
+
+    response.ok = true;
+  }
+
+  bool isTerminated()
+  {
+    boost::mutex::scoped_lock lock(m_worker_mutex);
+    return m_is_terminated;
+  }
+
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+
+private:
+  std::deque<basic_next_best_view::BasicRequest> m_request_queue;
+
+  BasicViewpointEvaluator m_evaluator;
+
+  ExecuteActionServerPtr m_execute_action_server;
+
+  ros::NodeHandle & m_nh;
+  ros::Subscriber m_occupancy_subscriber;
+  ros::Subscriber m_poi_subscriber;
+  ros::Subscriber m_candidates_subscriber;
+  ros::Subscriber m_voxel_filter_subscriber;
+  ros::Publisher m_ack_publisher;
+
+  std::string m_world_frame;
+
+  bool m_is_terminated;
+  bool m_is_running;
+  boost::mutex m_worker_mutex;
+
+  geometry_msgs::Pose _FromEigenToROSPose(const Eigen::Affine3f & epose)
+  {
+    geometry_msgs::Pose rpose;
+    tf::poseEigenToMsg(epose.cast<double>(),rpose);
+    return rpose;
+  }
+
+  Eigen::Affine3f _FromROSPoseToEigen(const geometry_msgs::Pose & rpose)
+  {
+    Eigen::Affine3d result;
+    tf::poseMsgToEigen(rpose,result);
+    return result.cast<float>();
+  }
+};
+
+int main(int argc,char** argv)
+{
+  ros::init (argc, argv, "nbv_finder");
+
+  // Reading parameters
+  ros::NodeHandle nh("~");
+  BaseNBVHandler nbv(nh);
+
+  ros::spin();
+
+  return 0;
+}
+```
+
+### src/basic_next_best_view.h
+```
+/*
+ * Copyright (c) 2013-2014, Riccardo Monica
+ *   RIMLab, Department of Information Engineering, University of Parma, Italy
+ *   http://www.rimlab.ce.unipr.it/
+ *
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted
+ * provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions
+ * and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of
+ * conditions and the following disclaimer in the documentation and/or other materials provided with
+ * the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to
+ * endorse or promote products derived from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+ * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#ifndef BASIC_NEXT_BEST_VIEW_H
+#define BASIC_NEXT_BEST_VIEW_H
+
+// input topics
+#define PARAM_NAME_OCCUPANCY_TOPIC      "occupancy_topic"
+#define PARAM_DEFAULT_OCCUPANCY_TOPIC   "/basic_next_best_view/occupancy"
+
+#define PARAM_NAME_POI_TOPIC            "poi_topic"
+#define PARAM_DEFAULT_POI_TOPIC         "/basic_next_best_view/poi"
+
+// this allows to override the candidate generation
+#define PARAM_NAME_CANDIDATES_TOPIC     "candidates_topic"
+#define PARAM_DEFAULT_CANDIDATES_TOPIC  "/basic_next_best_view/candidates"
+
+#define PARAM_NAME_VOXEL_FILTER_TOPIC    "voxel_filter_topic"
+#define PARAM_DEFAULT_VOXEL_FILTER_TOPIC "/basic_next_best_view/voxel_filter"
+
+#define PARAM_NAME_EXECUTE_ACTION       "execute_action"
+#define PARAM_DEFAULT_EXECUTE_ACTION    "/basic_next_best_view/execute"
+
+// output topics
+#define PARAM_NAME_ACK_TOPIC            "ack_topic"
+#define PARAM_DEFAULT_ACK_TOPIC         "/basic_next_best_view/ack"
+
+// parameters
+#define PARAM_NAME_VOXEL_RESOLUTION     "voxel_resolution"
+#define PARAM_DEFAULT_VOXEL_RESOLUTION  ((double)(0.02))
+
+#define PARAM_NAME_SENSOR_RANGE_MAX     "sensor_range_max"
+#define PARAM_DEFAULT_SENSOR_RANGE_MAX  ((double)(1.0))
+
+#define PARAM_NAME_SPHERE_RADIUS        "sphere_radius"
+#define PARAM_DEFAULT_SPHERE_RADIUS     ((double)(1.0))
+
+  // sensor horizontal resolution
+#define PARAM_NAME_HORIZONTAL_RES       "horizontal_resolution"
+#define PARAM_DEFAULT_HORIZONTAL_RES    ((int)(30))
+  // sensor vertical resolution
+#define PARAM_NAME_VERTICAL_RES         "vertical_resolution"
+#define PARAM_DEFAULT_VERTICAL_RES      ((int)(30))
+  // horizontal half field of view, in degrees
+#define PARAM_NAME_HALF_FOV_HOR         "half_fov_horizontal"
+#define PARAM_DEFAULT_HALF_FOV_HOR      ((double)(30.0))
+  // vertical half field of view, in degrees
+#define PARAM_NAME_HALF_FOV_VER         "half_fov_vertical"
+#define PARAM_DEFAULT_HALF_FOV_VER      ((double)(30.0))
+
+// latitude, longitude and z-rotation sampling
+#define PARAM_NAME_LATITUDE_MAX         "latitude_max"
+#define PARAM_DEFAULT_LATITUDE_MAX      ((double)(60.0))
+
+#define PARAM_NAME_LATITUDE_MIN         "latitude_min"
+#define PARAM_DEFAULT_LATITUDE_MIN      ((double)(0.0))
+
+#define PARAM_NAME_LATITUDE_STEP        "latitude_step"
+#define PARAM_DEFAULT_LATITUDE_STEP     ((double)(10.0))
+
+#define PARAM_NAME_LONGITUDE_MAX         "longitude_max"
+#define PARAM_DEFAULT_LONGITUDE_MAX      ((double)(330.0))
+
+#define PARAM_NAME_LONGITUDE_MIN         "longitude_min"
+#define PARAM_DEFAULT_LONGITUDE_MIN      ((double)(0.0))
+
+#define PARAM_NAME_LONGITUDE_STEP        "longitude_step"
+#define PARAM_DEFAULT_LONGITUDE_STEP     ((double)(30.0))
+
+#define PARAM_NAME_ZROTATION_MAX         "zrotation_max"
+#define PARAM_DEFAULT_ZROTATION_MAX      ((double)(330.0))
+
+#define PARAM_NAME_ZROTATION_MIN         "zrotation_min"
+#define PARAM_DEFAULT_ZROTATION_MIN      ((double)(0.0))
+
+#define PARAM_NAME_ZROTATION_STEP        "zrotation_step"
+#define PARAM_DEFAULT_ZROTATION_STEP     ((double)(30.0))
+
+#define PARAM_NAME_OCCUPIED_WEIGHT       "occupied_voxel_weight"
+#define PARAM_DEFAULT_OCCUPIED_WEIGHT    ((double)(0.0))
+
+#define PARAM_NAME_UNKNOWN_WEIGHT        "unknown_voxel_weight"
+#define PARAM_DEFAULT_UNKNOWN_WEIGHT     ((double)(1.0))
+
+#define PARAM_NAME_WORLD_FRAME           "world_frame"
+#define PARAM_DEFAULT_WORLD_FRAME        "/world_frame"
+
+#endif // BASIC_NEXT_BEST_VIEW_H
+```
+
+### src/basic_viewpoint_evaluator.cpp
+```
+/*
+ * Copyright (c) 2013-2014, Riccardo Monica
+ *   RIMLab, Department of Information Engineering, University of Parma, Italy
+ *   http://www.rimlab.ce.unipr.it/
+ *
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted
+ * provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions
+ * and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of
+ * conditions and the following disclaimer in the documentation and/or other materials provided with
+ * the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to
+ * endorse or promote products derived from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+ * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#include "basic_viewpoint_evaluator.h"
+
+BasicViewpointEvaluator::BasicViewpointEvaluator()
+{
+  m_poi_received = false;
+  m_occupancy_cloud_received = false;
+  m_sensor_poses_computed = false;
+  m_pose_weights_computed = false;
+  m_ordered_pose_indices_computed = false;
+
+  m_unknown_weight = 1.0;
+  m_occupied_weight = 0.0;
+}
+
+void BasicViewpointEvaluator::computeCandidates()
+{
+  if (!m_poi_received)
+  {
+    ROS_ERROR("basic_next_best_view: POI not set. Can't continue!");
+    return;
+  }
+
+  if (m_sensor_poses_computed)
+    return; // be lazy
+
+  m_sensor_poses.clear();
+
+  // scope only
+  {
+    Eigen::Vector3f pos;
+    Eigen::Vector3f target;
+    Eigen::Vector3f down;
+    Eigen::Affine3f transf;
+    Eigen::Affine3f center = Eigen::Affine3f::Identity();
+    center.translate(m_poi);
+    int tmin = (int)round(m_latitude.min / m_latitude.step);
+    int tmax = (int)round(m_latitude.max / m_latitude.step);
+    int pmin = (int)round(m_longitude.min / m_longitude.step);
+    int pmax = (int)round(m_longitude.max / m_longitude.step);
+    int zmin = (int)round(m_zrotation.min / m_zrotation.step);
+    int zmax = (int)round(m_zrotation.max / m_zrotation.step);
+    target << 0.0f, 0.0f, 0.0f;
+    for (int t = tmin; t <= tmax; ++t) {
+      for (int p = pmin; p <= pmax; ++p) {
+        for (int rz = zmin; rz <= zmax; ++rz) {
+          float theta = m_latitude.step * t;
+          float phi = m_longitude.step * p;
+          float radius_rotation = rz * m_zrotation.step; // rotation around the selected radius
+          // Computes the position of candidate viewpoint sampled on a sphere
+          pos << m_sphere_radius * sin(theta) * cos(phi),
+                 m_sphere_radius * sin(theta) * sin(phi),
+                 m_sphere_radius * cos(theta);
+          down <<  cos(theta) * cos(phi),
+                   cos(theta) * sin(phi),
+                  -sin(theta);
+          // rotate the down vector by rz around pos-target
+          down = Eigen::AngleAxisf(radius_rotation,(pos - target).normalized()) * down;
+          bool valid = targetViewpoint(pos,target,down,transf);
+          if (valid) {
+            // Moves the viewpoint to the center of the observation
+            transf = center * transf;
+            m_sensor_poses.push_back(transf);
+          }
+
+        if (_IsTerminated())
+          return;
+        }
+      }
+    }
+  }
+
+  m_sensor_poses_computed = true;
+}
+
+void BasicViewpointEvaluator::computeWeights()
+{
+  if (!m_occupancy_cloud_received)
+  {
+    ROS_ERROR("basic_next_best_view: occupancy cloud not set. Can't continue!");
+    return;
+  }
+
+  computeCandidates();
+
+  if (_IsTerminated())
+    return;
+
+  if (!m_sensor_poses_computed)
+  {
+    ROS_ERROR("basic_next_best_view: couldn't compute candidates!");
+    return;
+  }
+
+  if (m_pose_weights_computed)
+    return; // be lazy
+
+  m_simulated_poses.clear();
+  m_pose_weights.clear();
+
+  pcl::octree::OctreePointCloudSearch<pcl::PointXYZI> octree_search(m_raytracer.getBoxRes());
+  {
+    octree_search.setInputCloud(m_occupancy_cloud);
+    octree_search.addPointsFromInputCloud();
+  }
+
+  m_simulated_poses.reserve(m_sensor_poses.size());
+  m_pose_weights.reserve(m_sensor_poses.size());
+
+  for (int i = 0; i < (int)m_sensor_poses.size(); ++i)
+  {
+    //std::cout << __FILE__ << "," << __LINE__ << ": " << i << " of " << m_sensor_poses.size() << " candidate viewpoints to assess" << std::endl;
+    CandidateViewpoint cvp;
+    cvp.viewpoint = m_sensor_poses[i];
+    pcl::PointIndices indices;
+    m_raytracer.setViewpoint(m_sensor_poses[i]);
+    m_raytracer.evaluate(octree_search,indices);
+
+    if (_IsTerminated())
+      return;
+
+    // Counts the occupied and unknown boxes
+    cvp.occupied = 0;
+    cvp.unknown = 0;
+    std::vector<int>::iterator it = indices.indices.begin();
+    for (; it != indices.indices.end(); ++it) {
+      if (0 <= *it && *it < (int)(*m_occupancy_cloud).size()) {
+        if (!m_voxel_filter || m_voxel_filter->Evaluate(m_occupancy_cloud,*it,m_sensor_poses[i])) {
+          if (m_occupancy_policy.getOccupancyStatus((*m_occupancy_cloud).points[*it])
+            == SignedIntensityOccupancyPolicy::OCCUPIED) {
+            cvp.occupied++;
+          }
+          else if (m_occupancy_policy.getOccupancyStatus((*m_occupancy_cloud).points[*it])
+            == SignedIntensityOccupancyPolicy::UNKNOWN) {
+            cvp.unknown++;
+          }
+        }
+      }
+      else {
+        std::cerr << __FILE__ << "," << __LINE__ << ": invalid index " << *it << ": max size "
+          << (*m_occupancy_cloud).size() << std::endl;
+      }
+
+    if (_IsTerminated())
+      return;
+    }
+    // Inserts viewpoint with statistics
+    m_simulated_poses.push_back(cvp);
+    m_pose_weights.push_back(computeWeight(cvp.unknown,cvp.occupied));
+  }
+
+  m_pose_weights_computed = true;
+}
+
+void BasicViewpointEvaluator::orderWeights()
+{
+  computeWeights();
+
+  if (_IsTerminated())
+    return;
+
+  if (!m_pose_weights_computed)
+  {
+    ROS_ERROR("basic_next_best_view: Couldn't compute weights! Can't continue!");
+    return;
+  }
+
+  m_ordered_pose_indices.resize(m_pose_weights.size());
+  for (uint i = 0; i < m_ordered_pose_indices.size(); i++)
+    m_ordered_pose_indices[i] = i;
+
+  std::sort(m_ordered_pose_indices.begin(),m_ordered_pose_indices.end(),ByWeightCompare(m_pose_weights));
+
+  m_ordered_pose_indices_computed = true;
+}
+```
+
+### src/basic_viewpoint_evaluator.h
+```
+/*
+ * Copyright (c) 2013-2014, Riccardo Monica
+ *   RIMLab, Department of Information Engineering, University of Parma, Italy
+ *   http://www.rimlab.ce.unipr.it/
+ *
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted
+ * provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions
+ * and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of
+ * conditions and the following disclaimer in the documentation and/or other materials provided with
+ * the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to
+ * endorse or promote products derived from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+ * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#ifndef BASIC_VIEWPOINT_EVALUATOR_H
+#define BASIC_VIEWPOINT_EVALUATOR_H
+
+// STL
+#include <vector>
+
+// Eigen
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
+#include <Eigen/StdVector>
+EIGEN_DEFINE_STL_VECTOR_SPECIALIZATION(Eigen::Affine3f);
+
+// ROS
+#include <ros/ros.h>
+
+// PCL
+#include <pcl/point_types.h>
+#include <pcl/point_cloud.h>
+#include <pcl/visualization/pcl_visualizer.h>
+#include <pcl/visualization/point_cloud_handlers.h>
+
+// custom
+#include "RayTracer.h"
+
+class BasicViewpointEvaluator
+{
+public:
+  typedef unsigned int uint;
+  typedef unsigned int PoseIndex;
+  typedef typename std::vector<PoseIndex> PoseIndexVector;
+  typedef double Weight;
+  typedef typename pcl::PointCloud<pcl::PointXYZI> PointCloudXYZI;
+  typedef typename std::vector<uint> UintVector;
+  typedef typename boost::shared_ptr<const UintVector> UintVectorConstPtr;
+  typedef typename boost::shared_ptr<UintVector> UintVectorPtr;
+
+  struct CandidateViewpoint
+  {
+    Eigen::Affine3f viewpoint;
+    int occupied;
+    int unknown;
+
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+  };
+
+  typedef std::vector<CandidateViewpoint,Eigen::aligned_allocator<CandidateViewpoint> > CandidateViewpointVector;
+
+  struct MinMaxStep
+  {
+    double min,max,step;
+  };
+
+  BasicViewpointEvaluator();
+
+  void computeCandidates();
+  void computeWeights();
+  void orderWeights();
+
+  void setVoxelResolution(double res)
+  {
+    m_voxel_resolution = res;
+    m_raytracer.setBoxRes(res);
+  }
+
+  void setSensorRangeMax(double max)
+  {
+    m_sensor_range_max = max;
+    m_raytracer.setRangeMax(max);
+  }
+
+  void setSphereRadius(double radius)
+  {
+    m_sphere_radius = radius;
+  }
+
+  void setVerticalRes(int res)
+  {
+    m_vertical_res = std::max(1,res);
+    m_raytracer.setImageSize(m_vertical_res,m_horizontal_res);
+  }
+
+  void setHorizontalRes(int res)
+  {
+    m_horizontal_res = std::max(1,res);
+    m_raytracer.setImageSize(m_vertical_res,m_horizontal_res);
+  }
+
+  void setHalfHorizontalFOV(double fov)
+  {
+    m_hhfov = fov;
+    m_raytracer.setHalfFoV(m_hhfov,m_hvfov);
+  }
+
+  void setHalfVerticalFOV(double fov)
+  {
+    m_hvfov = fov;
+    m_raytracer.setHalfFoV(m_hhfov,m_hvfov);
+  }
+
+  void setLatitudeSampling(const MinMaxStep & sampling)
+  {
+    m_latitude = sampling;
+  }
+
+  void setLongitudeSampling(const MinMaxStep & sampling)
+  {
+    m_longitude = sampling;
+  }
+
+  void setZRotationSampling(const MinMaxStep & sampling)
+  {
+    m_zrotation = sampling;
+  }
+
+  void setOccupancyCloud(PointCloudXYZI::Ptr pc)
+  {
+    m_occupancy_cloud = pc;
+    m_occupancy_cloud_received = true;
+
+    m_pose_weights_computed = false;
+    m_ordered_pose_indices_computed = false;
+  }
+
+  void setPOI(const Eigen::Vector3f & poi)
+  {
+    m_poi = poi;
+    m_poi_received = true;
+
+    m_sensor_poses_computed = false;
+    m_pose_weights_computed = false;
+    m_ordered_pose_indices_computed = false;
+  }
+
+  void setSensorPoses(const std::vector<Eigen::Affine3f> & poses)
+  {
+    m_sensor_poses = poses;
+
+    m_sensor_poses_computed = true;
+    m_pose_weights_computed = false;
+    m_ordered_pose_indices_computed = false;
+  }
+
+  class IVoxelFilter
+  {
+    public:
+    typedef boost::shared_ptr<IVoxelFilter> Ptr;
+    /// checks if a voxel is a valid voxel
+    /// @param pidx the index in the occupancy cloud
+    /// @param viewpoint the viewpoint that is seeing the voxel
+    /// @return true if the evaluator should count the voxel
+    virtual bool Evaluate(PointCloudXYZI::Ptr cloud,uint pidx,const Eigen::Affine3f & viewpoint) = 0;
+
+    virtual ~IVoxelFilter() {}
+  };
+
+  // whenever filter.Evaluate returns false, the voxel is excluded
+  // from the voxel count
+  // set to Ptr() (=NULL) to disable
+  void setVoxelFilter(IVoxelFilter::Ptr filter)
+  {
+    m_voxel_filter = filter;
+
+    m_pose_weights_computed = false;
+    m_ordered_pose_indices_computed = false;
+  }
+
+  bool isSensorPosesComputed() { return m_sensor_poses_computed;}
+  bool isPoseWeightsComputed() { return m_pose_weights_computed;}
+  bool isOrderedPosesComputed() { return m_ordered_pose_indices_computed;}
+
+  // NULL if failed
+  const std::vector<Eigen::Affine3f> * getCandidates()
+  {
+    computeCandidates();
+
+    if (_IsTerminated() || !m_sensor_poses_computed)
+      return NULL;
+
+    return &m_sensor_poses;
+  }
+
+  // NULL if failed
+  const std::vector<uint> * getOrderedPoseIndices()
+  {
+    orderWeights();
+
+    if (_IsTerminated() || !m_ordered_pose_indices_computed)
+      return NULL;
+
+    return &m_ordered_pose_indices;
+  }
+
+  // NULL if failed
+  const std::vector<Weight> * getWeights()
+  {
+    computeWeights();
+
+    if (_IsTerminated() || !m_pose_weights_computed)
+      return NULL;
+
+    return &m_pose_weights;
+  }
+
+  // NULL if failed
+  const UintVectorConstPtr getUnknownCount()
+  {
+    computeWeights();
+
+    if (_IsTerminated() || !m_pose_weights_computed)
+      return UintVectorConstPtr();
+
+    UintVectorPtr result = UintVectorPtr(new UintVector);
+
+    result->reserve(m_simulated_poses.size());
+    for (uint i = 0;i < m_simulated_poses.size(); i++)
+      result->push_back(m_simulated_poses[i].unknown);
+
+    return result;
+  }
+
+  void setOccupiedWeight(double w) {m_occupied_weight = w; }
+  void setUnknownWeight(double w) {m_unknown_weight = w; }
+
+  Weight computeWeight(uint unknown,uint occupied) const
+  {
+    return Weight(m_unknown_weight * unknown + m_occupied_weight * occupied);
+  }
+
+  struct ByWeightCompare
+  {
+    const std::vector<Weight> & weights;
+    ByWeightCompare(const std::vector<Weight> & w): weights(w) {}
+    bool operator()(PoseIndex l,PoseIndex r) const
+    {
+      return weights[l] > weights[r];
+    }
+  };
+
+  template <class T>
+  // set a reference to any class with a method named "isTerminated()"
+  void setTerminationCondition(T & obj)
+  {
+    m_termination_condition = TerminationCondition::Ptr(new TerminationConditionAdapter<T>(obj));
+  }
+
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+
+private:
+  bool _IsTerminated()
+  {
+    return (bool(m_termination_condition) && m_termination_condition->isTerminated());
+  }
+
+  PointCloudXYZI::Ptr m_occupancy_cloud;
+    // the occupancy cloud, with intensity:
+    // < 0, no point: empty
+    // > 0: occupied
+    // =~ 0: unknown
+  bool m_occupancy_cloud_received;
+
+  Eigen::Vector3f m_poi; // the sensor will point towards the Point Of Interest
+  bool m_poi_received;
+
+  std::vector<Eigen::Affine3f> m_sensor_poses;
+  bool m_sensor_poses_computed;
+
+  CandidateViewpointVector m_simulated_poses;
+  std::vector<Weight> m_pose_weights;
+  bool m_pose_weights_computed;
+
+  PoseIndexVector m_ordered_pose_indices;
+  bool m_ordered_pose_indices_computed;
+
+  PinholeRayTracer m_raytracer;
+  SignedIntensityOccupancyPolicy m_occupancy_policy;
+
+  double m_voxel_resolution;
+  double m_sensor_range_max;
+  double m_sphere_radius;
+
+  uint m_vertical_res;
+  uint m_horizontal_res;
+
+  double m_hhfov;
+  double m_hvfov;
+
+  MinMaxStep m_zrotation;
+  MinMaxStep m_latitude;
+  MinMaxStep m_longitude;
+
+  double m_occupied_weight;
+  double m_unknown_weight;
+
+  class TerminationCondition
+  {
+  public:
+    virtual ~TerminationCondition() {}
+    virtual bool isTerminated() = 0;
+
+    typedef boost::shared_ptr<TerminationCondition> Ptr;
+  };
+
+  TerminationCondition::Ptr m_termination_condition;
+
+  IVoxelFilter::Ptr m_voxel_filter;
+
+  template <class T>
+  class TerminationConditionAdapter: public TerminationCondition
+  {
+  public:
+    TerminationConditionAdapter(T & obj): m_instance(obj) {}
+    bool isTerminated() {return m_instance.isTerminated(); }
+
+    T & m_instance;
+  };
+};
+
+#endif // BASIC_VIEWPOINT_EVALUATOR_H
+```
+
+### src/impl/RayTracer.hpp
+```
+/*
+ * Copyright (c) 2013-2014, Dario Lodi Rizzini, Riccardo Monica
+ *   RIMLab, Department of Information Engineering, University of Parma, Italy
+ *   http://www.rimlab.ce.unipr.it/
+ *
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted
+ * provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions
+ * and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of
+ * conditions and the following disclaimer in the documentation and/or other materials provided with
+ * the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to
+ * endorse or promote products derived from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+ * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+ * IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#ifndef RAY_TRACER_HPP
+#define RAY_TRACER_HPP
+
+#include <set>
+
+template <typename PointT>
+SignedIntensityOccupancyPolicy::OccupancyStatus SignedIntensityOccupancyPolicy::getOccupancyStatus(const PointT& p)
+{
+  float intensity;
+  bool exists;
+  // It checks the value of point field "intensity" if it exists
+  typedef typename pcl::traits::fieldList<PointT>::type FieldList;
+  pcl::for_each_type<FieldList> (pcl::CopyIfFieldExists<PointT, float> (p, "intensity", exists, intensity));
+  if (!exists) {
+    std::cerr << __FILE__ << "," << __LINE__ << ": field \"intensity\" does not exists for this type of points" << std::endl;
+    return UNKNOWN;
+  }
+  // A convention on intensity to check whether 
+  if (std::abs(intensity) < EPS) return UNKNOWN;
+  else if (intensity > 0.0f) return OCCUPIED;
+  else return FREE;
+}
+
+template <typename PointT>
+ProbabilisticOccupancyPolicy::OccupancyStatus ProbabilisticOccupancyPolicy::getOccupancyStatus(const PointT& p)
+{
+  float intensity;
+  bool exists;
+  // It checks the value of point field "intensity" if it exists
+  typedef typename pcl::traits::fieldList<PointT>::type FieldList;
+  pcl::for_each_type<FieldList> (pcl::CopyIfFieldExists<PointT, float> (p, "intensity", exists, intensity));
+  if (!exists) {
+    std::cerr << __FILE__ << "," << __LINE__ << ": field \"intensity\" does not exists for this type of points" << std::endl;
+    return UNKNOWN;
+  }
+  // A convention on intensity to check whether 
+  if (std::abs(intensity) < TOLLERANCE) return FREE;
+  else if (intensity > 1.0 - TOLLERANCE) return OCCUPIED;
+  else return UNKNOWN;
+}
+
+// --------------------------------------------------------
+// RAY TRACING
+// --------------------------------------------------------
+
+//// More efficient implementation: it sorts all the boxes w.r.t. the distance to the ray origin  
+//// and stop box intersection check at the FIRST intersection which is also the closest one
+//// thanks to the order!
+//template <typename PointT>
+//void PinholeRayTracer::evaluate(const pcl::PointCloud<PointT>& cloud,pcl::PointIndices& indices)
+//{
+//  Eigen::Vector3f rayo;                // ray origin
+//  std::vector<Eigen::Vector3f> rayds;  // ray directions (variable)
+//  Eigen::Vector3f bmin;  // box min coordinates
+//  Eigen::Vector3f bmax;  // box max coordinates
+//  Eigen::Vector3f bctr;  // box center coordinates
+//  Eigen::Vector3f rayi;
+
+//  // Sorts a copy of the point cloud according to the distance from tge viewpoint
+//  typedef typename ViewpointDistance<PointT>::ConstIterator ConstIterator;
+//  ViewpointDistance<PointT> sorter;
+//  sorter.rayo = rayo;
+//  std::vector<ConstIterator> sorted;
+//  for (ConstIterator it = cloud.begin(); it != cloud.end(); ++it) {
+//    sorted.push_back(it);
+//  }
+//  std::sort(sorted.begin(),sorted.end(),sorter);  
+
+//  // Viewpoint coordinates and direction
+//  rayo = viewpoint_.translation();
+//  std::set<int> viewed;
+//  castRays(rayds);
+//  for (int i = 0; i < (int)rayds.size(); ++i) {
+//    // Intersects all the boxes
+//    int idxmin = -1;
+//    float distMin = 1e+6;
+//    bool inters = false;
+//    for (int ii = 0; ii < (int)sorted.size() && !inters; ++ii) {
+//      ConstIterator it = sorted[ii];
+//      bctr <<  it->x, it->y, it->z;
+//      bmin << it->x - res_/2, it->y - res_/2, it->z - res_/2;
+//      bmax << it->x + res_/2, it->y + res_/2, it->z + res_/2;
+//      inters = intersectRayBox(rayo,rayds[i],bmin,bmax,rayi);
+//      float dist = (rayi-rayo).norm();
+//      if (inters && dist < distMin) {
+//        idxmin = std::distance(cloud.begin(),it);
+//        distMin = dist;
+//      }
+//    }
+//    //std::cout << __FILE__ << "," << __LINE__ << ": ray " << i << " intersect box " << idxmin << std::endl;
+//    if (idxmin>=0 && viewed.find(idxmin) == viewed.end()) {
+//      indices.indices.push_back(idxmin);
+//      viewed.insert(idxmin);
+//    }
+//  }
+//}
+
+template <typename PointT>
+void PinholeRayTracer::evaluate(pcl::octree::OctreePointCloudSearch<PointT>& octree_search,pcl::PointIndices& indices)
+{
+  Eigen::Vector3f rayo;                // ray origin
+  std::vector<Eigen::Vector3f> rayds;  // ray directions (variable)
+
+  typename pcl::PointCloud<PointT>::ConstPtr cloud = octree_search.getInputCloud();
+
+  // Viewpoint coordinates and direction
+  rayo = viewpoint_.translation();
+  std::set<int> viewed;
+  castRays(rayds);
+  for (int i = 0; i < (int)rayds.size(); ++i) {
+    // Intersects all the boxes
+    std::vector<PointT,Eigen::aligned_allocator<PointT> > voxels;
+    octree_search.getIntersectedVoxelCenters(rayo,rayds[i],voxels);
+
+    std::vector<int> points_idx;
+    for (int h = 0; h < (int)voxels.size(); h++) {
+      std::vector<int> points_idx_temp;
+      octree_search.voxelSearch(voxels[h],points_idx_temp);
+      points_idx.insert(points_idx.end(),points_idx_temp.begin(),points_idx_temp.end());
+    }
+
+    int idxmin = -1;
+    float distMin = 1e+6;
+    for (int idx = 0; idx < (int)points_idx.size(); ++idx) {
+      const PointT & pt = (*cloud)[points_idx[idx]];
+      Eigen::Vector3f ept(pt.x,pt.y,pt.z);
+      float dist = (ept-rayo).norm();
+      if (dist < rangeMax_ && dist < distMin) {
+        idxmin = points_idx[idx];
+        distMin = dist;
+      }
+    }
+    //std::cout << __FILE__ << "," << __LINE__ << ": ray " << i << " intersect box " << idxmin << std::endl;
+    if (idxmin>=0 && viewed.find(idxmin) == viewed.end()) {
+      indices.indices.push_back(idxmin);
+      viewed.insert(idxmin);
+    }
+  }
+}
+
+
+#endif
+```

@@ -1,0 +1,106 @@
+--- v002.md
++++ v003.md
+@@ -27,9 +27,9 @@
+    b. Run the model forward pass with `is_train=False` inside a gradient-disabled context [S1, unofficial].
+    c. Render the novel view. Apply background color compositing if applicable [S1, unofficial].
+-   d. **Metric Computation:** Clamp the rendered image and ground truth to $[0.0, 1.0]$. Compute the Peak Signal-to-Noise Ratio (PSNR) between the rendered image $I_{render}$ and ground truth $I_{gt}$:
++   d. **Metric Computation:** Clamp the rendered image and ground truth to $[0.0, 1.0]$ [S2, unofficial]. Compute the Peak Signal-to-Noise Ratio (PSNR) between the rendered image $I_{render}$ and ground truth $I_{gt}$:
+       $$ \text{PSNR} = 10 \cdot \log_{10} \left( \frac{1}{\text{MSE}(I_{render}, I_{gt})} \right) $$
+       where $\text{MSE}(I_{render}, I_{gt}) = \frac{1}{N} \sum_{i=1}^{N} (I_{render,i} - I_{gt,i})^2$ and $N$ is the number of pixels [G]. Accumulate PSNR (and L1 loss if required) across cameras [S2, unofficial]. Append the PSNR value to `psnr_list` [S1, unofficial].
+    e. **Visualization:** If the current index equals `show_idx`: detach the tensor from the computation graph, multiply pixel values by 255, permute dimensions from CHW to HWC, convert to a NumPy array, and save as a JPEG file [S1, unofficial].
+-5. **Aggregation:** Compute the mean of `psnr_list`. Round the result to 4 decimal places. If the mean PSNR is less than 10, print an error message and exit. Log the final PSNR to the logger [S1, unofficial].
++5. **Aggregation:** Compute the mean of `psnr_list` [S1, unofficial]. Round the result to 4 decimal places. If the mean PSNR is less than 10, print an error message and exit [S1, unofficial]. Log the final PSNR to the logger [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -37,18 +37,18 @@
+ def compute_validation_metrics(model, scene, testing_iterations, current_iter, logger):
+     # Step 1: Setup
+-    clear_cuda_cache()
++    torch.cuda.empty_cache()  # [G]
+     psnr_list = []
+-    show_idx = random.randint(0, max(0, len(scene.getTestCameras()) - 1))
++    show_idx = random.randint(0, max(0, len(scene.getTestCameras()) - 1))  # [G]
+ 
+     # Step 2: Trigger
+-    if current_iter not in testing_iterations:
++    if current_iter not in testing_iterations:  # [S2, unofficial]
+         return
+ 
+     # Step 3: Configuration
+-    test_cameras = scene.getTestCameras()
+-    train_cameras = scene.getTrainCameras()
+-    train_sample_indices = list(range(5, 31, 5))
+-    train_sample_cameras = [train_cameras[i] for i in train_sample_indices if i < len(train_cameras)]
+-    validation_configs = {'test': test_cameras, 'train': train_sample_cameras}
++    test_cameras = scene.getTestCameras()  # [S2, unofficial]
++    train_cameras = scene.getTrainCameras()  # [S2, unofficial]
++    train_sample_indices = list(range(5, 31, 5))  # [S2, unofficial]
++    train_sample_cameras = [train_cameras[i] for i in train_sample_indices if i < len(train_cameras)]  # [S2, unofficial]
++    validation_configs = {'test': test_cameras, 'train': train_sample_cameras}  # [S2, unofficial]
+ 
+     # Step 4: Iteration Loop
+@@ -57,42 +57,40 @@
+         for idx, camera in enumerate(cameras):
+             # 4a: Fetch data
+-            data = fetch_data(camera, phase='val')
++            data = fetch_data(camera, phase='val')  # [S1, unofficial]
+             for view in data:
+                 for key in data[view]:
+-                    data[view][key] = move_to_gpu(data[view][key])
++                    data[view][key] = data[view][key].cuda()  # [G]
+ 
+             # 4b: Forward pass
+-            with disable_gradients():
+-                model.set_eval()
+-                rendered_data = model(data, is_train=False)
+-                rendered_img = rendered_data['novel_view']['img_pred'][0]
+-                rendered_img = apply_bg_color(rendered_img, bg_color=0.0)
++            with torch.no_grad():  # [G]
++                model.eval()  # [G]
++                rendered_data = model(data, is_train=False)  # [S1, unofficial]
++                rendered_img = rendered_data['novel_view']['img_pred'][0]  # [S1, unofficial]
++                rendered_img = pts2render(rendered_img, bg_color=0.0)  # [S1, unofficial]
+ 
+             # 4c: Metric Computation
+-            gt_img = data['novel_view']['img_gt'][0]
+-            rendered_clamped = clamp(rendered_img, 0.0, 1.0)
+-            gt_clamped = clamp(gt_img, 0.0, 1.0)
+-            mse = mean_squared_error(rendered_clamped, gt_clamped)
++            gt_img = data['novel_view']['img_gt'][0]  # [G]
++            rendered_clamped = torch.clamp(rendered_img, 0.0, 1.0)  # [S2, unofficial]
++            gt_clamped = torch.clamp(gt_img, 0.0, 1.0)  # [S2, unofficial]
++            mse = torch.mean((rendered_clamped - gt_clamped) ** 2)  # [G]
+             if mse == 0:
+-                psnr_val = 100.0
++                psnr_val = 100.0  # [G]
+             else:
+-                psnr_val = 10 * math.log10(1.0 / mse)
+-            current_psnr_list.append(psnr_val)
++                psnr_val = 10 * math.log10(1.0 / mse)  # [G]
++            current_psnr_list.append(psnr_val)  # [S1, unofficial]
+ 
+             # 4d: Visualization
+-            if idx == show_idx:
+-                img_tensor = detach(rendered_img)
+-                img_tensor = img_tensor * 255
+-                img_tensor = permute(img_tensor, (1, 2, 0))
+-                img_np = to_numpy(img_tensor)
+-                save_as_jpeg(img_np, f"validation_{config_name}_{idx}.jpg")
++            if idx == show_idx:  # [S1, unofficial]
++                img_tensor = rendered_img.detach() * 255  # [G]
++                img_tensor = img_tensor.permute(1, 2, 0).cpu().numpy()  # [G]
++                cv2.imwrite(f"validation_{config_name}_{idx}.jpg", img_tensor[:, :, ::-1].astype(np.uint8))  # [G]
+ 
+         # Step 5: Aggregation
+-        mean_psnr = sum(current_psnr_list) / len(current_psnr_list)
+-        mean_psnr = round(mean_psnr, 4)
+-        if mean_psnr < 10:
++        mean_psnr = sum(current_psnr_list) / len(current_psnr_list)  # [S1, unofficial]
++        mean_psnr = round(mean_psnr, 4)  # [S1, unofficial]
++        if mean_psnr < 10:  # [S1, unofficial]
+             logger.error(f"Validation PSNR too low: {mean_psnr}")
+             exit()
+-        logger.info(f"{config_name} PSNR: {mean_psnr}")
++        logger.info(f"{config_name} PSNR: {mean_psnr}")  # [S1, unofficial]
+ ```
+ 

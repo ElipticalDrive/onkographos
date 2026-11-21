@@ -1,0 +1,266 @@
+# Cosine Projection via Upsampling
+
+Also called: Get Cos Projection, Find Cosine Window, Generate View Alternative, Generate Views
+
+## Overview
+Cosine Projection via Upsampling generates multi-angle view projections (sinograms) from 3D volumetric data by accounting for the viewing zenith angle (VZA). It solves the geometric distortion inherent in oblique viewing by upsampling the data, applying a cosine scaling factor to the grid spacing, and padding the result to maintain resolution consistency with the nadir view. It differs from [Zero Padding for Aliasing Reduction](6382-zero-padding-for-aliasing-reduction.md) by explicitly incorporating the angular dependency of the projection path length via the cosine factor, rather than merely preventing boundary artifacts.
+
+## How it works
+The method transforms a 3D dataset (typically optical thickness or density) into a set of 2D projections corresponding to different viewing angles. The core challenge is that an oblique view traverses a longer path through the volume than the nadir view, effectively stretching the data along the projection axis. This method compensates by upsampling, scaling the grid, and padding.
+
+### Inputs and Outputs
+- **Input**: A 3D data array (e.g., `xarray.DataArray`) with dimensions `(x, y, z)` or `(x, y, vza)` if pre-projected. The source code assumes a 2D slice or a projection to a Center of Mass (COM) plane before generating views. Let the input be $D$ with spatial coordinates $x$ and $y$, and grid spacing $dx$.
+- **Output**: A multi-angle tile (sinogram) or a list of projected views, typically stacked along a new angle dimension.
+
+### Data Structures
+The implementation uses `xarray.DataArray` objects.
+- **Fields**: `data` (numeric values), `coords` (spatial coordinates like `x`, `y`, `vza`), `dims` (dimension names).
+- **Layout**: The data is assumed to be on a regular grid. The `x` coordinate is a 1D array defining the boundaries or centers of the cells.
+
+### Parameters
+- **Upsampling Factor ($U$)**: The factor by which the data is upsampled before projection. Typical value: 100 [S1, unofficial].
+- **Viewing Zenith Angle ($\theta$)**: The angle of view relative to the nadir (vertical). $\theta = 0^\circ$ is the nadir view.
+- **Stretch ($S$)**: A small buffer factor (in units of $dx$) used to ensure the window covers the projected extent. Not given in the sources as a specific number, but used in the window calculation [S1, unofficial].
+- **Offset**: A shift applied during interpolation to align the projected view. [G] Typically derived from the geometry of the projection center.
+
+### Steps
+1. **Project to Center of Mass (COM)**: If the input is 3D, project it to a 2D plane (e.g., using a ray-marching or simple projection) to get a base view. Let this be $D_{COM}$.
+2. **Select Nadir View**: Extract the view at $\theta = 0^\circ$ from $D_{COM}$ (or the original data if already 2D). Let this be $D_{nadir}$.
+3. **Loop over VZA Angles**: For each angle $\theta$ in the desired set of angles:
+    a. **Handle Nadir**: If $\theta = 0^\circ$, append $D_{nadir}$ directly to the output list.
+    b. **Calculate Cosine Factor**: Compute $f = \cos(\theta_{rad})$, where $\theta_{rad} = \theta \times \frac{\pi}{180}$.
+    c. **Upsample Data**:
+        - Determine the original x-range: $x_{min} = D.x[0]$, $x_{max} = D.x[-1]$.
+        - Create upsampled x-coordinates: $x_{up} = \text{linspace}(x_{min}, x_{max}, U \times \text{len}(D.x))$.
+        - Interpolate the data to $x_{up}$: $D_{up} = \text{interp}(D, x=x_{up})$.
+    d. **Calculate Projected Grid Spacing**:
+        - The effective grid spacing in the projected view is stretched by $1/f$.
+        - $dx_{proj} = \frac{dx}{U} \times f$.
+    e. **Create Projected Coordinates**:
+        - Determine the new x-range based on the projected spacing.
+        - $x_{proj} = \text{arange}(x_{min}, x_{max} + dx_{proj}, dx_{proj})$.
+        - Note: The number of points $N_{proj} = \text{len}(x_{proj})$.
+    f. **Calculate Padding**:
+        - The original upsampled data has $N_{up} = \text{len}(D_{up})$.
+        - Padding needed: $P = N_{proj} - N_{up}$.
+        - Split padding: $P_{before} = \lfloor P/2 \rfloor$, $P_{after} = P - P_{before}$.
+    g. **Pad Data**:
+        - Pad $D_{up}$ with zeros: $D_{pad} = \text{pad}(D_{up}, \text{x}=(P_{before}, P_{after}), \text{constant\_values}=0)$.
+        - Assign new coordinates: $D_{proj} = D_{pad}.\text{assign\_coords}(\text{x}=x_{proj})$.
+    h. **Interpolate to Nadir Window**:
+        - Calculate the center of the nadir view: $x_{center} = x_{nadir, min} + \frac{x_{nadir, max} - x_{nadir, min}}{2}$.
+        - Calculate the radius of the nadir view: $R = \frac{x_{nadir, max} - x_{nadir, min}}{2}$.
+        - Determine the window slice for the projected view. The projected view is wider by $1/f$.
+        - Window bounds: $x_{start} = x_{center} - \frac{R}{f} - S \cdot dx$, $x_{end} = x_{center} + \frac{R}{f} + S \cdot dx$.
+        - Interpolate $D_{proj}$ to the nadir x-grid with an offset to align the center: $D_{new} = D_{proj}.\text{interp}(\text{x}=(x_{nadir} + \text{offset}))$.
+        - [G] The offset ensures that the center of the projected view aligns with the center of the nadir view. If the projection is centered, offset is 0.
+    i. **Append**: Add $D_{new}$ to the list of camera views.
+4. **Concatenate**: Stack all views along a new dimension (e.g., `vza` or `angles`) to form the final sinogram or multi-angle tile.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import xarray as xr
+
+def cosine_projection_via_upsampling(data: xr.DataArray, angles_deg: list, dx: float, upsampling_factor: int = 100, stretch: float = 1.0) -> xr.DataArray:
+    """
+    Generate multi-angle projections using cosine projection via upsampling.
+    
+    Args:
+        data: Input 2D or 3D data array. If 3D, it is assumed to be projected to 2D COM first.
+              Must have 'x' and 'y' coordinates.
+        angles_deg: List of viewing zenith angles in degrees.
+        dx: Original grid spacing in x.
+        upsampling_factor: Factor to upsample data before projection.
+        stretch: Buffer factor for window calculation.
+        
+    Returns:
+        xr.DataArray with dimensions (angles, x, y) containing the projected views.
+    """
+    # Assume data is already projected to 2D (e.g., nadir or COM)
+    # If 3D, this step would involve a projection function like project2com
+    if data.dims == ('x', 'y', 'z'):
+        # Placeholder for 3D to 2D projection if not already done
+        # For this method, we assume the input is the base 2D representation
+        pass
+    
+    # Get nadir view parameters
+    x_nadir = data.coords['x'].values
+    y_nadir = data.coords['y'].values
+    x_min_nadir = x_nadir[0]
+    x_max_nadir = x_nadir[-1]
+    x_center_nadir = (x_min_nadir + x_max_nadir) / 2.0
+    radius_nadir = (x_max_nadir - x_min_nadir) / 2.0
+    
+    cameras = []
+    
+    for vza in angles_deg:
+        if vza == 0:
+            # Nadir view is the original data (or the specific nadir slice)
+            cameras.append(data)
+            continue
+            
+        # 1. Calculate cosine factor
+        vza_rad = np.deg2rad(vza)
+        factor = np.cos(vza_rad)
+        
+        # 2. Upsample x coordinates
+        x_orig = data.coords['x'].values
+        x_min = x_orig[0]
+        x_max = x_orig[-1]
+        n_orig = len(x_orig)
+        n_up = int(upsampling_factor) * n_orig
+        
+        x_up = np.linspace(x_min, x_max, n_up)
+        
+        # 3. Interpolate data to upsampled x
+        # Using linear interpolation for simplicity; source uses .interp()
+        data_up = data.interp(x=x_up)
+        
+        # 4. Calculate projected grid spacing
+        dx_proj = (dx / upsampling_factor) * factor
+        
+        # 5. Create projected x coordinates
+        # The projected view is wider. We need to define the new x range.
+        # The source code uses: x_proj = np.arange(xmin, xmax+dx_proj, dx_proj)
+        # However, xmin/xmax here refer to the original data bounds?
+        # Let's assume the projected view is centered on the same center.
+        # The width of the projected view in terms of original grid cells is Width / factor.
+        # So the new x range should be wider.
+        
+        # Re-evaluating source logic:
+        # x_proj = np.arange(xmin, xmax+dx_proj, dx_proj)
+        # This implies the projected grid starts at the same xmin but has finer spacing?
+        # No, dx_proj is smaller if factor < 1 (oblique).
+        # If dx_proj is smaller, the number of points increases.
+        
+        # Let's follow the source exactly:
+        # xmin and xmax are from the original data (or upsampled data bounds)
+        # But the upsampled data has bounds x_min to x_max.
+        # The projected grid should cover the same physical extent but with different spacing?
+        # Actually, the projection stretches the view. The data needs to be padded.
+        
+        # Source: x_proj = np.arange(xmin, xmax+dx_proj, dx_proj)
+        # This creates a grid with spacing dx_proj from xmin to xmax.
+        # This grid is denser if dx_proj < dx_orig.
+        
+        x_proj = np.arange(x_min, x_max + dx_proj, dx_proj)
+        n_proj = len(x_proj)
+        n_up_actual = len(data_up.coords['x'])
+        
+        # 6. Calculate padding
+        pad = n_proj - n_up_actual
+        pad_before = pad // 2
+        pad_after = pad - pad_before
+        
+        # 7. Pad data with zeros
+        # Create a new DataArray for padding
+        # data_up is a DataArray with coords x_up
+        # We need to pad the data values and adjust coords
+        
+        # Pad the data values
+        padded_values = np.pad(data_up.values, ((pad_before, pad_after), (0, 0)), mode='constant', constant_values=0)
+        
+        # Create new coords for padded data
+        # The x coordinates are now x_proj
+        padded_data = xr.DataArray(
+            padded_values,
+            dims=data_up.dims,
+            coords={dim: (coord if dim != 'x' else x_proj) for dim, coord in data_up.coords.items()}
+        )
+        
+        # 8. Interpolate to nadir x grid with offset
+        # The source uses: data_proj.interp(x=(x_center+offset))
+        # But we need to interpolate to the nadir x coordinates, not just the center.
+        # The source likely means interpolating to the nadir x grid, shifted by an offset.
+        
+        # Calculate offset
+        # The projected view is wider. We need to center it.
+        # The nadir x grid is x_nadir.
+        # The projected view center is x_center_nadir.
+        # The offset is likely 0 if centered.
+        
+        offset = 0.0 # [G] Assuming centered projection
+        
+        # Interpolate to nadir x coordinates
+        # We need to interpolate the padded data to the nadir x grid
+        # But the padded data has x_proj.
+        # We interpolate to x_nadir.
+        
+        # However, the source says: data_proj.interp(x=(x_center+offset))
+        # This might be a specific slice or a single point?
+        # No, it likely means interpolating to the nadir x coordinates.
+        
+        # Let's assume we interpolate to the nadir x coordinates.
+        # But the projected view is wider, so we need to select the relevant part.
+        
+        # Source: find_cosine_window calculates a slice.
+        # x_slice = slice(x_center - radius/factor-(stretch*dx), x_center+radius/factor+(stretch*dx))
+        
+        x_start = x_center_nadir - radius_nadir / factor - stretch * dx
+        x_end = x_center_nadir + radius_nadir / factor + stretch * dx
+        
+        # Select the slice from the projected data
+        # We need to find the indices in x_proj that correspond to x_start and x_end
+        idx_start = np.searchsorted(x_proj, x_start)
+        idx_end = np.searchsorted(x_proj, x_end)
+        
+        # Extract the slice
+        # Note: xarray slicing is inclusive/exclusive depending on method
+        # Let's use boolean masking or index selection
+        
+        mask = (x_proj >= x_start) & (x_proj <= x_end)
+        x_slice = x_proj[mask]
+        data_slice = padded_data.sel(x=slice(x_start, x_end))
+        
+        # Interpolate to nadir x coordinates
+        # The nadir x coordinates are x_nadir
+        # We need to shift the data_slice to align with nadir
+        # The center of data_slice should align with x_center_nadir
+        
+        # Calculate the center of the slice
+        x_slice_center = (x_slice[0] + x_slice[-1]) / 2.0
+        shift = x_center_nadir - x_slice_center
+        
+        # Interpolate to nadir x coordinates with shift
+        # We create a new x grid: x_nadir + shift
+        x_interp = x_nadir + shift
+        
+        # Interpolate
+        data_new = data_slice.interp(x=x_interp)
+        
+        # Ensure y coordinates are preserved
+        # data_new should have dims (x, y)
+        
+        cameras.append(data_new)
+        
+    # Concatenate cameras
+    # Stack along a new dimension 'angles'
+    angles_data = xr.concat(cameras, dim='angles')
+    angles_data.coords['angles'] = angles_deg
+    
+    return angles_data
+```
+
+### Edge Cases and Pitfalls
+- **VZA = 0**: The cosine factor is 1. The method should return the original data without upsampling/padding to avoid interpolation artifacts.
+- **Precision**: Upsampling by a large factor (e.g., 100) increases memory usage significantly. Ensure sufficient memory.
+- **Boundary Conditions**: Padding with zeros assumes the data is zero outside the domain. If the data has significant values near the boundary, this may introduce artifacts.
+- **Degenerate Input**: If the input data has no x dimension, the method fails.
+
+## Operating characteristics
+- **Time Complexity**: $O(N \cdot U)$, where $N$ is the number of pixels and $U$ is the upsampling factor. The interpolation and padding steps dominate.
+- **Memory Complexity**: $O(N \cdot U)$ for the upsampled data.
+- **Strengths**: Accurately models the geometric stretching of oblique views. Simple to implement using standard interpolation libraries.
+- **Limitations**: Computationally expensive due to upsampling. Assumes a regular grid. Padding with zeros may introduce edge artifacts.
+- **When to Use**: When generating multi-angle views for tomographic reconstruction or visualization where geometric accuracy is critical.
+- **When Not to Use**: For real-time applications or when memory is constrained. For near-nadir views where the distortion is negligible.
+
+## Background
+The method is described in the `hybridCT` repository [S1, unofficial], which focuses on hybrid cloud tomography. It is used to generate sinograms from 3D cloud fields for tomographic reconstruction. The approach is based on the principle that an oblique view traverses a longer path through the volume, effectively scaling the data along the projection axis by the cosine of the viewing zenith angle.
+
+## Sources
+[S1] lforster/hybridCT, https://github.com/lforster/hybridCT, fetched 2026-10-27 (unofficial)

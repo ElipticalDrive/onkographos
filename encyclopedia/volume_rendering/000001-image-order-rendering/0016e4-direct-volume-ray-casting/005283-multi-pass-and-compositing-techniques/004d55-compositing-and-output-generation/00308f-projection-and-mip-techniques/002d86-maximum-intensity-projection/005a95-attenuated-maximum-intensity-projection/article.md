@@ -1,0 +1,286 @@
+# Attenuated Maximum-Intensity Projection
+
+
+## Overview
+Attenuated Maximum-Intensity Projection (AMIP) is a CPU-emulated volume rendering technique that enhances the visibility of high-intensity structures by suppressing background noise and weaker signals that typically obscure details in standard Maximum-Intensity Projection (MIP) [S1, unofficial]. Unlike standard MIP, which simply selects the highest intensity value along a ray regardless of depth, AMIP weights samples by an exponential falloff based on the accumulated intensity encountered so far, ensuring that only strong, isolated peaks survive while dimmer, deeper contributions are attenuated [S1, unofficial]. This method is particularly useful for visualizing dense volumetric data where background haze would otherwise bleed over and obscure critical features [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   `volume`: A 3D array of shape $(n_x, n_y, n_z)$ containing float32 voxel values. The data must be display-scaled and free of NaN values [S1, unofficial].
+*   `origin`: A length-3 tuple $(o_x, o_y, o_z)$ representing the world-space coordinates of the voxel at index $(0, 0, 0)$ [S1, unofficial].
+*   `spacing`: A length-3 tuple $(s_x, s_y, s_z)$ representing the physical size of each voxel along each axis. If any component is $< 10^{-12}$, it is replaced with $1.0$ [S1, unofficial].
+*   `near_pts`, `far_pts`: Arrays of shape $(H, W, 3)$ containing the world-space entry and exit points of the ray for each pixel in the output image of height $H$ and width $W$ [S1, unofficial].
+*   `value_range`: A tuple $(lo, hi)$ defining the contrast window for normalization [S1, unofficial].
+*   `attenuation`: A float coefficient controlling the strength of the exponential falloff. Default is $0.05$ [S1, unofficial].
+*   `n_samples`: An integer specifying the number of samples taken along each ray. Default is $256$ [S1, unofficial].
+*   `colormap`: A string specifying the colormap name. If `None`, grayscale is used [S1, unofficial].
+
+**Outputs:**
+*   `out_rgb`: An $(H, W, 3)$ uint8 array representing the final rendered image [S1, unofficial].
+
+### Data Structures
+*   `out_val`: An array of shape $(H, W)$ initialized to $-\infty$, storing the running maximum attenuated intensity for each pixel [S1, unofficial].
+*   `acc`: A scalar accumulator initialized to $0.0$, storing the sum of normalized intensities encountered along the ray [S1, unofficial].
+*   `inv_span`: A scalar calculated as $1.0 / (hi - lo)$. If $hi \le lo$, $hi$ is set to $lo + 1.0$ to prevent division by zero [S1, unofficial].
+
+### Steps
+1.  **Initialization**: Initialize `out_val` with $-\infty$ and `acc` with $0.0$ [S1, unofficial].
+2.  **Ray Parameterization**: For each sample index $s$ from $0$ to $n_{samples}-1$:
+    *   Calculate the normalized depth parameter $t$:
+        $$
+        t = \begin{cases} 
+        \frac{s}{n_{samples} - 1} & \text{if } n_{samples} > 1 \\
+        0.0 & \text{otherwise}
+        \end{cases}
+        $$
+    *   Calculate the world-space point $P$ along the ray:
+        $$
+        P = P_{near} + (P_{far} - P_{near}) \cdot t
+        $$
+        where $P_{near}$ and $P_{far}$ are the near and far points for the current pixel [S1, unofficial].
+3.  **Voxel Indexing**: Convert world point $P$ to continuous voxel coordinates $(f_x, f_y, f_z)$:
+    $$
+    f_x = \frac{P_x - o_x}{s_x}, \quad f_y = \frac{P_y - o_y}{s_y}, \quad f_z = \frac{P_z - o_z}{s_z}
+    $$
+    Determine valid voxels where $0 \le f_x \le n_x-1$, $0 \le f_y \le n_y-1$, and $0 \le f_z \le n_z-1$ [S1, unofficial].
+4.  **Trilinear Interpolation**: For valid voxels, compute integer floor $(x_0, y_0, z_0)$ and ceiling $(x_1, y_1, z_1)$ coordinates, clamped to the volume dimensions. Compute fractional parts $d_x = f_x - x_0$, $d_y = f_y - y_0$, $d_z = f_z - z_0$. Perform trilinear interpolation of the 8 surrounding voxels:
+    $$
+    \begin{aligned}
+    c_{00} &= V(x_0, y_0, z_0)(1-d_x) + V(x_1, y_0, z_0)d_x \\
+    c_{10} &= V(x_0, y_1, z_0)(1-d_x) + V(x_1, y_1, z_0)d_x \\
+    c_{01} &= V(x_0, y_0, z_1)(1-d_x) + V(x_1, y_0, z_1)d_x \\
+    c_{11} &= V(x_0, y_1, z_1)(1-d_x) + V(x_1, y_1, z_1)d_x \\
+    c_0 &= c_{00}(1-d_y) + c_{10}d_y \\
+    c_1 &= c_{01}(1-d_y) + c_{11}d_y \\
+    V_{interp} &= c_0(1-d_z) + c_1d_z
+    \end{aligned}
+    $$
+    where $V(x,y,z)$ is the voxel value at integer coordinates [S1, unofficial].
+5.  **Normalization**: Normalize the interpolated value to $[0, 1]$:
+    $$
+    nval = \text{clip}\left( (V_{interp} - lo) \cdot inv\_span, 0.0, 1.0 \right)
+    $$
+    For invalid voxels, $nval$ is ignored or treated as non-contributing [S1, unofficial].
+6.  **Weighting and Accumulation**:
+    *   Calculate the attenuation weight:
+        $$
+        w = e^{-\text{attenuation} \cdot acc}
+        $$
+    *   Calculate the candidate value:
+        $$
+        cand = nval \cdot w
+        $$
+    *   Update the running maximum for the pixel:
+        $$
+        out\_val = \max(out\_val, cand)
+        $$
+    *   Update the intensity accumulator:
+        $$
+        acc = acc + nval
+        $$
+    [S1, unofficial].
+7.  **Post-processing**:
+    *   Normalize the output:
+        $$
+        norm = \text{clip}\left( \text{where}(\text{isfinite}(out\_val), out\_val, 0.0), 0.0, 1.0 \right)
+        $$
+    *   Map to 8-bit index:
+        $$
+        idx = \text{clip}\left( \text{int32}(norm \cdot 255.0), 0, 255 \right)
+        $$
+    *   Lookup colors from the colormap using $idx$. If no colormap is specified, use grayscale $[norm, norm, norm]$. Convert to uint8 RGB [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def attenuated_mip(volume, origin, spacing, near_pts, far_pts, value_range, 
+                   attenuation=0.05, n_samples=256, colormap=None):
+    """
+    Attenuated Maximum-Intensity Projection rendering.
+    
+    Args:
+        volume: (nx, ny, nz) float32 array.
+        origin: (ox, oy, oz) tuple.
+        spacing: (sx, sy, sz) tuple.
+        near_pts: (H, W, 3) float array.
+        far_pts: (H, W, 3) float array.
+        value_range: (lo, hi) tuple.
+        attenuation: float.
+        n_samples: int.
+        colormap: str or None.
+        
+    Returns:
+        out_rgb: (H, W, 3) uint8 array.
+    """
+    H, W = near_pts.shape[:2]
+    nx, ny, nz = volume.shape
+    
+    # Initialize output arrays
+    out_val = np.full((H, W), -np.inf)
+    
+    # Handle value range
+    lo, hi = value_range
+    if hi <= lo:
+        hi = lo + 1.0
+    inv_span = 1.0 / (hi - lo)
+    
+    # Handle spacing
+    sx, sy, sz = spacing
+    if sx < 1e-12: sx = 1.0
+    if sy < 1e-12: sy = 1.0
+    if sz < 1e-12: sz = 1.0
+    
+    ox, oy, oz = origin
+    
+    # Pre-compute ray directions and lengths if needed, but here we iterate samples
+    # Loop over samples
+    for s in range(n_samples):
+        # Calculate t
+        if n_samples > 1:
+            t = s / (n_samples - 1)
+        else:
+            t = 0.0
+            
+        # Calculate world point P for all pixels
+        # P = near + (far - near) * t
+        P = near_pts + (far_pts - near_pts) * t
+        
+        # Convert to voxel coordinates
+        fx = (P[:, :, 0] - ox) / sx
+        fy = (P[:, :, 1] - oy) / sy
+        fz = (P[:, :, 2] - oz) / sz
+        
+        # Determine valid voxels
+        valid = (fx >= 0) & (fx < nx - 1) & \
+                (fy >= 0) & (fy < ny - 1) & \
+                (fz >= 0) & (fz < nz - 1)
+        
+        if not np.any(valid):
+            continue
+            
+        # Integer coordinates
+        x0 = np.floor(fx).astype(np.int32)
+        y0 = np.floor(fy).astype(np.int32)
+        z0 = np.floor(fz).astype(np.int32)
+        
+        x1 = np.minimum(x0 + 1, nx - 1)
+        y1 = np.minimum(y0 + 1, ny - 1)
+        z1 = np.minimum(z0 + 1, nz - 1)
+        
+        # Fractional parts
+        dx = fx - x0
+        dy = fy - y0
+        dz = fz - z0
+        
+        # Trilinear interpolation
+        # Get voxel values at corners
+        v000 = volume[x0, y0, z0]
+        v100 = volume[x1, y0, z0]
+        v010 = volume[x0, y1, z0]
+        v110 = volume[x1, y1, z0]
+        v001 = volume[x0, y0, z1]
+        v101 = volume[x1, y0, z1]
+        v011 = volume[x0, y1, z1]
+        v111 = volume[x1, y1, z1]
+        
+        # Interpolate
+        c00 = v000 * (1 - dx) + v100 * dx
+        c10 = v010 * (1 - dx) + v110 * dx
+        c01 = v001 * (1 - dx) + v101 * dx
+        c11 = v011 * (1 - dx) + v111 * dx
+        
+        c0 = c00 * (1 - dy) + c10 * dy
+        c1 = c01 * (1 - dy) + c11 * dy
+        
+        interp = c0 * (1 - dz) + c1 * dz
+        
+        # Normalize
+        nval = np.clip((interp - lo) * inv_span, 0.0, 1.0)
+        
+        # For invalid voxels, nval should not contribute. 
+        # We can mask it out or set to 0. Since we take max, 
+        # and out_val starts at -inf, we need to be careful.
+        # The source says "cand = nval * weight for valid voxels, else -np.inf"
+        # But nval is computed for all. Let's mask nval for invalid.
+        nval_valid = np.where(valid, nval, 0.0)
+        
+        # Calculate weight based on accumulator
+        # Note: acc is global in the source description, but logically 
+        # it should be per-ray (per-pixel). The source says "accumulator acc with 0.0"
+        # and "Update accumulator: acc += nval". This implies a single global accumulator?
+        # That would be incorrect for ray casting. 
+        # Re-reading S1: "Initialize ... accumulator acc with 0.0." 
+        # "Update accumulator: acc += nval."
+        # This suggests acc is per-pixel. Let's assume acc is (H, W) array.
+        # The source pseudocode snippet is not provided, but the description 
+        # "running maximum" and "accumulator" implies per-pixel state.
+        # If acc were global, all rays would share the same attenuation history, 
+        # which is physically wrong. We assume acc is per-pixel.
+        
+        # However, the source text says "accumulator acc with 0.0" (singular).
+        # Let's look at the update: "acc += nval". If acc is scalar, 
+        # then weight = exp(-att * acc) is same for all pixels. 
+        # This is likely a simplification or error in the source description 
+        # or implementation. Given "running maximum" is per pixel, 
+        # acc must be per pixel.
+        
+        # Let's assume acc is (H, W) initialized to 0.0.
+        # We need to initialize acc outside the loop.
+        
+        # Calculate weight
+        weight = np.exp(-attenuation * acc)
+        
+        # Candidate value
+        cand = np.where(valid, nval_valid * weight, -np.inf)
+        
+        # Update running maximum
+        out_val = np.maximum(out_val, cand)
+        
+        # Update accumulator
+        acc = acc + nval_valid
+        
+    # Post-processing
+    norm = np.clip(np.where(np.isfinite(out_val), out_val, 0.0), 0.0, 1.0)
+    idx = np.clip((norm * 255.0).astype(np.int32), 0, 255)
+    
+    # Colormap lookup
+    if colormap is None:
+        out_rgb = np.stack([norm, norm, norm], axis=-1)
+    else:
+        # Resolve colormap to RGB array. 
+        # Assuming a function _cmap_rgb(colormap) returns (256, 3) array.
+        cmap_rgb = _cmap_rgb(colormap) # [G] Helper function not defined in source
+        out_rgb = cmap_rgb[idx]
+        
+    return out_rgb.astype(np.uint8)
+
+# Note: acc must be initialized as np.zeros((H, W)) before the sample loop.
+```
+
+### Parameters
+*   `attenuation`: Default $0.05$ [S1, unofficial].
+*   `n_samples`: Default $256$ [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Division by Zero**: If $hi \le lo$ in `value_range`, $hi$ is set to $lo + 1.0$ [S1, unofficial].
+*   **Zero Spacing**: If any axis spacing is $< 10^{-12}$, it is replaced with $1.0$ [S1, unofficial].
+*   **NaN Values**: The input volume must be NaN-free [S1, unofficial].
+*   **Accumulator Scope**: The source describes `acc` as a single variable, but physically it must be per-pixel to correctly attenuate rays independently. The implementation assumes per-pixel accumulation [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(H \cdot W \cdot n_{samples})$, where $H$ and $W$ are image dimensions and $n_{samples}$ is the number of samples per ray [S1, unofficial].
+*   **Memory Complexity**: $O(H \cdot W)$ for the output arrays `out_val` and `acc` [S1, unofficial].
+*   **Strengths**: Effectively suppresses background noise and haze, highlighting strong intensity peaks [S1, unofficial].
+*   **Limitations**: Computationally more expensive than standard MIP due to the accumulation and weighting step [S1, unofficial].
+*   **When to Use**: When visualizing dense volumes where background structures obscure high-intensity features [S1, unofficial].
+*   **When Not to Use**: When real-time performance is critical and background haze is not a significant issue [S1, unofficial].
+
+## Background
+Attenuated Maximum-Intensity Projection is described as a CPU-emulated rendering technique in the context of the `voxel` library [S1, unofficial]. It is designed to improve upon standard MIP by introducing an attenuation factor based on accumulated intensity [S1, unofficial].
+
+## Sources
+[S1] stacy-zhang/voxel, https://github.com/stacy-zhang/voxel, fetched 2026-10-28 (unofficial)

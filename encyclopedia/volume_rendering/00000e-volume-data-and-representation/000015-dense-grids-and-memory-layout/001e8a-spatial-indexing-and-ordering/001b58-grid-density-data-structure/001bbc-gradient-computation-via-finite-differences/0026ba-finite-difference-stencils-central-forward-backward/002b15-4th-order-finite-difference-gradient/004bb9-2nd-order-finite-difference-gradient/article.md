@@ -1,0 +1,123 @@
+# 2nd-Order Finite Difference Gradient
+
+Also called: Central Difference Gradient Estimation, NormalGenerator, Central Difference Gradient, Finite Difference Normal, Gradient Estimation via Central Differencing, Gradient Sampling
+
+## Overview
+The 2nd-Order Finite Difference Gradient is a method to estimate the volume gradient (surface normal) at discrete grid points using central differences [S1, unofficial][S5]. It solves the problem of determining light reflection and surface strength for classification and shading in volume rendering by approximating the derivative of the scalar field [S3, unofficial]. It is distinguished from its parent [4th-Order Finite Difference Gradient](4889-4th-order-finite-difference-gradient.md) by using a simpler, lower-accuracy stencil that requires fewer memory accesses but is more susceptible to directional bias and filtering artifacts [S1, unofficial][S5].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A discrete scalar field $V$ (or $D$) defined on a regular 3D grid with voxel spacing $\Delta x, \Delta y, \Delta z$.
+*   **Output:** A gradient vector $\mathbf{G}$ and a normalized surface normal $\mathbf{N}$ at each voxel center $(i, j, k)$.
+
+**Data Structures:**
+*   The scalar field is stored as a dense grid or sparse structure (e.g., OpenVDB) supporting coordinate-based access.
+*   The gradient is typically computed on-the-fly during ray marching or pre-computed into a vector field grid.
+
+**Steps:**
+1.  For each voxel center at coordinates $(i, j, k)$, identify the six neighboring voxels along the three orthogonal axes: $(i\pm1, j, k)$, $(i, j\pm1, k)$, and $(i, j, k\pm1)$.
+2.  Compute the partial derivatives for each axis using the central difference formula [S1, unofficial][S5]:
+    $$ G_x = \frac{V(i+1, j, k) - V(i-1, j, k)}{2 \Delta x} $$
+    $$ G_y = \frac{V(i, j+1, k) - V(i, j-1, k)}{2 \Delta y} $$
+    $$ G_z = \frac{V(i, j, k+1) - V(i, j, k-1)}{2 \Delta z} $$
+    *Note: In many implementations with uniform spacing, $\Delta x = \Delta y = \Delta z = 1$, allowing the division by 2 to be absorbed or ignored if only direction is needed, though magnitude accuracy requires it [S5].*
+3.  Construct the gradient vector $\mathbf{G} = (G_x, G_y, G_z)$ [S2, S4, unofficial].
+4.  Calculate the magnitude $|\mathbf{G}| = \sqrt{G_x^2 + G_y^2 + G_z^2}$ [S4, unofficial].
+5.  Normalize the vector to obtain the surface normal $\mathbf{N}$:
+    *   If $|\mathbf{G}| > \epsilon$ (where $\epsilon$ is a small threshold, typically $1.0 \times 10^{-7}$), then $\mathbf{N} = \mathbf{G} / |\mathbf{G}|$ [S4, unofficial].
+    *   If $|\mathbf{G}| \le \epsilon$, the normal is undefined. Implementation varies: it may remain zero-initialized, retain a previous value, or be set to a default (e.g., $(0,0,0)$ or $(0,1,0)$) [S4, G, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_central_gradient_normal(grid, i, j, k, dx=1.0, dy=1.0, dz=1.0, epsilon=1e-7):
+    """
+    Computes the normalized gradient at grid[i][j][k] using 2nd-order central differences.
+    
+    Args:
+        grid: 3D array or accessor supporting grid[x][y][z] access.
+        i, j, k: Integer coordinates of the current voxel.
+        dx, dy, dz: Voxel spacing in each dimension.
+        epsilon: Threshold for zero-length gradient check.
+        
+    Returns:
+        Tuple (gx, gy, gz) representing the normalized normal vector.
+    """
+    # Access neighbors. 
+    # Note: In a real implementation, boundary checks are required.
+    # If i-1 or i+1 is out of bounds, use forward/backward difference or clamp.
+    # For this core definition, we assume valid interior points or boundary handling is external.
+    
+    val_center = grid[i][j][k]
+    val_x_minus = grid[i-1][j][k]
+    val_x_plus = grid[i+1][j][k]
+    val_y_minus = grid[i][j-1][k]
+    val_y_plus = grid[i][j+1][k]
+    val_z_minus = grid[i][j][k-1]
+    val_z_plus = grid[i][j][k+1]
+    
+    # Central differences
+    gx = (val_x_plus - val_x_minus) / (2.0 * dx)
+    gy = (val_y_plus - val_y_minus) / (2.0 * dy)
+    gz = (val_z_plus - val_z_minus) / (2.0 * dz)
+    
+    # Magnitude
+    length_sq = gx*gx + gy*gy + gz*gz
+    length = sqrt(length_sq)
+    
+    # Normalization with zero-check
+    if length > epsilon:
+        inv_length = 1.0 / length
+        return (gx * inv_length, gy * inv_length, gz * inv_length)
+    else:
+        # Return zero vector or handle as undefined [S4, unofficial]
+        return (0.0, 0.0, 0.0)
+```
+
+**Parameters:**
+*   **Voxel Spacing ($\Delta x, \Delta y, \Delta z$):** Typically uniform. If non-uniform, explicit division is required [S5].
+*   **Epsilon ($\epsilon$):** Threshold for gradient magnitude. Typical value: $1.0 \times 10^{-7}$ [S4, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Conditions:** The central difference requires neighbors on both sides. At grid boundaries, this method fails unless clamping, reflection, or fallback to forward/backward differences is implemented [G].
+*   **Zero Gradient:** In flat regions or voids, the gradient magnitude may be zero. The normal becomes undefined [S4, unofficial].
+*   **Filtering Artifacts:** The large distance between sample points ($2\Delta$) can cause unacceptable filtering of the gradient, smoothing out fine details [S1, unofficial].
+*   **Interpolation Sensitivity:** Gradients are highly sensitive to the quality of the underlying interpolation filter used to sample the volume, as errors are amplified during normalization [S3, unofficial].
+
+## Subtopics
+
+### Scharr-based Gradient Estimation
+A gradient computation method using a 3D Scharr operator to minimize directional bias errors found in central difference methods, particularly at 45° angles [S6, unofficial]. It uses a smoothing kernel based on the Sobel operator to ensure consistent response magnitude across all directions [S6, unofficial]. It is chosen when directional accuracy is critical and the computational cost of the Scharr kernel is acceptable. It extends to the Hessian matrix for curvature estimation [S6, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Memory Accesses:** Requires 6 memory accesses per voxel for the scalar values (3 pairs of neighbors) [S5]. In hardware implementations, this is often optimized; for example, the "fastest" mode uses 1 memory access by reusing trilinear interpolation face values, while higher quality modes use 4 or 7 accesses [S5].
+*   **Computation:** Constant time $O(1)$ per voxel. Involves 6 subtractions, 3 divisions (or multiplications by inverse spacing), 3 multiplications, 2 additions, and one square root for normalization [S5].
+
+**Measured Performance:**
+*   Performance is heavily dependent on memory bandwidth. High-quality gradient estimation requires additional computation and memory bandwidth, which may affect performance and cost [S5].
+*   The method is faster than higher-order schemes (like 4th-order) but less accurate [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Simple to implement, computationally inexpensive, standard approach for SDF normals [S2, S4, unofficial].
+*   **Limitations:** Susceptible to directional bias (anisotropy) at oblique angles (e.g., 45°) [S6, unofficial]. Prone to filtering artifacts due to the wide stencil [S1, unofficial]. Sensitive to interpolation noise [S3, unofficial].
+
+**When to Use:**
+*   Use for real-time rendering where performance is critical and high-frequency gradient accuracy is not paramount.
+*   Use when the volume data is already smooth or pre-filtered.
+
+**When Not to Use:**
+*   Avoid when high directional accuracy is required (use Scharr or 4th-order) [S6, unofficial].
+*   Avoid for noisy data without pre-filtering, as gradients will be unstable [S3, unofficial].
+
+## Background
+The central difference gradient is a standard technique in volume visualization for estimating surface normals from discrete data fields [S1, S3, unofficial]. It is widely used in ray casting architectures for volume visualization, where gradients are needed for classification and shading [S5]. The method is implemented in various libraries, such as OpenVDB's `ISGradient<CD_2ND>` and `NormalGenerator` [S4, unofficial]. It is often contrasted with intermediate difference gradients, which offer better results by subtracting neighboring samples to compute the gradient at the midpoint [S1, unofficial].
+
+## Sources
+[S1] Iso-Surface Volume Rendering : speed and accuracy for medical applications, https://doi.org/10.3990/1.9789036513982, fetched 2026-10-26 (unofficial)
+[S2] lamdao/sdvr, https://github.com/lamdao/sdvr, fetched 2026-10-26 (unofficial)
+[S3] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S4] AcademySoftwareFoundation/openvdb, https://github.com/AcademySoftwareFoundation/openvdb, fetched 2026-10-27 (unofficial)
+[S5] Ray Casting Architectures for Volume Visualization, https://vcg.seas.harvard.edu/publications/19990101-ray-casting-architetures-for-volume-visualization/paper, fetched 2026-10-27
+[S6] Surface Extraction for Industrial CT Based On Adaptive Particle System, https://doi.org/10.21203/rs.3.rs-9502773/v1, fetched 2026-10-26 (unofficial)

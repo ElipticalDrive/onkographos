@@ -1,0 +1,124 @@
+# Training Configuration and Hyperparameters
+
+Also called: Decoder Training Setup, Hyperparameter Tuning, Training Configuration for Gaussian Splatting Decoder
+
+## Overview
+This article defines the specific hyperparameters, optimization schedules, and training protocols required to converge 3D Gaussian Splatting models, particularly in generative and downstream transfer contexts. It addresses the configuration of learning rates, iteration counts, and loss weights necessary to stabilize training, while also detailing standardized protocols for downstream tasks like classification and segmentation. It differs from sibling methods by focusing on the *configuration* of the training loop itself rather than the geometric densification logic or rendering primitives.
+
+## How it works
+The training process involves optimizing the Gaussian parameters ($\mathbf{p}_i, \mathbf{s}_i, \mathbf{q}_i, \alpha_i, \mathbf{c}_i$) using gradient descent. The specific configuration depends on the target application (e.g., generative decoding vs. downstream classification).
+
+### Inputs and Outputs
+*   **Inputs:** Input images (and optionally depth/normal maps), camera poses, and initial Gaussian initialization (often from SfM points or a latent code).
+*   **Outputs:** Optimized Gaussian attributes and, in generative contexts, a trained decoder mapping latent codes to Gaussian parameters.
+
+### Data Structures
+The training state maintains the standard 3DGS primitive attributes:
+*   Position $\mathbf{p}_i \in \mathbb{R}^3$
+*   Scale $\mathbf{s}_i \in \mathbb{R}^3$
+*   Rotation $\mathbf{q}_i \in \mathbb{R}^4$ (unit quaternion)
+*   Opacity $\alpha_i \in [0, 1]$
+*   Color coefficients $\mathbf{c}_i$ (Spherical Harmonics)
+
+### Optimization Steps
+The general training loop follows these steps, with specific hyperparameters detailed below:
+
+1.  **Initialization:** Initialize Gaussians from SfM point clouds or a generative prior. [S1, S5, unofficial]
+2.  **Camera Sampling:** Sample camera poses based on the target domain. [S2]
+3.  **Rendering:** Render the scene using differentiable splatting. [S4, unofficial]
+4.  **Loss Calculation:** Compute the total loss $L$ based on the task (photometric, depth, or classification). [S1, S3, unofficial][S6]
+5.  **Backpropagation:** Compute gradients with respect to Gaussian attributes. [S4, unofficial]
+6.  **Update:** Apply optimizer step (typically Adam or AdamW). [S2][S3, unofficial]
+7.  **Densification/Pruning:** Periodically adjust Gaussian count based on density control criteria (see [Parent](15107-optimization-schedule-and-densification.md)). [S4, unofficial]
+
+### Formulas and Loss Functions
+The total loss $L$ is a weighted sum of task-specific terms.
+
+**Photometric Stereo Loss:**
+For methods utilizing inverse rendering with lighting, the loss is defined as [S6]:
+$$ L = L_c + \lambda L_n $$
+Where:
+*   $L_c$ is the L1 photometric loss between the rendered image and the observed image.
+*   $L_n$ is a normal regularization term ensuring Gaussians align with the true object surface, calculated via the gradient of the depth map.
+*   $\lambda$ is a weighting factor.
+
+**Lambertian Reflectance Model:**
+The rendering intensity $I(x,y)$ is modeled as [S6]:
+$$ I(x,y) \propto l^T \cdot n(x,y) $$
+Where $l$ is the light direction and $n(x,y)$ is the surface normal. This model is used to calculate self-occlusions (shadows) by analyzing surface alignment with the light direction.
+
+**Generative/Decoder Loss:**
+For generative decoders, loss weights are typically set as $(\lambda_1, \lambda_2, \lambda_3, \lambda_4, \lambda_5) = (0.2, 0.5, 1.0, 1.0, 0.2)$ unless stated otherwise. [S2]
+
+### Parameters and Typical Values
+
+**General Training Parameters:**
+*   **Optimizer:** Adam [S2] or AdamW [S3, unofficial].
+*   **Learning Rate:**
+    *   Generative Decoder (PanoHead/EG3D): 0.0009 [S2].
+    *   ModelNet10/40 (Downstream): $10^{-3}$ [S3, unofficial].
+    *   ShapeNet-Part (Downstream): $10^{-4}$ [S3, unofficial].
+*   **Weight Decay:** 0.05 (for AdamW in downstream tasks) [S3, unofficial].
+*   **Warm-up:** 5 epochs (for downstream tasks) [S3, unofficial].
+*   **Batch Size:**
+    *   Generative Decoder: Not explicitly specified, but standard batch training is implied. [S2]
+    *   ModelNet10/40: 256 [S3, unofficial].
+    *   ShapeNet-Part: 16 [S3, unofficial].
+*   **Iterations/Epochs:**
+    *   Generative Decoder: 500,000 iterations [S2].
+    *   Downstream Tasks: 300 epochs [S3, unofficial].
+
+**VoxelTTO Specific Parameters:**
+*   **Voxel Size:** 0.002 meters (optimal balance of performance and computation) [S1, unofficial].
+*   **Splits per Voxel:** 2 (optimal; 4 splits show no substantial improvement) [S1, unofficial].
+*   **TTO Iterations:** 20 (balances accuracy and efficiency) [S1, unofficial].
+*   **Depth Loss:** Used by default; removing it slightly reduces geometric accuracy [S1, unofficial].
+
+**Camera Sampling Strategies:**
+*   **PanoHead:** Random cameras sampled all around the head (360°) [S2].
+*   **EG3D:** Mainly frontal views with small vertical and horizontal rotations [S2].
+
+### Edge Cases and Pitfalls
+*   **Initialization Sensitivity:** 3DGS is sensitive to initialization. RAIN-GS addresses this by initializing Gaussians sparsely with large variance and progressively applying low-pass filtering to avoid 2D projections smaller than a pixel [S5, unofficial].
+*   **Occlusion Artifacts:** Standard densification can create "popping" artifacts in occluded regions. StopThePop integration uses occlusion-aware densification to restrict statistics to views where Gaussians actually contribute, reducing popping and keeping occlusion boundaries intact [S4, unofficial].
+*   **Run-to-Run Variation:** Downstream fine-tuning (e.g., ModelNet) can exhibit appreciable run-to-run variation. Results should be interpreted with caution regarding small cross-environment differences [S3, unofficial].
+
+## Subtopics
+
+### [Adaptive Gaussian Refinement Strategy](16570-adaptive-gaussian-refinement-strategy.md)
+The Adaptive Gaussian Refinement Strategy is a densification and pruning mechanism for 3D Gaussian Splatting that dynamically adjusts the number and size of Gaussians during training based on 2D gradient magnitude and screen-space size. It solves the problem of fixed Gaussian counts by growing Gaussians in regions with high reconstruction error and pruning those that are redundant or overly large. It differs from standard densification by explicitly tracking screen-space radii to enable screen-aware splitting and pruning, and by using a reset-based accumulation of gradient statistics to avoid bias from early training steps.
+
+### Standard Downstream Protocols
+A standardized training and evaluation pipeline for classification and part segmentation tasks using Gaussian inputs. It defines specific protocols for ModelNet10/40 and ShapeNet-Part datasets to ensure reproducibility and fair comparison. [S3, unofficial]
+*   **ModelNet10/40:** Uses 1,024 Gaussians, 64 groups of 32, and all 14 attributes. Full fine-tuning, linear probing, and three-layer MLP probing run for 300 epochs with AdamW, learning rate $10^{-3}$, weight decay 0.05, 5 warm-up epochs, and total batch size 256. Frozen probing updates only the classifier. [S3, unofficial]
+*   **ShapeNet-Part:** Uses 2,048 Gaussians, 128 groups of 32, batch size 16, learning rate $10^{-4}$, and 300 epochs. [S3, unofficial]
+
+### StopThePop Framework Integration
+A framework that integrates occlusion-aware densification with StopThePop's per-pixel depth ordering to remove popping artifacts and keep occlusion boundaries intact. It replaces the visibility filter with an occlusion-aware filter that updates Gaussian statistics only from views in which the Gaussian is actually rendered. It also introduces a contribution-based densification criterion, replacing the raw view-count normalizer with an average-contribution one. This reduces the Gaussian count by up to 63% while improving image quality metrics (up to 6% lower LPIPS) on occlusion-heavy scenes. [S4, unofficial]
+
+### RAIN-GS
+A method that initializes Gaussians sparsely with large variance from the SfM point cloud and progressively applies low-pass filtering to avoid 2D Gaussian projections smaller than a pixel, addressing sensitivity to initialization. [S5, unofficial]
+
+### Bulò et al. method
+A method that uses pixel-level error as a densification criterion and revises the opacity setting during the cloning process, leading to a more stable training process. [S5, unofficial]
+
+### Photometric Stereo with Gaussian Splatting
+A calibrated photometric stereo method that reconstructs 3D normal maps from multiple images with different lighting by optimizing Gaussian Splatting parameters using inverse rendering and a Lambertian reflectance model. It calculates self-occlusions (shadows) by analyzing if surfaces are aligned with the light direction, enabling view-dependent rendering despite a fixed camera. The loss function minimizes the L1 photometric loss and a normal regularization term. [S6]
+
+## Operating characteristics
+*   **Time Complexity:** Training time is dominated by the number of iterations and the number of Gaussians. Generative decoding requires 500,000 iterations [S2], while downstream tasks require 300 epochs [S3, unofficial].
+*   **Memory Complexity:** Memory usage scales with the number of Gaussians. Occlusion-aware methods (StopThePop) can reduce the required Gaussian count by up to 63% compared to view-count normalizers, reducing memory footprint [S4, unofficial].
+*   **Performance:** VoxelTTO adds negligible overhead (2.304s vs 2.293s for 10 images) when retaining frozen attention computations in BF16 [S1, unofficial].
+*   **Strengths:** Standardized protocols ensure reproducibility [S3, unofficial]. Occlusion-aware methods improve quality in complex scenes [S4, unofficial].
+*   **Limitations:** Run-to-run variation in downstream tasks can obscure small performance gains [S3, unofficial].
+
+## Background
+3D Gaussian Splatting has become a dominant representation for explicit 3D scene representation. Training configurations have evolved from basic novel view synthesis to complex generative decoding and downstream transfer tasks. Key developments include the integration of occlusion-aware densification [S4, unofficial], standardized downstream protocols [S3, unofficial], and specialized methods for photometric stereo [S6] and initialization sensitivity [S5, unofficial].
+
+## Sources
+[S1] VoxelTTO: Voxel-Aligned Feed-Forward 3D Gaussian Splatting with Test-Time Optimization, https://doi.org/10.48550/arxiv.2609.21498, fetched 2026-10-26 (unofficial)
+[S2] Gaussian Splatting Decoder for 3D-aware Generative Adversarial Networks, https://doi.org/10.1109/cvprw63382.2024.00794, fetched 2026-10-29
+[S3] Gaussian-JEPA: Joint-Embedding Predictive Learning for 3D Gaussian Splats, https://arxiv.org/abs/2608.15651v1, fetched 2026-10-26 (unofficial)
+[S4] Counting Contributions, Not Views: Occlusion-Aware Densification for 3D Gaussian Splatting, https://arxiv.org/abs/2610.27108, fetched 2026-10-26 (unofficial)
+[S5] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)
+[S6] Photometric Stereo Using Gaussian Splatting And Inverse Rendering, https://hal.science/hal-05553367v1, fetched 2026-10-26

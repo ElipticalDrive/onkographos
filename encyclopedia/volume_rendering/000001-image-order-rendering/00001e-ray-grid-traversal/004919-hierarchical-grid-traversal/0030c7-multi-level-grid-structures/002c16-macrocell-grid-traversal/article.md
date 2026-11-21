@@ -1,0 +1,255 @@
+# Macrocell Grid Traversal
+
+Also called: Downscaled Grid Traversal, Macrocell or multigrids, multigrids
+
+## Overview
+Macrocell Grid Traversal is a hierarchical acceleration technique for ray-grid traversal that superimposes a coarse grid over a base uniform fine grid to skip empty regions [S1, S2, S3]. It solves the problem of excessive traversal overhead in large, sparse uniform grids by allowing rays to bypass blocks of empty fine cells in single steps [S2, S3]. Unlike [Multi-Level Array Grid](3329-multi-level-array-grid.md) which may use complex indexing or variable subdivision, or [Multi-Grid Ray Traversal](4142-multi-grid-ray-traversal.md) which might involve multiple independent grids, Macrocell Grid Traversal uses a fixed, regular downsampling factor $M$ to create a simple boolean occupancy map [S1, S2]. This simplicity allows for trivial build times and efficient reuse of frustum setup calculations, yielding approximately 30% performance improvement over single ray grids for medium-sized animated scenes [S2, S3].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- A base uniform fine grid of resolution $N \times N \times N$ (or $W \times H \times D$).
+- The ray parameters: origin $\mathbf{o}$, direction $\mathbf{d}$, and inverse direction $\mathbf{d}^{-1}$.
+- The downsampling factor $M$ (typically 6) [S2, S3].
+
+**Outputs:**
+- A traversal sequence of occupied fine grid cells.
+- A boolean occupancy flag for each macrocell indicating if any underlying fine cell is occupied [S1, S2, S3].
+
+### Data Structures
+The structure consists of two grids:
+1.  **Fine Grid:** The original voxel data. Cells are indexed by $(i, j, k)$.
+2.  **Macrocell Grid:** A coarse grid of resolution $\lceil N/M \rceil \times \lceil N/M \rceil \times \lceil N/M \rceil$.
+    -   **Layout:** Flat array or organized in bricks for locality [S1].
+    -   **Fields:** Each macrocell stores a single boolean flag `occupied`.
+    -   **Definition:** A macrocell at coarse index $(I, J, K)$ corresponds to the fine grid block defined by fine indices:
+        $$ i \in [I \cdot M, \min((I+1) \cdot M, N) - 1] $$
+        $$ j \in [J \cdot M, \min((J+1) \cdot M, N) - 1] $$
+        $$ k \in [K \cdot M, \min((K+1) \cdot M, N) - 1] $$
+    -   **Occupancy:** `macrocell[I][J][K].occupied` is `true` if any fine cell in the corresponding block is occupied, `false` otherwise [S1, S2, S3].
+
+### Parameters
+-   **$M$ (Downsampling Factor):** The side length of the cubic block of fine cells represented by one macrocell.
+    -   **Typical Value:** $M = 6$ [S2, S3].
+    -   **Constraints:** Smaller $M$ yields insufficient savings to justify overhead; larger $M$ reduces the probability of finding empty regions, reducing skip benefits [S2, S3].
+
+### Algorithm Steps
+
+#### Build Phase
+1.  Initialize the macrocell grid with all flags set to `false`.
+2.  Iterate through all fine grid cells $(i, j, k)$.
+3.  If fine cell $(i, j, k)$ is occupied:
+    -   Compute macrocell coordinates:
+        $$ I = \lfloor i / M \rfloor $$
+        $$ J = \lfloor j / M \rfloor $$
+        $$ K = \lfloor k / M \rfloor $$
+    -   Set `macrocell[I][J][K].occupied = true`.
+4.  [G] Handle boundary conditions where $N$ is not a multiple of $M$ by ensuring array bounds checks during indexing.
+
+#### Traversal Phase
+The traversal reuses the standard ray-grid traversal logic (DDA) but operates on macrocells first to determine skip distances.
+
+1.  **Frustum Setup (Coarse):**
+    -   Compute the initial intersection interval $[t_{min}, t_{max}]$ of the ray with the entire scene bounding box.
+    -   Compute the coarse grid step variables. Since the macrocell grid is a downscaled version, the step sizes in macrocell space are $M$ times larger than in fine cell space.
+    -   Let $\Delta t_{x}, \Delta t_{y}, \Delta t_{z}$ be the time to cross one fine cell.
+    -   The time to cross one macrocell is $M \cdot \Delta t_{x}$, etc.
+    -   Alternatively, compute the coarse grid traversal parameters by dividing the fine grid setup values by $M$ [S2, S3].
+
+2.  **Coarse Traversal Loop:**
+    -   Initialize coarse DDA variables $(I, J, K)$ to the macrocell containing the ray origin.
+    -   While $t < t_{max}$:
+        -   Check if `macrocell[I][J][K].occupied` is `false`.
+        -   **If Empty:**
+            -   Skip the entire macrocell.
+            -   Advance the coarse DDA to the next macrocell along the ray direction.
+            -   Update $t$ by adding the time to cross the current macrocell ($M \cdot \Delta t$).
+            -   Continue loop.
+        -   **If Occupied:**
+            -   Perform fine grid traversal within this macrocell block.
+            -   Determine the fine cell indices $(i_{start}, j_{start}, k_{start})$ corresponding to $(I, J, K)$.
+            -   Execute standard fine grid DDA steps for cells within the block $[I \cdot M, (I+1) \cdot M) \times [J \cdot M, (J+1) \cdot M) \times [K \cdot M, (K+1) \cdot M)$.
+            -   For each occupied fine cell, perform ray-volume intersection.
+            -   Update $t$ and fine DDA variables.
+            -   If the ray exits the current macrocell block, advance the coarse DDA to the next macrocell $(I', J', K')$ and continue the coarse loop.
+
+3.  **Edge Cases:**
+    -   **Partial Macrocells:** At the boundaries of the grid, macrocells may be smaller than $M \times M \times M$. The traversal must handle these boundary blocks correctly by checking array bounds [S2, S3].
+    -   **Ray Origin Outside:** If the ray origin is outside the grid, standard frustum clipping applies before coarse traversal begins.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def traverse_macrocell_grid(ray_origin, ray_dir, fine_grid, macrocell_grid, M):
+    """
+    ray_origin: (ox, oy, oz)
+    ray_dir: (dx, dy, dz)
+    fine_grid: 3D array of booleans, size N x N x N
+    macrocell_grid: 3D array of booleans, size ceil(N/M) x ceil(N/M) x ceil(N/M)
+    M: downsampling factor
+    """
+    # 1. Setup Fine Grid DDA
+    # Standard ray-grid traversal setup for fine grid
+    # Calculate t_min, t_max for the entire scene bounding box
+    # Calculate delta_t (time to cross one fine cell)
+    # Calculate t_max_x, t_max_y, t_max_z (entry times to next cell)
+    # Calculate step_x, step_y, step_z (direction of DDA)
+    # Calculate current_cell (i, j, k) containing ray origin
+    
+    # 2. Setup Coarse Grid DDA
+    # Coarse grid resolution
+    N_coarse = ceil(N / M)
+    
+    # Map fine cell to coarse cell
+    coarse_i = floor(i / M)
+    coarse_j = floor(j / M)
+    coarse_k = floor(k / M)
+    
+    # Coarse DDA parameters
+    # Time to cross one macrocell is M * delta_t
+    coarse_delta_t_x = M * delta_t_x
+    coarse_delta_t_y = M * delta_t_y
+    coarse_delta_t_z = M * delta_t_z
+    
+    # Entry times to next coarse cell
+    # Adjust t_max_x/y/z to align with coarse grid boundaries
+    # If current fine cell is not at the start of a macrocell, 
+    # the first coarse step might be partial.
+    # Simplified: Assume we jump to the next coarse cell boundary.
+    
+    # 3. Traversal
+    while t < t_max:
+        # Check if current coarse cell is empty
+        if not macrocell_grid[coarse_i][coarse_j][coarse_k]:
+            # Skip this macrocell
+            # Advance coarse DDA
+            if step_x == 1:
+                t_max_x += coarse_delta_t_x
+                if t_max_x < t_max_y and t_max_x < t_max_z:
+                    coarse_i += 1
+                    t = t_max_x
+                    continue
+            elif step_x == -1:
+                t_max_x -= coarse_delta_t_x
+                if t_max_x < t_max_y and t_max_x < t_max_z:
+                    coarse_i -= 1
+                    t = t_max_x
+                    continue
+            
+            # Similar logic for y and z steps...
+            # Determine which axis is next
+            if t_max_x < t_max_y:
+                if t_max_x < t_max_z:
+                    coarse_i += step_x
+                    t = t_max_x
+                    t_max_x += coarse_delta_t_x
+                else:
+                    coarse_k += step_z
+                    t = t_max_z
+                    t_max_z += coarse_delta_t_z
+            else:
+                if t_max_y < t_max_z:
+                    coarse_j += step_y
+                    t = t_max_y
+                    t_max_y += coarse_delta_t_y
+                else:
+                    coarse_k += step_z
+                    t = t_max_z
+                    t_max_z += coarse_delta_t_z
+        else:
+            # Macrocell is occupied, traverse fine cells within this block
+            # Determine the bounds of the current macrocell in fine grid
+            i_start = coarse_i * M
+            j_start = coarse_j * M
+            k_start = coarse_k * M
+            i_end = min(i_start + M, N)
+            j_end = min(j_start + M, N)
+            k_end = min(k_start + M, N)
+            
+            # Reset fine DDA to the start of the macrocell if needed,
+            # or continue from current fine cell if inside the block.
+            # Standard fine grid traversal loop
+            while t < t_max and i < i_end and j < j_end and k < k_end:
+                if fine_grid[i][j][k]:
+                    # Perform ray-volume intersection
+                    intersect(ray_origin, ray_dir, i, j, k)
+                
+                # Advance fine DDA
+                if t_max_x < t_max_y:
+                    if t_max_x < t_max_z:
+                        i += step_x
+                        t = t_max_x
+                        t_max_x += delta_t_x
+                    else:
+                        k += step_z
+                        t = t_max_z
+                        t_max_z += delta_t_z
+                else:
+                    if t_max_y < t_max_z:
+                        j += step_y
+                        t = t_max_y
+                        t_max_y += delta_t_y
+                    else:
+                        k += step_z
+                        t = t_max_z
+                        t_max_z += delta_t_z
+            
+            # After finishing the block, advance coarse DDA
+            # Determine which coarse axis was last crossed
+            # This requires tracking which fine step caused the exit from the block
+            # Simplified: Just advance to the next coarse cell in the direction of the ray
+            # Note: The coarse DDA state (t_max_x/y/z) must be synchronized with the fine DDA
+            # exit point.
+            
+            # Re-calculate coarse entry times based on current fine position
+            # This ensures continuity
+            coarse_i = floor(i / M)
+            coarse_j = floor(j / M)
+            coarse_k = floor(k / M)
+            
+            # Update coarse t_max values to reflect the current position
+            # This is a simplification; a robust implementation would maintain
+            # coarse t_max values incrementally.
+            t_max_x_coarse = (coarse_i + 1) * coarse_delta_t_x if step_x == 1 else coarse_i * coarse_delta_t_x
+            # ... similar for y and z
+            
+            # Advance coarse DDA to the next cell
+            # (Logic similar to the empty case, but triggered after block traversal)
+            if step_x == 1:
+                coarse_i += 1
+                t = t_max_x_coarse # Approximate
+            # ...
+```
+
+### Subtopics
+-   **Multi-Level Array Grid:** Uses array-based indexing for variable depth subdivision. Choose when scene density varies significantly across different regions and a fixed $M$ is insufficient.
+-   **Multi-Grid Ray Traversal:** May involve multiple distinct grids or more complex hierarchical structures. Choose when the scene has distinct geometric components that benefit from separate acceleration structures.
+-   **Two-Level Grids for Ray Tracing on GPUs:** Optimized specifically for GPU architectures with specific memory coalescing requirements. Choose when targeting GPU hardware with limited shared memory.
+-   **Multi-resolution grids:** General term for grids with varying resolution. Choose when the scene has high-frequency details in some areas and low-frequency in others, requiring adaptive refinement rather than fixed blocks.
+
+## Operating characteristics
+-   **Time Complexity:** Build time is $O(N^3)$ for the fine grid, but the macrocell build is $O((N/M)^3)$ which is trivial. Traversal time is reduced by skipping empty macrocells. The overhead of checking macrocells is minimal.
+-   **Memory Complexity:** Adds $O((N/M)^3)$ bits (or bytes) for the macrocell grid. For $M=6$, this is roughly $1/216$ of the fine grid size, which is negligible.
+-   **Measured Performance:** Approximately 30% improvement over single ray grids for medium-sized animated scenes [S2, S3].
+-   **Strengths:**
+    -   Trivial and cheap build process [S2, S3].
+    -   Simple traversal logic [S2, S3].
+    -   Low memory overhead [S2, S3].
+    -   Effective for scenes with large empty regions [S2, S3].
+-   **Limitations:**
+    -   Fixed block size $M$ may not adapt to varying density [S2, S3].
+    -   For smaller resolutions, savings are insufficient [S2, S3].
+    -   For larger resolutions, probability of finding empty regions decreases [S2, S3].
+    -   Not suitable for scenes with highly varying geometric density without additional robustness [S2, S3].
+-   **When to Use:** Medium-sized animated scenes with significant empty space and uniform fine grid resolution [S2, S3].
+-   **When Not to Use:** Scenes with highly varying density where fixed blocks are inefficient, or very small grids where overhead dominates [S2, S3].
+
+## Background
+Macrocell Grid Traversal was proposed by Parker et al. in 1999 [S1, S2, S3]. It is a simple hierarchical optimization to a base uniform grid, often used to apply grids to scalar volume fields [S2, S3]. The method was designed to formulate a viable grid traversal for medium-size animated scenes, balancing performance and build time [S2, S3]. Additional levels of macrocells could further improve performance for more complex models, but were not investigated in the original work [S2, S3].
+
+## Sources
+[S1] A Survey on Exploiting Grids for Ray Tracing, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/089-096, fetched 2026-10-24
+[S2] PDF Ray Tracing Animated Scenes using Coherent Grid Traversal, https://www.sci.utah.edu/~thiago/papers/grid.pdf, fetched 2026-10-25
+[S3] PDF Ray Tracing Animated Scenes using Coherent Grid Traversal, https://www.sci.utah.edu/~wald/Publications/2006/CGT/grid.pdf, fetched 2026-10-25

@@ -1,0 +1,121 @@
+A GPU-driven game engine written in Rust, with meshlet-based rendering and an editor. - feat(render): postfix RPN CSG tree (Approach D) by lobinuxsoft · Pull Request #310 · lobinuxsoft/kooch
+
+feat(render): postfix RPN CSG tree (Approach D) by lobinuxsoft · Pull Request #310 · lobinuxsoft/kooch · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+lobinuxsoft
+commented
+Apr 26, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Implements Approach D from docs/research/sdf-csg-composition.md: linearise the CSG tree to a flat token array in postfix order. The shader walks the tokens once with a fixed-size 16-slot evaluation stack — no GPU recursion, deterministic results regardless of entity creation order.
+Today
+After
+SdfInstance carries blend_mode + blend_smoothness per entity (80 B)
+SdfPrimitive carries only geometry (64 B); blends live on operator tokens
+Flat fold loop in eval_scene — iteration order = visible result
+Postfix evaluator + array<f32, 16> stack — order-independent
+instances SSBO
+primitives SSBO + new tokens SSBO (postfix)
+instance_count in SceneMeta
+primitive_count + token_count
+Migration default tree
+```
+smooth_subtract(
+smooth_intersect(smooth_union(adds, k=max), intersects, k=max),
+subs, k=max
+)
+```
+ADD-like = MODE_REPLACE ∪ MODE_SMOOTH_UNION. When role smoothness is 0 the smin clamps to k=1e-5 (effectively hard min) — legacy scenes with all-default SdfBlend render identically.
+INTERSECT = MODE_SMOOTH_INTERSECTION. SUB = MODE_SMOOTH_SUBTRACTION.
+Per-role k = max over the role's instances — tracked as a known minor drift on mixed-mode scenes (documented in update.rs comment), addressed when the tree-editor UX ships.
+Within each role, leaves fold pairwise into a balanced subtree of depth ceil(log2(N)). Total tree depth covers ~65k primitives within the 16-slot stack.
+SdfBlend component remains the user-facing API for the Inspector; the GPU-side blend fields are what got dropped.
+Test plan
+Automated (this PR)
+10 unit tests in csg_tree::tests — token layout (16 B), balanced fold, depth>16 rejection (synthesised 2^17-leaf tree), migration tree shape (full roles + adds-only + no-adds-collapses-to-None), order-independence within role.
+raymarch::tests::shader_parses — naga full validation of the rewritten WGSL.
+cargo build --workspace clean (excluding the pre-existing wgpu-29 breakage in examples/compute_vector_add.rs, unrelated).
+cargo test --workspace --lib — ~345 tests passing, no regressions.
+Manual smoke (verified before opening PR)
+TestEngine2.0 opens → TEST2_SCENE.ome_scene and HierarchyTest.ome_scene both load and render correctly (raymarch + glTF Suzanne mesh coexist, depth compositing OK).
+Scene save/load round-trip preserves geometry.
+PowerProfile menu (Plugged ↔ Debug) toggles without renderer issues.
+Pipeline cache grew from 33496 → 53152 bytes — proof that the new render pipeline (3-SSBO bind group + rewritten WGSL) compiled successfully and persisted.
+Clean shutdown (exit code 0).
+Acceptance from issue body
+Subtractive entity created first still subtracts (default tree rebuilds from full ECS state every frame; spawn order is irrelevant after the entity-index sort).
+Reordering creation history of two entities never changes the rendered output (verified by order_independence_within_role test + manual scene reorder).
+Per-entity smoothness controls the local blend radius (now via the operator edge of its role; user-visible behaviour preserved through Inspector).
+Sphere-tracing converges on scenes with mixed roles + smooth blends.
+Old scenes load and render identically post-migration (verified by smoke test on existing .ome_scene files; legacy MODE_REPLACE entities collapse to k≈0 smin which is hard-union-equivalent).
+Stack overflow validated at upload time — CsgError::StackOverflow returned by serialise_postfix; an if let Err(...) in update.rs logs a warning and falls back to empty token stream + sky render.
+What this PR does NOT include (filed separately)
+Tree editor UX in the World panel — manual grouping, drag-into-group, tree visualisation. Per-edge k editing.
+Spatial chunking (World streaming básico #54), BVH per-chunk culling (feat(core): Spatial Acceleration Structure — BVH/Octree compartido #115), Sparse SDF storage (feat(sdf): Sparse SDF Storage #136), Edit Baker pipeline (feat(render): RPN edit baker — bridge runtime CSG edits into sparse SDF chunks #309) — the rest of the destructible-terrain / planet-scale streaming roadmap.
+Files
+New: crates/ome_render/src/raymarch/csg_tree.rs (398 lines, under the 400-line "monolithic" threshold)
+Modified: instance.rs (struct rename + size 80→64 B + SceneMeta layout), renderer.rs (3-SSBO bind group + new tokens buffer), update.rs (collect → role-group → build tree → serialise → upload), raymarch_main.wgsl (postfix evaluator), mod.rs (mod decl).
+feat(render): postfix RPN CSG tree (Approach D)
+…
+ee5f73c
+```
+Replace per-entity flat-fold SDF composition (where iteration order
+silently determined the visible result) with a CSG tree linearised to a
+flat array of tokens in postfix order. The shader walks the array once
+with a fixed-size 16-slot evaluation stack — no GPU recursion, no
+order-dependent renders.
+
+- New `raymarch/csg_tree.rs`: `CsgNode` tree + balanced pairwise fold +
+  DFS-postfix serialiser + depth>16 rejection. 10 unit tests cover
+  token layout, balanced depth, overflow guard, migration shape, and
+  order-independence within role.
+- `SdfInstance` -> `SdfPrimitive` (64 B; blend metadata removed from
+  the GPU struct, now lives on operator tokens).
+- `SceneMeta` carries `primitive_count` + `token_count`.
+- Scene bind group expanded to 3 SSBOs (meta + primitives + tokens).
+- `raymarch_main.wgsl::eval_scene` rewritten as postfix evaluator with
+  `array<f32, 16>` stack; new `apply_op` dispatches the 6 CSG ops.
+- Migration default tree:
+  smooth_subtract(
+      smooth_intersect(smooth_union(adds, k=max), intersects, k=max),
+      subs, k=max).
+  MODE_REPLACE entities collapse cleanly when role smoothness is 0
+  (smin clamps k to 1e-5, equivalent to a hard min).
+
+Closes #307
+```
+lobinuxsoft
+merged commit d6967b2
+into
+development
+Apr 26, 2026
+lobinuxsoft
+deleted the
+307-featrender-postfix-rpn-csg-tree-approach-d-from-sdf-csg-compositionmd
+branch
+April 26, 2026 18:39
+This was referenced Apr 26, 2026
+feat(render): postfix RPN CSG tree (Approach D from sdf-csg-composition.md)
+#307
+Closed
+epic(world): planets — layered terrain (heightfield + sparse voxels + detail + deformation) for Stellar Delivery
+#313
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

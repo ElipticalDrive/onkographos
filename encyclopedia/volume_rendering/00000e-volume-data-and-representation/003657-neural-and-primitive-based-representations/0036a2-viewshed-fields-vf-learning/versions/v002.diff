@@ -1,0 +1,236 @@
+--- v001.md
++++ v002.md
+@@ -4,192 +4,68 @@
+ 
+ ## Overview
+-Viewshed Fields (VF) Learning is a method that learns an implicit probability distribution over oriented points (location $\mathbf{x}$ and viewing direction $\mathbf{d}$) to represent the likelihood that a 3D surface point is visible from the original training cameras [S1]. It solves the problem of generating plausible initializations for novel camera poses in NeRF registration by sampling from this learned distribution, thereby enabling the creation of satisfactory novel views for optimization [S1]. Unlike standard NeRFs that model density and color, VF specifically models the "viewshed" or visibility likelihood, often using Normalizing Flows to map the complex distribution of valid oriented points to a simple latent space [S1].
++Viewshed Fields (VF) Learning is a method that learns an implicit probability distribution over oriented points (location $\mathbf{x}$ and viewing direction $\mathbf{d}$) to identify regions of a 3D scene that are likely to be visible from original camera viewpoints [S1]. It solves the problem of generating geometrically consistent novel views and initializing NeRF registration by mapping the distribution of valid oriented points to a simple latent Gaussian space using Normalizing Flows (NF) [S1]. Unlike standard NeRF rendering which traverses rays to estimate density and color, VF Learning explicitly models the likelihood of a view being valid, allowing for direct sampling of high-confidence camera configurations [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D spatial position $\mathbf{x}$ and a viewing direction $\mathbf{d}$ (forming an oriented point).
+-*   **Output:** A log-likelihood score indicating the probability that the oriented point $(\mathbf{x}, \mathbf{d})$ belongs to the viewshed of the original cameras, or a latent vector $\mathbf{z}$ in the normalizing flow space.
++*   **Input:** A pre-trained or jointly trained NeRF model (providing density $\sigma$ and color $\mathbf{c}$) and a set of training images with known camera poses.
++*   **Output:** A Normalizing Flow model $f$ that maps oriented points $\mathbf{x} \in \mathbb{R}^3, \mathbf{d} \in \mathbb{R}^3$ to a latent vector $\mathbf{z} \in \mathbb{R}^6$, and the inverse mapping $f^{-1}$ for generating novel views.
+ 
+ **Data Structures:**
+-*   **Normalizing Flow Model ($f$):** A neural network architecture (specifically Real-NVP) that maps the data distribution $X$ of oriented points to a latent space $Z$.
+-    *   **Architecture:** Real-NVP with 4 layers [S1].
+-    *   **Latent Space:** A 6-dimensional diagonal Gaussian distribution [S1].
+-*   **NeRF Model:** A standard Neural Radiance Field that outputs density ($\sigma$) and RGB color, used to determine surface depth [S1].
++*   **NeRF Model:** Standard MLP or grid-based representation outputting density $\sigma$ and RGB color.
++*   **Normalizing Flow Model ($f$):** A Real-NVP architecture with 4 layers [S1]. It takes a 6-dimensional input vector (concatenation of $\mathbf{x}$ and $\mathbf{d}$) and outputs a 6-dimensional latent vector $\mathbf{z}$.
++*   **Latent Space ($Z$):** A 6-dimensional diagonal Gaussian distribution $\mathcal{N}(\mathbf{0}, \mathbf{I})$ [S1].
+ 
+ **Numbered Steps:**
+ 
+-1.  **Surface Point Sampling:** During NeRF training, sample rays. For each ray with origin $\mathbf{o}$ and direction $\mathbf{d}$, calculate the depth as the median of the density weights accumulated along the ray [S1]. Compute the surface point $\tilde{\mathbf{x}}$ using:
+-    $$ \tilde{\mathbf{x}} = \mathbf{o} + \text{depth} \cdot \mathbf{d} $$
+-    [S1]
+-
+-2.  **Oriented Point Formation:** Create the oriented point pair $(\tilde{\mathbf{x}}, \mathbf{d})$. Note that $\mathbf{d}$ is constant along the ray, while $\tilde{\mathbf{x}}$ varies [S1].
+-
+-3.  **Flow Mapping:** Input the oriented point $(\tilde{\mathbf{x}}, \mathbf{d})$ into the Normalizing Flow model $f$ to map it to the latent space $\mathbf{z}$:
++1.  **NeRF Training:** Train a standard NeRF to estimate volume density $\sigma$ and color $\mathbf{c}$ for a scene. This can be done jointly with VF learning or after NeRF parameters are fixed [S1].
++2.  **Surface Point Sampling:** During training, for each ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$:
++    *   Compute the depth as the median of the density weights accumulated along the ray [S1].
++    *   Calculate the surface point $\tilde{\mathbf{x}}$ using the formula:
++        $$ \tilde{\mathbf{x}} = \mathbf{o} + \text{depth} \cdot \mathbf{d} $$
++        [S1]
++    *   The direction $\mathbf{d}$ is constant along the ray, while $\tilde{\mathbf{x}}$ varies [S1].
++3.  **Oriented Point Formation:** Create the oriented point pair $(\tilde{\mathbf{x}}, \mathbf{d})$ [S1].
++4.  **Flow Mapping:** Pass the oriented point $(\tilde{\mathbf{x}}, \mathbf{d})$ through the Normalizing Flow model $f$ to obtain the latent representation $\mathbf{z}$:
+     $$ \mathbf{z} = f(\tilde{\mathbf{x}}, \mathbf{d}) $$
+     [S1]
+-
+-4.  **Training (Maximizing Likelihood):** Train the VF model by maximizing the log-likelihood of the data distribution $p_X(\mathbf{x})$. This is equivalent to minimizing the negative log-likelihood using the change of variables formula [S1]:
+-    $$ p_X(\mathbf{x}) = p_Z(f(\mathbf{x})) \cdot \left| \det \left( \frac{df}{d\mathbf{x}} \right) \right| $$
++5.  **Loss Calculation:** Minimize the negative log-likelihood of the data distribution $p_X(\mathbf{x})$ using the change of variables formula [S1]. The log-likelihood for a sample is:
++    $$ \log(p_X(\tilde{\mathbf{x}}, \mathbf{d})) = \log(p_Z(\mathbf{z})) + \sum_{i=1}^{K} \log \left| \det \left( \frac{df_i}{df_{i-1}} \right) \right| $$
+     [S1]
+-    The log-likelihood is computed as:
+-    $$ \log(p_X(\mathbf{x})) = \log(p_Z(f(\mathbf{x}))) + \sum_{i=1}^{K} \log \left| \det \left( \frac{df_i}{df_{i-1}} \right) \right| $$
+-    [S1]
+-    where $K$ is the number of flow layers/steps, and $p_Z$ is the 6-dimensional diagonal Gaussian prior [S1].
+-
+-5.  **Novel View Generation (Inference):**
+-    a. Sample $K$ points $\mathbf{z}_i$ from the 6-dimensional Gaussian latent space $Z$ [S1].
+-    b. Invert the flow model to recover the oriented points:
+-    $$ (\mathbf{x}_i, \mathbf{d}_i) = f^{-1}(\mathbf{z}_i) $$
+-    [S1]
+-    c. Use the recovered oriented points to reconstruct plausible camera origins and render novel views for NeRF registration optimization [S1].
++    Where $p_Z$ is the probability density of the 6-dimensional diagonal Gaussian in latent space, and $K$ is the number of coupling layers in the Real-NVP architecture [S1].
++6.  **Novel View Generation (Inference):**
++    *   Sample a latent vector $\mathbf{z}$ from the 6-dimensional Gaussian distribution $Z$ [S1].
++    *   Invert the flow to obtain the oriented point:
++        $$ (\mathbf{x}, \mathbf{d}) = f^{-1}(\mathbf{z}) $$
++        [S1]
++    *   Reconstruct the camera origin $\mathbf{o}$ using the recovered $\mathbf{x}$ and $\mathbf{d}$ and the depth information (or by solving for $\mathbf{o}$ given the constraint that $\mathbf{x}$ lies on the ray from $\mathbf{o}$ in direction $\mathbf{d}$) [S1].
++    *   Render the view from the new camera position $\mathbf{o}$ and direction $\mathbf{d}$ using the trained NeRF [S1].
+ 
+ **Parameters:**
+-*   **VF Training Schedule:** Can occur jointly with NeRF density/RGB training or after NeRF parameters are fixed (pre-trained NeRF) [S1].
+-*   **Flow Layers:** 4 layers in the Real-NVP architecture [S1].
+-
+-**Pseudocode:**
+-
+-```python
+-import torch
+-import torch.nn as nn
+-import torch.distributions as D
+-
+-class ViewshedField:
+-    def __init__(self, nerf_model, flow_model):
+-        """
+-        Initialize VF Learning.
+-        :param nerf_model: Pre-trained or training NeRF model.
+-        :param flow_model: Real-NVP Normalizing Flow model (4 layers).
+-        """
+-        self.nerf = nerf_model
+-        self.flow = flow_model
+-        # Latent space is 6D diagonal Gaussian
+-        self.latent_dist = D.Normal(torch.zeros(6), torch.ones(6))
+-
+-    def get_surface_point(self, ray_origin, ray_direction, nerf_sample_fn):
+-        """
+-        Sample the surface point along a ray using NeRF density weights.
+-        :param ray_origin: (3,) tensor, origin o
+-        :param ray_direction: (3,) tensor, direction d
+-        :param nerf_sample_fn: Function to query NeRF for density/weights along ray
+-        :return: surface_point (3,) tensor
+-        """
+-        # Sample points along the ray
+-        # Note: Exact sampling strategy (e.g., uniform, stratified) depends on NeRF implementation
+-        # For this method, we need the median of density weights
+-        t_vals = torch.linspace(0.0, 1.0, 100) # Example sampling
+-        points_along_ray = ray_origin.unsqueeze(0) + t_vals.unsqueeze(1) * ray_direction.unsqueeze(0)
+-        
+-        # Query NeRF for density (sigma)
+-        # sigma_vals = nerf_model.query_density(points_along_ray)
+-        # Accumulate weights (simplified)
+-        # weights = ... 
+-        
+-        # Calculate depth as median of density weights
+-        # depth = median(weights)
+-        # [G] Placeholder for specific NeRF weight accumulation logic
+-        depth = 0.5 # Placeholder
+-        
+-        surface_point = ray_origin + depth * ray_direction
+-        return surface_point
+-
+-    def train_step(self, ray_origins, ray_directions):
+-        """
+-        Perform one training step for the VF model.
+-        :param ray_origins: (N, 3) tensor
+-        :param ray_directions: (N, 3) tensor
+-        :return: loss scalar
+-        """
+-        # Step 1: Sample surface points
+-        surface_points = []
+-        for i in range(ray_origins.shape[0]):
+-            sp = self.get_surface_point(ray_origins[i], ray_directions[i], self.nerf)
+-            surface_points.append(sp)
+-        surface_points = torch.stack(surface_points)
+-        
+-        # Step 2: Form oriented points (x, d)
+-        # Note: d is constant along the ray
+-        oriented_points = torch.cat([surface_points, ray_directions], dim=1) # (N, 6)
+-        
+-        # Step 3: Map to latent space
+-        z = self.flow(oriented_points)
+-        
+-        # Step 4: Compute log-likelihood
+-        # log p_X(x) = log p_Z(z) + sum log |det df_i/df_{i-1}|
+-        # The flow model should return the log determinant of the Jacobian
+-        log_det_jac = self.flow.log_det_jacobian(oriented_points)
+-        
+-        # Log probability under Gaussian prior
+-        log_prob_z = self.latent_dist.log_prob(z).sum(dim=1)
+-        
+-        # Total log likelihood
+-        log_likelihood = log_prob_z + log_det_jac
+-        
+-        # Minimize negative log likelihood
+-        loss = -log_likelihood.mean()
+-        
+-        return loss
+-
+-    def generate_novel_views(self, num_samples=100):
+-        """
+-        Generate novel camera poses by sampling from the latent space.
+-        :param num_samples: Number of novel views to generate
+-        :return: list of (camera_origin, camera_direction) tuples
+-        """
+-        # Step 1: Sample from 6D Gaussian
+-        z_samples = self.latent_dist.sample((num_samples,))
+-        
+-        # Step 2: Invert flow to get oriented points
+-        # f^{-1}(z) = (x, d)
+-        oriented_points = self.flow.inverse(z_samples)
+-        
+-        # Split into x and d
+-        # [G] Assuming the flow output/inverse returns concatenated (x, d)
+-        # x is first 3 dims, d is last 3 dims
+-        x_samples = oriented_points[:, :3]
+-        d_samples = oriented_points[:, 3:]
+-        
+-        # Step 3: Reconstruct camera origins
+-        # [G] The paper states "use equation 5 to reconstruct the camera origin"
+-        # Equation 5 is not explicitly provided in the text, but typically:
+-        # o = x - depth * d
+-        # However, for novel view generation, we often just use the sampled x as a point on the surface
+-        # and define a new camera looking at it, or use the inverse mapping directly.
+-        # The paper says: "recover the oriented point (x, d) and use equation 5 to reconstruct the camera origin."
+-        # Since Eq 5 is missing, we assume the inverse flow provides sufficient info or a standard reconstruction.
+-        # For implementation, we return the oriented points which define the viewshed.
+-        
+-        novel_views = []
+-        for i in range(num_samples):
+-            # Placeholder for camera origin reconstruction logic
+-            # camera_origin = x_samples[i] # Or derived via depth
+-            camera_origin = x_samples[i]
+-            camera_direction = d_samples[i]
+-            novel_views.append((camera_origin, camera_direction))
+-            
+-        return novel_views
+-```
++*   **Architecture:** Real-NVP with 4 layers [S1].
++*   **Latent Dimension:** 6 (3 for position, 3 for direction) [S1].
++*   **Training Mode:** Can be joint with NeRF density/RGB training or post-training on fixed NeRF parameters [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Depth Estimation:** The surface point $\tilde{\mathbf{x}}$ relies on the median of density weights. If the NeRF density is noisy or the scene is transparent, the median may not correspond to the true surface, leading to incorrect oriented points [S1].
+-*   **Noise Robustness:** The method is robust to noise in the oriented points (up to 20% of scene size), as the goal is plausible initialization rather than exact pose recovery [S1].
+-*   **Illumination Changes:** VF minimizes a photometric loss. If illumination changes significantly between training and novel view generation, the photometric objective may not align with the geometric objective of COLMAP, potentially causing discrepancies in registration error metrics [S1].
++*   **Depth Estimation:** The depth is defined as the median of density weights. If the NeRF density is poorly calibrated, the surface point $\tilde{\mathbf{x}}$ may be inaccurate, leading to low viewshed scores for valid views [S1].
++*   **Noise Robustness:** The method is robust to noise in the input oriented points (up to 20% of scene size) because the goal is plausible initialization rather than exact geometric reconstruction [S1].
++*   **Registration Error:** Generated views may have slightly higher numerical registration error compared to original images due to COLMAP's geometric estimation inaccuracies versus the method's photometric objective, though results are visually indistinguishable [S1].
+ 
+ ## Subtopics
+ 
+ ### [Novel View Generation via Viewshed Field](8948-novel-view-generation-via-viewshed-field.md)
+-Focuses on using VF to sample novel camera poses for NeRF registration, leveraging the invertibility of Normalizing Flows to map latent Gaussian samples back to valid oriented points.
++Generates novel views by sampling from the learned latent Gaussian distribution, inverting the mapping to obtain oriented points with high VF scores, and reconstructing camera origins. It differs from standard NeRF rendering by explicitly sampling the latent space of valid viewing configurations rather than traversing a ray, ensuring generated views are geometrically consistent with the learned VF representation.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training involves sampling rays and passing oriented points through a 4-layer Real-NVP flow, which is computationally efficient compared to full NeRF training. Inference (novel view generation) requires sampling from a Gaussian and inverting the flow, which is fast.
+-*   **Memory Complexity:** Low, as it stores only the flow model parameters and the latent space distribution.
+-*   **Performance:** VF-generated novel views yield visually indistinguishable registration results compared to using original images, despite slightly higher numerical error due to COLMAP's geometric estimation inaccuracies versus the method's photometric objective [S1].
+-*   **Strengths:** Robust to noise; enables generation of plausible camera initializations for registration; works with pre-trained NeRFs.
+-*   **Limitations:** Relies on the quality of the underlying NeRF for surface point sampling; photometric loss may not perfectly align with geometric registration objectives in varying illumination.
+-*   **When to Use:** When registering NeRFs to new views or initializing novel view generation is required, especially in noisy or challenging lighting conditions.
+-*   **When Not to Use:** When high-precision geometric registration is critical and photometric errors are unacceptable; when the underlying NeRF is poorly trained.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** On diverse datasets (LLFF, synthetic objects), VF-NeRF achieves State-of-the-Art (SOTA) results for rigid NeRF registration [S1]. Using VF-generated novel views yields visually indistinguishable registration results compared to using original images [S1].
++*   **Scaling:** Not given in the sources.
++*   **Strengths:** Enables generation of geometrically consistent novel views; robust to noise in input points; improves NeRF registration initialization [S1].
++*   **Limitations:** Slightly higher numerical registration error compared to original images due to objective function differences (photometric vs. geometric) [S1].
++*   **When to use:** When NeRF registration initialization is difficult or when novel views consistent with the original camera distribution are needed [S1].
++*   **When not to use:** When exact geometric registration accuracy is critical and photometric objectives introduce ambiguity [S1].
+ 
+ ## Background
+-Viewshed Fields (VF) were introduced in the paper "VF-NeRF: Viewshed Fields for Rigid NeRF Registration" by L. Segre and S. Avidan [S1]. The method combines Neural Radiance Fields (NeRF) with Normalizing Flows to model the visibility of 3D surface points from original camera viewpoints. It addresses the challenge of NeRF registration by providing a probabilistic representation of valid views, enabling the generation of novel camera poses for optimization.
++Viewshed Fields (VF) were introduced in the paper "VF-NeRF: Viewshed Fields for Rigid NeRF Registration" [S1]. The method combines Neural Radiance Fields (NeRF) with Normalizing Flows to learn an implicit function representing the likelihood of 3D surface points being viewed by original cameras [S1]. It is used primarily for rigid NeRF registration and novel view generation [S1].
+ 
+ ## Sources

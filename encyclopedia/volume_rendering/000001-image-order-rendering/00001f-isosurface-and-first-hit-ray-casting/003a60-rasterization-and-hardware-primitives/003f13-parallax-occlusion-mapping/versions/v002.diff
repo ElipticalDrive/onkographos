@@ -1,0 +1,159 @@
+--- v001.md
++++ v002.md
+@@ -13,5 +13,5 @@
+ *   Conventional low-poly triangle meshes with shading normals [S2, unofficial].
+ *   Albedo maps and displacement maps (height fields) [S2, unofficial].
+-*   SDF brick data (in the SDF context) [S1, unofficial].
++*   SDF brick data [S1, unofficial].
+ 
+ **Outputs:**
+@@ -27,13 +27,23 @@
+ ### Steps
+ 1.  **Pre-processing (CPU):**
+-    *   Convert triangle meshes and displacement map information into geometry data for the GPU [S2, unofficial]. This can be baked to disk [S2, unofficial].
+-    *   Generate normal maps from the displacement textures. This process is slow and should be baked [S2, unofficial].
++    *   Convert triangle meshes and displacement map information into geometry data for the GPU [S2, unofficial].
++    *   This conversion process can be baked to disk [S2, unofficial].
++    *   Generate normal maps from the displacement textures [S2, unofficial].
++    *   This generation step is computationally slow and should be baked [S2, unofficial].
+     *   Identify sharp edges and smooth regions using the input mesh's shading normals [S2, unofficial].
++2.  **Rendering (GPU):**
++    *   Draw the voxel-displacement geometry using the pre-processed mesh and texture state [S2, unofficial].
++    *   For SDF bricks, rasterize the bounding boxes of the bricks [S1, unofficial].
++    *   Displace vertices to the nearest whole number of voxels based on the displacement map [S2, unofficial].
++    *   Use the pre-computed normal maps for shading [S2, unofficial].
++    *   The renderer performs extra work for sharp edges to ensure correct lighting transitions [S2, unofficial].
++    *   If used with SDF bricks, perform parallax occlusion mapping after rasterization to reveal the iso-surface within each brick [S1, unofficial].
+ 
+-2.  **Rendering (GPU):**
+-    *   **Rasterization:** Draw the voxel-displacement geometry using the pre-processed mesh and texture state [S2, unofficial]. For SDF bricks, rasterize the bounding boxes of the bricks [S1, unofficial].
+-    *   **Displacement Application:** Displace vertices to the nearest whole number of voxels based on the displacement map [S2, unofficial].
+-    *   **Lighting:** Use the pre-computed normal maps for shading. The renderer performs extra work for sharp edges to ensure correct lighting transitions [S2, unofficial].
+-    *   **SDF Context (Optional):** If used with SDF bricks, perform parallax occlusion mapping after rasterization to reveal the iso-surface within each brick [S1, unofficial].
++### Formulas
++The displacement magnitude $d$ in voxels is calculated from the exact height $h$ and a scale factor $s$:
++$$d = \text{round}(h \cdot s)$$
++The normal map $\mathbf{n}$ is computed directly from the exact height field without quantization:
++$$\mathbf{n} = \text{normalize}(\nabla h)$$
++where $\nabla h$ represents the spatial gradient of the height values [S2, unofficial].
+ 
+ ### Parameters
+@@ -49,54 +59,69 @@
+ ### Pseudocode
+ ```python
+-# Pre-processing Phase (CPU)
+ def preprocess_mesh(mesh, displacement_map):
+-    """
+-    Converts mesh and displacement data into GPU-ready format.
+-    """
+-    # Generate normal map from exact displacement heights
+-    normal_map = generate_normal_map(displacement_map)
+-    
+-    # Identify sharp edges based on shading normals
++    """CPU pre-processing phase."""
++    normal_map = compute_gradient_normals(displacement_map)
+     sharp_edges = detect_sharp_edges(mesh.shading_normals)
+-    
+-    # Create geometry data structure
+-    geometry_data = {
++    return {
+         'vertices': mesh.vertices,
+         'indices': mesh.indices,
+         'normal_map': normal_map,
+         'sharp_edges': sharp_edges,
+-        'displacement_scale': 1.0 # Rescale factor for voxel units
++        'scale': 1.0
+     }
+-    return geometry_data
+ 
+-# Rendering Phase (GPU)
+-def render_voxel_displacement(geometry_data, albedo_map, camera_view):
+-    """
+-    Renders the displaced geometry.
+-    """
+-    # Rasterize the base mesh
+-    rasterized_pixels = rasterize(geometry_data.vertices, geometry_data.indices)
+-    
+-    for each pixel in rasterized_pixels:
+-        # Sample displacement height
+-        height = sample_displacement(geometry_data, pixel.uv)
+-        
+-        # Quantize to nearest whole voxel
+-        voxel_displacement = round(height * geometry_data.displacement_scale)
+-        
+-        # Displace vertex position
+-        displaced_position = pixel.position + voxel_displacement * normal
+-        
+-        # Sample normal map for lighting
+-        normal = sample_normal_map(geometry_data.normal_map, pixel.uv)
+-        
+-        # Handle sharp edges if necessary
+-        if geometry_data.sharp_edges.contains(pixel):
+-            normal = adjust_normal_for_sharp_edge(normal, geometry_data)
+-        
+-        # Compute lighting
+-        color = compute_phong_lighting(displaced_position, normal, albedo_map, camera_view)
+-        
+-        write_color(pixel, color)
++def compute_gradient_normals(height_field):
++    """[G] Standard gradient computation for normal maps."""
++    normals = []
++    for y in range(len(height_field)):
++        row = []
++        for x in range(len(height_field[0])):
++            dx = height_field[y][x+1] - height_field[y][x-1] if x+1 < len(height_field[0]) and x-1 >= 0 else 0.0
++            dy = height_field[y+1][x] - height_field[y-1][x] if y+1 < len(height_field) and y-1 >= 0 else 0.0
++            row.append(normalize((-dx, -dy, 2.0)))
++        normals.append(row)
++    return normals
++
++def normalize(v):
++    """[G] Standard vector normalization."""
++    l = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
++    return (v[0]/l, v[1]/l, v[2]/l)
++
++def detect_sharp_edges(normals, threshold=0.9):
++    """[G] Standard sharp edge detection."""
++    return {i for i in range(len(normals)-1) if dot(normals[i], normals[i+1]) < threshold}
++
++def dot(a, b):
++    """[G] Standard dot product."""
++    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
++
++def render(geometry_data, albedo_map, camera):
++    """GPU rendering phase."""
++    pixels = rasterize(geometry_data['vertices'], geometry_data['indices'])
++    for pixel in pixels:
++        height = sample_texture(geometry_data['displacement_map'], pixel.uv)
++        voxel_disp = round(height * geometry_data['scale'])
++        displaced_pos = pixel.position + voxel_disp * pixel.normal
++        normal = sample_texture(geometry_data['normal_map'], pixel.uv)
++        if pixel.index in geometry_data['sharp_edges']:
++            normal = correct_sharp_normal(normal, geometry_data)
++        color = shade(displaced_pos, normal, albedo_map, camera)
++        framebuffer[pixel.x][pixel.y] = color
++
++def rasterize(vertices, indices):
++    """[G] Standard rasterization. Sources do not specify implementation details."""
++    return []
++
++def sample_texture(tex, uv):
++    """[G] Standard bilinear sampling. Sources do not specify implementation details."""
++    return 0.0
++
++def correct_sharp_normal(n, data):
++    """[G] Standard sharp edge normal correction. Sources do not specify implementation details."""
++    return n
++
++def shade(pos, n, albedo, cam):
++    """[G] Standard lighting model. Sources do not specify implementation details."""
++    return (1.0, 1.0, 1.0)
+ ```
+ 
+@@ -118,5 +143,5 @@
+ 
+ ## Background
+-The technique was used in the game *Dreams* (Evans, 2015) for rendering SDF bricks [S1, unofficial]. A standalone implementation, the Voxel Displacement Renderer, was developed by Daniel Schroeder and documented in 2024 [S2, unofficial]. It is implemented as a C++/Vulkan project, with assets authored as albedo and displacement maps, and meshes exported as OBJ files from Blender [S2, unofficial].
++The technique was used in the game *Dreams* (Evans, 2015) for rendering SDF bricks [S1, unofficial]. A standalone implementation, the Voxel Displacement Renderer, was developed by Daniel Schroeder and documented in May 2024 [S2, unofficial]. It is implemented as a C++/Vulkan project, with assets authored as albedo and displacement maps, and meshes exported as OBJ files from Blender [S2, unofficial].
+ 
+ ## Sources

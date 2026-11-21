@@ -1,0 +1,157 @@
+--- v012.md
++++ v013.md
+@@ -4,59 +4,118 @@
+ 
+ ## Overview
+-This configuration adapts the StyleGAN2 generative adversarial network architecture for training 3D-aware image synthesis models, specifically within the context of differentiable volume rendering pipelines like VoxGRAF. It solves the problem of stabilizing GAN training for high-resolution 3D-consistent image generation by leveraging established StyleGAN2 stability techniques. It is distinguished from standard NeRF training setups by its reliance on adversarial loss, equalized learning rates, and specific regularization strategies rather than purely photometric supervision.
++This configuration adapts the StyleGAN2 architecture for training 3D-aware image synthesis models (such as StyleNeRF or VoxGRAF) by leveraging its discriminator and generator training dynamics. It solves the problem of stable adversarial training for high-resolution neural radiance fields by incorporating equalized learning rates, minibatch standard deviation, and mixed precision. It is distinguished from standard NeRF baselines by its reliance on GAN-specific regularization (R1) and weight averaging (EMA) rather than purely photometric supervision, and from original StyleGAN2 by the explicit exclusion of path regularization and style-mixing to suit the differentiable rendering pipeline.
+ 
+ ## How it works
+-The method configures the training loop for a generator and discriminator pair based on the StyleGAN2 architecture.
+-
+ **Inputs and Outputs:**
+-- Inputs: Ground truth images, latent vectors $z$, and dataset metadata (e.g., resolution).
+-- Outputs: Updated generator weights $G$, discriminator weights $D$, and rendered images.
++*   **Inputs:** Real image batches, latent vectors $z$, camera parameters (intrinsics/poses), and scene geometry (voxel grid or implicit field).
++*   **Outputs:** Discriminator scores (real/fake logits), Generator weights (EMA updated), and rendered images.
+ 
+ **Data Structures:**
+-- Generator $G$: Maps latent vector $z$ to image. Uses equalized learning rates for all trainable parameters.
+-- Discriminator $D$: Maps image to scalar real/fake score. Uses a minibatch standard deviation layer at the end.
+-- Exponential Moving Average (EMA): Maintains a shadow copy of generator weights for evaluation.
++*   **Generator/Discriminator Weights:** Standard PyTorch tensors.
++*   **EMA State:** Separate copy of generator weights, updated via exponential moving average.
++*   **Minibatch Statistics:** A tensor of shape $(B, C, H, W)$ representing the standard deviation across the batch dimension $B$ for each channel $C$ and spatial location $(H, W)$.
++
++**Parameters:**
++*   **R1 Regularization Strength ($\gamma$):** 1.0 [S1].
++*   **R1 Frequency:** Once every 4 minibatches [S1].
++*   **Learning Rate Scaling:** Equalized learning rates applied to trainable parameters [S1].
++*   **Mixed Precision:** Enabled for both Generator and Discriminator [S1].
++*   **Path Regularization / Style-Mixing:** Disabled [S1].
+ 
+ **Numbered Steps:**
+-1. **Equalized Learning Rates:** Apply equalized learning rates to all trainable parameters in the generator and discriminator. This ensures that layers with fewer parameters do not dominate the gradient updates [S1].
+-2. **Minibatch Standard Deviation:** Append a minibatch standard deviation layer to the end of the discriminator. This layer computes the standard deviation across the batch dimension and concatenates it as an additional channel to the feature map, helping the discriminator detect mode collapse [S1].
+-3. **Exponential Moving Average:** Maintain an EMA of the generator weights. Update the EMA weights $w_{ema}$ after each generator update step using a decay factor (typically close to 1, e.g., 0.999, though exact decay is not specified in the primary source, the mechanism is required) [S1].
+-4. **Mixed Precision:** Use mixed-precision training (FP16 for activations/weights, FP32 for master weights) for both the generator and discriminator to accelerate training and reduce memory usage [S1].
+-5. **Regularization (R1):** Apply R1 gradient penalty regularization to the discriminator. Unlike standard StyleGAN2, path regularization and style-mixing are **not** used [S1].
+-6. **R1 Frequency:** Compute the R1 penalty once every 4 minibatches. This reduces computational cost and memory usage while maintaining stability [S1].
+-7. **Rendering Integration:** For 3D-aware models, the generator outputs a radiance field or voxel grid. Rendering is performed using custom CUDA kernels with equidistant sampling points (step size 0.5 voxels). Voxels with density $\sigma_i < 10^{-10}$ are skipped, and early ray termination occurs if transmittance $T_i < 10^{-7}$ [S1].
++1.  **Initialize Weights:** Load generator weights. If the dataset is small (e.g., AFHQ), initialize with a generator pretrained on FFHQ [S1].
++2.  **Forward Pass (Generator):** Sample latent vectors $z$. Pass through the generator to produce a 3D representation (e.g., sparse voxel grid). Render images using differentiable volume rendering (equidistant sampling, early exit if transmittance $T_i < 10^{-7}$) [S1].
++3.  **Forward Pass (Discriminator):** Pass real images and generated images through the discriminator. The discriminator uses a skip architecture for progressive growing, adding a downsampled version of the input image to the input of each layer [S1].
++4.  **Minibatch Standard Deviation:** Compute the standard deviation of the discriminator's feature maps across the minibatch dimension. Concatenate this statistic to the feature maps before the final classification layer [S1].
++5.  **Compute Losses:**
++    *   Calculate adversarial loss for real and fake images.
++    *   **R1 Regularization:** If the current minibatch index is divisible by 4, compute the R1 gradient penalty on the real images. The penalty is $\gamma \cdot \frac{1}{2} \|\nabla_{x_r} D(x_r)\|^2$ [S1].
++6.  **Backward Pass:** Compute gradients for both Generator and Discriminator.
++7.  **Update Weights:** Update generator and discriminator weights using an optimizer (typically Adam).
++8.  **EMA Update:** Update the generator's EMA weights: $W_{ema} \leftarrow \alpha W_{ema} + (1-\alpha) W_{gen}$, where $\alpha$ is the decay rate (typically 0.999 or similar, though exact $\alpha$ is not specified in sources, the mechanism is [S1]).
++9.  **Repeat:** Continue until convergence.
+ 
+-**Formulas:**
+-- R1 Regularization Loss:
+-  $$ \mathcal{L}_{R1} = \frac{\gamma}{2} \mathbb{E}_{x \sim p_{data}} [\|\nabla_x D(x)\|_2^2] $$
+-  Where $\gamma$ is the regularization strength [S1].
+-
+-**Parameters:**
+-- R1 regularization strength ($\gamma$): 1.0 for all datasets [S1].
+-- R1 regularization frequency: Every 4 minibatches [S1].
+-- Learning rate scaling factor ($\eta_{fg}$): 0.4 for AFHQ and FFHQ; 0.1 for Carla (due to smaller object fraction) [S1].
+-- Background learning rate ($\eta_{bg}$): 0.1 for all datasets [S1].
+-- Feature consistency loss weight ($\lambda_{fcvg}$): 0.1 for all datasets [S1].
++**Pseudocode:**
++```python
++# Pseudocode for one training step
++def train_step(real_images, latent_z, generator, discriminator, ema_generator, optimizer_g, optimizer_d, step_count):
++    # 1. Generator Forward
++    # Rendered images are produced via differentiable volume rendering
++    fake_images = generator(latent_z)
++    
++    # 2. Discriminator Forward (Real)
++    # Apply minibatch standard deviation
++    real_features = discriminator(real_images)
++    real_std = torch.std(real_features, dim=0, unbiased=False)
++    real_features = torch.cat([real_features, real_std], dim=1)
++    real_logits = discriminator.classifier(real_features)
++    
++    # 3. Discriminator Forward (Fake)
++    fake_features = discriminator(fake_images)
++    fake_std = torch.std(fake_features, dim=0, unbiased=False)
++    fake_features = torch.cat([fake_features, fake_std], dim=1)
++    fake_logits = discriminator.classifier(fake_features)
++    
++    # 4. Loss Calculation
++    # Adversarial Loss (e.g., WGAN-GP or standard GAN loss)
++    d_loss_real = -torch.mean(real_logits)
++    d_loss_fake = torch.mean(fake_logits)
++    d_loss = d_loss_real + d_loss_fake
++    
++    # R1 Regularization (applied every 4 steps)
++    r1_penalty = 0.0
++    if step_count % 4 == 0:
++        # Compute gradient of real logits w.r.t real images
++        grad_real, = torch.autograd.grad(
++            outputs=real_logits.sum(), 
++            inputs=real_images, 
++            create_graph=True
++        )
++        # R1 penalty: gamma * 0.5 * ||grad||^2
++        r1_penalty = 1.0 * 0.5 * (grad_real ** 2).sum()
++        
++    d_loss += r1_penalty
++    
++    # Generator Loss
++    g_loss = -torch.mean(fake_logits)
++    
++    # 5. Backward Pass
++    optimizer_d.zero_grad()
++    d_loss.backward()
++    optimizer_d.step()
++    
++    optimizer_g.zero_grad()
++    g_loss.backward()
++    optimizer_g.step()
++    
++    # 6. EMA Update
++    update_ema(ema_generator, generator, decay=0.999) # Decay value inferred from standard practice, mechanism from [S1]
++    
++    return d_loss.item(), g_loss.item()
++```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Small Datasets:** For small datasets like AFHQ, do not train from scratch. Instead, finetune a generator pretrained on FFHQ. Use specific regularization settings for this phase: $R_I = 128$ and $R_G = 32$ (before pruning) [S1].
+-- **Object Fraction:** If the scene contains objects covering a small fraction of the image (e.g., Carla dataset), reduce the foreground learning rate scaling factor $\eta_{fg}$ to 0.1 to prevent instability [S1].
++*   **Small Datasets:** For datasets like AFHQ, training from scratch may fail. The pitfall is to finetune a generator pretrained on FFHQ [S1].
++*   **Regularization Frequency:** Applying R1 every step is computationally expensive. The source specifies applying it every 4 minibatches to reduce cost [S1].
++*   **Missing Features:** Unlike original StyleGAN2, path regularization and style-mixing are not used. Implementing them would be incorrect for this specific configuration [S1].
+ 
+ ## Subtopics
+ 
+ ### Conditional Discriminator with Skip Connections for Progressive Growing
+-A variant of the discriminator designed to facilitate progressive growing of resolution. It uses conditional input and implements a skip architecture where a downsampled version of the input image is added to the input of each layer. This allows the network to learn coarse-to-fine details progressively [S1].
++A variant of the discriminator architecture used in this configuration. It incorporates conditional input (e.g., camera poses or class labels) and uses a skip connection architecture for progressive growing, where a downsampled version of the input image is added to the input of each layer [S1]. This allows the model to train at increasing resolutions smoothly.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Reduced by applying R1 regularization only every 4 minibatches and using mixed precision [S1].
+-- **Memory Complexity:** Reduced by skipping low-density voxels during rendering and using mixed precision [S1].
+-- **Strengths:** Stable training for high-resolution 3D-aware synthesis; efficient rendering via sparse voxel grids and early termination [S1].
+-- **Limitations:** Requires careful tuning of learning rate scaling factors for different datasets; not suitable for datasets with very small object fractions without adjustment [S1].
+-- **When to use:** When training 3D-aware generative models that require high visual fidelity and stability, particularly when leveraging pre-trained 2D generators [S1].
+-- **When not to use:** When computational resources are extremely limited and R1 regularization cannot be afforded even at reduced frequency, or when style-mixing/path regularization is critical for the specific generative task [S1].
++*   **Time Complexity:** Training is accelerated by mixed-precision arithmetic [S1]. R1 regularization is applied every 4 minibatches, reducing the computational overhead compared to per-step R1 [S1].
++*   **Memory Complexity:** Mixed precision reduces memory usage for both generator and discriminator [S1].
++*   **Performance:** The configuration is designed for fast 3D-aware synthesis (e.g., VoxGRAF) [S1].
++*   **Strengths:** Stable training for high-resolution images; efficient via mixed precision and infrequent R1; robust to small datasets via finetuning.
++*   **Limitations:** Requires careful tuning of learning rates (equalized) and regularization strength; not suitable for datasets where style-mixing is beneficial (though excluded here by design).
++*   **When to use:** When training 3D-aware generative models (NeRF-based) that benefit from GAN stability and high-resolution synthesis.
++*   **When not to use:** When computational resources are extremely limited and R1 cannot be skipped; when style-mixing is required for the specific data distribution.
+ 
+ ## Background
+-Originated from the StyleGAN2 architecture [22], this configuration was adapted for 3D-aware image synthesis in VoxGRAF [S1]. It builds on the stability techniques of StyleGAN2, including equalized learning rates and minibatch standard deviation, while modifying regularization and rendering strategies for volumetric data. The approach is used in fast 3D-aware image synthesis with sparse voxel grids [S1].
++This configuration is derived from the StyleGAN2 training methodology [S1]. It was adapted for 3D-aware image synthesis in works such as StyleNeRF and VoxGRAF [S1]. The use of equalized learning rates, minibatch standard deviation, and R1 regularization are hallmarks of the StyleGAN2 paper . The specific adaptation for volume rendering (excluding path regularization/style-mixing) is detailed in the VoxGRAF paper [S1].
+ 
+ ## Sources
+-[S1] VoxGRAF: Fast 3D-Aware Image Synthesis with Sparse Voxel Grids, https://doi.org/10.52202/068431-2464, fetched 2026-10-26+[S1] VoxGRAF: Fast 3D-Aware Image Synthesis with Sparse Voxel Grids, https://doi.org/10.52202/068431-2464, fetched 2026-10-26
++[S22] StyleGAN2, https://github.com/NVlabs/stylegan2, fetched 2026-10-26

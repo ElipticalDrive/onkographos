@@ -1,0 +1,49 @@
+# SplatArmor
+Also called: SplatArmor [S1]
+## Overview
+SplatArmor is a method for reconstructing animatable human avatars using drivable 3D Gaussians [S1][S2, unofficial]. It addresses the limitation of standard rigid deformation in capturing large, non-rigid motions and pose-dependent appearance effects [S1][S2, unofficial]. It sets itself apart by leveraging two distinct Multi-Layer Perceptrons (MLPs) to predict large motions and employing SE(3) fields to model pose-dependent effects, enabling more detailed geometry and appearance reconstruction than methods relying solely on Linear Blend Skinning (LBS) [S1][S2, unofficial].
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view video frames of a human subject; SMPL mesh parameters (pose $\theta$, shape $\beta$) corresponding to each frame.
+*   **Outputs:** A set of 3D Gaussians representing the avatar, parameterized to be drivable by SMPL parameters, allowing rendering of novel poses and views.
+
+**Data Structures:**
+*   **Gaussian Attributes:** Position $\mathbf{p}$, covariance $\Sigma$, opacity $\alpha$, spherical harmonics coefficients for color $\mathbf{c}$.
+*   **SMPL Model:** Parametric human body model providing a canonical mesh and skinning weights [S1][S2, unofficial].
+*   **MLPs:** Two separate neural networks used for motion prediction [S1][S2, unofficial].
+*   **SE(3) Fields:** A field representation encoding pose-dependent transformations [S1][S2, unofficial].
+
+**Method Steps:**
+1.  **Initialization:** Initialize Gaussians on the canonical SMPL mesh surface [S1][S2, unofficial].
+2.  **Large Motion Prediction:** Use two different MLPs to predict large motions. These MLPs operate on inputs derived from the SMPL space and the canonical space [S1][S2, unofficial].
+3.  **Pose-Dependent Effects:** Apply SE(3) fields to capture pose-dependent effects. This allows the avatar's appearance and geometry to change dynamically based on the pose $\theta$ [S1][S2, unofficial].
+4.  **Deformation:** Combine the rigid LBS deformation (from the parent method) with the predicted large motions and SE(3) field adjustments to transform canonical Gaussians to the target pose [S1][S2, unofficial].
+5.  **Rendering:** Render the deformed Gaussians using differentiable 3D Gaussian Splatting [S1][S2, unofficial].
+6.  **Training:** Optimize Gaussian parameters and MLP weights by minimizing photometric and perceptual losses against input video frames [S1][S2, unofficial].
+
+**Formulas:**
+*   **Large Motion Prediction:** Let $M_{SMPL}$ and $M_{Canonical}$ be the two MLPs. The predicted motion $\Delta \mathbf{p}_{large}$ is derived from these networks [S1][S2, unofficial].
+    $$ \Delta \mathbf{p}_{large} = f(M_{SMPL}, M_{Canonical}, \theta, \beta) $$
+    (Specific internal structure of $M_{SMPL}$ and $M_{Canonical}$ is not detailed in the sources [S1][S2, unofficial].)
+*   **SE(3) Fields:** The SE(3) field provides a pose-dependent transformation $T_{SE3}(\theta)$ [S1][S2, unofficial].
+    $$ \mathbf{p}_{final} = T_{SE3}(\theta) \cdot (\mathbf{p}_{LBS} + \Delta \mathbf{p}_{large}) $$
+    (Exact formulation of the SE(3) field application is not detailed in the sources [S1][S2, unofficial].)
+
+**Parameters:**
+*   Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   Not given in the sources.
+
+## Operating characteristics
+*   **Performance:** The sources do not provide specific performance metrics (FPS, memory usage) for SplatArmor.
+*   **Strengths:** Capable of capturing more dynamic details and pose-dependent effects compared to methods using only LBS [S1][S2, unofficial].
+*   **Limitations:** Not given in the sources.
+*   **When to use:** When high-fidelity reconstruction of dynamic human avatars with significant non-rigid motion and pose-dependent appearance changes is required [S1][S2, unofficial].
+*   **When not to use:** When computational resources are limited and simpler deformation methods (like pure LBS) are sufficient, or when real-time performance is critical and the overhead of MLP inference is prohibitive [G].
+
+## Background
+SplatArmor was introduced in the context of recent advances in 3D Gaussian Splatting for human avatar reconstruction [S1][S2, unofficial]. It is cited as a method that improves upon basic drivable 3D Gaussians by incorporating more sophisticated motion prediction and pose-dependent modeling [S1][S2, unofficial].
+## Sources
+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

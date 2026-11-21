@@ -1,0 +1,130 @@
+A room can be stored as three million fuzzy blobs instead of a mesh or a network, and the whole renderer is a depth sort and some tinted glass.
+
+Gaussian Splatting - Three Million Balloons · Narendiran Chembu
+Gaussian Splatting - Three Million Balloons
+posted in
+gaussian-splatting
+computer-vision
+optimization
+simulation
+world-models
+on
+Oct 14, 2026
+by Narendiran Chembu
+On the cover: an arch of party balloons. From the front it is a wall of colour, which is all the photographer needs. Photo by Ishmael Orendain, CC BY 2.0.
+The man who decorates wedding halls turns up at four in the morning with a helium cylinder and six bags of balloons. By seven in the evening there is an arch over the stage and a column either side of the door, and it photographs beautifully. The photographer has three spots he stands on, and from all three it is a wall of red and gold.
+Then somebody’s uncle walks round the side of it looking for the toilet. From there it is tape, knots and a steel stand holding up the middle.
+Now swap the hall for a problem in computer vision. You walk around a garden with your phone and take two hundred photos. What you want back is not those photos. You want to fly a camera through that garden along a path nobody walked, at a height nobody held the phone, and have it come out looking like a photograph. That is novel view synthesis, and it is what every 3D scanning app and robot simulator is actually buying.
+Welcome to the era of 3D Gaussian splatting. This is the story of how the best way to store a room turned out to be a few million coloured smudges, and of what you give up by never building a surface at all.
+Why not just build the wall
+The obvious answer is to work out where the surfaces are. COLMAP, the standard open-source tool for this, finds the same corner of the same brick across forty photos and works out where each camera must have been standing. That gives you a cloud of 3D points, and the process has a name: structure from motion. Join those points into triangles, paint the photos on, and you have a mesh. Game engines have run on meshes for thirty years.
+Meshes are wonderful right up to the point where the thing you photographed has no surface. A privet hedge is ten thousand leaves with gaps between them. A chrome kettle shows you the room instead of itself. Smoke, fur, lace, a glass of water: a mesh turns all of these into a melted candle, because it has to commit to one skin with one colour per point, and reality did not.
+So in 2020 the field went the other way. NeRF (Mildenhall et al., 2020) threw the surface away and kept the scene inside a small neural network. You hand that network a point in space and a direction to look from. It hands back a colour and a density. To make one pixel you shoot a ray out through it, stop at a few hundred points along the way, ask the network at every stop, and add up what comes back.
+It works, and the pictures are gorgeous. The catch is that the scene only exists inside the network, so you cannot look at anything without asking first. The paper’s supplement puts a real scene at 150 to 200 million network queries for a single image, about 30 seconds a frame on a V100. Training takes a day or two.
+Thirty seconds a frame. So what would you have to store instead, to walk through that garden at the speed of a video game?
+Figure 1: two ways to get a pixel. One asks a network a few hundred times per ray, the other sorts some blobs and paints them. Source: Author
+What a balloon knows
+Here is the move 3D Gaussian Splatting for Real-Time Radiance Field Rendering (Kerbl et al., SIGGRAPH 2023) makes. Keep NeRF’s idea that the world is a fog with colour and density in it. Throw away the network that stores the fog. Write it down as a pile of individual blobs instead, each one listed explicitly, like the decorator’s balloons.
+One blob, which everybody calls a splat, carries four things:
+Where it is tied: a centre $\mu$ in 3D, which is 3 numbers.
+How much air is in it and which way it is squashed: 3 numbers of scale, and a 4-number quaternion for the tilt. (Yes, those pesky little bastards again. A quaternion holds a 3D rotation without the gimbal lock you get from three angles.)
+How see-through it is: an opacity $\alpha$, one number.
+What colour it shows from where you are standing, which takes 48 numbers.
+Figure 2: everything one splat stores. The arrows in the first panel are the scale, the angle they sit at is the rotation. Source: Author
+The shape is a 3D Gaussian, the same bell curve from every statistics course, written in three dimensions. Its covariance matrix $\Sigma$ says how wide the blob is in each direction and which way it leans. If you have read the Kalman filter post, it is the same object that drew those uncertainty ellipses around John Connor’s motorcycle.
+In words, the blob’s strength at a point in space is:
+\[\text{strength} = \exp\left(-\frac{\text{distance from the centre, measured in blob-widths}}{2}\right)\]
+specifically,
+\[G(x) = \exp\left(-\frac{1}{2}(x - \mu)^\top \Sigma^{-1} (x - \mu)\right)\]
+where $x$ is the point you are asking about, $\mu$ is the blob’s centre, and $\Sigma$ is that covariance matrix. Now, a covariance matrix cannot be any old grid of numbers, and gradient descent will happily push it somewhere that has no shape at all. So the paper never stores $\Sigma$ directly. It stores a rotation $R$ and a scale $S$, and builds the matrix out of them every time:
+\[\Sigma = R S S^\top R^\top\]
+That squashability is doing a lot of work. A blob you can stretch and tilt can lie flat along a wall, go thin along a window frame, or stand on end along a blade of grass. The paper ablates it by forcing every blob round, and the renders come back visibly worse, because a round blob needs a lot more balloons to cover the same wall.
+Now the 48 numbers. The chrome kettle problem does not go away just because you switched representations, so each splat stores its colour as a function of viewing direction, using spherical harmonics. These are to the surface of a sphere what sines and cosines are to a line: smooth patterns you add up with weights. Degree 0 is one flat pattern, the same colour from everywhere, and each degree you add brings in finer wobbles. Degree 3 gives you 16 of these patterns per colour channel, and 16 times 3 channels is 48. So one splat is 59 numbers, not one of which is a surface.
+One pixel, three balloons
+Rendering is where this pays off, and it is old-fashioned enough to be funny.
+Each 3D blob is squashed onto the image as a 2D ellipse. A Gaussian seen through a camera is still a Gaussian, a result from EWA splatting (Zwicker et al., 2001), named after Heckbert’s elliptical weighted average filter. You sandwich the covariance between two matrices and out comes the ellipse, $\Sigma’ = J W \Sigma W^\top J^\top$. $W$ swings the blob from world coordinates into the camera’s, and $J$ stands in for the perspective squeeze that makes far things small. The word splat is as literal as it sounds: you throw the blob at the film and it lands with a footprint.
+Then the renderer cuts the image into 16 by 16 pixel tiles and works out which tiles each ellipse touches. A Gaussian technically never reaches zero, so the implementation calls it finished at about three standard deviations out and ignores the rest. Each tile sorts its blobs by depth, once for the whole frame, and walks that list front to back.
+Figure 3: the whole renderer, and one pixel done by hand. If it looks like a 1990s graphics textbook, that is because it mostly is. Source: Author
+Let’s do one pixel by hand. Say three blobs land on it. The nearest is red at $\alpha = 0.6$, behind it is yellow at $\alpha = 0.5$, and furthest back is blue at $\alpha = 0.9$.
+Red is first, so it gets 0.6 of the pixel. That leaves 0.4 unclaimed.
+Yellow only ever gets a share of what is left: $0.5 \times 0.4 = 0.2$.
+Blue gets a share of what those two left behind: $0.9 \times (1 - 0.6) \times (1 - 0.5) = 0.18$.
+So the pixel is 0.6 red plus 0.2 yellow plus 0.18 blue, and the last 0.02 is whatever sits behind all three. It is a stack of tinted glass, and the same rule NeRF uses along a ray. Written out for $N$ blobs:
+\[C = \sum_{i=1}^{N} c_i \alpha_i \prod_{j=1}^{i-1}(1 - \alpha_j)\]
+where $c_i$ is blob $i$’s colour in the direction you are looking from, and the product is the fraction of light that survived everything in front of it. $\alpha_i$ is the blob’s stored opacity times its strength at this pixel, which is that bell curve evaluated right there. A blob centred on your pixel gives its full opacity, and one whose edge grazes it gives almost nothing.
+No network is asked anything, anywhere in that. It is a sort and a loop. A GPU has been optimised to death for both. And both are differentiable, which is the whole reason any of this can be fitted to photographs.
+Nobody ties three million balloons by hand
+So who decides where all these blobs go? Not a person, obviously. And not a network either, which is the part that surprises people.
+You start with the point cloud COLMAP already gave you, and put one small round blob on each point. Then you loop. Pick one of your photos, render the blobs from where that camera was standing, and compare the render against the photo. The loss is mostly absolute pixel difference with a bit of structural similarity mixed in, $\mathcal{L} = (1-\lambda)\mathcal{L}1 + \lambda\mathcal{L}{\text{D-SSIM}}$, with $\lambda = 0.2$.
+Because the renderer is differentiable, that error flows straight back into each blob’s 59 numbers, and Adam nudges every one. The blob making the hedge too dark gets greener. The one smeared across a window edge goes thinner and rotates to lie along it. Thirty thousand of those steps and the hall is decorated.
+The decorator in this story is the cheapest person you have ever met. Leave an opacity in there that no photo needs, and gradient descent will have taken it to zero before you finish the sentence, because fading it costs nothing and buys a better match somewhere else.
+Blow up more, pop the rest
+The trouble with starting from COLMAP’s points is that structure from motion finds corners and edges. It does not find the flat beige wall or the sky. So there are whole regions with nothing in them, and nudging the blobs you have will not conjure up a new one.
+Every 100 steps, then, the optimiser edits the population. It decides using one number: how hard the photos are pulling on each blob’s position. A big pull means that blob sits where the render and the photos disagree.
+Clone. Pull is large, blob is small. A small blob pulled hard means there is detail there that nothing covers yet, so copy it and let the copy drift towards the error.
+Split. Pull is large, blob is big. A big blob pulled hard already covers that area and is getting it wrong, so replace it with two and divide the scale by 1.6. Not 2, not $e$. Somebody tried a few numbers on a garden and 1.6 came back, and it has been in every implementation since.
+Prune. Every 3,000 steps the code overrides the optimiser and sets every opacity to nearly zero, so each blob has to earn it back from the photos. Anything that cannot climb above 0.005, is deleted: the blobs nobody can see, and the giant near-invisible ones that drift in front of the camera.
+Figure 4: the three edits that decide how many balloons the room gets. Nobody picks the number three million. It is whatever survives. Source: Author
+And here is the ablation that makes the case. The authors tried capping how many blobs may receive gradients on each step, a thing you do to save memory. On the Truck scene that cost them about 11 dB of PSNR. Eleven. PSNR is the standard score for how close a render is to the real photograph, in decibels, and a gap of one decibel is already visible if you look for it. Capping the gradients means most blobs get no correction on most steps, so the ones in the empty regions never grow loud enough to be cloned.
+Taking the other side of it: the authors also threw COLMAP’s points away and seeded blobs at random inside a cube. The method still mostly worked, with the damage in the background and floaters where the cameras barely looked. So you can start the blobs almost anywhere. What you cannot skip is the cloning and the splitting.
+What forty-one minutes buys
+Here are the numbers on Mip-NeRF 360, nine real indoor and outdoor scenes, all from Table 1 of the paper. Plenoxels and Instant-NGP are the fast NeRF alternatives of the time, both keeping the scene in a lookup grid rather than only in network weights.
+Method
+Training, one scene
+Rendering
+PSNR
+Verdict
+Plenoxels
+26 min
+fast
+23.08
+a grid of cells got there first, and the quality shows
+Instant-NGP
+5-8 min
+fast
+25.3-25.6
+still the quickest way to a rough scene
+Mip-NeRF 360
+48 hours
+0.06 FPS
+27.69
+the quality bar, at two days a garden
+3DGS, 7K steps
+6m 25s
+160 FPS
+25.60
+six minutes for what Instant-NGP gives you
+3DGS, 30K steps
+41m 33s
+134 FPS
+27.21
+half a decibel short, at 1/70th of the time
+Figure 5: the trade that made the field move. The dotted line is what forty-eight hours of Mip-NeRF 360 buys. Source: Author
+The 1080p rendering changed what people build. A radiance field you can look at at 0.06 frames a second is a research result. One you can look at at 134 runs in a web page.
+Now check the price, in the same table. Those nine scenes average 734 MB of blobs. At 59 numbers of 4 bytes each a splat is 236 bytes, so 734 MB works out at roughly 3.1 million balloons for one garden. That is three CDs of helium.
+Where you actually find them
+This is not a lab curiosity, which I did not expect when I read the paper.
+Scaniverse, Niantic’s phone scanner, builds splats on the handset itself and gives them away free. Polycam has had splat capture since September 2023.
+Houdini 22 made splats one of two headline features of the release, and Autodesk’s Arnold 7.5.2 renders them natively. glTF, the format most 3D assets travel in, got a release-candidate splat extension from Khronos in February 2026.
+Robot simulators. Scan a real room, render it from wherever a simulated camera wants to stand, and train a policy against that. A pile of 2026 papers do real-to-sim this way, which lands next to the world models post: that one learns how a scene behaves, this copies how one room looks.
+Where things are going
+The 734 MB is what everybody attacks first. Self-Organizing Gaussians (Morgenstern et al., ECCV 2024) sorts the blob parameters into 2D grids so neighbours look alike, then hands the grids to an ordinary image codec. They report up to 41.6x smaller on Deep Blending, with one scene going from 174 MB to 17 MB at the same quality. HAC predicts each blob’s parameters from a hash grid and claims 75x against vanilla 3DGS.
+Then there is popping. Sorting per tile rather than per pixel means the order can flip as the camera turns, and blobs jump in front of each other mid-pan. StopThePop (Radl et al., SIGGRAPH 2024) sorts hierarchically for about 4% more render cost, and reports that scenes trained that way need half as many blobs. Mip-Splatting handles the fizzing you get zooming in past the resolution your photos ever had.
+And then there is motion. 4D Gaussian Splatting keeps one canonical set of blobs and learns how they deform over time, at 82 FPS at 800x800 on a 3090, with follow-ups past 300. Monocular video, where nobody handed you the poses, is still rough.
+Knots, tape and the view from the side
+The uncle who went looking for the toilet is the honest critic here, so this section is his.
+There is no geometry in there, and plenty of pipelines need geometry. A physics engine cannot collide with a blob. A lighting artist cannot relight one, because the spherical harmonics baked in whatever light was in the room that day. Walk a character through a splat scene and they go through the hedge. SuGaR will pull a mesh back out in minutes by forcing the blobs flat onto the surface, which costs you the fuzzy things you left meshes for.
+It is also only as good as where you stood. Point the camera somewhere the photos never covered and you get floaters: stray translucent blobs the optimiser parked there because no photo ever contradicted them. More training does not help, because there is nothing to correct them against. And it inherits COLMAP’s bad days, since blank walls, mirrors and motion blur all break structure from motion, and blobs fitted to wrong camera poses still match your photos.
+The benchmarks worry me more than any of that. Mip-NeRF 360, Tanks and Temples and Deep Blending are nine, two and two scenes, and every compression paper since reports against the same thirteen. PSNR on held-out views also rewards smooth interpolation between nearby cameras, which is what this method is best at. I would not read 0.3 dB between two papers as meaning much.
+And the sourcing, which is the usual caveat on this blog. arXiv and Wikimedia are both blocked from the machine I write these on. So the numbers come from published tables as they appear in search results and write-ups, not from the PDFs. The ones I would most like checked are the 11 dB Truck ablation and the 41.6x compression claim. The 3.1 million count is mine, divided out of 734 MB rather than quoted. And the three densification constants, the 1.6, the 0.005 and the 3,000 steps, are from the reference implementation as I remember it.
+Conclusion
+None of the parts are new. Levoy and Whitted proposed drawing pictures out of points instead of triangles in a 1985 technical report, which is old enough to draw a pension. The elliptical Gaussian kernel was worked out in 2001. What was missing was a renderer you could take derivatives through, so three million of those kernels could be tuned against photographs at once.
+So: take photos, scatter soft ellipsoids, render by sorting and painting, and measure the error against the photos. Then let the optimiser blow up more blobs where the picture is wrong and pop the ones nobody can see. Forty-one minutes a scene, 134 frames a second, three million bell curves with colours on them.
+My bet is that the next two years go to storage rather than quality. 27.21 against 27.69 is a settled argument. 734 MB a garden is not, and a game ships whole levels for less. The day a phone holds a city’s worth of this, it stops being a scanning app and becomes how maps work.
+And the uncle? He is still right. Walk round the back of a splat scene and there is nothing there, because there was never anything there from the front either. Only balloons, tied in an order that happens to look like a hall from the three places the photographer stood.
+And now you know. Fin.
+Recent posts
+Retrieval - Bring the Broken Part
+Voice Models - Press to Talk
+Voice Models - Writing Down a Concert
+Test-Time Compute - Order One More Test

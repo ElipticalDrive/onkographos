@@ -1,0 +1,184 @@
+# Immediate 3D Gaussian Splat Reconstruction
+
+Also called: Immediate 3D Gaussian Splat Reconstruction Pipeline, Incremental 3D Gaussian Splatting Reconstruction, Incremental 3DGS with Loop Closure, Main Pipeline for Immediate 3D Gaussian Splat Reconstruction, Real-time 3DGS Reconstruction, Streaming 3D Gaussian Splatting Pipeline, Two-Level Matching 3DGS
+
+## Overview
+Immediate 3D Gaussian Splat Reconstruction is a streaming pipeline that processes an unordered sequence of RGB images to produce a real-time 3D Gaussian Splatting (3DGS) model [S1]. It solves the problem of incremental reconstruction from unordered inputs by maintaining global consistency through loop closure and a covisibility graph, while optimizing Gaussian primitives in real-time [S1]. Unlike batch methods, it interleaves feature matching, pose estimation, and Gaussian optimization to keep the delay between capture and processing start below 0.8 seconds [S1]. It distinguishes itself from other training optimizations by focusing on the *pipeline structure* for incremental input rather than just the loss function or densification schedule [S1].
+
+## How it works
+The method operates as a streaming loop. It takes an unordered stream of images and outputs a 3DGS model consisting of optimized Gaussian primitives and camera poses.
+
+### Data Structures
+*   **Registered Keyframes ($M$):** A set of keyframes that have been successfully registered to the global map.
+*   **Covisibility Graph ($G_{graph}$):** Structured as a triple $(M, E, W)$, representing the set of registered keyframes, edges $E$ between them, and edge weights $W$ [S1]. Note: The source pseudocode uses $G$ for both the graph and primitives; this implementation distinguishes them as $G_{graph}$ and $G_{prims}$ [S1].
+*   **Active Gaussian Primitives ($G_{prims}$):** The set of 3D Gaussians currently in the scene.
+*   **Gaussian Hierarchy ($H$):** A structure managing the hierarchy of Gaussians, updated based on the graph and image [S1].
+*   **Shelf ($Shelf$):** A buffer for unmatched frames that cannot be processed immediately [S1].
+
+### Parameters
+*   $N=20$: The fixed number of keyframes selected for local bundle adjustment [S1].
+*   $\tau_{lc} = 5$: The threshold for the minimum graph distance (hops) between clusters to trigger loop closure [S1].
+*   $\tau_v$: The threshold for the minimum number of valid matching pairs required to trigger loop closure [S1].
+*   Welding Window ($W$): Defined as the union of the top $N/2$ keyframes from cluster $C1$ and the top $N/2$ keyframes from cluster $C2$ [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def main_pipeline(image_stream):
+    # 1. Initialize data structures
+    M = set()          # Registered keyframes
+    G_graph = (set(), set(), dict()) # Covisibility graph: (nodes, edges, weights)
+    G_prims = set()    # Active Gaussian primitives
+    H = set()          # Gaussian hierarchy
+    Shelf = []         # Shelved unmatched frames
+
+    # 2. Bootstrap: Process first 8 well-connected keyframes
+    # This step initializes the map with a stable base.
+    bootstrap_keyframes = get_first_8_well_connected_images(image_stream)
+    for img in bootstrap_keyframes:
+        process_image(img, M, G_graph, G_prims, H, Shelf)
+
+    # 3. Stream processing loop
+    for I_q in image_stream:
+        process_image(I_q, M, G_graph, G_prims, H, Shelf)
+
+    # 4. Post-processing: Retry shelved frames
+    process_shelved_frames(Shelf, M, G_graph)
+
+def process_image(I_q, M, G_graph, G_prims, H, Shelf):
+    # Two-Level Matching
+    V, K_prime = TwoLevelMatching(I_q, M)
+
+    # If no matches, shelve
+    if not V:
+        Shelf.append(I_q)
+        return
+
+    # Update Covisibility Graph
+    UpdateGraph(G_graph, I_q, V)
+
+    # Loop Detection
+    loop, C1, C2 = LoopDetection(I_q, K_prime, G_graph)
+
+    # Select Keyframes for Local BA
+    S = SelectKeyframes({I_q}, G_graph, N=20)
+
+    # Local Bundle Adjustment
+    LocalBA(S, G_prims)
+
+    # Handle Loop Closure
+    if loop:
+        WeldingBA(C1, C2, G_graph)
+        BackbonePropagation(G_graph, C1, C2, G_prims)
+
+    # Place New Gaussians
+    PlaceGaussians(I_q, G_graph, G_prims)
+
+    # Update State
+    M.add(I_q)
+    UpdateHierarchy(G_graph, H, I_q)
+    OptimizeGaussians(M, G_graph, G_prims)
+
+    # Retry Shelved Frames
+    RetryShelved(Shelf, M, G_graph)
+
+def TwoLevelMatching(I_q, M):
+    # Extract features for 4 rotations (0, 90, 180, 270 degrees)
+    # Use MixVPR to detect orientation
+    # Use XFeat for keypoints/features based on detected orientation
+    # Return matches V and candidate keyframe indices K'
+    pass
+
+def LoopDetection(I_q, K_prime, G_graph):
+    # Identify disjoint clusters C1, C2 in the visual neighborhood
+    # Check if d_G(C1, C2) > 5 and min(|C1|, |C2|) > tau_v
+    # Return loop flag and clusters
+    pass
+
+def SelectKeyframes(query, G_graph, N=20):
+    # Select N=20 keyframes from the neighborhood for optimization
+    pass
+
+def LocalBA(S, G_prims):
+    # Fast Bundle Adjustment
+    # Allow each landmark to be observed by a fixed subset of keyframes
+    # selected based on covisibility, rather than all keyframes in S
+    pass
+
+def WeldingBA(C1, C2, G_graph):
+    # Select anchor keyframes I_a1, I_a2 from C1, C2 based on connectivity
+    # Compute rigid transform T_delta between optimized and initial poses
+    # Estimate scale change s_delta from landmark depth variations
+    # Compute similarity transform S_delta = Sim3(T_delta, s_delta)
+    pass
+
+def BackbonePropagation(G_graph, C1, C2, G_prims):
+    # Build backbone path B using Dijkstra on G_graph between I_a1 and I_a2
+    # Calculate interpolation weight alpha(I_b) for each node I_b in B
+    # Interpolate rotation (6D) and scale (linear) to get S_delta,b
+    # Propagate corrections to keyframes not in welding window
+    # T_i_new = S_delta,b* o T_i_old
+    pass
+
+def PlaceGaussians(I_q, G_graph, G_prims):
+    # Instantiate new Gaussian primitives for I_q based on graph G
+    pass
+
+def UpdateHierarchy(G_graph, H, I_q):
+    # Update Gaussian hierarchy H with new image I_q
+    pass
+
+def OptimizeGaussians(M, G_graph, G_prims):
+    # Optimize Gaussians in registered set M using graph G
+    # Uses standard 3DGS optimization steps (densification/pruning)
+    pass
+
+def RetryShelved(Shelf, M, G_graph):
+    # Continuously compute best MixVPR match between shelved frames and M
+    # If best match cosine similarity > last registered image's similarity,
+    # attempt to add shelved frame to M
+    pass
+```
+
+### Detailed Steps
+
+**1. Rotation Invariant Matching**
+Standard CNN descriptors are not rotation invariant. To handle strong rotations, the pipeline extracts MixVPR and XFeat features for four rotations of the image ($0^\circ, 90^\circ, 180^\circ, 270^\circ$) [S1]. For XFeat, keypoints are extracted only from the upright image, but features are sampled in all four rotated images [S1]. MixVPR is used first to detect the orientation, allowing the system to select the corresponding XFeat features for matching efficiently [S1].
+
+**2. Fast Bundle Adjustment**
+To scale to $N=20$ keyframes, the method uses a custom Fast BA [S1]. Previous fast BA solutions scale quadratically because every landmark is observed by all keyframes [S1]. This method scales linearly by allowing each landmark to be observed by a fixed subset of keyframes in the local window, selected based on covisibility [S1]. This reduces the number of observations significantly [S1].
+
+**3. Loop Closure and Drift Correction**
+Accumulated drift causes Gaussians to be optimized incorrectly, leading to spiky artifacts and superimposition [S1]. Loop closure is detected when disjoint clusters $C1$ and $C2$ are found in the visual neighborhood [S1]. A loop closure occurs if the graph distance $d_G(C1, C2) > \tau_{lc}=5$ and the size of the smaller cluster $> \tau_v$ [S1].
+*   **Anchor Selection:** The most connected keyframes $I_{a1}$ and $I_{a2}$ are selected from $C1$ and $C2$ based on their connection count $c(I, W)$ to the welding window $W$ [S1].
+*   **Transformation:** A rigid transform $T_\Delta$ is computed between the optimized and initial poses of the anchor. A scale change $s_\Delta$ is estimated from landmark depth variations. The similarity transform is $S_\Delta = \text{Sim3}(T_\Delta, s_\Delta)$ [S1].
+*   **Propagation:** A backbone path $B$ is built between $I_{a1}$ and $I_{a2}$ using Dijkstra's algorithm on the covisibility graph (loop edges are not yet added) [S1]. The transformation is interpolated along the backbone:
+    $$ \alpha(I_b) = \frac{d_G(I_b, I_{a2})}{d_G(I_{a1}, I_{a2})} $$
+    $$ S_{\Delta, b} = \text{interpSim3}(I, S_\Delta, \alpha(I_b)) $$
+    Rotations are interpolated using 6D representation, and scale is interpolated linearly: $s_{\Delta, b} = s_\Delta^{\alpha(I_b)}$ [S1].
+*   **Application:** For keyframes $I_i$ not in the welding window, the closest backbone node $I_b^*$ is found, and the pose is updated: $T_i^{\text{new}} = S_{\Delta, b^*} \circ T_i^{\text{old}}$ [S1].
+
+**4. Shelving**
+Frames that cannot be matched or fail pose initialization are added to the `Shelf` [S1]. The system continuously computes the best MixVPR match between shelved frames and the registered set $M$. If the best match cosine similarity is above the last registered image's similarity, the shelved frame is processed [S1]. After capture ends, remaining shelved frames are processed starting from the best VPR match [S1].
+
+### Edge Cases and Pitfalls
+*   **Variable Name Collision:** The source pseudocode assigns both the covisibility graph and active Gaussian primitives to the variable $G$. Implementers must distinguish them (e.g., $G_{graph}$ vs $G_{prims}$) to avoid overwriting [S1].
+*   **Memory Constraints:** While efficient, the method can still face VRAM limitations on very large scenes or high-resolution inputs if not managed carefully (e.g., AnySplat runs out of memory on H100 for StaticHikes due to image size constraints) [S1].
+*   **Drift Artifacts:** Without loop closure, accumulated drift introduces spiky artifacts and superimposition in the Gaussian model [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The local bundle adjustment scales linearly with the number of keyframes in the window due to the covisibility-based landmark observation subset [S1]. The overall pipeline keeps the delay between capture and processing start below 0.8 seconds (time to handle two keyframes) [S1].
+*   **Memory Complexity:** Depends on the number of active Gaussians and the size of the covisibility graph. It is more memory-efficient than feed-forward methods like AnySplat which require large vision model backbones and are limited to 448x448 images [S1].
+*   **Performance:**
+    *   MipNeRF360: PSNR 26.29, SSIM 0.839, LPIPS 0.241 in 0:01:17 [S1].
+    *   TUM: PSNR 24.51, SSIM 0.861, LPIPS 0.174 in 0:01:36 [S1].
+    *   StaticHikes: PSNR 23.78, SSIM 0.760, LPIPS 0.242 in 0:01:49 [S1].
+*   **Strengths:** Real-time incremental reconstruction, robust to rotation, handles loop closures to prevent drift, scalable to larger local windows ($N=20$) compared to previous fast BA methods [S1].
+*   **Limitations:** Requires unordered input to be processed sequentially; performance depends on the quality of feature matching; may require post-capture fine-tuning for optimal quality (e.g., +10-30 epochs improves metrics) [S1].
+
+## Background
+The method is described in "Immediate 3D Gaussian Splat Reconstruction of Unordered Input with Global Consistency" by Andreas Meuleman, Linus Franke, Boris Zhestiankin, Camille Montemagni, and George Drettakis, published in SIGGRAPH Conference Papers 2026 [S1]. It addresses the limitations of previous fast BA solutions which did not scale well beyond $N=5$ keyframes [S1].
+
+## Sources
+[S1] Immediate 3D Gaussian Splat Reconstruction of Unordered Input with Global Consistency, https://doi.org/10.1145/3799902.3811167, fetched 2026-10-26

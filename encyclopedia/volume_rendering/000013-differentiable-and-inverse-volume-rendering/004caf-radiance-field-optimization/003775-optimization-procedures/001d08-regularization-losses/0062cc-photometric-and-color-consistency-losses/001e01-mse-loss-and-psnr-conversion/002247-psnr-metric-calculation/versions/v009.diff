@@ -1,0 +1,188 @@
+--- v008.md
++++ v009.md
+@@ -4,121 +4,113 @@
+ 
+ ## Overview
+-Peak Signal-to-Noise Ratio (PSNR) is a standard benchmark metric used to evaluate the quality of reconstructed images or volumes in novel view synthesis and radiance field optimization [S2, unofficial]. It quantifies the photometric fidelity between a rendered prediction and a ground-truth reference by converting the Mean Squared Error (MSE) into a logarithmic decibel (dB) scale [S3, unofficial]. Unlike structural metrics such as SSIM, PSNR focuses strictly on pixel-wise intensity error, making it a fast, objective measure of reconstruction accuracy, though it is known to correlate imperfectly with human perception [S1, unofficial].
++Peak Signal-to-Noise Ratio (PSNR) is a standard benchmark metric used to evaluate the photometric fidelity of reconstructed images or volumes in novel view synthesis and 3D reconstruction [S1, unofficial][S2, unofficial][S4]. It quantifies the error between a predicted image and a ground-truth reference by converting the Mean Squared Error (MSE) into a logarithmic decibel (dB) scale, where higher values indicate better quality [S2, unofficial][S3, unofficial]. Unlike structural metrics such as SSIM, PSNR focuses strictly on pixel-wise intensity accuracy, making it sensitive to large smooth regions while largely ignoring small, high-frequency features like specular highlights [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- **Input:** Two arrays of identical dimensions representing the target image/volume $y$ and the predicted image/volume $x$. The values are typically normalized to the range $[0, 1]$ or $[0, 255]$.
+-- **Output:** A single floating-point scalar representing the PSNR in decibels (dB). Higher values indicate better quality.
++**Inputs and Outputs**
++- **Input `x`**: Ground-truth image or volume (tensor/array of pixel/voxel values).
++- **Input `y`**: Predicted/reconstructed image or volume (same dimensions and data type as `x`).
++- **Parameter `MAX`**: The maximum possible representable pixel value (e.g., 1.0 for normalized float, 255 for 8-bit integer) [S1, unofficial][S4].
++- **Parameter `eps`**: A small constant (typically $10^{-10}$) added to MSE to prevent division by zero or log(0) [S3, unofficial].
++- **Output**: A scalar float representing the PSNR in decibels (dB) [S2, unofficial].
+ 
+-**Data Structures:**
+-- The inputs are treated as dense arrays of shape $(H, W, C)$ for images or $(D, H, W, C)$ for volumes, where $C$ is the number of channels (typically 3 for RGB).
+-- No intermediate data structures are required beyond scalar accumulators for the error sum.
++**Data Structures**
++The inputs are typically dense arrays or tensors. For images, the shape is $(H, W, C)$ or $(N, H, W, C)$, where $H$ is height, $W$ is width, and $C$ is the number of channels (usually 3 for RGB) [S6, unofficial]. For volumes, the shape is $(D, H, W)$ or $(N, D, H, W)$ [S7, unofficial]. The computation aggregates errors over all elements in the array.
+ 
+-**Parameters:**
+-- `max_val`: The maximum possible pixel value. Default is $1.0$ if inputs are normalized to $[0, 1]$, or $255$ if inputs are 8-bit integers [S2, unofficial].
+-- `eps`: A small constant added to the MSE to prevent division by zero or logarithm of zero. Typical value is $10^{-10}$ [S3, unofficial].
+-
+-**Formulas:**
+-The core calculation involves two steps: computing the MSE and then converting it to PSNR.
+-
+-1. **Mean Squared Error (MSE):**
++**Steps**
++1. **Validation**: Ensure `x` and `y` have identical shapes. If dimensions mismatch, the metric is undefined or returns an error/maximum float value [S6, unofficial].
++2. **Compute Squared Error**: Calculate the element-wise squared difference between `x` and `y`.
++   $$ \text{sq\_diff} = (x - y)^2 $$
++3. **Compute MSE**: Calculate the mean of the squared differences over all pixels/voxels.
+    $$ \text{MSE} = \frac{1}{N} \sum_{i=1}^{N} (x_i - y_i)^2 $$
+-   where $N$ is the total number of elements (pixels or voxels) across all channels, and $x_i, y_i$ are the predicted and target values respectively [S4].
+-
+-2. **Peak Signal-to-Noise Ratio (PSNR):**
++   where $N$ is the total number of elements (e.g., $H \times W \times C$ for images) [S1, unofficial][S4].
++4. **Compute PSNR**: Apply the logarithmic conversion.
+    $$ \text{PSNR} = 10 \log_{10} \left( \frac{\text{MAX}^2}{\text{MSE} + \epsilon} \right) $$
+    Alternatively, using the identity $\log_{10}(A/B) = \log_{10}(A) - \log_{10}(B)$ and $\log_{10}(X^2) = 2\log_{10}(X)$:
+    $$ \text{PSNR} = 20 \log_{10}(\text{MAX}) - 10 \log_{10}(\text{MSE} + \epsilon) $$
+-   where $\text{MAX}$ is the maximum representable pixel value and $\epsilon$ is the epsilon constant [S2, unofficial][S4].
++   where $\epsilon$ is the small constant `eps` [S2, unofficial][S3, unofficial].
+ 
+-**Pseudocode:**
++**Pseudocode**
+ ```python
+ import math
+ 
+-def calculate_psnr(target: list, predicted: list, max_val: float = 1.0, eps: float = 1e-10) -> float:
++def calculate_psnr(x: list, y: list, max_val: float = 1.0, eps: float = 1e-10) -> float:
+     """
+-    Calculate Peak Signal-to-Noise Ratio between target and predicted arrays.
++    Calculate Peak Signal-to-Noise Ratio between two images/volumes x and y.
+     
+     Args:
+-        target: List or array of ground truth values.
+-        predicted: List or array of predicted values.
+-        max_val: Maximum possible pixel value (default 1.0 for normalized data).
++        x: Ground truth array.
++        y: Predicted array.
++        max_val: Maximum possible pixel value (e.g., 1.0 for [0,1] normalized).
+         eps: Small constant to prevent log(0).
+         
+     Returns:
+-        PSNR value in dB.
++        PSNR in dB.
+     """
+-    # Validate dimensions
+-    if len(target) != len(predicted):
+-        raise ValueError("Target and predicted arrays must have the same length.")
++    # Validate dimensions [S6, unofficial]
++    if len(x) != len(y):
++        raise ValueError("Input arrays must have the same length")
+     
+-    n_elements = len(target)
+-    if n_elements == 0:
+-        return float('inf') # Or handle as error
++    n = len(x)
++    if n == 0:
++        return 0.0
+         
+-    # Compute Mean Squared Error
++    # Compute MSE
+     mse_sum = 0.0
+-    for t, p in zip(target, predicted):
+-        diff = t - p
++    for i in range(n):
++        diff = x[i] - y[i]
+         mse_sum += diff * diff
+         
+-    mse = mse_sum / n_elements
++    mse = mse_sum / n
+     
+-    # Compute PSNR
+-    # Using the 10 * log10(MAX^2 / MSE) formulation
+-    # Note: If max_val is 1.0, MAX^2 is 1.0, so log10(1/MSE) = -log10(MSE)
+-    # The factor 10 applies to the log10 of the ratio.
+-    
+-    # Guard against zero MSE resulting in infinity
+-    if mse < eps:
+-        mse = eps
++    # Compute PSNR [S1, unofficial][S2, unofficial][S3, unofficial]
++    # Use max_val^2 / (MSE + eps) inside log
++    if mse + eps <= 0:
++        # Perfect prediction or negative MSE (impossible for real data, but guard against numerical issues)
++        return float('inf')
+         
+-    psnr = 10.0 * math.log10((max_val ** 2) / mse)
+-    
++    psnr = 10.0 * math.log10((max_val ** 2) / (mse + eps))
+     return psnr
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- **Zero MSE:** If the prediction is identical to the target, MSE is 0, leading to $\log_{10}(0)$ which is undefined (negative infinity). A small epsilon ($10^{-10}$) is added to the denominator to stabilize the calculation [S3, unofficial].
+-- **Dimension Mismatch:** Inputs must have identical spatial dimensions and channel counts. Mismatched dimensions should raise an error or return a sentinel value (e.g., `float.MaxValue`) [S6, unofficial].
+-- **Weighting Bias:** PSNR averages error over all pixels. Large smooth regions dominate the score, while small, high-frequency details (like specular highlights or thin structures) have negligible impact on the final value [S1, unofficial].
+-- **Interpretation:** The scale is logarithmic. A difference of 3 dB corresponds to a halving of the squared error, and 6 dB corresponds to a quartering [S1, unofficial].
++**Parameters and Typical Values**
++- `max_val`: Default is 1.0 for normalized floating-point images [S2, unofficial][S8, unofficial]. For 8-bit integer images, this is 255.
++- `eps`: Default is $10^{-10}$ [S3, unofficial].
++- **Interpretation**: A difference of 3 dB corresponds to a halving of the squared error; a 6 dB difference corresponds to a quartering [S1, unofficial]. Target PSNR for NeRF Blender scenes is typically 31–33 dB [S2, unofficial].
++
++**Edge Cases and Pitfalls**
++- **Zero MSE**: If the prediction is perfect (MSE = 0), PSNR is infinite [S2, unofficial]. The `eps` term prevents this from causing a runtime error but results in a very large finite number.
++- **Smooth Region Bias**: PSNR averages over every pixel, weighting large smooth regions heavily. It ignores small bright features like specular highlights or grass blades, which occupy too few pixels to significantly affect the score [S1, unofficial].
++- **Noise Floor**: In scientific volumes, if the noise level is zero (signal-limited), MAD estimators may return exactly zero, bounding nothing [S7, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [3D Evaluation Metrics](2903-3d-evaluation-metrics.md)
+-3D Evaluation Metrics extend PSNR and SSIM to volumetric data by computing these metrics across axial, coronal, and sagittal slices. Unlike standard 2D PSNR which evaluates pixel-level photometric error in projections, this approach assesses both geometric and photometric fidelity in 3D space. It serves as the foundational evaluation layer for mesh reconstruction and normal consistency checks.
++3D Evaluation Metrics quantify the fidelity of reconstructed volumetric or radiance-field representations against ground-truth references, addressing the problem of assessing both geometric accuracy and photometric consistency in 3D reconstruction. Unlike sibling methods that focus on specific aspects like mesh topology [Mesh Reconstruction Evaluation](2909-mesh-reconstruction-evaluation.md) or surface orientation [Normal Consistency](3050-normal-consistency.md), this category encompasses a suite of metrics including PSNR, SSIM, and mIoU to provide a comprehensive assessment of reconstruction quality. It distinguishes itself from [PSNR Metric Calculation](2742-psnr-metric-calculation.md) by extending the evaluation to 3D volumes and multi-view consistency, and from [Benchmark Performance Numbers](3471-benchmark-performance-numbers.md) by providing the specific algorithmic definitions of the scores rather than just reporting aggregated results.
+ 
+ ### [Benchmark Performance Numbers](3471-benchmark-performance-numbers.md)
+-Benchmark Performance Numbers provide standardized baselines for radiance field methods, primarily using the Mip-NeRF 360 dataset metrics (average PSNR and LPIPS). These numbers aggregate results across specific scene sets to compare reconstruction quality against established baselines like 3DGS or Mip-Splatting. They highlight trade-offs between visual fidelity, geometric accuracy, and resource efficiency.
++Benchmark Performance Numbers provide standardized quantitative baselines for evaluating radiance field optimization methods, primarily using the Mip-NeRF 360 dataset metrics (average PSNR and LPIPS). They serve as a reference point to compare the reconstruction quality of different variants (e.g., 3DGS, Mip-Splatting) against established baselines. Unlike raw metric calculation, these numbers aggregate results across a specific scene set to highlight trade-offs between visual fidelity, geometric accuracy, and resource efficiency.
+ 
+ ### [PSNR Difference Metric for Ablation](5656-psnr-difference-metric-for-ablation.md)
+-The PSNR Difference Metric for Ablation quantifies performance degradation by comparing the PSNR of an ablated configuration against the full method. It isolates the error ratio independent of the bit depth (MAX), as MAX cancels out in the logarithmic difference, providing a scale-invariant measure of quality loss.
++The PSNR Difference Metric for Ablation quantifies the performance degradation caused by removing a specific component from a rendering pipeline by comparing the Peak Signal-to-Noise Ratio (PSNR) of the ablated configuration against the full method. It isolates the error ratio independent of the bit depth (MAX), as MAX cancels out in the logarithmic difference, providing a scale-invariant measure of quality loss.
+ 
+ ### Noise Floor Estimation via MAD
+-This variant estimates the noise floor using Median Absolute Deviation (MAD) to determine the theoretical maximum PSNR (noise floor) for a given volume [S7, unofficial]. It uses estimators such as the Laplacian MAD or Haar finite-difference MAD to compute the noise standard deviation $\sigma$. The noise floor PSNR is then calculated as $10 \log_{10}(1/\sigma^2)$ [S7, unofficial]. A pitfall is that MAD estimators may return zero for signal-limited volumes (e.g., Mouse heart nuclei), indicating the model is not noise-limited [S7, unofficial].
++Noise Floor Estimation via MAD estimates the noise standard deviation $\sigma$ in volumetric data to determine the theoretical maximum achievable PSNR (noise floor) [S7, unofficial]. It uses Median Absolute Deviation (MAD) estimators:
++1. **Laplacian MAD**: Compute the D-dimensional discrete Laplacian, scale MAD by $1/(0.6745 \sqrt{2D(2D+1)})$ [S7, unofficial].
++2. **Haar Finite-Difference MAD**: Compute diagonal second differences $d = I(y,x) - I(y,x+1) - I(y+1,x) + I(y+1,x+1)$, scale MAD by $1/(0.6745 \sqrt{2})$ [S7, unofficial].
++The noise floor PSNR is then $10 \log_{10}(1/\sigma^2)$ [S7, unofficial]. A pitfall is that MAD estimators may return exactly zero for signal-limited volumes (e.g., Mouse heart nuclei), bounding nothing [S7, unofficial].
+ 
+ ### PSNR Loss
+-PSNR Loss uses the PSNR formula as a regression metric during training [S8, unofficial]. It is computed as $\text{PSNR} = 20 \log_{10}(\text{max\_val} / \sqrt{\text{MSE}})$ [S8, unofficial]. While typically used as an evaluation metric, it can be adapted as a differentiable loss function, though MSE is more commonly used for optimization due to gradient stability [S8, unofficial].
++PSNR Loss computes the Peak Signal-to-Noise Ratio between predicted and target images, used as a regression metric during training [S8, unofficial]. It is defined as $\text{PSNR} = 20 \log_{10}\left(\frac{\text{max\_val}}{\sqrt{\text{MSE}}}\right)$ [S8, unofficial]. Unlike the standard PSNR metric which is used for evaluation, this variant is often used as a differentiable loss function (or its negative) during optimization, with `max_val` defaulting to 1.0 [S8, unofficial].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-- **Time:** $O(N)$, where $N$ is the total number of pixels/voxels. The calculation requires a single pass to compute the squared differences and a constant-time logarithmic conversion.
+-- **Memory:** $O(1)$ auxiliary space. Only scalar accumulators (sum of squared errors) are needed. The input arrays must be held in memory.
+-
+-**Measured Performance:**
+-- On standard NeRF Blender scenes, target PSNR values are typically 31–33 dB [S2, unofficial].
+-- A 3 dB increase represents a halving of the squared error, making PSNR sensitive to small improvements in high-quality reconstructions [S1, unofficial].
+-
+-**Strengths and Limitations:**
+-- **Strengths:** Fast to compute, easy to interpret, and widely used as a standard benchmark for comparing different rendering pipelines [S2, unofficial].
+-- **Limitations:** It does not account for structural similarity or perceptual quality. It heavily weights large smooth areas and ignores small but visually important details (e.g., grass blades, specular highlights) [S1, unofficial]. It is also sensitive to pixel misalignment.
+-
+-**When to Use:**
+-- Use PSNR for quick, objective comparison of photometric accuracy during training logging or when comparing methods on standard benchmarks [S2, unofficial].
+-- Do not rely on PSNR alone for final quality assessment; combine with SSIM, LPIPS, or human evaluation [S1, unofficial].
++- **Time Complexity**: $O(N)$, where $N$ is the number of pixels/voxels, as it requires a single pass to compute the sum of squared errors [S1, unofficial].
++- **Memory Complexity**: $O(1)$ auxiliary space if computed in a streaming fashion, or $O(N)$ if intermediate squared error arrays are stored [S6, unofficial].
++- **Strengths**: Simple to implement, computationally inexpensive, and widely understood as a standard benchmark for image quality [S2, unofficial][S4].
++- **Limitations**: Does not correlate well with human perception for structural details or textures; heavily biased towards smooth regions; sensitive to global brightness shifts [S1, unofficial].
++- **When to Use**: Standard reporting for novel view synthesis benchmarks (e.g., Mip-NeRF 360, Blender scenes) where photometric accuracy is the primary concern [S1, unofficial][S2, unofficial].
++- **When Not to Use**: When structural similarity or perceptual quality is more important than pixel-wise accuracy; in such cases, SSIM or LPIPS should be used alongside or instead [S1, unofficial].
+ 
+ ## Background
+-PSNR originated in signal processing and image compression as a measure of reconstruction quality [S4]. In the context of volume rendering and NeRFs, it has become a standard metric for evaluating novel view synthesis quality [S2, unofficial]. The metric is defined in foundational papers such as those evaluating Deep Learning Reconstruction methods [S4] and is widely cited in recent surveys of 3D Gaussian Splatting pipelines [S1, unofficial].
++PSNR originated in signal processing as a measure of reconstruction quality for lossy compression [S4]. In the context of volume rendering and neural radiance fields (NeRF), it became a standard metric for evaluating novel view synthesis quality, with early benchmarks targeting 31–33 dB on Blender scenes [S2, unofficial]. It is frequently reported alongside SSIM and LPIPS to provide a more complete picture of reconstruction fidelity, as PSNR alone fails to capture perceptual similarities in complex scenes [S1, unofficial].
+ 
+ ## Sources

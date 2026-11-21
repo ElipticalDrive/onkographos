@@ -1,0 +1,135 @@
+# Face Normal Computation
+
+Also called: Face Normal Accumulation for Smooth Normals, Face Normal Calculation, computeFaceNormal, getShadingFaceNormal
+
+## Overview
+Face Normal Computation determines the geometric orientation of a polygonal face (typically a triangle) to provide shading information for ray-marched distance fields or rasterized meshes [S1, S2, S3, unofficial]. It solves the problem of deriving a consistent surface normal from discrete vertex positions when an explicit normal attribute is unavailable [S3, S4, unofficial]. Unlike [Vertex Normal Averaging for Shading](3735-vertex-normal-averaging-for-shading.md), which computes smooth per-vertex normals by aggregating face normals, this method yields the flat normal for a single face [G].
+
+## How it works
+**Inputs:**
+*   Vertex positions: $v_0, v_1, v_2 \in \mathbb{R}^3$, representing the three corners of the triangle face [S3, S4, unofficial].
+*   Ray direction $d$ and hit axis information for the axis-aligned heuristic [S1, unofficial].
+
+**Outputs:**
+*   Face normal: $n \in \mathbb{R}^3$, a unit vector perpendicular to the triangle plane [S3, unofficial].
+
+**Data Structures:**
+*   Vertex array: A contiguous buffer or list of 3D vectors [S5, unofficial].
+*   Face index array: Indices pointing to vertices in the vertex array [S5, unofficial].
+
+**Steps:**
+1.  **Extract Vertices:** Retrieve the 3D coordinates $v_0, v_1, v_2$ for the current face using the face index array [S5, unofficial].
+2.  **Compute Edge Vectors:** Calculate two edge vectors originating from the same vertex (e.g., $v_0$):
+    $$ e_1 = v_1 - v_0 $$
+    $$ e_2 = v_2 - v_0 $$
+3.  **Cross Product:** Compute the unnormalized normal vector $n_{raw}$ using the cross product of the edge vectors:
+    $$ n_{raw} = e_1 \times e_2 $$
+    This vector is perpendicular to the triangle plane [S3, S4, unofficial].
+4.  **Normalization:** Normalize $n_{raw}$ to obtain the unit face normal $n$:
+    $$ n = \frac{n_{raw}}{\|n_{raw}\|} $$
+    Special handling is required for degenerate triangles where $\|n_{raw}\|$ is near zero [S4, S5, unofficial].
+
+**Alternative: Axis-Aligned Heuristic (Ray-Marching Specific)**
+In voxel-based or signed distance field (SDF) ray-marching implementations, if the hit location is known to be on a specific axis-aligned face, the normal can be derived directly from the ray direction components to ensure it points back toward the ray origin [S1, unofficial].
+*   If the hit is on the X-axis face:
+    $$ n = (\text{select}(-1, 1, d_x < 0.0), 0, 0) $$
+*   If the hit is on the Y-axis face:
+    $$ n = (0, \text{select}(-1, 1, d_y < 0.0), 0) $$
+*   If the hit is on the Z-axis face:
+    $$ n = (0, 0, \text{select}(-1, 1, d_z < 0.0)) $$
+    Here, $\text{select}(a, b, c)$ returns $b$ if condition $c$ is true, else $a$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def select(a, b, condition):
+    """Returns b if condition is true, else a."""
+    return b if condition else a
+
+def compute_face_normal(v0, v1, v2):
+    """
+    Computes the geometric face normal for a triangle defined by v0, v1, v2.
+    Returns a normalized 3D vector.
+    """
+    # Step 1: Compute edge vectors
+    e1 = (v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2])
+    e2 = (v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2])
+
+    # Step 2: Cross product e1 x e2
+    nx = e1[1] * e2[2] - e1[2] * e2[1]
+    ny = e1[2] * e2[0] - e1[0] * e2[2]
+    nz = e1[0] * e2[1] - e1[1] * e2[0]
+
+    # Step 3: Handle degenerate cases
+    mag_sq = nx * nx + ny * ny + nz * nz
+    
+    # Threshold for degenerate triangle (zero area)
+    if mag_sq < 1e-20:
+        # Return a default up vector for degenerate faces
+        return (0.0, 0.0, 1.0)
+
+    # Step 4: Normalize
+    mag = math.sqrt(mag_sq)
+    return (nx / mag, ny / mag, nz / mag)
+
+def compute_face_normal_axis_heuristic(ray_direction, axis):
+    """
+    Computes face normal based on ray direction for axis-aligned hits.
+    axis: 0 for X, 1 for Y, 2 for Z.
+    Returns normal pointing back toward the ray origin.
+    """
+    dx, dy, dz = ray_direction
+    
+    if axis == 0:
+        return (select(-1.0, 1.0, dx < 0.0), 0.0, 0.0)
+    elif axis == 1:
+        return (0.0, select(-1.0, 1.0, dy < 0.0), 0.0)
+    elif axis == 2:
+        return (0.0, 0.0, select(-1.0, 1.0, dz < 0.0))
+    else:
+        raise ValueError("Axis must be 0, 1, or 2")
+```
+
+**Parameters:**
+*   Degeneracy Threshold: $10^{-20}$ is used to detect zero-length normals [S4, S5, unofficial].
+*   Default Normal: $[0.0, 0.0, 1.0]$ is used as a fallback for degenerate triangles [S5, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Triangles:** If vertices are collinear or identical, the cross product is zero [S5, unofficial]. Normalizing a zero vector causes division by zero [G]. The method must check the squared magnitude against a small epsilon and substitute a default vector [S5, unofficial].
+*   **Winding Order:** The direction of the normal depends on the order of $v_0, v_1, v_2$ [G].
+*   **Precision:** For very small or very large coordinates, floating-point precision errors in the cross product may affect the normal's accuracy [G].
+
+## Subtopics
+
+### [Vertex Normal Averaging for Shading](3735-vertex-normal-averaging-for-shading.md)
+Computes a smooth shading normal for a polygonal face by averaging the pre-computed vertex normals of its three corners and normalizing the result. It serves as the shading-based alternative to geometric face normal computation [G]. This approach reduces visible faceting on rendered isosurfaces compared to flat shading.
+
+### Pseudonormal Calculation
+A technique to ensure accuracy of the mesh distance field sign by using a weighted sum of normals on incident faces [S7, unofficial]. It addresses the breakdown of face normals near edges or vertices when generating the sign of a distance field [S7, unofficial].
+
+### Camera-Aligned Normal Fixing
+Interpolates face normals to pixel space using fragment attributes and identity weights [S8, unofficial]. Computes pixel positions in world coordinates from the depth buffer and camera intrinsics/extrinsics [S8, unofficial]. Calculates direction vectors from each pixel to the camera and normalizes them [S8, unofficial]. Computes the dot product between pixel normals and directions to camera [S8, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per face [G]. The computation involves a fixed number of arithmetic operations (subtractions, multiplications, one square root) [G].
+*   **Memory Complexity:** $O(1)$ auxiliary space [G]. No additional data structures are required beyond the input vertex positions [G].
+*   **Strengths:** Simple to implement; does not require pre-computed normal attributes; geometrically exact for the triangle geometry [G].
+*   **Limitations:** Produces flat shading (faceted appearance) if used directly for per-vertex shading without averaging [G]; sensitive to vertex winding order [G]; degenerate triangles require special handling [S5, unofficial].
+*   **When to use:** When only vertex positions are available and flat shading is acceptable, or as a precursor to vertex normal averaging [G].
+*   **When not to use:** When smooth shading is required without post-processing (use [Vertex Normal Averaging for Shading](3735-vertex-normal-averaging-for-shading.md) or [Gradient-Based Surface Normal Estimation](4261-gradient-based-surface-normal-estimation.md)) [G]; when the mesh has significant degenerate geometry and robust fallbacks are not implemented [G].
+
+## Background
+Face normal computation is a fundamental technique in computer graphics, originating from the basic principles of polygonal mesh rendering [G]. The geometric method using the cross product of edge vectors is standard in rasterization and ray tracing pipelines [G]. The axis-aligned heuristic appears in specialized voxel-based or SDF ray-marching implementations [S1, unofficial]. The method is widely used in real-time rendering engines and offline renderers as a fallback or primary method for shading when explicit normals are absent [G].
+
+## Sources
+[S1] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)
+[S2] seung-lab/zmesh, https://github.com/seung-lab/zmesh, fetched 2026-10-26 (unofficial)
+[S3] leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs, https://github.com/leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs, fetched 2026-10-26 (unofficial)
+[S4] prateekchandan/Advanced-CG-High-Resolution-Sparse-Voxel-DAGs, https://github.com/prateekchandan/Advanced-CG-High-Resolution-Sparse-Voxel-DAGs, fetched 2026-10-26 (unofficial)
+[S5] dreamgaussian/dreamgaussian, https://github.com/dreamgaussian/dreamgaussian, fetched 2026-10-27 (unofficial)
+[S6] elyssov/prometheus-engine, https://github.com/elyssov/prometheus-engine, fetched 2026-10-28 (unofficial)
+[S7] PDF Generating Signed Distance Fields from Triangle Meshes using Vulkan ..., https://williamwhitehouse.dev/assets/projects/2023/sdf-gen/gen-sdf-from-meshes-using-vulkan-compute-report.pdf, fetched 2026-10-30 (unofficial)
+[S8] GAP-LAB-CUHK-SZ/gaustudio, https://github.com/GAP-LAB-CUHK-SZ/gaustudio, fetched 2026-10-26 (unofficial)

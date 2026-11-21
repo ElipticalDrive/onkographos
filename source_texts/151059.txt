@@ -1,0 +1,2123 @@
+Under review as a conference paper at ICLR 2027
+S PLAT Q: I NTERACTION -AWARE P RUNING OF 3D
+G AUSSIAN S PLATTING VIA Q UADRATIC S ELECTION
+Hongbin Ye, Haixu Liu, Shenwei Kang, Wenxiu Wei, Tinglan Wang, Hongdong Zhu, Fan Tang
+Qi Gao, Yin Ma, Kai Wen, Hai Wei, Nuo Qian, Wei-Shi Zheng, Shaobo Chen, Fa-Ting Hong, Jingke Meng
+arXiv:2610.13503v1 [cs.CV] 9 Oct 2026
+A BSTRACT
+Existing 3D Gaussian Splatting (3DGS) pruning methods primarily rely on global
+Top-K selection based on independent importance scores, lacking regional budget
+control and ignoring joint deletion effects. Consequently, they cannot ensure balanced reconstruction quality across a scene. We propose SplatQ, a combinatorial
+pruning algorithm that coordinates regional budget allocation and joint Gaussian
+selection under a fixed budget. SplatQ partitions Gaussians by spatial proximity and
+appearance similarity into size-limited blocks, decomposing global selection into
+subproblems of a specific size. It then smooths importance-based block retention
+quotas to prevent excessive budget concentration. Finally, it constructs a quadratic
+approximation of joint deletion effects using the responses of representative pixel
+colors to changes in Gaussian opacity. Individual responses, pairwise interactions,
+and quota penalties are incorporated into a quadratic unconstrained binary optimization (QUBO) objective, solved using simulated annealing (SA) or a coherent
+Ising machine (CIM) to jointly select Gaussians. Experiments on 5 benchmarks
+demonstrate that SplatQ outperforms state-of-the-art pruning methods in aggregate
+reconstruction quality, spatial quality balance, and rendering speed. Ablations confirm that budget smoothing improves local detail reconstruction, while interaction
+modeling improves Gaussian selection quality under a fixed budget.
+1
+I NTRODUCTION
+Gaussian Splatting (Kerbl et al., 2023) enables high-quality real-time rendering through an explicit
+Gaussian representation, providing a practical foundation for the reconstruction and interaction of
+3D digital assets. Complex scenes, however, often contain large numbers of Gaussians, whose
+storage, memory, and rendering costs limit asset transmission and deployment (Fan et al., 2024;
+Girish et al., 2024). Gaussian pruning reduces these costs by removing primitives. Methods such
+as LightGaussian (Fan et al., 2024) and PUP 3D-GS (Hanson et al., 2025b) combine importance
+estimation with post-pruning fine-tuning to balance model size and rendering quality.
+Under a fixed budget and aggressive pruning, we observe that results with similar overall imagequality metrics can exhibit different patterns of local degradation: structures and textures remain
+clear in some regions, while other regions become visibly blurred or distorted. Existing methods
+also make different regional trade-offs. For example, PUP 3D-GS discusses the trade-off between
+foreground detail and background quality (Hanson et al., 2025b), whereas GaussianPOP emphasizes
+the preservation of detail-rich regions (Lee et al., 2026). These choices have their own motivations,
+but they raise a question: when the number of retained Gaussians is strictly limited, how can pruning
+preserve both overall rendering quality and reconstruction quality across different regions?
+We have two observations from previous global importance ranking works (Fan et al., 2024; Hanson
+et al., 2025b; Chen et al., 2026): First, global ranking does not directly control how the retention
+budget is distributed across a scene. Such methods score each Gaussian separately and retain the
+highest-scoring Gaussians globally (Fan et al., 2024; Hanson et al., 2025b; Chen et al., 2026). The
+number retained in each region therefore depends primarily on the score distribution. If Gaussians
+in certain regions consistently receive higher scores, the limited budget may concentrate there,
+leaving other regions with insufficient representational capacity. Thus,relying on a global ranking
+cannot guarantee that the rendering quality of all regions is well preserved under aggressive pruning
+Figure 1(a) illustrates this spatial quality imbalance: pruning baselines preserve some structures while
+losing detail in other regions of the same scene. Second, Gaussian pruning under a fixed budget is a
+combinatorial optimization problem. It requires selecting, subject to a retention constraint, a set of
+Gaussians that renders well together. Independent scoring followed by Top-K ranking reduces this set-
+1
+(a) Comparison
+Under review as a conference paper at ICLR 2027
+EAGLES
+MesonGS
+Ours
+GT
+Top-K
++ Uniform block quotas
++ Budget assignment
++ Quadratic, SA
+GT
+(b) Ablation
+PUP
+Figure 1: Addressing spatial quality imbalance in 3DGS pruning. (a) Comparisons with baselines
+illustrate uneven detail preservation across image regions, while SplatQ preserves the highlighted
+structures more consistently. (b) Component ablations show how block quotas, budget assignment,
+and quadratic selection progressively improve spatial quality balance over global Top-K pruning.
+selection problem to a comparison of individual scores. Yet multiple Gaussians may jointly support
+the same pixel or make overlapping contributions during rendering (Kerbl et al., 2023). Because
+Gaussian contributions overlap, the degradation caused by removing multiple Gaussians is not strictly
+additive and cannot be inferred from individual deletion costs.Highly overlapping Gaussians might
+all receive high individual scores and be redundantly retained, even though preserving just one would
+suffice. Consequently, accurate individual scores alone cannot determine which set of Gaussians
+should be retained. Ignoring interactions may prevent the limited budget from being used for a
+combination that achieves better reconstruction quality.
+To address these limitations, we propose SplatQ, a post-training Gaussian pruning framework that
+performs similarity-guided partitioning, budget assignment, and interaction-aware quadratic selection
+in sequence. SplatQ aims to reduce disparities in local reconstruction quality under aggressive pruning
+and use the retained Gaussian budget more effectively, improving overall and local reconstruction
+quality with the same number of Gaussians. First, SplatQ partitions Gaussians into local blocks
+according to spatial proximity and appearance similarity. These blocks provide units for budget
+assignment while keeping the selection problems at a specific size. Second, to control local retention
+counts, SplatQ derives an initial quota for each block from importance estimates and adjusts the
+quota distribution to reduce the risk of concentrating the budget in a few blocks while leaving others
+with insufficient capacity. Finally, to account for the joint effects of deleting multiple Gaussians,
+SplatQ uses rendering responses to changes in opacity multipliers to estimate individual deletion
+effects and pairwise interactions. Figure 1(b) illustrates how block quotas, budget assignment, and
+quadratic selection progressively improve detail preservation across the highlighted regions. It then
+formulates and solves a QUBO (Glover et al., 2018) under each block’s quota to select a retained
+set with a smaller estimated joint deletion effect. Because solving QUBOs with classical methods
+requires more computation than direct Top-K ranking, we also examine a coherent Ising machine
+(CIM) as a hardware solver backend and assess its potential to improve solving efficiency. After
+pruning, SplatQ fine-tunes the retained Gaussians to recover rendering quality.
+We conduct extensive experiments on 27 scenes from 5 benchmarks covering indoor, outdoor, and
+objects, comparing SplatQ with eight open-source pruning methods. Under a common 90% pruning
+setting, SplatQ achieves the best overall image quality and rendering speed among the compared
+methods, while providing more uniform reconstruction quality across image regions. We further
+evaluate different pruning ratios, fine-tuning budgets, and combinations of pruning rounds and perround fine-tuning iterations, facilitating comparisons with the reported settings of methods without
+released code. SplatQ also remains effective in a picture-free setting, where neither pruning nor finetuning uses the original training photographs and fine-tuning relies on images rendered by the fixed
+pretrained model. Even under this constraint, SplatQ surpasses the strongest baseline, MesonGS (Xie
+et al., 2024), in dataset-macro PSNR. Ablation studies further validate the effectiveness of partition-
+2
+Under review as a conference paper at ICLR 2027
+Figure 2: Overview of SplatQ. We partition Gaussians, compute a response matrix Rb for each block
+using sampled pixels from multiple views. Diagonal scores determine block retention quotas, while
+the full matrix is used to formulate a blockwise QUBO that determines which Gaussians to delete.
+The retained Gaussians are then fine-tuned without changing their count. For iterative pruning, the
+process repeats on the updated model.
+based budget assignment and interaction-aware combinatorial optimization, while experiments with
+CIM demonstrate that an alternative solver backend can also produce competitive selection results.
+2
+R ELATED WORK
+Gaussian compression and pruning. Existing 3DGS pruning methods often rank or sample
+Gaussians by rendering contributions, using compositing weights, coverage, volume, opacity, or
+gradients (Girish et al., 2024; Fan et al., 2024; Xie et al., 2024; Ali et al., 2024; Mousa & Maalouf,
+2026). These criteria may overlook compensation by other Gaussians and undervalue sparsely
+observed regions. Other methods use parameter sensitivity or its approximations (Hanson et al.,
+2025b; Chen et al., 2026; Niedermayr et al., 2024), or estimate single-Gaussian deletion error relative
+to renderings of the current or original model (Lee et al., 2026; Ramlot et al., 2026). However,
+sensitivity is not equivalent to actual deletion error, and individual deletion errors do not directly
+characterize joint removal. Learned scores, masks, or sparse representations enable reconstructiondriven adaptation but require additional learning (Yang et al., 2026; Lee et al., 2024; Zhang et al.,
+2024; 2025; Liu et al., 2025b). Further methods consider relationships among Gaussians through
+neighboring appearance differences or local overlap (Lee et al., 2025; Jiang et al., 2026), or merge
+Gaussians into new representatives (Wang et al., 2025). In contrast, SplatQ partitions pretrained
+Gaussians by spatial and appearance similarity, initializes and smooths blockwise retention quotas
+under an exact global budget, and jointly selects Gaussians within each block using a quadratic
+objective built from individual and pairwise linearized rendering responses.
+Balancing Rendering Quality Across Image Regions. NeRF++ (Zhang et al., 2020), Mip-NeRF
+360 (Barron et al., 2022), and HoGS (Liu et al., 2025a) study how to represent near and distant
+content during scene reconstruction. For a pretrained 3DGS model, pruning additionally requires
+deciding how many primitives to retain in different parts of the scene under a limited Gaussian budget.
+PUP 3D-GS reports a trade-off between foreground detail and background quality under aggressive
+pruning (Hanson et al., 2025b). These regional differences motivate SplatQ to partition Gaussians
+with similar spatial positions and appearances into size-limited blocks, smooth the block quotas
+derived from importance estimates while preserving the exact global retention count, and perform
+joint selection within each block. In addition to overall reconstruction quality, we evaluate pruning
+results by measuring quality differences across image patches.
+3
+M ETHOD
+Given a pretrained 3D Gaussian Splatting model with N Gaussians, SplatQ aims to retain exactly
+K Gaussians while accounting for their joint effects on the rendered image and reducing disparities
+N
+in retention across scene regions. We represent the model as G = {Gi = (µi , si , ri , ci , hi , oi )}i=1
+where each Gaussian is parameterized by its center µi , scale si , rotation quaternion ri , zeroth-order
+(DC) and higher-order spherical-harmonic coefficients ci and hi , and opacity oi .
+3
+Under review as a conference paper at ICLR 2027
+Previous methods suffer from two limitations: 1) They may produce imbalanced Gaussian retention
+across near and distant regions. 2) Moreover, independent Gaussian scores cannot capture the joint
+rendering effects of simultaneous deletions. SplatQ addresses these limitations through blockwise
+retention ratio allocation and interaction-aware quadratic selection, respectively.
+SplatQ decomposes this global selection problem into five stages. Partitioning in Section 3.1 first
+converts Gaussians G into several size-limited blocks {Cb }. Opacity response modeling in Section 3.2
+then produces a response matrix Rb for each block. Budget allocation
+P in Section 3.3 uses part of
+the matrix Rb to assign a retention quota Kb to every block, with b Kb = K. Given Rb and Kb ,
+quadratic selection in Section 3.4 determines which Kb block members to retain. Finally, we fine-tune
+the retained attributes without changing the count of Gaussians in Section 3.5.
+3.1
+S IMILARITY G UIDED PARTITION
+Independent importance scores do not capture how the image changes when several Gaussians are
+deleted together. To better describe these changes, we approximate their joint rendering effects using
+a quadratic objective over binary retention variables. Each variable equals 1 if the corresponding
+Gaussian is retained and 0 if it is deleted, as detailed in Section 3.4. Formulating this optimization
+problem over the entire 3D-GS model requires N binary variables and an N × N matrix of pairwise
+coefficients. For models containing millions of Gaussians, the variable count and memory requirements make this approach impractical. We therefore divide the Gaussians into blocks of at most M
+members and solve a smaller pruning problem within each block.
+Simply dividing Gaussians into consecutive blocks in their stored order ignores their spatial and
+appearance relationships. Nearby Gaussians with similar appearance may fall into different blocks,
+preventing their joint effects from being considered in the same pruning problem. We therefore
+use spatial proximity and appearance similarity to guide partitioning, so that potentially redundant
+Gaussians can be evaluated together. Finding related Gaussians through all pairwise comparisons
+itself requires quadratic work. We therefore use a 3D grid and Morton ordering to efficiently generate
+candidate pairs, whose spatial and appearance similarity is measured by an affinity.
+Candidate generation. Gaussian centers are assigned to grid cells, and the occupied cells are
+ordered by their Morton order to preserve spatial proximity. Then we divide the resulting Gaussian
+sequence into groups of approximately equal size, each within a size limit of M. These groups are
+temporary search windows rather than the partition results Cb .
+Affinity graph. To encourage spatially and visually related Gaussians to be assigned to the same
+block, we define the following pairwise affinity. For Gaussian i, let µi denote its center, si its
+activated scale vector, and ci its three-channel DC spherical-harmonic descriptor. For each candidate
+pair, we define the scale-aware affinity as
+" 3
+#
+X (µi,d − µj,d )2
+2
+aij = exp −
+− ∥ci − cj ∥2 .
+(1)
+s2i,d + s2j,d + ϵg
+d=1
+The first term measures center separation relative to the Gaussian scales and the second term reduces
+the affinity between spatially close Gaussians with different appearance. Each Gaussian retains at
+most the k candidates with the largest affinities, and the retained pairs form a sparse graph with aij as
+edge weights. The candidate groups depend on the grid origin, so one pass can miss pairs separated
+by a group boundary. We repeat candidate generation and affinity calculating with a shifted grid and
+merge both passes into one sparse graph. Repeated edges record their weights only once. The merged
+sparse graph then guides the construction of the final partition.
+Partition. We next convert the sparse graph into the final size-limited blocks. Using Morton order
+in the first pass, we select one seed from each interval containing at most M Gaussians and grow all
+blocks in parallel. Each unassigned Gaussian proposes the block reached by its strongest edge to
+an assigned member, and proposals are accepted only while that block has capacity. Gaussians not
+reached by the graph fill the blocks in Morton order. This procedure yields disjoint blocks {Cb }B
+b=1
+with nb = |Cb | ≤ M . These blocks serve as the units for response modeling, quota allocation, and
+quadratic selection in the following sections.
+3.2
+O PACITY R ESPONSE M ODELING
+The partition defines the local Gaussian sets, but it does not determine how many Gaussians to retain
+in each block or which ones to retain. For each block, we select pixels in rendered training views and
+calculate how their RGB values change when a block member’s opacity changes. These measurements
+4
+Under review as a conference paper at ICLR 2027
+provide both individual importance scores for each block’s budget allocation in Section 3.3 and
+pairwise interactions for quadratic selection of Gaussians in 3.4.
+For each block b and camera view v, we use the projected Gaussian centers as the initially selected
+pixel coordinates. We augment this set with neighboring pixels obtained by offsetting each projected
+center. After removing duplicate locations and discarding those outside the image, we collect the
+selected pixels p of this view v as pairs (v, p) into Pb . These representative pixels are used to evaluate
+the RGB changes as Gaussian opacity changes.
+Let Lvp denote the number of Gaussians covering pixel p in view v. We index these Gaussians in
+front-to-back order as g1 , . . . , gLvp . Let αℓ denote the original alpha of gℓ , given by its activated
+opacity times its projected Gaussian value. We introduce a continuous multiplier ηi ∈ [0, 1] for each
+Gaussian’s activated opacity. The modified alpha and incoming transmittance are
+αℓ (η) = ηgℓ αℓ ,
+Tℓ (η) =
+ℓ−1
+Y
+
+1 − αr (η) .
+(2)
+r=1
+Using front-to-back alpha compositing, the rendered RGB channel q ∈ {1, 2, 3} at this pixel is
+Ivpq (η) =
+Lvp
+X
+Tℓ (η)αℓ (η)cℓ + TLvp +1 (η)cbg
+q .
+(3)
+ℓ=1
+Here cℓ is the Gaussian’s view-dependent color component, cbg
+q is the background color component,
+and TLvp +1 is the transmittance remaining after all contributors.
+We differentiate each sampled RGB channel with respect to the opacity multiplier of every block
+member. For i ∈ Cb , the corresponding entry of Jb ∈ R3|Pb |×nb is
+∂Ivpq (η)
+.
+(4)
+(Jb )(v,p,q),i =
+∂ηi
+η=1
+Rows correspond to sampled view-pixel-channel triples (v, p, q), and columns correspond to the
+Gaussians in block b. The derivatives define the opacity-response Gram matrix Rb = JbT Jb and
+diagonal score Di = (Rb )ii , i ∈ Cb . The diagonal score Di sums the squared color derivatives
+for opacity of Gaussian i over all selected pixels, views, and RGB channels. A larger Di therefore
+indicates that Gaussian i has a greater influence on the rendered image. Each off-diagonal entry is the
+signed inner product between two response columns. Positive entries indicate reinforcing linearized
+deletion effects, whereas negative entries indicate partial cancellation. It serves as the interactions
+used in Section 3.4.
+3.3
+B UDGET A SSIGNMENT
+This stage determines how many Gaussians each block retains.
+PWe use the diagonal scores Di defined
+in Section 3.2 to assign each block a retention quota Kb , with b Kb = K. We first rank all Gaussians
+
+by Di and count the global Top-K members contained in each block: Kb = Cb ∩ TopK {Di }N
+i=1 .
+Top-K returns exactly KPindices, with equal scores resolved by global index. The resulting initial
+quotas therefore satisfy b Kb = K. Global Top-K selection may assign zero retained Gaussians
+to a block if none of its members ranks among the top K. Thus, some blocks may lose all their
+Gaussians. These blocks may include distant scene regions. To reduce this imbalance, We smooth
+the initial quotas to reduce disparities in retention across blocks. For initial quotas 0 < K < N , the
+smoothed quotas are
+Kb + ϵa
+b b = K P nb log(1 + βrb )
+.
+(5)
+rb =
+,
+K
+B
+(K/N )nb + ϵa
+′
+′
+b′ =1 nb log(1 + βrb )
+Here rb compares the initial quota with the proportional quota (K/N )nb , while nb denotes block
+capacity. Increasing β > 0 reduces disparities among block retention ratios. The pseudocount
+ϵa > 0 handles blocks with zero initial quota. We round each continuous quota down and allocate the
+remaining units to eligibleP
+blocks in descending order of their fractional remainders. The final quotas
+satisfy 0 ≤ Kb ≤ nb and b Kb = K exactly.
+3.4
+Q UADRATIC S ELECTION
+Budget allocation fixes the retained count Kb for each block. We now use Rb to determine which
+Kb members should be retained while accounting for their joint effects on the rendered image. Let
+xb ∈ {0, 1}nb denote the block retention vector, where xb,i = 1 indicates that the corresponding
+5
+Under review as a conference paper at ICLR 2027
+Gaussian is retained. We define the QUBO problem as
+min
+xb ∈{0,1}nb
+Eb (xb ) = (1 − xb )T Rb (1 − xb ) + λ 1T xb − Kb
+2
+.
+(6)
+The first term approximates the rendering change caused by jointly deleting the Gaussians with
+xb,i = 0. The second term penalizes deviations from the allocated quota Kb . Each block’s QUBO
+can be solved independently using greedy selection, simulated annealing, or an Ising solver. After
+repairing infeasible solver outputs when necessary, we combine the block masks into a model
+containing exactly K Gaussians. Appendix A.6 and Appendix A.7 provide the algebraic derivations
+and solver details.
+3.5
+F INE -T UNING AND I TERATIVE P RUNING
+We combine the result binary masks xb from all blockwise QUBOs and fine-tune the retained
+Gaussians with
+densification disabled. The refinement loss is Lrefine = 0.8 L1 (I, I gt ) + 0.2 1 −
+
+SSIM(I, I gt ) , where I and I gt are the rendered and ground-truth images. For iterative pruning, we
+repeat partitioning, opacity response computation, budget allocation, and quadratic selection on the
+refined model until the target retention ratio is reached.
+4
+E XPERIMENTS
+4.1
+E XPERIMENTAL S ETTINGS
+Datasets and metrics. We evaluate SplatQ on 27 scenes from 5 benchmarks: Mip-NeRF 360 (9),
+Deep Blending (2), Tanks and Temples (2), NeRF Synthetic (8), and Ref-NeRF/Shiny Blender (6).
+These benchmarks cover indoor scenes, outdoor scenes, and objects. We compare against unpruned
+3DGS and eight pruning baselines, reporting average PSNR, SSIM, LPIPS-VGG, and rendering FPS.
+To assess spatial quality balance, we divide each test image into a 16 × 16 grid of non-overlapping
+patches and compute PSNR against the corresponding ground-truth region for each patch. For each
+image, we calculate the variance and range of its 256 patch PSNR values. We then average these
+statistics over test views within each scene and equally over scenes within each dataset. Considered
+alongside full-image PSNR, lower patch variance and range indicate smaller quality differences
+across image regions. Macro scores average the five dataset means equally. FPS is measured on
+Ubuntu 22.04 servers equipped with RTX 5090 GPUs and Intel Xeon Gold 6459C processors.
+Experimental protocol. All methods start from the same 3DGS model pretrained for 30k iterations
+for each scene and follow a shared two-round pruning and fine-tuning schedule. The first round
+removes 80% of the original Gaussians, and the second removes 50% of the survivors, leaving 10%
+of the original Gaussians. Each round includes 10k fine-tuning iterations, for 20k in total. Baselines
+that originally did not use fine-tuning receive the same schedule. All methods use the refinement
+loss defined in Section 3.5, with densification disabled. We preserve each baseline’s Gaussian
+importance estimation procedure. For methods that do not natively enforce an exact retention count,
+we apply Top-K selection using their importance scores to meet the target retention ratio. To facilitate
+comparison with reported results from methods without released code, we additionally evaluate
+pruning ratios from 10% to 90%, fine-tuning budgets from 0 to 30k iterations, and combinations of
+one to four pruning rounds with 5k to 30k fine-tuning iterations per round at 90% final removal. We
+also evaluate a picture-free setting mentioned in Section 1.
+Ablation settings. Global Top-K retains the K Gaussians with the highest individual importance
+scores Di across the entire model. Uniform block quotas assigns the same retention ratio to every
+block, whereas budget assignment uses our smoothed quotas. Both variants retain the highest-scoring
+Gaussians within each block according to Di . The Quadratic variants use the full objective with
+smoothed quotas and are solved using greedy selection, simulated annealing (SA), or a coherent
+Ising machine (CIM). Quadratic, uniform quotas instead combines uniform block quotas with greedy
+selection. For each variant, we repeat the complete pruning and fine-tuning pipeline five times with
+random seeds 0 through 4, starting from the same pretrained models.
+4.2
+C OMPARISON WITH S TRONG BASELINE
+Quality and rendering speed. As shown in Table 1, SplatQ achieves a macro-average PSNR
+of 28.426 dB, exceeding MesonGS and PUP by 0.224 dB and 0.300 dB, respectively. Among the
+compared pruning methods, it achieves the highest PSNR on four of the five datasets (MesonGS leads
+on Tanks and Temples), as well as the highest SSIM and lowest LPIPS-VGG on all five. The lower
+entry in each quality cell reports the picture-free result. Under this setting, SplatQ achieves macro6
+Under review as a conference paper at ICLR 2027
+average PSNR, SSIM, and LPIPS-VGG values of 28.250 dB, 0.88216, and 0.17936, respectively,
+with its macro-average PSNR exceeding MesonGS by 0.238 dB. SplatQ also achieves the highest
+rendering FPS among the pruning methods on all five datasets. Figure 3 compares the Gaussian
+volume distributions of the nine pruning methods. At matched cumulative fractions, SplatQ generally
+yields smaller normalized Gaussian volumes. Details of volume normalization and cross-scene
+aggregation are provided in Appendix B.1. Prior work shows that, for a fixed number of Gaussians,
+rendering cost is related to the number of screen-space pixels processed per Gaussian (Liu & Han,
+2026; Hanson et al., 2025a; Feng et al., 2025). Thus, the smaller Gaussian volumes in SplatQ
+may correspond to more localized screen-space footprints and hence a lower rendering workload,
+providing a possible explanation for the observed FPS gains. We attribute the smaller Gaussian sizes
+to our pruning’s ability to maintain better spatial relationships among the Gaussians, which reduces
+the need for compensatory enlargement during fine-tuning.
+Figure 3: Normalized Gaussian-volume distributions across five benchmarks. Curves farther left
+indicate smaller volumes at the same cumulative fraction.
+Spatial quality balance. To evaluate how effectively SplatQ alleviates regional imbalance in
+reconstruction quality, Figure 4 compares SplatQ (SA) with eight pruning baselines across five
+benchmarks. Alongside full-image PSNR, we use the variance and range of patch PSNR introduced
+in Section 4.1 to measure spatial variation in reconstruction quality. SplatQ (SA) achieves the
+lowest patch-PSNR variance and range on all five benchmarks, while attaining the highest full-image
+PSNR on four benchmarks and remaining close to the best result on Tanks and Temples. These
+results indicate that SplatQ reduces quality differences across regions while maintaining high overall
+reconstruction quality, thereby alleviating regional quality imbalance.
+Figure 4: Overall reconstruction quality and spatial quality variation across five benchmarks. The
+horizontal axis shows the variance of PSNR over 256 image patches, and the vertical axis shows
+full-image PSNR. Bubble area represents the patch-PSNR range and is comparable only within each
+dataset. Higher positions, smaller horizontal values, and smaller bubbles indicate better results.
+Sensitivity to pruning and fine-tuning. The pruning-ratio study evaluates removal ratios from 10%
+to 90% in increments of 10 percentage points, together with seven fine-tuning budgets ranging from 0
+to 30,000 steps. The pruning-round study evaluates one to four rounds with 5,000–30,000 fine-tuning
+steps per round, at a final removal ratio of 90%. The main paper presents the 2D slice of pruning-ratio
+results at 10,000 fine-tuning steps and the full 3D sweep over pruning rounds and fine-tuning steps
+(Figure 5). SplatQ outperforms the compared open-source pruning methods in reconstruction quality
+under the vast majority of evaluated configurations, demonstrating that its advantages extend across
+different pruning ratios, numbers of pruning rounds, and fine-tuning budgets. Under a few settings on
+Tanks and Temples, some quality metrics of SplatQ are slightly below those of the best-performing
+baseline. This suggests room for further improvement on datasets containing distant scene regions.
+Qualitative Comparison Based on the results in Table 1, we select PUP, MesonGS, and EAGLES
+as three strong baselines for qualitative comparison. Figure 1(a) compares representative test views
+7
+Under review as a conference paper at ICLR 2027
+Table 1: Main and picture-free comparisons at 90% pruning. Best among pruned methods is bold
+and second best is underlined.
+Method
+Mip-NeRF 360
+Deep Blending
+Tanks and Temples
+PSNR↑ SSIM↑ LPIPS↓
+FPS↑ PSNR↑ SSIM↑ LPIPS↓
+FPS↑ PSNR↑ SSIM↑ LPIPS↓
+FPS↑
+214.73
+3DGS
+27.47 0.8123
+0.2216
+LightGaussian
+26.47
+26.17
+26.90
+26.54
+26.81
+26.43
+26.87
+26.47
+26.84
+26.39
+26.58
+26.05
+25.90
+25.42
+25.91
+25.50
+27.07
+26.69
+0.7711
+0.7671
+0.7903
+0.7841
+0.7903
+0.7841
+0.7889
+0.7817
+0.7883
+0.7837
+0.7706
+0.7591
+0.7536
+0.7416
+0.7705
+0.7608
+0.7932
+0.7870
+0.2950 600.25
+0.2994
+0.2665 716.36
+0.2755
+0.2663 707.75
+0.2753
+0.2698 747.66
+0.2797
+0.2675 896.26
+0.2754
+0.3026 781.16
+0.3163
+0.3188 801.46
+0.3325
+0.2903 771.27
+0.3044
+0.2547 1022.23
+0.2721
+PSNR↑
+SSIM↑
+LPIPS↓
+FPS↑
+PSNR↑
+SSIM↑
+LPIPS↓
+FPS↑
+PSNR↑
+SSIM↑
+LPIPS↓
+3DGS
+33.32
+0.9695
+0.0304
+743.34
+30.36
+0.9470
+0.0837
+919.88
+28.788
+0.89300
+0.15354
+LightGaussian
+30.10
+30.18
+31.91
+31.84
+31.96
+31.89
+31.82
+31.75
+31.83
+31.63
+30.70
+30.26
+30.04
+29.65
+30.35
+29.82
+32.37
+32.30
+0.9486
+0.9494
+0.9614
+0.9613
+0.9617
+0.9615
+0.9610
+0.9609
+0.9607
+0.9595
+0.9506
+0.9476
+0.9469
+0.9439
+0.9517
+0.9483
+0.9623
+0.9623
+0.0624
+0.0613
+0.0444
+0.0445
+0.0440
+0.0445
+0.0449
+0.0452
+0.0440
+0.0456
+0.0615
+0.0653
+0.0640
+0.0682
+0.0562
+0.0603
+0.0424
+0.0426
+2668.98
+28.41
+28.47
+29.58
+29.46
+29.45
+29.41
+29.55
+29.52
+29.93
+29.77
+28.72
+28.40
+27.54
+27.07
+27.34
+26.89
+30.01
+29.90
+0.9363
+0.9369
+0.9430
+0.9430
+0.9432
+0.9432
+0.9430
+0.9431
+0.9443
+0.9434
+0.9360
+0.9340
+0.9294
+0.9263
+0.9270
+0.9249
+0.9453
+0.9451
+0.1063
+0.1053
+0.0934
+0.0937
+0.0927
+0.0932
+0.0931
+0.0934
+0.0915
+0.0937
+0.1067
+0.1098
+0.1194
+0.1247
+0.1144
+0.1178
+0.0897
+0.0901
+2392.75
+27.396
+27.322
+28.202
+28.012
+28.116
+27.958
+28.170
+27.996
+28.126
+27.910
+27.654
+27.282
+26.912
+26.524
+27.080
+26.726
+28.426
+28.250
+0.86940
+0.86866
+0.88160
+0.87948
+0.88076
+0.87866
+0.88112
+0.87886
+0.87976
+0.87752
+0.86902
+0.86324
+0.85600
+0.84992
+0.86714
+0.86248
+0.88390
+0.88216
+0.20234
+0.20224
+0.18116
+0.18406
+0.18154
+0.18470
+0.18174
+0.18484
+0.18068
+0.18370
+0.20498
+0.21258
+0.21806
+0.22606
+0.19980
+0.20644
+0.17504
+0.17936
+MesonGS
+EAGLES
+C3DGS
+PUP
+RAP
+REFINE
+CoreSet
+SplatQ (SA)
+Method
+MesonGS
+EAGLES
+C3DGS
+PUP
+RAP
+REFINE
+CoreSet
+SplatQ (SA)
+29.43 0.8984
+0.2460
+216.03
+23.36 0.8378
+0.1860
+285.66
+28.92
+28.99
+29.32
+29.30
+29.28
+29.29
+29.34
+29.34
+29.39
+29.37
+29.13
+29.00
+28.54
+28.35
+28.84
+28.84
+29.47
+29.43
+0.2840
+0.2828
+0.2644
+0.2662
+0.2642
+0.2664
+0.2640
+0.2658
+0.2588
+0.2572
+0.2867
+0.2931
+0.3003
+0.3067
+0.2812
+0.2848
+0.2562
+0.2571
+792.80
+23.08
+22.80
+23.30
+22.92
+23.08
+22.77
+23.27
+22.90
+22.64
+22.39
+23.14
+22.70
+22.54
+22.13
+22.96
+22.58
+23.21
+22.93
+0.7992
+0.7973
+0.8154
+0.8113
+0.8107
+0.8068
+0.8143
+0.8104
+0.8038
+0.7988
+0.7969
+0.7872
+0.7712
+0.7616
+0.7983
+0.7906
+0.8160
+0.8136
+0.2640
+0.2624
+0.2371
+0.2404
+0.2405
+0.2441
+0.2369
+0.2401
+0.2416
+0.2466
+0.2674
+0.2784
+0.2878
+0.2982
+0.2569
+0.2649
+0.2322
+0.2349
+1063.42
+0.8918
+0.8926
+0.8979
+0.8977
+0.8979
+0.8977
+0.8984
+0.8982
+0.9017
+0.9022
+0.8910
+0.8883
+0.8789
+0.8762
+0.8882
+0.8878
+0.9027
+0.9028
+NeRF Synthetic
+973.20
+1006.56
+1005.52
+1206.42
+1071.71
+1078.79
+1005.39
+1232.28
+Ref-NeRF
+3388.19
+3377.08
+3372.90
+3489.60
+3346.09
+2985.89
+3294.38
+3595.66
+1286.88
+1254.02
+1299.13
+1452.20
+1392.78
+1307.51
+1344.95
+1573.73
+Macro
+3002.43
+3060.99
+2984.86
+3026.85
+2740.48
+2623.77
+2861.67
+3180.37
+from SplatQ and these baselines. In these examples, SplatQ preserves detail more consistently across
+the highlighted regions, while several baselines show uneven degradation.
+4.3 A BLATION E XPERIMENTS
+Component and solver ablations. Table 2 compares seven variants across datasets and reports
+their equally weighted macro-averages. Uniform block quotas lower macro PSNR from 27.978
+to 27.858 dB relative to global first-order top-k; budget allocation raises it to 28.060 dB. Adding
+quadratic interactions with greedy selection yields 28.374 dB, versus 28.224 dB without budget
+allocation. The main SA variant achieves 28.426 dB, while CIM, reported separately, reaches
+28.488 dB. Appendix B.2 compares CIM, SA, and greedy runtimes.
+Qualitative ablations. Figure 1(b) illustrates the corresponding changes in local reconstruction
+quality. Uniform block quotas alone do not consistently recover the highlighted details. As budget
+allocation and quadratic selection with SA are progressively introduced, reconstruction quality
+improves in these examples.
+5 C ONCLUSION
+This work makes three main contributions. First, we propose SplatQ, which combines partitioning
+based on spatial and appearance similarity, regional budget allocation, and joint Gaussian selection to
+mitigate regional quality imbalance under a fixed budget and account for joint deletion effects over8
+Under review as a conference paper at ICLR 2027
+Figure 5: Top: 2D pruning-percentage figure at 10k fine-tuning iterations. Bottom: Pruning-round
+3D figure at 90% final removal. SplatQ denotes the SA variant.
+Table 2: Component and solver ablations at 90% pruning. Boldface marks SplatQ’s default config.
+Variant
+Top-k
++ Uniform block quotas
++ Budget assignment
++ Quadratic, greedy
+Quadratic, uniform quotas
++ Quadratic, SA
++ Quadratic, CIM
+Variant
+Top-k
++ Uniform block quotas
++ Budget assignment
++ Quadratic, greedy
+Quadratic, uniform quotas
++ Quadratic, SA
++ Quadratic, CIM
+Mip-NeRF 360
+Deep Blending
+Tanks and Temples
+PSNR↑
+SSIM↑
+LPIPS↓
+PSNR↑
+SSIM↑
+LPIPS↓
+PSNR↑
+SSIM↑
+LPIPS↓
+26.68
+26.52
+26.74
+27.03
+26.79
+27.07
+27.14
+0.7787
+0.7755
+0.7889
+0.7928
+0.7811
+0.7932
+0.7960
+0.2640
+0.2685
+0.2626
+0.2552
+0.2602
+0.2547
+0.2507
+29.09
+28.98
+29.15
+29.42
+29.36
+29.47
+29.54
+0.8944
+0.8930
+0.8958
+0.9020
+0.8985
+0.9027
+0.9041
+0.2649
+0.2668
+0.2638
+0.2568
+0.2585
+0.2562
+0.2532
+22.72
+22.64
+22.81
+23.15
+23.07
+23.21
+23.21
+0.8034
+0.8004
+0.8050
+0.8135
+0.8093
+0.8160
+0.8173
+0.2469
+0.2505
+0.2455
+0.2357
+0.2424
+0.2322
+0.2296
+NeRF Synthetic
+Ref-NeRF
+Macro
+PSNR↑
+SSIM↑
+LPIPS↓
+PSNR↑
+SSIM↑
+LPIPS↓
+PSNR↑
+SSIM↑
+LPIPS↓
+31.85
+31.72
+31.96
+32.31
+32.14
+32.37
+32.48
+0.9568
+0.9557
+0.9575
+0.9618
+0.9596
+0.9623
+0.9635
+0.0503
+0.0520
+0.0496
+0.0427
+0.0452
+0.0424
+0.0409
+29.55
+29.43
+29.64
+29.96
+29.76
+30.01
+30.07
+0.9407
+0.9396
+0.9415
+0.9449
+0.9431
+0.9453
+0.9456
+0.0972
+0.0993
+0.0961
+0.0906
+0.0924
+0.0897
+0.0887
+27.978
+27.858
+28.060
+28.374
+28.224
+28.426
+28.488
+0.87480
+0.87284
+0.87774
+0.88300
+0.87832
+0.88390
+0.88530
+0.18466
+0.18742
+0.18352
+0.17620
+0.17974
+0.17504
+0.17262
+9
+Under review as a conference paper at ICLR 2027
+looked by independent scoring. We also introduce metrics for assessing regional quality imbalance.
+Second, we construct a QUBO model from a quadratic approximation of joint deletion error and a
+retention-count constraint, and demonstrate its solvability through experiments on CIM quantum computing hardware. Finally, in comparisons against 8 baselines across 5 benchmarks, SplatQ achieves
+the best overall reconstruction metrics and rendering speed at 90% pruning. We further evaluate
+different pruning ratios, numbers of pruning rounds, and fine-tuning budgets to facilitate comparisons
+with methods without released code or those that do not enforce a fixed retention budget.
+AI USE STATEMENT
+Generative AI tools assisted with manuscript drafting, language editing and translation, figure and
+table preparation, and LaTeX formatting. All reported numerical results originate from actual
+experimental records, not AI-generated data. The authors take responsibility for the final content and
+accuracy of the paper.
+E THICS STATEMENT
+Our experiments use only existing public benchmark datasets. Potential downstream concerns include
+unauthorized sharing of reconstructed private spaces and loss of important visual details under
+aggressive pruning. Neither compression nor the picture-free setting provides a privacy guarantee.
+Use and redistribution of scene assets should respect applicable licenses and privacy requirements.
+R EPRODUCIBILITY STATEMENT
+Section 3 and Appendix A describe the method, derivations, pseudocode, and solver postprocessing.
+Appendix B.1 specifies the datasets, baseline adaptations, hyperparameters, random seeds, fine-tuning
+and evaluation protocols, and hardware. Table 2 reports means and standard deviations across five
+complete-pipeline runs. Appendix B.2 provides computational costs and additional ablations. We
+plan to publicly release the source code.
+R EFERENCES
+Muhammad Salman Ali, Maryam Qamar, Sung-Ho Bae, and Enzo Tartaglione. Trimming the fat:
+Efficient compression of 3D gaussian splats through pruning. In BMVC, 2024. URL https:
+//bmva-archive.org.uk/bmvc/2024/papers/Paper_358/paper.pdf.
+Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. MipNeRF 360: Unbounded anti-aliased neural radiance fields. In CVPR, pp. 5470–5479, 2022. URL
+https://jonbarron.info/mipnerf360/.
+Zhang Chen, Shuai Wan, Mengting Yu, Fuzheng Yang, and Junhui Hou. REFINE: Super-efficient 3D
+gaussian splatting pruning via rendering-free primitive importance. In ECCV, volume 17027 of
+LNCS, pp. 131–147. Springer, 2026. doi: 10.1007/978-3-032-37602-2_8.
+Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, and Zhangyang Wang. LightGaussian:
+Unbounded 3D gaussian compression with 15x reduction and 200+ FPS. In NeurIPS, volume 37,
+pp. 140138–140158, 2024.
+Guofeng Feng, Siyan Chen, Rong Fu, Zimu Liao, Yi Wang, Tao Liu, Boni Hu, Linning Xu, Zhilin
+Pei, Hengjie Li, Xiuhong Li, Ninghui Sun, Xingcheng Zhang, and Bo Dai. FlashGS: Efficient
+3D Gaussian Splatting for large-scale and high-resolution rendering. In CVPR, pp. 26652–26662,
+2025.
+Sharath Girish, Kamal Gupta, and Abhinav Shrivastava. EAGLES: Efficient accelerated 3D gaussians
+with lightweight encodings. In ECCV, volume 15121 of LNCS, pp. 54–71, 2024. doi: 10.1007/
+978-3-031-73036-8_4.
+Fred Glover, Gary Kochenberger, and Yu Du. A tutorial on formulating and using QUBO models.
+arXiv preprint arXiv:1811.11538, 2018. URL https://arxiv.org/abs/1811.11538.
+Alex Hanson, Allen Tu, Geng Lin, Vasu Singla, Matthias Zwicker, and Tom Goldstein. Speedy-Splat:
+Fast 3D Gaussian Splatting with sparse pixels and sparse primitives. In CVPR, pp. 21537–21546,
+2025a.
+10
+Under review as a conference paper at ICLR 2027
+Alex Hanson, Allen Tu, Vasu Singla, Mayuka Jayawardhana, Matthias Zwicker, and Tom Goldstein.
+PUP 3D-GS: Principled uncertainty pruning for 3D gaussian splatting. In CVPR, pp. 5949–5958,
+2025b.
+Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel Brostow.
+Deep blending for free-viewpoint image-based rendering. ACM TOG, 37(6), 2018. doi: 10.1145/
+3272127.3275084. URL http://visual.cs.ucl.ac.uk/pubs/deepblending/.
+Shizeng Jiang, Hao Zhang, Xuerui Ma, Ying Hu, and Tao Zhang. QIRF: Quantum-inspired nonorthogonal function-space compression for 3D gaussian splatting, 2026. URL https://arxiv.
+org/abs/2607.18067.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3D Gaussian
+Splatting for real-time radiance field rendering. ACM TOG, 42(4), 2023. doi: 10.1145/3592433.
+URL https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/.
+Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking
+large-scale scene reconstruction. ACM TOG, 36(4), 2017. doi: 10.1145/3072959.3073599. URL
+https://www.tanksandtemples.org/.
+Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko, and Eunbyung Park. Compact 3D gaussian
+representation for radiance field. In CVPR, pp. 21719–21728, 2024.
+Joo Chan Lee, Jong Hwan Ko, and Eunbyung Park. Optimized minimal 3D gaussian splatting. In
+NeurIPS, volume 38, 2025. doi: 10.52202/085713-4534.
+Soonbin Lee, Yeong-Gyu Kim, Simon Sasse, Tomás M. Borges, Yago Sánchez, Eun-Seok Ryu,
+Thomas Schierl, and Cornelius Hellge. GaussianPOP: Principled simplification framework for
+compact 3D gaussian splatting via error quantification, 2026. URL https://arxiv.org/
+abs/2602.06830.
+Jiaqi Liu and Zhizhong Han. Speeding up the learning of 3D gaussians with much shorter gaussian
+lists. In CVPR, 2026.
+Xinpeng Liu, Zeyi Huang, Fumio Okura, and Yasuyuki Matsushita. HoGS: Unified near and far
+object reconstruction via homogeneous gaussian splatting. In CVPR, pp. 26714–26722, 2025a.
+URL https://arxiv.org/abs/2503.19232.
+Yifei Liu, Zhihang Zhong, Yifan Zhan, Sheng Xu, and Xiao Sun. MaskGaussian: Adaptive 3D
+gaussian representation from probabilistic masks. In CVPR, pp. 681–690, 2025b.
+Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and
+Ren Ng. NeRF: Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020.
+URL https://arxiv.org/abs/2003.08934.
+Waseem Mousa and Alaa Maalouf. Provable pruning for efficient 3D gaussian splatting via coresets,
+2026. URL https://arxiv.org/abs/2607.02721.
+Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann. Compressed 3D gaussian splatting
+for accelerated novel view synthesis. In CVPR, pp. 10349–10358, 2024.
+Bert Ramlot, Martijn Courteaux, Peter Lambert, and Glenn Van Wallendael. POTR: Post-training
+3DGS compression. IEEE TCSVT, 36(8):12168–12181, 2026. doi: 10.1109/TCSVT.2026.3685779.
+Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler, Jonathan T. Barron, and Pratul P. Srinivasan.
+Ref-NeRF: Structured view-dependent appearance for neural radiance fields. In CVPR, 2022. URL
+https://arxiv.org/abs/2112.03907.
+Tao Wang, Mengyu Li, Geduo Zeng, Cheng Meng, and Qiong Zhang. Gaussian herding across pens:
+An optimal transport perspective on global gaussian reduction for 3DGS. In NeurIPS, volume 38,
+2025. doi: 10.52202/085713-5277.
+Shuzhao Xie, Weixiang Zhang, Chen Tang, Yunpeng Bai, Rongwei Lu, Shijia Ge, and Zhi Wang.
+MesonGS: Post-training compression of 3D gaussians via efficient attribute transformation. In
+ECCV, pp. 434–452, 2024. doi: 10.1007/978-3-031-73414-4_25.
+11
+Under review as a conference paper at ICLR 2027
+Kaifa Yang, Qi Yang, Yiling Xu, and Zhu Li. RAP: Fast feedforward rendering-free attribute-guided
+primitive importance score prediction for efficient 3D gaussian splatting processing. In CVPR, pp.
+33323–33332, 2026.
+Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen Koltun. NeRF++: Analyzing and improving
+neural radiance fields. arXiv preprint arXiv:2010.07492, 2020. URL https://arxiv.org/
+abs/2010.07492.
+Yangming Zhang, Wenqi Jia, Wei Niu, and Miao Yin. GaussianSpa: An “Optimizing-Sparsifying”
+simplification framework for compact and high-quality 3D gaussian splatting. In CVPR, pp.
+26673–26682, 2025.
+Zhaoliang Zhang, Tianchen Song, Yongjae Lee, Li Yang, Cheng Peng, Rama Chellappa, and Deliang
+Fan. LP-3DGS: Learning to prune 3D gaussian splatting. In NeurIPS, volume 37, 2024. doi:
+10.52202/079017-3891.
+12
+Under review as a conference paper at ICLR 2027
+A
+M ETHOD DERIVATIONS AND IMPLEMENTATION DETAILS
+A.1
+N OTATION
+We use the notation of Section 3. The current model has N Gaussians, partitioned into P
+disjoint blocks
+Cb of size nb ≤ M . The target retained count is K, and the final block budgets satisfy b Kb = K.
+During allocation, Kb is updated from its initial Top-K count to its final integer budget.
+For each block, Pb contains selected view-pixel pairs, and mb = 3|Pb | denotes the number of
+sampled color channels. Thus Jb ∈ Rmb ×nb and Rb = JbT Jb ∈ Rnb ×nb .
+The depth index ℓ is distinct from Gaussian identity i. For a fixed view and pixel, gℓ denotes the
+global ID of the Gaussian at depth rank ℓ. In particular, αℓ (η) = ηgℓ αℓ . The reference for response
+evaluation is the current model at each pruning round, not a fixed model shared by all rounds.
+Table 3 collects these main symbols.
+Table 3: Principal method notation. Other scalar parameters are defined at their first use.
+Symbol
+Meaning
+G, N, K
+Current Gaussian model, its Gaussian count, and target retained count for the
+current pruning round.
+Block retention and deletion vectors in {0, 1}nb , with zb = 1 − xb . Subscripts
+are omitted in local derivations.
+Set of Gaussian indices in block b, its size nb = |Cb |, and maximum allowed
+block size.
+Number of blocks and block retention budget, updated from the initial Top-K
+count to the final integer budget.
+Continuous opacity multipliers in [0, 1]N .
+Camera index, pixel index, and RGB channel index.
+Number of Gaussians covering pixel p in view v, and the global Gaussian ID at
+depth rank ℓ for that pixel.
+Rendered RGB channel q at pixel p in view v, evaluated with opacity multipliers
+η in the full scene.
+Selected view-pixel pairs for block b, and the sampled channel count mb =
+3|Pb |.
+Sampled opacity Jacobian in Rmb ×nb and its Gram matrix Rb = JbT Jb ∈
+Rnb ×nb .
+Allocation score (Rb )ii for i ∈ Cb , equal to the summed squared opacity
+responses over sampled channels.
+Continuous block quota from logarithmic smoothing.
+Pseudocount for handling zero initial budgets, and logarithmic smoothing parameter.
+Coefficient of the count penalty (1T xb − Kb )2 .
+Rendered image and supervision image for a training view, used in the refinement loss.
+xb , z b
+Cb , nb , M
+B, Kb
+η
+v, p, q
+Lvp , gℓ
+Ivpq (η)
+Pb , mb
+Jb , Rb
+Di
+bb
+K
+ϵa , β
+λ
+I, I gt
+A.2
+S AMPLING AND G RAM ACCUMULATION
+For each block and selected training view, we generate candidate pixels only from Gaussians whose
+projected radii reported by the rasterizer are positive. Let uvi be a projected center and hvi > 0 its
+radius in pixels. The candidate locations are
+uvi + max(hvi , 1)δ,
+δ ∈ D,
+D = {(0, 0), (±0.5, 0), (0, ±0.5), (±0.35, ±0.35)}.
+(7)
+This yields the projected center and eight neighboring locations for each Gaussian. We round their
+coordinates to the nearest integer pixels and discard locations outside the image boundaries. For each
+block, we remove duplicate pixels within each view and collect the selected pairs (v, p) across views
+into Pb .
+Responses are evaluated through the full scene rendering, with the Jacobian columns restricted to
+block members. Gaussians outside the block and the background therefore remain part of each
+response. Partitioning the sampled rows into batches gives
+Rb =
+Tb
+X
+[t]
+[t]
+(Jb )T Jb ,
+Di = (Rb )ii =
+t=1
+X
+3
+X
+(Jb )2(v,p,q),i .
+(v,p)∈Pb q=1
+13
+(8)
+Under review as a conference paper at ICLR 2027
+Algorithm 1 Similarity guided partitioning
+Require: Gaussians G; block limit M ; neighbors k; comparison-group size limit
+Ensure: Disjoint blocks {Cb }B
+b=1 covering all N Gaussians
+1. Build the graph
+1: for two spatial passes do
+2:
+Assign centers µi to grid cells and sort cells by Morton code
+3:
+Split the sequence into the fewest balanced groups satisfying the comparison limit
+4:
+for each comparison group do
+5:
+Compute pairwise affinities aij
+6:
+Keep each Gaussian’s top-k edges
+7:
+end for
+8:
+Shift the grid origin and enlarge the cell size for the second pass
+9: end for
+10: Merge edges from both passes, keep weight of repeated edges once
+2. Grow blocks in parallel
+11: Split the first-pass Morton sequence into ⌈N/M ⌉ balanced intervals,
+12: seed each block with its first Gaussian, and leave the others unassigned.
+13: for at most 16 iterations do
+14:
+Each unassigned Gaussian proposes the block of its strongest assigned neighbor
+15:
+for each block Cb , in parallel do
+16:
+Rank proposals by descending edge weight, then ascending Gaussian index
+17:
+Add the first min(number of proposals, nb − |Cb |) Gaussians
+18:
+end for
+19:
+Stop if no Gaussian was assigned in this iteration
+20: end for
+3. Fill unused capacity
+21: Assign remaining Gaussians to fill each block to nb in the first-pass Morton order.
+22: return {Cb }B
+b=1
+Algorithm 2 Representative pixel selection
+Require: Block Cb and selected training views
+Ensure: Sampled view-pixel pairs Pb
+1: Pb ← ∅
+2: D ← {(0, 0), (±0.5, 0), (0, ±0.5), (±0.35, ±0.35)}
+3: for each selected view v do
+4:
+Obtain projected centers uvi and screen radii hvi for i ∈ Cb
+5:
+Generate p = round(uvi + max(hvi , 1)δ) for hvi > 0 and δ ∈ D
+6:
+Remove duplicate pixels and discard those outside the image
+7:
+Add the remaining view-pixel pairs (v, p) to Pb
+8: end for
+9: return Pb
+Here Tb is the number of batches, and each batch contains all three channels of its sampled pixels.
+Batch accumulation equals the full Gram product up to floating-point rounding and does not require
+storing the full Jacobian. If no valid pixels are sampled across the selected views, the zero-initialized
+matrix and its diagonal scores remain zero.
+A.3
+D ERIVATION OF THE OPACITY RESPONSE
+For a fixed view v, pixel p, and color channel q, consider Gaussian gℓ at depth rank ℓ. We keep the
+projected footprints, depth order, and all other opacity multipliers fixed. We then rewrite Equation (3)
+as the sum of contributions from gℓ , the Gaussians in front of it, and the content behind it:
+
+
+Ivpq (η) = A<ℓ + Tℓ αℓ (η)cℓ + (1 − αℓ (η))Cℓback .
+(9)
+Here A<ℓ is the foreground contribution and Cℓback is the suffix color composited with unit incoming
+transmittance. Neither term, nor Tℓ , depends on ηgℓ . At the reference model, the suffix is
+" r−1
+#
+Lvp
+X
+Y
+Cℓback =
+(1 − αu ) αr cr
+r=ℓ+1
+u=ℓ+1
+
+Lvp
++
+Y
+
+(1 − αu ) cbg
+q .
+u=ℓ+1
+14
+(10)
+Under review as a conference paper at ICLR 2027
+Empty products equal one, so the suffix after the last Gaussian is the background color. Since
+∂αℓ (η)/∂ηgℓ = αℓ , for i = gℓ ∈ Cb we obtain
+∂Ivpq (η)
+(Jb )(v,p,q),i =
+= Tℓ αℓ (cℓ − Cℓback ).
+(11)
+∂ηi
+η=1
+All quantities on the right are evaluated at the reference model. The first color term is the Gaussian’s
+direct response; the suffix term captures the change in visibility of everything behind it.
+When the projected footprints remain fixed and alpha values are not clamped, the rendered channel is
+an affine function of each opacity multiplier, with all others held fixed. A single deletion is therefore
+represented exactly by its derivative under these assumptions. Multiple deletions introduce products
+of multiplier changes through transmittance, so their combined first-order response is generally
+approximate. In practice, alpha clamping, contribution thresholds, and early ray termination can
+invalidate the exact correspondence between the derivative and the effect of deleting one Gaussian.
+A.4
+C APACITY HANDLING
+Equation (5) produces continuous quotas summing to K. To enforce capacities during integer
+conversion, the implementation first clips them and initializes integer budgets:
+e b = min{nb , max(0, K
+b b )},
+e b ⌋.
+K
+Kb ← ⌊K
+(12)
+It then recomputes the remaining budget and residuals as
+X
+e b − Kb .
+H=K−
+Kb ,
+fb = K
+(13)
+b
+While H > 0, eligible blocks are those with Kb < nb . They are sorted by descending fb , with ties
+broken by block index. Each of the first min(H, number of eligible blocks) blocks receives one unit.
+The remaining budget and residuals are then updated, and the procedure repeats until H = 0.
+If no quota is clipped, one pass reduces to largest-remainder rounding. Clipping can create a larger
+deficit, requiring multiple passes. Each increment respects capacity
+P and reduces the remaining deficit.
+The procedure therefore terminates with 0 ≤ Kb ≤ nb and b Kb = K. For K = 0 or disabled
+smoothing, the initial budgets are returned unchanged.
+A.5
+J OINT DELETION
+Let fb (ξ) ∈ Rmb stack the sampled RGB channels when block-member opacity multipliers are
+ξ ∈ Rnb . All multipliers outside the block remain one. For a small perturbation u,
+fb (1 − u) − fb (1) = −Jb u + O(∥u∥22 ).
+(14)
+The squared magnitude of its linear term is
+∥Jb u∥22 = uT Rb u.
+With binary deletion variables zb = 1 − xb , the approximate deletion cost is:
+X
+X
+(Rb )ii zb,i + 2
+(Rb )ij zb,i zb,j .
+Edel (zb ) = zT
+b Rb zb =
+i
+(15)
+(16)
+i<j
+The diagonal is the individual squared response. The off-diagonal terms measure reinforcement or
+cancellation between response columns. Substituting zb = 1 − xb and adding the count penalty
+yields Equation (6) in the main text.
+Our objective approximates changes from the current rendering rather than error relative to ground
+truth. This approximation may become less accurate when many Gaussians are deleted together. We
+therefore recompute the responses after model refinement in each subsequent pruning round.
+A.6
+QUBO COEFFICIENTS AND THE I SING MAPPING
+Within this subsection, write n = nb , K = Kb and R = Rb for local quantities. Expanding
+Equation (6) and using x2i = xi gives
+X
+X
+E(x) = C +
+ai xi +
+bij xi xj ,
+i
+ai = Rii − 2
+i<j
+X
+Rij + λ(1 − 2K),
+j
+C = 1T R1 + λK 2 .
+bij = 2Rij + 2λ,
+15
+(17)
+Under review as a conference paper at ICLR 2027
+The constant does not affect selection. We store the rendering objective as a vector of linear
+coefficients and a sparse list of quadratic coefficients. Each pair (i, j) is stored once with i < j.
+For spins σi ∈ {−1, +1}, substitute xi = (1 + σi )/2:
+X
+X
+E(σ) = C ′ +
+hi σi +
+Jij σi σj ,
+i
+i<j
+hi = ai /2 + 14
+Jij = bij /4,
+X
+bij ,
+j̸=i
+C ′ = C + 12
+X
+ai + 41
+i
+X
+bij .
+(18)
+i<j
+Here bji = bij when evaluating the field sum. For the backend convention H(σ) = −σ T W σ, the
+symmetric pair entries are Wij = −Jij /2. Fields are encoded using one reference spin σ0 , with
+Wi0 = W0i = −hi /2 and zero diagonal entries. Decoding uses xi = (1 + σi σ0 )/2, so an n-variable
+block requires n + 1 spins in this encoding.
+A.7
+G REEDY SELECTION , S IMULATED A NNEALING AND CIM S OLVERS
+Again use local R, n, K and deletion cost Edel (z) = zT Rz.
+Starting with z = 0, deleting a retained member j changes the cost by
+∆add (j) = 2(Rz)j + Rjj .
+(19)
+Greedy selection takes the smallest increment at each step until exactly n − K members are deleted.
+It satisfies the count constraint by construction and does not require a count penalty.
+Greedy selection.
+Simulated annealing. Simulated annealing (SA) minimizes the penalized objective with the countpenalty coefficient λ = 1, using the Ising encoding in Appendix A.6. We initialize multiple random
+spin configurations and apply Metropolis updates while reducing the temperature geometrically. For
+a proposed spin flip with energy change ∆H, the acceptance probability at temperature θ > 0 is
+paccept = min{1, exp(−∆H/θ)}.
+(20)
+Energy decreases are always accepted, whereas temporary increases allow the search to leave local
+minima. Lower temperatures reduce the probability of accepting such increases. By default, the
+initial and final temperatures are 100 and 10−3 , respectively, with a cooling factor of 0.99. We use 10
+iterations per temperature and a solution limit of 100 per block. We select the returned state with the
+lowest Ising energy and decode its retention variables using the reference spin.
+Coherent Ising Machine (CIM). The coherent Ising machine (CIM) uses the same Ising formulation and reference-spin encoding as SA, but with a different count-penalty coefficient, λ = 0.0625.
+Before submission, we rescale and truncate the matrix coefficients to a signed 14-bit representation.
+We request multiple samples and select the returned state with the lowest energy under the submitted
+matrix. The selected state is then decoded into binary retention variables. Neither SA nor CIM
+guarantees an exact retained count, we therefore apply the following postprocessing.
+A.8
+P OSTPROCESSING
+Capacity repairing. For an infeasible solver output, count repair changes one bit at a time. If too
+many Gaussians are retained, it deletes the retained member with the smallest increase in unpenalized
+energy. If too few are retained, it restores the deleted member with the smallest increase. The
+coefficients and current state determine each increment exactly, and the process stops when the
+retained count equals K. Repair can increase the unpenalized cost because feasibility takes priority.
+One-swap refinement. For a deleted member i and retained member j, a one-swap move restores i
+and deletes j. Its energy change is
+
+
+∆swap (i, j) = 2 (Rz)j − (Rz)i + Rii + Rjj − 2Rij .
+(21)
+When enabled, refinement repeatedly selects the best exchange and accepts it only when ∆swap < −τ ,
+for a numerical tolerance τ ≥ 0. It stops when no qualifying exchange remains or the configured
+swap limit is reached. Every accepted swap preserves the count and decreases the objective. Without
+an active iteration limit, termination gives a one-swap local optimum within tolerance. For K = 0 or
+K = n, the feasible state is unique and no search is needed.
+We use one-swap refinement as a shared local-search step rather than a separate methodological
+contribution. The same refinement rule and stopping criteria are applied after greedy selection, SA,
+16
+Under review as a conference paper at ICLR 2027
+Table 4: Scoring time, solver time, and peak GPU memory across three datasets. Times are reported
+in seconds and memory in GB. For SplatQ, scoring denotes Rb calculation. A dash indicates that no
+separate QUBO solver is used.
+Mip-NeRF 360
+Deep Blending
+Tanks & Temples
+Method
+Scoring Solving Memory Scoring Solving Memory Scoring Solving Memory
+LightGS
+MesonGS
+EAGLES
+C3DGS
+PUP
+REFINE
+RAP
+CoreSet
+4.63
+6.17
+1.10
+4.37
+17.5
+0.26
+89.4
+1240.4
+–
+–
+–
+–
+–
+–
+–
+–
+9.91
+7.64
+8.36
+10.05
+10.1
+1.5
+16.4
+4.0
+5.26
+20.34
+1.12
+4.31
+16.3
+0.25
+88.5
+876.3
+–
+–
+–
+–
+–
+–
+–
+–
+7.74
+6.50
+7.80
+8.48
+8.7
+1.4
+14.6
+4.4
+6.12
+8.59
+1.01
+3.24
+20.1
+0.27
+41.7
+638.9
+–
+–
+–
+–
+–
+–
+–
+–
+5.52
+4.02
+5.00
+5.47
+5.5
+1.3
+9.2
+4.1
+SplatQ (greedy)
+SplatQ (SA)
+SplatQ (CIM)
+1005.0
+1005.0
+1005.0
+101.1
+845.9
+581.4
+10.41
+10.41
+10.41
+1237.1
+1237.1
+1237.1
+99.1
+748.4
+514.5
+8.56
+8.56
+8.56
+3456.3
+3456.3
+3456.3
+58.9
+448.9
+309.6
+5.45
+5.45
+5.45
+and CIM. We therefore keep this step fixed in the solver comparisons, which evaluate each solver
+together with the shared postprocessing.
+B
+E XPERIMENT
+This section supplements the experimental results in Section 4.
+B.1
+E XPERIMENT S ETTINGS
+Datasets and Metrics We evaluate 27 scenes from five benchmarks: Mip-NeRF 360 (9), Deep
+Blending (2), Tanks and Temples (2), NeRF Synthetic (8), and Ref-NeRF/Shiny Blender (6) (Barron
+et al., 2022; Hedman et al., 2018; Knapitsch et al., 2017; Mildenhall et al., 2020; Verbin et al.,
+2022). We compare against the unpruned 3DGS reference and eight pruning baselines, reporting
+dataset-average PSNR, SSIM, LPIPS-VGG, and measured rendering FPS. Macro scores average the
+five dataset means equally.
+Evaluation settings. FPS measurements were conducted on an Ubuntu 22.04 server equipped with
+NVIDIA GeForce RTX 5090 GPUs and Intel Xeon Gold 6459C processors. The inspected evaluation
+pipeline saves test-view renderings and computes PSNR, SSIM, and LPIPS-VGG. The FPS testing
+procedure warms up with ten test views and times three passes over all test views.
+Implementation Details. For each scene, all pruning methods start from the same 3DGS model
+pretrained for 30k iterations and retain 10% of its original Gaussians. All methods follow the same
+two-round schedule: removing 80% of the original Gaussians, then 50% of the survivors. Each round
+includes 10k fine-tuning iterations, for 20k in total, using the same loss 0.8L1 + 0.2(1 − SSIM) with
+densification disabled. We adapt the baselines by retaining their Gaussian selection mechanisms
+within this shared pruning and fine-tuning pipeline. Methods originally evaluated without fine-tuning
+also receive the same fine-tuning schedule, and attribute compression is disabled for all methods.
+SplatQ uses simulated annealing (SA) in the main comparison, with greedy and CIM evaluated as
+solver ablations. Further details are provided in Appendix A.1 and Table 5.
+Ablation settings. Table 6 compares budget assignment and selection variants. Top-k globally
+retains the K Gaussians with the largest diagonal scores Di . Uniform block quotas assigns the
+same retention fraction to all blocks, whereas Budget allocation uses our logarithmically smoothed
+quotas. Both variants select the highest-scoring Gaussians within each block using Di . The Quadratic
+variants use the full objective with smoothed quotas and are solved using greedy selection, SA, or
+CIM. Quadratic, no allocation variant instead uses uniform block quotas and greedy selection. For
+each variant in this table, we repeat the complete pruning and fine-tuning pipeline five times using
+seeds 0 through 4, starting from the same pretrained models.
+Algorithm settings. Table 5 lists the partitioning, sampling, and allocation settings. We use
+M = 512 and k = 4, with at most 512 Gaussians in each temporary comparison group. Successive
+spatial passes change the grid origin using half-cell offsets. Graph construction uses two passes,
+and parallel block growth runs for at most 16 iterations. For each block, we use all training views
+with image width and height reduced to one quarter of their input dimensions. At this resolution, we
+17
+Under review as a conference paper at ICLR 2027
+Table 5: Partitioning, response, and budget settings. Parameters without dedicated symbols in
+Section 3 are described by name.
+Parameter
+Setting
+Maximum block size M
+Neighbors per Gaussian per pass k
+Comparison group size limit
+Spatial passes
+maximum growth iterations
+Response views
+Response image width and height
+Pixel cap per block per view
+Budget smoothing β
+Budget pseudocount ϵa
+Spherical-harmonic degree
+512
+4
+512
+2
+16
+All training views
+Input dimensions divided by 4
+256
+3
+1
+3
+generate candidate pixels using the projected-center offsets in Algorithm 2. After removing duplicate
+locations and those outside the image, We evaluate Jb at the selected pixels. We use β = 3 and
+ϵa = 1 for budget assignment.
+QUBO solver settings. Greedy selection enforces Kb directly and therefore does not use a count
+penalty. The SA backend uses Kaiwu’s simulated annealing optimizer with an initial temperature of
+100, a cutoff of 10−3 , and a cooling factor of 0.99. It uses 10 iterations per temperature, eight worker
+processes, and a solution limit of 100 per block. The SA random seed is the base seed 0 plus the
+block index. After decoding the lowest-energy returned state, the implementation repairs its count
+and applies up to nb improving one-swap exchanges. The CIM backend additionally truncates its
+Ising coefficients to signed 14-bit precision and applies the same repair and refinement.
+Fine-tuning settings. Fine-tuning uses Adam with numerical stabilizer 10−15 and one randomly
+selected training view per update. The initial learning rates for DC coefficients, higher-order coefficients, opacity, scale, and rotation are 0.0025, 0.000125, 0.05, 0.005, and 0.001, respectively.
+These rates decay by a factor of 0.95 every 400 refinement steps. Position updates use the inherited
+exponential schedule, with endpoints 1.6 × 10−4 and 1.6 × 10−6 multiplied by the scene scale.
+Refinement and final evaluation preserve input resolution when image width is at most 1600 pixels.
+Wider images are resized to approximately 1600 pixels in width while preserving aspect ratio. In
+the picture-free setting, neither pruning nor fine-tuning uses the original training images. We retain
+the training camera parameters and supervise fine-tuning with images rendered by the fixed, original
+pretrained model. Ground-truth test images are used only for evaluation.
+Metrics methods. For Figure 4, we divide each test image into a 16×16 grid of 256 non-overlapping
+patches. We compute PSNR for each patch against its corresponding ground-truth region, including
+pure background patches in synthetic scenes. For each image, we calculate the variance and range
+(maximum minus minimum) of these patch PSNR values. We average each statistic over test views
+within each scene, then equally over scenes within each benchmark. Full-image PSNR is reported
+alongside these statistics to distinguish overall reconstruction quality from spatial quality variation.
+For Figure 3, we normalize Gaussian volumes using a shared spatial reference for each scene. We
+construct an axis-aligned bounding box from the coordinate-wise minima and maxima of Gaussian
+centers across all nine pruned models. Its diagonal length is
+p
+D = (xmax − xmin )2 + (ymax − ymin )2 + (zmax − zmin )2 .
+Each Gaussian’s volume is divided by D3 , so all methods use the same normalization within a
+scene. For each method, we compute normalized volume quantiles separately for each scene. At
+each cumulative fraction, we average the corresponding quantiles equally across scenes within
+each benchmark. The resulting curves summarize scene-level volume distributions without pooling
+Gaussians across scenes.
+B.2
+A DDITIONAL E XPERIMENTAL R ESULTS
+Ablations with standard deviations. Table 6 supplements the mean results in Table 2 with standard
+deviations. For each variant, we repeat the complete pruning and fine-tuning pipeline five times using
+random seeds 0 through 4, starting from the same pretrained models. We first average scene-level
+metrics within each dataset, then report the mean and standard deviation of these dataset averages
+across runs.
+18
+Under review as a conference paper at ICLR 2027
+Table 6: Component and solver ablations at 90% pruning. Each dataset cell reports the mean above
+its ± standard deviation across five runs of the complete pruning and fine-tuning pipeline.
+Variant
+Top-k
+Mip-NeRF 360
+Deep Blending
+Tanks and Temples
+PSNR↑
+SSIM↑
+LPIPS↓
+PSNR↑
+SSIM↑
+LPIPS↓
+PSNR↑
+SSIM↑
+LPIPS↓
+26.68
+0.7787
+0.2640
+29.09
+0.8944
+0.2649
+22.72
+0.8034
+0.2469
+±4.1e-3
+±2.50e-5
+±7.40e-5
+±1.31e-2
+±5.85e-5
+±7.42e-5
+±7.6e-3
+±8.67e-5
+26.52
+0.7755
+0.2685
+28.98
+0.8930
+0.2668
+22.64
+0.8004
++ Uniform block quotas
+±5.5e-3
++ Budget assignment
+±4.8e-3
++ Quadratic, greedy
+±5.2e-3
+±2.82e-5
+±8.27e-5
+±1.38e-2
+±5.26e-5
+±7.05e-5
+±7.5e-3
+±8.77e-5
+26.79
+0.7811
+0.2602
+29.36
+0.8985
+0.2585
+23.07
+0.8093
+26.74
+27.03
+±2.75e-5
+0.7889
+±2.79e-5
+0.7928
+±8.31e-5
+0.2626
+±8.07e-5
+0.2552
+±1.42e-2
+29.15
+±1.35e-2
+29.42
+±5.37e-5
+0.8958
+±5.87e-5
+0.9020
+±8.32e-5
+0.2638
+±7.92e-5
+0.2568
+±8.1e-3
+22.81
+±8.3e-3
+23.15
+±9.12e-5
+0.8050
+±9.03e-5
+0.8135
+±1.158e-4
+0.2505
+±1.269e-4
+0.2455
+±1.240e-4
+0.2357
+±1.141e-4
+0.2424
+Quadratic, uniform quotas ±4.7e-3 ±2.65e-5 ±8.01e-5 ±1.53e-2 ±5.65e-5 ±7.81e-5 ±8.6e-3 ±8.45e-5 ±1.374e-4
+0.7932
+29.47
+0.9027
+27.07
+0.2547
+0.2562
+23.21
+0.8160
+0.2322
++ Quadratic, SA
+±4.4e-3 ±2.56e-5 ±7.90e-5 ±1.37e-2 ±5.34e-5 ±7.08e-5
+±7.3e-3 ±8.41e-5 ±1.393e-4
+0.7960
+29.54
+0.9041
+0.2296
+27.14
+0.2507
+0.2532
+23.21
+0.8173
++ Quadratic, CIM
+±2.0e-3 ±1.12e-4 ±9.12e-5 ±1.24e-2 ±1.22e-4 ±1.20e-4 ±1.27e-2
+±3.5e-5
+±1.25e-4
+Variant
+Top-k
+NeRF Synthetic
+Ref-NeRF
+Macro
+PSNR↑
+SSIM↑
+LPIPS↓
+PSNR↑
+SSIM↑
+LPIPS↓
+31.85
+0.9568
+0.0503
+29.55
+0.9407
+0.0972
+±9.9e-3
+±1.43e-5
+±6.86e-5
+±8.7e-3
+±4.31e-5
+±5.88e-5
+31.72
+0.9557
+0.0520
+29.43
+0.9396
+0.0993
++ Uniform block quotas
+±8.5e-3
++ Budget assignment
+±8.9e-3
+±1.29e-5
+±7.51e-5
+±9.0e-3
+±3.97e-5
+±6.79e-5
+32.31
+0.9618
+0.0427
+29.96
+0.9449
+0.0906
++ Quadratic, greedy
+Quadratic, uniform quotas
+31.96
+±1.48e-5
+0.9575
+±7.12e-5
+0.0496
+±7.8e-3
+29.64
+±3.77e-5
+0.9415
+±6.60e-5
+0.0961
+±9.1e-3
+±1.45e-5
+±6.62e-5
+±9.4e-3
+±3.73e-5
+±7.08e-5
+32.14
+0.9596
+0.0452
+29.76
+0.9431
+0.0924
+±9.1e-3
+±1.40e-5
+±6.97e-5
+±8.9e-3
+±4.22e-5
+±6.95e-5
+32.37
+0.9623
+0.0424
+30.01
+0.9453
+0.0897
++ Quadratic, SA
+±8.3e-3
++ Quadratic, CIM
+±7.0e-3
+32.48
+±1.44e-5
+0.9635
+±3.2e-5
+±7.42e-5
+0.0409
+±6.5e-5
+±8.7e-3
+30.07
+±3.6e-3
+±4.13e-5
+0.9456
+±3.3e-5
+±6.30e-5
+0.0887
+±1.27e-4
+PSNR↑
+SSIM↑
+LPIPS↓
+27.978
+0.87480
+0.18466
+27.858
+0.87284
+0.18742
+28.060
+0.87774
+0.18352
+28.374
+0.88300
+0.17620
+28.224
+0.87832
+0.17974
+28.426
+0.88390
+0.17504
+28.488
+0.88530
+0.17262
+Pruning Time and Memory. Table 4 reports mean per-scene scoring time, QUBO solving time,
+and peak GPU memory. We average scenes equally within each dataset: nine for Mip-NeRF 360 and
+two each for Deep Blending and Tanks and Temples. We perform one pruning pass, removing 80%
+of the Gaussians from the original 3D-GS. These measurements use RTX 5090 GPUs on the same
+servers. For SplatQ, scoring includes partitioning and Rb calculation, taking 1005.0, 1237.2, and
+3456.3 s on the three datasets, respectively. Selection includes budget allocation and solving QUBOs
+including necessary postprocessing. Greedy selection takes 101.1, 99.1, and 58.9 s, whereas SA takes
+845.9, 748.4, and 448.9 s. Greedy therefore reduces solver time by approximately 7.6–8.4×, although
+Rb calculation remains the main computational cost. The reported peak GPU memory is the memory
+peak over scoring and QUBO solving stages. We average these per-scene peaks. SplatQ’s peak GPU
+memory is similar to that of LightGS and C3DGS. These measurements show the substantial offline
+cost of SplatQ’s interaction-aware selection.
+Pruning latency should be considered within the complete compression pipeline, which also includes
+20k fine-tuning iterations in our main setting. Our refinement sweeps show that longer fine-tuning
+generally improves reconstruction quality within the tested range. For a fixed pruning workload,
+longer fine-tuning reduces the relative contribution of pruning to total preparation time. Moreover,
+this cost is incurred offline and is not repeated during rendering. For applications that prioritize final
+reconstruction quality, the observed quality gains can therefore justify additional pruning time.
+Effect of Pairwise Interactions without Fine-tuning. To isolate the contribution of pairwise
+interactions, we compare a diagonal-only objective with the full quadratic objective. We solve the
+diagonal-only problem exactly by retaining the Kb Gaussians with the largest Di in each block.
+The full quadratic problem is solved using SA with the settings described above. Both variants
+use the same pretrained models, partitions, and block quotas. We perform one run per variant
+per scene, removing 80% of the Gaussians in a single round without fine-tuning. Table 7 reports
+dataset-average metrics from these runs. Including pairwise interactions improves PSNR by 0.34,
+0.30, and 0.28 dB on Mip-NeRF 360, Deep Blending, and Tanks and Temples, respectively. Figure 6
+provides corresponding visual comparisons.
+19
+Under review as a conference paper at ICLR 2027
+Table 7: Effect of pairwise interactions after a single round of 80% pruning without fine-tuning. Both
+variants use identical pretrained models, partitions, and block quotas. Values are dataset averages;
+PSNR is measured in dB and LPIPS uses the VGG backbone. Better results are shown in bold.
+Mip-NeRF 360
+Deep Blending
+Tanks & Temples
+Objective
+PSNR↑
+SSIM↑
+LPIPS↓
+PSNR↑
+SSIM↑
+LPIPS↓
+PSNR↑
+SSIM↑
+LPIPS↓
+Diagonal
+Quadratic
+21.57
+21.91
+0.6848
+0.6890
+0.3330
+0.3272
+26.51
+26.81
+0.8543
+0.8572
+0.3018
+0.2984
+18.71
+18.99
+0.7195
+0.7215
+0.2871
+0.2844
+Quadratic
+Diagonal
+PSNR 26.32 dB
+PSNR 23.99 dB
+PSNR 21.81 dB
+PSNR 20.82 dB
+PSNR 20.84 dB
+PSNR 20.51 dB
+Train
+Garden
+DrJohnson
+Ground truth
+Figure 6: Visual comparison after a single round of 80% pruning without fine-tuning.
+Sensitivity to Block Size and Smoothing. Table 8 evaluates block size M and smoothing strength
+β on Mip-NeRF 360 using SA. We vary one parameter at a time, fixing β = 3 for the block-size
+sweep and M = 512 for the smoothing sweep. Across M ∈ {256, 512, 1024, 2048}, PSNR varies
+by only 0.07 dB, while SSIM increases and LPIPS decreases as blocks grow. The largest tested
+size, M = 2048, achieves the best quality across all three metrics. Increasing M from 256 to 2048
+also reduces scoring time from 1636.8 to 310.2 s and solver time from 940.4 to 536.3 s under the
+tested configuration. We use M = 512 by default to maintain compatibility with the CIM backend
+used in our experiments, which supports Ising matrices with fewer than 1,000 variables. Across
+β ∈ {1, 2, 3, 4, 5}, PSNR varies by only 0.05 dB. The default β = 3 achieves the highest PSNR and
+SSIM, and ties with β = 2 for the lowest LPIPS at the reported precision.
+20
+Under review as a conference paper at ICLR 2027
+Table 8: Sensitivity to block size M and smoothing strength β on Mip-NeRF 360 using SA. We
+fix β = 3 when varying M and M = 512 when varying β. PSNR is measured in dB, and scoring
+and solver times are reported in seconds. Bold indicates the best quality result within each sweep,
+including ties at the reported precision. For the beta part, we report quality only and omit timing
+results.
+Block size M
+Smoothing strength β
+Metric
+256
+512
+1024
+2048
+1
+2
+3
+4
+5
+PSNR↑
+SSIM↑
+LPIPS↓
+27.02
+0.7927
+0.2556
+27.07
+0.7932
+0.2547
+27.05
+0.7934
+0.2539
+27.09
+0.7937
+0.2528
+27.02
+0.7926
+0.2549
+27.04
+0.7929
+0.2547
+27.07
+0.7932
+0.2547
+27.06
+0.7929
+0.2550
+27.05
+0.7925
+0.2553
+Scoring time
+Solver time
+1636.8
+940.4
+1005.0
+845.9
+541.6
+784.0
+310.2
+536.3
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+Sensitivity to Pruning and Fine-Tuning Figure 7 extends the pruning-ratio comparison at 10k
+fine-tuning steps in Figure ?? to additional nonzero fine-tuning budgets. Figure 8 shows the two-round
+slice of Figure ??. In the round study, the reported fine-tuning budget is per round: R rounds with T
+updates each require RT updates in total.
+Figure 7: Reconstruction quality across pruning percentages and fine-tuning budgets. Columns
+correspond to Mip-NeRF 360, Deep Blending, Tanks and Temples, NeRF Synthetic, and Ref-NeRF;
+rows show PSNR, SSIM, and LPIPS-VGG. Axes indicate removal percentage, fine-tuning iterations
+in thousands, and the corresponding metric. SplatQ uses SA.
+21
+Under review as a conference paper at ICLR 2027
+Figure 8: Effect of fine-tuning duration with two pruning rounds and 90% final removal. Columns
+correspond to the five datasets, and rows show PSNR, SSIM, and LPIPS-VGG. Fine-tuning steps on
+the horizontal axis are per round. The SplatQ curves use SA.
+22

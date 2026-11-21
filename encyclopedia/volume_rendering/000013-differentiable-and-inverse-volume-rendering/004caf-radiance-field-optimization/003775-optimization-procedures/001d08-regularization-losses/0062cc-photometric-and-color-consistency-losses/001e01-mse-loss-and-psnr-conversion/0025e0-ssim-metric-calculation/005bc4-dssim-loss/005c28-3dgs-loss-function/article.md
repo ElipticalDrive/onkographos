@@ -1,0 +1,96 @@
+# 3DGS Loss Function
+Also called: PyGS Loss Function
+## Overview
+The 3DGS Loss Function is the primary photometric optimization objective used in 3D Gaussian Splatting and its variants to render images from a set of 3D Gaussians. It solves the problem of aligning rendered pixel colors with ground-truth observations by combining a pixel-wise intensity error with a structural similarity metric. It differs from its parent [DSSIM Loss](16964-dssim-loss.md) by explicitly weighting the Mean Squared Error (MSE) term against the Structural Dissimilarity (DSSIM) term using a hyperparameter $\lambda$, rather than relying on a fixed combination or pure DSSIM. It builds on [MSE Loss and PSNR Conversion](16964-mse-loss-and-psnr-conversion.md) and [SSIM Metric Calculation](16964-ssim-metric-calculation.md).
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:**
+    *   $C$: Ground-truth color of the pixel (typically RGB).
+    *   $\hat{C}$: Rendered color of the pixel from the current Gaussian splatting state.
+    *   $\lambda$: Hyperparameter balancing the loss terms.
+*   **Outputs:**
+    *   $L$: Scalar loss value for the pixel.
+
+**Data Structures**
+The loss is computed per-pixel and aggregated over the image. No specific complex data structures are required beyond standard image buffers for $C$ and $\hat{C}$.
+
+**Formulas**
+The total loss $L$ is defined as [S1, unofficial]:
+
+$$
+L = \lambda \cdot \text{MSE}(C, \hat{C}) + (1 - \lambda) \cdot \text{SSIM}(C, \hat{C})
+$$
+
+Where:
+*   $\text{MSE}(C, \hat{C}) = \frac{1}{N} \sum_{i=1}^{N} (C_i - \hat{C}_i)^2$ is the Mean Squared Error between ground-truth and rendered pixels.
+*   $\text{SSIM}(C, \hat{C})$ is the Structural Similarity Index, calculated as per [SSIM Metric Calculation](16964-ssim-metric-calculation.md). Note that in the context of the loss function, this term often refers to the dissimilarity (1 - SSIM) or is used directly as a similarity metric depending on the specific implementation's gradient direction; however, the source formula explicitly writes $\text{SSIM}(C, \hat{C})$ as a positive term added to the loss, implying it is treated as a similarity measure where higher is better, or potentially a typo in the source for DSSIM. Given the parent is DSSIM Loss, and standard 3DGS uses $1 - \text{SSIM}$, the term $(1-\lambda)\text{SSIM}$ suggests minimizing the loss requires maximizing SSIM. We follow the source notation exactly [S1, unofficial].
+*   $\lambda$: Hyperparameter balancing the two terms.
+
+**Parameters**
+*   $\lambda$: Balances MSE and SSIM loss terms. Value not explicitly stated in the sources, but implied to be tuned [S1, unofficial]. Typical values in related literature range from 0.2 to 0.8, but this specific value is "Not given in the sources."
+
+**Numbered Steps**
+1.  Render the image $\hat{C}$ from the current 3D Gaussian primitives using differentiable volume rendering.
+2.  Retrieve the ground-truth image $C$ for the corresponding camera viewpoint.
+3.  Compute the pixel-wise Mean Squared Error: $\text{MSE}(C, \hat{C})$.
+4.  Compute the Structural Similarity Index: $\text{SSIM}(C, \hat{C})$.
+5.  Compute the weighted sum: $L = \lambda \cdot \text{MSE}(C, \hat{C}) + (1 - \lambda) \cdot \text{SSIM}(C, \hat{C})$.
+6.  Backpropagate gradients through $L$ to update Gaussian parameters (position, covariance, opacity, color).
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_3dgs_loss(C, C_hat, lambda_param):
+    """
+    Computes the 3DGS loss function.
+    
+    Args:
+        C: Ground-truth image tensor (H, W, 3).
+        C_hat: Rendered image tensor (H, W, 3).
+        lambda_param: Hyperparameter balancing MSE and SSIM.
+        
+    Returns:
+        L: Scalar loss value.
+    """
+    # Compute MSE
+    mse_loss = torch.mean((C - C_hat) ** 2)
+    
+    # Compute SSIM
+    # Note: Standard SSIM returns a value between 0 and 1 where 1 is identical.
+    # The source formula adds SSIM directly to the loss. 
+    # To minimize loss, we must maximize SSIM, or the term should be (1 - SSIM).
+    # We follow the source formula literally [S1, unofficial].
+    ssim_val = compute_ssim(C, C_hat)
+    
+    # Combine losses
+    L = lambda_param * mse_loss + (1 - lambda_param) * ssim_val
+    
+    return L
+```
+
+**Edge Cases and Pitfalls**
+*   **Precision:** Ensure $C$ and $\hat{C}$ are in the same color space and range (e.g., [0, 1]) before computing MSE.
+*   **SSIM Implementation:** The source formula uses $\text{SSIM}(C, \hat{C})$ as a positive term. In standard optimization, one minimizes $1 - \text{SSIM}$. If the implementation minimizes $L$ as written, it will *maximize* SSIM, which is correct for similarity. However, if the source intended DSSIM, the sign would differ. The implementer must verify if the gradient direction is correct for their optimizer.
+*   **$\lambda$ Tuning:** The value of $\lambda$ significantly affects convergence and visual quality. It is not fixed in the source [S1, unofficial].
+
+## Subtopics
+
+### DropoutGS Loss Function
+A variant that extends the 3DGS loss with additional regularization terms for sparse-view rendering. The total loss is $\mathcal{L} = \mathcal{L}_{gs} + \lambda_{depth}\mathcal{L}_{depth} + \lambda_{RDR}\mathcal{L}_{RDR}$, where $\mathcal{L}_{gs}$ is the original 3DGS loss, $\mathcal{L}_{depth}$ is depth regularization from DNGaussian, and $\mathcal{L}_{RDR}$ is a proposed RDR loss [S2]. It is chosen when rendering from sparse viewpoints to improve edge details and depth consistency. Parameters $\lambda_{depth}$ and $\lambda_{RDR}$ balance the constraints, but their values are not explicitly given [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the SSIM calculation, which involves local window statistics. Typically $O(N)$ where $N$ is the number of pixels, with a constant factor depending on the SSIM window size.
+*   **Memory Complexity:** $O(N)$ to store intermediate SSIM statistics and gradients.
+*   **Strengths:** Combines pixel-level accuracy (MSE) with perceptual quality (SSIM), leading to sharper and more photorealistic results than MSE alone.
+*   **Limitations:** SSIM computation is more expensive than MSE. The hyperparameter $\lambda$ requires tuning.
+*   **When to use:** Standard photorealistic rendering optimization.
+*   **When not to use:** When computational resources are extremely limited and perceptual quality is secondary to speed, or when depth/edge constraints are the primary concern (use variants like DropoutGS).
+
+## Background
+The loss function originates from the original 3D Gaussian Splatting paper by Kerbl et al. (2023) [S1, unofficial]. It was adopted and refined in subsequent works such as PyGS (Pyramidal 3D Gaussian Splatting) for large-scale scene representation [S1, unofficial]. The formulation balances intensity and structural fidelity to handle the complex lighting and geometry of real-world scenes.
+
+## Sources
+[S1] PyGS: Large-scale Scene Representation with Pyramidal 3D Gaussian Splatting, https://doi.org/10.48550/arxiv.2405.16829, fetched 2026-10-26 (unofficial)
+[S2] DropoutGS: Dropping Out Gaussians for Better Sparse-view Rendering, https://doi.org/10.1109/cvpr52734.2025.00074, fetched 2026-10-26

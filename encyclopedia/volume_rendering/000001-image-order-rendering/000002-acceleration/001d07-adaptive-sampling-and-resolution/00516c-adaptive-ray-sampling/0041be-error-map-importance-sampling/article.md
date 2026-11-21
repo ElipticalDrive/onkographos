@@ -1,0 +1,146 @@
+# Error Map Importance Sampling
+
+Also called: Error-Guided Ray Selection
+
+## Overview
+Error Map Importance Sampling is an adaptive ray sampling strategy that prioritizes pixels with high reconstruction error for training, filtering out low-error planar areas to accelerate convergence [S2]. It differs from sibling methods like [Mip-NeRF 360 Sampling and Training](3393-mip-nerf-360-sampling-and-training.md) by operating directly on 2D pixel-space error metrics rather than spatial frequency or hierarchical grid structures, and from [Adaptive Sparse Ray Sampling](8313-adaptive-sparse-ray-sampling.md) by using a dense probability density function (PDF) map updated dynamically per iteration rather than static sparsity masks [S1, unofficial][S2].
+
+## How it works
+The method maintains a 2D error map for each training image, computing sampling weights proportional to the local reconstruction error. It combines importance sampling with uniform random sampling to prevent overfitting to local error spikes [S1, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** Current batch of rays, ground truth images, current model state, `error_map_size` (resolution of the error map grid), `P_min` (pruning threshold), `n_rays` (total rays to sample per batch).
+*   **Output:** A set of sampled ray indices (and corresponding 2D coordinates) for the current training step.
+
+**Data Structures:**
+*   `error_map`: A 2D tensor of shape `(H, W)` or `(error_map_size, error_map_size)` storing the reconstruction error $E$ for each pixel. The source notes imply a grid resolution defined by `error_map_size` [S1, unofficial].
+*   `sample_weight`: A 1D tensor of shape `(N,)` where $N$ is the number of candidate pixels/rays, representing the sampling probability distribution.
+
+**Parameters:**
+*   `error_map_size`: Integer defining the resolution of the 2D error map grid [S1, unofficial]. Not given in the sources if it matches image resolution or is downsampled.
+*   `P_min`: Threshold for pruning pixels with low error. Value not specified in the sources [S2].
+*   `n_rays`: Total number of rays to sample per batch [S1, unofficial].
+*   `batch_size`: Number of images in the current training batch [S1, unofficial].
+
+**Steps:**
+1.  **Error Calculation:** Compute the reconstruction error metric $E(p)$ for each pixel $p$ in the current batch. The source specifies using depth loss as the error metric [S2].
+2.  **Weight Computation:** Calculate sampling weights. The source provides a specific formula:
+    $$ \text{sample\_weight} = E + 2 \cdot \text{mean}(E, \text{dim}=-1, \text{keepdim}=\text{True}) $$
+    where $E$ is the error map and the mean is taken over the spatial dimensions [S1, unofficial].
+3.  **Pruning:** Pixels with error $E(p) < P_{min}$ are pruned from the sampling distribution. The PDF is defined as:
+    $$ \text{PDF}(x(p; D)) \propto E(p) $$
+    for pixels where $E(p) \ge P_{min}$ [S2].
+4.  **Sampling:** Sample ray indices using a multinomial distribution based on the computed weights:
+    $$ \text{ray\_idx\_coarse} = \text{Multinomial}(\text{sample\_weight}, \frac{n\_rays}{\text{batch\_size}}, \text{replacement}=\text{False}) $$
+    [S1, unofficial].
+5.  **Coordinate Conversion:** Decode the 1D sampled indices into 2D grid coordinates:
+    $$ \text{inds\_x} = \text{ray\_idx} // \text{error\_map\_size} $$
+    $$ \text{inds\_y} = \text{ray\_idx} \% \text{error\_map\_size} $$
+    [S1, unofficial].
+6.  **Dynamic Update:** After each training iteration, the PDF values for pixels in the current batch are updated with their new error metrics $E$ [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def error_map_importance_sampling(error_map, error_map_size, p_min, n_rays, batch_size):
+    """
+    error_map: Tensor of shape (batch_size, H, W) or (H, W) containing reconstruction error E.
+    error_map_size: int, resolution of the error map grid.
+    p_min: float, threshold for pruning low-error pixels.
+    n_rays: int, total rays to sample per batch.
+    batch_size: int, number of images in the batch.
+    """
+    # Step 1 & 2: Compute weights
+    # Note: Source [S1, unofficial] formula: sample_weight = error_map + 2 * error_map.mean(dim=-1, keepdim=True)
+    # Assuming error_map is 2D per image or flattened. We handle per-image weighting.
+    
+    weights = []
+    valid_indices = []
+    
+    for b in range(batch_size):
+        e = error_map[b] # Shape (H, W)
+        
+        # Flatten error map to 1D
+        e_flat = e.view(-1)
+        
+        # Pruning: Mask out pixels with error < p_min
+        mask = e_flat >= p_min
+        
+        # Compute weights for valid pixels
+        # Source [S1, unofficial]: sample_weight = E + 2 * mean(E)
+        # We compute mean over the spatial dimensions of the current image
+        e_mean = e.mean()
+        w = e_flat + 2.0 * e_mean
+        
+        # Apply mask
+        w_valid = w[mask]
+        
+        # Normalize weights to form a probability distribution
+        w_sum = w_valid.sum()
+        if w_sum > 0:
+            probs = w_valid / w_sum
+        else:
+            probs = torch.ones_like(w_valid) / len(w_valid)
+            
+        # Store valid indices and probabilities
+        valid_flat_indices = torch.arange(len(e_flat))[mask]
+        weights.append(probs)
+        valid_indices.append(valid_flat_indices)
+        
+    # Step 4: Sample rays
+    # Total rays per batch is n_rays. Distribute evenly across batch?
+    # Source [S1, unofficial] samples n_rays // batch_size per image.
+    rays_per_image = n_rays // batch_size
+    
+    sampled_ray_indices = []
+    
+    for b in range(batch_size):
+        if len(weights[b]) == 0:
+            # Fallback if no valid pixels (e.g., all errors below p_min)
+            # Not specified in sources, [G] default to uniform random from valid range or all pixels
+            sampled_ray_indices.append(torch.zeros(rays_per_image, dtype=torch.long))
+            continue
+            
+        # Multinomial sampling without replacement
+        # torch.multinomial requires probabilities to sum to 1, which they do.
+        # replacement=False is used in source [S1, unofficial]
+        sampled_flat = torch.multinomial(weights[b], rays_per_image, replacement=False)
+        
+        # Map back to original flat indices
+        sampled_global = valid_indices[b][sampled_flat]
+        sampled_ray_indices.append(sampled_global)
+        
+    # Step 5: Decode 1D indices to 2D coordinates
+    # Note: Source [S1, unofficial] uses integer division // which triggers deprecation warning in PyTorch 1.10+
+    # Use torch.div or torch.floor_divide instead [S1, unofficial]
+    
+    final_2d_coords = []
+    for b in range(batch_size):
+        indices = sampled_ray_indices[b]
+        x = torch.div(indices, error_map_size, rounding_mode='floor') # Equivalent to //
+        y = torch.remainder(indices, error_map_size)
+        final_2d_coords.append((x, y))
+        
+    return final_2d_coords
+```
+
+**Edge Cases and Pitfalls:**
+*   **Integer Division:** The integer division operator `//` triggers a PyTorch 1.10+ deprecation warning; use `torch.div` or `torch.floor_divide` instead [S1, unofficial].
+*   **Pruning Threshold:** If `P_min` is set too high, all pixels may be pruned, leading to empty sampling distributions. The source does not specify a fallback mechanism [S2].
+*   **Overfitting:** Importance sampling alone can overfit to local error spikes. The method combines 1/3 importance sampling with 2/3 uniform random sampling to mitigate this [S1, unofficial]. This mixing ratio is not explicitly coded in the pseudocode above but should be applied to the final ray selection.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ for error map update and weight computation, where $N$ is the number of pixels. Sampling is $O(K \log N)$ or $O(K)$ depending on implementation, where $K$ is the number of rays sampled.
+*   **Memory Complexity:** $O(H \times W)$ to store the error map for each image [S1, unofficial].
+*   **Strengths:** Accelerates convergence by focusing training on erroneous areas (e.g., small objects, high-frequency details) [S2]. Simple to implement as it operates on 2D pixel metrics.
+*   **Limitations:** Requires maintaining and updating the error map per iteration [S2]. Pruning low-error areas may lead to loss of global context if not balanced with uniform sampling [S1, unofficial].
+*   **When to use:** When training neural radiance fields or SDFs on scenes with varying complexity, particularly where planar areas dominate but small objects need high fidelity [S2].
+*   **When not to use:** When memory is constrained (due to storing error maps) or when the error metric is noisy/unstable.
+
+## Background
+Error Map Importance Sampling was introduced in the context of neural SDF reconstruction. It is described in "I 2 -SDF: Intrinsic Indoor Scene Reconstruction and Editing via Raytracing in Neural SDFs" [S2]. The method leverages the observation that large planar areas (low frequency) have low reconstruction error and can be pruned, while small-object areas (high frequency) require more attention [S2]. An unofficial implementation is available in the "Joint-TensoRF" repository [S1, unofficial].
+
+## Sources
+[S1] Nemo1999/Joint-TensoRF, https://github.com/Nemo1999/Joint-TensoRF, fetched 2026-10-27 (unofficial)
+[S2] I 2 -SDF: Intrinsic Indoor Scene Reconstruction and Editing via Raytracing in Neural SDFs, https://doi.org/10.1109/cvpr52729.2023.01202, fetched 2026-11-01

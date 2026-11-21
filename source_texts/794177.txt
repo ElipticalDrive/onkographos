@@ -1,0 +1,127 @@
+Learn frustum culling with six planes, sphere and AABB tests, view-projection extraction, transformed bounds, hierarchies, GPU culling, and debugging.
+
+Frustum Culling Explained: Planes, Bounds, and Visibility | DeepRasterSkip To Article
+Web 3D Engine APIs
+Learning guideBack to topics
+Frustum Culling Explained: Planes, Bounds, and Visibility
+Frustum culling looks like a simple inside/outside test until matrix conventions, transformed bounds, intersecting objects, animation, spatial hierarchies, and multiple cameras cause missing or wasted geometry.
+APIsBeginner17 min
+Quick answer: Frustum culling removes objects whose bounding volumes lie completely outside the camera’s visible volume before issuing their draw calls. Extract or construct the six frustum planes, test each object’s world-space sphere or box against them, and keep every object that is inside or intersects all planes. It reduces submission and GPU work but does not replace occlusion culling, LOD, or clipping.
+What is a view frustum?
+A perspective camera does not see an infinite pyramid. Its field of view, aspect ratio, near distance, and far distance form a truncated pyramid called a view frustum. Six planes bound it: left, right, top, bottom, near, and far.
+The six planes of a camera view frustumA perspective camera forms a truncated pyramid bounded by left, right, top, bottom, near, and far planes.cameranearfartopbottomleftrightinward plane normal
+A perspective frustum is the intersection of six half-spaces. Geometry must remain on the inside of every active plane to be potentially visible.
+Every plane divides space into an inside and outside half-space. An object is definitely invisible if its complete bounding volume lies outside any one plane. An object touching a plane remains a candidate because some of it may contribute pixels.
+Orthographic cameras use a box-shaped frustum, but the plane-testing principle is identical.
+Rotate the camera and watch classification change
+Camera yaw 0°Field of view 58° Show culled bounds
+Visible / intersectingCulled outside frustumObserver view—not the camera image
+Screen Footprint Size: 120 px
+Object Nearest Depth (z_box): 0.65
+Occluder Hi-Z Depth (z_hiz): 0.40
+Shader Mathematical Evaluation:mip = ceil(log2(120.0)) = 7;
+float maxOccluderZ = textureLod(uHiZPyramid, uv, 7).r; // 0.40
+bool isVisible = (z_box < maxOccluderZ); // 0.65 < 0.40 == FALSE (Culled!)
+Why conservative depth is critical: Each mip level in the Hi-Z buffer is generated using a MAX operator (or MIN in Reversed-Z). A single texel at Mip $k$ represents the farthest possible depth in that entire $2^k \times 2^k$ screen region. If your object's closest point is farther than the farthest occluder, it is 100% physically guaranteed to be invisible.
+The demo uses a 3D world and an external observer projection so the camera icon and its frustum remain visible. Each cube has a conservative bounding sphere. Move the yaw slider: cubes leave one side plane and enter the other. Widening the field of view rotates the side planes outward, keeping more cubes.
+Dim cubes are not drawn by the hypothetical scene camera; they remain visible only to teach which objects were rejected. A real renderer would omit their draw commands from the camera’s render queue.
+Plane equations and signed distance
+Represent a normalized plane as:
+```
+ax + by + cz + d = 0
+normal = (a, b, c)
+```
+For a point p, the signed plane distance is:
+```
+distance = dot(normal, p) + d
+```
+With inward-facing plane normals, positive distance is inside. Sign conventions vary; consistency matters more than which side is positive.
+Sphere against a plane
+A sphere with center c and radius r is outside when its signed distance is less than -r. It intersects when the magnitude of the distance is no greater than the radius.
+Sphere tests against a frustum planeA sphere is inside, intersecting, or outside according to its signed center distance relative to its radius.planenormald < −radiusCULLED|d| ≤ radiusKEEPd > radiusKEEP
+For conservative culling, an intersecting bound stays visible. Only a bound wholly outside one plane is rejected.
+```
+function sphereInFrustum(sphere: Sphere, planes: Plane[]): boolean {
+  for (const plane of planes) {
+    const distance = dot(plane.normal, sphere.center) + plane.constant;
+    if (distance < -sphere.radius) return false;
+  }
+  return true;
+}
+```
+Sphere tests are cheap and rotation-independent, but loose for long or flat objects. A loose sphere keeps more invisible objects, which is safe but reduces culling efficiency.
+AABB against a plane
+For an axis-aligned bounding box, select the box vertex most positive along the plane normal. If even that vertex is outside, the entire box is outside:
+```
+const p = {
+  x: plane.n.x >= 0 ? box.max.x : box.min.x,
+  y: plane.n.y >= 0 ? box.max.y : box.min.y,
+  z: plane.n.z >= 0 ? box.max.z : box.min.z,
+};
+if (dot(plane.n, p) + plane.d < 0) return false;
+```
+An oriented box can be tighter, but costs more to update and test. Many engines use spheres in broad hierarchy nodes and AABBs or oriented bounds for finer leaves.
+Extracting planes from the view-projection matrix
+Planes can be extracted from combinations of the view-projection matrix rows or columns. The exact combinations depend on matrix storage, multiplication order, handedness, clip-space depth range, reversed-Z, and whether vectors multiply on the left or right.
+Do not paste extraction code without validating conventions. A robust test scene places known spheres just inside and outside every plane. Visualize the plane normals and frustum corners, and normalize each extracted plane so distance comparisons use world units.
+Alternatively, construct the eight frustum corners by unprojecting clip-space corners through the inverse view-projection matrix, then build inward-facing planes from corner triples. This is easier to visualize and less convention-sensitive, though somewhat more work.
+World-space versus camera-space tests
+You may transform world-space bounds into camera space and test against analytic limits, or keep bounds in world space and transform/extract world-space planes. Avoid transforming every mesh vertex. Bounds exist specifically to make rejection cheap.
+For a sphere transformed by a model matrix with non-uniform scale, multiply its local radius by the largest world-axis scale magnitude to remain conservative. For an AABB, transform all eight corners or use the absolute linear matrix to compute a new center and extents.
+Hierarchical frustum culling
+Testing every object linearly still costs CPU time in very large scenes. A BVH, octree, or k-d tree groups objects under parent bounds:
+Test the parent bound against the frustum.
+If outside, reject its entire subtree.
+If intersecting, descend to children.
+If fully inside, accept descendants without repeating every plane where the hierarchy supports that optimization.
+Spatial hierarchies are particularly useful for large medical scans divided into chunks, point-cloud pages, or meshlets. Dynamic scenes need bounds updates or a dynamic hierarchy; rebuilding a static tree every frame can cost more than it saves.
+Frustum culling does not test occlusion
+An object behind a wall can be inside the frustum and therefore survive. Frustum culling asks could the camera project this bound? Occlusion culling asks is it hidden by previously visible geometry?
+Common visibility layers are:
+object/layer masks and explicit visibility flags;
+distance and frustum culling;
+portal, cell, or hierarchical culling;
+CPU or GPU occlusion tests;
+meshlet/cluster culling;
+final depth testing during rasterization.
+Each later stage is usually more precise and more expensive. Early conservative rejection keeps later work small.
+CPU and GPU culling
+CPU frustum culling is simple, debuggable, and prevents draw submission. It works well for thousands of scene objects and feeds a sorted render queue.
+GPU culling stores object or meshlet bounds in buffers, tests them in a compute shader, compacts visible IDs, and writes instance or indirect-draw arguments. It scales to very large GPU-resident scenes and avoids returning visibility to the CPU, but requires synchronization, prefix sums or atomics, capacity handling, and indirect drawing support. The draw-call guide explains how the resulting visible lists become instanced or indirect commands.
+Common bugs
+Everything disappears
+Plane normals point outward, matrix rows/columns were mixed, or the inside sign is reversed. Test the camera position and a point directly forward against every plane.
+Objects pop at screen edges
+The bound is too small, stale, or transformed incorrectly. Conservative bounds should produce false positives, never false negatives. Add a small epsilon only after fixing the underlying transform.
+Skinned meshes vanish while limbs remain visible
+The static bind-pose bound does not contain animated vertices. Update bounds from animation, use a conservative authored bound, or aggregate bone bounds.
+Large objects never cull
+A single bound spans too much space. Split the mesh into spatial chunks, hierarchy nodes, or meshlets so invisible regions can be rejected independently.
+Culling costs more than rendering
+The scene contains few cheap objects, bounds update too often, or tests are poorly organized. Profile traversal and culling separately; allow small scenes or known-visible objects to bypass elaborate structures.
+Practical implementation checklist
+Use world-space conservative bounds and update them only when transforms or geometry change.
+Normalize plane equations before comparing sphere radii.
+Keep intersecting objects; culling must not create missing geometry.
+Test camera cuts, reversed-Z, infinite far planes, orthographic projections, and viewport aspect changes.
+Visualize frustum corners, plane normals, bounds, and rejection plane.
+Cache a plane mask per hierarchy branch so children skip planes that fully contained the parent.
+Split spatially huge meshes when finer visibility matters.
+Combine culling with LOD rather than treating them as alternatives.
+Measure objects tested, hierarchy nodes visited, objects accepted, draws saved, CPU time, and GPU time.
+For a dense scanned surface, frustum culling is one piece of the wider strategy described in rendering a million-polygon medical mesh efficiently.
+Frequently asked questions
+Is frustum culling automatic on the GPU?
+Rasterization clips primitives outside clip space, but that happens after work is submitted and vertices may be processed. Renderer-level frustum culling avoids submitting definitely invisible objects or clusters.
+Should partially visible objects be culled?
+No. A conservative frustum test keeps intersecting bounds. The GPU clips the actual primitives at the frustum boundary.
+Sphere or box—which should I use?
+Start with spheres for cheap, rotation-independent tests. Use AABBs, oriented boxes, or hierarchical combinations when sphere false positives become significant.
+How often should culling run?
+Usually once per camera per relevant frame. Shadow cascades, reflections, portals, and multiple viewports each have different frusta and require their own visibility results or carefully shared hierarchies.
+References
+Real-Time Rendering: The Rendering Pipeline
+Three.js Frustum documentation
+Keep exploring
+Related graphics articles
+Web 3D Engine APIsCoordinate Spaces in Computer GraphicsRead article →Web 3D Engine APIsDraw Calls Explained: Batching, Instancing, and GPU-Driven RenderingRead article →Web 3D Engine APIsHow Picking Works in Computer Graphics: CPU Rays and GPU IDsRead article →

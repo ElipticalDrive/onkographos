@@ -1,0 +1,126 @@
+# Ray Sample Generation
+
+Also called: Frustum Generation
+
+## Overview
+Ray Sample Generation constructs `RaySamples` from a `RayBundle` and bin boundaries, projecting points along ray directions to create frustums for volume rendering [S1, unofficial]. It serves as the bridge between camera geometry and volumetric integration, defining the spatial extent and sampling intervals for each ray [S1, unofficial]. Unlike sibling methods that define ray origins or directions (e.g., [Camera Ray Generation](7456-camera-ray-generation.md)), this method focuses on the discretization of the ray path into manageable segments (frustums) with associated geometric properties [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A `RayBundle` containing ray origins, directions, and camera parameters (e.g., focal length, image dimensions); bin boundaries defining the sampling intervals along the ray.
+*   **Output:** A `RaySamples` object containing the geometric representation of the sampled frustums.
+
+**Data Structures**
+The `RaySamples` structure contains the following fields [S1, unofficial]:
+*   `frustums`: The geometric representation of the frustums (e.g., `Frustums` object).
+*   `camera_indices`: Integer tensor of shape `(*bs, 1)` indicating the camera index for each sample.
+*   `deltas`: Float tensor of shape `(*bs, 1)` representing the distance between consecutive sample points.
+*   `spacing_starts`: Float tensor of shape `(*bs, num_samples, 1)` indicating the start distance of each interval.
+*   `spacing_ends`: Float tensor of shape `(*bs, num_samples, 1)` indicating the end distance of each interval.
+*   `spacing_to_euclidean_fn`: A callable function to convert spacing to Euclidean distance.
+*   `metadata`: A dictionary for additional context.
+*   `times`: Float tensor of shape `(*batch, 1)` for temporal information.
+
+**Steps**
+1.  **Extract Ray Parameters:** Retrieve ray origins $\mathbf{o}$ and directions $\mathbf{d}$ from the `RayBundle`. Determine the number of samples $N$ and the bin boundaries $t_0, t_1, \dots, t_N$ along the ray [S1, unofficial].
+2.  **Compute Interval Boundaries:** For each sample $i \in [0, N-1]$, define the start $t_{start}^{(i)}$ and end $t_{end}^{(i)}$ of the interval using the bin boundaries [S1, unofficial].
+3.  **Calculate Deltas:** Compute the delta $\Delta^{(i)} = t_{end}^{(i)} - t_{start}^{(i)}$ for each interval [S1, unofficial].
+4.  **Generate Frustums:** Construct the frustum geometry for each interval. This involves projecting the interval boundaries onto the image plane to determine the frustum's base and top areas, using the camera's intrinsic parameters (focal length, aspect ratio) [S1, unofficial].
+5.  **Assemble RaySamples:** Populate the `RaySamples` object with the computed frustums, deltas, spacing starts/ends, and metadata [S1, unofficial].
+
+**Formulas**
+*   Interval Delta: $\Delta^{(i)} = t_{end}^{(i)} - t_{start}^{(i)}$ [S1, unofficial].
+*   Frustum Geometry: The frustum is defined by the ray direction $\mathbf{d}$, origin $\mathbf{o}$, and the projected radii at $t_{start}^{(i)}$ and $t_{end}^{(i)}$. The radius $r$ at distance $t$ is proportional to $t \cdot \frac{\text{pixel\_size}}{\text{focal\_length}}$ [S1, unofficial].
+
+**Parameters**
+*   `num_samples`: The number of intervals per ray. Typical values range from 128 to 1024 depending on desired accuracy and performance [S1, unofficial].
+*   `bin_boundaries`: The specific distances along the ray where samples are taken. Can be uniform or non-uniform (e.g., linear spacing, depth-based) [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Precision:** Floating-point precision errors can accumulate when computing large distances or small deltas. Use double precision for intermediate calculations if necessary [G].
+*   **Boundaries:** Ensure that bin boundaries are strictly increasing and within the valid viewing range (near and far planes) [G].
+*   **Degenerate Input:** Handle cases where ray directions are zero or origins are undefined [G].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_ray_samples(ray_bundle, bin_boundaries):
+    """
+    Generates RaySamples from a RayBundle and bin boundaries.
+    
+    Args:
+        ray_bundle: Object containing ray origins (o) and directions (d).
+        bin_boundaries: Array of shape (num_samples + 1,) containing t_0, t_1, ..., t_N.
+        
+    Returns:
+        RaySamples object.
+    """
+    o = ray_bundle.origins  # Shape: (batch_size, 3)
+    d = ray_bundle.directions  # Shape: (batch_size, 3)
+    num_samples = len(bin_boundaries) - 1
+    
+    # Initialize tensors
+    spacing_starts = bin_boundaries[:-1]  # Shape: (num_samples,)
+    spacing_ends = bin_boundaries[1:]     # Shape: (num_samples,)
+    deltas = spacing_ends - spacing_starts  # Shape: (num_samples,)
+    
+    # Compute frustum geometry
+    # This step involves projecting the interval boundaries to image plane
+    # to determine the frustum's base and top radii.
+    # The exact implementation depends on the camera model (e.g., pinhole).
+    # For a pinhole camera, radius r at distance t is:
+    # r = t * (pixel_width / focal_length)
+    # Frustums are constructed from these radii and the ray direction.
+    frustums = compute_frustums(o, d, spacing_starts, spacing_ends, ray_bundle.camera_params)
+    
+    # Assemble RaySamples
+    ray_samples = RaySamples(
+        frustums=frustums,
+        camera_indices=ray_bundle.camera_indices,
+        deltas=deltas,
+        spacing_starts=spacing_starts,
+        spacing_ends=spacing_ends,
+        spacing_to_euclidean_fn=ray_bundle.spacing_to_euclidean_fn,
+        metadata=ray_bundle.metadata,
+        times=ray_bundle.times
+    )
+    
+    return ray_samples
+```
+
+## Subtopics
+
+### Ray Featurization with Gaussians
+Approximates a frustum as a Gaussian distribution (mean + covariance) to enable efficient featurization of ray sections [S2, unofficial]. It assumes the ray originates from the origin and casts cone- or cylinder-shaped rays [S2, unofficial]. Choose this variant when using Gaussian-based rendering or when smooth, differentiable approximations of ray segments are required [S2, unofficial]. It sets itself apart by converting distance intervals into Gaussian parameters rather than keeping them as geometric frustums [S2, unofficial].
+
+**Steps:**
+1.  Extract interval boundaries $t_0$ and $t_1$ from the ray samples [S2, unofficial].
+2.  Compute the mean distance $t_{\text{mean}} = (t_0 + t_1) / 2$ [S2, unofficial].
+3.  Compute the variance of the distance $t_{\text{var}} = (t_1 - t_0)^2 / 12$ [S2, unofficial].
+4.  Compute the radius variance $r_{\text{var}} = \text{radius}^2 / 4$ [S2, unofficial].
+5.  Select the Gaussian conversion function based on `ray_shape`: 'cone' uses `conical_frustum_to_gaussian`, 'cylinder' uses `cylinder_to_gaussian` [S2, unofficial].
+6.  Call the selected function with directions, $t_0$, $t_1$, radii, and variances to get means and covariances [S2, unofficial].
+7.  Add the ray origins to the means: $\text{means} = \text{means} + \text{origins}[\dots, \text{None}, :]$ [S2, unofficial].
+8.  Return the means and covariances [S2, unofficial].
+
+**Formulas:**
+*   $t_{\text{mean}} = \frac{t_0 + t_1}{2}$ [S2, unofficial].
+*   $t_{\text{var}} = \frac{(t_1 - t_0)^2}{12}$ [S2, unofficial].
+*   $r_{\text{var}} = \frac{\text{radius}^2}{4}$ [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear in the number of samples $N$ and batch size $B$, i.e., $O(B \cdot N)$ [G].
+*   **Memory Complexity:** Linear in $B \cdot N$ for storing frustum parameters and deltas [G].
+*   **Performance:** Performance depends on the efficiency of the frustum construction and the underlying tensor operations. GPU acceleration is typically used for parallel generation [G].
+*   **Strengths:** Provides a structured representation of ray segments suitable for volume rendering and integration [S1, unofficial].
+*   **Limitations:** Memory usage can be high for large numbers of samples [G]. Precision issues may arise with very small or large distances [G].
+*   **When to Use:** When volume rendering requires explicit discretization of rays into segments [S1, unofficial].
+*   **When Not to Use:** When continuous ray integration is preferred or when memory is constrained [G].
+
+## Background
+Ray Sample Generation is a fundamental component in modern volume rendering and neural radiance fields (NeRF) pipelines. It was popularized by frameworks like Gaussian-Splatting-Toolkit and CaSE-NeRF, which require explicit ray segment definitions for efficient rendering and optimization [S1, unofficial][S2, unofficial]. The method builds on the principles of ray generation and camera models [G].
+
+## Sources
+[S1] Gaussian-Splatting-Toolkit/Gaussian-Splatting-Toolkit, https://github.com/Gaussian-Splatting-Toolkit/Gaussian-Splatting-Toolkit, fetched 2026-10-27 (unofficial)
+[S2] https://github.com/CPREgroup/CaSE-NeRF, https://github.com/CPREgroup/CaSE-NeRF, fetched 2026-10-30 (unofficial)

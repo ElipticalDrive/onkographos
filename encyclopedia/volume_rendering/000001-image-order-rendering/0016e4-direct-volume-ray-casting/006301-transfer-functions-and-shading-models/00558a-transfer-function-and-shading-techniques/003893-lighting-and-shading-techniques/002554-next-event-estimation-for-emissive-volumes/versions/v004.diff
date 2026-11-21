@@ -1,0 +1,203 @@
+--- v003.md
++++ v004.md
+@@ -4,81 +4,143 @@
+ 
+ ## Overview
+-Next Event Estimation (NEE) for emissive volumes reduces noise in participating media by explicitly sampling light sources (or emissive geometry) rather than relying solely on path tracing through the medium. It differs from standard volume rendering by decoupling the emission sampling from the ray's natural progression, requiring careful handling of probability density functions (PDFs) to maintain unbiased results. It builds on [Lighting and Shading Techniques](8281-lighting-and-shading-techniques.md).
++Next Event Estimation (NEE) for emissive volumes is a technique to reduce noise in path-traced volume rendering by directly sampling light sources (emissive media) rather than relying solely on random walk scattering events. It solves the problem of high variance when emissive volumes are small or distant relative to the camera. It differs from standard volume ray casting by introducing a separate sampling branch for light sources, managed via Multiple Importance Sampling (MIS) to combine the direct light estimate with the standard volume integration.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Ray segment $[t_{min}, t_{max}]$ intersecting an emissive volume or shape; solid angle PDF $p(\vec{\omega})$ of the sampled light direction; volume density/scattering properties.
+-*   **Output:** Emissive contribution estimate; MIS weight.
+ 
+-**Data Structures:**
+-*   Ray entry point $\vec{x}_{in}$ and exit point $\vec{x}_{out}$ within the bounding shape.
+-*   Distance $r$ from the shading point to the sampled light position.
++### Inputs and Outputs
++**Inputs:**
++*   Ray origin $\mathbf{o}$ and direction $\vec{\omega}$ (from camera or previous scattering event).
++*   Volume scalar field $V(\mathbf{x})$ defining density/emission.
++*   Emissive volume geometry (bounding shape or mesh) to determine ray intersection bounds.
++*   Emission coefficient function $L_e(\mathbf{x}, \vec{\omega})$.
++*   Absorption coefficient $\sigma_a(\mathbf{x})$ and scattering coefficient $\sigma_s(\mathbf{x})$ (if participating media).
+ 
+-**Method:**
+-1.  **Sample Light Direction:** Sample a point $\vec{x}_L$ on the emissive geometry using a solid angle PDF $p(\vec{\omega})$ centered at the current shading point $\vec{x}$.
+-2.  **Calculate Distance:** Compute the distance $r = \|\vec{x}_L - \vec{x}\|$.
+-3.  **Determine Ray Bounds:** Calculate the exact entry and exit points of the ray segment passing through the emissive shape containing $\vec{x}_L$. Let these be $t_{entry}$ and $t_{exit}$ relative to $\vec{x}$.
+-4.  **Convert PDF:** Convert the solid angle PDF $p(\vec{\omega})$ to a volume PDF $p_v(\vec{x}')$ for any point $\vec{x}'$ along the ray segment. The conversion is given by:
+-    $$ p_v(\vec{x}') = \frac{p(\vec{\omega})}{r^2} $$
+-    where $r$ is the distance from $\vec{x}$ to $\vec{x}'$. Note that this PDF is non-normalizable over the entire volume $V$ because $\int_V r^{-2} p(\vec{\omega}) \mathrm{dV}$ does not converge to 1 in the standard manner [S1, unofficial].
+-5.  **Evaluate Emission:** Evaluate the emission along the entire ray segment from $t_{entry}$ to $t_{exit}$. This evaluation must be consistent with the direction sampling used in the MIS calculation [S1, unofficial].
+-6.  **Compute MIS Weight:** Use Multiple Importance Sampling (MIS) to combine the NEE estimate with the standard volume sampling estimate. The weight is computed as:
+-    $$ \mathrm{MIS}(w) = \frac{w_{NEE}}{w_{NEE} + w_{vol}} $$
+-    where $w_{NEE}$ is derived from the volume PDF $p_v(\vec{x}') = r^{-2}p(\vec{\omega})$ and $w_{vol}$ is derived from the standard volume PDF $p(\vec{x})$ [S1, unofficial].
++**Outputs:**
++*   Radiance contribution $L_{nee}$ from the emissive source.
++*   MIS weight for combining with other estimators.
+ 
+-**Pseudocode:**
++### Data Structures
++*   **Ray Bounds:** Two scalar values $t_{entry}$ and $t_{exit}$ representing the distance from the ray origin to the entry and exit points of the emissive volume along the ray direction. These are computed via ray-shape intersection tests [S1, unofficial].
++*   **PDF Storage:**
++    *   $p(\vec{x})$: The standard volume PDF, typically uniform along the ray segment or based on distance sampling.
++    *   $p(\vec{\omega})$: The solid angle PDF of the light source as seen from the shading point.
++
++### Algorithm Steps
++
++1.  **Ray-Shape Intersection:**
++    Cast a ray from the current position $\mathbf{x}$ towards the emissive volume. Determine the entry distance $t_{entry}$ and exit distance $t_{exit}$ along the ray direction $\vec{\omega}_l$ pointing to the light [S1, unofficial]. If no intersection, return 0.
++
++2.  **Sample a Point on the Light:**
++    Sample a point $\mathbf{x}_l$ on the emissive volume surface or within the volume. In the context of volume NEE, this often involves sampling a point along the ray segment inside the volume or on its boundary, depending on the specific implementation of "emissive media." The source notes imply tracking entry/exit points to calculate the exact directional PDF [S1, unofficial].
++
++3.  **Compute Solid Angle PDF:**
++    Calculate the probability density $p(\vec{\omega})$ of the sampled direction $\vec{\omega}_l$ from the shading point $\mathbf{x}$. This is the solid angle PDF.
++
++4.  **Convert to Volume PDF (MIS Weighting):**
++    To combine with the standard volume estimator, the solid angle PDF must be converted to a volume PDF $p(\vec{x})$. The correct conversion involves the distance $r$ from $\mathbf{x}$ to $\mathbf{x}_l$.
++    
++    The MIS weight is computed as:
++    $$ \mathrm{MIS}(r^{-2}p(\vec\omega), p(\vec x)) $$
++    where $r^{-2}p(\vec\omega)$ represents the volume PDF derived from the solid angle PDF [S1, unofficial].
++    
++    *Note:* Simply dividing $p(\vec{\omega})$ by $r^2$ is insufficient if not handled consistently with the emission evaluation. The term $r^{-2}p(\vec{\omega})dV$ is a non-normalisable PDF because the integral $\int_V r^{-2} p(\vec{\omega}) \mathrm{dV}$ does not converge to 1 in the standard manner [S1, unofficial].
++
++5.  **Evaluate Emission:**
++    Evaluate the emission $L_e$ at the sampled point $\mathbf{x}_l$. Crucially, the emission evaluation must be consistent with the direction sampling used in the MIS calculation. The simplest consistent method is to evaluate the emission along the entire ray segment from $\mathbf{x}$ to $\mathbf{x}_l$, accounting for attenuation [S1, unofficial].
++
++6.  **Compute Radiance Contribution:**
++    The radiance contribution is:
++    $$ L_{nee} = \frac{L_e(\mathbf{x}_l) \cdot \cos(\theta) \cdot T(\mathbf{x}, \mathbf{x}_l)}{p(\vec{x})} $$
++    Where $T(\mathbf{x}, \mathbf{x}_l)$ is the transmittance from $\mathbf{x}$ to $\mathbf{x}_l$, and $p(\vec{x})$ is the volume PDF used for weighting. The term $p(\vec{x})$ in the denominator is effectively $r^{-2}p(\vec{\omega})$ adjusted for the volume element [S1, unofficial].
++
++7.  **Combine with MIS:**
++    Apply the MIS weight (e.g., balance heuristic) to combine $L_{nee}$ with the standard volume scattering estimator $L_{vol}$:
++    $$ L_{final} = L_{nee} \cdot w_{nee} + L_{vol} \cdot w_{vol} $$
++
++### Pseudocode
++
+ ```python
+-def next_event_estimation_emissive_volume(shading_point, ray_direction, light_sampler, volume):
+-    # 1. Sample light direction
+-    light_pos, p_omega = light_sampler.sample(shading_point)
++def next_event_estimation_emissive_volume(ray_origin, ray_direction, volume_data, light_geometry):
++    # Step 1: Intersect ray with emissive volume geometry
++    hit = ray_intersect(ray_origin, ray_direction, light_geometry)
++    if not hit:
++        return 0.0
++
++    t_entry = hit.t_min
++    t_exit = hit.t_max
+     
+-    # 2. Calculate distance
+-    r = distance(shading_point, light_pos)
++    # Sample a point on the light (simplified: sample midpoint or specific distribution)
++    # In practice, this involves sampling a point x_l on the volume/mesh
++    x_l = sample_light_point(light_geometry)
+     
+-    # 3. Determine ray bounds within the emissive shape
+-    # This requires intersecting the ray with the bounding shape of the emissive volume
+-    t_entry, t_exit = intersect_ray_shape(shading_point, ray_direction, volume.shape)
++    # Vector from shading point to light sample
++    l_vec = x_l - ray_origin
++    r = length(l_vec)
++    if r < epsilon:
++        return 0.0
+     
+-    # 4. Convert solid angle PDF to volume PDF
+-    # p_v = p_omega / r^2
+-    # Note: This PDF is non-normalizable over the whole volume, but valid for the segment
+-    p_v = p_omega / (r * r)
++    omega_l = normalize(l_vec)
+     
+-    # 5. Evaluate emission along the ray segment
+-    # Integrate emission from t_entry to t_exit
+-    # This step must be consistent with the direction sampling
+-    emission_contribution = integrate_emission(shading_point, ray_direction, t_entry, t_exit, volume)
++    # Step 2: Compute Solid Angle PDF p(omega)
++    p_omega = light_geometry.pdf(omega_l, x_l)
+     
+-    # 6. Compute MIS weight
+-    # w_nee is based on p_v, w_vol is based on standard volume PDF p(x)
+-    w_nee = p_v
+-    w_vol = volume.pdf(shading_point) # Standard volume PDF
++    # Step 3: Convert to Volume PDF for MIS
++    # The volume PDF equivalent is r^-2 * p(omega)
++    # Note: This is non-normalizable, so we use it directly in the MIS ratio
++    p_vol_equivalent = (1.0 / (r * r)) * p_omega
+     
+-    mis_weight = w_nee / (w_nee + w_vol)
++    # Step 4: Evaluate Emission at x_l
++    # Consistent evaluation: integrate emission along the segment or evaluate at x_l
++    # Assuming point evaluation for simplicity, but source suggests segment evaluation
++    L_e = volume_data.emission(x_l, omega_l)
+     
+-    return emission_contribution * mis_weight
++    # Step 5: Compute Transmittance from ray_origin to x_l
++    T = compute_transmittance(ray_origin, x_l, volume_data)
++    
++    # Step 6: Compute Radiance Contribution
++    # Using the balance heuristic, we need p(x) for the volume estimator too.
++    # Assuming standard volume PDF p_vol_standard is available from the main loop
++    # For this NEE branch, the estimator is:
++    # L_nee = L_e * T / p_vol_equivalent
++    
++    # However, MIS requires both PDFs.
++    # Let p_vol_standard be the PDF of the current volume sampling strategy
++    p_vol_standard = volume_data.pdf(ray_origin, x_l)
++    
++    # Avoid division by zero
++    if p_vol_standard < epsilon or p_vol_equivalent < epsilon:
++        return 0.0
++        
++    # MIS Weight (Balance Heuristic)
++    w_nee = (p_vol_equivalent * p_vol_equivalent) / (p_vol_equivalent * p_vol_equivalent + p_vol_standard * p_vol_standard)
++    # Note: The source notes MIS(r^-2 p(omega), p(x)). 
++    # The actual weight calculation depends on the specific MIS strategy.
++    # Standard balance heuristic: w1 = f1(x) / (f1(x) + f2(x)) where f1, f2 are unnormalized densities.
++    
++    # Radiance contribution
++    L_nee = (L_e * T) / p_vol_equivalent
++    
++    return L_nee * w_nee
+ ```
+ 
+-**Parameters:**
+-*   Light sampler: Must support solid angle sampling.
+-*   Volume shape: Must support ray intersection queries.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Incorrect PDF Conversion:** Simply converting the solid angle PDF to a volume PDF using the differential element $r^{-2}\frac{\mathrm{dV}}{\mathrm{d\Omega}}$ yields incorrect results and is inconsistent with previous results obtained without NEE [S1, unofficial].
+-*   **Integration Cost:** Integrating the volume PDF over the ray length is significantly slower (20x-40x) due to required ray casts and raises OptiX warnings in CUDA modes [S1, unofficial].
+-*   **Implementation Discrepancies:** In `llvm_*` modes, the implementation using NEE is approximately 5x slower than not using NEE. In `cuda_*` modes, it is approximately 1.5x slower [S1, unofficial].
+-*   **Ray Intersection Handling:** Differences in ray intersection handling between Embree (llvm) and OptiX (cuda) can lead to different results for ray entry and exit points, potentially causing incorrect results in `llvm_*` modes if not carefully handled [S1, unofficial].
++### Parameters and Edge Cases
++*   **Distance $r$:** Must be strictly positive to avoid division by zero.
++*   **Non-normalizable PDF:** The term $r^{-2}p(\vec{\omega})$ is not a normalized PDF. Integrating it over the volume does not yield 1. This must be handled correctly in the MIS framework by using unnormalized densities in the weight calculation [S1, unofficial].
++*   **Consistency:** The emission evaluation must match the sampling distribution. If the PDF is derived from solid angle, the emission should be evaluated consistently, potentially requiring integration along the ray segment [S1, unofficial].
++*   **Precision:** Floating-point precision issues may arise when $r$ is very large or very small.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Slower than standard volume rendering without NEE. In `llvm_*` modes, ~5x slower; in `cuda_*` modes, ~1.5x slower [S1, unofficial].
+-*   **Memory Complexity:** Not specified.
+-*   **Strengths:** Noticeable reduction in noise for the same sample count [S1, unofficial].
+-*   **Limitations:** Significant performance overhead, especially in `llvm_*` modes. Potential for incorrect results due to ray intersection discrepancies between backends [S1, unofficial].
+-*   **When to use:** When noise reduction is critical and performance overhead is acceptable.
+-*   **When not to use:** When performance is critical or when using `llvm_*` modes with strict correctness requirements regarding ray intersections.
++
++*   **Performance:** The implementation using NEE is slower than not using NEE. In `llvm_*` modes, it is approximately 5x slower. In `cuda_*` modes, it is approximately 1.5x slower [S1, unofficial].
++*   **Noise Reduction:** NEE provides a noticeable reduction in noise for the same sample count, particularly for small or distant emissive sources [S1, unofficial].
++*   **Complexity:** Integrating the volume PDF over the ray length is significantly slower (20x-40x) due to required ray casts and raises OptiX warnings in CUDA modes. Therefore, direct PDF conversion and MIS weighting is preferred over integration [S1, unofficial].
++*   **Platform Differences:** There are discrepancies between `llvm_*` (Embree) and `cuda_*` (OptiX) modes regarding ray entry/exit points, leading to different results. The implementation currently gives correct results primarily for `cuda_*` modes [S1, unofficial].
+ 
+ ## Background
+-This method was developed as part of the Mitsuba 3 renderer, specifically in the context of emissive media rendering. It addresses the challenge of efficiently sampling emission from participating media by leveraging next event estimation techniques. The implementation and associated discussions are documented in the Mitsuba 3 GitHub repository [S1, unofficial].
++
++*   **Origin:** This method was implemented as a feature in Mitsuba 3, specifically in the `feature/emissive-media` branch. The discussion and implementation details are documented in GitHub Pull Request #678 [S1, unofficial].
++*   **Development:** The implementation was contributed by Microno95 and reviewed by dvicini. It addresses the challenge of correctly converting solid angle PDFs to volume PDFs for MIS in the context of emissive volumes [S1, unofficial].
+ 
+ ## Sources
++
+ [S1] [✨ feature] Emissive Volume Rendering, https://github.com/mitsuba-renderer/mitsuba3/pull/678, fetched 2026-10-26 (unofficial)

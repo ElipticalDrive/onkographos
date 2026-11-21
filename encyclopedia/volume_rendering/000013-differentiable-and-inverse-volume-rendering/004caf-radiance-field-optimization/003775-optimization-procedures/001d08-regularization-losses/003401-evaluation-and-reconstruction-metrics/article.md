@@ -1,0 +1,71 @@
+# Evaluation and Reconstruction Metrics
+
+
+## Overview
+This family comprises metrics and objectives used to evaluate the quality, stability, and robustness of radiance field optimizations and volume renderings, distinct from the regularization losses that drive the optimization itself. While regularization losses (see [Regularization losses](1413-regularization-losses.md)) shape the scene parameters during training, evaluation metrics quantify the final output's fidelity to ground truth, temporal coherence, geometric consistency, or robustness to perturbations. Unlike sibling methods that enforce smoothness or perceptual similarity, these metrics serve as diagnostic tools or final benchmarks to assess specific failure modes such as flickering, geometric inconsistency across views, or adversarial sensitivity.
+
+## Shared principles
+All methods in this family rely on the differentiability of the forward rendering operator and the propagation of gradients through the integration steps [44-radiance-field-optimization.md]. The core mechanism is the evaluation of the volume rendering equation and the computation of gradients with respect to scene parameters (density, geometry, transfer functions, camera poses) [44-radiance-field-optimization.md].
+
+The standard emission-absorption model computes the color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$ as [44-radiance-field-optimization.md]:
+
+$$
+\hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
+$$
+
+where $\sigma_i$ is the density, $\delta_i$ is the step size, $\mathbf{c}_i$ is the color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance [44-radiance-field-optimization.md].
+
+Differentiation strategies fall into three main categories [44-radiance-field-optimization.md]:
+1. **Reverse-Mode Automatic Differentiation (AD):** Standard backpropagation through the computational graph. This requires storing $O(kn)$ intermediate states (where $n$ is pixels and $k$ is samples), leading to high memory usage [44-radiance-field-optimization.md].
+2. **Adjoint Method:** Computes gradients by propagating adjoint variables backward through the rendering algorithm, evaluating the chain rule from output to input. This has computational complexity largely constant in the number of parameters, making it preferable for optimizing many parameters like the transfer function [44-radiance-field-optimization.md].
+3. **Analytic Inversion / Explicit Gradients:** Uses a-priori knowledge of the DVR operations to invert the order of operations or derive closed-form gradients, reducing memory consumption to $O(n)$ by avoiding the storage of intermediate results [44-radiance-field-optimization.md].
+
+## Subtopics
+
+### [Temporal Instability Metric](1921-temporal-instability-metric.md)
+The Temporal Instability (TI) metric quantifies temporal coherence in volume rendering or novel view synthesis by measuring frame-to-frame variations in reconstruction error. It serves as a diagnostic for visual flickering artifacts that static per-frame metrics like RMSE may miss. Lower values indicate smoother temporal consistency.
+
+### [Inverse Mean Residual Color (IMRC) Metric](10556-inverse-mean-residual-color-imrc-metric.md)
+The Inverse Mean Residual Color (IMRC) metric evaluates the geometric quality of a radiance field without requiring ground-truth geometry, by measuring the transmittance-density-weighted residual color in decibels. Unlike PSNR, which assesses overall image quality, or Chamfer Distance (CD), which requires ground-truth point clouds and suffers from information loss by considering only a single iso-surface, IMRC evaluates the entire density field and is more consistent with human user rankings for geometry.
+
+### [Across View-direction Inconsistency (AVI) Metric](11106-across-view-direction-inconsistency-avi-metric.md)
+The Across View-direction Inconsistency (AVI) metric quantifies the degree of geometrical inconsistency between every pair of test frames corresponding to adjacent viewing directions. It is designed to evaluate the temporal and spatial coherence of rendered volumetric super-resolution outputs by leveraging ground truth optical flow to warp adjacent views against each other. Unlike sibling metrics that may focus on static image quality or temporal stability in video sequences, AVI specifically targets the consistency of 3D geometry reconstruction across different camera viewpoints.
+
+### [Ray Diversity Objective](13003-ray-diversity-objective.md)
+The Ray Diversity Objective quantifies the variation of rays projected from various viewing poses observing a particular face of an object mesh, aiming to yield better reconstruction by ensuring highly varied novel views. It sets itself apart from sibling metrics by explicitly combining a geometric diversity measure (variance of ray principal axes) with a quality penalty (outlier score based on grazing angles) to guide active view planning.
+
+### [Adversarial Robustness Evaluation](16421-adversarial-robustness-evaluation.md)
+Adversarial Robustness Evaluation assesses the stability of reconstruction networks (such as those used in tomography or radiance field optimization) when subjected to small, targeted perturbations in the input data. It quantifies sensitivity by computing the **BREN ratio**, which measures the relative change in the reconstructed output versus the magnitude of the input perturbation. Unlike standard metrics that measure accuracy against ground truth, this method evaluates whether small input errors lead to disproportionately large, artifact-ridden outputs, indicating a lack of robustness.
+
+#### Leak Metric
+**Definition:** Measures the fraction of a method's near-plane foreground energy that incorrectly falls on the culled side where the reference is background. Combines proxy reconstruction error, renderer mismatch, soft tails, and overshooting culls [S1, unofficial].
+**Steps:** 1. Compute method foreground mask $F(R)$ using $\theta_{fg} = 0.04$. 2. Define near-plane region $N$ as pixels in $F(R)$ with $|s| \leq 60$. 3. Define leak region $L$ as pixels in $N$ with $s > 2$ that are not in reference foreground $F(G)$. 4. Sum $\max_c R_c(\mathbf{x})$ over $L$ and $N$ across all grazing views, then take ratio [S1, unofficial].
+**Formula:** $N = F(R) \cap \{|s| \leq 60\}$, $L = N \cap \{s > 2\} \setminus F(G)$. $\text{Leak} = \frac{\sum_{\mathbf{x} \in \mathcal{L}} \max_{\mathbf{x}} R_c(\mathbf{x})}{\sum_{\mathbf{x} \in \mathcal{N}} \max_{\mathbf{x}} R_c(\mathbf{x})}$ [S1, unofficial].
+**Parameters:** Foreground threshold $\theta_{fg} = 0.04$. Cut-edge margin $\delta = 2$ (for $s > 2$). Near-plane half-width $w = 60$ (for $|s| \leq 60$) [S1, unofficial].
+**Pitfalls:** Averaging per-view ratios on thin grazing bands causes numerical instability. Pooling sums across all views before taking the ratio stabilizes the metric [S1, unofficial].
+
+#### Band Fidelity Metric (Sb)
+**Definition:** A fidelity metric measuring the structural similarity between a method's render and a reference render over the exposed cut face (reference foreground) [S1, unofficial].
+**Steps:** Compute scalar luminance $Y(x) = \frac{1}{3} \sum_c I_c(x) \in [0, 1]$ at each pixel $x$. Compute foreground mask $F(I) = \{x : \max_c I_c(x) > \theta_{fg}\}$ with $\theta_{fg} = 0.04$. Compute SSIM between method render and reference restricted to $F(G)$. Average the SSIM values across all perpendicular views of all planes in the evaluated set [S1, unofficial].
+**Parameters:** Foreground threshold $\theta_{fg} = 0.04$. Band $\mathcal{B}$ for $S_b$ is the reference foreground $F(G)$ [S1, unofficial].
+**Pitfalls:** Band PSNR is omitted from main tables because operator differences are only hundredths of a decibel and leakage can offset small brightness bias [S1, unofficial].
+
+#### Model Validation using RMSE and EMD
+**Definition:** A validation procedure assessing model generalization on a hold-out set of 2,000 volume-rendered images not used for training [S2]. EMD (Earth Mover’s Distance) is used to measure higher-level similarity between color histograms, mitigating misalignment in histogram space [S2].
+**Parameters:** RMSE (Root Mean Squared Error) is used as the primary evaluation metric for image similarity [S2]. EMD Cost Normalization: The cost between histogram bins is normalized such that the maximum cost is 1 [S2].
+**Numbers:** Training Time: 16.5 hours. Rendering Time: 0.007 seconds per image. TF Exploration Time: 0.06 seconds. TF Sensitivity Time: 0.49 seconds [S2].
+
+#### Baseline Calibration
+**Definition:** A calibration procedure that drives a scene reconstruction as close as possible to ground truth in image space without using network losses, to establish a threshold for metamerism [S3, unofficial].
+**Steps:** For shape reconstruction, use mean-absolute error between rendered and ground-truth views. For material reconstruction, use the Dual-Buffer loss to handle Monte Carlo noise from path tracing. Compute the baseline score using the network's latent space projection on masked images [S3, unofficial].
+**Formula:** $\text{score}_{\text{baseline}} = \text{score}(\text{NN}(m(n) \odot \hat{x}(n)), \text{NN}(m(n) \odot x_i(n)))$ [S3, unofficial].
+**Parameters:** $m(n)$: A binary foreground mask that suppresses background regions [S3, unofficial].
+**Pitfalls:** Do not mask material experiments because the object's appearance depends on global illumination and indirect lighting; masking would discard appearance cues [S3, unofficial].
+
+## Background
+Evaluation metrics for volume rendering and radiance fields have evolved alongside the complexity of reconstruction methods. Early metrics focused on simple pixel-wise errors like PSNR and SSIM. As methods like Gaussian Splatting and neural radiance fields emerged, metrics began to address specific artifacts such as temporal instability in novel view synthesis [S1, unofficial] and geometric consistency across views [S1, unofficial]. The introduction of metrics like IMRC allowed for geometry evaluation without ground-truth meshes [S2], while adversarial robustness metrics were adapted from computer vision to ensure stability in tomographic and radiance field reconstructions [S1, unofficial]. The family also includes specialized metrics for evaluating clipping and cutting operations in medical volume rendering, such as Leak and Band Fidelity, which address artifacts specific to half-space clipping techniques [S1, unofficial].
+
+## Sources
+[S1] XClipGS: Exact Half-Space Clipping for Medical Volume Gaussian Splatting, https://doi.org/10.48550/arxiv.2608.07760, fetched 2026-10-26 (unofficial)
+[S2] A Generative Model for Volume Rendering, https://doi.org/10.1109/tvcg.2018.2816059, fetched 2026-10-26
+[S3] MRD: Using Physically Based Differentiable Rendering to Probe Vision Models for 3D Scene Understanding, https://doi.org/10.48550/arXiv.2512.12307, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,1515 @@
+2026-6-2
+HiGS: A Hierarchical Rendering Architecture for
+Real-Time 3D Gaussian Splatting
+Dawid Pająk
+Martin Bisson
+Rodolfo Lima
+NVIDIA
+arXiv:2606.00352v1 [cs.CV] 29 May 2026
+103
+102
+101
+262 FPS
+1,124 FPS
+Figure 1: HiGS renders a 5.8M-gaussian scene at 1,124 FPS (1080p). Left: rendered image. Center and Right show
+how evenly rendering work is spread, measured per tile as the gaussians covering the tile divided by the number of
+parallel work units that work on it. Center: gsplat [38] uses one work unit per 8 × 8 tile, so the value is the raw
+per-tile gaussian count and dense regions form severe hotspots (peak 2,485). Right: HiGS groups tiles into 8 × 4
+macro-tiles and splits each macro-tile’s gaussians into independent batches of at most 1,024. Dense macro-tiles
+spawn proportionally more batches, so the per-work-unit load flattens and its peak across tiles drops to ∼340.
+Abstract
+3D Gaussian Splatting (3DGS) has become the standard for real-time novel view synthesis on
+commodity GPUs. Its pipeline ties spatial partitioning and rasterization to one tile size, yet the two
+pull in opposite directions: partitioning, which bins and depth-sorts gaussians, grows cheaper with
+larger tiles, while rasterization gets cheaper with smaller ones. Prior acceleration work reduces the
+cost of individual stages but keeps both locked to that single scale, where a few dense tiles dominate
+frame time. We present Hierarchically Tiled Gaussian Splatting (HiGS), which gives each its own scale:
+partitioning runs over coarse macro-tiles, while rasterization runs over the fine render tiles within
+them. Rasterization work is then issued in proportion to the gaussians in each macro-tile rather than
+per tile, so dense regions spread across many parallel units instead of serializing through one. Across
+tested scenes, HiGS renders up to ∼15.8× faster than the original 3DGS and outperforms every
+other rasterizer we evaluate, while preserving exact front-to-back alpha compositing.
+1. Introduction
+Real-time photorealistic rendering of three-dimensional scenes reconstructed from multi-view captures
+has become foundational to virtual reality, telepresence, and immersive content creation. 3D Gaussian
+Splatting [14] has emerged as the leading approach, combining the visual fidelity of neural radiance
+fields [25] with the throughput of an explicit, differentiable representation that maps efficiently to
+commodity GPU rasterization. Its open-source implementation gsplat [38] has become the de facto
+foundation for subsequent work on training, compression, and rendering.
+Most variants of 3DGS share a similar pipeline factorization: project gaussians to screen space,
+assign each to overlapping render tiles, globally sort all (tile, depth) pairs, then rasterize each tile
+© 2026 NVIDIA. All rights reserved.
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+independently. This factorization maps cleanly onto GPU rasterization primitives, but also introduces a
+fundamental trade-off at its core related to the tile size. Partitioning favors large tiles: a larger spatial
+cell is less likely to be straddled by any single gaussian’s screen-space extent, so the (tile, gaussian) pair
+count—and every dependent stage of binning, sort, and intersection testing—shrinks with tile area.
+Rasterization, on the other hand, favors small tiles. As tile area grows, more gaussians overlap each tile
+and a larger fraction of pixel–gaussian evaluations fall outside the gaussian’s effective support, inflating
+per-pixel work with computations that contribute nothing to the final image. The one-block-per-tile
+dispatch compounds the imbalance: a few dense tiles dominate frame time. 3DGS ties both stages
+to a single render-tile size and pays both costs: the global radix sort over composite tile-depth keys
+processes tens of millions of pairs per frame at 4K and consumes several milliseconds, while rasterizer
+time varies by several multiples across viewpoints of the same scene (Fig. 3, left).
+A growing body of work targets these costs along two axes: input-side reduction through pair
+compaction, pruning, and model compression [3, 5, 9, 11, 32, 34], and in-pipeline acceleration through
+kernel-level optimization, restructured rasterizer parallelism, or two-pass sort variants [8, 21, 33]. These
+approaches retain the shared-tile-size constraint and the trade-off it forces. A few software approaches
+do depart from this factorization, but pay for it with approximate compositing or alternative rendering
+substrates [12, 16, 40]. A separate hardware line resolves the trade-off architecturally—by sorting at
+coarser-than-tile granularity while preserving exact compositing—but realizes the design on custom
+hardware datapaths [13, 17].
+We present HiGS, a rendering architecture that resolves the same trade-off on commodity GPUs
+by decoupling partitioning from rasterization granularity. Gaussians are binned and depth-sorted at
+a coarse macro-tile granularity—a grouping of render tiles processed jointly—while a rasterization
+kernel dispatches at the finer render-tile granularity, determining per-tile visibility inline and reusing
+each loaded gaussian across all member tiles from local storage. The work decomposition transitions
+from (tile) to (macro-tile, gaussian-batch): dense macro-tiles spawn proportionally more bounded-work
+units, so resources scale with gaussian density rather than screen area, eliminating the tail effect
+by construction. From this single decoupling, segmented sorting, cross-tile data reuse, and densityproportional load balancing emerge as architectural consequences. Across every tested scene and
+resolution, HiGS is faster than every rasterizer in our benchmark, with no observable image-quality loss.
+Our contributions form a single pipeline built around the macro-tile primitive:
+• a two-scale spatial hierarchy that decouples partitioning from rasterization granularity, resolving
+the tile-size trade-off at 3DGS’s core;
+• a dynamically load-balanced rasterizer that computes per-tile visibility inline during the
+cooperative gaussian load and balances work at three levels—dense macro-tiles spawn more
+processing units, worker groups claim render tiles from a shared queue, and a per-worker
+scheduling buffer absorbs per-tile density variation before fixed-rate blending—eliminating the
+rasterizer tail effect on commodity GPUs;
+• a fully asynchronous on-device segmented depth sort that runs as a cascade of tier-classified
+per-segment block sorts, with oversized segments handled by a device-built merge tree consumed
+by a persistent kernel, scaling across orders of magnitude of segment sizes without host
+involvement;
+• a half-precision data path stabilized by Cholesky factors of conics, which turn the Mahalanobis
+quadratic into a sum of squares free of fp16 cancellation.
+2
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+2. Related Work
+Kerbl et al. [14] established the tile-based rendering architecture for 3D Gaussian Splatting: project
+gaussians to 2D, assign each to overlapping tiles via axis-aligned bounding boxes, globally sort all (tile,
+depth) pairs, and rasterize each tile with one thread block. gsplat [38] popularized this design through
+a widely adopted open-source implementation. Subsequent work falls along three axes—reducing
+the input to the pipeline, accelerating the pipeline itself, and improving rendering fidelity or training
+efficiency.
+Pair reduction. A line of research targets the false-positive tile–gaussian pairs that drive sort and
+rasterization cost. Opacity-aware bounding—computing the ellipse extent at the alpha detection
+threshold rather than at a fixed number of standard deviations—was introduced by StopThePop [32],
+FlashGS [5], and AdR-Gaussian [34]; Speedy-Splat [11] and Faster-GS [9] adopt and extend the
+technique. Tighter intersection tests followed: Speedy-Splat’s AccuTile traces per-row ellipse
+boundaries, AdR-Gaussian derives per-axis rectangular bounds from diagonal covariance entries,
+and FlashGS performs exact ellipse–rectangle intersection via algebraic edge comparisons. FlashGS
+additionally combines these reductions with kernel-level micro-optimizations across the projection
+and rasterization stages. Like these methods, HiGS reduces pair counts; in contrast, it does so by
+partitioning at coarser-than-render-tile granularity rather than by refining the per-tile assignment.
+Model-side reduction. Model-side reduction complements pair reduction by shrinking the gaussian
+set itself. Speedy-Splat applies sensitivity-based pruning during training, LightGaussian [3] performs
+vector-quantized model compression at training time, RadSplat [28] combines NeRF-supervised pruning
+with test-time visibility filtering to reduce the gaussian set by up to 10×, and Taming 3DGS [22]
+replaces 3DGS’s gradient-driven densification with a score-guided procedure under a user-specified
+budget, producing 4–5× smaller models at comparable quality. A parallel line of learned-codebook
+quantization approaches shrinks per-gaussian state: EAGLES [6] represents color, rotation, and
+opacity as MLP-decoded integer latents, Compact-3DGS [18] combines a learnable volume mask with
+R-VQ geometry codebooks and a hash-grid color field replacing per-gaussian spherical harmonics,
+and Compressed 3DGS [27] applies sensitivity-aware k-means clustering with quantization-aware
+fine-tuning and entropy coding. Mini-Splatting [4] reorganizes the gaussian distribution itself via
+blur split, depth reinitialization, and importance-weighted sampling; RetinaGS [19] scales 3DGS to
+billion-gaussian scenes via multi-GPU model parallelism. All of these input-side reductions compose
+with renderer-side acceleration: a compacted or compressed gaussian set fed to HiGS would compound
+the input reduction with the architectural speedup.
+Rendering acceleration. A second line of work accelerates the rendering pipeline itself. Beyond
+pair-count reduction, FlashGS fuses the preprocessing kernels, applies software pipelining across
+the dependent gaussian-fetch chain, and uses base-2 exponentials evaluated through the GPU’s
+special function unit. Splatshop [33] narrows sort keys by sorting visible splats by 32-bit depth before
+tile-fragment creation, reducing total sort cost by 1.5–1.9×. TC-GS [21] reformulates the alpha-blending
+exponent as a Tensor-Core matrix multiplication, reporting up to 2.1× speedup over 3DGS and further
+gains when layered on prior accelerators. Balanced 3DGS [8] addresses the rasterizer’s tail effect
+through dynamic inter-block tile dispatch, gaussian-wise warp collaboration with prefix-product
+transmittance shuffles, and fine-grained 4-pixel scheduling units. A separate group of approaches
+departs from exact front-to-back compositing: Sort-free Gaussian Splatting [12] replaces alpha
+blending with a commutative weighted sum, removing the depth-ordering requirement and per-pixel
+early termination while reporting PSNR comparable to alpha-blended 3DGS, while StochasticSplats [16]
+uses stochastic transparency over standard Z-buffering, exposing a samples-per-pixel knob that trades
+latency for image quality. Closer to the metal, Yuan and He [40] port the full pipeline to Vulkan—hardware
+3
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+Macro-tiles
+Macro-tile
+Processing units
+Batch 4:
+Processing unit
+Batch 2: 1,024 gaussians
+Render tile
+Pixels
+1,024 gaussians in local storage
+1,024
+Batch 3: 1,024 gaussians
+Render tiles
+depth
+Frame
+Batch 1: 1,024 gaussians
+Each macro-tile = 8×4 render tiles
+Sorted list fixed-size batches
+1 CTA per batch
+Per-tile visibility masks
+worker groups claim tiles
+8×8 pixels, alpha blending
+from local storage
+Figure 2: Hierarchical work decomposition. HiGS organizes rendering coarse-to-fine, from macro-tile groupings
+down to per-pixel blending. Render tiles (8×8 pixels) are grouped into macro-tiles of 8×4 render tiles—the coarse
+unit at which binning and depth sort operate. Each macro-tile’s sorted gaussian list is split into fixed-size batches
+of 1,024 gaussians, and each batch is assigned to one processing unit; dense macro-tiles spawn more processing
+units. Within each processing unit, per-tile visibility masks identify which gaussians overlap each render tile, and
+worker groups claim active tiles dynamically. Each worker group then rasterizes its 8×8-pixel tile via front-to-back
+alpha blending, reading all data from local storage.
+blending for forward, programmable blending via fragment-shader interlock for backward—reaching
+3× forward speedup at fp16, at the cost of per-pixel transmittance early-termination and softwaremanaged shared memory. Hardware proposals go further still: GSCore [17] proposes a custom ASIC
+combining shape-aware oriented-bounding-box intersection, hierarchical sorting that overlaps with
+rasterization, and a per-subtile visibility bitmap, GauRast [20] extends the GPU triangle rasterizer at
+the RTL level with native gaussian alpha evaluation, and GSAcc [37] proposes a custom ASIC that
+exploits temporal depth speculation across frames combined with a gaussian-centric dataflow. Jo
+and Park [13] propose GS-TG, an ASIC accelerator that decouples sort and rasterization granularities.
+Of these, GS-TG is the closest in spirit to HiGS, sharing the same two-level decoupling of coarse
+sorting from fine rasterization. The authors report, however, that on a GPU its per-gaussian bitmask
+cannot be generated concurrently with the sort, leaving preprocessing slower than the baseline and
+motivating their dedicated accelerator. Unlike these acceleration approaches, which fuse stages, swap
+compositing models, or move to alternative hardware, HiGS restructures the partitioning–rasterization
+hierarchy while retaining the standard exact-alpha rendering model on a commodity GPU.
+Quality, view consistency, and training. A complementary strand of work prioritizes rendering fidelity
+or training-time efficiency rather than primary-visibility throughput. StopThePop [32] introduces
+per-ray depth ordering with a hierarchical rasterizer (warp-level, sub-tile, and per-pixel sort queues) and
+opacity-aware tile culling, eliminating popping artifacts at roughly 4% overhead. Mip-Splatting [39]
+introduces a 3D smoothing filter that band-limits each primitive to its training-view Nyquist rate,
+paired with a 2D Mip filter approximating the physical pixel box filter, eliminating dilation and erosion
+artifacts under out-of-distribution sampling rates and adopted by several subsequent works as a
+default anti-aliasing front-end. In [10] authors replace the affine projection with perspective-correct
+Plücker-coordinate evaluation and combine a sorted alpha-compositing core with an order-independent
+tail accumulator. 3D Gaussian Ray Tracing [26] departs from rasterization entirely via OptiX with
+icosahedral mesh proxies, enabling secondary ray effects at the cost of roughly 2× slower primary
+visibility. Complementing this, 3DGUT [36] retains rasterization while replacing the affine EWA
+projection with the unscented transform, propagating sigma points through the camera model to
+support distorted and rolling-shutter cameras; by aligning its formulation with that of 3D Gaussian Ray
+Tracing, the same representation supports a hybrid scheme that rasterizes primary rays and traces
+secondary rays for reflections and refractions. On the training side, Taming 3DGS [22] introduces
+a per-splat backward parallelization that replaces 3DGS’s per-pixel atomic-contention pattern with
+warp-collaborative gradient accumulation; Faster-GS [9] integrates this scheme with a fused Adam
+4
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+optimizer and reports up to 5× faster training end-to-end. DISTWAR [2] addresses the same backward
+atomic-contention bottleneck through a complementary mechanism, a warp-level reduction primitive
+that aggregates gradient updates in registers before issuing one atomic per warp. These directions are
+complementary to HiGS, which targets primary-visibility throughput at a fixed rendering model and
+integrates upstream of these refinements.
+Throughput-focused prior work falls into two camps. The pair-reduction, model-side, and renderingacceleration approaches above retain the per-tile factorization: they reduce inputs, accelerate individual
+stages, or restructure rasterizer parallelism, but leave global sorting and per-tile scheduling intact. The
+remaining approaches depart from that factorization at different costs: custom hardware datapaths
+(GSCore, GauRast, GSAcc, GS-TG) that sort locally and preserve exact compositing on dedicated silicon;
+compositing models that trade exact alpha blending or per-pixel early termination (Sort-free Gaussian
+Splatting, StochasticSplats, Yuan and He’s Vulkan port); and ray tracing (3D Gaussian Ray Tracing),
+which preserves exact compositing at reduced primary-visibility throughput. HiGS demonstrates that
+design directions recently explored for custom hardware pipelines translate efficiently to commodity
+GPUs. Realizing this required redesigning the pipeline around new partitioning, sorting and rasterization
+algorithms.
+3. Architecture
+HiGS is organized around a macro-tile hierarchy: binning and depth sorting operate at coarse macro-tile
+granularity, while rasterization dispatches at the finer render-tile granularity within each macro-tile. This
+reshapes work decomposition from screen-area-proportional to density-proportional and eliminates
+the rasterizer tail effect inherent to single-tile-size pipelines.
+The remainder of this section walks the pipeline data flow shown in Fig. 2, from binning onward:
+the macro-tile hierarchy (Section 3.1), gaussian partitioning (Section 3.2), segmented depth sort
+(Section 3.3), macro-tile rasterization with post-blend compositing (Section 3.4), and the half-precision
+numerical representation (Section 3.5). The description is hardware-agnostic; GPU-specific mappings,
+including the standard fused projection and spherical-harmonic evaluation front-end [5, 9], are deferred
+to Section 4.
+3.1. Macro-tile hierarchy and work decomposition
+Tile size in a tile-based gaussian splatting pipeline sits between two opposing pressures. The
+partition-and-sort cost favors large tiles: a larger spatial cell is less likely to be straddled by any single
+screen-space gaussian extent, so the (tile, gaussian) pair count drops with tile area, shrinking the work
+for every binning, sort, and intersection-test stage downstream. The rasterization cost favors small
+tiles: as tile area grows, more gaussians overlap each tile, each pixel pays more work, and a larger
+fraction of gaussian–pixel evaluations land outside the gaussian’s effective support. 3DGS [14] ties
+both stages to a single render-tile size and lives on one point along this trade-off; HiGS separates the
+two scales so each can be set independently.
+The separation is realized as a two-level spatial hierarchy built bottom-up over the standard
+rasterization unit. The render tile (8 × 8 pixels) is the fine-grained primitive shared with 3DGS-style
+pipelines; HiGS groups 𝑀 adjacent render tiles (𝑀 =32 in our implementation, arranged as 8 × 4 render
+tiles spanning 64 × 32 pixels) into a macro-tile, the coarse-grained unit at which binning, depth sort, and
+data locality all operate. Binning and depth sort run at macro-tile granularity (Sections 3.2 and 3.3)—
+segmented sort produces per-macro-tile depth-ordered gaussian lists—while rasterization dispatches
+at render-tile granularity (Section 3.4), with per-render-tile visibility masks and per-render-tile blending.
+5
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+Gaussians per tile
+bottleneck
+2000
+10000
+10000
+8000
+8000
+1500
+6000
+6000
+1000
+4000
+4000
+500
+0
+12000
+0
+50
+100
+150
+Render tile (1 row)
+200
+2000 batch bound (1024)
+0
+0
+5
+10
+Gaussians
+one thread block per tile
+2500
+2000
+15
+20
+Macro-tile (1 row)
+25
+30
+0
+Figure 3: Work imbalance during rendering (from Fig. 1 center scan-line). Left: standard 3DGS assigns one thread
+block per tile which leads to load-imbalance and GPU under-utilization. Right: HiGS groups tiles into coarser
+macro-tiles and divides each macro-tile’s gaussians into fixed-size batches. Dense macro-tiles spawn more work
+that is both bounded and more concurrent at the thread block level.
+Within each macro-tile, gaussian data is loaded into local storage once and reused across all 𝑀 member
+render tiles, amortizing the fetch over fine-grained output.
+Work is decomposed coarse-to-fine to match. Each macro-tile’s depth-sorted gaussian list is split
+into fixed-size gaussian batches of 𝐵𝑟 gaussians (𝐵𝑟 =1,024 in our implementation), and each (macro-tile,
+batch) pair becomes one independent processing unit: a macro-tile holding 𝑛 gaussians spawns ⌈𝑛/𝐵𝑟 ⌉
+units. Within each processing unit, render tiles are claimed dynamically by worker groups from a shared
+tile work queue 𝒬, and a per-worker scheduling buffer ℛ absorbs the per-tile variability in visible-gaussian
+count so the blending pipeline runs at a fixed rate. The schedule is therefore density-proportional
+rather than screen-area-proportional: compute scales with gaussian count, and no single render tile
+can gate the frame the way the slowest tile gates a one-thread-group-per-tile assignment. Figure 3
+illustrates the decomposition.
+The macro-tile decomposition trades memory for parallelism. Per-macro-tile gaussian lists, per-batch
+partition histograms, and per-batch partial blending buffers are all preallocated up front so that
+binning batches, sort segments, and rasterization processing units run concurrently without dynamic
+allocation or producer–consumer stalls. The resulting footprint scales with the number of macro-tile
+gaussian batches in the frame—roughly linearly in scene density at fixed resolution—and is an explicit
+consequence of replacing 3DGS’s serial-by-tile model with a density-proportional schedule.
+3.2. Gaussian partitioning
+Binning constructs a per-macro-tile depth-keyed gaussian list. Each macro-tile’s gaussian count is
+data-dependent and unknown a priori; building per-macro-tile lists in parallel across millions of gaussians
+requires reconciling write positions without serializing through global atomics. Kerbl et al. [14] address
+this by fusing list construction with depth ordering: a count pass records per-gaussian tile-overlap
+counts, a global prefix scan converts them to write offsets, and a fill pass emits composite-key records
+into an unordered global buffer; a subsequent radix sort over the composite key simultaneously groups
+records by tile and orders them by depth. The per-tile list structure is materialized inside the sort, which
+is the structural reason that sort must be global.
+Our binning produces per-macro-tile lists during binning, leaving only in-segment ordering for the
+downstream sort. Gaussians are processed in fixed-size partitioning batches of 𝐵𝑝 gaussians (𝐵𝑝 =8,192
+in our implementation), each batch handled cooperatively by one work group: the work group maintains
+6
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+1080p
+Scene
+gsplat AccuTile
+bicycle
+bonsai
+counter
+garden
+kitchen
+room
+stump
+12.0M
+6.6M
+10.6M
+11.9M
+12.0M
+9.1M
+8.4M
+7.56M
+4.16M
+6.39M
+8.22M
+8.06M
+5.31M
+5.39M
+Mean
+10.1M
+6.44M 1.51M
+4K
+Ours Reduction gsplat AccuTile
+2.15M
+0.74M
+1.05M
+2.60M
+1.81M
+0.77M
+1.45M
+82%
+89%
+90%
+78%
+85%
+91%
+83%
+31.9M
+21.2M
+34.3M
+29.5M
+34.8M
+30.5M
+22.9M
+85% 29.3M
+15.98M
+11.98M
+18.22M
+16.99M
+20.65M
+16.00M
+12.16M
+Ours Reduction
+2.95M
+1.21M
+1.80M
+3.41M
+2.69M
+1.39M
+2.03M
+91%
+94%
+95%
+88%
+92%
+95%
+91%
+16.00M 2.21M
+92%
+Table 1: Tile–gaussian pair counts (averaged across test cameras, Mip-NeRF 360 scenes, 8 × 8 render tiles).
+gsplat [38]: render-tile partitioning with opacity-aware AABB [32]. AccuTile: same opacity-aware AABB refined
+by per-row ellipse intersection [11], still at render-tile granularity. Ours: the same ellipse-refined intersection at
+macro-tile granularity. Reduction denotes pair count decrease of our scheme with respect to gsplat.
+a private histogram in local storage with one counter per macro-tile in the rendered frame, and
+accumulates batch-scoped overlap counts via local atomics rather than global ones. The accumulation
+fits in local storage because the frame’s macro-tile count is modest—roughly 1,000 entries at 1080p
+and 4,000 at 4K with our 64 × 32-pixel macro-tile size. A render-tile histogram at the same resolutions
+would carry 30,000–130,000 entries, exceeding commodity GPUs’ local-storage capacity by an order
+of magnitude and forcing a global-atomic path. Batch-local counts are then combined through a
+hierarchical prefix scan into per-macro-tile write offsets. The fill pass replays the same batched
+decomposition and writes (depth, gauss-id) pairs directly into each gaussian’s destination macro-tile
+range. The output is the segmented structure consumed by Section 3.3: per-macro-tile lists of 32-bit
+depth keys ready for in-segment sorting, with no global composite-key sort required.
+The gaussian-to-macro-tile intersection test uses a conservative per-row ellipse-contour scan
+applied at macro-tile granularity, following the AccuTile family [11] but one level coarser. Compared
+against a representative modern rasterizer—gsplat with opacity-aware AABB binning [32, 38]—mean
+pair counts drop from 10.1M to 1.51M at 1080p (85% reduction) and 29.3M to 2.21M at 4K (92%)
+(Table 1). The reduction splits between an AccuTile-style tile–ellipse intersection test and macro-tile
+coarsening on top.
+3.3. Segmented depth sort
+A segmented sort partitions the input into contiguous segments defined by an offset array and sorts
+each segment independently. Macro-tile binning produces exactly this structure: each of the 𝑁𝑀
+macro-tiles defines one segment containing its binned gaussians, and the sort key is depth. Segments
+are independent by construction—no synchronization or data exchange occurs between them.
+The segmented formulation also halves the sort key width. In gsplat [38], a global sort over all render
+tiles must distinguish which tile each entry belongs to, requiring composite keys that encode both
+the tile index and the depth—64 bits (32 bits for the tile-encoded index, 32 bits for depth). Because
+our sort operates within a single macro-tile, the segment index implicitly encodes spatial location: the
+key is the 32-bit depth value alone. Halving the key width halves the radix sort’s memory traffic per
+pass and reduces the number of radix passes from ⌈64/𝑟⌉ to ⌈32/𝑟⌉ for radix width 𝑟. Schütz et al. [33]
+observed the benefit of narrower sort keys within the same factorization, decomposing the 48-bit
+composite into a 32-bit depth sort of visible splats followed by a 16-bit tile-ID sort of the resulting
+fragments. The segmented formulation goes further: because each macro-tile defines an independent
+sort boundary, the tile-ID dimension is unnecessary and the sort operates on fewer entries—macro-tile
+7
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+pairs rather than render-tile fragments.
+Beyond key-width savings, the total entry count drops from the render-tile pair count to 𝑁macro
+macro-tile pairs (Table 1), and segment-level parallelism replaces the single global sort with 𝑁𝑀
+independent in-segment sorts. As resolution increases, the render-tile pair count grows but persegment workload stays bounded—more macro-tiles distribute gaussians into more, smaller segments.
+The practical consequence is resolution-stable sort performance: at 4K, our cascade sort remains below
+0.08 ms across all benchmark scenes versus 2.5–4.2 ms for a global radix sort over the same content
+(Table 3).
+3.4. Macro-tile rasterization
+3DGS materializes explicit per-tile gaussian lists—bitmask generation, counting, prefix sum, fill—before
+rasterization can begin. Our macro-tile rasterizer replaces these four stages with inline visibility
+determination during the gaussian load phase (Algorithm 1), at low marginal cost. Each processing unit
+consists of 𝑊 worker groups of 𝑃 threads each and executes the rasterization work for its (macro-tile,
+gaussian-batch) pair in two phases followed by a post-blend compositing pass. Two primitives recur in
+the pseudocode (Algorithms 1 and 2): Compact(mask ) returns the positions of the set bits of mask as a
+variable-length list of indices (a stream-compaction primitive), and TransposeMasks transposes the
+𝑃 ×𝑀 bit matrix of a mini-batch, turning per-gaussian tile masks into per-tile gaussian masks.
+Phase 1—Load and inline visibility. The processing unit cooperatively loads its batch of 𝐵𝑟 gaussians
+into local storage in 𝐾=⌈𝐵𝑟 /𝑃 ⌉ mini-batches of 𝑃 gaussians, one per thread of a worker group.
+During the load, each gaussian is tested against all 𝑀 render tiles using a conservative overlap test
+on its opacity-threshold ellipse (details in Section 4.5), producing a per-gaussian tile-visibility mask.
+Materializing such a mask through main memory at preprocessing time, as in the ASIC-targeted GS-TG
+pipeline [13], was observed to serialize bitmask generation with the sort and negate sort-cost savings
+on commodity GPUs; computing the mask inline during the cooperative load avoids that round-trip
+entirely. Phase 1 naturally produces per-gaussian information (which tiles does this gaussian overlap?),
+but Phase 2 requires per-tile information (which gaussians does this tile need?). A lightweight transpose
+(Algorithm 1, line 6) converts the per-gaussian tile masks into per-tile gaussian masks: for each
+mini-batch, every render tile receives a 𝑃 -bit mask whose bit 𝑔 marks whether mini-batch gaussian 𝑔
+overlaps it, so the 𝐾 such masks concatenated give the tile’s full visibility over the 𝐵𝑟 batch gaussians.
+This replaces the standard four-stage render-tile refinement pipeline with a single pass.
+Phase 2—Per-tile rasterization. Active render tiles are assigned to worker groups via the tile work queue
+𝒬 (Algorithm 1, lines 15–16). For each claimed tile, the worker group iterates over the precomputed
+mask, extracting only the visible gaussians from local storage. A scheduling buffer ℛ accumulates
+gaussian indices from the mask (Algorithm 2, lines 4–5), then drains them in fixed-size drain batches of
+𝐵𝑑 gaussians through an unrolled blending core (Algorithm 2, line 7). This decouples variable-rate mask
+iteration—some tiles have many visible gaussians, others few—from the fixed-rate blending arithmetic,
+keeping utilization high regardless of per-tile density. Blending uses front-to-back alpha compositing
+with half-precision accumulators tracking per-pixel RGBT. After each drain batch, a unanimous vote
+tests whether all pixels in the tile have reached transmittance saturation (Algorithm 2, line 8); if so, the
+worker group immediately claims the next tile from the queue.
+Post-rasterization compositing. Because each macro-tile’s depth-sorted gaussian list may span
+multiple batches processed by independent processing units, per-tile results are partial: each unit
+accumulates color and transmittance only for its batch’s visible gaussians. Correct compositing is
+possible because front-to-back alpha blending is associative over contiguous depth ranges [31]. If
+8
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+ALGORITHM 1: MacroTileRasterize(𝑚𝑡, batch). One processing unit handles a (macro-tile, batch) pair.
+Phase 1 parallelizes across gaussians (one per thread) to hide memory latency; each thread tests its
+gaussian against all 𝑀 tiles and TransposeMasks converts per-gaussian masks to per-tile masks. Worker
+group 0 builds a tile work queue 𝒬. In Phase 2, worker groups dynamically claim tiles from 𝒬—no group idles
+while tiles remain. (see Section 4.1 for implementation details.)
+Input: 𝑊 worker groups of 𝑃 threads each; local storage 𝒮
+𝑀 = render tiles per macro-tile; 𝐵𝑟 = gaussians in this batch;
+a mini-batch = 𝑃 gaussians (one per thread)
+1
+◁ mini-batches per batch
+𝐾 ← ⌈𝐵𝑟 /𝑃 ⌉;
+// Phase 1: Load + Inline Visibility (all worker groups)
+2
+3
+for 𝑘 ← group_id to 𝐾−1 step 𝑊 do
+𝑗 ← 𝑘 · 𝑃 + thread _id ;
+◁ groups stride over mini-batches
+◁ one gaussian per thread
+// gather gaussian data and convert to local tile-space frame
+4
+𝒮.pos[𝑗], 𝒮.conic[𝑗], 𝒮.color [𝑗] ← LoadGaussian(𝑚𝑡, 𝑗) ;
+// 𝑀 -bit mask: bit 𝑡 ↔ tile 𝑡
+5
+tile_mask ← OverlapTest(𝒮.pos[𝑗], 𝒮.conic[𝑗]) ;
+// transpose mask from per-gaussian → per-tile
+6
+𝒮.masks[𝑘·𝑀 + thread _id ] ← TransposeMasks(tile_mask )
+end
+8 Barrier();
+7
+// Transition: Build work queue (worker group 0 only)
+if group_id = 0 then
+⋁︀
+hit ← 𝐾−1
+𝑘=0 𝒮.masks[𝑘·𝑀 + thread _id ];
+11
+active ← Vote(hit ̸= 0) ∧ InBounds;
+12
+𝒬 ← Compact(active);
+9
+10
+◁ OR-reduce per tile
+◁ valid tile mask
+◁ tile work queue in local storage
+end
+14 Barrier();
+13
+// Phase 2: Tile Rasterization (all worker groups)
+while 𝑡 ← Claim(𝒬) do
+RasterizeTile(𝑡, 𝒮);
+17 end
+15
+◁ groups pull tiles dynamically
+16
+◁ → Algorithm 2
+batch 𝑖 produces partial color 𝐶𝑖 and residual transmittance 𝑇𝑖 for a tile, the final pixel color is
+𝐶 = 𝐶0 + 𝑇0 · 𝐶1 + 𝑇0 𝑇1 · 𝐶2 + · · · ,
+(1)
+∏︀
+with early termination when 𝑖 𝑇𝑖 < 𝜖. Each processing unit writes its partial RGBT only for tiles that
+have visible gaussians, using a sparse buffer indexed by a per-batch active-tile bitmask. A lightweight
+post-blend pass walks each render tile’s batch chain in depth order, accumulating Eq. (1) front-to-back
+with transmittance early-out. The pass is sequential across batches per tile but not a bottleneck in
+practice: each worker group reads a compact stream of partial RGBT records, and tiles that saturate
+early skip the remaining batches entirely.
+The rasterizer realizes the density-proportional decomposition promised in Section 3.1: processing
+units scale with gaussian count per macro-tile, render tiles within each unit are distributed dynamically,
+and the scheduling buffer ℛ decouples variable-rate filtering from fixed-rate blending.
+3.5. Numerical representation
+The rendering pipeline operates entirely in half precision. The motivation is memory rather than
+arithmetic: on the commodity GPUs we target, packed half-precision and single-precision share the
+9
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+ALGORITHM 2: RasterizeTile(𝑡, 𝒮). One worker group rasterizes one tile claimed from 𝒬 (Algorithm 1,
+line 15). The scheduling buffer ℛ (capacity 2𝐵𝑑 ) decouples variable-rate mask compaction (lines 4–5) from
+fixed-rate blending (lines 6–7): FrontToBackBlend always processes 𝐵𝑑 gaussians from local storage via
+front-to-back alpha compositing. Early-out (line 8) skips remaining mini-batches when all pixels saturate.
+Input: 𝑃 threads, each owns tile_size 2 /(2𝑃 ) pixel-pairs
+𝐵𝑑 = drain batch size; 𝐾 = mini-batches per batch (Alg. 1);
+ℛ = scheduling buffer
+1
+◁ per-pixel-pair accumulators
+2
+◁ scheduling buffer, capacity 2𝐵𝑑
+(𝑅, 𝐺, 𝐵, 𝑇 ) ← (0, 0, 0, 1);
+ℛ ← ∅;
+3 for 𝑘 = 0 to 𝐾−1 do
+4
+𝑚 ← 𝒮.masks[𝑘·𝑀 + 𝑡];
+5
+ℛ.EnqueueAll(𝑘·𝑃 + Compact(𝑚));
+6
+while |ℛ| ≥ 𝐵𝑑 do
+7
+FrontToBackBlend(ℛ.Dequeue(𝐵𝑑 ), 𝒮, 𝑅, 𝐺, 𝐵, 𝑇 );
+8
+if Unanimous(∀𝑝 : 𝑇 [𝑝] < 𝜀) then
+9
+goto line 14;
+10
+end
+11
+◁ iterate over mini-batches
+◁ 𝑃 -bit: bit 𝑔 = gaussian 𝑔 overlaps 𝑡
+◁ bulk push gaussian indices
+◁ drain full batches
+◁ all pixels saturated
+◁ early-out
+end
+end
+FrontToBackBlend(ℛ.Flush(), 𝒮, 𝑅, 𝐺, 𝐵, 𝑇 );
+14 StreamStore(tile_buf [𝑡], 𝑅, 𝐺, 𝐵, 𝑇 ) ;
+12
+13
+◁ drain remaining
+◁ write partial RGBT
+same math throughput, so the gain is not faster computation but smaller, cheaper data movement.
+Storing gaussian attributes in 16 bits halves their footprint in DRAM and in on-chip local storage.
+This doubles effective load/store throughput at each level, lets a processing unit keep twice as many
+gaussians resident, and halves the per-pixel accumulator state each worker carries in the rasterizer’s
+inner loop. Running the whole pipeline in a single format additionally removes the per-element
+conversions that a 16-bit-storage, 32-bit-compute design would pay on every load and store. Two
+half-precision hazards arise in the per-pixel Mahalanobis distance 𝑞 = (p − 𝜇)⊤ Σ−1 (p − 𝜇), where
+p is the pixel position, 𝜇 the projected gaussian center, and Σ its 2×2 screen-space covariance: a
+cancellation hazard in the algebraic form of 𝑞, and an overflow hazard in the magnitudes of the operands
+that build it. HiGS addresses each in the data representation rather than at runtime.
+Cancellation arises when Σ−1 is stored as the conic coefficients (𝐴, 𝐵, 𝐶): the quadratic form
+𝐴 · 𝑑𝑥2 + 2𝐵 · 𝑑𝑥 · 𝑑𝑦 + 𝐶 · 𝑑𝑦 2 in the pixel offset (𝑑𝑥, 𝑑𝑦) = p − 𝜇 has a mixed-sign cross term that is prone
+to catastrophic cancellation in half precision. HiGS stores Σ−1 as its Cholesky factors Σ−1 = 𝐿𝐿⊤ , so
+the Mahalanobis distance becomes a sum of squares: 𝑞 = (𝑙0 · 𝑑𝑥 + 𝑙1 · 𝑑𝑦)2 + (𝑙2 · 𝑑𝑦)2 . Each term is the
+square of a half-precision product and therefore non-negative regardless of rounding error, eliminating
+the precision collapse that would otherwise force single-precision arithmetic in the inner loop.
+Overflow arises when pixel and gaussian coordinates carry their absolute screen-space magnitudes
+into the products 𝑙𝑘 · 𝑑𝑥 and 𝑙𝑘 · 𝑑𝑦; at high resolution and with anisotropic gaussians, these products
+can approach the fp16 range limit. HiGS stores positions relative to the macro-tile center, keeping
+every coordinate, and every intermediate product entering the Mahalanobis evaluation, well within the
+fp16 range; the specific units and bounds are deferred to Section 4.5. TC-GS [21] identifies the same
+overflow hazard in its tensor-core polynomial evaluation and addresses it with an equivalent runtime
+shift (global-to-local coordinates); HiGS makes the shift part of the data layout, so it costs no runtime
+arithmetic.
+Both hazards become properties of the data representation rather than of runtime arithmetic.
+10
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+Compared against an fp32 reference rasterizer with the gaussian model held fixed, HiGS reaches
+67.0 dB PSNR without SH compression and 55.6 dB with the 32-byte SH-compression front end enabled
+by default (Table 5); the compositing algorithm itself is exact, and against ground-truth images both
+configurations produce no observable image-quality loss compared to the gsplat baseline (Section 5.3).
+The mapping of this representation to CUDA implementation is deferred to Section 4.5.
+4. Implementation
+While the architecture of Section 3 is hardware-agnostic, this section targets NVIDIA Blackwell GPUs.
+The subsections walk Fig. 2 in pipeline order: GPU mapping overview, projection and SH evaluation,
+gaussian partitioning, segmented depth sort, and macro-tile rasterization.
+4.1. GPU mapping overview
+The abstract concepts from Section 3 map directly to GPU execution primitives. For the rasterization
+kernel, the concrete mapping is:
+• Processing unit = one CUDA CTA (cooperative thread array): 𝑊 =10 warps of 𝑃 =32 threads (320
+threads total).
+• Worker group = one warp (𝑃 =32 threads): each warp corresponds to exactly one render tile.
+• Local storage = shared memory (∼27 KB per CTA).
+• Scheduling buffer = per-warp ring buffer in shared memory, drain batch 𝐵𝑑 =64.
+4.2. Projection and SH evaluation
+A single kernel replaces three separate DRAM-bound passes (projection, view-direction computation,
+SH evaluation). Each thread processes one gaussian end-to-end: camera-space transformation,
+2D covariance via Jacobian projection, Cholesky decomposition of the inverse covariance, inline
+view-direction computation, and degree-3 spherical harmonics evaluation. The outputs—2D positions,
+Cholesky conics, colors, and a compact per-warp visibility bitfield—are consumed by the partitioning
+and rasterization stages.
+As an optional bandwidth optimization, SH coefficients can be stored in a 32-byte packed
+representation. The compression applies YCoCg-R color-space conversion [23] to decorrelate channels,
+square-root gamma quantization (6 bits luma, 4 bits chroma), and per-basis percentile scaling computed
+from visible gaussians. Decoding uses a pure fp16 SIMD pipeline with PTX [30] byte-permute
+instructions for bitfield extraction, avoiding integer-to-float conversions. Per-gaussian SH bandwidth
+drops from 192 bytes (fp32) to 32 bytes—6× compression at 55 dB mean PSNR (Table 5). Inline
+decoding from this 32-byte representation reduces projection kernel runtime by 23% on average
+relative to streaming uncompressed fp16 coefficients. On large scenes (5–6 M gaussians), this stage
+is the dominant frame-time cost of the HiGS pipeline at 37–42 % of total frame time (Fig. 4), since
+per-gaussian projection and SH evaluation scale with gaussian count regardless of pipeline architecture.
+4.3. Gaussian partitioning
+The count-then-fill binning of Section 3.2 is realized as two CUDA passes over partitioning batches
+of 𝐵𝑝 =8,192 gaussians each. Both passes consume the per-warp visibility bitmask emitted by the
+projection front-end (Section 4.2), so culled gaussians never reach the intersection test.
+11
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+Count pass. One CTA per batch builds a private shared-memory histogram of macro-tile hits using the
+modified AccuTile intersection [11] on the Cholesky factors of the inverse covariance. The histogram
+is flushed to DRAM as packed uint16 pairs, producing an 𝑁𝐵 × 𝑁𝑀 matrix where 𝑁𝑔 is the scene’s
+gaussian count, 𝑁𝐵 = ⌈𝑁𝑔 /𝐵𝑝 ⌉ is the number of partition batches, and 𝑁𝑀 is the number of macro-tiles
+in the frame (𝑁𝑀 ≈ 103 at 1080p, 4 × 103 at 4K). With each count stored as a 16-bit unsigned integer
+(two cells per 32-bit word), the histogram occupies 2𝑁𝐵 𝑁𝑀 bytes—small relative to the gaussian set
+itself.
+Prefix sum. A two-level scan over the DRAM histogram widens the packed 16-bit batch counts to 32-bit
+totals and global write offsets, producing two arrays in a single pass: per-macro-tile total gaussian
+counts, which become the segment boundaries consumed by the sort (Section 4.4); and per-batch
+starting write offsets, one base per (batch, macro-tile) cell, used by the fill pass below.
+Fill pass. The second pass replays the per-batch intersection using the same visibility bitmask, and
+each hit deposits a (depth, gaussian-id) record at its precomputed offset. Depth is stored as raw
+IEEE 754 float bits reinterpreted as int32, exploiting the property that positive floats sort correctly
+under unsigned integer comparison. The output pair list occupies 8𝑁macro bytes for 𝑁macro macro-tile
+pairs (4-byte depth key + 4-byte gaussian-id; Table 1).
+Together with the sort cascade below, partitioning constitutes the intersection+sort group in Fig. 4;
+binning accounts for roughly 60–70 % of that group’s time (0.10–0.13 ms at 1080p), with the remainder
+spent in the sort cascade (Table 3).
+4.4. Segmented depth sort
+Tier cascade. The segmented depth sort (Section 3.3) is implemented as a four-tier block radix sort
+cascade followed by a persistent merge phase for overflow segments. The entire pipeline is fully
+asynchronous: all kernel launches return immediately, with no host-device synchronization until the
+sorted results are consumed by the rasterizer. Each tier sorts the depth keys produced in Section 4.3
+via four 8-bit radix passes using CUB’s block radix ranking primitives [24].
+Tier
+CTA Size
+Capacity
+Role
+T0
+T1
+T2
+T3
+64
+128
+256
+512
+≤1,024
+1,025–2,048
+2,049–4,096
+4,097–8,192
+Majority of segments
+Emits overflow descriptors
+Each tier is launched with one CTA per segment; each CTA checks whether its segment falls in the
+tier’s size range and either sorts or early-returns. Adjacent tiers overlap execution via Programmatic
+Dependent Launch [29] (PDL, SM ≥ 9.0), avoiding a full kernel-completion barrier between independent
+size classes and hiding tier-launch latency.
+Overflow path. Segments exceeding 8,192 items are handled by an overflow path. The T3 epilog splits
+each overflow segment into 8,192-item blocks and emits overflow descriptors to device memory. A
+persistent block-sort kernel then claims and sorts these blocks via an atomic work counter, with no
+host synchronization. The sorted blocks are merged via a binary merge tree constructed device-side:
+leaf nodes merge pairs of adjacent 8,192-item runs, and internal nodes double the run size at each level.
+A persistent merge kernel processes this tree through a device-side FIFO work queue—CTAs claim
+merge partitions via atomic operations, and upon completion enqueue the parent node’s partitions
+when all children are finished. Each merge partition uses a GPU merge-path algorithm [7]: CTA-level
+partitioning via warp-cooperative binary search determines balanced sub-problems, which are then
+12
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+merged sequentially in shared memory.
+Asynchronous coordination. The entire cascade—tiered block sorts, persistent overflow sort, and
+persistent merge—executes as a sequence of non-blocking kernel launches on a single CUDA
+stream. Inter-kernel coordination (overflow descriptors, merge-tree metadata, FIFO queue state) is
+communicated entirely through device-side atomic counters and memory fences. Sort is no longer a
+frame-time bottleneck: it accounts for 30–41 % of intersection+sort time and under 0.08 ms even at 4K
+(Table 3).
+4.5. Macro-tile rasterization
+Numerical format. The Cholesky factorization from Section 3.5 is realized in fp16 through prescaled
+[︀
+]︀
+factors, macro-tile-relative coordinates, and half2 packing. The factors 𝐿 = 𝑙𝑙01 𝑙02 are prescaled to
+√︀
+absorb the ln → log2 base conversion and tile-unit coordinate scaling (𝑙𝑘′ = 𝑙𝑘 · log2 (𝑒)/2 · tile_size), so
+that the rasterizer evaluates 𝛼 = opacity · exp2 (−𝑞) as a single half-precision exp2 instruction with no
+runtime base conversion. Pixel and gaussian positions are stored in tile units relative to the macro-tile
+center, with |𝑥| ≤ 4 and |𝑦| ≤ 2 for the 8 × 4 macro-tile layout. This bound, combined with the prescaled
+𝐿 factors above, keeps every operand entering the Mahalanobis evaluation comfortably below the
+fp16 range limit (Section 3.5). Throughout the pipeline, half2 packing processes two elements per
+instruction: the visibility test evaluates two tile columns simultaneously, and the rasterizer blends
+two pixel rows per accumulator pair. Three properties motivate the fp16 representation in this kernel.
+Shared-memory throughput is 4 bytes per cycle per thread, so packing gaussian attributes as half2
+both halves the shared memory they occupy and doubles the rate at which the blending loop reads
+them. Native fp16 evaluation avoids the fp16-to-fp32 conversions that a mixed-precision path would
+incur on every operand. Finally, fp16 halves register pressure, which matters here because the kernel
+maps relatively few threads to each tile’s pixels, so each thread holds many per-pixel accumulators.
+Mask transpose and tile dispatch. The per-tile mask transpose (Algorithm 1, line 6) is implemented as a
+5-stage warp-shuffle butterfly that transposes the 32 × 32 bit matrix in registers so that lane 𝑡 holds a
+word where bit 𝑗 indicates gaussian 𝑗 overlaps tile 𝑡—no atomics and no shared-memory bank conflicts.
+The tile work queue (Algorithm 1, lines 9–13) is built by warp 0 against a single shared-memory counter,
+keeping the contention warp-local.
+Blending loop and post-rasterization compositing. The scheduling buffer (Algorithm 2, line 2) is
+a 2𝐵𝑑 -entry ring buffer in shared memory. Gaussian indices are drained in batches of 𝐵𝑑 , with the
+blending loop 8× unrolled and indices loaded as batched 16-byte transactions (8 uint16 per load). The
+blending inner loop executes ∼11 half2 operations per pixel-pair per gaussian: the position delta 𝑑𝑥 and
+base Cholesky term 𝑢base
+= 𝑙0 · 𝑑𝑥 are hoisted outside the pixel-pair loop so that only the 𝑑𝑦-dependent
+0
+terms run per pair, and each gaussian requires just 4 shared-memory loads regardless of how many
+pixel-pairs the thread owns. After each drain batch, a warp-unanimous ballot vote tests whether
+all pixel-pairs have saturated transmittance (Algorithm 2, line 8); if so, the warp immediately claims
+the next tile. Partial RGBT results are written to a global-memory tile buffer via cache-bypassing
+streaming stores, so the partial buffers do not evict reused gaussian data from cache. The buffer
+itself is preallocated at frame start as a dense array indexed by (macro-tile batch, render tile within
+macro-tile), occupying 16 KB per batch slot at the default 8 × 8 render-tile size (32 tiles per macro-tile ×
+64 pixels per tile × 4 RGBT channels × 2 bytes for half precision); the total footprint is 16𝑁𝑅 KB for 𝑁𝑅
+macro-tile gaussian batches, and is the explicit cost of the per-batch parallelism that lets independent
+processing units write without coordination. Sparsity is recorded out-of-band: a per-batch 32-bit active
+mask flags which render tiles received gaussians, and the post-blend kernel reads only the flagged
+slots, leaving the dense buffer’s unused entries untouched.
+13
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+1080p (ms)
+8×8
+Scene
+4K (ms)
+16 × 16
+8×8
+16 × 16
+Gaussian# gsplat Ours gsplat Ours gsplat Ours gsplat Ours
+bicycle
+bonsai
+counter
+garden
+kitchen
+room
+stump
+Mean
+6.1M
+1.2M
+1.2M
+5.8M
+1.9M
+1.6M
+5.0M
+—
+3.51
+1.41
+2.22
+3.46
+2.66
+1.94
+2.24
+0.76
+0.29
+0.36
+0.83
+0.49
+0.34
+0.55
+2.49 0.52
+2.81
+1.02
+1.38
+2.77
+1.80
+1.28
+1.87
+0.89
+0.35
+0.43
+0.99
+0.59
+0.41
+0.62
+1.85 0.61
+8.13
+4.94
+7.36
+7.54
+7.90
+6.75
+5.84
+1.05
+0.57
+0.68
+1.10
+0.82
+0.66
+0.87
+6.92 0.82
+4.88
+2.22
+3.35
+4.72
+4.07
+3.05
+3.20
+1.16
+0.56
+0.72
+1.25
+0.90
+0.66
+0.84
+3.64 0.87
+Table 2: Total frame time (ms, median). Bold marks each pipeline’s best tile size. At matched 8 × 8: 4.8× at 1080p,
+8.4× at 4K. Tile-agnostic (best vs best): 3.6× at 1080p, 4.4× at 4K.
+A separate compositing kernel assigns one warp per render tile, walking the parent macro-tile’s
+batches in depth order and reading partial RGBT from the sparse tile buffer only when the perbatch active-tile bitmask has the tile’s bit set. The accumulation follows Eq. (1) front-to-back, with
+transmittance early-out skipping remaining batches once all pixels saturate. On small scenes (1.2–1.9 M
+gaussians), the macro-tile rasterizer is the dominant cost at 48–51 % of HiGS frame time (Fig. 4); the
+post-blend pass itself contributes a small fraction since most tiles saturate before the trailing batches
+arrive.
+5. Results
+5.1. Experimental setup
+We evaluate on seven scenes from the Mip-NeRF 360 dataset [1], spanning outdoor (bicycle, garden,
+stump) and indoor (bonsai, counter, kitchen, room) environments with gaussian counts ranging
+from 1.2M to 6.1M (Table 2), and on the nvcampus park capture for scaling experiments at six
+gaussian-budget caps from 5M to 75M (Fig. 5). All comparisons use the publicly-released Inria 3DGS
+pre-trained models (30K iterations, SH degree 3), the same source used by every prior-work rasterizer
+in Table 4.
+All timings are 100-iteration medians across the full COLMAP test camera split per scene (16–39
+cameras depending on scene). The baseline throughout is the unmodified gsplat renderer implementing
+the standard tile-based pipeline, taken at commit ed2557f; all other comparisons are against published
+prior work. Hardware is an NVIDIA RTX PRO 6000 Blackwell (SM 120, 188 SMs). The default tile size is
+8 × 8; we also evaluate 16 × 16 for tile-agnostic comparison. 32-byte SH compression is enabled for our
+pipeline.
+5.2. Performance
+Throughput comparison. Table 4 compares HiGS against six prior-work rasterizers on the same
+hardware. HiGS leads every scheme at both 1080p and 4K, with the speedup magnitude reflecting
+each scheme’s overall optimization scope. The original 3DGS introduces the tile-based pipeline with a
+fixed 3𝜎 tile margin, producing the largest gap (6.8–11.9 ×). gsplat, Speedy-Splat, and StopThePop use
+opacity-aware tile bounds in place of the fixed margin and cluster at 3.0–4.4 ×. Faster-GS and FlashGS
+14
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+3
+2
+4.9×
+1
+0
+8
+6
+2.9×
+3.2×
+3.0×
+3.1×
+10.2×
+8.7×
+7.0×
+4
+2
+0
+en om tump
+cle sai
+ter en
+s
+bicy bon coun gard kitch ro
+4K, 16×16 tiles
+2.8×
+2
+0
+4K, 8×8 tiles
+10.8× 6.9× 9.6×
+1080p, 16×16 tiles
+3 3.2×
+1
+7.6×
+en om tump
+cle sai
+ter en
+s
+bicy bon coun gard kitch ro
+4
+Frame time (ms)
+1080p, 8×8 tiles
+4.1×
+5.5×
+4.2×
+6.2×
+5.7×
+Rasterize
+3.0×
+en om tump
+cle sai
+ter en
+s
+bicy bon coun gard kitch ro
+Frame time (ms)
+Frame time (ms)
+4 4.6×
+Partitioning
+Frame time (ms)
+Projection & SH eval
+8
+6
+4
+2
+0
+4.2×
+4.0×
+4.6×
+3.8×
+4.5×
+4.7× 3.8×
+en om tump
+cle sai
+ter en
+s
+bicy bon coun gard kitch ro
+Figure 4: Per-stage timing breakdown across seven Mip-NeRF 360 scenes. Top: 8 × 8 tiles, bottom: 16 × 16
+tiles. Gray = baseline, blue = ours. Each bar stacks projection + SH evaluation (light), partitioning (medium), and
+rasterization (dark). At 8 × 8 tiles, the baseline is partitioning-dominated; at 16 × 16, the bottleneck shifts to
+rasterization—but our bars remain nearly unchanged in both cases.
+layer per-pixel rendering-stage optimizations on top of opacity-aware tile bounds, giving the smallest
+gap (1.8–2.2 ×).
+Per-stage breakdown. The per-stage breakdown (Fig. 4) explains the magnitude of the gap. The
+baseline (gsplat) splits roughly evenly between partitioning (46–60% of frame time at 1080p) and
+rasterization (26–33%) at 8 × 8 tiles; at 4K, partitioning rises to 61–73% because render-tile pair counts
+roughly triple from 1080p to 4K (Table 1), and the global radix sort alone consumes 29–46% of total
+baseline frame time at 1080p and 44–57% at 4K. HiGS’s macro-tile pair count grows only 1.3–1.8 × from
+1080p to 4K, against 2.5–3.4 × for every render-tile scheme; with the partition bottleneck cut, HiGS’s
+per-stage profile is preprocessing-dominated on large scenes (37–42% on bicycle, garden, stump at
+5.0–6.1 M gaussians) and rasterization-dominated on small ones (48–51% on bonsai, counter, kitchen,
+room at 1.2–1.9 M). The result is resolution-stable frame time: mean 0.52 → 0.82 ms (1.6 ×) from 1080p
+to 4K against the baseline’s 2.49 → 6.92 ms (2.8 ×) on the same scenes (Table 2). This resolution
+stability is the quantitative signature of the density-proportional schedule (Section 3.1): per-unit work is
+bounded rather than screen-area-proportional (Fig. 3), so the slowest tile no longer gates the frame as
+it does under one-block-per-tile dispatch. This is the rasterizer tail effect that the macro-tile schedule
+removes by construction. Within this profile, the 32-byte SH representation (Section 4.2) cuts the
+projection kernel’s runtime by 23%, which reduces total frame time by 7% at 1080p and 4% at 4K on
+average across the seven scenes; the larger 1080p figure reflects projection’s higher share of frame
+time at lower resolution.
+Tile size sensitivity. The macro-tile decomposition is robust to render-tile choice (Table 2). Larger
+tiles (16 × 16) help the baseline by 17–38% at 1080p and 37–55% at 4K—the partition cost drops,
+but rasterization waste grows—and its bottleneck only shifts from partition-dominated to rasterizedominated. HiGS is 13–22% slower at 16 × 16 at 1080p and ranges from −4% to +14% at 4K, because
+15
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+Pairs
+Scene
+CUB Global Sort CUB Seg. Sort
+64b
+32b
+(ms)
+(ref) (ours) 1080p
+bicycle 12.0M 2.15M
+bonsai
+6.6M 0.74M
+counter 10.6M 1.05M
+garden 11.9M 2.60M
+kitchen 12.0M 1.81M
+room
+9.1M 0.77M
+stump
+8.4M 1.45M
+1.19
+0.47
+1.03
+1.16
+1.16
+0.80
+0.66
+(ms)
+4K 1080p
+3.92
+2.53
+4.17
+3.56
+4.24
+3.65
+2.55
+0.15
+0.10
+0.11
+0.12
+0.11
+0.10
+0.12
+Ours
+(ms)
+4K 1080p 4K
+0.28
+0.21
+0.25
+0.30
+0.29
+0.27
+0.28
+0.07 0.07
+0.04 0.05
+0.06 0.06
+0.07 0.07
+0.06 0.06
+0.04 0.05
+0.06 0.06
+Table 3: Sort-stage comparison (ms, median). Global CUB sorts 64-bit keys over all render-tile pairs; CUB Segmented
+and Ours sort 32-bit depth keys over macro-tile pairs. Pair counts are averages at 1080p.
+Ours (FPS)
+Scene
+#Gauss 1080p
+bicycle
+bonsai
+counter
+garden
+kitchen
+room
+stump
+6.1M
+1.2M
+1.2M
+5.8M
+1.9M
+1.6M
+5.0M
+Mean
+Speedup
+—
+—
+1316
+3460
+2809
+1199
+2049
+2967
+1818
+FlashGS
+4K 1080p
+949
+1745
+1471
+907
+1214
+1515
+1147
+1937 1214
+—
+—
+Faster-GS
+4K 1080p
+Speedy-Splat StopThePop
+gsplat
+3DGS
+4K 1080p
+4K 1080p
+4K 1080p
+4K 1080p
+4K
+454
+725
+754
+426
+568
+773
+626
+356
+839
+643
+336
+488
+708
+492
+415
+1156
+925
+418
+679
+934
+625
+296
+608
+456
+278
+343
+497
+407
+374
+1036
+789
+375
+615
+809
+560
+218
+481
+317
+225
+265
+348
+341
+205
+448
+298
+212
+246
+328
+304
+60
+167
+110
+94
+106
+104
+140
+765 499
+2.53 2.43
+643
+3.01
+385
+3.16
+573 293
+3.38 4.14
+582 508
+1543 1121
+1212 746
+591 480
+852 541
+1466 907
+912 796
+599
+1471
+1302
+559
+931
+1353
+921
+893
+2.17
+897 588
+2.16 2.06
+670
+1.81
+TC-GS
+4K 1080p
+468
+1443
+1242
+466
+916
+1232
+682
+356
+981
+725
+360
+554
+782
+528
+541 275
+3.58 4.42
+163
+557
+343
+222
+295
+331
+371
+286
+102
+6.77 11.86
+Table 4: Throughput at 1080p and 4K (FPS, 1000/median ms) [5, 9, 11, 14, 21, 32, 38]. Ours uses 8 × 8 tiles with
+32-byte SH compression. Each prior-work scheme runs at its fastest configuration at 16 × 16 tiles with the same
+single tile-level depth ordering as ours (no per-pixel sort queues, no antialiasing). TC-GS reference works on top of
+Speedy-Splat rasterizer.
+the partition saving was already small. The fairest comparison is each pipeline at its best tile size: HiGS
+at 8 × 8 versus the baseline at 16 × 16 yields 3.6 × at 1080p and 4.4 × at 4K, matching the headline
+speedup against gsplat in Table 4.
+Sort cascade. Table 3 isolates the depth-sort stage. At 4K, a global radix sort over 64-bit composite
+keys reaches 2.5–4.2 ms; a CUB segmented radix sort over our 32-bit macro-tile segments reaches
+0.21–0.30 ms; the three-tier custom cascade described in Section 4.4 stays below 0.08 ms regardless
+of scene—a 42–73 × advantage over the global sort. Within the macro-tile intersection stage, sort
+accounts for 30–41% of the intersection time (0.04–0.07 ms at 1080p); the remainder is the binning
+count-and-fill passes. Sort is effectively eliminated as a pipeline bottleneck.
+Scaling with gaussian count. Figure 5 extends the comparison to the nvcampus park capture across
+six gaussian-budget caps from 5 M to 75 M. HiGS leads every scheme at every budget at both 1080p
+and 4K, and its frame time grows roughly linearly in gaussian count—from 1.25 to 9.97 ms at 1080p
+and 1.97 to 10.29 ms at 4K—preserving the resolution-stability property of Table 2. The gap against
+partitioning-bound schemes compresses with scene size: at 1080p the ratio over gsplat drops from
+4.2 × at 5 M to 2.9 × at 75 M as per-frame fixed overheads amortize, while 3DGS’s 4K frame time grows
+steeply across the same range (9.85 to 70.67 ms). FlashGS and Faster-GS keep a roughly 2 × gap across
+the full budget range, mirroring the Mip-NeRF 360 finding above.
+16
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+1080p
+Frame time (ms)
+102
+Test Camera View
+101
+100
+Tile gaussian pairs (M)
+4K
+5
+10
+20
+30
+60 75
+5
+10
+20
+30
+60 75
+HiGS
+gsplat
+Faster-GS
+FlashGS
+Speedy-Splat
+StopThePop
+3DGS
+102
+101
+5
+10
+20 30
+Gaussians (M)
+60 75
+5
+10
+20 30
+Gaussians (M)
+60 75
+Figure 5: Cross-scheme scaling on the nvcampus park scene reconstructed at six gaussian-budget caps (5M–75M).
+Top row: median frame time (ms, log scale) vs scene complexity at 1080p and 4K. Bottom row: corresponding
+tile–gaussian pair counts (millions, log scale). The test camera view is shown on the right.
+5.3. Image quality
+HiGS achieves high image quality both against ground truth and against the fp32 reference renderer,
+despite running fp16 arithmetic throughout the rasterization pipeline (Table 5). Against the COLMAP
+test set HiGS attains 27.68 dB PSNR—the same level as existing fp32 rasterizers—and 67 dB against
+the gsplat baseline reconstructed output. At 8 bits per channel, 67 dB corresponds to RMS error near
+0.1 of one code value, well below a single quantization step, so the deviation is not representable in the
+displayed 8-bit image. The absolute-quality spread across every scheme in the table is just 0.04 dB:
+rendering-kernel differences all sit below the trained gaussian model’s residual error against the test
+set.
+The rendering-kernel comparison against gsplat fp32 baseline spans 45 dB across schemes, and
+each scheme’s offset traces to a specific design choice. Speedy-Splat and StopThePop reach the
+∼94 dB ceiling, reproducing the fp32 reference to numerical precision. 3DGS sits ∼20 dB lower because,
+as noted by StopThePop [32], its fixed 3𝜎 tile-touch bound can be too small for the renderer’s 1/255
+contribution threshold on sufficiently opaque gaussians, causing above-threshold tile contributions
+to be omitted. Faster-GS sits at a similar level for a different reason: it evaluates the transmittance
+termination threshold after compositing rather than before, and does not apply the min(0.99, 𝛼)
+stability clamp the reference applies during blending. HiGS’s 67 dB level is set by fp16 accumulation
+and a transmittance termination check evaluated at drain-batch boundaries (every 𝐵𝑑 gaussians)
+rather than per-gaussian; the SH-compressed variant pays an additional 11 dB. FlashGS reaches 50 dB
+because its final pixel buffer is 8-bit per channel; internal precision is bounded below the requantization
+noise floor regardless of upstream choices.
+The kernel-level spread is therefore a sensitive microbench rather than a perceptual signal: HiGS
+trades ∼27 dB of fp32-reference fidelity for fp16 throughput, drain-batch transmittance, and 6 × SH
+bandwidth reduction, and these choices remain imperceptible against ground truth.
+17
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+vs. gsplat baseline
+Method
+PSNR
+Ours w/o SH comp.
+Ours w/ SH comp.
+FlashGS
+Faster-GS
+Speedy-Splat
+StopThePop
+3DGS
+gsplat
+67.03
+55.59
+49.74
+73.86
+94.43
+94.37
+75.04
+—
+vs. ground-truth
+SSIM LPIPS PSNR
+.9999
+.9995
+.9983
+1.0000
+1.0000
+1.0000
+1.0000
+—
+.0000
+.0007
+.0010
+.0000
+.0000
+.0000
+.0000
+—
+27.68
+27.67
+27.65
+27.68
+27.68
+27.68
+27.68
+27.68
+SSIM LPIPS
+.8649
+.8645
+.8633
+.8649
+.8649
+.8649
+.8649
+.8649
+.1034
+.1034
+.1046
+.1035
+.1034
+.1034
+.1034
+.1034
+Table 5: Image quality means under two comparison protocols. Left: rendered output vs. fp32 gsplat baseline at
+1920 × 1080 — isolates rendering-pipeline differences with the gaussian model held fixed. Right: rendered output
+vs. COLMAP test images at factor-4 native resolution — measures absolute image quality. Metrics: PSNR (dB),
+SSIM [35], and LPIPS [41] via AlexNet. The left (vs-gsplat) PSNR is a numerical-precision microbenchmark; against
+ground truth (right) all schemes lie within 0.04 dB of each other.
+6. Discussion and Limitations
+Dataset scope Results span seven Mip-NeRF 360 [1] scenes (1.2–6.1 M gaussians) and the larger
+nvcampus capture (up to ∼75 M gaussians), covering both the standard small-scene benchmark and
+the multi-tens-of-millions regime relevant to production capture. Within this range the macro-tile
+schedule’s load-balancing property holds without scene-specific tuning, and the pipeline’s per-stage
+costs (Table 2) extrapolate roughly linearly in gaussian count; we have not validated on scenes outside
+this scale. A separate dimension we do not exercise is feature-parity comparison with per-pixel sort
+queues or antialiasing enabled across schemes.
+Forward-only The current implementation covers forward rendering; differentiable training is not
+addressed in this paper. Most of the architecture—macro-tile decomposition, per-macro-tile sort
+segments, batched rasterization with sparse active masks—carries over to a backward pass essentially
+unchanged, but three pieces of bookkeeping change shape. First, the post-blend reduction that
+composites partial RGBT slots into a single per-pixel value (Section 4.5) becomes a prefix scan: each
+batch’s backward step needs the cumulative RGB and T before that batch as starting state, which
+the forward pass currently produces and discards. Second, gradient accumulation needs to be
+re-introduced in fp32 even though forward keeps the per-pixel state in fp16; the algebraic stability of
+the Cholesky form (Section 3.5) carries over, but the division by (1 − 𝛼) that reverses the alpha-blend
+amplifies fp16 rounding by up to 𝛼−2 near saturation and is the natural place for selective upcasting.
+Third, the per-pixel last-contributing-gaussian index that backward uses for early termination [14]
+becomes a per-(pixel, batch) index in our scheme, since transmittance can saturate inside any batch
+rather than at a single ordered position. None of these requires changing the macro-tile decomposition
+itself, and we expect the extension to be additive.
+Hardware specificity The architecture itself is hardware-agnostic (Section 3), and its numerical design
+rests on packed half-precision (half2) storage and arithmetic, available on NVIDIA desktop GPUs
+since Volta and Turing. The rasterizer’s per-block shared-memory footprint (∼27 KB; Section 4.1) sits
+well within the ∼100 KB per-SM shared memory of Ampere-class and newer desktop SKUs, so we
+expect the core pipeline to run well across commodity GPUs in that range, though we have not yet
+characterized performance on Ampere or Ada. The one launch-time dependency on recent hardware is
+the PDL-coordinated kernel chain (Section 4.4), which uses Hopper-class programmatic dependent
+launch; on architectures without it the same schedule can be expressed with conventional launches at
+18
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+some coordination cost.
+Complementary techniques Several published optimizations operate at orthogonal pipeline stages:
+training-time model compression [3], Faster-GS’s backward-pass acceleration [9], and SplatShop’s
+interactive editing [33] apply before, after, or alongside our rendering kernel, and large-scale and
+distributed schemes [15, 19] compose with renderer-side acceleration on a different scaling axis.
+FlashGS’s [5] software-pipelined fetch loop could be adopted in our per-batch rasterizer to overlap
+memory and compute; tensor-core blending [21] would primarily help in a math-bound regime, which is
+not where our profile sits. Per-pixel depth-ordering [32] is not directly composable: it would require
+materializing the per-pixel sort queues our macro-tile scheme deliberately avoids.
+7. Conclusion
+We have presented HiGS, a 3D-gaussian-splatting rendering architecture in which spatial partitioning
+and rasterization operate at different granularities. Across seven Mip-NeRF 360 scenes and the
+nvcampus capture, HiGS leads every prior-work rasterizer we evaluate at both 1080p and 4K, while
+preserving exact alpha compositing. We achieve this by decoupling the coarse (macro-tile) spatial
+partition from the fine (render-tile) rasterization grid, so that segmented sorting, rasterization, cross-tile
+data reuse, and density-proportional load balancing all follow as architectural consequences of a single
+decomposition rather than as independent optimizations.
+Extending HiGS to differentiable training is a natural next step; the macro-tile decomposition carries
+over to the backward pass, with the additional per-batch bookkeeping discussed in Section 6.
+Acknowledgement
+We would like to thank Zan Gojcic for his valuable guidance and support. We also thank Jorge Condor
+Lacambra for providing nvcampus dataset. We are grateful to Ruilong Li, Jean-Eudes Marvie, Qi Wu,
+and Nicolas Moenne-Loccoz for insightful discussions, feedback, and encouragement. Finally, we would
+like to thank David Lesage, Vincent Caux-Brisebois and Eric Shangguan for their help in integrating
+HiGS into gsplat.
+References
+[1] J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and P. Hedman. Mip-NeRF 360: Unbounded anti-aliased
+neural radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), 2022. 14, 18
+[2] S. Durvasula, A. Zhao, F. Chen, R. Liang, P. K. Sanjaya, and N. Vijaykumar. DISTWAR: Fast differentiable
+rendering on raster-based rendering pipelines. arXiv preprint arXiv:2401.05345, 2024. 5
+[3] Z. Fan, K. Wang, K. Wen, Z. Zhu, D. Xu, and Z. Wang. LightGaussian: Unbounded 3D Gaussian compression with
+15x reduction and 200+ fps. In Advances in Neural Information Processing Systems (NeurIPS), 2024. 2, 3, 19
+[4] G. Fang and B. Wang. Mini-splatting: Representing scenes with a constrained number of Gaussians. In
+European Conference on Computer Vision (ECCV), 2024. 3
+[5] G. Feng, S. Chen, R. Fu, Z. Liao, Y. Wang, T. Liu, B. Hu, L. Xu, Z. Pei, H. Li, X. Li, N. Sun, X. Zhang, and B. Dai.
+FlashGS: Efficient 3D Gaussian splatting for large-scale and high-resolution rendering. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 26652–26662, 2025. 2, 3, 5,
+16, 19
+19
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+[6] S. Girish, K. Gupta, and A. Shrivastava. EAGLES: Efficient accelerated 3D Gaussians with lightweight encodings.
+In European Conference on Computer Vision (ECCV), 2024. 3
+[7] O. Green, R. McColl, and D. A. Bader. GPU merge path: A GPU merging algorithm. In Proceedings of the 26th
+ACM International Conference on Supercomputing, ICS ’12, pages 331–340. ACM, 2012. 12
+[8] H. Gui, L. Hu, R. Chen, M. Huang, Y. Yin, J. Yang, and Y. Wu. Balanced 3DGS: Gaussian-wise parallelism
+rendering with fine-grained tiling. arXiv preprint arXiv:2412.17378, 2024. 2, 3
+[9] F. Hahlbohm, L. Franke, M. Eisemann, and M. Magnor. Faster-gs: Analyzing and improving gaussian splatting
+optimization, 2026. 2, 3, 4, 5, 16, 19
+[10] F. Hahlbohm, F. Friederichs, T. Weyrich, L. Franke, M. Kappel, S. Castillo, M. Stamminger, M. Eisemann,
+and M. Magnor. Efficient perspective-correct 3D Gaussian splatting using hybrid transparency. Computer
+Graphics Forum, 44(2), 2025. 4
+[11] A. Hanson, A. Tu, G. Lin, V. Singla, M. Zwicker, and T. Goldstein. Speedy-splat: Fast 3D Gaussian splatting with
+sparse pixels and sparse primitives. In Proceedings of the Computer Vision and Pattern Recognition Conference
+(CVPR), pages 21537–21546, June 2025. 2, 3, 7, 12, 16
+[12] Q. Hou, R. Rauwendaal, Z. Li, H. Le, F. Farhadzadeh, F. Porikli, A. Bourd, and A. Said. Sort-free Gaussian splatting
+via weighted sum rendering. In International Conference on Learning Representations (ICLR), 2025. 2, 3
+[13] J. Jo and J. Park. GS-TG: 3D Gaussian splatting accelerator with tile grouping for reducing redundant sorting
+while preserving rasterization efficiency. arXiv preprint arXiv:2509.00911, 2025. 2, 4, 8
+[14] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis. 3d gaussian splatting for real-time radiance field
+rendering. ACM Transactions on Graphics, 42(4), 2023. 1, 3, 5, 6, 16, 18
+[15] B. Kerbl, A. Meuleman, G. Kopanas, M. Wimmer, A. Lanvin, and G. Drettakis. A hierarchical 3D Gaussian
+representation for real-time rendering of very large datasets. ACM Transactions on Graphics, 43(4), 2024. 19
+[16] S. Kheradmand, D. Vicini, G. Kopanas, D. Lagun, K. M. Yi, M. Matthews, and A. Tagliasacchi. StochasticSplats:
+Stochastic rasterization for sorting-free 3D Gaussian splatting. In ICCV, 2025. 2, 3
+[17] J. Lee, S. Lee, J. Lee, J. Park, and J. Sim. GSCore: Efficient radiance field rendering via architectural support
+for 3D Gaussian splatting. In Proceedings of the 29th ACM International Conference on Architectural Support
+for Programming Languages and Operating Systems, Volume 3 (ASPLOS ’24), 2024. 2, 4
+[18] J. C. Lee, D. Rho, X. Sun, J. H. Ko, and E. Park. Compact 3D Gaussian representation for radiance field.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages
+21719–21728, 2024. 3
+[19] B. Li, S. Chen, L. Wang, K. Liao, S. Yan, and Y. Xiong. RetinaGS: Scalable training for dense scene rendering
+with billion-scale 3D Gaussians. arXiv preprint arXiv:2406.11836, 2024. 3, 19
+[20] S. Li, B. Keller, Y. Lin, and B. Khailany. GauRast: Enhancing GPU triangle rasterizers to accelerate 3D Gaussian
+splatting. In Proceedings of the 62nd ACM/IEEE Design Automation Conference (DAC), 2025. 4
+[21] Z. Liao, J. Ding, S. Cui, R. Gong, B. Hu, Y. Wang, H. Li, H. Wang, X. Zhang, and R. Fu. TC-GS: A faster Gaussian
+splatting module utilizing tensor cores. In SIGGRAPH Asia 2025 Conference Papers, 2025. 2, 3, 10, 16, 19
+[22] S. S. Mallick, R. Goel, B. Kerbl, M. Steinberger, F. V. Carrasco, and F. De La Torre. Taming 3dgs: High-quality
+radiance fields with limited resources. In SIGGRAPH Asia 2024 Conference Papers, SA ’24, New York, NY, USA,
+2024. Association for Computing Machinery. 3, 4
+[23] H. S. Malvar, G. J. Sullivan, and S. Srinivasan. Lifting-based reversible color transformations for image
+compression. In Proc. SPIE 7073, Applications of Digital Image Processing XXXI, page 707307, 2008. 11
+[24] D. Merrill and A. S. Grimshaw. Revisiting sorting for GPGPU stream architectures. Technical Report CS2010-03,
+Department of Computer Science, University of Virginia, 2010. 12
+20
+HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+[25] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng. NeRF: Representing scenes
+as neural radiance fields for view synthesis. In Computer Vision – ECCV 2020, pages 405–421. Springer, 2020. 1
+[26] N. Moenne-Loccoz, A. Mirzaei, O. Perel, R. de Lutio, J. Martinez Esturo, G. State, S. Fidler, N. Sharp, and Z. Gojcic.
+3D Gaussian ray tracing: Fast tracing of particle scenes. ACM Transactions on Graphics, 43(6), 2024. 4
+[27] S. Niedermayr, J. Stumpfegger, and R. Westermann. Compressed 3D Gaussian splatting for accelerated novel
+view synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR),
+pages 10349–10358, 2024. 3
+[28] M. Niemeyer, F. Manhardt, M.-J. Rakotosaona, M. Oechsle, D. Duckworth, R. Gosula, K. Tateno, J. Bates,
+D. Kaeser, and F. Tombari. RadSplat: Radiance field-informed gaussian splatting for robust real-time rendering
+with 900+ fps. arXiv preprint arXiv:2403.13806, 2024. 3
+[29] NVIDIA Corporation. CUDA programming guide: Programmatic dependent launch and synchronization.
+https://docs.nvidia.com/cuda/cuda-programming-guide/, 2025. Section 4.5. 12
+[30] NVIDIA Corporation. Parallel thread execution ISA version 9.3.
+parallel-thread-execution/, 2025. 11
+https://docs.nvidia.com/cuda/
+[31] T. Porter and T. Duff. Compositing digital images. In Proceedings of the 11th Annual Conference on Computer
+Graphics and Interactive Techniques (SIGGRAPH ’84), pages 253–259. Association for Computing Machinery,
+1984. 8
+[32] L. Radl, M. Steiner, M. Parger, A. Weinrauch, B. Kerbl, and M. Steinberger. StopThePop: Sorted Gaussian
+splatting for view-consistent real-time rendering. In ACM SIGGRAPH, 2024. 2, 3, 4, 7, 16, 17, 19
+[33] M. Schütz, C. Peters, F. Hahlbohm, E. Eisemann, M. Magnor, and M. Wimmer. Splatshop: Efficiently editing
+large Gaussian splat models. Computer Graphics Forum (Proc. HPG), 44(8), 2025. 2, 3, 7, 19
+[34] X. Wang, R. Yi, and L. Ma. AdR-Gaussian: Accelerating Gaussian splatting with adaptive radius. In SIGGRAPH
+Asia 2024 Conference Papers, 2024. 2, 3
+[35] Z. Wang, A. C. Bovik, H. R. Sheikh, and E. P. Simoncelli. Image quality assessment: From error visibility to
+structural similarity. IEEE Transactions on Image Processing, 13(4):600–612, 2004. 18
+[36] Q. Wu, J. Martinez Esturo, A. Mirzaei, N. Moenne-Loccoz, and Z. Gojcic. 3DGUT: Enabling distorted cameras
+and secondary rays in Gaussian splatting. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), 2025. 4
+[37] M. Yang, Y. Wang, C.-P. Lo, X. Zhang, S. Oruganti, and J. P. Kulkarni. GSAcc: Accelerate 3D Gaussian splatting
+via depth speculation and Gaussian-centric rasterization. In Proceedings of the 62nd ACM/IEEE Design
+Automation Conference (DAC), 2025. 4
+[38] V. Ye, M. Turkulainen, and the nerfstudio team. gsplat: An open-source library for Gaussian splatting. Journal
+of Machine Learning Research, 26, 2024. 1, 3, 7, 16
+[39] Z. Yu, A. Chen, B. Huang, T. Sattler, and A. Geiger. Mip-splatting: Alias-free 3D Gaussian splatting. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 19447–19456, 2024. 4
+[40] Y. Yuan and Q. He. Efficient differentiable hardware rasterization for 3D Gaussian splatting. arXiv preprint
+arXiv:2505.18764, 2025. 2, 3
+[41] R. Zhang, P. Isola, A. A. Efros, E. Shechtman, and O. Wang. The unreasonable effectiveness of deep features
+as a perceptual metric. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 586–595, 2018. 18
+21

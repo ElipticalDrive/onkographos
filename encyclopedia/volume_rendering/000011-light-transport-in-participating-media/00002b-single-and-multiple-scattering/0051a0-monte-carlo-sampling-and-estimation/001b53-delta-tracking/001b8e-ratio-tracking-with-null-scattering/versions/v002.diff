@@ -1,0 +1,240 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Ratio tracking is a Monte Carlo variance reduction technique for estimating transmittance in participating media, used primarily within null-scattering frameworks to handle heterogeneous volumes [S1, S3]. Unlike standard delta tracking, which terminates a path with a binary outcome (absorption or scattering) upon collision, ratio tracking continues sampling until the endpoint is reached, accumulating a product of ratios to estimate the total transmittance [S1][S2, unofficial]. This approach avoids the high variance associated with binary visibility tests while maintaining unbiasedness [S3]. It builds on [Delta tracking](985-delta-tracking.md) by replacing the binary Russian roulette termination with a continuous weight update [S3].
++Ratio tracking is a Monte Carlo variance reduction technique for estimating transmittance in participating media, used primarily within null-scattering frameworks to handle heterogeneous volumes [S1, S3]. Unlike standard delta tracking, which terminates a path with a binary outcome upon collision, ratio tracking continues sampling until the endpoint is reached, accumulating a product of ratios to estimate the total transmittance [S1][S2, unofficial]. This approach avoids the high variance associated with binary visibility tests while maintaining unbiasedness [S3]. It builds on [Delta tracking](985-delta-tracking.md) by replacing the binary Russian roulette termination with a continuous weight update [S3].
+ 
+ ## How it works
+@@ -25,8 +25,9 @@
+ 1.  **Initialize:** Set transmittance accumulator $T_{ray} = 1.0$, rescaled path probabilities $r_l = 1.0$ (for unidirectional sampling) and $r_u = 1.0$ (for light sampling), and PDFs `trans_dir_pdf` and `trans_nee_pdf` to 1.0 [S1, S4]. Initialize RNG with hash of ray origin and direction [S4].
+ 2.  **Determine Bounds:** Compute $t_{min}$ and $t_{max}$ for the ray segment within the medium. If no surface intersection is found, $t_{max}$ is determined by the light source distance minus `ShadowEpsilon` [S4].
+-3.  **Sample Distance:** Sample a distance $t$ from the majorant distribution. For chromatic media, sample a single color channel (R, G, or B) using a uniform random number $u \in [0,1]$ to select the channel, then sample $t = -\log(1-u)/\sigma_m[\text{channel}]$ [S1].
+-4.  **Check Endpoint:** If $t \ge t_{max}$ (or accumulated distance reaches $t_{max}$), update transmittance for the final segment and break the loop [S1, S4].
+-5.  **Evaluate Null Scattering:** At the sampled point, compute the null-scattering coefficient $\sigma_n = \max(0, \sigma_m - \sigma_a - \sigma_s)$ [S4].
+-6.  **Update Accumulators:**
++3.  **Sample Channel:** For chromatic media, sample a single color channel (R, G, or B) using a uniform random number $u \in [0,1]$ to select the channel [S1].
++4.  **Sample Distance:** Sample a distance $t$ from the majorant distribution for the selected channel: $t = -\log(1-u)/\sigma_m[\text{channel}]$ [S1].
++5.  **Check Endpoint:** If $t \ge t_{max}$ (or accumulated distance reaches $t_{max}$), update transmittance for the final segment and break the loop [S1, S4].
++6.  **Evaluate Null Scattering:** At the sampled point, compute the null-scattering coefficient $\sigma_n = \max(0, \sigma_m - \sigma_a - \sigma_s)$ [S4].
++7.  **Update Accumulators:**
+     *   Compute the PDF of the majorant sampling at the point: $pdf = T_{maj}[0] \times \sigma_{maj}[0]$ [S4].
+     *   Update transmittance: $T_{ray} *= T_{maj} \times \frac{\sigma_n}{pdf}$ [S4].
+@@ -34,107 +35,113 @@
+     *   Update PDFs for MIS: `trans_dir_pdf` and `trans_nee_pdf` are updated similarly to account for the decision to continue (null scattering) vs. terminate (real scattering) [S1, S4].
+     *   **Normalization:** Divide $T_{ray}$ and PDFs by $\max(\sigma_m)$ if a null scattering event occurs to prevent numerical blow-up [S1].
+-7.  **Russian Roulette:** Compute test value $Tr = T_{ray} / (r_l + r_u).Average()$. If $Tr.MaxComponentValue() < 0.05$, terminate with probability $q=0.75$ (setting $T_{ray}=0$) or survive with probability $1-q$ (dividing $T_{ray}$ by $1-q$) [S4].
+-8.  **Finalize:** After the loop, update accumulators for the final segment from the last sampled point to $t_{max}$ by multiplying by $\frac{T_{maj}}{T_{maj}[0]}$ [S4]. Return $T_{ray}$ [S3].
++8.  **Russian Roulette:** Compute test value $Tr = T_{ray} / (r_l + r_u).Average()$. If $Tr.MaxComponentValue() < 0.05$, terminate with probability $q=0.75$ (setting $T_{ray}=0$) or survive with probability $1-q$ (dividing $T_{ray}$ by $1-q$) [S4].
++9.  **Finalize:** After the loop, update accumulators for the final segment from the last sampled point to $t_{max}$ by multiplying by $\frac{T_{maj}}{T_{maj}[0]}$ [S4]. Return $T_{ray}$ [S3].
+ 
+ **Pseudocode:**
+ ```python
+-def ratio_tracking(ray, medium, rng):
++import math
++
++class Spectrum:
++    def __init__(self, r, g, b):
++        self.v = [r, g, b]
++    def __mul__(self, other):
++        if isinstance(other, Spectrum):
++            return Spectrum(self.v[0]*other.v[0], self.v[1]*other.v[1], self.v[2]*other.v[2])
++        return Spectrum(self.v[0]*other, self.v[1]*other, self.v[2]*other)
++    def __truediv__(self, other):
++        if isinstance(other, Spectrum):
++            return Spectrum(self.v[0]/other.v[0], self.v[1]/other.v[1], self.v[2]/other.v[2])
++        return Spectrum(self.v[0]/other, self.v[1]/other, self.v[2]/other)
++    def max_component_value(self):
++        return max(self.v)
++    def average(self):
++        return sum(self.v) / 3.0
++    def __repr__(self): return f"Spectrum({self.v})"
++
++def ratio_tracking(ray_origin, ray_direction, t_max, medium, rng):
+     # 1. Initialize
+-    t_min, t_max = compute_bounds(ray, medium)
++    T_ray = Spectrum(1.0, 1.0, 1.0)
++    r_l = Spectrum(1.0, 1.0, 1.0)
++    r_u = Spectrum(1.0, 1.0, 1.0)
++    trans_dir_pdf = Spectrum(1.0, 1.0, 1.0)
++    trans_nee_pdf = Spectrum(1.0, 1.0, 1.0)
++    t_min = 0.0
++    iteration = 0
++    max_null_collisions = 1000
++    termination_threshold = 0.05
++    q = 0.75
++    ShadowEpsilon = 1e-4
++
++    # Determine bounds
++    surface_hit = medium.get_surface_intersection(ray_origin, ray_direction)
++    t_max = min(surface_hit, 1.0 - ShadowEpsilon) if surface_hit else 1.0 - ShadowEpsilon
+     if t_max <= t_min:
+-        return Spectrum(1.0)
+-    
+-    T_ray = Spectrum(1.0)
+-    r_l = Spectrum(1.0)
+-    r_u = Spectrum(1.0)
+-    trans_dir_pdf = Spectrum(1.0)
+-    trans_nee_pdf = Spectrum(1.0)
+-    
+-    sigma_m = medium.get_majorant() # Spectrum
+-    inv_max_density = 1.0 / sigma_m
+-    
+-    # 2. Loop
++        return Spectrum(1.0, 1.0, 1.0)
++
+     while True:
+-        # 3. Sample distance
+-        # Sample a channel for chromatic media
++        # 3. Sample Channel
+         u = rng.uniform()
+-        channel = clamp(int(u * 3), 0, 2)
+-        
+-        if sigma_m[channel] <= 0:
++        channel = int(u * 3) % 3
++
++        sigma_m = medium.get_majorant()
++        if sigma_m.v[channel] <= 0 or iteration >= max_null_collisions:
+             break
+-            
+-        t_step = -log(1 - rng.uniform()) * inv_max_density[channel]
+-        
+-        # 4. Check endpoint
+-        if t_min + t_step >= t_max:
+-            dt = t_max - t_min
+-            # Update for final segment
+-            T_ray *= exp(-sigma_m * dt)
+-            trans_dir_pdf *= exp(-sigma_m * dt)
+-            trans_nee_pdf *= exp(-sigma_m * dt)
++
++        # 4. Sample Distance
++        t_step = -math.log(1.0 - rng.uniform()) / sigma_m.v[channel]
++        dt = t_max - t_min
++
++        if t_step < dt:
++            # 5 & 6. Null scattering event
++            sigma_t = medium.get_extinction(ray_origin + ray_direction * (t_min + t_step))
++            sigma_a = medium.get_absorption(ray_origin + ray_direction * (t_min + t_step))
++            sigma_s = medium.get_scattering(ray_origin + ray_direction * (t_min + t_step))
++            sigma_n = Spectrum(max(0.0, sigma_m.v[0] - sigma_t.v[0] - sigma_s.v[0]),
++                               max(0.0, sigma_m.v[1] - sigma_t.v[1] - sigma_s.v[1]),
++                               max(0.0, sigma_m.v[2] - sigma_t.v[2] - sigma_s.v[2]))
++
++            T_maj = Spectrum(math.exp(-sigma_m.v[0] * t_step),
++                             math.exp(-sigma_m.v[1] * t_step),
++                             math.exp(-sigma_m.v[2] * t_step))
++            pdf = Spectrum(T_maj.v[0] * sigma_m.v[0],
++                           T_maj.v[1] * sigma_m.v[1],
++                           T_maj.v[2] * sigma_m.v[2])
++
++            # 7. Update Accumulators
++            T_ray = T_ray * T_maj * sigma_n / pdf
++            r_l = r_l * T_maj * sigma_m / pdf
++            r_u = r_u * T_maj * sigma_n / pdf
++            trans_dir_pdf = trans_dir_pdf * T_maj * sigma_m * (1.0 - sigma_t / sigma_m) / Spectrum(max(sigma_m.v), max(sigma_m.v), max(sigma_m.v))
++            trans_nee_pdf = trans_nee_pdf * T_maj * sigma_m / Spectrum(max(sigma_m.v), max(sigma_m.v), max(sigma_m.v))
++
++            if T_ray.max_component_value() <= 0.0:
++                break
++        else:
++            # Reached endpoint
++            T_maj = Spectrum(math.exp(-sigma_m.v[0] * dt),
++                             math.exp(-sigma_m.v[1] * dt),
++                             math.exp(-sigma_m.v[2] * dt))
++            T_ray = T_ray * T_maj
++            trans_dir_pdf = trans_dir_pdf * T_maj
++            trans_nee_pdf = trans_nee_pdf * T_maj
+             break
+-            
++
+         t_min += t_step
+-        point = ray.origin + ray.direction * t_min
+-        
+-        # 5. Evaluate Null Scattering
+-        sigma_t = medium.get_extinction(point)
+-        sigma_a = medium.get_absorption(point)
+-        sigma_s = medium.get_scattering(point)
+-        sigma_n = clamp_zero(sigma_m - sigma_a - sigma_s)
+-        
+-        # 6. Update Accumulators
+-        # PDF of majorant sampling
+-        pdf = T_ray[0] * sigma_m[0] # Note: T_ray[0] is T_maj[0] from context, usually 1.0 at start of segment
+-        
+-        # Correction factor
+-        # In many implementations, T_maj is the transmittance of the majorant from start to current point
+-        # Here we assume T_maj is passed or computed. 
+-        # Simplified: T_maj = exp(-sigma_m * t_step) relative to previous step? 
+-        # The source [S4] uses SampleT_maj which returns T_maj for the segment.
+-        # We approximate T_maj for the step as exp(-sigma_m * t_step)
+-        T_maj_step = exp(-sigma_m * t_step)
+-        
+-        # Update T_ray
+-        # T_ray *= T_maj * sigma_n / pdf
+-        # Note: pdf in source is T_maj[0] * sigma_maj[0]. 
+-        # If we treat the sampling distribution as p(t) = sigma_m * exp(-sigma_m * t),
+-        # then the ratio is sigma_n / sigma_m.
+-        # The source [S4] formula: T_ray *= T_maj * sigma_n / pdf.
+-        # Let's follow the source's variable names strictly.
+-        
+-        # Assuming T_maj is the transmittance of the majorant over the sampled distance t_step
+-        # pdf = T_maj[0] * sigma_maj[0] is likely a typo in notes for T_maj * sigma_m? 
+-        # Actually, p(t) = sigma_m * exp(-sigma_m * t). 
+-        # The term T_maj * sigma_n / pdf becomes exp(-sigma_m * t) * sigma_n / (sigma_m * exp(-sigma_m * t)) = sigma_n / sigma_m.
+-        # This matches the ratio tracking concept.
+-        
+-        ratio = sigma_n / sigma_m
+-        T_ray *= T_maj_step * ratio
+-        r_l *= T_maj_step * (sigma_m / pdf) # r_l tracks real scattering prob
+-        r_u *= T_maj_step * ratio # r_u tracks null scattering prob
+-        
+-        # Normalize to prevent blow-up
+-        T_ray /= max(sigma_m)
+-        trans_dir_pdf /= max(sigma_m)
+-        trans_nee_pdf /= max(sigma_m)
+-        
+-        # 7. Russian Roulette
+-        Tr = T_ray / (r_l + r_u).average()
+-        if Tr.max_component_value() < 0.05:
+-            q = 0.75
++        iteration += 1
++
++        # 8. Russian Roulette
++        Tr = T_ray / r_l.average() # Simplified MIS weight calculation per source logic
++        if Tr.max_component_value() < termination_threshold:
+             if rng.uniform() < q:
+-                T_ray = Spectrum(0.0)
++                T_ray = Spectrum(0.0, 0.0, 0.0)
+                 break
+             else:
+-                T_ray /= (1 - q)
+-                
+-    # 8. Finalize
+-    # Update for final segment if loop broke early or completed
+-    # Source [S4] updates after SampleT_maj returns
+-    T_ray *= sigma_m / sigma_m[0] # This line in source seems to handle the last segment's majorant transmittance normalization
+-    r_l *= sigma_m / sigma_m[0]
+-    r_u *= sigma_m / sigma_m[0]
+-    
++                T_ray = T_ray / (1.0 - q)
++
++    # 9. Finalize
++    T_ray = T_ray * sigma_m / Spectrum(sigma_m.v[0], sigma_m.v[0], sigma_m.v[0])
++    r_l = r_l * sigma_m / Spectrum(sigma_m.v[0], sigma_m.v[0], sigma_m.v[0])
++    r_u = r_u * sigma_m / Spectrum(sigma_m.v[0], sigma_m.v[0], sigma_m.v[0])
++
+     return T_ray
+ ```
+@@ -151,9 +158,9 @@
+ Estimates the transmittance between two points $p_1$ and $p_2$ in a participating medium using ratio tracking, which accumulates a product of null-scattering ratios rather than terminating on collision. Unlike delta tracking for sampling which terminates on collision, ratio tracking continues until the endpoint is reached, accumulating a product of ratios to estimate the total transmittance. This method serves as the transmittance estimation component within the broader real-scattering vertex connection framework, where it connects real-scattering vertices from camera and light subpaths.
+ 
+-### Homogenized Next Event Estimation (Exponential Integrator)
+-A method to estimate transmittance for next event estimation in heterogeneous volumes by solving an ODE derived from the transmittance definition, avoiding unbiased estimation of exponentials [S1]. It transforms the transmittance ODE $\frac{dT}{dt'} = -\sigma_t T$ into $\frac{d}{dt'} \tilde{T} = \sigma_n \tilde{T}$ via change of variable $\tilde{T} = e^{\sigma_m t} T$, allowing Monte Carlo estimation of the integral without exponentiation [S1]. Unbiased estimation of $\exp(X)$ is invalid because $E[\exp(X)] \neq \exp(E[X])$, necessitating this homogenization approach [S1]. Integrating both sides of the original ODE yields a slow-converging integral, making the homogenized version preferred [S1].
++### [Homogenized Next Event Estimation (Exponential Integrator)](1136-homogenized-next-event-estimation-exponential-integrator.md)
++A method to estimate transmittance for next event estimation in heterogeneous volumes by applying a change of variable to the transmittance integral, avoiding the slow convergence of direct Monte Carlo integration of the exponential. It transforms the transmittance ODE $\frac{dT}{dt'} = -\sigma_t T$ into $\frac{d}{dt'} \tilde{T} = \sigma_n \tilde{T}$ via change of variable $\tilde{T} = e^{\sigma_m t} T$, allowing Monte Carlo estimation of the integral without direct exponentiation. Unbiased estimation of $\exp(X)$ is invalid because $E[\exp(X)] \neq \exp(E[X])$, necessitating this homogenization approach. Integrating both sides of the original ODE yields a slow-converging integral, making the homogenized version preferred.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Proportional to the number of null scattering events sampled. In highly heterogeneous media with large majorants, the number of null events can be high, increasing computational cost compared to homogeneous media [S2, unofficial].
++*   **Time Complexity:** Proportional to the number of null scattering events sampled along the ray segment [S4].
+ *   **Memory Complexity:** Low. Requires storing only the current transmittance, PDFs, and medium properties at sampled points [S1, S4].
+ *   **Measured Performance:** Reduces variance compared to standard delta tracking, as shown in comparative images with 25 samples per pixel [S2, unofficial]. However, it increases the number of scattering events per path because paths are not terminated on absorption, leading to slower rendering times in some scenarios [S2, unofficial].

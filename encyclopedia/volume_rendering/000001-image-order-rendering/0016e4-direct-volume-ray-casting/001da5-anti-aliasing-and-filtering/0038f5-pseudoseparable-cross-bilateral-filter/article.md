@@ -1,0 +1,153 @@
+# PseudoSeparable Cross Bilateral Filter
+
+Also called: AOHorizontalH, AOHorizontalL, AOVerticalH, AOVerticalL, AOHorizontalM, AOVerticalM
+
+## Overview
+The PseudoSeparable Cross Bilateral Filter is a screen-space post-processing technique used to smooth Ambient Occlusion (AO) data in direct volume ray casting [S1, unofficial]. It reduces computational cost by decomposing a 2D bilateral filter into two sequential 1D passes (horizontal and vertical) [S1, unofficial]. Unlike standard Gaussian blurs, it weights neighbors based on geometric consistency (depth and normal similarity) rather than just spatial proximity, making it suitable for preserving sharp silhouettes in volumetric scenes [S1, unofficial].
+
+## How it works
+The method operates on screen-space buffers containing ambient occlusion values, surface normals, and depth (trace distance) [S1, unofficial]. It processes the AO data in two passes: one horizontal and one vertical [S1, unofficial]. Each pass computes a weighted average of neighboring pixels, where weights are determined by a combination of spatial distance, depth difference, and normal alignment [S1, unofficial].
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   `AmbientOcclusionTarget`: Texture containing the raw AO values (float4) [S1, unofficial].
+    *   `NormalMap`: Texture containing surface normals (float3) [S1, unofficial].
+    *   `TraceDistance`: Texture containing depth/z-buffer values (float) [S1, unofficial].
+    *   `discreteWeights`: Precomputed 1D kernel weights array of size 15 [S1, unofficial].
+*   **Outputs**:
+    *   `AmbientOcclusionTarget`: Updated with the filtered AO values [S1, unofficial].
+
+### Data Structures
+1.  **BilateralData**: A struct holding the necessary information for a single pixel [S1, unofficial].
+    *   `Ao`: `float4` (Ambient Occlusion value) [S1, unofficial].
+    *   `Normal`: `float3` (Surface normal vector) [S1, unofficial].
+    *   `TraceDistance`: `float` (Depth value) [S1, unofficial].
+2.  **Shared Memory Array (`gsBilateralData`)**:
+    *   Used for thread cooperation within a thread group [S1, unofficial].
+    *   Size: `(2 * FilterSize) + ThreadLength` [S1, unofficial].
+    *   `ThreadLength` is `ThreadsX` for horizontal passes and `ThreadsY` for vertical passes [S1, unofficial].
+    *   Stores `BilateralData` structs [S1, unofficial].
+3.  **discreteWeights**:
+    *   Array of 15 `float` values [S1, unofficial].
+    *   Index 0 corresponds to the center pixel [S1, unofficial].
+    *   Indices 1–14 correspond to neighbors at increasing distances [S1, unofficial].
+
+### Parameters
+*   `FilterSize`: Integer, radius of the filter kernel on each side [S1, unofficial]. Value: `14` [S1, unofficial].
+*   `epsilon`: Float, small constant to prevent division by zero in depth weight [S1, unofficial]. Value: `0.001` [S1, unofficial].
+*   `RangeSigma`: Declared in source but not used in the visible implementation [S1, unofficial].
+
+### Algorithm Steps
+The filter is applied in two distinct passes [S1, unofficial]. The logic for a single pass (horizontal or vertical) is as follows:
+
+1.  **Load Center Data**: Read `Ao`, `Normal`, and `TraceDistance` for the current pixel `uv` from input textures [S1, unofficial]. Store these in a local variable `centerData` [S1, unofficial].
+2.  **Shared Memory Initialization**: Calculate global thread ID `gtid.xy` [S1, unofficial]. Define padding offset `PAD(xy) = CASTDIR(xy) + FilterSize` [S1, unofficial]. Store `centerData` in shared memory at `gsBilateralData[PAD(gtid.xy)]` [S1, unofficial].
+3.  **Load Neighbors**: For `i` from 1 to `FilterSize`, calculate neighbor UV as `uv - (i * uvstep)` [S1, unofficial]. Sample `Ao`, `Normal`, `TraceDistance` using `sampler_point_clamp` to handle boundaries [S1, unofficial]. Store in `gsBilateralData[PAD(gtid.xy) - i]` [S1, unofficial]. Repeat for `uv + (i * uvstep)` storing in `gsBilateralData[PAD(gtid.xy) + i]` [S1, unofficial].
+4.  **Synchronization**: Execute a barrier/synchronization command to ensure all threads in the group have finished loading shared memory [S1, unofficial].
+5.  **Weighted Accumulation**: Initialize `filteredAo` and `totalWeight` using the center pixel data multiplied by `discreteWeights[0]` [S1, unofficial]. Loop `i` from 1 to `FilterSize` [S1, unofficial]. Iterate `sign` from -1 to 1 with step 2 [S1, unofficial]. Access neighbor data `bData` from `gsBilateralData[PAD(gtid.xy) + sign * i]` [S1, unofficial]. Compute weights: `depthWeight = 1.0 / (epsilon + centerData.TraceDistance * 0.01 + |centerData.TraceDistance - bData.TraceDistance|)` [S1, unofficial]. Compute `normalWeight = |dot(centerData.Normal, bData.Normal)|^32` [S1, unofficial]. Compute `combinedWeight = discreteWeights[i] * depthWeight * normalWeight` [S1, unofficial]. Update accumulators: `filteredAo += bData.Ao * combinedWeight` and `totalWeight += combinedWeight` [S1, unofficial].
+6.  **Normalization and Output**: Normalize filtered AO by dividing by total weight [S1, unofficial]. Write result to `AmbientOcclusionTarget` [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+FILTER_SIZE = 14
+EPSILON = 0.001
+DISCRETE_WEIGHTS = [0.0] * 15  # Precomputed array of 15 floats
+
+class BilateralData:
+    def __init__(self, ao, normal, trace_distance):
+        self.Ao = ao
+        self.Normal = normal
+        self.TraceDistance = trace_distance
+
+# Shared memory array: gsBilateralData = [None] * ((2 * FILTER_SIZE) + THREAD_LENGTH)
+
+def cast_dir(x, y, stride):
+    return x + y * stride
+
+def get_uv_step(direction, width, height):
+    if direction == 'horizontal':
+        return (1.0 / width, 0.0)
+    else:
+        return (0.0, 1.0 / height)
+
+def clamp(val, min_val, max_val):
+    return max(min_val, min(val, max_val))
+
+def apply_pseudo_separable_bilateral_filter(uv, direction, width, height, threads_x, threads_y):
+    center_ao = load_ao(uv)
+    center_normal = load_normal(uv)
+    center_depth = load_trace_distance(uv)
+    center_data = BilateralData(center_ao, center_normal, center_depth)
+
+    gtid_x, gtid_y = uv_to_thread_id(uv, width, height)
+    thread_idx = cast_dir(gtid_x, gtid_y, threads_x)
+    pad_offset = thread_idx + FILTER_SIZE
+
+    gsBilateralData[pad_offset] = center_data
+
+    uv_step = get_uv_step(direction, width, height)
+
+    for i in range(1, FILTER_SIZE + 1):
+        uv_lower = (uv[0] - i * uv_step[0], uv[1] - i * uv_step[1])
+        lower_ao = load_ao(uv_lower)
+        lower_normal = load_normal(uv_lower)
+        lower_depth = load_trace_distance(uv_lower)
+        gsBilateralData[pad_offset - i] = BilateralData(lower_ao, lower_normal, lower_depth)
+
+        uv_upper = (uv[0] + i * uv_step[0], uv[1] + i * uv_step[1])
+        upper_ao = load_ao(uv_upper)
+        upper_normal = load_normal(uv_upper)
+        upper_depth = load_trace_distance(uv_upper)
+        gsBilateralData[pad_offset + i] = BilateralData(upper_ao, upper_normal, upper_depth)
+
+    sync_threads()
+
+    filtered_ao = center_data.Ao * DISCRETE_WEIGHTS[0]
+    total_weight = DISCRETE_WEIGHTS[0]
+
+    for i in range(1, FILTER_SIZE + 1):
+        for sign in [-1, 1]:
+            neighbor_idx = pad_offset + sign * i
+            b_data = gsBilateralData[neighbor_idx]
+
+            depth_diff = abs(center_data.TraceDistance - b_data.TraceDistance)
+            depth_weight = 1.0 / (EPSILON + center_data.TraceDistance * 0.01 + depth_diff)
+
+            normal_dot = dot(center_data.Normal, b_data.Normal)
+            normal_weight = pow(abs(normal_dot), 32)
+
+            combined_weight = DISCRETE_WEIGHTS[i] * depth_weight * normal_weight
+
+            filtered_ao += b_data.Ao * combined_weight
+            total_weight += combined_weight
+
+    final_ao = filtered_ao / total_weight if total_weight > 0 else center_data.Ao
+    write_to_ao_target(uv, final_ao)
+```
+
+### Edge Cases and Pitfalls
+*   **Boundary Handling**: The filter uses `sampler_point_clamp` for neighbor sampling [S1, unofficial]. This clamps UV coordinates to the texture edges, effectively replicating the edge pixel values for out-of-bounds accesses [S1, unofficial].
+*   **Arbitrary Depth Factor**: The term `centerData.TraceDistance * 0.01` in the depth weight denominator is an arbitrary linear factor introduced in the implementation [S1, unofficial]. Its impact on visual quality is not theoretically derived in the source [S1, unofficial].
+*   **Unused Parameter**: `RangeSigma` is declared but not used in the visible code, suggesting it may be a remnant of a different filter variant or intended for future use [S1, unofficial].
+*   **Division by Zero**: The `epsilon` constant (`0.001`) prevents division by zero in the depth weight calculation when depth differences are negligible [S1, unofficial].
+
+## Subtopics
+
+### Bilateral AO Map Filtering
+An optimization strategy to generate a low resolution AO map and use joint bilateral upsampling to resample the HAO map at screen resolution while filtering noise [S2]. It approximates the non-separable bilateral filter in two passes (one horizontal, one vertical) to improve frame rate [S2]. The method computes the filtered AO at pixel `x` as $h_{m \times m}(x) = \frac{\sum_{y \in Q} w_d(x, y) w_r(x, y) h_0(y/k)}{\sum_{y \in Q} w_d(x, y) w_r(x, y)}$, where $Q$ is the set of pixels in an $m \times m$ square centered on $x$ [S2]. The spatial weight is $w_d(x, y) := w(\|x - y\|, m)$ [S2]. The range weight combines normal, position, and height influences: $w_r(x, y) := w_n(x, y) \cdot w_p(x, y) \cdot w_h(x, y)$ [S2]. Normal influence is $w_n(x, y) := w(1 + \langle n(x), n(y) \rangle, 2)$ [S2]. Position influence is $w_p(x, y) := w(\|p(x) - p(y)\|, e_{max})$ [S2]. Height influence is $w_h(x, y) := w(\|h_0(x/k) - h_0(y/k)\|, 1)$ [S2]. Here, $p(x)$ is the object space position extracted from the Z map, $n(x)$ is the normal extracted from the normal map, $h_0$ is the low resolution AO map, and $k$ is the scale ratio between high and low resolution maps [S2]. The non-separable filter is approximated as $\tilde{h}_{m \times m}(x) := h_{1 \times m}(h_{m \times 1}(x))$ [S2]. Defining the range space according to object space entities avoids AO bleeding between distant objects projected closely in image space [S2].
+
+## Operating characteristics
+*   **Time Complexity**: $O(N \cdot K)$, where $N$ is the number of pixels and $K$ is the filter radius (14) [G]. The separable approach reduces the 2D complexity $O(N \cdot K^2)$ to two 1D passes $O(2 \cdot N \cdot K)$ [G].
+*   **Memory Complexity**: $O(K \cdot T)$ for shared memory, where $T$ is the thread group size [G]. This is minimal compared to full 2D kernel storage [G].
+*   **Performance**: The method is efficient for real-time rendering due to the separable decomposition and use of shared memory [S1, unofficial]. However, the bilateral weighting (dot product, power, division) per neighbor is more expensive than a simple Gaussian blur [G].
+*   **Strengths**: Preserves edges defined by depth and normal discontinuities, preventing AO bleeding across object boundaries [S1, unofficial].
+*   **Limitations**: Computationally heavier than simple box or Gaussian filters [G]. The arbitrary depth factor may require tuning for different scenes [S1, unofficial]. Not suitable for scenes with high-frequency depth variation where the depth weight might become unstable [G].
+
+## Background
+The PseudoSeparable Cross Bilateral Filter is implemented in the codebase referenced by [S1, unofficial] for direct volume ray casting to improve the visual quality of ambient occlusion by smoothing noise while maintaining geometric sharpness [S1, unofficial]. The technique leverages standard screen-space post-processing techniques adapted for volumetric data [S1, unofficial].
+
+## Sources
+[S1] SphereTracing, https://github.com/nicoell/SphereTracing, fetched 2026-10-26 (unofficial)
+[S2] Hybrid Ambient Occlusion, https://doi.org/10.2312/ega.20091008.051-057, fetched 2026-11-03

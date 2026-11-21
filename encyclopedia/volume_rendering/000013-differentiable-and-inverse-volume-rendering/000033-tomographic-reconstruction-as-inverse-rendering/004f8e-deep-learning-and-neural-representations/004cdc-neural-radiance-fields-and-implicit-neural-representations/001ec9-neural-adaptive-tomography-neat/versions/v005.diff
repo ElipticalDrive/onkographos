@@ -1,0 +1,147 @@
+--- v004.md
++++ v005.md
+@@ -66,13 +66,13 @@
+     $$
+     where $\hat{I}_0(p)$ is the calibrated reference intensity at pixel $p$ [S1].
+-7.  **Loss Computation:** Calculate the total loss $L_{total}$ (see Formulas below).
++7.  **Loss Computation:** Calculate the total loss $L_{total}$ (see Formulas below) [S1].
+ 8.  **Backpropagation:** Compute gradients of $L_{total}$ with respect to:
+     *   Neural feature vectors $f_n$.
+     *   Neural decoder parameters.
+-    *   Camera poses (source/detector positions and rotations).
++    *   Camera poses (source/detector positions and rotations) [S1].
+     *   Photometric parameters ($I_0$, exposure multipliers) [S1].
+ 9.  **Optimization Step:** Update all parameters using an optimizer (e.g., Adam) [S1].
+ 10. **Octree Update:**
+-    *   Compute the volumetric error $E(n)$ for each leaf node $n$ (see Formulas below).
++    *   Compute the volumetric error $E(n)$ for each leaf node $n$ (see Formulas below) [S1].
+     *   Determine the optimal octree structure (splitting or merging nodes) based on $E(n)$ [S1].
+     *   Refine the octree: Split nodes with high error, remove empty nodes [S1].
+@@ -123,8 +123,9 @@
+ **Volumetric Error for Octree Update:**
+ $$
+-E(n) = \rho_{max}(n) \cdot \sum_{(p,t_n,t_f) \in \Omega_n} ||I(p) - \hat{I}(p)||^2
+-$$
+-*   $\Omega_n$: Set of all samples $(p, t_n, t_f)$ from any ray passing through node $n$, paired with pixel coordinates $p$.
++E(n) = \rho_{max}(n) \cdot \sum_{(p,t_n,t_f) \in \Omega_n} ||I(p) - \tilde{I}(p)||^2
++$$
++*   $\Omega_n$: Set of all samples $(p, t_n, t_f)$ from any ray passing through node $n$, paired with pixel coordinates $p$ [S1].
+ *   $\rho_{max}(n)$: Maximum density in node $n$, defined as $\max_{(p,t_n,t_f) \in \Omega_n} \mu(r_p(t))$ [S1].
++*   $\tilde{I}(p)$: Reprojection of the current volume estimate for pixel $p$ [S1].
+ 
+ ### Pseudocode
+@@ -132,4 +133,16 @@
+ ```python
+ import numpy as np
++
++class Ray:
++    def __init__(self, origin, direction, p_idx, t_near, t_far):
++        self.origin = origin
++        self.direction = direction
++        self.p_idx = p_idx
++        self.t_near = t_near
++        self.t_far = t_far
++
++def generate_ray(pose, p):
++    # pose: dict with 'origin', 'direction', 't_near', 't_far'
++    return Ray(pose['origin'], pose['direction'], p['idx'], pose['t_near'], pose['t_far'])
+ 
+ def find_leaf_in_octree(node, point):
+@@ -169,19 +182,22 @@
+     return r0*(1-fz) + r1*fz
+ 
+-def render_pixel(ray_origin, ray_direction, octree, decoder, I0, t_near, t_far):
+-    """Renders a single pixel using the NeAT pipeline."""
++def render_pixel(ray, octree, decoder, I0):
++    """Renders a single pixel using the NeAT pipeline and tracks traversed nodes."""
+     num_samples = 100
+-    step_size = (t_far - t_near) / num_samples
++    step_size = (ray.t_far - ray.t_near) / num_samples
+     density_integral = 0.0
++    traversed_nodes = []
+     for i in range(num_samples):
+-        t = t_near + i * step_size
+-        point = ray_origin + ray_direction * t
++        t = ray.t_near + i * step_size
++        point = ray.origin + ray.direction * t
+         node = find_leaf_in_octree(octree, point)
+         if node is not None:
++            if node not in traversed_nodes:
++                traversed_nodes.append(node)
+             f = query_features_in_leaf(node, point)
+             mu = decoder(f)
+             density_integral += mu * step_size
+-    I0_val = I0[ray.pixel_index]
+-    return I0_val * np.exp(-density_integral)
++    I0_val = I0[ray.p_idx]
++    return I0_val * np.exp(-density_integral), traversed_nodes
+ 
+ def compute_loss(measured_images, octree, decoder, I0, poses, lambda_tv, lambda_bc):
+@@ -190,5 +206,5 @@
+     tv_loss = 0.0
+     bc_loss = 0.0
+-    node_errors = {}
++    node_errors = {node: 0.0 for node in octree.leaves}
+     
+     for view_idx, (image, pose) in enumerate(zip(measured_images, poses)):
+@@ -196,32 +212,26 @@
+         for p in image.pixels:
+             ray = generate_ray(pose, p)
+-            rendered_view[p] = render_pixel(
+-                ray.origin, ray.direction, octree, decoder, I0, 
+-                ray.t_near, ray.t_far
+-            )
+-        
+-        error = (image - rendered_view) ** 2
+-        total_loss += np.sum(error)
+-        
+-        # Accumulate reprojection error per node for octree update
++            intensity, traversed_nodes = render_pixel(ray, octree, decoder, I0)
++            rendered_view[p] = intensity
++            error = (image[p] - intensity) ** 2
++            total_loss += error
++            for node in traversed_nodes:
++                node_errors[node] += error
++                
++        # TV loss computed on feature grids
+         for node in octree.leaves:
+-            if node not in node_errors:
+-                node_errors[node] = 0.0
+-            # Sum errors for rays passing through this node
+-            node_errors[node] += np.sum(error[node.ray_indices])
++            features = node.get_feature_grid()
++            tv_loss += np.sum(np.abs(np.gradient(features)))
+             
+-    for node in octree.leaves:
+-        features = node.get_feature_grid()
+-        tv_loss += np.sum(np.abs(np.gradient(features)))
+-        
+-    for n, m in octree.get_neighbor_pairs():
+-        boundary_points = n.get_boundary_surface(m)
+-        for x in boundary_points:
+-            f_n = n.query_features(x)
+-            f_m = m.query_features(x)
+-            bc_loss += np.sum(np.abs(f_n - f_m))
+-            
++        # BC loss computed on boundary surfaces
++        for n, m in octree.get_neighbor_pairs():
++            boundary_points = n.get_boundary_surface(m)
++            for x in boundary_points:
++                f_n = n.query_features(x)
++                f_m = m.query_features(x)
++                bc_loss += np.sum(np.abs(f_n - f_m))
++                
+     total_loss += lambda_tv * tv_loss + lambda_bc * bc_loss
+-    return total_loss, rendered_images, node_errors
++    return total_loss, rendered_view, node_errors
+ 
+ def update_octree(octree, node_errors, rho_max, split_threshold=1.0, merge_threshold=0.1):
+@@ -239,6 +249,6 @@
+ *   $\lambda_{tv}$: Total Variation regularizer strength. Typical values: 0.00002 for sparse view problems, 0.00010 for limited angle problems [S1].
+ *   $\lambda_{bc}$: Boundary Consistency regularizer strength. Typical value: 0.01 [S1].
+-*   $D$: Dimension of neural feature vectors. Not given in the sources.
+-*   Grid resolution per leaf node: Not given in the sources.
++*   $D$: Dimension of neural feature vectors. Not given in the sources [S1].
++*   Grid resolution per leaf node: Not given in the sources [S1].
+ 
+ ### Edge Cases and Pitfalls

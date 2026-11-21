@@ -1,0 +1,27 @@
+# Shading and Occlusion Models
+## Overview
+This family extends Direct Volume Ray Casting [19-direct-volume-ray-casting.md] by modifying the compositing step to incorporate lighting, shadows, and occlusion cues, thereby enhancing depth perception and visual clarity in volumetric data. Unlike standard DVR which relies solely on opacity-weighted accumulation, these methods integrate ambient occlusion, directional filtering, or image-space shadowing to simulate light transport effects . They are distinguished from [TVAM Integrator](6814-tvam-integrator.md) by their focus on local shading approximations rather than global illumination path tracing, and from [Cinematic Rendering](9473-cinematic-rendering.md) by their use of simplified or image-space techniques rather than full physically-based surface/volume interaction models.
+## Shared principles
+The methods in this family share the foundational mechanism of Direct Volume Ray Casting [19-direct-volume-ray-casting.md], including ray definition, sampling, interpolation, and transfer function mapping. However, they diverge in the **Compositing (Integration)** step (Step 4 of the parent's Shared principles). While standard DVR uses the front-to-back accumulation equation, specific applications modify this accumulation:
+*   **Summation:** Some modes simply sum interpolated scalar values without opacity weighting .
+*   **Path Tracing:** Others trace randomized photon paths to solve the multi-dimensional rendering equation, accounting for scattering and global illumination .
+*   **Layered Compositing:** Some render distinct material styles into separate layers and composite them post-hoc .
+*   **Occlusion-Aware Shading:** Others integrate in-scattered radiance approximations using cone-shaped phase functions during slice traversal .
+## Subtopics
+
+### [Directional Occlusion Shading](10970-directional-occlusion-shading.md)
+A slice-based technique that simulates ambient occlusion by integrating soft shadowing using a backward-peaked cone phase function. It differs from siblings by deriving occlusion factors from the radiative transport equation using a viewer-oriented cone, allowing semi-transparent materials to influence occlusion and enabling interactive clipping without precomputation.
+
+### [Directional Filtering for Occlusion Reduction](14417-directional-filtering-for-occlusion-reduction.md)
+A technique that modulates alpha values based on the alignment between local fiber directions (major eigenvectors) and a user-defined vector. It sets itself apart by leveraging full tensor directional information to selectively fade irrelevant fiber bundles, unlike methods relying on scalar invariants or surface-based approximations.
+
+### [ISMOS](15205-ismos.md)
+A unified image-space shading model that simulates hard shadows and ambient occlusion for both opaque and transparent media. It distinguishes itself by computing occlusion entirely in image space using multidirectional sampling, achieving results visually identical to ray-casting-based shadows but with decoupled post-processing overhead.
+
+## Background
+The specific origins of the family as a whole are not detailed in the provided sources. The constituent methods originate from various research efforts in medical visualization and interactive rendering: Directional Occlusion Shading and ISMOS are associated with research on efficient shading for volume rendering , while Directional Filtering for Occlusion Reduction is linked to diffusion tensor imaging (DTI) visualization .
+## Sources
+[S1] Directional Occlusion Shading, Directional Filtering, ISMOS notes.
+[S2] Compositional Rendering notes.
+[S3] TVAM Integrator notes.
+[S4] Directional Occlusion Shading notes.

@@ -1,0 +1,182 @@
+Error-bounded lossy compression methods enforce user-specified error bounds to optimize data storage, transfer, and analysis in scientific computing.
+
+Error-Bounded Lossy Compression Overview
+2000 character limit reached
+Error-Bounded Lossy Compression Overview
+Updated 10 July 2026
+Error-bounded lossy compression is a method that limits reconstruction error via absolute or relative bounds while maintaining critical data fidelity.
+It incorporates diverse algorithms, including prediction-based, transform-based, and deep learning models, to achieve high throughput and compression ratios.
+It ensures deterministic error control across CPU and GPU architectures, integrating advanced verification and adaptation techniques for consistent performance.
+Error-bounded lossy compression is a class of data-reduction methods in which reconstruction fidelity is controlled by a user-specified bound on distortion. In scientific computing, it has been effective in significantly reducing the data storage/transfer burden while preserving the reconstructed data fidelity very well, and many error-bounded lossy compressors have been developed for a wide range of parallel and distributed use cases for years (Di et al., 2024). The field spans prediction-based, transform-based, bit-manipulation-based, decimation/filtering-based, HOSVD-based, and deep learning–based models, with implementations targeting storage reduction, GPU-centric compression, distributed communication, deep learning training, and application-specific preservation of downstream analyses (Di et al., 2024).
+1. Formal guarantees and error models
+User-defined error control is the hallmark of modern scientific lossy compressors. The most common formulations are absolute and relative pointwise bounds. For absolute error, the requirement is
+∣diorig−direc∣≤ϵabs,|d_i^{orig} - d_i^{rec}| \leq \epsilon_{abs},∣diorig​−direc​∣≤ϵabs​,
+while relative error is expressed as
+∣diorig−direc∣≤ϵrel⋅∣diorig∣.|d_i^{orig} - d_i^{rec}| \leq \epsilon_{rel} \cdot |d_i^{orig}|.∣diorig​−direc​∣≤ϵrel​⋅∣diorig​∣.
+LC also summarizes normalized error as
+enoa=∣xoriginal−xreconstructed∣R≤ϵ,e_{noa} = \frac{|x_{original} - x_{reconstructed}|}{R} \leq \epsilon,enoa​=R∣xoriginal​−xreconstructed​∣​≤ϵ,
+where R=xmax−xminR = x_{max} - x_{min}R=xmax​−xmin​, and cuSZ-Hi writes the absolute-bound constraint as
+∥X−X′∥∞=max⁡i∣xi−xi′∣≤ϵ.\|X - X'\|_\infty = \max_i |x_i - x'_i| \leq \epsilon.∥X−X′∥∞​=imax​∣xi​−xi′​∣≤ϵ.
+These formulations distinguish strict pointwise guarantees from global criteria such as L2L^2L2-style control, which some transform- or decomposition-based compressors favor instead (Di et al., 2024, Fallin et al., 2024, Wu et al., 15 Jul 2025).
+A central technical distinction is between a theoretical bound and an implementation that actually preserves that bound for all supported inputs. LC explains why many error-bounded compressors occasionally violate the error bound: floating-point rounding, special values such as denormals, INFs, and NaNs, fused multiply-add behavior, math-library inconsistencies between CPU and GPU, and edge cases in integer handling can all produce correctness loopholes. LC addresses these cases with post-quantization verification, lossless storage of outliers, FMA suppression via compiler flags, custom IEEE 754-compliant approximations for critical math functions, and explicit two-sided integer checks. It reports that LC is the only tested compressor that meets all error bounds on all tested values, covering ALL 4 billion possible FP32 values—including INF, NaN, denormals—and that CPU and GPU compressed outputs are bit-for-bit identical (Fallin et al., 2024).
+An older but conceptually important bounding strategy uses lossless codes at reduced precision to constrain an arbitrary lossy compressor. In that formulation, an nnn-bit truncated representation establishes lower and upper bounds, and the lossy reconstruction is clamped into the admissible interval. The reconstruction rule can be written as
+xdecompressed=min⁡(max⁡(xl,xr), xr+2d−n−1),x_{\text{decompressed}} = \min\left(\max(x_l, x_r),\; x_r + 2^{d-n} - 1 \right),xdecompressed​=min(max(xl​,xr​),xr​+2d−n−1),
+which gives a strict absolute bound derived from the reduced-precision lossless code rather than from the internals of the lossy codec itself (Scoville, 2012).
+2. Compression models and core algorithmic pipelines
+A comprehensive survey organizes error-bounded lossy compression into six fundamental models: decimation/filtering-based compression, bit-manipulation-based compression, transformation-based compression, prediction-based compression, HOSVD-based compression, and deep learning–based compression. It also enumerates over ten major components, including pointwise data prediction, quantization, orthogonal or wavelet transforms, pointwise domain transforms, bit-plane coding, Tucker decomposition, decimation, filtering, lossless encoding, and deep neural networks. This modular view is important because state-of-the-art compressors are often assembled from interchangeable stages rather than from a single fixed algorithmic template (Di et al., 2024).
+Prediction-based compression is especially prominent because it combines high compression ratios with direct error-bound control. In a canonical predictor–quantizer pipeline, each data value is predicted from neighboring reconstructed values, the residual is quantized under the user-specified bound, and the resulting codes are entropy-encoded. cuSZ formulates the central guarantee as
+∣d−d∙∣<eb,|d - d^\bullet| < eb,∣d−d∙∣<eb,
+and removes the prediction step’s RAW dependency by a dual-quantization scheme:
+d∘=round(d2×eb).d^\circ = \mathrm{round} \left( \frac{d}{2 \times eb} \right).d∘=round(2×ebd​).
+cuSZ-Hi expresses the corresponding prediction-and-quantization stage as
+∣diorig−direc∣≤ϵrel⋅∣diorig∣.|d_i^{orig} - d_i^{rec}| \leq \epsilon_{rel} \cdot |d_i^{orig}|.∣diorig​−direc​∣≤ϵrel​⋅∣diorig​∣.0
+after interpolation-based prediction (Tian et al., 2020, Wu et al., 15 Jul 2025).
+Several later systems refine this template rather than replace it. cuSZ+ adds an adaptive workflow that selects run-length encoding and/or variable-length encoding according to smoothness and symbol statistics, and reconceptualizes first-order Lorenzo reconstruction as multidimensional partial-sum computation, enabling fine-grained GPU parallelism. The ratio-quality model paper then adds an analytical layer above prediction-based compressors: it estimates the quantized code distribution, models entropy coding, and predicts reconstructed-data quality and post-hoc analysis quality. Reported results include 93.47% accuracy on average for estimating compression ratio and the impact of lossy compression on post-hoc analysis quality, with computational cost up to 18.7X lower than the trial-and-error approach (Tian et al., 2021, Jin et al., 2021).
+3. Accelerator-centric implementations and strict bound enforcement
+GPU implementations have been a major driver of recent progress because accelerator-centric workflows require both high throughput and hard error control. cuSZ states that it is the first error-bounded lossy compressor on GPUs for scientific data, and reports compression throughput improvements by up to 370.1x and 13.1x, respectively, over the production version running on single and multiple CPU cores, respectively, while getting the same quality of reconstructed data. It also reports compression-ratio improvements by up to 3.48x on the tested data compared with another state-of-the-art GPU supported lossy compressor (Tian et al., 2020).
+cuSZ+ pushes this further by combining adaptive encoding selection with GPU-optimized Lorenzo reconstruction. It reports up to 18.4X improvement in compression throughput and up to 5.3X improvement in compression ratio over cuSZ on the tested datasets. cuSZ-Hi moves to interpolation-based prediction, quantization-code reordering, and optimized open-source lossless pipelines, with up to 249% compression ratio improvement under the same error bound and up to 215% compression ratio improvement under the same decompression data PSNR (Tian et al., 2021, Wu et al., 15 Jul 2025).
+The need for accelerator performance has also sharpened the distinction between nominal and guaranteed bounds. LC is explicitly designed to guarantee the error bound for all supported types of quantizers on CPU and GPU, while maintaining high compression ratios and causing no appreciable change in throughput. Its results show a negligible throughput loss, with compression/decompression speeds differing by less than 1%, despite the added verification and determinism mechanisms (Fallin et al., 2024).
+System
+Core mechanism
+Reported result
+cuSZ (Tian et al., 2020)
+Dual-quantization and GPU Huffman coding
+Up to 370.1x throughput improvement
+cuSZ+ (Tian et al., 2021)
+Adaptive RLE/VLE and fine-grained Lorenzo reconstruction
+Up to 18.4X throughput and 5.3X ratio improvement
+cuSZ-Hi (Wu et al., 15 Jul 2025)
+Interpolation-based prediction and optimized lossy-lossless orchestration
+Up to 249% ratio improvement under the same error bound
+LC (Fallin et al., 2024)
+Double-checking, outlier handling, and CPU/GPU parity control
+Error-bound guaranteed on all tested FP32 values
+These results show that accelerator-oriented error-bounded compression is no longer limited to a throughput-only objective. Recent systems jointly optimize throughput, compression ratio, and strict correctness, and some explicitly prioritize deterministic parity across devices (Fallin et al., 2024).
+4. Memory, transfer, and communication systems
+Error-bounded lossy compression has been incorporated into memory management for deep learning training. COMET compresses intermediate activation data with strict error control rather than with image-based lossy methods such as JPEG. It models the compression error as
+∣diorig−direc∣≤ϵrel⋅∣diorig∣.|d_i^{orig} - d_i^{rec}| \leq \epsilon_{rel} \cdot |d_i^{orig}|.∣diorig​−direc​∣≤ϵrel​⋅∣diorig​∣.1
+and analyzes its propagation into gradients, with a predicted gradient-error standard deviation
+∣diorig−direc∣≤ϵrel⋅∣diorig∣.|d_i^{orig} - d_i^{rec}| \leq \epsilon_{rel} \cdot |d_i^{orig}|.∣diorig​−direc​∣≤ϵrel​⋅∣diorig​∣.2
+and a sparsity-adjusted form
+∣diorig−direc∣≤ϵrel⋅∣diorig∣.|d_i^{orig} - d_i^{rec}| \leq \epsilon_{rel} \cdot |d_i^{orig}|.∣diorig​−direc​∣≤ϵrel​⋅∣diorig​∣.3
+The framework uses the empirical target
+∣diorig−direc∣≤ϵrel⋅∣diorig∣.|d_i^{orig} - d_i^{rec}| \leq \epsilon_{rel} \cdot |d_i^{orig}|.∣diorig​−direc​∣≤ϵrel​⋅∣diorig​∣.4
+collects activation sparsity, average gradient and momentum, and average loss per layer every ∣diorig−direc∣≤ϵrel⋅∣diorig∣.|d_i^{orig} - d_i^{rec}| \leq \epsilon_{rel} \cdot |d_i^{orig}|.∣diorig​−direc​∣≤ϵrel​⋅∣diorig​∣.5 iterations, and adapts the error bound accordingly. It reports up to 13.5× reduction in peak memory usage over baseline training, top-1 accuracy maintained within ∣diorig−direc∣≤ϵrel⋅∣diorig∣.|d_i^{orig} - d_i^{rec}| \leq \epsilon_{rel} \cdot |d_i^{orig}|.∣diorig​−direc​∣≤ϵrel​⋅∣diorig​∣.6 of baseline across multiple models, overhead of about 11–17% per iteration, up to 2× speedup in training throughput, and scalability to 64 GPUs without additional communication (Jin et al., 2021).
+In federated learning, FedSZ inserts an error-bounded compression pipeline at the last step in the FL client-server update cycle. It partitions the model state into lossy-compressible tensors and lossless-compressible metadata, evaluates SZ2, SZ3, SZx, and ZFP, and reports that SZ2 provides the best overall trade-off. FedSZ uses relative error bounding,
+∣diorig−direc∣≤ϵrel⋅∣diorig∣.|d_i^{orig} - d_i^{rec}| \leq \epsilon_{rel} \cdot |d_i^{orig}|.∣diorig​−direc​∣≤ϵrel​⋅∣diorig​∣.7
+and identifies ∣diorig−direc∣≤ϵrel⋅∣diorig∣.|d_i^{orig} - d_i^{rec}| \leq \epsilon_{rel} \cdot |d_i^{orig}|.∣diorig​−direc​∣≤ϵrel​⋅∣diorig​∣.8 as the empirically optimal setting, compressing model states between 5.55-12.61x while maintaining inference accuracy within ∣diorig−direc∣≤ϵrel⋅∣diorig∣.|d_i^{orig} - d_i^{rec}| \leq \epsilon_{rel} \cdot |d_i^{orig}|.∣diorig​−direc​∣≤ϵrel​⋅∣diorig​∣.9 of uncompressed results. Runtime overhead is enoa=∣xoriginal−xreconstructed∣R≤ϵ,e_{noa} = \frac{|x_{original} - x_{reconstructed}|}{R} \leq \epsilon,enoa​=R∣xoriginal​−xreconstructed​∣​≤ϵ,0 of the wall-clock communication-round time, and the communication reduction is worthwhile for network bandwidths enoa=∣xoriginal−xreconstructed∣R≤ϵ,e_{noa} = \frac{|x_{original} - x_{reconstructed}|}{R} \leq \epsilon,enoa​=R∣xoriginal​−xreconstructed​∣​≤ϵ,1 Mbps. The paper also reports that the compression-induced error is approximately Laplacian-distributed, suggesting a possible connection to differentially private noise, while emphasizing that formal analysis is still needed (Wilkins et al., 2023).
+For wide-area transfer, Ocelot integrates error-bounded lossy compression into Globus. It couples compression with an ML-based quality predictor that estimates compression ratio, compression speed, and distortion measured as PSNR from sampled data and compression settings. The system uses state-of-the-art error-bounded lossy compressors, notably SZ3 for high performance and modularity, and combines prediction with orchestration strategies such as parallel compression, overlap of compute-node wait time with transfer, and file grouping. Reported results include accurate prediction of time, ratio, and data distortion, and end-to-end speedups up to 11.2×, i.e., 91% time reduction over Globus alone (Liu et al., 2023).
+In MPI collectives, ZCCL replaces fixed-rate lossy compressors with an error-bounded design tailored to collective data movement and collective computation. It customizes fZ-light and derives error-propagation expressions for collective sum operations:
+enoa=∣xoriginal−xreconstructed∣R≤ϵ,e_{noa} = \frac{|x_{original} - x_{reconstructed}|}{R} \leq \epsilon,enoa​=R∣xoriginal​−xreconstructed​∣​≤ϵ,2
+so that, with 95.44% confidence,
+enoa=∣xoriginal−xreconstructed∣R≤ϵ,e_{noa} = \frac{|x_{original} - x_{reconstructed}|}{R} \leq \epsilon,enoa​=R∣xoriginal​−xreconstructed​∣​≤ϵ,3
+The framework reports overall speedups of 1.9--8.9X over original MPI collectives and multiple baselines (Huang et al., 25 Feb 2025).
+5. Domain-specific, metric-oriented, and semantics-preserving designs
+A major line of work adapts error-bounded lossy compression to specific data organizations that defeat generic layouts. TAC+ targets 3D AMR simulations by compressing each refinement level separately in 3D SZ mode and removing redundancy across levels through Ghost Shell Padding, Optimized Sparse Tensor Representation, and Adaptive k-d Tree preprocessing. It then introduces Shared Huffman Encoding so that prediction and quantization remain local to each block while a single Huffman tree is built over aggregated quantization outputs. On 10 AMR datasets from three real-world large-scale AMR simulations, TAC+ reports compression-ratio improvement by up to 4.9enoa=∣xoriginal−xreconstructed∣R≤ϵ,e_{noa} = \frac{|x_{original} - x_{reconstructed}|}{R} \leq \epsilon,enoa​=R∣xoriginal​−xreconstructed​∣​≤ϵ,4 under the same data distortion compared to the state-of-the-art method, and it also supports per-level error-bound tuning to achieve much lower data distortion on two application-specific metrics (Wang et al., 2023).
+For particle datasets, bit-adaptive quantization replaces spatial-order assumptions with k-d tree partitioning and local “bit boxes.” The number of bits per spatial dimension is dynamically chosen so that each reconstructed coordinate satisfies a strict per-point bound. The method guarantees
+enoa=∣xoriginal−xreconstructed∣R≤ϵ,e_{noa} = \frac{|x_{original} - x_{reconstructed}|}{R} \leq \epsilon,enoa​=R∣xoriginal​−xreconstructed​∣​≤ϵ,5
+for all particles and coordinates, and reports consistently higher compression ratios than leading general-purpose compressors on cosmology, fluid dynamics, and fusion plasma datasets. On one fluid dynamics example, at 2.53 bits per particle, it reports PSNR of 70.8 dB, while the maximum PSNR of other compressors at this rate is 24.8 dB (Ren et al., 2024).
+A second line of work targets quality objectives that are not captured by raw-data bounds alone. QoZ is a dynamic quality metric oriented error-bounded lossy compression framework that auto-tunes a highly-parameterized multi-level interpolation-based predictor according to user-specified quality metrics such as PSNR, SSIM, and autocorrelation during online compression. It reports up to 70% compression ratio improvement under the same error bound, up to 150% compression ratio improvement under the same PSNR, and up to 270% compression ratio improvement under the same SSIM (Liu et al., 2023). SRN-SZ pursues the same rate–distortion objective from a different direction, using the Hybrid Attention Transformer within a hierarchical data grid expansion paradigm. It remains strictly error-bounded through residual quantization and reports up to 75% compression ratio improvements under the same error bound and up to 80% compression ratio improvements under the same PSNR than the second-best compressor (Liu et al., 2023).
+A third line explicitly preserves downstream structure. TopoSZ preserves topological features in 2D and 3D scalar fields by combining a global error bound enoa=∣xoriginal−xreconstructed∣R≤ϵ,e_{noa} = \frac{|x_{original} - x_{reconstructed}|}{R} \leq \epsilon,enoa​=R∣xoriginal​−xreconstructed​∣​≤ϵ,6 with a persistence threshold enoa=∣xoriginal−xreconstructed∣R≤ϵ,e_{noa} = \frac{|x_{original} - x_{reconstructed}|}{R} \leq \epsilon,enoa​=R∣xoriginal​−xreconstructed​∣​≤ϵ,7, deriving per-point admissible intervals from contour-tree-induced segmentation, and modifying SZ quantization so that
+enoa=∣xoriginal−xreconstructed∣R≤ϵ,e_{noa} = \frac{|x_{original} - x_{reconstructed}|}{R} \leq \epsilon,enoa​=R∣xoriginal​−xreconstructed​∣​≤ϵ,8
+and
+enoa=∣xoriginal−xreconstructed∣R≤ϵ,e_{noa} = \frac{|x_{original} - x_{reconstructed}|}{R} \leq \epsilon,enoa​=R∣xoriginal​−xreconstructed​∣​≤ϵ,9
+Its objective is that the simplified contour tree of the decompressed data matches that of the original above the specified persistence threshold (Yan et al., 2023). QPET addresses a broader QoI-preservation problem. It introduces dual-bounded compression:
+R=xmax−xminR = x_{max} - x_{min}R=xmax​−xmin​0
+and estimates heterogeneous point-wise error bounds through numerical analysis of differentiable univariate and multivariate QoIs, with a validator that losslessly corrects rare violations. On six real-world datasets, QPET reports 2x to 10x compression speedups over existing QoI-preserving solutions, up to 1000% compression ratio improvements to general-purpose compressors, and up to 133% compression ratio improvements to existing QoI-integrated scientific compressors (Liu et al., 2024).
+6. Reliability, misconceptions, and ongoing directions
+A recurring misconception is that a strict pointwise error bound is sufficient for all downstream uses. Several recent systems explicitly refute that assumption. QPET states that raw-data error control may fail to meet the quality requirements on Quantities of Interest derived from raw data, and TopoSZ shows that standard error-bounded compressors do not explicitly preserve contour-tree topology. QoZ similarly treats PSNR, SSIM, and autocorrelation as first-class optimization targets rather than as incidental outcomes. This suggests that contemporary error-bounded lossy compression is increasingly defined not only by R=xmax−xminR = x_{max} - x_{min}R=xmax​−xmin​1-style guarantees on values, but also by preservation criteria tied to analysis, topology, and application semantics (Liu et al., 2024, Yan et al., 2023, Liu et al., 2023).
+Another misconception is that correctness is purely a numerical-analysis issue inside the quantizer. The SDC-resilient SZ-based compressor shows that silent data corruptions can invalidate decompression error bounds or trigger crashes even when the underlying compression algorithm is theoretically error-bounded. Its independent-block-wise model, checksums, and selective instruction duplication keep the correctness of decompressed data still bounded within user's requirement with a very limited degradation of compression ratios upon soft errors. Reported results include 100% of runs decompressing within error bounds for protected memory errors, about 92% success under one or two system-level errors per run, compression-ratio degradation R=xmax−xminR = x_{max} - x_{min}R=xmax​−xmin​2 on scientific datasets, and runtime overhead typically R=xmax−xminR = x_{max} - x_{min}R=xmax​−xmin​3 (Li et al., 2020).
+The survey literature identifies several open challenges: unified handling of diverse data types, fine-grained and multi-faceted error control, the performance-versus-quality tradeoff on accelerators, transparent integration into scientific workflows, interpretable and controllable deep-learning-based compression, compression-enhanced data movement, and compression-aware I/O and communication (Di et al., 2024). An emerging extension beyond floating-point scientific arrays is Error-Bounded Predictive Coding for lossy text compression, which uses a Masked LLM as a decompressor and stores rank-based corrections only when the model’s top prediction is incorrect. Its formulation of a residual channel with continuous rate-distortion control suggests that error-bounded compression principles are beginning to migrate into modality-specific predictive systems outside traditional HPC numerics (Aghanya et al., 25 Oct 2025).
+Across these developments, the defining property remains stable: lossy compression is no longer treated as an unconstrained rate-reduction tool, but as a controlled approximation mechanism whose acceptability is specified in advance—whether by absolute error, relative error, QoI tolerance, persistence threshold, metric target, or communication-accuracy contract. The resulting research trajectory is toward compressors that are simultaneously faster, more architecture-aware, more application-aware, and more explicit about what exactly is being preserved (Di et al., 2024).
+Markdown
+Report Issue
+Upgrade to Chat
+Definition Search Book Streamline Icon: https://streamlinehq.com
+References (19)
+1.
+A Survey on Error-Bounded Lossy Compression for Scientific Datasets
+(2024)
+2.
+Lessons Learned on the Path to Guaranteeing the Error Bound in Lossy Quantizers
+(2024)
+3.
+Boosting Scientific Error-Bounded Lossy Compression through Optimized Synergistic Lossy-Lossless Orchestration
+(2025)
+4.
+Bounding Lossy Compression using Lossless Codes at Reduced Precision
+(2012)
+5.
+cuSZ: An Efficient GPU-Based Error-Bounded Lossy Compression Framework for Scientific Data
+(2020)
+6.
+Optimizing Error-Bounded Lossy Compression for Scientific Data on GPUs
+(2021)
+7.
+Improving Prediction-Based Lossy Compression Dramatically via Ratio-Quality Modeling
+(2021)
+8.
+COMET: A Novel Memory-Efficient Deep Learning Training Framework by Using Error-Bounded Lossy Compression
+(2021)
+9.
+FedSZ: Leveraging Error-Bounded Lossy Compression for Federated Learning Communications
+(2023)
+10.
+Optimizing Scientific Data Transfer on Globus with Error-bounded Lossy Compression
+(2023)
+11.
+ZCCL: Significantly Improving Collective Communication With Error-Bounded Lossy Compression
+(2025)
+12.
+TAC+: Optimizing Error-Bounded Lossy Compression for 3D AMR Simulations
+(2023)
+13.
+An Error-Bounded Lossy Compression Method with Bit-Adaptive Quantization for Particle Data
+(2024)
+14.
+Dynamic Quality Metric Oriented Error-bounded Lossy Compression for Scientific Datasets
+(2023)
+15.
+SRN-SZ: Deep Leaning-Based Scientific Error-bounded Lossy Compression with Super-resolution Neural Networks
+(2023)
+16.
+TopoSZ: Preserving Topology in Error-Bounded Lossy Compression
+(2023)
+17.
+QPET: A Versatile and Portable Quantity-of-Interest-Preservation Framework for Error-Bounded Lossy Compression
+(2024)
+18.
+SDC Resilient Error-bounded Lossy Compressor
+(2020)
+19.
+The Lossy Horizon: Error-Bounded Predictive Coding for Lossy Text Compression (Episode I)
+(2025)
+Topic to Video (Beta)
+No one has generated a video about this topic yet.
+Sign Up to Generate
+All Videos
+Subscribe on YouTube
+Whiteboard
+No one has generated a whiteboard explanation for this topic yet.
+Sign Up to Generate
+Follow Topic
+Get notified by email when new papers are published related to Error-Bounded Lossy Compression.
+Sign Up to Follow Topic by Email
+Continue Learning
+How do absolute and relative error bounds affect the performance of lossy compressors?
+What are the benefits and challenges of using GPU-accelerated implementations in this compression paradigm?
+How does prediction-based compression achieve both high compression ratios and strict error control?
+In what ways do application-specific designs like TopoSZ and QPET enhance downstream analysis quality?
+Find recent papers about error-controlled data compression for scientific workflows.
+Related Topics
+Repetition Compression Algorithms
+Voxel Cube Encoding: Fundamentals & Applications
+MRES-32M: Multi-Granularity RES Benchmark
+Adaptive & Error-Bounded Compression
+Mix Distillation: Strategies & Applications
+SZ3.1: State-of-the-Art Scientific Compressor
+Hyper-Compression: Extreme Data Reduction
+cuSZ-Hi: Open-Source GPU Scientific Compressor
+Progressive Compression Techniques
+SZ3: Modular Framework for Scientific Compression
+Stay informed about trending AI papers:

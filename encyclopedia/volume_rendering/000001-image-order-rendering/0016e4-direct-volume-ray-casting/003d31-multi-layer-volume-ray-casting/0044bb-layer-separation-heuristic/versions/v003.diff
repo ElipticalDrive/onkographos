@@ -1,0 +1,151 @@
+--- v002.md
++++ v003.md
+@@ -4,21 +4,19 @@
+ 
+ ## Overview
+-The Layer Separation Heuristic is a method for determining optimal split points along a ray in multi-layer volume rendering to separate high-quality raycasting from lower-cost image warping [S1]. It solves the problem of identifying the "main visual effect" of light attenuation, which often occurs in the middle of a ray interval rather than at entry or exit [S1]. Unlike simple depth-based splitting, this heuristic identifies specific volumetric features, preserving depth cues and providing better visual approximation for transparent volumes [S1].
++The Layer Separation Heuristic determines optimal split points along a ray in multi-layer volume rendering to separate high-quality raycasting from lower-cost image warping [S1]. It solves the problem of identifying the main visual effect of light attenuation, which frequently occurs in the middle of a ray interval rather than at entry or exit [S1]. Unlike simple depth-based splitting, this heuristic identifies main visual effects along the ray, preserving depth cues and providing better visual approximation for transparent volumes [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, sampled at discrete steps through the volume. For each sample point $i$, the voxel opacity $\alpha_i$ and the accumulated transmittance (remaining opacity) $T_i$ are available.
+-*   **Output:** A set of depth values (layer separation points) along the ray that define the boundaries between layers.
++*   **Input:** A ray sampled at discrete steps through the volume, where each sample provides voxel opacity $\alpha_i$ and accumulated transmittance $T_i$ [S1].
++*   **Output:** A set of depth values defining layer separation points along the ray [S1].
+ 
+ **Data Structures:**
+-The method operates on a 1D array of sample values along the ray. No complex spatial data structures are required beyond the standard ray marching buffer.
++The method operates on a 1D array of sample values along the ray, requiring no complex spatial data structures beyond the standard ray marching buffer [G].
+ 
+ **Steps:**
+-1.  **Evaluate Criteria:** For each sample point $i$ along the ray, calculate a score based on one of two criteria:
+-    *   **Maximum Opacity:** The score is the voxel's opacity $\alpha_i$.
+-    *   **Maximum Color Impact:** The score is the product of the voxel's opacity and the remaining transmittance: $C_i = \alpha_i \times T_i$.
+-2.  **Identify Local Maxima:** Find the local maxima in the sequence of scores. A local maximum is a point $i$ where the score is greater than or equal to its neighbors.
+-3.  **Resolve Discrete Spans:** If a local maximum spans several consecutive sample points (a plateau), select the median index of these points as the separation depth [S1].
+-4.  **Select Layers:** Choose the top $N$ separation points (where $N$ is the number of layers) based on their scores. The Maximum Color Impact method is generally preferred as it yields slight advantages in visual quality [S1].
++1.  **Evaluate Criteria:** For each sample point $i$ along the ray, calculate a score using either the maximum opacity criterion ($\alpha_i$) or the maximum color impact criterion ($C_i = \alpha_i \times T_i$) [S1].
++2.  **Identify Local Maxima:** Find local maxima in the score sequence, where a point $i$ is a local maximum if its score is greater than or equal to its immediate neighbors [S1].
++3.  **Resolve Discrete Spans:** If a local maximum spans several consecutive sample points, select the median index of these points as the separation depth [S1].
++4.  **Select Layers:** Choose the top $N$ separation points based on their scores, with the Maximum Color Impact method generally preferred for slight visual quality advantages [S1].
+ 
+ **Formulas:**
+@@ -26,23 +24,24 @@
+     $$ C_i = \alpha_i \cdot T_i $$
+     Where:
+-    *   $\alpha_i$ is the opacity of the voxel at sample $i$.
+-    *   $T_i$ is the transmittance (probability of light passing through) from the camera to sample $i$.
++    *   $\alpha_i$ is the opacity of the voxel at sample $i$ [S1].
++    *   $T_i$ is the transmittance (remaining opacity along the ray segment) from the camera to sample $i$ [S1].
+ 
+ **Parameters:**
+-*   **Number of Layers ($N$):** A fixed integer determined in advance. Typical values in evaluations range from 2 to 9 layers [S1].
++*   **Number of Layers ($N$):** A fixed integer determined in advance [S1]. Evaluations tested layer counts from 2 to 9 [S1].
+ *   **Criterion Selection:** Binary choice between "Max Opacity" and "Max Color Impact" [S1].
+ 
+ **Pitfalls:**
+-*   **Fixed Layer Count:** Layers must be allocated in advance. If the heuristic is overly sensitive, it may "waste" layers on features close to the camera, leaving distant features underrepresented [S1].
+-*   **Heuristic Failure:** The heuristic is fixed and cannot adapt to dynamic scene complexity. Insufficient layers or poor distribution lead to visual artifacts [S1].
+-*   **Depth Cues:** Simple entry/exit depth choices fail to capture main light attenuation effects occurring in the middle of the ray interval [S1].
++*   **Fixed Layer Count:** Layers must be allocated in advance [S1]. If the heuristic is overly sensitive, it may allocate too many layers to features close to the camera, leaving distant features underrepresented [S1].
++*   **Heuristic Failure:** The heuristic is fixed and cannot adapt to dynamic scene complexity; insufficient layers or poor distribution lead to visual artifacts [S1].
++*   **Depth Cues:** Simple entry or exit depth choices fail to capture main light attenuation effects occurring in the middle of the ray interval [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def find_layer_separation(rays, num_layers):
++def find_layer_separation(rays, num_layers, criterion="color_impact"):
+     """
+     Finds layer separation points for a batch of rays.
+     rays: List of Ray objects, each containing a list of sample points.
+     num_layers: Integer, number of layers to separate.
++    criterion: String, "opacity" or "color_impact".
+     Returns: List of lists, where each inner list contains depth values for that ray.
+     """
+@@ -58,30 +57,45 @@
+         for i, point in enumerate(points):
+             alpha = point.opacity
+-            # T_i is the transmittance accumulated up to this point
+-            # Assuming ray object provides accumulated_transmittance or we compute it
+-            T_i = point.accumulated_transmittance
++            T_i = point.accumulated_transmittance  # Transmittance from camera to this point [S1]
+             
+-            # Criterion: Maximum Color Impact
+-            # Alternative: score = alpha (Maximum Opacity)
+-            score = alpha * T_i
++            if criterion == "color_impact":
++                score = alpha * T_i
++            else:  # maximum_opacity
++                score = alpha
+             scores.append((score, point.depth, i))
+             
+-        # Find local maxima
++        # Find local maxima with proper boundary handling [G]
+         local_maxima = []
+-        for i in range(1, len(scores) - 1):
+-            if scores[i][0] >= scores[i-1][0] and scores[i][0] >= scores[i+1][0]:
++        for i in range(len(scores)):
++            is_max = True
++            if i > 0 and scores[i][0] < scores[i-1][0]:
++                is_max = False
++            if i < len(scores) - 1 and scores[i][0] < scores[i+1][0]:
++                is_max = False
++            if is_max:
+                 local_maxima.append(scores[i])
+                 
+-        # Handle plateaus (not explicitly in pseudocode but described in text)
+-        # If consecutive points have same max score, pick median index
+-        # Simplified: just pick the highest scoring local maxima
++        # Resolve plateaus: if consecutive points share the max score, pick median index [S1]
++        resolved_maxima = []
++        if local_maxima:
++            current_group = [local_maxima[0]]
++            for j in range(1, len(local_maxima)):
++                if local_maxima[j][2] == current_group[-1][2] + 1:
++                    current_group.append(local_maxima[j])
++                else:
++                    median_idx = current_group[len(current_group)//2][2]
++                    resolved_maxima.append((max(current_group, key=lambda x: x[0])[0], 
++                                           next(p.depth for p in points if p.index == median_idx), 
++                                           median_idx))
++                    current_group = [local_maxima[j]]
++            median_idx = current_group[len(current_group)//2][2]
++            resolved_maxima.append((max(current_group, key=lambda x: x[0])[0], 
++                                   next(p.depth for p in points if p.index == median_idx), 
++                                   median_idx))
++            
++        # Select top N layers based on score [S1]
++        resolved_maxima.sort(key=lambda x: x[0], reverse=True)
++        selected = resolved_maxima[:num_layers]
+         
+-        # Sort by score descending
+-        local_maxima.sort(key=lambda x: x[0], reverse=True)
+-        
+-        # Select top N layers
+-        selected = local_maxima[:num_layers]
+-        
+-        # Extract depths
+         depths = [m[1] for m in selected]
+         separation_points.append(depths)
+@@ -99,14 +113,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot S)$ per ray, where $N$ is the number of layers and $S$ is the number of samples per ray. Finding local maxima is linear in $S$.
+-*   **Memory Complexity:** $O(N)$ per ray for storing separation points.
+-*   **Performance:** The method enables multi-frame rate rendering, allowing high-quality raycasting for a subset of layers while warping the rest [S1].
++*   **Performance:** Enables multi-frame rate rendering by allowing high-quality raycasting for a subset of layers while warping the rest [S1]. Layer images can be transferred separately to the fast node as soon as completed, reducing latency [S1].
+ *   **Strengths:** Preserves depth cues better than single surface approaches; outperforms single layered image warps for transparent transfer functions (e.g., MANIX dataset) [S1].
+-*   **Limitations:** Visual quality suffers if layers are not distributed well (e.g., too many close to camera); fixed number of layers limits adaptability; less significant quality gain for opaque transfer functions (e.g., VIX dataset) [S1].
+-*   **When to Use:** Transparent volumes where depth cues are critical and view-dependent lighting is needed.
+-*   **When Not to Use:** Opaque volumes with simple structures where the quality difference is negligible; scenes with highly dynamic or unpredictable feature distribution.
++*   **Limitations:** Visual quality suffers if layers are not distributed well (e.g., too many close to camera); fixed number of layers limits adaptability; quality gain is less significant for opaque transfer functions revealing bones (e.g., VIX dataset) [S1].
++*   **When to Use:** Transparent volumes where depth cues are critical and view-dependent lighting is needed [S1].
++*   **When Not to Use:** Opaque volumes with simple structures where the quality difference is negligible [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ 
+ ## Background
+-The method was introduced in the context of Multi-Frame Rate Volume Rendering by S. Hauswiesner, D. Kalkofen, and D. Schmalstieg [S1]. It addresses the limitations of single-layer image warping by separating volume layers based on visual impact rather than uniform depth intervals. The approach was evaluated on datasets such as MANIX (head CT) and VIX (foot) [S1].
++The method was introduced in the context of Multi-Frame Rate Volume Rendering by S. Hauswiesner, D. Kalkofen, and D. Schmalstieg [S1]. It addresses the limitations of single-layer image warping by separating volume layers based on visual impact rather than uniform depth intervals [S1]. The approach was evaluated on datasets such as MANIX (head CT) and VIX (foot) [S1].
+ 
+ ## Sources

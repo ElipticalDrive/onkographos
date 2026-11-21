@@ -1,0 +1,56 @@
+# Object-Order Empty Space Skipping
+
+Also called: Block min-max culling, Front-to-back ray-casting with bounding box culling, GPU-based Ray-Casting with Object-Order Empty Space Skipping
+
+## Overview
+Object-Order Empty Space Skipping is a GPU-based ray-casting acceleration technique that reduces the computational overhead of traversing transparent regions in a volume by culling entire blocks of voxels before sample evaluation [S1]. It differs from image-order methods by using view-dependent bounding geometry to determine ray entry and exit depths per pixel, thereby skipping large portions of empty space with minimal per-pixel overhead [S1]. Unlike macrocell or BSP-tree approaches that require complex tree traversal logic, this method relies on simple rasterization of block boundaries to establish search ranges, making it highly efficient for real-time isosurface rendering [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D texture storing the volume data, camera parameters (position $c$, screen coordinates $(x, y)$), and a block min-max structure storing the minimum and maximum scalar values for each block in the volume.
+- Output: A rendered image with isosurface shading, where rays are terminated early if they traverse inactive (transparent) blocks.
+
+**Data Structures:**
+- **Block Min-Max Structure:** For a regular subdivision of the volume into blocks of size $B^3$ (e.g., $4^3$ or $8^3$ voxels), this structure stores two values per block: $min$ and $max$. These represent the minimum and maximum scalar values present in the block's voxel data [S1].
+- **Bounding Geometry:** A set of 3D primitives representing the bounding boxes of active blocks. This geometry is kept in GPU memory and updated when the isovalue changes [S1].
+
+**Steps:**
+1. **Ray Direction Computation:** For each pixel $(x, y)$, compute the ray direction vector $d(x, y)$ in volume coordinates based on the camera position $c$ [S1]:
+   $$ p(t, x, y) = c + t \cdot d(x, y) $$
+   where $t$ is the distance along the ray [S1].
+
+2. **Ray Depth Range Initialization:** Determine the initial search range $[t_{start}(x, y), t_{exit}(x, y)]$ for each ray by rasterizing the block bounding geometry [S1]:
+   - **$t_{start}$:** Rasterize the front faces of the active block bounding geometry. Use a depth test (e.g., `GL_LESS`) to retain the closest intersection point, which corresponds to the entry point into the first active block [S1].
+   - **$t_{exit}$:** Rasterize the back faces of the active block bounding geometry. Use an inverted depth test (e.g., `GL_GREATER`) to retain the farthest intersection point, which corresponds to the exit point from the last active block [S1].
+
+3. **Ray Casting Loop:** Iterate through the volume in front-to-back order within the fragment shader [S1]:
+   - Sample the volume at the current ray position.
+   - **Object-Order Skip:** If the current ray segment falls within a region covered by inactive blocks (blocks where the isovalue is outside $[min, max]$), skip the sampling process for that segment. This is handled by the depth range computed in Step 2, which excludes inactive blocks from the initial search range unless they are enclosed by active blocks [S1].
+   - **Image-Order Skip:** For samples within active blocks but in transparent regions, use adaptive sampling or early termination based on accumulated opacity [S1].
+   - Refine the isosurface intersection position using iterative bisection if the ray crosses the isovalue [S1].
+
+**Parameters:**
+- **Block Size:** The volume is subdivided into blocks of size $4^3$ or $8^3$ voxels [S1]. Smaller blocks increase culling precision but increase memory overhead for the min-max structure.
+
+**Edge Cases and Pitfalls:**
+- **Enclosed Inactive Blocks:** Inactive blocks enclosed by active blocks are not excluded from the search range by the bounding geometry because the rasterization only captures the outer boundary of active regions [S1]. Samples in these enclosed inactive blocks are skipped on a per-sample basis early in the ray-casting loop, incurring a small overhead [S1].
+- **Precision:** Depth values for $t_{start}$ and $t_{exit}$ must be computed with sufficient precision to avoid gaps or overlaps in the bounding geometry, which could lead to incorrect ray ranges [S1].
+
+## Subtopics
+
+### Overlapped Min-Max Block
+A variant of block min-max culling designed for pre-integrated volume rendering [S2]. It modifies the region covered by each block so that each block covers a region of thickness at least the sampling distance, creating overlaps between adjacent blocks [S2]. This allows a line segment formed by two sampling points to be tested for transparency using only one block, avoiding the overhead of determining which of multiple intersecting blocks are transparent [S2]. Unlike previous methods where a line segment may intersect at most three blocks and requires testing all intersecting blocks, this method tests only one block due to the overlapping region design [S2].
+
+## Operating characteristics
+- **Time Complexity:** The culling overhead is minimal, as it relies on rasterization of bounding geometry, which is highly optimized on GPUs [S1]. The main cost is the ray casting loop, which is reduced by skipping inactive blocks [S1].
+- **Memory Complexity:** Requires additional memory for the block min-max structure, proportional to the number of blocks in the volume [S1]. For large volumes that do not fit in GPU memory, a second level of coarser bricks is maintained, increasing memory usage [S1].
+- **Performance:** In empty regions, this approach results in a considerable speed-up because only one texture fetch is needed to check the mean value of the block [S1]. However, in complex scenes with many active blocks, the overhead of maintaining the bounding geometry and min-max structure may reduce performance gains [S1].
+- **Strengths:** Simple implementation, low per-pixel overhead, effective for real-time isosurface rendering [S1].
+- **Limitations:** Enclosed inactive blocks are not fully excluded, leading to per-sample overhead in those regions [S1]. Performance may degrade with complex shaders and texture indirections [S1].
+
+## Background
+Object-Order Empty Space Skipping was introduced in the context of GPU-based ray-casting for real-time volume rendering [S1]. It builds on earlier approaches that used multiple rendering passes for ray casting, replacing them with a single pass and front-to-back looping in the fragment shader [S1]. The technique was developed to overcome limitations of earlier empty space skipping methods, such as high overhead and poor performance with complex shaders [S1]. It is widely used in real-time volume rendering applications, particularly for isosurface visualization [S1].
+
+## Sources
+[S1] Real-Time Ray-Casting and Advanced Shading of Discrete Isosurfaces, https://cgl.ethz.ch/people/archive/siggc/publications/eg05.pdf, fetched 2026-10-26
+[S2] Efficient Interactive Pre-integrated Volume Rendering, https://doi.org/10.1007/11428862_118, fetched 2026-10-26

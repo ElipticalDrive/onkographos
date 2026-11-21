@@ -1,0 +1,313 @@
+Summary
+
+add a focused video_to_3d_core::colmap module for sparse COLMAP scene-data contracts and text parsing
+keep the reusable COLMAP camera/image/point representation in video-to-3d-core, preserving one Rust scene-data authority
+parse only cameras.txt, images.txt, and points3D.txt; COLMAP execution remains reference/evidence tooling rather than product implementation
+preserve the full u64 point-ID domain while treating only literal -1 as COLMAP's missing-point sentinel
+add deterministic parser coverage for normal sparse input, filenames with spaces, empty observations, u64::MAX, invalid negative IDs, and malformed tracks
+
+Migration boundary
+This is the first implementation slice of moritzbrantner/rust-packages#179. It provides the exact sparse COLMAP surface needed to move spatial-media-explorer off historical moenarch-video-analysis-radiance-io without absorbing radiance-field, Nerfstudio, Gaussian-splatting, or unrelated legacy 3D semantics.
+The large reconstruction implementation is split into reconstruction.rs and included at the crate root so all established video-to-3d-core public paths remain unchanged while lib.rs becomes the composition point for the new core-owned contract.
+Acceptance
+
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+existing golden pose/COLMAP reference evidence remains green
+no Cargo.lock dependency expansion is required
+
+Add core-owned COLMAP text interoperability by moritzbrantner · Pull Request #17 · moritzbrantner/video-to-3d · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add core-owned COLMAP text interoperability
+#17
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Merged
+moritzbrantner
+merged 17 commits into
+main
+from
+migration/colmap-text-adapter
+Sep 11, 2026
+Uh oh!
+There was an error while loading. Please reload this page.
+Merged
+Add core-owned COLMAP text interoperability
+#17
+Changes from 1 commit
+Commits
+Show all changes
+17 commits
+Select commit
+Hold shift + click to select a range
+65f43d0
+feat(colmap): add focused text adapter crate
+moritzbrantner Sep 11, 2026
+9d3d06a
+feat(colmap): implement focused sparse text parser
+moritzbrantner Sep 11, 2026
+1181955
+feat(colmap): include text adapter in workspace
+moritzbrantner Sep 11, 2026
+f7b5730
+style(colmap): apply rustfmt output
+moritzbrantner Sep 11, 2026
+e26f2d3
+fix(colmap): satisfy strict Clippy chunk iteration
+moritzbrantner Sep 11, 2026
+2cdef76
+test(colmap): keep fixture support dependency-free
+moritzbrantner Sep 11, 2026
+9d30102
+test(colmap): use dependency-free isolated fixtures
+moritzbrantner Sep 11, 2026
+2b68231
+style(colmap): apply remaining rustfmt output
+moritzbrantner Sep 11, 2026
+1f65764
+refactor(colmap): own interchange scene contract in core
+moritzbrantner Sep 11, 2026
+1168b94
+refactor(core): keep COLMAP scene contracts in core
+moritzbrantner Sep 11, 2026
+191727b
+refactor(colmap): depend on core-owned interchange contract
+moritzbrantner Sep 11, 2026
+531d661
+fix(colmap): keep scene types in core and preserve u64 ids
+moritzbrantner Sep 11, 2026
+c6512a1
+refactor(core): own sparse COLMAP parser with scene contract
+moritzbrantner Sep 11, 2026
+2ad16d0
+refactor(colmap): keep interoperability inside core workspace package
+moritzbrantner Sep 11, 2026
+e7d3a5a
+refactor(colmap): remove temporary adapter crate
+moritzbrantner Sep 11, 2026
+382614f
+refactor(colmap): remove temporary adapter manifest
+moritzbrantner Sep 11, 2026
+876227f
+style(core): apply COLMAP rustfmt output
+moritzbrantner Sep 11, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Previous commit
+Next
+Next commit
+fix(colmap): keep scene types in core and preserve u64 ids
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+moritzbrantner
+committed
+Sep 11, 2026
+commit 531d661360e4520027c0152ce66d486a26f47797
+Some comments aren't visible on the classic Files Changed page.
+There are no files selected for viewing
+114 changes: 44 additions & 70 deletions
+114
+crates/video-to-3d-colmap/src/lib.rs
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -1,14 +1,18 @@
+//! Focused COLMAP text-format interoperability for `video-to-3d`.
+//!
+//! This crate owns parsing of COLMAP's sparse text interchange files. It does not
+//! own reconstruction algorithms, camera estimation, radiance fields, Gaussian
+//! splatting, or COLMAP execution.
+//! This crate owns parsing of COLMAP's sparse text interchange files. Reusable scene-data types
+//! live in `video-to-3d-core`; this adapter does not own reconstruction algorithms, camera
+//! estimation, radiance fields, Gaussian splatting, or COLMAP execution.
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+pub use video_to_3d_core::colmap::{
+ColmapCamera, ColmapDataset, ColmapImage, ColmapPoint2d, ColmapPoint3d, ColmapTrackElement,
+Vec2, Vec3,
+};
+#[derive(Debug, Error)]
+pub enum ColmapError {
+Expand All
+@@ -24,71 +28,6 @@ pub enum ColmapError {
+pub type Result<T> = std::result::Result<T, ColmapError>;
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Vec2 {
+pub x: f32,
+pub y: f32,
+}
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Vec3 {
+pub x: f32,
+pub y: f32,
+pub z: f32,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColmapDataset {
+pub cameras: Vec<ColmapCamera>,
+pub images: Vec<ColmapImage>,
+pub points: Vec<ColmapPoint3d>,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColmapCamera {
+pub id: u32,
+pub raw_model: String,
+pub width: u32,
+pub height: u32,
+pub params: Vec<f32>,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColmapImage {
+pub id: u32,
+pub qw: f32,
+pub qx: f32,
+pub qy: f32,
+pub qz: f32,
+pub tx: f32,
+pub ty: f32,
+pub tz: f32,
+pub camera_id: u32,
+pub name: String,
+pub points2d: Vec<ColmapPoint2d>,
+}
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColmapPoint2d {
+pub xy: Vec2,
+pub point3d_id: Option<u64>,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColmapPoint3d {
+pub id: u64,
+pub xyz: Vec3,
+pub color: [u8; 3],
+pub error: f32,
+pub track: Vec<ColmapTrackElement>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColmapTrackElement {
+pub image_id: u32,
+pub point2d_index: usize,
+}
+/// Reads the three COLMAP sparse text files from a directory.
+pub fn read_colmap_text_dir(path: impl AsRef<Path>) -> Result<ColmapDataset> {
+let path = path.as_ref();
+Expand Down
+Expand Up
+@@ -191,13 +130,17 @@ fn parse_points2d(path: &Path, line_number: usize, line: &str) -> Result<Vec<Col
+.0
+.iter()
+.map(|chunk| {
+let point3d_id: i64 = parse(path, line_number, chunk[2], "point3D id")?;
+let point3d_id = if chunk[2] == "-1" {
+None
+} else {
+Some(parse(path, line_number, chunk[2], "point3D id")?)
+};
+Ok(ColmapPoint2d {
+xy: Vec2 {
+x: parse(path, line_number, chunk[0], "point2D x")?,
+y: parse(path, line_number, chunk[1], "point2D y")?,
+},
+point3d_id: u64::try_from(point3d_id).ok(),
+point3d_id,
+})
+})
+.collect()
+Expand Down
+Expand Up
+@@ -317,6 +260,16 @@ mod tests {
+}
+}
+fn write_empty_sparse_files(directory: &TestDir, images: &str) {
+fs::write(
+directory.path().join("cameras.txt"),
+"1 PINHOLE 640 480 500 501 320 240\n",
+)
+.expect("camera fixture");
+fs::write(directory.path().join("images.txt"), images).expect("image fixture");
+fs::write(directory.path().join("points3D.txt"), "").expect("point fixture");
+}
+#[test]
+fn reads_sparse_colmap_text_directory() {
+let directory = TestDir::new("reads-sparse");
+Expand Down
+Expand Up
+@@ -357,6 +310,27 @@ mod tests {
+assert_eq!(dataset.points[0].track.len(), 2);
+}
+#[test]
+fn preserves_full_u64_point_ids() {
+let directory = TestDir::new("u64-point-id");
+write_empty_sparse_files(
+&directory,
+"1 1 0 0 0 0 0 0 1 frame.png\n10 20 18446744073709551615\n",
+);
+let dataset = read_colmap_text_dir(directory.path()).expect("u64 point id parses");
+assert_eq!(dataset.images[0].points2d[0].point3d_id, Some(u64::MAX));
+}
+#[test]
+fn rejects_negative_point_ids_other_than_the_colmap_sentinel() {
+let directory = TestDir::new("negative-point-id");
+write_empty_sparse_files(&directory, "1 1 0 0 0 0 0 0 1 frame.png\n10 20 -2\n");
+let error = read_colmap_text_dir(directory.path()).expect_err("-2 is not a sentinel");
+assert!(error.to_string().contains("point3D id"));
+}
+#[test]
+fn rejects_malformed_point_track() {
+let directory = TestDir::new("malformed-track");
+Expand Down
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

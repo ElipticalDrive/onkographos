@@ -1,0 +1,201 @@
+# Voxel Face Culling with Chunked Rendering Order
+
+Also called: Camera-relative Chunk Iteration, Chunked Rendering Order, Neighbor-based Face Culling
+
+## Overview
+This method generates mesh faces for solid voxels only when they are adjacent to an empty voxel or a chunk boundary, iterating through world chunks in a camera-relative front-to-back order to optimize GPU depth sorting and culling [S1, S2, unofficial]. It eliminates interior geometry by ensuring only visible faces reach the GPU, preventing non-visible geometry from being processed [S2, unofficial]. Unlike standard static meshing, it dynamically handles chunk boundaries by treating unallocated neighbor chunks as empty space, allowing for immediate culling of inner faces at chunk edges [S1, S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D array of chunks, where each chunk contains a block array of voxels. Each voxel has an `index` field (0 indicates empty/air). Camera position and look vector.
+*   **Output:** A set of GPU buffers (`voxelBuffer`) containing mesh geometry for visible faces, submitted for rendering.
+
+**Data Structures:**
+*   **Voxel:** Contains at least an `index` field (integer/byte). `index == 0` denotes air [S1, S2, unofficial].
+*   **Chunk:** Contains:
+    *   `Allocated`: Boolean indicating if the chunk's voxel data is valid.
+    *   `voxels`: Pointer or array to the voxel block data.
+    *   `WorldPos`: 3D vector representing the chunk's position in world space.
+    *   `IsDirty`: Boolean flag indicating if the mesh needs regeneration.
+    *   `fake`: Boolean flag (usage context-dependent) [S1, unofficial].
+    *   `voxelBuffer`: GPU buffer holding the generated mesh geometry [S1, unofficial].
+*   **Constants:**
+    *   `ChunkSize`: Linear dimension of a voxel chunk in voxels (e.g., 16 or 32) [S1, unofficial].
+    *   `ChunkSizeM1`: `ChunkSize - 1`. Used for boundary indexing within a chunk [S1, unofficial].
+    *   `ChunkSizeSquared`: `ChunkSize * ChunkSize`. Used for 2D chunk stride calculations [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Calculate Camera-Relative Chunk Iteration Bounds:**
+    Determine the traversal order for chunks based on the camera's look vector to render front-to-back [S1, unofficial].
+    *   Let $L$ be the camera look vector.
+    *   If $L.x > 0$:
+        *   $startX = 0$
+        *   $endX = ChunkAmountX$
+        *   $xStep = 1$
+        *   $xAccessStep = ChunkSize$
+    *   Else:
+        *   $startX = ChunkAmountX - 1$
+        *   $endX = -1$
+        *   $xStep = -1$
+        *   $xAccessStep = -ChunkSize$
+    *   Repeat logic for Z axis ($startZ, endZ, zStep, zAccessStep$) and Y axis if applicable [S1, unofficial].
+
+2.  **Iterate Chunks:**
+    Loop through the 1D `meshChunks` array using the calculated bounds and steps [S1, unofficial].
+    *   For each chunk $c$:
+        *   If $c$ is null, skip.
+        *   If $c.IsDirty$ is false, skip (assuming static caching is handled by parent method).
+        *   Call `MeshChunk(c)` to generate geometry.
+        *   Bind and draw $c.voxelBuffer$ if not null [S1, unofficial].
+
+3.  **MeshChunk(c) - Voxel Face Culling:**
+    Iterate through every voxel in the chunk's block array using nested loops for dimensions $i$ (X), $j$ (Y), and $k$ (Z) [S1, S2, unofficial].
+    *   For each voxel at $(i, j, k)$:
+        *   If $voxel.index == 0$ (AIR), skip [S2, unofficial].
+        *   For each of the 6 face directions $d \in \{XN, XP, YN, YP, ZN, ZP\}$:
+            *   Determine the neighbor voxel's location.
+            *   If the neighbor is inside the current chunk, access it directly from the block array [S1, unofficial].
+            *   If the neighbor is outside the current chunk (boundary voxel):
+                *   Identify the neighboring chunk $c_{neighbor}$ in direction $d$.
+                *   If $c_{neighbor}$ is unallocated (null or `Allocated == false`), treat the neighbor as empty (AIR) and render the face [S1, S3, unofficial].
+                *   If $c_{neighbor}$ is allocated, fetch the voxel from $c_{neighbor}$'s data pointer. The specific offset depends on the direction (e.g., for $XN$, access the last X layer of the neighbor chunk) [S1, unofficial].
+            *   If the neighbor voxel is empty (index == 0), call `AddVoxelFace` to generate geometry for that specific face [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_chunks(camera_look_vector, chunks, chunk_amount_x, chunk_amount_z, chunk_size):
+    # 1. Calculate camera-relative iteration bounds
+    if camera_look_vector.x > 0:
+        start_x = 0
+        end_x = chunk_amount_x
+        x_step = 1
+        x_access_step = chunk_size
+    else:
+        start_x = chunk_amount_x - 1
+        end_x = -1
+        x_step = -1
+        x_access_step = -chunk_size
+
+    if camera_look_vector.z > 0:
+        start_z = 0
+        end_z = chunk_amount_z
+        z_step = 1
+        z_access_step = chunk_size
+    else:
+        start_z = chunk_amount_z - 1
+        end_z = -1
+        z_step = -1
+        z_access_step = -chunk_size
+
+    # 2. Iterate chunks in order
+    for z in range(start_z, end_z, z_step):
+        for x in range(start_x, end_x, x_step):
+            chunk = chunks.get_chunk(x, z) # Simplified indexing
+            if chunk is None:
+                continue
+            if chunk.is_dirty:
+                mesh_chunk(chunk, chunk_size)
+            if chunk.voxel_buffer is not None:
+                bind_and_draw(chunk.voxel_buffer)
+
+def mesh_chunk(chunk, chunk_size):
+    chunk_size_m1 = chunk_size - 1
+    chunk_size_squared = chunk_size * chunk_size
+    
+    # 3. Iterate voxels
+    for k in range(chunk_size): # Z
+        for i in range(chunk_size): # X
+            for j in range(chunk_size): # Y
+                voxel = chunk.voxels[i + j * chunk_size + k * chunk_size_squared]
+                
+                if voxel.index == 0: # Skip air
+                    continue
+
+                # Check 6 directions
+                directions = [
+                    ('XN', -1, 0, 0), ('XP', 1, 0, 0),
+                    ('YN', 0, -1, 0), ('YP', 0, 1, 0),
+                    ('ZN', 0, 0, -1), ('ZP', 0, 0, 1)
+                ]
+
+                for dir_name, dx, dy, dz in directions:
+                    neighbor_voxel = get_neighbor_voxel(chunk, i, j, k, dx, dy, dz, chunk_size)
+                    
+                    if neighbor_voxel is None or neighbor_voxel.index == 0:
+                        add_voxel_face(chunk, i, j, k, dir_name)
+
+def get_neighbor_voxel(chunk, i, j, k, dx, dy, dz, chunk_size):
+    # Calculate neighbor chunk coordinates
+    # Note: Exact chunk coordinate math depends on world layout, assumed here as helper
+    neighbor_chunk = get_neighbor_chunk(chunk, dx, dy, dz)
+    
+    if neighbor_chunk is None or not neighbor_chunk.allocated:
+        # Unallocated chunk treated as empty air
+        return None
+    
+    # Calculate local index in neighbor chunk
+    # If moving XN (-1,0,0), we look at the last X layer of the neighbor chunk
+    # If moving XP (1,0,0), we look at the first X layer of the neighbor chunk
+    # Similar logic for Y and Z
+    
+    if dx == -1: # XN
+        local_i = chunk_size - 1
+        local_j = j
+        local_k = k
+    elif dx == 1: # XP
+        local_i = 0
+        local_j = j
+        local_k = k
+    elif dy == -1: # YN
+        local_i = i
+        local_j = chunk_size - 1
+        local_k = k
+    elif dy == 1: # YP
+        local_i = i
+        local_j = 0
+        local_k = k
+    elif dz == -1: # ZN
+        local_i = i
+        local_j = j
+        local_k = chunk_size - 1
+    else: # ZP
+        local_i = i
+        local_j = j
+        local_k = 0
+        
+    return neighbor_chunk.voxels[local_i + local_j * chunk_size + local_k * (chunk_size * chunk_size)]
+
+def add_voxel_face(chunk, i, j, k, direction):
+    # Generate vertices, normals, UVs for the face
+    # Update chunk.voxel_buffer
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Access:** Boundary voxels must correctly access neighbor chunks. If a neighbor chunk is unallocated, the face is rendered immediately, treating the out-of-bounds region as empty space [S1, unofficial].
+*   **Double Rendering/Recursion:** Checks between blocks at the very edge of adjacent chunks (e.g., $j==sectionSide$ and neighbor $j==sectionSide$) must be handled carefully to prevent double-rendering or recursive checks. Some implementations ignore checks between blocks at the very edge to prevent this [S2, unofficial].
+*   **Array Bounds:** The block array may include an extra row/column (size $sectionSide+1$) to handle inter-chunk edges. Neighbors outside the array bounds are treated as non-air (solid) to prevent holes at chunk edges in some implementations, while others treat unallocated chunks as air [S2, unofficial]. This discrepancy should be resolved based on the specific engine's chunk management strategy.
+
+## Subtopics
+
+### Voxel Face Culling with Unknown Voxel Default to Air
+Treats voxels in unloaded or unknown chunks as air during mesh generation, allowing immediate culling of inner faces at chunk boundaries [S3, unofficial]. During mesh generation, if a neighbor voxel is unloaded or unknown, it is treated as air. The face is culled if the treated neighbor is solid (which it isn't, so it's rendered) [S3, unofficial]. This is a fallback strategy in voxel engines to handle dynamic chunk loading without blocking mesh generation [S3, unofficial]. The pitfall is that edge chunks may render slightly incorrect geometry temporarily, but this is acceptable if chunks load in sufficient numbers simultaneously [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(V)$ where $V$ is the number of voxels in visible chunks. Each voxel is checked against 6 neighbors. The camera-relative iteration order helps cull distant chunks earlier in the pipeline, potentially reducing GPU draw calls if depth sorting is utilized effectively [S1, unofficial].
+*   **Memory Complexity:** $O(C)$ where $C$ is the number of allocated chunks. Each chunk stores its voxel data and a GPU buffer for mesh geometry. The mesh size is proportional to the surface area of the solid voxels, not the volume [S2, unofficial].
+*   **Performance:** Eliminates interior geometry, significantly reducing the number of triangles sent to the GPU [S2, unofficial]. Real-time voxel editing requires marking chunks as dirty and regenerating their meshes, often done asynchronously on a thread pool to prevent frame drops [S2, unofficial].
+*   **Strengths:** Efficient culling of non-visible geometry; handles dynamic chunk loading by treating unknown neighbors as air; camera-relative ordering optimizes rendering order.
+*   **Limitations:** Requires careful handling of chunk boundaries to avoid holes or double rendering; dynamic updates require efficient dirty-flag management and asynchronous meshing [S2, S3, unofficial].
+
+## Background
+This technique is commonly used in voxel-based games and simulations, such as Minecraft clones, where efficient rendering of large, dynamic worlds is critical. It builds on the principles of blocky meshing and chunk-based management. The specific implementation details, such as camera-relative iteration and neighbor-based culling, are found in various community-driven voxel engine projects and tutorials [S1, S2, S3, unofficial].
+
+## Sources
+[S1] vercidium-patreon/meshing, https://github.com/vercidium-patreon/meshing, fetched 2026-10-26 (unofficial)
+[S2] Manolo94/UE5MinecraftClone, https://github.com/Manolo94/UE5MinecraftClone, fetched 2026-10-26 (unofficial)
+[S3] Tips for culling inner faces? : r/VoxelGameDev, https://www.reddit.com/r/VoxelGameDev/comments/210u58/tips_for_culling_inner_faces/, fetched 2026-10-27 (unofficial)

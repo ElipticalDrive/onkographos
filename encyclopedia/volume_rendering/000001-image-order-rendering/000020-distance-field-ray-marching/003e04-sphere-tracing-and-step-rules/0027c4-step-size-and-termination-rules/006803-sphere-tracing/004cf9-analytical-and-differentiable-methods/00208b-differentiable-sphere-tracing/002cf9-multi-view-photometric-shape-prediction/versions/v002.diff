@@ -1,0 +1,104 @@
+--- v001.md
++++ v002.md
+@@ -7,6 +7,6 @@
+ 
+ ## How it works
+-**Inputs:** A set of $N$ color images $\{I_0, \dots, I_{N-1}\}$ from known camera poses.
+-**Outputs:** A latent code $\mathbf{z}$ representing the 3D shape.
++**Inputs:** A set of $N$ color images $\{I_0, \dots, I_{N-1}\}$ from known camera poses [S1].
++**Outputs:** A latent code $\mathbf{z}$ representing the 3D shape [S1].
+ 
+ **Data Structures:**
+@@ -17,43 +17,76 @@
+ 
+ **Steps:**
+-1.  Initialize latent code $\mathbf{z}$ randomly [S1].
+-2.  For each view $i$, render a depth image $D_i = \mathcal{R}_d^i(f(\mathbf{z}))$ [S1].
+-3.  For each view $i$ and neighbor $j \in \mathcal{N}_i$:
++1. Initialize latent code $\mathbf{z}$ randomly [S1].
++2. For each view $i$, render a depth image $D_i = \mathcal{R}_d^i(f(\mathbf{z}))$ [S1].
++3. For each view $i$ and neighbor $j \in \mathcal{N}_i$:
+     a. Warp color image $I_j$ to view $i$ using depth $D_i$ and camera pose to get $I_{j \rightarrow i}$ [S1].
+     b. Compute photometric difference between $I_i$ and $I_{j \rightarrow i}$ [S1].
+-4.  Minimize the total photometric loss with respect to $\mathbf{z}$ [S1].
++4. Minimize the total photometric loss with respect to $\mathbf{z}$ [S1].
+ 
+ **Formula:**
+-$$ \arg \min_{\mathbf{z}} \sum_{i=0}^{N-1} \sum_{j \in \mathcal{N}_i} \| I_i - I_{j \rightarrow i}(\mathcal{R}_d^i(f(\mathbf{z}))) \| $$
++$$ \arg \min_{\mathbf{z}} \sum_{i=0}^{N-1} \sum_{j \in \mathcal{N}_i} I_i - I_{j \rightarrow i}(\mathcal{R}_d^i(f(\mathbf{z}))) $$
+ where $\mathcal{R}_d^i$ is the rendered depth image at view $i$, $\mathcal{N}_i$ are the neighboring images of $I_i$, and $I_{j \rightarrow i}$ is the warped image from view $j$ to $i$ using the rendered depth [S1]. No mask is required [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def multi_view_photometric_shape_prediction(images, cameras, sdf_decoder, num_iters=1000):
++def multi_view_photometric_shape_prediction(images, cameras, sdf_decoder, num_iters=1000, lr=0.01, max_steps=64, eps=1e-4):
+     # Initialize latent code randomly [S1]
+-    z = random_vector()
++    z = np.random.randn(sdf_decoder.latent_dim)
+     
+     for step in range(num_iters):
++        depths = []
+         # Render depth for each view [S1]
+-        depths = []
+-        for i, img in enumerate(images):
+-            # Render depth using differentiable sphere tracing [S1]
+-            d = render_depth(sdf_decoder(z), cameras[i])
+-            depths.append(d)
++        for i, cam in enumerate(cameras):
++            h, w = images[i].shape[:2]
++            depth_map = np.zeros((h, w))
++            for u in range(h):
++                for v in range(w):
++                    ray_o, ray_d = cam.unproject(u, v)
++                    ray_d = ray_d / np.linalg.norm(ray_d)
++                    t = 0.0
++                    for _ in range(max_steps):
++                        sdf_val = sdf_decoder(z, ray_o + t * ray_d)
++                        if sdf_val < eps:
++                            break
++                        t += sdf_val
++                    depth_map[u, v] = t
++            depths.append(depth_map)
+         
+         loss = 0.0
+         # Compute photometric loss [S1]
+         for i in range(len(images)):
+-            for j in neighbors(i, len(images)):
++            for j in range(len(images)):
++                if i == j: continue
+                 # Warp image j to view i using rendered depth [S1]
+-                warped_img = warp_image(images[j], cameras[j], cameras[i], depths[i])
++                warped_img = warp_images(images[j], cameras[j], cameras[i], depths[i])
+                 # Photometric difference [S1]
+                 diff = images[i] - warped_img
+-                loss += sum_squared_errors(diff)
++                loss += np.sum(diff ** 2)
+         
+         # Update latent code to minimize loss [S1]
+-        z = optimize(z, loss)
++        grad = autograd.compute(loss, z)
++        z = z - lr * grad
+         
+     return z
++
++def warp_images(source_img, src_cam, dst_cam, dst_depth):
++    h, w = dst_depth.shape
++    warped = np.zeros_like(source_img)
++    for u in range(h):
++        for v in range(w):
++            ray_o, ray_d = dst_cam.unproject(u, v)
++            ray_d = ray_d / np.linalg.norm(ray_d)
++            t = dst_depth[u, v]
++            point_3d = ray_o + t * ray_d
++            src_u, src_v = src_cam.project(point_3d)
++            if 0 <= src_u < source_img.shape[1] and 0 <= src_v < source_img.shape[0]:
++                warped[u, v] = bilinear_interpolate(source_img, src_v, src_u)
++    return warped
++
++def bilinear_interpolate(img, y, x):
++    x0, x1 = int(x), min(int(x) + 1, img.shape[1] - 1)
++    y0, y1 = int(y), min(int(y) + 1, img.shape[0] - 1)
++    dx, dy = x - x0, y - y0
++    return (1-dx)*(1-dy)*img[y0, x0] + dx*(1-dy)*img[y0, x1] + (1-dx)*dy*img[y1, x0] + dx*dy*img[y1, x1]
+ ```
+ 

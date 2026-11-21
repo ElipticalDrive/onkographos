@@ -1,0 +1,103 @@
+# LH Histogram TF
+
+Also called: LH Space TF Specification, LH TF, Lower-Higher Histogram TF
+
+## Overview
+LH Histogram TF is a 2D transfer function specification method that maps each voxel to a pair of scalar values $(L, H)$ representing the homogeneous material intensities on either side of the local gradient boundary [S1, S2, unofficial]. It addresses the difficulty of selecting boundaries in standard gradient-magnitude histograms by explicitly encoding the material composition of edges, performing better regarding noise, bias, and partial volume effects [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A volumetric dataset $V$ with scalar values.
+- Output: A 2D histogram where each voxel is plotted at coordinates $(L, H)$.
+
+**Data Structures:**
+- The LH space is a 2D coordinate system with axes $L$ (Lower intensity) and $H$ (Higher intensity).
+- Each voxel $v$ is represented by a point $(L_v, H_v)$.
+
+**Steps:**
+1. For each voxel $v$ in the volume:
+   a. Compute the gradient vector $\nabla v$ at $v$.
+   b. Follow the gradient direction in the positive sense (along $\nabla v$) until a homogeneous region is found. Record the scalar value as $H_v$.
+   c. Follow the gradient direction in the negative sense (along $-\nabla v$) until a homogeneous region is found. Record the scalar value as $L_v$.
+   d. A region is considered homogeneous if the scalar value is approximately constant [S2, unofficial].
+2. Plot the voxel at $(L_v, H_v)$ in the 2D histogram.
+
+**Formulas:**
+- $L_v = \text{Value}(\text{HomogeneousRegion}(-\nabla v))$
+- $H_v = \text{Value}(\text{HomogeneousRegion}(\nabla v))$
+
+**Parameters:**
+- "Approximately constant": Not given in the sources. [G] Implementation typically requires a threshold for variance or a maximum distance to search for homogeneity.
+
+**Edge Cases and Pitfalls:**
+- If the gradient direction does not lead to a distinct homogeneous region within a reasonable distance, the values may be undefined or default to the voxel's own intensity.
+- Biasing in MRI data can cause nonuniformities in intensity values, leading to false material borders in the histogram [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_lh_histogram(volume):
+    """
+    Computes the LH histogram for a volume.
+    volume: 3D array of scalar values.
+    Returns: 2D histogram array indexed by (L, H).
+    """
+    # Initialize histogram
+    # Assume intensity range is [min_val, max_val]
+    # Histogram dimensions depend on quantization of L and H
+    hist = empty_2d_array()
+
+    for each voxel v in volume:
+        # Compute gradient
+        grad = compute_gradient(volume, v)
+        
+        # Follow positive gradient to find H
+        h_val = find_homogeneous_value(volume, v, grad)
+        
+        # Follow negative gradient to find L
+        l_val = find_homogeneous_value(volume, v, -grad)
+        
+        # Ensure L <= H for consistent plotting
+        if l_val > h_val:
+            l_val, h_val = h_val, l_val
+            
+        # Bin and increment histogram
+        bin_l = quantize(l_val)
+        bin_h = quantize(h_val)
+        hist[bin_l, bin_h] += 1
+
+    return hist
+
+def find_homogeneous_value(volume, start_voxel, direction):
+    """
+    Follows the direction from start_voxel to find a homogeneous region.
+    Returns the scalar value of that region.
+    """
+    # Not given in the sources. [G]
+    # Implementation detail: Step along direction, check for constant value
+    # or low variance over a small window.
+    pass
+```
+
+## Subtopics
+
+### Local Histogram-based Transfer Function
+The parent method using local histograms to discern tissues. LH TF is a specific 2D space within this family. [Link](9491-local-histogram-based-transfer-function.md)
+
+### 2D Transfer Function with Gradient Magnitude
+The sibling method using gradient magnitude as the second axis. LH TF replaces magnitude with the specific material intensities $L$ and $H$, offering clearer edge representation. [Link](9490-2d-transfer-function-with-gradient-magnitude.md)
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ where $N$ is the number of voxels, assuming constant time for finding homogeneous regions. In practice, finding homogeneous regions may require searching, increasing complexity.
+- **Memory Complexity**: $O(N)$ for storing the volume and gradient data. The histogram size depends on the quantization of $L$ and $H$.
+- **Strengths**: Better performance in terms of noise, bias, and partial volume effects compared to standard 2D histograms [S1, unofficial]. Edges and homogeneous regions are clearly distinguished (diagonal vs. off-diagonal) [S2, unofficial].
+- **Limitations**: Requires defining "homogeneous region," which is not explicitly defined in the sources [G]. Sensitive to intensity biasing in MRI data [S1, unofficial].
+- **When to use**: Medical volume rendering where clear distinction of material boundaries is critical, especially in the presence of noise or partial volume effects. Used in Voreen and OsiriX [S1, unofficial].
+
+## Background
+LH Histogram TF was proposed by Šereda et al. [SER 2006c] as cited in [S2, unofficial]. It is used in medical volume rendering programs including Voreen [14] and OsiriX [15] [S1, unofficial]. The method addresses the limitations of scalar-only and gradient-magnitude histograms by explicitly encoding the materials forming boundaries [S1, S2, unofficial].
+
+## Sources
+[S1] Context-Preserving Volume Image Exploration Using A 3D Painting Metaphor, https://doi.org/10.32920/ryerson.14646888, fetched 2026-10-26 (unofficial)
+[S2] Especificação de funções de transferência unidimensionais e multidimensionais para visualização volumétrica direta, http://hdl.handle.net/10183/12077, fetched 2026-10-30 (unofficial)

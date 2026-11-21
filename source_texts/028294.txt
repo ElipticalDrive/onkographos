@@ -1,0 +1,1114 @@
+Massively Parallel Stackless Ray Tracing of Catmull-Clark
+Subdivision Surfaces
+arXiv:1811.03510v1 [cs.GR] 8 Nov 2018
+Nikolaus Binder, Alexander Keller
+NVIDIA
+Figure 1: Model composed of Catmull-Clark subdivision surfaces, ray traced with the described direct patch
+intersection method. Performance: ∼220 MRays/s for primary and ∼85 MRays/s for diffuse/reflection rays on an NVIDIA Titan VTM GPU. Armor Guy courtesy of c 2014 DigitalFish, Inc.
+All rights reserved.
+Abstract
+We present a fast and efficient method for intersecting rays with Catmull-Clark subdivision
+surfaces. It takes advantage of the approximation democratized by OpenSubdiv, in which regular
+patches are represented by tensor product Bézier surfaces and irregular ones are approximated
+using Gregory patches. Our algorithm operates solely on the original patch data and can process
+both patch types simultaneously with only a small amount of control flow divergence. Besides
+introducing an optimized method to determine axis aligned bounding boxes of Gregory patches
+restricted in the parametric domain, several techniques are introduced that accelerate the recursive subdivision process including stackless operation, efficient work distribution, and control
+flow optimizations. The algorithm is especially useful for quick turnarounds during patch editing
+and animation playback.
+1 Introduction
+For many years, Catmull-Clark subdivision surfaces [CC78] have been very popular in feature
+animation. Besides simple and intuitive modeling, subdivision surfaces facilitate animation because
+only their control points need to be animated. The original construction has been complemented
+1
+by many extensions, such as semi-sharp creases [DKT98] and hierarchically defined detail (multiresolution surfaces) [PLW97]. Over the recent years OpenSubdiv [Pix12] has been established as
+the de-facto industry standard for the representation of subdivision surfaces.
+While subdivision and evaluation of the parametric surfaces for tessellation of meshes composed
+from Catmull-Clark subdivision surfaces in a preprocess is well understood and almost trivially
+integrates into existing ray tracing systems supporting triangle meshes, the incoherent memory
+access patterns of path tracing and memory constraints on modern graphics hardware are longing
+for the direct intersection of rays with these surfaces.
+2 Survey of Previous Work
+Rendering systems only computing primary visibility, such as REYES [CCC87] or rasterization, rely
+on temporary tessellation of subdivision surfaces. Besides using efficient data structures [PS96] or
+methods to determine tessellated vertices without subdivision [Sta98], the efficiency of this procedure
+stems from the nature of these systems, which aim to access each surface at most once. In ray tracing
+based simulations, on the other hand, access is incoherent, and surfaces may be subsequently hit
+by different generations of rays. While coherency within one generation of rays can be improved by
+sorting [HKL10], the problem of repeated access across generations remains. Caching the tessellated
+data allows for a reuse up to a certain degree [BWN+ 15], however the efficiency highly depends on
+scene complexity, tessellation rate, and cache size. The memory footprint of hierarchies referencing
+tessellated primitives can be compressed and compactly represented without pointers due to their
+regular quad-tree structure [SLM+ 16].
+In order to display subdivision surfaces at interactive rates, feature adaptive subdivision [NLMD12]
+determines a set of patches that is submitted to the hardware tessellation units for rasterization.
+These patches can be partitioned into two classes, regular and irregular patches. Patches are regular unless one of their control points has a valence which is different from four. The limit surface
+of regular patches can be exactly and efficiently evaluated using cubic tensor product B-Spline or
+equivalent Bézier surfaces. For the fast evaluation of the limit surface of irregular patches, however,
+an approximation using Gregory patches [Gre74] is used. As each irregular patch with m vertices
+with a valence different from four and n vertices in total can be subdivided into n − m regular
+patches and m irregular ones, irregular patches are subdivided several times in order to decrease
+the area in which the approximation is used. A similar refinement is executed for patches next to
+creases and semi-sharp edges. When tessellating patches, special care has to be taken whenever the
+subdivision level or tessellation factor differs across edges in order to guarantee crack free surfaces.
+Methods that directly determine intersections with subdivision surfaces lend themselves to ray
+tracing simulations. They neither require parameter tweaking, nor preprocessing, nor additional
+memory for tessellated geometry and acceleration structures for this micro geometry.
+Solutions for the equality of the parametric representation of a ray and those of a surface patch can
+be computed using root finding of the resulting polynomials using Laguerre’s method [Ral65, Kaj82]
+or Newton-Raphson solvers [PMS+ 99]. However, methods based on Newton iterations need a good
+starting point in order to be efficient and to guarantee correct results. While for primary rays
+these starting points can often be guessed from adjoining rays [JB86], and regions in parameter
+space with guaranteed convergence of the solver can be identified [Tot85], coherence may lead to
+incorrect closest intersection points [LG90], only supporting coherent rays is not sufficient, and the
+cost of identifying safe regions per ray can be prohibitively high in practice. The convergence of
+Newton iterations can be accelerated by using polynomial extrapolation and by determining better
+starting points from the bounding volume of the patch defined as a trapezoidal prism [QGGW97], by
+2
+adaptively subdividing the patch into parts enclosed in parallelepipeds and referenced by a hierarchy
+for pruning [BS93], or by simply pre-subdividing patches into smaller ones referenced in the same
+top-level acceleration data structure [NN12]. Besides improving performance, these methods also
+improve the quality of starting points, but either increase the memory footprint for the extension
+of the acceleration structure or add a certain performance overhead.
+Recursive subdivision of the patch [Kaj83, Whi80] does not suffer from issues of methods based on
+root finding. Kobbelt et al. develop a fast on-the-fly subdivision method based on the precomputation of basis functions for the influence of vertices [KDS98]. This, however, needs to be done for all
+occurring valences and crease values, resulting in a combinatorial explosion. Müller et al. perform
+adaptive subdivision of the surfaces based on several criteria [MTF03]. Still, the process is elaborate.
+Testing the projections of the convex hull of the 1-neighborhood can be efficiently performed in a
+ray centric coordinate system [Woo89], however the resulting bounding volumes are not especially
+tight. Oriented slabs allow for more accurate pruning of patches than axis aligned bounding boxes,
+especially for rather flat ones [YSSP91]. Depending on the type of patch and subdivision rules, the
+effort can be rather low, but may potentially perform redundant computations. Therefore, attempts
+were made to amortize this cost across groups of rays either by exploiting coherence of primary rays
+[LG90], by predefining bundles of primary rays [BBLW07], or by sorting batches of rays [HKL10].
+As the potential re-use for large scenes, high subdivision depths, and small cache sizes may be
+small and at the same time the performance of modern massively parallel processors is very fast
+compared to memory access, subdividing independently for each ray individually is getting more
+and more interesting. Instead of intersecting with micro geometry, nested hierarchies of axis-aligned
+bounding boxes of sub-patches determined on demand during recursive subdivision can be refined
+until the intersected bounding box is sufficiently small to be identified as point of intersection along
+the ray [PK87, DK06]. The absence of an approximation with false negatives after termination of
+the subdivision process guarantees watertightness without further effort.
+Bézier clipping [NSK90] iteratively reduces the parametric interval in which an intersection can
+be found by transforming the ray into the parametric (u, v) space of a patch and cropping it to
+the bounds of the ray in this space. The original algorithm suffers from several deficiencies that
+can be resolved [CSS97, EHS05]. It can also be used in conjunction with Newton-Raphson solvers
+[WSC01]. Tejima et al. combine Bézier clipping with a bi-linear approximation that is used after
+subdivision termination [TFM15]. While this approximation reduces the number of subdivision
+steps in flat regions, the approximation with bi-linear surfaces cannot guarantee watertight surfaces:
+Adjacency on the surface does not necessarily imply shared vertices of the bi-linear approximations.
+Furthermore, efficient Bézier clipping requires rotations that not only increase the computational
+cost compared to simple subdivision by bisection, but may also introduce numerical errors visible as
+cracks in the surface. While consuming patches from an OpenSubdiv preprocess generating Bézier
+and Gregory patches, their method can only handle tensor product Bézier patches and therefore
+needs to approximate the approximation with Gregory patches even more. While certain parts are
+optimized for watertightness, the overall method does not guarantee watertightness: As the final
+intersection is performed with a bi-linear patch and domain cropping may terminate for different
+domain sizes, adjacent bi-linear patches do not necessarily meet at connecting edges. Furthermore,
+precision issues in Bézier clipping may also introduce cracks since the resulting intervals may also
+suffer from the imprecision due to the initial rotation and all subsequent floating point operations.
+While the required number of iterations is halved compared to midpoint subdivision, the required
+effort is significantly higher, especially since midpoint subdivision is extremely cheap and already
+reduces the parameter interval exponentially.
+We also investigate intersecting rays with the bicubic patches generated by OpenSubdiv instead
+of using them for tessellation, but support both Bézier and Gregory patches and focus on a method
+3
+suitable for efficient massive parallelization on GPUs. First, we explain how spatial bounds for
+both Bézier and Gregory patches can be calculated efficiently for patches cropped to parametric
+domains. The calculation of spatial bounds for Gregory patches restricted to parametric domains
+is based on a variant of the algorithm described by Miura et al. [MW94], which we optimize to
+calculate slightly looser bounds at a reduced cost. Second, these bounds are used for hierarchical
+culling in an iterative intersection algorithm. Finally, we provide details how performance of our
+massively parallel implementation can be optimized. With this massive parallelization in mind,
+stack memory consumption of recursive approaches becomes considerable and may cause bandwidth
+issues. Therefore, one of the key characteristics of the proposed algorithm is that it does not require
+a stack for backtracking during subdivision of the patch. Instead, remaining domains are indicated
+in two bit trails [HL09], kept in registers. Bit trails have previously also been used for backtracking
+during traversal of bounding volume hierarchies by restarting from the root node [Lai10], by using
+parent pointers [ÁSK14], or by using a perfect hash map [BK16]. We then calculate control points
+and/or bounding volumes for remaining domains, whose position and size can be extracted from
+these bit trails.
+3 Algorithm
+In a pre-process OpenSubdiv performs feature adaptive subdivision on the input mesh to isolate
+irregular patches and output patch data. Note that we do not need to differentiate between regular
+and transition patches since we do not need to take special care at boundaries between subdivision
+levels. After determining conservative spatial bounds of the patches, a hierarchy referencing the
+patches is built. A ray is then intersected with the mesh by first traversing this hierarchy, pruning
+patches that cannot be intersected by the ray, and identifying patches potentially intersected by the
+ray.
+In order to determine the first intersection of a ray and a bicubic patch, we partition the parametric
+unit square recursively, alternating u and v direction. Restricting the bicubic patches to the resulting
+subdomains allows one to determine bounding volumes as derived for Bézier patches in Section 3.1
+and Gregory patches in Section 3.2.
+Refining the subdomains on demand results in a sequence of nested axis-aligned bounding boxes
+and in fact intersecting only bounding boxes is sufficient to compute intersections up to almost
+floating point precision. Section 3.3 details Algorithm 3 that only uses bit trails instead of a stack
+and recomputes control points for backtracking. The numerical properties of the algorithm are
+discussed in Section 3.4, and its efficient parallelization is explained in Section 3.5.
+3.1 Bounding Bicubic Bézier Patches on Subdomains
+A conservative axis aligned bounding box of a bicubic Bézier patch is given by the component-wise
+minimum and maximum of its control points pi,j (i, j ∈ {0, 1, 2, 3}) as guaranteed by the convex
+hull property of the tensor product surface.
+Sub-patches defined by restricting the parametric domain of a Bézier patch can also be represented
+by Bézier patches. Control points of a Bézier sub-patch resulting from splitting the domain along
+a parametric axis can be calculated using de Casteljau subdivision [dC59].
+A restriction of a bicubic Bézier patch f (u, v) defined on the unit square to an arbitrary subdomain
+D := [u0 , u1 ] × [v0 , v1 ] ∈ [0, 1]2 results in a bicubic Bézier patch whose control points as laid out
+in Figure 2 can be computed by cropping the tensor product surface, for example as implemented
+in Algorithm 1. Besides intuitively imposing constraints to enforce the properties of the Bézier
+sub-patch, cropping can be derived by applying de Casteljau subdivision to the patch twice, once
+4
+v p0,3
+p1,3
+p2,3
+p3,3
+v p0,3
+p1,3
+p2,3
+pv1,2
+pv2,2
+p3,3
+p0,2
+p1,2
+p2,2
+p3,2
+p0,2
+pu1,2
+pu2,2
+p3,2
+p0,1
+p1,1
+p2,1
+p3,1
+p0,1
+pu1,1
+pu2,1
+p3,1
+p0,0
+p1,0
+p2,0
+p0,0
+p3,0
+u
+pv1,1
+pv2,1
+p1,0
+p2,0
+p3,0
+u
+Figure 2: Control vertex layout of a bicubic Bézier (left) and Gregory patch (right) along u and v direction.
+to cut each side of one parametric direction, and repeating the process to crop the other one. In
+our performance tests, cropping as implemented in Algorithm 1 performed slightly faster than the
+mathematically equivalent successive cropping of parametric directions.
+As splitting a patch using de Causteljau subdivision is significantly faster than computing control
+poinof a sub patch from scratch, we only recompute control points after backtracking, i.e. unless
+the next domain is a subdomain of the current one.
+3.2 Bounding Bicubic Gregory Patches on Subdomains
+A bicubic Gregory patch is controlled by 20 points as laid out in Figure 2. Given a pair of (u, v)
+coordinates, it can be evaluated by reducing it to a bicubic Bézier patch, where the control points
+on the boundary are identical and the inner control points
+pi,j (u, v) = gi,j (u, v)pui,j + (1 − gi,j (u, v)) pvi,j
+for i, j ∈ {1, 2} are determined using the weights
+
+v
+
+
+u+v
+
+
+ v
+gi,j (u, v) = (1−u)+v
+(1−v)
+
+
+u+(1−v)
+
+
+ (1−v)
+(1−u)+(1−v)
+i = 1, j = 1
+i = 2, j = 1
+i = 1, j = 2
+i = 2, j = 2.
+Due to the special case pui,j = pvi,j = pi,j , a Gregory patch may be considered a generalization of a
+Bézier patch.
+While bounding volumes for Gregory patches can also be determined from the convex hull of
+its control points, determining a bounding volume for the restriction to an arbitrary parametric
+subdomain D := [u0 , u1 ] × [v0 , v1 ] ∈ [0, 1]2 is not as obvious as in the Bézier case, because a subpatch of a Gregory patch may not necessarily be representable as a Gregory patch.
+While Gregory patches can be converted to bi-7th degree rational Bézier patches [TOTC90], the
+approach is ruled out by the additional amount of data, computations, and numerical issues.
+5
+However, analyzing the inner control points [MW94] allows for finding bounding volumes of
+bicubic Gregory patches restricted to D: Taking a look at the signs of the derivatives of the weights
+i, j
+1, 1
+2, 1
+1, 2
+2, 2
+∂
+∂u gi,j (u, v)
+v
+− (u+v)
+2
+v
+((1−u)+v)2
+(1−v)
+− (u+(1−v))
+2
+(1−v)
+((u−1)+(v−1))2
+≤0
+≥0
+≤0
+≥0
+∂
+∂v gi,j (u, v)
+u
+(u+v)2
+1−u
+((1−u)+v)2
+u
+− (u+(1−v))
+2
+(1−u)
+− ((u−1)+(v−1))2
+≥0
+≥0
+≤0
+≤0
+allows one to bound the weights
+min
+gi,j
+(D) := min gi,j (u, v) =
+(u,v)∈D
+
+u1
+
+
+u1 +v0
+
+
+ (1−u0 )
+i = 1, j = 1
+i = 2, j = 1
+u1
+
+
+u1 +(1−v1 )
+
+
+(1−u0 )
+
+i = 1, j = 2
+
+u0
+
+
+u0 +v1
+
+
+ (1−u1 )
+i = 1, j = 1
+i = 2, j = 1
+u0
+
+
+u0 +(1−v0 )
+
+
+(1−u1 )
+
+i = 1, j = 2
+(1−u0 )+v0
+(1−u0 )+(1−v1 )
+i = 2, j = 2
+and
+max
+gi,j
+(D) := max gi,j (u, v) =
+(u,v)∈D
+(1−u1 )+v1
+(1−u1 )+(1−v0 )
+i = 2, j = 2
+on the subdomain D. Finally, as depicted in Figure 3,
+ v
+min
+u
+min
+pA
+i,j (D) = gi,j (D)pi,j + 1 − gi,j (D) pi,j ,
+ v
+max
+u
+max
+pB
+i,j (D) = gi,j (D)pi,j + 1 − gi,j (D) pi,j ,
+A
+B
+pmin
+i,j (D) = min{pi,j (D), pi,j (D)}, and
+A
+B
+pmax
+i,j (D) = max{pi,j (D), pi,j (D)},
+where minima and maxima are determined component-wise, and hence
+max
+pmin
+i,j (D) ≤ pi,j (u, v) ≤ pi,j (D) for (u, v) ∈ D.
+max
+As obviously pmin
+i,j (D) = pi,j (D) = pi,j for the control points on the patch boundary, the two
+max
+bicubic Bézier patches defined by the control points on the boundary and pmin
+i,j (D) and pi,j (D),
+respectively, bound the volume of the restriction of a bicubic Gregory patch to D. The bounding
+volume bounding both bicubic Bézier patches restricted to D then bounds the bicubic Gregory patch
+restricted to D.
+Instead of maintaining two sets of control points, a conservative bounding volume can be defined
+by determining the lower bound from the Bézier patch with pmin
+i,j as inner control points and extending its upper bound by the maximum displacement vector dmax (D), which is defined as the
+component-wise maximum of the maximal displacements
+min
+di,j (D) := pmax
+i,j (D) − pi,j (D)
+of the inner control points.
+6
+0
+g min
+i,j
+(D
+)
+pv
+i,j
+pmax
+i,j
+pA
+i,j
+gi
+,j (
+u,
+g ma
+v)
+i,j x
+(D
+)
+1
+pB
+pmin
+i,j
+i,j
+pu
+i,j
+Figure 3: Bounding the interpolant gi,j (u, v) in the domain D also bounds the parametric inner control
+points pi,j (u, v).
+Unlike the bounding volumes determined by Miura et al. [MW94], we do not use a difference
+patch based on the di,j , but instead derive a conservative upper bound of the displacement of the
+upper bound, which we will improve in the following:
+In floating point arithmetic the displacement is not necessarily monotonously decreasing with
+increasing subdivision steps and limu1 →u0 ,v1 →v0 dmax (D) = 0 cannot be guaranteed. This especially
+happens when u and v are 0 or 1.
+The tightness of the bounding volume and its numerical properties can be improved by bounding
+the tensor product weights
+wi,j (u, v) = Bi3 (u) · Bj3 (v)
+in the bicubic Bézier surface formula according to D. For example, analyzing the second Bernstein
+polynomial of degree 3 yields
+
+4
+
+t0 ≤ 23 ∧ t1 ≥ 23
+9
+max B13 (t) = 3 · t21 (1 − t1 ) t1 < 32
+
+t0 ≤t≤t1
+
+3 · t20 (1 − t0 ) t0 > 23
+when restricted to the interval [t0 , t1 ]. A similar bound can be derived for B23 (t) and hence
+wi,j (u, v) ≤ wi,j (D) := max Bi3 (t) · max Bj3 (t)
+u0 ≤t≤u1
+v0 ≤t≤v1
+for (u, v) ∈ D and i, j ∈ {1, 2}. Noting that on the patch boundary di,j (D) = 0, i.e. for i, j ∈ {0, 3},
+the evaluation of a bicubic Bézier patch now can be bounded by
+X
+f (u, v) =
+wi,j (u, v)pi,j (u, v)
+0≤i,j≤3
+≤
+X
+wi,j (u, v)pmax
+i,j (D)
+0≤i,j≤3
+=
+X
+
+wi,j (u, v) pmin
+i,j (D) + di,j (D)
+0≤i,j≤3
+=
+X
+0≤i,j≤3
+≤
+X
+X
+wi,j (u, v)pmin
+i,j (D) +
+wi,j (u, v)di,j (D)
+i,j∈{1,2}
+X
+wi,j (u, v)pmin
+i,j (D) +
+0≤i,j≤3
+wi,j (D)di,j (D) .
+i,j∈{1,2}
+|
+7
+{z
+=:d(D)
+}
+Note that d(D) is now zero in the numerically critical cases (u0/1 and v0/1 are 0 or 1).
+Again, in order to bound a bicubic Gregory patch, we first determine the axis-aligned bounding
+box of the lower bounding Bézier patch, however, now extending it by displacing its upper bound
+by d(D), which includes the bounds on the weights. These computations to determine the control
+points of the lower bounding Bézier patch and the maximum displacement of the upper bound are
+subsumed in Algorithm 2.
+Now, dealing with both Bézier and Gregory patches can be realized by one unified algorithm (see
+Algorithm 2), because cropping Bézier patches is simply realized by setting d(D) to zero and using
+the inner control points of a Bézier patch instead of calculating pmin
+i,j (D).
+3.3 Iterative Hierarchical Subdivision
+In order to intersect a ray and a parametric patch, we start with the unit square as the parameter
+domain, which becomes repeatedly partitioned, alternating splits along the u and v parameter axes.
+Instead of an obvious recursive approach, Algorithm 3 traverses the implicit complete binary tree
+of nested subdomains iteratively.
+Therefore both bounding boxes of the two sub-patches resulting from partitioning are intersected
+with the ray. Avoiding a stack, intersection information now is stored in a bit trail [HL09], one
+for each parameter. Only if the ray intersects both bounding boxes, the bit corresponding to the
+current level of subdivision is set in the trail of the current axis to indicate that the second domain
+also needs to be checked for intersection. Once the bit trail contains only zeros and the current
+subtree is pruned, traversal is terminated.
+Similar to Dammertz et al. [DK06, Sec. 2.1], partitioning can be stopped once the L1 -norm of
+the bounding box diagonal projected onto the screen is less than half a pixel width for primary
+rays. As there is no approximation with a bi-linear surface, flatness criteria are not applicable.
+After terminating partitioning due to sufficient precision or missing both bounding boxes, the least
+significant set bit from both trails determines the next domain checked for intersection and the
+next partition axis. Now, Algorithm 2 determines the inner control points and the maximum
+displacement d, and in association with Algorithm 1 re-computes the current set p of control points
+for the subdomain specified by position and size as discussed in the previous sections.
+Intersecting the two bounding volumes of the sub-patches instead of intersecting only the bounding volume has two main advantages: First, it reduces the frequency of backtracking. Backtracking
+is expensive compared to de Casteljau subdivision, and can be quite often avoided because one of the
+two subdomains can immediately be pruned. Second, ordered traversal is as simple as intersecting
+the sub domain with the closer bounding volume first. While only adding the negligible overhead
+of comparing hit distances, this ordering helps avoiding the subdivision of hidden parts of patches.
+Interestingly, we can use the same subdivision and pruning procedure also for Gregory patches:
+After subdividing the lower bounding Bézier patch, we extend the maximum bound by the maximum
+displacement determined on the coarser scale. As the lower bounding Bézier patch of the coarser
+level also bounds the one on the current level and the maximum displacement is monotonously
+decreasing, the calculated bounding volumes are conservative.
+Our experiments show that the reduction of traversal steps and computation of control points
+nearly halves traversal time as compared to intersecting only the bounding volume of the patches
+restricted to the current domain.
+We do not calculate the distance to the bounding box tcur again on termination, as it has already
+been determined directly after subdivision. Even if the second domain on the same level was also
+intersected by the ray, it cannot be closer as the subdomain whose bounding box is closer is checked
+first. We could therefore also clear the trail bit to avoid backtracking to the same level, but these
+8
+cases are so rare that we could not measure any speedup.
+For path tracing, we avoid self-intersection by shifting the origin of the subsequent ray along the
+normal in the intersection by the L1 distance of the last bounding volume. While this offset is
+not minimal, it is numerically preferable over the diagonal of the bounding box and always avoids
+self-intersection.
+3.4 Numerical Robustness and Watertightness
+De Casteljau subdivision is the most robust method for bisection of a Bézier patch as it only performs
+additions and divisions by two. Intersecting rays with patches using the iterative subdivision method
+described in Section 3.3 only reports false positives; false negatives can only be introduced by
+numerical imprecision. In theory, the surface intersected by the algorithm would therefore be
+completely watertight, and its approximation error would only be an artificial thickness of the patch.
+It is important to note that this guarantee also includes independence from the local subdivision
+depth, which clearly differentiates the approach from others using bi-linear approximations after
+subdivision [BBLW07, TFM15], which either require a fixed subdivision depth or may introduce
+cracks due to local deviation of subdivision depth.
+In practice, special care needs to be taken for intersection of rays with bounding volumes [WBMS05,
+Ize13]. Furthermore, the recomputation of control points after backtracking may be numerically
+critical as it may result in control points that differ from the ones calculated by subdivision. An
+analysis of all included operations may define an upper bound on the deviation which can be used
+to extend bounding boxes and guarantee watertightness. On the other hand, this deviation can be
+dramatically reduced by anchoring patches in the origin. In our numerical experiments we measured
+a deviation as low as 0.0001 %, which suggests that the deviation will most likely be negligible. For
+some of our meshes the discrepancy between floating point and double precision subdivision is about
+similar.
+Intersecting patches in local frames instead of using world space coordinates for all bounding boxes
+improves performance significantly by reducing their overlap and therefore lowering the number of
+parametric domains that cannot be immediately pruned. While the performance often doubles in
+our test scenes, the transformation to the local frame is a source of numerical precision issues that
+may become visible as gaps between adjacent patches. Extending bounding boxes at the boundary
+that fall below a certain size threshold introduces an artificial thickness which closes these gaps.
+3.5 Efficient Parallelization
+The apparent parallelization of the method over rays suffers from very high register pressure: Even
+for a Bézier patch already 48 registers are required to maintain the set of control points. As the
+vast majority of calculations is performed component-wise, the number of required registers can
+be reduced by operating with thread groups of three per ray, using one thread per component of
+the three-dimensional vectors. Although this approach results in only 30 active threads for a SIMD
+width of 32 and requires several shuffles of values between threads, our experiments report a speedup
+of up to 33 %. Besides reducing the register pressure, this parallelization scheme also helps reducing
+the amount of control flow and data divergence.
+In addition, shared state variables can also be maintained across the thread group, which further
+reduces register pressure and allows for further distributing computations across the thread group.
+We measure another performance gain of up to 10 % after this optimization.
+We also use this parallelization scheme for traversal of the top level hierarchy. While there the
+number of component-wise computations is relatively low compared to the time spent for memory
+9
+// −−−−−−−−−−−−−− one calculation per thread −−−−−−−−−−−−−−
+vec3f p0 = 3.0 f ∗ a + 2.0 f ∗ b + vec3f(12.0 f ) ;
+vec3f p1 = 1.0 f ∗ a − 3.0 f ∗ b + vec3f(7.0 f ) ;
+float best = hmax3(p0) + hmax3(p1) ;
+// −−−−−−−−−−−−−− in thread groups of three −−−−−−−−−−−−−−−
+// component wise operations look exactly the same
+float p0 = 3.0 f ∗ a + 2.0 f ∗ b + 12.0 f ;
+float p1 = 1.0 f ∗ a − 3.0 f ∗ b + 7.0 f ;
+// shuffles required for operations on multiple components
+float best = max3(shuffle(p0, lane0) ,
+shuffle(p0, lane1) ,
+shuffle(p0, lane2) ) +
+max3(shuffle(p1, lane0) ,
+shuffle(p1, lane1) ,
+shuffle(p1, lane2) ) ;
+Listing 1: CUDA example for an arbitrary, unrelated calculation using the parallelization scheme using
+thread groups of three.
+access and communication between the threads of a group, we still measured a clear performance
+advantage over traversal in only one of the three threads of a group and also over a two step
+method that first traverses the hierarchy with one thread per ray and enqueues ray-patch tuples for
+a subsequent intersection test. Listing 1 shows an example for a parallelization with this scheme.
+Another source of control flow divergence is subdivision, which may split along different parametric directions for different threads of a warp. We avoid this issue completely by transposing the
+grid of control points after subdivision and after recalculation (if required). This way we only need
+to split along one parametric direction. As we are only interested in the convex hull of the set of
+control points, its rotation is irrelevant.
+4 Results and Discussion
+We evaluated the performance of our method using a path tracer with next event estimation on
+several different generations of NVIDIA GPUs. The numbers presented in this article were obtained
+using a NVIDIA Titan VTM . Due to the simplicity of the models only one primary, one reflection,
+and one shadow ray to the light sources were traced.
+Employing a basic wavefront ray tracer [LKA13], we can distinguish intersection performance
+from ray setup and shading. We do not perform compaction of the ray stream after intersecting primary rays; intersection performance for secondary rays is therefore not only penalized by increased
+incoherency of secondary rays, but also by the resulting lower SIMD occupancy.
+Intersection performance for larger models is mostly dominated by traversal performance of the
+hierarchy referencing the patches. We use a simple binary Bounding Volume Hierarchy (BVH),
+recursively constructed using bins to split approximately according to the Surface Area Heuristic
+(SAH) [GS87, Hav00, SSK07, Wal07]. Traversal performance can potentially be improved by utilizing spatial splits [SFD09] also for patches. Furthermore, while we traverse a binary hierarchy
+using a node index stack and persistent threads [AL09], recent advances in stackless BVH traversal
+[BK16] and fast traversal of wide BVHs on GPUs [YKL17] will certainly also improve the overall
+performance.
+The results in the captions of Figures 1 and 4 show that the direct ray tracing of the bicubic
+patches resulting from feature adaptive subdivision can be performed interactively or even in real
+10
+Algorithm 1: cropBezierPatch: Calculate control points of a Bézier patch cropped to the
+parametric domain [u0 , u1 ] × [v0 , v1 ].
+Input: A Bézier patch defined by its control points p and the domain [u0 , u1 ] × [v0 , v1 ]
+Output: Control points q of the cropped Bézier patch
+0
+∆u ← u1 −u
+3
+v1 −v0
+∆v ← 3
+// Corners
+q0,0 ← evalBezier(p, u0 , v0 )
+q3,0 ← evalBezier(p, u1 , v0 )
+q0,3 ← evalBezier(p, u0 , v1 )
+q3,3 ← evalBezier(p, u1 , v1 )
+// Points on the boundary
+q1,0 ← q0,0 + ∆u · evalBezierDu(p, u0 , v0 )
+q2,0 ← q3,0 − ∆u · evalBezierDu(p, u1 , v0 )
+q0,1 ← q0,0 + ∆v · evalBezierDv(p, u0 , v0 )
+q3,1 ← q3,0 + ∆v · evalBezierDv(p, u1 , v0 )
+q0,2 ← q0,3 − ∆v · evalBezierDv(p, u0 , v1 )
+q3,2 ← q3,3 − ∆v · evalBezierDv(p, u1 , v1 )
+q1,3 ← q0,3 + ∆u · evalBezierDu(p, u0 , v1 )
+q2,3 ← q3,3 − ∆u · evalBezierDu(p, u1 , v1 )
+// Inner control points
+q1,1 ← q1,0 + ∆v · evalBezierDv(p, u0 , v0 )
++ ∆u · ∆v · evalBezierDuDv(p, u0 , v0 )
+q2,1 ← q3,1 − ∆u · evalBezierDu(p, u1 , v0 )
+− ∆u · ∆v · evalBezierDuDv(p, u1 , v0 )
+q1,2 ← q1,3 − ∆v · evalBezierDv(p, u0 , v1 )
+− ∆u · ∆v · evalBezierDuDv(p, u0 , v1 )
+q2,2 ← q2,3 − ∆v · evalBezierDv(p, u1 , v1 )
++ ∆u · ∆v · evalBezierDuDv(p, u1 , v1 )
+return q
+11
+Algorithm 2: calcPointsAndD: Calculating control points of a Bézier patch as a lower
+bound and the maximum displacement of an upper bounding Bézier patch of a Gregory
+Patch restricted to a domain. For a Bézier patch the lower bounding patch equals the patch
+itself and the displacement of the upper bound is zero.
+Input: A Bézier/Gregory patch with control points p and the domain to which it is restricted
+[u0 , u1 ] × [v0 , v1 ] and a flag isGregoryP atch
+Output: A set of control points q of the lower bounding Bézier patch and the maximum distance d
+of the upper bounding Bézier patch
+if isGregoryPatch then
+v
+u0 ·pu
+1,1 +v1 ·p1,1
+pmin
+1,1 ←
+u0 +v1
+v
+u1 ·pu
+1,1 +v0 ·p1,1
+u1 +v0
+v
+(1−u0 )·pu
+2,1 +v0 ·p2,1
+pmin
+2,1 ←
+(1−u0 )+v0
+v
+(1−u1 )·pu
+2,1 +v1 ·p2,1
+pmax
+2,1 ←
+(1−u1 )+v1
+v
+u1 ·pu
+1,2 +(1−v1 )·p1,2
+pmin
+←
+1,2
+u1 +(1−v1 )
+v
+u0 ·pu
+1,2 +(1−v0 )·p1,2
+pmax
+1,2 ←
+u0 +(1−v0 )
+v
+(1−u1 )·pu
+2,2 +(1−v0 )·p2,2
+pmin
+2,2 ←
+(1−u1 )+(1−v0 )
+v
+(1−u0 )·pu
+2,2 +(1−v1 )·p2,2
+pmax
+←
+2,2
+(1−u
+)+(1−v
+)
+0
+1
+
+1
+
+u0 ≤ 13 ∧ u1 ≥ 31 ,
+3
+wu,1 ← u1 u1 ≤ 13 ,
+
+pmax
+1,1 ←
+
+u else.
+ 0
+2
+
+u0 ≤ 23 ∧ u1 ≥ 32 ,
+3
+wu,2 ← u1 u1 < 23 ,
+
+
+u else.
+ 0
+1
+1
+1
+
+ 3 v0 ≤ 3 ∧ v1 ≥ 3 ,
+wv,1 ← v1 v1 < 31 ,
+
+
+v else.
+ 0
+2
+2
+2
+
+ 3 v0 ≤ 3 ∧ v1 ≥ 3 ,
+wv,2 ← v1 v1 < 32 ,
+
+
+v0 else.
+max
+wu,1 ← 3 · wu,1 · (1 − wu,1 ) · (1 − wu,1 )
+max
+wu,2
+← 3 · wu,2 · wu,2 · (1 − wu,2 )
+max
+wv,1 ← 3 · wv,1 · (1 − wv,1 ) · (1 − wv,1 )
+max
+← 3 · wv,2 · wv,2 · (1 − wv,2 )
+wv,2
+max
+p1,1 ← min{pmin
+1,1 , p1,1 }
+min max
+p2,1 ← min{p2,1 , p2,1 }
+max
+p1,2 ← min{pmin
+1,2 , p1,2 }
+min max
+p2,2 ← min{p2,2 , p2,2 }
+max
+max
+min
+d←
+wu,1
+· wv,1
+· |pmax
+1,1 − p1,1 |
+min
+max
+max
++ wu,2
+· wv,1
+· |pmax
+2,1 − p2,1 |
+max
+max
+max
++ wu,1 · wv,2 · |p1,2 − pmin
+1,2 |
+max
+max
+min
++ wu,2
+· wv,2
+· |pmax
+−
+p
+2,2
+2,2 |
+else
+d←0
+end
+q ← cropBezierPatch(p, u0 , u1 , v0 , v1 )
+return (q, d)
+12
+Algorithm 3: Intersecting a Bézier or Gregory patch.
+Input: A ray with its current closest hit distance tmax , the patch control points porg and a flag
+isGregoryP atch
+Output: Intersection details and distance tmax
+pos ← (0, 0)
+size ← (223 , 223 )
+trail ← (0, 0)
+axis ← 0
+tmax ← ray.tmax
+if isGregoryPatch then
+(p, d) ←calcPointsAndD(isGregoryP atch, porg , pos, size)
+else
+p ← porg
+d ← (0, 0, 0)T
+end
+while true do
+subdividing ← false
+if ¬terminate(p, ray, pos, size) then
+(pL , pR ) ← subdivideDeCasteljau(p, axis)
+(hitL, hitR, closest, tcur ) ← intersect(ray, t, pL , pR , d)
+if hitL or hitR then
+subdividing ← true
+size[axis] ← size[axis]/2
+if hitL and hitR then
+trail[axis] ← trail[axis] ⊕ size[axis]
+end
+if closest = R or ¬hitL then
+p ← pR
+pos[axis] ← pos[axis] ⊕ size[axis]
+else
+p ← pL
+end
+axis ← 1 − axis
+end
+else
+if tcur < tmax then
+tmax = tcur
+intersection ← (pos, size, ...)
+end
+end
+if ¬subdividing then
+if trail = (0, 0) then break
+lvl ← countTrailingZeros(trail)
+axis ← argmin(lvl)
+if axis = 0 then size ← (2lvl[0] , 2lvl[0]+1 )
+else size ← (2lvl[1] , 2lvl[1] )
+pos[axis] ← pos[axis] ⊕ size
+trail[axis] ← trail[axis] ⊕ size
+pos ← pos ∧ ¬(size − 1)
+axis ← 1 − axis
+end
+if ¬subdividing or isGregoryP atch then
+(p, d) ←calcPointsAndD(isGregoryP atch, porg , pos, size)
+end
+end
+return (tmax , intersection)
+13
+185 Mrays/s (60 Mrays/s)
+73 Mrays/s (51 Mrays/s)
+a) Road Bike (courtesy of Yasutoshi “Mirage” Mori)
+220 Mrays/s (85 Mrays/s)
+65 Mrays/s (62 Mrays/s)
+b) Armor Guy and false color closeup of texture coordinates (courtesy of DigitalFish)
+131 Mrays/s (72 Mrays/s)
+70 Mrays/s (43 Mrays/s)
+c) Curiosity (courtesy of DigitalFish)
+Figure 4: Several meshes, ray traced using the described method and the performance for primary (diffuse)
+rays measured on a NVIDIA Titan VTM GPU.
+14
+time. Depending on the scene complexity, the pure intersection performance of pre-tessellated
+meshes outperforms the presented direct intersection clearly, whereas memory limitations easily
+can become prohibitive depending on the desired precision. However, taking into account the time
+required for tessellation and the increased time for bounding volume hierarchy construction, direct
+intersection in many cases is faster and thus favorable.
+5 What about Displacements?
+Applying displacements to patches complicates the determination of the bounding boxes, as now
+bounds on both the displacement as well as the range of directions along which the patch is displaced
+are required.
+Bounds on the displacement can be either scalar or vector valued. Efficient lookup requires a
+hierarchical structure such that the current displacement can be determined with a minimal amount
+of read operations [Wil83]. Displacement maps can be given per patch [BL08] or in one or multiple
+textures, which are then accessed using texture coordinates. For the latter bounds cannot be read
+from a single location in this texture due to a potential warping of the domain. As the size of
+the hierarchy built for vector valued displacement textures equals the size required for a bounding
+volume hierarchy of a pre-subdivided patch, using direct intersection with displacements only saves
+memory if the displacement can be used multiple times, e.g. for motion blur. Depending on their
+complexity, bounds for procedural displacement of the patch restricted to a parametric domain may
+be determined quite efficiently [HS98, VAZH+ 09].
+While bounds of the possible range of normal directions can be computed using normal cones or
+tangent cones [MHTAM10], it adds yet another significant overhead.
+Displacing a tessellated subdivision surface may remove all mathematical guarantees of the underlying surface. Often, the level of tessellation is selected as level of detail [CFLB06]. While
+practical in the REYES architecture and rasterization, the visibility may be affected and shadows
+and silhouettes may be changed [DK06], for example.
+The ensemble of these issues raises the interesting question whether a subdivided mesh with a
+displacement, as used for modeling, is a representation suitable for efficient rendering at all. We
+therefore see our algorithm as an initial step to start exploring displacements that allow for level of
+detail and at the same time provide mathematical guarantees for efficient evaluation and visibility
+error control in future research.
+6 Conclusion
+We have presented a numerically robust algorithm that intersects rays with Bézier and Gregory
+patches with very high performance and precision on massively parallel hardware based on an
+improved calculation of bounds of Gregory patches, iterative hierarchical subdivision, and a special
+parallelization scheme. After creating these patches using feature adaptive subdivision of CatmullClark subdivision meshes, they can be efficiently and directly intersected with rays.
+Due to the superiority of hierarchical culling over brute force (hardware) tessellation and rasterization, direct ray tracing of these meshes can in some cases even outperform rasterization, which is
+expected especially for large scenes with a high depth complexity and very high precision requiring
+fine tessellation for rasterization.
+While one might argue about the quality of the approximation of irregular patches by Gregory
+patches, consistent and thus predictable output from modeling until final rendering may be more important. Hence our new algorithm is beneficial during modeling and animation playback, especially
+15
+when caching and tessellation are inefficient and even more so for the large number of applications
+that do not require displacement.
+References
+[AL09]
+T. Aila and S. Laine. Understanding the efficiency of ray traversal on gpus. In
+Proceedings of the Conference on High Performance Graphics 2009, HPG ’09, pages
+145–149, New York, NY, USA, 2009. ACM.
+[ÁSK14]
+A. Áfra and L. Szirmay-Kalos. Stackless multi-BVH traversal for CPU, MIC and
+GPU ray tracing. Computer Graphics Forum, 33(1):129–140, 2014.
+[BBLW07]
+C. Benthin, S. Boulos, D. Lacewell, and I. Wald. Packet-based ray tracing of catmullclark subdivision surfaces. Sci institute technical report uusci-2007-011, University of
+Utah, 2007.
+[BK16]
+N. Binder and A. Keller. Efficient stackless hierarchy traversal on gpus with backtracking in constant time. In Proceedings of High Performance Graphics, HPG ’16,
+pages 41–50, Aire-la-Ville, Switzerland, Switzerland, 2016. Eurographics Association.
+[BL08]
+B. Burley and D. Lacewell. Ptex: Per-face texture mapping for production rendering.
+In Proceedings of the Nineteenth Eurographics Conference on Rendering, EGSR ’08,
+pages 1155–1164, Aire-la-Ville, Switzerland, Switzerland, 2008. Eurographics Association.
+[BS93]
+W. Barth and W. Stürzlinger. Efficient ray tracing for bezier and b-spline surfaces.
+Computers & Graphics, 17(4):423 – 430, 1993.
+[BWN+ 15]
+C. Benthin, S. Woop, M. Nießner, K. Selgrad, and I. Wald. Efficient ray tracing of
+subdivision surfaces using tessellation caching. In Proceedings of the 7th Conference
+on High-Performance Graphics, HPG ’15, pages 5–12, New York, NY, USA, 2015.
+ACM.
+[CC78]
+E. Catmull and J. Clark. Recursively generated B-spline surfaces on arbitrary topological meshes. Computer-Aided Design, 10(6):350–355, November 1978.
+[CCC87]
+R. Cook, L. Carpenter, and E. Catmull. The reyes image rendering architecture. In
+Proceedings of the 14th Annual Conference on Computer Graphics and Interactive
+Techniques, SIGGRAPH ’87, pages 95–102, New York, NY, USA, 1987. ACM.
+[CFLB06]
+P. Christensen, J. Fong, D. Laur, and D. Batali. Ray tracing for the movie ’Cars’. In
+Proc. 2006 IEEE Symposium on Interactive Ray Tracing, pages 1–6, 2006.
+[CSS97]
+S. Campagna, P. Slusallek, and H.-P. Seidel. Ray tracing of spline surfaces: Bézier
+clipping, chebyshev boxing, and bounding volume hierarchy – a critical comparison
+with new results. The Visual Computer, 13(6):265–282, 08 1997.
+[dC59]
+P. de Casteljau. Outillages methodes calcul. Technical report, Andre Citroen Automobiles SA, Paris, 1959.
+[DK06]
+H. Dammertz and A. Keller. Improving Ray Tracing Precision by World Space Intersection Computation. In Proc. 2006 IEEE Symposium on Interactive Ray Tracing,
+pages 25–32, Salt Lake City, UT, Sep 2006. IEEE.
+16
+[DKT98]
+T. DeRose, M. Kass, and T. Truong. Subdivision surfaces in character animation.
+In Proceedings of the 25th Annual Conference on Computer Graphics and Interactive
+Techniques, SIGGRAPH ’98, pages 85–94, New York, NY, USA, 1998. ACM.
+[EHS05]
+A. Efremov, V. Havran, and H.-P. Seidel. Robust and numerically stable bézier
+clipping method for ray tracing nurbs surfaces. In Proceedings of the 21st Spring
+Conference on Computer Graphics, SCCG ’05, pages 127–135, New York, NY, USA,
+2005. ACM.
+[Gre74]
+J. Gregory. Smooth interpolation without twist constraints. In R. Barnhill and
+R. Riesenfeld, editors, Computer Aided Geometric Design, pages 71–87. Academic
+Press, 1974.
+[GS87]
+J. Goldsmith and J. Salmon. Automatic creation of object hierarchies for ray tracing.
+Computer Graphics and Applications, IEEE, 7:14–20, 06 1987.
+[Hav00]
+Vlastimil Havran. Heuristic Ray Shooting Algorithms. Ph.d. thesis, Department of
+Computer Science and Engineering, Faculty of Electrical Engineering, Czech Technical
+University in Prague, November 2000.
+[HKL10]
+J. Hanika, A. Keller, and H. Lensch. Two-level ray tracing with reordering for highly
+complex scenes. In Proceedings of Graphics Interface 2010, GI ’10, pages 145–152,
+Toronto, Ont., Canada, Canada, 2010. Canadian Information Processing Society.
+[HL09]
+D. Hughes and I. Lim. Kd-jump: a path-preserving stackless traversal for faster isosurface raytracing on GPUs. Visualization and Computer Graphics, IEEE Transactions
+on, 15(6):1555–1562, Nov 2009.
+[HS98]
+W. Heidrich and H.-P. Seidel. Ray-tracing procedural displacement shaders. In
+Proceedings of the Graphics Interface 1998 Conference, pages 8–16, Vancouver, BC,
+Canada, June 1998. Canadian Human-Computer Communications Society.
+[Ize13]
+T. Ize. Robust BVH ray traversal. Journal of Computer Graphics Techniques (JCGT),
+2(2):12–27, July 2013.
+[JB86]
+K. Joy and M. Bhetanabhotla. Ray tracing parametric surface patches utilizing numerical techniques and ray coherence. SIGGRAPH Comput. Graph., 20(4):279–285,
+August 1986.
+[Kaj82]
+J. Kajiya. Ray tracing parametric patches. SIGGRAPH Comput. Graph., 16(3):245–
+254, July 1982.
+[Kaj83]
+J. Kajiya. New techniques for ray tracing procedurally defined objects. SIGGRAPH
+Comput. Graph., 17(3):91–102, July 1983.
+[KDS98]
+L. Kobbelt, K. Daubert, and H-P. Seidel. Ray tracing of subdivision surfaces. In
+George Drettakis and Nelson Max, editors, Rendering Techniques ’98, pages 69–80,
+Vienna, 1998. Springer Vienna.
+[Lai10]
+S. Laine. Restart trail for stackless bvh traversal. In Proceedings of the Conference
+on High Performance Graphics, HPG ’10, pages 107–111, Aire-la-Ville, Switzerland,
+Switzerland, 2010. Eurographics Association.
+17
+[LG90]
+D. Lischinski and J. Gonczarowski. Improved techniques for ray tracing parametric
+surfaces. The Visual Computer, 6(3):134–152, May 1990.
+[LKA13]
+S. Laine, T. Karras, and T. Aila. Megakernels considered harmful: Wavefront path
+tracing on gpus. In Proceedings of the 5th High-Performance Graphics Conference,
+HPG ’13, pages 137–143, New York, NY, USA, 2013. ACM.
+[MHTAM10] J. Munkberg, J. Hasselgren, R. Toth, and T. Akenine-Möller. Efficient bounding
+of displaced bézier patches. In Proceedings of the Conference on High Performance
+Graphics, HPG ’10, pages 153–162, Aire-la-Ville, Switzerland, Switzerland, 2010. Eurographics Association.
+[MTF03]
+K. Müller, T. Techmann, and D. Fellner. Adaptive ray tracing of subdivision surfaces.
+Computer Graphics Forum, 22:553–562, 09 2003.
+[MW94]
+K. Miura and K.-K. Wang. Ray Tracing Gregory-type Patches, pages 98–109. World
+Scientific. Springer-Verlag, Melbourne, Australia, 1994.
+[NLMD12]
+M. Nießner, C. Loop, M. Meyer, and T. Derose. Feature-adaptive GPU rendering
+of Catmull-Clark subdivision surfaces. ACM Trans. Graph., 31(1):6:1–6:11, February
+2012.
+[NN12]
+R. Nigam and P. Narayanan. Hybrid ray tracing and path tracing of bezier surfaces
+using a mixed hierarchy. In Proceedings of the Eighth Indian Conference on Computer
+Vision, Graphics and Image Processing, ICVGIP ’12, pages 35:1–35:8, New York, NY,
+USA, 2012. ACM.
+[NSK90]
+T. Nishita, T. Sederberg, and M. Kakimoto. Ray tracing trimmed rational surface
+patches. In Proceedings of the 17th Annual Conference on Computer Graphics and
+Interactive Techniques, SIGGRAPH ’90, pages 337–345, New York, NY, USA, 1990.
+ACM.
+[Pix12]
+Pixar. Open Subdiv, http://graphics.pixar.com/opensubdiv/, 2012.
+[PK87]
+R. Pulleyblank and J. Kapenga. The feasibility of a VLSI chip for ray tracing bicubic
+patches. Computer Graphics and Applications, IEEE, 7(3):33–44, March 1987.
+[PLW97]
+K. Pulli, M. Lounsbery, and S. Wa. Hierarchical editing and rendering of subdivision
+surfaces. Technical Report UW-CSE-97-04-07, University of Washington, Dept. of
+CS&E, Seattle, WA, 1997.
+[PMS+ 99]
+S. Parker, W. Martin, P.-P. Sloan, P. Shirley, B. Smits, and C. Hansen. Interactive
+ray tracing. In Proceedings of the 1999 Symposium on Interactive 3D Graphics, I3D
+’99, pages 119–126, New York, NY, USA, 1999. ACM.
+[PS96]
+K. Pulli and M. Segal. Fast rendering of subdivision surfaces. In X. Pueyo and
+P. Schröder, editors, Rendering Techniques ’96, pages 61–70, Vienna, 1996. Springer
+Vienna.
+[QGGW97]
+K. Qin, M. Gong, Y. Guan, and W. Wang. A new method for speeding up ray tracing
+nurbs surfaces. Comput. Graph., 21(5):577–586, September 1997.
+18
+[Ral65]
+A. Ralston. A First Course in Numerical Analysis. McGraw-Hill, New York City,
+1965.
+[SFD09]
+M. Stich, H. Friedrich, and A. Dietrich. Spatial splits in bounding volume hierarchies.
+In Proceedings of the Conference on High Performance Graphics 2009, HPG ’09, pages
+7–13, New York, NY, USA, 2009. ACM.
+[SLM+ 16]
+K. Selgrad, A. Lier, M. Martinek, C. Buchenau, M. Guthe, F. Kranz, H. Schäfer, and
+M. Stamminger. A compressed representation for ray tracing parametric surfaces.
+ACM Trans. Graph., 36(1):5:1–5:13, November 2016.
+[SSK07]
+M. Shevtsov, A. Soupikov, and A. Kapustin. Highly parallel fast kd-tree construction
+for interactive ray tracing of dynamic scenes. Comput. Graph. Forum, 26:395–404, 09
+2007.
+[Sta98]
+J. Stam. Exact evaluation of catmull-clark subdivision surfaces at arbitrary parameter
+values. In Proceedings of the 25th Annual Conference on Computer Graphics and
+Interactive Techniques, SIGGRAPH ’98, pages 395–404, New York, NY, USA, 1998.
+ACM.
+[TFM15]
+T. Tejima, M. Fujita, and T. Matsuoka. Direct ray tracing of full-featured subdivision
+surfaces with bezier clipping. Journal of Computer Graphics Techniques (JCGT),
+4(1):69–83, March 2015.
+[Tot85]
+D. Toth. On ray tracing parametric surfaces. SIGGRAPH Comput. Graph., 19(3):171–
+179, July 1985.
+[TOTC90]
+T. Takamura, M. Ohta, H. Toriya, and H. Chiyokura. A method to convert a gregory patch and a rational boundary gregory patch to a rational bézier patch and its
+applications. In T. Chua and T. Kunii, editors, CG International ’90, pages 543–562,
+Tokyo, 1990. Springer Japan.
+[VAZH+ 09]
+E. Velázquez-Armendáriz, S. Zhao, M. Hašan, B. Walter, and K. Bala. Automatic
+bounding of programmable shaders for efficient global illumination. ACM Trans.
+Graph., 28(5):142:1–142:9, December 2009.
+[Wal07]
+I. Wald. On fast construction of sah-based bounding volume hierarchies. In Proceedings of the 2007 IEEE Symposium on Interactive Ray Tracing, RT ’07, pages 33–40,
+Washington, DC, USA, 2007. IEEE Computer Society.
+[WBMS05]
+A. Williams, S. Barrus, R. Morley, and P. Shirley. An efficient and robust ray-box
+intersection algorithm. Journal of Graphics Tools, 10(1):49–54, 2005.
+[Whi80]
+T. Whitted. An improved illumination model for shaded display. Commun. ACM,
+23(6):343–349, June 1980.
+[Wil83]
+L. Williams. Pyramidal parametrics. SIGGRAPH Comput. Graph., 17(3):1–11, July
+1983.
+[Woo89]
+C. Woodward. Ray tracing parametric surfaces by subdivision in viewing plane. In
+W. Straßer and H.-P. Seidel, editors, Theory and Practice of Geometric Modeling,
+pages 273–287, Berlin, Heidelberg, 1989. Springer Berlin Heidelberg.
+19
+[WSC01]
+S. Wang, Z. Shih, and R. Chang. An efficient and stable ray tracing algorithm for
+parametric surfaces. Journal of Information Science and Engineering, 18:541–561,
+2001.
+[YKL17]
+H. Ylitie, T. Karras, and S. Laine. Efficient incoherent ray traversal on gpus through
+compressed wide bvhs. In Proceedings of High Performance Graphics, HPG ’17, pages
+4:1–4:13, New York, NY, USA, 2017. ACM.
+[YSSP91]
+J. Yen, S. Spach, M. Smith, and R. Pulleyblank. Parallel boxing in b-spline intersection. IEEE Computer Graphics and Applications, 11:72–79, 01 1991.
+20

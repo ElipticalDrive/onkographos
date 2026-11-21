@@ -1,0 +1,201 @@
+# Dual Marching Cubes with Ambiguity Resolution and Regularization
+
+Also called: DMC with Ambiguity Resolution and Regularization, Differentiable Dual Marching Cubes, Isosurface Extraction via Dual Vertices
+
+## Overview
+This method extracts an isosurface from a voxel grid by computing dual vertices for grid cubes based on topology cases, resolving topological ambiguities (specifically cases C16 and C19) by checking adjacent cubes, and optionally optimizing vertex positions using a Quadratic Error Function (QEF) with gradient normals or linear interpolation with learned weights [S1, unofficial]. It builds on [Dual Marching Cubes](906-dual-marching-cubes.md) by adding explicit ambiguity resolution and regularization mechanisms to ensure manifold geometry and improved surface fidelity [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- `x_nx3`: Tensor of voxel grid vertex coordinates [S1, unofficial].
+- `s_n`: Scalar field values at grid vertices [S1, unofficial].
+- `cube_fx8`: Indices of 8 vertices for each cube in the voxel grid [S1, unofficial].
+- `res`: Resolution of the voxel grid (integer or list of 3 integers) [S1, unofficial].
+- `beta_fx12`: Optional weight parameters for cube edges (12 per cube) [S1, unofficial].
+- `alpha_fx8`: Optional weight parameters for cube corners (8 per cube) [S1, unofficial].
+- `gamma_f`: Optional weight parameters for quad splitting (1 per cube) [S1, unofficial].
+- `grad_func`: Optional callable to compute surface gradients at 3D positions [S1, unofficial].
+- `weight_scale`: Scaling factor for normalized weights [S1, unofficial].
+- `qef_reg_scale`: Regularization strength for the QEF solver [S1, unofficial].
+
+**Outputs:**
+- `vertices`: Extracted mesh vertices [S1, unofficial].
+- `faces`: Extracted mesh faces (triangles or tetrahedra) [S1, unofficial].
+- `L_dev`: Regularizer loss (Mean Absolute Deviation) per dual vertex [S1, unofficial].
+
+### Data Structures
+- `surf_edges`: Tensor of shape `[N_edges, 2]` containing indices of grid vertices defining surface-intersecting edges [S1, unofficial].
+- `idx_map`: Tensor of shape `[N_cubes, 12]` mapping local cube edge index to global unique surface edge index (`-1` if not a surface edge) [S1, unofficial].
+- `case_ids`: Tensor of shape `[N_cubes]` containing topology case IDs [S1, unofficial].
+- `vd_idx_map`: Tensor of shape `[N_cubes, 12]` mapping local cube edge index to global dual vertex index [S1, unofficial].
+- `cube_corners_idx`: Tensor of shape `[8]` with values `[1, 2, 4, 8, 16, 32, 64, 128]` representing powers of 2 for case ID computation [S1, unofficial].
+- `cube_edges`: Tensor of shape `[24]` defining the 12 edge vertex pairs per cube [S1, unofficial].
+- `edge_dir_table`: Tensor of shape `[12]` defining edge directions [S1, unofficial].
+- `dir_faces_table`: Tensor of shape `[3, 4, 2]` defining face connections [S1, unofficial].
+- `adj_pairs`: Tensor of shape `[8]` defining adjacent cube pairs for ambiguity checks [S1, unofficial].
+
+### Steps
+1. **Identify surface-intersecting cubes:**
+   Calculate the occupancy sum for each cube. A cube intersects the surface if the sum of its 8 corner occupancy flags (boolean, `1` if positive, `0` if negative) is strictly between `0` and `8` [S1, unofficial].
+   ```python
+   occ_fx8 = [[1 if s_n[cube_fx8[i][j]] > 0 else 0 for j in range(8)] for i in range(len(cube_fx8))]
+   occ_sum = [sum(row) for row in occ_fx8]
+   surf_cubes = [i for i, s in enumerate(occ_sum) if 0 < s < 8]
+   occ_fx8_surf = [occ_fx8[i] for i in surf_cubes]
+   ```
+
+2. **Identify surface-intersecting edges:**
+   For each cube, check its 12 edges. An edge intersects the surface if the signs at its two endpoints are opposite (sum of boolean occupancy flags equals `1`). Assign a unique global index to each unique intersecting edge [S1, unofficial].
+   ```python
+   cube_edges = [0, 1, 1, 5, 4, 5, 0, 4, 2, 3, 3, 7, 6, 7, 2, 6, 2, 0, 3, 1, 7, 5, 6, 4]
+   unique_edges = []
+   edge_to_global = {}
+   global_idx = 0
+   idx_map = [[-1] * 12 for _ in range(len(surf_cubes))]
+   for i, cube_idx in enumerate(surf_cubes):
+       cube_verts = cube_fx8[cube_idx]
+       for e in range(12):
+           v0, v1 = cube_verts[cube_edges[2*e]], cube_verts[cube_edges[2*e+1]]
+           if (s_n[v0] > 0) != (s_n[v1] > 0):
+               edge_key = tuple(sorted((v0, v1)))
+               if edge_key not in edge_to_global:
+                   edge_to_global[edge_key] = global_idx
+                   unique_edges.append(edge_key)
+                   global_idx += 1
+               idx_map[i][e] = edge_to_global[edge_key]
+   surf_edges = [[unique_edges[g][0], unique_edges[g][1]] for g in range(global_idx)]
+   ```
+
+3. **Compute topology case IDs:**
+   Calculate the case ID for each surface cube by summing the product of corner occupancy bits and pre-defined corner indices (powers of 2) [S1, unofficial].
+   ```python
+   cube_corners_idx = [1, 2, 4, 8, 16, 32, 64, 128]
+   case_ids = [sum(occ_fx8_surf[i][j] * cube_corners_idx[j] for j in range(8)) for i in range(len(surf_cubes))]
+   ```
+
+4. **Resolve topological ambiguities:**
+   For cubes with ambiguous cases (indicated by `problem_config[..., 0] == 1`), check adjacent cubes. If an ambiguous cube shares a face with another ambiguous cube (specifically cases C16 and C19), invert the case ID to resolve the ambiguity [S1, unofficial].
+   ```python
+   # Precomputed ambiguity table: case_id -> [is_ambiguous, resolved_case_id]
+   check_table = {cid: (1, cid) for cid in range(256)}  # Placeholder for actual table
+   problem_config = [check_table.get(cid, (0, cid)) for cid in case_ids]
+   to_check = [i for i, pc in enumerate(problem_config) if pc[0] == 1]
+   
+   # Build full 3D config array
+   res_list = res if isinstance(res, (list, tuple)) else [res, res, res]
+   problem_config_full = [[[ [0, 0] for _ in range(res_list[2])] for _ in range(res_list[1])] for _ in range(res_list[0])]
+   for i in to_check:
+       cube_idx = surf_cubes[i]
+       cx, cy, cz = cube_idx // (res_list[1]*res_list[2]), (cube_idx // res_list[2]) % res_list[1], cube_idx % res_list[2]
+       problem_config_full[cx][cy][cz] = problem_config[i]
+       
+   # Check adjacent cubes
+   adj_offsets = [[1,0,0], [-1,0,0], [0,1,0], [0,-1,0], [0,0,1], [0,0,-1]]
+   for i in to_check:
+       cube_idx = surf_cubes[i]
+       cx, cy, cz = cube_idx // (res_list[1]*res_list[2]), (cube_idx // res_list[2]) % res_list[1], cube_idx % res_list[2]
+       for dx, dy, dz in adj_offsets:
+           nx, ny, nz = max(0, min(res_list[0]-1, cx+dx)), max(0, min(res_list[1]-1, cy+dy)), max(0, min(res_list[2]-1, cz+dz))
+           if problem_config_full[nx][ny][nz][0] == 1:
+               problem_config[i] = (1, problem_config[i][1])  # Invert/resolve logic
+   case_ids = [problem_config[i][1] for i in range(len(case_ids))]
+   ```
+
+5. **Normalize weights:**
+   Convert learnable parameters to non-negative weights. Beta (12 edges per cube) and Alpha (8 corners per cube) use `tanh` scaling: `weight * scale + 1`. Gamma (1 per cube) uses `sigmoid` scaling: `sigmoid * scale + (1-scale)/2`. If inputs are `None`, default to ones [S1, unofficial].
+   ```python
+   import math
+   if beta_fx12 is None: beta_fx12 = [1.0] * (12 * len(surf_cubes))
+   if alpha_fx8 is None: alpha_fx8 = [1.0] * (8 * len(surf_cubes))
+   if gamma_f is None: gamma_f = [1.0] * len(surf_cubes)
+   beta_fx12 = [math.tanh(b) * weight_scale + 1.0 for b in beta_fx12]
+   alpha_fx8 = [math.tanh(a) * weight_scale + 1.0 for a in alpha_fx8]
+   gamma_f = [math.sigmoid(g) * weight_scale + (1 - weight_scale) / 2.0 for g in gamma_f]
+   ```
+
+6. **Compute zero-crossings:**
+   For each surface-intersecting edge, compute the linear interpolation point where the scalar field crosses zero [S1, unofficial].
+   ```python
+   surf_edges_s = [[s_n[e[0]], s_n[e[1]]] for e in surf_edges]
+   surf_edges_x = [[x_nx3[e[0]], x_nx3[e[1]]] for e in surf_edges]
+   zero_crossings = []
+   for s, x in zip(surf_edges_s, surf_edges_x):
+       w = [s[1], -s[0]]
+       denom = sum(w)
+       if denom != 0:
+           ue = [(x[0][k]*w[0] + x[1][k]*w[1]) / denom for k in range(3)]
+       else:
+           ue = [(x[0][k] + x[1][k]) / 2.0 for k in range(3)]
+       zero_crossings.append(ue)
+   ```
+
+7. **Group edges for dual vertices:**
+   For each cube, use the `vd_idx_map` indexed by `case_id` to determine which edges contribute to which dual vertices. Map these edge indices to global dual vertex indices (`edge_group_to_vd`) [S1, unofficial].
+   ```python
+   # vd_idx_map maps (case_id, local_edge_idx) -> global_dual_vertex_idx
+   edge_group_to_vd = [[vd_idx_map[case_ids[i]][idx_map[i][e]] for e in range(12)] for i in range(len(surf_cubes))]
+   ```
+
+8. **Compute dual vertex positions:**
+   - **Gradient/QEF mode:** If `grad_func` is provided, compute normals at zero-crossings. For each dual vertex, gather the positions of its associated zero-crossings (`verts_group_pos`) and normals. Solve a QEF: `A = norms`, `B = (positions * norms).sum()`. Add regularization: `A_reg = eye * qef_reg_scale`, `B_reg = qef_reg_scale * centroid`. Solve `lstsq(A, B)` [S1, unofficial].
+     ```python
+     if grad_func is not None:
+         normals = [grad_func(ue) for ue in zero_crossings]
+         dual_verts = []
+         # Assuming vd_offsets defines ranges for each dual vertex group
+         for vd_idx in range(len(vd_offsets)-1):
+             start, end = vd_offsets[vd_idx], vd_offsets[vd_idx+1]
+             A = [normals[zero_crossings_idx] for zero_crossings_idx in range(start, end)]
+             B = [sum(p[n]*n[n] for n in range(3)) for p in A]
+             A_reg = [[qef_reg_scale if i==j else 0 for j in range(3)] for i in range(3)]
+             centroid = [sum(p[n] for p in A)/len(A) for n in range(3)]
+             B_reg = [qef_reg_scale * centroid[n] for n in range(3)]
+             # Solve least squares (A^T A) v = A^T B
+             # ...
+     ```
+   - **Weighted Linear Interpolation mode:** If no gradient, compute vertex position as weighted average of zero-crossings on incident edges. Weight is `beta`. Normalize by sum of `beta` [S1, unofficial].
+     ```python
+     else:
+         vd = [[0.0]*3 for _ in range(len(vd_offsets)-1)]
+         for i, row in enumerate(edge_group_to_vd):
+             for e, vd_idx in enumerate(row):
+                 beta = beta_fx12[i*12 + e]
+                 for k in range(3):
+                     vd[vd_idx][k] += zero_crossings[i*12 + e][k] * beta
+         beta_sum = [sum(beta_fx12[i*12 + e] for e in range(12)) for i in range(len(surf_cubes))]
+         dual_verts = vd
+     ```
+
+9. **Compute regularization loss:**
+   Calculate the Mean Absolute Deviation (MAD) of the distance between the computed dual vertex and the zero-crossings on its incident edges [S1, unofficial].
+   ```python
+   dist = [abs(sum((dual_verts[v][k] - zero_crossings[i][k])**2 for k in range(3))**0.5) for i, v in enumerate(edge_group_to_vd)]
+   mean_l2 = sum(dist) / len(dist)
+   mad = [abs(d - mean_l2) for d in dist]
+   L_dev = sum(mad) / len(mad)
+   ```
+
+### Formulas
+- **Linear Interpolation:** $u_e = \frac{\sum x_i w_i}{\sum w_i}$ where $x_i$ are edge endpoints and $w_i$ are signed scalar values (weights) [S1, unofficial]. In code, weights are concatenated as $[w_1, -w_0]$ to handle signs [S1, unofficial].
+- **QEF Solution:** $v = \text{argmin}_v \| A v - B \|^2$ where $A$ is the matrix of normals and $B$ is the dot product of positions and normals [S1, unofficial]. Regularized: $A_{aug} = [A; \lambda I]$, $B_{aug} = [B; \lambda c]$ [S1, unofficial].
+
+### Parameters
+- `weight_scale`: Scaling factor for normalized weights (beta, alpha, gamma). Typical value not specified, but used in `tanh * scale + 1` [S1, unofficial].
+- `qef_reg_scale`: Regularization strength for the QEF solver. Used to add $\text{diag}(\text{scale})$ to the normal matrix and $\text{scale} \times \text{centroid}$ to the target vector [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Topological Ambiguity:** Cases C16 and C19 can create non-manifold geometry if not resolved. The method resolves this by checking adjacent cubes sharing an ambiguous face; if both are ambiguous, their case IDs are inverted [S1, unofficial].
+- **Boundary Checking:** When checking adjacent cubes for ambiguity resolution, coordinates must be clamped to the grid resolution bounds `[0, res[0])`, `[0, res[1])`, `[0, res[2])` [S1, unofficial].
+
+## Operating characteristics
+- **Strengths:** Resolves topological ambiguities (C16/C19) to ensure manifold geometry; supports gradient-based optimization via differentiable QEF or weighted interpolation; flexible weight parameters for surface adjustment [S1, unofficial].
+- **Limitations:** Requires gradient function for QEF mode; ambiguity resolution depends on adjacent cube checks, which may be complex for large grids; regularization parameters need tuning [S1, unofficial].
+- **When to use:** When extracting isosurfaces from voxel grids with potential topological ambiguities and when gradient information is available for improved surface fidelity [S1, unofficial].
+- **When not to use:** When gradient computation is expensive or unavailable and weighted interpolation is insufficient [S1, unofficial].
+
+## Background
+This method is part of the FlexiCubes framework, introduced in the SIGGRAPH 2023 paper "Flexible Isosurface Extraction for Gradient-Based Mesh Optimization" [S1, unofficial]. It enhances mesh quality and geometric fidelity by adjusting the surface representation based on gradient optimization, building on the Dual Marching Cubes approach [S1, unofficial].
+
+## Sources
+[S1] RomanKotov/isosurface-extraction-comparison, https://github.com/RomanKotov/isosurface-extraction-comparison, fetched 2026-10-27 (unofficial)

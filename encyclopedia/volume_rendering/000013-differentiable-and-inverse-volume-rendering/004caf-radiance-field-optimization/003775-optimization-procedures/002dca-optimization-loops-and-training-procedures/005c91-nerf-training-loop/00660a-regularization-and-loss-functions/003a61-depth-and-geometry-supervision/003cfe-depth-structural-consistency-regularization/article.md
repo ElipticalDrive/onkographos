@@ -1,0 +1,143 @@
+# Depth Structural Consistency Regularization
+Also called: RDSC
+
+## Overview
+Depth Structural Consistency Regularization (RDSC) is a geometric regularization technique applied during Neural Radiance Field (NeRF) training to enforce continuity constraints on rendered depth maps, leveraging external depth priors such as those from DepthAnythingV2 [S1]. It distinguishes itself from sibling methods like [Patch-Based Depth Regularization](10369-patch-based-depth-regularization.md) by explicitly modeling structural consistency through k-nearest neighbor (KNN) relationships in depth space rather than spatial proximity alone, ensuring that neighboring pixels in the prior map exhibit similar continuity in the rendered output [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs**:
+    *   Rendered depth map $\hat{\mathbf{D}}$ from the NeRF model, where $\hat{d}_{k}$ is the depth value at pixel index $k$.
+    *   Prior depth map $\mathbf{D}^{V2}$ (e.g., from DepthAnythingV2), where $d^{V2}_{k}$ is the prior depth value at pixel index $k$.
+    *   Hyperparameter $m_{ar'}$: a small boundary value accounting for minor depth variations between neighboring pixels [S1].
+    *   Hyperparameter $K$: the number of nearest neighbors to consider [S1].
+*   **Outputs**:
+    *   Scalar regularization loss $\mathcal{L}_{DSC}$ [S1].
+
+**Data Structures**
+*   Depth maps are treated as 2D grids of floating-point values.
+*   The KNN search operates on the values within $\mathbf{D}^{V2}$ within a local spatial region [S1].
+
+**Algorithm**
+1.  For each pixel $k_1$ in the rendered depth map $\hat{\mathbf{D}}$:
+    a. Identify the corresponding pixel location in the prior depth map $\mathbf{D}^{V2}$.
+    b. Define a small spatial region around this location in $\mathbf{D}^{V2}$.
+    c. Compute the k-nearest neighbors (KNN) of the prior depth value $d^{V2}_{k_1}$ based on depth values within this region. Let this set be $\mathcal{N}(d^{V2}_{k_1})$ [S1].
+    d. For each neighbor $k_2 \in \mathcal{N}(d^{V2}_{k_1})$:
+        i. Retrieve the rendered depth value $d^{r}_{k_1}$ at pixel $k_1$ and $d^{r}_{k_2}$ at pixel $k_2$ [S1].
+        ii. Compute the absolute difference $|d^{r}_{k_1} - d^{r}_{k_2}|$.
+        iii. Apply the hinge-like penalty: $\max(|d^{r}_{k_1} - d^{r}_{k_2}| - m_{ar'}, 0)$ [S1].
+    e. Sum the penalties for all neighbors of $k_1$.
+2.  Sum the results over all pixels $k_1$ to obtain the total loss [S1].
+
+**Formula**
+The regularization term is defined as [S1]:
+$$ \mathcal{L}_{DSC} = \sum_{k_1} \sum_{d^{V2}_{k_2} \in \text{KNN}(d^{V2}_{k_1})} \max(|d^{r}_{k_1} - d^{r}_{k_2}| - m_{ar'}, 0) $$
+Where:
+*   $k_1$ indexes the pixels in the rendered depth map.
+*   $\text{KNN}(d^{V2}_{k_1})$ returns the set of $K$ nearest neighbors based on depth values within a small region of the prior depth map $\mathbf{D}^{V2}$ [S1].
+*   $d^{r}_{k_1}$ and $d^{r}_{k_2}$ are the rendered depth values at pixels $k_1$ and $k_2$ respectively [S1].
+*   $m_{ar'}$ is the small boundary value for minor depth variations [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_rdsc_loss(rendered_depth, prior_depth, k_neighbors=5, margin=0.01):
+    """
+    Computes the Depth Structural Consistency Regularization loss.
+    
+    Args:
+        rendered_depth (np.ndarray): 2D array of rendered depths d^r.
+        prior_depth (np.ndarray): 2D array of prior depths d^V2.
+        k_neighbors (int): Number of KNN to consider.
+        margin (float): Boundary value m_ar' for minor variations.
+        
+    Returns:
+        float: The RDSC loss value.
+    """
+    loss = 0.0
+    h, w = rendered_depth.shape
+    
+    # Precompute KNN indices for prior depth to avoid repeated search
+    # Note: KNN is based on depth values within a small region.
+    # For implementation, we typically use a sliding window or fixed local neighborhood.
+    # Here we assume a simple local spatial neighborhood for KNN search on prior_depth values.
+    
+    # To ensure self-contained valid Python, we implement a simple local KNN search
+    # on the prior depth map values.
+    
+    # Define a local window size for the "small region" mentioned in [S1]
+    # A common choice is 3x3 or 5x5. Let's use 5x5 for the region.
+    window_size = 5
+    half_window = window_size // 2
+    
+    # Create a list of (depth_value, row, col) for the prior map
+    # This is for efficient KNN search if the region is large, 
+    # but for small regions, direct iteration is fine.
+    
+    for r in range(h):
+        for c in range(w):
+            current_prior_val = prior_depth[r, c]
+            current_rendered_val = rendered_depth[r, c]
+            
+            # Collect neighbors in the small region
+            neighbors = []
+            for dr in range(-half_window, half_window + 1):
+                for dc in range(-half_window, half_window + 1):
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < h and 0 <= nc < w:
+                        # Exclude the center pixel itself if necessary, 
+                        # though KNN usually includes self or not depending on definition.
+                        # The formula implies neighbors of k1, so k2 != k1 is likely intended 
+                        # for "neighboring pixels".
+                        if dr == 0 and dc == 0:
+                            continue
+                        neighbors.append((prior_depth[nr, nc], nr, nc))
+            
+            # Sort by depth value difference to find KNN based on depth values
+            # "KNN returns the k-nearest neighbors based on depth values"
+            # This implies sorting by |d^V2_neighbor - d^V2_center|
+            neighbors.sort(key=lambda x: abs(x[0] - current_prior_val))
+            
+            # Take top K neighbors
+            selected_neighbors = neighbors[:k_neighbors]
+            
+            for _, nr, nc in selected_neighbors:
+                neighbor_rendered_val = rendered_depth[nr, nc]
+                diff = abs(current_rendered_val - neighbor_rendered_val)
+                penalty = max(diff - margin, 0.0)
+                loss += penalty
+                
+    return loss
+```
+
+**Parameters**
+*   $m_{ar'}$: Small boundary value. Typical value not given in sources [S1]. [G] A small value like 0.01 or 0.1 is typical for depth differences in normalized units, but exact value depends on depth scale.
+*   $K$: Number of nearest neighbors. Typical value not given in sources [S1]. [G] 5 or 10 is common for local consistency.
+
+**Edge Cases and Pitfalls**
+*   **Boundary Pixels**: Pixels at the image boundary have fewer neighbors. The implementation must handle out-of-bounds checks [S1].
+*   **Depth Scale**: The margin $m_{ar'}$ must be scaled appropriately to the depth units of $\mathbf{D}^{V2}$ and $\hat{\mathbf{D}}$ [S1].
+*   **KNN Definition**: The phrase "based on depth values within a small region" requires careful implementation. It implies a spatial constraint (small region) followed by a value-based sort (KNN on depth) [S1].
+
+## Subtopics
+
+### [Patch-Based Depth Regularization](10369-patch-based-depth-regularization.md)
+Uses bilateral filters to smooth depth while preserving edges. Choose when spatial continuity is more important than structural depth-value consistency.
+
+## Operating characteristics
+*   **Time Complexity**: $O(H \cdot W \cdot K \cdot R^2)$, where $H, W$ are image dimensions, $K$ is the number of neighbors, and $R^2$ is the size of the small region used for KNN search [S1].
+*   **Memory Complexity**: $O(H \cdot W)$ to store depth maps [S1].
+*   **Strengths**: Enhances overall scene reconstruction quality by clarifying depth information for both neighboring and distant pixels [S1]. Effective in sparse-view scenarios where depth ambiguity is high [S1].
+*   **Limitations**: Relies on the quality of the external depth prior (e.g., DepthAnythingV2) [S1]. Computationally more expensive than simple pairwise smoothness terms due to KNN search [S1].
+*   **When to Use**: Sparse-view 3D reconstruction where standard depth supervision is insufficient [S1].
+*   **When Not to Use**: Dense-view scenarios where depth is already well-constrained, or when external depth priors are unavailable or unreliable [S1].
+
+## Background
+*   **Origin**: Introduced in DASNeRF [S1].
+*   **History**: Developed to address the loss of structure in sparse-view 3D reconstruction by leveraging latest depth models (like DepthAnythingV2) to standardize depth regularization [S1].
+*   **Usage**: Used in sparse-view neural radiance fields training [S1].
+
+## Sources
+[S1] DASNeRF: depth consistency optimization, adaptive sampling, and hierarchical structural fusion for sparse view neural radiance fields., https://doi.org/10.1371/journal.pone.0321878, fetched 2026-10-27

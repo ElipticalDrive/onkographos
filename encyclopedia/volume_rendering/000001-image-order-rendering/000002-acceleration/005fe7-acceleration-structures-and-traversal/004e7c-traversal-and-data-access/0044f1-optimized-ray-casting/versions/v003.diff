@@ -1,0 +1,91 @@
+--- v002.md
++++ v003.md
+@@ -10,5 +10,5 @@
+ 
+ **Inputs and Outputs:**
+-- Input: Volumetric dataset, camera parameters, cut plane position (optional), alpha cutoff threshold.
++- Input: Volumetric dataset, camera parameters, cut plane position (optional), alpha cutoff threshold, dissimilarity threshold.
+ - Output: Final 2D image formed by bilinear interpolation of the ray-cast pixels [S1, unofficial].
+ 
+@@ -19,23 +19,60 @@
+ **Algorithm Steps:**
+ 1. **Initialization:** The master GPU loads a backing store region (e.g., 32 macros or 16K voxels) into a renderer's pixel memory [S1, unofficial].
+-2. **Octree Construction/Update:** As macro blocks arrive, the octree is incrementally updated. Macros containing only transparent voxels are tagged [S1, unofficial]. This tagging is critical because typically 2/3 of macros are completely transparent, making the octree skipping worthwhile [S1, unofficial].
++2. **Octree Construction/Update:** As macro blocks arrive, the octree is incrementally updated [S1, unofficial]. Macros containing only transparent voxels are tagged to assist computation [S1, unofficial]. This tagging is critical because typically 2/3 of macros are completely transparent, making the octtree skipping worthwhile [S1, unofficial].
+ 3. **Ray Casting Loop (per tile/sector):**
+     a. **Adaptive Ray Selection:** Cast an initial coarse grid of rays across the image tile [S1, unofficial].
+     b. **Refinement:** If adjacent ray samples or resulting pixel values are sufficiently dissimilar, cast additional rays in those regions to capture high-frequency details [S1, unofficial].
+     c. **Ray Traversal:** For each ray, traverse the octree [S1, unofficial].
+-        i. **Cut Plane Optimization:** If a cut plane is defined, start the ray at the cut plane intersection instead of the dataset boundary. This adds no runtime cost and can speed up rendering by reducing the traversal distance [S1, unofficial].
+-        ii. **Empty Space Skipping:** Use the octree to skip over transparent regions. If a node is tagged as transparent, skip trilinear interpolation and compositing for that subtree [S1, unofficial].
+-        iii. **Alpha Cutoff:** Accumulate opacity along the ray. Terminate the ray when accumulated opacity reaches a predefined threshold ('alpha cutoff'), as further processing yields little color change [S1, unofficial].
++        i. **Cut Plane Optimization:** If a cut plane is defined, start the ray at the cut plane intersection instead of the dataset boundary [S1, unofficial]. This adds no runtime cost and can speed up rendering by reducing the traversal distance [S1, unofficial].
++        ii. **Empty Space Skipping:** Use the octree to skip over transparent regions [S1, unofficial]. If a node is tagged as transparent, skip trilinear interpolation and compositing for that subtree [S1, unofficial].
++        iii. **Alpha Cutoff:** Accumulate opacity along the ray [S1, unofficial]. Terminate the ray when accumulated opacity reaches a predefined threshold ('alpha cutoff'), as further processing yields little color change [S1, unofficial].
+     d. **Shading:** Classify and shade the voxels encountered along the active ray segments in parallel (SIMD) [S1, unofficial].
+ 4. **Image Formation:** Store the shaded voxels in the backing store [S1, unofficial]. The final image is formed by bilinear interpolation of the ray-cast pixels [S1, unofficial].
+ 
++**Formulas:**
++The method modifies the standard front-to-back compositing loop from [Acceleration](18-acceleration.md) by introducing early termination and skipping conditions:
++$$ C_{acc} = C_{acc} + C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
++$$ \alpha_{acc} = \alpha_{acc} + \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
++The loop breaks when $\alpha_{acc} \ge \text{alpha\_cutoff}$ or when the octree traversal skips a transparent subtree.
++
+ **Parameters:**
+-- **Alpha Cutoff:** Threshold for ray termination. Not given in the sources.
+-- **Dissimilarity Threshold:** For adaptive ray refinement. Not given in the sources.
++- **Alpha Cutoff:** Threshold for ray termination when accumulated opacity yields little color change [S1, unofficial]. Not given in the sources.
++- **Dissimilarity Threshold:** Threshold for adaptive ray refinement when adjacent values are sufficiently dissimilar [S1, unofficial]. Not given in the sources.
+ - **Macro Size:** Example given is 32 macros or 16K voxels per backing store region [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Transparent Macros:** If the octree tagging is inaccurate, skipping may lead to visual artifacts. The method relies on accurate tagging of transparent macros [S1, unofficial].
+-- **Adaptive Refinement:** Choosing the dissimilarity threshold too low may lead to excessive ray casting; too high may miss details. Not given in the sources.
++- **Transparent Macros:** Typically 2/3 of macros are completely transparent, making octtree skipping worthwhile [S1, unofficial]. If the octree tagging is inaccurate, skipping may lead to visual artifacts [S1, unofficial].
++- **Adaptive Refinement:** Choosing the dissimilarity threshold too low may lead to excessive ray casting; too high may miss details [S1, unofficial].
++
++```python
++def render_tile(tile_coords, camera, cut_plane, alpha_cutoff, dissimilarity_threshold):
++    # Initialize accumulation buffers
++    color_acc = (0.0, 0.0, 0.0)
++    alpha_acc = 0.0
++    # Load backing store region (32 macros / 16K voxels) into pixel memory [S1, unofficial]
++    macro_data = load_backing_store(tile_coords)
++    # Incrementally update octree and tag transparent macros [S1, unofficial]
++    octree = build_or_update_octree(macro_data)
++    # Cast initial coarse grid of rays [S1, unofficial]
++    rays = generate_coarse_grid(tile_coords)
++    # Adaptive refinement: cast additional rays if adjacent values are sufficiently dissimilar [S1, unofficial]
++    rays = refine_rays(rays, macro_data, dissimilarity_threshold)
++    for ray in rays:
++        # Cut plane optimization: start ray at plane instead of dataset boundary [S1, unofficial]
++        ray.origin = max(ray.origin, cut_plane) if cut_plane else ray.origin
++        # Traverse octree, skipping transparent regions [S1, unofficial]
++        for voxel in traverse_octree_ray(ray, octree):
++            # Classify and shade voxel [S1, unofficial]
++            sample_color, sample_alpha = classify_and_shade(voxel)
++            # Front-to-back compositing (follows parent shared principles)
++            color_acc += sample_color * sample_alpha * (1.0 - alpha_acc)
++            alpha_acc += sample_alpha * (1.0 - alpha_acc)
++            # Alpha cutoff termination [S1, unofficial]
++            if alpha_acc >= alpha_cutoff:
++                break
++    return color_acc
++# Note: Helper functions (load_backing_store, build_or_update_octree, etc.) 
++# implement standard volume rendering primitives; exact source implementations not provided.
++```
+ 
+ ## Subtopics
+@@ -45,9 +82,9 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Depends on the sparsity of the data and the alpha cutoff [S1, unofficial]. The octree skipping reduces the number of samples significantly [S1, unofficial].
++- **Time Complexity:** Depends on data sparsity and alpha cutoff [S1, unofficial]. The octree skipping reduces the number of samples significantly [S1, unofficial].
+ - **Measured Performance:** A slave GPU renders a 128x128 image tile for a 128x128x128 dataset with coarse refinement in 100-240 ms [S1, unofficial].
+ - **Memory Complexity:** Requires storage for the octree and backing store regions (e.g., 16K voxels per region) [S1, unofficial].
+-- **Strengths:** Significant speedup for sparse or transparent datasets due to empty space skipping and alpha cutoffs. Adaptive ray casting improves quality in complex regions without uniform overhead. Cut planes provide free optimization [S1, unofficial].
+-- **Limitations:** Requires incremental octree construction and management. Adaptive ray casting adds complexity to the ray selection logic [S1, unofficial].
++- **Strengths:** Significant speedup for sparse or transparent datasets due to empty space skipping and alpha cutoffs [S1, unofficial]. Adaptive ray casting improves quality in complex regions without uniform overhead [S1, unofficial]. Cut planes provide free optimization [S1, unofficial].
++- **Limitations:** Requires incremental octree construction and management [S1, unofficial]. Adaptive ray casting adds complexity to the ray selection logic [S1, unofficial].
+ - **When to Use:** Interactive visualization of large, sparse, or semi-transparent volumetric datasets (e.g., medical imaging) where performance is critical [S1, unofficial].
+ - **When Not to Use:** Dense, fully opaque datasets where empty space skipping provides little benefit, or when high-frequency detail requires uniform dense sampling [S1, unofficial].

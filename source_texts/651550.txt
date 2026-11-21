@@ -1,0 +1,587 @@
+Contribute to satvikOS/Forge development by creating an account on GitHub.
+
+T-162: voxelIoU 3.10x -- threaded grid loop + exact bbox cull, 0 differing cells of 2,637,824, OCCT 503 -> 503 by satvikOS · Pull Request #277 · satvikOS/Forge · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+satvikOS
+commented
+Sep 18, 2026
+Copy link
+Copy Markdown
+Owner
+T-162 — voxelIoU: 3.10x on the corpus, bit-identical, OCCT ledger unchanged
+forge::voxelIoU is reachable from exactly one caller, src/tools/forge_verify.cpp. It is
+offline verification; the shipped kernel path is untouched.
+A1 — baseline, at the real default
+forge_verify.cpp:710 sets int grid = 64; and no benchmark row in this repo overrides
+iouGrid. At that default the loop issues 2 x 64^3 = 524,288
+BRepClass3d_SolidClassifier::Perform calls per scored part, serially. Proven, not
+asserted — the instrument added in the first commit prints the count it actually made:
+```
+$ FORGE_VOXEL_CELL_DIGEST=1 build-t162-base/forge_verify < s01_box_vs_box.jsonl
+VOXELIOU_CELL_DIGEST gridN=64 cells=262144 digest=95688c7e269a06ed
+  inA=238328 inB=238328 intersection=238328 union=238328 errs=0 classifierCalls=524288
+```
+Fixture s01_box_vs_box is BOX(10,10,10) scored against a reference STEP of the same
+box: 3.17 s, against a 0.02 s no-IoU control on the same row.
+A3 — after, same fixtures, same command
+Corpus T162-C1, 14 rows (10 synthetic at the default grid 64, 4 cadgenbench STEP pairs
+at grid 16), forge_verify < corpus_T162_C1.jsonl, digest off:
+arm
+wall
+baseline, serial
+84.13 s / 84.19 s
+threaded + culled, default
+27.15 s / 27.48 s
+cull only (FORGE_VOXEL_THREADS=1)
+55.24 s
+3.10x. Per row, best of two each:
+row
+baseline
+after
+r02_231_vs_218 (cadgenbench)
+3.23
+0.44
+7.34x
+s06_box_vs_tri_centred
+7.58
+1.59
+4.77x
+s03_box_vs_tri
+6.74
+1.59
+4.24x
+s07_box_vs_tri_cscaled
+7.65
+1.94
+3.94x
+s05_cyl_vs_part
+3.68
+0.95
+3.87x
+s08_box_vs_tri_clongest
+7.42
+1.93
+3.84x
+r01_218_vs_231 (cadgenbench)
+1.55
+0.44
+3.52x
+r04_224_vs_209 (cadgenbench)
+16.17
+4.69
+3.45x
+s09_part_vs_tri
+7.79
+3.04
+2.56x
+s02_tricyl_vs_tri
+9.35
+3.39
+2.76x
+s10_offsetbox_vs_box
+3.31
+1.57
+2.11x
+s01_box_vs_box
+3.17
+2.96
+1.07x
+The worst row is a solid scored against itself: the two bounding boxes coincide, so
+only the one-cell frame padding is cullable and the shape is simple enough that threading
+barely pays. A benchmark contains no such row.
+A2 — bit-identical, with its denominator
+The counts voxelIoU returns are SUMS: a cell gained here and a cell lost there cancels.
+So the first commit adds an env-gated per-cell digest — FNV-1a 64 over one byte of
+(inA,inB) state per cell, folded in the canonical i-j-k order of the serial loop — and
+prints how many cells it folded.
+Comparing every arm against a serial baseline built in a separate build tree:
+```
+reference arm: BASELINE(serial dylib)   rows=14   digest lines=14
+cells the reference arm folded: 2,637,824
+  rows differing: 0/14    digests differing: 0/14
+  cells proven identical: 2,637,824 / 2,637,824
+ALL ARMS BIT-IDENTICAL
+denominator: 14 rows, 2,637,824 cells, 5,275,648 classifier calls in the reference arm
+```
+0 differing cells out of 2,637,824.
+A4 — determinism
+Identical digest and identical counts across repeated runs and across eight worker
+counts — 1, 2, 3, 4 (default), 6, 8, 10, 14 — each 0/2,637,824.
+The checks were seen red before being trusted:
+A mutant that shares one classifier across workers — the exact race this design
+avoids — was built in a third tree. It does not produce a wrong answer quietly; it
+dies, differently each time: SIGSEGV, SIGABRT, SIGSEGV on three runs of the same
+row, while the shipped build printed the same digest three times.
+One cell in 262,144 is visible to the digest: flipping a single byte of the cell
+array moves it e06a9c3a47709fc7 -> efbd8f3e39e7f12c.
+The comparison script prints differences: fed an arm where one row was run at grid
+32, it reported rows differing: 1/14, digests differing: 1/14 and named the row.
+A5 — OCCT ledger
+Measured with bash scripts/occt_closure_count.sh <dylib> --symbols on both arms:
+baseline
+after
+OCCT_SYMBOLS
+503
+503
+OCCT_CLOSURE
+14
+14
+OCCT_DIRECT
+10
+10
+OCCT_PHANTOM
+0
+0
+OCCT arrivals: empty. Departures: 0. Two non-OCCT symbols do arrive — libc++'s
+operator new/delete(align_val_t), from the cache-line-padded per-worker tally.
+503, not the 507 the task named: 507 is the figure docs/kernel/OCCT_REMOVAL_TRACKER.md
+records for fifteen days ago (it puts "now" at 550, on the node addon). 503 is what
+libforge_kernel_core.dylib — the library forge_verify actually links — measures today
+on origin/archdisc@1c0f57de, before and after.
+CMakeLists.txt is untouched, so the OCCT_REMOVAL_TRACKER.md ->
+archie_op_vocabulary.json -> ui/ArchieOpVocabulary.hpp cascade is not invalidated.
+ParallelFor.hpp is header-only for that reason.
+What is in it
+1. forge/ParallelFor.hpp (new, header-only) — a reusable worker facility. The index
+range is cut into many more tiles than there are workers and each worker claims the next
+unclaimed tile from one shared atomic cursor: dynamic self-scheduling over an
+over-decomposed space, the balancing property a work-stealing deque gives with one atomic
+instead of a deque per worker. An equal static split is wrong here twice — the cores are
+asymmetric (10 P + 4 E) and the work is uneven. This is the seam other loops will want:
+the kernel is otherwise single-threaded, Tessellate.cpp holds the only real pool, and
+BooleanTol.cpp / Features.cpp / Booleans.cpp each spawn one thread as a timeout
+watchdog, not for parallelism.
+2. Threading voxelIoU — per-worker classifier pairs (Perform mutates the
+classifier), per-worker deep copies of both solids via the
+BRepBuilderAPI_Transform(identity, Copy=true) this file already called, all Loads on
+the calling thread before any worker starts, per-worker counters padded to a cache line
+and merged in worker order.
+3. An exact bounding-box cull — a cell centre outside a solid's Bnd_Box, slackened by
+the classifier's own tolerance, cannot be IN or ON, and BRepBndLib already inflates that
+box by the shape's face tolerances. 38.3% of all classifier calls across the corpus are
+now never made (5,275,648 -> 3,252,700); 49-64% on the rows where the candidate and the
+reference actually differ, which is every row a benchmark contains.
+The measurement that did not survive contact
+Threading alone is worth ~2x, not the 9.2x the task briefed, and more workers is worse.
+Wall clock for one row, sweeping FORGE_VOXEL_THREADS:
+workers
+1
+2
+3
+4
+5
+6
+8
+box10 vs box10, g64
+3.20
+2.83
+2.92
+3.15
+3.45
+5.86
+6.98
+tri-cyl part, g64
+9.33
+5.59
+4.51
+3.78
+3.45
+4.49
+5.11
+cadgenbench, g16
+1.59
+1.02
+0.86
+0.77
+0.72
+0.84
+0.88
+At corpus level, past four it is worse than serial: 41.98 s at 4, 56.63 s at 6,
+67.57 s at 8, 68.82 s at 10, 95.11 s at 14 against a serial 84.13 s.
+It is not the E-cores — ten workers (ten P-cores) is slower than four. It is not the
+allocator — a malloc microbenchmark on this box scales 5.5x to 14 threads on fixed total
+work, and OCCT 7.9 has no memory manager of its own left to blame (MMGT_OPT 0/1/2 moved
+nothing, which is itself an instrument that cannot fail). The control that locates it:
+ten separate processes, one worker each, each doing the whole tri-cyl row, finish in
+10.41 s against 9.34 s for one process — 9.0x the throughput. The machine
+parallelises; OCCT's classifier, inside one address space, does not.
+BRepClass3d_SClassifier::Perform calls TopExp::MapShapesAndAncestors per point, and
+those containers allocate through one process-wide NCollection_BaseAllocator handle that
+every worker touches.
+So the default is capped at four — the largest count that never lost on any fixture
+measured — and FORGE_VOXEL_THREADS overrides the cap, not merely the default.
+That gap is also why the cull exists: with threading capped by OCCT, the way to go faster
+is to stop calling OCCT.
+Third-party classifier: not adopted, and the contradiction is settled
+The task flagged an unresolved contradiction about PhysX 5. Both reports were right, at
+different scopes:
+Licence. The repository ROOT LICENSE.md is BSD-3-Clause (GitHub's SPDX agrees), but
+physx/LICENSE.md on main is Apache-2.0 — added by a single commit da950a3537
+dated 2026-09-16, two days ago, and present on no release tag: PxPhysics.h carries
+BSD boilerplate and no SPDX line at every tag through 110.1-omni-and-physx-5.9.0, where
+physx/LICENSE.md 404s. Anyone who cloned main this week saw Apache-2.0; anyone pinned
+to a tag saw BSD-3-Clause. Separately, ovphysx/licenses/LICENSE-binary.txt puts parts
+of the tree under an NVIDIA Software License Agreement, and the licence on the
+downloaded PhysX GPU binaries could not be established from the repo at all.
+macOS. There is no official macOS preset: physx/buildtools/presets/public holds
+15 files, all linux-* or vc1[67]win64*, at 5.1.0, 5.6.0, 5.9.0 and main, and the
+only mac|darwin|apple|xcode hit in the whole tree is flow/external/vulkan/vulkan_macos.h.
+NVIDIA said so in issue forge-desktop: fix the stale call site that made the release dry run un-buildable #107. PhysX 4.1 did ship mac64.xml. It nevertheless builds
+on macOS arm64 via patched forks (o3de/PhysX carries mac-arm64.xml; Cysharp/MagicPhysX
+ships osx-arm64 PhysX 5 dylibs from CI on macos-15). vcpkg's port is 5.5.0 and
+excludes macOS; conan has 4.1.x, Intel-only; homebrew has nothing.
+Ext::InsideTester is real — physx/source/physxextensions/src/tet/ExtInsideTester.h
+— but it lives under source/, not include/, so it is reachable only by compiling the
+SDK source tree, not by linking a released SDK.
+Not adopted: no official platform, an untagged licence change mid-flight, an
+NVIDIA-licensed sibling tree, and a private header. A5 forbids it anyway — arrivals
+must be empty, so any classifier swap has to be either OCCT-free and native or nothing.
+Also corrected
+The briefed "29.8 s for a realistic part (box minus three orthogonal cylinders)" is
+9.12 s here. The same construction, measured three times, at grid 64.
+The briefed "20-40 minutes across the frozen 42-row gate" cannot be checked from this
+repo: no in-repo harness passes refStep at all. The only refStep outside
+forge_verify.cpp is in a test fixture. Real corpus parts also vary by three orders of
+magnitude — 218 vs 231 is 1.55 s at grid 16 while 230 vs 229 extrapolates to hours at
+grid 64 — so a single figure for the gate was never available.
+I published a "no speedup" reading of my own for about twenty minutes. A copied
+forge_verify still resolves @rpath/libforge_kernel_core.dylib against the live build
+directory, so the saved "baseline" binary had been running the new code since the first
+rebuild — an arm compared against itself. Every number above comes from two separate
+build trees, verified by nm: 0 parallelForTiles symbols in the baseline dylib, 5 in
+the new one.
+Gates
+forge_verify_batch_gate.sh GREEN (6/6 records), forge_verify_instrument_gate.sh GREEN,
+--target forge_all builds.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_011i9tcyXkdyqD5cuGxxDwkW
+claude
+and others
+added 3 commits
+September 18, 2026 11:19
+T-162 step 1: give voxelIoU a per-cell digest so "bit-identical" has …
+…
+3cdb49b
+```
+…a denominator
+
+voxelIoU returns four SUMS (inA, inB, intersection, union). Two different
+occupancy grids can produce the same four sums -- one cell gained here, one lost
+there, cancelling exactly -- so "the counts matched" is strictly weaker than
+"every cell matched", and the gap between them is exactly the shape a
+parallelisation bug takes.
+
+This adds an env-gated instrument (FORGE_VOXEL_CELL_DIGEST=1) that folds the
+per-cell (inA,inB) state pair into one FNV-1a 64 value in the canonical i-j-k
+order of the serial loop, and prints the number of cells it folded plus the
+number of BRepClass3d_SolidClassifier::Perform calls it made. A later claim of
+bit-identity is then checkable against a stated denominator instead of against
+the absence of a complaint.
+
+MEASURED, before any change to the loop, on forge_verify at the real default
+gridN=64 (fixture: candidate BOX(10,10,10) vs reference box10.step):
+
+    VOXELIOU_CELL_DIGEST gridN=64 cells=262144 digest=95688c7e269a06ed
+      inA=238328 inB=238328 intersection=238328 union=238328 errs=0
+      classifierCalls=524288
+
+524,288 = 2 x 64^3, serially, for the simplest solid there is. Wall clock for
+that one row is 3.04 s against a 0.02 s no-IoU control.
+
+The instrument is OFF unless the variable is exactly "1": with it unset the same
+run prints zero digest lines, and wall clock is unchanged (3.06/3.10 s vs
+3.04/3.05 s -- noise).
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011i9tcyXkdyqD5cuGxxDwkW
+```
+T-162 step 2: thread voxelIoU's grid loop -- 2.02x, bit-identical, an…
+…
+3bb7d3b
+```
+…d the ceiling is OCCT
+
+voxelIoU issues 2 x gridN^3 BRepClass3d_SolidClassifier::Perform calls per scored
+part -- 524,288 at the real default gridN=64 that forge_verify.cpp:710 sets and
+no benchmark row overrides. They ran serially on one core of fourteen.
+
+WHAT THIS DOES
+
+include/forge/ParallelFor.hpp is a new header-only worker facility: the index
+range is cut into many more tiles than there are workers, and each worker claims
+the next unclaimed tile from one shared atomic cursor. That is dynamic
+self-scheduling over an over-decomposed space -- the balancing property a
+work-stealing deque gives, with one atomic instead of a deque per worker. An
+equal static split would be wrong here twice over: the cores are asymmetric
+(10 P + 4 E) and the work is uneven (a cell deep inside a solid classifies far
+faster than one that lands on a face). It is header-only so that sixty lines of
+standard library do not put the CMakeLists.txt -> OCCT_REMOVAL_TRACKER.md ->
+archie_op_vocabulary.json -> ui/ArchieOpVocabulary.hpp cascade between a caller
+and the core.
+
+voxelIoU then gives each worker its own classifier pair -- Perform() mutates the
+classifier, so one cannot be shared -- and its own deep copy of each solid, via
+the BRepBuilderAPI_Transform(identity, Copy=true) this file already called. All
+Loads happen on the calling thread before any worker starts. Counters are
+per-worker, padded to a cache line, and merged in worker order.
+
+MEASURED (14-core M4 Max, OCCT 7.9.3, two independent build trees so each arm
+loads its own libforge_kernel_core.dylib)
+
+  corpus T162-C1, 14 rows, same command both arms
+      baseline  84.78 s / 84.53 s
+      after     42.61 s / 41.80 s      2.02x
+      after, FORGE_VOXEL_THREADS=1     84.64 s   (the restructuring itself costs ~0)
+
+BIT-IDENTICAL, WITH ITS DENOMINATOR
+
+Every row of T162-C1 matches the serial baseline on all four counts, the IoU,
+the align convention AND the per-cell digest:
+
+  0 differing cells out of 2,637,824, across 14 rows and 5,275,648 classifier
+  calls, at worker counts 1, 2, 3 and the default 4, over repeated runs.
+
+WHAT DOES NOT WORK, MEASURED
+
+More workers is worse. Wall clock for one row, sweeping FORGE_VOXEL_THREADS:
+
+  workers               1     2     3     4     5     6     8
+  box10 vs box10 g64  3.20  2.83  2.92  3.15  3.45  5.86  6.98
+  tri-cyl part   g64  9.33  5.59  4.51  3.78  3.45  4.49  5.11
+  cadgenbench    g16  1.59  1.02  0.86  0.77  0.72  0.84  0.88
+
+It is not the E-cores: ten workers (ten P-cores) is slower than four. It is not
+the allocator: a malloc microbenchmark on this box scales 5.5x to 14 threads,
+and OCCT 7.9 has no memory manager of its own left to blame. The control that
+locates it: TEN SEPARATE PROCESSES, one worker each, each doing the whole tri-cyl
+row, finish in 10.41 s against 9.34 s for one process -- 9.0x the throughput.
+The machine parallelises. OCCT's classifier, in one address space, does not:
+BRepClass3d_SClassifier::Perform calls TopExp::MapShapesAndAncestors per point,
+and those containers allocate through one process-wide
+NCollection_BaseAllocator handle every worker touches.
+
+So the default is capped at four -- the largest count that never lost on any
+fixture measured -- and FORGE_VOXEL_THREADS overrides the cap, not merely the
+default, so a sweep past four measures what it asked for.
+
+OCCT LEDGER UNCHANGED: OCCT_SYMBOLS 503 -> 503, OCCT_CLOSURE 14 -> 14,
+OCCT_DIRECT 10 -> 10, zero OCCT arrivals. The two symbols that do arrive are
+libc++'s aligned operator new/delete, from the cache-line-padded tally.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011i9tcyXkdyqD5cuGxxDwkW
+```
+T-162 step 3: cull voxel cells by bounding box -- 38.3% of classifier…
+…
+a99b821
+```
+… calls never made
+
+The grid voxelIoU builds spans the UNION of the two bounding boxes, because an
+offset candidate must be penalised rather than silently re-centred. That is the
+right grid and the wrong amount of work: whenever the candidate and the
+reference differ in size or placement -- which is every row where the IoU is not
+already 1 -- a large part of that union is empty for at least one of them, and
+the loop classified all of it anyway.
+
+A cell centre outside a solid's Bnd_Box, slackened by the same tolerance the
+classifier is given, cannot come back IN and cannot come back ON. BRepBndLib
+already inflates the box by the shape's own face tolerances, so the test is
+conservative twice over. The answer is OUT either way; this stops paying
+BRepClass3d_SolidClassifier to say so.
+
+MEASURED over corpus T162-C1 (14 rows, classifier calls, same command):
+
+  row                         calls before   calls after   saved
+  s01_box_vs_box                    524288        476656    9.1%
+  s03_box_vs_tri                    524288        248248   52.7%
+  s05_cyl_vs_part                   524288        242792   53.7%
+  s07_box_vs_tri_cscaled            524288        307024   41.4%
+  s08_box_vs_tri_clongest           524288        321656   38.6%
+  s10_offsetbox_vs_box              524288        192200   63.3%
+  r01_218_vs_231  (cadgenbench)       8192          2924   64.3%
+  r04_224_vs_209  (cadgenbench)       8192          4004   51.1%
+  TOTAL                            5275648       3252700   38.3%
+
+The rows that save least (9.1%) are the ones scoring a solid against ITSELF,
+where the two boxes coincide and only the one-cell frame padding is cullable.
+Those are the rows a benchmark never contains.
+
+Corpus wall clock, threaded + culled against the serial baseline:
+84.53 s -> 27.79 s, 3.04x.
+
+STILL BIT-IDENTICAL: 0 differing cells out of 2,637,824 across all 14 rows,
+compared on the per-cell digest and all four counts. classifierCalls and the new
+culled counter are instrument counters and are reported, not compared -- lowering
+the first is the entire point of the change, and the digest is what holds it
+honest.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011i9tcyXkdyqD5cuGxxDwkW
+```
+chatgpt-codex-connector
+Bot
+commented
+Sep 18, 2026
+Copy link
+Copy Markdown
+You have reached your Codex usage limits for code reviews. You can see your limits in the Codex usage dashboard.
+To continue using code reviews, you can upgrade your account or add credits to your account and enable them for code reviews in your settings.
+coderabbitai
+Bot
+commented
+Sep 18, 2026
+Copy link
+Copy Markdown
+Warning
+Review limit reached
+Next included review available in 12 minutes.
+Check out review usage here.
+View limit details
+Limit details: You’ve used the included review currently available.
+You've used all free OSS reviews for now. Wait for the free limit to reset to keep reviewing this public repository.
+Learn how review limits work.
+Review configuration:
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yaml
+Review profile: ASSERTIVE
+Plan: Advanced
+Run ID: ee81cd2e-2404-470a-bf6e-a58768ff45b6
+📥 Commits
+Reviewing files that changed from the base of the PR and between 1c0f57d and a99b821.
+📒 Files selected for processing (2)
+forge-kernel/include/forge/ParallelFor.hpp
+forge-kernel/src/VoxelIoU.cpp
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands.
+Hide details
+View details
+satvikOS
+merged commit e025440
+into
+archdisc
+Sep 18, 2026
+18 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+satvikOS
+deleted the
+work/T-162-voxeliou
+branch
+September 18, 2026 21:22
+satvikOS
+pushed a commit
+that referenced
+this pull request
+Sep 18, 2026
+T-152: merge #277; re-apply the VoxelIoU refusal onto the threaded lo…
+…
+bd893bc
+```
+…op; settle the TOCTOU
+
+MERGED origin/archdisc (e025440, T-162). The only conflict was VoxelIoU.cpp,
+which #277 rewrote from 287 to 481 lines: the grid loop now runs through
+forge/ParallelFor.hpp over tiles from one atomic cursor, with an exact bbox cull.
+
+I did NOT let the auto-merge interleave. I took THEIRS whole and re-applied my
+refusal fix onto the new structure by hand, because the two changes touch the
+same statements and a silent interleave there is how this repo has lost work.
+
+★ #277 CARRIED THE ORIGINAL DEFECT FORWARD VERBATIM. The threaded loop still had
+  `catch (...) { ++t.errs; }` with a/b initialised false, and the epilogue still
+  read "measured, but N point classifications threw and were counted as outside"
+  before `return true`. The rewrite preserved it faithfully; it is gone now, and
+  no live `++t.errs` remains (the one textual hit left is my comment quoting it).
+
+RE-APPLIED THREAD-SAFELY. Each worker records its own failure (cause, and the
+point's coordinates) in its own padded Tally — nothing shared — sets an atomic
+abort flag so peers stop rather than finishing a quarter of a million pointless
+classifications, and breaks.
+
+★ AND DETERMINISTICALLY, which threading made a real question. Which WORKER sees
+  a failure first is not reproducible: tiles come off one atomic cursor, so the
+  assignment varies run to run. The CELL INDEX does not. The merge reports the
+  SMALLEST failing idx — the first cell the serial loop would have reached — so
+  the refusal text is the same at every worker count and on every run. #277's
+  whole claim is that threading changed nothing observable; a refusal whose text
+  depended on scheduling would have broken exactly that.
+
+MEASURED on the threaded build:
+  healthy          status=ok  iou=0.250000 inA=320 inB=320 inter=128 union=512
+                   — identical to the serial numbers measured before the rewrite
+  fault injected   status=REFUSED, rc=1, names cause AND coordinates
+  determinism      three runs name the identical cell (1.200000, 0.800000, 0.800000)
+
+Noted from #277 and not fought: threading an OCCT-calling loop caps near 2.0x and
+goes NEGATIVE past four workers, because Perform routes through one process-wide
+NCollection_BaseAllocator. Nothing here assumes more threads help.
+
+── THE TOCTOU THREAD: DECIDED WITH EVIDENCE, NOT FIXED BY REFLEX ────────────
+classifyPoint() makes separate registry lookups and a concurrent release()
+between them would be a use-after-free. The question that settles whether to add
+registry API for it is whether that race is reachable. MEASURED on this tree:
+
+  * classifyPoint() has NO production caller. Every call site is a gate. The four
+    consumers it was built for still call BRepClass3d_SolidClassifier directly.
+  * The kernel's threaded regions are Tessellate.cpp, VoxelIoU.cpp (new in #277)
+    and the one-thread timeout watchdogs in BooleanTol/Features/Booleans. NONE of
+    the five calls classifyPoint(), and NONE calls ShapeRegistry::release().
+  * release() is reached only from src/binding.cpp (the addon entry point),
+    src/ShapeHandle.cpp (the RAII destructor) and two temporary-cleanup sites
+    (ShapeQuery.cpp, ClassASurfacing.cpp) — all on their caller's own thread.
+
+NOT REACHABLE TODAY, so the lease is DEFERRED rather than added — it is new
+public API on a type most of the kernel includes, and I declined the same cost
+once already for the cache-erase variant. The precondition is now documented in
+ShapeClassify.hpp ABOVE THE DECLARATION, with that evidence and with the exact
+trigger that voids it: migrating a consumer onto this seam, or threading one that
+is already on it. A latent race is worth naming even when it cannot fire.
+
+── RE-VERIFIED ON THE MERGED TREE ───────────────────────────────────────────
+  multi_solid_import_gate   GATE PASS, 11 parts, 0 failures
+  A2 reverted / restored    exit 1 (4 failures) / exit 0
+  null-shape contract       PASS    cache bound cap 8   PASS
+  cache capacity 0          PASS    ratchet             GREEN
+  three derived --checks    GREEN   conflict markers    NONE
+  point_classify structural GREEN
+
+── SYMBOLS, RE-MEASURED AFTER BOTH MOVES (#275 then #277) ───────────────────
+  my addon  DIRECT 8  CLOSURE 14  PHANTOM 2  OCCT_SYMBOLS 503   (ceiling 507: exit 0)
+  my dylib  DIRECT 10 CLOSURE 14             OCCT_SYMBOLS 503
+
+503 on both, and #277 reported 503 on its own build — so archdisc is 503 and this
+PR moves it by nothing. That also retires the 507-vs-503 question I flagged last
+round: 503 is the live number, 507 is the CI ceiling it sits under.
+
+Per object versus origin/archdisc, in every file this PR touches:
+  OcctImport.cpp.o  112 -> 112   arrivals 0  departures 0
+  VoxelIoU.cpp.o     16 ->  16   arrivals 0  departures 0
+  Topology.cpp.o      0 ->   0   arrivals 0  departures 0
+
+OCCT SYMBOL DELTA OF THIS PR: ZERO.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011i9tcyXkdyqD5cuGxxDwkW
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

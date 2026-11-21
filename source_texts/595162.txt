@@ -1,0 +1,255 @@
+Godot Engine – Multi-platform 2D and 3D game engine - Fix `BVH::ray_query()` numerical precision by Flarkk · Pull Request #100475 · godotengine/godot
+
+Fix `BVH::ray_query()` numerical precision by Flarkk · Pull Request #100475 · godotengine/godot · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Flarkk
+commented
+Dec 16, 2024
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+The current BVH ray query implementation starts generating false positive / negative hits on small objects when the ray's starting point is farther than ~1000km away from the origin (with single precision build).
+As an example, with p_ray_from = Vector3(1e+7, 0.0, 1e+7) and p_ray_to = Vector3(5.0, 0.0, 0.0), BHV::ray_query() will hit any 1 meter large object at the origin although the ray doesn't pass there.
+This PR circumvents the numerical precision issue involved there by making ray_query() taking the ray direction and length instead of the ray's endpoint. This avoids the precision-killing operation p_ray_end - p_ray_start in the function's body.
+Note that making Godot's raycasting actually precision-proof will require to move away from the ray_start / ray_end pattern (in favor of ray_start / ray_dir / ray_length) at various places in the codebase.
+As these additional changes would affect several independant subparts of the engine (physic server, editor picking, scene culling) they will be splitted into specific PRs for easier review :
+Editor picking : [BVH precision] Make editor gizmos use precision-proof version of BVH::ray_query() #100478
+Scene culling : [BVH precision] Make scene culling use precision-proof version of BVH::ray_query() #100480
+3D Physics : [BVH precision] Make 3D physics use precision-proof version of BVH::ray_query() #100604
+3D Physics - GodotBroadPhase3D
+The current PR lays the foundations, and for now just makes sure non precision-proof code interoperates smoothly with it. This way it can be independently review and merged.
+Flarkk
+requested review from
+a team
+as code owners
+December 16, 2024 16:09
+Flarkk
+requested a review
+from a team
+December 16, 2024 16:09
+Flarkk
+requested a review
+from a team
+as a code owner
+December 16, 2024 16:09
+lawnjelly
+commented
+Dec 16, 2024
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Could you alternatively just add another function for the direction version, and call it from the old function using a wrapper?
+i.e. Am wondering if there would there be so many of the old cases (even after converting) that it is better to retain the old API as an alternative, to prevent boiler plate in client code.
+Flarkk
+commented
+Dec 16, 2024
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+There are not that many places that call BVH raycast. You can actually see them in the diff :
+Node3DEditor::gizmo_bvh_ray_query()
+GodotSoftBody3D::query_ray()
+RendererSceneCull::instances_cull_ray()
+The thing is these 3 functions take themselves ray starts and ray ends as parameters.
+And when you pull the thread you realize that there is a whole stack of other functions behind that pass those ray starts and ends through. It's even exposed this way to GDScript (we might not want to push the change that far for now though, as it would be a breaking change).
+So I'm not sure wrapping the old logic right in BVH would help. But maybe wrapping it at a higher level in the aforementioned PRs may be relevant indeed.
+This was referenced Dec 16, 2024
+[BVH precision] Make editor gizmos use precision-proof version of BVH::ray_query()
+#100478
+Draft
+[BVH precision] Make scene culling use precision-proof version of BVH::ray_query()
+#100480
+Draft
+Remove duplicate code between intersects_ray and intersects_segment
+#100511
+Open
+AThousandShips
+added
+bug
+topic:core
+labels
+Dec 17, 2024
+AThousandShips
+added this to the
+4.4 milestone
+Dec 17, 2024
+lawnjelly
+commented
+Dec 18, 2024
+Copy link
+Copy Markdown
+Member
+Also as usual with these things, do we have any issues where this is causing a problem in practice?
+https://docs.godotengine.org/en/stable/contributing/development/best_practices_for_engine_contributors.html
+If 99% of cases involve a start and end point anyway, whether this calculation is done within the function or externally, it still gets done. And APIs are primarily designed for common use.
+This is why I was wondering whether it would be better just making the existing function a wrapper, then adding a more accurate version with direction called from this wrapper if use cases / issues warrant it.
+The other question is whether there are precision issues at these large ranges anyway within the ray cast routine. Remember also that Godot can be compiled with real as doubles which might be another way of addressing same problem.
+Flarkk
+commented
+Dec 18, 2024
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Now I understand better your previous comment.
+For context I'm working on uncapping camera's zfar in the editor (#100896), after having uncapped it in game already (#99986). This would untap the potential of reverse-z in both single and double precision builds.
+From the engine's perspective, it's a matter of rewriting in a more precision-friendly way a targeted collection of operations across the rendering and physic logic. This PR is one of them.
+To your points more specifically :
+Use case : large worlds / space games, regular scenes with very large distant objects, and all use cases that wants to use real units for big objects
+Current usage : all usages of ray_query() I've seen so far [Edit except 2] build the ray endpoint from a normal and a distance (you have sometimes to go back a few wrapping calls to realize it). Taking the latters directly seems to simplify things a little bit
+Other raycast issues with large numbers : I haven't identified any other yet. I extensively tested object picking with my local zfar-uncapped editor and it seems to work well with this PR ([BVH precision] Make editor gizmos use precision-proof version of BVH::ray_query() #100478 on top allows correct interactions with far away guizmos)
+Anyway your questioning is very valid. I think I will make my zfar-uncapped editor PR out first so people can grasp what it brings, and continue the discussion.
+Flarkk
+commented
+Dec 18, 2024
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Ah and just to make this clear :
+just making the existing function a wrapper, then adding a more accurate version with direction called from this wrapper
+The precision friendly version requires a ray normal at first hand. This is to avoid Vector3 ray = (to - start).normalized() in the current implementation.
+So there is no real point to just call the new one from the old as we would have to do this normalization in the wrapper then.
+lawnjelly
+commented
+Dec 18, 2024
+Copy link
+Copy Markdown
+Member
+The precision friendly version requires a ray normal at first hand. This is to avoid Vector3 ray = (to - start).normalized() in the current implementation.
+Yup I understand this - I'm trying to say that if the client code is based around a start and end point (rather than a direction), then this calculation is done somewhere regardless.
+Whether it is done in the client code or in a wrapper function is a matter of convenience for the user, and reduction of boiler plate.
+There's no precision gain in using this client side:
+```
+	Vector3 segment = p_ray_end - p_ray_start;
+	real_t length = segment.length();
+	gizmo_bvh.ray_query(p_ray_start, segment / length, length, result);
+```
+versus doing it in a wrapper, no?
+Flarkk
+commented
+Dec 18, 2024
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Got you. Correct.
+For now I've seen nowhere [edit : twice] in the codebase some client code involving start and end positions in the first place. It's all the time the opposite : there is a ray direction and a known far boundary, and the client builds the end position out of it to do the raycast.
+Will share here whenever I stumble upon such a case.
+Flarkk
+mentioned this pull request
+Dec 19, 2024
+[BVH precision] Make 3D physics use precision-proof version of BVH::ray_query()
+#100604
+Draft
+Flarkk
+commented
+Dec 19, 2024
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Interestingly Unity raycasts with from, direction and distance whereas Unreal uses start and end.
+I found only 1 2 raycasting cases where client code has the ray end position in the first place :
+when VehicleBody3D checks for collisions with the wheels
+navigation as it involves starting and ending points by design
+In both cases though, it's hard to figure out any usage at very large scales, so we can keep using the non-precision proof version there.
+Will keep updating this list ☝️ whenever I find any other case.
+Repiteo
+modified the milestones:
+4.4,
+4.5
+Feb 24, 2025
+Repiteo
+modified the milestones:
+4.5,
+4.6
+Sep 8, 2025
+Repiteo
+modified the milestones:
+4.6,
+4.x
+Jan 26, 2026
+Repiteo
+requested a review
+from a team
+as a code owner
+February 17, 2026 20:10
+Fix BVH::ray_query() numerical precision
+7c3325a
+Flarkk
+force-pushed
+the
+fix_BVH_precision
+branch
+from
+4456c09 to
+7c3325a
+Compare
+August 9, 2026 19:18
+Flarkk
+requested a review
+from a team
+as a code owner
+August 9, 2026 19:18
+Flarkk
+commented
+Aug 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Rebased
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+bug
+topic:core
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,541 @@
+# PointCloud Core
+
+NumPy primitives for validating point clouds, aggregating points into voxels,
+and mapping voxel results back to the original points. No GPU, training
+framework, command-line interface, or dataset format is required.
+
+Version `0.1.0` is prepared for the first release. The source is public; the
+package has not yet been published to PyPI. Install from a local checkout
+while the publisher is being configured. See the
+[release notes](https://github.com/ajavanma/pointcloud-core/blob/main/docs/releases/0.1.0.md)
+and [API compatibility policy](https://github.com/ajavanma/pointcloud-core/blob/main/docs/api.md#compatibility-policy).
+
+```sh
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install .
+```
+
+Python 3.11 or later and NumPy 1.26.4 or later (below 3) are required. CI covers
+Python 3.11 and 3.12 with NumPy 1.26.4 and the latest NumPy 2.x.
+
+## Example
+
+```python
+import numpy as np
+from pointcloud_core import LabelMap, PointCloud, lift_voxel_values, voxelize
+
+classes = LabelMap((7, 42), ignore_label=255)
+cloud = PointCloud(
+    coords=[[0.1, 0, 0], [0.2, 0, 0], [1.1, 0, 0], [np.nan, 0, 0]],
+    features=[[2], [4], [8], [10]],
+    labels=classes.encode([7, 7, 42, 255]),
+    point_indices=[100, 105, 900, 901],
+)
+voxels = voxelize(cloud, voxel_size=1.0)
+assert voxels.voxel_coords.tolist() == [[0, 0, 0], [1, 0, 0]]
+assert voxels.features.tolist() == [[3.0], [8.0]]
+assert voxels.point_to_voxel.tolist() == [0, 0, 1, -1]
+
+# A model or another algorithm can supply one value per voxel.
+encoded_predictions = np.array([0, 1], dtype=np.int64)
+point_predictions = classes.decode(
+    lift_voxel_values(encoded_predictions, voxels.point_to_voxel)
+)
+assert point_predictions.tolist() == [7, 7, 42, 255]
+assert voxels.point_indices.tolist() == [100, 105, 900, 901]
+```
+
+Every output row maps back to an input row. Original point IDs remain separate
+from row positions. Invalid coordinate/feature rows receive mapping `-1`, so
+they cannot accidentally index the final voxel during reconstruction.
+
+## Numerical contract
+
+- Coordinates use floor division by a scalar voxel size in the caller's units.
+  Negative coordinates are handled by floor; no origin offset or boundary
+  epsilon is applied.
+- Voxels are sorted lexicographically. Features are arithmetic means. Labels
+  use the most frequent nonignored value, with the smallest numeric label on
+  ties. Use `LabelMap` first when declared class order should break ties.
+- Coordinates/features normalize to float64; labels, coordinates of voxels,
+  mappings, and point IDs use int64. Inputs are not mutated.
+- Coordinates and features share one finite mask. At least one finite row is
+  required. Input labels are validated even on excluded rows.
+- Operations hold arrays in memory. This is not a streaming or out-of-core
+  implementation, and floating reductions are not promised to be bit-identical
+  across arbitrary input permutations or NumPy versions.
+
+See the [API reference](https://github.com/ajavanma/pointcloud-core/blob/main/docs/api.md),
+[contribution guide](https://github.com/ajavanma/pointcloud-core/blob/main/CONTRIBUTING.md), and
+[release plan](https://github.com/ajavanma/pointcloud-core/blob/main/docs/releasing.md).
+
+## Relationship to PointCloud Workflows
+
+The numerical methods were extracted and generalized from
+[PointCloud Workflows](https://github.com/ajavanma/PointCloud-Workflows).
+PointCloud Core owns only in-memory array operations. PCW owns dataset
+manifests, file readers, model execution, checkpoints, and run artifacts.
+
+PCW uses Core through a compatibility adapter, pinned to the prepared `0.1.0`
+source revision `5c28a700c30aee6186cfe30f6cd74708289f0743` with an archive hash
+while the first PyPI release is pending. The adapter preserves PCW's validation
+errors, artifact schemas, and historical divide-before-sum feature means. Direct
+Core callers use the scaled-mean reduction documented in the API reference.
+See the [integration guide](https://github.com/ajavanma/PointCloud-Workflows/blob/main/docs/core-integration.md)
+and [standalone Core example](https://github.com/ajavanma/PointCloud-Workflows/blob/main/examples/core_roundtrip.py).
+The example needs only NumPy and Core and demonstrates preserved point IDs,
+ignored labels, invalid rows, and prediction lifting.
+
+The original MIT attribution is retained in
+[LICENSE](https://github.com/ajavanma/pointcloud-core/blob/main/LICENSE).
+
+### scripts/apply-public-settings.py
+```
+"""Preview or apply the maintained public-repository controls through gh.
+
+The default is an offline preview. --apply requires the intended repository to
+already be public and the caller to have admin permission. This script never
+changes visibility or publishes a package, image, or documentation site.
+"""
+
+import argparse
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+
+REPOSITORY = "ajavanma/pointcloud-core"
+BASE = f"repos/{REPOSITORY}"
+
+
+def api(method, endpoint, payload=None):
+    command = [
+        "gh", "api", "--method", method, endpoint,
+        "-H", "Accept: application/vnd.github+json",
+        "-H", "X-GitHub-Api-Version: 2022-11-28",
+    ]
+    if payload is not None:
+        command.extend(["--input", "-"])
+    result = subprocess.run(
+        command, input=None if payload is None else json.dumps(payload),
+        text=True, capture_output=True, check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(f"{method} {endpoint}: {result.stderr.strip()}")
+    return json.loads(result.stdout) if result.stdout.strip() else None
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--apply", action="store_true", help="Apply to the already-public repository.")
+    arguments = parser.parse_args()
+    protection = json.loads(Path(__file__).with_name("public-branch-protection.json").read_text())
+    security = {"security_and_analysis": {
+        "secret_scanning": {"status": "enabled"},
+        "secret_scanning_push_protection": {"status": "enabled"},
+    }}
+    operations = [
+        ("PUT", f"{BASE}/branches/main/protection", protection),
+        ("PATCH", BASE, security),
+        ("PUT", f"{BASE}/vulnerability-alerts", None),
+        ("PUT", f"{BASE}/private-vulnerability-reporting", None),
+        ("PUT", f"{BASE}/actions/permissions/fork-pr-contributor-approval", {"approval_policy": "all_external_contributors"}),
+    ]
+    if not arguments.apply:
+        print(json.dumps({"repository": REPOSITORY, "mode": "preview", "operations": [
+            {"method": method, "endpoint": endpoint, "payload": payload}
+            for method, endpoint, payload in operations
+        ]}, indent=2))
+        return
+
+    repository = api("GET", BASE)
+    if repository.get("full_name") != REPOSITORY or repository.get("private") is not False:
+        raise RuntimeError("Refusing changes: the intended repository must already be public.")
+    if repository.get("default_branch") != "main" or not repository.get("permissions", {}).get("admin"):
+        raise RuntimeError("Refusing changes: main must be the default branch and admin permission is required.")
+    for method, endpoint, payload in operations:
+        api(method, endpoint, payload)
+        print(f"Applied {method} {endpoint}")
+
+    observed = api("GET", f"{BASE}/branches/main/protection")
+    for setting in ("enforce_admins", "required_linear_history", "required_conversation_resolution"):
+        if observed.get(setting, {}).get("enabled") is not True:
+            raise RuntimeError(f"Branch protection verification failed: {setting}")
+    for setting in ("allow_force_pushes", "allow_deletions"):
+        if observed.get(setting, {}).get("enabled") is not False:
+            raise RuntimeError(f"Branch protection verification failed: {setting}")
+    required_checks = {(item["context"], item["app_id"]) for item in protection["required_status_checks"]["checks"]}
+    actual_checks = {(item["context"], item["app_id"]) for item in observed["required_status_checks"]["checks"]}
+    if actual_checks != required_checks or observed["required_status_checks"].get("strict") is not True:
+        raise RuntimeError("Branch protection verification failed: required status checks")
+    reviews = observed.get("required_pull_request_reviews", {})
+    if reviews.get("required_approving_review_count") != 0 or not reviews.get("dismiss_stale_reviews"):
+        raise RuntimeError("Branch protection verification failed: solo-maintainer PR policy")
+    observed_security = api("GET", BASE).get("security_and_analysis", {})
+    for setting in security["security_and_analysis"]:
+        if observed_security.get(setting, {}).get("status") != "enabled":
+            raise RuntimeError(f"Security verification failed: {setting}")
+    api("GET", f"{BASE}/vulnerability-alerts")
+    if api("GET", f"{BASE}/private-vulnerability-reporting").get("enabled") is not True:
+        raise RuntimeError("Private vulnerability reporting verification failed")
+    if api("GET", f"{BASE}/actions/permissions/fork-pr-contributor-approval").get("approval_policy") != "all_external_contributors":
+        raise RuntimeError("External contributor workflow approval verification failed")
+    print("Verified branch protection, secret scanning, push protection, dependency alerts, private reporting, and contributor workflow approvals.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, RuntimeError, KeyError) as error:
+        print(f"public settings: {error}", file=sys.stderr)
+        raise SystemExit(1)
+```
+
+### src/pointcloud_core/__init__.py
+```
+"""NumPy primitives for point clouds, voxels, and original-point mappings."""
+
+from ._version import __version__
+from .arrays import PointCloud, PointCloudError, validate_cloud
+from .labels import LabelMap
+from .mapping import lift_voxel_values
+from .voxel import VoxelizedCloud, voxelize
+
+__all__ = [
+    "__version__", "PointCloud", "PointCloudError", "validate_cloud", "LabelMap",
+    "VoxelizedCloud", "voxelize", "lift_voxel_values",
+]
+```
+
+### src/pointcloud_core/_version.py
+```
+__version__ = "0.1.0"
+```
+
+### src/pointcloud_core/arrays.py
+```
+"""In-memory point-cloud contracts. No file formats or storage conventions."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from numbers import Integral
+
+import numpy as np
+from numpy.typing import ArrayLike
+
+
+class PointCloudError(ValueError):
+    """Input arrays or parameters violate a point-cloud operation's contract."""
+
+
+@dataclass(frozen=True)
+class PointCloud:
+    """Aligned source arrays; call :func:`validate_cloud` to normalize them.
+
+    Rows identify points. ``point_indices`` are unique external point IDs,
+    independent of row positions. Missing IDs default to ``arange(N)``.
+    Missing features become an ``[N, 0]`` array. Labels remain optional.
+    """
+
+    coords: ArrayLike
+    features: ArrayLike | None = None
+    labels: ArrayLike | None = None
+    point_indices: ArrayLike | None = None
+
+
+def _array(value: ArrayLike, name: str) -> np.ndarray:
+    try:
+        return np.asarray(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise PointCloudError(f"{name}: expected a rectangular numeric array") from error
+
+
+def _integers(value: ArrayLike, name: str) -> np.ndarray:
+    result = _array(value, name)
+    if result.dtype.kind not in "iu":
+        raise PointCloudError(f"{name}: expected an integer array (not booleans)")
+    if result.dtype.kind == "u" and result.size and np.any(result > np.iinfo(np.int64).max):
+        raise PointCloudError(f"{name}: values exceed the int64 range")
+    return result.astype(np.int64, copy=True)
+
+
+def _int64(value: int, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise PointCloudError(f"{name}: expected an integer in the int64 range")
+    result = int(value)
+    if not -(2**63) <= result < 2**63:
+        raise PointCloudError(f"{name}: expected an integer in the int64 range")
+    return result
+
+
+def _reals(value: ArrayLike, name: str) -> np.ndarray:
+    result = _array(value, name)
+    if result.dtype.kind not in "iuf":
+        raise PointCloudError(f"{name}: expected a real numeric array")
+    # An overflow during conversion must not silently turn a finite source row
+    # into a discarded row in voxelize(). NaNs/infinities in the input are kept.
+    with np.errstate(over="ignore", invalid="ignore"):
+        converted = result.astype(np.float64, copy=True)
+    if np.any(np.isfinite(result) & ~np.isfinite(converted)):
+        raise PointCloudError(f"{name}: finite values exceed the float64 range")
+    return converted
+
+
+def validate_cloud(cloud: PointCloud) -> PointCloud:
+    """Return owned float64/int64 arrays without reordering or dropping rows.
+
+    Coordinates must be nonempty ``[N, 3]``; features are ``[N, F]`` (F may be
+    zero), labels and IDs are ``[N]``. Nonfinite coordinate/feature rows are
+    retained, but at least one row must have finite coordinates and features.
+    Voxelization later excludes invalid rows with a shared mask.
+    """
+    if not isinstance(cloud, PointCloud):
+        raise PointCloudError("cloud: expected a PointCloud")
+    coords = _reals(cloud.coords, "coords")
+    if coords.ndim != 2 or coords.shape[1] != 3 or len(coords) == 0:
+        raise PointCloudError("coords: expected nonempty shape [N,3]")
+    count = len(coords)
+    features = (
+        np.empty((count, 0), dtype=np.float64)
+        if cloud.features is None else _reals(cloud.features, "features")
+    )
+    if features.ndim != 2 or features.shape[0] != count:
+        raise PointCloudError("features: expected shape [N,F] aligned with coords")
+    labels = None if cloud.labels is None else _integers(cloud.labels, "labels")
+    if labels is not None and labels.shape != (count,):
+        raise PointCloudError("labels: expected shape [N] aligned with coords")
+    indices = (
+        np.arange(count, dtype=np.int64)
+        if cloud.point_indices is None else _integers(cloud.point_indices, "point_indices")
+    )
+    if indices.shape != (count,):
+        raise PointCloudError("point_indices: expected shape [N] aligned with coords")
+    if np.any(indices < 0) or len(np.unique(indices)) != count:
+        raise PointCloudError("point_indices: expected unique nonnegative original point IDs")
+    if not np.any(np.isfinite(coords).all(axis=1) & np.isfinite(features).all(axis=1)):
+        raise PointCloudError("cloud: no rows have finite coordinates and features")
+    return PointCloud(coords, features, labels, indices)
+```
+
+### src/pointcloud_core/labels.py
+```
+"""Explicit class-order mappings, independent of a dataset manifest."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+from numpy.typing import ArrayLike
+
+from .arrays import PointCloudError, _int64, _integers
+
+
+@dataclass(frozen=True)
+class LabelMap:
+    """Map ordered original class IDs to 0..C-1; encoded ignore is always -1."""
+
+    class_ids: tuple[int, ...]
+    ignore_label: int = -1
+
+    def __post_init__(self) -> None:
+        try:
+            ids = tuple(_int64(value, "class_ids") for value in self.class_ids)
+        except TypeError as error:
+            raise PointCloudError("class_ids: expected a nonempty sequence of integers") from error
+        if not ids or len(set(ids)) != len(ids):
+            raise PointCloudError("class_ids: expected nonempty unique class IDs")
+        ignored = _int64(self.ignore_label, "ignore_label")
+        if ignored in ids:
+            raise PointCloudError("ignore_label: must differ from every class ID")
+        object.__setattr__(self, "class_ids", ids)
+        object.__setattr__(self, "ignore_label", ignored)
+
+    def encode(self, labels: ArrayLike) -> np.ndarray:
+        """Encode every element; reject unknown IDs, even on excluded rows."""
+        values = _integers(labels, "labels")
+        result = np.full(values.shape, -1, dtype=np.int64)
+        known = values == self.ignore_label
+        for training_id, original_id in enumerate(self.class_ids):
+            selected = values == original_id
+            result[selected] = training_id
+            known |= selected
+        if not np.all(known):
+            raise PointCloudError(f"labels: unknown class IDs: {np.unique(values[~known]).tolist()}")
+        return result
+
+    def decode(self, labels: ArrayLike) -> np.ndarray:
+        """Restore original IDs and the original ignore label."""
+        values = _integers(labels, "encoded labels")
+        if np.any((values < -1) | (values >= len(self.class_ids))):
+            raise PointCloudError("encoded labels: expected -1 or a declared encoded class ID")
+        result = np.full(values.shape, self.ignore_label, dtype=np.int64)
+        for training_id, original_id in enumerate(self.class_ids):
+            result[values == training_id] = original_id
+        return result
+```
+
+### src/pointcloud_core/mapping.py
+```
+"""Restore per-voxel values to original point rows."""
+
+from __future__ import annotations
+
+from numbers import Integral, Rational, Real
+
+import numpy as np
+from numpy.typing import ArrayLike
+
+from .arrays import PointCloudError, _array, _integers
+
+
+def _fill(value: Real, dtype: np.dtype):
+    if not isinstance(value, (Real, np.bool_)):
+        raise PointCloudError("fill_value: expected a real numeric scalar")
+    if dtype.kind in "iu":
+        if not isinstance(value, (Integral, np.bool_)):
+            raise PointCloudError("fill_value: integer values require an integer fill")
+        bounds = np.iinfo(dtype)
+        if not bounds.min <= int(value) <= bounds.max:
+            raise PointCloudError("fill_value: outside values' integer dtype range")
+    elif dtype.kind == "b":
+        if value not in (0, 1):
+            raise PointCloudError("fill_value: boolean values require 0, 1, False or True")
+    try:
+        with np.errstate(over="ignore", invalid="ignore"):
+            converted = np.asarray(value, dtype=dtype).item()
+        finite_source = True if isinstance(value, Rational) else np.isfinite(value)
+        if dtype.kind == "f" and finite_source and not np.isfinite(converted):
+            raise PointCloudError("fill_value: outside values' floating dtype range")
+    except (ValueError, OverflowError, TypeError) as error:
+        if isinstance(error, PointCloudError):
+            raise
+        raise PointCloudError("fill_value: cannot represent scalar in values' dtype") from error
+    return converted
+
+
+def lift_voxel_values(
+    values: ArrayLike, point_to_voxel: ArrayLike, *, fill_value: Real = -1
+) -> np.ndarray:
+    """Return ``[N, ...]`` values in source row order from ``[V, ...]`` values.
+
+    Every mapping must be -1 or in [0, V). Excluded rows receive fill_value.
+    The output preserves values' numeric dtype and never aliases the input.
+    Fill must fit that dtype; integer arrays require integer fills. Floating
+    payloads and fills may contain NaN/infinity. Point IDs are not row offsets.
+    """
+    payload = _array(values, "values")
+    if payload.ndim < 1 or payload.dtype.kind not in "biuf":
+        raise PointCloudError("values: expected numeric shape [V,...]")
+    mapping = _integers(point_to_voxel, "point_to_voxel")
+    if mapping.ndim != 1 or np.any(mapping < -1) or np.any(mapping >= len(payload)):
+        raise PointCloudError("point_to_voxel: expected a vector of -1 or existing voxel indices")
+    fill = _fill(fill_value, payload.dtype)
+    result = np.full((len(mapping), *payload.shape[1:]), fill, dtype=payload.dtype)
+    included = mapping >= 0
+    result[included] = payload[mapping[included]]
+    return result
+```
+
+### src/pointcloud_core/voxel.py
+```
+"""Deterministic NumPy voxel aggregation."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from numbers import Real
+
+import numpy as np
+
+from .arrays import PointCloud, PointCloudError, _int64, validate_cloud
+
+
+@dataclass(frozen=True)
+class VoxelizedCloud:
+    """Voxel arrays plus an index for each original row (-1 means excluded)."""
+
+    voxel_coords: np.ndarray
+    features: np.ndarray
+    labels: np.ndarray | None
+    point_to_voxel: np.ndarray
+    point_indices: np.ndarray
+
+
+def voxelize(
+    cloud: PointCloud, voxel_size: float, *, ignore_label: int = -1
+) -> VoxelizedCloud:
+    """Floor-quantize coordinates using a scalar size in the input's units.
+
+    Voxels are lexicographically ordered. Features use a mean; labels use a
+    nonignored majority and the smallest numeric ID on ties. Labels are NOT
+    remapped: pass LabelMap.encode() output to use declared training order.
+    A shared finite-coordinate/feature mask preserves original row alignment.
+    No origin offset or boundary epsilon is applied. Inputs are never mutated.
+    """
+    if isinstance(voxel_size, (bool, np.bool_)) or not isinstance(voxel_size, Real):
+        raise PointCloudError("voxel_size: expected a finite positive real number")
+    try:
+        size = float(voxel_size)
+    except (OverflowError, ValueError) as error:
+        raise PointCloudError("voxel_size: expected a finite positive real number") from error
+    if not np.isfinite(size) or size <= 0:
+        raise PointCloudError("voxel_size: expected a finite positive real number")
+    ignored = _int64(ignore_label, "ignore_label")
+    source = validate_cloud(cloud)
+    finite = np.isfinite(source.coords).all(axis=1) & np.isfinite(source.features).all(axis=1)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        quantized = np.floor(source.coords[finite] / size)
+    if (
+        not np.isfinite(quantized).all()
+        or np.any(quantized < -(2**63))
+        or np.any(quantized >= 2**63)
+    ):
+        raise PointCloudError("voxel coordinates: quantized values exceed the int64 range")
+    coords, inverse, counts = np.unique(
+        quantized.astype(np.int64), axis=0, return_inverse=True, return_counts=True
+    )
+    inverse = inverse.reshape(-1)
+    features = np.zeros((len(coords), source.features.shape[1]), dtype=np.float64)
+    # Scale each voxel/feature independently. Summing raw values can overflow;
+    # dividing each contribution by the count first can erase subnormal values.
+    # Normalized contributions are bounded by 1. Divide their sum only once,
+    # then restore the original scale. All-zero columns retain their zeros.
+    maxima = np.zeros_like(features)
+    finite_features = source.features[finite]
+    np.maximum.at(maxima, inverse, np.abs(finite_features))
+    scales = maxima[inverse]
+    with np.errstate(over="ignore", invalid="ignore"):
+        normalized = np.divide(
+            finite_features, scales, out=np.zeros_like(finite_features), where=scales != 0
+        )
+        np.add.at(features, inverse, normalized)
+        features /= counts[:, None]
+        # A mean of values in [-1, 1] lies in [-1, 1]. Enforce that bound before
+        # rescaling so rounding cannot turn a finite maximum into infinity.
+        np.clip(features, -1, 1, out=features)
+        features *= maxima
+    if not np.isfinite(features).all():
+        raise PointCloudError("features: voxel feature mean is not finite")
+    labels = None
+    if source.labels is not None:
+        labels = np.full(len(coords), ignored, dtype=np.int64)
+        valid_labels = source.labels[finite]
+        included = valid_labels != ignored
+        if np.any(included):
+            pairs, frequencies = np.unique(
+                np.column_stack((inverse[included], valid_labels[included])),
+                axis=0, return_counts=True,
+            )
+            order = np.lexsort((pairs[:, 1], -frequencies, pairs[:, 0]))
+            ranked = pairs[order]
+            first = np.r_[True, ranked[1:, 0] != ranked[:-1, 0]]
+            winners = ranked[first]
+            labels[winners[:, 0]] = winners[:, 1]
+    mapping = np.full(len(source.coords), -1, dtype=np.int64)
+    mapping[finite] = inverse
+    return VoxelizedCloud(coords, features, labels, mapping, source.point_indices)
+```

@@ -1,0 +1,265 @@
+--- v008.md
++++ v009.md
+@@ -4,148 +4,98 @@
+ 
+ ## Overview
+-GigaVoxels is a real-time voxel-based rendering pipeline designed for the efficient exploration of large and detailed scenes containing billions of voxels [S1, S4, S6, unofficial]. It solves the problem of rendering volumetric data that exceeds GPU memory capacities by using a sparse voxel octree data structure, GPU caching, and ray-guided streaming to load only the necessary data at the required resolution [S1, S4, unofficial]. Unlike sibling methods such as [Sparse Voxel Octree Ray Traversal](2451-sparse-voxel-octree-ray-traversal.md) which may assume static or fully resident data, GigaVoxels employs a hybrid update/ray-casting process where the GPU feeds back data usage requests to manage an out-of-core cache, enabling dynamic subdivision and streaming with minimum CPU intervention [S2][S3, unofficial]. It differs from view-independent structures by continuously adapting resolution based on view and occlusion, ensuring smooth temporal transitions and inherent anti-aliasing via cone tracing [S4, unofficial].
++GigaVoxels is a real-time voxel-based rendering pipeline designed for the efficient exploration of large and detailed scenes containing billions of voxels [S1, unofficial][S2][S3, S4, unofficial]. It solves the problem of rendering volumetric data that exceeds GPU memory capacities by using a sparse voxel octree structure, GPU caching, and ray-guided streaming to load only the necessary data at the required resolution [S1, unofficial][S2][S3, S4, unofficial]. Unlike sibling methods such as [Sparse Voxel Octree Ray Traversal](2451-sparse-voxel-octree-ray-traversal.md) which may assume in-core data or simpler traversal, GigaVoxels integrates a unified out-of-core cache management system on the GPU, combining hierarchical volume ray-casting with cone tracing to provide inherent anti-aliasing and smooth level-of-detail transitions [S1, unofficial][S2][S3, S4, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Sparse voxel data (static or procedural), camera parameters (position, projection), transfer functions (for color/opacity), and optional procedural definitions (e.g., noise functions, distance fields).
+-*   **Outputs:** Final 2D image (color and alpha), data usage requests (subdivision/loading) for the cache manager.
++*   **Inputs:** Sparse voxel data (geometry/density), camera parameters (position, projection), and optional procedural definitions (e.g., noise functions, distance fields).
++*   **Outputs:** Final color buffer (and optionally depth/normal buffers).
+ 
+ **Data Structures:**
+-1.  **Sparse Voxel Mipmap Pyramid (SVMP):** A hierarchy of voxel data.
+-    *   **Nodes:** Part of a Generalized N3-tree (octree) for space partitioning and empty space compaction [S1, unofficial]. Nodes point to either a 'brick' or a constant value for homogeneous regions [S6, unofficial]. Sibling nodes are stored adjacently; children are accessed via the pointer to the first child [S6, unofficial].
+-    *   **Bricks:** Low-resolution regular grids of voxels, typically $8^3$ [S5, unofficial]. Non-leaf nodes own bricks to allow mip-mapping [S6, unofficial]. Bricks store opacity, color, and normal information [S1, unofficial].
+-    *   **Brick Pool:** A separate storage area for bricks, managed by the cache [S6, unofficial].
+-2.  **GPU Cache:**
+-    *   Implements an LRU (Least Recently Used) mechanism to maintain temporal coherence [S1, unofficial].
+-    *   **Cache Elements:** Structure containing 'Oldest' and 'Newest' pointers, 'Usage sorted nodes addresses', and a 'Used nodes mask' [S3, unofficial].
+-    *   **Implementation:** Uses 3D textures for reading and bound surfaces for writing data [S1, unofficial].
+-    *   **Stream Compaction:** Used to concatenate the Octree/Bricks Pool and manage the 'New data Stream' of newly accessed elements [S3, unofficial].
++The method uses a unified data structure consisting of three main components [S1, S3, S6, unofficial]:
++1.  **Sparse Voxel Mipmap Pyramid (SVMP):** A hierarchy of downsampled voxel data. Each level represents a lower resolution version of the volume, built by iteratively downsampling and averaging neighbors [S4, unofficial]. This allows for cone tracing approximation [S3, S4, unofficial].
++2.  **Generalized N3-tree (Octree):** A space-partitioning structure that handles empty space compaction. Nodes point to either child nodes or a "brick" [S1, S6, unofficial].
++3.  **Bricks:** Regular, constant-sized blocks of voxels (typically $8^3$) [S2][S5, unofficial]. Bricks store opacity, color, and normal information. Non-leaf nodes may also own bricks to facilitate mip-mapping [S6, unofficial]. Bricks are stored in a "brick pool" [S6, unofficial].
++
++**GPU Cache:**
++A unified LRU (Least Recently Used) cache manages both the node pool and brick pool on the GPU [S3, unofficial]. Cache elements track usage via 'Oldest' and 'Newest' pointers and a 'Used nodes mask' [S3, unofficial]. Stream compaction is used to manage the "New data Stream" and concatenate the Octree/Bricks Pool [S3, unofficial].
+ 
+ **Algorithm Steps:**
+-
+-1.  **Ray Traversal and LOD Selection:**
+-    *   For each pixel, a ray is cast into the scene [S3, unofficial].
+-    *   The ray traverses the sparse voxel octree. A KD-restart algorithm is used to descend the node tree without stack usage until the desired level of detail is reached [S6, unofficial].
+-    *   **Cone Tracing:** To determine the intersected maximum voxel size, the method uses approximate cone tracing based on the radius of the cone footprint defined by the eye and pixel extent [S5, unofficial]. This determines the appropriate LOD level [S4, unofficial].
+-    *   **Descent Criterion:** The traversal continues if the node does not meet the descent criterion (e.g., if it is not a leaf or if higher resolution is needed) [S1, unofficial].
+-
+-2.  **Brick Marching and Accumulation:**
+-    *   Once a brick is reached, the ray marches through the voxels within the brick [S6, unofficial].
+-    *   **Hardware Filtering:** Tri-linear interpolation is used for semi-transparent volumes [S2].
+-    *   **Accumulation:** Color and alpha are accumulated using front-to-back rendering [S3, unofficial]. The emission/absorption model for each ray is:
++1.  **Ray Traversal & LOD Selection:** For each pixel, a ray is cast. The ray traverses the octree. A KD-restart algorithm is used to descend the node tree without stack usage [S6, unofficial]. The traversal determines the appropriate Level of Detail (LOD) based on the cone footprint radius relative to the ray distance [S5, unofficial].
++2.  **Data Request & Streaming:** If the required node or brick is not in the GPU cache, the ray tracer emits a request [S1, unofficial]. The Central Memory/Cache Manager loads the missing data from mass storage or generates it procedurally [S1, unofficial]. Data can be loaded level-by-level (coarse to fine) for speed or directly at max resolution for quality [S1, unofficial].
++3.  **Cone Tracing / Brick Marching:**
++    *   The renderer performs hierarchical volume ray-casting [S1, unofficial].
++    *   Instead of simple ray accumulation, it uses approximate cone tracing [S5, unofficial]. The step size is proportional to the distance from the observer, approximating the cone integral defined by the eye and pixel extent [S4, unofficial].
++    *   Reading from the SVMP delivers the integrated value of a small volume [S4, unofficial].
++    *   Shading (e.g., Blinn-Phong) is computed per sample [S3, unofficial]. Normals can be derived on-the-fly using finite differences or stored directly [S3, unofficial].
++    *   Accumulation follows the front-to-back model [S3, unofficial]:
+         $$ C = \text{Color intensity} + \text{Alpha} $$
+-        (Specifically, the standard front-to-back compositing equation is implied by the accumulation logic described in [S1, unofficial] and [S3, unofficial]).
+-    *   **Termination:** Marching terminates when the volume becomes opaque (e.g., accumulated alpha $\ge 0.98$) or when a stop criterion is met [S1, unofficial][S2]. This accounts for intravolume occlusion [S2].
+-
+-3.  **Data Usage Feedback and Streaming:**
+-    *   During traversal, the ray records information about traversed octree nodes [S2].
+-    *   If visited nodes are not present at the correct resolution (missing bricks or un-subdivided nodes), the ray returns a **subdivision request** or **data loading request** instead of just a color value [S2].
+-    *   These requests are sent to the **Central Memory/Cache Manager** [S1, unofficial].
+-
+-4.  **Cache Management and Production:**
+-    *   The Cache Manager handles structure updates and loads data from mass storage or the GPU cache [S1, unofficial].
+-    *   **Subdivision:** If a node needs subdivision, a GPU kernel is launched (1 block/node, 1 thread/child_node) to test if children are inside the object (e.g., analytically for a sphere) and write new nodes to the cache [S1, unofficial].
+-    *   **Brick Production:** If a brick is needed, a GPU kernel (1 block/brick) is launched to populate the voxels (user-defined producer) and write them to the data cache [S1, unofficial].
+-    *   **Data Loading Modes:** Data can be loaded level-by-level (coarse to fine) for speed or directly at max resolution for quality [S1, unofficial].
+-
+-5.  **Shading:**
+-    *   Standard Blinn-Phong illumination is computed per sample [S3, unofficial].
+-    *   Normals are derived on-the-fly using finite differences or stored directly [S3, unofficial].
+-    *   For opaque objects, deferred shading is used [S3, unofficial].
++        (Specifically, $\text{AccumulatedColor} = \text{AccumulatedColor} + (1.0 - \text{AccumulatedColor}.w) \times \text{SampleColor}$) [S1, S3, unofficial].
++    *   Marching terminates when the volume becomes opaque (e.g., accumulated alpha $\ge 0.98$) or when a descent criterion is met [S1, unofficial][S2][S6, unofficial].
++4.  **Occlusion Handling:** Opaque objects are rendered first to the depth buffer to skip occluded parts [S1, unofficial]. Intravolume occlusion is taken into account by stopping rays when opaque [S2].
++5.  **Procedural Generation (Optional):** For hypertextures or fractals, noise is computed on-the-fly. To optimize, only one octave of noise is computed per LOD level and stored in the cache. The total noise is reconstructed as $F(\text{level } N) = \text{currentNoise}(\text{level } N) + \text{previousNoise}(\text{level } N-1)$ [S1, unofficial].
+ 
+ **Pseudocode:**
++```python
++# Simplified CUDA Kernel for GigaVoxels Rendering
++# One thread per pixel/ray
+ 
+-```python
+-# Simplified representation of the GigaVoxels rendering loop and cache interaction
+-
+-def gigavoxels_render(camera, scene_producer):
+-    # 1. Initialize Cache Manager (LRU, 3D textures)
+-    cache = CacheManager()
++def GigaVoxelsRenderKernel(ray, cache_manager, svmp, octree):
++    accumulated_color = float4(0.0, 0.0, 0.0, 0.0)
++    current_pos = ray.origin
++    ray_direction = ray.direction
+     
+-    # 2. For each pixel/ray
+-    for pixel in screen_pixels:
+-        ray = cast_ray(camera, pixel)
+-        accumulated_color = vec4(0.0)
+-        accumulated_alpha = 0.0
++    # Traverse Octree and March Bricks
++    while accumulated_color.w < 0.98f: # Stop when opaque [S1, unofficial]
+         
+-        # 3. Traverse Octree
+-        node = scene_root
+-        while node is not None:
+-            # Determine LOD based on cone footprint
+-            lod_level = get_cone_aperture(ray, node)
++        # 1. Determine LOD and Fetch Node/Brick
++        # Calculate cone aperture based on distance and pixel footprint [S5, unofficial]
++        cone_aperture = getConeAperture(current_pos, ray)
++        
++        # Traverse octree to find the appropriate brick at the correct LOD
++        # Returns the brick data if available, or triggers a cache request [S2]
++        brick_data = octree.traverse_and_fetch(current_pos, cone_aperture, cache_manager)
++        
++        if brick_data is None:
++            # Data not available, break or handle request (implementation dependent)
++            break
+             
+-            # Check if node is in cache
+-            if not cache.contains(node.id, lod_level):
+-                # Request subdivision/loading
+-                request = cache.request_subdivision(node.id, lod_level)
+-                if request.type == SUBDIVISION:
+-                    # GPU Kernel: Subdivide node
+-                    # Input: node.id, lod_level
+-                    # Output: child nodes in cache
+-                    gpu_subdivide_node(node.id, lod_level, scene_producer)
+-                elif request.type == BRICK_LOAD:
+-                    # GPU Kernel: Load/Produce Brick
+-                    # Input: node.id, lod_level
+-                    # Output: brick voxels in cache
+-                    gpu_produce_brick(node.id, lod_level, scene_producer)
++        # 2. Sample Brick (Cone Tracing Approximation)
++        # Sample the brick using the calculated aperture
++        # brickSampler.getValue retrieves color (channel 0) and alpha [S1, unofficial]
++        sample = brick_sampler.sample(brick_data, current_pos, cone_aperture)
++        
++        # 3. Shading (Optional: Blinn-Phong per sample)
++        # Normal can be fetched from brick or computed via finite differences [S3, unofficial]
++        normal = compute_normal(brick_data, current_pos)
++        color = compute_shading(sample.color, normal, ray)
++        
++        # 4. Accumulate Color (Front-to-Back)
++        # C = C + (1 - C.w) * sample_color [S1, unofficial]
++        if sample.alpha > 0.0f:
++            accumulated_color = accumulated_color + (1.0 - accumulated_color.w) * color
+             
+-            # Get node from cache
+-            node = cache.get_node(node.id, lod_level)
++        # 5. Advance Ray
++        # Step size is determined by the brick size or LOD level [S4, unofficial]
++        step_size = get_step_size(brick_data.lod_level)
++        current_pos = current_pos + ray_direction * step_size
++        
++        # Check if ray has exited the volume bounds
++        if not octree.contains(current_pos):
++            break
+             
+-            # If node is a leaf (brick) or homogeneous
+-            if node.is_leaf or node.is_homogeneous:
+-                # March through brick
+-                step_size = get_step_size(ray, lod_level)
+-                while ray_t < node.boundary_end:
+-                    voxel = sample_brick(node.brick, ray.position)
+-                    color = voxel.color
+-                    alpha = voxel.alpha
+-                    
+-                    # Front-to-back accumulation
+-                    # C = C_prev + (1 - A_prev) * C_voxel
+-                    # A = A_prev + (1 - A_prev) * A_voxel
+-                    weight = (1.0 - accumulated_alpha) * alpha
+-                    accumulated_color += weight * color
+-                    accumulated_alpha += weight
+-                    
+-                    # Stop if opaque
+-                    if accumulated_alpha >= 0.98:
+-                        break
+-                    
+-                    ray.position += ray.direction * step_size
+-                
+-                break # Brick traversal done
+-            else:
+-                # Descend to child
+-                # Children are stored adjacently
+-                child_index = get_child_index(ray, node)
+-                node = node.children[child_index]
+-        
+-        # 4. Write result
+-        pixel.color = accumulated_color
+-
+-def gpu_subdivide_node(node_id, lod_level, producer):
+-    # Kernel: 1 block per node, 1 thread per child
+-    child_id = get_child_id(node_id, lod_level)
+-    if producer.is_inside(child_id):
+-        cache.write_node(child_id, lod_level)
+-
+-def gpu_produce_brick(node_id, lod_level, producer):
+-    # Kernel: 1 block per brick
+-    brick = producer.generate_voxels(node_id, lod_level)
+-    cache.write_brick(brick)
++    return accumulated_color
+ ```
+ 
+ **Parameters:**
+-*   **Cone Aperture:** Modifiable via `getConeAperture()` to adjust the trade-off between quality and performance [S1, unofficial].
++*   **Cone Aperture:** Controls the trade-off between quality and performance [S1, S5, unofficial].
+ *   **Stop Criterion:** e.g., `accumulatedColor.w >= 0.98f` [S1, unofficial].
+-*   **Descent Criterion:** Used during visit traversal to decide when to stop descending [S1, unofficial].
+-*   **Brick Pool Size:** Adjustable to match hardware capabilities; smaller pools consume less video memory but store fewer bricks [S6, unofficial].
+-*   **CUDA Compute Capability:** Requires SM at least 2.0 [S1, unofficial].
++*   **Descent Criterion:** Used during visit traversal to decide when to stop descending the octree [S1, unofficial].
++*   **Brick Pool Size:** Adjustable to match available hardware; smaller pools consume less video memory but store fewer bricks [S6, unofficial].
++*   **CUDA Compute Capability:** SM at least 2.0 [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Aliasing:** Occurs because pixel value should be defined by integration along a cone, not just ray accumulation. Addressed by mipmapping and cone tracing [S4, unofficial].
+-*   **Popping:** Discrete mipmap levels can cause popping. Addressed by smooth transitions and continuous adaptation [S4, unofficial].
+-*   **Memory Budget:** The method respects limited GPU memory by streaming, but out-of-core rendering is essential for vast worlds [S6, unofficial].
++*   **Aliasing:** Caused by defining pixel value by ray accumulation rather than cone integration. Addressed by mipmapping and cone tracing [S4, unofficial].
++*   **Memory Limits:** Out-of-core rendering is essential for vast worlds; the method relies on the cache to manage this [S6, unofficial].
++*   **Procedural Noise:** Reusing noise computation requires careful management of cache levels to ensure $F(\text{level } N)$ correctly sums octaves [S1, unofficial].
+ 
+ ## Subtopics
+@@ -154,26 +104,18 @@
+ Distributed Multi-Level Out-Of-Core Volume Rendering is a distributed image-order rendering technique designed to visualize volume datasets significantly larger than the aggregate memory of a GPU cluster, targeting scalable high-resolution display arrays. It solves the problem of out-of-core data access by combining a multi-level cache hierarchy (GPU texture memory, CPU RAM, and distributed shared memory) with a display-aware LOD selection mechanism that bounds the working set size. Unlike sibling methods such as GigaVoxels which stream data to a single GPU, this method distributes the volume across cluster nodes, using a unique data management scheme to relocate bricks between nodes based on view transformation, thereby avoiding the data replication required by systems like Vol-a-Tile or Volume Visualizer.
+ 
+-### [Dense 3D Texture Voxelization](7286-dense-3d-texture-voxelization.md)
+-Dense 3D Texture Voxelization is an alternative to GigaVoxels [GigaVoxels](3057-gigavoxels.md) where the entire scene, including empty space, is encoded into a very large mip-mapped 3D texture. It solves the problem of sparse data management by replacing the explicit octree structure with an implicit one derived from the texture's mipmap levels. Unlike GigaVoxels, which uses a dynamic sparse octree to stream only necessary data, this method relies on direct world-space indexing and automatic hardware filtering, trading memory efficiency for implementation simplicity.
++#### Dense 3D Texture Voxelization
++Dense 3D Texture Voxelization is an alternative to GigaVoxels where the entire scene (empty space and all) is encoded into a very large mip-mapped 3D texture [S7, unofficial]. The octree is implicit in the mipmap levels of the 3D texture, and rays traverse the mip-map chain instead of an octree [S7, unofficial]. Rays index into the voxel data directly because the 3D texture is a world space representation of the scene [S7, unofficial]. Quadrilinear interpolation is automatically achieved with texture() calls because of the mip map chain [S7, unofficial]. Bricks are spatially aligned in the scene rather than existing in an amorphous memory pool, so redundant neighbor voxels do not need to be stored, and the filtering stage (mip map generation) is straightforward [S7, unofficial]. However, dense 3D textures are impractical because of how much memory they consume, especially the empty space that must be backed by physical memory [S7, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Real-time to interactive rates (20-90 fps) on current generation hardware [S4, unofficial]. Complexity depends on the number of visible voxels and the depth of the octree traversal.
+-*   **Memory Complexity:** Out-of-core. Memory usage is bounded by the GPU cache size (brick pool + node pool) and the visible working set [S6, unofficial]. It respects limited GPU memory budgets [S4, unofficial].
+-*   **Performance:** Achieves rendering of billions of voxels (e.g., $8192^3$ for 3D scans, $16384^3$ for hypertextured meshes) [S4, unofficial].
+-*   **Strengths:**
+-    *   Handles scenes larger than GPU memory [S4, unofficial].
+-    *   Inherent anti-aliasing via cone tracing and mipmapping [S4, unofficial].
+-    *   Smooth temporal transitions and view-dependent LOD [S4, unofficial].
+-    *   Efficient handling of semi-transparent volumes [S2].
+-    *   Supports procedural generation and complex effects (soft shadows, depth of field) via mipmapping [S3, unofficial].
+-*   **Limitations:**
+-    *   Requires GPU Compute Capability 2.0 or higher [S1, unofficial].
+-    *   Mipmapping increases memory consumption and makes tree updates more challenging [S4, unofficial].
+-    *   Out-of-core rendering is essential but adds complexity to data management [S6, unofficial].
+-*   **When to use:** Real-time exploration of large, detailed voxel scenes, scientific visualization of massive datasets, procedural generation of complex environments.
+-*   **When not to use:** Scenes with very small, sparse details that do not benefit from hierarchical streaming, or when hardware does not support the required CUDA capabilities.
++*   **Time Complexity:** Real-time to interactive rates (20-90 fps) on current generation hardware [S4, unofficial]. Performance depends on the density of the volume and the efficiency of the cache hits [S4, unofficial].
++*   **Memory Complexity:** Out-of-core; memory usage is bounded by the GPU cache size and the brick pool, which can be adjusted to fit available hardware [S6, unofficial]. It respects the limited GPU memory budget [S4, unofficial].
++*   **Scaling:** Fully scalable (infinite resolution) due to the procedural generation and LOD mechanisms [S3, unofficial].
++*   **Strengths:** Handles billions of voxels; inherent anti-aliasing via cone tracing; smooth LOD transitions; supports semi-transparent volumes; efficient GPU cache management with zero CPU intervention during rendering [S1, unofficial][S2][S3, S4, unofficial].
++*   **Limitations:** Requires CUDA Compute Capability SM 2.0 or higher [S1, unofficial]; complex to implement due to the unified cache and streaming logic; out-of-core rendering adds complexity [S6, unofficial].
++*   **When to use:** Real-time exploration of large, detailed voxel scenes (e.g., 3D scans, hypertextured meshes, fractals) where memory exceeds GPU capacity [S4, unofficial].
++*   **When not to use:** Scenes with very small, sparse details that do not benefit from hierarchical streaming, or when hardware does not support the required CUDA features.
+ 
+ ## Background
+-GigaVoxels was introduced in 2009 by Chabert, Neyret, Lefebvre, and Eisemann in the paper "Ray-Guided Streaming for Efficient and Detailed Voxel Rendering" (I3D 2009) [S4, S3, unofficial]. It was developed as a dynamic sparse octree approach to render complex scenes consisting of billions of voxels in real time [S2]. The method builds on earlier work in sparse voxel octrees [LHN05a] and brick maps [LKS*06], combining them with a GPU-based cache and ray-guided streaming mechanism [S4, unofficial]. It differs from view-independent structures by continuously adapting resolution, making discontinuities disappear and ensuring smooth temporal transitions [S4, unofficial]. It was further detailed in subsequent presentations and library documentation (e.g., Guehl and Neyret, 2013) [S1, unofficial].
++GigaVoxels was introduced in 2009 by Crassin et al. [S4, S3, unofficial]. It was developed as a response to the limitations of previous volume rendering techniques in handling massive datasets in real-time. The method builds on the concept of sparse voxel octrees [LHN05a] and brick maps [LKS*06], combining them with a novel ray-guided streaming approach [S4, unofficial]. It differs from view-independent structures by continuously adapting resolution, making discontinuities disappear and ensuring smooth temporal transitions [S4, unofficial]. It also differs from Gobbetti et al. [GMAG08] by providing better quality/performance, procedural content generation, and level-of-detail management [S4, unofficial]. The technique has been used in various applications, including planetariums (RSA Cosmos project) and video games [S1, unofficial][S2].
+ 
+ ## Sources
+@@ -183,3 +125,4 @@
+ [S4] [PDF] Ray-Guided Streaming for Efficient and Detailed Voxel Rendering, https://www-sop.inria.fr/reves/Basilic/2009/CNLE09/CNLE09.pdf, fetched 2026-10-26 (unofficial)
+ [S5] Level-of-Detail Independent Voxel-Based Surface ..., https://studenttheses.uu.nl/items/a8b8233a-d142-43f1-8f6d-c0b0fe43a767, fetched 2026-10-27 (unofficial)
+-[S6] PDF Real-time Rendering and Construction of Signed Distance Fields, https://jambuttenshaw.github.io/devportfolio/Dissertation.pdf, fetched 2026-10-28 (unofficial)+[S6] PDF Real-time Rendering and Construction of Signed Distance Fields, https://jambuttenshaw.github.io/devportfolio/Dissertation.pdf, fetched 2026-10-28 (unofficial)
++[S7] http://realtimevoxels.blogspot.fr/2012/09/introduction-to-gigavoxels-and-sparse.html, http://realtimevoxels.blogspot.fr/2012/09/introduction-to-gigavoxels-and-sparse.html, fetched 2026-10-28 (unofficial)

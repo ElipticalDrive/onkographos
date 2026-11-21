@@ -1,0 +1,60 @@
+# Pixel-aligned Volumetric Avatars (PVA)
+
+## Overview
+Pixel-aligned Volumetric Avatars (PVA) is a method for estimating a volumetric 3D avatar of a human head from only a few input images, enabling view synthesis for unseen identities and expressions [S1, S1, unofficial]. It generalizes across identities by combining a neural radiance field with local, pixel-aligned features extracted directly from input images, avoiding the information loss associated with global latent codes [S1, S1, unofficial]. Unlike mesh-based methods, PVA captures arbitrary topology and high-frequency details (e.g., hair, expressions) without requiring explicit 3D supervision or voxel grids [S1, S1, unofficial].
+
+## How it works
+**Inputs:** One or more conditioning images $v_i$ of dimensions $h \times w \times 3$, along with their camera intrinsics $K_i$ and extrinsics $[R|t]_i$.
+**Outputs:** A radiance field function that predicts color $\mathbf{c}$ and volume density $\sigma$ for any 3D point $\mathbf{X}$ and view direction, allowing novel view synthesis.
+
+**Data Structures:**
+1.  **Feature Map ($f^{(i)}$):** A 2D tensor of size $h \times w \times C$, where $C$ is the feature dimension. This is the output of the encoder-decoder network $N_{feat}$.
+2.  **Radiance Field Network ($N$):** A Multi-Layer Perceptron (MLP) taking encoded position and pixel-aligned features as input.
+3.  **Positional Encoding ($\phi$):** A hierarchical sinusoidal encoding function applied to 3D coordinates.
+
+**Numbered Steps:**
+
+1.  **Feature Extraction:** For each conditioning view $v_i$, compute the pixel-aligned feature map $f^{(i)}$ by passing the image through the shallow convolutional encoder-decoder network $N_{feat}$ [S1, S1, unofficial]:
+    $$ f^{(i)} = N_{feat}(v_i) $$
+
+2.  **Feature Interpolation:** For a 3D point $\mathbf{X}$ in world space, determine its corresponding pixel location $\mathbf{x}$ in the conditioning view $v_i$ using perspective projection $\Pi$ [S1, S1, unofficial]:
+    $$ \mathbf{x} = \Pi(\mathbf{X}) $$
+    Extract the feature vector $\mathbf{f}_\mathbf{X}$ by bilinearly interpolating the feature map $f^{(i)}$ at location $\mathbf{x}$ [S1, S1, unofficial]:
+    $$ \mathbf{f}_\mathbf{X} = F(f^{(i)}, \mathbf{x}) $$
+    where $F$ denotes bilinear interpolation.
+
+3.  **Radiance Field Query:** Pass the positional encoding of the 3D location, $\phi(\mathbf{X})$, and the extracted feature vector $\mathbf{f}_\mathbf{X}$ into the radiance field network $N$ to predict color $\mathbf{c}$ and opacity/density $\sigma$ [S1, S1, unofficial]:
+    $$ \{\mathbf{c}, \sigma\} = N(\phi(\mathbf{X}), \mathbf{f}_\mathbf{X}) $$
+    Note: The positional encoding $\phi(\cdot)$ follows the standard hierarchical sinusoidal encoding defined in the parent article [Parent].
+
+4.  **Ray Marching for Rendering:** For a target view $j$ with camera intrinsics $K_j$ and extrinsics $[R|t]_j$, march rays into the scene. For a pixel $\mathbf{p}$, compute the ray direction $\mathbf{d}$ [S1, S1, unofficial]:
+    $$ \mathbf{d} = \frac{P^{-1} \mathbf{p} - \mathbf{r}_0}{\| P^{-1} \mathbf{p} - \mathbf{r}_0 \|} $$
+    where $P^{-1} = [R_i | t_i]^{-1} K_i^{-1}$ is the inverse projection matrix relative to the conditioning view $i$ (or target view if self-conditioning), and $\mathbf{r}_0$ is the ray origin [S1, S1, unofficial]. All camera extrinsics are relative to the computed head pose to help the network focus on scene content [S1, S1, unofficial].
+
+5.  **Sampling:** Uniformly sample a set of $n_s$ points $t$ along the ray $\mathbf{r}(t) = \mathbf{r}_0 + t\mathbf{d}$ for $t \in [t_{near}, t_{far}]$ [S1, S1, unofficial]. Set $\mathbf{X} = \mathbf{r}(t)$.
+
+6.  **Volume Rendering:** Use the quadrature rule to approximate the integral of color along the ray, accumulating the color and occupancy produced by $N$ at each sample point [S1, S1, unofficial]. The predicted color $I_\alpha(\mathbf{p})$ is computed as:
+    $$ I_\alpha(\mathbf{p}) = \sum_{i=1}^{n_s} T_i \left( 1 - e^{-\sigma_i \delta_i} \right) \mathbf{c}_i $$
+    where $T_i = e^{-\sum_{j=1}^{i-1} \sigma_j \delta_j}$ is the accumulated transmittance, $\delta_i$ is the distance between samples, and $\{\mathbf{c}_i, \sigma_i\}$ are the outputs of $N$ at sample $i$ [S1, S1, unofficial].
+
+**Parameters:**
+*   $n_s$: The number of uniformly sampled points along the ray for volume rendering [S1, S1, unofficial]. Value not given in the sources.
+*   $t_{near}, t_{far}$: The near and far clipping planes for ray sampling. Value not given in the sources.
+
+**Pitfalls:**
+*   **Global Latent Codes:** Using global latent codes (as in SRNs) summarizes image information and discards details, making it difficult to generalize to local changes like facial expressions and failing to recover high-frequency details [S1, S1, unofficial]. PVA avoids this by using local pixel-aligned features [S1, S1, unofficial].
+*   **3D Supervision:** PVA does not require explicit 3D supervision during training, relying solely on photometric re-rendering loss [S1, S1, unofficial]. Methods requiring 3D supervision may fail to generalize to unseen identities if not trained on a multi-identity corpus [S1, S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time depends on the number of sampled points $n_s$ and the cost of the radiance field network $N$ and encoder-decoder $N_{feat}$. Interpolation is $O(1)$ per sample.
+*   **Memory Complexity:** Memory usage is dominated by the feature maps $f^{(i)}$ for all conditioning views. This avoids the high memory cost of 3D voxel grids [S1, S1, unofficial].
+*   **Strengths:** Captures arbitrary topology (e.g., hair, expressions) and high-frequency texture details better than mesh-based methods [S1, S1, unofficial]. Generalizes to unseen identities and expressions [S1, S1, unofficial]. Does not require 3D supervision [S1, S1, unofficial].
+*   **Limitations:** Relies on the quality of the input images and the accuracy of the head pose estimation [S1, S1, unofficial]. Performance may degrade if the input images do not cover the necessary viewpoints for the target view [S1, S1, unofficial].
+*   **When to use:** Virtual telepresence applications, specifically for generating photo-realistic human heads from a small number of example views [S1, S1, unofficial].
+*   **When not to use:** When explicit 3D geometry is required for downstream tasks that cannot be derived from the volumetric representation, or when computational resources are extremely limited and real-time rendering is critical without optimization [S1, S1, unofficial].
+
+## Background
+PVA was introduced in the paper "PVA: Pixel-aligned Volumetric Avatars" [S1, S1, unofficial]. It builds on insights from NeRF [Parent] and PIFu/PIFuHD [S1, S1, unofficial], which use pixel-aligned features to retain high-frequency detail. Unlike PIFu/PIFuHD, PVA does not require explicit 3D supervision [S1, S1, unofficial]. It addresses the limitations of Scene Representation Networks (SRNs) [S1, S1, unofficial] and GRAF [S1, S1, unofficial] by using local pixel-aligned features to handle multiple identities and local deformations, rather than global latent codes or disentangled global shape/appearance codes [S1, S1, unofficial]. The method is used for virtual telepresence applications [S1, S1, unofficial].
+
+## Sources
+[S1] PVA: Pixel-aligned Volumetric Avatars, https://doi.org/10.48550/arxiv.2101.02697, fetched 2026-10-30 (unofficial)

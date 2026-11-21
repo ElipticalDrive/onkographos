@@ -1,0 +1,669 @@
+Firmware for Pinetime smartwatch written in C++ and based on FreeRTOS - Use Melissa E. O'Neill's pcg for rng and Lemire's unbiased bounded rand by Andersama · Pull Request #2385 · InfiniTimeOrg/InfiniTime
+
+Use Melissa E. O'Neill's pcg for rng and Lemire's unbiased bounded rand by Andersama · Pull Request #2385 · InfiniTimeOrg/InfiniTime · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Andersama
+commented
+Dec 8, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Mersenne Twister's state size is huge (kb's of state), instead we'll swap with a pcg. The pcg's state is 128 bits and has a equidistributed 2^64 period (plenty for a quick rng). To replicate std::distribution we use lemire's unbiased bounded random method.
+Additionally we seed using the address of the rng struct, in theory this is randomly allocated somewhere, but since this is a tiny device with not a lot of of address space, this likely only flips the lower bits. It still uses the motion accelerometers 3-axis data as before, but uses the three uint32_t results to create one uint64_t. The rng shuffles itself a bit further by replacing its state using the initial seeding.
+github-actions
+Bot
+commented
+Dec 8, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Build size and comparison to main:
+Section
+Size
+Difference
+text
+382160B
+-716B
+data
+944B
+0B
+bss
+22656B
+24B
+Run in InfiniEmu
+mark9064
+added
+the
+maintenance
+Background work
+label
+Dec 8, 2025
+Andersama
+force-pushed
+the
+smaller_fairer_dice_rng
+branch
+4 times, most recently
+from
+b801061 to
+09e2f75
+Compare
+December 8, 2025 23:50
+mark9064
+commented
+Dec 9, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+https://www.youtube.com/watch?v=ia8Q51ouA_s&t=78
+Seriously though, this looks great :) really good spot that the mersenne twister is way too big for this application (and that's probably the cause of a crash I've been seeing recently)
+I'm not too experienced with random number generation techniques so I need to read over them properly to review, but at a quick glance this looks very promising
+mark9064
+added this to the
+1.17.0 milestone
+Dec 9, 2025
+Andersama
+commented
+Dec 9, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+Yeah I'm personally not a fan of using MT ever given that there are prng functions like this floating around which are plenty good enough for purposes like these and tend to be faster as well. I'm suprised the size diff isn't larger.
+@mark9064 the alternative rng I would use is romu, but that is slightly larger and from memory it technically has a potential bad 0 state*. I've liked using pcg ever since I learned about it years ago, it's comparably fast to MT but doesn't have the huge state cost and setup time, so it's nice to be able to randomly create one on the fly for rng purposes.
+There's also a potentially similar issue with the Two game, rand() depending on the implementation may create a massive table.
+Andersama
+force-pushed
+the
+smaller_fairer_dice_rng
+branch
+2 times, most recently
+from
+3f0f369 to
+bc8f107
+Compare
+December 9, 2025 03:28
+Andersama
+commented
+Dec 9, 2025
+Copy link
+Copy Markdown
+Author
+Currently rewriting, after some thought I realized that I could create a "controller" type object inside SystemTask which would allow any screen or app to retrieve some prng like data. This way at system boot we can seed a global rng object, then following apps can seed their rngs from that master rng object. We can potentially make use of any form of system / sensor noise or even the included bluetooth rng for a really well seeded prng object at boot once and then leave it be.
+Since the cost of a reference is equivalent to a pointer and the overall prng size is not much larger, even if the global prng is not well seeded we can generate a better seeded prng object for only the cost of an additional 64 bits per screen / application.
+The benefit being no single app needs to write their own rng object, and the initialization cost is extremely low.
+Avamander
+commented
+Dec 9, 2025
+Copy link
+Copy Markdown
+Collaborator
+The nRF52 has RNG hardware, why not use that?
+Andersama
+commented
+Dec 9, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+@Avamander that's the bluetooth device right? I did a quick search and spotted that there's an RNG interrupt, so I assume there's some form of secure rng available. I would use it, if I knew how.
+But, if that wouldn't work for whatever reason, so long as there's some noisy data available we should be able to pack the rng with more than enough state that no one would ever notice.
+mark9064
+commented
+Dec 9, 2025
+Copy link
+Copy Markdown
+Member
+OK I've looked into it a bit. Firstly for cryptographically secure RNG we have ble_ll_rand(), so that base is covered. This RNG is slow though so we only want to use it where needed.
+Regarding general PRNG:
+While I think PCGs look great, I think the C++ standard LCG will be more than enough for the Dice app.
+So I think this can be resolved with swapping to std::minstd_rand.
+The main reason why I think this is better is the simplicity of this solution - we don't need to carry and maintain our own RNG implementation.
+However I'm not against including PCG, but I think if we choose to implement it we should implement the proper interface https://en.cppreference.com/w/cpp/named_req/RandomNumberEngine.html
+That way we can continue to use the standard library components around it.
+Regarding having a central RNG object that's shared, I think that could make sense. This would mean that apps avoid having to seed their own randomness and potentially minor memory savings if we ever reach a point where we have many RNGs.
+Andersama
+commented
+Dec 10, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+@mark9064 Melissa has an implementation that follows the standard pattern. I personally just don't see the need to bring in all the template mess since prng functions are fundamentally state machines where part of their state is hidden and the rest transformed. std::minstd_rand is really outdated from what I remember, if I remember correctly it sometimes is used as rand(), the small tweaks that the pcg makes to an lcg does work wonders in terms of how random the data is.
+However, that said, I'm pretty sure that the c++ library for pcg has smaller versions which would probably work just fine. That might be worthwhile since I don't imagine that the hardware is 64 bit, so that might be a plus.
+Well actually this will be an easy switch, since the constants for each size are in the c++ header here:
+https://github.com/imneme/pcg-cpp/blob/master/include/pcg_random.hpp
+So I'll take a minute to make that edit.
+Andersama
+commented
+Dec 10, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+@mark9064 I believe looking at ble_ll_rand that realistically we're grabbing random data using ble_ll_rand_data_get((uint8_t *)xsubi, sizeof(xsubi));? It seems like jrand48 is a transform to take the random data from 48 bits of random data to output 32. We could just use ble_ll_rand_data_get to fill the pcg fairly easily.
+It looks like in a way we could create a similar approach to ble_ll_rand where instead of 48 bits we instead grab however many to instantiate our own desired rng.
+On second look, I absolutely would not bother using minstd it's lcg function is literally just previous_state * 48271, that would be a horrible idea, it has a catastrophic failure should the state ever be 0.
+Update: struggling to get access to ble_ll_rand or ble_ll_rand_data_get, I'll figure it out tommorow....
+Avamander
+commented
+Dec 10, 2025
+Copy link
+Copy Markdown
+Collaborator
+This RNG is slow though so we only want to use it where needed.
+The relative slowness does not matter in these scenarios, especially for a dice app and it avoids the significant memory and storage cost of shipping an entire PRNG.
+Andersama
+commented
+Dec 10, 2025
+Copy link
+Copy Markdown
+Author
+@Avamander the cost of the pcg should only be 128 bits of memory to hold the state at most (depends on the size choice of the implementation) for any instance being used (or double that in my rough conceptual model where there were two at work, one for the screen, one to generate new seeds) and only a few bytes for the instructions for the two functions.
+Andersama
+commented
+Dec 11, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+@mark9064 I'm not sure why, but I thought when you brought up LCGs that minstd might be a slight improvement on one or some form of variation. I remembered the history that a lot of libraries would use minstd as rand, but I didn't remember that it's one of the first examples of an LCG with a good multiplier. LCGs have issues with how statistically "random" they behave. It's not unique to minstd, since it's literally just a fused multiply add operation what happens is they'll exhibit two predictable behaviors 1) Their outputs will always be odd or 2) Their outputs will toggle between even and odd and if they're missing an increment (which I'm suprised minstd doesn't) you'll have a looping 0 state. Now this wouldn't be so bad given a function to unbias the results (which is a must for dice rolling or some measure of "fairness"), but the reality is you'd be putting the load bearing part of the rng results on the unbiasing function and not the prng itself. I wouldn't be too sure of how "random" the results would actually be. However there's a dangerous potential here, which is that the LCG gets seeded to 0, and then the unbiasing function infinitely loops. (That's the horrible idea part, I didn't explain the other day).
+Andersama
+commented
+Dec 12, 2025
+Copy link
+Copy Markdown
+Author
+Poking around the bluetooth specification I tried to find out what jrand48's implementation is. It may be https://www.ibm.com/docs/en/zos/3.2.0?topic=functions-jrand48-pseudo-random-number-generator So similar issue with minstd except the state size is slightly larger.
+Andersama
+force-pushed
+the
+smaller_fairer_dice_rng
+branch
+2 times, most recently
+from
+2c13cd8 to
+7b4b528
+Compare
+December 17, 2025 02:37
+Andersama
+commented
+Dec 17, 2025
+Copy link
+Copy Markdown
+Author
+Thoroughly confused myself with undefined reference problems. I'm leaving as is, though feel free to change the state size, it should adjust as desired, though I'd recommend sticking with the 128 bit form.
+Andersama
+force-pushed
+the
+smaller_fairer_dice_rng
+branch
+from
+7b4b528 to
+efe9569
+Compare
+December 18, 2025 01:02
+mark9064
+commented
+Dec 18, 2025
+Copy link
+Copy Markdown
+Member
+OK so there's a few problems here
+There is currently no way to get a well seeded RNG
+Mersenne twister is too big
+Quality of rand() and other simple RNGs is questionable
+1: We should have a randomness controller that hands out a well seeded RNG. This should use the hardware RNG for seeding, no other RNG source is needed.
+2: We should replace it with another RNG. Of those available, either the LCG or PCG are suitable size wise
+3: We need to decide if the LCG available in the standard library is good enough. The critique of a zero seed is not particularly relevant in my opinion - we can reject zero seeds in the randomness controller. The real question is whether the quality is sufficient. I am quite convinced that the PCG is a better generator, however this would mean pulling in a new library to the project which is a lot of potential extra maintenance work. In short, for the applications we use RNG for in InfiniTime, we'd have to make a clear argument that an LCG like minstd_rand is not sufficient.
+I'd guess that minstd_rand is good enough for generating dice rolls or the speed of the paddle ball etc. and therefore we don't need to use a PCG. But if someone can show that minstd_rand does generate flawed output in the scenarios InfiniTime uses RNG in, then I think that's a convincing reason to take on an extra dependency
+Andersama
+force-pushed
+the
+smaller_fairer_dice_rng
+branch
+from
+efe9569 to
+7dab95f
+Compare
+December 18, 2025 05:47
+Andersama
+commented
+Dec 18, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+@mark9064 well I think just conceptually since a PCG is taking an LCG and adding only a few instructions to massively improve the "randomness". I suppose you could take any LCG from anywhere, including the standard library and then perform the xor shift with random rotation step and get a fair improvement.
+So far what I've done*, provided this thing checks out and provides an artifact to check, is use the bluetooth "secure" rng, which presumably is some form of hardware noise to initialize the seed...unfortunately I couldn't get this to play nice and let me do that from within or around the .cpp file because of undefined reference issues. I don't know what part of the cmakelists I forgot to edit or tweak that would be causing the problem.
+I'd agree on 1. Unfortunately all the neat tricks I've learned to get some randomness don't really work on hardware like this, address randomization isn't great, using time as a seed would otherwise be ok*, but I've noticed the watch by default boots without restoring the last known time...which means it resets to a fixed point (not great for rng purposes).
+Very much agree :) hence the PR
+Yeah the problem with rand is that without specifically finding what it is per platform...you have no idea, it could easily be MT19937 and we're doubling up for no apparent reason. I would suspect minstd, minstd was very common and I can only imagine that given how simple it is...it's ended up in a lot of places.
+I think we could have a fix for a decent seed strictly* based on time, if we made another PR which specifically saves and loads the last known time (I honestly would like this because I've had my watch die a couple times while I wasn't paying too much attention with the higher battery usage and all). Then we could use time at least as part of the seed.
+Another consideration for seeding (also worth a PR?) is lifetime statistics, EG: you and I probably haven't waved the watch around as much nor had it record the same number of heart beats etc...etc...basically turn the watch into an old arcade machine where the "RNG" is actually deterministic.
+The issue with the zero seed thing is more a critique on LCGs, you sort've need the addition term to escape the 0 state...and then with some poor choice of multipliers you can get really bad not so random looking behaviors. I don't know why minstd at least from what I saw of the standard doesn't have an addition term...maybe there's different "versions" of minstd. I don't know.
+Also...have not tested on real hardware I've no idea if the bluetooth rng thing works*, I'll test when the thing appears to have compiled here and I can grab the artifact.
+mark9064
+commented
+Dec 18, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Put another way: without a convincing demo of why LCGs (in the form of minstd_rand) are insufficient, I think we cannot justify carrying another implementation. I don't find the idea carrying a custom wrapper around the standard library appealing: the standard C++ random interface is well thought out and I want to keep it. To me it's either the standard LCG, or we pull in the C++ implementation of PCG as a submodule.
+Use Melissa E. O'Neill's pcg for rng and Lemire's unbiased bounded rand
+…
+e42049d
+```
+    Mersenne Twister's state size is huge (kb's of state), instead we'll swap with a pcg.
+    The pcg's state is n bits and has a equidistributed 2^(n/2) period (plenty for a quick rng).
+    To replicate std::distribution we use lemire's unbiased bounded random method.
+
+    Adjust the state size as desired between 32 and 128 bits.
+```
+Andersama
+force-pushed
+the
+smaller_fairer_dice_rng
+branch
+from
+7dab95f to
+e42049d
+Compare
+December 18, 2025 20:27
+Andersama
+commented
+Dec 18, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+Unfortunately I'd say I'm a bit biased, because the best explanation I've seen of why LCGs have an issue is from Melissa's work. Here's a point from her stanford video that visualizes some prngs which I think helps https://youtu.be/45Oet5qjlms?t=1313.
+The other option I initially suggested also has a paper with this sort of diagram as an example: https://arxiv.org/pdf/2002.11331
+The I guess answer is that LCGs have this sort of "stripy" repeating pattern, and maybe at a human level reading the output it wouldn't be so obvious, but it does have statistical impact. So maybe for the pong game and twos is doesn't matter because there's human input involved and the games should expand in state size, but if you wanted something that was a good dice roller, the pcg's definitely a plus, at which point if the pcg is included, then the function's available to use for any application...and you could use it everywhere a prng is needed.
+I guess the way I 'd argue it is, if you want a statistically good cheap prng, these are simple enough in implementation I wouldn't worry about including them however you want.
+mark9064
+commented
+Dec 20, 2025
+Copy link
+Copy Markdown
+Member
+From what I understand the performance is in the same ballpark as LCG. It's the maintenance burden of carrying a submodule that's best avoided. More code, more problems :)
+Andersama
+commented
+Dec 20, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+@mark9064 I'm not sure what you mean by submodule, you don't have to pull in a git submodule for this, Mellissa's pcg is literally this:
+```
+// *Really* minimal PCG32 code / (c) 2014 M.E. O'Neill / pcg-random.org
+// Licensed under Apache License 2.0 (NO WARRANTY, etc. see website)
+
+typedef struct { uint64_t state;  uint64_t inc; } pcg32_random_t;
+
+uint32_t pcg32_random_r(pcg32_random_t* rng)
+{
+    uint64_t oldstate = rng->state;
+    // Advance internal state
+    rng->state = oldstate * 6364136223846793005ULL + (rng->inc|1);
+    // Calculate output function (XSH RR), uses old state for max ILP
+    uint32_t xorshifted = ((oldstate >> 18u) ^ oldstate) >> 27u;
+    uint32_t rot = oldstate >> 59u;
+    return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
+}
+```
+which is dead simple, forgive my complicated mess trying to make sense of how to generalize what was already in her c++ headers.
+And then romu is any one of these:
+```
+// Romu Pseudorandom Number Generators
+//
+// Copyright 2020 Mark A. Overton
+// 
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// 
+//     http://www.apache.org/licenses/LICENSE-2.0
+// 
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// ------------------------------------------------------------------------------------------------
+//
+// Website: romu-random.org
+// Paper:   http://arxiv.org/abs/2002.11331
+//
+// Copy and paste the generator you want from those below.
+// To compile, you will need to #include <stdint.h> and use the ROTL definition below.
+
+#define ROTL(d,lrot) ((d<<(lrot)) | (d>>(8*sizeof(d)-(lrot))))
+
+
+//===== RomuQuad ==================================================================================
+//
+// More robust than anyone could need, but uses more registers than RomuTrio.
+// Est. capacity >= 2^90 bytes. Register pressure = 8 (high). State size = 256 bits.
+
+uint64_t wState, xState, yState, zState;  // set to nonzero seed
+
+uint64_t romuQuad_random () {
+   uint64_t wp = wState, xp = xState, yp = yState, zp = zState;
+   wState = 15241094284759029579u * zp; // a-mult
+   xState = zp + ROTL(wp,52);           // b-rotl, c-add
+   yState = yp - xp;                    // d-sub
+   zState = yp + wp;                    // e-add
+   zState = ROTL(zState,19);            // f-rotl
+   return xp;
+}
+
+
+//===== RomuTrio ==================================================================================
+//
+// Great for general purpose work, including huge jobs.
+// Est. capacity = 2^75 bytes. Register pressure = 6. State size = 192 bits.
+
+uint64_t xState, yState, zState;  // set to nonzero seed
+
+uint64_t romuTrio_random () {
+   uint64_t xp = xState, yp = yState, zp = zState;
+   xState = 15241094284759029579u * zp;
+   yState = yp - xp;  yState = ROTL(yState,12);
+   zState = zp - yp;  zState = ROTL(zState,44);
+   return xp;
+}
+
+
+//===== RomuDuo ==================================================================================
+//
+// Might be faster than RomuTrio due to using fewer registers, but might struggle with massive jobs.
+// Est. capacity = 2^61 bytes. Register pressure = 5. State size = 128 bits.
+
+uint64_t xState, yState;  // set to nonzero seed
+
+uint64_t romuDuo_random () {
+   uint64_t xp = xState;
+   xState = 15241094284759029579u * yState;
+   yState = ROTL(yState,36) + ROTL(yState,15) - xp;
+   return xp;
+}
+
+
+//===== RomuDuoJr ================================================================================
+//
+// The fastest generator using 64-bit arith., but not suited for huge jobs.
+// Est. capacity = 2^51 bytes. Register pressure = 4. State size = 128 bits.
+
+uint64_t xState, yState;  // set to nonzero seed
+
+uint64_t romuDuoJr_random () {
+   uint64_t xp = xState;
+   xState = 15241094284759029579u * yState;
+   yState = yState - xp;  yState = ROTL(yState,27);
+   return xp;
+}
+
+
+//===== RomuQuad32 ================================================================================
+//
+// 32-bit arithmetic: Good for general purpose use.
+// Est. capacity >= 2^62 bytes. Register pressure = 7. State size = 128 bits.
+
+uint32_t wState, xState, yState, zState;  // set to nonzero seed
+
+uint32_t romuQuad32 () {
+   uint32_t wp = wState, xp = xState, yp = yState, zp = zState;
+   wState = 3323815723u * zp;  // a-mult
+   xState = zp + ROTL(wp,26);  // b-rotl, c-add
+   yState = yp - xp;           // d-sub
+   zState = yp + wp;           // e-add
+   zState = ROTL(zState,9);    // f-rotl
+   return xp;
+}
+
+
+//===== RomuTrio32 ===============================================================================
+//
+// 32-bit arithmetic: Good for general purpose use, except for huge jobs.
+// Est. capacity >= 2^53 bytes. Register pressure = 5. State size = 96 bits.
+
+uint32_t xState, yState, zState;  // set to nonzero seed
+
+uint32_t romuTrio32_random () {
+   uint32_t xp = xState, yp = yState, zp = zState;
+   xState = 3323815723u * zp;
+   yState = yp - xp; yState = ROTL(yState,6);
+   zState = zp - yp; zState = ROTL(zState,22);
+   return xp;
+}
+
+
+//===== RomuMono32 ===============================================================================
+//
+// 32-bit arithmetic: Suitable only up to 2^26 output-values. Outputs 16-bit numbers.
+// Fixed period of (2^32)-47. Must be seeded using the romuMono32_init function.
+// Capacity = 2^27 bytes. Register pressure = 2. State size = 32 bits.
+
+uint32_t state;
+
+void romuMono32_init (uint32_t seed) {
+   state = (seed & 0x1fffffffu) + 1156979152u;  // Accepts 29 seed-bits.
+}
+
+uint16_t romuMono32_random () {
+   uint16_t result = state >> 16;
+   state *= 3611795771u;  state = ROTL(state,12);
+   return result;
+}
+```
+They're all incredibly small .c files or .h files depending where you decide to keep them.
+mark9064
+commented
+Dec 21, 2025
+Copy link
+Copy Markdown
+Member
+#2385 (comment)
+As explained before, I think that maintaining the C++ random interface is important. The most sensible way to do that would be to use the upstream implementation as the full C++ interface has already implemented there.
+Andersama
+commented
+Dec 22, 2025
+Copy link
+Copy Markdown
+Author
+I can make another edit using the git repo, I just want to make note I don't think it'll save quite as much as the ~800 bytes in program size.
+mark9064
+commented
+Dec 26, 2025
+Copy link
+Copy Markdown
+Member
+Code size should be OK, the linker strips all unused symbols. A small increase is not an issue :)
+Andersama
+commented
+Dec 26, 2025
+Copy link
+Copy Markdown
+Author
+@mark9064 I'll push, but from what I see of my build, it's oversized. It doesn't appear it'll fit on the pinetime using that appraoch.
+Use pcg-cpp git repo as submodule
+c083748
+mark9064
+commented
+Dec 27, 2025
+Copy link
+Copy Markdown
+Member
+Huh, how has this happened. All other implementations should be stripped...
+I'll try take a look, but might be a while honestly
+Andersama
+commented
+Dec 28, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+@mark9064 my guess, the c++ library's use of no inline / forceinline / inline? Might force the generation of a number of functions which wouldn't be used...and/or optimization depth issues.
+Problem is, these are macros stuck into the header, so you wouldn't be able to use it without modification. At which point...you could just use the simpler versions.
+Second guess*, putting implementations in the header confuses the compiler. I tried rewriting again and similar results. It's taken me moving just about everything I can into the .cpp file for it to compile down to size.
+Andersama
+force-pushed
+the
+smaller_fairer_dice_rng
+branch
+2 times, most recently
+from
+b58ab64 to
+0a4a15c
+Compare
+December 28, 2025 17:39
+Rewrite rng component using <random> as reference
+…
+1be0d2b
+```
+Incorporate interface for <random> engines and std::seed_seq into single struct.
+Use operator()() and operator()(uint32_t) to retrieve unbounded and bounded results.
+
+Melissa's PCG is unbiased, so <random> is not required in order to use the RNG struct as is.
+Use generate(It start, It end) to fill target range with data (as per std::seed_seq).
+Use seed functions with something like std::seed_seq with a generate function to fill the internal state of the PCG with random data.
+Or alternatively use the seed function with an integer to select a fairly random PCG stream.
+```
+Andersama
+force-pushed
+the
+smaller_fairer_dice_rng
+branch
+from
+0a4a15c to
+1be0d2b
+Compare
+December 28, 2025 17:41
+Andersama
+commented
+Dec 29, 2025
+Copy link
+Copy Markdown
+Author
+@mark9064 ok, not sure what the difference between this and the first commit, but now the build-simulator step fails? Probably because I moved the code into a "component". So this latest commit "works". I'll leave the history intact for testing.
+Andersama
+commented
+Feb 6, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+@mark9064 I've implemented the interface for <random> inside the prng component, so if you want to use the std library's approach you can...although as you saw in the earlier build, there's some strange sizing issues.
+BurninTurtles
+mentioned this pull request
+May 25, 2026
+#2385: Use Melissa E. O'Neill's pcg for rng and Lemire's unbiased bounded rand
+BurninTurtles/InfiniTimeBT#19
+Open
+mark9064
+mentioned this pull request
+Aug 9, 2026
+Switch dice RNG
+#2473
+Merged
+DavisNT
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Contributor
+@Andersama, @Avamander What do you think about a different approach - reseeding PRNG on every roll of the Dice app (in addition to replacing existing Mersenne Twister with any small footprint PRNG like std::minstd_rand)?
+See #2478 for details.
+Andersama
+commented
+Aug 19, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+@DavisNT well, from limited experience, seeding a prng tends to be more expensive than using it. But arguably if you're "properly" seeding the prng, you probably have a decent source of randomness, or you really should. You kind of end up in a catch 22 there, yes ultimately it'd be better than MT, this is one of the reasons I don't like MT at all. It's so expensive on memory, not exactly "fast" (in the context of a dice roller this doesn't matter). Your reseeding has to be a fairly good source of randomness...which you might as well just use, but it'd probably be better than MT (which is the crazy part). That's why I proposed these cheap prngs, once they're seeded, their statistical quality's solid, they're fast, tiny, and evenly distributed. Granted that's over a very long period, which would look pretty random and technically would be "fair", not that anyone would live to see that shake out.
+Forgive me for not re-reading the whole thread but from memory, the reason I wouldn't use the ble's cryptographic rng over and over is that its implementation is in fact slow because its using some rng hardware that very slowly accumulates random bits (for its own seeding). Now I don't know if there could be contention for that resource for bluetooth...so I wouldn't hammer on that interface too hard. If I remember correctly the ble implementation memorizes the fact it's been seeded from the cryptographic source and then uses another prng from there. So it could be fine.
+It sounds like they're looking at using a different prng that'll be included in a more recent version of GCC, which I think will be a decent choice. I wouldn't have waited this long and it looks like that potential build is larger than this, but hey...I'm not actively wearing this watch...although it is fun to play with.
+As for #2478, that's not an ideal way to use a prng, because what you've effectively done is directly tie the state of the output to a sensor. Reseeding every time basically means you're not using the "prng" aspect of the "prng". But as you put it, that's kind of more like rolling the dice...I would say...if you like the idea of influencing the output with a sensor. I'd say seed once, do an xor-shift or some other crazy hash function on the sensor readings, and then combine it with the previously seeded prng.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+maintenance
+Background work
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

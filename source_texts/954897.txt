@@ -1,0 +1,214 @@
+Severity: P1 | Confidence: HIGH for the symptom, and the symptom does not depend on the unresolved cause. Base 330a764fc14, RTX 3090 / Vulkan. Found while reproducing #930. With painterly/enabled = true, the Gaussian splats disappear ent...
+
+Painterly renders nothing at the shipped default composite/depth_test=true: strict depth contract skips the composite (QA pin depth_test=false masks it) · Issue #987 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Painterly renders nothing at the shipped default composite/depth_test=true: strict depth contract skips the composite (QA pin depth_test=false masks it) #987
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Painterly renders nothing at the shipped default composite/depth_test=true: strict depth contract skips the composite (QA pin depth_test=false masks it)#987
+Copy link
+Labels
+area:rendererRendering pipelineRendering pipelinebugSomething isn't workingSomething isn't workingpriority:P1High priorityHigh priorityprogram:prod-readyProduction-readiness program (audit 2026-07-07)Production-readiness program (audit 2026-07-07)user-facingDirectly affects external users, docs, or public repo surfaceDirectly affects external users, docs, or public repo surface
+Description
+klausi3D
+opened on Sep 6, 2026
+Issue body actions
+Severity: P1 | Confidence: HIGH for the symptom, and the symptom does not depend on the unresolved cause. Base 330a764fc14, RTX 3090 / Vulkan.
+Found while reproducing #930. With painterly/enabled = true, the Gaussian splats disappear entirely under the shipped default composite settings. The same scene, same binary, same frame budget renders normally with painterly off, and renders painterly fine once composite/depth_test is flipped to false.
+This is stated in three separate registers, deliberately.
+Observed
+Scene: a SubViewport (own_world_3d, 960x540) containing one GaussianSplatNode3D with real-scan content (Cabin in the forest.ply, ~130k splats, desktop import preset, quality/preset = 2), one Camera3D, no WorldEnvironment. Forward+, single view — inside the §10.1 alpha envelope. Coverage is measured as pixels differing from a splats-hidden reference capture.
+Settings are the shipped defaults: rendering/gaussian_splatting/composite/depth_test = true (core/gaussian_splat_manager.cpp:998) and the default strict scene-depth policy (GS_SCENE_COMPOSITE_DEPTH_POLICY_DEFAULT = STRICT, interfaces/output_compositor.cpp:31).
+composite/depth_test
+scene_depth_policy
+standard (painterly off)
+painterly on
+true (shipped default)
+strict (default)
+506,481 px
+0 px
+false (QA pin)
+strict
+506,481 px
+490,706 px
+true
+relaxed
+506,481 px
+490,706 px
+Single variable. The standard path is unaffected in all three rows, so this is painterly-specific, not a general depth failure.
+Accompanying log at the failing configuration:
+```
+WARNING: [OutputCompositor] Scene compositing skipped: missing required source_depth
+         while strict depth policy is active.
+ERROR:   [Composite] strict depth composite skipped: source or scene depth missing
+```
+Traced
+The composite is skipped at interfaces/output_compositor.cpp:1677, reached because missing_required_scene_depth (:1672) is true: scene_depth_test_requested && (!has_source_depth || !has_scene_depth). With depth_test = false, scene_depth_test_requested is false, the term collapses, and the composite proceeds — which is exactly why the QA pin hides this.
+has_source_depth is p_cached_depth.is_valid() (:1669). In painterly mode that depth is absent where the standard path has it.
+Not established
+Why p_cached_depth is absent in painterly mode. I have not traced which producer stops supplying it, nor whether _get_painterly_depth_texture() (renderer/gaussian_splat_renderer.cpp:2052) is implicated.
+Whether it is scene-specific. One scene, one machine, one vendor. Not reproduced on a second scene means not demonstrated, not absent.
+Whether "shipped defaults" generalises beyond this scene. The settings are unambiguously the shipped defaults; the scene is mine. If the correct claim turns out to be "this scene's defaults" rather than "shipped defaults", that distinction carries the whole severity and should be corrected here.
+Reconciliation with #851
+#851 reports painterly rendering normally, on a real lighting rig, with instrumentation confirmed at the GPU boundary. Both observations are true and together they are sharper than either alone: painterly works on a hand-built rig and not at defaults.
+#851's rig is tests/examples/godot/test_project/scenes/lighting_test.tscn, and that project pins gaussian_splatting/composite/depth_test=false at tests/examples/godot/test_project/project.godot:41 — row 2 of the table above. So #851's premise ("resolve-time lighting ships today on both painterly paths") survives, but its reachability at shipped defaults is now in question and needs re-testing at depth_test=true.
+This is the same masking shape as GPU-001/#921: the QA pin renders a configuration no user ships, so the blocking visual gate cannot see the defect (#903).
+Scope note
+This is not the painterly viewport composite being dead code — that is a separate defect filed alongside this one, and it is upstream of #930 rather than of this. This issue is about the standard composite refusing painterly's frame under the strict depth contract. Both were found in the same session; they are independent.
+Refs #851
+Activity
+klausi3D
+added
+bugSomething isn't workingSomething isn't working
+priority:P1High priorityHigh priority
+area:rendererRendering pipelineRendering pipeline
+user-facingDirectly affects external users, docs, or public repo surfaceDirectly affects external users, docs, or public repo surface
+program:prod-readyProduction-readiness program (audit 2026-07-07)Production-readiness program (audit 2026-07-07)
+on Sep 6, 2026
+klausi3D commented on Sep 8, 2026
+klausi3D
+on Sep 8, 2026
+OwnerAuthor
+More actions
+Root cause established. Classification: BROKEN — and this is a downstream symptom of #986, not an independent defect.
+Read-only investigation at 330a764fc14. The "Not established" item in the body above is now established.
+Why p_cached_depth is absent in painterly mode
+It was never absent — painterly never publishes it, because painterly was never meant to use it.
+p_cached_depth at the composite is p_input.raster_output.depth (render_pipeline_stages.cpp:2855).
+raster_output.depth is assigned in exactly two places: the cached-render reuse path (:2618) and render_baseline_stage, which passes it into render_tile_fallback (:2645).
+render_painterly_stage (:2730-2778) sets r_output.color, internal_size, raster_path and render_time_ms — and never assigns r_output.depth. It stays default-invalid.
+Same shape as #851: a field the painterly branch simply does not fill in.
+The log confirms which depth is missing. gs_log_scene_depth_contract_skip_once (output_compositor.cpp:79-97) prints source_depth alone only when the source is missing and the scene depth is present — and the observed message was exactly missing required source_depth. So scene_depth was fine.
+Why that is #986's problem and not a depth-wiring problem
+Painterly's own composite sources depth from a different accessor: get_painterly_depth_texture() (gaussian_splat_renderer.h:910 → _get_painterly_depth_texture, .cpp:2052), used at output_compositor.cpp:1650-1653, with p_cached_depth only as a fallback. That is coherent design — painterly's depth lives behind its own accessor precisely because raster_output.depth is not populated on that path.
+And that depth is valid at runtime. Proof: the [Painterly] Failed to load composite shader warning is emitted inside composite_painterly_output at painterly_renderer.cpp:1265, which is reached only after the if (depth_for_composite.is_valid()) gate at output_compositor.cpp:1654. The warning fired, so the gate passed.
+So painterly had a valid depth for its designed composite the whole time. It reaches the standard composite only because #986 makes composite_painterly_output fail, and the standard composite then demands a variable the painterly raster stage never fills.
+Also note painterly_composite.frag.glsl:71-79 does its own scene-depth interleave and never reads composite/depth_test. On the designed path the setting is simply irrelevant to painterly, and painterly would render at both values.
+Why not the other two classifications
+Not "never wired." Painterly's composite is fully implemented and depth-aware — correct premultiplied source-over blend state (painterly_renderer.cpp:1284-1292), scene-depth interleave, device-ownership validation. It is blocked by a shader-load bug, not by absent design.
+Not "constrain to depth_test=false." Painterly appears to work at depth_test=false only because that value collapses missing_required_scene_depth (output_compositor.cpp:1672) to false and lets the fallthrough proceed. At that setting painterly is being composited by the standard composite — which is also why its encoding happens to be correct (the GPU-001 follow-up: painterly composite bypasses the sRGB->linear source decode on the pre-upscale path — painterly splats blended as linear, then tonemapped #930 finding). "Painterly works at depth_test=false" is two bugs cancelling, not a supported configuration; constraining to it would enshrine the accident.
+Envelope implication
+Painterly's alpha-envelope status turns on #986 alone. Repair #986 and painterly composites through its own path, with valid depth, at both depth_test values. Leave #986 unrepaired and painterly is an incomplete feature regardless of any depth wiring.
+This issue should be blocked on / folded into #986 rather than fixed on its own. Fixing the depth wiring alone would make painterly render at depth_test=true via the standard composite — which is the wrong composite for painterly and, per #986, the configuration whose encoding is correct only by accident.
+Secondary gap, independent of the above, not blocking
+render_painterly_stage not publishing r_output.depth has a second consequence today: at render_pipeline_stages.cpp:1904-1907, an invalid r_raster_output.depth makes the pipeline call output_compositor->invalidate_cached_render() whenever scene-depth compositing is expected. So painterly also permanently defeats cached-render reuse in that configuration — a silent per-frame cost, not a correctness bug. Worth folding into whichever change repairs #986.
+No code changed and no branch opened for this investigation.
+Refs #986, #930, #851
+klausi3D
+added 2 commits that reference this issue on Sep 8, 2026
+docs/governance: add the disclosed-not-blocking table, and record pai…
+...
+9fc2cbf
+docs/governance: define the two-stage release acceptance bar (#360) (#…
+...
+2efc7b5
+klausi3D commented on Sep 16, 2026
+klausi3D
+on Sep 16, 2026
+OwnerAuthor
+More actions
+Addressed by #999 (head 21555bfb9fa, base 5dfeb44b5b4). The symptom reproduces exactly; the cause in the "Not established" section is now established, and it is not downstream of #986 — it is an independent defect that #986's fix happens to mask.
+Why p_cached_depth is absent in painterly mode
+render_painterly_or_baseline_stage (modules/gaussian_splatting/renderer/render_pipeline_stages.cpp:2773-2788 on base) never assigns r_output.depth. The baseline path gets it for free — render_tile_fallback publishes it through an out-parameter (:2645) — and the cached-reuse path copies it (:2618). The painterly branch simply has no such assignment, so raster_output.depth stays invalid on every painterly frame, reaches integrate_final_output as p_cached_depth (:2855), fails has_source_depth (interfaces/output_compositor.cpp:1680) and trips missing_required_scene_depth (:1683).
+_get_painterly_depth_texture() is not implicated — it returns a valid texture, which is exactly why the painterly composite itself (output_compositor.cpp:1661) can source depth from it while the strict contract cannot.
+Same omission also explains a second symptom nobody had connected: render_pipeline_stages.cpp:1904-1907 invalidates the render cache whenever require_scene_depth && !r_raster_output.depth.is_valid(), so painterly was re-rendering from scratch every single frame.
+Fixed at the cause, not by the composite
+#999 assigns r_output.depth = renderer->get_painterly_depth_texture() in the painterly stage. Painterly's depth is the same normalized-linear texture both composites expand as mix(z_near, z_far, d), so it is the correct source depth. That fix stands on its own: it also restores the strict-depth fallback on the legacy post-scene phase (forward mobile / multiview / reflection probes), where the painterly graphics composite deliberately does not run.
+Scene-specificity: your caution was right, and it cut the other way
+The table in this report is reproducible, but the "painterly on" rows measured the baseline fallback, not painterly: painterly/enabled = true without a PainterlyMaterial takes RenderFallbackReason::PAINTERLY_UNAVAILABLE, and there is no PainterlyMaterial anywhere under tests/. On base, painterly-on-without-material is bit-identical to painterly-off (max channel delta 0 over 518,400 px). Filed as #997.
+With a complete material the defect is still exactly as reported — and worse than the table suggests, because a third blocker inside the composite (see the #986 thread) meant that even with the strict-depth skip removed, painterly produced 0 px.
+Measurement
+Different scene from yours — real scan Cabin in the forest.ply, 31,208 splats, 960x540 SubViewport with own_world_3d, one Camera3D, no WorldEnvironment, Forward+ single view, RTX 3090 — and the rig's project.godot has no [gaussian_splatting] section at all, so composite/depth_test and the scene-depth policy are read at their shipped defaults. So this is a second scene confirming "shipped defaults", not "this scene's defaults".
+composite/depth_test
+scene
+painterly, before
+painterly, after
+true (shipped default)
+splats only
+0
+307,242
+true (shipped default)
++ opaque mesh
+0
+306,920
+false (explicit runtime pin)
+splats only
+307,242
+307,242
+false (explicit runtime pin)
++ opaque mesh
+308,304
+308,304
+Standard (painterly off) is unchanged in every row, and all twelve painterly-off captures are bit-identical before and after.
+For #851
+Its rig, tests/examples/godot/test_project/scenes/lighting_test.tscn, sets no PainterlyMaterial, so its painterly observations were made on the baseline path. Its reachability question is answered — painterly does now render at depth_test=true — but its lighting claim needs re-testing on a rig that actually runs painterly. That is #997.
+klausi3D
+added 2 commits that reference this issue on Sep 16, 2026
+gaussian_splatting: address review findings on the painterly composite (
+...
+ac8d1b1
+gaussian_splatting: make the painterly viewport composite reachable, …
+...
+b915afc
+klausi3D commented on Sep 17, 2026
+klausi3D
+on Sep 17, 2026
+OwnerAuthor
+More actions
+Closing: fixed by PR #999
+Fix: PR #999 — "gaussian_splatting: make the painterly viewport composite reachable, colour-correct and depth-correct (#986, #987)"
+Merge commit: b915afc51c5792257f2a8621607f78d3e5eab1d1 (merged 2026-09-17)
+Verified at: origin/master = b915afc51c5792257f2a8621607f78d3e5eab1d1
+Verification (issue-ledger audit — read at master, not taken from the PR title)
+This issue traced the 0-px result to output_compositor.cpp, where missing_required_scene_depth = scene_depth_test_requested && (!has_source_depth || !has_scene_depth) skipped the composite, with has_source_depth = p_cached_depth.is_valid() false in painterly mode. The issue explicitly left why unestablished. That cause is now identified and fixed at its source rather than worked around at the gate.
+The missing producer was render_painterly_stage never assigning raster_output.depth. At master:
+modules/gaussian_splatting/renderer/render_pipeline_stages.cpp:2782 —
+r_output.depth = renderer->get_painterly_depth_texture();
+in RasterStage::render_painterly_stage(), immediately before
+r_output.raster_path = "painterly". The comment at :2773-2781 states the
+mechanism: the baseline path published its depth through
+render_tile_fallback()'s out-parameter and the painterly path never did, so
+raster_output.depth stayed invalid on every painterly frame.
+The getter it uses is real and public:
+modules/gaussian_splatting/renderer/gaussian_splat_renderer.h:909
+(get_painterly_depth_texture() → _get_painterly_depth_texture(), defined at
+gaussian_splat_renderer.cpp:2064) — the function this issue named at
+gaussian_splat_renderer.cpp:2052 as a suspect. It was indeed implicated: it
+existed and was simply never wired to the stage output.
+The depth gate itself was left intact. modules/gaussian_splatting/interfaces/output_compositor.cpp:1694-1697 still computes has_source_depth / has_scene_depth / missing_required_scene_depth exactly as this issue described, and still skips at :1702-1703 under the strict policy. Nothing was relaxed to make painterly pass; the missing input was supplied. That is the right shape — had the gate been loosened instead, the strict contract would have stopped protecting the standard path too.
+The composite also now honours composite/depth_test instead of depth-testing unconditionally — PainterlyCompositePushConstant::depth_test_enabled, modules/gaussian_splatting/renderer/render_types/render_pipeline_io_types.h:296-299, which explicitly notes that the pass "used to depth-test unconditionally, which nobody noticed while it could not run at all".
+Dependency on #986 resolved as predicted. docs/governance/release-acceptance-bar.md:316-319 recorded this issue as "downstream of #986, not independent … Fix #986 and this resolves; do not fix it separately." Both were fixed in the one PR, which is what the bar asked for. #986 is closed alongside this one.
+A second, silent consequence fixed by the same line: an invalid raster_output.depth made the pipeline invalidate its cached render every frame, so painterly permanently defeated cached-render reuse (noted at release-acceptance-bar.md:340-343). With depth now valid, painterly frames can reuse the cache — which in turn required _on_painterly_material_changed() to drop the cached render so a material edit still reaches the screen (modules/gaussian_splatting/renderer/gaussian_splat_renderer.cpp:2035-2052, invalidation at :2050).
+Scope note
+The original report's own caveats — one scene, one machine, one vendor — applied to the symptom. The closure here rests on the mechanism: the named field was unassigned in the painterly branch and is now assigned from the correct source. That is not scene-specific.
+Closing as FIXED.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+klausi3D
+closed this as completedon Sep 17, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:rendererRendering pipelineRendering pipelinebugSomething isn't workingSomething isn't workingpriority:P1High priorityHigh priorityprogram:prod-readyProduction-readiness program (audit 2026-07-07)Production-readiness program (audit 2026-07-07)user-facingDirectly affects external users, docs, or public repo surfaceDirectly affects external users, docs, or public repo surface
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

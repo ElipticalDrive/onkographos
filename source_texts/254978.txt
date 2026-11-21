@@ -1,0 +1,162 @@
+Train, inspect, edit, automate, and export 3D Gaussian Splatting scenes from a single native application. - Single-source Slang splat rasterizer for the viewer (opt-in) by MrNeRF · Pull Request #2801 · MrNeRF/LichtFeld-Studio
+
+Single-source Slang splat rasterizer for the viewer (opt-in) by MrNeRF · Pull Request #2801 · MrNeRF/LichtFeld-Studio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+MrNeRF
+commented
+Oct 5, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Step 3 of moving the viewer to one rasterizer: the native Metal splat rasterizer, ported to Slang and run through GpuKernelModule on Metal and Vulkan. For now it is opt-in with LFS_TENSOR_RASTER=1. It covers 3DGS and 3DGUT views with selection, preview, crop boxes, ellipsoids, emphasis, rings, center markers, depth view and transparency. It runs on the backend that holds the splats: with the Vulkan tensor backend, the same programs run as SPIR-V through MoltenVK. LOD/RAD, the portal profile and points stay native until they are ported.
+What is in it
+src/rendering/rasterizer/tensor/: projection (SplatProjector), tile binning and radix sort (SplatTileBinner), blend, depth-batch compose and present (SplatRasterizer). Every pass is a tensor program, and indirect dispatch sizes the later passes, so the host never waits.
+Native speedups, ported: source-sorted binning (visible splats sorted by depth before they are duplicated per tile), and depth batches (long tiles blended in parallel chunks, then composed).
+The opaque blends are compiled with their feature flags fixed and with relaxed math, as native does. New RELAXED_MATH option on lfs_add_gpu_program (Entry::relaxed_math, used only by Metal).
+Scratch is carved from arenas. Separate buffers under 64 MiB round up to a power of two, which wasted about 160 MB at 1080p. Replaced scratch leaves the tensor cache one frame later.
+MetalViewportRenderer: the tensor path renders through the tensor timeline. One native blit publishes the outputs.
+App parity against native (garden, window captures)
+Plain view, selection highlight, crop box, center markers, depth view, 3DGUT, and the Vulkan tensor backend: at most 1/255 on almost every pixel. A few isolated pixels differ in depth view (24/255) and 3DGUT (12/255).
+Rings: isolated speckles on ring edges (about 1% of pixels), from half-precision threshold flips in the macro footprint.
+Results (M5 Max, garden 1M splats, 1920x1080)
+Slang
+Native
+benchmark frame latency, sh0 / q16
+4.60 / 5.05 ms
+4.14 / 4.45 ms
+replay of one dumped frame (throughput)
+3.77 ms
+3.1 ms
+dense synthetic frame (8.9M instances)
+2.75 ms
+3.7 ms
+app idle / orbit peak footprint
+1388 / 1749 MB
+1388 / 1735 MB
+Image parity with native: at most 0.25–0.54/255. PSNR against the Vulkan reference: 72.9 dB, same as native.
+Tests
+tensor_rasterizer_contracts (Metal and Vulkan):
+binning against a stable CPU sort, with and without source sorting
+overflow
+every blend variant loads and presents
+source-sorted frames and depth batches reproduce the serial image (verified to fail when the compose pass is removed)
+tensor_rasterizer_contracts also runs the overlay blend with a selection mask, and rejects overlay flags passed without inputs.
+tensor_raster_parity (Metal): projection against SplatPreprocessor, and full frames against TileRasterizer, first and steady state. LFS_REPLAY=<dump> replays a real viewer frame through both rasterizers. It reports GPU time per stage (stage markers with GpuElapsed), and native vs Slang blend kernels on identical input.
+Builds checked on this Mac: pure Metal, pure Vulkan, both. Backend neutrality: 0 violations. Error-debt gate: no new violations.
+Not yet
+LOD/RAD, portal and points coverage; the remaining blend codegen gap (chunks 1.11 vs 0.85 ms, prefix 0.69 vs 0.59 ms on identical input); Vulkan viewer integration, switching the default, then deleting the native MSL rasterizer.
+CUDA: lfs_add_gpu_program already emits PTX, but CUDA programs reject indirect dispatch, and this directory builds only for Metal and Vulkan.
+MrNeRF
+added 13 commits
+October 5, 2026 09:15
+WIP: Slang tile binning and radix sort for the single-source rasterizer
+0f23c24
+WIP: Slang projection pass and native parity contract
+0cdd229
+WIP: projection parity tolerances
+9361459
+Blend, compose and present splats as tensor programs
+64441a5
+Sort visible sources by depth before binning when instances dominate
+fc6e432
+Render the plain splat view with tensor programs behind LFS_TENSOR_RA…
+…
+59ddea7
+```
+…STER
+
+Depth batches, compile-time specialized opaque blends with relaxed math,
+a per-program RELAXED_MATH option, and a frame replay in the parity harness.
+```
+Carve tensor raster scratch from arenas; the rasterizer owns its disp…
+…
+d40c332
+```
+…lay outputs
+
+Power-of-two rounding of separate buffers cost about 160 MB at a 1080p
+viewport. Contract tests now clear outputs between frames and cover depth
+batches.
+```
+Release replaced tensor raster scratch from the cache a frame later
+2a34a60
+Read the tensor raster switch through the environment accessor
+3b7654b
+Stage markers for GPU timestamps; replay compares native and Slang bl…
+…
+36a0250
+```
+…end kernels
+```
+Selection, crop and emphasis overlays on the tensor raster path
+…
+19d479e
+```
+The projector uploads the overlay parameters and node mask and writes the
+per-splat overlay flags; the blend binds them with the selection and
+preview masks and the selection colors. Frames fall back to native when
+model or mask tensors are not resident on Metal.
+```
+Run the tensor rasterizer on the splats' backend; stage its status fo…
+…
+ba60b0d
+```
+…r completion
+
+Vulkan-backed tensors have no CPU mapping, so the completion handler now
+reads a 24-byte copy of the RasterStatus. Removes the Metal-only guard,
+which branched on the backend in viewer code.
+```
+3DGUT on the tensor raster path
+…
+783b075
+```
+GUT geometry is allocated when the view switches to 3DGUT, and dense GUT
+frames narrow to single-subgroup blending as the native rasterizer does.
+```
+MrNeRF
+marked this pull request as ready for review
+October 5, 2026 07:53
+Hide details
+View details
+MrNeRF
+merged commit 64d3871
+into
+dev
+Oct 5, 2026
+6 of 8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Oct 5, 2026
+Tensor rasterizer: LOD cuts, portal and Spark; ring rounding and viewport target fixes
+#2802
+Merged
+Render splats only with tensor programs; delete the native Metal rasterizer
+#2812
+Merged
+MrNeRF
+deleted the
+feat/slang-splat-raster
+branch
+October 5, 2026 19:30
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,268 @@
+--- v006.md
++++ v007.md
+@@ -4,203 +4,96 @@
+ 
+ ## Overview
+-Voxel Splat Rendering is an object-order volume rendering technique that projects individual voxels from 3D space onto the 2D image plane as geometric primitives (splats), which are then rasterized and accumulated using alpha blending [S3, unofficial][S4, unofficial]. It solves the problem of real-time interactive visualization of volumetric data by leveraging hardware-accelerated rasterization pipelines, allowing users to interactively select voxel subsets and tune rendering parameters like alpha and gamma [S2, unofficial]. Unlike ray-casting methods that compute contributions per pixel, splatting computes contributions per voxel, distributing energy across multiple pixels via a footprint function to mitigate aliasing and holes [S3, unofficial].
++Voxel Splat Rendering is an object-order volume rendering technique where each voxel is transformed into screen space and projected as a 2D footprint (splat) that contributes to the final image via alpha blending [S3, unofficial][S4, unofficial]. Unlike ray casting, which traverses rays per pixel, splatting traverses voxels per object, distributing each voxel's energy across multiple pixels to mitigate aliasing and holes caused by discrete sampling [S3, unofficial][S4, unofficial]. It sets itself apart from sibling methods like Circle Splat Rendering by typically utilizing square or axis-aligned bounding box projections for efficient rasterization, and from Tetrahedral Splatting by operating on grid-aligned volumetric primitives rather than unstructured tetrahedra [S2, unofficial][S3, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A 3D volumetric dataset $V$ where each voxel $k$ has position $\mathbf{p}_k$, density/extinction coefficient $\rho_k$ (or color/intensity), and optionally a surface normal $\mathbf{n}_k$ [G]. A camera model defined by the Model-View-Projection (MVP) matrix [G].
+-*   **Output:** A 2D image buffer containing the accumulated color and opacity values [G].
++**Inputs:** 3D volume dataset (voxel positions, values, normals), camera parameters (view and projection matrices), rendering parameters (point size, alpha, gamma).
++**Outputs:** 2D color and opacity image buffer.
+ 
+ **Data Structures:**
+-*   **Voxel List:** An array of structures containing:
+-    *   `position`: 3D coordinates $(x, y, z)$ [G].
+-    *   `density`: Scalar value $\rho$ [G].
+-    *   `color`: RGB or RGBA value [G].
+-    *   `normal`: 3D unit vector $\mathbf{n}$ (optional, used for shading/weighting) [S2, unofficial][S1].
+-*   **Image Buffer:** 2D array of color and opacity values $(C_x, C_y, \alpha_x, \alpha_y)$ [G].
++*   **Voxel:** Contains position $(x,y,z)$, value (color/density), and optionally a normal vector $\mathbf{n}$. Normals may be quantized to one of 240 pre-defined directions stored in 1 byte [S2, unofficial].
++*   **Footprint Table:** A 2D lookup table storing the analytically integrated kernel function along a traversing ray. Entries correspond to screen-space offsets from the voxel center [S3, unofficial].
++*   **Image Buffer:** Accumulates color and opacity via alpha blending.
+ 
+ **Steps:**
+-
+-1.  **Traversal and Selection:**
+-    Traverse the volume dataset. Optionally, filter voxels based on user-defined criteria (e.g., value selection via slice clicking, bounding box constraints) to create a subset of active voxels for rendering [S2, unofficial].
+-
+-2.  **Projection:**
+-    For each active voxel $k$, transform its position $\mathbf{p}_k$ from volume space to screen space using the MVP matrix [S3, unofficial][S4, unofficial]. Determine the 2D screen coordinates $(x_k, y_k)$ of the voxel center [S3, unofficial].
+-
+-3.  **Footprint Calculation:**
+-    Determine the area covered by the splat (footprint) on the screen [S3, unofficial][S4, unofficial]. For parallel projection, the footprint is constant for all voxels [S4, unofficial]. For perspective projection, the footprint may vary based on depth [G]. The contribution of a voxel to a screen point $(x,y)$ is determined by the footprint function $F(x,y)$, which is the analytically integrated kernel function along a traversing ray [S3, unofficial]:
+-    $$ F(x,y) = \int h(x-x_k, y-y_k, z) \, dz $$
+-    where $h$ is a reconstruction kernel, commonly Gaussian [S3, unofficial]. The weight applied to the voxel's contribution at screen location $(x,y)$ is:
+-    $$ w(x,y) = F(x-x_k, y-y_k) $$
+-    To counter holes produced by discrete processing, energy is distributed across multiple pixels using a footprint table [S3, unofficial].
+-
+-4.  **Weighting (Optional):**
+-    If normals are available, compute a weighting factor to modulate the splat's intensity based on view and surface orientation [S1]. For each camera $i$ (or view direction):
+-    *   Calculate $\text{dotV} = \mathbf{V}_{\text{toEye}} \cdot \mathbf{V}_{\text{toCamera}[i]}$, where $\mathbf{V}_{\text{toEye}}$ is the unit vector from the voxel center to the eye point, and $\mathbf{V}_{\text{toCamera}[i]}$ is the unit vector from the voxel center to the camera position [S1].
+-    *   Calculate $\text{dotN} = \mathbf{n} \cdot \mathbf{V}_{\text{toCamera}[i]}$, where $\mathbf{n}$ is the unit normal to the surface at the voxel center [S1].
+-    *   Compute view-dependent weight: $w_V = \max(0, \text{dotV})^4$ [S1].
+-    *   Compute normal-dependent weight: $w_N = \max(0, \text{dotN})^4$ [S1].
+-    *   Compute combined weight: $w_{\text{combined}} = w_V \cdot w_N$ [S1].
+-    *   Normalize weights by dividing by the sum of all weights [S1].
+-
+-5.  **Rasterization (Splatting):**
+-    Render the voxel as a primitive (e.g., a square or circular quad) centered at $(x_k, y_k)$ with a size corresponding to the footprint [S2, unofficial]. The primitive is rasterized into the image buffer [S3, unofficial]. The contribution $P(x,y)$ written to the pixel is modulated by the voxel density and the footprint weight:
+-    $$ P(x,y) = w(x,y) \cdot \rho_k $$
+-    If alpha blending is disabled, the splat may be rendered as a point or square to provide a surface-oriented view, potentially using normals for shading [S2, unofficial].
+-
+-6.  **Compositing:**
+-    Accumulate the splatted contributions into the image buffer [S4, unofficial]. This is typically done using alpha blending in front-to-back or back-to-front order to handle transparency correctly [S4, unofficial]. The standard alpha blending equation for a new fragment with color $C_f$ and opacity $\alpha_f$ over an existing buffer color $C_b$ and opacity $\alpha_b$ is:
+-    $$ C_{out} = C_f \alpha_f + C_b \alpha_b (1 - \alpha_f) $$
+-    $$ \alpha_{out} = \alpha_f + \alpha_b (1 - \alpha_f) $$
+-    Gamma correction may be applied to reduce the contribution of points from tissues with differing color value densities [S2, unofficial].
++1.  **Traversal:** Traverse the 3D dataset, typically front-to-back relative to the camera [S5, unofficial][S4, unofficial].
++2.  **Culling (Optional):** Cull voxels whose surface normals point away from the observer to reduce processing load [S3, unofficial].
++3.  **Transformation:** Transform each voxel's center from object space to screen space using the Model-View-Projection (MVP) matrix [S3, unofficial][S4, unofficial].
++4.  **Bounding Box Calculation:** Compute the axis-aligned bounding rectangle of the projected voxel in screen space [S1].
++5.  **Weighting (Optional):** Calculate view-dependent and normal-dependent weights to modulate contribution, reducing artifacts in transitions between textures [S1]:
++    $$ \text{weight}_V = \begin{cases} \text{dot}(\mathbf{V}_{\text{toEye}}, \mathbf{V}_{\text{toCamera}[i]})^4 & \text{if } \text{dot} > 0 \\ 0 & \text{otherwise} \end{cases} $$
++    $$ \text{weight}_N = \begin{cases} \text{dot}(\mathbf{n}, \mathbf{V}_{\text{toCamera}[i]})^4 & \text{if } \text{dot} > 0 \\ 0 & \text{otherwise} \end{cases} $$
++    $$ w[i] = \text{weight}_V \times \text{weight}_N $$
++    Normalize weights by dividing by the sum of all weights [S1].
++6.  **Splatting (Rasterization):** Render the projected voxel as a quad (pair of triangles) covering the bounding rectangle. Use the Footprint Table to determine the contribution of each pixel within the rectangle. The footprint spreads the voxel's energy across multiple pixels, countering holes produced by discrete processing [S4, unofficial].
++7.  **Compositing:** Alpha blend the splatted contribution into the image buffer. This can be done front-to-back or back-to-front [S4, unofficial].
++    *   *Surface-oriented view:* Disable alpha blending; use normals to shade points [S2, unofficial].
++    *   *Volume-oriented view:* Enable alpha blending and gamma correction to reduce contributions from tissues with differing densities [S2, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+-import math
+-
+-def voxel_splat_rendering(voxels, mvp_matrix, image_width, image_height, camera_eye_pos):
+-    """
+-    Renders a volume using voxel splatting.
++def voxel_splat_rendering(volume, camera, image_buffer):
++    # Initialize image buffer with zero color and zero opacity
++    image_buffer.clear()
+     
+-    Args:
+-        voxels: List of voxel objects with attributes:
+-            - position: (x, y, z)
+-            - density: float
+-            - color: (r, g, b)
+-            - normal: (nx, ny, nz) [optional]
+-        mvp_matrix: 4x4 Model-View-Projection matrix
+-        image_width: int
+-        image_height: int
+-        camera_eye_pos: (x, y, z) camera position
++    # Traverse voxels front-to-back
++    for voxel in volume.front_to_back_traversal():
++        # Transform voxel center to screen space
++        screen_pos = camera.mvp_matrix * voxel.position
+         
+-    Returns:
+-        image_buffer: 2D list of shape (image_height, image_width) with RGBA tuples
+-    """
+-    # Initialize image buffer with zeros (color and alpha)
+-    image_buffer = [[(0.0, 0.0, 0.0, 0.0) for _ in range(image_width)] for _ in range(image_height)]
+-    
+-    for voxel in voxels:
+-        # 1. Project voxel center to screen space
+-        pos_hom = (voxel.position[0], voxel.position[1], voxel.position[2], 1.0)
+-        clip_coords = multiply_matrix_vector(mvp_matrix, pos_hom)
++        # Cull if normal points away (optional optimization)
++        if voxel.has_normal:
++            view_dir = normalize(camera.eye_position - voxel.position)
++            if dot(voxel.normal, view_dir) < 0:
++                continue
++                
++        # Calculate bounding box in screen space
++        bbox = get_axis_aligned_bounding_box(screen_pos, voxel.size)
+         
+-        if clip_coords[3] == 0.0:
+-            continue
++        # Determine footprint weights for pixels in bbox
++        # Using a precomputed footprint table F(x,y)
++        for pixel in bbox.pixels:
++            offset = pixel.position - screen_pos
++            footprint_weight = footprint_table.lookup(offset)
+             
+-        ndc_coords = (clip_coords[0] / clip_coords[3], 
+-                      clip_coords[1] / clip_coords[3], 
+-                      clip_coords[2] / clip_coords[3])
+-        
+-        # Convert NDC [-1, 1] to screen coordinates [0, width/height]
+-        sx = (ndc_coords[0] + 1.0) * 0.5 * image_width
+-        sy = (1.0 - ndc_coords[1]) * 0.5 * image_height
+-        
+-        # 2. Determine footprint size
+-        # Footprint radius calculation not given in sources; typically constant for parallel projection or scales with depth for perspective [G].
+-        footprint_radius = 1.0 
+-        
+-        # 3. Calculate weight if normals are available
+-        weight = 1.0
+-        if voxel.normal is not None:
+-            v_to_eye = normalize(subtract(camera_eye_pos, voxel.position))
+-            v_to_cam = v_to_eye # For single view, eye and camera vectors are identical
+-            dot_v = dot(v_to_eye, v_to_cam)
+-            dot_n = dot(voxel.normal, v_to_cam)
++            # Modulate by voxel value and optional view/normal weights
++            contribution = voxel.value * footprint_weight
+             
+-            w_v = max(0.0, dot_v) ** 4
+-            w_n = max(0.0, dot_n) ** 4
+-            weight = w_v * w_n
+-            
+-        # 4. Rasterize the splat
+-        min_x = max(0, int(sx - footprint_radius))
+-        max_x = min(image_width, int(sx + footprint_radius))
+-        min_y = max(0, int(sy - footprint_radius))
+-        max_y = min(image_height, int(sy + footprint_radius))
+-        
+-        for y in range(min_y, max_y):
+-            for x in range(min_x, max_x):
+-                dx = x - sx
+-                dy = y - sy
+-                dist_sq = dx*dx + dy*dy
+-                
+-                # Evaluate footprint function (Gaussian kernel) [G]
+-                sigma = footprint_radius / 2.0
+-                footprint_val = math.exp(-dist_sq / (2.0 * sigma * sigma)) if sigma > 0 else 0.0
+-                
+-                # Modulate by voxel density and weight
+-                contribution_color = (voxel.color[0] * footprint_val * weight * voxel.density,
+-                                      voxel.color[1] * footprint_val * weight * voxel.density,
+-                                      voxel.color[2] * footprint_val * weight * voxel.density)
+-                contribution_alpha = footprint_val * weight * voxel.density
+-                
+-                # 5. Composite into buffer
+-                buf_color = image_buffer[y][x][:3]
+-                buf_alpha = image_buffer[y][x][3]
+-                
+-                new_alpha = contribution_alpha + buf_alpha * (1.0 - contribution_alpha)
+-                if new_alpha > 0.0:
+-                    new_color = (contribution_color[0] * contribution_alpha + buf_color[0] * buf_alpha * (1.0 - contribution_alpha)) / new_alpha, \
+-                                (contribution_color[1] * contribution_alpha + buf_color[1] * buf_alpha * (1.0 - contribution_alpha)) / new_alpha, \
+-                                (contribution_color[2] * contribution_alpha + buf_color[2] * buf_alpha * (1.0 - contribution_alpha)) / new_alpha
+-                else:
+-                    new_color = buf_color
+-                    
+-                image_buffer[y][x] = (new_color[0], new_color[1], new_color[2], new_alpha)
+-                
+-    return image_buffer
+-
+-def multiply_matrix_vector(matrix, vector):
+-    # Standard 4x4 matrix-vector multiplication
+-    return (
+-        matrix[0][0]*vector[0] + matrix[0][1]*vector[1] + matrix[0][2]*vector[2] + matrix[0][3]*vector[3],
+-        matrix[1][0]*vector[0] + matrix[1][1]*vector[1] + matrix[1][2]*vector[2] + matrix[1][3]*vector[3],
+-        matrix[2][0]*vector[0] + matrix[2][1]*vector[1] + matrix[2][2]*vector[2] + matrix[2][3]*vector[3],
+-        matrix[3][0]*vector[0] + matrix[3][1]*vector[1] + matrix[3][2]*vector[2] + matrix[3][3]*vector[3]
+-    )
+-
+-def subtract(v1, v2):
+-    return (v1[0]-v2[0], v1[1]-v2[1], v1[2]-v2[2])
+-
+-def normalize(v):
+-    length = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+-    if length == 0: return (0,0,0)
+-    return (v[0]/length, v[1]/length, v[2]/length)
+-
+-def dot(v1, v2):
+-    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
++            # Alpha blend into image buffer
++            image_buffer.alpha_blend(pixel.position, contribution)
+ ```
+ 
+ **Parameters:**
+-*   **Point-size / Footprint Radius:** Determines the spread of the splat [S2, unofficial].
+-*   **Alpha-value:** Controls the opacity of individual voxels [S2, unofficial].
+-*   **Gamma-value:** Applied to reduce contribution of points from tissues with differing densities [S2, unofficial].
+-*   **Power Exponent:** Used in weighting calculations (default 4) [S1].
++*   **Point-size:** Diameter of the splat, can be fixed or distance-dependent [S2, unofficial].
++*   **Alpha-value:** Controls opacity blending [S2, unofficial].
++*   **Gamma-value:** Adjusts contrast for tissues with differing color value densities [S2, unofficial].
++*   **Power exponent:** Used in weighting calculations (typically 4) to reduce transition artifacts [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Holes:** Discrete processing can produce holes on the periphery or during extreme perspective projection. This is countered by distributing energy across multiple pixels via a footprint table [S3, unofficial].
+-*   **Aliasing:** Minor aliasing artifacts similar to non-anti-aliased triangle models may occur. GPU rasterization is not optimized for single-pixel quads, but performance is acceptable [S1].
+-*   **Close-range Views:** At close range, voxel splats may appear as rectangular blocks covering many pixels, leading to pixelation artifacts induced by the finite resolution of RGB images [S1].
+-*   **Brightness Variations:** Summing voxel kernels within volume slices most parallel to the image plane is prone to severe brightness variations in animated viewing [S3, unofficial].
++*   **Holes:** Discrete processing produces holes on the periphery or during extreme perspective projection. Mitigated by distributing energy across multiple pixels via the footprint table [S4, unofficial].
++*   **Blurring:** Tends to blur object edges and reduce image contrast [S3, unofficial].
++*   **Aliasing:** Minor aliasing artifacts similar to non-anti-aliased triangle models; close-range views show rectangular block artifacts and pixelation from finite RGB image resolution [S1].
++*   **Performance:** Requires extensive filtering and is time-consuming for large datasets if not optimized [S3, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Image-Space Sheet-Buffered Splatting Pipeline](8961-image-space-sheet-buffered-splatting-pipeline.md)
+-A GPU-based variant that processes voxels in slabs parallel to the image plane, performing bucket construction, transformation, and depth sorting entirely on the GPU to avoid CPU-GPU memory transfer bottlenecks. Unlike CPU-based buckets containing all intersecting voxels, GPU buckets contain depth-sorted voxels whose centers fall inside a specific slab, allowing each voxel to belong to exactly one bucket while still being splatted for all intersecting slabs. Accelerates rendering by 2 to 2.5 times compared to CPU-based implementations.
++A GPU-accelerated variant that processes voxels in slabs parallel to the image plane, performing bucket construction and depth sorting on the GPU to avoid CPU-GPU bottlenecks, offering 2-2.5x speedup over CPU-based bucketing.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** $O(W \cdot H)$ for the image buffer, plus $O(N)$ for the voxel data [G].
+-*   **Performance:** Enables real-time interactivity due to hardware-accelerated rasterization [S1][S2, unofficial][S3, unofficial]. Performance is acceptable even for single-pixel quads, though not optimal [S1].
+-*   **Strengths:** Simple and efficient method for displaying contours and volume-oriented views. Allows interactive selection of voxelsets and fine-tuning of parameters [S2, unofficial].
+-*   **Limitations:** Discrete processing can cause holes and aliasing. Close-range views suffer from pixelation and block artifacts [S1][S3, unofficial]. Tends to blur the edges of objects and reduce image contrast [S3, unofficial]. Requires extensive filtering, making it time-consuming [S3, unofficial].
+-*   **When to use:** Real-time interactive visualization of volumetric datasets, especially when user interaction (selection, parameter tuning) is required [S2, unofficial].
+-*   **When not to use:** Not given in the sources.
++*   **Time Complexity:** Linear with respect to the number of voxels $N$ and the number of pixels covered by each splat $P$. Total complexity $O(N \cdot P)$.
++*   **Memory Complexity:** $O(N)$ for voxel storage plus $O(W \cdot H)$ for the image buffer and footprint table, where $W, H$ are image dimensions.
++*   **Performance:** Achieves interactive frame rates (e.g., 1.1 Hz on a 150MHz R4400 for a $256^3$ volume with pre-processing) [S3, unofficial]. GPU implementations are significantly faster, though rasterization of single-pixel quads is not always optimized [S1].
++*   **Strengths:** Interactive value selection; efficient culling of irrelevant voxels; suitable for parallelization based on object space subdivision [S3, unofficial].
++*   **Limitations:** Blurs edges; prone to brightness variations in animation (unless image-aligned splatting is used); discrete processing artifacts at extreme perspectives [S3, unofficial][S4, unofficial].
++*   **When to use:** Interactive visualization, large datasets where pre-processing is acceptable, and when surface-oriented or volume-oriented views with interactive parameter tuning are required [S2, unofficial].
++*   **When not to use:** When high-fidelity edge preservation is critical, or when extreme perspective projection causes significant discretization artifacts that cannot be mitigated by footprint size [S3, unofficial][S4, unofficial].
+ 
+ ## Background
+-Voxel Splatting was first published in [20] (referenced in [S4, unofficial]). It is an object-space front-to-back algorithm where voxels are projected onto the screen as contributions that are highest at the center and drop off away from it [S4, unofficial][S5, unofficial]. The method is part of the broader splatting family, which treats volumetric data as a set of geometric primitives [S1][S3, unofficial][S4, unofficial]. It has been used in various applications for interactive visualization of volumetric data, including medical imaging and scientific visualization [S2, unofficial].
++Voxel Splatting was first published by Westover [S5, unofficial]. It represents the volume as an array of overlapping basis functions (commonly Gaussian kernels) scaled by voxel values, projecting them to the screen [S3, unofficial]. The method was introduced to address the aliasing and sampling issues of ray casting while providing interactive performance. Variations include Mueller's image-aligned splatting, which processes voxel kernels within slabs aligned parallel to the image plane to eliminate brightness variations in animation [S3, unofficial].
+ 
+ ## Sources
+ [S1] Real-time high-resolution sparse voxelization with application to image-based modeling, https://doi.org/10.1145/2492045.2492053, fetched 2026-11-01
+ [S2] Interactive Visualization of Very Large Datasets Using an Out-of-Core Point-based Approach, https://core.ac.uk/download/484268453.pdf, fetched 2026-10-27 (unofficial)
+-[S3] Indirect volume rendering, https://slidetodoc.com/direct-volume-rendering-what-is-volume-rendering-accumulate/, fetched 2026-10-29 (unofficial)
+-[S4] Fourier volume rendering, https://shiftleft.com/mirrors/www.hpl.hp.com/techreports/95/HPL-95-73.pdf, fetched 2026-10-31 (unofficial)+[S3] Volume Visualization and Volume Rendering Techniques, https://www.cs.unh.edu/~cs880/visualization/Meissner-VolRenderingEGTutorial-rdb.pdf, fetched 2026-10-27 (unofficial)
++[S4] Indirect volume rendering, https://slidetodoc.com/direct-volume-rendering-what-is-volume-rendering-accumulate/, fetched 2026-10-29 (unofficial)
++[S5] Fourier volume rendering, https://shiftleft.com/mirrors/www.hpl.hp.com/techreports/95/HPL-95-73.pdf, fetched 2026-10-31 (unofficial)

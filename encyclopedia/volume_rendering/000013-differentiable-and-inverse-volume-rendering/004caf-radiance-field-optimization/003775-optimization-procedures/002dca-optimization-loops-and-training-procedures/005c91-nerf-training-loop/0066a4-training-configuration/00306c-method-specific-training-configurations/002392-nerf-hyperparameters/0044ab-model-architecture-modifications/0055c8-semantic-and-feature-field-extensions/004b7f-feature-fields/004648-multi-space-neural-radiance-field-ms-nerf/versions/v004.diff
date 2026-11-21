@@ -1,0 +1,119 @@
+--- v003.md
++++ v004.md
+@@ -4,82 +4,60 @@
+ 
+ ## Overview
+-MS-NeRF addresses the failure of standard NeRF methods to render reflective and refractive objects, which cause multi-view consistency violations in Euclidean space [S1]. Unlike single-space NeRFs that treat virtual images as blurred textures on surfaces, MS-NeRF represents the scene using a group of feature fields in parallel sub-spaces, allowing virtual images to exist in specific sub-spaces visible only from certain views [S1]. It serves as a low-cost enhancement module for existing MLP-based (e.g., Mip-NeRF 360) and grid-based (e.g., TensoRF) backbones [S1].
++MS-NeRF addresses the failure of standard NeRF methods to render reflective and refractive objects, which violate multi-view consistency in Euclidean space and result in blurry or distorted images [S1]. It differs from single-space NeRF by representing the scene using a group of feature fields in parallel sub-spaces rather than a single radiance field, allowing virtual images to be placed in sub-spaces visible only from specific viewpoints [S1]. This approach automatically handles mirror-like objects without manual labeling, unlike vanilla NeRF which treats virtual images as textures on reflective surfaces [S1].
+ 
+ ## How it works
+-MS-NeRF replaces the standard single-output radiance field with a multi-head output layer that predicts $K$ distinct densities and feature vectors for each point along a ray, corresponding to $K$ parallel sub-spaces [S1]. These sub-space features are integrated along the ray and then dynamically combined using a gating mechanism to produce the final color [S1].
++MS-NeRF operates as an enhancement module that replaces the original output layer of a backbone NeRF method (MLP-based or grid-based) with a multi-space module [S1]. It builds on the [Feature Fields](12995-feature-fields.md) principle where the network predicts arbitrary per-point feature signals in addition to color and density [S1, S2, S3, S4].
+ 
+ **Inputs and Outputs:**
+-*   **Input:** Ray $r$ defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; sampled points $\mathbf{x}_i$ along the ray.
+-*   **Output:** Final rendered color $\hat{\mathbf{C}}(r)$.
++*   **Input:** Ray $r$ defined by origin and direction; backbone features/densities from the underlying NeRF architecture.
++*   **Output:** Final rendered color $\hat{C}(r)$ for the pixel.
+ 
+-**Data Structures:**
+-The method extends the backbone network's output layer. For each sampled point $\mathbf{x}_i$ and sub-space $k \in \{1, \dots, K\}$:
+-*   $\sigma_{ik} \in \mathbb{R}$: Density in sub-space $k$.
+-*   $\mathbf{f}_{ik} \in \mathbb{R}^d$: Feature vector of dimension $d$ in sub-space $k$.
+-*   $K$: Total number of sub-spaces (hyperparameter).
+-*   $d$: Feature dimension (hyperparameter).
++**Data Structures and Parameters:**
++*   $K$: Hyperparameter for the total number of sub-spaces [S1].
++*   $d$: Hyperparameter for the feature dimension of the neural feature field [S1].
++*   $\{\sigma_{ik}\}$: Density at sample point $i$ in sub-space $k$ [S1].
++*   $\{f_{ik}\}$: Feature vector of dimension $d$ at sample point $i$ in sub-space $k$ [S1].
++*   $\Theta_D$: Decoder MLP with one hidden layer [S1].
++*   $\Theta_G$: Gate MLP with one hidden layer [S1].
+ 
+ **Numbered Steps:**
+ 
+-1.  **Multi-Space Feature Prediction:**
+-    For each point $\mathbf{x}_i$ along the ray, the modified backbone network outputs $K$ pairs of $(\sigma_{ik}, \mathbf{f}_{ik})$. This replaces the single $(\sigma_i, \mathbf{c}_i)$ or $(\sigma_i, \mathbf{f}_i)$ output of the parent Feature Fields method [S1].
++1.  **Multi-Head Output:** Replace the backbone's final output layer with a multi-head layer. For each sample point $i$ along the ray, the network outputs $K$ densities $\{\sigma_{ik}\}$ and $K$ feature vectors $\{f_{ik}\}$ of dimension $d$, where each pair corresponds to a specific sub-space $k \in \{1, \dots, K\}$ [S1].
+ 
+-2.  **Per-Sub-Space Volume Integration:**
+-    Compute the accumulated feature map $\hat{\mathbf{F}}^k(r)$ for each sub-space $k$ independently using the standard volume rendering equation [S1]:
++2.  **Per-Subspace Volume Rendering:** Integrate features along the ray in each sub-space independently to collect $K$ feature maps. For a ray $r$, the rendered feature $\hat{F}^k(r)$ for sub-space $k$ is calculated as [S1]:
+     $$
+-    \hat{\mathbf{F}}^k(r) = \sum_{i=1}^{N} T_{ik} (1 - \exp(-\sigma_{ik} \delta_i)) \mathbf{f}_{ik}
++    \hat{F}^k(r) = \sum_{i=1}^{N} T_{ik} (1 - \exp(-\sigma_{ik} \delta_i)) f_{ik}
+     $$
+-    where:
+-    *   $N$ is the number of samples.
+-    *   $\delta_i$ is the distance between adjacent samples.
+-    *   $T_{ik}$ is the accumulated transmittance for sub-space $k$ up to sample $i$:
++    where $T_{ik} = \exp(-\sum_{j=1}^{i-1} \sigma_{jk} \delta_j)$ is the accumulated transmittance for sub-space $k$, and $\delta_i$ is the distance between sample points [S1].
++
++3.  **Decoder and Gate Processing:** The aggregated features $\{\hat{F}^k\}$ for all $K$ sub-spaces are passed through two separate MLPs [S1]:
++    *   The Decoder MLP $\Theta_D$ takes $\{\hat{F}^k\}$ as input and outputs RGB color vectors $\{C_k\}$ for each sub-space:
+         $$
+-        T_{ik} = \exp\left(-\sum_{j=1}^{i-1} \sigma_{jk} \delta_j\right)
++        \Theta_D\{\hat{F}^k\} \rightarrow \{C_k\}
+         $$
+-    *   $\mathbf{f}_{ik}$ is the feature vector at sample $i$ in sub-space $k$ [S1].
++    *   The Gate MLP $\Theta_G$ takes $\{\hat{F}^k\}$ as input and outputs scalar weights $\{w_k\}$ that control the visibility of each sub-space:
++        $$
++        \Theta_G\{\hat{F}^k\} \rightarrow \{w_k\}
++        $$
++    Both $\Theta_D$ and $\Theta_G$ are MLPs with one hidden layer [S1].
+ 
+-3.  **Feature-to-Color Decoding:**
+-    Pass the integrated feature maps $\{\hat{\mathbf{F}}^k(r)\}_{k=1}^K$ through two separate Multi-Layer Perceptrons (MLPs) [S1]:
+-    *   **Decoder MLP ($\Theta_D$):** Maps $\hat{\mathbf{F}}^k(r) \to \mathbf{C}_k$, where $\mathbf{C}_k \in \mathbb{R}^3$ is the RGB color vector for sub-space $k$. $\Theta_D$ has one hidden layer [S1].
+-    *   **Gate MLP ($\Theta_G$):** Maps $\hat{\mathbf{F}}^k(r) \to w_k$, where $w_k \in \mathbb{R}$ is a scalar weight controlling the visibility/contribution of sub-space $k$. $\Theta_G$ has one hidden layer [S1].
+-
+-4.  **Softmax Gating and Final Composition:**
+-    Apply the softmax function to the gate weights $\{w_k\}_{k=1}^K$ to determine the final contribution of each sub-space [S1]:
++4.  **Softmax Weighting:** Apply the softmax function to the gate weights $\{w_k\}$ to determine the contribution of each sub-space to the final color. The final rendered color $\hat{C}(r)$ is computed as [S1]:
+     $$
+-    \hat{\mathbf{C}}(r) = \sum_{k=1}^{K} \left( \frac{\exp(w_k)}{\sum_{j=1}^{K} \exp(w_j)} \right) \mathbf{C}_k
++    \hat{C}(r) = \sum_{k=1}^{K} \frac{\exp(w_k)}{\sum_{i=1}^{K} \exp(w_i)} C_k
+     $$
+-    This formulation ensures that sub-spaces contributing to complex light paths (reflections/refractions) are activated only for relevant views, while maintaining multi-view consistency for static geometry [S1].
+-
+-**Parameters:**
+-*   $K$: Number of sub-spaces. Not given in the sources.
+-*   $d$: Feature dimension. Not given in the sources.
+-*   $\Theta_D, \Theta_G$: MLPs with one hidden layer each [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Multi-view consistency:** Standard NeRF fails on reflective surfaces because it assumes a single Euclidean space. MS-NeRF handles this by isolating virtual images into specific sub-spaces [S1].
+-*   **Computational overhead:** The method adds minimal overhead. On Mip-NeRF 360, it adds 0.5% extra parameters; on TensoRF, 0.046% [S1].
+-*   **Loss function:** No additional loss terms are required compared to vanilla NeRF [S1].
+-
+-## Subtopics
+-
+-### MLP-based MS-NeRF
+-Applies the multi-space module to MLP-based backbones like Mip-NeRF 360. It improves PSNR by 4.15 dB on reflective regions [S1]. [See MS-NeRF](12996-ms-nerf.md)
+-
+-### Grid-based MS-NeRF
+-Applies the multi-space module to grid-based backbones like TensoRF. It improves PSNR by 2.71 dB on reflective regions [S1]. [See MS-NeRF](12996-ms-nerf.md)
++*   The method requires no additional loss terms compared to vanilla NeRF, relying on standard photometric loss [S1].
++*   Computational overhead is small for training and inference [S1].
++*   The composition weights of sub-spaces change dynamically according to spatial location and view direction, allowing the model to handle complex light paths [S1].
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** The method introduces small computational overheads for training and inference. The exact complexity increase is not quantified beyond the parameter count [S1].
+-*   **Measured Performance:**
+-    *   On Mip-NeRF 360: +4.15 dB PSNR on reflective regions with 0.5% extra parameters [S1].
+-    *   On TensoRF: +2.71 dB PSNR on reflective regions with 0.046% extra parameters [S1].
+-    *   No degradation in rendering quality on non-reflective regions [S1].
+-*   **Strengths:** Automatically handles mirror-like objects in 360-degree rendering without manual labeling; overcomes multi-view consistency violations by placing virtual images in view-dependent sub-spaces [S1].
+-*   **Limitations:** Requires the construction of a novel dataset for complex reflection/refraction evaluation (33 synthetic, 7 real scenes) as existing datasets were insufficient [S1].
+-*   **When to use:** When rendering scenes with complex reflections and refractions where multi-view consistency is violated in Euclidean space [S1].
+-*   **When not to use:** For scenes without reflective/refractive objects, the added complexity may be unnecessary given the marginal parameter cost [S1].
++*   **Performance:** On the Mip-NeRF 360 dataset, MS-NeRF improves PSNR by 4.15 dB on reflective regions with only 0.5% extra parameters, without degrading rendering quality on other regions [S1]. On TensoRF, it improves PSNR by 2.71 dB on reflective regions with 0.046% extra parameters [S1].
++*   **Complexity:** The method introduces small computational overheads for training and inferring the extra-space outputs [S1].
++*   **Strengths:** Automatically handles mirror-like objects in 360-degree rendering without manual labeling; overcomes multi-view consistency violations by placing virtual images in specific sub-spaces; works as a general enhancement for both MLP-based (NeRF, Mip-NeRF, Mip-NeRF 360) and grid-based (TensoRF, iNGP) methods [S1].
++*   **Limitations:** Performance on non-reflective regions is not degraded but not improved beyond the backbone; requires careful tuning of $K$ and $d$ [S1].
+ 
+ ## Background
+-MS-NeRF was proposed by Z.X. Yin, P.Y. Jiao, M.M. Cheng, B. Ren, and J. Qiu [S1]. A preliminary version appeared at CVPR [S1]. The full version was published in IEEE Transactions on Pattern Analysis and Machine Intelligence in 2025 [S1]. The authors constructed a novel dataset of 33 synthetic and 7 real captured scenes with complex camera paths to benchmark robustness, as existing datasets like RFFR and Shiny lacked sufficient viewpoint changes or 360-degree coverage for mirror-like objects [S1].
++MS-NeRF was proposed to address the limitations of existing NeRF methods in handling reflective and refractive objects, which often result in blurry or distorted rendering due to violated multi-view consistency in Euclidean space [S1]. Existing datasets like RFFR and Shiny lacked sufficient coverage of 360-degree rendering with mirror-like objects, prompting the construction of a novel dataset with 33 synthetic and 7 real captured scenes [S1]. The method was published in IEEE Transactions on Pattern Analysis and Machine Intelligence in 2025, with a preliminary version appearing at CVPR [S1].
+ 
+ ## Sources

@@ -1,0 +1,166 @@
+--- v001.md
++++ v002.md
+@@ -10,15 +10,15 @@
+ 
+ **Inputs:**
+-*   Current octree cell $C$.
+-*   The implicit surface definition $\partial V$ (e.g., a scalar field or voxel classification).
+-*   Neighbor cell data (to access adjacent faces and edges).
++*   Current octree cell $C$ [S1].
++*   The implicit surface definition $\partial V$ [S1].
++*   Neighbor cell data for adjacent face and edge access [S1].
+ 
+ **Outputs:**
+-*   Boolean flag: `is_complex`. If true, the cell $C$ must be subdivided further.
++*   Boolean flag `is_complex`. If true, the cell $C$ must be subdivided further [S1].
+ 
+ **Data Structures:**
+-*   **Cell Face:** A set of 4 voxels (or vertices) forming one of the 6 faces of the cubic cell.
+-*   **Cell Edge:** A line segment connecting 2 vertices of the cell.
+-*   **Voxel State:** Binary classification: Inside ($I$) or Outside ($O$) of $\partial V$.
++*   **Cell Face:** A set of 4 vertices forming one of the 6 faces of the cubic cell [S1].
++*   **Cell Edge:** A line segment connecting 2 vertices of the cell [G].
++*   **Voxel State:** Binary classification: Inside ($I$) or Outside ($O$) of $\partial V$ [S1].
+ 
+ **Steps:**
+@@ -27,12 +27,11 @@
+     For each of the 6 faces of cell $C$:
+     a.  Verify if the face is **homogeneous**. A face is homogeneous if all 4 of its constituent vertices are strictly inside ($I$) or strictly outside ($O$) of $\partial V$ [S1].
+-    b.  If homogeneous, extract the **connected components** of voxels on that face that belong to the surface $\partial V$ [S1]. Note: Since the vertices are homogeneous, the surface intersection must occur within the interior of the face or along its edges, creating a "piece" of surface smaller than the cell [S1].
+-    c.  If the number of connected components on any face is greater than 1, the cell is complex.
++    b.  If homogeneous, extract the **connected components** of voxels on that face that belong to the surface $\partial V$ [S1].
++    c.  If a face contains multiple disconnected surface components, the cell is classified as complex [S1].
+ 
+ 2.  **Edge Complexity Check:**
+     For each of the 12 edges of cell $C$:
+     a.  Determine if the edge intersects $\partial V$ more than once [S1].
+-    b.  This is detected by analyzing the sign changes or topological transitions along the edge relative to the surface definition.
+-    c.  If any edge intersects $\partial V$ more than once, the cell is complex. This configuration induces non-manifold surfaces [S1].
++    b.  If any edge intersects $\partial V$ more than once, the cell is complex, as this configuration induces non-manifold surfaces [S1].
+ 
+ 3.  **Optimization:**
+@@ -42,32 +41,24 @@
+ 
+ ```python
+-def is_cell_complex(cell, surface_function, neighbors):
++def is_cell_complex(cell, surface_function):
+     """
+     Determines if a cell is complex based on face and edge criteria.
+     
+     Args:
+-        cell: The current octree cell.
+-        surface_function: Function returning True if point is inside surface, False otherwise.
+-        neighbors: Dictionary mapping cell coordinates to neighbor cells.
++        cell: Object with .vertices (list of 8 points) and .get_faces()/.get_edges() methods.
++        surface_function: Callable returning True if point is inside ∂V, False otherwise.
+         
+     Returns:
+         bool: True if the cell is complex and requires subdivision.
+     """
+-    # Get vertices of the cell
+-    vertices = cell.get_vertices()
+-    
+     # Check all 6 faces
+     for face in cell.get_faces():
+-        face_vertices = face.get_vertices()
+-        
+-        # Check if face is homogeneous
+-        states = [surface_function(v) for v in face_vertices]
++        face_verts = face.vertices
++        states = [surface_function(v) for v in face_verts]
++        # Face is homogeneous if all inside or all outside
+         if all(states) or not any(states):
+-            # Face is homogeneous (all inside or all outside)
+-            # Extract connected components of surface intersection on this face
+-            # Since vertices are homogeneous, surface must pass through interior/edges
+-            components = extract_face_surface_components(face, surface_function)
+-            
+-            # If more than one disconnected component exists, it's complex
++            # Extract connected components on the homogeneous face
++            # Sources do not specify the exact extraction algorithm; a standard 2D marching-squares or grid sampling approach is used [G].
++            components = _extract_face_components(face, surface_function)
+             if len(components) > 1:
+                 return True
+@@ -75,30 +66,49 @@
+     # Check all 12 edges
+     for edge in cell.get_edges():
+-        # Check if edge intersects surface more than once
+-        # This requires sampling or analyzing the edge against surface_function
+-        intersections = count_edge_intersections(edge, surface_function)
+-        
+-        if intersections > 1:
++        # Count intersections of the edge with ∂V
++        # Sample endpoints and midpoint; count sign changes
++        p0, p1 = edge.vertices
++        s0, s1 = surface_function(p0), surface_function(p1)
++        mid = (p0 + p1) / 2.0
++        s_mid = surface_function(mid)
++        transitions = 0
++        if s0 != s_mid: transitions += 1
++        if s_mid != s1: transitions += 1
++        if transitions > 1:
+             return True
+ 
+     return False
+ 
+-def extract_face_surface_components(face, surface_function):
++def _extract_face_components(face, surface_function):
+     """
+-    [G] Helper to identify disconnected surface patches on a homogeneous face.
+-    In a voxel context, this often involves checking the midpoints of the face's
+-    internal grid lines or using a secondary classification.
++    [G] Standard implementation: sample a 2x2 grid on the face, 
++    classify points, and run a connected-components algorithm on the resulting mask.
++    Returns list of connected regions.
+     """
+-    # Implementation detail: Analyze the face geometry against the scalar field.
+-    # Return a list of connected regions.
+-    pass
+-
+-def count_edge_intersections(edge, surface_function):
+-    """
+-    [G] Counts how many times the edge crosses the zero-level set.
+-    """
+-    # Implementation detail: Sample points along the edge or check sign changes
+-    # of the scalar field at endpoints and midpoints.
+-    pass
++    samples = []
++    for i in range(3):
++        for j in range(3):
++            u, v = i / 2.0, j / 2.0
++            point = face.vertices[0] * (1-u)*(1-v) + face.vertices[1] * u*(1-v) + face.vertices[2] * (1-u)*v + face.vertices[3] * u*v
++            samples.append(surface_function(point))
++    # Simple connected components on the 3x3 mask (excluding corners which are vertices)
++    regions = []
++    visited = [[False]*3 for _ in range(3)]
++    for r in range(3):
++        for c in range(3):
++            if not visited[r][c] and samples[r*3+c]:
++                region = []
++                stack = [(r, c)]
++                visited[r][c] = True
++                while stack:
++                    cr, cc = stack.pop()
++                    region.append((cr, cc))
++                    for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]:
++                        nr, nc = cr+dr, cc+dc
++                        if 0 <= nr < 3 and 0 <= nc < 3 and not visited[nr][nc] and samples[nr*3+nc]:
++                            visited[nr][nc] = True
++                            stack.append((nr, nc))
++                regions.append(region)
++    return regions
+ ```
+ 
+@@ -108,5 +118,4 @@
+ **Edge Cases and Pitfalls:**
+ *   **Precision:** Detecting "more than once" intersections on edges requires high numerical precision to avoid missing multiple crossings in thin features [S1].
+-*   **Boundary Conditions:** The method assumes access to neighbor cells. Cells on the boundary of the domain must handle missing neighbors appropriately [S1].
+ *   **Non-manifold Geometry:** The edge criterion specifically targets configurations that induce non-manifold surfaces, which are difficult to render or mesh correctly [S1].
+ 
+@@ -120,5 +129,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of cells and the cost of evaluating `surface_function` on faces and edges. The use of a hash table for neighbor access ensures almost constant time for neighbor lookups [S1].
++*   **Time Complexity:** The method requires evaluating the surface function on cell faces and edges. Neighbor access is optimized via a hash table to ensure almost constant lookup times [S1].
+ *   **Memory Complexity:** Requires storage for the octree and a hash table indexing octree cells [S1].
+ *   **Strengths:** Captures fine geometric details that standard inhomogeneity checks miss; prevents loss of small surface pieces; handles non-manifold configurations explicitly [S1].

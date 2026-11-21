@@ -1,0 +1,372 @@
+an advanced procedural CAD and computational geometry system written in python 3 - feat: Add yapcad.rom package — Range-of-Motion (kinematic sweep) infrastructure by rdevaul · Pull Request #101 · rdevaul/yapCAD
+
+feat: Add yapcad.rom package — Range-of-Motion (kinematic sweep) infrastructure by rdevaul · Pull Request #101 · rdevaul/yapCAD · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+rdevaul
+commented
+Oct 25, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+yapcad.rom — range-of-motion sweeps on signed distance fields
+Drives an assembly's joints through their declared limits and measures, at
+every pose, how close the parts come to each other — on their SDF fields,
+so nothing is meshed and no boolean kernel runs.
+```
+result = compile_and_run(source, "BUILD", {}, representation="sdf",
+                         source_path=path)
+model = RomModel.from_result(result)
+print(model.describe())
+
+sweep = sweep_rom(model, schedule_from_model(model, step_deg=5.0))
+print(sweep.summary())
+```
+```
+Sweep of 'rom_arm': 7 configuration(s), 2 pair(s)
+  elbow: 0.0 deg to 90.0 deg in 7 step(s)
+  measurements: 6 sampled, 8 resolved from bounding boxes
+  closest approach: elbow=90.0 deg | arm - stop: -5.000 mm (+/- 0.433, field)
+  interference (< 0.0 mm): 3
+  near misses (< 5.0 mm): 1
+```
+The kinematics come from the design
+There is no new annotation namespace. A DSL assembly already says all of
+it, and the rover design already does:
+what
+how the DSL says it
+where the joint is
+@meta(assembly.datums=[{"id": "pivot", "kind": "axis", "origin_mm": [...], "direction": [...]}])
+that it is a joint
+add_named_mate(a, "elbow", "revolute", "base", "pivot", "arm", "hub")
+how far it travels
+set_mate_limits(a, "elbow", radians(-90.0), radians(90.0))
+where everything sits
+solve_assembly(a, "base"), emit assembly_compound(a)
+Poses come from the assembly solver, so a sweep cannot disagree with the
+design it came from. Limits come from the design, so a value outside them
+is refused rather than clamped. The retained assembly is the same object
+the .ycpkg builder reads.
+What changed from the first three commits
+The package had brought its own kinematics, and none of it reached the
+runtime:
+RomTree.from_interpreter_context probed context.commands /
+context.variables; ExecutionContext has neither, so it always
+returned an empty tree and logged "Did you forget
+@meta(kinematic.)?"*. The documented entry points compile_to_ast and
+interpret_module do not exist in yapcad.dsl.
+annotations.py monkey-patched apply_meta_hint_to_raw on import,
+while the interpreter calls apply_meta_hint — so the patch never
+fired. The metadata is byte-identical with and without it.
+Every joint was placed at the assembly origin (base_transform=None,
+"For now, use identity"), so even a working bridge would have swept
+geometry that was in the wrong place.
+The kinematic.* namespace was added to transforms/metadata.py but
+not to the checker's own table, so every annotation drew a W310 unknown namespace warning from dsl check.
+All of that is gone: annotations.py, tree.py, the kinematic
+namespace and its docs, the five silent fallbacks in _extract_sdf (which
+ended in a bounding box standing in for the part), and clearance_mesh,
+which could not detect penetration at all — nearest-neighbour between
+sampled surface points is never negative — and needed an undeclared
+scipy.
+The clearance number was wrong by its own margin
+It sampled the part's bounding box grown by padding, kept the points in
+that margin, and took the minimum over them. Measured against analytic
+answers, two 10 mm cubes:
+offset
+true gap
+before
+after
+12.0
++2.00
+0.000
++2.000
+11.0
++1.00
+−1.000
++1.000
+10.2
++0.20
+−1.800
++0.200
+9.8
+−0.20
+−2.200
+−0.200
+Resolution made no difference; the error was exactly −padding. With the
+default interference_threshold = 0.0, every pair within 2 mm was
+reported as interfering, with up to 2 mm of penetration that wasn't
+there.
+Now only points at or inside the sampled part's surface are kept, within
+half a cell of it, and every result carries tolerance_mm — the bound on
+its own error. Pitch is set in mm (pitch_mm) rather than as a grid
+count, so the error bound follows the part size instead of drifting with
+it, and Clearance.resolved is False when a result is smaller than its
+own tolerance.
+Pairs whose bounding boxes are further apart than the threshold of
+interest are resolved from the bounds — a valid lower bound — instead of
+sampled, reported as method="bounds". That is what makes pairs="all"
+affordable on a large assembly.
+Default pairs: what the sweep actually moves
+The old default was mate-adjacent pairs — exactly the pairs a rigid mate
+holds still, which routinely interpenetrate by design (a boss in a plate,
+a screw in its hole), while missing the pair that interferes. The default
+is now every pair the swept joints move relative to one another, which
+includes pairs sharing no mate at all. In the test fixture that is
+base - arm and arm - stop, and the interference is in arm - stop.
+Silence is not a clean result
+a pair with no field is an error naming the part and the fix;
+skip_unmeasurable=True carries on, but the pair and its reason appear
+in result.skipped and in every summary and report;
+a sweep that measured nothing says NOTHING WAS MEASURED — this is not a clean result;
+unknown joint or part names, values outside the limits, an empty
+schedule, and a joint both swept and held are all errors;
+early_stop marks the result incomplete.
+Events no longer retain their sample arrays (1 MiB per event at the old
+default resolution). interference_summary no longer crashes on an event
+it did not measure ('N/A' into a :.2f).
+Tests
+tests/test_rom.py, 76 tests: measured clearances against analytic
+answers for boxes, spheres, rotated poses and a part thinner than the
+pitch; pitch-independence as a regression test for the margin bug; frame
+invariance; the bounds lower bound; sample ceiling and pitch coarsening;
+model reading, datum-placed rotation, mate chains and moving pairs; every
+refusal; and the report, including a clean sweep and a hand-built result.
+The old suite asserted >= 0 and < 4 where the true answer was 2.0 and
+the code returned 0.0 — which is how the bug shipped.
+Full suite: 2105 passed, 23 skipped. Lint gate clean, no unused imports,
+no new dependencies.
+Known gap
+A design has to be authorable as a field, and yapcad.sdf has no
+chamfer. The rover design uses 18 of them (chamfers rather than fillets
+are a supportless-FDM requirement), so it cannot be swept yet — the SDF
+build fails with "chamfer requires a solid with BREP data". SDF chamfer
+is the blocker between this feature and that design.
+Driving a sweep from a .ycpkg on disk is also not implemented, though
+the format already records the mate graph with limits
+(yapcad-assembly-v0.1) and each component's SDF construction at geometry
+JSON v0.3.
+🤖 Generated with Claude Code
+Richard DeVaul
+and others
+added 5 commits
+October 24, 2026 17:51
+Add yapcad.rom package: Range-of-Motion (kinematic sweep) infrastructure
+…
+4579be3
+```
+## Package: yapcad/rom/
+
+The ROM package enables SDF-based kinematic clearance sweeps without meshing:
+
+- **annotations.py**: Routes @meta(kinematic.*) DSL decorators into solid
+  metadata. Adds "kinematic" to the type checker's known namespaces with
+  field validation (joint_kind, axis, limits, zero_pose, parent, etc.).
+
+- **tree.py**: RomTree and RomLink — builds a KinematicChain from
+  RomLink objects (or from DSL interpreter context via
+  from_interpreter_context). Each link holds its SDF node for
+  collision-free clearance evaluation.
+
+- **clearance.py**: clearance_sdf() — evaluates clearance between adjacent
+  SDF solids by sampling child's bounding-box grid, transforming to parent's
+  local frame, and evaluating parent's SDF field. Returns min_distance,
+  penetration_depth, fraction-within-threshold. No meshing needed.
+
+- **sweep.py**: sweep_kinematics() — orchestrates multi-DOF sweeps across
+  the product space. SweepResult.summary() provides human-readable output
+  of interference events, near-misses, and per-pair clearance traces.
+
+- **report.py**: interference_summary() — detailed text reports.
+
+## Test suite: tests/test_rom.py (16 tests)
+
+Covers annotations, tree building, clearance, sweep orchestration, and DSL
+integration. All pass alongside existing 130+ yapCAD tests.
+
+## Type checker integration
+
+Modified dsl/transforms/metadata.py to accept the "kinematic" namespace
+with field-level validation (enum for joint_kind, 3-element axis, 2-element
+limits, bool for printable, cross-field consistency checks).
+```
+test, docs: expand test coverage and add ROM guide for yapcad.rom pac…
+…
+52def5c
+```
+…kage
+
+Tests (16 new, 32 total):
+- TestRomLink: to_kinematic_part (fixed, with base_transform)
+- TestRomTree: get_sdf_node, link_names, adjacent_pairs missing parent,
+  from_interpreter_context via compile_and_run
+- TestClearance: verify all 9 result keys present
+- TestSweep: config defaults, result accessors, prismatic DOF schedule,
+  extra_pairs, fixed_angles
+- TestDSLIntegration: compile_and_interpret_context, skip_fixed variants
+
+Documentation:
+- docs/rom_guide.rst — full user guide with examples, clearance mechanics,
+  multi-DOF sweeps, and autodoc references
+- docs/metadata_namespace.rst — new kinematic namespace section (7)
+- docs/dsl_reference.md — kinematic namespace in @meta conventions table
+- docs/index.rst — ROM guide added to DSL toctree
+```
+docs review: fix docstring/examples, add missing APIs to rom_guide, t…
+…
+e184844
+```
+…ighter usage examples
+
+- clearance.py: fix usage example (dict not tuple), add clearance_mesh mention
+- annotations.py: replace broken ASCII table with proper list-table, fix axis syntax
+- __init__.py: fix axis example syntax
+- rom_guide.rst: show RomTree.from_interpreter_context as primary workflow,
+  add extra_pairs documentation, fix missing RomLink import, add clearance_mesh
+  to reference autofunctions
+```
+Rebuild the ROM sweep on the assembly the DSL already describes
+…
+acf4400
+```
+The package had its own kinematics: a `kinematic.*` metadata namespace, a
+monkey-patch of the metadata pipeline to route it, and a KinematicChain
+built by scanning an interpreter context for annotations. None of it
+reached the runtime. `ExecutionContext` has no `commands` or `variables`
+attribute, so `RomTree.from_interpreter_context` always returned an empty
+tree and logged "Did you forget @meta(kinematic.*)?"; the documented entry
+points `compile_to_ast` and `interpret_module` do not exist; and the
+monkey-patch wrapped `apply_meta_hint_to_raw` while the interpreter calls
+`apply_meta_hint`, so importing it changed nothing (verified: the metadata
+is byte-identical with and without it). Every joint was placed at the
+assembly origin by `base_transform=None`, so even a working bridge would
+have swept geometry that was in the wrong place.
+
+The DSL already describes all of this, and the rover design already uses
+it: `@meta(assembly.datums=[...])` places a joint, `add_named_mate` names
+it, `set_mate_limits` bounds it, `solve_assembly` poses it, and
+`assembly_compound` retains the assembly for the package builder. So ROM
+now reads that:
+
+  result = compile_and_run(source, "BUILD", {}, representation="sdf", ...)
+  model = RomModel.from_result(result)
+  sweep = sweep_rom(model, schedule_from_model(model, step_deg=5.0))
+
+Poses come from the assembly solver, so a sweep cannot disagree with the
+design it came from; limits come from the design, so values outside them
+are refused rather than clamped. Deleted: `annotations.py`, the
+`kinematic` namespace in `transforms/metadata.py` and its documentation,
+`tree.py`'s five silent fallbacks (which ended in a bounding box standing
+in for the part), and `clearance_mesh`, which could not detect
+penetration at all and needed an undeclared scipy.
+
+The clearance measurement was wrong by exactly its sampling margin. It
+sampled the part's bounding box grown by `padding`, kept the points in
+that margin, and reported the minimum over them -- so at the default
+padding of 2 mm, every clearance came back 2 mm short at every
+resolution, and a pair 1 mm apart was reported as interfering 1 mm deep.
+It now samples only at or inside the part's surface, within half a cell
+of it, and each result carries `tolerance_mm`, the bound on its own
+error. Pitch is set in mm rather than as a grid count, so the error bound
+follows the part size; pairs whose bounding boxes are further apart than
+the threshold of interest are resolved from the bounds, which is what
+makes `pairs="all"` affordable.
+
+The default pair set is now every pair the swept joints move relative to
+one another, which includes pairs that share no mate -- an arm and the
+stop it swings towards -- and excludes pairs a rigid mate holds still.
+The old default (mate-adjacent pairs) measured exactly the pairs that
+cannot move and missed the one that interferes.
+
+A sweep can no longer look clean when it measured nothing: a pair without
+a field is an error naming the part and the fix, `skip_unmeasurable`
+records the reason and reports it in every summary, an unknown joint or
+part name is an error, and a sweep that measured nothing says so in
+capitals. Events no longer retain the sample arrays (1 MiB per event at
+the old default resolution).
+
+`interference_summary` crashed on an event it had not measured
+(`'N/A'` into a `:.2f`); the report is rebuilt and tested, including that
+case.
+
+tests/test_rom.py is rewritten: 76 tests, with measured clearances
+checked against analytic answers (that is the test the old suite could
+not fail -- it asserted `>= 0 and < 4` where the true answer was 2.0 and
+the code returned 0.0), pitch-independence as a regression test for the
+margin bug, and a three-part DSL fixture whose arm swings into a stop it
+shares no mate with.
+
+Known gap: a design must be authorable as a field, and `yapcad.sdf` has
+no `chamfer`, so the rover design (18 chamfers, required by its
+supportless-FDM rule) cannot be swept yet. SDF chamfer is the blocker
+between this feature and that design.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Say when a clearance is a lower bound rather than a measurement
+…
+8d43e18
+```
+The clearance docs claimed the true distance was within tolerance_mm of
+the reported number. That holds only when both fields are exact distances,
+and hard CSG does not preserve exactness: yapCAD marks union, intersect
+and subtract inexact, Lipschitz 1, so a part built by combining anything
+-- which is most parts, and every part of the rover -- carries a lower
+bound rather than a distance.
+
+A Clearance now records `conservative`, true when either field is inexact
+and for every bounds-derived result. The magnitude is then closer to zero
+than the truth: a gap between separated parts is never overstated and a
+penetration may be understated, while the sign holds either way, so a
+sweep still cannot miss an interference. `describe()` prints "at least",
+the report marks those rows `>=` with a legend, and the guide says which
+fields are exact (single and rounded primitives, and transforms of them).
+
+The overclaim was mine, not the original PR's; it is the same kind of
+unstated-error problem the padding bias was, so it gets the same
+treatment: a flag on the result, a line in the report, and tests.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+This was referenced Oct 25, 2026
+SDF chamfer: chamfered_box and chamfered_cylinder, the way OCC chamfers them
+#102
+Merged
+Mesh finer when the cell cannot find the part, and say so
+#103
+Merged
+Hide details
+View details
+rdevaul
+merged commit 1ef1164
+into
+main
+Oct 25, 2026
+6 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+rdevaul
+deleted the
+feat/rom-sweep-package
+branch
+October 25, 2026 21:31
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

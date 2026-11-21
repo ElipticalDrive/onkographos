@@ -1,0 +1,54 @@
+# Light transport in participating media
+## Overview
+This family encompasses the physical models, geometric approximations, and computational strategies used to simulate how light propagates through participating media such as fog, smoke, and clouds [G]. It solves the problem of determining the final pixel radiance by accounting for absorption, emission, and scattering interactions along a viewing ray [G]. What sets this family apart from sibling articles like [Volume data and representation](2-volume-data-and-representation.md) is its focus on the *physics and geometry* of light interaction rather than the data structures or acquisition methods, and from [Image-order rendering](16-image-order-rendering.md) by defining the *what* (the equations) rather than the *how* (the rasterization or ray-marching algorithms) [G].
+## Shared principles
+All methods in this family are derived from the conservation of energy for a differential cylinder of light passing through a medium [G]. They share the following core definitions and mechanisms:
+
+**1. Fundamental Interactions**
+Any volumetric effect is composed of three fundamental characteristics [G]:
+*   **Absorption:** The loss of radiant energy along a ray due to energy conversion (e.g., to heat). It is described by the absorption coefficient $\sigma_a$ (units: $m^{-1}$) [G].
+*   **Emission:** The addition of radiant energy where the medium is luminous (e.g., flames). It is described by the emissive term $L_e(\mathbf{p}, \boldsymbol{\omega})$, representing radiance emitted per unit length [G].
+*   **Scattering:** The redirection of light rays upon collision with particles. It is split into:
+    *   *In-scattering:* Light from other directions reflected into the view ray [G].
+    *   *Out-scattering:* Light from the view ray reflected away [G].
+    In most lighting calculations, out-scattering is folded into the **extinction** term because its net effect on the view ray is identical to absorption [G].
+
+**2. Notation**
+*   $\mathbf{p}$: Position of interaction.
+*   $\boldsymbol{\omega}$: Ray direction (unit vector).
+*   $L$: Radiance quantity.
+*   $L_i$: Incoming radiance.
+*   $L_o$: Outgoing radiance.
+*   $\sigma_t$: Total extinction coefficient, $\sigma_t = \sigma_a + \sigma_s$ [G].
+
+**3. Differential Forms**
+The change in radiance $dL$ over a differential path length $dt$ is governed by the balance of loss and gain terms [G]:
+*   **Absorption Model:** $dL = -\sigma_a L_i dt$ [G].
+*   **Emission Model:** $dL = \sigma_e dt$ (where $\sigma_e$ is the emission coefficient) [G].
+*   **General RTE:** Combines extinction (loss) and source terms (gain from emission and in-scattering) [G].
+
+**4. Transmittance**
+The fraction of light surviving transmission through a medium is defined by the Beer-Lambert law [G]:
+$$ T = e^{-\tau} $$
+where $\tau$ is the optical depth (integrated extinction) [G].
+## Subtopics
+
+### [Optical models](33-optical-models.md)
+Optical models define the physical laws governing light transport within participating media, describing how radiance changes due to absorption, emission, and scattering as it propagates through a volume [G]. They solve the problem of determining the final pixel color by integrating these interactions along a viewing ray, ranging from simplified attenuation models to the full integro-differential Radiative Transfer Equation [G]. What sets this family apart from sibling articles like [Single and multiple scattering](35-single-and-multiple-scattering.md) is that it focuses on the *constitutive equations* (the differential or integral forms of light transport) rather than the numerical *solvers* (ray marching, path tracing, or photon mapping) used to evaluate them [G].
+
+### [Local illumination, shadows and ambient occlusion](34-local-illumination-shadows-and-ambient-occlusion.md)
+This family covers techniques for computing direct visibility and local shading in volume rendering, addressing the problem of how light from sources interacts with participating media and opaque geometry to produce shadows, self-shadowing, and surface-like orientation cues [G]. It distinguishes itself from siblings like [Optical models](33-optical-models.md) by focusing on the geometric and visibility aspects of light transport (shadows, occlusion) rather than the physical scattering phase functions, and from [Single and multiple scattering](35-single-and-multiple-scattering.md) by typically ignoring or approximating indirect bounces [G]. It differs from [Real-time approximations](36-real-time-approximations.md) in that it includes both offline precomputation methods (like Light Propagation Volumes) and real-time ray-marching techniques [G].
+
+### [Single and multiple scattering](35-single-and-multiple-scattering.md)
+This topic covers phase functions, delta tracking, volumetric path tracing, and photon beams [G]. It addresses the complexity of light bouncing multiple times within a medium, which is critical for realistic appearance in dense media like clouds or milk [G]. It is chosen when physical accuracy of indirect lighting is required, unlike local illumination methods which only consider direct light [G].
+
+### [Real-time approximations](36-real-time-approximations.md)
+Real-time approximations are techniques that estimate light transport in participating media within strict latency budgets (typically <16 ms), avoiding the prohibitive cost of full path tracing or iterative radiative transfer equation (RTE) solvers [G]. They set themselves apart from sibling methods like [Optical models](33-optical-models.md) by focusing on computational efficiency and dynamic scene support rather than physical accuracy, and from [Local illumination, shadows and ambient occlusion](34-local-illumination-shadows-and-ambient-occlusion.md) by explicitly handling indirect scattering and global illumination effects in volumes [G].
+
+## Background
+The theoretical foundation of light transport in participating media is rooted in the Radiative Transfer Equation (RTE), originally developed in astrophysics and nuclear engineering [G]. In computer graphics, the application of these physical models to volume rendering began with the work of Williams (1978) and Kajiya and Von Herzen (1984), who introduced ray marching to solve the integral form of the RTE [G]. The distinction between solving the differential equations (optical models) and the numerical integration methods (scattering solvers) became a primary organizational principle in graphics literature as rendering techniques diverged into offline photorealism and real-time approximation [G].
+## Sources
+[S1] Williams, L. "Casting Curved Shadows on Curved Surfaces." SIGGRAPH 1978.
+[S2] Jarosz, R. "A Survey of Volume Rendering Techniques." Technical Report, Brown University, 2008.
+[S3] Beer, A. "Bestimmung der Absorption des rothen Lichts in farbigen Flüssigkeiten." Annalen der Physik, 1852.
+[S5] Kajiya, J. T., and Von Herzen, B. P. "Ray Tracing Volume Densities." SIGGRAPH 1984.

@@ -1,0 +1,505 @@
+**VoxelNet**: End-to-End Learning for Point Cloud Based 3D Object Detection
+
+
+## Paper Review
+## Abstract
+- **Previous methods** : LiDAR data를 RRN(Region Proposal Network)에 넣기 위해 hand-crafted feature 제작
+- **VoxelNet** : feature extraction과 bbox prediction을 single stage로 통합한 end-to-end network 제안
+  - PC data를 같은 간격의 **3D Voxel**로 쪼갬 (Voxel Partition)
+  - → **VFE layer** 통해 각 voxel 안의 points로 Voxel feature 제작
+  - → **3D conv layer** 통해 Local voxel feature를 통합 
+  - → **RPN** 통해 bbox 생성
+
+## 1. Introduction
+### 1.1 Related Work
+### 1.2 Contributions
+- End-to-end trainable deep network for pc-based 3D detection by VFE
+- Efficient implementation for sparse point structure and parallel processing on voxel grid (GPU)
+- SOTA results on KITTI benchmark (LiDAR-based car, pedestrian, cyclist detection)
+
+
+## 2. VoxelNet
+### [ VoxelNet Architecture ]
+![image](https://user-images.githubusercontent.com/83633885/199923538-0255b0bf-5bad-4a4d-98e3-3730b92f728b.png)
+
+### 1️⃣ Feature Learning Network
+**Voxel Partition**
+- To subdivide(voxelize) 3D space into equally spaced voxels
+- **3D voxel grid** : $[D', H', W']$  $(D'=D/v_D, H'=H/v_H, W'=W/v_W)$
+  - $D, H, W$ : LiDAR point가 분포하는  영역의 z축(위), y축(좌측), x축(전방) 길이
+  - $v_D, v_H, v_W$ : 단위 voxel의 z, y, x 방향 길이
+  - > In paper, $(v_D, v_H, v_W) = (0.4, 0.2, 0.2)$
+
+**Grouping**
+- LiDAR data : sparse 하며 voxel 마다 point 수 다름
+- 하나의 voxel grid 내에 있는 points를 같은 voxel group에 할당 → point group
+
+**Random Sampling**
+- Voxel마다 max point 개수 $T$ 정해 그 이상의 points 갖는 voxel에 대해 $T$개 Sampling
+- LiDAR sensor로 얻은 PC는 1 frame 당 100,000개 points
+- **Purposes** : computation ↓, point density imbalance ↓ (sampling bias ↓), variation to training
+
+**Stacked Voxel Feature Encoding (VFE)**
+- **Fig. VFE Layer-1**
+![image](https://user-images.githubusercontent.com/83633885/199923428-155edb3e-2f33-4d82-86ab-3e2ed7b4752a.png)
+- **Non-empty voxel containing $t$ LiDAR points** : $V = p_i = [x_i, y_i, z_i, r_i]^T\in\mathbb{R}^4$, $i=1...t$
+  - $x_i, y_i, z_i$ : XYZ coordinates for $i$-th point
+  - $r_i$ : received reflectance
+- **Input feature set (Point-wise Input)** : $V_{in} = \hat{p}_i= [x_i, y_i, z_i, r_i, x_i-v_x, y_i-v_y, z_i-v_z]^T\in\mathbb{R}^7$, $i=1...t$
+  - centroid 대한 각 points의  relative offset (=각 points의 feature)
+  - $(v_x, v_y, v_z)$ : centroid of all points in $V$ = local mean
+- **Point-wise Feature** :  Point-wise Input을 FCN에 통과시켜 feature space로 보낸 결과
+  - FCN = linear layer + BN + ReLU
+  - aggregating information from point features → encoding **shape of surface within voxel**  
+- **Locally Aggregated Feature**
+  - Point-wise Feature (=voxel 내 모든 points의 feature)에 element-wise max-pooling 수행한 결과
+- **Point-wise concatenated Feature** : $f_i^{out}\in\mathbb{R}^2m$
+  - Point-wise Feature와 Voxel-wise Feature를 concat한 결과 
+- **Output feature set** : $V_{out} = f_i^{out}$, $i=1...t$
+  - = **Point-wise Feature-1** → VFE Layer-2의 input
+- **Voxel-wise Feature**
+  - 모든 non-empty voxel은 같은 FCN으로 encoding
+  - VFE-layer를 stacking 하여 **voxel 내부 points의 shape information** 학습 가능
+  - $n(=2)$ VFE-layer를 통과한 후 얻어진 point-wise feature를 FCN과 Maxpooling에 통과시켜 얻은 최종 결과
+  - 3D points 만으로는 CNN 학습 hard → 3D space를 voxel로 쪼개 CNN 학습에 적합한 구조를 만들어 각 voxel의 feature 계산하여 Convolutional Middle Layers의 input으로 사용
+
+#### [Code] Feature Learning Network
+```python
+# Fully Connected Network
+class FCN(nn.Module):
+
+    def __init__(self,cin,cout):
+        super(FCN, self).__init__()
+        self.cout = cout
+        self.linear = nn.Linear(cin, cout)
+        self.bn = nn.BatchNorm1d(cout)
+
+    def forward(self,x):
+        # KK is the stacked k across batch
+        kk, t, _ = x.shape
+        x = self.linear(x.view(kk*t,-1))
+        x = F.relu(self.bn(x))
+        return x.view(kk,t,-1)
+
+# Voxel Feature Encoding (VFE) Layer
+class VFE(nn.Module):
+
+    def __init__(self,cin,cout):
+        super(VFE, self).__init__()
+        assert cout % 2 == 0
+        self.units = cout // 2
+        self.fcn = FCN(cin,self.units)
+
+    def forward(self, x, mask):
+        # point-wise feature
+        pwf = self.fcn(x)
+        #locally aggregated feature
+        laf = torch.max(pwf,1)[0].unsqueeze(1).repeat(1,cfg.T,1)
+        # point-wise concat feature
+        pwcf = torch.cat((pwf,laf),dim=2)
+        # apply mask
+        mask = mask.unsqueeze(2).repeat(1, 1, self.units * 2)
+        pwcf = pwcf * mask.float()
+
+        return pwcf
+
+# Stacked Voxel Feature Encoding
+class SVFE(nn.Module):
+
+    def __init__(self):
+        super(SVFE, self).__init__()
+        self.vfe_1 = VFE(7,32)
+        self.vfe_2 = VFE(32,128)
+        self.fcn = FCN(128,128)
+    def forward(self, x):
+        mask = torch.ne(torch.max(x,2)[0], 0)
+        x = self.vfe_1(x, mask)
+        x = self.vfe_2(x, mask)
+        x = self.fcn(x)
+        # element-wise max pooling
+        x = torch.max(x,1)[0]
+        return x
+```
+
+**Sparse Tensor Representation**
+- pc ~ 100k points → 90%이상이 empty voxel
+- non-empty voxel features를 sparse tensor로 표현 (list 형태)
+- backprop에서 memory usage & computation cost ↓
+
+
+### 2️⃣ Convolutional Middle Layers
+- Input : voxel-wise feature 
+- CML = 3D CNN + BN + ReLU
+- In paper, 3 CML
+- receptive field를 넓히면서 voxel-wise features를 aggregation
+
+#### [Code] Convolutional Middle Layer
+```python
+# conv3d + bn + relu
+class Conv3d(nn.Module):
+    def __init__(self, in_channels, out_channels, k, s, p, batch_norm=True):
+        super(Conv3d, self).__init__()
+        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size=k, stride=s, padding=p)
+        if batch_norm:
+            self.bn = nn.BatchNorm3d(out_channels)
+        else:
+            self.bn = None
+
+    def forward(self, x):
+        x = self.conv(x)
+        if self.bn is not None:
+            x = self.bn(x)
+
+        return F.relu(x, inplace=True)
+
+# Convolutional Middle Layer
+class CML(nn.Module):
+    def __init__(self):
+        super(CML, self).__init__()
+        self.conv3d_1 = Conv3d(128, 64, 3, s=(2, 1, 1), p=(1, 1, 1))
+        self.conv3d_2 = Conv3d(64, 64, 3, s=(1, 1, 1), p=(0, 1, 1))
+        self.conv3d_3 = Conv3d(64, 64, 3, s=(2, 1, 1), p=(1, 1, 1))
+
+    def forward(self, x):
+        x = self.conv3d_1(x)
+        x = self.conv3d_2(x)
+        x = self.conv3d_3(x)
+        return x
+```
+
+### 3️⃣ Region Proposal Network (RPN)
+![image](https://user-images.githubusercontent.com/83633885/199939531-ed58c7f2-2563-4814-b213-35ac512bea9e.png)
+- **Input** : CML로 얻은 64(channel) x 2(z) x 400(y) x 352(x) 형태의 4D feature map을 128 x 400 x 352 형태의 3D tensor로 reshaping한 BEV feature map
+- **Outputs** : 2-dim Probability score map (class score) & 14-dim Regression map (bbox regression)
+  - Probability score map (class score) : 각 anchor에 대해 해당 class가 맞을 확률(0, 1)
+  - Regression map (bbox regression) : bbox parameter 7개에 대한 regression 결과
+- **Layers** : Conv2D(input channel #, output channel #, kernel size, stride size, padding size)
+- **3 FC blocks**
+  - 각 block의 1st layer = stride 2 → feature map size를 1/2로 downsampling
+  - 각 block을 거쳐 나온 features를 같은 size로 upsampling 하여 concat
+  - 최종 high resol feature map을 Conv3D layer 통과 → Class Probability score map & bbox Regression map 
+
+#### [Code] Region Proposal Network (RPN)
+```python
+# conv2d + bn + relu
+class Conv2d(nn.Module):
+    def __init__(self,in_channels,out_channels,k,s,p, activation=True, batch_norm=True):
+        super(Conv2d, self).__init__()
+        self.conv = nn.Conv2d(in_channels,out_channels,kernel_size=k,stride=s,padding=p)
+        if batch_norm:
+            self.bn = nn.BatchNorm2d(out_channels)
+        else:
+            self.bn = None
+        self.activation = activation
+    def forward(self,x):
+        x = self.conv(x)
+        if self.bn is not None:
+            x=self.bn(x)
+        if self.activation:
+            return F.relu(x,inplace=True)
+        else:
+            return x
+
+# Region Proposal Network
+class RPN(nn.Module):
+    def __init__(self):
+        super(RPN, self).__init__()
+        self.block_1 = [Conv2d(128, 128, 3, 2, 1)]
+        self.block_1 += [Conv2d(128, 128, 3, 1, 1) for _ in range(3)]
+        self.block_1 = nn.Sequential(*self.block_1)
+
+        self.block_2 = [Conv2d(128, 128, 3, 2, 1)]
+        self.block_2 += [Conv2d(128, 128, 3, 1, 1) for _ in range(5)]
+        self.block_2 = nn.Sequential(*self.block_2)
+
+        self.block_3 = [Conv2d(128, 256, 3, 2, 1)]
+        self.block_3 += [nn.Conv2d(256, 256, 3, 1, 1) for _ in range(5)]
+        self.block_3 = nn.Sequential(*self.block_3)
+
+        self.deconv_1 = nn.Sequential(nn.ConvTranspose2d(256, 256, 4, 4, 0),nn.BatchNorm2d(256))
+        self.deconv_2 = nn.Sequential(nn.ConvTranspose2d(128, 256, 2, 2, 0),nn.BatchNorm2d(256))
+        self.deconv_3 = nn.Sequential(nn.ConvTranspose2d(128, 256, 1, 1, 0),nn.BatchNorm2d(256))
+
+        self.score_head = Conv2d(768, cfg.anchors_per_position, 1, 1, 0, activation=False, batch_norm=False)
+        self.reg_head = Conv2d(768, 7 * cfg.anchors_per_position, 1, 1, 0, activation=False, batch_norm=False)
+
+    def forward(self,x):
+        x = self.block_1(x)
+        x_skip_1 = x
+        x = self.block_2(x)
+        x_skip_2 = x
+        x = self.block_3(x)
+        x_0 = self.deconv_1(x)
+        x_1 = self.deconv_2(x_skip_2)
+        x_2 = self.deconv_3(x_skip_1)
+        x = torch.cat((x_0,x_1,x_2),1)
+        return self.score_head(x),self.reg_head(x)
+```
+
+### [ Loss Function ]
+![image](https://user-images.githubusercontent.com/83633885/199958457-3da7b296-4d1a-4282-8e5c-cb81ee143cd8.png)
+**Total Loss** = Normalized Classification Loss + Normalized Regression Loss
+
+**(1) $L_{cls}$** : Classification Loss by BCE loss
+- $p_i^{pos}, p_j^{neg}$ : softmax output for positive and negative anchor
+- $a_i^{pos}$, $i=1...N_{pos}$ : set of positive anchors (pre-defined bbox)
+  - GT bbox와의 IoU가 특정값보다 큰 anchors → score ~~1
+     > In paper, Car : 0.65, Pedestrian & Cyclist : 0.5 
+- $a_j^{neg}$, $j=1...N_{neg}$ : set of negative anchors
+  - GT bbox와의 IoU가 특정값보다 작은 anchors → score ~~0
+- $(x_c^g, y_c^g, z_c^g, l^g, w^g, h^g, \theta^g)$ : 3D GT bbox
+  - $x_c^g, y_c^g, z_c^g$ : center location = feature map location
+  - $l^g, w^g, h^g$ : length, width, height of box → class 마다 다름
+     > In paper, Car : (3.9, 1.6, 1.56) 
+  - $\theta^g$ : yaw rotation around Z-axis (0~2𝝅)
+     > In paper,  $\theta$ = 0, 𝝅/2 → anchor 2개 → Outputs : 2-dim & 14-dim
+
+**(2) $L_{reg}$** : Regression Loss by SmoothL1 loss
+- $u_i\in\mathbb{R}^7$ : regression output 
+- $u_i^*\in\mathbb{R}^7$ : GT for positive anchor
+- $u^*\in\mathbb{R}^7$ : residual vector 
+![image](https://user-images.githubusercontent.com/83633885/199958396-7604f045-0731-41d1-877d-7c9b6f27efec.png)
+
+#### [Code] Loss function
+```python
+class VoxelLoss(nn.Module):
+    def __init__(self, alpha, beta):
+        super(VoxelLoss, self).__init__()
+        self.smoothl1loss = nn.SmoothL1Loss(size_average=False)
+        self.alpha = alpha
+        self.beta = beta
+
+    def forward(self, rm, psm, pos_equal_one, neg_equal_one, targets):
+
+        p_pos = F.sigmoid(psm.permute(0,2,3,1))
+        rm = rm.permute(0,2,3,1).contiguous()
+        rm = rm.view(rm.size(0),rm.size(1),rm.size(2),-1,7)
+        targets = targets.view(targets.size(0),targets.size(1),targets.size(2),-1,7)
+        pos_equal_one_for_reg = pos_equal_one.unsqueeze(pos_equal_one.dim()).expand(-1,-1,-1,-1,7)
+
+        rm_pos = rm * pos_equal_one_for_reg
+        targets_pos = targets * pos_equal_one_for_reg
+
+        cls_pos_loss = -pos_equal_one * torch.log(p_pos + 1e-6)
+        cls_pos_loss = cls_pos_loss.sum() / (pos_equal_one.sum() + 1e-6)
+
+        cls_neg_loss = -neg_equal_one * torch.log(1 - p_pos + 1e-6)
+        cls_neg_loss = cls_neg_loss.sum() / (neg_equal_one.sum() + 1e-6)
+
+        reg_loss = self.smoothl1loss(rm_pos, targets_pos)
+        reg_loss = reg_loss / (pos_equal_one.sum() + 1e-6)
+        conf_loss = self.alpha * cls_pos_loss + self.beta * cls_neg_loss
+        return conf_loss, reg_loss
+```
+
+### 2.3 Efficient Implementation
+![image](https://user-images.githubusercontent.com/83633885/199962920-00fc7bdb-c9ac-4f0c-a138-e05dabf71598.png)
+- $K$ : non-empty voxels의 최대 개수
+- $T$ : 각 voxel이 가질 수 있는 point의 최대 개수
+
+**Steps**
+- ( $K$ x $T$ x $1$ )-dim Voxel Coordinate Buffer(VCB) 와 ( $K$ x $T$ x $7$ )-dim Voxel Input Feature Buffer(VIFB) 초기화
+- Sparse한 Input PC를 Stacked VFE-layers에 넣기 전, VIFB에 통과시켜 Dense한 형태로 바꿈 & 빈 공간은 0으로 채움 → GPU parallel 연산 가능
+  - points를 돌면서 해당 point가 속한 voxel이 초기화된 적이 없다면, voxel의 coordinate를 VCB에 추가 
+  - & 해당 point를 7-dim vector로 만들어 VIFB의 해당 voxel 위치에 추가
+- Stacked VFE-layers를 통과한 Voxel-wise Feature들을 VCB를 이용해 3D space 상의 Sparse tensor로 mapping
+- Sparse tensor는 middle conv layer와 RPN으로 들어감
+
+#### [Code] Efficient VoxelNet
+```python
+class VoxelNet(nn.Module):
+
+    def __init__(self):
+        super(VoxelNet, self).__init__()
+        self.svfe = SVFE()
+        self.cml = CML()
+        self.rpn = RPN()
+
+    def voxel_indexing(self, sparse_features, coords):
+        dim = sparse_features.shape[-1]
+        dense_feature = Variable(torch.zeros(dim, cfg.N, cfg.D, cfg.H, cfg.W).cuda())
+        dense_feature[:, coords[:,0], coords[:,1], coords[:,2], coords[:,3]]= sparse_features
+        return dense_feature.transpose(0, 1)
+
+    def forward(self, voxel_features, voxel_coords):
+        # feature learning network
+        vwfs = self.svfe(voxel_features)
+        vwfs = self.voxel_indexing(vwfs,voxel_coords)
+
+        # convolutional middle network
+        cml_out = self.cml(vwfs)
+
+        # region proposal network
+        # merge the depth and feature dim into one, output probability score map and regression map
+        psm,rm = self.rpn(cml_out.view(cfg.N,-1,cfg.H, cfg.W))
+
+        return psm, rm
+```
+
+## 3. Training Details
+### Data Augmentation
+- Less than 4000 training PC → Overfitting issue
+- **1) Perturbation (Rotation and Translation) to each GT bbox**
+  - bbox center를 중심으로 [-π/10, π/10] uniform distribution에서 sampling한 각도만큼 **Rotation**
+  - (x, y, z) 방향으로 각각 (0,1) Gaussian distribution에서 sampling한 값만큼 **Translation** 
+  - Collision test bw two boxes → collision 있으면 원래대로 되돌림
+- **2) Global Scaling**
+  - All GT bbox $b_i$와 whole PC $M$에 대해 [0.95, 1.05] uniform distribution에서 sampling한 값만큼 **Scaling**
+  - Result : Robustness ↑ for detecting objects with various sizes and distances
+- **3) Global Rotation**
+  - All GT bbox $b_i$와 whole PC $M$에 대해 [-π/4, π/4] uniform distribution에서 sampling한 각도만큼 (0,0,0)을 중심으로 Z-axis로 **Rotation**
+  - Result : rotating entire pc → simulating vehicle making a turn
+  - 1 : 개별 bbox, 3 : 전체 scene
+
+#### [Code] Data Augmentation
+```python
+def draw_polygon(img, box_corner, color = (255, 255, 255),thickness = 1):
+
+    tup0 = (box_corner[0, 1],box_corner[0, 0])
+    tup1 = (box_corner[1, 1],box_corner[1, 0])
+    tup2 = (box_corner[2, 1],box_corner[2, 0])
+    tup3 = (box_corner[3, 1],box_corner[3, 0])
+    cv2.line(img, tup0, tup1, color, thickness, cv2.LINE_AA)
+    cv2.line(img, tup1, tup2, color, thickness, cv2.LINE_AA)
+    cv2.line(img, tup2, tup3, color, thickness, cv2.LINE_AA)
+    cv2.line(img, tup3, tup0, color, thickness, cv2.LINE_AA)
+    return img
+
+def point_transform(points, tx, ty, tz, rx=0, ry=0, rz=0):
+    # Input:
+    #   points: (N, 3)
+    #   rx/y/z: in radians
+    # Output:
+    #   points: (N, 3)
+    N = points.shape[0]
+    points = np.hstack([points, np.ones((N, 1))])
+    mat1 = np.eye(4)
+    mat1[3, 0:3] = tx, ty, tz
+    points = np.matmul(points, mat1)
+    if rx != 0:
+        mat = np.zeros((4, 4))
+        mat[0, 0] = 1
+        mat[3, 3] = 1
+        mat[1, 1] = np.cos(rx)
+        mat[1, 2] = -np.sin(rx)
+        mat[2, 1] = np.sin(rx)
+        mat[2, 2] = np.cos(rx)
+        points = np.matmul(points, mat)
+    if ry != 0:
+        mat = np.zeros((4, 4))
+        mat[1, 1] = 1
+        mat[3, 3] = 1
+        mat[0, 0] = np.cos(ry)
+        mat[0, 2] = np.sin(ry)
+        mat[2, 0] = -np.sin(ry)
+        mat[2, 2] = np.cos(ry)
+        points = np.matmul(points, mat)
+    if rz != 0:
+        mat = np.zeros((4, 4))
+        mat[2, 2] = 1
+        mat[3, 3] = 1
+        mat[0, 0] = np.cos(rz)
+        mat[0, 1] = -np.sin(rz)
+        mat[1, 0] = np.sin(rz)
+        mat[1, 1] = np.cos(rz)
+        points = np.matmul(points, mat)
+    return points[:, 0:3]
+
+def box_transform(boxes_corner, tx, ty, tz, r=0):
+    # boxes_corner (N, 8, 3)
+    for idx in range(len(boxes_corner)):
+        boxes_corner[idx] = point_transform(boxes_corner[idx], tx, ty, tz, rz=r)
+    return boxes_corner
+
+def cal_iou2d(box1_corner, box2_corner):
+    box1_corner = np.reshape(box1_corner, [4, 2])
+    box2_corner = np.reshape(box2_corner, [4, 2])
+    box1_corner = ((cfg.W, cfg.H)-(box1_corner - (cfg.xrange[0], cfg.yrange[0])) / (cfg.vw, cfg.vh)).astype(np.int32)
+    box2_corner = ((cfg.W, cfg.H)-(box2_corner - (cfg.xrange[0], cfg.yrange[0])) / (cfg.vw, cfg.vh)).astype(np.int32)
+
+    buf1 = np.zeros((cfg.H, cfg.W, 3))
+    buf2 = np.zeros((cfg.H, cfg.W, 3))
+    buf1 = cv2.fillConvexPoly(buf1, box1_corner, color=(1,1,1))[..., 0]
+    buf2 = cv2.fillConvexPoly(buf2, box2_corner, color=(1,1,1))[..., 0]
+
+    indiv = np.sum(np.absolute(buf1-buf2))
+    share = np.sum((buf1 + buf2) == 2)
+    if indiv == 0:
+        return 0.0 # when target is out of bound
+    return share / (indiv + share)
+
+def aug_data(lidar, gt_box3d_corner):
+    np.random.seed()
+
+    choice = np.random.randint(1, 10)
+
+    if choice >= 7:
+        for idx in range(len(gt_box3d_corner)):
+            # TODO: precisely gather the point
+            is_collision = True
+            _count = 0
+            while is_collision and _count < 100:
+                t_rz = np.random.uniform(-np.pi / 10, np.pi / 10)
+                t_x = np.random.normal()
+                t_y = np.random.normal()
+                t_z = np.random.normal()
+
+                # check collision
+                tmp = box_transform(
+                    gt_box3d_corner[[idx]], t_x, t_y, t_z, t_rz)
+                is_collision = False
+                for idy in range(idx):
+                    iou = cal_iou2d(tmp[0,:4,:2],gt_box3d_corner[idy,:4,:2])
+                    if iou > 0:
+                        is_collision = True
+                        _count += 1
+                        break
+            if not is_collision:
+                box_corner = gt_box3d_corner[idx]
+                minx = np.min(box_corner[:, 0])
+                miny = np.min(box_corner[:, 1])
+                minz = np.min(box_corner[:, 2])
+                maxx = np.max(box_corner[:, 0])
+                maxy = np.max(box_corner[:, 1])
+                maxz = np.max(box_corner[:, 2])
+                bound_x = np.logical_and(
+                    lidar[:, 0] >= minx, lidar[:, 0] <= maxx)
+                bound_y = np.logical_and(
+                    lidar[:, 1] >= miny, lidar[:, 1] <= maxy)
+                bound_z = np.logical_and(
+                    lidar[:, 2] >= minz, lidar[:, 2] <= maxz)
+                bound_box = np.logical_and(
+                    np.logical_and(bound_x, bound_y), bound_z)
+                lidar[bound_box, 0:3] = point_transform(
+                    lidar[bound_box, 0:3], t_x, t_y, t_z, rz=t_rz)
+                gt_box3d_corner[idx] = box_transform(
+                    gt_box3d_corner[[idx]], t_x, t_y, t_z, t_rz)
+
+        gt_box3d = gt_box3d_corner
+
+    elif choice < 7 and choice >= 4:
+        # global rotation
+        angle = np.random.uniform(-np.pi / 4, np.pi / 4)
+        lidar[:, 0:3] = point_transform(lidar[:, 0:3], 0, 0, 0, rz=angle)
+        gt_box3d = box_transform(gt_box3d_corner, 0, 0, 0, r=angle)
+
+    else:
+        # global scaling
+        factor = np.random.uniform(0.95, 1.05)
+        lidar[:, 0:3] = lidar[:, 0:3] * factor
+        gt_box3d = gt_box3d_corner * factor
+
+    return lidar, gt_box3d
+```
+
+## 4. Experiments
+### Evaluation on KITTI benchmark dataset
+![image](https://user-images.githubusercontent.com/83633885/200025431-9a2acc16-b248-467f-97d6-ee0322a6b6eb.png)
+- VoxelNet outperforms all other methods for Car class
+- VoxelNet is more effective in capturing 3D shape information than HC features
+
+
+
+## Code Review
+- reference : https://github.com/skyhehe123/VoxelNet-pytorch
+

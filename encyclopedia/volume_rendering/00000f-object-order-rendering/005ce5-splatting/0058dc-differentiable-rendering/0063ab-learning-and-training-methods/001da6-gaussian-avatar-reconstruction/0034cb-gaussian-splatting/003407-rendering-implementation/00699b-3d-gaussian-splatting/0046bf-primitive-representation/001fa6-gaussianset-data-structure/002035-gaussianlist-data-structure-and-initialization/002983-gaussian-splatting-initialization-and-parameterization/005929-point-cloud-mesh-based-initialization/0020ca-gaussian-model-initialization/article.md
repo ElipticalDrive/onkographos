@@ -1,0 +1,207 @@
+# Gaussian Model Initialization
+
+
+## Overview
+Gaussian Model Initialization establishes the initial state of a 3D Gaussian Splatting (3DGS) scene by mapping input geometric primitives—typically a sparse point cloud from Structure-from-Motion (SfM) or LiDAR—into the learnable parameters of the Gaussian set. It solves the problem of defining a valid, differentiable starting configuration for optimization, ensuring that positions, colors, opacities, and covariances are set to values that allow stable gradient propagation without early overconfidence [S1][S3, unofficial]. It differs from its parent method, Point Cloud/Mesh-based Initialization, by providing the specific implementation details of the standard 3DGS initialization pipeline, including the exact tensor layouts and default hyperparameters used in the reference implementation [S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A point cloud $\{p_i\}$ where each point $i$ has a 3D position $\mathbf{p}_i \in \mathbb{R}^3$ and an RGB color $\mathbf{c}_i \in \mathbb{R}^3$. Optional inputs include surface normals (if available) or depth information.
+*   **Output:** A `GaussianModel` data structure containing tensors for positions (`_xyz`), rotations (`_quats`), scales (`_scales`), opacities (`_opacity`), and spherical harmonic coefficients (`_features_dc`, `_features_rest`).
+
+**Data Structures:**
+The model maintains the following tensors (based on the reference implementation [S3, unofficial]):
+*   `_xyz`: Float tensor of shape $(N, 3)$, storing the center coordinates of $N$ Gaussians.
+*   `_quats`: Float tensor of shape $(N, 4)$, storing unit quaternions $(w, x, y, z)$ for rotation.
+*   `_scales`: Float tensor of shape $(N, 3)$, storing the logarithmic scale parameters $(\log s_x, \log s_y, \log s_z)$.
+*   `_opacity`: Float tensor of shape $(N, 1)$, storing the raw opacity parameter $\alpha_{raw}$.
+*   `_features_dc`: Float tensor of shape $(N, 1, 3)$, storing the zeroth-order spherical harmonic coefficients (RGB).
+*   `_features_rest`: Float tensor of shape $(N, 15, 3)$, storing higher-order SH coefficients (zero-initialized).
+
+**Steps:**
+1.  **Position Mapping:** Assign the input point cloud coordinates directly to `_xyz`.
+    $$ \mathbf{xyz}_i = \mathbf{p}_i $$
+2.  **Rotation Initialization:** Initialize all rotation quaternions to the identity quaternion, implying an initial isotropic orientation.
+    $$ \mathbf{quats}_i = (1, 0, 0, 0) $$
+    *Note:* If local surface normals are available (e.g., from LiDAR or mesh), the rotation can be aligned to the normal frame using local PCA [S7].
+3.  **Color Initialization:** Set the zeroth-order SH coefficient to the input RGB color. Higher-order coefficients are zero-initialized.
+    $$ \mathbf{features\_dc}_i = \mathbf{c}_i $$
+    $$ \mathbf{features\_rest}_i = \mathbf{0} $$
+4.  **Scale Estimation:** Compute initial scales based on local density. A common heuristic is to use the median distance to the $k$-nearest neighbors ($k_{nn}$) of each point.
+    $$ s_i = \text{median}(\{ \|\mathbf{p}_i - \mathbf{p}_j\|_2 \mid j \in \text{NN}_k(\mathbf{p}_i) \}) $$
+    The scale tensor stores the logarithm:
+    $$ \mathbf{scales}_i = \log(s_i) $$
+    *Alternative:* For volumetric data, scales may be derived from depth or focal length [S1].
+5.  **Opacity Initialization:** Initialize opacity to a low value to prevent early overconfidence. The raw parameter is typically set to $\approx -2.197$, which corresponds to an opacity of $0.1$ after the sigmoid activation.
+    $$ \alpha_{raw, i} = -2.197 $$
+    $$ \mathbf{opacity}_i = \alpha_{raw, i} $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+
+def initialize_gaussian_model(points_xyz, points_rgb, k_nn=20):
+    """
+    Initialize a Gaussian Model from a point cloud.
+    
+    Args:
+        points_xyz: numpy array of shape (N, 3)
+        points_rgb: numpy array of shape (N, 3) with values in [0, 1]
+        k_nn: Number of nearest neighbors for scale estimation
+        
+    Returns:
+        model: Dictionary-like object with tensors _xyz, _quats, _scales, _opacity, _features_dc, _features_rest
+    """
+    N = points_xyz.shape[0]
+    
+    # 1. Position Mapping
+    xyz = torch.tensor(points_xyz, dtype=torch.float32)
+    
+    # 2. Rotation Initialization (Identity)
+    quats = torch.zeros(N, 4, dtype=torch.float32)
+    quats[:, 0] = 1.0  # w=1, x=0, y=0, z=0
+    
+    # 3. Color Initialization
+    features_dc = torch.tensor(points_rgb, dtype=torch.float32).unsqueeze(1) # Shape (N, 1, 3)
+    features_rest = torch.zeros(N, 15, 3, dtype=torch.float32)
+    
+    # 4. Scale Estimation (KNN heuristic)
+    # Compute pairwise distances to find k-nearest neighbors
+    # Note: In practice, use a KDTree for efficiency
+    dists = torch.cdist(xyz, xyz, p=2)
+    # Exclude self (distance 0) by setting diagonal to inf
+    dists[torch.arange(N), torch.arange(N)] = float('inf')
+    # Get k_nn smallest distances
+    k_nn_dists, _ = torch.topk(dists, k_nn, dim=1, largest=False)
+    # Median distance (k_nn is odd for median, or use mean if even)
+    scales_log = torch.log(k_nn_dists[:, k_nn // 2]) # Shape (N,)
+    scales = scales_log.unsqueeze(1) # Shape (N, 1)
+    
+    # 5. Opacity Initialization
+    # -2.197 corresponds to sigmoid(-2.197) ≈ 0.1
+    opacity = torch.full((N, 1), -2.197, dtype=torch.float32)
+    
+    # Construct model
+    model = {
+        '_xyz': xyz,
+        '_quats': quats,
+        '_scales': scales,
+        '_opacity': opacity,
+        '_features_dc': features_dc,
+        '_features_rest': features_rest
+    }
+    
+    # Validate covariance symmetry (G)
+    # Covariance = R * S * S^T * R^T
+    # With identity rotation and log-scales, S is diagonal.
+    # Check if the resulting covariance matrix is symmetric
+    # This is a sanity check, not part of initialization logic
+    cov = compute_covariance(model)
+    assert torch.allclose(cov[0], cov[0].T, atol=1e-6), "Covariance must be symmetric"
+    
+    return model
+
+def compute_covariance(model):
+    """Helper to compute covariance from quats and scales for validation."""
+    # Extract rotation matrix from quaternion
+    # Extract scale matrix from log-scales
+    # Cov = R @ diag(exp(scales)) @ diag(exp(scales)) @ R.T
+    # This is a placeholder for the actual matrix math
+    pass
+```
+
+**Parameters:**
+*   **Learning Rate for `_xyz`:** 0.00016 [S3, unofficial].
+*   **Learning Rate for `_features_dc`:** 0.0025 [S3, unofficial].
+*   **Initial Opacity Raw Value:** -2.197 (Opacity $\approx 0.1$) [S3, unofficial].
+*   **K-Nearest Neighbors ($k_{nn}$):** 20 is a common default for scale estimation [S7].
+
+**Edge Cases and Pitfalls:**
+*   **Covariance Symmetry:** The covariance matrix computed from scaling and rotation must be symmetric. Implementation must ensure that the rotation matrix is orthonormal and the scale matrix is diagonal to maintain this property [S3, unofficial].
+*   **Boundary Conditions:** If the point cloud is sparse, KNN-based scale estimation may yield large initial scales, causing excessive overlap. Conversely, dense clusters may yield tiny scales, leading to under-representation.
+*   **Missing Normals:** Standard SfM point clouds (e.g., from COLMAP) lack surface normals. Rotation must default to identity or be estimated via local PCA [S7].
+
+## Subtopics
+
+### [Angle-pose Cuboid Uniform Initialization (ACUI)](4503-angle-pose-cuboid-uniform-initialization-acui.md)
+Angle-pose Cuboid Uniform Initialization (ACUI) is a deterministic initialization strategy for 3D Gaussian Splatting in X-ray novel view synthesis that replaces Structure-from-Motion (SfM) by computing camera parameters directly from scanner specifications and uniformly sampling Gaussian centers within a bounding cuboid. It solves the problem of feature detection failure in low-contrast, overlapping X-ray projections, offering a significant reduction in training time compared to SfM-based initialization.
+
+### [DreamGaussian](5998-dreamgaussian.md)
+DreamGaussian is a text-to-3D generation method that replaces the MipNeRF representation in the DreamFusion framework with 3D Gaussian Splatting (3DGS), using Score Distillation Sampling (SDS) loss to optimize 3D Gaussians. It distinguishes itself from its parent method, Gaussian Model Initialization, by providing a complete generative pipeline that not only initializes but fully optimizes a textured 3D asset from text prompts, leveraging the efficient splitting process of 3DGS to accelerate optimization. Unlike standard NeRF-based generation, it extracts a mesh from the generated Gaussians and refines texture details via UV-texture diffusion, enabling high-quality textured mesh generation in approximately 2 minutes.
+
+### [PhysGaussian](6002-physgaussian.md)
+PhysGaussian couples 3D Gaussian Splatting (3DGS) with continuum mechanics, specifically the Material Point Method (MPM), to enable the simulation of physical dynamics such as deformation, fracture, and fluid flow. It provides a unified representation for both high-fidelity rendering and physics simulation, supporting materials like cloth, jelly, sand, and snow. Unlike variants that convert Gaussians to meshes for simulation (e.g., GASP), PhysGaussian applies MPM directly over the Gaussian primitives, allowing for differentiable physical interactions within the Gaussian representation.
+
+### [GaussianEditor](6004-gaussianeditor.md)
+GaussianEditor is a text-driven local editing method for 3D Gaussian Splatting (3DGS) that leverages 2D image-editing models to drive updates of 3D Gaussians. It solves the problem of localized appearance and geometry modification by repeatedly rendering GS views, applying 2D edits, and back-propagating the differences to Gaussian parameters. It is distinguished from sibling methods like [Spherical Harmonics Initialization](3163-spherical-harmonics-initialization.md) or [DreamGaussian](5998-dreamgaussian.md) by its specific use of Hierarchical Gaussian Semantic Tracing (HGS) for adaptive generative guidance and its iterative refinement loop.
+
+### [Gaussian Asset Generation](7625-gaussian-asset-generation.md)
+Gaussian Asset Generation is a deterministic method for creating a reproducible 3D Gaussian Splatting PLY asset, specifically a dense "rainbow sphere" shell, without using randomness or external data. It solves the problem of needing a standardized, visually recognizable test asset for validating parsers and renderers (such as SceneView's PlyParser) by generating a synthetic point cloud with specific color, scale, opacity, and rotation parameters. It differs from other initialization methods like [Gaussian Model Initialization](2349-gaussian-model-initialization.md) or [DreamGaussian](5998-dreamgaussian.md) by being purely synthetic and deterministic, rather than derived from input images or learned optimization.
+
+### [Learning-based and Generative Initialization](12356-learning-based-and-generative-initialization.md)
+Learning-based and Generative Initialization methods initialize 3D Gaussian Splatting parameters using data-driven priors or learned latent representations rather than heuristic geometric heuristics. This approach solves the problem of poor convergence and structural incoherence in scenes with sparse or ambiguous input data by providing a structured starting point that respects the underlying scene topology. It differs from sibling methods like [Angle-pose Cuboid Uniform Initialization (ACUI)](4503-angle-pose-cuboid-uniform-initialization-acui.md) and [Sparse and Efficient Initialization](12944-sparse-and-efficient-initialization.md) by replacing explicit geometric rules with neural network decoding or optimization-based latent mapping.
+
+### [Sparse and Efficient Initialization](12944-sparse-and-efficient-initialization.md)
+Sparse and Efficient Initialization establishes a computationally lightweight starting state for 3D Gaussian Splatting by initializing primitives within the visible camera frustum with low opacity and small scales, avoiding the computational overhead of dense scene coverage. It solves the problem of slow convergence and sub-optimal local minima caused by poor initial placement or high initial reflectivity, which leads to interference from closer splats. It sets itself apart from its siblings by focusing on the *initial placement* and *static pre-training* phase rather than iterative refinement (Recurrent Gaussian Update) or uniform density generation (Dense Initialization). It builds on [Gaussian Model Initialization](2349-gaussian-model-initialization.md).
+
+### [Geometry-Aware and Surface-Aligned Initialization](15765-geometry-aware-and-surface-aligned-initialization.md)
+
+### [Gaussian Sampling for Surface Patch Anchors](16541-gaussian-sampling-for-surface-patch-anchors.md)
+This method creates a denser, more continuous surface representation than single-point ray intersection by pulling randomly sampled queries around 3D anchor points derived from back-projected geometry cues. It solves the problem of sparse geometric supervision by defining an isotropic Gaussian distribution around each anchor to sample a local surface patch, which is significantly more geometry-aware than single-point intersection or simple depth patch back-projection. Unlike its siblings, it explicitly models the local surface neighborhood via statistical sampling rather than uniform grid or mesh-based distribution, enabling patch-level photo consistency which achieves better performance than pixel-level consistency.
+
+### [Parameter and Coordinate Initialization](17024-parameter-and-coordinate-initialization.md)
+Parameter and Coordinate Initialization establishes the initial values for learnable attributes of 3D Gaussian primitives, including spherical harmonic coefficients, sampling coordinates, and material parameters, before the optimization process begins. It differs from sibling methods by focusing on the specific numerical setup of internal state variables (such as SH coefficients and feature sampling matrices) rather than the geometric placement of the Gaussians themselves.
+
+### [Mesh-based Initialization](17462-mesh-based-initialization.md)
+Mesh-based initialization converts a polygonal mesh into a set of 3D Gaussian splats to serve as the starting point for optimization or rendering. It solves the problem of establishing a geometric prior for Gaussian Splatting when a high-quality surface representation is already available, leveraging the explicit nature of Gaussians to support user-guided generation or scene-level inverse rendering. It differs from sibling methods like [Angle-pose Cuboid Uniform Initialization (ACUI)](4503-angle-pose-cuboid-uniform-initialization-acui.md) by deriving positions from continuous surface geometry rather than volumetric bounding boxes, and from [Learning-based and Generative Initialization](12356-learning-based-and-generative-initialization.md) by relying on deterministic geometric sampling rather than neural priors.
+
+### R2-Gaussian Initialization
+R2-Gaussian Initialization is a method for initializing 3D Gaussians from volumetric tomography data where SfM is not applicable. It uses a Fast Feldkamp-Davis-Kress (FDK) algorithm to reconstruct a low-quality volume in under 1 second [S4]. Empty spaces are excluded using a density threshold $\tau$ (typically 0.05), and $M$ points (typically 50k) are randomly sampled as kernel positions [S4]. Scales are set to the nearest neighbor distances, and rotation is assumed to be identity. Central densities are queried from the FDK volume and scaled down by a factor $k$ (typically 0.15) to compensate for kernel overlay [S4].
+
+### Persistent Material Descriptors
+Persistent Material Descriptors attach samples $(m_{ik}, b_{ik})$ with weights based on initial Gaussian support at sampled voxels, keeping identifiers and weights fixed during optimization [S5, unofficial]. The weight $w_{ik}$ is computed as:
+$$ w_{ik} \propto \exp\left(-\frac{1}{2}(\mathbf{x}_{ik} - \boldsymbol{\mu}_i)^\top \Sigma_i^{-1}(\mathbf{x}_{ik} - \boldsymbol{\mu}_i)\right), \quad \sum_k w_{ik} = 1 $$
+where $(\boldsymbol{\mu}_i, \Sigma_i)$ are the initial center and covariance, and $\mathbf{x}_{ik}$ is a sampled voxel center [S5, unofficial]. This makes the descriptor scale-aware: sub-voxel primitives concentrate on their own material, while larger primitives integrate over their footprint [S5, unofficial]. Clone and split children inherit descriptors from the nearest pre-existing primitive, and pruning applies one mask to all attributes [S5, unofficial].
+
+### GMM to Fuzzy Metaball Conversion
+Methods to convert other representations (meshes, point clouds) into Fuzzy Metaballs (Gaussian Mixture Models) by fitting a GMM. Two types are described: surface GMM (sGMM) and volumetric GMM (vGMM) [S6]. To build sGMM, points are sampled from the object surface and fit with EM [S6]. To build vGMM, points are sampled from the interior of a watertight mesh and fit with EM [S6]. The resulting GMM is optimized using a differentiable renderer, and a mesh can be extracted via marching cubes with an optimized iso-surface level [S6]. Experiments show both work well, but vGMM is often preferred [S6].
+
+### DART Initialization
+DART Initialization rewrites the SfM cloud $P$ into an augmented cloud $P_{aug}$ using a replication multiplier $m$ (default 10) [S7]. Each augmented point becomes one 3D Gaussian. Covariance is estimated from local point density using a local-PCA neighborhood of size $K_{nn}=20$ [S7]. Opacity is initialized at 0.1, and color from the SfM color [S7]. Tangent-disk radius bounds are $\rho_{min}=0.008$ and $\rho_{max}=0.04$ (fractions of scene radius $R$) [S7]. Weiszfeld iterations count $T_w=8$ [S7]. A pitfall is that COLMAP point clouds lack usable normals, so surface normals for tangent frames are estimated via local PCA [S7].
+
+### Mixed-Primitive-Based Initialization
+An initialization strategy designed to support mixed-primitive-based learning, as standard initialization is incompatible with mixed primitives [S8, unofficial]. It initializes the scene using mixed types of primitives (elliptical and non-elliptical) [S8, unofficial].
+
+### Photometric Stereo Gaussian Splatting Initialization
+A calibrated photometric stereo method that reconstructs 3D surface normals and albedo by optimizing a 3D Gaussian Splatting representation of the scene using inverse rendering, specifically designed for single-view scenarios where traditional Structure-from-Motion initialization is not possible [S9, unofficial]. It initializes the scene by placing one 3D Gaussian per pixel on a planar grid at $z=0$ [S9, unofficial]. The initial color attribute is set to the maximum intensity observed across all input images with different lighting conditions for that pixel location [S9, unofficial]. The color of a pixel $x$ is computed via alpha blending:
+$$ c(x) = \frac{\tilde{c}_k \tilde{\boldsymbol{\eta}}_k G_{\tilde{b}_k}(x)}{\tilde{\boldsymbol{\eta}}_k} \bigoplus_{k=1}^K \tilde{\boldsymbol{\eta}}_k G_{\tilde{b}_k}(x) \bigoplus_{j=1}^{k-1} (1 - \tilde{\boldsymbol{\eta}}_j G_{\tilde{b}_j}(x)) $$
+where $\tilde{\boldsymbol{\eta}}_k$ is opacity and $\tilde{c}_k$ is view-dependent color [S9, unofficial].
+
+### SplatFace
+SplatFace initializes Gaussians on a template mesh and jointly optimizes Gaussians and the mesh with a splat-to-mesh distance loss [S10, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Initialization is $O(N \log N)$ or $O(N^2)$ depending on the KNN implementation, where $N$ is the number of input points. This is negligible compared to the training time.
+*   **Memory Complexity:** $O(N)$ to store the Gaussian parameters.
+*   **Strengths:** Provides a robust, differentiable starting point that aligns with the input geometry. The low initial opacity prevents overfitting to noise.
+*   **Limitations:** Relies heavily on the quality of the input point cloud. Sparse or noisy SfM clouds can lead to poor initial coverage or artifacts.
+*   **When to Use:** Standard 3DGS reconstruction from multi-view images or LiDAR scans.
+*   **When Not to Use:** When no geometric prior is available (use uniform or learning-based initialization) or when working with volumetric data requiring specific tomographic initialization (use R2-Gaussian).
+
+## Background
+The standard Gaussian Model Initialization was introduced with the original 3D Gaussian Splatting paper by Kerbl et al. [S1]. It has since been adapted for various domains, including SLAM (LIVGaussMap, Gaussian-SLAM) [S1], avatar reconstruction (PSAvatar, GaussianAvatars) [S1], and medical imaging (FactorSplat, R2-Gaussian) [S4][S5, unofficial]. The method mimics the hierarchy of the OpenVDB Grid Tree in some scientific visualization contexts, producing a nested set of overlapping Gaussians [S2, unofficial].
+
+## Sources
+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S2] 3D Gaussian Particle Approximation of VDB Datasets: A Study for Scientific Visualization, https://www.emergentmind.com/papers/2504.04857, fetched 2026-10-29 (unofficial)
+[S3] metin-yat/mini-splat, https://github.com/metin-yat/mini-splat, fetched 2026-10-28 (unofficial)
+[S4] R$^2$-Gaussian: Rectifying Radiative Gaussian Splatting for Tomographic Reconstruction, https://arxiv.org/abs/2405.20693v2, fetched 2026-10-26
+[S5] FactorSplat: Appearance-Controllable Gaussian Proxies for Medical Volume Rendering, https://doi.org/10.48550/arxiv.2610.02382, fetched 2026-10-26 (unofficial)
+[S6] Approximate Differentiable Rendering with Algebraic Surfaces, https://doi.org/10.1007/978-3-031-19824-3_35, fetched 2026-10-26
+[S7] DART-3DGS: Distance-Aware Replication and Age-Gated Densification for 3D Gaussian Splatting, https://europepmc.org/article/PMC/PMC13705904, fetched 2026-10-27
+[S8] A Mixed-Primitive-based Gaussian Splatting Method for Surface Reconstruction, https://core.ac.uk/works/308836756, fetched 2026-10-30 (unofficial)
+[S9] Stéréophotométrie par Gaussian Splatting et rendu inverse, https://hal.science/hal-05151330v1, fetched 2026-10-26 (unofficial)
+[S10] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

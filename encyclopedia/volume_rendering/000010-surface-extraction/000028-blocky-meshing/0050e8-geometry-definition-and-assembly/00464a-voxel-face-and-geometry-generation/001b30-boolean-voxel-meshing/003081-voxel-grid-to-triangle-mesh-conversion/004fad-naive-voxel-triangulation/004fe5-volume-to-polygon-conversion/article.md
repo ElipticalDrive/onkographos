@@ -1,0 +1,92 @@
+# Volume-to-Polygon Conversion
+
+Also called: Voxel to Polygon
+
+## Overview
+Volume-to-Polygon Conversion is a surface extraction method that treats volumetric data as a collection of cubes (voxels) and generates polygonal geometry directly from voxel boundaries. It solves the problem of converting discrete voxel grids into renderable triangle meshes by analyzing neighbor relationships to determine surface visibility. It differs from its parent [Naive Voxel Triangulation](14035-naive-voxel-triangulation.md) by selectively generating faces only where voxel boundaries exist, rather than rendering every voxel as a full cube, and from [Marching Cubes](14036-marching-cubes.md) by using a simpler cube-surface approach that facilitates efficient Level of Detail (LOD) welding and adjacency generation, albeit at the cost of a block-like initial appearance.
+
+## How it works
+**Inputs:** A binary volume dataset (each voxel is set or unset) and a Clip-Box (CB) defining the region of interest.
+**Outputs:** A triangle mesh representing the surface of the set voxels.
+
+**Data Structures:**
+*   **Voxel:** A cube with six quadrilateral faces.
+*   **Clip-Box (CB):** A bounding volume enclosing a subset of the volume data. In LOD schemes, CBs are nested with exponentially increasing scale factors (e.g., $100^3, 200^3$) while containing a constant number of voxels per level.
+
+**Steps:**
+1.  **Iterate Voxels:** Visit every voxel enclosed by the current Clip-Box.
+2.  **Neighbor Check:** For each voxel, check its direct bounding neighbors in the positive x, y, and z directions.
+3.  **Surface Creation:** If a neighbor in a specific direction is unset (or outside the volume) while the current voxel is set, generate the corresponding quadrilateral surface. This avoids generating internal faces between two set voxels.
+4.  **LOD Welding:** To merge geometry between two LOD levels (nested Clip-Boxes), the algorithm considers all voxels in the bounding area of the two nested CBs to ensure seamless connections without gaps.
+5.  **Post-Processing:** Apply geometry smoothing to reduce the block-like appearance inherent to the voxel-based representation.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxel_to_polygon(volume, clip_box):
+    """
+    Converts a binary volume within a clip_box to a polygon mesh.
+    volume: 3D array where True indicates a set voxel.
+    clip_box: Defines the bounds of the region to process.
+    """
+    mesh = EmptyMesh()
+    
+    # Iterate over all voxels within the clip_box bounds
+    for x, y, z in clip_box.voxels():
+        if not volume[x, y, z]:
+            continue
+            
+        # Check positive x neighbor
+        if not volume.get(x + 1, y, z, default=False):
+            mesh.add_face(quad_face_x_positive(x, y, z))
+            
+        # Check positive y neighbor
+        if not volume.get(x, y + 1, z, default=False):
+            mesh.add_face(quad_face_y_positive(x, y, z))
+            
+        # Check positive z neighbor
+        if not volume.get(x, y, z + 1, default=False):
+            mesh.add_face(quad_face_z_positive(x, y, z))
+            
+    return mesh
+
+def quad_face_x_positive(x, y, z):
+    # Returns vertices for the face at x+1
+    # Vertices: (x+1, y, z), (x+1, y+1, z), (x+1, y+1, z+1), (x+1, y, z+1)
+    return [(x+1, y, z), (x+1, y+1, z), (x+1, y+1, z+1), (x+1, y, z+1)]
+
+def quad_face_y_positive(x, y, z):
+    # Returns vertices for the face at y+1
+    return [(x, y+1, z), (x+1, y+1, z), (x+1, y+1, z+1), (x, y+1, z+1)]
+
+def quad_face_z_positive(x, y, z):
+    # Returns vertices for the face at z+1
+    return [(x, y, z+1), (x+1, y, z+1), (x+1, y+1, z+1), (x, y+1, z+1)]
+```
+
+**Edge Cases and Pitfalls:**
+*   **Block-like Appearance:** The initial mesh consists of flat quadrilaterals aligned with the grid axes, resulting in a faceted, blocky look. This requires a post-processing geometry smoothing step to approximate curved surfaces.
+*   **LOD Gaps:** Naive conversion can leave breaks in geometry at Level of Detail boundaries. The algorithm must explicitly consider the bounding area of nested Clip-Boxes to weld these levels seamlessly.
+*   **Adjacency:** While simpler than Marching Cubes, generating adjacency information for post-processing (like smoothing) is still required.
+
+## Subtopics
+
+### Polygon-Based Volumetric Rendering
+A technique that treats data as regular-sized cubes with data values at each vertex, using data gradients during rendering but reverting to polygonal geometry to produce surfaces. It fits polygons to the voxel data and applies simple viewpoint transformations before rendering additional images. This enhances the capability to rapidly produce images from different viewpoints compared to methods requiring complex per-frame geometry reconstruction. It is distinct from ray-casting methods (like those by Marc Levoy) which do not use polygonal geometry.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of voxels within the Clip-Box, as each voxel is visited once and checked against three neighbors.
+*   **Memory Complexity:** Proportional to the number of surface voxels. Significantly less than naive voxel triangulation (which stores 6 faces per voxel) because internal faces are omitted.
+*   **Performance:** Fast conversion and efficient welding of LOD boundaries. The cube-surface approach allows for fast adjacency creation.
+*   **Strengths:** Simple implementation; efficient LOD welding; fast generation of adjacency information for post-processing.
+*   **Limitations:** Produces a block-like initial mesh that requires smoothing; less geometrically smooth than Marching Cubes or Marching Tetrahedra out-of-the-box.
+*   **When to use:** When LOD welding and adjacency generation are critical, and post-processing smoothing is acceptable.
+*   **When not to use:** When high geometric smoothness is required without post-processing, or when the volume data is not binary/voxel-aligned.
+
+## Background
+The method originates from work on visualizing large procedural volumetric terrains using nested Clip-Boxes. It was developed to address the inefficiencies of applying standard surface extraction algorithms (like Marching Cubes) to hierarchical voxel structures. The approach simplifies the conversion process by regarding each voxel as a cube with six quadrilateral surfaces, allowing for efficient welding of bounding LOD levels together seamlessly.
+
+## Sources
+[S1] Visualizing Large Procedural Volumetric Terrains Using Nested Clip-Boxes, https://waseda.repo.nii.ac.jp/records/19543, fetched 2026-10-26 (unofficial)
+[S2] DTIC ADA215533: Sampling Scattered Data Onto Rectangular Grids for Volume Visualization, https://archive.org/details/DTIC_ADA215533, fetched 2026-10-26 (unofficial)

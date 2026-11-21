@@ -1,0 +1,403 @@
+--- v005.md
++++ v006.md
+@@ -4,112 +4,106 @@
+ 
+ ## Overview
+-SXMPVO is an algorithm that computes image-precision visibility ordering for volume rendering of unstructured meshes by scan-converting exterior faces into an A-Buffer to determine occlusion relations (pseudoneighbor or PN relations) between cells, rather than computing object-precision ray shooting queries [S1][S4, unofficial]. It solves the problem that heuristic methods like MPVO fail for nonconvex meshes because they do not consider ordering relations along viewing rays that cross empty space (ray-gaps) between cells [S3, unofficial]. Unlike its parent method, Topological Sort for Cell Projection, which computes a global topological sort, SXMPVO produces an image identical to one produced by an exact visibility ordering, even though it does not compute a globally exact topological ordering, by using the same image resolution for ordering relations as for volume rendering [S3, unofficial][S4, unofficial]. It differs from [XMPVO](1363-xmpvo.md) by using image-precision scan conversion instead of object-precision ray shooting, and from [BSP-XMPVO](1160-bsp-xmpvo.md) by relying on image-space rasterization rather than a view-independent BSP tree [S1][S4, unofficial][Parent].
++SXMPVO is an algorithm that computes image-precision visibility ordering for volume rendering of unstructured meshes by scan-converting exterior faces into an A-Buffer to determine occlusion relations (Pseudoneighbor or PN relations) between cells, rather than computing object-precision ray shooting queries [S1][S6, unofficial]. It guarantees correct visibility order for a particular image resolution by using a strict object-space visibility order augmented with image-space data [S2, unofficial][S3, unofficial]. It sets itself apart from its parent [Topological Sort for Cell Projection](999-topological-sort-for-cell-projection.md) and sibling [XMPVO](1363-xmpvo.md) by replacing expensive object-precision ray shooting with efficient scan conversion, achieving "image-space correctness" where the rendering resolution matches the ordering resolution [S1][S5, unofficial]. Unlike [BSP-XMPVO](1160-bsp-xmpvo.md), it avoids BSP tree construction and exact arithmetic, making it simpler and faster for general acyclic meshes [S1][S6, unofficial].
+ 
+ ## How it works
+-**Inputs:** An acyclic unstructured mesh (tetrahedral, hexahedral, or "zoo" meshes with mixed cell types) and a viewing direction. The mesh may have nonconvex boundaries and disconnected components. Cells may have nonplanar surfaces provided their edges do not have projections that cross each other ("bow tie" quadrilateral projections) [S1][S3, unofficial][S4, unofficial].
+-
+-**Outputs:** A directed graph of visibility relations (arrows) between cells, sufficient to perform a depth-first search (DFS) to generate a back-to-front sorting sequence for cell projection volume rendering [S1][S3, unofficial].
++**Inputs and Outputs:**
++*   **Input:** An unstructured mesh (tetrahedral, hexahedral, or "zoo" mesh) consisting of $n$ cells. The mesh must be acyclic. Cells may have nonplanar surfaces provided their edges do not project to crossing lines ("bow tie" projections) [S1][S5, unofficial].
++*   **Output:** A total ordering sequence of cells $b = c_{im} < c_{im-1} < \dots < c_{i1} < c_{i0} = a$, where $b$ comes before $a$ in the sorted sequence (back-to-front) [S5, unofficial].
+ 
+ **Data Structures:**
+-1.  **MPVO Data Structures:** As defined in [Topological Sort for Cell Projection](999-topological-sort-for-cell-projection.md). For a tetrahedral mesh, this requires $4f + 14n$ words, where $f$ is the number of interior faces and $n$ is the number of cells [S1][S3, unofficial][S4, unofficial].
++1.  **MPVO Structures:** Standard adjacency graph, cell vertices, plane equation coefficients, arrows on shared faces, and a sink cell flag per cell. Storage: $4f + 14n$ words, where $f$ is the number of interior faces ($O(n)$) [S1][S6, unofficial].
+ 2.  **Exterior Face List:** A list holding a record for each exterior face. Each record contains:
+-    *   A pointer to the face.
+-    *   A pointer to the cell to which the face belongs.
+-    *   The face’s centroid (used for sorting).
+-    *   A next pointer for the list [S1][S3, unofficial][S4, unofficial].
+-3.  **A-Buffer:** Implemented as an array of pixel (PIX) lists, one per pixel in the screen image. Each PIX list consists of PIX list entry records (PIX entries) [S1][S3, unofficial][S4, unofficial].
++    *   Pointer to the face.
++    *   Pointer to the owning cell.
++    *   Face centroid.
++    *   Next pointer.
++    *   Storage: $O(b)$ words, where $b$ is the number of exterior cells [S1][S6, unofficial].
++3.  **A-Buffer:** Implemented as an array of pixel (PIX) lists, one per pixel in the screen image ($w \times h$).
+     *   **PIX Entry:** Contains:
+-        *   The distance $z$ from the screen to the intersection point where the ray through pixel $p$ intersects face $f$.
+-        *   A pointer to face $f$.
+-        *   A next pointer for the PIX list [S1][S3, unofficial][S4, unofficial].
+-4.  **PN List:** Every cell has a PN list pointer, initially NULL. The PN list for a cell contains all exterior cells it occludes (its dependencies) [S3, unofficial][S4, unofficial].
++        *   Distance $z$ from the screen to the intersection point where the ray through pixel $p$ intersects face $f$.
++        *   Pointer to face $f$.
++        *   Next pointer for the PIX list.
++    *   Storage: $O(wh + a)$ words, where $a$ is the total projected area (number of pixels scanned) [S1][S6, unofficial].
++4.  **PN List:** Every cell has a PN list pointer (initially NULL). The PN list for a cell contains all exterior cells it occludes (its dependencies).
+     *   **PN Entry:** Contains:
+-        *   The cell number of the occluded cell.
+-        *   A next pointer [S3, unofficial][S4, unofficial].
+-
+-**Parameters:**
+-*   $n$: Number of cells in the mesh.
+-*   $b$: Number of exterior cells.
+-*   $a$: Total area of all exterior faces, measured by the total number of pixels generated in their scan conversion.
+-*   $w, h$: Image width and height in pixels.
+-*   Image resolution: The resolution used for computing visibility ordering relations must be the same as that used for the actual volume rendering to ensure image-space correctness [S3, unofficial][S4, unofficial].
++        *   Cell number of the occluded cell.
++        *   Next pointer.
++    *   Storage: $O(a)$ words for entries, plus $O(n)$ words for head pointers [S1][S6, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Phase I: Create Partial Ordering (Interior Relations)**
+-    *   Mark all shared faces with arrows exactly as in MPVO Phase I to determine behind relations from adjacent cells [S1][S3, unofficial][S4, unofficial].
+-    *   Set a sink cell flag in each cell to true or false as appropriate [S1][S3, unofficial][S4, unofficial].
+-    *   Create the Exterior Face List.
+-    *   Complexity: $O(n)$ [S3, unofficial][S4, unofficial].
++1.  **Phase I: Create Partial Ordering (Interior)**
++    *   Traverse all cells to mark arrows on shared faces exactly as in MPVO Phase I, determining "behind" relations for adjacent cells [S1][S5, unofficial].
++    *   Set a `sink_cell` flag in each cell to true or false based on the arrows [S1][S5, unofficial].
++    *   Complexity: $O(n)$ [S5, unofficial][S6, unofficial].
+ 
+ 2.  **Phase II: Sort Exterior Faces**
+-    *   Sort the exterior faces in the Exterior Face List by increasing distance from the screen to the face's centroid [S1][S3, unofficial][S4, unofficial].
+-    *   Complexity: $O(b \log b)$ [S3, unofficial][S4, unofficial].
+-
+-3.  **Phase III: Scan Faces and Add Dependencies (Exterior Relations)**
+-    *   Create the A-Buffer (array of PIX lists) [S1][S3, unofficial][S4, unofficial].
+-    *   Remove exterior faces from the sorted queue one at a time and scan-convert their interiors in 3D. For OpenGL, this means sampling at pixel centers [S1][S3, unofficial][S4, unofficial].
+-    *   For each pixel $p$ of an exterior face $f$ enumerated by scan conversion:
+-        *   Create a PIX entry containing the distance $z$ from the screen to the intersection point, a pointer to $f$, and a next pointer [S1][S3, unofficial][S4, unofficial].
+-        *   Insert the PIX entry into the appropriate PIX list in the A-Buffer in order of decreasing $z$. Use an efficient insertion sort. Since faces are sorted by centroid distance, the vast majority of insertions occur at or very near the beginning of the PIX list [S1][S3, unofficial][S4, unofficial].
++    *   Create the exterior face list.
++    *   Sort the exterior faces by increasing distance from the screen to the face's centroid [S1][S5, unofficial].
++    *   Complexity: $O(b \log b)$ [S5, unofficial][S6, unofficial].
++
++3.  **Phase III: Scan Faces and Add Dependencies**
++    *   Create the A-Buffer (array of PIX lists) [S1].
++    *   Remove exterior faces from the sorted queue one at a time.
++    *   Scan-convert the interior of each exterior face $f$ in 3D (sampling at pixel centers) [S1][S5, unofficial].
++    *   For each pixel $p$ of face $f$ enumerated by scan conversion:
++        *   Create a PIX entry with $z$ (distance to intersection), pointer to $f$, and next pointer.
++        *   Insert the PIX entry into the PIX list for pixel $p$ in the A-Buffer in order of decreasing $z$. Use an efficient insertion sort. Because faces are sorted by centroid distance, insertions occur at or near the beginning of the list [S1][S5, unofficial][S6, unofficial].
+     *   After rasterizing all exterior faces, process each PIX list:
+-        *   Discard the first entry of every PIX list (the back-facing face where the ray exits the mesh for the last time, which has no matching front-facing face behind it) [S1][S3, unofficial][S4, unofficial].
+-        *   If the viewpoint is outside the mesh, discard the last entry (the face where the ray enters the mesh for the first time) [S1][S3, unofficial][S4, unofficial].
+-    *   Traverse each PIX list. For each pair of consecutive entries (a front-facing face and a back-facing face), there is a "ray-gap". The two cells whose faces make up this pair are pseudoneighbors (PNs) [S3, unofficial][S4, unofficial].
++        *   Discard the first entry of every PIX list (the back-facing face where the ray exits the mesh for the last time, which has no matching front-facing face behind it) [S1][S5, unofficial][S6, unofficial].
++        *   If the viewpoint is outside the mesh, also discard the last entry (the face where the ray enters the mesh for the first time) [S1][S5, unofficial].
++    *   Traverse the remaining PIX lists to discover Pseudoneighbor (PN) relations:
++        *   Between each consecutive front-facing/back-facing face pair on the PIX list, there is a "ray-gap".
++        *   The two cells whose faces make up this pair are pseudoneighbors (PNs).
+         *   The cell contributing the back-facing face is the **occluding PN**.
+-        *   The other cell (contributing the front-facing face) is the **occluded PN** [S3, unofficial][S4, unofficial].
+-    *   For each PN pair:
+-        *   Check if the PN relation is already recorded in the occluding PN's PN list.
+-        *   If not, add it to the head of the list. If an entry is found in the list, move it to the head if it is not already there (to exploit coherence and reduce search cost to $O(1)$ in practice) [S3, unofficial][S4, unofficial].
+-        *   Set the sink cell flag of the occluded PN to false [S3, unofficial][S4, unofficial].
+-    *   The definition of a sink cell is expanded: a cell is a sink cell if it has no outbound arrows AND is not an occluded PN [S4, unofficial].
+-    *   Complexity: $O(wh + a)$ for most data sets [S3, unofficial][S4, unofficial].
++        *   The other cell (contributing the front-facing face) is the **occluded PN** [S1][S5, unofficial][S6, unofficial].
++        *   Add a PN entry (cell number of occluded PN) to the PN list of the occluding PN.
++        *   Set the `sink_cell` flag of the occluded PN to false.
++        *   **Duplicate Handling:** Check if the PN relation is already in the occluding PN's PN list. If not, add it to the head. If found, move it to the head to exploit coherence. This reduces search cost to $O(1)$ in practice, avoiding $O(b^2)$ or $O(a^2/b)$ costs [S1][S5, unofficial][S6, unofficial].
++    *   Complexity: $O(wh + a)$ for most data sets [S5, unofficial][S6, unofficial].
+ 
+ 4.  **Phase IV: Depth First Search (DFS)**
+-    *   Examine each cell to see which are still marked as sink cells (those whose sink cell flag is still set) [S3, unofficial][S4, unofficial].
+-    *   Perform a DFS on the directed graph to determine the final visibility order.
++    *   Examine each cell to identify those still marked as sink cells (cells with no outbound arrows AND not an occluded PN) [S1][S5, unofficial][S6, unofficial].
++    *   Execute a Depth First Search (DFS) on the directed graph to determine the final visibility order.
+     *   Traverse each edge in the directed graph twice.
+-    *   Occluded neighbors (cells on the PN list of cell $c$) are now eligible neighbors of $c$ in RECURSIVE-DFS [S3, unofficial][S4, unofficial].
+-    *   Complexity: $O(n + a)$ [S3, unofficial][S4, unofficial].
++    *   **Modification:** Occluded neighbors (cells on the PN list of cell $c$) are now eligible neighbors of $c$ in the recursive DFS step [S5, unofficial].
++    *   Complexity: $O(n + a)$ [S5, unofficial][S6, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def sxmpvo(mesh, image_width, image_height, viewpoint):
++def sxmpvo(mesh, image_width, image_height):
+     # Phase I: Create Partial Ordering
+-    # Initialize MPVO structures and mark arrows on shared faces
+-    # Set sink_cell_flag[c] = True for all cells c
+-    mpvo_phase_i(mesh)
+-    
+-    # Create Exterior Face List
+-    exterior_face_list = []
+-    for cell in mesh.cells:
++    # Initialize MPVO structures
++    cells = mesh.cells
++    for cell in cells:
++        cell.sink_flag = True
++        cell.pn_list_head = None
++        
++    # Mark arrows on shared faces (MPVO Phase I)
++    for cell in cells:
+         for face in cell.faces:
+-            if face.is_exterior:
+-                exterior_face_list.append({
+-                    'face': face,
+-                    'cell': cell,
+-                    'centroid': face.centroid,
+-                    'next': None
+-                })
+-    
++            if face.is_shared:
++                neighbor = face.other_cell(cell)
++                # Determine direction based on viewpoint
++                if is_behind(face, cell, neighbor, viewpoint):
++                    add_arrow(cell, neighbor)
++                    neighbor.sink_flag = False
++                    
+     # Phase II: Sort Exterior Faces
++    exterior_faces = [f for f in mesh.faces if not f.is_shared]
+     # Sort by increasing distance from screen to centroid
+-    exterior_face_list.sort(key=lambda x: distance(viewpoint, x['centroid']))
++    exterior_faces.sort(key=lambda f: distance(viewpoint, f.centroid))
++    
++    # Create A-Buffer
++    a_buffer = [ [] for _ in range(image_width * image_height) ]
+     
+     # Phase III: Scan Faces and Add Dependencies
+-    # Initialize A-Buffer as array of empty PIX lists
+-    a_buffer = [[] for _ in range(image_width * image_height)]
+-    
+-    for item in exterior_face_list:
+-        face = item['face']
+-        # Scan-convert face, sampling at pixel centers
+-        pixels_covered = scan_convert_face(face, image_width, image_height, viewpoint)
+-        
++    for face in exterior_faces:
++        # Scan-convert face in 3D
++        pixels_covered = scan_convert_3d(face, viewpoint)
+         for p in pixels_covered:
+-            # Calculate z-distance from screen to intersection
+-            z = ray_face_intersection_z(p, face, viewpoint)
+-            
+-            # Create PIX entry
++            # Calculate z-distance to intersection
++            z = distance(viewpoint, p.intersection_point)
+             pix_entry = {
+                 'z': z,
+@@ -117,73 +111,87 @@
+                 'next': None
+             }
+-            
+             # Insert into PIX list in decreasing z order
+             pix_list = a_buffer[p.index]
+             insert_sorted(pix_list, pix_entry)
+             
+-    # Process PIX lists to find Pseudoneighbors (PNs)
++    # Process PIX lists to find PN relations
+     for pix_list in a_buffer:
+         if not pix_list:
+             continue
+             
+-        # Discard first entry (back-facing exit)
++        # Discard first entry (last exit)
+         pix_list.pop(0)
+         
+-        # If viewpoint is outside mesh, discard last entry (front-facing entry)
+-        if is_viewpoint_outside_mesh(viewpoint, mesh):
++        # Discard last entry if viewpoint outside mesh (first entry)
++        if viewpoint_outside_mesh:
+             if pix_list:
+                 pix_list.pop()
+                 
+         # Traverse remaining entries to find PN pairs
+-        for i in range(0, len(pix_list) - 1, 2):
+-            back_face_entry = pix_list[i]
+-            front_face_entry = pix_list[i+1]
+-            
+-            occluding_cell = back_face_entry['face'].owner_cell
+-            occluded_cell = front_face_entry['face'].owner_cell
+-            
+-            # Add PN relation: occluding_cell occludes occluded_cell
+-            add_pn_relation(occluding_cell, occluded_cell, a_buffer)
+-            
+-            # Mark occluded cell as not a sink
+-            occluded_cell.sink_cell_flag = False
+-            
+-    # Phase IV: Depth First Search
+-    # Find sink cells
+-    sink_cells = [c for c in mesh.cells if c.sink_cell_flag]
+-    
+-    # Perform DFS to generate sort order
+-    sort_order = []
+-    visited = set()
+-    
+-    def dfs(cell):
+-        if cell in visited:
++        for i in range(len(pix_list) - 1):
++            entry1 = pix_list[i]
++            entry2 = pix_list[i+1]
++            
++            # Check if they form a front/back pair
++            if is_front_face(entry2.face) and is_back_face(entry1.face):
++                occluding_cell = entry1.face.cell
++                occluded_cell = entry2.face.cell
++                
++                # Add PN relation
++                add_pn_relation(occluding_cell, occluded_cell)
++                
++                # Mark occluded cell as not a sink
++                occluded_cell.sink_flag = False
++                
++    # Phase IV: DFS
++    sink_cells = [c for c in cells if c.sink_flag]
++    sorted_order = []
++    
++    for sink in sink_cells:
++        if not sink.visited:
++            dfs(sink, sorted_order)
++            
++    return reverse(sorted_order)
++
++def add_pn_relation(occluding_cell, occluded_cell):
++    # Check for duplicates and add to head
++    current = occluding_cell.pn_list_head
++    while current:
++        if current.cell_id == occluded_cell.id:
++            # Move to head if not already there
++            if current != occluding_cell.pn_list_head:
++                remove_from_list(occluding_cell.pn_list_head, current)
++                insert_at_head(occluding_cell.pn_list_head, current)
+             return
+-        visited.add(cell)
+-        sort_order.append(cell)
++        current = current.next
+         
+-        # Traverse edges from shared faces (MPVO arrows)
+-        for neighbor in cell.mpvo_neighbors:
+-            dfs(neighbor)
+-            
+-        # Traverse edges from PN relations (Phase III)
+-        for pn_cell in cell.pn_list:
+-            dfs(pn_cell)
+-            
+-    for sink in sink_cells:
+-        dfs(sink)
+-        
+-    return sort_order
+-
+-def add_pn_relation(occluding_cell, occluded_cell, a_buffer):
+-    # Check for duplicates in occluding_cell's PN list
+-    # If not present, add to head. If present, move to head.
+-    pn_list = occluding_cell.pn_list
+-    if occluded_cell not in pn_list:
+-        pn_list.insert(0, occluded_cell)
+-    else:
+-        # Move to head for coherence optimization
+-        pn_list.remove(occluded_cell)
+-        pn_list.insert(0, occluded_cell)
++    # Add new entry to head
++    new_entry = {
++        'cell_id': occluded_cell.id,
++        'next': occluding_cell.pn_list_head
++    }
++    occluding_cell.pn_list_head = new_entry
++
++def dfs(cell, order):
++    cell.visited = True
++    # Add current cell to order (pre-order or post-order depending on back-to-front requirement)
++    # Typically post-order for back-to-front compositing
++    order.append(cell)
++    
++    # Traverse neighbors
++    # 1. Neighbors via shared faces (arrows)
++    for neighbor in cell.outbound_arrow_neighbors:
++        if not neighbor.visited:
++            dfs(neighbor, order)
++            
++    # 2. Neighbors via PN list (image-space occlusion)
++    current_pn = cell.pn_list_head
++    while current_pn:
++        occluded_id = current_pn.cell_id
++        # Find cell object by ID
++        occluded_cell = find_cell_by_id(occluded_id)
++        if not occluded_cell.visited:
++            dfs(occluded_cell, order)
++        current_pn = current_pn.next
+ ```
+ 
+@@ -191,41 +199,43 @@
+ 
+ ### [BSP-XMPVO](1160-bsp-xmpvo.md)
+-Uses a view-independent BSP tree of exterior faces for preprocessing to compute exact global ordering, differing from SXMPVO's image-space scan conversion. Choose when view-independent preprocessing is acceptable and memory is not constrained by complex boundary BSP trees.
++Combines BSP tree of exterior faces with MPVO adjacency to handle non-convex meshes. Chosen when object-precision exactness is required or when scan-conversion is insufficient, but at the cost of higher complexity and memory.
+ 
+ ### [SXMPVO Total Ordering (Phase II Modification)](5894-sxmpvo-total-ordering-phase-ii-modification.md)
++Completes SXMPVO by generating a global topological sort using Pseudo-Neighbor relations derived from image-space occlusion. Chosen when a strict total order is needed for rendering pipelines that require it.
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(wh + a + n)$ for most data sets, where $w$ and $h$ are image dimensions, $a$ is the projected area (number of pixels scanned), and $n$ is the number of cells [S1][S3, unofficial][S4, unofficial]. The expected cost for data sets seen in practice is $O(wh(\hat{d}_e + 1) + n)$, where $\hat{d}_e$ is the average depth complexity of exterior faces [S1][S3, unofficial].
+-
+-**Memory Complexity:** $O(wh + a)$ for the A-Buffer (including PIX lists), $O(a)$ for PN lists, plus $O(n)$ for PN list head pointers, and $O(b)$ for the exterior face list [S1][S3, unofficial][S4, unofficial].
+-
+-**Measured Performance:**
+-*   On a 250 MHz MIPS R10000 processor, execution times for SXMPVO vary with projected area: 0.32s for 187,395 cells, 0.45s for 450,000 cells, 3.00s for 1,485,000 cells, and 10.85s for 4,500,000 cells [S1][S4, unofficial].
+-*   On an SGI Power Onyx (R10000 250 MHz), for the helix3.5 data set (3.57 million cells, 375x450 image), SXMPVO uses 3.7 MB for the A-Buffer and 14.5 MB for PN data structures, totaling 367 MB overhead compared to MPVONC's 347.4 MB [S1][S3, unofficial][S4, unofficial].
+-*   On a 2.53 GHz Pentium 4, SXMPVO achieves a throughput of 500K-600K tetrahedra per second for a 1,050,000 pixel image [S1][S3, unofficial][S4, unofficial].
+-
+-**Strengths:**
+-*   Faster than all published algorithms producing exact visibility ordering in object or image space [S1][S3, unofficial][S4, unofficial].
+-*   Easier to implement than BSP-XMPVO as it does not require implementing a BSP tree, glue code, or handling degeneracies with exact arithmetic [S1][S4, unofficial].
+-*   Requires no extra preprocessing with respect to MPVO [S1][S3, unofficial][S4, unofficial].
+-*   Handles nonconvex boundaries, disconnected meshes, cells of different types, and cells with nonplanar surfaces (provided no "bow tie" projections) [S1][S3, unofficial][S4, unofficial].
+-*   Handles coherence in both x and y because it scan-converts each exterior face as a whole [S3, unofficial][S4, unofficial].
+-
+-**Limitations:**
+-*   The mesh must be acyclic for a correct ordering to be found. If a cycle exists, the algorithm reports it [S1][S3, unofficial][S4, unofficial].
+-*   Tiny cells (those not projecting onto any screen pixels) may be output out of order if they are exterior cells, because the relationship $a <_{vp} b$ is only guaranteed if there is a continuous sequence of adjacent intervening cells. Interior tiny cells are output in correct order [S1][S3, unofficial][S4, unofficial]. Sorting sink cells by increasing distance of their centroid to the viewpoint reduces these errors [S3, unofficial][S4, unofficial].
+-*   Always slower than MPVONC because it must determine and respect every relationship that MPVONC does, plus create and follow extra relations between exterior faces. However, for data sets with >100,000 cells, SXMPVO generates an exact imagespace visibility ordering at about the same speed as the nonexact MPVONC heuristic [S4, unofficial].
+-*   Sorting errors may occur for tiny cells if splatting is used for antialiasing [S1][S4, unofficial].
+-
+-**When to use:** When exact image-space correctness is required for nonconvex unstructured meshes and performance is critical, especially when compared to object-precision methods like XMPVO or BSP-based methods like BSP-XMPVO.
+-
+-**When not to use:** When the mesh contains cycles (unless cycle detection is the goal), or when tiny cells are rendered using splatting antialiasing without mitigation.
++**Time Complexity:**
++*   Overall: $O(wh + a + n)$ for most data sets, where $w, h$ are image dimensions, $a$ is the projected area (pixels scanned), and $n$ is the number of cells [S1][S5, unofficial][S6, unofficial].
++*   Expected cost: $O(wh(\hat{d}_e + 1) + n)$, where $\hat{d}_e$ is the average depth complexity of exterior faces [S1][S5, unofficial].
++*   Phase I: $O(n)$ [S5, unofficial].
++*   Phase II: $O(b \log b)$ [S5, unofficial].
++*   Phase III: $O(wh + a)$ [S5, unofficial].
++*   Phase IV: $O(n + a)$ [S5, unofficial].
++
++**Memory Complexity:**
++*   MPVO structures: $4f + 14n$ words ($O(n)$) [S1].
++*   A-Buffer: $O(wh + a)$ words [S1].
++*   PN Lists: $O(a)$ words for entries, $O(n)$ for head pointers [S1].
++*   Exterior Face List: $O(b)$ words [S1].
++*   Total overhead over MPVO is modest. For helix3.5 (3.57M cells, 375x450 image), SXMPVO uses 367 MB vs MPVONC's 347.4 MB [S1][S6, unofficial].
++
++**Performance:**
++*   On a 250 MHz MIPS R10000: 0.32s for 187,395 cells; 10.85s for 4,500,000 cells [S1].
++*   On a 2.53 GHz Pentium 4: 500K-600K tetrahedra per second for a 1,050,000 pixel image [S1].
++*   Faster than all published exact visibility ordering algorithms in object or image space [S1].
++*   Slower than MPVONC but generates exact images at comparable speed for datasets >100,000 cells [S6, unofficial].
++
++**Strengths and Limitations:**
++*   **Strengths:** Simpler and more stable than extending MPVO to exact object-space ordering [S2, unofficial][S3, unofficial]. No extra preprocessing compared to MPVO [S6, unofficial]. Handles nonconvex boundaries, disconnected meshes, and mixed cell types (zoo meshes) [S1]. Faster than BSP-XMPVO [S1].
++*   **Limitations:** Requires the mesh to be acyclic [S1]. Sorting errors may occur for "tiny cells" (not projecting to any pixel) if antialiasing via splatting is used, as the behind relation is only guaranteed across continuous adjacent cells or sampled ray-gaps [S1]. Image-space correctness is tied to the rendering resolution [S5, unofficial].
+ 
+ ## Background
+-SXMPVO was introduced by Cláudio T. Silva, João Luiz Dihl Comba, and others as an efficient and exact projection algorithm for unstructured volume rendering [S1][S3, unofficial][S4, unofficial]. It addresses the limitations of MPVO, which fails for nonconvex meshes, and XMPVO, which uses object-precision ray shooting. SXMPVO was designed to provide image-space correctness by leveraging hardware scan conversion and A-Buffer techniques, making it faster and easier to implement than previous exact methods [S1][S3, unofficial][S4, unofficial]. It is used for volume rendering of tetrahedral meshes, zoo meshes, and other unstructured grids [S1][S3, unofficial][S4, unofficial].
++SXMPVO was introduced to address the failure of MPVO on nonconvex meshes, where ray-gaps between cells cause incorrect ordering [S5, unofficial]. It was developed as a more stable and simple alternative to conceptually extending MPVO with strict object-space visibility ordering [S2, unofficial][S3, unofficial]. It improves upon XMPVO by using image-precision ray shooting via scan conversion and an A-Buffer, rather than object-precision queries [S1]. It is used in volume rendering systems for unstructured grids, specifically tetrahedral and zoo meshes [S1][S5, unofficial].
+ 
+ ## Sources
+ [S1] Image-space visibility ordering for cell projection volume rendering of unstructured data, https://doi.org/10.1109/tvcg.2004.45, fetched 2026-10-25
+-[S2] Tetrahedral projection using vertex shaders, https://www.researchgate.net/publication/221247894_Tetrahedral_projection_using_vertex_shaders, fetched 2026-10-28 (unofficial)
+-[S3] Image-space visibility ordering for cell projection volume rendering of unstructured data, https://www.researchgate.net/publication/8193687_Image-space_visibility_ordering_for_cell_projection_volume_rendering_of_unstructured_data, fetched 2026-10-29 (unofficial)
+-[S4] PDF 0078-0903-2 1..13, https://sci.utah.edu/~csilva/papers/tvcg2004cr.pdf, fetched 2026-10-28 (unofficial)+[S2] PDF A Survey of GPU-Based Volume Rendering of Unstructured Grids, https://www.sci.utah.edu/~stevec/papers/gputet_survey.pdf, fetched 2026-10-27 (unofficial)
++[S3] A Survey of GPU-Based Volume Rendering of Unstructured Grids., https://www.researchgate.net/publication/220162223_A_Survey_of_GPU-Based_Volume_Rendering_of_Unstructured_Grids, fetched 2026-10-28 (unofficial)
++[S4] (PDF) Tetrahedral projection using vertex shaders - ResearchGate, https://www.researchgate.net/publication/221247894_Tetrahedral_projection_using_vertex_shaders, fetched 2026-10-28 (unofficial)
++[S5] (PDF) Image-space visibility ordering for cell projection volume ..., https://www.researchgate.net/publication/8193687_Image-space_visibility_ordering_for_cell_projection_volume_rendering_of_unstructured_data, fetched 2026-10-29 (unofficial)
++[S6] PDF 0078-0903-2 1..13, https://sci.utah.edu/~csilva/papers/tvcg2004cr.pdf, fetched 2026-10-28 (unofficial)

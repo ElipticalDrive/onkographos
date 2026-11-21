@@ -1,0 +1,83 @@
+# Simultaneous Visualization
+
+Also called: Multi-property Visualization, Multivariate Visualization, Superimposed Volume and Stroke Rendering
+
+## Overview
+Simultaneous Visualization is a multidimensional visualization strategy that presents multiple data properties in a single image by combining distinct rendering techniques, such as superimposing volumetric rendering of a scalar field with stroke-based rendering of a vector field [S2]. It differs from [Multi-field Visualization Combination](7061-multi-field-visualization-combination.md) by explicitly leveraging non-photorealistic rendering (NPR) strokes to convey vector direction and motion history, whereas the parent category focuses more broadly on combining volumetric objects with geometric glyphs or streamlines [S1, unofficial][S2].
+
+## How it works
+**Inputs and Outputs**
+- **Input:** Multivariate volume data containing at least two distinct properties (e.g., a scalar field like vorticity magnitude, temperature, or salinity, and a vector field like velocity) [S2].
+- **Output:** A single composite image where volumetric structures and vector flow directions are perceptually integrated [S2].
+
+**Data Structures**
+- **Scalar Field:** A 3D grid or unstructured mesh where each node/voxel holds a scalar value (e.g., $S$) [S2].
+- **Vector Field:** A 3D grid or unstructured mesh where each node/voxel holds a 3D vector $\vec{V} = (v_x, v_y, v_z)$ [S2].
+- **Stroke Representation:** A set of line segments defined by start points, end points, and attributes (color, opacity, width) [S2].
+
+**Steps**
+1. **Volumetric Rendering:** Render the primary scalar property (e.g., vorticity magnitude, temperature) using standard volume rendering techniques (e.g., ray casting) to establish structural context and object location [S1, unofficial][S2].
+2. **Stroke Generation:** Generate sparse strokes from the vector field (e.g., velocity). The density and length of strokes can be interactively controlled by the user to adjust detail level [S2].
+3. **Superposition:** Render the strokes over the volumetric background. The strokes indicate local flow direction and motion history [S2].
+4. **Boundary Highlighting:** Highlight specific boundaries (e.g., ocean surface) to aid in perceiving the volumetric depth and structure of the data [S2].
+5. **Depth/Contextual Darkening:** Darken strokes in regions away from areas of interest (e.g., away from the sea surface) to enhance depth perception or focus attention [S2].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def simultaneous_visualization(scalar_field, vector_field, view_params):
+    # Step 1: Render scalar field volumetrically
+    # Uses standard volume rendering (ray casting)
+    # scalar_field: 3D array of scalar values
+    # Returns: background_image
+    background_image = volume_render(scalar_field, view_params)
+
+    # Step 2: Generate strokes from vector field
+    # vector_field: 3D array of 3D vectors
+    # density: user-controlled parameter for stroke density
+    # Returns: list of stroke objects (start, end, color, opacity, width)
+    strokes = generate_strokes(vector_field, density=user_density)
+
+    # Step 3: Apply contextual darkening
+    # For each stroke, adjust opacity based on distance from region of interest
+    # e.g., darken strokes away from sea surface
+    for stroke in strokes:
+        distance_to_surface = get_distance_to_boundary(stroke, boundary='sea_surface')
+        if distance_to_surface > threshold:
+            stroke.opacity = darken_factor(stroke.opacity, distance_to_surface)
+
+    # Step 4: Highlight boundaries
+    # Render boundary lines or surfaces with high contrast
+    boundary_image = render_boundaries(scalar_field, boundary='sea_surface')
+
+    # Step 5: Composite
+    # Superimpose strokes and boundary highlights onto the volumetric background
+    final_image = composite(background_image, strokes, boundary_image)
+    return final_image
+```
+
+**Parameters**
+- **Stroke Density:** Controls the number of strokes per unit volume. Higher density provides more detail but may clutter the image [S2].
+- **Stroke Length:** Determines the extent of the stroke, indicating motion history [S2].
+- **Darkening Factor:** A function or constant that reduces stroke opacity based on distance from a region of interest [S2].
+
+**Edge Cases and Pitfalls**
+- **Clutter:** High stroke density can obscure the volumetric structure. Interactive control is recommended [S2].
+- **Depth Perception:** Without boundary highlighting or darkening, the superposition of 2D strokes on 3D volume can flatten the perception of depth [S2].
+- **Precision:** Accurate vector field interpolation is required for correct stroke direction [S2].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the volume rendering cost plus the stroke generation and rasterization cost. Stroke generation is generally $O(N)$ where $N$ is the number of voxels or particles.
+- **Memory Complexity:** Requires storage for both scalar and vector fields, plus temporary storage for stroke data structures [S2].
+- **Strengths:** Enhances comprehension of vector fields (direction, motion) while maintaining structural context from scalar fields. Interactive control allows users to balance detail and clarity [S2].
+- **Limitations:** Can be visually cluttered if not tuned. Relies on user interaction for optimal density settings [S2].
+- **When to Use:** When both structural context (scalar) and flow/direction (vector) are critical, and traditional glyphs or streamlines alone are insufficient [S1, unofficial][S2].
+- **When Not to Use:** When the vector field is too dense to render meaningfully with strokes, or when real-time performance is critical and stroke generation is too expensive [S2].
+
+## Background
+Simultaneous Visualization was investigated by Stompel et al. in the context of CFD and ocean simulation visualizations [S1, unofficial][S2]. It builds on earlier work by Joshi and Rheingans on time-varying data visualization, such as speedlines and opacity modulation [S1, unofficial]. The technique is particularly useful in disciplines like medical imaging (combining CT, MRI, PET) and CFD (combining streamlines and isosurfaces) where multiple modalities or properties need to be perceived simultaneously [S2].
+
+## Sources
+[S1] Generalized Framework and Algorithms for Illustrative Visualization of Time-Varying Data on Unstructured Meshes, https://digital.library.unt.edu/ark:/67531/metadc838861/?q=illustrative volume rendering, fetched 2026-10-28 (unofficial)
+[S2] PDF Visualization of Multidimensional, Multivariate Volume Data Using ..., https://www3.cs.stonybrook.edu/~mueller/teaching/cse616/pg-086_stompel_a_NEW.pdf, fetched 2026-10-28

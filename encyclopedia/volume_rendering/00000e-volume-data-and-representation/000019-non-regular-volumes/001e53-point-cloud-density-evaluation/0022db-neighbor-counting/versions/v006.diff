@@ -1,0 +1,156 @@
+--- v005.md
++++ v006.md
+@@ -3,30 +3,43 @@
+ 
+ ## Overview
+-Neighbor Counting is a method for evaluating local point cloud density by determining the number of neighboring points within a specified radius for each point in the dataset [S1, unofficial]. It serves as a fundamental primitive for non-regular volume representations, enabling density estimation, clustering validation, and noise filtering [S1, unofficial]. Unlike global density metrics, it provides a per-point local statistic, distinguishing it from sibling methods like Chamfer Distance which measure pairwise set distances, or BrickDensityRegion Point Splatting which aggregates density into fixed spatial bricks [S3956-brickdensityregion-point-splatting.md].
++Neighbor Counting is a fundamental technique in Point Cloud Density Evaluation that estimates the local density of points by counting the number of neighbors within a specified radius for each point in a dataset [S1, unofficial]. It serves as a core primitive for assessing spatial distribution, identifying outliers, and initializing density-based clustering or rendering parameters. Unlike global metrics, it provides a per-point local density estimate, distinguishing it from sibling methods like Chamfer Distance which measure set-to-set error, or BrickDensityRegion Point Splatting which aggregates density into voxel bricks [3956-brickdensityregion-point-splatting.md].
+ 
+ ## How it works
+ **Inputs:**
+-- A set of $N$ points $P = \{p_1, p_2, \dots, p_N\}$ in $\mathbb{R}^d$ (typically $d=3$).
+-- A distance threshold $r$ (radius) defining the neighborhood scope.
++- A set of $N$ points $P = \{p_1, p_2, \dots, p_N\}$, where each $p_i \in \mathbb{R}^3$.
++- A distance threshold (radius) $r$.
+ 
+ **Outputs:**
+-- An array `neighbor_counts` of size $N$, where `neighbor_counts[i]` is the number of points $p_j$ ($j \neq i$) such that $\|p_i - p_j\| \le r$.
++- An array `neighbor_counts` of size $N$, where `neighbor_counts[i]` is the number of points in $P$ within distance $r$ of $p_i$, excluding $p_i$ itself.
+ 
+ **Data Structures:**
+-- **KDTree**: A spatial partitioning data structure built from $P$ to enable efficient range queries. The tree nodes store point indices and bounding boxes.
+-- **neighbor_counts**: A 1D integer array of length $N$.
++- **KDTree**: A spatial indexing structure built from $P$ to enable efficient range queries. The tree is typically balanced, with each node representing a bounding volume (e.g., AABB) containing a subset of points. Leaf nodes contain a small number of points (e.g., 1-10) [S1, unofficial].
+ 
+ **Steps:**
+-1. **Build Index**: Construct a KDTree from the input point set $P$ [S1, unofficial].
+-2. **Query Radius**: For each point $p_i \in P$:
+-   - Query the KDTree for all points within distance $r$ of $p_i$ [S1, unofficial].
+-   - Let $S_i$ be the set of returned point indices.
+-   - Calculate the count: $c_i = |S_i| - 1$. The subtraction of 1 excludes the point $p_i$ itself, which is always returned by a standard radius query [S1, unofficial].
+-3. **Store**: Assign $c_i$ to `neighbor_counts[i]`.
++1. **Build KDTree**: Construct a KDTree from the input point set $P$. This involves recursively splitting the space along the axis with the largest variance until a stopping criterion (e.g., max points per leaf) is met [S1, unofficial].
++2. **Query Neighbors**: For each point $p_i \in P$:
++   a. Perform a range query on the KDTree with center $p_i$ and radius $r$.
++   b. Retrieve all points $p_j$ such that $\|p_i - p_j\|_2 \le r$.
++   c. Count the number of retrieved points.
++   d. Subtract 1 from the count to exclude the query point $p_i$ itself (since the distance to itself is 0, it is always included in the range query unless explicitly excluded) [S1, unofficial].
++   e. Store the result in `neighbor_counts[i]`.
++
++**Formula:**
++For a point $p_i$, the neighbor count $C_i$ is:
++$$ C_i = |\{ p_j \in P : \|p_i - p_j\|_2 \le r \}| - 1 $$
++where $\| \cdot \|_2$ is the Euclidean distance.
++
++**Parameters:**
++- $r$ (distance_threshold): The radius for neighbor search. Typical values depend on the scale of the data; e.g., in point cloud processing, it might be a fraction of the bounding box diagonal or a fixed world unit [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Self-Inclusion**: The range query typically includes the query point itself. Failing to subtract 1 results in an overcount of 1 for every point [S1, unofficial].
++- **Boundary Effects**: Points near the boundary of the point cloud may have fewer neighbors simply due to lack of data, not lower density. This should be considered when interpreting density [G].
++- **Precision**: Floating-point precision in distance calculations can affect inclusion/exclusion at the exact boundary $r$. Using squared distances ($\|p_i - p_j\|_2^2 \le r^2$) avoids square roots and improves performance and precision [G].
+ 
+ **Pseudocode:**
+ ```python
+ import numpy as np
+-from sklearn.neighbors import KDTree
++from scipy.spatial import KDTree
+ 
+ def neighbor_counting(points: np.ndarray, radius: float) -> np.ndarray:
+@@ -35,32 +48,30 @@
+     
+     Args:
+-        points: Array of shape (N, D) containing point coordinates.
+-        radius: The distance threshold for neighborhood definition.
++        points: Array of shape (N, 3) containing 3D coordinates.
++        radius: Distance threshold for neighbor search.
+         
+     Returns:
+         Array of shape (N,) containing neighbor counts (excluding self).
+     """
+-    # Step 1: Build KDTree
++    # Build KDTree from input points
+     tree = KDTree(points)
+     
+-    # Step 2: Query neighbors
+-    # query_radius returns a list of arrays, where each array contains indices
+-    # of points within 'radius' of the corresponding query point.
+-    indices_list = tree.query_radius(points, r=radius)
++    # Initialize array for neighbor counts
++    counts = np.zeros(len(points), dtype=np.int32)
+     
+-    # Step 3: Calculate counts excluding self
+-    # The query includes the point itself, so we subtract 1.
+-    neighbor_counts = np.array([len(indices) - 1 for indices in indices_list])
+-    
+-    return neighbor_counts
++    # Query neighbors for each point
++    # query_radius returns indices of points within radius
++    # Note: scipy's query_radius includes the point itself if distance is 0
++    for i in range(len(points)):
++        # Get indices of neighbors within radius
++        neighbor_indices = tree.query_radius(points[i], r=radius)
++        
++        # Count neighbors, excluding self
++        # The point itself is always at distance 0, so it is in neighbor_indices
++        # We subtract 1 to exclude self
++        counts[i] = len(neighbor_indices) - 1
++        
++    return counts
+ ```
+-
+-**Parameters:**
+-- `radius` ($r$): The Euclidean distance threshold. Typical values depend on the scale of the input data; for normalized unit cubes, $r \in [0.01, 0.1]$ is common for sparse clouds [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- **Self-Inclusion**: Standard KDTree radius queries include the query point itself. Failing to subtract 1 results in a count inflated by 1 [S1, unofficial].
+-- **Precision**: Floating-point comparison errors near the boundary $r$ may cause inconsistent inclusion/exclusion if not handled consistently (e.g., using $\le$ vs $<$).
+-- **Empty Neighborhoods**: Points with no neighbors (other than self) will have a count of 0.
+ 
+ ## Subtopics
+@@ -70,5 +81,5 @@
+ 
+ ### [KDTree-based Neighbor Counting](6285-kdtree-based-neighbor-counting.md)
+-Calculates the density of mesh vertices within each voxel by querying neighboring points using a KDTree and normalizing counts. This variant adapts the basic neighbor counting logic to voxel-based density estimation, often used in conjunction with point splatting or volume rasterization.
++Calculates the density of mesh vertices within each voxel by querying neighboring points using a KDTree and normalizing counts. This variant extends basic neighbor counting by mapping points to a voxel grid and aggregating counts per voxel, enabling density estimation for rendering purposes [6285-kdtree-based-neighbor-counting.md].
+ 
+ ### Range Weight
+@@ -77,5 +88,5 @@
+ 
+ #### formula
+-$$w_r(\boldsymbol{\Phi}, N) = \frac{|N \cap V_{\boldsymbol{\Phi}}|}{|N|}$$
++$$ w_r(\boldsymbol{\Phi}, N) = \frac{|N \cap V_{\boldsymbol{\Phi}}|}{|N|} $$
+ where $N$ is an arbitrary voxel neighborhood, $V_{\boldsymbol{\Phi}}$ is the set of voxels within range $\boldsymbol{\Phi}$, and $|V|$ is the cardinality of a set $V$ [S2, unofficial].
+ 
+@@ -83,16 +94,24 @@
+ Used in forensic visualizations to highlight metal fragments and their neighborhood, and in MR bile duct examination to isolate liver tumors [S2, unofficial].
+ 
++### Predictor Definitions
++#### layout
++Predictor Definitions (Table 1): NOP: 0; P_X: A; P_Y: B; P_Z: D; AVG_XY: (A+B)/2; AVG_XZ: (A+D)/2; AVG_YZ: (B+D)/2; MED_XY: median(A, B, A+B-C); MED_XZ: median(A, D, A+D-E); MED_YZ: median(B, D, B+D-F); AVG3D: (A+B+D)/3. Neighbors A,B,C,D,E,F,G,H defined in Figure 2 relative to pixel X [S3].
++
++Neighbor Locations (Figure 2): For pixel X at (slice i, row r, col c): A=(i, r, c-1), B=(i, r-1, c), C=(i, r-1, c-1), D=(i-1, r, c), E=(i-1, r, c-1), F=(i-1, r-1, c), G=(i-1, r-1, c-1), H=(i, r-1, c+1)? Note: Figure 2 shows specific relative positions. Text says 'Note: neighbors’ locations presented in Figure 2.' [S3].
++
+ ## Operating characteristics
+-- **Time Complexity**: Building the KDTree takes $O(N \log N)$ on average. Querying all points takes $O(N \log N)$ on average for uniform distributions, but can degrade to $O(N^2)$ in worst-case high-dimensional or clustered scenarios [S1, unofficial].
+-- **Memory Complexity**: $O(N)$ to store the points and the KDTree structure, plus $O(N)$ for the output array.
+-- **Strengths**: Simple to implement; provides immediate local density estimates; effective for noise detection and outlier removal.
+-- **Limitations**: Sensitive to the choice of radius $r$; computationally expensive for very large datasets without spatial indexing; does not account for point orientation or surface normal information.
+-- **When to use**: When local density is required for clustering, noise filtering, or as a preprocessing step for more complex volume representations.
+-- **When not to use**: When global density metrics are sufficient, or when computational resources are extremely limited and approximate methods are acceptable.
++- **Time Complexity**: Building the KDTree takes $O(N \log N)$ on average. Querying neighbors for all points takes $O(N \log N)$ on average with a balanced KDTree, but can degrade to $O(N^2)$ in worst-case scenarios (e.g., highly clustered data or poor tree balance) [S1, unofficial].
++- **Memory Complexity**: $O(N)$ to store the points and the KDTree structure [S1, unofficial].
++- **Measured Performance**: Performance depends heavily on the data distribution and the choice of $r$. For uniform distributions, KDTree queries are efficient. For clustered data, performance may degrade [G].
++- **Strengths**: Simple to implement, efficient for moderate-sized datasets, provides local density information.
++- **Limitations**: Sensitive to the choice of $r$, can be slow for very large datasets or high-dimensional data, suffers from the curse of dimensionality [G].
++- **When to use**: When local density estimation is needed for outlier detection, clustering initialization, or rendering parameter adjustment.
++- **When not to use**: For very large datasets where approximate methods (e.g., grid-based hashing) are preferred, or in high-dimensional spaces where KDTree performance degrades [G].
+ 
+ ## Background
+-Neighbor Counting is a fundamental technique in spatial data analysis and point cloud processing. Its implementation using KDTree-based radius queries is widely documented in computational geometry libraries and graphics research [S1, unofficial]. The concept is closely related to local density estimation in statistics and is a precursor to more complex neighborhood-based attributes like Range Weight in volume visualization [S2, unofficial].
++Neighbor Counting is a basic spatial analysis technique widely used in point cloud processing, computer graphics, and scientific visualization. The use of KDTree for efficient neighbor search was popularized by Bentley in 1975 [G]. In the context of volume rendering and point cloud density evaluation, it serves as a foundational step for more complex operations like density-based clustering or adaptive sampling [S1, unofficial]. The specific implementation details cited here are from an unofficial source [S1, unofficial], which describes a practical implementation using `scipy.spatial.KDTree`.
+ 
+ ## Sources
+ [S1] wskingdom/DGR, https://github.com/wskingdom/DGR, fetched 2026-10-26 (unofficial)
+-[S2] Multi-Dimensional Transfer Function Design Using Sorted Histograms, https://doi.org/10.2312/vg/vg06/001-008, fetched 2026-10-26 (unofficial)+[S2] Multi-Dimensional Transfer Function Design Using Sorted Histograms, https://doi.org/10.2312/vg/vg06/001-008, fetched 2026-10-26 (unofficial)
++[S3] Employing New Hybrid Adaptive Wavelet-Based Transform and Histogram Packing to Improve JP3D Compression of Volumetric Medical Images, https://doi.org/10.3390/e22121385, fetched 2026-10-26

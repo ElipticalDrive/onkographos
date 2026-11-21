@@ -1,0 +1,237 @@
+--- v005.md
++++ v006.md
+@@ -16,6 +16,4 @@
+ - `stepsize`: Number of voxels per sample step, float32 scalar.
+ - `voxel_size`: Physical size of a single voxel, float32 scalar.
+-- `bbox_cycle_xy`: Boolean flag enabling cyclic wrapping in X/Y axes [S1, unofficial].
+-- `randomize`: Boolean flag enabling uniform jitter within sample bins [S1, unofficial].
+ 
+ **Outputs:**
+@@ -33,8 +31,8 @@
+ 
+ **Parameters:**
+-- `stepsize`: Typical values depend on scene scale; often 1-4 voxels [S1, unofficial][S5, unofficial].
+-- `near`: Typically $>0$, e.g., 0.2 or 1.0 [S2, unofficial][S5, unofficial].
+-- `far`: Typically large, e.g., $10^9$ or scene diameter [S5, unofficial].
+-- `voxel_size`: Determined by grid resolution and bounding box dimensions [S5, unofficial].
++- `stepsize`: Number of voxels per sample step [S1, unofficial][S5, unofficial].
++- `near`: Near clipping plane distance [S2, unofficial][S5, unofficial].
++- `far`: Far clipping plane distance [S5, unofficial].
++- `voxel_size`: Physical size of a single voxel [S5, unofficial].
+ 
+ **Steps:**
+@@ -54,5 +52,4 @@
+      $$ t_{min} = \max(\min(t_{min}^{raw}, far), near) $$
+      $$ t_{max} = \max(\min(t_{max}^{raw}, far), near) $$
+-   - Note: If `bbox_cycle_xy` is enabled, $t_{min}$ is computed using only the Z-axis intersection rates [S1, unofficial].
+ 
+ 3. **Sample Count Calculation:**
+@@ -68,13 +65,9 @@
+    - Compute normalized direction: $rays_{dir} = rays_d / r_{norm}$ [S2, unofficial].
+    - Generate base step distances: $dist_k = stepdist \times k$ for $k = 0, \dots, n_{samples}-1$ [S5, unofficial].
+-   - If `randomize` is enabled, add uniform jitter:
+-     $$ jitter = \text{rand}() \times \frac{t_{max} - t_{min}}{n_{samples}} $$
+-     $$ dist_k = dist_k + jitter $$
+    - Compute query points:
+      $$ p = rays_{start} + rays_{dir} \times dist_k $$
+-   - If `bbox_cycle_xy` is enabled, wrap X and Y coordinates of $p$ around the AABB bounds [S1, unofficial].
+ 
+ 5. **Masking and Metadata:**
+-   - Compute `mask_outbbox`: True if any coordinate of $p$ is outside $[xyz_{min}, xyz_{max}]$. If `bbox_cycle_xy` is enabled, check only Z-axis bounds [S1, unofficial][S5, unofficial].
++   - Compute `mask_outbbox`: True if any coordinate of $p$ is outside $[xyz_{min}, xyz_{max}]$ [S2, unofficial].
+    - Construct `ray_id`: Initialize array of zeros length $total\_len$. Set `ray_id[N_steps_cumsum[i-1]] = 1` for $i > 0$. Perform cumulative sum [S5, unofficial].
+    - Construct `step_id`: For index $idx$, let $rid = ray_id[idx]$. Then $step\_id[idx] = idx - (N_{steps\_cumsum}[rid-1] \text{ if } rid \neq 0 \text{ else } 0)$ [S5, unofficial].
+@@ -84,78 +77,43 @@
+ ```python
+ import torch
+-import math
+ 
+ def ray_bbox_intersection_and_sampling(
+-    rays_o: torch.Tensor,
+-    rays_d: torch.Tensor,
+-    xyz_min: torch.Tensor,
+-    xyz_max: torch.Tensor,
+-    near: float,
+-    far: float,
+-    stepsize: float,
+-    voxel_size: float,
+-    bbox_cycle_xy: bool = False,
+-    randomize: bool = False
+-) -> dict:
+-    """
+-    Compute ray-AABB intersection and generate sample points.
++    rays_o, rays_d, xyz_min, xyz_max, near, far, stepsize, voxel_size
++):
++    # Convert inputs to tensors if necessary
++    rays_o = torch.as_tensor(rays_o, dtype=torch.float32)
++    rays_d = torch.as_tensor(rays_d, dtype=torch.float32)
++    xyz_min = torch.as_tensor(xyz_min, dtype=torch.float32)
++    xyz_max = torch.as_tensor(xyz_max, dtype=torch.float32)
+     
+-    Args:
+-        rays_o: (N, 3) ray origins
+-        rays_d: (N, 3) ray directions
+-        xyz_min: (3,) bounding box min
+-        xyz_max: (3,) bounding box max
+-        near: near clipping plane
+-        far: far clipping plane
+-        stepsize: voxels per step
+-        voxel_size: physical voxel size
+-        bbox_cycle_xy: enable cyclic wrapping in X/Y
+-        randomize: enable jitter
+-        
+-    Returns:
+-        Dictionary with rays_pts, mask_outbbox, ray_id, step_id, N_steps, t_min, t_max
+-    """
+-    # 1. Preprocessing
+     N = rays_o.shape[0]
+     rays_o = rays_o.contiguous().reshape(-1, 3)
+     rays_d = rays_d.contiguous().reshape(-1, 3)
+     
+-    # Replace zero direction components with 1e-6
++    # Replace zero direction components with 1e-6 to avoid division by zero
+     vec = torch.where(rays_d == 0, torch.full_like(rays_d, 1e-6), rays_d)
+     
+-    # 2. Ray-AABB Intersection
+-    # ax = (xyz_max - rays_o) / vec
+-    # bx = (xyz_min - rays_o) / vec
++    # Compute intersection rates
+     ax = (xyz_max.unsqueeze(0) - rays_o) / vec.unsqueeze(0)
+     bx = (xyz_min.unsqueeze(0) - rays_o) / vec.unsqueeze(0)
+     
+-    if bbox_cycle_xy:
+-        # Use only Z-axis for t_min calculation
+-        t_min_raw = torch.min(ax[:, 2], bx[:, 2])
+-    else:
+-        # Standard slab method
+-        t_min_raw = torch.max(torch.min(ax, bx), dim=1).values
+-        
+-    # t_max uses all axes
++    # Standard slab method for t_min and t_max
++    t_min_raw = torch.max(torch.min(ax, bx), dim=1).values
+     t_max_raw = torch.min(torch.max(ax, bx), dim=1).values
+     
+-    # Clamp to near/far
++    # Clamp to near/far planes
+     t_min = torch.clamp(t_min_raw, min=near, max=far)
+     t_max = torch.clamp(t_max_raw, min=near, max=far)
+     
+-    # 3. Sample Count Calculation
++    # Compute ray direction norm and step distance
+     r_norm = torch.norm(rays_d, dim=1, keepdim=True)
+     stepdist = stepsize * voxel_size
+     
+-    # Avoid division by zero if r_norm is 0 (shouldn't happen with valid rays)
+-    r_norm_safe = torch.where(r_norm == 0, torch.full_like(r_norm, 1e-6), r_norm)
+-    
+-    n_samples_float = (t_max - t_min) * r_norm_safe.squeeze() / stepdist
++    # Calculate number of samples per ray, ensuring at least 1
++    n_samples_float = (t_max - t_min) * r_norm / stepdist
+     N_steps = torch.clamp(torch.ceil(n_samples_float).long(), min=1)
+     
+-    # 4. Point Generation
+-    total_len = N_steps.sum().item()
++    total_len = int(N_steps.sum().item())
+     if total_len == 0:
+-        # Handle edge case where no samples are generated
+         return {
+             'rays_pts': torch.empty(0, 3),
+@@ -168,64 +126,37 @@
+         }
+         
++    # Compute ray start position and normalized direction
+     rays_start = rays_o + rays_d * t_min.unsqueeze(1)
+-    rays_dir = rays_d / r_norm_safe
++    rays_dir = rays_d / r_norm
+     
+-    # Generate step indices
+-    steps = torch.arange(0, N_steps.max().item(), device=rays_o.device)
+-    # Create mask for valid steps per ray
++    # Generate step indices and distances
++    max_steps = int(N_steps.max().item())
++    steps = torch.arange(max_steps, device=rays_o.device)
+     valid_mask = steps.unsqueeze(0) < N_steps.unsqueeze(1)
+     
+-    # Compute distances
+     dists = steps.float() * stepdist
+     
+-    if randomize:
+-        bin_size = (t_max - t_min) / N_steps.float().unsqueeze(1)
+-        jitter = torch.rand_like(dists) * bin_size
+-        dists = dists + jitter
+-        
+-    # Apply valid mask
+-    dists = dists * valid_mask.float()
++    # Compute query points
++    rays_start_exp = rays_start.unsqueeze(1)
++    rays_dir_exp = rays_dir.unsqueeze(1)
++    dists_exp = dists.unsqueeze(2)
+     
+-    # Compute points
+-    # rays_start: (N, 3), rays_dir: (N, 3), dists: (N, max_steps)
+-    # Expand for broadcasting
+-    rays_start_exp = rays_start.unsqueeze(1) # (N, 1, 3)
+-    rays_dir_exp = rays_dir.unsqueeze(1)    # (N, 1, 3)
+-    dists_exp = dists.unsqueeze(2)          # (N, max_steps, 1)
++    rays_pts_unmasked = rays_start_exp + rays_dir_exp * dists_exp
++    rays_pts = rays_pts_unmasked[valid_mask]
+     
+-    rays_pts_unmasked = rays_start_exp + rays_dir_exp * dists_exp # (N, max_steps, 3)
+-    
+-    # Flatten
+-    rays_pts = rays_pts_unmasked[valid_mask] # (total_len, 3)
+-    
+-    # 5. Masking and Metadata
+-    # Check bounds
++    # Compute mask_outbbox
+     mask_x = (rays_pts[:, 0] < xyz_min[0]) | (rays_pts[:, 0] > xyz_max[0])
+     mask_y = (rays_pts[:, 1] < xyz_min[1]) | (rays_pts[:, 1] > xyz_max[1])
+     mask_z = (rays_pts[:, 2] < xyz_min[2]) | (rays_pts[:, 2] > xyz_max[2])
++    mask_outbbox = mask_x | mask_y | mask_z
+     
+-    if bbox_cycle_xy:
+-        mask_outbbox = mask_z
+-    else:
+-        mask_outbbox = mask_x | mask_y | mask_z
+-        
+-    # Cyclic wrapping
+-    if bbox_cycle_xy:
+-        range_x = xyz_max[0] - xyz_min[0]
+-        range_y = xyz_max[1] - xyz_min[1]
+-        rays_pts[:, 0] = xyz_min[0] + (rays_pts[:, 0] - xyz_min[0]) % range_x
+-        rays_pts[:, 1] = xyz_min[1] + (rays_pts[:, 1] - xyz_min[1]) % range_y
+-        
+-    # Ray IDs
++    # Construct ray_id
+     N_steps_cumsum = torch.cat([torch.zeros(1, dtype=torch.long, device=N_steps.device), N_steps.cumsum(0)[:-1]])
+     ray_id = torch.zeros(total_len, dtype=torch.long, device=N_steps.device)
+-    # Mark start of each ray segment
+-    start_indices = N_steps_cumsum[1:] # Skip first as it's 0
+-    ray_id[start_indices] = 1
++    ray_id[N_steps_cumsum[1:]] = 1
+     ray_id = ray_id.cumsum(0)
+     
+-    # Step IDs
++    # Construct step_id
+     step_id = torch.arange(total_len, dtype=torch.long, device=N_steps.device)
+-    # Subtract offset for each ray
+     offsets = N_steps_cumsum[ray_id]
+     step_id = step_id - offsets
+@@ -248,14 +179,11 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot S)$ where $N$ is the number of rays and $S$ is the average number of samples per ray. The intersection calculation is $O(N)$, and point generation is $O(N \cdot S)$.
+-- **Memory Complexity:** $O(N \cdot S)$ to store the generated points and metadata.
+ - **Performance:** Efficiently implemented in CUDA for batched processing, often splitting rays into batches (e.g., 10,000) to manage memory [S5, unofficial].
+-- **Strengths:** Handles arbitrary bounding boxes, supports cyclic boundary conditions for periodic scenes, and provides structured metadata (ray/step IDs) for efficient downstream processing [S1, unofficial][S5, unofficial].
++- **Strengths:** Handles arbitrary bounding boxes and provides structured metadata (ray/step IDs) for efficient downstream processing [S1, unofficial][S5, unofficial].
+ - **Limitations:** Requires careful handling of zero-direction components to avoid division by zero [S5, unofficial]. The fixed step size may lead to over-sampling in sparse regions or under-sampling in dense regions if not combined with importance sampling [S1, unofficial].
+-- **When to use:** When rendering neural radiance fields with a defined bounding box, especially for unbounded scenes or those requiring periodic boundary conditions [S1, unofficial][S5, unofficial].
+-- **When not to use:** For unbounded scenes without a contracted space or bounding box, or when adaptive sampling is required [S1, unofficial].
++- **When to use:** When rendering neural radiance fields with a defined bounding box [S1, unofficial][S5, unofficial].
+ 
+ ## Background
+-This method is commonly used in neural radiance field (NeRF) implementations, particularly those dealing with unbounded scenes or specific bounding box constraints [S1, unofficial][S2, unofficial][S5, unofficial]. It builds on the standard slab method for ray-AABB intersection [Parent] and extends it to prepare samples for volume rendering [S1, unofficial]. Variants are found in projects like DirectVoxGO, UnboundedNeRFPytorch, and ref-dvgo [S1, unofficial][S2, unofficial][S5, unofficial].
++This method is commonly used in neural radiance field (NeRF) implementations, particularly those dealing with unbounded scenes or specific bounding box constraints [S1, unofficial][S2, unofficial][S5, unofficial]. It builds on the standard slab method for ray-AABB intersection [Parent] and extends it to prepare samples for volume rendering [S1, unofficial].
+ 
+ ## Sources

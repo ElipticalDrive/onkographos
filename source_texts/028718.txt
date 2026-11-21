@@ -1,0 +1,746 @@
+1
+LiteVoxel: Low-memory Intelligent Thresholding for Efficient Voxel
+Rasterization
+Jee Won Lee1,2 , and Jongseong Brad Choi1,2*
+1 Department of Mechanical Engineering, State University of New York, Korea, Incheon, South Korea
+2 Department of Mechanical Engineering, State University of New York, Stony Brook, NY, United States
+arXiv:2511.02510v1 [cs.CV] 4 Nov 2025
+* Corresponding author
+Fig. 1. LiteVoxel Overview. Our system trains a sparse voxel field with a differentiable tile rasterizer and three targeted innovations. (i) LF-weighted loss: a
+Sobel-inverse weight with a mid-training γ-ramp shifts gradient to low-texture regions without harming edges. (ii) Depth-quantile pruning: per-depth bins
+prune voxels with low max blending weight wmax using a quantile cutoff τb , stabilized by EMA + hysteresis and a small per-step cap. (iii) Priority-driven
+subdivision: ray-footprint eligibility (hv > κ δv ) and a depth-aware priority pv = uv b(zv ) select splits under a growth budget with optimizer
+re-initialization. Together, these modules bound VRAM and model size while improving low-frequency fidelity and boundary stability.
+Abstract—Sparse-voxel rasterization is a fast, differentiable
+alternative for optimization-based scene reconstruction, but it
+tends to underfit low-frequency content, depends on brittle
+pruning heuristics, and can overgrow in ways that inflate VRAM.
+We introduce LiteVoxel, a self-tuning training pipeline that makes
+SV rasterization both steadier and lighter. Our loss is made lowfrequency aware via an inverse-Sobel reweighting with a midtraining γ-ramp, shifting gradient budget to flat regions only after
+geometry stabilize. Adaptation replaces fixed thresholds with a
+depth-quantile pruning logic on maximum blending weight, stabilized by EMA-hysteresis guards and refines structure through
+ray-footprint-based, priority-driven subdivision under an explicit
+growth budget. Ablations and full-system results across MipNeRF 360 (6 scenes) and Tanks & Temples (3 scenes) datasets
+show mitigation of errors in low-frequency regions and boundary
+instability while keeping PSNR/SSIM, training time, and FPS
+comparable to a strong SVRaster baseline. Crucially, LiteVoxel
+reduces peak VRAM by ∼40–60% and preserves low-frequency
+detail that prior setups miss, enabling more predictable, memoryefficient training without sacrificing perceptual quality.
+This work was supported by the National Research Foundation of Korea
+(NRF) grant funded by the Korea government (MSIT) (Grant No. RS-2022NR067080 and RS-2025-05515607) (Corresponding author: Jongseong Brad
+Choi). Jee Won Lee: Data Curation, Methodology, Validation, Visualization,
+Writing – original draft, Software. Jongseong Brad Choi: Conceptualization,
+Methodology, Validation, Formal Analysis, Writing - Review & Editing.
+Jee Won Lee is with the State University of New York City Korea, Incheon
+21985, South Korea (jeewon.lee@stonybrook.edu). Jongseong Brad Choi is
+with the Department of Mechanical Engineering, State University of New
+York City Korea, Incheon 21985, Korea (jongseong.choi@stonybrook.edu).
+Index Terms—Image reconstruction, Image synthesis, Octrees,
+Structure from Motion, Thresholding (Imaging)
+I. I NTRODUCTION
+V
+IEW-synthesis and reconstruction surged with radiancefield methods such as NeRF by Mildenhall et al. [1],
+but training/rendering speed and memory pressure motivated a
+shift toward faster, explicit alternatives. 3D Gaussian Splatting
+(3DGS), introduced by Kerbl et al. [2], achieves real-time
+rendering by optimizing anisotropic Gaussian primitives with
+a visibility-aware rasterizer, catalyzing a wave of explicit,
+differentiable pipelines that trade deep MLPs for direct parameter optimization. This trend invites a re-examination of
+classical voxel structures as practical, differentiable substrates
+for efficient pipelines.
+Voxel and sparse voxel octrees, in particular, have long
+served graphics and reconstruction for their visibility handling
+and hierarchical culling [3]. The depth-sensor era popularized
+dense Truncated Signed Distance Function (TSDF) grids and
+voxel hashing for large-scale mapping [4], [5]. However,
+dense memory footprints, aliasing, and level-of-detail control
+limited adoption in high-fidelity view synthesis. Sparse Voxels
+Rasterization (SVRaster) proposed by Sun et al., revisits
+voxels with a differentiable rasterizer and adaptive sparsity,
+achieving high quality and speed without neural networks and
+2
+positioning voxels as a viable alternative to Gaussians and
+neural fields [6], [7].
+While NeRF and explicit rasterization pipelines such as
+3DGS have matured rapidly, the community has continued to
+address reconstruction blind spots by their novel techniques.
+Micro-Splatting by Lee et al. [8] focuses on compact, nearisotropic primitives and disciplined densification, AbsGS by
+Ye et al. [9] analyzes gradient interactions and proposes
+homodirectional view-space gradients to stabilize splitting, and
+Gaussian Surfels by Dai et al. [10] align primitives to local
+surfaces for sharper geometry. As complementary efforts refine
+Gaussian pipelines, our focus is the voxel regime. We target
+the failure modes specific to sparse-voxel rasterization and
+design mechanisms native to voxels to improve low-frequency
+fidelity, depth fairness, and sparsity stability.
+Despite recent progress, baseline SVRaster suffers (i) lowfrequency underfitting (blotchy flats), (ii) depth-biased pruning with silhouette flicker, and (iii) myopic subdivision that
+over-refines near geometry and ignores far voxels, inflating
+VRAM. Therefore, we introduce LiteVoxel, a self-tuning
+training pipeline for sparse-voxel rasterization that achieves
+steadier optimization and lower memory, directly addressing
+the practical gaps of the baseline SVRaster pipeline. Our
+contributions are as follows:
+We introduce a low-frequency-aware photometric loss
+that reweights pixels via an inverse-Sobel map with a
+mid-training γ(t) ramp and mean normalization, redirection gradient to flat regions only after geometry stabilizes
+thus removing blotchy planes without sacrificing details
+or PSNR/SSIM/runtime.
+• We propose depth-quantile pruning with stability guards,
+per-depth cumulative distribution function cutoffs on
+maximum blending weight combined with EMAhysteresis, contour-dilation, and a per-step cap, which
+adapts pruning fairly across depth to eliminate boundary
+flicker while reducing model size and peak VRAM.
+• We develop priority-driven subdivision that uses a rayfootprint eligibility test that ranks eligible voxels by
+usefulness with a mild far-depth bias which selects splits
+under a global budget with optimizer re-initialization,
+ensuring refinement where cameras can resolve detail,
+attention to far regions, and bounded growth (˜40%-60%
+lower peak VRAM) with comparable FPS and training
+time.
+•
+II. R ELATED W ORK
+A. Sparse-Voxel Rasterization (SVRaster)
+SVRaster reconstructs and renders a scene by directly optimizing a sparse voxel field with a differentiable tile rasterizer
+and a photometric objective without neural networks. Rays are
+traced from camera centers through pixel footprints where the
+rasterizer accumulates per-voxel color/opacity along each ray,
+and gradients from the image loss flow directly to voxel parameters [6]. The adaptation loop periodically prunes unhelpful
+voxels and subdivides useful ones to match image resolution,
+yielding real-time rendering with competitive fidelity.
+We adopt SVRaster’s native statistics that drive adaptation:
+the maximum blending weight wmax (v) (a proxy for voxel
+contribution/visibility), and the local inter-ray sample interval
+δv (the camera-induced footprint at the voxel’s depth). These
+signals are inexpensive to gather during rasterization and are
+central to our redesign of pruning and subdivision.
+B. Fidelity Enhancements in Explicit Rasterization
+3D Gaussian Splatting (3DGS), introduced by Kerbl et
+al., demonstrated that real-time view synthesis is attainable
+with explicit, rasterizable primitives optimized directly in
+image space, catalyzing a family of non-neural, differentiable
+pipelines [2]. Building on 3DGS, several methods explicitly
+target missed detail via improved densification and geometry
+alignment. Micro-Splatting by Lee et al. emphasizes compact, near-isotropic primitives and disciplined densification
+to recover fine structure [8]. AbsGS by Ye et al. analyzes
+gradient interactions in the splatting objective and proposes
+homodirectional, view-space gradients to stabilize splitting and
+improve high-frequency recovery [9]. Gaussian Surfels by Dai
+et al. align anisotropic primitives to local surfaces (surfels) for
+sharper geometry and crisper edges [10].
+Recent work on explicit rasterization shows that careful loss
+weighting and adaptive refinement can remedy reconstruction
+blind spots. Motivated by these insights, we target sparse-voxel
+rasterization and introduce a voxel-native training pipeline
+that targets the baseline’s overlooked issues in low-frequency
+fidelity, pruning stability, and refinement policy. Inspired by
+these advances, we target sparse-voxel rasterization directly,
+introducing mechanisms native to voxels rather than porting
+Gaussian-specific tricks.
+C. Low-Frequency Underfitting in SVRaster
+Low-frequency regions are systematically underfit in
+sparse-voxel rasterization. Although SVRaster preserves highfrequency detail, the training signal is strongly edge-driven
+as pixelwise photometric losses produce large gradients
+at contours and high-contrast areas, while low-texture regions receive weak, noisy supervision, leading to blotchy
+planes [6], [7]. This imbalance is compounded along the ray
+because flat-region errors are spatially diluted, spread over
+many pixels, so each voxel explains only a tiny share of the
+bias. Also, since accumulated transmittance in large, smooth
+surfaces often saturate near zero or one, both effects make the
+derivative of the rendered color with respect to opacity nearly
+vanish and further weakens gradients in flats.
+Classical remedies help but don’t directly fix this LF
+underfitting. SSIM (Structural Similarity Index Measure) is
+routinely paired with L1/L2 to better match perception, and
+robust penalties stabilize optimization under exposure drift
+and outliers [11], [12]. Appearance/exposure handling in viewsynthesis reduces bias from brightness shifts [1], [13]. However, these components still emphasize structure or merely
+damp outliers as they do not explicitly reallocate gradient
+budget toward flat regions in a voxel rasterizer.
+Motivated by this gap, we introduce a low-frequency-aware
+reweighting that increases the contribution of flat pixels only
+3
+after early geometry has stabilized, counteracting the edge bias
+while preserving high-frequency sharpness.
+D. SVRaster VRAM Inflation
+Despite its efficiency at render time, a vanilla sparse-voxel
+rasterizer often inflates memory during training. Each occupied voxel carries a nontrivial parameter set (position/extent
+and several SH color coefficients) plus optimizer state (e.g.,
+Adam’s moments), so footprint scales linearly with voxel
+count [6], [14]. Early iterations favor aggressive octree growth:
+uniform or edge-driven splitting multiplies cells by up to
+8× per step and is biased toward near-camera regions where
+rays are densest. Since pruning is typically governed by a
+global threshold on per-voxel blending weight, it is depthbiased being conservative on far voxels and over-zealous near
+silhouettes so many low-value cells linger while useful far cells
+are retained unevenly [6], [7]. Around object boundaries, noisy
+inside/outside estimates cause “keep halos,” further bloating
+the grid. Peak usage also reflects transient buffers needed for
+tiling/compositing and statistic passes, which grow with the
+number of live voxels. These behaviors together create large,
+spiky VRAM peaks even when final reconstructions could be
+represented far more compactly thereby motivating our depthaware pruning and budgeted, footprint-tested subdivision to
+keep growth in check without sacrificing quality.
+III. P RELIMINARIES
+Camera and Rays.
+Throughout, voxels are indexed by v and pixels by image
+coordinates (x, y). Let o ∈ R3 be the camera center and
+b y) ∈ S2 the unit direction through pixel (x, y) as shown
+d(x,
+in Fig. 2. A primary ray is
+r(t) = o + t d(x, y),
+t ≥ 0.
+T0 = 1,
+Tk = Tk−1 (1 − αvk ) ,
+b
+C(x, y) =
+Differentiable compositing (per ray).
+K
+Let {vk }k=1 be the voxels intersected by r(t), ordered frontto-back. Using standard alpha compositing,
+K
+X
+wk cvk .
+(2)
+(3)
+(4)
+k=1
+Here, wk is the contribution of voxel vk , αvk its opacity,
+and Tk the accumulated transmittance up to the k-th sample.
+Per-voxel statistics used for adaptation.
+We employ the maximum blending weight observed for
+voxel v,
+
+wmax (v) =
+max
+Tk(v,r)−1 αv ,
+(5)
+rays r hitting v
+And the local inter-ray spacing δv (the image-plane footprint
+at xv ) as a depth proxy.
+Loss Optimization.
+Given the rendered color b
+C(x, y) and ground truth I(x, y),
+the standard sparse-voxel rasterization loss is defined as
+LSVR = Lmse + λssim Lssim + λT LT
++ λdist Ldist + λR LR + λtv Ltv .
+(6)
+Here, Lmse is the pixelwise MSE; Lssim measures structure
+similarity; LT promotes near-binary transmittance; Ldist is a
+distortion term in ray space; LR regularizes per-voxel color;
+and Ltv is the total variation on the density/opacity grid.
+Section IV-E specifies our modifications to the photometric
+term and the subset of auxiliaries used in LiteVoxel.
+IV. M ETHODOLOGY
+(1)
+Sparse Voxel/Octree Indexing.
+The scene is discretized into cube voxels v with center xv ,
+half-size hv , RGB color cv ∈ [0, 1]3 , and opacity av ∈ [0, 1].
+Voxels are organized in an octree; level l voxel cells have edge
+length 2l h0 , and lmax denotes the finest level.
+wk = Tk−1 αvk ,
+A. Overview
+LiteVoxel is a principled training framework for sparsevoxel rasterization that rethinks both supervision and capacity
+control within the classic analysis-by-synthesis loop (Fig. 1).
+Starting from an SfM-initialized voxel field, we project, rasterize, measure a photometric objective, and back-propagate. Our
+contributions center on two coordinated components that address fundamental failure modes of voxel rasterization—edgedominated gradients, depth-coupled sampling bias, and unstable sparsity updates—without adding neural modules or
+heavy priors. Together, these components yield a self-tuning
+pipeline that preserves the simplicity and speed of voxel
+rasterization while substantially reducing peak VRAM and
+improving reconstruction of low-frequency structure.
+B. Low-frequency-aware photometric reweighting
+Fig. 2. Voxel Parameters and Ray Geometry. A pinhole camera at o casts a
+ray r(t) = o + t d(x, y) through pixel (x, y) toward a voxel v with center
+xv and half-size hv .
+Edges naturally dominate the photometric gradient in voxel
+rasterization, leaving large, flat regions under-optimized. We
+counter this by redistributing per-pixel gradients with an
+inverse-Sobel weight [15], following the edge-aware weighting
+principle used to attenuate gradients near high-contrast boundaries [16], [18]. The reweighting is activated mid-training
+as a simple curriculum to avoid disturbing early geometric
+4
+convergence [17] and is mean-normalized to prevent lossscale drift (Fig. 3).
+Let s(p) ∈ [0, 1] be the percentile-normalized Sobel magnitude at pixel p, treated as stop-grad. We form the unnormalized
+weight
+w(p) = (ε + 1 − s(p))γ(t) ,
+ε ≈ 10−3 .
+(7)
+and stabilize the overall gradient scale by mean normalization.
+w(p)
+1 X
+w(p) =
+e
+, ⟨w(·)⟩ =
+w(q).
+(8)
+⟨w(·)⟩
+|P |
+q∈P
+The LF emphasis factor γ(t) follows a piecewise-linear schedule
+
+0,
+t < t0 ,
+
+
+
+0
+γ(t) = γmax tt−t
+(9)
+, t0 ≤ t < t1 ,
+1 −t0
+
+
+
+γmax ,
+t ≥ t1 ,
+with default t0 ≈ 0.3T , t1 ≈ 0.6T , γmax ≈ 0.6. Given
+residual rp = R(p) − G(p), the photo term becomes
+1 X
+w(p) ρ(rp ).
+b
+(10)
+LLF =
+|P |
+p∈P
+where γ(t) = 0, LLF reduces exactly to the baseline
+photometric loss. As γ(t) ramps up mid-training, gradients
+on high-Sobel (edge) pixels are relatively down-weighted
+while those on low-Sobel (flat) pixels are amplified. Intuitively, edges and textures converge early where flats lag
+and exhibit blotchy residuals. The delayed, mean-normalized
+inverse-Sobel weighting increases attention to flat regions only
+after geometry stabilize, suppressing low-frequency blotching
+without softening edges, and keeps learning dynamics (step
+sizes, wall-clock) comparable to the baseline.
+C. Depth-aware quantile pruning
+To mitigate the baseline’s peak-VRAM spikes caused by
+uniform growth near cameras and a single global prune
+threshold that under-removes far voxels, we replace ad-hoc
+deletion with a depth-aware, adaptive rule. Voxels are pruned
+by per-depth quantiles of their maximum blending weight, and
+the decision is stabilized by an EMA–hysteresis inside test, a
+contour/detail “keep-halo,” and a per-step cap. The result is
+balanced sparsity across depth and stable silhouettes (see Fig.
+4).
+We group voxels by a depth proxy into bins Vb . As a
+proxy we use the per-voxel maximum blending weights. The
+empirical CDF is
+1 X
+Fb (t) =
+1{wvmax ≤ t} ,
+(11)
+|Vb |
+v∈Vb
+and the bin-wise threshold is the qb -quantile,
+τb = Fb−1 (qb ) .
+(12)
+Here, qb ∈ (0, 1) is a per-bin quantile annealed over training
+with a mild near/far relaxation. We prune v ∈ Vb when
+wvmax ≤ τb . This allocates sparsity pressure fairly over depth
+and avoids the “all-near, no-far” bias of a single global cutoff.
+To avoid silhouette chatter and burst deletions, we add three
+guards:
+i. EMA + hysteresis for inside labels. Maintain an exponential moving average mt = (1 − α)mt−1 + αxt of the
+inside score and update a discrete state st ∈ {in, out} with
+hysteresis,
+
+out,
+mt < mlow ,
+
+
+
+st = in,
+mt > mhigh ,
+
+
+
+otherwise, st = st−1
+This prevents flip-flops when mt hovers near the boundary.
+ii. Contour/detail dilation (“keep-halo”). Temporarily protect voxels that are small relative to the local ray footprint
+or exhibit high wvmax near edges where this preserves thin
+structures and silhouette continuity.
+iii. Per-step cap. Limit the removable fraction at each adapt
+step, turning potentially spiky deletion into smooth, predictable downsizing.
+D. Priority-driven subdivision
+To curb near-surface over-refinement, neglect of far geometry, and the resulting VRAM spikes in baseline sparse-voxel
+rasterization, we drive subdivision by an image-resolution test
+and a depth-aware priority.
+We permit splits only where image formation can justify
+extra capacity. For a voxel v with half-size hv , let δv denote
+the local inter-ray spacing, the projected ray “footprint”, at v’s
+location. A voxel is eligible if it is not at the finest octree level
+and
+hv > κ δv , κ ≈ 1,
+(13)
+Fig. 3. Low-frequency-aware photometric reweighting. From the inverseSobel weight map, the loss up-weights low-frequency regions; a mid-training
+γ(t)-ramp gradually enables this emphasis, with weights mean-normalized
+and the Sobel map treated as stop-grad to avoid.
+which prevents refining regions that camera cannot resolve and
+removes a major source of runaway growth near the sensor
+(see Fig. 5).
+Among eligible voxels, we assign a depth-aware priority that
+balances usefulness and a mild far-depth preference. Let zv be
+5
+Fig. 4. Depth-aware pruning with stability guards. (a) For each zone, voxels
+are pruned by a per-bin quantile of their maximum blending weight (orange
+region), equalizing sparsity across depth. (b) EMA + hysteresis converts
+noisy inside scores into stable in/out decisions, preventing flip-flops along
+silhouettes.
+the camera-space depth of voxel v. We robust-normalize depth
+to [0, 1] using the running 5th/95th percentiles (zp5 , zp95 ):
+
+
+zv − zp5
+zev = clip
+, 0, 1 .
+(14)
+zp95 − zp5
+We then apply a gentle far-bias
+b(zv ) = 1 + β zev ,
+(15)
+where zev ∈ [0, 1], β ∈ [0.1, 0.3], and scale each voxel’s
+running usefulness score Pv by b(·):
+Pv ← Pv b(zv ).
+(16)
+This counters myopic splitting near the camera and ensures
+resolvable far regions receive attention as shown in Fig. 5,
+where darker green indicates higher Pv .
+Finally, we perform budgeted selection where at each adaptation step, we choose only the top-pv candidates under a
+global growth cap (maximum splits per step) and refresh the
+optimizer/scheduler after topology changes. Together, footprint
+eligibility, depth-aware prioritization, and budgeted selection
+refine exactly where views support detail, allocate capacity
+across depth, and keep model growth and VRAM, predictable.
+E. LiteVoxel Training Objective
+LTotal = LLF + λSSIM LSSIM + λTc LTc + λTi LTi
+(17)
++ λmask Lmask + λtv Ltv .
+The LF-weighted photometric term is
+
+
+1 X
+w(p; t) ρ b
+e
+C(p) − I(p) ,
+LLF (t) =
+|P |
+LSSIM is the structure-aware penalty, LTc is the transmittance concentration that encourages final ray transmittance
+to be near 0 or 1, LTi is the inside regularizer on raw
+transmittance which discourages floating density and stabilizes
+empty space, λNDM is the depth-normal consistency to promote piecewise-smooth geometry, LNDM is the median-based
+depth-normal consistency for robustness to outliers, Lmask is
+the foreground/background supervision, and Ltv is the totalvariation on the sparse density field to reduce spurious highfrequency noise.
+LiteVoxel couples an LF-aware supervision scheme with
+depth-adaptive sparsity control—quantile pruning with stabilization and footprint-guided, budgeted subdivision—to keep
+capacity where images support detail while bounding growth.
+In the next section we evaluate these components quantitatively and qualitatively on standard view-synthesis benchmarks, reporting PSNR/SSIM, training/render throughput,
+peak VRAM, and ablations that isolate the effect of each
+module and the combined system.
+V. R ESULTS AND E VALUTAION
+Relative to the baseline SVRaster objective, we replace the
+photometric core with a low-frequency-weighted robust loss
+and retain only the auxiliary regularizer we actually use. The
+overall loss is
++ λNDm LNDm + λNDM LNDM
+Fig. 5. Priority-driven subdivision with ray-footprint eligibility. (i) Voxel
+becomes a candidate for splitting only if its half-size exceeds the local interray spacing on the image plane; this footprint test voids over-refining regions
+the camera cannot resolve. (ii) Eligible voxels are ranked by a usefulness
+score with a mild depth bias; the highest-priority candidates (green) are split
+under a global growth budget, allocating refinement to resolvable near and far
+regions while keeping model size bounded.
+(18)
+p∈P
+b
+where P is the set of pixels, C(p)
+is the rendered color,
+I(p) is the ground truth, and ρ(·) is a robust penalty.
+We evaluate LiteVoxel on two standard view-synthesis
+benchmarks: Mip-NeRF 360 [19] and Tanks & Temples [20]
+(outdoor/large-scale scenes). These datasets stress both lowfrequency expanses (skies, walls, floors) and high-frequency
+geometry (foliage, thin structures), which directly probe the
+three failure modes targeted by our method (LF underfitting,
+depth-biased pruning, and near-surface over-refinement). We
+report results on held-out views for each scene.
+To isolate our contributions, we compare LiteVoxel against
+SVRaster [6] (the voxel rasterization baseline), and two explicit splatting methods, 3D Gaussian Splatting (3DGS) [2]
+and Micro-Splatting [8], using public implementations and the
+same camera intrinsics and render settings where applicable.
+SVRaster and LiteVoxel share the same differentiable rasterizer and adaptation cadence.
+6
+TABLE I
+Q UANTITATIVE A NALYSIS AVERAGED ACROSS DATASETS
+Fig. 6. Qualitative comparison on Mip-NeRF 360 [19]. (From left to right) Each row shows the ground truth, SVRaster [6], LiteVoxel (Ours), 3DGS [2], and
+Micro-Splatting [8]. Scenes such as bicycle, bonsai, counter, kitchen, room, stump, and garden demonstrate how our approach captures detail and removes
+errors more effectively.
+7
+Fig. 7. Qualitative comparison on Tanks & Temples [20]. (From left to right) Each row shows the ground truth, SVRaster [6], LiteVoxel (Ours), 3DGS [2],
+and Micro-Splatting [8]. Scenes such as truck, church, and Ignatius demonstrate how our approach captures detail and removes errors more effectively.
+SVRaster and LiteVoxel are trained with 20k iterations;
+3DGS and Micro-Splatting are trained with 30k iteration
+budgets on a single RTX 5090 GPU. This identical
+compute/iteration budget ensures that any efficiency gains
+(e.g., memory, stability) arise from policy changes rather than
+extra optimization steps. We report PSNR [21], SSIM [11],
+and LPIPS [22] on held-out views, along with efficiency
+metrics such as peak VRAM, final voxel/splat count, training
+time, and render FPS, to capture both quality and resource
+usage.
+Quantitative Results. Across Mip-NeRF 360, LiteVoxel
+achieves image quality on par with SVRaster and the Gaussian
+baseline while substantially lowering memory pressure, as
+shown in Fig.6 and Table 1. The peak VRAM is reduced by
+approximately 40%−60% on average without degrading PSNR,
+SSIM, or LPIPS, and FPS and training time remain similar to
+the baseline. These trends persist on Tanks & Temples (Fig.7),
+where large-scale geometry and extended depth ranges amplify
+the benefits of depth-aware pruning and footprint-tested subdivision. The combined effect is a more compact model with
+fewer live voxels, steady silhouettes, and balanced refinement
+across depth, avoiding the myopic near-camera growth typical
+of global-threshold SVRaster. Detailed quantitative results for
+each scene are included in Appendix I.
+Qualitative Analysis. Figures on both datasets reveal characteristic failure modes and how LiteVoxel addresses them:
+•
+Low-frequency regions. On Mip-NeRF 360 indoor scenes
+and outdoor flat regions, LiteVoxel suppresses blotchy
+residuals and evens out exposure and tonal drift while
+maintaining edge sharpness. This stems from the midtraining inverse-Sobel reweighting, which redirects gradient budget to flat regions only after geometry settles,
+avoiding over-smoothing of contours. The effectiveness
+of blotch suppression without softening edges is visible
+in Fig. 6 bonsai, counter, and room scenes and in Fig. 7
+church scene.
+• Silhouette stability. Around thin structures and object
+boundaries, the EMA + hysteresis and keep-halo guards
+prevent flip-flop behavior and preserve delicate geometry
+during pruning passes, reducing flicker and “halo” artifacts. Fig. 6 bicycle scene and Fig. 7 truck, Ignatius shows
+how edges and silhouettes are preserved.
+• Depth fairness. On Tanks & Temples, far-depth details
+(distant facades, statues) are no longer neglected; a depthaware quantile allocates prune pressure fairly across depth
+while footprint eligibility forbids over-refining regions
+the camera cannot resolve, producing cleaner far-field
+reconstructions without unnecessary voxel growth near
+the sensor. This can be observed in Fig. 7 truck, church
+scenes where the details such as lightbulbs and ceiling
+edges are refined.
+These observations align with our stated goals to recover LF
+fidelity, stabilize sparsity updates, and bound growth without
+sacrificing high-frequency detail.
+Ablation Study. We ablate the three pillars of LiteVoxel (i)
+the LF-aware curriculum, (ii) the priority-driven subdivision
+with footprint eligibility, and (iii) the depth-stratified pruning
+with stability guards, by disabling one module at a time across
+Mip-NeRF 360 datasets (6scenes). Table II reports scene-level
+averages from the same run with evaluation metrics and full
+per-scene numbers and qualitative results are provided in the
+Appendix I.
+•
+(a) Full LiteVoxel.
+Fig. 8 (a) shows clean, uniform flats (tabletop/placemat),
+crisp edges on the bulldozer silhouette, and stable
+depth/normal fields without banding. Table II confirms
+a balanced operating point with strong perceptual quality
+(SSIM 0.937, LPIPS 0.0652), competitive PSNR (32.13),
+8
+bounded peak VRAM (7.9 GB) and compact model
+size (4.67 M voxels) with real-time FPS (307) and
+moderate training time (7m 6s). This is the reference
+we aim to match in fidelity while enforcing memory
+predictability.
+• (b) – LF curriculum.
+Without the mid-training LF schedule, optimization remains edge-dominated. In Fig. 8 (b), flat regions (tabletop, placement) exhibit faint blotchy grain; depth shows
+mild low-frequency banding, and normal expose microspeckle aligned with texture. Quantitatively, PSNR rises
+slightly (32.58) but SSIM drops (0.925) and LPIPS degrades (0.0729) (Table II), which is a classic sign that the
+solution sharpens edges while sacrificing low-frequency
+smoothness. Resource usage remains similar (8.0 GB,
+4.64 M voxels, 7m 14s). The LF curriculum primarily
+improves flat-region fidelity at essentially no cost, which
+is not fully captured by PSNR alone but is visible in
+Fig. 8 (b) and detailed in Appendix I.
+• (c) – Pruning logic.
+Disabling pruning removes the principal growth control.
+Fig. 8 (c) looks close at a glance, but the depth map
+thickens around object boundaries and normal show
+noisier micro-structure/halos which are symptoms of unbounded voxel acceleration. Table II shows the cost:
+voxels jump to 8.04 M, peak memory to 12.3 GB, FPS
+drops to 238, and time increases to 9m 47s. The small
+PSNR bump (32.77) is a diminishing-returns gain bought
+by excessive capacity; perceptual gains are negligible.
+Pruning with stability guards is the dominant efficiency
+lever as it keeps memory and model size predictable
+without hurting quality.
+• (d) – Priority-driven subdivision.
+Removing footprint eligibility and depth-aware priority
+prevents the system from putting detail where the camera
+TABLE II
+A BLATION S TUDY Q UANTITATIVE A NALYSIS
+(AVERAGED ACROSS 6 S CENES )
+can resolve it. The result is under-refinement of essential
+regions and eroded thin structures (see Appendix II
+zooms); normal exhibit regular cross-hatch artifacts. Table II records the failure: quality collapses even though
+efficiency looks great on paper. Capacity allocation is not
+optional, as without the priority/footprint test, the model
+is “efficiently wrong”.
+For scene-by-scene quantitative tables across 7 scenes in
+Mip NeRF 360 dataset and additional qualitative crops that
+exhibit the above effects more clearly, please refer to the
+Appendix II.
+VI. D ISCUSSION AND C ONCLUSION
+Discussion. LiteVoxel reframes voxel rasterization as a
+memory-bounded, stability-constrained optimization regime,
+and the evidence across Mip-NeRF 360 [19]. and Tanks &
+Temples [20] shows that this shift of not having heavier models
+or longer training, drives the outcomes. The ablations clarify
+the role of each pillar: the LF curriculum repairs low-frequency
+bias without taxing resources; depth-quantile pruning with
+EMA/hysteresis stabilizes sparsity kinetics and keeps VRAM
+predictable; and priority-driven subdivision allocates capacity
+only where the imaging footprint can resolve additional detail.
+Fig. 8. Ablation on Mip-NeRF 360 [19]: rendered, depth, and normal comparisons. Columns (left→right): SVRaster (context baseline), (a) Full LiteVoxel,
+(b) -LF curriculum (LF reweighting off), (c) -Pruning logic (no depth-quantile pruning or stability guards), (d) -Priority-driven subdivision removed (no
+footprint/priority). Rows show the final RGB render, depth, and surface normals under the same training budget and camera settings.
+9
+Together they yield compact models with steady silhouettes
+and preserved high-frequency detail at matched fidelity. The
+approach does introduce schedule choices (e.g., LF activation
+window) and assumes non-pathological view coverage for
+reliable depth statistics; however, our guards (per-step caps,
+halo protection) mitigate most instability modes. Practically,
+LiteVoxel’s bounded-peak-VRAM behavior makes explicit
+rasterization viable on commodity GPUs for large scenes,
+enabling reproducible training budgets and easier deployment.
+Conclusion. We presented LiteVoxel, a principled training and
+adaptation framework for voxel rasterization that reallocates
+optimization effort and representational capacity under an
+explicit memory budget. On two challenging benchmarks,
+LiteVoxel matches or exceeds the visual quality of strong
+baselines while cutting peak VRAM and stabilizing topology
+evolution. Ablations confirm that each component is necessary and complementary: curriculum improves low-frequency
+fidelity, guarded pruning governs growth and stability, and
+priority-based subdivision focuses detail where it matters. Beyond the empirical gains, the key contribution is a predictable
+operating regime for explicit scene representations—one that
+scales to complex environments without trading away fidelity. Future work will explore auto-tuning of the schedules/quantiles, uncertainty-aware capacity rules, and extending
+the regime to dynamic scenes and multi-task supervision (e.g.,
+normals/semantics) under the same memory constraints.
+R EFERENCES
+[1] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi,
+and R. Ng, “NeRF: Representing scenes as neural radiance fields for view
+synthesis,” in Proc. ECCV, 2020, pp. 405–421.
+doi:10.1007/978-3-030-58452-8 24
+[2] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis, “3D Gaussian
+Splatting for real-time radiance field rendering,” ACM Trans. Graph.,
+vol. 42, no. 4, pp. 1–14, 2023.
+doi:10.1145/3592433
+[3] S. Laine and T. Karras, “Efficient sparse voxel octrees,” in Proc. I3D,
+2010, pp. 55–63.
+doi:10.1109/TVCG.2010.240
+[4] R. A. Newcombe, S. Izadi, O. Hilliges, D. Molyneaux, D. Kim,
+A. J. Davison, P. Kohli, J. Shotton, S. Hodges, and A. Fitzgibbon,
+“KinectFusion: Real-time dense surface mapping and tracking,” in Proc.
+ISMAR, 2011, pp. 127–136.
+doi:10.1109/ISMAR.2011.6092378
+[5] M. Nießner, M. Zollhöfer, S. Izadi, and M. Stamminger, “Real-time 3D
+reconstruction at scale using voxel hashing,” ACM Trans. Graph., vol. 32,
+no. 6, pp. 169:1–169:11, 2013.
+doi:10.1145/2508363.2508374
+[6] C. Sun, H. Wang, H. Liu, J. Gu, and S. Peng, “Sparse Voxels Rasterization: Real-time high-fidelity radiance field rendering,” in arXiv preprint,
+2024. (Preprint: arXiv:2411.18605)
+arXiv:2411.18605
+[7] NVLabs, “SVRaster (code repository),” GitHub, 2024–2025. Available:
+https://github.com/NVlabs/svraster (accessed Nov. 4, 2025).
+[8] J. W. Lee, H. Lim, S. Yang, and J. Choi, “Micro-splatting: Maximizing
+isotropic constraints for refined optimization in 3D Gaussian splatting,”
+in arXiv preprint, 2025. (Preprint: arXiv:2504.05740)
+arXiv:2504.05740
+[9] Z. Ye, W. Li, S. Liu, P. Qiao, and Y. Dou, “AbsGS: Recovering fine details
+for 3D Gaussian splatting,” in Proc. ACM MM, 2024, pp. 1127–1136.
+(Preprint: arXiv:2404.10484)
+arXiv:2404.10484
+[10] P. Dai, J. Xu, W. Xie, X. Liu, H. Wang, and W. Xu, “High-quality
+surface reconstruction using Gaussian Surfels,” in arXiv preprint, 2024.
+(Preprint: arXiv:2404.17774)
+arXiv:2404.17774
+[11] Z. Wang, A. C. Bovik, H. R. Sheikh, and E. P. Simoncelli, “Image
+quality assessment: From error visibility to structural similarity,” IEEE
+Trans. Image Process., vol. 13, no. 4, pp. 600–612, 2004.
+doi:10.1109/TIP.2003.819861
+[12] J. T. Barron, “A general and adaptive robust loss function,” in Proc.
+CVPR, 2019, pp. 4331–4339.
+doi:10.1109/CVPR.2019.00446
+[13] R. Martin-Brualla, N. Radwan, M. S. M. Sajjadi, J. T. Barron, A. Dosovitskiy, and D. Duckworth, “NeRF in the Wild: Neural radiance fields for
+unconstrained photo collections,” in Proc. CVPR, 2021, pp. 7210–7219.
+doi:10.1109/cvpr46437.2021.00713
+[14] D. P. Kingma and J. Ba, “Adam: A method for stochastic optimization,”
+in arXiv preprint, 2015. (Preprint: arXiv:1412.6980)
+arXiv:1412.6980
+[15] R. C. Gonzalez and R. E. Woods, Digital Image Processing, 4th ed.,
+Pearson, 2018, ch. 7 (Sobel operator).
+[16] C. Godard, O. Mac Aodha, and G. J. Brostow, “Unsupervised monocular
+depth estimation with left-right consistency,” in Proc. CVPR, 2017,
+pp. 270–279.
+doi:10.1109/CVPR.2017.699
+[17] Y. Bengio, J. Louradour, R. Collobert, and J. Weston, “Curriculum
+learning,” in Proc. ICML, 2009, pp. 41–48.
+doi:10.1145/1553374.1553380
+[18] P. Perona and J. Malik, “Scale-space and edge detection using
+anisotropic diffusion,” IEEE Trans. Pattern Anal. Mach. Intell., vol. 12,
+no. 7, pp. 629–639, 1990.
+doi:10.1109/34.56205
+[19] J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and P. Hedman,
+“Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields,” in
+Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), 2022,
+pp. 5470–5479.
+doi:10.1109/CVPR52688.2022.00539
+[20] A. Knapitsch, J. Park, Q.-Y. Zhou, and V. Koltun, “Tanks and Temples:
+Benchmarking Large-Scale Scene Reconstruction,” ACM Trans. Graph.,
+vol. 36, no. 4, art. 78, pp. 1–13, 2017.
+doi:10.1145/3072959.3073599
+[21] A. Hore and D. Ziou, “Image quality metrics: PSNR vs. SSIM,” in Proc.
+Int. Conf. Pattern Recognit. (ICPR), 2010, pp. 2366–2369.
+doi:10.1109/ICPR.2010.579
+[22] R. Zhang, P. Isola, A. A. Efros, E. Shechtman, and O. Wang, “The
+unreasonable effectiveness of deep features as a perceptual metric,” in
+Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), 2018,
+pp. 586–595.
+doi:10.1109/CVPR.2018.00068
+10
+APPENDIX I. P ER -S CENE Q UANTITATIVE R ESULTS
+This appendix reports the full per-scene metrics that underpin Sec. V: Results and Evaluation (Quantitative Results). For
+each scene, we list PSNR, SSIM, LPIPS (held-out views) and efficiency statistics—peak VRAM, final voxel/splat count,
+render FPS, and training time—for the four methods compared in the main text: SVRaster, LiteVoxel (ours), 3D Gaussian
+Splatting (3DGS), and Micro-Splatting. All numbers were obtained under an identical iteration budget, camera intrinsics/poses,
+and render settings. We use a color rank legend (red = best, orange = second, yellow = third) to make scene-wise winners
+immediately visible. Scene-level tables are provided for the full set of Mip-NeRF 360 scenes and the Tanks & Temples subset
+used in Sec. V; dataset means that appear in the main text can be recomputed directly from these rows. Cropped qualitative
+comparisons already appear in Sec. V; readers may cross-reference them with these per-scene tables for a complete view of
+quality–efficiency trade-offs.
+TABLE AI
+QUANTITATIVE ANALYSIS ON MIP-NERF 360 DATASET
+TABLE AII
+QUANTITATIVE ANALYSIS ON TANKS & TEMPLES DATASET
+11
+APPENDIX II. A BLATION S TUDY D ETAILS
+This appendix complements Sec. VD by reporting per-scene results for the ablations on Mip-NeRF 360 (Tanks & Temples
+ablations were not performed). We keep the same labels as the main text and restate them here for clarity: (a) Full LiteVoxel
+(ours), (b) LF curriculum (inverse-Sobel reweighting disabled), (c) Pruning logic (depth-quantile pruning and stability guards
+disabled), (d) Priority-driven subdivision (footprint eligibility / priority allocator disabled). Figure A1 presents cropped GT
+vs. (a)–(d) for each scene; Tables A3 (PSNR/SSIM/LPIPS) and A4 (FPS, peak VRAM, training time, voxel count) list the
+corresponding numbers.
+Fig. A1. Ablation study on Mip-NeRF 360—per-scene qualitative comparisons. Columns (left → right): GT, (a) Full LiteVoxel, (b) -LF curriculum (inverseSobel reweighting disabled), (c) Pruning logic (no depth-quantile pruning or stability guards), (d) Priority-driven subdivision removed (no footprint/priority).
+Rows are 7 scenes from the Mip-NeRF 360 dataset—bicycle, bonsai, counter, kitchen, room, stump, and garden.
+In Fig. A1 the qualitative trends are consistent across scenes. The –LF curriculum variant (b) leaves flat regions with fine
+blotchy grain and faint banding–clearly visible on the walls and planar patches in room, counter, kitchen, and the cardboard
+in bonsai–whereas the full LiteVoxel model (a) suppresses these artifacts while keeping edges crisp. The –priority subdivision
+12
+variant (d) misallocates capacity: foliage in bicycle and background structure in garden appear blocky or eroded, and thin
+details go missing, a hallmark of ignoring footprint/priority during splitting. By contrast, removing pruning (–pruning, c)
+permits uncontrolled growth; textures may look marginally sharper at a glance, but boundary halos and micro-noise increase,
+as seen on stump bark and the bicycle rail.
+TABLE AIII
+MIP-NERF 360 ABLATION (PER-SCENE): IMAGE-QUALITY METRICS
+TABLE AIV
+MIP-NERF 360 ABLATION (PER-SCENE): EFFICIENCY METRICS
+Tables A3 and A4 corroborate these observations quantitatively. In Table A3, (b) often shows a small PSNR uptick yet worse
+LPIPS/SSIM (e.g., room, counter), matching the “sharper but blotchier” appearance; (c) sometimes attains the highest PSNR
+but negligible perceptual gains, while (d) collapses across all three quality metrics. Table A4 shows that (c) inflates voxel count
+and peak VRAM and reduces FPS with longer training time—evidence that pruning with guards is the main efficiency lever.
+Although (d) looks fast and light on paper (high FPS, low VRAM), its severe quality drop in A3 confirms it is efficiently
+wrong. Full LiteVoxel (a) strikes the intended balance: low LPIPS and strong SSIM at bounded VRAM with compact voxel
+counts.
+These per-scene ablations substantiate the claims in Sec. V-D: the LF curriculum fixes flat-region bias at negligible cost;
+guarded pruning stabilizes sparsity and memory; and priority-driven subdivision is essential to place detail where the camera
+can resolve it.

@@ -1,0 +1,365 @@
+--- v007.md
++++ v008.md
+@@ -4,229 +4,169 @@
+ 
+ ## Overview
+-This method computes the gradient of the loss function with respect to the opacity parameter $\alpha_k$ of the $k$-th Gaussian in Time-of-Flight (ToF) image formation models, specifically for phasor or quad pixel signals [S1]. It extends the standard 3D Gaussian Splatting (3DGS) opacity gradient by introducing recursive accumulation terms that account for the squared transmittance factors inherent in ToF signal mixing [S1]. Unlike standard color rendering which uses linear accumulation, ToF quad pixel gradients require handling squared terms in both the transmittance and the accumulation step, making the back-propagation less trivial [S1].
++This method computes the gradient of the loss function with respect to the opacity parameters of 3D Gaussians specifically for Time-of-Flight (ToF) image formation models, such as those generating phasor or quad pixel signals [S1]. It extends the standard differentiable alpha-compositing gradient used in RGB rendering by introducing recursive accumulation terms that account for the squared transmittance factors inherent in ToF signal models [S1]. Unlike standard color rendering where the gradient depends linearly on transmittance, ToF gradients require a backward pass that squares the transmittance terms, making the computation less trivial and distinct from sibling methods that rely on simple chain rules or intermediate variable optimizations [S1].
+ 
+ ## How it works
++The method computes the gradient $\frac{\partial L}{\partial \alpha_k}$ for the opacity $\alpha_k$ of the $k$-th Gaussian sorted by depth. The computation relies on a backward recursive pass to accumulate contributions from Gaussians with greater depth (higher index $k$).
+ 
+ ### Inputs and Outputs
+-**Inputs:**
+-*   $L$: The scalar loss function value.
+-*   $\frac{\partial L}{\partial \mathbf{c}(\mathbf{x})}$: The gradient of the loss with respect to the rendered signal (color $\mathbf{c}$ or quad signal $\mathbf{q}$) at pixel $\mathbf{x}$.
+-*   $N$: The total number of Gaussians sorted by depth for the pixel.
+-*   For each Gaussian $k \in \{1, \dots, N\}$:
+-    *   $\alpha_k$: The opacity term of the $k$-th Gaussian.
+-    *   $\mathbf{c}_k$: The color contribution of the $k$-th Gaussian.
+-    *   $\mathbf{q}_k$: The quad contribution of the $k$-th Gaussian (for ToF).
+-    *   $T_k$: The transmittance up to the $k$-th Gaussian, defined as $T_k = \prod_{j=1}^{k-1} (1 - \alpha_j)$.
+-
+-**Outputs:**
+-*   $\frac{\partial L}{\partial \alpha_k}$: The gradient of the loss with respect to the opacity of the $k$-th Gaussian.
++- **Inputs**:
++  - $L$: The scalar loss function.
++  - $\frac{\partial L}{\partial \mathbf{q}(\mathbf{x})}$: The gradient of the loss with respect to the rendered ToF signal (e.g., quad pixel signal) at pixel $\mathbf{x}$.
++  - $N$: The total number of Gaussians sorted by depth for the pixel.
++  - $\alpha_k$: The opacity of the $k$-th Gaussian.
++  - $\mathbf{q}_k$: The ToF signal contribution (e.g., quad value) of the $k$-th Gaussian.
++  - $T_k$: The transmittance up to the $k$-th Gaussian, defined as $T_k = \prod_{j=1}^{k-1} (1 - \alpha_j)$.
++- **Outputs**:
++  - $\frac{\partial L}{\partial \alpha_k}$: The gradient of the loss with respect to the opacity of the $k$-th Gaussian.
+ 
+ ### Data Structures
+-No specific complex data structures are required beyond the standard sorted list of Gaussians per pixel. The algorithm requires two scalar/vector accumulators per pixel during the backward pass:
+-1.  `acc`: Accumulator for standard color contributions.
+-2.  `acc^q`: Accumulator for ToF quad contributions.
++The algorithm requires two scalar/vector accumulators for each pixel, initialized to zero before the backward pass:
++1. $\text{acc}_k^q$: The accumulated ToF signal contribution from Gaussians $k+1$ to $N$.
++2. (Implicit) The transmittance $T_k$ is computed during the forward pass or stored.
+ 
+ ### Numbered Steps
++1. **Initialize Accumulator**: Set $\text{acc}_{N+1}^q = 0$.
++2. **Backward Recursion**: Iterate $k$ from $N$ down to $1$:
++   a. Compute the gradient of the signal with respect to opacity using the recursive formula:
++      $$ \frac{\partial \mathbf{q}(\mathbf{x})}{\partial \alpha_k} = T_k^2 \left( \mathbf{q}_k + 2(\alpha_k - 1)\text{acc}_k^q \right) $$
++   b. Compute the final opacity gradient using the chain rule:
++      $$ \frac{\partial L}{\partial \alpha_k} = \frac{\partial L}{\partial \mathbf{q}(\mathbf{x})} \frac{\partial \mathbf{q}(\mathbf{x})}{\partial \alpha_k} $$
++   c. Update the accumulator for the next iteration (previous Gaussian in depth order):
++      $$ \text{acc}_k^q = \alpha_{k+1} \mathbf{q}_{k+1} + (1 - \alpha_{k+1})^2 \text{acc}_{k+1}^q $$
++      *Note: For $k=N$, $\text{acc}_{N+1}^q$ is 0, so $\text{acc}_N^q = \alpha_{N+1} \mathbf{q}_{N+1}$ is not applicable as $N+1$ does not exist. The base case for the accumulator update is handled by the loop structure where the update uses the *next* Gaussian's data. Specifically, the recurrence for $\text{acc}_k^q$ depends on $\text{acc}_{k+1}^q$. The definition in [S1] is:*
++      $$ \text{acc}_k^q = \begin{cases} \alpha_{k+1} \mathbf{q}_{k+1} + (1 - \alpha_{k+1})^2 \text{acc}_{k+1}^q, & k < N \\ 0, & k = N \end{cases} $$
++      *Correction on Step 2c logic based on [S1] definition:* The accumulator $\text{acc}_k^q$ is defined for index $k$. The recurrence calculates $\text{acc}_k^q$ using values from $k+1$. Therefore, the loop should compute $\text{acc}_k^q$ *after* computing the gradient for $k$, or the gradient for $k$ uses $\text{acc}_k^q$ which was computed in the previous iteration (for $k+1$). Let's align with the standard backward pass pattern:
++      
++      *Revised Step 2:*
++      Initialize $\text{acc}_{N+1}^q = 0$.
++      For $k = N$ down to $1$:
++      1. Calculate $\frac{\partial \mathbf{q}(\mathbf{x})}{\partial \alpha_k} = T_k^2 (\mathbf{q}_k + 2(\alpha_k - 1)\text{acc}_k^q)$.
++         *Wait, the definition of $\text{acc}_k^q$ in [S1] is:*
++         $$ \text{acc}_k^q = \begin{cases} \alpha_{k+1} \mathbf{q}_{k+1} + (1 - \alpha_{k+1})^2 \text{acc}_{k+1}^q, & k < N \\ 0, & k = N \end{cases} $$
++         This implies $\text{acc}_k^q$ is the accumulation *starting* from $k+1$. So for $k=N$, $\text{acc}_N^q = 0$. For $k=N-1$, $\text{acc}_{N-1}^q = \alpha_N \mathbf{q}_N + (1-\alpha_N)^2 \text{acc}_N^q$.
++         
++         Therefore, the algorithm is:
++         1. Set $\text{acc}_{N+1}^q = 0$.
++         2. For $k = N$ down to $1$:
++            a. Determine $\text{acc}_k^q$:
++               If $k < N$: $\text{acc}_k^q = \alpha_{k+1} \mathbf{q}_{k+1} + (1 - \alpha_{k+1})^2 \text{acc}_{k+1}^q$.
++               If $k = N$: $\text{acc}_k^q = 0$.
++            b. Compute signal gradient: $\frac{\partial \mathbf{q}(\mathbf{x})}{\partial \alpha_k} = T_k^2 (\mathbf{q}_k + 2(\alpha_k - 1)\text{acc}_k^q)$.
++            c. Compute loss gradient: $\frac{\partial L}{\partial \alpha_k} = \frac{\partial L}{\partial \mathbf{q}(\mathbf{x})} \frac{\partial \mathbf{q}(\mathbf{x})}{\partial \alpha_k}$.
+ 
+-1.  **Initialize Accumulators**:
+-    Set the initial accumulation values for the last Gaussian ($k=N$) to zero:
+-    $$ \text{acc}_N = 0 $$
+-    $$ \text{acc}_N^q = 0 $$
+-
+-2.  **Iterate Backwards**:
+-    For $k$ from $N-1$ down to $1$:
+-    
+-    a. **Update Color Accumulator**:
+-    Compute the color accumulation term for standard 3DGS:
+-    $$ \text{acc}_k = \alpha_{k+1} \mathbf{c}_{k+1} + (1 - \alpha_{k+1}) \text{acc}_{k+1} $$
+-    
+-    b. **Update Quad Accumulator**:
+-    Compute the ToF quad accumulation term. Note the squared transmittance factor $(1 - \alpha_{k+1})^2$:
+-    $$ \text{acc}_k^q = \alpha_{k+1} \mathbf{q}_{k+1} + (1 - \alpha_{k+1})^2 \text{acc}_{k+1}^q $$
+-
+-3.  **Compute Opacity Gradients**:
+-    For each Gaussian $k$ from $1$ to $N$:
+-    
+-    a. **Standard Color Gradient**:
+-    If computing gradients for standard RGB color $\mathbf{c}(\mathbf{x})$:
+-    $$ \frac{\partial \mathbf{c}(\mathbf{x})}{\partial \alpha_k} = T_k (\mathbf{c}_k - \text{acc}_k) $$
+-    *Note: The source text writes $\alpha \mathbf{c}_k$ in formula S11, but the context of the recursive definition and standard 3DGS literature implies $\text{acc}_k$ represents the accumulated contribution of subsequent layers. The term $\mathbf{c}_k - \text{acc}_k$ represents the difference between the current Gaussian's color and the accumulated background color.*
+-    
+-    b. **ToF Quad Gradient**:
+-    If computing gradients for ToF quad signals $\mathbf{q}(\mathbf{x})$:
+-    $$ \frac{\partial \mathbf{q}(\mathbf{x})}{\partial \alpha_k} = T_k^2 (\mathbf{q}_k + 2(\alpha_k - 1)\text{acc}_k^q) $$
+-
+-4.  **Apply Chain Rule**:
+-    Combine the signal gradient with the loss gradient:
+-    $$ \frac{\partial L}{\partial \alpha_k} = \frac{\partial L}{\partial \mathbf{c}(\mathbf{x})} \frac{\partial \mathbf{c}(\mathbf{x})}{\partial \alpha_k} \quad \text{(for color)} $$
+-    $$ \frac{\partial L}{\partial \alpha_k} = \frac{\partial L}{\partial \mathbf{q}(\mathbf{x})} \frac{\partial \mathbf{q}(\mathbf{x})}{\partial \alpha_k} \quad \text{(for ToF)} $$
+-
+-### Formulas and Definitions
+-
+-*   **Transmittance ($T_k$)**: The probability that a ray passes through all Gaussians preceding $k$.
+-    $$ T_k = \prod_{j=1}^{k-1} (1 - \alpha_j) $$
+-*   **Color Accumulation ($\text{acc}_k$)**: Aggregates contributions of later Gaussians for standard rendering.
+-    $$ \text{acc}_k = \alpha_{k+1} \mathbf{c}_{k+1} + (1 - \alpha_{k+1}) \text{acc}_{k+1}, \quad \text{for } k < N $$
+-    $$ \text{acc}_N = 0 $$
+-*   **Quad Accumulation ($\text{acc}_k^q$)**: Aggregates contributions of later Gaussians for ToF quad signals.
+-    $$ \text{acc}_k^q = \alpha_{k+1} \mathbf{q}_{k+1} + (1 - \alpha_{k+1})^2 \text{acc}_{k+1}^q, \quad \text{for } k < N $$
+-    $$ \text{acc}_N^q = 0 $$
+-*   **Color Gradient w.r.t Opacity**:
+-    $$ \frac{\partial \mathbf{c}(\mathbf{x})}{\partial \alpha_k} = T_k (\mathbf{c}_k - \text{acc}_k) $$
+-*   **Quad Gradient w.r.t Opacity**:
+-    $$ \frac{\partial \mathbf{q}(\mathbf{x})}{\partial \alpha_k} = T_k^2 (\mathbf{q}_k + 2(\alpha_k - 1)\text{acc}_k^q) $$
++### Formulas
++1. **Chain Rule**:
++   $$ \frac{\partial L}{\partial \alpha_k} = \frac{\partial L}{\partial \mathbf{q}(\mathbf{x})} \frac{\partial \mathbf{q}(\mathbf{x})}{\partial \alpha_k} $$
++2. **Signal Gradient**:
++   $$ \frac{\partial \mathbf{q}(\mathbf{x})}{\partial \alpha_k} = T_k^2 \left( \mathbf{q}_k + 2(\alpha_k - 1)\text{acc}_k^q \right) $$
++3. **Accumulator Recurrence**:
++   $$ \text{acc}_k^q = \begin{cases} \alpha_{k+1} \mathbf{q}_{k+1} + (1 - \alpha_{k+1})^2 \text{acc}_{k+1}^q, & k < N \\ 0, & k = N \end{cases} $$
+ 
+ ### Parameters
+-*   $T_k$: Transmittance up to the $k$-th Gaussian.
+-*   $\mathbf{c}_k$: Color of the $k$-th Gaussian.
+-*   $\mathbf{q}_k$: Quad contribution of the $k$-th Gaussian.
+-*   $\alpha_k$: Opacity of the $k$-th Gaussian.
++- $T_k$: Transmittance up to Gaussian $k$.
++- $\mathbf{q}_k$: Quad contribution of Gaussian $k$.
++- $\alpha_k$: Opacity of Gaussian $k$.
+ 
+ ### Edge Cases and Pitfalls
+-*   **Squared Terms**: In ToF signals, the recursion involves squared terms for accumulation and transmittance, making it less trivial than standard color rendering [S1]. Specifically, the term $(1 - \alpha_{k+1})^2$ appears in the quad accumulation, and $T_k^2$ appears in the quad gradient.
+-*   **Precision**: The squared terms may amplify numerical instability if $\alpha_k$ is close to 1 or 0. Care should be taken with floating-point precision, especially when $T_k$ becomes very small.
+-*   **Boundary Conditions**: The base case for the recursion is $k=N$, where both $\text{acc}_N$ and $\text{acc}_N^q$ are initialized to 0.
++- **Squared Transmittance**: The presence of $T_k^2$ in the gradient formula makes the computation distinct from standard RGB rendering, where the factor is $T_k$ [S1]. This increases the sensitivity to depth ordering and opacity values.
++- **Recursion Base Case**: The accumulator $\text{acc}_N^q$ must be explicitly initialized to 0. Failure to do so leads to incorrect gradient accumulation for the deepest Gaussian.
++- **Precision**: The squared terms $(1-\alpha_{k+1})^2$ can lead to numerical instability if opacities are very close to 1 or 0, though this is inherent to the ToF model [S1].
+ 
+ ### Pseudocode
+-
+ ```python
+-def compute_tof_opacity_gradients(
+-    N: int,
+-    alphas: List[float],      # [alpha_1, ..., alpha_N]
+-    colors: List[Vector3],    # [c_1, ..., c_N]
+-    quads: List[Vector3],     # [q_1, ..., q_N]
+-    grad_color: Vector3,      # dL/dc(x)
+-    grad_quad: Vector3        # dL/dq(x)
+-) -> List[float]:
++def compute_tof_opacity_gradient(
++    grad_loss_signal,  # dL/dq(x), scalar or vector
++    q_contributions,   # List of q_k for k=1..N
++    alphas,            # List of alpha_k for k=1..N
++    transmittances     # List of T_k for k=1..N
++):
+     """
+-    Computes dL/d_alpha_k for standard color and ToF quad signals.
+-    Returns a list of gradients [dL/d_alpha_1, ..., dL/d_alpha_N].
++    Computes dL/d_alpha_k for ToF quad pixel signals.
++    Args:
++        grad_loss_signal: Gradient of loss w.r.t. rendered signal q(x).
++        q_contributions: Array of shape (N,) containing q_k.
++        alphas: Array of shape (N,) containing alpha_k.
++        transmittances: Array of shape (N,) containing T_k.
++    Returns:
++        grad_alphas: Array of shape (N,) containing dL/d_alpha_k.
+     """
+-    # Initialize accumulators
+-    acc = 0.0
+-    acc_q = 0.0
++    N = len(alphas)
++    grad_alphas = [0.0] * N
++    acc_k_q = 0.0  # This will hold acc_{k+1}^q in the loop, initialized to acc_{N+1}^q = 0
+     
+-    # Precompute transmittances T_k for k=1..N
+-    # T_k = product_{j=1}^{k-1} (1 - alpha_j)
+-    # T_1 = 1.0
+-    transmittances = [0.0] * N
+-    current_T = 1.0
+-    for k in range(N):
+-        transmittances[k] = current_T
+-        current_T *= (1.0 - alphas[k])
++    # Iterate backwards from N-1 to 0 (indices 0..N-1)
++    for k in range(N - 1, -1, -1):
++        # k is the current index (0-based)
++        # Corresponds to Gaussian k+1 in 1-based indexing from sources
+         
+-    # Initialize output gradients
+-    grad_alphas = [0.0] * N
+-    
+-    # Iterate backwards from N-1 down to 0 (using 0-based indexing for lists)
+-    # In 1-based indexing: k from N-1 down to 1
+-    for k in range(N - 2, -1, -1):
+-        # k is the current index in 0-based list, corresponding to Gaussian k+1 in 1-based
+-        # We need alpha_{k+1}, c_{k+1}, q_{k+1} which are at index k+1
+-        alpha_next = alphas[k + 1]
+-        c_next = colors[k + 1]
+-        q_next = quads[k + 1]
++        # 1. Compute acc_k^q (accumulation from k+1 onwards)
++        # In 1-based indexing: acc_k^q = alpha_{k+1} q_{k+1} + (1-alpha_{k+1})^2 acc_{k+1}^q
++        # In 0-based indexing: current k, next is k+1
++        # acc_k_q currently holds acc_{k+1}^q from the previous iteration (which was k+1 in 0-based, i.e., k+2 in 1-based)
++        # Wait, let's trace carefully.
++        # Loop starts at k = N-1 (last Gaussian).
++        # acc_k_q is initialized to 0 (acc_{N+1}^q).
++        # For k = N-1:
++        #   We need acc_{N-1}^q (1-based index N).
++        #   Formula: acc_N^q = 0 (base case).
++        #   So for the last element, acc is 0.
+         
+-        # Update Color Accumulator
+-        # acc_k = alpha_{k+1} * c_{k+1} + (1 - alpha_{k+1}) * acc_{k+1}
+-        acc = alpha_next * c_next + (1.0 - alpha_next) * acc
++        if k == N - 1:
++            acc_current = 0.0
++        else:
++            # acc_current = alpha_{k+1} * q_{k+1} + (1 - alpha_{k+1})^2 * acc_next
++            # In 0-based: next index is k+1
++            alpha_next = alphas[k+1]
++            q_next = q_contributions[k+1]
++            acc_current = alpha_next * q_next + (1.0 - alpha_next)**2 * acc_k_q
++            
++        # 2. Compute signal gradient d q(x) / d alpha_k
++        # Formula: T_k^2 * (q_k + 2*(alpha_k - 1)*acc_k^q)
++        T_k = transmittances[k]
++        q_k = q_contributions[k]
++        alpha_k = alphas[k]
+         
+-        # Update Quad Accumulator
+-        # acc_k^q = alpha_{k+1} * q_{k+1} + (1 - alpha_{k+1})^2 * acc_{k+1}^q
+-        acc_q = alpha_next * q_next + (1.0 - alpha_next) ** 2 * acc_q
++        grad_signal = (T_k ** 2) * (q_k + 2.0 * (alpha_k - 1.0) * acc_current)
+         
+-        # Note: The accumulators are updated for the *next* iteration (k-1).
+-        # However, the gradient for Gaussian k+1 (index k) depends on acc_{k+1} and acc_{k+1}^q.
+-        # In the loop above, 'acc' and 'acc_q' hold the values for index k+1 at the start of the iteration?
+-        # Let's re-verify the indexing.
++        # 3. Compute loss gradient
++        grad_alphas[k] = grad_loss_signal * grad_signal
+         
+-        # Standard 3DGS backward pass:
+-        # We compute grad for Gaussian k using acc_{k+1}.
+-        # So we should compute grad for k, then update acc for k.
++        # 4. Update acc_k_q for the next iteration (which is k-1)
++        # The next iteration needs acc_{k-1}^q? No, the next iteration is k-1.
++        # It will need acc_{k-1}^q which depends on acc_k^q.
++        # So we store acc_current as acc_k_q for the next loop step.
++        acc_k_q = acc_current
+         
+-    # Corrected Loop Structure:
+-    # Initialize acc_N = 0, acc_N^q = 0
+-    acc = 0.0
+-    acc_q = 0.0
+-    
+-    grad_alphas = [0.0] * N
+-    
+-    # Iterate k from N-1 down to 0 (0-based index for Gaussians)
+-    # This corresponds to Gaussian index k+1 in 1-based notation
+-    for k in range(N - 1, -1, -1):
+-        # Current Gaussian is k (0-based)
+-        # T_k is transmittance BEFORE Gaussian k
+-        T_k = transmittances[k]
+-        
+-        alpha_k = alphas[k]
+-        c_k = colors[k]
+-        q_k = quads[k]
+-        
+-        # Compute gradient for standard color
+-        # d c(x) / d alpha_k = T_k * (c_k - acc_k)
+-        # Here 'acc' holds acc_{k+1} from the previous iteration (or 0 if k=N-1)
+-        grad_c_d_alpha = T_k * (c_k - acc)
+-        grad_alphas[k] += grad_color.dot(grad_c_d_alpha)
+-        
+-        # Compute gradient for ToF quad
+-        # d q(x) / d alpha_k = T_k^2 * (q_k + 2*(alpha_k - 1)*acc_k^q)
+-        grad_q_d_alpha = (T_k ** 2) * (q_k + 2.0 * (alpha_k - 1.0) * acc_q)
+-        grad_alphas[k] += grad_quad.dot(grad_q_d_alpha)
+-        
+-        # Update accumulators for the NEXT Gaussian (k-1)
+-        # acc_k = alpha_{k+1} * c_{k+1} + (1 - alpha_{k+1}) * acc_{k+1}
+-        # But we are at Gaussian k. The next Gaussian in the backward pass is k-1.
+-        # The accumulator for Gaussian k-1 depends on Gaussian k.
+-        # So we update acc to be acc_k, which will be used for Gaussian k-1.
+-        
+-        # Wait, the formula is:
+-        # acc_k = alpha_{k+1} c_{k+1} + (1 - alpha_{k+1}) acc_{k+1}
+-        # This means acc_k depends on alpha_{k+1}.
+-        # In our loop, when we are at Gaussian k, we have just computed its gradient.
+-        # We need to prepare acc_k for Gaussian k-1.
+-        # But the formula uses alpha_{k+1}.
+-        # Let's look at the indices carefully.
+-        
+-        # If we are at Gaussian k (0-based), the next Gaussian in depth order is k+1.
+-        # The accumulator acc_k is used for Gaussian k-1.
+-        # acc_k = alpha_{k+1} * c_{k+1} + (1 - alpha_{k+1}) * acc_{k+1}
+-        
+-        # So, after processing Gaussian k, we need to compute acc_k using alpha_{k+1}.
+-        # But alpha_{k+1} is the opacity of the NEXT Gaussian in the forward pass (deeper).
+-        # In the backward pass, we go from N-1 down to 0.
+-        # When we are at k, we have already processed k+1.
+-        # So 'acc' currently holds acc_{k+1}.
+-        # We want to compute acc_k to use for k-1.
+-        # acc_k = alpha_{k+1} * c_{k+1} + (1 - alpha_{k+1}) * acc_{k+1}
+-        
+-        # So we need alpha_{k+1} and c_{k+1}.
+-        if k < N - 1:
+-            alpha_next = alphas[k + 1]
+-            c_next = colors[k + 1]
+-            q_next = quads[k + 1]
+-            
+-            # Update Color Accumulator
+-            acc = alpha_next * c_next + (1.0 - alpha_next) * acc
+-            
+-            # Update Quad Accumulator
+-            acc_q = alpha_next * q_next + (1.0 - alpha_next) ** 2 * acc_q
+-            
+     return grad_alphas
+ ```
+ 
++## Subtopics
++
++### [Gradient-Weighted Feature Back-Projection](9769-gradient-weighted-feature-back-projection.md)
++Focuses on feature gradients rather than opacity/photometric gradients.
++
++### [SNS Backward Pass with Intermediate Variable Q](10040-sns-backward-pass-with-intermediate-variable-q.md)
++Uses an intermediate variable Q to optimize the backward pass for standard splatting.
++
++### [Specular-Aware Gradient Gating](13432-specular-aware-gradient-gating.md)
++Gates gradients based on specular components, not specific to ToF.
++
++### [Deferred Back-propagation](13506-deferred-back-propagation.md)
++Defers gradient computation for memory efficiency.
++
++### [Softmax Depth Gradient Derivation](17405-softmax-depth-gradient-derivation.md)
++Derives gradients for depth estimation using softmax, distinct from ToF quad pixel gradients.
++
+ ## Operating characteristics
+-
+-*   **Time Complexity**: $O(N)$ per pixel, where $N$ is the number of Gaussians. The backward pass requires a single reverse iteration to compute accumulators and gradients.
+-*   **Memory Complexity**: $O(N)$ per pixel to store the Gaussians and intermediate accumulators. The accumulators `acc` and `acc^q` are scalar/vector values that can be updated in place.
+-*   **Strengths**: Provides exact gradients for ToF signal mixing, enabling optimization of Gaussian opacities for depth estimation tasks.
+-*   **Limitations**: The squared terms in the ToF gradient computation increase numerical sensitivity compared to standard color rendering. It requires additional computation for the quad accumulation compared to standard color accumulation.
+-*   **When to use**: When training 3D Gaussian Splatting models for Time-of-Flight data, specifically when optimizing for depth or reflectivity from quad pixel signals.
+-*   **When not to use**: For standard RGB-only rendering where ToF signals are not involved.
++- **Time Complexity**: $O(N)$ per pixel for the backward pass, where $N$ is the number of Gaussians. This is comparable to the forward pass but requires an additional recursive accumulator.
++- **Memory Complexity**: $O(1)$ additional memory per pixel for the accumulator, assuming transmittances and contributions are available.
++- **Strengths**: Enables end-to-end training of 3D Gaussian Splatting models for ToF data, allowing optimization of geometry and appearance based on depth/reflectivity signals.
++- **Limitations**: The squared transmittance terms can make gradients more sensitive to noise and numerical precision compared to RGB rendering. The method is specific to ToF signal models (phasor/quad) and does not apply to standard RGB rendering without modification.
++- **When to use**: When training 3D Gaussian Splatting models on Time-of-Flight datasets (e.g., depth, quad pixels) and gradients with respect to opacity are required.
++- **When not to use**: For standard RGB rendering where the simpler linear transmittance gradient suffices.
+ 
+ ## Background
+-
+-This method originates from the paper "Time of the Flight of the Gaussians: Optimizing Depth Indirectly in Dynamic Radiance Fields" [S1]. It addresses the challenge of back-propagating gradients through the non-linear mixing of ToF signals (phasor/quad pixels) in Gaussian Splatting. Standard 3DGS opacity gradients are linear, but ToF signals involve squared transmittance terms, requiring a modified recursive accumulation scheme [S1].
++The method was introduced in the context of optimizing depth indirectly in dynamic radiance fields using 3D Gaussian Splatting [S1]. It addresses the gap in differentiable rendering for ToF sensors, where the image formation model involves phasor or quad pixel signals that differ from standard RGB alpha-compositing. The key insight is that the gradient of the ToF signal with respect to opacity involves a recursive accumulation with squared transmittance terms, necessitating a specialized backward pass [S1].
+ 
+ ## Sources
+-
+ [S1] Time of the Flight of the Gaussians: Optimizing Depth Indirectly in Dynamic Radiance Fields, https://doi.org/10.1109/cvpr52734.2025.01958, fetched 2026-10-26

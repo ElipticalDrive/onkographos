@@ -1,0 +1,212 @@
+A Open Source Material Editor. Contribute to PiJellyPin/MaterialCraft development by creating an account on GitHub.
+
+Honour the parameters of the library blur Ambient Occlusion graphs by RafaelMendes1407 · Pull Request #35 · PiJellyPin/MaterialCraft · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+RafaelMendes1407
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Depends on #32 (stacked on #31, #29, #28, #27). This PR's commit is only 77f2066.
+Summary
+The library graphs ambient_occlusion/ambient_occlusion and ambient_occlusion_2/ambient_occlusion_2 were rendered with MaterialCraft's own ao node through the generic mapping, which dropped every one of their parameters. The audit (cargo test --lib unmapped_parameters -- --nocapture) listed:
+ambient_occlusion -> ao: AO_Spread, AO_Levels, Light_Intensity, Light_Angle, Light_Distance
+ambient_occlusion_2 -> ao: spreading, equalizer, levels
+Both graphs now have adapters, and the ao node has new parameters for these settings, on the CPU and on the GPU. The audit no longer lists either graph.
+What changed (per parameter)
+Neither legacy graph has its own page in the public documentation. The meanings below come from the documented AO parameters of the same names on the Bitmap to Material Light page ("Ambient Occlusion Spread / Light Distance / Light Angle / Levels"), from the declared defaults and ranges in src/sbs_library.txt, and from what the parameter names say where nothing is documented.
+ambient_occlusion
+Parameter
+Documented meaning
+Mapping
+AO_Spread (0.5, 0..1)
+"Sets how far generated AO spreads."
+blur radius = AO_Spread * 12 px. The default 0.5 gives our default radius of 6.
+Light_Distance (0, 0..1)
+"Sets AO 'depth' interpretation."
+depth intensity = 2 + 8 * Light_Distance. The default gives our default depth of 2.
+Light_Angle (0, 0..1)
+"Sets fake lighting AO cast angle."
+new light_angle, in turns, measured the same way as Emboss's angle.
+Light_Intensity (0, 0..1)
+no page; the strength of that fake light
+new light_intensity: the neighbourhood is read light_intensity * 2 * radius pixels towards the light, so the floor beside a wall that faces away from the light gets darker. 0 means no light.
+AO_Levels (0 1, f2)
+"Modifies AO output levels."
+new out_low / out_high.
+ambient_occlusion_2
+Parameter
+Meaning
+Mapping
+spreading (0.15, 0..1)
+how far the AO spreads
+radius = spreading * 40 px. The default gives radius 6.
+equalizer (0 0 0, -1..1, f3)
+not documented; read as a three-band equalizer, with lanes taken as fine / medium / large
+new band_fine, band_mid, band_large. The occlusion is split into a fine band (the blur at radius/4), a medium band (radius/4 to radius/2) and a large band (radius/2 to radius). Each band is scaled by 1 + weight: -1 removes the band, +1 doubles it. With all weights at 0 the sum is exactly the plain blur AO.
+levels (0 0.5 1, f3)
+input levels: low, midpoint, high
+new levels_low, levels_mid, levels_high. The midpoint is a position inside the low..high range and becomes a gamma: above 0.5 darkens, below 0.5 lightens.
+Implementation
+src/sbs_adapt.rs: new ambient_occlusion and ambient_occlusion_2 adapters (mode = 0, the blur method). Their entries in the ADAPTERS table use the exact package/graph ids.
+src/ops.rs: new ambient_occlusion_ex adds the detail bands and a whole-pixel light shift with wrapping, so tiling is kept. With neutral settings it falls back to the existing ambient_occlusion, bit for bit. New helpers ao_light_shift and ao_levels are shared by the CPU and GPU paths.
+src/graph.rs and src/graph_gpu.rs: the ao node reads the new parameters. Levels apply to both methods (blur and HBAO).
+GPU: new opa::AO_BANDS (26) op in src/kernels/parts/ops_a.wgsl, regenerated with tools/gen_kernels.py; generated files whose only change was line endings were reverted. When the bands are used and radius/4 is below the GPU blur's 2.5 px minimum, the node falls back to the CPU, like the plain blur AO already does at small radii.
+src/params.rs: new parameters with neutral defaults, so existing graphs render as before. Labels: "Light intensity (legacy)", "Light angle (legacy)", "Fine detail / Medium detail / Large shapes (legacy)", "Levels low / midpoint / high", "Output low / high".
+No library .sbs content or vendor code was used. .sbs identifiers and parameter names are unchanged.
+Tests
+cargo test --test core blur_ao_spread_light_bands_and_levels (new) passes. It checks that:
+neutral extras give identical pixels;
+a larger spread gives a wider occluded area;
+a larger depth gives darker AO;
+a light from the right darkens the right side of a pit, and angle 0.5 darkens the left side;
+each band at +1 or -1 gives darker or lighter AO, and the fine band alone stays close to the walls;
+the output range is respected;
+a midpoint above 0.5 darkens, a raised low point darkens and a lowered high point lightens.
+cargo test --lib: 32 passed. This includes the new sbs_adapt::tests::library_ambient_occlusion_parameters, which checks the default and changed values through both adapters, and unmapped_parameters, whose output no longer lists either AO graph (537 unmapped parameters in 84 graphs remain).
+cargo test --test core: all 60 passed.
+cargo test --features gui --test gpu_graph every_gpu_node_matches_the_cpu_and_runs_resident: 5 new CPU-vs-GPU cases (blur AO, light, bands, levels, HBAO with levels) all match and stay on the device. The test as a whole still fails, but only on the 11 existing cases (directional_blur, warp, vector_warp, slope_blur, bent_normal, x_rt_shadows, ...), which all predate this change.
+How to test
+Import an .sbs that uses the library Ambient Occlusion or ambient_occlusion_2 node with non-default values. The ao node should show the carried-over spread, depth, light, bands and levels.
+Or add an ao node, set Method to "Blur (legacy)" and change Light intensity / angle, the detail bands, Levels and Output on a height map.
+cargo test --lib unmapped_parameters -- --nocapture | grep ambient_occlusion prints nothing.
+The UI was not tested by hand.
+🤖 Generated with Claude Code
+RafaelMendes1407
+and others
+added 7 commits
+October 29, 2026 18:44
+PBR Base Material fixes, 3D view per node, output rename, input switches
+…
+4f656e1
+```
+- PBR Base Material: derive diffuse, specular, glossiness and roughness from
+  the workflow (metallic/roughness or specular/glossiness) and from the
+  connected maps per pixel instead of fixed settings.
+- 3D view: a "3D" button (and context menu entry) on material nodes shows
+  that node's outputs in the 3D view through temporary pass-through nodes.
+- Output nodes: an Identifier field renames the graph output; nodes of other
+  graphs that read it by name follow.
+- PBR Base Material: an IMAGE INPUTS section picks which maps the node reads;
+  the sockets of unused inputs are hidden.
+- Regression tests for the above.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Select links in the graph and swap connections with X
+…
+da19fb7
+```
+- Links can be clicked to select them (Shift-click adds/removes); the hovered
+  link is highlighted, selected ones are drawn orange.
+- Delete / Backspace remove the selected links (with selected nodes, in one
+  undo step); the Edit menu's Delete works with links alone.
+- X swaps connections: two selected links, one link with the next input of its
+  node, or the first two inputs of the selected node. Swaps that would make a
+  cycle or join image and value pins are refused.
+- Edit menu, node context menu, in-app shortcut list and docs/UXMAP.md list
+  the new actions.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Save a graph as a template for new projects
+…
+5177972
+```
+- user_templates: save a graph (with the graphs and functions it uses) as an
+  .sbs package in the settings folder's templates directory, list the saved
+  templates, read their outputs and make a renamed copy for a new project.
+- File > Save graph as template... and the Explorer's graph menu open a box
+  for the template's name (warning when it replaces one).
+- The New dialog lists them under MY TEMPLATES (details, double-click to
+  create, right-click to delete); File > New from template lists them too.
+  A copy becomes a new package or a graph of an open package.
+- Test and docs/UXMAP.md.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Show the alpha channel in the 3D view and the 2D view
+…
+f9c4233
+```
+The base colour's alpha (or an opacity output's luminance) cuts the 3D
+model out: dithered in the GPU scene pass and the CPU raster, a 0.5
+threshold in the shadow pass, stochastic transparency in the path tracer.
+The 2D view draws pictures with alpha over a checkerboard, with an Alpha
+toggle that shows the colours fully opaque.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+RGBA Merge: take the alpha from the A input's grey value
+…
+1ca8130
+```
+The A slot read channel 3 of its input, which is the input's own alpha
+(always 1 for a grey map), so a mask plugged into A never reached the
+alpha. It now reads the input's luminance, on the CPU and on the device.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Delete the package's main graph; icons for the core nodes
+…
+08446b4
+```
+Explorer > right-click > Delete now works on the graph a package opens
+on: the next compositing graph becomes the main one and takes the
+package's other graphs, resources and settings. It is still refused
+while another graph uses it or when it is the package's only graph, and
+Ctrl+Z brings it back.
+
+The library's Core nodes tiles show vector icons (src/gui_icons.rs)
+instead of a rendered preview.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Honour the parameters of the library blur Ambient Occlusion graphs
+…
+77f2066
+```
+ambient_occlusion and ambient_occlusion_2 now have adapters onto our ao
+node instead of the generic mapping that dropped all their values:
+
+- AO_Spread / spreading -> blur radius (defaults land on our radius 6)
+- Light_Distance (AO depth) -> depth (intensity)
+- Light_Intensity / Light_Angle -> a fake light: the neighbourhood is read
+  towards the light, so the sides facing away from it darken
+- equalizer -> weights of the fine / medium / large detail bands
+- AO_Levels -> output range; levels -> input low / midpoint / high
+
+The ao node gains these parameters (neutral defaults keep existing graphs
+unchanged), on the CPU and on the GPU (new ops_a AO_BANDS op; levels via
+levels_g, for both AO methods).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+PiJellyPin
+merged commit 713de14
+into
+PiJellyPin:main
+Nov 1, 2026
+PiJellyPin
+mentioned this pull request
+Nov 1, 2026
+Hide parameters whose "visible if" condition is false
+#34
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

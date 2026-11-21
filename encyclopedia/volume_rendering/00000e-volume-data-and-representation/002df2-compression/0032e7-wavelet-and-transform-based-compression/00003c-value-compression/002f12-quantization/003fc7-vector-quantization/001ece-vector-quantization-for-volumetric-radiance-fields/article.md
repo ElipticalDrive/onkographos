@@ -1,0 +1,203 @@
+# Vector Quantization for Volumetric Radiance Fields
+
+Also called: Codebook Encoding, Codebook Lookup Decompression, VQ Decompression, Vector Quantization (VQ), Vector Quantization (VQ) Decompression, Vector Quantization (VQ) Random Access
+
+## Overview
+Vector Quantization for Volumetric Radiance Fields (VQRF) is a compression strategy that encodes voxel color features into a compact codebook, substituting multiple voxel features with a single code vector to reduce storage from individual voxel storage to codebook storage plus mapping indices [S1]. It achieves a superior PSNR-size trade-off compared to uncompressed baselines and their direct vector-quantized variants (VQ-DVGO, VQ-Plenoxels, VQ-TensoRF) [S1]. Unlike standard VQ which treats all voxels equally, VQRF combines adaptive voxel pruning, learnable vector quantization, and weight quantization to reduce model size to approximately 1 MB [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A pre-trained volumetric radiance field model (e.g., DVGO, Plenoxels, TensoRF) consisting of a density grid and color feature voxels [S1].
+*   **Output:** A compressed representation comprising a codebook, voxel-to-codebook indices, a mask, quantized density/non-VQ features, and entropy-encoded data [S1].
+
+**Data Structures:**
+The final storage consists of six components [S1]:
+1.  **2-bit mask:** Identifies pruned, VQ, or unaltered voxels [S1].
+2.  **Code vectors:** Stored in float16 (16 bits) [S1].
+3.  **Mapping indexes:** $\log_2(K)$ bits per voxel, mapping voxels to codebook entries [S1].
+4.  **8-bit quantized density grid:** Full-precision floats cast to unsigned 8-bit integers [S1].
+5.  **8-bit quantized non-VQ voxels:** Full-precision floats cast to unsigned 8-bit integers [S1].
+6.  **Small network weights:** If applicable (e.g., for DVGO) [S1].
+
+**Parameters:**
+*   **Codebook size ($K$):** Default 4096 codes [S1].
+*   **Keep quantile ($\beta_k$):** Fraction of most important voxels saved without VQ. Value is 0.6 for DVGO and Plenoxels, 0.7 for TensoRF [S1].
+*   **Decay factor ($\lambda_d$):** Moving average factor for code vector updating. Default 0.8 [S1].
+*   **Expired codes ($J$):** Number of dead codes expired at every step. Default 10 [S1].
+*   **Finetuning steps:** 10,000 steps for VQ-DVGO (8196 rays/batch); 25,600 steps for VQ-Plenoxels (batch size 5000) [S1].
+
+**Algorithm Steps:**
+
+1.  **Voxel Importance and Pruning:**
+    Calculate importance scores $I_j$ for each voxel $v_j$ [S1]. Determine the keeping threshold $\theta_k$ using the inverse cumulative distribution function $F^{-1}$ of importance scores:
+    $$ \theta_k = Q(\beta_k) = F^{-1}(\beta_k) $$
+    Voxels with importance score $I_j > \theta_k$ are marked as non-VQ voxels and stored directly [S1].
+
+2.  **Codebook Initialization:**
+    Initialize codebook $B = \{b_1, ..., b_K\}$ by minimizing the weighted within-cluster sum of squares:
+    $$ \arg \min_{\mathbf{B}} \sum_{k=1}^K \sum_{\mathbf{v}_j \in \mathcal{R}(\mathbf{b}_k)} \|\mathbf{u}_j - \mathbf{b}_k\|_2^2 \cdot I_j $$
+    where $\mathbf{u}_j$ is the color feature, $I_j$ is the importance score, and $\mathcal{R}(b_k)$ is the set of voxels assigned to code $b_k$ [S1].
+
+3.  **Iterative Optimization:**
+    Perform iterative updates to refine the codebook:
+    *   Randomly select a batch of voxels from the grid [S1].
+    *   Calculate Euclidean distance between selected voxels and each code vector to determine association [S1].
+    *   Update code vectors using the moving average rule:
+        $$ \mathbf{b}_k := \lambda_d \mathbf{b}_k + (1 - \lambda_d) \sum_{\mathbf{v}_j \in \mathcal{R}(\mathbf{b}_k)} I_j \mathbf{u}_j $$
+    *   **Code Expiration:** Track capacity $s_k = \sum I_j \mathbb{1}_{v_j \in \mathcal{R}(b_k)}$ [S1]. Rank codes by capacity. Expire $J$ codes with the lowest capacity and reinitialize them with features of the top $J$ most important voxels in the batch [S1].
+
+4.  **Joint Finetuning:**
+    *   Fix and save the voxel-to-codebook mapping [S1].
+    *   Tune four parts: code vectors, density grid, non-VQ voxels, and small network (if applicable) [S1].
+    *   Update code vectors by synchronizing weights across assigned voxels every $i$ iterations [S1].
+
+5.  **Post-Processing:**
+    *   Apply 8-bit uniform weight quantization to density voxels and non-VQ feature voxels (cast full-precision float to unsigned int). Do not quantize the codebook [S1].
+    *   Encode all components (mask, code vectors, indices, quantized grids) with entropy encoding (LZ77) and pack together [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compress_vqrf(model, K=4096, beta_k=0.6, lambda_d=0.8, J=10):
+    """
+    Compress a volumetric radiance field using Vector Quantization.
+    model: object with .density_grid, .color_features (N, C), .importance_scores (N), .network_weights
+    """
+    N = len(model.color_features)
+    C = len(model.color_features[0])
+    
+    # 1. Determine Non-VQ Voxels
+    # Sort importance scores to find the beta_k quantile threshold
+    sorted_scores = sorted(model.importance_scores)
+    theta_k = sorted_scores[int(beta_k * N)]
+    
+    non_vq_mask = [i for i in range(N) if model.importance_scores[i] > theta_k]
+    vq_indices = [i for i in range(N) if i not in non_vq_mask]
+    
+    # 2. Initialize Codebook
+    # Initialize B with K random voxels from vq_indices
+    B = [list(model.color_features[vq_indices[k % len(vq_indices)]]) for k in range(K)]
+    
+    # 3. Iterative Optimization
+    for step in range(100):
+        batch_size = 10000
+        batch_voxels = [vq_indices[i % len(vq_indices)] for i in range(batch_size)]
+        batch_features = [model.color_features[v] for v in batch_voxels]
+        batch_importance = [model.importance_scores[v] for v in batch_voxels]
+        
+        # Calculate Euclidean distance to each code vector
+        dists = []
+        for feat in batch_features:
+            row = [sum((feat[c] - B[k][c])**2 for c in range(C)) for k in range(K)]
+            dists.append(row)
+            
+        assignments = [min(range(K), key=lambda k: dists[i][k]) for i in range(len(batch_features))]
+        
+        # Update code vectors using moving average
+        for k in range(K):
+            assigned_feats = [batch_features[i] for i in range(len(batch_features)) if assignments[i] == k]
+            assigned_imp = [batch_importance[i] for i in range(len(batch_importance)) if assignments[i] == k]
+            if assigned_feats:
+                weighted_sum = [sum(imp * feat[c] for imp, feat in zip(assigned_imp, assigned_feats)) for c in range(C)]
+                B[k] = [lambda_d * B[k][c] + (1 - lambda_d) * weighted_sum[c] for c in range(C)]
+                
+        # Code Expiration
+        capacities = [0.0] * K
+        for i, k in enumerate(assignments):
+            capacities[k] += batch_importance[i]
+        expired_indices = sorted(range(K), key=lambda k: capacities[k])[:J]
+        sorted_batch_idx = sorted(range(len(batch_importance)), key=lambda i: batch_importance[i], reverse=True)[:J]
+        for idx, expired_k in enumerate(expired_indices):
+            B[expired_k] = list(batch_features[sorted_batch_idx[idx]])
+
+    # 4. Final Assignment
+    final_assignments = []
+    for v in vq_indices:
+        feat = model.color_features[v]
+        dists = [sum((feat[c] - B[k][c])**2 for c in range(C)) for k in range(K)]
+        final_assignments.append(min(range(K), key=lambda k: dists[k]))
+    indices = [0] * N
+    for idx, v in enumerate(vq_indices):
+        indices[v] = final_assignments[idx]
+        
+    # 5. Joint Finetuning
+    # The sources do not provide the exact gradient descent loop for joint finetuning.
+    # In practice, this step fixes the voxel-to-codebook mapping and tunes code vectors,
+    # density grid, non-VQ voxels, and small network weights via backpropagation,
+    # synchronizing weights across assigned voxels every i iterations.
+    
+    # 6. Post-Processing
+    quantized_density = [int(min(255, max(0, round(v * 255.0)))) for v in model.density_grid]
+    quantized_non_vq_features = [[int(min(255, max(0, round(v * 255.0)))) for v in model.color_features[i]] for i in non_vq_mask]
+    
+    mask = [0] * N
+    for i in non_vq_mask: mask[i] = 2
+    for i in range(N):
+        if mask[i] == 0 and indices[i] != 0: mask[i] = 1
+        
+    compressed_data = {
+        'mask': mask,
+        'codebook': B,
+        'indices': indices,
+        'quantized_density': quantized_density,
+        'quantized_non_vq_features': quantized_non_vq_features,
+        'network_weights': model.network_weights
+    }
+    
+    # The sources do not provide the exact entropy encoding implementation.
+    # This step encodes all components with LZ77 and packs them together.
+    return compressed_data
+```
+
+## Subtopics
+
+### [VQRF (Vector Quantized Radiance Fields)](1903-vqrf-vector-quantized-radiance-fields.md)
+VQRF is a compression framework for volumetric radiance fields (such as DVGO, Plenoxels, and TensoRF) that reduces model size to approximately 1 MB by combining adaptive voxel pruning, learnable vector quantization, and weight quantization. It achieves a superior PSNR-size trade-off compared to uncompressed baselines and their direct vector-quantized variants (VQ-DVGO, VQ-Plenoxels, VQ-TensoRF).
+
+### [Neural Vector Quantization](10103-neural-vector-quantization.md)
+Neural Vector Quantization (NVQ) is a compression technique for 3D Gaussian Splatting that reduces storage costs by partitioning Gaussian attribute vectors into sub-vectors, clustering them via K-Means, and quantizing each cluster using separate codebooks. It further minimizes storage by replacing high-dimensional Spherical Harmonic (SH) coefficients with lightweight neural decoders that reconstruct diffuse and view-dependent components from quantized latent codes. Unlike traditional vector quantization that uses a single codebook for the entire attribute vector, NVQ employs a sub-vector decomposition strategy to enhance representation flexibility and mitigate codeword collisions.
+
+### Flag-based Classified Hierarchical Vector Quantization
+A dictionary-based method where each voxel is reconstructed on-the-fly by accessing selected codewords, supporting per-voxel random access [S3].
+
+### Compressed Volume Format with Precomputed Normals
+A compressed volume format that may be rendered directly with minimal impact on rendering time, useful for extracting information from large datasets [S5, unofficial]. It provides fast random access to voxel values by decoding voxels with a simple access to the codebook [S5, unofficial]. The scheme consists of a vector of density values and the precomputed normal fields of voxels in the partitioning subblocks [S5, unofficial]. It quantifies data into a codebook and represents each subblock by an appropriate index, accelerating rendering by shading only the vectors in the codebook [S5, unofficial]. Some blockiness and contouring was reported, but it achieved a compression ratio of 5:1 for volume data of $128^3$ [S5, unofficial].
+
+### VQ-Based Model Compression
+Compresses each basic iVR-GS model using vector quantization to enhance scalability for large numbers of transfer functions without sacrificing reconstruction accuracy [S6]. It samples transfer functions uniformly over the whole voxel value range to ensure both content-rich and content-poor parts are included during compression evaluation [S6]. At a model size of ~280 MB, VQ compression allows nearly 4× the number of TFs compared to non-VQ iVR-GS [S6].
+
+### Energy-based Thresholding for Vector Quantization
+A technique to reduce the bitstream size of Vector Quantization (VQ) by discarding low-energy code vectors [S7, unofficial]. It replaces vectors with energy below a threshold T with a predefined zero-energy vector Z, allowing entropy encoders to compress the stream more effectively [S7, unofficial]. It designs a codebook matrix M with n rows, ensuring one row Z (index z) has zero energy (all elements are zero) [S7, unofficial]. For each index i from the encoder, it calculates the squared magnitude $|M_i|^2$ of the code vector $M_i$ [S7, unofficial]. If $|M_i|^2 > T$, it transmits index i to the entropy encoder [S7, unofficial]. If $|M_i|^2 \le T$, it replaces index i with z (the index of the zero-energy vector Z) before transmitting to the decoder [S7, unofficial]. The energy threshold T is individual for each pyramid layer, with larger threshold values assigned to lower pyramid levels to discard more coefficients [S7, unofficial]. Unlike standard VQ which transmits all indices, this method maps most indices to a single value (z), creating a sparse stream ideal for entropy coding (LZ/Huffman) [S7, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+The computational complexity of reconstructing VQ is linear $O(N)$, where $N$ is the number of blocks [S2, S3]. In Hierarchical VQ (HVQ), the complexity is $O(N \times M)$, where $M$ is the number of dictionaries [S2, S3]. The sparse coding of voxel blocks employs a linear combination of different codewords of a dictionary, thus the computational complexity remains very similar to HVQ and is $O(N \times S)$ where $S$ is the sparsity [S2, S3].
+
+**Measured Performance:**
+VQ-DVGO achieves a 75x average compression on Synthetic-NeRF with a 0.13 dB PSNR drop, outperforming VQ-Plenoxels (20x, 0.2 dB drop) and VQ-TensoRF (20x, better size/quality than TensoRF-CP) due to higher redundancy in DVGO [S1]. The upper bound compression rate $r$ is given by:
+$$ r = \frac{16NC}{N\log_2(K) + 16KC} $$
+where $N$ is the number of voxels, $C$ is the channel dimension, $K$ is the codebook size, and features are stored in float16 (16 bits) [S1]. For $K=4096$, the upper bound compression rate is 16 for DVGO, 64 for TensoRF, and 36 for Plenoxels on the synthetic-NeRF dataset [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Significant model size reduction (up to 75x) with negligible quality loss. Supports per-voxel random access. Dictionaries can be uploaded to GPU memory with only one additional memory indirection per codeword [S2, S3].
+*   **Limitations:** Direct VQ after pruning can cause unacceptable performance loss without joint finetuning [S1]. Inactive code issues (imbalanced assignment) can degrade representation ability if not managed via code expiration [S1]. Some blockiness and contouring may occur in certain variants [S5, unofficial].
+
+**When to Use:**
+Use when storage size is critical and the scene has high redundancy in color features (e.g., DVGO). Use when random access to specific voxels is required [S2, S3].
+
+**When Not to Use:**
+Avoid if the scene has low redundancy or if the overhead of joint finetuning is prohibitive. Avoid if strict lossless compression is required.
+
+## Background
+Vector Quantization for Volumetric Radiance Fields (VQRF) was introduced in the paper "Compressing Volumetric Radiance Fields to 1 MB" [S1]. It builds on the concept of dictionary-based compression methods where voxels are reconstructed on-the-fly by accessing selected codewords [S2, S3]. The method is used by Schneider & Westermann [36], Fout & Ma [37], and Parys & Knittel [45] [S4, unofficial].
+
+## Sources
+[S1] Compressing Volumetric Radiance Fields to 1 MB, https://doi.org/10.1109/cvpr52729.2023.00411, fetched 2026-10-26
+[S2] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S3] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S4] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)
+[S5] Volumetric Medical Images Visualization on Mobile Devices, http://hdl.handle.net/2099.1/11308, fetched 2026-10-26 (unofficial)
+[S6] iVR-GS: Inverse Volume Rendering for Explorable Visualization via Editable 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2025.3567121, fetched 2026-10-26
+[S7] Confocal microscopic image sequence compression using vector quantization and 3D pyramids, http://eprints.gla.ac.uk/3795/1/confocal_image_sequence.pdf, fetched 2026-10-30 (unofficial)

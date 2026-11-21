@@ -1,0 +1,93 @@
+--- v017.md
++++ v018.md
+@@ -3,36 +3,47 @@
+ 
+ ## Overview
+-GeoGaussian is a training optimization and initialization strategy for 3D Gaussian Splatting that improves geometric consistency and surface smoothness by densifying primitives on the tangent plane of existing Gaussians and enforcing smoothness of geometric properties between neighbors [S1]. It distinguishes itself from sibling methods like Scaffold-GS, which anchors Gaussians to a grid, and Negative Gaussian Splatting, which introduces negative opacity, by focusing exclusively on the spatial distribution and geometric coherence of the Gaussian primitives during the densification phase [S1].
++GeoGaussian is a training optimization and initialization strategy for 3D Gaussian Splatting that improves geometric consistency and reduces artifacts by modifying the densification process. It addresses the issue of irregular Gaussian distribution and geometric discontinuities by constraining new primitives to lie on the tangent plane of existing Gaussians and enforcing smoothness of geometric properties between neighbors [S1]. It sets itself apart from standard 3D Gaussian Splatting by introducing explicit geometric constraints during densification, distinguishing it from sibling methods that modify kernels (like DARBF-Splatting) or use negative values (like Negative Gaussian Splatting).
+ 
+ ## How it works
+-GeoGaussian modifies the standard 3D Gaussian Splatting densification process to respect local surface geometry. It operates within the differentiable rendering framework of 3D Gaussian Splatting [Parent](3761-3d-gaussian-splatting-training.md).
++GeoGaussian modifies the densification phase of 3D Gaussian Splatting. It does not alter the fundamental rendering equation or the primitive attribute definition (position, covariance, opacity, color) but changes how new Gaussians are spawned during optimization.
+ 
+-**Inputs and Outputs:**
+-*   **Input:** The current set of 3D Gaussians $\mathcal{G} = \{G_i\}$, where each $G_i$ is defined by position $\mathbf{p}_i$, covariance $\boldsymbol{\Sigma}_i$ (parameterized by rotation $\mathbf{R}_i$ and scale $\mathbf{s}_i$), opacity $\alpha_i$, and color $\mathbf{c}_i$.
+-*   **Output:** An updated set of Gaussians with new primitives added on tangent planes and existing primitives adjusted for geometric smoothness.
++**Inputs:**
++- Current set of 3D Gaussians $\mathcal{G} = \{G_i\}$, where each $G_i$ has position $\mathbf{p}_i$, covariance $\boldsymbol{\Sigma}_i$, opacity $\alpha_i$, and color $\mathbf{c}_i$.
++- Gradient information from the rendering loss with respect to the Gaussian parameters.
++- A threshold for densification (e.g., based on gradient magnitude or depth error).
++
++**Outputs:**
++- Updated set of 3D Gaussians $\mathcal{G}'$ with new primitives added according to geometric constraints.
+ 
+ **Data Structures:**
+-The core data structure remains the 3D Gaussian primitive. GeoGaussian utilizes the normal vector $\mathbf{n}_i$ derived from the covariance matrix $\boldsymbol{\Sigma}_i$ to define the local tangent plane. The normal is typically the eigenvector corresponding to the smallest eigenvalue of $\boldsymbol{\Sigma}_i$ [G].
++- Each Gaussian $G_i$ retains the standard 3DGS representation:
++  - $\mathbf{p}_i \in \mathbb{R}^3$: Position.
++  - $\mathbf{R}_i \in SO(3)$: Rotation matrix (derived from quaternion).
++  - $\mathbf{s}_i \in \mathbb{R}^3$: Scale vector.
++  - $\alpha_i \in [0, 1]$: Opacity.
++  - $\mathbf{c}_i$: Color (SH coefficients).
++  - $\boldsymbol{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T$: Covariance matrix, where $\mathbf{S}_i = \text{diag}(\mathbf{s}_i)$.
+ 
+ **Steps:**
+-1.  **Identify Candidates:** Select Gaussians $G_i$ that require densification based on standard criteria (e.g., high gradient magnitude in screen space) [S1].
+-2.  **Compute Tangent Plane:** For each candidate Gaussian $G_i$, compute the surface normal $\mathbf{n}_i$. The tangent plane is defined as the plane passing through $\mathbf{p}_i$ with normal $\mathbf{n}_i$.
+-3.  **Densify on Tangent Plane:** Generate new Gaussian primitives by sampling positions $\mathbf{p}_{new}$ on the tangent plane of $G_i$. The new Gaussians inherit the orientation $\mathbf{R}_i$ and scale $\mathbf{s}_i$ of the parent, or are slightly perturbed to cover the local area [S1].
+-4.  **Enforce Geometric Smoothness:** Apply a regularization term to the optimization loss that encourages the geometric properties (such as normals or positions) of neighboring Gaussians to be smooth. This reduces noise and ensures coherent surface reconstruction [S1].
+-
+-**Formulas:**
+-Let $\mathbf{n}_i$ be the normal of Gaussian $i$. The tangent plane constraint ensures new points $\mathbf{p}_{new}$ satisfy:
+-$$ (\mathbf{p}_{new} - \mathbf{p}_i) \cdot \mathbf{n}_i = 0 $$
+-The smoothness regularization term $L_{smooth}$ can be formulated as a penalty on the difference of normals or positions between adjacent Gaussians $i$ and $j$:
+-$$ L_{smooth} = \sum_{(i,j) \in \mathcal{N}} \| \mathbf{n}_i - \mathbf{n}_j \|^2 + \| \mathbf{p}_i - \mathbf{p}_j \|^2 $$
+-where $\mathcal{N}$ is the set of neighboring Gaussian pairs [S1].
++1. **Identify Densification Candidates:** Select Gaussians $G_i$ that require densification based on a criterion (e.g., high gradient magnitude in the image space). Let this set be $\mathcal{C}$.
++2. **Compute Tangent Plane:** For each candidate $G_i \in \mathcal{C}$, compute the normal vector $\mathbf{n}_i$ of the tangent plane. In 3DGS, the normal is not explicitly stored but can be derived from the covariance matrix or assumed to be the viewing direction if surface-aligned. GeoGaussian assumes the Gaussian approximates a surface patch, so the normal $\mathbf{n}_i$ is estimated from the local geometry or the gradient of the depth/position. [G: If not explicitly stored, $\mathbf{n}_i$ can be approximated by the eigenvector corresponding to the smallest eigenvalue of $\boldsymbol{\Sigma}_i$, or by the camera ray direction if the Gaussian is front-facing.]
++3. **Spawn New Gaussians on Tangent Plane:** For each $G_i \in \mathcal{C}$, spawn new Gaussians $G_{new}$ such that their positions $\mathbf{p}_{new}$ lie on the tangent plane defined by $\mathbf{p}_i$ and $\mathbf{n}_i$.
++   - The position is updated as:
++     $$ \mathbf{p}_{new} = \mathbf{p}_i + \mathbf{u} + \mathbf{v} $$
++     where $\mathbf{u}$ and $\mathbf{v}$ are orthogonal vectors lying in the tangent plane (i.e., $\mathbf{u} \cdot \mathbf{n}_i = 0$, $\mathbf{v} \cdot \mathbf{n}_i = 0$, and $\mathbf{u} \cdot \mathbf{v} = 0$).
++   - The magnitude of $\mathbf{u}$ and $\mathbf{v}$ is determined by the scale of $G_i$ or a densification step size.
++4. **Enforce Geometric Smoothness:** Encourage smoothness of geometric properties (position, normal, scale) between neighboring Gaussians. This is achieved by adding a regularization term to the loss function or by constraining the initialization of new Gaussians to match the properties of their parent $G_i$.
++   - Regularization term $\mathcal{L}_{smooth}$:
++     $$ \mathcal{L}_{smooth} = \sum_{i,j \in \text{neighbors}} \left( \|\mathbf{p}_i - \mathbf{p}_j\|^2 + \|\mathbf{n}_i - \mathbf{n}_j\|^2 + \|\mathbf{s}_i - \mathbf{s}_j\|^2 \right) $$
++   - [G: Neighbors are typically defined by spatial proximity or adjacency in the Gaussian graph.]
++5. **Update Gaussians:** Add the new Gaussians to the scene and continue optimization.
+ 
+ **Parameters:**
+-*   Densification threshold: Not given in the sources.
+-*   Smoothness weight: Not given in the sources.
++- Densification threshold: Not given in the sources. Typically similar to standard 3DGS (e.g., gradient magnitude threshold).
++- Tangent plane offset: Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Degenerate Covariance:** If a Gaussian is highly anisotropic or degenerate, the normal estimation may be unstable. [G] A minimum scale threshold or covariance regularization should be applied before normal extraction.
+-*   **Boundary Artifacts:** Densification on tangent planes may create gaps or overlaps at object boundaries if not handled carefully. [G] Standard boundary checks or clamping may be required.
++- **Degenerate Normals:** If the normal estimation is inaccurate (e.g., in textureless regions), the tangent plane constraint may lead to incorrect placement.
++- **Over-densification:** If the smoothness constraint is too strong, it may prevent the model from capturing fine geometric details.
+ 
+ ## Subtopics
+@@ -45,14 +56,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Strengths:** Improves geometric consistency and surface smoothness, leading to better reconstruction quality for complex surfaces [S1].
+-*   **Limitations:** May increase training time due to additional regularization and densification steps [S1].
+-*   **When to Use:** When high-quality geometric reconstruction and smooth surfaces are required, particularly for scenes with complex geometry [S1].
+-*   **When Not to Use:** When real-time performance is critical and geometric smoothness is less important than raw rendering speed [S1].
++- **Time Complexity:** Not given in the sources. Likely similar to standard 3DGS densification, with additional overhead for normal estimation and tangent plane projection.
++- **Memory Complexity:** Not given in the sources.
++- **Strengths:** Improves geometric consistency, reduces artifacts in regions with complex geometry, and encourages smoother surfaces.
++- **Limitations:** Requires accurate normal estimation, which may be challenging in textureless or noisy regions.
++- **When to use:** When geometric accuracy and smoothness are critical, such as in architectural scenes or objects with smooth surfaces.
++- **When not to use:** When computational resources are limited and the scene has high-frequency details that may be smoothed out.
+ 
+ ## Background
+-GeoGaussian was proposed in the context of recent advances in 3D Gaussian Splatting, specifically to address issues with geometric consistency and surface smoothness [S1]. It builds upon the progressive propagation strategy introduced by GaussianPro and is cited alongside other methods like RadSplat, Spec-Gaussian, TRIPS, and FreGS in surveys of recent 3DGS variants [S1].
++GeoGaussian was proposed in the paper "GeoGaussian: Geometry-aware Gaussian Splatting for Radiance Field Rendering" [S1]. It is part of the broader effort to improve the geometric fidelity of 3D Gaussian Splatting. The method builds on the observation that standard 3DGS densification can lead to irregular Gaussian distributions and geometric discontinuities. By constraining new Gaussians to lie on the tangent plane of existing ones and enforcing smoothness, GeoGaussian achieves better geometric consistency.
+ 
+ ## Sources

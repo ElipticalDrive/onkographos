@@ -1,0 +1,154 @@
+# Histogram Peak Interpolation for Transfer Function Generation
+
+Also called: Douglas-Peucker Histogram Interpolation, Interpolation between Transfer Function Peaks
+
+## Overview
+Histogram Peak Interpolation is a method for automatically generating intermediate transfer functions by analyzing the histogram data between two existing unit transfer function peaks. It solves the problem of visualizing intermediate structures or filling gaps in data density by detecting new peaks within the interval defined by two user-selected visualizations. It distinguishes itself from its parent method, Unit Transfer Function Generation via Histogram Peak Detection, by focusing on the interval between peaks rather than the global histogram maximums, and from its child, Visualization by Example, by providing the underlying algorithmic logic for peak detection rather than a constructive interface [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input:** A 1D histogram of the volume dataset; two selected unit transfer functions defined by their peak values $p_1$ and $p_2$ in the histogram domain.
+- **Output:** A new set of transfer functions (up to three) located within the interval $[p_1, p_2]$.
+
+**Data Structures**
+- **Histogram:** An array of bin counts $H[i]$ where $i$ represents the data value (e.g., voxel intensity). The resolution of the histogram is not specified in the sources [G].
+- **Peak List:** A list of peak indices found within the search interval.
+
+**Steps**
+1.  **Define Interval:** Identify the range of histogram bins between the two selected peak values $p_1$ and $p_2$. Assume $p_1 < p_2$.
+2.  **Initialize Search:** Set the Douglas-Peucker tolerance parameter $\epsilon = \epsilon_{start}$. The initial value is not explicitly given, but the algorithm iteratively decreases it [S1, unofficial].
+3.  **Iterative Peak Detection:**
+    a.  Apply the Douglas-Peucker algorithm to the histogram segment within $[p_1, p_2]$ using the current $\epsilon$.
+    b.  The Douglas-Peucker algorithm simplifies the curve (histogram profile) by recursively dividing it at the point with the maximum perpendicular distance from the line segment connecting the endpoints. Points with distance $> \epsilon$ are retained as "peaks" or significant vertices.
+    c.  Collect the indices of the retained peaks.
+    d.  If fewer than three peaks are found, decrease $\epsilon$ and repeat step 3a.
+    e.  Stop if three or more peaks are found, or if $\epsilon$ reaches the minimum threshold of 2.
+4.  **Select Peaks:** From the detected peaks, select the three largest peaks based on their histogram bin counts (height). Note that this approach selects any peak regardless of size or height relative to the global maximum, unlike the initial peak selection which likely prioritized global maxima [S1, unofficial].
+5.  **Handle Empty Interval:** If no peaks are found after $\epsilon$ reaches 2, place the new transfer functions equidistantly between $p_1$ and $p_2$. The number of functions placed is not explicitly defined, but the context implies filling the gap with uniform spacing [S1, unofficial].
+
+**Parameters**
+-   **$\epsilon$ (epsilon):** The tolerance parameter for the Douglas-Peucker algorithm. It is decreased iteratively. The search stops when three peaks are found or when $\epsilon = 2$ [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def histogram_peak_interpolation(histogram, p1, p2):
+    """
+    histogram: list of bin counts
+    p1, p2: indices of the two selected peaks in the histogram (p1 < p2)
+    Returns: list of up to 3 peak indices between p1 and p2
+    """
+    # Extract the histogram segment between the two peaks
+    segment = histogram[p1:p2+1]
+    
+    # Start with a high epsilon; exact initial value not given [G]
+    epsilon = 100.0 
+    min_epsilon = 2
+    
+    detected_peaks = []
+    
+    while epsilon >= min_epsilon:
+        # Apply Douglas-Peucker to the segment to find significant vertices
+        # The algorithm returns indices relative to the segment start
+        vertices = douglas_peucker(segment, epsilon)
+        
+        # Filter vertices to keep only those strictly between p1 and p2
+        # and identify them as peaks
+        current_peaks = []
+        for v in vertices:
+            if p1 < v < p2:
+                current_peaks.append(v)
+        
+        # If we have enough peaks, select the largest ones
+        if len(current_peaks) >= 3:
+            # Sort peaks by histogram height (bin count)
+            current_peaks.sort(key=lambda idx: histogram[idx], reverse=True)
+            return current_peaks[:3]
+        
+        # Decrease epsilon to find smaller peaks
+        epsilon -= 1 # Step size not specified, assumed 1 for implementation [G]
+        
+    # If no peaks found or epsilon reached minimum
+    if len(detected_peaks) < 3:
+        # Place transfer functions equidistantly
+        # Number of functions to place is not specified [G]
+        # Assuming 3 for consistency with the peak search goal
+        num_functions = 3
+        step = (p2 - p1) / (num_functions + 1)
+        equidistant_peaks = []
+        for i in range(1, num_functions + 1):
+            equidistant_peaks.append(int(p1 + i * step))
+        return equidistant_peaks
+        
+    return detected_peaks
+
+def douglas_peucker(points, epsilon):
+    """
+    Simplifies a polyline using the Douglas-Peucker algorithm.
+    points: list of (index, value) tuples
+    epsilon: tolerance
+    Returns: list of indices of retained points
+    """
+    if len(points) < 3:
+        return [p[0] for p in points]
+    
+    # Find the point with the maximum distance from the line segment
+    start = points[0]
+    end = points[-1]
+    
+    max_dist = 0
+    max_idx = 0
+    
+    for i in range(1, len(points) - 1):
+        dist = perpendicular_distance(points[i], start, end)
+        if dist > max_dist:
+            max_dist = dist
+            max_idx = i
+            
+    if max_dist > epsilon:
+        # Recursively simplify
+        left = douglas_peucker(points[:max_idx+1], epsilon)
+        right = douglas_peucker(points[max_idx:], epsilon)
+        # Remove duplicate endpoint
+        return left[:-1] + right
+    else:
+        return [start[0], end[0]]
+
+def perpendicular_distance(point, line_start, line_end):
+    """
+    Calculates the perpendicular distance from a point to a line segment.
+    """
+    x, y = point[1], point[1] # Note: point is (index, value), so y is value
+    x1, y1 = line_start[1], line_start[1]
+    x2, y2 = line_end[1], line_end[1]
+    
+    # Distance from point (x,y) to line defined by (x1,y1) and (x2,y2)
+    # Using the formula: |Ax + By + C| / sqrt(A^2 + B^2)
+    # Line equation: (y1-y2)x + (x2-x1)y + x1y2 - x2y1 = 0
+    A = y1 - y2
+    B = x2 - x1
+    C = x1*y2 - x2*y1
+    
+    dist = abs(A*x + B*y + C) / ( (A**2 + B**2)**0.5 )
+    return dist
+```
+
+## Subtopics
+
+### [Visualization by Example / Constructive Visual Component-based Interface](17199-visualization-by-example-constructive-visual-component-based.md)
+This method enables users to create direct volume rendering (DVR) visualizations by combining automatically generated unit transfer functions, requiring no knowledge of the DVR process or transfer function design. It distinguishes itself from its parent method, Histogram Peak Interpolation, by providing a constructive, spreadsheet-like interface where users select and merge pre-computed visualizations rather than manually interpolating between histogram peaks. Unlike traditional manual transfer function design, it prioritizes speed and ease of use for inexperienced users at the cost of precise control over material boundaries and opacity.
+
+## Operating characteristics
+- **Time Complexity:** The complexity depends on the Douglas-Peucker algorithm, which is $O(n \log n)$ for a segment of size $n$ in the average case, but can be $O(n^2)$ in the worst case. The iterative decrease of $\epsilon$ adds a multiplicative factor depending on the number of iterations required to find peaks or reach $\epsilon=2$.
+- **Memory Complexity:** $O(n)$ to store the histogram segment and recursive stack for Douglas-Peucker.
+- **Strengths:** Automatically detects intermediate structures without manual input; handles varying peak sizes by selecting the largest peaks in the interval.
+- **Limitations:** The choice of $\epsilon$ step size and initial value is not specified, which may affect performance and reproducibility [G]. The method may fail to find peaks if the histogram segment is flat or noisy, resulting in equidistant placement which may not correspond to actual data structures.
+- **When to use:** When visualizing intermediate densities between two known structures.
+- **When not to use:** When precise control over material boundaries is required, or when the histogram lacks clear peaks in the interval.
+
+## Background
+The method was introduced in the context of the "Visualization by Example" interface for Direct Volume Rendering. It is part of a system implemented using Voreen, a rapid-prototyping environment for ray-casting-based volume visualizations [S1, unofficial]. The approach allows users to assemble complex transfer functions from simple unit transfer functions by interpolating between them.
+
+## Sources
+[S1] SCITEPRESS - SCIENCE AND TECHNOLOGY PUBLICATIONS, https://www.scitepress.org/PublishedPapers/2010/28441/, fetched 2026-10-29 (unofficial)

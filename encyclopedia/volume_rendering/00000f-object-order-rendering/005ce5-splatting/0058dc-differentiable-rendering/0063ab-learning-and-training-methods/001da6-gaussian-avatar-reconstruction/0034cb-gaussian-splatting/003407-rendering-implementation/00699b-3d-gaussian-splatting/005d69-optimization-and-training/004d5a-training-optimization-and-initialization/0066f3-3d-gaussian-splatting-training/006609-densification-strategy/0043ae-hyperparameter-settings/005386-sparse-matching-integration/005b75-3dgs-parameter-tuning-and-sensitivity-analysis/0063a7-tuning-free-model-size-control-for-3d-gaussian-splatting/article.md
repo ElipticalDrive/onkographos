@@ -1,0 +1,267 @@
+# Tuning-Free Model-Size Control for 3D Gaussian Splatting
+
+Also called: Budget-controlled 3DGS, Lagrangian relaxation for 3DGS pruning
+
+## Overview
+This method controls the final number of 3D Gaussian primitives in a scene to a user-specified budget $B$ without per-scene hyperparameter tuning, using a Lagrangian relaxation of the population constraint and a dual ascent controller [S1, unofficial]. It differs from standard 3D Gaussian Splatting (3DGS) [3DGS Parameter Tuning and Sensitivity Analysis](16894-3dgs-parameter-tuning-and-sensitivity-analysis.md) by replacing fixed sparsity penalties with a dynamic budget constraint that guarantees an exact primitive count across all scenes, and from [PSCD-GS](18934-pscd-gs.md) by employing a closed-loop controller rather than static pruning criteria [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input:** Target budget $B$ (integer number of primitives); standard 3DGS training data (images, poses).
+- **Output:** A set of exactly $B$ 3D Gaussian primitives with optimized parameters (position, scale, rotation, opacity, spherical harmonics coefficients).
+
+**Data Structures**
+- **Primitives:** Standard 3DGS representation. Each primitive $i$ has an inclusion probability $p_i$ derived from its opacity/logits.
+- **Mask Indicator $m_i$:** Binary variable indicating if primitive $i$ is active ($1$) or pruned ($0$).
+- **Dual Multiplier $\lambda_t$:** Scalar value controlling the strength of the budget penalty at iteration $t$.
+- **Live Count Estimate $\hat{N}_t$:** Exponential moving average of the number of active primitives.
+
+**Parameters**
+The method uses a fixed set of hyperparameters for all scenes and budgets [S1, unofficial]:
+- Base gain $\eta = 0.05$
+- Margin $\mu = 0.15$
+- Update interval $K = 100$ iterations
+- Dead band threshold $\epsilon = 0.02$
+- Log-domain clip range $\delta = 0.02$
+- Asymmetric release ratio $\rho = 3$
+- Initial multiplier $\lambda_0 = 10^{-3}$
+- Terminal projection iteration $T_{lock} = 28,000$
+
+**Formulas**
+The loss function replaces the fixed sparsity penalty with a Lagrangian relaxation of the constraint $\sum_i m_i \le B$ [S1, unofficial]:
+
+$$
+L = (1 - \lambda_D)L_1 + \lambda_D L_{D-SSIM} + \frac{\lambda_t}{B} \sum_i m_i
+$$
+
+Here, $L_1$ and $L_{D-SSIM}$ are the reconstruction and D-SSIM losses, $\lambda_D$ is the standard sparsity weight, and $m_i$ is the mask indicator. The penalty term is linear and normalized by $B$, ensuring the gradient $\lambda_t/B$ is independent of the current population size [S1, unofficial].
+
+The dual multiplier $\lambda_t$ is updated every $K$ iterations using multiplicative dual ascent in the log domain [S1, unofficial]:
+
+$$
+e_t = \log \left( \frac{\hat{N}_t}{B^\star} \right)
+$$
+
+$$
+\lambda_{t+K} = \text{clip} \left( \lambda_t \exp \left( \text{clip}(\eta_t e_t, \pm \delta) \right), \lambda_{\min}, \lambda_{\max} \right)
+$$
+
+The gain $\eta_t$ is asymmetric to account for the irreversibility of pruning [S1, unofficial]:
+
+$$
+\eta_t = \begin{cases} 
+\eta & \text{if } e_t > 0 \quad (\text{above budget: tighten}) \\
+\rho \eta & \text{if } e_t < 0 \quad (\text{below budget: release})
+\end{cases}
+$$
+
+The setpoint $B^\star$ is inflated by margin $\mu$ [S1, unofficial]:
+
+$$
+B^\star = (1 + \mu)B
+$$
+
+The inclusion probability $p_i$ is computed as [S1, unofficial]:
+
+$$
+p_i = \text{softmax}(s_i)^0
+$$
+
+where $s_i$ are the logits. The mask is defined by the mode: $m_i = 1$ if $p_i > 1/2$, else $0$ [S1, unofficial].
+
+**Numbered Steps**
+1. **Initialization:** Initialize 3DGS primitives. Set $\lambda_0 = 10^{-3}$, $\hat{N}_0 = 0$. Set target budget $B$.
+2. **Setpoint Calculation:** Compute $B^\star = (1 + 0.15)B$.
+3. **Training Loop (Iteration $t$):**
+    a. Render image and compute $L_1$ and $L_{D-SSIM}$ losses.
+    b. Compute mask indicators $m_i$ based on $p_i > 1/2$.
+    c. Compute current live count $N_t = \sum_i m_i$.
+    d. Update exponential moving average $\hat{N}_t$ (implementation detail: standard EMA update).
+    e. If $t$ is a multiple of $K=100$:
+        i. Compute error $e_t = \log(\hat{N}_t / B^\star)$.
+        ii. If $|e_t| < \epsilon$, set $e_t = 0$.
+        iii. Determine $\eta_t$: if $e_t > 0$, $\eta_t = 0.05$; if $e_t < 0$, $\eta_t = 0.15$ ($3 \times 0.05$).
+        iv. Update $\lambda_{t+K} = \text{clip}(\lambda_t \exp(\text{clip}(\eta_t e_t, \pm 0.02)), \lambda_{\min}, \lambda_{\max})$.
+    f. Compute total loss $L$ using current $\lambda_t$.
+    g. Perform gradient descent step.
+    h. **Pruning/Deletion Floor:** If standard densification/pruning occurs:
+        i. Identify primitives to delete based on opacity/score.
+        ii. **Guard:** If deleting these primitives would reduce the total count below $B$, spare the primitives with the highest inclusion probability $p_i$ until the count is exactly $B$.
+4. **Terminal Projection (Iteration $T_{lock} = 28,000$):**
+    a. Sort all primitives by inclusion probability $p_i$.
+    b. Keep the top $B$ primitives.
+    c. Delete the rest.
+    d. Set $\lambda_t = 0$ for all subsequent iterations.
+5. **Refinement:** Continue training for 2,000 iterations with fixed topology (no densification/pruning) to refine parameters of the remaining $B$ primitives.
+6. **Export:** Output the $B$ remaining primitives.
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def train_3dgs_with_budget(primitives, images, poses, B, T_total=30000, T_lock=28000):
+    """
+    Train 3DGS with exact budget control.
+    primitives: List of primitive objects with attributes: pos, scale, rot, opacity, sh, logits
+    images: List of target images
+    poses: List of camera poses
+    B: Target number of primitives
+    """
+    # Constants
+    mu = 0.15
+    eta_base = 0.05
+    rho = 3.0
+    K = 100
+    eps = 0.02
+    delta = 0.02
+    lambda_min = 1e-6
+    lambda_max = 1e2
+    lambda_t = 1e-3
+    lambda_D = 5e-4 # Standard sparsity weight from 3DGS
+    
+    # Setpoint
+    B_star = (1 + mu) * B
+    
+    # EMA for live count
+    alpha_ema = 0.9
+    N_hat = 0.0
+    
+    # Standard 3DGS densification parameters (assumed from parent context)
+    # ... initialization of densification counters ...
+
+    for t in range(1, T_total + 1):
+        # 1. Forward pass and Loss
+        # Render image using current primitives
+        rendered_img = render(primitives, images[t-1], poses[t-1])
+        
+        # Compute L1 and D-SSIM losses
+        L1 = compute_L1(rendered_img, images[t-1])
+        L_DSSIM = compute_DSSIM(rendered_img, images[t-1])
+        
+        # 2. Masking and Counting
+        # Compute inclusion probability p_i = softmax(s_i)^0
+        # Note: softmax(x)^0 is 1 if x is max, 0 otherwise? 
+        # Source says p_i = softmax(s_i)^0. In context of "mode", this implies 
+        # selecting the argmax or thresholding. 
+        # Source 4.5: "export the mode, {i : pi > 1/2}". 
+        # Standard softmax sums to 1. If we treat logits s_i as independent, 
+        # we might use sigmoid. However, source explicitly writes softmax(s_i)^0.
+        # Assuming s_i are logits for inclusion. 
+        # Let's assume standard sigmoid for binary inclusion or softmax over a dummy dim.
+        # Given "softmax(s_i)^0", if s_i is a scalar logit, softmax is not defined.
+        # Likely s_i is a vector of logits for [keep, drop] or similar.
+        # Or it refers to the opacity parameter directly mapped to probability.
+        # We will use the threshold p_i > 0.5 as the definition of active.
+        
+        active_mask = []
+        for prim in primitives:
+            # Assuming prim.opacity or a specific logit determines inclusion
+            # Source 4.5: "pi = softmax(si)^0". 
+            # Let's assume prim has a 'logit' field.
+            # If logit > 0, p > 0.5.
+            p_i = 1.0 if prim.logit > 0 else 0.0
+            active_mask.append(p_i)
+            
+        N_t = sum(active_mask)
+        
+        # Update EMA
+        if t == 1:
+            N_hat = N_t
+        else:
+            N_hat = alpha_ema * N_hat + (1 - alpha_ema) * N_t
+            
+        # 3. Dual Ascent Update
+        if t % K == 0:
+            error = math.log(N_hat / B_star)
+            if abs(error) < eps:
+                error = 0.0
+            
+            if error > 0:
+                eta_t = eta_base
+            else:
+                eta_t = rho * eta_base
+                
+            # Clip inner term
+            inner = eta_t * error
+            inner = max(-delta, min(delta, inner))
+            
+            # Update lambda
+            lambda_new = lambda_t * math.exp(inner)
+            lambda_t = max(lambda_min, min(lambda_max, lambda_new))
+            
+        # 4. Loss with Budget Penalty
+        # Penalty term: (lambda_t / B) * sum(m_i)
+        # sum(m_i) is N_t
+        budget_penalty = (lambda_t / B) * N_t
+        
+        L_total = (1 - lambda_D) * L1 + lambda_D * L_DSSIM + budget_penalty
+        
+        # 5. Backward Pass
+        gradients = compute_gradients(L_total, primitives)
+        update_primitives(primitives, gradients)
+        
+        # 6. Densification and Pruning (Standard 3DGS steps)
+        # ... standard densification logic ...
+        
+        # Pruning with Floor
+        if should_prune(primitives):
+            candidates = get_pruning_candidates(primitives)
+            # Sort candidates by inclusion probability (lowest first for removal)
+            candidates.sort(key=lambda p: p.logit)
+            
+            current_count = len(primitives)
+            to_remove = []
+            
+            for cand in candidates:
+                if current_count - 1 < B:
+                    # Floor reached: spare this primitive
+                    break
+                to_remove.append(cand)
+                current_count -= 1
+                
+            remove_primitives(primitives, to_remove)
+
+        # 7. Terminal Projection
+        if t == T_lock:
+            # Sort by inclusion probability (highest first)
+            primitives.sort(key=lambda p: p.logit, reverse=True)
+            # Keep top B
+            primitives = primitives[:B]
+            # Stop pruning/densification
+            lambda_t = 0
+            
+    return primitives
+```
+
+**Edge Cases and Pitfalls**
+- **Irreversibility of Pruning:** Mask-based pruning behaves like hard pruning with a delay. If the population falls below the budget $B$, relieving sparsity pressure does not recover lost primitives because the gradient reaching masked logits is negligible compared to what is needed to reverse logits driven negative by Adam over thousands of steps [S1, unofficial].
+- **Overshoot:** A controller aiming exactly at $B$ may overshoot before reacting. Since deficits cannot be restored, the population must settle above $B$ (using margin $\mu$) to ensure the final projection can remove primitives to reach $B$ [S1, unofficial].
+- **Stochastic Export:** Exporting primitives based on a single stochastic draw (as in MaskGaussian) makes the delivered size a random variable. The method exports the mode ($p_i > 1/2$) to ensure the measured size matches the shipped size [S1, unofficial].
+
+## Subtopics
+
+### Budget-Controlled Training
+The core loop using dual ascent to maintain population near $B^\star$. Choose when exact model size is required without per-scene tuning.
+
+### Terminal Projection
+The final step at $T_{lock}$ to enforce exact count $B$. Choose when deterministic output is critical.
+
+## Operating characteristics
+- **Time Complexity:** Training time is comparable to standard 3DGS, but slightly shorter (1.3x faster than 3DGS, 1.2x faster than MaskGaussian) because fewer primitives are carried through the second half of the schedule [S1, unofficial].
+- **Memory Complexity:** Model size is exactly $B$ primitives. For $B=600,000$, disk size is 142 MB, compared to 709 MB for 3DGS and 318 MB for MaskGaussian [S1, unofficial].
+- **Performance:** Rendering is 2.3x faster than 3DGS and 1.4x faster than MaskGaussian for the same budget [S1, unofficial].
+- **Quality:** Quality parity is maintained. Mean PSNR moves by -0.014 dB against MaskGaussian and +0.014 dB against 3D-GS. The 95% confidence interval for the paired mean difference between seeds is [-0.076, +0.085] dB [S1, unofficial].
+- **Strengths:** Deterministic model size across all scenes and seeds; zero deviation from target budget $B$; no per-scene hyperparameter tuning required.
+- **Limitations:** Requires a terminal projection step which fixes the topology; sensitive to the choice of $T_{lock}$ and $\mu$; if $T_{lock}$ is too early, the model may not have converged; if too late, training time increases.
+- **When to Use:** When a specific model size constraint is mandatory (e.g., for real-time deployment or storage limits) and per-scene tuning is not feasible.
+- **When Not to Use:** When maximum possible quality is preferred over size constraints, or when the scene is very small and naturally requires fewer than $B$ primitives (though the method still forces $B$, potentially overfitting noise).
+
+## Background
+The method was introduced in "One Setting, Any Scene: Tuning-Free Model-Size Control for 3D Gaussian Splatting" [S1, unofficial]. It addresses the variability in model size produced by standard 3DGS and MaskGaussian, which can vary by a factor of 7.8x across scenes for a fixed sparsity penalty [S1, unofficial]. The approach leverages Lagrangian relaxation and dual ascent, concepts from optimization theory, applied to the population control of Gaussian primitives.
+
+## Sources
+[S1] One Setting, Any Scene: Tuning-Free Model-Size Control for 3D Gaussian Splatting, https://doi.org/10.21203/rs.3.rs-10987108/v1, fetched 2026-10-26 (unofficial)

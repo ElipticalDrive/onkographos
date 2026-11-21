@@ -1,0 +1,4080 @@
+# Sphere Tracing study for university course "realtime rendering"
+The idea for this project was to study a whole lot of possibilities enabled by sphere tracing implicit distance fields. For this to be achievable, we neglected performance concerns and instead concentrated on algorithms that are impossible to achieve in classical realtime rendering with no distance information available.
+
+## Pipeline and Features
+The result is a custom rendering pipeline made in Unity3D driven purely by compute shaders.
+
+### Preprocessing Step
+##### Prefilter Environment Map for Global Illumination
+- Render a procedural sky to a cubemap texture.
+- Prefilter sky radiance for different angles and save result in cubemap array.
+
+### 1. Sphere Tracing
+Trace each path intersecting a pixel in a compute shader (1 invocation = 1 pixel) using the sphere tracing scheme (evaluated distance to world is the marching distance along the path for next step).
+
+- Sphere Tracing Texture (Array) holding world position, depth and normals. 
+
+![STNormals](normals.png)
+
+### 2. Ambient Occlusion
+#### 2.1 Downsampling
+Reduce resolution of the sphere tracing texture. This lowres version acts as input for AO to allow interactive to realtime performance. Downsampling using a min/max checkerboard pattern to reduce artifacts.
+
+#### 2.1 Cone Tracing
+In lowres perform cone tracing by evaluating the implicitly defined world for a number of samples and a number of equidistant spaced points along the samples. For performance reasons cone tracing is used instead of sphere tracing. The degree of occultation for each sample allows the generation of Bent Normals.
+
+![AOAnim](ao_anim.gif)
+
+#### 2.2 Edge-preserving Upsampling
+Using the normals and depth the bent-normals are restored to fullres while edges are preserved.
+
+![AOUpscaled](ao_upscaled.png)
+
+#### 2.3 Bilateral Filtering
+To reduce noise a pseudo separable bilateral filter is applied in x and then in y direction, again with respect to normal and depth to prevent smoothing edges.
+
+![AOUpscaled](ao_filtered.png)
+
+- We now have bent normals for each pixel, where the bent normal points into the direction of lowest occultation and its length equals the amount of occultation.
+
+### 3. Deferred Shading
+Use all information stored in textures (world position, depth, normals, bent normal, environment map) to shade the pixel.
+#### 3.1 Global Illumination
+The bent normal is used to sample the radiance of the prefiltered environment map, thus approximating global illumination.
+#### 3.2 Shadows
+Knowing the distance to the world allows soft shadowing.
+#### 3.3 Reflection
+Repeat Step 2-3 to get perfect reflections, which is super expensive performance wise.
+
+![STTitle](title.png)
+
+### Assets/Plugins/CurvesAndSplines/Bezier.cs
+```
+﻿using UnityEngine;
+
+namespace CurvesAndSplines
+{
+	public static class Bezier
+	{
+
+		public static Vector3 GetPoint(Vector3 p0, Vector3 p1, Vector3 p2, float t)
+		{
+			t = Mathf.Clamp01(t);
+			float oneMinusT = 1f - t;
+			return
+				oneMinusT * oneMinusT * p0 +
+				2f * oneMinusT * t * p1 +
+				t * t * p2;
+		}
+
+		public static Vector3 GetFirstDerivative(Vector3 p0, Vector3 p1, Vector3 p2, float t)
+		{
+			return
+				2f * (1f - t) * (p1 - p0) +
+				2f * t * (p2 - p1);
+		}
+
+		public static Vector3 GetPoint(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, float t)
+		{
+			t = Mathf.Clamp01(t);
+			float OneMinusT = 1f - t;
+			return
+				OneMinusT * OneMinusT * OneMinusT * p0 +
+				3f * OneMinusT * OneMinusT * t * p1 +
+				3f * OneMinusT * t * t * p2 +
+				t * t * t * p3;
+		}
+
+		public static Vector3 GetFirstDerivative(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, float t)
+		{
+			t = Mathf.Clamp01(t);
+			float oneMinusT = 1f - t;
+			return
+				3f * oneMinusT * oneMinusT * (p1 - p0) +
+				6f * oneMinusT * t * (p2 - p1) +
+				3f * t * t * (p3 - p2);
+		}
+	}
+}
+```
+
+### Assets/Plugins/CurvesAndSplines/BezierControlPointMode.cs
+```
+﻿namespace CurvesAndSplines
+{
+	public enum BezierControlPointMode
+	{
+		Free,
+		Aligned,
+		Mirrored
+	}
+}
+```
+
+### Assets/Plugins/CurvesAndSplines/BezierCurve.cs
+```
+﻿using UnityEngine;
+
+namespace CurvesAndSplines
+{
+	public class BezierCurve : MonoBehaviour
+	{
+
+		public Vector3[] points;
+
+		public Vector3 GetPoint(float t)
+		{
+			return transform.TransformPoint(Bezier.GetPoint(points[0], points[1], points[2], points[3], t));
+		}
+
+		public Vector3 GetVelocity(float t)
+		{
+			return transform.TransformPoint(Bezier.GetFirstDerivative(points[0], points[1], points[2], points[3], t)) -
+			       transform.position;
+		}
+
+		public Vector3 GetDirection(float t) { return GetVelocity(t).normalized; }
+
+		public void Reset()
+		{
+			points = new Vector3[]
+			{
+				new Vector3(1f, 0f, 0f),
+				new Vector3(2f, 0f, 0f),
+				new Vector3(3f, 0f, 0f),
+				new Vector3(4f, 0f, 0f)
+			};
+		}
+	}
+}
+```
+
+### Assets/Plugins/CurvesAndSplines/BezierSpline.cs
+```
+﻿using UnityEngine;
+using System;
+
+namespace CurvesAndSplines
+{
+	public class BezierSpline : MonoBehaviour
+	{
+
+		[SerializeField]
+		private Vector3[] points;
+
+		[SerializeField]
+		private BezierControlPointMode[] modes;
+
+		[SerializeField]
+		private bool loop;
+
+		public bool Loop
+		{
+			get { return loop; }
+			set
+			{
+				loop = value;
+				if (value == true)
+				{
+					modes[modes.Length - 1] = modes[0];
+					SetControlPoint(0, points[0]);
+				}
+			}
+		}
+
+		public int ControlPointCount { get { return points.Length; } }
+
+		public Vector3 GetControlPoint(int index) { return points[index]; }
+
+		public void SetControlPoint(int index, Vector3 point)
+		{
+			if (index % 3 == 0)
+			{
+				Vector3 delta = point - points[index];
+				if (loop)
+				{
+					if (index == 0)
+					{
+						points[1] += delta;
+						points[points.Length - 2] += delta;
+						points[points.Length - 1] = point;
+					} else if (index == points.Length - 1)
+					{
+						points[0] = point;
+						points[1] += delta;
+						points[index - 1] += delta;
+					} else
+					{
+						points[index - 1] += delta;
+						points[index + 1] += delta;
+					}
+				} else
+				{
+					if (index > 0)
+					{
+						points[index - 1] += delta;
+					}
+
+					if (index + 1 < points.Length)
+					{
+						points[index + 1] += delta;
+					}
+				}
+			}
+
+			points[index] = point;
+			EnforceMode(index);
+		}
+
+		public BezierControlPointMode GetControlPointMode(int index) { return modes[(index + 1) / 3]; }
+
+		public void SetControlPointMode(int index, BezierControlPointMode mode)
+		{
+			int modeIndex = (index + 1) / 3;
+			modes[modeIndex] = mode;
+			if (loop)
+			{
+				if (modeIndex == 0)
+				{
+					modes[modes.Length - 1] = mode;
+				} else if (modeIndex == modes.Length - 1)
+				{
+					modes[0] = mode;
+				}
+			}
+
+			EnforceMode(index);
+		}
+
+		private void EnforceMode(int index)
+		{
+			int modeIndex = (index + 1) / 3;
+			BezierControlPointMode mode = modes[modeIndex];
+			if (mode == BezierControlPointMode.Free || !loop && (modeIndex == 0 || modeIndex == modes.Length - 1))
+			{
+				return;
+			}
+
+			int middleIndex = modeIndex * 3;
+			int fixedIndex, enforcedIndex;
+			if (index <= middleIndex)
+			{
+				fixedIndex = middleIndex - 1;
+				if (fixedIndex < 0)
+				{
+					fixedIndex = points.Length - 2;
+				}
+
+				enforcedIndex = middleIndex + 1;
+				if (enforcedIndex >= points.Length)
+				{
+					enforcedIndex = 1;
+				}
+			} else
+			{
+				fixedIndex = middleIndex + 1;
+				if (fixedIndex >= points.Length)
+				{
+					fixedIndex = 1;
+				}
+
+				enforcedIndex = middleIndex - 1;
+				if (enforcedIndex < 0)
+				{
+					enforcedIndex = points.Length - 2;
+				}
+			}
+
+			Vector3 middle = points[middleIndex];
+			Vector3 enforcedTangent = middle - points[fixedIndex];
+			if (mode == BezierControlPointMode.Aligned)
+			{
+				enforcedTangent = enforcedTangent.normalized * Vector3.Distance(middle, points[enforcedIndex]);
+			}
+
+			points[enforcedIndex] = middle + enforcedTangent;
+		}
+
+		public int CurveCount { get { return (points.Length - 1) / 3; } }
+
+		public Vector3 GetPoint(float t)
+		{
+			int i;
+			if (t >= 1f)
+			{
+				t = 1f;
+				i = points.Length - 4;
+			} else
+			{
+				t = Mathf.Clamp01(t) * CurveCount;
+				i = (int) t;
+				t -= i;
+				i *= 3;
+			}
+
+			return transform.TransformPoint(Bezier.GetPoint(points[i], points[i + 1], points[i + 2], points[i + 3], t));
+		}
+
+		public Vector3 GetVelocity(float t)
+		{
+			int i;
+			if (t >= 1f)
+			{
+				t = 1f;
+				i = points.Length - 4;
+			} else
+			{
+				t = Mathf.Clamp01(t) * CurveCount;
+				i = (int) t;
+				t -= i;
+				i *= 3;
+			}
+
+			return transform.TransformPoint(Bezier.GetFirstDerivative(points[i], points[i + 1], points[i + 2],
+				       points[i + 3], t)) - transform.position;
+		}
+
+		public Vector3 GetDirection(float t) { return GetVelocity(t).normalized; }
+
+		public void AddCurve()
+		{
+			Vector3 point = points[points.Length - 1];
+			Array.Resize(ref points, points.Length + 3);
+			point.x += 1f;
+			points[points.Length - 3] = point;
+			point.x += 1f;
+			points[points.Length - 2] = point;
+			point.x += 1f;
+			points[points.Length - 1] = point;
+
+			Array.Resize(ref modes, modes.Length + 1);
+			modes[modes.Length - 1] = modes[modes.Length - 2];
+			EnforceMode(points.Length - 4);
+
+			if (loop)
+			{
+				points[points.Length - 1] = points[0];
+				modes[modes.Length - 1] = modes[0];
+				EnforceMode(0);
+			}
+		}
+
+		public void Reset()
+		{
+			points = new Vector3[]
+			{
+				new Vector3(1f, 0f, 0f),
+				new Vector3(2f, 0f, 0f),
+				new Vector3(3f, 0f, 0f),
+				new Vector3(4f, 0f, 0f)
+			};
+			modes = new BezierControlPointMode[]
+			{
+				BezierControlPointMode.Free,
+				BezierControlPointMode.Free
+			};
+		}
+	}
+}
+```
+
+### Assets/Plugins/CurvesAndSplines/Line.cs
+```
+﻿using UnityEngine;
+
+namespace CurvesAndSplines
+{
+	public class Line : MonoBehaviour
+	{
+
+		public Vector3 p0, p1;
+	}
+}
+```
+
+### Assets/Plugins/CurvesAndSplines/SplineDecorator.cs
+```
+﻿using UnityEngine;
+
+namespace CurvesAndSplines
+{
+	public class SplineDecorator : MonoBehaviour
+	{
+
+		public BezierSpline spline;
+
+		public int frequency;
+
+		public bool lookForward;
+
+		public Transform[] items;
+
+		private void Awake()
+		{
+			if (frequency <= 0 || items == null || items.Length == 0)
+			{
+				return;
+			}
+
+			float stepSize = frequency * items.Length;
+			if (spline.Loop || stepSize == 1)
+			{
+				stepSize = 1f / stepSize;
+			} else
+			{
+				stepSize = 1f / (stepSize - 1);
+			}
+
+			for (int p = 0, f = 0; f < frequency; f++)
+			{
+				for (int i = 0; i < items.Length; i++, p++)
+				{
+					Transform item = Instantiate(items[i]) as Transform;
+					Vector3 position = spline.GetPoint(p * stepSize);
+					item.transform.localPosition = position;
+					if (lookForward)
+					{
+						item.transform.LookAt(position + spline.GetDirection(p * stepSize));
+					}
+
+					item.transform.parent = transform;
+				}
+			}
+		}
+	}
+}
+```
+
+### Assets/Plugins/CurvesAndSplines/SplineWalker.cs
+```
+﻿using UnityEngine;
+
+namespace CurvesAndSplines
+{
+	public class SplineWalker : MonoBehaviour
+	{
+
+		public BezierSpline spline;
+
+		public float duration;
+		[Range(0, 1)]
+		public float offset;
+
+		public bool lookForward;
+
+		public SplineWalkerMode mode;
+		
+		private float progress;
+		private bool goingForward = true;
+
+		private void Update()
+		{
+			if (goingForward)
+			{
+				progress += Time.deltaTime / duration;
+				if (progress > 1f)
+				{
+					if (mode == SplineWalkerMode.Once)
+					{
+						progress = 1f;
+					} else if (mode == SplineWalkerMode.Loop)
+					{
+						progress -= 1f;
+					} else
+					{
+						progress = 2f - progress;
+						goingForward = false;
+					}
+				}
+			} else
+			{
+				progress -= Time.deltaTime / duration;
+				if (progress < 0f)
+				{
+					progress = -progress;
+					goingForward = true;
+				}
+			}
+
+			Vector3 position = spline.GetPoint((progress + offset) % 1);
+			transform.localPosition = position;
+			if (lookForward)
+			{
+				transform.LookAt(position + spline.GetDirection((progress + offset) % 1));
+			}
+		}
+	}
+}
+```
+
+### Assets/Plugins/CurvesAndSplines/SplineWalkerMode.cs
+```
+﻿namespace CurvesAndSplines
+{
+	public enum SplineWalkerMode
+	{
+		Once,
+		Loop,
+		PingPong
+	}
+}
+```
+
+### Assets/Scripts/Editor/BakeMatricesEditor.cs
+```
+﻿using UnityEditor;
+using UnityEngine;
+using Utils;
+
+[CustomEditor(typeof(BakeMatrices))]
+public class BakeMatricesEditor : Editor {
+
+	public override void OnInspectorGUI()
+	{
+		base.OnInspectorGUI();
+		serializedObject.Update();
+		var controller = (BakeMatrices) target;
+
+		if (GUILayout.Button("Print Hlsl Code"))
+			controller.PrintHlslMatrices();
+
+		serializedObject.ApplyModifiedProperties();
+	}
+}
+```
+
+### Assets/Scripts/SphereTracing/AmbientOcclusionDebugVisualization.cs
+```
+﻿using System;
+using JetBrains.Annotations;
+using UnityEditor;
+using UnityEngine;
+using UnityEngine.Experimental.UIElements;
+using Utils;
+using Random = UnityEngine.Random;
+
+namespace SphereTracing
+{
+	[ExecuteInEditMode]
+	public class AmbientOcclusionDebugVisualization : MonoBehaviour
+	{
+		[Header("Dependencies")]
+		public Mesh HemisphereMesh;
+		private Mesh _coneMesh;
+		[Header("Gizmo Options")]
+		public bool DrawConnectedSamples;
+		public bool DrawSamples;
+		public bool DrawCoordinateSystem;
+		public bool DrawHemisphere;
+		public bool DrawAllCones;
+		public bool DrawSelectedCone;
+		public bool DrawConeSpheres;
+		[Range(0, 31)]
+		public int GizmoConeId = 0;
+		
+		[Header("Ambient Occlusion Settings")]
+		public Vector3 DebugSurfaceNormal = Vector3.up;
+		[Range(1, 32)]
+		public int AmbientOcclusionSamples = 1;
+		[Range(1, 32)]
+		public int AmbientOcclusionSteps = 1;
+		[Range(0, 1)]
+		public float RandomNumber;
+		public float MaxTraceDistance;
+		public bool CorrectSamplesWithConeAngle;
+		[Range(0, 2*Mathf.PI)]
+		public float ConeAngle = Mathf.PI / 4f;
+
+		private System.Random _random;
+		private int _oldAmbientOcclusionSamplese = -1;
+		private float _oldTraceDistance = -1;
+		private float _oldConeAngle = -1;
+
+		private void OnDrawGizmos()
+		{
+			var origin = transform.position;
+
+			var normal = DebugSurfaceNormal.normalized;
+			var up = Mathf.Abs(normal.y) < 0.999 ? new Vector3(0, 1, 0) : new Vector3(1, 0, 0);
+			var tangent = Vector3.Cross(up, normal).normalized;
+			var bitangent = Vector3.Cross(normal, tangent);
+
+			var quaternion = Quaternion.LookRotation(normal, up);
+			var prevConeDir = Vector3.zero;
+
+			if (DrawHemisphere)
+			{
+				Gizmos.color = new Color(1, 1, 1, 0.04f);
+				Gizmos.DrawMesh(HemisphereMesh, origin, quaternion);
+				//Draw a Hemisphere for better visualization
+				Gizmos.color = new Color(0, 0, 0, 0.3f);
+				Gizmos.DrawWireMesh(HemisphereMesh, origin, quaternion);
+			}
+			
+			for (var coneIndex = 0; coneIndex < AmbientOcclusionSamples; coneIndex++)
+			{
+				
+				var coneDir = Sampling.HemisphericalFibonacciMapping(coneIndex, AmbientOcclusionSamples,
+					RandomNumber * 2 * Mathf.PI, CorrectSamplesWithConeAngle ? GetTanConeAngle(ConeAngle) : Mathf.Clamp01(ConeAngle));
+				var coneDirWorld = coneDir.x * tangent + coneDir.y * bitangent + coneDir.z * normal;
+				
+				var coneColor = new Color(1f, 1f, 1f, 0.1f);
+				coneColor.r = Mathf.Abs(coneDir.x);
+				coneColor.g = Mathf.Abs(coneDir.y);//coneDir.y;
+				coneColor.b = Mathf.Sin(coneDir.z);//Mathf.Sin(Mathf.Abs(coneDir.z) * Mathf.PI);
+				
+				//Prevent self occlusion
+				//coneDirWorld += normal * GetTanConeAngle(ConeAngle);
+				//coneDirWorld = coneDirWorld.normalized;
+
+				GetConeVisibility(coneIndex, origin, coneDirWorld, normal, GetTanConeAngle(ConeAngle));
+
+				//Draw sample position as sphere
+				if (DrawSamples)
+				{
+					var sampleColor = coneColor * 4;
+					sampleColor.a = 0.7f;
+					Gizmos.color = sampleColor;
+					Gizmos.DrawSphere(origin + coneDirWorld * MaxTraceDistance, 0.025f);
+				}
+
+				//Draw connection between samples positions
+				if (DrawConnectedSamples && coneIndex > 0)
+				{
+					Gizmos.color = coneColor;
+					Gizmos.DrawLine(origin + prevConeDir * MaxTraceDistance, origin + coneDirWorld * MaxTraceDistance);
+				}
+
+				prevConeDir = coneDirWorld;
+
+				if (DrawAllCones)
+				{
+					var sampleColor = coneColor;
+					sampleColor.a = 0.7f;
+					Gizmos.color = sampleColor;
+					Gizmos.DrawLine(origin, origin + coneDirWorld * MaxTraceDistance);
+				}
+				if (DrawSelectedCone && coneIndex == GizmoConeId)
+				{
+					var sampleColor = coneColor;
+					if (!CorrectSamplesWithConeAngle) sampleColor.a = 0.7f;
+					Gizmos.color = sampleColor;
+					Gizmos.DrawLine(origin, origin + coneDirWorld * MaxTraceDistance);
+
+					Gizmos.color = coneColor;
+					var quaternionCone = Quaternion.LookRotation(coneDirWorld, up);
+					if (CorrectSamplesWithConeAngle) Gizmos.DrawWireMesh(_coneMesh, origin, quaternionCone);
+				}
+			}
+			
+
+			
+
+			if (DrawCoordinateSystem)
+			{
+				Gizmos.color = Color.red;
+				Gizmos.DrawLine(origin, origin + tangent);
+				Gizmos.color = Color.green;
+				Gizmos.DrawLine(origin, origin + normal);
+				Gizmos.color = Color.blue;
+				Gizmos.DrawLine(origin, origin + bitangent);
+			}
+		}
+		
+		private float GetConeVisibility(int coneIndex, Vector3 origin, Vector3 coneDir, Vector3 normal,
+			float tanConeAngle)
+		{
+			var traceDistance = 0.1f;
+			for (var step = 0; step < AmbientOcclusionSteps; step++)
+			{
+				var sphereRadius = tanConeAngle * traceDistance;
+
+				if (DrawConeSpheres && DrawSelectedCone && coneIndex == GizmoConeId)
+				{
+					Gizmos.color = Color.red;
+					Gizmos.DrawSphere(origin + traceDistance * coneDir, sphereRadius);
+				}
+
+				traceDistance += MaxTraceDistance / AmbientOcclusionSteps;
+			}
+
+			return 0;
+		}
+
+		private float GetTanConeAngle(float coneAngle) { return Mathf.Tan(coneAngle / AmbientOcclusionSamples); }
+
+		private void OnValidate()
+		{
+			if (Mathf.Abs(ConeAngle - _oldConeAngle) > Mathf.Epsilon ||
+			    Mathf.Abs(MaxTraceDistance - _oldTraceDistance) > Mathf.Epsilon ||
+			    AmbientOcclusionSamples != _oldAmbientOcclusionSamplese)
+				_coneMesh = CreateConeMesh(24, GetTanConeAngle(ConeAngle) * MaxTraceDistance, MaxTraceDistance);
+
+			_oldConeAngle = ConeAngle;
+			_oldTraceDistance = MaxTraceDistance;
+			_oldAmbientOcclusionSamplese = AmbientOcclusionSamples;
+		}
+
+		/*
+		 * Based on gist from github User mattatz
+		 * Updated for wireframe use only
+		 * https://gist.github.com/mattatz/aba0d06fa56ef65e45e2
+		 */
+		private static Mesh CreateConeMesh(int subdivisions, float radius, float height)
+		{
+			var mesh = new Mesh();
+
+			var vertices = new Vector3[subdivisions + 2];
+			var uv = new Vector2[vertices.Length];
+			var triangles = new int[subdivisions * 2 * 3];
+
+			vertices[0] = Vector3.zero;
+			uv[0] = new Vector2(0f, 0.5f);
+			for (int i = 0, n = subdivisions - 1; i < subdivisions; i++)
+			{
+				var ratio = (float) i / n;
+				var r = ratio * (Mathf.PI * 2f);
+				var x = Mathf.Cos(r) * radius;
+				var z = Mathf.Sin(r) * radius;
+				vertices[i + 1] = new Vector3(x, z, height);
+
+				//Debug.Log (ratio);
+				uv[i + 1] = new Vector2(ratio, 0f);
+			}
+
+			vertices[subdivisions + 1] = new Vector3(0f, 0f, 0f);
+			uv[subdivisions + 1] = new Vector2(0.5f, 1f);
+
+			// construct bottom
+
+			for (int i = 0, n = subdivisions - 1; i < n; i++)
+			{
+				var offset = i * 3;
+				triangles[offset] = subdivisions + 1;
+				triangles[offset + 1] = i + 1;
+				triangles[offset + 2] = i + 2;
+			}
+
+			// construct sides
+
+			var bottomOffset = subdivisions * 3;
+			for (int i = 0, n = subdivisions - 1; i < n; i++)
+			{
+				var offset = i * 3 + bottomOffset;
+				triangles[offset] = i + 1;
+				triangles[offset + 1] = subdivisions + 1;
+				triangles[offset + 2] = i + 2;
+			}
+
+			mesh.vertices = vertices;
+			mesh.uv = uv;
+			mesh.triangles = triangles;
+			mesh.RecalculateBounds();
+			mesh.RecalculateNormals();
+
+			return mesh;
+		}
+	}
+}
+```
+
+### Assets/Scripts/SphereTracing/RenderOutput.cs
+```
+﻿using System.Diagnostics.CodeAnalysis;
+
+namespace SphereTracing {
+	[SuppressMessage("ReSharper", "UnusedMember.Global")]
+	public enum RenderOutput
+	{
+		Color = 0,
+		SurfaceColor, 
+		RepresentColor,
+		SurfacePosition,
+		SurfaceMaterialId,
+		SurfaceRayDirection,
+		SurfaceDepth,
+		SurfaceNormal,
+		SurfaceAlpha,
+		SurfaceBentNormal,
+		SurfaceDiffuseOcclusion,
+		SurfaceSpecularOcclusion,
+		RepresentPosition,
+		RepresentMaterialId,
+		RepresentRayDirection,
+		RepresentDepth,
+		RepresentNormal,
+		RepresentAlpha,
+		RepresentBentNormal,
+		RepresentDiffuseOcclusion,
+		RepresentSpecularOcclusion,
+		SurfaceLowResDepth,
+		CombinedBentNormal,
+		CubeMapArray
+	}
+}
+```
+
+### Assets/Scripts/SphereTracing/SphereTracingManager.cs
+```
+﻿using System.Collections.Generic;
+using System.Linq;
+using SphereTracing.DeferredRendering;
+using SphereTracing.Lights;
+using SphereTracing.Materials;
+using SphereTracing.Matrices;
+using UnityEngine;
+using UnityEngine.Rendering;
+
+namespace SphereTracing
+{
+	public class SphereTracingManager : MonoBehaviour
+	{
+		private ComputeKernel[] _sphereTracingFKernels;
+		private ComputeKernel[] _sphereTracingKKernels;
+		private ComputeKernel[] _sphereTracingDownSamplerKernels;
+		private ComputeKernel[] _sphereTracingAoKernels;
+		private ComputeKernel[] _sphereTracingAoUpSamplerKernels;
+		private ComputeKernel[] _horizontalBilateralFilterKernels;
+		private ComputeKernel[] _verticalBilateralFilterKernels;
+		private ComputeKernel[] _deferredKernels;
+		
+		private ComputeKernel[] _environmentMapRendererKernels;
+		private ComputeKernel[] _environmentMapConvolutionKernels;
+		
+		private Resolution _targetResolution;
+		
+		private RenderTexture _deferredOutput;
+		private RenderTexture _sphereTracingData;
+		private RenderTexture _sphereTracingDataLow;
+
+		private ComputeBuffer _aoSampleBuffer;
+		
+		#region PublicVariables Adjustable in Editor
+
+		[Header("Dependencies")]
+		public ComputeShader SphereTracingShader;
+		public ComputeShader SphereTracingDownSampler;
+		public ComputeShader AmbientOcclusionShader;
+		public ComputeShader AmbientOcclusionUpSampler;
+		public ComputeShader BilateralFilterShader;
+		public ComputeShader DeferredShader;
+		[Space(5)]
+		public ComputeShader EnvironmentMapRenderer;
+		public ComputeShader EnvironmentMapConvolution;
+		public Texture2D BrdfLUT;
+		
+		[Header("Resolution")]
+		public bool UseCustomResolution;
+		public Vector2Int CustomResolution;
+		
+		[Header("Quality Settings")]
+		[Tooltip("Kernels have a different ThreadGroupSizes. 0: High; 1: Mid; 2: Low Size.")]
+		[Range(0, 2)]
+		public int ComputeShaderKernel;
+		[Range(2, 1024)]
+		public int SphereTracingSteps = 32;
+		[Range(0, 32)]
+		[Header("Render Settings")]
+		public int IterativeSteps = 0;
+		public RenderOutput RenderOutput = RenderOutput.Color;
+		public Vector3 GammaCorrection = Vector3.one;
+		
+		[Header("Shadow Settings")]
+		public bool EnableShadows = true;
+		public bool UseOldShadowTechnique = true;
+		[Range(2, 128)]
+		public int MaxShadowSteps = 32;
+		[Range(2, 128)]
+		public float ShadowSoftnessFactor = 10;
+		[Range(0, 3)]
+		public float ShadowBias = 1;
+	
+		[Header("Anti Aliasing")]
+		[Range(0.001f, 1f)]
+		public float RadiusPixel = 0.01f;
+		
+		[Header("Features")]
+		public bool EnableCheckerBoardDownsampling;
+		public bool DisableAntiAliasing;
+		public int LightCount = 1;
+		public Color ClearColor = Color.black;
+		[Tooltip("x: Gap Distance, y: Size, z: Depth, w: VisibleRange")]
+		public Vector4 PlateTextureSettings = new Vector4(1.0f, .0075f, .0025f, 20f);
+		
+		[Header("Ambient Occlusion")]
+		public bool EnableAmbientOcclusion;
+		[Range(1, 32)]
+		public int AmbientOcclusionSamples = 5;
+		[Range(1, 32)]
+		public int AmbientOcclusionSteps = 5;
+		[Range(0.01f, 100f)]
+		public float AmbientOcclusionMaxDistance = 1.0f;
+		[Range(0.01f, 3f)]
+		public float SpecularOcclusionStrength = 1.0f;
+		[Range(0.01f, 3f)]
+		public float OcclusionExponent = 1.0f;
+		[Range(0f, 1f)]
+		public float BentNormalFactor = 1.0f;
+		[Range(0f, Mathf.PI * 2f)]
+		public float ConeAngle = 1.0f;
+		[Space(10)]
+		public bool EnableGlobalIllumination;
+		public bool EnableCrossBilateralFiltering;
+		[Range(1, 32)]
+		public int FilterSteps = 1;
+
+		[Header("Cubemap")]
+		public bool EnableCubemap;
+		public Vector3 SunPosition = new Vector3(4000.0f, 150.0f, 7000.0f);
+		//public Cubemap Cubemap;
+
+		[Header("Cubemap Convolution")]
+		public bool RenderCubemapContinuously = false;
+		public int CubemapResolution = 1024;
+		public int ConvolutionLayerCount = 6;
+		public int ConvolutionSampleCount = 6;
+        [Range(0,5)]
+        public int CubeMapIndex;
+		[Space(10)]
+		[Tooltip("Control the resolution of ambient occlusion rendering.")]
+		public DeferredRenderTarget AmbientOcclusionDrt;
+
+		#endregion
+
+		private RenderTexture _fakeCubemapRenderTexture;
+		private RenderTexture _fakeCubemapArrayRenderTexture;
+		private Cubemap _environmentMap;
+		private CubemapArray _convolutedEnvironmentMapArray;
+		
+		// Use this for initialization
+		public void Awake()
+		{
+			OnDestroy();
+			if (UseCustomResolution)
+				_targetResolution = new Resolution
+				{
+					width = CustomResolution.x,
+					height = CustomResolution.y
+				};
+			else _targetResolution = Screen.currentResolution;
+
+			AmbientOcclusionDrt.Init("AmbientOcclusion", _targetResolution, RenderTextureFormat.ARGBFloat, TextureDimension.Tex2DArray, 2);
+
+			// Create Render Texture
+			_deferredOutput = new RenderTexture(_targetResolution.width, _targetResolution.height, 0,
+				RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear)
+			{
+				enableRandomWrite = true
+			};
+			_deferredOutput.Create();
+			
+			_sphereTracingData = new RenderTexture(_targetResolution.width, _targetResolution.height, 0,
+				RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear)
+			{
+				enableRandomWrite = true,
+				useMipMap = false,
+				autoGenerateMips = false,
+				dimension = TextureDimension.Tex2DArray,
+				volumeDepth = 6
+			};
+			_sphereTracingData.Create();
+
+			_sphereTracingDataLow = new RenderTexture(AmbientOcclusionDrt.Resolution.width, AmbientOcclusionDrt.Resolution.height, 0,
+				RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear)
+			{
+				enableRandomWrite = true,
+				useMipMap = false,
+				autoGenerateMips = false,
+				dimension = TextureDimension.Tex2DArray,
+				volumeDepth = 6
+			};
+			_sphereTracingDataLow.Create();
+
+			_fakeCubemapRenderTexture = new RenderTexture(CubemapResolution, CubemapResolution, 0,
+				RenderTextureFormat.ARGBHalf, RenderTextureReadWrite.Linear)
+			{
+				enableRandomWrite = true,
+				useMipMap = false,
+				autoGenerateMips = false,
+				anisoLevel = 0,
+				dimension = TextureDimension.Tex2DArray,
+				volumeDepth = 6
+			};
+			_fakeCubemapRenderTexture.Create();
+			
+			_fakeCubemapArrayRenderTexture = new RenderTexture(CubemapResolution, CubemapResolution, 0,
+				RenderTextureFormat.ARGBHalf, RenderTextureReadWrite.Linear)
+			{
+				enableRandomWrite = true,
+				useMipMap = false,
+				autoGenerateMips = false,
+				anisoLevel = 0,
+				dimension = TextureDimension.Tex2DArray,
+				volumeDepth = 6 * ConvolutionLayerCount
+			};
+			_fakeCubemapArrayRenderTexture.Create();
+
+			_environmentMap = new Cubemap(CubemapResolution, TextureFormat.RGBAHalf, false)
+			{
+				hideFlags = HideFlags.HideAndDontSave,
+				wrapMode = TextureWrapMode.Clamp,
+				anisoLevel = 0
+			};
+			
+			_convolutedEnvironmentMapArray = new CubemapArray(CubemapResolution, ConvolutionLayerCount, TextureFormat.RGBAHalf, false)
+			{
+				hideFlags = HideFlags.HideAndDontSave,
+				wrapMode = TextureWrapMode.Clamp,
+				filterMode = FilterMode.Trilinear,
+				anisoLevel = 0
+			};
+
+			_sphereTracingFKernels = InitComputeKernels(SphereTracingShader, _targetResolution, 1, "SphereTracingFPassH", "SphereTracingFPassM", "SphereTracingFPassL");
+			_sphereTracingKKernels = InitComputeKernels(SphereTracingShader, _targetResolution, 1, "SphereTracingKPassH", "SphereTracingKPassM", "SphereTracingKPassL");
+			_sphereTracingDownSamplerKernels = InitComputeKernels(SphereTracingDownSampler, AmbientOcclusionDrt.Resolution, 2, "SphereTracingDownSampleH", "SphereTracingDownSampleM", "SphereTracingDownSampleL");
+			_sphereTracingAoKernels = InitComputeKernels(AmbientOcclusionShader, AmbientOcclusionDrt.Resolution, 1, "AmbientOcclusionH", "AmbientOcclusionM", "AmbientOcclusionL");
+			_sphereTracingAoUpSamplerKernels = InitComputeKernels(AmbientOcclusionUpSampler, _targetResolution, 2, "AmbientOcclusionUpSampleH", "AmbientOcclusionUpSampleM", "AmbientOcclusionUpSampleL");
+			_horizontalBilateralFilterKernels = InitComputeKernels(BilateralFilterShader, _targetResolution, 2, "AOHorizontalH", "AOHorizontalM", "AOHorizontalL");
+			_verticalBilateralFilterKernels = InitComputeKernels(BilateralFilterShader, _targetResolution, 2, "AOVerticalH", "AOVerticalM", "AOVerticalL");
+			_deferredKernels = InitComputeKernels(DeferredShader, _targetResolution, 1, "DeferredH", "DeferredM", "DeferredL");
+
+			var environmentMapResolution = new Resolution {width = CubemapResolution, height = CubemapResolution};
+			//With 6 z Dispatch groups, one for each side of cubemap
+			_environmentMapRendererKernels = InitComputeKernels(EnvironmentMapRenderer,environmentMapResolution, 6, "RenderEnvironmentMapH", "RenderEnvironmentMapM", "RenderEnvironmentMapL");
+			//With 6 * ConvolutionLayerCount z Dispatch groups. One for each side of cubemap per convoluted cubemap
+			_environmentMapConvolutionKernels = InitComputeKernels(EnvironmentMapConvolution, environmentMapResolution, 6 * ConvolutionLayerCount, "ConvoluteEnvironmentMapH", "ConvoluteEnvironmentMapM", "ConvoluteEnvironmentMapL");
+
+			GenerateAmbientOcclusionSamples();
+			
+			InitLights();
+			InitMaterials();
+			InitMatrices();
+			SetShaderPropertiesOnce();
+			
+			//At least we have to render environmentmap one
+			RenderEnvironmentMap();
+		}
+
+		private void GenerateAmbientOcclusionSamples()
+		{
+			const int samplesPerStep = 360;
+			int sampleCount = AmbientOcclusionSamples * samplesPerStep;
+			_aoSampleBuffer = new ComputeBuffer(sampleCount, 3 * sizeof(float), ComputeBufferType.Default);
+			var samples = new Vector3[sampleCount];
+			int c = 0;
+			for (int i = 0; i < AmbientOcclusionSamples; i++)
+			{
+				for (int deg = 0; deg < samplesPerStep; deg++)
+				{
+					deg *= 360 / samplesPerStep;
+					float rad = deg * Mathf.Deg2Rad;
+					var sample = Utils.Sampling.HemisphericalFibonacciMapping(i, AmbientOcclusionSamples, rad);
+					samples[c] = sample;
+					c++;
+				}
+			}
+			_aoSampleBuffer.SetData(samples);
+		}
+		
+		private void SetShaderPropertiesOnce()
+		{
+			Shader.SetGlobalFloat("AoTargetMip", AmbientOcclusionDrt.TargetMip);
+			//Shader.SetGlobalFloat("CubemapMaxMip", Cubemap.mipmapCount);
+			Shader.SetGlobalInt("EnvironmentMapResolution", CubemapResolution);
+			//Cannot set bool/floats globally. For simplicity we do it for all computeShaders
+			var computeShaders = new[] { SphereTracingShader, SphereTracingDownSampler, AmbientOcclusionShader, AmbientOcclusionUpSampler, BilateralFilterShader, DeferredShader};
+			foreach (var computeShader in computeShaders)
+			{
+				computeShader.SetFloats("Resolution", _targetResolution.width, _targetResolution.height);
+				computeShader.SetFloats("AoResolution", AmbientOcclusionDrt.Resolution.width, AmbientOcclusionDrt.Resolution.height);
+			}
+			//Only bind textures once
+			foreach (var kernel in _sphereTracingFKernels)
+			{
+				SphereTracingShader.SetTexture(kernel.Id, "SphereTracingDataTexture", _sphereTracingData);
+				SphereTracingShader.SetBuffer(kernel.Id, "MaterialBuffer", _stMaterialBuffer);
+				SphereTracingShader.SetBuffer(kernel.Id, "MatrixBuffer", _stMatrixBuffer);
+				SphereTracingShader.SetBuffer(kernel.Id, "LightBuffer", _stLightBuffer);
+			}
+			foreach (var kernel in _sphereTracingKKernels)
+			{
+				SphereTracingShader.SetTexture(kernel.Id, "SphereTracingDataTexture", _sphereTracingData);
+				SphereTracingShader.SetBuffer(kernel.Id, "MaterialBuffer", _stMaterialBuffer);
+				SphereTracingShader.SetBuffer(kernel.Id, "MatrixBuffer", _stMatrixBuffer);
+				SphereTracingShader.SetBuffer(kernel.Id, "LightBuffer", _stLightBuffer);
+			}
+			foreach (var kernel in _sphereTracingDownSamplerKernels)
+			{
+				SphereTracingDownSampler.SetTexture(kernel.Id, "SphereTracingDataTexture", _sphereTracingData);
+				SphereTracingDownSampler.SetTexture(kernel.Id, "SphereTracingDataLowTexture", _sphereTracingDataLow);
+			}
+			foreach (var kernel in _sphereTracingAoKernels)
+			{
+				AmbientOcclusionShader.SetTexture(kernel.Id, "SphereTracingDataTexture", _sphereTracingDataLow);
+				AmbientOcclusionShader.SetTexture(kernel.Id, "AmbientOcclusionTexture", AmbientOcclusionDrt.RenderTexture);
+				AmbientOcclusionShader.SetBuffer(kernel.Id, "AoSampleBuffer", _aoSampleBuffer);
+				AmbientOcclusionShader.SetBuffer(kernel.Id, "MaterialBuffer", _stMaterialBuffer);
+				AmbientOcclusionShader.SetBuffer(kernel.Id, "MatrixBuffer", _stMatrixBuffer);
+				AmbientOcclusionShader.SetBuffer(kernel.Id, "LightBuffer", _stLightBuffer);
+			}
+			foreach (var kernel in _sphereTracingAoUpSamplerKernels)
+			{
+				AmbientOcclusionUpSampler.SetTexture(kernel.Id, "SphereTracingDataTexture", _sphereTracingData);
+				AmbientOcclusionUpSampler.SetTexture(kernel.Id, "SphereTracingDataLowTexture", _sphereTracingDataLow);
+				AmbientOcclusionUpSampler.SetTexture(kernel.Id, "AmbientOcclusionTexture", AmbientOcclusionDrt.RenderTexture);
+				AmbientOcclusionUpSampler.SetTexture(kernel.Id, "AmbientOcclusionDataHigh", AmbientOcclusionDrt.RenderTexture2);
+			}
+			foreach (var kernel in _horizontalBilateralFilterKernels)
+			{
+				BilateralFilterShader.SetTexture(kernel.Id, "SphereTracingDataTexture", _sphereTracingData);
+			}
+			foreach (var kernel in _verticalBilateralFilterKernels)
+			{
+				BilateralFilterShader.SetTexture(kernel.Id, "SphereTracingDataTexture", _sphereTracingData);
+			}
+
+			foreach (var kernel in _environmentMapRendererKernels)
+			{
+				EnvironmentMapRenderer.SetTexture(kernel.Id, "FakeCubemapRenderTexture", _fakeCubemapRenderTexture);
+			}
+			foreach (var kernel in _environmentMapConvolutionKernels)
+			{
+				EnvironmentMapConvolution.SetTexture(kernel.Id, "EnvironmentMap", _environmentMap);
+				EnvironmentMapConvolution.SetTexture(kernel.Id, "FakeCubemapArrayRenderTexture", _fakeCubemapArrayRenderTexture);
+			}
+			
+			foreach (var kernel in _deferredKernels)
+			{
+				DeferredShader.SetTexture(kernel.Id, "SphereTracingDataTexture", _sphereTracingData);
+				DeferredShader.SetTexture(kernel.Id, "AmbientOcclusionTexture", AmbientOcclusionDrt.RenderTexture2);
+				DeferredShader.SetTexture(kernel.Id, "DeferredOutputTexture", _deferredOutput);
+				//DeferredShader.SetTexture(kernel.Id, "Cubemap", Cubemap);
+				//TODO: THIS IS TEMPORARY
+				//DeferredShader.SetTexture(kernel.Id, "FakeCubemapRenderTexture", _fakeCubemapRenderTexture);
+				DeferredShader.SetTexture(kernel.Id, "EnvironmentMap", _environmentMap);
+				//
+				DeferredShader.SetTexture(kernel.Id, "ConvolutedEnvironmentMap", _convolutedEnvironmentMapArray);
+				DeferredShader.SetTexture(kernel.Id, "BrdfLUT", BrdfLUT);
+				DeferredShader.SetBuffer(kernel.Id, "LightBuffer", _stLightBuffer);
+				DeferredShader.SetBuffer(kernel.Id, "MaterialBuffer", _stMaterialBuffer);
+				DeferredShader.SetBuffer(kernel.Id, "MatrixBuffer", _stMatrixBuffer);
+			}
+		}
+
+		private void SetShaderPropertiesPerFrame()
+		{
+			//Note: Materials and Lights are set seperately in respective regions 
+			
+			//Set Properties global if possible for simplicity
+			Shader.SetGlobalFloat("OcclusionExponent", OcclusionExponent);
+			Shader.SetGlobalFloat("RadiusPixel", RadiusPixel);
+			Shader.SetGlobalFloat("AmbientOcclusionMaxDistance", AmbientOcclusionMaxDistance);
+			Shader.SetGlobalFloat("SpecularOcclusionStrength", SpecularOcclusionStrength);
+			Shader.SetGlobalFloat("BentNormalFactor", BentNormalFactor);
+			Shader.SetGlobalFloat("ConeAngle", ConeAngle);
+			Shader.SetGlobalFloat("ShadowSoftnessFactor", ShadowSoftnessFactor);
+			Shader.SetGlobalFloat("ShadowBias", ShadowBias);
+			Shader.SetGlobalInt("RenderOutput", (int) RenderOutput);
+			Shader.SetGlobalInt("SphereTracingSteps", SphereTracingSteps);
+			Shader.SetGlobalInt("AmbientOcclusionSamples", AmbientOcclusionSamples);
+			Shader.SetGlobalInt("AmbientOcclusionSteps", AmbientOcclusionSteps);
+			Shader.SetGlobalInt("ConvolutionLayerCount", ConvolutionLayerCount);
+			Shader.SetGlobalInt("SampleCount", ConvolutionSampleCount);
+			Shader.SetGlobalInt("MaxShadowSteps", MaxShadowSteps);
+			Shader.SetGlobalVector("Time", new Vector4(Time.time, Time.time / 20f, Time.deltaTime, 1f / Time.deltaTime));
+			Shader.SetGlobalVector("CameraPos", Camera.main.transform.position);
+			Shader.SetGlobalVector("CameraDir", Camera.main.transform.forward);
+			Shader.SetGlobalVector("GammaCorrection", GammaCorrection);
+			Shader.SetGlobalVector("PlateTextureSettings", PlateTextureSettings);
+			Shader.SetGlobalVector("SunPosition", SunPosition);
+			Shader.SetGlobalColor("ClearColor", ClearColor);
+			Shader.SetGlobalVectorArray("CameraFrustumEdgeVectors", GetCameraFrustumEdgeVectors(Camera.main));
+			Shader.SetGlobalMatrix("CameraInverseViewMatrix", Camera.main.cameraToWorldMatrix);
+            Shader.SetGlobalInt("CubeMapIndex", CubeMapIndex);
+			//Cannot set bool/floats globally. For simplicity we do it for all computeShaders
+			var computeShaders = new[] { SphereTracingShader, SphereTracingDownSampler, AmbientOcclusionShader, AmbientOcclusionUpSampler, BilateralFilterShader, DeferredShader};
+			foreach (var computeShader in computeShaders)
+			{
+				computeShader.SetBool("EnableShadows", EnableShadows);
+				computeShader.SetBool("EnableCheckerBoardDownsampling", EnableCheckerBoardDownsampling);
+				computeShader.SetBool("UseOldShadowTechnique", UseOldShadowTechnique);
+				computeShader.SetBool("EnableAmbientOcclusion", EnableAmbientOcclusion);
+				computeShader.SetBool("DisableAntiAliasing", DisableAntiAliasing);
+				computeShader.SetBool("EnableGlobalIllumination", EnableGlobalIllumination);
+				computeShader.SetBool("EnableCubemap", EnableCubemap);
+				computeShader.SetFloats("ClippingPlanes", Camera.main.nearClipPlane, Camera.main.farClipPlane);
+			}
+			
+		}
+		
+		// Update is called once per frame
+		private void Update()
+		{
+			UpdateStLights();
+			UpdateStMaterials();
+			UpdateStMatrices();
+			SetShaderPropertiesPerFrame();
+			
+			//Rerender sky to cubemap if we want to rendercontinuously
+			if (RenderCubemapContinuously) RenderEnvironmentMap();
+			
+			//Dispatch first pass
+			DispatchPass(true, IterativeSteps == 0);
+			
+			//Perform iterative steps for transparency and reflections
+			for (int iterativeStep = 0; iterativeStep < IterativeSteps; iterativeStep++)
+				DispatchPass(false, iterativeStep > IterativeSteps - 1);
+		}
+		
+		private void DispatchPass(bool isFirstPass, bool isLastPass)
+		{
+			if (isFirstPass)
+			{
+				//Do first SphereTracing step and write SphereTracingData into textures
+				_sphereTracingFKernels[ComputeShaderKernel].Dispatch();
+			} else
+			{
+				//Do kPass SphereTracing step and write SphereTracingData into textures
+				_sphereTracingKKernels[ComputeShaderKernel].Dispatch();
+			}
+			_sphereTracingDownSamplerKernels[ComputeShaderKernel].Dispatch();
+			
+			//If ambient occlusion is enabled, calculate AO next
+			if (EnableAmbientOcclusion)
+			{
+				//Calculate AO and write in AmbientOcclusionDrt.RenderTexture
+				_sphereTracingAoKernels[ComputeShaderKernel].Dispatch();
+				_sphereTracingAoUpSamplerKernels[ComputeShaderKernel].Dispatch();
+
+				if (EnableCrossBilateralFiltering)
+				{
+					for (int i = 0; i < FilterSteps; i++)
+					{
+						//Filter AO Texture
+						//Bind textures to read and write and do horizontal filtering
+						BilateralFilterShader.SetTexture(_horizontalBilateralFilterKernels[ComputeShaderKernel].Id,
+							"AmbientOcclusionTexture", AmbientOcclusionDrt.RenderTexture2);
+						BilateralFilterShader.SetTexture(_horizontalBilateralFilterKernels[ComputeShaderKernel].Id,
+							"AmbientOcclusionTarget", AmbientOcclusionDrt.RenderTexture3);
+						_horizontalBilateralFilterKernels[ComputeShaderKernel].Dispatch();
+						//Swap textures and do vertical filtering
+						BilateralFilterShader.SetTexture(_verticalBilateralFilterKernels[ComputeShaderKernel].Id,
+							"AmbientOcclusionTexture", AmbientOcclusionDrt.RenderTexture3);
+						BilateralFilterShader.SetTexture(_verticalBilateralFilterKernels[ComputeShaderKernel].Id,
+							"AmbientOcclusionTarget", AmbientOcclusionDrt.RenderTexture2);
+						_verticalBilateralFilterKernels[ComputeShaderKernel].Dispatch();
+					}
+				}
+			}
+			
+			DeferredShader.SetBool("IsFirstPass", isFirstPass);
+			DeferredShader.SetBool("IsLastPass", isLastPass);
+			//Deferred Rendering step to calculate lightning and finalize image
+			_deferredKernels[ComputeShaderKernel].Dispatch();
+			
+		}
+
+		private void OnRenderImage(RenderTexture src, RenderTexture dest)
+		{
+			//Render Texture on Screen
+			Graphics.Blit(_deferredOutput, (RenderTexture) null);
+		}
+
+		private void RenderEnvironmentMap()
+		{
+			//Render sky into _fakeCubemapRenderTexture
+			_environmentMapRendererKernels[ComputeShaderKernel].Dispatch();
+			//Copy textureslices of _fakeCubemapRenderTexture into real cubemap
+			for (int f = 0; f < 6; f++)
+				Graphics.CopyTexture(_fakeCubemapRenderTexture, f, _environmentMap, f);
+			
+			//Compute convolution of environmentMap and write into _fakeCubemapArrayRenderTexture
+			_environmentMapConvolutionKernels[ComputeShaderKernel].Dispatch();
+			//Copy textureslices of _fakeCubemapArrayRenderTexture into real cubemapArray
+			for (int f = 0; f < 6 * ConvolutionLayerCount; f++)
+				Graphics.CopyTexture(_fakeCubemapArrayRenderTexture, f, _convolutedEnvironmentMapArray, f);
+		}
+		
+		private void OnDrawGizmosSelected()
+		{
+			//Draw Camera Frustum Edge Vectors
+			var cameraFrustumEdgeVectors = GetCameraFrustumEdgeVectors(Camera.main);
+			foreach (var edge in cameraFrustumEdgeVectors)
+			{
+				Gizmos.color = Color.green;
+				Gizmos.DrawRay(Camera.main.transform.position, Camera.main.cameraToWorldMatrix.MultiplyVector(edge));
+			}			
+		}
+
+		/// <summary>
+		///     Returns the 4 edge vectors of the frustum of the given camera.
+		/// </summary>
+		/// <param name="camera">Unity camera object.</param>
+		/// <returns>Array of Vectors with 4 not-normalized vectors. </returns>
+		private static Vector4[] GetCameraFrustumEdgeVectors(Camera camera)
+		{
+			var frustumVectors = new Vector4[4];
+			var tanFov = Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.Deg2Rad);
+			var right = Vector3.right * tanFov * camera.aspect;
+			var top = Vector3.up * tanFov;
+
+			frustumVectors[0] = (-Vector3.forward - right + top).normalized; //TopLeft
+			frustumVectors[1] = (-Vector3.forward + right + top).normalized; //TopRight
+			frustumVectors[2] = (-Vector3.forward + right - top).normalized; //BottomRight
+			frustumVectors[3] = (-Vector3.forward - right - top).normalized; //BottomLeft
+
+			return frustumVectors;
+		}
+
+		private void OnDestroy()
+		{
+			if (_stLightBuffer != null) _stLightBuffer.Release();
+			if (_stMaterialBuffer != null) _stMaterialBuffer.Release();
+			if (_stMatrixBuffer != null) _stMatrixBuffer.Release();
+			if (_aoSampleBuffer != null) _aoSampleBuffer.Release();
+			if (_deferredOutput != null) DestroyImmediate(_deferredOutput);
+			if (_sphereTracingData != null) DestroyImmediate(_sphereTracingData);
+			if (_sphereTracingDataLow != null) DestroyImmediate(_sphereTracingDataLow);
+			if (AmbientOcclusionDrt.RenderTexture != null) DestroyImmediate(AmbientOcclusionDrt.RenderTexture);
+			if (AmbientOcclusionDrt.RenderTexture2 != null) DestroyImmediate(AmbientOcclusionDrt.RenderTexture2);
+			if (AmbientOcclusionDrt.RenderTexture3 != null) DestroyImmediate(AmbientOcclusionDrt.RenderTexture3);
+			if (_fakeCubemapRenderTexture != null) DestroyImmediate(_fakeCubemapRenderTexture);
+			if (_fakeCubemapArrayRenderTexture != null) DestroyImmediate(_fakeCubemapArrayRenderTexture);
+			if (_environmentMap != null) DestroyImmediate(_environmentMap);
+			if (_convolutedEnvironmentMapArray != null) DestroyImmediate(_convolutedEnvironmentMapArray);
+		}
+		
+		private ComputeKernel[] InitComputeKernels(ComputeShader computeShader, Resolution res, int totalThreadsZ, params string[] kernelNames)
+		{
+			var ret = new ComputeKernel[kernelNames.Length];
+			for (int i = 0; i < ret.Length; i++)
+			{
+				ret[i].LinkedComputeShader = computeShader;
+				ret[i].Name = kernelNames[i];
+				ret[i].Id = computeShader.FindKernel(ret[i].Name);
+				uint threadGroupX, threadGroupY, threadGroupZ;
+				computeShader.GetKernelThreadGroupSizes(ret[i].Id, out threadGroupX,
+					out threadGroupY, out threadGroupZ);
+				ret[i].ThreadGroupSize = new Vector3Int((int) threadGroupX, (int) threadGroupY, (int) threadGroupZ);
+				ret[i].CalculateThreadGroups(res.width, res.height, totalThreadsZ);
+			}
+
+			return ret;
+		}
+
+		protected struct ComputeKernel
+		{
+			public ComputeShader LinkedComputeShader;
+			public string Name;
+			public int Id;
+			public Vector3Int ThreadGroupSize;
+			public Vector3Int ThreadGroups;
+
+			public void CalculateThreadGroups(int totalThreadsX, int totalThreadsY, int totalThreadsZ)
+			{
+				ThreadGroups = new Vector3Int
+				{
+					x = totalThreadsX / ThreadGroupSize.x,
+					y = totalThreadsY / ThreadGroupSize.y,
+					z = totalThreadsZ / ThreadGroupSize.z
+				};
+			}
+
+			public void Dispatch()
+			{
+				LinkedComputeShader.Dispatch(Id, ThreadGroups.x, ThreadGroups.y, ThreadGroups.z);
+			}
+		}
+
+		#region Light
+
+		private StLightData[] _stLightData;
+		private List<StLight> _stLights;
+		private ComputeBuffer _stLightBuffer;
+
+		private void InitLights()
+		{
+			_stLightData = new StLightData[LightCount];
+			_stLightBuffer = new ComputeBuffer(LightCount, StLightData.GetSize(), ComputeBufferType.Default);
+			_stLightBuffer.SetData(_stLightData);
+			if (_stLights == null) _stLights = new List<StLight>();
+
+			Shader.SetGlobalInt("LightCount", LightCount);
+			Shader.SetGlobalBuffer("LightBuffer", _stLightBuffer);
+		}
+
+		public void RegisterStLight(StLight stLight)
+		{
+			if (_stLights != null && _stLights.All(item => item.GetInstanceID() != stLight.GetInstanceID())) _stLights.Add(stLight);
+		}
+
+		public void CleanStLights()
+		{
+			_stLights.RemoveAll(lights => lights == null || !lights.IsActive);
+		}
+
+		private void UpdateStLights()
+		{
+			var i = 0;
+
+			foreach (var stLight in _stLights)
+			{
+				_stLightData[i] = stLight.GetStLightData();
+				i++;
+				if (i >= _stLightData.Length)
+				{
+					if (i > _stLightData.Length) Debug.LogWarning("There are more lights in the scene than the light buffer can store."); 
+					break; 
+				}
+			}
+
+			for (var c = i; c < _stLightData.Length; c++) _stLightData[c].LightType = -1;
+
+			_stLightBuffer.SetData(_stLightData);
+
+			//DeferredShader.SetBuffer(_deferredKernels[ComputeShaderKernel].Id, "LightBuffer", _stLightBuffer);
+			Shader.SetGlobalInt("LightCount", _stLights.Count);
+		}
+
+		#endregion
+		
+		#region Material
+
+		public StMaterial[] StMaterials;
+		private ComputeBuffer _stMaterialBuffer;
+
+		private void InitMaterials()
+		{
+			_stMaterialBuffer = new ComputeBuffer(StMaterials.Length, StMaterialData.GetSize(), ComputeBufferType.Default);
+			_stMaterialBuffer.SetData(StMaterials.Select(x => x.MaterialData).ToArray());
+
+			Shader.SetGlobalInt("MaterialCount", StMaterials.Length);
+			Shader.SetGlobalBuffer("MaterialBuffer", _stMaterialBuffer);
+		}
+		
+		private void UpdateStMaterials()
+		{
+			_stMaterialBuffer.SetData(StMaterials.Select(x => x.MaterialData).ToArray());
+
+			//DeferredShader.SetBuffer(_deferredKernels[ComputeShaderKernel].Id, "MaterialBuffer", _stMaterialBuffer);
+			//SphereTracingShader.SetBuffer(_sphereTracingKKernels[ComputeShaderKernel].Id, "MaterialBuffer", _stMaterialBuffer);
+			//AmbientOcclusionShader.SetBuffer(_sphereTracingAoKernels[ComputeShaderKernel].Id, "MaterialBuffer", _stMaterialBuffer);
+		}
+		
+		#endregion
+		
+		#region Matrices
+
+
+		public int MatrixCount;
+		
+		private StMatrixData[] _stMatrixData;
+		private List<StMatrix> _stMatrices;
+		private ComputeBuffer _stMatrixBuffer;
+
+		private void InitMatrices()
+		{
+			_stMatrixData = new StMatrixData[MatrixCount];
+			_stMatrixBuffer = new ComputeBuffer(MatrixCount, StMatrixData.GetSize(), ComputeBufferType.Default);
+			_stMatrixBuffer.SetData(_stMatrixData);
+			if (_stMatrices == null) _stMatrices = new List<StMatrix>();
+
+			Shader.SetGlobalInt("MatrixCount", MatrixCount);
+			Shader.SetGlobalBuffer("MatrixBuffer", _stMatrixBuffer);
+		}
+
+		public void RegisterStMatrix(StMatrix stMatrix)
+		{
+			if (_stMatrices != null && _stMatrices.All(item => item.GetInstanceID() != stMatrix.GetInstanceID())) _stMatrices.Add(stMatrix);
+		}
+
+		public void CleanStMatrices()
+		{
+			_stMatrices.RemoveAll(matrices => matrices == null || !matrices.IsActive);
+		}
+
+		private void UpdateStMatrices()
+		{
+			var i = 0;
+
+			foreach (var stMatrix in _stMatrices)
+			{
+				_stMatrixData[i] = stMatrix.GetStMatrixData();
+				i++;
+				if (i >= _stMatrixData.Length)
+				{
+					if (i > _stMatrixData.Length) Debug.LogWarning("There are more matrices in the scene than the matrix buffer can store."); 
+					break; 
+				}
+			}
+
+			_stMatrixBuffer.SetData(_stMatrixData);
+
+			//DeferredShader.SetBuffer(_deferredKernels[ComputeShaderKernel].Id, "MatrixBuffer", _stMatrixBuffer);
+			//Shader.SetGlobalBuffer("MatrixBuffer", _stMatrixBuffer);
+			Shader.SetGlobalInt("MatrixCount", _stMatrices.Count);
+		}
+
+		#endregion
+	}
+}
+```
+
+### Assets/Scripts/Utils/BakeMatrices.cs
+```
+﻿using UnityEngine;
+
+namespace Utils
+{
+	public class BakeMatrices : MonoBehaviour
+	{
+		public string[] MatrixNames;
+		public Vector3[] Rotations;
+		public Vector3[] Transforms;
+
+		public void PrintHlslMatrices()
+		{
+			if (Transforms.Length != Rotations.Length || Rotations.Length != MatrixNames.Length) return;
+
+			var hlslOut = "";
+
+			var txm = new Matrix4x4[Transforms.Length];
+			for (var i = 0; i < Transforms.Length; i++)
+			{
+				var t = -Transforms[i];
+				var r = Rotations[i];
+				var tm = new Matrix4x4(new Vector4(1f, 0f, 0f, t.x), new Vector4(0f, 1f, 0f, t.y),
+					new Vector4(0f, 0f, 1f, t.z), new Vector4(0f, 0f, 0f, 1f));
+				if (Mathf.Abs(r.magnitude) < Mathf.Epsilon) txm[i] = tm;
+
+				var rx = new Matrix4x4(new Vector4(1f, 0f, 0f, 0f),
+					new Vector4(0f, Mathf.Cos(r.x), -Mathf.Sin(r.x), 0f),
+					new Vector4(0f, Mathf.Sin(r.x), Mathf.Cos(r.x), 0f), new Vector4(0f, 0f, 0f, 1f));
+
+				txm[i] = tm * rx;
+
+				hlslOut += "static const float4x4 " + MatrixNames[i] + " =\nfloat4x4(";
+				for (var row = 0; row < 4; row++)
+				{
+					var vrow = txm[i].GetColumn(row);
+					hlslOut += vrow.x + ", " + vrow.y + ", " + vrow.z + ", " + vrow.w;
+					hlslOut += row < 3 ? ", \n" : "); \n \n";
+				}
+			}
+
+			Debug.Log(hlslOut);
+		}
+	}
+}
+```
+
+### Assets/Scripts/Utils/FreeRoamCamera.cs
+```
+﻿using UnityEngine;
+
+[RequireComponent(typeof(Camera))]
+public class FreeRoamCamera : MonoBehaviour
+{
+	private float _currentSpeed;
+	private bool _moving;
+	private bool _togglePressed;
+
+	public bool AllowMovement = true;
+	public bool AllowRotation = true;
+	public KeyCode BackwardButton = KeyCode.S;
+
+	public float CursorSensitivity = 0.01f;
+
+	public KeyCode ForwardButton = KeyCode.W;
+	public float IncreaseSpeed = 5f;
+	public float InitialSpeed = 20f;
+	public KeyCode LeftButton = KeyCode.A;
+	public KeyCode RightButton = KeyCode.D;
+
+	private void Update()
+	{
+		if (AllowMovement)
+		{
+			var lastMoving = _moving;
+			var deltaPosition = Vector3.zero;
+
+			if (_moving)
+				_currentSpeed += IncreaseSpeed * Time.deltaTime;
+
+			_moving = false;
+
+			CheckMove(ForwardButton, ref deltaPosition, transform.forward);
+			CheckMove(BackwardButton, ref deltaPosition, -transform.forward);
+			CheckMove(RightButton, ref deltaPosition, transform.right);
+			CheckMove(LeftButton, ref deltaPosition, -transform.right);
+
+			if (_moving)
+			{
+				if (_moving != lastMoving)
+					_currentSpeed = InitialSpeed;
+
+				transform.position += deltaPosition * _currentSpeed * Time.deltaTime;
+			} else
+			{
+				_currentSpeed = 0f;
+			}
+		}
+
+		if (Input.GetMouseButton(0) && AllowRotation)
+		{
+			Cursor.visible = false;
+			var eulerAngles = transform.eulerAngles;
+			eulerAngles.x += -Input.GetAxis("Mouse Y") * 359f * CursorSensitivity;
+			eulerAngles.y += Input.GetAxis("Mouse X") * 359f * CursorSensitivity;
+			if (eulerAngles.x < 89 || eulerAngles.x > 271) transform.eulerAngles = eulerAngles;
+		} else
+		{
+			Cursor.visible = true;
+		}
+	}
+
+	private void CheckMove(KeyCode keyCode, ref Vector3 deltaPosition, Vector3 directionVector)
+	{
+		if (Input.GetKey(keyCode))
+		{
+			_moving = true;
+			deltaPosition += directionVector;
+		}
+	}
+}
+```
+
+### Assets/Scripts/Utils/HideToolGizmos.cs
+```
+﻿using UnityEditor;
+using UnityEngine;
+
+namespace Utils
+{
+	[ExecuteInEditMode]
+	public class HideToolGizmos : MonoBehaviour
+	{
+		#if UNITY_EDITOR
+		private void OnEnable() { Tools.hidden = true; }
+
+		private void OnDisable() { Tools.hidden = false; }
+		#endif
+	}
+}
+```
+
+### Assets/Scripts/Utils/Sampling.cs
+```
+﻿using UnityEngine;
+
+namespace Utils
+{
+	public static class Sampling
+	{
+		private const float PI = 3.141592653589793238f;
+		private const float GOLDENRATIO = 1.6180339887498948f;//Golden Ratio = (1 + sqrt(5)) / 2
+		
+		public static Vector3 HemisphericalFibonacciMapping(float i, float n, float rand, float minZ = 0.0f)
+		{
+			float phi = i * 2.0f * PI * GOLDENRATIO + rand;
+			float zi = 1.0f - (2.0f*i+1.0f)/(2.0f*n);
+			//zi = Mathf.Max(zi, minZ);
+			zi = zi * (1 - minZ) + minZ;
+			float theta = Mathf.Sqrt(1.0f - zi*zi);
+			return new Vector3( Mathf.Cos(phi) * theta, Mathf.Sin(phi) * theta, zi).normalized;
+		}
+	}
+}
+```
+
+### Assets/Plugins/CurvesAndSplines/Editor/BezierCurveInspector.cs
+```
+using UnityEditor;
+using UnityEngine;
+
+namespace CurvesAndSplines
+{
+	[CustomEditor(typeof(BezierCurve))]
+	public class BezierCurveInspector : Editor
+	{
+
+		private const int lineSteps = 10;
+		private const float directionScale = 0.5f;
+
+		private BezierCurve curve;
+		private Transform handleTransform;
+		private Quaternion handleRotation;
+
+		private void OnSceneGUI()
+		{
+			curve = target as BezierCurve;
+			handleTransform = curve.transform;
+			handleRotation = Tools.pivotRotation == PivotRotation.Local
+				? handleTransform.rotation
+				: Quaternion.identity;
+
+			Vector3 p0 = ShowPoint(0);
+			Vector3 p1 = ShowPoint(1);
+			Vector3 p2 = ShowPoint(2);
+			Vector3 p3 = ShowPoint(3);
+
+			Handles.color = Color.gray;
+			Handles.DrawLine(p0, p1);
+			Handles.DrawLine(p2, p3);
+
+			ShowDirections();
+			Handles.DrawBezier(p0, p3, p1, p2, Color.white, null, 2f);
+		}
+
+		private void ShowDirections()
+		{
+			Handles.color = Color.green;
+			Vector3 point = curve.GetPoint(0f);
+			Handles.DrawLine(point, point + curve.GetDirection(0f) * directionScale);
+			for (int i = 1; i <= lineSteps; i++)
+			{
+				point = curve.GetPoint(i / (float) lineSteps);
+				Handles.DrawLine(point, point + curve.GetDirection(i / (float) lineSteps) * directionScale);
+			}
+		}
+
+		private Vector3 ShowPoint(int index)
+		{
+			Vector3 point = handleTransform.TransformPoint(curve.points[index]);
+			EditorGUI.BeginChangeCheck();
+			point = Handles.DoPositionHandle(point, handleRotation);
+			if (EditorGUI.EndChangeCheck())
+			{
+				Undo.RecordObject(curve, "Move Point");
+				EditorUtility.SetDirty(curve);
+				curve.points[index] = handleTransform.InverseTransformPoint(point);
+			}
+
+			return point;
+		}
+	}
+}
+```
+
+### Assets/Plugins/CurvesAndSplines/Editor/BezierSplineInspector.cs
+```
+﻿using UnityEditor;
+using UnityEngine;
+
+namespace CurvesAndSplines
+{
+	[CustomEditor(typeof(BezierSpline))]
+	public class BezierSplineInspector : Editor
+	{
+
+		private const int stepsPerCurve = 10;
+		private const float directionScale = 0.5f;
+		private const float handleSize = 0.04f;
+		private const float pickSize = 0.06f;
+
+		private static Color[] modeColors =
+		{
+			Color.white,
+			Color.yellow,
+			Color.cyan
+		};
+
+		private BezierSpline spline;
+		private Transform handleTransform;
+		private Quaternion handleRotation;
+		private int selectedIndex = -1;
+
+		public override void OnInspectorGUI()
+		{
+			spline = target as BezierSpline;
+			EditorGUI.BeginChangeCheck();
+			bool loop = EditorGUILayout.Toggle("Loop", spline.Loop);
+			if (EditorGUI.EndChangeCheck())
+			{
+				Undo.RecordObject(spline, "Toggle Loop");
+				EditorUtility.SetDirty(spline);
+				spline.Loop = loop;
+			}
+
+			if (selectedIndex >= 0 && selectedIndex < spline.ControlPointCount)
+			{
+				DrawSelectedPointInspector();
+			}
+
+			for (int i = 0; i < spline.ControlPointCount; i++)
+			{
+				DrawAllPointsInspector(i);
+			}
+
+			if (GUILayout.Button("SelectPreviuos Point"))
+			{
+				selectedIndex = selectedIndex - 1;
+				Repaint();
+			}
+			if (GUILayout.Button("Select Next Point"))
+			{
+				selectedIndex = selectedIndex + 1;
+				Repaint();
+			}
+
+			if (GUILayout.Button("Add Curve"))
+			{
+				Undo.RecordObject(spline, "Add Curve");
+				spline.AddCurve();
+				EditorUtility.SetDirty(spline);
+			}
+		}
+			
+		private void DrawAllPointsInspector(int i)
+		{
+			GUILayout.Label("Point " + i, EditorStyles.boldLabel);
+			EditorGUI.BeginChangeCheck();
+			Vector3 point = EditorGUILayout.Vector3Field("Position", spline.GetControlPoint(i));
+			if (EditorGUI.EndChangeCheck())
+			{
+				Undo.RecordObject(spline, "Move Point");
+				EditorUtility.SetDirty(spline);
+				spline.SetControlPoint(i, point);
+			}
+
+			EditorGUI.BeginChangeCheck();
+			BezierControlPointMode mode =
+				(BezierControlPointMode) EditorGUILayout.EnumPopup("Mode", spline.GetControlPointMode(i));
+			if (EditorGUI.EndChangeCheck())
+			{
+				Undo.RecordObject(spline, "Change Point Mode");
+				spline.SetControlPointMode(i, mode);
+				EditorUtility.SetDirty(spline);
+			}
+		}
+		
+		private void DrawSelectedPointInspector()
+		{
+			GUILayout.Label("Active Point "+selectedIndex, EditorStyles.boldLabel);
+			EditorGUI.BeginChangeCheck();
+			Vector3 point = EditorGUILayout.Vector3Field("Position", spline.GetControlPoint(selectedIndex));
+			if (EditorGUI.EndChangeCheck())
+			{
+				Undo.RecordObject(spline, "Move Point");
+				EditorUtility.SetDirty(spline);
+				spline.SetControlPoint(selectedIndex, point);
+			}
+
+			EditorGUI.BeginChangeCheck();
+			BezierControlPointMode mode =
+				(BezierControlPointMode) EditorGUILayout.EnumPopup("Mode", spline.GetControlPointMode(selectedIndex));
+			if (EditorGUI.EndChangeCheck())
+			{
+				Undo.RecordObject(spline, "Change Point Mode");
+				spline.SetControlPointMode(selectedIndex, mode);
+				EditorUtility.SetDirty(spline);
+			}
+		}
+
+		private void OnSceneGUI()
+		{
+			spline = target as BezierSpline;
+			handleTransform = spline.transform;
+			handleRotation = Tools.pivotRotation == PivotRotation.Local
+				? handleTransform.rotation
+				: Quaternion.identity;
+
+			Vector3 p0 = ShowPoint(0);
+			for (int i = 1; i < spline.ControlPointCount; i += 3)
+			{
+				Vector3 p1 = ShowPoint(i);
+				Vector3 p2 = ShowPoint(i + 1);
+				Vector3 p3 = ShowPoint(i + 2);
+
+				Handles.color = Color.gray;
+				Handles.DrawLine(p0, p1);
+				Handles.DrawLine(p2, p3);
+
+				Handles.DrawBezier(p0, p3, p1, p2, Color.white, null, 2f);
+				p0 = p3;
+			}
+
+			ShowDirections();
+		}
+
+		private void ShowDirections()
+		{
+			Handles.color = Color.green;
+			Vector3 point = spline.GetPoint(0f);
+			Handles.DrawLine(point, point + spline.GetDirection(0f) * directionScale);
+			int steps = stepsPerCurve * spline.CurveCount;
+			for (int i = 1; i <= steps; i++)
+			{
+				point = spline.GetPoint(i / (float) steps);
+				Handles.DrawLine(point, point + spline.GetDirection(i / (float) steps) * directionScale);
+			}
+		}
+
+		private Vector3 ShowPoint(int index)
+		{
+			Vector3 point = handleTransform.TransformPoint(spline.GetControlPoint(index));
+			float size = HandleUtility.GetHandleSize(point);
+			if (index == 0)
+			{
+				size *= 2f;
+			}
+
+			Handles.color = modeColors[(int) spline.GetControlPointMode(index)];
+			if (Handles.Button(point, handleRotation, size * handleSize, size * pickSize, Handles.DotCap))
+			{
+				selectedIndex = index;
+				Repaint();
+			}
+
+			if (selectedIndex == index)
+			{
+				EditorGUI.BeginChangeCheck();
+				point = Handles.DoPositionHandle(point, handleRotation);
+				if (EditorGUI.EndChangeCheck())
+				{
+					Undo.RecordObject(spline, "Move Point");
+					EditorUtility.SetDirty(spline);
+					spline.SetControlPoint(index, handleTransform.InverseTransformPoint(point));
+				}
+			}
+
+			return point;
+		}
+	}
+}
+```
+
+### Assets/Plugins/CurvesAndSplines/Editor/LineInspector.cs
+```
+﻿using UnityEditor;
+using UnityEngine;
+
+namespace CurvesAndSplines
+{
+	[CustomEditor(typeof(Line))]
+	public class LineInspector : Editor
+	{
+
+		private void OnSceneGUI()
+		{
+			Line line = target as Line;
+			Transform handleTransform = line.transform;
+			Quaternion handleRotation = Tools.pivotRotation == PivotRotation.Local
+				? handleTransform.rotation
+				: Quaternion.identity;
+			Vector3 p0 = handleTransform.TransformPoint(line.p0);
+			Vector3 p1 = handleTransform.TransformPoint(line.p1);
+
+			Handles.color = Color.white;
+			Handles.DrawLine(p0, p1);
+			EditorGUI.BeginChangeCheck();
+			p0 = Handles.DoPositionHandle(p0, handleRotation);
+			if (EditorGUI.EndChangeCheck())
+			{
+				Undo.RecordObject(line, "Move Point");
+				EditorUtility.SetDirty(line);
+				line.p0 = handleTransform.InverseTransformPoint(p0);
+			}
+
+			EditorGUI.BeginChangeCheck();
+			p1 = Handles.DoPositionHandle(p1, handleRotation);
+			if (EditorGUI.EndChangeCheck())
+			{
+				Undo.RecordObject(line, "Move Point");
+				EditorUtility.SetDirty(line);
+				line.p1 = handleTransform.InverseTransformPoint(p1);
+			}
+		}
+	}
+}
+```
+
+### Assets/Scripts/SphereTracing/DeferredRendering/DeferredRenderTarget.cs
+```
+﻿using System;
+using UnityEngine;
+using UnityEngine.Rendering;
+
+namespace SphereTracing.DeferredRendering
+{
+	[Serializable]
+	public class DeferredRenderTarget : object
+	{
+		[Range(0.0625f, 1f)]
+		public float InternalResolutionFactor = 1.0f;
+
+		private string _textureName;
+		[NonSerialized]
+		public RenderTexture RenderTexture;
+		[NonSerialized]
+		public RenderTexture RenderTexture2;
+		[NonSerialized]
+        public RenderTexture RenderTexture3;
+		//public int Step { get; private set; }
+		public float TargetMip { get ; private set; }
+
+		public bool IsDownScaled { get; private set; }
+
+		public Resolution Resolution { get; private set; }
+
+		public void Init(string textureName, Resolution unscaledResolution, RenderTextureFormat format = RenderTextureFormat.ARGBFloat, TextureDimension dimension = TextureDimension.Tex2D, int volumeDepth = 1)
+		{
+			_textureName = textureName;
+			if (Math.Abs(InternalResolutionFactor - 1.0f) > 0.1f) IsDownScaled = true;
+
+			TargetMip = -Mathf.Log(InternalResolutionFactor, 2);
+			//Step = Mathf.RoundToInt(1.0f / InternalResolutionFactor);
+			
+			Resolution = new Resolution
+			{
+				width = (int) Math.Floor(unscaledResolution.width * InternalResolutionFactor),
+				height = (int) Math.Floor(unscaledResolution.height * InternalResolutionFactor)
+			};
+
+			RenderTexture = new RenderTexture(Resolution.width, Resolution.height, 0,
+				format, RenderTextureReadWrite.Linear)
+			{
+				name = _textureName, 
+				enableRandomWrite = true,
+				useMipMap = false,
+				dimension = dimension,
+				volumeDepth = volumeDepth
+			};
+			RenderTexture.Create();
+			
+			RenderTexture2 = new RenderTexture(unscaledResolution.width, unscaledResolution.height, 0,
+				format, RenderTextureReadWrite.Linear)
+			{
+				name = _textureName, 
+				enableRandomWrite = true,
+				useMipMap = false,
+				dimension = dimension,
+				volumeDepth = volumeDepth
+			};
+			RenderTexture2.Create();
+
+            RenderTexture3 = new RenderTexture(unscaledResolution.width, unscaledResolution.height, 0,
+                format, RenderTextureReadWrite.Linear)
+            {
+                name = _textureName,
+                enableRandomWrite = true,
+                useMipMap = false,
+                dimension = dimension,
+                volumeDepth = volumeDepth
+            };
+            RenderTexture3.Create();
+		}
+	}
+}
+```
+
+### Assets/Scripts/SphereTracing/Editor/SphereTracingManagerEditor.cs
+```
+﻿using UnityEditor;
+using UnityEngine;
+
+namespace SphereTracing.Editor
+{
+	[CustomEditor(typeof(SphereTracingManager))]
+	public class SphereTracingManagerEditor : UnityEditor.Editor
+	{
+		private UnityEditor.Editor _editor;
+
+		public override void OnInspectorGUI()
+		{
+			base.OnInspectorGUI();
+			serializedObject.Update();
+			var controller = (SphereTracingManager) target;
+
+			if (GUILayout.Button("Reload"))
+				controller.Awake();
+
+			serializedObject.ApplyModifiedProperties();
+		}
+	}
+}
+```
+
+### Assets/Scripts/SphereTracing/Lights/DirectionalLight.cs
+```
+﻿using UnityEngine;
+
+namespace SphereTracing.Lights {
+	public class DirectionalLight : StLight
+	{
+		private const int LIGHT_TYPE = 1;
+		public override int LightType { get { return LIGHT_TYPE; } }
+
+		[Header("Directional Light Settings")]
+		public Color LightColor = Color.white;
+
+		public override StLightData GetStLightData()
+		{
+			var data = new StLightData
+			{
+				LightType = IsActive ? LIGHT_TYPE : -1,
+				LightData = LightColor,
+				LightData2 = transform.forward
+			};
+
+			return data;
+		}
+
+		private void OnDrawGizmos()
+		{
+			Gizmos.color = LightColor;
+			Gizmos.DrawRay(transform.position, -transform.forward);
+			Gizmos.DrawIcon(transform.position, "stLight_Directional");
+		}
+	}
+}
+```
+
+### Assets/Scripts/SphereTracing/Lights/PointLight.cs
+```
+﻿using UnityEngine;
+
+namespace SphereTracing.Lights {
+	public class PointLight : StLight
+	{
+		private const int LIGHT_TYPE = 0;
+		public override int LightType { get { return LIGHT_TYPE; } }
+
+		[Header("Point Light Settings")]
+		public Color LightColor = Color.white;
+
+		public float LightPower = 40f;
+
+		public override StLightData GetStLightData()
+		{
+			var data = new StLightData
+			{
+				LightType = IsActive ? LIGHT_TYPE : -1,
+				LightData = new Vector4(LightColor.r, LightColor.g, LightColor.b, LightPower),
+				LightData2 = transform.position
+			};
+
+			return data;
+		}
+
+		private void OnDrawGizmos()
+		{
+			Gizmos.color = LightColor;
+			Gizmos.DrawWireSphere(transform.position, 0.5f);
+			Gizmos.DrawIcon(transform.position, "stLight_Point");
+		}
+	}
+}
+```
+
+### Assets/Scripts/SphereTracing/Lights/StLight.cs
+```
+﻿using System;
+using UnityEngine;
+
+namespace SphereTracing.Lights
+{
+	/// <inheritdoc />
+	/// <summary>
+	///     Sphere Tracing Light.
+	/// </summary>
+	/// <remarks>Class name "Light" would conflict with unity.</remarks>
+	public abstract class StLight : MonoBehaviour
+	{
+		[HideInInspector]
+		public bool IsActive = true;
+		public SphereTracingManager SphereTracingManager;
+		public abstract int LightType { get; }
+
+		public abstract StLightData GetStLightData();
+
+		protected void Start()
+		{
+			IsActive = true;
+			SphereTracingManager.RegisterStLight(this);
+		}
+
+		protected void OnDisable()
+		{
+			IsActive = false;
+			SphereTracingManager.CleanStLights();
+		}
+		
+		protected void OnEnable()
+		{
+			if (IsActive) return;
+			IsActive = true;
+			SphereTracingManager.RegisterStLight(this);
+		}
+
+		protected void OnDestroy()
+		{
+			IsActive = false;
+			SphereTracingManager.CleanStLights();
+		}
+	}
+}
+```
+
+### Assets/Scripts/SphereTracing/Lights/StLightData.cs
+```
+﻿using UnityEngine;
+
+namespace SphereTracing.Lights
+{
+	public struct StLightData
+	{
+		public int LightType;
+		public Vector4 LightData;
+		public Vector4 LightData2;
+		
+		/// <summary>
+		/// Returns the size of the struct in Bytes.
+		/// </summary>
+		/// <remarks>Adjust when changing struct.</remarks>
+		/// <returns></returns>
+		public static int GetSize()
+		{
+			return sizeof(int) + 2 * (4 * sizeof(float));
+		}
+	}
+}
+```
+
+### Assets/Scripts/SphereTracing/Materials/StMaterial.cs
+```
+﻿using UnityEngine;
+
+namespace SphereTracing.Materials
+{	
+	[CreateAssetMenu(menuName = "SphereTracing/Material")]
+	public class StMaterial : ScriptableObject
+	{
+		public StMaterialData MaterialData;
+	}
+	
+	[System.Serializable]
+	public struct StMaterialData
+	{
+		public int MaterialType;
+		public Color BaseColor;
+		public Color EmissiveColor;
+		[Range(0, 1)]
+		public float Metallic;
+		[Range(0, 1)]
+		public float PerceptualRoughness;
+		[Range(0, 16)]
+		public float RimFactor;
+		
+		/// <summary>
+		/// Returns the size of the struct in Bytes.
+		/// </summary>
+		/// <remarks>Adjust when changing struct.</remarks>
+		/// <returns></returns>
+		public static int GetSize()
+		{
+			return sizeof(int) + 11 * sizeof(float);
+		}
+	}
+}
+```
+
+### Assets/Scripts/SphereTracing/Matrices/DynamicSplineObjectInstantiater.cs
+```
+﻿using System.Collections.Generic;
+using CurvesAndSplines;
+using UnityEngine;
+
+namespace SphereTracing.Matrices
+{
+	public class DynamicSplineObjectInstantiater : MonoBehaviour
+	{
+		public SphereTracingManager SphereTracingManager;
+		public BezierSpline Spline;
+		public GameObject Object;
+		public int ObjectCount;
+		public float SplineOffset;
+		public float Duration;
+
+		private List<GameObject> _instantiatedObjects;
+		
+		private void Start()
+		{
+			_instantiatedObjects = new List<GameObject>();
+			for (int i = 0; i < ObjectCount; i++)
+			{
+				var newObj = Instantiate(Object, transform);
+				newObj.GetComponent<SplineWalker>().spline = Spline;
+				newObj.GetComponent<SplineWalker>().duration = Duration;
+				newObj.GetComponent<SplineWalker>().offset = SplineOffset * i;
+				newObj.GetComponent<StMatrix>().SphereTracingManager = SphereTracingManager;
+				
+				_instantiatedObjects.Add(newObj);
+			}
+		}
+
+		private void Update()
+		{
+			int i = 0;
+			foreach (var o in _instantiatedObjects)
+			{
+				o.GetComponent<SplineWalker>().duration = Duration;
+				o.GetComponent<SplineWalker>().offset = SplineOffset * i;
+				i++;
+			}
+		}
+	}
+}
+```
+
+### Assets/Scripts/SphereTracing/Matrices/StMatrix.cs
+```
+﻿using UnityEngine;
+
+namespace SphereTracing.Matrices
+{
+	public struct StMatrixData
+	{
+		public Matrix4x4 Matrix;
+		
+		/// <summary>
+		/// Returns the size of the struct in Bytes.
+		/// </summary>
+		/// <remarks>Adjust when changing struct.</remarks>
+		/// <returns></returns>
+		public static int GetSize()
+		{
+			return 4 * 4 * sizeof(float);
+		}
+	}
+	
+	public class StMatrix : MonoBehaviour
+	{
+		[HideInInspector]
+		public bool IsActive = true;
+		public SphereTracingManager SphereTracingManager;
+
+		private StMatrixData _stMatrixData;
+
+		public StMatrixData GetStMatrixData()
+		{
+			_stMatrixData.Matrix = transform.localToWorldMatrix;
+			_stMatrixData.Matrix.m03 = -_stMatrixData.Matrix.m03;
+			_stMatrixData.Matrix.m13 = -_stMatrixData.Matrix.m13;
+			_stMatrixData.Matrix.m23 = -_stMatrixData.Matrix.m23;
+			return _stMatrixData;
+		}
+
+		protected void Start()
+		{
+			IsActive = true;
+			SphereTracingManager.RegisterStMatrix(this);
+		}
+
+		protected void OnDisable()
+		{
+			IsActive = false;
+			SphereTracingManager.CleanStMatrices();
+		}
+		
+		protected void OnEnable()
+		{
+			if (IsActive) return;
+			IsActive = true;
+			SphereTracingManager.RegisterStMatrix(this);
+		}
+
+		protected void OnDestroy()
+		{
+			IsActive = false;
+			SphereTracingManager.CleanStMatrices();
+		}
+	}
+}
+```
+
+### Assets/Scripts/SphereTracing/Shader/AmbientOcclusion.compute
+```
+#pragma kernel AmbientOcclusionH    ST_R    AO_RW    AO       HIGHDOWNSAMPLED
+#pragma kernel AmbientOcclusionM    ST_R    AO_RW    AO       MIDDOWNSAMPLED
+#pragma kernel AmbientOcclusionL    ST_R    AO_RW    AO       LOWDOWNSAMPLED
+
+#include "Defines/HighMidLowThreads.cginc"
+#include "Defines/SharedConstants.cginc"
+#include "Defines/Structs.cginc"
+
+#include "Inputs/SharedInputs.cginc"
+#include "Inputs/SphereTracingInputs.cginc"
+#include "Inputs/TextureAccessAwareInputs.cginc"
+
+#include "Utils/ImplicitBasics.cginc" 
+#include "Utils/StructSampleFuncs.cginc"
+#include "Utils/StructWriteFuncs.cginc"
+#include "Utils/Random.cginc"
+
+#include "WorldLogic.cginc"
+
+float3 SphericalFibonacciMapping(float i, float n, float rand)
+{
+	float phi = i * 2.0 * PI * GOLDENRATIO + rand;
+	float zi = 1.0 - (2.0*i+1.0)/(n);
+	float theta = sqrt(1.0 - zi*zi);
+	return float3( cos(phi) * theta, sin(phi) * theta, zi);
+}
+
+float3 HemisphericalFibonacciMapping(float i, float n, float rand, float minZ)
+{
+	float phi = i * 2.0 * PI * GOLDENRATIO + rand;
+	float zi = 1.0 - (2.0*i+1.0)/(2*n);
+	zi = zi * (1.0 - minZ) + minZ;
+	float theta = sqrt(1.0 - zi*zi);
+	return normalize(float3( cos(phi) * theta, sin(phi) * theta, zi));
+}
+
+float3 UniformSampleHemisphere(float r1, float r2)
+{
+	float cosTheta = 2.0 * r1 - 1.0;
+	float sinTheta = sqrt(1.0 - r1 * r1);
+	float phi = 2 * PI * r2;
+	return float3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta);
+} 
+
+void GetCoordinateSystem(in float3 normal, out float3 tangent, out float3 bitangent)
+{
+	float3 up = abs(normal.y) < 0.999 ? float3(0, 1, 0) : float3(1,0,0);
+	tangent = normalize( cross( up, normal ) );
+	bitangent = normalize( cross( normal, tangent ) );   
+}
+
+float ApproxConeConeIntersection(float arcLength1, float arcLength2, float angleBetweenCones)
+{
+	float angleDiff = abs(arcLength1 - arcLength2);
+	
+	return smoothstep(0, 1,
+	 1.0 - saturate((angleBetweenCones - angleDiff) / (arcLength1 + arcLength2 - angleDiff)));
+}
+
+float GetConeVisibility(in Ray coneRay, in float tanConeAngle)
+{
+	float minSphereRadius = 0.0001; //TODO: Causes artefacts if not small enough
+	float maxSphereRadius = 100.0;
+
+	float minVisibility = 1.0;
+	float minDistance = 1000000;
+	float traceDistance = 0.1;
+	float minStepSize = AmbientOcclusionMaxDistance / (AmbientOcclusionSteps); //TODO: Also causes artefacts
+	
+	for(int step = 0; step < AmbientOcclusionSteps; step++)
+	{
+		float epsilon = 0.00015 * traceDistance;
+		float3 pointOnRay = coneRay.Origin + traceDistance * coneRay.Direction;
+		float distance = Map(pointOnRay).x;
+		
+		minDistance = min(minDistance, distance);
+		float sphereRadius = clamp(tanConeAngle * traceDistance, minSphereRadius, maxSphereRadius);
+		
+		float visibility = saturate(distance / sphereRadius);
+		
+		// Fade visibility based on distance
+		float distanceFraction = traceDistance / AmbientOcclusionMaxDistance;
+		visibility = max(visibility, saturate(distanceFraction * distanceFraction * 0.6f));
+		
+		minVisibility = min(minVisibility, visibility);
+		traceDistance += max(distance, minStepSize);
+
+		if (distance < epsilon || traceDistance > AmbientOcclusionMaxDistance) break;
+	}
+	
+	if (minDistance < 0 || step == AmbientOcclusionSteps)
+	{
+		minVisibility = 0;
+	}
+	
+	return minVisibility;
+}
+
+float3 ComputeBentNormal(in float2 uv, in float3 pos, in float3 normal)
+{
+	float3 tangent;
+	float3 bitangent;
+	GetCoordinateSystem(normal, tangent, bitangent);
+	
+	float3 bentNormal = float3(0, 0, 0);
+	Ray coneRay;
+	coneRay.Origin = pos + 0.001 * normal;
+	
+	float rand = hash12(uv * 100.0) * 2 * PI;
+	//float rand = max(uv.x, uv.y) * 2 * PI;
+	int randInt = 360 * hash12(uv * 100);
+	//int randInt = 360 * (uv.x * uv.y);
+
+    float tanConeAngle = tan(ConeAngle / AmbientOcclusionSamples);             //TODO: Revisit
+    for (int ci = 0; ci < AmbientOcclusionSamples; ci++)
+    {
+        float3 cDir;
+        //if (uv.x < 0.5){
+        cDir = HemisphericalFibonacciMapping((float) ci, (float) AmbientOcclusionSamples, rand, tanConeAngle);
+        //} else {
+        //cDir = HemisphericalFibonacciMapping((float) ci, (float) AmbientOcclusionSamples, rand, 0);
+        //float2 r2 = hash22(ci * 100.0 + uv * 100.0);
+        //cDir = UniformSampleHemisphere(r2.x, r2.y);
+        //}
+        float3 cDirWorld = cDir.y * bitangent + cDir.x * tangent + cDir.z * normal; //TODO: Possible error source
+        
+        coneRay.Direction = cDirWorld;
+        
+        float cVisibility = GetConeVisibility(coneRay, tanConeAngle);
+        //cVisibility = 1;
+        
+        bentNormal += cVisibility * coneRay.Direction;
+    }
+    
+    bentNormal /= AmbientOcclusionSamples;
+    //Add normalize factor to further reduce self occlusion  
+    const float nFactor = 7.0 / 255.0;
+    bentNormal *= AmbientOcclusionSamples < 3 ? 1.0 : 1.0 + nFactor * (AmbientOcclusionSamples) - nFactor;
+    //Since self occlusion is not perfectly linear we make it work perfect for 9 samples, which we use.
+    bentNormal *= AmbientOcclusionSamples == 9 ? 1.16 : 1.0;
+	
+	
+	return bentNormal;
+}
+
+void ComputeAO(in float2 uv, in float3 pos, in float3 dir, in float3 normal, in float reflectiveF, out float3 bentNormal, out float specularOcclusion)
+{
+	//TODO: Improve ao factor computation
+	bentNormal = ComputeBentNormal(uv,pos,normal);
+	bentNormal = lerp(normal, bentNormal, BentNormalFactor);
+	float bentNormalLength = length(bentNormal);
+	float reflectionConeAngle = max(reflectiveF, 0.1) * PI;
+	float unoccludedAngle = bentNormalLength * PI * SpecularOcclusionStrength;
+	float angleBetween = acos(dot(bentNormal, reflect(dir, normal) / max(bentNormalLength, 0.001)));
+	specularOcclusion = ApproxConeConeIntersection(reflectionConeAngle, unoccludedAngle, angleBetween);
+	specularOcclusion = lerp(0, specularOcclusion, saturate((unoccludedAngle - 0.1) / 0.2));
+}
+
+void CalcAO(uint3 id)
+{
+	float2 uv = float2((id.x + 0.5) / AoResolution.x, (id.y + 0.5) / AoResolution.y);
+	
+	SphereTracingData surface = SampleSphereTracingData(sampler_point_clamp, uv, 0, 0);
+	SphereTracingData represent = SampleSphereTracingData(sampler_point_clamp, uv, 1, 0);
+	AmbientOcclusion surfaceAo;
+	AmbientOcclusion representAo;
+	
+	//Sample SphereTracingData from surface and represent
+	
+	
+	
+	//Do not calculate ao if a surface' alpha doesn't have an impact
+	[branch]
+	if (surface.Alpha > ALPHAEPSILON && sign(surface.MaterialId) >= 0) {
+		StMaterial surfaceMat = MaterialBuffer[surface.MaterialId];
+		ComputeAO(uv, surface.Position, (surface.RayDirection), surface.Normal, surfaceMat.Metallic,//TODO: metallic ist not the correct reflective factor
+			surfaceAo.BentNormal, surfaceAo.SpecularOcclusion);
+			
+		surfaceAo.BentNormal -= surface.Normal; //Save the change of normals.
+	} else {
+		surfaceAo.BentNormal = (float3) 0;
+		surfaceAo.SpecularOcclusion = 0;
+	}
+	[branch]
+	if (represent.Alpha > ALPHAEPSILON) {
+		StMaterial representMat = MaterialBuffer[represent.MaterialId];
+		ComputeAO(uv, represent.Position, represent.RayDirection, represent.Normal, representMat.Metallic, //TODO: metallic ist not the correct reflective factor
+			representAo.BentNormal, representAo.SpecularOcclusion);
+		representAo.BentNormal -= surface.Normal; //Save the change of normals.
+	} else {
+		representAo.BentNormal = (float3) 0;
+		representAo.SpecularOcclusion = 0;
+	}
+			 
+	WriteAmbientOcclusion(id.xy, 0, surfaceAo);
+	WriteAmbientOcclusion(id.xy, 1, representAo);
+}
+
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void AmbientOcclusionH (uint3 id : SV_DispatchThreadID) { CalcAO(id); }
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void AmbientOcclusionM (uint3 id : SV_DispatchThreadID) { CalcAO(id); }
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void AmbientOcclusionL (uint3 id : SV_DispatchThreadID) { CalcAO(id); }
+```
+
+### Assets/Scripts/SphereTracing/Shader/AmbientOcclusionUpSampler.compute
+```
+﻿#pragma kernel AmbientOcclusionUpSampleH    ST_R ST_LOW_R AO_R HIGH
+#pragma kernel AmbientOcclusionUpSampleM    ST_R ST_LOW_R AO_R MID
+#pragma kernel AmbientOcclusionUpSampleL    ST_R ST_LOW_R AO_R LOW
+
+#include "Defines/HighMidLowThreads.cginc"
+#include "Defines/Structs.cginc"
+
+#include "Inputs/SharedInputs.cginc"
+#include "Inputs/TextureAccessAwareInputs.cginc"
+
+#include "Utils/StructCustomSampleFuncs.cginc"
+
+
+RWTexture2DArray<float4> AmbientOcclusionDataHigh;
+
+void Main(uint3 id, float2 direction)
+{
+    float2 uv = float2((id.x + 0.5) / Resolution.x, (id.y + 0.5) / Resolution.y);
+    float2 uvstep = float2(1.0 / AoResolution.x, 1.0 / AoResolution.y) * direction;
+    //AmbientOcclusion ao = SampleAmbientOcclusion(sampler_point_clamp, uv, id.z, 0.0);
+    AmbientOcclusion ao = UpSampleAmbientOcclusion(uv, id.z, 0.0);
+    
+    AmbientOcclusionDataHigh[id] = float4(ao.BentNormal, ao.SpecularOcclusion);
+}
+
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void AmbientOcclusionUpSampleH ( uint3 id : SV_DispatchThreadID) { Main(id, float2(1, 0)); }
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void AmbientOcclusionUpSampleM ( uint3 id : SV_DispatchThreadID) { Main(id, float2(1, 0)); }
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void AmbientOcclusionUpSampleL ( uint3 id : SV_DispatchThreadID) { Main(id, float2(1, 0)); }
+```
+
+### Assets/Scripts/SphereTracing/Shader/DeferredShading.compute
+```
+#pragma kernel DeferredH DEF_RW ST_R AO_R HIGH
+#pragma kernel DeferredM DEF_RW ST_R AO_R MID
+#pragma kernel DeferredL DEF_RW ST_R AO_R LOW
+
+#include "Defines/HighMidLowThreads.cginc"
+#include "Defines/SharedConstants.cginc"
+#include "Defines/Structs.cginc"
+
+#include "Inputs/DeferredShadingInputs.cginc"
+#include "Inputs/SharedInputs.cginc"
+#include "Inputs/TextureAccessAwareInputs.cginc"
+
+#include "Utils/StructLoadFuncs.cginc"
+#include "Utils/StructSampleFuncs.cginc"
+#include "Utils/StructWriteFuncs.cginc"
+
+#include "WorldLogic.cginc"
+
+float3 Background(in Ray r);
+
+TextureCubeArray<float4> ConvolutedEnvironmentMap;
+SamplerState sampler_ConvolutedEnvironmentMap;
+
+TextureCube<float4> EnvironmentMap;
+SamplerState sampler_EnvironmentMap;
+
+Texture2D<float4> BrdfLUT;
+//SamplerState sampler_linear
+
+Texture2DArray<float4> FakeCubemapRenderTexture;
+SamplerState sampler_FakeCubemapRenderTexture;
+
+int ConvolutionLayerCount;
+int CubeMapIndex;
+float3 SunPosition;
+bool EnableShadows;
+bool UseOldShadowTechnique;
+int MaxShadowSteps;
+float ShadowSoftnessFactor;
+float ShadowBias;
+
+float ShadowSoft(float3 ro, SphereTracingData surface, int k, float bias)
+{
+    float res = 1.0;
+    float ph = 1e20;
+    float3 dest = surface.Position+bias*surface.Normal;
+    float3 rd = -normalize(ro-dest);
+    float mint = 0;
+    float maxt = length(dest-ro); 
+	int maxloops = MaxShadowSteps;
+    for( float t=mint; t < maxt && maxloops > 0; )
+    {
+        float3 pos = ro + rd*t;
+        float h = MapLite(pos);
+        if( h < .0015 ) return 0.0;
+        float y = (maxloops == MaxShadowSteps) ? 0.0 : h*h/(2.0*ph); 
+        float d = sqrt(h*h-y*y);
+        res = min(res, k*d/max(0.0,t-y));
+        ph = h;  
+        t += h;
+		maxloops--;
+    }
+    return saturate(res);
+}
+
+float ShadowSoftBidirectional(float3 lightPos, float3 lightDir, SphereTracingData surface, int k, float bias)
+{
+    float res = 1.0;
+    float ph = 1e20;
+    float ph2 = 1e20;
+    float3 ro = surface.Position;
+    float3 rd = lightDir;
+    float t = bias;
+    float maxt = length(lightPos-ro);
+    float t2 = maxt;
+    
+    for( int i = 0; i < MaxShadowSteps; i++)
+    {
+        float3 pos = ro + rd*t;
+        float3 pos2 = ro + rd*t2;
+        float h = MapLite(pos);
+        float h2 = MapLite(pos2);
+        //if (h < 0.001 || h2 < 0.001) return 0.0;
+        
+        float y = (MaxShadowSteps == 0) ? 0.0 : h*h/(2.0*ph); 
+        float y2 = (MaxShadowSteps == 0) ? 0.0 : h2*h2/(2.0*ph2); 
+        float d = sqrt(h*h-y*y);
+        float d2 = sqrt(h2*h2-y2*y2);
+        res = min(res, k*d/max(0.0,t-y));
+        res = min(res, k*d2/max(0.0,t2-y2));
+        ph = h;  
+        ph2 = h2;  
+        t += h;
+        t2 -= h2;
+        if (res < 0.001 || t2 - t <= 0) break;
+    }
+    return saturate(res);
+}
+
+float ShadowSoftOldTechnique(float3 lightPos, float3 lightDir, SphereTracingData surface, int k, float bias)
+{
+    float res = 1.0;
+    float3 ro = surface.Position;
+    float3 rd = lightDir;
+    float t = bias;
+    float maxt = length(lightPos-ro); 
+    for (int i = 0; i < MaxShadowSteps; i++) 
+    {
+        float3 pos = ro + rd*t;
+        float h = MapLite(pos);
+        if (h < 0.001) return 0.0;
+
+        res = min( res, k*h/t );
+        
+        t += h;
+        if (res < 0.001 ||t >= maxt) break;
+    }
+    return saturate(res);
+}
+
+void EvaluateSky(SphereTracingData surface, inout float3 skyColor)
+{
+    Ray r;
+    r.Origin = float3(0,0,0);
+    r.Direction = surface.RayDirection;
+    if (EnableCubemap){
+        skyColor += EnvironmentMap.SampleLevel(sampler_EnvironmentMap, r.Direction, 0).xyz;
+    } else {
+        //Use prodecural sky generation if cubemap is not enabled. Expensive!
+        skyColor += Background(r) * surface.Alpha ;
+    }
+}
+
+
+// Source from: https://github.com/KhronosGroup/glTF-WebGL-PBR/blob/master/shaders/pbr-frag.glsl
+//
+// References:
+// [1] Real Shading in Unreal Engine 4
+//     http://blog.selfshadow.com/publications/s2013-shading-course/karis/s2013_pbs_epic_notes_v2.pdf
+// [2] Physically Based Shading at Disney
+//     http://blog.selfshadow.com/publications/s2012-shading-course/burley/s2012_pbs_disney_brdf_notes_v3.pdf
+// [3] README.md - Environment Maps
+//     https://github.com/KhronosGroup/glTF-WebGL-PBR/#environment-maps
+// [4] "An Inexpensive BRDF Model for Physically based Rendering" by Christophe Schlick
+//     https://www.cs.virginia.edu/~jdl/bib/appearance/analytic%20models/schlick94b.pdf
+float3 PBRShading(SphereTracingData surface, AmbientOcclusion ao, inout float3 skyColor)
+{
+    float3 outputColor = float3(.0, .0, .0);
+    int matId = (int) surface.MaterialId;
+	
+	if (sign(matId) >= 0)
+	{
+	    StMaterial mat = MaterialBuffer[matId];
+	    
+	    float3 color = float3(0, 0, 0);
+	    float rimFactorModifier = 0;
+	    
+	    float perceptualRoughness = mat.PerceptualRoughness;
+	    float metallic = mat.Metallic;
+	    //Convert to Material Roughness by squaring the perceptualRoughness [2]
+	    float alphaRoughness = perceptualRoughness * perceptualRoughness;
+	    
+	    float3 baseColor = mat.BaseColor.rgb;// * mat.BaseColor.a;
+	    float3 f0 = (float3) 0.04;
+	    float3 diffuseColor = baseColor * ( (float3) 1.0 - f0);
+	    diffuseColor *= 1.0 - metallic;
+	    float3 specularColor = lerp(f0, baseColor, metallic);
+	    
+	    float reflectance = max(max(specularColor.r, specularColor.g), specularColor.b);
+	    float reflectance90 = saturate(reflectance * 25);
+	    float3 specularEnvironmentR0 = specularColor;
+	    float3 specularEnvironmentR90 = (float3) 1.0 * reflectance90;
+	    
+	    float3 bentNormal = surface.Normal + ao.BentNormal;
+	    float3 n = surface.Normal;//EnableAmbientOcclusion ? surface.Normal + ao.BentNormal : surface.Normal;
+	    float3 v = normalize(CameraPos - surface.Position); //Direction from surface to CameraDir
+	    float3 reflection = -normalize(reflect(v, n));
+	    
+	    float NdotV = clamp(abs(dot(n, v)), 0.001, 1.0);
+	    
+        float specularOcclusion = EnableAmbientOcclusion ? lerp(1, ao.SpecularOcclusion, OcclusionExponent) : 1;
+        float diffuseOcclusion = EnableAmbientOcclusion ? lerp (1, length(bentNormal), OcclusionExponent) : 1;
+	    
+	    for(int i = 0; i < LightCount; i++)
+        {
+            StLight light = LightBuffer[i];
+            
+            float3 l; //Direction from surface to light
+            float3 lightColor;
+            float attenuation = 1.0;
+            float shadow = 1.0;
+            
+            [branch]
+            if (light.LightType == 0)               // Point Light
+            {
+                float3 lightDir = light.LightData2.xyz - surface.Position;
+                l = normalize(lightDir);
+                lightColor = light.LightData.xyz;
+                float lightPower = light.LightData.w;
+                attenuation = lightPower / length(lightDir);
+                lightColor *= attenuation;
+                
+                [branch]
+                if (EnableShadows) {
+                    [branch]
+                    if (UseOldShadowTechnique) {
+                        shadow = ShadowSoft(light.LightData2.xyz, surface, ShadowSoftnessFactor, ShadowBias);
+                    } else {
+                        shadow = ShadowSoftBidirectional(light.LightData2.xyz, l, surface, ShadowSoftnessFactor, ShadowBias);
+                    }
+                }
+                /*shadow = EnableShadows ? 
+                            (UseOldShadowTechnique ? 
+                            //ShadowSoftOldTechnique(light.LightData2.xyz, l, surface, ShadowSoftnessFactor, ShadowBias) :
+                            ShadowSoft(light.LightData2.xyz, surface, ShadowSoftnessFactor, ShadowBias) :
+                            ShadowSoftBidirectional(light.LightData2.xyz, l, surface, ShadowSoftnessFactor, ShadowBias)) 
+                         : 1;*/
+                //shadow = EnableShadows ? ShadowSoftOldTechnique(light.LightData2.xyz, l, surface, ShadowSoftnessFactor, 0.5) : 1;
+                
+                rimFactorModifier += attenuation;
+            }
+            
+            
+            float3 h = normalize(l+v);
+            float NdotL = clamp(dot(n, l), 0.001, 1.0);
+            
+            [branch]
+            if (length(lightColor) * shadow * NdotL < 0.001) continue;
+            
+            float NdotH = saturate(dot(n, h));
+            float LdotH = saturate(dot(l, h));
+            float VdotH = saturate(dot(v, h));
+            
+            //Calculate Fresnel F, GeometricAttenuation G and Microfacet Distribution D
+            float3 F; float G, D;
+                //Calculate the Fresnel Reflection term (from [4])
+                F = specularEnvironmentR0 + (specularEnvironmentR90 - specularEnvironmentR0) * 
+                            pow(saturate(1.0 - VdotH), 5.0);
+                            
+                //Calculate the specular geometric attenuation, where rougher material will reflect less light back to the viewer.
+                //Based on [1] eq.4 with modifications as proposed in [2]
+                float arSq = alphaRoughness * alphaRoughness;
+                float NdotLSq = NdotL * NdotL;
+                float NdotVSq = NdotV * NdotV;
+                float attenuationL = 2.0 * NdotL / ( NdotL + sqrt( arSq + (1.0 - arSq) * NdotLSq));
+                float attenuationV = 2.0 * NdotV / ( NdotV + sqrt( arSq + (1.0 - arSq) * NdotVSq));
+                G = attenuationL * attenuationV;
+                
+                //Models the distribution of microfacet normals across the area being drawn.
+                //Implementation from "Average Irregularity Representation of a Roughened Surface for Ray Reflection" by T. S. Trowbridge, and K. P. Reitz
+                // Follows the distribution function recommended in the SIGGRAPH 2013 course notes from EPIC Games [1], Equation 3.
+                float f = (NdotH * arSq - NdotH) * NdotH + 1.0;
+                D = arSq / (PI * f * f);
+                
+            //Calculate analytical lighting contribution
+            float3 diffuseContrib, specContrib;
+                //Basic lambertian diffuse from [1] eq.1
+                float3 lambertian = diffuseColor / PI;
+                diffuseContrib = (1.0 - F) * lambertian;
+                //diffuseContrib *= diffuseOcclusion;
+                specContrib = F * G * D / (4.0 * NdotL * NdotV);
+                //specContrib *= specularOcclusion;
+            
+            //Calculate final intensity as reflectance (BRDF) scaled by the energy of light (cosine law)
+            color += NdotL * lightColor * (diffuseContrib + specContrib) * shadow;
+            
+            
+            /*
+                float lod = (1.0 - perceptualRoughness) * (ConvolutionLayerCount - 1.0);
+                float3 brdf = BrdfLUT.SampleLevel(sampler_linear_clamp, float2(NdotV, 1.0 - perceptualRoughness), 0.0).rgb;
+                //TODO: Diffuse EnvironmentMap
+                //float3 iblDiffuseLight = ConvolutedEnvironmentMap.SampleLevel(sampler_ConvolutedEnvironmentMap, float4(n, ConvolutionLayerCount - 1.0), 0.0).rgb;
+                
+                float tap0Index = floor(lod);
+                float tap1Index = min(ceil(lod), ConvolutionLayerCount - 1);
+                float3 specularLightTap0 = ConvolutedEnvironmentMap.SampleLevel(sampler_ConvolutedEnvironmentMap, float4(reflection, tap0Index), 0.0).rgb;
+                float3 specularLightTap1 = ConvolutedEnvironmentMap.SampleLevel(sampler_ConvolutedEnvironmentMap, float4(reflection, tap1Index), 0.0).rgb;
+                float3 iblSpecularLight = lerp(specularLightTap0 specularLightTap1 frac(lod));
+                
+                //float3 iblDiffuseContrib = iblDiffuseLight * diffuseColor; 
+                //iblDiffuseContrib *= diffuseOcclusion;
+                float3 iblSpecularContrib = iblSpecularLight * (specularColor * brdf.x + brdf.y);
+                //iblSpecularContrib *= specularOcclusion;
+                */
+                //iblContribution = iblDiffuseContrib * iblSpecularContrib;
+            
+        }
+	    
+	    //Calculate lightning contribution from image based light source, which are our Preconvoled Environment Maps
+        float3 iblContribution = (float3) 0;
+        [branch]
+        if (EnableAmbientOcclusion && EnableGlobalIllumination && EnableCubemap){
+            //Diffuse IBL based on coneAngle
+            float coneAngle = saturate(length(bentNormal) * 2 - 1.0);
+            float cubemapArrayIndex = coneAngle * (ConvolutionLayerCount - 1);
+            float3 direction = normalize(bentNormal);
+            float tap0Index = floor(cubemapArrayIndex);
+            float tap1Index = min(ceil(cubemapArrayIndex), ConvolutionLayerCount - 1);
+            float4 skyColorTap0 = ConvolutedEnvironmentMap.SampleLevel(sampler_ConvolutedEnvironmentMap, float4(direction, tap0Index), 0.0);
+            float4 skyColorTap1 = ConvolutedEnvironmentMap.SampleLevel(sampler_ConvolutedEnvironmentMap, float4(direction, tap1Index), 0.0);
+            //skyRadiance = skyColorDebug;
+            float3 skyRadiance = lerp(skyColorTap0.xyz, skyColorTap1.xyz, frac(cubemapArrayIndex));
+           
+            skyRadiance *= dot(bentNormal, surface.Normal);
+           
+            //float3 brdf = BrdfLUT.SampleLevel(sampler_linear_clamp, float2(NdotV, 1.0 - perceptualRoughness), 0.0).rgb;
+            
+            float3 iblDiffuseContrib = skyRadiance * diffuseColor * diffuseOcclusion;   
+            //float3 iblSpecularContrib = skyRadiance * specularColor * specularOcclusion;
+            
+            //Specular IBL based on material reflectance
+            float lod = (1.0 - perceptualRoughness) * (ConvolutionLayerCount - 1.0);
+            float3 brdf = BrdfLUT.SampleLevel(sampler_linear_clamp, float2(NdotV, 1.0 - perceptualRoughness), 0.0).rgb;
+            tap0Index = floor(lod);
+            tap1Index = min(ceil(lod), ConvolutionLayerCount - 1);
+
+            float3 specularLightTap0 = ConvolutedEnvironmentMap.SampleLevel(sampler_ConvolutedEnvironmentMap, float4(reflection, tap0Index), 0.0).rgb;
+            float3 specularLightTap1 = ConvolutedEnvironmentMap.SampleLevel(sampler_ConvolutedEnvironmentMap, float4(reflection, tap1Index), 0.0).rgb;
+            float3 iblSpecularLight = lerp(specularLightTap0, specularLightTap1, frac(lod));
+            
+            float3 iblSpecularContrib = iblSpecularLight * (specularColor * brdf.x + brdf.y * metallic) * diffuseOcclusion;
+                       
+            iblContribution = iblDiffuseContrib + iblSpecularContrib; 
+        }
+        
+        color += iblContribution; 
+        
+        float rim = (mat.MaterialType == 1) ? pow(1 - NdotV, max(0, mat.RimFactor - 1.5 * rimFactorModifier)) : 1;
+        color += rim * mat.EmissiveColor;
+        
+        
+        outputColor = color;
+	    
+	} else 
+	{
+	    EvaluateSky(surface, skyColor);
+	}
+	return float3(outputColor);
+}
+/*
+float3 Shading(SphereTracingData surface, AmbientOcclusion ao, inout float3 skyColor)
+{
+    float3 color = float3(.0, .0, .0);
+        
+    float3 ambientColor = float3(.1, .1, .1);
+    float3 skyRadiance = float3(.0, .0, .0);
+	float3 diffuseColor = float3(.0, .0, .0);
+	float3 specularColor = float3(.0, .0, .0);
+	
+	float3 bentNormal = EnableAmbientOcclusion ? surface.Normal + ao.BentNormal : surface.Normal;
+	float specularOcclusion = EnableAmbientOcclusion ? ao.SpecularOcclusion : 1;
+	float diffuseOcclusion = EnableAmbientOcclusion ? pow(length(bentNormal), OcclusionExponent) : 1;
+	
+	int matId = (int) surface.MaterialId;
+	
+	if (sign(matId) >= 0){
+        StMaterial mat = MaterialBuffer[matId];
+        for(int i = 0; i < LightCount; i++)
+        {
+            StLight light = LightBuffer[i];
+            if (light.LightType < 0) break;
+            
+            //Compute BlinnPhong Lightning
+            float3 lightDir;
+            float3 lightDirNormalized;
+            float3 lightColor;
+            float lightPower;
+            float attenuation = 1.0;
+            float lightOcclusion = 1.0;
+            float shadow = 1.0;
+            
+            if (light.LightType == 0)               // Point Light
+            {
+                lightDir = light.LightData2.xyz - surface.Position;
+                lightDirNormalized = normalize(lightDir);
+                lightColor = light.LightData.xyz;
+                lightPower = light.LightData.w;
+                attenuation = lightPower / length(lightDir);
+                
+                shadow = ShadowSoft(light.LightData2.xyz, surface, 24, 1);
+                //shadow = ShadowSoft2(light.LightData2.xyz, surface, 10, .1);
+
+            } else if (light.LightType == 1)        // Directional Light
+            {
+                lightDir = light.LightData2.xyz;
+                lightDirNormalized = normalize(lightDir);
+                lightColor = light.LightData.xyz;
+                lightPower = light.LightData.w;
+                //attenuation = 1.0; No attenuation for directional light
+                //NOTE: Low performance on Directional Light for Shadows
+                float3 fakeLightPos = lightDirNormalized*20;
+               // float3 fakeLightDir = normalize(fakeLightPos - surface.Position);
+                shadow = ShadowSoft(fakeLightPos, surface, 10, 1);
+                
+            }
+            
+            float NdotL = saturate(dot(lightDirNormalized, surface.Normal));
+            float bentNdotL = saturate(dot(lightDirNormalized, bentNormal));
+            lightOcclusion = 1.0 - saturate(sqrt(saturate(NdotL - bentNdotL)));
+            
+            float lambertian = max(dot(surface.Normal, lightDir), 0.0);
+            
+            float specular = 0.0;
+            float3 halfDir = normalize(lightDir + (-CameraDir));
+            float specularAngle = max(dot(surface.Normal, halfDir), 0.0);
+            specular = pow(specularAngle, mat.Shininess);
+
+            diffuseColor += mat.DiffuseColor * lambertian * lightColor * attenuation * shadow;
+            specularColor += mat.SpecularColor * specular * lightColor * attenuation * specularOcclusion * shadow;
+        }
+        
+        if (EnableAmbientOcclusion && EnableGlobalIllumination){
+            //TODO: This is not how it works actually, need to review with physically based lightning
+            Ray aoRay;
+            aoRay.Origin = float3(0,0,0);
+            aoRay.Direction = bentNormal;
+            if (EnableCubemap){
+                float coneAngle = saturate(length(bentNormal) * 2 - 1.0);
+                float cubemapArrayIndex = coneAngle * (ConvolutionLayerCount - 1);
+                float3 direction = normalize(bentNormal);
+                float tap0Index = floor(cubemapArrayIndex);
+                float tap1Index = min(ceil(cubemapArrayIndex), ConvolutionLayerCount - 1);
+                float4 skyColorTap0 = ConvolutedEnvironmentMap.SampleLevel(sampler_ConvolutedEnvironmentMap, float4(direction, tap0Index), 0.0);
+                float4 skyColorTap1 = ConvolutedEnvironmentMap.SampleLevel(sampler_ConvolutedEnvironmentMap, float4(direction, tap1Index), 0.0);
+				//skyRadiance = skyColorDebug;
+                skyRadiance = lerp(skyColorTap0.xyz, skyColorTap1.xyz, frac(cubemapArrayIndex));
+               
+				skyRadiance *= dot(bentNormal, surface.Normal);
+                //ambientColor = FakeCubemapRenderTexture.SampleLevel(sampler_FakeCubemapRenderTexture, aoRay.Direction, 0).xyz;
+                
+                ambientColor += mat.DiffuseColor * skyRadiance * diffuseOcclusion;
+                //diffuseColor *= skyRadiance * diffuseOcclusion;
+                //ambientColor = diffuseOcclusion * Cubemap.SampleLevel(sampler_Cubemap, aoRay.Direction, (1 - diffuseOcclusion) * CubemapMaxMip).xyz;
+            } else {
+                ambientColor = specularOcclusion * diffuseOcclusion * Background(aoRay);
+            }
+        }
+        
+        //diffuseColor *= diffuseOcclusion;
+        //specularColor *= specularOcclusion;
+        
+        //Add up color
+        color = ambientColor + diffuseColor + specularColor;
+	} else {
+	    Ray r;
+	    r.Origin = float3(0,0,0);
+	    r.Direction = surface.RayDirection;
+	    if (EnableCubemap){
+	        skyColor += EnvironmentMap.SampleLevel(sampler_EnvironmentMap, r.Direction, 0).xyz;
+	        //skyColor += FakeCubemapRenderTexture.SampleLevel(sampler_FakeCubemapRenderTexture, r.Direction, 0).xyz;
+	        //skyColor += ConvolutedEnvironmentMap.SampleLevel(sampler_ConvolutedEnvironmentMap, float4(r.Direction, CubeMapIndex), 0.0);
+	    } else {
+	        //Use prodecural sky generation if cubemap is not enabled. Expensive!
+	        skyColor += Background(r) * surface.Alpha ;
+	    }
+	    
+	}
+	//Gamma correct colors
+ 
+	return float3(color);
+}
+*/
+void Main(uint3 id)
+{
+    float2 uv = float2((id.x + 0.5) / Resolution.x, (id.y + 0.5) / Resolution.y);
+    
+    float3 surfaceSkyColor = (float3) 0;
+    float3 representSkyColor = (float3) 0;
+    
+    //surface Shading
+    SphereTracingData surface = LoadSphereTracingData(id.xy, 0);
+	SphereTracingData represent = LoadSphereTracingData(id.xy, 1);
+	AmbientOcclusion surfaceAo;
+    AmbientOcclusion representAo;
+    
+    represent.Alpha = DisableAntiAliasing ? 0.0 : represent.Alpha;
+
+	
+	float debugTraceDistance = SampleTraceDistance(sampler_point_clamp, uv, 0, 0.0);
+	
+    float3 surfaceColor = (float3) 0;
+    //Only do shading if Alpha is greater than some epsilon
+    [branch]
+    if ((surface.Alpha) > ALPHAEPSILON) {
+        [branch]
+        if (EnableAmbientOcclusion) surfaceAo = LoadAmbientOcclusion(id.xy, 0);
+        surfaceColor = PBRShading(surface, surfaceAo, surfaceSkyColor);
+        surfaceColor *= (surface.Alpha - represent.Alpha);
+        surfaceSkyColor *= (surface.Alpha - represent.Alpha);
+    }
+    
+    //represent Shading
+    float3 representColor = (float3) 0;
+    //Only do shading if Alpha is greater than some epsilon
+    [branch]
+    if (represent.Alpha > ALPHAEPSILON) {
+        [branch]
+        if (EnableAmbientOcclusion) representAo = LoadAmbientOcclusion(id.xy, 1);
+        representColor = PBRShading(represent, representAo, representSkyColor);
+        representColor *= represent.Alpha;
+        representSkyColor *= represent.Alpha;
+    }
+    
+    float3 outputColor = surfaceColor + represent.Alpha * representColor;
+    outputColor = pow( max(outputColor,0.0), GammaCorrection);
+    outputColor += surfaceSkyColor + representSkyColor; //Exclude sky from gamma correction
+    
+    //Clear DeferredOutputTexture if this is the first pass.
+    if (IsFirstPass) DeferredOutputTexture[uint2(id.xy)] = ClearColor;
+    
+    //Add Color on DeferredOutputTexture
+    [branch]
+    if (RenderOutput == 0) DeferredOutputTexture[uint2(id.xy)] =      DeferredOutputTexture[uint2(id.xy)] + float4(outputColor, 1);
+    
+    //Or draw some debug Outputs
+    //TODO: Probably need to rethink which of these values should be summed up in debug view and which not.
+    else if (RenderOutput == 1) DeferredOutputTexture[uint2(id.xy)] = DeferredOutputTexture[uint2(id.xy)] + float4(surfaceColor, 1);
+    else if (RenderOutput == 2) DeferredOutputTexture[uint2(id.xy)] = DeferredOutputTexture[uint2(id.xy)] + float4(representColor, 1);
+   
+    else if (RenderOutput == 3) DeferredOutputTexture[uint2(id.xy)] = float4(surface.Position / ClippingPlanes.y, 1);
+    else if (RenderOutput == 4) DeferredOutputTexture[uint2(id.xy)] = float4((float3) surface.MaterialId / MaterialCount, 1);
+    else if (RenderOutput == 5) DeferredOutputTexture[uint2(id.xy)] = float4(surface.RayDirection, 1);
+    else if (RenderOutput == 6) DeferredOutputTexture[uint2(id.xy)] = DeferredOutputTexture[uint2(id.xy)] + float4((float3) surface.TraceDistance / ClippingPlanes.y, 1);
+    else if (RenderOutput == 7) DeferredOutputTexture[uint2(id.xy)] = float4(surface.Normal, 1);
+    else if (RenderOutput == 8) DeferredOutputTexture[uint2(id.xy)] = float4((float3) (surface.Alpha - represent.Alpha), 1);
+    else if (RenderOutput == 9) DeferredOutputTexture[uint2(id.xy)] = DeferredOutputTexture[uint2(id.xy)] + float4(surfaceAo.BentNormal + surface.Normal, 1);
+    else if (RenderOutput == 10) DeferredOutputTexture[uint2(id.xy)] = DeferredOutputTexture[uint2(id.xy)] + float4((float3) length(surfaceAo.BentNormal  + surface.Normal), 1);
+    else if (RenderOutput == 11) DeferredOutputTexture[uint2(id.xy)] = DeferredOutputTexture[uint2(id.xy)] + float4((float3) surfaceAo.SpecularOcclusion, 1);
+    
+    else if (RenderOutput == 12) DeferredOutputTexture[uint2(id.xy)] = float4(represent.Position / ClippingPlanes.y, 1);
+    else if (RenderOutput == 13) DeferredOutputTexture[uint2(id.xy)] = float4((float3) represent.MaterialId / MaterialCount, 1);
+    else if (RenderOutput == 14) DeferredOutputTexture[uint2(id.xy)] = float4(represent.RayDirection, 1);
+    else if (RenderOutput == 15) DeferredOutputTexture[uint2(id.xy)] = DeferredOutputTexture[uint2(id.xy)] + float4((float3) represent.TraceDistance/ ClippingPlanes.y, 1);
+    else if (RenderOutput == 16) DeferredOutputTexture[uint2(id.xy)] = float4(represent.Normal, 1);
+    else if (RenderOutput == 17) DeferredOutputTexture[uint2(id.xy)] = float4((float3) represent.Alpha, 1);
+    else if (RenderOutput == 18) DeferredOutputTexture[uint2(id.xy)] = DeferredOutputTexture[uint2(id.xy)] + float4(representAo.BentNormal + represent.Normal, 1);
+    else if (RenderOutput == 19) DeferredOutputTexture[uint2(id.xy)] = DeferredOutputTexture[uint2(id.xy)] + float4((float3) length(representAo.BentNormal + represent.Normal), 1);
+    else if (RenderOutput == 20) DeferredOutputTexture[uint2(id.xy)] = DeferredOutputTexture[uint2(id.xy)] + float4((float3) representAo.SpecularOcclusion, 1);
+    else if (RenderOutput == 21) DeferredOutputTexture[uint2(id.xy)] = DeferredOutputTexture[uint2(id.xy)] + float4((float3) debugTraceDistance / ClippingPlanes.y, 1);
+    else if (RenderOutput == 22) DeferredOutputTexture[uint2(id.xy)] = float4((surface.Alpha - represent.Alpha) * surfaceAo.BentNormal + (represent.Alpha) * representAo.BentNormal, 1);
+    else if (RenderOutput == 23) DeferredOutputTexture[uint2(id.xy)] = ConvolutedEnvironmentMap.SampleLevel(sampler_ConvolutedEnvironmentMap, float4(surface.RayDirection,CubeMapIndex), 0.0);;
+    
+}
+
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void DeferredH (uint3 id : SV_DispatchThreadID) { Main(id); }
+
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void DeferredM (uint3 id : SV_DispatchThreadID) { Main(id); }
+
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void DeferredL (uint3 id : SV_DispatchThreadID) { Main(id); }
+
+
+/*
+ *  BACKGROUND
+ * 
+ *  Background/Sky related functions from here on. Need more comments
+ */
+float3 totalMie(in float T)
+{
+	float3 MieConst = float3(1.8399918514433978E14, 2.7798023919660528E14, 4.0790479543861094E14 );
+	float c = (0.2*T) * 10E-18;
+	return 0.434 * c * MieConst;
+}
+
+float sunIntensity(in float zenithAngleCos )
+{   
+	float e = 2.71828182845904523536028747135266249775724709369995957;
+	float EE = 1000.0;
+	float cutoffAngle = 1.6110731556870734;
+	float steepness = 1.5;
+	zenithAngleCos = clamp( zenithAngleCos, -1.0, 1.0 );
+	return EE * max( 0.0, 1.0 - pow( e, -( ( cutoffAngle - acos( zenithAngleCos)) / steepness ) ) );
+}
+
+float hgPhase(in float cosTheta,in float g)
+{
+	float ONE_OVER_FOURPI = 0.07957747154594767;
+	float g2 = pow( g, 2.0);
+	float inverse = 1.0 / pow( 1.0 - 2.0 * g * cosTheta + g2, 1.5);
+	return ONE_OVER_FOURPI * ( ( 1.0 - g2 ) * inverse );
+}
+
+float rayleighPhase(in float cosTheta ) 
+{
+	float THREE_OVER_SIXTEENPI = 0.05968310365946075;
+	return THREE_OVER_SIXTEENPI * ( 1.0 + pow( cosTheta, 2.0 ) );
+}
+
+float3 Uncharted2Tonemap(in float3 x)
+{
+	float A = 0.15;
+	float B = 0.50;
+	float C = 0.10;
+	float D = 0.20;
+	float E = 0.02;
+	float F = 0.30;
+	return ( ( x * ( A * x + C * B ) + D * E ) / ( x * ( A * x + B ) + D * F ) ) - E / F;
+}
+
+float3 Background(in Ray r)
+{       
+	
+	float3 sunPosition = SunPosition;//float3( 4000.0, 150.0, 7000.0 );
+	float3 vSunDirection = normalize( sunPosition );
+
+	float3 up = float3(0.0, 1.0, 0.0);
+
+	float vSunE = sunIntensity( dot( vSunDirection, up ));
+	float vSunfade = 1.0 - clamp( 1.0 - exp((sunPosition.y / 450000.0 )), 0.0, 1.0);
+
+	float rayleigh = 2.0;
+	float3 totalRayleigh = float3( 5.804542996261093E-6, 1.3562911419845635E-5, 3.0265902468824876E-5 );
+	float rayleighCoefficient = rayleigh - (1.0 * (1.0 - vSunfade ));
+	float3 vBetaR = totalRayleigh * rayleighCoefficient;
+
+	float turbidity = 10.0;
+	float mieCoefficient = 0.005;
+	float vBetaM = totalMie( turbidity ) * mieCoefficient;
+
+	float pi = 3.141592653589793238462643383279502884197169;
+	float rayleighZenithLength = 8.4E3;
+	float mieZenithLength = 1.25E3;
+	float zenithAngle = acos(max(0.0, dot( up, normalize(r.Direction) ) ) );
+	float inverse = 1.0 / ( cos( zenithAngle ) + 0.15 * pow( 93.885 - ( ( zenithAngle * 180.0 ) / pi ), -1.253) );
+	float sR = rayleighZenithLength * inverse;
+	float sM = mieZenithLength * inverse;
+
+	float3 Fex = exp( -( vBetaR * sR + vBetaM * sM) );
+
+	float cosTheta = dot( normalize(r.Direction), vSunDirection );
+	float rPhase = rayleighPhase( cosTheta * 0.5 + 0.5);
+	float3 betaRTheta = vBetaR * rPhase;
+
+	float mieDirectionalG = 0.8;
+	float mPhase = hgPhase( cosTheta, mieDirectionalG);
+	float3 betaMTheta = vBetaM * mPhase;
+
+	float3 Lin = pow( vSunE * ( ( betaRTheta + betaMTheta ) / ( vBetaR + vBetaM ) ) * ( 1.0 - Fex ), float3( 1.5 , 1.5, 1.5) );
+	Lin *= lerp( float3( 1.0,1.0,1.0 ), pow( vSunE * ( ( betaRTheta + betaMTheta ) / ( vBetaR + vBetaM ) ) * Fex, float3( 1.0 / 2.0, 1.0 / 2.0, 1.0 / 2.0 ) ), clamp( pow( 1.0 - dot( up, vSunDirection ), 5.0 ), 0.0, 1.0 ) );
+
+	float theta = acos(r.Direction.y);
+	float phi = atan2(r.Direction.z, r.Direction.x);
+	float2 uv = float2(phi, theta);
+	float3 L0 = float3(0.1,0.1,0.1) * Fex;
+
+	float sunAngularDiameterCos = 0.999956676946448443553574619906976478926848692873900859324;
+	float sundisk = smoothstep( sunAngularDiameterCos, sunAngularDiameterCos + 0.00002, cosTheta);
+	L0 += ( vSunE * 19000.0 * Fex) * sundisk;
+
+	float luminance = 1.0;
+	float whiteScale = 1.0748724675633854;
+	float3 texColor = (Lin + L0) * 0.04 + float3(0.0, 0.0003, 0.00075);
+	float3 curr = Uncharted2Tonemap( ( log2( 2.0 / pow( luminance, 4.0 ) ) ) * texColor );
+	float3 color = curr * whiteScale;
+
+	float retc =  1.0 / ( 1.2 + ( 1.2 * vSunfade ) );
+	float3 retColor = pow( color, float3(retc, retc, retc));
+
+	//return r.Direction;
+	return retColor;
+}
+```
+
+### Assets/Scripts/SphereTracing/Shader/EnvironmentMapConvolution.compute
+```
+#pragma kernel ConvoluteEnvironmentMapH HIGH
+#pragma kernel ConvoluteEnvironmentMapM MID
+#pragma kernel ConvoluteEnvironmentMapL LOW
+
+#include "Defines/HighMidLowThreads.cginc"
+#include "Defines/SharedConstants.cginc"
+
+int EnvironmentMapResolution;
+
+TextureCube<float4> EnvironmentMap;
+SamplerState sampler_EnvironmentMap;
+RWTexture2DArray<float4> FakeCubemapArrayRenderTexture;
+
+int SampleCount;
+int ConvolutionLayerCount;
+
+
+float ComputeGeometricTerm(in float3 inDirection, in float3 outDirection) {
+	return max(0.0, dot(inDirection, outDirection));
+}
+
+float ComputeReflectance(in float3 inDirection, in float3 outDirection) {
+	return PI_1_PI; // lambert
+}
+
+float3 ComputeIncomingRadiance(in float3 inDirection) {
+    return EnvironmentMap.SampleLevel(sampler_EnvironmentMap, inDirection, 0.0).rgb;
+}
+
+float ComputePDF(in float3 inDirection) {
+	return PI_1_PI * 0.5; // uniform
+}
+
+float3 ComputeRadiance(in float3 inDirection, in float3 outDirection) {	
+	return 
+		ComputeIncomingRadiance(inDirection) * 		 
+		ComputeReflectance(inDirection, outDirection) * 
+		ComputeGeometricTerm(inDirection, outDirection) /
+		ComputePDF(inDirection);
+}
+
+
+float3 HemisphericalFibonacciMapping(float i, float n, float rand, float minZ)
+{
+	float phi = i * 2.0 * PI * GOLDENRATIO + rand;
+	float zi = 1.0 - (2.0*i + 1.0) / (2 * n);
+	zi = zi * (1.0 - minZ) + minZ;
+	float theta = sqrt(1.0 - zi * zi);
+	return normalize(float3(cos(phi) * theta, sin(phi) * theta, zi));
+}
+
+void GetCoordinateSystem(in float3 direction, out float3 tangent, out float3 bitangent, out float3 normal)
+{
+    normal = normalize(direction);
+	float3 up = abs(normal.y) < 0.999 ? float3(0, 1, 0) : float3(1,0,0);
+	tangent = normalize( cross( up, normal ) );
+	bitangent = cross( normal, tangent );   
+}
+
+float3 ComputeConvolutionForDirection(in float3 direction, in float cutOffAngle) {
+	float3 radianceSum = (float3) .0;
+
+	float3 u,v,w;
+	GetCoordinateSystem(direction, u, v, w);
+
+	float cutOffAngleCosine = cos(cutOffAngle);
+
+	float weigthsSum = 0.0;
+
+	for (int i = 0; i < SampleCount; i++) {
+		// uniform sampling of hemisphere
+		float3 sampleDirection = HemisphericalFibonacciMapping(i, SampleCount, 0, cutOffAngleCosine);
+		// transform to orthonormal basis of direction
+		float3 finalSampleDirection = sampleDirection.x * u + sampleDirection.y * v + sampleDirection.z * w;
+
+		float3 radianceSample = ComputeRadiance(finalSampleDirection, direction);
+		float coneWeight = 1.0; // all samples in cone
+		weigthsSum += coneWeight;
+		radianceSum += coneWeight * radianceSample;
+	}
+	radianceSum.rgb /= weigthsSum;
+
+	return radianceSum.rgb;
+}
+
+void Main(uint3 id)
+{
+    float2 uv = float2((id.x + 0.5) / EnvironmentMapResolution, (id.y + 0.5) / EnvironmentMapResolution);
+    uv = 2.0 * uv - float2(1, 1); // we want coordinates from -1 to 1
+    
+    //Calculate cutOffAngle based on ConvolutionLayerCount
+    int i = id.z / 6;
+    float cutOffAngle = (ConvolutionLayerCount - i) / (ConvolutionLayerCount * PI_HALF);
+    float3 dir;
+         if ((id.z % ConvolutionLayerCount) == 0) dir = normalize(float3(    1, -uv.y, -uv.x)); //posXDirection
+    else if ((id.z % ConvolutionLayerCount) == 1) dir = normalize(float3(   -1, -uv.y,  uv.x)); //negXDirection
+    else if ((id.z % ConvolutionLayerCount) == 2) dir = normalize(float3( uv.x,     1,  uv.y)); //posYDirection
+    else if ((id.z % ConvolutionLayerCount) == 3) dir = normalize(float3( uv.x,    -1, -uv.y)); //negYDirection
+    else if ((id.z % ConvolutionLayerCount) == 4) dir = normalize(float3( uv.x, -uv.y,     1)); //posZDirection
+    else if ((id.z % ConvolutionLayerCount) == 5) dir = normalize(float3(-uv.x, -uv.y, -   1)); //negZDirection
+    
+    float3 convolutedSkyColor = ComputeConvolutionForDirection(dir, cutOffAngle);
+    
+    FakeCubemapArrayRenderTexture[id] = float4(convolutedSkyColor, 1);
+}
+
+[numthreads(ThreadsX, ThreadsX, ThreadsZ)]
+void ConvoluteEnvironmentMapH (uint3 id : SV_DispatchThreadID) { Main(id); }
+
+[numthreads(ThreadsX, ThreadsX, ThreadsZ)]
+void ConvoluteEnvironmentMapM (uint3 id : SV_DispatchThreadID) { Main(id); }
+
+[numthreads(ThreadsX, ThreadsX, ThreadsZ)]
+void ConvoluteEnvironmentMapL (uint3 id : SV_DispatchThreadID) { Main(id); }
+```
+
+### Assets/Scripts/SphereTracing/Shader/EnvironmentMapRenderer.compute
+```
+#pragma kernel RenderEnvironmentMapH DEF_RW ST_R AO_R HIGH
+#pragma kernel RenderEnvironmentMapM DEF_RW ST_R AO_R MID
+#pragma kernel RenderEnvironmentMapL DEF_RW ST_R AO_R LOW
+
+#include "Defines/HighMidLowThreads.cginc"
+#include "Defines/SharedConstants.cginc"
+
+float3 Background(in float3 direction);
+
+RWTexture2DArray<float4> FakeCubemapRenderTexture;
+
+int EnvironmentMapResolution;
+float3 SunPosition;
+
+void Main(uint3 id)
+{
+    float2 uv = float2((id.x + 0.5) / EnvironmentMapResolution, (id.y + 0.5) / EnvironmentMapResolution);
+    uv = 2.0 * uv - float2(1.0, 1.0); // we want coordinates from -1 to 1
+    
+    float3 dir;
+         if (id.z == 0) dir = normalize(float3(    1, -uv.y, -uv.x)); //posXDirection
+    else if (id.z == 1) dir = normalize(float3(   -1, -uv.y,  uv.x)); //negXDirection
+    else if (id.z == 2) dir = normalize(float3( uv.x,     1,  uv.y)); //posYDirection
+    else if (id.z == 3) dir = normalize(float3( uv.x,    -1, -uv.y)); //negYDirection
+    else if (id.z == 4) dir = normalize(float3( uv.x, -uv.y,     1)); //posZDirection
+    else if (id.z == 5) dir = normalize(float3(-uv.x, -uv.y,    -1)); //negZDirection
+    
+    float3 skyColor = Background(dir);
+    
+    FakeCubemapRenderTexture[id] = float4(skyColor, 1);
+}
+
+[numthreads(ThreadsX, ThreadsX, ThreadsZ)]
+void RenderEnvironmentMapH (uint3 id : SV_DispatchThreadID) { Main(id); }
+
+[numthreads(ThreadsX, ThreadsX, ThreadsZ)]
+void RenderEnvironmentMapM (uint3 id : SV_DispatchThreadID) { Main(id); }
+
+[numthreads(ThreadsX, ThreadsX, ThreadsZ)]
+void RenderEnvironmentMapL (uint3 id : SV_DispatchThreadID) { Main(id); }
+
+
+/*
+ *  BACKGROUND
+ * 
+ *  Background/Sky related functions from here on. Need more comments
+ */
+float3 totalMie(in float T)
+{
+	float3 MieConst = float3(1.8399918514433978E14, 2.7798023919660528E14, 4.0790479543861094E14 );
+	float c = (0.2*T) * 10E-18;
+	return 0.434 * c * MieConst;
+}
+
+float sunIntensity(in float zenithAngleCos )
+{   
+	float e = 2.71828182845904523536028747135266249775724709369995957;
+	float EE = 1000.0;
+	float cutoffAngle = 1.6110731556870734;
+	float steepness = 1.5;
+	zenithAngleCos = clamp( zenithAngleCos, -1.0, 1.0 );
+	return EE * max( 0.0, 1.0 - pow( e, -( ( cutoffAngle - acos( zenithAngleCos)) / steepness ) ) );
+}
+
+float hgPhase(in float cosTheta,in float g)
+{
+	float ONE_OVER_FOURPI = 0.07957747154594767;
+	float g2 = pow( g, 2.0);
+	float inverse = 1.0 / pow( 1.0 - 2.0 * g * cosTheta + g2, 1.5);
+	return ONE_OVER_FOURPI * ( ( 1.0 - g2 ) * inverse );
+}
+
+float rayleighPhase(in float cosTheta ) 
+{
+	float THREE_OVER_SIXTEENPI = 0.05968310365946075;
+	return THREE_OVER_SIXTEENPI * ( 1.0 + pow( cosTheta, 2.0 ) );
+}
+
+float3 Uncharted2Tonemap(in float3 x)
+{
+	float A = 0.15;
+	float B = 0.50;
+	float C = 0.10;
+	float D = 0.20;
+	float E = 0.02;
+	float F = 0.30;
+	return ( ( x * ( A * x + C * B ) + D * E ) / ( x * ( A * x + B ) + D * F ) ) - E / F;
+}
+
+float3 Background(in float3 direction)
+{       
+	
+	float3 sunPosition = SunPosition;//float3( 4000.0, 150.0, 7000.0 );
+	float3 vSunDirection = normalize( sunPosition );
+
+	float3 up = float3(0.0, 1.0, 0.0);
+
+	float vSunE = sunIntensity( dot( vSunDirection, up ));
+	float vSunfade = 1.0 - clamp( 1.0 - exp((sunPosition.y / 450000.0 )), 0.0, 1.0);
+
+	float rayleigh = 2.0;
+	float3 totalRayleigh = float3( 5.804542996261093E-6, 1.3562911419845635E-5, 3.0265902468824876E-5 );
+	float rayleighCoefficient = rayleigh - (1.0 * (1.0 - vSunfade ));
+	float3 vBetaR = totalRayleigh * rayleighCoefficient;
+
+	float turbidity = 10.0;
+	float mieCoefficient = 0.005;
+	float vBetaM = totalMie( turbidity ) * mieCoefficient;
+
+	float pi = 3.141592653589793238462643383279502884197169;
+	float rayleighZenithLength = 8.4E3;
+	float mieZenithLength = 1.25E3;
+	float zenithAngle = acos(max(0.0, dot( up, normalize(direction) ) ) );
+	float inverse = 1.0 / ( cos( zenithAngle ) + 0.15 * pow( 93.885 - ( ( zenithAngle * 180.0 ) / pi ), -1.253) );
+	float sR = rayleighZenithLength * inverse;
+	float sM = mieZenithLength * inverse;
+
+	float3 Fex = exp( -( vBetaR * sR + vBetaM * sM) );
+
+	float cosTheta = dot( normalize(direction), vSunDirection );
+	float rPhase = rayleighPhase( cosTheta * 0.5 + 0.5);
+	float3 betaRTheta = vBetaR * rPhase;
+
+	float mieDirectionalG = 0.8;
+	float mPhase = hgPhase( cosTheta, mieDirectionalG);
+	float3 betaMTheta = vBetaM * mPhase;
+
+	float3 Lin = pow( vSunE * ( ( betaRTheta + betaMTheta ) / ( vBetaR + vBetaM ) ) * ( 1.0 - Fex ), float3( 1.5 , 1.5, 1.5) );
+	Lin *= lerp( float3( 1.0,1.0,1.0 ), pow( vSunE * ( ( betaRTheta + betaMTheta ) / ( vBetaR + vBetaM ) ) * Fex, float3( 1.0 / 2.0, 1.0 / 2.0, 1.0 / 2.0 ) ), clamp( pow( 1.0 - dot( up, vSunDirection ), 5.0 ), 0.0, 1.0 ) );
+
+	float theta = acos(direction.y);
+	float phi = atan2(direction.z, direction.x);
+	float2 uv = float2(phi, theta);
+	float3 L0 = float3(0.1,0.1,0.1) * Fex;
+
+	float sunAngularDiameterCos = 0.999956676946448443553574619906976478926848692873900859324;
+	float sundisk = smoothstep( sunAngularDiameterCos, sunAngularDiameterCos + 0.00002, cosTheta);
+	L0 += ( vSunE * 19000.0 * Fex) * sundisk;
+
+	float luminance = 1.0;
+	float whiteScale = 1.0748724675633854;
+	float3 texColor = (Lin + L0) * 0.04 + float3(0.0, 0.0003, 0.00075);
+	float3 curr = Uncharted2Tonemap( ( log2( 2.0 / pow( luminance, 4.0 ) ) ) * texColor );
+	float3 color = curr * whiteScale;
+
+	float retc =  1.0 / ( 1.2 + ( 1.2 * vSunfade ) );
+	float3 retColor = pow( color, float3(retc, retc, retc));
+
+	//return direction;
+	return retColor;
+}
+```
+
+### Assets/Scripts/SphereTracing/Shader/PseudoSeparableCrossBilateralFilter.compute
+```
+#pragma kernel AOHorizontalH    ST_R    AO_R    HORIZONTAL    HIGH1D
+#pragma kernel AOHorizontalM    ST_R    AO_R    HORIZONTAL    MID1D
+#pragma kernel AOHorizontalL    ST_R    AO_R    HORIZONTAL    LOW1D
+#pragma kernel AOVerticalH      ST_R    AO_R    VERTICAL      HIGH1D
+#pragma kernel AOVerticalM      ST_R    AO_R    VERTICAL      MID1D
+#pragma kernel AOVerticalL      ST_R    AO_R    VERTICAL      LOW1D
+
+#include "Defines/HighMidLowThreads.cginc"
+#include "Defines/Structs.cginc"
+
+#include "Inputs/SharedInputs.cginc"
+#include "Inputs/TextureAccessAwareInputs.cginc"
+
+#include "Utils/StructSampleFuncs.cginc"
+#include "Utils/StructLoadFuncs.cginc"
+#include "Utils/StructWriteFuncs.cginc"
+
+//Filter kernelsize to each side of pixel. Total kernelsize is 2*FilterSize + 1
+//#define FilterSize 4
+#define FilterSize 14
+float RangeSigma;
+RWTexture2DArray<float4> AmbientOcclusionTarget;
+
+struct BilateralData 
+{
+    float4 Ao;
+    float3 Normal;
+    float TraceDistance;
+};
+
+#ifdef HORIZONTAL
+    #define ThreadLength ThreadsX
+    #define SharedDataSize (2*FilterSize) + ThreadsX
+    #define CASTDIR(xy) xy.x
+#else //VERTICAL
+    #define ThreadLength ThreadsY
+    #define SharedDataSize (2*FilterSize) + ThreadsY
+    #define CASTDIR(xy) xy.y
+#endif
+
+#define PAD(xy) (CASTDIR(xy) + FilterSize)
+
+groupshared BilateralData gsBilateralData[SharedDataSize];
+
+void Main(uint3 id, uint3 gtid, float2 direction)
+{
+    float2 uv = float2((id.x + 0.5) / Resolution.x, (id.y + 0.5) / Resolution.y);
+    float2 uvstep = float2(1.0 / Resolution.x, 1.0 / Resolution.y) * direction;
+    
+    BilateralData centerData;
+    centerData.Ao = LoadAmbientOcclusionAsFloat4(id.xy, id.z);
+    centerData.Normal = LoadNormal(id.xy, id.z);
+    centerData.TraceDistance = LoadTraceDistance(id.xy, id.z);
+    
+    gsBilateralData[PAD(gtid.xy)] = centerData;
+    
+    [branch]
+    if (CASTDIR(gtid.xy) == 0) {
+        //Load BilateralData 'below'
+        [unroll]
+        for(int i = 1; i <= FilterSize; i++) {
+            BilateralData bData;
+            //Use sample functions for correct bound wrap
+            float2 curUv = uv - (i * uvstep);
+            bData.Ao = SampleAmbientOcclusionAsFloat4(sampler_point_clamp, curUv, id.z, 0.0);
+            bData.Normal = SampleNormal(sampler_point_clamp, curUv, id.z, 0.0);
+            bData.TraceDistance = SampleTraceDistance(sampler_point_clamp, curUv, id.z, 0.0);
+            
+            gsBilateralData[PAD(gtid.xy) - i] = bData;
+        }
+        
+    } else if (CASTDIR(gtid.xy) == (ThreadLength - 1)) 
+    {
+        //Load BilateralData 'above'
+        [unroll]
+        for(int i = 1; i <= FilterSize; i++) {
+            
+            BilateralData bData;
+            //Use sample functions for correct bound wrap
+            float2 curUv = uv + (i * uvstep);
+            bData.Ao = SampleAmbientOcclusionAsFloat4(sampler_point_clamp, curUv, id.z, 0.0);
+            bData.Normal = SampleNormal(sampler_point_clamp, curUv, id.z, 0.0);
+            bData.TraceDistance = SampleTraceDistance(sampler_point_clamp, curUv, id.z, 0.0);
+            
+            gsBilateralData[PAD(gtid.xy) + i] = bData;
+        }
+    }
+    
+    //Blocks execution of all threads in a group until all group shared accesses have been completed and all threads in the group have reached this call.
+    GroupMemoryBarrierWithGroupSync();
+        
+    //const float discreteWeights[5] = {0.20236, 0.179044, 0.124009, 0.067234, 0.028532};
+    const float discreteWeights[15] = {0.079954, 0.078376, 0.073827, 0.066823, 0.05812, 0.048575, 0.039011, 0.030106, 0.022325, 0.015908, 0.010893, 0.007167, 0.004531, 0.002753, 0.001607};
+    const float epsilon = 0.001;
+    
+    float4 aoFiltered;
+    aoFiltered = centerData.Ao * discreteWeights[0];
+    float totalWeight = discreteWeights[0];
+
+    [unroll]
+    for (int i = 1; i <= FilterSize; i++) {
+        [unroll]
+        for(int sign = -1; sign <= 1; sign += 2){
+            BilateralData bData;
+            bData = gsBilateralData[PAD(gtid.xy) + sign * i];
+            
+            float depthDiff = abs(centerData.TraceDistance - bData.TraceDistance);
+            float depthWeight = 1.0 / (epsilon + centerData.TraceDistance * .01 + depthDiff); //Warning: centerData.TraceDistance * .01 is some arbitrary linear factor.
+            
+            float normalWeight = pow(abs(dot(centerData.Normal, bData.Normal)), 32);
+
+            float combinedWeight = discreteWeights[i] * depthWeight * normalWeight;
+            totalWeight += combinedWeight;
+            
+            aoFiltered += bData.Ao * combinedWeight;
+        }
+    }
+    
+    aoFiltered /= totalWeight;
+
+    AmbientOcclusionTarget[id] = aoFiltered;
+    
+}
+
+[numthreads(ThreadsX, 1, ThreadsZ)]
+void AOHorizontalH ( uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID) { Main(id, gtid, float2(1, 0)); }
+[numthreads(ThreadsX, 1, ThreadsZ)]
+void AOHorizontalM ( uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID) { Main(id, gtid, float2(1, 0)); }
+[numthreads(ThreadsX, 1, ThreadsZ)]
+void AOHorizontalL ( uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID) { Main(id, gtid, float2(1, 0)); }
+[numthreads(1, ThreadsY, ThreadsZ)]
+void AOVerticalH ( uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID) { Main(id, gtid, float2(0, 1)); }
+[numthreads(1, ThreadsY, ThreadsZ)]
+void AOVerticalM ( uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID) { Main(id, gtid, float2(0, 1)); }
+[numthreads(1, ThreadsY, ThreadsZ)]
+void AOVerticalL ( uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID) { Main(id, gtid, float2(0, 1)); }
+```
+
+### Assets/Scripts/SphereTracing/Shader/SphereTracing.compute
+```
+﻿#pragma kernel SphereTracingFPassH  ST_RW    F_PASS   HIGH
+#pragma kernel SphereTracingFPassM  ST_RW    F_PASS   MID
+#pragma kernel SphereTracingFPassL  ST_RW    F_PASS   LOW
+
+#pragma kernel SphereTracingKPassH  ST_RW    K_PASS   HIGH
+#pragma kernel SphereTracingKPassM  ST_RW    K_PASS   MID
+#pragma kernel SphereTracingKPassL  ST_RW    K_PASS   LOW
+
+#include "Defines/HighMidLowThreads.cginc"
+#include "Defines/SharedConstants.cginc"
+#include "Defines/Structs.cginc"
+
+#include "Inputs/SharedInputs.cginc"
+#include "Inputs/SphereTracingInputs.cginc"
+#include "Inputs/TextureAccessAwareInputs.cginc"
+
+#include "Utils/ImplicitBasics.cginc" 
+#include "Utils/StructLoadFuncs.cginc"
+#include "Utils/StructWriteFuncs.cginc"
+
+#include "WorldLogic.cginc"
+
+float3 CalculateNormal(in float3 pos)
+{
+    //Faster normal Calculation
+    const float2 eps = float2(1.0,-1.0)*0.5773*0.005;
+    
+    return normalize( eps.xyy * Map( pos + eps.xyy ).x + 
+					  eps.yyx * Map( pos + eps.yyx ).x + 
+					  eps.yxy * Map( pos + eps.yxy ).x + 
+					  eps.xxx * Map( pos + eps.xxx ).x );
+    /*
+	const float3 epsilon = float3(0.01, 0.0, 0.0);
+	
+	float gradientX = Map(pos + epsilon.xyy).x - Map(pos - epsilon.xyy).x;
+	float gradientY = Map(pos + epsilon.yxy).x - Map(pos - epsilon.yxy).x;
+	float gradientZ = Map(pos + epsilon.yyx).x - Map(pos - epsilon.yyy).x;
+	
+	float3 normal = float3(gradientX, gradientY, gradientZ);
+	
+	return normalize(normal);*/
+}
+
+/*
+ *  RayMarch
+ * 
+ *  Performs Sphere Tracing along given Ray
+ *      x: Total trace distance travelled along Ray (t * rayDir)
+ *      y: Material ID of hit object (-1 if nothing hit)
+ */
+void RayMarch(in Ray r, inout Hit surfaceHit, inout Hit representHit)
+{
+	//TODO: Don't use clippingplane as starting trace distance for reflections 
+	surfaceHit.TraceDistance = ClippingPlanes.x;    //Start tracing at Near Plane
+	surfaceHit.DistanceToWorld = ClippingPlanes.y;  
+	surfaceHit.Alpha = 1;
+	surfaceHit.MaterialId = -1; //No material is represented by material <= 0
+	
+	representHit.Position = float3(0,0,0);
+    representHit.TraceDistance = ClippingPlanes.x; //Start tracing at Near Plane
+	representHit.DistanceToWorld = 1000000;
+	representHit.Alpha = 0;
+	representHit.MaterialId = -1; //No material is represented by material <= 0
+    
+    //const float radiusP = 0.01; //radius of Pixel
+    bool representFound = false;
+    float t = ClippingPlanes.x;
+    
+    //float3 pointOnRay = r.Origin + t * r.Direction;
+    float2 currentMap = Map(r.Origin + t * r.Direction); //start with negative distance and no material
+    int i = 0;
+    for(; i < SphereTracingSteps; i++)
+	{   
+	    float epsilon = 0.0015 * t;
+	    //Test if we hit the surface
+	    if (currentMap.x <= epsilon) {
+	        //We hit the surface.
+	        surfaceHit.DistanceToWorld = currentMap.x;
+            surfaceHit.TraceDistance = t;
+            surfaceHit.MaterialId = currentMap.y;
+            surfaceHit.Position = r.Origin + surfaceHit.TraceDistance * r.Direction;
+            break;
+	    }
+	    
+	    //We didn't hit the surface yet so sample next sphere
+	    float2 nextMap = Map(r.Origin + (t + currentMap.x) * r.Direction);
+        
+        //Test if we are inside pixelRadius
+        if (currentMap.x < (t * RadiusPixel)) {
+            //We are inside the pixelRadius but we didn't hit a surface
+            //Test if the next sphere is bigger than the current one
+            if (nextMap.x > currentMap.x){
+                //Next sphere is bigger, meaning we move away from a surface
+                //Test if we have a represent by making sure it's the first time a sphere gets bigger next step
+                if (representFound == false){
+                    //We found a represent
+                    representFound = true;
+                    //But we only want to save it, if it's the smallest represent in sphere radius
+                    //and if we either did not found a represent yet or if we are still on same Material //this is Hacky and not garantued to produce nice results
+                    if (currentMap.x < representHit.DistanceToWorld && (representHit.MaterialId == -1 || representHit.MaterialId == currentMap.y)){
+                        //We found a new smallest represent.
+                        representHit.DistanceToWorld = currentMap.x;
+                        representHit.TraceDistance = t;
+                        representHit.MaterialId = currentMap.y;
+                    }
+                }
+            } else {
+                //Next sphere is not bigger, meaning we are getting closer to a surface
+                representFound = false;
+            }
+        }
+	    
+	    t += currentMap.x;
+	    currentMap = nextMap;
+	    
+	    //Test if we exceeded far clippingplane
+	    if (t > ClippingPlanes.y){
+	        surfaceHit.TraceDistance = ClippingPlanes.y;
+	        surfaceHit.MaterialId = -1;
+	        break;
+	    }
+	}
+	
+	//Test if we found a represent by checking its MaterialId
+	if (representHit.MaterialId >= 0) {
+	    //Calculate how much the represent covers the pixel
+	    representHit.Alpha = 1.0 - representHit.DistanceToWorld / (representHit.TraceDistance * RadiusPixel);
+	    representHit.Position = r.Origin + representHit.TraceDistance * r.Direction;
+	}
+    
+    //Test if we reached max SphereTracingSteps
+    if (i == SphereTracingSteps) {
+        //Use latest hit instead of background
+        surfaceHit.TraceDistance = t;
+		surfaceHit.MaterialId = currentMap.y;
+		surfaceHit.DistanceToWorld = currentMap.x;
+		surfaceHit.Position = r.Origin + surfaceHit.TraceDistance * r.Direction;
+    }
+}
+
+/*
+ *  RayMarch
+ * 
+ *  Performs Sphere Tracing along given Ray
+ *      x: Total trace distance travelled along Ray (t * rayDir)
+ *      y: Material ID of hit object (-1 if nothing hit)
+ */
+void RayMarchNoAA(in Ray r, inout Hit surfaceHit, inout Hit representHit)
+{
+	//TODO: Don't use clippingplane as starting trace distance for reflections 
+	surfaceHit.TraceDistance = ClippingPlanes.x;    //Start tracing at Near Plane
+	surfaceHit.DistanceToWorld = ClippingPlanes.y;  
+	surfaceHit.Alpha = 1;
+	surfaceHit.MaterialId = -1; //No material is represented by material <= 0
+	
+	representHit.Position = float3(0,0,0);
+    representHit.TraceDistance = ClippingPlanes.x; //Start tracing at Near Plane
+	representHit.DistanceToWorld = 1000000;
+	representHit.Alpha = 0;
+	representHit.MaterialId = -1; //No material is represented by material <= 0
+    
+    //const float radiusP = 0.01; //radius of Pixel
+    float t = ClippingPlanes.x;
+    
+    //float3 pointOnRay = r.Origin + t * r.Direction;
+    float2 currentMap = Map(r.Origin + t * r.Direction); //start with negative distance and no material
+    int i = 0;
+    for(; i < SphereTracingSteps; i++)
+	{   
+	    float epsilon = 0.0015 * t;
+	    //Test if we hit the surface
+	    if (currentMap.x <= epsilon) {
+	        //We hit the surface.
+	        surfaceHit.DistanceToWorld = currentMap.x;
+            surfaceHit.TraceDistance = t;
+            surfaceHit.MaterialId = currentMap.y;
+            surfaceHit.Position = r.Origin + surfaceHit.TraceDistance * r.Direction;
+            break;
+	    }
+	    
+	    //We didn't hit the surface yet so sample next sphere
+	    float2 nextMap = Map(r.Origin + (t + currentMap.x) * r.Direction);
+
+	    t += currentMap.x;
+	    currentMap = nextMap;
+	    
+	    //Test if we exceeded far clippingplane
+	    if (t > ClippingPlanes.y){
+	        surfaceHit.TraceDistance = ClippingPlanes.y;
+	        surfaceHit.MaterialId = -1;
+	        break;
+	    }
+	}
+	    
+    //Test if we reached max SphereTracingSteps
+    if (i == SphereTracingSteps) {
+        //Use latest hit instead of background
+        surfaceHit.TraceDistance = t;
+		surfaceHit.MaterialId = currentMap.y;
+		surfaceHit.DistanceToWorld = currentMap.x;
+		surfaceHit.Position = r.Origin + surfaceHit.TraceDistance * r.Direction;
+    }
+}
+
+void EvaluateHit(in uint2 xy, in Ray r, in Hit hit, inout SphereTracingData sd)
+{
+    sd.Position = hit.Position;
+    sd.MaterialId = hit.MaterialId;
+    sd.TraceDistance = hit.TraceDistance;
+    if (sign(hit.MaterialId) >= 0)
+    {
+        sd.Normal = CalculateNormal(hit.Position);
+        sd.RayDirection = r.Direction;
+        sd.Alpha *= hit.Alpha;
+    }
+    //if the background is hit
+    else
+    {
+        sd.Normal = (float3) 0;
+        sd.RayDirection = r.Direction;
+        sd.Alpha *= hit.Alpha;
+    }
+}
+
+void Main(uint3 id)
+{
+    float2 uv = float2((id.x + 0.5) / Resolution.x, (id.y + 0.5) / Resolution.y);
+    
+    SphereTracingData surface;
+    SphereTracingData represent;
+    
+    #ifdef F_PASS
+        surface.Alpha = 1.0;
+        represent.Alpha = 1.0;
+        //Create Ray through current Pixel
+        Ray r;
+        r.uv = uv;
+        r.Origin = CameraPos;
+        float4 rayDir = (lerp(
+            lerp(CameraFrustumEdgeVectors[3], CameraFrustumEdgeVectors[2], uv.x),
+            lerp(CameraFrustumEdgeVectors[0], CameraFrustumEdgeVectors[1], uv.x),
+            uv.y));
+        r.Direction = (mul(CameraInverseViewMatrix, rayDir).xyz);
+    #elif K_PASS
+        //Read SphereTracingData from previuos pass
+        surface = LoadSphereTracingData(id.xy, 0);
+        represent = LoadSphereTracingData(id.xy, 1);
+        //Do not calculate pass if neither surface nor represent alpha has an impact
+        if (surface.Alpha <= ALPHAEPSILON && represent.Alpha <= ALPHAEPSILON) return;        
+        
+        /*
+         * TODO: Handle transparent materials
+         *          Somehow need to exlude the transparent object in signed distance field
+         *          Maybe use ScreenSpace Reflections in this case and only follow transparent ray
+         *          Or use the represent surface for transparency/reflection since it is only needed for edges
+         */
+        
+        //Evaluate Material to calculate new Ray Direction
+        StMaterial surfaceMat = MaterialBuffer[surface.MaterialId];
+        StMaterial representMat = MaterialBuffer[represent.MaterialId];
+        surface.Alpha *= surfaceMat.Metallic; //TODO: metallic ist not the correct reflective factor
+        represent.Alpha *= representMat.Metallic;//TODO: metallic ist not the correct reflective factor
+        
+        if (sign(surface.MaterialId) < 0) surface.Alpha = 0;
+        if (sign(represent.MaterialId) < 0) represent.Alpha = 0;
+        //Test again if we need to calculate this pass
+        [branch]
+        if (surface.Alpha <= ALPHAEPSILON && represent.Alpha <= ALPHAEPSILON){
+            //If not, we need to write the new alphas to texture before we stop
+            WriteSphereTracingData(id.xy, 0, surface);
+            WriteSphereTracingData(id.xy, 1, represent);
+            return;
+        }
+        //We only follow one ray though, so we choose the one with greater visual impact
+        Ray r;
+        r.uv = uv;
+        if (surface.Alpha >= represent.Alpha) {
+            r.Origin = surface.Position;
+            //normalize(dir - 2 * normalize( dot(dir, normal) * normal))  
+            r.Direction = reflect(normalize(surface.RayDirection), surface.Normal);
+            //r.Direction = reflect(normalize(surface.RayDirection), surface.Normal);
+        } else {
+            r.Origin = represent.Position;
+            r.Direction = reflect(normalize(represent.RayDirection), represent.Normal);
+            //r.Direction = reflect(normalize(represent.RayDirection), represent.Normal);
+        }
+    #endif
+
+    Hit surfaceHit;
+    Hit representHit;
+    [branch]
+    if (DisableAntiAliasing){
+        RayMarchNoAA(r, surfaceHit, representHit);
+    } else {
+        RayMarch(r, surfaceHit, representHit);
+    }
+    EvaluateHit(id.xy, r, surfaceHit, surface);
+    EvaluateHit(id.xy, r, representHit, represent);
+
+    WriteSphereTracingData(id.xy, 0, surface);
+    WriteSphereTracingData(id.xy, 1, represent);
+}
+
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void SphereTracingFPassH (uint3 id : SV_DispatchThreadID) { Main(id); }
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void SphereTracingFPassM (uint3 id : SV_DispatchThreadID) { Main(id); }
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void SphereTracingFPassL (uint3 id : SV_DispatchThreadID) { Main(id); }
+
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void SphereTracingKPassH (uint3 id : SV_DispatchThreadID) { Main(id); }
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void SphereTracingKPassM (uint3 id : SV_DispatchThreadID) { Main(id); }
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void SphereTracingKPassL (uint3 id : SV_DispatchThreadID) { Main(id); }
+```
+
+### Assets/Scripts/SphereTracing/Shader/SphereTracingDownSampler.compute
+```
+﻿#pragma kernel SphereTracingDownSampleH    ST_R     ST_LOW_RW    HIGHDOWNSAMPLED
+#pragma kernel SphereTracingDownSampleM    ST_R     ST_LOW_RW    MIDDOWNSAMPLED
+#pragma kernel SphereTracingDownSampleL    ST_R     ST_LOW_RW    LOWDOWNSAMPLED
+
+
+#include "Defines/HighMidLowThreads.cginc"
+#include "Defines/Structs.cginc"
+
+#include "Inputs/SharedInputs.cginc"
+#include "Inputs/TextureAccessAwareInputs.cginc"
+
+#include "Utils/StructCustomSampleFuncs.cginc"
+#include "Utils/StructSampleFuncs.cginc"
+#include "Utils/StructWriteFuncs.cginc"
+
+bool EnableCheckerBoardDownsampling;
+
+void Main(uint3 id, float2 direction)
+{
+    float2 uvCenterLow = float2((id.x + 0.5) / AoResolution.x, (id.y + 0.5) / AoResolution.y);
+    float2 uvStepFull = float2(1.0 / Resolution.x, 1.0 / Resolution.y) * direction;
+
+    SphereTracingData stDownsampled;
+    [branch]
+    if (EnableCheckerBoardDownsampling){
+        stDownsampled = DownsampleSphereTracingData(uvCenterLow, uvStepFull, id.z, 0.0);
+    } else {
+        stDownsampled = SampleSphereTracingData(sampler_point_clamp, uvCenterLow, id.z, 0.0);
+    }
+    
+    WriteSphereTracingDataLow(id.xy, id.z, stDownsampled);
+}
+
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void SphereTracingDownSampleH ( uint3 id : SV_DispatchThreadID) { Main(id, float2(1, 0)); }
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void SphereTracingDownSampleM ( uint3 id : SV_DispatchThreadID) { Main(id, float2(1, 0)); }
+[numthreads(ThreadsX, ThreadsY, ThreadsZ)]
+void SphereTracingDownSampleL ( uint3 id : SV_DispatchThreadID) { Main(id, float2(1, 0)); }
+```

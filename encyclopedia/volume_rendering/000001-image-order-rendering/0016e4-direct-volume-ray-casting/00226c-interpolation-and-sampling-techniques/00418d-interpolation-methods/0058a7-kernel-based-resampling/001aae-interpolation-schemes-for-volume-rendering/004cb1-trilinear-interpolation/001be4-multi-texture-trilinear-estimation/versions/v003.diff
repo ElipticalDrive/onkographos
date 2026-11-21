@@ -1,0 +1,260 @@
+--- v002.md
++++ v003.md
+@@ -4,144 +4,143 @@
+ 
+ ## Overview
+-Multi-Texture Trilinear Estimation is a direct volume ray casting technique that renders scalar field data defined on a 3D rectilinear grid by stacking parallel quads textured with scalar information and compositing them in depth order [S1, unofficial]. It solves the problem of visualizing space data where grid cells are not uniform cubes by reconstructing scalar values from a Piecewise Rational (PRI) representation using a hybrid interpolation scheme [S1, S2, unofficial]. It sets itself apart from basic 2D texture rendering by substituting standard trilinear interpolation with two bilinear interpolations and one linear interpolation to improve image quality and speed [S2, unofficial], and from [Trilinear Interpolation](1531-trilinear-interpolation.md) by relying on a stack of slices and dependent texturing rather than direct 3D texture mapping or software-based coordinate array interpolation [S1, S2, unofficial].
++Multi-Texture Trilinear Estimation is a slice-based volume rendering technique that reconstructs scalar values from a Piecewise Regular Interval (PRI) representation using trilinear interpolation, implemented via a stack of parallel quads textured with scalar information [S1, S3, unofficial]. It solves the problem of visualizing space data defined on a 3D rectilinear grid by substituting direct 3D texture sampling with a two-stage interpolation process (two bilinear and one linear interpolation) to improve image quality over basic 2D texture rendering while maintaining speed [S2, unofficial]. It differs from its siblings by explicitly relying on the PRI data structure and dependent texturing for spline access, whereas [Plenoxels Interpolation Methods](935-plenoxels-interpolation-methods.md) uses spherical harmonics, [Semi-Analytical Volume Rendering with Trilinear Interpolation](1312-semi-analytical-volume-rendering-with-trilinear-interpolatio.md) uses analytical integration, and [Trilinear Interpolation for X-ray Attenuation Approximation](10000-trilinear-interpolation-for-x-ray-attenuation-approximation.md) focuses on specific physical approximations [S1, S2, S3, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   Volumetric scalar field data [S1, unofficial].
+-*   A Piecewise Rational (PRI) representation of the data, stored as two float textures: one for scalar values and one for knot distances [S1, unofficial].
+-*   An index texture mapping spatial positions to spline segments [S1, unofficial].
+-*   Camera view direction [S1, unofficial].
+-
+-**Outputs:**
+-*   Final 2D image with color and opacity values [S1, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A Piecewise Regular Interval (PRI) representation of the volume data, consisting of an index texture and a knots texture (storing scalar values and knot distances) [S1, S3, unofficial]. The PRI is constructed along a specific sampling direction [S3, unofficial].
++*   **Output:** A 2D image with color and opacity values computed via front-to-back or back-to-front alpha compositing [S1, S3, unofficial].
+ 
+ **Data Structures:**
+-1.  **Index Texture:** 2D texture where each texel corresponds to a pixel on the PRI sampling plane [S1, unofficial].
+-2.  **Knots Texture:** 2D texture storing the linear splines [S1, unofficial]. Each texel (or set of texels) represents a spline segment [S1, unofficial]. The knots within each spline are sorted in depth (z-direction) [S1, unofficial].
+-3.  **Slice Geometry:** A stack of parallel quads [S1, unofficial].
+-    *   *Axis-aligned:* Slices are perpendicular to the PRI sampling direction [S1, unofficial].
+-    *   *View-aligned:* Slices are parallel to the image plane [S1, unofficial].
+-
+-**Parameters:**
+-*   View angle threshold: 45 degrees. If the view direction changes by more than 45 degrees, switching artifacts may occur unless multiple PRI copies are used [S2, unofficial].
+-*   Number of PRIs: Minimum 1 for view-aligned; minimum 3 (orthogonal) for axis-aligned to support arbitrary views [S1, unofficial].
++*   **Index Texture:** A 2D texture where each texel corresponds to a pixel on the PRI's sampling plane. It stores the identifier or pointer to the linear spline associated with that grid location [S1, S3, unofficial].
++*   **Knots Texture:** Stores the linear splines. In the implementation described, this is stored as two separate textures with float format for high precision: one for scalar values and one for the distance values of the knots [S1, unofficial]. The knots of each spline are sorted in depth [S3, unofficial].
+ 
+ **Steps:**
+-1.  **Slice Positioning:** Position a stack of parallel quads. For axis-aligned slicing, align them perpendicular to the chosen PRI sampling direction. For view-aligned slicing, align them parallel to the image plane [S1, unofficial].
+-2.  **Projection:** For each pixel fragment at position $(x, y, z)$ in the PRI coordinate space, parallel project the position to the PRI's sampling plane by dropping the $z$ coordinate. Identify the four nearest neighbor pixels on the sampling plane surrounding the projection point $(x, y)$ [S1, unofficial].
+-3.  **Index Retrieval:**
+-    *   *Axis-aligned:* Map the index texture to each slice using texture coordinates $(0,0), (0,h), (w,h), (w,0)$ where $w,h$ are the index texture dimensions. Retrieve the four nearest texels in the index texture [S1, unofficial].
+-    *   *View-aligned:* Use inverse mapping (e.g., OpenGL TexGen) to retrieve the four nearest texels [S1, unofficial].
+-4.  **Spline Segment Search:** For each of the four retrieved index texels, access the associated linear spline in the knots texture via dependent texturing. Perform a binary search on the knots (which are sorted in depth) to find the specific spline segment that overlaps the fragment's $z$ location [S1, unofficial].
+-5.  **Interpolation:** Perform trilinear interpolation:
+-    *   Perform four linear interpolations in the $z$ direction using the four found spline segments [S1, unofficial].
+-    *   Perform bilinear interpolation in the $x$ and $y$ directions using the results of the four linear interpolations [S1, unofficial].
+-    *   *Alternative Description:* The method substitutes full trilinear interpolation with two bilinear interpolations and one linear interpolation to achieve a better and faster estimation of the scalar at an arbitrary position along the chosen axis [S2, unofficial].
+-6.  **Classification and Compositing:** Classify the reconstructed scalar value (e.g., transfer function mapping to color and opacity) and composite the fragment in depth order (front-to-back or back-to-front) to the final image [S1, unofficial].
++The algorithm reconstructs a trilinearly interpolated scalar value at a pixel fragment located at $(x, y, z)$ in the PRI coordinate space through three main steps [S1, S3, unofficial]:
++
++1.  **Projection and Neighbor Identification:** Parallel project the position of the pixel fragment to the PRI's sampling plane by dropping the $z$ coordinate. Identify the four pixels on the sampling plane that surround the projection point $(x, y)$, i.e., the four nearest neighbors [S1, S3, unofficial].
++2.  **Spline Search:** Search each of the four linear splines associated with the neighborhood of pixels identified in Step 1 to find the specific spline segment that overlaps the pixel fragment's $z$ location [S1, S3, unofficial].
++3.  **Interpolation:** Perform trilinear interpolation by executing four linear interpolations in the $z$ direction using the four spline segments found in Step 2, followed by bilinear interpolation in the $x$ and $y$ directions [S1, S3, unofficial].
++
++**Implementation Details (Slicing Strategies):**
++The method supports two slicing paradigms [S1, S3, unofficial]:
++
++*   **Axis-Aligned Slicing:** The stack of slices is positioned perpendicular to the PRI's sampling direction. To map the index texture to each rendering slice, texture coordinates at the four corners are set to $(0, 0)$, $(0, h)$, $(w, h)$, and $(w, 0)$, where $w$ and $h$ are the pixel dimensions of the index texture. This avoids inverse mapping from eye space to object space [S1, S3, unofficial].
++*   **View-Aligned Slicing:** The stack of slices is positioned parallel to the image plane. The inverse mapping from eye space to object space is performed using OpenGL's TexGen operation, similar to shadow mapping [S3, unofficial].
++
++**Shader Execution:**
++The shader program retrieves the four nearest texels in the index texture and accesses each associated linear spline in the knots texture via dependent texturing [S1, S3, unofficial]. Since the knots are sorted in depth, the search for the spline segment including the pixel fragment's $z$ location is performed with a binary search [S3, unofficial]. Finally, the shader computes the trilinear interpolation [S1, S3, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def render_slice_stack(slices, index_texture, knots_texture, view_direction):
+-    # Determine slicing mode based on view direction
+-    if view_direction is parallel_to_axes:
+-        mode = "axis_aligned"
+-        # Requires 3 orthogonal PRIs; select the one most parallel to view
+-        pri = select_most_parallel_PRI(view_direction, [PRI_X, PRI_Y, PRI_Z])
++def render_slice_stack(pri_index_texture, pri_knots_texture, view_matrix, projection_matrix, resolution):
++    """
++    Renders volume using Multi-Texture Trilinear Estimation.
++    pri_index_texture: 2D texture mapping grid positions to spline IDs.
++    pri_knots_texture: 2D texture storing knot distances and scalar values.
++    """
++    image = empty_image(resolution)
++    
++    # Determine slicing strategy based on view direction relative to PRI axes
++    if is_axis_aligned(view_matrix, pri_axes):
++        strategy = "axis-aligned"
+     else:
+-        mode = "view_aligned"
+-        # Requires at least 1 PRI
+-        pri = PRI_0
++        strategy = "view-aligned"
+ 
+-    for fragment in slices:
+-        x, y, z = fragment.position
+-        # Step 1: Parallel project to sampling plane by dropping z
+-        x_proj, y_proj = x, y
+-        
+-        # Step 2: Identify four nearest neighbors on sampling plane
+-        neighbors = get_four_nearest_neighbors(x_proj, y_proj)
+-        
+-        # Step 3 & 4: Retrieve index texels, access knots via dependent texturing, binary search
+-        spline_segments = []
+-        for neighbor in neighbors:
+-            # Access knots texture via dependent texturing
+-            spline_data = dependent_texture_lookup(index_texture, knots_texture, neighbor)
+-            # Binary search on knots (sorted in depth) to find segment overlapping z
+-            segment = binary_search_knots(spline_data.knots, z)
+-            spline_segments.append(segment)
++    for slice in slice_stack:
++        # Set up texture coordinates for the current slice quad
++        if strategy == "axis-aligned":
++            # Corners mapped to (0,0), (0,h), (w,h), (w,0)
++            tex_coords = get_axis_aligned_coords(slice, pri_index_texture.width, pri_index_texture.height)
++        else:
++            # Use TexGen for inverse mapping
++            tex_coords = get_view_aligned_coords(slice, view_matrix, pri_index_texture)
++
++        # Render the slice quad
++        for pixel in slice.pixels:
++            # Step 1: Project to sampling plane and find 4 neighbors
++            # Drop z to get (x, y) on sampling plane
++            proj_x, proj_y = pixel.x, pixel.y
++            neighbors = get_four_nearest_neighbors(proj_x, proj_y, pri_index_texture)
+             
+-        # Step 5: Interpolation
+-        # Four linear interpolations in z direction
+-        z_values = []
+-        for segment in spline_segments:
+-            val = linear_interpolate(segment, z)
+-            z_values.append(val)
+-        # Bilinear interpolation in x and y directions
+-        scalar_value = bilinear_interpolate(z_values, x_proj, y_proj)
+-        
+-        # Step 6: Classification and Compositing
+-        color, opacity = transfer_function(scalar_value)
+-        composite_front_to_back(color, opacity)
++            scalar_values = []
++            knot_distances = []
++            
++            for neighbor in neighbors:
++                # Step 2: Access spline via dependent texturing
++                spline_id = pri_index_texture.sample(neighbor.u, neighbor.v)
++                
++                # Retrieve knot data for this spline
++                knots = pri_knots_texture.get_spline(spline_id)
++                
++                # Binary search for the segment overlapping pixel.z
++                # Knots are sorted in depth
++                segment_index = binary_search_knots(knots, pixel.z)
++                
++                # Get scalar and distance values for the segment
++                val1 = knots[segment_index].scalar
++                val2 = knots[segment_index + 1].scalar
++                dist1 = knots[segment_index].distance
++                dist2 = knots[segment_index + 1].distance
++                
++                # Linear interpolation in Z direction for this neighbor
++                t = (pixel.z - dist1) / (dist2 - dist1)
++                interpolated_z = lerp(val1, val2, t)
++                
++                scalar_values.append(interpolated_z)
++                knot_distances.append([dist1, dist2])
+ 
+-# Helper definitions
+-def get_four_nearest_neighbors(x, y):
+-    # Returns indices of four surrounding pixels on the sampling plane
+-    return [(int(x), int(y)), (int(x)+1, int(y)), (int(x), int(y)+1), (int(x)+1, int(y)+1)]
++            # Step 3: Bilinear interpolation in X and Y directions
++            # Use the 4 interpolated Z values from the 4 neighbors
++            # Neighbors are arranged in a 2x2 grid around (proj_x, proj_y)
++            # Let's assume neighbors are ordered: top-left, top-right, bottom-left, bottom-right
++            # with corresponding weights based on fractional part of proj_x, proj_y
++            
++            fx = fractional_part(proj_x)
++            fy = fractional_part(proj_y)
++            
++            # Bilinear interpolation of the 4 Z-interpolated values
++            # Note: The exact arrangement of neighbors in 'neighbors' list must match
++            # the spatial layout relative to (proj_x, proj_y)
++            v00 = scalar_values[0] # e.g., floor_x, floor_y
++            v10 = scalar_values[1] # e.g., ceil_x, floor_y
++            v01 = scalar_values[2] # e.g., floor_x, ceil_y
++            v11 = scalar_values[3] # e.g., ceil_x, ceil_y
++            
++            # Bilinear interpolation
++            top = lerp(v00, v10, fx)
++            bottom = lerp(v01, v11, fx)
++            final_scalar = lerp(top, bottom, fy)
++            
++            # Classification and Compositing
++            color, opacity = classify(final_scalar)
++            image.composite_front_to_back(pixel.position, color, opacity)
+ 
+-def dependent_texture_lookup(index_tex, knots_tex, neighbor_idx):
+-    # Retrieves spline data associated with the neighbor index
+-    return knots_tex[neighbor_idx]
+-
+-def binary_search_knots(knots, z):
+-    # Finds the spline segment where knots[i].dist <= z < knots[i+1].dist
+-    for i in range(len(knots) - 1):
+-        if knots[i].dist <= z < knots[i+1].dist:
+-            return knots[i]
+-    return knots[-1]
+-
+-def linear_interpolate(segment, z):
+-    # Linear interpolation along the spline segment at z
+-    t = (z - segment.start_dist) / (segment.end_dist - segment.start_dist)
+-    return segment.start_val + t * (segment.end_val - segment.start_val)
+-
+-def bilinear_interpolate(values, x, y):
+-    # Bilinear interpolation of four z-interpolated values
+-    # values layout: [bottom_left, bottom_right, top_left, top_right]
+-    dx = x - int(x)
+-    dy = y - int(y)
+-    return (values[0] * (1 - dx) * (1 - dy) + values[1] * dx * (1 - dy) +
+-            values[2] * (1 - dx) * dy + values[3] * dx * dy)
+-
+-def transfer_function(scalar):
+-    # Maps scalar value to color and opacity
+-    return scalar, scalar
+-
+-def composite_front_to_back(color, opacity):
+-    # Accumulates color and opacity into the framebuffer
+-    pass
++    return image
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Computational Bottleneck:** Binary search and dependent texturing for trilinear interpolation create a significant computational bottleneck on current GPUs [S1, unofficial].
+-*   **Memory Constraints:** The basic algorithm requires three copies of the volumetric data set in main memory to eliminate switching artifacts when the view direction changes more than 45 degrees [S2, unofficial]. This limits the algorithm to very small data sets [S2, unofficial].
+-*   **Precision:** The knots texture should be stored as two separate textures with float format to ensure high precision, holding scalar values and distance values of the knots separately [S1, unofficial].
++**Parameters and Edge Cases:**
++*   **Binary Search:** The search for the spline segment is a binary search over sorted knots [S3, unofficial].
++*   **Precision:** Knots texture is stored as two separate float textures (scalar and distance) to ensure high precision [S1, unofficial].
++*   **View Direction:** If the view direction changes more than 45 degrees, switching artifacts may occur if multiple PRIs are not used [S2, unofficial].
++*   **Performance Bottleneck:** The binary search and dependent texturing create a computational bottleneck on current GPUs [S1, S3, unofficial].
+ 
+ ## Subtopics
+ 
+ ### On-the-Fly Reconstruction for 2D Texture Rendering
+-An optimization that eliminates the need for multiple data copies by reconstructing volumetric data on-the-fly, storing only one stack of original data [S2, unofficial]. It performs on-the-fly reconstruction of volumetric data to avoid switching artifacts [S2, unofficial]. This approach is only beneficial when the GPU texture memory is not enough to store three copies, but enough for one copy [S2, unofficial]. If the entire data is larger than the size of texture memory, more sophisticated techniques such as paging or out-of-core rendering are needed [S2, unofficial]. It introduces a severe performance drop-off [S2, unofficial]. Examined by Engel et al. [S2, unofficial].
++An optimization that eliminates the need for multiple data copies by reconstructing volumetric data on-the-fly, storing only one stack of original data [S2, unofficial]. It is beneficial when GPU texture memory is insufficient for three copies but sufficient for one [S2, unofficial]. However, it introduces a severe performance drop-off [S2, unofficial]. If the data exceeds texture memory, paging or out-of-core rendering is needed [S2, unofficial]. Examined by Engel et al. [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The search time for spline segments contributes to a considerable computational bottleneck due to binary search and dependent texturing [S1, unofficial].
+-*   **Memory Complexity:** Requires at least three copies of the volumetric data set in main memory for the basic algorithm to handle view changes >45 degrees without artifacts [S2, unofficial]. The on-the-fly variant reduces this to one copy but increases CPU/GPU computation time [S2, unofficial].
+-*   **Measured Performance:** The basic approach was found to have a bottleneck on current GPU platforms, though it was considered viable for future graphics cards [S1, unofficial]. The multi-texture approach achieves improved image quality compared to plain 2D texture rendering without losing too much rendering speed [S2, unofficial].
+-*   **Strengths:** Improves image quality over basic 2D texture rendering by reducing artifacts associated with bilinear interpolation [S2, unofficial]. View-aligned slicing requires only one PRI [S1, unofficial].
+-*   **Limitations:** High storage requirements limit data size [S2, unofficial]. Dependent texturing and binary search are inefficient on GPUs [S1, unofficial]. Switching artifacts occur with large view angle changes unless multiple copies are used [S2, unofficial].
+-*   **When to use:** When data size is small enough to fit multiple copies in memory and view changes are limited [S2, unofficial].
+-*   **When not to use:** When rendering large datasets that exceed texture memory [S2, unofficial]. When real-time performance is critical due to GPU bottlenecks with dependent texturing [S1, unofficial].
++*   **Time Complexity:** The algorithm requires four spline searches per pixel fragment, contributing to a considerable computational bottleneck on current GPU technology due to costly searches and interpolation [S3, unofficial].
++*   **Memory Complexity:** The basic algorithm requires three copies of the volumetric data set in main memory to eliminate switching artifacts when the view direction changes more than 45 degrees [S2, unofficial]. This limits the algorithm to very small data sets [S2, unofficial].
++*   **Strengths:** Improved image quality compared to plain 2D texture-based rendering without losing too much rendering speed [S2, unofficial]. View-aligned slicing requires only a single PRI at a minimum [S3, unofficial].
++*   **Limitations:** High storage requirements [S2, unofficial]. Computational bottleneck due to binary search and dependent texturing [S1, S3, unofficial].
++*   **When to use:** When image quality is prioritized over raw speed and data sets are small enough to fit in memory with three copies [S2, unofficial].
++*   **When not to use:** When GPU texture memory is limited and on-the-fly reconstruction causes unacceptable performance drops, or when data sets are too large for out-of-core techniques [S2, unofficial].
+ 
+ ## Background
+-Multi-Texture Trilinear Estimation was introduced by Rezk-Salama et al. [S2, unofficial]. It was developed to address the limitations of basic 2D texture-based rendering, which suffered from severe artifacts due to bilinear interpolation [S2, unofficial]. The method was examined as an optimization for subjective image quality, mathematical accuracy, and memory consumption [S2, unofficial]. The on-the-fly reconstruction variant was examined by Engel et al. [S2, unofficial].
++The method was introduced by Rezk-Salama et al. [S2, unofficial]. It was developed as an improvement over basic 2D texture-based rendering, aiming to substitute trilinear interpolation with two bilinear interpolations and one linear interpolation to achieve better image quality [S2, unofficial]. The approach is part of the broader field of image-based volume rendering using PRI representations [S1, S3, unofficial].
+ 
+ ## Sources
+ [S1] An Image-Based Modelling Approach To GPU-based Unstructured Grid Volume Rendering, https://doi.org/10.2312/vg/vg06/031-038, fetched 2026-10-24 (unofficial)
+-[S2] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)+[S2] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)
++[S3] PDF An Image-Based Modelling Approach To GPU-based Unstructured Grid Volume ..., https://www3.cs.stonybrook.edu/~mueller/papers/vg06_ibr.pdf, fetched 2026-10-27 (unofficial)

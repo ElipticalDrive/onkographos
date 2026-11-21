@@ -1,0 +1,192 @@
+--- v002.md
++++ v003.md
+@@ -4,110 +4,103 @@
+ 
+ ## Overview
+-The VolumePro 500 is a hardware-accelerated volume rendering system based on the Cube-4 architecture that implements the Shear-warp algorithm [S1, unofficial]. It distinguishes itself from software implementations by using specialized memory address arithmetic called 3D skewing to efficiently read axis-aligned voxel slices while storing only one copy of the volume data [S1, unofficial]. Unlike general-purpose GPU ray-casting, it processes data in a brute-force manner where performance is independent of classification complexity or data sparsity, relying on fixed-function hardware for interpolation, gradient estimation, and shading [S1, unofficial].
++The VolumePro 500 is a hardware-accelerated volume rendering system based on the Cube-4 architecture, designed to render $256^3$ or smaller volumes at 30 frames per second [S1, unofficial]. It distinguishes itself from software-based shear-warp implementations by utilizing dedicated hardware for 3D skewing, on-the-fly gradient estimation, and Phong shading, enabling performance independent of classification complexity or data density [S1, unofficial]. It builds on the [Shear-warp](24-shear-warp.md) algorithm but replaces the CPU-driven resampling and compositing with specialized silicon pipelines.
+ 
+ ## How it works
+-The method extends the standard Shear-warp factorization by integrating hardware-specific optimizations for memory access, interpolation, and shading.
++The VolumePro 500 implements the shear-warp factorization using a custom memory interface and processing pipeline.
+ 
+ **Inputs and Outputs:**
+-*   **Input:** 3D volume data $V(x,y,z)$, viewing transformation matrix $M_{view}$, transfer function, and image dimensions $(W, H)$.
+-*   **Output:** 2D image buffer $I(u,v)$.
++*   **Input:** Volume data (up to $256^3$), viewing parameters (position, direction, projection type), classification tables, and reflectance maps.
++*   **Output:** Final image composited onto the viewing plane.
+ 
+ **Data Structures:**
+-*   **Volume Data:** Stored as a single 3D array. The hardware uses 3D skewing to map logical axis-aligned slices to physical memory addresses [S1, unofficial].
+-*   **Classification Lookup Table (LUT):** A $4096 \times 36$ bit table mapping density/gradient inputs to 24-bit color and 12-bit alpha values [S1, unofficial].
+-*   **Reflectance Maps:** Pre-computed tables storing illumination sums for diffuse and specular lighting, indexed by view and light vectors [S1, unofficial].
+-*   **Intermediate Image:** A 2D buffer for compositing sheared slices.
++*   **Classification Lookup Table (LUT):** 4k $\times$ 36 bits. Maps input voxel values to 24-bit color and 12-bit alpha [S1, unofficial].
++*   **Reflectance Maps:** Pre-computed tables storing illumination sums for all light sources, used for diffuse and specular shading [S1, unofficial].
++*   **On-chip Slice Buffers:** Store axis-aligned slices to maximize memory coherent accesses [S1, unofficial].
+ 
+-**Numbered Steps:**
++**Algorithm Steps:**
+ 
+-1.  **Permutation and Shear:**
+-    *   Determine the principal viewing axis by aligning the view direction with one of the volume axes (X, Y, or Z) using a permutation matrix $P$ [S2, S12, unofficial].
+-    *   Calculate shear coefficients $s_x, s_y$ based on the view direction $v_o$ in the permuted space:
+-        $$ s_x = -\frac{v_{o,x}}{v_{o,z}}, \quad s_y = -\frac{v_{o,y}}{v_{o,z}} $$
+-    *   Apply the shear transformation to the volume slices. The hardware performs 3D skewing to ensure that memory accesses for the sheared slices remain coherent and axis-aligned [S1, unofficial].
+-    *   *Pitfall:* If the view direction is near 45 degrees to an axis, artifacts may increase; the permutation choice affects artifact direction [S9, unofficial][S15, book].
+-
+-2.  **Resampling and Interpolation:**
+-    *   Resample the sheared slices into the intermediate image space.
+-    *   Use **tri-linear interpolation** between volume slices to prevent undersampling artifacts [S1, unofficial].
+-    *   Viewing rays start at **sub-pixel locations** to prevent popping artifacts during base plane switches and allow over-sampling [S1, unofficial].
+-
+-3.  **Gradient Estimation and Correction:**
+-    *   Estimate gradients on-the-fly using central-difference hardware at each voxel [S1, unofficial].
+-    *   Tri-linearly interpolate these gradients to the resampling locations.
+-    *   Compute gradient magnitude and map it via a lookup table to a user-specified piece-wise linear function. This highlights specific values or attenuates modulation effects [S1, unofficial].
+-    *   Automatically correct gradient magnitudes for anisotropic volumes using the lookup table [S1, unofficial].
+-
+-4.  **Classification and Shading:**
+-    *   Perform **post-classification** using the $4096 \times 36$ bit LUT. This outputs 24-bit color and 12-bit alpha, providing high accuracy for low-opacity volumes [S1, unofficial].
+-    *   Apply **opacity correction** in software for each frame to account for uniform sample spacing [S1, unofficial].
+-    *   Implement **Phong shading** at each sample point at the rate of one illuminated sample per clock cycle [S1, unofficial].
+-    *   Look up diffuse and specular illumination in pre-computed reflectance maps. Reload these maps when object/light positions change or to correct the eye vector for anisotropic volumes [S1, unofficial].
+-
+-5.  **Composite:**
+-    *   Composite the classified and shaded slices in front-to-back order into the intermediate image using the Porter-Duff "over" operator [S2, S12, unofficial].
+-    *   Use dynamic double buffering in hardware to load opacity and color LUTs during compositing [S1, unofficial].
+-
+-6.  **Warp:**
+-    *   Transform the intermediate image to the final image space using the 2D warp matrix $M_{warp2D}$ [S2, S12, unofficial].
+-    *   Compute $M_{warp2D}$ as:
+-        $$ M_{warp2D} = M_{view} \cdot S^{-1} \cdot P^{-1} $$
+-    *   Resample the intermediate image to produce the final image [S2, S12, unofficial].
++1.  **Volume Partitioning (if necessary):** If the volume exceeds $256^3$, the driver software partitions it into smaller blocks. Each block is rendered independently and the resulting images are automatically combined [S1, unofficial].
++2.  **Shear and Resampling:**
++    *   The viewing transformation is decomposed into shear and 2D warp operations [S1, unofficial].
++    *   **3D Skewing:** The system uses special memory address arithmetic called 3D skewing to efficiently read any blocks and axis-aligned voxel slices while storing only one copy of the volume data [S1, unofficial].
++    *   **Interpolation:** Tri-linear interpolation is used between volume slices to prevent undersampling [S1, unofficial].
++    *   **Sub-pixel Sampling:** Viewing rays start at sub-pixel locations to prevent popping artifacts during base plane switches and allow over-sampling in x, y, or z directions [S1, unofficial].
++3.  **Gradient Estimation:**
++    *   Hardware performs on-the-fly central-difference gradient estimation at each voxel [S1, unofficial].
++    *   Gradients are tri-linearly interpolated to resampling locations [S1, unofficial].
++    *   Gradient magnitude is computed and mapped via a lookup table to a user-specified piece-wise linear function. This highlights specific gradient values or attenuates modulation effects [S1, unofficial].
++    *   The lookup table automatically corrects gradient magnitudes for anisotropic volumes [S1, unofficial].
++4.  **Classification:**
++    *   Post-classification is performed using the 4k $\times$ 36 bit classification LUT [S1, unofficial].
++    *   The 12-bit alpha precision is necessary for high accuracy in low opacity volumes [S1, unofficial].
++    *   Opacity correction is applied in software for each frame due to uniform sample spacing [S1, unofficial].
++    *   The LUTs are dynamically loaded using double buffering in hardware [S1, unofficial].
++5.  **Shading:**
++    *   Phong shading is implemented at each sample point at the rate of one illuminated sample per clock cycle [S1, unofficial].
++    *   Diffuse and specular illumination are looked up in pre-computed reflectance maps [S1, unofficial].
++    *   Reflectance maps are reloaded when object/light positions change relative to each other, or to correct the eye vector for anisotropic volumes [S1, unofficial].
++6.  **Compositing and Warp:**
++    *   Samples are composited onto the viewing plane along axis-aligned viewing rays [S1, unofficial].
++    *   The intermediate image is warped to the final image space [S1, unofficial].
+ 
+ **Pseudocode:**
++```python
++def volume_pro_500_render(volume, view_params, classification_lut, reflectance_maps):
++    # Step 1: Partition if too large
++    if volume.size > 256**3:
++        blocks = partition_volume(volume, 256**3)
++        images = []
++        for block in blocks:
++            images.append(render_block(block, view_params, classification_lut, reflectance_maps))
++        return combine_images(images)
++    else:
++        return render_block(volume, view_params, classification_lut, reflectance_maps)
+ 
+-```python
+-def volumepro_render(volume, M_view, width, height):
+-    # 1. Permutation
+-    view_dir = get_view_direction(M_view)
+-    principal_axis = argmax(abs(view_dir))
+-    P = get_permutation_matrix(principal_axis)
++def render_block(volume, view_params, classification_lut, reflectance_maps):
++    # Step 2: Shear and Resampling
++    # Use 3D skewing for memory access
++    sheared_slices = shear_volume(volume, view_params)
+     
+-    # 2. Shear
+-    vo = compute_view_direction_from_matrix(M_view)
+-    sx = -vo[0] / vo[2]
+-    sy = -vo[1] / vo[2]
+-    S = [
+-        [1, 0, sx, 0],
+-        [0, 1, sy, 0],
+-        [0, 0, 1, 0],
+-        [0, 0, 0, 1]
+-    ]
++    # Initialize output image
++    final_image = zeros(view_params.resolution)
+     
+-    # Initialize hardware buffers
+-    # 3D skewing handles memory access coherence internally
+-    intermediate_image = init_intermediate_image(width, height)
+-    
+-    # 3. Resample, Gradient, Classify, Shade, Composite
+-    # Hardware performs these steps in a single pass per slice
+-    # Sub-pixel ray starting is handled by hardware
+-    for slice_idx in range(num_slices):
+-        # Hardware reads sheared slice using 3D skewing
+-        # Tri-linear interpolation is applied
+-        # Gradient estimation (central difference) is performed
+-        # Gradient magnitude is corrected and mapped
+-        # Post-classification (4k LUT) is applied
+-        # Phong shading (reflectance maps) is applied
+-        # Opacity correction is applied in software
+-        composite_slice_to_intermediate(slice_idx, S, intermediate_image)
++    # Step 3-5: Process each sample point
++    for sample in resample_sheared_slices(sheared_slices, view_params):
++        # Sub-pixel sampling prevents popping artifacts
++        # Tri-linear interpolation for value and gradient
+         
+-    # 4. Warp
+-    S_inv = invert_matrix(S)
+-    P_inv = invert_matrix(P)
+-    M_warp2D = multiply_matrices(M_view, S_inv, P_inv)
+-    final_image = warp_image(intermediate_image, M_warp2D, width, height)
+-    
++        # Gradient Estimation
++        gradient = central_difference_gradient(sample.voxel)
++        gradient_mag = compute_magnitude(gradient)
++        # Correct for anisotropy via LUT
++        corrected_mag = apply_gradient_correction_lut(gradient_mag)
++        
++        # Classification
++        # 12-bit alpha precision for low opacity accuracy
++        color, alpha = lookup_classification(classification_lut, sample.value, corrected_mag)
++        
++        # Shading
++        # Phong shading at 1 sample/cycle
++        # Lookup in reflectance maps
++        illumination = lookup_reflectance(reflectance_maps, sample.normal, view_params.eye_vector)
++        shaded_color = apply_phong_shading(color, illumination)
++        
++        # Apply opacity correction in software
++        shaded_alpha = apply_opacity_correction(alpha, sample.spacing)
++        
++        # Step 6: Composite
++        final_image = composite_over(final_image, shaded_color, shaded_alpha)
++        
+     return final_image
+ ```
+ 
+ ## Operating characteristics
+-*   **Performance:** Renders $256^3$ or smaller volumes at 30 frames per second [S1, unofficial].
+-*   **Complexity:** Performance is independent of classification complexity or data sparsity due to brute-force processing [S1, unofficial].
+-*   **Memory:** Stores only one copy of the volume data, using 3D skewing for efficient access [S1, unofficial].
+-*   **Limitations:** Requires partitioning larger volumes into smaller blocks, rendering each independently, and combining the results [S1, unofficial].
+-*   **Precision:** Uses 12-bit alpha and 24-bit color in the classification LUT for high accuracy [S1, unofficial].
++*   **Performance:** Renders $256^3$ volumes at 30 frames per second [S1, unofficial].
++*   **Scalability:** Performance is independent of classification complexity or data density due to brute-force processing [S1, unofficial].
++*   **Limitations:** Hardware is limited to volumes of $256^3$ or smaller; larger volumes require software partitioning and compositing [S1, unofficial].
++*   **Strengths:** High speed, consistent performance, hardware-accelerated shading and gradient estimation [S1, unofficial].
+ 
+ ## Background
+-The VolumePro 500 system was developed based on the Cube-4 architecture created at SUNY Stony Brook [Pfister and Kaufman 1996]. Mitsubishi Electric licensed the technology, improved it [Osborne et al. 1997], and began production shipments in 1999 [Pfister et al. 1999]. It was one of the first commercial hardware-accelerated volume rendering systems [S1, unofficial].
++The VolumePro 500 system [Pfister et al. 1999] is based on the Cube-4 architecture developed at SUNY Stony Brook [Pfister and Kaufman 1996]. Mitsubishi Electric licensed the technology, improved it [Osborne et al. 1997], and started production shipments of the VolumePro 500 in 1999 [Pfister et al. 1999]. It was one of the first commercial hardware-accelerated volume rendering systems.
+ 
+ ## Sources

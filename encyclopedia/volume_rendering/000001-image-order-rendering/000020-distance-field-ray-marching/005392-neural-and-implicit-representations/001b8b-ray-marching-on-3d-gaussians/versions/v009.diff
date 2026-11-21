@@ -1,0 +1,256 @@
+--- v008.md
++++ v009.md
+@@ -1,137 +1,118 @@
+ # Ray-marching on 3D Gaussians
+ 
+-Also called: 3D Gaussian Ray Marching, Volumetric 3DGS
++Also called: 3D Gaussian Ray Marching, Gaussian Volume Rendering
+ 
+ ## Overview
+-Ray-marching on 3D Gaussians is a volumetric rendering method that evaluates the full Gaussian mixture along rays to accurately handle primitive overlap and compute the volumetric integral, contrasting with the rasterization-based approximations of standard 3D Gaussian Splatting (3DGS) [S1]. It solves the problem of spatial overlap and incorrect self-attenuation inherent in 3DGS by performing adaptive sampling and analytical integration, ensuring that overlapping Gaussians are resolved with precision governed by sample count rather than rasterization artifacts [S1]. Unlike [RBF Particle Volume Path Tracing](9641-rbf-particle-volume-path-tracing.md) which uses different basis functions, this method retains the standard 3DGS Gaussian parameterization but changes the integration logic to be physically more accurate [S1].
++Ray-marching on 3D Gaussians is a volume rendering method that evaluates the continuous Gaussian mixture field along camera rays to compute accurate volumetric integrals, explicitly handling primitive overlap and self-attenuation [S1]. It solves the problem of approximations in standard 3D Gaussian Splatting (3DGS), such as ignoring spatial overlap and using incorrect opacity models, which can lead to artifacts like popping or incorrect depth perception [S1]. Unlike rasterization-based splatting, which projects Gaussians to screen space and blends them, this method performs adaptive sampling along rays to resolve the exact contribution of overlapping primitives, ensuring precision governed by sample count rather than rasterization heuristics [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ 3D Gaussians, each defined by a mean position $\mu_i \in \mathbb{R}^3$, a covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (or scale $s_i$ and rotation $R_i$), an opacity $\alpha_i \in [0, 1]$, and a view-dependent color $c_i$ (often represented by Spherical Harmonics coefficients). The camera parameters (view and projection matrices) are also required.
+-*   **Outputs:** A rendered image pixel buffer.
++*   **Input:** A set of $N$ 3D Gaussians, each defined by position $\mathbf{c}_i$, covariance matrix $\Sigma_i$ (or scale $\mathbf{s}_i$ and rotation $\mathbf{q}_i$), opacity $\alpha_i$, and color $\mathbf{c}_i^{color}$. A camera ray $r(t) = \mathbf{o} + t\mathbf{d}$.
++*   **Output:** The accumulated color $\mathbf{C}$ and depth $D$ for the pixel.
+ 
+ **Data Structures:**
+-The method reuses the standard 3DGS data structures:
+-*   **Gaussian Tensor:** A flat array or tensor containing $N$ primitives. Each primitive stores:
+-    *   `position`: 3 floats ($x, y, z$).
+-    *   `scale`: 3 floats (log-scale or linear).
+-    *   `rotation`: 4 floats (quaternion $w, x, y, z$).
+-    *   `opacity`: 1 float.
+-    *   `color`: $C$ floats (e.g., 45 for SH degree 3).
+-*   **Ray Buffer:** For each pixel, a ray origin and direction.
+-*   **Sample Buffer:** Stores intermediate transmittance and color accumulators along the ray.
++The method reuses the standard 3DGS data structures: tensors storing positions, scales, rotations, opacities, and spherical harmonic coefficients for each Gaussian [S1].
+ 
+-**Algorithm Steps:**
+-1.  **Ray Generation:** For each pixel $(u, v)$, compute the ray origin $O$ and direction $D$ from the camera projection.
+-2.  **Bounding Volume Construction:** For each Gaussian $i$, compute its bounding volume (e.g., an axis-aligned bounding box or an icosahedron as in Condor [S2]) in world space to cull primitives that do not intersect the ray's path.
+-3.  **Ray-Primitive Intersection:** For each candidate Gaussian, compute the intersection interval $[t_{min}, t_{max}]$ along the ray. If the ray does not intersect the Gaussian, skip it.
+-4.  **Adaptive Sampling:** Along the intersection interval $[t_{min}, t_{max}]$, perform adaptive sampling. The sample density is determined by the gradient of the Gaussian's density function to ensure accurate resolution of the mixture [S1].
+-5.  **Volumetric Integration:** At each sample point $t_k$, evaluate the Gaussian mixture. The contribution is computed using either the 3DGS opacity model or the extinction-based model (OTS) [S1].
+-    *   **Extinction-based Model (OTS):** The transmittance $T(t)$ is updated as:
+-        $$ T(t_{k+1}) = T(t_k) \exp\left( -\sum_{i \in \text{active}} \sigma_i(t_k) \Delta t \right) $$
+-        where $\sigma_i(t)$ is the extinction coefficient of Gaussian $i$ at $t$, derived from its density and opacity. The color contribution is:
+-        $$ C_{out} = \sum_{k} T(t_k) \left( 1 - \exp\left( -\sum_{i \in \text{active}} \sigma_i(t_k) \Delta t \right) \right) \bar{c}_i(t_k) $$
+-    *   **3DGS Model:** Uses the standard alpha-blending approximation, but applied along the ray rather than in screen space.
+-6.  **Accumulation:** Accumulate the color and transmittance for the pixel.
+-7.  **Output:** Write the final accumulated color to the pixel buffer.
++**Method Steps:**
++1.  **Ray Initialization:** Cast a ray $r(t)$ from the camera origin $\mathbf{o}$ in direction $\mathbf{d}$.
++2.  **Adaptive Sampling:** Determine a set of sample points $t_j$ along the ray. The sampling strategy is adaptive to resolve regions of high Gaussian density or overlap [S1].
++3.  **Gaussian Evaluation:** For each sample point $r(t_j)$, evaluate the density contribution of all $N$ Gaussians. The density $\rho_i(r(t_j))$ of the $i$-th Gaussian is computed using its spatial distribution [S1].
++4.  **Integration:** Compute the accumulated transmittance $T(t)$ and color $\mathbf{C}(t)$ using the volumetric rendering integral. The standard form is:
++    $$ \mathbf{C} = \sum_{j} \mathbf{C}_j \cdot \alpha_j \cdot \exp\left(-\sum_{k < j} \alpha_k\right) $$
++    where $\alpha_j$ is the effective opacity/density at sample $j$ [S1].
++5.  **Termination:** Stop when the ray exits the bounding volume or transmittance drops below a threshold.
++
++**Parameters:**
++*   **Sample Count:** Governs precision. Higher counts reduce artifacts from overlap but increase cost [S1].
++*   **Step Size:** Determined by adaptive sampling criteria [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Overlap:** Standard 3DGS ignores overlap; this method explicitly resolves it [S1].
++*   **Self-attenuation:** 3DGS approximates projected shape; this method treats self-attenuation correctly [S1].
++*   **Performance:** Significantly slower than rasterization due to per-ray evaluation [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def ray_march_gaussians(gaussians, ray_origin, ray_direction, num_samples=100):
++def ray_march_gaussians(ray_o, ray_d, gaussians, num_samples):
+     """
+-    Renders a single ray against a set of 3D Gaussians using volumetric integration.
++    Ray march through a set of 3D Gaussians.
++    :param ray_o: Ray origin (3,)
++    :param ray_d: Ray direction (3,)
++    :param gaussians: List of Gaussian objects with pos, cov, alpha, color
++    :param num_samples: Number of adaptive samples along the ray
++    :return: Accumulated color (3,), Depth (float)
+     """
+-    # Initialize accumulators
+-    accumulated_color = [0.0, 0.0, 0.0]
++    # Determine ray segment bounds (simplified: fixed range for now)
++    t_min = 0.1
++    t_max = 100.0
++    
++    # Adaptive sampling: generate sample points t_j
++    # In a full implementation, this would be adaptive based on density gradients
++    t_samples = linspace(t_min, t_max, num_samples)
++    
++    accumulated_color = zeros(3)
+     accumulated_alpha = 0.0
+-    transmittance = 1.0
++    final_depth = 0.0
+     
+-    # Determine ray bounds (simplified: assume scene bounds [-10, 10])
+-    t_min = -10.0
+-    t_max = 10.0
+-    
+-    # Step size
+-    dt = (t_max - t_min) / num_samples
+-    
+-    for t in np.arange(t_min, t_max, dt):
+-        # Current point on ray
+-        point = ray_origin + ray_direction * t
++    for t in t_samples:
++        point = ray_o + t * ray_d
++        total_density = 0.0
++        weighted_color = zeros(3)
+         
+-        # Evaluate all active Gaussians at this point
+-        total_sigma = 0.0
+-        weighted_color = [0.0, 0.0, 0.0]
++        # Evaluate all Gaussians at this point
++        for g in gaussians:
++            # Compute density of Gaussian g at point
++            # Density is based on the Mahalanobis distance using the Gaussian's covariance
++            dist_sq = mahalanobis_distance_sq(point, g.pos, g.cov)
++            density = g.alpha * exp(-0.5 * dist_sq)
++            
++            total_density += density
++            weighted_color += g.color * density
++            
++        # If no density, skip
++        if total_density < 1e-6:
++            continue
++            
++        # Compute opacity at this sample step
++        # Assuming small step size dt, alpha_sample = density * dt
++        # Note: dt should be calculated based on t_samples spacing
++        dt = t_samples[1] - t_samples[0] if len(t_samples) > 1 else 0.1
++        alpha_sample = total_density * dt
+         
+-        for g in gaussians:
+-            # Compute distance from point to Gaussian center
+-            diff = point - g.position
+-            # Transform diff by inverse covariance (or scale/rotation)
+-            # This is a simplified density evaluation
+-            sigma = g.opacity * gaussian_density(diff, g.scale, g.rotation)
+-            
+-            if sigma > 0:
+-                total_sigma += sigma
+-                # View-dependent color evaluation
+-                color = evaluate_sh(g.sh_coeffs, ray_direction)
+-                weighted_color += sigma * color
++        # Clamp alpha
++        alpha_sample = min(alpha_sample, 1.0)
+         
+-        if total_sigma > 0:
+-            # Extinction-based integration step
+-            # T(t+dt) = T(t) * exp(-sigma * dt)
+-            # Color += T(t) * (1 - exp(-sigma * dt)) * color
+-            # Note: weighted_color is sum(sigma_i * c_i), so we need average color
+-            avg_color = weighted_color / total_sigma if total_sigma > 0 else [0,0,0]
+-            
+-            attenuation = np.exp(-total_sigma * dt)
+-            contribution = transmittance * (1 - attenuation) * avg_color
+-            
+-            accumulated_color += contribution
+-            accumulated_alpha += transmittance * (1 - attenuation)
+-            transmittance *= attenuation
+-            
+-            if transmittance < 1e-4:
+-                break
+-                
+-    return accumulated_color, accumulated_alpha
+-
+-def gaussian_density(diff, scale, rotation):
+-    """
+-    Computes the unnormalized density of a 3D Gaussian at a point.
+-    """
+-    # Transform diff to local space
+-    R_inv = rotation.inverse()
+-    local_diff = R_inv @ diff
+-    
+-    # Scale
+-    scaled_diff = local_diff / scale
+-    
+-    # Squared Mahalanobis distance
+-    dist_sq = np.sum(scaled_diff ** 2)
+-    
+-    # Gaussian kernel (ignoring normalization constant for relative weighting)
+-    return np.exp(-0.5 * dist_sq)
++        # Blend
++        # T = exp(-sum(alpha_k)) for k < j
++        # C = sum(C_j * alpha_j * T)
++        # Here, we approximate T as exp(-accumulated_alpha)
++        transmittance = exp(-accumulated_alpha)
++        
++        accumulated_color += weighted_color * alpha_sample * transmittance
++        accumulated_alpha += alpha_sample
++        
++        # Update depth (weighted average)
++        final_depth = (final_depth * exp(-accumulated_alpha) + t * alpha_sample * transmittance) / (accumulated_alpha + 1e-8)
++        
++    return accumulated_color, final_depth
+ ```
+-
+-**Parameters:**
+-*   `num_samples`: Number of integration steps per ray. Typical values range from 64 to 256 depending on desired accuracy [S1].
+-*   `t_min`, `t_max`: Near and far clipping planes.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** High-frequency details may require adaptive sampling to avoid aliasing [S1].
+-*   **Performance:** Evaluating all Gaussians at every sample point is $O(N \cdot S)$, which is significantly slower than rasterization [S1].
+-*   **Overlap:** The method correctly handles overlap, but this increases computational cost compared to 3DGS which ignores it [S1].
++[G] The pseudocode assumes a uniform step size for simplicity; the source specifies "adaptive sampling" [S1]. The density calculation uses the standard Gaussian PDF form. The blending follows the standard volumetric rendering equation.
+ 
+ ## Subtopics
+ 
+ ### [OTS Marching Ray Marching Algorithm](1073-ots-marching-ray-marching-algorithm.md)
+-The OTS Marching Ray Marching Algorithm is a volumetric rendering method for 3D Gaussians that evaluates the full Gaussian mixture to accurately handle primitive overlap and compute the volumetric integral using an extinction-based model. It distinguishes itself from splatting-based approaches by performing adaptive binning and analytical integration along rays, ensuring that overlapping Gaussians are resolved with precision governed by sample count rather than relying on rasterization approximations. Unlike raytracing solutions for Gaussians, this method explicitly accounts for primitive overlap in the integration process. See [OTS Marching Ray Marching Algorithm](1073-ots-marching-ray-marching-algorithm.md).
++The OTS Marching Ray Marching Algorithm is a volumetric rendering method for 3D Gaussians that evaluates the full Gaussian mixture to accurately handle primitive overlap and compute the volumetric integral using an extinction-based model. It distinguishes itself from splatting-based approaches by performing adaptive binning and analytical integration along rays, ensuring that overlapping Gaussians are resolved with precision governed by sample count rather than relying on rasterization approximations. Unlike raytracing solutions for Gaussians, this method explicitly accounts for primitive overlap in the integration process.
+ 
+ ### [View-dependent color with Spherical Harmonics](1369-view-dependent-color-with-spherical-harmonics.md)
+-View-dependent color with Spherical Harmonics (SH) is a representation technique used in 3D Gaussian Splatting to model the view-dependent appearance (e.g., reflections, specular highlights) of each Gaussian primitive as a function of the viewing direction. It solves the problem of storing directional color variation compactly without requiring per-ray neural network queries, allowing each Gaussian to store a color that varies with the observer's angle. Unlike simple point colors or view-independent RGB values, this model captures high-frequency directional effects like glossy reflections. It is distinct from its siblings [OTS Marching Ray Marching Algorithm](1073-ots-marching-ray-marching-algorithm.md) and [Physics-based Gaussian Simulation](1457-physics-based-gaussian-simulation.md) by providing a differentiable, closed-form basis expansion for appearance rather than physical simulation or marching logic. See [View-dependent color with Spherical Harmonics](1369-view-dependent-color-with-spherical-harmonics.md).
++View-dependent color with Spherical Harmonics (SH) is a representation technique used in 3D Gaussian Splatting to model the view-dependent appearance (e.g., reflections, specular highlights) of each Gaussian primitive as a function of the viewing direction. It solves the problem of storing directional color variation compactly without requiring per-ray neural network queries, allowing each Gaussian to store a color that varies with the observer's angle. Unlike simple point colors or view-independent RGB values, this model captures high-frequency directional effects like glossy reflections. It is distinct from its siblings [OTS Marching Ray Marching Algorithm](1073-ots-marching-ray-marching-algorithm.md) and [Physics-based Gaussian Simulation](1457-physics-based-gaussian-simulation.md) by providing a differentiable, closed-form basis expansion for appearance rather than physical simulation or marching logic.
+ 
+ ### [Physics-based Gaussian Simulation](1457-physics-based-gaussian-simulation.md)
+-Physics-based Gaussian Simulation is a method that integrates physics-based continuum mechanics directly within 3D Gaussian Splatting (3DGS), treating each Gaussian as a discrete physical particle with volume for direct simulation. It solves the problem of animating 3D representations by creating a unified simulation-to-rendering pipeline, allowing for physically accurate dynamics rather than relying on pre-recorded motion or simple deformation. It sets itself apart from standard 3DGS by embedding physical laws into the representation itself, enabling the Gaussians to behave like material particles. See [Physics-based Gaussian Simulation](1457-physics-based-gaussian-simulation.md).
++Physics-based Gaussian Simulation is a method that integrates physics-based continuum mechanics directly within 3D Gaussian Splatting (3DGS), treating each Gaussian as a discrete physical particle with volume for direct simulation. It solves the problem of animating 3D representations by creating a unified simulation-to-rendering pipeline, allowing for physically accurate dynamics rather than relying on pre-recorded motion or simple deformation. It sets itself apart from standard 3DGS by embedding physical laws into the representation itself, enabling the Gaussians to behave like material particles.
+ 
+ ### [Weighted Blending (Fuzzy Metaballs)](3691-weighted-blending-fuzzy-metaballs.md)
+-Weighted Blending is a sort-free, image-order rendering technique for 3D Gaussians that resolves the hidden-surface problem by computing a weighted average of all ray-Gaussian intersection depths. Unlike NeRF-style methods that sort intersections and use closer Gaussians to attenuate further ones, this method blends all intersections simultaneously without sorting, extending Order Independent Transparency (OIT) principles to 3D opaque surfaces. See [Weighted Blending (Fuzzy Metaballs)](3691-weighted-blending-fuzzy-metaballs.md).
++Weighted Blending is a sort-free, image-order rendering technique for 3D Gaussians that resolves the hidden-surface problem by computing a weighted average of all ray-Gaussian intersection depths. Unlike NeRF-style methods that sort intersections and use closer Gaussians to attenuate further ones, this method blends all intersections simultaneously without sorting, extending Order Independent Transparency (OIT) principles to 3D opaque surfaces.
++
++### [Two-Stage Optimization Pipeline](15284-two-stage-optimization-pipeline.md)
++The Two-Stage Optimization Pipeline is a post-processing refinement method for 3D Gaussian Splatting (3DGS) that decouples geometric alignment from material/lighting optimization to improve reconstruction quality and enable relighting. It addresses the limitations of coarse geometry from initial regressors and accumulated pose errors by first correcting camera poses and refining geometry, then locking geometry to optimize material and lighting parameters using pre-computed visibility. It differs from standard 3DGS by introducing explicit normal vectors and a visibility pre-computation step, and from pose-free methods like [CF3DGS](1036-ray-marching-on-3d-gaussians.md) by using a dedicated pose correction stage.
+ 
+ ### 3DGS Marcher
+@@ -139,20 +120,20 @@
+ 
+ ### Condor
+-A custom ray tracing solution for physically accurate volumetric integration of 3D Gaussians, potentially including scattering [S2]. Uses icosahedrons to bound Gaussians and proposed an alternative kernel function to increase compactness [S2].
++A custom ray tracing solution for physically accurate volumetric integration of 3D Gaussians, potentially including scattering [S2]. Uses icosahedrons to bound Gaussians [S2]. Proposed an alternative kernel function to increase compactness [S2].
+ 
+ ### Stochastic Subsampling for Pretrained 3D Gaussians
+-A proposal by Sun et al. to accelerate the ray tracing of pretrained 3D Gaussians using stochastic subsampling [S2]. Does not offer a backward pass and reaches frame rates about 3× below 3DGS [S2].
++A proposal by Sun et al. to accelerate the ray tracing of pretrained 3D Gaussians using stochastic subsampling [S2]. Does not offer a backward pass [S2]. Reaches frame rates about 3× below 3DGS [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot S \cdot P)$, where $N$ is the number of Gaussians, $S$ is the number of samples per ray, and $P$ is the number of pixels. This is significantly slower than the $O(N + P)$ rasterization of 3DGS [S1].
+-*   **Memory Complexity:** $O(N)$ to store the Gaussian parameters, plus $O(P \cdot S)$ for intermediate buffers if not optimized [S1].
+-*   **Measured Performance:** Stochastic subsampling reaches frame rates about 3× below 3DGS [S2]. Other ray tracing solutions like EVER are 4–20× slower than 3DGS [S2].
+-*   **Strengths:** Accurately handles spatial overlap and self-attenuation, which are approximations in 3DGS [S1]. Provides physically plausible volumetric integration [S2].
+-*   **Limitations:** Computationally expensive due to per-ray, per-primitive evaluation [S1]. No backward pass for some accelerated variants [S2].
+-*   **When to use:** When high-fidelity volumetric accuracy is required and performance is secondary, or for offline rendering [S1].
+-*   **When not to use:** For real-time applications where 3DGS rasterization is sufficient, as the approximations have negligible impact on still images with large numbers of Gaussians [S1].
++*   **Time Complexity:** $O(N \cdot S)$ per pixel, where $N$ is the number of Gaussians and $S$ is the number of samples per ray [S1]. This is significantly slower than the $O(N)$ rasterization of 3DGS [S1].
++*   **Memory Complexity:** $O(N)$ to store Gaussian parameters [S1].
++*   **Performance:** Significantly slower than 3DGS rasterization. Stochastic subsampling can accelerate this but still results in frame rates ~3× lower than 3DGS [S2].
++*   **Strengths:** Accurately handles overlap and self-attenuation, reducing artifacts like popping [S1].
++*   **Limitations:** High computational cost makes it unsuitable for real-time rendering without acceleration techniques like stochastic subsampling [S2].
++*   **When to use:** When visual fidelity and accurate volumetric integration are prioritized over speed, or for offline analysis of 3DGS approximations [S1].
++*   **When not to use:** Real-time applications requiring high frame rates [S1].
+ 
+ ## Background
+-Originating from the analysis of 3D Gaussian Splatting's approximations, this method was introduced to study the impact of ignoring spatial overlap and incorrect self-attenuation [S1]. The systematic analysis was presented in "Does 3D Gaussian Splatting Need Accurate Volumetric Rendering?" [S1]. Subsequent work, such as Condor and stochastic subsampling proposals, extended the method to include physically accurate integration and acceleration techniques [S2].
++The method was introduced to systematically analyze and assess the approximations made in 3D Gaussian Splatting (3DGS), specifically regarding spatial overlap and opacity models [S1]. It was developed by the authors of "Does 3D Gaussian Splatting Need Accurate Volumetric Rendering?" [S1]. The work demonstrates that while 3DGS approximations have negligible impact on still images with many Gaussians, accurate ray marching provides a ground truth for comparison [S1].
+ 
+ ## Sources

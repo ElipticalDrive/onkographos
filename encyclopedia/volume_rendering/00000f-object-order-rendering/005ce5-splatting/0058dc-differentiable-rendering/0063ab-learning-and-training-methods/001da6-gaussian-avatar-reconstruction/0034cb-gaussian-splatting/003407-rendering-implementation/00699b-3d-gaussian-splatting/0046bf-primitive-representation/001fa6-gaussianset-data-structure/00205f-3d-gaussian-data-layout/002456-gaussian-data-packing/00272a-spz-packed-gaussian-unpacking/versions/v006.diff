@@ -1,0 +1,72 @@
+--- v005.md
++++ v006.md
+@@ -37,13 +37,13 @@
+ 
+ **Steps:**
+-1. **Header Validation:** Read the header. Check `magic == SPZ_MAGIC`. Check `version` is 1, 2, 3, or 4. Reject v4 if using a legacy parser [S3, unofficial]. Check `numPoints <= MAX_POINTS_TO_READ` [S1, unofficial]. Check `shDegree <= 3`. If using v4, read the TOC to locate attribute streams. If using v1–v3, decompress the gzip stream if `flags` indicate compression [S1, S2, S3, unofficial].
+-2. **Determine Data Layout:** If `version == 1`, `usesFloat16` is true. Positions are stored as 2 bytes per component (Float16) [S1, unofficial]. If `version >= 2`, `usesFloat16` is false. Positions are stored as 3 bytes per component (24-bit fixed-point) [S1, unofficial]. Calculate `shDim = dimForDegree(shDegree)`. For degree $d$, $shDim = (d+1)^2$ [G].
++1. **Header Validation:** Read the header. Check `magic == SPZ_MAGIC`. Check `version` is 1, 2, 3, or 4. Reject v4 if using a legacy parser [S3, unofficial]. Check `numPoints <= MAX_POINTS_TO_READ` [S1, unofficial]. Check `shDegree <= 3`. If using v4, read the TOC to locate attribute streams [S2, unofficial]. If using v1–v3, decompress the gzip stream if `flags` indicate compression [S1, S2, S3, unofficial].
++2. **Determine Data Layout:** If `version == 1`, `usesFloat16` is true. Positions are stored as 2 bytes per component (Float16) [S1, unofficial]. If `version >= 2`, `usesFloat16` is false. Positions are stored as 3 bytes per component (24-bit fixed-point) [S1, unofficial]. Calculate `shDim = dimForDegree(shDegree)` [S2, unofficial]. For degree $d$, $shDim = (d+1)^2$ [G].
+ 3. **Allocate Output Arrays:** `positions`: `numPoints * 3` floats. `scales`: `numPoints * 3` floats. `rotations`: `numPoints * 4` floats. `alphas`: `numPoints` floats. `colors`: `numPoints * 3` floats. `sh`: `numPoints * shDim * 3` floats [S1, unofficial].
+-4. **Unpack Positions:** Create a `CoordinateConverter` object `c` to handle coordinate system flips [S2, unofficial]. If `usesFloat16` is true: Cast the packed position buffer to `Half*`. For each component $i$ from $0$ to `numPoints * 3 - 1`: `val = halfToFloat(packed[i])`, `out[i] = val * c.flipP[i % 3]`. If `usesFloat16` is false: Calculate `scale = 1.0f / (1 << fractionalBits)` [S2, unofficial]. For each point $p$ from $0$ to `numPoints - 1`: For each component $j$ from $0$ to $2$: Read 3 bytes from `packed` at offset corresponding to point $p$, component $j$. Reconstruct 24-bit signed integer: `fixed32 = src[0] | (src[1] << 8) | (src[2] << 16)` [S2, unofficial]. Sign-extend if bit 23 is set: `if (fixed32 & 0x800000) fixed32 |= 0xff000000` [S2, unofficial]. `out[p*3 + j] = static_cast<float>(fixed32) * scale * c.flipP[j]` [S2, unofficial].
+-5. **Unpack Alphas:** Read 1 byte per point. For each point $p$: `val = src[p] / 255.0f`, `out[p] = invSigmoid(val)` [S2, unofficial].
+-6. **Unpack Colors:** Read 3 bytes per point (RGB). For each point $p$: For each channel $c$ from $0$ to $2$: `val = src[p*3 + c] / 255.0f`, `out[p*3 + c] = (val - 0.5f) / colorScale` [S2, unofficial].
+-7. **Unpack Scales:** Read 1 byte per component per point. For each point $p$: For each component $j$ from $0$ to $2$: `out[p*3 + j] = src[p*3 + j] / 16.0f - 10.0f` [S2, unofficial].
+-8. **Unpack Rotations:** Determine if `usesQuaternionSmallestThree` is true (v3+) or false (v1–v2) [S2, unofficial]. If `usesQuaternionSmallestThree` is false (3 bytes per quaternion): Read 3 bytes per point. Reconstruct 3 signed 8-bit integers. Normalize to $[-1, 1]$ range: `q[i] = (src[i] - 127.5f) / 127.5f` [S2, unofficial]. Reconstruct $w$: `w = sqrt(1 - x^2 - y^2 - z^2)`. Apply `c.rotFlipPFunc` if it exists, otherwise apply `c.flipQ` [S2, unofficial]. If `usesQuaternionSmallestThree` is true (4 bytes per quaternion): Read 4 bytes per point. Reconstruct 32-bit integer. Extract largest component index `iLargest` (2 bits) and 3 components (10 bits each: 1 sign bit, 9 magnitude bits) [S2, unofficial]. Magnitude is scaled by `sqrt(2)` and normalized to 9-bit precision. Reconstruct quaternion, ensuring the largest component is positive (sign flip if needed) [S2, unofficial]. Normalize quaternion. Apply `c.rotFlipPFunc` if it exists, otherwise apply `c.flipQ` [S2, unofficial].
+-9. **Unpack Spherical Harmonics (SH):** If `shDim == 0`, return immediately [S2, unofficial]. Read `shDim * 3` bytes per point. **Within-Family Unpacking:** For each point $p$: For each coefficient $j$ from $0$ to `shDim - 1`: For each channel $c$ from $0$ to $2$: Read 1 byte. Apply sign flip `c.flipSh[j]` fused with unquantization [S2, unofficial]. `out[base + j*3 + c] = unquantizeSH(src[base + j*3 + c])` [S2, unofficial]. **Cross-Family Unpacking (Rotation/Flip):** If `c.rotFlipShFuncs[0]` exists: For each band `band` from $0$ to `SH_MAX_DEGREE - 1`: If `rotFlipShFuncs[band]` is null, break. Calculate `bandStart = band * (band + 2)` and `bandSize = 2 * band + 3` [S2, unofficial]. If `bandStart + bandSize > shDim`, break. For each channel $c$ from $0$ to $2$: Copy `bandSize` coefficients to temporary buffer. Apply `rotFlipShFuncs[band](tmp)`. Copy back to output [S2, unofficial].
++4. **Unpack Positions:** Create a `CoordinateConverter` object `c` to handle coordinate system flips [S2, unofficial]. If `usesFloat16` is true: Cast the packed position buffer to `Half*` [S2, unofficial]. For each component $i$ from $0$ to `numPoints * 3 - 1`: `val = halfToFloat(packed[i])`, `out[i] = val * c.flipP[i % 3]` [S2, unofficial]. If `usesFloat16` is false: Calculate `scale = 1.0f / (1 << fractionalBits)` [S2, unofficial]. For each point $p$ from $0$ to `numPoints - 1`: For each component $j$ from $0$ to $2$: Read 3 bytes from `packed` at offset corresponding to point $p$, component $j$ [S2, unofficial]. Reconstruct 24-bit signed integer: `fixed32 = src[0] | (src[1] << 8) | (src[2] << 16)` [S2, unofficial]. Sign-extend if bit 23 is set: `if (fixed32 & 0x800000) fixed32 |= 0xff000000` [S2, unofficial]. `out[p*3 + j] = static_cast<float>(fixed32) * scale * c.flipP[j]` [S2, unofficial].
++5. **Unpack Alphas:** Read 1 byte per point [S2, unofficial]. For each point $p$: `val = src[p] / 255.0f`, `out[p] = invSigmoid(val)` [S2, unofficial].
++6. **Unpack Colors:** Read 3 bytes per point (RGB) [S2, unofficial]. For each point $p$: For each channel $c$ from $0$ to $2$: `val = src[p*3 + c] / 255.0f`, `out[p*3 + c] = (val - 0.5f) / colorScale` [S2, unofficial].
++7. **Unpack Scales:** Read 1 byte per component per point [S2, unofficial]. For each point $p$: For each component $j$ from $0$ to $2$: `out[p*3 + j] = src[p*3 + j] / 16.0f - 10.0f` [S2, unofficial].
++8. **Unpack Rotations:** Determine if `usesQuaternionSmallestThree` is true (v3+) or false (v1–v2) [S2, unofficial]. If `usesQuaternionSmallestThree` is false (3 bytes per quaternion): Read 3 bytes per point [S2, unofficial]. Reconstruct 3 signed 8-bit integers. Normalize to $[-1, 1]$ range: `q[i] = (src[i] - 127.5f) / 127.5f` [S2, unofficial]. Reconstruct $w$: `w = sqrt(1 - x^2 - y^2 - z^2)` [G]. Apply `c.rotFlipPFunc` if it exists, otherwise apply `c.flipQ` [S2, unofficial]. If `usesQuaternionSmallestThree` is true (4 bytes per quaternion): Read 4 bytes per point [S2, unofficial]. Reconstruct 32-bit integer. Extract largest component index `iLargest` (2 bits) and 3 components (10 bits each: 1 sign bit, 9 magnitude bits) [S2, unofficial]. Magnitude is scaled by `sqrt(2)` and normalized to 9-bit precision [S2, unofficial]. Reconstruct quaternion, ensuring the largest component is positive (sign flip if needed) [S2, unofficial]. Normalize quaternion. Apply `c.rotFlipPFunc` if it exists, otherwise apply `c.flipQ` [S2, unofficial].
++9. **Unpack Spherical Harmonics (SH):** If `shDim == 0`, return immediately [S2, unofficial]. Read `shDim * 3` bytes per point. **Within-Family Unpacking:** For each point $p$: For each coefficient $j$ from $0$ to `shDim - 1`: For each channel $c$ from $0$ to $2$: Read 1 byte [S2, unofficial]. Apply sign flip `c.flipSh[j]` fused with unquantization [S2, unofficial]. `out[base + j*3 + c] = unquantizeSH(src[base + j*3 + c])` [S2, unofficial]. **Cross-Family Unpacking (Rotation/Flip):** If `c.rotFlipShFuncs[0]` exists: For each band `band` from $0$ to `SH_MAX_DEGREE - 1`: If `rotFlipShFuncs[band]` is null, break [S2, unofficial]. Calculate `bandStart = band * (band + 2)` and `bandSize = 2 * band + 3` [S2, unofficial]. If `bandStart + bandSize > shDim`, break [S2, unofficial]. For each channel $c$ from $0$ to $2$: Copy `bandSize` coefficients to temporary buffer [S2, unofficial]. Apply `rotFlipShFuncs[band](tmp)`. Copy back to output [S2, unofficial].
+ 10. **Verification:** Ensure `currentOffset + result.sh.length == buffer.byteLength` [S1, unofficial]. Return the structured object.
+ 
+@@ -75,5 +75,5 @@
+ 
+ def decompress_gzip(data):
+-    return zlib.decompress(data, 16 + zlib.MAX_WBITS)  # [G]
++    return zlib.decompress(data, 16 | zlib.MAX_WBITS)  # [G]
+ 
+ def decompress_zstd_v4(data):
+@@ -97,5 +97,5 @@
+         self.sh = sh
+ 
+-def unpack_spz(buffer: bytes) -> GaussianCloud:
++def unpack_spz(buffer: bytes, color_scale: float = 1.0) -> GaussianCloud:
+     if len(buffer) < 16:
+         raise ValueError("Buffer too small for header")
+@@ -116,4 +116,5 @@
+         raise ValueError("Invalid SH degree")
+ 
++    # Note: v4 requires parsing the TOC to locate individual ZSTD streams [S2, unofficial]
+     if version >= 4:
+         data = decompress_zstd_v4(buffer)
+@@ -177,6 +178,7 @@
+             for i in range(4):
+                 if i != i_largest:
+-                    negbit = ((comp >> (10 * (i if i < i_largest else i-1) + 1)) & 0x1) ^ (1 if negate else 0)
+-                    mag = (comp >> (10 * (i if i < i_largest else i-1))) & 0x1FF
++                    shift = 10 * (i if i < i_largest else i - 1)
++                    negbit = ((comp >> (shift + 1)) & 0x1) ^ (1 if negate else 0)
++                    mag = (comp >> shift) & 0x1FF
+                     q[i] = (mag / 511.0) * (1.0 if negbit == 0 else -1.0)
+             q[i_largest] = math.sqrt(max(0.0, 1.0 - sum(x*x for x in q[:3])))
+@@ -220,13 +222,13 @@
+                         break
+                     for c in range(3):
+-                        tmp = sh[p * sh_dim * 3 + band_start * 3 + c : band_start * 3 + c + band_size]
++                        tmp = sh[base + band_start * 3 + c : base + band_start * 3 + c + band_size]
+                         coord_converter.rot_flip_sh_funcs[band](tmp)
+-                        sh[p * sh_dim * 3 + band_start * 3 + c : band_start * 3 + c + band_size] = tmp
++                        sh[base + band_start * 3 + c : base + band_start * 3 + c + band_size] = tmp
+ 
+     return GaussianCloud(positions, scales, rotations, alphas, colors, sh)
+ 
+ def unquantize_sh(val, flip):
+-    # Standard 8-bit quantization inversion [G]
+-    return (val / 127.5 - 1.0) * flip
++    # Standard 8-bit signed quantization inversion [G]
++    return ((val - 128) / 127.5) * flip
+ ```
+ 

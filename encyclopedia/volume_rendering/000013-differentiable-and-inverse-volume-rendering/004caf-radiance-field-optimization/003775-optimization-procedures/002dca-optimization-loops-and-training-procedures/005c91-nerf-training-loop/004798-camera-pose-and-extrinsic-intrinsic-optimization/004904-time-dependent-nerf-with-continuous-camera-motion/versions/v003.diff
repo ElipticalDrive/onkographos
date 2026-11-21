@@ -1,0 +1,261 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method jointly optimizes a time-dependent Neural Radiance Field (NeRF) and continuous camera motion from monocular video, representing the scene as local Signed Distance Field (SDF) and appearance fields at each time step [S1]. Unlike methods that train a single global NeRF mapped via noisy initial transformations, this approach uses local time-dependent representations constrained by consistency losses to avoid local minima [S1]. It builds on [Camera Pose and Extrinsic/Intrinsic Optimization](12051-camera-pose-and-extrinsic-intrinsic-optimization.md) by modeling camera motion as continuous velocities rather than discrete pose parameters.
++This method jointly optimizes a time-dependent Neural Radiance Field (NeRF) and continuous camera motion from monocular video, representing the scene as local Signed Distance Field (SDF) and appearance fields at each time step [S1]. Unlike methods that train a single global NeRF mapped via noisy initial transformations, this approach uses local time-dependent representations constrained by consistency losses to avoid local minima [S1]. It builds on [Camera Pose and Extrinsic/Intrinsic Optimization](12051-camera-pose-and-extrinsic-intrinsic-optimization.md) by modeling camera motion as continuous angular and linear velocities rather than discrete pose parameters [S1].
+ 
+ ## How it works
+@@ -62,33 +62,27 @@
+ import numpy as np
+ 
++def rotation_vector_to_matrix(w):
++    """Converts rotation vector w to rotation matrix using Rodrigues' formula [G]."""
++    theta = np.linalg.norm(w)
++    if theta < 1e-8:
++        return np.eye(3)
++    k = w / theta
++    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
++    return np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
++
+ def integrate_camera_motion(phi_v, t_start, t_end, U=10):
+-    """
+-    Integrate camera velocities to get relative transformation.
+-    """
+     l = t_end - t_start
+     dt = l / U
+     R = np.eye(3)
+     t_vec = np.zeros(3)
+-    
+     for u in range(U):
+         t_curr = t_start + u * dt
+-        omega, v = phi_v(t_curr) # Returns (3,) and (3,)
+-        
+-        # Convert rotation vector to matrix (right-multiplication)
+-        # Assuming psi converts angle vector to rotation matrix
+-        delta_R = psi(omega * dt) 
++        omega, v = phi_v(t_curr)
++        delta_R = rotation_vector_to_matrix(omega * dt)
+         R = R @ delta_R
+-        
+         t_vec += v * dt
+-        
+     return R, t_vec
+ 
+ def compute_transformation(phi_v, t1, t2):
+-    """
+-    Compute P_{t1->t2} using integration from 0 or relative to each other.
+-    Simplified: integrate from min(t1,t2) to max(t1,t2) and invert if needed.
+-    In practice, integrate from a reference (e.g., 0) or use relative integration.
+-    Here we assume relative integration between t1 and t2.
+-    """
+     if t1 <= t2:
+         R, t_vec = integrate_camera_motion(phi_v, t1, t2)
+@@ -99,5 +93,4 @@
+     else:
+         R, t_vec = integrate_camera_motion(phi_v, t2, t1)
+-        # Invert transformation
+         R_inv = R.T
+         t_inv = -R_inv @ t_vec
+@@ -107,103 +100,120 @@
+                          [0, 0, 0, 1]])
+ 
+-def compute_loss(phi_g, phi_c, phi_v, rays, gt_colors, K, N_intervals, t_w, lambda_weights):
+-    """
+-    Compute total loss for a batch of rays.
+-    """
+-    # 1. Render Color and SDF
+-    # Assume sample_points, weights, sigmas are computed via volume rendering
+-    # using phi_g(x, t) and phi_c(x, d, t)
+-    rendered_colors, surface_points, sdfs, normals = render_volume(phi_g, phi_c, rays)
+-    
+-    # L_rgb
++def volume_render(phi_g, phi_c, origins, directions, t, K_samples=128):
++    """Computes rendered color and surface point via discrete volume rendering [G]."""
++    depths = np.linspace(0.0, 5.0, K_samples)
++    points = origins[:, None, :] + directions[:, None, :] * depths[None, None, :]
++    sdfs = phi_g(points.reshape(-1, 3), t).reshape(origins.shape[0], K_samples)
++    colors = phi_c(points.reshape(-1, 3), directions[:, None, :], t).reshape(origins.shape[0], K_samples, 3)
++    alphas = 1.0 - np.exp(-sdfs)
++    weights = alphas * np.cumprod(np.concatenate([np.ones((origins.shape[0], 1)), 1.0 - alphas[:, :-1]], axis=1), axis=1)
++    rendered_colors = np.sum(weights[:, :, None] * colors, axis=1)
++    surface_points = np.sum(weights[:, :, None] * points, axis=1)
++    normals = np.zeros_like(points)
++    return rendered_colors, surface_points, sdfs, normals
++
++def compute_gradient(phi_g, points, t):
++    """Computes spatial gradient of SDF using finite differences [G]."""
++    eps = 1e-4
++    grad = np.zeros_like(points)
++    for i in range(3):
++        p_plus = points.copy(); p_plus[:, i] += eps
++        p_minus = points.copy(); p_minus[:, i] -= eps
++        grad[:, i] = (phi_g(p_plus, t) - phi_g(p_minus, t)) / (2 * eps)
++    return grad
++
++def compute_time_derivative(phi_g, points, t):
++    """Computes temporal derivative of SDF using finite differences [G]."""
++    eps = 1e-4
++    return (phi_g(points, t + eps) - phi_g(points, t - eps)) / (2 * eps)
++
++def bilinear_sample(image, uv):
++    """Samples image at UV coordinates [G]."""
++    h, w, _ = image.shape
++    u = (uv[:, 0] * (w - 1)).astype(int)
++    v = (uv[:, 1] * (h - 1)).astype(int)
++    u = np.clip(u, 0, w - 2)
++    v = np.clip(v, 0, h - 2)
++    x0, y0 = u, v
++    x1, y1 = x0 + 1, y0 + 1
++    w0 = (x1 - uv[:, 0]) * (y1 - uv[:, 1])
++    w1 = (uv[:, 0] - x0) * (y1 - uv[:, 1])
++    w2 = (x1 - uv[:, 0]) * (uv[:, 1] - y0)
++    w3 = (uv[:, 0] - x0) * (uv[:, 1] - y0)
++    return (w0[:, None] * image[y0, x0] + w1[:, None] * image[y0, x1] + 
++            w2[:, None] * image[y1, x0] + w3[:, None] * image[y1, x1])
++
++def adam_step(params, grads, lr, m, v, beta1=0.9, beta2=0.999, eps=1e-8, t=1):
++    """Standard Adam optimizer update step [G]."""
++    for p, g in zip(params, grads):
++        m[t] = beta1 * m[t] + (1 - beta1) * g
++        v[t] = beta2 * v[t] + (1 - beta2) * (g ** 2)
++        m_hat = m[t] / (1 - beta1 ** t)
++        v_hat = v[t] / (1 - beta2 ** t)
++        p -= lr * m_hat / (np.sqrt(v_hat) + eps)
++
++def compute_loss(phi_g, phi_c, phi_v, origins, directions, gt_colors, K_intrinsic, N_intervals, t_w, lambdas):
++    rendered_colors, surface_points, sdfs, normals = volume_render(phi_g, phi_c, origins, directions, t)
++    
+     l_rgb = np.mean((rendered_colors - gt_colors)**2)
+     
+-    # L_eik
+-    # Compute gradient of SDF w.r.t x
+-    sdf_grads = compute_sdf_gradient(phi_g, surface_points)
++    sdf_grads = compute_gradient(phi_g, surface_points, t)
+     l_eik = np.mean((np.linalg.norm(sdf_grads, axis=1) - 1)**2)
+     
+-    # L_flow
+-    # Compute time derivative of SDF and scene flow
+-    # dS/dt approx via finite difference or network output if available
+-    # Scene flow = omega x x + v
+-    t_curr = rays.time # Assuming rays have time attribute
+-    omega, v = phi_v(t_curr)
++    omega, v = phi_v(t)
+     scene_flow = np.cross(omega, surface_points) + v
+-    sdf_flow = compute_sdf_time_derivative(phi_g, surface_points, t_curr) # [G]: Implementation detail for dS/dt
++    sdf_flow = compute_time_derivative(phi_g, surface_points, t)
+     l_flow = np.mean(np.abs(sdf_flow + np.sum(scene_flow * normals, axis=1)))
+     
+-    # L_photo
+-    l_photo = 0
++    l_photo = 0.0
+     for n in N_intervals:
+-        t_neighbor = t_curr + n
+-        P = compute_transformation(phi_v, t_curr, t_neighbor)
+-        # Project surface point to neighbor frame
++        t_neighbor = t + n
++        P = compute_transformation(phi_v, t, t_neighbor)
+         homo_points = np.hstack([surface_points, np.ones((surface_points.shape[0], 1))])
+         neighbor_points_homo = (P @ homo_points.T).T
+         neighbor_points = neighbor_points_homo[:, :3]
+-        
+-        # Project to image plane
+-        neighbor_uv = K @ neighbor_points.T
++        neighbor_uv = K_intrinsic @ neighbor_points.T
+         neighbor_uv = neighbor_uv[:2, :] / neighbor_uv[2, :]
+-        
+-        # Sample color from neighbor frame
+-        neighbor_colors = sample_image(K, neighbor_uv, gt_colors_neighbor) # [G]: Helper to sample GT color at UV
+-        
++        neighbor_colors = bilinear_sample(gt_colors_neighbor, neighbor_uv.T)
+         l_photo += np.mean(np.abs(neighbor_colors - rendered_colors))
+     l_photo /= len(N_intervals)
+     
+-    # L_sdf
+-    # Transform points to world frame (t_w)
+-    P_to_world = compute_transformation(phi_v, t_curr, t_w)
++    P_to_world = compute_transformation(phi_v, t, t_w)
+     homo_points = np.hstack([surface_points, np.ones((surface_points.shape[0], 1))])
+     world_points_homo = (P_to_world @ homo_points.T).T
+     world_points = world_points_homo[:, :3]
+-    
+     sdfs_world = phi_g(world_points, t_w)
+     l_sdf = np.mean(np.abs(sdfs - sdfs_world))
+     
+-    # Total Loss
+-    l_total = (l_rgb + 
+-               lambda_weights['eik'] * l_eik + 
+-               lambda_weights['flow'] * l_flow + 
+-               lambda_weights['photo'] * l_photo + 
+-               lambda_weights['sdf'] * l_sdf)
+-               
++    l_total = l_rgb + lambdas['eik'] * l_eik + lambdas['flow'] * l_flow + lambdas['photo'] * l_photo + lambdas['sdf'] * l_sdf
+     return l_total, l_rgb, l_eik, l_flow, l_photo, l_sdf
+ 
+-def train_joint_optimization(phi_g, phi_c, phi_v, dataloader, epochs=200, lambda_weights_init=None):
+-    """
+-    Joint optimization phase.
+-    """
+-    optimizer = Adam([phi_g.parameters(), phi_c.parameters(), phi_v.parameters()], lr=0.001)
+-    
++def train_joint_optimization(phi_g, phi_c, phi_v, dataloader, epochs=200, lambdas_init=None):
++    m = [np.zeros_like(p) for p in phi_g.parameters()]
++    v = [np.zeros_like(p) for p in phi_g.parameters()]
++    t_step = 1
+     for epoch in range(epochs):
+-        for rays, gt_colors in dataloader:
+-            optimizer.zero_grad()
+-            loss, *_ = compute_loss(phi_g, phi_c, phi_v, rays, gt_colors, ...)
+-            loss.backward()
+-            optimizer.step()
+-            
+-        # Adjust lambda_sdf after 200 epochs
++        for origins, directions, gt_colors in dataloader:
++            loss, *_ = compute_loss(phi_g, phi_c, phi_v, origins, directions, gt_colors, K_intrinsic, N_intervals, t_w, lambdas_init)
++            grads = compute_gradients(loss, [phi_g, phi_c, phi_v])
++            adam_step([phi_g, phi_c, phi_v], grads, 0.001, m, v, t=t_step)
++            t_step += 1
+         if epoch >= 200:
+-            lambda_weights_init['sdf'] = ... # Gradually increase
+-
+-def train_fine_tuning(phi_g, phi_c, dataloader, t_w, N_intervals, K, gt_colors_all, epochs=5000):
+-    """
+-    Fine-tuning phase: Fix camera motion, update NeRF only.
+-    """
+-    optimizer = Adam([phi_g.parameters(), phi_c.parameters()], lr=0.001) # Decaying LR
+-    
++            lambdas_init['sdf'] = adjust_lambda(lambdas_init['sdf'])
++
++def train_fine_tuning(phi_g, phi_c, dataloader, t_w, lambdas_init, epochs=5000):
++    m = [np.zeros_like(p) for p in phi_g.parameters()]
++    v = [np.zeros_like(p) for p in phi_g.parameters()]
++    t_step = 1
+     for epoch in range(epochs):
+-        for rays, gt_colors in dataloader:
+-            optimizer.zero_grad()
+-            # Recompute transformations based on fixed phi_v
+-            # Only compute L_rgb and L_eik (L_flow, L_photo, L_sdf dropped)
+-            # [G]: Implementation of L_rgb and L_eik as defined above
+-            l_rgb, l_eik = compute_rendering_and_eikonal_losses(phi_g, phi_c, rays, gt_colors)
+-            loss = l_rgb + lambda_weights_init['eik'] * l_eik
+-            loss.backward()
+-            optimizer.step()
++        for origins, directions, gt_colors in dataloader:
++            rendered_colors, surface_points, sdfs, normals = volume_render(phi_g, phi_c, origins, directions, t_w)
++            l_rgb = np.mean((rendered_colors - gt_colors)**2)
++            sdf_grads = compute_gradient(phi_g, surface_points, t_w)
++            l_eik = np.mean((np.linalg.norm(sdf_grads, axis=1) - 1)**2)
++            loss = l_rgb + lambdas_init['eik'] * l_eik
++            grads = compute_gradients(loss, [phi_g, phi_c])
++            adam_step([phi_g, phi_c], grads, 0.001, m, v, t=t_step)
++            t_step += 1
+ ```
+ 
+@@ -228,5 +238,5 @@
+ *   **Limitations:** Requires monocular video; performance depends on the quality of the continuous motion modeling [S1].
+ *   **When to use:** When initial camera poses are unavailable or unreliable, and high-quality geometry reconstruction is needed from monocular video [S1].
+-*   **When not:** When high-quality initial poses are available and a simpler global NeRF optimization suffices.
++*   **When not:** Not given in the sources.
+ 
+ ## Background

@@ -1,0 +1,123 @@
+# Hybrid Triangle Voxelization
+
+Also called: Bin-based Triangle Voxelization, Compute Shader Hybrid Voxelization
+
+## Overview
+Hybrid Triangle Voxelization is a compute-shader-based technique for voxelizing triangles that dynamically selects between direct voxel filling and a two-stage binning process based on triangle size [S1, unofficial]. It solves the problem of workload imbalance in parallel voxelization by avoiding the overhead of binning for small triangles while preventing excessive memory usage and atomic contention for large triangles [S1, unofficial]. It builds on [Compute Shader Triangle Voxelization](12867-compute-shader-triangle-voxelization.md) by introducing a spatial binning stage for triangles that span more than two voxels [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Triangle index `ix_src_triangle`, global triangle count `n_triangles`, index buffer `indices`, vertex buffer `vertices`, model matrix, cascade anchor positions, voxel size, and cascade dimensions.
+*   **Outputs:** Voxel target buffer `voxel_targets` (for small triangles) and a buffered triangle list `buf` (for large triangles, to be processed in a subsequent pass).
+
+**Data Structures:**
+*   **Vertex Struct (`std430` alignment):**
+    *   `position`: `[3]f32` aligned to 16 bytes (implicit padding to 4 floats) [S1, unofficial].
+    *   `normal`: `[3]f32` aligned to 16 bytes (implicit padding to 4 floats) [S1, unofficial].
+*   **Triangle Struct (packed into buffer `buf`):**
+    *   `p0[0]`: `half2` (xy of p0) [S1, unofficial].
+    *   `p0[1]`: `half2` (z of p0, x of normal) [S1, unofficial].
+    *   `p1[0]`: `half2` (xy of p1) [S1, unofficial].
+    *   `p1[1]`: `half2` (z of p1, x of normal) [S1, unofficial].
+    *   `p2[0]`: `half2` (xy of p2) [S1, unofficial].
+    *   `p2[1]`: `half2` (z of p2, x of normal) [S1, unofficial].
+    *   `diffuse`: `uint` (packed from `packDiffuseNormalOpacity`) [S1, unofficial].
+    *   `emissive`: `uint` (set to 0) [S1, unofficial].
+
+**Numbered Steps:**
+1.  Get triangle index `ix_src_triangle` from `gl_GlobalInvocationID.x`. If `ix_src_triangle >= n_triangles`, return [S1, unofficial].
+2.  Calculate vertex indices: `index_offset = first_index + 3 * ix_src_triangle`; `i0 = indices[index_offset + 0] + first_vertex`, `i1 = indices[index_offset + 1] + first_vertex`, `i2 = indices[index_offset + 2] + first_vertex` [S1, unofficial].
+3.  Fetch model-space positions `p0_model`, `p1_model`, `p2_model` from `vertices` buffer using `i0`, `i1`, `i2` [S1, unofficial].
+4.  Transform to cascade-local space: `p0 = (model_matrix * vec4(p0_model, 1.0)).xyz - anchors[target_cascade].xyz` (same for p1, p2) [S1, unofficial].
+5.  Compute normal: `normal = normalize(cross(p1 - p0, p2 - p0))` [S1, unofficial].
+6.  Compute AABB bounds in cascade-local space: `lower_bound = min(min(p0, p1), p2)`, `upper_bound = max(max(p0, p1), p2)` [S1, unofficial].
+7.  Pack attributes: `packed = packDiffuseNormalOpacity(diffuse.rgb, abs(normal), 1.0)` [S1, unofficial].
+8.  Calculate voxel bounds: `voxel_size = voxelSize(target_cascade)`; `voxel_lower_bound = max(ivec3(floor(lower_bound / voxel_size)), -cascade_size_half)`; `voxel_upper_bound = min(ivec3(floor(upper_bound / voxel_size)), cascade_size_half - 1)` [S1, unofficial].
+9.  If `triangleVolume(voxel_lower_bound, voxel_upper_bound) <= 2`, execute direct voxelization loop and return [S1, unofficial].
+10. Otherwise, calculate bin bounds: `bin_size = voxelSize(target_cascade) * 4`; `bin_lower_bound = max(ivec3(floor(lower_bound / bin_size)), -bin_cascade_size_half)`; `bin_upper_bound = min(ivec3(floor(upper_bound / bin_size)), bin_cascade_size_half - 1)` [S1, unofficial].
+11. Increment bin counters: Loop over bin bounds, calculate `bin_index = binIndex(bin_pos)`, execute `atomicAdd(bin_offsets[bin_index + bin_group_offset], 1)` [S1, unofficial].
+12. Pack triangle data into `Triangle` struct: `tri.p0[0] = packHalf2x16(p0.xy)`, `tri.p0[1] = packHalf2x16(vec2(p0.z, normal.x))`, etc. for p1, p2. Set `tri.diffuse = packed`, `tri.emissive = 0` [S1, unofficial].
+13. Append to buffer: `ix = atomicAdd(n_buffered_triangles[buffer_group_index], 1)`; `buf[ix + buffer_group_offset] = tri` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybrid_triangle_voxelization(ix_src_triangle, n_triangles, indices, vertices, model_matrix, anchors, target_cascade, voxel_size, cascade_size_half, bin_cascade_size_half, bin_offsets, bin_group_offset, n_buffered_triangles, buffer_group_index, buf, voxel_targets):
+    if ix_src_triangle >= n_triangles:
+        return
+
+    index_offset = first_index + 3 * ix_src_triangle
+    i0 = indices[index_offset + 0] + first_vertex
+    i1 = indices[index_offset + 1] + first_vertex
+    i2 = indices[index_offset + 2] + first_vertex
+
+    p0_model = vertices[i0].position
+    p1_model = vertices[i1].position
+    p2_model = vertices[i2].position
+
+    p0 = (model_matrix * vec4(p0_model, 1.0)).xyz - anchors[target_cascade].xyz
+    p1 = (model_matrix * vec4(p1_model, 1.0)).xyz - anchors[target_cascade].xyz
+    p2 = (model_matrix * vec4(p2_model, 1.0)).xyz - anchors[target_cascade].xyz
+
+    normal = normalize(cross(p1 - p0, p2 - p0))
+
+    lower_bound = min(min(p0, p1), p2)
+    upper_bound = max(max(p0, p1), p2)
+
+    packed = packDiffuseNormalOpacity(diffuse.rgb, abs(normal), 1.0)
+
+    voxel_lower_bound = max(ivec3(floor(lower_bound / voxel_size)), -cascade_size_half)
+    voxel_upper_bound = min(ivec3(floor(upper_bound / voxel_size)), cascade_size_half - 1)
+
+    if triangle_volume(voxel_lower_bound, voxel_upper_bound) <= 2:
+        for x in range(voxel_lower_bound.x, voxel_upper_bound.x + 1):
+            for y in range(voxel_lower_bound.y, voxel_upper_bound.y + 1):
+                for z in range(voxel_lower_bound.z, voxel_upper_bound.z + 1):
+                    voxel_pos = ivec3(x, y, z)
+                    voxel_index = index_from_cascade_pos(target_cascade, voxel_pos)
+                    packed_with_opacity = set_packed_opacity(packed, 0.5)
+                    atomic_or(voxel_targets[voxel_index], packed_with_opacity)
+        return
+
+    bin_size = voxel_size * 4
+    bin_lower_bound = max(ivec3(floor(lower_bound / bin_size)), -bin_cascade_size_half)
+    bin_upper_bound = min(ivec3(floor(upper_bound / bin_size)), bin_cascade_size_half - 1)
+
+    for x in range(bin_lower_bound.x, bin_upper_bound.x + 1):
+        for y in range(bin_lower_bound.y, bin_upper_bound.y + 1):
+            for z in range(bin_lower_bound.z, bin_upper_bound.z + 1):
+                bin_pos = ivec3(x, y, z)
+                bin_index = bin_index_from_pos(bin_pos)
+                atomic_add(bin_offsets[bin_index + bin_group_offset], 1)
+
+    tri = Triangle()
+    tri.p0[0] = pack_half2x16(p0.xy)
+    tri.p0[1] = pack_half2x16(vec2(p0.z, normal.x))
+    tri.p1[0] = pack_half2x16(p1.xy)
+    tri.p1[1] = pack_half2x16(vec2(p1.z, normal.x))
+    tri.p2[0] = pack_half2x16(p2.xy)
+    tri.p2[1] = pack_half2x16(vec2(p2.z, normal.x))
+    tri.diffuse = packed
+    tri.emissive = 0
+
+    ix = atomic_add(n_buffered_triangles[buffer_group_index], 1)
+    buf[ix + buffer_group_offset] = tri
+```
+
+**Parameters:**
+*   `bin_size`: The spatial extent of a bin, calculated as `voxelSize(target_cascade) * 4` [S1, unofficial].
+*   `opacity`: In the direct voxelization path, the opacity is hardcoded to `0.5` via `setPackedOpacity(packed, 0.5)` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Atomic Contention:** Appending to the triangle buffer via `atomicAdd(n_buffered_triangles[buffer_group_index], 1)` may cause contention if many threads write simultaneously [S1, unofficial].
+*   **Small Triangle Overhead:** Direct voxelization is used for triangles spanning <= 2 voxels to avoid the overhead of binning for very fine geometry, but this requires an LOD system to prevent overloading the voxelization pass [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] Sandalmoth/voxel-cone-tracing, https://github.com/Sandalmoth/voxel-cone-tracing, fetched 2026-10-26 (unofficial)

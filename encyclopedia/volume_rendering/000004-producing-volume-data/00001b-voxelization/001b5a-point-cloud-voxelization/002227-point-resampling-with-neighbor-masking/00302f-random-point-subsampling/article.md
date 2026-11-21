@@ -1,0 +1,86 @@
+# Random Point Subsampling
+
+Also called: Random Point Cloud Downsampling, Random Subset Selection, Shuffle and Slice
+
+## Overview
+Random Point Subsampling selects a random subset of points from a given set of points without replacement [S1, unofficial]. It serves as a fundamental resampling primitive within [Point Resampling with Neighbor Masking](2710-point-resampling-with-neighbor-masking.md), providing a baseline strategy for reducing point cloud density by ignoring spatial distribution or error metrics [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `points`: A tensor of points, typically shape $(M, 3)$ [S1, unofficial].
+- `n_points`: The integer number of points to select [S1, unofficial].
+
+**Outputs:**
+- A tensor of shape $(n\_points, 3)$ containing the selected subset [G].
+
+**Data Structures:**
+- The input `points` tensor holds $M$ 3D coordinates.
+- A permutation array of indices is generated to shuffle the selection order [S1, unofficial].
+
+**Steps:**
+1. Generate a random permutation of indices for the input points tensor [S1, unofficial].
+2. Index the `points` tensor with the random permutation to shuffle the points [S1, unofficial].
+3. Reshape the shuffled points tensor to ensure it is 2D with shape $(-1, 3)$ [S1, unofficial].
+4. Return the first `n_points` rows of the reshuffled tensor as the selected subset [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def random_point_subsampling(points: torch.Tensor, n_points: int) -> torch.Tensor:
+    """
+    Selects a random subset of points from a given set of points without replacement.
+    
+    Args:
+        points: Tensor of shape (M, 3) containing M 3D points.
+        n_points: Integer, the number of points to select.
+        
+    Returns:
+        Tensor of shape (n_points, 3) containing the selected subset.
+    """
+    M = points.shape[0]
+    # Clamp n_points to M to prevent out-of-bounds indexing [G]
+    n_points = min(n_points, M)
+    
+    # Step 1: Generate a random permutation of indices
+    perm = torch.randperm(M, device=points.device)
+    
+    # Step 2: Index the points tensor with the random permutation
+    shuffled_points = points[perm]
+    
+    # Step 3: Reshape the shuffled points tensor to ensure it is 2D (shape (-1, 3))
+    shuffled_points = shuffled_points.view(-1, 3)
+    
+    # Step 4: Return the selected subset of points
+    selected_points = shuffled_points[:n_points]
+    
+    return selected_points
+```
+
+**Parameters:**
+- `n_points`: The number of points to select [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If `n_points` exceeds the total number of points $M$, the tensor slice will raise an index error; clamp `n_points` to $M$ before selection [G].
+- Precision issues are minimal as the operation relies on integer indexing and tensor reshaping, but the randomness source (e.g., `torch.randperm`) should be seeded for reproducibility if required [G].
+
+## Subtopics
+
+### Near Sampling
+A site placement strategy where a proportion of sites are placed close to uniformly subsampled input point cloud data [S3]. It is effective in methods that can efficiently move sites during optimization, such as DCCVT, but may fail in methods like MTet or Voromesh that require accurate initial occupancy information [S3]. It is often combined with uniform grid sampling and iterative upsampling strategies [S3].
+
+### Stratified Point Subsampling
+A variant that ensures proportional representation from different labels or clusters. It initializes a random number generator, computes unique labels and their counts, calculates target counts based on proportions, and samples indices without replacement from each label's pool [S4, unofficial]. It handles deficits by distributing remaining samples, ensuring the final count matches `sample_size` [S4, unofficial]. This method is chosen when preserving class balance or cluster distribution is critical, unlike the pure randomness of the base method [S4, unofficial].
+
+## Operating characteristics
+
+## Background
+Random Point Subsampling is a standard technique in point cloud processing, often used as a preprocessing step for neural surface reconstruction and volume rendering pipelines [S1, unofficial]. It is cited in the context of optimizing neural implicit surfaces, where it is used to manage the computational load of training by subsampling the input point cloud [S1, unofficial].
+
+## Sources
+[S1] omkarchittar/Neural_Surfaces, https://github.com/omkarchittar/Neural_Surfaces, fetched 2026-10-26 (unofficial)
+[S2] ElenaViewSynthesis/4dgs, https://github.com/ElenaViewSynthesis/4dgs, fetched 2026-10-28 (unofficial)
+[S3] DCCVT: Differentiable Clipped Centroidal Voronoi Tessellation, https://arxiv.org/abs/2601.13603v1, fetched 2026-10-26
+[S4] cilix-ai/gs-embedding, https://github.com/cilix-ai/gs-embedding, fetched 2026-10-27 (unofficial)

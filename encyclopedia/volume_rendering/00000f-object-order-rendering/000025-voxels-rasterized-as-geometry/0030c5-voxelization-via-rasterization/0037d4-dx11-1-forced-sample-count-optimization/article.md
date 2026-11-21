@@ -1,0 +1,90 @@
+# DX11.1 Forced Sample Count Optimization
+
+Also called: Forced Sample Count MSAA Voxelization
+
+## Overview
+This method enables Multi-Sample Anti-Aliasing (MSAA) rasterization for voxelization without requiring an MSAA render target to be bound to the output merger stage [S2, unofficial]. It reduces video memory (vidmem) overhead compared to standard MSAA voxelization, which requires allocating an MSAA render target [S2, unofficial]. It is distinguished from standard MSAA voxelization by its reduced memory footprint, while remaining an aggressive approximation that may produce holes compared to genuine conservative rasterization [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Mesh or set of primitives to be voxelized.
+*   **Output:** Voxel grid populated with coverage data. (Not given in the sources.)
+
+**Data Structures:**
+*   **Rasterizer State:** Configured to enable MSAA rasterization via the DirectX 11.1 Forced Sample Count feature [S2, unofficial].
+*   **Render Target:** A standard, non-MSAA render target [G].
+
+**Steps:**
+1.  Configure the rasterizer state to enable MSAA rasterization using the Forced Sample Count feature, without binding an MSAA render target [S2, unofficial].
+2.  Bind a standard (non-MSAA) render target to the output merger stage [G].
+3.  Draw the primitives. The GPU rasterizer invokes the pixel shader once per sample location within each pixel, performing MSAA rasterization logic while discarding sample coverage data into the single-sampled render target [G].
+
+**Formulas:**
+None specified in the sources.
+
+**Parameters:**
+*   **MSAA Sample Count:** Configurable via the Forced Sample Count feature. Typical values are not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Holes:** This method is not genuine conservative rasterization. Primitives lying in-between subsamples may not be voxelized properly, leading to holes in the voxel grid [S1, S2, unofficial].
+*   **Mitigation:** Holes are avoidable by ensuring the voxel grid resolution is sufficiently high relative to the sizes of the voxelized primitives [S1, S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class RasterizerState:
+    def __init__(self):
+        self.forced_sample_count_enabled = False
+    def enable_forced_sample_count(self):
+        self.forced_sample_count_enabled = True
+
+class RenderTarget:
+    def bind(self):
+        pass
+
+def voxelize_primitives(primitives, rasterizer_state, render_target):
+    # 1. Enable MSAA rasterization without binding an MSAA render target
+    rasterizer_state.enable_forced_sample_count()
+    
+    # 2. Bind standard non-MSAA render target
+    render_target.bind()
+    
+    # 3. Draw primitives; rasterizer invokes pixel shader per sample location
+    for prim in primitives:
+        prim.draw()
+```
+
+## Subtopics
+
+### Conservative Raster via Edge Extension
+Not given in the sources. [Link](2480-3-axis-rasterization-voxelization.md)
+
+### Chunked UV Rasterization with Face ID Storage
+Not given in the sources. [Link](2598-chunked-uv-rasterization-with-face-id-storage.md)
+
+### Triangle Projection Voxelization
+Not given in the sources. [Link](5432-triangle-projection-voxelization.md)
+
+### Bone-Animated Voxel Skinning with Skeletal Mesh Voxelization
+Not given in the sources. [Link](12565-bone-animated-voxel-skinning-with-skeletal-mesh-voxelization.md)
+
+### Cascaded Voxel Cone Tracing Voxelization
+Not given in the sources. [Link](13853-cascaded-voxel-cone-tracing-voxelization.md)
+
+### Voxelization by Rasterization
+Not given in the sources. [Link](14850-voxelization-by-rasterization.md)
+
+## Operating characteristics
+*   **Memory Cost:** Reduces vidmem usage compared to standard MSAA voxelization, which requires allocating an MSAA render target [S2, unofficial].
+*   **Performance:** Not given in the sources.
+*   **Accuracy:** Aggressive approximation. Does not guarantee full conservative coverage, potentially leaving gaps ("holes") in the voxel grid [S1, S2, unofficial].
+*   **Scaling:** Not given in the sources.
+*   **When to use / not to use:** Not given in the sources.
+
+## Background
+This technique was described in NVIDIA's "The Basics of GPU Voxelization" documentation, highlighting the use of DirectX 11.1 features to optimize the voxelization pipeline [S1, S2, unofficial]. It addresses the memory overhead of traditional MSAA-based voxelization methods [S2, unofficial].
+
+## Sources
+[S1] 【转】The Basics of GPU Voxelization - 竹庭, https://www.cnblogs.com/hustztz/p/7575729.html, fetched 2026-10-27 (unofficial)
+[S2] https://developer.nvidia.com/content/basics-gpu-voxelization, https://developer.nvidia.com/content/basics-gpu-voxelization, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,147 @@
+An actor-based systems language that compiles to readable C. Native, no VM, no garbage collector. - GPU tier: instancing, indirect draws, dynamic uniform offsets, GPU timing (#2198) by nicolas-maman · Pull Request #2374 · aether-lang-dev/aether
+
+GPU tier: instancing, indirect draws, dynamic uniform offsets, GPU timing (#2198) by nicolas-maman · Pull Request #2374 · aether-lang-dev/aether · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+nicolas-maman
+commented
+Oct 2, 2026
+Copy link
+Copy Markdown
+Collaborator
+Second batch of #2198. The calls are the same in contrib.vulkan, contrib.d3d12 and contrib.metal, and docs/gpu.md documents them in a new "Drawing many things" section and new rows in "What differs".
+New calls
+Call
+What it does
+Vulkan
+Direct3D 12
+Metal
+vertex_stream(t, binding, buf), target_set_instances, batch_add_instanced
+Streams 1..7 come from buffers, per vertex or per instance; instanced draws
+vkCmdBindVertexBuffers per binding, firstInstance
+input slot B, StartInstanceLocation
+[[buffer(16+B)]], baseInstance
+batch_add_indirect(t, m, buf, offset, draws)
+Draw commands read from a buffer when the frame runs
+vkCmdDraw[Indexed]Indirect, one call when multiDrawIndirect is available
+ExecuteIndirect with a command signature per device
+one indirect draw per command
+bindings_uniform_dynamic, batch_set_offset, uniform_offset_alignment
+One buffer holds every draw's uniform block
+UNIFORM_BUFFER_DYNAMIC
+root CBV address + offset (256)
+buffer offset (256)
+target_set_timing / target_gpu_ms, compute_set_timing / compute_gpu_ms
+GPU milliseconds of the newest frame or dispatch that has been waited on
+timestamp query pool
+timestamp query heap + resolve
+GPUStartTime..GPUEndTime
+An indirect command has the same layout in all three APIs: five words with indices, four without.
+Refusals and behaviour changes
+A draw is refused, with the stream named, when a stream it reads is unbound or shorter than the vertices or instances it draws.
+A draw is refused when a dynamic window has no buffer bound or runs past its buffer.
+Setting an offset on a binding that isn't dynamic is refused, and so is an offset that isn't a multiple of the device's alignment.
+Compute passes refuse dynamic uniforms.
+Behaviour change: a second vertex stream used to be refused at pipeline creation. It is now accepted, and layout_binding instead refuses a stream past 7 or one declared twice, in all three modules. The three *_resources specs are updated to match.
+Vulkan internals:
+The dispatch barrier now covers DRAW_INDIRECT and INDIRECT_COMMAND_READ, so commands written by a compute pass are visible to the draw that reads them.
+buffer_create adds INDIRECT_BUFFER usage.
+The dispatch list gains the indirect-draw and query commands, regenerated from registry 1.3.204. vk/module.ae is unchanged.
+GPU time ordering: each module records which submission a frame slot holds. Waiting on slots out of order with frames in flight therefore never reports an older frame's time.
+Tests
+test_{vulkan,d3d12,metal}_draws.ae check every feature against pixels read back. They cover:
+instances landing in their own quarter of the target;
+a batch drawing instances 2 and 3 only;
+a per-vertex stream;
+an indirect draw whose instance count a compute pass sets, and then zeroes;
+two indirect commands, the second starting at first instance 3;
+a non-indexed indirect draw;
+two draws reading different blocks of one uniform buffer;
+GPU time for a frame, with three frames in flight, and for a dispatch.
+The refusals listed above are tested too. CI asserts that each spec ran rather than skipped on Linux lavapipe, Windows lavapipe, WARP, macOS Metal and MoltenVK.
+Local results
+Vulkan (lavapipe on Windows): passes. Under the Khronos validation layer with synchronisation and best-practices validation on, it reports only the usual small-dedicated-allocation advisories.
+Direct3D 12: passes on the GPU and on WARP with 0 debug-layer messages, including with GPU-based validation (AETHER_D3D12_DEBUG=2).
+Metal: compiles for arm64 and x86_64 macOS with -Wall -Wextra and no warnings (zig cc). The macOS CI leg is its first run on a device.
+Follow-up
+Comparison sampling of a target's depth, for hardware shadow-map filtering, is the last item on #2198's acceptance list. It is filed as #2373 and listed under "Not here yet".
+nicolas-maman
+added 2 commits
+October 2, 2026 19:48
+GPU tier: instancing, indirect draws, dynamic uniform offsets, GPU ti…
+…
+14a1c90
+```
+…ming (#2198)
+
+contrib.vulkan, contrib.d3d12 and contrib.metal gain the same calls:
+
+- vertex_stream binds a buffer as stream 1..7 at the rate the layout
+  declares; target_set_instances and batch_add_instanced set the
+  instances drawn. A stream the pipeline reads that is unbound, or
+  shorter than the vertices or instances drawn, refuses the draw.
+- batch_add_indirect draws commands read from a buffer when the frame
+  runs (vkCmdDraw[Indexed]Indirect, ExecuteIndirect, Metal's indirect
+  draws), so a compute pass can write them; the dispatch barrier now
+  covers the indirect-command read.
+- bindings_uniform_dynamic declares a window of one buffer whose offset
+  batch_set_offset chooses per draw (dynamic descriptors, a root CBV
+  address, a buffer offset); uniform_offset_alignment reports the step.
+- target_set_timing / target_gpu_ms and compute_set_timing /
+  compute_gpu_ms report the GPU milliseconds of the newest waited frame
+  or dispatch (timestamp queries, a timestamp query heap, the command
+  buffer's GPUStartTime..GPUEndTime), ordered by submission so waiting
+  on slots out of order never reports an older frame.
+
+layout_binding now refuses a stream past 7 or one declared twice in all
+three modules; a second stream is no longer refused at pipeline creation.
+The Vulkan dispatch list gains the indirect and query commands,
+regenerated from registry 1.3.204.
+
+A draws spec per module checks every feature against pixels read back;
+CI asserts it ran on lavapipe, WARP, Metal and MoltenVK.
+```
+GPU tier: MoltenVK stamps a frame's queries together where Metal cann…
+…
+0a2b21d
+```
+…ot sample counters (#2198)
+
+On the macOS runners' virtual GPU, MoltenVK has no Metal counter
+sampling at stage boundaries and writes every timestamp in a command
+buffer as the buffer completes, so a Vulkan frame there reads 0 ms
+(contrib.metal, timing the command buffer itself, passed on the same
+runner). The Vulkan spec still requires a time on macOS and requires
+time to have passed everywhere else; docs/gpu.md and the README say
+where the figure comes from.
+```
+Hide details
+View details
+paul-hammant
+merged commit 9bd2c81
+into
+main
+Oct 3, 2026
+34 of 35 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+paul-hammant
+deleted the
+feat/2198-draws-offsets-timestamps
+branch
+October 3, 2026 08:28
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

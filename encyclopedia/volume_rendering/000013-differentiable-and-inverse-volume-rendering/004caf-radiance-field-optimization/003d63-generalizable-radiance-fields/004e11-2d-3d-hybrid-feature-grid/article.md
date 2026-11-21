@@ -1,0 +1,121 @@
+# 2D-3D Hybrid Feature Grid
+
+Also called: Hybrid Tri-Plane and Voxel Grid
+
+## Overview
+The 2D-3D Hybrid Feature Grid is a scene representation architecture that combines 2D feature planes (tri-planes) and a 3D voxel grid to improve reconstruction quality while maintaining compact parameter counts [S1]. It addresses the trade-off between the geometric expressiveness of 3D voxels and the computational efficiency of 2D planes. Compared to a pure 2D tri-plane representation and a pure 3D voxel representation, the hybrid grid achieves superior compactness and quality, using fewer parameters to reach higher PSNR and SSIM scores [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of source images used for training; a query ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ for rendering.
+*   **Output:** Volume density $\sigma$ and view-dependent color $\mathbf{c}$ for sample points along the ray.
+
+**Data Structures:**
+The representation consists of a hybrid feature grid $\Psi$. While the specific layout of the 2D tri-planes is not detailed in the provided sources, the 3D component is defined as a 3D volume of dimension $f \times d^3$ [S2, unofficial].
+*   **Feature Grid $\Psi$:** A 3D volume storing features.
+*   **Density Features $f_d$:** A vector in $\mathbb{R}^4$ [S2, unofficial].
+*   **Appearance Features $f_c$:** A vector in $\mathbb{R}^8$ [S2, unofficial].
+*   **Positional Encoding $\gamma(\cdot)$:** Applied to the view direction $\mathbf{d}$, using 6 frequencies [S2, unofficial].
+
+**Parameters:**
+*   $d = 256$: The final grid resolution dimension for the 3D component [S2, unofficial].
+*   $f_d \in \mathbb{R}^4$: Number of density feature channels [S2, unofficial].
+*   $f_c \in \mathbb{R}^8$: Number of appearance feature channels [S2, unofficial].
+*   $N_\gamma = 6$: Number of frequencies in the positional encoding function $\gamma(\cdot)$ [S2, unofficial].
+
+**Steps:**
+1.  **Ray Sampling:** Sample points $p_i$ along the ray.
+2.  **Feature Interpolation:** Obtain features $f$ for each sample point $p_i$ by trilinearly interpolating the feature grid $\Psi$ [S2, unofficial].
+3.  **Feature Splitting:** Split the interpolated features into density features $f_d$ and appearance features $f_c$ [S2, unofficial].
+4.  **Density Prediction:** Process density features $f_d$ through a small MLP $\pi_d$ to produce density $\sigma_i$ [S2, unofficial]:
+    $$ \sigma_i = \pi_d(f_d) $$
+5.  **Color Prediction:** Concatenate appearance features $f_c$ with the viewpoint encoding $\gamma(\mathbf{d})$ and process through a small MLP $\pi_c$ to produce color $\mathbf{c}_i$ [S2, unofficial]:
+    $$ \mathbf{c}_i = \pi_c(f_c, \gamma(\mathbf{d})) $$
+
+**Pitfalls:**
+*   **Hardware Efficiency:** The number of features for each network must be a multiple of four to maximize texture efficiency, as one hardware-accelerated texture read fetches four channel values [S2, unofficial].
+*   **Precision:** Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def query_hybrid_grid(grid, point, view_direction):
+    """
+    Query the 2D-3D hybrid feature grid for density and color.
+    
+    Args:
+        grid: The 3D feature volume Psi of dimension f x d^3.
+        point: 3D coordinate (x, y, z) of the sample point.
+        view_direction: 3D view direction vector d.
+        
+    Returns:
+        sigma: Volume density.
+        color: View-dependent color.
+    """
+    # 1. Trilinearly interpolate features from the 3D grid
+    # Note: The sources describe a hybrid grid but only provide 
+    # implementation details for the 3D voxel part's interpolation.
+    # The 2D tri-plane contribution is not specified in the pseudocode 
+    # or detailed layout in the sources.
+    features = trilinear_interpolate(grid, point)
+    
+    # 2. Split features into density and appearance components
+    # Based on [S2, unofficial], fd is R^4 and fc is R^8.
+    # Assuming features are concatenated as [fd, fc] or similar.
+    # The exact split logic (e.g., indices) is not given in sources.
+    fd = features[0:4]
+    fc = features[4:12]
+    
+    # 3. Predict density using MLP pi_d
+    # pi_d is a small MLP. Implementation details of pi_d are not given.
+    sigma = mlp_density(fd)
+    
+    # 4. Predict color using MLP pi_c
+    # Apply positional encoding with 6 frequencies to view_direction
+    view_encoding = positional_encoding(view_direction, num_frequencies=6)
+    
+    # Concatenate fc and view_encoding
+    input_color = concatenate(fc, view_encoding)
+    
+    # pi_c is a small MLP. Implementation details of pi_c are not given.
+    color = mlp_color(input_color)
+    
+    return sigma, color
+```
+
+## Subtopics
+
+### Hardware-guided model design
+A model architecture combining a 3D feature grid with small MLP decoders to leverage hardware texture interpolation and cache coherence for efficient real-time rendering [S2, S2, unofficial]. It uses a 3D feature grid $\psi$ of dimension $f \times d^3$ and small MLPs $\pi_d$ and $\pi_c$ for density and color, respectively [S2, S2, unofficial]. This design achieves higher computational efficiency due to better cache coherence for sampling [S2, S2, unofficial]. It is critical to use multiples of four for the number of features for each network to maximize texture efficiency, as one hardware-accelerated texture read fetches four channel values [S2, S2, unofficial]. The grid resolution is set to $d=256$, with $f_d \in \mathbb{R}^4$ and $f_c \in \mathbb{R}^8$ [S2, S2, unofficial]. The view direction $\mathbf{d}$ is encoded using a positional encoding function $\gamma(\cdot)$ with 6 frequencies [S2, S2, unofficial]. To address aliasing artifacts and high-resolution query costs in virtual reality, a hierarchy of feature grids is introduced by trilinearly downsampling the full-resolution grid to multiple levels of lower resolutions, similar to mipmaps [S2, S2, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Memory:** The hybrid grid uses 13.2M parameters, which is fewer than the tri-plane (13.7M) and voxel (13.6M) representations [S1]. The 3D component has a resolution of $256^3$ [S2, unofficial].
+*   **Time:** The compact representation leads to better cache coherence, improving computational efficiency [S2, unofficial]. Sparsity loss can improve rendering time in both training and inference with a minor decrease in reconstruction quality [S1].
+
+**Measured Performance:**
+*   **Synthetic-NeRF Dataset:**
+    *   Tri-plane: 13.7M params, 31.44 PSNR, 0.949 SSIM [S1].
+    *   Voxel: 13.6M params, 32.35 PSNR, 0.956 SSIM [S1].
+    *   Hybrid: 13.2M params, 32.64 PSNR, 0.958 SSIM [S1].
+*   **Dynamic Scene Reconstruction (D-NeRF/HyperNeRF):**
+    *   Ours-B2 (w/o sparsity loss): 6.4m train time, 3.3 fps inference, 32.69 PSNR, 0.958 SSIM [S1].
+    *   Ours-B2 (w/ sparsity loss): 6.1m train time, 3.8 fps inference, 32.64 PSNR, 0.958 SSIM [S1].
+    *   Ours-B8 (w/o sparsity loss): 14.7m train time, 2.2 fps inference, 33.60 PSNR, 0.964 SSIM [S1].
+    *   Ours-B8 (w/ sparsity loss): 13.9m train time, 2.7 fps inference, 33.59 PSNR, 0.964 SSIM [S1]. [S1]
+
+**Strengths and Limitations:**
+*   **Strengths:** Superior compactness and quality compared to pure 2D or 3D representations [S1]. Efficient real-time rendering potential due to hardware texture interpolation and cache coherence [S2, unofficial].
+*   **Limitations:** Not given in the sources.
+
+**When to Use:**
+*   Use when high reconstruction quality is needed with compact parameter counts [S1].
+*   Use when real-time rendering efficiency is critical, leveraging hardware texture interpolation [S2, unofficial].
+
+## Background
+The 2D-3D Hybrid Feature Grid was introduced in "Binary Radiance Fields" [S1]. It was developed to improve radiance field reconstruction quality while maintaining compact feature encoding [S1]. The hardware-guided variant was presented in "Neural Assets: Volumetric Object Capture and Rendering for Interactive Environments" [S2, unofficial].
+
+## Sources
+[S1] Binary Radiance Fields, https://doi.org/10.52202/075280-2438, fetched 2026-10-26
+[S2] Neural Assets: Volumetric Object Capture and Rendering for Interactive Environments, https://core.ac.uk/download/552466290.pdf, fetched 2026-10-30 (unofficial)

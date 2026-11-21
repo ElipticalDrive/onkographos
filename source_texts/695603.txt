@@ -1,0 +1,1024 @@
+6464
+IEEE TRANSACTIONS ON VISUALIZATION AND COMPUTER GRAPHICS, VOL. 32, NO. 7, JULY 2026
+Scalable Hole-Filling for Real-Time Multi-GPU
+Light Field Path Tracing
+Erwan Leria , Markku Mäkitalo , Pekka Jääskeläinen , and Mårten Sjöström , Senior Member, IEEE
+Abstract—Light field (LF) displays address the mismatch in
+focus cues present in traditional displays by triggering natural
+defocus blur and enabling motion parallax. They rely on geometrical optics, displaying rays from multiple angles of view. LF
+path tracing is computationally expensive for real-time applications, since it requires rendering multiple views. To reduce this
+computational complexity, spatially reprojecting pixels between
+views is commonly performed. Reusing pixels that are already
+rendered is cheaper than path tracing additional ones. However,
+when occluded areas are uncovered in some views, reprojection
+is not possible, creating holes in these views. Filling-in the holes
+requires extra path tracing computation. This paper investigates
+scalable hole-filling strategies for LF path tracing, using multiple
+GPUs to reach real-time performance. We propose an algorithm
+search optimization procedure to determine whether a specific
+assignment algorithm can be generalized across scenes, using the
+hole-filling time as a minimization function. In addition, we introduce DaSH (Discarded and Subsampled path traced Hole-filling),
+a novel method that reduces computation and divergence overhead
+in fixed-size hardware thread-blocks. Based on local pixel sparsity
+within pixel patches, DaSH adaptively subsamples and discards
+hole-filling rays. Our evaluation demonstrates that DaSH achieves
+significant performance gains while preserving the visual and structural quality of refocused light field images at the retina plane. The
+experiments demonstrate an average speedup factor of 1.8× for
+DaSH, compared to prior work, in a multi-GPU rendering system.
+Index Terms—GPU, Ray tracing, parallel architectures, multithreading, partitioning algorithms, performance optimization,
+computer graphics, multiview, displays.
+I. INTRODUCTION
+RADITIONAL 3D displays (e.g., stereoscopic virtual and
+augmented reality headsets, and 3D movie screens) are
+poorly suited for a prolonged viewing experience, due to their
+inability to provide sufficient focus cues for the Human Visual
+System (HVS). This is caused by a mismatch between the depth
+of the display and the depth of the virtual objects. This is known
+T
+Received 9 June 2025; revised 1 April 2026; accepted 7 April 2026. Date of
+publication 13 April 2026; date of current version 17 June 2026. This work was
+supported in part by the European Union’s Horizon 2020 Research and Innovation Programme through Marie Skłodowska-Curie under Grant 956770, and
+in part by the Research Council of Finland under Grant 351623. Recommended
+for acceptance by C. Dachsbacher. (Corresponding author: Erwan Leria.)
+Erwan Leria, Markku Mäkitalo, and Pekka Jääskeläinen are with
+Tampere University, 33014 Tampere, Finland (e-mail: erwan.leria@tuni.fi;
+markku.makitalo@tuni.fi; pekka.jaaskelainen@tuni.fi).
+Mårten Sjöström is with Mid Sweden University, 851 70 Sundsvall, Sweden
+(e-mail: marten.sjostrom@miun.se).
+This article has supplementary downloadable material available at
+https://doi.org/10.1109/TVCG.2026.3683358, provided by the authors.
+Digital Object Identifier 10.1109/TVCG.2026.3683358
+Fig. 1. Diagram illustrating a scene rendered to six views. The views are
+sampled within the plane (s, t). They are assigned to three different GPUs (blue,
+pink, and green). Dashed lines represent path tracing tasks, and solid arrows
+represent spatial reprojection tasks.
+as the vergence–accommodation conflict (VAC). Light Field
+(LF) displays are a novel way of visualizing 3D data for multiple
+viewers (e.g., multiscopic displays) and for a single viewer (e.g.,
+with near-eye displays [1]). These displays mitigate the VAC,
+by providing light rays from multiple angles. This triggers depth
+perception, which helps the HVS to reproduce its natural defocus
+blur and to experience the motion parallax. Generally, real-time
+applications for stereo and LF displays must be able to reach the
+range of the human Critical Flicker Frequency (CFF): from 50
+to 90 Hz [2]. LFs are not only limited to LF displays, they can
+be extended to holographic stereogram-based displays [3].
+A LF can be represented by a two-plane parameterization
+L(s, t, u, v) [4], [5], where s, t, u and v are scalars associated
+with their corresponding axis. The finite plane (s, t) is formed
+by ||s|| columns and ||t|| rows of pinhole cameras. Fig. 1 shows
+the sensors of six pinhole cameras (i.e., views). Each view has
+a finite resolution of ||u|| × ||v || pixels, corresponding to the
+dimension of the sensors. In short, a LF is a collection of light
+rays rendered (or captured) from multiple views.
+Path tracing is a ray tracing technique based on Monte Carlo
+integration [6]. As suggested by Fig. 1, the computational complexity of LF path tracing is linear to the number of rays to trace
+per view. The high number of views required for LF displays
+represents a massive workload. A common method to reduce
+the workload is to reproject some pixels from a path traced view
+(i.e., source) to the other views (i.e., targets) when they share
+© 2026 The Authors. This work is licensed under a Creative Commons Attribution 4.0 License. For more information, see
+https://creativecommons.org/licenses/by/4.0/
+LERIA et al.: SCALABLE HOLE-FILLING FOR REAL-TIME MULTI-GPU LIGHT FIELD PATH TRACING
+visual similarities [7], which is computationally cheaper than
+path tracing all the views. However, due to disocclusions, some
+pixels cannot be systematically reprojected in target views [7],
+[8], resulting in holes composed of missing pixels. These holes
+can be filled in using hole-filling techniques. This work uses path
+tracing to render source views and to fill in the holes in target
+views.
+Using multiple GPUs to perform path traced hole-filling
+drastically reduces the computation time. In order to achieve
+that, the views must be assigned to the GPUs, as shown in Fig. 1.
+An assignment describes the mapping of data or computational
+tasks to hardware resources (e.g., GPU). For disambiguation,
+later in the paper, the term partition refers to a set of views that
+are assigned to the same GPU.
+For any number of GPUs, such assignment problems are not
+trivial to generalize because they have a combinatorial complexity. Any assignment solution does not guarantee minimized
+path traced hole-filling time. For instance, Fig. 1 does not show
+an optimized solution. The best assignment solution would
+maximize the number of solid arrows and minimize the number
+of dashed lines.
+As found in this article, assigning views with weak or no
+assumptions on spatial coherence in view-space represents a
+computational performance loss, when filling in the holes with
+path tracing. By considering the geometrical structure of the LF
+as an input parameter, we demonstrate that performance gain can
+be generalized beyond any scene geometry in real-time multiGPU LF path tracing.
+First, we define a performance model that describes the execution time of path traced hole-filling in a multi-GPU rendering system, given a LF and an assignment algorithm as input
+(Section IV). Subsequently, we present an algorithm search
+optimization procedure for minimizing the hole-filling time
+(Section V). For lowering path traced hole-filling computation and overhead caused by divergent execution in GPUs, we
+introduce Discarded and Subsampled path traced Hole-filling
+(DaSH) (Section VI). It adaptively discards and subsamples
+hole-filling rays in fixed-size GPU hardware thread-blocks,
+based on local pixel sparsity. DaSH aims at preserving the quality
+of images at the retina plane, while reducing computation. In
+Section VII, we present the outcome of the algorithm search
+optimization on two different sets of scenes. Then, we show outperforming scaling results against prior work, in a homogeneous
+multi-GPU system for DaSH, coupled with different assignment
+algorithms. Finally, we conduct an image quality evaluation,
+confirming that rendering LF-based retinal images with DaSH
+yields visually comparable quality against prior work, while
+providing a significant performance gain.
+II. RELATED WORKS
+View synthesis consists of rendering a view or a set of views
+from one (or many) source view (i.e., input image). Many works
+have explored the use of rasterization and ray tracing techniques
+coupled with reprojection and warping for synthesizing views
+for real-time stereo and LF rendering [7], [8], [9], [10], [11]. Despite their potential, these methods have not gained widespread
+adoption in the research community.
+6465
+Instead, the majority of the recent works on view synthesis
+are frameworks that rely on image-based rendering techniques
+combined with machine/deep learning methods. View synthesis
+frameworks, based on image input for inference, are limited to
+the features embedded in the specific datasets they are trained
+on [12], [13], [14], [15]. Differentiable scene representation
+frameworks [16], [17] allow having a continuous space for
+synthesizing novel views. They build per-scene compact representations of radiance based on training images that are specific to a single scene. However, static illumination captured
+in the training images and per-scene training constrain the use
+of such frameworks to static scenes; otherwise, constant retraining becomes necessary. In practice, image-based view synthesis frameworks are generally not suited for applications such
+as video games or visual effects. On the other hand, path tracing is convenient for reproducing dynamic global illumination
+effects with moving objects and camera motion in real time.
+Accelerating multiview rendering has been extensively studied for the single-GPU case. Fink et al. [18] propose an approach
+based on tailored projection mappings for LF displays. They
+rasterize LFs based on an adaptive image-space refinement of
+the views, which maps the interlaced pixel arrangement of the
+LF display. Gavane et al. [19] accelerate multiview rendering
+for LF displays by improving traditional multiview rasterization
+with a point-based approach, where points sampled from a 3D
+mesh are mapped to elemental images for LF displays.
+These methods are not suitable for multi-GPU path tracing,
+since the path tracing workload depends on the number of rays
+rather than on the number of visible primitives. Leimkühler
+et al. [20] propose an optimal traversal of the views within a view
+sampling space to minimize warp time within a single partition.
+This method considers a continuous flow of pixels (e.g., densely
+sampled) where at most 1 pixel difference between successively
+sampled views is assumed. In this article, we do not assume any
+pixel continuity in the domain of the sampled views. Moreover,
+Leimkühler et al. propose an optimal traversal based on scene
+information, which we aim to avoid in order to find assignment
+solutions independently from the scene.
+A few recent works focus on LF path tracing on multiple
+GPUs. Liu et al. [21] present a dual-GPU pipeline for LF path
+tracing. They use a split frame approach to balance the workload between the GPUs. They do not use spatial reprojection
+techniques between views. Therefore, they do not address the
+partitioning of the image-space domain to multiple GPUs, since
+their pipeline does not use spatial reprojection (e.g., dependencies between views). Leria et al. [22] path trace a LF using
+reprojection on a multi-GPU node. They distribute the views
+in a round-robin fashion to the GPUs. Although they manage
+to reduce the G-buffer rasterization time with a coarse-grained
+distribution of the views, their pipeline suffers from additional
+hole-filling time caused by holes in the images, causing diverging hardware thread execution paths. Weinrauch et al. [23] address the problem of heavy computation in real-time multiview
+volume rendering using multiple GPUs. They assign views to
+areas called view cells, which are formed based on distances between views. For each view cell, view-independent information
+is cached in order to be reused between views looking in a similar
+direction.
+6466
+IEEE TRANSACTIONS ON VISUALIZATION AND COMPUTER GRAPHICS, VOL. 32, NO. 7, JULY 2026
+Finally, all the views are transferred to the primary GPU, which
+is a designated GPU within the compute node.
+IV. RELATION BETWEEN ASSIGNMENT AND HOLE-FILLING
+Fig. 2. Diagram of the input parameters at the initialization of the application
+(i.e., Assignment Algorithm Execution Interface + Renderer). The LF grid is
+divided into N partitions. Assume N = 4 partitions in this example.
+Fig. 3. Scheduling of the rendering stages per partition (GPU). Dependencies
+between stages are shown by the white arrow. Full and dashed arrows indicate
+at which stages the source and the target views, respectively, are used for either
+Read (R), Write (W), or Read-Write (RW) operations.
+III. OVERVIEW OF THE MULTI-GPU PIPELINE
+This section provides an overview of the multi-GPU rendering
+system. Fig. 2 illustrates the logic between the assignment
+algorithm and the renderer. We design the execution interface of
+the assignment algorithm as a framework that converts the LF
+grid ||s|| × ||t|| into the input layout of the selected assignment
+algorithm and then runs the algorithm. When N partitions
+are created, the central view within a partition becomes the
+source view of that partition. The central view is the view that
+minimizes the distance to all the other views within the same
+partition [7], [22], [24]. The execution interface computes the
+chosen assignment algorithm a(||s||, ||t||, N ) which outputs the
+resulting partitions. For each partition, it returns the indices
+of the source and the targets, which are later fetched by the
+renderer. The assignment algorithm is static because it is not
+refined at each time frame since the input parameters do not
+vary during a run. The static assignment is computed on the
+CPU at initialization. Then the path tracer fetches the partitions
+to schedule computation on the GPUs.
+The scheduling of the rendering stages is depicted in Fig. 3.
+At each stage, for each GPU, the indices of the source and target
+views involved for read and write operations are obtained from
+the associated partition.
+The path tracing stage path traces the source view. The Gbuffers rasterization stage rasterizes scene information used in
+spatial reprojection and denoising. Each feature of the G-buffers
+(e.g., albedo, normals, world positions, materials) contains perpixel information for each view. The spatial reprojection stage
+reprojects the pixels from the source to the targets. The holefilling stage path traces the holes. The post-processing stage
+executes a real-time path tracing denoiser and tonemapping.
+The assignment problem for multi-GPU LF hole-filling is an
+instance of the Quadratic Semi-Assignment Problem (QSAP),
+which is an NP-hard problem: no known polynomial-time algorithm guarantees an optimal solution for all QSAP instances. In
+this article, the QSAP instance is characterized by a number of
+GPUs lower than the number of views, a combinatorially large
+solution space caused by the view-GPU assignment possibilities,
+and a hole-filling time function to minimize. Finding an assignment algorithm that produces optimal view partitioning for
+different numbers of GPUs, different distances between views,
+different scenes and different LF configurations is not trivial.
+To model the relation between any assignment algorithm
+and the hole-filling time, we reformulate the QSAP problem
+as follows: Considering M views and N GPUs, the objective is
+to assign at least one view to a GPU, such that the hole-filling
+time from one view to another is minimized.
+Consider the number of views is M = ||s|| × ||t||, such that
+two distinct view indices i and j are in {0, . . ., M − 1}, and k
+is a GPU index in {0, . . ., N − 1}. Given a scene x, we define a
+function F (a(||s||, ||t||, N ), x) that returns the aggregated holefilling time for N GPUs and M views, as reflected by Fig. 2:
+ 
+ 
+F a ||s||, ||t||, N , x
+=
+−1
+N
+−1 M
+−1 M
+
+
+
+a[i, k] · a[j, k] · f (x, i → j)
+(1)
+k=0 i=0 j=0
+with a[i, k] being 1 if view i (or respectively j) is assigned to
+GPU k and 0 otherwise, and f (x, i → j) is a black-box function
+that represents the hole-filling time of the target view j with
+respect to the source view i and scene x. The input argument i →
+j represents the dependency between views i and j. In theory, if
+view j does not depend on view i, then f (x, i → j) is arbitrarily
+zero, so in practice it is not computed. The value of f (x, i → j)
+is only known at rendering time.
+The main assumption is that minimizing the distance between
+views within the same partition reduces disparity. The disparity [25] indicates how much the visual similarities between two
+views differ from each other (e.g., high disparity means views
+are not similar). The disparity d is defined as d = β·f
+Z , with β
+the distance between two views, f the focal length, and Z the
+depth range. For a fixed depth range and a fixed focal length,
+the disparity increases as the distance between the source and
+the target views becomes larger.
+V. ALGORITHM SEARCH OPTIMIZATION
+We want to show that there is an assignment algorithm that
+minimizes the hole-filling time based on a scene-independent
+parameter.
+Suppose this scene-independent parameter is β, which is
+defined at input as a parameter of the light field grid.
+LERIA et al.: SCALABLE HOLE-FILLING FOR REAL-TIME MULTI-GPU LIGHT FIELD PATH TRACING
+Lowering the distance between a source and its target views
+would reduce disparity, and consequently lower the number of
+discarded pixels that must be filled in with path tracing. Thus, we
+must verify that an assignment algorithm that creates partitions
+with low β values is the optimal solution. Such partitions are
+named compact partitions, since their elements are highly close
+to each other compared to other solutions.
+For a set of assignment algorithms A, a set of LF configurations L, and a set of scenes X, we want to find an assignment
+algorithm a that minimizes F (a(||s||, ||t||, N ), x), such that:
+  
+ 
+1
+F a ||sl ||, ||tl ||, N , x , (2)
+min
+a∈A |L| · |X| · |N |
+6467
+Fig. 4. Example of 8 partitions in a 12 × 6 grid. Each color corresponds to a
+different GPU partition. (a) Gilbert with its traversal curve shown for illustrative
+purpose. (b) Sampling-based Label Propagation with b = 0.035 (i.e., partition
+shapes are in-between scattered and compact).
+l∈L x∈X
+where ||sl || and ||tl || represent the dimensions of the LF grid l.
+As shown by (2), we search to minimize the aggregated score of
+each assignment algorithm a, which is the average performance
+over multiple scenes and LF configurations and per GPU.
+Our algorithm search optimization is done in two phases. For
+each phase, the results section provides a rank for each candidate
+algorithm based on its hole-filling time performance. In the
+experiments, we use a different set of scenes for each phase
+(see Section VII-A).
+Preliminary Evaluation Phase: We expect the hole-filling
+time to be high when views within the same partition are far from
+each other, and low when views are tightly partitioned. To verify
+our hypothesis, first we set up scenes that have non-overlapping
+depth ranges. Then, we increase the scale b of the LF which is the
+uniform distance between adjacent views, which affects β. Thus,
+if the scale increases, β increases, and so does the disparity. As
+a consequence, the assignment algorithms that create scattered
+partitions are expected to suffer from a lack of visual similarities,
+yielding a higher hole-filling time.
+Validation Phase: We want to validate that the trend observed in the previous phase can be generalized for any depth
+range. In other words, we are interested in validating the sceneindependent correlation between the hole-filling time improvement and the partition compactness. Less performant assignment
+algorithms are expected to lead to high hole-filling times when
+b increases.
+After all the results have been collected, an offline script performs the aggregation, from which the optimal solution is found.
+The outcome of the algorithm search is shown in Section VII,
+where we assess if the solution found in the Preliminary Evaluation Phase is consistent with the one found in the Validation
+Phase.
+A. Portfolio of Assignment Algorithms
+We investigate the following assignment algorithms: Contiguous, Generalized Hilbert Space-Filling Curve – shortened into
+Gilbert, Munkres (or Hungarian) algorithm, (Sampling-based)
+Label Propagation, Direct k-Way Partitioning, and Spectral
+Clustering. As these are all generic assignment algorithms, we
+also outline how they can be adapted to address multi-GPU
+LF rendering. For some algorithms (e.g., Contiguous, Gilbert,
+Label propagation), we must calculate the number of views per
+partition prior to assigning the views. We use a greedy approach
+to calculate a balanced number of views between the partitions.
+Initially, we consider all the partitions to have size 0. For M
+iterations, the lowest partition size is incremented by one.
+1) Round Robin, Contiguous and Gilbert: Round robin assigns views one by one to a different GPU, whereas the Contiguous algorithm assigns a chunk of views in row-major order,
+typically of size M/N (i.e., equal shares). The Gilbert algorithm
+is similar to the Contiguous assignment, but the views are
+partitioned based on a space-filling curve that describes a specific
+traversal order of the view indices such that they are contiguous
+in the view plane. Fig. 4 shows a partitioning example of a LF
+grid into 8 partitions, using Gilbert. For instance, a Hilbert-based
+space-filling curve has been used in Equalizer [26] to render tiled
+displays.
+2) Munkres/Hungarian Algorithm: The Munkres (or Hungarian) algorithm [27], [28] is commonly used to solve the more
+general Quadratic Assignment Problem (QAP). As a consequence, the input of the solver is based on a squared dissimilarity
+matrix. However, in our case, we face the QSAP (i.e., rectangular
+matrix). We adapt this algorithm to our research purpose by
+including padding in the matrix. Values in the padded area
+are discarded by being set to infinity. We design an iterative
+assignment process, where at each iteration, the best available
+view is assigned to a GPU and its distance is set to infinity.
+The N initial views (i.e., one per GPU), are selected using
+the Farthest First Traversal algorithm [29]. Each view is picked
+as far as possible from the set of views already picked. Such an
+initialization suffers only from the selection of the first view that
+is randomly picked. During the algorithm, a greedy approach is
+performed: once a view is picked into a partition, it may worsen
+the choice of the other partitions. In the worst case, a view could
+end up far away from the rest of its partition, thus becoming an
+outlier.
+3) Sampling-Based Label Propagation: We design a
+sampling-based label-propagation algorithm [30] in order to
+control the spread of the partitions based on a concentration
+parameter. In short, this algorithm propagates a GPU index
+in graph representation. It starts from an initial view until it
+reaches a fixed number of unassigned views, for each partition.
+We set the concentration parameter to be equal to b. When b is
+close to 0, the partitions are scattered in the grid. Towards 1,
+they become tightly compact.
+We create a similarity matrix M × M , composed of weights
+wi,j that represent the similarity between views i and j. The
+6468
+IEEE TRANSACTIONS ON VISUALIZATION AND COMPUTER GRAPHICS, VOL. 32, NO. 7, JULY 2026
+Fig. 5. Example of input data involved in the partitioning process of a 12 × 6
+grid. (a) Sampling-based Label-Propagation: Weights relative to view 0 during
+the sampling phase, with b = 0.5. The figure shows a high concentration around
+view 0. When b = 0.001, the grid has a uniform color. (b) Spectral Clustering:
+Normalized values from the Fiedler vector shown with a color gradient on a grid
+graph. The color intensities represent the spatial similarity.
+be computed using a similarity matrix. In our case, the similarity matrix is obtained by transforming an M × M Euclidean
+distance (i.e., dissimilarity) matrix, expressed in meters, with
+a Gaussian Radial Basis Function. The resulting values of the
+similarity matrix are then dimensionless.
+For partitioning the values in the Fiedler vector, we use a
+discretization [32] strategy. In our investigation, we empirically
+found that this approach gives better balanced partitions compared to k-means [33] for grid-shaped LFs. Fig. 5(b) shows the
+spectral embedded data contained in the Fiedler vector mapped
+to a grid graph.
+VI. DISCARDED AND SUBSAMPLED HOLE-FILLING
+weights are computed using a Probability Distribution Function
+(PDF). For our research purpose, we choose the Von Mises PDF
+because it contains a concentration parameter that can model the
+desired entropy behavior based on b. The initial views (i.e., one
+per partition) are selected based on the N lowest norm vectors
+||wi ||1 . These views are located in low-similarity areas (e.g.,
+usually in the corners or close to the borders). Initialization in
+low-similarity areas reduces the likelihood of spatial outliers
+in the last partitions formed by the algorithm when b is close
+to 1. For any similarity vector associated to an initial view,
+the weight–view pairs are randomly inserted into a max-weight
+heap. When the heap is popped out if the obtained views is unassigned, then it receives the propagation index of the initial view.
+Fig. 5(a) shows a heatmap of a similarity vector. The propagation
+for a given partition stops when the expected number of views
+is reached.
+4) K-Way Partitioning: This algorithm aims at finding k
+partitions. It follows three stages: coarsening, partitioning, and
+refinement. The coarsening stage consists of representing the
+initial graph as multiple coarse graphs. A coarse graph is an
+aggregation of adjacent nodes into a ”super” node. This eases
+partitioning, since there are fewer possible partitions to evaluate
+as the number of nodes drops. The partitioning stage is usually
+implementation dependent, and it can be applied by using any
+graph partitioning algorithm. After partitioning, the graph is
+uncoarsened: a coarse node is split back into the inner nodes
+it spans. The refinement stage finds better partitions by using
+implementation-dependent refinement heuristics. The refinement can happen during the uncoarsening phase.
+We apply the k-way partitioning on an initial grid graph.
+The edges and the nodes are unweighted. We employ a k-way
+partitioning implementation [31] that performs flow-based refinement in order to find the best cut in a flow graph. This
+inherently weights the graph to transform it into a flow network.
+The cut defines the border between partitions. The edges located
+on the cut have their endpoints in different partitions. Finding
+the best cut generally provides better solutions than a greedy
+approach, which may get stuck in a local optimum, and it leads
+to better balanced partitions.
+5) Spectral Clustering: Spectral clustering involves partitioning the values of the eigenvector associated to the secondsmallest eigenvalues (i.e., the Fiedler vector) of the Laplacian
+matrix of the input structured graph. The Laplacian matrix can
+We introduce Discarded and Subsampled path traced Holefilling (DaSH), aimed at lowering hole-filling computation.
+Divergent shader execution paths and incoherent memory
+accesses occur directly for primary rays, due to missing pixels.
+This causes non-active threads (i.e., reprojected pixels) to stall
+while active threads (i.e., missing pixels) are tracing rays [22].
+Moreover, it is unnecessary to fill in all the missing pixels, since
+the retina sees the whole as a single image.
+DaSH operates locally in every subgroup of GPU threads.
+When the ratio of missing pixels within a subgroup is below a
+25% sparsity threshold, its computation is discarded, avoiding
+divergence in a subgroup of threads. Otherwise, subsampled
+path traced hole-filling is performed for the sparse subgroup.
+Evaluating the amount of missing pixels in a subgroup is
+computationally cheap. Performing local sparsity evaluations in
+small pixel patches allows a fine-grained control of our adaptive
+solution.
+A. GPU Subgroup Execution Model
+In GPUs, a shader code is launched following a Single Instruction Multiple Threads (SIMT) execution model: the execution
+code is fetched for each fixed-sized hardware thread-block,
+called subgroup in Vulkan terminology (also known as warp
+or wavefront). The shader code running on a hardware thread
+is called shader invocation. A subgroup completes its execution
+once all active shader invocations are complete. A subgroup has
+a fixed size, determined by the hardware vendor. Mapping a
+subgroup to pixels is either decided by the hardware vendor, or
+reprogrammed in shaders. For coherent memory accesses, mapping a subgroup to a contiguous region of pixels (e.g., patch, row,
+strip) is usually the preferred solution. In our implementation,
+subgroups are mapped to rectangular pixel patches within the
+same view, as highlighted in Fig. 6. A pseudo-shader code of
+DaSH is described in the supplemental material.
+B. DaSH Implementation
+In general, the size of a subgroup is a power of two (typically
+8, 16, 32, or 64). Thus, setting up a pixel sparsity threshold of 25% ensures getting a whole number while having
+a low threshold, avoiding sacrificing much quality. To count
+the number of missing pixels within a subgroup, we use the
+GLSL ballot extension. A ballot is a shared memory object
+LERIA et al.: SCALABLE HOLE-FILLING FOR REAL-TIME MULTI-GPU LIGHT FIELD PATH TRACING
+Fig. 6. (a) Cropped image of a target view after reprojection plus DaSH.
+Remaining missing pixels are encoded in magenta (discarded) and cyan (nonsampled). (b) Zoomed-in image of the region framed in red. Notice the checkerboard pattern in the subsampled regions. The area highlighted in yellow is a
+subgroup mapped to a pixel patch. (c) Close-up image of the highlighted area.
+In this example, the subgroup is mapped to a pixel patch, which is a rectangle
+composed of 4 × 8 pixels.
+(e.g., uvec4) between shader invocations within a subgroup.
+It collects votes (i.e., binary values) from each invocation of the
+subgroup. Usually, a built-in shader function (e.g., subgroupBallot(bool condition)) allows for the invocations to
+vote atomically in the ballot. Active shader invocations raise to 1
+their bit in the ballot, if they read a missing pixel filled with NaN
+values. We use a checkerboard pattern (i.e., 2D 5-points stencil)
+to subsample the pixels (as shown in Fig. 6) and trace hole-filling
+rays, when the sparsity is above a 25% threshold. Basically, if
+the threshold is set at 0%, no subgroups are discarded; they are
+all subsampled and then filled in. When the threshold is set at
+100%, all subgroups are discarded. Discarded subgroups and
+remaining missing pixels in subsampled areas are filled in by
+the denoiser later in the post-processing stage.
+VII. RESULTS
+A. Experimental Setup
+We conduct our experiments in a server composed of 8× RTX
+A6000 GPUs and two CPU sockets (i.e., 4 GPUs per socket).
+The bandwidth between GPUs is capped at 256 GB/s, which is
+enough to send an 8K resolution image from one GPU to another
+with a latency of ∼ 1 ms, excluding the read/write overhead
+of GPU buffers. We work with two LF configurations for the
+following target display types:
+r Multiscopic, based on 8 K display panel, with a LF resolution of 100 × 1 × 768 × 432 (i.e., 100 views)
+r Near-eye, based on 1024 × 1024 Spatial Light Modulator,
+with a LF resolution of 12 × 6 × 1024 × 1024 (i.e., 72
+views)
+The reference implementations of each assignment algorithm
+that we integrated into the renderer are given below:
+r Round-robin and Contiguous: C++
+r Gilbert: Python (Gilbert [34])
+r Munkres: C++ (Dlib [35])
+r Label Propagation: Python
+r k-way Partitioning: C++ (KaHypar [31])
+r Spectral Clustering: Python (scikit-learn [36])
+For the assignment algorithms written as Python modules, we
+use pybind [37] to integrate them into the open source renderer
+6469
+Fig. 7. Visualization of a scene, randomly generated in Blender. (a) Scene
+viewed from above. Notice the random objects are placed in the field of view
+of the initial camera, which is located at the tip of the frustum. (b) View of the
+objects facing the initial camera.
+Tauray [38] (C++/Vulkan). Unless otherwise specified, we use
+1 sample per pixel (spp) and 6 ray bounces during path tracing.
+For denoising, we use the real-time path tracing denoisers Spatiotemporal Variance-Guided Filtering (SVGF) [39] and Blockwise Multi-order Feature Regression (BMFR) coupled with
+Temporal Anti-Aliasing [40], which are already implemented
+in Tauray. For our research purposes, we have to extend them
+for LF rendering, as performed in [22], [41]. When the denoiser
+is not specified for an experiment, SVGF is used. SVGF is a
+state-of-the-art path tracing denoiser. It is the preferred choice,
+since BMFR suffers from block artifacts. For quality measurements, denoised images are accumulated over 10 time-frames.
+Performance-sensitive results are run in headless mode: without
+any graphical user interface running simultaneously, nor any
+image saved at the same time.
+We use two sets of scenes, X1 and X2 . The set X1 is
+used for the algorithm search optimization. These scenes are
+randomly generated using Blender. The number of generated
+objects in each scene is between 200 and 250. The objects are
+placed inside the field of view of the initial scene’s camera,
+and they are generated in such a way that they can occlude
+each other (e.g., similarly to [14]) as shown in Fig. 7. There
+are three distinct scenes per LF configuration (i.e., six
+scenes in total). Each scene has a fixed object depth range:
+respectively, [17,300] cm, [300,1700] cm, and [1700, 3000]
+cm.
+The set X2 is used for the Validation Phase, and for evaluating the rendering performance and the scalability of our implementation. It is composed of scenes available on the internet;
+they are shown in Fig. 8. All the scenes have an initial camera. It
+serves as a reference point to center the view grid of the LF
+and to set up the views, created at runtime by the renderer.
+The Eternal Valley FPS scene contains time-varying content:
+moving characters and first-person shooter-like camera motion.
+Extended image quality evaluations for each scene are detailed
+in the supplemental material.
+The metrics used for image quality measurements are: Peak
+Signal-to-Noise Ratio (PSNR), Multi-Scale Structure Similarity
+(MS SSIM) [45], Learned Perceptual Image Patch Similarity
+(LPIPS) [46], and Visual Information Fidelity (VIF) [47]. They
+are all reference-based metrics. MS SSIM captures the structural
+similarity in images at multiple scales. PSNR measures the level
+of pixel fidelity. LPIPS measures the difference in perceptual
+6470
+IEEE TRANSACTIONS ON VISUALIZATION AND COMPUTER GRAPHICS, VOL. 32, NO. 7, JULY 2026
+Fig. 8. Test scenes, rendered with our pipeline: (a) Chess Game - 62 k triangles - A LF displayed in a near-eye OpenXR simulator using a single GPU. There is a
+single source view in the left eye. The focus is on the king, (b) Vokselia Spawn [42] - 1.63 M triangles, (c) San Miguel ©Guillermo M. Leal Llaguno [42] - 4.9 M
+triangles, LF displayed on the multiscopic Looking Glass 32”, (d) Sponza ©Crytek [42] - 262 k triangles - single view from a multiscopic LF, (e) Eternal Valley
+FPS [43], [44] - 251 k triangles - view from a multiscopic LF, (f) Attic ©NVIDIA - 1.3 M triangles - view from a multiscopic LF.
+TABLE I
+AGGREGATED SCORES OF THE ASSIGNMENT ALGORITHMS DURING THE
+|X |
+PRELIMINARY EVALUATION PHASE WITH |L| = 2, |N | = 8, |X| = 21 = 3
+TABLE II
+AGGREGATED SCORES OF THE ASSIGNMENT ALGORITHMS DURING THE
+VALIDATION PHASE WITH |L| = 2, |N | = 8, |X| = |X2 | = 6
+quality. VIF measures the visual fidelity of preserved information. The values are expected to be between 0 and 1, with 1 being
+the best for MS SSIM and VIF, and 0 being the best for LPIPS.
+B. Evaluating the Best Assignment Algorithm
+In this section, we show the results of our algorithm search
+optimization. All the results are run with DaSH.
+1) Preliminary Evaluation Phase: The experiments of the
+Preliminary evaluation phase are done in controlled settings,
+using the X1 set (see Section VII-A). The depth range, the
+distance between adjacent views (i.e., the scale b), and the
+position of the views are also set. For each scene, the scale b is
+automatically set at runtime and varies by order of magnitude,
+from 10−3 up to 100 (included) meters.
+The results reported in Table I are aggregated for clarity and
+compactness. As reflected by the scores, k-way and Spectral
+Clustering outperform the other algorithms.
+Munkres and Gilbert have good scores, but the results suggest that they are stuck in a local minimum when creating
+the partitions. The Munkres algorithm suffers from its greedy
+decision-making at each iteration. However, it seems that having
+some outliers provides better results than naïve index-based partitioning. Label Propagation proves that an adaptive partitioning
+approach does not favor the reduction of the hole-filling time.
+Naïve algorithms, such as Round Robin and Contiguous, fail at
+creating efficient compact partitions in grid space, resulting in
+bad scores. The score difference between Gilbert and Contiguous shows that favoring data locality traversal over row-major
+indexing traversal provides better performance.
+Overall, observations demonstrate that algorithms that produce compact partitions are effective at reducing the hole-filling
+time. The extended evaluation per LF configuration, per scene,
+per assignment algorithm, and per b is shown in the supplemental
+material.
+Fig. 9. Average rendering time per stage for the Near-eye configuration with
+San Miguel using 8 GPUs. The views are assigned using Spectral Clustering.
+b = 0.001.
+2) Validation Phase: We validate the robustness of our model
+and its generalization beyond the controlled setting of the X1
+set. During this phase we use the X2 set.
+For each scene, we increase the scale of the LF grid as done
+in the previous phase. These scenes have different memory
+footprints, and they may involve irregularities. For example,
+some views might be located outside an indoor space, below
+a floor, or inside an object or a wall.
+Table II shows that the ranking of the assignment algorithms
+is similar to Table I, except that k-way Partitioning and Spectral
+Clustering are not equal anymore, k-way being slightly better.
+Overall, this demonstrates that our assumption remains consistent. We notice that Label Propagation is ranked higher than
+Contiguous in the validation phase. This is caused by Label
+Propagation performing slightly better than Contiguous in the
+Near-eye measurements, due to better data locality preservation
+at higher scales.
+C. Pipeline Rendering Time Breakdown
+Fig. 9 shows the average rendering time of the proposed
+pipeline for the near-eye configuration. We notice a clear 1.70×
+performance improvement of DaSH (i.e., Proposed), compared
+LERIA et al.: SCALABLE HOLE-FILLING FOR REAL-TIME MULTI-GPU LIGHT FIELD PATH TRACING
+6471
+Fig. 11. Strong scaling of the DaSH stage, in milliseconds (lower is better),
+for the Multiscopic setup, when scaling from 1 to 8 GPUs. b = 0.001
+Fig. 10. Proposed hole-filling method (DaSH) against FHF, using 8 GPUs.
+X2 scenes are rendered for the Multiscopic configuration using round-robin and
+the scale is b = 0.001. (a) The hole-filling time is shown per scene, and (b) its
+time contribution to the pipeline, per scene.
+to the baseline where all missing samples are filled-in with no
+discarding or subsampling; we call the latter full hole-filling
+(FHF). We see that FHF accounts for a large proportion of the
+overall rendering time. In contrast, DaSH clearly lowers the
+hole-filling time contribution.
+In Fig. 10(a), our method demonstrates a constant performance improvement for hole-filling for each scene, compared
+to the FHF pipeline. The DaSH time has a speedup of 1.21 −
+2.35×, depending on the scene. Especially San Miguel, Eternal
+Valley FPS, Sponza and Attic benefit significantly from the
+DaSH strategy: for these scenes, the hole-filling time is nearly
+halved.
+Fig. 10(b) shows the average time contribution of the holefilling stage relative to the average total execution time of the LF
+rendering pipeline. On average, enabling the subgroup discard
+strategy combined with subsampling improves the hole-filling
+time by ∼1.2× against subsampling only, with a 25% pixel
+sparsity threshold.
+D. Scalability Performance
+In this section, the evaluation of the scalability is based on two
+concepts: strong scaling [48] and weak scaling [49]. Strong scaling focuses on a fixed-size problem and an increasing number of
+computational resources. Weak scaling focuses on increasing the
+size of the problem while using fixed computational resources.
+1) Strong Scaling: Strong scaling measurements are conducted with the four best assignment algorithms from Table II.
+The strong scaling of DaSH from 1 to 8 GPUs, for the
+Multiscopic setup is shown in Fig. 11. As expected from their
+ranking, Spectral Clustering, Gilbert and k-way exhibit similar
+performance. There is no significant difference in terms of strong
+scaling. However, we notice that the Munkres algorithm can
+underperform. This is caused by the greedy strategy that occurs
+Fig. 12. Strong scaling speedup of the hole-filling stage: DaSH against FHF,
+for the Near-eye setup, when scaling from 1 to 8 GPUs (x-axis), with b = 0.001.
+When a bar exceeds the thick black line set at y = 1.0, DaSH is better than FHF.
+The speedup is calculated as follows: time(FHF)/time(DaSH).
+at each assignment iteration, as explained in Section V-A2.
+For each scene, the strong scaling acceleration factor of DaSH,
+measured on 1 GPU against 8 GPUs, using k-way Partitioning
+in the multiscopic configuration, is as follows: Vokselia Spawn
+18.71×, Chess Game 7.20×, Attic 11.42×. For the scenes that
+do not appear in Fig. 11, we observe the following acceleration
+factors: San Miguel 8.88×, Eternal Valley FPS 4.64× and
+Sponza 8.48×. As suggested by Fig. 11, the tendency of the
+strong scaling follows the same behavior for all the scenes,
+showing a linear strong scaling factor, close to 8×, except for the
+Eternal Valley FPS scene, for which DaSH is already 1.88 ms
+with 3 GPUs, and is hardly further improvable, reaching 1.17 ms
+with 8 GPUs. The extended results for the six scenes are shown
+in the supplemental material.
+We compare the hole-filling performance of DaSH against
+FHF in Fig. 12. The figure shows results for a single run per
+scene, per GPU, and per assignment algorithm for 500 frames.
+The DaSH and FHF pipelines are both executed with the four
+best assignment algorithms of Table II. The speedup of DaSH
+is calculated against FHF, for each scene, for each algorithm,
+and for each number of GPUs. We clearly notice that DaSH
+outperforms FHF, since the speed-up bars are above 1.0 for
+all four assignment algorithms. In Fig. 12, we observe that the
+behavior of the speedup is generally constant against FHF.
+Overall, considering all scenes, the average speedup factor
+against FHF for the Near-eye configuration is 1.8×, demonstrating a significant improvement for time-based performance.
+2) Weak Scaling: The weak scaling measurements consist of
+increasing the number of samples per pixel while keeping the
+number of GPUs fixed.
+For the Multiscopic setup, the speedup factor of DaSH ranges
+from 1.60× up to 2.90× compared to FHF. However, the end-toend execution time of the rendering pipeline with Round robin,
+6472
+IEEE TRANSACTIONS ON VISUALIZATION AND COMPUTER GRAPHICS, VOL. 32, NO. 7, JULY 2026
+TABLE III
+AGGREGATED QUALITY METRICS BASED ON ASSIGNMENT ALGORITHM
+(USING DASH)
+Fig. 13. Weak scaling measurements: Increasing number of samples per pixel
+by power of two (from 1 to 16 spp) using 8 GPUs. Hole-filling performance
+comparisons: FHF against DaSH, and Round robin (worst) against k-way
+(best). (a) Eternal V. FPS - Multiscopic. (b) Eternal V. FPS - Near-eye. The
+rendering time is averaged over 360 animated frames with moving characters
+and dynamic camera movement. b = 0.001
+at 16 spp, is 65.52 ms for Eternal Valley FPS against 74.88 ms
+with k-way, per time frame. The benefits of Round robin for
+the average pipeline execution time is only true when the DaSH
+time contribution is relatively low, since it favors a more uniform
+G-buffers rasterization time. With the Attic scene, at 16 spp,
+minimizing disparity using k-way is noticeably effective, with
+DaSH taking 137 ms, whereas it takes 204 ms when using Round
+robin.
+The Near-eye setup improvement ranges from 1.46× up to
+2.48× with the Eternal Valley FPS scene compared to FHF. At
+1 and 2 spp, the DaSH time with the Round-robin algorithm
+achieves 3.676ms and 5.338ms, and k-way achieves 2.389ms
+and 2.957ms. This reflects the results in Fig. 10(b), where DaSH
+decreases the time contribution. Without DaSH, we clearly see
+a major performance gap between FHF Round-robin and FHF
+k-way. Round robin significantly benefits from DaSH. In both
+Fig. 13(a) and (b), DaSH with k-way significantly outperforms
+FHF plus Round-robin. When comparing both approaches at 16
+spp, the improvement factor is 7.1× for Multiscopic, and 7.0×
+for Near-eye.
+E. Quantitative Image Quality Measurements
+In the following, we perform quantitative image quality measurements of the rendered LFs. We provide an evaluation between assignment algorithms (using DaSH), and another evaluation between FHF and DaSH. We want to verify our assumption
+that applying DaSH does not heavily degrade the quality.
+The views are merged in the retina once they are displayed.
+We reproduce this behavior by projecting them directly on the
+retina plane using image refocusing. To achieve that, we use
+the geometrical image formation model proposed by Gudelek
+et al. [50]. Since this model is designed for Near-eye LF configurations, we evaluate only the quality of Near-eye LFs. LFs are
+rendered with our DaSH pipeline, and then fed into the optical
+model, contained in a Python script. For compactness, results
+are presented for the left eye only (i.e., 36 views), although
+images are rendered from runs that render both eyes (i.e., 72
+views).
+Initially, in the renderer, the views are looking in parallel
+directions, which corresponds to looking far at the horizon (i.e.,
+TABLE IV
+AGGREGATED QUALITY METRICS OF FHF VS DASH
+infinity). Therefore, in the optical model, near objects appear
+blurred in the retina because they are not in the accommodation
+(i.e., focus) plane, located at infinity. In this case, far objects
+or the environment map (if visible) appear sharp. The vergence
+plane of the views (i.e., parameterized in the renderer), and the
+accommodation plane (i.e., parameterized in the optical model)
+are computationally independent depth parameters. However,
+when both values are equal, the virtual objects located at the
+matching depth appear sharp in the retina. This phenomenon
+reproduces the vergence-accommodation of the human visual
+system. To see sharp objects in refocused retinal images we
+arbitrarily set a vergence plane per scene. This way, the quality
+metrics are not measuring only blurry pixels.
+Qualitative visual comparisons of refocused retinal images of
+DaSH against FHF (1 spp denoised) and against the reference
+(4096 spp) are accessible in the supplemental video.
+1) Quality of DaSH Per Assignment Algorithm: The results
+in Table III indicate that there is no clear trend in terms of quality
+that would make an algorithm more preferrable compared to
+the others. The ranking order of the assignment algorithms
+from hole-filling time is kept as an indicator. PSNR results
+range between 23.66 and 24.41 dB. Although the discrepancy
+of values within this range is very low, the results seem to
+reflect the performance rank. MS SSIM shows that the retinal
+images from 1 spp LFs are structurally highly similar to retinal
+images from 4096 spp LFs (i.e., reference), with the values being
+above 0.92. LPIPS values are homogeneous, located around
+0.11, which can be interpreted as slightly perceptible differences
+compared to the ground truth. Measurements based on VIF also
+indicate that there are no major differences in the visual fidelity
+between the algorithms, with all the resulting values fluctuating
+between 0.706 and 0.721, however the trend of VIF follows the
+performance ranking.
+2) DaSH Against FHF: Subsampled DaSH rays degrade the
+structure of the image, since subsampling causes loss of information. Moreover, denoising suffers from loss of high-frequency
+details as it averages pixel intensities. Yet, as shown in Table IV,
+the structural quality of DaSH images remains close to the FHF
+images after denoising.
+LERIA et al.: SCALABLE HOLE-FILLING FOR REAL-TIME MULTI-GPU LIGHT FIELD PATH TRACING
+Fig. 14. (a) Quality metrics based on SVGF, normalized for each scene, over all
+assignment algorithms and averaged. The LF configuration is Near-eye with b =
+0.001. (b) DaSH time in milliseconds averaged over all assignment algorithms
+and over all scenes. Values are reported for a threshold ranging from 0% to 100%
+by step of 10%.
+The difference between FHF and DaSH is noticeable with
+PSNR and LPIPS. These metrics are very sensitive to variations
+in image contrast. However, LPIPS values remain relatively low
+for both FHF and DaSH.
+Low-contrast areas are caused by attenuation loss in subsampling subgroups. This occurs in the Chess Game scene,
+where hole-filling rays that hit the environment map are from
+subsampling subgroups in target views. The pixels of the environment map are not reprojected to avoid wrong reprojection
+if the camera sensors are sheared. This can be easily solved
+by replacing NaN RGBA values (i.e., discarded pixels) in target
+image buffers with specific values (e.g., −1) that would signal to
+switch from DaSH to regular sampling (FHF). In this paper, we
+do not apply this change for a fair quality comparison against
+FHF. The supplemental material and the supplemental video
+show detailed results for the Chess Game scene which causes
+the difference in PSNR values when comparing DaSH to FHF.
+The VIF values are very close to each other. This implies that
+the FHF and DaSH pipelines are on par in terms of preservation
+of visual features. However, when rendering a single source (i.e.,
+single GPU) with DaSH, the refocused retinal images suffer
+from attenuation loss since the distance to the targets is larger, as
+illustrated in Fig. 8(a). Results are provided for both SVGF and
+BMFR, showing that the behavior of the quality is not relative
+to a single real-time path tracing denoiser. We notice that SVGF
+provides better results compared to BMFR, as anticipated in
+Section VII-A. The extended quality measurements averaged
+over all assignment algorithms per scene, for both FHF and
+DaSH respectively, are detailed in the supplemental material.
+F. DaSH Threshold
+In this section, we evaluate the performance–quality tradeoff
+of the DaSH pixel sparsity threshold. Fig. 14 generalizes the
+tendency of the quality and time metrics when the threshold
+increases. Quality metrics are normalized between 0.0 and 1.0.
+The higher the threshold is, the more subgroups get discarded.
+When fewer missing pixels are filled in with path tracing, it worsens the quality of the retinal image, as observed in Fig. 14(a);
+PSNR, MS SSIM and VIF decrease, indicating a degradation of
+the quality. Similarly, LPIPS increases, proving a loss in perceptual similarity. The average tendency clearly demonstrates that
+6473
+quality gets linearly degraded beyond a 20% threshold. Setting
+the threshold at 25% allows a balanced quality-based decision
+between discarding subgroups and subsampled hole-filling. In
+general, we observed that the difference of quality when varying
+the threshold from 0% to 100% is quite small. In terms of
+PSNR (not normalized), with both denoisers, the quality drops
+roughly by 1 dB. This is mostly valid when the scale is 0.001,
+since holes remain narrow. Fig. 14(b) shows that the DaSH time
+decreases as the threshold increases. The DaSH time drops from
+7.57 ms (threshold = 0%) down to 4.22 ms (threshold = 100%),
+on average, for all scenes and all assignment algorithms. This
+corresponds to an average speedup of 1.79×.
+The results suggest that the difference in contrast is not
+restraining the user from understanding the image and from
+perceiving photorealism, with respect to the ground truth.
+G. Discussion
+We have shown multiple input formats for representing a light
+field grid. Our algorithm search optimization demonstrates that
+the optimal solution is tailored for real-time LF path tracing. The
+results suggest that k-way is the most reliable algorithm in terms
+of performance and quality in different light field configurations.
+DaSH provides a significant computational reduction in exchange for a minor quality degradation. The threshold in DaSH
+affects mostly the rendering time rather than the quality for a
+low b. The PSNR values exhibit the largest difference between
+FHF and DaSH, ∼ 4 dB. However, PSNR has a poor correlation
+with visual perception. Utilizing multiple metrics provides a
+more comprehensive understanding of the quality degradation
+of DaSH. Overall, the proposed solution remains competitive
+because it preserves most of the visual and structural information for refocused retinal images while providing an average 1.8× hole-filling speedup and better scalability than prior
+work.
+An imbalance between partitions can occur due to dynamic
+time-varying information within a scene. Leria et al. [51] propose a load balancing method for multiview path tracing. They
+show that heterogeneous hardware capabilities have more impact on imbalance than time-varying scene information. Temporal inputs updated at each time frame could be further investigated for using assignment algorithms for load balancing.
+VIII. CONCLUSION
+We demonstrated that the hole-filling time is affected by the
+assignment of the views. This shows that path traced hole-filling
+time is sensitive to the distance between views rather than the
+depth range of the scene. Thus, as the hole-filling workload
+increases (e.g., more rays per pixel, order of magnitude of the
+scale, higher distance β between views within the same partition), tightly partitioning the views becomes the key parameter
+to reduce the computation, which can be achieved with spatial
+awareness during the assignment of the views.
+DaSH is effective at reducing the path traced hole-filling time.
+It demonstrates that trading less computation against subgroup
+divergence outperforms the prior work in terms of rendering
+time, albeit the perceptible image quality can be slightly lower.
+6474
+IEEE TRANSACTIONS ON VISUALIZATION AND COMPUTER GRAPHICS, VOL. 32, NO. 7, JULY 2026
+This is mainly due to the attenuation loss, resulting in a difference of contrast, occurring when subsampled and discarded
+areas are denoised.
+ACKNOWLEDGMENT
+The authors would like to thank Lauri Varjo for his help with
+implementing the random scene generator and Manu Gond for
+the image quality evaluation. The authors are also grateful to the
+Centre for Immersive and Virtual Reality of Tampere University
+for making its LF display available. Especially, authors would
+like to acknowledge the assistance of Kamran Akbar.
+REFERENCES
+[1] D. Lanman and D. Luebke, “Near-eye light field displays,” ACM Trans.
+Graph., vol. 32, no. 6, pp. 1–10, 2013.
+[2] N. D. Mankowska, A. B. Marcinkowska, M. Waskow, R. I. Sharma, J.
+Kot, and P. J. Winklewski, “Critical flicker fusion frequency: A narrative
+review,” Medicina, vol. 57, no. 10, 2021, Art. no. 1096.
+[3] S. Choi, C. Jang, D. Lanman, and G. Wetzstein, “Synthetic aperture waveguide holography for compact mixed-reality displays with large étendue,”
+Nature Photon., vol. 19, no. 8, pp. 854–863, Aug. 2025.
+[4] S. J. Gortler, R. Grzeszczuk, R. Szeliski, and M. F. Cohen, “The lumigraph,” in Proc. 23rd Annu. Conf. Comput. Graph. Interactive Techn.,
+1996, pp. 43–54.
+[5] M. Levoy and P. Hanrahan, “Light field rendering,” in Proc. 23rd Annu.
+Conf. Comput. Graph. Interactive Techn.,1996, pp. 31–42.
+[6] J. T. Kajiya, “The rendering equation,” in Proc. 13th Annu. Conf. Comput.
+Graph. Interactive Techn., 1986, pp. 143–150.
+[7] M. Mäkitalo, E. Leria, J. Ikkala, and P. Jääskeläinen, “Real-time light field
+path tracing,” in Proc. Adv. Comput. Graph., N. Magnenat-Thalmann,
+J. Zhang, J. Kim, G. Papagiannakis, B. Sheng, D. Thalmann, and M.
+Gavrilova, Eds., 2022, pp. 211–226.
+[8] A. J. Hansen, J. Klein, and M. Kraus, “Light field rendering for head
+mounted displays using pixel reprojection,” in Proc. Int. Conf. Comput.
+Graph. Theory Appl., vol. 2, 2017, pp. 27–36.
+[9] S. J. Adelson and L. F. Hodges, “Stereoscopic ray-tracing,” Vis. Comput.,
+vol. 10, pp. 127–144, 1993.
+[10] N. Wißmann, M. Mišiak, A. Fuhrmann, and M. E. Latoschik, “Accelerated
+stereo rendering with hybrid reprojection-based rasterization and adaptive
+ray-tracing,” in Proc. IEEE Conf. Virtual Reality 3D User Interfaces, 2020,
+pp. 828–835.
+[11] S. Widmer et al., “An adaptive acceleration structure for screen-space ray
+tracing,” inProc. High- Perform. Graph., 2015, pp. 67–76.
+[12] B. Attal, S. Ling, A. Gokaslan, C. Richardt, and J. Tompkin, “MatryODShka: Real-time 6DoF video view synthesis using multi-sphere images,”
+in Proc. 16th Eur. Conf. Comput. Vis., 2020, pp. 441–459.
+[13] K. Gu, T. Maugey, S. Knorr, and C. Guillemot, “Omni-NeRF: Neural radiance field from 360 image captures,” in Proc. IEEE Int. Conf. Multimedia
+Expo, 2022, pp. 1–6.
+[14] L. Xiao, A. Kaplanyan, A. Fix, M. Chapman, and D. Lanman, “DeepFocus: Learned image synthesis for computational display,” in Proc. ACM
+SIGGRAPH 2018 Talks, 2018, vol. 37, pp. 1–13.
+[15] M. Gond, E. Zerman, S. Knorr, and M. Sjöström, “LFSphereNet: Real time
+spherical light field reconstruction from a single omnidirectional image,”
+in Proc. 20th ACM SIGGRAPH Eur. Conf. Vis. Media Prod., 2023, pp.
+1–10.
+[16] B. Mildenhall, P.P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi,
+and R. Ng, “NeRF: Representing scenes as neural radiance fields for view
+synthesis,” Commun. ACM, vol. 65, no. 1, pp. 99–106, 2021.
+[17] B. Kerbl, G. Kopanas, T. Leimkuehler, and G. Drettakis, “3D Gaussian
+splatting for real-time radiance field rendering,”inACM Trans. Graph., vol.
+42, no. 4, pp. 1–14, Jul. 2023.
+[18] L. Fink, S. Strobel, L. Franke, and M. Stamminger, “Efficient rendering
+for light field displays using tailored projective mappings,” Proc. ACM
+Comput. Graph. Interact. Tech., vol. 6, no. 1, pp. 1–17, 2023.
+[19] A. Gavane and B. Watson, “Light field display point rendering,” in Proc.
+ACM Comput. Graph. Interact. Tech., vol. 7, no. 1, 2024, pp. 1–18.
+[20] T. Leimkühler, H.-P. Seidel, and T. Ritschel, “Minimal warping: Planning
+incremental novel-view synthesis,” Comput. Graph. Forum, vol. 36, no. 4,
+pp. 1–14, Jul. 2017.
+[21] X. Liu et al., “Real-time super high resolution light field rendering with
+multi-GPU scheduling,” in Proc. Asia-Pacific Conf. Commun. Technol.
+Comput. Sci., 2021, pp. 103–109.
+[22] E. Leria, M. Mäkitalo, P. Jääskeläinen, M. Sjöström, and T. Zhang,
+“Interactive Multi-GPU light field path tracing using multi-source spatial
+reprojection,” in Proc. 30th ACM Symp. Virtual Reality Softw. Technol.,
+2024, pp. 1–11.
+[23] A. Weinrauch, S. Lorbek, W. Tatzgern, P. Stadlbauer, and M. Steinberger,
+“Clouds in the cloud: Efficient cloud-based rendering of real-time volumetric clouds,” in Proc. High-Perform. Graph.- Symp. Papers, J. Bikker
+and C. Gribble, Eds., 2023, pp. 77–88.
+[24] T. Puu, “Location theory,” in Mathematical Location and Land Use Theory: An Introduction. Berlin, Heidelberg: Springer, 1997, pp. 5–30.
+[25] B. K. P. Horn, Robot Vision. Cambridge, MA, USA: MIT Press, 1986, ch.
+11.
+[26] S. Eilemann, M. Makhinya, and R. Pajarola, “Equalizer: A scalable parallel
+rendering framework,” IEEE Trans. Vis. Comput. Graph., vol. 15, no. 3,
+pp. 436–452, May/Jun. 2009.
+[27] H. W. Kuhn, “Variants of the Hungarian method for assignment problems,”
+Nav. Res. Logistics Quart., vol. 3, no. 4, pp. 253–258, 1956.
+[28] J. Munkres, “Algorithms for the assignment and transportation problems,”
+J. Soc. Ind. Appl. Math., vol. 5, no. 1, pp. 32–38, 1957.
+[29] D. J. Rosenkrantz, R. E. Stearns, and P. M. Lewis, II, “An analysis of
+several heuristics for the traveling salesman problem,” SIAM J. Comput.,
+vol. 6, no. 3, pp. 563–581, 1977.
+[30] A. El Moussawi, R. Rojas Ruiz, and N. Bennacer Seghouani, “Samplingbased label propagation for balanced graph partitioning,” in Proc. 2022
+ACM/SPEC Int. Conf. Perform. Eng., 2022, pp. 223–230.
+[31] L. Gottesbüren, M. Hamann, S. Schlag, and D. Wagner, “Advanced flowbased multilevel hypergraph partitioning,” in Proc. 18th Int. Symp. Exp.
+Algorithms, 2020, vol. 160, pp. 11:1–11:15.
+[32] Yu and Shi, “Multiclass spectral clustering,” in Proc. 9th IEEE Int. Conf.
+Comput. Vis., 2003, pp. 313–319.
+[33] S. Lloyd, “Least squares quantization in PCM,” IEEE Trans. Inf. Theory,
+vol. 28, no. 2, pp. 129–137, Mar. 1982.
+[34] J. Červený, “Gilbert curve generator,” 2024. [Online]. Available: https:
+//github.com/jakubcerveny/gilbert
+[35] D. E. King, “DLIB-ML: A machine learning toolkit,” inJ. Mach. Learn.
+Res., vol. 10, pp. 1755–1758, 2009.
+[36] F. Pedregosa et al., “Scikit-Learn: Machine learning in Python,” J. Mach.
+Learn. Res., vol. 12, pp. 2825–2830, 2011.
+[37] W. Jakob, J. Rhinelander, and D. Moldovan, “Pybind/Pybind11: Seamless
+operability between C 11 and Python,” 2017. [Online]. Available: https:
+//github.com/pybind/pybind11
+[38] J. Ikkala, M. Mäkitalo, T. Lauttia, E. Leria, and P. Jääskeläinen,
+“Tauray: A scalable real-time open-source path tracer for stereo and
+light field displays,” in Proc. SIGGRAPH Asia Tech. Commun., 2022,
+pp. 1–4.
+[39] C. Schied et al., “Spatiotemporal variance-guided filtering: Real-time
+reconstruction for path-traced global illumination,” in Proc. High Perform.
+Graph., 2017, pp. 1–12.
+[40] M. Koskela et al., “Blockwise multi-order feature regression for real-time
+path-tracing reconstruction,” ACM Trans. Graph., vol. 38, no. 5, pp. 1–14,
+Jun. 2019.
+[41] E. Leria, M. Mäkitalo, and P. Jääskeläinen, “Real-time stereoscopic imageparallel path tracing,” Electron. Imag., vol. 36, no. 13, pp. 1–6, 2024.
+[42] M. McGuire, “Computer graphics archive,” Jul. 2017. [Online]. Available:
+https://casual-effects.com/data
+[43] J. Alanko, M. Mäkitalo, and P. Jääskeläinen, “TauBench: Dynamic benchmark for graphics rendering,” in Proc. Int. Conf. Comput. Graph. Theory
+Appl., 2022, pp. 172–179.
+[44] E. M. Yazdi, M. Mäkitalo, J. Ikkala, and P. Jääskeläinen, “TauBench 1.1:
+A dynamic benchmark for graphics rendering,” 2023, arXiv:2305.04804.
+[45] Z. Wang, E. P. Simoncelli, and A. C. Bovik, “Multiscale structural similarity for image quality assessment,” in Proc. Conf. Rec. 37th Asilomar
+Conf. Signals, Syst. Comput., 2003, pp. 1398–1402.
+[46] R. Zhang, P. Isola, A. A. Efros, E. Shechtman, and O. Wang,
+“The unreasonable effectiveness of deep features as a perceptual
+metric,” in Proc. IEEE Conf. Comput. Vis. Pattern Recognit., 2018,
+pp. 586–595.
+[47] H. R. Sheikh and A. C. Bovik, “Image information and visual quality,”
+IEEE Trans. Image Process., vol. 15, no. 2, pp. 430–444, Feb. 2006.
+LERIA et al.: SCALABLE HOLE-FILLING FOR REAL-TIME MULTI-GPU LIGHT FIELD PATH TRACING
+[48] G. M. Amdahl, “Validity of the single processor approach to achieving
+large scale computing capabilities,” in Proc. Apr. 18-20, 1967, Spring Joint
+Comput. Conf., 1967, pp. 483–485.
+[49] J. L. Gustafson, “Reevaluating Amdahl’s law,” Commun. ACM, vol. 31,
+pp. 532–533, 1988.
+[50] U. Gudelek, E. Sahin, and A. Gotchev, “Perceptually optimized model
+for near-eye light field reconstruction,” in Proc. IEEE 25th Int. Workshop
+Multimedia Signal Process., 2023, pp. 1–6.
+[51] E. Leria, M. Makitalo, J. Ikkala, and P. Jääskeläinen, “Dynamic load balancing for real-time multiview path tracing on multi-GPU architectures,”
+Virtual Reality Intell. Hardware, vol. 7, no. 4, pp. 393–405, 2025.
+Erwan Leria is currently an early stage researcher that conducts his joint
+doctoral studies between Tampere University and Mid-Sweden University as part
+of the Marie Sklodowska-Curie Programme on plenoptic imaging (PLENOPTIMA). He is also a researcher with VGA Group, Tampere University. His
+research interests include distributed and parallel graphics, real-time path tracing
+and multiview rendering for LF displays.
+Markku Mäkitalo received the PhD degree in signal processing from the Tampere University of Technology (TUT), in 2013. He is currently a senior research
+fellow with Tampere University. His research interests include photorealistic
+real-time rendering, noise filtering and modeling, and immersive rendering
+technologies such as LF rendering.
+6475
+Pekka Jääskeläinen is currently a professor with Tampere University. He is also
+an active contributor to various heterogeneous parallel platform related open
+source projects. Since the early 2000s, he has been researching heterogeneous
+platform customization and programming. His research focuses on implementing challenging real-time applications, including the next generation distributed
+architectures for photorealistic real-time rendering.
+Mårten Sjöström (Senior Member, IEEE) received the MSc degree from
+Linköping University, in 1992, the Lic. of Techn. degree from KTH Stockholm,
+in 1998, and the PhD degree from EPF Lausanne, in 2001. From 1993 to 1994, he
+was with ABB and was also with CERN, from 1994 to 1996. In 2001, he joined
+Mid Sweden University. In 2007, he has founded the Realistic 3-D Research
+Group. In 2008, he became an associate professor and a full professor of signal
+processing in 2013. His research interests include visual AI and machine learning
+for multidimensional signal processing and imaging. From 2018 to 2022, he was
+an associate editor for SPIE JEI and has been for IEEE Transactions on Image
+Processing since 2022.

@@ -1,0 +1,242 @@
+# Adaptive Gaussian Refinement Strategy
+
+Also called: GS Adaptation, SplatAdapt
+
+## Overview
+The Adaptive Gaussian Refinement Strategy is a densification and pruning mechanism for 3D Gaussian Splatting that dynamically adjusts the number and size of Gaussians during training based on 2D gradient magnitude and screen-space size. It solves the problem of fixed Gaussian counts by growing Gaussians in regions with high reconstruction error and pruning those that are redundant or overly large. It differs from standard densification by explicitly tracking screen-space radii to enable screen-aware splitting and pruning, and by using a reset-based accumulation of gradient statistics to avoid bias from early training steps.
+
+## How it works
+The method operates as a callback attached to the training loop, executing at specific intervals to modify the Gaussian set. It relies on accumulated 2D gradients and screen-space radii to make decisions.
+
+### Inputs and Outputs
+**Inputs:**
+- Current training step `step`.
+- Gaussian parameters: means, quaternions, scales, opacities, colors.
+- Gradient information: 2D mean gradients (or absolute gradients) for visible Gaussians.
+- Screen-space radii: maximum radius in pixels for each visible Gaussian.
+- Configuration parameters (see below).
+- `scene_scale`: A normalization factor for 3D scale thresholds.
+
+**Outputs:**
+- Updated Gaussian parameters (means, quaternions, scales, opacities, colors) after growth, splitting, and pruning operations.
+
+### Data Structures
+The strategy maintains a state dictionary `state` per refinement cycle:
+- `grad2d`: Tensor of shape `[N]`, accumulating the squared L2 norm of 2D gradients for each Gaussian.
+- `count`: Tensor of shape `[N]`, accumulating the number of times each Gaussian has been visible/updated.
+- `radii`: Tensor of shape `[N]`, accumulating the maximum screen-space radius observed for each Gaussian.
+- `scene_scale`: Float, the normalization factor for 3D scales.
+
+These tensors are initialized to `None` and created on the fly if not present, matching the device and size of the current Gaussian set.
+
+### Parameters
+- `refine_stop_iter`: Integer. Refinement stops when `step >= refine_stop_iter`.
+- `refine_start_iter`: Integer. Refinement begins only when `step > refine_start_iter`.
+- `refine_every`: Integer. Refinement steps occur every `refine_every` iterations.
+- `reset_every`: Integer. Running statistics (`grad2d`, `count`, `radii`) are reset every `reset_every` iterations.
+- `pause_refine_after_reset`: Integer. If `step % reset_every >= pause_refine_after_reset`, refinement is paused immediately after a reset to allow statistics to accumulate.
+- `refine_scale2d_stop_iter`: Integer. If `> 0`, screen-space radius tracking is enabled. If `0`, screen-space refinement is disabled.
+- `absgrad`: Boolean. If `True`, uses absolute gradients (`absgrad`); if `False`, uses raw gradients.
+- `key_for_gradient`: String. Key in the info dict storing 2D gradients, typically `'means2d'` or `'gradient_2dgs'`.
+- `grow_grad2d`: Float. Threshold for mean normalized gradient magnitude. Gaussians exceeding this are candidates for growth/splitting.
+- `grow_scale3d`: Float. Threshold for 3D scale. Gaussians with `max(exp(scales)) <= grow_scale3d * scene_scale` are candidates for duplication.
+- `grow_scale2d`: Float. Threshold for screen radius. If `refine_scale2d_stop_iter > 0`, Gaussians with `radii > grow_scale2d` are candidates for splitting.
+- `prune_opa`: Float. Threshold for opacity. Gaussians with `sigmoid(opacity) < prune_opa` are pruned.
+- `prune_scale3d`: Float. Threshold for 3D scale. If `step > reset_every`, Gaussians with `max(exp(scales)) > prune_scale3d * scene_scale` are pruned.
+- `prune_scale2d`: Float. Threshold for screen radius. If `refine_scale2d_stop_iter > 0`, Gaussians with `radii > prune_scale2d` are pruned.
+- `revised_opacity`: Boolean. Passed to split/duplicate functions to determine opacity handling.
+
+### Numbered Steps
+
+1. **Initialize State**: Create `state` dict with `grad2d`, `count`, `radii` (if `refine_scale2d_stop_iter > 0`), and `scene_scale`. Initialize tensors to `None`.
+2. **Pre-backward Callback**: Assert `key_for_gradient` exists in info. Retain gradient on the tensor.
+3. **Post-backward Check**: If `step >= refine_stop_iter`, return immediately.
+4. **Update State**: Accumulate gradient norms and counts per Gaussian.
+    - Normalize gradients: Multiply gradient x by `width/2 * n_cameras`, y by `height/2 * n_cameras`.
+    - Initialize state tensors: If `grad2d`/`count`/`radii` are `None`, create zero tensors of size `n_gaussian` on the same device.
+    - Handle unpacked mode: If `packed=False`, select visible Gaussians where `radii[..., 0] > 0.0`, extract `gs_ids` and filter `grads`/`radii`.
+    - Accumulate gradient norm: Add `norm(grads, dim=-1)` to `state['grad2d']` at indices `gs_ids`.
+    - Accumulate count: Add `1.0` to `state['count']` at indices `gs_ids`.
+    - Compute mean gradient: Divide `state['grad2d']` by `state['count']` clamped to min 1.
+5. **Refinement Trigger**: If `step > refine_start_iter` AND `step % refine_every == 0` AND `step % reset_every >= pause_refine_after_reset`, proceed to grow/prune.
+6. **Grow Gaussians**: Call `_grow_gs` to duplicate small/high-gradient Gaussians and split large/high-gradient Gaussians.
+    - Identify small Gaussians: `max(exp(scales)) <= grow_scale3d * scene_scale`.
+    - Identify high gradient: `grads > grow_grad2d`.
+    - Identify duplication candidates: `is_grad_high AND is_small`.
+    - Identify large Gaussians: `NOT is_small`.
+    - Identify split candidates: `is_large`. If `refine_scale2d_stop_iter > 0` and `step < refine_scale2d_stop_iter`, also include if `radii > grow_scale2d`.
+    - Final split mask: `is_grad_high AND is_split`.
+    - Duplicate: If `n_dupli > 0`, call `duplicate()` with mask `is_dupli`.
+    - Adjust split mask: Append zeros of length `n_dupli` to `is_split` so newly duplicated Gaussians are not split in the same step.
+    - Split: If `n_split > 0`, call `split()` with mask `is_split` and `revised_opacity`.
+7. **Prune Gaussians**: Call `_prune_gs` to remove low-opacity or oversized Gaussians.
+    - Prune condition: `sigmoid(opacity) < prune_opa`.
+    - Prune size condition: If `step > reset_every`, add Gaussians with `max(exp(scales)) > prune_scale3d * scene_scale`.
+    - Prune screen size condition: If `step < refine_scale2d_stop_iter`, add Gaussians with `radii > prune_scale2d`.
+    - Final prune mask: `is_prune OR is_too_big`.
+    - Remove Gaussians: If `n_prune > 0`, call `remove()` with mask `is_prune`.
+8. **Reset Stats**: Zero out `grad2d`, `count`, and `radii` tensors. Empty CUDA cache.
+9. **Reset Opacity**: If `step % reset_every == 0`, call `reset_opa` with value `prune_opa * 2.0`.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_refinement_step(step, gaussians, info, config):
+    """
+    Performs one step of adaptive refinement for 3D Gaussian Splatting.
+    
+    Args:
+        step: Current training iteration.
+        gaussians: Object containing Gaussian parameters (means, quats, scales, opacities, colors).
+        info: Dictionary containing gradient information and metadata.
+        config: Configuration object with refinement parameters.
+    """
+    # 1. Initialize State
+    if not hasattr(adaptive_refinement_step, 'state'):
+        adaptive_refinement_step.state = {
+            'grad2d': None,
+            'count': None,
+            'radii': None,
+            'scene_scale': 1.0  # Placeholder, should be derived from scene
+        }
+    state = adaptive_refinement_step.state
+
+    # 2. Pre-backward Callback (Handled by framework, ensure gradient retention)
+    # Assert config.key_for_gradient in info
+    # info[config.key_for_gradient].retain_grad()
+
+    # 3. Post-backward Check
+    if step >= config.refine_stop_iter:
+        return
+
+    # 4. Update State
+    # Normalize gradients
+    grads = info[config.key_for_gradient]
+    if config.absgrad:
+        grads = grads.abs()
+    
+    # Normalize by image dimensions and number of cameras
+    # Note: width, height, n_cameras should be available from context
+    width = info.get('width', 1)
+    height = info.get('height', 1)
+    n_cameras = info.get('n_cameras', 1)
+    
+    # Assuming grads shape is [N, 2] for 2D means
+    grads[:, 0] *= width / 2 * n_cameras
+    grads[:, 1] *= height / 2 * n_cameras
+    
+    # Initialize state tensors if None
+    n_gaussians = gaussians.num_gaussians
+    if state['grad2d'] is None:
+        state['grad2d'] = torch.zeros(n_gaussians, device=grads.device)
+        state['count'] = torch.zeros(n_gaussians, device=grads.device)
+        if config.refine_scale2d_stop_iter > 0:
+            state['radii'] = torch.zeros(n_gaussians, device=grads.device)
+            
+    # Handle unpacked mode
+    if not info.get('packed', True):
+        # Select visible Gaussians
+        visible_mask = info['radii'][:, 0] > 0.0
+        gs_ids = info['gs_ids'][visible_mask]
+        visible_grads = grads[visible_mask]
+        visible_radii = info['radii'][visible_mask]
+    else:
+        gs_ids = torch.arange(n_gaussians, device=grads.device)
+        visible_grads = grads
+        visible_radii = info.get('radii', torch.zeros(n_gaussians, device=grads.device))
+        
+    # Accumulate gradient norm
+    grad_norms = torch.norm(visible_grads, dim=-1)
+    state['grad2d'][gs_ids] += grad_norms
+    
+    # Accumulate count
+    state['count'][gs_ids] += 1.0
+    
+    # Accumulate radii if enabled
+    if config.refine_scale2d_stop_iter > 0:
+        state['radii'][gs_ids] = torch.maximum(state['radii'][gs_ids], visible_radii)
+        
+    # Compute mean gradient
+    mean_grad = state['grad2d'] / torch.clamp(state['count'], min=1)
+
+    # 5. Refinement Trigger
+    if (step > config.refine_start_iter and 
+        step % config.refine_every == 0 and 
+        step % config.reset_every >= config.pause_refine_after_reset):
+        
+        # 6. Grow Gaussians
+        is_small = torch.max(torch.exp(gaussians.scales), dim=1)[0] <= config.grow_scale3d * state['scene_scale']
+        is_grad_high = mean_grad > config.grow_grad2d
+        
+        is_dupli = is_small & is_grad_high
+        is_large = ~is_small
+        
+        is_split = is_large.clone()
+        if config.refine_scale2d_stop_iter > 0 and step < config.refine_scale2d_stop_iter:
+            is_split = is_split | (state['radii'] > config.grow_scale2d)
+            
+        final_split_mask = is_grad_high & is_split
+        
+        # Duplicate
+        n_dupli = is_dupli.sum().item()
+        if n_dupli > 0:
+            gaussians.duplicate(is_dupli)
+            # Adjust split mask to exclude new Gaussians
+            new_zeros = torch.zeros(n_dupli, dtype=torch.bool, device=final_split_mask.device)
+            final_split_mask = torch.cat([final_split_mask, new_zeros], dim=0)
+            
+        # Split
+        n_split = final_split_mask.sum().item()
+        if n_split > 0:
+            gaussians.split(final_split_mask, config.revised_opacity)
+            
+        # 7. Prune Gaussians
+        is_prune = torch.sigmoid(gaussians.opacities) < config.prune_opa
+        
+        is_too_big = torch.zeros_like(is_prune, dtype=torch.bool)
+        if step > config.reset_every:
+            is_too_big = is_too_big | (torch.max(torch.exp(gaussians.scales), dim=1)[0] > config.prune_scale3d * state['scene_scale'])
+            
+        if config.refine_scale2d_stop_iter > 0:
+            is_too_big = is_too_big | (state['radii'] > config.prune_scale2d)
+            
+        final_prune_mask = is_prune | is_too_big
+        
+        n_prune = final_prune_mask.sum().item()
+        if n_prune > 0:
+            gaussians.remove(final_prune_mask)
+            
+    # 8. Reset Stats
+    state['grad2d'].zero_()
+    state['count'].zero_()
+    if config.refine_scale2d_stop_iter > 0:
+        state['radii'].zero_()
+    torch.cuda.empty_cache()
+    
+    # 9. Reset Opacity
+    if step % config.reset_every == 0:
+        gaussians.reset_opacity(config.prune_opa * 2.0)
+```
+
+### Edge Cases and Pitfalls
+- **Screen-size pruning bug**: The official code implements screen-size pruning but it is disabled by default (`refine_scale2d_stop_iter=0`) due to a bug referenced in GitHub issue #123 [S1, unofficial].
+- **Newly duplicated Gaussians**: Must not be split in the same iteration. The split mask is extended with zeros corresponding to the number of duplicated Gaussians [S1, unofficial].
+- **Gradient normalization**: Gradients are normalized by image dimensions and number of cameras to ensure consistent thresholds across resolutions and views [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: O(N) per refinement step, where N is the number of Gaussians. The cost is dominated by gradient accumulation and the duplicate/split/remove operations.
+- **Memory Complexity**: O(N) for state tensors (`grad2d`, `count`, `radii`).
+- **Measured Performance**: Not given in the sources.
+- **Scaling**: Scales linearly with the number of Gaussians. The use of packed/unpacked modes allows for memory-speed trade-offs.
+- **Strengths**: Dynamic adaptation to scene complexity, reduces over-smoothing in high-detail areas, and prevents excessive Gaussian count in simple areas.
+- **Limitations**: Dependent on gradient quality, sensitive to parameter tuning, and screen-space pruning may be buggy.
+- **When to use**: When training 3D Gaussian Splatting on complex scenes with varying levels of detail.
+- **When not to use**: When screen-space refinement is disabled due to bugs, or when fixed Gaussian counts are sufficient.
+
+## Background
+The Adaptive Gaussian Refinement Strategy is an implementation detail from the `gsplat` library, specifically the `SplatAdapt` module. It is based on the densification strategies proposed in the original 3D Gaussian Splatting paper but enhanced with screen-space awareness. The method is part of the training optimization pipeline, aiming to improve reconstruction quality by dynamically adjusting the Gaussian representation.
+
+## Sources
+[S1] carlinds/splatad, https://github.com/carlinds/splatad, fetched 2026-10-27 (unofficial)

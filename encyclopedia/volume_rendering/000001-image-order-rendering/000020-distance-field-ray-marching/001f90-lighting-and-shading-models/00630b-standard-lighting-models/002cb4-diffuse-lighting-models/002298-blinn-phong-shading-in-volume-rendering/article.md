@@ -1,0 +1,128 @@
+# Blinn-Phong Shading in Volume Rendering
+
+Also called: Shaded Volume Rendering (SVR)
+
+## Overview
+Blinn-Phong Shading in Volume Rendering is a technique that applies the Blinn-Phong lighting model to volume data during ray marching to provide surface-like shading cues [S1, unofficial]. It differs from unshaded volume rendering by computing per-sample normals via central differences and combining diffuse, specular, and ambient terms to enhance depth perception and material appearance [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D volume texture (`volumeTexture`), a 1D transfer function texture (`tfTexture`), a transformation matrix (`transform`), and lighting parameters (`lightPos`, `lightColour`, `diffuse`, `specular`, `ambient`, `tfSize`) [S1, unofficial].
+- Output: A 2D image with accumulated color and alpha [S1, unofficial].
+
+**Data Structures:**
+- `Uniforms` struct:
+  - `transform`: `mat4x4<f32>` [S1, unofficial]
+  - `lightPos`: `vec3<f32>` [S1, unofficial]
+  - `lightColour`: `vec3<f32>` [S1, unofficial]
+  - `diffuse`: `f32` [S1, unofficial]
+  - `specular`: `f32` [S1, unofficial]
+  - `ambient`: `f32` [S1, unofficial]
+  - `tfSize`: `f32` [S1, unofficial]
+- Texture Bindings:
+  - `volumeTexture`: `texture_3d<f32>` at binding 0 [S1, unofficial]
+  - `volumeSampler`: sampler at binding 1 [S1, unofficial]
+  - `tfTexture`: `texture_1d<f32>` at binding 3 [S1, unofficial]
+
+**Steps:**
+1. **Vertex Shader**: Generate a full-screen triangle using vertex indices to produce positions $(-1, 3)$, $(-1, -1)$, and $(3, -1)$ in clip space [S1, unofficial].
+2. **Ray Origin/Direction**: For each fragment with screen coordinate `coord.xy`, compute ray origin `pos` and direction `dir` by transforming screen coordinates:
+   - `pos = transform * vec4(coord.xy, 0.0, 1.0)`
+   - `dir = transform * vec4(0.0, 0.0, 1.0, 0.0)` [S1, unofficial]
+3. **Ray-Box Intersection**: Compute entry (`near`) and exit (`far`) distances by calculating inverse direction, bounding box distances, and taking min/max of axis intersections. Clamp `near` to 0 if negative [S1, unofficial].
+4. **Ray Marching Loop**: Iterate from `near` to `far`:
+   - **Intensity Sampling**: Sample the 3D volume texture at `coords`. Convert the RG8 format sample to a normalized 16-bit value:
+     $$ \text{intensity} = \frac{\text{sample}.x + \text{sample}.y \times 255}{256} $$
+     [S1, unofficial]
+   - **Normal Calculation**: Compute the gradient using central differences. For each axis, sample the intensity at `pos + offset` and `pos - offset`, subtract them, and normalize the resulting vector `delta` [S1, unofficial].
+   - **Transfer Function Lookup**: Map the sampled intensity `val` to a 1D texture index `tfIndex = \text{int32}(val \times \text{uniforms.tfSize})` and load the color from `tfTexture` [S1, unofficial].
+   - **Blinn-Phong Lighting**: Calculate light direction `lightDir`, view direction `viewDir`, and half vector `halfDir`. Compute:
+     - Diffuse: $\max(0.0, \text{dot}(\text{norm}, \text{lightDir})) \times \text{uniforms.diffuse}$
+     - Specular: $\text{pow}(\max(0.0, \text{dot}(\text{norm}, \text{halfDir})), \text{shininess}) \times \text{uniforms.specular}$
+     - Ambient: $\text{uniforms.ambient}$
+     - Combined: $\text{litColor} = \text{uniforms.lightColour} \times (\text{colour.rgb} \times (\text{diffuse} + \text{ambient}) + \text{specular})$ [S1, unofficial]
+   - **Front-to-Back Composition**: Update accumulated color `accColour` using alpha blending:
+     $$ \alpha = (1.0 - \text{accColour}.a) \times \text{colour}.a $$
+     $$ \text{accColour}.rgb += \alpha \times \text{colour}.rgb $$
+     $$ \text{accColour}.a += \alpha $$
+     Break if $\text{accColour}.a \ge 0.95$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Vertex Shader
+def vert_main(idx):
+    pos = [(3.0, -1.0), (-1.0, -1.0), (-1.0, 3.0)]
+    return (pos[idx][0], pos[idx][1], 0.0, 1.0)
+
+# Fragment Shader
+def frag_main(coord, uniforms, volumeTexture, tfTexture):
+    size = texture_dimensions(volumeTexture)
+    pos = uniforms.transform * (coord.x, coord.y, 0.0, 1.0)
+    dir = uniforms.transform * (0.0, 0.0, 1.0, 0.0)
+    
+    intersect = ray_box_intersection((0.0, 0.0, 0.0), size, pos.xyz, dir.xyz)
+    near = max(0, int(intersect.x))
+    far = int(intersect.y)
+    
+    acc_colour = (0.0, 0.0, 0.0, 0.0)
+    
+    for k in range(near, far + 1):
+        transformed = uniforms.transform * (coord.x, coord.y, k, 1.0)
+        coords = transformed.xyz / size
+        
+        sample = texture_sample(volumeTexture, coords)
+        intensity = (sample.x + sample.y * 255) / 256
+        
+        # Normal calculation using central differences
+        offset = 1.0 / size
+        p_plus = coords + offset
+        p_minus = coords - offset
+        grad = (texture_sample(volumeTexture, p_plus) - texture_sample(volumeTexture, p_minus))
+        norm = normalize(grad)
+        
+        # Transfer function lookup
+        tf_index = int(intensity * uniforms.tf_size)
+        colour = texture_sample(tfTexture, tf_index / uniforms.tf_size)
+        
+        # Blinn-Phong lighting
+        light_dir = normalize(uniforms.light_pos - pos.xyz)
+        view_dir = normalize(-pos.xyz)
+        half_dir = normalize(light_dir + view_dir)
+        
+        diffuse = max(0.0, dot(norm, light_dir)) * uniforms.diffuse
+        specular = pow(max(0.0, dot(norm, half_dir)), 10.0) * uniforms.specular
+        ambient = uniforms.ambient
+        
+        lit_colour = uniforms.light_colour * (colour.rgb * (diffuse + ambient) + specular)
+        
+        # Front-to-back composition
+        alpha = (1.0 - acc_colour.a) * colour.a
+        acc_colour.rgb += alpha * lit_colour.rgb
+        acc_colour.a += alpha
+        
+        if acc_colour.a >= 0.95:
+            break
+            
+    return acc_colour
+```
+
+**Parameters:**
+- `shininess`: 10.0 [S1, unofficial]
+
+**Edge Cases:**
+- Precision issues in normal calculation due to small offsets [G].
+- Boundary conditions when ray exits volume [S1, unofficial].
+
+## Operating characteristics
+- Time Complexity: $O(N)$ where $N$ is the number of samples along the ray [S1, unofficial].
+- Memory Complexity: $O(1)$ per fragment [S1, unofficial].
+- Strengths: Provides realistic shading cues [S1, unofficial].
+- Limitations: Computationally expensive due to multiple texture samples for normal calculation [S1, unofficial].
+
+## Background
+Blinn-Phong Shading in Volume Rendering was implemented in the `ossium` project for WebGPU [S1, unofficial].
+
+## Sources
+[S1] fraserlove/ossium, https://github.com/fraserlove/ossium, fetched 2026-10-27 (unofficial)

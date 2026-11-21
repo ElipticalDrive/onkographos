@@ -1,0 +1,155 @@
+# Levenberg-Marquardt Pose Optimization
+
+Also called: LM Pose Estimation, Pose Optimization via Levenberg-Marquardt
+
+## Overview
+Levenberg-Marquardt (LM) Pose Optimization is an iterative procedure that minimizes the squared error between reference image features and rendered image features by using a numerically estimated Jacobian [S1]. It sets itself apart from its siblings by relying on finite-difference Jacobian approximation via pose perturbation rather than analytical derivatives or derivative-free search, balancing the stability of gradient descent with the speed of Gauss-Newton methods [S1].
+
+## How it works
+**Inputs:** Reference image $s_{ref}$, initial pose guess $\hat{p}_0$, Levenberg-Marquardt damping parameter $\lambda$, convergence threshold $\epsilon$, number of perturbation samples $N_s$.
+**Outputs:** Converged pose estimate $\hat{p}_{final}$.
+
+**Data Structures:**
+*   Pose vector $\hat{p} \in \mathbb{R}^6$: Represents the 6-DoF camera pose (rotation and translation).
+*   Feature vector $\tilde{x}$: Extracted features from the reference image.
+*   Jacobian matrix $J_f$: Numerically estimated Jacobian of the feature error with respect to the pose parameters.
+
+**Steps:**
+1.  **Initialization:** Extract reference features $\tilde{x}$ from $s_{ref}$ [S1]. Set current pose $\hat{p}_i = \hat{p}_0$.
+2.  **Iteration Loop:** While the norm of the pose update $\|\delta p\| > \epsilon$:
+    a.  **Render and Match:** Render the scene at the current pose guess $\hat{p}_i$. Extract features from the rendered image and match them with the reference features $\tilde{x}$ to obtain the current feature correspondence $h(s_i, \hat{p}_i)$ [S1].
+    b.  **Pose Sampling:** Sample $N_s$ pose parameters around the current guess $\hat{p}_i$. The sampling biases random pose samples from the $SE(3)$ group to be within a $\delta$-neighborhood of the reference pose, specifically sampling rotation axes uniformly on a spherical surface [S1].
+    c.  **Jacobian Estimation:** Render images at each sampled pose value. Match reference features in each rendered image. Calculate the Jacobian $J_f$ using the feature differences and pose perturbations, effectively approximating the derivative via finite differences (referred to as "online learning" in the source) [S1].
+    d.  **LM Update:** Calculate the least-squares pose update $\delta p$ using the Levenberg-Marquardt formulation. The update solves the regularized normal equations:
+        $$ (J_f^T J_f + \lambda I) \delta p = -J_f^T e $$
+        where $e$ is the feature error vector (difference between reference and matched features) and $I$ is the identity matrix [S1].
+    e.  **Pose Update:** Update the pose: $\hat{p}_{i+1} = \hat{p}_i + \delta p$ [S1].
+3.  **Termination:** Return $\hat{p}_{final} = \hat{p}_i$ when convergence is reached [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def levenberg_marquardt_pose_optimization(s_ref, p_hat_0, lambda_param, epsilon, N_s):
+    # 1. Extract reference features
+    x_tilde = extract_features(s_ref)
+    
+    # 2. Initialize pose
+    p_hat = p_hat_0
+    
+    while True:
+        # 3. Render at current pose and match features
+        rendered_img = render_scene(p_hat)
+        current_features = extract_features(rendered_img)
+        matched_features = match_features(current_features, x_tilde)
+        
+        # Calculate error vector e
+        e = x_tilde - matched_features
+        
+        # Check convergence on previous step's delta (approximated here by checking error norm if delta not stored, 
+        # but strictly following source: check ||delta_p|| > epsilon)
+        # Note: Source checks ||delta_p|| > epsilon at loop start. 
+        # We need to compute delta_p first to check convergence for the *next* iteration or break if small.
+        # Standard LM loop structure:
+        
+        # 4. Sample poses around current guess
+        sampled_poses = sample_poses_around(p_hat, N_s)
+        
+        # 5. Render sampled poses and match features to estimate Jacobian
+        J_f = zeros((num_features, 6))
+        for k in range(N_s):
+            p_sampled = sampled_poses[k]
+            img_sampled = render_scene(p_sampled)
+            feat_sampled = extract_features(img_sampled)
+            matched_sampled = match_features(feat_sampled, x_tilde)
+            
+            # Finite difference approximation for Jacobian column k
+            # delta_p_sampled = p_sampled - p_hat
+            # delta_e = matched_sampled - matched_features
+            # J_f[:, k] = delta_e / delta_p_sampled (element-wise or least-squares fit over N_s samples)
+            # Source says "Calculate J_f via online learning and using Eq. (13)"
+            # We implement a standard finite difference accumulation
+            pass 
+            
+        # Refine J_f using all samples (e.g., least squares fit of perturbations to errors)
+        # This step corresponds to Eq. (13) in [S1]
+        J_f = estimate_jacobian_finite_difference(p_hat, sampled_poses, x_tilde, N_s)
+        
+        # 6. Calculate LM update
+        # (J^T J + lambda * I) * delta_p = -J^T * e
+        JTJ = J_f.T @ J_f
+        lambda_I = lambda_param * np.eye(6)
+        A = JTJ + lambda_I
+        b = -J_f.T @ e
+        
+        delta_p = solve_linear_system(A, b)
+        
+        # 7. Check convergence
+        if np.linalg.norm(delta_p) <= epsilon:
+            break
+            
+        # 8. Update pose
+        p_hat = p_hat + delta_p
+        
+    return p_hat
+
+def sample_poses_around(p_current, N_s):
+    # Sample N_s poses in a delta-neighborhood of p_current in SE(3)
+    # Bias random samples from SE(3) group
+    # Rotation axis distributed uniformly on spherical surface
+    sampled = []
+    for _ in range(N_s):
+        # Generate random perturbation in SE(3)
+        perturbation = random_se3_perturbation()
+        sampled.append(p_current + perturbation) # Simplified addition; actual SE(3) composition required
+    return sampled
+
+def estimate_jacobian_finite_difference(p_current, sampled_poses, x_ref, N_s):
+    # Approximate Jacobian using feature errors from sampled poses
+    # This implements the "online learning" and Eq. (13) reference
+    J = np.zeros((len(x_ref), 6))
+    # Accumulate differences to solve for J in a least-squares sense
+    # Let D be matrix of pose differences (N_s x 6)
+    # Let E be matrix of feature differences (N_s x num_features)
+    # J^T = E^T D (D D^T)^-1  or similar least squares solution
+    # For simplicity, assuming direct finite difference if N_s >= 6 and well-conditioned
+    # Source implies a specific Eq. (13) which is not fully detailed, so we use standard FD approximation
+    # [G] Standard finite difference: J[:, i] = (f(p + h*e_i) - f(p)) / h
+    # Here we use random perturbations, so we solve min_J || E - D @ J ||
+    pass
+```
+
+**Parameters:**
+*   $\lambda$: Levenberg-Marquardt update parameter. Controls the trade-off between Gauss-Newton and gradient descent. [S1]
+*   $\epsilon$: Convergence threshold for $\|\delta p\|$. [S1]
+*   $N_s$: Number of pose samples for Jacobian estimation. [S1]
+
+**Edge Cases and Pitfalls:**
+*   **Jacobian Singularity:** If the pose perturbations are collinear or insufficient, $J_f^T J_f$ may be singular. The damping term $\lambda I$ helps mitigate this [S1].
+*   **Perturbation Size:** The $\delta$-neighborhood must be small enough for the linear approximation to hold but large enough to overcome noise. [S1]
+*   **Feature Matching Errors:** Incorrect feature matches lead to erroneous error vectors $e$ and Jacobian estimates. [S1]
+
+## Subtopics
+
+### [Derivative-free Pose Estimation via Feature Matching](11310-derivative-free-pose-estimation-via-feature-matching.md)
+Estimates 6-DoF pose by rendering sampled perturbations and using feature matching for least-squares differential corrections, bypassing analytical Jacobians.
+
+### [Lie Algebra (Tangent Plane) Pose Optimization](14005-lie-algebra-tangent-plane-pose-optimization.md)
+Optimizes pose in the tangent space of $SE(3)$ ($\mathfrak{se}(3)$) for smoother convergence, avoiding noisy photometric loss landscapes on the manifold.
+
+### [Shonan Averaging for Pose Synchronization](17128-shonan-averaging-for-pose-synchronization.md)
+Finds global alignment of camera poses from noisy relative measurements by relaxing the problem into higher-dimensional special-orthogonal spaces.
+
+## Operating characteristics
+*   **Time Complexity:** Each iteration requires $N_s$ renders and feature extractions/matches. Jacobian estimation is $O(N_s \cdot F \cdot 6)$ where $F$ is feature dimension. Update is $O(6^3)$. Total per iteration is dominated by rendering.
+*   **Memory Complexity:** Stores reference features, current features, and Jacobian matrix. Low memory overhead compared to full Hessian storage.
+*   **Strengths:** Robust to local minima due to damping parameter $\lambda$; does not require analytical derivatives of the rendering pipeline.
+*   **Limitations:** Computationally expensive due to multiple renders per iteration; sensitive to the choice of $\lambda$ and perturbation size $\delta$.
+*   **When to Use:** When analytical gradients are unavailable or too complex, and feature-based alignment is preferred over pixel-wise photometric error.
+*   **When Not to Use:** When real-time performance is critical and $N_s$ renders are too slow; when pixel-level accuracy is required and photometric loss is more appropriate.
+
+## Background
+Originated in the context of differentiable rendering for pose estimation in proximity operations, such as spacecraft approach and asteroid navigation [S1]. The method leverages the Levenberg-Marquardt algorithm's ability to handle non-linear least squares problems by combining gradient descent and Gauss-Newton methods, using finite differences to approximate the Jacobian when analytical derivatives are difficult to obtain [S1].
+
+## Sources
+[S1] Differentiable Rendering for Pose Estimation in Proximity Operations, https://core.ac.uk/download/552738213.pdf, fetched 2026-10-30

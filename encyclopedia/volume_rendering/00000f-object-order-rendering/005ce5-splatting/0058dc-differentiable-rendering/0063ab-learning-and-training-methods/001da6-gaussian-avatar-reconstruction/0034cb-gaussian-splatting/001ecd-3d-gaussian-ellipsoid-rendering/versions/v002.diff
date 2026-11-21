@@ -1,0 +1,159 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # 3D Gaussian Ellipsoid Rendering
+ 
+-Also called: Gaussian Ellipsoid Ray Tracing, VoGE, VoGE Ray Tracing with Ellipsoidal Gaussians, VoGE Volume Density Ray Tracing, VoGE: A Differentiable Volume Renderer using Gaussian Ellipsoids for Analysis-by-Synthesis
++Also called: Differentiable Volume Renderer using Gaussian Ellipsoids, Gaussian Ellipsoid Ray Tracing, VoGE, VoGE Ray Tracing with Ellipsoidal Gaussians, VoGE Volume Density Ray Tracing, VoGE Volume Rendering, VoGE: A Differentiable Volume Renderer using Gaussian Ellipsoids for Analysis-by-Synthesis
+ 
+ ## Overview
+@@ -7,6 +7,6 @@
+ 
+ ## How it works
+-**Inputs:** A set of $K$ Gaussian ellipsoids, each defined by a center location $\mathbf{M}_k \in \mathbb{R}^3$ and a symmetric spatial variance matrix $\mathbf{\Sigma}_k \in \mathbb{R}^{3 \times 3}$; a camera configuration defining viewing rays $\mathbf{r}(t)$; and per-kernel attributes (e.g., color $\mathbf{c}_k$).
+-**Outputs:** A synthesized 2D image where each pixel color is a weighted sum of kernel attributes.
++**Inputs:** A set of $K$ Gaussian ellipsoids, each defined by a center location $\mathbf{M}_k \in \mathbb{R}^3$ and a symmetric spatial variance matrix $\mathbf{\Sigma}_k \in \mathbb{R}^{3 \times 3}$; a camera configuration defining viewing rays $\mathbf{r}(t)$; and per-kernel attributes (e.g., color $\mathbf{c}_k$) [S1, unofficial].
++**Outputs:** A synthesized 2D image where each pixel color is a weighted sum of kernel attributes [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -47,5 +47,5 @@
+     Substituting the 1D Gaussian form and using the error function $\operatorname{erf}(x) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-u^2} du$, the closed-form solution is [S1, unofficial]:
+     $$ T(t) = \exp\left(-\sum_{k=1}^K e^{q_k} \frac{\operatorname{erf}\left((t - l_k)/\sigma_k\right) + 1}{2}\right) $$
+-    Here, $\tau$ is a scattering coefficient (often 1). The integral limits are effectively $-\infty$ to $t$ because the Gaussian support is infinite, though in practice truncated by a threshold.
++    Here, $\tau$ is a scattering coefficient [S1, unofficial]. The integral limits are effectively $-\infty$ to $t$ because the Gaussian support is infinite [S1, unofficial].
+ 
+ 5.  **Kernel-to-Pixel Weight Computation:** Compute the weight $W_k$ for each kernel to determine its contribution to the final pixel color. The exact weight is the integral of the reweighted density [S1, unofficial]:
+@@ -59,5 +59,4 @@
+ 6.  **Image Synthesis:** For each pixel, sum the contributions of all kernels weighted by their computed weights $W_k$ and their attributes $\mathbf{c}_k$ [S1, unofficial]:
+     $$ \mathbf{C}_{pixel} = \sum_{k=1}^K W_k \mathbf{c}_k $$
+-    (Note: Standard volume rendering normalization may apply, but VoGE primarily uses these weights for interpolation [S1, unofficial]).
+ 
+ **Pseudocode:**
+@@ -75,9 +74,6 @@
+     Returns: l_k, q_k, sigma_k_sq
+     """
+-    # Inverse of Sigma_k
+     Sigma_inv = np.linalg.inv(Sigma_k)
+     
+-    # Calculate l_k: distance along ray for max density
+-    # l_k = (M^T Sigma^-1 D + D^T Sigma^-1 M) / (2 * D^T Sigma^-1 D)
+     term1 = np.dot(M_k, np.dot(Sigma_inv, D))
+     term2 = np.dot(D, np.dot(Sigma_inv, M_k))
+@@ -85,39 +81,14 @@
+     
+     if denominator == 0:
+-        return 0.0, 0.0, 0.0 # Degenerate case: ray parallel to principal axis?
++        # Guard against degenerate covariance projection
++        return 0.0, 0.0, 1e-8 
+         
+     l_k = (term1 + term2) / denominator
+     
+-    # Calculate V_k: vector from ray point l_k*D to center M_k
+     V_k = M_k - (l_k * D)
+-    
+-    # Calculate q_k: -0.5 * V^T Sigma^-1 V
+     q_k = -0.5 * np.dot(V_k, np.dot(Sigma_inv, V_k))
+-    
+-    # Calculate sigma_k_sq: D^T Sigma^-1 D
+     sigma_k_sq = np.dot(D, np.dot(Sigma_inv, D))
+     
+     return l_k, q_k, sigma_k_sq
+-
+-def erf_approx(x):
+-    """
+-    Approximation of the error function erf(x).
+-    Using a standard polynomial approximation or library call.
+-    """
+-    # Standard approximation for erf
+-    # erf(x) = 1 - (a1*t + a2*t^2 + a3*t^3 + a4*t^4 + a5*t^5) * exp(-x^2)
+-    # where t = 1 / (1 + p*x), p=0.3275911
+-    sign = 1 if x >= 0 else -1
+-    x = abs(x)
+-    p = 0.3275911
+-    a1 = 0.254829592
+-    a2 = -0.284496736
+-    a3 = 1.421413741
+-    a4 = -1.453152027
+-    a5 = 1.061405429
+-    
+-    t = 1.0 / (1.0 + p * x)
+-    y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * math.exp(-x * x)
+-    return sign * y
+ 
+ def render_voge(kernels, ray_origin, ray_direction, tau=1.0):
+@@ -144,18 +115,9 @@
+         })
+     
+-    # Step 4: Compute Occupancy T(t) at specific points if needed, 
+-    # but VoGE approximates W_k using T(l_k).
+-    # We need T(l_k) for each kernel.
+-    # T(t) = exp(- sum_k e^{q_k} * (erf((t - l_k)/sigma_k) + 1)/2 )
+-    
+     total_weight = 0.0
+     pixel_color = np.zeros(3)
+     
+-    # To compute T(l_k) for each k, we need the sum over ALL kernels.
+-    # Note: The approximation W_k = T(l_k) * e^{q_k} uses the occupancy 
+-    # evaluated at the peak of the CURRENT kernel k, but the occupancy 
+-    # function T(t) includes contributions from ALL kernels.
+-    
+-    for k_idx, kd in enumerate(kernel_data):
++    # Step 4 & 5: Compute Occupancy T(l_k) and Weight W_k for each kernel
++    for kd in kernel_data:
+         l_k = kd['l_k']
+         q_k = kd['q_k']
+@@ -163,5 +125,5 @@
+         
+         # Compute T(l_k): Occupancy at the peak of kernel k
+-        # Sum over all other kernels (and itself) to get total density integral
++        # T(t) = exp(-tau * sum_{j} e^{q_j} * (erf((t - l_j)/sigma_j) + 1)/2 )
+         density_integral_sum = 0.0
+         for other_kd in kernel_data:
+@@ -170,12 +132,9 @@
+             sigma_other = other_kd['sigma_k']
+             
+-            # Term for this other kernel in the exponent sum
+-            # erf((t - l_other)/sigma_other)
+             arg = (l_k - l_other) / sigma_other
+-            erf_val = erf_approx(arg)
++            erf_val = math.erf(arg)
+             term = math.exp(q_other) * (erf_val + 1.0) / 2.0
+             density_integral_sum += term
+             
+-        # T(l_k) = exp(-tau * density_integral_sum)
+         T_lk = math.exp(-tau * density_integral_sum)
+         
+@@ -187,7 +146,4 @@
+         total_weight += W_k
+         
+-    # Optional: Normalize by total weight if required by specific implementation
+-    # VoGE paper implies direct interpolation, but standard alpha blending 
+-    # might require normalization. The paper states "interpolate per kernel attributes".
+     if total_weight > 0:
+         pixel_color /= total_weight
+@@ -199,5 +155,4 @@
+ - $\tau$: Scattering coefficient. Typical value: 1.0 [S1, unofficial].
+ - $K$: Total number of Gaussian kernels. Varies by scene complexity [S1, unofficial].
+-- $\eta$: Threshold for kernel inclusion (mentioned in Fig 11 context, value 0.01) [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -212,5 +167,5 @@
+ 
+ ### [Ever Rendering](3814-ever-rendering.md)
+-Ever Rendering is a real-time volumetric rendering method that uses 3D Gaussian ellipsoids as geometric primitives to represent a consistent 3D radiance field, avoiding the 2D billboard approximation inherent in 3D Gaussian Splatting (3DGS). Unlike its sibling [Differentiable Ellipsoid Primitive](3490-differentiable-ellipsoid-primitive.md) which may rely on rasterization or different approximations, Ever Rendering replaces rasterization with ray tracing to capture volume density distributions for blending, enabling real-time performance without approximation errors in the transmittance calculation.
++Ever Rendering is a real-time volumetric rendering method that represents a radiance field as a set of constant-density volumetric ellipsoids, avoiding the 2D billboard approximation of 3D Gaussian Splatting (3DGS). Unlike its sibling [Differentiable Ellipsoid Primitive](3490-differentiable-ellipsoid-primitive.md), it replaces rasterization with ray tracing to capture volume density distributions for blending, enabling exact transmittance calculation without approximation errors.
+ 
+ ### Gaussian Point Representation
+@@ -229,5 +184,4 @@
+ **Limitations:**
+ - Approximation error in weight calculation (though negligible) [S1, unofficial].
+-- Requires ray tracing per pixel, which can be slower than rasterization for very high $K$ if not optimized [S1, unofficial].
+ 
+ **When to use:** When accurate occlusion reasoning and differentiability are required, such as in object pose estimation, shape/texture fitting, and scenes with significant overlapping objects [S1, unofficial].
+@@ -236,5 +190,5 @@
+ 
+ ## Background
+-VoGE (Volume Gaussian Ellipsoid) was proposed as a differentiable volume renderer that utilizes volumetric Gaussian reconstruction kernels as geometric primitives [S1, unofficial]. It was developed to address the limitations of current state-of-the-art differentiable renderers that use rasterization and distance-based blending, which suffer from ambiguity when objects overlap [S1, unofficial]. The method builds on the power of volume rendering with high-quality occlusion reasoning shown by Mildenhall et al. (2020) and Schwarz et al. (2020), but adapts it to explicit Gaussian ellipsoids [S1, unofficial]. The code is available at https://github.com/Angtian/VoGE [S1, unofficial].
++VoGE (Volume Gaussian Ellipsoid) was proposed as a differentiable volume renderer that utilizes volumetric Gaussian reconstruction kernels as geometric primitives [S1, unofficial]. It was developed to address the limitations of current state-of-the-art differentiable renderers that use rasterization and distance-based blending, which suffer from ambiguity when objects overlap [S1, unofficial]. The code is available at https://github.com/Angtian/VoGE [S1, unofficial].
+ 
+ ## Sources

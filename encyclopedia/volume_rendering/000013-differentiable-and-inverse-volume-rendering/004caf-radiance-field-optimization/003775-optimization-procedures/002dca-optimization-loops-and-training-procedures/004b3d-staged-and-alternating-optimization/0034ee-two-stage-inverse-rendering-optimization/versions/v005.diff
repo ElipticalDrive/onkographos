@@ -1,0 +1,410 @@
+--- v004.md
++++ v005.md
+@@ -4,244 +4,202 @@
+ 
+ ## Overview
+-Two-Stage Inverse Rendering Optimization is a pipeline that decouples geometry and reflectance estimation by first optimizing scene geometry using an approximate differentiable renderer and then optimizing material reflectance (albedo) and lighting using a physically-based differentiable renderer [S1]. It differs from NeRF, IDR, and PhySG by utilizing triangle meshes and physically-based rendering (PBR) materials (Cook-Torrance) rather than Signed Distance Fields (SDFs) or Spherical Gaussians, enabling direct deployment on graphics engines and superior specular handling [S1].
++Two-Stage Inverse Rendering Optimization decouples the recovery of scene geometry from material reflectance and illumination by alternating between an approximate differentiable renderer and a physically-based ray tracer [S1, S2]. It solves the ill-posed nature of inverse rendering by first establishing a robust geometric proxy using silhouette constraints, then refining physically accurate albedo and environment maps while holding geometry fixed [S1, S2]. This approach differs from single-stage radiance field methods (e.g., [NeRF](44-radiance-field-optimization.md), [PhySG](44-radiance-field-optimization.md)) by explicitly modeling triangle meshes or Gaussian splats with PBR materials, enabling direct deployment in graphics engines and superior specular handling [S1].
+ 
+ ## How it works
+-The method operates in two distinct phases. The first phase initializes and refines geometry, while the second phase optimizes material properties and illumination while keeping geometry fixed.
++The method operates in two distinct phases. The specific variables involved are: $\mu$ (position), $\Sigma$ (covariance), $c$ (color), $\alpha$ (opacity), $n$ (normal), $\rho$ (albedo), $r$ (roughness), and $L_{env}$ (environment-map radiance) [S2].
+ 
+ ### Inputs and Outputs
+-**Inputs:**
+-*   A set of multi-view images $\{I_{rgb}\}$ of a scene.
+-*   Camera parameters for each input image.
+-*   (Optional) Binary foreground masks $M$ for the input images [S2].
+-*   Initial geometry: A dense mesh obtained via Structure-from-Motion (SfM) and Multi-View Stereo (MVS) reconstruction [S1].
+-
+-**Outputs:**
+-*   Optimized vertex positions $\theta_p$ defining the mesh geometry [S1].
+-*   Diffuse albedo texture $\theta_d$ and specular albedo texture $\theta_s$ [S1].
+-*   HDR Environment map $L_{env}$ representing the illumination [S1, S2].
++*   **Inputs:** A set of multi-view images $\{I_k\}$, camera parameters, and an initial geometry estimate (either a coarse mesh from SfM/MVS [S1] or a pre-trained 3D Gaussian Splatting model [S2]).
++*   **Outputs:** Optimized vertex positions $\theta_p$ (or Gaussian attributes), diffuse albedo texture $\theta_d$, specular albedo texture $\theta_s$ (or BRDF parameters $\rho, r$), and HDR environment map $L_{env}$ [S1, S2].
+ 
+ ### Data Structures
+-**Scene Parameters $\Theta$:**
+-*   $\theta_p$: Vertex positions of the mesh [S1].
+-*   $\theta_d$: Diffuse albedo texture map [S1].
+-*   $\theta_s$: Specular albedo texture map [S1].
+-*   $L_{env}$: Environment map radiance [S2].
+-
+-**Gaussian Splatting Attributes (Stage 2 variant [S2]):**
+-*   $\mu$: Position [S2].
+-*   $\Sigma$: Covariance [S2].
+-*   $c$: Color [S2].
+-*   $\alpha$: Opacity [S2].
+-*   $n$: Normal [S2].
+-*   $\rho$: Albedo (diffuse/specular) [S2].
+-*   $r$: Roughness [S2].
++1.  **Geometry Representation:**
++    *   *Mesh-based [S1]:* Vertex position matrix $V \in \mathbb{R}^{n \times 3}$, Laplacian matrix $L \in \mathbb{R}^{n \times n}$, face normals $n_i$.
++    *   *Gaussian-based [S2]:* 3D Gaussians defined by mean $\mu$, covariance $\Sigma$, opacity $\alpha$, color $c$, and normal $n$.
++2.  **Material Representation:**
++    *   Diffuse albedo $\theta_d$ (or $\rho_d$) and specular albedo $\theta_s$ (or $\rho_s$) stored as 2D texture maps [S1].
++    *   Roughness $r$ (or $\alpha$ in GGX) [S1, S2].
++3.  **Lighting:**
++    *   Environment map $L_{env}$, typically discretized on a grid (e.g., $512 \times 128$ [S1] or $16 \times 32$ [S2]).
+ 
+ ### Numbered Steps
+ 
+ #### Stage 1: Geometry Optimization
+-This stage establishes a robust geometric proxy. Two variations exist in the literature: one using explicit mesh optimization [S1] and one using 3D Gaussian Splatting initialization [S2].
+-
+-1.  **Initialization:**
+-    *   Generate a sparse point cloud and rough mesh using SfM [S1].
+-    *   Generate dense pixel-level matching using MVS [S1].
+-    *   Reconstruct a dense mesh via Poisson surface reconstruction [S1].
+-    *   Initialize the environment map $L_{env}$ with white light, setting channels to $(0.5, 0.5, 0.5)$ [S1].
+-    *   [S2] Pretrain a standard 3D Gaussian model with joint normal training.
+-
+-2.  **Geometry Update:**
+-    *   [S1] Compute a silhouette image $I_{sil}(\theta_p)$ for each input image using an approximate differentiable renderer (e.g., Soft Rasterizer) and camera parameters.
+-    *   [S2] Render opacity $\hat{\alpha}$ and color using the Gaussian splatter.
+-
+-3.  **Loss Calculation:**
+-    *   [S1] Compute the geometry loss $L_{geo}$:
+-        $$ L_{geo} = \lambda_{sil} L_{sil} + \lambda_{lap} L_{lap} + \lambda_{normal} L_{normal} + \lambda_{edge} L_{edge} $$
+-        Where:
+-        *   Silhouette Loss: $L_{sil} = \frac{1}{|\Omega|} \sum_{\Omega} \left( 1 - \frac{\tilde{I}_{sil} \otimes I_{sil}}{\tilde{I}_{sil} \oplus I_{sil}} \right)$, with $\otimes$ and $\oplus$ being element-wise product and sum, and $\tilde{I}_{sil}$ being the ground truth silhouette.
+-        *   Laplacian Loss: $L_{lap} = \|LV\|_2$, where $V$ is the $n \times 3$ vertex coordinate matrix and $L$ is the $n \times n$ Laplacian matrix of the mesh.
+-        *   Normal Consistency Loss: $L_{normal} = \sum_{i,j} [1 - (n_i \cdot n_j)]$, summed over all triangle pairs $(i,j)$ sharing a common edge, where $n_i, n_j$ are face normals.
+-        *   Edge Length Loss: $L_{edge} = \sum_i e_i$, where $e_i$ is the length of the $i$-th edge.
+-    *   [S2] Compute the initialization loss $L_{init}$:
+-        $$ L_{init} = L_c + L_n + \lambda_{mask} L_{mask} $$
+-        Where:
+-        *   $L_c$: Color reconstruction loss from standard Gaussian splatting.
+-        *   $L_n$: Normal loss.
+-        *   $L_{mask} = \|\hat{\alpha} - M\|_1$, where $M$ is the binary foreground mask. This pulls splats closer to the surface.
+-
+-4.  **Optimization:**
+-    *   Optimize vertex positions $\theta_p$ (mesh) or Gaussian attributes $\{\mu, \Sigma, c, \alpha, n\}$ (Gaussian) to minimize the respective loss.
+-    *   [S1] Iterate for ~200 iterations per view (total ~0.5 hours per example on RTX 3090) [S1].
+-    *   [S2] Iterate for 30,000 iterations [S2].
++The goal is to refine the initial geometry to accurately match the scene silhouette and surface structure.
++
++1.  **Initialize:** Load initial geometry (mesh vertices $\theta_p$ or Gaussian parameters $\{\mu, \Sigma, c, \alpha, n\}$) and set environment map channels to $(0.5, 0.5, 0.5)$ [S1, S2].
++2.  **Render Silhouette/Opacity:**
++    *   *Mesh [S1]:* Use a soft rasterizer to compute silhouette image $I_{sil}(\theta_p)$ for each input view.
++    *   *Gaussians [S2]:* Render opacity $\hat{\alpha}$ and color using standard Gaussian splatting.
++3.  **Compute Losses:**
++    *   *Silhouette Loss [S1]:*
++        $$ L_{sil} = 1 - \frac{\sum (\tilde{I}_{sil} \otimes I_{sil})}{\sqrt{\sum \tilde{I}_{sil}^2 \sum I_{sil}^2}} $$
++        where $\tilde{I}_{sil}$ is the ground truth silhouette, $\otimes$ is element-wise product, and normalization ensures scale invariance.
++    *   *Laplacian Loss [S1]:*
++        $$ L_{lap} = \|LV\|_2 $$
++        where $V$ is the vertex coordinate matrix and $L$ is the mesh Laplacian matrix.
++    *   *Normal Consistency Loss [S1]:*
++        $$ L_{normal} = \sum_{i,j} [1 - (n_i \cdot n_j)] $$
++        summed over all triangle pairs $(i,j)$ sharing a common edge.
++    *   *Edge Length Loss [S1]:*
++        $$ L_{edge} = \sum_i e_i $$
++        where $e_i$ is the length of the $i$-th edge.
++    *   *Opacity-Mask Loss [S2]:*
++        $$ L_{mask} = \|\hat{\alpha} - M\|_1 $$
++        where $M$ is the binary foreground mask.
++    *   *Color/Normal Loss [S2]:* $L_c$ (color reconstruction) and $L_n$ (normal consistency) from standard Gaussian splatting.
++4.  **Optimize Geometry:**
++    *   *Mesh [S1]:* Minimize $L_{geo} = \lambda_{sil} L_{sil} + \lambda_{lap} L_{lap} + \lambda_{normal} L_{normal} + \lambda_{edge} L_{edge}$ by updating $\theta_p$.
++    *   *Gaussians [S2]:* Minimize $L_{init} = L_c + L_n + \lambda_{mask} L_{mask}$ by updating $\{\mu, \Sigma, c, \alpha, n\}$.
++5.  **Iterate:** Repeat for $N_1$ iterations (e.g., 30,000 for Gaussians [S2], or 200 iterations per view for meshes [S1]).
+ 
+ #### Stage 2: Reflectance and Lighting Optimization
+-This stage optimizes material properties and lighting using physically-based rendering.
+-
+-1.  **Freeze Geometry:**
+-    *   [S1] Keep vertex positions $\theta_p$ fixed.
+-    *   [S2] Freeze geometric Gaussian attributes $\{\mu, \Sigma, c, \alpha, n\}$.
+-
+-2.  **Physically-Based Rendering Setup:**
+-    *   Define the reflectance model $f_r(\omega_o, \omega_i; x)$:
++The goal is to recover physically accurate materials and lighting.
++
++1.  **Freeze Geometry:** Fix all geometric attributes ($\theta_p$ or $\{\mu, \Sigma, c, \alpha, n\}$) [S1, S2].
++2.  **Initialize Materials:** Initialize diffuse $\theta_d$ (or $\rho_d$) and specular $\theta_s$ (or $\rho_s$) textures, roughness $r$, and environment map $L_{env}$ [S1, S2].
++3.  **Physically-Based Rendering:**
++    *   Trace rays using a physically-based differentiable renderer (e.g., Mitsuba 2 [S1] or OptiX [S2]).
++    *   *Reflectance Model [S1]:*
+         $$ f_r(\omega_o, \omega_i; x) = \theta_d(x) + \theta_s(\omega_o, \omega_i; x) $$
+-        Where:
+-        *   $\theta_d(x) = \rho_d(x)/\pi$ is the diffuse reflectance.
+-        *   $\theta_s(\omega_o, \omega_i; x) = \rho_s(x) \frac{D(h, \alpha)G(\omega_o, \omega_i, n(x))}{(n(x) \cdot \omega_i)(n(x) \cdot \omega_o)\pi}$ is the specular reflectance.
+-        *   $D(h, \alpha)$ is the GGX microfacet distribution [Walter et al., 2007].
+-        *   The Fresnel effect is ignored [S1].
+-    *   Render the scene using a physically-based differentiable renderer (e.g., Mitsuba 2 or OptiX-based ray tracer) [S1, S2].
+-    *   [S1] Set ray tracing bounce depth to 3, image downsampling factor to 4, and samples per pixel (spp) to 4 [S1].
+-    *   [S2] Use a compact environment map (e.g., $16 \times 32$ or $512 \times 128$) and normal-based hemisphere sampling [S1, S2].
+-
+-3.  **Loss Calculation:**
+-    *   [S1] Compute the reflectance loss $L_{ref}$:
++        $$ \theta_d(x) = \frac{\rho_d(x)}{\pi} $$
++        $$ \theta_s(\omega_o, \omega_i; x) = \rho_s(x) \frac{D(h, \alpha) G(\omega_o, \omega_i, n(x))}{(n(x) \cdot \omega_i)(n(x) \cdot \omega_o) \pi} $$
++        where $D$ is the GGX microfacet distribution [Walter et al., 2007], $G$ is the shadowing-masking function, and Fresnel effects are ignored [S1].
++    *   *Rendering Equation [S1]:*
++        $$ L_o(\omega_o; x) = \int_{\Omega} L_i(\omega_i) f_r(\omega_o, \omega_i; x) (\omega_i \cdot n) d\omega_i $$
++4.  **Compute Losses:**
++    *   *Photometric Loss [S1, S2]:*
++        $$ L_{rgb} = \|\tilde{I}_{rgb} - I_{rgb}(\theta_r)\|_1 $$
++        where $\tilde{I}_{rgb}$ is the ground truth image and $I_{rgb}(\theta_r)$ is the rendered image.
++    *   *Albedo Regularization [S1]:*
++        $$ R(\theta_r) = \sum_p \left( \theta_s[p] - \frac{\sum_q \theta_s[q] k_{p,q}}{\sum_q k_{p,q}} \right)^2 + \sum_p \frac{(\theta_d[p] - \theta_d[q])^2}{2\sigma_2^2} $$
++        where $k_{p,q} = \exp\left(-\frac{\|p-q\|_2^2}{2\sigma_1^2}\right)$ is a Gaussian kernel between pixels/vertices $p$ and $q$ [S1].
++    *   *Total Loss [S1]:*
+         $$ L_{ref} = \lambda_{rgb} L_{rgb} + \lambda_{reg} R(\theta_r) $$
+-        Where:
+-        *   $L_{rgb} = \|\tilde{I}_{rgb} - I_{rgb}(\theta_r)\|_1$ is the L1 photometric loss between rendered color $I_{rgb}$ and ground truth $\tilde{I}_{rgb}$.
+-        *   $R(\theta_r)$ is a regularizer for diffuse $\theta_d$ and specular $\theta_s$ albedos:
+-            $$ R(\theta_r) = \sum_p \left( \theta_s[p] - \frac{\sum_q \theta_s[q]k_{p,q}}{\sum_q k_{p,q}} \right)^2 + \sum_p \frac{(\theta_d[p] - \theta_d[q])^2}{2\sigma_2^2} $$
+-            Where $k_{p,q} = \exp\left(-\frac{\|p-q\|_2^2}{2\sigma_1^2}\right)$ is a kernel between specific mesh vertices/pixels $p, q$.
+-    *   [S2] Compute the L1 photometric loss $L_{1pbr}$ with unit weight.
+-
+-4.  **Optimization:**
+-    *   Optimize BRDF parameters ($\rho_d, \rho_s$ or $\theta_d, \theta_s$) and the environment map $L_{env}$ jointly [S1, S2].
+-    *   [S1] Iterate for 400 iterations per view (total 1.5–2.5 hours per example on RTX 3090) [S1].
+-    *   [S2] Iterate for 400 iterations [S2].
+-    *   **Pitfall:** Longer second-stage training degrades relighting quality because the albedo begins to absorb illumination information [S2].
++    *   *Total Loss [S2]:*
++        $$ L_{1pbr} = \|\tilde{I}_{rgb} - I_{rgb}\|_1 $$
++5.  **Optimize Materials:**
++    *   Update $\theta_d, \theta_s$ (or $\rho, r$) and $L_{env}$ to minimize $L_{ref}$ or $L_{1pbr}$.
++6.  **Iterate:** Repeat for $N_2$ iterations (e.g., 400 for both [S1, S2]).
+ 
+ ### Pseudocode
+ 
+ ```python
+-def two_stage_inverse_rendering(input_images, camera_params, initial_mesh):
++def two_stage_inverse_rendering(images, cameras, initial_geometry):
+     """
+-    Implements the Two-Stage Inverse Rendering Optimization.
+-    Supports both Mesh-based [S1] and Gaussian-based [S2] geometry representations.
++    Implements the two-stage optimization for inverse rendering.
++    
++    Args:
++        images: List of input RGB images.
++        cameras: List of camera parameters (extrinsics, intrinsics).
++        initial_geometry: Initial mesh vertices or Gaussian parameters.
++        
++    Returns:
++        optimized_geometry, albedo_textures, environment_map
+     """
+     
+-    # --- Initialization ---
+-    # Initialize environment map with white light
+-    L_env = np.ones((512, 128, 3)) * 0.5 
+-    
+-    # Scene parameters
+-    theta_p = initial_mesh.vertices  # Vertex positions
+-    theta_d = initial_mesh.diffuse_albedo  # Diffuse albedo texture
+-    theta_s = initial_mesh.specular_albedo  # Specular albedo texture
+-    
+-    # Gaussian attributes (if using Stage 2 variant [S2])
+-    gaussians = None 
+-    if use_gaussian_initialization:
+-        gaussians = init_gaussian_splats(input_images, camera_params)
+-        # Jointly train normals in Stage 1
+-        gaussians.normals = compute_normals_from_mesh(initial_mesh)
+-
+     # --- Stage 1: Geometry Optimization ---
+-    print("Starting Stage 1: Geometry Optimization")
+-    
+-    if use_gaussian_initialization:
+-        # [S2] Pretrain Gaussian model
+-        for iteration in range(30000):
+-            # Render current state
+-            rendered_color, rendered_opacity = render_gaussians(gaussians, camera_params)
+-            
+-            # Compute Losses
+-            L_c = l1_loss(rendered_color, input_images)
+-            L_n = normal_loss(gaussians.normals, input_images)
+-            L_mask = l1_loss(rendered_opacity, foreground_masks)
+-            
+-            L_init = L_c + L_n + lambda_mask * L_mask
+-            
+-            # Update Gaussians
+-            update_gaussians(gaussians, L_init)
+-            
+-        # Freeze geometric attributes for Stage 2
+-        frozen_gaussians = copy(gaussians)
+-        frozen_gaussians.requires_grad = False
+-        
+-    else:
+-        # [S1] Optimize Mesh Vertices
+-        for iteration in range(200 * num_views):
+-            # Compute silhouette using approximate differentiable renderer (Soft Rasterizer)
+-            I_sil = compute_silhouette(theta_p, camera_params)
+-            
+-            # Compute Losses
++    
++    # Initialize parameters based on geometry type
++    if is_mesh(initial_geometry):
++        theta_p = initial_geometry.vertices
++        # Initialize textures if present, else random
++        theta_d = random_texture()
++        theta_s = random_texture()
++        L_env = init_environment_map(value=0.5) # White light
++        
++        for stage1_iter in range(30000): # Or 200 per view
++            # Render silhouette using soft rasterizer
++            I_sil = soft_rasterize(theta_p, cameras)
++            
++            # Compute losses
+             L_sil = silhouette_loss(I_sil, ground_truth_silhouettes)
+-            L_lap = laplacian_smoothness(theta_p, initial_mesh.edges)
+-            L_normal = normal_consistency(theta_p, initial_mesh.faces)
+-            L_edge = edge_length_loss(theta_p, initial_mesh.edges)
++            L_lap = laplacian_smoothness(theta_p)
++            L_normal = normal_consistency(theta_p)
++            L_edge = edge_length_loss(theta_p)
+             
+             L_geo = lambda_sil * L_sil + lambda_lap * L_lap + \
+                     lambda_normal * L_normal + lambda_edge * L_edge
+             
+-            # Update Vertex Positions
+-            theta_p = optimize_step(theta_p, L_geo)
++            # Backpropagate to update theta_p
++            update_parameters(theta_p, L_geo)
++            
++    elif is_gaussian(initial_geometry):
++        mu, Sigma, c, alpha, n = initial_geometry
++        theta_d = random_texture()
++        theta_s = random_texture()
++        L_env = init_environment_map(value=0.5)
++        
++        for stage1_iter in range(30000):
++            # Render Gaussian splatting
++            alpha_hat, color_hat = gaussian_splat_render(mu, Sigma, c, alpha, n, cameras)
++            
++            # Compute losses
++            L_c = color_loss(color_hat, ground_truth_images)
++            L_n = normal_loss(n, ground_truth_normals)
++            L_mask = opacity_mask_loss(alpha_hat, foreground_masks)
++            
++            L_init = L_c + L_n + lambda_mask * L_mask
++            
++            # Backpropagate to update geometry params
++            update_parameters([mu, Sigma, c, alpha, n], L_init)
+ 
+     # --- Stage 2: Reflectance and Lighting Optimization ---
+-    print("Starting Stage 2: Reflectance Optimization")
+-    
+-    # Define Physically-Based Render Function
+-    def render_pbr(theta_d, theta_s, L_env, geometry):
+-        # Use Mitsuba 2 or OptiX ray tracer
+-        # Reflectance model: fr = theta_d + theta_s
+-        # theta_d = rho_d / pi
+-        # theta_s = rho_s * GGX * G / (pi * cos_i * cos_o)
+-        # Ignore Fresnel effect
+-        # Ray bounce depth = 3
+-        # Downsampling = 4, SPP = 4
+-        return physically_based_ray_trace(geometry, theta_d, theta_s, L_env, camera_params)
+-
+-    for iteration in range(400):
+-        # Render using physically-based differentiable renderer
+-        if use_gaussian_initialization:
+-            # Use frozen geometry (Gaussians)
+-            rendered_color = render_pbr(theta_d, theta_s, L_env, frozen_gaussians)
+-        else:
+-            # Use frozen geometry (Mesh)
+-            rendered_color = render_pbr(theta_d, theta_s, L_env, theta_p)
+-            
+-        # Compute Photometric Loss
+-        L_rgb = l1_loss(rendered_color, input_images)
+-        
+-        # Compute Regularization (if using Mesh variant [S1])
+-        if not use_gaussian_initialization:
+-            # Kernel calculation for regularization
+-            # k_pq = exp(-||p-q||^2 / (2*sigma1^2))
+-            R_theta_r = compute_albedo_regularization(theta_d, theta_s)
+-            L_ref = lambda_rgb * L_rgb + lambda_reg * R_theta_r
+-        else:
+-            # [S2] Unit weight L1 loss
+-            L_ref = L_rgb
+-            
+-        # Optimize Reflectance and Environment Map
+-        # Freeze geometry, update theta_d, theta_s, L_env
+-        if use_gaussian_initialization:
++    
++    # Freeze geometry
++    if is_mesh(initial_geometry):
++        frozen_theta_p = theta_p
++        # Optimize theta_d, theta_s, L_env
++        for stage2_iter in range(400):
++            # Physically-based rendering
++            I_rgb = pbr_render(frozen_theta_p, theta_d, theta_s, L_env, cameras)
++            
++            # Compute losses
++            L_rgb = l1_loss(I_rgb, ground_truth_images)
++            R_theta = albedo_regularization(theta_s, theta_d)
++            L_ref = lambda_rgb * L_rgb + lambda_reg * R_theta
++            
++            # Backpropagate to update materials and lighting
+             update_parameters([theta_d, theta_s, L_env], L_ref)
+-        else:
+-            update_parameters([theta_d, theta_s, L_env], L_ref)
+-            
+-    return theta_p, theta_d, theta_s, L_env
+-
+-def compute_albedo_regularization(theta_d, theta_s):
+-    """
+-    Computes R(theta_r) as defined in [S1].
+-    R(theta_r) = sum_p (theta_s[p] - sum_q(theta_s[q]*k_pq)/sum_q(k_pq))^2 
+-               + sum_p (theta_d[p] - theta_d[q])^2 / (2*sigma2^2)
+-    """
+-    # Implementation details for kernel k_pq and summations
+-    # p, q are specific mesh vertices/pixels
+-    pass
++            
++    elif is_gaussian(initial_geometry):
++        frozen_mu, frozen_Sigma, frozen_c, frozen_alpha, frozen_n = \
++            mu, Sigma, c, alpha, n
++        # Optimize rho (albedo), r (roughness), L_env
++        rho = random_texture()
++        r = random_texture()
++        
++        for stage2_iter in range(400):
++            # Ray-traced rendering with PBR
++            I_rgb = ray_trace_render(frozen_mu, frozen_Sigma, frozen_c, 
++                                     frozen_alpha, frozen_n, rho, r, L_env, cameras)
++            
++            # Compute L1 photometric loss
++            L_1pbr = l1_loss(I_rgb, ground_truth_images)
++            
++            # Backpropagate to update materials and lighting
++            update_parameters([rho, r, L_env], L_1pbr)
++
++    return optimized_geometry, albedo_textures, L_env
+ ```
+ 
++### Parameters and Edge Cases
++*   **Iterations:** Stage 1 typically requires significantly more iterations (e.g., 30,000 [S2]) than Stage 2 (e.g., 400 [S1, S2]).
++*   **Ray Tracing Depth:** Limited to 3 bounces to manage memory and compute [S1].
++*   **Sampling:** 4 samples per pixel (spp) and image downsampling by factor 4 are used during optimization to reduce cost [S1].
++*   **Environment Map Size:** $512 \times 128$ [S1] or $16 \times 32$ [S2].
++*   **Pitfall:** Extending Stage 2 training beyond the recommended iterations degrades relighting quality because the albedo begins to absorb illumination information [S2].
++*   **Fresnel Effect:** Often ignored in the reflectance model to simplify the optimization landscape [S1].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Stage 1 (Geometry) takes approximately 0.5 hours per example on an NVIDIA RTX 3090 [S1]. Stage 2 (Reflectance) takes 1.5–2.5 hours per example on the same hardware [S1]. In the Gaussian variant [S2], Stage 1 takes ~15 minutes and Stage 2 ~10 minutes on an RTX A6000 [S2].
+-*   **Memory Complexity:** The physically-based rendering module requires significant memory. To mitigate this, the method uses a maximum ray tracing bounce depth of 3, an image downsampling factor of 4, and 4 samples per pixel (spp) [S1].
+-*   **Strengths:**
+-    *   Decoupling geometry and reflectance allows for more stable optimization than joint optimization [S1].
+-    *   Using triangle meshes and PBR materials allows direct deployment on graphics engines [S1].
+-    *   Better handling of specular highlights compared to methods using SDFs or Spherical Gaussians (e.g., PhySG, NeRF) [S1].
+-*   **Limitations:**
+-    *   Longer training in Stage 2 degrades relighting quality as the albedo absorbs illumination information [S2].
+-    *   Relies on initial SfM/MVS reconstruction, which may have defects in boundary regions [S1].
+-    *   The Fresnel effect is ignored in the reflectance model, which may limit accuracy in certain scenes [S1].
++*   **Time Complexity:** Stage 1 is fast for meshes (~0.5 hours [S1]) or moderate for Gaussians (~15 minutes [S2]). Stage 2 is slower due to ray tracing (1.5–2.5 hours [S1] or ~10 minutes [S2] on high-end GPUs).
++*   **Memory Complexity:** Depends on the geometry representation. Mesh-based methods have lower memory overhead than volumetric NeRFs. Gaussian splatting requires storing covariance and normal attributes per Gaussian [S2].
++*   **Strengths:** Produces explicit, editable geometry (meshes or splats) compatible with standard graphics pipelines. Better handling of specular highlights compared to SDF-based methods like PhySG [S1].
++*   **Limitations:** Requires a good initial geometry estimate. The decoupling assumes geometry and material are separable, which may fail in highly ambiguous scenes.
++*   **When to use:** When explicit geometry and physically accurate materials are required for downstream applications (e.g., relighting, rendering in game engines).
++*   **When not to use:** When only novel view synthesis is needed and explicit geometry is not required (use NeRF or standard 3DGS).
+ 
+ ## Background
+-The method was introduced in "Efficient Multi-View Inverse Rendering Using a Hybrid Differentiable Rendering Method" [S1] at IJCAI-2023. It addresses the challenges of inverse rendering in complex, unstructured scenes without depth information. The approach builds on earlier work in differentiable rendering [Liu et al., 2019] and physically-based rendering [Kajiya, 1986]. It contrasts with NeRF [Mildenhall et al., 2020], IDR [Yariv et al., 2020], and PhySG [Zhang et al., 2021b] by using explicit geometry (meshes) and PBR materials rather than implicit representations (SDFs/occupancy) and simplified lighting models (Spherical Gaussians).
++The method originates from the need to combine the robustness of approximate differentiable rendering for geometry with the physical accuracy of ray tracing for materials. It was introduced in [S1] (IJCAI 2023) as a hybrid approach using triangle meshes and Cook-Torrance PBR, differing from NeRF/IDR/PhySG which use SDFs and Spherical Gaussians. A variant using 3D Gaussian Splatting as the geometry proxy was later proposed in [S2] (2026), leveraging the speed of splatting for Stage 1 and ray tracing for occlusion-aware relighting in Stage 2.
+ 
+ ## Sources

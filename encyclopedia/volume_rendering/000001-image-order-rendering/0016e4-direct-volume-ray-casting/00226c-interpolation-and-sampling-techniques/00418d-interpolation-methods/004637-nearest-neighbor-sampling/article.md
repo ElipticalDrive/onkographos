@@ -1,0 +1,77 @@
+# Nearest Neighbor Sampling
+
+Also called: Nearest Neighbour Interpolation, Nearest Neighbour Sampling, Vizinho mais próximo, Zero-order hold, Zero-order interpolation
+
+## Overview
+Nearest Neighbor Sampling is a volume rendering interpolation technique that assigns the value of the single grid sample closest to the ray's current position [S1, unofficial][S2, unofficial][S3]. It solves the problem of estimating continuous volume data from discrete samples by selecting the nearest neighbor rather than blending multiple values [S3][S4, unofficial]. Unlike trilinear interpolation, which blends eight neighboring points to provide $C^0$ smoothness, nearest neighbor produces piecewise constant, discontinuous results [S3]. It is chosen when execution speed is prioritized over visual quality, as it yields the poorest visual results due to jagged edges and staircasing artifacts [S5, book].
+
+## How it works
+**Inputs and Outputs**
+*   **Input**: A query position $\mathbf{p} = (x, y, z)$ in the volume's local coordinate system, and a discrete volume dataset $V$ defined on a regular grid.
+*   **Output**: The scalar value $f(x, y, z)$ at the query position.
+
+**Data Structures**
+*   **Volume Data ($V$)**: A 3D array of values indexed by integer coordinates $(i, j, k)$. The grid spacing is assumed to be uniform and normalized such that sample centers are at integer coordinates.
+
+**Steps**
+1.  **Coordinate Rounding**: Round the floating-point coordinates of the query position $\mathbf{p}$ to the nearest integers. This identifies the indices of the closest voxel.
+2.  **Lookup**: Retrieve the value from the volume dataset $V$ at the rounded integer indices.
+
+**Formula**
+The interpolated value $f(x, y, z)$ is defined as [S5, book]:
+$$
+f(x, y, z) = V(\text{round}(x), \text{round}(y), \text{round}(z))
+$$
+Where:
+*   $x, y, z$ are the continuous coordinates of the query point.
+*   $\text{round}(\cdot)$ is the standard rounding function (rounding to the nearest integer, with ties typically rounded to the nearest even integer or away from zero depending on implementation, though the source simply states "round").
+*   $V(i, j, k)$ is the value stored at grid index $(i, j, k)$.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def nearest_neighbor_sample(volume: Volume3D, x: float, y: float, z: float) -> float:
+    """
+    Samples the volume at (x, y, z) using nearest neighbor interpolation.
+    
+    Args:
+        volume: The 3D volume data structure supporting integer indexing.
+        x, y, z: Continuous coordinates in the volume's local space.
+        
+    Returns:
+        The scalar value at the nearest grid point.
+    """
+    # Round coordinates to nearest integer indices
+    ix = round(x)
+    iy = round(y)
+    iz = round(z)
+    
+    # Retrieve value from the volume grid
+    # Note: Boundary checks are required if (ix, iy, iz) falls outside [0, W-1] x [0, H-1] x [0, D-1]
+    # [G] Implementation detail: Clamp indices to valid range or handle edge cases as per volume bounds.
+    return volume[ix, iy, iz]
+```
+
+**Edge Cases and Pitfalls**
+*   **Staircasing**: The method produces "unpleasant staircasing" and jagged edges because the result is piecewise constant [S5, book].
+*   **Magnification Artifacts**: When magnifying the volume, a "blobby structure" appears due to the discrete selection of voxels [S4, unofficial].
+*   **Error**: It exhibits the highest interpolation error (measured by mean squared error) compared to higher-order methods like trilinear interpolation [S3].
+*   **Discontinuity**: The function lacks $C^0$ continuity; the derivative is undefined at the boundaries between voxels [S3].
+
+## Operating characteristics
+*   **Time Complexity**: $O(1)$ per sample. It requires only rounding operations and a single memory lookup.
+*   **Memory Complexity**: $O(1)$ auxiliary memory. No additional buffers or neighbor lookups are required.
+*   **Performance**: It is significantly faster than trilinear interpolation, which requires blending eight values and multiple arithmetic operations [S1, unofficial][S3].
+*   **Visual Quality**: Poor. It is unsuitable for high-quality offline rendering due to aliasing and lack of smoothness [S5, book].
+*   **Usage**: Suitable for real-time applications where visual artifacts from abrupt changes are acceptable due to its speed [S3]. It is often used as a fallback or for initial exploration [S2, unofficial].
+
+## Background
+Nearest neighbor interpolation is the simplest approach to 3D data estimation [S3]. It is also referred to as zero-order hold or zero-order interpolation [S5, book]. In the context of volume rendering, it acts as a box filter in the frequency domain [S5, book]. While it lacks the continuous transitions provided by trilinear interpolation, its simplicity makes it a foundational method in digital signal processing and graphics [S3].
+
+## Sources
+[S1] A volume exploration approach based on clustering and dimensional reduction to support the definition of multidimensional transfer functions, http://hdl.handle.net/11449/153618, fetched 2026-10-26 (unofficial)
+[S2] CSE-333-Computer-Graphics-2020/VolumeRayCasting, https://github.com/CSE-333-Computer-Graphics-2020/VolumeRayCasting, fetched 2026-10-26 (unofficial)
+[S3] trilinear interpolation, https://grokipedia.com/page/Trilinear_interpolation, fetched 2026-10-26
+[S4] Volume Visualization and Volume Rendering Techniques, https://www.cs.unh.edu/~cs880/visualization/Meissner-VolRenderingEGTutorial-rdb.pdf, fetched 2026-10-27 (unofficial)
+[S5] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

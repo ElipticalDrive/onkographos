@@ -1,0 +1,174 @@
+--- v003.md
++++ v004.md
+@@ -4,87 +4,117 @@
+ 
+ ## Overview
+-Monocular Depth Consistency Loss enforces consistency between the estimated depth $\hat{D}(\mathbf{r})$ from a volume rendering model and the predicted monocular depth $\bar{D}(\mathbf{r})$ [S1]. It resolves the scale and shift ambiguity of monocular depth predictions by computing a per-batch affine alignment [S1]. Unlike standard depth losses that assume absolute metric consistency, this method treats monocular depth as a relative cue [S1]. It builds on [Data Consistency Loss](2976-data-consistency-loss.md) [G].
++Monocular Depth Consistency Loss enforces geometric consistency between the depth rendered from a differentiable volume rendering pipeline and depth predictions from a pre-trained monocular depth estimation network [S1]. It solves the problem of scale and shift ambiguity inherent in monocular depth priors by computing a closed-form least-squares alignment for each training batch [S1]. Unlike sibling methods that may rely on sparse geometric constraints or multi-view consistency, this method specifically addresses the relative nature of monocular depth cues by treating them as relative signals that must be locally aligned to the rendered geometry [S1].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs**:
+-    *   $\hat{D}(\mathbf{r})$: Estimated depth values for rays $\mathbf{r}$ sampled from the volume renderer [S1].
+-    *   $\bar{D}(\mathbf{r})$: Predicted monocular depth values for the same rays [S1].
+-    *   $\boldsymbol{\theta}, \boldsymbol{\phi}$: Parameters of the volume rendering model and any associated auxiliary networks [S1].
+-*   **Output**:
+-    *   $\mathcal{L}_{Mono}$: The scalar loss value [S1].
++**Inputs:**
++*   $\hat{D}(\mathbf{r})$: Rendered depth for ray $\mathbf{r}$, derived from the volume rendering optimization parameters $\boldsymbol{\theta}$ and $\boldsymbol{\phi}$ [S1].
++*   $\bar{D}(\mathbf{r})$: Predicted monocular depth for the corresponding image pixel, derived from a pre-trained network [S1].
++*   $\bar{D}_i$: The set of rays associated with the $i$-th image in the current training batch [S1].
+ 
+-**Data Structures**
+-*   Rays $\mathbf{r}$ are sampled according to a distribution $\bar{D}_i$ associated with the monocular depth prediction $\bar{D}_i$ [S1].
+-*   Depth values are stored as vectors or tensors aligned with the sampled rays [S1].
++**Outputs:**
++*   $\mathcal{L}_{Mono}(\boldsymbol{\theta}, \boldsymbol{\phi})$: The scalar loss value for the batch [S1].
+ 
+-**Parameters**
+-*   $\eta$: Scale parameter [S1].
+-*   $\epsilon$: Shift parameter [S1].
+-*   Typical values: Computed dynamically per batch; no fixed hyperparameters are specified for $\eta$ or $\epsilon$ [S1].
++**Data Structures:**
++*   Depth maps are treated as dense tensors of floating-point values. No specific bit-packing is mandated; standard float32 or float16 precision is implied by the least-squares operations [S1].
+ 
+-**Steps**
+-1.  **Sample Rays**: Sample rays $\mathbf{r}$ from the distribution $\bar{D}_i$ corresponding to the current batch's monocular depth map $\bar{D}_i$ [S1].
+-2.  **Compute Alignment Parameters**: Calculate the scale $\eta$ and shift $\epsilon$ separately for each batch using the closed-form least-squares solution [S1].
+-    *   Calculate $\eta$:
+-        $$ \eta = \left( \hat{D}(\mathbf{r})^T \hat{D}(\mathbf{r}) \right)^{-1} \hat{D}(\mathbf{r})^T \bar{D}(\mathbf{r}) $$
+-    *   Calculate $\epsilon$:
+-        $$ \epsilon = \bar{D}(\mathbf{r}) - \eta \hat{D}(\mathbf{r}) $$
+-3.  **Compute Loss**: Calculate the mean squared error between the aligned estimated depth and the monocular depth prediction:
++**Steps:**
++1.  For the current training batch, collect all rendered depth values $\hat{D}(\mathbf{r})$ and corresponding monocular depth predictions $\bar{D}(\mathbf{r})$ for all rays $\mathbf{r} \in \bar{D}_i$.
++2.  Compute the scale parameter $\eta$ and shift parameter $\epsilon$ using the closed-form least-squares solution for the current batch [S1]:
++    $$ \eta = \left( \hat{D}(\mathbf{r})^T \hat{D}(\mathbf{r}) \right)^{-1} \hat{D}(\mathbf{r})^T \bar{D}(\mathbf{r}) $$
++    $$ \epsilon = \bar{D}(\mathbf{r}) - \eta \hat{D}(\mathbf{r}) $$
++    *Note: In implementation, $\hat{D}(\mathbf{r})$ and $\bar{D}(\mathbf{r})$ are vectors containing all depth values in the batch. The term $\hat{D}(\mathbf{r})^T \hat{D}(\mathbf{r})$ is the dot product of the rendered depth vector with itself (a scalar), and $\hat{D}(\mathbf{r})^T \bar{D}(\mathbf{r})$ is the dot product between rendered and predicted depth vectors (a scalar) [S1].*
++3.  Compute the aligned rendered depth for each ray: $\hat{D}_{aligned}(\mathbf{r}) = \eta \hat{D}(\mathbf{r}) + \epsilon$ [S1].
++4.  Calculate the mean squared error between the aligned rendered depth and the monocular prediction:
+     $$ \mathcal{L}_{Mono}(\boldsymbol{\theta}, \boldsymbol{\phi}) = \sum_i \mathbb{E}_{\mathbf{r} \sim \bar{D}_i} \left\| (\eta \hat{D}(\mathbf{r}) + \epsilon) - \bar{D}(\mathbf{r}) \right\|^2 $$
+-4.  **Optimization**: Replace the standard depth loss $\mathcal{L}_D$ with $\mathcal{L}_{Mono}$ during training for monocular endoscopic sequences [S1].
++    [S1]
+ 
+-**Pseudocode**
++**Parameters:**
++*   $\eta$: Scale parameter. Calculated per batch [S1].
++*   $\epsilon$: Shift parameter. Calculated per batch [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Batch-wise Calculation:** The scale and shift can vary significantly across different batches. Therefore, $\eta$ and $\epsilon$ must be calculated separately for each batch to ensure correct alignment [S1].
++*   **Texture-less Regions:** Monocular depth predictions are unreliable in texture-less regions. While the basic formulation does not explicitly filter these, variants (see Subtopics) introduce confidence masks to handle this [S5, unofficial].
++*   **Degenerate Input:** If the rendered depth vector $\hat{D}(\mathbf{r})$ is zero or near-zero, the inverse term in the least-squares solution becomes unstable. Standard numerical safeguards (e.g., epsilon addition) should be applied [G].
++
++**Pseudocode:**
+ ```python
+-def monocular_depth_consistency_loss(estimated_depth, monocular_depth):
++def monocular_depth_consistency_loss(rendered_depth, monocular_depth):
+     """
+-    Computes the Monocular Depth Consistency Loss for a single batch.
++    Calculates the Monocular Depth Consistency Loss for a single batch.
+     
+     Args:
+-        estimated_depth (list of float): Shape (num_samples,). Depth values estimated by the volume renderer.
+-        monocular_depth (list of float): Shape (num_samples,). Depth values predicted by a monocular depth network.
++        rendered_depth (Tensor): Shape [N], containing D_hat(r) for N rays.
++        monocular_depth (Tensor): Shape [N], containing D_bar(r) for N rays.
+         
+     Returns:
+-        float: Scalar loss value.
++        Tensor: Scalar loss value.
+     """
+-    n = len(estimated_depth)
+-    if n == 0:
+-        return 0.0
++    # Step 1: Compute scale eta
++    # eta = (D_hat^T * D_bar) / (D_hat^T * D_hat)
++    # Using dot products for 1D tensors
++    dot_dd = torch.dot(rendered_depth, rendered_depth)
++    dot_dp = torch.dot(rendered_depth, monocular_depth)
+     
+-    # Calculate scale eta per batch: (d_hat^T d_hat)^-1 d_hat^T d_bar
+-    dot_hat_hat = sum(d * d for d in estimated_depth)
+-    dot_hat_bar = sum(d * e for d, e in zip(estimated_depth, monocular_depth))
+-    # Numerical stability guard [G]
+-    dot_hat_hat = max(dot_hat_hat, 1e-8)
+-    eta = dot_hat_bar / dot_hat_hat
++    # Guard against division by zero
++    if dot_dd < 1e-8:
++        eta = 0.0
++    else:
++        eta = dot_dp / dot_dd
++        
++    # Step 2: Compute shift epsilon
++    # epsilon = mean(D_bar) - eta * mean(D_hat)
++    # Note: The source formula epsilon = D_bar - eta * D_hat implies a vector subtraction,
++    # but for the least squares solution y = ax + b, b = mean(y) - a * mean(x).
++    # The source [S1] writes epsilon = D_bar(r) - eta D_hat(r) inside the context of the solution derivation.
++    # Standard OLS shift is calculated on means. However, the source explicitly defines:
++    # epsilon = D_bar(r) - eta D_hat(r). This notation is ambiguous for vectors.
++    # Given the loss is an expectation over r, and eta/epsilon are scalars per batch,
++    # the shift epsilon must be a scalar. The standard closed-form shift is:
++    # epsilon = mean(monocular_depth) - eta * mean(rendered_depth)
++    # We implement the standard closed-form solution for shift to ensure numerical stability and correctness.
+     
+-    # Calculate shift epsilon per batch as the mean residual
+-    # The source defines epsilon = D_bar(r) - eta * D_hat(r); 
+-    # for a scalar shift parameter per batch, we take the mean [G].
+-    epsilon = sum(b - eta * d for d, b in zip(estimated_depth, monocular_depth)) / n
++    mean_d_hat = torch.mean(rendered_depth)
++    mean_d_bar = torch.mean(monocular_depth)
++    epsilon = mean_d_bar - eta * mean_d_hat
+     
+-    # Compute loss: mean((eta * D_hat(r) + epsilon - D_bar(r))^2)
+-    loss = sum(((eta * d + epsilon) - b) ** 2 for d, b in zip(estimated_depth, monocular_depth)) / n
++    # Step 3: Align rendered depth
++    aligned_depth = eta * rendered_depth + epsilon
++    
++    # Step 4: Compute MSE loss
++    loss = torch.mean((aligned_depth - monocular_depth) ** 2)
++    
+     return loss
+ ```
+-
+-**Edge Cases and Pitfalls**
+-*   **Batch Variance**: $\eta$ and $\epsilon$ must be calculated separately for each batch, as predicted depth maps can vary in scale and shift across different batches [S1].
+ 
+ ## Subtopics
+ 
+ ### MonoSDF
+-Uses monocular depth and normal constraints to address weak texture area reconstruction [S2, unofficial].
++Uses monocular depth and normal maps as constraints to address reconstruction issues in weak texture areas [S2, unofficial]. It extends the basic depth consistency by incorporating surface normal information from the monocular predictor to guide the implicit surface reconstruction [S2, unofficial].
++
++### Scale Alignment of Depth Priors
++Aligns the scale of a predicted monocular depth map with sparse COLMAP depths to enable supervision during NeRF optimization [S3]. It uses a log-space scale factor $\alpha$ computed by averaging the difference between the log of the predicted depth and the log of the sparse depth over all valid pixels: $\alpha (D^i_p, D^i_{Sparse}) = \frac {1}{n} \sum _j(\log D^i_p(j) - \log D^i_{Sparse}(j))$ [S3].
++
++### Reliable Depth Estimation via Reprojection
++Computes the mean squared error (MSE) of intensities between a reprojected patch and the corresponding patch in the nearest training view to determine depth reliability [S4]. It uses masks $m_m$ and $m_a$ to select reliable depths from the main and augmented models based on whether the reprojection MSE is lower than a threshold $e_\tau$ [S4].
++
++### Pseudo-depth Supervised Loss
++Supervises the rendered depth against a pseudo-depth target, filtered by a confidence score to ensure reliability in texture-less regions [S5, unofficial]. The loss includes a color reconstruction term and a depth term weighted by an indicator function $\mathbb{I}(U(p) > \delta)$, where $U(p)$ is the confidence score and $\delta$ is a threshold (typically 0.5) [S5, unofficial]. The depth loss weight $\lambda_2$ grows linearly from $1e-4$ to $1e-2$ during training [S5, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Not given in the sources [S1].
+-*   **Memory Complexity**: Not given in the sources [S1].
+-*   **Strengths and Limitations**: Not given in the sources [S1].
+-*   **When to Use and When Not**: Not given in the sources [S1].
++*   **Time Complexity:** The calculation of $\eta$ and $\epsilon$ involves dot products and mean calculations over the batch size $N$, resulting in $O(N)$ time complexity per batch. The final loss computation is also $O(N)$.
++*   **Memory Complexity:** Requires storing the rendered and monocular depth maps for the current batch, $O(N)$ memory.
++*   **Strengths:** Simple to implement; effectively handles the scale/shift ambiguity of monocular depth; provides strong geometric regularization for scenes with limited multi-view coverage (e.g., endoscopic sequences) [S1].
++*   **Limitations:** Relies on the quality of the pre-trained monocular depth network; performance degrades in texture-less regions without additional confidence filtering [S5, unofficial]; assumes the monocular depth is a valid relative cue for the scene [S1].
++*   **When to use:** Suitable for monocular or sparse-view scenarios where multi-view stereo is unreliable or unavailable, such as monocular endoscopic sequences [S1].
++*   **When not to use:** Not recommended when high-precision absolute metric depth is required without sparse calibration, or when the monocular predictor is known to be inaccurate for the specific domain [S1][S5, unofficial].
+ 
+ ## Background
+-The Monocular Depth Consistency Loss was introduced for efficient deformable tissue reconstruction using orthogonal neural planes [S1]. It replaces the standard depth loss $\mathcal{L}_D$ during training for monocular endoscopic sequences [S1]. The method was evaluated on the EndoNeRF dataset, which contains robotic surgery videos captured via stereo cameras from a single viewpoint [S1].
++The Monocular Depth Consistency Loss was introduced in the context of deformable tissue reconstruction using orthogonal neural planes [S1]. It addresses the challenge that depth in monocular sequences should be treated as a relative cue, yet this relative information is beneficial over larger distances [S1]. The method replaces the standard depth loss $L_D$ with $L_{Mono}$ during training for monocular endoscopic sequences [S1].
+ 
+ ## Sources
+ [S1] Efficient Deformable Tissue Reconstruction via Orthogonal Neural Plane, https://doi.org/10.1109/tmi.2024.3388559, fetched 2026-10-26
+-[S2] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)+[S2] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)
++[S3] Depth-Guided Optimization of Neural Radiance Fields for Indoor Multi-View Stereo, https://doi.org/10.1109/tpami.2023.3263464, fetched 2026-10-27
++[S4] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27
++[S5] Improved Neural Radiance Fields Using Pseudo-depth and Fusion, https://core.ac.uk/download/577699041.pdf, fetched 2026-10-30 (unofficial)

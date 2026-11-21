@@ -1,0 +1,269 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # Adaptive Time-step Training Framework
+ 
+-Also called: Pretraining-based Adaptive Time-step Adjustment (PATA), PATA: Adaptive Time-step Training Framework, temporal-budget learning, Adaptive Time-step Training for Spike-Based Neural Radiance Fields
++Also called: Pretraining-based Adaptive Time-step Adjustment (PATA), PATA: Adaptive Time-step Training Framework, temporal-budget learning, Adaptive Time-step Training for Spike-Based Neural Radiance Fields, Adaptive Time-step Training
+ 
+ ## Overview
+@@ -10,195 +10,89 @@
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Training rays and ground-truth colors $\mathcal{D}$, maximum time step $T$, first-stage iterations $N_1$, second-stage iterations $N_2$, loss weights $\alpha$ and $\beta$.
+-*   **Outputs:** Optimized network parameters $\Theta$, PLIF decay factors $\tau$, and scene-wise target time step $t^*_r$.
++*   **Inputs:** Training rays and ground-truth colors $\mathcal{D}$, maximum time step $T$, first-stage iterations $N_1$, second-stage iterations $N_2$, loss weights $\alpha$ and $\beta$ [S1, unofficial].
++*   **Outputs:** Optimized network parameters $\Theta$, PLIF decay factors $\tau$, and scene-wise target time step $t^*_r$ [S1, unofficial].
+ 
+ ### Data Structures
+-*   **SNN-NeRF Parameters $\Theta$:** Weights and biases of the spike-based neural network (e.g., INGP-NeRF or TensoRF backbone).
+-*   **PLIF Decay Factors $\tau$:** Parameters controlling the decay in Parametric Leaky Integrate-and-Fire neurons.
+-*   **Target Time Step $t^*$:** A single learnable scalar variable representing the temporal budget for a specific scene.
+-*   **Rendered Colors $C$:** Output color images for different time steps ($C_T, C_{t^*_r}$, etc.).
++*   **SNN-NeRF Parameters $\Theta$:** Weights and biases of the spike-based neural network (e.g., INGP-NeRF or TensoRF backbone) [S1, unofficial].
++*   **PLIF Decay Factors $\tau$:** Parameters controlling the decay in Parametric Leaky Integrate-and-Fire neurons [S1, unofficial].
++*   **Target Time Step $t^*$:** A single learnable scalar variable representing the temporal budget for a specific scene [S1, unofficial].
++*   **Rendered Colors $C$:** Output color images for different time steps ($C_T, C_{t^*_r}$, etc.) [S1, unofficial].
+ 
+ ### Pseudocode
+ 
+ ```python
+-import torch
+-import torch.nn.functional as F
++def pata_training(
++    dataset, max_time_step=8, stage1_iters=10000, stage2_iters=30000,
++    alpha=1e-6, beta=5e-7, gamma0=5e-5, gamma1=5e-2, gamma2=1e-6
++):
++    # Initialize parameters [G] Standard PyTorch initialization
++    theta = torch.nn.Parameter(torch.randn_like(initial_weights))
++    tau = torch.nn.Parameter(torch.ones_like(initial_tau))
++    t_star = torch.nn.Parameter(torch.tensor(float(max_time_step - 1.0), requires_grad=True))
++    optimizer = torch.optim.Adam([theta, tau, t_star])
+ 
+-def pata_training(
+-    training_data: Dataset,
+-    max_time_step: int = 8,
+-    stage1_iters: int = 10000,
+-    stage2_iters: int = 30000,
+-    alpha: float = 1e-6,
+-    beta: float = 5e-7,
+-    gamma0: float = 5e-5,
+-    gamma1: float = 5e-2,
+-    gamma2: float = 1e-6,
+-    surrogate_alpha: float = 4.0
+-):
+-    """
+-    Pretraining-based Adaptive Time-step Adjustment (PATA) training loop.
+-    
+-    Args:
+-        training_data: Dataset of rays and ground truth colors.
+-        max_time_step (T): Maximum temporal budget for unrolling.
+-        stage1_iters (N1): Number of iterations for pretraining.
+-        stage2_iters (N2): Number of iterations for adaptive optimization.
+-        alpha: Weight for L_extra in temporal budget loss.
+-        beta: Weight for L_penalty in temporal budget loss (controls compression).
+-        gamma0: Coefficient for L2 consistency loss.
+-        gamma1: Coefficient for cosine similarity loss.
+-        gamma2: Coefficient for Cauchy regularization.
+-        surrogate_alpha: Hyperparameter for surrogate gradient of spike activation.
+-        
+-    Returns:
+-        theta: Optimized network parameters.
+-        tau: Optimized PLIF decay factors.
+-        t_star_r: Learned scene-wise target time step.
+-    """
+-    
+-    # Initialize model parameters
+-    theta = initialize_snn_nerf_parameters()
+-    tau = initialize_plif_decay_factors()
+-    
+     # Stage 1: Pretraining
+-    # Train a fixed full-step spike-based renderer at maximum time step T
+-    for k in range(1, stage1_iters + 1):
+-        batch = sample_mini_batch(training_data)
+-        
+-        # Unroll spike-based NeRF for T time steps
+-        # C_T is the rendered color using full temporal budget
++    for k in range(stage1_iters):
++        batch = next(iter(dataset))
++        # [S1, unofficial] Unroll spike-based NeRF for T time steps to render full-step output C_T
+         C_T = render_spike_nerf(batch, theta, tau, T=max_time_step)
+         
+-        # Compute first-stage rendering loss
+-        # L_Render(T) = MSE + Consistency + Cauchy Regularization
+-        mse_loss = mean_squared_error(C_T, batch.gt)
+-        l_consist = compute_consistency_loss(C_T, batch.gt, gamma0, gamma1)
+-        l_cauchy = compute_cauchy_regularization(theta, gamma2)
++        mse_loss = torch.mean((C_T - batch.gt) ** 2)
++        l_consist = gamma0 * torch.mean((C_T - batch.gt) ** 2) + gamma1 * (1 - torch.cosine_similarity(C_T.flatten(), batch.gt.flatten(), dim=0))
++        sigma = get_density_predictions(theta) # [S1, unofficial] Extract density predictions sigma_i
++        l_cauchy = gamma2 * torch.sum(torch.log(1 + 2 * sigma))
+         
+-        l_render_t = mse_loss + l_consist + l_cauchy
+-        
+-        # Update parameters
+-        l_render_t.backward()
+-        optimizer_step(theta, tau)
+-        zero_grad()
++        l_render = mse_loss + l_consist + l_cauchy
++        optimizer.zero_grad()
++        l_render.backward()
++        optimizer.step()
+ 
+     # Stage 2: Adaptive Time-step Optimization
+-    # Initialize learnable target time step
+-    t_star = torch.tensor(max_time_step - 1.0, requires_grad=True)
+-    
+-    # Max Time-Step Scaling: Start with reduced T to save memory, then restore
+-    current_max_t = 2
+-    for k in range(1, stage2_iters + 1):
+-        # Restore max time step after initial epoch if needed
+-        if k == 1:
+-            current_max_t = max_time_step
+-            
+-        batch = sample_mini_batch(training_data)
++    current_max_t = 2 # Max Time-Step Scaling: start reduced to save memory
++    for k in range(stage2_iters):
++        if k == 1: current_max_t = max_time_step # Restore to T once sampling stabilizes
+         
+-        # Clamp and Round target time step
++        batch = next(iter(dataset))
++        
+         t_hat_star = torch.clamp(t_star, 1.0, float(current_max_t))
+         t_star_r = torch.round(t_hat_star)
+-        
+-        # Compute fractional part for smoothing
+         t_star_f = torch.floor(t_hat_star)
+         t_star_c = torch.ceil(t_hat_star)
+         delta = t_hat_star - t_star_f
+         
+-        # Unroll for T time steps to get teacher and adjacent step outputs
+-        # Note: Even though we optimize for t_star_r, we need C_T for distillation
+-        # and C_t_star_f, C_t_star_c for smoothing.
++        # [S1, unofficial] Unroll for T time steps to obtain teacher and adjacent step outputs
+         C_T = render_spike_nerf(batch, theta, tau, T=current_max_t)
+-        C_t_star_f = render_spike_nerf(batch, theta, tau, T=int(t_star_f))
+-        C_t_star_c = render_spike_nerf(batch, theta, tau, T=int(t_star_c))
+-        C_t_star_r = render_spike_nerf(batch, theta, tau, T=int(t_star_r))
++        C_t_f = render_spike_nerf(batch, theta, tau, T=int(t_star_f))
++        C_t_c = render_spike_nerf(batch, theta, tau, T=int(t_star_c))
++        C_t_r = render_spike_nerf(batch, theta, tau, T=int(t_star_r))
+         
+-        # Compute Smoothed Rendering Loss
+-        # M_smooth(t_hat*) = (1 - delta) * M_t_star_f + delta * M_t_star_c
+-        M_t_star_f = mean_squared_error(C_t_star_f, batch.gt)
+-        M_t_star_c = mean_squared_error(C_t_star_c, batch.gt)
+-        M_smooth = (1 - delta) * M_t_star_f + delta * M_t_star_c
++        M_t_f = torch.mean((C_t_f - batch.gt) ** 2)
++        M_t_c = torch.mean((C_t_c - batch.gt) ** 2)
++        M_smooth = (1 - delta) * M_t_f + delta * M_t_c
+         
+-        # Compute L_Render(t_hat*) by replacing M_T in Eq 13 with M_smooth
+-        # L_Render(t_hat*) = M_smooth + L_consist(t_hat*) + L_Cauchy
+-        # Note: Consistency loss is typically computed against GT. 
+-        # The source implies using the smoothed error for the main loss term.
+-        l_consist_smooth = compute_consistency_loss(C_t_star_r, batch.gt, gamma0, gamma1)
+-        l_cauchy = compute_cauchy_regularization(theta, gamma2)
++        l_consist_smooth = gamma0 * torch.mean((C_t_r - batch.gt) ** 2) + gamma1 * (1 - torch.cosine_similarity(C_t_r.flatten(), batch.gt.flatten(), dim=0))
++        l_cauchy = gamma2 * torch.sum(torch.log(1 + 2 * get_density_predictions(theta)))
++        l_render_hat = M_smooth + l_consist_smooth + l_cauchy
+         
+-        l_render_t_hat = M_smooth + l_consist_smooth + l_cauchy
+-        
+-        # Compute Temporal Budget Loss
+-        # L_extra = (||w_{i,t>t_r*}||^2 / ||W_points||^2) + (||c_{t>t_r*}||^2 / ||C_T||^2) + exp(tau)
+-        # Note: Exact implementation of L_extra depends on specific spike-based 
+-        # weight/color accumulation definitions. We assume access to weights w and colors c 
+-        # for time steps > t_star_r.
++        # L_extra approximation: energy of weights/colors after t_star_r
+         w_extra = compute_weight_energy_after_t_star(theta, t_star_r)
+         c_extra = compute_color_energy_after_t_star(theta, t_star_r)
+-        w_norm = compute_norm_weights(theta)
+-        c_norm = compute_norm_colors(C_T)
+-        
++        w_norm = torch.norm(theta)
++        c_norm = torch.norm(C_T)
+         l_extra = (w_extra / (w_norm**2 + 1e-8)) + (c_extra / (c_norm**2 + 1e-8)) + torch.exp(tau)
+         
+-        # L_penalty = sg(M_T / M_smooth(t_hat*)) * exp(t_hat*)
+-        # sg denotes stop-gradient
++        M_T = torch.mean((C_T - batch.gt) ** 2)
+         l_penalty = torch.stop_gradient(M_T / (M_smooth + 1e-8)) * torch.exp(t_hat_star)
+-        
+         l_budg = alpha * l_extra + beta * l_penalty
+         
+-        # Compute Temporal Distillation Loss
+-        # L_distill = || C_T - C_t_star_r ||^2_2
+-        l_distill = mean_squared_error(C_T, C_t_star_r)
++        l_distill = torch.mean((C_T - C_t_r) ** 2)
++        l_total = l_render_hat + l_budg + l_distill
+         
+-        # Total Objective
+-        l_total = l_render_t_hat + l_budg + l_distill
+-        
+-        # Update parameters
++        optimizer.zero_grad()
+         l_total.backward()
+-        optimizer_step(theta, tau, t_star)
+-        zero_grad()
++        optimizer.step()
+ 
+-    # Inference
+     t_star_r_final = torch.round(t_star)
+     return theta, tau, t_star_r_final
+-
+-def compute_consistency_loss(C_pred, gt, gamma0, gamma1):
+-    l2 = gamma0 * torch.mean((C_pred - gt)**2)
+-    # Cosine similarity
+-    dot_product = torch.sum(C_pred * gt)
+-    norm_pred = torch.norm(C_pred)
+-    norm_gt = torch.norm(gt)
+-    cosine_sim = dot_product / (norm_pred * norm_gt + 1e-8)
+-    l_cos = gamma1 * (1 - cosine_sim)
+-    return l2 + l_cos
+-
+-def compute_cauchy_regularization(theta, gamma2):
+-    # sigma_i are density predictions
+-    # Assuming access to density predictions sigma from the model
+-    sigma = get_density_predictions(theta)
+-    l_cauchy = gamma2 * torch.sum(torch.log(1 + 2 * sigma))
+-    return l_cauchy
+-
+-def render_spike_nerf(batch, theta, tau, T):
+-    # Placeholder for the specific spike-based unrolling logic
+-    # This function unrolls the SNN for T time steps
+-    # Returns the rendered color image C
+-    pass
+-
+-def compute_weight_energy_after_t_star(theta, t_star_r):
+-    # Computes squared norm of weights contributing to time steps > t_star_r
+-    pass
+-
+-def compute_color_energy_after_t_star(theta, t_star_r):
+-    # Computes squared norm of colors contributing to time steps > t_star_r
+-    pass
+-
+-def compute_norm_weights(theta):
+-    # Computes total norm of weights
+-    pass
+-
+-def compute_norm_colors(C_T):
+-    # Computes total norm of full-step color output
+-    pass
+ ```
+ 
+@@ -208,5 +102,5 @@
+ *   **$\gamma_2$:** Coefficient for Cauchy regularization. Set to $1 \times 10^{-6}$ [S1, unofficial].
+ *   **$\alpha$:** Hyperparameter for $L_{extra}$. Set to $1 \times 10^{-6}$ [S1, unofficial].
+-*   **$\beta$:** Loss weight for $L_{penalty}$. Controls the compression pressure. Typical value: $5 \times 10^{-7}$ [S1, unofficial].
++*   **$\beta$:** Loss weight for $L_{penalty}$. Controls the compression pressure [S1, unofficial].
+ *   **$T$:** Maximum time step. Typical value: 8 [S1, unofficial].
+ *   **$N_1$:** First-stage iterations. Typical value: 10,000 [S1, unofficial].
+@@ -277,6 +171,5 @@
+ *   **Strengths:** Preserves parallel rendering pattern; backbone-general (validates on INGP-NeRF and TensoRF); stable adaptive time-step training [S1, unofficial].
+ *   **Limitations:** Requires two-stage training; sensitive to loss weights; early training memory intensive [S1, unofficial].
+-*   **When to Use:** When using spike-based NeRF backbones and seeking to reduce inference energy while maintaining quality.
+-*   **When Not to Use:** When non-spike-based NeRF backbones are used without modification; when memory is extremely constrained during early training without scaling strategies [S1, unofficial].
++*   **When to Use:** When using spike-based NeRF backbones and seeking to reduce inference energy while maintaining quality [S1, unofficial].
+ 
+ ## Background

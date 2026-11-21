@@ -1,0 +1,302 @@
+Deterministic 3D physics engine: bit-exact rollback, record/replay, voxel destruction. C17, zero dependencies, MIT. - fix(query): box and sphere overlaps skip hidden and disabled planes by siracozmen01 · Pull Request #309 · Rawframe-Project/maul3d
+
+fix(query): box and sphere overlaps skip hidden and disabled planes by siracozmen01 · Pull Request #309 · Rawframe-Project/maul3d · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+siracozmen01
+commented
+Nov 1, 2026
+Copy link
+Copy Markdown
+Collaborator
+Problem
+m3World_OverlapAabb and m3World_OverlapSphere reported a plane that the query filter hid, and a plane whose body was disabled. Planes live outside the broadphase tree, so both queries offer them in a loop of their own after the tree walk. The tree callback skips disabled bodies and applies the filter; that plane loop did neither. The capsule, box and hull overlaps, the ray casts and the shape casts already check both for planes.
+Change
+OverlapGather in src/query.c offers a plane only when its body is enabled and the filter passes it, the checks OverlapCallback makes for tree shapes and ProxyOverlapGather makes for planes.
+Verification
+test_queries gains TestOverlapsSkipHiddenPlanes. A plane of category 2 sits under a small sphere, and each of the five overlaps, AABB, sphere, capsule, box and hull, finds both with the default filter. With a filter whose mask is ~2, each finds only the sphere. With the plane's body disabled, each finds only the sphere. Without the fix, the hidden and disabled checks fail for the AABB and sphere overlaps.
+Local: test_queries built with clang-20 through heavy.sh, failing before the fix and passing after it; then tools/check.sh pr through heavy.sh, all suites, the four fuzzers for 10 s each, clang-format, clang-tidy and the source, module, length, float environment, guide, test hygiene and bindings checks.
+Closes #304
+fix(query): box and sphere overlaps skip hidden and disabled planes
+…
+aa2710c
+```
+Planes live outside the broadphase tree, so m3World_OverlapAabb and
+m3World_OverlapSphere offer them in a loop of their own after the tree
+walk. That loop applied neither the query filter nor the disabled-body
+skip the tree callback applies, so both queries reported a plane the
+filter hid and a plane whose body was disabled. The loop now makes the
+same two checks as the other overlaps.
+
+Closes #304
+```
+siracozmen01
+commented
+Nov 1, 2026
+View reviewed changes
+siracozmen01
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review at aa2710c.
+Changes needed (1).
+The fix itself is right. OverlapGather's plane loop now makes the checks OverlapCallback makes for tree shapes, body enabled and m3FilterPass with the same argument order. TestOverlapsSkipHiddenPlanes fails on main for the AABB and sphere overlaps, in both the hidden and the disabled case, and passes for the other three, as the body says.
+1. Two other queries still disagree. body.h says "A disabled body vanishes from simulation AND queries". I checked every world query's handling of planes and disabled bodies:
+Query
+Tree shapes
+Planes
+m3World_CastRayClosest (RayTestShape, raycast.c)
+enabled + filter
+enabled + filter
+shape casts (ShapeCastTestPlane, shape_cast.c)
+enabled + filter
+enabled + filter
+capsule, box, hull overlaps (ProxyOverlapGather)
+enabled + filter
+enabled + filter
+AABB, sphere overlaps (this PR)
+enabled + filter
+enabled + filter
+m3World_CastRayAll (query.c)
+enabled + filter (RayAllCallback)
+filter only
+m3World_TestPoint (query.c)
+no enabled check
+no enabled check
+m3World_CastRayAll: its plane loop (query.c, after m3TreeQuery) calls m3FilterPass but never reads bodyEnabled. Take the test's world: a plane on ground, m3Body_Enable(world, ground, false), then a ray-all from (0, 1, 0) down 2 m. It still reports the plane, while m3World_CastRayClosest along the same ray reports nothing.
+m3World_TestPoint: WorldTestPointWorker walks every alive shape and returns the first that contains the point, without looking at the body. With the plane's body disabled, m3World_TestPoint(world, (m3Pos3){0, -1, 0}) still returns the plane. The same holds for any shape of a disabled body, not only planes. It takes no filter, so only the disabled half applies.
+Both are the same failure as #304: a query sees what the docs say it cannot. They fit this PR's goal of every query agreeing, so I would add the enabled check to both, and extend the test with a ray-all and a point test. If you would rather keep this PR narrow, they need an issue of their own.
+Not verified: CI (queued). I built nothing.
+siracozmen01
+commented
+Nov 1, 2026
+View reviewed changes
+siracozmen01
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Re-review at aa2710c, correcting my previous review.
+Ready. Both of my points were wrong; I withdraw them.
+m3World_CastRayAll's plane loop calls m3RayTestOneShape (raycast.c), which runs RayTestShape. That returns early when bodyEnabled is 0 ("disabled bodies are invisible to rays"). The default filter it sets there passes everything, so the loop's own m3FilterPass is the only filter check, and the enabled check happens inside. A disabled body's plane is not reported. I read the loop without following the call.
+m3World_TestPoint skipping disabled bodies is #295, fixed by #296 ("fix(query): the point test skips shapes of disabled bodies"), which I approved and which merges before this. Its loop covers planes too. I read this PR's base, which does not have #296 yet.
+With those, every world query skips both hidden and disabled planes once #296 and this land. The fix and its test stand as I reviewed them before: the test fails on main for the AABB and sphere overlaps, in the hidden and the disabled case.
+Not verified: CI (queued).
+Hide details
+View details
+siracozmen01
+merged commit 0076600
+into
+main
+Nov 2, 2026
+28 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+siracozmen01
+deleted the
+overlap-planes-304
+branch
+November 2, 2026 01:35
+rawframe-release
+Bot
+mentioned this pull request
+Nov 2, 2026
+chore: release 0.12.0
+#314
+Merged
+This was referenced Nov 2, 2026
+build: main does not compile test_queries after #309 and #297
+#316
+Closed
+test(query): call the overlap capsule with a center and its points
+#317
+Merged
+siracozmen01
+added a commit
+that referenced
+this pull request
+Nov 2, 2026
+test(query): call the overlap capsule with a center and its points (#317
+…
+61b36b0
+```
+)
+
+## Problem
+
+Main does not build since #309 merged at 0076600 (#316). Its new test `TestOverlapsSkipHiddenPlanes` calls `m3World_OverlapCapsule` with two world points, the argument list #297 replaced with a center and two center-relative points. #297 reached main after #309's last CI run, so each passed alone and the two together fail to compile `test/test_queries.c` at line 1569 on every build job.
+
+## Change
+
+The test's capsule call passes the same capsule in the new form: center at the origin, points (0, 0, 0) and (1, 0, 0). Before, the points were the world points (0, 0, 0) and (1, 0, 0), so the capsule and the test are unchanged. No library code changes.
+
+## Verification
+
+Local: `test/test_queries.c` compiles with gcc-14 and clang-20 under `-Wall -Wextra -Werror`, and a syntax-only pass over every C file in src, test, bench and tools finds no other break against main. heavy.sh was busy, so the build and tests on every platform, and the checks job, are left to this pull request's CI in place of a local `tools/check.sh pr`.
+
+Closes #316
+```
+siracozmen01
+pushed a commit
+that referenced
+this pull request
+Nov 2, 2026
+chore: release 0.12.0 (#314)
+…
+272d3ac
+```
+🤖 I have created a release *beep* *boop*
+---
+
+
+## [0.12.0](v0.11.0...v0.12.0) (2026-11-02)
+
+### Changed
+
+- **Breaking: a def, a default and a create per joint type.**
+  `m3JointDef`, `m3DefaultJointDef` and `m3CreateJoint` are gone. Each
+  of the twelve types has its own def, default and create:
+  `m3SphericalJointDef` with `m3DefaultSphericalJointDef` and
+  `m3CreateSphericalJoint`, and the same for the revolute, prismatic,
+  weld, distance, generic, wheel, filter, parallel, motor, gear and
+  pulley joints. Each def holds only the fields its type reads, so a
+  cone on a wheel or a spring on a weld can no longer be written.
+  Rename the fields you set as below. A create refuses another type's
+  def with `m3_errorInvalid` and one misuse. The default wheel def
+  builds: its suspension points down -y with its axle along z. The C#
+  `JointDef`, `DefaultJointDef` and `CreateJoint` are replaced by the
+  same twelve structs, defaults and creates.
+
+  | 0.11.0 `m3JointDef` field | 0.12.0 |
+  |---|---|
+  | `type` | gone: call the create for your type |
+  | `lowerLimit`, `upperLimit` | spherical `lowerTwist`, `upperTwist`; revolute `lowerAngle`, `upperAngle`; prismatic and wheel `lowerTranslation`, `upperTranslation` |
+  | wheel `localAxisB` | `localSpinAxisB` |
+  | `genericLinear`, `genericAngular` | `linearModes`, `angularModes` |
+  | `genericLinearLower`, `genericLinearUpper` | `linearLower`, `linearUpper` |
+  | `genericAngularLower`, `genericAngularUpper` | `angularLower`, `angularUpper` |
+  | `genericMotorAxis` | `motorAxis`, `M3_GENERIC_NO_MOTOR` for none |
+
+  ([#299](#299))
+- **Breaking: a dynamic body bounds its contact lever ratio.** A
+  colliding shape far from its body's center of mass, on a body a
+  joint also holds, let the contact go: past a ratio of about 1e7,
+  mass times the squared arm over the moment that arm turns, the
+  contact and the joint stopped settling and the body fell through.
+  `M3_CONTACT_LEVER_LIMIT`, 1e6, is the new bound. A shape create,
+  destroy, resize or density change, a filter change that lets a
+  shape collide, and a type change to dynamic are refused with
+  `m3_errorLimit` when they would carry the ratio past it. They change
+  nothing and count no misuse. Restore and replay refuse such bytes.
+  `m3Shape_SetFilter` now returns `m3Result`, so check its status.
+  ([#302](#302))
+- **Breaking: body names are UTF-8 with a byte count.**
+  `m3Body_SetName(world, body, name, byteCount)` returns `m3Result`.
+  It refuses a name longer than `M3_MAX_BODY_NAME_BYTES`, 31 bytes,
+  with `m3_errorLimit` where it cut the name, and bytes that are not
+  well-formed UTF-8 or hold a zero byte with `m3_errorInvalid`. Each
+  refusal keeps the old name and counts one misuse. A count of 0
+  clears the name. `m3Body_GetName(world, body, nameOut, capacity)`
+  copies the name into your buffer with no terminator and returns its
+  byte length; call it with a NULL buffer and capacity 0 to measure.
+  ([#293](#293))
+- **Breaking: `m3World_Compare` returns a status.** It takes
+  `rowsOut`, `capacity` and `totalOut` in place of `out` and
+  `outCount`, writes up to `capacity` rows and sets `*totalOut` to the
+  number of differing slots, which may exceed the capacity. Read
+  `min(total, capacity)` rows. Worlds of different capacities now
+  compare slot by slot instead of being refused. A refusal returns
+  `m3_errorInvalid` and counts one misuse, where it returned -1 and
+  counted none. `m3EncodeReplay`'s buffer parameter is named
+  `containerOut`.
+  ([#294](#294))
+- **Breaking: the point test takes a filter, the capsule overlap a
+  center.** `m3World_TestPoint(world, point, filter)` answers with the
+  lowest shape the filter sees; pass `m3DefaultQueryFilter()` to keep
+  the old answer. `m3World_OverlapCapsule` takes a center and two
+  points relative to it, as `m3World_CastCapsuleClosest` does, in
+  place of two world points.
+  ([#297](#297))
+- **Breaking: seven internal math helpers leave `core_math.h`.**
+  `m3MinF`, `m3MaxF`, `m3ClampF`, `m3AbsF`, `m3MakeZeroMat3`,
+  `m3UnwindAngle` and `m3IntegrateRotation` are no longer declared.
+  Use your own. The vector, matrix and quaternion math, `m3ComputeCosSin`
+  and `m3Atan2` stay.
+  ([#298](#298))
+- **Formats.** The snapshot keeps format 6, the journal tape format 7
+  and the replay container format 4. As in every release, a snapshot,
+  tape or container written by another release is refused with
+  `m3_errorVersion`.
+
+### Fixed
+
+- **A generic joint's motor follows its switch.** It drove the named
+  motor axis whether the motor was on or off, so
+  `m3Joint_EnableMotor(world, joint, false)` did not stop it. It now
+  drives only while the switch is on, like every other motor; set
+  `enableMotor` in the def to keep it driving.
+  ([#301](#301))
+- **A plane sits in its body's frame everywhere.** The contacts, the
+  fast-body sweep, the mover and the shape casts read a plane as world
+  space, while the ray casts, overlaps and point test placed it with
+  its body. A plane on a moved or turned static body collided in a
+  different place than queries found it. A plane on a body at the
+  origin collides exactly as before.
+  ([#312](#312))
+- **A fast body is swept only against shapes it can touch.** The
+  continuous phase moved a fast body back to the time it hit a shape
+  it never gets a contact with, so it lost most of a step's travel and
+  went through on the next one. It hit planes that are sensors, hidden
+  by its filter or on a disabled body, static surfaces its filter
+  hides, and shapes of a body it is jointed to with connected
+  collision off. The sweep now asks the same pair rule as contacts.
+  Scenes with such joints step to different results.
+  ([#310](#310),
+  [#315](#315))
+- **The fast-body sweep places offset shapes.** It swept every shape
+  as if it sat at its body's origin with no turn, so a fast body could
+  pass through an offset box, voxel chunk or plane, or stop in the air
+  above one. Bodies with offset shapes step to different results.
+  ([#319](#319))
+- **Queries skip what they should.** `m3World_TestPoint` no longer
+  reports shapes of disabled bodies, and `m3World_OverlapAabb` and
+  `m3World_OverlapSphere` no longer report planes the filter hides or
+  planes on disabled bodies.
+  ([#296](#296),
+  [#309](#309))
+- **A box overlap refuses a rotation that is not unit length.**
+  `m3World_OverlapBox` took any finite quaternion and answered for a
+  stretched or shrunk box. A rotation whose squared length is not
+  between 0.98 and 1.02 is now refused as the box cast refuses it: the
+  call returns 0, zeroes the array and counts one misuse.
+  ([#306](#306))
+- **An explosion carves only chunks its filter sees.**
+  `m3World_Explode` carved every voxel chunk in reach, including
+  chunks its filter hides and chunks on disabled bodies, while its
+  push already skipped both.
+  ([#318](#318))
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

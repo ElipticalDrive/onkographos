@@ -1,0 +1,122 @@
+# Adaptive Instance Normalization (AdaIN)
+
+
+## Overview
+Adaptive Instance Normalization (AdaIN) is a feature modulation technique that achieves arbitrary style transfer by aligning the statistical moments (mean and variance) of content feature maps with those of style feature maps [S2]. It differs from its parent, Color Transfer, which operates on final pixel colors, by operating in a deep feature space to preserve high-level semantic structure while transferring artistic appearance [S2]. Unlike Neural Style Transfer (NST), which optimizes an output image to minimize perceptual loss, AdaIN is a feedforward operation that directly transforms features, enabling rapid, arbitrary style application without per-image optimization [S1, S2].
+
+## How it works
+**Inputs and Outputs:**
+- Input $x$: A feature tensor extracted from a content source (e.g., a neural radiance field decoder or image).
+- Input $y$: A feature tensor extracted from a style source (e.g., a reference image).
+- Output $x'$: The stylized feature tensor, where the statistical distribution of $x$ is replaced by that of $y$.
+
+**Data Structures:**
+The method operates on 4D tensors $x, y \in \mathbb{R}^{C \times H \times W}$ (or higher dimensions for volumetric data), where $C$ is the number of channels, and $H, W$ are spatial dimensions. For volumetric applications, dimensions may include depth $D$. The statistics are computed per channel across the spatial (and potentially volumetric) dimensions.
+
+**Formulas:**
+Let $\mu(x)$ and $\sigma(x)$ be the mean and standard deviation of the content tensor $x$, computed across spatial dimensions for each channel. Similarly, let $\mu(y)$ and $\sigma(y)$ be the mean and standard deviation of the style tensor $y$.
+
+The AdaIN operation is defined as [S2]:
+
+$$
+\text{AdaIN}(x, y) = \frac{\sigma(y)}{\sigma(x)} (x - \mu(x)) + \mu(y)
+$$
+
+Where:
+- $\mu(x) = \frac{1}{N} \sum_{i=1}^{N} x_i$
+- $\sigma(x) = \sqrt{\frac{1}{N} \sum_{i=1}^{N} (x_i - \mu(x))^2 + \epsilon}$
+- $N$ is the number of elements over which statistics are computed (e.g., $H \times W$ or $H \times W \times D$).
+- $\epsilon$ is a small constant added for numerical stability to prevent division by zero [G].
+
+**Comparison with Instance Normalization (IN):**
+Standard Instance Normalization (IN) normalizes features to zero mean and unit variance, then applies learned scale ($\gamma$) and shift ($\beta$) parameters [S1]:
+
+$$
+\text{IN}(x) = \gamma \frac{x - \mu(x)}{\sigma(x)} + \beta
+$$
+
+AdaIN replaces the learned parameters $\gamma, \beta$ with the style statistics $\sigma(y), \mu(y)$, effectively injecting style information directly into the normalization process [S1].
+
+**Implementation Steps:**
+1. Extract feature maps $x$ from the content network and $y$ from the style network (typically using a shared encoder like VGG-19) [S2].
+2. Compute channel-wise mean $\mu(x)$ and standard deviation $\sigma(x)$ for the content features $x$ [S2].
+3. Compute channel-wise mean $\mu(y)$ and standard deviation $\sigma(y)$ for the style features $y$ [S2].
+4. Normalize $x$ by subtracting $\mu(x)$ and dividing by $\sigma(x)$ [S2].
+5. Scale the normalized content by $\sigma(y)$ and shift by $\mu(y)$ [S2].
+6. Return the resulting tensor as the stylized features.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def compute_mean_std(tensor):
+    """
+    Computes mean and standard deviation per channel.
+    tensor shape: (B, C, H, W) or (B, C, H, W, D)
+    """
+    # Keep dimensions for broadcasting
+    keep_dims = True
+    mean = torch.mean(tensor, dim=list(range(2, tensor.dim())), keepdim=keep_dims)
+    var = torch.var(tensor, dim=list(range(2, tensor.dim())), keepdim=keep_dims, unbiased=False)
+    std = torch.sqrt(var + 1e-9) # [G] epsilon for numerical stability
+    return mean, std
+
+def adain(content_features, style_features):
+    """
+    Applies Adaptive Instance Normalization.
+    content_features: Tensor from content source
+    style_features: Tensor from style source
+    """
+    # 1. Compute statistics
+    c_mean, c_std = compute_mean_std(content_features)
+    s_mean, s_std = compute_mean_std(style_features)
+    
+    # 2. Normalize content
+    normalized_content = (content_features - c_mean) / c_std
+    
+    # 3. Adapt to style statistics
+    stylized_features = s_std * normalized_content + s_mean
+    
+    return stylized_features
+```
+
+**Parameters and Edge Cases:**
+- **Feature Extractor:** Typically VGG-19 is used to extract features from both content and style inputs [S2].
+- **Batch Size:** In volumetric implementations, batch size is often limited to 1 due to memory constraints [S1].
+- **Degenerate Input:** If $\sigma(x)$ is zero (constant feature map), division by zero occurs. The $\epsilon$ term in the standard deviation calculation prevents this [G].
+- **Volumetric Consistency:** In 3D rendering, computing statistics over a sampled point batch can cause block artifacts. Volume-adaptive variants compute statistics over the entire volume to maintain multi-view consistency [S3].
+
+## Subtopics
+
+### [Neural Style Transfer (NST)](14833-neural-style-transfer-nst.md)
+Neural Style Transfer (NST) is a technique that applies the visual characteristics of an artistic style to a content image while preserving the original content structure. It differs from its parent, Adaptive Instance Normalization (AdaIN), which aligns feature map statistics for arbitrary style transfer, by optimizing a specific output image to minimize perceptual losses in a feature space. Unlike sibling method FPRF, which focuses on photorealistic structure preservation via segmentation, NST focuses on artistic stylization.
+
+### FPRF
+FPRF is a method for photorealistic style transformation that stylizes 3D scenes without optimization, using a radiance field for geometry/content and a style dictionary module with style attention [S2]. It utilizes AdaIN to stylize 3D scenes without optimization, enabling rapid style manipulation [S2]. It outperforms previous 3D photorealistic appearance editing methods by achieving transformation with multiple style references in less training time [S2].
+
+### Linear Style Transfer (LST)
+Linear Style Transfer (LST) is a method that improves efficiency over AdaIN by learning linear transformations directly to the feature maps, realizing fast and scalable style transfer across multiple styles [S2].
+
+### Volume-adaptive Instance Normalization
+Volume-adaptive Instance Normalization is a normalization technique that uses the learned mean and variance of the whole volume during inference to eliminate dependency on holistic statistics of the sampled point batch, improving stylization quality and maintaining multi-view consistency [S3]. Vanilla IN produces severe block-shape artifacts because the transformation of each batch is conditioned on the holistic statistics of itself, leading to inconsistent stylization per block. Discarding IN entirely compromises stylization quality, failing to capture the correct color tone of the reference style, because IN removes the original style information of the content image which facilitates the transfer of the reference style [S3].
+
+## Operating characteristics
+- **Time Complexity:** The operation is $O(N)$ where $N$ is the number of elements in the feature map, as it involves only mean, variance, and element-wise arithmetic operations. It is significantly faster than optimization-based methods like NST because it is a single forward pass [S2].
+- **Memory Complexity:** Requires storing the feature maps for both content and style inputs. In volumetric settings, memory usage is constrained by the resolution of the radiance field and the batch size [S1].
+- **Performance:** Enables arbitrary style transfer without per-image optimization, making it suitable for real-time or near-real-time applications [S2].
+- **Strengths:** Simple implementation, fast inference, ability to handle arbitrary styles without retraining the style encoder [S2].
+- **Limitations:** May lose fine-grained structural details if the style statistics dominate the content statistics. In 3D, naive application can lead to view-dependent inconsistencies if statistics are computed per batch rather than per volume [S3].
+- **When to use:** When rapid, arbitrary style transfer is required without the computational cost of iterative optimization.
+- **When not to use:** When strict photorealistic structure preservation is required without any style leakage, or when fine-grained local style control is needed beyond global statistics [S2].
+
+## Background
+AdaIN was introduced as a method for arbitrary style transfer, aligning the mean and variance of feature maps extracted from content images with those of style images [S2]. It was originally proposed in the context of 2D image style transfer [S2]. In the context of volume rendering and neural radiance fields, it has been adapted to modulate feature tensors in the decoder network, replacing instance normalization layers with AdaIN layers conditioned on a transfer function descriptor [S1]. This allows for explicit control over the appearance of 3D scenes using learned descriptors [S1].
+
+## Sources
+[S1] Deep Volumetric Ambient Occlusion, https://arxiv.org/abs/2008.08345v2, fetched 2026-10-26
+[S2] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28
+[S3] StyleRF: Zero-Shot 3D Style Transfer of Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00806, fetched 2026-10-26

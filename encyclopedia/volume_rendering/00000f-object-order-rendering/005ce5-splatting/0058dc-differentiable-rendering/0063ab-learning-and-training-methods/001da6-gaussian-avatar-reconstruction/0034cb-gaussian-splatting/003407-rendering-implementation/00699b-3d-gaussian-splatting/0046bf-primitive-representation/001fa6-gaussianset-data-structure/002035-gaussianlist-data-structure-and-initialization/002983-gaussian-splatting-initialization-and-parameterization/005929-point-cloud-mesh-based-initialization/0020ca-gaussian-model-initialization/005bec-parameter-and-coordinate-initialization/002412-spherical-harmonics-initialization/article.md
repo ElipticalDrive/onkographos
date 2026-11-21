@@ -1,0 +1,101 @@
+# Spherical Harmonics Initialization
+
+
+## Overview
+Spherical Harmonics Initialization sets the initial view-dependent color coefficients for 3D Gaussian splats by mapping input RGB colors into the zeroth-order (DC) spherical harmonic term [S1, unofficial]. It differs from [Spherical Harmonics Evaluation](3848-spherical-harmonics-evaluation.md) by preparing the parameter tensor for optimization rather than computing colors during rendering, and from [Splat Initialization from Normalized Coordinates](3595-splat-initialization-from-normalized-coordinates.md) by relying on external RGB data rather than deriving color from spatial coordinates [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `rgb`: A tensor of shape $(N, 3)$ containing the initial RGB color values for $N$ Gaussians. Values are typically in the range $[0, 1]$.
+
+**Outputs:**
+- `sh_coeffs`: A tensor of shape $(N, 27)$ containing the initialized spherical harmonic coefficients. The first 3 values correspond to the DC term for R, G, and B respectively; the remaining 24 values are zero.
+
+**Data Structures:**
+- The SH coefficients are stored in a flattened format. For degree $L=3$, there are $9$ coefficients per color channel (R, G, B), totaling $27$ coefficients per Gaussian. The layout is $[c_{0,R}, c_{1,R}, \dots, c_{8,R}, c_{0,G}, \dots, c_{8,B}]$.
+
+**Steps:**
+1. Allocate a zero-initialized tensor `sh_coeffs` of shape $(N, 3, 9)$.
+2. Compute the DC coefficient for each color channel by dividing the input RGB value by the normalization constant $k_0 = 0.28209479177387814$.
+3. Assign the computed DC coefficients to the index $0$ of the last dimension for each color channel.
+4. Flatten the tensor from shape $(N, 3, 9)$ to $(N, 27)$ to match the expected parameter layout for the Gaussian Splatting optimizer.
+
+**Formula:**
+The zeroth-order spherical harmonic coefficient $c_0$ is calculated as:
+$$
+c_{0} = \frac{\text{RGB}}{0.28209479177387814}
+$$
+where $\text{RGB}$ is the input color value for a specific channel (R, G, or B), and $0.28209479177387814$ is the normalization constant for the zeroth-order spherical harmonic basis function [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import math
+
+def initialize_sh(rgb: torch.Tensor) -> torch.Tensor:
+    """
+    Initialize spherical harmonic coefficients for 3D Gaussian splatting.
+    
+    Args:
+        rgb: Tensor of shape (N, 3) with RGB values in [0, 1].
+        
+    Returns:
+        Tensor of shape (N, 27) with initialized SH coefficients.
+    """
+    # N is the number of Gaussians
+    N = rgb.shape[0]
+    
+    # Step 1: Allocate zero tensor of shape (N, 3, 9)
+    # 3 channels (R, G, B), 9 coefficients per channel (degree 3)
+    sh_coeffs = torch.zeros(N, 3, 9, dtype=rgb.dtype, device=rgb.device)
+    
+    # Step 2 & 3: Assign scaled RGB values to the DC coefficient index (0)
+    # Normalization constant for zeroth-order SH basis function
+    k0 = 0.28209479177387814
+    
+    # Extract R, G, B channels. rgb shape is (N, 3).
+    # We need to assign to sh_coeffs[:, channel, 0]
+    for channel in range(3):
+        sh_coeffs[:, channel, 0] = rgb[:, channel] / k0
+        
+    # Step 4: Flatten to shape (N, 27)
+    # The standard layout in Gaussian Splatting implementations is (N, 27)
+    sh_coeffs = sh_coeffs.reshape(N, 27)
+    
+    return sh_coeffs
+```
+
+**Parameters:**
+- `0.28209479177387814`: The normalization constant for the zeroth-order spherical harmonic basis function [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The division by the normalization constant should be performed in floating-point precision (typically float32 or float16) to avoid quantization errors in the initial color values.
+- **Input Range:** The input RGB values are assumed to be normalized to $[0, 1]$. If input values are in $[0, 255]$, they must be scaled down before division.
+- **Higher Order Coefficients:** The initialization sets only the DC term (index 0). All other coefficients (indices 1-8 for each channel) remain zero, which is the standard initialization for view-dependent effects that are learned during training.
+
+## Subtopics
+
+### [Splat Initialization from Normalized Coordinates](3595-splat-initialization-from-normalized-coordinates.md)
+Initializes a single 3D Gaussian splat with SH degree 3 from normalized coordinates, deriving DC color from position rather than external RGB.
+
+### [Spherical Harmonics Evaluation](3848-spherical-harmonics-evaluation.md)
+Computes view-dependent RGB color by evaluating SH basis functions against viewing direction.
+
+### [Appearance Feature Initialization and Training Schedule](13489-appearance-feature-initialization-and-training-schedule.md)
+Defines a staged training protocol for appearance features, decoupling them from initial geometry optimization.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the number of Gaussians. The operation involves a single pass over the input RGB tensor.
+- **Memory Complexity:** $O(N)$, requiring storage for $27 \times N$ coefficients.
+- **Strengths:** Simple, deterministic, and computationally inexpensive. Provides a valid starting point for view-dependent color optimization.
+- **Limitations:** Does not initialize higher-order SH coefficients, which must be learned from data. Relies on the quality of the input RGB colors.
+- **When to use:** At the start of Gaussian Splatting training when RGB colors are available from a source point cloud or mesh.
+- **When not to use:** When no RGB data is available, or when using methods that derive color from spatial coordinates [S1, unofficial].
+
+## Background
+Spherical Harmonics Initialization is a standard step in 3D Gaussian Splatting pipelines, introduced in the context of learning view-dependent appearance [S1, unofficial]. It leverages the property that the zeroth-order spherical harmonic coefficient represents the average (DC) color of a surface, providing a natural initialization for the color parameters.
+
+## Sources
+[S1] https://github.com/WangFeng18/3d-gaussian-splatting, https://github.com/WangFeng18/3d-gaussian-splatting, fetched 2026-10-30 (unofficial)

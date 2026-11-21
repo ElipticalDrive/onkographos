@@ -1,0 +1,145 @@
+# Additive Metaball Modification for Marching Cubes
+
+Also called: Meta-ball addition to Perlin noise, User-defined function modification
+
+## Overview
+This method enables dynamic, local modification of a Marching Cubes terrain (such as digging or placing blocks) by superimposing user-defined density functions, typically metaballs, onto a base procedural noise field [S1, unofficial]. It solves the problem of maintaining terrain integrity during interactive editing by avoiding direct alteration of the underlying pseudo-random noise sequence, which would cause catastrophic global artifacts [S1, unofficial]. Unlike siblings that modify the grid topology directly or require complex data structures for dynamic updates, this approach relies on additive mixing of scalar fields, allowing smooth integration of changes without rebuilding the base noise [S1, unofficial].
+
+## How it works
+The method operates by evaluating a composite scalar field at each point in space, combining a static base noise function with a dynamic list of user-defined functions.
+
+**Inputs and Outputs**
+- **Input**: A base noise function $N(x, y, z)$ (e.g., Perlin noise), a list of user-defined ball functions, and an isovalue threshold for material selection.
+- **Output**: A scalar value at any point $(x, y, z)$ used to determine material type or surface presence.
+
+**Data Structures**
+- `UserBallFunctions`: A class or struct representing a single metaball.
+  - Fields:
+    - `x0, y0, z0`: Integer coordinates defining the center of the metaball.
+    - `ballDensity`: Double-precision floating-point value representing the density parameter.
+- `userDefinedFunctions`: A list (or array) of `UserBallFunctions` objects.
+
+**Formulas**
+The value of a single user-defined ball function at point $(x, y, z)$ is calculated as [S1, unofficial]:
+
+$$
+value(x, y, z) = \frac{ballDensity}{(x-x_0)^2 + (y-y_0)^2 + (z-z_0)^2}
+$$
+
+The total evaluation function combines the base terrain and user modifications [S1, unofficial]:
+
+$$
+totalValue(x, y, z) = N(x, y, z) + \sum_{i} value_i(x, y, z)
+$$
+
+Where $N(x, y, z)$ is the base noise value and the sum iterates over all functions in `userDefinedFunctions`.
+
+**Parameters**
+- `ballDensity`: The numerator in the ball function formula. Controls the strength of the modification. Typical values depend on the scale of the noise function and the desired depth of "digging" or "placing" [S1, unofficial].
+- `x0, y0, z0`: Integer coordinates for the ball center. These are typically snapped to the voxel grid or chunk boundaries [S1, unofficial].
+
+**Steps**
+1. Initialize an empty list `userDefinedFunctions` to store active metaballs.
+2. When a user action occurs (e.g., digging), create a new `UserBallFunctions` instance with the specified center $(x_0, y_0, z_0)$ and density $d$.
+3. Add the new instance to `userDefinedFunctions`.
+4. To evaluate the material at a point $(x, y, z)$:
+   a. Calculate the base terrain value: $terrainValue = N(x, y, z)$.
+   b. Initialize `userModification = 0`.
+   c. Iterate through each `func` in `userDefinedFunctions`:
+      i. Calculate $v = func.valueAt(x, y, z)$.
+      ii. Add $v$ to `userModification`.
+   d. Compute the final scalar: $finalValue = terrainValue + userModification$.
+   e. Select the material based on $finalValue$ relative to the isovalue.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class UserBallFunctions:
+    def __init__(self, x0: int, y0: int, z0: int, ballDensity: float):
+        self.x0 = x0
+        self.y0 = y0
+        self.z0 = z0
+        self.ballDensity = ballDensity
+
+    def valueAt(self, x: int, y: int, z: int) -> float:
+        # Calculate squared distance from center
+        dx = x - self.x0
+        dy = y - self.y0
+        dz = z - self.z0
+        distSq = dx*dx + dy*dy + dz*dz
+        # Avoid division by zero if evaluating exactly at center
+        if distSq == 0:
+            return float('inf') if self.ballDensity > 0 else float('-inf')
+        return self.ballDensity / distSq
+
+def evaluate_material(x: int, y: int, z: int, isovalue: float, 
+                      userDefinedFunctions: list, 
+                      perlin_noise_func) -> int:
+    """
+    Evaluates the material at a given voxel coordinate.
+    Returns an integer material ID based on the combined scalar field.
+    """
+    # 1. Get base terrain value
+    terrainValue = perlin_noise_func(x, y, z)
+    
+    # 2. Accumulate user modifications
+    userModification = 0.0
+    for func in userDefinedFunctions:
+        userModification += func.valueAt(x, y, z)
+        
+    # 3. Combine and select material
+    # Note: The source uses 'isovalue + userModification' in the selection logic,
+    # implying the threshold is adjusted or the value is compared against a fixed isovalue.
+    # Standard interpretation: compare totalValue against isovalue.
+    totalValue = terrainValue + userModification
+    
+    # Placeholder for material selection logic based on totalValue vs isovalue
+    # [G] Implementation detail: The source code snippet returns 
+    # selectAppropriateMaterial(isovalue + userModification). 
+    # This implies the 'isovalue' variable in the snippet might be the base terrain 
+    # threshold or the function expects the caller to pass the base terrain value 
+    # as 'isovalue'. However, standard Marching Cubes compares field value to threshold.
+    # Based on the text "select appropriate material based on the sum of the isovalue 
+    # and the user modification", we interpret this as comparing the modified field 
+    # against a fixed threshold, or adjusting the threshold. 
+    # Given the formula structure, we assume standard comparison:
+    if totalValue > isovalue:
+        return MATERIAL_SOLID
+    else:
+        return MATERIAL_AIR
+
+def add_metaball(x0: int, y0: int, z0: int, density: float, 
+                 userDefinedFunctions: list):
+    """Adds a new metaball to the list of user-defined functions."""
+    ball = UserBallFunctions(x0, y0, z0, density)
+    userDefinedFunctions.append(ball)
+```
+
+**Edge Cases and Pitfalls**
+- **High Base Density**: If the base Perlin noise density is very high, subtracting a metaball's density might not drop the total value below the isovalue immediately. This results in a gradual material transition rather than an immediate void. To fix this, increase the `ballDensity` magnitude, use higher-order powers in the denominator (e.g., $(x-x_0)^4$), or change the mixing function from additive (`+`) to a conditional maximum/minimum function [S1, unofficial].
+- **Chunk Boundaries**: Metaballs may influence voxels beyond their assigned chunk boundary, causing side-effects in neighboring chunks. Mitigation strategies include using ball functions with bounded support (clamping the value to zero beyond a certain radius) or carefully managing the persistence of metaball definitions per-chunk [S1, unofficial].
+- **Center Evaluation**: Evaluating exactly at $(x_0, y_0, z_0)$ results in division by zero. The pseudocode handles this by returning infinity, which effectively guarantees the material is selected (solid or air depending on sign) at the exact center [G].
+
+## Subtopics
+
+### Bounded Metaballs
+A variant where the ball function is clamped to zero outside a specific radius to prevent cross-chunk artifacts. Choose this when working with chunked world generation. [Link to Bounded Metaballs](#) (Not given in the sources).
+
+### Non-Additive Mixing
+Using `max()` or `min()` instead of `+` to combine noise and metaballs. Choose this when abrupt, non-gradual transitions are required. [Link to Non-Additive Mixing](#) (Not given in the sources).
+
+## Operating characteristics
+- **Time Complexity**: $O(N \cdot M)$ per voxel evaluation, where $N$ is the number of voxels in the evaluation region and $M$ is the number of active metaballs in `userDefinedFunctions`. This can become expensive if $M$ is large.
+- **Memory Complexity**: $O(M)$ to store the list of metaball definitions. This is significantly lower than storing a full modified voxel grid.
+- **Performance**: The method is lightweight for sparse modifications. However, evaluating many metaballs per voxel can degrade performance. Optimization involves spatial partitioning (e.g., only checking metaballs within a certain radius of the voxel) [S1, unofficial].
+- **Strengths**: Preserves the base terrain structure; easy to implement; allows persistent, dynamic editing without regenerating noise.
+- **Limitations**: Additive mixing can lead to gradual transitions; metaballs have infinite support unless bounded; performance degrades with many active metaballs.
+- **When to Use**: Ideal for voxel-based games or simulations where players can dig or place objects in a procedurally generated world.
+- **When Not to Use**: When strict topological changes (e.g., creating tunnels) are required without gradual material fading, or when performance constraints prevent evaluating many metaballs per voxel.
+
+## Background
+This technique was discussed in the context of implementing destructible environments in voxel-based games using Marching Cubes. It was proposed as an alternative to modifying the Perlin noise sequence directly, which was noted to be disastrous on a large scale due to the deterministic nature of pseudo-random number generators [S1, unofficial]. The method leverages the additive property of scalar fields to allow user-defined modifications to coexist with procedural generation.
+
+## Sources
+[S1] Marching cubes with destructible environment, https://gamedev.stackexchange.com/questions/136510/marching-cubes-with-destructible-environment, fetched 2026-10-27 (unofficial)

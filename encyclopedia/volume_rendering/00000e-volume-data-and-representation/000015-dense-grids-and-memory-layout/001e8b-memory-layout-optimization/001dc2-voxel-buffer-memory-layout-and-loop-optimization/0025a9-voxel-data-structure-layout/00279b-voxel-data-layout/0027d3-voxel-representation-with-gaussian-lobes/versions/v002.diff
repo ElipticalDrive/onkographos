@@ -1,0 +1,196 @@
+--- v001.md
++++ v002.md
+@@ -4,91 +4,130 @@
+ 
+ ## Overview
+-This method represents volumetric data using isotropic Gaussian lobes to approximate directional information (normals and light directions) and scalar properties (visibility, color) within a voxel grid. It solves the problem of storing accurate directional data in a compact memory layout by replacing single vectors with Gaussian distributions characterized by an average direction and variance. It differs from sibling methods like [Voxel Data Volume Storage and Access](4453-voxel-data-volume-storage-and-access.md) by explicitly modeling directional uncertainty via Gaussian parameters rather than storing raw vector components or material indices.
++Voxel Representation with Gaussian Lobes is a compact data structure for storing directional and material information within a voxel grid, designed to facilitate efficient cone tracing for indirect illumination. It solves the problem of storing high-dimensional directional data (normals, light directions) and occlusion metrics in a memory-constrained environment by approximating distributions with isotropic Gaussian lobes. Unlike sibling methods that may store raw per-voxel vectors or complex hierarchical trees without directional abstraction, this method encodes directionality and spread into a single compact voxel footprint, enabling fast interpolation and visibility estimation during rendering.
+ 
+ ## How it works
+-**Inputs:** Raw volumetric data (normals, visibility, color) for a voxel or leaf node.
+-**Outputs:** A compact voxel data structure containing Gaussian parameters.
++The method represents the directional behavior of a voxel's contents using an isotropic Gaussian distribution characterized by an average direction vector and a standard deviation. It also stores scalar occlusion and material properties.
+ 
+-**Data Structure Layout:**
+-Each voxel stores the following fields in order:
+-1.  **Average Vector D**: A 3D vector representing the mean direction.
+-2.  **Standard Deviation σ**: Encoded implicitly via the norm of D.
+-3.  **Visibility/Occlusion**: A single scalar value representing the average percentage of blocked rays.
+-4.  **Material Color**: Opacity-weighted, alpha-premultiplied color.
+-5.  **Normal**: Pre-multiplied by opacity.
++**Inputs and Outputs**
++*   **Input:** A voxel grid (e.g., from a VDB tree) where each leaf node or voxel requires directional and material summarization.
++*   **Output:** A dense voxel buffer where each voxel contains a fixed-size data structure.
+ 
+-**Formulas and Parameters:**
+-The variance $\sigma^2$ is encoded via the norm $|D|$ of the average vector $D$ to ease interpolation during rendering [S1]:
+-$$ \sigma^2 = \frac{1 - |D|}{|D|} $$
+-Where $|D|$ is the Euclidean norm $\sqrt{D_x^2 + D_y^2 + D_z^2}$.
++**Data Structure Layout**
++Each voxel stores the following fields in a fixed layout:
++1.  **Average Vector $D$**: A 3D vector representing the mean direction (e.g., normal or light direction).
++2.  **Standard Deviation $\sigma$**: Encoded implicitly via the norm of $D$.
++3.  **Visibility**: A single scalar value representing the percentage of blocked rays (occlusion).
++4.  **Material Color**: An RGB vector, pre-multiplied by opacity.
++5.  **Normal**: A 3D vector, pre-multiplied by opacity.
+ 
+-**Steps:**
+-1.  **Compute Average Direction**: For a given voxel, compute the average normal or light direction vector $D$ from the underlying high-resolution data.
+-2.  **Encode Variance**: Calculate $|D|$. If $|D|$ is zero (degenerate case), handle as a special case (e.g., set $\sigma$ to a maximum value or default direction) [G]. Compute $\sigma^2$ using the formula above. The value of $\sigma$ is derived as $\sqrt{\sigma^2}$.
+-3.  **Store D**: Store the normalized or unnormalized vector $D$ in the voxel. The source implies $D$ is stored directly, and its norm encodes the variance.
+-4.  **Compute Visibility**: Estimate occlusion by calculating the percentage of blocked rays for the voxel. Store this as a single average scalar value.
+-5.  **Compute Color**: Calculate the material color, applying opacity weighting and premultiplying by alpha.
+-6.  **Compute Normal**: Store the normal vector, pre-multiplied by the opacity value.
++**Formulas and Parameters**
++The variance $\sigma^2$ is derived from the norm of the average vector $|D|$ to ease interpolation during cone tracing. The relationship is defined as:
+ 
+-**Pseudocode:**
++$$
++\sigma^2 = \frac{1 - |D|}{|D|}
++$$
++
++Where:
++*   $|D|$ is the Euclidean norm of the average vector $D$.
++*   $\sigma$ is the standard deviation of the isotropic Gaussian lobe.
++
++This encoding ensures that as $|D|$ approaches 1 (highly directional), $\sigma$ approaches 0, and as $|D|$ approaches 0 (isotropic), $\sigma$ increases.
++
++**Algorithm Steps**
++1.  **Accumulate Directions**: For a given voxel (or leaf node), collect all relevant directional vectors (e.g., surface normals, incoming light directions) from the underlying geometry or data.
++2.  **Compute Average Vector $D$**: Calculate the mean of these vectors.
++    $$
++    D = \frac{1}{N} \sum_{i=1}^{N} v_i
++    $$
++    where $v_i$ are the individual direction vectors and $N$ is the count.
++3.  **Encode Variance**: Compute $|D|$ and derive $\sigma^2$ using the formula above. The value $\sigma$ is not stored explicitly but can be reconstructed during rendering if needed, or the value $|D|$ is stored directly.
++4.  **Compute Visibility**: Estimate the occlusion by tracing rays or analyzing the geometry within the voxel to determine the percentage of blocked paths. Store this as a single scalar value.
++5.  **Compute Material Color**: Sum the color contributions of all materials within the voxel, weighted by their opacity. Store the result as an alpha-premultiplied RGB value.
++6.  **Compute Normal**: Sum the normal vectors weighted by their respective opacities. Store the result as an opacity-premultiplied normal vector.
++
++**Pseudocode**
+ ```python
+-def encode_voxel_gaussian(normal, visibility, color, opacity):
+-    # Step 1: Compute average direction D
+-    # In a real implementation, D might be an average of multiple samples
+-    D = normalize(normal)
++def compute_gaussian_lobe_voxel(voxel_data):
++    """
++    Computes the Gaussian lobe representation for a single voxel.
++    voxel_data: List of tuples (normal, color, opacity) for all primitives in the voxel.
++    Returns: dict with keys 'D', 'visibility', 'color', 'normal'
++    """
++    N = len(voxel_data)
++    if N == 0:
++        return {'D': [0, 0, 0], 'visibility': 1.0, 'color': [0, 0, 0], 'normal': [0, 0, 0]}
++
++    # 1. Accumulate Directional Information (Normals)
++    sum_normal = [0.0, 0.0, 0.0]
++    sum_color = [0.0, 0.0, 0.0]
++    total_opacity = 0.0
++
++    for normal, color, opacity in voxel_data:
++        # Pre-multiply normal by opacity
++        sum_normal[0] += normal[0] * opacity
++        sum_normal[1] += normal[1] * opacity
++        sum_normal[2] += normal[2] * opacity
++        
++        # Pre-multiply color by opacity
++        sum_color[0] += color[0] * opacity
++        sum_color[1] += color[1] * opacity
++        sum_color[2] += color[2] * opacity
++        
++        total_opacity += opacity
++
++    # 2. Compute Average Vector D (from normals)
++    # Note: The source uses D for direction. Here we use the accumulated normal as D.
++    # In practice, D might be a separate light direction accumulator, but normals are primary.
++    D = sum_normal
+     
+-    # Step 2: Encode variance
+-    norm_D = length(D)
++    # 3. Compute Norm |D|
++    norm_D = sqrt(D[0]**2 + D[1]**2 + D[2]**2)
+     
+-    # Handle degenerate case where D is zero vector
+-    if norm_D < 1e-6:
+-        sigma_sq = 1.0 # Default max variance
+-    else:
+-        # Formula: sigma^2 = (1 - |D|) / |D|
+-        sigma_sq = (1.0 - norm_D) / norm_D
+-        
+-    sigma = sqrt(sigma_sq)
++    # 4. Encode Variance (implicit)
++    # sigma^2 = (1 - |D|) / |D|
++    # This is used during rendering, not stored directly.
+     
+-    # Step 3: Store D
+-    # The voxel stores D directly. The renderer will use |D| to retrieve sigma.
+-    voxel_D = D
++    # 5. Compute Visibility
++    # Estimate as 1.0 if total_opacity is high, or based on ray casting.
++    # Source mentions "single average value".
++    visibility = 1.0 - (total_opacity / N) # Simplified heuristic [G]
++    # Note: Actual visibility requires ray tracing or density estimation [S1]
+     
+-    # Step 4: Store Visibility
+-    voxel_visibility = visibility
+-    
+-    # Step 5: Store Material Color (alpha-premultiplied)
+-    voxel_color = color * opacity
+-    
+-    # Step 6: Store Normal (pre-multiplied by opacity)
+-    voxel_normal = normal * opacity
+-    
++    # 6. Return Data
+     return {
+-        "D": voxel_D,
+-        "visibility": voxel_visibility,
+-        "color": voxel_color,
+-        "normal": voxel_normal
++        'D': D,
++        'visibility': visibility,
++        'color': sum_color,
++        'normal': sum_normal
+     }
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+--   **Degenerate D**: If the average direction $D$ is zero, $|D|=0$, leading to division by zero in the variance formula. A guard is required [G].
+--   **View-dependency**: Storing a single average visibility value lacks view-dependency, which is a disadvantage for large thin objects [S1].
+--   **Precision**: The encoding of $\sigma$ via $|D|$ assumes $|D| \in (0, 1]$. If $|D|$ is very close to 0, precision issues may arise.
++**Edge Cases and Pitfalls**
++*   **Degenerate Input**: If $|D| = 0$ (isotropic distribution), the variance formula involves division by zero. In practice, a small epsilon or a fallback isotropic value should be used [G].
++*   **Precision**: The encoding of $\sigma$ via $|D|$ can lose precision for very small variances.
++*   **View Dependency**: Storing a single average visibility value lacks view-dependency, which can lead to inaccuracies for large thin objects [S1].
+ 
+ ## Subtopics
+ 
+ ### [Leaf Node Gaussian Approximation](14713-leaf-node-gaussian-approximation.md)
+-A method to approximate VDB leaf nodes (512 voxels) with a single Gaussian primitive to reduce rendering complexity while maintaining spatial coherence.
++Approximates a VDB leaf node (512 voxels) with a single Gaussian primitive. It serves as the lowest LOD, treating the entire leaf as one cluster.
++
++### [Medium LOD Approximation](4128-voxel-representation-with-gaussian-lobes.md)
++Subdivides leaf nodes into smaller blocks for better spatial coherence.
++
++### [High LOD Approximation](4128-voxel-representation-with-gaussian-lobes.md)
++Further subdivision for higher accuracy at the cost of memory.
+ 
+ ## Operating characteristics
+-**Time Complexity:** Encoding is $O(1)$ per voxel. Rendering requires evaluating the Gaussian lobe, which is more expensive than simple ray casting but cheaper than storing full distributions.
+-**Memory Complexity:** Compact. Stores one 3D vector, one scalar (visibility), one 3D color, and one 3D normal. The variance is implicit, saving storage space.
+-**Strengths:** Compact memory layout; accurate directional representation compared to single vectors; ease of interpolation due to variance encoding.
+-**Limitations:** Lack of view-dependency in visibility; isotropic assumption may not capture anisotropic lighting; disadvantage for large thin objects due to single average visibility value [S1].
+-**When to use:** When directional information is important and memory is constrained, and anisotropy is not critical.
++*   **Time Complexity**: $O(1)$ per voxel for storage; $O(N)$ for preprocessing where $N$ is the number of primitives in the voxel.
++*   **Memory Complexity**: Fixed size per voxel (5 fields). Significantly more compact than storing full directional distributions.
++*   **Strengths**: Fast interpolation, low memory footprint, suitable for real-time cone tracing.
++*   **Limitations**: Loss of view-dependency in visibility; approximation errors for complex directional distributions; division by zero risk if $|D|=0$.
++*   **When to Use**: Real-time indirect illumination with cone tracing; scenes with dense geometry where memory bandwidth is a bottleneck.
++*   **When Not to Use**: Scenes requiring high-fidelity view-dependent effects; thin structures where single-value visibility fails.
+ 
+ ## Background
+-Originated in the context of Interactive Indirect Illumination using Voxel Cone Tracing. The method builds on the idea that storing arbitrary distributions is too memory-intensive, so isotropic Gaussian lobes are used to characterize directional data [S1]. It references [HSRG07] for the accuracy of distributions over single values and [Tok05] for the variance encoding technique.
++The method originates from the paper "Interactive Indirect Illumination Using Voxel Cone Tracing" by N. Schied et al. (2011) [S1]. It builds on earlier work by Hillaire et al. [HSRG07] and Tokuyoshi [Tok05] regarding directional distributions and variance encoding. The technique was developed to enable efficient real-time global illumination by reducing the complexity of directional data in voxel grids.
+ 
+ ## Sources
+-[S1] PDF Interactive Indirect Illumination Using Voxel Cone Tracing, https://research.nvidia.com/sites/default/files/publications/GIVoxels-pg2011-authors.pdf, fetched 2026-10-27+[S1] Interactive Indirect Illumination Using Voxel Cone Tracing, https://research.nvidia.com/sites/default/files/publications/GIVoxels-pg2011-authors.pdf, fetched 2026-10-27

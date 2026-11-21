@@ -1,0 +1,547 @@
+Set of classes and utilities based on research and software developed at the Computational Visualization Center. - cvcGL VolRenNode, CUDA raycast backend, and the volren_bunny demo by transfix · Pull Request #323 · transfix/libcvc
+
+cvcGL VolRenNode, CUDA raycast backend, and the volren_bunny demo by transfix · Pull Request #323 · transfix/libcvc · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+transfix
+commented
+Sep 3, 2026
+Copy link
+Copy Markdown
+Owner
+Builds on #320 (the cvc::volren port): a scene-graph node that drops a software raycast into a live cvcGL scene, a CUDA backend, and a demo that exercises both — native and in the browser.
+1. cvc::gl::VolRenNode — the drop-in node
+A GeometryNode subclass that composites a cvc::volren frame into the scene:
+Colour: straight-alpha RGBA8 through the zero-copy texture path (the raycaster's background is forced to black so alpha carries all compositing), drawn in the translucent pass.
+Depth: the frame's eye-space depth map uploads as an R32F texture, and a //VTK::Depth::Impl fragment replacement converts it to window z using the live camera's near/far as uniforms (VTK refits the clip range every frame). Volume pixels therefore depth-test per pixel against opaque geometry — the node test proves it with a wall that occludes the volume on one half of the screen while it survives on the other.
+Transform: the node's composed scene-graph world matrix multiplies into each volume's model_transform before every raycast, so a volume follows position/rotation/scale like any node.
+Threading: async worker, one frame in flight, latest camera wins, private thread pool; synchronous fallback on single-threaded wasm.
+2. CUDA backend (opt-in, single-volume v1)
+raycast.cu mirrors the CPU marcher semantically — DDA isosurface traversal, de Boor gradients, trilinear + baked LUT, gradient ramp, window, cut planes, Blinn-Phong, per-cell compositing, depth latch. Compiled --use_fast_math per the voxels_kernels.cu precedent, so parity is asserted image-level.
+Default stays backend::cpu; automatic uses the GPU when the scene fits and falls back silently, cuda demands it and names the reason otherwise.
+scene (512², GTX 1650)
+CPU
+CUDA
+isosurface
+160 ms
+65 ms
+shaded TF + ramp + cut plane
+270 ms
+113 ms
+100% of pixels within 1 LSB, identical depth. 8 parity/dispatch tests.
+3. Renderer fix: exact isosurface cell traversal
+Building the demo exposed a real defect. The legacy model only tested cells a march sample landed in, so cells the ray merely clipped were skipped — silhouettes came out peppered with alpha-0 holes, worse at finer grids. The isosurface path now enumerates every crossed cell with an Amanatides–Woo DDA and merges hits into the compositing stream by ray parameter. TF paths keep the legacy per-cell look. Regression test: IsosurfaceSilhouetteHasNoHoles.
+4. volren_bunny demo (native + wasm)
+bunny_shadow's scene with the mesh bunny replaced by an SDF volume of the same bunny, under the identical StageLighting rig. Add/Remove places up to 9 bunnies on a 3×3 grid purely via model_transform; panel exposes resolution scale, steps, continuous mode, and the backend actually used. One bunny on CUDA: 14 ms / 16.5 Mray/s at 640×360.
+Ships to the wasm gallery. CVC_ENABLE_SDF is now ON for the wasm build — the module compiles clean under Emscripten, so the browser computes the real bunny SDF instead of a stand-in.
+Bugs found and fixed along the way
+Three of these were invisible to a green native build:
+Shader replacements consume their anchor. addFragmentShaderReplacement registers with replaceFirst=true, so it runs ahead of VTK's own substitutions. Desktop leaves //VTK::CustomUniforms::Dec empty; wasm's vtkOpenGLLowMemoryPolyDataMapper declares primitiveSize/usesEdgeValues there, so eating the anchor made every fragment shader in the scene fail to compile — a blank browser demo with all native tests passing. Both replacements now re-emit their anchor.
+The composited frame was upside down. The frame is top-left origin and GeometryNode already flips V, so the quad's UVs had to supply the inverse mapping and supplied it directly. The node test missed it because its volume was a vertically symmetric sphere and its assertions only compared left vs right; it now lifts the volume along the camera's screen-up axis and requires the silhouette to move well above centre.
+CUDA __constant__ tables were uploaded once per process. __constant__ storage is per device, so on a second GPU every marching-cubes table would read zero — and cube_edges[code][0] == 0 means "no isosurface in this cell", so isosurfaces would silently vanish rather than fail. Now tracked per device.
+fminf/fmaxf (IEEE, discards NaN) replaced the CPU's std::min/std::max (keeps a NaN accumulator) in the corner folds, flipping the isovalue-bracket test for a cell whose first corner is NaN.
+cudaGetLastError() reports the last error since it was last read, so an unrelated handled failure was blamed on our launch and forced a spurious fallback.
+backend::automatic promised a silent fallback but only caught cuda_error, letting the kernel's own volren_error escape.
+The 32-hit per-ray cap was documented as unreachable "because the march terminates at opacity_cutoff first". Wrong — the DDA collects every crossing before compositing starts. Behaviour (keep nearest) is right and kept; the comments now state the real divergence instead of denying it.
+Testing
+153 core volren tests + cvcgl_volren_node (offscreen, SKIPs without usable GL) all green; full local suite clean. Browser-verified: no shader errors, volume composites at the right position, upright, animating.
+Follow-ups
+Lift the CUDA single-volume limit (a 9-bunny scene falls back to CPU).
+Resident device-side volume cache so a camera-only change skips the H2D.
+Per-sample opacity-corrected integration mode.
+transfix
+added 6 commits
+September 3, 2026 01:07
+Add cvcGL VolRenNode, exact iso DDA traversal, and the volren_bunny demo
+…
+5dfd9a6
+```
+VolRenNode (cvc::gl) drops a cvc::volren raycast into a live scene:
+- GeometryNode subclass rendering the frame as a translucent textured quad
+  (straight-alpha color, raycast background forced black so the scene shows
+  through); an R32F depth texture + a //VTK::Depth::Impl fragment
+  replacement converts the frame's eye-space depth to window z with live
+  near/far uniforms, so volume pixels depth-test per pixel against opaque
+  scene geometry.
+- The node's composed scene-graph world matrix multiplies into each
+  volume's model_transform before every raycast (mat4 operator* added), so
+  the volume follows position/rotation/scale keys like any node.
+- Async raycast worker (one frame in flight, latest camera wins), private
+  thread pool, synchronous fallback on single-threaded wasm; settings
+  bound to the state tree via an embedded volren state_settings at
+  <node>.volren.* plus resolution_scale/continuous keys.
+
+Renderer: the isosurface path now enumerates every cell the ray crosses
+with an Amanatides-Woo DDA and merges hits into the compositing stream at
+their ray parameter, replacing the legacy test-cells-that-samples-visit
+model whose corner-clipped-cell skips peppered silhouettes with alpha-0
+holes (worse at finer grids). TF paths keep the legacy per-cell sampling
+look. Regression test: IsosurfaceSilhouetteHasNoHoles.
+
+volren_bunny example: SDF v2 of the standing Stanford bunny (0.4-0.6 s at
+64-96^3) raycast live beside the classic mesh bunny under bunny_shadow's
+exact StageLighting rig, spinning through the scene graph, FpsHud + per-
+raycast Mray/s reporting. cvcgl_volren_node test drives the full pipeline
+offscreen: frame reaches pixels, opaque wall occludes the volume per pixel
+via the depth path, transform moves re-raycast; SKIPs without usable GL.
+```
+Ship volren_bunny to the wasm gallery; fix shader-anchor consumption
+…
+15ece3d
+```
+Browser bring-up of the volren demo, verified live in a WebGL2 page.
+
+The blocking bug: GeometryNode::addFragmentShaderReplacement registers with
+replaceFirst=true, so a replacement runs AHEAD of VTK's own substitutions and
+CONSUMES the anchor. Desktop's polydata mapper leaves //VTK::CustomUniforms::Dec
+empty, so native was green; wasm's vtkOpenGLLowMemoryPolyDataMapper declares
+primitiveSize/usesEdgeValues there, and eating the anchor made EVERY fragment
+shader in the scene fail to compile ('primitiveSize': undeclared identifier) --
+a blank demo that no native test could catch. Both replacements now re-emit
+their anchor: uniforms before ours, depth code after (so our gl_FragDepth
+write still wins).
+
+Also: correct the ImGui include (cvc/gl/ImGuiBinding.h, not a ui/Widgets.h
+that never existed -- invisible natively because CVC_ENABLE_IMGUI is off
+there) and add the state_publisher include SceneGraph only forward-declares.
+
+CVC_ENABLE_SDF is now ON for the wasm build: the SDF module compiles clean
+under Emscripten, so the browser computes the real bunny SDF instead of the
+analytic-sphere fallback (which stays compiled in for feature-cut builds).
+
+Demo gains a live control panel -- resolution scale, march steps, continuous
+re-raycast, spin, and a Mray/s readout -- since the raycast raster is the
+headline performance knob, and doubly so in a single-threaded browser.
+
+Gallery: demos.json entry + order slot, deploy-pages verify list, and a
+thumbnail. Verified in-browser: zero shader errors, scene renders, the
+volume bunny's cyan shell composites at the right screen position, and
+2.5% of pixels change between samples (spinning + re-raycasting).
+```
+volren_bunny: volume-only scene, upright on the ground, add/remove up…
+…
+6945fdd
+```
+… to 9
+
+Fixes a real VolRenNode bug and reworks the demo per review.
+
+THE BUG: the raycast frame was composited UPSIDE DOWN. The frame is
+top-left origin and GeometryNode already flips V in the TCoords for that
+reason, so the quad's UVs must supply the inverse mapping; they supplied the
+mapping directly, flipping every frame vertically. A flipped upright bunny
+reads exactly as 'lying down and floating', which is what it looked like.
+The node test missed it because its volume was a vertically symmetric sphere
+and its assertions only compared left vs right -- so the test now lifts the
+volume along the camera's screen-up axis and requires the silhouette to move
+well ABOVE centre (mean row 53.8 vs centre 120; a flipped frame lands at
+~186 and trips the assert).
+
+Demo changes:
+- The mesh bunny is gone: the scene is bunny_shadow's, with the SDF volume
+  standing in for the mesh. The first bunny sits at the origin with its base
+  on the ground, exactly where the mesh bunny stood, and does not move --
+  the gratuitous auto-spin is removed.
+- The translucent shell is off by default. It is an isosurface at a POSITIVE
+  distance, i.e. an offset surface floating outside the bunny in every
+  direction including below its feet, which also read as hovering. Kept
+  behind --shell / a checkbox to show translucent compositing.
+- Add/Remove buttons place up to 9 bunnies on a 3x3 grid (pitch 1.35x the
+  bunny's height, so no overlap), purely via per-volume model_transform on a
+  single VolRenNode. Slot 0 is the origin, the rest ring outward; the stage
+  lighting and the startup camera framing widen with the ring, and the ground
+  is sized for the full grid so nobody stands off the edge. 'Frame all'
+  re-frames on demand.
+- VolRenNode gains setBackend()/backendUsed(), and the demo asks for
+  backend::automatic: one bunny renders on CUDA at 14 ms (16.5 Mray/s at
+  640x360) vs ~62 ms on the CPU. Multi-volume scenes fall back to the CPU
+  (the CUDA path is single-volume in v1) -- 4 bunnies 43 ms, 9 bunnies 71 ms
+  -- and the panel and the perf line both name the backend actually used.
+```
+Add the cvc::volren CUDA backend (opt-in, single-volume v1)
+…
+ae3cf78
+```
+raycast.cu mirrors the CPU marcher semantically -- ray generation, slab
+intersect, Amanatides-Woo isosurface DDA, de Boor spline gradients,
+trilinear sampling, baked-LUT transfer functions, gradient ramp, density
+window, cut planes, Blinn-Phong, per-cell front-to-back compositing and the
+depth latch -- one thread per pixel, 16x16 blocks, per-render H2D of the
+volume and LUT. Compiled with --use_fast_math per the voxels_kernels.cu
+precedent (volume rendering has no bit-equivalence contract), so parity is
+asserted image-level.
+
+Opt-in: raycaster defaults to backend::cpu. backend::cuda demands the GPU
+and names the reason when a scene does not fit; backend::automatic uses it
+when available and falls back silently. v1 renders exactly one volume, <=8
+isosurfaces/lights/cut planes.
+
+Measured on a GTX 1650, 512^2: isosurface 160 ms CPU -> 65 ms CUDA, shaded
+TF + ramp + cut plane 270 ms -> 113 ms; agreement 100% of pixels within
+1 LSB and identical depth. volren_cuda_test adds 8 parity/dispatch tests.
+
+Fixes from the adversarial review of the generated kernel:
+- The marching-cubes __constant__ tables were uploaded under a process-wide
+  call_once, but __constant__ storage is PER DEVICE and cudaMemcpyToSymbol
+  only writes the current one. On a second GPU every table would read zero,
+  and cube_edges[code][0]==0 means 'no isosurface in this cell' -- so
+  isosurfaces would silently vanish rather than fail. Now tracked per device.
+- The corner min/max folds used fminf/fmaxf (IEEE, returns the non-NaN
+  operand) where the CPU uses std::min/std::max (keeps a NaN accumulator),
+  flipping the isovalue-bracket decision for a cell whose first corner is
+  NaN. NaN voxels are in contract, so the folds now match the CPU form.
+- cudaGetLastError() reports the last error since it was last READ, so an
+  unrelated failure some earlier call had already handled would be blamed on
+  our launch and force a spurious fallback; cleared before launching.
+- backend::automatic promises a silent fallback but only caught cuda_error,
+  so a volren_error from the kernel's own validation escaped. Both are now
+  caught for automatic and both propagate for an explicit backend::cuda.
+- The 32-hit per-ray cap was documented as unreachable because 'the march
+  terminates at opacity_cutoff first'. That reasoning is wrong: the DDA
+  collects every crossing before compositing starts, so the cutoff cannot
+  bound it. Behaviour (keep nearest) is right and kept; the comments now
+  state the real, reachable divergence instead of denying it.
+```
+Apply clang-format to the cvcGL/CUDA volren additions
+991fa40
+volren: per-ray volume culling, CUDA multi-volume, anti-aliasing, vol…
+…
+72dd0f9
+```
+…umetric shadows
+
+PERFORMANCE. The march visited every volume at every step just to ask
+cell_index whether it was inside, and almost always was not. A per-ray slab
+test now builds an active list up front, so a step only visits volumes whose
+t-range contains it -- pure work elimination, output byte-identical (proved
+by memcmp). CPU raycast at 640x360, 64^3 volumes:
+
+  volumes    1      2      4      9
+  before  35.4   49.0   47.9   70.4 ms
+  after   37.9   38.6   37.5   47.6 ms
+
+CUDA now renders multi-volume scenes (was exactly one, so a 9-bunny scene
+silently fell back to the CPU): 1 vol 15.6 ms, 2 vols 16.1, 4 vols 28.8,
+9 vols 49.0. A resident device cache keyed on the pinned host buffer keeps
+volumes across renders, so a camera-only change re-launches with no H2D.
+
+ANTI-ALIASING. render_settings::supersample casts n x n rays per pixel on a
+fixed regular sub-pixel grid -- deterministic, because byte-identical output
+across thread counts is a documented contract, which rules out jitter. The
+resolve averages in STRAIGHT-alpha space; the depth map takes the NEAREST
+finite sub-sample rather than the mean, since averaging depth across a
+silhouette invents a surface between foreground and background. n=1 is
+bit-identical to before.
+
+SHADOWS. One orthographic light-view pass per casting light, rendered by the
+same marcher: frame::depth already latches where the light stops (first
+isosurface hit or first depth_alpha_threshold crossing), and for an ortho
+camera that depth IS the light-space depth, with no projection round-trip.
+The main march projects each shaded sample into the map and attenuates the
+light's diffuse+specular. Self- and inter-volume shadows; hard-edged, one
+occluder layer, off by default. The map is cached across camera motion, so
+orbiting a static scene pays nothing. Rejected alternatives are recorded in
+the docs: per-sample shadow rays (15-25x slower), deep shadow maps (needs a
+new per-ray output; the right upgrade for translucent media), half-angle
+slicing (destroys exact MC intersection and the determinism guarantee).
+
+The volume still does NOT cast onto scene geometry -- VolRenNode's quad is
+camera-facing, so VTK's own shadow pass cannot render it from the light. The
+light-view map is public (shadow_view) so a future cvcGL pass can project it.
+
+Review fixes:
+- CRITICAL: VolRenNode's worker caught std::exception, but cvc::volren_error
+  derives from boost::exception ALONE and is not a std::exception -- so every
+  throw out of render() escaped the worker's std::thread and called
+  std::terminate. All three catch sites are catch-all now, with the reason.
+- The dark fringe around every silhouette: the raycast texture is now left
+  PREMULTIPLIED and un-premultiplied in the shader after VTK samples it,
+  because bilinear filtering is only linear in premultiplied space -- filtered
+  straight alpha reads a transparent texel's RGB=0 as black paint.
+- clear_volumes() erased a pending invalidate_device_volume(), handing the
+  volume back to the device cache under the stamp its stale block was
+  installed with. Announcements are now durable, keyed on the buffer.
+- invalidate_device_volumes() drew a distinct generation per volume, so an
+  instanced scene (nine bunnies, one buffer) collided on one cache key with N
+  stamps and re-uploaded N times per render. One stamp per call now.
+- The cache's copy-on-write invariant does not hold for using_cuda() volumes:
+  active_storage() returns the unified block while preWrite() tests the host
+  shared_array, so our pin is invisible and a supported write lands in place.
+  Such volumes are stamped dirty every render.
+- Docs: the CUDA request's bias formula (latch_quantum, not unit_step), the
+  shadow strength range, the gradient_ramp plateau key, and a false claim that
+  a degenerate light direction contributes nothing (its specular lobe does).
+```
+transfix
+commented
+Sep 3, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Pushed the follow-up work: per-ray volume culling, CUDA multi-volume, anti-aliasing, and volumetric shadows.
+Does adding volumes slow it down?
+It did, more than it should have — the march visited every volume at every step just to ask cell_index whether it was inside, and almost always wasn't. A per-ray slab test now builds an active list up front. Pure work elimination, output byte-identical (proved by memcmp).
+volumes
+1
+2
+4
+9
+CPU before
+35.4
+49.0
+47.9
+70.4 ms
+CPU after
+37.9
+38.6
+37.5
+47.6 ms
+CUDA after
+15.6
+16.1
+28.8
+49.0 ms
+1→4 volumes is now essentially flat on the CPU. CUDA also renders multi-volume scenes at last (it accepted exactly one before, so a 9-bunny scene silently fell back to the CPU), plus a resident device cache so a camera-only change re-launches with no host→device upload.
+Note for later: at 9 volumes CUDA (49.0 ms) has caught up with the CPU (47.6 ms) — the GPU advantage erodes as per-thread state grows. Worth profiling before pushing the volume cap higher.
+Anti-aliasing
+render_settings::supersample casts n×n rays per pixel on a fixed regular sub-pixel grid — deterministic, since byte-identical output across thread counts is a documented contract here, which rules out jitter. Resolve averages in straight-alpha space; the depth map takes the nearest finite sub-sample rather than the mean, because averaging depth across a silhouette invents a surface floating between foreground and background. n=1 is bit-identical to before.
+Shadows
+Yes — a second raycast pass from the light, and it's cheaper than it sounds. frame::depth already latches where the light stops (first isosurface hit, or the first depth_alpha_threshold crossing), and for an orthographic light camera that depth is the light-space depth: no projection matrix, no near/far, no depth_to_window_z round-trip. The main march projects each shaded sample into the map and attenuates that light's diffuse+specular. Self- and inter-volume shadows, hard-edged, one occluder layer, off by default. The map is cached across camera motion, so orbiting a static scene pays nothing.
+Rejected alternatives are recorded in the docs rather than left implicit: per-sample shadow rays (exact, but 15–25× slower — a secondary march from every sample), deep shadow maps (the right upgrade for genuinely translucent media; needs a new per-ray output, not just the existing latch), half-angle slicing (would destroy both the exact MC intersection and the determinism guarantee).
+Still missing: the volume casting onto scene geometry. VolRenNode's quad is camera-facing, so VTK's own shadow pass renders nonsense from the light's point of view. The light-view map is public (shadow_view) so a cvcGL pass can project it onto the ground later.
+Review fixes
+The adversarial pass found 15 issues; the notable ones:
+CRITICAL, my bug from the previous round: VolRenNode's worker caught std::exception, but cvc::volren_error derives from boost::exception alone — it is not a std::exception. So every throw out of render() escaped the worker's std::thread and called std::terminate(). All three catch sites are catch-all now, with the reason written down.
+The dark fringe around every silhouette (visible in earlier screenshots): the raycast texture is now left premultiplied and un-premultiplied in the shader after VTK samples it. Bilinear filtering is only linear in premultiplied space; filtered straight alpha reads a transparent texel's RGB=0 as black paint.
+clear_volumes() erased a pending invalidate_device_volume(), handing the volume back to the device cache under the exact stamp its stale block was installed with — so an announced mutation still rendered old voxels. Announcements are durable now, keyed on the buffer.
+invalidate_device_volumes() drew a distinct generation per volume, so an instanced scene (nine bunnies, one shared buffer) collided on one cache key carrying N stamps and re-uploaded N times per render.
+The cache's copy-on-write invariant is false for using_cuda() volumes: active_storage() returns the unified block while preWrite() tests the host shared_array, so the pin is invisible and a supported write lands in place. Those are stamped dirty every render.
+All 187 volren tests plus the GL node test pass; demo verified visually at 1 and 9 bunnies (upright, on the ground, no overlap, no speckle, clean edges).
+transfix
+added 7 commits
+September 3, 2026 17:00
+cvcgl_volren_node: measure the silhouette instead of assuming pixel o…
+…
+8b991d6
+```
+…ffsets
+
+The test sampled at offsets tuned to this machine's framing (24 px left,
+18 px below centre). macOS projects the same scene smaller, so those samples
+landed OUTSIDE the silhouette on pure background and the run aborted --
+'center (255,32,32) body (0,0,0)'. Linux's silhouette is r=41 px, not the
+~66 the naive ortho arithmetic suggests, so the margin was thinner than it
+looked everywhere.
+
+Every probe is now relative to the MEASURED silhouette (centroid + equal-area
+radius): the body sample, the two sides of the wall-occlusion edge, and the
+moved-volume check, which now finds the volume's actual centroid and asserts
+it moved right rather than testing a hard-coded column. A plausibility band on
+the measured radius keeps a genuinely mis-scaled composite -- the failure mode
+a fixed offset was accidentally testing for -- a hard failure.
+```
+cvc::exception derives from std::exception; VolRenNode::converged()
+…
+05c7e1d
+```
+EXCEPTIONS. cvc::volren_error was already declared the way every other libcvc
+module declares its exceptions (volume.h, dimension.h, cuda_utils.h and the
+rest each define their own). The real anomaly was library-wide: cvc::exception
+derived from boost::exception ALONE, so the ubiquitous
+'catch (const std::exception &)' caught NONE of them -- and an exception that
+escapes a std::thread's function is an immediate std::terminate(). That is
+exactly how a rejected volren setting aborted the process instead of dropping
+a frame. cvc::exception now derives from both.
+
+boost::exception has no data members and std::exception::what() is virtual, so
+the existing what()/what_str() contract is unchanged; this only widens which
+handlers see these types. The one behavioural consequence, noted in the header:
+a 'catch (const std::exception &)' placed AHEAD of a cvc-specific handler now
+wins where it previously fell through. Full suite (2906 tests) is green with
+the change, and a behavioural probe confirms all four properties: catchable as
+std::exception, what() intact, still catchable as boost::exception, and a
+specific handler listed first still wins.
+
+CONVERGENCE. cvcgl_volren_node passed standalone but aborted under parallel
+ctest, and the plausibility assertion added in the previous commit is what
+caught it: the silhouette measured r=11.3 (402 px) under load versus r=41.2
+(5324 px) idle -- a STALE frame, not a timing flake.
+
+The cause was a genuine gap in the node's API, not just the test. The test
+waited for 'N ticks with no new frame', but while a raycast is in flight
+tick() deliberately does not relaunch, so a slow frame is indistinguishable
+from a settled one; under load the test sampled a pre-setCamera frame.
+VolRenNode::converged() now reports whether what is ON SCREEN was raycast from
+the live camera, transform and settings with nothing pending. Anything that
+waits for a finished image -- the test, and equally the demo's offscreen PNG
+capture -- must poll it. Verified stable at r=41.2 across repeated runs with
+every core saturated, and all 22 cvcgl tests pass under parallel ctest.
+```
+Document why VolRenNode derives from GeometryNode, not VolumeNode
+…
+72076d0
+```
+The name says 'volume', so VolumeNode looks like the obvious base and a
+future reader will wonder. It is not: VolumeNode is not a general volume
+abstraction, it is a thin wrapper around vtkSmartVolumeMapper -- VTK's own
+GPU raycaster -- whose whole job is handing a vtkImageData plus transfer
+functions to VTK. By the time this node draws, cvc::volren has already
+produced a finished 2D image and depth map, so there is nothing for a volume
+mapper to consume. What the node needs is precisely GeometryNode's machinery
+(aliasing texture upload, shader replacements for the gl_FragDepth write and
+the un-premultiply, shader textures for the depth map, quad re-posing), none
+of which VolumeNode has.
+
+Also records the known wart, so nobody has to rediscover it: public
+inheritance exposes GeometryNode's mesh API (setGeometry, updateVertices,
+updateColors, setRenderMode) which is meaningless here and will corrupt the
+quad if called, and why the clean alternatives -- private inheritance, which
+breaks addGraphicsChild<T>'s shared_ptr conversion, and composition, which
+would duplicate the plumbing -- cost more than they are worth today. And that
+the transfer-function state encoding is deliberately shared with VolumeNode so
+one editor drives either renderer.
+```
+Fix the two CI failures: Windows macro collisions and a Debug-timeout…
+…
+0bda78b
+```
+… test
+
+WINDOWS. volren_cuda_test declared 'const cvc::volume small', and the Windows
+SDK's rpcndr.h has '#define small char' -- so MSVC saw 'cvc::volume char' and
+rejected the whole translation unit. Renamed to 'tiny'.
+
+Scanning for the sibling landmines found two more already in the tree that
+would have broken the NEXT Windows run: volren_render_test used 'near' and
+'far' as local names, and minwindef.h defines both as EMPTY macros, so the
+declarations would have vanished into syntax errors. Renamed to nearBall and
+farBall. Each rename carries a comment naming the header, so the next person
+does not rediscover this.
+
+DEBUG TIMEOUT. VolrenRenderTest.SelfShadowingHasNoAcne timed out in the
+Debug+gRPC job. It builds four light-view shadow maps at the 512-texel default,
+where the light pass alone is 16x the main pass (512^2 vs 128^2 rays) -- fine
+in Release at 1.27 s, but Debug is untenably slower and CI caps a PR test at
+300 s. Pinned this test's shadow map to 128 texels: 1.27 s -> 0.36 s.
+
+That makes the test STRICTER rather than weaker, which is why it is the right
+knob: coarser light-map texels mean a larger depth step per texel and so more
+opportunity for a surface to shadow itself, and self-shadow acne is precisely
+what the test rules out.
+```
+volren: deep shadow maps, soft shadows, SDF ambient occlusion, CUDA m…
+…
+68d55ee
+```
+…ulti-volume perf
+
+PERFORMANCE. Profiling first, and it killed every obvious suspect with a
+number: the kernel is 98.3% of wall time (host staging, the resident cache and
+the per-ray active list are all noise), warps run 24.7-29.2 of 32 lanes so
+divergence is a rounding error, and forcing occupancy up made it WORSE
+(32 -> 157 ms at maxrregcount 64 -- the working set is genuinely needed).
+
+The real cause, from fitting time against DDA cells walked: the GPU is 4.58x
+faster than the CPU on the fixed per-ray march but 0.67x on the marginal
+isosurface-DDA cell -- 1397 FP64 ops are ~98% of FP issue slots at sm_75's
+1/32 double rate, and the DDA walked every cell BEHIND an opaque isosurface
+because collection and compositing are separate phases, so the opacity cutoff
+could not bound it. Terminating the walk once the kept hits saturate is
+byte-identical; rebasing the per-cell MC/triangle math to float costs 0.017%
+of pixels. One bunny with shadows now renders in 10.7 ms at 21.6 Mray/s.
+
+DEEP SHADOW MAPS. The light-view pass now emits transmittance as a function of
+depth, not a single latched scalar, so a translucent occluder casts a partial
+shadow and a sample deep inside a volume is attenuated by everything in front
+of it. Hard mode stays as the cheaper option and remains the default.
+
+LIGHTING. Percentage-closer filtering over the map, and ambient occlusion for
+signed-distance volumes -- where one fetch certifies that a whole SPHERE of
+radius f(q) is empty, so a handful of taps is a real neighbourhood measurement
+rather than the noise five shadow rays would give. Both off by default.
+
+Review fixes (2 real bugs of 23 findings):
+- The resident device cache never retired a superseded shadow raster. It
+  retires on a generation mismatch for the SAME key (device, host pointer,
+  length), but each rebuild allocates fresh images, so the replacement never
+  lands on the old address and that check could not fire. Dead blocks sat in
+  the budget evicting live volume blocks and pinning host rasters nobody would
+  read again. Added raycast_cuda_forget_host_buffer(); the raycaster drops the
+  old rasters before releasing them.
+- pcf_taps == 1 was NOT byte-identical, though documented so in two places:
+  pcf_half_width() collapsed it to a single-tap lookup while the slope bias
+  still widened by (1 + 2*radius), biasing for a footprint that was not there.
+  Both bias sites now use detail::pcf_effective_radius, so the bias stops
+  widening exactly when the footprint collapses. The render-level inertness
+  test passed straight through this because its scene is not bias-sensitive,
+  so the contract is now pinned by a unit test instead.
+
+Also: --help printed a one-line banner and never showed the option table, so
+none of the new flags' help text was reachable. And a pass over the docs the
+reviewers flagged as contradicting the code -- PCF described as unshipped
+future work while it shipped, a profile_out pre-fill precondition no caller
+performs and the kernel does not need, a cuda_shadow_map lifetime comment that
+contradicted the pin its own cache requires, a payload described in bytes that
+is counted in floats, and an upload counter documented as voxels-only after
+shadow rasters joined the same cache.
+```
+Add the missing no-CUDA stub for raycast_cuda_forget_host_buffer
+…
+e782751
+```
+The shadow-raster cache fix declared raycast_cuda_forget_host_buffer in
+raycaster_cuda.h, defined it in raycast.cu, and called it unconditionally from
+raycaster.cpp -- but never stubbed it for builds without CUDA. Every non-CUDA
+configuration failed to link:
+
+  libcvc.so.3.0: undefined reference to
+    cvc::volren::raycast_cuda_forget_host_buffer(void const*)
+
+which is why all seven remaining CI jobs went red at once rather than one
+platform. My own build has CVC_ENABLE_CUDA=ON, so it linked here and the gap
+was invisible locally.
+
+raycaster_cuda_stub.cpp exists for exactly this, and its header comment already
+warns about this class of mistake. Verified the right way this time: configured
+and linked a CVC_ENABLE_CUDA=OFF build locally -- the configuration that was
+never exercised -- and audited every raycast_cuda_* symbol declared in the
+header against the stub's definitions. No other gaps.
+```
+test: rename near/far in volren_cuda_test to unbreak MSVC
+…
+2b608ae
+```
+minwindef.h defines `near` and `far` as empty object-like macros, so
+`volume_settings near;` collapses to `volume_settings ;` and every
+subsequent `near.foo = ...` is a syntax error (C2059). Only MSVC sees
+this; the CUDA branch of the file is behind `#ifndef CVC_ENABLE_CUDA`,
+so a non-CUDA build never compiles the lines at all.
+
+Rename to nearVol/farVol. Comments keep the prose "near"/"far".
+```
+Hide details
+View details
+transfix
+merged commit b517e65
+into
+master
+Sep 4, 2026
+13 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

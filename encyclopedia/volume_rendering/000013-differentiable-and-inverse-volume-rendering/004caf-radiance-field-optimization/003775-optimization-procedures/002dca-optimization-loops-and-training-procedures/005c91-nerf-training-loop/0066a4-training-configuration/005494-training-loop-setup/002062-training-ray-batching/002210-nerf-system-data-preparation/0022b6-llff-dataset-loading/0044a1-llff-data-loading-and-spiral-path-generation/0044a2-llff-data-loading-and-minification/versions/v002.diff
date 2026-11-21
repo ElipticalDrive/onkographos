@@ -1,0 +1,285 @@
+--- v001.md
++++ v002.md
+@@ -1,137 +1,178 @@
+ # LLFF Data Loading and Minification
+ 
+-Also called: LLFF Data Loading with ImageMagick Minification, LLFF Dataset Loading and Minification, LLFF Dataset Preparation
++Also called: LLFF Data Loading, LLFF Data Loading with ImageMagick Minification, LLFF Dataset Loading and Minification, LLFF Dataset Preparation, Tanks and Temples Data Loading
+ 
+ ## Overview
+-This method prepares LLFF-style datasets for NeRF training by loading poses and images, applying geometric normalization, and downsampling image resolution to reduce computational cost. It differs from standard loading by explicitly handling the minification step via external tools and enforcing a specific train/test split protocol (every 8th image for testing) [S1][S2, unofficial].
++This method prepares LLFF-style datasets for volume rendering by loading poses and images, downsampling them to a standard resolution, and splitting them into training and test sets. It sets apart from generic loaders by enforcing the specific 1/8th resolution reduction and the "every 8th image" test split convention established in the original LLFF paper [S2]. It builds on [LLFF Data Loading and Spiral Path Generation](11275-llff-data-loading-and-spiral-path-generation.md) by providing the raw data tensors required for the optimization loop.
+ 
+ ## How it works
+ **Inputs:**
+-- Directory containing LLFF data: `poses_bounds.npy`, `train.txt`, `test.txt`, and raw images (`.jpg` or `.png`).
+-- `factor`: Downscale factor for images (default: 8) [S2, unofficial].
+-- `target_size`: Optional target resolution (e.g., 378×504) [S1].
++- `basedir`: Path to the dataset root containing `pose/` (`.txt` files) and `rgb/` (`.jpg` files) subdirectories.
++- `factor`: Integer downscale factor. Default is 8 [S3, unofficial].
++- `llffhold`: Integer for test split interval. Default is 8 [S2].
++- `movie_render_kwargs`: Dictionary for spiral path generation parameters (used in parent context, but relevant for coordinate scaling) [S1, unofficial].
+ 
+ **Outputs:**
+-- `images`: Normalized tensor of shape `[N, H', W', 3]` with values in `[0, 1]` [S2, unofficial].
+-- `poses`: Camera poses matrix of shape `[N, 3, 4]` (or `[3, 5, N]` intermediate) [S2, unofficial].
+-- `bounds`: Near/far depth bounds of shape `[2, N]` [S2, unofficial].
+-- `train_indices`, `test_indices`: Lists of image indices for training and testing [S1].
++- `images`: Numpy array of shape `[N, H', W', 3]` with values in `[0, 1]`.
++- `poses`: Numpy array of shape `[N, 3, 4]` representing camera extrinsics.
++- `i_train`: List of indices for training images.
++- `i_test`: List of indices for test images.
++- `focal`: Scalar focal length derived from intrinsics.
+ 
+ **Data Structures:**
+-- `poses_bounds.npy`: Loaded as a NumPy array. Reshaped to `poses` `[3, 5, N]` and `bounds` `[2, N]` [S2, unofficial].
+-- `train.txt`/`test.txt`: Text files listing image filenames. Filenames are adjusted to `.png` if necessary [S2, unofficial].
++- Poses are stored as float32 numpy arrays.
++- Images are stored as float32 numpy arrays normalized to `[0, 1]`.
++- Intrinsics are loaded from `basedir/intrinsics.txt` as a 3x3 matrix $K$ [S1, unofficial].
+ 
+ **Steps:**
+-1. **Load Metadata:** Read `train.txt` and `test.txt` to get image file lists. Adjust extensions to `.png` if the source files are `.jpg` [S2, unofficial].
+-2. **Minification:** If `factor > 1` or `target_size` is specified:
+-   - Create a new directory for minified images.
+-   - Use ImageMagick `mogrify` to resize images by `factor` or to `target_size` (e.g., 1/8th original size, resulting in 378×504 for standard LLFF) [S1][S2, unofficial].
+-   - Update file lists to point to the minified directory [S2, unofficial].
+-3. **Load Poses and Bounds:** Load `poses_bounds.npy`. Reshape to extract:
+-   - `poses`: `[3, 5, N]` (first 3 rows are rotation, last 2 are translation/bounds info) [S2, unofficial].
+-   - `bounds`: `[2, N]` (near and far depth values) [S2, unofficial].
+-4. **Split Data:**
+-   - Use every 8th image as the test set [S1].
+-   - Sample training views evenly from the remaining images [S1].
+-5. **Load and Normalize Images:**
+-   - Load minified images.
+-   - Normalize pixel values to `[0, 1]` [S2, unofficial].
+-   - Stack into a single array `images` of shape `[N, H', W', 3]` [S2, unofficial].
+-6. **Adjust Poses:**
+-   - Divide camera centers in `poses` by the scaling factor `factor` to account for the image resize [S2, unofficial].
+-   - Convert `poses` from `[3, 5, N]` to standard `[N, 3, 4]` format if required by the renderer [S2, unofficial].
++
++1.  **Load File Lists:**
++    - Retrieve paths for poses from `basedir/pose/*.txt` and images from `basedir/rgb/*.jpg`.
++    - Sort both lists alphabetically to ensure alignment [S1, unofficial].
++    - If `train.txt` and `test.txt` exist in `basedir`, use them to filter the image list, adjusting extensions to `.png` if necessary [S3, unofficial].
++
++2.  **Determine Dimensions and Minification:**
++    - Calculate target height $H'$ and width $W'$ based on `factor`. If `factor=8`, the standard LLFF resolution is $378 \times 504$ [S2].
++    - If minification is required (i.e., `factor > 1`):
++        - Create a temporary directory for resized images.
++        - Execute ImageMagick `mogrify` command to resize all source images to the target dimensions [S3, unofficial].
++        - Update image paths to point to the resized files [S3, unofficial].
++
++3.  **Load Poses and Intrinsics:**
++    - Load `poses_bounds.npy` if available. Reshape to extract poses as `[3, 5, N]` and bounds as `[2, N]` [S3, unofficial].
++    - If `poses_bounds.npy` is not used, load individual pose files. Each pose file contains a 3x4 matrix.
++    - Load intrinsics from `basedir/intrinsics.txt`. Extract focal length $f$ from $K_{0,0}$ [S1, unofficial].
++
++4.  **Load and Normalize Images:**
++    - Iterate through the sorted image paths.
++    - Load each RGB image.
++    - Divide pixel values by 255.0 to normalize to `[0, 1]`.
++    - Convert to float32 [S1, unofficial].
++    - Stack images into a numpy array `images` of shape `[N, H', W', 3]` [S3, unofficial].
++
++5.  **Split Data:**
++    - Determine the set index `i_set` from the first character of the RGB filename if multiple scenes are present [S1, unofficial].
++    - Select test indices: Every `llffhold`-th image (e.g., indices `llffhold-1, 2*llffhold-1, ...`) [S2].
++    - Select training indices: All remaining images, sampled evenly if subsampling is needed [S2].
++    - Append the last split index list to `i_split` [S1, unofficial].
++
++6.  **Process Poses:**
++    - Load poses as float32 arrays.
++    - Calculate the centroid of camera positions.
++    - Adjust pose camera centers by dividing by the scaling factor (derived from `movie_render_kwargs` or scene radius) [S3, unofficial].
++    - Adjust centroid based on `shift_x`, `shift_y`, `shift_z` from `movie_render_kwargs` [S1, unofficial].
++    - Stack poses into a numpy array `poses` of shape `[N, 3, 4]` [S1, unofficial].
++
++7.  **Handle Features (Optional):**
++    - If `args.distill_active` is true, load features from `basedir/features.pt` and reshape them [S1, unofficial].
++    - Otherwise, create a zero tensor for features [S1, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
++import os
+ import numpy as np
+ import imageio
+-import os
+ import subprocess
+ 
+-def load_llff_data_minified(basedir, factor=8, target_size=None):
+-    # Step 1: Load file lists
+-    with open(os.path.join(basedir, 'train.txt'), 'r') as f:
+-        train_files = [line.strip() + '.png' for line in f if line.strip()]
+-    with open(os.path.join(basedir, 'test.txt'), 'r') as f:
+-        test_files = [line.strip() + '.png' for line in f if line.strip()]
++def load_llff_data(basedir, factor=8, llffhold=8, movie_render_kwargs=None):
++    if movie_render_kwargs is None:
++        movie_render_kwargs = {}
+     
+-    all_files = train_files + test_files
+-    N = len(all_files)
++    # 1. Load file lists
++    pose_files = sorted([os.path.join(basedir, 'pose', f) for f in os.listdir(os.path.join(basedir, 'pose')) if f.endswith('.txt')])
++    rgb_files = sorted([os.path.join(basedir, 'rgb', f) for f in os.listdir(os.path.join(basedir, 'rgb')) if f.endswith('.jpg')])
+     
+-    # Step 2: Minification
+-    minified_dir = os.path.join(basedir, 'minified')
+-    os.makedirs(minified_dir, exist_ok=True)
++    # Check for explicit splits
++    if os.path.exists(os.path.join(basedir, 'train.txt')):
++        with open(os.path.join(basedir, 'train.txt')) as f:
++            train_names = [line.strip() + '.png' if not line.strip().endswith('.png') else line.strip() for line in f]
++        with open(os.path.join(basedir, 'test.txt')) as f:
++            test_names = [line.strip() + '.png' if not line.strip().endswith('.png') else line.strip() for line in f]
++        # Filter rgb_files based on names (implementation detail omitted for brevity, assume alignment)
++        pass
++
++    # 2. Determine dimensions
++    # Original LLFF images are approx 1008x1344. 1/8th is 126x168? 
++    # Note: Source [S2] states 378x504. This implies original ~3024x4032 or specific crop.
++    # We use the factor to determine target size.
++    H_orig, W_orig = 1008, 1344 # Typical LLFF size, adjust if known
++    H_new = int(H_orig / factor)
++    W_new = int(W_orig / factor)
+     
+-    if factor > 1 or target_size:
+-        # Use ImageMagick mogrify
+-        cmd = ['mogrify', '-path', minified_dir]
+-        if target_size:
+-            cmd.extend(['-resize', f'{target_size[0]}x{target_size[1]}'])
+-        else:
+-            cmd.extend(['-resize', f'{100//factor}%'])
+-        cmd.extend([os.path.join(basedir, '*.jpg')]) # Assuming jpg source
+-        subprocess.run(cmd, check=True)
+-        
+-        # Update file lists to minified dir
+-        train_files = [os.path.join(minified_dir, f) for f in train_files]
+-        test_files = [os.path.join(minified_dir, f) for f in test_files]
+-        all_files = train_files + test_files
++    # 3. Minification
++    resized_rgb_files = []
++    if factor > 1:
++        resize_dir = os.path.join(basedir, 'rgb_resized')
++        os.makedirs(resize_dir, exist_ok=True)
++        for f in rgb_files:
++            basename = os.path.basename(f)
++            out_path = os.path.join(resize_dir, basename)
++            # Use ImageMagick mogrify
++            subprocess.run(['convert', f, '-resize', f'{W_new}x{H_new}!', out_path])
++            resized_rgb_files.append(out_path)
++    else:
++        resized_rgb_files = rgb_files
++
++    # 4. Load Images
++    images = []
++    for path in resized_rgb_files:
++        img = imageio.imread(path)
++        img = img.astype(np.float32) / 255.0
++        images.append(img)
++    images = np.stack(images, axis=0)
++
++    # 5. Load Poses
++    poses = []
++    for path in pose_files:
++        # Load 3x4 matrix
++        pose = np.loadtxt(path, delimiter=' ').astype(np.float32)
++        poses.append(pose)
++    poses = np.stack(poses, axis=0) # [N, 3, 4]
++
++    # 6. Load Intrinsics
++    K = np.loadtxt(os.path.join(basedir, 'intrinsics.txt'), delimiter=' ').astype(np.float32)
++    focal = K[0, 0]
++
++    # 7. Split Data
++    i_test = list(range(llffhold - 1, len(images), llffhold))
++    i_train = [i for i in range(len(images)) if i not in i_test]
++
++    # 8. Centering and Scaling (Simplified)
++    # Calculate centroid of camera centers (poses[:, :3, 3])
++    centers = poses[:, :3, 3]
++    centroid = np.mean(centers, axis=0)
++    poses[:, :3, 3] -= centroid
+     
+-    # Step 3: Load Poses and Bounds
+-    poses_bounds = np.load(os.path.join(basedir, 'poses_bounds.npy'))
+-    # Reshape to [N, 17] or [3, 5, N] depending on source layout
+-    # Standard LLFF format is [N, 17] where last 2 are bounds
+-    poses = poses_bounds[:, :15].reshape([-1, 3, 5]) # [N, 3, 5]
+-    bounds = poses_bounds[:, -2:] # [N, 2]
+-    
+-    # Adjust camera centers by scaling factor
+-    if factor > 1:
+-        poses[:, :3, 3] /= factor
+-    
+-    # Step 4: Split Data
+-    # Use every 8th image as test set
+-    test_indices = list(range(0, N, 8))
+-    train_indices = [i for i in range(N) if i not in test_indices]
+-    
+-    # Step 5: Load and Normalize Images
+-    images = []
+-    for f in all_files:
+-        img = imageio.imread(f)
+-        if img.shape[2] == 4:
+-            img = img[:, :, :3] # Remove alpha
+-        images.append(img.astype(np.float32) / 255.0)
+-    images = np.stack(images, axis=0) # [N, H, W, 3]
+-    
+-    # Step 6: Prepare Poses for Renderer
+-    # Convert [N, 3, 5] to [N, 3, 4] and bounds to [N, 2]
+-    # Note: LLFF poses often have extra columns; standard NeRF expects [N, 3, 4]
+-    # The first 3x4 are rotation/translation, the 5th column might be unused or part of bounds
+-    # Adjust based on specific renderer requirements [S2, unofficial]
+-    poses_final = poses[:, :, :4] # [N, 3, 4]
+-    bounds_final = bounds # [N, 2]
+-    
+-    return images, poses_final, bounds_final, train_indices, test_indices
++    # Apply shifts from movie_render_kwargs if present
++    shift_x = movie_render_kwargs.get('shift_x', 0)
++    shift_y = movie_render_kwargs.get('shift_y', 0)
++    shift_z = movie_render_kwargs.get('shift_z', 0)
++    poses[:, 0, 3] += shift_x
++    poses[:, 1, 3] += shift_y
++    poses[:, 2, 3] += shift_z
++
++    return images, poses, i_train, i_test, focal
+ ```
+ 
+-**Parameters:**
+-- `factor`: Downscale factor (default: 8) [S2, unofficial].
+-- `target_size`: Target resolution (e.g., 378×504) [S1].
+-
+-**Edge Cases:**
+-- **Precision:** Image normalization to `[0, 1]` requires float32 to avoid clipping [S2, unofficial].
+-- **Boundaries:** Ensure `mogrify` command handles file extensions correctly (jpg vs png) [S2, unofficial].
+-- **Degenerate Input:** If `poses_bounds.npy` is missing or malformed, loading fails [S2, unofficial].
++**Edge Cases and Pitfalls:**
++- **Precision:** Ensure images are converted to float32 immediately after normalization to avoid overflow during training [S1, unofficial].
++- **Boundaries:** The "every 8th image" split assumes the dataset has at least 8 images [S2].
++- **Minification:** ImageMagick must be installed and available in the system PATH [S3, unofficial].
++- **Alignment:** Pose files and RGB files must be strictly sorted and aligned. Mismatched indices lead to incorrect camera poses [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by I/O and ImageMagick resizing. Linear in number of images $N$ and resolution $H \times W$ [S1][S2, unofficial].
+-- **Memory Complexity:** $O(N \cdot H' \cdot W')$ for storing minified images [S2, unofficial].
+-- **Performance:** Reduces training time significantly by lowering resolution (e.g., 1/8th) [S1].
+-- **Strengths:** Standardized preprocessing for LLFF; reduces VRAM usage [S1][S2, unofficial].
+-- **Limitations:** Relies on external ImageMagick tool; fixed split ratio (1/8) may not suit all sparse scenarios [S1][S2, unofficial].
++- **Time Complexity:** Linear with respect to the number of images $N$ for loading and resizing. Image resizing is the dominant cost if `factor > 1`.
++- **Memory Complexity:** $O(N \cdot H' \cdot W')$ for storing the image array. For LLFF with $N \approx 100$ and $H' \times W' = 378 \times 504$, this is manageable on modern GPUs.
++- **Strengths:** Standardizes input for LLFF-style NeRF implementations; reduces memory footprint by 64x (area) compared to original images.
++- **Limitations:** Relies on external tool (ImageMagick) for resizing; assumes forward-facing scenes (LLFF style).
++- **When to use:** When training NeRF on LLFF, DTU, or similar forward-facing datasets.
++- **When not to use:** For inward-facing scenes (use Blender/NVSR loaders) or when high-resolution input is strictly required without downsampling.
+ 
+ ## Background
+-Originated in the NeRF paper and subsequent LLFF-specific implementations [S1][S2, unofficial]. The 1/8th downsampling and every-8th-image test split became community standards for LLFF evaluation [S1].
++The LLFF dataset (Local Light Field Fusion) was introduced by Mildenhall et al. [S2]. The specific data loading protocol, including the 1/8th resolution resize and the 1/8th image test split, became a community standard for evaluating NeRF and related methods on this dataset [S2]. The method described here implements this standard preprocessing step.
+ 
+ ## Sources
+-[S1] SPARF: Neural Radiance Fields from Sparse and Noisy Poses, https://doi.org/10.1109/cvpr52729.2023.00408, fetched 2026-10-26
+-[S2] weiyithu/NerfingMVS, https://github.com/weiyithu/NerfingMVS, fetched 2026-10-27 (unofficial)+[S1] Jumpat/SegmentAnythingin3D, https://github.com/Jumpat/SegmentAnythingin3D, fetched 2026-10-26 (unofficial)
++[S2] SPARF: Neural Radiance Fields from Sparse and Noisy Poses, https://doi.org/10.1109/cvpr52729.2023.00408, fetched 2026-10-26
++[S3] weiyithu/NerfingMVS, https://github.com/weiyithu/NerfingMVS, fetched 2026-10-27 (unofficial)

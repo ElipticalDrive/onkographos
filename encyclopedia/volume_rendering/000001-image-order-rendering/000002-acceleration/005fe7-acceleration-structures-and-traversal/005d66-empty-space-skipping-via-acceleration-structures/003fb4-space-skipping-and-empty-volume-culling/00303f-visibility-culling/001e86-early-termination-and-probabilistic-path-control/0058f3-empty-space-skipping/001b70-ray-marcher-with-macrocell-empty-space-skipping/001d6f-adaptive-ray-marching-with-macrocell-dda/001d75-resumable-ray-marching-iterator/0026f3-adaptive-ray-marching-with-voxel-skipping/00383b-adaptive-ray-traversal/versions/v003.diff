@@ -1,0 +1,200 @@
+--- v002.md
++++ v003.md
+@@ -3,123 +3,104 @@
+ 
+ ## Overview
+-Adaptive ray traversal is a technique for traversing tree-based adaptive mesh refinement (TB-AMR) data that skips empty space and adapts the integration step size to the width of the leaf cell being sampled, thereby avoiding the over-sampling or under-sampling artifacts inherent in fixed-step rendering [S2]. It distinguishes itself from fixed-step methods by dynamically adjusting the sampling resolution to the local data granularity while using low-precision algorithms for rapid empty-space traversal and high-precision algorithms near data [S1, unofficial].
++Adaptive ray traversal is a visibility culling technique for direct volume rendering that accelerates ray marching by distinguishing between empty space and regions near data. It solves the problem of excessive sampling in large empty volumes by using a low-precision traversal algorithm for empty regions and switching to a high-precision algorithm when approaching data. It differs from standard empty-space skipping by dynamically adjusting precision based on proximity to data, rather than using a static skip distance or hierarchical structure like [Adaptive Ray Marching with Voxel Skipping](3870-adaptive-ray-marching-with-voxel-skipping.md).
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A TB-AMR volume (octree structure), a ray (origin and direction), and a transfer function.
+-*   **Output:** Computed sample values and accumulated opacity along the ray.
++**Inputs:** A 3D volume grid, a set of rays, and a pre-computed "vicinity flag" for each voxel.
++**Outputs:** Accumulated color and opacity for each pixel.
++**Data Structures:**
++*   **Volume Grid:** A 3D array of voxels. Each voxel contains a data value (e.g., density) and a boolean `vicinity_flag`.
++*   **Vicinity Flag:** A boolean field set to `true` for all empty voxels that are immediate neighbors (6-connected or 26-connected) of at least one non-empty (data) voxel. All other empty voxels have `vicinity_flag = false`. [S1, unofficial]
+ 
+-**Data Structures:**
+-*   **Octree Nodes:** Contain value ranges (min/max) used for opacity culling.
+-*   **Stack:** A software-maintained stack used for top-down traversal, storing node IDs and bitmask information for parallel corner queries [S2].
+-*   **Vicinity Flags:** A boolean flag assigned to empty voxels neighboring a data voxel [S1, unofficial].
+-
+-**Steps:**
+-1.  **Preprocessing (Vicinity Flags):** Assign all empty voxels neighboring a data voxel a 'vicinity flag' [S1, unofficial].
+-2.  **Ray-Octree Traversal:** Traverse the octree top-down using a software-maintained stack [S2].
+-3.  **Culling:** For each node, query the maximum opacity over its value range using the preintegrated transfer function [S2].
+-    *   If the maximum opacity is 0, skip the node and its children [S2].
+-    *   Otherwise, proceed to sample [S2].
+-4.  **Adaptive Step Sizing:** Advance the ray to the next sample point, where the step size is equal to the width of the leaf cell currently being sampled [S2].
+-5.  **Interpolation (Dual Cell):** When interpolating within a non-boundary region, find the values of the eight corners of the dual cell [S2].
+-    *   Traverse all eight points at once using a bitmask to track which query points require traversal of each child node [S2].
+-    *   Store the bitmask and node ID in the stack [S2].
+-6.  **Boundary Handling:** When interpolating at a level boundary, find the corresponding leaf cells that enclose the virtual unstructured element using a `findLeafCell` traversal, which takes a query point and traverses it to the bottom of the tree [S2].
+-7.  **Sample Computation:** Compute samples for the ray interval using a user-selected reconstruction kernel (e.g., finest, octant, or GTI method) [S2].
++**Algorithm Steps:**
++1.  **Pre-processing:** Iterate through all voxels. For every voxel with non-zero data, mark all its empty neighbors as having `vicinity_flag = true`. [S1, unofficial]
++2.  **Ray Initialization:** For each ray, determine the starting voxel index.
++3.  **Traversal Loop:** While the ray is within the volume bounds:
++    a.  **Check Current Voxel:** Let the current voxel be $V$.
++    b.  **Precision Selection:**
++        *   If $V$ is empty and `V.vicinity_flag` is `false`: Use the **Low-Precision Algorithm**. This algorithm skips multiple voxels at once (e.g., using a coarse step size or integer arithmetic) to rapidly traverse empty space. [S1, unofficial]
++        *   If $V$ is empty and `V.vicinity_flag` is `true`: Switch to the **High-Precision Algorithm**. This algorithm steps one voxel at a time (or with fine granularity) to accurately sample the transition region. [S1, unofficial]
++        *   If $V$ is non-empty: Use the **High-Precision Algorithm** to sample the data. [S1, unofficial]
++    c.  **Advance Ray:** Update the ray position and voxel index based on the selected algorithm's step size.
++    d.  **Termination:** If the ray exits the volume or reaches a maximum opacity threshold, stop.
+ 
+ **Pseudocode:**
+ ```python
+-def adaptive_ray_traversal(ray, octree, transfer_function):
+-    # Stack stores (node_id, bitmask) for parallel corner traversal
+-    stack = []
+-    stack.append((octree.root_id, 0))
++def adaptive_ray_traversal(ray, volume_grid, vicinity_flags):
++    # ray: object with origin, direction, t_max
++    # volume_grid: 3D array of voxel data
++    # vicinity_flags: 3D array of booleans
+     
+-    accumulated_opacity = 0.0
+-    color = (0.0, 0.0, 0.0)
++    # Initialize ray parameters
++    t = 0.0
++    x, y, z = ray.origin
++    dx, dy, dz = ray.direction
+     
+-    # Current ray position and step size
+-    t = ray.origin
+-    step_size = 0.0
++    # Determine initial voxel
++    ix, iy, iz = voxel_indices(x, y, z)
+     
+-    while stack:
+-        node_id, bitmask = stack.pop()
+-        node = octree.get_node(node_id)
++    while t < ray.t_max and inside_volume(ix, iy, iz):
++        is_empty = volume_grid[ix, iy, iz] == 0
++        is_near_data = vicinity_flags[ix, iy, iz]
+         
+-        # Culling: Check if node is fully transparent
+-        max_opacity = transfer_function.query_max_opacity(node.value_range)
+-        if max_opacity == 0:
+-            continue
++        if is_empty and not is_near_data:
++            # Low-precision traversal: skip multiple voxels
++            step_size = COARSE_STEP # e.g., 4 or 8 voxels
++            # Calculate next voxel index directly
++            ix, iy, iz = next_voxel_coarse(ix, iy, iz, dx, dy, dz, step_size)
++            t += step_size * ray.step_length
++        else:
++            # High-precision traversal: step one voxel or small amount
++            step_size = FINE_STEP # e.g., 1 voxel or sub-voxel
++            # Sample if non-empty or near data
++            if not is_empty or is_near_data:
++                sample_color = volume_grid[ix, iy, iz]
++                accumulate(sample_color)
+             
+-        # Determine step size based on leaf cell width
+-        # If node is leaf, step_size = leaf_width
+-        # If node is internal, we may need to traverse deeper or use a heuristic
+-        # For this implementation, we assume we process leaves or subdivide
+-        if node.is_leaf:
+-            step_size = node.width
+-            # Compute sample at current t
+-            sample_value = compute_sample(ray, t, node, transfer_function)
+-            alpha = transfer_function.get_opacity(sample_value)
++            # Advance ray precisely
++            t += step_size * ray.step_length
++            x, y, z = ray.origin + t * ray.direction
++            ix, iy, iz = voxel_indices(x, y, z)
+             
+-            # Front-to-back compositing
+-            color = color + (1.0 - accumulated_opacity) * alpha * sample_value
+-            accumulated_opacity = accumulated_opacity + (1.0 - accumulated_opacity) * alpha
+-            
+-            # Advance ray
+-            t = t + ray.direction * step_size
+-            
+-            # Check if ray is still in volume
+-            if not ray.intersects_volume(t):
+-                break
+-        else:
+-            # Internal node: push children to stack
+-            # In a full implementation, children are pushed in back-to-front order
+-            for child_id in node.children:
+-                stack.append((child_id, 0))
+-                
+-    return color, accumulated_opacity
++    return accumulated_color
+ 
+-def find_dual_cell_corners(ray, t, octree):
+-    """
+-    Finds the 8 corners of the dual cell for interpolation.
+-    Uses bitmask to track which children need traversal.
+-    """
+-    corners = []
+-    # Define the 8 corner offsets relative to the cell center
+-    corner_offsets = get_corner_offsets() 
+-    
+-    for i, offset in enumerate(corner_offsets):
+-        query_point = t + offset
+-        # Traverse octree to find leaf cell containing query_point
+-        leaf_cell = octree.find_leaf_cell(query_point)
+-        corners.append(leaf_cell)
+-        
+-    return corners
++def voxel_indices(x, y, z):
++    # Convert world coordinates to voxel indices
++    # [G] Implementation depends on grid origin and spacing
++    return int(x / spacing), int(y / spacing), int(z / spacing)
++
++def next_voxel_coarse(ix, iy, iz, dx, dy, dz, step_size):
++    # [G] Simple integer stepping for empty space
++    # Assumes ray direction components are non-zero for simplicity
++    # In practice, use a DDA-like approach but with larger steps
++    new_ix = ix + int(sign(dx) * step_size)
++    new_iy = iy + int(sign(dy) * step_size)
++    new_iz = iz + int(sign(dz) * step_size)
++    return new_ix, new_iy, new_iz
+ ```
+ 
+ **Parameters:**
+-*   **Reconstruction Kernel:** User-selected method for computing sample values (e.g., finest, octant, GTI) [S2].
+-*   **Transfer Function:** Preintegrated transfer function supporting arbitrary 1D opacity configurations [S2].
++*   `COARSE_STEP`: Step size for empty space. Typical value: 4–8 voxels. [S1, unofficial]
++*   `FINE_STEP`: Step size for vicinity/data regions. Typical value: 1 voxel or sub-voxel. [S1, unofficial]
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Level Boundaries:** Interpolation at level boundaries requires finding corresponding leaf cells for virtual unstructured elements, which is more complex than non-boundary regions [S2].
+-*   **Precision:** Empty space traversal uses a low-precision algorithm for speed, switching to accurate algorithms only when vicinity voxels are encountered [S1, unofficial].
++**Edge Cases:**
++*   **Degenerate Rays:** Rays parallel to grid axes may cause division by zero in DDA. Handle by checking for zero direction components. [G]
++*   **Precision Errors:** Low-precision skipping might overshoot a vicinity voxel if the step size is too large. Ensure `COARSE_STEP` is small enough to guarantee detection of the vicinity boundary. [G]
+ 
+ ## Subtopics
+ 
+ ### Proximity Clouds
+-An extension of adaptive ray traversal where the distance to the nearest data voxel is pre-computed for each empty voxel [S1, unofficial]. When a ray encounters a proximity voxel with value $n$, it skips the next $n$ voxels because there are no data voxels in between [S1, unofficial]. This allows for larger skips in empty regions compared to simple vicinity flags [S1, unofficial].
++Proximity clouds is an extension of adaptive ray traversal where the distance to the nearest data voxel is pre-computed for each empty voxel. Instead of a binary vicinity flag, each empty voxel stores an integer $n$ representing the number of voxels to the nearest data voxel. When a ray encounters a proximity voxel with value $n$, it skips the next $n$ voxels directly. This allows for larger, data-aware skips than standard vicinity flags. [S1, unofficial]
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the depth of the octree and the density of data. Empty space skipping reduces the number of nodes visited. Adaptive step sizing reduces the number of samples in coarse regions.
+-*   **Memory Complexity:** Requires storage for the octree structure, vicinity flags (or proximity clouds), and the traversal stack.
+-*   **Strengths:** Avoids over-sampling in coarse regions and under-sampling in fine regions, which are artifacts of fixed-step rendering [S2]. Efficiently skips empty space [S1, unofficial].
+-*   **Limitations:** Requires preprocessing to assign vicinity flags or compute proximity clouds [S1, unofficial]. More complex traversal logic than fixed-step methods [S2].
+-*   **When to use:** TB-AMR data with significant variation in resolution and large empty regions [S2].
+-*   **When not to use:** Uniform grid data where fixed-step rendering is sufficient and simpler [S2].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels intersected by rays, but with a significantly reduced constant factor due to skipping. The speedup depends on the volume of empty space.
++*   **Memory Complexity:** $O(V)$ where $V$ is the number of voxels, for storing the vicinity flags or proximity values.
++*   **Strengths:** Efficient for sparse volumes with large empty regions. Simple to implement compared to hierarchical methods.
++*   **Limitations:** Pre-processing time to compute vicinity flags. Performance degrades if the volume is dense (few empty voxels). Precision trade-off between skip speed and accuracy.
++*   **When to Use:** Sparse volumes with well-defined object boundaries.
++*   **When Not to Use:** Dense volumes, volumes with no clear empty space, or when high precision is required throughout.
+ 
+ ## Background
+-Adaptive ray traversal was developed to address the limitations of fixed-step ray traversal in OSPRay 1.8, which could not dynamically adjust opacity when changing step size [S2]. The method was implemented in OSPRay 2.0 to support TB-AMR data [S2]. The concept of assigning vicinity flags to empty voxels and using low-precision traversal for empty space was introduced in earlier literature on direct volume rendering techniques [S1, unofficial]. Proximity clouds were proposed as an extension to further optimize empty space skipping [S1, unofficial].
++Adaptive ray traversal was introduced as a method to accelerate direct volume rendering by exploiting the sparsity of data. It was described in the context of various volume rendering techniques, including PARC (Polygon assisted ray casting). The method relies on pre-computing spatial information (vicinity flags) to guide the ray marching process. [S1, unofficial]
+ 
+ ## Sources
+-[S1] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
+-[S2] PDF CPU Ray Tracing of Tree‐Based Adaptive Mesh Refinement Data, https://publications.sci.utah.edu/publications/Wan2020a/cgf.13958.pdf, fetched 2026-10-27+[S1] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)

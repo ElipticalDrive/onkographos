@@ -1,0 +1,217 @@
+Contribute to aircan80/vimi development by creating an account on GitHub.
+
+Indexed per-tile terrain mesh with per-chunk culling (#373, part 1) by aircan80 · Pull Request #430 · aircan80/vimi · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+aircan80
+commented
+Nov 6, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Review fold (4b4aaa6):
+M1: the terrain FS discard is gone, so terrain keeps early-Z. Chunks past the cut are culled on the CPU, and straddling ones are fully fogged. v_depth is removed.
+L1: moot, since no terrain discard remains.
+L2: View.of(camera, w, h, cut) takes the frame's fog.cut(), so the CPU cull (objects and terrain) and the shaders share one cut value. A test checks that a lower cut culls a chunk.
+L3: a static check, plus a test, that terrain and water vertex limits are ≤ 65536 for the u16 indices.
+L4: per-slot scratch (visible, ranges) is sized once per tile generation, with an allocation-free visibleRanges overload.
+L5: new test with the camera exactly on a chunk edge at 3 pitches; both adjacent chunks stay visible. New nativeGpuWorldStreamTerrainCapture task captures authored fallback and textured frames, near and fogged at 600–1133 yd. Against Fog fully at the cut into a horizon sky, alpha to coverage for cutouts (#357, part 2) #407's instanced path (Vulkan):
+frame
+pixels changed
+max change
+fallback, near
+40.7 %
+1 level (RGBA8 vertex colour rounding)
+fallback, fogged
+1.5 %
+1 level
+textured, near
+0 %
+0
+textured, fogged
+0.5 %
+1 level (per-vertex vs per-triangle fog)
+Re-run: :rendering-bgfx:check is green. The owner proof passes on Vulkan and D3D11 (same lines as below), and so do the session and transport proofs.
+Stacked on #407 → #389 → #386 → #369 (base perf/world-fog-horizon). This is part 1 of 3 for #373; parts 2 (MCNR normals, MCCV, shared light block) and 3 (MCSH) wait for #404.
+Problem
+World terrain was drawn one triangle per instance: 65,536 instances × 48 bytes per tile, with every triangle's three positions duplicated into its instance, and no chunk culling. Each tile cost 3 MiB of upload and 196,608 vertex-shader runs per draw. Every draw covered the whole tile, even the half behind the camera (#373, review renderer F3).
+Approach
+One indexed mesh per tile (WorldStreamPackedTile, built on the worker):
+every vertex once, in the reader's order (145 shared vertices per ADT chunk), as 16 bytes: float xyz plus an RGBA8 fallback colour;
+then u16 indices in the reader's triangle order (holes as today);
+static water follows as its own vertex and index range, with its indices relative to its first vertex (drawn with startVertex).
+Size: a full tile is now 987,136 bytes of geometry instead of 3,145,728. The worst case with water is 1,609,728 bytes (was 3,932,160). MAX_PAYLOAD_BYTES goes from 5,330,260 to 3,007,828.
+The fallback colour (untextured or uncovered texels) keeps the old light and altitude tint, from the area-weighted vertex normal instead of each face's normal. It's smooth instead of faceted until part 2 brings real MCNR lighting. Textured terrain samples exactly as before.
+Chunk culling. Terrain triangles form runs of consecutive triangles of one chunk, keyed by first vertex / 145. Each run gets a world bounding sphere. An unusual mesh with more than 1,024 runs becomes one run.
+drawTerrain tests every run with the frame's WorldStreamObjectCulling.View (the same frustum, far-depth and size tests as objects, from Cull exterior object placements on the CPU before drawing (#356) #369).
+It then merges contiguous visible runs into one index range per submit.
+The cut. It used to be per triangle in the VS (instances had all three corners). Since the review fold, terrain has no discard, so it keeps early-Z. Chunks wholly past the cut are culled on the CPU, using the frame's fog cut. The few triangles of a straddling chunk that lie past it are fully fogged into the sky colour (Fog fully at the cut into a horizon sky, alpha to coverage for cutouts (#357, part 2) #407). Objects keep their per-pixel cut.
+Fog is now per vertex, interpolated, instead of the triangle's far depth.
+The renderer keeps per-slot dynamic vertex buffers (69,888 vertices) and index buffers (245,760 u16). Upload slices never cross from the vertex section into the index section, and stay within the existing step and ticket bounds.
+Shaders. world-stream VS/FS now read a_position and a_color0. All 4 profiles are regenerated. The D3D11 test now pins this family's inputs to POSITION0, COLOR0. The instance-semantics rule still covers the families that instance.
+No tile-file format change. This only changes the in-memory packing. dev-objmips (packet v3, World explorer: improve terrain texture and material quality #174) and I agreed that I take the next version bump in part 2.
+Validation
+./gradlew --max-workers=2 :rendering-bgfx:spotlessApply :rendering-bgfx:check :gui:check (sqlite flag): BUILD SUCCESSFUL, rendering-bgfx 427 tests.
+New WorldStreamTerrainMeshTest:
+one run per chunk in tile order, holes included ({0,768, 768,744, 1512,768}), each chunk's sphere bounding only its own chunk;
+a too-fragmented mesh is one run;
+water counts follow the terrain's;
+planning stops when canceled;
+contiguous visible runs merge into ranges;
+chunks behind the camera are culled, while the chunk under it and the one ahead are kept.
+Packed-tile and water tests now pin the exact vertex/index layout, colours, water offset and byte bounds. The atlas-mips ticket budget counts the extra slice at the section boundary.
+GPU, nativeGpuWorldStreamOwnerProof on Vulkan and D3D11:
+```
+WORLD_NATIVE_OWNER_PASS backend=vulkan ... callbacks=3002 ... peakUploadBytes=2385236 ... gpuHeapBytes=119791616, msaaSamples=4]
+WORLD_OBJECT_CULL_PASS samples=4 edgeRed=153/165/200 placements=576 culled=575 objectSubmits=3/1728 cameraUniforms=5 terrainChunks=256 chunksCulled=255 terrainSubmits=1/1 bgfxDraws=5/1730
+WORLD_OBJECT_COVERAGE_PASS partialEdgePixels=100 fogAt2190=ff7da4ba water=ff649cb1
+WORLD_NATIVE_OWNER_PASS backend=d3d11 ... same lines
+```
+Before and after on the proof's 104 tile replacements: release callbacks 4913 → 3002; peak upload 4,543,828 → 2,385,236 bytes; GPU heap 140.8 → 119.8 MB (the ten slot meshes now share bgfx's pooled backing buffers).
+In the down-pitched proof view, 255 of 256 chunks are culled. The frames with culling on and off are pixel-identical.
+The authored colour checks and geographic-side pixel counts pass unchanged.
+New water check: a water patch 16 yd ahead blends teal at 0.4 over the fog-coloured sky behind it, matching the expected colour within 3 levels (649cb1).
+nativeGpuWorldStreamSessionProof and nativeGpuWorldStreamTransportProof pass.
+nativeGpuWorldStreamObjectsProof passes, with one caveat: it flakes about 3 runs in 8 on origin/main too. The helper exits 1 after closeAsync, with an empty stderr, once all pixel checks have passed. I measured 3/8 on main 693d61a, 3/8 on Camera uniforms once per frame, primitive blended sort, sky drawn last (#356) #386, 5/8 on MSAA x4 World target and anisotropic World textures (#357, part 1) #389, 4/8 on Fog fully at the cut into a horizon sky, alpha to coverage for cutouts (#357, part 2) #407 and 1/6 on this branch, so it's pre-existing and not caused by this stack. I'll report it to the PM as its own issue.
+Not measured: fps and vertex throughput on real data (#353). Metal is not GPU-checked.
+Owner visual checks
+Terrain looks the same as before: textures, the fog fade at distance, and the horizon.
+No cracks or missing chunks while turning; chunks entering from the screen edges should already be there.
+Untextured fallback ground (dark green-grey) is now smoothly shaded instead of faceted.
+Water patches still show as a translucent teal.
+Not done (parts 2 and 3 of #373)
+MCNR normals, MCCV colours and the shared light block for terrain, objects and water; that's also the next tile-file version.
+MCSH baked shadows.
+Refs #373
+Draw World terrain as one indexed mesh per tile, culled by ADT chunk
+…
+649a4da
+```
+Each tile packs every vertex once (position and RGBA8 fallback colour)
+with u16 indices in the reader's chunk order, instead of one 48-byte
+instance per triangle; static water follows as its own vertex and index
+range. Terrain triangles form one run per chunk with a bounding sphere,
+and the renderer draws only the runs inside the view, merging
+contiguous ones into one index range. The cut moves to a per-pixel
+discard, where fog is already full.
+
+Refs #373
+```
+This was referenced Nov 6, 2026
+World stream: nativeGpuWorldStreamObjectsProof fails about 3 in 8 runs; helper exits 1 with EOF before CLOSED
+#431
+Closed
+World terrain: indexed per-chunk mesh with normals, vertex colours and baked shadows, lit by a shared light block
+#373
+Open
+Keep early depth for terrain, share the fog cut with the CPU cull
+…
+4b4aaa6
+```
+The terrain fragment shader no longer discards past the cut: chunks
+wholly past it are culled on the CPU and the rest are fully fogged.
+The view's cull depth is the frame's fog cut, mesh vertex limits are
+checked against u16 indices, and the per-frame chunk scratch is reused.
+A capture task records authored terrain frames for before/after
+comparisons.
+
+Refs #373
+```
+This was referenced Nov 6, 2026
+World explorer: improve terrain texture and material quality
+#174
+Open
+World renderer: instanced drawing of repeated models
+#382
+Open
+World terrain: tier-sized splat masks and commit-tied layer lifetime (#174 step 2b-2a)
+#438
+Open
+World helper: opt-in native presentation into a child window (#381, helper half)
+#439
+Open
+World explorer: present frames through a native child window (Windows first)
+#381
+Open
+Merge branch 'perf/world-fog-horizon' into perf/world-terrain-mesh
+9ed5fb3
+This was referenced Nov 6, 2026
+Draw unlit and additive WMO surfaces (#367)
+#447
+Draft
+Draw repeated World objects as instances (#382)
+#456
+Draft
+World water: sloped, overlapping and whole-tile layers, plus layers without vertex heights
+#463
+Open
+World explorer: render source-qualified water
+#171
+Open
+Charge sampled BC object textures their compressed size; raise caps (#374 part 3)
+#466
+Draft
+Blend terrain splat layers in the World shader near the camera (#174 step 2b-2b)
+#477
+Draft
+Draw the WDL horizon in the World stream renderer
+#479
+Open
+World explorer: add source-qualified sky, lighting, fog and time of day
+#177
+Open
+World sky and fog from the recorded light tables, behind a property (177-2a)
+#486
+Draft
+World terrain: MCNR normals, vertex MCCV and the shared World light (#373 part 2)
+#487
+Draft
+aircan80
+added 2 commits
+November 6, 2026 04:11
+Merge branch 'perf/world-fog-horizon' into perf/world-terrain-mesh
+47f33aa
+Merge branch 'perf/world-fog-horizon' into perf/world-terrain-mesh
+…
+f256294
+```
+# Conflicts:
+#	rendering-bgfx/build.gradle
+#	rendering-bgfx/src/main/java/com/vibeminer/rendering/bgfx/BgfxWorldStreamRenderer.java
+#	rendering-bgfx/src/test/java/com/vibeminer/rendering/bgfx/WorldStreamNativeProof.java
+```
+aircan80
+mentioned this pull request
+Nov 6, 2026
+Byte-bound the terrain atlas pool before splat defaults on
+#491
+Open
+4 tasks
+Merge branch 'perf/world-fog-horizon' into perf/world-terrain-mesh
+5feba2b
+aircan80
+mentioned this pull request
+Nov 6, 2026
+Roadmap: urgent client-data fixes and World experience work
+#186
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

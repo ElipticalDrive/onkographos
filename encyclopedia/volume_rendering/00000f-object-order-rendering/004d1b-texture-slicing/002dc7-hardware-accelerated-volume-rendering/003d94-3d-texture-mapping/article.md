@@ -1,0 +1,139 @@
+# 3D Texture Mapping
+
+Also called: Rendering Slices with 3D Texture Mapping, Texture-mapped volume rendering (3D texture), Voltx Method, Volume Rendering with Shading via Three-Dimensional Texture Maps, Volume Texturing
+
+## Overview
+3D Texture Mapping is a hardware-accelerated volume rendering technique that represents the volumetric dataset as a single 3D texture stored in GPU memory [S1, S2, unofficial]. It solves the problem of interactive visualization by offloading the computationally intensive interpolation and per-pixel blending operations to dedicated graphics hardware [G]. Unlike 2D texture stack methods, it allows arbitrary slice distances and avoids popping artifacts caused by switching between texture stacks [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar volume dataset of dimensions $n_x \times n_y \times n_z$; camera parameters (view and projection matrices); transfer function (for classification into color/opacity) [G].
+*   **Output:** A 2D image frame buffer [G].
+
+**Data Structures:**
+1.  **3D Texture:** A 3D texture object in GPU memory with resolution $(N_x, N_y, N_z)$ [S2, unofficial].
+    *   $N_x, N_y, N_z$ are the least powers of two such that $N_x \ge n_x$, $N_y \ge n_y$, $N_z \ge n_z$ [S2, unofficial].
+    *   The texture stores the scalar field values (and potentially pre-shaded RGB values if using the Voltx method [S1, unofficial]).
+    *   Texture filtering is set to trilinear interpolation [S2, unofficial].
+2.  **Bounding Cube Geometry:** A set of parallel planes (slices) representing the volume [S2, unofficial].
+    *   The planes are squares in screen space, parallel to the image plane [S2, unofficial].
+    *   The stack of slabs is drawn back-to-front [S2, unofficial].
+
+**Parameters:**
+*   **Texture Resolution:** $(N_x, N_y, N_z)$ [S2, unofficial].
+*   **Scaled Dimensions:** $L_x = N_x \Delta x$, $L_y = N_y \Delta y$, $L_z = N_z \Delta z$, where $\Delta x, \Delta y, \Delta z$ are the voxel spacings [S2, unofficial].
+*   **Bounding Cube Side Length:** $d = (L_x^2 + L_y^2 + L_z^2)^{1/2}$ [S2, unofficial].
+*   **Bounding Cube Corners:** $(\pm d, \pm d, \pm d)$ in the local volume coordinate system centered at the origin [S2, unofficial].
+
+**Steps:**
+
+1.  **Texture Setup:**
+    *   Allocate a 3D texture of size $(N_x, N_y, N_z)$ [S2, unofficial].
+    *   Upload the volume data into the texture [S2, unofficial].
+    *   Set texture filtering to trilinear interpolation [S2, unofficial].
+
+2.  **Coordinate Transformation Setup:**
+    *   Define the mapping from world space $(x, y, z)$ to texture space $(s, t, r)$ for the original orientation [S2, unofficial]:
+        $$ s = \frac{x + \frac{1}{2}n_x\Delta x}{N_x\Delta x} $$
+        $$ t = \frac{y + \frac{1}{2}n_y\Delta y}{N_y\Delta y} $$
+        $$ r = \frac{z + \frac{1}{2}n_z\Delta z}{N_z\Delta z} $$
+    *   This mapping can be represented as a matrix transformation $(s, t, r) = (x, y, z) D^{-1} S T$, where $D$ is a uniform scale by $d$, $S$ is a non-uniform scale by $(d/L_x, d/L_y, d/L_z)$, and $T$ is a translation [S2, unofficial].
+
+3.  **Viewing Angle Transformation:**
+    *   For arbitrary viewing angles, keep the bounding cube stationary in screen space [S2, unofficial].
+    *   Rotate the texture-space coordinates of the corners of the slicing planes using the inverse rotation matrix $R^{-1}$ [S2, unofficial].
+    *   The transformation for arbitrary angles is $(s, t, r) = (x, y, z) R^{-1} D^{-1} S T$ or equivalently $(x, y, z) D^{-1} R^{-1} S T$ [S2, unofficial].
+    *   **Critical Order of Operations:** Rotation must be applied before non-uniform scaling. The correct order of operations on texture coordinates is rotation, then scaling [S2, unofficial].
+
+4.  **Rasterization and Sampling:**
+    *   Render the stack of parallel planes (slices) from back to front [S2, unofficial].
+    *   For each pixel covered by a slice, the GPU hardware performs trilinear interpolation of the 3D texture using the transformed texture coordinates [S2, unofficial].
+    *   The interpolated value is passed to the fragment shader [G].
+
+5.  **Classification and Compositing:**
+    *   In the fragment shader, classify the interpolated scalar value using the transfer function to obtain color $C_i$ and opacity $\alpha_i$ [G].
+    *   Perform front-to-back compositing using the standard equations:
+        $$ C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i $$
+        $$ \alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i $$
+    *   Apply Early Ray Termination (ERT) if $\alpha' > \text{threshold}$ (e.g., 0.95) [G].
+
+**Edge Cases and Pitfalls:**
+*   **Shearing Distortion:** Applying non-uniform scaling before rotation in the texture coordinate transformation causes shearing. The correct order is rotation, then scaling [S2, unofficial].
+*   **Off-Axis Error:** For large window widths or close viewing distances, the effective slab thickness increases slightly with the off-axis angle. This error is at most 4% for normal viewing geometry (600-pixel width, 70 cm distance) but can increase to 14% for 1000-pixel widths [S2, unofficial].
+*   **Texture Stack Switching:** Unlike 2D texture stacks, 3D texture mapping avoids "popping" artifacts caused by switching between texture stacks for different viewing directions [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_3d_texture_volume(volume, camera, transfer_fn):
+    # 1. Texture Setup
+    Nx, Ny, Nz = next_power_of_two(volume.shape)
+    texture = create_3d_texture(Nx, Ny, Nz)
+    texture.data = volume
+    texture.filter = TRILINEAR  # [G] Standard GPU requirement
+
+    # 2. Coordinate Mapping Setup
+    dx, dy, dz = volume.spacing
+    Lx, Ly, Lz = Nx * dx, Ny * dy, Nz * dz
+    d = (Lx**2 + Ly**2 + Lz**2)**0.5
+    # Matrices for original orientation mapping
+    D_inv = diag(1.0/d, 1.0/d, 1.0/d)
+    S = diag(d/Lx, d/Ly, d/Lz)
+    T = translate(volume.nx/(2*Nx), volume.ny/(2*Ny), volume.nz/(2*Nz))
+
+    # 3. Viewing Angle Transformation
+    R_inv = camera.inverse_rotation
+    # Correct order: rotation then scaling to avoid shearing [S2, unofficial]
+    texture_matrix = R_inv @ D_inv @ S @ T
+
+    # 4. Rasterization & 5. Compositing
+    acc_color = [0.0, 0.0, 0.0]
+    acc_alpha = 0.0
+    threshold = 0.95
+
+    for slab in generate_back_to_front_slabs(d, texture_matrix):
+        # Hardware performs trilinear interpolation [S2, unofficial]
+        val = sample_3d_texture(texture, slab.coords)
+        color, alpha = transfer_fn(val)  # [G]
+
+        acc_color = acc_color + (1.0 - acc_alpha) * alpha * color
+        acc_alpha = acc_alpha + (1.0 - acc_alpha) * alpha
+
+        if acc_alpha > threshold:
+            break  # Early Ray Termination [G]
+
+    return acc_color
+```
+
+## Subtopics
+
+### [Hardware-Accelerated Volume Rendering via 3D Texturing](2799-hardware-accelerated-volume-rendering-via-3d-texturing.md)
+Hardware-Accelerated Volume Rendering via 3D Texturing renders volumetric data by storing it as a 3D texture in GPU memory and sampling it using polygonal planes parallel to the image plane. It solves the problem of interactive volume visualization by offloading the computationally intensive trilinear interpolation and per-pixel blending operations to dedicated graphics hardware [G]. Unlike [Shear-Warp](shear-warp.md), which requires a final warp step and performs classification before resampling, this method performs trilinear interpolation followed by classification (or direct compositing) and requires no final warp, resulting in consistent performance for arbitrary viewing angles and higher image quality [G]. It differs from [3D Pixel Texture Classification](6055-3d-pixel-texture-classification.md) by treating the volume as a solid texture sampled by geometry rather than classifying pixels directly, and from [Hardware Shading via Pixel Texture](6056-hardware-shading-via-pixel-texture.md) by relying on hardware interpolation of the volume data itself rather than shading techniques applied to pixel textures [G].
+
+### [3D Pixel Texture Classification](6055-3d-pixel-texture-classification.md)
+3D Pixel Texture Classification is a hardware-accelerated volume rendering technique that maps multi-dimensional voxel attributes to color and opacity using a 3D texture lookup. It solves the problem of efficient, real-time classification by exploiting the parallel nature of GPUs to perform transfer function evaluation during ray casting. It differs from standard 3D texturing by explicitly structuring the lookup texture around specific derivative axes (Gradient Magnitude and Second Derivative) to emphasize boundaries, rather than relying on generic scalar or vector textures.
+
+### [Hardware Shading via Pixel Texture](6056-hardware-shading-via-pixel-texture.md)
+Hardware Shading via Pixel Texture is a technique for adding lighting calculations to texture-memory based volume rendering, addressing the common limitation where such methods lack shading. It distinguishes itself from standard hardware interpolation by encoding surface normals into a 2D pixel texture and using nearest-neighbor lookups to avoid redundancy and truncation errors. This approach increases rendering quality with negligible cost by decoupling shading from the primary volume sampling pipeline.
+
+### Texture Mapping Volume Rendering Optimization
+Reducing texture-mapped polygons is equivalent to reducing the number of samples taken along the ray in an image-order ray casting method [S3, book]. Loading a reduced resolution volume is similar to reducing both the number of rays cast and the number of samples taken along a ray in an image-order method [S3, book]. To achieve faster rendering speeds, the number of texture-mapped polygons used to represent the volume can be reduced [S3, book]. If texture download rates are a bottleneck, a reduced resolution version of the volume can be loaded into texture memory for interaction [S3, book].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of pixels and the number of slices (or samples) per ray [G]. The hardware interpolation is constant time per sample [G].
+*   **Memory Complexity:** $O(N_x N_y N_z)$ for the 3D texture storage [S2, unofficial].
+*   **Performance:** Provides better images than 2D stacks because slice distance can be arbitrarily small and avoids popping caused by texture stack switching [S1, unofficial].
+*   **Strengths:** High image quality due to hardware trilinear interpolation; no final warp step required; consistent performance for arbitrary viewing angles; hardware-accelerated interpolation reduces CPU/GPU shader load for sampling [G].
+*   **Limitations:** Requires hardware support for 3D textures; potential off-axis thickness error for large viewports; non-uniform scaling must be handled carefully to avoid shearing [S2, unofficial].
+*   **When to use:** Interactive visualization of scalar volumes where high quality and arbitrary viewing angles are required, and hardware supports 3D textures [G].
+*   **When not to use:** When memory bandwidth is extremely limited and 3D texture upload is a bottleneck (consider reduced resolution variants [S3, book]); when specific boundary emphasis via gradient-based classification is needed (consider [3D Pixel Texture Classification](6055-3d-pixel-texture-classification.md)) [G].
+
+## Background
+The first implementation of 3D texture mapping for volume rendering was devised by Cabral et al. and ran on SGI Reality Engine workstations [S1, unofficial]. The method was further developed by VanGelder and Kim, who introduced a fast technique to pre-shade the volume on the fly and then slice and composite an RGB volume to obtain an image with shading effects (the Voltx Method) [S1, unofficial]. Meißner et al. provided a method to enable direct diffuse illumination for semi-transparent volume rendering, although multiple passes through rasterization hardware led to performance losses [S1, unofficial]. Dachille et al. proposed a one-pass approach to address this [S1, unofficial]. The technique evolved from earlier 2D texture stack methods, offering superior image quality by allowing arbitrary slice distances and avoiding stack-switching artifacts [S1, unofficial].
+
+## Sources
+[S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S2] o,,ect Volume Rendering with Shading via Three- ..., https://ntrs.nasa.gov/api/citations/19970021689/downloads/19970021689.pdf?attachment=true, fetched 2026-10-29 (unofficial)
+[S3] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)
+[S4] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

@@ -1,0 +1,161 @@
+--- v002.md
++++ v003.md
+@@ -8,49 +8,43 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A scalar volume dataset $V$, a threshold $\tau$ for isosurface detection, an isosurface opacity $\alpha_{iso}$, and a camera position $\mathbf{o}$ inside the volume.
+-*   **Output:** A 2D image where the near surface is shaded and the background is volume-rendered.
++*   **Input:** A scalar volume dataset $V$, a threshold $\tau$ for isosurface detection, an isosurface opacity $\alpha_{iso}$, and a camera position $\mathbf{o}$ inside the volume [G].
++*   **Output:** A 2D image where the near surface is shaded and the background is volume-rendered [S1, unofficial][S2, unofficial].
+ 
+ **Data Structures:**
+-*   **Volume Data:** A 3D grid of scalar values.
+-*   **Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
+-*   **Accumulators:** Color $C_{acc}$ and Opacity $A_{acc}$, initialized to $(0, 0)$.
++*   **Volume Data:** A 3D grid of scalar values [G].
++*   **Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [G].
++*   **Accumulators:** Color $C_{acc}$ and transmittance $T$, initialized to $(C_{surf}, 1.0 - \alpha_{iso})$ [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Ray Initialization:** Define the ray $r(t) = \mathbf{o} + t\mathbf{d}$ starting from the camera position $\mathbf{o}$ inside the volume.
+-2.  **Isosurface Detection:** March along the ray to find the first intersection with the isosurface defined by $f(\mathbf{p}) = \tau$.
+-    *   Sample the volume at discrete intervals.
+-    *   Detect a threshold crossing where the scalar value exceeds $\tau$ [S1, unofficial][S2, unofficial].
+-    *   **Refinement:** Refine the intersection position $t_{hit}$ using a fixed number of bisection or binary search steps to reduce discretization artifacts [S1, unofficial]. This step has virtually no impact on performance [S1, unofficial].
+-    *   **Pitfall:** Small features or silhouettes may require adaptive sampling to handle intersection problems correctly [S1, unofficial].
+-3.  **Surface Shading:** At the hit point $\mathbf{p}_{hit}$, compute the surface normal $\mathbf{n}$ using the gradient $\nabla f$ (via finite differences or tri-cubic filtering) [G]. Apply a local lighting model (e.g., Phong) to compute the shaded color $C_{surf}$ and opacity $\alpha_{iso}$ [S2, unofficial].
+-4.  **DVR Continuation:** Continue ray marching from $t_{hit}$ to the end of the volume domain.
+-    *   Initialize the opacity accumulator with $A_{acc} = 1.0 - \alpha_{iso}$ [S2, unofficial].
+-    *   For each subsequent sample, compute the volume color $C_{vol}$ and opacity $\alpha_{vol}$ based on the transfer function.
+-    *   Composite using front-to-back blending:
+-        $$ C_{out} = C_{acc} + C_{vol} \cdot \alpha_{vol} \cdot A_{acc} $$
+-        $$ A_{acc} = A_{acc} \cdot (1 - \alpha_{vol}) $$
+-    *   The volume behind the surface is rendered with unshaded DVR [S2, unofficial].
++1.  **Ray Initialization:** Define the ray $r(t) = \mathbf{o} + t\mathbf{d}$ starting from the camera position $\mathbf{o}$ inside the volume [G].
++2.  **Isosurface Detection:** March along the ray to find the first intersection with the isosurface [S1, unofficial]. Use a fixed number of bisection or binary search steps to refine the intersection position, which has virtually no impact on performance [S1, unofficial]. Small features or silhouettes may require adaptive sampling to handle intersection problems correctly [S1, unofficial].
++3.  **Surface Shading:** At the hit point, compute the surface color using semi-transparent shading to provide surface information [S2, unofficial].
++4.  **DVR Continuation:** Continue ray marching from the hit position to the end of the volume domain [S1, unofficial]. Initialize the transmittance accumulator with $T = 1.0 - \alpha_{iso}$ [S2, unofficial]. For each subsequent sample, compute volume color and opacity based on a transfer function. Composite using front-to-back blending:
++    $$ C_{out} = C_{acc} + C_{vol} \cdot \alpha_{vol} \cdot T $$
++    $$ T = T \cdot (1 - \alpha_{vol}) $$
++    The volume behind the surface is rendered with unshaded DVR [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def hybrid_isosurface_dvr(ray_origin, ray_direction, volume, threshold, alpha_iso):
+-    # Step 1: Find isosurface
+-    t_hit = find_isosurface_intersection(ray_origin, ray_direction, volume, threshold)
++def hybrid_isosurface_dvr(ray_origin, ray_direction, volume, threshold, alpha_iso, step_size, max_dist):
++    # Step 1: Find isosurface intersection
++    t_hit = find_isosurface_intersection(ray_origin, ray_direction, volume, threshold, step_size, max_dist)
+     
+     if t_hit is None:
+-        # No surface hit, render full DVR (or handle as background)
+-        return render_full_dvr(ray_origin, ray_direction, volume)
++        # No surface hit; fall back to standard DVR from camera [G]
++        return standard_dvr(ray_origin, ray_direction, volume, step_size, max_dist)
+     
+     # Step 2: Shading at hit point
+     hit_point = ray_origin + t_hit * ray_direction
+-    normal = compute_gradient(volume, hit_point)
+-    color_surf = compute_phong_shading(hit_point, normal, ray_direction)
++    normal = compute_normal(volume, hit_point)
++    # Semi-transparent shading provides surface information [S2, unofficial]
++    color_surf = apply_shading(hit_point, normal, ray_direction)
+     
+-    # Step 3: DVR behind surface
++    # Step 3: DVR continuation behind surface
+     color_acc = color_surf
+-    alpha_acc = 1.0 - alpha_iso
++    transmittance = 1.0 - alpha_iso  # Initial opacity accumulation [S2, unofficial]
+     
+-    t_current = t_hit + epsilon
+-    while t_current < ray_length:
++    t_current = t_hit + step_size
++    while t_current <= max_dist:
+         sample_point = ray_origin + t_current * ray_direction
+         value = sample_volume(volume, sample_point)
+@@ -58,8 +52,8 @@
+         
+         # Front-to-back blending
+-        color_acc = color_acc + color_vol * alpha_vol * alpha_acc
+-        alpha_acc = alpha_acc * (1.0 - alpha_vol)
++        color_acc = color_acc + color_vol * alpha_vol * transmittance
++        transmittance = transmittance * (1.0 - alpha_vol)
+         
+-        if alpha_acc < epsilon:
++        if transmittance < 1e-4:
+             break
+             
+@@ -68,22 +62,19 @@
+     return color_acc
+ 
+-def find_isosurface_intersection(origin, direction, volume, threshold):
+-    # Marching cubes or simple step-wise detection
++def find_isosurface_intersection(origin, direction, volume, threshold, step_size, max_dist):
+     t = 0.0
+-    step = 0.1 # Example step size
+-    while t < max_distance:
++    while t <= max_dist:
+         p = origin + t * direction
+         val = sample_volume(volume, p)
+         if val >= threshold:
+-            # Refine with bisection
++            # Refine with fixed number of bisection steps [S1, unofficial]
+             return refine_intersection(origin, direction, t, volume, threshold)
+-        t += step
++        t += step_size
+     return None
+ 
+ def refine_intersection(origin, direction, t_approx, volume, threshold):
+-    # Fixed number of bisection steps
+-    t_low = t_approx - step
++    t_low = t_approx - step_size
+     t_high = t_approx
+-    for _ in range(5): # Example: 5 steps
++    for _ in range(5): # Fixed number of steps [S1, unofficial]
+         t_mid = (t_low + t_high) / 2.0
+         p_mid = origin + t_mid * direction
+@@ -94,4 +85,36 @@
+             t_low = t_mid
+     return t_high
++
++def sample_volume(volume, point):
++    # Trilinear interpolation of the scalar field
++    return volume.interpolate(point)
++
++def apply_transfer_function(value):
++    # Maps scalar value to (color, opacity)
++    return volume.transfer(value)
++
++def compute_normal(volume, point):
++    # Central finite differences
++    eps = 1e-3
++    return volume.gradient(point)
++
++def apply_shading(point, normal, direction):
++    # Simple semi-transparent shading model [S2, unofficial]
++    diffuse = max(0.0, dot(normal, -direction))
++    return volume.color_at(point) * (0.5 + 0.5 * diffuse)
++
++def standard_dvr(origin, direction, volume, step_size, max_dist):
++    color_acc = (0.0, 0.0, 0.0)
++    transmittance = 1.0
++    t = step_size
++    while t <= max_dist:
++        p = origin + t * direction
++        val = sample_volume(volume, p)
++        c, a = apply_transfer_function(val)
++        color_acc = color_acc + c * a * transmittance
++        transmittance = transmittance * (1.0 - a)
++        if transmittance < 1e-4: break
++        t += step_size
++    return color_acc
+ ```
+ 
+@@ -99,5 +122,5 @@
+ *   **Performance:** Shading is expensive, so full ray casting steps compute only the intersection image initially [S1, unofficial]. The refinement step has virtually no impact on performance [S1, unofficial].
+ *   **Scalability:** If the data set is too large to fit into local GPU memory, it must be divided into smaller chunks (bricks) [S1, unofficial].
+-*   **Strengths:** Provides sharp surface detail for the near field while maintaining volumetric context for the background.
++*   **Strengths:** Provides sharp surface detail for the near field while maintaining volumetric context for the background [S1, unofficial][S2, unofficial].
+ *   **Limitations:** Requires adaptive sampling for small features or silhouettes to avoid intersection errors [S1, unofficial].
+ 

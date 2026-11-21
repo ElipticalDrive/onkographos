@@ -1,0 +1,241 @@
+--- v003.md
++++ v004.md
+@@ -4,121 +4,145 @@
+ 
+ ## Overview
+-Structural and Geometric Compression is a method for compressing volumetric surface data by storing depth values and their topological connectivity (surface links) alongside geometric attributes (normals) in a compact, voxel-aligned structure [S1]. It solves the problem of efficiently storing and transmitting complex isosurfaces for ray-casting rendering by avoiding the storage of explicit triangle meshes, instead relying on on-the-fly connectivity reconstruction [S1]. Unlike sibling methods that focus on transform coefficients or block coding of scalar fields, this method explicitly encodes the geometric relationship between neighboring surface points using a sparse linked-list-like structure within a voxel grid [S1].
++Structural and Geometric Compression is a method for compressing volumetric surface data by storing depth values and their topological connectivity (surface links) rather than the full volumetric grid. It solves the problem of high memory usage in ray-casting and voxelization by exploiting the sparsity of surfaces, storing only the depth and normal information for occupied voxel columns. It differs from sibling methods like [Predictive and Differential Coding](4393-predictive-and-differential-coding.md) by explicitly encoding the geometric adjacency of surface points via links, and from [Vector Quantization](907-vector-quantization.md) by preserving the exact geometric structure rather than approximating it with codewords.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-Input is a voxelized representation of a surface (e.g., from particle spheres or isosurface extraction). Output is a compressed data structure consisting of depth values, surface links, and normals, optimized for random access during rendering [S1].
++**Inputs:** A voxelized representation of a surface (e.g., from particle spheres or isosurface extraction).
++**Outputs:** A compressed bitstream containing depth values, surface links, and normals.
+ 
+ **Data Structures:**
+-The core data structure is organized per voxel column (pixel). For each voxel containing surface data, the following fields are stored:
+-1.  **Depth:** A 32-bit floating-point value representing the distance to the surface [S1].
+-2.  **Surface Links:** A 32-bit word comprising four 1-byte entries, each storing a link to one of the four direct neighbors (up, down, left, right) of the current depth value [S1].
+-3.  **Normals:** A 32-bit word storing the surface normal, compressed using octahedron normal encoding with two 16-bit normalized integers [S1].
++The data is organized per voxel column (pixel). For each occupied column, the following fields are stored:
++1.  **Depth Values:** Stored in 32-bit floating-point format ($f32$). Multiple layers (entry/exit) may be stored for translucency.
++2.  **Surface Links:** A 32-bit word storing links to the four direct neighbors (up, down, left, right) in the 2D projection. Each neighbor link is stored in 1 byte ($u8$).
++3.  **Normals:** Stored in parallel to the depth array. Compressed into a 32-bit word using octahedron normal encoding, consisting of two 16-bit normalized integers ($u16$).
+ 
+ **Steps:**
+-1.  **Voxelization/Extraction:** Identify voxels that overlap the surface of the input geometry (e.g., particle spheres) [S1].
+-2.  **Depth Storage:** Store the depth value for each surface voxel in 32-bit float format [S1].
+-3.  **Link Generation:** For each depth value, determine links to its four direct spatial neighbors. Store these links as four 1-byte values, packing them into a single 32-bit word [S1].
+-4.  **Normal Computation:** Compute surface normals using the Sobel operator to estimate derivatives in two directions [S1].
+-5.  **Normal Compression:** Encode the computed normals into a 32-bit word using octahedron normal encoding, which maps the normal vector to two 16-bit normalized integers [S1].
+-6.  **Parallel Storage:** Store the normals in parallel to the surface depth array, reusing the surface link storage logic to allow on-the-fly computation of connectivity during rendering [S1].
+-
+-**Formulas:**
+-*   **Normal Encoding:** The normal $\mathbf{n} = (n_x, n_y, n_z)$ is encoded into two 16-bit integers. The specific mapping uses octahedron encoding [S1].
+-*   **Link Packing:** Four 1-byte neighbor indices are packed into one 32-bit word: $Word = (b_3 \ll 24) | (b_2 \ll 16) | (b_1 \ll 8) | b_0$, where $b_i$ are the 1-byte links [S1].
+-
+-**Parameters:**
+-*   **Depth Precision:** 32-bit float [S1].
+-*   **Link Size:** 1 byte per neighbor [S1].
+-*   **Normal Precision:** Two 16-bit normalized integers [S1].
+-*   **Smoothing Iterations:** Depends on the distance of the processed surface point to the camera, keeping the world-space radius of the filter approximately constant [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Boundary Conditions:** Links to neighbors outside the volume or non-surface voxels must be handled (e.g., null pointers or specific flags), though the sources do not specify the exact encoding for invalid links [G].
+-*   **Precision:** The use of 1-byte links limits the addressing range to 256 neighbors, which is sufficient for local connectivity but requires careful handling of non-local connections if they arise [G].
++1.  **Voxelization/Extraction:** Identify all voxel columns that intersect the surface. For each column, determine the depth values (z-coordinates) of the surface entry and exit points.
++2.  **Link Generation:** For each surface point, determine its connectivity to its four direct 2D neighbors (North, South, East, West).
++    *   If a neighbor exists and is part of the same surface component, store a pointer/reference to that neighbor's data.
++    *   The links are stored in a single 32-bit word: 4 bytes $\times$ 4 neighbors = 32 bits.
++3.  **Normal Computation:** Compute surface normals. The source uses the Sobel operator on the reciprocal of depth values to estimate derivatives [S1].
++4.  **Normal Encoding:** Encode the computed normal vector $(n_x, n_y, n_z)$ into two 16-bit integers using octahedron encoding [MSS*10]. This maps the unit sphere to a square, allowing storage in two signed normalized integers.
++5.  **Storage:** Store the depth ($f32$), links ($u32$), and normals ($u32$) for each column. The links allow on-the-fly computation of surface connectivity during rendering without storing the full mesh topology [S1].
+ 
+ **Pseudocode:**
+ ```python
+ # Pseudocode for encoding a single voxel column's surface data
+-def encode_voxel_column(depth_value, neighbors, normal_vector):
+-    # 1. Store depth
+-    depth_encoded = depth_value # 32-bit float
++def encode_voxel_column(depth_values, neighbors, normals):
++    """
++    Encodes depth, links, and normals for a single voxel column.
+     
+-    # 2. Encode links
+-    # neighbors is a list of 4 neighbor indices/flags
++    Args:
++        depth_values: List of float32 depth values (e.g., entry and exit).
++        neighbors: Dictionary or array of 4 neighbor references (N, S, E, W).
++                   Each neighbor is either None or a reference to the neighbor's data block.
++        normals: List of 3D vectors (nx, ny, nz) corresponding to depth_values.
++    
++    Returns:
++        A tuple of (depth_bytes, link_word, normal_word)
++    """
++    
++    # 1. Encode Depth
++    # Stored as 32-bit floats. For multiple layers, concatenate them.
++    depth_bytes = b''
++    for d in depth_values:
++        depth_bytes += struct.pack('f', d)
++        
++    # 2. Encode Links
++    # 4 neighbors, 1 byte each. 
++    # Note: The source does not specify the exact bit-packing scheme for the 4 bytes 
++    # within the 32-bit word, only that they are stored in one byte each.
++    # We assume a simple concatenation of 4 unsigned bytes.
++    # If a neighbor is missing, a specific value (e.g., 0xFF) might be used, 
++    # but the source does not specify the sentinel value [G].
+     link_word = 0
+     for i, neighbor in enumerate(neighbors):
+-        # Pack each neighbor into 1 byte
+-        link_word |= (neighbor & 0xFF) << (8 * i)
++        if neighbor is not None:
++            # Placeholder for neighbor ID/reference extraction. 
++            # The source implies a direct link storage logic [S1].
++            neighbor_id = get_neighbor_id(neighbor) 
++            link_word |= (neighbor_id & 0xFF) << (8 * i)
++        else:
++            # [G] Assuming 0xFF for no link, as is common in such encodings.
++            link_word |= (0xFF & 0xFF) << (8 * i)
++            
++    # 3. Encode Normals
++    # Octahedron encoding: maps (nx, ny, nz) to two 16-bit integers.
++    # Standard octahedron encoding:
++    # u = nx + ny
++    # v = nz
++    # If u < 0: u = -u, v = -v
++    # Then normalize u, v to [0, 1] and scale to 16-bit range.
++    # The source cites [MSS*10] for this specific encoding.
++    normal_word = octahedron_encode(normals[0]) # Assuming one normal per column for simplicity
+     
+-    # 3. Encode normal
+-    # Octahedron normal encoding
+-    # Map normal vector to two 16-bit integers
+-    nx, ny, nz = normal_vector
+-    # Simplified octahedron encoding logic [G]
+-    # Actual implementation details for octahedron encoding are not fully specified in sources
+-    # Assuming standard octahedron mapping:
+-    abs_x = abs(nx)
+-    abs_y = abs(ny)
+-    if abs_x + abs_y > 1.0:
+-        scale = 1.0 / (abs_x + abs_y)
+-        nx *= scale
+-        ny *= scale
+-    # Map to 16-bit integers
+-    int_x = int((nx + 1.0) * 32767.5)
+-    int_y = int((ny + 1.0) * 32767.5)
+-    normal_encoded = (int_x & 0xFFFF) | ((int_y & 0xFFFF) << 16)
++    return depth_bytes, link_word, normal_word
++
++def octahedron_encode(normal):
++    """
++    Encodes a 3D normal vector into two 16-bit integers using octahedron encoding.
++    Based on [MSS*10] as cited in [S1].
++    """
++    nx, ny, nz = normal
++    # Normalize if not already unit length
++    length = sqrt(nx*nx + ny*ny + nz*nz)
++    if length > 0:
++        nx, ny, nz = nx/length, ny/length, nz/length
+     
+-    return depth_encoded, link_word, normal_encoded
++    # Octahedron projection
++    u = nx + ny
++    v = nz
++    
++    if u < 0:
++        u = -u
++        v = -v
++        
++    # Map to [0, 1] range
++    # The exact scaling factor depends on the implementation in [MSS*10].
++    # Typically, u and v are in [-1, 1] or [0, 1].
++    # Assuming standard mapping to [0, 1] for unsigned integers.
++    u_norm = (u + 1) / 2.0
++    v_norm = (v + 1) / 2.0
++    
++    # Clamp to [0, 1]
++    u_norm = max(0.0, min(1.0, u_norm))
++    v_norm = max(0.0, min(1.0, v_norm))
++    
++    # Scale to 16-bit integer range [0, 65535]
++    u_int = int(u_norm * 65535)
++    v_int = int(v_norm * 65535)
++    
++    # Pack into 32-bit word: two 16-bit integers
++    word = (u_int << 16) | v_int
++    return word
++```
+ 
+-# Pseudocode for decoding during rendering
+-def decode_and_render(depth_encoded, link_word, normal_encoded):
+-    # 1. Retrieve depth
+-    depth = depth_encoded
+-    
+-    # 2. Retrieve links
+-    neighbors = []
+-    for i in range(4):
+-        neighbors.append((link_word >> (8 * i)) & 0xFF)
+-    
+-    # 3. Retrieve normal
+-    int_x = normal_encoded & 0xFFFF
+-    int_y = (normal_encoded >> 16) & 0xFFFF
+-    nx = (int_x / 32767.5) - 1.0
+-    ny = (int_y / 32767.5) - 1.0
+-    # Reconstruct normal from octahedron encoding [G]
+-    # nz = 1.0 - abs(nx) - abs(ny)
+-    # if nz < 0: nz = 0.0
+-    # normal = normalize((nx, ny, nz))
+-    
+-    return depth, neighbors, normal_encoded
+-```
++**Parameters:**
++*   **Depth Precision:** 32-bit float.
++*   **Link Size:** 1 byte per neighbor.
++*   **Normal Precision:** 16-bit integers per component (via octahedron encoding).
++
++**Edge Cases and Pitfalls:**
++*   **Data Coherency:** In parallel implementations, shared vertices between partitions can be disregarded with minimal quality impact [S2].
++*   **Data Balancing:** Critical in parallel processing because the cost to process each triangle is constant time [S2].
++*   **Precision:** The use of 32-bit floats for depth ensures accuracy but increases memory usage compared to quantized formats.
+ 
+ ## Subtopics
+ 
++### [Fractal Compression](5719-fractal-compression.md)
++Fractal compression is a lossy volume compression method that exploits self-similarity within the dataset by mapping each "range block" to a larger, dissimilar "domain block" from the same volume, storing only the affine transformation required to convert the domain block into the range block. Unlike vector quantization, which stores a reference to a codeword, fractal compression stores the geometric relationship between two different-sized blocks, allowing for high compression ratios at the cost of extreme encoding complexity and iterative reconstruction during decoding.
++
+ ### Parallel Edgebreaker
+-A parallel compression algorithm for isosurfaces where each part of the mesh is encoded independently from the others, based on the Edgebreaker algorithm [S2]. Unlike sequential compression, it disregards data coherency (shared vertices) as it has only a small impact on quality, but requires critical data balancing because the cost to process each triangle is constant time [S2]. It increases file size by almost 10% compared to sequential compression but achieves higher speedup due to reduced processing time outweighing the cost of transferring the larger file [S2].
++A parallel compression algorithm for isosurfaces where each part of the mesh is encoded independently from the others, based on the Edgebreaker algorithm [S2]. In parallel compression, data coherency (shared vertices) can be disregarded because it has only a small impact on the quality of results, whereas data balancing is critical because the cost to process each triangle is constant time [S2]. Compared to sequential compression, the parallel version increases the resulting file size by almost 10%, but achieves higher speedup because the time saved in processing outweighs the cost of transferring the larger file [S2]. For dataset XT-52 (374 MB uncompressed): Sequential compression reduced size to 31 MB; Parallel compression with 16 processes reduced size to 32 MB. Transmission over a 1.14 Mbps network took 44min:37sec for uncompressed, 17min:36sec for sequential compressed (31 MB), and 4min:31sec for parallel compressed (32 MB) [S2].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Memory:** The method stores 32 bits for depth, 32 bits for links, and 32 bits for normals per surface voxel, totaling 96 bits (12 bytes) per voxel [S1]. This is significantly more compact than storing full triangle meshes for complex surfaces.
+-*   **Time:** Encoding involves voxelization, smoothing, and link generation. Parallel compression reduces processing time significantly, as demonstrated by the XT-52 dataset [S2].
+-
+-**Measured Performance:**
+-*   On dataset XT-52 (374 MB uncompressed):
+-    *   Sequential compression: 31 MB, transmission time 17 min 36 sec over 1.14 Mbps network [S2].
+-    *   Parallel compression (16 processes): 32 MB, transmission time 4 min 31 sec over 1.14 Mbps network [S2].
+-    *   Uncompressed: 44 min 37 sec [S2].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Enables efficient on-the-fly rendering by storing depth and normals directly accessible per voxel column [S1]. Parallel compression offers significant speedup for large datasets [S2].
+-*   **Limitations:** Parallel compression increases file size by ~10% [S2]. The method is specific to surface rendering and may not be suitable for volumetric data without modification [G].
+-
+-**When to Use:**
+-*   Use when rendering complex isosurfaces with ray casting and efficient random access to depth and normal data is required [S1].
+-*   Use parallel compression when processing time is critical and a slight increase in file size is acceptable [S2].
++*   **Time Complexity:** Encoding complexity is high for fractal compression due to iterative search for self-similar blocks [S1]. Parallel Edgebreaker offers significant speedup over sequential methods, with processing time dominated by constant-time triangle processing [S2].
++*   **Memory Complexity:** Stores only surface data (depth, links, normals) rather than the full volume, leading to significant memory savings for sparse volumes [S1].
++*   **Measured Performance:** On dataset XT-52, parallel compression achieved a 10x speedup in transmission time compared to uncompressed data, and 4x speedup compared to sequential compression [S2].
++*   **Strengths:** High compression ratios for surfaces; efficient rendering via on-the-fly connectivity [S1]; parallelizability [S2].
++*   **Limitations:** Fractal compression has extreme encoding complexity [S1]; parallel methods may have slightly larger file sizes due to lack of global coherency [S2].
++*   **When to use:** When rendering sparse volumetric surfaces (e.g., particle data) and memory bandwidth is a bottleneck [S1]. When parallel processing is available and speed is prioritized over minimal file size [S2].
+ 
+ ## Background
+-The method originates from research on memory-efficient voxelization of particle data and parallel isosurface extraction [S1, S2]. It was developed to address the challenges of storing and transmitting complex surface data for volume rendering, particularly in distributed environments [S2]. The approach leverages the structure of voxel grids to store surface information compactly, using octahedron encoding for normals and a linked-list-like structure for connectivity [S1].
++The method originates from work on memory-efficient on-the-fly voxelization of particle data [S1]. It was developed to address the high memory requirements of storing full volumetric grids for ray-casting. The parallel variant was developed for distributed environments to accelerate isosurface extraction and compression workflows [S2].
+ 
+ ## Sources

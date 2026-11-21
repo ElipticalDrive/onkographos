@@ -1,0 +1,243 @@
+Water-aware photogrammetry and Gaussian splatting for shoreline structures - feat(dense): decimate before TextureMesh to reach post.target_faces by laurigates · Pull Request #109 · laurigates/shore-recon
+
+feat(dense): decimate before TextureMesh to reach post.target_faces by laurigates · Pull Request #109 · laurigates/shore-recon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+laurigates
+commented
+Oct 31, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+What
+Dense now decimates the mesh inside OpenMVS TextureMesh (--decimate <ratio>), so the textured mesh is aimed at post.target_faces before post runs. Two new [dense] keys control it: texture_decimate (default true) and texture_headroom (default 0.95, validated in (0, 1]).
+Why
+Post's seam-keeping decimation stops at 740,903 faces on vartiosaari, above the 500,000 target, because the many-chart OpenMVS atlas blocks collapses (ADR-0012). Collapsing across seams reaches the target but produces texture speckles. Decimating before texturing gives an atlas built for the reduced mesh.
+How
+After ReconstructMesh, Dense::run reads the face count of mesh.ply with the existing ply::element_counts and computes decimate_ratio(target_faces, headroom, faces) = target_faces * headroom / faces. The flag is omitted when the ratio would be 1 or more or the mesh has no faces; the ratio is clamped to 1e-6 because OpenMVS reads 0 as "auto".
+texture_mesh_args(out, ratio) is the single definition of the TextureMesh argument list; openmvs_steps calls it with None, and the run loop replaces the TextureMesh step's arguments with texture_mesh_step_args(out, config), which reads mesh.ply only when texture_decimate is on. Stage::steps is unchanged.
+Stage::config includes post.target_faces when texture_decimate is on, so changing the target invalidates the dense cache; with decimation off it does not. REVISION stays 1: the new [dense] fields already change the fingerprint.
+mesh.ply and the mesh_faces metric remain the undecimated ReconstructMesh output (TextureMesh writes only mesh_textured.glb).
+Docs: configs/defaults.toml and the docs/kickoff.md [dense] block, a "Decimation before texturing" section in ADR-0011, and a cross-reference in ADR-0012. Post's own decimation is unchanged.
+Validation
+Run in the worktree with CARGO_TARGET_DIR set to the shared target:
+cargo fmt --all: exit 0
+cargo clippy --workspace --all-targets -- -D warnings: exit 0
+cargo nextest run: exit 0, 245 passed, 6 skipped. New tests: decimate_ratio_aims_at_the_target_times_headroom, texture_mesh_appends_decimate_only_with_a_ratio, texture_mesh_step_reads_mesh_faces_only_when_decimating, target_faces_is_in_the_config_only_when_decimating (dense), dense_texture_headroom_is_within_zero_exclusive_and_one (core).
+No Python files changed, so pytest was not run.
+Pending on popos (Claude runs it next): re-run dense and post on both datasets, check that each model.glb has at most post.target_faces faces with no post gate warning, and check the mesh videos for texture speckles. These are the issue's acceptance criteria and are not yet verified.
+Started by opencode-go/beam-free (quota ran out mid-task); finished by Claude.
+Closes #55
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01JkCD9B4jmMHK4fDoUedcSh
+feat(dense): decimate before TextureMesh to reach post.target_faces
+…
+eb02255
+```
+Post's seam-keeping decimation stalls at 740,903 faces on vartiosaari
+because the many-chart OpenMVS atlas blocks collapses (ADR-0012).
+Decimating inside TextureMesh gives an atlas built for the reduced mesh.
+
+After ReconstructMesh, dense reads the face count of mesh.ply and passes
+--decimate post.target_faces * dense.texture_headroom / faces. New
+[dense] keys: texture_decimate (default true) and texture_headroom
+(default 0.95, validated in (0, 1]). With decimation on, post.target_faces
+is part of the dense stage config, so changing the target invalidates the
+dense cache. The TextureMesh argument list is defined once, in
+texture_mesh_args, and openmvs_steps uses it.
+
+Refs #55
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JkCD9B4jmMHK4fDoUedcSh
+```
+laurigates
+added
+the
+enhancement
+New feature or improvement
+label
+Oct 31, 2026
+laurigates
+self-assigned this
+Oct 31, 2026
+github-actions
+Bot
+added
+the
+merge:squash
+Merge with Squash and merge
+label
+Oct 31, 2026
+fix(dense): address review findings
+…
+a341a0e
+```
+Move the TextureMesh argument selection out of the run loop into
+texture_mesh_step_args and test it: before, ignoring texture_decimate
+or counting vertices instead of faces left every test green.
+
+Correct the ADR-0011 headroom rationale: post only removes faces, so
+the headroom covers the faces TextureMesh adds when --decimate also
+closes holes in the same Mesh::Clean pass.
+
+Refs #55
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JkCD9B4jmMHK4fDoUedcSh
+```
+laurigates
+commented
+Oct 31, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Review by a separate Claude Opus agent (the beam-free quota is exhausted). Base checked: origin/main is an ancestor of eb02255.
+#
+Finding
+Verdict
+Evidence
+Fix
+1
+The run-loop wiring that picks the TextureMesh arguments had no test
+Confirmed
+Two mutations of Dense::run on eb02255 both left cargo nextest run -p shoreline-dense green (7/7): dropping the texture_decimate check, and reading the vertex count in place of face
+a341a0e: the branch moved into texture_mesh_step_args(out, config). The new test texture_mesh_step_reads_mesh_faces_only_when_decimating fails under both mutations
+2
+ADR-0011 says texture_headroom "leaves room for post removing small components", but post only removes faces (clip_below, remove_small_components), so that step cannot push the count over the target
+Confirmed
+At the pinned OpenMVS commit eeedab7, TextureMesh --decimate calls Mesh::Clean(fDecimate, …, nCloseHoles, …), which decimates first and then fills holes of up to 30 edges, adding faces
+a341a0e: the ADR bullet now gives the hole-filling reason
+Also checked, no defect found:
+--decimate semantics at eeedab7: a face fraction, TargetFaceNum = ROUND2INT(fDecimate*mesh.fn), applied only when the value is below 1.
+The 1e-6 clamp.
+The cache fingerprint (target_faces is in Stage::config only when decimating).
+Rejection of NaN and inf headroom.
+ToolRunner-only process spawning.
+Gates on a341a0e (shared CARGO_TARGET_DIR):
+cargo fmt --all --check: exit 0
+cargo clippy --workspace --all-targets -- -D warnings: exit 0
+cargo nextest run: exit 0, 245 passed, 6 skipped
+pytest: not run, because no Python files changed
+The acceptance criteria (face counts and speckles in the mesh videos) still need the GPU re-run, as the PR body says.
+laurigates
+commented
+Oct 31, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Validation on popos, 2026-10-31/11-01. Release binary built from a341a0e. shoreline-recon run configs/<dataset>.toml --stage video with configs/popos.local.toml, on both datasets. Both exit 0.
+Laajasalo
+Vartiosaari
+ReconstructMesh faces
+1,902,183
+2,711,528
+--decimate passed to TextureMesh
+0.249713
+0.175178
+post mesh_faces_in
+474,975
+474,964
+post mesh_faces (final)
+465,133
+460,739
+post decimation_error
+0
+0
+TextureMesh time (manifest)
+110.8 s (was 455 s)
+102.2 s (was 1377 s)
+Face target: both model.glb are under post.target_faces (500,000). Neither run printed a warning: line, so the "over post.target_faces" gate did not fire.
+Speckles: I checked frames from mesh-arc.mp4 and mesh-drone.mp4 for both datasets (video/217783249e16a922, video/3cb304578df01720). The decks show no black speckles.
+Gates with a private CARGO_TARGET_DIR (a shared target dir mixed shoreline-core builds between parallel worktrees, so I re-ran them): fmt 0, clippy -D warnings 0, nextest 245 passed with 6 skipped.
+TextureMesh is now under 10 min on Vartiosaari, which is #41's first criterion. #41's before/after texture comparison is still open.
+This was referenced Oct 31, 2026
+[Task] dense: reduce TextureMesh time
+#41
+Open
+docs(rules): record GPU-host drop testing, wiped-root and bind-mount traps
+#113
+Merged
+Merge branch 'main' into feat/dense-decimate-before-texture
+06948f6
+claude
+Bot
+commented
+Nov 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @laurigates's task in 44s —— View job
+PR review: decimate before TextureMesh (#109)
+Read the diff against origin/main and the surrounding Dense::run code
+Check correctness, cache fingerprint, validation, tests and docs
+Post the review
+Verdict: I found no correctness bugs. The design is small: texture_mesh_args is the only place that builds the TextureMesh argument list, and decimate_ratio is a pure function. The run-loop branch has a test, and config validation covers NaN and inf. The GPU validation in the earlier comment meets #55's acceptance criteria (465k and 461k faces, no gate warning, no speckles). I have a few small follow-ups, none blocking.
+Should fix before merge
+ADR-0011 still says the validation is pending. docs/adr/0011-splat-and-dense-images.md:77-78 ends with "Pending: re-running dense on both datasets on the GPU host…". The popos run has finished, so replace that bullet with the results: ReconstructMesh faces → --decimate ratio → post mesh_faces for each dataset, TextureMesh time 455 s→111 s and 1377 s→102 s, and "no speckles". The ADR is the long-term record, and the PR comment will be hard to find later.
+Fix this →
+Nits / optional
+The ratio is not recorded in the metrics. Dense::run (crates/dense/src/lib.rs:265-272) records mesh_faces from the undecimated mesh.ply, as intended. The --decimate ratio itself only shows up in the TextureMesh log. You had to piece it together from logs for the validation table, which suggests it should be easier to find. A texture_decimate_ratio metric (or 1.0 when the flag is omitted) would put it in the manifest. The function that builds the arguments could return the ratio along with them.
+mesh.ply header is read twice. It is read once in texture_mesh_step_args and again at line 261. The cost is negligible because only the header is parsed. It only matters if you do item 2, since the face count could then be reused.
+Two tests depend on the default config without checking it. texture_mesh_step_reads_mesh_faces_only_when_decimating and target_faces_is_in_the_config_only_when_decimating load reposalmi-laajasalo.toml and assume texture_decimate comes out true from defaults.toml. If that dataset config ever set texture_decimate = false, the first assert_ne! and the --decimate assertion would fail with a confusing message. Setting config.dense.texture_decimate = true; explicitly at the start of each test fixes this.
+Edge case at the rounding boundary (harmless). A ratio in [0.9999995, 1) formats as 1.000000. OpenMVS only decimates when the value is below 1, so it does nothing in that case, which is the right result. I mention it only so nobody later tightens the check to ratio <= 1.0 expecting a change in behaviour.
+Change in config fingerprint shape. With decimation on, Stage::config returns {dense: {...}, target_faces}. With it off, it returns the bare dense object. That is fine for invalidation and is tested. Keeping REVISION = 1 is also fine: adding the new fields already changes every existing dense fingerprint, so caches built before this PR re-run once. That is expected, given that the output does change.
+Checked, no issues
+--decimate is a face fraction, the 1e-6 clamp stops the value from formatting as 0.000000 (which OpenMVS reads as "auto"), and the flag is skipped for empty meshes and for meshes already under the target.
+Validation: !(h > 0.0 && h <= 1.0) rejects NaN, and the non-finite list also covers dense.texture_headroom.
+The host reads mesh.ply before mount() rewrites the paths, so it reads the host path.
+Processes are still spawned only through ToolRunner, as ADR-0003 requires.
+Stage::steps still lists the log names in run order.
+Docs: defaults.toml, kickoff.md, ADR-0011 and ADR-0012 agree. The headroom explanation (hole filling in Mesh::Clean) matches the review finding.
+I did not run cargo in this job. The PR comments report fmt, clippy and nextest all passing (245 passed, 6 skipped) with a private target dir.
+Hide details
+View details
+laurigates
+merged commit bce84a4
+into
+main
+Nov 2, 2026
+11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+laurigates
+deleted the
+feat/dense-decimate-before-texture
+branch
+November 2, 2026 08:04
+laurigates-release-please
+Bot
+mentioned this pull request
+Nov 2, 2026
+chore(main): release 0.7.0
+#115
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+enhancement
+New feature or improvement
+merge:squash
+Merge with Squash and merge
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

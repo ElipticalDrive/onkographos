@@ -1,0 +1,222 @@
+--- v017.md
++++ v018.md
+@@ -4,99 +4,161 @@
+ 
+ ## Overview
+-Voxel Data Interpolation and Sampling retrieves scalar values, gradients, and transformed colors at arbitrary 3D positions within a dense volume grid [S1, unofficial]. It solves the problem of converting discrete grid data into continuous fields for ray casting or field evaluation [S2, unofficial]. It differs from its siblings by explicitly supporting both interpolation modes (trilinear, nearest neighbor) and specific transfer function input modes (scalar-only vs. scalar-plus-gradient magnitude) within a unified sampling interface [S1, unofficial].
++Voxel Data Interpolation and Sampling is a method for retrieving scalar values, gradients, and transformed colors at arbitrary 3D positions within a dense volume grid [S1, S2, unofficial]. It solves the problem of evaluating a discrete field at non-integer coordinates by applying interpolation modes (nearest neighbor or trilinear) and optional gradient-based transfer function transformations [S1, unofficial]. It differs from its siblings by explicitly exposing both the interpolated value and the gradient magnitude as inputs to a transfer function, a feature highlighted in Blender's Geometry Nodes implementation [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Query position $\mathbf{p} = (x, y, z)$ in grid coordinates; grid dimensions $X_{DIM}, Y_{DIM}, Z_{DIM}$; grid data vectors (scalars, gradients); interpolation mode $INTER\_MODE$; transfer function mode $TRN\_MODE$.
+-*   **Output:** Interpolated scalar value, gradient vector (optional), and transformed color/alpha.
++*   **Input:** Query position $\mathbf{p} = (x, y, z)$ in continuous grid coordinates; grid dimensions $XDIM, YDIM, ZDIM$; interpolation mode $INTER\_MODE$; transfer function mode $TRN\_MODE$.
++*   **Output:** Transformed color/opacity tuple (e.g., RGBA) or raw scalar/gradient values.
+ 
+ **Data Structures:**
+-The volume data is stored in two vectors [S1, unofficial]:
+-1.  `scalars`: `vector<float>` containing density or scalar field values.
+-2.  `gradients`: `vector<glm::vec3>` containing pre-computed gradient vectors.
++The volume data is stored in two parallel vectors [S1, unofficial]:
++1.  `scalars`: `vector<float>` containing scalar values $D_k$.
++2.  `gradients`: `vector<glm::vec3>` containing gradient vectors $\mathbf{G}_k$.
+ 
+ The index for a voxel at integer coordinates $(x, y, z)$ is calculated as [S1, unofficial]:
+-$$ idx = x + (y \cdot X_{DIM}) + (z \cdot X_{DIM} \cdot Y_{DIM}) $$
++$$ \text{index}(x, y, z) = x + (y \cdot XDIM) + (z \cdot XDIM \cdot YDIM) $$
+ 
+ **Parameters:**
+-*   $INTER\_MODE$: Controls interpolation. $1$ for trilinear interpolation, $2$ for nearest neighbor [S1, unofficial].
+-*   $TRN\_MODE$: Controls transfer function input. $1$ for input $(Voxel Value, Voxel Value)$, $2$ for input $(Voxel Value, Gradient Magnitude)$ [S1, unofficial].
++*   $INTER\_MODE$: Integer. 1 for trilinear interpolation, 2 for nearest neighbor [S1, unofficial].
++*   $TRN\_MODE$: Integer. 1 for (Voxel Value, Voxel Value), 2 for (Voxel Value, Gradient Magnitude) [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Boundary Check:** Check if integer coordinates $(x, y, z)$ are within bounds $[0, X_{DIM}-1] \times [0, Y_{DIM}-1] \times [0, Z_{DIM}-1]$. If not, return default value $(0,0,0,0)$ [S1, unofficial].
+-2.  **Gather Data:**
+-    *   If $INTER\_MODE = 2$ (Nearest Neighbor): Retrieve scalar $S$ and gradient $\mathbf{G}$ at $(x, y, z)$ using the index formula.
+-    *   If $INTER\_MODE = 1$ (Trilinear): Retrieve the 8 corner values and gradients of the enclosing voxel. Compute weights based on fractional coordinates $(u, v, w)$ and interpolate $S$ and $\mathbf{G}$ [S1, unofficial]. Note: Some implementations may default to nearest neighbor if trilinear is not fully implemented [S1, unofficial].
+-3.  **Compute Transfer Function Input:**
+-    *   If $TRN\_MODE = 1$: Pass $(S, S)$ to the transfer function transformer.
+-    *   If $TRN\_MODE = 2$: Compute gradient magnitude $M = \|\mathbf{G}\|$. Clamp $M$ to $[0, 1]$. Scale by 256. Pass $(S, M \cdot 256)$ to the transformer [S1, unofficial].
+-4.  **Transform:** Apply the 1D transfer function to the inputs to obtain color and alpha [S1, unofficial].
++1.  **Boundary Check:** Determine if the query point $\mathbf{p}$ falls within the grid bounds $[0, XDIM-1] \times [0, YDIM-1] \times [0, ZDIM-1]$. If outside, return default value $(0,0,0,0)$ [S1, unofficial].
++2.  **Sample Scalar:** Retrieve the scalar value $V$ at $\mathbf{p}$ using the selected $INTER\_MODE$.
++    *   If $INTER\_MODE = 2$ (Nearest Neighbor), round $\mathbf{p}$ to the nearest integer coordinates $(x,y,z)$ and fetch $D_{\text{index}(x,y,z)}$ [S1, unofficial].
++    *   If $INTER\_MODE = 1$ (Trilinear), compute weights for the 8 surrounding voxels and interpolate [S1, unofficial]. *Note: Some implementations default to nearest neighbor if trilinear logic is not fully implemented [S1, unofficial].*
++3.  **Sample Gradient (Conditional):** If $TRN\_MODE = 2$, retrieve the gradient vector $\mathbf{G}$ at $\mathbf{p}$ using the same interpolation mode as the scalar [S1, unofficial].
++4.  **Compute Gradient Magnitude:** If $TRN\_MODE = 2$, calculate the magnitude $M = \|\mathbf{G}\|$ [S1, unofficial].
++5.  **Transform Input:**
++    *   If $TRN\_MODE = 1$, pass $(V, V)$ to the transfer function transformer [S1, unofficial].
++    *   If $TRN\_MODE = 2$, clamp $M$ to $[0, 1]$, scale by 256, and pass $(V, M \cdot 256)$ to the transformer [S1, unofficial].
++6.  **Return:** Output the result of the transformer (typically color and opacity) [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def sample_voxel(x, y, z, scalars, gradients, x_dim, y_dim, z_dim, inter_mode, trn_mode):
++def sample_voxel(p_x, p_y, p_z, scalars, gradients, xd, yd, zd, inter_mode, trn_mode):
+     # 1. Boundary Check
+-    if not (0 <= x < x_dim and 0 <= y < y_dim and 0 <= z < z_dim):
++    if not (0 <= p_x < xd and 0 <= p_y < yd and 0 <= p_z < zd):
+         return (0.0, 0.0, 0.0, 0.0)
+ 
+-    # 2. Gather Data
+-    idx = x + (y * x_dim) + (z * x_dim * y_dim)
+-    
++    # 2. Sample Scalar
+     if inter_mode == 2: # Nearest Neighbor
++        ix, iy, iz = round(p_x), round(p_y), round(p_z)
++        # Clamp to bounds if rounding pushes out
++        ix = max(0, min(ix, xd - 1))
++        iy = max(0, min(iy, yd - 1))
++        iz = max(0, min(iz, zd - 1))
++        idx = ix + iy * xd + iz * xd * yd
+         scalar_val = scalars[idx]
+-        grad_vec = gradients[idx]
+     elif inter_mode == 1: # Trilinear
+-        # TODO: Implement trilinear interpolation using 8 neighbors
+-        # For now, fallback to nearest neighbor as per source note
+-        scalar_val = scalars[idx]
+-        grad_vec = gradients[idx]
++        # Implementation of trilinear interpolation using 8 neighbors
++        # [G] Standard trilinear formula: sum of weights * values
++        scalar_val = trilinear_interpolate(p_x, p_y, p_z, scalars, xd, yd, zd)
+     else:
+-        scalar_val = scalars[idx]
+-        grad_vec = gradients[idx]
++        scalar_val = 0.0
+ 
+-    # 3. Compute Transfer Function Input
++    # 3 & 4. Gradient Handling
++    grad_mag = 0.0
++    if trn_mode == 2:
++        # Retrieve gradient vector at p
++        if inter_mode == 2:
++            ix, iy, iz = round(p_x), round(p_y), round(p_z)
++            ix = max(0, min(ix, xd - 1))
++            iy = max(0, min(iy, yd - 1))
++            iz = max(0, min(iz, zd - 1))
++            idx = ix + iy * xd + iz * xd * yd
++            g_vec = gradients[idx]
++        else:
++            # [G] Trilinear interpolation of gradient vector components
++            g_vec = trilinear_interpolate_vector(p_x, p_y, p_z, gradients, xd, yd, zd)
++        
++        grad_mag = length(g_vec)
++        grad_mag = clamp(grad_mag, 0.0, 1.0)
++        grad_mag = grad_mag * 256.0
++
++    # 5. Transform
+     if trn_mode == 1:
+-        tf_input_1 = scalar_val
+-        tf_input_2 = scalar_val
+-    elif trn_mode == 2:
+-        tf_input_1 = scalar_val
+-        grad_mag = length(grad_vec)
+-        grad_mag_clamped = clamp(grad_mag, 0.0, 1.0)
+-        tf_input_2 = grad_mag_clamped * 256.0
++        input_a = scalar_val
++        input_b = scalar_val
+     else:
+-        tf_input_1 = scalar_val
+-        tf_input_2 = scalar_val
++        input_a = scalar_val
++        input_b = grad_mag
+ 
+-    # 4. Transform (Placeholder for actual transfer function logic)
+-    # The source mentions a "transformer" but does not provide its implementation.
+-    # This step is marked as [G] for the missing transfer function evaluation.
+-    color = evaluate_transfer_function(tf_input_1, tf_input_2)
++    # [G] Apply transfer function logic (e.g., lookup or calculation)
++    # Assuming a simple identity or placeholder for the transformer
++    color = transfer_function_transform(input_a, input_b)
+     
+     return color
+ 
+-def evaluate_transfer_function(input1, input2):
+-    # [G] Standard 1D transfer function evaluation would occur here.
+-    # The source code snippet shows a CubicSpline calculation but does not
+-    # show the final color mapping from the sampled values.
+-    return (input1, input1, input1, 1.0)
++def trilinear_interpolate(x, y, z, data, xd, yd, zd):
++    # [G] Standard trilinear interpolation implementation
++    # Calculate fractional parts
++    fx = x - floor(x)
++    fy = y - floor(y)
++    fz = z - floor(z)
++    
++    # Integer coordinates of the 8 corners
++    x0 = int(floor(x))
++    y0 = int(floor(y))
++    z0 = int(floor(z))
++    x1 = x0 + 1
++    y1 = y0 + 1
++    z1 = z0 + 1
++    
++    # Clamp indices
++    x0 = max(0, min(x0, xd - 1))
++    x1 = max(0, min(x1, xd - 1))
++    y0 = max(0, min(y0, yd - 1))
++    y1 = max(0, min(y1, yd - 1))
++    z0 = max(0, min(z0, zd - 1))
++    z1 = max(0, min(z1, zd - 1))
++    
++    # Helper to get index
++    def get_val(ix, iy, iz):
++        idx = ix + iy * xd + iz * xd * yd
++        return data[idx]
++        
++    # Interpolate
++    c00 = lerp(get_val(x0, y0, z0), get_val(x1, y0, z0), fx)
++    c10 = lerp(get_val(x0, y1, z0), get_val(x1, y1, z0), fx)
++    c01 = lerp(get_val(x0, y0, z1), get_val(x1, y0, z1), fx)
++    c11 = lerp(get_val(x0, y1, z1), get_val(x1, y1, z1), fx)
++    
++    c0 = lerp(c00, c10, fy)
++    c1 = lerp(c01, c11, fy)
++    
++    return lerp(c0, c1, fz)
++
++def lerp(a, b, t):
++    return a + t * (b - a)
++
++def length(v):
++    return (v.x**2 + v.y**2 + v.z**2)**0.5
++
++def clamp(val, min_val, max_val):
++    return max(min_val, min(val, max_val))
++
++def transfer_function_transform(a, b):
++    # [G] Placeholder for actual transfer function logic
++    return (a, a, a, 1.0)
+ ```
+ 
+ ## Subtopics
+ 
++### Sample Grid Index
++Provides low-level access to actual values stored in the grid at integer coordinates without interpolation [S2, unofficial]. Use when exact grid values are required.
++
+ ### Sample Grid
+-High-level node that computes interpolated value at a position [S2, unofficial].
+-
+-### Sample Grid Index
+-Low-level access to actual values at integer coordinates [S2, unofficial].
++Computes the interpolated value at a continuous position in the grid [S2, unofficial]. Use for smooth field evaluation.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ for nearest neighbor. $O(1)$ for trilinear (constant 8 samples).
+-*   **Memory Complexity:** $O(N)$ where $N$ is the number of voxels, storing both scalars and gradients.
+-*   **Strengths:** Simple implementation; supports gradient-based transfer functions for better material appearance [S1, unofficial].
+-*   **Limitations:** Pre-computing gradients increases memory usage by 3x (assuming float scalars and vec3 gradients) [S1, unofficial]. Trilinear interpolation may not be fully implemented in all versions [S1, unofficial].
+-*   **When to use:** When ray casting requires smooth scalar fields and gradient-based opacity control.
++*   **Time Complexity:** $O(1)$ for nearest neighbor. $O(1)$ for trilinear (constant 8 lookups and arithmetic operations).
++*   **Memory Complexity:** $O(N)$ where $N$ is the number of voxels, storing both scalar and gradient vectors [S1, unofficial].
++*   **Strengths:** Simple to implement; supports gradient-based transfer functions which can enhance edge detection in volume rendering [S1, unofficial].
++*   **Limitations:** Trilinear interpolation may not be fully implemented in all reference codebases, defaulting to nearest neighbor [S1, unofficial]. Gradient calculation adds memory overhead.
++*   **When to use:** When arbitrary position sampling is needed for ray casting or field evaluation. Avoid if memory is extremely constrained and gradients are not needed.
+ 
+ ## Background
+-This method originates from a student project for CSE-333 Computer Graphics (2020) implementing volume ray casting [S1, unofficial]. It was designed to support 1D transfer functions and optional gradient-based opacity. The concepts of "Sample Grid" and "Sample Grid Index" are also present in modern geometry node systems like Blender's, where they facilitate field evaluation on voxel grids [S2, unofficial].
++The method originates from volume ray casting implementations, specifically noted in the CSE-333 Computer Graphics 2020 project [S1, unofficial]. It has been adopted in modern 3D software like Blender as part of the Geometry Nodes system for volume grids, providing nodes for sampling grids at positions or indices [S2, unofficial].
+ 
+ ## Sources

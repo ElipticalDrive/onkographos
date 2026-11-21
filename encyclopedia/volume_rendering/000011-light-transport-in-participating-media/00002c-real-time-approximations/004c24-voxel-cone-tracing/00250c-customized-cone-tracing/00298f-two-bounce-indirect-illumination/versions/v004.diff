@@ -1,0 +1,186 @@
+--- v003.md
++++ v004.md
+@@ -4,120 +4,99 @@
+ 
+ ## Overview
+-A three-step GPU-based algorithm for computing two light bounces of indirect illumination for Lambertian and glossy materials at interactive framerates [S1]. It differs from its parent [Customized Cone Tracing](3447-customized-cone-tracing.md) by explicitly separating the capture of incoming radiance from dynamic lights into a sparse voxel octree and using a view-dependent Gaussian-Lobes filtering scheme to store direction distributions, enabling efficient approximation of glossy reflections and color bleeding [S1]. It addresses the limitations of static caching in dynamic scenes by recomputing the radiance distribution per frame [S1].
++A three-step GPU-based algorithm for computing two light bounces of indirect illumination for Lambertian and glossy materials at interactive framerates [S1]. It differs from standard voxel cone tracing by explicitly capturing incoming radiance from dynamic light sources into a sparse voxel octree and filtering it using a view-dependent Gaussian-Lobes representation, enabling efficient approximation of glossy reflections and color bleeding without static caches [S1].
+ 
+ ## How it works
+-The method computes indirect illumination using a two-step approach (capture and filter) followed by final gathering [S1].
++The method computes indirect illumination using a two-step approach: capturing incoming radiance from light sources in octree leaves, filtering/distributing it over octree levels, and performing approximate cone tracing for light transport [S1].
+ 
+ **Inputs:**
+-*   Scene geometry and material properties (specifically Phong specular exponent $k_s$) [S1].
+-*   Dynamic light source positions and intensities [S1].
+-*   Sparse voxel octree hierarchy (pre-existing or built) [S1].
++*   Sparse voxel octree hierarchy (initially empty or containing geometry).
++*   Dynamic light sources (position, color, intensity).
++*   Camera position and view vector.
++*   Surface material properties (diffuse color, specular exponent).
+ 
+ **Outputs:**
+-*   Final color buffer with direct and indirect illumination combined [S1].
++*   Final color for each visible surface fragment, combining direct and indirect illumination.
+ 
+ **Data Structures:**
+-*   **Sparse Voxel Octree:** Stores incoming radiance. Each node/leaf contains a "compact Gaussian-Lobes representation" of the filtered distribution of incoming light directions and energy [S1]. The structure supports mipmap-like levels [S1].
+-*   **Light-View Map:** A rasterization output map where each pixel represents a photon (world position, energy, direction) from a light source [S1].
++*   **Sparse Voxel Octree:** Stores incoming radiance. Each node contains a compact Gaussian-Lobes representation of the filtered distribution of incoming light directions and energy [S1].
++*   **Light-View Map:** A rasterization buffer used to capture photons from light sources [S1].
+ 
+ **Steps:**
+ 
+ 1.  **Capture Incoming Radiance (Photon Splatting):**
+-    *   Rasterize the scene from the perspective of each dynamic light source to generate a light-view map [S1].
+-    *   For each visible surface fragment in the light-view map, splat a photon into the leaves of the sparse voxel octree [S1].
+-    *   The photon stores incoming energy and direction [S1].
+-    *   *Note:* This step assumes the octree structure exists; the exact construction of the octree from geometry is not detailed in the core algorithm description but is implied as a prerequisite [S1].
++    *   Render the scene from the perspective of each dynamic light source using standard rasterization to output a world position map (light-view map) [S1].
++    *   Each pixel in this map represents a photon that bounces off the visible surface fragment [S1].
++    *   Splat these photons into the leaves of the sparse voxel octree hierarchy. The splatting stores the direction and energy of the incoming light [S1].
+ 
+-2.  **Filter and Distribute Radiance (Octree Filtering):**
+-    *   Filter the incoming radiance values from the leaves up to higher levels of the octree (mipmap levels) [S1].
++2.  **Filter and Distribute Radiance (Octree Mipmapping):**
++    *   Filter the incoming radiance values from the leaves into the higher levels of the octree (mipmap) [S1].
+     *   Use a compact Gaussian-Lobes representation to store the filtered distribution of incoming light directions [S1].
+     *   Perform this filtering efficiently in parallel using a screen-space quad-tree analysis [S1].
+-    *   The filtering scheme treats the Normal Distribution Function (NDF) and the Bidirectional Reflectance Distribution Function (BRDF) in a view-dependent way [S1].
+-    *   *Formula/Logic:* The Gaussian-Lobes representation approximates the directional distribution of light. The specific mathematical formulation of the Gaussian-Lobes is not provided in the sources [S1].
++    *   The voxel filtering scheme treats the Normal Distribution Function (NDF) and the Bidirectional Reflectance Distribution Function (BRDF) in a view-dependent way [S1].
+ 
+ 3.  **Final Gathering (Cone Tracing):**
+-    *   Render the scene from the camera using deferred shading to identify surface points requiring indirect illumination [S1].
+-    *   For each such surface point, combine direct and indirect illumination [S1].
+-    *   Perform approximate cone tracing to query the illumination distributed in the octree [S1].
+-    *   Send out a few cones over the hemisphere to collect illumination [S1].
+-    *   **Diffuse Component:** Use typically five large cones to estimate the diffuse energy coming from the scene [S1].
+-    *   **Specular Component:** Use a tight cone in the reflected direction with respect to the viewpoint to capture the specular component [S1].
+-    *   **Specular Cone Aperture:** The aperture of the specular cone is derived from the specular exponent $k_s$ of the material [S1]. The exact formula for deriving the aperture from $k_s$ is not given in the sources [S1].
++    *   Render the scene from the camera. Use deferred shading to determine which surface points require indirect illumination calculation [S1].
++    *   For each such point, perform final gathering by sending out several cones to query the illumination distributed in the octree [S1].
++    *   Combine direct and indirect illumination for the final color [S1].
++
++**Parameters and Formulas:**
++*   **Diffuse Estimation:** Typically, five large cones are sent out to estimate the diffuse energy coming from the scene [S1].
++*   **Specular Estimation:** A tight cone is sent in the reflected direction with respect to the viewpoint to capture the specular component [S1].
++*   **Specular Cone Aperture:** The aperture of the specular cone is derived from the specular exponent of the material [S1]. Let $n$ be the specular exponent. The cone aperture $\alpha$ is determined such that it aligns with the glossy lobe defined by $n$ [S1]. (Exact formula not provided in sources; [G] typically $\alpha \propto 1/\sqrt{n}$ or similar mapping to solid angle).
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def compute_two_bounce_indirect_illumination(scene, lights, octree, camera):
+-    # Step 1: Capture Incoming Radiance
+-    # Render scene from each light's perspective to generate light-view map
+-    light_view_maps = []
++def compute_two_bounce_indirect_illumination(scene, lights, camera, octree):
++    # Step 1: Capture incoming radiance
+     for light in lights:
++        # Render scene from light's perspective to get world positions
+         light_view_map = rasterize_scene_from_light(scene, light)
+-        light_view_maps.append(light_view_map)
+-    
+-    # Splat photons from light-view maps into octree leaves
+-    for light_view_map in light_view_maps:
+-        for fragment in light_view_map.fragments:
+-            splat_photon_into_octree_leaves(octree, fragment.position, fragment.energy, fragment.direction)
++        
++        # Splat photons into octree leaves
++        for pixel in light_view_map:
++            world_pos = pixel.world_position
++            photon_energy = pixel.color * light.intensity
++            photon_direction = normalize(light.position - world_pos)
++            octree.splat_leaf(world_pos, photon_energy, photon_direction)
+ 
+-    # Step 2: Filter and Distribute Radiance
+-    # Filter incoming radiance up the octree hierarchy using Gaussian-Lobes
+-    # This is done in parallel via screen-space quad-tree analysis
+-    filter_octree_leaves_to_levels(octree)
++    # Step 2: Filter radiance into octree levels
++    # Parallel screen-space quad-tree analysis filters leaves to higher levels
++    octree.filter_gaussian_lobes()
+ 
+-    # Step 3: Final Gathering
+-    # Determine surface points needing indirect illumination via deferred shading
+-    surface_points = deferred_shading_pass(scene, camera)
+-    
+-    final_colors = []
+-    for point in surface_points:
+-        # Combine direct and indirect illumination
+-        direct_light = compute_direct_illumination(point, lights)
+-        
+-        # Approximate cone tracing for indirect illumination
+-        indirect_light = Vector3(0, 0, 0)
+-        
+-        # Estimate diffuse energy with ~5 large cones
+-        diffuse_cones = generate_large_cones(point.normal, point.position, count=5)
+-        for cone in diffuse_cones:
+-            radiance = query_octree_cone_trace(octree, cone.origin, cone.direction, cone.aperture)
+-            indirect_light += radiance * point.brdf.diffuse
+-        
+-        # Capture specular component with tight cone in reflected direction
+-        view_direction = normalize(camera.position - point.position)
+-        reflected_direction = reflect(-view_direction, point.normal)
+-        specular_cone = generate_tight_cone(reflected_direction, point.position)
+-        # Aperture derived from specular exponent k_s (formula not given)
+-        specular_cone.aperture = derive_aperture_from_specular_exponent(point.material.specular_exponent)
+-        specular_radiance = query_octree_cone_trace(octree, specular_cone.origin, specular_cone.direction, specular_cone.aperture)
+-        indirect_light += specular_radiance * point.brdf.specular
+-        
+-        final_color = direct_light + indirect_light
+-        final_colors.append(final_color)
+-        
+-    return final_colors
++    # Step 3: Final gathering from camera
++    for surface_point in deferred_shading_buffer:
++        if surface_point.needs_indirect_illumination:
++            indirect_color = vec3(0.0)
++            
++            # Estimate diffuse energy with large cones
++            for i in range(5):
++                cone_direction = sample_diffuse_hemisphere(surface_point.normal)
++                cone_aperture = LARGE_CONE_ANGLE
++                radiance = octree.query_cone(cone_direction, cone_aperture)
++                indirect_color += radiance * surface_point.diffuse_color
++            
++            # Estimate specular energy with tight cone
++            view_vector = normalize(camera.position - surface_point.position)
++            reflect_direction = reflect(-view_vector, surface_point.normal)
++            specular_aperture = get_specular_aperture(surface_point.specular_exponent)
++            radiance = octree.query_cone(reflect_direction, specular_aperture)
++            indirect_color += radiance * surface_point.specular_color
++            
++            surface_point.final_color += indirect_color
+ ```
+-
+-**Parameters:**
+-*   Number of diffuse cones: Typically 5 [S1].
+-*   Specular cone aperture: Derived from the material's specular exponent [S1]. Exact derivation formula not given [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   The algorithm assumes the octree structure is already present and populated with incoming radiance before the final gathering step [S1].
+-*   The method focuses on low-energy/low-frequency and high-energy/high-frequency components of arbitrary material BRDFs, but the description specifically details Phong BRDFs [S1].
+-*   Precision issues may arise if the Gaussian-Lobes representation is insufficient for complex directional distributions, though the sources claim it is compact and efficient [S1].
+ 
+ ## Subtopics
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Interactive framerates are claimed [S1]. The filtering step is performed efficiently in parallel [S1].
+-*   **Memory Complexity:** Uses a sparse voxel octree hierarchy, which allows for sparse storage of incoming radiance and scene occlusion information [S1].
+-*   **Strengths:** Enables glossy reflections and color bleeding in dynamic scenes; uses sparse storage to maintain high precision; efficient parallel filtering [S1].
+-*   **Limitations:** The exact mathematical formulation of the Gaussian-Lobes representation and the aperture derivation are not provided, making implementation difficult without inference [S1]. The method is described primarily for Phong-like BRDFs [S1].
+-*   **When to use:** Real-time rendering of dynamic scenes requiring indirect illumination with glossy reflections [S1].
+-*   **When not to use:** Static scenes where precomputed radiance transfer might be more efficient; scenes with complex BRDFs not approximated by Phong models [S1].
++*   **Time Complexity:** Interactive framerates are achieved due to the parallel nature of the octree filtering and the limited number of cones (typically 5+1) per pixel [S1].
++*   **Memory Complexity:** Uses a sparse voxel octree, which allows for high precision with lower memory usage compared to dense grids, storing only incoming radiance and occlusion information [S1].
++*   **Strengths:** Handles dynamic scenes and dynamic light sources effectively. Supports glossy reflections and color bleeding. View-dependent filtering improves accuracy for anisotropic or glossy materials [S1].
++*   **Limitations:** Approximate nature of cone tracing may introduce artifacts. The method is complex to implement due to the octree filtering and Gaussian-Lobes representation [S1].
++*   **When to use:** Real-time rendering of scenes with dynamic lighting and glossy materials where global illumination effects like color bleeding are desired [S1].
++*   **When not to use:** Scenes requiring exact global illumination or where performance is critical and approximate results are unacceptable [S1].
+ 
+ ## Background
+-The method was introduced in the paper "Interactive Indirect Illumination Using Voxel Cone Tracing" [S1]. It builds upon previous work on voxel cone tracing for ambient occlusion and extends it to handle indirect illumination and glossy reflections [S1]. The approach is inspired by photon mapping concepts, specifically the idea of storing incoming radiance rather than outgoing radiance to simulate glossy surfaces [S1].
++The method was introduced in the paper "Interactive Indirect Illumination Using Voxel Cone Tracing" [S1]. It builds upon earlier work in voxel cone tracing and photon mapping, adapting them for real-time GPU execution. The approach addresses the limitations of caching-based global illumination in dynamic scenes by computing inter-reflections on the fly [S1].
+ 
+ ## Sources

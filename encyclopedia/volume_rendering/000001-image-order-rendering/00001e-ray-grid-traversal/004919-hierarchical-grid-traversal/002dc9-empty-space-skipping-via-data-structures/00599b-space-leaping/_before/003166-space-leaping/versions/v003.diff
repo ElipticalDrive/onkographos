@@ -1,0 +1,255 @@
+--- v002.md
++++ v003.md
+@@ -4,92 +4,182 @@
+ 
+ ## Overview
+-Space leaping is an acceleration technique for volume rendering that reduces computational cost by skipping empty regions along the ray path [S1, unofficial]. It solves the problem of redundant sampling in large volumes with significant empty space [S2]. Unlike hierarchical methods that traverse complex data structures like octrees, this specific variant exploits ray coherence across neighboring pixels to skip samples using a lightweight buffer [S2]. It is distinct from [Object-Order Empty Space Skipping](865-object-order-empty-space-skipping.md) and [Occupancy Grid and Map-Based Empty Space Skipping](3852-occupancy-grid-and-map-based-empty-space-skipping.md) by relying on image-order coherence rather than pre-computed spatial occupancy maps [S2].
++Space Leaping is a ray-coherence-based acceleration technique for volume rendering that skips empty regions by leveraging the spatial correlation between adjacent rays [S2]. Unlike hierarchical data structures (e.g., octrees) that require complex traversal logic and significant memory overhead, this method uses a lightweight buffer to record the depth of the first hit for each pixel, allowing neighboring rays to leap over empty space based on that information [S2]. It is distinct from sibling methods like [Occupancy Grid and Map-Based Empty Space Skipping](3852-occupancy-grid-and-map-based-empty-space-skipping.md) because it avoids per-voxel metadata storage, relying instead on image-plane coherence [S2]. It is primarily suited for applications where the camera is close to the object surface, such as virtual endoscopy, where large volumes of empty space exist in front of the camera [S2].
+ 
+ ## How it works
+-This method, specifically the "Light Weight Space Leaping using Ray Coherence" variant implemented in the Vikon system, uses a single buffer to store traversal distances for detector rays and applies those distances to skip samples for neighboring "space leap" rays [S2].
++Space Leaping exploits the fact that rays casting through empty space will hit the same object boundary at similar depths. By storing the depth of the first non-empty sample for each pixel, rays that are spatially close can "leap" over empty regions if their neighbors have already identified the hit point [S2].
+ 
+-**Inputs and Outputs:**
+-*   **Input:** Volume dataset, camera parameters (position, direction, sampling distance), image plane size $N \times N$.
+-*   **Output:** Rendered image with accelerated ray traversal.
+-*   **Data Structures:**
+-    *   **Leap Buffer:** A 2D array of size $N \times N$ (image plane size). Each element stores an integer representing the number of samples a detector ray took to reach the first non-empty cell [S2].
+-    *   **Volume Grid:** Standard 3D voxel grid [S2].
++### Inputs and Outputs
++*   **Input:** Volume dataset, camera parameters (position, orientation, projection), sampling distance $d_s$.
++*   **Output:** Rendered image.
++*   **Auxiliary Data:** A "Leap Buffer" of size $W \times H$ (image plane dimensions), storing the number of samples from the image plane to the first non-empty voxel for each pixel [S2].
+ 
+-**Algorithm Steps:**
++### Data Structures
++**Leap Buffer:**
++*   Dimensions: $W \times H$ (width and height of the image plane).
++*   Type: Integer array.
++*   Content: For pixel $(u, v)$, `LeapBuffer[u][v]` stores the count of samples the detector ray took to reach the first non-empty cell [S2].
++*   Memory: $O(N^2)$ where $N \times N$ is the image size (e.g., 256x256 bytes for 256x256 resolution) [S2].
+ 
+-1.  **Initialize Leap Buffer:**
+-    Create a leap buffer $L$ of size $N \times N$, initialized to zero [S2].
++### Algorithm Steps
+ 
+-2.  **Cast Detector Rays:**
+-    For every pixel $(i, j)$ in the image, cast a "detector ray" $R_{det}$ from the camera origin through the pixel center [S2].
+-    *   March along $R_{det}$ with the standard sampling distance $d$.
+-    *   Check each sample point against the volume data.
+-    *   Identify the first sample point $S_{first}$ that lies inside a non-empty (data) cell [S2].
+-    *   Let $k$ be the number of samples taken to reach $S_{first}$ (i.e., $S_{first}$ is the $k$-th sample along the ray) [S2].
+-    *   Store $k$ in $L[i][j]$ [S2].
+-    *   If the ray hits no data within the view frustum, $L[i][j]$ remains 0 or is handled as a background case [S2].
++1.  **Initialization:**
++    *   Initialize `LeapBuffer` with zeros or infinity, depending on the pass strategy. In the Vikon implementation, the buffer is filled by casting rays for a subset of pixels (e.g., every 4th ray) [S2].
+ 
+-3.  **Cast Space Leap Rays:**
+-    For every pixel $(i, j)$, cast a "space leap ray" $R_{leap}$ [S2].
+-    *   Retrieve the leap value $v = L[i][j]$ [S2].
+-    *   **Boundary Condition Check:** If $v == 0$, do not leap. Proceed with standard ray marching for this pixel [S2].
+-    *   **Leap Calculation:** Calculate the starting sample index for $R_{leap}$ as $k_{start} = v - 1$ [S2].
+-        *   Rationale: The leap buffer stores the number of samples to reach the *first* non-empty cell. The sample *before* that (index $v-1$) is the last sample in the empty region [S2].
+-    *   **Backtracking (Safety):**
+-        *   Start marching $R_{leap}$ from sample index $k_{start}$ [S2].
+-        *   Check if the sample at $k_{start}$ is inside an empty cell [S2].
+-        *   If the sample at $k_{start}$ is inside a *non-empty* cell, backtrack $R_{leap}$ to earlier samples until an empty cell is found [S2].
+-        *   **Constraint:** Do not backtrack beyond the sample index corresponding to the image plane (i.e., do not go behind the camera). The maximum backtracking depth is limited by the leap buffer value $v$ to prevent invalid geometry [S2].
+-    *   **Rendering:**
+-        *   Once the correct starting point in empty space is found (or if $v=0$), proceed with standard front-to-back compositing for the remainder of the ray [S2].
++2.  **Detector Ray Casting (Filling the Buffer):**
++    *   Cast rays for a subset of pixels (e.g., checkerboard or stride-4 pattern) [S2].
++    *   For each detector ray, march through the volume.
++    *   Identify the first sample point that falls within a non-empty (active) voxel [S2].
++    *   Store the number of samples taken to reach this point in `LeapBuffer` for that pixel [S2].
++    *   If the ray hits nothing (transparency), store a value indicating "empty" or handle via boundary conditions [S2].
+ 
+-**Formulas:**
+-*   Leap Buffer Value: $L[i][j] = \min \{ k \mid \text{Sample}_k(R_{det}) \in \text{NonEmpty} \}$ [S2].
+-*   Leap Start Index: $k_{leap} = L[i][j] - 1$ [S2].
++3.  **Space Leap Ray Casting (Rendering):**
++    *   For each pixel $(u, v)$ in the image:
++        *   Retrieve `L = LeapBuffer[u][v]`.
++        *   **Boundary Condition Check:** If `L == 0`, do not leap. Cast a standard detector ray from the image plane [S2].
++        *   **Leap Calculation:**
++            *   Calculate the starting position for the leap ray. The leap ray starts at the image plane and advances by $L$ samples [S2].
++            *   However, the leap buffer stores the count to the *first non-empty cell*. The sample *before* that is the last empty sample. Therefore, the leap ray should start at the position corresponding to the last empty sample to ensure it doesn't miss the boundary [S2].
++            *   Let $P_{start}$ be the position after $L$ samples. Backtrack the ray by one sample distance $d_s$ to land in the empty cell preceding the hit [S2].
++            *   **Backtracking Limit:** Do not backtrack beyond the leap buffer value to avoid going behind the image plane. The maximum backtracking samples is $L$ [S2].
++        *   **Verification:**
++            *   Check if the backtracked position is inside an empty cell.
++            *   If the first sample of the leap ray is inside a non-empty cell, backtrack further until an empty cell is found [S2].
++            *   If the leap ray starts in an empty cell, it is definitely before the object group.
++        *   **Rendering:**
++            *   From the verified start position, perform standard volume rendering (marching and compositing) until the object is fully rendered or opacity threshold is reached [S2].
+ 
+-**Parameters:**
+-*   **Sampling Distance ($d$):** Determines the granularity of the leap. Smaller $d$ increases accuracy but reduces leap efficiency [S2].
+-*   **Image Plane Size ($N \times N$):** Determines memory usage [S2].
++### Formulas
++*   **Leap Start Position:**
++    $$ P_{leap} = P_{image} + (L - 1) \cdot d_s \cdot \vec{d} $$
++    Where $P_{image}$ is the image plane origin, $L$ is the leap buffer value, $d_s$ is the sampling distance, and $\vec{d}$ is the ray direction unit vector [S2].
++    *Note: The sources describe backtracking to the "last sample in an empty cell". If $L$ is the count to the first non-empty, the index of the last empty is $L-1$ (0-indexed) or similar depending on implementation. The key is to ensure the ray starts in empty space.*
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Zero Leap Value:** If $L[i][j] = 0$, the ray should not be leaped at all [S2].
+-*   **Backtracking Limit:** Backtracking must not exceed the leap buffer value $v$ to avoid sampling behind the image plane [S2].
+-*   **First Hit Only:** Space leaping is only possible between the image plane and the first object hit. Empty space beyond the first hit cannot be leaped using this method [S2].
+-*   **Accuracy:** The method assumes that neighboring rays have similar first-hit distances. This holds well when the camera is close to the object surface [S2].
++*   **Backtracking Limit:**
++    $$ N_{backtrack} \le L $$
++    The number of samples to backtrack is limited by $L$ to prevent the ray from moving behind the image plane [S2].
++
++### Parameters
++*   **Sampling Distance ($d_s$):** Determines the granularity of the leap. Smaller $d_s$ increases accuracy but reduces leap efficiency [S2].
++*   **Leap Stride:** The Vikon system leaps one out of every 4 rays, achieving 75% of the possible acceleration [S2].
++
++### Edge Cases and Pitfalls
++*   **Zero Leap Buffer Value:** If `LeapBuffer[u][v] == 0`, the space leap ray should not be leaped at all. A standard ray must be cast [S2].
++*   **Backtracking Beyond Image Plane:** Care must be taken not to backtrack the leap ray beyond the value stored in the leap buffer, as this would place the ray behind the image plane, causing incorrect rendering [S2].
++*   **Non-Empty Start:** If the leap ray's first sample falls inside a non-empty cell, it must be backtracked until it is inside an empty cell [S2].
++*   **Limitation:** Space leaping is only possible between the image plane and the first object hit. Empty space beyond the first hit cannot be leaped using this method [S2].
++
++### Pseudocode
++
++```python
++def render_space_leaping(volume, camera, leap_buffer, sampling_distance):
++    """
++    Renders the volume using Space Leaping.
++    Assumes leap_buffer is pre-filled by detector rays.
++    """
++    image = empty_image(camera.width, camera.height)
++    
++    for y in range(camera.height):
++        for x in range(camera.width):
++            # Get the leap count for this pixel
++            L = leap_buffer[y][x]
++            
++            # Calculate ray direction for this pixel
++            ray_dir = camera.get_ray_direction(x, y)
++            ray_origin = camera.get_ray_origin(x, y)
++            
++            # Boundary Condition: If L is 0, do not leap
++            if L == 0:
++                color = standard_ray_march(volume, ray_origin, ray_dir, sampling_distance)
++                image[y][x] = color
++                continue
++            
++            # Calculate leap start position
++            # Leap buffer stores samples to first non-empty cell.
++            # We want to start at the last empty cell (L-1 samples from origin)
++            # However, we must ensure we don't go behind the image plane.
++            
++            # Number of samples to advance to reach the start of the leap
++            # The source says: "leap them one sample less than the number stored"
++            # and "sample before that is the last sample in an empty cell".
++            # If L is count to first non-empty, index L-1 is the last empty.
++            
++            leap_samples = L - 1
++            
++            # Check if leap_samples is negative (should not happen if L>0, but guard)
++            if leap_samples < 0:
++                leap_samples = 0
++                
++            # Calculate position
++            leap_origin = ray_origin + leap_samples * sampling_distance * ray_dir
++            
++            # Backtracking: If the first sample at leap_origin is non-empty,
++            # backtrack until empty.
++            # Limit backtracking to L samples to avoid going behind image plane.
++            
++            current_pos = leap_origin
++            backtracked = 0
++            
++            # Check if current position is in empty space
++            # Assuming a function to check voxel activity
++            while not is_empty(volume, current_pos) and backtracked < L:
++                current_pos -= sampling_distance * ray_dir
++                backtracked += 1
++            
++            # If we backtracked all the way to or behind image plane, fallback
++            if backtracked >= L:
++                color = standard_ray_march(volume, ray_origin, ray_dir, sampling_distance)
++            else:
++                # Render from the verified empty start position
++                color = standard_ray_march(volume, current_pos, ray_dir, sampling_distance)
++            
++            image[y][x] = color
++
++    return image
++
++def fill_leap_buffer(volume, camera, leap_buffer, sampling_distance, stride=4):
++    """
++    Fills the leap buffer by casting rays for a subset of pixels.
++    """
++    for y in range(camera.height):
++        for x in range(camera.width):
++            # Only cast for subset of rays (e.g., every 4th)
++            if (x % stride != 0) or (y % stride != 0):
++                continue
++                
++            ray_dir = camera.get_ray_direction(x, y)
++            ray_origin = camera.get_ray_origin(x, y)
++            
++            samples = 0
++            pos = ray_origin
++            
++            # March until non-empty or end of volume
++            while samples < max_samples:
++                if is_empty(volume, pos):
++                    samples += 1
++                    pos += sampling_distance * ray_dir
++                else:
++                    # Found first non-empty
++                    leap_buffer[y][x] = samples
++                    break
++            else:
++                # Hit nothing
++                leap_buffer[y][x] = 0
++```
+ 
+ ## Subtopics
+ 
+ ### [Boundary Pixel Detector Ray Casting](5870-boundary-pixel-detector-ray-casting.md)
+-Boundary Pixel Detector Ray Casting is a safety mechanism within Space Leaping [5870-boundary-pixel-detector-ray-casting.md] that ensures volumetric objects projecting exclusively onto the edges of the image buffer are not erroneously skipped. It distinguishes itself from standard space leaping by treating all image boundary pixels as mandatory "detector pixels," preventing the algorithm from leaping over objects located at the periphery of the view frustum.
+-
+-### Leap Buffer Boundary Condition Handling
+-The leap buffer stores the number of samples the detector ray took to reach a non-empty cell. The sample before that is the last sample in an empty cell. If the leap buffer value is zero, the space leap ray should not be leaped at all [S2].
+-
+-### Original Space-Leaping (Hierarchical)
+-Original space-leaping efficiently traverses or skips empty space using a hierarchical spatial data structure (e.g., octree) or a flat pyramid [S1, unofficial]. In a flat pyramid, uniform information of the octree is stored in the empty space of the 3D volume grid. When a ray encounters a voxel with uniformity information, it jumps to the first voxel outside this uniform region [S1, unofficial].
+-
+-### Bounding Box Space-Leaping
+-For volumes with few objects, bounding boxes or convex polyhedra can be used for space-leaping. The PARC (Polygon assisted ray casting) method allows building a convex polyhedron around the object to skip empty space outside it [S1, unofficial].
+-
+-### Adaptive Ray Traversal
+-This approach assigns empty voxels neighboring a data voxel a "vicinity flag." The empty space is traversed rapidly using a low-precision algorithm. When a vicinity voxel is encountered, the algorithm switches to a more accurate traversal method [S1, unofficial].
+-
+-### Proximity Clouds
+-In a pre-processing step, the distance to the nearest data voxel is computed for each empty voxel. When a ray encounters a proximity voxel with value $n$, it skips the next $n$ voxels, as there are no data voxels in between [S1, unofficial].
+-
+-### Homogeneity-Acceleration
+-Homogeneous regions are approximated with fewer sample points. Mean values and variance are stored in the octree to allow for coarser sampling in uniform areas [S1, unofficial].
++Boundary Pixel Detector Ray Casting is a safety mechanism within Space Leaping that ensures volumetric objects projecting exclusively onto the edges of the image buffer are not erroneously skipped. It distinguishes itself from standard space leaping by treating all image boundary pixels as mandatory "detector pixels," preventing the algorithm from leaping over objects located at the periphery of the view frustum [5870-boundary-pixel-detector-ray-casting.md].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N^2)$ for filling the leap buffer, where $N \times N$ is the image plane size. The buffer is scanned once [S2].
+-*   **Memory Complexity:** $O(N^2)$, requiring one buffer of size $N \times N$ (e.g., 256x256 bytes for a 256x256 image) [S2].
+-*   **Performance:** Achieved speedups of up to 165% over non-space leap ray casting on a Pentium-IV, 2.6GHz PC with 1GB RAM and Linux OS [S2].
+-*   **Strengths:** Low memory overhead; suitable for systems with limited resources (e.g., virtual endoscopy) [S2].
+-*   **Limitations:** Cannot achieve as much empty space skipping as techniques using data structures for empty/non-empty voxel info because it only leaps one out of every 4 rays, getting 75% of possible acceleration [S2]. Space leaping is only possible between the image plane and the first object hit [S2].
+-*   **When to Use:** Ideal for virtual endoscopy and applications requiring camera placement close to the object surface, as well as high-resolution volume rendering with orthographic and perspective projections [S2].
+-*   **When Not to Use:** When the camera is far from the object or when maximum empty space skipping is required regardless of memory cost [S2].
++*   **Time Complexity:** $O(N^2)$, where $N \times N$ is the image plane size. The primary computational cost is filling the leap buffer, which scans the buffer once [S2].
++*   **Memory Complexity:** $O(N^2)$, requiring only one buffer (the leap buffer) of size equal to the image plane (e.g., 256x256 bytes for 256x256 resolution) [S2].
++*   **Performance:** Achieved speedups of up to 165% over non-space-leap ray casting on a Pentium-IV, 2.6GHz PC with 1GB RAM [S2].
++*   **Acceleration Efficiency:** By leaping one out of every 4 rays, it achieves 75% of the possible acceleration compared to techniques that use data structures for empty/non-empty voxel info [S2].
++*   **Strengths:** Low memory overhead, simple implementation, suitable for interactive rendering in virtual endoscopy where the camera is close to the object surface [S2].
++*   **Limitations:** Cannot achieve as much empty space skipping as hierarchical methods. Space leaping is only possible between the image plane and the first object hit; empty space beyond the first hit cannot be leaped [S2].
+ 
+ ## Background
+-Space leaping was introduced as a method for fast traversal of regions with homogeneous structure [S1, unofficial]. The "Light Weight Space Leaping using Ray Coherence" variant was incorporated into the Vikon system for perspective direct volume rendering, specifically for endoscopy applications like Virtual Colonoscopy [S2]. The system allows users to navigate inside 3D datasets, where interactive rendering is essential [S2].
++Space Leaping was incorporated into the Vikon system for perspective direct volume rendering, specifically for endoscopy applications like Virtual Colonoscopy [S2]. The system allows users to navigate inside 3D datasets, requiring interactive rendering capabilities [S2]. The technique is ideal for virtual endoscopy and applications requiring camera placement close to the object surface, as well as high-resolution volume rendering with orthographic and perspective projections [S2]. The method exploits temporal coherence in volume animations by storing coordinates of the first non-transparent voxel in a C-buffer, which can be used to determine where to start tracing the ray in subsequent frames [S1, unofficial].
+ 
+ ## Sources

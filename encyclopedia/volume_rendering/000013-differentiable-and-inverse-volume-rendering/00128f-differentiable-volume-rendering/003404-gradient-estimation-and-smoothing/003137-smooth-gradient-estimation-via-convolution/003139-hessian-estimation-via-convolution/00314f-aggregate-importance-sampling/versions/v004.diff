@@ -1,0 +1,170 @@
+--- v003.md
++++ v004.md
+@@ -4,75 +4,115 @@
+ 
+ ## Overview
+-Aggregate Importance Sampling (AIS) is a sampling strategy to reduce function evaluations by importance-sampling the average of the convolution kernels across all dimensions or elements, rather than each individually [S1]. Unlike non-aggregate importance sampling, which samples each dimension optimally but individually (requiring $O(n)$ or $O(n^2)$ evaluations), AIS samples from a mixture distribution requiring only one function evaluation per iteration [S1].
++Aggregate Importance Sampling (AIS) is a variance reduction technique for estimating differential quantities (such as gradients or Hessians) in differentiable volume rendering by reducing the number of required function evaluations. It addresses the high computational cost of non-aggregate importance sampling, which requires $O(n)$ or $O(n^2)$ evaluations for an $n$-dimensional output, by sampling from a mixture distribution representing the average of all convolution kernels. Unlike non-aggregate methods that optimize each dimension individually, AIS performs a single function evaluation per iteration, trading a slight increase in variance for a linear reduction in computational complexity [S1].
+ 
+ ## How it works
++AIS estimates the derivative of a scalar function $f$ with respect to $n$ parameters by approximating the convolution of $f$ with a differential kernel. The method reduces the number of rendering calls from proportional to the number of output elements to a constant $O(1)$ per iteration.
++
+ **Inputs and Outputs:**
+-*   **Input:** A scalar field function $f(\mathbf{x})$, the dimensionality $n$, and the differential quantity to estimate (e.g., Hessian elements) [S1].
+-*   **Output:** An unbiased estimator for the differential quantity computed with a single function evaluation per iteration [S1].
++*   **Input:** A differentiable rendering function $f(\mathbf{x})$, where $\mathbf{x} \in \mathbb{R}^n$ is the parameter vector. A probability distribution $p(\mathbf{z})$ for sampling perturbation directions $\mathbf{z}$.
++*   **Output:** An unbiased estimator for the differential quantity (e.g., gradient vector or Hessian matrix).
+ 
+ **Data Structures:**
+-*   **Aggregate Kernel:** A weighted sum of individual convolution kernels $K_i$ corresponding to each element of the differential representation [S1]. For a Hessian in $n$ dimensions, there are $n^2$ elements [S1]. The aggregate kernel $K_{agg}$ is defined as the average:
+-    $$ K_{agg}(\mathbf{x}) = \frac{1}{n^2} \sum_{i=1}^{n^2} K_i(\mathbf{x}) $$
+-*   **Sampling Distribution:** The probability density function (PDF) $p(\mathbf{x})$ used for sampling is derived from the aggregate kernel [S1].
++*   **Differential Representation:** For a Hessian, this is an $n \times n$ matrix. For a gradient, it is a vector of size $n$.
++*   **Kernel:** The convolution kernel $K(\mathbf{z})$ associated with the differential operator (e.g., second-order derivative kernel for Hessian).
+ 
+-**Steps:**
+-1. Randomly decide which element of the differential representation to choose (e.g., which matrix element out of $n^2$ in the Hessian) [S1].
+-2. Compute the convolution sample for all $n^2$ elements using the same function value (single rendering call), weighting each by its respective kernel [S1].
++**Algorithm Steps:**
++1.  **Select Element:** Randomly select one element index $(i, j)$ from the differential representation (e.g., uniformly from $1 \dots n^2$ for a Hessian). Let this index correspond to the specific partial derivative $\frac{\partial^2 f}{\partial x_i \partial x_j}$ being estimated in this iteration.
++2.  **Sample Perturbation:** Draw a random perturbation vector $\mathbf{z}$ from the sampling distribution $p(\mathbf{z})$. This distribution is typically chosen to match the shape of the *average* kernel across all dimensions, rather than the individual kernel for the selected element.
++3.  **Evaluate Function:** Compute the function value $f(\mathbf{x} + \mathbf{z})$ (and potentially $f(\mathbf{x} - \mathbf{z})$ or other stencil points depending on the specific convolution implementation, but crucially, this is a **single** rendering call for the perturbed state).
++4.  **Compute Sample:** Calculate the convolution sample for the *selected* element $(i, j)$ using the function value from step 3 and the kernel value $K_{i,j}(\mathbf{z})$.
++5.  **Accumulate:** Add the weighted sample to the estimator for element $(i, j)$.
++
++**Formulas:**
++Let $D$ be the differential operator (e.g., Hessian). The estimator for the $(i,j)$-th element $\hat{H}_{ij}$ after $T$ iterations is:
++$$ \hat{H}_{ij} = \frac{1}{T_{ij}} \sum_{t=1}^{T_{ij}} \frac{f(\mathbf{x} + \mathbf{z}_t) K_{ij}(\mathbf{z}_t)}{p(\mathbf{z}_t)} $$
++Where:
++*   $T_{ij}$ is the number of times element $(i,j)$ was selected.
++*   $K_{ij}(\mathbf{z})$ is the kernel value for the $(i,j)$-th derivative at perturbation $\mathbf{z}$.
++*   $p(\mathbf{z})$ is the probability density of the sampling distribution.
++
++**Parameters:**
++*   **Sampling Distribution $p(\mathbf{z})$:** Typically a mixture distribution or a distribution matching the average kernel properties. The sources note that the average kernel shares properties like being zero at position 0 with individual kernels [S1].
++*   **Selection Probability:** Uniform selection of the element index is implied by the "randomly decide" step [S1].
+ 
+ **Pseudocode:**
+ ```python
+-import random
+-
+-def aggregate_importance_sampling(f, n, num_samples):
+-    """Estimate differential quantity using AIS."""
+-    n2 = n * n
+-    estimator = [0.0] * n2
+-    for _ in range(num_samples):
+-        # Step 1: Randomly decide which element of the differential representation to choose
+-        k = random.randint(0, n2 - 1)
+-        # [Comment: Sources do not specify the exact sampling algorithm for the mixture PDF.]
+-        x = sample_from_aggregate_pdf(n)
+-        # Single function evaluation
+-        val = f(x)
+-        # Step 2: Compute the convolution sample for all n^2 elements using the same function value
+-        # [Comment: Sources do not specify the exact kernel evaluation routine.]
+-        weights = [evaluate_kernel(j, x) for j in range(n2)]
+-        # Weight each by its respective kernel and update all elements
+-        for j in range(n2):
+-            estimator[j] += val * weights[j]
+-    return [v / num_samples for v in estimator]
+-
+-def sample_from_aggregate_pdf(n):
+-    # [Comment: Sources do not specify the exact sampling algorithm for the mixture PDF.]
+-    pass
+-
+-def evaluate_kernel(idx, x):
+-    # [Comment: Sources do not specify the exact kernel evaluation routine.]
+-    pass
++def aggregate_importance_sampling(f, x, n, num_iterations, sample_distribution):
++    """
++    Estimate the Hessian of f at x using Aggregate Importance Sampling.
++    
++    Args:
++        f: Differentiable rendering function.
++        x: Input parameter vector of size n.
++        n: Dimensionality of the parameter space.
++        num_iterations: Total number of Monte Carlo iterations.
++        sample_distribution: Function that returns a sample z and its log-probability.
++        
++    Returns:
++        H: Estimated Hessian matrix of size n x n.
++        counts: Number of samples per element (for variance tracking).
++    """
++    H = zeros(n, n)
++    counts = zeros(n, n)
++    
++    for t in range(num_iterations):
++        # Step 1: Randomly select which element of the differential representation to choose
++        i = random_integer(0, n - 1)
++        j = random_integer(0, n - 1)
++        
++        # Step 2: Sample perturbation from the mixture/average distribution
++        z, log_p = sample_distribution()
++        p = exp(log_p)
++        
++        # Step 3: Compute the convolution sample for all n^2 elements using the same function value
++        # Note: The function is evaluated only once per iteration.
++        # The specific convolution stencil depends on the kernel definition.
++        # Assuming a standard central difference or similar convolution requiring f(x+z)
++        f_val = f(x + z)
++        
++        # Step 4: Weight by the respective kernel for the selected element
++        # K(i, j, z) is the kernel value for the (i,j) derivative at perturbation z
++        kernel_val = get_kernel_value(i, j, z)
++        
++        # Unbiased estimator contribution
++        # If the kernel requires multiple points (e.g., f(x+z) and f(x-z)), 
++        # they must be computed in the same f() call or accounted for in the weight.
++        # Based on [S1], "compute the convolution sample... with the same function value"
++        # implies the sampling strategy handles the kernel support.
++        sample = (f_val * kernel_val) / p
++        
++        # Accumulate
++        H[i, j] += sample
++        counts[i, j] += 1
++        
++    # Normalize by counts to get the average estimate
++    # Avoid division by zero if an element was never selected
++    for i in range(n):
++        for j in range(n):
++            if counts[i, j] > 0:
++                H[i, j] /= counts[i, j]
++                
++    return H
+ ```
+ 
+-**Parameters:**
+-*   **Number of Samples:** Not given in the sources. Convergence is linear in a log-log plot [S1].
+-*   **Kernel Width:** Not given in the sources [S1].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Variance Increase:** AIS increases variance because the average kernel is not identical to the individual kernels, though they share properties such as zero value at position 0 [S1].
+-*   **Sampling Efficiency:** Not given in the sources [S1].
++*   **Variance Increase:** AIS increases variance compared to non-aggregate importance sampling because the average kernel is not identical to the individual kernels [S1].
++*   **Zero-Kernel Positions:** Both average and individual kernels are zero at position 0, which must be handled correctly in the sampling distribution to avoid division by zero or undefined weights [S1].
++*   **Uneven Sampling:** If certain elements are rarely selected, their estimates will have higher variance due to fewer samples.
+ 
+ ## Subtopics
+ 
+-### Variance Analysis
+-All estimators converge linearly in a log-log plot [S1]. The optimal estimator has the lowest variance but requires quadratically many elements for Hessians [S1]. Aggregate sampling performs slightly worse than optimal but much better than uniform sampling [S1].
++### [Sampling Convolutions](14972-sampling-convolutions.md)
++Sampling Convolutions is a technique to compute accurate gradients in integrands with large support using spherical convolutions, specifically addressing the mismatch between standard hemispherical sampling and the full-sphere support of a convolution. It differs from naive convolution sampling by introducing a precomputed correction factor that compensates for the energy loss incurred when the sampling distribution (typically a BRDF) is restricted to a hemisphere while the convolution kernel extends over the full sphere.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reduces time complexity to $O(1)$ function evaluations for all methods (Gradient, Hessian, HVP) compared to $O(n)$ or $O(n^2)$ for non-aggregate importance sampling [S1].
+-*   **Memory Complexity:** Not given in the sources [S1].
+-*   **Strengths:** Drastically reduces the number of expensive function evaluations required for higher-order derivatives [S1].
+-*   **Limitations:** Higher variance than optimal per-element importance sampling due to the mismatch between the aggregate kernel and individual kernels [S1].
+-*   **When to Use:** When function evaluations are prohibitively expensive and a slight increase in estimator variance is acceptable for a massive reduction in computational cost [S1].
+-*   **When Not to Use:** When the lowest possible variance is required and computational resources allow for $O(n^2)$ evaluations [S1].
++*   **Time Complexity:** $O(1)$ function evaluations per iteration for all differential methods (Gradient, Hessian, Hessian-Vector Product), compared to $O(n)$ or $O(n^2)$ for non-aggregate importance sampling [S1].
++*   **Memory Complexity:** $O(n^2)$ to store the Hessian matrix and counts, assuming a Hessian is being estimated.
++*   **Variance:** All estimators converge linearly in a log-log plot [S1]. The optimal estimator (sampling each dimension individually) has the lowest variance but requires quadratically many evaluations for Hessians. Aggregate sampling performs slightly worse than the optimal estimator but much better than uniform sampling [S1].
++*   **Strengths:** Significant reduction in rendering calls, making higher-order derivatives feasible in differentiable rendering.
++*   **Limitations:** Higher variance than optimal sampling; requires careful design of the mixture sampling distribution to approximate the average kernel effectively.
+ 
+ ## Background
+-Aggregate Importance Sampling was introduced in the context of stochastic gradient estimation for higher-order differentiable rendering [S1]. It addresses the challenge of estimating second-order derivatives (Hessians) in optimization problems involving differentiable volume rendering, where the number of dimensions $n$ can be large, making standard finite difference or per-element importance sampling computationally infeasible [S1]. The method leverages the similarity between convolution kernels to form a mixture distribution, akin to Multiple Importance Sampling with the balance heuristic [S1].
++Aggregate Importance Sampling was proposed in the context of stochastic gradient estimation for higher-order differentiable rendering [S1]. It addresses the challenge of optimizing differentiable quantities where the number of parameters $n$ is large, making non-aggregate methods computationally prohibitive. The method is analogous to Multiple Importance Sampling (MIS) using the balance heuristic, where proposals are combined by sampling from a mixture [S1].
+ 
+ ## Sources

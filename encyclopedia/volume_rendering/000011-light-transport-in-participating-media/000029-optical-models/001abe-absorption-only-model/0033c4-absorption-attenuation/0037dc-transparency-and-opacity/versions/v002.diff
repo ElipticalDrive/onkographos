@@ -1,0 +1,155 @@
+--- v001.md
++++ v002.md
+@@ -4,36 +4,38 @@
+ 
+ ## Overview
+-Transparency and opacity define the light transmission and blocking properties of a participating medium along a ray segment, serving as the fundamental components of the absorption-only optical model. Transparency (or transmittance) $T(s)$ quantifies the fraction of light surviving absorption, while opacity $O(s)$ quantifies the fraction blocked; together they enable the calculation of radiance attenuation in volume rendering. This method is distinguished from scattering models by considering only energy loss due to absorption, ignoring redirection of light.
++Transparency and opacity define the attenuation of light as it travels through a participating medium, quantifying how much incident radiance survives absorption versus how much is blocked. Transparency (or transmittance) $T(s)$ represents the fraction of light remaining after distance $s$, while opacity $O(s)$ represents the fraction absorbed. This method is distinct from scattering-based models by considering only absorption, making it the foundational component for compositing in volume rendering and radiography where emission or scattering is either negligible or handled separately.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Optical depth $\tau(s)$, which is the integral of the absorption coefficient $\kappa$ along the ray; or the absorption coefficient field $\kappa(x)$ and ray segment length $s$.
+-*   **Outputs:** Transparency $T(s)$ and Opacity $O(s)$.
++*   **Input:** Extinction coefficient field $\kappa(x, \omega)$ (units: inverse length), ray origin $x$, ray direction $\omega$, and integration distance $s$.
++*   **Output:** Transparency $T(s)$ and Opacity $O(s)$.
+ 
+ **Data Structures:**
+-No specific data structures are required for the calculation itself, as it operates on scalar values derived from the ray integration. However, in implementation, $\kappa$ is typically sampled from a volume texture or grid at positions $x + t\omega$ for $t \in [0, s]$.
++*   **Extinction Coefficient:** Stored as a scalar field. In radiography contexts, this may be pre-computed into a table indexed by material number and energy group number [S3, unofficial].
+ 
+ **Formulas:**
+-The optical depth $\tau(s)$ along a ray starting at $x$ in direction $\omega$ over distance $s$ is defined as [S1, unofficial]:
+-$$ \tau(s) = \int_0^s \kappa(x + t\omega, \omega) \, dt $$
+-If the medium is homogeneous ($\kappa$ is constant), this simplifies to $\tau(s) = \kappa s$ [S1, unofficial].
++The optical depth $\tau(s)$ along a ray segment of length $s$ is defined as:
++$$ \tau(s) = \int_0^s \kappa(x + t\omega, \omega) dt $$
++If $\kappa$ is constant, this simplifies to $\tau(s) = \kappa s$ [S1, unofficial].
+ 
+-Transparency $T(s)$ is the exponential decay of light intensity due to absorption [S1, unofficial]:
+-$$ T(s) = e^{-\tau(s)} = e^{-\int_0^s \kappa(x + t\omega) \, dt} $$
++Transparency $T(s)$ is the exponential decay of light:
++$$ T(s) = e^{-\tau(s)} = e^{-\int_0^s \kappa(x + t\omega) dt} $$
++[ S1, unofficial ]
+ 
+-Opacity $O(s)$ is the complement of transparency, representing the fraction of light absorbed [S1, unofficial]:
++Opacity $O(s)$ is the complement of transparency:
+ $$ O(s) = 1 - T(s) $$
++[ S1, unofficial ]
+ 
+ **Pseudocode:**
+ ```python
+-def calculate_transparency_and_opacity(absorption_coefficient_field, ray_origin, ray_direction, segment_length):
++def compute_transparency_and_opacity(extinction_coefficient_func, ray_origin, ray_direction, distance):
+     """
+-    Calculates transparency and opacity for a ray segment in an absorption-only medium.
++    Computes transparency and opacity for a ray segment.
+     
+     Args:
+-        absorption_coefficient_field: A function or data structure providing kappa(x) at any point x.
++        extinction_coefficient_func: Function kappa(x, omega) returning extinction coefficient.
+         ray_origin: 3D vector x.
+-        ray_direction: Normalized 3D vector omega.
+-        segment_length: Scalar s > 0.
++        ray_direction: 3D vector omega (normalized).
++        distance: Scalar s > 0.
+         
+     Returns:
+@@ -41,53 +43,65 @@
+         O: Opacity (float in [0, 1]).
+     """
+-    # 1. Calculate optical depth tau(s) by integrating kappa along the ray
+-    # This requires numerical integration (e.g., trapezoidal rule or midpoint rule)
+-    # over N samples along the segment [0, s].
+-    # Not given in the sources: Implementation of numerical integration.
+-    # Assuming a simple midpoint approximation with N steps for clarity:
+-    N = 100  # Number of integration steps
+-    tau = 0.0
+-    step_size = segment_length / N
+-    for i in range(N):
+-        t = (i + 0.5) * step_size
+-        position = ray_origin + ray_direction * t
+-        kappa = absorption_coefficient_field(position)
+-        tau += kappa * step_size
++    # Numerical integration of extinction coefficient along the ray
++    # Using a simple midpoint rule for demonstration; in practice, quadrature or 
++    # pre-integrated textures may be used.
++    num_samples = 100 # Not given in sources; implementation detail [G]
++    step = distance / num_samples
++    optical_depth = 0.0
+     
+-    # 2. Calculate Transparency T(s) = exp(-tau(s))
+-    T = math.exp(-tau)
++    for i in range(num_samples):
++        # Sample point at midpoint of segment
++        t = (i + 0.5) * step
++        sample_point = ray_origin + t * ray_direction
++        kappa = extinction_coefficient_func(sample_point, ray_direction)
++        optical_depth += kappa * step
++        
++    transparency = math.exp(-optical_depth)
++    opacity = 1.0 - transparency
+     
+-    # 3. Calculate Opacity O(s) = 1 - T(s)
+-    O = 1.0 - T
+-    
+-    return T, O
++    return transparency, opacity
+ ```
+ 
+ **Parameters:**
+-*   **Integration steps ($N$):** Not given in the sources. Typically determined by the desired accuracy and the frequency of changes in $\kappa$.
+-*   **Absorption coefficient ($\kappa$):** Varies by material. For homogeneous media, it is a constant scalar.
++*   **Integration Steps:** Not specified in sources. Implementation requires sufficient sampling to resolve high-frequency variations in $\kappa$ [G].
++*   **Precision:** Standard floating-point precision is assumed. Care must be taken when $\tau(s)$ is large, as $T(s)$ approaches machine epsilon [G].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** If $\tau(s)$ is very large, $T(s)$ approaches 0 and $O(s)$ approaches 1. Floating-point underflow may occur for $T(s)$ if $\tau(s) > \approx 700$ (for 32-bit float).
+-*   **Boundaries:** At $s=0$, $\tau(0)=0$, $T(0)=1$, and $O(0)=0$.
+-*   **Degenerate Input:** If $\kappa(x) = 0$ everywhere, $T(s)=1$ and $O(s)=0$ for all $s$.
++*   **High Opacity:** If $\tau(s) \gg 1$, $T(s)$ underflows to 0. This is expected behavior but may cause precision issues in gradient-based optimization if not handled [G].
++*   **Zero Extinction:** If $\kappa = 0$, $T(s) = 1$ and $O(s) = 0$.
++*   **Boundary Artifacts:** In fuzzy surface rendering, naive opacity calculation can cause visual artifacts at object boundaries. Transparency attenuation techniques are used to mitigate this [S2].
+ 
+ ## Subtopics
+ 
+ ### Transparency Attenuation
+-A technique introduced to reduce visual artifacts at object boundaries, particularly in methods modeling fuzzy surfaces or layered meshes [S2]. It involves applying a transparency decay factor to improve rendering quality. In ablation studies, using transparency-decay resulted in a 2.13 dB PSNR gain on the Shelly scene compared to not using it [S2]. It is used in conjunction with optimizing sample distribution for fuzzy surfaces [S2].
++A technique introduced to reduce visual artifacts at object boundaries in fuzzy surface rendering. It modifies the standard opacity calculation to improve visual quality. In ablation studies, using transparency-decay resulted in a 2.13 dB PSNR gain on the Shelly scene compared to not using it [S2].
++
++### Extinction Coefficient Computation
++A procedure for obtaining extinction coefficients from calculated atomic cross-sections for X-rays, used to define material opacity for radiography.
++*   **Elemental Opacity:** Computed from tabulated atomic cross-sections $\sigma_E$ (units: barns/atom, 1 barn = $10^{-24}$ cm$^2$):
++    $$ \kappa_E = \frac{\sigma_E}{uA} $$
++    where $u$ is the atomic mass unit ($1 \text{ amu} = 1.6605402 \times 10^{-24}$ g) and $A$ is the atomic mass of the element in amu [S3, unofficial].
++*   **Energy Group Approximation:** Opacity is divided into energy groups $[E_g, E_{g+1}]$. The constant approximation for group $g$ is:
++    $$ \mathbf{k}_g = \frac{1}{E_{g+1} - E_g} \int_{E_g}^{E_{g+1}} \mathbf{k}_{E'} dE' $$
++    [ S3, unofficial ]
++*   **Mixture Opacity:** For mixtures or compounds, opacity is estimated by atomic mixing:
++    $$ \mathbf{K}_{mat,g} = \sum_{i=0}^{N-1} m_i \mathbf{K}_{i,g} $$
++    where $m_i$ is the mass fraction of element $i$ [S3, unofficial].
++*   **Storage:** Extinction coefficients are stored in a table indexed by material number and energy group number [S3, unofficial].
++*   **Constants:** Planck's constant $h = 6.6263 \times 10^{-27}$ erg/s. Photon energy $E = h\nu$. Photon energies are typically given in electron volts (1 eV = $1.60206 \times 10^{-12}$ erg) [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of samples used to numerically integrate the absorption coefficient $\kappa$ along the ray.
+-*   **Memory Complexity:** $O(1)$ for the calculation itself, plus the memory required to store or access the absorption coefficient field $\kappa$.
+-*   **Strengths:** Simple, physically grounded model for non-scattering media; computationally inexpensive per ray segment.
+-*   **Limitations:** Does not account for scattering, which is significant in many participating media (e.g., fog, smoke). Accuracy depends heavily on the quality of $\kappa$ sampling and integration.
+-*   **When to use:** When the medium is primarily absorptive (e.g., tinted glass, dense smoke with negligible scattering) or as a component in more complex models.
+-*   **When not to use:** When scattering effects are dominant or visually significant.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of samples along the ray for numerical integration. If pre-computed tables are used, lookup is $O(1)$ [S3, unofficial].
++*   **Memory Complexity:** $O(1)$ for the formulaic approach. $O(M \times G)$ for radiography tables, where $M$ is the number of materials and $G$ is the number of energy groups [S3, unofficial].
++*   **Strengths:** Computationally inexpensive; forms the basis for all volume compositing.
++*   **Limitations:** Does not account for scattering or emission. Requires accurate extinction coefficients.
++*   **When to use:** Absorption-dominated media (e.g., fog, smoke with negligible scattering, X-ray radiography).
++*   **When not to use:** Participating media with significant scattering or emission where the full radiative transfer equation is required.
+ 
+ ## Background
+-The concepts of transparency (transmittance) and opacity in the context of volume rendering originate from the absorption-only model of light transport in participating media. The differential form of the radiance change due to absorption is $dL/ds = -\kappa(x,\omega)L(x,\omega)$, leading to the exponential solution $L(x+s\omega, \omega) = e^{-\tau(s)}L(x,\omega)$ [S1, unofficial]. This formulation is foundational in computer graphics for rendering volumes where scattering is ignored or approximated. The specific term "Transparency Attenuation" as a technique to reduce boundary artifacts in fuzzy surface rendering was introduced in the context of layered mesh representations [S2].
++The concepts of transparency and opacity in volume rendering originate from the solution to the radiative transfer equation in the absence of scattering. The differential form $dL/ds = -\kappa L$ describes the loss of radiance due to absorption [S1, unofficial]. This model is fundamental to the "Absorption-only model" and is widely used in medical imaging (radiography) and computer graphics for compositing. The specific formulation of transparency attenuation for fuzzy surfaces is a more recent development in neural rendering and layered mesh representations [S2].
+ 
+ ## Sources
+-[S1] Volume Rendering, https://docslib.org/doc/1400821/volume-rendering, fetched 2026-10-28 (unofficial)
+-[S2] Volumetric Surfaces: Representing Fuzzy Geometries with Layered Meshes, https://doi.org/10.1109/cvpr52734.2025.01991, fetched 2026-10-26+[S1] Volume Rendering Volume Rendering, https://docslib.org/doc/1400821/volume-rendering, fetched 2026-10-28 (unofficial)
++[S2] Volumetric Surfaces: Representing Fuzzy Geometries with Layered Meshes, https://doi.org/10.1109/cvpr52734.2025.01991, fetched 2026-10-26
++[S3] Hardware-Accelerated Simulated Radiography, https://digital.library.unt.edu/ark:/67531/metadc876978/?q=front-to-back compositing, fetched 2026-10-29 (unofficial)

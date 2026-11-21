@@ -1,0 +1,126 @@
+--- v001.md
++++ v002.md
+@@ -1,8 +1,8 @@
+ # Normal Ground Truth Alignment Loss
+ 
+-Also called: Normal Consistency Loss, Normal GT Alignment Loss, Normal GT Loss, Training Loss Functions
++Also called: Normal GT Alignment Loss, Normal GT Loss
+ 
+ ## Overview
+-The Normal Ground Truth Alignment Loss is a regularization term used in differentiable inverse rendering to supervise predicted surface normals against available ground truth normal data [S1]. It minimizes the angular deviation between the predicted normal vector at a sample point and the corresponding ground truth normal vector [S2, unofficial]. This method is distinct from sibling methods like [Normal Ray Alignment Loss](4202-normal-ray-alignment-loss.md), which aligns normals with ray directions, and [Predicted Normal Loss](7713-predicted-normal-loss.md), which enforces consistency between independently predicted normal maps; instead, this loss relies on explicit geometric supervision [S1].
++The Normal Ground Truth Alignment Loss is a regularization term in differentiable inverse rendering that supervises predicted surface normals against available ground truth normals by minimizing their angular deviation [S1][S2, unofficial]. It differs from sibling methods like [Normal Ray Alignment Loss](4202-normal-ray-alignment-loss.md) and [Predicted Normal Loss](7713-predicted-normal-loss.md) by directly comparing network outputs to explicit geometric targets rather than enforcing internal consistency or ray alignment [S1][S2, unofficial].
+ 
+ ## How it works
+@@ -16,33 +16,33 @@
+ 
+ **Data Structures:**
+-*   Vectors $\mathbf{n}_p$ and $\mathbf{n}_{gt}$ are typically 3D unit vectors $(x, y, z)$.
+-*   In implementations using the L1 angular error formulation, the predicted normal $\hat{N}$ must be explicitly normalized before the dot product [S1].
++*   Vectors $\mathbf{n}_p$ and $\mathbf{n}_{gt}$ are typically 3D vectors $(x, y, z)$ [G].
++*   In implementations using the angular error formulation, the predicted normal must be explicitly normalized before the dot product [S1].
+ 
+ **Steps:**
+-1.  Retrieve the predicted normal $\mathbf{n}_p$ and ground truth normal $\mathbf{n}_{gt}$ for the current sample or pixel.
+-2.  Normalize the predicted normal if it is not already a unit vector: $\hat{\mathbf{n}}_p = \frac{\mathbf{n}_p}{\|\mathbf{n}_p\|}$ [S1].
+-3.  Compute the dot product between the normalized predicted normal and the ground truth normal: $d = \hat{\mathbf{n}}_p \cdot \mathbf{n}_{gt}$ [S1].
+-4.  Clamp the dot product $d$ to the range $[-1, 1]$ to handle numerical precision errors that might cause $\arccos$ to fail [G].
+-5.  Calculate the angular error in radians: $\theta = \arccos(d)$ [S1].
+-6.  Compute the loss using the weighted scalar: $L = w \cdot \theta$ [S2, unofficial].
++1. Retrieve the predicted normal $\mathbf{n}_p$ and ground truth normal $\mathbf{n}_{gt}$ for the current sample or pixel [G].
++2. Normalize the predicted normal to unit length: $\hat{\mathbf{n}}_p = \frac{\mathbf{n}_p}{\|\mathbf{n}_p\|}$ [S1].
++3. Compute the dot product between the normalized predicted normal and the ground truth normal: $d = \hat{\mathbf{n}}_p \cdot \mathbf{n}_{gt}$ [S1][S2, unofficial].
++4. Clamp the dot product $d$ to the range $[-1, 1]$ to handle numerical precision errors that might cause $\arccos$ to fail [G].
++5. Calculate the angular error in radians: $\theta = \arccos(d)$ [S1].
++6. Compute the loss using the L1 norm over the batch or pixels and apply the scalar weight: $L = w \cdot \|\theta\|_1$ [S1][S2, unofficial].
+ 
+ **Formula:**
+-The loss can be expressed in two equivalent forms found in the sources. The first form uses the dot product directly with a weight [S2, unofficial]:
++The primary formulation uses the L1 angular error between the normalized predicted normal and the ground truth normal [S1]:
++
++$$
++L_{normal} = \left\| \cos^{-1} \left( \frac{\mathbf{n}_p}{\|\mathbf{n}_p\|} \cdot \mathbf{n}_{gt} \right) \right\|_1
++$$
++
++Where:
++*   $\mathbf{n}_p$ is the predicted normal [S1].
++*   $\mathbf{n}_{gt}$ is the ground truth normal [S1].
++*   $\|\mathbf{n}_p\|$ is the magnitude of the predicted normal [S1].
++*   $\|\cdot\|_1$ denotes the L1 norm applied over the batch or pixels [S1].
++
++An alternative weighted formulation uses the dot product directly, which is proportional to the squared sine of half the angle [S2, unofficial]:
+ 
+ $$
+ L = w \cdot (1 - \mathbf{n}_p \cdot \mathbf{n}_{gt})
+ $$
+-
+-*Note: Source [S2, unofficial] uses the form $1 - \mathbf{n}_p \cdot \mathbf{n}_{gt}$, which is proportional to the squared sine of half the angle, whereas Source [S1] uses the explicit angular error. Both aim to minimize angular deviation. The explicit angular error form is:*
+-
+-$$
+-L_{normal} = \left\| \cos^{-1} \left( N \cdot \frac{\hat{N}}{|\hat{N}|} \right) \right\|_1
+-$$
+-
+-Where:
+-*   $N$ is the ground truth normal [S1].
+-*   $\hat{N}$ is the predicted normal [S1].
+-*   $|\hat{N}|$ is the magnitude of the predicted normal [S1].
+-*   $\|\cdot\|_1$ denotes the L1 norm (sum of absolute values) over the batch or pixels [S1].
+ 
+ **Parameters:**
+@@ -53,5 +53,5 @@
+ *   **Normalization:** The predicted normal must be normalized before computing the dot product in the angular error formulation to ensure the input to $\arccos$ is valid [S1].
+ *   **Numerical Stability:** The dot product result must be clamped to $[-1, 1]$ before passing to $\arccos$ to avoid NaNs due to floating-point inaccuracies [G].
+-*   **Ambiguity:** Ground truth normals must be consistently oriented (e.g., pointing outward from the surface) relative to the camera or world space to avoid minimizing the angle to the opposite direction [G].
++*   **Orientation Consistency:** Ground truth normals must be consistently oriented (e.g., pointing outward from the surface) relative to the camera or world space to avoid minimizing the angle to the opposite direction [G].
+ 
+ **Pseudocode:**
+@@ -72,25 +72,19 @@
+         torch.Tensor: Scalar loss value.
+     """
+-    # Normalize predicted normals to unit length
+-    # Add small epsilon to avoid division by zero
++    # 1. Normalize predicted normals to unit length
+     eps = 1e-8
+-    predicted_normals_normalized = predicted_normals / (torch.norm(predicted_normals, dim=-1, keepdim=True) + eps)
++    predicted_normalized = predicted_normals / (torch.norm(predicted_normals, dim=-1, keepdim=True) + eps)
+     
+-    # Compute dot product
+-    # Ensure tensors are on the same device and dtype
+-    dot_product = torch.sum(predicted_normals_normalized * ground_truth_normals, dim=-1)
++    # 2. Compute dot product between normalized predicted and ground truth normals
++    dot_product = torch.sum(predicted_normalized * ground_truth_normals, dim=-1)
+     
+-    # Clamp dot product to [-1, 1] for numerical stability in arccos
++    # 3. Clamp dot product to [-1, 1] for numerical stability in arccos
+     dot_product = torch.clamp(dot_product, -1.0 + eps, 1.0 - eps)
+     
+-    # Compute angular error in radians
+-    # Using arccos to get the angle between vectors
++    # 4. Compute angular error in radians
+     angular_error = torch.acos(dot_product)
+     
+-    # Compute L1 loss (mean over all elements)
+-    loss = torch.mean(angular_error)
+-    
+-    # Apply weight
+-    loss = weight * loss
++    # 5. Apply L1 norm over all elements and scale by weight
++    loss = weight * torch.sum(angular_error)
+     
+     return loss
+@@ -106,10 +100,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of sample points or pixels, as it involves a constant number of vector operations per point.
+-*   **Memory Complexity:** $O(1)$ auxiliary memory per sample, as it does not require storing large intermediate matrices beyond the input vectors.
+-*   **Strengths:** Provides direct geometric supervision, leading to more accurate surface orientation estimation compared to indirect cues [S1].
+-*   **Limitations:** Requires ground truth normal data, which is not always available in real-world scenarios [S1].
+-*   **When to use:** When ground truth normals are available and accurate geometric reconstruction is prioritized [S1].
+-*   **When not to use:** When ground truth normals are noisy, missing, or when computational resources are extremely limited and indirect supervision suffices.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Not given in the sources.
++*   **Limitations:** Not given in the sources.
++*   **When to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background

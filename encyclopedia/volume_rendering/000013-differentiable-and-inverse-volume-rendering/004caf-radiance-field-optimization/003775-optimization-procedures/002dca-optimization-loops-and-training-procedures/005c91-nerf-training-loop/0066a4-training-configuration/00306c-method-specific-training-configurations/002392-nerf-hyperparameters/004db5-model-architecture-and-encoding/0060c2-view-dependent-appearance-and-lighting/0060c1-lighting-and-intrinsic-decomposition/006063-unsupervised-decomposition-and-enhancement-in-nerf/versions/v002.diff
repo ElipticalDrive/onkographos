@@ -1,0 +1,159 @@
+--- v001.md
++++ v002.md
+@@ -4,92 +4,80 @@
+ 
+ ## Overview
+-Unsupervised Decomposition and Enhancement in NeRF (LLNeRF) decomposes the view-dependent color of a neural radiance field into a view-dependent lighting component and a view-independent reciprocal color basis, then enhances the lighting component using a neural network to produce brightened images without ground truth supervision [S1]. It differs from 2D Retinex-based methods by leveraging 3D geometry and multi-view consistency to constrain the decomposition, avoiding the need for paired low-light/high-light training data [S1].
++This method decomposes the view-dependent color in a Neural Radiance Field (NeRF) into a view-dependent lighting component $v$ and a view-independent reciprocal color basis $r$, then enhances $v$ using a neural network to produce an enhanced image $I_e$ without ground truth supervision [S1]. It sets itself apart from 2D Retinex-based methods by leveraging 3D geometry and multi-view consistency to constrain the ill-posed decomposition, allowing for unsupervised training [S1].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs:** Low-light training images (RAW or processed), camera poses, and intrinsic parameters.
+-*   **Outputs:** Enhanced novel view images $I_e$, decomposed lighting component $v$, and reciprocal color basis $r$.
++**Inputs and Outputs:**
++- **Inputs:** Low-light training images (potentially RAW), camera poses, and intrinsics.
++- **Outputs:** Enhanced novel view images $I_e$, decomposed lighting $v$, and reciprocal color $r$.
+ 
+-**Data Structures**
++**Data Structures:**
+ The model consists of three main neural network components:
+-1.  **Standard NeRF Components:**
+-    *   Density MLP: Outputs density $\sigma$.
+-    *   Direction MLP: Outputs view-dependent features.
+-    *   Feature MLP: Combines spatial and directional features to output color $c$ and density.
+-2.  **Decomposition MLPs:**
+-    *   $F_1(\tau, d; \Theta_{F1})$: Maps spatial coordinate $\tau$ and view direction $d$ to the scalar lighting component $v$.
+-    *   $F_2(\tau; \Theta_{F2})$: Maps spatial coordinate $\tau$ to the 3-channel reciprocal color basis $r$.
+-3.  **Enhancement Model $\phi$:**
+-    *   **Feature MLP 1:** Input is the lighting component $v$. Architecture: 8 layers, 256 channels per layer.
+-    *   **Feature MLP 2:** Input is the output of Feature MLP 1. Architecture: 1 layer, 256 channels.
+-    *   **Coeff MLP:** Input is the output of Feature MLP 2. Outputs a 3-channel vector $\gamma$ and a scalar $\alpha$.
+-    *   **Color MLP:** Input is the output of Feature MLP 2. Outputs a 3-channel correction vector (used in some variants, though the primary enhancement uses $\alpha$ and $\gamma$).
++1.  **Radiance Field Model:** Predicts density $\sigma$ and the base color components $v$ and $r$.
++    -   $F_{density}$: MLP predicting density $\sigma$.
++    -   $F_1$: MLP predicting the view-dependent lighting component $v$. Input: spatial coordinate $\tau$ and view direction $d$. Output: 1 channel (scalar).
++    -   $F_2$: MLP predicting the reciprocal color basis $r$. Input: spatial coordinate $\tau$. Output: 3 channels (RGB).
++2.  **Enhancement Model $\phi$:** Predicts coefficients for dynamic gamma correction.
++    -   **Feature MLP 1:** 8 hidden layers, 256 channels each. Input: $v$.
++    -   **Feature MLP 2:** 1 hidden layer, 256 channels. Input: output of Feature MLP 1.
++    -   **Coeff MLP:** 1 hidden layer, 128 channels. Input: output of Feature MLP 2. Output: $\alpha$ (1 channel, scalar) and $\gamma$ (3 channels, vector).
++    -   **Color MLP:** 1 hidden layer, 128 channels. Input: output of Feature MLP 2. Output: 3 channels (used for color distortion correction, though the primary enhancement is via $\alpha, \gamma$).
++    -   *Note:* The source diagram [S1] shows the enhancement model structure. The exact architecture details are: Feature MLP 1 (8x256), Feature MLP 2 (1x256), Coeff MLP (1x128 outputting 4 channels: 1 for $\alpha$, 3 for $\gamma$), and Color MLP (1x128 outputting 3 channels).
+ 
+-**Numbered Steps**
+-1.  **Ray Casting:** For each pixel, cast a ray through the scene. Sample $N$ points along the ray at spatial coordinates $\tau_i$ with view directions $d_i$.
+-2.  **Decomposition:**
+-    *   Compute the lighting component for each sample: $v_i = F_1(\tau_i, d_i; \Theta_{F1})$.
+-    *   Compute the reciprocal color basis for each sample: $r_i = F_2(\tau_i; \Theta_{F2})$.
+-    *   The unenhanced color is $c_i = v_i \circ r_i$, where $\circ$ is pixel-wise multiplication [S1].
+-3.  **Enhancement:**
+-    *   Pass $v_i$ through the enhancement network $\phi$ to obtain coefficients $\alpha_i$ and $\gamma_i$.
+-    *   Apply dynamic gamma correction to $v_i$:
+-        $$ \hat{v}_i = \phi(v_i) = \left( \frac{v_i}{\gamma_0} \right)^{\frac{\alpha}{1+\gamma}} $$
+-        where $\gamma_0$ is a fixed initialization value for the non-linear transform [S1].
+-    *   Compute the enhanced color sample: $\hat{c}_i = \hat{v}_i \circ r_i$ [S1].
+-4.  **Volume Rendering:**
+-    *   Render the enhanced image $I_e$ by accumulating the enhanced colors along the ray:
+-        $$ I_e = \{ \hat{c}_r \}, \quad \hat{c}_r = \sum_{i=1}^N w_i \hat{v}_i \circ r_i $$
+-        where $w_i$ are the volume rendering weights derived from density $\sigma$ and transmittance [S1].
++**Numbered Steps:**
++1.  **Ray Casting:** For each pixel, cast a ray through the scene. Sample $N$ points $\tau_i$ along the ray.
++2.  **Attribute Prediction:**
++    -   Compute density $\sigma_i = F_{density}(\tau_i)$.
++    -   Compute lighting component $v_i = F_1(\tau_i, d; \Theta_{F1})$.
++    -   Compute reciprocal color $r_i = F_2(\tau_i; \Theta_{F2})$.
++3.  **Alpha Computation:** Compute transmittance and weights $w_i$ for volume rendering:
++    $$ w_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) (1 - \exp(-\sigma_i \delta_i)) $$
++    where $\delta_i$ is the distance between adjacent samples.
++4.  **Enhancement:** Apply the enhancement function $\phi$ to the lighting component $v_i$:
++    $$ \hat{v}_i = \phi(v_i) = \left( \frac{v_i}{\gamma_0} \right)^{\frac{\gamma}{1+\gamma_0} \alpha} $$
++    Here, $\alpha$ is a scalar gain, $\gamma$ is a 3D vector for color distortion correction, and $\gamma_0$ is a fixed initialization value for the non-linear transform [S1].
++5.  **Enhanced Color Rendering:** Compute the enhanced color $\hat{c}_r$ for the pixel:
++    $$ \hat{c}_r = \sum_{i=1}^{N} w_i \hat{v}_i \circ r_i $$
++    where $\circ$ denotes pixel-wise multiplication. The enhanced image $I_e$ is composed of these $\hat{c}_r$ values [S1].
++6.  **Loss Calculation:** Minimize the following loss functions:
++    -   **Data Loss:** $L_{data} = \mathbb{E}[\eta(\tilde{c}_r) - \eta(c_r)]$, where $\tilde{c}_r$ is the observed RAW pixel, $c_r$ is the predicted color (un-enhanced or enhanced depending on the specific supervision target, but typically the base NeRF output is supervised against RAW via tone mapping), and $\eta(y) = \log(y + \epsilon_2)$ [S1].
++    -   **Gray-world Prior Loss ($L_c$):** Constrains the enhanced output $\hat{c}_r$:
++        $$ L_c = \mathbb{E}[(\hat{c}_r - e)^2] + \lambda_1 \mathbb{E}\left[\frac{\text{var}_c(\hat{c}_r)}{\beta_1 + \text{var}_c(r_r)}\right] + \lambda_2 \|\gamma\|^2 $$
++        where $e=0.55$ is the target brightness, $\text{var}_c$ is channel-wise variance, and $r_r$ is the rendered reciprocal color [S1].
++    -   **Smoothness Loss ($L_s$):** Constrains the gradients of the enhancement coefficients $\alpha$ and $\gamma$ with respect to the integrated lighting $v_r$:
++        $$ L_s = L_{sa} + L_{sg} $$
++        $$ L_{sa} = \frac{1}{2} \left( \frac{(\alpha_r - \alpha_{rh})^2}{(v_r - v_{rh})^2 + \epsilon_1} + \frac{(\alpha_r - \alpha_{rv})^2}{(v_r - v_{rv})^2 + \epsilon_1} \right) $$
++        where subscripts $h$ and $v$ denote horizontal and vertical neighbors in image space [S1].
++7.  **Optimization:** Jointly optimize the parameters of $F_{density}$, $F_1$, $F_2$, and $\phi$ using the combined loss.
+ 
+-**Formulas and Loss Functions**
+-The training minimizes three loss terms:
++**Formulas:**
++-   **Decomposition:** $c = v \circ r$ and $\hat{c} = \phi(v) \circ r$ [S1].
++-   **Enhancement Function:** $\hat{v} = \phi(v) = \left( \frac{v}{\gamma_0} \right)^{\frac{\gamma}{1+\gamma_0} \alpha}$ [S1].
++-   **Gray-world Loss:** $L_c = \mathbb{E}[(\hat{c}_r - e)^2] + \lambda_1 \mathbb{E}\left[\frac{\text{var}_c(\hat{c}_r)}{\beta_1 + \text{var}_c(r_r)}\right] + \lambda_2 \|\gamma\|^2$ [S1].
++-   **Smoothness Loss:** $L_s = \mathbb{E}\left[ \frac{\partial \alpha_r}{\partial v_r} \right] + \mathbb{E}\left[ \frac{\partial \gamma_r}{\partial v_r} \right]$ approximated by discrete neighbors [S1].
++-   **Data Loss:** $L_{data} = \mathbb{E}[\log(\tilde{c}_r + \epsilon_2) - \log(c_r + \epsilon_2)]$ [S1].
+ 
+-1.  **Gray-World Prior-based Colorimetric Supervision ($L_c$):**
+-    Corrects color bias caused by noise in low-light RAW images.
+-    $$ L_c = \mathbb{E}[(\hat{c}_r - e)^2] + \lambda_1 \mathbb{E}\left[ \frac{\text{var}_c(\hat{c}_r)}{\beta_1 + \text{var}_c(r_r)} \right] + \lambda_2 \|\gamma\|^2 $$
+-    *   $e = 0.55$: Target brightness for the gray-world prior [S1].
+-    *   $\text{var}_c(\cdot)$: Channel-wise variance [S1].
+-    *   $\lambda_1, \lambda_2, \beta_1$: Hyper-parameters [S1].
+-    *   The term $\frac{\text{var}_c(\hat{c}_r)}{\beta_1 + \text{var}_c(r_r)}$ relaxes the constraint for highly saturated colors (large $\text{var}_c(r_r)$) [S1].
++**Parameters:**
++-   $\alpha$: Scalar output by $\phi$, adjusts lighting gain globally [S1].
++-   $\gamma$: 3D vector output by $\phi$, corrects color distortion [S1].
++-   $\gamma_0$: Fixed value initializing the non-linear transform [S1].
++-   $e$: Hyper-parameter for gray-world prior, set to 0.55 [S1].
++-   $\lambda_1, \lambda_2, \beta_1$: Hyper-parameters for $L_c$ [S1].
++-   $\epsilon_1$: Small constant in smoothness loss denominator [S1].
++-   $\epsilon_2$: Small constant in tone mapping function [S1].
+ 
+-2.  **Smoothness Prior-based Supervision ($L_s$):**
+-    Constrains the gradients of the integrated coefficients $\alpha$ and $\gamma$ with respect to the integrated lighting component $v_r$ to preserve local structure.
+-    $$ L_s = L_{s\alpha} + L_{s\gamma} $$
+-    $$ L_{s\alpha} = \frac{1}{2} \left[ \frac{(\alpha_r - \alpha_{rh})^2}{(v_r - v_{rh})^2 + \epsilon_1} + \frac{(\alpha_r - \alpha_{rv})^2}{(v_r - v_{rv})^2 + \epsilon_1} \right] $$
+-    *   $\alpha_r, v_r$: Integrated $\alpha$ and $v$ for the current ray.
+-    *   $\alpha_{rh}, v_{rh}$: Integrated values for the horizontally neighboring ray.
+-    *   $\alpha_{rv}, v_{rv}$: Integrated values for the vertically neighboring ray.
+-    *   $\epsilon_1$: Small constant to prevent division by zero [S1].
+-    *   $L_{s\gamma}$ is computed similarly for $\gamma$ [S1].
+-
+-3.  **Data Supervision ($L_d$):**
+-    Aligns the predicted color with the observed RAW pixel values.
+-    $$ L_d = \mathbb{E}[\eta(\tilde{c}_r) - \eta(c_r)] $$
+-    *   $\tilde{c}_r$: Observed RAW pixel value.
+-    *   $c_r$: Predicted unenhanced color (accumulated from $v_i \circ r_i$).
+-    *   $\eta(y) = \log(y + \epsilon_2)$: Tone mapping function to amplify errors in dark regions [S1].
+-    *   $\epsilon_2$: Small constant inside the log [S1].
+-
+-**Parameters**
+-*   $\alpha$: Scalar output by $\phi$, adjusts lighting gain globally [S1].
+-*   $\gamma$: 3D vector output by $\phi$, corrects color distortion via permutation [S1].
+-*   $\gamma_0$: Fixed value initializing the non-linear transform in $\phi$ [S1].
+-*   $e$: Hyper-parameter for brightness, set to 0.55 [S1].
+-*   $\lambda_1, \lambda_2, \beta_1, \epsilon_1, \epsilon_2$: Hyper-constants [S1].
+-
+-**Pitfalls**
+-*   **Color Bias in RAW Images:** Non-linear ISP processes change the noise distribution, causing the predicted color $c_r$ to converge to a biased value $\bar{c} + b$ instead of the true color $\bar{c}$ [S1]. The gray-world prior loss $L_c$ is specifically designed to mitigate this [S1].
+-*   **Gradient Computation:** Direct gradient computation for smoothness loss is difficult due to random ray sampling; a discrete approximation using neighboring rays is required [S1].
++**Pitfalls:**
++-   **Bias in RAW Images:** Non-linear ISP processes change the noise distribution of RAW images. If not accounted for, the predicted color $c_r$ may converge to a biased value $\bar{c} + b$ instead of the true color $\bar{c}$, leading to color distortions [S1]. The method addresses this via the gray-world prior and smoothness constraints.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Comparable to standard NeRF training, with additional overhead from the enhancement network $\phi$ and the computation of neighboring ray gradients for $L_s$ [S1].
+-*   **Memory Complexity:** Requires storing the enhancement network parameters and intermediate features for $\alpha$ and $\gamma$ [S1].
+-*   **Strengths:** Unsupervised; handles low-light and noisy RAW images; preserves 3D geometry while enhancing lighting [S1].
+-*   **Limitations:** Relies on the assumption that noise in RAW images is zero-mean; performance depends on the quality of the gray-world prior assumption [S1].
+-*   **When to use:** Low-light novel view synthesis where ground truth high-light images are unavailable [S1].
++-   **Time Complexity:** Depends on the number of samples $N$ per ray and the depth of the MLPs. The enhancement model adds a small overhead per sample.
++-   **Memory Complexity:** Stores the parameters of $F_{density}$, $F_1$, $F_2$, and $\phi$. No explicit voxel grid is stored.
++-   **Strengths:** Unsupervised; handles low-light conditions; preserves geometry; corrects color bias inherent in RAW processing.
++-   **Limitations:** Relies on multi-view consistency; may struggle with highly dynamic scenes or non-Lambertian surfaces if not explicitly modeled.
++-   **When to use:** Low-light novel view synthesis where ground truth enhanced images are unavailable.
+ 
+ ## Background
+-The method was introduced in "Lighting up NeRF via Unsupervised Decomposition and Enhancement" (ICCV 2023) [S1]. It addresses the limitation of standard NeRF in low-light conditions and the requirement of paired data in 2D low-light enhancement methods [S1].
++-   **Origin:** Proposed in "Lighting up NeRF via Unsupervised Decomposition and Enhancement" [S1].
++-   **History:** Builds on NeRF [22] and RawNeRF [21]. Addresses limitations of 2D Retinex methods [28, 9, 31, 38] which require ground truth.
++-   **Usage:** Low-light image enhancement and novel view synthesis.
+ 
+ ## Sources

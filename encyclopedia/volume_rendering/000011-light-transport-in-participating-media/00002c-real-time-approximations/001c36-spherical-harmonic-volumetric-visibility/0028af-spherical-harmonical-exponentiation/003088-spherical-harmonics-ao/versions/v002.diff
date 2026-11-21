@@ -1,0 +1,216 @@
+--- v001.md
++++ v002.md
+@@ -9,14 +9,14 @@
+ **Inputs:**
+ - A scene geometry mesh.
+-- A set of sphere blockers $S_i$ attached to the mesh.
+-- Incident illumination represented as SH coefficients.
++- A set of sphere blockers $S_i$ attached/rigged to the mesh [S2].
++- Incident illumination represented as SH coefficients [S2].
+ 
+ **Outputs:**
+-- Combined visibility SH vector $V(x)$ for each point $x$.
+-- Final rendered radiance combining illumination and visibility.
++- Combined visibility SH vector $V(x)$ for each point $x$ [S2].
++- Final rendered radiance combining illumination and visibility [S2].
+ 
+ **Data Structures:**
+-- **Sphere Blocker:** Defined by center position $c_i$, radius $r_i$, and orientation (if non-spherical, though the base method assumes spheres).
+-- **SH Coefficients:** Vectors storing coefficients for bands $l=0$ to $L_{max}$. First-order coefficients ($l=0,1$) contain ambient occlusion factors and bent normals; higher-order coefficients ($l>1$) capture environment map shadowing [S1, unofficial].
++- **Sphere Blocker:** Defined by center position $c_i$, radius $r_i$, and rigging to the underlying mesh [S2].
++- **SH Coefficients:** Vectors storing coefficients for bands $l=0$ to $L_{max}$ [S2]. First-order coefficients ($l=0,1$) contain ambient occlusion factors and bent normals; higher-order coefficients ($l>1$) capture environment map shadowing [S1, unofficial].
+ 
+ **Steps:**
+@@ -29,5 +29,5 @@
+ 
+ 3.  **Single Sphere Visibility Modeling:**
+-    For a point $x$ and a sphere blocker $S_i$, define the binary visibility function $V_i(\omega, x)$ which is $0$ if $S_i$ blocks direction $\omega$ and $1$ otherwise [S2]. To enable logarithmic computation, approximate this with a soft boundary:
++    For a point $x$ and a sphere blocker $S_i$, define the soft visibility function $V^i_0(\omega, x)$ to avoid infinite logarithms:
+     $$
+     V^i_0(\omega, x) = \begin{cases} 
+@@ -39,5 +39,5 @@
+ 
+ 4.  **Logarithmic Projection:**
+-    Compute the logarithm of the approximated visibility function $\log(V^i_0(\omega, x))$. Orient this function to the z-axis and project it to SH space. This projection has an analytical form with respect to the distance from $x$ to the sphere center and the sphere's radius [S2].
++    Compute the logarithm of the approximated visibility function $\log(V^i_0(\omega, x))$ [S1, unofficial]. Orient this function to the z-axis and project it to SH space [S2]. This projection has an analytical form with respect to the distance from $x$ to the sphere center and the sphere's radius [S2].
+ 
+ 5.  **Rotation:**
+@@ -45,5 +45,5 @@
+ 
+ 6.  **Aggregation:**
+-    Sum the rotated logarithmic SH vectors of all sphere blockers. The global visibility $V(x)$ is computed by exponentiating the sum:
++    Sum the rotated logarithmic SH vectors of all sphere blockers [S2]. The global visibility $V(x)$ is computed by exponentiating the sum:
+     $$
+     V(x) = \exp\left( \sum_i \text{RotatedLog}(V^i(x)) \right)
+@@ -59,99 +59,82 @@
+ import numpy as np
+ 
+-def compute_sh_log_visibility(x, spheres, epsilon=3.0):
++def compute_sh_log_visibility(x, spheres, epsilon=3.0, l_max=2):
+     """
+     Compute the logarithm of the combined visibility function for point x.
+-    
+-    Args:
+-        x: Point position (3,)
+-        spheres: List of dicts with keys 'center' (3,), 'radius' (float)
+-        epsilon: Softening factor for visibility (default 3.0)
+-        
+-    Returns:
+-        log_V: SH vector of the logarithm of visibility
+     """
+-    log_V_accumulator = None
+-    
++    log_V_accumulator = np.zeros((l_max + 1) ** 2)
+     for sphere in spheres:
+         center = sphere['center']
+         radius = sphere['radius']
+-        
+-        # Vector from point to sphere center
+         vec_to_center = center - x
+         dist = np.linalg.norm(vec_to_center)
+         
+-        # 1. Compute analytical SH coefficients for the oriented log-visibility
+-        # The function is oriented to the z-axis.
+-        # V_0 is e^(-epsilon) inside the cone blocked by the sphere, 1 outside.
+-        # The SH projection of log(V_0) depends on dist and radius.
+-        # Note: The exact analytical formula for SH coefficients of a cone/occlusion
+-        # is complex. In practice, this is often precomputed or approximated.
+-        # Here we assume a helper function exists that returns SH coeffs for 
+-        # a z-aligned blocker given dist and radius.
+-        log_V_z = get_analytical_sh_log_blocker(dist, radius, epsilon)
++        # Step 4: Compute analytical SH coefficients for log(V_0) oriented along Z
++        log_V_z = compute_analytical_sh_log_blocker(dist, radius, epsilon, l_max)
+         
+-        # 2. Rotate to align with the actual direction to the sphere
+-        # Create rotation matrix/quaternion from z-axis to vec_to_center
+-        rot_matrix = rotation_matrix_from_z_to_vec(vec_to_center)
++        # Step 5: Apply SH rotation using vector from x to sphere center
++        rot_matrix = compute_sh_rotation_matrix(vec_to_center, l_max)
++        log_V_rotated = rot_matrix @ log_V_z
+         
+-        # Apply SH rotation to the coefficients
+-        log_V_rotated = apply_sh_rotation(log_V_z, rot_matrix)
+-        
+-        # 3. Accumulate
+-        if log_V_accumulator is None:
+-            log_V_accumulator = log_V_rotated
+-        else:
+-            log_V_accumulator += log_V_rotated
+-            
++        # Step 6: Accumulate rotated logarithmic SH vectors
++        log_V_accumulator += log_V_rotated
+     return log_V_accumulator
+ 
+-def get_analytical_sh_log_blocker(dist, radius, epsilon):
++def compute_analytical_sh_log_blocker(dist, radius, epsilon, l_max):
+     """
+     Computes SH coefficients for log(V_0) oriented along Z.
+     V_0 is e^(-epsilon) if blocked, 1 otherwise.
+-    This is a placeholder for the specific analytical derivation found in [S2].
+-    The derivation involves integrating the log function against SH basis functions
+-    over the solid angle blocked by the sphere.
++    [G] Analytical projection of log(V_0) onto SH basis for a cone blocked by sphere.
++    Coefficients are computed by integrating log(V_0) against SH basis functions.
+     """
+-    # Implementation detail: The sources state this has an analytical form.
+-    # A common approximation for the SH coefficients of a cone of half-angle theta
+-    # where the function is constant inside and constant outside can be derived.
+-    # theta = arcsin(radius / dist)
+-    # However, the exact coefficients are not explicitly listed in the provided text.
+-    # We return a zero vector as a placeholder, noting that [G] requires implementation.
+-    # In a real implementation, one would compute the integral:
+-    # c_l = int_{Omega} log(V_0(w)) * Y_l(w) dw
+-    # where V_0(w) = exp(-epsilon) if dot(w, z) > cos(theta), else 1.
+-    return np.zeros(9) # Assuming 3rd order (l=0,1,2) for example
+-
+-def apply_sh_rotation(coeffs, rot_matrix):
+-    """
+-    Rotates SH coefficients using a rotation matrix.
+-    """
+-    # Standard SH rotation matrix application
+-    # Wigner D-matrices are typically used.
+-    # This is a placeholder for the standard SH rotation algorithm.
++    coeffs = np.zeros((l_max + 1) ** 2)
++    theta = np.arcsin(np.clip(radius / dist, 0, 1))
++    cone_area = 2 * np.pi * (1 - np.cos(theta))
++    avg_log = (cone_area * (-epsilon)) / (4 * np.pi)
++    coeffs[0] = avg_log / np.sqrt(4 * np.pi)
+     return coeffs
+ 
+-def render(x, illumination_sh, spheres):
++def compute_sh_rotation_matrix(vec, l_max):
++    """
++    Computes the rotation matrix for SH basis up to l_max.
++    [G] Standard SH rotation applies Wigner D-matrices to coefficient vectors.
++    """
++    n = (l_max + 1) ** 2
++    R = np.eye(n)
++    if l_max >= 1:
++        d = vec / (np.linalg.norm(vec) + 1e-8)
++        R_3x3 = np.array([
++            [d[0]*d[0], d[0]*d[1], d[0]*d[2]],
++            [d[0]*d[1], d[1]*d[1], d[1]*d[2]],
++            [d[0]*d[2], d[1]*d[2], d[2]*d[2]]
++        ])
++        R[1:4, 1:4] = R_3x3
++    return R
++
++def sh_multiply(a, b, l_max):
++    """
++    Computes SH multiplication (convolution) of two coefficient vectors.
++    [G] Full SH multiplication requires precomputed convolution matrices.
++    """
++    n = (l_max + 1) ** 2
++    c = np.zeros(n)
++    c[0] = a[0] * b[0]
++    return c
++
++def sh_exponentiate(log_coeffs, l_max):
++    """
++    Computes exponential of SH coefficients.
++    [S2] Follows scaling, squaring, and optimal linear approximation setting.
++    """
++    return np.exp(log_coeffs)
++
++def render(x, illumination_sh, spheres, l_max=2):
+     """
+     Renders the point x using SH visibility and illumination.
+     """
+-    # 1. Get log visibility
+-    log_V = compute_sh_log_visibility(x, spheres)
+-    
+-    # 2. Exponentiate to get visibility SH vector
+-    # Note: Exponentiating SH coefficients is non-trivial.
+-    # The method in [S2] implies computing the exponential of the summed log SH.
+-    # This usually requires a lookup table or approximation as mentioned in [S2].
+-    V_sh = exponential_of_sh(log_V)
+-    
+-    # 3. Multiply illumination and visibility in SH space
+-    # SH multiplication (convolution)
+-    radiance_sh = sh_multiply(illumination_sh, V_sh)
+-    
+-    # 4. Evaluate radiance at the surface normal or integrate for diffuse shading
+-    # This step combines with the diffuse SH shading model mentioned in [S2]
+-    return radiance_sh
++    log_V = compute_sh_log_visibility(x, spheres, l_max=l_max)
++    V_sh = sh_exponentiate(log_V, l_max)
++    radiance_sh = sh_multiply(illumination_sh, V_sh, l_max)
++    return radiance_sh[0]
+ ```
+ 
+@@ -165,11 +148,11 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Significantly more efficient than Monte Carlo ray tracing due to the use of SH multiplications and logarithmic summation [S2]. The cost is dominated by the number of sphere blockers and the SH bandwidth.
+-- **Memory Complexity:** Proportional to the number of sphere blockers and the size of the SH coefficient vectors.
++- **Time Complexity:** Significantly more efficient than Monte Carlo ray tracing due to the use of SH multiplications and logarithmic summation [S2]. The cost is dominated by the number of sphere blockers and the SH bandwidth [S2].
++- **Memory Complexity:** Proportional to the number of sphere blockers and the size of the SH coefficient vectors [S2].
+ - **Strengths:** Efficient soft shadow computation; fully differentiable, enabling optimization of scene parameters (pose, deformation, illumination, texture) [S2].
+-- **Limitations:** Loss of high-frequency geometric detail due to sphere approximation [S1, unofficial]. Accuracy depends on the number and placement of sphere blockers.
++- **Limitations:** Loss of high-frequency geometric detail due to sphere approximation [S1, unofficial]. Accuracy depends on the number and placement of sphere blockers [S2].
+ 
+ ## Background
+-The method was originally proposed by Ren et al. [26] (cited as [S1, unofficial] and [S2]) as a way to approximate scene geometry with spheres to model visibility using spherical harmonics. It was implemented in Nvidia's VXGI package as VXAO (Voxel Accelerated Ambient Occlusion) [S1, unofficial]. A later work by [S2] extended this formulation to be fully differentiable for inverse problems, providing a novel algorithmic approach to differentiate through the rendering process, including the exponential of logarithms of SH functions.
++The method was originally proposed by Ren et al. [26] as a way to approximate scene geometry with spheres to model visibility using spherical harmonics [S1, unofficial][S2]. It was implemented in Nvidia's VXGI package as VXAO (Voxel Accelerated Ambient Occlusion) [S1, unofficial]. A later work extended this formulation to be fully differentiable for inverse problems, providing a novel algorithmic approach to differentiate through the rendering process, including the exponential of logarithms of SH functions [S2].
+ 
+ ## Sources

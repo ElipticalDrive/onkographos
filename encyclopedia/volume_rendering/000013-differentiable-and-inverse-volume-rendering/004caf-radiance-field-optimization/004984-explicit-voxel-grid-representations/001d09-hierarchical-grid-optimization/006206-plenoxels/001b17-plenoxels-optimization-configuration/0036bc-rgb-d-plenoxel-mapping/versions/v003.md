@@ -1,0 +1,54 @@
+# RGB-D Plenoxel Mapping
+
+Also called: RGB-D Plenoxel
+
+## Overview
+RGB-D Plenoxel Mapping is a dense mapping algorithm that extends the Plenoxel voxel-based radiance field representation to incorporate depth data from an RGB-D sensor [S1]. It solves the problem of geometric ambiguity in gradient-less regions and outward-facing scenes, which standard NeRF-based methods fail to capture accurately [S1]. Unlike sparse tracking methods that rely on feature points, this method utilizes all available image and model information for smoother, more accurate trajectories [S1]. It builds on [Plenoxels Optimization Configuration](929-plenoxels-optimization-configuration.md) by adding depth constraints to the optimization process.
+
+## How it works
+The method derives analytical derivative equations for mapping in a voxel-based radiance field based on RGB-D data and implements the optimization in CUDA for fast computation [S1].
+
+**Inputs:**
+- RGB-D image pair (color $C$, depth $D$) from a camera pose $P$.
+- Pre-existing Plenoxel radiance field model (voxel grid with opacity $\sigma$ and spherical harmonic coefficients).
+
+**Outputs:**
+- Updated Plenoxel model parameters (refined geometry and appearance).
+- Refined camera pose $P'$ (in the context of tracking).
+
+**Data Structures:**
+- Voxel grid storing radiance field parameters. The specific layout is inherited from the base Plenoxel representation [S1].
+- CUDA kernels for rendering and gradient computation [S1].
+
+**Steps:**
+1. **Rendering:** Render the predicted RGB and depth values for the current camera pose using the radiance field rendering equations [S1].
+2. **Loss Computation:** Compute the photometric difference between the observed RGB-D data and the rendered values [S1].
+3. **Gradient Derivation:** Use the derived analytical derivative equations for the voxel-based radiance field with RGB-D data to compute gradients [S1].
+4. **Optimization:** Update the model parameters (and/or camera pose) using gradient-based optimization [S1].
+5. **Implementation:** Execute steps 1-4 in CUDA to leverage the speed of the Plenoxel model, which is more than two magnitudes faster than the original NeRF algorithm [S1].
+
+**Formulas:**
+The specific analytical derivative equations are derived in the source but not explicitly written out in the provided text [S1]. The optimization minimizes the photometric difference between the observed image and the image rendered from the estimated pose [S1].
+
+**Parameters:**
+- Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- Gradient-less regions: Standard NeRF optimization suffers from ambiguity here; RGB-D data removes this ambiguity [S1].
+- Outward-facing scenes: Standard NeRF fails to capture geometry; depth sensors ensure accurate geometry [S1].
+
+## Subtopics
+
+## Operating characteristics
+- **Speed:** The Plenoxel model is more than two magnitudes faster than the original NeRF algorithm, enabling a very efficient mapping algorithm and real-time, highly accurate tracking [S1].
+- **Accuracy:** Shows improvement in both mapping and tracking results compared to existing radiance field mapping and tracking methods given the same time constraints [S1].
+- **Hardware:** Implemented in CUDA for fast computation times [S1].
+- **Scaling:** Not given in the sources.
+- **Strengths:** Removes ambiguities in gradient-less regions; accurate geometry in outward-facing scenes; real-time performance [S1].
+- **Limitations:** Relies on RGB-D sensor data; technical and computational complexity of dense mapping/tracking methods [S1].
+
+## Background
+The method is based on the Plenoxel algorithm, which uses an analytical radiance field representation without a neural network but rather a voxel grid representation [S1]. It was developed to make the Plenoxel model more applicable for practical tasks like robotics and XR by augmenting it with depth data [S1]. The work addresses the limitations of using NeRF directly for practical applications, which often suffer from geometric ambiguity [S1].
+
+## Sources
+[S1] RGB-D Mapping and Tracking in a Plenoxel Radiance Field, https://doi.org/10.1109/wacv57701.2024.00331, fetched 2026-10-26

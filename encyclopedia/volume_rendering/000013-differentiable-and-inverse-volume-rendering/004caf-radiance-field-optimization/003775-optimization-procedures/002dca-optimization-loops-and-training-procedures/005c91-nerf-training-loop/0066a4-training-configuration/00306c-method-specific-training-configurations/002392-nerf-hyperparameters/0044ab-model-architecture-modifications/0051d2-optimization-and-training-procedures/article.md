@@ -1,0 +1,27 @@
+# Optimization and Training Procedures
+
+
+## Overview
+This article defines the optimization and training procedures for NeRF-based architectures, focusing on hyperparameter configurations, learning rate schedules, and specific training loops for model editing or acceleration. It sets itself apart from sibling articles by detailing the numerical parameters (learning rates, batch sizes, iterations) and optimizer choices required to converge specific variants, rather than describing the architectural topology or rendering equations.
+
+## Shared principles
+Not given in the sources.
+
+## Subtopics
+
+### [Activation-Informed Coarse-to-Fine Rendering](12277-activation-informed-coarse-to-fine-rendering.md)
+This method accelerates NeRF inference by skipping the expensive fine-pass MLP evaluation for rays determined to be empty or background, based on intermediate activation values from the coarse pass [12277-activation-informed-coarse-to-fine-rendering.md]. It sets itself apart from standard coarse-to-fine rendering by using a data-driven mask derived from hidden layer statistics rather than a fixed geometric threshold or uniform sampling, achieving significant speedups on synthetic scenes with transparent backgrounds [12277-activation-informed-coarse-to-fine-rendering.md].
+
+### [Last Layer Re-training](13532-last-layer-re-training.md)
+Last Layer Re-training is a technique to instantly propagate a color edit from a single view to the entire Neural Radiance Field (NeRF) by selectively retraining only the last layer of the color Multi-Layer Perceptron (MLP) [13532-last-layer-re-training.md]. It solves the problem of efficient NeRF editing by reducing the number of parameters requiring modification compared to full retraining, while preserving existing view-dependent information [13532-last-layer-re-training.md]. It sets itself apart from full MLP retraining by avoiding the loss of useful pre-trained information and from methods like ICE-NeRF by preventing color bleeding at object boundaries [13532-last-layer-re-training.md].
+
+#### Rip-NeRF Optimization
+**Definition**: The optimization process for Rip-NeRF involves training the tiny MLP weights and the ripmaps $R$ [S1].
+**Steps**: The learning rate schedule is reduced by 0.6x at steps 60K, 90K, 100K, and 108K, over a total of 120K iterations [S1]. The batch size is dynamically adjusted to maintain approximately 256K spheres per batch [S1].
+**Parameters**: MLP weights are initialized following Glorot and Bengio (2010) [S1]. Ripmaps $R$ are initialized from a uniform distribution over $[-0.01, 0.01]$ [S1]. The optimizer is AdamW [S1]. The base learning rate for $R$ is scaled by 10x due to its direct scene representation role [S1]. The base learning rate is $2 \times 10^{-3}$ [S1].
+
+## Background
+The specific optimization configurations for Rip-NeRF are derived from [S1]. General NeRF training principles, such as the use of AdamW and dynamic batch sizing, follow [Müller et al. 2022] as cited in [S1]. The activation-informed skipping method is detailed in [12277-activation-informed-coarse-to-fine-rendering.md]. The last layer re-training technique is detailed in [13532-last-layer-re-training.md].
+
+## Sources
+[S1] Rip-NeRF: Anti-aliasing Radiance Fields with Ripmap-Encoded Platonic Solids, https://arxiv.org/abs/2405.02386v1, fetched 2026-10-26

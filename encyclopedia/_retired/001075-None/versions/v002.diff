@@ -1,0 +1,155 @@
+--- v001.md
++++ v002.md
+@@ -13,17 +13,17 @@
+ **Data Structures:**
+ *   **Geometry Shader Output:** A stream of vertices forming triangle strips. The number of emitted vertices is $3 \times n$, where $n$ is the number of slices the triangle spans [S1, unofficial].
+-*   **Inter-shader Communication:** Flat-shaded varying variables `zMin` and `zMax` passed from the geometry shader to the pixel shader, representing the slice boundaries in Normalized Device Coordinates (NDC) [S1, unofficial].
++*   **Inter-shader Communication:** Flat-shaded varying variables `zMin` and `zMax` passed from the geometry shader to the pixel shader, representing slice boundaries in Normalized Device Coordinates (NDC) [S1, unofficial].
+ 
+ **Steps:**
+ 1.  **Geometry Shader Processing:**
+     *   For each directional voxelization, pass each triangle through the geometry shader [S1, unofficial].
+-    *   Check if the triangle is aligned with the current sweeping direction (e.g., Z-axis). If not aligned, discard the primitive [S1, unofficial].
++    *   Check if the triangle is aligned with the current sweeping direction (Z-axis). If not aligned, discard the primitive [S1, unofficial].
+     *   Compute the slice indices $s_{min}$ and $s_{max}$ that the triangle intersects:
+-        $$ s_{min} = \min \left( \frac{z(v_i) - z_{min\_vol}}{t} \right) $$
+-        $$ s_{max} = \max \left( \frac{z(v_i) - z_{min\_vol}}{t} \right) $$
++        $$ s_{min} = \left\lfloor \min_i \frac{z(v_i) - z_{min\_vol}}{t} \right\rfloor $$
++        $$ s_{max} = \left\lfloor \max_i \frac{z(v_i) - z_{min\_vol}}{t} \right\rfloor $$
+         where $z(v_i)$ is the z-coordinate of vertex $v_i$ in ECS [S1, unofficial].
+     *   Iterate through each slice $s$ from $s_{min}$ to $s_{max}$:
+         *   Determine the depth range $[z_{min}, z_{max}]$ of the triangle within slice $s$ in NDC [S1, unofficial].
+-        *   Emit vertices to rasterize the triangle into slice $s$. The specific clipping logic is omitted here as the method relies on the pixel shader for boundary enforcement [G].
++        *   Emit vertices to rasterize the triangle into slice $s$. The specific geometric clipping logic is omitted as the method relies on the pixel shader for boundary enforcement [S1, unofficial].
+         *   Pass the computed NDC boundaries `zMin` and `zMax` to the pixel shader for the emitted vertices [S1, unofficial].
+ 
+@@ -32,65 +32,77 @@
+     *   For each fragment, check its depth $z_{frag}$ against the boundaries:
+         $$ \text{if } z_{frag} < z_{Min} \text{ or } z_{frag} > z_{Max} \text{ then discard} $$
+-    *   If the fragment is within bounds, compute the required multi-channel data (e.g., occupancy, normals) and write to the volume buffer [S1, unofficial].
++    *   If the fragment is within bounds, compute the required multi-channel data and write to the volume buffer [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# Geometry Shader
++def perspective_divide(v):
++    # Standard perspective division to convert ECS to NDC [G]
++    return (v.x / v.w, v.y / v.w, v.z / v.w)
++
++def is_aligned_with_z(v1, v2, v3):
++    # Standard orientation check for Z-axis alignment [G]
++    return abs(v1.z - v2.z) < 1e-6 and abs(v2.z - v3.z) < 1e-6
++
+ def geometry_shader(v1, v2, v3, slice_thickness, z_vol_min):
+-    # Check alignment with sweeping direction (Z-axis)
+-    # Assuming triangle is defined in Eye Coordinate Space
++    # Check alignment with sweeping direction (Z-axis) [S1, unofficial]
++    if not is_aligned_with_z(v1, v2, v3):
++        return
++    
+     z_coords = [v1.z, v2.z, v3.z]
+-    
+-    # Compute slice indices
+-    # Note: Integer division or floor is implied for slice indexing
++    # Compute slice indices in ECS
+     s_min = floor(min(z_coords) - z_vol_min) / slice_thickness
+     s_max = floor(max(z_coords) - z_vol_min) / slice_thickness
+     
+-    # Emit vertices for each intersecting slice
+-    for s in range(s_min, s_max + 1):
+-        # Determine depth range in NDC for this slice
+-        # This requires transforming triangle vertices to NDC and finding
+-        # the intersection with the slice planes.
+-        # The exact clipping of the triangle to the slice slab is handled
+-        # by the rasterizer's depth test or implicit in the vertex generation.
+-        # However, the method relies on PS to discard out-of-bounds fragments.
++    # Transform vertices to NDC for rasterization [G]
++    v1_ndc = perspective_divide(v1)
++    v2_ndc = perspective_divide(v2)
++    v3_ndc = perspective_divide(v3)
++    
++    for s in range(int(s_min), int(s_max) + 1):
++        # Compute NDC depth bounds for this slice
++        z_min_ecs = z_vol_min + s * slice_thickness
++        z_max_ecs = z_vol_min + (s + 1) * slice_thickness
++        z_min_ndc = perspective_divide_z(z_min_ecs)
++        z_max_ndc = perspective_divide_z(z_max_ecs)
+         
+-        # Compute NDC boundaries for the current slice
+-        # z_min_ndc and z_max_ndc are derived from the triangle's 
+-        # intersection with the slice slab [s, s+1] in ECS, transformed to NDC.
+-        z_min_ndc, z_max_ndc = compute_slice_ndc_bounds(v1, v2, v3, s, slice_thickness, z_vol_min)
+-        
+-        # Emit vertices for the triangle (or clipped portion)
+-        # The geometry shader emits 3 vertices per slice.
+-        # The vertices are passed with flat varying zMin and zMax.
+-        emit_vertex(v1, z_min_ndc, z_max_ndc)
+-        emit_vertex(v2, z_min_ndc, z_max_ndc)
+-        emit_vertex(v3, z_min_ndc, z_max_ndc)
++        # Emit the full triangle vertices for this slice
++        # Flat varyings zMin and zMax are attached to each vertex
++        emit_vertex(v1_ndc, z_min_ndc, z_max_ndc)
++        emit_vertex(v2_ndc, z_min_ndc, z_max_ndc)
++        emit_vertex(v3_ndc, z_min_ndc, z_max_ndc)
+ 
+-def compute_slice_ndc_bounds(v1, v2, v3, slice_index, slice_thickness, z_vol_min):
+-    # Placeholder for the actual geometric calculation of NDC bounds.
+-    # In practice, this involves transforming the triangle vertices to NDC
+-    # and determining the depth range covered by the triangle within the
+-    # specific slice slab.
+-    # Since the method relies on PS clipping, the GS may emit the full
+-    # triangle or a simple approximation, and the PS handles the rest.
+-    # For implementation, one might transform the triangle to NDC and
+-    # clamp the depth values to the slice's NDC range.
+-    pass
+-
+-# Pixel Shader
+ def pixel_shader(z_min, z_max, fragment_depth):
+     # Discard fragments outside the slice boundaries
+     if fragment_depth < z_min or fragment_depth > z_max:
+-        discard()
++        return None # discard
+     
+-    # Compute multi-channel data
+-    # Example: Occupancy, Normal, Color
+-    occupancy = compute_occupancy()
+-    normal = compute_normal()
+-    color = compute_color()
++    # Compute multi-channel data (e.g., occupancy, normal, color)
++    # The pixel shader is virtually empty, computing just the data required by the application [S1, unofficial]
++    occupancy = compute_occupancy(fragment_depth)
++    normal = compute_normal(fragment_depth)
++    color = compute_color(fragment_depth)
+     
+     return occupancy, normal, color
++
++def emit_vertex(v, z_min, z_max):
++    # Standard graphics pipeline vertex emission [G]
++    pass
++
++def compute_occupancy(depth):
++    # Application-specific occupancy calculation [S1, unofficial]
++    return 1.0
++
++def compute_normal(depth):
++    # Application-specific normal calculation [S1, unofficial]
++    return (0.0, 0.0, 1.0)
++
++def compute_color(depth):
++    # Application-specific color calculation [S1, unofficial]
++    return (1.0, 1.0, 1.0)
++
++def perspective_divide_z(z_ecs):
++    # Extract z-component after perspective division [G]
++    return z_ecs / 1.0 # Simplified for NDC depth extraction
+ ```
+ 
+@@ -128,6 +140,5 @@
+ 
+ **History and Development:**
+-*   The method is part of a suite of single-pass GPU voxelization techniques designed for dynamic scenes [S1, unofficial].
+-*   It was compared against geometry shader triangle slicing, showing comparable performance and voxel count [S1, unofficial].
++*   The method was compared against geometry shader triangle slicing, showing comparable performance and voxel count [S1, unofficial].
+ 
+ **Usage:**

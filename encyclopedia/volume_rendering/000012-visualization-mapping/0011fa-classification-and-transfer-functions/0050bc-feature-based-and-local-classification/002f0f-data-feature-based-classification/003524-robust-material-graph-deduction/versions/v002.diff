@@ -1,0 +1,265 @@
+--- v001.md
++++ v002.md
+@@ -4,67 +4,69 @@
+ 
+ ## Overview
+-Robust Material Graph Deduction automatically discovers material interiors and their spatial interconnectivity to generate transfer functions, solving the problem of manual TF creation by ensuring materials are mapped beyond just their boundaries [S1, unofficial]. It differs from sibling methods like [Feature Graph](8595-feature-graph.md) by explicitly modeling the topology of adjacent materials as a graph $G(M, I)$ and optimizing for separation energy to merge similar materials, whereas siblings may focus on static feature clustering or distance metrics without topological graph reconstruction [S1, unofficial].
++Robust Material Graph Deduction automatically discovers the set of materials and their spatial interconnectivity within a volume to generate a transfer function, solving the problem of manual classification by mapping material interiors rather than just boundaries [S1, unofficial]. It sets itself apart from sibling methods like [Feature Graph](8595-feature-graph.md) by explicitly modeling materials as Gaussian intensity distributions with occlusion values and using a greedy merging strategy based on Bhattacharyya distance to optimize interface separation, whereas siblings often rely on static feature clustering or heuristic ranking [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A 3D volume dataset $V$.
+-*   **Output:** A material graph $G(M, I)$ where $M$ is the set of discovered materials and $I$ is the set of interfaces between adjacent materials. Each material $M_k$ is defined by an intensity distribution $V_k \sim \mathcal{N}(\mu_k, \sigma_k)$ and a mean occlusion value $\eta_k$.
++*   **Input:** A 3D scalar volume dataset $V$.
++*   **Output:** A material graph $G(M, I)$, where $M$ is the set of deduced materials and $I$ is the set of interfaces between adjacent materials. Each material $M_i \in M$ is defined by a Gaussian intensity distribution $V_i$ with mean $\mu_i$, standard deviation $\sigma_i$, and a mean occlusion value $\eta_i$. Each interface $I_j \in I$ connects two materials.
+ 
+ **Data Structures**
+-*   **LH Sample:** A tuple $(L, H)$ representing low and high intensity values found at an interface edge.
+-*   **Interface Set $\hat{I}$:** A collection of LH samples representing initial detected boundaries.
+-*   **Distance Matrix $D$:** A symmetric matrix where $D_{ij}$ is the Bhattacharyya distance between material distributions $V_i$ and $V_j$.
+-*   **Material Graph $G(M, I)$:** A graph where nodes are materials and edges are interfaces.
++*   **Material:** A tuple $(\mu, \sigma, \eta)$.
++*   **Interface:** A pair of material indices $(m_a, m_b)$ and the set of edge pixels belonging to it.
++*   **Distance Matrix $D$:** A symmetric matrix where $D_{ij}$ is the Bhattacharyya distance between material $i$ and material $j$.
++*   **Edge Set $\hat{I}$:** The initial set of interface edges detected from the volume.
+ 
+ **Algorithm Steps**
+ 
+-1.  **Compute Initial Edge Set $\hat{I}$:**
+-    For each edge pixel in the volume, perform a bidirectional traversal along the local gradient to search for a low value $L$ and a high value $H$ in a small neighborhood [S1, unofficial]. These values are samples from adjacent intensity distributions $V_{i,1}$ and $V_{i,2}$ [S1, unofficial].
++1.  **Initial Edge Detection:**
++    Compute the initial edge set $\hat{I}$ using the LH histogram method [S1, unofficial]. For each edge pixel, perform a bidirectional traversal along the local gradient to find a low intensity value $L$ and a high intensity value $H$ in a small neighborhood. These values $(L, H)$ are samples from the adjacent intensity distributions $V_{i,1}$ and $V_{i,2}$ of the interface $I_i$ [S1, unofficial].
+ 
+-2.  **Subsample and Cluster:**
+-    To ensure computational tractability for large volumes, subsample the interface set $\hat{I}$ from its distribution [S1, unofficial]. Cluster the LH samples using the HDBSCAN algorithm to define distinct material interfaces [S1, unofficial]. This step identifies pairs of adjacent materials but does not yet establish full connectivity or merge similar materials [S1, unofficial].
++2.  **Subsampling and Clustering:**
++    To ensure computational tractability for large volumes, subsample the interface set from the distribution of $\hat{I}$ [S1, unofficial]. Cluster the $(L, H)$ samples using the HDBSCAN algorithm to define initial material interfaces [S1, unofficial]. This step groups edge pixels into distinct interfaces between potential material pairs.
+ 
+-3.  **Define Base Threshold $\theta_{base}$:**
+-    Compute the minimum Bhattacharyya distance between the two materials in any initial interface $i \in \{1, \dots, k\}$:
++3.  **Compute Base Threshold:**
++    Calculate the base distance threshold $\theta_{base}$ as the minimum Bhattacharyya distance between the two materials in any initial interface:
+     $$ \theta_{base} = \min_{i \in \{1, \dots, k\}} d_B(V_{i,1}, V_{i,2}) $$
+-    where $d_B$ is the Bhattacharyya distance between two Gaussian distributions [S1, unofficial].
++    where $k$ is the number of initial interfaces and $d_B$ is the Bhattacharyya distance between two Gaussian distributions [S1, unofficial].
+ 
+ 4.  **Define Search Range:**
+     Choose two multipliers $\epsilon \ll 1$ and $\zeta \gg 1$. The search threshold $\theta$ is chosen from the range $[\epsilon \theta_{base}, \zeta \theta_{base}]$ [S1, unofficial].
+ 
+-5.  **Greedy Merging for a Fixed $\theta$:**
+-    For a given threshold $\theta$, deduce a feasible graph in two steps:
+-    *   **Find Materials to Merge:** Walk through the distance matrix $D$ to find sets of similar materials. A set may include a material from an interface, but not both materials of that interface (to avoid collapsing an interface to a single material) [S1, unofficial]. Reduce each set to a single material using a parent-child hierarchy, merging all children with their respective parents. This yields the set of materials $M$ [S1, unofficial].
+-    *   **Reconstruct Graph:** Merge nodes of similar materials together and merge repeating interface edges into one interface edge. Since each material intensity is a distribution function, the resulting material intensities for merged materials are computed by a weighted average of the constituent material distributions (means and standard deviations) [S1, unofficial].
++5.  **Greedy Merging (for a given $\theta$):**
++    Perform greedy merging in two steps to deduce the graph $G(M, I)$:
++    *   **Find Materials to Merge:** Walk through the distance matrix $D$ to find sets of similar materials. Create sets of materials that are similar to each other, ensuring that a set does not include both materials of a single interface (to avoid collapsing an interface into a single material). Reduce each set to a single material using a parent-child hierarchy, merging all children with their respective parents [S1, unofficial].
++    *   **Reconstruct Graph:** Merge nodes of similar materials together. Merge repeating interface edges (edges between the same pair of materials) into a single interface edge. The resulting material intensity distributions are computed by a weighted average of the constituent material distributions (means and standard deviations) [S1, unofficial].
+ 
+-6.  **Search for Optimal $\theta$:**
+-    Calculate the separation energy $E_{sep}$ for the graph $G(M, I)$:
++6.  **Optimal Graph Search:**
++    Search for the optimal threshold $\theta_{opt}$ that maximizes the separation energy $E_{sep}$:
+     $$ E_{sep}(G(M, I)) = \frac{1}{|I|} \sum_{j=1}^{|I|} d_B(V_{j,1}, V_{j,2}) $$
+-    Search for the optimal $\theta$ that maximizes $E_{sep}$ [S1, unofficial]. Maximizing $E_{sep}$ results in a graph with fewer but well-separated interface edges [S1, unofficial].
++    Maximizing $E_{sep}$ results in a graph with fewer but well-separated interface edges [S1, unofficial].
+ 
+ **Pseudocode**
+ 
+ ```python
+-def robust_material_graph_deduction(volume_data):
+-    # Step 1: Compute Initial Edge Set
+-    # Perform bidirectional traversal along local gradient for each edge pixel
+-    # to find low (L) and high (H) values in a small neighborhood.
++def robust_material_graph_deduction(volume):
++    # Step 1: Initial Edge Detection
++    # Compute LH histogram to find edge pixels
++    # For each edge pixel, traverse gradient to find L and H
+     initial_edges = []
+-    for pixel in edge_pixels(volume_data):
+-        L, H = traverse_gradient(pixel, volume_data)
+-        initial_edges.append((L, H))
++    for pixel in volume.edge_pixels():
++        L, H = traverse_gradient(pixel, volume)
++        initial_edges.append((L, H, pixel))
+ 
+-    # Step 2: Subsample and Cluster
++    # Step 2: Subsampling and Clustering
+     # Subsample to keep algorithm tractable
+     subsampled_edges = subsample(initial_edges)
+-    # Cluster LH samples using HDBSCAN to define interfaces
++    # Cluster using HDBSCAN to define initial interfaces
++    # Each cluster represents an interface between two intensity distributions
+     interfaces = hdbscan_cluster(subsampled_edges)
+ 
+     # Step 3: Compute Base Threshold
+-    # Calculate Bhattacharyya distance for all initial interface pairs
++    # Calculate Bhattacharyya distance for each interface
+     distances = []
+-    for (L, H) in interfaces:
+-        # Assume L and H define Gaussian distributions V_L and V_H
+-        dist = bhattacharyya_distance(L, H)
++    for interface in interfaces:
++        # interface contains samples from two distributions V1 and V2
++        V1, V2 = fit_gaussians(interface.samples)
++        dist = bhattacharyya_distance(V1, V2)
+         distances.append(dist)
+     
+@@ -78,95 +80,88 @@
+     # Step 5 & 6: Optimal Graph Search
+     best_theta = None
+-    max_e_sep = -infinity
++    max_energy = -infinity
+     best_graph = None
+ 
+     for theta in search_grid(theta_range):
+-        # Step 5a: Find Materials to Merge
+-        # Create sets of similar materials based on distance matrix D
+-        # D_ij = bhattacharyya_distance(V_i, V_j)
+-        # Constraint: Do not merge both materials of a single interface
+-        material_sets = find_similar_materials(interfaces, theta)
+-        
+-        # Reduce sets to single materials using parent-child hierarchy
+-        materials = reduce_to_parents(material_sets)
+-        
+-        # Step 5b: Reconstruct Graph
+-        # Merge nodes of similar materials
+-        # Merge repeating interface edges
+-        graph = reconstruct_graph(materials, interfaces)
++        # Greedy Merging
++        materials, graph = greedy_merge(interfaces, theta)
+         
+         # Calculate Separation Energy
+-        e_sep = calculate_separation_energy(graph)
++        if len(graph.interfaces) == 0:
++            continue
++            
++        energy = 0.0
++        for interface in graph.interfaces:
++            V1, V2 = interface.materials
++            energy += bhattacharyya_distance(V1, V2)
+         
+-        if e_sep > max_e_sep:
+-            max_e_sep = e_sep
++        energy /= len(graph.interfaces)
++        
++        if energy > max_energy:
++            max_energy = energy
+             best_theta = theta
+             best_graph = graph
+ 
+-    return best_graph
++    return best_graph, best_theta
+ 
+-def bhattacharyya_distance(mean1, std1, mean2, std2):
+-    # Bhattacharyya distance between two 1D Gaussians
+-    # d_B = 1/4 * ln((std1^2 + std2^2)/2) + 1/4 * ((mean1 - mean2)^2)/(std1^2 + std2^2)
+-    var_sum = std1**2 + std2**2
+-    term1 = 0.25 * math.log(var_sum / 2)
+-    term2 = 0.25 * ((mean1 - mean2)**2) / var_sum
+-    return term1 + term2
++def traverse_gradient(pixel, volume):
++    # Bidirectional traversal along local gradient
++    # Search for low (L) and high (H) values in small neighborhood
++    gradient = compute_gradient(pixel, volume)
++    pos = pixel + gradient
++    neg = pixel - gradient
++    L = find_min_in_neighborhood(neg, volume)
++    H = find_max_in_neighborhood(pos, volume)
++    return L, H
+ 
+-def calculate_separation_energy(graph):
+-    # E_sep = (1/|I|) * sum(d_B(V_j1, V_j2)) for all interfaces j
+-    total_dist = 0
+-    num_interfaces = len(graph.interfaces)
+-    for interface in graph.interfaces:
+-        mat1, mat2 = interface.materials
+-        dist = bhattacharyya_distance(mat1.mean, mat1.std, mat2.mean, mat2.std)
+-        total_dist += dist
+-    return total_dist / num_interfaces
++def fit_gaussians(samples):
++    # Fit two Gaussian distributions to the samples
++    # Returns (mean1, std1), (mean2, std2)
++    # Implementation details omitted [G]
++    pass
++
++def bhattacharyya_distance(V1, V2):
++    # Calculate Bhattacharyya distance between two Gaussians
++    # Formula: 0.25 * ln(0.5 * (sigma1^2 + sigma2^2) / (sigma1 * sigma2)) 
++    #         + 0.25 * (mu1 - mu2)^2 / (sigma1^2 + sigma2^2)
++    # Note: Exact formula may vary by implementation [G]
++    pass
++
++def greedy_merge(interfaces, theta):
++    # Create distance matrix D from interface distributions
++    D = compute_distance_matrix(interfaces)
++    
++    # Find sets of similar materials
++    # Walk through D, create sets excluding both materials of an interface
++    material_sets = find_similar_sets(D, theta)
++    
++    # Reduce sets to single materials using parent-child hierarchy
++    merged_materials = reduce_sets(material_sets)
++    
++    # Reconstruct graph: merge nodes and repeating edges
++    graph = reconstruct_graph(merged_materials, interfaces)
++    
++    return merged_materials, graph
+ ```
+ 
+ **Parameters**
+-*   $\epsilon$: Multiplier for lower bound of threshold range. Must be $\ll 1$. [S1, unofficial]
+-*   $\zeta$: Multiplier for upper bound of threshold range. Must be $\gg 1$. [S1, unofficial]
+-*   Typical values are not explicitly given in the sources, but the search is performed over the logarithmic range defined by these multipliers [S1, unofficial].
++*   $\epsilon$: Lower bound multiplier for threshold search. Must be much less than 1. Not given in the sources.
++*   $\zeta$: Upper bound multiplier for threshold search. Must be much greater than 1. Not given in the sources.
++*   Subsampling rate: To keep the algorithm computationally tractable. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls**
+-*   **Noise:** Noise in volume data and subtle intensity variations can result in repeating boundaries for the same interface. The clustering and merging steps help mitigate this, but subsampling is critical for performance [S1, unofficial].
+-*   **Connectivity:** Initial interfaces only convey adjacency; explicit connectivity is deduced via the graph merging process [S1, unofficial].
++*   **Noise:** Noise in volume data and subtle intensity variations can result in repeating boundaries for the same interface. The clustering and merging steps help mitigate this, but excessive noise may lead to over-segmentation before merging [S1, unofficial].
++*   **Connectivity:** The algorithm assumes that clustering provides valid material-material interfaces. It does not explicitly model connectivity beyond adjacency, relying on the merging process to infer topology [S1, unofficial].
+ *   **Background:** The background material is typically set to invisible (white node) to hide it from rendering [S1, unofficial].
+ 
+-## Subtopics
+-
+-### Feature Graph
+-A related method that constructs a graph from feature vectors. It differs by focusing on feature space connectivity rather than intensity distribution separation energy. Choose when feature-based discrimination is more robust than intensity-based. [Link](8595-feature-graph.md)
+-
+-### Texture-based Transfer Function
+-Uses texture metrics to separate materials. Choose when materials have similar intensities but different microstructures. [Link](5450-texture-based-transfer-function.md)
+-
+-### Distance-based Transfer Function
+-Uses distance to landmarks. Choose when spatial context relative to specific structures is key. [Link](5451-distance-based-transfer-function.md)
+-
+-### Curvature-based Transfer Function
+-Uses second derivatives. Choose when geometric shape of boundaries is the primary discriminant. [Link](5452-curvature-based-transfer-function.md)
+-
+-### Shape-based Transfer Function Generation
+-Classifies geometric forms. Choose when global shape properties are important. [Link](5941-shape-based-transfer-function-generation.md)
+-
+-### High-Dimensional Classification with Color Data
+-Handles color volumes. Choose when input data is multi-channel/color. [Link](6327-high-dimensional-classification-with-color-data.md)
+-
+-### K-means-based hybrid segmentation
+-Uses clustering for segmentation. Choose when a simpler clustering approach is sufficient without topological graph deduction. [Link](7597-k-means-based-hybrid-segmentation.md)
+-
+ ## Operating characteristics
+-*   **Time Complexity:** The algorithm involves clustering (HDBSCAN), which is generally sub-linear to linear in the number of samples, and a greedy merging process over the distance matrix. The search for optimal $\theta$ adds a factor proportional to the number of threshold values tested. Specific complexity is not given in the sources. [S1, unofficial]
+-*   **Memory Complexity:** Depends on the size of the volume for storing LH samples and the distance matrix. Subsampling is used to keep it tractable. [S1, unofficial]
+-*   **Measured Performance:** In the source, total pipeline time (including voxel classification and graph deduction) was 6 seconds for the tested datasets. Interface clustering and graph deduction were the dominant steps. [S1, unofficial]
+-*   **Strengths:** Automatically discovers material interiors and interconnectivity; provides fine control over material color and opacities; achieves automatic background removal; robust to noise via clustering and merging. [S1, unofficial]
+-*   **Limitations:** Relies on the quality of the initial LH edge detection; requires tuning of $\epsilon$ and $\zeta$ (though the search is automated, the range must be sensible); assumes intensity distributions are Gaussian. [S1, unofficial]
+-*   **When to use:** When automatic TF creation is needed for volumes with distinct intensity-based materials and spatial interconnectivity is important. [S1, unofficial]
+-*   **When not to use:** When materials are not distinguishable by intensity distributions or when real-time performance is critical and the overhead of graph deduction is unacceptable. [S1, unofficial]
++*   **Time Complexity:** The complexity is dominated by the initial edge detection and the clustering step. The greedy merging is linear in the number of materials/interfaces for a fixed threshold, but the search for optimal $\theta$ requires evaluating multiple thresholds. Not given in the sources.
++*   **Memory Complexity:** Depends on the number of edge pixels and the size of the distance matrix $D$. Subsampling is used to manage memory for large volumes [S1, unofficial].
++*   **Performance:** In a real-time GPU volume renderer (C++ with Python backend), the graph deduction step took approximately 2-4 seconds on the tested datasets, with voxel classification taking 4-6 seconds (Table 1 in [S1, unofficial]).
++*   **Strengths:** Automatically discovers material interiors and spatial interconnectivity; provides fine control over material color and opacities; achieves automatic background removal [S1, unofficial].
++*   **Limitations:** Relies on the quality of the LH histogram and HDBSCAN clustering; sensitive to the choice of $\epsilon$ and $\zeta$; assumes materials can be modeled as Gaussian distributions [S1, unofficial].
+ 
+ ## Background
+-The method was proposed by Šereda et al. in 2018 as part of a pipeline for robust material graphs for volume rendering [S1, unofficial]. It addresses the limitation of previous methods that focused only on material boundaries, neglecting the interior of materials [S1, unofficial]. The approach builds on the LH histogram proposed by Šereda et al. in 2006 [S1, unofficial]. It is implemented in a real-time GPU volume renderer written in C++ with a Python backend, using datasets from The Volume Library [S1, unofficial].
++The method was proposed in 2018 by authors associated with Eurographics Proceedings [S1, unofficial]. It addresses the limitation of previous methods that focused only on material boundaries, neglecting the interior of materials for visualization. The approach is motivated by the need for robust, automatic transfer function creation that maps both interiors and interfaces. It builds on the LH histogram proposed by Šereda et al. [S1, unofficial].
+ 
+ ## Sources

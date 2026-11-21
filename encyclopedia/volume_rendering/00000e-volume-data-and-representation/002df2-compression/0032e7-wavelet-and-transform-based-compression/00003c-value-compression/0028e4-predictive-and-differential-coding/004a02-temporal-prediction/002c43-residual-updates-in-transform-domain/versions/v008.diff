@@ -1,0 +1,224 @@
+--- v007.md
++++ v008.md
+@@ -1,126 +1,133 @@
+ # Residual Updates in Transform Domain
+ 
+-Also called: Inter-frame DCT coding, Transform-domain temporal prediction, Zero-motion block prediction (variant)
++Also called: Inter-frame DCT coding
+ 
+ ## Overview
+-Residual Updates in Transform Domain is a temporal compression method for volumetric data that operates in the frequency domain rather than the spatial domain. It solves the problem of efficiently encoding time-varying implicit surfaces (such as TSDF volumes) by exploiting temporal coherence between consecutive frames. Unlike spatial predictors that estimate voxel values from neighbors, this method subtracts the reconstructed DCT coefficients of the previous frame from the current frame's coefficients to form residuals. This concentrates residual energy near regions of surface change, significantly improving compressibility for subsequent transform and entropy coding [S1].
++Residual Updates in Transform Domain is a temporal compression method for volumetric data that operates in the frequency domain rather than the spatial domain. It solves the problem of encoding time-varying volumes by predicting current transform coefficients from the previously reconstructed frame's coefficients, rather than predicting voxel values directly. It sets itself apart from spatial predictors like [Delta Encoding](1096-delta-encoding.md) by concentrating residual energy near regions of surface change in the transform domain, which improves compressibility for subsequent entropy coding [S1].
+ 
+ ## How it works
+-The method assumes a block-based representation of the volume (e.g., 3D DCT blocks). It relies on the Shared principles of [Predictive and Differential Coding](4393-predictive-and-differential-coding.md), specifically closed-loop prediction to prevent drift.
+-
+ **Inputs and Outputs:**
+-*   **Input:** Current frame's DCT coefficients $\mathbf{c}_t^{(b)}$ for each active block $b$ at time $t$.
+-*   **State:** Reference coefficient buffer $\tilde{\mathbf{c}}_{t-1}^{(b)}$ containing the reconstructed DCT coefficients from the previous frame $t-1$.
+-*   **Output:** Encoded residuals $\Delta \mathbf{c}_t^{(b)}$ and updated reference buffer $\tilde{\mathbf{c}}_t^{(b)}$.
++*   **Input:** A sequence of volumetric frames. Each frame is divided into fixed-size blocks. For each block $b$ at time $t$, the input is the 3D DCT coefficient vector $\mathbf{c}_t^{(b)}$.
++*   **Output:** A bitstream containing entropy-coded residuals $\Delta \mathbf{c}_t^{(b)}$ and block activity flags.
+ 
+ **Data Structures:**
+-*   **Reference Buffer:** A map or array keyed by block coordinates $(x, y, z)$, storing vectors of DCT coefficients $\tilde{\mathbf{c}}$.
+-*   **Block Coefficients:** For a block $b$, $\mathbf{c}_t^{(b)} \in \mathbb{R}^k$ represents the retained $k$ DCT coefficients under a fixed ordering.
++*   **Reference Buffer:** A map keyed by block coordinates $(x, y, z)$ storing the reconstructed DCT coefficients $\tilde{\mathbf{c}}_{t-1}^{(b)}$ from the previous frame.
++*   **Block Activity:** A flag indicating if block $b$ is active (present) or inactive (absent) in the current frame.
+ 
+ **Steps:**
+-
+-1.  **Initialization:**
+-    The encoder sends one fully intra-coded frame to initialize the decoder's reference buffer. At this point, $\tilde{\mathbf{c}}_{-1}^{(b)} = 0$ for all $b$.
+-
+-2.  **Residual Formation:**
+-    For each block $b$ in the current frame $t$:
+-    *   If block $b$ is present in the current frame, retrieve its DCT coefficients $\mathbf{c}_t^{(b)}$.
+-    *   If block $b$ is absent in the current frame but existed in the reference, treat it as a removal event by setting $\mathbf{c}_t^{(b)} = 0$.
+-    *   Retrieve the reference coefficient $\tilde{\mathbf{c}}_{t-1}^{(b)}$ from the buffer. If the block did not exist in the previous frame, $\tilde{\mathbf{c}}_{t-1}^{(b)} = 0$.
+-    *   Compute the transform-domain residual:
+-        $$ \Delta \mathbf{c}_t^{(b)} = \mathbf{c}_t^{(b)} - \tilde{\mathbf{c}}_{t-1}^{(b)} \quad (10) $$
+-
+-3.  **Quantization:**
+-    Quantize the residual coefficients $\Delta \mathbf{c}_t^{(b)}$ using the same quantization steps (e.g., separate handling of DC and AC components) as used for intra coding [S1]. Let $Q(\cdot)$ denote the quantization function.
+-
+-4.  **Entropy Coding:**
+-    Range-encode the resulting quantized integers using the same per-coefficient entropy coding strategy (adaptive probability models) as intra coding [S1].
+-
+-5.  **Closed-Loop Update:**
+-    To prevent encoder-decoder drift, the encoder must update its reference buffer using the reconstructed (dequantized) residual, not the raw residual. Let $Q^{-1}(\cdot)$ denote dequantization:
+-    $$ \tilde{\mathbf{c}}_t^{(b)} = \tilde{\mathbf{c}}_{t-1}^{(b)} + Q^{-1}(Q(\Delta \mathbf{c}_t^{(b)})) \quad (11) $$
+-    The decoder performs the identical update after decoding the residual.
++1.  **Initialization:** For the first frame ($t=0$), encode the block using standard intra-coding (DCT + quantization + entropy coding). Initialize the reference buffer $\tilde{\mathbf{c}}_{-1}^{(b)}$ with the reconstructed coefficients of this frame.
++2.  **Transform:** For each subsequent frame $t$, compute the 3D DCT for every active block $b$ to obtain $\mathbf{c}_t^{(b)}$.
++3.  **Residual Formation:** For each block $b$:
++    *   If block $b$ is **active** in frame $t$:
++        *   Retrieve the reference coefficients $\tilde{\mathbf{c}}_{t-1}^{(b)}$ from the buffer. If block $b$ was inactive in $t-1$, $\tilde{\mathbf{c}}_{t-1}^{(b)} = \mathbf{0}$.
++        *   Compute the residual:
++            $$ \Delta \mathbf{c}_t^{(b)} = \mathbf{c}_t^{(b)} - \tilde{\mathbf{c}}_{t-1}^{(b)} $$
++    *   If block $b$ is **inactive** in frame $t$ but was active in $t-1$:
++        *   Treat as a removal event. Set $\mathbf{c}_t^{(b)} = \mathbf{0}$ effectively, or explicitly signal the removal. The residual is formed against the reference:
++            $$ \Delta \mathbf{c}_t^{(b)} = \mathbf{0} - \tilde{\mathbf{c}}_{t-1}^{(b)} = -\tilde{\mathbf{c}}_{t-1}^{(b)} $$
++        *   Update the reference buffer for this block to $\mathbf{0}$ after encoding.
++    *   If block $b$ is **inactive** in both frames:
++        *   No data needs to be encoded for this block.
++4.  **Quantization:** Quantize the residual coefficients $\Delta \mathbf{c}_t^{(b)}$ using the same quantization steps (DC and AC handling) as intra coding. Let $Q(\cdot)$ denote the quantization function.
++5.  **Entropy Coding:** Range-encode the quantized residual integers using the same per-coefficient entropy coding strategy as intra coding. This requires maintaining adaptive probability models for the coefficient streams [S1].
++6.  **Closed-Loop Update:** To prevent encoder-decoder drift, the encoder must update its reference buffer using the reconstructed (dequantized) residual, not the raw residual:
++    $$ \tilde{\mathbf{c}}_t^{(b)} = \tilde{\mathbf{c}}_{t-1}^{(b)} + Q^{-1}(Q(\Delta \mathbf{c}_t^{(b)})) $$
++    where $Q^{-1}(\cdot)$ is the dequantization function. This updated buffer is used for predicting the next frame $t+1$.
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def encode_frame(current_dct_coeffs, reference_buffer, quantizer, entropy_encoder):
++def encode_transform_domain_residual(frame_blocks, prev_ref_buffer, quantizer, entropy_coder):
+     """
+-    Encodes a frame using residual updates in the transform domain.
++    Encodes a frame using residual updates in the DCT domain.
+     
+     Args:
+-        current_dct_coeffs: Dict mapping block_id -> list of DCT coefficients [c0, c1, ...]
+-        reference_buffer: Dict mapping block_id -> list of reconstructed DCT coefficients from t-1
++        frame_blocks: Dict mapping block_id -> DCT_coefficients (vector)
++        prev_ref_buffer: Dict mapping block_id -> reconstructed DCT_coefficients from t-1
+         quantizer: Function Q(x) that quantizes coefficients
+-        entropy_encoder: Function that range-encodes integers
++        entropy_coder: Function that range-encodes integers
+         
+     Returns:
+-        updated_reference_buffer: Dict mapping block_id -> list of reconstructed DCT coefficients for t
++        bitstream: Encoded data
++        new_ref_buffer: Updated reference buffer for next frame
+     """
+-    updated_reference_buffer = {}
++    bitstream = []
++    new_ref_buffer = {}
+     
+-    # Process all blocks present in the current frame
+-    for block_id, coeffs in current_dct_coeffs.items():
+-        # Get reference coefficients; 0 if block didn't exist previously
+-        ref_coeffs = reference_buffer.get(block_id, [0] * len(coeffs))
++    # Identify active blocks in current frame
++    current_block_ids = set(frame_blocks.keys())
++    previous_block_ids = set(prev_ref_buffer.keys())
++    
++    # Process all blocks that were active in previous frame or are active now
++    all_block_ids = current_block_ids.union(previous_block_ids)
++    
++    for block_id in all_block_ids:
++        is_active_now = block_id in current_block_ids
++        has_ref = block_id in prev_ref_buffer
+         
+-        # Step 2: Form residual
+-        residual = [c - r for c, r in zip(coeffs, ref_coeffs)]
+-        
+-        # Step 3: Quantize
+-        quantized_residual = quantizer(residual)
+-        
+-        # Step 4: Encode
+-        entropy_encoder(quantized_residual)
+-        
+-        # Step 5: Closed-loop update (Reconstruct)
+-        reconstructed_residual = dequantizer(quantized_residual)
+-        new_ref_coeffs = [r + rr for r, rr in zip(ref_coeffs, reconstructed_residual)]
+-        
+-        updated_reference_buffer[block_id] = new_ref_coeffs
+-
+-    # Handle blocks that existed in reference but are absent in current frame (Removal events)
+-    for block_id, ref_coeffs in reference_buffer.items():
+-        if block_id not in current_dct_coeffs:
+-            # Treat as removal: current coeffs are 0
+-            # Residual = 0 - ref_coeffs = -ref_coeffs
+-            residual = [-r for r in ref_coeffs]
++        if is_active_now:
++            c_t = frame_blocks[block_id]
++            if has_ref:
++                c_tilde_prev = prev_ref_buffer[block_id]
++            else:
++                c_tilde_prev = np.zeros_like(c_t)
+             
+-            # Quantize and encode
+-            quantized_residual = quantizer(residual)
+-            entropy_encoder(quantized_residual)
++            # Step 3a: Compute residual
++            delta_c = c_t - c_tilde_prev
+             
+-            # Update reference to 0 (since current block is effectively gone/zero)
+-            # Note: The formula c_t = 0 implies the new reference should reflect the state after reconstruction.
+-            # If the block is removed, the "current" value is 0.
+-            # Reconstructed current = 0.
+-            # New reference = Old reference + (0 - Old reference) = 0.
+-            # Alternatively, simply remove from buffer or set to zero vector.
+-            updated_reference_buffer[block_id] = [0] * len(ref_coeffs)
+-
+-    return updated_reference_buffer
+-
+-def dequantizer(quantized_coeffs):
+-    """Inverse of quantizer. Implementation depends on specific quantization scheme."""
+-    # Placeholder for specific dequantization logic defined in intra coding
+-    return [q * scale for q in quantized_coeffs] # [G] Generic placeholder; actual logic depends on Q()
++            # Step 4: Quantize
++            quantized_delta = quantizer(delta_c)
++            
++            # Step 5: Encode
++            entropy_coder.encode(quantized_delta)
++            
++            # Step 6: Closed-loop update
++            reconstructed_delta = quantizer.inverse(quantized_delta)
++            new_c_tilde = c_tilde_prev + reconstructed_delta
++            new_ref_buffer[block_id] = new_c_tilde
++            
++        else:
++            # Block is inactive in current frame
++            if has_ref:
++                # Removal event: residual is negative of reference
++                c_tilde_prev = prev_ref_buffer[block_id]
++                delta_c = -c_tilde_prev
++                
++                # Quantize and encode
++                quantized_delta = quantizer(delta_c)
++                entropy_coder.encode(quantized_delta)
++                
++                # Update reference to zero (block removed)
++                new_ref_buffer[block_id] = np.zeros_like(c_tilde_prev)
++            else:
++                # Block was never active and is not active now: do nothing
++                pass
++                
++    return bitstream, new_ref_buffer
+ ```
+ 
+-*Note: The pseudocode above assumes `dequantizer` is the inverse of `quantizer`. In practice, this involves scaling and rounding as defined by the specific DCT quantization table.*
++**Parameters:**
++*   **Block Size:** Fixed size for 3D DCT. Not given in the sources.
++*   **Quantization Step:** Same as intra coding. Not given in the sources.
++
++**Edge Cases:**
++*   **Block Appearance/Disappearance:** If a block appears (was inactive, now active), the reference is treated as zero. If a block disappears (was active, now inactive), the residual is the negative of the reference, and the reference is reset to zero [S1].
++*   **Drift Prevention:** Failure to use the closed-loop update (using reconstructed values for prediction) will cause encoder-decoder mismatch and error propagation [S1].
+ 
+ ## Subtopics
+ 
+ ### Zero-Motion Block Prediction
+-A specific application of Residual Updates in Transform Domain for TSDF volumes. It reuses the previous reconstructed TSDF on the same voxel block grid as a "zero-motion predictor." Only blockwise residual updates are encoded. This method concentrates residual energy near regions of surface change, improving compressibility for subsequent transform and range encoding [S1]. It is chosen when explicit motion tracking is too costly or unnecessary, relying instead on the assumption that most of the volume remains static between frames [S1].
++A specific application of residual updates in transform domain for TSDF (Truncated Signed Distance Field) volumes. It reuses the previous reconstructed TSDF on the same voxel block grid as a "zero-motion predictor." Only blockwise residual updates are encoded, which concentrates residual energy near regions of surface change, improving compressibility for subsequent transform and range encoding [S1]. It requires sending one intra-coded frame to initialize the decoder reference [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of active blocks. The main cost is the DCT transform (if not precomputed) and the element-wise subtraction and quantization. It is computationally efficient because it avoids explicit correspondence tracking often required by explicit geometry codecs [S1].
+-*   **Memory Complexity:** Requires storing the reference coefficient buffer $\tilde{\mathbf{c}}_{t-1}$, which is proportional to the number of active blocks and the number of retained DCT coefficients per block.
+-*   **Strengths:** High compression ratio for temporally coherent data; simple implementation; no need for complex motion estimation or mesh tracking [S1].
+-*   **Limitations:** Performance degrades if there is significant motion or if the block grid alignment shifts between frames. It is sensitive to quantization errors accumulating over time if the closed-loop update is not strictly maintained [S1].
+-*   **When to use:** Ideal for time-varying implicit surface representations (like TSDF) where the underlying voxel grid remains fixed and motion is relatively slow or local [S1].
++*   **Time Complexity:** Linear with respect to the number of blocks and coefficients, dominated by the DCT transform and entropy coding. It is computationally efficient and does not require explicit correspondence tracking [S1].
++*   **Memory Complexity:** Requires storing the reference coefficient buffer for all active blocks.
++*   **Strengths:** Simple and efficient for temporally coherent volumes. Effective for TSDF volumes where surface changes are localized [S1].
++*   **Limitations:** Requires temporal coherence. Random access to specific time steps is limited because the reference buffer depends on the previous frame's reconstruction [1096-delta-encoding.md].
++*   **When to use:** When encoding time-varying volumetric data with slow or local changes (e.g., animation, medical time-series).
++*   **When not to use:** When there is no temporal coherence or when random access to arbitrary time steps is required without decoding all preceding frames.
+ 
+ ## Background
+-This method originates from work on implicit surface compression using Discrete Cosine Transforms (DCT) and motion compensation [S1]. It leverages the regular, indexable structure of block-based DCT representations to simplify temporal coding. The approach was developed to address the inefficiencies of spatial-only compression for dynamic volumes and the complexity of explicit geometry codecs [S1].
++Originated in the context of implicit surface compression using DCT and motion compensation [S1]. It leverages the regular, indexable structure of block-based DCT to simplify temporal coding compared to explicit geometry codecs [S1].
+ 
+ ## Sources

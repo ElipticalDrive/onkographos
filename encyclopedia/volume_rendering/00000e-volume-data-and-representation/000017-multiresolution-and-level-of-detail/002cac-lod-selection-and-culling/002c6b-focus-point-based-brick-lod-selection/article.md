@@ -1,0 +1,162 @@
+# Focus Point Based Brick LOD Selection
+
+Also called: Adaptive level-of-detail, Focus Point Based LOD Selection, Focus point based LOD, Focus point oracle, Focus-point based adaptive level-of-detail
+
+## Overview
+Focus Point Based Brick LOD Selection is a method for determining the resolution level of individual bricks in a multiscale volume representation based solely on the spatial distance between the brick's center and a user-defined focus point [S1, S2]. Unlike error-based methods, it does not consider approximation error or signal frequency, relying exclusively on a "focus point oracle" to assign levels [S1]. This approach allows for arbitrary texture resolutions per brick and significant memory savings, but risks topological artifacts and boundary discontinuities when high-frequency data is present [S1, S2].
+
+## How it works
+**Inputs:**
+*   A 3D volume dataset.
+*   A user-defined focus point $P_f$ in world coordinates.
+*   A predefined initial brick size (spatial extent) for the finest level [S2].
+*   A mapping function (oracle) from distance to LOD level [S1].
+
+**Outputs:**
+*   A multiscale brick hierarchy where each brick is assigned a specific resolution level.
+*   Adapted brick boundaries if level transitions occur [S2].
+
+**Data Structures:**
+*   **Brick:** A spatial partition of the volume. Each brick stores its spatial bounds and its assigned LOD level.
+*   **Hierarchy:** A collection of bricks at various resolutions. The structure assumes that adjacent bricks may have different resolutions, requiring boundary adaptation [S2].
+
+**Steps:**
+1.  **Define Initial Brick Size:** Specify the physical size of the bricks at the finest resolution level before constructing the hierarchy [S2].
+2.  **Calculate Distances:** For each brick $B_i$ in the volume, calculate the Euclidean distance $d_i$ from the brick's center $C_i$ to the focus point $P_f$:
+    $$ d_i = \| C_i - P_f \| $$
+3.  **Determine LOD Level:** Use the focus point oracle to map $d_i$ to a discrete LOD level $L_i$. The oracle typically defines a threshold or function such that bricks closer to $P_f$ receive higher resolution (lower $L_i$) and distant bricks receive lower resolution (higher $L_i$) [S1, S2].
+4.  **Adapt Boundaries:** If the hierarchy is modified (e.g., by moving $P_f$), adapt brick boundaries to ensure continuous level transitions. Specifically, if a brick is adjacent to a coarser brick, its boundaries must be adjusted to match the coarser grid [S2].
+5.  **Handle Adjacency:** When adapting boundaries, up to 26 neighboring bricks in 3D may need to be considered to maintain consistency across level transitions [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def focus_point_lod_selection(volume_data, focus_point, initial_brick_size):
+    """
+    Assigns LOD levels to bricks based on distance to a focus point.
+    
+    Args:
+        volume_data: The 3D volume dataset.
+        focus_point: 3D vector (x, y, z) defining the user-defined focus.
+        initial_brick_size: Scalar defining the side length of the finest bricks.
+        
+    Returns:
+        bricks: A list of Brick objects with assigned LOD levels and adjusted bounds.
+    """
+    # Step 1: Generate initial bricks at finest resolution
+    # This step depends on the specific spatial partitioning scheme (e.g., grid)
+    # [G] Assuming a regular grid partitioning for the finest level
+    finest_bricks = generate_grid_bricks(volume_data, initial_brick_size)
+    
+    bricks = []
+    
+    for brick in finest_bricks:
+        # Step 2: Calculate distance from brick center to focus point
+        center = brick.get_center()
+        distance = euclidean_distance(center, focus_point)
+        
+        # Step 3: Determine LOD level using oracle
+        # [G] The oracle function is not explicitly defined in sources, 
+        # but implies a monotonic mapping from distance to integer level.
+        lod_level = focus_point_oracle(distance)
+        
+        # Step 4: Assign level to brick
+        brick.lod_level = lod_level
+        
+        # Step 5: Store brick
+        bricks.append(brick)
+        
+    # Step 6: Adapt boundaries for continuous transitions
+    # [G] This step requires checking neighbors. The source notes that
+    # up to 26 neighbors may be involved in 3D.
+    bricks = adapt_brick_boundaries(bricks)
+    
+    return bricks
+
+def focus_point_oracle(distance):
+    """
+    Maps distance to an LOD level.
+    [G] Implementation detail: Typically a step function or linear mapping
+    based on predefined thresholds. Not specified in sources.
+    """
+    # Placeholder for the specific oracle logic defined by the user
+    # e.g., return floor(distance / threshold)
+    pass
+
+def adapt_brick_boundaries(bricks):
+    """
+    Adjusts brick boundaries to ensure continuity between adjacent bricks
+    of different LOD levels.
+    """
+    # [G] Iterate through all bricks and their neighbors.
+    # If a brick is adjacent to a coarser brick, adjust its bounds.
+    # The source notes this may involve up to 26 neighbors in 3D.
+    for brick in bricks:
+        neighbors = get_26_neighbors(brick, bricks)
+        for neighbor in neighbors:
+            if neighbor.lod_level > brick.lod_level:
+                # Neighbor is coarser; adjust brick boundaries to match
+                adjust_brick_bounds(brick, neighbor)
+    return bricks
+```
+
+**Parameters:**
+*   **Focus Point ($P_f$):** The user-defined point in space that determines the area of highest interest [S1, S2].
+*   **Initial Brick Size:** The physical dimension of the finest-level bricks, specified in advance [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Approximation Error:** The method does not account for approximation error. High-frequency data sampled at a lower resolution can deviate significantly from the original signal [S1, S2].
+*   **Topological Artifacts:** Non-topology preserving coarsification can cause structures to disappear due to low-pass filtering, leading to visual artifacts at brick boundaries [S1].
+*   **Boundary Discontinuities:** Even if continuity is guaranteed by boundary adaptation, artifacts may still occur if the resampled approximation differs significantly from the original data [S1, S2].
+
+## Subtopics
+
+### Hierarchical Culling & Multi-resolution Approximation
+Uses error metrics to select LOD, unlike the distance-only approach of Focus Point Based LOD. [Link](2010-hierarchical-culling-multi-resolution-approximation.md)
+
+### Streaming and Level-of-Detail (LOD) selection
+Focuses on data streaming and dynamic LOD, whereas Focus Point Based LOD is a static hierarchy construction method based on spatial position. [Link](3087-streaming-and-level-of-detail-lod-selection.md)
+
+### Choosing Alternative Resolutions
+Discusses general strategies for resolution choice, including error-based methods, contrasting with the single-criterion focus point approach. [Link](5314-choosing-alternative-resolutions.md)
+
+### Finding Higher Resolution Levels
+Details the process of locating finer levels, whereas Focus Point Based LOD assigns levels based on a pre-defined oracle. [Link](5315-finding-higher-resolution-levels.md)
+
+### Multi-resolution LOD Volume Rendering with Temporal Coherence
+Incorporates temporal coherence into LOD selection, while Focus Point Based LOD is frame-independent. [Link](5717-multi-resolution-lod-volume-rendering-with-temporal-coherenc.md)
+
+### Flat blocking multi-resolution volume rendering
+Uses flat blocking structures, whereas Focus Point Based LOD typically uses 3D bricks with boundary adaptation. [Link](6428-flat-blocking-multi-resolution-volume-rendering.md)
+
+### Level of Detail (LoD) for Large-Scale Scenes
+General LoD techniques for large scenes, often involving culling, whereas Focus Point Based LOD is specific to brick-based multiscale representations. [Link](7325-level-of-detail-lod-for-large-scale-scenes.md)
+
+### Level of Detail Calculation
+General calculation methods, often error-based, contrasting with the distance-only calculation here. [Link](7836-level-of-detail-calculation.md)
+
+### LoD Selection via Projected Width
+Uses screen-space projected width for LOD, unlike the world-space distance metric of Focus Point Based LOD. [Link](7837-lod-selection-via-projected-width.md)
+
+### GPU-Based Dynamic LOD Calculation
+Implements LOD calculation on the GPU, whereas Focus Point Based LOD is described as a CPU-side hierarchy construction method. [Link](10845-gpu-based-dynamic-lod-calculation.md)
+
+### Error-based and Statistical Prediction
+Uses error metrics or statistics, directly contrasting with the focus point oracle's lack of error consideration. [Link](15224-error-based-and-statistical-prediction.md)
+
+## Operating characteristics
+*   **Time Complexity:** The selection process is $O(N)$ where $N$ is the number of bricks, as each brick's distance is calculated once. Boundary adaptation may increase complexity due to neighbor checks (up to 26 neighbors per brick in 3D) [S2].
+*   **Memory Complexity:** Reduces texture memory usage significantly. For example, in the head data set, memory usage dropped to 64% and 37% of the original at different LOD settings [S1].
+*   **Performance:** Reduces the number of texture lookups (e.g., from 69% to 40% of original) [S1].
+*   **Strengths:** Allows arbitrary texture resolutions for every brick, which is not possible with techniques requiring strict correspondence between texture tiles and brick geometry [S1, S2]. Simple to implement as it relies only on distance.
+*   **Limitations:** Does not consider approximation error, leading to potential loss of relevant structures and visual artifacts at brick boundaries, especially with high-frequency data [S1, S2]. Non-topology preserving coarsification can cause structures to disappear [S1].
+*   **When to use:** When computational simplicity is prioritized over visual fidelity, or when the data is known to be low-frequency.
+*   **When not to use:** When high-frequency details are critical, or when topological accuracy is required, as error-based methods are superior in these cases [S1].
+
+## Background
+The method was introduced by Weiler et al. in 2000 in the paper "Level-Of-Detail Volume Rendering via 3D Textures" [S1, S2]. It was developed as part of a broader approach to multiresolution 3D texture-based volume rendering, aiming to reduce memory usage and rendering time by adapting brick resolution to the viewer's focus. The approach was noted as having a major drawback compared to error-controlled methods, prompting further research into pyramidal representations and error-controlled ray-casting [S1, S2].
+
+## Sources
+[S1] Level-Of-Detail Volume Rendering via 3D Textures, https://publications.sci.utah.edu/publications/weiler00/IEEE-VolVis-2000.pdf, fetched 2026-10-27
+[S2] Level-of-Detail Volume Rendering via 3D Textures, https://www.semanticscholar.org/paper/05e7d88387ac7484397e329456535b0c8c665a16, fetched 2026-11-03

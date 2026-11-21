@@ -1,0 +1,87 @@
+# LRU Cache Management for Octree Nodes
+
+Also called: Least Recently Used (LRU) Strategy
+
+## Overview
+LRU Cache Management for Octree Nodes is a demand-based page replacement algorithm used for managing the caching of octree nodes [S1]. It prioritizes retaining recently accessed nodes to optimize memory reuse [G]. Unlike specialized predictors, it is the most generic among the considered algorithms and contains a very limited amount of application-specific logic [S1]. It serves as a baseline for evaluating other out-of-core prefetching strategies [S1].
+
+## How it works
+The method manages a cache of octree nodes using a queue organized in temporal order [S1]. The implementation involves an out-of-core octree controller and an out-of-core point set controller [S1].
+
+**Inputs and Outputs:**
+*   **Input:** A request for a specific octree node; the current cache state (queue of nodes).
+*   **Output:** The requested octree node (if present or newly loaded); updated cache state; asynchronous load requests for point sets associated with leaf nodes [S1].
+
+**Data Structures:**
+*   **Cache Queue:** A queue containing all cached octree nodes, organized in temporal order [S1]. The head represents the most recently used node, and the tail represents the least recently used node [G].
+
+**Steps:**
+1.  **Request Handling:** When an octree node is requested:
+    *   Check if the node is already in the cache [S1].
+    *   If present: move it to the head of the queue [S1].
+    *   If absent: load it into the cache and store it at the head of the queue [S1].
+2.  **Eviction:** If the cache is full:
+    *   Evict the node at the tail of the queue (the least recently used node) to make room [S1].
+    *   Insert the new node at the head [S1].
+3.  **Point Set Synchronization:** After an octree node is cached, the out-of-core octree controller informs the out-of-core point set controller of the point list from the accessed leaf node [S1].
+4.  **Asynchronous Point Loading:** The point set controller checks if these points are cached in-core; if not, it attempts to load them asynchronously [S1].
+
+**Parameters:**
+*   **Cache Size:** Not given in the sources.
+*   **Queue Implementation:** Not specified in the sources, but must support O(1) move-to-head and O(1) removal-from-tail operations [G].
+
+**Edge Cases and Pitfalls:**
+*   **Belady’s Anomaly:** The algorithm does not suffer from Belady’s anomaly, meaning increasing cache size will not decrease performance [S1].
+*   **Point Set Consistency:** Asynchronous point loading requires synchronization to ensure data consistency if the octree node is accessed before points are fully loaded [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def request_octree_node(node_id: str, cache_queue: Queue, cache_capacity: int) -> Node:
+    # Step 1: Request Handling
+    if node_id in cache_queue:
+        cache_queue.move_to_head(node_id)  # [S1]
+        return cache_queue[node_id]
+    else:
+        # Step 2: Eviction if full
+        if len(cache_queue) >= cache_capacity:
+            lru_node = cache_queue.tail
+            cache_queue.remove(lru_node)
+            free_memory(lru_node)  # [G]
+        # Load and insert at head
+        new_node = load_from_disk(node_id)  # [S1]
+        cache_queue.insert_head(new_node)
+        
+        # Step 3: Point Set Synchronization
+        point_list = get_point_list_from_leaf(new_node)  # [S1]
+        out_of_core_octree_controller.inform_point_set_controller(point_list)
+        
+        return new_node
+
+def point_set_controller_check(point_list: list) -> None:
+    # Step 4: Asynchronous Point Loading
+    for point in point_list:
+        if not is_cached_in_core(point):  # [S1]
+            load_async(point)  # [S1]
+```
+
+## Subtopics
+
+### Least Recently Used (LRU)
+This is the generic baseline algorithm described above [S1]. It is considered the most generic among the four out-of-core algorithms evaluated in the source study, containing a very limited amount of application-specific logic [S1]. It is used as a baseline for evaluating all other algorithms (RDP, APP, HAP) in the study [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Provides a good approximation to the optimal algorithm without using pre-paging [S1].
+*   **Strengths:** Simple to implement; generic; does not suffer from Belady’s anomaly [S1].
+*   **Limitations:** Lacks application-specific knowledge of access patterns, making it less effective than knowledge-based predictors in specific scenarios [S1].
+*   **When to use:** As a baseline for comparison across all algorithms in the study [S1].
+*   **When not to use:** Not given in the sources.
+
+## Background
+The LRU strategy for octree nodes was adapted from operating systems, where it is a commonly used demand-based page replacement algorithm [S1]. It was presented by D. Chisnall, M. Chen, and C. Hansen in the context of knowledge-based out-of-core algorithms for data management in visualization [S1]. The work was published in the Eurographics Symposium on Visualization (EuroVis) in 2006 [S1].
+
+## Sources
+[S1] Knowledge-Based Out-of-Core Algorithms for Data Management in Visualization, https://doi.org/10.2312/vissym/eurovis06/107-114, fetched 2026-10-26

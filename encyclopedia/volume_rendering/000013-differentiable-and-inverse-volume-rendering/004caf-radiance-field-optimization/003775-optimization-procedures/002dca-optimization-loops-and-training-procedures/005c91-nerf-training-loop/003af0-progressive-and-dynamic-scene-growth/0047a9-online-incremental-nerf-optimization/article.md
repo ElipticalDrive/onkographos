@@ -1,0 +1,79 @@
+# Online Incremental NeRF Optimization
+
+Also called: Incremental NeRF Training, Online NeRF
+
+## Overview
+Online Incremental NeRF Optimization addresses the problem of reconstructing 3D scenes from a continuous stream of incoming camera views, rather than a fixed, pre-collected dataset. Unlike offline methods such as DVGO [S1, unofficial], which optimize the scene representation based on a static set of images, this method updates the representation dynamically as new observations are collected. It enables active exploration by planning next-best views and integrating new data incrementally, allowing the model to build better 3D models with limited viewpoints while adapting to real-world navigation scenarios [S1, unofficial].
+
+## How it works
+The method operates as a continuous loop of perception, planning, and optimization.
+
+**Inputs and Outputs:**
+*   **Input:** A current scene representation (e.g., a NeRF or grid-based model), a set of previously collected images/poses, and a new incoming image/pose from a sensor or agent.
+*   **Output:** An updated scene representation and a plan for the next viewpoint.
+
+**Data Structures:**
+*   **Scene Representation:** Typically a neural radiance field (MLP) or a grid-based representation (e.g., HashGrid, Voxel Grid).
+*   **Training Buffer:** A set of stored images and their corresponding camera poses. In online settings, this buffer may be bounded or managed to handle large environments [S2, unofficial].
+
+**Steps:**
+1.  **Perception:** The agent or system captures a new observation (image and pose) based on the current scene representation.
+2.  **Incremental Update:** The new observation is added to the training set. The scene representation is optimized using this expanded dataset [S1, unofficial].
+3.  **Planning (Active):** Based on the current representation, the system computes a metric (e.g., entropy or uncertainty) to determine the "next best view" for future exploration [S1, unofficial].
+4.  **Iteration:** Repeat steps 1-3 as new data arrives.
+
+**Formulas and Parameters:**
+*   **Entropy-based Exploration:** The method may use entropy to guide viewpoint selection, allowing the agent to explore diverse viewpoints [S1, unofficial].
+*   **Thresholds:** Specific thresholds for triggering growth or pruning are not explicitly defined in the provided sources for the general online method, but are discussed in the context of the parent family [S1, unofficial].
+
+**Pitfalls:**
+*   **Catastrophic Forgetting:** In vanilla NeRF, global MLP updates can cause previously reconstructed regions to degrade when new, unsupervised areas are optimized [S2, unofficial].
+*   **Memory Usage:** Large environments result in a high number of captured images, requiring strategies to discard older frames or manage memory [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialize scene representation R (e.g., NeRF or Grid)
+# Initialize training buffer D = empty
+# Initialize current pose P_curr
+
+while not terminated:
+    # 1. Plan next view based on current representation
+    # Compute metric (e.g., entropy) over the scene
+    next_view = plan_next_best_view(R, D)
+    
+    # 2. Capture new observation
+    # Assume sensor provides image I_new and pose P_new
+    I_new, P_new = capture_observation(next_view)
+    
+    # 3. Add to training buffer
+    D.add((I_new, P_new))
+    
+    # 4. Optimize representation incrementally
+    # Update R using all data in D
+    R = optimize(R, D)
+    
+    # 5. Update current pose
+    P_curr = P_new
+```
+
+## Subtopics
+
+### Incremental Reconstruction with Frozen Decoder
+A strategy for online incremental reconstruction to address catastrophic forgetting, where the model integrates new viewpoints while preserving previously learned information. It employs pre-trained, scene-agnostic decoders that remain frozen during the feature grids optimization. This design enables new grid cells to represent unseen areas while preserving the integrity of already reconstructed regions. Vanilla NeRF suffers from catastrophic forgetting because every optimization step updates shared MLP weights globally, causing previously reconstructed regions not supervised anymore to degrade. Grid-based representations partially mitigate forgetting due to spatially localized feature storage, but forgetting still occurs due to the decoder and hashgrid dictionary [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the optimization frequency and the size of the training buffer. Incremental updates are generally faster than full re-optimization but require careful management of buffer size [S1, unofficial].
+*   **Memory Complexity:** Scales with the number of stored views and the complexity of the scene representation. Large environments may require discarding older frames to bound memory usage [S2, unofficial].
+*   **Strengths:** Enables real-time or near-real-time reconstruction; supports active exploration; adapts to dynamic or large-scale scenes [S1, unofficial].
+*   **Limitations:** Susceptible to catastrophic forgetting in vanilla architectures; requires careful management of training data and optimization steps [S2, unofficial].
+*   **When to use:** When data arrives continuously (e.g., robot navigation, AR/VR) and offline retraining is not feasible [S1, unofficial].
+*   **When not to use:** When a fixed, high-quality reconstruction from a static dataset is sufficient and computational resources allow for offline optimization [S1, unofficial].
+
+## Background
+The concept of online incremental NeRF optimization arises from the need to adapt NeRFs to real-world scenarios involving imperfect data, large-scale scenes, and incremental reconstruction. Traditional NeRF methods optimize offline on fixed datasets, which is insufficient for active mapping and planning tasks. The method builds on the principles of progressive and dynamic scene growth, where the scene representation is expanded based on metrics of insufficiency [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] ActiveRMAP: Radiance Field for Active Mapping And Planning, https://doi.org/10.48550/arxiv.2211.12656, fetched 2026-10-26 (unofficial)
+[S2] From reconstruction to reasoning : neural radiance fields for comprehensive 3D scene understanding, https://theses.hal.science/tel-05693528v1, fetched 2026-10-26 (unofficial)

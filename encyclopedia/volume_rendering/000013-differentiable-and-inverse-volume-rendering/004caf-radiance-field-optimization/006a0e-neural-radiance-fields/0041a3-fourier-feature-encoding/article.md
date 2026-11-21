@@ -1,0 +1,119 @@
+# Fourier Feature Encoding
+
+Also called: Fourier Feature Mapping, Fourier Feature Positional Encoding, Fourier Features, NeRF Positional Encoding, Positional Encoding (NeRF), Sinusoidal Positional Encoding
+
+## Overview
+Fourier Feature Encoding is a preprocessing technique applied to scene coordinates and viewing directions to address the spectral bias of neural networks, which naturally favor low-frequency functions [S1][S3, unofficial]. By mapping input vectors into a high-dimensional space via sinusoidal functions, it provides high-frequency features directly to the network, greatly improving fine detail reconstruction in rendered views [S1]. It sets itself apart from standard positional encodings (like those in Transformers) by using fixed, non-trainable sinusoidal bases rather than learned embeddings, and from learnable frequency mappings by relying on a deterministic geometric progression of frequencies [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A vector $\mathbf{v}$ representing either a 3D scene coordinate $\mathbf{x}$ or a viewing direction $\mathbf{d}$ [S1][S3, unofficial].
+- Output: A higher-dimensional vector $\gamma(\mathbf{v})$ containing sinusoidal features [S1][S3, unofficial].
+
+**Data Structures:**
+- The encoding is a static transformation applied element-wise or vector-wise [G].
+- No persistent data structures are required beyond the input vector and the output vector [G].
+
+**Parameters:**
+- $L$ (or $N$): The number of frequency bands (or encoding dimensionality parameter) [S1][S3, unofficial].
+- The output dimension is $2L$ [S1][S3, unofficial].
+- Typical values: In the original NeRF implementation, $N=10$ for coordinates $\mathbf{x}$ and $N=4$ for directions $\mathbf{d}$ [S1].
+
+**Formulas:**
+The positional encoding function $\gamma$ maps a vector $\mathbf{v}$ to a vector of sines and cosines with exponentially increasing frequencies [S1][S3, unofficial]:
+
+$$
+\gamma(\mathbf{v}) = \left( \sin(2^0 \pi \mathbf{v}), \cos(2^0 \pi \mathbf{v}), \dots, \sin(2^{L-1} \pi \mathbf{v}), \cos(2^{L-1} \pi \mathbf{v}) \right)
+$$
+
+The neural radiance field $F_{\Theta}$ is reformulated as a composition $F_{\Theta} = F^{\prime}_{\Theta} \circ \gamma$, where $F^{\prime}_{\Theta}$ is the MLP that takes the encoded features [S3, unofficial]:
+
+$$
+(\mathbf{c}, \sigma) = F^{\prime}_{\Theta}(\gamma(\mathbf{x}), \gamma(\mathbf{d}))
+$$
+
+**Numbered Steps:**
+1. Normalize the input coordinate $\mathbf{x}$ and direction $\mathbf{d}$ to the range $[-1, 1]$ [S1][S3, unofficial].
+2. For each component $v$ of the input vector:
+   a. Initialize an empty list of features [G].
+   b. For $b$ from $0$ to $L-1$:
+      i. Calculate frequency $\omega = 2^b \pi$ [S1].
+      ii. Append $\sin(\omega v)$ to the list [S1].
+      iii. Append $\cos(\omega v)$ to the list [S1].
+3. Concatenate the features for all components of the input vector to form the final encoded vector [G].
+4. Pass the encoded vector into the MLP $F^{\prime}_{\Theta}$ [S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def fourier_feature_encoding(v, num_bands):
+    """
+    Encodes a vector v using Fourier features.
+    
+    Args:
+        v: A list or array of floats (coordinates or direction components), 
+           expected to be in range [-1, 1].
+        num_bands: Integer L, the number of frequency bands.
+        
+    Returns:
+        A list of floats representing the encoded features.
+    """
+    features = []
+    for val in v:
+        for b in range(num_bands):
+            # Frequency is 2^b * pi
+            freq = (2 ** b) * math.pi
+            features.append(math.sin(freq * val))
+            features.append(math.cos(freq * val))
+    return features
+
+def nerf_forward(x, d, x_bands, d_bands, mlp):
+    """
+    Simulates the forward pass of a NeRF with Fourier Feature Encoding.
+    
+    Args:
+        x: 3D coordinate vector [x, y, z].
+        d: Viewing direction vector [dx, dy, dz].
+        x_bands: Number of bands for coordinates (e.g., 10).
+        d_bands: Number of bands for directions (e.g., 4).
+        mlp: A function representing the MLP F'_Theta.
+        
+    Returns:
+        Color c and density sigma.
+    """
+    # Encode inputs
+    x_encoded = fourier_feature_encoding(x, x_bands)
+    d_encoded = fourier_feature_encoding(d, d_bands)
+    
+    # Concatenate encoded inputs
+    input_features = x_encoded + d_encoded
+    
+    # Pass through MLP
+    c, sigma = mlp(input_features)
+    
+    return c, sigma
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** High-frequency bands ($2^{L-1}$) can lead to numerical instability if inputs are not strictly normalized to $[-1, 1]$ [G]. Values outside this range may cause oscillations that the network cannot resolve or gradients that vanish/explode [G].
+- **Boundary Conditions:** The encoding is periodic [G]. If the scene geometry extends beyond the normalized bounding box, the encoding wraps around, potentially causing artifacts [G].
+- **Degenerate Input:** If the input vector is zero, the encoding results in zeros for sines and ones for cosines, which is valid but provides no directional information for that component [G].
+
+## Operating characteristics
+- **Time Complexity:** The encoding itself is $O(L \cdot D)$, where $D$ is the input dimension (3 for coordinates/directions) [G]. This is negligible compared to the MLP evaluation [G].
+- **Memory Complexity:** $O(L \cdot D)$ to store the encoded vector [G]. No additional memory is required for the encoding process itself [G].
+- **Strengths:** Significantly improves the reconstruction of high-frequency details (textures, sharp edges) compared to unencoded MLPs [S1]. It is simple to implement and requires no additional training parameters for the encoder [G].
+- **Limitations:** The fixed frequency spectrum may not be optimal for all scenes [S1]. Very high frequencies can lead to aliasing or optimization difficulties if the sampling rate along rays is insufficient [G].
+- **When to use:** Standard for NeRF-like implicit radiance fields where high-frequency detail is desired [S1].
+- **When not to use:** If the scene is inherently low-frequency or if computational resources are extremely constrained and the overhead of encoding is non-trivial (though it usually is not) [G].
+
+## Background
+Fixed sinusoidal positional encoding was introduced in the seminal paper "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" by Mildenhall et al. in 2020 [S1]. It was motivated by the observation that standard MLPs struggle to learn high-frequency functions due to spectral bias [S3, unofficial]. The technique was later analyzed theoretically using Neural Tangent Kernels [S1]. Modern variants include trainable parametric encodings, integral encodings, and hierarchical variants [S1].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] BirdNeRF: fast neural reconstruction of large-scale scenes from aerial imagery., https://doi.org/10.1038/s41598-025-21206-z, fetched 2026-10-26
+[S3] Neural Radiance Fields - Lei Mao's Log Book, https://leimao.github.io/blog/Neural-Radiance-Fields-NeRF/, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,316 @@
+--- v003.md
++++ v004.md
+@@ -4,131 +4,209 @@
+ 
+ ## Overview
+-Synthetic Camera Trajectory Generation creates a sequence of camera poses for volume rendering or novel view synthesis when real-world capture data is unavailable or insufficient [S1, unofficial]. It solves the problem of defining valid viewing geometries by sampling positions and orientations from a structured distribution, typically using low-discrepancy sequences like Sobol samplers to ensure uniform coverage of the scene volume [S1, unofficial]. It differs from sibling methods by decoupling position and direction sampling to allow arbitrary spherical coverage [S1, unofficial].
++Synthetic Camera Trajectory Generation creates structured camera poses for volume rendering or NeRF training by sampling positions on a sphere around the scene center using low-discrepancy sequences, specifically Sobol sequences [S1, unofficial]. It differs from [Random Camera Sampling](15470-random-camera-sampling.md) by providing uniform coverage of the viewing sphere without the variance of pure random sampling, and from [B-Spline Camera Path Interpolation](11453-b-spline-camera-path-interpolation.md) by generating discrete, independent viewpoints rather than a continuous smooth path [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-- **Input**: Volume bounding box (AABB), target number of views ($N_{VIEWS}$), renderer resolution, and focal length calculation method [S1, unofficial].
+-- **Output**: A list of camera poses (position, orientation quaternion, translation) and metadata compatible with standard photogrammetry formats [S1, unofficial].
+-
+-**Data Structures**
+-1. **Volume AABB**: Represented as a bounding box defining the scene extent [S1, unofficial].
+-2. **Camera Definition**: A single camera object with a SIMPLE_PINHOLE model [S1, unofficial]. The focal length is computed based on the renderer resolution [S1, unofficial].
+-3. **Pose List**: A sequence of entries, each containing image metadata, rotation quaternion, and translation vector [S1, unofficial].
+-
+-**Steps**
+-1. **Initialize Volume Metadata**: Write the world-space AABB of the volume as a single Point3D (id=0) with position and RGB values from the AABB bounds [S1, unofficial].
+-2. **Initialize Camera Model**: Write a single camera (id=0) with model SIMPLE_PINHOLE, using renderer resolution and focal length calculated by `renderer.colmap_focal_length()` [S1, unofficial].
+-3. **Sample Positions**: For each view $i$ from $0$ to $N_{VIEWS}-1$, sample a camera position on a sphere around the volume center using a Sobol sequence samplerOut [S1, unofficial].
+-4. **Sample Directions**: Sample a camera direction towards the center with a small random offset using a Sobol sequence samplerIn [S1, unofficial].
+-5. **Compute Orientation**: Construct a rotation matrix or quaternion that aligns the camera's local forward vector with the sampled direction [G].
+-6. **Store Pose**: Store the image metadata including quaternion rotation (reordered from [3,0,1,2]) and translation vector for view $i$ [S1, unofficial].
+-
+-**Pseudocode**
++**Inputs:**
++- Volume world-space Axis-Aligned Bounding Box (AABB) bounds.
++- Renderer resolution (width, height).
++- Focal length calculation function (e.g., `renderer.colmap_focal_length()`).
++- Number of views $N_{VIEWS}$.
++- Scene center $\mathbf{c}$ (typically the center of the AABB).
++
++**Outputs:**
++- A list of camera poses, each defined by a position $\mathbf{p}_i$, a direction $\mathbf{d}_i$, and a rotation quaternion $\mathbf{q}_i$.
++- Metadata compatible with COLMAP format (id, model, parameters, qvec, tvec).
++
++**Data Structures:**
++- **Camera Pose:** Struct containing:
++  - `id`: Integer identifier.
++  - `model`: String, e.g., "SIMPLE_PINHOLE".
++  - `params`: Array of floats (focal length, principal point).
++  - `qvec`: Quaternion $[w, x, y, z]$ or $[x, y, z, w]$ depending on convention. The source specifies reordering from $[3, 0, 1, 2]$ [S1, unofficial].
++  - `tvec`: Translation vector (camera position in world space).
++- **Sobol Sampler:** Instance of a low-discrepancy sequence generator for uniform sampling on a sphere and direction offsets.
++
++**Steps:**
++1. **Define Scene Bounds:** Compute the world-space AABB of the volume. Store this as a single point (id=0) with position and RGB values derived from the AABB bounds [S1, unofficial].
++2. **Initialize Camera Metadata:** Create a base camera (id=0) with model `SIMPLE_PINHOLE`. Calculate the focal length $f$ using the renderer's focal length function based on resolution [S1, unofficial].
++3. **Sample Positions:** For each view index $i$ from $0$ to $N_{VIEWS}-1$:
++   - Use the Sobol sequence sampler to sample a point $\mathbf{p}_i$ on a sphere centered at $\mathbf{c}$ with a radius $R$ sufficient to encompass the volume [S1, unofficial].
++4. **Sample Directions:** For each view $i$:
++   - Calculate the base direction $\mathbf{d}_{base} = \mathbf{c} - \mathbf{p}_i$.
++   - Use the Sobol sequence sampler to generate a small random offset $\mathbf{o}_i$ [S1, unofficial].
++   - Compute the final direction $\mathbf{d}_i = \text{normalize}(\mathbf{d}_{base} + \mathbf{o}_i)$ [S1, unofficial].
++5. **Compute Rotation:** Construct the rotation matrix $M_i$ that aligns the camera's local Z-axis with $\mathbf{d}_i$ and X/Y axes appropriately. Convert $M_i$ to a quaternion $\mathbf{q}_i$. Reorder the quaternion components from the internal representation $[3, 0, 1, 2]$ to the standard output format (typically $[w, x, y, z]$ or $[x, y, z, w]$) [S1, unofficial].
++6. **Store Pose:** Store the image metadata including the reordered quaternion $\mathbf{q}_i$ and translation vector $\mathbf{t}_i = \mathbf{p}_i$ [S1, unofficial].
++
++**Pseudocode:**
+ ```python
+ import numpy as np
+ 
+-def generate_synthetic_trajectory(aabb_center, n_views):
+-    """
+-    Generates synthetic camera trajectories using Sobol sampling.
+-    """
++def generate_trajectory(aabb_min, aabb_max, width, height, n_views, scene_center=None):
++    # 1. Define Scene Bounds
++    if scene_center is None:
++        scene_center = (aabb_min + aabb_max) / 2.0
++    
++    # Calculate radius to encompass AABB
++    radius = np.linalg.norm(aabb_max - aabb_min) / 2.0 * 1.5 # [G] Multiplier ensures coverage
++    
++    # 2. Initialize Camera Metadata
++    # SIMPLE_PINHOLE params: [focal_length, cx, cy]
++    # cx, cy are typically image center
++    cx = width / 2.0
++    cy = height / 2.0
++    focal_length = calculate_focal_length(width, height) # [G] Placeholder for specific renderer logic
++    
+     poses = []
+-    # Standard Sobol sequence generation is used here [G]
+-    # sampler_out and sampler_in are assumed to be initialized low-discrepancy generators
++    
++    # Initialize Sobol Sampler
++    sobol_pos = SobolSampler(dim=3)
++    sobol_dir = SobolSampler(dim=3)
+     
+     for i in range(n_views):
+-        # Step 3: Sample position on sphere around volume center
+-        raw_pos = sampler_out.next()  # Returns 3D vector in [0, 1]^3
+-        raw_pos = raw_pos * 2 - 1     # Map to [-1, 1]^3
+-        norm = np.linalg.norm(raw_pos)
+-        if norm == 0: norm = 1e-6
+-        offset_from_center = raw_pos / norm
+-        # Radius relative to AABB is not specified in the sources [S1, unofficial]
+-        radius = 1.0 
+-        position = aabb_center + offset_from_center * radius
+-        
+-        # Step 4: Sample direction towards center with small random offset
+-        direction_to_center = aabb_center - position
+-        direction_to_center = direction_to_center / np.linalg.norm(direction_to_center)
+-        
+-        raw_offset = sampler_in.next()  # Returns 3D vector in [0, 1]^3
+-        offset = (raw_offset - 0.5) * 0.1
+-        final_direction = direction_to_center + offset
+-        final_direction = final_direction / np.linalg.norm(final_direction)
+-        
+-        # Step 5: Compute quaternion from direction [G]
+-        forward = final_direction
+-        world_up = np.array([0, 1, 0])
+-        if np.abs(np.dot(forward, world_up)) > 0.999:
+-            world_up = np.array([1, 0, 0])
+-        right = np.cross(forward, world_up)
++        # 3. Sample Position on Sphere
++        # Sobol generates values in [0, 1], map to sphere
++        u = sobol_pos.next()
++        v = sobol_pos.next()
++        w = sobol_pos.next()
++        
++        # Map to sphere using inverse CDF or standard mapping
++        # Using standard spherical coordinate mapping for uniform distribution
++        theta = 2.0 * np.pi * u
++        phi = np.arccos(2.0 * v - 1.0)
++        
++        # Convert to Cartesian
++        x = radius * np.sin(phi) * np.cos(theta)
++        y = radius * np.sin(phi) * np.sin(theta)
++        z = radius * np.cos(phi)
++        
++        position = scene_center + np.array([x, y, z])
++        
++        # 4. Sample Direction
++        # Base direction towards center
++        base_dir = scene_center - position
++        base_dir = base_dir / np.linalg.norm(base_dir)
++        
++        # Small random offset using Sobol
++        offset_u = sobol_dir.next()
++        offset_v = sobol_dir.next()
++        offset_w = sobol_dir.next()
++        
++        # Map offset to a small cone or perturbation
++        # [G] Assuming small Gaussian-like perturbation scaled by a small angle
++        perturbation_angle = 0.05 # [G] Small angle in radians
++        perturbation = np.array([
++            (offset_u - 0.5) * perturbation_angle,
++            (offset_v - 0.5) * perturbation_angle,
++            (offset_w - 0.5) * perturbation_angle
++        ])
++        
++        direction = base_dir + perturbation
++        direction = direction / np.linalg.norm(direction)
++        
++        # 5. Compute Rotation
++        # Construct rotation matrix aligning camera Z with direction
++        # Camera local Z is usually (0,0,1) or (0,0,-1) depending on convention
++        # Assuming OpenGL convention: camera looks down -Z
++        forward = -direction
++        up = np.array([0, 1, 0])
++        
++        # Handle degenerate case where forward is parallel to up
++        if np.abs(np.dot(forward, up)) > 0.999:
++            up = np.array([1, 0, 0])
++            
++        right = np.cross(up, forward)
+         right = right / np.linalg.norm(right)
+-        up = np.cross(right, forward)
+-        R = np.column_stack((right, up, -forward))
+-        trace = np.trace(R)
+-        if trace > 0:
+-            S = np.sqrt(trace + 1.0) * 2
+-            w = 0.25 * S
+-            x = (R[2, 1] - R[1, 2]) / S
+-            y = (R[0, 2] - R[2, 0]) / S
+-            z = (R[1, 0] - R[0, 1]) / S
+-        elif (R[0, 0] > R[1, 1]) and (R[0, 0] > R[2, 2]):
+-            S = np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
+-            w = (R[2, 1] - R[1, 2]) / S
+-            x = 0.25 * S
+-            y = (R[0, 1] + R[1, 0]) / S
+-            z = (R[0, 2] + R[2, 0]) / S
+-        elif R[1, 1] > R[2, 2]:
+-            S = np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2
+-            w = (R[0, 2] - R[2, 0]) / S
+-            x = (R[0, 1] + R[1, 0]) / S
+-            y = 0.25 * S
+-            z = (R[1, 2] + R[2, 1]) / S
+-        else:
+-            S = np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2
+-            w = (R[1, 0] - R[0, 1]) / S
+-            x = (R[0, 2] + R[2, 0]) / S
+-            y = (R[1, 2] + R[2, 1]) / S
+-            z = 0.25 * S
+-        quat = np.array([w, x, y, z])
+-        
+-        # Step 6: Store Pose with quaternion reordered from [3,0,1,2] as specified [S1, unofficial]
+-        reordered_quat = quat[[3, 0, 1, 2]]
++        up = np.cross(forward, right)
++        
++        rotation_matrix = np.column_stack([right, up, forward])
++        quaternion = rotation_matrix_to_quaternion(rotation_matrix)
++        
++        # 6. Store Pose
++        # Reorder quaternion from [3, 0, 1, 2] to [w, x, y, z] or similar
++        # Assuming input quaternion is [x, y, z, w] and source reorders to [w, x, y, z]
++        # The source says "reordered from [3,0,1,2]" which likely refers to indices
++        # If q = [q0, q1, q2, q3], new_q = [q3, q0, q1, q2]
++        reordered_q = [quaternion[3], quaternion[0], quaternion[1], quaternion[2]]
++        
+         poses.append({
+             'id': i,
+-            'position': position,
+-            'quaternion': reordered_quat,
+-            'camera_id': 0
++            'model': 'SIMPLE_PINHOLE',
++            'params': [focal_length, cx, cy],
++            'qvec': reordered_q,
++            'tvec': position.tolist()
+         })
++        
+     return poses
++
++def calculate_focal_length(width, height):
++    # [G] Standard pinhole focal length calculation
++    return max(width, height)
++
++def rotation_matrix_to_quaternion(R):
++    # [G] Standard conversion from 3x3 rotation matrix to quaternion
++    trace = R[0,0] + R[1,1] + R[2,2]
++    if trace > 0:
++        S = np.sqrt(trace + 1.0) * 2
++        w = 0.25 * S
++        x = (R[2,1] - R[1,2]) / S
++        y = (R[0,2] - R[2,0]) / S
++        z = (R[1,0] - R[0,1]) / S
++    elif (R[0,0] > R[1,1]) and (R[0,0] > R[2,2]):
++        S = np.sqrt(1.0 + R[0,0] - R[1,1] - R[2,2]) * 2
++        w = (R[2,1] - R[1,2]) / S
++        x = 0.25 * S
++        y = (R[0,1] + R[1,0]) / S
++        z = (R[0,2] + R[2,0]) / S
++    elif R[1,1] > R[2,2]:
++        S = np.sqrt(1.0 + R[1,1] - R[0,0] - R[2,2]) * 2
++        w = (R[0,2] - R[2,0]) / S
++        x = (R[0,1] + R[1,0]) / S
++        y = 0.25 * S
++        z = (R[1,2] + R[2,1]) / S
++    else:
++        S = np.sqrt(1.0 + R[2,2] - R[0,0] - R[1,1]) * 2
++        w = (R[1,0] - R[0,1]) / S
++        x = (R[0,2] + R[2,0]) / S
++        y = (R[1,2] + R[2,1]) / S
++        z = 0.25 * S
++    return np.array([x, y, z, w])
+ ```
+ 
+-**Parameters**
+-- $N_{VIEWS}$: Not given in the sources.
+-- Radius of sampling sphere: Not given in the sources.
+-- Offset magnitude for direction: Not given in the sources.
+-
+-**Edge Cases and Pitfalls**
+-- **Precision**: Sobol sequence generators must be initialized with the correct dimension and seed to avoid repetition [G].
+-- **Boundaries**: The source does not specify a minimum distance from the volume center [S1, unofficial].
+-- **Degenerate Input**: If the volume center is not well-defined, the trajectory generation fails [G].
++**Parameters:**
++- $N_{VIEWS}$: Number of camera poses to generate. Typical values depend on scene complexity, often 100-1000 for training [S1, unofficial].
++- Radius $R$: Distance from scene center. Must be large enough to see the entire volume [S1, unofficial].
++- Offset Magnitude: Small perturbation for direction sampling to avoid exact centering [S1, unofficial].
++
++**Edge Cases:**
++- **Degenerate Up Vector:** If the camera direction is parallel to the world up vector, the cross product for the right vector becomes zero. A fallback up vector (e.g., $[1, 0, 0]$) must be used [G].
++- **Precision:** Sobol sequence generation requires careful handling of integer overflow for high dimensions or large sample counts [G].
++- **Boundary:** Ensure the sampled sphere radius does not clip the volume if the volume is not centered at the origin or if the AABB is used incorrectly [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### [Random Pose Selection](8187-random-pose-selection.md)
+-Random Pose Selection generates intermediate camera poses by interpolating between two randomly chosen training poses, ensuring that rendered views remain within the observed regions of the training data. It differs from nearest camera pose selection by synthesizing new poses that lie between existing training views to guarantee visibility.
+-
+ ### Inpainting Trajectory Sampling
+-Inpainting Trajectory Sampling generates camera positions for inpainting tasks by defining a closed curve on the horizontal plane based on depth values at zero elevation angle from a single panoramic depth map [S2]. It applies 1D Gaussian filtering to smooth the distance values, creating a closed curve $C$ that defines the maximum movement space [S2]. It then progressively samples on shrunk curves $\{C_i\}$ scaled by factors $\{s_i\}$ [S2]. Specifically, it uses 4 shrunk curves with scale factors 0.15, 0.3, 0.45, and 0.6, uniformly sampling 8 positions on each, resulting in 32 total positions [S2].
++Inpainting Trajectory Sampling generates camera paths for filling invisible 3D regions by defining a closed curve on the horizontal plane based on depth values at zero elevation angle from a single panoramic depth map [S2]. It differs from standard spherical sampling by adapting the trajectory to the scene's geometry, ensuring the camera stays within visible bounds [S2]. It is chosen when inpainting or novel view synthesis from a single panorama is required [S2].
++- **Definition:** Sampling new camera positions for inpainting by defining a closed curve on the horizontal plane based on depth values at zero elevation angle, then sampling on shrunk curves [S2].
++- **Steps:**
++  1. Extract distance values of all pixels on the zero elevation angle position from the estimated single-view panoramic depth map [S2].
++  2. Apply 1D Gaussian filtering to the distance values to get a smoothed closed curve $C$, which defines the maximum space within which the camera can move [S2].
++  3. Progressively sample camera positions on shrunk curves $\{C_i\}$ whose scale is $\{s_i\}$ times the largest curve $C$ [S2].
++  4. Uniformly sample 8 camera positions on each shrunk curve, resulting in 32 positions total [S2].
++- **Parameters:**
++  - Number of shrunk curves: 4 [S2].
++  - Scale factors $\{s_i\}$: 0.15, 0.3, 0.45, and 0.6 [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Not given in the sources.
+-- **Memory Complexity**: Not given in the sources.
+-- **Measured Performance**: Not given in the sources.
+-- **Scaling**: Not given in the sources.
+-- **Strengths and Limitations**: Not given in the sources.
+-- **When to use it and when not**: Not given in the sources.
++- **Time Complexity:** $O(N_{VIEWS})$ for generating poses, assuming constant-time Sobol sequence generation [S1, unofficial].
++- **Memory Complexity:** $O(N_{VIEWS})$ to store the pose metadata [S1, unofficial].
++- **Performance:** Efficient for generating large datasets for training NeRFs or volume renderers [S1, unofficial].
++- **Strengths:** Provides uniform coverage of the viewing sphere, reducing artifacts from sparse or biased sampling [S1, unofficial].
++- **Limitations:** Assumes the scene is roughly centered and convex; may not adapt well to complex, non-convex, or elongated structures without modification [S1, unofficial].
++- **When to Use:** When generating synthetic training data for volume rendering or NeRFs where uniform spherical coverage is desired [S1, unofficial].
++- **When Not to Use:** For scenes with significant depth variation or non-convex geometry where adaptive sampling is needed [S2].
+ 
+ ## Background
+-The method originates from the need to generate training data for volume rendering and neural radiance fields when real-world captures are unavailable [S1, unofficial]. The specific implementation using Sobol sequences and COLMAP format is documented in the `volren` repository [S1, unofficial]. The inpainting variant is described in the context of panoramic neural radiance fields from single panoramas [S2].
++Synthetic Camera Trajectory Generation using Sobol sequences for volume rendering and NeRF training was described in the context of the `volren` project [S1, unofficial]. The method leverages low-discrepancy sequences to ensure efficient coverage of the camera sphere, which is critical for training neural radiance fields and volume renderers [S1, unofficial].
+ 
+ ## Sources

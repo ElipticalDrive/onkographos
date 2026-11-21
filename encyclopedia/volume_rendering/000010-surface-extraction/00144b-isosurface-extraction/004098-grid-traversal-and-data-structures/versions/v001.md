@@ -1,0 +1,31 @@
+# Grid Traversal and Data Structures
+
+Also called: Adaptive Grid Traversal, Hierarchical Isosurfacing, AMR Isosurfacing
+
+## Overview
+This family defines methods for extracting isosurfaces from scalar fields by adapting the underlying spatial data structure to the geometry, rather than iterating over a fixed uniform grid [8340-grid-traversal-and-data-structure-adaptation.md]. By using hierarchical structures like octrees or sparse hash maps, these algorithms reduce memory usage and computational cost by only processing cells where the surface exists or varies significantly [8340-grid-traversal-and-data-structure-adaptation.md]. They set themselves apart from sibling methods like [Transvoxel](6277-transvoxel.md) by relying on standard topological triangulation rules (e.g., Marching Cubes) applied to adapted domains, often requiring specific traversal logic to handle mismatched refinement levels between adjacent cells [8340-grid-traversal-and-data-structure-adaptation.md].
+
+## Shared principles
+All methods in this family operate on a discretized domain, typically a regular grid (Cartesian, octree, or tetrahedral) where each cell contains scalar values or occupancy states at its vertices or centers. The core mechanism involves traversing the grid cells and evaluating the data to determine which parts of the domain constitute the surface [G].
+
+1.  **Domain Traversal**: The algorithm iterates over the volume data structure [G]. For regular grids, this often involves checking each cell or voxel [G].
+2.  **Surface Determination**: A criterion is applied to identify surface locations. In isosurface methods, this involves comparing scalar values against a threshold (isovalue) to detect sign changes or equality [30-isosurface-extraction.md]. In blocky meshing, this involves checking occupancy states or material IDs to identify exposed boundaries [31-blocky-meshing.md].
+3.  **Primitive Generation**: Geometric primitives (vertices, edges, faces) are generated based on the determined surface locations [G].
+4.  **Mesh Coherence**: Adjacent primitives are merged or connected to form a coherent mesh, often requiring vertex merging to avoid duplicates and ensure watertightness [30-isosurface-extraction.md].
+
+## Subtopics
+
+### [Octree-based Isosurfacing](1247-octree-based-isosurfacing.md)
+Replaces the uniform Cartesian grid with an octree spatial subdivision to discretize the domain for surface extraction algorithms like Marching Cubes or Dual Contouring. This approach enables adaptive resolution, refining the mesh density only where necessary, but it sacrifices the topological guarantees of uniform grids, potentially causing cracks in the resulting surface if the octree is not sufficiently adapted to the geometry.
+
+### [Grid Traversal and Data Structure Adaptation](8340-grid-traversal-and-data-structure-adaptation.md)
+Extracts isosurfaces by adapting the underlying spatial data structure to the geometry, rather than iterating over a fixed uniform grid. By using hierarchical structures like octrees or sparse hash maps, these algorithms reduce memory usage and computational cost by only processing cells where the surface exists or varies significantly. They set themselves apart from sibling methods like [Transvoxel](6277-transvoxel.md) by relying on standard topological triangulation rules (e.g., Marching Cubes) applied to adapted domains, often requiring specific traversal logic to handle mismatched refinement levels between adjacent cells.
+
+### [Crack-free Isosurface Extraction from AMR Data](9981-crack-free-isosurface-extraction-from-amr-data.md)
+A method to extract watertight, crack-free isosurfaces from block-structured Adaptive Mesh Refinement (AMR) data in a distributed-memory parallel environment. It solves the problem of T-junctions (cracks) that arise when standard Marching Cubes is applied to hierarchical data, and overcomes the memory and serial processing limitations of previous dual-grid approaches by using ghost cells.
+
+## Background
+The need for adaptive grid traversal arises from the inefficiency of uniform grids for sparse or complex geometries, where most cells contain no surface information. Early implementations relied on simple octree constructions where a split predicate determines subdivision [S1]. The primary challenge in hierarchical isosurfacing is maintaining topological consistency (watertightness) across level boundaries, a problem addressed by specific crack-free techniques for AMR data [9981-crack-free-isosurface-extraction-from-amr-data.md].
+
+## Sources
+[S1] Octree-based Isosurfacing notes, URL not provided, date fetched not provided.

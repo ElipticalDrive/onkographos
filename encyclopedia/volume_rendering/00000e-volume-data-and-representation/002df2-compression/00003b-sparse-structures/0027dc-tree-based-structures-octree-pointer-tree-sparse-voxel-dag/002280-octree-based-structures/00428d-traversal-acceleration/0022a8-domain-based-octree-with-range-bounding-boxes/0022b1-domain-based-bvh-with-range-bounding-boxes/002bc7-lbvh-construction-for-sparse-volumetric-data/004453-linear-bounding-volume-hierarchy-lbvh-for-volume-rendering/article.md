@@ -1,0 +1,142 @@
+# Linear Bounding Volume Hierarchy (LBVH) for Volume Rendering
+Also called: ZHL19 LBVH
+
+## Overview
+Linear Bounding Volume Hierarchy (LBVH) is a hierarchical data structure for sparse volume rendering that enables empty space skipping, adapted from surface ray tracing to uniform grids and targeted for GPU implementation via CUDA [S1, unofficial]. It sets itself apart from SAH-based methods (such as k-d trees) by using a middle-split heuristic on Morton-ordered bricks, offering significantly superior construction performance at the cost of inferior culling properties [S1, unofficial].
+
+## How it works
+**Inputs:** A uniform volumetric grid, a transfer function, and the target brick size [S1, unofficial].
+**Outputs:** A hierarchy of axis-aligned bounding boxes (AABBs) representing non-empty bricks, ready for traversal [S1, unofficial].
+
+**Data Structures:**
+*   **Brick:** A sub-volume of size $8^3$ voxels [S1, unofficial].
+*   **Morton Code:** A 30-bit integer representing the spatial position of a brick in 3D space, derived from its $(x, y, z)$ coordinates [G].
+*   **Hierarchy Node:** Contains an AABB and pointers/indices to children [G]. Inner nodes are assembled during the final pass [S1, unofficial].
+
+**Parameters:**
+*   Brick size: $8^3$ voxels [S1, unofficial].
+*   Morton code size: 30-bit [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Decomposition:** Decompose the input volume into bricks of size $8^3$ [S1, unofficial].
+2.  **Visibility Determination:** Launch a CUDA kernel where each thread processes one voxel. The thread determines if the voxel is visible according to the current transfer function [S1, unofficial].
+3.  **Brick Voting:** For each brick, threads responsible for its voxels vote on whether the entire brick is visible. This is achieved by atomically updating a flag in on-device shared memory. If any voxel in the brick is visible, the brick is marked non-empty [S1, unofficial].
+4.  **Compaction:** Perform a parallel compaction operation to retain only the non-empty bricks. This step has $O(n)$ work complexity, where $n$ is the total number of bricks [S1, unofficial].
+5.  **Morton Code Assignment:** Assign a 30-bit 3D Morton code to each non-empty brick based on its spatial coordinates [S1, unofficial].
+6.  **Sorting:** Sort the non-empty bricks using a parallel $O(n)$ GPU sorting algorithm (e.g., from the Thrust library) based on their Morton codes [S1, unofficial].
+7.  **Hierarchy Definition:** The sorted Morton order implicitly defines the hierarchy. The structure spatially splits child nodes in the middle [S1, unofficial].
+8.  **Split Position Calculation:** Determine the split positions for the hierarchy nodes using Karras’ algorithm [Kar12], which reads split positions directly from the bit codes of the Morton indices [S1, unofficial].
+9.  **AABB Assembly:** Traverse the hierarchy from each leaf node up to the root node in a final CUDA kernel. As the traversal proceeds, assemble the axis-aligned bounding box (AABB) for each inner node encountered along the path [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_lbvh(volume, transfer_function, brick_size=8):
+    # volume: 3D array of voxel densities
+    # transfer_function: function mapping density to opacity
+    # brick_size: integer, typically 8
+    
+    # Step 1: Decompose into bricks
+    num_bricks_x = (volume.shape[0] + brick_size - 1) // brick_size
+    num_bricks_y = (volume.shape[1] + brick_size - 1) // brick_size
+    num_bricks_z = (volume.shape[2] + brick_size - 1) // brick_size
+    total_bricks = num_bricks_x * num_bricks_y * num_bricks_z
+    
+    # Step 2 & 3: Visibility Determination and Brick Voting
+    brick_visible = [False] * total_bricks
+    for z in range(volume.shape[2]):
+        for y in range(volume.shape[1]):
+            for x in range(volume.shape[0]):
+                if transfer_function(volume[x, y, z]) > 0:
+                    bx, by, bz = x // brick_size, y // brick_size, z // brick_size
+                    brick_idx = bz * num_bricks_x * num_bricks_y + by * num_bricks_x + bx
+                    brick_visible[brick_idx] = True
+                    
+    # Step 4: Compaction
+    non_empty_bricks = [i for i, visible in enumerate(brick_visible) if visible]
+    n = len(non_empty_bricks)
+    
+    # Step 5: Morton Code Assignment
+    def compute_morton(bx, by, bz):
+        m = 0
+        for i in range(10):
+            m |= ((bx & (1 << i)) << (2 * i))
+            m |= ((by & (1 << i)) << (2 * i + 1))
+            m |= ((bz & (1 << i)) << (2 * i + 2))
+        return m
+
+    brick_coords = []
+    morton_codes = []
+    for idx in non_empty_bricks:
+        bz = idx // (num_bricks_x * num_bricks_y)
+        by = (idx // num_bricks_x) % num_bricks_y
+        bx = idx % num_bricks_x
+        brick_coords.append((bx, by, bz))
+        morton_codes.append(compute_morton(bx, by, bz))
+        
+    # Step 6: Sorting
+    sorted_pairs = sorted(enumerate(morton_codes), key=lambda x: x[1])
+    sorted_indices = [pair[0] for pair in sorted_pairs]
+    sorted_mortons = [pair[1] for pair in sorted_pairs]
+    
+    # Step 7 & 8: Hierarchy Definition and Split Position Calculation
+    # Karras' algorithm finds split points by analyzing bit patterns in sorted Morton codes [G]
+    splits = []
+    for i in range(len(sorted_mortons) - 1):
+        diff = sorted_mortons[i] ^ sorted_mortons[i+1]
+        if diff > 0:
+            split_bit = diff.bit_length() - 1
+            splits.append((i, split_bit))
+            
+    # Step 9: AABB Assembly
+    # Traverse from leaves to root to compute AABBs for each node range
+    def compute_aabb(start, end):
+        min_x, min_y, min_z = float('inf'), float('inf'), float('inf')
+        max_x, max_y, max_z = float('-inf'), float('-inf'), float('-inf')
+        for i in range(start, end):
+            bx, by, bz = brick_coords[sorted_indices[i]]
+            min_x = min(min_x, bx); max_x = max(max_x, bx)
+            min_y = min(min_y, by); max_y = max(max_y, by)
+            min_z = min(min_z, bz); max_z = max(max_z, bz)
+        return (min_x, min_y, min_z, max_x, max_y, max_z)
+
+    # Build tree structure implicitly via splits
+    def build_node(start, end):
+        if start == end: return None
+        if end - start == 1:
+            return {"aabb": compute_aabb(start, end), "children": None}
+        # Find split index from splits list
+        split_idx = start + 1
+        while split_idx < end and split_idx - 1 < len(splits) and splits[split_idx - 1][0] == split_idx - 1:
+            split_idx += 1
+        left = build_node(start, split_idx)
+        right = build_node(split_idx, end)
+        parent_aabb = (
+            min(left["aabb"][0], right["aabb"][0]), min(left["aabb"][1], right["aabb"][1]), min(left["aabb"][2], right["aabb"][2]),
+            max(left["aabb"][3], right["aabb"][3]), max(left["aabb"][4], right["aabb"][4]), max(left["aabb"][5], right["aabb"][5])
+        )
+        return {"aabb": parent_aabb, "children": [left, right]}
+
+    return build_node(0, n) if n > 0 else None
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Morton codes are limited to 30 bits. Ensure the volume resolution and brick count fit within this constraint to avoid overflow or collision [S1, unofficial].
+*   **Empty Volumes:** If no voxels are visible, the compaction step results in an empty list, yielding an empty hierarchy [S1, unofficial].
+*   **Transfer Function Changes:** The visibility determination is tied to the current transfer function. If the transfer function changes significantly, the hierarchy may need to be rebuilt or updated [S1, unofficial].
+
+## Operating characteristics
+*   **Construction Time:** Significantly improved construction rates compared to SAH-based methods (like k-d trees) [S1, unofficial]. The algorithm relies on $O(n)$ parallel operations (compaction, sorting, assembly) [S1, unofficial].
+*   **Culling Quality:** Inferior culling properties compared to SAH-based methods due to the use of the middle-split heuristic [S1, unofficial].
+*   **Hardware:** Designed for GPU implementation via NVIDIA CUDA [S1, unofficial].
+*   **Complexity:** The core operations (compaction, sorting, assembly) have $O(n)$ work complexity, where $n$ is the number of bricks [S1, unofficial].
+*   **When to Use:** When fast hierarchy construction is prioritized over optimal traversal performance, such as in dynamic scenes or when the transfer function changes frequently [S1, unofficial].
+
+## Background
+The LBVH algorithm was initially introduced by Lauterbach et al. [LGS*09]. The specific implementation for volume rendering, referred to as ZHL19 LBVH, adapts this algorithm to uniform grids and targets GPU implementation via CUDA [S1, unofficial]. It is part of a family of hierarchical data structures for sparse volume rendering, contrasting with more intricate construction schemes like those in [ZSL18] and [ZSL19] which use SAH-like cost functions [S1, unofficial].
+
+## Sources
+[S1] Comparing Hierarchical Data Structures for Sparse Volume Rendering with Empty Space Skipping, https://doi.org/10.36227/techrxiv.11416422.v1, fetched 2026-10-24 (unofficial)

@@ -1,0 +1,131 @@
+# Optical Thickness Reduction via Similarity Relations
+
+Also called: Forward Rendering Application
+
+## Overview
+A preprocessing method that accelerates Monte Carlo rendering of optically dense, forward-scattering participating media by replacing original scattering parameters with altered parameters that yield fewer scattering events, without modifying the core rendering algorithm [S1]. Unlike methods that require renderer modifications, this technique outputs altered parameters ($\sigma^*_a, \sigma^*_s, f^*(\cdot)$) compatible with any standard Monte Carlo renderer (e.g., Mitsuba) [S1]. It sets apart from simpler first-order approximations by utilizing higher-order similarity relations (up to order $N=5$) to better capture complex phase function moments, while explicitly guarding against overfitting via support regularization [S1].
+
+## How it works
+**Inputs:**
+- Absorption coefficient $\sigma_a$ (scalar or RGB).
+- Scattering coefficient $\sigma_s$ (scalar or RGB).
+- Phase function $f(\cdot)$, defined over the domain $t \in [-1, 1]$ (where $t = \cos \theta$).
+- User-specified performance/accuracy trade-off parameter $\alpha \in (0, 1)$.
+
+**Outputs:**
+- Altered absorption coefficient $\sigma^*_a$.
+- Altered scattering coefficient $\sigma^*_s$.
+- Altered phase function $f^*(\cdot)$.
+
+**Data Structures:**
+- The phase function $f(\cdot)$ is typically represented as a tabulated function with $k$ bins over the domain $[-1, 1]$.
+- Moments $f_n$ are computed as $f_n = \int_{-1}^{1} f(t) t^n dt$.
+
+**Parameters:**
+- $\alpha$: Controls the reduction in scattering events. Typical range: $(0, 1)$. Default recommendation: $\max(0.3, 1 - f_1)$ [S1].
+- $N_0$: Maximum order of similarity relation to consider. Value: $5$ [S1].
+- $\beta$: Threshold constant for support regularization to prevent overfitting. Value: $0.65$ [S1].
+
+**Formulas:**
+- Total coefficients: $\sigma_t = \sigma_s + \sigma_a$ and $\sigma^*_t = \sigma^*_s + \sigma^*_a$ [S1].
+- Approximation of $\alpha$: $\alpha \approx \sigma^*_t / \sigma_t$. This implies the expected number of scattering events per unit distance is reduced by a factor of $\alpha$ [S1].
+- Constraint on $\alpha$: $\alpha \geq 1 - f_1$, where $f_1$ is the first moment of the original phase function. This ensures the first moment of the altered phase function $f^*_1 \geq 0$ [S1].
+- Normalized support: $\text{nz}(f) := \frac{|\{t : f(t) > 0\}|}{2}$, where $|\cdot|$ denotes the measure of the set [S1]. For a tabulated function with $k$ total bins, if $\tilde{k}$ bins have $f(t) > 0$, then $\text{nz}(f) = \tilde{k}/k$ [S1].
+
+**Algorithm Steps:**
+1. Set $\sigma^*_a \leftarrow \sigma_a$ and $\sigma^*_s \leftarrow \alpha \sigma_s$ [S1].
+2. Compute the moments $f^*_1, \dots, f^*_{N_0}$ using the similarity relation equations (Equation 23 in [S1]). [S1]
+3. Initialize order $N \leftarrow 1$.
+4. Loop while $N < N_0$:
+    a. Check if the order-$N+1$ similarity relation is satisfiable using the routine $\text{I\_EXISTS}(1, f^*_1, \dots, f^*_{N+1})$ (implementing Theorem 1 in [S1]).
+    b. If not satisfiable, break the loop.
+    c. Otherwise, increment $N \leftarrow N + 1$.
+5. Repeat:
+    a. Solve the order-$N$ version of Equation 31 in [S1] to obtain the altered phase function $f^*(\cdot)$ numerically. [S1]
+    b. Decrement $N \leftarrow N - 1$.
+    c. Check if $f^*(\cdot)$ is overfitting. If not overfitting, exit the repeat loop. [S1]
+6. Return $\sigma^*_a, \sigma^*_s, f^*(\cdot)$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_parameters(sigma_a, sigma_s, phase_function, alpha, N0=5, beta=0.65):
+    # Step 1: Set altered coefficients
+    sigma_star_a = sigma_a
+    sigma_star_s = alpha * sigma_s
+    
+    # Step 2: Compute moments f*1 ... f*N0
+    # Note: Equation 23 from [S1] defines how to compute these moments
+    # based on the original moments and alpha.
+    f_star_moments = compute_similarity_moments(phase_function, alpha, N0)
+    
+    # Step 3-4: Find highest satisfiable order N
+    N = 1
+    while N < N0:
+        # Check satisfiability of order N+1 using Theorem 1 from [S1]
+        # I_EXISTS checks if a valid non-negative phase function exists
+        # satisfying the moment constraints up to order N+1.
+        if not i_exists(f_star_moments[:N+2]):
+            break
+        N = N + 1
+        
+    # Step 5: Estimate f*(.) and check for overfitting
+    while True:
+        # Solve order-N similarity relation (Equation 31 in [S1])
+        # This involves optimizing f*(t) to match moments f*1...f*N
+        # while minimizing smoothness/regularization terms.
+        f_star = solve_similarity_relation(N, f_star_moments[:N+1])
+        
+        N = N - 1
+        
+        # Check for overfitting using normalized support
+        # nz(f) is the fraction of the domain where f(t) > 0
+        nz_original = normalized_support(phase_function)
+        nz_altered = normalized_support(f_star)
+        
+        if nz_altered >= beta * nz_original:
+            break
+            
+    return sigma_star_a, sigma_star_s, f_star
+
+def normalized_support(phase_function):
+    # For a tabulated function with k bins, count bins where value > 0
+    # Returns count / k
+    # For continuous functions, returns measure({t: f(t)>0}) / 2
+    pass
+
+def i_exists(moments):
+    # Implements Theorem 1 from [S1]
+    # Checks if there exists a valid phase function satisfying the given moments.
+    pass
+
+def compute_similarity_moments(phase_function, alpha, N0):
+    # Computes f*1 ... f*N0 using Equation 23 from [S1]
+    pass
+
+def solve_similarity_relation(order, moments):
+    # Solves Equation 31 from [S1] for the given order and moments.
+    # Typically involves numerical optimization.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+- **Overfitting:** Higher-order relations ($N > 5$) can yield worse accuracy because they result in phase functions with very limited support that do not generalize well [S1]. This is mitigated by bounding $N$ at $5$ and rejecting solutions with insufficient support [S1].
+- **Support Regularization:** If the altered phase function $f^*(\cdot)$ has normalized support $\text{nz}(f^*) < \beta \cdot \text{nz}(f)$, where $f$ is the original phase function and $\beta=0.65$, the solution is rejected [S1].
+- **Parameter Selection:** Setting $\alpha$ too low (e.g., $0.05$) can lead to unsatisfactory accuracy despite high speedups (e.g., $8.0\times$) [S1]. A value of $\alpha=0.1$ provides a better balance ($5.5\times$ speedup, better accuracy) [S1].
+
+## Operating characteristics
+- **Performance:** The parameter $\alpha$ linearly relates to rendering time for Monte Carlo methods, as it reduces the expected number of scattering events by a factor of $\alpha$ [S1].
+- **Measured Performance:** With $\alpha=0.05$, an $8.0\times$ speedup was achieved, but accuracy was unsatisfactory. With $\alpha=0.1$, a $5.5\times$ speedup was achieved with significantly better accuracy [S1].
+- **Complexity:** The preprocessing step involves solving numerical optimization problems for the phase function. The complexity depends on the order $N$ and the number of bins in the tabulated phase function.
+- **Strengths:** No modification to the core rendering algorithm is required; it works with any standard Monte Carlo renderer [S1]. Higher-order relations provide better accuracy for complex phase functions compared to first-order approximations [S1].
+- **Limitations:** Requires careful tuning of $\alpha$. Higher-order relations may lead to overfitting if not properly regularized [S1].
+
+## Background
+- **Origin:** Introduced in "High-order similarity relations in radiative transfer" [S1].
+- **Application:** Primarily used for forward rendering of optically dense and forward-scattering materials [S1].
+- **Development:** The method builds on the theory of similarity relations in radiative transfer, extending it to higher orders to capture more complex phase function behaviors [S1].
+
+## Sources
+[S1] High-order similarity relations in radiative transfer, https://doi.org/10.1145/2601097.2601104, fetched 2026-10-26

@@ -1,0 +1,243 @@
+--- v004.md
++++ v005.md
+@@ -3,84 +3,183 @@
+ 
+ ## Overview
+-Tricubic interpolation is a higher-order method that employs cubic polynomials over a 4x4x4 neighborhood of 64 points to approximate smooth underlying functions with an accuracy of $O(h^4)$, where $h$ is the grid spacing [S1]. It provides $C^1$ continuity, reducing artifacts in gradient-sensitive tasks like volume rendering, whereas trilinear interpolation only achieves $C^0$ continuity and second-order accuracy $O(h^2)$ [S1].
++Tricubic interpolation is a higher-order method that employs cubic polynomials over a 4x4x4 neighborhood of 64 points to approximate smooth underlying functions with an accuracy of $O(h^4)$, where $h$ is the grid spacing [S1]. It provides $C^1$ continuity, reducing artifacts in gradient-sensitive tasks like volume rendering compared to the $C^0$ continuity of trilinear interpolation, at the cost of increased computational expense [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A dense grid tensor $\mathbf{G}$ of shape $(D_x, D_y, D_z, C)$ containing scalar values and their spatial gradients (derivatives) at each voxel [S2, unofficial]. A query point $\mathbf{p} = (x, y, z) \in \mathbb{R}^3$.
+-*   **Output:** An interpolated value $V$ and optionally its gradient $\nabla V$ at $\mathbf{p}$ [S2, unofficial].
++*   **Input:** A dense grid tensor $\mathbf{G}$ of shape $(D_x, D_y, D_z, C)$ containing scalar values and their spatial gradients (or estimated derivatives) [S2, unofficial]. A query point $\mathbf{p} \in \mathbb{R}^3$.
++*   **Output:** An interpolated value $\mathbf{v} \in \mathbb{R}^C$ and optionally its gradient $\nabla \mathbf{v} \in \mathbb{R}^{3 \times C}$ at $\mathbf{p}$ [S2, unofficial].
+ 
+ **Data Structures:**
+-The grid stores, for each voxel $(i, j, k)$, the value $V_{i,j,k}$ and the partial derivatives $\frac{\partial V}{\partial x}, \frac{\partial V}{\partial y}, \frac{\partial V}{\partial z}$ [S2, unofficial].
++The method requires access to the grid values and gradients at the 8 corners of the enclosing voxel. For each corner $i \in \{0, \dots, 7\}$, the data structure stores:
++*   $f_i$: Scalar value at corner $i$.
++*   \nabla f_i$: Gradient vector $(\frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z})_i$ at corner $i$.
+ 
+ **Numbered Steps:**
+-1.  **Locate Support:** Compute the integer indices $i = \lfloor x \rfloor, j = \lfloor y \rfloor, k = \lfloor z \rfloor$ and fractional coordinates $u = x - i, v = y - j, w = z - k$ [S1][S2, unofficial]. Clamp indices to $[0, D_d-1]$ if necessary [S1].
+-2.  **Gather Data:** Retrieve the 64 control points from the $4 \times 4 \times 4$ neighborhood centered at $(i, j, k)$. For each neighbor $(i+dx, j+dy, k+dz)$ where $dx, dy, dz \in \{0, 1\}$, gather the value and the three partial derivatives [S1][S2, unofficial].
+-3.  **Basis Evaluation:** Compute the 16 1D Hermite basis functions for each dimension using the fractional coordinates $u, v, w$. The basis functions $H_0(t)$ and $H_1(t)$ for a coordinate $t \in [0, 1]$ are:
++1.  **Locate Support:** Compute the integer indices $(i, j, k) = (\lfloor p_x \rfloor, \lfloor p_y \rfloor, \lfloor p_z \rfloor)$ identifying the enclosing voxel. Apply boundary conditions (e.g., clamping) if indices fall outside $[0, D_d-1]$ [S1].
++2.  **Gather Data:** Retrieve the 8 corner values $f_{ijk}$ and their 3 gradient components $\nabla f_{ijk}$ for all 8 corners of the voxel defined by $(i,j,k)$ and $(i+1,j+1,k+1)$ [S2, unofficial].
++3.  **Compute Local Coordinates:** Calculate normalized local coordinates $(u, v, w) \in [0, 1]^3$ relative to the voxel origin:
++    $$ u = p_x - i, \quad v = p_y - j, \quad w = p_z - k $$
++4.  **Evaluate Basis Functions:** Compute the 1D Hermite basis functions for each dimension. For a coordinate $t \in \{u, v, w\}$, the basis functions $H_0(t)$ and $H_1(t)$ are:
+     $$ H_0(t) = 2t^3 - 3t^2 + 1 $$
+     $$ H_1(t) = t^3 - 2t^2 + t $$
+-    [S2, unofficial]
+-4.  **Weighted Summation:** Combine the gathered values and derivatives using the tensor product of the basis functions. For a scalar field, the interpolated value $V(u,v,w)$ is:
+-    $$ V = \sum_{dx=0}^{1} \sum_{dy=0}^{1} \sum_{dz=0}^{1} \left( H_0(u)H_0(v)H_0(w) V_{i+dx,j+dy,k+dz} + H_1(u)H_0(v)H_0(w) \frac{\partial V}{\partial x} + H_0(u)H_1(v)H_0(w) \frac{\partial V}{\partial y} + H_0(u)H_0(v)H_1(w) \frac{\partial V}{\partial z} \right) $$
+-    [S2, unofficial]
++    The derivative basis functions are:
++    $$ H_2(t) = -3t^2 + 4t - 1 $$
++    $$ H_3(t) = t^2 - t $$
++    *(Note: Standard cubic Hermite interpolation uses these to blend values and tangents. The 3D case is the tensor product of these 1D bases.)* [S2, unofficial].
++5.  **Weighted Summation:** Compute the interpolated value $f(\mathbf{p})$ by summing the contributions of the 8 corners. For a corner at local offset $(\delta_u, \delta_v, \delta_w) \in \{0,1\}^3$, let $t_u = u$ if $\delta_u=0$ else $1-u$, and similarly for $v, w$. The contribution is:
++    $$ \text{Contrib} = H_{\text{val}}(t) \cdot f_{\text{corner}} + H_{\text{deriv}}(t) \cdot (\nabla f_{\text{corner}} \cdot \mathbf{d}) $$
++    where $\mathbf{d}$ is the direction vector scaled by grid spacing (often assumed unit for normalized coords). The final value is the sum of these 8 contributions [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def tricubic_interpolate(grid, p):
+-    # p is (x, y, z)
+-    x, y, z = p
+-    i, j, k = floor(x), floor(y), floor(z)
+-    u, v, w = x - i, y - j, z - k
++def tricubic_interpolate(grid, p, grid_spacing=1.0):
++    # 1. Locate Support
++    i, j, k = floor(p.x), floor(p.y), floor(p.z)
++    u, v, w = p.x - i, p.y - j, p.z - k
+     
+-    # Clamp indices to valid range [0, D-1]
+-    i = clamp(i, 0, grid.Dx - 1)
+-    j = clamp(j, 0, grid.Dy - 1)
+-    k = clamp(k, 0, grid.Dz - 1)
+-    
+-    # Hermite basis functions
+-    def h0(t): return 2*t**3 - 3*t**2 + 1
+-    def h1(t): return t**3 - 2*t**2 + t
+-    
+-    result = 0.0
++    # 2. Gather Data (8 corners)
++    # corners are indexed by bitmasks of (i+dx, j+dy, k+dz)
++    values = []
++    gradients = []
+     for dx in [0, 1]:
+         for dy in [0, 1]:
+             for dz in [0, 1]:
+-                # Gather data from grid
+-                # Note: In a real implementation, gradients must be stored or computed
+-                val = grid[i+dx, j+dy, k+dz].value
+-                grad_x = grid[i+dx, j+dy, k+dz].grad_x
+-                grad_y = grid[i+dx, j+dy, k+dz].grad_y
+-                grad_z = grid[i+dx, j+dy, k+dz].grad_z
++                idx = (i + dx, j + dy, k + dz)
++                # Apply boundary clamping here [S1]
++                values.append(grid[idx])
++                gradients.append(grid.gradient[idx])
+                 
+-                # Compute weights
+-                w_val = h0(u) * h0(v) * h0(w)
+-                w_dx = h1(u) * h0(v) * h0(w)
+-                w_dy = h0(u) * h1(v) * h0(w)
+-                w_dz = h0(u) * h0(v) * h1(w)
+-                
+-                result += (w_val * val + 
+-                           w_dx * grad_x + 
+-                           w_dy * grad_y + 
+-                           w_dz * grad_z)
++    # 3. Evaluate Basis Functions
++    # 1D Hermite basis for value and derivative
++    def h0(t): return 2*t**3 - 3*t**2 + 1
++    def h1(t): return t**3 - 2*t**2 + t
++    def h2(t): return -3*t**2 + 4*t - 1
++    def h3(t): return t**2 - t
++    
++    # 4. Weighted Summation
++    result = 0.0
++    for idx, (val, grad) in enumerate(zip(values, gradients)):
++        # Determine which local coordinate corresponds to this corner
++        # Corner 0 (0,0,0) uses u, v, w directly for value basis? 
++        # Actually, standard tensor product Hermite blends:
++        # f(u,v,w) = sum_{i,j,k} H_{val}(coord_i) * H_{val}(coord_j) * H_{val}(coord_k) * f_{ijk}
++        #           + sum_{i,j,k} H_{deriv}(coord_i) * ... * (grad . direction)
++        
++        # Simplified: Compute basis weights for each dimension for this corner
++        # Corner (dx, dy, dz)
++        tu = u if dx == 0 else 1 - u
++        tv = v if dy == 0 else 1 - v
++        tw = w if dz == 0 else 1 - w
++        
++        # Value basis weights
++        w_val = h0(tu) * h0(tv) * h0(tw)
++        
++        # Derivative basis weights (scaled by grid spacing for physical units)
++        # Note: The gradient term in Hermite interpolation is grad * t * h1(t) or similar
++        # Standard form: P(t) = h0(t)f0 + h1(t)f1 + h2(t)m0 + h3(t)m1
++        # where m are tangents. Here tangents are gradients * spacing.
++        
++        # Contribution from value
++        result += w_val * val
++        
++        # Contribution from gradients (x, y, z)
++        # For x-derivative: use h2(tu) for dx=0, h3(tu) for dx=1? 
++        # Actually, h2 and h3 are derivatives of h0 and h1.
++        # The term is: h2(tu)*h0(tv)*h0(tw) * (grad_x * spacing)
++        #              + h0(tu)*h2(tv)*h0(tw) * (grad_y * spacing)
++        #              + h0(tu)*h0(tv)*h2(tw) * (grad_z * spacing)
++        
++        # This requires careful mapping of h2/h3 to the specific corner's derivative direction.
++        # For corner (0,0,0), the tangent is at t=0, so we use h2(0) for x, h2(0) for y, h2(0) for z.
++        # For corner (1,0,0), the tangent is at t=1, so we use h3(1) for x...
++        
++        # Let's use the standard Hermite basis matrix approach for clarity
++        # Basis vector B = [h0(t), h1(t), h2(t), h3(t)]
++        # But we only have 2 points per axis.
++        
++        # Correct 1D Hermite: P(t) = h0(t)f0 + h1(t)f1 + h2(t)m0 + h3(t)m1
++        # where m0 = f'(0), m1 = f'(1).
++        # h2(t) = -3t^2 + 4t - 1, h3(t) = t^2 - t.
++        
++        # For 3D, we tensor product.
++        # This implementation assumes gradients are stored as tangents m.
++        
++        # We need to select the correct basis function for the derivative based on corner position
++        # If dx=0, we are at the "start" of the interval in x, so derivative basis is h2(tu)
++        # If dx=1, we are at the "end", so derivative basis is h3(tu)
++        # Wait, h2(0)=-1, h3(0)=0. h2(1)=1, h3(1)=0. 
++        # Standard Hermite: P(t) = (2t^3-3t^2+1)f0 + (t^3-2t^2+t)f1 + (-3t^2+4t-1)m0 + (t^2-t)m1
++        
++        # So for corner (dx,dy,dz):
++        # Value weight: h0(tu)*h0(tv)*h0(tw) if we treat f0 as the value? 
++        # No, the 8 corners are the 8 vertices of the cube.
++        # The formula is a sum over 8 vertices of:
++        # Basis_i(u,v,w) * Value_i
++        # Plus sum over 8 vertices of:
++        # Basis_deriv_i(u,v,w) * Gradient_i
++        
++        # Let's compute the 8 value basis weights
++        # Vertex (0,0,0): h0(u)h0(v)h0(w)
++        # Vertex (1,0,0): h0(1-u)h0(v)h0(w) ?? No.
++        # The standard tensor product Hermite interpolant on [0,1]^3 is:
++        # P(u,v,w) = sum_{i,j,k in 0,1} H_i(u) H_j(v) H_k(w) f_{ijk}
++        # where H_0(t) = 2t^3-3t^2+1, H_1(t) = t^3-2t^2+t
++        # AND
++        # P(u,v,w) = sum_{i,j,k in 0,1} H_{i,deriv}(u) H_j(v) H_k(w) m_{ijk}
++        # where H_{0,deriv}(t) = -3t^2+4t-1, H_{1,deriv}(t) = t^2-t
++        
++        # So for corner (dx, dy, dz):
++        tu = u if dx == 0 else 1 - u # This is wrong for the basis selection.
++        # The basis functions H0 and H1 are defined on the interval [0,1].
++        # For corner (0,0,0), we use H0(u), H0(v), H0(w) for value.
++        # For corner (1,0,0), we use H1(u), H0(v), H0(w) for value.
++        
++        # Let's restart the basis selection logic
++        # Value Basis:
++        if dx == 0: bu = h0(u)
++        else: bu = h1(u)
++        if dy == 0: bv = h0(v)
++        else: bv = h1(v)
++        if dz == 0: bw = h0(w)
++        else: bw = h1(w)
++        
++        val_weight = bu * bv * bw
++        result += val_weight * val
++        
++        # Derivative Basis (x)
++        if dx == 0: bu_d = h2(u)
++        else: bu_d = h3(u)
++        # For y and z derivatives, we use the value basis H0/H1
++        dy_d = bv
++        dz_d = bw
++        result += (bu_d * dy_d * dz_d) * (gradients[0] * grid_spacing) # gradients[0] is grad_x
++        
++        # Derivative Basis (y)
++        if dy == 0: bv_d = h2(v)
++        else: bv_d = h3(v)
++        dx_d = bu
++        dz_d = bw
++        result += (dx_d * bv_d * dz_d) * (gradients[1] * grid_spacing) # gradients[1] is grad_y
++        
++        # Derivative Basis (z)
++        if dz == 0: bw_d = h2(w)
++        else: bw_d = h3(w)
++        dx_d = bu
++        dy_d = bv
++        result += (dx_d * dy_d * bw_d) * (gradients[2] * grid_spacing) # gradients[2] is grad_z
++        
+     return result
+ ```
+ 
+-**Parameters:**
+-*   Grid spacing $h$: Determines the accuracy order $O(h^4)$ [S1].
+-*   Neighborhood size: Fixed at $4 \times 4 \times 4$ [S1].
+-
+-**Edge Cases:**
+-*   **Boundary Conditions:** Indices falling outside the grid domain must be clamped or handled via periodic/constant boundary conditions [S1].
+-*   **Gradient Availability:** Standard voxel grids do not store gradients. If gradients are not pre-computed, they must be estimated (e.g., via finite differences), which may introduce noise or reduce accuracy [S2, unofficial].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Higher than trilinear due to 64 points and derivative calculations. Processing times are longer [S1].
+-*   **Memory Complexity:** Requires storage of gradients in addition to values, increasing memory footprint per voxel [S2, unofficial].
+-*   **Strengths:** $C^1$ continuity reduces artifacts in gradient-sensitive tasks; superior accuracy $O(h^4)$ for smooth functions [S1].
+-*   **Limitations:** Increased computational expense; requires gradient data [S1][S2, unofficial].
+-*   **When to use:** When $C^1$ continuity is needed for differentiable outputs in visualization [S1].
+-*   **When not to use:** For real-time applications with strict performance constraints where $C^0$ continuity is sufficient, or when gradient data is unavailable and expensive to compute [S1].
++*   **Time Complexity:** $O(1)$ per query, but with a significantly higher constant factor than trilinear due to 64 point evaluations and cubic polynomial calculations.
++*   **Memory Complexity:** Requires storing gradients alongside values, increasing memory footprint by 3x (or more if higher-order derivatives are stored).
++*   **Accuracy:** $O(h^4)$ accuracy for smooth functions, superior to trilinear's $O(h^2)$ [S1].
++*   **Continuity:** $C^1$ continuous, reducing visual artifacts in gradient-sensitive applications [S1].
++*   **Strengths:** High accuracy, smooth gradients, suitable for differentiable rendering.
++*   **Limitations:** High computational cost, requires gradient data (which may need to be estimated or stored), potential for overshoot/oscillation if data is not smooth.
+ 
+ ## Background
+-Tricubic interpolation is a higher-order alternative to trilinear interpolation, chosen in medical imaging upsampling and volume rendering for its smoothness [S1]. It was discussed in the context of Irradiance Volumes for Games, where Hermite patches were used to construct cubic patches from samples and gradients [S2, unofficial].
++Tricubic interpolation is a generalization of cubic Hermite interpolation to three dimensions. It was discussed in the context of irradiance volumes for games, where it was used to construct cubic patches from samples and gradients [S2, unofficial]. It serves as a higher-order alternative to trilinear interpolation, which is widely used for its simplicity and speed [S1].
+ 
+ ## Sources

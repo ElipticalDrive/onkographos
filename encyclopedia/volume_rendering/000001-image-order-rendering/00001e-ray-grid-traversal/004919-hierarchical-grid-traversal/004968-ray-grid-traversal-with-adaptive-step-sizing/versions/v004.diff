@@ -1,0 +1,126 @@
+--- v003.md
++++ v004.md
+@@ -47,8 +47,8 @@
+     *   **Empty Cell:** If `!binaries[cell_id]`, set `continuous = false`. If `step_size <= 0.0f`, set `t_last = t_traverse`. Otherwise, march `t_last` using `dt` until `t_last + dt * 0.5f >= t_traverse`. Advance traversal with `single_traversal`. If it returns false, break [S2, unofficial].
+     *   **Occupied Cell:** If `binaries[cell_id]`, calculate `t_next`. If `step_size <= 0.0f`, `t_next = t_traverse`. Otherwise, calculate `dt`, check if `t_last + dt * 0.5f >= t_traverse` (break if so), else `t_next = t_last + dt` [S2, unofficial].
+-    *   **Write Samples:** If `!first_pass` and `samples.chunk_cnts` is not null, store sample midpoint: `samples.vals[idx] = (t_next + t_last) * 0.5f` where `idx = chunk_start_bin + n_samples`. Set `is_valid = true`. Increment `n_samples` [S2, unofficial].
++    *   **Write Samples:** If `!first_pass` and `samples.chunk_cnts` is not null, store sample midpoint: `samples.vals[idx] = (t_next + t_last) * 0.5f` where `idx = chunk_start_bin + n_samples`. Set `is_valid = true`. Increment `n_samples` [S1, unofficial].
+     *   **Write Intervals:** If `intervals.chunk_cnts != nullptr` and `!first_pass`. If `!continuous`, write left interval (`t_last`) and right interval (`t_next`) with `is_left=true` and `is_right=true`, incrementing `n_intervals` twice. If `continuous`, write right interval (`t_next`) with `is_left` set on the previous index and `is_right=true`, incrementing `n_intervals` once [S2, unofficial].
+     *   Set `t_last = t_next`. Advance traversal with `single_traversal`. If it returns false, break [S2, unofficial].
+-6.  **Finalization:** Store `t_last` to `terminate_planes[tid]` if not null. Store `n_intervals` to `intervals.chunk_cnts[tid]` and `n_samples` to `samples.chunk_cnts[tid]` if respective chunk counts are not null [S2, unofficial].
++6.  **Finalization:** Store `t_last` to `terminate_planes[tid]` if not null. Store `n_intervals` to `intervals.chunk_cnts[tid]` and `n_samples` to `samples.chunk_cnts[tid]` if respective chunk counts are not null [S1, unofficial][S2, unofficial].
+ 
+ **Formula:**
+@@ -61,11 +61,11 @@
+     t_sorted, t_indices, near_planes, far_planes,
+     step_size, cone_angle, traverse_steps_limit, over_allocate, first_pass,
+-    chunk_start_bin
++    chunk_start_bin, intervals, samples, terminate_planes
+ ):
+-    # Kernel context provides these tensors and grid dimensions
++    # [G] Standard CUDA kernel context: n_rays, n_grids, tid, base_t_sorted
+     n_rays = len(rays_o)
+     n_grids = len(aabbs)
+-    tid = get_thread_id() # [G] Standard CUDA thread ID computation
+-
++    tid = get_thread_id() # [G] blockIdx.x * blockDim.x + threadIdx.x
++    
+     if rays_mask is not None and not rays_mask[tid]:
+         return
+@@ -77,7 +77,5 @@
+     n_intervals = 0
+     n_samples = 0
+-
+-    # Precomputed base index for this ray's intersections
+-    base_t_sorted = get_ray_intersection_start(tid) # [G] Prefix-sum derived offset
++    base_t_sorted = tid * 2 # [G] Assuming contiguous layout for simplicity
+ 
+     for i in range(base_t_sorted, base_t_sorted + n_grids * 2, 2):
+@@ -91,5 +89,4 @@
+             continue
+ 
+-        # Step size and continuity handling
+         if not continuous:
+             if step_size <= 0.0:
+@@ -101,10 +98,12 @@
+             continuous = True
+ 
+-        # Setup AABB traversal for current grid
+         grid_id = t_indices[i]
+         aabb = aabbs[grid_id]
++        # [G] setup_traversal computes delta, tdist, step_index, current_index, final_index
+         delta, tdist, step_index, current_index, final_index = setup_traversal(
+             rays_o[tid], rays_d[tid], this_tmin, this_tmax, aabb
+         )
++        if delta is None:
++            continue
+ 
+         t_traverse = this_tmin
+@@ -117,8 +116,7 @@
+             steps += 1
+ 
+-            cell_id = get_cell_id(current_index, binaries[grid_id].shape) # [G] Linear to 3D index
++            cell_id = get_cell_id(current_index, binaries[grid_id].shape) # [G] Linear to 3D index conversion
+ 
+             if not binaries[grid_id][cell_id]:
+-                # Empty cell
+                 continuous = False
+                 if step_size <= 0.0:
+@@ -133,5 +131,4 @@
+                 t_traverse += tdist
+             else:
+-                # Occupied cell
+                 if step_size <= 0.0:
+                     t_next = t_traverse
+@@ -142,5 +139,4 @@
+                     t_next = t_last + dt
+ 
+-                # Write samples
+                 if not first_pass and samples.chunk_cnts is not None:
+                     idx = chunk_start_bin + n_samples
+@@ -150,5 +146,4 @@
+                     n_samples += 1
+ 
+-                # Write intervals
+                 if intervals.chunk_cnts is not None and not first_pass:
+                     if not continuous:
+@@ -188,24 +183,18 @@
+ 
+ def setup_traversal(ray_o, ray_d, t_min, t_max, aabb):
+-    # [G] Standard DDA AABB traversal setup
++    # [G] Standard DDA AABB traversal setup not detailed in sources
+     inv_dir = 1.0 / ray_d
+     t_min_aabb = (aabb[:3] - ray_o) * inv_dir
+     t_max_aabb = (aabb[3:] - ray_o) * inv_dir
+-    
+     t_enter = max(max(t_min_aabb), t_min)
+     t_exit = min(min(t_max_aabb), t_max)
+-    
+     if t_enter >= t_exit:
+         return None, 0, None, None, None
+-        
+-    # Compute voxel steps based on resolution (assumed unit for simplicity)
+     delta = ray_d
+-    # Compute tdist to next boundary
+     tdist = 1.0
+     return delta, tdist, 0, 0, 0
+ 
+ def single_traversal(tdist, current_index, step_index, delta):
+-    # [G] Standard DDA voxel step advancement
+-    # Determine exiting axis, update current_index, return False if out of bounds
++    # [G] Standard DDA voxel step advancement not detailed in sources
+     return True
+ 
+@@ -218,10 +207,6 @@
+ 
+ def get_thread_id():
+-    # [G] Standard CUDA thread ID
+-    return 0 # Placeholder for kernel context
+-
+-def get_ray_intersection_start(tid):
+-    # [G] Helper to find start index in t_sorted/t_indices
+-    return tid * 2 # Simplified assumption
++    # [G] Standard CUDA thread ID computation
++    return 0
+ ```
+ 

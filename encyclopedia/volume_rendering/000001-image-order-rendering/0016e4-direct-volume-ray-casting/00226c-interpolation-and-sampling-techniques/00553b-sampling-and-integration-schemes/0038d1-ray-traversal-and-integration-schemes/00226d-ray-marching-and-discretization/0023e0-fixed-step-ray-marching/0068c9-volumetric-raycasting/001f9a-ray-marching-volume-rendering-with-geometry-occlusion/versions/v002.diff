@@ -1,0 +1,235 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-A front-to-back ray marching technique that renders a 3D volume texture by stepping along rays from the camera, compositing color and opacity, and using pre-rendered opaque geometry to occlude the volume and adjust sampling rates [S1, unofficial]. It solves the problem of self-occlusion in volume rendering without requiring full volumetric integration or multiple rendering passes, making it suitable for real-time applications where geometry occlusion is already handled by the parent method [S1, unofficial]. Unlike standard front-to-back ray casting which integrates opacity along the ray, this method decouples the occlusion estimation from the ray step, using spatial averaging of a pre-rendered occlusion texture to modulate the current slice's contribution [S1, unofficial].
++A front-to-back ray marching technique that renders a 3D volume texture by stepping along rays from the camera, compositing color and opacity, and using pre-rendered opaque geometry to occlude the volume and adjust sampling rates [S1, unofficial]. It solves the problem of self-occlusion in volume rendering without requiring full volumetric integration or multiple rendering passes [S1, unofficial]. It is suitable for real-time applications where geometry occlusion is handled by the parent method [S1, unofficial].
+ 
+ ## How it works
+@@ -12,8 +12,10 @@
+     *   `dt_scale`: Scalar multiplier for base step size [S1, unofficial].
+     *   `transformed_eye`: Camera position in world space [S1, unofficial].
+-    *   `pos`: World-space position of the current fragment (derived from screen coordinates and projection matrices) [S1, unofficial].
++    *   `pos`: World-space position of the current fragment [S1, unofficial].
+     *   `volume_texture`: 3D texture containing density/scalar values [S1, unofficial].
+-    *   `colormap`: 2D texture (`gl.SRGB8_ALPHA8`, size 180x1) mapping scalar values to RGBA colors [S1, unofficial].
++    *   `colormap`: 2D texture (`gl.SRGB8_ALPHA8`, size 180x1, `LINEAR` filtered) mapping scalar values to RGBA colors [S1, unofficial].
+     *   `depth_buffer`: Pre-rendered depth buffer of opaque geometry (`gl.DEPTH_COMPONENT32F`) [S1, unofficial].
++    *   `inv_proj_view_matrix`: Inverse projection and view matrices for depth reconstruction [G].
++    *   `frag_coord`: Screen-space fragment coordinates [G].
+ *   **Outputs:**
+     *   Final composited RGBA color for the pixel [S1, unofficial].
+@@ -21,6 +23,6 @@
+ **Data Structures:**
+ *   **Render Targets:** Two textures created via `gl.texStorage2D` [S1, unofficial].
+-    *   Target 0: `gl.RGBA8` format, size `WIDTH x HEIGHT`.
+-    *   Target 1: `gl.DEPTH_COMPONENT32F` format, size `WIDTH x HEIGHT`.
++    *   Target 0: `gl.RGBA8` format, size `WIDTH x HEIGHT` [S1, unofficial].
++    *   Target 1: `gl.DEPTH_COMPONENT32F` format, size `WIDTH x HEIGHT` [S1, unofficial].
+ *   **Framebuffers:**
+     *   `depthColorFbo`: Attaches Target 0 to `COLOR_ATTACHMENT0` and Target 1 to `DEPTH_ATTACHMENT` [S1, unofficial].
+@@ -36,8 +38,6 @@
+ 2.  **Ray-Box Intersection:**
+     Intersect the ray with the unit box $[0,1]^3$ using the slab method to determine entry ($t_{hit.x}$) and exit ($t_{hit.y}$) distances [S1, unofficial].
+-    $$ t_{min} = \frac{\text{box}_{min} - \text{orig}}{\text{dir}} $$
+-    $$ t_{max} = \frac{\text{box}_{max} - \text{orig}}{\text{dir}} $$
+-    $$ t_0 = \max(t_{min}.x, t_{min}.y, t_{min}.z) $$
+-    $$ t_1 = \min(t_{max}.x, t_{max}.y, t_{max}.z) $$
++    $$ t_{min} = \frac{\text{box}_{min} - \text{orig}}{\text{dir}}, \quad t_{max} = \frac{\text{box}_{max} - \text{orig}}{\text{dir}} $$
++    $$ t_{hit.x} = \max(t_{min}.x, t_{min}.y, t_{min}.z), \quad t_{hit.y} = \min(t_{max}.x, t_{max}.y, t_{max}.z) $$
+     If $t_{hit.x} > t_{hit.y}$, discard the pixel [S1, unofficial].
+ 
+@@ -45,15 +45,15 @@
+     Compute the base step size $dt$ based on volume dimensions and ray direction magnitude [S1, unofficial]:
+     $$ dt = dt\_scale \times \min\left(\frac{1.0}{\text{volume\_dims} \times |\text{ray\_dir}|}\right) $$
+-    *Note: The source code snippet implies `volume_dims` is used as a divisor, likely representing the inverse resolution or a scaling factor relative to the unit box.* [S1, unofficial].
++    *Note: In GLSL, `volume_dims` (ivec3) is implicitly converted to vec3 during multiplication with `abs(ray_dir)`.* [S1, unofficial].
+ 
+ 4.  **Add Jitter Offset:**
+-    Add a jitter offset to the entry point $t_{hit.x}$ to reduce banding artifacts. The offset is calculated using a hash function (e.g., `wang_hash`) based on pixel coordinates or a random seed [S1, unofficial].
++    Add a jitter offset to the entry point $t_{hit.x}$ to reduce banding artifacts [S1, unofficial].
+     $$ t_{hit.x} \leftarrow t_{hit.x} + \text{offset} $$
+ 
+ 5.  **Check for Geometry Occlusion:**
+     Sample the pre-rendered depth buffer $z$ at the current pixel [S1, unofficial].
+-    *   If $z \ge 1.0$, no opaque geometry is present. The ray marches through the entire box from $t_{hit.x}$ to $t_{hit.y}$.
++    *   If $z \ge 1.0$, no opaque geometry is present. The ray marches through the entire box from $t_{hit.x}$ to $t_{hit.y}$ [S1, unofficial].
+     *   If $z < 1.0$, geometry is present. Reconstruct the geometry's world-space position from the depth value $z$ and the inverse projection/view matrices. Calculate the distance $t_{geom}$ along the ray to the geometry surface [S1, unofficial].
+-    *   Adjust the exit point: $t_{hit.y} = \min(t_{hit.y}, t_{geom})$.
++    *   Adjust the exit point: $t_{hit.y} = \min(t_{hit.y}, t_{geom})$ [S1, unofficial].
+     *   Adjust the step size $dt$ if necessary to ensure the final sample aligns with the geometry surface [S1, unofficial].
+ 
+@@ -78,9 +78,18 @@
+ def ray_march_with_geometry_occlusion(pos, transformed_eye, volume_dims, dt_scale, 
+                                       volume_texture, colormap, depth_buffer, 
+-                                      inv_proj_view_matrix):
+-    # 1. Calculate Ray Direction
++                                      inv_proj_view_matrix, frag_coord):
++    def wang_hash(coord):
++        # Standard integer hash returning [0, 1)
++        h = coord.x * 374761393 + coord.y * 668265263
++        h = (h ^ (h >> 13)) * 1274126177
++        return (h & 0x7fffffff) / 2147483647.0
++
++    def argmax(vec):
++        return max(range(len(vec)), key=lambda i: abs(vec[i]))
++
++    # 1. Ray Direction
+     ray_dir = normalize(pos - transformed_eye)
+     
+-    # 2. Ray-Box Intersection with unit box [0,1]^3
++    # 2. Ray-Box Intersection [0,1]^3
+     box_min = vec3(0.0)
+     box_max = vec3(1.0)
+@@ -91,90 +100,68 @@
+     
+     if t_hit_x > t_hit_y:
+-        return vec4(0.0, 0.0, 0.0, 0.0)
++        return vec4(0.0)
+     
+-    # 3. Calculate Base Step Size
+-    # Note: volume_dims is ivec3, abs(ray_dir) is vec3. 
+-    # The source uses min(1.0 / (volume_dims * abs(ray_dir))). 
+-    # Assuming volume_dims represents inverse resolution or similar scaling.
+-    step_denom = volume_dims * abs(ray_dir)
++    # 3. Base Step Size
++    step_denom = vec3(volume_dims.x * abs(ray_dir.x), 
++                      volume_dims.y * abs(ray_dir.y), 
++                      volume_dims.z * abs(ray_dir.z))
+     dt = dt_scale * min(1.0 / step_denom)
+     
+-    # 4. Add Jitter Offset
+-    offset = wang_hash(gl_FragCoord.xy) # Placeholder for hash function
++    # 4. Jitter Offset
++    offset = wang_hash(frag_coord) * dt
+     t_hit_x += offset
+     
+-    # 5. Check for Geometry Occlusion
+-    z = depth_buffer.sample(gl_FragCoord.xy).r
++    # 5. Geometry Occlusion Check
++    z = depth_buffer.sample(frag_coord).r
+     geometry_present = z < 1.0
+-    geom_t = t_hit_y # Default to box exit
++    geom_t = t_hit_y
+     
+     if geometry_present:
+-        # Reconstruct geometry position from depth z
+-        # This requires inverse projection and view matrices
+-        # Simplified reconstruction assuming standard OpenGL/NDC depth
+-        ndc_depth = z * 2.0 - 1.0 # Convert to NDC if necessary
+-        # Reconstruct world position from depth and screen coords
+-        # This step depends on specific engine implementation details not fully provided
+-        # [G] Assuming a standard reconstruction helper exists
+-        geom_world_pos = reconstruct_world_pos(gl_FragCoord.xy, z, inv_proj_view_matrix)
++        # Reconstruct world position from depth z
++        ndc_depth = z * 2.0 - 1.0
++        clip_pos = vec4(frag_coord * 2.0 - 1.0, ndc_depth, 1.0)
++        world_pos = inv_proj_view_matrix * clip_pos
++        world_pos = world_pos / world_pos.w
++        # Distance to geometry along ray
++        axis = argmax(ray_dir)
++        geom_t = (world_pos[axis] - pos[axis]) / ray_dir[axis]
+         
+-        # Calculate distance to geometry along ray
+-        # t = (geom_world_pos - pos) / ray_dir
+-        # We need the t value where ray intersects geom_world_pos
+-        # Since geom_world_pos is on the ray, we can solve for t
+-        # [G] Using dot product if ray_dir is normalized and pos is origin relative
+-        # More robust: solve for t in pos + t*ray_dir = geom_world_pos
+-        # Since it's a line intersection, we can use any non-zero component of ray_dir
+-        t_geom = (geom_world_pos.x - pos.x) / ray_dir.x # Assuming ray_dir.x != 0
+-        # [G] In practice, use the component with largest magnitude to avoid division by zero
+-        geom_t = t_geom
+-        
+-        # Adjust exit point
+         t_hit_y = min(t_hit_y, geom_t)
+-        
+-        # Adjust step size to ensure final sample lands on geometry
+-        # [G] Ensure dt divides the remaining distance evenly or handle last step separately
++        # Adjust dt to align final sample with geometry surface
+         num_steps = int((t_hit_y - t_hit_x) / dt)
+-        dt = (t_hit_y - t_hit_x) / num_steps
+-
++        if num_steps > 0:
++            dt = (t_hit_y - t_hit_x) / num_steps
++            
+     # 6. Ray Marching Loop
+-    C_out = vec4(0.0)
+-    A_out = 0.0
++    C_in = vec4(0.0)
++    A_in = 0.0
++    t = t_hit_x
+     
+-    t = t_hit_x
+     while t < t_hit_y:
+-        # Sample Volume
+         sample_pos = pos + t * ray_dir
+         s = volume_texture.sample(sample_pos).r
+-        
+-        # Lookup Color
+-        C_sample = colormap.sample(vec2(s, 0.5)).rgba # Assuming 1D colormap mapped to 2D
++        C_sample = colormap.sample(vec2(s, 0.5)).rgba
+         
+         # Opacity Correction
+-        # dt_correction scales sample opacity based on step size
+-        # [G] Reference step size is not explicitly defined, assuming dt is the correction factor
+         a_corrected = 1.0 - pow(1.0 - C_sample.a, dt)
+         
+         # Front-to-Back Compositing
+-        C_out = C_out + (1.0 - C_out.a) * a_corrected * C_sample.rgb
+-        A_out = A_out + (1.0 - A_out.a) * a_corrected
++        C_in = C_in + (1.0 - C_in.a) * a_corrected * C_sample.rgb
++        A_in = A_in + (1.0 - A_in) * a_corrected
+         
+-        if A_out >= 0.99:
++        if A_in >= 0.99:
+             break
+             
+         t += dt
+         
+-    # 7. Final Composition with Geometry
++    # 7. Final Composition
+     if geometry_present:
+-        # Take final sample at t_hit_y
+-        final_sample_pos = pos + t_hit_y * ray_dir
+-        final_s = volume_texture.sample(final_sample_pos).r
+-        final_C_sample = colormap.sample(vec2(final_s, 0.5)).rgba
++        final_pos = pos + t_hit_y * ray_dir
++        final_s = volume_texture.sample(final_pos).r
++        final_C = colormap.sample(vec2(final_s, 0.5)).rgba
++        C_in = C_in + (1.0 - C_in.a) * final_C.a * final_C.rgb
++        A_in = A_in + (1.0 - A_in) * final_C.a
+         
+-        # Composite final sample
+-        C_out = C_out + (1.0 - C_out.a) * final_C_sample.a * final_C_sample.rgb
+-        A_out = A_out + (1.0 - A_out.a) * final_C_sample.a
+-        
+-    return vec4(C_out.rgb, A_out)
++    return vec4(C_in.rgb, A_in)
+ ```
+ 
+@@ -192,15 +179,15 @@
+ 
+ ### [Direct Volume Rendering with Precomputed Occlusion (DOS)](4566-direct-volume-rendering-with-precomputed-occlusion-dos.md)
+-Direct Volume Rendering with Precomputed Occlusion (DOS) is a single-pass, image-order ray marching technique that approximates volumetric attenuation from behind the current sample using precomputed 2D occlusion maps. It solves the problem of self-occlusion in volume rendering without requiring full volumetric integration or multiple rendering passes, making it suitable for real-time applications where geometry occlusion is already handled by the parent method. Unlike standard front-to-back ray casting which integrates opacity along the ray, DOS decouples the occlusion estimation from the ray step, using spatial averaging of a pre-rendered occlusion texture to modulate the current slice's contribution.
++Direct Volume Rendering with Precomputed Occlusion (DOS) is a single-pass, image-order ray marching technique that approximates volumetric attenuation from behind the current sample using precomputed 2D occlusion maps. It solves the problem of self-occlusion in volume rendering without requiring full volumetric integration or multiple rendering passes. Unlike standard front-to-back ray casting which integrates opacity along the ray, DOS decouples the occlusion estimation from the ray step, using spatial averaging of a pre-rendered occlusion texture to modulate the current slice's contribution.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of samples along the ray, which depends on the ray length through the volume and the step size $dt$. Step size is inversely proportional to volume dimensions and ray direction magnitude.
+-*   **Memory Complexity:** Depends on the size of the 3D volume texture, 2D colormap, and depth buffer.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Performance scales with volume resolution and camera distance (ray length).
+-*   **Strengths:** Real-time capable, handles geometry occlusion efficiently by stopping ray march, simple implementation.
+-*   **Limitations:** Approximate self-occlusion handling (geometry only, not volumetric), step size artifacts if not corrected, requires pre-rendered depth buffer.
+-*   **When to use:** Real-time applications with opaque geometry occluding volumes, where full volumetric self-occlusion is too expensive.
+-*   **When not to use:** Scenes with complex volumetric self-occlusion where geometry occlusion is not the primary factor, or when high accuracy is required.
++*   **Scaling:** Not given in the sources.
++*   **Strengths:** Real-time capable, handles geometry occlusion efficiently by stopping ray march, simple implementation [S1, unofficial].
++*   **Limitations:** Approximate self-occlusion handling (geometry only, not volumetric), step size artifacts if not corrected, requires pre-rendered depth buffer [S1, unofficial].
++*   **When to use:** Real-time applications with opaque geometry occluding volumes, where full volumetric self-occlusion is too expensive [S1, unofficial].
++*   **When not to use:** Scenes with complex volumetric self-occlusion where geometry occlusion is not the primary factor, or when high accuracy is required [S1, unofficial].
+ 
+ ## Background

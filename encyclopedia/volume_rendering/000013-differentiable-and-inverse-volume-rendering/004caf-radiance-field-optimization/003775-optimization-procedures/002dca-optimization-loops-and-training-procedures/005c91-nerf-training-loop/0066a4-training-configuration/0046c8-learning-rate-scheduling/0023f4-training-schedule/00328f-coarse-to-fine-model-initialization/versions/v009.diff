@@ -1,0 +1,158 @@
+--- v008.md
++++ v009.md
+@@ -4,107 +4,78 @@
+ 
+ ## Overview
+-Coarse-to-Fine Model Initialization is a training strategy for radiance field optimization that initializes a high-resolution "fine" model using the learned parameters from a lower-resolution "coarse" model. It solves the problem of optimization instability and local minima in complex scenes by providing a geometrically coherent starting point for high-frequency detail recovery. It sets itself apart from single-resolution training by preventing the model from committing to high-frequency noise before establishing global structure [S2, unofficial], and differs from the NeRF Restarting Approach by using a continuous schedule of complexity rather than discrete restarts [12980-nerf-restarting-approach.md].
++Coarse-to-Fine Model Initialization is a training strategy for differentiable volume rendering that initializes a high-resolution (fine) radiance field model using the optimized parameters of a lower-resolution (coarse) model. It solves the problem of geometric artifacts and slow convergence that occur when training directly at high resolution by establishing a coherent global structure before fitting high-frequency features [S2, unofficial][S3]. It differs from standard full-resolution training by deferring the fitting of fine features until the global geometry is established [S2, unofficial], and differs from simple two-stage pipelines by potentially using continuous or multi-stage resolution scaling rather than a single abrupt switch [S1][S2, unofficial].
+ 
+ ## How it works
+-The method initializes the fine model's parameters using the optimized weights of the coarse model, typically involving interpolation for grid-based features and direct weight copying for MLPs.
+-
+ **Inputs and Outputs:**
+-*   **Input:** Trained coarse model parameters (deformation MLP weights, feature grid), target fine model architecture (same MLP structure, higher resolution grid).
+-*   **Output:** Initialized fine model ready for high-resolution training.
++*   **Inputs:** Optimized parameters (weights and feature grids) from a trained coarse model; hyperparameters for resolution scaling and learning rate decay.
++*   **Outputs:** Initialized parameters for the fine model, ready for continued optimization.
+ 
+ **Data Structures:**
+-*   **Deformation Feature Grid:** A 3D voxel grid storing deformation features. In the coarse model, it has resolution $R_c$. In the fine model, it has resolution $R_f = 2 R_c$ (or similar doubling).
+-*   **Deformation MLP:** A Multi-Layer Perceptron mapping position/time to deformation features. The architecture (layer widths, activation functions) is identical between coarse and fine models.
++*   **Coarse Model:** A neural radiance field (e.g., MLP or voxel grid) trained at a base resolution.
++*   **Fine Model:** A neural radiance field with the same architecture as the coarse model but at a higher resolution (e.g., doubled voxel grid dimensions).
++*   **Feature Grid:** A 3D tensor storing deformation or density features. In voxel-based methods, this is a dense grid; in MLP-based methods, this may refer to the network weights themselves if architectures are identical [S1].
+ 
+ **Steps:**
+-1.  **MLP Weight Transfer:** Copy the trained weights of the coarse deformation MLP directly to the fine deformation MLP. Since the architecture is identical, this provides a good initialization for the deformation field [S1].
+-2.  **Feature Grid Interpolation:** Initialize the fine model's deformation feature grid by interpolating the optimized feature grid from the coarse model. This ensures the fine model starts with a smooth, low-frequency approximation of the deformation field [S1].
+-3.  **Progressive Scale Training:** During the fine model training, progressively increase the voxel resolution (e.g., doubling it) after a certain number of iterations. This allows the model to refine details gradually [S1].
++1.  **Train Coarse Model:** Optimize the coarse model for a specified number of iterations or until convergence on global geometry [S2, unofficial].
++2.  **Interpolate/Transfer Weights:**
++    *   If using a voxel grid: Interpolate the optimized feature grid from the coarse model to initialize the fine model's feature grid [S1].
++    *   If using an MLP with identical architecture: Directly copy the trained network weights from the coarse deformation module to the fine model [S1].
++3.  **Progressive Scale Training (Optional/Variant):** Instead of a single jump, gradually increase the resolution. For example, double the voxel resolution after a set number of training iterations [S1]. This can be viewed as a sequence of coarse-to-fine initializations.
++4.  **Resume Optimization:** Continue training the fine model using the initialized parameters. The learning rate is typically decayed from the coarse model's final rate [S2, unofficial].
+ 
+ **Formulas:**
+-*   Not given in the sources.
++*   **Feature Grid Interpolation:** Let $G_{coarse}$ be the coarse feature grid and $G_{fine}$ be the fine feature grid. If the fine grid has resolution $2N \times 2N \times 2N$ and the coarse has $N \times N \times N$, then $G_{fine}[i,j,k]$ is initialized by interpolating values from $G_{coarse}$ [S1].
++*   **Loss Function (in context of UP-NeRF):**
++    $$ L = w_{u,v} L_{rgb} + (1 - w_{u,v})(L_{feat} + \lambda_d L_{depth}) $$
++    where $w_{u,v}$ is a scheduling factor that decays over time, $L_{rgb}$ is the RGB reconstruction loss, $L_{feat}$ is a feature loss, and $L_{depth}$ is a depth loss [S2, unofficial].
++*   **Coarse RGB Loss (detached):**
++    $$ L_{coarse\_rgb} = \frac{1}{2} \| \hat{C}_i(r) - C_i(r) \|_2^2 $$
++    where $\hat{C}_i(r)$ is the rendered color using detached transient outputs and $C_i(r)$ is the target color [S2, unofficial].
+ 
+ **Parameters:**
+-*   **Voxel Resolution Doubling Interval:** Not given in the sources.
+-*   **Interpolation Method:** Not given in the sources (typically trilinear or nearest-neighbor).
++*   **Learning Rate:** Typically starts at $5 \times 10^{-4}$ and decays to $5 \times 10^{-5}$ for NeRF and transient networks [S2, unofficial].
++*   **Pose/Depth Factor Learning Rate:** Typically starts at $2 \times 10^{-3}$ and decays to $1 \times 10^{-3}$ [S2, unofficial].
++*   **Sampling Points:** 128 points per ray for both coarse and fine models [S2, unofficial].
++*   **Iterations:** 600K iterations is a common duration for the full pipeline [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Architecture Mismatch:** The method relies on the coarse and fine deformation MLPs having the exact same architecture. If they differ, direct weight transfer is not possible [S1].
+-*   **Grid Resolution:** The fine grid resolution must be compatible with the interpolation from the coarse grid (e.g., powers of two) to ensure efficient interpolation [S1].
+-
+-**Pseudocode:**
+-```python
+-def initialize_fine_model(coarse_model, fine_model):
+-    """
+-    Initializes the fine model using the trained coarse model.
+-    
+-    Args:
+-        coarse_model: The trained coarse model containing deformation_mlp and deformation_grid.
+-        fine_model: The fine model with identical deformation_mlp architecture but higher resolution deformation_grid.
+-        
+-    Returns:
+-        fine_model: The initialized fine model.
+-    """
+-    # Step 1: Transfer MLP weights
+-    # Since the architecture is identical, we can directly copy the weights
+-    fine_model.deformation_mlp.load_state_dict(coarse_model.deformation_mlp.state_dict())
+-    
+-    # Step 2: Interpolate feature grid
+-    # Interpolate the coarse grid to the fine grid resolution
+-    # Assuming trilinear interpolation for simplicity
+-    coarse_grid = coarse_model.deformation_grid
+-    fine_grid = interpolate_grid(coarse_grid, fine_model.deformation_grid.shape)
+-    fine_model.deformation_grid.data = fine_grid
+-    
+-    return fine_model
+-
+-def interpolate_grid(coarse_grid, target_shape):
+-    """
+-    Interpolates a 3D grid to a target shape.
+-    
+-    Args:
+-        coarse_grid: 3D numpy array of shape (H, W, D, C)
+-        target_shape: Tuple (H_new, W_new, D_new, C)
+-        
+-    Returns:
+-        3D numpy array of shape target_shape
+-    """
+-    # Placeholder for actual interpolation logic (e.g., using scipy.ndimage.zoom or torch.nn.functional.interpolate)
+-    # This is a generic implementation detail not specified in the sources [G]
+-    import numpy as np
+-    from scipy.ndimage import zoom
+-    
+-    # Calculate zoom factors for each dimension
+-    zoom_factors = [target_shape[i] / coarse_grid.shape[i] for i in range(3)]
+-    
+-    # Perform interpolation
+-    # The last dimension (channels) is not interpolated
+-    interpolated_grid = zoom(coarse_grid, zoom_factors + [1.0], order=1) # order=1 for linear interpolation
+-    
+-    return interpolated_grid
+-```
++*   **Architecture Mismatch:** If the fine model's architecture differs from the coarse model (e.g., different MLP widths), direct weight copying is not possible, and interpolation must be used for grid-based features [S1].
++*   **Overfitting:** Initializing with coarse weights may cause the fine model to overfit to the coarse geometry if not regularized or if the resolution jump is too large [S2, unofficial].
++*   **Local Minima:** Without proper initialization (e.g., LiDAR Initialization), the model may struggle to represent sparse space, leading to infinite training times or failure to converge [S3].
+ 
+ ## Subtopics
+ 
+ ### [Progressive Coarse-to-Fine Training Strategy](8900-progressive-coarse-to-fine-training-strategy.md)
+-A training methodology that decouples the recovery of global scene structure from the refinement of high-frequency details by progressively increasing input complexity or model capacity. It solves the problem of optimization instability and local minima in radiance field reconstruction, particularly in dynamic scenes or when camera poses are imperfect. It sets itself apart from single-resolution training by preventing the model from committing to high-frequency noise before establishing geometric coherence, and differs from the NeRF Restarting Approach by using a continuous schedule of complexity rather than discrete restarts [12980-nerf-restarting-approach.md].
++Progressive Coarse-to-Fine Training is a strategy that gradually introduces finer levels of detail during optimization to ensure stable convergence and prevent overfitting. It solves the problem of geometric artifacts and slow convergence that occur when training directly at high resolution by establishing a coherent global structure before fitting high-frequency features. It differs from standard full-resolution training by deferring the fitting of fine features until the global geometry is established, and differs from simple two-stage pipelines by potentially using continuous or multi-stage resolution scaling rather than a single abrupt switch.
+ 
+ ### [NeRF Restarting Approach](12980-nerf-restarting-approach.md)
+ The NeRF Restarting Approach is a training schedule for joint pose and radiance field optimization that eliminates artifacts learned during the pose refinement phase by discarding the neural network weights and retraining from scratch. Unlike staged training, which freezes poses and continues training the existing networks, this method re-initializes both coarse and fine Multi-Layer Perceptrons (MLPs) after pose convergence. It is chosen when the initial joint optimization introduces persistent artifacts into the scene representation that persist even after pose stabilization.
+ 
++### Overall Training Pipeline
++This variant integrates the coarse-to-fine initialization into a broader pipeline involving transient object handling and depth supervision.
++*   **Training Duration:** 600K iterations with 2048 randomly sampled pixel rays per step [S2, unofficial].
++*   **Transient Handling:** The TransientNet is optimized with the fine model alone; the coarse model uses detached $\alpha(\tau)$ and $\hat{C}_i(\tau)$ [S2, unofficial].
++*   **Sampling:** The sample set for the fine model uses both shared density $\sigma$ and candidate density $\sigma_i$ until a scheduling factor eliminates the candidate head [S2, unofficial].
++*   **Loss:** $L = w_{u,v} L_{rgb} + (1 - w_{u,v})(L_{feat} + \lambda_d L_{depth})$ [S2, unofficial].
++*   **Parameters:** Learning rate for NeRF/TransientNet: $5e-4$ decaying to $5e-5$. Learning rate for pose/depth: $2e-3$ decaying to $1e-3$. Optimizer: Adam (AdamW for test-time appearance) [S2, unofficial].
++
++### LiDAR Initialization
++An initialization technique using LiDAR point clouds to provide prior information for the scene representation, helping to avoid local minima in optimization [S3].
++*   **Performance:** On Argoverse2, the combination of Hybrid Scene Representation (HSR) and LiDAR Initialization (LI) yields more than 4 times boost in convergence speed compared with NGP [S3].
++*   **Necessity:** Without LI, the model cannot converge to NGP's PSNR, and training time is infinite ('Inf.') because it struggles to represent space sparsely [S3].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Not given in the sources.
+-*   **Strengths:** Shortens training time and results in higher performance by providing a good initialization [S1].
+-*   **Limitations:** Requires the coarse and fine models to have compatible architectures (specifically the MLP structure) [S1].
+-*   **When to Use:** When training dynamic scenes or scenes with imperfect camera poses where optimization instability is a concern [S1][S3, S4, unofficial].
+-*   **When Not to Use:** When the coarse and fine models have different architectures, or when the scene is simple enough that single-resolution training converges reliably.
++*   **Time Complexity:** Reduces total training time compared to training from scratch at high resolution. LiDAR Initialization can provide a 4x speedup in convergence [S3].
++*   **Memory Complexity:** Requires storing both coarse and fine model parameters during the transition phase, or re-initializing the fine model. Voxel-based methods scale memory with resolution cubed.
++*   **Strengths:** Stabilizes convergence, prevents geometric artifacts, allows for higher final resolution quality.
++*   **Limitations:** Requires careful scheduling of resolution jumps and learning rates. May not be suitable for scenes with extreme dynamic changes if the coarse model fails to capture global motion [S2, unofficial].
++*   **When to Use:** When training high-resolution NeRFs or dynamic scenes where direct high-res training is unstable or slow.
++*   **When Not to Use:** For low-resolution scenes where the overhead of multi-stage training is unjustified, or when computational resources are extremely limited and a single coarse model suffices.
+ 
+ ## Background
+-The method is used in the context of Neural Deformable Voxel Grids for fast optimization of dynamic view synthesis [S1] and UP-NeRF for unconstrained pose-prior-free neural radiance fields [S2, unofficial]. It builds on the idea of hierarchical optimization to improve convergence in complex radiance field reconstruction tasks.
++Coarse-to-Fine initialization is a common practice in neural rendering to handle the optimization landscape of high-dimensional radiance fields. It was notably employed in methods like BARF (Blending Artificially Realistic Fusion) for unconstrained pose estimation [S2, unofficial] and in dynamic view synthesis methods like Neural Deformable Voxel Grid [S1]. The concept of progressive scale training has also been used in 3D Gaussian Splatting and other grid-based representations. LiDAR Initialization was introduced in Lightning NeRF to address convergence issues in autonomous driving scenes [S3].
+ 
+ ## Sources
+ [S1] Neural Deformable Voxel Grid for Fast Optimization of Dynamic View Synthesis, https://doi.org/10.1007/978-3-031-26319-4_27, fetched 2026-10-26
+-[S2] UP-NeRF: Unconstrained Pose-Prior-Free Neural Radiance Fields, https://arxiv.org/abs/2311.03784v2, fetched 2026-10-26 (unofficial)+[S2] UP-NeRF: Unconstrained Pose-Prior-Free Neural Radiance Fields, https://arxiv.org/abs/2311.03784v2, fetched 2026-10-26 (unofficial)
++[S3] Lightning NeRF: Efficient Hybrid Scene Representation for Autonomous Driving, https://doi.org/10.1109/icra57147.2024.10611130, fetched 2026-10-27

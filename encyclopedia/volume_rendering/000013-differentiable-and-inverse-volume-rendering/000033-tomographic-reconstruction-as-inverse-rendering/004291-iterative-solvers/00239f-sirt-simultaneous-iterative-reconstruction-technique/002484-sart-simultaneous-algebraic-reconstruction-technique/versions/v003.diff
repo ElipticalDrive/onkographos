@@ -1,0 +1,248 @@
+--- v002.md
++++ v003.md
+@@ -1,137 +1,136 @@
+ # SART (Simultaneous Algebraic Reconstruction Technique)
+ 
+-Also called: Modified SART for Data Term Proximal Operator, PSART SART, SART Data Term Solver, SART for prox_{λ_f}(q), Simultaneous Algebraic Reconstruction Technique
++Also called: Simultaneous Algebraic Reconstruction Technique, Proximal SART, ProxiSART
+ 
+ ## Overview
+-SART is an iterative algebraic reconstruction technique based on the Kaczmarz projection method, used to solve the data fidelity term in tomographic reconstruction problems [S1, unofficial]. It updates the reconstructed volume for each scan view, offering modest memory requirements and superior performance over direct methods like FDK in limited projection scenarios [S1, unofficial]. It is preferred over Conjugate Gradient (CG) for sparse-view settings because CG suffers from numerical noise in matrix-free implementations and convergence issues with large sparse systems [S1, unofficial].
++SART is an iterative algebraic reconstruction technique that solves the linear system $Af = b$ by updating the volume estimate using normalized back-projection of ray residuals [S2, unofficial]. It distinguishes itself from its parent [SIRT](3101-sirt-simultaneous-iterative-reconstruction-technique.md) by normalizing the correction term by the sum of weights for each individual ray, rather than the total accumulated sensitivity of the voxel, which often yields faster convergence and better stability in limited-angle or sparse-view tomography [S2, unofficial]. It is also preferred over Conjugate Gradient (CG) for sparse-view settings because CG suffers from numerical noise in matrix-free implementations and convergence issues with large sparse systems [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** System matrix $A \in \mathbb{R}^{m \times n}$ (where $m$ is the number of rays and $n$ is the number of voxels), measured projections $p \in \mathbb{R}^m$, previous iterate $q \in \mathbb{R}^n$, regularization parameter $\lambda \in \mathbb{R}$, relaxation parameter $\alpha \in \mathbb{R}$, and total outer iterations $T$ [S1, unofficial].
+-*   **Outputs:** Reconstructed volume $f \in \mathbb{R}^n$ [S1, unofficial].
++*   **Input:** System matrix $A \in \mathbb{R}^{m \times n}$ (where $m$ is the number of rays/projections and $n$ is the number of voxels), measured projection data $b \in \mathbb{R}^m$, initial volume estimate $f^{(0)} \in \mathbb{R}^n$, relaxation parameter $\alpha$, and maximum iterations $T$.
++*   **Output:** Reconstructed volume $f \in \mathbb{R}^n$.
+ 
+ **Data Structures:**
+-*   $A$: Sparse matrix or implicit operator defining ray-voxel intersections $a_{ij}$ [S1, unofficial].
+-*   $y$: Auxiliary vector of size $m$, initialized to zero [S1, unofficial].
+-*   $f$: Volume vector of size $n$ [S1, unofficial].
+-*   $\hat{b}$: Estimated projection vector of size $m$ [S1, unofficial].
+-*   $c$: Correction factor vector of size $m$ [S1, unofficial].
++*   $A$: Typically stored implicitly as a forward/back-projection operator to save memory, as explicit storage is infeasible for large volumes [S2, unofficial].
++*   $f$: 3D array of voxel values.
++*   $b$: 1D array of projection values.
++*   $c$: 1D array of correction factors for rays.
++*   $\hat{b}$: 1D array of estimated projection values.
+ 
+ **Algorithm Steps:**
+-The method solves the proximal operator $\text{prox}_{\lambda_f}(q) = \text{argmin}_f \|Af - p\|_2^2 + \frac{1}{2\lambda}\|f - q\|_2^2$ by transforming it into an under-determined linear system using auxiliary variables $y = \sqrt{2\lambda}(p - Af)$ and $z = f - q$ [S1, unofficial].
++The standard SART algorithm updates the volume by iterating over all projections. For each iteration $t$ from 1 to $T$:
++1.  **Initialization:** Set $f^{(0)}$ (often zero or a prior estimate).
++2.  **Loop over Projections:** For each projection $i$ (or set of rays $\mathcal{S}$):
++    a.  **Forward Projection:** Compute the estimated projection $\hat{b}_i^{(t)}$ for ray $i$ using the current volume estimate $f^{(t)}$:
++        $$ \hat{b}_i^{(t)} = \sum_{k=1}^{n} a_{ik} f_k^{(t)} $$
++    b.  **Correction:** Compute the normalized deviation (correction factor) $c_i^{(t)}$ for ray $i$:
++        $$ c_i^{(t)} = \frac{b_i - \hat{b}_i^{(t)}}{\sum_{k=1}^{n} a_{ik}} $$
++        Here, the denominator $\sum_{k} a_{ik}$ is the sum of weights of all voxels intersected by ray $i$.
++    c.  **Backprojection:** Update the volume $f$ for all voxels $j=1 \dots n$ that contribute to ray $i$:
++        $$ f_j^{(t+1)} = f_j^{(t)} + \alpha \frac{c_i^{(t)} a_{ij}}{\sum_{l \in \mathcal{S}} a_{lj}} \quad \text{(Note: Standard SART updates sequentially or simultaneously over a subset)} $$
++        
++        *Clarification on Simultaneous Update:* In the standard simultaneous formulation, the update for voxel $j$ aggregates corrections from *all* rays $i$ that pass through it in the current sweep. The formula provided in [S2, unofficial] Eq. 3.30 describes the update after processing a set of projections $\mathcal{S}$:
++        $$ f_j^{(t+1)} = f_j^{(t)} + \alpha \frac{\sum_{i \in \mathcal{S}} c_i^{(t)} a_{ij}}{\sum_{i \in \mathcal{S}} a_{ij}} $$
++        Where $c_i^{(t)}$ is computed based on the volume state at the beginning of the sweep or iteratively updated. The sources [S2, unofficial] describe a modified SART for solving a proximal operator which includes auxiliary variables. The standard SART (Andersen et al.) is simpler. The following pseudocode implements the standard SART as described in [S2, unofficial] Eq 3.30-3.32.
+ 
+-1.  **Initialization:**
+-    *   Set $y^{(0)} = 0$ [S1, unofficial].
+-    *   Set $f^{(0)} = q$ [S1, unofficial].
+-    *   Scale inputs: $\tilde{p} = \sqrt{2\lambda}p$, $\tilde{A} = \sqrt{2\lambda}A$ [S1, unofficial].
+-
+-2.  **Outer Loop:** Iterate $t$ from $1$ to $T$ [S1, unofficial].
+-
+-3.  **Inner Loop:** Iterate over projection sets $S \in \{S_1, \dots, S_N\}$ [S1, unofficial]. For each set of rays $S$:
+-    *   **Forward Projection:** Compute estimated projections for all rays $i$:
+-        $$ \hat{b}_i^{(t+1)} = \sum_{k} a_{ik} f_k^{(t)} + y_i^{(t)} $$
+-        [S1, unofficial]
+-    *   **Correction:** Compute normalized deviations for all rays $i \in S$:
+-        $$ c_i^{(t+1)} = \frac{b_i - \hat{b}_i^{(t+1)}}{\sum_{k} a_{ik} + 1} $$
+-        [S1, unofficial]
+-        *Note: The denominator includes $+1$ due to the augmented system structure involving the auxiliary variable $y$.*
+-    *   **Update Auxiliary Variable:** Update $y$ for indices $j \in S$:
+-        $$ y_j^{(t+1)} = y_j^{(t)} + \alpha c_j^{(t+1)} $$
+-        [S1, unofficial]
+-    *   **Backprojection:** Update volume $f$ for all voxels $j=1 \dots n$:
+-        $$ f_j^{(t+1)} = f_j^{(t)} + \alpha \frac{\sum_{i \in S} c_i^{(t+1)} a_{ij}}{\sum_{i \in S} a_{ij}} $$
+-        [S1, unofficial]
+-
+-**Parameters:**
+-*   $\alpha$: Relaxation parameter. Typical values range from $0.1$ to $0.8$ depending on the dataset (e.g., $0.3$ for Zone plate, $0.1$ for Artificial rose) [S1, unofficial].
+-
+-**Pitfalls:**
+-*   **Memory Usage:** High memory consumption occurs if patch-based Jacobians $J_K(f)$ are stored for regularization [S1, unofficial]. For a volume of size $N$, storage can be 82 times the volume size (81 for $J_K(f)$ + 1 for volume) [S1, unofficial]. For a $690 \times 668 \times 776$ voxel volume, this requires 109 GB [S1, unofficial].
+-*   **CG Incompatibility:** Conjugate Gradient is unsuitable for this proximal operator in tomography because: 1) It requires preconditioning for large systems, but storing $A$ is infeasible, limiting preconditioners to ineffective Jacobi types [S1, unofficial]. 2) Matrix-free implementations of $A$ and $A^T$ introduce numerical discrepancies, making $A^T A$ not an exact transpose, which CG is sensitive to [S1, unofficial].
++**Pseudocode (Standard SART):**
+ 
+ ```python
+-def sart_solve(A, b, q, lam, alpha, T, projection_sets):
++def sart(A_forward, A_back, b, n_voxels, n_rays, alpha, T):
+     """
+-    Solves the data term proximal operator using Modified SART.
++    A_forward: function that computes sum(a_ik * f_k) for all rays i
++    A_back: function that adds a_ij * correction to f_j for all rays i
++    b: measured projections (array of size n_rays)
++    n_voxels: number of voxels
++    n_rays: number of rays
++    alpha: relaxation parameter (0 < alpha < 2)
++    T: number of iterations
++    """
++    # Initialize volume
++    f = zeros(n_voxels)
+     
+-    Args:
+-        A: System matrix A (list of lists, shape m x n).
+-        b: Measured projections p (list, size m).
+-        q: Previous iterate (list, size n).
+-        lam: Regularization parameter lambda.
+-        alpha: Relaxation parameter.
+-        T: Total outer iterations.
+-        projection_sets: List of sets of ray indices S_1 ... S_N.
+-        
+-    Returns:
+-        f: Reconstructed volume (list, size n).
+-    """
+-    import math
+-    
+-    n = len(q)
+-    m = len(b)
+-    
+-    # Initialization
+-    y = [0.0] * m
+-    f = list(q)
+-    
+-    # Scale inputs as per source derivation
+-    sqrt_2lam = math.sqrt(2 * lam)
+-    b = [sqrt_2lam * bi for bi in b]
+-    # A is scaled implicitly in the derivation; the loop formulas use the original a_ik structure.
++    # Precompute ray sums (denominators) if A is static
++    # sum_a_i = sum over k of a_ik for each ray i
++    # This requires access to the geometry or A matrix structure.
++    # In matrix-free implementations, this is computed during forward pass or pre-cached.
++    sum_a = compute_ray_weight_sums(A_forward, n_voxels, n_rays) # [G] Helper to compute sum of weights per ray
+     
+     for t in range(1, T + 1):
+-        for S in projection_sets:
+-            # 1. Forward Projection: compute estimated projections for all rays
+-            b_hat = [0.0] * m
+-            for i in range(m):
+-                ray_sum = 0.0
+-                for k in range(n):
+-                    ray_sum += A[i][k] * f[k]
+-                b_hat[i] = ray_sum + y[i]
++        # 1. Forward Projection: Compute estimated projections
++        b_hat = A_forward(f) # b_hat[i] = sum_k a_ik * f_k
++        
++        # 2. Correction: Compute normalized deviations for all rays
++        # c[i] = (b[i] - b_hat[i]) / sum_a[i]
++        # Guard against division by zero
++        c = zeros(n_rays)
++        for i in range(n_rays):
++            if sum_a[i] > 0:
++                c[i] = (b[i] - b_hat[i]) / sum_a[i]
++            else:
++                c[i] = 0.0
++                
++        # 3. Backprojection: Distribute corrections back to voxels
++        # f_j = f_j + alpha * sum_{i in S} (c_i * a_ij) / sum_{i in S} a_ij
++        # Note: The denominator in the standard SART update for voxel j is the sum of weights 
++        # of all rays passing through voxel j. Let's call this sum_b_j.
++        # sum_b_j = sum over i of a_ij for each voxel j
++        
++        sum_b = compute_voxel_ray_weight_sums(A_back, n_voxels, n_rays) # [G] Helper to compute sum of weights per voxel
++        
++        # We need to accumulate the numerator: sum_{i} c_i * a_ij
++        # This is effectively a weighted backprojection of c
++        correction_sum = A_back_weighted(c) # [G] Computes sum_i c_i * a_ij for each voxel j
++        
++        for j in range(n_voxels):
++            if sum_b[j] > 0:
++                f[j] = f[j] + alpha * correction_sum[j] / sum_b[j]
++            # Else: voxel not intersected by any ray, no update
+             
+-            # 2. Correction & 3. Update y & 4. Backprojection
+-            voxel_denom = [0.0] * n
+-            corrections = [0.0] * m
+-            
+-            for i in S:
+-                # Compute correction c_i
+-                ray_weight_sum = 0.0
+-                for k in range(n):
+-                    ray_weight_sum += A[i][k]
+-                
+-                numerator = b[i] - b_hat[i]
+-                denominator = ray_weight_sum + 1.0
+-                c_i = numerator / denominator
+-                corrections[i] = c_i
+-                
+-                # Update y for indices in S
+-                y[i] = y[i] + alpha * c_i
+-                
+-                # Accumulate voxel denominators for backprojection
+-                for k in range(n):
+-                    voxel_denom[k] += A[i][k]
+-            
+-            # Backproject to update f
+-            for j in range(n):
+-                if voxel_denom[j] == 0:
+-                    continue
+-                weighted_sum = 0.0
+-                for i in S:
+-                    weighted_sum += corrections[i] * A[i][j]
+-                f[j] = f[j] + alpha * (weighted_sum / voxel_denom[j])
+-                
+     return f
+ ```
+ 
++**Modified SART for Proximal Operator:**
++When used as a proximal operator for the data term $\text{prox}_{\lambda_f}(q) = \text{argmin}_f \|Af - p\|_2^2 + \frac{1}{2\lambda}\|f - q\|_2^2$, the problem is transformed into an under-determined linear system using auxiliary variables $y$ and $z$ [S2, unofficial]. The algorithm (Algorithm 2 in [S2, unofficial]) is:
++
++1.  **Scale Inputs:** $\tilde{p} = \sqrt{2\lambda}p$, $\tilde{A} = \sqrt{2\lambda}A$.
++2.  **Initialize:** $y^{(0)} = 0$, $f^{(0)} = q$.
++3.  **Outer Loop:** Iterate $t$ from 1 to $T$.
++4.  **Inner Loop:** Iterate over projections $S \in S_1 \dots S_N$.
++    a.  Update $y$ for indices $j \in S$: $y_j^{(t+1)} = y_j^{(t)} + \alpha c_j^{(t)}$.
++    b.  Compute predicted projection sum: $\hat{b}_i^{(t+1)} = \sum_k a_{ik} f_k^{(t)} + y_i^{(t)}$.
++    c.  Compute correction factor: $c_i^{(t+1)} = \frac{b_i - \hat{b}_i^{(t+1)}}{\sum_k a_{ik} + 1}$.
++    d.  Update volume $f$ for all voxels $j=1 \dots n$: $f_j^{(t+1)} = f_j^{(t)} + \alpha \frac{\sum_{i \in S} c_i^{(t+1)} a_{ij}}{\sum_{i \in S} a_{ij}}$.
++
++**Parameters:**
++*   $\alpha$: Relaxation parameter. Typical values range from 0.1 to 0.8 [S2, unofficial]. Specific values cited: 0.5 [S1, unofficial], 0.3 for Zone plate, 0.1 for Artificial rose [S2, unofficial].
++*   Interpolation Kernel: Kaiser-Bessel kernel with a radius of 2 voxels is used for forward and back projection steps to ensure accurate and smooth interpolation [S1, unofficial].
++*   SART Iterations: In proximal frameworks (e.g., Chambolle-Pock), 2 iterations of SART are often performed within each step [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Division by Zero:** Rays or voxels with zero weight sum must be handled to avoid NaNs [G].
++*   **Memory Usage:** While standard SART has modest memory requirements, using it within a proximal framework that requires storing a patch-based Jacobian $J_K(f)$ can be memory-intensive. For a volume of size $N$, storage can be 82 times the volume size (81 for $J_K(f)$ + 1 for volume). For a 690x668x776 voxel volume, this requires 109 GB [S2, unofficial].
++*   **Convergence:** SART is preferred over CG because CG is sensitive to numerical discrepancies in matrix-free implementations of $A$ and $A^T$, where $A^T A$ is not an exact transpose [S2, unofficial].
++
++## Subtopics
++
++### [Voxel Splatting SART/SIRT](15304-voxel-splatting-sart-sirt.md)
++A GPU-accelerated implementation that inverts the data flow by projecting voxels onto the detector plane, leveraging pre-integrated lookup tables for efficient parallelization in cryo-ET.
++
++### [Proximal Jointly-Optimized Reconstruction and Denoising](15324-proximal-jointly-optimized-reconstruction-and-denoising.md)
++A method that integrates noise reduction directly into the reconstruction process, using SART as the primary solver for the data fidelity term in a proximal optimization scheme.
++
+ ## Operating characteristics
+-*   **Memory Complexity:** Modest for the core SART algorithm, but can become high if auxiliary structures like patch-based Jacobians are stored (up to 82x volume size) [S1, unofficial].
+-*   **Strengths:** Handles limited projections better than FDK; allows incorporation of prior information (e.g., TV priors); preferred over CG for sparse-view settings due to CG's sensitivity to numerical noise in matrix-free implementations [S1, unofficial].
+-*   **Limitations:** Memory intensive if complex regularizers requiring Jacobian storage are used [S1, unofficial].
+-*   **When to use:** Sparse-view tomography, dynamic tomography, or when incorporating non-standard priors in a proximal framework [S1, unofficial].
++*   **Time Complexity:** Each iteration involves one forward projection and one backprojection. The cost is proportional to the number of rays times the number of voxels per ray. Convergence is generally faster than SIRT for limited data [S2, unofficial].
++*   **Memory Complexity:** Standard SART requires $O(n)$ memory for the volume and $O(m)$ for projections, plus temporary buffers for corrections. It is memory-efficient compared to direct matrix methods. However, in proximal variants requiring Jacobian storage, memory can scale to $82 \times$ volume size [S2, unofficial].
++*   **Performance:** SART yields better reconstruction results than FDK when the number of projections is limited [S2, unofficial]. It handles sparse-view settings better than CG [S2, unofficial].
++*   **Strengths:** Modest memory requirements, handles limited projections better than FDK, allows incorporation of prior information (like TV priors) [S2, unofficial].
++*   **Limitations:** Slower than direct methods (FDK) for full-view data. Convergence can be slow for ill-conditioned systems without proper relaxation parameters [S2, unofficial].
++*   **When to use:** Sparse-view tomography, limited-angle tomography, or when integrating regularization priors via proximal operators.
++*   **When not to use:** Full-view, high-data-volume scenarios where speed is critical and FDK is sufficient; or when memory is severely constrained and the proximal variant's Jacobian storage is required.
+ 
+ ## Background
+-SART was proposed by Andersen et al. as an efficient iterative reconstruction method based on the Kaczmarz projection method [S1, unofficial]. It has been widely used in computed tomography (CT) for its ability to handle limited projection data and incorporate prior information [S1, unofficial]. Recent developments have adapted SART as a solver for the data term proximal operator in proximal optimization frameworks for CT reconstruction, particularly in dynamic and sparse-view scenarios [S1, unofficial].
++SART was proposed by Andersen and Kak [7] (cited in [S2, unofficial]) as an efficient iterative reconstruction method based on the Kaczmarz projection method [S2, unofficial]. It updates the reconstructed volume for each scan view, offering better results than the Feldkamp-Davis-Kress (FDK) algorithm in limited projection scenarios [S2, unofficial]. It has been widely adopted in computed tomography (CT) and cryo-electron tomography (cryo-ET) due to its flexibility in incorporating prior information and its robustness in sparse-view settings [S1, S2, unofficial]. Recent developments include its use as a proximal operator in primal-dual optimization schemes for robust 3D cone beam reconstruction [S1, unofficial].
+ 
+ ## Sources
+-[S1] Space-Time Tomographic Reconstruction of Deforming Objects, https://vccimaging.org/Publications/Zang2020Thesis/Zang2020Thesis.pdf, fetched 2026-10-30 (unofficial)+[S1] Industrial Computed Tomography using Proximal Algorithm, https://doi.org/10.25781/kaust-th10i, fetched 2026-10-27 (unofficial)
++[S2] Space-Time Tomographic Reconstruction of Deforming Objects, https://vccimaging.org/Publications/Zang2020Thesis/Zang2020Thesis.pdf, fetched 2026-10-30 (unofficial)

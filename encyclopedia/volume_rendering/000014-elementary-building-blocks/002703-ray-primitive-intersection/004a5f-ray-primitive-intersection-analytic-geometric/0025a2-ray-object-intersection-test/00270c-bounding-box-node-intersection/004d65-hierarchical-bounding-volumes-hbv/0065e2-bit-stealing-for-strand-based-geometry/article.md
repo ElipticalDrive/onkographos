@@ -1,0 +1,108 @@
+# Bit-stealing for Strand-Based Geometry
+
+Also called: Mixed Bounding Volume Strategy, Woop et al. mixed BVH
+
+## Overview
+Bit-stealing for strand-based geometry is a heterogeneous Bounding Volume Hierarchy (BVH) representation designed for hair and fur, which combines Axis-Aligned Bounding Boxes (AABBs) near the root for fast traversal with Oriented Bounding Boxes (OBBs) at deeper levels for tighter volume fits [S1]. It distinguishes itself from standard BVHs by using bit-field exploitation to encode node type, primitive counts, and offsets within a single 64-bit index, while leveraging a merged-parent quantization frame for OBB children to reduce memory footprint [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of Bezier segments representing hair/fur strands.
+*   **Output:** A BVH tree stored in a compact, bit-packed layout using indirect addressing.
+
+**Data Structures:**
+The BVH is defined by the type `BVHm`, which supports three node variants: `AABBNode`, `OBBNode`, and `Leaf` [S1].
+
+1.  **Index Layout (`I`):** A 64-bit unsigned integer (`u64`) serves as the node identifier. The bits are partitioned as follows [S1]:
+    *   **Bits 0–1:** Node type discriminator.
+    *   **Bits 1–4:** Primitive count (`nprims`) for `Leaf` nodes; unused for interior nodes.
+    *   **Bits 5–63:** Offset. For `Leaf` nodes, this is the primitive offset into the primitive buffer. For interior nodes, this is the offset into the respective interior node buffer (AABBs or OBBs).
+
+2.  **Node Variants:**
+    *   **AABBNode:** Stores uncompressed 32-bit floating-point bounds (`low: f32x3x4`, `high: f32x3x4`) and four child pointers (`C: u64x4`) [S1].
+    *   **OBBNode:** Stores a merged-parent bounding volume (`mlo: f323`, `mex: f323`), per-child quantized offsets (`qlo: u8x3x4`, `qhi: u8x3x4`), a shared quantized orientation matrix (`qo: i8x4x3`), and four child pointers (`C: u64x4`) [S1].
+    *   **Leaf:** Stores a primitive count (`nprims: u4`) and an array of `BezierSegment` data [S1].
+
+**Algorithm Steps:**
+1.  **Construct Tree:** Build a BVH where the top levels use AABBs and deeper levels transition to OBBs [S1].
+2.  **Encode Index:** For each node, compute the 64-bit index `I` by setting bits 0–1 to the node type code, bits 1–4 to the primitive count (if leaf), and bits 5–63 to the memory offset [S1].
+3.  **Store Interior Nodes:**
+    *   If `AABBNode`, store `low`, `high`, and `C` in the AABB indirect group [S1].
+    *   If `OBBNode`, store `mlo`, `mex`, `qlo`, `qhi`, `qo`, and `C` in the OBB indirect group [S1].
+4.  **Store Primitives:** Store `BezierSegment` data in the primitive buffer, indexed by the leaf offset [S1].
+5.  **Traverse:**
+    *   Decode `I` to determine node type and offset.
+    *   If `Leaf`, access primitives using the offset.
+    *   If `AABBNode`, access bounds and children from the AABB buffer.
+    *   If `OBBNode`, access merged bounds and quantized data from the OBB buffer. Dequantize child bounds using `mlo`, `mex`, `qlo`, `qhi`, and `qo` to perform intersection tests [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Node type codes
+AABB_TYPE = 0
+OBB_TYPE = 1
+LEAF_TYPE = 2
+
+def decode_index(I: u64) -> dict:
+    node_type = I & 0x3
+    nprims = (I >> 1) & 0xF
+    offset = I >> 5
+    return {'type': node_type, 'nprims': nprims, 'offset': offset}
+
+def traverse(node_index: u64, ray: Ray) -> bool:
+    info = decode_index(node_index)
+    
+    if info['type'] == LEAF_TYPE:
+        # Access BezierSegments from primitive buffer
+        primitives = get_primitives(info['offset'], info['nprims'])
+        for prim in primitives:
+            if intersect(prim, ray):
+                return True
+        return False
+        
+    elif info['type'] == AABB_TYPE:
+        # Access AABB data from AABB buffer
+        aabb_data = get_aabb_data(info['offset'])
+        # Check intersection with AABB bounds
+        if not intersects_aabb(aabb_data.low, aabb_data.high, ray):
+            return False
+        # Recurse children
+        for child_idx in aabb_data.C:
+            if traverse(child_idx, ray):
+                return True
+        return False
+        
+    elif info['type'] == OBB_TYPE:
+        # Access OBB data from OBB buffer
+        obb_data = get_obb_data(info['offset'])
+        # Dequantize child bounds using merged parent frame
+        # Note: Exact dequantization formulas are not provided in sources [S1]
+        for i in range(4):
+            child_low = dequantize(obb_data.mlo, obb_data.mex, obb_data.qlo[i], obb_data.qo)
+            child_high = dequantize(obb_data.mlo, obb_data.mex, obb_data.qhi[i], obb_data.qo)
+            if intersects_obb(child_low, child_high, obb_data.qo, ray):
+                if traverse(obb_data.C[i], ray):
+                    return True
+        return False
+    return False
+```
+
+**Parameters and Edge Cases:**
+*   **Quantization:** OBB bounds are quantized to 8-bit integers (`u8`) relative to a merged parent frame [S1].
+*   **Orientation:** The orientation matrix `qo` is quantized to 8-bit signed integers (`i8`) and shared among all four children of an OBB node [S1].
+*   **Pitfall:** The specific dequantization functions for OBB bounds and orientation are not defined in the source specification [S1]. Implementers must derive these from Woop et al. [105, Sec 3.5] [S1].
+
+## Operating characteristics
+*   **Memory:** Reduces memory footprint by using quantized 8-bit offsets and shared orientation matrices for OBBs, compared to storing full 32-bit floats for every child bound [S1].
+*   **Performance:** AABBs at the root provide fast, simple traversal, while OBBs at deeper levels offer tighter bounds for complex strand geometry, improving culling efficiency [S1].
+*   **Complexity:** Not given in the sources.
+*   **Strengths:** Compact representation for high-primitive-count hair/fur; flexible layout decoupling [S1].
+*   **Limitations:** Requires complex dequantization logic for OBBs; bit-stealing requires careful index management [S1].
+
+## Background
+The method is based on the mixed bounding volume strategy from Woop et al. [105], which addresses the challenges of ray tracing hair and fur, such as high primitive counts and poor spatial coherence [S1]. It is implemented in the Scion language to demonstrate decoupling data layouts from BVH structures [S1].
+
+## Sources
+[S1] Decoupling Data Layouts from Bounding Volume Hierarchies, https://arxiv.org/pdf/2511.15028, fetched 2026-10-29

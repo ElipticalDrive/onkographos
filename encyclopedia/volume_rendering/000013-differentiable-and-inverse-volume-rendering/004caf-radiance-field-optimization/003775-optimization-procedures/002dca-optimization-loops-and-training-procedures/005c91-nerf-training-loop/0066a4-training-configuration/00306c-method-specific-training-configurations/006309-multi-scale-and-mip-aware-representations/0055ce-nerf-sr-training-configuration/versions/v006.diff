@@ -1,0 +1,214 @@
+--- v005.md
++++ v006.md
+@@ -1,135 +1,111 @@
+ # NeRF-SR Training Configuration
+ 
+-Also called: NeRF-SR, High-Quality Neural Radiance Fields using Supersampling
++Also called: NeRF-SR, NeRF Super-Resolution
+ 
+ ## Overview
+-NeRF-SR is a training configuration designed to synthesize high-resolution novel views from low-resolution input images by exploiting the 3D consistency of neural radiance fields [S1]. It differs from standard NeRF by training the network directly on low-resolution inputs while rendering at high resolution via supersampling, and optionally applying a post-rendering refinement network to restore texture details [S1]. It addresses the limitation of standard NeRF, which often produces blurry results when upscaling from low-resolution inputs, by ensuring the learned density field captures high-frequency details consistent with the underlying 3D geometry [S1].
++NeRF-SR is a training configuration designed to synthesize high-resolution (HR) novel views from low-resolution (LR) input images by optimizing a neural radiance field with a supersampling strategy [S1]. It differs from standard NeRF training by explicitly leveraging 3D consistency during the rendering process to recover high-frequency details that are lost in LR inputs, rather than relying on post-hoc 2D upsampling [S1]. It builds on [Method-Specific Training Configurations](6267-method-specific-training-configurations.md) by modifying the sampling and optimization loop to support arbitrary resolution rendering while maintaining photometric accuracy against ground truth [S1].
+ 
+ ## How it works
+-**Inputs:** Low-resolution training images, camera intrinsics, camera extrinsics, and dataset metadata.
+-**Outputs:** Optimized MLP weights (density $\sigma$ and color $\mathbf{c}$) for the high-resolution radiance field.
++**Inputs and Outputs:**
++*   **Inputs:** A set of $N$ LR images with known camera poses and intrinsics. The method is resolution-agnostic during training but targets specific HR output resolutions during inference.
++*   **Outputs:** A trained MLP representing the radiance field $(\sigma, \mathbf{c})$ and, optionally, a refined HR image via a post-processing refinement network.
+ 
+ **Data Structures:**
+-*   **Ray Bundle:** Tensor of shape $[B, 3]$ for origins and $[B, 3]$ for directions, where $B$ is the batch size.
+-*   **Query Points:** Tensor of shape $[B, N, 3]$ containing 3D coordinates along rays.
+-*   **Depth Values:** Tensor of shape $[B, N]$ containing distances from camera origin.
++*   **Radiance Field MLP:** Standard NeRF MLP structure mapping 3D coordinates and viewing directions to density $\sigma$ and color $\mathbf{c}$.
++*   **Ray Batch:** A batch of $B$ rays sampled from the training views.
++*   **Sample Points:** For each ray, $N_c$ coarse samples and $N_f$ fine samples are generated.
+ 
+ **Parameters:**
+-*   **Optimizer:** Adam with $\beta_1 = 0.9$, $\beta_2 = 0.999$ [S1].
+-*   **Batch Size:** 2048 rays per batch [S1].
+-*   **Learning Rate:** Exponentially decayed from $5 \cdot 10^{-4}$ to $5 \cdot 10^{-6}$ [S1].
+-*   **Sampling:** Hierarchical sampling with 64 coarse samples and 64 fine samples [S1].
++*   **Optimizer:** Adam with $\beta_1 = 0.9, \beta_2 = 0.999$ [S1].
++*   **Batch Size:** $B = 2048$ rays per batch [S1].
++*   **Learning Rate:** Exponential decay from $5 \times 10^{-4}$ to $5 \times 10^{-6}$ [S1].
++*   **Sampling:** Hierarchical sampling with $N_c = 64$ coarse samples and $N_f = 64$ fine samples [S1].
+ *   **Epochs:** 20 epochs for Blender dataset; 30 epochs for LLFF dataset [S1].
+-*   **Dataset Split:** 100 views for training, 200 images held out for testing [S1].
+ 
+-**Steps:**
+-1.  **Ray Generation:** For each training image, generate rays passing through each pixel. The rays are defined by the camera intrinsic matrix $K$ and extrinsic matrix $T$ [S1].
++**Algorithm Steps:**
++1.  **Ray Sampling:** For each training image, sample rays through each pixel.
+ 2.  **Hierarchical Sampling:**
+-    *   **Coarse Stage:** Sample $N_c = 64$ points along each ray uniformly or using a learned distribution. Query the MLP to obtain density $\sigma_c$ and color $\mathbf{c}_c$.
+-    *   **Fine Stage:** Use the coarse density to guide sampling of $N_f = 64$ points along each ray, focusing on regions with high opacity. Query the MLP to obtain density $\sigma_f$ and color $\mathbf{c}_f$ [S1].
+-3.  **Volume Rendering:** Compute the rendered color $\hat{C}(\mathbf{r})$ for each ray using the differentiable volume rendering integral:
+-    $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i $$
+-    where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$, and $\delta_i$ is the distance between samples [S1].
+-4.  **Loss Computation:** Compute the photometric loss (MSE) between the rendered high-resolution image and the ground truth high-resolution image. The model is trained to minimize this loss, effectively learning a high-resolution radiance field from low-resolution supervision [S1].
+-5.  **Optimization:** Update MLP weights using the Adam optimizer with the specified learning rate schedule [S1].
+-6.  **Refinement (Optional):** If using the refinement network, divide the rendered high-resolution image into non-overlapping patches. For each patch, extract reference patches from a reference image (e.g., the first image in the dataset) using estimated depth and camera parameters to boost texture details [S1]. Stitch the refined patches together [S1].
++    *   Sample $N_c$ points along each ray using a uniform or learned distribution.
++    *   Compute coarse density $\sigma_c$ and transmittance $T$.
++    *   Use $T$ to weight a histogram for resampling $N_f$ points in regions of high density (fine sampling) [S1].
++3.  **Network Forward Pass:**
++    *   Query the MLP for density $\sigma_i$ and color $\mathbf{c}_i$ at each sample point $i$.
++4.  **Volume Rendering:**
++    *   Compute opacity $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ and transmittance $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ [Parent].
++    *   Render color $\hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i$ [Parent].
++    *   *Note:* In NeRF-SR, the "supersampling" aspect implies that the training targets are LR images, but the ray marching and MLP queries effectively resolve the scene at a higher granularity, allowing the model to learn HR details implicitly [S1].
++5.  **Loss Computation:**
++    *   Compute photometric loss between rendered color $\hat{C}(\mathbf{r})$ and ground truth LR image color $C_{gt}$.
++    *   Metrics used for evaluation: PSNR, SSIM, and LPIPS [S1].
++6.  **Optimization:**
++    *   Update MLP parameters using Adam optimizer.
++    *   Decay learning rate exponentially [S1].
+ 
+ **Pseudocode:**
+ ```python
+-import torch
+-import torch.nn as nn
+-import torch.optim as optim
+-
+-def train_nerf_sr(model, dataloader, num_epochs, lr_start, lr_end, device):
+-    optimizer = optim.Adam(model.parameters(), lr=lr_start, betas=(0.9, 0.999))
+-    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=(lr_end/lr_start)**(1/num_epochs))
++def train_nerf_sr(model, lr_scheduler, optimizer, train_loader, epochs):
++    # Hyperparameters from [S1]
++    batch_size = 2048
++    num_coarse_samples = 64
++    num_fine_samples = 64
+     
+-    for epoch in range(num_epochs):
+-        for batch in dataloader:
+-            rays_o, rays_d, gt_images = batch # rays_o: [B, 3], rays_d: [B, 3], gt_images: [B, H, W, 3]
++    for epoch in range(epochs):
++        for batch in train_loader:
++            rays_o, rays_d, gt_colors = batch
+             
+-            # Hierarchical Sampling
+-            # Coarse sampling
+-            t_coarse = sample_points(rays_o, rays_d, N=64) # [B, 64]
+-            pts_coarse = rays_o.unsqueeze(1) + t_coarse.unsqueeze(2) * rays_d.unsqueeze(1) # [B, 64, 3]
+-            sigma_coarse, rgb_coarse = model(pts_coarse) # [B, 64], [B, 64, 3]
++            # 1. Hierarchical Sampling
++            # Sample coarse points
++            t_vals_coarse = sample_t_vals(num_coarse_samples)
++            z_vals_coarse = rays_o + t_vals_coarse * rays_d
+             
+-            # Fine sampling based on coarse density
+-            t_fine = sample_points_hierarchical(rays_o, rays_d, sigma_coarse, N=64) # [B, 64]
+-            pts_fine = rays_o.unsqueeze(1) + t_fine.unsqueeze(2) * rays_d.unsqueeze(1) # [B, 64, 3]
+-            sigma_fine, rgb_fine = model(pts_fine) # [B, 64], [B, 64, 3]
++            # Query coarse MLP
++            sigma_coarse, rgb_coarse = model.forward(rays_o, rays_d, z_vals_coarse)
+             
+-            # Volume Rendering
+-            rgb_rendered = volume_render(rays_o, rays_d, pts_fine, sigma_fine, rgb_fine) # [B, H, W, 3]
++            # Compute transmittance for fine sampling
++            deltas = z_vals_coarse[1:] - z_vals_coarse[:-1]
++            alpha_coarse = 1.0 - torch.exp(-sigma_coarse * deltas)
++            transmittance = torch.cumprod(1.0 - alpha_coarse + 1e-10, dim=-1)
+             
+-            # Loss Computation
+-            loss = mse_loss(rgb_rendered, gt_images)
++            # Resample for fine points based on transmittance
++            z_vals_fine = resample(z_vals_coarse, transmittance, num_fine_samples)
+             
+-            # Optimization
+-            optimizer.zero_grad()
++            # 2. Fine Pass
++            sigma_fine, rgb_fine = model.forward(rays_o, rays_d, z_vals_fine)
++            
++            # 3. Volume Rendering
++            deltas_fine = z_vals_fine[1:] - z_vals_fine[:-1]
++            alpha_fine = 1.0 - torch.exp(-sigma_fine * deltas_fine)
++            transmittance_fine = torch.cumprod(1.0 - alpha_fine + 1e-10, dim=-1)
++            
++            weights = alpha_fine * transmittance_fine
++            rgb_rendered = torch.sum(weights.unsqueeze(-1) * rgb_fine, dim=-2)
++            
++            # 4. Loss and Optimization
++            loss = mse_loss(rgb_rendered, gt_colors)
+             loss.backward()
+             optimizer.step()
+-            scheduler.step()
++            optimizer.zero_grad()
++            
++        lr_scheduler.step()
++```
+ 
+-def volume_render(rays_o, rays_d, pts, sigma, rgb):
+-    # pts: [B, N, 3], sigma: [B, N], rgb: [B, N, 3]
+-    # Compute delta distances
+-    delta = torch.norm(pts[:, 1:, :] - pts[:, :-1, :], dim=-1) # [B, N-1]
+-    delta = torch.cat([delta, torch.zeros_like(delta[:, :1])], dim=1) # [B, N]
+-    
+-    # Compute alpha
+-    alpha = 1 - torch.exp(-sigma * delta) # [B, N]
+-    
+-    # Compute transmittance
+-    T = torch.cumprod(1 - alpha + 1e-10, dim=1) # [B, N]
+-    T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=1) # [B, N]
+-    
+-    # Compute final color
+-    weights = alpha * T # [B, N]
+-    rgb_final = torch.sum(weights.unsqueeze(2) * rgb, dim=1) # [B, 3]
+-    
+-    # Reshape to image dimensions if needed
+-    return rgb_final
+-
+-def sample_points(rays_o, rays_d, N):
+-    # Uniform sampling along rays
+-    t_min, t_max = 0.1, 10.0 # Example near/far planes
+-    t_vals = torch.linspace(t_min, t_max, N).to(rays_o.device)
+-    t_vals = t_vals.unsqueeze(0).expand_as(rays_o)
+-    return t_vals
+-
+-def sample_points_hierarchical(rays_o, rays_d, sigma, N):
+-    # Importance sampling based on sigma
+-    # This is a simplified placeholder for the actual importance sampling logic
+-    # In practice, this involves computing weights from sigma and sampling accordingly
+-    # For implementation completeness, we assume a uniform sample for now
+-    # [G] Actual implementation requires computing cumulative distribution from sigma
+-    t_vals = torch.linspace(0.1, 10.0, N).to(rays_o.device)
+-    return t_vals
+-```
++**Edge Cases and Pitfalls:**
++*   **Arbitrary Scale Limitation:** NeRF-SR does not support arbitrary-scale super-resolution natively; it is trained for specific scale factors (e.g., $\times 2, \times 4$) [S1].
++*   **Real-World Detail Loss:** Supersampling alone may be insufficient for complex real-world scenes (e.g., LLFF dataset) where high-frequency textures are lost, necessitating a refinement network [S1].
+ 
+ ## Subtopics
+ 
+ ### Refinement Network (Ours-Refine)
+-A post-processing step that boosts NeRF-SR outputs with texture details and edge sharpness, particularly for real-world LLFF dataset where supersampling alone is insufficient [S1]. It uses a fixed number of reference patches ($K=8$) with dimensions $64 \times 64$ [S1]. During inference, input images are divided into non-overlapping patches and stitched together after refinement [S1]. The reference image is typically the first image in the dataset [S1]. For scale 2, PSNR increases only slightly as supersampling already learns decent HR fields, but LPIPS improves. For scale 4, refinement is necessary as supersampling derives fewer details [S1].
++A post-processing module that boosts NeRF-SR outputs with texture details and edge sharpness, specifically for real-world datasets like LLFF where supersampling alone yields insufficient photorealism [S1]. It operates during inference by dividing input images into non-overlapping patches, refining them using reference patches, and stitching them back together [S1]. It uses a fixed number of reference patches $K=8$ with dimensions $64 \times 64$ [S1]. The refinement is necessary for larger magnifications (e.g., $\times 4$) where supersampling derives fewer details, though it provides subtle LPIPS improvements even at $\times 2$ [S1].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   Training time is comparable to training a standard high-resolution NeRF, as the network learns the high-resolution field directly [S1].
+-*   Inference time for NeRF's MLP to render a $1008 \times 756$ image is approximately 48 seconds on a single 1080Ti GPU [S1].
+-*   The refinement stage adds negligible time, taking approximately 1.3 seconds on the same hardware [S1].
+-
+-**Measured Performance:**
+-*   **Blender Dataset:** Trained for 20 epochs [S1].
+-*   **LLFF Dataset:** Trained for 30 epochs [S1].
+-*   **LLFF ×2 Refined:** PSNR 27.34, SSIM 0.842, LPIPS 0.103 [S1].
+-*   **LLFF ×4 Refined:** PSNR 25.59, SSIM 0.759, LPIPS 0.165 [S1].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Achieves photorealistic renderings without external data by exploiting 3D consistency [S1]. Improves visual appearance (LPIPS) even when PSNR gains are marginal [S1].
+-*   **Limitations:** Does not support arbitrary-scale super-resolution; it is trained for specific scale factors (e.g., ×2, ×4) [S1]. Introduces extra computational overhead compared to standard NeRF, though less than training a full HR NeRF from scratch [S1].
++*   **Time Complexity:** The training time is comparable to training a standard HR NeRF, as it consumes no more time than training a HR NeRF directly [S1]. Inference time for the base NeRF-SR is dominated by the MLP rendering (e.g., ~48 seconds for a $1008 \times 756$ image on a single 1080Ti) [S1].
++*   **Memory Complexity:** Standard NeRF memory footprint for MLP weights and ray batches.
++*   **Performance:** On the LLFF dataset, NeRF-SR with refinement (Ours-Refine) achieves PSNR 27.34, SSIM 0.842, and LPIPS 0.103 at $\times 2$ scale, and PSNR 25.59, SSIM 0.759, and LPIPS 0.165 at $\times 4$ scale [S1].
++*   **Strengths:** Achieves photorealistic HR novel view synthesis from LR inputs without external data, leveraging 3D consistency [S1].
++*   **Limitations:** Lacks arbitrary-scale support; introduces extra computation during the refinement stage (e.g., +1.3 seconds for refinement on a $1008 \times 756$ image) [S1].
+ 
+ ## Background
+-NeRF-SR was introduced in the paper "NeRF-SR: High-Quality Neural Radiance Fields using Supersampling" [S1]. It is the first pipeline to achieve high-resolution novel view synthesis from mostly low-resolution inputs without external data [S1]. The method builds on the original NeRF framework [S1] and addresses the blurriness issue in upscaling by training the radiance field directly on low-resolution inputs while rendering at high resolution [S1].
++NeRF-SR was introduced to address the limitation of standard NeRF in generating high-resolution details from low-resolution training data. It is the first pipeline to achieve HR novel view synthesis with mostly LR inputs without external data [S1]. The method exploits 3D consistency through a supersampling strategy [S1].
+ 
+ ## Sources

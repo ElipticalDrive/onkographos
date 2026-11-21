@@ -1,0 +1,52 @@
+# Outline and Contour Generation
+
+
+## Overview
+Outline and Contour Generation is a family of non-photorealistic volume rendering techniques that enhance perceptual clarity by explicitly rendering edges, silhouettes, or topological boundaries as line primitives or stylized strokes [G]. Unlike standard volume rendering which relies on opacity and color to imply form, these methods detect geometric or scalar discontinuities and render them as distinct visual cues to define object boundaries, internal structures, or topological relationships. This family is distinguished from its siblings by its focus on explicit edge extraction and rendering strategies, ranging from object-space silhouette extraction to image-space depth discontinuity detection and topological landscape mapping.
+
+## Shared principles
+The family shares the fundamental goal of enhancing perceptual clarity through non-photorealistic edge representation [G]. Common mechanisms include:
+1. **Edge Detection:** Identifying boundaries based on local volumetric properties (gradients, Laplacian of Gaussian) or image-space properties (depth, normal discontinuities) [S2].
+2. **Line Rendering:** Converting detected edges into line primitives (strips, segments) or stylized strokes [S2].
+
+## Subtopics
+
+### [Object Contour NPR](787-object-contour-npr.md)
+Generates view-dependent line primitives demarcating areas where an object's surface turns away from the viewer, relying on gradient magnitude and viewing angle for real-time tracing.
+
+### [Image Space Outline Generation](788-image-space-outline-generation.md)
+A post-processing technique detecting screen-space depth or normal discontinuities to define boundaries without analytical geometry processing.
+
+### [Lasso Contour Rendering](1855-lasso-contour-rendering.md)
+An interactive technique allowing users to manually define regions of interest to generate contour overlays, isolating complex structures lacking sharp boundaries [G].
+
+### [Curvature-Controlled Style Contours](5350-curvature-controlled-style-contours.md)
+Regulates contour thickness based on normal curvature along the view direction to prevent uncontrolled variation in thickness inherent in standard dot-product silhouette methods.
+
+### [Silhouette Rendering](7959-silhouette-rendering.md)
+An object-space technique extracting significant edges (silhouettes and feature lines) from geometry, assembling them into strokes, and rendering them with stylization to enhance perceptual clarity.
+
+### [Topological Landscape](8481-topological-landscape.md)
+Maps the connectivity of a scalar field’s level sets onto a 3D terrain model using the contour tree, leveraging human intuition for reading physical terrain to interpret complex topological relationships.
+
+### [Suggestive Contour Extraction](13101-suggestive-contour-extraction.md)
+Identifies surface locations where radial curvature is zero but increasing towards the viewer, complementing standard object contours to reveal hidden or occluded geometry.
+
+### [Bounding Wall Contour Overlay](16354-bounding-wall-contour-overlay.md)
+Displays line contours of a reference scalar field on the vertical bounding walls of a 3D volume to provide spatial context without occluding primary data.
+
+### [Contour Correspondence via Object Set Overlap](17217-contour-correspondence-via-object-set-overlap.md)
+Determines contour correspondence in time-varying fields by verifying overlap of associated upper and lower object sets, avoiding higher-dimensional interpolations.
+
+### Ghosted Views with Contours
+Ghosted views with contours combine segmentation and contour rendering to clarify internal structures obscured by context. The method pre-segments the most interesting internal structures (e.g., small internal organs) [S1, unofficial]. It identifies context information (e.g., the body) that obscures these structures [S1, unofficial]. In areas of occlusion, the visual representation of the context object is reduced to contours, providing a clear view of the interesting internal organ [S1, unofficial].
+
+### 2D Stroke to 3D Line Picking
+2D Stroke to 3D Line Picking is a method that locates the intended location of a 2D stroke in 3D space by finding the 3D line that is a projection of the 2D stroke and fits contours in the data best, determined by the dot product of the normal vector of the extruded stroke and the gradient in the data [S2]. This method only works at contours of objects and segments objects whose contour best fits the stroke, which may not be the most visible objects, whereas WYSIWYP is applicable to any position in the rendering [S2].
+
+## Background
+The family of outline and contour generation techniques has evolved to address the limitations of photorealistic volume rendering in conveying shape, boundaries, and topological information. Early work in illustrative visualization for medicine and science highlighted the utility of expressive visualizations, such as ghosted views with contours, to clarify internal structures obscured by context [S1, unofficial]. The development of non-photorealistic rendering (NPR) techniques allowed for the explicit rendering of edges and silhouettes to enhance perceptual clarity. Object-space silhouette rendering techniques were developed to extract significant edges from geometry and assemble them into stylized strokes [S2]. Image-space techniques emerged to provide faster, post-processing based outline generation by detecting depth and normal discontinuities [S1, unofficial][S2]. More advanced methods introduced curvature control to maintain consistent visual weight across varying surface geometries [S1, unofficial] and suggestive contours to reveal hidden geometry [S1, unofficial]. Topological landscape techniques mapped scalar field connectivity to 3D terrain models to aid in interpreting complex topological relationships [S1, unofficial]. Interactive methods like lasso contour rendering and 2D stroke to 3D line picking were developed to allow users to explicitly select and highlight regions of interest [G][S2].
+
+## Sources
+[S1] Illustrative Visualization for Medicine and Science, https://doi.org/10.2312/egt.20061068, fetched 2026-10-26 (unofficial)
+[S2] WYSIWYP: What You See Is What You Pick, https://doi.org/10.1109/tvcg.2012.292, fetched 2026-11-05

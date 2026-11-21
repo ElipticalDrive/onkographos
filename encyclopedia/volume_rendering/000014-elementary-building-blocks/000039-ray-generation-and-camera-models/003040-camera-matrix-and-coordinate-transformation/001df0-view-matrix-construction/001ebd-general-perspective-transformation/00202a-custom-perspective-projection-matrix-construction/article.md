@@ -1,0 +1,216 @@
+# Custom Perspective Projection Matrix Construction
+
+Also called: 3D Projection Matrix Construction, Camera projection matrix setup, Canvas projection setup, Custom Perspective Projection Matrix, View matrix assembly, View matrix setup
+
+## Overview
+This method constructs the perspective projection matrix and view matrix required to transform 3D world coordinates into clip space for volume rendering and rasterization. It solves the problem of defining the camera's field of view, aspect ratio, and depth clipping planes in a way that is compatible with specific rendering pipelines, such as those used in Gaussian Splatting or standard OpenGL-based volume renderers [S2, unofficial][S3, unofficial]. It differs from generic graphics pipelines by explicitly managing intrinsic scaling (focal lengths) for multi-resolution training and constructing a specific projection matrix tailored for the near/far plane constraints of the rendering engine [S1, unofficial][S2, unofficial]. It builds on [General Perspective Transformation](1845-general-perspective-transformation.md).
+
+## How it works
+**Inputs:**
+- Camera parameters: Field of view (FOV) in radians, aspect ratio ($w/h$), near plane distance ($n$), far plane distance ($f$) [S3, unofficial].
+- Optional: Focal lengths ($f_x, f_y$) if constructing from intrinsic parameters [S2, unofficial].
+- Screen dimensions: Width ($W$) and Height ($H$) in pixels [S2, unofficial].
+- Camera orientation: Yaw and Pitch angles [S1, unofficial].
+- Shift vectors: `before` and `after` vectors for coordinate system adjustments [S1, unofficial].
+
+**Outputs:**
+- Projection matrix $P$ (4x4) [S2, unofficial].
+- View matrix $V$ (4x4) [S3, unofficial].
+- Combined model-view-projection matrix $MVP = P \cdot V \cdot Model$ [S3, unofficial].
+
+**Data Structures:**
+- `Matrix4`: A 4x4 matrix stored in column-major or row-major order depending on the backend (e.g., GLM uses column-major by default, but the formula below assumes standard mathematical notation where $P_{ij}$ is row $i$, column $j$).
+- `Vector3`: 3D coordinates for shifts and rotations.
+
+**Steps:**
+
+1. **Initialize Matrices:**
+   - Set the Model matrix $Model$ to the identity matrix $I$ [S3, unofficial].
+   - Initialize the Projection matrix $P$ with zeros [S2, unofficial].
+
+2. **Calculate Projection Matrix Elements:**
+   - If focal lengths $f_x, f_y$ are provided, use them directly. Otherwise, derive them from FOV and aspect ratio:
+     $$f_x = \frac{W}{2 \tan(\text{FOV}_y / 2)}$$
+     $$f_y = \frac{H}{2 \tan(\text{FOV}_y / 2)}$$
+     [S2, unofficial][G] (Note: Standard derivation assumes square pixels where $f_x = f_y$, but [S2, unofficial] allows distinct $f_x, f_y$).
+   - Set the non-zero elements of $P$ as follows [S2, unofficial]:
+     $$P_{0,0} = \frac{2 f_x}{W}$$
+     $$P_{1,1} = \frac{2 f_y}{H}$$
+     $$P_{2,2} = -\frac{f + n}{f - n}$$
+     $$P_{2,3} = -1$$
+     $$P_{3,2} = -\frac{2 f n}{f - n}$$
+     All other elements are 0.
+   - *Note:* This formulation maps the view space $z$ to clip space $z'$ such that $z' \in [-1, 1]$ (or $[0, 1]$ depending on the depth buffer convention, but the formula uses the standard OpenGL-like range). The negative sign on $P_{2,2}$ and $P_{2,3}$ assumes a right-handed coordinate system where the camera looks down the negative Z-axis.
+
+3. **Apply Coordinate Shifts (Optional):**
+   - If a `before` shift vector is non-zero, apply a translation to move the origin before projection [S1, unofficial].
+   - If an `after` shift vector is non-zero, apply an inverse translation after projection to map back to screen coordinates [S1, unofficial].
+
+4. **Construct View Matrix:**
+   - Get the view matrix $V$ from the camera object, which typically involves inverse rotation and translation of the camera position [S3, unofficial].
+   - Alternatively, construct $V$ manually using yaw and pitch rotations [S1, unofficial]:
+     - If $|\text{yaw}| > 10^{-20}$, apply rotation around the Z-axis (or Y-axis depending on convention; [S1, unofficial] specifies Z-axis for yaw, which is non-standard for typical "yaw-pitch-roll" where yaw is Y, but we follow the source) [S1, unofficial].
+     - If $|\text{pitch}| > 10^{-20}$, apply rotation around the X-axis [S1, unofficial].
+     - *Pitfall:* Rotations are skipped if angles are near zero ($10^{-20}$) to prevent numerical instability and unnecessary matrix multiplications [S1, unofficial].
+
+5. **Apply Model Transformations (Optional):**
+   - Apply uniform scaling (e.g., factor 0.7) to the Model matrix if required by the scene setup [S1, unofficial].
+
+6. **Combine Matrices:**
+   - Compute the final transformation matrix:
+     $$MVP = P \cdot V \cdot Model$$
+     [S3, unofficial]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def construct_projection_matrix(width, height, fov_radians, near, far, fx=None, fy=None):
+    """
+    Constructs a perspective projection matrix.
+    
+    Args:
+        width (float): Screen width in pixels.
+        height (float): Screen height in pixels.
+        fov_radians (float): Vertical field of view in radians.
+        near (float): Near plane distance.
+        far (float): Far plane distance.
+        fx (float, optional): Horizontal focal length. If None, derived from FOV.
+        fy (float, optional): Vertical focal length. If None, derived from FOV.
+        
+    Returns:
+        list: 4x4 projection matrix in row-major order (list of lists).
+    """
+    # Step 2: Calculate focal lengths if not provided
+    if fx is None or fy is None:
+        # Standard derivation for square pixels
+        fy = (height / 2.0) / math.tan(fov_radians / 2.0)
+        fx = fy # Assuming square pixels if not specified
+        
+    # Initialize 4x4 matrix with zeros
+    P = [[0.0 for _ in range(4)] for _ in range(4)]
+    
+    # Set elements according to [S2, unofficial]
+    P[0][0] = (2.0 * fx) / width
+    P[1][1] = (2.0 * fy) / height
+    P[2][2] = -(far + near) / (far - near)
+    P[2][3] = -1.0
+    P[3][2] = (-2.0 * far * near) / (far - near)
+    
+    return P
+
+def construct_view_matrix(yaw, pitch, camera_position):
+    """
+    Constructs a view matrix from yaw, pitch, and camera position.
+    Note: This is a simplified version following [S1, unofficial] logic.
+    Standard view matrix is inverse of camera transform.
+    """
+    # Identity matrix
+    V = [[1.0 if i == j else 0.0 for j in range(4)] for i in range(4)]
+    
+    # Apply rotations if angles are significant [S1, unofficial]
+    yaw_threshold = 1e-20
+    pitch_threshold = 1e-20
+    
+    if abs(yaw) > yaw_threshold:
+        # Rotation around Z-axis for yaw (as per [S1, unofficial])
+        # Note: Standard OpenGL uses Y-axis for yaw. This follows the source.
+        cos_y = math.cos(yaw)
+        sin_y = math.sin(yaw)
+        # Rotation matrix around Z
+        R_z = [
+            [cos_y, -sin_y, 0, 0],
+            [sin_y, cos_y, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ]
+        V = multiply_matrices(R_z, V)
+        
+    if abs(pitch) > pitch_threshold:
+        # Rotation around X-axis for pitch [S1, unofficial]
+        cos_p = math.cos(pitch)
+        sin_p = math.sin(pitch)
+        # Rotation matrix around X
+        R_x = [
+            [1, 0, 0, 0],
+            [0, cos_p, -sin_p, 0],
+            [0, sin_p, cos_p, 0],
+            [0, 0, 0, 1]
+        ]
+        V = multiply_matrices(R_x, V)
+        
+    # Apply translation to move world relative to camera
+    # T = translate(-camera_position)
+    T = [
+        [1, 0, 0, -camera_position[0]],
+        [0, 1, 0, -camera_position[1]],
+        [0, 0, 1, -camera_position[2]],
+        [0, 0, 0, 1]
+    ]
+    V = multiply_matrices(T, V)
+    
+    return V
+
+def multiply_matrices(A, B):
+    """Multiplies two 4x4 matrices A and B (A * B)."""
+    C = [[0.0 for _ in range(4)] for _ in range(4)]
+    for i in range(4):
+        for j in range(4):
+            for k in range(4):
+                C[i][j] += A[i][k] * B[k][j]
+    return C
+
+def combine_matrices(projection, view, model):
+    """Combines Projection, View, and Model matrices: P * V * M."""
+    # First V * M
+    VM = multiply_matrices(view, model)
+    # Then P * (V * M)
+    MVP = multiply_matrices(projection, VM)
+    return MVP
+```
+
+**Parameters:**
+- `DEFAULT_CAMERA_SPECS`: Typical default values include $f_x = 1159.5880733038064$, $f_y = 1164.6601287484507$, $near = 0.1$, $far = 500$ [S2, unofficial].
+- Aspect Ratio: Typically $SCR\_WIDTH / SCR\_HEIGHT$, e.g., $1280/720$ [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Numerical Instability:** Rotations should be skipped if yaw or pitch are near zero ($< 10^{-20}$) to avoid numerical noise [S1, unofficial].
+- **Far Plane Clipping:** Standard finite far planes can cause precision loss at large distances. Consider [Reverse Z Perspective Projection with Infinite Far Plane](7544-reverse-z-perspective-projection-with-infinite-far-plane.md) for such cases.
+- **Depth Buffer Convention:** The formula provided maps $z$ to $[-1, 1]$. If the renderer expects $[0, 1]$, the matrix elements $P_{2,2}$ and $P_{3,2}$ must be adjusted.
+
+## Subtopics
+
+### [View and Projection Matrix Construction](2432-view-and-projection-matrix-construction.md)
+This method constructs the view and projection matrices required for volume rendering, specifically tailored for Gaussian Splatting pipelines where splat shaders may require explicit focal length calculations derived from the field of view (FOV). It differs from generic graphics pipelines by explicitly managing intrinsic scaling for multi-resolution training and constructing a specific projection matrix tailored for the near/far plane constraints of the rendering engine. It builds on [Custom Perspective Projection Matrix Construction](2175-custom-perspective-projection-matrix-construction.md).
+
+### [Reverse Z Perspective Projection with Infinite Far Plane](7544-reverse-z-perspective-projection-with-infinite-far-plane.md)
+This method constructs a perspective projection matrix that maps view space coordinates to clip space while utilizing a reversed depth buffer (Reverse Z) and an effectively infinite far plane. It solves the problem of depth precision loss at large distances inherent in standard finite-far-plane projections, thereby avoiding far-plane clipping artifacts and maintaining high precision near the camera. It differs from standard perspective projections by inverting the depth range and removing the far-plane dependency from the matrix structure.
+
+### [MiniGS Full Projection Matrix](13954-minigs-full-projection-matrix.md)
+The MiniGS Full Projection Matrix constructs a combined view-projection matrix that adheres to the specific rendering conventions of the MiniGS reference kernel. It solves the problem of transforming 3D camera-space coordinates into clip space for perspective projection, explicitly handling the frustum geometry and depth mapping. It differs from standard textbook projections by using an explicit frustum plane calculation followed by a matrix transpose before batched multiplication with the view matrix, ensuring compatibility with the specific memory layout and shader expectations of the MiniGS implementation.
+
+### Object Space Projection
+Object Space Projection is a technique where a second-order tensor $T$ is projected onto object space (surface space) using a symmetric projection matrix $P$ [S4, unofficial]. It is used to transform tensor fields from world space to object space for visualization, such as in Line Integral Convolution (LIC) methods [S4, unofficial]. The projection is defined as $T' = P \cdot T \cdot P^T$, where $P$ is constructed from the surface normal $\mathbf{n} = (n_x, n_y, n_z)$ as:
+$$P = \begin{pmatrix} 1 - n_x^2 & -n_y n_x & -n_z n_x \\ -n_x n_y & 1 - n_y^2 & -n_z n_y \\ -n_x n_z & -n_y n_z & 1 - n_z^2 \end{pmatrix}$$
+[S4, unofficial]. This method is typically applied during the rendering pass where depth and surface normal information are available [S4, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Matrix construction is $O(1)$ as it involves a fixed number of arithmetic operations. Combining matrices is $O(1)$ for 4x4 matrices.
+- **Memory Complexity:** $O(1)$ for storing the matrices.
+- **Performance:** The method is computationally inexpensive. The bottleneck is usually the rendering of the splats or volume slices, not the matrix construction.
+- **Strengths:** Explicit control over focal lengths and aspect ratio allows for accurate simulation of camera intrinsics, which is crucial for Gaussian Splatting and multi-resolution training [S2, unofficial].
+- **Limitations:** Standard perspective projection suffers from depth precision issues at large distances. The method does not inherently support infinite far planes without modification (see [Reverse Z](7544-reverse-z-perspective-projection-with-infinite-far-plane.md)).
+- **When to Use:** Use when explicit control over camera intrinsics is required, such as in Gaussian Splatting, or when integrating with OpenGL/DirectX pipelines that expect standard projection matrices.
+- **When Not to Use:** Use [Reverse Z](7544-reverse-z-perspective-projection-with-infinite-far-plane.md) if depth precision at large distances is critical. Use [MiniGS Full Projection Matrix](13954-minigs-full-projection-matrix.md) if targeting the MiniGS kernel specifically.
+
+## Background
+The construction of perspective projection matrices is a fundamental concept in computer graphics, originating from the work of Foley, van Dam, Feiner, and Hughes in "Computer Graphics: Principles and Practice" [S3, unofficial]. The specific formulation used here, with explicit focal lengths and the particular arrangement of matrix elements, is commonly found in modern real-time rendering engines and Gaussian Splatting implementations [S2, unofficial][S3, unofficial]. The method has been adapted for volume rendering and 3D Gaussian Splatting to ensure that the rendered splats accurately reflect the camera's intrinsic parameters, which is essential for high-fidelity novel view synthesis [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] hikaricai/vdrm, https://github.com/hikaricai/vdrm, fetched 2026-10-26 (unofficial)
+[S2] akbartus/Gaussian-Splatting-WebViewers, https://github.com/akbartus/Gaussian-Splatting-WebViewers, fetched 2026-10-27 (unofficial)
+[S3] Kaefaell/VoxelDemo, https://github.com/Kaefaell/VoxelDemo, fetched 2026-10-27 (unofficial)
+[S4] Image-Space Tensor Field Visualization Using a LIC-like Method, https://doi.org/10.1007/978-3-642-21608-4_11, fetched 2026-10-27 (unofficial)

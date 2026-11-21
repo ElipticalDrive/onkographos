@@ -1,0 +1,934 @@
+# WebGPU Volume Pathtracer
+
+A volume raycaster using WebGPU. Try it out [online!](https://www.willusher.io/webgpu-volume-pathtracer/)
+
+![bonsai](https://user-images.githubusercontent.com/1522476/177204612-f305c151-6e41-44bb-ba4c-1fd334beec60.png)
+
+## Building
+
+The project uses webpack and node to build, after cloning the repo run:
+
+```
+npm install
+npm run serve
+```
+
+Then point your browser to `localhost:8080`!
+
+### webpack.config.js
+```
+const HtmlWebpackPlugin = require("html-webpack-plugin");
+const path = require("path");
+
+module.exports = {
+    entry: "./src/volume-pathtracer.js",
+    mode: "development",
+    output: {
+        filename: "main.js",
+        path: path.resolve(__dirname, "dist"),
+    },
+    module: {
+        rules: [
+            {
+                test: /\.(png|jpg|jpeg)$/i,
+                type: "asset/resource",
+            },
+            {
+                test: /\.wgsl$/i,
+                type: "asset/source",
+            }
+        ]
+    },
+    plugins: [new HtmlWebpackPlugin({
+        template: "./index.html",
+    })],
+};
+```
+
+### src/shaders.wgsl
+```
+const M_PI: f32 = 3.14159265358979323846;
+
+// Reduce clutter/keyboard pain
+alias float2 = vec2<f32>;
+alias float3 = vec3<f32>;
+alias float4 = vec4<f32>;
+alias uint2 = vec2<u32>;
+alias int2 = vec2<i32>;
+
+// TODO: Would need to write a custom webpack loader for wgsl that
+// processes #include to be able to #include this
+struct LCGRand {
+     state: u32,
+};
+
+fn murmur_hash3_mix(hash_in: u32, k_in: u32) -> u32
+{
+    let c1 = 0xcc9e2d51u;
+    let c2 = 0x1b873593u;
+    let r1 = 15u;
+    let r2 = 13u;
+    let m = 5u;
+    let n = 0xe6546b64u;
+
+    var k = k_in * c1;
+    k = (k << r1) | (k >> (32u - r1));
+    k *= c2;
+
+    var hash = hash_in ^ k;
+    hash = ((hash << r2) | (hash >> (32u - r2))) * m + n;
+
+    return hash;
+}
+
+fn murmur_hash3_finalize(hash_in: u32) -> u32
+{
+    var hash = hash_in ^ (hash_in >> 16u);
+    hash *= 0x85ebca6bu;
+    hash ^= hash >> 13u;
+    hash *= 0xc2b2ae35u;
+    hash ^= hash >> 16u;
+
+    return hash;
+}
+
+fn lcg_random(rng: ptr<function, LCGRand>) -> u32
+{
+    let m = 1664525u;
+    let n = 1013904223u;
+    // WGSL please Add an arrow operator or only use refs/inout
+    // This is really a pain
+    (*rng).state = (*rng).state * m + n;
+    return (*rng).state;
+}
+
+fn lcg_randomf(rng: ptr<function, LCGRand>) -> f32
+{
+	return ldexp(f32(lcg_random(rng)), -32);
+}
+
+fn get_rng(frame_id: u32, pixel: int2, dims: int2) -> LCGRand
+{
+    var rng: LCGRand;
+    rng.state = murmur_hash3_mix(0u, u32(pixel.x + pixel.y * dims.x));
+    rng.state = murmur_hash3_mix(rng.state, frame_id);
+    rng.state = murmur_hash3_finalize(rng.state);
+    return rng;
+}
+
+struct VertexInput {
+    @location(0) position: float3,
+};
+
+struct VertexOutput {
+    @builtin(position) position: float4,
+    @location(0) transformed_eye: float3,
+    @location(1) ray_dir: float3,
+};
+
+struct ViewParams {
+    proj_view: mat4x4<f32>,
+    // Not sure on WGSL padding/alignment rules for blocks,
+    // just assume align/pad to vec4
+    eye_pos: float4,
+    volume_scale: float4,
+    light_dir: float4,
+    frame_id: u32,
+    sigma_t_scale: f32,
+    sigma_s_scale: f32
+};
+
+@group(0) @binding(0)
+var<uniform> params: ViewParams;
+
+@group(0) @binding(1)
+var volume: texture_3d<f32>;
+
+@group(0) @binding(2)
+var colormap: texture_2d<f32>;
+
+@group(0) @binding(3)
+var tex_sampler: sampler;
+
+// Why can't we read from storage textures or read/write from one?
+@group(0) @binding(4)
+var accum_buffer_in: texture_2d<f32>;
+
+@group(0) @binding(5)
+var accum_buffer_out: texture_storage_2d<rgba32float, write>;
+
+@vertex
+fn vertex_main(vert: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    // Translate the volume to place its center at the origin to scale it
+    var volume_translation = float3(0.5) - params.volume_scale.xyz * 0.5;
+    var world_pos = vert.position * params.volume_scale.xyz + volume_translation;
+    out.position = params.proj_view * float4(world_pos, 1.0);
+
+    // Transform the eye into the scaled space
+    out.transformed_eye = (params.eye_pos.xyz - volume_translation) / params.volume_scale.xyz;
+    out.ray_dir = vert.position - out.transformed_eye;
+    return out;
+};
+
+fn intersect_box(orig: float3, dir: float3) -> float2 {
+	var box_min = float3(0.0);
+	var box_max = float3(1.0);
+	var inv_dir = 1.0 / dir;
+	var tmin_tmp = (box_min - orig) * inv_dir;
+	var tmax_tmp = (box_max - orig) * inv_dir;
+	var tmin = min(tmin_tmp, tmax_tmp);
+	var tmax = max(tmin_tmp, tmax_tmp);
+	var t0 = max(tmin.x, max(tmin.y, tmin.z));
+	var t1 = min(tmax.x, min(tmax.y, tmax.z));
+	return float2(t0, t1);
+}
+
+fn sample_spherical_direction(s: float2) -> float3 {
+    let cos_theta = 1.0 - 2.0 * s.x;
+    let sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
+    let phi = s.y * 2.0 * M_PI;
+    return float3(cos(phi) * sin_theta, sin(phi) * sin_theta, cos_theta);
+}
+
+fn linear_to_srgb(x: f32) -> f32 {
+	if (x <= 0.0031308) {
+		return 12.92 * x;
+	}
+	return 1.055 * pow(x, 1.0 / 2.4) - 0.055;
+}
+
+struct SamplingResult {
+    scattering_event: bool,
+    color: float3,
+    transmittance: f32,
+};
+
+fn sample_woodcock(orig: float3,
+                   dir: float3,
+                   interval: float2,
+                   t: ptr<function, f32>,
+                   rng: ptr<function, LCGRand>)
+                   -> SamplingResult
+{
+    var result: SamplingResult;
+    result.scattering_event = false;
+    result.color = float3(0.0);
+    result.transmittance = 0.0;
+    loop {
+        let samples = float2(lcg_randomf(rng), lcg_randomf(rng));
+
+        *t -= log(1.0 - samples.x) / params.sigma_t_scale;
+        if (*t >= interval.y) {
+            break;
+        }
+
+        var p = orig + *t * dir;
+        var val = textureSampleLevel(volume, tex_sampler, p, 0.0).r;
+        // TODO: opacity from transfer function in UI instead of just based on the scalar value
+        // Opacity values from the transfer fcn will already be in [0, 1]
+        var density = val;
+        //var sample_opacity = textureSampleLevel(colormap, tex_sampler, float2(val, 0.5), 0.0).a;
+        // Here the sigma t scale will cancel out
+        if (density > samples.y) {
+            result.scattering_event = true;
+            result.color = textureSampleLevel(colormap, tex_sampler, float2(val, 0.5), 0.0).rgb;
+            result.transmittance = (1.0 - val);
+            break;
+        }
+    }
+    return result;
+}
+
+fn delta_tracking_transmittance(orig: float3,
+                                dir: float3,
+                                interval: float2,
+                                rng: ptr<function, LCGRand>) -> f32
+{
+    var transmittance = 1.0;
+    var t = interval.x;
+    loop {
+        let samples = float2(lcg_randomf(rng), lcg_randomf(rng));
+
+        t -= log(1.0 - samples.x) / params.sigma_t_scale;
+        if (t >= interval.y) {
+            break;
+        }
+
+        var p = orig + t * dir;
+        var val = textureSampleLevel(volume, tex_sampler, p, 0.0).r;
+        // TODO: Sample opacity from colormap
+        if (val > samples.y) {
+            return 0.0;
+        }
+    }
+    return 1.0;
+}
+
+fn ratio_tracking_transmittance(orig: float3,
+                                dir: float3,
+                                interval: float2,
+                                rng: ptr<function, LCGRand>) -> f32
+{
+    var transmittance = 1.0;
+    var t = interval.x;
+    loop {
+        t -= log(1.0 - lcg_randomf(rng)) / params.sigma_t_scale;
+        if (t >= interval.y) {
+            break;
+        }
+
+        var p = orig + t * dir;
+        var val = textureSampleLevel(volume, tex_sampler, p, 0.0).r;
+        // TODO: Sample from the opacity colormap
+        transmittance *= (1.0 - val);
+    }
+    return transmittance;
+}
+
+@fragment
+fn fragment_main(in: VertexOutput) -> @location(0) float4 {
+    var ray_dir = normalize(in.ray_dir);
+
+	var t_interval = intersect_box(in.transformed_eye, ray_dir);
+	if (t_interval.x > t_interval.y) {
+		discard;
+	}
+	t_interval.x = max(t_interval.x, 0.0);
+
+    let pixel = int2(i32(in.position.x), i32(in.position.y));
+    // Image will be no larger than 1280x720 so we can keep this fixed
+    // for picking our RNG value
+    var rng = get_rng(params.frame_id, pixel, int2(1280, 720));
+
+    // This should just be 1 for the max density in scivis
+    var inv_max_density = 1.0;
+
+    let light_dir = params.light_dir.xyz;
+    let light_emission = params.light_dir.w;
+    let ambient_strength = 0.0;
+    let volume_emission = 0.5;
+
+    var illum = float3(0.0);
+    var throughput = float3(1.0);
+    var transmittance = 1.0;
+
+    var had_any_event = false;
+    var pos = in.transformed_eye;
+    // Sample the next scattering event in the volume
+    for (var i = 0; i < 4; i += 1) {
+        var t = t_interval.x;
+        var event = sample_woodcock(pos, ray_dir, t_interval, &t, &rng);
+
+        if (!event.scattering_event) {
+            // Illuminate with an "environment light"
+            if (had_any_event) {
+                illum += throughput * float3(ambient_strength);
+            } else {
+                illum = float3(0.1);
+            }
+            break;
+        } else {
+            had_any_event = true;
+
+            // Update scattered ray position
+            pos = pos + ray_dir * t;
+
+            // Sample illumination from the direct light
+            t_interval = intersect_box(pos, light_dir);
+            // We're inside the volume
+            t_interval.x = 0.0;
+            /*
+            var light_transmittance =
+                ratio_tracking_transmittance(pos, light_dir, t_interval, &rng);
+            */
+            var light_transmittance =
+                delta_tracking_transmittance(pos, light_dir, t_interval, &rng);
+            illum += throughput * light_transmittance * float3(light_emission);
+
+            // Include emission from the volume for emission/absorption scivis model
+            // Scaling the volume emission by the inverse of the opacity from the transfer function
+            // can give some nice effects. Would be cool to provide control of this
+            illum += throughput * event.color * volume_emission;// * (1.0 - event.transmittance);
+
+            throughput *= event.color * event.transmittance * params.sigma_s_scale;
+
+            // Scatter in a random direction to continue the ray
+            ray_dir = sample_spherical_direction(float2(lcg_randomf(&rng), lcg_randomf(&rng)));
+            t_interval = intersect_box(pos, ray_dir);
+            if (t_interval.x > t_interval.y) {
+                illum = float3(0.0, 1.0, 0.0);
+                break;
+            }
+            // We're now inside the volume
+            t_interval.x = 0.0;
+        }
+    }
+
+    var color = float4(illum, 1.0);
+
+    // Accumulate into the accumulation buffer for progressive accumulation 
+    var accum_color = float4(0.0);
+    if (params.frame_id > 0u) {
+        accum_color = textureLoad(accum_buffer_in, pixel, 0);
+    }
+    accum_color += color;
+    textureStore(accum_buffer_out, pixel, accum_color);
+
+    color = accum_color / f32(params.frame_id + 1u);
+
+    // TODO: background color also needs to be sRGB-mapped, otherwise this
+    // causes the volume bounding box to show up incorrectly b/c of the
+    // differing brightness
+    color.r = linear_to_srgb(color.r);
+    color.g = linear_to_srgb(color.g);
+    color.b = linear_to_srgb(color.b);
+    return color;
+}
+```
+
+### src/volume-pathtracer.js
+```
+import {ArcballCamera} from "arcball_camera";
+import {Controller} from "ez_canvas_controller";
+import {mat4, vec3} from "gl-matrix";
+
+import shaderCode from "./shaders.wgsl";
+import {
+    colormaps,
+    fetchVolume,
+    fillSelector,
+    getCubeMesh,
+    getVolumeDimensions,
+    linearToSRGB,
+    sphericalDir,
+    uploadImage,
+    uploadVolume,
+    volumes
+} from "./volume.js";
+
+(async () => {
+    if (navigator.gpu === undefined) {
+        document.getElementById("webgpu-canvas").setAttribute("style", "display:none;");
+        document.getElementById("no-webgpu").setAttribute("style", "display:block;");
+        return;
+    }
+
+    var adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) {
+        document.getElementById("webgpu-canvas").setAttribute("style", "display:none;");
+        document.getElementById("no-webgpu").setAttribute("style", "display:block;");
+        return;
+    }
+    var device = await adapter.requestDevice();
+
+    // Get a context to display our rendered image on the canvas
+    var canvas = document.getElementById("webgpu-canvas");
+    var context = canvas.getContext("webgpu");
+
+    // Setup shader modules
+    var shaderModule = device.createShaderModule({code: shaderCode});
+    var compilationInfo = await shaderModule.getCompilationInfo();
+    if (compilationInfo.messages.length > 0) {
+        var hadError = false;
+        console.log("Shader compilation log:");
+        for (var i = 0; i < compilationInfo.messages.length; ++i) {
+            var msg = compilationInfo.messages[i];
+            console.log(`${msg.lineNum}:${msg.linePos} - ${msg.message}`);
+            hadError = hadError || msg.type == "error";
+        }
+        if (hadError) {
+            console.log("Shader failed to compile");
+            return;
+        }
+    }
+
+    const defaultEye = vec3.set(vec3.create(), 0.5, 0.5, 2.5);
+    const center = vec3.set(vec3.create(), 0.5, 0.5, 0.5);
+    const up = vec3.set(vec3.create(), 0.0, 1.0, 0.0);
+
+    const cube = getCubeMesh();
+
+    // Upload cube to use to trigger raycasting of the volume
+    var vertexBuffer = device.createBuffer({
+        size: cube.vertices.length * 4,
+        usage: GPUBufferUsage.VERTEX,
+        mappedAtCreation: true
+    });
+    new Float32Array(vertexBuffer.getMappedRange()).set(cube.vertices);
+    vertexBuffer.unmap();
+
+    var indexBuffer = device.createBuffer(
+        {size: cube.indices.length * 4, usage: GPUBufferUsage.INDEX, mappedAtCreation: true});
+    new Uint16Array(indexBuffer.getMappedRange()).set(cube.indices);
+    indexBuffer.unmap();
+
+    // Create a buffer to store the view parameters, the buffer is padded out by 1 float
+    var viewParamsSize = (16 + 4 * 4) * 4;
+    var viewParamsBuffer = device.createBuffer(
+        {size: viewParamsSize, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
+
+    var sampler = device.createSampler({
+        magFilter: "linear",
+        minFilter: "linear",
+    });
+
+    var volumePicker = document.getElementById("volumeList");
+    var colormapPicker = document.getElementById("colormapList");
+
+    fillSelector(volumePicker, volumes);
+    fillSelector(colormapPicker, colormaps);
+
+    // Fetch and upload the volume
+    var volumeName = "Bonsai";
+    if (window.location.hash) {
+        var linkedDataset = decodeURI(window.location.hash.substring(1));
+        if (linkedDataset in volumes) {
+            volumePicker.value = linkedDataset;
+            volumeName = linkedDataset;
+        } else {
+            alert(`Linked to invalid data set ${linkedDataset}`);
+            return;
+        }
+    }
+
+    var volumeDims = getVolumeDimensions(volumes[volumeName]);
+    const longestAxis = Math.max(volumeDims[0], Math.max(volumeDims[1], volumeDims[2]));
+    var volumeScale = [
+        volumeDims[0] / longestAxis,
+        volumeDims[1] / longestAxis,
+        volumeDims[2] / longestAxis
+    ];
+
+    var colormapName = "Cool Warm";
+    var colormapTexture = await uploadImage(device, colormaps[colormapName]);
+
+    var volumeTexture =
+        await fetchVolume(volumes[volumeName])
+            .then((volumeData) => { return uploadVolume(device, volumeDims, volumeData); });
+
+    // We need to ping-pong the accumulation buffers because read-write storage textures are
+    // missing and we can't have the same texture bound as both a read texture and storage
+    // texture
+    var accumBuffers = [
+        device.createTexture({
+            size: [canvas.width, canvas.height, 1],
+            format: "rgba32float",
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
+        }),
+        device.createTexture({
+            size: [canvas.width, canvas.height, 1],
+            format: "rgba32float",
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
+        })
+    ];
+
+    var accumBufferViews = [accumBuffers[0].createView(), accumBuffers[1].createView()];
+
+    // Setup render outputs
+    var swapChainFormat = "bgra8unorm";
+    context.configure({
+        device: device,
+        format: swapChainFormat,
+        usage: GPUTextureUsage.OUTPUT_ATTACHMENT,
+        alphaMode: "premultiplied"
+    });
+
+    var bindGroupLayout = device.createBindGroupLayout({
+        entries: [
+            {
+                binding: 0,
+                visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+                buffer: {type: "uniform"}
+            },
+            {binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {viewDimension: "3d"}},
+            {binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: {viewDimension: "2d"}},
+            {binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: {type: "filtering"}},
+            {
+                binding: 4,
+                visibility: GPUShaderStage.FRAGMENT,
+                texture: {sampleType: "unfilterable-float", viewDimension: "2d"}
+            },
+            {
+                binding: 5,
+                visibility: GPUShaderStage.FRAGMENT,
+                storageTexture: {
+                    // Would be great to have read-write back
+                    access: "write-only",
+                    format: "rgba32float"
+                }
+            },
+        ]
+    });
+
+    // Create render pipeline
+    var layout = device.createPipelineLayout({bindGroupLayouts: [bindGroupLayout]});
+
+    var vertexState = {
+        module: shaderModule,
+        entryPoint: "vertex_main",
+        buffers: [{
+            arrayStride: 3 * 4,
+            attributes: [{format: "float32x3", offset: 0, shaderLocation: 0}]
+        }]
+    };
+
+    var fragmentState = {
+        module: shaderModule,
+        entryPoint: "fragment_main",
+        targets: [{
+            format: swapChainFormat,
+            blend: {
+                color: {srcFactor: "one", dstFactor: "one-minus-src-alpha"},
+                alpha: {srcFactor: "one", dstFactor: "one-minus-src-alpha"}
+            }
+        }]
+    };
+
+    var renderPipeline = device.createRenderPipeline({
+        layout: layout,
+        vertex: vertexState,
+        fragment: fragmentState,
+        primitive: {
+            topology: "triangle-strip",
+            stripIndexFormat: "uint16",
+            cullMode: "front",
+        }
+    });
+
+    var clearColor = linearToSRGB(0.1);
+    var renderPassDesc = {
+        colorAttachments: [{
+            view: undefined,
+            loadOp: "clear",
+            storeOp: "store",
+            clearValue: [clearColor, clearColor, clearColor, 1]
+        }]
+    };
+
+    var camera = new ArcballCamera(defaultEye, center, up, 2, [canvas.width, canvas.height]);
+    var proj = mat4.perspective(
+        mat4.create(), 50 * Math.PI / 180.0, canvas.width / canvas.height, 0.1, 100);
+    var projView = mat4.create();
+
+    var frameId = 0;
+
+    // Register mouse and touch listeners
+    var controller = new Controller();
+    controller.mousemove = function(prev, cur, evt) {
+        if (evt.buttons == 1) {
+            frameId = 0;
+            camera.rotate(prev, cur);
+
+        } else if (evt.buttons == 2) {
+            frameId = 0;
+            camera.pan([cur[0] - prev[0], prev[1] - cur[1]]);
+        }
+    };
+    controller.wheel = function(amt) {
+        frameId = 0;
+        camera.zoom(amt);
+    };
+    controller.pinch = controller.wheel;
+    controller.twoFingerDrag = function(drag) {
+        frameId = 0;
+        camera.pan(drag);
+    };
+    controller.registerForCanvas(canvas);
+
+    // Reset accumulation when the light parameters change
+    var lightPhiSlider = document.getElementById("phiRange");
+    var lightThetaSlider = document.getElementById("thetaRange");
+    var lightStrengthSlider = document.getElementById("lightStrength");
+    lightPhiSlider.oninput = function() {
+        frameId = 0;
+    };
+    lightThetaSlider.oninput = function() {
+        frameId = 0;
+    };
+    lightStrengthSlider.oninput = function() {
+        frameId = 0;
+    };
+
+    var bindGroupEntries = [
+        {binding: 0, resource: {buffer: viewParamsBuffer}},
+        {binding: 1, resource: volumeTexture.createView()},
+        {binding: 2, resource: colormapTexture.createView()},
+        {binding: 3, resource: sampler},
+        // Updated each frame because we need to ping pong the accumulation buffers
+        {binding: 4, resource: null},
+        {binding: 5, resource: null}
+    ];
+
+    var upload = device.createBuffer({
+        size: viewParamsSize,
+        usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC,
+        mappedAtCreation: false
+    });
+
+    var sigmaTScale = 100.0;
+    var sigmaSScale = 1.0;
+
+    const render = async () => {
+        // Fetch a new volume or colormap if a new one was selected
+        if (volumeName != volumePicker.value) {
+            volumeName = volumePicker.value;
+            history.replaceState(history.state, "", "#" + volumeName);
+
+            volumeDims = getVolumeDimensions(volumes[volumeName]);
+            const longestAxis =
+                Math.max(volumeDims[0], Math.max(volumeDims[1], volumeDims[2]));
+            volumeScale = [
+                volumeDims[0] / longestAxis,
+                volumeDims[1] / longestAxis,
+                volumeDims[2] / longestAxis
+            ];
+
+            volumeTexture = await fetchVolume(volumes[volumeName]).then((volumeData) => {
+                return uploadVolume(device, volumeDims, volumeData);
+            });
+
+            // Reset accumulation and update the bindgroup
+            frameId = 0;
+            bindGroupEntries[1].resource = volumeTexture.createView();
+        }
+
+        if (colormapName != colormapPicker.value) {
+            colormapName = colormapPicker.value;
+            colormapTexture = await uploadImage(device, colormaps[colormapName]);
+
+            // Reset accumulation and update the bindgroup
+            frameId = 0;
+            bindGroupEntries[2].resource = colormapTexture.createView();
+        }
+
+        // Update camera buffer
+        projView = mat4.mul(projView, proj, camera.camera);
+
+        var lightDir = sphericalDir(lightThetaSlider.value, lightPhiSlider.value);
+
+        {
+            await upload.mapAsync(GPUMapMode.WRITE);
+            var eyePos = camera.eyePos();
+            var map = upload.getMappedRange();
+            var f32map = new Float32Array(map);
+            var u32map = new Uint32Array(map);
+
+            // TODO: A struct layout size computer/writer utility would help here
+            f32map.set(projView, 0);
+            f32map.set(eyePos, 16);
+            f32map.set(volumeScale, 16 + 4);
+            f32map.set(lightDir, 16 + 4 * 2);
+            f32map.set([lightStrengthSlider.value], 16 + 4 * 2 + 3);
+            u32map.set([frameId], 16 + 4 * 3);
+            f32map.set([sigmaTScale, sigmaSScale], 16 + 4 * 3 + 1);
+
+            upload.unmap();
+        }
+
+        bindGroupEntries[4].resource = accumBufferViews[frameId % 2];
+        bindGroupEntries[5].resource = accumBufferViews[(frameId + 1) % 2];
+
+        var bindGroup =
+            device.createBindGroup({layout: bindGroupLayout, entries: bindGroupEntries});
+
+        var commandEncoder = device.createCommandEncoder();
+        commandEncoder.copyBufferToBuffer(upload, 0, viewParamsBuffer, 0, viewParamsSize);
+
+        renderPassDesc.colorAttachments[0].view = context.getCurrentTexture().createView();
+        var renderPass = commandEncoder.beginRenderPass(renderPassDesc);
+
+        renderPass.setPipeline(renderPipeline);
+        renderPass.setBindGroup(0, bindGroup);
+        renderPass.setVertexBuffer(0, vertexBuffer);
+        renderPass.setIndexBuffer(indexBuffer, "uint16");
+        renderPass.draw(cube.vertices.length / 3, 1, 0, 0);
+
+        renderPass.end();
+        device.queue.submit([commandEncoder.finish()]);
+
+        frameId += 1;
+        requestAnimationFrame(render);
+    };
+    requestAnimationFrame(render);
+})();
+```
+
+### src/volume.js
+```
+import coolwarm from "./colormaps/cool-warm-paraview.png";
+import plasma from "./colormaps/matplotlib-plasma.png";
+import virdis from "./colormaps/matplotlib-virdis.png";
+import rainbow from "./colormaps/rainbow.png";
+import samselGreen from "./colormaps/samsel-linear-green.png";
+import samselYgb from "./colormaps/samsel-linear-ygb-1211g.png";
+
+export const volumes = {
+    "Fuel": "fuel_64x64x64_uint8.raw",
+    "Neghip": "neghip_64x64x64_uint8.raw",
+    "Hydrogen Atom": "hydrogen_atom_128x128x128_uint8.raw",
+    "Bonsai": "bonsai_256x256x256_uint8.raw",
+    "Foot": "foot_256x256x256_uint8.raw",
+    "Skull": "skull_256x256x256_uint8.raw",
+    "Aneurysm": "aneurism_256x256x256_uint8.raw",
+};
+
+export const colormaps = {
+    "Cool Warm": coolwarm,
+    "Matplotlib Plasma": plasma,
+    "Matplotlib Virdis": virdis,
+    "Rainbow": rainbow,
+    "Samsel Linear Green": samselGreen,
+    "Samsel Linear YGB 1211G": samselYgb,
+};
+
+export function getVolumeDimensions(file) {
+    var fileRegex = /(\w+)_(\d+)x(\d+)x(\d+)_(\w+)\.*/;
+    var m = file.match(fileRegex);
+    return [parseInt(m[2]), parseInt(m[3]), parseInt(m[4])];
+}
+
+export function getCubeMesh() {
+    var cubeVertices = [
+        1, 1, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0,
+        1, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0
+    ];
+    // Indices are required to render a triangle strip, but ours here are trivial
+    var cubeIndices = [];
+    for (var i = 0; i < cubeVertices.length; ++i) {
+        cubeIndices.push(i);
+    }
+    return {vertices: cubeVertices, indices: cubeIndices};
+}
+
+export function alignTo(val, align) {
+    return Math.floor((val + align - 1) / align) * align;
+};
+
+function padVolume(buf, volumeDims) {
+    const paddedVolumeDims = [alignTo(volumeDims[0], 256), volumeDims[1], volumeDims[2]];
+    var padded =
+        new Uint8Array(paddedVolumeDims[0] * paddedVolumeDims[1] * paddedVolumeDims[2]);
+    // Copy each row into the padded volume buffer
+    const nrows = volumeDims[1] * volumeDims[2];
+    for (var i = 0; i < nrows; ++i) {
+        var inrow = buf.subarray(i * volumeDims[0], i * volumeDims[0] + volumeDims[0]);
+        padded.set(inrow, i * paddedVolumeDims[0]);
+    }
+    return padded;
+}
+
+export async function fetchVolume(file) {
+    const volumeDims = getVolumeDimensions(file);
+    const volumeSize = volumeDims[0] * volumeDims[1] * volumeDims[2];
+
+    var loadingProgressText = document.getElementById("loadingText");
+    var loadingProgressBar = document.getElementById("loadingProgressBar");
+    loadingProgressText.innerHTML = "Loading Volume...";
+    loadingProgressBar.setAttribute("style", "width: 0%");
+
+    var url = "https://cdn.willusher.io/demo-volumes/" + file;
+    try {
+        var response = await fetch(url);
+        var reader = response.body.getReader();
+
+        var receivedSize = 0;
+        var buf = new Uint8Array(volumeSize);
+        while (true) {
+            var {done, value} = await reader.read();
+            if (done) {
+                break;
+            }
+            buf.set(value, receivedSize);
+            receivedSize += value.length;
+            var percentLoaded = receivedSize / volumeSize * 100;
+            loadingProgressBar.setAttribute("style", `width: ${percentLoaded.toFixed(2)}%`);
+        }
+        loadingProgressText.innerHTML = "Volume Loaded";
+
+        // WebGPU requires that bytes per row = 256, so we need to pad volumes
+        // that are smaller than this
+        if (volumeDims[0] % 256 != 0) {
+            return padVolume(buf, volumeDims);
+        }
+        return buf;
+    } catch (err) {
+        console.log(`Error loading volume: ${err}`);
+        loadingProgressText.innerHTML = "Error loading volume";
+    }
+    return null;
+}
+
+export async function uploadVolume(device, volumeDims, volumeData) {
+    var volumeTexture = device.createTexture({
+        size: volumeDims,
+        format: "r8unorm",
+        dimension: "3d",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+    });
+
+    var uploadBuf = device.createBuffer(
+        {size: volumeData.length, usage: GPUBufferUsage.COPY_SRC, mappedAtCreation: true});
+    new Uint8Array(uploadBuf.getMappedRange()).set(volumeData);
+    uploadBuf.unmap();
+
+    var commandEncoder = device.createCommandEncoder();
+
+    var src = {
+        buffer: uploadBuf,
+        // Volumes must be aligned to 256 bytes per row, fetchVolume does this padding
+        bytesPerRow: alignTo(volumeDims[0], 256),
+        rowsPerImage: volumeDims[1]
+    };
+    var dst = {texture: volumeTexture};
+    commandEncoder.copyBufferToTexture(src, dst, volumeDims);
+
+    device.queue.submit([commandEncoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+
+    return volumeTexture;
+}
+
+export async function uploadImage(device, imageSrc) {
+    var image = new Image();
+    image.src = imageSrc;
+    await image.decode();
+    var bitmap = await createImageBitmap(image);
+
+    var texture = device.createTexture({
+        size: [bitmap.width, bitmap.height, 1],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST |
+            GPUTextureUsage.RENDER_ATTACHMENT
+    });
+
+    var src = {source: bitmap};
+    var dst = {texture: texture};
+    device.queue.copyExternalImageToTexture(src, dst, [bitmap.width, bitmap.height]);
+    await device.queue.onSubmittedWorkDone();
+
+    return texture;
+}
+
+export function linearToSRGB(x) {
+    if (x <= 0.0031308) {
+        return 12.92 * x;
+    }
+    return 1.055 * Math.pow(x, 1.0 / 2.4) - 0.055;
+}
+
+export function fillSelector(selector, dict) {
+    for (var v in dict) {
+        var opt = document.createElement("option");
+        opt.value = v;
+        opt.innerHTML = v;
+        selector.appendChild(opt);
+    }
+}
+
+export function sphericalDir(theta, phi) {
+    const cosTheta = Math.cos(theta);
+    const sinTheta = Math.sin(theta);
+    return [Math.cos(phi) * sinTheta, Math.sin(phi) * sinTheta, cosTheta];
+}
+```

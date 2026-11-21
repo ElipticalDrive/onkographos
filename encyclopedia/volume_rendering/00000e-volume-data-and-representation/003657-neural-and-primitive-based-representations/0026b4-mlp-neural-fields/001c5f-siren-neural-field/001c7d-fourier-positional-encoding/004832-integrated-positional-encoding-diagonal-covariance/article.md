@@ -1,0 +1,126 @@
+# Integrated Positional Encoding (Diagonal Covariance)
+
+Also called: Expected Sine for Positional Encoding, integrated positional encoding component
+
+## Overview
+Integrated Positional Encoding (Diagonal Covariance) computes the expected value of sinusoidal positional encodings when input coordinates are modeled as Gaussian random variables with diagonal covariance [S1, S2, unofficial]. It solves the aliasing problem in neural fields by integrating over the spatial uncertainty (ray thickness or voxel size) represented by the variance [S2, unofficial]. Unlike standard Fourier Positional Encoding which treats inputs as point samples, this method accounts for the query's spatial extent, naturally suppressing high-frequency components when variance is large [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: `x_coord` containing mean coordinates $x$ and covariance information. If `diagonal=True`, covariance is a vector of variances $x_{var}$; if `diagonal=False`, it is a full covariance matrix $x_{cov}$ [S1, S2, unofficial].
+- Parameters: `min_deg` (int, minimum exponent), `max_deg` (int, maximum exponent, exclusive), `diagonal` (bool) [S1, unofficial].
+- Output: Encoded vector containing the expected sine/cosine values and their variance-dependent scaling factors [S1, S2, unofficial].
+
+**Data Structures:**
+- `x`: Tensor of shape $(N, D)$, where $N$ is batch size and $D$ is dimensionality (typically 3) [S1, unofficial].
+- `x_var`: Tensor of shape $(N, D)$, diagonal elements of covariance [S1, unofficial].
+- `scales`: Tensor of shape $(K,)$, where $K = max\_deg - min\_deg$. Values are $2^i$ for $i \in [min\_deg, max\_deg)$ [S1, S2, unofficial].
+
+**Steps:**
+1. Extract mean $x$ and covariance ($x_{var}$ or $x_{cov}$) from `x_coord` [S1, S2, unofficial].
+2. Compute frequency scales: $s_i = 2^i$ for $i$ from `min_deg` to `max_deg - 1` [S1, S2, unofficial].
+3. Construct basis matrix $B$ by concatenating $s_i \cdot I_D$ for each scale $i$ [S1, S2, unofficial].
+4. Compute transformed mean $y = x \cdot B$ [S1, S2, unofficial].
+5. Compute transformed variance $y_{var}$:
+   - If diagonal: $y_{var} = x_{var} \cdot B^2$ (element-wise square of scales applied to variances) [S1, S2, unofficial].
+   - If full: $y_{var} = \sum_{j} (x_{cov} \cdot B)_{ij} \cdot B_{kj}$ (matrix multiplication followed by contraction) [S1, S2, unofficial].
+6. Compute expected sine using the formula: $E[\sin(z)] = e^{-0.5 \sigma^2} \sin(\mu)$, where $\mu$ is the mean and $\sigma^2$ is the variance [S1, unofficial].
+7. Concatenate results for sine and cosine components [S1, S2, unofficial].
+
+**Formula:**
+The core integration result for a Gaussian variable $z \sim \mathcal{N}(\mu, \sigma^2)$ is:
+$$ E[\sin(z)] = e^{-\frac{1}{2}\sigma^2} \sin(\mu) $$
+$$ E[\cos(z)] = e^{-\frac{1}{2}\sigma^2} \cos(\mu) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def integrated_pos_enc_diag(x_coord, min_deg, max_deg, diagonal=True):
+    """
+    Computes integrated positional encoding for diagonal covariance.
+    
+    Args:
+        x_coord: Dict containing 'mean' (x) and 'var' (x_var).
+                 x shape: (N, D)
+                 x_var shape: (N, D)
+        min_deg: int, minimum exponent for scales.
+        max_deg: int, maximum exponent for scales (exclusive).
+        diagonal: bool, if True uses diagonal covariance logic.
+        
+    Returns:
+        encoded: Tensor of shape (N, 2 * D * (max_deg - min_deg))
+    """
+    # 1. Extract mean and variance from x_coord
+    x = x_coord['mean']  # (N, D)
+    x_var = x_coord['var']  # (N, D)
+
+    # 2. Compute scales as 2^i for i in [min_deg, max_deg)
+    exponents = np.arange(min_deg, max_deg)
+    scales = np.power(2.0, exponents)  # (K,)
+
+    # 3. Reshape x and scales to create y
+    # y shape: (N, D, K)
+    y = x[:, :, np.newaxis] * scales[np.newaxis, np.newaxis, :]
+    y = y.reshape(x.shape[0], -1)  # (N, D*K)
+
+    # 4. Reshape x_var and scales squared to create y_var
+    scales_sq = np.square(scales)
+    y_var = x_var[:, :, np.newaxis] * scales_sq[np.newaxis, np.newaxis, :]
+    y_var = y_var.reshape(x.shape[0], -1)  # (N, D*K)
+
+    # 5. Concatenate for sine and cosine components
+    # Notes specify: expected_sin of concatenated [y, y + 0.5*pi] and [y_var, y_var]
+    y_concat = np.concatenate([y, y + 0.5 * np.pi], axis=-1)
+    y_var_concat = np.concatenate([y_var, y_var], axis=-1)
+
+    # 6. Compute expected sine: E[sin(z)] = exp(-0.5 * var) * sin(mean)
+    decay = np.exp(-0.5 * y_var_concat)
+    encoded = decay * np.sin(y_concat)
+
+    return encoded
+```
+
+**Pitfall:**
+When the variance is wide, the sine function shrinks towards zero, which is handled by the exponential decay term $\exp(-0.5 \cdot x_{var})$ [S1, unofficial].
+
+## Subtopics
+
+### [Fourier Feature Networks](2765-fourier-feature-networks.md)
+Uses random Gaussian frequencies instead of deterministic powers of two.
+
+### [Off-Axis Positional Encoding](3503-off-axis-positional-encoding.md)
+Adjusts frequencies based on viewing direction to reduce aliasing.
+
+### [Coordinate-Time Encoding](5105-coordinate-time-encoding.md)
+Extends positional encoding to temporal dimensions for dynamic scenes.
+
+### [Integrated Positional Encoding](5255-integrated-positional-encoding.md)
+The general family of integrating over uncertainty, of which this is a specific diagonal covariance implementation.
+
+### [2D Positional Embedding](12829-2d-positional-embedding.md)
+Standard sinusoidal embeddings for 2D data, lacking the integration aspect.
+
+### [Frequency Annealing](13443-frequency-annealing.md)
+Gradually increases frequencies during training, a different approach to handling high frequencies.
+
+### [Truncated Dynamic Low-pass Filter](14016-truncated-dynamic-low-pass-filter.md)
+Dynamically filters frequencies based on scene content, distinct from the fixed Gaussian integration.
+
+## Operating characteristics
+- Time complexity: Not given in the sources.
+- Memory complexity: Not given in the sources.
+- Performance: Not given in the sources.
+- Strengths: Handles ray thickness and voxel size naturally by integrating over covariance uncertainty [S2, unofficial].
+- Limitations: Not given in the sources.
+- When to use: Not given in the sources.
+- When not to use: Not given in the sources.
+
+## Background
+Integrated Positional Encoding was introduced in the context of Mip-NeRF to address high-frequency aliasing caused by sampling points along rays with significant thickness [S1, S2, unofficial]. It builds on the idea that positional encodings should account for the spatial extent of the query, not just the mean position [S1, S2, unofficial]. The diagonal covariance variant assumes independence between coordinate dimensions to compute the expected value efficiently [S1, S2, unofficial].
+
+## Sources
+[S1] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)
+[S2] https://github.com/CPREgroup/CaSE-NeRF, https://github.com/CPREgroup/CaSE-NeRF, fetched 2026-10-30 (unofficial)

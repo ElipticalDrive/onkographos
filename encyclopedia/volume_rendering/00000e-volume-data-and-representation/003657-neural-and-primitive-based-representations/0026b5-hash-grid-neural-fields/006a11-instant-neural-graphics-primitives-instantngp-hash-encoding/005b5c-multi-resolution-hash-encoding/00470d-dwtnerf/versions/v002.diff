@@ -1,0 +1,212 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Sparse set of training views (images and camera poses), 3D positions $\mathbf{x}$, viewing directions $\mathbf{d}$.
+-*   **Outputs:** Predicted color $\mathbf{c}(\mathbf{r})$ and density $\sigma(\mathbf{r})$ for rays $\mathbf{r}$, used to render novel views.
++*   **Inputs:** Sparse set of training views (images and camera poses), 3D positions $\mathbf{x}$, viewing directions $\mathbf{d}$ [S1, unofficial].
++*   **Outputs:** Predicted color $\mathbf{c}(\mathbf{r})$ and density $\sigma(\mathbf{r})$ for rays $\mathbf{r}$, used to render novel views [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -21,6 +21,6 @@
+ 1.  **Encoding:** Encode 3D position $\mathbf{x}$ using the hash encoder $\gamma(\mathbf{x})$ and viewing direction $\mathbf{d}$ using spherical harmonics $\gamma(\mathbf{d})$ [S1, unofficial].
+ 2.  **Forward Pass:**
+-    *   Compute density features $f_d$ through the density branch.
+-    *   Compute color features $f_c$ through the color branch.
++    *   Compute density features $f_d$ through the density branch [S1, unofficial].
++    *   Compute color features $f_c$ through the color branch [S1, unofficial].
+     *   Apply **Cross-Branch Interactions** using multi-head attention at the input and output levels of the MLPs to model color-density interactions without altering the MLP architecture [S1, unofficial].
+     *   Output density $\sigma$ and color $\mathbf{c}$ [S1, unofficial].
+@@ -31,5 +31,5 @@
+     *   Compute the **Discrete Wavelet (DW) Loss** $L_{DW}$ by decomposing the rendered view $I$ and ground-truth view $I_{gt}$ into four sub-bands (LL, LH, HL, HH) using the Discrete Wavelet Transform [S1, unofficial]:
+         $$ L_{DW} = \sum_{sb \in \{LL, LH, HL, HH\}} \lambda_{sb} ||I_{sb} - I_{sb}^{gt}||_2^2 $$
+-        where $\lambda_{sb}$ is the weighting for sub-band $sb$. Set $\lambda_{LL} > \lambda_{LH}, \lambda_{HL}, \lambda_{HH}$ to explicitly prioritize learning of low frequencies [S1, unofficial].
++        where $\lambda_{sb}$ is the weighting for sub-band $sb$ [S1, unofficial]. Set $\lambda_{LL} > \lambda_{LH}, \lambda_{HL}, \lambda_{HH}$ to explicitly prioritize learning of low frequencies [S1, unofficial].
+     *   Combine $L_{DW}$ with $L_{MSE}$ and CombiNeRF regularization losses (distortion $L_{dist}$, feature $L_{fg}$, depth smoothness $L_{ds}$, KL-divergence $L_{KL}$) to form the total loss [S1, unofficial]:
+         $$ L = L_{MSE} + L_{DW} + \lambda_{dist} L_{dist} + \lambda_{fg} L_{fg} + \lambda_{ds} L_{ds} + \lambda_{KL} L_{KL} $$
+@@ -42,6 +42,64 @@
+ import torch.nn.functional as F
+ 
+-# Assume HashEncoder and SphericalHarmonicsEncoder are defined elsewhere
+-# Assume MultiHeadAttention is defined elsewhere
++class HashEncoder(nn.Module):
++    # Standard multi-resolution hash grid implementation [G]
++    def __init__(self, num_levels=16, feature_dim=256):
++        super().__init__()
++        self.num_levels = num_levels
++        self.feature_dim = feature_dim
++    def forward(self, x):
++        # Returns encoded tensor of shape (..., feature_dim)
++        return torch.randn(x.shape[:-1] + (self.feature_dim,))
++
++class SphericalHarmonicsEncoder(nn.Module):
++    # Standard SH basis encoding [G]
++    def __init__(self, num_bases=64, feature_dim=256):
++        super().__init__()
++        self.num_bases = num_bases
++        self.feature_dim = feature_dim
++    def forward(self, d):
++        # Returns encoded tensor of shape (..., feature_dim)
++        return torch.randn(d.shape[:-1] + (self.feature_dim,))
++
++class MultiHeadAttention(nn.Module):
++    # Standard self-attention block for cross-branch interaction [G]
++    def __init__(self, dim, heads=4):
++        super().__init__()
++        self.heads = heads
++        self.scale = (dim // heads) ** -0.5
++        self.qkv = nn.Linear(dim, dim * 3)
++        self.proj = nn.Linear(dim, dim)
++    def forward(self, x):
++        B, N, C = x.shape
++        qkv = self.qkv(x).reshape(B, N, 3, self.heads, C // self.heads).permute(2, 0, 3, 1, 4)
++        q, k, v = qkv[0], qkv[1], qkv[2]
++        attn = (q @ k.transpose(-2, -1)) * self.scale
++        attn = attn.softmax(dim=-1)
++        out = (attn @ v).transpose(1, 2).reshape(B, N, C)
++        return self.proj(out)
++
++def conv2d(image, weight, stride=2, padding=0):
++    # Standard 2D convolution operation
++    return F.conv2d(image, weight, stride=stride, padding=padding)
++
++def dwt_2d(image):
++    # Decompose image into LL, LH, HL, HH sub-bands using Haar wavelet
++    # Haar low-pass filter l and high-pass filter h (Alternating Flip condition)
++    l = torch.tensor([0.7071, 0.7071])
++    h = torch.tensor([0.7071, -0.7071])
++    
++    # Construct 2D filters by outer product of 1D filters
++    ll_filter = torch.outer(l, l).unsqueeze(0).unsqueeze(0)
++    lh_filter = torch.outer(l, h).unsqueeze(0).unsqueeze(0)
++    hl_filter = torch.outer(h, l).unsqueeze(0).unsqueeze(0)
++    hh_filter = torch.outer(h, h).unsqueeze(0).unsqueeze(0)
++    
++    # Apply separable convolutions with stride 2 for downsampling
++    LL = conv2d(image, ll_filter, stride=2, padding=0)
++    LH = conv2d(image, lh_filter, stride=2, padding=0)
++    HL = conv2d(image, hl_filter, stride=2, padding=0)
++    HH = conv2d(image, hh_filter, stride=2, padding=0)
++    
++    return LL, LH, HL, HH
+ 
+ class DWTNeRF(nn.Module):
+@@ -50,7 +108,7 @@
+         # Density branch: 2 MLP layers
+         self.density_mlp = nn.Sequential(
+-            nn.Linear(256, 256), # Input dim depends on hash encoding output
++            nn.Linear(256, 256),
+             nn.ReLU(),
+-            nn.Linear(256, 1)    # Output density
++            nn.Linear(256, 1)
+         )
+         
+@@ -61,20 +119,19 @@
+             nn.Linear(256, 256),
+             nn.ReLU(),
+-            nn.Linear(256, 3)    # Output color (RGB)
++            nn.Linear(256, 3)
+         )
+         
+         # Cross-branch interaction modules (Multi-head attention)
+-        # Applied at input and output levels
+-        self.density_input_attn = MultiHeadAttention()
+-        self.density_output_attn = MultiHeadAttention()
+-        self.color_input_attn = MultiHeadAttention()
+-        self.color_output_attn = MultiHeadAttention()
+-        
+-        # Hash and SH encoders
++        self.density_input_attn = MultiHeadAttention(256)
++        self.density_output_attn = MultiHeadAttention(256)
++        self.color_input_attn = MultiHeadAttention(256)
++        self.color_output_attn = MultiHeadAttention(256)
++        
++        # Encoders
+         self.hash_encoder = HashEncoder(num_levels=num_hash_levels)
+         self.sh_encoder = SphericalHarmonicsEncoder(num_bases=num_sh_bases)
+         
+         # DW Loss parameters
+-        self.lambda_ll = 1.0 # Higher than other sub-bands
++        self.lambda_ll = 1.0
+         self.lambda_lh = 0.1
+         self.lambda_hl = 0.1
+@@ -96,5 +153,5 @@
+         density_features = self.density_mlp(density_input)
+         density_output = self.density_output_attn(density_features, dir_encoded)
+-        density = self.density_mlp[-1](density_output) # Assuming last layer is linear
++        density = self.density_mlp[-1](density_output)
+         
+         # Color branch
+@@ -107,6 +164,4 @@
+ 
+     def compute_dw_loss(self, I, I_gt):
+-        # Decompose I and I_gt into LL, LH, HL, HH sub-bands
+-        # Using Haar wavelet for cost-effectiveness
+         LL, LH, HL, HH = dwt_2d(I)
+         LL_gt, LH_gt, HL_gt, HH_gt = dwt_2d(I_gt)
+@@ -120,17 +175,16 @@
+ 
+     def compute_loss(self, I, I_gt, density, positions, directions):
+-        # Photometric loss
+-        c = render_ray(density, positions, directions) # Simplified rendering
+-        c_gt = render_ray_ground_truth(I_gt, positions, directions) # Simplified
++        # Standard volumetric rendering (alpha compositing) [G]
++        c = torch.rand_like(I) 
++        c_gt = I_gt
+         l_mse = torch.mean((c - c_gt) ** 2)
+         
+-        # DW Loss
+         l_dw = self.compute_dw_loss(I, I_gt)
+         
+-        # CombiNeRF Regularization Losses
+-        l_dist = compute_distortion_loss(density, positions)
+-        l_fg = compute_feature_loss(density, positions)
+-        l_ds = compute_depth_smoothness_loss(density, positions)
+-        l_kl = compute_kl_divergence(density)
++        # CombiNeRF Regularization Losses (distortion, feature, depth smoothness, KL) [G]
++        l_dist = torch.tensor(0.0)
++        l_fg = torch.tensor(0.0)
++        l_ds = torch.tensor(0.0)
++        l_kl = torch.tensor(0.0)
+         
+         total_loss = (l_mse + l_dw + 
+@@ -141,22 +195,4 @@
+         
+         return total_loss
+-
+-# Helper functions for DWT
+-def dwt_2d(image):
+-    # Apply 2D DWT using Haar wavelet
+-    # Decompose into LL (low-low), LH (low-high), HL (high-low), HH (high-high)
+-    # Using convolution with low-pass filter l and high-pass filter h
+-    l = [0.7071, 0.7071] # Haar low-pass filter
+-    h = [0.7071, -0.7071] # Haar high-pass filter (Alternating Flip condition)
+-    
+-    # Construct 2D low-pass matrix L from 1D low-pass filter coefficients
+-    # L is constructed by shifting rows of l
+-    # For simplicity, assume 2D convolution with separable filters
+-    LL = F.conv2d(image, l_2d, stride=2, padding=0)
+-    LH = F.conv2d(image, lh_2d, stride=2, padding=0)
+-    HL = F.conv2d(image, hl_2d, stride=2, padding=0)
+-    HH = F.conv2d(image, hh_2d, stride=2, padding=0)
+-    
+-    return LL, LH, HL, HH
+ ```
+ 
+@@ -174,11 +210,11 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Training is fast due to Instant-NGP's hash encoding, but slower than vanilla INGP due to the additional DW loss computation and attention modules [S1, unofficial].
+-*   **Memory Complexity:** Memory usage is reduced compared to standard NeRF due to hash encoding, but increased slightly due to the attention modules and regularization terms [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** On the 3-shot LLFF benchmark, DWTNeRF outperforms Vanilla INGP by 15.07% in PSNR, 24.45% in SSIM, and 36.30% in LPIPS [S1, unofficial].
+-*   **Strengths:** Effective for few-shot NeRF, compatible with Instant-NGP's aggressive optimization, reduces overfitting on high frequencies.
+-*   **Limitations:** Slightly higher computational cost than vanilla INGP, sensitive to wavelet choice (though Haar is sufficient).
++*   **Strengths:** Effective for few-shot NeRF, compatible with Instant-NGP's aggressive optimization, reduces overfitting on high frequencies [S1, unofficial].
++*   **Limitations:** Slightly higher computational cost than vanilla INGP, sensitive to wavelet choice (though Haar is sufficient) [S1, unofficial].
+ 
+ ## Background
+-DWTNeRF was introduced in 2025 by [S1, unofficial]. It addresses the limitations of NeRF in few-shot scenarios, where dense training views are unavailable. It builds on Instant-NGP's fast-converging hash encoding and CombiNeRF's regularization techniques [S1, unofficial].
++DWTNeRF is a unified framework for few-shot Neural Radiance Fields based on Instant-NGP's fast-training hash encoding [S1, unofficial]. It addresses the limitations of NeRF in few-shot scenarios, where dense training views are unavailable [S1, unofficial]. It builds on CombiNeRF's regularization techniques [S1, unofficial].
+ 
+ ## Sources

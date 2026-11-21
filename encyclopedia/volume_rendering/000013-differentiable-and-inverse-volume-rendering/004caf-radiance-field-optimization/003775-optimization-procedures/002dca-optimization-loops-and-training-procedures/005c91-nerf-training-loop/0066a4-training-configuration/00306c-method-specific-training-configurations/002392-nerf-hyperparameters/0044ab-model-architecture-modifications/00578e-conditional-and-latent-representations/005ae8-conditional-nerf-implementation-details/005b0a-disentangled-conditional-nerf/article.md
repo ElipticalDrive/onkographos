@@ -1,0 +1,235 @@
+# Disentangled Conditional NeRF
+
+Also called: Disentangled Conditional NeRF Training
+
+## Overview
+Disentangled Conditional NeRF is a generative neural radiance field architecture that achieves independent control over object shape and appearance by isolating shape conditioning to explicit volumetric deformation of positional encodings [S1]. Unlike standard conditional NeRFs where concatenating latent codes causes mutual intervention (e.g., shape changes altering color), this method prevents such interference by deferring appearance conditioning to the radiance field while applying shape conditioning via a deformation network [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Spatial position $x \in \mathbb{R}^3$.
+*   Shape code $z_s \in \mathbb{R}^{d_s}$, sampled from a normal distribution $Z_s$.
+*   Appearance code $z_a \in \mathbb{R}^{d_a}$, sampled from a normal distribution $Z_a$.
+*   View direction $v \in \mathbb{R}^3$, sampled from the upper hemisphere $Z_v$.
+
+**Outputs:**
+*   Radiance color $c \in \mathbb{R}^3$ and density $\sigma \in \mathbb{R}$ for the deformed position.
+
+### Data Structures
+*   **Deformation Network $T$**: A neural network mapping $(x, z_s)$ to displacement vectors.
+*   **Conditional NeRF Generator $F_\theta$**: A neural network mapping deformed position, view direction, and appearance code to radiance and density.
+*   **Discriminator $D$**: A neural network distinguishing real images from generated images.
+*   **Positional Encoding $\Gamma(x)$**: Standard Fourier features mapping $x$ to $\mathbb{R}^{2m}$.
+
+### Algorithm Steps
+
+1.  **Deformation**: Compute the displacement vector $\Delta x$ by passing the spatial position $x$ and shape code $z_s$ through the deformation network $T$:
+    $$ T: (x, z_s) \rightarrow \Delta x $$
+    where $\Delta x \in \mathbb{R}^{3 \times 2m}$ represents the displacement for each band of the positional encoding [S1].
+
+2.  **Deformed Encoding**: Apply the displacement to the positional encoding. The deformed positional encoding $\Gamma^*(p, z_s)$ is computed as:
+    $$ \Gamma^*(p, z_s) = \{ \gamma^*(p, \Delta p) \mid \dots \} $$
+    Specifically, the displacement $\Delta x$ is added to the original positional encoding components to produce the deformed features [S1].
+
+3.  **Radiance Field Evaluation**: Feed the deformed positional encoding, view direction $v$, and appearance code $z_a$ into the main NeRF MLP $F_\theta$ to predict density and color:
+    $$ (\sigma, c) = F_\theta(\Gamma^*(x, z_s), v, z_a) $$
+    [S1]
+
+4.  **Training (Stage 1)**: Train the generator $F_\theta$ and deformation network $T$ jointly with a discriminator $D$ using a non-saturating GAN objective [S1].
+    *   Sample $z_s \sim Z_s$, $z_a \sim Z_a$, and $v \sim Z_v$.
+    *   Generate image $I_{gen} = F_\theta(v, z_s, z_a)$.
+    *   Compute GAN loss:
+        $$ L_{GAN} = \mathbb{E}_{z_s, z_a, v} [ f(D(F_\theta(v, z_s, z_a))) ] + \mathbb{E}_{I \sim d} [ f(-D(I)) ] + \lambda_r \| \nabla D(I) \|^2 $$
+        where $f(x) = -\log(1 + \exp(-x))$ and $\lambda_r$ is the gradient penalty regularization weight [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+
+# Standard Fourier Positional Encoding
+def positional_encoding(x, L=10):
+    """
+    Computes standard positional encoding for x.
+    x: (N, 3)
+    Returns: (N, 2 * 3 * L)
+    """
+    freq_bands = 2.0 ** torch.linspace(0, L - 1, L).to(x.device)
+    scaled_x = x.unsqueeze(-1) * freq_bands.unsqueeze(0)
+    encoded = torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1)
+    return encoded
+
+# Deformation Network T
+class DeformationNetwork(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim)
+        )
+
+    def forward(self, x, z_s):
+        """
+        x: (N, 3)
+        z_s: (N, d_s)
+        Returns: delta_x (N, 3 * 2 * L)
+        """
+        # Concatenate position and shape code
+        input_feat = torch.cat([x, z_s], dim=-1)
+        delta_x = self.net(input_feat)
+        return delta_x
+
+# Conditional NeRF Generator F_theta
+class ConditionalNeRF(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim=4):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim)
+        )
+
+    def forward(self, deformed_encoding, v, z_a):
+        """
+        deformed_encoding: (N, 2 * 3 * L)
+        v: (N, 3)
+        z_a: (N, d_a)
+        Returns: sigma (N, 1), color (N, 3)
+        """
+        input_feat = torch.cat([deformed_encoding, v, z_a], dim=-1)
+        output = self.net(input_feat)
+        sigma = output[:, :1]
+        color = output[:, 1:]
+        return sigma, color
+
+# Discriminator D
+class Discriminator(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LeakyReLU(0.2),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LeakyReLU(0.2),
+            nn.Linear(hidden_dim, 1)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+def gan_loss(D, F_theta, T, real_images, z_s, z_a, v, lambda_r):
+    """
+    Computes the non-saturating GAN loss with gradient penalty.
+    """
+    # Generate fake images
+    # 1. Get deformed encoding
+    # Note: In practice, x is sampled from rays, but for the GAN loss formulation
+    # in the source, it operates on the image level or ray level.
+    # Here we assume F_theta returns an image tensor or we aggregate.
+    # The source formula implies D takes an image I.
+    
+    # Generate fake image I_gen
+    # This requires a full rendering pipeline. For the purpose of the GAN loss definition:
+    I_gen = F_theta(v, z_s, z_a) # Simplified: F_theta returns rendered image
+    
+    # Real image loss
+    f = lambda x: -torch.log(1 + torch.exp(-x))
+    
+    loss_real = torch.mean(f(-D(real_images)))
+    loss_fake = torch.mean(f(D(I_gen)))
+    
+    # Gradient Penalty
+    # Sample random interpolation between real and fake
+    alpha = torch.rand(real_images.size(0), 1, 1, 1).to(real_images.device)
+    interpolates = alpha * real_images + (1 - alpha) * I_gen.detach()
+    interpolates.requires_grad_(True)
+    
+    disc_interpolates = D(interpolates)
+    gradients = torch.autograd.grad(
+        outputs=disc_interpolates,
+        inputs=interpolates,
+        grad_outputs=torch.ones_like(disc_interpolates),
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True
+    )[0]
+    
+    gradients = gradients.view(gradients.size(0), -1)
+    gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * lambda_r
+    
+    total_loss = loss_fake + loss_real + gradient_penalty
+    return total_loss
+
+# Training Loop Step
+def train_step(D, F_theta, T, optimizer_D, optimizer_G, real_images, batch_size):
+    # Sample codes
+    z_s = torch.randn(batch_size, d_s).to(device)
+    z_a = torch.randn(batch_size, d_a).to(device)
+    v = sample_from_upper_hemisphere(batch_size).to(device)
+    
+    # Update Discriminator
+    optimizer_D.zero_grad()
+    loss_D = gan_loss(D, F_theta, T, real_images, z_s, z_a, v, lambda_r)
+    loss_D.backward()
+    optimizer_D.step()
+    
+    # Update Generator (Non-saturating)
+    optimizer_G.zero_grad()
+    # Re-compute loss for G update (source uses same f(x) but D(F) term)
+    # In non-saturating GAN, we maximize log(D(G(z))) which is minimizing -log(D(G(z)))
+    # The source formula L_GAN = E[f(D(G))] + ... suggests minimizing the sum.
+    # f(x) = -log(1+exp(-x)). If D(G) is large positive, f(D(G)) is small.
+    # So minimizing L_GAN encourages D(G) to be large.
+    loss_G = gan_loss(D, F_theta, T, real_images, z_s, z_a, v, lambda_r)
+    loss_G.backward()
+    optimizer_G.step()
+```
+
+### Parameters
+*   $\lambda_r$: Regularization weight for the gradient penalty term in the GAN loss. Value not given in the sources.
+
+### Pitfalls
+*   **Mutual Intervention**: Trivially concatenating the shape code $z_s$ to the position features causes shape changes to affect color. This is solved by deferring color conditioning to the radiance field and applying shape conditioning via explicit deformation [S1].
+*   **Deformation Smoothness**: The deformation network should regularize the output shape to be a smooth deformation of the base shape to preserve original details [S1].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+Not given in the sources.
+
+### Measured Performance
+Not given in the sources.
+
+### Strengths and Limitations
+*   **Strengths**: Achieves individual control over shape and appearance; prevents mutual intervention between shape and appearance conditions; improves robustness of manipulation [S1].
+*   **Limitations**: Requires training a GAN framework (generator, discriminator, deformation network); two-stage training process [S1].
+
+### When to Use
+Use when independent manipulation of shape and appearance is required for a category of objects, and standard conditional NeRFs exhibit unwanted cross-condition interference [S1].
+
+## Background
+
+### Origin
+Disentangled Conditional NeRF was introduced in the paper "CLIP-NeRF: Text-and-Image Driven Manipulation of Neural Radiance Fields" [S1].
+
+### History
+The method builds upon Conditional NeRF, which introduced latent vectors for shape and appearance but suffered from mutual intervention [S1]. Disentangled Conditional NeRF addresses this by introducing a deformation network [S1].
+
+### Usage
+It is used in 3D reconstruction and manipulation tasks, specifically for text- and image-driven editing of neural radiance fields [S1].
+
+## Sources
+
+[S1] CLIP-NeRF: Text-and-Image Driven Manipulation of Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00381, fetched 2026-10-29

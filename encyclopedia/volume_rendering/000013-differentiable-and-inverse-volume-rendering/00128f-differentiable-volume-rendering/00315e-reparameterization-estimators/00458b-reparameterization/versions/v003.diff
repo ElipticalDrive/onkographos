@@ -1,0 +1,127 @@
+--- v002.md
++++ v003.md
+@@ -4,75 +4,76 @@
+ 
+ ## Overview
+-Reparameterization is a technique in differentiable volume rendering and path tracing that counteracts parameter-dependent silhouette motion and the resulting bias in differentiated rendering [S1]. It solves the problem where changes in scene parameters (e.g., geometry positions) cause discontinuities in the rendering integral that standard automatic differentiation cannot handle correctly [S1]. Unlike its siblings, which may focus on specific sampling strategies or boundary formulations, this method explicitly freezes discontinuities within spherical integrals by tracing auxiliary rays to construct a warp field [S1].
++Reparameterization is a technique in differentiable rendering that counteracts parameter-dependent silhouette motion and the resulting bias in differentiated rendering integrals [S1]. It addresses the problem where scene geometry parameters (e.g., vertex positions) influence the position and shape of intersections, causing discontinuities to move in the sample space when parameters change [S1]. By reparameterizing rays, it freezes these discontinuities, allowing for unbiased gradient estimation [S1]. Unlike primal rendering, where it reduces to the identity, differentiated rendering expands it into intricate operations involving auxiliary ray tracing and Jacobian weighting [S1].
+ 
+ ## How it works
+-The method relies on the change of variables formula to ensure that the support of the Monte Carlo integral remains independent of the scene parameters during differentiation [S1, 2, 3].
+-
+-**Inputs and Outputs:**
+-*   **Input:** A ray $r$ with direction $d$ and origin, and scene parameters $\theta$.
+-*   **Output:** A modified ray direction $d'$ and a Jacobian determinant $\det$.
++**Inputs:** A ray $r$ (origin $o$, direction $d$) and scene geometry parameters $\theta$.
++**Outputs:** A modified ray direction $d'$, a Jacobian determinant scalar $J$, and a scene intersection $si$.
+ 
+ **Data Structures:**
+-The implementation exposes reparameterizations through a `CustomOp`-based abstraction to isolate specifics from the PBDR integrator [S1]. The core state involves the ray object and the scene intersection result.
++*   `ray`: Contains origin $o$ and direction $d$.
++*   `si`: Scene intersection object containing hit point, geometry ID, and normal.
++*   `det`: Scalar float representing the determinant of the Jacobian of the change of variables.
+ 
+ **Steps:**
+-1.  **Reparameterize Ray:** Call `reparameterize(ray)`. This function traces auxiliary rays to construct a warp field that counteracts silhouette motion [S1].
+-2.  **Compute Jacobian:** Calculate the determinant $\det$ of the change of variables induced by the warp field [S1].
+-3.  **Intersect:** Perform the standard ray intersection `scene.ray_intersect(ray)` using the reparameterized direction [S1].
++1.  **Reparameterize Ray:** Compute the warp field that counteracts silhouette motion. This involves tracing auxiliary rays to determine how the intersection point moves with respect to parameter changes [S1].
++2.  **Compute Jacobian:** Calculate the determinant $J$ of the change of variables induced by the warp field [S1].
++3.  **Intersect:** Perform the ray intersection using the reparameterized ray direction [S1].
+ 4.  **Gradient Scattering:** Use the reverse-mode derivative of the warp field to scatter scene parameter gradients into the intersected geometry [S1].
+ 
+ **Pseudocode:**
+-The following Python-like pseudocode illustrates the integration within a differentiable rendering loop (e.g., Path Replay Backpropagation). It assumes a differentiable runtime `dr` with gradient suspension/resumption capabilities.
+-
+ ```python
+-# Primal computation: reparameterize() returns identity
+-# Differentiated computation: expands to auxiliary ray tracing
+-
+-# Suspend gradients for the initial ray setup if necessary
+-with dr.suspend_grad():
+-    # ... setup ray origin and initial direction ...
+-    pass
+-
+-# The core reparameterization step
+-# ray.d is the modified direction, det is the Jacobian determinant
++# Primal rendering: reparameterize() returns input direction and Jacobian 1
++# Differentiated rendering: expands to auxiliary ray tracing and AD
+ ray.d, det = reparameterize(ray)
+-
+-# Perform intersection with the reparameterized ray
+ si = scene.ray_intersect(ray)
+ 
+-# Resume gradients for the directional component if needed for BSDF evaluation
+-with dr.resume_grad(ray.d):
+-    # Evaluate BSDF using the reparameterized direction
+-    # This accounts for the dependence of BSDF at adjacent vertices
+-    L += Li_prev * si_prev.bsdf().eval(si_prev, ray.d)
+-
+-# ... other rendering steps ...
+-
+-# Backpropagate through all terms, including the reparameterization
+-dr.backward(delta_L * L)
++# In a differentiable loop (e.g., PRB), gradients are accumulated
++# The Jacobian 'det' is used to weight the contribution
++# Gradients are scattered into geometry via AD tape surgery
+ ```
+ 
+-**Parameters and Edge Cases:**
+-*   **Jacobian Determinant:** In primal rendering, `reparameterize()` returns the input ray direction with a Jacobian determinant of 1 [S1].
+-*   **Dielectric Interfaces:** Derivatives are biased in scenes containing dielectric objects (e.g., a glass of water) because reparameterizing through perfectly specular interfaces is an open research problem [S1].
+-*   **Recursion:** The usage of Automatic Differentiation (AD) is recursive; a top-level render function launches PRB, which differentiates contributions in a traced loop, evaluating derivatives of system operations including reparameterizations [S1].
++**Formulas:**
++The rendering integral $I(\theta)$ is reparameterized from:
++$$
++I(\theta) = \int f(x, \theta) dx
++$$
++to:
++$$
++I(\theta) = \int f(g(u, \theta), \theta) p(u) du
++$$
++where $u$ is a parameter-independent random variable and $g$ is the differentiable mapping [S1]. The gradient is:
++$$
++\nabla_\theta I = \int \nabla_\theta \left[ f(g(u, \theta), \theta) \right] p(u) du
++$$
++In the context of ray tracing, the Jacobian determinant $J$ accounts for the change in solid angle or intersection density due to the warp field [S1].
++
++**Parameters:**
++*   `det`: Jacobian determinant. Not given in the sources.
++
++**Edge Cases:**
++*   **Dielectric Interfaces:** Derivatives are biased in scenes containing dielectric objects (e.g., glass of water) [S1].
++*   **Specular Interfaces:** How to reparameterize through perfectly specular interfaces is an open research problem [S1].
+ 
+ ## Subtopics
+ 
+ ### Reparameterized PRB Benchmark
+-A variant of Path Replay Backpropagation (PRB) that introduces reparameterizations and steps to evaluate derivatives of adjacent vertices [S1].
+-*   **Characteristics:** Leads to very large programs compared to primal rendering or non-reparameterized methods [S1].
+-*   **Optimizations:** Polymorphism-related optimizations (dead code elimination, value numbering, constant propagation) produce a 6.6x speedup on the OptiX backend [S1]. Loop state optimizations provide modest runtime improvements (a few percent) but may be more effective in methods using attached Monte Carlo sampling where large sets of derivatives are exchanged between loop iterations [S1].
+-*   **Limitations:** As noted in the main method, derivatives are biased in scenes with dielectric objects [S1].
++A variant of Path Replay Backpropagation (PRB) that introduces reparameterizations and steps to evaluate derivatives of adjacent vertices [S1]. It leads to very large programs compared to primal rendering or non-reparameterized methods [S1]. Polymorphism-related optimizations (dead code elimination, value numbering, constant propagation) produce a 6.6x speedup on the OptiX backend [S1]. Loop state optimizations yield modest runtime improvements (a few percent) but may be more effective in methods using attached Monte Carlo sampling where large sets of derivatives are exchanged between loop iterations [S1].
+ 
+ ## Operating characteristics
+-*   **Complexity:** The introduction of reparameterizations significantly increases program size and computational overhead compared to primal rendering [S1]. The visualization of generated kernel subroutines shows a substantial increase in subroutine count and data exchange through function inputs/outputs and loop state variables [S1].
+-*   **Performance:** On the OptiX backend, polymorphism-related optimizations are critical, yielding a 6.6x speedup [S1]. On CUDA, improvements are present but less dramatic than on LLVM/OptiX for this specific optimization set [S1].
+-*   **Memory:** The method increases memory usage due to the storage of auxiliary ray data and larger kernel subroutines [S1].
+-*   **Strengths:** Correctly handles parameter-dependent silhouette motion, reducing bias in gradients for geometry optimization [S1].
+-*   **Limitations:** Biased derivatives for dielectric/specular interfaces; high computational cost due to auxiliary ray tracing and large AD tapes [S1].
++**Time and Memory Complexity:**
++The introduction of reparameterizations leads to very large programs in terms of generated kernel subroutines and data exchange through function inputs, outputs, and loop state variables [S1]. Polymorphism-related optimizations are critical for performance, providing significant speedups (e.g., 6.6x on OptiX) [S1].
++
++**Measured Performance:**
++In the "Staircase" scene (3 bounces, 16 spp), reparameterized PRB shows significant optimization benefits [S1]. In the "Living room" scene (12 bounces, 16 spp), similar trends are observed [S1].
++
++**Strengths and Limitations:**
++*   **Strengths:** Enables unbiased gradient estimation for geometry parameters by freezing discontinuities [S1].
++*   **Limitations:** Biased derivatives for dielectric/specular interfaces [S1]. High computational overhead due to auxiliary ray tracing and large program size [S1].
++
++**When to Use:**
++Use when differentiating with respect to scene geometry parameters where silhouette motion would otherwise cause bias [S1].
+ 
+ ## Background
+-Reparameterization in this context was introduced by Wenzel Jakob, Sébastien Speierer, Nicolas Roussel, and Delio Vicini in the DR.JIT paper [S1]. It builds on the general reparameterization trick [S1, 2, 3] and specifically addresses the challenges of differentiable path tracing where geometry parameters influence the domain of integration [S1]. The method was developed to enable stable optimization of scene geometry in differentiable rendering pipelines [S1].
++Reparameterization in differentiable rendering was introduced by Wenzel Jakob, Sébastien Speierer, Nicolas Roussel, and Delio Vicini in the DR.JIT paper [S1]. It builds on the change of variables formula and the reparameterization trick [S1]. The method exposes reparameterizations through a CustomOp-based abstraction to isolate specifics from the PBDR integrator [S1].
+ 
+ ## Sources

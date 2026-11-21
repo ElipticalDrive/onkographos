@@ -1,0 +1,174 @@
+# Inverse Manipulation (Inversion)
+Also called: CLIP-Driven Inverse Manipulation, EM-based Inverse Projection
+
+## Overview
+Inverse Manipulation is an iterative optimization method that inversely projects an input image $I_r$ onto the generation manifold of a pre-trained neural radiance field (NeRF) generator by optimizing the generation conditions: shape code $z_s$, appearance code $z_a$, and camera pose $v$ [S1]. It distinguishes itself from direct latent code retrieval by using an Expectation-Maximization (EM) style alternating optimization to find the specific latent codes and camera parameters that best reconstruct the input image, enabling subsequent text-driven or attribute-based manipulations [S1]. Unlike [Test-Time Photometric Optimization](12699-test-time-photometric-optimization.md) which may optimize for general fidelity, this method specifically targets the disentangled latent space of a conditional NeRF to enable precise editing [S1].
+
+## How it works
+**Inputs:**
+*   Input image $I_r$ belonging to the training category (e.g., chairs, cars) [S1].
+*   Pre-trained conditional NeRF generator $\hat{F}_\theta$ with fixed weights [S1].
+*   Pre-trained CLIP encoders $\hat{E}_t$ (text) and $\hat{E}_i$ (image) [S1].
+*   Discriminator $\hat{D}$ (optional, used in mapper training but not explicitly in the inversion loop loss in [S1], though the loss structure implies a GAN-aware context) [S1].
+*   Initial estimates for shape code $\hat{z}_s$, appearance code $\hat{z}_a$, and camera pose $v$ (often sampled or initialized from the manifold distribution) [S1].
+
+**Outputs:**
+*   Optimized shape code $z_s^*$, appearance code $z_a^*$, and camera pose $v^*$ that minimizes the reconstruction and CLIP consistency losses [S1].
+
+**Data Structures:**
+*   $z_s \in \mathbb{R}^{d_s}$: Shape latent code.
+*   $z_a \in \mathbb{R}^{d_a}$: Appearance latent code.
+*   $v$: Camera pose parameters (extrinsics/intrinsics).
+*   $n_z \in \mathbb{R}^{d_n}$: Random noise vector.
+*   $\lambda_n \in [0, 1]$: Noise scaling factor.
+
+**Parameters:**
+*   $\lambda_v, \lambda_s, \lambda_a$: Weights for the CLIP consistency terms in the camera, shape, and appearance losses respectively. Typical values cited: $\lambda_v = 0.1$, $\lambda_s = 3.5$ (implied from context of similar losses, though exact $\lambda_s, \lambda_a$ values are not explicitly fixed in the snippet, $\lambda_v=0.1$ is given) [S1].
+*   $\lambda_n$: Linearly decays from 1 to 0 throughout the optimization iterations [S1].
+*   $n_z$: Random standard Gaussian noise vector sampled at each step [S1].
+
+**Algorithm Steps:**
+The method follows an EM-like iterative procedure. In each iteration, the following three steps are performed sequentially:
+
+1.  **Camera Optimization:** Optimize the camera pose $v$ while keeping $z_s$ and $z_a$ fixed. The loss $L_v$ combines pixel reconstruction error and CLIP image consistency:
+    $$ L_v = \| \hat{F}_\theta(v, \hat{z}_s, \hat{z}_a) - I_r \|^2 + \lambda_v D_{CLIP}(\hat{F}_\theta(v, \hat{z}_s, \hat{z}_a), I_r) $$
+    where $D_{CLIP}$ is the CLIP distance (typically $1 - \text{cosine similarity}$) [S1].
+
+2.  **Shape Code Update:** Update the shape code $z_s$ by minimizing $L_s$. The update uses a perturbed shape code $z_s + \lambda_n n_z$ to improve robustness:
+    $$ L_s = \| \hat{F}_\theta(\hat{v}, z_s + \lambda_n n_z, \hat{z}_a) - I_r \|^2 + \lambda_s D_{CLIP}(\hat{F}_\theta(\hat{v}, z_s + \lambda_n n_z, \hat{z}_a), I_r) $$
+    Here, $\hat{v}$ is the camera pose optimized in Step 1 [S1].
+
+3.  **Appearance Code Update:** Update the appearance code $z_a$ by minimizing $L_a$, similarly using a perturbed appearance code:
+    $$ L_a = \| \hat{F}_\theta(\hat{v}, \hat{z}_s, z_a + \lambda_n n_z) - I_r \|^2 + \lambda_a D_{CLIP}(\hat{F}_\theta(\hat{v}, \hat{z}_s, z_a + \lambda_n n_z), I_r) $$
+    Here, $\hat{z}_s$ is the shape code from Step 2 [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def inverse_manipulation(F_theta, E_i, I_r, z_s_init, z_a_init, v_init, 
+                         lambda_v, lambda_s, lambda_a, num_iterations):
+    """
+    Inverse Manipulation: Optimize z_s, z_a, v to match I_r.
+    """
+    z_s = z_s_init.clone()
+    z_a = z_a_init.clone()
+    v = v_init.clone()
+    
+    # Lambda_n decays from 1 to 0
+    lambda_n_schedule = torch.linspace(1.0, 0.0, num_iterations)
+    
+    for step in range(num_iterations):
+        lambda_n = lambda_n_schedule[step]
+        
+        # Sample noise
+        n_z = torch.randn_like(z_s) # Assuming same dimension or appropriate size
+        
+        # Step 1: Optimize Camera v
+        # Loss: L_v = ||F(v, z_s, z_a) - I_r||^2 + lambda_v * D_CLIP(F(v, z_s, z_a), I_r)
+        v = optimize_camera(F_theta, E_i, I_r, z_s, z_a, lambda_v, v)
+        
+        # Step 2: Update Shape z_s
+        # Loss: L_s = ||F(v, z_s + lambda_n * n_z, z_a) - I_r||^2 + lambda_s * D_CLIP(...)
+        # Note: The paper uses z_s + lambda_n * n_z in the loss evaluation, 
+        # but optimizes z_s. The noise is for robustness during gradient descent.
+        z_s = optimize_shape(F_theta, E_i, I_r, v, z_a, lambda_s, lambda_n, n_z, z_s)
+        
+        # Step 3: Update Appearance z_a
+        # Loss: L_a = ||F(v, z_s, z_a + lambda_n * n_z) - I_r||^2 + lambda_a * D_CLIP(...)
+        z_a = optimize_appearance(F_theta, E_i, I_r, v, z_s, lambda_a, lambda_n, n_z, z_a)
+        
+    return z_s, z_a, v
+
+def optimize_camera(F_theta, E_i, I_r, z_s, z_a, lambda_v, v):
+    """Gradient descent step for camera pose v."""
+    # Render image with current v
+    rendered_img = F_theta(v, z_s, z_a)
+    
+    # Pixel loss
+    pixel_loss = torch.mean((rendered_img - I_r) ** 2)
+    
+    # CLIP loss
+    # D_CLIP is typically 1 - cosine_similarity
+    clip_features_rendered = E_i(rendered_img)
+    clip_features_input = E_i(I_r)
+    cosine_sim = torch.cosine_similarity(clip_features_rendered, clip_features_input)
+    clip_loss = 1.0 - cosine_sim
+    
+    loss = pixel_loss + lambda_v * clip_loss
+    
+    # Perform gradient step on v
+    v.grad = torch.autograd.grad(loss, v, retain_graph=True)[0]
+    v = v - learning_rate * v.grad
+    v.grad.zero_()
+    return v
+
+def optimize_shape(F_theta, E_i, I_r, v, z_a, lambda_s, lambda_n, n_z, z_s):
+    """Gradient descent step for shape code z_s."""
+    # Perturbed shape
+    z_s_perturbed = z_s + lambda_n * n_z
+    
+    rendered_img = F_theta(v, z_s_perturbed, z_a)
+    
+    pixel_loss = torch.mean((rendered_img - I_r) ** 2)
+    
+    clip_features_rendered = E_i(rendered_img)
+    clip_features_input = E_i(I_r)
+    cosine_sim = torch.cosine_similarity(clip_features_rendered, clip_features_input)
+    clip_loss = 1.0 - cosine_sim
+    
+    loss = pixel_loss + lambda_s * clip_loss
+    
+    # Gradient w.r.t z_s (not z_s_perturbed directly, but the optimization updates z_s)
+    # The noise is added to the forward pass for robustness, but gradients flow through z_s
+    z_s.grad = torch.autograd.grad(loss, z_s, retain_graph=True)[0]
+    z_s = z_s - learning_rate * z_s.grad
+    z_s.grad.zero_()
+    return z_s
+
+def optimize_appearance(F_theta, E_i, I_r, v, z_s, lambda_a, lambda_n, n_z, z_a):
+    """Gradient descent step for appearance code z_a."""
+    z_a_perturbed = z_a + lambda_n * n_z
+    
+    rendered_img = F_theta(v, z_s, z_a_perturbed)
+    
+    pixel_loss = torch.mean((rendered_img - I_r) ** 2)
+    
+    clip_features_rendered = E_i(rendered_img)
+    clip_features_input = E_i(I_r)
+    cosine_sim = torch.cosine_similarity(clip_features_rendered, clip_features_input)
+    clip_loss = 1.0 - cosine_sim
+    
+    loss = pixel_loss + lambda_a * clip_loss
+    
+    z_a.grad = torch.autograd.grad(loss, z_a, retain_graph=True)[0]
+    z_a = z_a - learning_rate * z_a.grad
+    z_a.grad.zero_()
+    return z_a
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The method relies on gradient-based optimization, which can be sensitive to local minima if the initial codes are far from the manifold [S1].
+*   **Noise Scaling:** The linear decay of $\lambda_n$ from 1 to 0 is critical for robustness; failing to decay it may prevent convergence to a precise solution [S1].
+*   **Input Domain:** The method assumes the input image $I_r$ belongs to the same training category as the NeRF generator (e.g., chairs for a chair NeRF) [S1].
+
+## Subtopics
+
+### Text-driven Manipulation via Inversion
+A variant where the goal is to find an optimal latent code $w$ (in a single-code formulation) that maximizes the cosine similarity between rendered images and a target text embedding in CLIP space [S2]. The optimization solves $w^* = \arg\max_w D_{CLIP}(I^{G,w}_{[R|t]}, p)$ using the loss $L_{CLIP} = 1 - D_{CLIP}(I^{G,w}_{[R|t]}, p)$ [S2]. A key pitfall of this vanilla inversion approach is the "linked local attribute problem," where interpolations between learned latent codes cause facial attributes in different locations to change simultaneously, preventing independent control (e.g., opened eyes with closed mouth) [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Iterative gradient-based optimization. Each iteration requires rendering the NeRF and computing CLIP features, which is computationally expensive. The number of iterations depends on convergence criteria [S1].
+*   **Memory Complexity:** Requires storing the latent codes $z_s, z_a$, camera parameters $v$, and gradients during backpropagation. The NeRF weights are fixed [S1].
+*   **Performance:** Evaluated on Photoshapes (150K chairs, 128x128) and Carla (10K cars, 256x256) [S1].
+*   **Strengths:** Enables text-driven and attribute-based editing of NeRFs by finding precise latent codes for input images [S1].
+*   **Limitations:** Computationally intensive due to iterative optimization. The "linked local attribute problem" can limit fine-grained control in text-driven variants [S2].
+*   **When to use:** When precise inversion of an input image into a latent space is required for subsequent editing.
+*   **When not to use:** When real-time performance is required or when the input image is out-of-distribution for the NeRF generator.
+
+## Background
+Inverse Manipulation was introduced in the context of CLIP-NeRF, a method for text-and-image driven manipulation of Neural Radiance Fields [S1]. It builds on latent image manipulation methods [1, 2, 10, 27] and applies the EM algorithm [5] to optimize generation conditions. The method was evaluated on public datasets like Photoshapes and Carla [S1]. The text-driven variant and its limitations were further explored in FaceCLIPNeRF [S2].
+
+## Sources
+[S1] CLIP-NeRF: Text-and-Image Driven Manipulation of Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00381, fetched 2026-10-29
+[S2] FaceCLIPNeRF: Text-driven 3D Face Manipulation using Deformable Neural Radiance Fields, https://doi.org/10.1109/ICCV51070.2023.00321, fetched 2026-10-29

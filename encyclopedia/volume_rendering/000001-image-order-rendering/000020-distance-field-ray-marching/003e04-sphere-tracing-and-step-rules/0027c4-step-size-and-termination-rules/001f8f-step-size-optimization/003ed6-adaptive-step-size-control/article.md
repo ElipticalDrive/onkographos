@@ -1,0 +1,120 @@
+# Adaptive Step Size Control
+
+Also called: Adaptive Step Size Controller, Integrator Step Controller, Step Safety Factor
+
+## Overview
+Adaptive Step Size Control is a family of techniques that dynamically adjusts the ray marching interval $\Delta t$ during volume rendering or ray tracing to balance computational cost against visual fidelity. Unlike fixed-step methods, which enforce a uniform trade-off between quality and efficiency, these methods vary the sampling density based on local scene properties (such as density gradients, transtransmittance, or statistical variance) or global constraints (such as target frame rates) [S1, S2, S3, unofficial]. This family is distinct from its siblings: [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) focuses on geometric safety bounds, [Compute Minimal Sample Distance Per Pixel](2684-compute-minimal-sample-distance-per-pixel.md) on resolution limits, [Error Estimate](2768-error-estimate.md) on local error metrics, [Gap-Limited Ray Marching](4412-gap-limited-ray-marching.md) on feature gaps, and [Adaptive Volume Rendering Integration](9817-adaptive-volume-rendering-integration.md) on integration accuracy.
+
+## Shared principles
+All methods in this family operate on a ray defined by origin $\mathbf{o}$ and normalized direction $\mathbf{d}$, parameterized by distance $t$. The core loop evaluates a scene function (SDF, density field, or volume texture) at the current position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ to determine the next step size $\Delta t$ and check for termination.
+
+**Termination Conditions:**
+1.  **Surface Hit:** The ray has intersected the target geometry. For SDFs, this is typically $|f(\mathbf{p})| < \epsilon$ or $f(\mathbf{p}) \le 0$. For volumes, this may be a density threshold or opacity accumulation [S1, unofficial].
+2.  **Escape/Miss:** The ray has traveled beyond a maximum distance $t_{max}$ or exceeded a maximum iteration count $N_{max}$.
+3.  **Early Termination (Volumes):** Accumulated opacity $\alpha_{acc}$ exceeds a threshold (e.g., $1 - \epsilon$), or accumulated transmission falls below a minimum threshold, allowing the ray to stop early as further contributions are negligible [S1, unofficial].
+
+**Step Size Determination:**
+The step size $\Delta t$ is computed based on the local scene properties:
+*   **SDF-based:** $\Delta t$ is often derived from the SDF value $f(\mathbf{p})$, potentially scaled by a relaxation factor or Lipschitz constant $\lambda$ [S2, unofficial].
+*   **Volume-based:** $\Delta t$ may be fixed, adaptive based on density gradients, or constrained by minimum/maximum bounds to prevent aliasing or excessive computation [S2, unofficial].
+*   **Safety:** Steps must be chosen to ensure the ray does not penetrate the surface or skip over significant volumetric features, often requiring conservative clamping.
+
+**Pseudocode Structure:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_march_loop(ray_origin, ray_direction, scene_func, max_dist, max_steps, epsilon):
+    t = 0.0
+    for i in range(max_steps):
+        if t > max_dist:
+            return False, t
+        
+        p = ray_origin + ray_direction * t
+        val = scene_func(p)
+        
+        # Termination: Hit
+        if is_hit(val, epsilon):
+            return True, t
+        
+        # Termination: Early Exit (Volume specific)
+        if is_early_exit(val, t):
+            return False, t # Or handle partial contribution
+            
+        # Step Size Calculation
+        step = compute_step_size(val, t, i)
+        
+        # Safety Clamp
+        step = max(step, min_step)
+        step = min(step, max_step)
+        
+        t += step
+        
+    return False, t
+```
+
+## Subtopics
+
+### [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md)
+Adaptive Step Size Ray Marching optimizes computational cost by varying the sampling interval along a ray based on local density changes and transmittance. It uses fine steps in high-density regions and coarse steps in empty space or at distance. It distinguishes itself from siblings like [Dynamic Sampling Step Adjustment](2442-dynamic-sampling-step-adjustment.md) by explicitly coupling step size to density gradients and transmittance thresholds, and from [Variance-based Step Size Adaptation](13161-variance-based-step-size-adaptation.md) by relying on deterministic density thresholds rather than statistical variance.
+
+### [Dynamic Sampling Step Adjustment](2442-dynamic-sampling-step-adjustment.md)
+Dynamic Sampling Step Adjustment accelerates traversal through empty or homogeneous regions of a volume by exponentially increasing the step size when no density is detected. It solves the problem of redundant sampling in sparse areas, such as the sky in atmospheric rendering, by skipping large distances until a feature is encountered. It distinguishes itself from sibling methods like [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by using a binary "empty/non-empty" heuristic rather than continuous gradient or variance metrics to drive step changes, and from [Variance-based Step Size Adaptation](13161-variance-based-step-size-adaptation.md) by relying on mip-level offsets rather than statistical error bounds.
+
+### [Adaptive Step Size for Interaction](6615-adaptive-step-size-for-interaction.md)
+Adaptive Step Size for Interaction is a performance optimization technique that dynamically increases the ray marching step size during user interaction (e.g., viewpoint changes) to maintain frame rate, then restores smaller step sizes for high-quality final image generation. It differs from continuous adaptive methods like [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by decoupling the step size from local geometric features during the interaction phase, relying instead on a global state switch to trade visual fidelity for speed.
+
+### [Variance-based Step Size Adaptation](13161-variance-based-step-size-adaptation.md)
+Variance-based Step Size Adaptation is a preprocessing technique that determines the adaptive ray traversal step size ($\Delta t$) for volume rendering by calculating the statistical variance of voxel data within spatial bricks. It solves the problem of selecting an appropriate step size for sparse or local traversal without the computational cost of calculating iso-surface normals at runtime. Unlike fixed-step methods, it adjusts $\Delta t$ based on local data complexity: high variance (frequent normal changes) yields smaller steps, while low variance allows larger steps.
+
+### [Time-Aware Adaptive Step Size](17974-time-aware-adaptive-step-size.md)
+Time-Aware Adaptive Step Size is a technique for controlling rendering frame rate by dynamically adjusting the ray step size based on a predicted rendering time. It solves the problem of maintaining a target frame rate during interactive exploration, particularly when scene complexity changes due to camera movement or transfer function adjustments. It sets itself apart from reactive methods like OLP and PID controllers by predicting rendering time proactively before rendering each frame, thereby avoiding the one-frame lag inherent in reactive approaches.
+
+### Adaptive Stepsize Rendering
+#### definition
+- [S2, unofficial] A rendering method where the ray marching step size is provided per-pixel via an input tensor, allowing for variable sampling density across the image.
+#### step
+- [S2, unofficial] The PyTorch wrapper `adaptiveStepsizeRendering` asserts that the input `stepsizes` tensor has shape B*1*H*W and C=1.
+- [S2, unofficial] The stepsizes tensor is moved to the CUDA device.
+- [S2, unofficial] For each batch item, the renderer settings are sent to update the renderer state.
+- [S2, unofficial] The viewport dimensions are extracted from settings and asserted to match the H and W of the stepsizes tensor.
+- [S2, unofficial] The stepsizes tensor is padded to match the viewport requirements (code snippet cuts off, but padding is initiated).
+#### parameter
+- [S2, unofficial] fd_epsilon: A float parameter with default value 1e-5, used for gradient propagation support.
+#### layout
+- [S2, unofficial] Input tensor `stepsize` is a float tensor on the GPU of size HxW with only positive values.
+- [S2, unofficial] Output tensor `output` is a float tensor on the GPU of size BxHxW with B=8 channels: 0=mask, 1=normalX, 2=normalY, 3=normalZ, 4=depth, 5=ao, 6=flowX, 7=flowY.
+#### comparison
+- [S2, unofficial] Unlike standard rendering which uses a uniform or pre-computed step size, this method accepts a per-pixel tensor of step sizes, enabling adaptive sampling based on importance maps.
+
+### PID-based Adaptive Step Size Control
+#### definition
+- [S3, unofficial] A reactive feedback-loop controller that adjusts the ray step size based on the error between actual and target rendering times.
+#### step
+- [S3, unofficial] Calculate the error as the difference between the actual rendering time and the target rendering time of the previous frame.
+- [S3, unofficial] Apply proportional, integral, and derivative coefficients to the error to compute the control signal.
+- [S3, unofficial] Update the ray step size using the computed control signal.
+#### parameter
+- [S3, unofficial] Proportional coefficient: 0.3.
+- [S3, unofficial] Integral coefficient: 0.05.
+- [S3, unofficial] Derivative coefficient: 0.1.
+
+### Performance-based Step Size Adaptation
+#### definition
+- [S3, unofficial] A technique to adapt ray step size during volume rendering by constructing a lookup table from median measured rendering times across discrete step sizes, then using linear interpolation to predict rendering time for arbitrary step sizes.
+#### step
+- [S3, unofficial] Measure rendering times for a set of discrete ray step sizes to generate sampled δ-tnorm curves.
+- [S3, unofficial] Compute the median rendering time at each ray step size across all measured curves to form the adaptation curve G.
+- [S3, unofficial] Store G as a lookup table indexed by ray step size.
+- [S3, unofficial] Query the lookup table for a desired step size using linear interpolation to estimate rendering time.
+#### layout
+- [S3, unofficial] Lookup table mapping ray step size (input) to predicted rendering time (output), accessed via linear interpolation between stored points.
+#### usage
+- [S3, unofficial] Integrated into an interactive widget for Use Case 1 based on the CUDA-raycaster, enabling real-time transfer function adjustment and volume exploration with live frame rate feedback.
+
+## Background
+Adaptive step size control originated from the need to optimize ray marching in volumetric data, where fixed sampling rates lead to either aliasing in dense regions or wasted computation in empty space. Early methods focused on density-gradient-based adaptation for cloud rendering . The field expanded to include statistical variance-based precomputation for sparse traversal [S1, unofficial] and dynamic mip-level skipping for empty space culling [S1, unofficial]. More recently, the focus has shifted towards performance-aware adaptation, using predictive models like ENTIRE to proactively adjust step sizes for target frame rates, avoiding the lag of reactive PID controllers [S3, unofficial]. These techniques are widely used in interactive volume visualization, medical imaging, and real-time cloud/atmospheric rendering.
+
+## Sources
+[S1] rusaitis/webpic, https://github.com/rusaitis/webpic, fetched 2026-10-27 (unofficial)
+[S2] Learning adaptive sampling and reconstruction for Volume Visualization, https://github.com/shamanDevel/AdaptiveSampling, fetched 2026-10-27 (unofficial)
+[S3] ENTIRE: Learning-based Volume Rendering Time Prediction, https://doi.org/10.48550/arxiv.2501.12119, fetched 2026-10-26 (unofficial)

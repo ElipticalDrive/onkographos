@@ -1,0 +1,288 @@
+# GPU BVH Construction via Cluster Merging
+
+Also called: Cluster Merging BVH, GPU-based BVH Construction via Cluster Merging, VoxelFragmentML BVH Build
+
+## Overview
+This method constructs a Binary Volume Hierarchy (BVH) on the GPU by iteratively merging clusters of triangles [S1, unofficial]. It solves the problem of building hierarchical acceleration structures for ray tracing without CPU-GPU synchronization bottlenecks by using a fully parallel, double-buffered approach involving neighbor finding, prefix scans, and reallocation [S1, unofficial]. It differs from CPU-based top-down or bottom-up builders by keeping all data on the GPU and using a "merge-compact" loop that reduces the number of active clusters by half (approximately) each iteration until a single root remains [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** A set of static triangles defined by their geometry. The number of input triangles is $N$.
+*   **Output:** A BVH stored in a GPU buffer (`_clusterSSBO`) containing $2N - 1$ nodes (clusters) [S1, unofficial]. The final readback size is explicitly $staticData.\_numTriangles \times 2 - 1$ [S1, unofficial].
+
+### Data Structures
+
+**BVHCluster**
+The fundamental unit of the BVH. On the CPU, it is defined as `Model3D::BVHCluster`. On the GPU, it resides in a Shader Storage Buffer Object (SSBO). The exact internal fields are not specified in the source, but it represents a cluster of triangles with a bounding volume [S1, unofficial].
+
+**Current Position Buffers**
+Two CPU-side arrays of type `GLuint*` (unsigned 32-bit integers), `currentPosBuffer` and `currentPosBufferOut`, each of size $arraySize$ (initially $N$) [S1, unofficial].
+*   `currentPosBufferOut` is initialized with sequential integers: $currentPosBufferOut[i] = i$ for $0 \le i < arraySize$ [S1, unofficial].
+*   These buffers track the compacted position of valid clusters during the merge process.
+
+**GPU Buffers (SSBOs)**
+*   `cinBuffer`: Read-only cluster data for the current iteration.
+*   `coutBuffer`: Write-only cluster data for the next iteration (double-buffered with `cinBuffer`).
+*   `inCurrentPosition`: Read-only position data for the current iteration.
+*   `outCurrentPosition`: Write-only position data for the next iteration (double-buffered with `inCurrentPosition`).
+*   `neighborIndex`: Stores the index of the nearest neighbor for each cluster.
+*   `prefixScan`: Temporary buffer for the parallel prefix scan (reduction and up-sweep/down-sweep).
+*   `validCluster`: Boolean or integer flag indicating if a cluster was merged or remains valid.
+*   `mergedCluster`: Buffer storing details of merged clusters.
+*   `numNodesCount`: Buffer to store the count of remaining nodes after an iteration.
+*   `arraySizeCount`: Buffer to store the updated `arraySize` for the loop condition.
+*   `_clusterSSBO`: The final BVH storage, sized for $N \times 2 - 1$ clusters [S1, unofficial].
+*   `_tempClusterSSBO`: Temporary cluster storage, sized for $arraySize$ [S1, unofficial].
+*   `sortedFaces`: Sorted triangle indices (output of Morton sort).
+*   `gpuData->_tempClusterSSBO`: Temporary cluster data [S1, unofficial].
+
+### Algorithm Steps
+
+The construction consists of three main phases: Morton Code Sorting, Cluster Building, and Iterative Merging.
+
+#### Phase 1: Morton Code Sort (Radix Sort)
+Triangles are sorted by Morton code to improve spatial locality before clustering.
+1.  **Parameters:** `numBits = 30` (10 bits per coordinate for 3D Morton codes) [S1, unofficial].
+2.  **Loop:** Iterate `currentBits` from 0 to `numBits - 1`.
+3.  **Bit Mask:** Execute `bitMaskShader` on `mortonCodes` and `indicesBufferID_1`. This splits indices into `pBitsBufferID` (bit=1) and `nBitsBufferID` (bit=0) [S1, unofficial].
+4.  **Reduce:** Perform a prefix scan on `nBitsBufferID` to count the number of zeros (bit=0) [S1, unofficial].
+5.  **Reset:** Execute `resetPositionShader` on `nBitsBufferID` with 1 group to set the last position to zero [S1, unofficial].
+6.  **Down Sweep:** Execute `downSweepShader` to compute final positions for the zeros [S1, unofficial].
+7.  **Reallocate:** Execute `reallocatePositionShader` to reorder `indicesBufferID_1` into `indicesBufferID_2` based on the computed positions [S1, unofficial].
+
+#### Phase 2: Build Initial Clusters
+1.  **Execution:** Execute `buildClusterShader` with buffers `{ staticData._groupTopologySSBO, sortedFaces, staticData->_clusterSSBO, gpuData->_tempClusterSSBO }` [S1, unofficial].
+2.  **Uniforms:** Set `arraySize` to the number of triangles [S1, unofficial].
+3.  **Groups:** Execute with `numGroups` groups [S1, unofficial].
+4.  **Result:** Initial leaf clusters are created in `_tempClusterSSBO` (or `_clusterSSBO` depending on implementation flow, but notes specify `_tempClusterSSBO` as input to build, and `_clusterSSBO` as final output) [S1, unofficial]. *Note: The notes state `buildClusterBuffer` creates `clusterData` of size $N \times 2 - 1$ and sets up `_clusterSSBO` (write) and `_tempClusterSSBO` (write) [S1, unofficial].*
+
+#### Phase 3: Iterative Cluster Merging
+The core loop reduces the number of clusters until one root remains.
+
+**Initialization:**
+1.  Calculate `arraySize` = number of triangles $N$ [S1, unofficial].
+2.  Create input buffer `outCluster` (CPU side) [S1, unofficial].
+3.  Initialize `currentPosBufferOut` with `std::iota(..., 0)` [S1, unofficial].
+4.  Set up SSBOs: `cinBuffer`, `coutBuffer`, `inCurrentPosition`, `outCurrentPosition`, `neighborIndex`, `prefixScan`, `validCluster`, `mergedCluster`, `numNodesCount`, `arraySizeCount` [S1, unofficial].
+
+**Main Loop:**
+While `arraySize > 1`:
+
+1.  **Buffer Swapping:**
+    *   Swap `coutBuffer` and `cinBuffer`.
+    *   Swap `outCurrentPosition` and `inCurrentPosition` [S1, unofficial].
+    *   This double-buffers the cluster and position data to allow parallel reads and writes [S1, unofficial].
+
+2.  **Group Size Calculation:**
+    *   `numGroups = ComputeShader::getNumGroups(arraySize)` [S1, unofficial].
+    *   `startThreads = std::ceil(arraySize / 2.0f)` [S1, unofficial].
+    *   `numExec = std::ceil(std::log2(arraySize))` [S1, unofficial].
+    *   `numGroups2Log = ComputeShader::getNumGroups(startThreads)` [S1, unofficial].
+
+3.  **Neighbor Finding:**
+    *   Execute `findNeighborShader` with buffers `{ cinBuffer, neighborIndex }` [S1, unofficial].
+    *   Uniforms: `arraySize`, `radius` (search radius for nearest neighbor clusters) [S1, unofficial].
+    *   Execution: `numGroups` groups [S1, unofficial].
+
+4.  **Cluster Merging:**
+    *   Execute `clusterMergingShader` with buffers `{ cinBuffer, staticData._clusterSSBO, neighborIndex, validCluster, mergedCluster, prefixScan, inCurrentPosition, numNodesCount }` [S1, unofficial].
+    *   Uniform: `arraySize` [S1, unofficial].
+    *   Execution: `numGroups` groups [S1, unofficial].
+    *   This step merges clusters based on neighbors, writes valid/merged status, and updates prefix scan data [S1, unofficial].
+
+5.  **Prefix Scan - Reduce Phase (First Step):**
+    *   Build a binary tree summatory on `prefixScan` [S1, unofficial].
+    *   Initialize `iteration = 0`.
+    *   Loop `while (iteration < numExec)`:
+        *   Get `numThreads = threadCount[threadCount.size() - 1]` [S1, unofficial].
+        *   Set uniforms `iteration` and `numThreads` [S1, unofficial].
+        *   Execute `reduceShader` with `numGroups2Log` groups [S1, unofficial].
+        *   Push `std::ceil(numThreads / 2.0f)` to `threadCount` [S1, unofficial].
+
+6.  **Prefix Scan - Reset Last Position (Second Step):**
+    *   Execute `resetPositionShader` on `prefixScan` with 1 group to set the last position to zero [S1, unofficial].
+    *   Note: This is faster than CPU modification [S1, unofficial].
+
+7.  **Prefix Scan - Down Sweep Phase (Third Step):**
+    *   Build tree back to first level and compute final summatory on `prefixScan` [S1, unofficial].
+    *   Initialize `iteration = threadCount.size() - 2` [S1, unofficial].
+    *   Loop `while (iteration >= 0 && iteration < numExec)`:
+        *   Set uniforms `iteration` and `numThreads = threadCount[iteration]` [S1, unofficial].
+        *   Execute `downSweepShader` with `numGroups2Log` groups [S1, unofficial].
+        *   Decrement `iteration` [S1, unofficial].
+
+8.  **Reallocation:**
+    *   Execute `reallocClustersShader` with buffers `{ cinBuffer, coutBuffer, validCluster, prefixScan, inCurrentPosition, outCurrentPosition }` [S1, unofficial].
+    *   Uniform: `arraySize` [S1, unofficial].
+    *   Execution: `numGroups` groups [S1, unofficial].
+    *   This compacts the valid clusters into the output buffer (`coutBuffer`) [S1, unofficial].
+
+9.  **Update Cluster Size:**
+    *   Execute `endLoopCompShader` with buffers `{ arraySizeCount, prefixScan, validCluster }` [S1, unofficial].
+    *   Uniform: `arraySize` [S1, unofficial].
+    *   Execution: 1 group [S1, unofficial].
+    *   Read back the new `arraySize` from `arraySizeCount` [S1, unofficial].
+
+**Final Readback:**
+1.  After the loop, read the final BVH cluster data from `staticData._clusterSSBO` into a CPU vector [S1, unofficial].
+2.  The size is `staticData._numTriangles * 2 - 1` [S1, unofficial].
+
+**Cleanup:**
+1.  Delete GPU buffers: `coutBuffer`, `cinBuffer`, `inCurrentPosition`, `outCurrentPosition`, `neighborIndex`, `prefixScan`, `validCluster`, `mergedCluster`, `numNodesCount`, `arraySizeCount` [S1, unofficial].
+2.  Delete CPU memory: `outCluster`, `currentPosBuffer`, `currentPosBufferOut`, `volatileGPUData` [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gpu_bvh_cluster_merging(triangles):
+    """
+    Constructs a BVH on the GPU using cluster merging.
+    triangles: List of triangle objects with geometry.
+    Returns: BVH clusters as a list of BVHCluster objects.
+    """
+    N = len(triangles)
+    array_size = N
+    
+    # Phase 1: Morton Code Sort
+    morton_codes = compute_morton_codes(triangles)
+    indices = list(range(N))
+    
+    # 30-bit radix sort (10 bits per coordinate)
+    num_bits = 30
+    for current_bits in range(num_bits):
+        # 1. Bit Mask
+        p_bits_indices = []
+        n_bits_indices = []
+        for idx in indices:
+            if (morton_codes[idx] >> current_bits) & 1:
+                p_bits_indices.append(idx)
+            else:
+                n_bits_indices.append(idx)
+        
+        # 2. Reduce: Count zeros (n_bits)
+        # In GPU: prefix_scan(n_bits_indices)
+        # Here we simulate the count logic for position calculation
+        n_count = len(n_bits_indices)
+        
+        # 3. Reset Last Position (GPU optimization, simulated here by logic)
+        # 4. Down Sweep: Compute positions
+        # Positions for n_bits (0s) are 0 to n_count-1
+        # Positions for p_bits (1s) are n_count to N-1
+        
+        # 5. Reallocate
+        new_indices = [None] * N
+        n_idx = 0
+        p_idx = 0
+        for idx in indices:
+            if (morton_codes[idx] >> current_bits) & 1:
+                new_indices[n_count + p_idx] = idx
+                p_idx += 1
+            else:
+                new_indices[n_idx] = idx
+                n_idx += 1
+        indices = new_indices
+
+    # Phase 2: Build Initial Clusters
+    # Execute buildClusterShader
+    # Input: sorted triangles (indices), Output: initial clusters in temp buffer
+    clusters = build_initial_clusters(triangles, indices)
+    
+    # Phase 3: Iterative Merging
+    # Buffers setup
+    cin_buffer = clusters
+    cout_buffer = [None] * (2 * N) # Pre-allocate max size
+    in_pos = list(range(N))
+    out_pos = [None] * (2 * N)
+    
+    # Initialize out_pos with sequential integers for the initial array_size
+    for i in range(array_size):
+        out_pos[i] = i
+        
+    neighbor_index = [0] * array_size
+    prefix_scan = [0] * (2 * N)
+    valid_cluster = [True] * array_size
+    merged_cluster = [None] * (2 * N)
+    
+    while array_size > 1:
+        # Buffer Swapping
+        cin_buffer, cout_buffer = cout_buffer, cin_buffer
+        in_pos, out_pos = out_pos, in_pos
+        
+        # Group Size Calculation
+        num_groups = get_num_groups(array_size)
+        start_threads = ceil(array_size / 2.0)
+        num_exec = ceil(log2(array_size))
+        num_groups2_log = get_num_groups(start_threads)
+        
+        # Neighbor Finding
+        radius = 1.0 # Typical value, source does not specify exact default
+        find_neighbor(cin_buffer, neighbor_index, array_size, radius)
+        
+        # Cluster Merging
+        cluster_merging(cin_buffer, neighbor_index, valid_cluster, merged_cluster, 
+                        prefix_scan, in_pos, num_groups)
+        
+        # Prefix Scan - Reduce Phase
+        thread_count = []
+        iteration = 0
+        while iteration < num_exec:
+            num_threads = thread_count[-1] if thread_count else array_size
+            reduce_shader(prefix_scan, iteration, num_threads, num_groups2_log)
+            thread_count.append(ceil(num_threads / 2.0))
+            iteration += 1
+            
+        # Prefix Scan - Reset Last Position
+        reset_position_shader(prefix_scan, 1)
+        
+        # Prefix Scan - Down Sweep Phase
+        iteration = len(thread_count) - 2
+        while iteration >= 0 and iteration < num_exec:
+            num_threads = thread_count[iteration]
+            down_sweep_shader(prefix_scan, iteration, num_threads, num_groups2_log)
+            iteration -= 1
+            
+        # Reallocation
+        realloc_clusters(cin_buffer, cout_buffer, valid_cluster, prefix_scan, 
+                         in_pos, out_pos, array_size)
+        
+        # Update Cluster Size
+        new_array_size = end_loop_comp(prefix_scan, valid_cluster, array_size)
+        array_size = new_array_size
+        
+    # Final Readback
+    final_bvh = read_back(cin_buffer, N)
+    return final_bvh
+```
+
+### Parameters
+*   `radius`: The search radius for finding nearest neighbor clusters during the merging phase. Passed as a uniform to `findNeighborShader` [S1, unofficial].
+*   `numBits`: The number of bits for the radix sort, set to 30 (10 bits per coordinate for 3D Morton codes) [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Precision:** The use of `double` for AABB calculations (`dAABBCC`, `dvec3`) suggests high precision is required for bounding volume operations [S1, unofficial].
+*   **Boundary Conditions:** The loop condition `arraySize > 1` ensures the process stops at a single root. The prefix scan reset step is critical for correctness in the down-sweep phase [S1, unofficial].
+*   **Degenerate Input:** If `arraySize` is 0 or 1, the loop does not execute, and the final readback handles the base case. The source does not specify behavior for empty inputs beyond the loop condition [S1, unofficial].
+
+## Operating characteristics
+
+*   **Time Complexity:** The merging loop runs $O(\log N)$ iterations, as the number of clusters is roughly halved each time. Each iteration involves neighbor finding ($O(N)$), merging ($O(N)$), and prefix scans ($O(N)$). Thus, the total time complexity is $O(N \log N)$ [S1, unofficial].
+*   **Memory Complexity:** The algorithm uses double-buffering for clusters and positions, requiring $O(N)$ space for buffers. The final BVH requires $2N - 1$ nodes [S1, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** The method is designed for GPU parallelism, using compute shaders and SSBOs. It scales with the number of GPU threads and memory bandwidth [S1, unofficial].
+*   **Strengths:** Fully GPU-based, no CPU-GPU synchronization during construction, parallel neighbor finding and merging [S1, unofficial].
+*   **Limitations:** Requires significant GPU memory for double-buffering and temporary buffers. The neighbor finding step may be expensive for large scenes if the radius is large [S1, unofficial].
+*   **When to Use:** When building BVHs for static triangle meshes on the GPU is required, especially in contexts where CPU-GPU transfer overhead is prohibitive [S1, unofficial].
+*   **When Not to Use:** For dynamic scenes where frequent rebuilds are needed, or when memory bandwidth is a bottleneck [S1, unofficial].
+
+## Background
+
+*   **Origin:** The method is described in the VoxelFragmentML project by AlfonsoLRz [S1, unofficial].
+*   **History:** The specific implementation details are from the VoxelFragmentML repository, which appears to be an unofficial or experimental project [S1, unofficial].
+*   **Usage:** Used in the VoxelFragmentML project for GPU-based BVH construction [S1, unofficial].
+
+## Sources
+
+[S1] AlfonsoLRz/VoxelFragmentML, https://github.com/AlfonsoLRz/VoxelFragmentML, fetched 2026-10-26 (unofficial)

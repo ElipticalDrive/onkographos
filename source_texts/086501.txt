@@ -1,0 +1,60 @@
+While wrapping up my post for generating simplified occluders for Hierarchical Z-Buffer Occlusion Culling, I was pointed to a paper called Complete Polygonal Scene Voxelization.
+
+Robust Inside and Outside Solid Voxelization - Nick Darnell’s Blog
+Nick Darnell
+Follow
+Mastodon
+Twitter
+GitHub
+AstroBin
+While wrapping up my post for generating simplified occluders for Hierarchical Z-Buffer Occlusion Culling, I was pointed to a paper called Complete Polygonal Scene Voxelization.
+Afterwards I found time to read it thoroughly and implement it as a replacement for my existing ray casting based solid voxelization method.
+The problem with the solid voxelization technique I was using previously was that it used ray casting; making it impossible to perform solid voxelization unless the mesh is watertight in addition to having no anomalies like intersecting geometry.
+However, that restriction makes it an unrealistic solution in the real world because game art typically has holes in the locations players never see; such as the bottom cap on a building, which is rarely modeled.
+The New Solution
+The Complete Polygonal Scene Voxelization paper’s solution to voxelizing a scene is pretty clever; It applies a heuristic model to the problem of determining the inside/outside status of each voxel or octree cell. Allowing it to overcome the problem of holes and intersecting geometry making it suitable as a real world solution.
+How It Works
+You can download the paper and read it for yourself, but let me go ahead and summarize the algorithm for brevity’s sake so that the rest of the article makes sense.
+The algorithm takes place in 3 stages:
+Create Octree
+Find Seed Cell
+Propagate Seed Cell
+Create Octree
+First you create an octree around the mesh that continues to subdivide each cell until either the cell no longer intersects with any triangle or a maximum depth is reached. A typical maximum octree depth that will work for most meshes is 5. If the mesh has some exceptionally thin walls that you want the cells to be small enough to fill you may need to go as high as 7 or 8.
+I was having some problems with the GPU AABB/Triangle overlap test I used for voxelization in the Hierarchical Z-Buffer Occlusion Culling article and so I ended up porting the Möller implementation of AABB/Triangle overlap test to C# and just used it instead.
+Also if you ever need to lookup how an intersection is performed I highly recommend the gigantic matrix of intersections over at realtimerendering.com. It was a handy resource since I don’t keep the algorithm for AABB/Triangle overlap stored in my brain.
+After you’ve created the octree we need to process each cell that wasn’t intersecting with a triangle to determine if it is inside or outside.
+Find Seed Cell
+Before we can determine if a cell is inside or outside the mesh we need to find a seed cell. The seed cell is sort of the ground truth example cell that we use to propagate its status to the other cells that it can see. The seed cell’s status is determined by rendering a cube map centered inside the cell with the near plane placed at the cell edge.
+When rendering each side of the cube map, you render the scene such that all front facing polygons are blue and all back facing polygons are red. You then read back each cube map surface from the GPU and determine the percentage of red and blue pixels seen at each face.
+If at least 4 sides of the cube map contain red pixels, the cell is determined to be inside the mesh.
+The paper says that NO red pixels can be seen for a seed cell to be determined to be outside however I found this problematic since occasionally a red pixel can be seen just through tiny rendering artifacts.
+So I feel a better solution is one like the following:
+Where you don’t count a face as inside unless at least 3% of the total red and blue pixels are red. The percentage is just something I picked out of thin air, it feels like a number small enough to be easily overcome by any truly inside cube face, but high enough to allow me to ignore tiny artifacts.
+Propagate Seed Cell
+The last step is to propagate the seed cell’s status to other cells. After classifying a seed cell you need to test every unknown cell against each the depth map and frustum of each cube map surface.
+You’re performing a test to see if any of the 8 corners of the octree cell when projected into the camera space of each cube face are closer than the depth value at that pixel. If it is, then then the entire octree cell likely visible.
+If the cell is visible from the seed cell, then in all likelihood the cell has the same status as the seed cell. However because having holes means 2 seed cells (one inside and one outside) can potentially see the same cell you want several seed cells to confirm the status of a cell before committing to it.
+So once you’ve determined a cell is visible from the seed cell you’ll increment a counter on the cell for that status. Once one of the statuses reaches a threshold, like for example 16 you’ll change the status of the cell from Unknown to whatever status counter overcame the threshold and no longer process that cell.
+It should be noted that only seed cells propagate their status. Cells that you propagate to do not propagate their own status.
+Repeat
+After you’ve found a seed cell and propagated its status you’ll continue to repeat finding a seed cell and propagating the seed cell until all cells have a status of inside, outside or intersecting. You can rarely end up with some cells whose status simply can’t be determined so make sure your code can handle that scenario and not loop forever.
+Improvements
+While implementing the paper I made some additional improvements to the proposed solution. I sped up the process by taking advantage of hardware improvements to render the scene using a single pass. I also improved the conservativeness of the algorithm in situations where you’re using square voxels. When a mesh is wider than it is tall in those sitations there will be padding below the mesh; if the bottom of the mesh is uncapped it can lead to inside cells ‘leaking’ their status outside.
+Single Pass Rendering
+The paper was published back in 2002 and due to limitations at the time the simplest method of rendering front faces one color and back faces another was to render the scene twice and flip the winding order and the color of the triangles being rendered. However this method is slower than just using a simple pixel shader to change the color of front/back faces.
+In OpenGL you can use gl_FrontFacing and in DirectX 11 you can use SV_IsFrontFace.
+Intersect Mesh Bounds and Clip To Bounds
+One problem I found is that when a mesh (like a building) is uncapped at its base but is wider than it is tall there will be several cells below the base of the mesh. Cells that will have the status of inside spread to them, even though a human could easily see those cells are outside.
+So one improvement I ended up adding is that when testing for triangle intersection, you should also test against intersection against the mesh bounds. Additionally you immediately mark a cell as Outside if is outside the mesh bounds, since it simply is not possible for that cell to be inside the mesh, but don’t treat that cell like it’s a seed cell; just mark it as outside and move on.
+I needed some real game art to properly test the solution so I exported a roof structure from the Necropolis map from UDK’s UTGame sample. Here you can really see the difference it makes to clip to the bounds of the mesh. Note how many additional voxel/octree cells (purple lines) are determined to be ‘inside’ because of how many backfaces (red triangles) they can see.
+Figure 1 – Roof Inner Voxelization Not Bounded (Before)
+Figure 2 – Roof Inner Voxelization Bounded (After)
+Future Improvements
+When the cube map for each seed cell is processed it’s read back from the GPU and each pixel is checked on the CPU. This is wildly inefficient when all we care about is the percentage of red to blue pixels on each face.
+So that processing can be moved to OpenCL to improve the performance significantly. I would prefer to have all cells be seed cells since that makes it easier to define the rules of what cells are inside vs. outside. Allowing the cells to propagate has a higher potential to cause problems I suspect on meshes with very nasty artifacts. Giving each cell the ability to individually determine their status will be more stable and more predictable.
+Currently my cube map rendering is performed in 6 passes. Shifting over to a single pass method using the geometry shader will likely add additional speed improvements, but I don’t know for sure.
+If I move enough of the processing to the GPU it may allow me to make more cells seed cells (perhaps all?) and still maintain an acceptable performance footprint for tool time usage. For offline usage though this method is already very acceptable (a few seconds for an average mesh and a maximum depth of 5) even with all the CPU read-backs I’m performing.
+Sample Code
+I’m still working on an improved version of the Generating Occluders for Hierarchical Z-Buffer Occlusion Culling sample. So the code is a bit tied up at the moment. However the next post I do on generating the occluders will contain it, which should be soon.
+Robust Inside and Outside Solid Voxelization @ altdevblogaday.com

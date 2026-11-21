@@ -1,0 +1,81 @@
+# Statistical Correlation and Consistency Metrics
+
+Also called: Objective Metric Evaluation Metrics, PCC, RMSE, SROCC
+
+## Overview
+Computes statistical measures to assess the linearity, monotonicity, accuracy, and consistency of objective metric predictions against subjective Mean Opinion Scores (MOS) [S1]. It differs from [Reference-free Image Quality Metrics](15295-reference-free-image-quality-metrics.md) by requiring ground-truth subjective data, and from [Target-Focused Quantitative Evaluation](18844-target-focused-quantitative-evaluation.md) by focusing on the statistical relationship between predicted and perceived quality rather than pixel-wise fidelity.
+
+## How it works
+**Inputs:**
+- $MOS$: Vector of subjective Mean Opinion Scores for $N$ samples.
+- $MOS_p$: Vector of predicted objective metric scores for the same $N$ samples.
+- $a, b, c, d$: Regression coefficients (optional, for monotonicity assessment).
+
+**Outputs:**
+- PCC: Pearson linear correlation coefficient.
+- OR: Outlier Ratio.
+- SROCC: Spearman rank order correlation coefficient (if monotonicity is required).
+- RMSE: Root-mean-square error (if accuracy is required).
+
+**Data Structures:**
+- Vectors $MOS$ and $MOS_p$ of size $N$, containing floating-point values.
+
+**Steps:**
+1. **Regression (Optional for Monotonicity):** If assessing monotonicity via a regression model, fit a monotonic cubic function to map predicted scores to subjective scores [S1]:
+   $$ MOS_p = a \cdot x^3 + b \cdot x^2 + c \cdot x + d $$
+   Determine coefficients $a, b, c, d$ using a least squares method [S1].
+
+2. **Compute PCC:** Calculate the Pearson linear correlation coefficient between $MOS$ and $MOS_p$ to assess linearity [S1]:
+   $$ PCC = \frac{\sum_{i=1}^{N} (MOS_i - \overline{MOS})(MOS_{p,i} - \overline{MOS_p})}{\sqrt{\sum_{i=1}^{N} (MOS_i - \overline{MOS})^2} \sqrt{\sum_{i=1}^{N} (MOS_{p,i} - \overline{MOS_p})^2}} $$
+   where $\overline{MOS}$ and $\overline{MOS_p}$ are the means of the respective vectors.
+
+3. **Compute OR:** Calculate the Outlier Ratio based on standard error to assess consistency [S1]. An outlier is typically defined as a prediction error exceeding a threshold (e.g., $k$ standard deviations) from the mean error. The OR is the fraction of samples classified as outliers.
+
+4. **Compute SROCC (Optional):** Calculate the Spearman rank order correlation coefficient to assess monotonicity [S1]. This involves ranking the values in $MOS$ and $MOS_p$ and computing the Pearson correlation on the ranks.
+
+5. **Compute RMSE (Optional):** Calculate the Root-Mean-Square Error to assess accuracy [S1]:
+   $$ RMSE = \sqrt{\frac{1}{N} \sum_{i=1}^{N} (MOS_i - MOS_{p,i})^2} $$
+
+**Parameters:**
+- $k$: Threshold multiplier for outlier detection in OR calculation. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- Division by zero in PCC if the variance of $MOS$ or $MOS_p$ is zero.
+- Degenerate input where all predicted scores are identical.
+
+## Subtopics
+
+### Normalized Mutual Information (NMI)
+A metric used to evaluate the correlation (both linear and non-linear) between two random variables $X$ and $Y$ by quantifying the amount of shared information [S2]. It is chosen when non-linear dependencies are significant, such as in analyzing correlations between spherical harmonic coefficients in 3D Gaussian Splatting [S2].
+
+**Steps:**
+1. Compute the joint probability mass function (pmf) $p(x, y)$ and marginal pmfs $p(x)$ and $p(y)$ from the data [S2].
+2. Compute mutual information $I(X; Y)$:
+   $$ I(X; Y) = \sum_{x \in X} \sum_{y \in Y} p(x, y) \log \frac{p(x, y)}{p(x)p(y)} $$
+3. Compute entropy $H(X)$ and $H(Y)$:
+   $$ H(X) = -\sum_{x \in X} p(x) \log p(x) $$
+   $$ H(Y) = -\sum_{y \in Y} p(y) \log p(y) $$
+4. Compute NMI:
+   $$ NMI(X, Y) = \frac{2 \cdot I(X; Y)}{H(X) + H(Y)} $$
+
+**Formula:**
+$$ NMI(X, Y) = \frac{2 \cdot I(X; Y)}{H(X) + H(Y)} $$
+The result is a value between 0 and 1. $NMI=1$ indicates perfect correlation, $NMI=0$ indicates no mutual correlation [S2].
+
+**Observations:**
+In the 'bicycle' scene from Mip-NeRF 360, NMI heatmaps show weak intra-correlation within SHAC coefficients and no inter-correlation between SHAC and other attributes (rotation, scaling, opacity, SHDC) [S2].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ for PCC, SROCC, and RMSE, where $N$ is the number of samples. $O(N \log N)$ for SROCC due to sorting. $O(N)$ for NMI if histograms are precomputed, otherwise dependent on binning.
+- **Memory Complexity:** $O(N)$ to store the score vectors.
+- **Strengths:** Provides a comprehensive statistical view of metric reliability. PCC and SROCC are standard for linear and monotonic relationships. NMI captures non-linear dependencies.
+- **Limitations:** Requires subjective ground truth (MOS), which is expensive to collect. OR definition varies by implementation.
+- **When to use:** When validating new objective metrics against human perception.
+- **When not to use:** When no subjective data is available (use Reference-free metrics).
+
+## Background
+Originated in the field of perceptual quality assessment for voxelized point clouds and 3D graphics [S1]. The methodology follows Recommendation ITU-T P.1401 for computing PCC, SROCC, RMSE, and OR [S1]. NMI has been applied to 3D Gaussian Splatting entropy coding to analyze attribute correlations [S2].
+
+## Sources
+[S1] A novel methodology for quality assessment of voxelized point clouds, https://doi.org/10.1117/12.2322741, fetched 2026-10-30
+[S2] EntropyGS: An Efficient Entropy Coding on 3D Gaussian Splatting, https://doi.org/10.1109/icassp55912.2026.11462744, fetched 2026-10-30

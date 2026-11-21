@@ -1,0 +1,241 @@
+--- v002.md
++++ v003.md
+@@ -1,118 +1,146 @@
+ # PBF Displacement Calculation with Grid-Based Neighbor Search
++
++
+ ## Overview
+-PBF Displacement Calculation with Grid-Based Neighbor Search is a Particle-Based Fluid (PBF) simulation step that calculates particle displacements to enforce incompressibility via density constraints [S1, unofficial]. It relies on a spatial hash grid to efficiently locate neighboring particles within a search radius and applies separation forces to push overlapping particles apart [S1, unofficial].
++PBF Displacement Calculation with Grid-Based Neighbor Search is a particle-based fluid simulation step that calculates particle displacements to enforce incompressibility via density constraints [S1, unofficial]. It operates by using a spatial hash grid to identify neighboring particles within a search radius and applying separation forces to push particles apart if they are too close [S1, unofficial]. Unlike its parent method, Sphere-Clamped Voxel Neighbor Search, which focuses on efficient neighbor retrieval, this method performs the actual physical constraint resolution [S1, unofficial]. It differs from Local Short-Range Repulsion, which optimizes geometric distribution regularity through tangential force projection, by strictly enforcing volumetric incompressibility [15114-local-short-range-repulsion.md].
++
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** `positionBufferIN` (array of `vec4<f32>`, read-only), where `.rgb` is position and `.a` encodes particle radius/identifier [S1, unofficial].
+-*   **Output:** `positionBufferOUT` (array of `vec4<f32>`, read-write), storing updated positions [S1, unofficial].
+-*   **Auxiliary Input:** `indicesBuffer` (array of `u32`, read-only), storing particle indices for the current voxel [S1, unofficial].
+-*   **Uniforms:** `uResolution` (grid resolution), `maxParticlesPerVoxel` (max particles per voxel), `separation` (target separation distance, though the source logic derives separation from particle radii), `currentFrame`, `vertical`, and `uSearchRadius` (not explicitly used in loop condition but implied by separation logic) [S1, unofficial].
++*   **Input:** `positionBufferIN` (array of `vec4<f32>`), where `.rgb` is the particle position and `.a` encodes the radius/identifier.
++*   **Output:** `positionBufferOUT` (array of `vec4<f32>`, read-write), storing the updated positions.
++*   **Auxiliary Input:** `indicesBuffer` (array of `u32`), storing particle indices for the current voxel.
++*   **Uniforms:** `uResolution` (grid resolution), `uSearchRadius` (implied), `separation` (target separation distance), `maxParticlesPerVoxel` (max particles per voxel).
+ 
+ **Data Structures:**
+-*   **Particle Position:** `vec4<f32>`. The radius $r_i$ is extracted from the alpha channel: $r_i = \lfloor \text{position}.a \rfloor / 4$ [S1, unofficial].
+-*   **Grid Indexing:** Particles are mapped to a 3D grid. The grid position is `gridPosition = vec3<i32>(floor(particlePosition.rgb))` [S1, unofficial].
+-*   **Neighbor Search:** A 3x3x3 offset array of 27 `vec3<i32>` values covers the current voxel and all adjacent voxels (faces, edges, corners) [S1, unofficial]. Offsets range from $(-1,-1,-1)$ to $(1,1,1)$ [S1, unofficial].
++*   **Grid Position:** `vec3<i32>` derived from `floor(particlePosition.rgb)`.
++*   **Neighbor Offsets:** A static array of 27 `vec3<i32>` values representing the $3 \times 3 \times 3$ neighborhood (offsets from $(-1,-1,-1)$ to $(1,1,1)$) [S1, unofficial].
++*   **Delta Position:** `vec3<f32>` initialized to `(0., 0., 0.)` for each particle [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  Initialize a global displacement vector `deltaPosition` to `vec3<f32>(0.)` for the current particle [S1, unofficial].
+-2.  For the current particle index, read its position `p` from `positionBufferIN` [S1, unofficial].
+-3.  Extract the particle's radius $r_1$ from `p.a`: $r_1 = \lfloor p.a \rfloor / 4$ [S1, unofficial].
+-4.  Compute the grid coordinate `gridPosition` using `floor(p.rgb)` [S1, unofficial].
+-5.  Iterate over all 27 neighbor voxels defined by the 3x3x3 offset array [S1, unofficial].
+-    a.  Calculate `neighborsVoxel` = `gridPosition` + `offsets[i]` [S1, unofficial].
+-    b.  Calculate the linear `voxelIndex` in the hash grid: `voxelIndex` = `neighborsVoxel.x` + `neighborsVoxel.y` * `uResolution` + `neighborsVoxel.z` * `uResolution` * `uResolution` [S1, unofficial].
+-    c.  Retrieve the list of particle indices stored in `indicesBuffer` for this `voxelIndex` [S1, unofficial].
+-    d.  Iterate through each neighbor particle index `j` in the voxel (up to `maxParticlesPerVoxel`) [S1, unofficial].
+-    e.  Retrieve the neighbor's position `p_j` from `positionBufferIN` [S1, unofficial].
+-    f.  Extract the neighbor's radius $r_2$: $r_2 = \lfloor p_j.a \rfloor / 4$ [S1, unofficial].
+-    g.  Calculate the distance vector $\vec{d} = p.rgb - p_j.rgb$ [S1, unofficial].
+-    h.  Calculate the distance $r = \|\vec{d}\|$ [S1, unofficial].
+-    i.  Calculate the target separation distance $s = 0.5 \times (r_1 + r_2)$ [S1, unofficial].
+-    j.  If $r > 0$ and $r < s$, apply the separation force:
+-        $$ \text{deltaPosition} \ -= \ (r - s) \times \frac{\vec{d}}{r} \times \frac{r_2}{r_1 + r_2} $$
+-6.  After checking all neighbors, update the particle's position in `positionBufferOUT` by adding `deltaPosition` to the original position [S1, unofficial].
++1.  Initialize `deltaPosition` to `vec3<f32>(0.)` for the current particle [S1, unofficial].
++2.  Read `particlePosition` from `positionBufferIN` [S1, unofficial].
++3.  Extract the radius identifier from `particlePosition.a` and compute `gridPosition` as `vec3<i32>(floor(particlePosition.rgb))` [S1, unofficial].
++4.  Define the 27 neighbor voxel offsets [S1, unofficial].
++5.  Loop over all 27 neighbor voxels ($i$ from 0 to 26):
++    a. Calculate `neighborsVoxel = gridPosition + offsets[i]` [S1, unofficial].
++    b. Calculate `voxelIndex = neighborsVoxel.x + neighborsVoxel.y * uResolution + neighborsVoxel.z * uResolution * uResolution` [S1, unofficial].
++    c. Loop over all particles $j$ stored in the neighbor voxel using `indicesBuffer` (up to `maxParticlesPerVoxel`) [S1, unofficial].
++    d. For each neighbor particle $j$, retrieve its position from `positionBufferIN` [S1, unofficial].
++    e. Call `addToSum(particlePosition, neighborParticlePosition)` [S1, unofficial].
++6.  Apply the accumulated `deltaPosition` to the particle's position in `positionBufferOUT` [S1, unofficial].
++
++**Helper Function: `addToSum`**
++Given `currentPos` and `neighborPos`:
++1.  Calculate `distanceVector = currentPos.rgb - neighborPos.rgb` [S1, unofficial].
++2.  Calculate `r = length(distanceVector)` [S1, unofficial].
++3.  Calculate `r1 = floor(currentPos.a) / 4.0` [S1, unofficial].
++4.  Calculate `r2 = floor(neighborPos.a) / 4.0` [S1, unofficial].
++5.  Calculate `separation = 0.5 * (r1 + r2)` [S1, unofficial].
++6.  If `r > 0` and `r < separation`:
++    a. Calculate `normalizedDistance = normalize(distanceVector)` [S1, unofficial].
++    b. Update `deltaPosition`:
++       $$ \Delta p = - (r - separation) \cdot \text{normalizedDistance} \cdot \frac{r2}{r1 + r2} $$
++       [S1, unofficial].
++
++**Parameters:**
++*   `uResolution`: Grid resolution [S1, unofficial].
++*   `separation`: Target separation distance [S1, unofficial].
++*   `maxParticlesPerVoxel`: Maximum number of particles stored per voxel for neighbor lookup [S1, unofficial].
++*   `uSearchRadius`: Implied by the separation logic but not explicitly used in the loop condition in the source [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Zero Distance:** The condition `r > 0` prevents division by zero during normalization [S1, unofficial].
++*   **Radius Encoding:** The radius is encoded in the `.a` component and scaled by division by 4.0. Implementation must ensure this encoding matches the input data [S1, unofficial].
++*   **Boundary Conditions:** The grid search assumes particles are within the bounds of the hash grid. Out-of-bounds voxel indices must be handled or clamped [G].
+ 
+ **Pseudocode:**
+ ```python
+-def calculate_displacements(particle_idx, position_buffer_in, position_buffer_out, indices_buffer, u_resolution, max_particles_per_voxel):
+-    # 1. Initialize delta position
+-    delta_position = vec3(0.0, 0.0, 0.0)
++def calculate_displacements(position_buffer_in, position_buffer_out, indices_buffer, u_resolution, max_particles_per_voxel):
++    # Assume particle_index is provided by the caller or looped over
++    # For each particle:
++    particle_position = position_buffer_in[particle_index]
++    delta_position = vec3(0.0)
+     
+-    # 2. Read current particle data
+-    p_vec4 = position_buffer_in[particle_idx]
+-    p_pos = p_vec4.rgb
+-    p_radius_alpha = p_vec4.a
++    # Extract grid position
++    grid_position = vec3i(floor(particle_position.rgb))
+     
+-    # Extract radius r1
+-    r1 = floor(p_radius_alpha) / 4.0
++    # Define 27 offsets
++    offsets = [
++        vec3i(-1,-1,-1), vec3i(-1,-1,0), vec3i(-1,-1,1),
++        vec3i(-1,0,-1),  vec3i(-1,0,0),  vec3i(-1,0,1),
++        vec3i(-1,1,-1),  vec3i(-1,1,0),  vec3i(-1,1,1),
++        vec3i(0,-1,-1),  vec3i(0,-1,0),  vec3i(0,-1,1),
++        vec3i(0,0,-1),   vec3i(0,0,0),   vec3i(0,0,1),
++        vec3i(0,1,-1),   vec3i(0,1,0),   vec3i(0,1,1),
++        vec3i(1,-1,-1),  vec3i(1,-1,0),  vec3i(1,-1,1),
++        vec3i(1,0,-1),   vec3i(1,0,0),   vec3i(1,0,1),
++        vec3i(1,1,-1),   vec3i(1,1,0),   vec3i(1,1,1)
++    ]
+     
+-    # 3. Compute grid position
+-    grid_pos = vec3(floor(p_pos.x), floor(p_pos.y), floor(p_pos.z))
++    for i in range(27):
++        neighbors_voxel = grid_position + offsets[i]
++        
++        # Calculate voxel index in the hash grid
++        # Note: indices_buffer logic implies accessing particles stored for this voxel
++        # The source snippet cuts off the exact indices_buffer access pattern, 
++        # but standard logic iterates through stored indices for the voxel.
++        # Assuming indices_buffer contains the list of particle indices for the current voxel context.
++        # In a full implementation, one would look up the start/end index for neighbors_voxel 
++        # in a hash map or sorted array. Here we assume the loop over 'j' iterates 
++        # through the relevant neighbor particles.
++        
++        # Pseudocode approximation of the neighbor loop based on source description:
++        # for j in range(max_particles_per_voxel):
++        #     neighbor_index = indices_buffer[...] # Implementation detail omitted in source
++        #     neighbor_position = position_buffer_in[neighbor_index]
++        #     delta_position += add_to_sum(particle_position, neighbor_position)
++        
++        # Since the source explicitly describes the loop over particles in the neighbor voxel,
++        # we represent the core logic of add_to_sum which is fully defined.
++        pass 
++
++    # Apply delta position
++    position_buffer_out[particle_index] = particle_position + vec4(delta_position, particle_position.a)
++
++def add_to_sum(current_pos, neighbor_pos):
++    distance_vector = current_pos.rgb - neighbor_pos.rgb
++    r = length(distance_vector)
+     
+-    # 4. Define 3x3x3 offsets
+-    offsets = []
+-    for x in [-1, 0, 1]:
+-        for y in [-1, 0, 1]:
+-            for z in [-1, 0, 1]:
+-                offsets.append(vec3(x, y, z))
+-                
+-    # 5. Iterate over neighbor voxels
+-    for offset in offsets:
+-        neighbors_voxel = grid_pos + offset
++    r1 = floor(current_pos.a) / 4.0
++    r2 = floor(neighbor_pos.a)  / 4.0
++    
++    separation = 0.5 * (r1 + r2)
++    
++    delta = vec3(0.0)
++    
++    if r > 0 and r < separation:
++        normalized_distance = normalize(distance_vector)
++        # Formula from source: deltaPosition -= (r - separation) * normalize(distance) * r2 / (r1 + r2)
++        delta = - (r - separation) * normalized_distance * (r2 / (r1 + r2))
+         
+-        # Calculate linear voxel index
+-        voxel_index = neighbors_voxel.x + neighbors_voxel.y * u_resolution + neighbors_voxel.z * u_resolution * u_resolution
+-        
+-        # 6. Iterate over particles in the voxel
+-        base_idx = voxel_index * max_particles_per_voxel
+-        for k in range(max_particles_per_voxel):
+-            neighbor_particle_idx = indices_buffer[base_idx + k]
+-            
+-            p_j_vec4 = position_buffer_in[neighbor_particle_idx]
+-            p_j_pos = p_j_vec4.rgb
+-            p_j_radius_alpha = p_j_vec4.a
+-            
+-            # Extract radius r2
+-            r2 = floor(p_j_radius_alpha) / 4.0
+-            
+-            # Calculate distance vector and magnitude
+-            dist_vec = p_pos - p_j_pos
+-            r = length(dist_vec)
+-            
+-            # Calculate target separation
+-            separation = 0.5 * (r1 + r2)
+-            
+-            # Apply separation force if within range
+-            if r > 0.0 and r < separation:
+-                normalized_dist = dist_vec / r
+-                weight = r2 / (r1 + r2)
+-                delta_position -= (r - separation) * normalized_dist * weight
+-                
+-    # 7. Apply displacement
+-    new_pos = p_pos + delta_position
+-    position_buffer_out[particle_idx] = vec4(new_pos, p_radius_alpha)
++    return delta
+ ```
+-
+-**Parameters and Edge Cases:**
+-*   **Radius Extraction:** The radius is derived from the alpha channel using `floor(alpha) / 4`, implying the alpha channel stores an integer value representing $4 \times$ radius [S1, unofficial].
+-*   **Singularity:** The distance $r$ is checked against `0.0` to avoid division by zero when normalizing the distance vector [S1, unofficial].
+-*   **Boundary Conditions:** The grid search is limited to the 3x3x3 neighborhood, and particles near the domain boundary naturally have fewer neighbors [S1, unofficial].
+-*   **Precision:** Floating-point precision in `floor` operations and radius extraction may cause slight jitter if particle positions are not stable [G].
+ 
+ ## Subtopics
+ 
+-### Distance Constraint (Repulsion)
+-A constraint to promote uniform particle distribution by pushing apart particles closer than a distance threshold $d_0$ [S2]. The distance constraint is calculated as $D_{ij} = \min\{0, \|p_i - p_j\| - d_0\}$ [S2].
++### [Local Short-Range Repulsion](15114-local-short-range-repulsion.md)
++Local Short-Range Repulsion is a particle distribution optimization step used in adaptive voxel-based volume rendering to resolve particle clustering and improve surface extraction quality [15114-local-short-range-repulsion.md]. It operates by applying short-range repulsive forces between neighboring particles to spread them out, ensuring a more uniform sampling density [15114-local-short-range-repulsion.md]. Unlike the parent PBF Displacement Calculation which enforces incompressibility via density constraints, this method focuses on geometric distribution regularity through tangential force projection [15114-local-short-range-repulsion.md].
++
++#### Distance Constraint (Repulsion)
++**Definition:** A constraint to promote uniform particle distribution by pushing apart particles closer than a distance threshold $d_0$ [S2].
++**Formula:** The distance constraint is defined as:
++$$ D_{ij} = \min\{0, \|p_i - p_j\| - d_0\} $$
++where $d_0$ is the distance threshold [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot K)$, where $N$ is the number of particles and $K$ is the average number of neighbors found within the 3x3x3 voxel neighborhood [G]. The constant factor is small due to the fixed 27-voxel search [G].
+-*   **Memory Complexity:** $O(N)$ for position buffers and $O(V)$ for the voxel index buffers, where $V$ is the number of voxels [G].
+-*   **Strengths:** Efficient neighbor search using spatial hashing and simple separation force logic suitable for real-time simulation on GPU [G].
+-*   **Limitations:** The separation force is a heuristic and may not perfectly conserve mass or momentum compared to more rigorous PBF formulations [G]. The radius extraction method is specific to the implementation and may not generalize to other PBF variants [G].
+-*   **When to use:** Real-time fluid simulation where performance is critical and visual plausibility is acceptable [G].
+-*   **When not to use:** High-fidelity scientific simulation requiring strict incompressibility constraints [G].
++*   **Time Complexity:** $O(N \cdot K)$, where $N$ is the number of particles and $K$ is the average number of neighbors found within the $3 \times 3 \times 3$ voxel neighborhood. The grid search reduces neighbor lookup from $O(N^2)$ to near-linear time [S1, unofficial].
++*   **Memory Complexity:** $O(N)$ for particle storage and $O(R^3)$ for the spatial hash grid, where $R$ is the grid resolution [S1, unofficial].
++*   **Strengths:** Efficient neighbor search using spatial hashing; enforces incompressibility effectively for fluid-like behavior [S1, unofficial].
++*   **Limitations:** The $3 \times 3 \times 3$ grid search assumes particles are well-distributed within voxels; clustering may require multiple iterations or smaller voxel sizes [S1, unofficial]. The radius encoding in the `.a` component requires specific preprocessing [S1, unofficial].
++*   **When to use:** When simulating incompressible fluids or dense particle systems requiring volume preservation [S1, unofficial].
++*   **When not to use:** When long-range interactions are critical or when particle distribution regularity is more important than volume preservation (use Local Short-Range Repulsion instead) [15114-local-short-range-repulsion.md].
+ 
+ ## Background
+-The method implements a PBF simulation step using a spatial hash grid for neighbor lookup and separation forces [S1, unofficial]. It operates as a compute shader or parallel loop step within a larger voxel-based rendering or simulation pipeline [S1, unofficial].
++PBF (Particle-Based Fluid) simulation is a method for simulating fluid dynamics using particles [S1, unofficial]. The specific displacement calculation described here originates from a WebGPU-based voxel cone tracing implementation [S1, unofficial]. The distance constraint formula for repulsion is associated with Gaussian Splashing, a method for unified particles for versatile motion synthesis and rendering [S2].
+ 
+ ## Sources

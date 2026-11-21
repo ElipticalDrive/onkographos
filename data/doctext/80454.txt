@@ -1,0 +1,1734 @@
+# Voxel Compare
+
+A real-time voxel terrain renderer written in Rust, built as a hands-on exploration of two fundamentally different rendering techniques side by side. Press **Tab** at any time to switch between them.
+
+---
+
+## Renderers
+
+### Rasterisation
+
+The traditional approach. At startup the world is divided into 33×33 chunks (radius 16). Each chunk samples a Perlin noise heightmap to determine which voxels are solid, then builds a mesh. Only faces that border empty air are emitted (face culling). The resulting vertex and index buffers are uploaded to the GPU once and drawn every frame via a standard vertex/fragment pipeline.
+
+Lighting is baked into the vertex colours at mesh-build time: top faces are full brightness, side faces are darkened by a fixed multiplier, and bottom faces darker still.
+
+### SVO Ray March
+
+Instead of sending geometry to the camera, rays are fired from the camera into the scene one per pixel, and the first solid voxel each ray hits is what gets drawn.
+
+The scene is stored as a **Sparse Voxel Octree (SVO)**: a 512³ cubic region recursively subdivided into octants. Empty subtrees are collapsed to a single null value, so the structure is compact and large empty regions can be skipped in a single step. At startup the octree is built on the CPU and uploaded to the GPU as a flat storage buffer.
+
+Each frame a single fullscreen triangle is drawn. The fragment shader fires one ray per pixel, descends the SVO to find the first solid voxel, and shades it using the face normal it gets for free from the ray–AABB intersection. No mesh, no vertex buffer, no draw calls per chunk.
+
+---
+
+## Controls
+
+| Key | Action |
+|---|---|
+| **W / A / S / D** | Fly forward / left / back / right |
+| **E / Space** | Fly up |
+| **Q / Shift** | Fly down |
+| **Tab** | Switch between Rasterisation and SVO Ray March |
+| **Escape** | Quit |
+
+The window title always shows the active renderer and current FPS.
+
+---
+
+## Building and Running
+
+```bash
+git clone https://github.com/scarlyle0/voxel-compare
+cd voxel-demo
+cargo run
+```
+
+---
+
+## Project Structure
+
+```
+src/
+├── main.rs              Entry point
+├── app.rs               winit event loop
+├── state.rs             Per-frame update + render dispatch; Tab toggle
+│
+├── render/
+│   ├── gpu_context.rs   wgpu device / surface / queue setup
+│   └── texture.rs       Depth texture helper
+│
+├── input/
+│   ├── camera.rs        Camera matrices, GPU uniform, bind group
+│   └── controller.rs    WASD keyboard input → camera movement
+│
+├── chunk/
+│   ├── chunk.rs         Per-chunk voxel data + face-culled mesh builder
+│   ├── terrain.rs       Generates ChunkMesh list for the rasteriser
+│   ├── vertex.rs        Vertex struct (position + colour)
+│   └── raster.wgsl      Rasterisation vertex + fragment shaders
+│
+└── svo/
+    ├── svo.rs           Builds the Sparse Voxel Octree; uploads to GPU
+    ├── svo_pipeline.rs  wgpu pipeline for the ray march pass
+    └── ray_march.wgsl   SVO ray march fragment shader
+```
+
+### src/app.rs
+```
+use crate::state::State;
+use std::sync::Arc;
+
+use winit::{
+    application::ApplicationHandler,
+    event::{KeyEvent, WindowEvent},
+    event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::PhysicalKey,
+    window::{Window, WindowId},
+};
+
+pub struct App {
+    state: Option<State>
+}
+
+impl App {
+    pub fn new() -> Self {
+        Self {
+            state: None,
+        }
+    }
+}
+
+impl ApplicationHandler<State> for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // Need to use Arc here since surface references window internally
+        let window = Arc::new(event_loop.create_window(Window::default_attributes()).unwrap());
+        // Pass the window to state
+        self.state = Some(pollster::block_on(State::new(window)).unwrap());
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let state = match &mut self.state {
+            Some(state) => state,
+            None => return,
+        };
+        match event {
+            WindowEvent::CloseRequested => {println!("The close button was pressed; stopping"); event_loop.exit();},
+            WindowEvent::Resized(size) => state.resize(size.width, size.height),
+            WindowEvent::RedrawRequested => {
+                state.update();
+                match state.render() {
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::error!("{e}");
+                        event_loop.exit();
+                    }
+                }
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(code),
+                        state: key_state,
+                        ..
+                    },
+                ..
+            } => state.handle_key(event_loop, code, key_state.is_pressed()),
+            _ => {}
+        }
+    }
+}
+
+pub fn run() -> anyhow::Result<()> {
+    env_logger::init();
+
+    let event_loop = EventLoop::with_user_event().build()?;
+    let mut app = App::new(); // Create empty container state
+    event_loop.run_app(&mut app)?; // Start loop call ApplicationHandler
+    // -> Calls resumed to initiate window, state 
+    // -> Then repeatedly calls window_event until closed
+    Ok(())
+}
+```
+
+### src/main.rs
+```
+mod app;
+mod chunk;
+mod svo;
+mod render;
+mod input;
+mod state;
+
+fn main() {
+    app::run().unwrap();
+}
+```
+
+### src/state.rs
+```
+use std::sync::Arc;
+use winit::{event_loop::ActiveEventLoop, keyboard::KeyCode, window::Window};
+
+use crate::{
+    input::{camera::CameraBundle, controller::CameraController},
+    render::{gpu_context::GpuContext, texture},
+    chunk::{vertex::Vertex, terrain::Terrain},
+    svo::{svo::SvoBuffers, svo_pipeline::SvoPipeline},
+};
+
+pub struct State {
+    ctx: GpuContext,
+
+    // Rasterisation renderer
+    raster_pipeline: wgpu::RenderPipeline,
+    terrain: Terrain,
+    depth_texture: texture::Texture,
+
+    // SVO ray march renderer
+    ray_march: SvoPipeline,
+
+    // Shared
+    camera: CameraBundle,
+    camera_controller: CameraController,
+    use_ray_march: bool,
+
+    last_frame_time: std::time::Instant,
+    frame_count: u32,
+    frame_time_accum: f32,
+    fps: f32,
+}
+
+impl State {
+    pub async fn new(window: Arc<Window>) -> anyhow::Result<State> {
+        let ctx = GpuContext::new(window).await?;
+
+        let camera = CameraBundle::new(&ctx.device, ctx.aspect_ratio());
+        let camera_controller = CameraController::new(1.5);
+
+        let terrain = Terrain::generate(&ctx.device, 16);
+        let depth_texture =
+            texture::Texture::create_depth_texture(&ctx.device, &ctx.config, "depth_texture");
+
+        // ── Rasterisation pipeline ────────────────────────────────────────────
+        let raster_shader =
+            ctx.device.create_shader_module(wgpu::include_wgsl!("chunk/raster.wgsl"));
+
+        let raster_layout =
+            ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Raster Pipeline Layout"),
+                bind_group_layouts: &[Some(&camera.bind_group_layout)],
+                immediate_size: 0,
+            });
+
+        let raster_pipeline =
+            ctx.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Raster Pipeline"),
+                layout: Some(&raster_layout),
+                vertex: wgpu::VertexState {
+                    module: &raster_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Vertex::desc()],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &raster_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: ctx.config.format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: texture::Texture::DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
+        // ── SVO ray march renderer ────────────────────────────────────────────
+        let svo = SvoBuffers::build_and_upload(&ctx.device);
+        let ray_march = SvoPipeline::new(&ctx.device, ctx.config.format, &camera, &svo);
+
+        Ok(Self {
+            ctx,
+            raster_pipeline,
+            terrain,
+            depth_texture,
+            ray_march,
+            camera,
+            camera_controller,
+            use_ray_march: false,
+            last_frame_time: std::time::Instant::now(),
+            frame_count: 0,
+            frame_time_accum: 0.0,
+            fps: 0.0,
+        })
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.ctx.resize(width, height);
+        self.camera.set_aspect(self.ctx.aspect_ratio());
+        self.depth_texture =
+            texture::Texture::create_depth_texture(&self.ctx.device, &self.ctx.config, "depth_texture");
+    }
+
+    pub fn update(&mut self) {
+        self.camera_controller.update_camera(&mut self.camera.camera);
+        self.camera.sync_to_gpu(&self.ctx.queue);
+
+        let now = std::time::Instant::now();
+        let dt = (now - self.last_frame_time).as_secs_f32();
+        self.last_frame_time = now;
+        self.frame_time_accum += dt;
+        self.frame_count += 1;
+
+        if self.frame_time_accum >= 0.5 {
+            self.fps = self.frame_count as f32 / self.frame_time_accum;
+            self.frame_count = 0;
+            self.frame_time_accum = 0.0;
+
+            let mode = if self.use_ray_march { "SVO Ray March" } else { "Rasterisation" };
+            self.ctx.window.set_title(&format!(
+                "Voxel Demo | {mode} | {:.0} FPS  [Tab] to switch",
+                self.fps
+            ));
+        }
+    }
+
+    pub fn handle_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
+        match code {
+            KeyCode::Escape if is_pressed => event_loop.exit(),
+            KeyCode::Tab if is_pressed => {
+                self.use_ray_march = !self.use_ray_march;
+                let mode = if self.use_ray_march { "SVO Ray March" } else { "Rasterisation" };
+                self.ctx.window.set_title(&format!(
+                    "Voxel Demo | {mode} | {:.0} FPS  [Tab] to switch",
+                    self.fps
+                ));
+            }
+            _ => { self.camera_controller.handle_key(code, is_pressed); }
+        }
+    }
+
+    pub fn render(&mut self) -> anyhow::Result<()> {
+        self.ctx.window.request_redraw();
+
+        if !self.ctx.is_surface_configured {
+            return Ok(());
+        }
+
+        let output = match self.ctx.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) => t,
+            wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                self.ctx.surface.configure(&self.ctx.device, &self.ctx.config);
+                t
+            }
+            wgpu::CurrentSurfaceTexture::Timeout
+            | wgpu::CurrentSurfaceTexture::Occluded
+            | wgpu::CurrentSurfaceTexture::Validation => return Ok(()),
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.ctx.surface.configure(&self.ctx.device, &self.ctx.config);
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Lost => anyhow::bail!("Lost device"),
+        };
+
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Render Encoder"),
+        });
+
+        if self.use_ray_march {
+            self.render_ray_march(&mut encoder, &view);
+        } else {
+            self.render_raster(&mut encoder, &view);
+        }
+
+        self.ctx.queue.submit(std::iter::once(encoder.finish()));
+        output.present();
+        Ok(())
+    }
+
+    // ── Rasterisation pass ────────────────────────────────────────────────────
+    fn render_raster(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Raster Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.53, g: 0.81, b: 0.98, a: 1.0 }),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_texture.view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            multiview_mask: None,
+        });
+
+        pass.set_pipeline(&self.raster_pipeline);
+        pass.set_bind_group(0, &self.camera.bind_group, &[]);
+
+        for chunk in &self.terrain.chunks {
+            pass.set_vertex_buffer(0, chunk.vertex_buffer.slice(..));
+            pass.set_index_buffer(chunk.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..chunk.num_indices, 0, 0..1);
+        }
+    }
+
+    // ── Ray march pass ────────────────────────────────────────────────────────
+    fn render_ray_march(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Ray March Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.53, g: 0.81, b: 0.98, a: 1.0 }),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            multiview_mask: None,
+        });
+
+        pass.set_pipeline(&self.ray_march.pipeline);
+        pass.set_bind_group(0, &self.camera.bind_group, &[]);
+        pass.set_bind_group(1, &self.ray_march.svo_bind_group, &[]);
+        pass.draw(0..3, 0..1); // fullscreen triangle
+    }
+}
+```
+
+### src/chunk/chunk.rs
+```
+use fastnoise_lite::FastNoiseLite;
+use crate::chunk::vertex::Vertex;
+
+pub const CHUNK_SIZE: usize = 16;
+pub const CHUNK_HEIGHT: usize = 64;
+
+pub struct Chunk {
+    voxels: Vec<u8>, // 1d array used in face culling loop to decide which to faces to render
+    pub chunk_x: i32, // which chunk column (x zxis)
+    pub chunk_z: i32, // which chunk column (z axis)
+}
+
+impl Chunk {
+    pub fn generate(noise: &FastNoiseLite, chunk_x: i32, chunk_z: i32) -> Self {
+        let mut voxels = vec![0u8; CHUNK_SIZE * CHUNK_HEIGHT * CHUNK_SIZE];
+
+        for x in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+
+                // Convert local x,z to world coordinates for noise sampling
+                let wx = (chunk_x * CHUNK_SIZE as i32 + x as i32) as f32;
+                let wz = (chunk_z * CHUNK_SIZE as i32 + z as i32) as f32;
+
+                let n = noise.get_noise_2d(wx, wz);
+                // Convert noise to height
+                let h = ((n + 1.0) * 0.5 * CHUNK_HEIGHT as f32 * 0.6
+                    + CHUNK_HEIGHT as f32 * 0.15) as usize;
+                let h = h.min(CHUNK_HEIGHT - 1);
+
+                // Fill voxels from y=0 up to height h as solid
+                for y in 0..=h {
+                    voxels[Self::idx(x, y, z)] = 1;
+                }
+            }
+        }  
+
+        Self { voxels, chunk_x, chunk_z }
+    }
+
+    // 3D position to flat array index
+    #[inline]
+    fn idx(x: usize, y: usize, z: usize) -> usize {
+        x * CHUNK_HEIGHT * CHUNK_SIZE + y * CHUNK_SIZE + z
+    }
+
+    // Check if out of bounds or air
+    #[inline]
+    fn is_solid(&self, x: i32, y: i32, z: i32) -> bool {
+        if x < 0
+            || y < 0
+            || z < 0
+            || x >= CHUNK_SIZE as i32
+            || y >= CHUNK_HEIGHT as i32
+            || z >= CHUNK_SIZE as i32
+        {
+            return false;
+        }
+        self.voxels[Self::idx(x as usize, y as usize, z as usize)] != 0
+    }
+
+    // Face culling loop
+    pub fn build_mesh(&self) -> (Vec<Vertex>, Vec<u32>) {
+        let mut vertices: Vec<Vertex> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+
+        // Chunk position offset
+        let ox = (self.chunk_x * CHUNK_SIZE as i32) as f32;
+        let oz = (self.chunk_z * CHUNK_SIZE as i32) as f32;
+
+        // For each of 6 faces, if neighbor is empty face gets exposed and added 
+        for x in 0..CHUNK_SIZE {
+            for y in 0..CHUNK_HEIGHT {
+                for z in 0..CHUNK_SIZE {
+                    if self.voxels[Self::idx(x, y, z)] == 0 {
+                        continue;
+                    }
+
+                    let fx = ox + x as f32;
+                    let fy = y as f32;
+                    let fz = oz + z as f32;
+                    let xi = x as i32;
+                    let yi = y as i32;
+                    let zi = z as i32;
+
+                    // +Y (top)
+                    if !self.is_solid(xi, yi + 1, zi) {
+                        add_face(
+                            &mut vertices, &mut indices,
+                            [fx, fy + 1.0, fz],
+                            [fx, fy + 1.0, fz + 1.0],
+                            [fx + 1.0, fy + 1.0, fz + 1.0],
+                            [fx + 1.0, fy + 1.0, fz],
+                            top_color(y),
+                        );
+                    }
+                    // -Y (bottom)
+                    if !self.is_solid(xi, yi - 1, zi) {
+                        add_face(
+                            &mut vertices, &mut indices,
+                            [fx, fy, fz],
+                            [fx + 1.0, fy, fz],
+                            [fx + 1.0, fy, fz + 1.0],
+                            [fx, fy, fz + 1.0],
+                            darken(side_color(y), 0.5),
+                        );
+                    }
+                    // +X
+                    if !self.is_solid(xi + 1, yi, zi) {
+                        add_face(
+                            &mut vertices, &mut indices,
+                            [fx + 1.0, fy, fz + 1.0],
+                            [fx + 1.0, fy, fz],
+                            [fx + 1.0, fy + 1.0, fz],
+                            [fx + 1.0, fy + 1.0, fz + 1.0],
+                            darken(side_color(y), 0.8),
+                        );
+                    }
+                    // -X
+                    if !self.is_solid(xi - 1, yi, zi) {
+                        add_face(
+                            &mut vertices, &mut indices,
+                            [fx, fy, fz],
+                            [fx, fy, fz + 1.0],
+                            [fx, fy + 1.0, fz + 1.0],
+                            [fx, fy + 1.0, fz],
+                            darken(side_color(y), 0.8),
+                        );
+                    }
+                    // +Z
+                    if !self.is_solid(xi, yi, zi + 1) {
+                        add_face(
+                            &mut vertices, &mut indices,
+                            [fx, fy, fz + 1.0],
+                            [fx + 1.0, fy, fz + 1.0],
+                            [fx + 1.0, fy + 1.0, fz + 1.0],
+                            [fx, fy + 1.0, fz + 1.0],
+                            darken(side_color(y), 0.7),
+                        );
+                    }
+                    // -Z
+                    if !self.is_solid(xi, yi, zi - 1) {
+                        add_face(
+                            &mut vertices, &mut indices,
+                            [fx + 1.0, fy, fz],
+                            [fx, fy, fz],
+                            [fx, fy + 1.0, fz],
+                            [fx + 1.0, fy + 1.0, fz],
+                            darken(side_color(y), 0.7),
+                        );
+                    }
+                }
+            }
+        }
+
+        (vertices, indices)
+    }
+}
+
+// Each face is a quad (4 vertices, 2 triangles) base offset makes indices relative to current end of vertex list
+fn add_face(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    v0: [f32; 3],
+    v1: [f32; 3],
+    v2: [f32; 3],
+    v3: [f32; 3],
+    color: [f32; 3],
+) {
+    let base = vertices.len() as u32;
+    vertices.extend_from_slice(&[
+        Vertex { position: v0, color },
+        Vertex { position: v1, color },
+        Vertex { position: v2, color },
+        Vertex { position: v3, color },
+    ]);
+    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+fn top_color(y: usize) -> [f32; 3] {
+    let h = y as f32 / CHUNK_HEIGHT as f32;
+    if h > 0.70 {
+        [0.30, 0.62, 0.18] // grass
+    } else if h > 0.40 {
+        [0.52, 0.38, 0.22] // dirt
+    } else {
+        [0.52, 0.52, 0.52] // stone
+    }
+}
+
+fn side_color(y: usize) -> [f32; 3] {
+    let h = y as f32 / CHUNK_HEIGHT as f32;
+    if h > 0.65 {
+        [0.52, 0.38, 0.22] // dirt under grass cap
+    } else if h > 0.40 {
+        [0.52, 0.38, 0.22] // dirt
+    } else {
+        [0.52, 0.52, 0.52] // stone
+    }
+}
+
+fn darken(c: [f32; 3], f: f32) -> [f32; 3] {
+    [c[0] * f, c[1] * f, c[2] * f]
+}
+```
+
+### src/chunk/mod.rs
+```
+pub mod chunk;
+pub mod terrain;
+pub mod vertex;
+```
+
+### src/chunk/raster.wgsl
+```
+// Vertex shader
+
+struct CameraUniform {
+    view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
+    position: vec3<f32>,
+    _pad: f32,
+};
+@group(0) @binding(0)
+var<uniform> camera: CameraUniform;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) color: vec3<f32>,
+}
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) color: vec3<f32>,
+}
+
+@vertex
+fn vs_main(model: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.clip_position = camera.view_proj * vec4<f32>(model.position, 1.0);
+    out.color = model.color;
+    return out;
+}
+
+// Fragment shader
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(in.color, 1.0);
+}
+```
+
+### src/chunk/terrain.rs
+```
+use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
+use wgpu::util::DeviceExt;
+
+use crate::chunk::chunk::Chunk;
+
+pub struct ChunkMesh {
+    pub vertex_buffer: wgpu::Buffer,
+    pub index_buffer: wgpu::Buffer,
+    pub num_indices: u32,
+}
+
+pub struct Terrain {
+    pub chunks: Vec<ChunkMesh>,
+}
+
+impl Terrain {
+    pub fn generate(device: &wgpu::Device, radius: i32) -> Self {
+        let mut noise = FastNoiseLite::new();
+        noise.set_noise_type(Some(NoiseType::Perlin));
+        noise.set_fractal_type(Some(FractalType::FBm));
+        noise.set_fractal_octaves(Some(4));
+        noise.set_fractal_lacunarity(Some(2.0));
+        noise.set_fractal_gain(Some(0.5));
+        noise.set_frequency(Some(0.02));
+
+        let mut chunks = Vec::new();
+
+        for cx in -radius..=radius {
+            for cz in -radius..=radius {
+                let chunk = Chunk::generate(&noise, cx, cz);
+                let (vertices, indices) = chunk.build_mesh();
+
+                if indices.is_empty() {
+                    continue;
+                }
+
+                let vertex_buffer =
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Chunk Vertex Buffer"),
+                        contents: bytemuck::cast_slice(&vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+
+                let index_buffer =
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Chunk Index Buffer"),
+                        contents: bytemuck::cast_slice(&indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
+
+                chunks.push(ChunkMesh {
+                    vertex_buffer,
+                    index_buffer,
+                    num_indices: indices.len() as u32,
+                });
+            }
+        }
+
+        Terrain { chunks }
+    }
+}
+```
+
+### src/chunk/vertex.rs
+```
+// CPU representation of a vertex
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Vertex {
+    pub position: [f32; 3],
+    pub color: [f32; 3],
+}
+
+impl Vertex {
+    const ATTRIBS: [wgpu::VertexAttribute; 2] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        use std::mem;
+
+        wgpu::VertexBufferLayout {
+            array_stride: mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBS,
+        }
+    }
+}
+```
+
+### src/input/camera.rs
+```
+#[rustfmt::skip]
+pub const OPENGL_TO_WGPU_MATRIX: glam::Mat4 = glam::Mat4::from_cols(
+    glam::Vec4::new(1.0, 0.0, 0.0, 0.0),
+    glam::Vec4::new(0.0, 1.0, 0.0, 0.0),
+    glam::Vec4::new(0.0, 0.0, 0.5, 0.0),
+    glam::Vec4::new(0.0, 0.0, 0.5, 1.0),
+);
+
+pub struct Camera {
+    pub eye: glam::Vec3,
+    pub target: glam::Vec3,
+    pub up: glam::Vec3,
+    pub aspect: f32,
+    pub fovy: f32,
+    pub znear: f32,
+    pub zfar: f32,
+}
+
+impl Camera {
+    fn build_view_projection_matrix(&self) -> glam::Mat4 {
+        // Moves world to be at position and rotation of camera
+        let view = glam::Mat4::look_at_rh(self.eye, self.target, self.up);
+        // Warps scene to give the effect of depth
+        let proj = glam::Mat4::perspective_rh(self.fovy.to_radians(), self.aspect, self.znear, self.zfar);
+
+        return OPENGL_TO_WGPU_MATRIX * proj * view;
+    }
+}
+
+// GPU representation of the camera, must match the uniform layout in shader.wgsl
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CameraUniform {
+    view_proj: [[f32; 4]; 4], // used by rasteriser vertex shader
+    inv_view_proj: [[f32; 4]; 4], // used by ray march fragment shader
+    position: [f32; 3], // camera world position for ray origin
+    _pad: f32,
+}
+
+impl CameraUniform {
+    pub fn new() -> Self {
+        Self {
+            view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            inv_view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            position: [0.0; 3],
+            _pad: 0.0,
+        }
+    }
+
+    pub fn update_view_proj(&mut self, camera: &Camera) {
+        let vp = camera.build_view_projection_matrix();
+        self.view_proj = vp.to_cols_array_2d();
+        self.inv_view_proj = vp.inverse().to_cols_array_2d();
+        self.position = camera.eye.to_array();
+    }
+}
+
+// Everything needed to drive the camera from the GPU side:
+// the logical camera, its uniform mirror, and the GPU buffer + bind group.
+pub struct CameraBundle {
+    pub camera: Camera,
+    pub uniform: CameraUniform,
+    pub buffer: wgpu::Buffer,
+    pub bind_group: wgpu::BindGroup,
+    pub bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl CameraBundle {
+    pub fn new(device: &wgpu::Device, aspect: f32) -> Self {
+        use wgpu::util::DeviceExt;
+
+        let camera = Camera {
+            eye: glam::Vec3::new(16.0, 90.0, 90.0),
+            target: glam::Vec3::new(0.0, 25.0, 0.0),
+            up: glam::Vec3::Y,
+            aspect,
+            fovy: 60.0,
+            znear: 0.1,
+            zfar: 2000.0,
+        };
+
+        let mut uniform = CameraUniform::new();
+        uniform.update_view_proj(&camera);
+
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Camera Buffer"),
+            contents: bytemuck::cast_slice(&[uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("camera_bind_group_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("camera_bind_group"),
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+
+        Self {
+            camera,
+            uniform,
+            buffer,
+            bind_group,
+            bind_group_layout,
+        }
+    }
+
+    // Call once per frame after the controller has moved the camera.
+    pub fn sync_to_gpu(&mut self, queue: &wgpu::Queue) {
+        self.uniform.update_view_proj(&self.camera);
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[self.uniform]));
+    }
+
+    pub fn set_aspect(&mut self, aspect: f32) {
+        self.camera.aspect = aspect;
+    }
+}
+```
+
+### src/input/controller.rs
+```
+use winit::keyboard::KeyCode;
+use crate::input::camera::Camera;
+
+pub struct CameraController {
+    speed: f32,
+    is_forward_pressed: bool,
+    is_backward_pressed: bool,
+    is_left_pressed: bool,
+    is_right_pressed: bool,
+    is_up_pressed: bool,
+    is_down_pressed: bool,
+}
+
+impl CameraController {
+    pub fn new(speed: f32) -> Self {
+        Self {
+            speed,
+            is_forward_pressed: false,
+            is_backward_pressed: false,
+            is_left_pressed: false,
+            is_right_pressed: false,
+            is_up_pressed: false,
+            is_down_pressed: false,
+        }
+    }
+
+    pub fn handle_key(&mut self, code: KeyCode, is_pressed: bool) -> bool {
+        match code {
+            KeyCode::KeyW | KeyCode::ArrowUp => {
+                self.is_forward_pressed = is_pressed;
+                true
+            }
+            KeyCode::KeyA | KeyCode::ArrowLeft => {
+                self.is_left_pressed = is_pressed;
+                true
+            }
+            KeyCode::KeyS | KeyCode::ArrowDown => {
+                self.is_backward_pressed = is_pressed;
+                true
+            }
+            KeyCode::KeyD | KeyCode::ArrowRight => {
+                self.is_right_pressed = is_pressed;
+                true
+            }
+            KeyCode::KeyE | KeyCode::Space => {
+                self.is_up_pressed = is_pressed;
+                true
+            }
+            KeyCode::KeyQ | KeyCode::ShiftLeft => {
+                self.is_down_pressed = is_pressed;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn update_camera(&self, camera: &mut Camera) {
+        let forward = camera.target - camera.eye;
+        let forward_norm = forward.normalize();
+        let forward_mag = forward.length();
+
+        if self.is_forward_pressed && forward_mag > self.speed {
+            camera.eye += forward_norm * self.speed;
+        }
+        if self.is_backward_pressed {
+            camera.eye -= forward_norm * self.speed;
+        }
+
+        let right = forward_norm.cross(camera.up);
+        // up in camera-local space (perpendicular to both forward and right)
+        let up = right.cross(forward_norm);
+
+        let forward = camera.target - camera.eye;
+        let forward_mag = forward.length();
+
+        if self.is_right_pressed {
+            camera.eye = camera.target - (forward + right * self.speed).normalize() * forward_mag;
+        }
+        if self.is_left_pressed {
+            camera.eye = camera.target - (forward - right * self.speed).normalize() * forward_mag;
+        }
+        if self.is_up_pressed {
+            camera.eye = camera.target - (forward - up * self.speed).normalize() * forward_mag;
+        }
+        if self.is_down_pressed {
+            camera.eye = camera.target - (forward + up * self.speed).normalize() * forward_mag;
+        }
+    }
+}
+```
+
+### src/input/mod.rs
+```
+pub mod camera;
+pub mod controller;
+```
+
+### src/render/gpu_context.rs
+```
+use std::sync::Arc;
+use winit::window::Window;
+ 
+// Owns the core wgpu infrastructure: surface, device, queue, and swap chain config.
+pub struct GpuContext {
+    pub window: Arc<Window>,
+    pub surface: wgpu::Surface<'static>, // Represents the window which images are presented
+    pub device: wgpu::Device, // Open connection to graphics device to create resources
+    pub queue: wgpu::Queue, // Submit things to run on GPU
+    pub config: wgpu::SurfaceConfiguration,
+    pub is_surface_configured: bool,
+}
+
+impl GpuContext {
+    pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
+        let window_size = window.inner_size();
+
+        // Instance is connection to graphics backend, allows request to adapter (choose gpu) and surface
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            flags: Default::default(),
+            memory_budget_thresholds: Default::default(),
+            backend_options: Default::default(),
+            display: None,
+        });
+
+        // Represents the window which images are presented
+        let surface = instance.create_surface(window.clone()).unwrap();
+
+        // Choose GPU
+        let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::default(),
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+        }).await?;
+
+        // Use adapter to create device and queue (handle for gpu connection, interface for commands to send to gpu)
+        let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
+            label: None,
+            required_features: wgpu::Features::empty(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: Default::default(),
+            trace: wgpu::Trace::Off,
+        }).await?;
+
+        // Swap chain / Surface config
+        let surface_caps = surface.get_capabilities(&adapter);
+        let surface_format = surface_caps.formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(surface_caps.formats[0]);
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width: window_size.width,
+            height: window_size.height,
+            present_mode: surface_caps.present_modes[0],
+            alpha_mode: surface_caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+
+        Ok(Self {
+            window,
+            surface,
+            device,
+            queue,
+            config,
+            is_surface_configured: false,
+        })
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width > 0 && height > 0 {
+            self.config.width = width;
+            self.config.height = height;
+            self.surface.configure(&self.device, &self.config);
+            self.is_surface_configured = true;
+        }
+    }
+ 
+    pub fn aspect_ratio(&self) -> f32 {
+        self.config.width as f32 / self.config.height as f32
+    }
+}
+```
+
+### src/render/mod.rs
+```
+pub mod gpu_context;
+pub mod texture;
+```
+
+### src/render/texture.rs
+```
+#![allow(dead_code)]
+use image::GenericImageView;
+use anyhow::*;
+
+pub struct TextureBundle {
+    #[allow(dead_code)]
+    pub texture: Texture,
+    pub bind_group: wgpu::BindGroup,
+    pub bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl TextureBundle {
+    pub fn from_image_bytes(device: &wgpu::Device, queue: &wgpu::Queue, bytes: &[u8], label: &str) -> Self {
+        // Load image and create GPU texture, view, and sampler from image data
+        let texture = Texture::from_bytes(device, queue, bytes, label).unwrap();
+
+        // Layout describing how the shader access texture + sampler
+        let bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+                label: Some("texture_bind_group_layout"),
+            });
+
+        // Bind texture and sampler to GPU shader bindings
+        let bind_group = device.create_bind_group(
+            &wgpu::BindGroupDescriptor {
+                layout: &bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&texture.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&texture.sampler),
+                    }
+                ],
+                label: Some("diffuse_bind_group"),
+            }
+        );
+
+        Self {
+            texture,
+            bind_group,
+            bind_group_layout,
+        }
+    }
+}
+
+pub struct Texture {
+    #[allow(unused)]
+    pub texture: wgpu::Texture,
+    pub view: wgpu::TextureView,
+    pub sampler: wgpu::Sampler,
+}
+
+impl Texture {
+    // Creates texture from raw image bytes
+    pub fn from_bytes(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bytes: &[u8], 
+        label: &str
+    ) -> Result<Self> {
+        let img = image::load_from_memory(bytes)?;
+        Self::from_image(device, queue, &img, Some(label))
+    }
+
+    // Uploads image into GPU texture
+    pub fn from_image(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        img: &image::DynamicImage,
+        label: Option<&str>
+    ) -> Result<Self> {
+        let rgba = img.to_rgba8();
+        let dimensions = img.dimensions();
+
+        let size = wgpu::Extent3d {
+            width: dimensions.0,
+            height: dimensions.1,
+            depth_or_array_layers: 1,
+        };
+
+        // Create empty GPU texture
+        let texture = device.create_texture(
+            &wgpu::TextureDescriptor {
+                label,
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            }
+        );
+
+        // Copy image data into GPU texture
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                aspect: wgpu::TextureAspect::All,
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+            },
+            &rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * dimensions.0),
+                rows_per_image: Some(dimensions.1),
+            },
+            size,
+        );
+
+        // Create texture sampler
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(
+            &wgpu::SamplerDescriptor {
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Nearest,
+                mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+                ..Default::default()
+            }
+        );
+
+        Ok(Self { texture, view, sampler })
+    }
+
+    pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+    
+    pub fn create_depth_texture(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration, label: &str) -> Self {
+        let size = wgpu::Extent3d {
+            width: config.width.max(1),
+            height: config.height.max(1),
+            depth_or_array_layers: 1,
+        };
+        let desc = wgpu::TextureDescriptor {
+            label: Some(label),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: Self::DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        };
+        let texture = device.create_texture(&desc);
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(
+            &wgpu::SamplerDescriptor {
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+                compare: Some(wgpu::CompareFunction::LessEqual),
+                lod_min_clamp: 0.0,
+                lod_max_clamp: 100.0,
+                ..Default::default()
+            }
+        );
+
+        Self { texture, view, sampler }
+    }
+}
+```
+
+### src/svo/mod.rs
+```
+pub mod svo;
+pub mod svo_pipeline;
+```
+
+### src/svo/ray_march.wgsl
+```
+// Camera (group 0, binding 0)
+struct CameraUniform {
+    view_proj: mat4x4<f32>, // rasteriser (not used here)
+    inv_view_proj: mat4x4<f32>, // clip→world transform for ray casting
+    position: vec3<f32>,
+    _pad: f32,
+}
+@group(0) @binding(0)
+var<uniform> camera: CameraUniform;
+
+// SVO (group 1)
+struct SvoInfo {
+    root: u32, // index of the root node in svo_nodes
+    size: u32, // side length of the cubic world in voxels
+    _pad0: u32,
+    _pad1: u32,
+    origin: vec3<f32>, // world-space corner of the SVO box (e.g. -256, 0, -256)
+    _pad2: f32,
+}
+@group(1) @binding(0)
+var<uniform> svo_info: SvoInfo;
+
+struct SvoNode {
+    children: array<u32, 8>,
+}
+@group(1) @binding(1)
+var<storage, read> svo_nodes: array<SvoNode>;
+
+// Vertex stage: full-screen triangle 
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) ndc: vec2<f32>, // clip-space XY, passed through
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
+    // Use a single oversized triangle that covers whole screen.
+    var corners = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+    );
+    let p = corners[vi];
+    var out: VertexOutput;
+    out.position = vec4<f32>(p, 0.0, 1.0); // hardcode z=0 and w=1
+    out.ndc = p; // ndc is normalized device coordinates, vec2 in this case
+    return out;
+}
+
+// Ray–AABB slab test
+// Basically asking is there some interval the ray is inside the slab
+// tnear where ray enters box, tfar where ray exits
+// ro = ray origin, inv_rd = inverse of ray direction
+// Returns (t_near, t_far). Miss when t_near > t_far or t_far < 0.
+fn ray_aabb(
+    ro: vec3<f32>, inv_rd: vec3<f32>,
+    box_min: vec3<f32>, box_max: vec3<f32>,
+) -> vec2<f32> {
+    // Compute ray intersection distances to box planes
+    let t0 = (box_min - ro) * inv_rd;
+    let t1 = (box_max - ro) * inv_rd;
+    // Need inner min/max incase negative ray (always want entry first exit second)
+    let t_near = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), min(t0.z, t1.z));
+    let t_far  = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
+    return vec2<f32>(t_near, t_far);
+}
+
+// SVO ray marcher
+const MAX_STEPS: i32 = 200;
+const EPS: f32 = 0.0004;
+const SKY: vec3<f32> = vec3<f32>(0.53, 0.81, 0.98);
+
+// takes in ray origin (camera world position), ray direction (direction pixel ray is pointing)
+fn trace(ro: vec3<f32>, rd: vec3<f32>) -> vec4<f32> {
+    let inv_rd = 1.0 / rd;
+    let world_sz = f32(svo_info.size); // 512
+    let world_min = svo_info.origin; // (-256, 0, -256)
+    let world_max = svo_info.origin + world_sz; // (256, 512, 256)
+
+    // Early-out: does the ray hit the world AABB at all?
+    let wh = ray_aabb(ro, inv_rd, world_min, world_max);
+    if wh.x > wh.y || wh.y < 0.0 {
+        return vec4<f32>(SKY, 1.0);
+    }
+
+    var t = max(wh.x, 0.0) + EPS; // start at where ray enters world box, or 0 if already inside, EPS is a nudge forward to avoice ray sitting on boundary exactly
+    let t_max = wh.y; // where ray exits
+
+    for (var step = 0; step < MAX_STEPS; step++) {
+        if t >= t_max { break; }
+
+        let pos = ro + t * rd; // current position along the ray
+
+        // Descend the SVO to find the subtree containing `pos`
+        var node_val = svo_info.root;
+        var node_min = svo_info.origin;
+        var node_size = world_sz;
+
+        // Maximum depth = log2(SVO_SIZE) = 9 halvings → 10 iterations.
+        for (var depth = 0; depth < 10; depth++) {
+
+            if node_val == 0u {
+                // Empty region
+                break;
+            }
+
+            if (node_val & 0x80000000u) != 0u {
+                // Solid leaf hit, unpack color
+                let packed = node_val & 0x00FFFFFFu;
+                let r = f32((packed >> 16u) & 0xFFu) / 255.0;
+                let g = f32((packed >>  8u) & 0xFFu) / 255.0;
+                let b = f32(packed & 0xFFu) / 255.0;
+                let base = vec3<f32>(r, g, b);
+
+                // Surface normal from the entry face of this voxel.
+                let t0v = (node_min - ro) * inv_rd;
+                let t1v = (node_min + node_size  - ro) * inv_rd;
+                let tn  = min(t0v, t1v);
+                var normal = vec3<f32>(0.0, 1.0, 0.0);
+                if tn.x >= tn.y && tn.x >= tn.z {
+                    normal = vec3<f32>(-sign(rd.x), 0.0, 0.0);
+                } else if tn.y >= tn.z {
+                    normal = vec3<f32>(0.0, -sign(rd.y), 0.0);
+                } else {
+                    normal = vec3<f32>(0.0, 0.0, -sign(rd.z));
+                }
+
+                let sun = normalize(vec3<f32>(0.6, 1.0, 0.4));
+                let light = 0.20 + 0.80 * max(dot(normal, sun), 0.0);
+                return vec4<f32>(base * light, 1.0);
+            }
+
+            // Internal node: step into the child that contains `pos`
+            let half = node_size * 0.5;
+            let mid = node_min + half;
+            let ox = select(0u, 1u, pos.x >= mid.x); // is pos left or right of center?
+            let oy = select(0u, 1u, pos.y >= mid.y); // is pos below or above center?
+            let oz = select(0u, 1u, pos.z >= mid.z); // is pos front or back of center?
+            let oct = ox | (oy << 1u) | (oz << 2u);
+
+            node_min = node_min + vec3<f32>(f32(ox), f32(oy), f32(oz)) * half;
+            node_size = half;
+            node_val = svo_nodes[node_val].children[oct];
+        }
+
+        // `node_min`/`node_size` now describe an empty (or out-of-bounds) box.
+        // Advance the ray to its far side so the next step enters new space.
+        let exit = ray_aabb(ro, inv_rd, node_min, node_min + node_size);
+        let nudge = max(EPS, min(abs(exit.y) * 1e-4, 0.25));
+        t = exit.y + nudge;
+    }
+
+    return vec4<f32>(SKY, 1.0);
+}
+
+// Fragment stage
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Unproject from clip space to world space to get the ray direction.
+    let clip = vec4<f32>(in.ndc.x, in.ndc.y, 1.0, 1.0);
+    let world_h = camera.inv_view_proj * clip; // clip space to world space
+    let rd = normalize(world_h.xyz / world_h.w - camera.position); // subtract camera position to get just direction then normalize
+
+    return trace(camera.position, rd);
+}
+```
+
+### src/svo/svo.rs
+```
+use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
+use wgpu::util::DeviceExt;
+
+// Side length of the cubic SVO world in voxels (must be a power of two).
+pub const SVO_SIZE: u32 = 512;
+
+// A node in the SVO buffer.
+// Each `children[i]` encodes one child octant:
+// 0 – empty subtree
+// high bit set – solid leaf; lower 24 bits = packed RGB8 colour
+// otherwise – index into the `svo_nodes` storage buffer
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SvoNode {
+    pub children: [u32; 8],
+}
+
+pub struct SvoBuffers {
+    // Uniform: [root_index, grid_size, pad, pad, origin_x, origin_y, origin_z, pad]
+    pub info_buffer: wgpu::Buffer,
+    // Storage buffer of `SvoNode`
+    pub nodes_buffer: wgpu::Buffer,
+}
+
+impl SvoBuffers {
+    pub fn build_and_upload(device: &wgpu::Device) -> Self {
+        println!("Building SVO ({0}^3 grid)...", SVO_SIZE);
+
+        // Voxel grid
+        let mut noise = FastNoiseLite::new();
+        noise.set_noise_type(Some(NoiseType::Perlin));
+        noise.set_fractal_type(Some(FractalType::FBm));
+        noise.set_fractal_octaves(Some(4));
+        noise.set_fractal_lacunarity(Some(2.0));
+        noise.set_fractal_gain(Some(0.5));
+        noise.set_frequency(Some(0.02));
+
+        let n = SVO_SIZE as usize;
+        let mut grid = vec![0u8; n * n * n];
+
+        // Sample noise at centred world coords so the SVO terrain matches
+        let half = n as f32 * 0.5;
+        for x in 0..n {
+            for z in 0..n {
+                let wx = x as f32 - half;
+                let wz = z as f32 - half;
+                let noise_val = noise.get_noise_2d(wx, wz);
+                let h = ((noise_val + 1.0) * 0.5 * 64.0 * 0.6 + 64.0 * 0.15) as usize;
+                let h = h.min(63);
+                for y in 0..=h {
+                    grid[x * n * n + y * n + z] = 1;
+                }
+            }
+        }
+
+        // Build SVO
+        // Slot 0 is reserved so that child value 0 always means "empty".
+        let mut nodes: Vec<SvoNode> = vec![SvoNode { children: [0; 8] }];
+        let root = build_node(&grid, n, 0, 0, 0, SVO_SIZE, &mut nodes);
+
+        // GPU upload
+        // Layout (32 bytes, matches SvoInfo in ray_march.wgsl):
+        // Origin is shifted to match rasterizer at x = -256, z = -256
+        let half_f = SVO_SIZE as f32 * 0.5;
+        let info_bytes: [u8; 32] = bytemuck::cast([
+            root,
+            SVO_SIZE,
+            0u32,
+            0u32,
+            (-half_f).to_bits(),
+            0f32.to_bits(),
+            (-half_f).to_bits(),
+            0f32.to_bits(),
+        ]);
+
+        // Info uniform - 32 bytes with root index, world size, origin point
+        let info_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("SVO Info Buffer"),
+            contents: &info_bytes,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Node array - the whole tree as a flat array of SvoNode
+        let nodes_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("SVO Nodes Buffer"),
+            contents: bytemuck::cast_slice(&nodes),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        SvoBuffers { info_buffer, nodes_buffer }
+    }
+}
+
+// choose color by height of voxel
+fn voxel_color_packed(y: u32) -> u32 {
+    let h = y as f32 / 64.0;
+    let (r, g, b): (u32, u32, u32) = if h > 0.70 {
+        (0x4D, 0x9E, 0x2E) // grass
+    } else if h > 0.40 {
+        (0x85, 0x61, 0x38) // dirt
+    } else {
+        (0x85, 0x85, 0x85) // stone
+    };
+    (r << 16) | (g << 8) | b
+}
+
+// Recursively constructs the SVO bottom-up.  Returns the child descriptor
+// for this subtree (0 = empty, high-bit = leaf, else = node index).
+fn build_node(
+    grid: &[u8],
+    stride: usize,
+    x: u32,
+    y: u32,
+    z: u32,
+    size: u32,
+    nodes: &mut Vec<SvoNode>,
+) -> u32 {
+    let n = stride as u32;
+
+    // Out-of-bounds octants are empty.
+    if x >= n || y >= n || z >= n {
+        return 0;
+    }
+
+    // At a leaf, store value in parents children
+    if size == 1 {
+        let v = grid[x as usize * stride * stride + y as usize * stride + z as usize];
+        return if v == 0 {
+            0 // empty
+        } else {
+            0x8000_0000 | voxel_color_packed(y) // solid leaf with color
+        };
+    }
+
+    let half = size / 2;
+    let mut children = [0u32; 8];
+    let mut any_solid = false;
+
+    // Recurse into all 8 children
+    for oct in 0u32..8 {
+        let cx = x + (oct & 1) * half;
+        let cy = y + ((oct >> 1) & 1) * half;
+        let cz = z + ((oct >> 2) & 1) * half;
+        let child = build_node(grid, stride, cx, cy, cz, half, nodes);
+        children[oct as usize] = child;
+        if child != 0 {
+            any_solid = true;
+        }
+    }
+
+    if !any_solid {
+        return 0;
+    }
+
+    let idx = nodes.len() as u32;
+    nodes.push(SvoNode { children });
+    idx
+}
+```
+
+### src/svo/svo_pipeline.rs
+```
+use crate::{input::camera::CameraBundle, svo::svo::SvoBuffers};
+
+// contians pipeline (compiled GPU program + setting)
+// bind group (SVO data + info / nodes to be handed to GPU)
+pub struct SvoPipeline {
+    pub pipeline: wgpu::RenderPipeline,
+    pub svo_bind_group: wgpu::BindGroup,
+}
+
+impl SvoPipeline {
+    pub fn new(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        camera: &CameraBundle,
+        svo: &SvoBuffers,
+    ) -> Self {
+        // load shader
+        let shader = device.create_shader_module(wgpu::include_wgsl!("ray_march.wgsl"));
+
+        // Bind group 1: SVO info uniform + nodes storage
+        let svo_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("SVO BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        // bind info buffer to 0, nodes_buffer to 1
+        let svo_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("SVO Bind Group"),
+            layout: &svo_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: svo.info_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: svo.nodes_buffer.as_entire_binding() },
+            ],
+        });
+
+        // pipeline
+        let pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Ray March PL"),
+                bind_group_layouts: &[
+                    Some(&camera.bind_group_layout), // group 0: camera
+                    Some(&svo_layout), // group 1: SVO
+                ],
+                immediate_size: 0,
+            });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Ray March Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[], // fullscreen triangle — no vertex buffer needed
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None, // fullscreen — no culling
+                ..Default::default()
+            },
+            depth_stencil: None, // ray marcher owns depth via colour output
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        SvoPipeline { pipeline, svo_bind_group }
+    }
+}
+```

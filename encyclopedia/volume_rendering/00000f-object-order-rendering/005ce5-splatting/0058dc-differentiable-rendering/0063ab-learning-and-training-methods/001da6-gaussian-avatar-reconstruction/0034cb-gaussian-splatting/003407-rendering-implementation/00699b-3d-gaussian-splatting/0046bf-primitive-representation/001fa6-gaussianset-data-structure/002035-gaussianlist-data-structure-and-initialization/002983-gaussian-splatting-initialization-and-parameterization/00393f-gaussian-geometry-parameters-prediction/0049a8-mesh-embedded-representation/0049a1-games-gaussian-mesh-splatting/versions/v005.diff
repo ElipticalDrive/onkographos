@@ -1,0 +1,258 @@
+--- v004.md
++++ v005.md
+@@ -4,135 +4,150 @@
+ 
+ ## Overview
+-GaMeS is a hybrid representation that integrates Gaussian Splatting (GS) with mesh topology by parameterizing each Gaussian component using the vertices of a mesh face [S1]. It solves the problem of conditioning and editing Gaussian splats by ensuring that means, rotations, and scales automatically adapt when the underlying mesh geometry is modified [S1]. Unlike sibling methods such as SuGaR, GaMeS avoids expensive pre-processing stages or SDF-based regularization, directly embedding Gaussians onto the mesh surface or a "Triangle Soup" structure [S1].
++GaMeS is a hybrid 3D representation that integrates Gaussian Splatting (GS) with a mesh structure, allowing Gaussian components to be modified and adapted in a manner similar to traditional mesh vertices [S1]. It solves the problem of conditioning and editing Gaussian splats by parameterizing each Gaussian component directly by the vertices of a mesh face, ensuring that means, covariances, and orientations automatically adjust when the underlying mesh is deformed [S1]. Unlike sibling methods such as SuGaR, which rely on expensive pre-processing and SDF regularization, GaMeS directly parameterizes Gaussians on mesh faces, supporting both mesh-initialized inputs and mesh-free "Triangle Soup" initialization [S1].
+ 
+ ## How it works
+-GaMeS operates in two primary input scenarios: **Mesh-Initialized Input** (where a mesh is provided) and **Mesh-Free Input** (where a "Triangle Soup" is constructed from flat Gaussians). The core mechanism parameterizes Gaussian components based on triangle vertices, ensuring that geometric transformations of the mesh propagate to the Gaussians.
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A mesh $\mathcal{M}$ with vertices $V$ and faces $F$, or a set of initial flat Gaussian splats.
+-*   **Outputs:** A set of 3D Gaussians $G_M$ defined by mean $\mu$, covariance $\Sigma$, opacity $\sigma$, and spherical harmonic colors $c$.
++*   **Inputs:** A canonical triangle mesh $\mathcal{M}$ with vertices $V$ and faces $F$, or a set of flat Gaussian splats (for Triangle Soup initialization).
++*   **Outputs:** A set of parameterized Gaussians $G_M$ defined by their mean, covariance, opacity, and spherical harmonic colors, which can be rendered in real-time [S1].
+ 
+ ### Data Structures
+-For a mesh with $n$ faces, GaMeS defines a fixed number $k$ of Gaussian components per face, resulting in $k \cdot n$ total Gaussians [S1].
++The core data structure is a set of Gaussians $G_M$, where each Gaussian is associated with a specific triangle face $V_i \in F$ of the mesh [S1].
+ 
+-**Per-Face Parameters:**
+-For each face $V_i = \{v_1, v_2, v_3\}$, the following are defined:
+-*   **Barycentric Coefficients:** $\alpha_{1i}, \alpha_{2i}, \alpha_{3i}$ such that $\alpha_{1i} + \alpha_{2i} + \alpha_{3i} = 1$. These are trainable parameters determining the mean position within the triangle [S1].
+-*   **Scale Factor:** $\rho_i \in \mathbb{R}^+$, a trainable scalar that dynamically adjusts the Gaussian size [S1].
+-*   **Opacity:** $\sigma_i$ [S1].
+-*   **Colors:** $c_i$ (Spherical Harmonics coefficients) [S1].
++For a mesh with $n$ faces, a fixed integer $k$ defines the number of Gaussian components per face, resulting in $k \cdot n$ total Gaussians [S1].
+ 
+-**Global Structure:**
+-The final Gaussian set is:
+-$$
+-G_M = \bigcup_{V_i \in F_{\mathcal{M}}} \{ G_{V_i}, \sigma_i, c_i \}
+-$$
+-where $G_{V_i}$ represents the $k$ Gaussians associated with face $V_i$ [S1].
++Each Gaussian component $G_{Vi}$ on face $V_i$ is defined by the tuple:
++$$ G_{Vi} = \{ \mathcal{N}(m_V, \rho_i \Sigma_V), \sigma_i, c_i \} $$
++Where:
++*   $m_V$: The mean position, parameterized by trainable barycentric coordinates.
++*   $\Sigma_V$: The covariance matrix, derived from the geometry of the triangle face.
++*   $\rho_i \in \mathbb{R}^+$: A trainable scale parameter for the $i$-th Gaussian on the face.
++*   $\sigma_i$: Opacity.
++*   $c_i$: Spherical Harmonic (SH) colors.
++
++The trainable parameters for the $j$-th Gaussian on the $i$-th face are $\{ \alpha_{1j}, \alpha_{2j}, \alpha_{3j}, \rho_j \}$, subject to the constraint $\alpha_{1j} + \alpha_{2j} + \alpha_{3j} = 1$ [S1].
+ 
+ ### Initialization and Parameterization
+ 
+-#### 1. Mesh-Initialized Input (Baseline)
+-Gaussians are placed directly on the mesh surface. For a single triangle face with vertices $V = \{v_1, v_2, v_3\}$, the Gaussian distribution is constructed as follows:
++#### Scenario 1: Mesh-Initialized Input
++When a mesh is provided, all Gaussian components are placed on the mesh surface. For a single triangle face with vertices $V = \{v_1, v_2, v_3\}$, the Gaussian is parameterized as follows:
+ 
+-**Step 1: Compute Face Basis Vectors**
+-Calculate the normal vector $n$ and orthonormal basis vectors $r_1, r_2, r_3$ to form the rotation matrix $R_V$ [S1]:
+-1.  Compute the centroid $m = \text{mean}(v_1, v_2, v_3)$ [S1].
+-2.  Compute the normal:
+-    $$
+-    n = \frac{(v_2 - v_1) \times (v_3 - v_1)}{\|(v_2 - v_1) \times (v_3 - v_1)\|}
+-    $$
+-3.  Compute the first basis vector $r_1$ from the centroid to vertex $v_1$:
+-    $$
+-    r_1 = \frac{v_1 - m}{\|v_1 - m\|}
+-    $$
+-4.  Compute the second basis vector $r_2$ using Gram-Schmidt orthogonalization of the vector from the centroid to $v_2$ against $r_1$:
+-    $$
+-    r_2 = \frac{\text{orth}(v_2 - m; r_1, r_2)}{\|\text{orth}(v_2 - m; r_1, r_2)\|}
+-    $$
++1.  **Compute Face Normal ($r_1$):**
++    $$ r_1 = \frac{(v_2 - v_1) \times (v_3 - v_1)}{\|(v_2 - v_1) \times (v_3 - v_1)\|} $$
++    where $\times$ is the cross product [S1].
++
++2.  **Compute Centroid ($m$):**
++    $$ m = \text{mean}(v_1, v_2, v_3) = \frac{v_1 + v_2 + v_3}{3} $$
++
++3.  **Compute First Tangent ($r_1'$):**
++    $$ r_1' = \frac{v_1 - m}{\|v_1 - m\|} $$
++    [S1]
++
++4.  **Compute Second Tangent ($r_2$):**
++    Using Gram-Schmidt orthogonalization to orthogonalize the vector from the center to vertex $v_2$ ($v_2 - m$) with respect to $r_1'$:
++    $$ r_2 = \frac{\text{orth}(v_2 - m; r_1', r_2)}{\|\text{orth}(v_2 - m; r_1', r_2)\|} $$
+     Where the orthogonalization function is:
+-    $$
+-    \text{orth}(x; r_1, r_2) = x - \text{proj}(x, r_1) - \text{proj}(x, r_2)
+-    $$
+-    And projection is:
+-    $$
+-    \text{proj}(v, u) = \frac{\langle v, u \rangle}{\langle u, u \rangle} u
+-    $$
+-5.  Compute the third basis vector $r_3$ using Gram-Schmidt on $v_2 - m$ against $r_1$ and $r_2$:
+-    $$
+-    r_3 = \frac{\text{orth}(v_2 - m; r_1, r_2)}{\|\text{orth}(v_2 - m; r_1, r_2)\|}
+-    $$
+-    *(Note: The source defines $r_3$ via Gram-Schmidt of $v_2-m$ in the context of obtaining the rotation matrix, effectively completing the orthonormal basis aligned with the face)* [S1].
+-6.  Construct rotation matrix $R_V = [r_1, r_2, r_3]$ [S1].
++    $$ \text{orth}(x; r_a, r_b) = x - \text{proj}(x, r_a) - \text{proj}(x, r_b) $$
++    $$ \text{proj}(v, u) = \frac{\langle v, u \rangle}{\langle u, u \rangle} u $$
++    [S1]
+ 
+-**Step 2: Define Scaling Matrix**
+-Define the scaling matrix $S_V = \text{diag}(s_1, s_2, s_3)$ [S1]:
+-*   $s_1 = \epsilon$ (a small constant to avoid numerical problems, corresponding to the normal direction) [S1].
+-*   $s_2 = \|m - v_1\|$ [S1].
+-*   $s_3 = \langle v_2, r_3 \rangle$ [S1].
++5.  **Compute Third Vector ($r_3$):**
++    $$ r_3 = \frac{\text{orth}(v_2 - m; r_1', r_2)}{\|\text{orth}(v_2 - m; r_1', r_2)\|} $$
++    Note: The source defines $r_3$ via the orthogonalization step in the context of building the rotation matrix $R_V = [r_1, r_2, r_3]$. Specifically, $r_1$ is the normal, $r_1'$ is the first tangent, and $r_2$ is the second tangent. The third vector $r_3$ completes the orthonormal basis [S1].
+ 
+-**Step 3: Compute Covariance**
+-The covariance matrix for the face is:
+-$$
+-\Sigma_V = R_V S_V S_V^T R_V^T
+-$$
+-This covariance shape corresponds to the geometry of the triangle $V$ [S1].
++6.  **Define Scaling Matrix ($S_V$):**
++    $$ S_V = \text{diag}(s_1, s_2, s_3) $$
++    Where:
++    *   $s_1 = \epsilon$ (a small constant to avoid numerical problems, corresponding to the normal vector scaling).
++    *   $s_2 = \|m - v_1\|$
++    *   $s_3 = \langle v_2, r_3 \rangle$
++    [S1]
+ 
+-**Step 4: Generate Gaussians**
+-For each of the $k$ Gaussians $i$ on the face, define the mean $m_V$ as a convex combination of vertices:
+-$$
+-m_V(\alpha_{1i}, \alpha_{2i}, \alpha_{3i}) = \alpha_{1i} v_1 + \alpha_{2i} v_2 + \alpha_{3i} v_3
+-$$
+-The Gaussian component $G_{Vi}$ is then:
+-$$
+-G_{Vi} = \mathcal{N}(m_V(\alpha_{1i}, \alpha_{2i}, \alpha_{3i}), \rho_i \Sigma_V)
+-$$
+-where $\rho_i$ is a trainable scale parameter [S1].
++7.  **Define Covariance Matrix ($\Sigma_V$):**
++    $$ \Sigma_V = R_V S_V S_V^T R_V^T $$
++    Where $R_V = [r_1, r_2, r_3]$ [S1].
+ 
+-#### 2. Mesh-Free Input (Triangle Soup)
+-When no mesh is available, GaMeS constructs a "Triangle Soup" by parameterizing flat Gaussians as triangles [S1].
++8.  **Define Mean ($m_V$):**
++    The mean is a convex combination of the face vertices:
++    $$ m_V(\alpha_1, \alpha_2, \alpha_3) = \alpha_1 v_1 + \alpha_2 v_2 + \alpha_3 v_3 $$
++    Where $\alpha_1 + \alpha_2 + \alpha_3 = 1$ are trainable parameters [S1].
+ 
+-**Step 1: Initial Training**
+-Train standard GS with flat splats, setting the first scaling parameter $s_1 = \epsilon$ [S1].
++9.  **Final Gaussian Definition:**
++    For $k$ Gaussians per face:
++    $$ G_V = \{ \mathcal{N}(m_V(\alpha_{1i}, \alpha_{2i}, \alpha_{3i}), \rho_i \Sigma_V) \}_{i=1}^k $$
++    [S1]
+ 
+-**Step 2: Estimate Triangles**
+-For each Gaussian component defined by mean $\hat{m}$, rotation $R = [r_1, r_2, r_3]$, and scaling $S = \text{diag}(\epsilon, s_2, s_3)$, define three vertices $V = [v_1, v_2, v_3]$ [S1]:
+-*   $v_1 = \hat{m}$
+-*   $v_2 = \hat{m} + s_2 r_2$
+-*   $v_3 = \hat{m} + s_3 r_3$
++#### Scenario 2: Triangle Soup (Mesh-Free Input)
++If no mesh is available, GaMeS initializes by training standard GS with flat splats ($s_1 = \epsilon$), then estimates a triangle face for each Gaussian to create a "Triangle Soup" [S1].
+ 
+-**Step 3: Re-parameterization**
+-Freeze the vertices $V$ and re-parameterize the Gaussian component $\hat{G}_V$ using the mesh-based approach from Section 1 [S1]:
+-1.  Set $\hat{m}_V = v_1$ [S1].
+-2.  Compute new basis vectors $\hat{r}_1, \hat{r}_2, \hat{r}_3$:
+-    *   $\hat{r}_1 = \frac{(v_2 - v_1) \times (v_3 - v_1)}{\|(v_2 - v_1) \times (v_3 - v_1)\|}$ [S1].
+-    *   $\hat{r}_3 = \text{orth}(v_3 - v_1; r_1, r_2)$ [S1]. *(Note: Source implies using the original $r_1, r_2$ or recomputing based on vertex geometry; the text specifies $\hat{r}_3$ via orth of $v_3-v_1$)*.
+-    *   $\hat{r}_2$ is derived to complete the orthonormal basis aligned with the triangle [S1].
+-3.  Compute new scaling parameters:
+-    *   $\hat{s}_1 = \epsilon$ [S1].
+-    *   $\hat{s}_2 = \|v_2 - v_1\|$ [S1].
+-    *   $\hat{s}_3 = \langle v_3 - v_1, \hat{r}_3 \rangle$ [S1].
+-4.  Compute covariance:
+-    $$
+-    \hat{\Sigma}_V = \hat{R}_V \hat{S}_V \hat{S}_V^T \hat{R}_V^T
+-    $$
+-5.  Define the final Gaussian:
+-    $$
+-    \hat{G}_V = \mathcal{N}(\hat{m}_V, \hat{\Sigma}_V)
+-    $$
+-The resulting set $G_M$ consists of these parameterized Gaussians on the Triangle Soup $\hat{\mathcal{M}}$ [S1].
++1.  **Extract Triangle Vertices:**
++    Given a Gaussian with mean $m$, rotation $R = [r_1, r_2, r_3]$, and scaling $S = \text{diag}(\epsilon, s_2, s_3)$:
++    *   $v_1 = m$
++    *   $v_2 = m + s_2 r_2$
++    *   $v_3 = m + s_3 r_3$
++    [S1]
++
++2.  **Re-parameterize:**
++    Freeze vertices $V = [v_1, v_2, v_3]$ and re-parameterize the Gaussian $\hat{G}_V$ using the mesh-based parameterization from Scenario 1:
++    *   $\hat{m}_V = v_1$
++    *   $\hat{r}_1 = \frac{(v_2 - v_1) \times (v_3 - v_1)}{\|(v_2 - v_1) \times (v_3 - v_1)\|}$
++    *   $\hat{r}_3 = \text{orth}(v_3 - v_1; r_1, r_2)$
++    *   $\hat{s}_1 = \epsilon$
++    *   $\hat{s}_2 = \|v_2 - v_1\|$
++    *   $\hat{s}_3 = \langle v_3 - v_1, \hat{r}_3 \rangle$
++    *   $\hat{\Sigma}_V = \hat{R}_V \hat{S}_V \hat{S}_V^T \hat{R}_V^T$
++    *   $\hat{G}_V = \mathcal{N}(\hat{m}_V, \hat{\Sigma}_V)$
++    [S1]
++
++### Posed State Computation
++When the mesh is deformed (e.g., via skeletal animation or blend shapes), the Gaussian attributes adapt automatically [S1].
++
++1.  **Posed Mean:**
++    The mean position is updated based on the deformed vertices $v'_1, v'_2, v'_3$:
++    $$ m_{pose} = \alpha_1 v'_1 + \alpha_2 v'_2 + \alpha_3 v'_3 $$
++    [S1]
++
++2.  **Posed Covariance:**
++    The rotation matrix $R_{pose}$ and scaling matrix $S_{pose}$ are recomputed from the deformed triangle geometry using the same steps as in initialization (Section "Scenario 1"). The covariance is then:
++    $$ \Sigma_{pose} = R_{pose} S_{pose} S_{pose}^T R_{pose}^T $$
++    [S1]
++
++### Parameters
++*   $k$: Number of Gaussian components per mesh face (integer). Total Gaussians = $k \times |F|$ [S1].
++*   $\epsilon$: Small constant for the normal scaling component ($s_1$) to prevent numerical instability [S1].
++*   $\alpha_{1i}, \alpha_{2i}, \alpha_{3i}$: Trainable barycentric coordinates for the $i$-th Gaussian, summing to 1 [S1].
++*   $\rho_i$: Trainable scale multiplier for the $i$-th Gaussian's covariance [S1].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Cross-Triangle Handling:** Barycentric coordinates are only differentiable within a single triangle. If optimization moves an embedding point across a boundary ($u < 0$, $v < 0$, or $u+v > 1$), the embedding must be re-expressed in the neighboring triangle to maintain differentiability [Parent]. Failure to handle this causes Gaussians to stick to boundaries and pile up [Parent].
+-*   **Face Size Variation:** When mesh faces vary significantly in size, using a fixed number of Gaussians per face ($k$) causes problems. The solution is to subdivide large faces into smaller parts [S1].
+-*   **Numerical Stability:** The scaling parameter $s_1$ (normal direction) is fixed to a small constant $\epsilon$ rather than zero to avoid numerical problems [S1].
++*   **Variable Face Sizes:** If mesh faces vary significantly in size, using a fixed number of Gaussians per face ($k$) causes quality issues. The recommended solution is to subdivide large faces into smaller parts before initialization [S1].
++*   **Numerical Stability:** The normal scaling $s_1$ must be set to $\epsilon$ rather than 0 to avoid division by zero or singular matrix errors in the covariance computation [S1].
+ 
+ ## Operating characteristics
+-*   **Complexity:** The number of Gaussians is fixed at $k \cdot n$, where $n$ is the number of mesh faces and $k$ is the number of Gaussians per face [S1].
+-*   **Performance:** GaMeS enables real-time rendering and editing of Gaussian splats [S1].
+-*   **Strengths:** Automatic adaptation of means, rotations, and scales during mesh deformation; no expensive pre-processing or SDF regularization required compared to SuGaR [S1].
+-*   **Limitations:** Requires mesh initialization or estimation; fixed $k$ per face may not suit meshes with highly variable face sizes without subdivision [S1].
++
++### Time and Memory Complexity
++*   **Memory:** The number of Gaussians is fixed at $k \cdot n$, where $n$ is the number of mesh faces. This is generally more memory-efficient than standard GS which may require hundreds of thousands of independent Gaussians for high fidelity, as the density is tied to mesh topology [S1].
++*   **Time:** Rendering is real-time, leveraging the standard GS rasterization pipeline. The overhead of computing posed means and covariances from mesh vertices is minimal compared to the rendering cost [S1].
++
++### Measured Performance
++*   GaMeS supports real-time rendering of editable GS [S1].
++*   It was tested on datasets including Mip-NeRF360, Tanks and Temples, and synthetic human meshes (FLAME) [S1].
++*   The method allows for modifications (e.g., facial expressions via FLAME parameters) while preserving high-quality renders [S1].
++
++### Strengths and Limitations
++*   **Strengths:**
++    *   Allows direct modification of Gaussian components via mesh editing (vertices, blend shapes) [S1].
++    *   Automatic adaptation of means, rotations, and scales during animation [S1].
++    *   No need for expensive pre-processing stages or SDF regularization required by methods like SuGaR [S1].
++    *   Works with mesh-free inputs via Triangle Soup [S1].
++*   **Limitations:**
++    *   Requires an initial mesh or the ability to estimate one (Triangle Soup).
++    *   Fixed $k$ per face may not adapt well to highly non-uniform mesh resolutions without subdivision [S1].
++
++### When to Use
++*   Use GaMeS when the goal is to edit or animate 3D Gaussian representations using mesh-based controls (e.g., facial animation, character rigging) [S1].
++*   Use when a mesh is available or can be reasonably estimated, and real-time rendering with editability is required [S1].
+ 
+ ## Background
+-GaMeS was introduced to address the lack of a well-defined approach for conditioning Gaussian Splatting components, which typically requires managing hundreds of thousands of independent parameters [S1]. The method allows modification of Gaussian components in a manner similar to traditional meshes [S1]. It has been used to initialize human meshes using the FLAME framework for facial expression modification [S1].
++GaMeS was introduced to address the lack of a well-defined approach for conditioning Gaussian Splatting, which typically involves hundreds of thousands of independent components [S1]. The method was developed to allow modification of Gaussian components in a similar way as meshes, parameterizing each Gaussian by the vertices of the mesh face [S1]. It was tested on various datasets including Mip-NeRF360 and Tanks and Temples, and demonstrated with human mesh initialization using the FLAME framework for facial expression modification [S1].
+ 
+ ## Sources

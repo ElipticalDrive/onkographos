@@ -1,0 +1,158 @@
+# SAES (Sliding-Window-Averaged Early Stopping)
+
+Also called: SAES trigger, Structure-Aware Early Stopping, structural saturation detection
+
+## Overview
+SAES is an intrinsic training termination criterion for 3D Gaussian Splatting that prevents over-training and the accumulation of "needle-like" primitives caused by null-space ambiguity in sparse-view reconstruction [S1, unofficial]. Unlike projection-based metrics such as PSNR, which can continue to improve artificially by exploiting geometric ambiguities, SAES monitors the internal dynamics of Gaussian population growth to detect structural saturation, allowing for early stopping without ground-truth volumetric metrics [S1, unofficial].
+
+## How it works
+SAES operates by monitoring the rate at which new Gaussian primitives are added during the densification phase. When this growth rate saturates, it indicates that the Gaussian field has converged structurally, and further densification yields diminishing returns or harmful artifacts [S1, unofficial].
+
+### Inputs and Outputs
+*   **Input:** The sequence of active Gaussian counts $N_j$ at specific monitoring steps $j$.
+*   **Output:** A trigger iteration $t_s$ and final training iteration $T_{final}$.
+
+### Data Structures
+The method relies on a sliding window buffer to store recent normalized growth rates.
+*   **Buffer:** A list or queue of size $W$ storing values of $\bar{g}_j$.
+*   **State Variables:**
+    *   $t$: Current training iteration.
+    *   $N_t$: Number of active Gaussian primitives at iteration $t$.
+    *   $t_{last\_monitor}$: Iteration of the last monitoring step.
+
+### Parameters
+*   $\Delta = 100$: Monitoring interval in iterations. The growth rate is calculated every $\Delta$ iterations [S1, unofficial].
+*   $W = 5$: Sliding window size for smoothing the growth rate [S1, unofficial].
+*   $\tau = 10^{-3}$: Threshold for the sliding-window-averaged growth rate to trigger stopping [S1, unofficial].
+*   $t_{min} = 2,000$: Minimum iteration count before SAES can trigger, preventing premature stopping during early structure formation [S1, unofficial].
+*   $\gamma_{cool} = 0.2$: Learning-rate cooldown factor applied to position and scale learning rates ($\eta_{xyz}, \eta_{scale}$) upon triggering [S1, unofficial].
+
+### Algorithm Steps
+
+1.  **Initialization:** Set $t_{last\_monitor} = 0$. Initialize an empty sliding window buffer $B$ of capacity $W$.
+2.  **Monitoring Loop:** At each training iteration $t$:
+    *   If $t > t_{last\_monitor} + \Delta$:
+        *   Calculate the normalized population growth rate $\bar{g}_j$ for the current monitoring step $j$.
+        *   Append $\bar{g}_j$ to buffer $B$.
+        *   If $|B| > W$, remove the oldest element from $B$.
+        *   Update $t_{last\_monitor} = t$.
+        *   Compute the sliding-window-averaged growth rate $\bar{g}_j$ (see Formula below).
+        *   Check SAES trigger condition.
+3.  **Trigger Condition:** SAES triggers at iteration $t_s$ if:
+    *   The current iteration $t > t_{min}$.
+    *   The sliding-window-averaged growth rate $\bar{g}_j < \tau$.
+4.  **Post-Trigger Actions:**
+    *   Set $t_s = t$.
+    *   Set the final densification iteration $T_{densify} = t_s$. No further densification (splitting/cloning) occurs after $t_s$.
+    *   Set the final training iteration $T_{final} = 2 \times t_s$. Training continues until $T_{final}$ for refinement.
+    *   Apply learning-rate cooldown: Multiply current learning rates by $\gamma_{cool}$.
+
+### Formulas
+
+**Normalized Population Growth Rate ($\bar{g}_j$):**
+The growth rate is normalized to account for the scale of the Gaussian population. Let $N_j$ be the active Gaussian count at monitoring step $j$, and $N_{j-1}$ be the count at the previous monitoring step. The normalized growth rate is:
+
+$$ \bar{g}_j = \frac{N_j - N_{j-1}}{N_{j-1}} $$
+
+*Note: The sources define $\bar{g}_j$ as the "normalized population growth rate" and use it directly in the sliding window average. The formula above represents the standard definition of normalized growth rate consistent with the context of population dynamics [S1, unofficial].*
+
+**Sliding-Window-Averaged Growth Rate:**
+Let $B = [b_1, b_2, \dots, b_k]$ be the current buffer contents, where $k \le W$. The averaged rate $\bar{g}_{avg}$ is:
+
+$$ \bar{g}_{avg} = \frac{1}{k} \sum_{i=1}^{k} b_i $$
+
+The trigger condition is $\bar{g}_{avg} < \tau$.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def check_saes_trigger(current_iter, active_gaussian_count, buffer, params):
+    """
+    Checks if SAES should trigger based on Gaussian population growth.
+    
+    Args:
+        current_iter (int): Current training iteration t.
+        active_gaussian_count (int): Number of active Gaussians N_t.
+        buffer (list): List of recent normalized growth rates.
+        params (dict): Contains delta, window_size, threshold, t_min, cooldown_factor.
+        
+    Returns:
+        bool: True if SAES triggers, False otherwise.
+        dict: Updated buffer.
+        float: Normalized growth rate calculated (if monitored).
+    """
+    delta = params['delta']          # 100
+    window_size = params['window_size'] # 5
+    threshold = params['threshold']  # 1e-3
+    t_min = params['t_min']          # 2000
+    
+    # State variables assumed to be maintained in the training loop context
+    # last_monitor_iter: iteration of the last check
+    # prev_gaussian_count: N_{j-1}
+    
+    if current_iter - last_monitor_iter < delta:
+        return False, buffer, None
+
+    # Calculate normalized growth rate
+    # Avoid division by zero if population is zero (edge case)
+    if prev_gaussian_count == 0:
+        growth_rate = 0.0
+    else:
+        growth_rate = (active_gaussian_count - prev_gaussian_count) / prev_gaussian_count
+
+    # Update buffer
+    buffer.append(growth_rate)
+    if len(buffer) > window_size:
+        buffer.pop(0)
+
+    # Update state for next step
+    last_monitor_iter = current_iter
+    prev_gaussian_count = active_gaussian_count
+
+    # Calculate sliding window average
+    avg_growth = sum(buffer) / len(buffer)
+
+    # Check trigger conditions
+    if current_iter > t_min and avg_growth < threshold:
+        return True, buffer, avg_growth
+
+    return False, buffer, avg_growth
+```
+
+### Edge Cases and Pitfalls
+*   **Division by Zero:** If the initial Gaussian population $N_{j-1}$ is zero, the normalized growth rate is undefined. The implementation should handle this by setting the growth rate to 0 or skipping the check until a non-zero population exists [G].
+*   **Premature Triggering:** The parameter $t_{min} = 2,000$ prevents triggering during the early phase where the population is still establishing basic structure. Ignoring this can lead to underfitting [S1, unofficial].
+*   **Fluctuations:** The sliding window $W=5$ smooths out iteration-to-iteration noise in densification. A window too small may trigger on transient dips; a window too large may delay stopping [S1, unofficial].
+
+## Subtopics
+
+### Termination Entropy Criterion
+*   **What it is:** A method that uses termination entropy to calculate information gain for active 3D reconstruction, serving as the broader criterion framework for SAES.
+*   **Difference:** While SAES specifically monitors population growth rate for early stopping, the Termination Entropy Criterion provides the theoretical basis for determining when information gain is sufficient.
+*   **When to choose:** Use when integrating SAES into a pipeline that already utilizes entropy-based active reconstruction strategies.
+*   **Link:** [Termination entropy criterion](12065-termination-entropy-criterion.md)
+
+## Operating characteristics
+*   **Time Complexity:** SAES adds negligible computational overhead per iteration, as it only requires counting active Gaussians and maintaining a small buffer of 5 floats. The primary benefit is a reduction in total training time.
+*   **Memory Complexity:** Minimal. Requires storing a buffer of size $W=5$ and a few scalar state variables.
+*   **Measured Performance:**
+    *   On the FIPS dataset with 25 views, SAES triggers at approximately $t_s \approx 5,133$ iterations (mean across objects), leading to $T_{final} \approx 10,267$ [S1, unofficial].
+    *   This results in a ~64% reduction in wallclock training time compared to R2-Gaussian, which runs for a fixed 30,000 iterations [S1, unofficial].
+    *   SAES is stable across different view counts (10, 20, 25 views) for the same object, with trigger iterations varying by less than 5% for complex objects like Walnut [S1, unofficial].
+*   **Strengths:**
+    *   Prevents over-training and the formation of needle-like primitives that exploit null-space ambiguity.
+    *   Does not require ground-truth volumetric metrics for evaluation.
+    *   Significantly reduces training time without sacrificing reconstruction quality (PSNR/SSIM).
+*   **Limitations:**
+    *   Relies on the assumption that population growth saturation correlates with structural convergence, which may not hold for all scene types or initialization strategies.
+    *   Requires careful tuning of $t_{min}$ to avoid early stopping.
+*   **When to use:** Sparse-view 3D Gaussian tomography or reconstruction where training time is a constraint and null-space ambiguity is a concern.
+*   **When not to use:** Dense-view settings where the Gaussian population may continue to refine structure significantly beyond initial saturation, or when ground-truth volumetric metrics are available and preferred.
+
+## Background
+SAES was introduced in the context of diagnosing and controlling optimization drift in sparse-view 3D Gaussian tomography, specifically as part of the LADES (Learning and Training Optimization and Initialization for Densification Strategy) framework [S1, unofficial]. The method addresses the "Projection-Volume Fidelity Divergence" (PVFD) problem, where projection fidelity (PSNR) continues to improve while volumetric fidelity degrades due to the formation of anisotropic, needle-like primitives [S1, unofficial]. By monitoring intrinsic Gaussian population dynamics rather than external projection metrics, SAES provides a robust, ground-truth-free stopping criterion [S1, unofficial].
+
+## Sources
+[S1] Projection-Volume Fidelity Divergence: Diagnosing and Controlling Optimization Drift in Sparse-View 3D Gaussian Tomography, https://doi.org/10.48550/arXiv.2606.22525, fetched 2026-10-27 (unofficial)

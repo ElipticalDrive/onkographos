@@ -1,0 +1,65 @@
+# Rasterization and Projection
+## Overview
+This family converts continuous geometric sources (meshes, implicit surfaces, parametric surfaces) into discrete 3D voxel grids by projecting them onto image space or rasterizing them through graphics pipelines [S2, unofficial]. It differs from geometric clipping or pure intersection methods by transferring intersection computation to image space using voxelization and 2D textures, enabling real-time performance for complex and deformable models [S2, unofficial].
+## Shared principles
+
+## Subtopics
+
+### [Voxel Carving](1213-voxel-carving.md)
+Reconstructs a dense, filled 3D voxel grid from multiple 2D depth maps or silhouettes. It solves the problem of creating a volumetric representation of an object's interior volume, distinguishing itself from surface-only voxelization methods by filling the space enclosed by the object's boundaries. Unlike [Multi-Plane Projection Voxelization and Aggregation](12100-multi-plane-projection-voxelization-and-aggregation.md), which aggregates sparse data, Voxel Carving explicitly "carves" away empty space based on visibility constraints from multiple viewpoints. Choose this when reconstructing volume from multi-view depth data.
+
+### [Implicit Surface Voxelization](2379-implicit-surface-voxelization.md)
+Maps a continuous implicit surface definition into a discrete 3D grid by rasterizing bounding rectangles and evaluating the implicit function in a pixel shader. It solves the problem of converting analytical or complex implicit representations into a volumetric format suitable for direct volume rendering or further geometric processing. Unlike [Parametric Surface Voxelization](6032-parametric-surface-voxelization.md), which evaluates surface positions in the vertex shader, this method evaluates the implicit function per-pixel, allowing for arbitrary implicit definitions provided the shader supports the necessary instruction count. Choose this for analytical surfaces.
+
+### [Parametric Surface Voxelization](6032-parametric-surface-voxelization.md)
+Converts parametric surfaces into a voxel grid by building a boodle of points covering the parametric field and processing them in the GPU vertex shader. It rasterizes points in the 2D parameter domain directly to 3D space, transcribing the resulting positions to a worksheet buffer immediately. Choose this when working with NURBS or subdivision surfaces that need rapid conversion without tessellation.
+
+### [Scanline and Geometric Primitives](10941-scanline-and-geometric-primitives.md)
+Converts explicit geometric primitives (polygons, lines, planes, or analytic surfaces) into a discrete volumetric representation (voxel grid) suitable for volume rendering. It sets itself apart from [Voxel Carving](1213-voxel-carving.md) by using analytic intersection or distance tests rather than multi-view silhouette intersection, and from [Implicit Surface Voxelization](2379-implicit-surface-voxelization.md) by often handling explicit mesh data directly via scanline or slab logic rather than pure implicit field evaluation. Choose this for explicit primitives.
+
+### [Rasterization and GPU Shaders](11755-rasterization-and-gpu-shaders.md)
+Converts triangle meshes into discrete volumetric representations (voxels) by leveraging GPU hardware rasterization pipelines or programmable shaders, rather than CPU-based geometric intersection tests. It solves the problem of real-time or high-throughput voxelization for volume rendering and fluid simulation by mapping 2D rasterization concepts or explicit geometry generation to 3D grid occupancy. It differs from sibling methods like [Voxel Carving](1213-voxel-carving.md) or [Implicit Surface Voxelization](2379-implicit-surface-voxelization.md) by relying on the graphics pipeline's fragment processing or geometry shaders to determine voxel inclusion, often producing explicit cube meshes or point clouds rather than dense occupancy grids. Choose this for GPU-accelerated mesh voxelization.
+
+### [Mesh Rasterization and Triangle Intersection](11783-mesh-rasterization-and-triangle-intersection.md)
+Converts continuous triangle meshes into discrete 3D voxel grids, solving the problem of representing surface geometry for volume rendering, simulation, or 3D printing. It differs from sibling methods like [Voxel Carving](1213-voxel-carving.md) (which uses multi-view silhouettes) and [Implicit Surface Voxelization](2379-implicit-surface-voxelization.md) (which evaluates signed distance fields) by relying on explicit geometric intersection tests between triangles and voxel volumes. Choose this for precise mesh-to-voxel conversion.
+
+### [Multi-Plane Projection Voxelization and Aggregation](12100-multi-plane-projection-voxelization-and-aggregation.md)
+Converts multi-view RGB-D images into a volumetric representation suitable for neural rendering by projecting 2D pixels into 3D space and aggregating them onto a set of parallel planes. Unlike standard voxelization methods that fill a 3D grid directly, MPP reduces memory overhead by storing data on $N$ discrete planes, making it efficient for large-scale scenes. It is specifically designed to handle the sparsity of real-world scans by weighting contributions based on horizontal and vertical distances to the nearest depth plane. Choose this for neural rendering of large sparse scenes.
+
+### [Simplicial Covering Voxelization](14628-simplicial-covering-voxelization.md)
+Rasterizes and voxelize 3D solids by decomposing their surface into tetrahedra connected to an origin point and using a presence buffer (P-buffer) to toggle voxel states. Unlike sibling methods such as [Voxel Carving](1213-voxel-carving.md) or [Implicit Surface Voxelization](2379-implicit-surface-voxelization.md) which often require complex intersection tests or distance field evaluations, this method relies on simple incremental rasterization of tetrahedral slices. The primary trade-off is that it produces a complete solid voxelization in a single pass, whereas boundary-only methods like [Scanline and Geometric Primitives](10941-scanline-and-geometric-primitives.md) require separate handling for interior filling. Choose this for single-pass solid voxelization.
+
+#### Nearest Neighbor Splatting
+- **Definition**: A splatting method where a value at a continuous position is written to the single nearest voxel by rounding coordinates to integers [S1, unofficial].
+- **Code**: Implementation using `contToDisc`:
+  ```cpp
+  inline void writePoint(const Vector &vsP, const Imath::V3f &value, VoxelBuffer::Ptr buffer) {
+    using namespace Field3D;
+    int i = contToDisc(vsP.x);
+    int j = contToDisc(vsP.y);
+    int k = contToDisc(vsP.z);
+    if (buffer->isInBounds(i, j, k)) {
+      buffer->lvalue(i, j, k) += value;
+    }
+  }
+  ```
+- **Pitfall**: This method suffers from obvious aliasing problems [S1, unofficial].
+
+#### Image Space Collision Detection
+- **Definition**: Transferring intersection computation from geometric space to image space by voxelizing common parts of objects and querying 2D textures [S2, unofficial].
+- **Usage**: Since voxelization is no longer the bottleneck, collision detection can reach real-time frame rates even for complex and deformable models. It handles arbitrarily-shaped geometries, with performance dependent entirely on volume resolution [S2, unofficial].
+
+#### Pixar Volume Rendering Algorithm
+- **Definition**: A forward mapping, volumetric projection rendering technique that creates an image by projecting each voxel onto the image plane [S3, unofficial].
+- **Step**: The projection maps from the 3D stereotactic frame coordinate system present in the volumetric data set to 2D image plane coordinates [S3, unofficial].
+- **Parameters**: Assumes the sampling frequency satisfies the Nyquist criteria [S3, unofficial]. Assumes isotropic resolution (cubic voxels) [S3, unofficial]. Provides only for orthographic projections [S3, unofficial].
+- **Code**: Uses the PIXAR Chap Volume software library, which contains subroutines to manipulate rectangular arrays of pixels called pixel windows [S3, unofficial].
+- **Pitfall**: Medical imaging often violates the isotropic assumption because in-plane resolution is much higher than slice thickness, creating oblong voxels [S3, unofficial]. Aliasing occurs if Nyquist sampling is not possible and no low-pass filter is incorporated before sampling [S3, unofficial].
+
+## Background
+The technique was proposed for real-time voxelization of complex models, aiming to support applications such as surgical planning, intra-operation navigation, and radiation therapy [S2, unofficial]. The method transfers intersection computation from geometric space to image space, allowing collision detection to reach real-time frame rates [S2, unofficial]. Early implementations were tested on hardware such as the ATI Radeon 9800 Pro [S2, unofficial].
+
+## Sources
+[S1] Production Volume Rendering, https://cg.informatik.uni-freiburg.de/intern/seminar/volumeRenderingProductionFundamentals2011.pdf, fetched 2026-10-27 (unofficial)
+[S2] Real-time Voxelization for Complex Models, https://www.researchgate.net/publication/252533918_Real-time_Voxelization_for_Complex_Models, fetched 2026-11-03 (unofficial)
+[S3] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)

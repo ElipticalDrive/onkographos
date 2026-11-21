@@ -1,0 +1,129 @@
+--- v002.md
++++ v003.md
+@@ -16,5 +16,5 @@
+   $$ B_{ijk} = \{ C_{xyz} \mid x \in [i \cdot N_{sub}, (i+1) \cdot N_{sub}], y \in [j \cdot N_{sub}, (j+1) \cdot N_{sub}], z \in [k \cdot N_{sub}, (k+1) \cdot N_{sub}] \} $$
+   where $C_{xyz}$ is a voxel at spatial position $(x,y,z)$ [S1].
+-- **Slice $S_l$:** A group of sub-volumes aligned with the LPM face orientation. For an LPM face perpendicular to the Z-axis, a slice is defined as:
++- **Slice $S_l$:** A group of sub-volumes aligned with the LPM face orientation [S1]. For an LPM face perpendicular to the Z-axis, a slice is defined as:
+   $$ S_l = \{ B_{ijk} \mid i \in [0, I_{max}], j \in [0, J_{max}], k = l \} $$
+   where $l$ is the slice index along the Z-axis [S1].
+@@ -28,16 +28,16 @@
+ 
+ **Algorithm Steps:**
+-1. **Partitioning:** Split the volume $V$ into sub-volumes $B_{ijk}$ using $N_{sub}$. Group these sub-volumes into slices $S_l$ based on the LPM face orientation (e.g., Z-slices for Z-perpendicular faces) [S1].
+-2. **Stream Initialization:** Initialize two CUDA streams: one for computation and one for data transfer. Allocate pinned memory buffers on the CPU [S1].
+-3. **Iteration Loop:** Iterate through each slice $S_l$ from $l=0$ to $Z_{max}/N_{sub} - 1$. The total number of steps is $Z_{max} / N_{sub}$ [S1].
++1. **Partitioning:** Split the volume $V$ into sub-volumes $B_{ijk}$ using $N_{sub}$ [S1]. Group these sub-volumes into slices $S_l$ based on the LPM face orientation (e.g., Z-slices for Z-perpendicular faces) [S1].
++2. **Stream Initialization:** Initialize two CUDA streams: one for computation and one for data transfer [S1]. Allocate pinned memory buffers on the CPU [S1].
++3. **Iteration Loop:** Iterate through each slice $S_l$ from $l=0$ to $Z_{max}/N_{sub} - 1$ [S1]. The total number of steps is $Z_{max} / N_{sub}$ [S1].
+ 4. **Data Transfer (Overlap):**
+    - The **Transfer Stream** downloads the radiance data ($I, U$) computed for the previous slice $S_{l-1}$ from GPU to CPU pinned memory [S1].
+    - Simultaneously, the **Transfer Stream** uploads the necessary input data (boundary conditions or incoming radiance) for the next slice $S_{l+1}$ from CPU pinned memory to GPU [S1].
+-   - *Note:* For the first slice, initial data is uploaded. For the last slice, no subsequent upload is needed [S1].
++   - *Note:* For the first slice, initial data is uploaded [S1]. For the last slice, no subsequent upload is needed [S1].
+ 5. **Computation:**
+    - The **Computation Stream** executes the LPM propagation algorithm on the current slice $S_l$ [S1].
+    - This involves iterating over all voxels in the slice and all propagation directions to update radiance buffers $I$ and $U$ using transmittance $T$ [S1].
+    - Propagation and collection for slice $S_l$ must complete before $S_{l+1}$ is processed [S1].
+-6. **Result Storage:** The radiance propagated through slice $S_l$ is stored at its outgoing face. This data serves as the input boundary condition for the next slice $S_{l+1}$ [S1].
++6. **Result Storage:** The radiance propagated through slice $S_l$ is stored at its outgoing face [S1]. This data serves as the input boundary condition for the next slice $S_{l+1}$ [S1].
+ 7. **Sub-slicing (Fallback):** If a single slice $S_l$ still exceeds GPU memory capacity, it is further split into sub-slices and streamed individually [S1].
+ 
+@@ -45,60 +45,67 @@
+ ```python
+ def streaming_lpm(volume_dims, N_sub, lpm_params):
+-    # volume_dims: (X_max, Y_max, Z_max)
+     X_max, Y_max, Z_max = volume_dims
+-    I_max = (X_max + N_sub - 1) // N_sub
+-    J_max = (Y_max + N_sub - 1) // N_sub
+-    K_max = (Z_max + N_sub - 1) // N_sub
++    num_slices = Z_max // N_sub
+ 
+-    # Allocate pinned host memory to accelerate CPU-GPU transfers [S1]
+-    host_pinned_buffer = allocate_pinned_memory(size=compute_slice_memory(I_max, J_max, N_sub, lpm_params))
++    # Allocate pinned host memory for CPU-GPU transfer [S1]
++    host_pinned = allocate_pinned_memory(size=slice_memory_size(lpm_params))
+ 
+-    # Initialize two streams: one for transfer, one for computation [S1]
++    # Allocate device memory for a single slice [S1]
++    device_slice = allocate_device_memory(size=slice_memory_size(lpm_params))
++
++    # Initialize two CUDA streams: transfer and computation [S1]
+     transfer_stream = create_stream()
+     compute_stream = create_stream()
+ 
+-    # Allocate device memory for a single slice
+-    device_slice_buffer = allocate_device_memory(size=compute_slice_memory(I_max, J_max, N_sub, lpm_params))
++    # Upload initial data for the first slice [S1]
++    stream_copy_from_host(transfer_stream, host_pinned, device_slice)
+ 
+-    for l in range(K_max):
+-        # Transfer stream: download previous slice result to pinned memory [S1]
++    for l in range(num_slices):
++        # Transfer stream: download result of previous slice to pinned memory [S1]
+         if l > 0:
+-            stream_copy_to_host(transfer_stream, device_slice_buffer, host_pinned_buffer)
++            stream_copy_to_host(transfer_stream, device_slice, host_pinned)
+ 
+-        # Transfer stream: upload next slice input from pinned memory [S1]
+-        if l < K_max - 1:
+-            stream_copy_from_host(transfer_stream, host_pinned_buffer, device_slice_buffer)
++        # Transfer stream: upload input for next slice from pinned memory [S1]
++        if l < num_slices - 1:
++            stream_copy_from_host(transfer_stream, host_pinned, device_slice)
+ 
+-        # Compute stream: estimate scattered light within current slice [S1]
+-        # Propagation and collection for slice l must complete before slice l+1 is processed [S1]
+-        # Note: The exact LPM kernel update formula is not provided in the sources [S1]
+-        launch_lpm_kernel(compute_stream, device_slice_buffer, lpm_params, slice_index=l)
++        # Computation stream: propagate light through current slice [S1]
++        # Propagation and collection for slice l must complete before next slice is processed [S1]
++        apply_lpm_propagation(compute_stream, device_slice, lpm_params)
+ 
+-    # Synchronize to ensure all transfers and computations finish [S1]
++        # Store radiance at the outgoing face of the slice [S1]
++
++    # Synchronize streams [S1]
+     synchronize_stream(transfer_stream)
+     synchronize_stream(compute_stream)
+-    free_device_memory(device_slice_buffer)
+-    free_pinned_memory(host_pinned_buffer)
++    free_memory(device_slice)
++    free_memory(host_pinned)
+ 
+-# Helper definitions (standard operations)
++def slice_memory_size(params):
++    return params.directions * 2 * N_sub * N_sub * N_sub
++
++def apply_lpm_propagation(stream, buffer, params):
++    # Parallel for each voxel in slice:
++    #   Parallel for each direction i:
++    #     Update I and U buffers using transmittance T [S1]
++    pass
++
+ def allocate_pinned_memory(size): return [0] * size
++def allocate_device_memory(size): return [0] * size
+ def create_stream(): return object()
+ def stream_copy_to_host(stream, src, dst): pass
+ def stream_copy_from_host(stream, src, dst): pass
+-def launch_lpm_kernel(stream, buffer, params, slice_index): pass
+ def synchronize_stream(stream): pass
+-def free_device_memory(buffer): pass
+-def free_pinned_memory(buffer): pass
+-def compute_slice_memory(I_max, J_max, N_sub, lpm_params): return I_max * J_max * N_sub * lpm_params.directions * 2
++def free_memory(buffer): pass
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+ - **Memory Limitation:** A $256^3$ volume with 25 propagation directions per LPM face requires ~3.8 GB memory, exceeding typical GPU memory (e.g., 1.5–2 GB on GTX 580/560M) [S1]. Streaming is mandatory in this case [S1].
++- **Boundaries:** The radiance stored at the outgoing face of one slice must be correctly passed to the incoming face of the next slice [S1]. Failure to synchronize streams correctly will cause data races or stale data usage [S1].
+ - **Precision:** Not given in the sources.
+-- **Boundaries:** The radiance stored at the outgoing face of one slice must be correctly passed to the incoming face of the next slice. Failure to synchronize streams correctly will cause data races or stale data usage [S1].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The computational work per voxel remains the same as standard LPM, but overhead is introduced by data transfers. The use of pinned memory and concurrent streams (transfer and computation) overlaps these costs [S1].
+-- **Memory Complexity:** Scales with the size of a single slice (or sub-slice) rather than the entire volume. This allows rendering of volumes much larger than available VRAM [S1].
++- **Time Complexity:** The computational work per voxel remains the same as standard LPM, but overhead is introduced by data transfers [S1]. The use of pinned memory and concurrent streams (transfer and computation) overlaps these costs [S1].
++- **Memory Complexity:** Scales with the size of a single slice (or sub-slice) rather than the entire volume [S1]. This allows rendering of volumes much larger than available VRAM [S1].
+ - **Measured Performance:** For a $64^3$ volume, 25 propagation directions and 3 bounces, the GPU implementation takes 417 milliseconds, compared to 47 seconds on a CPU [S1]. Speedup increases with volume size due to better GPU resource utilization [S1].
+ - **Strengths:** Enables high-resolution volume rendering on consumer GPUs; efficient use of GPU parallelism via concurrent streams [S1].

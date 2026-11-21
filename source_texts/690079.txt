@@ -1,0 +1,108 @@
+A C++20 geometry engine producing Manifold CSG geometry from a parsed OpenSCAD AST. - warp(f): move every vertex through an OpenSCAD function by revarbat · Pull Request #123 · BelfrySCAD/openscad_cpp_evaluator
+
+warp(f): move every vertex through an OpenSCAD function by revarbat · Pull Request #123 · BelfrySCAD/openscad_cpp_evaluator · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+revarbat
+commented
+Aug 27, 2026
+Copy link
+Copy Markdown
+Member
+```
+warp(function(p) [p.x, p.y, p.z + 2*sin(p.x*12)]) child();
+```
+Manifold has had Warp/WarpBatch all along and we never exposed it. This adds an operation the language could not otherwise perform: twist, taper, bend, shear, project onto a surface — any per-vertex displacement, applied to real geometry rather than a VNF you assembled by hand.
+Registered like any transform (registry.cpp, beside "scale"), modelled on generateTransform. Colour survives free, since vertices move and properties don't.
+Calling a closure from the generate pass
+There is no live EvalContext by then — the one the call was resolved in is gone. It builds EvalContext::makeRoot(closure.node->scope()), which works because a closure carries its own scope and captured lets, and evalFunctionLiteralFromBound only reads ctx as a scope fallback.
+Documented consequence: $-variables sit at their defaults inside a warp function, not whatever surrounded the call.
+A fold check was written, measured, and removed
+The obvious self-intersection detector — compare each triangle's normal before and after, count inversions — does not work. GetMeshGL() gives no guarantee that triangle t is the same triangle after a warp, so it pairs up unrelated triangles.
+I caught it with a case that cannot lie: a rigid rotation about Z, which cannot self-intersect and whose volume is identical to the digit (4510.99 before and after), reported 7 inverted triangles on a cylinder and 9 on a sphere. A gentle twist losing 1.5% volume reported 31.
+A warning that fires on provably correct geometry is worse than no warning, because people learn to ignore it. So it is gone, and Warp.ValidGeometryNeverWarns guards against it coming back.
+What is sound and stays: the volume sign. A mirroring warp turns the solid inside out and that shows up exactly, with no false positives. Genuine self-intersection without inversion stays undetected — Manifold says outright it does not check (manifold.cpp:560-566), and the docs say so rather than implying the check is complete.
+Measured, not estimated
+A callback into OpenSCAD costs 0.96 µs, linear across 500k–2M calls. A 100k-vertex mesh warps in ~0.1 s.
+Batching via WarpBatch is worth only 1.3× (1.57 → 1.21 µs/point). The arithmetic dominates, not the call overhead — so batch because it's free, but don't contort the API chasing it. I expected this to be the main design constraint and it isn't.
+The caveat users will hit first
+Topology is untouched, so no vertices are added. A linear_extruded square has 8 vertices, so a ripple applied to it does nothing visible — verified, 12 facets in and 12 out. On a dense mesh it works as expected: a bulge on a 4,092-triangle sphere moved volume 14080 → 14548 with the triangle count unchanged.
+Tests
+Ten Warp cases: identity, affine-warp-equals-scale() as the oracle, translation, topology preservation, closure capturing an outer variable, colour survival, mirror detection, the false-positive regression guard, 2D warning, non-function argument.
+1056 tests pass under both engines. Dalek renders identically (224220 facets, area 108075.257).
+Version 0.49.0 → 0.50.0.
+🤖 Generated with Claude Code
+warp(f): move every vertex through an OpenSCAD function
+…
+d728b49
+```
+  warp(function(p) [p.x, p.y, p.z + 2*sin(p.x*12)]) child();
+
+Manifold has had Warp/WarpBatch all along and we never exposed it. This
+adds an operation the language could not otherwise perform: twist,
+taper, bend, shear, project onto a surface -- any per-vertex
+displacement, applied to real geometry rather than a VNF assembled by
+hand.
+
+Registered like any transform and modelled on generateTransform.
+Colour survives free, since vertices move and properties do not.
+
+Calling a closure from the generate pass needed care: there is no live
+EvalContext by then, so it builds a root from the closure's own scope.
+That works because a closure carries its scope and captured lets.
+Consequence, documented: $-variables sit at their defaults inside a
+warp function.
+
+A fold check was written, measured, and REMOVED. Comparing each
+triangle's normal before and after looks like a self-intersection
+detector, but GetMeshGL() does not guarantee triangle t is the same
+triangle afterwards. A rigid rotation -- which cannot self-intersect,
+and whose volume is identical to the digit -- reported 7 inverted
+triangles on a cylinder and 9 on a sphere. A warning that fires on
+provably correct geometry is worse than none, so it is gone, with
+Warp.ValidGeometryNeverWarns guarding against its return. The volume
+sign IS sound and stays: it catches a mirroring warp exactly.
+
+Ten tests, 1056 passing under both engines.
+```
+revarbat
+commented
+Aug 27, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Closing: warp() is redundant. It is four lines of userspace, using render() in expression position:
+```
+module warp(f) {
+    o = render() { children(); };
+    polyhedron([for (v = o.vertices) f(v)], o.faces);
+}
+```
+Measured against this branch on identical input: same volume (24000), same genus, same triangle count, colour through color() works the same — and the userspace version is faster, 0.22s vs 0.35s on a warped $fn=200 sphere.
+The proposal claimed warp() 'adds an operation the language cannot otherwise perform'. That was wrong: render() in expression position is exactly the primitive that makes it expressible, and the proposal even described the four-line solution while calling it a workaround. It was never benchmarked against the alternative.
+The only remaining differences are the 2D warning, the non-function warning, and mirror detection — all a few lines of assert in userspace.
+Reasoning parked in ~/.claude/plans/warp-proposal.md.
+revarbat
+closed this
+Aug 27, 2026
+revarbat
+deleted the
+warp-op
+branch
+August 27, 2026 12:52
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

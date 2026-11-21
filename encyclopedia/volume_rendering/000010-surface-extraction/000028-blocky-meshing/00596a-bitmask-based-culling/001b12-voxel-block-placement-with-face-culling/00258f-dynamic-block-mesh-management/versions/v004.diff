@@ -1,0 +1,307 @@
+--- v003.md
++++ v004.md
+@@ -1,109 +1,220 @@
+ # Dynamic Block Mesh Management
+ 
++Also called: Dynamic Index Buffer Updating (for deformable models)
++
+ ## Overview
+-Dynamic Block Mesh Management is a technique for maintaining a dynamic list of block indices organized by spatial coordinates, allowing for the efficient addition and removal of individual block faces without rebuilding the entire mesh [S1, unofficial]. It solves the problem of high computational cost associated with regenerating voxel meshes upon every block placement or removal by updating only the affected local geometry [S1, unofficial].
++Dynamic Block Mesh Management is a technique for maintaining a dynamic list of block indices organized by spatial coordinates, allowing for efficient addition and removal of individual block faces without rebuilding the entire mesh [S1, unofficial]. It solves the performance bottleneck of static mesh regeneration in voxel environments where the geometry changes frequently. Unlike [Static Mesh Caching](1138-static-mesh-caching.md), which assumes immutable geometry, this method updates the index buffer in real-time by managing block-level data structures [S1, unofficial].
++
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Block coordinates $(x, y, z)$, a boolean flag `add` indicating insertion or removal, and vertex indices for the face geometry $(a, b, c, d)$ [S1, unofficial].
+-*   **Output:** Updated vertex index arrays and spatial position arrays reflecting the current state of the voxel chunk [S1, unofficial].
++**Inputs:** Block placement/removal events (coordinates $x, y, z$ and face indices).
++**Outputs:** Updated index buffer and spatial position arrays.
+ 
+ **Data Structures:**
+-The method relies on three primary data structures [S1, unofficial]. `blocksX`, `blocksY`, and `blocksZ` conceptually store block positions along each axis, implemented in the source as a nested array `blocksPos` where `blocksPos[x][y]` holds a sorted list of `[z, indices]` pairs [S1, unofficial]. `blocksData` is a dictionary mapping string keys `'x,y,z'` to arrays of vertex indices, where each entry represents a face of 6 indices [S1, unofficial]. `vertexSlots` is a stack used to manage vertex slot reuse, optimizing memory usage by recycling unused vertex indices [S1, unofficial].
+-
+-**Numbered Steps:**
+-1.  **Initialize Spatial Indexing:** When adding a block, check if the block's coordinates $(x, y, z)$ already exist in the spatial position arrays [S1, unofficial]. If not, insert them in sorted order to maintain spatial locality [S1, unofficial].
+-2.  **Access or Create Block Data:** Construct the key `pos = "x,y,z"` [S1, unofficial]. If `add` is true, check if `pos` exists in `blocksData` [S1, unofficial]. If not, initialize `blocksData[pos] = []` and call the spatial update function to ensure coordinates are in `blocksPos` [S1, unofficial]. If `add` is false, retrieve `indices = blocksData[pos]` [S1, unofficial]. If undefined, the block does not exist and the function returns immediately [S1, unofficial].
+-3.  **Update Indices:** For addition, generate the 6 vertex indices for the square face: $[a, b, c, c, d, a]$ [S1, unofficial]. Append these indices to `blocksData[pos]` and increment the global `indicesLength` by 6 [S1, unofficial]. For removal, find the specific 6 indices in `blocksData[pos]` that correspond to the face being removed [S1, unofficial]. Remove these 6 indices from the array and decrement `indicesLength` by 6 [S1, unofficial].
+-4.  **Cleanup Empty Blocks:** After removal, check if `blocksData[pos]` is empty [S1, unofficial]. If empty, remove the entry from `blocksData` and remove the block's coordinates from the spatial position arrays `blocksPos` [S1, unofficial].
+-5.  **Vertex Slot Management:** When adding new vertices, pop the last used vertex index from `vertexSlots` to reuse the slot, ensuring compact memory usage [S1, unofficial].
++1.  `blocksPos`: A 3-level nested array structure storing block coordinates.
++    *   `blocksPos[i]`: Array of Y-Z planes at X-index `i`.
++    *   `blocksPos[i][j]`: Array of Z-lines at Y-index `j`.
++    *   `blocksPos[i][j][k]`: Array `[z_coord, indices_array]`.
++2.  `blocksData`: A dictionary (hash map) mapping string keys `'x,y,z'` to arrays of vertex indices.
++3.  `vertexSlots`: A stack (LIFO) of available vertex indices for memory reuse [S1, unofficial].
++4.  `indicesLength`: Integer tracking the total number of indices in the buffer.
++
++**Algorithm Steps:**
++
++1.  **Initialization:**
++    *   Initialize `blocksPos` as empty.
++    *   Initialize `blocksData` as empty.
++    *   Initialize `vertexSlots` as empty.
++    *   Initialize `indicesLength` to 0.
++
++2.  **Adding a Block Face:**
++    *   Input: Coordinates $(x, y, z)$ and 6 vertex indices $(a, b, c, c, d, a)$ representing the face [S1, unofficial].
++    *   Construct key `pos = "x,y,z"`.
++    *   If `pos` not in `blocksData`:
++        *   Create empty list `indices = []`.
++        *   Store `blocksData[pos] = indices`.
++        *   Call `updateBlocksPos(x, y, z, add=True, indices)` to insert into `blocksPos`.
++    *   Append the 6 indices to `blocksData[pos]`.
++    *   Increment `indicesLength` by 6.
++
++3.  **Removing a Block Face:**
++    *   Input: Coordinates $(x, y, z)$ and the specific 6 indices to remove.
++    *   Retrieve `indices = blocksData[pos]`.
++    *   Find and remove the specific 6 indices from the list.
++    *   Decrement `indicesLength` by 6.
++    *   If `indices` is empty:
++        *   Remove `pos` from `blocksData`.
++        *   Call `updateBlocksPos(x, y, z, add=False)` to remove from `blocksPos`.
++
++4.  **Updating Spatial Position Arrays (`updateBlocksPos`):**
++    *   Input: $x, y, z$, boolean `add`, and reference to `indices` list.
++    *   **Insertion (`add=True`):**
++        *   Iterate through `blocksPos` to find the correct insertion point for $x$.
++        *   If $x$ does not exist, insert a new entry at index $i$.
++        *   Within `blocksPos[i]`, find the correct insertion point for $y$.
++        *   If $y$ does not exist, insert a new entry at index $j$.
++        *   Within `blocksPos[i][j]`, find the correct insertion point for $z$.
++        *   If $z$ does not exist, insert `[z, indices]` at index $k$.
++    *   **Deletion (`add=False`):**
++        *   Locate the entry `[z, indices]` in `blocksPos[i][j]`.
++        *   Remove it.
++        *   If `blocksPos[i][j]` has only 1 element left (or becomes empty depending on implementation logic for empty planes), remove the Y-plane.
++        *   If `blocksPos[i]` has only 1 element left, remove the X-plane.
++        *   If `blocksPos` has only 1 element left, remove the root.
+ 
+ **Pseudocode:**
++
+ ```python
+ class DynamicBlockMesh:
+     def __init__(self):
+-        self.blocks_data = {}
+-        self.blocks_pos = []
++        self.blocks_pos = []  # 3D nested structure: blocks_pos[x][y][z] = [z_val, indices]
++        self.blocks_data = {} # Map "x,y,z" -> [indices]
++        self.vertex_slots = [] # Stack of free vertex indices
+         self.indices_length = 0
+-        self.vertex_slots = []
+-
+-    def _update_blocks_pos(self, x, y, z, add, indices):
+-        # Ensure x dimension exists
+-        while len(self.blocks_pos) <= x:
+-            self.blocks_pos.append([])
+-        # Ensure y dimension exists
+-        while len(self.blocks_pos[x]) <= y:
+-            self.blocks_pos[x].append([])
+-        
+-        row = self.blocks_pos[x][y]
++
++    def add_face(self, x, y, z, a, b, c, d):
++        """
++        Adds a face defined by vertices a,b,c,d (two triangles: a,b,c and c,d,a)
++        to the block at (x,y,z).
++        """
++        pos_key = f"{x},{y},{z}"
++        
++        # Get or create indices list
++        if pos_key not in self.blocks_data:
++            indices = []
++            self.blocks_data[pos_key] = indices
++            self._update_blocks_pos(x, y, z, add=True, indices=indices)
++        else:
++            indices = self.blocks_data[pos_key]
++
++        # Append face indices
++        indices.extend([a, b, c, c, d, a])
++        self.indices_length += 6
++
++    def remove_face(self, x, y, z, a, b, c, d):
++        """
++        Removes a specific face from the block at (x,y,z).
++        Note: In a real implementation, one must identify which face corresponds 
++        to the removal event. Here we assume the indices are known.
++        """
++        pos_key = f"{x},{y},{z}"
++        if pos_key not in self.blocks_data:
++            return
++
++        indices = self.blocks_data[pos_key]
++        
++        # Remove the specific 6 indices
++        # In practice, one might search for the sequence or maintain face-level tracking.
++        # For this generic method, we assume we can identify and remove the 6 indices.
++        face_indices = [a, b, c, c, d, a]
++        
++        # Simple removal: find and remove the sequence
++        # Note: This is a simplified representation. Real implementation needs robust search.
++        try:
++            # Find start index of the face
++            start_idx = indices.index(a)
++            # Verify the sequence matches
++            if indices[start_idx:start_idx+6] == face_indices:
++                del indices[start_idx:start_idx+6]
++                self.indices_length -= 6
++            else:
++                # Fallback: linear search for each element if order varies
++                # This is inefficient but ensures correctness if order is not guaranteed
++                for idx in face_indices:
++                    if idx in indices:
++                        indices.remove(idx)
++                        self.indices_length -= 1
++        except ValueError:
++            pass
++
++        # If empty, clean up
++        if not indices:
++            del self.blocks_data[pos_key]
++            self._update_blocks_pos(x, y, z, add=False)
++
++    def _update_blocks_pos(self, x, y, z, add, indices=None):
++        """
++        Maintains the sorted 3D structure of blocks_pos.
++        """
++        # Find X position
++        x_idx = self._find_insertion_index(self.blocks_pos, x, axis=0)
++        
+         if add:
+-            # Find sorted insertion point for z
+-            k = 0
+-            while k < len(row) and row[k][0] < z:
+-                k += 1
+-            row.insert(k, [z, indices])
++            if x_idx == len(self.blocks_pos):
++                self.blocks_pos.append([])
++                x_idx = len(self.blocks_pos) - 1
++            
++            # Find Y position within X plane
++            y_plane = self.blocks_pos[x_idx]
++            y_idx = self._find_insertion_index(y_plane, y, axis=1)
++            
++            if y_idx == len(y_plane):
++                y_plane.append([])
++                y_idx = len(y_plane) - 1
++            
++            # Find Z position within Y line
++            z_line = y_plane[y_idx]
++            z_idx = self._find_insertion_index(z_line, z, axis=2)
++            
++            if z_idx == len(z_line):
++                z_line.append([z, indices])
++                z_idx = len(z_line) - 1
+         else:
+-            # Find z to remove
+-            k = 0
+-            while k < len(row) and row[k][0] < z:
+-                k += 1
+-            if k < len(row) and row[k][0] == z:
+-                row.pop(k)
+-            # Cleanup empty rows/planes
+-            if not row:
+-                self.blocks_pos[x].pop(y)
+-            if not self.blocks_pos[x]:
+-                self.blocks_pos.pop(x)
+-
+-    def update_blocks(self, x, y, z, a, b, c, d, add):
+-        pos = f"{x},{y},{z}"
+-        if add:
+-            if pos not in self.blocks_data:
+-                self.blocks_data[pos] = []
+-                self._update_blocks_pos(x, y, z, True, self.blocks_data[pos])
+-            self.blocks_data[pos].extend([a, b, c, c, d, a])
+-            self.indices_length += 6
+-        else:
+-            if pos not in self.blocks_data:
+-                return
+-            indices = self.blocks_data[pos]
+-            # Find and remove the specific 6 indices
+-            for i in range(len(indices) - 5):
+-                if indices[i:i+6] == [a, b, c, c, d, a]:
+-                    del indices[i:i+6]
+-                    self.indices_length -= 6
+-                    break
+-            if not indices:
+-                del self.blocks_data[pos]
+-                self._update_blocks_pos(x, y, z, False, None)
+-
+-    def get_vertex_slot(self):
+-        if self.vertex_slots:
+-            return self.vertex_slots.pop()
+-        return None  # [G] If stack empty, allocate new vertex
++            # Removal logic
++            if x_idx < len(self.blocks_pos):
++                y_plane = self.blocks_pos[x_idx]
++                if y_idx < len(y_plane):
++                    z_line = y_plane[y_idx]
++                    if z_idx < len(z_line):
++                        z_line.pop(z_idx)
++                        # Cleanup empty lines/planes
++                        if not z_line:
++                            y_plane.pop(y_idx)
++                        if not y_plane:
++                            self.blocks_pos.pop(x_idx)
++
++    def _find_insertion_index(self, arr, val, axis):
++        """
++        Finds the index where val should be inserted to maintain sorted order.
++        Handles nested structures based on axis.
++        """
++        # This is a simplified binary search or linear scan placeholder.
++        # In the source, it uses a loop: for k in range(len(arr)): if val <= arr[k]...
++        for i, item in enumerate(arr):
++            if axis == 0:
++                if val <= item[0]: # item is [y, ...] or similar
++                    return i
++            elif axis == 1:
++                # item is [z, indices]
++                if val <= item[0]:
++                    return i
++            elif axis == 2:
++                # item is [z, indices]
++                if val <= item[0]:
++                    return i
++        return len(arr)
+ ```
+ 
+-**Parameters and Typical Values:**
+-*   `face_indices`: Always 6 integers per face representing two triangles [S1, unofficial].
+-*   `pos_key`: String format `"x,y,z"` [S1, unofficial].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Coordinate keys must be exact integers to avoid hash mismatches [S1, unofficial].
+-*   **Degenerate Input:** Removing a face from a non-existent block returns immediately without error [S1, unofficial].
+-*   **Memory Management:** Empty `blocksData` entries are removed immediately upon face removal to prevent memory leaks [S1, unofficial].
++*   **Precision:** Floating-point coordinates for block positions must be handled carefully. The source uses integer-like indexing for the structure, but if coordinates are floats, exact equality checks (`==`) may fail. Use a tolerance or quantize coordinates [S1, unofficial].
++*   **Empty Lists:** When removing a block, ensure that empty lists are pruned from `blocks_pos` to prevent memory leaks and maintain efficient iteration [S1, unofficial].
++*   **Vertex Reuse:** The `vertexSlots` stack is mentioned but not fully detailed in the core addition/removal logic. It is used to optimize memory by reusing vertex indices rather than allocating new ones [S1, unofficial].
++
+ ## Subtopics
+ 
++### [Thin Instance Management for Object Blocks](14154-thin-instance-management-for-object-blocks.md)
++Thin Instance Management for Object Blocks manages a pool of thin instances per voxel block ID to render static object meshes efficiently, handling instance addition, removal, matrix updates, buffer resizing, and world rebasing. It builds on Dynamic Block Mesh Management by providing the specific data structures and update logic required to translate block-level changes into GPU-friendly instance buffers. It is chosen when rendering complex static objects within a voxel grid where instance count is high but geometry is static per block.
++
+ ### Dynamic Index Buffer Updating
+-A technique for handling deformable models by classifying triangles into groups based on surface normals and updating an index buffer in AGP memory dynamically to avoid traversing the whole model for each slab [S2, unofficial]. It sets itself apart by focusing on deformable geometry and GPU memory transfer optimization rather than static voxel block management [S2, unofficial]. Choose this when rendering deformable models where triangle classification needs to be updated in real-time [S2, unofficial]. It involves preprocessing static models once to classify primitives into three groups based on surface normals [S2, unofficial]. For deformable models, the dynamic index buffer in AGP memory is updated [S2, unofficial]. The groups are divided into smaller sets (buckets) that sort triangles intersecting specific slabs [S2, unofficial]. During rasterization, two clipping planes are set along slab borders, and multiple render targets are used to rasterize multiple slabs simultaneously [S2, unofficial].
++Dynamic Index Buffer Updating is a technique for handling deformable models by classifying triangles into groups based on surface normals and updating an index buffer in AGP memory dynamically to avoid traversing the whole model for each slab [S2, unofficial]. It is chosen when rendering deformable models in voxelization pipelines where static caching is insufficient. It differs from the standard block management by operating on triangle groups and using AGP memory for fast updates [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources [S1, unofficial].
+-*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+-*   **Measured Performance:** The performance penalty for dynamic index buffer updating is low, with the model traversed approximately only once in the rasterization stage [S2, unofficial].
+-*   **Strengths:** Not given in the sources [S1, unofficial].
+-*   **Limitations:** Not given in the sources [S1, unofficial].
+-*   **When to Use:** Not given in the sources [S1, unofficial].
+-*   **When Not to Use:** Not given in the sources [S1, unofficial].
++*   **Time Complexity:** Addition and removal are $O(1)$ for dictionary lookups, but $O(N)$ for spatial array updates due to potential list insertions/deletions in `blocks_pos`, where $N$ is the number of blocks along an axis. In practice, with sparse grids, this is very fast.
++*   **Memory Complexity:** Proportional to the number of active block faces. The `blocks_pos` structure adds overhead for spatial indexing.
++*   **Performance:** Efficient for dynamic scenes with frequent block changes. Avoids the $O(V)$ cost of full mesh regeneration [S1, unofficial].
++*   **Limitations:** Not suitable for highly deformable models without the additional Dynamic Index Buffer Updating variant [S2, unofficial]. Precision issues may arise with non-integer coordinates.
++
+ ## Background
+-Not given in the sources. The related technique of Dynamic Index Buffer Updating was introduced in research on real-time voxelization for complex models, leveraging AGP memory for fast data transfer [S2, unofficial].
++Dynamic Block Mesh Management originates from voxel-based game engines and simulation environments where real-time geometry modification is required. The specific implementation details are derived from the Exolands project, a voxel engine implementation [S1, unofficial]. The concept of dynamic index updating for deformable models in voxelization was also explored in research on real-time voxelization for complex models, which introduced the use of AGP memory for dynamic buffer updates [S2, unofficial].
++
+ ## Sources
+ [S1] kvxy/exolands, https://github.com/kvxy/exolands, fetched 2026-10-27 (unofficial)

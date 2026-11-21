@@ -1,0 +1,370 @@
+--- v001.md
++++ v002.md
+@@ -4,143 +4,138 @@
+ 
+ ## Overview
+-Half-Angle Slicing with Odd-Even Merge Sort is a GPU-based volume rendering technique for particle systems that correctly handles transparency and shadows by sorting particles along a view-dependent axis and compositing them in slices [S1, unofficial]. It distinguishes itself from standard splatting by using a hardware-accelerated odd-even merge sort to order particles relative to a "half-angle" vector (derived from the view and light directions), enabling accurate depth-based compositing for shadow casting without requiring expensive ray-marching or multiple full-scene passes [S1, unofficial].
++Half-angle slicing is a GPU-based volume rendering technique for particle systems that sorts particles along a view-dependent axis (the half-angle between the light and view directions) using an odd-even merge sort, then renders them in slices to handle transparency and shadows correctly [S1, unofficial]. It sets itself apart from standard front-to-back splatting by decoupling the sorting axis from the view direction, allowing for efficient accumulation of opacity from the light's perspective to compute accurate volumetric shadows in a single pass [S1, unofficial]. Unlike [Bitonic Sort](14217-bitonic-sort.md) which sorts strictly by depth, this method sorts by a projected coordinate that aligns with the light transport, enabling the "slicing" strategy where particles are rendered in batches to build a light-space opacity texture [S1, unofficial].
+ 
+ ## How it works
+-The method operates in three main phases: simulation, sorting, and slicing/compositing. It assumes a particle system where each particle is defined by position and lifetime, stored in a 2D texture grid.
++The method operates in three main phases: simulation, GPU-based sorting, and slice-based rendering with opacity accumulation.
+ 
+ ### Inputs and Outputs
+-*   **Inputs:**
+-    *   Particle grid resolution: $P \times P$ (default $P=256$).
+-    *   Total particle count: $N = P^2 = 65,536$.
+-    *   Number of slices: $S = 128$.
+-    *   Opacity texture resolution: $R \times R$ (default $R=1024$).
+-    *   View direction vector $\mathbf{v}$ and Light direction vector $\mathbf{l}$ (in view space or world space, consistent with the projection matrices).
+-*   **Outputs:**
+-    *   Final rendered image with shadows.
+-    *   Updated particle positions (if simulation is integrated).
++*   **Inputs:** Particle positions, velocities, lifetimes, and spawn data; camera view/projection matrices; light view/projection matrices; time delta.
++*   **Outputs:** Final composited image with volumetric shadows; opacity texture for light-space accumulation.
+ 
+ ### Data Structures
+-1.  **Simulation FBOs (Ping-Pong):** Two Framebuffer Objects of size $P \times P$ ($256 \times 256$). Internal format `GL_RGBA32F`. No depth buffer. Used to store particle positions and lifetimes.
+-2.  **Particle Data Texture:** A texture of size $P \times P$ with format `GL_RGBA32F`. Each texel stores a particle's state: $\mathbf{p}_k = (x, y, z)$ in the RGB channels and auxiliary data (e.g., lifetime, spawn ID) in the A channel.
+-3.  **Opacity FBO:** One Framebuffer Object of size $R \times R$ ($1024 \times 1024$). Internal format `GL_RGBA` (unsigned byte). No depth buffer. Accumulates opacity from the light's perspective.
+-4.  **Sort FBOs (Ping-Pong):** Two FBOs of size $P \times P$ with format `GL_RGBA32F`. Used during the odd-even merge sort to swap read/write buffers.
++The implementation relies on specific Framebuffer Objects (FBOs) and textures, typically stored in a grid layout for efficient GPU access [S1, unofficial].
++
++1.  **Simulation FBOs (Ping-Pong):**
++    *   Two FBOs, `mSimulationFbo[0]` and `mSimulationFbo[1]`.
++    *   Size: `PARTICLES` x `PARTICLES` (e.g., 256x256).
++    *   Internal Format: `GL_RGBA32F`.
++    *   Data Type: `GL_FLOAT`.
++    *   Purpose: Store particle state (position, velocity, etc.) for simulation updates. No depth buffer.
++
++2.  **Particle Data Texture:**
++    *   Size: `PARTICLES` x `PARTICLES` (e.g., 256x256).
++    *   Format: `GL_RGBA32F`.
++    *   Layout: Each texel `vec4` contains `position.x`, `position.y`, `position.z`, and `lifetime` (or spawn data) [S1, unofficial].
++
++3.  **Opacity FBO:**
++    *   One FBO.
++    *   Size: `OPACITY_TEXTURE_RESOLUTION` x `OPACITY_TEXTURE_RESOLUTION` (e.g., 1024x1024).
++    *   Internal Format: `GL_RGBA`.
++    *   Data Type: `GL_UNSIGNED_BYTE`.
++    *   Purpose: Accumulate opacity from the light's perspective. No depth buffer [S1, unofficial].
+ 
+ ### Parameters
+-*   `PARTICLES`: 256 (grid dimension).
+-*   `SLICES`: 128 (number of depth slices).
+-*   `OPACITY_TEXTURE_RESOLUTION`: 1024.
+-*   `mMaxParticleCount`: 65,536.
+-*   `mTotalSortSteps`: Calculated as $\frac{\log_2(N) \cdot (\log_2(N) + 1)}{2}$. For $N=65,536$, $\log_2(N)=16$, so steps $= \frac{16 \cdot 17}{2} = 136$.
++*   `PARTICLES`: Square root of total particle count. Default: 256.
++*   `mMaxParticleCount`: Total particles = `PARTICLES` * `PARTICLES`. Default: 65536.
++*   `SLICES`: Number of depth slices for rendering. Default: 128.
++*   `OPACITY_TEXTURE_RESOLUTION`: Resolution of the light-space opacity texture. Default: 1024.
+ 
+ ### Algorithm Steps
+ 
+-#### 1. Half-Vector Calculation
+-Determine the sorting axis based on the angle between the view direction $\mathbf{v}$ and the light direction $\mathbf{l}$.
+-*   Compute dot product $d = \mathbf{v} \cdot \mathbf{l}$.
+-*   If $d > 0.0$:
+-    *   $\mathbf{h} = \text{normalize}(\mathbf{l} + \mathbf{v})$
+-    *   $mFlipped = \text{false}$
+-*   Else:
+-    *   $\mathbf{h} = \text{normalize}(\mathbf{l} - \mathbf{v})$
+-    *   $mFlipped = \text{true}$
+-*   The half-vector $\mathbf{h}$ defines the axis along which particles are sorted. This axis approximates the direction that minimizes sorting errors for shadow casting [S1, unofficial].
+-
+-#### 2. Simulation (Optional/Integrated)
+-*   Bind previous frame's position texture to unit 0 and spawn data to unit 1.
+-*   Run simulation shader for 1 frame (or $BASE\_LIFETIME / PRESIMULATION\_DELTA\_TIME$ frames on the first frame) to update particle positions and lifetimes.
+-*   Write results to the current Simulation FBO.
+-
+-#### 3. GPU Odd-Even Merge Sort
+-Sort the particles in the Particle Data Texture based on their projection onto the half-vector $\mathbf{h}$. The sort is performed using a parallel odd-even merge sort algorithm implemented via fragment shaders and ping-pong FBOs.
+-
+-*   Initialize sort counters:
+-    *   $mSortStage = 0$
+-    *   $mSortPass = 0$
+-    *   $mSortStepsLeft = mTotalSortSteps$
+-*   Loop $mTotalSortSteps$ times:
+-    1.  Swap read/write FBOs: $mCurrent = 1 - mCurrent$.
+-    2.  Decrement $mSortPass$.
+-    3.  If $mSortPass < 0$:
+-        *   Increment $mSortStage$.
+-        *   Set $mSortPass = mSortStage$.
+-    4.  Bind source texture (current sort stage output) to unit 0.
+-    5.  Pass uniforms to sort shader:
+-        *   $uPass = 2^{mSortPass}$
+-        *   $uStage = 2^{mSortStage}$
+-    6.  Execute sort shader: Each fragment compares particles at indices $i$ and $i + uPass$. If the projection of particle $i$ onto $\mathbf{h}$ is greater than particle $i + uPass$ (for ascending order), swap them.
+-    7.  Decrement $mSortStepsLeft$.
+-    8.  If $mSortStepsLeft == 0$, reset counters ($mSortStage=0, mSortPass=0, mSortStepsLeft=mTotalSortSteps$).
+-
+-*   **Sort Shader Logic (Conceptual):**
+-    The sort shader reads particle data from the source texture. For a given thread/fragment corresponding to index $k$, it reads particle $A$ at $k$ and particle $B$ at $k + uPass$. It computes the scalar projection $s_A = \mathbf{p}_A \cdot \mathbf{h}$ and $s_B = \mathbf{p}_B \cdot \mathbf{h}$. If $s_A > s_B$, it writes $B$ to position $k$ and $A$ to position $k + uPass$ in the destination FBO; otherwise, it writes $A$ to $k$ and $B$ to $k + uPass$.
+-
+-#### 4. Slicing and Compositing
+-Render the sorted particles in slices to handle transparency and shadows.
+-
+-*   Loop $i$ from $0$ to $SLICES - 1$:
+-    1.  **Determine Particle Range:**
+-        *   $start\_index = i \cdot (N / SLICES)$
+-        *   $count = N / SLICES$
+-    2.  **View Pass (Render Particles):**
+-        *   Set camera matrices (View/Projection).
+-        *   Bind the sorted Particle Data Texture.
+-        *   Set blend mode:
+-            *   If $mFlipped$ is true: `GL_ONE`, `GL_ONE_MINUS_SRC_ALPHA` (Back-to-Front).
+-            *   Else: `GL_ONE_MINUS_DST_ALPHA`, `GL_ONE` (Front-to-Back). *Note: The source code snippet shows `GL_ONE_MINUS_DST_ALPHA, GL_ONE` for non-flipped, which is non-standard for simple alpha blending but may be specific to the shadow accumulation context or a specific OpenGL state machine quirk in the reference implementation. Standard front-to-back is `GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA`. We follow the source's explicit instruction.*
+-        *   Draw the slice of particles (using point sprites or instanced quads). The fragment shader computes the particle's contribution based on its distance from the center (Gaussian-like falloff) and its opacity.
+-    3.  **Opacity Pass (Light View):**
+-        *   Bind the Opacity FBO.
+-        *   Set matrices to Light Camera (Light View/Projection).
+-        *   Draw the same particle slice with blend mode `GL_ONE`, `GL_ONE_MINUS_SRC_ALPHA`.
+-        *   This accumulates the opacity of the current slice into the Opacity Texture from the light's perspective. This texture represents the "shadow map" of the particles.
+-
+-*   **Final Composite:**
+-    *   Draw the floor (or background geometry) using the accumulated Opacity Texture.
+-    *   Bind Opacity Texture to unit 2.
+-    *   Use Light View Projection matrix to sample the opacity at the floor's position.
+-    *   Blend mode: `GL_ONE_MINUS_DST_ALPHA`, `GL_ONE`.
+-    *   The floor's color is modulated by the accumulated opacity, creating the shadow effect.
++1.  **Calculate Half-Vector for Sorting:**
++    Determine the sorting axis based on the angle between the view direction ($\mathbf{v}$) and the light direction ($\mathbf{l}$).
++    *   If $\mathbf{v} \cdot \mathbf{l} > 0.0$:
++        *   $\mathbf{halfVector} = \text{normalize}(\mathbf{l} + \mathbf{v})$
++        *   $mFlipped = \text{false}$
++    *   Else:
++        *   $\mathbf{halfVector} = \text{normalize}(\mathbf{l} - \mathbf{v})$
++        *   $mFlipped = \text{true}$
++    *   [S1, unofficial]
++
++2.  **Simulate Particle Movement:**
++    *   Bind the previous frame's position texture (`mSimulationFbo[1 - mCurrent]`) to texture unit 0.
++    *   Bind the spawn data texture to texture unit 1.
++    *   Execute the simulation shader for 1 frame (or `BASE_LIFETIME / PRESIMULATION_DELTA_TIME` frames on the first frame to initialize) [S1, unofficial].
++    *   Update `mCurrent` to swap ping-pong buffers.
++
++3.  **Execute Odd-Even Merge Sort:**
++    Sort the particles based on their projection onto the $\mathbf{halfVector}$.
++    *   Calculate total sort steps:
++        $$ mTotalSortSteps = \frac{\log_2(mMaxParticleCount) \cdot (\log_2(mMaxParticleCount) + 1)}{2} $$
++    *   [S1, unofficial]
++    *   Loop `mTotalSortSteps` times:
++        *   Swap read/write FBOs: `mCurrent = 1 - mCurrent`.
++        *   Decrement `mSortPass`. If `mSortPass < 0`:
++            *   Increment `mSortStage`.
++            *   Set `mSortPass = mSortStage`.
++        *   Bind source texture to unit 0.
++        *   Pass uniforms to sort shader:
++            *   `uPass = float(1 << mSortPass)`
++            *   `uStage = float(1 << mSortStage)`
++        *   Decrement `mSortStepsLeft`. If it reaches 0, reset counters (`mSortPass`, `mSortStage`, `mSortStepsLeft`) [S1, unofficial].
++
++4.  **Render Slices (View Pass):**
++    *   Loop `i` from 0 to `SLICES - 1`.
++    *   Determine particle range:
++        *   `startIndex = i * (mMaxParticleCount / SLICES)`
++        *   `count = mMaxParticleCount / SLICES`
++    *   Set camera matrices to view space.
++    *   Bind opacity texture to unit 1.
++    *   Set blend mode:
++        *   If `mFlipped` is true: `GL_ONE_MINUS_DST_ALPHA`, `GL_ONE`
++        *   Else: `GL_ONE`, `GL_ONE_MINUS_SRC_ALPHA`
++    *   Draw the current slice of particles using point sprites [S1, unofficial].
++
++5.  **Opacity Pass (Light View):**
++    *   Bind the opacity FBO.
++    *   Set matrices to light camera (light view/projection).
++    *   Draw the same particle slice with blend mode `GL_ONE`, `GL_ONE_MINUS_SRC_ALPHA` to accumulate opacity into the opacity texture [S1, unofficial].
++
++6.  **Final Composite:**
++    *   Draw the floor (or scene geometry) and a fullscreen quad.
++    *   Bind the accumulated opacity texture (from step 5) to unit 2.
++    *   Use the light view projection matrix to sample the opacity texture for shadow calculation.
++    *   Blend mode: `GL_ONE_MINUS_DST_ALPHA`, `GL_ONE` [S1, unofficial].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def half_angle_slicing_sort_and_render(particles, view_dir, light_dir, P=256, SLICES=128, R=1024):
+-    """
+-    particles: list of (x, y, z, alpha) or texture of size P*P
+-    view_dir: normalized vector
+-    light_dir: normalized vector
+-    """
+-    N = P * P
+-    mTotalSortSteps = (log2(N) * (log2(N) + 1)) // 2
++# Constants
++PARTICLES = 256
++MAX_PARTICLES = PARTICLES * PARTICLES
++SLICES = 128
++OPACITY_RES = 1024
++
++# Data Structures
++# sim_fbo[0], sim_fbo[1]: TEXTURE_2D, RGBA32F, 256x256
++# particle_tex: TEXTURE_2D, RGBA32F, 256x256 (x,y,z,lifetime)
++# opacity_fbo: FRAMEBUFFER, RGBA, 1024x1024 (unsigned byte)
++
++def half_angle_slicing(view_dir, light_dir, dt, time):
++    # 1. Calculate Half-Vector
++    dot_val = dot(normalize(view_dir), normalize(light_dir))
++    if dot_val > 0.0:
++        half_vec = normalize(light_dir + view_dir)
++        flipped = False
++    else:
++        half_vec = normalize(light_dir - view_dir)
++        flipped = True
++
++    # 2. Simulation
++    # Bind sim_fbo[1-current] to unit 0, spawn data to unit 1
++    # Run simulation shader (1 frame or init frames)
++    # Swap current buffer
++    current = 1 - current
++
++    # 3. Odd-Even Merge Sort
++    total_steps = (log2(MAX_PARTICLES) * (log2(MAX_PARTICLES) + 1)) / 2
++    sort_pass = 0
++    sort_stage = 0
++    sort_steps_left = total_steps
+     
+-    # 1. Calculate Half Vector
+-    dot_product = dot(view_dir, light_dir)
+-    if dot_product > 0.0:
+-        half_vector = normalize(light_dir + view_dir)
+-        mFlipped = False
+-    else:
+-        half_vector = normalize(light_dir - view_dir)
+-        mFlipped = True
+-        
+-    # 2. Simulation (if applicable)
+-    # particles = simulate_particles(particles, dt)
+-    
+-    # 3. Odd-Even Merge Sort
+-    # Initialize FBOs for sorting
+-    sort_fbo_read = create_fbo(P, P, format=RGBA32F)
+-    sort_fbo_write = create_fbo(P, P, format=RGBA32F)
+-    current_fbo = sort_fbo_read
+-    
+-    sort_stage = 0
+-    sort_pass = 0
+-    sort_steps_left = mTotalSortSteps
+-    
+-    for step in range(mTotalSortSteps):
++    for step in range(total_steps):
+         # Swap buffers
+-        if current_fbo == sort_fbo_read:
+-            current_fbo = sort_fbo_write
+-        else:
+-            current_fbo = sort_fbo_read
+-            
++        current = 1 - current
++        
+         sort_pass -= 1
+         if sort_pass < 0:
+@@ -148,62 +143,63 @@
+             sort_pass = sort_stage
+             
+-        uPass = 2 ** sort_pass
+-        uStage = 2 ** sort_stage
+-        
+-        # Execute Sort Shader
+-        # Bind current_fbo as source
+-        # Pass half_vector, uPass, uStage to shader
+-        # Shader compares particle[i] and particle[i + uPass] based on dot(p, half_vector)
+-        # Writes sorted result to the other FBO
+-        execute_sort_shader(current_fbo, half_vector, uPass, uStage)
++        # Bind source texture (sim_fbo[current]) to unit 0
++        # Pass uPass = 1 << sort_pass, uStage = 1 << sort_stage
++        # Run sort shader
+         
+         sort_steps_left -= 1
+         if sort_steps_left == 0:
++            sort_pass = 0
+             sort_stage = 0
+-            sort_pass = 0
+-            sort_steps_left = mTotalSortSteps
+-            
+-    # 4. Slicing and Compositing
+-    opacity_fbo = create_fbo(R, R, format=RGBA)
+-    
+-    slice_size = N // SLICES
+-    
++            sort_steps_left = total_steps
++
++    # 4. Render Slices & 5. Opacity Accumulation
+     for i in range(SLICES):
+-        start_index = i * slice_size
+-        count = slice_size
++        start_idx = i * (MAX_PARTICLES / SLICES)
++        count = MAX_PARTICLES / SLICES
+         
+         # View Pass
+-        set_camera(view_matrix, projection_matrix)
+-        set_blend_mode(GL_ONE_MINUS_DST_ALPHA, GL_ONE if not mFlipped else GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+-        draw_particles(particles, start_index, count, half_vector)
+-        
+-        # Opacity Pass (Light View)
+-        bind_fbo(opacity_fbo)
+-        set_camera(light_view_matrix, light_projection_matrix)
+-        set_blend_mode(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+-        draw_particles(particles, start_index, count, half_vector)
+-        
+-    # Final Composite
+-    set_camera(view_matrix, projection_matrix)
+-    bind_texture(opacity_fbo, unit=2)
+-    draw_floor(light_view_projection_matrix, opacity_fbo)
++        set_camera_matrices(view_matrix, proj_matrix)
++        bind_texture(opacity_tex, unit=1)
++        if flipped:
++            set_blend(GL_ONE_MINUS_DST_ALPHA, GL_ONE)
++        else:
++            set_blend(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
++        draw_particles(start_idx, count)
++        
++        # Light View Pass (Opacity Accumulation)
++        bind_framebuffer(opacity_fbo)
++        set_camera_matrices(light_view_matrix, light_proj_matrix)
++        set_blend(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
++        draw_particles(start_idx, count)
++        bind_framebuffer(default_fbo)
++
++    # 6. Final Composite
++    set_camera_matrices(view_matrix, proj_matrix)
++    bind_texture(opacity_tex, unit=2) # From light view
++    set_blend(GL_ONE_MINUS_DST_ALPHA, GL_ONE)
++    draw_floor_and_quad()
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision:** The sort relies on floating-point comparisons of dot products. For very large particle counts or extreme view/light angles, precision loss in the half-vector calculation or dot product may lead to incorrect sorting order, causing artifacts in shadows [S1, unofficial].
+-*   **Boundary Conditions:** The sort is a parallel network sort. The implementation must handle the boundaries of the texture correctly, ensuring that indices $i + uPass$ do not exceed the texture dimensions. The source implementation uses a ping-pong FBO structure which implicitly handles this by processing the entire texture grid in each pass [S1, unofficial].
+-*   **Degenerate Input:** If the view and light directions are parallel or anti-parallel, the half-vector is well-defined. If they are orthogonal, the half-vector is still well-defined. However, if the particle distribution is extremely sparse, the sorting overhead may outweigh the benefits.
+-*   **Blending Modes:** The source code uses non-standard blending modes (`GL_ONE_MINUS_DST_ALPHA, GL_ONE`) for the view pass. This must be implemented exactly as specified to match the reference behavior, as it likely interacts with the specific alpha accumulation strategy for shadows [S1, unofficial].
++*   **Precision:** The sorting relies on floating-point comparisons. Ensure the half-vector calculation is normalized to avoid bias [S1, unofficial].
++*   **Boundaries:** When sampling the opacity texture in the final composite, check for coordinates outside [0, 1] to avoid wrapping artifacts [S1, unofficial].
++*   **Degenerate Input:** If particles are exactly on the sorting plane, the sort stability depends on the implementation of the odd-even merge sort shader [S1, unofficial].
++
++## Subtopics
++
++### Multiple Scattering Phase Function Lighting Approximation
++This variant extends the half-angle slicing technique to handle the gradual angular spreading of light during multiple scattering events, which is essential for capturing fine angularly dependent effects with large forward-scattering particles [S2]. It models the angular dispersion of light experiencing its first few scattering events for efficient single-pass rendering on programmable graphics hardware [S2]. A key pitfall in this approximation is the presence of the light term $L_\lambda$ on both sides of the governing equation (Equation 7 in the source), requiring separation of intensity and distribution to solve iteratively or approximately [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The odd-even merge sort has a depth of $O(\log^2 N)$ and requires $O(N \log^2 N)$ comparisons. For $N=65,536$, this is 136 sort steps. Each step is a GPU shader pass. The slicing phase is $O(S \cdot N/S) = O(N)$, but rendered as $S$ passes. Total passes: $136 + 2 \cdot 128 = 392$ passes (excluding simulation). This is significantly higher than simple splatting but allows for correct shadowing.
+-*   **Memory Complexity:** $O(N)$ for particle data and sort buffers, plus $O(R^2)$ for the opacity texture. For $P=256, R=1024$, this is manageable on modern GPUs.
+-*   **Performance:** The method is designed for real-time performance on GPUs by leveraging parallel sorting and rasterization. The reference implementation targets WebGL, suggesting it can run on consumer hardware. The performance is heavily dependent on the number of particles and the efficiency of the GPU sort implementation.
+-*   **Strengths:** Correctly handles transparency and shadows for particle systems. Leverages GPU parallelism for sorting.
+-*   **Limitations:** High number of draw calls/shader passes. Limited to particle systems. Sorting overhead can be significant for very large $N$.
++*   **Time Complexity:** The sorting phase uses odd-even merge sort, which has a time complexity of $O(\log^2 N)$ steps for $N$ particles, where each step is a parallel comparison-exchange operation [S1, unofficial]. The rendering phase is $O(S \cdot N)$ where $S$ is the number of slices, but each slice is processed in parallel.
++*   **Memory Complexity:** Requires $O(N)$ storage for particle data and $O(R^2)$ for the opacity texture, where $R$ is the opacity texture resolution [S1, unofficial].
++*   **Performance:** The method is designed for GPU acceleration, leveraging parallel sorting and rasterization. The use of ping-pong FBOs and texture-based particle storage allows for efficient data access on the GPU [S1, unofficial].
++*   **Strengths:** Handles volumetric shadows efficiently; works well with particle systems; leverages hardware rasterization [S1, unofficial].
++*   **Limitations:** Sorting is view-dependent and must be recomputed if the camera or light moves significantly; the odd-even merge sort can be complex to implement efficiently on all GPU architectures; limited to particle-based volumes [S1, unofficial].
+ 
+ ## Background
+-The half-angle slicing technique with odd-even merge sort was implemented in a WebGL project by David Li, ported to a GitHub repository by zk8085454 [S1, unofficial]. The technique is based on concepts described in a NVIDIA article on smoke particle simulation, which likely introduced the half-angle sorting concept for efficient shadow casting in particle systems [S1, unofficial]. The implementation uses standard OpenGL/WebGL features and does not rely on external libraries like OpenVDB or Eigen.
++The half-angle slicing technique was originally described by Kniss et al. [KPHE02] for rendering volumetric effects [S2]. The specific implementation using GPU-based odd-even merge sort and ping-pong FBOs for particle shadows is based on a webGL implementation by David Li, which in turn was ported from a NVIDIA article on smoke particles [S1, unofficial]. The technique is used in real-time volume rendering, particularly for atmospheric phenomena and particle systems where shadows are required [S1, unofficial][S2].
+ 
+ ## Sources
+-[S1] GitHub - zk8085454/VolumeParticleShadows: Half angle slicing technique ..., https://github.com/zk8085454/VolumeParticleShadows/, fetched 2026-10-28 (unofficial)+[S1] GitHub - zk8085454/VolumeParticleShadows: Half angle slicing technique ..., https://github.com/zk8085454/VolumeParticleShadows/, fetched 2026-10-28 (unofficial)
++[S2] Efficient Rendering of Atmospheric Phenomena, https://doi.org/10.2312/egwr/egsr04/375-386, fetched 2026-10-26

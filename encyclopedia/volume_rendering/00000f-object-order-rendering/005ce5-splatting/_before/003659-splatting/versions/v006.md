@@ -1,0 +1,155 @@
+# Splatting
+
+Also called: Object-order volume rendering, Element-tossing, Feed-forward volume rendering
+
+## Overview
+Splatting is an object-order volume rendering technique where volumetric data is decomposed into primitives (typically Gaussians or disks) that are projected onto the image plane as overlapping footprints and accumulated via alpha blending [S2, S4, unofficial][S7]. It solves the problem of efficiently rendering dense volumetric data by leveraging hardware-accelerated rasterization and cache-coherent traversal, contrasting with image-order ray-casting which samples the volume per-pixel [S2, unofficial][S14]. Unlike [Shear-warp](24-shear-warp.md), which relies on affine warping of slices, splatting handles perspective distortion through per-primitive footprint calculation (e.g., EWA) or sheet-buffer compositing [S4, S11, unofficial].
+
+## Shared principles
+The splatting family shares the fundamental mechanism of treating volumetric data as a set of geometric or parametric primitives that are transformed and rasterized [S1, S3, S4, unofficial].
+
+1.  **Primitive Representation:** The volume is decomposed into primitives. These may be explicit geometric shapes (cubes, cells, splats) or implicit functions sampled via texture hardware [S1, S3, S4, unofficial]. Each primitive $k$ is defined by its position $\mathbf{p}_k$, density/extinction coefficient $g_k$ or $\rho_k$, and a reconstruction kernel $h$ (typically a Gaussian) [S1, unofficial][S6, unofficial][S10, abstract only, unofficial].
+2.  **Transformation:** Primitives are transformed from volume space to screen space using the Model-View-Projection (MVP) matrix or specific factorizations (e.g., shear-warp) [S2, S3, S4, unofficial]. For perspective projections, the kernel shape may be distorted (e.g., EWA splatting) to account for foreshortening [S6, unofficial][S10, abstract only, unofficial].
+3.  **Rasterization:** The transformed primitives are projected onto the 2D image plane. This step leverages hardware-accelerated scan-conversion, depth testing, and blending [S1, S2, S3, S4, unofficial]. The contribution of a voxel $D$ to a screen point $(x,y)$ is determined by the footprint function $F(x,y)$, which is the integral of the 3D kernel along the view direction [S2, unofficial][S6, unofficial][S10, abstract only, unofficial]:
+    $$ F(x,y) = \int h(x-x_D, y-y_D, z) \, dz $$
+    The intensity written to the pixel is modulated by the voxel density:
+    $$ P(x,y) = \text{weight}(x,y) \cdot \rho(D) $$
+    where $\text{weight}(x,y) = F(x-x_D, y-y_D)$ [S10, abstract only, unofficial].
+4.  **Compositing:** Contributions are accumulated to form the final image. This is typically done using alpha blending in back-to-front or front-to-back order to handle transparency correctly [S1, S2, S3, unofficial][S7]. Splatting compositing is performed along sheets (all pixels at once for a set of voxels), whereas ray-casting composites along rays (one sample at a time) [S10, abstract only, unofficial].
+5.  **Hardware Acceleration:** Most methods in this family rely on GPU rasterization pipelines for performance, enabling real-time interactivity [S1, S2, S3, unofficial].
+
+## Subtopics
+
+### [Splatting Without the Blur](1157-splatting-without-the-blur.md)
+Splatting Without the Blur is a volume rendering technique that performs classification and shading in screen space, after voxels have been projected onto the image plane, to avoid the edge blurring inherent in traditional pre-shaded splatting. Unlike [Pre-Classified Splatting](5410-pre-classified-splatting.md), which applies optical properties before projection and results in fuzzy edges due to kernel smoothing, this method preserves crisp object boundaries by deferring classification until after the density footprint is rasterized. It distinguishes itself from [Edge Preservation in Volume Rendering Using Splatting](6573-edge-preservation-in-volume-rendering-using-splatting.md) by manipulating the rendering pipeline stages rather than warping the reconstruction kernels themselves.
+
+### [Rendering Pipelines and Passes](1411-rendering-pipelines-and-passes.md)
+Rendering Pipelines and Passes define the structural organization of volume rendering tasks into distinct, sequential logical blocks or stages, separating geometric projection from visual appearance to allow independent optimization of shading, classification, and compositing. This family solves the problem of managing complex data transformations by decomposing the rendering task into reusable passes (e.g., attribute accumulation, depth occlusion, normalization) that can be combined in various configurations, distinguishing it from monolithic ray-marching or single-shader approaches. It sets itself apart from sibling methods like [Splatting Without the Blur](1157-splatting-without-the-blur.md) by focusing on the orchestration of rendering stages rather than the specific primitive rasterization or filtering techniques.
+
+### [Anti-Aliasing and Filtering](1574-anti-aliasing-and-filtering.md)
+This family addresses aliasing artifacts in object-order splatting by modifying splat footprints, opacity, or rendering pipelines to account for spatial and temporal undersampling. It solves the problem of high-frequency content causing flickering, moiré patterns, and loss of detail for small structures [G]. Unlike [Ray-Driven Splatting](1156-ray-driven-splatting.md), which integrates samples along rays to naturally filter the signal, or [Splatting Without the Blur](1157-splatting-without-the-blur.md), which attempts to render sharp primitives, this family explicitly handles sampling rates and motion [G].
+
+### [Slice-by-Slice (Sheet Buffer) Splatting](2110-slice-by-slice-sheet-buffer-splatting.md)
+Slice-by-Slice (Sheet Buffer) Splatting is a volume rendering optimization that improves image quality over standard "splat-every-sample" compositing by correctly handling visibility through depth-ordered accumulation. It sets itself apart from its parent method, [Splatting](23-splatting.md), by organizing splats into 2D cache-sheets aligned with the volume axis most parallel to the image plane, compositing these sheets slice-by-slice in depth order, and then blending the result into the final image. Unlike [EWA Splatting](1069-ewa-splatting.md), which handles perspective distortion per-splat, this method primarily addresses the "sparkling" artifacts of list-based accumulation by ensuring correct occlusion, though it introduces its own "popping" artifacts if the view angle crosses specific thresholds.
+
+### [Ultrafast Spatial Texture-Atlas Splatting](3245-ultrafast-spatial-texture-atlas-splatting.md)
+Ultrafast Spatial Texture-Atlas Splatting is a learned sparse scene representation that eliminates runtime neural network inference by baking view-independent high-frequency texture into a hardware-accelerated 2D texture atlas. It represents the scene as a sparse set of oriented 2D Beta kernels, separating low-frequency view-dependent appearance (stored per-surfel) from high-frequency spatial texture (stored in the atlas). This approach achieves 7–9× faster rendering than 3D Gaussian Splatting (3DGS) on common benchmarks by reducing overdraw via flat Beta kernels and replacing expensive ray-surfel intersection shaders with an exact rational reformulation.
+
+### [Lighting and Material Interaction](3851-lighting-and-material-interaction.md)
+This family defines how photometric properties and illumination are computed for splatted primitives, addressing the gap between raw geometric density and visually plausible appearance. It differs from sibling methods like [EWA Splatting](1069-ewa-splatting.md) or [Ray-Driven Splatting](1156-ray-driven-splatting.md) by explicitly decoupling the shading model from the rasterization footprint, allowing for dynamic lighting, baked global illumination, or direct user editing of material properties per primitive.
+
+### [Anti-Aliasing for Splatting](4471-anti-aliasing-for-splatting.md)
+Anti-Aliasing for Splatting is a method designed to prevent sample-rate aliasing artifacts (pre-aliasing) that arise during the resampling phase of volume rendering when the integration grid sampling frequency is insufficient. Unlike standard splatting, which uses a fixed reconstruction kernel size in eye space, this method scales the splat size proportional to the viewing frustum and attenuates the splat energy for distant primitives to maintain constant energy per unit area on the view plane. It specifically addresses the divergence of rays in perspective projections where the distance between adjacent rays exceeds the volume raster sampling rate.
+
+### [Seed Generation for Initial Splats](4634-seed-generation-for-initial-splats.md)
+This method generates the initial positions for Gaussian splats directly from volumetric data, balancing edge fidelity with smooth region coverage. It solves the problem of sparse or redundant splat placement by combining gradient-based sampling for high-frequency details with uniform grid sampling for low-frequency areas. Unlike methods that rely on fixed voxel grids or purely random initialization, this approach adapts seed density to local data complexity.
+
+### [Multi-View Splatting Pipeline with Fill-Rate Filtering](4689-multi-view-splatting-pipeline-with-fill-rate-filtering.md)
+This method generates multi-view 2D images from a 3D point cloud by splatting points onto image planes and filtering out sparse views based on fill rate to ensure structured, high-quality outputs. It differs from standard splatting by integrating a post-rendering quality control step that discards views with insufficient pixel coverage, making it suitable for dataset generation where consistent view density is required.
+
+### [EWA Splatting with kNN Covariance Estimation](4690-ewa-splatting-with-knn-covariance-estimation.md)
+EWA Splatting with kNN Covariance Estimation is a rendering method that treats volumetric data as a set of point primitives, using per-point 3D covariance matrices estimated from k-nearest neighbours to project elliptical weighted average (EWA) shapes onto the 2D image plane. It solves the problem of sparse coverage and aliasing in raw point cloud rendering by providing denser, smoother coverage than simple disk splatting, without requiring explicit mesh reconstruction. It differs from standard [EWA Splatting](1069-ewa-splatting.md) by deriving the kernel shape from local point cloud geometry (kNN) rather than assuming a fixed or isotropic kernel, and from [Splat Radius Adjustment Based on Normal Angle](1264-splat-radius-adjustment-based-on-normal-angle.md) by using covariance-based elliptical footprints instead of angle-dependent radius scaling.
+
+### [Hierarchical and Multi-Resolution Splatting](5618-hierarchical-and-multi-resolution-splatting.md)
+Hierarchical and Multi-Resolution Splatting addresses the performance bottleneck of rendering large volumetric datasets or dense point clouds by adapting the rendering resolution to the viewer's distance and desired quality. It sets itself apart from standard splatting by using a multi-resolution structure (pyramid, octree, or list) to select appropriate detail levels, and from [Splatting Without the Blur](1157-splatting-without-the-blur.md) by explicitly managing spatial hierarchy rather than just kernel shape.
+
+### [Splat Texture Layout & Mapping](7089-splat-texture-layout-mapping.md)
+Splat Texture Layout & Mapping organizes per-primitive splat data into 3D texture structures to enable efficient GPU-based rendering of Gaussian splats. It solves the problem of mapping arbitrary numbers of splats into a fixed-size hardware texture format by calculating specific texture coordinates and managing memory alignment. It sets itself apart from proxy geometry methods by keeping data in texture memory for hardware filtering, and from sparse volume textures by using a dense, pre-allocated 3D texture layout for the splat attributes themselves.
+
+### [Vertex-Based Leaf Node Derivation](7234-vertex-based-leaf-node-derivation.md)
+Deriving leaf nodes directly from mesh vertices, where center and field values are the vertex coordinates and attributes. This lacks topology for radius definition.
+
+### [Gsplat Transformation](7308-gsplat-transformation.md)
+The Gsplat Transformation method applies affine and photometric modifications to a packed `Gsplat` data structure, which represents a 3D Gaussian primitive in Gaussian Splatting [Parent](946-gaussian-splatting.md). It solves the problem of efficiently updating Gaussian attributes (position, scale, orientation, color) during optimization or editing without full serialization overhead. It differs from raw memory copying by providing semantic field access and partial update capabilities, building on [Gsplat Transformation](7308-gsplat-transformation.md).
+
+### [Optimization and Culling](8124-optimization-and-culling.md)
+
+### [Hybrid and Parallel Rendering](8125-hybrid-and-parallel-rendering.md)
+Hybrid and Parallel Rendering encompasses techniques that combine the precomputation efficiency of splatting with the accumulation logic of ray casting, or leverage parallel processing and hardware acceleration to render volumetric data efficiently. It solves the problem of inefficient and inaccurate perspective projection in traditional voxel-driven splatting, where mapping 3D footprints to the 2D image plane is complex and slow, by using ray-driven intersection or parallel slice-based processing. Unlike pure splatting methods that rely solely on rasterization pipelines, this family includes ray-driven approaches that use spatial acceleration structures and early ray termination, as well as parallel frameworks that process voxels in slices perpendicular to the viewing direction to optimize memory bandwidth and traversal order.
+
+### [Splat Sorting and Composition](8126-splat-sorting-and-composition.md)
+Splat Sorting and Composition is the process of ordering volumetric primitives (splats) by depth relative to the camera and accumulating their contributions to form a final image. It solves the problem of correct transparency rendering, where the visual result depends on the order in which overlapping transparent surfaces are blended. It is distinct from ray-casting methods by operating on a discrete set of projected primitives rather than continuous volume samples, and from order-independent transparency (OIT) techniques by relying on explicit depth sorting to ensure physical correctness, albeit at the cost of sorting overhead.
+
+### [Noise Splats](8547-noise-splats.md)
+A technique for representing multivariate data sets defined on an integer lattice by extending volume rendering to include nonhomogeneous volume representations. It achieves this by introducing controlled amounts of noise within the volume representation, where varying the local amount of noise represents a separate scalar variable.
+
+### [Splat Kernels and Footprints](8724-splat-kernels-and-footprints.md)
+Splat Kernels and Footprints define the geometric shape, spatial extent, and attenuation profile of the primitives used in splatting-based volume rendering. They solve the problem of how to map discrete volumetric samples (voxels or particles) to continuous screen-space pixels while managing aliasing, transparency, and visual continuity. This family is distinguished from sibling methods like [Splatting Without the Blur](1157-splatting-without-the-blur.md) by its focus on the mathematical function $F(x,y)$ that determines the weight of a splat at a given screen coordinate, rather than the sorting or compositing pipeline itself. It sets itself apart from [Anti-Aliasing and Filtering](1574-anti-aliasing-and-filtering.md) by providing the specific kernel shapes (e.g., Gaussian, Beta, Dirichlet) that are subsequently filtered or projected.
+
+### [Learning and Training Methods](9068-learning-and-training-methods.md)
+This family encompasses optimization strategies and training pipelines for Gaussian Splatting that deviate from standard supervised reconstruction with known camera poses. It includes methods for reconstructing animatable dynamic avatars using parametric priors and feed-forward or pose-free approaches that eliminate the dependency on Structure-from-Motion (SfM) outputs. It is distinguished from standard [Gaussian Splatting](946-gaussian-splatting.md) by its explicit handling of deformation priors or joint pose optimization, and from [Base 3DGS Optimization](7549-base-3dgs-optimization.md) which assumes fixed, calibrated camera parameters.
+
+### [Particle and Fluid Simulation](9118-particle-and-fluid-simulation.md)
+#### Extinction-based splatting
+A rendering solution introduced in [S15] that uses extinction (referred to as 'density' in NeRF literature) instead of the learned opacity value used in 3DGS, to analyze the difference between opacity-based and accurate volumetric rendering. For small numbers of primitives, extinction-based splatting performs better than opacity-based splatting. However, with more primitives, opacity splatting performs best [S15].
+
+#### Scatter Samples to Image
+A post-processing step that scatters computed sample values from arbitrary screen-space positions into a regular image grid [S16, unofficial]. Samples located outside the image boundaries are ignored. Pixels in the output image that receive no samples are left untouched (no default value overwriting) [S16, unofficial]. Input `sample_positions` is a tensor of shape 2*N, where N is the number of samples. Input `samples` is a tensor of shape Channels*N. Output `image_out` is a tensor of shape Channels*H*W. Output `sample_mask_out` is a tensor of shape 1xHxW, containing '1' where samples were taken and '0' elsewhere. A `default_values` vector provides default values for the 8 channels in the PyTorch interface `ScatterSamplesToImage` [S16, unofficial].
+
+#### 3D Point Splatting with Dirichlet Kernel
+A method that splats a collection of weighted 3D points onto a volumetric grid using a Dirichlet kernel (described in the text as Lanczos/sinc filtering) [S17, unofficial]. It initializes the computation context with the output grid dimensions (nx, ny, nz) and the integer radius (ir = ceil(radius)). For each point (x, y, z) with weight w, it computes the integer floor coordinates ix, iy, iz and the bounding box [x0, x1), [y0, y1), [z0, z1) for the splat by clamping [ix-ir, ix+ir] to the grid boundaries [0, nx], [0, ny], [0, nz]. It iterates over the bounding box indices i, j, k and adds the computed weight wz to the grid cell at (i, j, k) [S17, unofficial]. Parameters include `out` (a 3D ndarray representing the target volumetric grid), `points` (a [n, 3] shape ndarray encoding the x/y/z grid coordinates of the points to splat), `weights` (a [n] shape ndarray containing the weight for each point), and `radius` (the radius of the point splat to draw, used to determine the bounding box of the kernel support) [S17, unofficial]. The text notes that if a different kernel is desired after splatting, a convolution via FFT can be applied [S17, unofficial].
+
+#### Beta-Splatting Rendering
+Loads the Beta-Splatting model from `point_cloud/iteration_{iteration}/point_cloud.ply` or `point_cloud/iteration_{iteration}/png/` directory. It iterates over held-out test cameras obtained via `scene.getTestCameras()`. It renders the scene for each camera using `beta_model.render(camera)`. It clamps the rendered image and ground truth to `[0.0, 1.0]`. It saves the render and ground truth images as PNGs in `renders/` and `gt/` directories [S18, unofficial].
+
+#### Particle Splatting for Density Field Construction
+A 3D density field representing a wax surface is constructed on the CPU every frame by splatting interpolated particles into a 3D grid aligned with the container [S19, unofficial]. Temporal smoothing is applied in-place using the update rule: $keep = \text{exp}(-dt/\tau)$, where $\tau = 0.04$ seconds [S19, unofficial]. Grid dimensions are 48×94×48 voxels, aligned with the container. The kernel is a separable kernel defined as $(1 - u^2)^3$. Two channels are stored per voxel: (1) density, (2) temperature × density. Density is normalized to approximately 1 at the core of the wax [S19, unofficial]. GPU Texture Format is Data3DTexture with RG channel layout. Internal format is RG32F (float32), or RG16F if the GPU does not support filtering of 32-bit floats [S19, unofficial]. CPU splatting takes 1.1 to 1.25 ms median, and 1.3 to 1.9 ms p95, measured on a Xeon 2.1 GHz processor [S19, unofficial].
+
+#### Embedded Vector Icons in Splat Footprint
+A refinement where vector icons are embedded directly into the splat footprint as billboard images overlapped and composited [S20, unofficial]. It overlaps and composites small billboard images to build up the final image. It places a small icon within the billboard image. It orients the billboard image perpendicular to the viewing ray and parallel to the projected vector direction at the splat’s center point. It uses a discrete set of billboard images with vector icons reduced in size [S20, unofficial].
+
+#### Indexed Splats
+An abstract class extending Splats that provides fixed packed storage with a visible-index contract for rendering and CPU reads, separating source opacity from display fade [S21, unofficial]. `IndexedSplatsOptions` includes capacity (number), layerSize (number), numSh (number), blockBits (number), packedOpacityGroups (boolean, optional). `IndexedSplats` fields include layerSize (readonly), numSh (readonly 0-4), opacities (SplatOpacityTable), sourceIndices (Uint32Array), visibleIndices (Uint32Array), sourceArrays, sourceCenters, sourceTextures, indexTexture, blockBits (readonly), disposed, uploadQueue (PendingUploads), spatialChunks, spatialBoundsBytes [S21, unofficial]. `IndexedSplats` differs from `Splats` by maintaining separate `sourceIndices` and `visibleIndices` arrays, allowing opacity fading for display without altering source data used in picking [S21, unofficial].
+
+#### Coherent Projection (Scanline Algorithm)
+A scanline algorithm that is much faster than splatting for parallel projection by scan converting depth information behind each projected polygon [S22, unofficial]. It scan converts the depth information behind each projected polygon line-by-line. It integrates interpolated data and color samples at each scan converting step to account for raycasting-like accuracy [S22, unofficial].
+
+#### SeqAffordSplat
+Performs sequential affordance reasoning on the 3DGS representation, where rendered feature fields encode interaction probabilities over time [S23, unofficial].
+
+#### Image-order Splatting
+Uses an image-order approach to improve accuracy when using a perspective projection [S24, unofficial].
+
+#### AMR Splatting with FFT
+A volume rendering technique for AMR data where cells are converted into points with size information, projected to 2D, and convolved with a Gaussian kernel using FFT to produce a summation plot [S25, unofficial]. It converts AMR cells into points with additional size information depending on the AMR cell size. It computes a different map for every AMR level involved in the camera-defined image. For every level, it projects corresponding AMR cell center points onto the projection plane. It transforms the 1D projected points into 2D disks by doing a convolution product with a 2D Gaussian kernel. It performs the convolution using the Fast Fourier Transform (FFT), as multiplication in Fourier space corresponds to a convolution product. It adds all maps obtained for every level to produce the final image [S25, unofficial]. Implementation platform is CPU using Numpy's FFT module [S25, unofficial]. Grid alignment may appear on resulting images. Solutions include increasing splatted disk/point sizes or adding a random shift to point position, though these lead to lower image quality [S25, unofficial]. It produces images close to ray-traced Maximum Intensity Projection (MIP) maps [S25, unofficial].
+
+#### Silhouette Splatting
+Triangulates the polygon. It estimates the depth of each sample point [S26]. Images produced are very blotchy from oblique angles on irregular grids [S26].
+
+#### Differentiable Forward Warping with Average Splatting
+A warping strategy that estimates deformation from canonical time to another time step, ensuring smooth flows. It uses average splatting to handle the many-to-one issue where multiple source positions map to one target position [S27]. The formula is $\Vgrid {}{T}[\mathbf {p}] = \frac {\sum _{\forall \mathbf {q}\in \Vgrid {}{S}}b[\mathbf {u}]\cdot \Vgrid {}{S}[\mathbf {q}]}{\sum _{\forall \mathbf {q}\in \Vgrid {}{S}}^{}b[\mathbf {u}]}$, where $b[\mathbf {u}] = \prod \text {max}(0, 1\!-\!\left |\mathbf {u}_i \right |), {i} \in \{x,y,z\}$, and $\mathbf {u} = (\mathbf {q}+f_{\text {S}\rightarrow \text {T}}[\mathbf {q}]) - \mathbf {p}$. $x, y, z$ are three axes of the voxel grid, and $u_i \in \mathbb {R}$ is one element of the vector $\mathbf {u} \in \mathbb {R}^3$ [S27]. The many-to-one issue: Multiple positions in the source correspond to the same position in the target (e.g., when a circle shrinks). This is handled by average splatting which fuses multiple values into one using a trilinear kernel [S27].
+
+#### gsplat
+A unified high-performance API that continuously integrates low-level scheduling optimizations for constrained environments [S23, unofficial].
+
+## Background
+Splatting was first proposed by Westover [S4, unofficial]. It is an object-order approach, contrasting with ray-casting which is image-order [S4, unofficial][S14]. The term is derived from the analogy of throwing snowballs (volume elements) at a wall (image plane), where each snowball leaves a fuzzy circular mark (footprint) [S6, unofficial]. Splatting is considered one of the four main paradigms of volume rendering [S9, unofficial]. It is particularly effective for generating X-ray projection images from volumes, as the summation of pre-integrated reconstruction kernels is faster and more accurate than ray-casting for this specific output [S2, unofficial]. The method is also used in 3D Gaussian Splatting (3DGS), where millions of 3D Gaussians are optimized by tweaking parameters until the rendered image matches a real image [S5, S13, unofficial].
+
+## Sources
+[S1] PPT - Volume Rendering, Part 2 PowerPoint Presentation, free download - ID:2205448, https://slideserve.com/walter/volume-rendering-part-2-powerpoint-ppt-presentation, fetched 2026-10-24 (unofficial)
+[S2] DTIC ADA363073: Perspective Splatting, https://archive.org/details/DTIC_ADA363073, fetched 2026-10-26 (unofficial)
+[S3] Shear-warp factorization volume rendering visualization system, https://archive.org/details/0162018299360, fetched 2026-10-26 (unofficial)
+[S4] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
+[S5] Splatting Explained | The Idea Behind Gaussian Splatting, https://www.youtube.com/watch?v=MvGLpOjEZ8I, fetched 2026-10-27 (unofficial)
+[S6] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
+[S7] 14 Rendering Volume and Subsurface Scattering - Foundations of Visual ..., https://learnvisualcomputing.github.io/rendering-rte.html, fetched 2026-10-27
+[S8] PDF Direct Volume Rendering, https://www.sci.utah.edu/~stevec/classes/cs5630/dvr.pdf, fetched 2026-10-27 (book)
+[S9] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
+[S10] Fast volume rendering using a shear-warp factorisation ... - ResearchGate, https://www.researchgate.net/publication/243763776_Fast_volume_rendering_using_a_shear-warp_factorisation_of_the_viewing_transform, fetched 2026-10-27 (abstract only, unofficial)
+[S11] PDF Fundamental Idea of Splatting - Stony Brook University, https://www3.cs.stonybrook.edu/~qin/courses/visualization/visualization-splatting.pdf, fetched 2026-10-28 (unofficial)
+[S12] PDF Real-Time Light Transport in Analytically Integrable Participating Media, https://cgg.mff.cuni.cz/~tomas/publications/pub-thesis-real-time-scattering/thesis.pdf, fetched 2026-10-29 (unofficial)
+[S13] 3D Gaussian Splatting 入门原创, https://blog.csdn.net/qq_35831906/article/details/143322205, fetched 2026-10-30 (unofficial)
+[S14] Volume visualization, https://dl.acm.org/doi/pdf/10.1145/234313.234383, fetched 2026-11-01
+[S15] Does 3D Gaussian Splatting Need Accurate Volumetric Rendering?, https://doi.org/10.1111/cgf.70032, fetched 2026-10-26
+[S16] Learning adaptive sampling and reconstruction for Volume Visualization, https://github.com/shamanDevel/AdaptiveSampling, fetched 2026-10-27 (unofficial)
+[S17] mikolalysenko/splat-points-3d, https://github.com/mikolalysenko/splat-points-3d, fetched 2026-10-26 (unofficial)
+[S18] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)
+[S19] Étape 4 : surface de cire raymarchée et liquide volumique, https://github.com/nathanddrl/lava-lamp/pull/4, fetched 2026-10-27 (unofficial)
+[S20] Flow Visualization Techniques for CDF using Volume Rendering, https://www.osti.gov/servlets/purl/790542, fetched 2026-10-26 (unofficial)
+[S21] WilliamLiu-1997/Gaussian-Splat-Lite, https://github.com/WilliamLiu-1997/Gaussian-Splat-Lite, fetched 2026-10-27 (unofficial)
+[S22] Indirect volume rendering, https://slidetodoc.com/direct-volume-rendering-what-is-volume-rendering-accumulate/, fetched 2026-10-29 (unofficial)
+[S23] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S24] DTIC ADA606342: An Anti-Aliasing Technique for Splatting, https://archive.org/details/DTIC_ADA606342, fetched 2026-10-26 (unofficial)
+[S25] Volume Rendering of AMR Simulations, https://doi.org/10.48550/arxiv.1210.8014, fetched 2026-10-26 (unofficial)
+[S26] Rapid Exploration of Curvilinear Grids Using Direct Volume Rendering, https://ntrs.nasa.gov/api/citations/19930015755/downloads/19930015755.pdf, fetched 2026-10-24
+[S27] Forward Flow for Novel View Synthesis of Dynamic Scenes, https://doi.org/10.1109/iccv51070.2023.01468, fetched 2026-10-26

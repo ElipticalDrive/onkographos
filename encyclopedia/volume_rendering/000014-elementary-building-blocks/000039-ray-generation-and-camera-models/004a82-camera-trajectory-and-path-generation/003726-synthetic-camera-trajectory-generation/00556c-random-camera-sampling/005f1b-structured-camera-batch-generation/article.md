@@ -1,0 +1,164 @@
+# Structured Camera Batch Generation
+
+Also called: Camera Sample Generation
+
+## Overview
+Generates a deterministic list of camera samples (positions) for a 3D dataset, distributing them between close-up views and general views based on a specified ratio, and sampling directions uniformly or within a hemisphere [S1, unofficial]. It differs from its parent [Random Camera Sampling](15470-random-camera-sampling.md) by enforcing a structured ratio of close-up to general views rather than purely random selection, and from siblings like [Elliptic Cylinder Sampled Views](17402-elliptic-cylinder-sampled-views.md) by using spherical radius constraints rather than elliptic cylinder geometry [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `total_frames`: Integer, total number of camera samples to generate.
+- `close_up_ratio`: Float, fraction of `total_frames` designated as close-up views.
+- `min_radius`: Float, minimum distance from the center for any camera.
+- `max_radius`: Float, maximum distance from the center for general views.
+- `view_distribution`: String or enum, specifying "uniform" (full sphere) or "hemisphere" (upper/lower half).
+- `rng`: Random number generator instance. If `None`, a new default RNG is initialized [S1, unofficial].
+
+**Outputs:**
+- A list of `CameraSample` objects, each containing:
+  - `position`: 3D vector $(x, y, z)$ representing the camera location.
+  - `is_close_up`: Boolean flag indicating if the sample is a close-up view.
+
+**Data Structures:**
+- `CameraSample`: A simple struct or class with fields `position` (vec3) and `is_close_up` (bool).
+- `samples`: A list of `CameraSample` objects.
+
+**Parameters:**
+- `CLOSE_UP_BAND_FRACTION`: Constant fraction of the radius span used to determine the maximum radius for close-up views. Default value is 0.15 [S1, unofficial].
+
+**Steps:**
+1. Initialize `rng` if it is `None` [S1, unofficial].
+2. Calculate `close_up_count` as `int(round(total_frames * close_up_ratio))` [S1, unofficial].
+3. Calculate `close_up_max_radius` as `min_radius + (max_radius - min_radius) * CLOSE_UP_BAND_FRACTION` [S1, unofficial].
+4. Initialize an empty list `samples` [S1, unofficial].
+5. Loop `index` from 0 to `total_frames - 1`:
+   a. Determine if the current frame is a close-up view: `is_close_up = (index < close_up_count)` [S1, unofficial].
+   b. Determine the radius bounds:
+      - If `is_close_up` is true, set `radius_min = min_radius` and `radius_max = close_up_max_radius`.
+      - If `is_close_up` is false, set `radius_min = close_up_max_radius` and `radius_max = max_radius`.
+      *(Note: The source implies a split in the radius span based on the band fraction, though exact boundary handling at `close_up_max_radius` is implementation-dependent [S1, unofficial].)*
+   c. Sample `radius` using `_sample_radius(radius_min, radius_max, rng)` [S1, unofficial].
+   d. Sample `direction` using `_sample_direction(radius, view_distribution, rng)` [S1, unofficial].
+   e. Compute `position` as `direction * radius` (assuming origin at 0,0,0) [S1, unofficial].
+   f. Create a `CameraSample` with `position` and `is_close_up` [S1, unofficial].
+   g. Append the sample to `samples` [S1, unofficial].
+6. Shuffle the `samples` list in place using `rng` [S1, unofficial].
+7. Return `samples` [S1, unofficial].
+
+**Helper Functions:**
+- `_sample_radius(min_r, max_r, rng)`: Samples a scalar radius uniformly between `min_r` and `max_r` [S1, unofficial].
+- `_sample_direction(radius, distribution, rng)`:
+  - If `distribution` is "uniform": Samples a point uniformly on the surface of a sphere of `radius` [S1, unofficial].
+  - If `distribution` is "hemisphere": Samples a point uniformly on the surface of a hemisphere of `radius` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If `total_frames` is 0, return an empty list.
+- If `close_up_ratio` is 0, `close_up_count` is 0, and all samples are general views.
+- If `close_up_ratio` is 1, `close_up_count` equals `total_frames`, and all samples are close-up views.
+- Precision issues may arise if `min_radius` equals `max_radius`; in this case, the radius is constant.
+- The shuffle step ensures that the structured ratio is not preserved in the output order, which is critical for training stability in stochastic optimization [S1, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import random
+import math
+
+def structured_camera_batch_generation(
+    total_frames: int,
+    close_up_ratio: float,
+    min_radius: float,
+    max_radius: float,
+    view_distribution: str,
+    rng: random.Random = None
+) -> list:
+    """
+    Generates a batch of structured camera samples.
+    
+    Args:
+        total_frames: Total number of samples.
+        close_up_ratio: Fraction of samples that are close-up.
+        min_radius: Minimum camera distance from center.
+        max_radius: Maximum camera distance from center.
+        view_distribution: 'uniform' or 'hemisphere'.
+        rng: Random number generator. If None, uses global random.
+        
+    Returns:
+        List of dicts with 'position' (vec3) and 'is_close_up' (bool).
+    """
+    if rng is None:
+        rng = random.Random()
+        
+    close_up_count = int(round(total_frames * close_up_ratio))
+    close_up_band_fraction = 0.15  # Default constant [S1, unofficial]
+    radius_span = max_radius - min_radius
+    close_up_max_radius = min_radius + radius_span * close_up_band_fraction
+    
+    samples = []
+    
+    for index in range(total_frames):
+        is_close_up = index < close_up_count
+        
+        if is_close_up:
+            r_min = min_radius
+            r_max = close_up_max_radius
+        else:
+            r_min = close_up_max_radius
+            r_max = max_radius
+            
+        # Sample radius uniformly
+        radius = rng.uniform(r_min, r_max)
+        
+        # Sample direction
+        if view_distribution == "uniform":
+            direction = _sample_sphere_direction(rng)
+        elif view_distribution == "hemisphere":
+            direction = _sample_hemisphere_direction(rng)
+        else:
+            raise ValueError(f"Unknown view_distribution: {view_distribution}")
+            
+        position = [direction[i] * radius for i in range(3)]
+        samples.append({"position": position, "is_close_up": is_close_up})
+        
+    rng.shuffle(samples)
+    return samples
+
+def _sample_sphere_direction(rng: random.Random) -> list:
+    """Sample a point uniformly on the unit sphere."""
+    # Using normal distribution method for uniform sphere sampling
+    x = rng.gauss(0, 1)
+    y = rng.gauss(0, 1)
+    z = rng.gauss(0, 1)
+    norm = math.sqrt(x*x + y*y + z*z)
+    return [x/norm, y/norm, z/norm]
+
+def _sample_hemisphere_direction(rng: random.Random) -> list:
+    """Sample a point uniformly on the upper hemisphere (z > 0)."""
+    while True:
+        x = rng.uniform(-1, 1)
+        y = rng.uniform(-1, 1)
+        z = rng.uniform(0, 1)
+        norm = math.sqrt(x*x + y*y + z*z)
+        if norm > 0:
+            return [x/norm, y/norm, z/norm]
+```
+
+## Subtopics
+
+### Error-aware View Sampling
+A variant that refines camera positions based on rendering error [S2]. Initial sampling uses farthest point sampling on a hulling sphere with random perturbations, looking at the object center [S2]. Refinement involves downsampling reference and rendered images, finding the pixel with the largest error, identifying $K$ points projecting closest to this pixel, and setting the new focal center to the mean 3D position of these points [S2]. New cameras are sampled on a small sphere around this focal point [S2]. This is chosen for complex topologies where uniform sampling fails to converge quickly [S2].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is `total_frames`, for generation and shuffling [S1, unofficial].
+- **Memory Complexity:** $O(N)$ to store the list of samples [S1, unofficial].
+- **Strengths:** Ensures balanced coverage of close-up and general views, which is critical for high-fidelity reconstruction [S1, unofficial]. The shuffle prevents order bias [S1, unofficial].
+- **Limitations:** Does not adapt to scene content during generation (unlike Error-aware View Sampling) [S2]. The fixed ratio may not suit all scenes [S1, unofficial].
+- **When to use:** When a balanced dataset of close-up and general views is required for training or evaluation [S1, unofficial].
+- **When not to use:** When the scene has complex topology requiring adaptive refinement [S2].
+
+## Background
+Originated in the context of 3D Gaussian Splatting dataset generation, specifically in the `3dgs-dataset-builder` tool [S1, unofficial]. It addresses the need for structured camera trajectories that provide both detailed close-ups and broader context views [S1, unofficial]. The method is distinct from error-aware approaches proposed in differentiable surface splatting literature, which focus on iterative refinement based on image loss [S2].
+
+## Sources
+[S1] yumehiko/3dgs-dataset-builder, https://github.com/yumehiko/3dgs-dataset-builder, fetched 2026-10-27 (unofficial)
+[S2] Differentiable surface splatting for point-based geometry processing, https://doi.org/10.1145/3355089.3356513, fetched 2026-10-26

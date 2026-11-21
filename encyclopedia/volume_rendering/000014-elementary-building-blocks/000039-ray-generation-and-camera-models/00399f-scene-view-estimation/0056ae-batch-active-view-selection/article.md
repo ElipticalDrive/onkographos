@@ -1,0 +1,114 @@
+# Batch Active View Selection
+
+Also called: Greedy Batch Selection
+
+## Overview
+Batch Active View Selection selects a batch of $B$ camera views to capture new images for volume reconstruction, specifically avoiding the selection of highly similar views by using a greedy optimization algorithm based on Fisher Information [S1]. It differs from single-view selection methods by planning a trajectory for an agent to acquire multiple training views simultaneously, addressing the combinatorial explosion of directly maximizing expected information gain across a batch [S1]. Unlike sibling methods like [Depth Network](13169-depth-network.md) or [Viewpoint Estimation via Sphere Classification](15364-viewpoint-estimation-via-sphere-classification.md) which may rely on learned heuristics or geometric classification, this method relies on the statistical properties of the current model's uncertainty [S1].
+
+## How it works
+The method uses a greedy approximation to maximize the trace of the product of the new view's Hessian and the inverse of the accumulated Fisher Information matrix, providing a $1/e$-approximation of the optimal solution [S1].
+
+**Inputs:**
+*   $D_{pool}$: The pool of candidate acquisition views.
+*   $H''[w^* | D_{train}]$: The Fisher Information matrix (Hessian) computed from the initial training dataset $D_{train}$ at the current optimal weights $w^*$ [S1].
+*   $B$: The number of views to select in the batch [S1].
+
+**Outputs:**
+*   $S_B$: The set of $B$ selected views [S1].
+
+**Data Structures:**
+*   $S_b$: A set containing the indices of views selected in steps $0$ to $b$.
+*   $H_b$: The accumulated Fisher Information matrix after step $b$.
+
+**Algorithm Steps:**
+1.  Initialize the selected set $S_0$ to the empty set $\emptyset$ [S1].
+2.  Initialize the accumulated Fisher Information matrix $H_0$ to the Hessian of the training data: $H_0 \leftarrow H''[w^* | D_{train}]$ [S1].
+3.  For each batch step $b$ from $1$ to $B$:
+    a.  Identify the candidate view $i$ from the remaining pool $D_{pool} \setminus S_{b-1}$ that maximizes the trace of the product of its Hessian and the inverse of the current accumulated matrix:
+        $$ i \leftarrow \arg \max_{x_{acq} \in D_{pool} \setminus S_{b-1}} \text{tr} \left( H''[y_{i_{acq}} | x_{acq_i}, w^*] H_{b-1}^{-1} \right) $$
+        where $H''[y_{i_{acq}} | x_{acq_i}, w^*]$ is the Hessian (Fisher Information contribution) of the candidate view $i$ [S1].
+    b.  Add the selected view $i$ to the set: $S_b \leftarrow S_{b-1} \cup \{i\}$ [S1].
+    c.  Update the accumulated Fisher Information matrix by adding the selected view's Hessian:
+        $$ H_b \leftarrow H_{b-1} + H''[y_{i_{acq}} | x_{acq_i}, w^*] $$
+        [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def batch_active_view_selection(D_pool, H_train, B):
+    """
+    Selects B views from D_pool using greedy Fisher Information maximization.
+    
+    Args:
+        D_pool: List of candidate view indices.
+        H_train: Initial Fisher Information matrix (Hessian) from training data.
+        B: Number of views to select.
+        
+    Returns:
+        S_B: List of selected view indices.
+    """
+    S = []  # Selected views
+    H = H_train.copy()  # Accumulated Fisher Information matrix
+    
+    for b in range(1, B + 1):
+        best_view = None
+        max_trace = -float('inf')
+        
+        # Iterate over remaining candidates
+        for view_idx in D_pool:
+            if view_idx in S:
+                continue
+                
+            # Compute Hessian for this candidate view at current weights w*
+            # Note: w* is assumed to be fixed or updated externally; 
+            # here we assume H'' is pre-computed or accessible via view_idx.
+            H_view = get_hessian_for_view(view_idx)
+            
+            # Compute trace(H_view * H^{-1})
+            # Inverse of H must be computed. For efficiency, 
+            # one might maintain H^{-1} directly, but the formula uses H^{-1}.
+            H_inv = inverse(H)
+            trace_val = trace(matrix_multiply(H_view, H_inv))
+            
+            if trace_val > max_trace:
+                max_trace = trace_val
+                best_view = view_idx
+        
+        # Add best view to selection
+        S.append(best_view)
+        
+        # Update accumulated Fisher Information
+        H_view_best = get_hessian_for_view(best_view)
+        H = matrix_add(H, H_view_best)
+        
+    return S
+```
+
+**Parameters:**
+*   $B$: Batch size. When $B=1$, the algorithm is equivalent to single-view active selection [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Matrix Inversion:** Computing $H_{b-1}^{-1}$ at every step can be computationally expensive. [G] In practice, maintaining the inverse explicitly or using Cholesky decomposition updates is recommended for stability and speed.
+*   **Degenerate Input:** If the pool $D_{pool}$ becomes empty before $B$ views are selected, the algorithm terminates early.
+*   **Precision:** The trace operation sums eigenvalues; numerical instability may occur if $H_{b-1}$ is ill-conditioned.
+
+## Subtopics
+
+### Greedy Representative View Selection
+A greedy scheme to select a set of views that show information not captured in the best view, avoiding similar information under different directions [S2]. It selects the best view $B_0$ first, then measures distances from $B_0$ to remaining views, selecting $B_1$ as the one at the highest distance [S2]. For subsequent views, it computes distances from remaining views against all previously selected views and chooses the view $X$ that maximizes the geometric average of the distances to the selected views [S2]. This approach is preferred over global maximization because global maximization has a quadratic cost in the number of views, while this approach yields similar results with lower cost [S2]. Usually, three or four representative views are enough for most models [S2].
+
+## Operating characteristics
+*   **Time Complexity:** The greedy selection requires $B$ iterations. In each iteration, it evaluates all remaining candidates. If $N$ is the number of candidates, the complexity is roughly $O(B \cdot N \cdot C)$, where $C$ is the cost of computing the trace and matrix inverse. The matrix inverse is $O(M^3)$ where $M$ is the dimension of the parameter space [S1].
+*   **Memory Complexity:** Requires storing the Fisher Information matrix $H$ ($O(M^2)$) and the pool of candidates [S1].
+*   **Strengths:** Provides a $1/e$-approximation guarantee for the Fisher Information objective [S1]. It is more related to real-world scenarios where an agent plans a trajectory to acquire more training views [S1].
+*   **Limitations:** Greedy optimization may get stuck in local optima compared to global search, though the approximation bound mitigates this [S1]. The cost of matrix operations can be high for large parameter spaces.
+*   **When to use:** When batch acquisition is required and the computational cost of global optimization is prohibitive [S1].
+*   **When not to use:** When single-view selection is sufficient ($B=1$) or when the parameter space is too large for efficient matrix inversion.
+
+## Background
+The method was introduced in the context of active mapping with 3D Gaussian Splatting and Radiance Fields, specifically in the paper "FisherRF: Active View Selection and Mapping with Radiance Fields Using Fisher Information" [S1]. It addresses the problem of selecting informative views for reconstruction by leveraging Fisher Information to quantify the information gain of potential new views [S1]. The approach is designed to avoid the combinatorial explosion of directly maximizing expected information gain between training and acquisition samples [S1].
+
+## Sources
+[S1] FisherRF: Active View Selection and Mapping with Radiance Fields Using Fisher Information, https://doi.org/10.1007/978-3-031-72624-8_24, fetched 2026-10-31
+[S2] Representative Views and Paths for Volume Models, https://doi.org/10.1007/978-3-540-85412-8_10, fetched 2026-10-26

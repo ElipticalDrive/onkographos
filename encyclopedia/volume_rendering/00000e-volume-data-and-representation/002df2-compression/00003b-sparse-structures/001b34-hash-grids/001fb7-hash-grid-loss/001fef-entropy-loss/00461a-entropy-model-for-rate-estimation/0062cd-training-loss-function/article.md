@@ -1,0 +1,200 @@
+# Training Loss Function
+
+Also called: CNC Loss, Composite Loss for Neural SDF and Material Optimization
+
+## Overview
+This article defines the composite training loss functions used in two distinct but related approaches to optimizing neural representations for volume rendering and compression. The first approach [S1] optimizes a physics-based material model and Signed Distance Function (SDF) for inverse rendering, balancing image reconstruction with geometric priors. The second approach [S2] optimizes compressed 3D embeddings for Instant-NGP-based NeRFs, integrating an entropy-based rate distortion term to control bitrate during training.
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   **For [S1]:** A batch of camera rays $\{r^obj_i\}$ passing through object pixels and $\{r^{nobj}_i\}$ passing through non-object pixels, with corresponding ground-truth colors $\{c^gt_i\}$. A set of random 3D points $\{x_i\}$ inside the object bounding box.
+*   **For [S2]:** A batch of images for Mean Squared Error (MSE) calculation, and the current state of 3D embedding vectors $\theta$ (both valid and invalid) to compute entropy.
+
+**Outputs:**
+*   A scalar loss value $\ell$ (or $L$) used for gradient descent optimization of the model parameters.
+
+### Data Structures
+*   **SDF Model:** Parameters $\Theta$ defining the SDF $S(x)$ and its gradient $\nabla_x S$.
+*   **Material Model:** Parameters for diffuse albedo $a(x; \Phi)$, specular BRDF (lobe sharpness $\lambda$, specular albedo $\mu$), and environment map lobes.
+*   **Embeddings:** 3D feature vectors $\theta$ stored in a grid structure. $M$ is the total count of these vectors (valid + invalid).
+
+### Formulas
+
+**1. PhySG Loss [S1]**
+The total loss $\ell$ is a weighted sum of three terms:
+$$
+\ell = \underbrace{\frac{1}{N_{obj}} \sum_{i=1}^{N_{obj}} |c^obj_i - c^gt_i|}_{\text{Image Reconstruction}} + \underbrace{\beta_1 \frac{1}{N_{nobj}} \sum_{i=1}^{N_{nobj}} \frac{1}{\alpha} \ln(1 + e^{-\alpha S^{inobj}_i})}_{\text{Non-Object SDF Constraint}} + \underbrace{\beta_2 \frac{1}{N_x} \sum_{i=1}^{N_x} (\|\nabla_{x_i} S\|_2 - 1)^2}_{\text{SDF Gradient Regularization}}
+$$
+Where:
+*   $c^obj_i$ is the rendered color for ray $r^obj_i$.
+*   $S^{inobj}_i$ is the minimal SDF value along ray $r^{nobj}_i$.
+*   $\alpha$ is a smooth approximation parameter for the flipped ReLU $\max\{-S^{inobj}, 0\}$.
+*   $\beta_1, \beta_2$ are loss weights.
+
+**2. Compression Loss [S2]**
+The total loss $L$ balances reconstruction accuracy and bitrate:
+$$
+L = L_{mse} + \lambda \frac{L_{entropy}}{M}
+$$
+Where:
+*   $L_{mse}$ is the Mean Squared Error between rendered and ground-truth images.
+*   $L_{entropy}$ is the sum of bits associated with all valid feature vectors $\theta_s$.
+*   $M$ is the total number of $\theta$s in the embeddings (valid and invalid).
+*   $\lambda$ is a tradeoff factor.
+
+### Parameters
+*   **PhySG [S1]:**
+    *   $\beta_1 = 100$
+    *   $\beta_2 = 0.1$
+    *   Batch size: $N_{obj} + N_{nobj} = 2048$
+    *   Random points: $N_x = 1024$
+    *   $\alpha$: Grows from 50 to 1600 during training [S1].
+    *   Smoothness loss weight: 10 (applied to surface normal variance in $2 \times 2$ patches) [S1].
+*   **Compression [S2]:**
+    *   $\lambda$: Varied from $0.7 \times 10^{-3}$ to $8 \times 10^{-3}$ to control bitrate [S2].
+    *   Grid resolution: 128 [S2].
+    *   Feature vector dimension $F$: 8 [S2].
+    *   Context levels $L_c$: 3 [S2].
+
+### Steps
+
+**PhySG Optimization [S1]:**
+1.  **Sample Rays:** Randomly sample a batch of pixels, split into object pixels ($N_{obj}$) and non-object pixels ($N_{nobj}$). Note: Instead of independent pixels, sample $\frac{N_{obj} + N_{nobj}}{4}$ patches of size $2 \times 2$.
+2.  **Render Object Rays:** For each object ray $r^obj_i$, render the color $c^obj_i$ using the current SDF and material parameters.
+3.  **Compute Non-Object SDF:** For each non-object ray $r^{nobj}_i$, find the minimal SDF value $S^{inobj}_i$ by evaluating the SDF at 100 points uniformly distributed along the ray segment inside the object bounding box.
+4.  **Sample Interior Points:** Randomly sample $N_x$ points $x_i$ inside the object bounding box.
+5.  **Compute Loss Terms:**
+    *   Calculate $L^1$ image reconstruction loss for object pixels.
+    *   Calculate the smooth approximation of the non-negative SDF constraint for non-object rays.
+    *   Calculate the SDF gradient regularization term ($\|\nabla S\|_2 \approx 1$) for interior points.
+    *   Calculate the surface normal variance penalty for patches containing only object pixels.
+6.  **Backpropagate:** Combine terms with weights $\beta_1, \beta_2$ and the smoothness weight (10) to update parameters $\Theta, \Phi$.
+
+**Compression Optimization [S2]:**
+1.  **Render Images:** Render images from the current 3D embeddings using the Instant-NGP architecture.
+2.  **Calculate MSE:** Compute $L_{mse}$ between rendered and ground-truth images.
+3.  **Estimate Entropy:** Using the context models, calculate the entropy loss $L_{entropy}$, defined as the sum of bits for all valid feature vectors.
+4.  **Compute Total Loss:** Apply $L = L_{mse} + \lambda L_{entropy} / M$.
+5.  **Backpropagate:** Update embedding parameters.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_physg_loss(render_func, sdf_func, grad_sdf_func, 
+                       rays_obj, colors_gt_obj, rays_nobj, 
+                       points_interior, alpha, beta1, beta2):
+    """
+    Computes the PhySG composite loss.
+    """
+    # 1. Render object rays
+    colors_obj = []
+    for r in rays_obj:
+        c = render_func(r)
+        colors_obj.append(c)
+    
+    # L1 Image Reconstruction
+    loss_img = 0.0
+    for c_obj, c_gt in zip(colors_obj, colors_gt_obj):
+        loss_img += abs(c_obj - c_gt)
+    loss_img /= len(rays_obj)
+
+    # 2. Non-object SDF constraint
+    # Find min SDF along ray by sampling 100 points in bounding box
+    loss_sdf_nobj = 0.0
+    for r in rays_nobj:
+        min_sdf = infinity
+        for t in linspace(0, 1, 100): # Uniform points on ray segment in bbox
+            x = r.origin + t * r.direction
+            s = sdf_func(x)
+            if s < min_sdf:
+                min_sdf = s
+        # Smooth approximation of max{-S, 0}
+        # term = ln(1 + exp(-alpha * S)) / alpha
+        term = log(1 + exp(-alpha * min_sdf)) / alpha
+        loss_sdf_nobj += term
+    loss_sdf_nobj /= len(rays_nobj)
+
+    # 3. SDF Gradient Regularization
+    loss_grad = 0.0
+    for x in points_interior:
+        grad = grad_sdf_func(x)
+        norm_grad = sqrt(sum(g**2 for g in grad))
+        loss_grad += (norm_grad - 1)**2
+    loss_grad /= len(points_interior)
+
+    # Total Loss
+    # Note: Smoothness loss for normals is added separately in source [S1]
+    # with weight 10, but requires patch-based normal variance calculation.
+    # Here we return the core components defined in Eq 10.
+    total_loss = loss_img + beta1 * loss_sdf_nobj + beta2 * loss_grad
+    
+    return total_loss
+
+def compute_compression_loss(render_func, entropy_model, embeddings, 
+                             rays, colors_gt, lambda_tradeoff):
+    """
+    Computes the compression loss for Instant-NGP based NeRF.
+    """
+    # 1. MSE Loss
+    rendered_colors = []
+    for r in rays:
+        c = render_func(r, embeddings)
+        rendered_colors.append(c)
+    
+    loss_mse = 0.0
+    for c_render, c_gt in zip(rendered_colors, colors_gt):
+        loss_mse += sum((cr - cg)**2 for cr, cg in zip(c_render, c_gt))
+    loss_mse /= len(rays)
+
+    # 2. Entropy Loss
+    # L_entropy is sum of bits for all valid feature vectors
+    # M is total number of theta (valid + invalid)
+    valid_vectors = get_valid_vectors(embeddings)
+    invalid_vectors = get_invalid_vectors(embeddings)
+    M = len(valid_vectors) + len(invalid_vectors)
+    
+    loss_entropy = 0.0
+    for theta in valid_vectors:
+        bits = entropy_model.estimate_bits(theta)
+        loss_entropy += bits
+    
+    # 3. Total Loss
+    total_loss = loss_mse + lambda_tradeoff * (loss_entropy / M)
+    
+    return total_loss
+```
+
+### Edge Cases and Pitfalls
+*   **PhySG [S1]:** The parameter $\alpha$ must be annealed (50 to 1600) to avoid local minima in the SDF constraint approximation [S1]. Initialization of SDF weights should create a rough sphere [S1].
+*   **Compression [S2]:** $M$ includes invalid embeddings; failing to normalize by $M$ will bias the loss towards larger grids [S2]. The tradeoff $\lambda$ significantly impacts the final bitrate and quality [S2].
+
+## Operating characteristics
+
+### PhySG [S1]
+*   **Time/Complexity:** Training takes 250k iterations on a single 12GB NVIDIA GPU [S1]. Rendering is differentiable w.r.t. parameters, allowing gradient-based optimization [S1].
+*   **Strengths:** Physics-based material editing and relighting capabilities [S1].
+*   **Limitations:** Requires segmentation masks for non-object pixels [S1].
+
+### Compression [S2]
+*   **Time/Complexity:** Encoding/decoding takes about 1 second [S2]. Training involves context models which add computational overhead [S2].
+*   **Strengths:** High compression ratios for Instant-NGP NeRFs [S2].
+*   **Limitations:** Performance depends on the context model architecture (3 levels, dim 8) [S2].
+
+## Background
+
+### PhySG [S1]
+*   **Origin:** "PhySG: Inverse Rendering with Spherical Gaussians for Physics-based Material Editing and Relighting" (CVPR 2021) [S1].
+*   **Context:** Designed for inverse rendering, optimizing SDFs and spherical Gaussian materials simultaneously [S1].
+
+### Compression [S2]
+*   **Origin:** "How Far can we Compress Instant-NGP-Based NeRF?" (CVPR 2024) [S2].
+*   **Context:** Addresses the storage cost of Instant-NGP NeRFs by integrating entropy models directly into the training loss [S2].
+
+## Sources
+
+[S1] PhySG: Inverse Rendering with Spherical Gaussians for Physics-based Material Editing and Relighting, https://doi.org/10.1109/cvpr46437.2021.00541, fetched 2026-10-26
+[S2] How Far can we Compress Instant-NGP-Based NeRF?, https://doi.org/10.1109/cvpr52733.2024.01921, fetched 2026-10-26

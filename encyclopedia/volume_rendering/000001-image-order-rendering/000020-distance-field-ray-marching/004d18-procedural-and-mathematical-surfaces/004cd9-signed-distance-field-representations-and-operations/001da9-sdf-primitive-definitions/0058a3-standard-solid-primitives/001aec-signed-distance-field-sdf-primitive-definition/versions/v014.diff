@@ -1,0 +1,323 @@
+--- v013.md
++++ v014.md
+@@ -4,138 +4,207 @@
+ 
+ ## Overview
+-A Signed Distance Field (SDF) Primitive Definition is a method for representing 3D geometry using closed-form analytical functions that return the shortest Euclidean distance from a query point to the nearest surface, along with a sign indicating whether the point is inside or outside the object [S2, S3, S8, unofficial]. It solves the problem of defining complex scene geometry for distance-field ray marching without explicit mesh tessellation, enabling efficient, noise-free rendering and boolean composition [S1, unofficial][S5][S9, unofficial]. Unlike [Distance to Natural Quadrics](1559-distance-to-natural-quadrics.md) which focuses on algebraic quadric surfaces, SDF primitives provide exact distance bounds for a wide variety of canonical shapes (spheres, boxes, tori) and their combinations, guaranteeing that ray marching steps do not overshoot surfaces [S8, S15, unofficial].
++A Signed Distance Field (SDF) Primitive Definition is a method for representing 3D geometry using analytical scalar functions that return the shortest Euclidean distance from a query point $\mathbf{p}$ to the surface of a canonical shape, with a sign indicating whether the point is inside (negative) or outside (positive) the shape [S2, S3, S8, S9, S15, unofficial]. It solves the problem of defining complex scene geometry without explicit mesh tessellation, replacing discrete triangle lists with continuous, closed-form algebraic solutions for primitives like spheres, boxes, and tori [S1, S15, unofficial]. Unlike [Distance to Natural Quadrics](1559-distance-to-natural-quadrics.md), which focuses on the geometric properties of conic sections, SDF primitives provide exact distance bounds required for safe sphere tracing in ray marching [S1, S8, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**: The function takes a 3D query point $p = (p_x, p_y, p_z)$ and primitive-specific parameters (e.g., radius $r$, center $c$, half-extents $b$). It returns a scalar float $d = \text{SDF}(p)$.
+-
+-**Data Structures**:
+-*   **Point**: A 3D vector $p$.
+-*   **Primitive Parameters**:
+-    *   Sphere: `struct sph { float r; vec3 c; }` [S14, unofficial]
+-    *   Box: `struct box { vec3 p; vec3 size; }` where `size` is full size, divided by 2 in calculation [S14, unofficial].
+-    *   Cylinder: `struct cylinder { vec2 p; float r; }` (center in XZ plane) [S14, unofficial].
+-    *   Cylinder Capped: `struct cylinderCapped { float r; float h; }` (half-height) [S14, unofficial].
+-    *   Cone: `struct cone { float r; float h; vec3 c; }` [S14, unofficial].
+-    *   Plane: `struct plane { vec4 k; }` where `k.xyz` is normal and `k.w` is offset [S14, unofficial].
+-    *   Torus: `struct tor { float inR; float outR; }` [S14, unofficial].
+-    *   Generalized Distance Function (GDF): Array of 19 normalized `vec3` directions `GDFVectors[19]` [S6, S13, unofficial].
+-
+-**Numbered Steps**:
+-1.  **Coordinate Transformation**: If the primitive is transformed (rotated, translated, scaled), apply the inverse transformation matrix $M^{-1}$ to the query point $p$ before evaluation: $p' = M^{-1} p$ [S11, unofficial]. For non-uniform scaling, distance compensation is required [S14, unofficial].
+-2.  **Distance Evaluation**: Compute the signed distance $d$ using the specific analytical formula for the primitive type.
+-3.  **Sign Convention**: The result $d$ follows the convention: $d < 0$ inside, $d = 0$ on surface, $d > 0$ outside [S2, S15, unofficial].
+-4.  **Normal Approximation**: Compute the surface normal $n$ using central finite differences with step size $\epsilon$ (typically $0.0001$) [S11, S13, unofficial]:
+-    $$ n = \text{normalize}\left( \begin{bmatrix} \text{SDF}(p + (\epsilon, 0, 0)) - d \\ \text{SDF}(p + (0, \epsilon, 0)) - d \\ \text{SDF}(p + (0, 0, \epsilon)) - d \end{bmatrix} \right) $$
+-
+-**Formulas**:
+-*   **Sphere**: $d(p) = \|p - c\| - r$ [S11, S14, unofficial].
+-*   **Box (Exact)**: Let $d = |p - p_{box}| - b$ where $b$ is half-extents. Then $d_{box} = \|\max(d, 0)\| + \min(\max(d_x, \max(d_y, d_z)), 0)$ [S14, unofficial].
+-    *   *Cheap Box (Overestimate)*: $d_{cheap} = \max(|p| - b)$ [S6, unofficial].
+-*   **Cylinder (Infinite)**: $d(p) = \|(p_{xz} - p_{center})\| - r$ [S14, unofficial].
+-*   **Cylinder (Capped)**: Let $d_x = \|p_{xz}\| - r$ and $d_y = |p_y| - h$. Then $d = \min(\max(d_x, d_y), 0) + \|\max(d, 0)\|$ [S14, unofficial].
+-*   **Cone**: Let $\phi = \arctan(r/h)$. $d = \max(\sqrt{x^2+z^2}\cos(\phi) - |y|\sin(\phi), \max(y-h, -y))$ [S14, unofficial].
+-*   **Plane**: $d(p) = p \cdot n + d_{offset}$ [S14, unofficial].
+-*   **Torus**: $d = \|(\|p_{xz}\| - R_{out}, p_y)\| - R_{in}$ [S14, unofficial].
+-*   **L-Norm Torus (Tor88)**: Uses $L_8$ norm for rounded corners. $q = (\|p_{xz}\|_8 - R_{out}, p_y)$, result is $\|q\|_8 - R_{in}$ [S14, unofficial].
+-*   **Generalized Distance Function (GDF)**: Uses pre-normalized vectors $v_i$.
+-    *   With exponent $e$: $d = (\sum_{i=begin}^{end} |\text{dot}(p, v_i)|^e)^{1/e} - r$ [S13, unofficial].
+-    *   Sharp edges ($e \to \infty$): $d = \max_{i} |\text{dot}(p, v_i)| - r$ [S6, unofficial].
+-
+-**Pseudocode**:
++**Inputs and Outputs:**
++*   **Input:** A 3D query point $\mathbf{p} = (p_x, p_y, p_z)$ in world or local space, and primitive-specific parameters (e.g., radius, center, half-extents).
++*   **Output:** A scalar float $d = \text{SDF}(\mathbf{p})$ representing the signed distance.
++
++**Data Structures:**
++Primitives are typically defined by simple structs or parameter sets. Common layouts include [S14, unofficial]:
++*   **Sphere:** `struct sph { float r; vec3 c; }` where `r` is radius and `c` is center.
++*   **Box:** `struct box { vec3 p; vec3 size; }` where `p` is position and `size` is full extent (halved in calculation).
++*   **Cylinder:** `struct cylinder { vec2 p; float r; }` (infinite) or `struct cylinderCapped { float r; float h; }` (capped, `h` is half-height).
++*   **Cone:** `struct cone { float r; float h; vec3 c; }` where `c` is center/offset.
++*   **Plane:** `struct plane { vec4 k; }` where `k.xyz` is the normal vector $\mathbf{n}$ and `k.w` is the offset $d_{offset}$.
++*   **Torus:** `struct tor { float inR; float outR; }` where `inR` is tube radius and `outR` is major radius.
++
++**Numbered Steps:**
++1.  **Transform Point:** If the primitive is transformed (rotated, translated, scaled), map the query point $\mathbf{p}$ into the primitive's local coordinate space using the inverse transformation matrix $M^{-1}$ [S11, S13, unofficial]. For uniform scaling, the distance value must be divided by the scale factor to preserve the Lipschitz condition [S2, unofficial].
++2.  **Evaluate Local Distance:** Compute the distance to the nearest point on the untransformed primitive surface using the specific analytical formula for the shape.
++3.  **Apply Sign:** The result is positive if $\mathbf{p}$ is outside the surface, negative if inside, and zero if on the surface [S2, S15, unofficial].
++4.  **Return Value:** Return the signed distance $d$.
++
++**Formulas:**
++The general definition for a shape centered at the origin with radius $r$ is $d(\mathbf{p}) = \|\mathbf{p}\| - r$ [S9, unofficial]. Specific primitives are defined as follows [S6, S11, S13, S14, unofficial]:
++
++*   **Sphere:** Center $\mathbf{c}$, radius $r$.
++    $$ d(\mathbf{p}) = \|\mathbf{p} - \mathbf{c}\| - r $$
++*   **Box (AABB):** Half-extents $\mathbf{b} = (b_x, b_y, b_z)$, centered at origin.
++    $$ \mathbf{d} = |\mathbf{p}| - \mathbf{b} $$
++    $$ d(\mathbf{p}) = \|\max(\mathbf{d}, 0)\| + \min(\max(\mathbf{d}_x, \max(\mathbf{d}_y, \mathbf{d}_z)), 0) $$
++    *Note: A cheaper, non-exact approximation is $\max(|\mathbf{p}| - \mathbf{b})$ [S6, unofficial].*
++*   **Cylinder (Infinite):** Axis-aligned with Y, radius $r$.
++    $$ d(\mathbf{p}) = \sqrt{p_x^2 + p_z^2} - r $$
++*   **Cylinder (Capped):** Radius $r$, half-height $h$.
++    $$ d_x = \sqrt{p_x^2 + p_z^2} - r, \quad d_y = |p_y| - h $$
++    $$ d(\mathbf{p}) = \min(\max(d_x, d_y), 0) + \|\max(d_x, d_y, 0)\| $$
++*   **Cone:** Radius $r$, height $h$, axis-aligned with Y. Let $\phi = \arctan(r/h)$.
++    $$ d(\mathbf{p}) = \max(\sqrt{p_x^2 + p_z^2}\cos(\phi) - |p_y|\sin(\phi), \max(p_y - h, -p_y)) $$
++    *Implementation detail: Requires checking distance to tip and base ring if the projection falls outside the mantle [S13, unofficial].*
++*   **Plane:** Normal $\mathbf{n}$ (unit length), offset $d_{offset}$.
++    $$ d(\mathbf{p}) = \mathbf{p} \cdot \mathbf{n} + d_{offset} $$
++*   **Torus:** Major radius $R_{out}$, tube radius $R_{in}$.
++    $$ d(\mathbf{p}) = \sqrt{(\sqrt{p_x^2 + p_z^2} - R_{out})^2 + p_y^2} - R_{in} $$
++*   **Capsule:** Endpoints $\mathbf{a}, \mathbf{b}$, radius $r$.
++    $$ \mathbf{ab} = \mathbf{b} - \mathbf{a} $$
++    $$ t = \text{clamp}\left(\frac{(\mathbf{p} - \mathbf{a}) \cdot \mathbf{ab}}{\|\mathbf{ab}\|^2}, 0, 1\right) $$
++    $$ d(\mathbf{p}) = \|\mathbf{a} + t\mathbf{ab} - \mathbf{p}\| - r $$
++
++**Parameters:**
++*   **Smoothing Constant ($k$):** Used in smooth minimum blending (e.g., $k=0.2$) [S11, unofficial].
++*   **Gradient Step ($\epsilon$):** Used for normal approximation, typically $0.0001$ [S11, unofficial].
++*   **Lipschitz Bound:** The SDF guarantees that $|f(\mathbf{p}_1) - f(\mathbf{p}_2)| \le \|\mathbf{p}_1 - \mathbf{p}_2\|$, ensuring $d(\mathbf{p})$ is a safe lower bound for ray marching [S15, unofficial].
++
++**Pseudocode:**
+ ```python
+-def sdf_sphere(p: vec3, center: vec3, radius: float) -> float:
+-    return length(p - center) - radius
+-
+-def sdf_box(p: vec3, center: vec3, half_extents: vec3) -> float:
+-    d = abs(p - center) - half_extents
+-    # Exact distance including corners
+-    return length(max(d, vec3(0))) + min(max(d.x, max(d.y, d.z)), 0)
+-
+-def sdf_torus(p: vec3, large_radius: float, small_radius: float) -> float:
+-    q = vec2(length(p.xz) - large_radius, p.y)
+-    return length(q) - small_radius
+-
+-def sdf_plane(p: vec3, normal: vec3, offset: float) -> float:
+-    return dot(p, normal) + offset
+-
+-def sdf_capsule(p: vec3, a: vec3, b: vec3, radius: float) -> float:
+-    ab = b - a
+-    t = clamp(dot(p - a, ab) / dot(ab, ab), 0.0, 1.0)
+-    return length((ab * t + a) - p) - radius
+-
+-def sdf_cone(p: vec3, radius: float, height: float) -> float:
+-    q = vec2(length(p.xz), p.y)
+-    tip = q - vec2(0, height)
+-    mantle_dir = normalize(vec2(height, radius))
+-    mantle = dot(tip, mantle_dir)
+-    d = max(mantle, -q.y)
+-    projected = dot(tip, vec2(mantle_dir.y, -mantle_dir.x))
+-    
+-    # Distance to tip
+-    if (q.y > height) and (projected < 0):
+-        d = max(d, length(tip))
+-    
+-    # Distance to base ring
+-    if (q.x > radius) and (projected > length(vec2(height, radius))):
+-        d = max(d, length(q - vec2(radius, 0)))
+-        
+-    return d
+-
+-def sdf_gdf(p: vec3, radius: float, vectors: list[vec3], begin: int, end: int, exponent: float = 1e9) -> float:
+-    d = 0.0
+-    for i in range(begin, end + 1):
+-        val = abs(dot(p, vectors[i]))
+-        if exponent < 1e8:
+-            d += pow(val, exponent)
+-        else:
+-            d = max(d, val)
+-    if exponent < 1e8:
+-        return pow(d, 1.0 / exponent) - radius
+-    return d - radius
++import math
++
++def length(v):
++    return math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++
++def dot(v1, v2):
++    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
++
++def vec3_sub(v1, v2):
++    return (v1[0]-v2[0], v1[1]-v2[1], v1[2]-v2[2])
++
++def vec3_add(v1, v2):
++    return (v1[0]+v2[0], v1[1]+v2[1], v1[2]+v2[2])
++
++def vec3_scale(v, s):
++    return (v[0]*s, v[1]*s, v[2]*s)
++
++def vec3_abs(v):
++    return (abs(v[0]), abs(v[1]), abs(v[2]))
++
++def vec3_max(v, s):
++    return (max(v[0], s), max(v[1], s), max(v[2], s))
++
++def vec3_min(v, s):
++    return (min(v[0], s), min(v[1], s), min(v[2], s))
++
++def vec3_max_component(v):
++    return max(v[0], v[1], v[2])
++
++def vec3_min_component(v):
++    return min(v[0], v[1], v[2])
++
++def sdf_sphere(p, center, radius):
++    """
++    Returns signed distance from p to sphere.
++    Positive outside, negative inside.
++    """
++    return length(vec3_sub(p, center)) - radius
++
++def sdf_box(p, center, half_extents):
++    """
++    Returns signed distance from p to AABB.
++    p: query point (vec3)
++    center: box center (vec3)
++    half_extents: half-size of box (vec3)
++    """
++    # Translate point to box local space
++    p_local = vec3_sub(p, center)
++    
++    # Distance to surface
++    d = vec3_abs(p_local) - half_extents
++    
++    # Calculate exact distance to corners/edges
++    # max(d, 0) gives distance to the infinite box (positive if outside)
++    # min(d, 0) gives distance to the interior (negative if inside)
++    dist_outside = length(vec3_max(d, 0))
++    dist_inside = vec3_min_component(vec3_min(d, 0))
++    
++    return dist_outside + dist_inside
++
++def sdf_torus(p, major_radius, tube_radius):
++    """
++    Torus centered at origin, aligned with Y axis.
++    """
++    # Distance to the center ring of the torus
++    q = (length((p[0], p[2])) - major_radius, p[1])
++    return length(q) - tube_radius
++
++def sdf_cylinder_capped(p, radius, half_height):
++    """
++    Cylinder aligned with Y axis.
++    """
++    dx = length((p[0], p[2])) - radius
++    dy = abs(p[1]) - half_height
++    
++    # Distance to the side surface or caps
++    dist_outside = length(vec3_max((dx, dy, 0), 0))
++    dist_inside = vec3_min_component(vec3_min((dx, dy, 0), 0))
++    
++    return dist_outside + dist_inside
++
++def sdf_union(d1, d2):
++    """
++    Union of two SDFs.
++    """
++    return min(d1, d2)
++
++def sdf_intersection(d1, d2):
++    """
++    Intersection of two SDFs.
++    """
++    return max(d1, d2)
++
++def sdf_subtraction(d1, d2):
++    """
++    Subtraction of d2 from d1.
++    """
++    return max(d1, -d2)
++
++def sdf_smooth_union(d1, d2, k):
++    """
++    Smooth union using Quilez's approximation.
++    """
++    h = clamp(0.5 + 0.5 * (d2 - d1) / k, 0.0, 1.0)
++    return mix(d2, d1, h) - k * h * (1.0 - h)
++
++def clamp(val, min_val, max_val):
++    return max(min_val, min(val, max_val))
++
++def mix(a, b, t):
++    return a + t * (b - a)
+ ```
+ 
+-**Parameters**:
+-*   $\epsilon$ (gradient step): $0.0001$ [S11, unofficial].
+-*   Torus major radius $s$: $70$ (example) [S4, unofficial].
+-*   Torus minor radius $t$: $15$ (example) [S4, unofficial].
+-*   Round Box half-size $b$: $\text{vec3}(20, 20, 5)$ (example) [S4, unofficial].
+-*   Round Box radius $r$: $10$ (example) [S4, unofficial].
+-*   GDF PHI constant: $\sqrt{5} \cdot 0.5 + 0.5$ [S13, unofficial].
+-
+-**Edge Cases and Pitfalls**:
+-*   **Non-Uniform Scaling**: Standard inverse transformation does not preserve Euclidean distance; explicit scaling factors or distance compensation are required [S14, unofficial].
+-*   **Discontinuities**: Taking `min()` or `max()` of two SDFs yields sharp discontinuities in the derivative, affecting normal quality [S11, unofficial].
+-*   **GDF Performance**: Loops in GDF implementations (e.g., for Icosahedrons) may fail to unroll on certain drivers (e.g., Nvidia 350.12), causing slowdowns [S13, unofficial].
+-*   **Approximation Errors**: The `fBlob` function is not a correct distance bound [S6, unofficial]. Variable exponent GDFs are slow and may not produce correct distances, allowing for bulging [S13, unofficial].
+-*   **Arbitrary Meshes**: Not every shape has a closed-form SDF; arbitrary meshes require approximate SDFs (baked into 3D textures or generated from BVH traversal) [S15, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Non-Exact SDFs:** Not all shapes have closed-form SDFs. Arbitrary meshes require approximate SDFs (e.g., baked into 3D textures or BVH traversal) [S15, unofficial].
++*   **Lipschitz Violation:** Non-uniform scaling or certain deformations can violate the Lipschitz condition, causing the SDF to no longer be a safe lower bound, leading to ray tunneling [S2, S11, unofficial].
++*   **Gradient Noise:** The GDF (Generalized Distance Function) implementation with variable exponent `e` is slow and may not produce correct distances, though it allows for bulging [S13, unofficial].
++*   **Driver Issues:** Loop unrolling issues on some hardware (e.g., Nvidia 350.12) can cause slowdowns for complex GDF primitives like `fIcosahedron` [S6, S13, unofficial].
++*   **Sharp Discontinuities:** Taking the `min()` or `max()` of two SDFs yields sharp corners; smooth blending requires specific approximation functions like `smin` [S11, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [SDF Primitives & Operations](1075-sdf-primitives-operations.md)
+-Provides foundational analytical functions and geometric operators (union, intersection, difference, smooth blending) for composing scene geometry. It focuses on base primitives and immediate min/max operators, distinct from coordinate transformation or complex CSG.
++SDF Primitives & Operations provide the foundational analytical functions and geometric operators used to define scene geometry implicitly for distance-field ray marching, replacing explicit mesh tessellation with continuous scalar fields [G]. They solve the problem of representing complex 3D shapes and their compositions using closed-form algebraic solutions for canonical shapes (spheres, boxes, tori) and boolean/domain operators [G]. Unlike [SDF Transformation](1086-sdf-transformation.md) which modifies coordinates, or [CSG Operations on Implicit Functions](1329-csg-operations-on-implicit-functions.md) which combines distinct shapes, this method focuses on the definition of base primitives and the immediate application of min/max operators for union/intersection.
+ 
+ ### [SDF Transformation](1086-sdf-transformation.md)
+-Applies geometric transformations (rotation, translation, scaling, deformation) by manipulating query point coordinates before evaluation. It preserves mathematical integrity for ray marching, relying on inverse mapping for isometries or explicit factors for scaling.
++SDF Transformation is a technique for applying geometric transformations (rotation, translation, scaling, and deformation) to Signed Distance Field primitives by manipulating the query point coordinates before evaluating the base distance function. It solves the problem of positioning and animating implicit surfaces in world space without modifying the underlying primitive definition, preserving the mathematical integrity of the distance field for ray marching. Unlike [Uniform Scaling of SDFs](2394-uniform-scaling-of-sdfs.md), which handles exact distance compensation for uniform factors, or [Lipschitz Transformation Bounds](1557-lipschitz-transformation-bounds.md), which derives safety bounds for non-linear deformations, standard SDF Transformation relies on the inverse mapping of isometries (which preserve distance) or explicit scaling factors.
+ 
+ ### [k-SDF](9530-k-sdf.md)
+-A representation for real-time view synthesis of fuzzy geometries using $k$ lightweight, semi-transparent mesh shells. It models implicit geometry as $k$ distinct SDFs combined with view-dependent transparency, bounding samples per ray for real-time performance on low-cost hardware.
++k-SDF is a representation for real-time view synthesis of fuzzy geometries using $k$ lightweight, semi-transparent mesh shells rendered via rasterization in a fixed order, bounding the number of sampling locations per ray to a small range ($3 \le k \le 9$). It models implicit geometry as $k$ distinct signed distance fields combined with a view-dependent transparency field and a color field. Unlike [3D Gaussian Splatting](52-3d-gaussian-splatting.md) or [SMERF](53-smurf.md), it is sorting-free and bounds samples per ray, enabling real-time rendering on low-cost smartphones. Unlike [AdaptiveShells](54-adaptive-shells.md), it learns multiple SDFs and finds sampling locations via rasterization using 2D textures rather than volume rendering.
+ 
+ ### [SDF Representation DOP](12996-sdf-representation-dop.md)
+-Creates a volumetric SDF from geometry for fast inside/outside testing in collision detection. It focuses on topological correctness for rigid body dynamics, using modes like Laser Scanning for non-watertight geometry.
++The SDF Representation DOP creates a volumetric signed distance field (SDF) from geometry to enable fast inside/outside testing for collision detection. It differs from general volume rendering methods by focusing on the topological correctness of the distance field for rigid body dynamics rather than visual appearance, utilizing specific modes like Laser Scanning to handle non-watertight geometry.
+ 
+ ### SDF Grid Modeling
+-A float grid where active values describe the distance to a surface, with negative values inside and positive outside, and the surface at zero [S16, unofficial]. It allows for efficient boolean operations with smooth transitions, which are difficult on meshes, and supports smoothing via nodes like the SDF Grid Mean [S16, unofficial].
++A float grid where the active values describe the distance to a surface. Negative values are on the inside and positive on the outside, and the surface is where the values are zero [S16, unofficial]. Boolean operations on SDF grids allow for efficient boolean operations with smooth transitions, which are hard to perform on meshes. Smoothing is often applied using an SDF Grid Mean node [S16, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(1)$ per primitive evaluation. Total time depends on the number of primitives and ray marching steps.
+-*   **Memory Complexity**: $O(1)$ for analytical primitives. $O(N)$ for grid-based SDFs [S10, S16, unofficial].
+-*   **Performance**: Significantly faster than ray-triangle intersection for complex scenes due to adaptive stepping [S1, unofficial]. Accuracy improves with exact distance bounds [S1, unofficial].
+-*   **Strengths**: No tessellation artifacts, easy boolean composition, smooth normals via finite differences, compact representation [S1, S9, unofficial].
+-*   **Limitations**: No closed-form SDF for arbitrary meshes [S15, unofficial]. Sharp edges from boolean ops can cause normal artifacts [S11, unofficial]. Non-uniform scaling requires compensation [S14, unofficial].
+-*   **When to Use**: Real-time rendering, procedural geometry, ray marching.
+-*   **When Not to Use**: When exact mesh topology is required for collision or when non-uniform scaling is prevalent without compensation.
++*   **Time Complexity:** $O(1)$ per primitive evaluation. The cost scales linearly with the number of primitives in the scene if evaluated naively, or logarithmically if accelerated with a BVH or grid structure.
++*   **Memory Complexity:** $O(1)$ for analytical primitives (only parameters stored). $O(N)$ for grid-based SDFs where $N$ is the number of voxels.
++*   **Measured Performance:** SDF ray marching is significantly faster than traditional ray-triangle intersection for scenes with high geometric complexity or procedural detail, as it avoids traversal overhead and leverages the distance bound for large steps [S1, S8, unofficial].
++*   **Strengths:** Exact representation of smooth surfaces; easy composition via CSG; efficient rendering of complex procedural geometry; robust inside/outside testing.
++*   **Limitations:** Limited to shapes with known analytical SDFs; sharp corners from boolean operations can cause aliasing or require smoothing; non-uniform scaling breaks the Lipschitz condition unless compensated.
++*   **When to Use:** Real-time rendering of procedural scenes, ray marching, collision detection, and implicit modeling.
++*   **When Not to Use:** Scenes requiring exact triangle-level detail (e.g., texturing with high-frequency UV maps), or when the geometry cannot be approximated by analytical functions.
+ 
+ ## Background
+-The Signed Distance Function was introduced as an implicit function for representing real surfaces, where the zero level set defines the surface [S2, unofficial][S5]. It is widely used in ray marching for real-time graphics, replacing explicit mesh tessellation with continuous scalar fields [S1, S9, unofficial]. The method relies on the Lipschitz bound to ensure safe ray stepping [S15, unofficial]. It is used in neural rendering for clearer geometry compared to density fields [S5], and in volume rendering for collision detection and topological analysis [S10, S16, unofficial].
++The concept of Signed Distance Fields originates from computational geometry and level set methods, where they are used to track interfaces and represent orientable manifolds [S10, unofficial]. In computer graphics, SDFs were popularized for real-time rendering by Inigo Quilez's work on "Modeling with Distance Functions" and the subsequent adoption of sphere tracing (ray marching) techniques [S1, S7, S11, unofficial]. They have become a standard tool in procedural generation, ray marching shaders, and implicit modeling due to their efficiency and composability [S1, S8, unofficial].
+ 
+ ## Sources

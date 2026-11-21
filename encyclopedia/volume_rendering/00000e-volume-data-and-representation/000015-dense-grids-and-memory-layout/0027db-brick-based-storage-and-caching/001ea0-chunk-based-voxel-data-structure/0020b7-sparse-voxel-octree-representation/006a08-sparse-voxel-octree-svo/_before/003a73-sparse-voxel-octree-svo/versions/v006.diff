@@ -1,0 +1,189 @@
+--- v005.md
++++ v006.md
+@@ -4,103 +4,112 @@
+ 
+ ## Overview
+-A Sparse Voxel Octree (SVO) is a hierarchical spatial subdivision data structure that stores voxel data sparsely by only retaining nodes containing geometry, enabling efficient ray-traced rendering and Level-of-Detail (LoD) management [S2, S3, S4, unofficial]. It distinguishes itself from dense grids by eliminating empty space overhead and from KD-trees by providing uniform subdivision at every level, which ensures smoothly-degrading LoD and predictable processing costs [S2, unofficial]. Unlike sibling methods like [Sparse Voxel Octree with Bricks](2354-sparse-voxel-octree-with-bricks.md) which optimize for cache linearization via flattening, the standard SVO prioritizes tight compression of sparse spaces and direct pointer-based traversal [S2, unofficial].
++A Sparse Voxel Octree (SVO) is a hierarchical spatial subdivision data structure that stores voxel data sparsely by retaining only nodes containing geometry, enabling efficient ray-traced rendering and Level-of-Detail (LoD) management [S2, S3, S4, unofficial]. It distinguishes itself from dense grids by eliminating empty space overhead and from KD-trees by providing uniform subdivision at every level, which ensures smoothly-degrading LoD and predictable processing costs [S2, unofficial]. Unlike sibling methods like [Sparse Voxel Octree with Bricks](2354-sparse-voxel-octree-with-bricks.md) which optimize for cache linearization via flattening, the standard SVO prioritizes tight compression of sparse spaces and direct pointer-based traversal [S2, unofficial].
+ 
+ ## How it works
+-**Inputs:** A 3D volume or signed distance field (SDF) representing geometry.
+-**Outputs:** A tree structure where internal nodes define spatial hierarchy and leaf nodes (or nodes with valid children) store voxel data.
++**Inputs:** A 3D volume or signed distance field (SDF) representing geometry [S3, unofficial].
++**Outputs:** A tree structure where internal nodes define spatial hierarchy and leaf nodes store voxel data [S2, S3, unofficial].
+ 
+ **Data Structures:**
+-The SVO is composed of nodes. Each node contains:
+-1.  **Valid Mask:** A bitmask indicating which of the 8 children contain geometry. If the mask is 0, the node is a leaf (empty). If the mask is non-zero, the node has children.
+-2.  **Child Pointer:** A pointer (or index) to the first child in a contiguous list of children that actually contain geometry. The number of allocated children equals the number of set bits in the valid mask [S3, S5, unofficial].
+-3.  **Voxel Data (Leaf/Content):** For leaf nodes or nodes storing surface data, this includes:
+-    *   **SDF Value:** Stored as an 8-bit signed normalized integer (snorm). A value of 1 encodes 0.5 interior voxel diagonals. Values are clamped to $[-1, 1]$ [S1, unofficial].
+-    *   **Contours (Optional):** Two parallel planes bounding the surface within the voxel, used as tighter-fitting bounding volumes for ray intersection [S5, unofficial].
++Each node in the SVO contains two primary fields [S3, S5, unofficial]:
++1. **Valid Mask:** An 8-bit integer where each bit indicates whether a corresponding child octant contains geometry [S3, unofficial]. A mask of `0` marks the node as a leaf [S3, unofficial].
++2. **Child Pointer:** An index pointing to the first child in a contiguous memory block that actually contains geometry [S3, unofficial]. The number of allocated children equals the population count of the valid mask [S3, S5, unofficial].
++3. **Leaf Data:** For leaf nodes, this stores the voxel content, typically an SDF value encoded as an 8-bit signed normalized integer (snorm) where a value of `1` encodes `0.5` interior voxel diagonals, clamped to $[-1, 1]$ [S1, unofficial]. Optionally, it stores contour data consisting of two parallel planes bounding the surface within the voxel [S5, unofficial].
+ 
+ **Layout Details:**
+-*   Nodes are stored compactly. The bitmasks describe the spatial relation between parent and children [S5, unofficial].
+-*   The tree is often split into 'blocks' with relative pointers to support out-of-core streaming [S5, unofficial].
+-*   Leaf voxels are not stored directly as separate entities; their state is implied by the parent's valid mask and the absence of further children [S5, unofficial].
++Nodes are stored compactly in linear memory, often split into streaming blocks with relative pointers [S5, unofficial]. The bitmasks implicitly describe the spatial relationship between parent and children, eliminating the need for explicit coordinate storage per node [S5, unofficial]. Leaf voxels are not stored as separate entities; their existence is implied by the parent's valid mask and the absence of further subdivision [S5, unofficial].
+ 
+ **Algorithm: Construction**
+-1.  Initialize an empty root node.
+-2.  For each voxel in the input volume:
+-    a. Determine the path from the root to the leaf corresponding to the voxel's position.
+-    b. If the path does not exist, create intermediate nodes as needed.
+-    c. At the leaf level, store the voxel data (SDF/Color).
+-    d. Update the `valid_mask` of all ancestor nodes along the path to include the new child.
+-    e. Update the `child_pointer` of ancestors if the new child is the first allocated child for that parent.
+-3.  Terminate the tree at any node where all potential leaf nodes contain the same data (all empty or all identical) [S4, unofficial].
++1. Initialize an empty root node with a valid mask of `0` [S4, unofficial].
++2. For each voxel in the input volume:
++   a. Compute the path from the root to the target leaf by recursively selecting the octant containing the voxel's center [S3, unofficial].
++   b. If an intermediate node does not exist, allocate it and initialize its valid mask to `0` [S4, unofficial].
++   c. At the target leaf, store the voxel data (SDF or color) [S3, S4, unofficial].
++   d. Update the valid mask of all ancestor nodes along the path by setting the bit corresponding to the new child [S3, unofficial].
++   e. Update the child pointer of ancestors if the new child is the first allocated child for that parent [S3, unofficial].
++3. Terminate the tree at any node where all potential leaf nodes contain identical data (all empty or all identical type) [S4, unofficial].
+ 
+ **Algorithm: Ray Traversal (Shader Implementation)**
+-Traversal occurs entirely in shader code [S1, unofficial]. The index of the next node is found by flipping bits of the current node index based on ray direction [S5, unofficial].
++Traversal occurs entirely in shader code [S1, unofficial]. The index of the next node is found by bit manipulation of the current node index based on ray direction [S5, unofficial]. A stack maintains the path from the root to the current node for backtracking [S5, unofficial].
+ 
+ ```python
+-def traverse_svo(ray_origin, ray_direction, root_index, max_depth):
+-    # Stack to maintain the path from root to current node
+-    path_stack = [root_index]
+-    current_node_index = root_index
+-    
+-    # Initial bounds check (optional, depends on implementation)
+-    if not is_node_valid(current_node_index):
+-        return None
++def traverse_svo(ray_origin, ray_direction, root_index, max_depth, voxel_size_root, nodes, valid_masks, child_pointers, leaf_data):
++    t = 0.0
++    t_max = float('inf')
++    stack = [root_index]
++    current_idx = root_index
++    current_voxel_size = voxel_size_root
+ 
+-    for depth in range(max_depth):
+-        # 1. Get node data
+-        node = get_node_data(current_node_index)
++    while stack:
++        current_idx = stack.pop()
+         
+-        # 2. Check if leaf or has children
+-        if node.valid_mask == 0:
+-            # Leaf node: perform intersection test
+-            # If contours are stored, use them for tighter bounds
+-            hit = ray_intersect_voxel(ray_origin, ray_direction, node.data)
+-            if hit:
+-                return hit
++        mask = valid_masks[current_idx]
++        
++        if mask == 0:
++            # Leaf node: test intersection with voxel bounds
++            hit_t = ray_voxel_intersection(ray_origin, ray_direction, current_idx, current_voxel_size)
++            if hit_t is not None and hit_t < t_max:
++                t_max = hit_t
++                return (current_idx, hit_t)
++            continue
++
++        # Internal node: determine which octant the ray enters first
++        child_offset = compute_ray_octant(ray_origin, ray_direction, current_idx, current_voxel_size)
++        
++        # Compute child index using bit-flip trick (Laine & Karras)
++        child_idx = (current_idx << 3) | child_offset
++        
++        # Check if child exists (bit set in mask)
++        if (mask >> child_offset) & 1:
++            # Update ray t for the child's entry point
++            t = compute_child_entry_t(ray_origin, ray_direction, current_idx, current_voxel_size, child_offset)
++            if t < t_max:
++                stack.append(current_idx)
++                stack.append(child_idx)
++                current_idx = child_idx
++                current_voxel_size /= 2.0
+             else:
+-                # Backtrack
+-                if not path_stack:
+-                    return None
+-                current_node_index = path_stack.pop()
+                 continue
+-        
+-        # 3. Determine which children to visit
+-        # Calculate child indices based on ray direction and current position
+-        # The index of the next node can be found by flipping bits of the current node index
+-        # depending on the ray direction [S5, unofficial]
+-        
+-        # Identify children intersected by ray
+-        intersected_children = get_intersected_children(current_node_index, ray_origin, ray_direction)
+-        
+-        # Filter by valid mask
+-        candidates = intersected_children & node.valid_mask
+-        
+-        if candidates == 0:
+-            # No valid children in this direction
+-            if not path_stack:
+-                return None
+-            current_node_index = path_stack.pop()
++        else:
+             continue
+-            
+-        # Push current node to stack before descending
+-        path_stack.append(current_node_index)
+-        
+-        # Select the first candidate child (or process all if needed for transparency)
+-        # Typically, we pick the closest child along the ray
+-        next_child_index = get_first_set_bit_index(candidates)
+-        
+-        # Update ray origin for next step (optional, depending on traversal style)
+-        # In many SVO implementations, the ray is kept global, and node indices encode position
+-        current_node_index = next_child_index
+ 
+     return None
++
++def ray_voxel_intersection(origin, direction, node_idx, voxel_size):
++    # Standard slab method handling zero direction components
++    inv_dir = [1.0/d if d != 0.0 else float('inf') for d in direction]
++    base = node_idx * voxel_size
++    t_min = max((base[i] - origin[i]) * inv_dir[i] for i in range(3))
++    t_max = min((base[i] + voxel_size - origin[i]) * inv_dir[i] for i in range(3))
++    return t_min if t_min <= t_max else None
++
++def compute_ray_octant(origin, direction, node_idx, voxel_size):
++    # Determine which of the 8 octants the ray enters first
++    base = node_idx * voxel_size
++    center = base + voxel_size / 2.0
++    offset = 0
++    for i in range(3):
++        if direction[i] * (origin[i] - center[i]) < 0:
++            offset |= (1 << i)
++    return offset
++
++def compute_child_entry_t(origin, direction, node_idx, voxel_size, child_offset):
++    # Calculate entry t into the child voxel
++    base = node_idx * voxel_size
++    child_base = base
++    for i in range(3):
++        if (child_offset >> i) & 1:
++            child_base += voxel_size / 2.0
++    inv_dir = [1.0/d if d != 0.0 else float('inf') for d in direction]
++    t = max((child_base[i] - origin[i]) * inv_dir[i] for i in range(3))
++    return t
+ ```
+ 
+ **Parameters:**
+ *   **SDF Precision:** 8-bit snorm [S1, unofficial].
+-*   **Subdivision Ratio:** 1:2 per axis (8 children per parent) [S2, unofficial].
+-*   **Max Depth:** Determined by required resolution and memory constraints.
++*   **Subdivision Ratio:** 1:2 per axis, yielding 8 children per parent [S2, unofficial].
++*   **Max Depth:** Determined by required resolution and memory constraints [G].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Interpolation Artifacts:** Standard SVO lacks interpolation and filtering, causing popping artifacts when transitioning between levels and aliasing at distance or close to the viewpoint [S3, unofficial]. This is often mitigated by screen-space blurring or merging LODs via a stitching algorithm to achieve C0-continuity [S3, unofficial].
++*   **Interpolation Artifacts:** Standard SVO lacks interpolation and filtering, causing popping artifacts when transitioning between levels and aliasing at distance or close to the viewpoint [S3, unofficial]. This is mitigated by screen-space blurring or merging LODs via a stitching algorithm to achieve C0-continuity [S3, unofficial].
+ *   **Dynamic Updates:** Adding, deleting, or modifying blocks is expensive, potentially requiring a large part of the octree to be rebuilt [S4, unofficial].
+ *   **Cache Friendliness:** Octrees are harder to make cache-friendly compared to flat structures [S2, unofficial].

@@ -1,0 +1,2850 @@
+# blender-kitti
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+| ![KITTI Point Cloud](img/blender_kitti_render_point_cloud_main.png?raw=true "Main view") |![KITTI Point Cloud](img/blender_kitti_render_point_cloud_top.png?raw=true "Top view") |
+|:-------------------------:|:-------------------------:|
+| ![KITTI Point Cloud](img/blender_kitti_render_voxels_main.png?raw=true "Main view voxels") |![KITTI Point Cloud](img/blender_kitti_render_voxels_top.png?raw=true "Top view voxels") |
+| ![KITTI Scene Flow](img/blender_kitti_render_scene_flow_main.png?raw=true "Main view scene flow") |![KITTI Scene Flow](img/blender_kitti_render_scene_flow_top.png?raw=true "Top view scene flow") |
+| ![KITTI Bounding Boxes](img/blender_kitti_render_boxes_main.png?raw=true "Main view boxes") |![KITTI Bounding Boxes](img/blender_kitti_render_boxes_top.png?raw=true "Top view bounding boxes") |
+
+## Update (2025):
+* Now uses the official `bpy` package published on PyPI. Both headless rendering and development are much more convenient.
+* Fixed compatibility for **Blender 4.5**
+* Switched to **uv** for project management
+* Changed texture image shape for better GPU compatibility
+
+## About
+
+`blender-kitti` contains utilities to create and render large particle collections in Blender (voxel grids, point clouds) with per-particle color information.
+This project has two goals:
+* **Exactness**. Particles are created at the exact coordinates you provide and colors match the specified RGB values. Every particle can be colored individually.
+* **Performance**. Creating a 100k-point point cloud should be on the order of seconds. Fast enough for practical, altough offline, renders.
+
+These properties make `blender-kitti` useful for rendering large-scale datasets such as KITTI (hence the name) and similar data. This repository is intentionally a toolbox of techniques rather than a one-size-fits-all visualization package. You will probably need to adapt the snippets to your use case.
+There are example scripts that reproduce the demo images. use them to verify your installation and as a starting point for changes.
+
+## Render demo images
+
+You can use `uv` to run the blender kitti examples script.
+By default, output images are created in `blender_kitti_examples/img/`.
+```
+uv run blender_kitti_render_demo point_cloud
+uv run blender_kitti_render_demo voxels
+uv run blender_kitti_render_demo scene_flow
+uv run blender_kitti_render_demo boxes
+```
+
+## Installation into Blender's bundled Python
+If you want to work interactively inside Blender's GUI, install the package into Blender's bundled Python virtualenv.
+```
+# Change into your Blender installation's python directory, e.g.:
+# cd /opt/blender-2.90.1-linux64/2.90/python
+$ cd <blender_directory>/<blender_version>/python
+
+# Ensure that pip available
+$ ./bin/python3.11 lib/python3.11/ensurepip
+
+# Install the package in editable mode
+$ ./bin/python3.11 -m pip install -e <path_to_blender_kitti>
+
+```
+
+## Work on a scene in Blender
+
+You can import and use `blender-kitti` in the Python console inside the Blender GUI to manipulate a scene interactively.
+
+```
+# Create a random [Nx3] numpy array and add as point cloud to the scene.
+import bpy
+import numpy as np
+from blender_kitti import add_point_cloud
+
+# create some points
+points = np.random.normal(loc=0.0, scale=2.0, size=(100, 3))
+
+# get current scene
+scene = bpy.context.scene
+
+# create point cloud object and link to scene
+add_point_cloud(points=points, scene=scene, particle_radius=0.2)
+```
+
+Result:
+
+![KITTI Point Cloud](img/demo_point_cloud_random.png?raw=true "Main view")
+
+## Ideas for future development
+
+* Track created objects/meshes/images so entire scenes can be cleaned up programmatically.
+* Handle name clashes or optionally overwrite existing objects.
+* Allow specifying per-particle rotation/scale.
+* Design a small API for common usecases.
+
+### blender_kitti/__init__.py
+```
+# -*- coding: utf-8 -*-
+
+__author__ = """Christoph Rist"""
+__email__ = "c.rist@posteo.de"
+
+from .blender_kitti import add_objects_from_data, extract_data_tasks_from_file
+from .particles import add_voxels, add_point_cloud, add_flow_mesh, add_boxes
+from .scene_setup import setup_scene, add_cameras_default
+from .system_setup import enable_devices
+from .object_spotlight import add_spotlight_ground
+from .cli import process_file
+import numpy as np
+
+
+__all__ = [
+    "add_boxes",
+    "add_cameras_default",
+    "add_flow_mesh",
+    "add_objects_from_data",
+    "add_point_cloud",
+    "add_spotlight_ground",
+    "add_voxels",
+    "enable_devices",
+    "extract_data_tasks_from_file",
+    "process_file",
+    "setup_scene",
+]
+
+
+def calc_distances(p0, points):
+    return ((p0 - points) ** 2).sum(axis=1)
+
+
+def furthest_point_sampling_thresh(pts, dist_thresh: float = 0.1):
+    farthest_pts = []
+    farthest_pts_idxs = []
+    first_idx = np.random.randint(len(pts))
+    farthest_pts_idxs.append(first_idx)
+    farthest_pts.append(pts[first_idx])
+    distances = calc_distances(farthest_pts[0], pts)
+    while True:
+        farthest_pt_idx = np.argmax(distances)
+        if distances[farthest_pt_idx] < dist_thresh:
+            break
+        farthest_pts.append(pts[farthest_pt_idx])
+        farthest_pts_idxs.append(farthest_pt_idx)
+        distances = np.minimum(distances, calc_distances(farthest_pts[-1], pts))
+    return np.stack(farthest_pts, axis=0), np.array(farthest_pts_idxs)
+```
+
+### blender_kitti/blender_kitti.py
+```
+# -*- coding: utf-8 -*-
+"""
+
+"""
+import typing
+import logging
+import re
+import pathlib
+
+import numpy as np
+
+from collections import defaultdict
+from ruamel.yaml import YAML
+
+from .particles import add_point_cloud, add_voxels, add_voxel_list
+from .mesh import add_object_from_mesh
+from .scene_setup import setup_scene
+from .object_spotlight import add_spotlight_ground
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter(
+    fmt="%(asctime)s - %(levelname)s - %(module)s - %(message)s"
+)
+handler = logging.StreamHandler()
+handler.setFormatter(formatter)
+handler.setLevel(logging.INFO)
+logger.addHandler(handler)
+
+"""
+TYPE+INSTANCE_NAME+ARG_NAME/OPTIONAL_DICT_KEY
+e.g. 'point_cloud+some_name+points
+e.g. 'mesh+some_name+vertices
+e.g. 'mesh+some_name+vertex_colors/semantics
+"""
+regex_key = re.compile(
+    r"([a-zA-Z0-9_-]+)\+([a-zA-Z0-9_-]+)\+([a-zA-Z0-9_-]+)(?:\/([a-zA-Z0-9_-]+))?"
+)
+
+global_config_key = "config"
+data_structures = {
+    "point_cloud": add_point_cloud,
+    "voxels": add_voxels,
+    "voxel_list": add_voxel_list,
+    "mesh": add_object_from_mesh,
+}
+
+
+def add_objects_from_data(tasks: {str: typing.Any}, scene):
+
+    results = {}
+    for instance_name, (task_f, task_kwargs) in tasks.items():
+        if "scene" not in task_kwargs:
+            task_kwargs["scene"] = scene
+        try:
+            results[instance_name] = task_f(**task_kwargs)
+        except ImportError:
+            logger.warning(
+                "Imports for '{}' unavailable. Ignoring task.".format(instance_name)
+            )
+        except TypeError as e:
+            logger.warning(
+                "Wrong data format for '{}': {}".format(instance_name, str(e))
+            )
+
+    return results
+
+
+def make_scene_single_object(scene, _config):
+    add_spotlight_ground(scene)
+
+
+def make_scene(
+    config: typing.Union[typing.Dict[str, typing.Any], None] = None,
+    *,
+    fallback_scene_name=None
+):
+    if config is None:
+        config = {}
+
+    # Todo some kind of default?
+    use_background_image = True
+
+    if fallback_scene_name is None:
+        try:
+            scene_name = config["file_desc"]
+        except KeyError:
+            scene_name = "blender_kitti_default"
+    else:
+        scene_name = fallback_scene_name
+
+    def placeholder(_scene, _config):
+        pass
+
+    scene_maker = placeholder
+
+    if "scene_setup" in config:
+        scene_mode = config["scene_setup"]
+        if scene_mode == "single_object":
+            use_background_image = True
+            scene_maker = make_scene_single_object
+        else:
+            raise NotImplementedError()
+
+    if "scene_name" in config:
+        scene_name = config["scene_name"]
+
+    scene = setup_scene(name=scene_name, use_background_image=use_background_image)
+    scene_maker(scene, config)
+    return scene
+
+
+def extract_config_from_data(data) -> dict:
+    try:
+        conf = data[global_config_key]
+        conf = bytes(conf).decode("utf-8")
+        yaml = YAML(typ="safe")
+        return yaml.load(conf)
+    except KeyError:
+        return {}
+
+
+def extract_data_tasks_from_file(
+    filepath: str,
+) -> {str: (typing.Callable, {str: typing.Any})}:
+    logger.info("Processing data file '{}'.".format(filepath))
+    data = np.load(filepath)
+
+    global_config = extract_config_from_data(data)
+
+    def filter_fn(x):
+        if x[1] is None and x[0] != global_config_key:
+            logger.warning("Ignoring unknown entry key '{}'.".format(x[0]))
+        return x[1] is not None
+
+    matches = [(x, regex_key.fullmatch(x)) for x in data.keys()]
+    matches = list(filter(filter_fn, matches))
+    matches = [(data[x[0]], x[1].groups()) for x in matches]
+
+    x = defaultdict(lambda: defaultdict(dict))
+    for d, key in matches:
+        if key[3] is None:
+            x[key[0]][key[1]][key[2]] = d
+        else:
+            try:
+                arg_dict = x[key[0]][key[1]][key[2]]
+            except KeyError:
+                arg_dict = {}
+                x[key[0]][key[1]][key[2]] = arg_dict
+
+            arg_dict[key[3]] = d
+
+    try:
+        file_desc = global_config["file_desc"]
+    except KeyError:
+        file_desc = pathlib.Path(filepath).stem
+        global_config["file_desc"] = file_desc
+
+    tasks = {}
+    for data_type, instances in x.items():
+        try:
+            f = data_structures[data_type]
+
+            instance_names = {k: "{}_{}".format(file_desc, k) for k in instances.keys()}
+
+            tasks.update(
+                {
+                    k: (f, {"name_prefix": instance_names[k], **v})
+                    for k, v in instances.items()
+                }
+            )
+
+        except KeyError:
+            logger.warning("Ignoring unknown entry '{}'.".format(data_type))
+
+    def m(task):
+        kwargs = task[1]
+        try:
+            yaml = YAML(typ="safe")
+            kwargs["config"] = yaml.load(kwargs["config"])
+        except KeyError:
+            pass
+        return task
+
+    tasks = {k: m(v) for k, v in tasks.items()}
+    return tasks, global_config
+```
+
+### blender_kitti/cli.py
+```
+#!/bin/env python
+# -*- coding: utf-8 -*-
+""" """
+
+import click
+import logging
+import typing
+
+import bpy
+from ruamel.yaml import YAML
+
+from .blender_kitti import (
+    add_objects_from_data,
+    make_scene,
+    extract_data_tasks_from_file,
+)
+from .system_setup import enable_devices
+from .scene_setup import add_cameras_default
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter(
+    fmt="%(asctime)s - %(levelname)s - %(module)s - %(message)s"
+)
+handler = logging.StreamHandler()
+handler.setFormatter(formatter)
+handler.setLevel(logging.INFO)
+logger.addHandler(handler)
+
+
+def process_file(filename: str, scene=None):
+    tasks, global_config = extract_data_tasks_from_file(filename)
+    if scene is None:
+        try:
+            scene = make_scene(global_config)
+        except ImportError:
+            logger.warning("Ignoring scene setup.")
+            scene, cameras = None, None
+
+    try:
+        add_objects_from_data(tasks, scene)
+    except ImportError:
+        pass
+    return scene, global_config
+
+
+def make_scene_from_data_files(render_config: typing.Union[str, None], filenames):
+    if render_config is not None:
+        yaml = YAML(typ="safe")
+        config = yaml.load(render_config)
+    else:
+        config = {}
+
+    tasks = {}
+
+    if isinstance(filenames, str):
+        filenames = [filenames]
+
+    for filename in filenames:
+        tasks_from_file, config_from_file = extract_data_tasks_from_file(filename)
+        # Todo check for conflicts and abort if necessary
+        tasks.update(tasks_from_file)
+        config.update(config_from_file)
+
+    try:
+        scene = make_scene(config)
+    except ImportError:
+        logger.warning("Ignoring scene setup.")
+        scene = None
+
+    if "whitelist" in config:
+        # only keep the instances that are in the whitelist
+        instance_whitelist = set(config["whitelist"])
+        tasks = dict((k, v) for k, v in tasks.items() if k in instance_whitelist)
+
+    add_objects_from_data(tasks, scene)
+
+    enable_gpu_rendering = True
+    if enable_gpu_rendering:
+        enable_devices()
+        scene.cycles.device = "GPU"
+
+    return scene, config
+
+
+def render_scene():
+    bpy.ops.render.render(write_still=True)
+
+
+@click.command(
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True}
+)
+@click.option("--python", required=False)
+@click.option("--background/--no-background", required=False)
+@click.option("--render_config", default=None)
+@click.argument("filenames", type=click.Path(exists=True), nargs=-1)
+def render(python, background, render_config: typing.Union[str, None], filenames):
+    """ """
+    scene, config = make_scene_from_data_files(render_config, filenames)
+    add_cameras_default(scene)
+
+    scene.render.filepath = "/tmp/test.png"
+    render_scene()
+```
+
+### blender_kitti/colormap_turbo.py
+```
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# Copyright 2019 Google LLC.
+# SPDX-License-Identifier: Apache-2.0
+
+# Author: Anton Mikhailov
+"""
+Turbo colormap
+https://ai.googleblog.com/2019/08/turbo-improved-rainbow-colormap-for.html
+"""
+
+turbo_colormap_data = [
+    [0.18995, 0.07176, 0.23217],
+    [0.19483, 0.08339, 0.26149],
+    [0.19956, 0.09498, 0.29024],
+    [0.20415, 0.10652, 0.31844],
+    [0.20860, 0.11802, 0.34607],
+    [0.21291, 0.12947, 0.37314],
+    [0.21708, 0.14087, 0.39964],
+    [0.22111, 0.15223, 0.42558],
+    [0.22500, 0.16354, 0.45096],
+    [0.22875, 0.17481, 0.47578],
+    [0.23236, 0.18603, 0.50004],
+    [0.23582, 0.19720, 0.52373],
+    [0.23915, 0.20833, 0.54686],
+    [0.24234, 0.21941, 0.56942],
+    [0.24539, 0.23044, 0.59142],
+    [0.24830, 0.24143, 0.61286],
+    [0.25107, 0.25237, 0.63374],
+    [0.25369, 0.26327, 0.65406],
+    [0.25618, 0.27412, 0.67381],
+    [0.25853, 0.28492, 0.69300],
+    [0.26074, 0.29568, 0.71162],
+    [0.26280, 0.30639, 0.72968],
+    [0.26473, 0.31706, 0.74718],
+    [0.26652, 0.32768, 0.76412],
+    [0.26816, 0.33825, 0.78050],
+    [0.26967, 0.34878, 0.79631],
+    [0.27103, 0.35926, 0.81156],
+    [0.27226, 0.36970, 0.82624],
+    [0.27334, 0.38008, 0.84037],
+    [0.27429, 0.39043, 0.85393],
+    [0.27509, 0.40072, 0.86692],
+    [0.27576, 0.41097, 0.87936],
+    [0.27628, 0.42118, 0.89123],
+    [0.27667, 0.43134, 0.90254],
+    [0.27691, 0.44145, 0.91328],
+    [0.27701, 0.45152, 0.92347],
+    [0.27698, 0.46153, 0.93309],
+    [0.27680, 0.47151, 0.94214],
+    [0.27648, 0.48144, 0.95064],
+    [0.27603, 0.49132, 0.95857],
+    [0.27543, 0.50115, 0.96594],
+    [0.27469, 0.51094, 0.97275],
+    [0.27381, 0.52069, 0.97899],
+    [0.27273, 0.53040, 0.98461],
+    [0.27106, 0.54015, 0.98930],
+    [0.26878, 0.54995, 0.99303],
+    [0.26592, 0.55979, 0.99583],
+    [0.26252, 0.56967, 0.99773],
+    [0.25862, 0.57958, 0.99876],
+    [0.25425, 0.58950, 0.99896],
+    [0.24946, 0.59943, 0.99835],
+    [0.24427, 0.60937, 0.99697],
+    [0.23874, 0.61931, 0.99485],
+    [0.23288, 0.62923, 0.99202],
+    [0.22676, 0.63913, 0.98851],
+    [0.22039, 0.64901, 0.98436],
+    [0.21382, 0.65886, 0.97959],
+    [0.20708, 0.66866, 0.97423],
+    [0.20021, 0.67842, 0.96833],
+    [0.19326, 0.68812, 0.96190],
+    [0.18625, 0.69775, 0.95498],
+    [0.17923, 0.70732, 0.94761],
+    [0.17223, 0.71680, 0.93981],
+    [0.16529, 0.72620, 0.93161],
+    [0.15844, 0.73551, 0.92305],
+    [0.15173, 0.74472, 0.91416],
+    [0.14519, 0.75381, 0.90496],
+    [0.13886, 0.76279, 0.89550],
+    [0.13278, 0.77165, 0.88580],
+    [0.12698, 0.78037, 0.87590],
+    [0.12151, 0.78896, 0.86581],
+    [0.11639, 0.79740, 0.85559],
+    [0.11167, 0.80569, 0.84525],
+    [0.10738, 0.81381, 0.83484],
+    [0.10357, 0.82177, 0.82437],
+    [0.10026, 0.82955, 0.81389],
+    [0.09750, 0.83714, 0.80342],
+    [0.09532, 0.84455, 0.79299],
+    [0.09377, 0.85175, 0.78264],
+    [0.09287, 0.85875, 0.77240],
+    [0.09267, 0.86554, 0.76230],
+    [0.09320, 0.87211, 0.75237],
+    [0.09451, 0.87844, 0.74265],
+    [0.09662, 0.88454, 0.73316],
+    [0.09958, 0.89040, 0.72393],
+    [0.10342, 0.89600, 0.71500],
+    [0.10815, 0.90142, 0.70599],
+    [0.11374, 0.90673, 0.69651],
+    [0.12014, 0.91193, 0.68660],
+    [0.12733, 0.91701, 0.67627],
+    [0.13526, 0.92197, 0.66556],
+    [0.14391, 0.92680, 0.65448],
+    [0.15323, 0.93151, 0.64308],
+    [0.16319, 0.93609, 0.63137],
+    [0.17377, 0.94053, 0.61938],
+    [0.18491, 0.94484, 0.60713],
+    [0.19659, 0.94901, 0.59466],
+    [0.20877, 0.95304, 0.58199],
+    [0.22142, 0.95692, 0.56914],
+    [0.23449, 0.96065, 0.55614],
+    [0.24797, 0.96423, 0.54303],
+    [0.26180, 0.96765, 0.52981],
+    [0.27597, 0.97092, 0.51653],
+    [0.29042, 0.97403, 0.50321],
+    [0.30513, 0.97697, 0.48987],
+    [0.32006, 0.97974, 0.47654],
+    [0.33517, 0.98234, 0.46325],
+    [0.35043, 0.98477, 0.45002],
+    [0.36581, 0.98702, 0.43688],
+    [0.38127, 0.98909, 0.42386],
+    [0.39678, 0.99098, 0.41098],
+    [0.41229, 0.99268, 0.39826],
+    [0.42778, 0.99419, 0.38575],
+    [0.44321, 0.99551, 0.37345],
+    [0.45854, 0.99663, 0.36140],
+    [0.47375, 0.99755, 0.34963],
+    [0.48879, 0.99828, 0.33816],
+    [0.50362, 0.99879, 0.32701],
+    [0.51822, 0.99910, 0.31622],
+    [0.53255, 0.99919, 0.30581],
+    [0.54658, 0.99907, 0.29581],
+    [0.56026, 0.99873, 0.28623],
+    [0.57357, 0.99817, 0.27712],
+    [0.58646, 0.99739, 0.26849],
+    [0.59891, 0.99638, 0.26038],
+    [0.61088, 0.99514, 0.25280],
+    [0.62233, 0.99366, 0.24579],
+    [0.63323, 0.99195, 0.23937],
+    [0.64362, 0.98999, 0.23356],
+    [0.65394, 0.98775, 0.22835],
+    [0.66428, 0.98524, 0.22370],
+    [0.67462, 0.98246, 0.21960],
+    [0.68494, 0.97941, 0.21602],
+    [0.69525, 0.97610, 0.21294],
+    [0.70553, 0.97255, 0.21032],
+    [0.71577, 0.96875, 0.20815],
+    [0.72596, 0.96470, 0.20640],
+    [0.73610, 0.96043, 0.20504],
+    [0.74617, 0.95593, 0.20406],
+    [0.75617, 0.95121, 0.20343],
+    [0.76608, 0.94627, 0.20311],
+    [0.77591, 0.94113, 0.20310],
+    [0.78563, 0.93579, 0.20336],
+    [0.79524, 0.93025, 0.20386],
+    [0.80473, 0.92452, 0.20459],
+    [0.81410, 0.91861, 0.20552],
+    [0.82333, 0.91253, 0.20663],
+    [0.83241, 0.90627, 0.20788],
+    [0.84133, 0.89986, 0.20926],
+    [0.85010, 0.89328, 0.21074],
+    [0.85868, 0.88655, 0.21230],
+    [0.86709, 0.87968, 0.21391],
+    [0.87530, 0.87267, 0.21555],
+    [0.88331, 0.86553, 0.21719],
+    [0.89112, 0.85826, 0.21880],
+    [0.89870, 0.85087, 0.22038],
+    [0.90605, 0.84337, 0.22188],
+    [0.91317, 0.83576, 0.22328],
+    [0.92004, 0.82806, 0.22456],
+    [0.92666, 0.82025, 0.22570],
+    [0.93301, 0.81236, 0.22667],
+    [0.93909, 0.80439, 0.22744],
+    [0.94489, 0.79634, 0.22800],
+    [0.95039, 0.78823, 0.22831],
+    [0.95560, 0.78005, 0.22836],
+    [0.96049, 0.77181, 0.22811],
+    [0.96507, 0.76352, 0.22754],
+    [0.96931, 0.75519, 0.22663],
+    [0.97323, 0.74682, 0.22536],
+    [0.97679, 0.73842, 0.22369],
+    [0.98000, 0.73000, 0.22161],
+    [0.98289, 0.72140, 0.21918],
+    [0.98549, 0.71250, 0.21650],
+    [0.98781, 0.70330, 0.21358],
+    [0.98986, 0.69382, 0.21043],
+    [0.99163, 0.68408, 0.20706],
+    [0.99314, 0.67408, 0.20348],
+    [0.99438, 0.66386, 0.19971],
+    [0.99535, 0.65341, 0.19577],
+    [0.99607, 0.64277, 0.19165],
+    [0.99654, 0.63193, 0.18738],
+    [0.99675, 0.62093, 0.18297],
+    [0.99672, 0.60977, 0.17842],
+    [0.99644, 0.59846, 0.17376],
+    [0.99593, 0.58703, 0.16899],
+    [0.99517, 0.57549, 0.16412],
+    [0.99419, 0.56386, 0.15918],
+    [0.99297, 0.55214, 0.15417],
+    [0.99153, 0.54036, 0.14910],
+    [0.98987, 0.52854, 0.14398],
+    [0.98799, 0.51667, 0.13883],
+    [0.98590, 0.50479, 0.13367],
+    [0.98360, 0.49291, 0.12849],
+    [0.98108, 0.48104, 0.12332],
+    [0.97837, 0.46920, 0.11817],
+    [0.97545, 0.45740, 0.11305],
+    [0.97234, 0.44565, 0.10797],
+    [0.96904, 0.43399, 0.10294],
+    [0.96555, 0.42241, 0.09798],
+    [0.96187, 0.41093, 0.09310],
+    [0.95801, 0.39958, 0.08831],
+    [0.95398, 0.38836, 0.08362],
+    [0.94977, 0.37729, 0.07905],
+    [0.94538, 0.36638, 0.07461],
+    [0.94084, 0.35566, 0.07031],
+    [0.93612, 0.34513, 0.06616],
+    [0.93125, 0.33482, 0.06218],
+    [0.92623, 0.32473, 0.05837],
+    [0.92105, 0.31489, 0.05475],
+    [0.91572, 0.30530, 0.05134],
+    [0.91024, 0.29599, 0.04814],
+    [0.90463, 0.28696, 0.04516],
+    [0.89888, 0.27824, 0.04243],
+    [0.89298, 0.26981, 0.03993],
+    [0.88691, 0.26152, 0.03753],
+    [0.88066, 0.25334, 0.03521],
+    [0.87422, 0.24526, 0.03297],
+    [0.86760, 0.23730, 0.03082],
+    [0.86079, 0.22945, 0.02875],
+    [0.85380, 0.22170, 0.02677],
+    [0.84662, 0.21407, 0.02487],
+    [0.83926, 0.20654, 0.02305],
+    [0.83172, 0.19912, 0.02131],
+    [0.82399, 0.19182, 0.01966],
+    [0.81608, 0.18462, 0.01809],
+    [0.80799, 0.17753, 0.01660],
+    [0.79971, 0.17055, 0.01520],
+    [0.79125, 0.16368, 0.01387],
+    [0.78260, 0.15693, 0.01264],
+    [0.77377, 0.15028, 0.01148],
+    [0.76476, 0.14374, 0.01041],
+    [0.75556, 0.13731, 0.00942],
+    [0.74617, 0.13098, 0.00851],
+    [0.73661, 0.12477, 0.00769],
+    [0.72686, 0.11867, 0.00695],
+    [0.71692, 0.11268, 0.00629],
+    [0.70680, 0.10680, 0.00571],
+    [0.69650, 0.10102, 0.00522],
+    [0.68602, 0.09536, 0.00481],
+    [0.67535, 0.08980, 0.00449],
+    [0.66449, 0.08436, 0.00424],
+    [0.65345, 0.07902, 0.00408],
+    [0.64223, 0.07380, 0.00401],
+    [0.63082, 0.06868, 0.00401],
+    [0.61923, 0.06367, 0.00410],
+    [0.60746, 0.05878, 0.00427],
+    [0.59550, 0.05399, 0.00453],
+    [0.58336, 0.04931, 0.00486],
+    [0.57103, 0.04474, 0.00529],
+    [0.55852, 0.04028, 0.00579],
+    [0.54583, 0.03593, 0.00638],
+    [0.53295, 0.03169, 0.00705],
+    [0.51989, 0.02756, 0.00780],
+    [0.50664, 0.02354, 0.00863],
+    [0.49321, 0.01963, 0.00955],
+    [0.47960, 0.01583, 0.01055],
+]
+```
+
+### blender_kitti/material_shader.py
+```
+# -*- coding: utf-8 -*-
+""""""
+
+import typing
+
+import bpy
+
+from .colormap_turbo import turbo_colormap_data
+
+
+class NodeRGBColorSelect:
+    COLOR_BLACK = (0.0, 0.0, 0.0, 1.0)
+    VALUES = {
+        "input": 0.0,
+        "default": 1.0,
+        "mix": 0.5,
+    }
+
+    def __init__(
+        self,
+        nodes,
+        *,
+        default_color=COLOR_BLACK,
+        input_color=COLOR_BLACK,
+        location=(1200, 0),
+    ):
+        self.node = nodes.new(type="ShaderNodeMixRGB")
+        self.node.location = location
+        self.node.inputs[1].default_value = input_color
+        self.node.inputs[2].default_value = default_color
+
+        self.set("input")
+
+    @property
+    def color_input(self):
+        return self.node.inputs[1]
+
+    @property
+    def color_output(self):
+        return self.node.outputs[0]
+
+    def set(self, value: typing.Union[float, str]):
+        if isinstance(value, str):
+            self.node.inputs[0].default_value = NodeRGBColorSelect.VALUES[value]
+        else:
+            self.node.inputs[0].default_value = value
+
+
+class NodeOutput:
+    """Build a default shader/material node tree
+
+    * Select between input color (some particle mapping) and unified default color
+    * Select between principled shader output and dummy 'true'-color output
+    """
+
+    MODES = {"shader": 1.0, "truecolor": 0.0}
+
+    def __init__(
+        self,
+        node_tree,
+        *,
+        default_color=NodeRGBColorSelect.COLOR_BLACK,
+        input_color=NodeRGBColorSelect.COLOR_BLACK,
+        location=(0, 0),
+        input_color_link=None,
+    ):
+        self.base_location_x = location[0]
+        self.base_location_y = location[1]
+
+        self.node_rgb_color_select = NodeRGBColorSelect(
+            node_tree.nodes,
+            default_color=default_color,
+            input_color=input_color,
+            location=(self.base_location_x, self.base_location_y),
+        )
+
+        self.node_bsdf = node_tree.nodes.new(type="ShaderNodeBsdfPrincipled")
+        self.node_bsdf.inputs[7].default_value = 0.65  # roughness
+        self.node_bsdf.inputs[12].default_value = 0.0  # clearcoat
+        self.node_bsdf.inputs[13].default_value = 0.25  # clearcoat roughness
+        self.node_bsdf.location = self.base_location_x + 200, self.base_location_y
+
+        self.node_mix_shader = node_tree.nodes.new(type="ShaderNodeMixShader")
+        self.node_mix_shader.location = (
+            self.base_location_x + 480,
+            self.base_location_y + 70,
+        )
+        self.node_mix_shader.inputs[0].default_value = self.MODES["shader"]
+
+        self.node_output = node_tree.nodes.new(type="ShaderNodeOutputMaterial")
+        self.node_output.location = self.base_location_x + 650, self.base_location_y
+
+        # link nodes
+        links = node_tree.links
+        links.new(self.node_rgb_color_select.color_output, self.node_bsdf.inputs[0])
+        links.new(
+            self.node_rgb_color_select.color_output, self.node_mix_shader.inputs[1]
+        )
+        links.new(self.node_bsdf.outputs[0], self.node_mix_shader.inputs[2])
+        links.new(self.node_mix_shader.outputs[0], self.node_output.inputs[0])
+
+        if input_color_link is not None:
+            links.new(input_color_link, self.node_rgb_color_select.color_input)
+
+    def set(self, value: typing.Union[float, str]):
+        return self.node_rgb_color_select.set(value)
+
+    def mode(self, value: str):
+        self.node_mix_shader.inputs[0].default_value = self.MODES[value]
+
+    @property
+    def color_input(self):
+        return self.node_rgb_color_select.color_input
+
+
+def make_color_ramp_node(nodes, colormap):
+    node = nodes.new(type="ShaderNodeValToRGB")
+    color_ramp_elements = node.color_ramp.elements
+
+    n_stops = len(colormap)
+    for i, color in enumerate(colormap):
+        element = color_ramp_elements.new(position=i / (n_stops - 1))
+        element.color = color + [1.0]
+
+    return node
+
+
+def make_pseudo_color(
+    node_tree,
+    colormap=turbo_colormap_data,
+    min_value: float = 0.0,
+    max_value: float = 1.0,
+    location=(0, 0),
+):
+    nodes = node_tree.nodes
+    links = node_tree.links
+
+    node_add = nodes.new(type="ShaderNodeMath")
+    node_add.inputs[1].default_value = -min_value
+    node_add.operation = "ADD"
+    node_add.location = location
+
+    node_scale = nodes.new(type="ShaderNodeMath")
+    node_scale.inputs[1].default_value = 1 / (max_value - min_value)
+    node_scale.operation = "MULTIPLY"
+    node_scale.location = (location[0] + 200, location[1])
+
+    node_ramp = make_color_ramp_node(nodes, colormap)
+
+    links.new(node_add.outputs[0], node_scale.inputs[0])
+    links.new(node_scale.outputs[0], node_ramp.inputs[0])
+
+    # input / output
+    return node_add.inputs[0], node_ramp.outputs[0]
+
+
+class ColorAttrSelector:
+    def __init__(
+        self,
+        node_tree,
+        *,
+        vertex_attr_rgb,
+        vertex_attr_scalar,
+        default_color=NodeRGBColorSelect.COLOR_BLACK,
+    ):
+        self._attrs = list(vertex_attr_rgb) + list(vertex_attr_scalar)
+        self._cut = len(vertex_attr_rgb)
+        self._attrs_rgb = vertex_attr_rgb
+        self._attrs_scalar = vertex_attr_scalar
+
+        nodes = node_tree.nodes
+        links = node_tree.links
+
+        self.rgb_attr_node = nodes.new(type="ShaderNodeAttribute")
+        self.rgb_attr_node.location = 0, 0
+        self.rgb_attr_node.attribute_name = "<unset>"
+
+        self.scalar_attr_node = nodes.new(type="ShaderNodeAttribute")
+        self.scalar_attr_node.location = 0, -200
+        self.scalar_attr_node.attribute_name = "<unset>"
+
+        input_scalar, output_pseudo_rgb = make_pseudo_color(node_tree)
+
+        # switch between RGB and scalar
+        self.node_color_switch = nodes.new(type="ShaderNodeMixRGB")
+        self.node_color_switch.location = 800, 0
+        self.node_color_switch.inputs[0].default_value = 0.0
+
+        # mix between attr and default
+        self.node_color_default = nodes.new(type="ShaderNodeMixRGB")
+        self.node_color_default.location = 1000, 0
+        self.node_color_default.inputs[0].default_value = 0.0  # attr color
+        self.node_color_default.inputs[2].default_value = default_color
+
+        links.new(self.rgb_attr_node.outputs[0], self.node_color_switch.inputs[1])
+
+        links.new(self.scalar_attr_node.outputs[2], input_scalar)
+        links.new(output_pseudo_rgb, self.node_color_switch.inputs[2])
+
+        links.new(self.node_color_switch.outputs[0], self.node_color_default.inputs[1])
+
+    @property
+    def color_output(self):
+        return self.node_color_default.outputs[0]
+
+    def __len__(self):
+        return len(self._attrs)
+
+    def __call__(self, desc: typing.Union[int, str, None]):
+        if desc is None:
+            self.node_color_default.inputs[0].default_value = 1.0
+            return
+
+        if isinstance(desc, int):
+            if desc < 0:
+                # set to default color
+                self.node_color_default.inputs[0].default_value = 1.0
+            else:
+                self.node_color_default.inputs[0].default_value = 0.0
+                target = (
+                    self.rgb_attr_node if desc < self._cut else self.scalar_attr_node
+                )
+                target.attribute_name = self._attrs[desc]
+
+        else:
+            if desc not in self._attrs:
+                raise ValueError("Vertex color names not found.")
+
+            self.node_color_default.inputs[0].default_value = 0.0
+            if desc in self._attrs_rgb:
+                self.rgb_attr_node.attribute_name = desc
+                self.node_color_switch.inputs[0].default_value = 0.0
+            else:
+                self.scalar_attr_node.attribute_name = desc
+                self.node_color_switch.inputs[0].default_value = 1.0
+
+    def __iter__(self):
+        return iter(self._attrs)
+
+    @property
+    def attrs(self):
+        return self._attrs
+
+
+def make_nodes_simple_material(material, base_color):
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    nodes.clear()
+
+    default_output_node = NodeOutput(
+        material.node_tree, input_color=base_color, location=(0, 0)
+    )
+
+    return default_output_node
+
+
+def _make_nodes_uv_mapped_material(node_tree, color_image):
+    nodes = node_tree.nodes
+    # create uv input node
+    node_uv = nodes.new(type="ShaderNodeUVMap")
+    node_uv.location = 0, 0
+    node_uv.from_instancer = True
+    node_uv.location = 0, 0
+    node_sep = nodes.new(type="ShaderNodeSeparateXYZ")
+    node_sep.location = 180, 0
+    node_add_x = nodes.new(type="ShaderNodeMath")
+    node_add_x.inputs[1].default_value = 0.5
+    node_add_x.operation = "ADD"
+    node_add_x.location = 360, 0
+    node_add_y = nodes.new(type="ShaderNodeMath")
+    node_add_y.inputs[1].default_value = 0.5
+    node_add_y.operation = "ADD"
+    node_add_y.location = 450, -200
+
+    node_div_x = nodes.new(type="ShaderNodeMath")
+    node_div_x.inputs[1].default_value = float(color_image.size[0])
+    node_div_x.operation = "DIVIDE"
+    node_div_x.location = 520, 0
+
+    node_div_y = nodes.new(type="ShaderNodeMath")
+    node_div_y.inputs[1].default_value = float(color_image.size[1])
+    node_div_y.operation = "DIVIDE"
+    node_div_y.location = 520, -200
+
+    node_comb = nodes.new(type="ShaderNodeCombineXYZ")
+    node_comb.inputs[2].default_value = 0.0
+    node_comb.location = 700, 0
+
+    node_text = nodes.new(type="ShaderNodeTexImage")
+    node_text.interpolation = "Closest"
+    node_text.extension = "CLIP"
+    node_text.image = color_image
+    node_text.location = 900, 0
+
+    # link nodes
+    links = node_tree.links
+    links.new(node_uv.outputs[0], node_sep.inputs[0])
+    links.new(node_sep.outputs[0], node_add_x.inputs[0])
+    links.new(node_sep.outputs[1], node_add_y.inputs[0])
+    links.new(node_add_x.outputs[0], node_div_x.inputs[0])
+    links.new(node_div_x.outputs[0], node_comb.inputs[0])
+    links.new(node_add_y.outputs[0], node_div_y.inputs[0])
+    links.new(node_div_y.outputs[0], node_comb.inputs[1])
+    links.new(node_comb.outputs[0], node_text.inputs[0])
+    # return color link
+    return node_text.outputs[0]
+
+
+def make_new_nodes_material(material, color_image):
+    material.use_nodes = True
+    material.node_tree.nodes.clear()
+
+    color_link = _make_nodes_uv_mapped_material(material.node_tree, color_image)
+
+    default_output_node = NodeOutput(
+        material.node_tree, input_color_link=color_link, location=(1200, 0)
+    )
+    return default_output_node
+
+
+def add_nodes_to_material(material, color_image):
+    assert color_image.size[1] == 1
+    material.use_nodes = True
+    return _make_nodes_uv_mapped_material(material.node_tree, color_image)
+
+
+def make_nodes_vertex_color_material(
+    material,
+    vertex_attr_rgb: [str],
+    vertex_attr_scalar: [str],
+    default_color,
+    mode: str = "select",
+):
+    if mode not in ["select", "mix"]:
+        raise ValueError("Unknown vertex color mode '{}'.".format(mode))
+
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    nodes.clear()
+
+    links = material.node_tree.links
+
+    def create_attr_input_node(attribute_name: str = "<unset>"):
+        attr_node = nodes.new(type="ShaderNodeAttribute")
+        attr_node.location = 0, 0
+        attr_node.attribute_name = attribute_name
+        return attr_node
+
+    selector = None
+
+    if mode == "mix":
+        # default color input node, if no vertex colors are given
+        node_default_color = nodes.new(type="ShaderNodeRGB")
+        node_default_color.outputs[0].default_value = default_color
+        nodes_input_attrs = list(map(create_attr_input_node, vertex_attr_rgb))
+        raise NotImplementedError()
+
+    elif mode == "select":
+        selector = ColorAttrSelector(
+            material.node_tree,
+            vertex_attr_rgb=vertex_attr_rgb,
+            vertex_attr_scalar=vertex_attr_scalar,
+        )
+
+    # create shader node
+    node_bsdf = nodes.new(type="ShaderNodeBsdfPrincipled")
+    node_bsdf.inputs[7].default_value = 0.65  # roughness
+    node_bsdf.inputs[12].default_value = 1.0  # clearcoat
+    node_bsdf.inputs[13].default_value = 0.50  # clearcoat roughness
+    node_bsdf.location = 1200, 0
+    # create output node
+    node_output = nodes.new(type="ShaderNodeOutputMaterial")
+    node_output.location = 1500, 0
+
+    # link nodes
+    links.new(selector.color_output, node_bsdf.inputs[0])
+    links.new(node_bsdf.outputs[0], node_output.inputs[0])
+
+    return selector
+
+
+def create_or_get_material(name_material: str):
+    try:
+        return bpy.data.materials[name_material]
+    except KeyError:
+        return bpy.data.materials.new(name=name_material)
+
+
+def create_simple_material(base_color, name_material: str):
+    mat = create_or_get_material(name_material)
+    color_selector = make_nodes_simple_material(mat, base_color)
+    return mat, color_selector
+
+
+def create_uv_mapped_material(color_image, name_material: str = "material_point_cloud"):
+    mat = create_or_get_material(name_material)
+    color_selector = make_new_nodes_material(mat, color_image)
+    return mat, color_selector
+
+
+def create_vertex_color_material(
+    vertex_attr_rgb: [str],
+    vertex_attr_scalar: [str],
+    default_color,
+    mode: str = "select",
+    name_material: str = "material_vertex_color",
+):
+    mat = create_or_get_material(name_material)
+    selector = make_nodes_vertex_color_material(
+        mat, vertex_attr_rgb, vertex_attr_scalar, default_color, mode
+    )
+    return mat, selector
+
+
+def create_flow_material(name_material: str):
+    # ### MATERIAL
+    # Vertex color material
+    mat = bpy.data.materials.new(name="VertexColorMaterial")
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    nodes.clear()
+
+    # create attribute input node
+    node_input = nodes.new(type="ShaderNodeAttribute")
+    node_input.location = 0, 0
+    node_input.attribute_name = "color_flow"
+
+    # create attribute input node
+    node_input_grads = nodes.new(type="ShaderNodeAttribute")
+    node_input_grads.location = 0, -200
+    node_input_grads.attribute_name = "color_flow"
+
+    # mix vertex colors with simple reconstruction material
+    node_mix_rgb = nodes.new(type="ShaderNodeMixRGB")
+    node_mix_rgb.location = 200, 0
+    node_mix_rgb.inputs[0].default_value = 0.0  # all on vertex color
+    node_mix_rgb.inputs[2].default_value = (0.1, 0.1, 0.1, 1.0)
+
+    # hue saturation value node
+    node_color = nodes.new(type="ShaderNodeHueSaturation")
+    node_color.inputs[0].default_value = 0.5
+    node_color.inputs[1].default_value = 1.0
+    node_color.inputs[4].default_value = (1.0, 1.0, 1.0, 1.0)
+
+    node_rgb_sep = nodes.new(type="ShaderNodeSeparateRGB")
+
+    node_grad_value_mult = nodes.new(type="ShaderNodeMath")
+    node_grad_value_mult.inputs[1].default_value = 1.2
+    node_grad_value_mult.operation = "MULTIPLY"
+
+    # mix between sem colors and grad colors
+    node_mix_semgrad = nodes.new(type="ShaderNodeMixRGB")
+    node_mix_semgrad.location = 400, -150
+    node_mix_semgrad.inputs[0].default_value = 0.0  # all on sem vertex color
+
+    # create shader node
+    node_bsdf = nodes.new(type="ShaderNodeBsdfPrincipled")
+    node_bsdf.inputs[7].default_value = 0.65  # roughness
+    node_bsdf.inputs[12].default_value = 1.0  # clearcoat
+    node_bsdf.inputs[13].default_value = 0.50  # clearcoat roughness
+    node_bsdf.location = 620, 0
+    # create output node
+    node_output = nodes.new(type="ShaderNodeOutputMaterial")
+    node_output.location = 900, 0
+    # link nodes
+    links = mat.node_tree.links
+    links.new(node_input.outputs[0], node_mix_rgb.inputs[1])
+    links.new(node_mix_rgb.outputs[0], node_mix_semgrad.inputs[1])
+
+    # old grad color
+    # links.new(node_input_grads.outputs[0], node_mix_semgrad.inputs[2])
+    # new grad color
+    links.new(node_input_grads.outputs[0], node_rgb_sep.inputs[0])
+    links.new(node_rgb_sep.outputs[0], node_grad_value_mult.inputs[0])
+    links.new(node_grad_value_mult.outputs[0], node_color.inputs[2])
+    links.new(node_color.outputs[0], node_mix_semgrad.inputs[2])
+
+    links.new(node_mix_semgrad.outputs[0], node_bsdf.inputs[0])
+    links.new(node_bsdf.outputs[0], node_output.inputs[0])
+    return mat
+```
+
+### blender_kitti/mesh.py
+```
+# -*- coding: utf-8 -*-
+""""""
+
+import bpy
+import numpy as np
+
+from .material_shader import create_vertex_color_material
+
+
+def create_mesh(
+    vertices: np.ndarray,
+    triangles: np.ndarray,
+    vertex_colors: {str: np.ndarray} = None,
+    face_colors: {str: np.ndarray} = None,
+    scalar_values: {str: np.ndarray} = None,
+    use_smooth: bool = True,
+    *,
+    name: str,
+):
+    assert vertices.ndim == 2 and vertices.shape[1] == 3
+    assert triangles.ndim == 2 and triangles.shape[1] == 3
+    assert triangles.dtype in [np.int32, np.int64] and vertices.dtype in [
+        np.float32,
+        np.float64,
+    ]
+
+    # Vertices and edges (straightforward)
+    num_vertices = vertices.shape[0]
+    vertices = vertices.reshape((-1))
+    vertex_index = triangles.reshape((-1))
+    num_vertex_indices = vertex_index.shape[0]
+    loop_start = np.arange(0, num_vertex_indices, 3, np.int32)
+    loop_total = np.full(fill_value=3, shape=(num_vertex_indices // 3,), dtype=np.int32)
+    num_loops = loop_start.shape[0]
+
+    # Create mesh object based on the arrays above
+    try:
+        if name in bpy.data.meshes:
+            raise RuntimeError("Mesh '{}' already exists.".format(name))
+    except AttributeError:
+        pass
+
+    mesh = bpy.data.meshes.new(name=name)
+
+    mesh.vertices.add(num_vertices)
+    mesh.vertices.foreach_set("co", vertices)
+
+    mesh.loops.add(num_vertex_indices)
+    mesh.loops.foreach_set("vertex_index", vertex_index)
+
+    mesh.polygons.add(num_loops)
+    mesh.polygons.foreach_set("loop_start", loop_start)
+    mesh.polygons.foreach_set("loop_total", loop_total)
+    mesh.polygons.foreach_set(
+        "use_smooth",
+        np.full(fill_value=use_smooth, shape=[len(mesh.polygons)], dtype=bool),
+    )
+
+    attr_keys_rgb = set()
+    attr_keys_scalar = set()
+    # Create vertex color layers and set values
+    if vertex_colors is not None:
+        attr_keys_rgb.update(add_vertex_color_layers(mesh, vertex_index, vertex_colors))
+
+    if face_colors is not None:
+        attr_keys_rgb.update(
+            add_vertex_color_layers_from_face_colors(mesh, vertex_index, face_colors)
+        )
+
+    if scalar_values is not None:
+        attr_keys_scalar.update(
+            add_vertex_colors_from_scalar(mesh, vertex_index, scalar_values)
+        )
+
+    mesh.update()
+    mesh.validate()
+    return mesh, attr_keys_rgb, attr_keys_scalar
+
+
+def add_vertex_color_layers_from_face_colors(
+    mesh, vertex_indices, face_colors: {str: np.ndarray}
+) -> {str}:
+    vertex_attr_keys = set()
+    for fcolor_name, fcolors in face_colors.items():
+        if (
+            fcolors.dtype != np.uint8
+            or fcolors.ndim != 2
+            or fcolors.shape[-1] not in [3, 4]
+        ):
+            raise ValueError("Need vertex colors in RGB (0-255) uint8 format.")
+
+        fcolors = fcolors.astype(np.float32) / 255.0
+        if fcolors.shape[-1] == 3:
+            fcolors = np.concatenate((fcolors, np.ones_like(fcolors[:, :1])), axis=-1)
+
+        # repeat face colors 3 times (for each vertex)
+        fcolors = np.repeat(fcolors, 3, axis=0)
+        fcolors = np.reshape(fcolors, [-1])
+        assert fcolors.shape[0] == 4 * vertex_indices.shape[0]
+
+        attr_key = "fcolor_{}".format(fcolor_name)
+        vcol_lay = mesh.vertex_colors.new(name=attr_key)
+        vcol_lay.data.foreach_set("color", fcolors)
+        vertex_attr_keys.add(attr_key)
+    return vertex_attr_keys
+
+
+def add_vertex_color_layers(
+    mesh, vertex_indices, vertex_colors: {str: np.ndarray}
+) -> {str}:
+    vertex_attr_keys = set()
+    for vcolor_name, vcolors in vertex_colors.items():
+        if (
+            vcolors.dtype != np.uint8
+            or vcolors.ndim != 2
+            or vcolors.shape[-1] not in [3, 4]
+        ):
+            raise ValueError("Need vertex colors in RGB (0-255) uint8 format.")
+
+        vcolors = vcolors.astype(np.float32) / 255.0
+        if vcolors.shape[-1] == 3:
+            vcolors = np.concatenate((vcolors, np.ones_like(vcolors[:, :1])), axis=-1)
+
+        # replicate vertex colors for each triangle at a vertex
+        vcolors = vcolors[vertex_indices]
+        vcolors = vcolors.reshape([-1])
+        assert vcolors.shape[0] == 4 * vertex_indices.shape[0]
+
+        attr_key = "vcolor_{}".format(vcolor_name)
+        vertex_attr_keys.add(attr_key)
+        vcol_lay = mesh.vertex_colors.new(name="vcolor_{}".format(vcolor_name))
+        vcol_lay.data.foreach_set("color", vcolors)
+
+    return vertex_attr_keys
+
+
+def add_vertex_colors_from_scalar(
+    mesh, vertex_indices, scalar_values: {str: np.ndarray}
+) -> {str}:
+    def add_values(v, name):
+        colors = np.tile(v[:, None], reps=[1, 3])
+        # add alpha
+        colors = np.concatenate((colors, np.ones_like(colors[:, :1])), axis=-1)
+
+        # replicate vertex colors for each triangle at a vertex
+        colors = colors[vertex_indices]
+        colors = colors.reshape([-1])
+        assert colors.shape[0] == 4 * vertex_indices.shape[0]
+
+        attr_key = "vcolor_{}".format(name)
+        vcol_lay = mesh.vertex_colors.new(name=attr_key)
+        vcol_lay.data.foreach_set("color", colors)
+        return attr_key
+
+    vertex_attr_keys = set()
+    for scolor_name, s_values in scalar_values.items():
+        if s_values.dtype != np.float32 or s_values.ndim != 1:
+            raise ValueError("Need scalar values in [N] float32 format.")
+
+        # Todo: learn how blender handles value ranges.
+        # Todo: use something that is less random.
+        value_ranges = [
+            (0.0, 3.5),
+        ]
+
+        for r in value_ranges:
+            values = (s_values - r[0]) / (r[1] - r[0])
+            values = np.clip(values, 0.0, 1.0)
+            vertex_attr_keys.add(
+                add_values(values, "{}_{:.2f}_{:.2f}".format(scolor_name, r[0], r[1]))
+            )
+
+    return vertex_attr_keys
+
+
+def create_obj_from_mesh(
+    vertices: np.ndarray,
+    triangles: np.ndarray,
+    vertex_colors: {str: np.ndarray} = None,
+    face_colors: {str: np.ndarray} = None,
+    scalar_values: {str: np.ndarray} = None,
+    *,
+    name_prefix: str,
+):
+    obj_name = "{}_obj".format(name_prefix)
+    try:
+        if obj_name in bpy.data.objects:
+            raise RuntimeError("Obj '{}' already exists.".format(obj_name))
+    except AttributeError:
+        pass
+
+    mesh, attr_keys_rgb, attr_keys_scalar = create_mesh(
+        vertices,
+        triangles,
+        vertex_colors,
+        face_colors,
+        scalar_values,
+        name="{}_mesh".format(name_prefix),
+    )
+    obj = bpy.data.objects.new(obj_name, mesh)
+
+    default_color = 0.0, 0.0, 0.0, 1.0  # black
+    mat, select_vertex_color = create_vertex_color_material(
+        list(attr_keys_rgb),
+        list(attr_keys_scalar),
+        default_color,
+        mode="select",
+        name_material="{}_material".format(name_prefix),
+    )
+
+    # Todo: handle multiple vertex color layers
+    if vertex_colors is None:
+        select_vertex_color(-1)
+    else:
+        select_vertex_color(0)
+
+    obj.data.materials.append(mat)
+    return obj, select_vertex_color
+
+
+def add_object_from_mesh(
+    vertices: np.ndarray,
+    triangles: np.ndarray,
+    vertex_colors: {str: np.ndarray} = None,
+    face_colors: {str: np.ndarray} = None,
+    scalar_values: {str: np.ndarray} = None,
+    *,
+    scene,
+    name_prefix: str,
+):
+    obj, select_vertex_color = create_obj_from_mesh(
+        vertices,
+        triangles,
+        vertex_colors,
+        face_colors,
+        scalar_values,
+        name_prefix=name_prefix,
+    )
+
+    scene.collection.objects.link(obj)
+    return obj, {"vertex_color_selector": select_vertex_color}
+```
+
+### blender_kitti/object_spotlight.py
+```
+# -*- coding: utf-8 -*-
+""" """
+
+import bmesh
+import bpy
+
+
+def _create_ground_material(name: str = "ground_material"):
+    if name in bpy.data.materials:
+        raise RuntimeError("Material '{}' already exists".format(name))
+
+    mat = bpy.data.materials.new(name=name)
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    nodes.clear()
+
+    node_tex_coord = nodes.new(type="ShaderNodeTexCoord")
+    node_tex_coord.location = 0, 0
+
+    node_vector_math = nodes.new(type="ShaderNodeVectorMath")
+    node_vector_math.location = 200, 0
+    node_vector_math.operation = "DISTANCE"
+    node_vector_math.inputs[1].default_value = (0.5, 0.5, 1.0)
+
+    node_scale_distance = nodes.new(type="ShaderNodeMath")
+    node_scale_distance.inputs[1].default_value = 1.5
+    node_scale_distance.operation = "MULTIPLY"
+    node_scale_distance.location = 400, 0
+
+    node_color_ramp = nodes.new(type="ShaderNodeValToRGB")
+    node_color_ramp.location = 600, 0
+    color_ramp = node_color_ramp.color_ramp
+    color_ramp.color_mode = "RGB"
+    color_ramp.interpolation = "EASE"
+    assert len(color_ramp.elements) == 2
+    color_ramp.elements[0].position = 0.27
+    color_ramp.elements[0].alpha = 0.0
+    color_ramp.elements[0].color = 0.0, 0.0, 0.0, 0.0
+    color_ramp.elements[1].position = 0.69
+    color_ramp.elements[1].alpha = 1.0
+    color_ramp.elements[1].color = 1.0, 1.0, 1.0, 1.0
+
+    node_bsdf = nodes.new(type="ShaderNodeBsdfPrincipled")
+    node_bsdf.inputs[7].default_value = 0.92  # roughness
+    node_bsdf.inputs[12].default_value = 0.0  # clearcoat
+    node_bsdf.inputs[13].default_value = 0.25  # clearcoat roughness
+    node_bsdf.location = 900, -100
+
+    node_transparent = nodes.new(type="ShaderNodeBsdfTransparent")
+    node_transparent.location = 1200, -200
+
+    node_mix = nodes.new(type="ShaderNodeMixShader")
+    node_mix.location = 1500, 0
+
+    node_output = nodes.new(type="ShaderNodeOutputMaterial")
+    node_output.location = 1800, 0
+
+    links = mat.node_tree.links
+    links.new(node_tex_coord.outputs[0], node_vector_math.inputs[0])
+    # for some reason it is outputs[1] for the vector math node (bug?)
+    links.new(node_vector_math.outputs[1], node_scale_distance.inputs[0])
+    links.new(node_scale_distance.outputs[0], node_color_ramp.inputs[0])
+    links.new(node_color_ramp.outputs[1], node_mix.inputs[0])
+    links.new(node_bsdf.outputs[0], node_mix.inputs[1])
+    links.new(node_transparent.outputs[0], node_mix.inputs[2])
+    links.new(node_mix.outputs[0], node_output.inputs[0])
+
+    return mat
+
+
+def create_ground(name_prefix: str = "ground"):
+    diameter: float = 10.0
+    height: float = 0.1
+    bm = bmesh.new()
+    bmesh.ops.create_cone(
+        bm,
+        cap_ends=True,
+        cap_tris=False,
+        segments=256,
+        diameter1=diameter,
+        diameter2=diameter,
+        depth=height,
+        calc_uvs=False,
+    )
+
+    me = bpy.data.meshes.new("{}_mesh".format(name_prefix))
+    bm.to_mesh(me)
+    bm.free()
+
+    obj = bpy.data.objects.new("{}_obj".format(name_prefix), me)
+    material = _create_ground_material("{}_material".format(name_prefix))
+    obj.data.materials.append(material)
+    return obj
+
+
+def add_spotlight_ground(scene=None, name_prefix: str = "spotlight"):
+    if scene is None:
+        scene = bpy.context.scene
+
+    obj_ground = create_ground(name_prefix="{}_ground".format(name_prefix))
+    scene.collection.objects.link(obj_ground)
+```
+
+### blender_kitti/particles.py
+```
+# -*- coding: utf-8 -*-
+""""""
+
+import logging
+import typing
+
+import bpy
+import bmesh
+import mathutils
+import numpy as np
+
+from .material_shader import (
+    create_flow_material,
+    create_simple_material,
+    create_uv_mapped_material,
+    add_nodes_to_material,
+)
+
+# Max texture size of 8192 works on AMDs RDNA3 architecture
+MAX_TEXTURE_WIDTH_EXP = 13
+MAX_TEXTURE_WIDTH = 2**MAX_TEXTURE_WIDTH_EXP
+
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter(
+    fmt="%(asctime)s - %(levelname)s - %(module)s - %(message)s"
+)
+handler = logging.StreamHandler()
+handler.setFormatter(formatter)
+handler.setLevel(logging.INFO)
+logger.addHandler(handler)
+
+
+def _create_instancer_mesh(positions: np.ndarray, name="mesh_points"):
+    """Create mesh with where each point is a pseudo face
+    (three vertices at the same position.
+    """
+    assert positions.ndim == 2
+    assert positions.shape[1] == 3
+
+    if name in bpy.data.meshes:
+        raise RuntimeError("Mesh '{}' already exists.".format(name))
+    mesh = bpy.data.meshes.new(name=name)
+
+    num_vertices = len(positions)
+    mesh.vertices.add(num_vertices * 3)
+    mesh.vertices.foreach_set("co", np.repeat(positions, 3, axis=0).reshape((-1)))
+    mesh.loops.add(num_vertices * 3)
+    mesh.loops.foreach_set("vertex_index", np.arange(0, 3 * num_vertices))
+
+    loop_start = np.arange(0, 3 * num_vertices, 3, np.int32)
+    loop_total = np.full(fill_value=3, shape=(num_vertices,), dtype=np.int32)
+    num_loops = loop_start.shape[0]
+
+    mesh.polygons.add(num_loops)
+    mesh.polygons.foreach_set("loop_start", loop_start)
+    mesh.polygons.foreach_set("loop_total", loop_total)
+
+    mesh.update()
+    mesh.validate()
+
+    logger.info("Created instancer mesh with {} vertices.".format(len(positions)))
+
+    return mesh
+
+
+def _create_instancer_obj(
+    positions: np.ndarray, name_instancer_obj: str, name_mesh: str
+):
+    assert positions.ndim == 2 and positions.shape[1] == 3
+
+    if name_instancer_obj in bpy.data.objects:
+        raise RuntimeError("Object '{}' already exists.".format(name_instancer_obj))
+
+    mesh = _create_instancer_mesh(positions, name_mesh)
+
+    # mesh has 3 vertices for every instancer position
+    assert len(mesh.vertices) % 3 == 0
+
+    uv_idx = np.repeat(np.arange(0, len(mesh.vertices) // 3), 3, axis=0)
+    # distribute into a 2D-texture with MAX_TEXTURE_WIDTH
+    uv_x = uv_idx & (MAX_TEXTURE_WIDTH - 1)
+    uv_y = uv_idx >> MAX_TEXTURE_WIDTH_EXP  # Since 2^14 = 16384
+
+    uv_xy = np.stack([uv_x, uv_y], axis=-1)
+    # TODO(risteon): this can be created more efficiently with np and knowledge of the mesh struct
+    coords_flat = [
+        uv for pair in [uv_xy[loop.vertex_index] for loop in mesh.loops] for uv in pair
+    ]
+
+    mesh.uv_layers.new(name="per_vertex_dummy_uv")
+    mesh.uv_layers[-1].data.foreach_set("uv", coords_flat)
+
+    obj_instancer = bpy.data.objects.new(name_instancer_obj, mesh)
+    return obj_instancer
+
+
+def _create_color_image(colors_rgba: np.ndarray, name: str):
+    assert colors_rgba.ndim == 2
+    # dtype and alpha channel checks
+    if colors_rgba.dtype == np.float32:
+        pass
+    elif colors_rgba.dtype == np.uint8:
+        colors_rgba = colors_rgba.astype(np.float32) / 255.0
+    else:
+        raise NotImplementedError(
+            "Cannot handle colors_rgba with dtype {}.".format(str(colors_rgba.dtype))
+        )
+    if colors_rgba.shape[1] == 3:
+        colors_rgba = np.concatenate(
+            (colors_rgba, np.ones_like(colors_rgba[:, :1])), axis=-1
+        )
+    elif colors_rgba.shape[1] == 4:
+        pass
+    else:
+        raise NotImplementedError(
+            "Cannot handle colors_rgba with shape {}.".format(colors_rgba.shape)
+        )
+    assert colors_rgba.shape[1] == 4
+
+    if name in bpy.data.images:
+        raise RuntimeError("Image '{}' already exists.".format(name))
+
+    image_num_rows = (len(colors_rgba) - 1) // MAX_TEXTURE_WIDTH + 1
+    image_num_cols = min(len(colors_rgba), MAX_TEXTURE_WIDTH)
+    image = bpy.data.images.new(name, image_num_cols, image_num_rows, alpha=True)
+
+    colors_rgba = np.resize(colors_rgba, (image_num_rows * image_num_cols, 4))
+    colors_rgba_flat = colors_rgba.reshape((-1))
+    image.pixels.foreach_set(colors_rgba_flat)
+    # super important. Otherwise the pixel data will just vanish from memory and be
+    # lost for certain after saving + loading the file.
+    image.pack()
+    return image
+
+
+def _create_particle_instancer(
+    name_prefix: str,
+    positions: np.ndarray,
+    obj_particle,
+):
+    # created entities
+    name_mesh = "{}_mesh".format(name_prefix)
+    name_obj = "{}_obj_instancer".format(name_prefix)
+
+    obj_instancer = _create_instancer_obj(positions, name_obj, name_mesh)
+
+    obj_particle.parent = obj_instancer
+    # instancing from 'fake' faces is necessary for uv mapping to work.
+    obj_instancer.instance_type = "FACES"
+    obj_instancer.show_instancer_for_render = False
+    return obj_instancer
+
+
+def _add_material_to_particle(name_prefix, colors, obj_particle, material=None):
+    """
+
+    :param name_prefix:
+    :param colors:
+    :param obj_particle:
+    :return:
+    """
+
+    name_image = "{}_colors".format(name_prefix)
+    name_material = "{}_material".format(name_prefix)
+
+    if colors is not None:
+        if isinstance(colors, np.ndarray):
+            colors = [colors]
+            name_image = [name_image]
+            name_material = [name_material]
+        else:
+            name_image = [f"{name_image}_{i}" for i in range(len(colors))]
+            name_material = [f"{name_material}_{i}" for i in range(len(colors))]
+
+        color_selector = []
+        for color_arr, ni, nm in zip(colors, name_image, name_material):
+            image = _create_color_image(color_arr, ni)
+            if material is None:
+                # the particle obj will use this material
+                logger.info(f"Creating material {ni}.")
+                _material, _cs = create_uv_mapped_material(image, nm)
+            else:
+                # Todo (risteon) does return color link, not color selector
+                _cs = add_nodes_to_material(material, image)
+                _material = material
+
+            obj_particle.data.materials.append(_material)
+            color_selector.append(_cs)
+    else:
+        material, color_selector = create_simple_material(
+            base_color=(0.1, 0.1, 0.1, 1.0), name_material=name_material
+        )
+        obj_particle.data.materials.append(material)
+
+    return color_selector
+
+
+def create_cube(name_prefix: str, *, edge_length: float = 0.16):
+    bm = bmesh.new()
+    bmesh.ops.create_cube(
+        bm,
+        size=edge_length,
+        calc_uvs=False,
+    )
+
+    me = bpy.data.meshes.new("{}_mesh".format(name_prefix))
+    bm.to_mesh(me)
+    bm.free()
+
+    obj = bpy.data.objects.new("{}_obj".format(name_prefix), me)
+    return obj
+
+
+def create_icosphere(
+    name_prefix: str,
+    *,
+    subdivisions: int = 3,
+    radius: float = 0.02,
+    use_smooth: bool = True,
+):
+    bm = bmesh.new()
+    bmesh.ops.create_icosphere(
+        bm,
+        subdivisions=subdivisions,
+        radius=radius,
+        calc_uvs=False,
+    )
+
+    mesh = bpy.data.meshes.new("{}_mesh".format(name_prefix))
+    bm.to_mesh(mesh)
+    bm.free()
+
+    mesh.polygons.foreach_set(
+        "use_smooth",
+        np.full(fill_value=use_smooth, shape=[len(mesh.polygons)], dtype=bool),
+    )
+
+    obj = bpy.data.objects.new("{}_obj".format(name_prefix), mesh)
+    return obj
+
+
+def create_voxel_particle_obj(
+    coords: np.ndarray,
+    colors: np.ndarray,
+    name_prefix: str,
+    scene,
+    material=None,
+):
+    obj_particle = create_cube(name_prefix + "_cube")
+    scene.collection.objects.link(obj_particle)
+
+    obj_voxels = _create_particle_instancer(name_prefix, coords, obj_particle)
+    if scene is not None:
+        scene.collection.objects.link(obj_voxels)
+
+    color_selector = _add_material_to_particle(
+        name_prefix, colors, obj_particle, material
+    )
+    return obj_voxels, color_selector
+
+
+def add_voxels(
+    scene,
+    *,
+    voxels: np.ndarray,
+    colors: np.ndarray = None,
+    name_prefix: str = "voxels",
+    material=None,
+):
+    """
+
+    :param voxels: boolean array marking occupancy
+    :param colors:
+    :param name_prefix:
+    :param scene:
+    :param material:
+    :return:
+    """
+    assert voxels.ndim == 3
+    assert voxels.dtype == bool
+
+    dtype = np.float32
+    deltas = np.asarray([0.2, 0.2, 0.2], dtype=dtype)
+
+    coords = np.mgrid[[slice(x) for x in voxels.shape]].astype(dtype)
+    coords = np.moveaxis(coords, 0, 3)
+    coords *= deltas
+    coords = coords[voxels]
+    colors = colors[voxels]
+
+    obj_voxels, color_selector = create_voxel_particle_obj(
+        coords, colors, name_prefix, scene, material
+    )
+    return obj_voxels, {"color_selector": color_selector}
+
+
+def add_voxel_list(
+    *,
+    indices: np.ndarray,
+    grid_shape: np.ndarray,
+    grid_origin: np.ndarray,
+    voxel_size: np.ndarray,
+    colors: np.ndarray = None,
+    name_prefix: str = "voxel_list",
+    scene,
+):
+    """"""
+    assert indices.ndim == 1
+    assert grid_shape.ndim == 1
+    assert indices.shape[0] == colors.shape[0]
+
+    dtype = np.float32
+    # cubic voxels
+    deltas = np.repeat(voxel_size, 3)
+
+    coords = np.mgrid[[slice(x) for x in grid_shape]].astype(dtype)
+    coords = np.moveaxis(coords, 0, 3)
+    coords *= deltas
+    coords += grid_origin
+
+    coords = coords.reshape([-1, 3])
+    coords = coords[indices]
+
+    obj_voxels, color_selector = create_voxel_particle_obj(
+        coords, colors, name_prefix, scene
+    )
+    return obj_voxels, {"color_selector": color_selector}
+
+
+def add_point_cloud(
+    scene,
+    *,
+    points: np.ndarray,
+    colors: np.ndarray = None,
+    reflectivity: np.ndarray = None,
+    row_splits: np.ndarray = None,
+    name_prefix: str = "point_cloud",
+    particle_radius: float = 0.02,
+    material=None,
+    particle_obj=None,
+):
+    """
+
+    :param scene:
+    :param points:
+    :param colors:
+    :param reflectivity:
+    :param row_splits:
+    :param name_prefix:
+    :param particle_radius:
+    :param material: If given, just add nodes to this material
+    :param particle_obj: If given, use this object
+    :return:
+    """
+    if particle_obj is None:
+        # created entities
+        obj_particle = create_icosphere(
+            name_prefix + "_icosphere", radius=particle_radius
+        )
+        scene.collection.objects.link(obj_particle)
+    else:
+        obj_particle = particle_obj
+
+    obj_point_cloud = _create_particle_instancer(name_prefix, points, obj_particle)
+    scene.collection.objects.link(obj_point_cloud)
+    color_selector = _add_material_to_particle(
+        name_prefix, colors, obj_particle, material
+    )
+    # works on GPU without color:
+    # color_selector = _add_material_to_particle(
+    #     name_prefix, None, obj_particle, material
+    # )
+
+    return (
+        obj_point_cloud,
+        {"color_selector": color_selector, "obj_particle": obj_particle},
+    )
+
+
+def read_verts(mesh):
+    mverts_co = np.zeros((len(mesh.vertices) * 3), dtype=np.float32)
+    mesh.vertices.foreach_get("co", mverts_co)
+    return np.reshape(mverts_co, (len(mesh.vertices), 3))
+
+
+def apply_trafo(points, trafo):
+    return np.matmul(trafo, points.T).T
+
+
+# adapted from https://blender.stackexchange.com/a/80592
+def bmesh_join(list_of_bmeshes, list_of_matrices, *, normal_update=False, bmesh):
+    """takes as input a list of bm references and outputs a single merged bmesh
+    allows an additional 'normal_update=True' to force _normal_ calculations.
+    """
+
+    bm = bmesh.new()
+    add_vert = bm.verts.new
+    add_face = bm.faces.new
+    add_edge = bm.edges.new
+
+    for bm_to_add, matrix in zip(list_of_bmeshes, list_of_matrices):
+        bm_to_add.transform(matrix)
+        offset = len(bm.verts)
+
+        for v in bm_to_add.verts:
+            add_vert(v.co)
+
+        bm.verts.index_update()
+        bm.verts.ensure_lookup_table()
+
+        if bm_to_add.faces:
+            for face in bm_to_add.faces:
+                add_face(tuple(bm.verts[i.index + offset] for i in face.verts))
+            bm.faces.index_update()
+
+        if bm_to_add.edges:
+            for edge in bm_to_add.edges:
+                edge_seq = tuple(bm.verts[i.index + offset] for i in edge.verts)
+                try:
+                    add_edge(edge_seq)
+                except ValueError:
+                    # edge exists!
+                    pass
+            bm.edges.index_update()
+
+    if normal_update:
+        bm.normal_update()
+
+    return bm
+
+
+def simple_scale_matrix(factor: np.array, direction: np.array):
+    dir_len = np.sqrt(np.sum(direction**2))
+    assert dir_len > 0.0, "direction vector of scale matrix may not have length zero"
+    normalized_dir = direction / dir_len
+    factor = 1.0 - factor
+    scale_matrix = np.eye(4)
+    scale_matrix[:3, :3] -= factor * np.einsum(
+        "i,j->ij", normalized_dir.ravel(), normalized_dir.ravel()
+    )
+    return scale_matrix
+
+
+def add_flow_mesh(
+    *,
+    point_cloud: np.ndarray,
+    flow: np.ndarray,
+    colors_rgba: np.ndarray = None,
+    name_prefix: str = "flow",
+    arrow_shaft_diameter: float = 0.05,
+    arrow_shaft_length: float = 1.0,
+    arrow_head_height: float = 0.2,
+    arrow_head_diameter: float = 0.15,
+    scene,
+):
+    if point_cloud.dtype != np.float32:
+        print(
+            "Warning: dtype of point_cloud should be np.float32. Casting to np.float32"
+        )
+        point_cloud = point_cloud.astype(np.float32)
+
+    if flow.dtype != np.float32:
+        print("Warning: dtype of flow should be np.float32. Casting to np.float32")
+        flow = flow.astype(np.float32)
+
+    if colors_rgba.dtype != np.float32:
+        print(
+            "Warning: dtype of colors_rgba should be np.float32. Casting to np.float32"
+        )
+        colors_rgba = colors_rgba.astype(np.float32)
+
+    # arrow shaft
+    arrow_shaft = bmesh.new()
+    bmesh.ops.create_cone(
+        arrow_shaft,
+        cap_ends=True,
+        cap_tris=False,
+        segments=10,
+        radius1=arrow_shaft_diameter / 2.0,
+        radius2=arrow_shaft_diameter / 2.0,
+        depth=arrow_shaft_length,
+        calc_uvs=False,
+    )
+
+    # arrow head
+    arrow_head = bmesh.new()
+    bmesh.ops.create_cone(
+        arrow_head,
+        cap_ends=True,
+        cap_tris=False,
+        segments=10,
+        radius1=arrow_head_diameter / 2.0,
+        radius2=0.0,
+        depth=arrow_head_height,
+        calc_uvs=False,
+    )
+
+    arrow_mesh = bmesh_join(
+        list_of_bmeshes=[arrow_shaft, arrow_head],
+        list_of_matrices=[
+            mathutils.Matrix.Translation((0.0, 0.0, 0.5)),
+            mathutils.Matrix.Translation((0.0, 0.0, 1.0)),
+        ],
+        normal_update=False,
+        bmesh=bmesh,
+    )
+
+    assert colors_rgba.shape[1] == 4
+    assert colors_rgba.dtype == np.float32
+    assert np.all(np.logical_and(0.0 <= colors_rgba, colors_rgba <= 1.0))
+
+    me = bpy.data.meshes.new("mesh_{}".format(name_prefix))
+    arrow_mesh.to_mesh(me)
+    arrow_head.free()
+    arrow_shaft.free()
+    arrow_mesh.free()
+
+    polygons = me.polygons
+    npolygons = len(polygons)
+    nloops = len(me.loops)
+
+    startloop = np.empty(npolygons, dtype=np.int32)
+    loop_total = np.empty(npolygons, dtype=np.int32)
+    polygon_indices = np.empty(npolygons, dtype=np.int32)
+
+    polygons.foreach_get("index", polygon_indices)
+    polygons.foreach_get("loop_start", startloop)
+    polygons.foreach_get("loop_total", loop_total)
+
+    vertex_index = np.empty(nloops, dtype=np.int32)
+    me.loops.foreach_get("vertex_index", vertex_index)
+    assert sum(loop_total) == len(vertex_index)
+    mesh_verts = read_verts(me)
+
+    num_flow_vecs = flow.shape[0]
+    flow_len = np.linalg.norm(flow, axis=-1)
+
+    vertices_homog = np.concatenate(
+        [mesh_verts, np.ones((mesh_verts.shape[0], 1))], axis=-1
+    )
+
+    full_vertices = []
+    vertex_indices = []
+    loop_start = []
+    loop_total = np.tile(loop_total, num_flow_vecs)
+
+    assert point_cloud.shape == flow.shape
+    for flow_vec_idx in range(num_flow_vecs):
+        arrow_head_unit = np.array([0.0, 0.0, 1.0])
+        scale_mat = simple_scale_matrix(
+            flow_len[flow_vec_idx], np.array([0.0, 0.0, 1.0])
+        )
+        vert_scaled = apply_trafo(np.copy(vertices_homog), scale_mat)
+
+        flow_vec = flow[flow_vec_idx]
+
+        flow_vec_unit = flow_vec / np.sqrt(np.sum(flow_vec**2))
+
+        # rotation matrix R that rotates unit vector a onto unit vector b.
+        v = np.cross(arrow_head_unit, flow_vec_unit)
+        cosine = np.dot(arrow_head_unit, flow_vec_unit)
+
+        vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+        R = np.eye(3) + vx + np.dot(vx, vx) * 1.0 / (1.0 + cosine)
+        T_rot = np.eye(4)
+        T_rot[0:3, 0:3] = R
+        vert_rotated = apply_trafo(vert_scaled, T_rot)
+
+        translation_matrix = np.eye(4)
+        translation_matrix[:3, 3] = point_cloud[flow_vec_idx][:3]
+
+        vert_translated = apply_trafo(vert_rotated, translation_matrix)
+
+        vert_final = vert_translated[..., 0:3]
+
+        full_vertices.append(vert_final)
+        shifted_start = startloop + flow_vec_idx * nloops
+        loop_start.append(shifted_start)
+        shifted_vertex_indices = vertex_index + flow_vec_idx * len(mesh_verts)
+        vertex_indices.append(shifted_vertex_indices)
+
+    vertex_indices = np.concatenate(vertex_indices, axis=0)
+
+    full_vertices = np.concatenate(full_vertices, axis=0)
+    loop_start = np.concatenate(loop_start, axis=0)
+
+    assert sum(loop_total) == len(vertex_indices)
+    assert loop_total.shape == loop_start.shape
+
+    assert npolygons * num_flow_vecs == len(loop_start)
+    assert npolygons * num_flow_vecs == len(loop_total)
+
+    assert np.all(np.diff(loop_start) == loop_total[:-1])
+
+    mesh = bpy.data.meshes.new(name="flow_mesh")
+    # vertices
+    mesh.vertices.add(full_vertices.shape[0])
+    mesh.vertices.foreach_set("co", full_vertices.astype(np.float32).reshape((-1)))
+
+    # vertex indices
+    mesh.loops.add(vertex_indices.shape[0])
+    mesh.loops.foreach_set("vertex_index", vertex_indices)
+
+    # triangles
+    mesh.polygons.add(loop_start.shape[0])
+    mesh.polygons.foreach_set("loop_start", loop_start)
+    mesh.polygons.foreach_set("loop_total", loop_total)
+
+    colors_per_vertex_index_colors_rgba = np.tile(
+        colors_rgba[:, None, :], reps=[1, len(mesh_verts), 1]
+    )
+    colors_flattened = np.reshape(colors_per_vertex_index_colors_rgba, (-1, 4))
+
+    colors_per_vertex_index = colors_flattened[vertex_indices]
+    # Create vertex color layer and set values
+    vcol_lay = mesh.vertex_colors.new(name="color_flow")
+    color_verts = np.reshape(colors_per_vertex_index, (-1))
+    vcol_lay.data.foreach_set("color", color_verts)
+
+    vcol_grad = mesh.vertex_colors.new(name="color_grads")
+    vcol_grad.data.foreach_set("color", color_verts)
+
+    mesh.update()
+    mesh.validate()
+
+    obj = bpy.data.objects.new("obj_{}".format(name_prefix), mesh)
+    material = create_flow_material("material_{}".format(name_prefix))
+    obj.data.materials.append(material)
+
+    # baurst: very unsure about this
+    if scene is not None:
+        scene.collection.objects.link(obj)
+
+    return obj
+
+
+def create_cube_with_wireframe(
+    position: np.ndarray,
+    scale: np.ndarray,
+    rotation: np.ndarray,
+    wireframe_scale: float,
+    color: np.ndarray,
+):
+    # create a mesh cube
+    bpy.ops.object.select_all(action="DESELECT")
+    bpy.ops.mesh.primitive_cube_add(
+        size=1, enter_editmode=False, align="WORLD", location=position
+    )
+    cube = bpy.context.object
+
+    # set scale and rotation
+    cube.scale = scale
+    cube.rotation_euler = rotation
+    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+
+    # add wireframe modifier
+    bpy.ops.object.modifier_add(type="WIREFRAME")
+    wireframe_modifier = cube.modifiers[-1]
+    wireframe_modifier.thickness = wireframe_scale
+
+    # create a new material with the given color
+    material = bpy.data.materials.new(name="CubeMaterial")
+    material.use_nodes = False
+    material.diffuse_color = color
+
+    # assign the material to the cube
+    if len(cube.data.materials) > 0:
+        cube.data.materials[0] = material
+    else:
+        cube.data.materials.append(material)
+
+    return cube
+
+
+def add_boxes(
+    *,
+    scene,
+    boxes: typing.Dict[str, np.ndarray],
+    box_colors_rgba_f64: np.ndarray,
+    confidence_threshold: float = 0.0,
+    bounding_box_wire_frame_scale: float = 0.2,
+    verbose: bool = False,
+):
+    """
+    supports only boxes with yaw rotation
+
+    scene: blender py scene
+    boxes: dictionairy with
+        * 'pos': np.ndarray with shape [num_boxes, 3] (i.e. box positions in 3d)
+        * 'rot': np.ndarray with shape [num_boxes, 1] (i.e. box yaw angles)
+        * 'dims': np.ndarray with shape [num_boxes, 3] (i.e. box size length, width, height)
+        * 'probs': np.ndarray with shape [num_boxes, 1] (i.e. box confidence)
+    box_colors_rgba_f64: np.ndarray with shape [num_boxes, 4], i.e. a color for each box
+    confidence_threshold: boxes below this threshold are discarded
+    bounding_box_wire_frame_scale: this is the thickness of the box wireframe (in meters I think)
+    """
+
+    assert "pos" in boxes, "need box positions with key 'pos' to work!"
+    assert "dims" in boxes, "need box dimensions with key 'dims' to work!"
+    assert "rot" in boxes, "need box rotations (yaw angle) with key 'rot' to work!"
+
+    assert (box_colors_rgba_f64 <= 1.0).all(), (
+        "this code is only tested with f64 colors <= 1.0!"
+    )
+
+    num_boxes = boxes["pos"].shape[0]
+    for box_idx in range(num_boxes):
+        box_confidence = np.squeeze(boxes["probs"][box_idx])
+        if box_confidence < confidence_threshold:
+            if verbose:
+                print(f"Discarding box #{box_idx} with confidence {box_confidence}")
+            continue
+        if verbose:
+            print(
+                f"Add box #{box_idx} at position: ",
+                boxes["pos"][box_idx],
+                ", rotation: ",
+                boxes["rot"][box_idx],
+                f", confidence: {box_confidence}",
+            )
+        cube = create_cube_with_wireframe(
+            position=boxes["pos"][box_idx],
+            scale=boxes["dims"][box_idx],
+            rotation=(
+                0.0,
+                0.0,
+                boxes["rot"][box_idx],
+            ),
+            wireframe_scale=bounding_box_wire_frame_scale,
+            color=box_colors_rgba_f64[box_idx],
+        )
+        scene.collection.objects.link(cube)
+```
+
+### blender_kitti/scene_setup.py
+```
+# -*- coding: utf-8 -*-
+""""""
+
+import pathlib
+import bpy
+
+
+def clear_all():
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.ops.object.delete()
+
+    master_collection = bpy.context.scene.collection
+    for c in master_collection.children:
+        master_collection.children.unlink(c)
+
+    for c in bpy.data.collections:
+        for o in c.objects:
+            bpy.data.objects.remove(o)
+        bpy.data.collections.remove(c)
+
+
+def add_light_source(scene):
+    raise NotImplementedError("Implement: Add lights to given scene.")
+
+    bpy.ops.mesh.primitive_plane_add()
+    scene_light = bpy.context.selected_objects[0]
+    scene_light.name = "SceneLight"
+    # Location above and somewhat behind scene center
+    scene_light.location = (-20.0, 0.0, 50.0)
+    scene_light.scale = (20.0, 30.0, 1.0)
+
+    mat = bpy.data.materials.new(name="LightEmission")
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    nodes.clear()
+
+    # create emission node
+    node_emission = nodes.new(type="ShaderNodeEmission")
+    node_emission.inputs[0].default_value = (1.0, 1.0, 1.0, 1.0)  # RGBA
+    node_emission.inputs[1].default_value = 5.0  # strength
+    node_emission.location = 0, 0
+    # create output node
+    node_output = nodes.new(type="ShaderNodeOutputMaterial")
+    node_output.location = 200, 0
+    # link nodes
+    links = mat.node_tree.links
+    _ = links.new(node_emission.outputs[0], node_output.inputs[0])
+
+    scene_light.data.materials.append(mat)
+    # not visible in camera
+    scene_light.cycles_visibility.camera = False
+
+    # enable ambient occlusion
+    world = bpy.context.scene.world
+    world.light_settings.use_ambient_occlusion = True
+
+
+def create_world_with_hdr_background(name: str = "world_hdr"):
+    hdr_filepath = (
+        pathlib.Path(__file__).parent.parent / "assets" / "ruckenkreuz_2k.hdr"
+    )
+    if not hdr_filepath.is_file():
+        raise FileNotFoundError(
+            "Cannot find HDR background file {}".format(str(hdr_filepath))
+        )
+    background_image = bpy.data.images.load(str(hdr_filepath), check_existing=False)
+
+    world = bpy.data.worlds.new(name)
+    world.use_nodes = True
+    nodes = world.node_tree.nodes
+    nodes.clear()
+
+    node_tex_env = nodes.new(type="ShaderNodeTexEnvironment")
+    node_tex_env.location = 0, 0
+    node_tex_env.image = background_image
+
+    node_background = nodes.new(type="ShaderNodeBackground")
+    node_background.location = 300, 0
+
+    node_output = nodes.new(type="ShaderNodeOutputWorld")
+    node_output.location = 600, 0
+
+    # link nodes
+    links = world.node_tree.links
+    links.new(node_tex_env.outputs[0], node_background.inputs[0])
+    links.new(node_background.outputs[0], node_output.inputs[0])
+    return world
+
+
+def create_camera_top_view_ortho(
+    name: str = "CameraTopViewOrtho", center=(0.0, 0.0), scale: float = 20.0
+):
+    """top view orthographic."""
+    cam = bpy.data.cameras.new(name)
+    cam = bpy.data.objects.new("Obj" + name, cam)
+    cam.location = center + (45.0,)
+    cam.rotation_mode = "QUATERNION"
+    cam.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+    cam.data.type = "ORTHO"
+    cam.data.ortho_scale = scale
+    return cam
+
+
+def create_camera_perspective(
+    location,
+    rotation_quat,
+    name: str = "CameraPerspective",
+    focal_length: float = 50.0,
+):
+    cam = bpy.data.cameras.new(name)
+    cam = bpy.data.objects.new("Obj" + name, cam)
+    cam.location = location
+    cam.rotation_mode = "QUATERNION"
+    cam.rotation_quaternion = rotation_quat
+    cam.data.type = "PERSP"
+    cam.data.lens = focal_length
+    return cam
+
+
+def add_cameras_default(scene):
+    """Make two camera (main/top) default setup for demo images."""
+    cam_main = create_camera_perspective(
+        location=(-33.3056, 24.1123, 26.0909),
+        rotation_quat=(0.42119, 0.21272, -0.39741, -0.78703),
+    )
+    scene.collection.objects.link(cam_main)
+
+    cam_top = create_camera_top_view_ortho()
+    scene.collection.objects.link(cam_top)
+
+    # make this the main scene camera
+    scene.camera = cam_main
+    return cam_main, cam_top
+
+
+def setup_scene(name: str = "blender_kitti", use_background_image: bool = True):
+    scene = bpy.data.scenes.new(name)
+    scene.render.engine = "CYCLES"
+    scene.render.film_transparent = True
+
+    scene.cycles.samples = 128
+    scene.view_settings.view_transform = "Standard"
+
+    if use_background_image:
+        scene.world = create_world_with_hdr_background()
+    else:
+        add_light_source(scene)
+    return scene
+```
+
+### blender_kitti/system_setup.py
+```
+# -*- coding: utf-8 -*-
+""""""
+
+import bpy
+
+
+def enable_devices():
+    ctx = bpy.context
+    cprefs = ctx.preferences.addons["cycles"].preferences
+
+    devices = cprefs.get_device_list("NONE")
+    if not devices:
+        raise RuntimeError("No compute devices found, not even a CPU?")
+
+    device_types = [device_desc[1] for device_desc in devices]
+    device_types = [t for t in device_types if t != "CPU"]
+    if not device_types:
+        raise RuntimeError(
+            "No accelerator device found (CUDA, OPTIX, HIP, ONEAPI, ...)"
+        )
+    cprefs.compute_device_type = device_types[0]
+
+    for device in cprefs.devices:
+        device.use = True
+```
+
+### blender_kitti_examples/__init__.py
+```
+# -*- coding: utf-8 -*-
+
+__author__ = """Christoph Rist"""
+__email__ = "c.rist@posteo.de"
+
+from .example_render_kitti import (
+    render_demo_images,
+)
+
+__all__ = [
+    "render_demo_images",
+]
+```
+
+### blender_kitti_examples/data.py
+```
+# -*- coding: utf-8 -*-
+""""""
+
+import colorsys
+import pathlib
+import numpy as np
+from ruamel.yaml import YAML
+
+
+def unpack(compressed: np.ndarray):
+    assert compressed.ndim == 1
+    uncompressed = np.zeros(compressed.shape[0] * 8, dtype=bool)
+    for b in range(8):
+        uncompressed[b::8] = compressed >> (7 - b) & 1
+    return uncompressed
+
+
+def read_semantic_kitti_voxel_label(semantic_kitti_sample) -> {str: np.ndarray}:
+    # compressed/uncompressed
+    d = {
+        "bin": True,
+        "invalid": True,
+        "label": False,
+        "occluded": True,
+    }
+    voxel_dims = (256, 256, 32)
+
+    data = {}
+    for k, compressed in d.items():
+        filepath = semantic_kitti_sample.parent / (semantic_kitti_sample.stem + "." + k)
+        if not filepath.is_file():
+            raise FileNotFoundError("Cannot find voxel label file '{}'.".format(k))
+
+        if compressed:
+            x = np.fromfile(str(filepath), dtype=np.uint8)
+            x = unpack(x)
+        else:
+            x = np.fromfile(str(filepath), dtype=np.int16)
+        x = x.reshape(voxel_dims)
+        data[k] = x
+    return data
+
+
+def get_semantic_kitti_config():
+    file_config_semantic = (
+        pathlib.Path(__file__).parent.parent / "data" / "config" / "semantic-kitti.yaml"
+    )
+    if not file_config_semantic.is_file():
+        raise FileNotFoundError("Cannot find semantic kitti config file.")
+
+    # read config
+    with open(str(file_config_semantic), "r") as file_conf_sem:
+        yaml = YAML()
+        data = yaml.load(file_conf_sem)
+        config_data = {k: dict(v) for k, v in data.items()}
+    return config_data
+
+
+def get_semantic_kitti_voxels():
+    config_data = get_semantic_kitti_config()
+
+    color_bgr = dict(config_data["color_map"])
+    learning_map = dict(config_data["learning_map"])
+
+    mapping = {k: v for k, v in zip(learning_map.keys(), range(len(learning_map)))}
+
+    semantic_kitti_sample = (
+        pathlib.Path(__file__).parent.parent
+        / "data"
+        / "voxel_label_kitti_odometry_08_001000"
+    )
+    data = read_semantic_kitti_voxel_label(semantic_kitti_sample)
+    voxel_label = np.vectorize(mapping.get, otypes=[np.int16])(data["label"])
+
+    semantic_colors = np.asarray(
+        [list(color_bgr[k]) for k in learning_map.keys()], np.uint8
+    )
+    # BGR -> RGB
+    semantic_colors = semantic_colors[..., ::-1]
+    color_grid = semantic_colors[voxel_label]
+    return data["label"] != 0, color_grid
+
+
+def get_semantic_kitti_point_cloud():
+    file_point_cloud = (
+        pathlib.Path(__file__).parent.parent
+        / "data"
+        / "velodyne_kitti_odometry_08_001000.bin"
+    )
+    if not file_point_cloud.is_file():
+        raise FileNotFoundError("Cannot find kitti point cloud file.")
+
+    file_semantic_label = (
+        pathlib.Path(__file__).parent.parent
+        / "data"
+        / "semantic_label_kitti_odometry_08_001000.label"
+    )
+    if not file_semantic_label.is_file():
+        raise FileNotFoundError("Cannot find semantic kitti label file.")
+
+    config_data = get_semantic_kitti_config()
+    point_cloud = np.fromfile(str(file_point_cloud), dtype=np.float32).reshape(
+        (
+            -1,
+            4,
+        )
+    )
+    label = np.fromfile(str(file_semantic_label), dtype=np.uint32).reshape((-1,))
+    label_sem = label & 0xFFFF  # semantic label in lower half
+    label_inst = label >> 16  # instance id in upper half
+    # sanity check
+    assert (label_sem + (label_inst << 16) == label).all()
+
+    color_bgr = dict(config_data["color_map"])
+    learning_map = dict(config_data["learning_map"])
+    mapping = {k: v for k, v in zip(learning_map.keys(), range(len(learning_map)))}
+    semantic_colors = np.asarray(
+        [list(color_bgr[k]) for k in learning_map.keys()], np.uint8
+    )
+    # BGR -> RGB
+    semantic_colors = semantic_colors[..., ::-1]
+
+    label = np.vectorize(mapping.get, otypes=[np.int16])(label_sem)
+    colors = semantic_colors[label]
+    return point_cloud[:, :3], colors
+
+
+def get_pseudo_flow(point_cloud):
+    points_homog = np.concatenate(
+        [point_cloud, np.ones((point_cloud.shape[0], 1))], axis=-1
+    )
+
+    rot_angle = np.pi / 32.0
+    ca = np.cos(rot_angle)
+    sa = np.sin(rot_angle)
+    rot_homog = np.eye(4)
+    rot_homog[0, 0] = ca
+    rot_homog[0, 1] = -sa
+    rot_homog[1, 0] = sa
+    rot_homog[1, 1] = ca
+
+    rot_around_y = 10.0
+    transl_homog = np.eye(4)
+    transl_homog_reverse = np.eye(4)
+    transl_homog[1, 3] = rot_around_y
+    transl_homog_reverse[1, 3] = -rot_around_y
+
+    odom = np.matmul(transl_homog, np.matmul(rot_homog, transl_homog_reverse))
+
+    odom[0, 3] = -1.0
+
+    flow = ((np.matmul(odom, points_homog.T) - points_homog.T).T)[..., 0:3]
+
+    colors_hsv = np.ones_like(flow)
+
+    flow_azi = np.arctan2(flow[..., 1], flow[..., 0])
+    colors_hsv[..., 0] = np.fmod(flow_azi + np.pi, 2 * np.pi) / (2 * np.pi)
+
+    colors = []
+    for color in colors_hsv:
+        colors.append(colorsys.hsv_to_rgb(color[0], color[1], color[2]))
+    colors_rgb = np.array(colors)
+    colors_rgba = np.concatenate(
+        [
+            colors_rgb,
+            0.3 * np.ones(colors_rgb.shape[0])[..., None],
+        ],
+        axis=-1,
+    ).astype(np.float32)
+    return flow, colors_rgba
+```
+
+### blender_kitti_examples/example_render_kitti.py
+```
+# -*- coding: utf-8 -*-
+"""Example renders of point cloud and voxels"""
+
+from dataclasses import dataclass
+import enum
+import pathlib
+import typing
+
+import bpy
+import numpy as np
+import tyro
+
+
+from blender_kitti import (
+    add_boxes,
+    add_point_cloud,
+    add_voxels,
+    enable_devices,
+    setup_scene,
+    add_cameras_default,
+    add_flow_mesh,
+)
+from blender_kitti.scene_setup import (
+    create_camera_top_view_ortho,
+    create_camera_perspective,
+)
+from .data import (
+    get_semantic_kitti_point_cloud,
+    get_semantic_kitti_voxels,
+    get_pseudo_flow,
+)
+
+
+class DemoScene(enum.StrEnum):
+    BOXES = enum.auto()
+    POINT_CLOUD = enum.auto()
+    VOXELS = enum.auto()
+    SCENE_FLOW = enum.auto()
+    ALL = enum.auto()
+
+
+@dataclass
+class Args:
+    demo_scene: tyro.conf.Positional[tyro.conf.EnumChoicesFromValues[DemoScene]]
+    """Select the demo scene to render."""
+
+    use_gpu: bool = False
+    """Set to true to enable GPU usage for rendering"""
+
+    output_path: pathlib.Path = pathlib.Path(__file__).parent / "img"
+    """"""
+
+
+def render(scene, cameras, output_path, scene_name):
+    for cam in cameras:
+        p = output_path / f"blender_kitti_demo_{scene_name}_{cam.data.name}.png"
+        scene.camera = cam
+        scene.render.filepath = str(p)
+        bpy.ops.render.render(write_still=True, scene=scene.name)
+
+
+def add_demo_point_cloud(scene, pcl_instancer_prefix="") -> None:
+    point_cloud, colors = get_semantic_kitti_point_cloud()
+    _ = add_point_cloud(
+        points=point_cloud, colors=colors, scene=scene, name_prefix=pcl_instancer_prefix
+    )
+
+
+def add_demo_scene_flow(scene):
+    # reduce number of points, especially near vehicle
+    point_cloud, _ = get_semantic_kitti_point_cloud()
+    num_pts = 6000
+    dist = np.linalg.norm(point_cloud, axis=-1)
+    prob = (dist - dist.min()) / (dist.max() - dist.min())
+    prob_normed = prob / prob.sum()
+    indices = np.arange(point_cloud.shape[0])
+    indices = np.random.choice(indices, size=num_pts, replace=False, p=prob_normed)
+    point_cloud_downsample = point_cloud[indices, ...]
+
+    flow, colors = get_pseudo_flow(point_cloud_downsample)
+    _ = add_flow_mesh(
+        point_cloud=point_cloud_downsample, flow=flow, colors_rgba=colors, scene=scene
+    )
+
+
+def add_demo_boxes(scene):
+    np.random.seed(1)
+
+    # Need different pcl_instancer_prefix, otherwise:
+    # RuntimeError: Object 'point_cloud_obj_instancer' already exists.
+    add_demo_point_cloud(scene, pcl_instancer_prefix="boxes")
+
+    num_boxes = 20
+    box_range_max = np.array([20.0, 20.0, 1.0])
+    box_range_min = -box_range_max
+
+    max_box_dims = np.array([7.0, 3.0, 2.0])
+    min_box_dims = np.array([1.0, 1.0, 1.0])
+
+    # random boxes
+    boxes = {
+        "pos": box_range_min[None, ...]
+        + np.random.rand(num_boxes, 3) * (box_range_max - box_range_min)[None, ...],
+        "dims": min_box_dims[None, ...]
+        + np.random.rand(num_boxes, 3) * (max_box_dims - min_box_dims)[None, ...],
+        "rot": 2 * np.pi * np.random.rand(num_boxes, 1),
+        "probs": np.random.rand(num_boxes, 1),
+    }
+
+    base_colors = np.array(
+        [
+            [1.0, 0.0, 0.0, 0.8],
+            [0.0, 1.0, 0.0, 0.8],
+            [0.0, 0.0, 1.0, 0.8],
+        ]
+    )
+
+    box_colors = base_colors[np.random.random_integers(0, 2, size=num_boxes)]
+
+    _ = add_boxes(
+        scene=scene,
+        boxes=boxes,
+        box_colors_rgba_f64=box_colors,
+        confidence_threshold=0.5,
+    )
+
+
+def add_cameras_voxels(scene):
+    cam_main = create_camera_perspective(
+        location=(2.86, 17.52, 3.74),
+        rotation_quat=(0.749, 0.620, -0.150, -0.181),
+    )
+    scene.collection.objects.link(cam_main)
+
+    cam_top = create_camera_top_view_ortho(
+        center=(25.5, 25.5), scale=51.0, name="CameraTop"
+    )
+    scene.collection.objects.link(cam_top)
+    scene.camera = cam_main
+    return [cam_main, cam_top]
+
+
+def add_demo_voxels(scene):
+    voxels, colors = get_semantic_kitti_voxels()
+    _ = add_voxels(voxels=voxels, colors=colors, scene=scene)
+
+
+def render_demo_images(
+    demo_scenes: typing.List[DemoScene], output_path: pathlib.Path, use_gpu: bool
+) -> None:
+    for demo_scene in demo_scenes:
+        if demo_scene == DemoScene.ALL:
+            continue
+
+        scene = setup_scene(name=f"demo_{str(demo_scene)}")
+        if demo_scene == DemoScene.VOXELS:
+            cameras = add_cameras_voxels(scene)
+        else:
+            cameras = add_cameras_default(scene)
+
+        # there should be a single view layer available
+        scene.view_layers[0].cycles.use_denoising = True
+        scene.render.resolution_percentage = 100
+        scene.render.resolution_x = 640
+        scene.render.resolution_y = 480
+        # alpha background
+        scene.render.film_transparent = True
+        #
+        if use_gpu:
+            enable_devices()
+            scene.cycles.device = "GPU"
+        else:
+            scene.cycles.device = "CPU"
+
+        add_f = {
+            DemoScene.POINT_CLOUD: add_demo_point_cloud,
+            DemoScene.VOXELS: add_demo_voxels,
+            DemoScene.SCENE_FLOW: add_demo_scene_flow,
+            DemoScene.BOXES: add_demo_boxes,
+        }
+        add_f[demo_scene](scene)
+
+        render(scene, cameras, output_path, str(demo_scene))
+
+
+def main() -> None:
+    args = tyro.cli(Args)
+    args.output_path.mkdir(exist_ok=True)
+
+    if args.demo_scene == DemoScene.ALL:
+        demo_scenes = list(DemoScene)
+    else:
+        demo_scenes = [args.demo_scene]
+
+    render_demo_images(demo_scenes, args.output_path, args.use_gpu)
+
+
+if __name__ == "__main__":
+    main()
+```

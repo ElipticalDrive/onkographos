@@ -1,0 +1,150 @@
+--- v001.md
++++ v002.md
+@@ -7,9 +7,9 @@
+ 
+ ## How it works
+-The method combines path prefix shifting with a self-normalized estimator to amortize the cost of path suffix evaluation across multiple cameras.
++The method combines path prefix shifting with a self-normalized estimator to amortize the cost of path suffix evaluation across multiple cameras [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A set of $K$ camera views (base and target), a heterogeneous participating medium defined by extinction coefficient $\mu_t(x)$, phase function $f_S$, and emission $L_e$.
+-*   **Outputs:** Radiance estimates $I_j$ for each pixel $j$ in the target views.
++*   **Inputs:** A set of $K$ camera views (base and target), a heterogeneous participating medium defined by extinction coefficient $\mu_t(x)$, phase function $f_S$, and emission $L_e$ [S1].
++*   **Outputs:** Radiance estimates $I_j$ for each pixel $j$ in the target views [S1].
+ 
+ ### Data Structures
+@@ -34,5 +34,5 @@
+     b.  Check that the pivot is not occluded and falls within the target camera's view frustum [S1].
+     c.  Construct the shifted prefix $\bar{\mathbf{x}}_j$ by transforming all events of the base prefix using the shift mapping $S_{i \to j}$ [S1].
+-    d.  The shifted prefix must have the same number of random events as the base prefix to be defined on the same probability space [S1].
++    d.  The shifted chain must have the same number of random events as the base one to be defined on the same probability space [S1].
+ 
+ 3.  **PDF and Jacobian Evaluation:**
+@@ -44,8 +44,7 @@
+ 
+ 4.  **MWIS Weight Computation:**
+-    Compute the MWIS weight $w_{i \to j}(\bar{\mathbf{x}}_j)$ for the shifted prefix contributing to pixel $j$ from base pixel $i$. Using the balance heuristic, the weight simplifies to:
+-    $$ w_{i \to j}(\bar{\mathbf{x}}_j) = \frac{p_{i \to j}(\bar{\mathbf{x}}_j)}{\sum_k p_{k \to j}(\bar{\mathbf{x}}_j)} $$
++    Compute the MWIS weight $w_{i \to j}(\bar{\mathbf{x}}_j)$ for the shifted prefix contributing to pixel $j$ from base pixel $i$. Using the balance heuristic, the weight simplifies to a ratio of the target PDF to the shifted PDF, normalized by the sum of ratios across all candidate cameras [S1]:
++    $$ w_{i \to j}(\bar{\mathbf{x}}_j) = \frac{p_{j \to j}(\bar{\mathbf{x}}_j) / p_{i \to j}(\bar{\mathbf{x}}_j)}{\sum_k p_{k \to j}(\bar{\mathbf{x}}_j) / p_{i \to k}(\bar{\mathbf{x}}_i)} $$
+     where $p_{i \to j}(\bar{\mathbf{x}}_j)$ is the effective PDF of the shifted prefix for pixel $j$, incorporating the base PDF and Jacobian [S1].
+-    *Note: The source text provides a numerically stable formulation for this ratio accumulation (Eq. 23 in [S1]), which sums ratios of source/target PDFs multiplied by Jacobians.*
+ 
+ 5.  **Path Suffix Generation:**
+@@ -64,73 +63,49 @@
+ ```python
+ def multi_view_path_tracing_with_mwis(cameras, medium, num_samples):
+-    # Initialize accumulators for each pixel
+-    pixel_weights = {j: 0.0 for j in range(len(cameras))}
+-    pixel_estimates = {j: 0.0 for j in range(len(cameras))}
++    # Accumulators for MWIS estimator (Eq. 17)
++    sum_w = {j: 0.0 for j in range(len(cameras))}
++    sum_w_f_p = {j: 0.0 for j in range(len(cameras))}
+ 
+-    for sample_idx in range(num_samples):
++    for _ in range(num_samples):
+         for base_pixel_i, base_camera in enumerate(cameras):
+-            # 1. Sample base prefix
+-            base_prefix, base_pdf = sample_base_prefix(base_camera, medium)
++            # 1. Sample base prefix (Sec. 3)
++            base_prefix = sample_base_prefix(base_camera, medium)
++            base_pdf = compute_prefix_pdf(base_prefix)
+             pivot = base_prefix.last_interaction()
+ 
+-            # 2. Shift prefixes to other cameras
++            # 2. Shift prefixes & compute ratios (Alg. 2, lines 3-9)
++            Sr = 0.0
+             shifted_prefixes = []
+-            shifted_pdfs = []
+-            jacobian_ratios = []
+-            
+             for target_pixel_j, target_camera in enumerate(cameras):
+-                # Check visibility and shift
+-                if is_visible(pivot, target_camera):
+-                    shifted_prefix = shift_prefix(base_prefix, base_camera, target_camera)
+-                    shifted_pdf = base_pdf * abs(jacobian_determinant(shift_prefix, base_camera, target_camera))
+-                    
+-                    # Store for weight computation
+-                    shifted_prefixes.append((target_pixel_j, shifted_prefix))
+-                    shifted_pdfs.append(shifted_pdf)
+-                    
+-                    # Compute ratio for denominator sum (Eq 23 logic)
+-                    # Ratio of shifted PDF to target PDF (here target is base PDF for simplicity in ratio)
+-                    # In practice, sum over all k of (p_k->j / p_k->i) * |J|
+-                    # Simplified: accumulate shifted_pdf for denominator
+-                    pass 
+-            
+-            # 3. Compute MWIS weights and accumulate
+-            # Denominator Sr is sum of shifted PDFs (or weighted PDFs) for all target cameras
+-            Sr = sum(shifted_pdfs)
+-            
+-            for idx, (target_pixel_j, shifted_prefix) in enumerate(shifted_prefixes):
+-                shifted_pdf = shifted_pdfs[idx]
+-                
+-                # MWIS Weight: w = p_shifted / sum(p_all_shifted)
+-                # Note: Source Eq 23 implies a more complex ratio involving c_i, but 
+-                # for equal sample counts c_i=1, it reduces to PDF ratios.
+-                if Sr > 0:
+-                    weight = shifted_pdf / Sr
+-                else:
+-                    weight = 0.0
+-                
+-                # 4. Evaluate Suffix (Shared)
+-                # The suffix is generated from the pivot. 
+-                # Direct and Indirect illumination are computed.
+-                radiance = evaluate_suffix(pivot, medium, target_pixel_j)
+-                
+-                # 5. Accumulate
+-                # Contribution = weight * (radiance / shifted_pdf)
+-                # Note: The estimator form in [S1] Eq 17 is sum(w * f/p) / sum(w).
+-                # Here we accumulate the numerator term w * f/p and the denominator term w separately?
+-                # Or use the self-normalizing form directly.
+-                # Pseudocode follows Alg 2 in [S1]:
+-                
+-                pixel_weights[target_pixel_j] += weight
+-                pixel_estimates[target_pixel_j] += weight * (radiance / shifted_pdf)
++                if not is_visible(pivot, target_camera):
++                    continue
++                shifted_prefix = shift_prefix(base_prefix, base_camera, target_camera)
++                jacobian = abs(jacobian_determinant(shifted_prefix, base_camera, target_camera))
++                # p_{i->j} = c_i * p_i * |J|
++                p_i_to_j = (1.0 / len(cameras)) * base_pdf * jacobian
++                # p_{j->j} = c_j * p_j
++                p_j_to_j = (1.0 / len(cameras)) * compute_prefix_pdf(shifted_prefix)
++                # Accumulate ratio for denominator
++                if p_i_to_j > 0:
++                    Sr += p_j_to_j / p_i_to_j
++                shifted_prefixes.append((target_pixel_j, shifted_prefix, p_i_to_j, p_j_to_j))
++
++            # 3. Sample suffix & compute direct/indirect (Alg. 2, lines 10-11)
++            suffix = sample_suffix(pivot, medium)
++            radiance = evaluate_suffix(suffix, medium)
++
++            # 4. Accumulate contributions (Alg. 2, lines 12-16)
++            for target_pixel_j, shifted_prefix, p_i_to_j, p_j_to_j in shifted_prefixes:
++                if Sr > 0 and p_i_to_j > 0:
++                    # MWIS weight w_{i->j} = (p_{j->j} / p_{i->j}) / Sr (Eq. 21, 23)
++                    w = (p_j_to_j / p_i_to_j) / Sr
++                    sum_w[target_pixel_j] += w
++                    sum_w_f_p[target_pixel_j] += w * (radiance / p_j_to_j)
+ 
+     # Final normalization
++    results = {}
+     for j in range(len(cameras)):
+-        if pixel_weights[j] > 0:
+-            pixel_estimates[j] /= pixel_weights[j]
+-        else:
+-            pixel_estimates[j] = 0.0
+-
+-    return pixel_estimates
++        results[j] = sum_w_f_p[j] / sum_w[j] if sum_w[j] > 0 else 0.0
++    return results
+ ```
+ 
+@@ -155,5 +130,5 @@
+ 
+ ### Adaptive Multi-View Path Tracing
+-An adaptive variant of multi-view rendering that distributes samples in undersampled areas to handle strongly view-dependent scattering functions where path reuse is less effective [S1]. It uses a phase function anisotropy factor $g = 0.98$ for strongly forward anisotropic volumes [S1]. Strongly view-dependent scattering functions reduce path reuse effectiveness in standard multi-view rendering [S1]. The adaptive variant (amvpt) has a small overhead due to error and sample maps evaluation compared to standard multi-view rendering (mvpt), but improves sample distribution in undersampled areas [S1].
++An adaptive variant of multi-view rendering that distributes samples in undersampled areas to handle strongly view-dependent scattering functions where path reuse is less effective [S1]. Demonstrated on scenes with strongly forward anisotropic volumes (e.g., $g = 0.98$) [S1]. Strongly view-dependent scattering functions reduce path reuse effectiveness in standard multi-view rendering [S1]. The adaptive variant (amvpt) has a small overhead due to error and sample maps evaluation compared to standard multi-view rendering (mvpt), but improves sample distribution in undersampled areas [S1].
+ 
+ ### Multiple View Path Construction

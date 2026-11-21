@@ -1,0 +1,159 @@
+# Volume Fragment Shader (Direct Ray Marching)
+
+Also called: Fragment Shader Implementation, Ray-box volume rendering, Volume Rendering Shader
+
+## Overview
+This method implements direct volume ray casting entirely within a GPU fragment shader, bypassing traditional ray-generation geometry or multi-pass accumulation buffers. It computes per-pixel ray parameters from camera matrices, performs ray-AABB intersection to determine entry and exit points, and executes the emission-absorption compositing loop directly in the fragment shader [S1, S2, unofficial]. It is distinguished from sibling methods by its reliance on hardware-accelerated texture sampling for trilinear interpolation and its specific handling of mask-based context visualization (ghosting) and intensity normalization within the shader logic itself [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** 3D volume texture (`volumeTex`), 3D mask texture (`maskTex`), 1D lookup table (`lut`), 1D color transfer function (`CTF`), 1D gradient magnitude transfer function (`GMTF`), camera matrices (implicit via NDC), and UI parameters (`beta`, `surfaceVoxelsOnly`, `colorGhosting`, `roiMin`, `roiMax`, `isoValue`, `quality`, `dithering`) [S1, S2, unofficial].
+*   **Outputs:** Final fragment color (`gl_FragColor`) [S1, unofficial].
+
+**Data Structures:**
+*   `volumeTex`: `sampler3D`, stores scalar volume values normalized to $[0, 1]$ [S2, unofficial].
+*   `maskTex`: `sampler3D`, stores classification/mask data [S1, unofficial].
+*   `lut`: `sampler1D`, maps volume intensity to color/opacity [S1, unofficial].
+*   `CTF`: `sampler1D`, maps mask data to color [S1, unofficial].
+*   `GMTF`: `sampler1D`, maps gradient magnitude to shading weight [S1, unofficial].
+*   `transferTex`: `sampler2D`, used in some implementations to store 1-D LUTs as a single-row 2-D texture [S2, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Coordinate Generation:** Compute Normalized Device Coordinates (NDC) from `gl_FragCoord` to ensure robustness across platforms (e.g., macOS) [S2, unofficial].
+2.  **Mask Sampling:** Sample the mask texture at the current fragment's texture coordinates (`glTexCoord[1].stp`) to get value $r$ [S1, unofficial].
+3.  **Mask Classification:** Sample the Color Transfer Function (CTF) using the alpha channel of $r$ ($r.a$) to obtain the mask color `col_mask` [S1, unofficial].
+4.  **Fragment Discard:** If `col_mask.a` is $0.0$, discard the fragment immediately [S1, unofficial].
+5.  **Ray-AABB Intersection:**
+    *   Define the bounding box (AABB) centered at the origin with half-extents `boxHalf` [S2, unofficial].
+    *   Compute ray direction `rayDir` and origin `rayOrigin` from camera parameters [S2, unofficial].
+    *   Calculate inverse direction: `invDir = 1.0 / rayDir` [S2, unofficial].
+    *   Compute intersection intervals for each slab:
+        $$ t_0 = (-\text{boxHalf} - \text{rayOrigin}) \times \text{invDir} $$
+        $$ t_1 = (\text{boxHalf} - \text{rayOrigin}) \times \text{invDir} $$
+    *   Determine $t_{\text{min}}$ and $t_{\text{max}}$:
+        $$ t_{\text{min}} = \max(\max(t_0.x, t_0.y), t_0.z) $$
+        $$ t_{\text{max}} = \min(\min(t_1.x, t_1.y), t_1.z) $$
+    *   The ray intersects the box if $t_{\text{max}} > \max(t_{\text{min}}, 0.0)$ [S2, unofficial].
+6.  **Volume Sampling:**
+    *   Sample the volume texture at the fragment's position (`glTexCoord[0].stp`) to get $p$ [S1, unofficial].
+    *   Extract gradient vector `grad` from $p.rgb$ [S1, unofficial].
+    *   Sample the Lookup Table (LUT) using $p.a$ to get volume color `col_vol` [S1, unofficial].
+    *   Sample the Gradient Magnitude Transfer Function (GMTF) using $r.a$ to get `grad_weight` [S1, unofficial].
+7.  **Compositing and Shading Logic:**
+    *   **Case A (Full Mask):** If `col_mask.a` is $1.0$:
+        $$ \text{color} = \text{col\_vol} \times \beta + (1 - \beta) \times \text{col\_mask} $$
+        where $\beta$ is a user-defined parameter modulating the influence of the volume color [S1, unofficial].
+    *   **Case B (Partial Mask):** If `col_mask.a` is not $1.0$:
+        *   **Surface Voxels Only:** If `surfaceVoxelsOnly` is true AND the gradient magnitude is small (checked via `LargeGradient(grad, grad_weight)`):
+            $$ \text{color}.a = 0.0 $$
+        *   **Color Ghosting:** If `colorGhosting` is true:
+            $$ \text{color} = \text{col\_mask} $$
+        *   **Default Blending:** Otherwise:
+            $$ \text{color} = \text{col\_vol} \times \beta + (1 - \beta) \times \text{col\_mask} $$
+8.  **Final Shading:** Call the `shade` function with `color`, `grad`, and `grad_weight` to produce `gl_FragColor` [S1, unofficial].
+
+**Intensity Normalization (Pre-processing):**
+Before sampling, raw volume values are normalized:
+$$ v_{\text{norm}} = \frac{v_{\text{raw}} - \text{rangeMin}}{\text{rangeMax} - \text{rangeMin}} $$
+Clamped to $[0, 1]$. If $\text{rangeMax} - \text{rangeMin} < 10^{-6}$, return $0.0$ to avoid division by zero [S2, unofficial]. Gamma correction is applied: $v_{\text{final}} = v_{\text{norm}}^{\text{gamma}}$ [S2, unofficial].
+
+**Dithering:**
+To prevent banding artifacts, a pseudo-random hash using `noiseSeed` adds a random offset to the ray start position [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Fragment Shader Logic
+# Inputs: gl_FragCoord, uniforms (volume, mask, lut, CTF, GMTF, beta, etc.)
+# Outputs: gl_FragColor
+
+def main():
+    # 1. NDC Coordinates
+    ndc = compute_ndc(gl_FragCoord)
+    
+    # 2. Mask Sampling
+    r = texture3D(mask, ndc)
+    col_mask = texture1D(CTF, r.a)
+    
+    # 3. Discard if mask is transparent
+    if col_mask.a == 0.0:
+        discard_fragment()
+        return
+
+    # 4. Volume Sampling
+    p = texture3D(volume, ndc)
+    col_vol = texture1D(lut, p.a)
+    grad = p.rgb
+    grad_weight = texture1D(GMTF, r.a)
+    
+    # 5. Compositing Logic
+    if col_mask.a == 1.0:
+        color = col_vol * beta + (1.0 - beta) * col_mask
+    else:
+        if surface_voxels_only and not large_gradient(grad, grad_weight):
+            color.a = 0.0
+        elif color_ghosting:
+            color = col_mask
+        else:
+            color = col_vol * beta + (1.0 - beta) * col_mask
+            
+    # 6. Final Shading
+    gl_FragColor = shade(color, grad, grad_weight)
+
+def compute_ndc(frag_coord):
+    # Robust NDC computation for macOS
+    return vec3(frag_coord.x, frag_coord.y, 0.5) / vec3(width, height, 1.0) * 2.0 - 1.0
+
+def large_gradient(grad, grad_weight):
+    # Placeholder for gradient magnitude check logic
+    # Typically checks if grad_weight exceeds a threshold
+    return grad_weight > 0.5 # [G] Implementation detail inferred from context
+
+def shade(color, grad, grad_weight):
+    # Placeholder for lighting/shading calculation
+    # Uses grad and grad_weight to modulate color
+    return color * grad_weight # [G] Simplified shading model
+```
+
+**Parameters:**
+*   `beta`: Float, modulates the blend between volume color and mask color. Default 1.0 [S1, S2, unofficial].
+*   `surfaceVoxelsOnly`: Boolean, hides interior voxels if gradient is small [S1, unofficial].
+*   `colorGhosting`: Boolean, displays mask color for context nodes [S1, unofficial].
+*   `roiMin`, `roiMax`: `vec3`, texture coordinate bounds for Region of Interest clipping, default $(0,0,0)$ to $(1,1,1)$ [S2, unofficial].
+*   `isoValue`: Float, threshold for isosurface mode [S2, unofficial].
+*   `quality`: Float, controls step count (0.1 coarse, 1.0 fine) [S2, unofficial].
+*   `dithering`: Float, controls random ray-start offset strength [S2, unofficial].
+
+## Subtopics
+
+### Volume Raycasting Fragment Shader (Integer Variant)
+A variant that handles colormap and inversion logic differently, specifically separating inversion application for colormap vs scalar modes. It uses integer-based fragment coordinates to determine inversion state.
+*   **Definition:** Uses `highp usampler3D` for volume and `highp sampler2D` for colormap. Inversion is determined by comparing `comp` uniform with `gl_FragCoord` [S3, unofficial].
+*   **Logic:**
+    1.  Initialize `invert = false`. If `comp.x == int(gl_FragCoord.x)` or `comp.y == int(gl_FragCoord.y)`, set `invert = true` [S3, unofficial].
+    2.  Sample volume at `samp`. Convert red channel to float and divide by 65536.0. If `samp` is outside $[0.0, 1.0]$, set value to 0.0 [S3, unofficial].
+    3.  Default color is white RGB with alpha `val`.
+    4.  If `use_colormap` is true: Sample colormap at `vec2(val, 0.5)`. Set color to RGB from colormap and alpha from `val` [S3, unofficial].
+    5.  If `invert` is true AND `use_colormap` is false: Set color to white RGB and alpha `1.0 - val` [S3, unofficial].
+    6.  If `invert` is true AND `use_colormap` is true: Set color to white RGB and alpha 1.0 [S3, unofficial].
+*   **When to choose:** When integer-based coordinate inversion is required for specific visualization modes or when using 16-bit integer volume data mapped to colormap [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of samples per ray, which is controlled by the `quality` parameter [S2, unofficial].
+*   **Memory Complexity:** Low, as it operates per-fragment without storing large intermediate buffers, relying on GPU texture memory [S2, unofficial].
+*   **Performance:** Fast for small volumes or low quality settings; performance degrades with high `quality` (fine step count) and large volumes [S2, unofficial].
+*   **Strengths:** Simple implementation, leverages hardware texture sampling, supports real-time interaction via UI parameters [S1, S2, unofficial].
+*   **Limitations:** Limited to direct ray casting; does not support advanced lighting or global illumination without additional shader complexity [S1, unofficial]. Banding artifacts may occur without dithering [S2, unofficial].
+*   **When to use:** Real-time visualization of scalar volumes with simple transfer functions [S1, S2, unofficial].
+*   **When not to use:** Complex lighting requirements or very large volumes requiring hierarchical traversal [S1, unofficial].
+
+## Background
+This method originates from implementations in open-source visualization tools like ClearVolume-plus and VisWeb, adapting direct volume ray casting to fragment shaders [S1, S2, S3, unofficial]. It builds on the principles of hardware-accelerated volume rendering [Hardware-Accelerated Volume Rendering](5616-hardware-accelerated-volume-rendering.md).
+
+## Sources
+[S1] Structural focus+context rendering of multiclassified volume data, http://hdl.handle.net/2117/86811, fetched 2026-10-26 (unofficial)
+[S2] xwghua/clearvolume-plus, https://github.com/xwghua/clearvolume-plus, fetched 2026-10-26 (unofficial)
+[S3] johanna-b/VisWeb, https://github.com/johanna-b/VisWeb, fetched 2026-10-27 (unofficial)

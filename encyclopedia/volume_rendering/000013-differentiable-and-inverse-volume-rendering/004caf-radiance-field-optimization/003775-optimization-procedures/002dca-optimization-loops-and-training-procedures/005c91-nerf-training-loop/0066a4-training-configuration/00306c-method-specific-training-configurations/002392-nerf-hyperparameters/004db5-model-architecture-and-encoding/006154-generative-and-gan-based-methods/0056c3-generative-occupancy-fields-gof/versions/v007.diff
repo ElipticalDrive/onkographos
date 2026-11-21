@@ -1,0 +1,431 @@
+--- v006.md
++++ v007.md
+@@ -2,178 +2,274 @@
+ 
+ ## Overview
+-Generative Occupancy Fields (GOF) is a 3D-aware image synthesis method that learns compact object surfaces by transitioning from cumulative volumetric rendering to surface-point rendering [S1, unofficial]. Unlike standard radiance fields that produce diffused surfaces due to shape-color ambiguity, GOF reinterprets alpha values as occupancy probabilities to locate surfaces via root-finding, enabling the gradual shrinking of the sampling region to ensure surface compactness without impeding training convergence [S1, unofficial].
++Generative Occupancy Fields (GOF) is a generative model for 3D-aware image synthesis that combines radiance fields and occupancy representations to learn compact object surfaces without impeding training convergence [S1, unofficial]. It solves the problem of diffused surfaces in standard generative radiance fields (like pi-GAN) and the sparse gradient convergence issues in direct occupancy networks by transitioning from cumulative volume rendering to surface-point rendering [S1, unofficial]. Unlike its siblings, GOF predicts alpha values (interpreted as occupancy) instead of volume densities, enabling surface-aware image synthesis via root-finding [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A latent code $z \sim p_z$ (typically truncated for inference), a camera pose $\xi \sim p_\xi$, and a viewing direction $\mathbf{d}$.
+-*   **Outputs:** A synthesized 2D image $\tilde{C}(r, z)$ for ray $r$ defined by origin $o$ and direction $\mathbf{d}$.
++*   **Inputs:** A latent code $z \sim p_z$ (typically truncated for inference), a camera pose $\xi \sim p_\xi$ (defining ray origin $\mathbf{o}$ and direction $\mathbf{d}$), and training hyperparameters.
++*   **Outputs:** A synthesized RGB image $I$. During training, gradients are computed against the ground truth image.
+ 
+ **Data Structures:**
+-*   **Generator Network ($G_\theta$):** A FiLMed-SIREN backbone [S1, unofficial] that takes spatial coordinate $\mathbf{x}$, direction $\mathbf{d}$, and latent code $z$ as input. It outputs a scalar alpha value $\alpha_\theta(\mathbf{x}, z) \in [0, 1]$ and a color vector $\mathbf{c}_\theta(\mathbf{x}, \mathbf{d}, z) \in \mathbb{R}^3$.
+-*   **Discriminator Network ($D_\phi$):** Standard GAN discriminator taking 2D images as input.
+-*   **Parameters:**
+-    *   $N$: Number of rendering samples. Typical value: 12 [S1, unofficial].
+-    *   $M$: Number of root-finding bins. Typical value: 12 [S1, unofficial].
+-    *   $m_s$: Number of secant iterations. Typical value: 3 [S1, unofficial].
++*   **Generator $g_\theta$:** A neural network (typically a FiLMed-SIREN backbone) that takes position $\mathbf{x}$, latent code $z$, and direction $\mathbf{d}$ as input. It outputs a scalar alpha value $\alpha_\theta(\mathbf{x}, z) \in [0, 1]$ and a color vector $\mathbf{c}_\theta(\mathbf{x}, \mathbf{d}, z) \in \mathbb{R}^3$.
++*   **Discriminator $D_{\theta_D}$:** A standard GAN discriminator evaluating real vs. generated images.
++*   **Sampling Parameters:**
++    *   $N$: Number of rendering samples per ray. Typical value: 12 [S1, unofficial].
++    *   $M$: Number of bins for root-finding. Typical value: 12 [S1, unofficial].
++    *   $m_s$: Number of secant iterations for surface refinement. Typical value: 3 [S1, unofficial].
+     *   $\tau$: Threshold for root-finding. Typical value: 0.5 [S1, unofficial].
+-    *   $\Delta_{init}$: Initial sampling interval, set to $(t_f - t_n)/2$ [S1, unofficial].
+-    *   $\Delta_{min}$: Minimal sampling interval (pre-defined) [S1, unofficial].
+-    *   $\gamma$: Decay rate for shrinking interval [S1, unofficial].
+-
+-**Formulas:**
+-1.  **Alpha Value:** The network predicts $\alpha_\theta(\mathbf{x}_i, z)$ directly, which corresponds to the occupancy probability for a segment of length $\delta_i$:
+-    $$ \alpha_\theta(\mathbf{x}_i, z) = 1 - \exp(-\sigma_\theta(\mathbf{x}_i, z)\delta_i) $$
+-    where $\sigma_\theta$ is the implicit volume density [S1, unofficial].
+-
+-2.  **Rendering (Cumulative):** The color $\tilde{C}(r, z)$ is computed via alpha composition:
+-    $$ \tilde{C}(r, z) = \sum_{i=1}^{N} \alpha_\theta(\mathbf{x}_i, z) \left( \prod_{j<i} (1 - \alpha_\theta(\mathbf{x}_j, z)) \right) \mathbf{c}_\theta(\mathbf{x}_i, \mathbf{d}, z) $$
+-    where $\mathbf{x}_i$ are points sampled along the ray [S1, unofficial].
+-
+-3.  **Surface Location (Root-Finding):**
+-    *   Sample $M$ evenly-spaced points $\mathbf{x}_k$ partitioning the volume $[t_n, t_f]$.
+-    *   Find the bin $k_S$ where alpha crosses threshold $\tau$:
+-        $$ k_S = \arg\min_k (\alpha_\theta(\mathbf{x}_k, z) < \tau \le \alpha_\theta(\mathbf{x}_{k+1}, z)) $$
+-    *   Apply the secant method iteratively $m_s$ times to find the precise surface point $\mathbf{x}_s$ [S1, unofficial].
+-
+-4.  **Shrinking Sampling Region:**
+-    *   At training step $n$, compute the interval width:
++    *   $\Delta_{init}$: Initial sampling interval radius. Defined as $(t_f - t_n)/2$, where $[t_n, t_f]$ is the near/far bound of the volume [S1, unofficial].
++    *   $\Delta_{min}$: Minimal sampling interval radius (pre-defined constant) [S1, unofficial].
++    *   $\gamma$: Decay rate for the shrinking interval [S1, unofficial].
++
++**Method Steps:**
++
++1.  **Surface Location via Root-Finding:**
++    To locate the object surface along a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, GOF samples $M$ evenly-spaced points $x_k$ partitioning the volume interval $[t_n, t_f]$. It queries the generator for alpha values $\alpha_\theta(x_k, z)$. The surface bin $k_S$ is identified where the alpha value crosses the threshold $\tau$:
++    $$ k_S = \arg\min_k (\alpha_\theta(x_k, z) < \tau \le \alpha_\theta(x_{k+1}, z)) $$
++    The precise surface point $x_s$ is found by applying the secant method iteratively $m_s$ times within the bin $[x_{k_S}, x_{k_S+1}]$ [S1, unofficial]. Note: These $M$ points do not require gradient computation in implementation [S1, unofficial].
++
++2.  **Shrinking Sampling Region (Training Only):**
++    During training, the sampling region shrinks to encourage surface compactness.
++    *   Initialize $\Delta = \Delta_{init}$.
++    *   At training step $n$, compute the current interval radius:
+         $$ \Delta_n = \max(\Delta_{init} \exp(-\gamma n), \Delta_{min}) $$
+-    *   Sample $N$ points uniformly in $[\mathbf{x}_s - \Delta_n, \mathbf{x}_s + \Delta_n]$ [S1, unofficial].
+-
+-5.  **Loss Functions:**
+-    *   **GAN Loss:**
+-        $$ L_{origin}(\theta_D, \theta_G) = \mathbb{E}_{z \sim p_z, \xi \sim p_\xi} f(D_{\theta_D}(G_{\theta_G}(z, \xi))) + \mathbb{E}_{I \sim p_D} f(-D_{\theta_D}(I)) + \lambda ||\nabla_{D_{\theta_D}}(I)||_2^2 $$
+-        where $f(u) = -\log(1 + \exp(-u))$ [S1, unofficial].
+-    *   **Opacity Regularization:** Reduces entropy of alpha values:
+-        $$ L_{opacity} = \frac{1}{N} \sum_{i=1}^{N} \log(\alpha_\theta(\mathbf{x}_i, z)) + \log(1 - \alpha_\theta(\mathbf{x}_i, z)) $$
+-    *   **Normal Regularization:** Encourages surface smoothness (applied to surface points $\mathbf{x}_s \in S$):
+-        $$ L_{normal} = \sum_{\mathbf{x}_s \in S} ||\mathbf{n}_\theta(\mathbf{x}_s, z) - \mathbf{n}_\theta(\mathbf{x}_s + \epsilon, z)||_2 $$
+-    *   **Total Loss:**
+-        $$ L(\theta, \phi) = L_{origin}(\theta, \phi) + \lambda_{normal} L_{normal} + \lambda_{opacity} L_{opacity} $$
++    *   Sample $N$ points uniformly in the interval $[t_s - \Delta_n, t_s + \Delta_n]$, where $t_s$ is the depth of the located surface point $x_s$. The $i$-th point $t_i$ is sampled from:
++        $$ t_i \sim U\left[t_s - \Delta_n + \frac{2i-2}{N}\Delta_n, t_s - \Delta_n + \frac{2i}{N}\Delta_n\right] $$
++    *   If the region $[t_s - \Delta_n, t_s + \Delta_n]$ exceeds the global bounds $[t_n, t_f]$, shift it back to fit within bounds [S1, unofficial].
++
++3.  **Rendering:**
++    Render the image using alpha composition. Let $\alpha_i = \alpha_\theta(x_i, z)$ and $\mathbf{c}_i = \mathbf{c}_\theta(x_i, \mathbf{d}, z)$. The transmittance $T_i$ and color $\tilde{C}(\mathbf{r})$ are:
++    $$ T_i = \prod_{j=1}^{i-1} (1 - \alpha_j) $$
++    $$ \tilde{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i $$
++    This is equivalent to the standard volume rendering formula but using predicted alphas directly [S1, unofficial].
++
++4.  **Inference Rendering:**
++    Fetch a truncated latent code $\hat{z}$. Locate the surface $x_s$ using steps 1-2 (with $\Delta_{min}$).
++    *   **Standard Mode:** Sample $N$ points in $[t_s - \Delta_{min}, t_s + \Delta_{min}]$ and render using the formula above.
++    *   **Surface-Only Mode:** Sample only the single surface point $x_s$ (i.e., $N=1$) and render. This is theoretically guaranteed to be indistinguishable from multi-point rendering as $\Delta_{min} \to 0$ and significantly speeds up off-line applications [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def train_gof(generator, discriminator, dataset, config):
+-    """
+-    Trains the GOF model.
+-    config contains: N, M, ms, tau, gamma, delta_min, lambda_normal, lambda_opacity.
+-    """
+-    delta_init = (config.t_far - config.t_near) / 2.0
+-    step = 0
+-    
+-    for epoch in epochs:
+-        for batch in dataset:
+-            # 1. Sample latent codes and camera poses
+-            z = sample_latent(config.p_z)
+-            xi = sample_pose(config.p_xi)
++import math
++import torch
++
++def locate_surface(ray_origin, ray_direction, t_near, t_far, generator, z, M=12, tau=0.5, ms=3):
++    """
++    Locates the surface along a ray using root-finding on alpha values.
++    """
++    # 1. Sample M evenly-spaced points
++    t_bins = torch.linspace(t_near, t_far, M + 1)
++    x_bins = ray_origin.unsqueeze(0) + t_bins.unsqueeze(1) * ray_direction.unsqueeze(0)
++    
++    # 2. Query alpha values (no gradients needed for root-finding)
++    with torch.no_grad():
++        alphas, _ = generator(x_bins, z, ray_direction) # Shape: (M+1, 1)
++    
++    # 3. Find bin where alpha crosses tau
++    # alpha < tau (free space) to alpha >= tau (occupied)
++    # Note: Source uses strict inequality < tau <= next. 
++    # We look for the first index k where alpha[k] < tau and alpha[k+1] >= tau.
++    free_mask = alphas.flatten() < tau
++    occupied_mask = alphas.flatten() >= tau
++    
++    # Find transition
++    # If no transition found, return midpoint or handle edge case
++    if not torch.any(free_mask & occupied_mask.roll(1)):
++        # Fallback: return midpoint if surface not found
++        return (t_near + t_far) / 2.0
++
++    # Find the index k where the transition occurs
++    # We want k such that alpha[k] < tau and alpha[k+1] >= tau
++    # This corresponds to free_mask[k] is True and occupied_mask[k+1] is True
++    # Or simply: free_mask[k] and not free_mask[k+1]
++    transition_indices = torch.where(free_mask[:-1] & ~free_mask[1:])[0]
++    
++    if len(transition_indices) == 0:
++        return (t_near + t_far) / 2.0
++        
++    k_s = transition_indices[0].item()
++    
++    # 4. Secant method refinement
++    t_left = t_bins[k_s].item()
++    t_right = t_bins[k_s + 1].item()
++    
++    # Re-query alphas for secant method (gradients still not needed for location)
++    with torch.no_grad():
++        x_left = ray_origin + t_left * ray_direction
++        x_right = ray_origin + t_right * ray_direction
++        alpha_left, _ = generator(x_left.unsqueeze(0), z, ray_direction)
++        alpha_right, _ = generator(x_right.unsqueeze(0), z, ray_direction)
++        alpha_left = alpha_left.item()
++        alpha_right = alpha_right.item()
++        
++    for _ in range(ms):
++        # Secant method: t_new = t_right - alpha_right * (t_right - t_left) / (alpha_right - alpha_left)
++        if abs(alpha_right - alpha_left) < 1e-8:
++            break
++        t_new = t_right - alpha_right * (t_right - t_left) / (alpha_right - alpha_left)
++        
++        # Clamp to bin
++        t_new = max(t_left, min(t_right, t_new))
++        
++        x_new = ray_origin + t_new * ray_direction
++        alpha_new, _ = generator(x_new.unsqueeze(0), z, ray_direction)
++        alpha_new = alpha_new.item()
++        
++        if alpha_new < tau:
++            t_left = t_new
++            alpha_left = alpha_new
++        else:
++            t_right = t_new
++            alpha_right = alpha_new
+             
+-            # 2. Root-finding to locate surface
+-            # Sample M points along the ray r defined by xi
+-            x_bins = sample_evenly_spaced_points(config.t_near, config.t_far, M)
+-            alphas = generator.query_alpha(x_bins, z)
+-            
+-            # Find bin where alpha crosses threshold tau
+-            k_S = find_crossing_bin(alphas, config.tau)
+-            
+-            # Refine surface point using secant method
+-            x_s = secant_refinement(x_bins[k_S], x_bins[k_S+1], generator, z, config.tau, config.ms)
+-            
+-            # 3. Shrinking sampling region
+-            # Compute current delta
+-            delta_n = max(delta_init * exp(-config.gamma * step), config.delta_min)
+-            
+-            # Sample N points in the shrinking region around x_s
+-            # Note: x_s is a point on the ray. We need to map this to ray coordinates.
+-            # Assuming x_s is the distance t_s along the ray:
+-            t_s = distance_from_origin(x_s, xi.origin, xi.direction)
+-            
+-            t_start = t_s - delta_n
+-            t_end = t_s + delta_n
+-            
+-            # Clamp to near/far bounds
+-            t_start = max(t_start, config.t_near)
+-            t_end = min(t_end, config.t_far)
+-            
+-            x_render = sample_uniform_points(t_start, t_end, N)
+-            
+-            # 4. Render image
+-            # Query alpha and color for rendering points
+-            alphas_r = generator.query_alpha(x_render, z)
+-            colors = generator.query_color(x_render, xi.direction, z)
+-            
+-            # Alpha composition
+-            T = 1.0
+-            C_rendered = zeros(3)
+-            for i in range(N):
+-                alpha = alphas_r[i]
+-                color = colors[i]
+-                # T_i = product(1 - alpha_j) for j < i
+-                C_rendered += T * alpha * color
+-                T *= (1 - alpha)
+-            
+-            # 5. Compute Losses
+-            # GAN Loss
+-            L_origin = compute_gan_loss(discriminator, C_rendered, batch.real_image, config.lambda_grad)
+-            
+-            # Opacity Loss
+-            L_opacity = mean(log(alphas_r) + log(1 - alphas_r))
+-            
+-            # Normal Loss (requires gradient of alpha or color w.r.t x to estimate normal)
+-            # Implemented via finite differences or automatic differentiation on surface points
+-            L_normal = compute_normal_smoothness(generator, x_s, z)
+-            
+-            L_total = L_origin + config.lambda_normal * L_normal + config.lambda_opacity * L_opacity
+-            
+-            # 6. Update networks
+-            update_generator(generator, L_total)
+-            update_discriminator(discriminator, L_origin)
+-            
+-            step += 1
+-
+-def infer_gof(generator, z, xi, config):
+-    """
+-    Infers an image using GOF.
+-    Can use cumulative rendering or single surface point rendering.
+-    """
++    return t_new
++
++def render_gof(ray_origin, ray_direction, t_near, t_far, generator, z, n_step, 
++               t_s, delta_init, delta_min, gamma, N=12, use_surface_only=False):
++    """
++    Renders an image by sampling points along the ray.
++    """
++    # Determine sampling interval
++    if use_surface_only:
++        # Single point at surface
++        t_samples = torch.tensor([t_s])
++    else:
++        # Shrinking interval during training, minimal during inference
++        # Note: delta_n calculation assumes n_step is global training step
++        delta_n = max(delta_init * math.exp(-gamma * n_step), delta_min)
++        
++        # Clamp interval to [t_near, t_far]
++        t_start = max(t_near, t_s - delta_n)
++        t_end = min(t_far, t_s + delta_n)
++        
++        # Sample N points uniformly in [t_start, t_end]
++        # Source: t_i ~ U[t_s - delta + (2i-2)/N * delta, t_s - delta + 2i/N * delta]
++        # This formula generates points in [t_s - delta, t_s + delta].
++        # We must shift/scale to fit [t_start, t_end] if clamped.
++        # However, source says "If region exceeds [tn, tf], shift it back".
++        # For simplicity, we sample in [t_s - delta_n, t_s + delta_n] and clamp coordinates.
++        
++        t_offsets = torch.linspace(-delta_n, delta_n, N + 1) # N+1 to define N intervals? 
++        # Source eq: ti ~ U[...]. This implies uniform sampling of points.
++        # Let's sample N points uniformly in the valid range [t_start, t_end]
++        t_samples = torch.linspace(t_start, t_end, N)
++        
++    # Query generator
++    x_samples = ray_origin.unsqueeze(0) + t_samples.unsqueeze(1) * ray_direction.unsqueeze(0)
++    alphas, colors = generator(x_samples, z, ray_direction)
++    
++    # Alpha composition
++    # T_i = product(1 - alpha_j) for j < i
++    # C = sum(T_i * alpha_i * c_i)
++    
++    # Compute transmittance
++    # 1 - alpha
++    one_minus_alpha = 1.0 - alphas
++    # Cumulative product
++    # T_1 = 1
++    # T_2 = 1 - alpha_1
++    # T_i = product_{j=1}^{i-1} (1 - alpha_j)
++    
++    # Using torch.cumprod
++    # We need T_i for each i. T_i corresponds to the product of previous (1-alpha).
++    # Let's compute cumulative product of (1-alpha)
++    cum_prod = torch.cumprod(one_minus_alpha, dim=0)
++    
++    # T_i is cum_prod[i-1] if i>0, else 1.0
++    # Shift cum_prod to align with indices
++    # T = [1, (1-a0), (1-a0)(1-a1), ...]
++    T = torch.cat([torch.tensor([1.0]).to(alphas.device), cum_prod[:-1]])
++    
++    # Rendered color
++    rendered_color = torch.sum(T * alphas * colors, dim=0)
++    
++    return rendered_color
++
++def train_step(generator, discriminator, real_image, z, camera_pose, n_step, 
++               t_near, t_far, delta_init, delta_min, gamma, 
++               lambda_normal, lambda_opacity, M=12, N=12, ms=3, tau=0.5):
++    """
++    One training step for GOF.
++    """
++    ray_origin = camera_pose.origin
++    ray_direction = camera_pose.direction
++    
+     # 1. Locate surface
+-    x_bins = sample_evenly_spaced_points(config.t_near, config.t_far, config.M)
+-    alphas = generator.query_alpha(x_bins, z)
+-    k_S = find_crossing_bin(alphas, config.tau)
+-    x_s = secant_refinement(x_bins[k_S], x_bins[k_S+1], generator, z, config.tau, config.ms)
+-    
+-    # Option A: Single surface point rendering (fastest)
+-    # Render using only the surface point x_s
+-    alpha_s = generator.query_alpha(x_s, z)
+-    color_s = generator.query_color(x_s, xi.direction, z)
+-    # Since it's a single point, T=1, and we assume it's the only contributor
+-    # In practice, if alpha_s is close to 1, this approximates the surface color
+-    return color_s
+-    
+-    # Option B: Cumulative rendering in minimal region
+-    # t_s = distance_from_origin(x_s, xi.origin, xi.direction)
+-    # t_start = max(t_s - config.delta_min, config.t_near)
+-    # t_end = min(t_s + config.delta_min, config.t_far)
+-    # x_render = sample_uniform_points(t_start, t_end, config.N)
+-    # ... perform alpha composition as in training ...
++    t_s = locate_surface(ray_origin, ray_direction, t_near, t_far, generator, z, M, tau, ms)
++    
++    # 2. Render
++    # During training, we use the shrinking region
++    rendered_image = render_gof(ray_origin, ray_direction, t_near, t_far, generator, z, n_step, 
++                                t_s, delta_init, delta_min, gamma, N, use_surface_only=False)
++    
++    # 3. Compute Losses
++    # GAN Loss
++    # L_origin = E[f(D(G(z)))] + E[f(-D(I))] + lambda * ||grad_D(I)||^2
++    # f(u) = -log(1 + exp(-u))
++    # Note: Standard GAN loss implementation details depend on the specific GAN variant (e.g., WGAN-GP, DCGAN).
++    # The source cites the non-saturating GAN loss form.
++    gen_fake = generator(z, camera_pose) # Assuming generator outputs image directly for discriminator input
++    # In GOF, the generator outputs the radiance field. The discriminator takes the rendered image.
++    # So:
++    fake_image = rendered_image
++    real_image = real_image
++    
++    # Discriminator loss
++    D_real = discriminator(real_image)
++    D_fake = discriminator(fake_image.detach())
++    
++    # Gradient penalty for D
++    # alpha = torch.rand_like(real_image)
++    # interpolated = alpha * real_image + (1 - alpha) * fake_image
++    # interpolated.requires_grad_(True)
++    # D_interpolated = discriminator(interpolated)
++    # gradients = torch.autograd.grad(outputs=D_interpolated, inputs=interpolated, grad_outputs=torch.ones_like(D_interpolated), create_graph=True)[0]
++    # grad_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * lambda_gp
++    
++    # GAN Loss terms
++    # f(u) = -log(1 + exp(-u))
++    # L_gen = f(D_fake)
++    # L_disc = f(-D_real) + f(D_fake) + grad_penalty
++    
++    # Normal Regularization (on surface points)
++    # L_normal = sum ||n(x_s) - n(x_s + eps)||^2
++    # Need to compute normals from the alpha field (gradient of alpha or density)
++    # x_s is the surface point.
++    # n_theta(x, z) is likely the normal derived from the gradient of the occupancy/alpha field.
++    # eps is a small perturbation.
++    # This requires computing gradients of the generator output w.r.t input x.
++    x_s = ray_origin + t_s * ray_direction
++    # Compute normal at x_s
++    # ... implementation detail for normal computation ...
++    # L_normal = ...
++    
++    # Opacity Regularization
++    # L_opacity = 1/N sum (log(alpha) + log(1-alpha))
++    # We need the alphas from the rendering step
++    # Re-query alphas for the N points used in rendering
++    # (Or store them from render_gof)
++    # L_opacity = torch.mean(torch.log(alphas) + torch.log(1 - alphas))
++    
++    # Total Loss
++    # L = L_origin + lambda_normal * L_normal + lambda_opacity * L_opacity
++    
++    return rendered_image, loss
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Shape-Color Ambiguity:** Direct training of generative radiance fields fails to maintain surface compactness because small perturbations on surfaces still lead to realistic RGB images, fooling the discriminator [S1, unofficial]. GOF mitigates this by shrinking the sampling region.
+-*   **Gradient Sparsity:** Directly applying occupancy representations causes severe convergence problems due to sparse gradients located only on surfaces. GOF avoids this by starting with cumulative rendering (dense gradients) and transitioning [S1, unofficial].
+-*   **Density Thresholding:** Predicted densities in generative radiance fields range from 0 to 50, making thresholding difficult. GOF uses alpha values (range [0,1]) for root-finding, which is more stable [S1, unofficial].
+-*   **Inference Speed:** Standard rendering requires $M + m_s + N$ queries. Single-point rendering requires $M + m_s + 1$ queries [S1, unofficial].
++*   **Convergence:** Directly applying occupancy representations causes severe convergence problems due to sparse gradients on surfaces [S1, unofficial]. GOF mitigates this by starting with cumulative rendering (radiance field) and gradually shrinking the sampling region [S1, unofficial].
++*   **Shape-Color Ambiguity:** Small perturbations on surfaces can still produce realistic RGB images, fooling the discriminator. GOF addresses this by encouraging surface compactness via the shrinking process and opacity regularization [S1, unofficial].
++*   **Density Thresholding:** Predicted densities in generative radiance fields can range from 0 to 50, making thresholding difficult. GOF predicts alpha values directly, which are bounded in $[0, 1]$, allowing a fixed threshold $\tau=0.5$ [S1, unofficial].
++*   **Surface Rendering Artifacts:** Rendering with only surface points may make furry or translucent objects over-smooth and less realistic. GOF is best suited for solid objects with a single clear surface [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Complexity:** GOF requires $M + m_s + N$ network queries for standard rendering, or $M + m_s + 1$ for single-point surface rendering. Baselines (e.g., pi-GAN) typically require $2N$ queries due to hierarchical sampling [S1, unofficial].
+-*   **Performance:** GOF outperforms baselines on MAD (Mean Angle Deviation, measuring compactness) and is comparable on SIDE (Scale-Invariant Depth Error, measuring depth accuracy) [S1, unofficial].
+-*   **Strengths:** Produces compact and smooth surfaces; alleviates the burden of sampling many points during inference; combines the training stability of radiance fields with the surface precision of occupancy networks.
+-*   **Limitations:** Single-point rendering may make textured objects (e.g., furry cats) appear over-smooth; best suited for solid objects with a single surface [S1, unofficial].
+-*   **Hardware/Resolution:** Tested on CelebA, BFM, and Cats datasets [S1, unofficial]. Specific hardware metrics are not provided in the source.
++*   **Query Count:** GOF requires $M + m_s + N$ queries for standard rendering, or $M + m_s + 1$ for single-point surface rendering. Baselines (like pi-GAN) typically require $2N$ queries due to hierarchical sampling [S1, unofficial].
++*   **Performance:** GOF achieves state-of-the-art performance on 3D-aware image synthesis metrics. It significantly outperforms baselines on MAD (Mean Angle Deviation, measuring compactness) and is comparable on SIDE (Scale-Invariant Depth Error, measuring depth accuracy) [S1, unofficial].
++*   **Strengths:** Compact and smooth surfaces; efficient inference with surface-only rendering; stable training convergence compared to direct occupancy networks.
++*   **Limitations:** Less suitable for translucent or furry objects; requires careful tuning of shrinking parameters ($\gamma, \Delta_{min}$); root-finding adds computational overhead per ray during training [S1, unofficial].
++*   **Scaling:** The method scales with the number of rays and samples. The root-finding step adds a constant overhead ($M + m_s$) per ray.
+ 
+ ## Background
+-*   **Origin:** Proposed by Xudong Xu, Xingang Pan, Dahua Lin, and Bo Dai in 2021 [S1, unofficial].
+-*   **History:** GOF addresses the limitations of prior generative radiance fields like pi-GAN, which suffer from diffused surfaces, and occupancy networks, which suffer from convergence issues in generative settings. It bridges the gap by reinterpreting alpha values as occupancy [S1, unofficial].
+-*   **Usage:** Used for 3D-aware image synthesis on datasets such as CelebA, BFM, and Cats [S1, unofficial].
++Generative Occupancy Fields (GOF) was proposed by Xudong Xu, Xingang Pan, Dahua Lin, and Bo Dai from CUHK-SenseTime Joint Lab, MPI Informatics, and Nanyang Technological University [S1, unofficial]. It was published on arXiv in November 2021 [S1, unofficial]. The method builds on the concept of Generative Radiance Fields (GRAFs) and Occupancy Networks, aiming to combine the training stability of radiance fields with the surface compactness of occupancy networks [S1, unofficial]. It is used for 3D-aware image synthesis on datasets like CelebA, BFM, and Cats [S1, unofficial].
+ 
+ ## Sources

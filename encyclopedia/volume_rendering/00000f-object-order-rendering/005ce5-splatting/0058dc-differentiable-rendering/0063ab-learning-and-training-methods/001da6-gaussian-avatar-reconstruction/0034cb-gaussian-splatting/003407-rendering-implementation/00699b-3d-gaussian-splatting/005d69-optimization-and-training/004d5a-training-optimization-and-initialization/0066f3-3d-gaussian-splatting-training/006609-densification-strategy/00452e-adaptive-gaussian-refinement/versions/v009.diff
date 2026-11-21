@@ -1,0 +1,85 @@
+--- v008.md
++++ v009.md
+@@ -8,13 +8,13 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** The base set of 7D Gaussian parameters for a primitive $k$: spatial mean $\mu_p \in \mathbb{R}^3$, temporal mean $\mu_t \in \mathbb{R}$, directional mean $\mu_d \in \mathbb{R}^3$, and the vectorized lower-triangular elements of the 7D covariance matrix $l \in \mathbb{R}^{28}$ (since a $7 \times 7$ symmetric matrix has 28 unique elements) [S1]. The current time $t$ and view direction $d$ are also required for the conditional slicing context, though the refinement itself is parameter-centric [S1].
++*   **Input:** The base set of 7D Gaussian parameters for a primitive $k$: spatial mean $\mu_p \in \mathbb{R}^3$, temporal mean $\mu_t \in \mathbb{R}$, directional mean $\mu_d \in \mathbb{R}^3$, and the vectorized lower-triangular elements of the 7D covariance matrix $l \in \mathbb{R}^{28}$ [S1]. The current time $t$ is required for the temporal encoding [S1].
+ *   **Output:** Refined parameters $\hat{\mu}_p, \hat{\mu}_t, \hat{\mu}_d, \hat{l}$ [S1].
+ 
+ **Data Structures:**
+ *   **Feature Vector $f$:** A concatenated vector formed by $\mu_p, \mu_t, \mu_d$, and a high-frequency temporal encoding $\gamma(t)$ [S1].
+-*   **MLP:** A small two-layer multilayer perceptron (MLP) with architecture $C_{in} \times 64 \times C_{out}$ [S1]. There are four such MLPs (or one shared with different output heads) to predict residuals for position, time, direction, and covariance [S1].
++*   **MLP:** A small two-layer multilayer perceptron (MLP) with architecture $C_{in} \times 64 \times C_{out}$ [S1]. Four such MLPs ($\phi_p, \phi_t, \phi_d, \phi_l$) predict residuals for position, time, direction, and covariance respectively [S1].
+ 
+ **Steps:**
+-1.  **Temporal Encoding:** Compute the positional encoding for the current time $t$. The encoding $\gamma(t)$ is defined as:
++1.  **Temporal Encoding:** Compute the positional encoding for the current time $t$ [S1]. The encoding $\gamma(t)$ is defined as:
+     $$ \gamma(t) = [\sin(2^0 \pi t), \cos(2^0 \pi t), \dots, \sin(2^{K-1} \pi t), \cos(2^{K-1} \pi t)] $$
+     where $K=10$ [S1]. This results in a vector of size $2K = 20$ [S1].
+@@ -49,5 +49,18 @@
+     return np.concatenate([sin_vals, cos_vals])
+ 
+-def adaptive_gaussian_refinement(mu_p, mu_t, mu_d, l, t, mlps):
++def mlp_predict(x, W1, b1, W2, b2):
++    """
++    Standard 2-layer MLP forward pass.
++    Args:
++        x: input vector
++        W1, b1: first layer weights and biases
++        W2, b2: second layer weights and biases
++    Returns:
++        residual vector
++    """
++    h = np.maximum(0, x @ W1 + b1) # ReLU activation [G]
++    return h @ W2 + b2
++
++def adaptive_gaussian_refinement(mu_p, mu_t, mu_d, l, t, mlp_params):
+     """
+     Applies adaptive refinement to 7D Gaussian parameters.
+@@ -58,6 +71,6 @@
+         l: np.array, shape (28,), vectorized lower-triangular covariance elements.
+         t: float, observed time.
+-        mlps: dict, containing 'phi_p', 'phi_t', 'phi_d', 'phi_l' functions.
+-              Each function takes a feature vector and returns a residual vector.
++        mlp_params: dict, containing 'W1_p', 'b1_p', 'W2_p', 'b2_p', etc.
++                    for phi_p, phi_t, phi_d, phi_l.
+     Returns:
+         tuple: (hat_mu_p, hat_mu_t, hat_mu_d, hat_l)
+@@ -65,12 +78,12 @@
+     # Step 1 & 2: Feature Construction
+     gamma_t = temporal_encoding(t, K=10)
+-    f = np.concatenate([mu_p, [mu_t], mu_d, gamma_t])
++    f = np.concatenate([mu_p, np.array([mu_t]), mu_d, gamma_t])
+     
+     # Step 3 & 4: Residual Prediction and Update
+-    # Note: mlps are assumed to be pre-initialized networks
+-    res_p = mlps['phi_p'](f)
+-    res_t = mlps['phi_t'](f)
+-    res_d = mlps['phi_d'](f)
+-    res_l = mlps['phi_l'](f)
++    # Note: mlp_params contain the trained weights for the four MLPs [S1]
++    res_p = mlp_predict(f, mlp_params['W1_p'], mlp_params['b1_p'], mlp_params['W2_p'], mlp_params['b2_p'])
++    res_t = mlp_predict(f, mlp_params['W1_t'], mlp_params['b1_t'], mlp_params['W2_t'], mlp_params['b2_t'])
++    res_d = mlp_predict(f, mlp_params['W1_d'], mlp_params['b1_d'], mlp_params['W2_d'], mlp_params['b2_d'])
++    res_l = mlp_predict(f, mlp_params['W1_l'], mlp_params['b1_l'], mlp_params['W2_l'], mlp_params['b2_l'])
+     
+     hat_mu_p = mu_p + res_p
+@@ -88,12 +101,12 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Covariance Validity:** The refined covariance matrix $\hat{\Sigma}$ is reconstructed from $\hat{l}$ as $\hat{\Sigma} = \hat{L}\hat{L}^\top$ (where $\hat{L}$ is the lower-triangular matrix from $\hat{l}$). This construction guarantees positive semi-definiteness by definition, avoiding invalid covariance matrices that might arise from direct perturbation of eigenvalues [S1].
+-*   **Temporal Discontinuity:** The use of sinusoidal positional encodings helps capture periodic or high-frequency temporal changes, but if the time $t$ is not normalized or bounded appropriately, the high-frequency terms may oscillate wildly [S1].
++*   **Covariance Reconstruction:** The refined covariance matrix $\hat{\Sigma}$ is reconstructed from $\hat{l}$ as $\hat{\Sigma} = \hat{L}\hat{L}^\top$ (where $\hat{L}$ is the lower-triangular matrix from $\hat{l}$) [S1].
++*   **Training Dependency:** The method requires training the MLPs alongside the Gaussians, and the residuals are added directly to the vectorized covariance elements, which requires careful handling of numerical stability during optimization [S1].
+ 
+ ## Operating characteristics
+-*   **Computational Cost:** Adds the cost of two MLP forward passes per Gaussian per frame (or per refinement step). The MLPs are small ($C_{in} \times 64 \times C_{out}$), so the overhead is relatively low compared to the rasterization cost [S1].
+-*   **Memory:** Requires storing the MLP weights. The number of parameters is small: $27 \times 64 + 64 \times C_{out}$ per MLP. With 4 MLPs, this is negligible compared to the Gaussian attributes [S1].
++*   **Computational Cost:** Adds the cost of four MLP forward passes per Gaussian per frame [S1]. The MLPs are small ($C_{in} \times 64 \times C_{out}$) [S1].
++*   **Memory:** Requires storing the MLP weights [S1]. The number of parameters is small: $27 \times 64 + 64 \times C_{out}$ per MLP [S1].
+ *   **Strengths:** Enables accurate modeling of complex non-rigid deformations and time-varying appearance without increasing the number of Gaussians [S1].
+-*   **Limitations:** Requires training the MLPs alongside the Gaussians. The method is specific to 7D Gaussian Splatting (spatial-temporal-angular) and may not directly apply to static 3DGS without modification [S1].
++*   **Limitations:** Requires training the MLPs alongside the Gaussians and is specific to 7D Gaussian Splatting without direct application to static 3DGS [S1].
+ 
+ ## Background

@@ -1,0 +1,235 @@
+--- v006.md
++++ v007.md
+@@ -4,96 +4,104 @@
+ 
+ ## Overview
+-Forward Projection (also known as X-ray projection or aTx) is a volume rendering technique that computes the line integral of interpolated sample values along each viewing ray [S1]. It solves the problem of generating 2D projection images from 3D volumetric data, which is a fundamental step in computed tomography (CT) and digital radiography [S1]. Unlike Maximum Intensity Projection (MIP) which highlights the highest density voxel, Forward Projection aggregates all encountered values, providing a cumulative measure that clearly represents dense structures like bones or vessels at the cost of losing depth information [S1].
++Forward Projection (aTx) is a volume rendering composition scheme where interpolated samples along a ray are simply summed to produce an image [S1]. It solves the problem of generating 2D projections from 3D volumetric data by mimicking the physical process of X-ray attenuation, where the total signal is the integral of density along the ray path [S1]. Unlike alpha blending, which preserves depth cues through opacity accumulation, Forward Projection loses depth information, making it ideal for visualizing high-density structures like bones or vessels where relative depth is less critical than total integrated intensity [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A 3D volume $V$ of dimensions $W \times H \times D$, a ray origin $\mathbf{o}$, and a ray direction $\mathbf{d}$ for each pixel [G].
+-*   **Output:** A 2D image $I$ where each pixel value represents the integrated density along the corresponding ray [G].
++**Inputs:**
++- A 3D volume $V$ (scalar field, e.g., density or attenuation coefficient).
++- A set of ray parameters defining the projection geometry (origin, direction, sampling interval $\Delta s$).
++- For each pixel, a ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
++
++**Outputs:**
++- A 2D projection image $P$ where each pixel value $P_{ij}$ is the sum of interpolated volume values along the corresponding ray.
+ 
+ **Data Structures:**
+-*   **Volume:** Stored as a 3D array, though batched 2D slices use a linearized index calculated as `batch_index * channels * height * width + channel_index * height * width + img_i * width + img_j` [S2, unofficial].
+-*   **Accumulator:** A scalar value initialized to $0.0$ for each ray [G].
++- The volume $V$ is typically stored as a 3D array or grid.
++- The accumulator for each ray is a scalar initialized to 0.
+ 
+ **Steps:**
+-1.  **Ray Intersection:** Determine the entry and exit points of the ray $r(t) = \mathbf{o} + t\mathbf{d}$ with the volume bounding box [G].
+-2.  **Discretization:** Divide the ray segment inside the volume into $N$ samples with step size $\Delta t$ [G].
+-3.  **Sampling:** For each sample point $t_i$, retrieve the scalar value $v_i$ from the volume using trilinear interpolation [G].
+-4.  **Accumulation:** Update the accumulator $A$ by adding the product of the sample value and the step length:
+-    $$ A \leftarrow A + v_i \cdot \Delta t $$
+-    [S1][S2, unofficial]
+-5.  **Finalization:** The final value $A$ is assigned to the corresponding pixel in the output image [S1].
++1. For each pixel $(i, j)$ in the output image:
++2. Define the ray $\mathbf{r}(s) = \mathbf{o}_{ij} + s \cdot \mathbf{d}_{ij}$, where $s$ ranges from the near clipping plane to the far clipping plane.
++3. Initialize the accumulator $A = 0$.
++4. Iterate through samples $k$ along the ray at positions $s_k$:
++   a. Compute the 3D world position $\mathbf{p}_k = \mathbf{r}(s_k)$.
++   b. Sample the volume value $v_k = V(\mathbf{p}_k)$ using interpolation (e.g., trilinear).
++   c. Update the accumulator: $A \leftarrow A + v_k \cdot \Delta s$.
++5. Assign the final accumulator value to the pixel: $P_{ij} = A$.
++
++**Formula:**
++The discrete approximation of the line integral is:
++$$
++P_{ij} = \sum_{k=1}^{N} v_k \cdot \Delta s
++$$
++where $v_k$ is the interpolated volume value at sample $k$, and $\Delta s$ is the step size along the ray [S1].
++
++**Parameters:**
++- $\Delta s$: Sampling interval. Typical values depend on the volume resolution and desired accuracy; often set to the voxel size or a fraction thereof [G].
++
++**Edge Cases and Pitfalls:**
++- **Loss of Depth Information:** Since only the sum is stored, occlusion and depth ordering are not represented [S1].
++- **Aliasing:** If $\Delta s$ is too large relative to the frequency content of the volume, artifacts may appear.
++- **Boundary Conditions:** Rays that do not intersect the volume should return 0 or a background value.
+ 
+ **Pseudocode:**
+ ```python
+-def forward_projection(volume, ray_origin, ray_direction, num_samples, step_size):
++def forward_projection(volume, ray_origins, ray_directions, step_size):
+     """
+-    Computes the forward projection (line integral) for a single ray.
++    volume: 3D numpy array or tensor of shape (D, H, W)
++    ray_origins: 2D array of shape (H_out, W_out, 3)
++    ray_directions: 2D array of shape (H_out, W_out, 3)
++    step_size: float, distance between samples
++    """
++    H_out, W_out, _ = ray_origins.shape
++    projection = np.zeros((H_out, W_out))
+     
+-    Args:
+-        volume: 3D array representing the density field.
+-        ray_origin: 3D vector (x, y, z).
+-        ray_direction: 3D vector (x, y, z), assumed normalized.
+-        num_samples: Integer number of samples along the ray.
+-        step_size: Float distance between samples.
+-        
+-    Returns:
+-        float: The accumulated line integral.
+-    """
+-    accumulator = 0.0
++    # Determine ray length bounds (simplified: assume fixed max length or bounding box intersection)
++    # In practice, one would compute intersection with the volume bounding box.
++    # Here we assume a fixed number of steps or a known max distance.
++    max_steps = 1000 # Placeholder for actual bounding box intersection logic
+     
+-    for i in range(num_samples):
+-        t = i * step_size
+-        current_pos = ray_origin + ray_direction * t
+-        
+-        # Retrieve density via trilinear interpolation [G]
+-        density = trilinear_interpolate(volume, current_pos)
+-        
+-        # Accumulate: sum of value * step size [S1][S2, unofficial]
+-        accumulator += density * step_size
+-        
+-    return accumulator
++    for y in range(H_out):
++        for x in range(W_out):
++            origin = ray_origins[y, x]
++            direction = ray_directions[y, x]
++            
++            # Normalize direction if not already unit length
++            direction = direction / np.linalg.norm(direction)
++            
++            accumulator = 0.0
++            
++            # Iterate along the ray
++            # Note: In a real implementation, one would clip the ray to the volume bounds
++            for s in np.arange(0, max_steps * step_size, step_size):
++                point = origin + s * direction
++                
++                # Check if point is within volume bounds
++                if not is_inside_volume(point, volume.shape):
++                    continue
++                
++                # Sample volume value (trilinear interpolation)
++                v = sample_volume(volume, point)
++                
++                accumulator += v * step_size
++            
++            projection[y, x] = accumulator
++            
++    return projection
+ 
+-def trilinear_interpolate(volume, pos):
+-    """Standard trilinear interpolation helper [G]."""
+-    x, y, z = pos
+-    # Map normalized coordinates [0, 1] to grid indices [G]
+-    ix = x * (volume.shape[0] - 1)
+-    iy = y * (volume.shape[1] - 1)
+-    iz = z * (volume.shape[2] - 1)
+-    # Clamp to valid range
+-    ix = max(0.0, min(volume.shape[0] - 2, ix))
+-    iy = max(0.0, min(volume.shape[1] - 2, iy))
+-    iz = max(0.0, min(volume.shape[2] - 2, iz))
+-    x0, y0, z0 = int(ix), int(iy), int(iz)
+-    # Fixed off-by-one bug: z1 must use z0, not iz
+-    x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
+-    dx, dy, dz = ix - x0, iy - y0, iz - z0
+-    v000 = volume[x0, y0, z0]
+-    v100 = volume[x1, y0, z0]
+-    v010 = volume[x0, y1, z0]
+-    v110 = volume[x1, y1, z0]
+-    v001 = volume[x0, y0, z1]
+-    v101 = volume[x1, y0, z1]
+-    v011 = volume[x0, y1, z1]
+-    v111 = volume[x1, y1, z1]
+-    c00 = v000 * (1 - dx) + v100 * dx
+-    c01 = v010 * (1 - dx) + v110 * dx
+-    c10 = v001 * (1 - dx) + v101 * dx
+-    c11 = v011 * (1 - dx) + v111 * dx
+-    d0 = c00 * (1 - dy) + c01 * dy
+-    d1 = c10 * (1 - dy) + c11 * dy
+-    return d0 * (1 - dz) + d1 * dz
++def is_inside_volume(point, shape):
++    # Check if point coordinates are within [0, shape[0]-1], etc.
++    # Implementation details omitted for brevity
++    return True
++
++def sample_volume(volume, point):
++    # Trilinear interpolation implementation
++    # Implementation details omitted for brevity
++    return 0.0
+ ```
+ 
+-**Parameters:**
+-*   **num_samples:** Number of discrete points along the ray segment [G].
+-*   **step_size ($\Delta t$):** Distance between samples, typically matching the voxel spacing to avoid aliasing [G].
++## Subtopics
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Loss of Depth Information:** The method sums all densities along the ray, meaning structures at different depths are indistinguishable in the final 2D image [S1].
+-*   **Boundary Conditions:** If the ray does not intersect the volume, the accumulator remains $0.0$ [G].
+-*   **Precision:** Accumulating many small values can lead to floating-point precision errors; using double precision for the accumulator is recommended for high-accuracy applications [G].
+-
+-## Subtopics
++### [Cylindrical Symmetry Projector](3005-cylindrical-symmetry-projector.md)
++The Cylindrical Symmetry Projector is a forward and back projector pair designed for objects possessing cylindrical symmetry, serving as a specialized case of the Forward Projection (aTx) method. It solves the problem of computing line integrals through axisymmetric volumes by reducing the 3D integration to a 1D radial problem, specifically implementing the Abel Transform for parallel-beam geometries. Unlike general 3D projectors, it exploits rotational invariance to achieve significant computational efficiency, distinguishing it from siblings like Analytic 3D Gaussian Ray Tracing for Tomography which handle arbitrary 3D distributions without symmetry assumptions.
+ 
+ ### [Analytic 3D Gaussian Ray Tracing for Tomography](3017-analytic-3d-gaussian-ray-tracing-for-tomography.md)
+@@ -103,34 +111,30 @@
+ This variant initializes CT reconstruction by computing a reference image via Fan beam ray transform and filtered back projection (FBP), then creates a sparse sinogram by subsampling and resizing [S3, unofficial].
+ **Steps:**
+-1.  Convert input image to CPU numpy array [S3, unofficial].
+-2.  Initialize sinogram, sparse_sinogram, and ori_img arrays with shape `[batch, 720, 720]` [S3, unofficial].
+-3.  For each batch element: compute sinogram via `Fan_ray_trafo(img[i])` [S3, unofficial].
+-4.  Compute reference image `ori_img[i]` via `Fan_FBP(sinogram[i])` [S3, unofficial].
+-5.  Store sinogram max value [S3, unofficial].
+-6.  Subsample sinogram along first axis with stride `r`: `t = np.copy(sinogram[i,::r,:])` [S3, unofficial].
+-7.  Resize `t` to `[720, 720]` using `cv2.resize` and store in `sparse_sinogram` [S3, unofficial].
++1. Convert input image to CPU numpy array.
++2. Initialize sinogram, sparse_sinogram, and ori_img arrays with shape [batch, 720, 720].
++3. For each batch element: compute sinogram via Fan_ray_trafo(img[i]).
++4. Compute reference image ori_img[i] via Fan_FBP(sinogram[i]).
++5. Store sinogram max value.
++6. Subsample sinogram along first axis with stride r: t = np.copy(sinogram[i,::r,:]).
++7. Resize t to [720, 720] using cv2.resize and store in sparse_sinogram.
+ **Parameters:**
+-*   **r:** Subsampling stride for the sinogram along the angular/detector axis [S3, unofficial].
++- r: Subsampling stride for the sinogram along the angular/detector axis.
+ **Layout:**
+-*   Output arrays: `ori_img`, `sparse_sinogram`, `sinogram` all have shape `[batch, 720, 720]` and dtype `float32`. `sinogram_max` has shape `[batch, 1]` [S3, unofficial].
+-
+-### Cylindrical Symmetry Projector
+-A forward/back projector pair for objects with cylindrical symmetry [S4, unofficial]. The Abel Transform is a special case of this applied to parallel-beam geometries [S4, unofficial].
++- Output arrays: ori_img, sparse_sinogram, sinogram all have shape [batch, 720, 720] and dtype float32. sinogram_max has shape [batch, 1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of samples per ray and $P$ is the number of pixels (rays) [G].
+-*   **Memory Complexity:** $O(V)$ for the volume storage, $O(P)$ for the output image [G].
+-*   **Performance:** Generally faster than alpha blending because it does not require sorting or complex blending calculations [S1].
+-*   **Strengths:** Clearly represents dense structures like bones or vessels; computationally efficient; order-independent [S1].
+-*   **Limitations:** Loses depth information; static images may lack context compared to volume-rendered images [S1].
+-*   **When to use:** When generating 2D projection images for CT reconstruction initialization [S3, unofficial] or for quick visualization of dense structures [S1].
+-*   **When not to use:** When depth perception or transparency effects are required [S1].
++- **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of samples per ray.
++- **Memory Complexity:** $O(V)$ for the volume storage, $O(N)$ for the output image.
++- **Performance:** Generally faster than alpha blending because it avoids branching and complex accumulation logic. It is highly parallelizable.
++- **Strengths:** Simple implementation, fast computation, good for visualizing dense structures.
++- **Limitations:** No depth information, no transparency effects, sensitive to sampling density.
++- **When to use:** When depth cues are not required, and the goal is to visualize the total integrated density (e.g., bone visualization in CT).
++- **When not to use:** When transparency, occlusion, or depth perception is important.
+ 
+ ## Background
+-Forward Projection is a fundamental technique in medical imaging, particularly in Computed Tomography (CT) and Digital Radiography [S1]. It is used in the forward pass of differentiable tomography pipelines [S4, unofficial] and for initializing reconstruction algorithms [S3, unofficial].
++Forward Projection is a fundamental technique in medical imaging and computer graphics, rooted in the physics of X-ray attenuation. It is widely used in Computed Tomography (CT) for generating projection data for reconstruction algorithms like Filtered Back Projection (FBP) [S1]. The method is also known as X-ray projection or aTx (attenuation transform) in the context of volume rendering [S1].
+ 
+ ## Sources
+ [S1] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
+ [S2] ApaarRaina/DiffTomo, https://github.com/ApaarRaina/DiffTomo, fetched 2026-10-27 (unofficial)
+-[S3] wskingdom/DGR, https://github.com/wskingdom/DGR, fetched 2026-10-26 (unofficial)
+-[S4] PDF Differentiable Forward Projector for X-ray Computed Tomography, https://differentiable.xyz/papers-2023/paper_48.pdf, fetched 2026-10-29 (unofficial)+[S3] wskingdom/DGR, https://github.com/wskingdom/DGR, fetched 2026-10-26 (unofficial)

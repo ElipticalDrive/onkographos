@@ -1,0 +1,191 @@
+--- v003.md
++++ v004.md
+@@ -1,127 +1,101 @@
+ # Projecting Detail Coefficients
+ 
++Also called: Projecting the detail coefficients
+ 
+ ## Overview
+-Projecting Detail Coefficients is a rendering technique for multiresolution volume data that projects wavelet detail coefficients and approximations directly to screen-space quads of decreasing resolution [S1]. It solves the problem of efficiently rendering large volumetric datasets by leveraging the hierarchical structure of wavelet decompositions, where lower levels represent coarser approximations [S1]. The method renders each level of the decomposition as a separate geometric primitive, scaling the output quad size inversely with the resolution level [S1].
++Projecting Detail Coefficients is a rendering technique for Multiresolution Maximum Intensity Projection (MMIP) that accelerates volume visualization by projecting wavelet detail coefficients directly to screen space [S1]. It solves the problem of high memory bandwidth consumption in large volumetric datasets by leveraging a multi-level decomposition, where lower-resolution levels are rendered to smaller viewports [S1]. Unlike standard ray-casting which processes every voxel, this method iterates over intensity thresholds and renders pre-decomposed detail levels ($d_0 \dots d_{L-1}$) and the final approximation ($f_L$) separately, allowing for efficient load balancing across multiple GPUs [S1].
+ 
+ ## How it works
+ **Inputs:**
+-- A multiresolution volume dataset decomposed into $L+1$ levels: detail levels $d_0, \dots, d_{L-1}$ and the final approximation $f_L$ [S1].
+-- Volume orientation (quaternion) and zoom factor (default 1 voxel per pixel) [S1].
+-- Intensity thresholds: a lower threshold (background) and an optional upper threshold (maximum intensity) [S1].
++- Volumetric dataset decomposed into $L+1$ levels: detail levels $d_0, \dots, d_{L-1}$ and approximation $f_L$ [S1].
++- Volume orientation (quaternion) and zoom factor (default: 1 voxel per 1 pixel) [S1].
++- Lower intensity threshold (background) and optional upper intensity threshold (maximum intensity) [S1].
+ 
+ **Outputs:**
+-- A composite image formed by projecting voxels from all levels [S1].
++- A 2D projection image (Maximum Intensity Projection) [S1].
+ 
+ **Data Structures:**
+-- The volume is stored as $L+1$ separate volumes, one for each level of the decomposition [S1].
+-- Each volume contains voxels corresponding to the detail coefficients ($d_i$) or the approximation ($f_L$) at that level [S1].
++- The volume data is stored as $L+1$ separate volumes. For an $L$-level decomposition, the structure consists of:
++  - $d_i$: Detail coefficients at level $i$ (for $i = 0$ to $L-1$) [S1].
++  - $f_L$: Approximation coefficients at the coarsest level $L$ [S1].
++- Each level $i$ is associated with a specific viewport size: Level 0 uses the full viewport size, Level 1 uses half the size, Level 2 uses a quarter, and so on [S1].
+ 
+ **Steps:**
+-1. **Matrix Construction:** Build a model-view matrix from the volume orientation quaternion and the zoom factor [S1]. Combine this with the projection matrix to form a 4x4 modelview-projection matrix and pass it to the vertex shader [S1].
+-2. **Intensity Iteration:** Iterate over the intensity values present in the volume, starting from the lowest intensity (or user-defined lower threshold) up to the highest [S1].
+-3. **Upper Threshold Optimization:** If an upper intensity threshold exists above which all voxels have maximum intensity, project all such voxels in a single call to `glDrawArrays` using point primitives [S1]. This step skips rounding and anti-aliasing for these high-intensity values [S1].
+-4. **Level Rendering:** Render each level $i$ (from $0$ to $L$) to a quad [S1]:
+-   - Level 0 is rendered to a quad with the same dimensions as the viewport [S1].
+-   - Level 1 is rendered to a quad with half the width and height of the viewport [S1].
+-   - Level $k$ is rendered to a quad with dimensions scaled by $1/2^k$ relative to the viewport [S1].
+-   - The rendering process for each level follows the same projection logic as described in steps 2-3, applied to the specific detail coefficients or approximation of that level [S1].
++1. **Matrix Construction:** Build a model-view matrix from the volume orientation quaternion and the zoom factor. Combine this with the projection matrix to form a 4x4 modelview-projection matrix. Pass this matrix to the vertex shader [S1].
++2. **Threshold Iteration:** Iterate over the intensity values present in the volume, starting from the lowest value (or user-defined lower threshold) up to the highest [S1].
++3. **Upper Threshold Optimization:** If an upper intensity threshold exists above which all voxels have maximum intensity, project all these voxels in a single call to `glDrawArrays` using point primitives. This step skips rounding or anti-aliasing for these maximum-intensity regions [S1].
++4. **Multi-Level Rendering:** Render each of the $L+1$ volumes ($d_0 \dots d_{L-1}$ and $f_L$) using the same projection logic.
++   - Render level 0 to a quad with dimensions equal to the viewport size.
++   - Render level 1 to a quad with half the viewport dimensions.
++   - Render level $k$ to a quad with dimensions scaled by $1/2^k$ [S1].
++5. **Compositing:** The results from the different levels are combined to form the final MMIP image. The specific compositing logic (e.g., alpha blending or max accumulation) is implied by the MMIP context but not explicitly detailed in the source beyond the projection steps [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def project_detail_coefficients(volume_levels, orientation_quat, zoom_factor, 
++def project_detail_coefficients(volume_decomposition, orientation_quaternion, zoom_factor, 
+                                 lower_threshold, upper_threshold, viewport_size):
+     """
+-    volume_levels: List of L+1 volumes [d0, d1, ..., dL-1, fL]
+-    orientation_quat: Quaternion (w, x, y, z) for volume orientation
+-    zoom_factor: Float, default 1.0 (voxels per pixel)
+-    lower_threshold: Intensity value below which is background
+-    upper_threshold: Optional intensity value above which is max intensity
++    volume_decomposition: List of volumes [d_0, d_1, ..., d_{L-1}, f_L]
++    orientation_quaternion: Quaternion representing volume orientation
++    zoom_factor: Float, default 1.0 (1 voxel per pixel)
++    lower_threshold: Intensity value below which voxels are background
++    upper_threshold: Intensity value above which voxels are max intensity (optional)
+     viewport_size: Tuple (width, height)
+     """
+-    # 1. Construct Model-View-Projection (MVP) matrix
+-    mv_matrix = build_model_view_matrix(orientation_quat, zoom_factor)
+-    mvp_matrix = multiply_matrices(get_projection_matrix(), mv_matrix)
++    # Step 1: Construct Model-View-Projection Matrix
++    model_view_matrix = build_model_view_matrix(orientation_quaternion, zoom_factor)
++    projection_matrix = build_projection_matrix() # Assumed standard projection
++    mvp_matrix = multiply_matrices(projection_matrix, model_view_matrix)
+     
+-    # 2 & 3. Handle intensity iteration and upper threshold optimization
++    # Step 3: Handle upper threshold optimization if present
+     if upper_threshold is not None:
+-        max_voxels = []
+-        for level_data in volume_levels:
+-            for v in level_data:
+-                if v.intensity >= upper_threshold:
+-                    max_voxels.append(v)
+-        if max_voxels:
+-            draw_point_primitives(max_voxels, mvp_matrix)
++        max_intensity_voxels = extract_voxels_above_threshold(volume_decomposition, upper_threshold)
++        if max_intensity_voxels is not empty:
++            render_point_primitives(max_intensity_voxels, mvp_matrix)
+             
+-    # 4. Render each level to decreasing quad sizes
+-    for level_idx, level_data in enumerate(volume_levels):
+-        scale = 1.0 / (2 ** level_idx)
+-        quad_width = int(viewport_size[0] * scale)
+-        quad_height = int(viewport_size[1] * scale)
++    # Step 4: Render multi-level decomposition
++    for level_index, detail_volume in enumerate(volume_decomposition):
++        # Determine viewport size for current level
++        # Level 0: full size, Level 1: half, Level 2: quarter, etc.
++        scale_factor = 1.0 / (2 ** level_index)
++        current_viewport_width = viewport_size[0] * scale_factor
++        current_viewport_height = viewport_size[1] * scale_factor
+         
+-        level_voxels = [v for v in level_data if v.intensity >= lower_threshold]
+-        draw_point_primitives(level_voxels, mvp_matrix, (quad_width, quad_height))
+-
+-def build_model_view_matrix(quat, zoom):
+-    # Converts quaternion to 4x4 rotation matrix, applies uniform scaling
+-    R = quaternion_to_rotation_matrix_4x4(quat)
+-    return [[R[i][j] * zoom for j in range(4)] for i in range(4)]
+-
+-def get_projection_matrix():
+-    # Standard orthographic projection matrix used in examples [S1]
+-    return [[1,0,0,0], [0,1,0,0], [0,0,1,0], [0,0,0,1]]
+-
+-def multiply_matrices(A, B):
+-    return [[sum(A[i][k]*B[k][j] for k in range(len(B))) for j in range(len(B[0]))] for i in range(len(A))]
+-
+-def draw_point_primitives(voxels, mvp, target_size=None):
+-    for v in voxels:
+-        pos = [v.x, v.y, v.z, 1.0]
+-        proj = multiply_matrices(mvp, [[pos[i]] for i in range(4)])
+-        sx = proj[0][0] * (target_size[0] if target_size else 1.0)
+-        sy = proj[1][0] * (target_size[1] if target_size else 1.0)
+-        rasterize_point(sx, sy, v.intensity)
+-
+-def quaternion_to_rotation_matrix_4x4(q):
+-    # Standard quaternion-to-rotation-matrix conversion with homogeneous coordinate
+-    w, x, y, z = q
+-    return [[1-2*(y**2+z**2), 2*(x*y-w*z), 2*(x*z+w*y), 0],
+-            [2*(x*y+w*z), 1-2*(x**2+z**2), 2*(y*z-w*x), 0],
+-            [2*(x*z-w*y), 2*(y*z+w*x), 1-2*(x**2+y**2), 0],
+-            [0, 0, 0, 1]]
+-
+-def rasterize_point(x, y, intensity):
+-    # Rasterizes a point primitive at screen coordinates (x, y)
+-    # with the given intensity value
+-    pass
++        # Render the current level's detail coefficients
++        # The source states they are rendered "in the same fashion"
++        # implying a projection pass for each level
++        render_volume_to_quad(detail_volume, mvp_matrix, 
++                              current_viewport_width, current_viewport_height)
++                              
++    # Note: The source does not specify the exact compositing shader code
++    # for combining these levels into the final MMIP image [S1].
+ ```
+ 
+ **Parameters:**
+-- Zoom factor: Default 1 voxel per pixel [S1].
+-- Lower threshold: User-defined or minimum intensity in volume [S1].
+-- Upper threshold: Optional, for maximum intensity optimization [S1].
++- Zoom factor: Default 1 voxel on 1 pixel [S1].
++- $L$: Number of decomposition levels. Requires $L+1$ volumes [S1].
+ 
+-**Edge Cases:**
+-- If no upper threshold is defined, the iteration proceeds normally from the lowest to the highest intensity [S1].
+-- The method uses point primitives without rounding or anti-aliasing, which may affect visual smoothness at non-integer zoom factors [S1].
+-- Orthogonal projection is used in the examples, though the method is generalizable [S1].
++**Edge Cases and Pitfalls:**
++- **Upper Threshold:** If an upper threshold is defined, all voxels above it are rendered as point primitives without rounding or anti-aliasing. This is an optimization but may affect visual smoothness at the boundaries of high-intensity regions [S1].
++- **Viewport Scaling:** Rendering lower levels to smaller viewports requires careful handling of coordinate transformations to ensure correct spatial alignment with higher-resolution levels [S1].
++- **Load Balancing:** The method supports multi-GPU rendering by switching GL contexts between X-screens per frame. This requires driver support for multiple cards on one X-server [S1].
+ 
+ ## Subtopics
+ 
+ ### [Coefficient Quantization Error Estimate](3334-coefficient-quantization-error-estimate.md)
+-Calculates the expected $L^2$ error from rounding detail coefficients, balancing value and positional quantization.
++Calculates the expected $L^2$ error from rounding detail coefficients, balancing value quantum $\varsigma$ against positional quantum $\tau$.
+ 
+ ### [Quantized Knot Position and Coefficient Computation](4958-quantized-knot-position-and-coefficient-computation.md)
+-Computes quantized knots and coefficients for piecewise polynomial approximation.
++Computes quantized knot positions and coefficients to enable exact integer arithmetic and prevent boundary error propagation.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources [S1].
+-- **Memory Complexity:** Requires storing $L+1$ separate volumes for the decomposition [S1].
+-- **Performance:** The method accelerates rendering by leveraging graphics hardware and multiresolution data [S1]. Load balancing across multiple GPUs is supported for large volumes [S1].
+-- **Strengths:** Efficient for large volumes, supports interactive adjustment of orientation and zoom, simplifies rendering by using point primitives [S1].
+-- **Limitations:** Uses orthogonal projection in examples, though generalizable; lacks anti-aliasing for point primitives [S1].
++- **Memory Bandwidth:** The method aims to reduce memory bandwidth usage by increasing the ratio of memory bandwidth to voxel count through multiresolution representation [S1].
++- **Performance:** The Multi-Resolution MIP (MMIP) algorithm allows for straightforward load spreading over multiple graphics cards, achieving almost optimal speedup for large volumes [S1].
++- **Hardware Requirements:** Requires graphics hardware capable of vertex shaders and multiple GPU support (e.g., newer NVIDIA drivers supporting multiple cards for one X-server) [S1].
++- **Strengths:** Efficient handling of large volumetric datasets; supports interactive adjustment of orientation and zoom; enables multi-GPU acceleration [S1].
++- **Limitations:** Relies on orthogonal projection in the described examples (though generality is claimed) [S1]. The specific compositing details for combining levels are not provided in the source [S1].
+ 
+ ## Background
+-The method was presented in the paper "Multiresolution MIP Rendering of Large Volumetric Data Accelerated on Graphics Hardware" [S1]. It is part of a broader approach to multiresolution volume rendering, specifically focusing on the projection of wavelet detail coefficients [S1]. The technique is designed to handle large volumetric datasets by exploiting the hierarchical nature of wavelet decompositions and accelerating the rendering process using graphics hardware [S1].
++The method is described in the paper "Multiresolution MIP Rendering of Large Volumetric Data Accelerated on Graphics Hardware" (EuroVis 2007) [S1]. It builds on the principles of multiresolution and level of detail, specifically utilizing wavelet-based decomposition for volume rendering [S1, S2]. The approach was developed to address the computational and memory challenges of rendering large volumetric datasets on graphics hardware [S1].
+ 
+ ## Sources

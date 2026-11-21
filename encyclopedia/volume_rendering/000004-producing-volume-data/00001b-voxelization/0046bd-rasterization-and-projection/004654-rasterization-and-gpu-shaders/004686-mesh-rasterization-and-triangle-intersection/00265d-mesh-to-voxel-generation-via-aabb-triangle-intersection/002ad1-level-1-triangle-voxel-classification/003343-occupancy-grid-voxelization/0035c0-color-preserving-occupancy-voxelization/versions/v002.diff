@@ -1,0 +1,208 @@
+--- v001.md
++++ v002.md
+@@ -4,101 +4,141 @@
+ 
+ ## Overview
+-This method extends standard occupancy grid voxelization by storing the index of the first intersecting mesh face in each occupied voxel, rather than a binary occupancy flag. This preserves color information by mapping face indices to voxel values, allowing the original mesh colors to be reconstructed from the voxel grid. It differs from [Occupancy Grid Voxelization](6958-occupancy-grid-voxelization.md) by retaining per-voxel identity data instead of simple presence/absence.
++This method extends standard occupancy grid voxelization by storing the index of the intersecting mesh face within each occupied voxel, rather than a binary occupancy flag [S1, S2, unofficial]. This preserves color information by allowing the reconstruction of the original mesh colors from the voxel grid [S2, unofficial]. It differs from [Occupancy Grid Voxelization](6958-occupancy-grid-voxelization.md) by replacing the boolean occupancy value with a face identifier, and from [Adaptive Triangle-to-Voxel Overlap Test](14342-adaptive-triangle-to-voxel-overlap-test.md) by focusing on face-index storage rather than adaptive resolution [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- A watertight triangular mesh in OFF format.
+-- Optional color data associated with mesh faces.
+-- Grid dimensions: `width`, `height`, `depth`.
+-- Voxel bounds defined by minimum and maximum coordinates.
++- A watertight triangular mesh in OFF format [S2, unofficial].
++- Grid dimensions: `width`, `height`, `depth` [S1, unofficial].
++- Voxel bounds defined by minimum and maximum coordinates [S1, unofficial].
++- Optional `--color` flag to enable color preservation [S2, unofficial].
+ 
+ **Outputs:**
+-- An occupancy grid where occupied voxels store a face index (integer).
+-- If color preservation is enabled, a separate HDF5 file (`_color.h5`) containing the original mesh face colors.
++- An occupancy grid where occupied voxels store a face index (integer) and empty voxels store 0 [S1, S2, unofficial].
++- If `--color` is set, a separate HDF5 file `[int]_color.h5` containing the original RGB face colors [S2, unofficial].
+ 
+ **Data Structures:**
+-- **Occupancy Grid:** A 3D array of integers with dimensions `width x height x depth`.
+-    - Value `0` indicates empty space.
+-    - Value `f` (where $f > 0$) indicates the voxel intersects with face index $f$.
+-    - Value `num_faces()` indicates the voxel intersects with face index 0 (see Pitfalls).
+-- **Color File:** An HDF5 file storing RGB color vectors for each face.
++- **Occupancy Grid:** A 3D array of integers with shape `(width, height, depth)`. Values are either 0 (empty) or a face index $f \in [1, N_{faces}]$ [S1, S2, unofficial].
++- **Color File:** An HDF5 file storing an array of RGB colors corresponding to each face index [S2, unofficial].
+ 
+-**Steps:**
+-1. Initialize a parallel loop over all voxel indices $i$ from $0$ to $width \times height \times depth - 1$.
++**Algorithm Steps:**
++1. Initialize a parallel loop over all voxel indices $i$ from $0$ to $width \times height \times depth - 1$ [S1, unofficial].
+ 2. Calculate voxel coordinates $(w, h, d)$ from index $i$:
+    $$ d = i \pmod{depth} $$
+    $$ w = \left\lfloor \frac{i}{depth} \right\rfloor \pmod{width} $$
+    $$ h = \left\lfloor \frac{i}{width \times depth} \right\rfloor $$
++   [S1, unofficial]
+ 3. Define the voxel bounding box using integer coordinates:
+-   - Minimum corner: $(w, h, d)$
+-   - Maximum corner: $(w + 1, h + 1, d + 1)$
+-4. Loop over all mesh faces $f$ from $0$ to $num\_faces() - 1$.
+-5. Retrieve the three vertices $v_1, v_2, v_3$ of face $f$.
++   $$ \text{min} = (w, h, d) $$
++   $$ \text{max} = (w + 1, h + 1, d + 1) $$
++   [S1, unofficial]
++4. Iterate through all mesh faces $f$ from $0$ to $N_{faces} - 1$ [S1, unofficial].
++5. Retrieve the three vertices $v_1, v_2, v_3$ of face $f$ [S1, unofficial].
+ 6. Perform triangle-box intersection test:
+-   $$ overlap = \text{triangle\_box\_intersection}((w, h, d), (w+1, h+1, d+1), v_1, v_2, v_3) $$
+-7. If $overlap$ is true:
+-   - Determine the stored value $val$:
+-     - If $f == 0$, set $val = num\_faces()$.
+-     - Otherwise, set $val = f$.
+-   - Store $val$ in the occupancy grid at $(h, w, d)$.
+-   - Break the face loop (only the first intersecting face is stored).
+-8. If the `--color` flag is set, save the mesh face colors to a separate color file.
++   $$ \text{overlap} = \text{triangle\_box\_intersection}(\text{min}, \text{max}, v_1, v_2, v_3) $$
++   [S1, unofficial]
++7. If `overlap` is true:
++   - If `--color` is enabled, store the face index $f$ in the voxel at $(h, w, d)$.
++   - If face index $f$ is 0, store $N_{faces}$ instead to distinguish it from empty space (0) [S1, unofficial].
++   - Break the face loop for this voxel (store only the first intersecting face) [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def color_preserving_voxelization(mesh, width, height, depth, use_color=False):
++def color_preserving_voxelization(mesh, width, height, depth, use_color):
++    """
++    Voxelize a mesh, storing face indices in occupied voxels.
++    
++    Args:
++        mesh: Object with vertices (list of Vector3f) and faces (list of Vector3i).
++              If use_color is True, mesh must also have colors (list of Vector3i).
++        width, height, depth: Grid dimensions.
++        use_color: Boolean flag to enable color preservation.
++        
++    Returns:
++        occ_grid: 3D numpy array of shape (width, height, depth) with face indices.
++        colors: List of face colors if use_color is True, else None.
++    """
++    import numpy as np
++    
+     num_faces = mesh.num_faces()
+-    # Initialize grid with 0 (empty)
+-    occ_grid = [[0] * width for _ in range(height)]
+-    for z in range(depth):
+-        occ_grid[z] = [row[:] for row in occ_grid] # Deep copy if needed, or 3D array
+-
++    num_vertices = mesh.num_vertices()
++    
++    # Initialize occupancy grid with 0 (empty)
++    occ_grid = np.zeros((width, height, depth), dtype=np.int32)
++    
++    # Prepare color storage if needed
++    colors = None
++    if use_color:
++        # Extract colors from mesh faces
++        # Note: Source implies colors are stored per face in the mesh structure
++        colors = [mesh.colors[f] for f in range(num_faces)]
++        
+     # Parallel loop over voxels
+     for i in range(width * height * depth):
++        # Calculate voxel coordinates
+         d = i % depth
+         w = (i // depth) % width
+-        h = (i // (width * depth)) % height
++        h = (i // (width * depth))
++        
++        # Define voxel bounds
++        min_coord = np.array([w, h, d], dtype=np.float32)
++        max_coord = np.array([w + 1, h + 1, d + 1], dtype=np.float32)
++        
++        # Check intersection with faces
++        for f in range(num_faces):
++            # Get vertices for face f
++            v_indices = mesh.faces[f]
++            v1 = mesh.vertices[v_indices[0]]
++            v2 = mesh.vertices[v_indices[1]]
++            v3 = mesh.vertices[v_indices[2]]
++            
++            # Triangle-box intersection test
++            overlap = triangle_box_intersection(min_coord, max_coord, v1, v2, v3)
++            
++            if overlap:
++                # Store face index
++                face_id = f
++                if face_id == 0:
++                    # Face 0 is treated as empty space by default; use num_faces to distinguish
++                    face_id = num_faces
++                occ_grid[w, h, d] = face_id
++                break  # Break face loop, store first intersecting face
++                
++    return occ_grid, colors
+ 
+-        # Voxel bounds
+-        min_coord = (w, h, d)
+-        max_coord = (w + 1, h + 1, d + 1)
+-
+-        # Check faces
+-        for f in range(num_faces):
+-            v1, v2, v3 = mesh.get_face_vertices(f)
+-            
+-            if triangle_box_intersection(min_coord, max_coord, v1, v2, v3):
+-                # Store face index, handling face 0 special case
+-                if f == 0:
+-                    occ_grid[h][w][d] = num_faces
+-                else:
+-                    occ_grid[h][w][d] = f
+-                break # First face found
+-
+-    if use_color:
+-        save_colors_to_hdf5(mesh, "output_color.h5")
+-
+-    return occ_grid
++def triangle_box_intersection(min_box, max_box, v1, v2, v3):
++    """
++    Standard triangle-box intersection test.
++    Returns True if the triangle intersects the box.
++    Implementation details for this helper are not provided in the source notes.
++    """
++    # Placeholder for standard intersection logic (e.g., separating axis theorem)
++    # [G] This function must implement a robust triangle-AABB intersection test.
++    pass
+ ```
+ 
+ **Parameters:**
+-- `--color`: Boolean flag. When set, enables color preservation mode.
+-- `width`, `height`, `depth`: Integer dimensions of the voxel grid.
++- `--color`: Flag to enable color storage. When set, face IDs are stored instead of binary 1s [S2, unofficial].
++- `--center`: (From sibling context) Determines if voxel centers or corners are used for SDF computation. Not directly applicable to occupancy but affects related pipelines [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Face Index 0:** Face index 0 is treated as "not voxelized" space by default because 0 is the empty value. If face 0 intersects a voxel, the value `num_faces()` is stored instead to distinguish it from empty space [S1, unofficial].
++- **Face Index 0:** Face index 0 is treated as "not voxelized" space by default. If face 0 intersects a voxel, the algorithm stores $N_{faces}$ (the total number of faces) in the voxel to distinguish it from empty space (0) [S1, unofficial].
+ - **Multiple Color Files:** When converting the voxel grid back to an OFF file using `occ_to_off.py`, if multiple color files are provided, their ordering is critical [S2, unofficial].
+-- **Watertight Meshes:** The input triangular meshes should be watertight. Simplification or semi-convex hull algorithms may be required to ensure this [S2, unofficial].
++- **Watertight Meshes:** The input triangular meshes should be watertight to ensure correct voxelization [S2, unofficial].
++
++## Subtopics
++
++### [Surface-based Voxel Color Sampling](16409-surface-based-voxel-color-sampling.md)
++Assigns colors by sampling the nearest point on the mesh surface rather than the voxel center, avoiding color errors when voxel centers fall inside empty space.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(V \cdot F)$, where $V$ is the number of voxels and $F$ is the number of faces. In practice, spatial acceleration structures (not detailed in the source) are often used to reduce this, but the base method iterates all faces for all voxels or uses a broad-phase check.
+-- **Memory Complexity:** $O(V)$ for the occupancy grid plus $O(F)$ for the color storage if enabled.
+-- **Strengths:** Preserves color information directly in the voxel index, allowing lossless reconstruction of face colors for visualization.
+-- **Limitations:** Only stores the *first* intersecting face. If a voxel intersects multiple faces, only one is recorded. Face 0 requires special handling.
+-- **When to use:** When color information is needed for the voxelized representation and the mesh is watertight.
+-- **When not to use:** When multiple surface interactions per voxel are required, or when face 0 is common and the special mapping is undesirable.
++- **Time Complexity:** $O(V \times F)$, where $V$ is the number of voxels and $F$ is the number of faces, as each voxel may check all faces [S1, unofficial]. Parallelization over voxels is implied by the "parallel loop" description [S1, unofficial].
++- **Memory Complexity:** $O(V)$ for the occupancy grid plus $O(F)$ for the color storage if `--color` is enabled [S1, S2, unofficial].
++- **Strengths:** Preserves color information directly from the mesh face indices, allowing for lossless color reconstruction in the voxel grid [S2, unofficial].
++- **Limitations:** Only stores the first intersecting face, which may lead to color inaccuracies for complex geometries where multiple faces intersect a voxel [S1, unofficial]. Requires watertight meshes for best results [S2, unofficial].
++- **When to use:** When color preservation is required and the mesh is watertight, and when the first-intersecting-face approximation is acceptable.
++- **When not to use:** When multiple intersecting faces per voxel need to be represented, or when the mesh is not watertight.
+ 
+ ## Background
+-This method is part of the `mesh-voxelization` toolkit by David Stutz. It is designed to work with OFF format meshes and provides a bridge between mesh-based and voxel-based representations while retaining attribute data. The approach relies on the assumption that the first intersecting face is sufficient for color preservation.
++This method is part of the `mesh-voxelization` toolkit, which provides utilities for voxelizing triangular meshes [S1, S2, unofficial]. It builds on the basic occupancy grid voxelization by adding color preservation capabilities [S1, S2, unofficial]. The toolkit is used for processing 3D meshes for volume rendering and other graphics applications [S2, unofficial].
+ 
+ ## Sources

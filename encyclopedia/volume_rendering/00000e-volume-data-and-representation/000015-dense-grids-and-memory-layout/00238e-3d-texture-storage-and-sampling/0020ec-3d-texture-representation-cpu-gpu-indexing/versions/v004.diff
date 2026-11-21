@@ -1,0 +1,113 @@
+--- v003.md
++++ v004.md
+@@ -1,8 +1,8 @@
+ # 3D Texture Representation (CPU/GPU Indexing)
+ 
+-Also called: 3D Textures, Volume Header, Voxel Data Structure and Indexing, Voxel Grid Volumes
++Also called: Volume Header, Voxel Data Structure and Indexing, Voxel Grid Volumes
+ 
+ ## Overview
+-3D Texture Representation stores voxel data in a dense 3D texture (or equivalent linear array) where the texture dimensions match the voxel grid dimensions exactly [S1, unofficial]. It solves the problem of mapping continuous 3D coordinates to discrete voxel values by using simple linear indexing, leveraging hardware acceleration for caching and filtering [S1, unofficial]. Unlike tree-based structures like Octrees, it offers high runtime performance and simplicity but suffers from low memory efficiency due to the allocation of empty space in sparse volumes [S1, unofficial].
++3D Texture Representation stores voxel data in a dense 3D texture or equivalent linear array where the texture dimensions match the voxel grid dimensions exactly [S1, unofficial]. It solves the problem of mapping continuous 3D coordinates to discrete voxel values by using simple linear indexing, leveraging hardware acceleration for caching and filtering [S1, unofficial]. Unlike tree-based structures like Octrees, it offers high runtime performance and simplicity but suffers from low memory efficiency due to the allocation of empty space in sparse volumes [S1, unofficial].
+ 
+ ## How it works
+@@ -14,5 +14,5 @@
+ **Outputs:**
+ - Linear index $I$ for 1D array access [S3].
+-- Interpolated voxel value $V$ [S3].
++- Interpolated voxel value $V$ [G].
+ 
+ **Data Structures:**
+@@ -22,34 +22,21 @@
+     -   `VolumeBuffer<T>`: Contains `Header` (`VolumeHeader`) and `DataArray` (`T[]`) [S3].
+ 2.  **GPU Side:**
+-    -   3D Texture (`GL_TEXTURE_3D`) with format `GL_R8` (or similar) and dimensions `dimension x dimension x dimension` [S2, unofficial].
++    -   3D Texture (`GL_TEXTURE_3D`) with format `GL_R8` and dimensions `dimension x dimension x dimension` [S2, unofficial].
+     -   Uniform buffer containing `_VolBufferSize` (`float3`) [S3].
+ 
+ **Numbered Steps:**
+ 
+-1.  **Coordinate Conversion (GPU):** Convert normalized texture coordinates to integer voxel indices.
+-    $$ \mathbf{intIndex3} = \lfloor \mathbf{coord} \times \mathbf{VolBufferSize} \rfloor $$
+-    where $\mathbf{coord}$ is the normalized coordinate and $\mathbf{VolBufferSize}$ is the volume dimensions [S3].
+-
+-2.  **Linear Indexing (CPU/GPU):** Map 3D integer coordinates $(X, Y, Z)$ to a 1D linear index $I$ using row-major ordering.
+-    $$ I = X + (Y \times S_x) + (Z \times S_x \times S_y) $$
+-    where $S_x, S_y$ are the width and height of the volume [S3].
+-    *Note: For negative coordinates, wrapping is required: `if (x < 0) x += dim; x = x % dim;` [S2, unofficial].*
+-
+-3.  **Inverse Mapping (CPU):** Convert linear index $I$ back to cubic coordinates $(X, Y, Z)$.
+-    $$ X = (I \mod S_x) $$
+-    $$ Y = ((I / S_x) \mod S_y) $$
+-    $$ Z = ((I / (S_x \times S_y)) \mod S_z) $$
+-    [S3].
+-
+-4.  **Data Access:**
+-    -   **CPU:** Use `VolumeBuffer.GetVoxel(pos)` which internally calls `Header.CubicToLinearIndex(pos)` to access `DataArray` [S3].
+-    -   **GPU:** Sample the 3D texture or access the structured buffer using the calculated linear index [S2, unofficial][S3]. For `GL_R8` textures, density might be retrieved as `(float)pTexels[index].a / 128.0f` [S2, unofficial].
++1.  **Coordinate Conversion (GPU):** Convert normalized texture coordinates to integer voxel indices. $\mathbf{intIndex3} = \lfloor \mathbf{coord} \times \mathbf{VolBufferSize} \rfloor$ [S3].
++2.  **Linear Indexing (CPU/GPU):** Map 3D integer coordinates $(X, Y, Z)$ to a 1D linear index $I$ using row-major ordering. $I = X + (Y \times S_x) + (Z \times S_x \times S_y)$ [S3].
++3.  **Inverse Mapping (CPU):** Convert linear index $I$ back to cubic coordinates $(X, Y, Z)$. $X = (I \mod S_x)$, $Y = ((I / S_x) \mod S_y)$, $Z = ((I / (S_x \times S_y)) \mod S_z)$ [S3].
++4.  **Data Access:** CPU uses `VolumeBuffer.GetVoxel(pos)` which internally calls `Header.CubicToLinearIndex(pos)` to access `DataArray` [S3]. GPU samples the 3D texture or accesses the structured buffer using the calculated linear index [S2, unofficial][S3]. For `GL_R8` textures, density is retrieved as `(float)pTexels[index].a / 128.0f` [S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# CPU Implementation
++import math
++
+ class Int3:
+-    def __init__(self, x, y, z):
++    def __init__(self, x: int, y: int, z: int):
+         self.x = x
+         self.y = y
+@@ -84,14 +71,10 @@
+         self.data_array[index] = val
+ 
+-# GPU Implementation (Conceptual HLSL/GLSL)
+-# uniform float3 _VolBufferSize;
+-# uniform StructuredBuffer<float> _VolBuffer;
+-
+-def sample_vol(coord3: tuple, vol_buffer_size: tuple, vol_buffer: list) -> float:
+-    # 1. Convert normalized coordinates to integer indices
++def sample_vol_gpu(coord3: tuple, vol_buffer_size: tuple, vol_buffer: list) -> float:
++    # 1. Convert normalized coordinates to integer indices (floor)
+     int_index3 = (
+-        int(coord3[0] * vol_buffer_size[0]),
+-        int(coord3[1] * vol_buffer_size[1]),
+-        int(coord3[2] * vol_buffer_size[2])
++        math.floor(coord3[0] * vol_buffer_size[0]),
++        math.floor(coord3[1] * vol_buffer_size[1]),
++        math.floor(coord3[2] * vol_buffer_size[2])
+     )
+     
+@@ -100,5 +83,5 @@
+     linear_index = int_index3[0] + (int_index3[1] * size_x) + (int_index3[2] * (size_x * size_y))
+     
+-    # 3. Return value (assuming float buffer)
++    # 3. Return value
+     return vol_buffer[linear_index]
+ ```
+@@ -111,6 +94,10 @@
+ **Edge Cases and Pitfalls:**
+ -   **Sparse Memory:** The structure allocates memory for the entire bounding box, even if most voxels are empty [S1, unofficial]. This limits achievable image quality on memory-limited platforms [S1, unofficial].
+--   **Negative Coordinates:** GPU sampling usually handles wrapping via texture wrap modes, but CPU indexing must explicitly handle negative indices using modulo arithmetic with offset [S2, unofficial].
+ -   **Texture Compression:** While BC1-7 compression can reduce memory usage, it adds a runtime performance cost to all pipeline stages, not just voxelization [S1, unofficial].
++
++## Subtopics
++
++### 3D Texture Population for Gradient and Intensity
++Encodes voxel gradients and normalized intensities into a 3D RGBA texture for GPU raycasting [S4, unofficial]. The process iterates over all voxels $(k, j, i)$, calculates the linear index $I = i + j \times res.x + k \times res.x \times res.y$, and normalizes gradient components $(x, y, z)$ by `maxGra` (255 for 8-bit, 65535 for 16-bit) before storing them in the RGB channels [S4, unofficial]. Intensity is stored in the A channel using either linear normalization $xpos = ((I - minInt) \times 255.0) / (maxInt - minInt)$ or histogram equalization $xpos = (accCounter[I] \times 255.0) / sum$, followed by $A = (xpos + 1.0) / 257.0$ [S4, unofficial]. The resulting `tex3D` is a contiguous float array of size $res.x \times res.y \times res.z \times 4$ with [R, G, B, A] layout per voxel [S4, unofficial].
+ 
+ ## Operating characteristics
+@@ -123,8 +110,9 @@
+ 
+ ## Background
+-This approach was taken in the implementation of *Real-Time Ray Traced Voxel Global Illumination* due to its runtime performance and simplicity, despite not optimizing memory usage [S1, unofficial]. It is a standard method in Mixed Reality volume rendering implementations [S3].
++This approach was taken in the implementation of *Real-Time Ray Traced Voxel Global Illumination* due to its runtime performance and simplicity, despite not optimizing memory usage [S1, unofficial].
+ 
+ ## Sources
+ [S1] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)
+ [S2] jaafersheriff/Cloud-Renderer, https://github.com/jaafersheriff/Cloud-Renderer, fetched 2026-10-27 (unofficial)
+-[S3] Volume rendering - Mixed Reality | Microsoft Learn, https://learn.microsoft.com/en-us/windows/mixed-reality/develop/native/volume-rendering, fetched 2026-10-27+[S3] Volume rendering - Mixed Reality | Microsoft Learn, https://learn.microsoft.com/en-us/windows/mixed-reality/develop/native/volume-rendering, fetched 2026-10-27
++[S4] extrovert7986/Scientific-visualization-Slicing-volume-rendering, https://github.com/extrovert7986/Scientific-visualization-Slicing-volume-rendering, fetched 2026-10-26 (unofficial)

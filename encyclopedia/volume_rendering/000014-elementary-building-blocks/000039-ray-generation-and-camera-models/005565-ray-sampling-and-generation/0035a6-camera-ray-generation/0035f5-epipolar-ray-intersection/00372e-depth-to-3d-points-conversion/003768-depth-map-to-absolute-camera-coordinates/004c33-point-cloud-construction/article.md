@@ -1,0 +1,122 @@
+# Point Cloud Construction
+
+Also called: Depth and Feature Unprojection, Multi-view Point Cloud Generation
+
+## Overview
+Point Cloud Construction converts 2D input views into 3D point clouds containing both geometric positions and view-dependent semantic features [S1]. It solves the problem of representing complex scenes in a format that is memory-efficient and scalable, serving as the foundational representation for subsequent differentiable rendering and multi-view fusion [S1]. Unlike sibling methods that may rely on explicit mesh extraction or virtual laser scans, this approach directly unprojects per-pixel depth and learned feature vectors into 3D space, preserving high-dimensional semantic information alongside geometry [S1, 16278-virtual-laser-scan-for-point-cloud-generation.md].
+
+## How it works
+**Inputs:**
+*   Input image view $I_i$.
+*   Camera intrinsics matrix $K$.
+*   Camera pose (extrinsics) $T_{world \to camera}$ or $T_{camera \to world}$ (implied by "Absolute Camera Coordinates" parent context, but specifically "known camera intrinsics" are cited for projection) [S1].
+*   Estimated depth map $D_i$ (output of depth network $d$) [S1].
+*   Spatial feature vectors $F_i^{raw}$ (output of spatial feature encoder $f$) [S1].
+
+**Outputs:**
+*   Point cloud $P_i$, a set of points where each point contains 3D coordinates and a 64-dimensional feature vector [S1].
+
+**Data Structures:**
+*   **Point Cloud $P_i$**: A list or array of points. Each point stores:
+    *   3D coordinates $(X, Y, Z)$ in world or camera space (consistent with the parent method's output coordinate system).
+    *   Feature vector $F \in \mathbb{R}^{64}$.
+*   **Feature Vector Layout**:
+    *   Dimensions 0-60 (61 dims): Semantic features from encoder $f$ [S1].
+    *   Dimensions 61-63 (3 dims): RGB color channels from input image $I_i$ [S1].
+
+**Steps:**
+1.  **Depth Estimation**: For each input view $I_i$, estimate the per-pixel depth map $D_i$ using a depth network $d$. This network may combine multi-view stereo cues with a U-Net refinement to resolve scaling ambiguities [S1].
+2.  **Feature Encoding**: Compute per-pixel spatial feature vectors $F_i^{raw}$ using a spatial feature encoder $f$ (e.g., BigGAN-based) [S1].
+3.  **Feature Concatenation**: For each pixel, concatenate the 61-dimensional feature vector $F_i^{raw}$ with the 3 RGB channels of the input image $I_i$ to form the final 64-dimensional feature vector $F_i$ [S1].
+    $$ F_i = \text{Concat}(F_i^{raw}, \text{RGB}(I_i)) $$
+4.  **3D Unprojection**: For each pixel $(u, v)$ with depth $d_{uv}$ and feature $F_{uv}$:
+    a. Convert pixel coordinates to normalized camera coordinates using intrinsics $K$.
+    b. Scale by depth $d_{uv}$ to get camera-space coordinates.
+    c. Transform to world coordinates using the camera pose (as per parent method [7984-depth-map-to-absolute-camera-coordinates.md]).
+    d. Create a point $p = (X, Y, Z, F_{uv})$ and add to $P_i$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def construct_point_cloud(I_i, K, T_world_to_camera, D_i, F_i_raw):
+    """
+    Constructs a 3D point cloud from a single view.
+    
+    Args:
+        I_i: Input image (H, W, 3) with RGB values in [0, 1] or [0, 255].
+        K: Camera intrinsic matrix (3, 3).
+        T_world_to_camera: 4x4 transformation matrix from world to camera coordinates.
+        D_i: Estimated depth map (H, W).
+        F_i_raw: Spatial feature vectors (H, W, 61).
+        
+    Returns:
+        P_i: List of points, each being a tuple (X, Y, Z, F_64).
+    """
+    H, W = D_i.shape
+    P_i = []
+    
+    # Precompute inverse intrinsics for unprojection
+    K_inv = np.linalg.inv(K)
+    
+    for y in range(H):
+        for x in range(W):
+            # 1. Get depth and raw features
+            depth = D_i[y, x]
+            feat_raw = F_i_raw[y, x]  # Shape: (61,)
+            rgb = I_i[y, x]          # Shape: (3,)
+            
+            # 2. Concatenate features: 61-dim + 3 RGB = 64-dim
+            feat_full = np.concatenate([feat_raw, rgb])
+            
+            # 3. Unproject pixel to 3D
+            # Convert pixel (x, y) to homogeneous normalized coordinates
+            # Assuming standard pinhole model: x = (u - cx) / fx, y = (v - cy) / fy
+            # Or using K_inv: [x_norm, y_norm, 1.0] = K_inv @ [u, v, 1]
+            pixel_hom = np.array([x, y, 1.0])
+            cam_coords_hom = K_inv @ pixel_hom
+            
+            # Scale by depth to get camera-space coordinates
+            # Note: Depth D_i is assumed to be in the same scale as the Z-axis in camera space
+            cam_coords = cam_coords_hom * depth
+            
+            # Transform to world coordinates
+            # cam_coords is (3,), need to make it (4,1) for matrix mult
+            cam_coords_hom = np.append(cam_coords, 1.0)
+            world_coords_hom = np.linalg.inv(T_world_to_camera) @ cam_coords_hom
+            
+            X, Y, Z = world_coords_hom[:3]
+            
+            # 4. Add point to cloud
+            P_i.append((X, Y, Z, feat_full))
+            
+    return P_i
+```
+
+**Parameters:**
+*   Feature vector base dimension: 61 [S1].
+*   Total feature dimension per point: 64 (61 + 3 RGB) [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Depth Ambiguity**: Single-image depth estimation suffers from scaling/shifting ambiguity, which can lead to inconsistent 3D points across views [S1]. The method relies on the depth network $d$ to mitigate this, often using multi-view stereo cues [S1].
+*   **Missing Depth**: Pixels with invalid or missing depth values should be excluded from the point cloud to avoid artifacts.
+*   **Coordinate System Consistency**: The depth values must be consistent with the camera coordinate system defined by $K$ and the transformation $T$ [S1, 7984-depth-map-to-absolute-camera-coordinates.md].
+
+## Subtopics
+
+### [Depth-aware Feature Warping](17880-depth-aware-feature-warping.md)
+Projects 2D features from a source view to a target view using estimated depth and camera poses. It differs by handling depth uncertainty through a depth volume and aggregating features across multiple depth hypotheses, rather than a single plane. Choose when multi-view consistency checks or feature aggregation for depth estimation are required.
+
+## Operating characteristics
+*   **Time Complexity**: Linear with respect to the number of pixels in the input image $O(H \times W)$ per view, as each pixel is processed independently during unprojection [S1].
+*   **Memory Complexity**: Proportional to the number of pixels times the feature dimension size. For an image of size $H \times W$, memory is $O(H \times W \times 64)$ for the point cloud data [S1].
+*   **Strengths**: Efficient, compact memory usage, and scalable to complex scenes compared to dense voxel grids [S1]. Preserves view-dependent semantics.
+*   **Limitations**: Relies heavily on the accuracy of the estimated depth $D_i$ and feature encoder $f$. Inaccurate depth leads to geometric errors in the point cloud [S1]. Sparse inputs with large baselines can lead to inaccurate depth estimations if not properly refined [S1].
+*   **When to Use**: When a compact, semantically rich 3D representation is needed for differentiable rendering or novel view synthesis [S1].
+*   **When Not to Use**: When high-precision geometric reconstruction is required without semantic features, or when depth estimation is unreliable.
+
+## Background
+The method originates from the FWD (Forward Warping and Depth) model for real-time novel view synthesis [S1]. It was introduced to leverage the efficiency and scalability of point clouds for representing scenes with complex geometry and view-dependent appearance [S1]. The approach integrates a differentiable neural point cloud renderer, allowing end-to-end training with photometric and perceptual losses [S1].
+
+## Sources
+[S1] FWD: Real-time Novel View Synthesis with Forward Warping and Depth, https://doi.org/10.1109/cvpr52688.2022.01526, fetched 2026-10-29

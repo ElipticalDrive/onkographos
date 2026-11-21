@@ -1,0 +1,112 @@
+--- v008.md
++++ v009.md
+@@ -4,68 +4,62 @@
+ 
+ ## Overview
+-K-wise moment-matched merging with L2-optimal amplitude is a level-of-detail (LOD) technique that reduces a set of $K$ 3D Gaussians into a single representative Gaussian by matching the first and second spatial moments of the cluster and optimizing the resulting amplitude to minimize the integrated squared error (L2 loss) [S1, unofficial]. It differs from simple arithmetic averaging by preserving the spatial extent and center of mass of the group, and from culling methods by retaining all information in a denser, lower-count representation [S1, unofficial].
++K-wise moment-matched merging with L2-optimal amplitude is a level-of-detail technique that reduces the complexity of a 3D Gaussian Splatting scene by combining $K$ individual splats into a single representative splat [S1, unofficial]. It solves the problem of efficient LOD generation by ensuring the merged Gaussian preserves the first and second spatial moments of the input cluster while optimizing its amplitude (opacity) to minimize the integrated squared error (L2 loss) [S1, unofficial]. It is distinguished from sibling methods like [Hierarchical Gaussian Merging](8358-hierarchical-gaussian-merging.md) by its specific focus on substitutive LOD via moment matching and L2 optimization, and from [LOD Generation for 3DGS](8408-lod-generation-for-3dgs.md) by its reliance on explicit partitioning algorithms (greedy, relocation, or relaxation) rather than fixed distance thresholds [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A cluster of $K$ Gaussians $C_k = \{G_i\}_{i=1}^K$, where each $G_i$ is defined by position $\mathbf{t}_i$, covariance matrix $\mathbf{\Sigma}_i$, opacity $\alpha_i$, and color coefficients $c_i$.
+-**Outputs:** A single representative Gaussian $G'_k$ with parameters $\mathbf{t}'_k, \mathbf{\Sigma}'_k, \alpha'_k, c'_k$.
++**Inputs:** A set of 3D Gaussians $G = \{G_i\}$, where each $G_i$ is defined by position $\mathbf{t}_i$, covariance $\mathbf{\Sigma}_i$, opacity $\alpha_i$, and color coefficients $c_i$. A target compression factor or cluster size $K$.
++
++**Outputs:** A reduced set of Gaussians $G' = \{G'_j\}$, where each $G'_j$ represents a cluster of $K$ input splats.
+ 
+ **Data Structures:**
+-The method operates on the statistical moments of the cluster.
+-1.  **Weighted Position ($\mathbf{t}'_k$):** The center of mass of the cluster, weighted by opacity.
+-2.  **Weighted Covariance ($\mathbf{\Sigma}'_k$):** The second moment of the cluster, adjusted for the spread of the individual Gaussians.
+-3.  **Optimized Amplitude ($\alpha'_k$):** Derived by minimizing the L2 error between the merged Gaussian and the sum of the input Gaussians.
++The method operates on a list of Gaussian objects. Each object contains:
++- `pos`: 3D vector $\mathbf{t}$
++- `cov`: 3x3 symmetric matrix $\mathbf{\Sigma}$ (or Cholesky factor $\mathbf{L}$ such that $\mathbf{\Sigma} = \mathbf{L}\mathbf{L}^T$)
++- `alpha`: scalar $\alpha \in [0, 1]$
++- `color`: vector or spherical harmonic coefficients $c$
+ 
+ **Steps:**
+-1.  **Partitioning:** The source of Gaussians is partitioned into clusters using one of three algorithms:
+-    *   Greedy hierarchical merging (à la Runnalls) [S1, unofficial].
+-    *   Cost-increment relocation [S1, unofficial].
+-    *   Joint relaxation [S1, unofficial].
+-2.  **Moment Matching:** Compute the first and second moments of the cluster $C_k$.
+-    *   Let $w_i = \alpha_i$ be the weight of each Gaussian.
+-    *   Compute the total weight $W = \sum_{i \in C_k} w_i$.
+-    *   Compute the merged position:
+-        $$ \mathbf{t}'_k = \frac{1}{W} \sum_{i \in C_k} w_i \mathbf{t}_i $$
+-    *   Compute the merged covariance. The covariance of a Gaussian is related to its scale. The merged covariance $\mathbf{\Sigma}'_k$ is calculated to match the second moment of the cluster. For 3D Gaussians, this typically involves summing the individual covariances weighted by their amplitudes and adding the outer product of the position deviations:
+-        $$ \mathbf{\Sigma}'_k = \frac{1}{W} \sum_{i \in C_k} w_i \left( \mathbf{\Sigma}_i + (\mathbf{t}_i - \mathbf{t}'_k)(\mathbf{t}_i - \mathbf{t}'_k)^T \right) $$
+-        [G] Note: In standard 3DGS, $\mathbf{\Sigma}$ is often parameterized by scale $\mathbf{s}$ and rotation $\mathbf{q}$. The covariance matrix is $\mathbf{\Sigma} = \mathbf{R}\mathbf{S}\mathbf{S}^T\mathbf{R}^T$. The merging formula above applies to the covariance matrix directly.
+-3.  **L2-Optimal Amplitude:** Determine $\alpha'_k$ to minimize the integrated squared error between the merged Gaussian and the cluster.
+-    *   The relative merging error for the amplitude-optimized moment-matched template is given by $\epsilon = \sin^2 \alpha$, where $\alpha$ is a geometric angle parameter derived from the overlap and alignment of the Gaussians in the cluster [S1, unofficial].
+-    *   Specifically, the optimal amplitude $\alpha'_k$ is found by solving the minimization problem:
+-        $$ \alpha'_k = \arg \min_{\alpha} \int \| \alpha \cdot \mathcal{G}(\mathbf{t}'_k, \mathbf{\Sigma}'_k) - \sum_{i \in C_k} \alpha_i \cdot \mathcal{G}(\mathbf{t}_i, \mathbf{\Sigma}_i) \|^2 d\mathbf{x} $$
+-        [G] In practice, this often results in a closed-form solution or a simple scalar optimization based on the overlap integrals of the Gaussians. The source notes that the error metric $\epsilon = \sin^2 \alpha$ provides a geometric interpretation of this error [S1, unofficial].
+-4.  **Color Interpolation:** The color coefficients $c'_k$ are typically computed as the weighted average of the input colors, weighted by the original opacities and the new amplitude:
+-    $$ c'_k = \frac{1}{W} \sum_{i \in C_k} w_i c_i $$
+-    [G] Alternatively, $c'_k$ may be scaled by the ratio $\alpha'_k / W$ to preserve radiance.
++
++1.  **Partitioning:** Partition the input set $G$ into disjoint clusters $C_j$ using one of three algorithms [S1, unofficial]:
++    *   **Greedy Hierarchical:** Iteratively merge the pair of splats with the lowest merging cost until clusters of size $K$ are formed (à la Runnalls).
++    *   **Cost-Increment Relocation:** Start with random or spatially initialized clusters, then iteratively move splats between clusters to minimize the total merging cost.
++    *   **Joint Relaxation:** Simultaneously optimize cluster assignments and representative parameters.
++
++2.  **Moment Matching (Geometric Aggregation):** For each cluster $C_j$, compute the representative position $\mathbf{t}'_j$ and covariance $\mathbf{\Sigma}'_j$ by matching the first and second moments of the constituent splats [S1, unofficial].
++    *   Calculate total weight $W_j = \sum_{i \in C_j} \alpha_i$.
++    *   Compute weighted position:
++        $$ \mathbf{t}'_j = \frac{1}{W_j} \sum_{i \in C_j} \alpha_i \mathbf{t}_i $$
++    *   Compute weighted covariance:
++        $$ \mathbf{\Sigma}'_j = \frac{1}{W_j} \sum_{i \in C_j} \alpha_i \left( \mathbf{\Sigma}_i + (\mathbf{t}_i - \mathbf{t}'_j)(\mathbf{t}_i - \mathbf{t}'_j)^T \right) $$
++    *   Compute weighted color (arithmetic mean):
++        $$ c'_j = \frac{1}{W_j} \sum_{i \in C_j} \alpha_i c_i $$
++
++3.  **L2-Optimal Amplitude:** Optimize the opacity $\alpha'_j$ of the merged Gaussian to minimize the L2 error between the merged Gaussian and the sum of the input Gaussians [S1, unofficial].
++    *   The optimal amplitude $\alpha'_j$ is derived analytically to minimize $\int \| \sum_{i \in C_j} G_i(\mathbf{x}) - G'_j(\mathbf{x}) \|^2 d\mathbf{x}$.
++    *   While the exact closed-form formula for $\alpha'_j$ depends on the specific L2 metric implementation (e.g., spectral bounds), it generally involves solving a linear system or using a closed-form expression based on the overlap integrals of the Gaussians [S1, unofficial]. [G] In practice, this often results in $\alpha'_j$ being a function of the cluster's total mass and the geometric overlap of the splats, ensuring the merged splat's intensity matches the integrated energy of the cluster.
++
++4.  **Color Preservation:** Assign $c'_j$ to the merged Gaussian.
+ 
+ **Parameters:**
+-*   $K$: The number of Gaussians to merge. Typical values are powers of 2 (e.g., 4, 8, 16) for LOD levels [S1, unofficial].
+-*   Partitioning Algorithm: Select from greedy, cost-increment, or joint relaxation [S1, unofficial].
++- $K$: Cluster size. Typical values depend on the desired compression ratio.
++- Partitioning Algorithm: One of Greedy, Relocation, or Relaxation.
+ 
+ **Edge Cases:**
+-*   **Degenerate Clusters:** If $K=1$, the Gaussian is returned unchanged.
+-*   **Precision:** The L2 optimization requires accurate computation of overlap integrals. Numerical instability may occur if Gaussians are nearly identical or widely separated [S1, unofficial].
+-*   **Boundaries:** The method assumes the cluster is spatially coherent. Poor clustering (e.g., merging distant Gaussians) leads to high L2 error [S1, unofficial].
++- **Degenerate Clusters:** If a cluster contains only one Gaussian, it is passed through unchanged.
++- **Precision:** Covariance matrices must remain positive definite. Numerical stability should be maintained during Cholesky decomposition if used [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### Analytical Merging of Gaussian Splats
+-A closed-form framework for merging two Gaussian splats using L2 integrated squared-error, providing a geometric interpretation of the relative merging error [S1, unofficial]. The relative merging error is $\epsilon = \sin^2 \alpha$ for the amplitude-optimised moment-matched template, where $\alpha$ is the geometric angle parameter in the error derivation [S1, unofficial]. It is implemented in Luxar for merging Gaussian splats during fitting or LOD reduction [S1, unofficial].
++### [Analytical Merging of Gaussian Splats](5681-analytical-merging-of-gaussian-splats.md)
++A closed-form framework for merging two Gaussian splats by minimizing L2 error. It serves as the core merging primitive for this method, providing the geometric interpretation of merging error and enabling efficient LOD reduction.
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Time:** Depends on the partitioning algorithm. Greedy hierarchical merging is $O(N \log N)$ or $O(N^2)$ depending on implementation. Cost-increment relocation is efficient, matching greedy performance within 5.5% at compression factors of four and above [S1, unofficial].
+-*   **Memory:** Reduces the number of Gaussians by a factor of $K$, reducing memory usage by $O(K)$ per cluster [S1, unofficial].
+-
+-**Measured Performance:**
+-*   On full fits, cost-aware merging outperforms mass-ranked culling regardless of amplitude refit [S1, unofficial].
+-*   On sparse subsamples, culling wins in the median [S1, unofficial].
+-*   The method is suitable for scalable interactive web visualisation of multidimensional scientific data [S1, unofficial].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Preserves spatial structure better than culling; provides a smooth LOD transition; cost-increment relocation offers near-optimal quality with lower computational cost than greedy methods [S1, unofficial].
+-*   **Limitations:** Requires careful partitioning; L2 optimization can be sensitive to the geometric configuration of the cluster [S1, unofficial].
++- **Time Complexity:** Depends on the partitioning algorithm. Greedy hierarchical is $O(N^2)$ or $O(N \log N)$ with optimizations. Cost-increment relocation is iterative and typically faster than greedy for large $N$ [S1, unofficial].
++- **Memory Complexity:** $O(N)$ for storing the input and output Gaussians.
++- **Performance:** Cost-increment relocation matches greedy merging performance within 5.5% at compression factors of four and above [S1, unofficial]. On full fits, cost-aware merging outperforms mass-ranked culling regardless of amplitude refit; on sparse subsamples, culling wins in the median [S1, unofficial].
++- **Strengths:** Provides high-fidelity LOD reduction with controllable error via L2 optimization.
++- **Limitations:** Requires careful selection of partitioning algorithm for optimal performance.
+ 
+ ## Background
+-This method originates from the Luxar project, which focuses on Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data [S1, unofficial]. It is part of a broader effort to create parameter-free image resolution estimation and substitutive levels of detail for Gaussian splats [S1, unofficial]. The technique is described in Supplementary Document 8 of the Luxar repository, which details the cost-metric design space and partitioning algorithms [S1, unofficial].
++This method originates from research on substitutive levels of detail for Gaussian splats, specifically detailed in the supplementary documents of the Luxar project [S1, unofficial]. It addresses the need for scalable interactive web visualization of multidimensional scientific data, such as microscopy volumes, where efficient LOD is critical for performance [S1, unofficial].
+ 
+ ## Sources

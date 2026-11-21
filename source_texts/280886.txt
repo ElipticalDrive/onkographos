@@ -1,0 +1,213 @@
+Game engine capable of running KotOR and TSL. Contribute to modawan/reone development by creating an account on GitHub.
+
+Degenerate ray direction defeats walkmesh BVH culling by MichaelMoroz · Pull Request #341 · modawan/reone · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+MichaelMoroz
+commented
+Aug 29, 2026
+Copy link
+Copy Markdown
+Degenerate ray direction defeats walkmesh BVH culling
+Area::moveCreature builds a step whose length clamps to zero when a creature is
+already at its destination, so SceneGraph::testWalk computes
+glm::normalize(dest - origin) on a zero vector and gets a NaN direction. That
+NaN reaches AABB::raycast as the reciprocal direction invDir, where every
+slab-test comparison is false and tmax < tmin never rejects, so no node is
+culled. Walkmesh::raycastAABB therefore sweeps the entire BVH and calls
+Walkmesh::raycastFace on all 3,132 triangles rather than the ~10 the ray
+actually crosses. Because raycastFace takes its std::set<uint32_t> surface
+filter by value, each of those calls copies a 19-element red-black tree to
+perform one count(), turning an 18 us query into 2,267 us.
+Warping into the level gives creatures MoveToObject orders, and once they
+arrive they re-issue the zero-length step every frame, so the degenerate
+traversal is permanent rather than transient. The NaN also propagates into
+dest, so the following SceneGraph::testElevation degenerates identically -
+with four creatures each paying both queries, Module::update settles at a
+sustained ~19 ms per frame.
+Reaching the state
+The state needs the zero-length step to repeat. At a normal timestep a
+creature's _pathVelocity picks up a non-zero steering force within a frame or
+two, so the degenerate traversal fires once and clears. Handing the module a
+zero timestep removes that escape: every call still runs, speedDt is zero
+every frame, and dest == origin forever.
+gamespeed 0 is the control that does this, and it reproduces the bug on
+demand. Headless, retro, loadgame 151 / warp danm14ad / gamespeed 0, one
+85 s capture spanning the switch:
+SceneGraph::testWalk, 5 s buckets
+mean
+before the command (t = 10..35 s)
+16.5 - 18.0 us
+after it (t = 40..85 s)
+2,230 - 2,254 us
+Over the sustained region: testWalk p50 2,211 us / p99 2,642 us across 11,362
+calls, and Module::update p50 4,773 us / mean 4,833 us. It does not decay -
+every 5 s bucket to the end of the run reads the same. This is the state the
+original 19 ms reproduction was in; the frame cost here is lower only because
+this module has fewer navigating creatures paying it.
+Pausing does not do this, and cannot. Game::update gates the whole module
+tick on _paused:
+```
+if (updModule && !_paused) { ... _module->update(dt); ... }
+```
+so a pause removes the code containing the bug rather than holding it still.
+Measured the same way, gamepause on left testWalk at p50 16.7 us / p99
+31.8 us before the switch and called it exactly zero times across the 6,372
+frames after it, while Game::update kept running all 9,415. That is why
+gamepause was replaced by gamespeed, which scales the timestep the way
+--freezeframe did rather than skipping the update.
+No script-only reproduction yet
+The scenario without any dev control does not reach the sustained state.
+loadgame 151 / warp danm14ad, headless at a fixed 1/60 timestep, 96.7 s and
+112,720 testWalk calls covering the warp and 70 s after it: every 5 s bucket
+reads a mean of 16.7 - 19.3 us, 17 calls exceed 200 us, 4 exceed 1 ms, and the
+tail is 0.51% of total time. Two isolated 2.5-2.9 ms spikes are the transient
+firing and clearing. Nothing sustains.
+The route that reaches it at a normal timestep is a creature whose steering
+force is exactly zero on the first frame of a fresh path - _pathVelocity is
+still {0, 0, 0}, glm::normalize of it is NaN, and because NaN survives
++= the velocity never recovers for the life of that path. A creature standing
+exactly on its next path point produces that, which is what a restored forced
+MoveToObject sets up: it is constructed with timeout = 0, so
+expiryMilliseconds equals the current world time, the first execute takes
+the expired branch, and setPosition teleports the actor onto its destination.
+Whether that is what the original session hit has not been confirmed - it needs
+a save whose action list contains one, and it has not been reproduced from a
+script.
+The fix
+One check at Walkmesh::raycast, the single entry point testWalk,
+testElevation and testLineOfSight all reach. A ray with no direction has no
+intersection, so that is the answer it gives.
+```
+float dirLength2 = glm::dot(dir, dir);
+if (!(dirLength2 > 0.0f) || !std::isfinite(origin.x + origin.y + origin.z)) {
+    Raycast result = {0};
+    result.distance = FLT_MAX;
+    result.fail = RAYCAST_NO_INTERSECTION;
+    return result;
+}
+```
+The test is a negated > rather than a comparison against zero, because every
+comparison involving a NaN is false and dot < 0.0f would let one through. The
+origin is checked as well as the direction, because testElevation passes a
+fixed downward direction and takes its NaN in through the position instead.
+Over the sustained region, before and after:
+before
+after
+SceneGraph::testWalk p50
+2,211 us
+5 us
+SceneGraph::testWalk p99
+2,642 us
+8 us
+Module::update p50
+4,773 us
+353 us
+Module::update mean
+4,833 us
+367 us
+Before the command lands the two builds agree, 16.8-18.7 us per 5 s bucket
+either way, so nothing that was working changed.
+This fixes the traversal, not the two things that made it expensive rather than
+merely wrong: raycastFace still copies its std::set surface filter by value
+once per triangle, and Creature::_pathVelocity still stays NaN for the life of
+a path once normalize poisons it. Both are real and neither is this.
+Notes for review
+The measurements were taken on a fork whose renderer differs from this tree.
+The walkmesh, Area::moveCreature and Creature::navigateTo code they
+exercise is the same code, but the absolute frame costs are not this tree's.
+--freezeframe and gamepause, named in the text above, are that fork's
+controls and do not exist here. The first commit adds gamespeed, which is
+the one this tree needs to reproduce the bug.
+MichaelMoroz
+added 2 commits
+August 29, 2026 19:50
+[game] Add gamespeed, a console control over the simulation timestep
+…
+e321205
+```
+Game::update already multiplies frameTime by _gameSpeed, but nothing could
+write that field except two developer keys clamped to [1, 8]. They exist for
+playing faster, so there was no way to ask for a slower world and none at all
+for a still one.
+
+gamespeed <multiplier> writes it directly, taking anything in [0, 8]. Zero is
+the setting it exists for: every call in the update path still runs, with
+dt == 0.
+
+That is deliberately not the same as pausing, which is the obvious-looking
+equivalent and is not one. Game::update gates the whole module tick on _paused:
+
+    if (updModule && !_paused) { ... _module->update(dt); ... }
+
+so pausing does not hold the world still, it removes the code that moves it.
+A world that is asked to update and does not move is where a step that clamps
+to zero length - or any other degenerate-timestep behaviour - becomes
+observable rather than absent. The commit that follows this one fixes a bug
+found exactly that way, and gamespeed 0 is how it is reproduced.
+```
+[graphics] Reject a degenerate ray before it defeats the walkmesh BVH
+…
+3e28616
+```
+Callers derive a ray direction by normalising a step, and glm::normalize of a
+zero-length vector is NaN. That is not merely a miss. AABB::raycast
+reciprocates the direction and compares slabs, every comparison against a NaN
+is false, so tmax < tmin never rejects and the tree culls nothing:
+raycastAABB walks the whole thing and calls raycastFace on all 3,132 triangles
+rather than the ~10 the ray crosses. Since the caller repeats the step every
+frame, it costs milliseconds of frame time for a ray that cannot hit anything.
+
+A ray with no direction has no intersection, so answer that and return. One
+check at Walkmesh::raycast, which is the single entry point testWalk,
+testElevation and testLineOfSight all reach.
+
+Two details it depends on. The test is a negated > rather than a comparison
+against zero, because every comparison involving a NaN is false and
+`dot < 0.0f` would let one through. And the origin is checked as well as the
+direction: testElevation passes a fixed downward direction and takes its NaN
+in through the position instead, which is how the second query degenerated
+alongside the first.
+
+Measured with the preceding commit's gamespeed 0, headless, loadgame 151 /
+warp danm14ad, an 85 s capture on each side. Over the sustained region:
+
+                       before          after
+  SceneGraph::testWalk p50   2,211 us     5 us
+                       p99   2,642 us     8 us
+  Module::update       p50   4,773 us   353 us
+                       mean  4,833 us   367 us
+
+Before the command lands the two builds agree, 16.8-18.7 us per 5 s bucket
+either way, so nothing that was working changed.
+
+This fixes the traversal, not the two things that made it expensive rather
+than merely wrong: raycastFace still copies its std::set surface filter by
+value once per triangle, and Creature::_pathVelocity still stays NaN for the
+life of a path once normalize poisons it. Both are real and neither is this.
+```
+MichaelMoroz
+force-pushed
+the
+fix/walkmesh-degenerate-ray
+branch
+from
+93af09e to
+3e28616
+Compare
+August 29, 2026 17:50
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

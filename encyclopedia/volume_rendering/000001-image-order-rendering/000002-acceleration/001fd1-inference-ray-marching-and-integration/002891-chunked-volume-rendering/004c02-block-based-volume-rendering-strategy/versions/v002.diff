@@ -1,0 +1,160 @@
+--- v001.md
++++ v002.md
+@@ -4,128 +4,62 @@
+ 
+ ## Overview
+-A rendering strategy for large scenes partitioned into spatial blocks, designed to overcome web platform limitations on texture unit counts by assigning separate shaders to each block [S1]. It solves the problem of maintaining 3D consistency and correct occlusion when a single ray traverses multiple blocks loaded by different shaders, which breaks standard volume rendering pipelines [S1]. It sets itself apart from sibling methods by explicitly handling the resource-independence of blocks through sequential depth-sorted accumulation rather than unified sampling [S1].
++A rendering strategy for large scenes partitioned into blocks, where each block uses a separate shader due to web texture unit limits [S1]. It solves the problem where standard volume rendering fails because sampling points across a ray may belong to different blocks loaded by different shaders, breaking 3D consistency and correct occlusion [S1]. It sets itself apart from its siblings by enforcing sequential rendering and post-hoc accumulation rather than attempting to load all resources into a single pass or using occupancy grids to skip empty space [S1, Siblings].
+ 
+ ## How it works
+-**Inputs:**
+-*   A set of $M$ scene blocks.
+-*   For each block $k \in \{1, \dots, M\}$, a dedicated shader instance capable of sampling the block's specific volume data (e.g., virtual grids or neural field parameters) [S1].
+-*   Camera viewpoint for depth sorting [S1].
+-
+-**Outputs:**
+-*   Final composite color $C_r$ [S1].
++**Inputs and Outputs:**
++*   **Input:** A set of $M$ scene blocks, each associated with a dedicated shader instance containing its specific texture resources [S1].
++*   **Output:** The final composite color $C_r$ for the pixel [S1].
+ 
+ **Data Structures:**
+-*   **Block List:** A collection of block identifiers sorted by depth relative to the camera [S1].
+-*   **Shader State:** Each block $k$ maintains its own sampling state. The shader outputs a local color $c_k$ and opacity $\alpha_k$ for the ray segment passing through that block [S1].
++*   **Block List:** A list of $M$ blocks, each containing a reference to its shader and its spatial position [S1].
++*   **Shader State:** Each shader instance holds the texture units required to render its specific block [S1].
+ 
+ **Steps:**
+-1.  **Depth Sorting:** Depth-sort all scene blocks relative to the current camera viewpoint [S1]. Let the sorted order be $k=1$ to $M$, where $k=1$ is the nearest block and $k=M$ is the farthest [S1].
+-2.  **Sequential Rendering:** Render each block $k$ sequentially using its dedicated shader [S1].
+-    *   The shader for block $k$ samples the volume data specific to that block [S1].
+-    *   The shader outputs the accumulated color $c_k$ and opacity $\alpha_k$ contributed by that block along the ray [S1].
+-3.  **Accumulation:** Combine the results from all blocks using front-to-back compositing to ensure correct occlusion [S1].
+-
+-**Formula:**
+-The final composite color $C_r$ is calculated as [S1]:
++1.  **Depth Sorting:** Sort all $M$ scene blocks relative to the camera viewpoint to determine the rendering order from back to front [S1].
++2.  **Sequential Rendering:** Iterate through the sorted blocks. For each block $k$:
++    *   Activate the dedicated shader for block $k$ [S1].
++    *   Render the block to obtain its local color $c_k$ and opacity $\alpha_k$ [S1].
++    *   Store $c_k$ and $\alpha_k$ for accumulation [S1].
++3.  **Accumulation:** Combine the results using the volume rendering equation [S1]:
+ 
+ $$
+-C_r = \sum_{k=1}^{M} \left( 1 - \prod_{j=1}^{k-1} \alpha_j \right) c_k
++C_r = \sum_{k=1}^{M} \left( \prod_{j=1}^{k-1} (1 - \alpha_j) \right) c_k
+ $$
+ 
+ Where:
++*   $C_r$ is the final composite color [S1].
+ *   $M$ is the total number of blocks [S1].
+ *   $c_k$ is the color output by the shader for block $k$ [S1].
+ *   $\alpha_k$ is the opacity output by the shader for block $k$ [S1].
+-*   The term $\prod_{j=1}^{k-1} \alpha_j$ represents the transmittance from all preceding (closer) blocks [S1].
++*   The term $\prod_{j=1}^{k-1} (1 - \alpha_j)$ represents the transmittance from all preceding blocks $j < k$ [S1].
+ 
+ **Parameters:**
+ *   **Texture Unit Limit:** Typically no more than 16 texture units can be loaded into a single web shader [S1]. This constraint necessitates the separation of blocks into different shaders [S1].
+ 
+-**Pitfalls:**
+-*   **Web Platform Limits:** Standard web shaders cannot load all block resources simultaneously due to the ~16 texture unit limit [S1].
+-*   **3D Consistency Break:** Using different shaders per block breaks standard volume rendering because sampling points across a ray may belong to different blocks/shaders, leading to incorrect occlusion if not handled via sequential accumulation [S1].
+-*   **Memory Usage:** Loading all blocks for rendering at high altitudes is impractical due to excessive memory usage on consumer devices [S1].
+-
+-**Pseudocode:**
+-```python
+-def block_based_volume_rendering(blocks, camera):
+-    """
+-    Renders a scene partitioned into blocks using sequential block rendering.
+-    
+-    Args:
+-        blocks: List of block objects, each containing a shader and spatial bounds.
+-        camera: Camera object with position and ray generation capability.
+-        
+-    Returns:
+-        C_r: Final composite color.
+-    """
+-    # Step 1: Depth-sort blocks relative to camera
+-    # Sort blocks such that block[0] is nearest to camera
+-    sorted_blocks = sort_blocks_by_depth(blocks, camera.position)
+-    
+-    # Initialize transmittance (amount of light not yet absorbed/scattered)
+-    transmittance = 1.0
+-    C_r = [0.0, 0.0, 0.0]  # Final color vector
+-    
+-    # Step 2 & 3: Sequential rendering and accumulation
+-    for k, block in enumerate(sorted_blocks):
+-        # Generate ray for current pixel/viewpoint
+-        ray = camera.generate_ray()
+-        
+-        # Intersect ray with current block's bounds
+-        intersection = ray.intersect_block(block)
+-        
+-        if intersection is None:
+-            continue
+-            
+-        # Step 2: Render block using its dedicated shader
+-        # The shader samples the specific volume data for this block
+-        # and returns color c_k and opacity alpha_k for the segment
+-        c_k, alpha_k = block.shader.render(ray, intersection)
+-        
+-        # Step 3: Accumulate result
+-        # Contribution = Transmittance * (1 - Opacity) * Color
+-        # Note: The formula in source is C_r = sum( (1 - prod(alpha_j)) * c_k )
+-        # This is equivalent to standard front-to-back:
+-        # contribution = transmittance * c_k
+-        # transmittance *= (1 - alpha_k)
+-        
+-        # However, the source formula explicitly defines c_k as the color 
+-        # output by the shader. In standard volume rendering, c_k usually 
+-        # includes the density integration. If c_k is the "color contribution" 
+-        # of the block (sigma * c * exp(-sigma * t)), then:
+-        
+-        contribution = transmittance * c_k
+-        C_r += contribution
+-        transmittance *= (1.0 - alpha_k)
+-        
+-        # Early exit if fully opaque
+-        if transmittance < 1e-6:
+-            break
+-            
+-    return C_r
+-```
+-[G] The pseudocode implements the standard front-to-back accumulation logic implied by the source formula. The source formula $C_r = \sum_{k=1}^{M} (1 - \prod_{j=1}^{k-1} \alpha_j) c_k$ assumes $c_k$ is the color contribution of block $k$ weighted by the transmittance from previous blocks. The code explicitly tracks `transmittance` to match this. If $c_k$ were the raw sample color, the formula would differ. Given the context of "shader outputting color $c_k$", it is treated as the block's integrated color contribution.
++**Edge Cases and Pitfalls:**
++*   **Web Platform Limits:** Web platforms limit texture units to ~16, preventing loading all block resources into a single shader [S1].
++*   **3D Consistency:** Using different shaders per block breaks standard volume rendering because sampling points across a ray may belong to different blocks/shaders [S1]. This method ensures correctness by rendering sequentially and combining results [S1].
++*   **Memory Usage:** Loading all blocks for rendering is impractical due to excessive memory usage on standard consumer devices [S1].
+ 
+ ## Subtopics
+ 
+ ### [Training Pipeline Consistency](13141-training-pipeline-consistency.md)
+-A strategy to minimize the gap between training and rendering by using the same block-based volume rendering pipeline during training as in the final rendering stage.
++Training Pipeline Consistency is a strategy to minimize the discrepancy between the training and inference phases of block-based volume rendering by enforcing the identical rendering pipeline during both stages. It solves the problem where training with a continuous, global coordinate system leads to artifacts or quality degradation when the model is deployed in a constrained, block-based rendering environment. It sets itself apart from standard neural rendering methods by explicitly simulating the discrete, hardware-bound constraints of the target rendering hardware (such as texture unit limits and quantization) during the optimization process.
+ 
+ ### [Patch-based Volume Rendering](13945-patch-based-volume-rendering.md)
+-A memory-saving rendering strategy for high-resolution volumes that splits the spatial dimensions into overlapping patches, renders them independently, and merges the results to scale to arbitrary image resolutions.
++A memory-saving rendering strategy for high-resolution volumes that splits the spatial dimensions into overlapping patches, renders them independently, and merges the results to scale to arbitrary image resolutions. Unlike full-volume rendering which requires memory proportional to $H \times W$, the patch-based approach trades redundant computation in overlapping regions for drastically reduced memory footprint, enabling scaling to arbitrary resolutions.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of blocks $M$ and the number of rays, as each block must be processed sequentially per ray [S1].
+-*   **Memory Complexity:** Reduced per-shader memory footprint, as each shader only loads resources for one block [S1]. However, total memory usage can still be high if all blocks are loaded simultaneously (e.g., at high altitudes) [S1].
++*   **Time Complexity:** Linear with respect to the number of blocks $M$ for the sorting and accumulation steps, plus the cost of rendering each block [S1].
++*   **Memory Complexity:** Proportional to the number of active blocks loaded into shaders, constrained by the texture unit limit (typically 16) [S1].
+ *   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Supports dynamic loading of resources via Level-of-Detail (LOD) to manage memory on consumer devices [S1].
+-*   **Strengths:** Enables rendering of large-scale scenes on web platforms with strict texture unit limits [S1]. Maintains 3D consistency and correct occlusion [S1].
+-*   **Limitations:** Sequential rendering may introduce overhead compared to unified shader approaches [S1]. Memory usage can exceed consumer device capacity if all blocks are loaded [S1].
+-*   **When to use:** When rendering large scenes on web platforms where texture unit limits prevent loading all data into a single shader [S1].
+-*   **When not:** When real-time performance is critical and the overhead of sequential shader switching is prohibitive, or when sufficient GPU memory exists to load all blocks into a single shader [S1].
++*   **Scaling:** Supports dynamic loading of resources via Level-of-Detail (LOD) generation to handle large scenes on consumer devices [S1].
++*   **Strengths:** Enables rendering of large-scale scenes on web platforms with limited texture unit resources [S1]. Ensures correct occlusion and 3D consistency [S1].
++*   **Limitations:** Requires sequential rendering, which may be slower than parallel approaches if not optimized [S1]. Limited by the number of texture units available per shader [S1].
++*   **When to use:** When rendering large scenes on web platforms with strict texture unit limits [S1].
++*   **When not:** When high parallelism is required and texture unit limits are not a constraint [S1].
+ 
+ ## Background
+-Originated in the "City-on-Web" paper, which addresses real-time neural rendering of large-scale scenes on the web [S1]. The method was developed to overcome specific web platform constraints, particularly the limit of ~16 texture units per shader [S1]. It draws inspiration from traditional graphics techniques for Level-of-Detail (LOD) generation [S1].
++Originated in the "City-on-Web" paper [S1]. The method addresses challenges associated with resource-independent block-based rendering on the web, specifically the limitation on the number and resolution of texture units that can be loaded into a shader [S1]. It draws inspiration from traditional graphics techniques for Level-of-Detail (LOD) generation [S1].
+ 
+ ## Sources

@@ -1,0 +1,412 @@
+# What this is
+This is an attempt to use neural ode instead of quadrature for NeRF.
+
+# Get Fern Data
+You can just run `cd nerf && sh ./download_example_data.sh && cd ..`, which should download all the necessary data for the fern scene.
+
+# PyCall Python Environment Setup
+Make sure your `PYTHON` environment variable is set to the version of python with necessary dependencies to run `nerf/load_llff.py`.
+If you're not sure what to install, you can see `nerf/README.md` for instructions on how to set up a conda environment to run all the NeRF code.
+
+### helpers.jl
+```
+function reverse_dims(A::AbstractArray)
+    n = length(size(A))
+    permutedims(A, n:-1:1)
+end
+```
+
+### main.jl
+```
+# %%
+# constants config
+llff_hold = 8; # size of holdout/test set
+batchsize = 4096
+
+# %%
+using CUDA
+using Printf
+using DifferentialEquations, DiffEqFlux
+using Pipe: @pipe
+using Flux
+using Flux.Data: DataLoader
+using DiffEqFlux, DifferentialEquations
+
+include("helpers.jl")
+include("render.jl")
+include("pymodules.jl")
+include("model.jl")
+
+CUDA.allowscalar(false)
+
+# %%
+images, poses, bounds, render_poses, i_test = PyModules.load_llff.load_llff_data(
+    "nerf/data/nerf_llff_data/fern/",
+    8;
+    recenter = true,
+    bd_factor = 0.75,
+    spherify = false,
+);
+images, poses, bounds, render_poses = reverse_dims(images),
+reverse_dims(poses),
+reverse_dims(bounds),
+reverse_dims(render_poses);
+
+hwf = poses[end, :, 1]; # height, width, focal length
+poses = poses[1:4, :, :]; # camera-to-world
+i_test = [convert(Integer, i_test)];
+i_test = collect(1:(size(images)|>last))[1:llff_hold];
+i_train = [i for i in 1:(size(images)|>last) if !(i in i_test)];
+
+# not really necessary since we still get a float vector out...
+near, far = 0.0f0, 1.0f0;
+H, W, f = hwf;
+H, W = convert(Integer, H), convert(Integer, W);
+hwf = [H, W, f];
+
+train_poses = poses[:, :, i_train];
+test_poses = poses[:, :, i_test];
+
+train_images = images[:, :, :, i_train];
+test_images = images[:, :, :, i_test];
+
+# %%
+get_features(c2w) = get_features(H, W, f, c2w, near, far)
+train_ray_features =
+    @pipe train_poses |> mapslices(get_features, _, dims = [1, 2]) |> reshape(_, 11, :);
+train_rgb = reshape(train_images, 3, :);
+train_dataloader = DataLoader(
+    (raw_to_state_space(train_ray_features), train_rgb);
+    batchsize = batchsize,
+    shuffle = true,
+);
+
+# %%
+# define nn
+
+nn = NeRFNODE(10, 4) |> gpu;
+nn_ode =
+    NeuralODE(
+        nn,
+        (0.0f0, 1.0f0),
+        Tsit5(),
+        save_everystep = false,
+        reltol = 1e-3,
+        abstol = 1e-3,
+        save_start = false,
+    ) |> gpu;
+
+model = Chain(
+    nn_ode,
+    x -> x.u[end], # get final timestep
+    x -> view(x, 13:15, :), # get rgb only
+) |> gpu;
+
+loss(x, y) = sum((model(x) .- y) .^ 2);
+opt = Flux.Optimiser(ExpDecay(1, 0.1, 250 * 1000), ADAM(5e-4, (0.9, 0.999)));
+params = Flux.params(model);
+
+# %%
+iter = 0
+
+cb() = begin
+    global iter += 1
+    if iter % 5 == 1
+        @printf("Iter: %3d", iter)
+    end
+    if iter == 20
+        Flux.stop()
+    end
+end
+Flux.train!(loss, params, CuIterator(train_dataloader), opt; cb = cb)
+
+# define a function that takes nn and outputs rgb
+# call train! with Flux.params(nn)
+
+# render_path -> render -> batchify_rays -> render_rays
+# render_path takes a sequence of camera poses
+# render is used for training
+# it takes either c2w poses to generate rays, or already generated rays
+# batchify rays renders rays in samller mini-batches to avoid OOM
+# render_rays does the actual hard lifting of rendering
+# it only takes ray minibatches
+```
+
+### model.jl
+```
+using Flux
+using Pipe: @pipe
+
+struct PositionalEncoder
+    L::Int
+end
+
+function (p::PositionalEncoder)(x)
+    i = Float32.(collect(0:p.L-1))
+    if isa(x, Union{CuArray,SubArray{Float32,U,V} where {U<:Any,V<:CuArray}})
+        i = i |> gpu
+    end
+    x = reshape(x, 1, size(x)...)
+    return cat(sin.(2.0f0 .^ i .* π .* x), cos.(2.0f0 .^ i .* π .* x); dims = 1)
+end
+
+
+flat(p::PositionalEncoder, x) =
+    reshape(p(x), 2 * p.L * prod(size(x)[1:end-1]), size(x)[end])
+
+struct Split{T}
+    paths::T
+end
+
+Split(paths...) = Split(paths)
+
+Flux.@functor Split
+
+(m::Split)(x::AbstractArray) = tuple(map(f -> f(x), m.paths))
+
+struct NeRFNet
+    trunk::Any
+    head::Any
+end
+
+# TODO make input shapes dependent on L_o and L_d
+function NeRFNet(L_o::Int, L_d::Int)
+    o_encoder = PositionalEncoder(L_o)
+    d_encoder = PositionalEncoder(L_d)
+    γ_o(x) = flat(o_encoder, x)
+    γ_d(x) = flat(d_encoder, x)
+    trunk = Chain(
+        Parallel(
+            vcat,
+            γ_o,
+            Chain(γ_o, Dense(60, 256, relu), [Dense(256, 256, relu) for i = 1:4]...),
+        ),
+        Dense(316, 256, relu),
+        Dense(256, 256, relu),
+        Dense(256, 256, relu),
+        Dense(256, 256),
+        Split(Dense(256, 1, sigmoid), (x) -> x),
+    )
+    rgb_head =
+        Chain(Parallel(vcat, γ_d, x -> x), Dense(280, 128, relu), Dense(128, 3, sigmoid))
+    return NeRFNet(trunk, rgb_head)
+end
+
+Flux.@functor NeRFNet
+
+
+function (nn::NeRFNet)(x, d)
+    σ, h = nn.trunk(x)[1]
+    rgb = nn.head((d, h))
+    return σ, rgb
+end
+
+
+struct NeRFNODE
+    nn::NeRFNet
+end
+
+NeRFNODE(L_o::Int, L_d::Int) = NeRFNODE(NeRFNet(L_o, L_d))
+
+Flux.@functor NeRFNODE
+
+function (nnode::NeRFNODE)(x)
+    p, d, viewdir, near, far, C, T = view(x, 1:3, :),
+    view(x, 4:6, :),
+    view(x, 7:9, :),
+    view(x, 10, :) |> permutedims,
+    view(x, 11, :) |> permutedims,
+    view(x, 12, :) |> permutedims,
+    view(x, 13:15, :)
+    dpdt = (far .- near) .* d
+    dddt = @pipe similar(d) |> fill!(_, 0)
+    dviewdirdt = @pipe similar(viewdir) |> fill!(_, 0)
+    dneardt = @pipe similar(near) |> fill!(_, 0)
+    dfardt = @pipe similar(far) |> fill!(_, 0)
+    σ, rgb = nnode.nn(p, viewdir)
+    dCdt = exp.(-T) .* σ .* rgb
+    dTdt = σ
+    return cat(dpdt, dddt, dviewdirdt, dneardt, dfardt, dCdt, dTdt; dims = 1)
+end
+
+function raw_to_state_space(x)
+    bs = size(x)[end]
+    CTinitial = similar(x, (4, bs))
+    fill!(CTinitial, 0)
+    return cat(x, CTinitial; dims = 1)
+end
+```
+
+### pymodules.jl
+```
+module PyModules
+using PyCall
+function __init__()
+    py"""
+    import sys
+    """
+
+    py"""sys.path.append"""(joinpath(@__DIR__, "nerf"))
+
+    global load_llff = pyimport("load_llff")
+    global run_nerf_helpers = pyimport("run_nerf_helpers")
+    global run_nerf = pyimport("run_nerf")
+end
+end
+```
+
+### render.jl
+```
+function get_rays(H::Integer, W::Integer, focal, c2w::AbstractMatrix)
+    i, j = Float32[i for i = 1:W, j = 1:H], Float32[j for i = 1:W, j = 1:H]
+    dirs = cat(
+        reshape((i .- W .* 0.5f0) ./ focal, 1, size(i)...),
+        reshape(-(j .- H .* 0.5f0) ./ focal, 1, size(j)...),
+        reshape([-1.0f0 for _ in i], 1, size(i)...);
+        dims = 1,
+    ) # 3 x W x H
+    rays_d =
+        sum(reshape(dirs, size(dirs)[1], 1, size(dirs)[2:end]...) .* c2w[1:3, :], dims = 1) # 3 x W x H
+    rays_d = reshape(rays_d, size(rays_d)[2:end])
+    rays_o = repeat(c2w[end, :], 1, W, H)
+    rays_o, rays_d
+end
+
+# TODO make this parametric? Float32 vs Float64
+function ndc_rays(H, W, focal, near, rays_o::AbstractArray, rays_d::AbstractArray)
+    # Shift rays to near plane
+    t = -(near .+ rays_o[3, :]) ./ rays_d[3, :] # 1 x N
+    rays_o = rays_o .+ reshape(t, 1, :) .* rays_d # 3 x N
+
+    # Project onto NDC coordinates
+    o_x, o_y, o_z =
+        selectdim(rays_o, 1, 1), selectdim(rays_o, 1, 2), selectdim(rays_o, 1, 3)
+    d_x, d_y, d_z =
+        selectdim(rays_d, 1, 1), selectdim(rays_d, 1, 2), selectdim(rays_d, 1, 3)
+
+    o1 = -focal ./ (W * 0.5f0) .* o_x ./ o_z
+    o2 = -focal ./ (H * 0.5f0) .* o_y ./ o_z
+    o3 = 1 .+ 2 .* near ./ o_z
+
+    d1 = -focal ./ (W * 0.5f0) .* (d_x ./ d_z .- o_x ./ o_z)
+    d2 = -focal ./ (H * 0.5f0) .* (d_y ./ d_z .- o_y ./ o_z)
+    d3 = -2.0f0 .* near ./ o_z
+
+    o_prime = cat(
+        reshape(o1, 1, size(o1)...),
+        reshape(o2, 1, size(o2)...),
+        reshape(o3, 1, size(o3)...);
+        dims = 1,
+    )
+    d_prime = cat(
+        reshape(d1, 1, size(d1)...),
+        reshape(d2, 1, size(d2)...),
+        reshape(d3, 1, size(d3)...);
+        dims = 1,
+    )
+    return o_prime, d_prime
+end
+
+struct RenderResult
+    rgb::AbstractArray{T} where {T<:Real}
+    disparity::AbstractArray{U} where {U<:Real}
+    function RenderResult(rgb, disparity)
+        if size(rgb, 1) != 3
+            error("rgb first dim must be 3.")
+        end
+        if size(rgb)[2:end] != size(disparity)
+            error("rgb and disparity must match on the last dimensions.")
+        end
+        return new(rgb, disparity)
+    end
+end
+
+function combine_render_results(render_results::Vector{RenderResult})
+    d = size(render_results[1].rgb) |> length
+    return RenderResult(
+        cat((rr.rgb for rr in render_results)...; dims = d),
+        cat((rr.disparity for rr in render_results)...; dims = d - 1),
+    )
+end
+
+function render_rays(rays::AbstractMatrix{T}) where {T<:Real} # rays is 8(or 11 with viewdir) x n
+    # rays_o, rays_d, view_dir, near, far
+end
+
+function batch_render_rays(rays::AbstractMatrix{T}, chunksize; kwargs...) where {T<:Real}
+    render_results = Vector{RenderResult}()
+    n = last(size(rays))
+    for i = 1:chunksize:n
+        rays_batch = rays[:, i:min(i + chunksize, n)]
+        render_result = render_rays(rays_batch, kwargs...)
+        push!(render_results, render_result)
+    end
+    return combine_render_results(render_results)
+end
+
+
+function get_features(H, W, focal, c2w, near, far; ndc = true)
+    rays_o, rays_d = get_rays(H, W, focal, c2w)
+    rays_o, rays_d = reshape(rays_o, 3, :), reshape(rays_d, 3, :)
+    if ndc
+        rays_o, rays_d = ndc_rays(H, W, focal, 1.0f0, rays_o, rays_d)
+    end
+    n = size(rays_d) |> last
+    rays = cat(rays_o, rays_d, rays_d, fill(near, 1, n), fill(far, 1, n); dims = 1)
+    return rays
+end
+
+function get_features(H, W, focal, c2w, c2w_staticcam, near, far; ndc = true)
+    rays = get_features(H, W, focal, c2w, near, far; ndc = ndc)
+    viewdirs = rays[4:6, :]
+    rays_o, rays_d = get_rays(H, W, focal, c2w_staticcam)
+    rays_o, rays_d = reshape(rays_o, 3, :), reshape(rays_d, 3, :)
+    rays[1:3], rays[4:6], rays[7:9] = rays_o, rays_d, viewdirs
+    return rays
+end
+
+function render(
+    H,
+    W,
+    focal,
+    c2w::AbstractMatrix{T},
+    c2w_staticcam::AbstractMatrix{T};
+    near = 0,
+    far = 1,
+    ndc = true,
+    chunksize = 1024 * 32,
+    kwargs...,
+) where {T<:Real}
+    rays = get_features(H, W, focal, c2w, c2w_staticcam, near, far; ndc = ndc)
+    return render(rays; chunksize = chunksize, kwargs...)
+end
+
+function render(
+    H,
+    W,
+    focal,
+    c2w::AbstractMatrix{T};
+    near = 0,
+    far = 1,
+    ndc = true,
+    chunksize = 1024 * 32,
+    kwargs...,
+) where {T<:Real}
+    rays = get_features(H, W, focal, c2w, near, far; ndc = ndc)
+    return render(rays; chunksize = chunksize, kwargs...)
+end
+
+render(rays; chunksize = 1024 * 32, kwargs...) =
+    batch_render_rays(rays, chunksize; kwargs...)
+```
+
+### volume_render_proto.jl
+```
+# %%
+# use augmented ODE [C(r(t)), T(t)]
+using DiffEqFlux
+
+using DifferentialEquations
+
+# %%
+```

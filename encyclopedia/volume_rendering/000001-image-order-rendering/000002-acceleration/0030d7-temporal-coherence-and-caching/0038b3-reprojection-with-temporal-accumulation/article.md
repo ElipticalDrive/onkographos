@@ -1,0 +1,141 @@
+# Reprojection with Temporal Accumulation
+
+Also called: Temporal Anti-Aliasing (TAA) via reprojection
+
+## Overview
+Reprojection with Temporal Accumulation stabilizes voxel and volume rendering over time by blending the current frame's color with an accumulated color buffer from the previous frame, using camera motion vectors to align pixels [S1, unofficial]. It sets itself apart from sibling methods by operating directly on the final radiance image in screen space, leveraging temporal coherence to reduce noise and aliasing without requiring per-voxel state caching or complex model coefficient tracking [S1, unofficial][S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Current frame color (`colour_attachment`), current frame world position (`position_attachment`), previous frame accumulated color (`accumulation_attachment`), camera transformation matrices (`trace_uniforms.last_camera`), and control uniforms (`reprojection_factor`, `indirect_lighting`) [S1, unofficial].
+*   **Outputs:** Final output color for the current pixel [S1, unofficial].
+
+**Data Structures:**
+*   `colour_attachment`: `texture_2d<f32>`, binding 3. Stores the current frame's computed color [S1, unofficial].
+*   `position_attachment`: `texture_storage_2d<rgba32float, read_write>`, binding 3. Stores the world-space position for each pixel, used for reprojection [S1, unofficial].
+*   `accumulation_attachment`: `texture_storage_2d<rgba16float, read_write>`, binding 1. Stores the temporally accumulated color from previous frames [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Load Current State:** Read the current frame's color $C_{curr}$ from `colour_attachment` at sample position $(u, v)$ and the world position $P_{curr}$ from `position_attachment` at $(u, v)$ [S1, unofficial].
+2.  **Check Reprojection Conditions:** If `indirect_lighting` is zero or `reprojection_factor` $\le 0.0$, skip reprojection and output $C_{curr}$ directly [S1, unofficial].
+3.  **Compute Local Bounds (Edge Detection):** To prevent ghosting across edges, compute local color bounds using $C_{curr}$ and its 8 immediate neighbors ($C_0$ to $C_8$) in a 3x3 grid [S1, unofficial].
+    *   Calculate the 'plus' bounds (cross pattern: center, top, bottom, left, right) and 'square' bounds (full 3x3) [S1, unofficial].
+    *   Compute $C_{min}$ and $C_{max}$ as the average of the minimums and maximums of the 'plus' and 'square' bounds respectively [S1, unofficial].
+4.  **Reproject Position:** Transform $P_{curr}$ into the previous frame's clip space using `trace_uniforms.last_camera` [S1, unofficial].
+5.  **Convert to Texture Coordinates:** Convert the clip space coordinates to Normalized Device Coordinates (NDC) range $[-1, 1]$, then map to texture coordinates $(u_{prev}, v_{prev})$ for the `accumulation_attachment` [S1, unofficial].
+6.  **Validate Projection:** If the projected coordinates are outside the NDC range $[-1, 1]$ (indicating the pixel is newly visible or occluded), the history sample is invalid. Skip blending and output $C_{curr}$ [S1, unofficial].
+7.  **Fetch History:** Load the accumulated color $C_{hist}$ from `accumulation_attachment` at $(u_{prev}, v_{prev})$ [S1, unofficial].
+8.  **Blend:** Compute the mixed color $C_{mix}$ using the `reprojection_factor` $\alpha$:
+    $$ C_{mix} = C_{curr} \cdot (1.0 - \alpha) + C_{hist} \cdot \alpha $$
+    [S1, unofficial]
+9.  **Clamp:** Clamp $C_{mix}$ to the local bounds $[C_{min}, C_{max}]$ to prevent bleeding across high-frequency details or edges [S1, unofficial].
+10. **Output:** Return $C_{mix}$ as the final color [S1, unofficial].
+
+**Accumulation Step:**
+After the reprojection pass, a separate accumulation shader stores the final output color of the current frame into `accumulation_attachment` for use in the next frame [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def reprojection_pass(u, v, colour_attachment, position_attachment, accumulation_attachment, last_camera, reprojection_factor, indirect_lighting):
+    # 1. Load current state
+    C_curr = colour_attachment[u, v]
+    P_curr = position_attachment[u, v]
+    
+    # 2. Check conditions
+    if indirect_lighting == 0 or reprojection_factor <= 0.0:
+        return C_curr
+    
+    # 3. Compute local bounds
+    # Get 3x3 neighborhood colors
+    neighbors = [colour_attachment[u+du, v+dv] for du in [-1, 0, 1] for dv in [-1, 0, 1]]
+    
+    # Plus pattern indices: center(4), top(1), bottom(7), left(3), right(5)
+    plus_indices = [4, 1, 7, 3, 5]
+    square_indices = [0, 1, 2, 3, 4, 5, 6, 7, 8]
+    
+    plus_min = min(neighbors[i] for i in plus_indices)
+    plus_max = max(neighbors[i] for i in plus_indices)
+    square_min = min(neighbors[i] for i in square_indices)
+    square_max = max(neighbors[i] for i in square_indices)
+    
+    C_min = (plus_min + square_min) / 2.0
+    C_max = (plus_max + square_max) / 2.0
+    
+    # 4. Reproject position
+    # Transform P_curr to previous frame clip space
+    P_clip = last_camera.transform_point(P_curr)
+    
+    # 5. Convert to NDC and texture coordinates
+    # Assuming perspective projection, divide by w
+    if P_clip.w == 0:
+        return C_curr
+        
+    ndc_x = P_clip.x / P_clip.w
+    ndc_y = P_clip.y / P_clip.w
+    
+    # Map NDC [-1, 1] to texture coordinates [0, 1]
+    u_prev = (ndc_x + 1.0) / 2.0
+    v_prev = (ndc_y + 1.0) / 2.0
+    
+    # 6. Validate projection
+    if not (0.0 <= u_prev <= 1.0 and 0.0 <= v_prev <= 1.0):
+        return C_curr
+        
+    # 7. Fetch history
+    C_hist = accumulation_attachment[u_prev, v_prev]
+    
+    # 8. Blend
+    alpha = reprojection_factor
+    C_mix = C_curr * (1.0 - alpha) + C_hist * alpha
+    
+    # 9. Clamp to local bounds
+    C_final = clamp(C_mix, C_min, C_max)
+    
+    # 10. Output
+    return C_final
+
+def accumulation_pass(u, v, output_color, accumulation_attachment):
+    accumulation_attachment[u, v] = output_color
+```
+
+**Parameters:**
+*   `reprojection_factor`: Float uniform controlling the blend weight between current and accumulated frames. Typical values are between 0.0 and 1.0. If $\le 0.0$, reprojection is skipped [S1, unofficial].
+*   `indirect_lighting`: Unsigned integer uniform. Reprojection is only performed if this value is non-zero [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Invalid Projection:** If the projected previous position is outside the NDC range $[-1, 1]$, the pixel is considered invalid (e.g., newly visible or occluded) and must not be blended with the accumulation buffer to avoid ghosting [S1, unofficial].
+*   **Edge Bleeding:** Without local bound clamping, blending across object boundaries causes "ghosting" artifacts where colors from adjacent objects bleed into each other over time [S1, unofficial][S2].
+
+## Subtopics
+
+### [Temporal Reprojection for Linear Models](11484-temporal-reprojection-for-linear-models.md)
+Temporal Reprojection for Linear Models exploits temporal coherence by reprojecting linear model coefficients and features rather than raw pixel colors, allowing the model to react immediately to abrupt changes in camera, light, or transfer functions. Unlike standard temporal reprojection which caches constant values per pixel, this method uses linear regression to predict gradual changes while maintaining robustness against sudden shading variations, thereby avoiding the need for Monte Carlo (MC) integration resets.
+
+### [Temporal Gradient Denoising](15080-temporal-gradient-denoising.md)
+Temporal Gradient Denoising is a technique that reduces noise in volume rendering by applying temporal reprojection and blending to gradient images rather than the final radiance image. It solves the problem of high noise levels in Monte Carlo volume rendering, particularly in high-order scattering-dominant media, while avoiding the visible bias and artifacts that occur when denoising the original image directly. It sets itself apart from standard temporal accumulation by operating on the derivative of the radiance with respect to a source parameter (albedo), leveraging the fact that denoising artifacts in the gradient domain are not directly visible in the final color.
+
+### Alpha-Max Quasi-Depth Motion Vector
+Alpha-Max Quasi-Depth Motion Vector is a method to compute screen-space motion vectors for direct volume rendering (DVR) by using the 3D position of the point with maximum alpha along the ray as a proxy for depth, enabling temporal reprojection despite the lack of a single surface depth value [S2]. For each pixel at current frame coordinates $(u, v)$, it identifies the point $p$ in world space where the alpha value is maximum along the ray passing through the volume. It then reprojects $p$ back to the previous frame's coordinate system using previous camera transformation matrices to obtain coordinates $(u', v')$. The screen-space motion vector is calculated as the difference between $(u, v)$ and $(u', v')$. This heuristic provides an acceptable approximation for motion vector estimation because the point of maximum alpha has the maximum contribution to the final accumulated sample [S2].
+
+### Frame Averaging at Rest
+Frame Averaging at Rest is a post-processing technique where, when the camera stops, consecutive frames are averaged with tiny sub-pixel offsets so the image settles into a clean still [S3, unofficial]. It involves detecting camera stop and then averaging frames with tiny sub-pixel offsets to refine the image quality during static periods [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per pixel per frame, as it involves a constant number of texture lookups, arithmetic operations, and a single matrix transformation per pixel [S1, unofficial].
+*   **Memory Complexity:** $O(W \times H)$ for the accumulation buffer, where $W$ and $H$ are the screen dimensions. The `accumulation_attachment` typically uses `rgba16float` to balance precision and memory usage [S1, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Performance scales linearly with screen resolution. The method is highly parallelizable on GPUs due to its per-pixel nature [S1, unofficial].
+*   **Strengths:** Effectively reduces temporal noise and aliasing; simple to implement as a post-processing pass; robust against minor camera jitter [S1, unofficial][S2].
+*   **Limitations:** Prone to ghosting artifacts if motion vectors are inaccurate or if objects move rapidly; requires accurate position buffers for reprojection; clamping can introduce slight blurring at edges [S1, unofficial][S2].
+*   **When to Use:** Real-time volume rendering where temporal stability is desired and camera motion is relatively smooth [S1, unofficial][S2].
+*   **When Not to Use:** Scenes with rapid, large-scale object movement or significant disocclusions where ghosting is unacceptable without complex history management [S2].
+
+## Background
+Reprojection with Temporal Accumulation is a technique used in voxel and volume rendering to stabilize images over time. It is closely related to Temporal Anti-Aliasing (TAA) used in rasterization [S1, unofficial][S2]. The method leverages the correlation between consecutive frames to reduce noise and improve visual quality. Variants such as Alpha-Max Quasi-Depth Motion Vector address specific challenges in volume rendering, such as the lack of a single depth value [S2]. Frame Averaging at Rest is used in progressive loading scenarios to refine static images [S3, unofficial].
+
+## Sources
+[S1] ria8651/bevy-voxel-engine, https://github.com/ria8651/bevy-voxel-engine, fetched 2026-10-27 (unofficial)
+[S2] Deep Learning Based Super-Resolution for Medical Volume Visualization with Direct Volume Rendering, https://doi.org/10.1007/978-3-031-20713-6_8, fetched 2026-10-26
+[S3] Volume rendering: progressive multiscale loading, sorted compositing, lighting and more from a histotomography fork (2.8 TB volume @ 16bits) - what, if anything, would be worth upstreaming?, https://github.com/google/neuroglancer/issues/1134, fetched 2026-10-26 (unofficial)

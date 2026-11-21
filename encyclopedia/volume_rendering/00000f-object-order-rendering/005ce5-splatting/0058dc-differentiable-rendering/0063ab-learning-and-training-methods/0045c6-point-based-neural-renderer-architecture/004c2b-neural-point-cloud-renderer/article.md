@@ -1,0 +1,165 @@
+# Neural Point Cloud Renderer
+
+Also called: differentiable point cloud renderer, $\pi$
+
+## Overview
+The Neural Point Cloud Renderer ($\pi$) is a differentiable rendering module that projects a 3D point cloud and camera pose into a 2D feature map by splatting points and blending them via alpha-compositing [S1]. It solves the problem of generating geometrically consistent feature maps for novel view synthesis by allowing photometric and perceptual loss gradients to propagate back to point positions and features during end-to-end training [S1]. Unlike SynSin [82], which relies on a single input image, this method requires fusing multi-view inputs, rendering each point cloud individually at target viewpoints before fusion [S1].
+
+## How it works
+**Inputs:**
+*   A 3D point cloud $P_i$ containing points with 3D coordinates, features, and depths [S1].
+*   Camera pose $P$ defining the target view [S1].
+*   Parameters: Point radius $r$, number of nearest points $K$, output resolution, and feature dimension [S1].
+
+**Outputs:**
+*   Rendered feature map $\tilde{F}$ of shape $H \times W \times C$ (e.g., $150 \times 200 \times 64$) [S1].
+*   Rendered depth map $D$ of shape $H \times W$ [S1].
+
+**Data Structures:**
+*   **Point Cloud:** A list or tensor of points. Each point $x$ has a 3D position, a feature vector $F$, and a depth $d$ [S1].
+*   **Pixel:** Identified by index $l$. Invisible pixels are filled with 64-dimensional zeros [S1].
+
+**Parameters:**
+*   Point radius in NDC coordinates: $r = 1.5$ pixels [S1].
+*   Number of nearest points to blend per pixel: $K = 16$ [S1].
+*   Output feature map resolution: $150 \times 200$ pixels [S1].
+*   Feature dimension per pixel: $C = 64$ [S1].
+*   Blending weight clamp range: $[10^{-3}, 1.0]$ [S1].
+
+**Steps:**
+1.  **Transformation:** Transform the point cloud $P_i$ from world coordinates to the target view coordinates based on the camera pose $P$ [S1].
+2.  **Projection:** Project the 3D points to the 2D image plane to obtain their splatted centers [S1].
+3.  **Distance Calculation:** For each pixel $l$, compute the Euclidean distance $s$ between the pixel center and the splatted center of each 3D point $x$ [S1].
+4.  **Blending Weight Computation:** Compute the blending weight $\alpha$ for each point based on the distance $s$ and the point radius $r$ in NDC coordinates [S1].
+5.  **Sorting:** Sort the feasible points for each pixel by their depth values (z-buffer depths) [S1].
+6.  **Alpha-Compositing:** Blend the top $K$ nearest points using alpha-compositing to compute the rendered feature $F_l$ and depth $D_l$ for pixel $l$ [S1].
+7.  **Invisible Pixel Handling:** Fill pixels with no feasible points with 64-dimensional zeros [S1].
+
+**Formulas:**
+The blending weight $\alpha$ is computed as [S1]:
+$$
+\alpha = 1 - \text{clamp}\left(\frac{r^2}{s^2}, 10^{-3}, 1.0\right)
+$$
+where $s$ is the Euclidean distance between the splatted point center and the pixel, and $r$ is the point radius in NDC coordinates.
+
+The rendered feature $F_l$ for pixel $l$ is computed by blending the top $K$ points [S1]:
+$$
+F_l = \sum_{i=1}^{K} \alpha_i F_i \prod_{j=1}^{i-1} (1 - \alpha_j)
+$$
+where $F_i$ and $\alpha_i$ are the feature and blending weight of the $i$-th point (sorted by depth).
+
+The rendered depth $D_l$ for pixel $l$ is computed as [S1]:
+$$
+D_l = \sum_{i=1}^{K} \alpha_i d_i
+$$
+where $d_i$ is the depth of the $i$-th point.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def neural_point_cloud_renderer(points, camera_pose, K=16, r_ndc=1.5, 
+                                out_h=150, out_w=200, feat_dim=64):
+    """
+    Renders a point cloud to a feature map using differentiable splatting.
+    
+    Args:
+        points: Tensor of shape (N, 3 + feat_dim + 1) representing N points.
+                Columns: [x, y, z, f_1, ..., f_64, depth]
+        camera_pose: Camera extrinsics/intrinsics to transform points to view space.
+        K: Number of nearest points to blend per pixel.
+        r_ndc: Point radius in NDC coordinates.
+        out_h, out_w: Output image height and width.
+        feat_dim: Feature dimension per pixel.
+        
+    Returns:
+        rendered_features: Tensor of shape (out_h, out_w, feat_dim)
+        rendered_depth: Tensor of shape (out_h, out_w)
+    """
+    # 1. Transform and project points to target view coordinates [S1]
+    # [G] Apply camera extrinsics (rotation R, translation t) to get view coordinates,
+    # then apply perspective division and intrinsics to map to pixel coordinates.
+    view_coords = points[:, :3] @ camera_pose[:3, :3].T + camera_pose[:3, 3]
+    # Perspective projection to pixel space
+    x = view_coords[:, 0] / (view_coords[:, 2] + 1e-8) * camera_pose[0, 0] + camera_pose[0, 2]
+    y = view_coords[:, 1] / (view_coords[:, 2] + 1e-8) * camera_pose[1, 1] + camera_pose[1, 2]
+    z = view_coords[:, 2]
+    coords = torch.stack([x, y, z], dim=1)
+    
+    features = points[:, 3:3+feat_dim]
+    depths = points[:, -1]
+    
+    # 2. Initialize output tensors
+    rendered_features = torch.zeros(out_h, out_w, feat_dim, device=points.device)
+    rendered_depth = torch.zeros(out_h, out_w, device=points.device)
+    
+    # 3. Compute distances and weights for all points [S1]
+    y_grid, x_grid = torch.meshgrid(torch.arange(out_h), torch.arange(out_w), indexing='ij')
+    pixel_grid = torch.stack([x_grid, y_grid], dim=-1).float()
+    
+    # Euclidean distance squared between pixel centers and point splat centers
+    dist_sq = torch.sum((pixel_grid.unsqueeze(-2) - coords[:, :2].unsqueeze(0).unsqueeze(0))**2, dim=-1)
+    
+    # 4. Compute blending weights [S1]
+    r_sq = r_ndc ** 2
+    alpha = 1.0 - torch.clamp(r_sq / (dist_sq + 1e-8), min=1e-3, max=1.0)
+    
+    # 5. Sort points by depth for each pixel [S1]
+    sorted_depths, sorted_indices = torch.sort(depths.unsqueeze(0).unsqueeze(0), dim=-1)
+    top_k_indices = sorted_indices[..., :K]
+    
+    # Gather features and alphas based on sorted indices
+    idx_expanded = top_k_indices.unsqueeze(-1).expand(-1, -1, -1, feat_dim)
+    gathered_features = torch.gather(features.unsqueeze(0).unsqueeze(0), 2, idx_expanded)
+    gathered_alphas = torch.gather(alpha, 2, top_k_indices)
+    gathered_depths = torch.gather(sorted_depths, 2, top_k_indices)
+    
+    # 6. Alpha-compositing [S1]
+    one_minus_alpha = 1.0 - gathered_alphas
+    # Cumulative product of (1 - alpha) for j < i
+    cum_prod = torch.cat([torch.ones_like(one_minus_alpha[..., :1]), 
+                          torch.cumprod(one_minus_alpha[..., :-1], dim=-1)], dim=-1)
+    
+    weighted_features = gathered_alphas.unsqueeze(-1) * gathered_features * cum_prod.unsqueeze(-1)
+    rendered_features = torch.sum(weighted_features, dim=-2)
+    
+    weighted_depths = gathered_alphas * gathered_depths
+    rendered_depth = torch.sum(weighted_depths, dim=-1)
+    
+    return rendered_features, rendered_depth
+```
+
+**Edge Cases and Pitfalls:**
+*   **Invisible Pixels:** Pixels with no feasible points (no points within the blending radius or occluded) are filled with 64-dimensional zeros [S1].
+*   **Depth Inaccuracy:** Naive fusion of point clouds from multiple views is vulnerable to inaccurate depths, where points with wrong depths may occlude points from other views, leading to degraded results [S1]. This method avoids naive fusion by rendering each point cloud individually and fusing the results via a Transformer [S1].
+*   **Precision:** The blending weight is clamped to a minimum of $10^{-3}$ to prevent numerical instability when $s$ is very large or $r$ is small relative to $s$ [S1].
+
+## Subtopics
+
+### Direct rendering
+Renders Plenoptic Point Clouds (PPCs) by directly projecting occupied voxels visible in the viewing direction over each training viewpoint, using the same projection scheme as colorization [S2]. Unlike NeRF-like solutions that use ray-marching via the Volume Rendering equation, this method projects explicit occupied voxels [S2].
+
+### Neural Point Cloud Rendering
+Performs novel-view synthesis for canonical space using a neural point cloud representation [S3, unofficial]. The point cloud is structured as $P = \{(x_i, f_i, \gamma_i) \mid i = 1, \dots, N\}$, where each point $i$ has a location $x_i$, a neural feature $f_i$, and a scale confidence value $\gamma_i \in [0, 1]$ [S3, unofficial].
+
+### Point Cloud Inpainting via Gate/Sparse Convolution
+Treats rendering as an image inpainting problem using a U-Net backbone, replacing ordinary convolution with gate convolution (GateConv) and sparse convolution (SparseConv) to fill irregular holes [S4]. Directly inpainting sparse point cloud images generates blurry results compared to this method because the color of directly projected points differs from ground truth images due to view-dependent effects (e.g., specular highlights) and different exposure times [S4].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Fully differentiable, allowing end-to-end training with photometric and perceptual losses [S1]. Geometrically consistent across views due to explicit geometry transformation [S1].
+*   **Limitations:** Vulnerable to depth inaccuracies if not handled properly (mitigated by individual rendering and fusion) [S1]. Requires multi-view inputs [S1].
+*   **When to use:** When generating novel views from a constructed point cloud with multi-view inputs and requiring differentiable rendering for optimization [S1].
+*   **Implementation:** Pytorch3D [S1].
+
+## Background
+The Neural Point Cloud Renderer $\pi$ is introduced in the context of real-time novel view synthesis with forward warping and depth [S1]. It builds on the differentiable renderer design of SynSin [82] but extends it to handle multi-view inputs by rendering each point cloud individually and fusing the results [S1]. The method is implemented using Pytorch3D [S1].
+
+## Sources
+[S1] FWD: Real-time Novel View Synthesis with Forward Warping and Depth, https://doi.org/10.1109/cvpr52688.2022.01526, fetched 2026-10-29
+[S2] A Comparative Assessment Of Implicit and Explicit Plenoptic Scene Representations, https://inria.hal.science/hal-04709909v1, fetched 2026-10-26
+[S3] Point-Based Radiance Fields for Controllable Human Motion Synthesis, https://doi.org/10.48550/arXiv.2310.03375, fetched 2026-10-29 (unofficial)
+[S4] Neural Point Cloud Rendering via Multi-Plane Projection, https://doi.org/10.1109/cvpr42600.2020.00785, fetched 2026-10-30

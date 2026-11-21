@@ -1,0 +1,81 @@
+# Fast Sphere Rendering via Ray-Sphere Test
+Also called: Projected sphere rendering
+## Overview
+A method to render spheres using only their radii and centers, avoiding polygon tessellation. It renders a rectangular region tightly fitting the perspective-projected sphere on the screen and performs a ray-sphere intersection test in the fragment shader. It distinguishes itself from direct tessellation approaches by evaluating various proxy-based ray casting techniques (triangles, quads, geometry-shader-generated polygons) and adaptive vertex distribution methods [S1].
+## How it works
+**Inputs and Outputs:**
+- Input: Sphere center $\mathbf{c}$, sphere radius $r$, viewing ray origin $\mathbf{o}$, viewing ray direction $\mathbf{d}$.
+- Output: Fragment color or depth; fragment is discarded if no intersection.
+
+**Data Structures:**
+- Not given in the sources.
+
+**Steps:**
+1. In the vertex shader, specify the rectangular region that tightly fits the perspective-projected sphere on the screen [S1].
+2. For each fragment in this region, perform an intersection test for the viewing ray and the sphere in the fragment shader [S1].
+3. Discard the fragment if there is no intersection [S1].
+4. Render only the front or back face of the sphere, whichever is farther away from the previous intersection point, as depth peeling does not require both [S1].
+
+**Formulas:**
+- Ray-sphere intersection: Given ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ and sphere center $\mathbf{c}$ with radius $r$, solve for $t$ in $|\mathbf{o} + t\mathbf{d} - \mathbf{c}|^2 = r^2$.
+- Not given in the sources.
+
+**Parameters:**
+- Not given in the sources.
+
+**Edge cases and pitfalls:**
+- Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Vertex Shader
+def vertex_shader(sphere_center, sphere_radius, view_projection_matrix):
+    # Calculate the bounding box of the perspective-projected sphere
+    # This defines the rectangular region on the screen
+    projected_center = view_projection_matrix * sphere_center
+    projected_radius = sphere_radius * view_projection_matrix.scale_factor # [G] Approximation
+    return projected_center, projected_radius
+
+# Fragment Shader
+def fragment_shader(view_ray_origin, view_ray_direction, sphere_center, sphere_radius):
+    # Ray-Sphere Intersection Test
+    oc = view_ray_origin - sphere_center
+    a = dot(view_ray_direction, view_ray_direction)
+    b = 2.0 * dot(oc, view_ray_direction)
+    c = dot(oc, oc) - sphere_radius * sphere_radius
+    discriminant = b * b - 4 * a * c
+    
+    if discriminant < 0:
+        discard_fragment()
+    
+    sqrt_disc = sqrt(discriminant)
+    t1 = (-b - sqrt_disc) / (2 * a)
+    t2 = (-b + sqrt_disc) / (2 * a)
+    
+    # Determine which face to render based on depth peeling context
+    # Render only the front or back face, whichever is farther away from the previous intersection point
+    # [G] Assuming t1 is front face, t2 is back face relative to ray origin
+    # The specific logic for "farther away from previous intersection point" requires context from depth peeling loop
+    # For this isolated method, we assume standard front-face rendering or depth comparison
+    return t1, t2
+```
+## Subtopics
+
+### [Sphere Ray Casting Benchmark Methods](16508-sphere-ray-casting-benchmark-methods.md)
+This family characterizes scalability and performance for drawing spherical glyphs in 3D space using proxy geometry for pixel-perfect ray casting. It distinguishes itself from direct tessellation approaches by evaluating various proxy-based ray casting techniques (triangles, quads, geometry-shader-generated polygons) and adaptive vertex distribution methods.
+
+## Operating characteristics
+- Time complexity: Not given in the sources.
+- Memory complexity: Not given in the sources.
+- Measured performance: Not given in the sources.
+- Scaling: Not given in the sources.
+- Strengths and limitations: Avoids polygon tessellation, which can be expensive for large numbers of spheres [S1]. However, rendering effective spheres multiple times for depth peeling can become expensive for a large number of metaballs [S1].
+- When to use it and when not: Use when rendering a large number of spheres/metaballs where tessellation overhead is significant. Not suitable when precise polygonal representation is required or when depth peeling overhead is prohibitive.
+## Background
+- Origin: GPU-based Fast Ray Casting for a Large Number of Metaballs [S1].
+- History and development: The method is part of a broader approach to rendering metaballs using GPU-based ray casting, optimizing depth peeling and isosurface tests [S1].
+- Where it is used: Rendering metaballs and spherical glyphs in 3D space [S1].
+## Sources
+[S1] GPU‐based Fast Ray Casting for a Large Number of Metaballs, https://doi.org/10.1111/j.1467-8659.2008.01132.x, fetched 2026-11-01

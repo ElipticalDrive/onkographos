@@ -1,0 +1,169 @@
+# Sparse Voxel Octree Structure Encoding/Decoding
+
+
+## Overview
+Sparse Voxel Octree (SVO) Structure Encoding/Decoding refers to the CPU-side algorithms responsible for encoding and decoding the sparse voxel octree structure itself [S1, unofficial]. It finalizes the octree by padding empty voxels to match the maximum Morton code depth, writing the root node and header, and optionally compressing the output [S2, unofficial]. Unlike sibling methods that focus on attribute compression or file-system indexing, this method specifically handles the structural serialization and deserialization required to reconstruct the exact spatial hierarchy on the CPU [S1, S2, unofficial].
+
+## How it works
+### Inputs and Outputs
+*   **Input:** An in-memory Sparse Voxel Octree data structure, typically defined by a root node containing child pointers and a maximum depth (Morton code depth) [S1, unofficial].
+*   **Output:** A file or buffer containing the root node, header, and optionally compressed data [S2, unofficial].
+
+### Data Structures
+The structure relies on the implicit octree storage model where nodes are ordered by Morton codes [Parent].
+*   **Root Node:** Contains the top-level child pointers, referenced as `m_Children[0][0]` in the source implementation [S2, unofficial].
+*   **Header:** Stores metadata required for decoding, written after the root node [S2, unofficial].
+*   **Compression Type:** An enum or flag indicating whether the output stream should be compressed (e.g., `NONE` or other algorithms) [S2, unofficial].
+*   **Node Layout:** Not given in the sources.
+*   **Morton Code:** Not given in the sources.
+
+### Steps
+1.  **Finalization and Padding:** If the current Morton depth is less than the maximum Morton depth, call `FastAddEmptyVoxel` with a difference of +1 to pad empty voxels [S2, unofficial].
+2.  **Write Root Node:** Write the root node explicitly, typically accessing the first child pointer `m_Children[0][0]` [S2, unofficial].
+3.  **Write Header:** Write the structural header containing necessary metadata [S2, unofficial].
+4.  **Compression:** If the compression type is not `NONE`, call `CompressFileIncremental(true)` to compress the written data [S2, unofficial].
+5.  **Close:** Close the file or finalize the buffer [S2, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def encode_sparse_voxel_octree(root_node, max_morton_depth, compression_type):
+    # 1. Finalization: Pad empty voxels to max depth
+    if root_node.current_depth < max_morton_depth:
+        fast_add_empty_voxel(root_node, max_morton_depth, depth_difference=1)
+        
+    # 2. Write root node
+    write_root_node(root_node.m_Children[0][0])
+        
+    # 3. Write header
+    write_header(compression_type=compression_type)
+        
+    # 4. Compression
+    if compression_type != "NONE":
+        compress_file_incremental(is_final=True)
+            
+    # 5. Close
+    close_output_stream()
+
+def decode_sparse_voxel_octree(input_stream):
+    # 1. Read header
+    header = read_header(input_stream)
+        
+    # 2. Decompression
+    if header.compression_type != "NONE":
+        decompress_file_incremental(input_stream)
+            
+    # 3. Read root node
+    root_node = read_root_node(input_stream)
+        
+    # 4. Reconstruct tree
+    reconstruct_tree(root_node, input_stream)
+        
+    return root_node
+
+# Helper implementations
+def fast_add_empty_voxel(node, max_morton_depth, depth_difference):
+    # Recursively instantiate empty child nodes until the maximum Morton code depth is reached
+    while node.current_depth < max_morton_depth:
+        for i in range(8):
+            if not node.children[i]:
+                node.children[i] = Node(depth=node.current_depth + 1, is_empty=True)
+        node.current_depth += 1
+
+def write_root_node(child_ptr):
+    # Serialize the root node's child pointer and occupancy mask to the output buffer
+    pass
+
+def write_header(compression_type):
+    # Write a fixed-size metadata block containing the compression flag to the output buffer
+    pass
+
+def compress_file_incremental(is_final):
+    # Apply a streaming compression algorithm to the accumulated buffer
+    pass
+
+def close_output_stream():
+    # Flush pending data and close the file or buffer handle
+    pass
+
+def read_header(stream):
+    # Parse the fixed-size metadata block from the input stream
+    pass
+
+def decompress_file_incremental(stream):
+    # Apply the inverse streaming compression algorithm to the buffer
+    pass
+
+def read_root_node(stream):
+    # Deserialize the root node's child pointer and occupancy mask from the input stream
+    pass
+
+def reconstruct_tree(root, stream):
+    # Sequentially read child masks and offsets from the stream to link nodes into the tree structure
+    pass
+```
+
+### Parameters
+*   **max_morton_depth:** The maximum depth of the octree, determined by the resolution of the voxel grid [S2, unofficial].
+*   **compression_type:** Enum or flag indicating whether to compress the structure (e.g., `NONE` or other algorithms) [S2, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Depth Mismatch:** If the octree is not padded to the maximum Morton code depth, decoding may fail or produce incorrect spatial mappings [S2, unofficial].
+*   **Empty Tree:** Handling an octree with no voxels requires writing a valid root node with an empty child mask [S2, unofficial].
+
+## Subtopics
+
+### [Octree File I/O Format](5032-octree-file-i-o-format.md)
+This format stores octree metadata in a separate text header file containing compression type, grid size, node count, and data position. It solves the problem of persistent storage for CPU-based ray casting by separating structural metadata from voxel data, allowing the renderer to map memory efficiently without parsing complex binary headers for every access. It differs from file-system-based indexing methods (like [Octree-based Space Subdivision with File System Indexing](5866-octree-based-space-subdivision-with-file-system-indexing.md)) by storing the entire octree structure in a single contiguous file rather than distributing nodes across the directory hierarchy.
+
+### [Tolerance-based Voxel Fusion](5866-tolerance-based-voxel-fusion.md)
+Tolerance-based Voxel Fusion is a performance optimization strategy that renders volume data at variable resolutions across the spatial domain by fusing voxels with similar values. It solves the trade-off between rendering fidelity and computational cost by coarsening the representation in regions where visual detail is less critical, achieving significant savings in storage and rendering time without perceptible quality loss in moderate coarsening modes. It differs from image-space skipping, which creates blocky artifacts, by operating in the spatial domain to maintain visual continuity.
+
+### [Temporal Difference Encoding](5869-temporal-difference-encoding.md)
+Temporal Difference Encoding is a compression technique for time-varying volume data that exploits high temporal correlation between consecutive time steps. It predicts each sample based on past data and encodes the difference between the prediction and the actual value. Structurally, it merges octrees from consecutive time steps by storing pointers to unchanged subtrees from previous steps instead of duplicating data. Unlike methods that treat all dimensions uniformly, this approach applies difference encoding specifically to the time domain.
+
+### [Sparse Voxel DAG](5984-sparse-voxel-dag.md)
+Sparse Voxel DAG is a compression technique for sparse voxel octrees that reduces memory footprint by merging identical nodes and redirecting parent pointers to single shared instances. It builds on [Sparse Voxel Octree Structure Encoding/Decoding](3012-sparse-voxel-octree-structure-encoding-decoding.md) by introducing node deduplication, distinguishing itself from standard SVOs which store separate nodes for identical subtrees.
+
+### [G-PCC PlenOctree Compression](11441-g-pcc-plenoctree-compression.md)
+G-PCC PlenOctree Compression is a method for compressing PlenOctree models by treating the voxelized tree nodes as a point cloud (PC) and applying Geometry-based Point Cloud Coding (G-PCC) standards. It encodes the geometry (voxel positions) losslessly to preserve the octree structure and encodes the attributes (opacity $\sigma$ and spherical harmonic coefficients $k$) lossily using Region Adaptive Hierarchical Transform (RAHT) or Predlift transforms. It is distinguished from sibling methods like [Octree File I/O Format](5032-octree-file-i-o-format.md) by its specific use of G-PCC attribute coders on PlenOctree parameters, and from [Tolerance-based Voxel Fusion](5866-tolerance-based-voxel-fusion.md) by its focus on bitstream compression rather than structural simplification.
+
+### Octree Finalization & Empty Voxel Padding
+Finalizes the octree by padding empty voxels to match maximum Morton code depth, writing the root node, header, and optionally compressing [S2, unofficial].
+1. If current Morton depth < max Morton depth, call `FastAddEmptyVoxel` with difference + 1 [S2, unofficial].
+2. Write root node (`m_Children[0][0]`) [S2, unofficial].
+3. Write header [S2, unofficial].
+4. If compression != `NONE`, call `CompressFileIncremental(true)` [S2, unofficial].
+5. Close file [S2, unofficial].
+
+### Sparse Voxel Octree Attribute Encoding (Light)
+A storage method for light values (0-15) that packs four 4-bit nibbles into a single 32-bit integer per 2x2x2 voxel region, reducing memory overhead and removing the need for the lowest octree layer [S3, unofficial].
+1. Initialize light values to 0 for non-illuminated blocks [S3, unofficial].
+2. Assign 1-15 to light-emitting blocks [S3, unofficial].
+3. Propagate light by decrementing the value by 1 for each neighboring block until it reaches 0 [S3, unofficial].
+4. Pack four 4-bit light values (one per voxel in a 2x2x2 region) into a single 32-bit integer [S3, unofficial].
+5. Store packed integers in a 4-layer octree per 16x16x16 area [S3, unofficial].
+6. Stack multiple octrees vertically to cover the full 256-block chunk height [S3, unofficial].
+Formula: $light(Pos) = \max(\{0\} \cup \{LVal - \|LPos - Pos\|_1 \mid (LPos, LVal) \in Lights\})$ [S3, unofficial].
+Layout: Each 2x2x2 voxel region is stored as a single 32-bit integer. Four 4-bit nibbles represent the light value of each voxel. The octree uses 4 layers instead of 5 due to the 2x2x2 packing granularity. Multiple octrees are stacked vertically to cover the 256-block chunk height [S3, unofficial].
+Comparison: Unlike naive byte-per-block storage which wastes 50% of allocated memory per block, bit-packing utilizes 100% of the allocated 32-bit integer space for four voxels [S3, unofficial].
+
+### Hyper Octree
+A compact data structure for lossy compression of voxel data in an animation sequence, designed to reduce memory consumption [S4, unofficial].
+1. Use a modified sparse voxel octree that exploits spatiotemporal coherency between each consecutive frame in a sequence [S4, unofficial].
+2. Compress colours using the DXT1 format [S4, unofficial].
+3. Sort or reorder colours using HSV values to place similar colours in close proximity in memory before DXT1 compression [S4, unofficial].
+4. Reduce redundant data generated by the DXT1 format to further compress the data [S4, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The Sparse Voxel Octree (SVO) structure encoding/decoding methods originate from CPU-based volume rendering implementations [S1, unofficial]. The specific CPU functions `encode_sparse_voxel_octree_cpu` and `decode_sparse_voxel_octree_cpu` are documented in the `o-voxel-gpu` repository [S1, unofficial] and a Master's thesis on SVOs [S2, unofficial]. The attribute encoding variants (Light, Hyper Octree) are derived from game engine architectures like DigBuild [S3, unofficial] and animation compression research [S4, unofficial]. These methods are used in real-time rendering applications where memory bandwidth and cache efficiency are critical, particularly for CPU ray casting [S1, S2, unofficial].
+
+## Sources
+[S1] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)
+[S2] GilesPenfold/MasterThesisSVO, https://github.com/GilesPenfold/MasterThesisSVO, fetched 2026-10-26 (unofficial)
+[S3] DigBuild: Sandbox Voxel Game and Engine Using Vulkan, https://gredos.usal.es/handle/10366/149914, fetched 2026-10-31 (unofficial)
+[S4] Compression of Sequential Voxel Data for Sequence-based Animation, https://core.ac.uk/download/620674356.pdf, fetched 2026-10-26 (unofficial)

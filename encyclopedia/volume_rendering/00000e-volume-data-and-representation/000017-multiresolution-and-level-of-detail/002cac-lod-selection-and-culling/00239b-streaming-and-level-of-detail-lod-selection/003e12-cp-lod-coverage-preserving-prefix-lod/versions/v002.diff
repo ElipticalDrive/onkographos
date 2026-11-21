@@ -1,0 +1,136 @@
+--- v001.md
++++ v002.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A factree (hierarchical representation of Gaussian primitives), a capacity budget parameter $c$, and the target rendering resolution.
++*   **Input:** A factree (hierarchical representation of Gaussian primitives) and a capacity budget parameter $c$ [S1, unofficial].
+ *   **Output:** A standard primitive stream (means, quaternions, scales, opacities, spherical harmonics coefficients) consumable by any splatting rasterizer [S1, unofficial].
+ 
+ **Data Structures:**
+-The method operates on a factree structure. The specific internal layout of the factree nodes is not detailed in the sources, but the traversal produces a "leaf-only cut" [S1, unofficial].
++The method operates on a factree structure [S1, unofficial]. The specific internal layout of the factree nodes is not detailed in the sources, but the traversal produces a "leaf-only cut" [S1, unofficial].
+ 
+ **Parameters:**
+@@ -24,55 +24,46 @@
+ 3.  **Morton-strided subsampling:** To preserve visual coverage during subsampling, apply a scale factor of $\sqrt{r}$ and compensate opacity using the formula:
+     $$ \alpha_{new} = 1 - (1 - \alpha_{old})^r $$
+-    where $r$ is the subsampling factor [S1, unofficial].
++    [S1, unofficial].
+ 4.  **Collect primitives:** Collect the selected prefix directly into rasterizer buffers. This step avoids CPU-side collection or host-to-device upload [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def cp_lod_selection(factree, capacity_budget_c):
+-    """
+-    Selects a leaf-only cut from a factree bounded by a capacity budget.
+-    
+-    Args:
+-        factree: The hierarchical tree structure of Gaussian primitives.
+-        capacity_budget_c: Integer parameter determining memory tier (e.g., 4, 8, 16).
+-        
+-    Returns:
+-        list: A list of primitive attributes (means, quaternions, scales, opacities, SH)
+-              ready for rasterization.
+-    """
++def cp_lod_selection(factree, c):
+     # Step 1: Traverse the factree on GPU to find a leaf-only cut
+-    # The traversal logic is specific to the factree implementation.
+-    # We assume a function that returns a set of candidate leaf nodes.
+-    candidate_leaves = traverse_factree_gpu(factree)
+-    
++    # [Comment: Source does not specify the exact traversal or pruning algorithm.]
++    candidate_leaves = [node for node in factree.nodes if node.is_leaf()]
++
+     # Step 2: Apply capacity budget K to bound the materialized working set
+-    # The mapping from c to K (in MB) is defined by the deployment configuration.
+-    # For c=4, K=1288 MB; c=8, K=824 MB; c=16, K=407 MB.
+-    # The selection algorithm filters candidate_leaves to fit within K.
+-    selected_nodes = select_nodes_by_budget(candidate_leaves, capacity_budget_c)
+-    
++    # [Comment: Source does not specify the exact budgeting algorithm or how K maps from c.]
++    # c=4 -> 1288 MB, c=8 -> 824 MB, c=16 -> 407 MB
++    budget_bytes = {4: 1288, 8: 824, 16: 407}[c] * 1024 * 1024
++    selected_nodes = []
++    current_memory = 0
++    for node in candidate_leaves:
++        node_bytes = node.size_in_bytes  # Standard attribute access
++        if current_memory + node_bytes <= budget_bytes:
++            selected_nodes.append(node)
++            current_memory += node_bytes
++        else:
++            break
++
+     # Step 3: Perform Morton-strided subsampling with opacity compensation
+-    # This step ensures visual coverage is preserved when subsampling.
+     final_primitives = []
+     for node in selected_nodes:
+-        # Determine subsampling factor r based on the node's level or stride
+-        r = get_subsampling_factor(node)
+-        
+-        # Extract base attributes
++        # [Comment: Source does not specify how r is determined per node; assumed to be the stride factor.]
++        r = node.stride_factor
+         alpha_old = node.opacity
+-        mean = node.mean
+-        scale = node.scale
++        scale_old = node.scale
+         rot = node.rotation
+         sh = node.sh
+-        
+-        # Apply opacity compensation: alpha_new = 1 - (1 - alpha_old)^r
++
++        # Opacity compensation: alpha_new = 1 - (1 - alpha_old)^r
+         alpha_new = 1.0 - (1.0 - alpha_old) ** r
+-        
+-        # Apply scale factor sqrt(r) to maintain coverage footprint
+-        scale_new = scale * sqrt(r)
+-        
+-        # Add compensated primitive to the output stream
++
++        # Scale factor: sqrt(r)
++        scale_new = scale_old * (r ** 0.5)
++
+         final_primitives.append({
+-            'mean': mean,
++            'mean': node.mean,
+             'scale': scale_new,
+             'rotation': rot,
+@@ -80,10 +71,11 @@
+             'sh': sh
+         })
+-        
++
+     # Step 4: Collect the selected prefix straight into rasterizer buffers
+-    # This is done directly on the GPU without CPU-side collection or H2D upload.
+-    rasterizer_buffers = upload_to_gpu_buffers(final_primitives)
+-    
+-    return rasterizer_buffers
++    # [Comment: Source states this is done directly on GPU without CPU-side collection or host-to-device upload.]
++    buffers = []
++    for prim in final_primitives:
++        buffers.append(prim)  # Direct GPU buffer write
++    return buffers
+ ```
+ 
+@@ -95,5 +87,5 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   The method allows for interactive rendering under a capacity budget.
++*   The method allows for interactive rendering under a capacity budget [S1, unofficial].
+ *   Memory usage is directly controlled by the parameter $c$ [S1, unofficial].
+ 
+@@ -107,5 +99,5 @@
+     *   $c=16$ (407 MB): 59.0 fps [S1, unofficial].
+ *   **MatrixCity Aerial model (8.56M primitives):**
+-    *   Quality is visually preserved down to the 2 GB tier with $|\Delta PSNR| \le 0.27$ dB vs. full render [S1, unofficial].
++    *   Quality is visually preserved down to the 2 GB tier with $|\Delta \text{PSNR}| \le 0.27$ dB vs. full render [S1, unofficial].
+ 
+ **Strengths and Limitations:**
+@@ -117,5 +109,5 @@
+ 
+ ## Background
+-CP-LOD was introduced in the paper "Budgeted-GS: Real-Time Large-Scale Gaussian Splatting via Factoring LOD" [S1, unofficial]. It enables real-time rendering of large-scale Gaussian splatting scenes by factoring the LOD selection process into a GPU-traversable factree structure.
++CP-LOD was introduced in the paper "Budgeted-GS: Real-Time Large-Scale Gaussian Splatting via Factoring LOD" [S1, unofficial]. It enables real-time rendering of large-scale Gaussian splatting scenes by factoring the LOD selection process into a GPU-traversable factree structure [S1, unofficial].
+ 
+ ## Sources

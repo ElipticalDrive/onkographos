@@ -1,0 +1,172 @@
+# Ray casting with on-the-fly region growing
+
+Also called: On-the-fly region growing ray casting
+
+## Overview
+This method extends standard direct volume ray casting by integrating a local region growing algorithm during ray traversal to eliminate artifacts caused by contrast inhomogeneities, such as isolated "particle-like" regions in medical imaging [S1]. Unlike standard ray casting which may render these artifacts as part of the surface, or undersampling which loses local features, this approach filters small isolated noise while preserving large structural boundaries like endocardial walls [S1]. It is specifically designed for 3-D navigation in cardiac MSCT data where contrast distribution is non-uniform [S1].
+
+## How it works
+The method operates within the standard direct volume ray casting framework [Parent]. For each pixel, a ray is cast into the volume. The algorithm modifies the standard detection and refinement steps by inserting a region growing stage whenever an object is detected via thresholding [S1].
+
+### Inputs and Outputs
+**Inputs:**
+*   Volume data $V$ (scalar field, e.g., Hounsfield Units).
+*   Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$).
+*   Contrast Threshold $CT$ (scalar, typical range 40–120 HU) [S1].
+*   Size Threshold $ST$ (scalar, typical range 1000–1500 voxels) [S1].
+*   Volume bounding box.
+
+**Outputs:**
+*   Final pixel color and opacity.
+*   Surface point coordinates for shading.
+
+### Data Structures
+*   **Stack**: A LIFO structure used to store voxel coordinates $(x, y, z)$ and their values during region growing.
+*   **Visited Set**: A boolean grid or hash set marking voxels already processed in the current region growing instance to prevent cycles and redundant processing.
+*   **Region Counter**: An integer tracking the number of voxels in the current growing region.
+
+### Algorithm Steps
+1.  **Ray Casting Initialization**: For each pixel, define ray $r(t) = \mathbf{o} + t\mathbf{d}$. Intersect with volume bounding box to get $t_{near}$ and $t_{far}$ [Parent].
+2.  **Rough Detection Loop**: Iterate along the ray from $t_{near}$ to $t_{far}$ with a step size $\Delta t$ sufficient to avoid missing surfaces [S1].
+    *   At sample position $\mathbf{p}_i$, retrieve voxel value $V(\mathbf{p}_i)$ [Parent].
+    *   Check if $V(\mathbf{p}_i) < CT$.
+    *   If $V(\mathbf{p}_i) \ge CT$, continue to next sample.
+    *   If $V(\mathbf{p}_i) < CT$, a potential object is detected. Proceed to Region Growing.
+3.  **Region Growing**:
+    *   Initialize `Stack` with $\mathbf{p}_i$.
+    *   Initialize `Visited` set with $\mathbf{p}_i$.
+    *   Initialize `RegionSize` = 0.
+    *   While `Stack` is not empty:
+        *   Pop voxel $\mathbf{v}$ from `Stack`.
+        *   Increment `RegionSize`.
+        *   If `RegionSize` $\ge ST$, stop growing. The region is considered "relevant" (e.g., a wall). Break loop.
+        *   For each neighbor $\mathbf{n}$ of $\mathbf{v}$ (6-connected or 26-connected, not specified but implied by "neighborhood"):
+            *   If $\mathbf{n}$ is within volume bounds and not in `Visited`:
+                *   Retrieve $V(\mathbf{n})$.
+                *   If $V(\mathbf{n}) < CT$:
+                    *   Add $\mathbf{n}$ to `Visited`.
+                    *   Push $\mathbf{n}$ to `Stack`.
+4.  **Decision and Continuation**:
+    *   If `RegionSize` $< ST$: The detected region is an artifact. Mark these voxels as "ignored" for this ray (or simply continue the ray casting loop from the point after the artifact, omitting the artifact's contribution to the surface detection) [S1]. The text states "omit it, and continue the ray-casting process using the rough detection scheme." This implies the ray traversal continues past the artifact cluster.
+    *   If `RegionSize` $\ge ST$: The region is relevant. The first detected voxel $\mathbf{p}_i$ is assumed to be on the surface. Stop ray traversal for this pixel. Proceed to Refinement.
+5.  **Refinement**:
+    *   Perform 3-D linear interpolation in the neighborhood of the surface point $\mathbf{p}_i$ using the eight surrounding voxels [S1].
+    *   Search for the local gradient maximum to determine precise surface orientation [S1].
+    *   Compute shading based on the surface normal [Parent, S1].
+    *   Composite the result using the standard front-to-back equation [Parent].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_cast_with_region_growing(volume, camera_origin, camera_direction, CT, ST):
+    """
+    Casts a ray and applies on-the-fly region growing to filter artifacts.
+    
+    Args:
+        volume: 3D array of voxel values.
+        camera_origin: (x, y, z) tuple.
+        camera_direction: (dx, dy, dz) tuple.
+        CT: Contrast Threshold (float).
+        ST: Size Threshold (int).
+        
+    Returns:
+        color: (r, g, b) tuple.
+        alpha: float.
+        surface_point: (x, y, z) tuple or None.
+    """
+    # 1. Ray-Bounding Box Intersection (Standard)
+    t_near, t_far = intersect_ray_bbox(camera_origin, camera_direction, volume.bbox)
+    
+    # 2. Rough Detection and Region Growing
+    t = t_near
+    step = get_step_size(volume.resolution) # Small enough to avoid missing surfaces [S1]
+    
+    while t <= t_far:
+        p = camera_origin + t * camera_direction
+        voxel_val = interpolate_volume(volume, p)
+        
+        if voxel_val < CT:
+            # Object detected, launch region growing
+            region_size, is_relevant = perform_region_growing(volume, p, CT, ST)
+            
+            if is_relevant:
+                # Relevant region found (e.g., wall)
+                surface_point = p
+                break
+            else:
+                # Artifact detected, skip this region and continue ray
+                # Note: The algorithm continues the loop, effectively skipping the artifact
+                # The exact skipping mechanism (how far to jump) is not specified, 
+                # but logically it must advance past the artifact cluster.
+                # For implementation, we might need to track the max extent of the artifact.
+                # Here we assume the loop continues to the next sample, 
+                # but in practice, one might skip ahead. 
+                # Based on "continue the ray-casting process", we just proceed.
+                pass
+        
+        t += step
+    
+    if surface_point is not None:
+        # 3. Refinement
+        # Perform 3-D linear interpolation in neighborhood of surface_point
+        # Search for local gradient maximum
+        normal = compute_gradient_max(volume, surface_point)
+        color = compute_shading(volume, surface_point, normal)
+        alpha = 1.0 # Assuming opaque surface for navigation context
+        return color, alpha, surface_point
+    else:
+        # No relevant surface found, return background or transparent
+        return (0, 0, 0), 0.0, None
+
+def perform_region_growing(volume, seed_point, CT, ST):
+    """
+    Grows a region from seed_point.
+    Returns (size, is_relevant).
+    """
+    stack = [seed_point]
+    visited = {seed_point}
+    region_size = 0
+    
+    while stack:
+        current = stack.pop()
+        region_size += 1
+        
+        if region_size >= ST:
+            return region_size, True
+        
+        neighbors = get_neighbors(current, volume.bbox)
+        for n in neighbors:
+            if n not in visited:
+                val = interpolate_volume(volume, n)
+                if val < CT:
+                    visited.add(n)
+                    stack.append(n)
+                    
+    return region_size, False
+```
+
+### Parameters
+*   **Contrast Threshold (CT)**: The Hounsfield Unit value below which voxels are considered part of the object or artifact. Typical range: 40 to 120 HU [S1].
+*   **Size Threshold (ST)**: The maximum number of voxels allowed for a "particle-like" region to be considered an artifact. If the region size is smaller than ST, it is filtered out. Typical range: 1000 to 1500 voxels [S1].
+
+### Edge Cases and Pitfalls
+*   **CT Too High**: If CT is set too high, occluding regions become too large and may connect to the actual walls (e.g., endocardial walls). This causes them to lose their "particle-like" isolated nature, making them indistinguishable from relevant structures and thus harder to filter as artifacts [S1].
+*   **Computational Cost**: The region growing stage increases computational requirements. On a 2-GHz CPU with 1-GB memory, the average time for ventricle exploration is 3 seconds with ST=1500, which is twice the time required without region growing [S1]. The computation time increases with ST [S1].
+*   **No Pre-segmentation**: The method does not require pre-segmentation, which is an advantage for flexibility but a disadvantage for performance [S1].
+
+## Operating characteristics
+*   **Time Complexity**: The base ray casting is $O(N)$ per pixel where $N$ is the number of samples. The region growing adds overhead proportional to the size of the detected regions. In the worst case, if many large regions are detected, the complexity increases significantly. The source notes that computation time is twice that of standard ray casting [S1].
+*   **Memory Complexity**: Requires additional memory for the `Stack` and `Visited` set during region growing. The size is proportional to the largest artifact region detected along the ray.
+*   **Performance**: Tested on cardiac MSCT data (512x512 matrix, ~200 slices, voxel size 0.33-0.4 mm³) [S1]. Average 100-150 eliminated regions per view [S1].
+*   **Strengths**: Eliminates artifacts due to contrast inhomogeneities without pre-segmentation; improves visibility of walls (e.g., endocardial walls, coronary sinus); preserves local surface features better than undersampling [S1].
+*   **Limitations**: Increased computational cost (2x slower); sensitive to parameter selection (CT and ST trade-off); requires interactive parameter tuning for optimal results [S1].
+*   **When to Use**: 3-D navigation in medical volumes with non-uniform contrast (e.g., cardiac MSCT) where small isolated artifacts obscure important structures.
+*   **When Not to Use**: Real-time applications requiring high frame rates where the 2x overhead is unacceptable; volumes with uniform contrast where artifacts are not an issue.
+
+## Background
+The method was proposed by J.L. Coatrieux, K. Rioual, C. Göksu, E. Unanua, and P. Haigron from the Laboratoire Traitement du Signal et de l’Image, INSERM U642, Université de Rennes 1 [S1]. It was published in 2005 in the IEEE Transactions on Information Technology in Biomedicine [S1]. The work was motivated by the need for pre-operative planning in Cardiac Resynchronisation Therapy, specifically for 3-D navigation into heart cavities using multislice X-Ray Computed Tomography (MSCT) data [S1]. The algorithm builds on the general framework of ray casting with rough detection and linear interpolation refinement [S1].
+
+## Sources
+[S1] Ray casting with "on-the-fly" region growing: 3-D navigation into cardiac MSCT volume., https://doi.org/10.1109/TITB.2005.864373, fetched 2026-10-26

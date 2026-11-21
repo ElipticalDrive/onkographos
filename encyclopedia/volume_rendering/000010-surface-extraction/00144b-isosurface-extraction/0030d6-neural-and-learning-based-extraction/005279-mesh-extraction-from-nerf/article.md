@@ -1,0 +1,145 @@
+# Mesh Extraction from NeRF
+
+Also called: Density Field Meshing, Marching Cubes on NeRF, NeRF Density Field Mesh Extraction
+
+## Overview
+Mesh Extraction from NeRF converts a trained Neural Radiance Field (NeRF) into an explicit triangle mesh by treating the network's volume density output as a scalar field, extracting the isosurface via the Marching Cubes algorithm, and coloring the resulting vertices using the NeRF's color prediction [S1, unofficial][S2]. It differs from sibling methods like [MISE](977-mise-meshing-isosurfaces-by-extracting.md) and [FlexiCubes](3669-flexicubes.md) by operating directly on the raw density field $\sigma$ rather than a learned Signed Distance Field (SDF) or a differentiable parametric representation, making it a post-processing step rather than a joint optimization objective [S1, unofficial][S2].
+
+## How it works
+**Inputs:** A trained NeRF model (typically an MLP mapping 3D coordinates and viewing directions to density $\sigma$ and color $\mathbf{c}$), a 3D bounding box defining the region of interest, a grid resolution, and a density threshold.
+**Outputs:** A triangle mesh $\mathcal{M}$ with vertex positions, face indices, and vertex colors (or UV coordinates for texture mapping).
+
+**Data Structures:**
+1.  **Coordinate Grid:** A 3D tensor of shape $(R, R, R)$ where $R$ is the resolution.
+2.  **Density Field:** A 3D tensor of shape $(R, R, R)$ storing $\sigma$ values.
+3.  **Mesh:** Standard triangle mesh format (vertices $V$, faces $F$).
+
+**Steps:**
+
+1.  **Grid Generation:**
+    Define a 1D linear space for each axis spanning the scene scale.
+    $$ \text{lin} = \text{linspace}(-\text{scene\_scale}, \text{scene\_scale}, \text{resolution}) $$
+    Create a 3D meshgrid. Note: NeRF conventions often swap Y and Z axes relative to standard Cartesian grids [S1, unofficial].
+    $$ x, z, y = \text{meshgrid}(\text{lin}, \text{lin}, \text{lin}, \text{indexing}=\text{"ij"}) $$
+    Stack and reshape to a list of 3D points $P$:
+    $$ P = \text{stack}([x, z, y]).\text{reshape}(-1, 3) $$
+    [G] The swap of Y and Z is critical to align the grid with the camera coordinate system used during NeRF training.
+
+2.  **Density Evaluation:**
+    Query the NeRF model for density $\sigma$ at each point $p_i \in P$. Since NeRF also requires viewing directions, dummy directions (e.g., all zeros or random) are passed if the model does not use direction for density prediction, or the direction is ignored for the density head [S1, unofficial].
+    $$ \sigma(p_i) = \text{NeRF}_\sigma(p_i, \mathbf{d}_{\text{dummy}}) $$
+    To manage memory, this is done in chunks of size $C$ (default 32768) [S1, unofficial].
+    Reshape the flattened density array back into a 3D grid $\Sigma$ of shape $(R, R, R)$ [S1, unofficial].
+
+3.  **Isosurface Extraction:**
+    Apply the Marching Cubes algorithm to the density grid $\Sigma$ using a threshold $\sigma_{\text{threshold}}$ [S2].
+    $$ \mathcal{M} = \text{MarchingCubes}(\Sigma, \sigma_{\text{threshold}}) $$
+    This yields vertices $V$, faces $F$, and normals $N$ in grid coordinates [S1, unofficial].
+
+4.  **Coordinate Rescaling:**
+    Convert vertices from grid indices $[0, R-1]$ to world coordinates $[-\text{scene\_scale}, \text{scene\_scale}]$ [S1, unofficial].
+    $$ v_{\text{world}} = \frac{v_{\text{grid}}}{R - 1} \times (2 \times \text{scene\_scale}) - \text{scene\_scale} $$
+
+5.  **Coloring:**
+    For each vertex $v_j$ in $\mathcal{M}$, construct a viewing ray $r_j$ (typically from the camera center or a set of training views) and query the NeRF for color [S2].
+    $$ \mathbf{c}(v_j) = \text{NeRF}_c(v_j, r_j) $$
+    [S1, unofficial] Advanced variants fuse colors from multiple training views weighted by occlusion and depth to reduce view-dependent artifacts.
+
+6.  **Texture Mapping (Optional):**
+    Perform UV unwrapping on the vertex-colored mesh [S2]. To minimize distortion, Least Squares Conformal Mapping (LSCM) can be used to minimize conformal energy [S2]:
+    $$ E(u, v) = \int_{\Omega} (|\nabla u|^2 + |\nabla v|^2) dA $$
+    Where $(u, v)$ are 2D texture coordinates, $\Omega$ is the surface, and $dA$ is the differential area element [S2].
+
+**Parameters:**
+*   `resolution`: Voxel grid resolution. Default: 128 [S1, unofficial].
+*   `scene_scale`: Half-extent of the query box. Default: 1.5 [S1, unofficial].
+*   `sigma_threshold`: Iso-value for the surface. Default: 50.0 [S1, unofficial]. Note: This is dataset-dependent; "optimal" values vary [S2].
+*   `chunk`: Batch size for NeRF queries. Default: 32768 [S1, unofficial].
+
+**Pitfalls:**
+*   **Axis Swapping:** Failing to swap Y/Z axes during grid creation results in a rotated or flipped mesh due to NeRF's coordinate convention [S1, unofficial].
+*   **Threshold Sensitivity:** The choice of $\sigma_{\text{threshold}}$ significantly affects the extracted geometry. Too low results in noise; too high results in missing geometry [S2].
+*   **Memory:** Dense volumetric sampling requires $O(R^3)$ memory for the grid and $O(R^3)$ queries to the NeRF, which can be prohibitive for high resolutions [S1, unofficial][S2].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+from skimage import measure
+
+def extract_mesh_from_nerf(coarse_model, resolution=128, scene_scale=1.5, sigma_threshold=50.0, chunk=32768):
+    """
+    Extract a mesh from a trained NeRF model using Marching Cubes on the density field.
+    
+    Args:
+        coarse_model: A NeRF model instance with a forward method.
+        resolution: Integer, grid resolution.
+        scene_scale: Float, half-extent of the bounding box.
+        sigma_threshold: Float, density threshold for Marching Cubes.
+        chunk: Integer, batch size for model queries.
+        
+    Returns:
+        verts: Tensor of shape (N, 3) in world coordinates.
+        faces: Tensor of shape (M, 3) of vertex indices.
+        normals: Tensor of shape (N, 3).
+    """
+    # 1. Generate 3D grid
+    lin = torch.linspace(-scene_scale, scene_scale, resolution, device=coarse_model.device)
+    xx, zz, yy = torch.meshgrid(lin, lin, lin, indexing="ij")
+    
+    # Stack and reshape to points. Note: Y/Z swap for NeRF convention [S1, unofficial]
+    pts = torch.stack([xx, zz, yy], dim=-1).reshape(-1, 3)
+    
+    # 2. Evaluate density in chunks
+    sigma_grid_flat = []
+    for i in range(0, pts.shape[0], chunk):
+        chunk_pts = pts[i:i+chunk]
+        # Dummy directions: NeRF density often ignores direction, 
+        # but the model expects a direction tensor.
+        dummy_dirs = torch.zeros_like(chunk_pts) 
+        _, sigma = coarse_model(chunk_pts, dummy_dirs)
+        sigma_grid_flat.append(sigma.detach().cpu())
+        
+    sigma_grid = torch.cat(sigma_grid_flat, dim=0).reshape(resolution, resolution, resolution)
+    
+    # 3. Run Marching Cubes
+    # measure.marching_cubes expects a 3D array
+    verts, faces, normals, _ = measure.marching_cubes(sigma_grid.numpy(), level=sigma_threshold)
+    
+    # 4. Rescale vertices to world coordinates
+    # Grid indices [0, resolution-1] -> World [-scene_scale, scene_scale]
+    verts = verts / (resolution - 1) * (2 * scene_scale) - scene_scale
+    
+    return verts, faces, normals
+```
+
+## Subtopics
+
+### [NeRF-based Mesh Extraction with Color Fusion](7372-nerf-based-mesh-extraction-with-color-fusion.md)
+Extracts a textured mesh by fusing colors from multiple training views weighted by occlusion and depth, reducing view-dependent artifacts compared to single-view querying.
+
+### [Error-based Mesh Subdivision](15172-error-based-mesh-subdivision.md)
+An iterative adaptive refinement strategy for explicit meshes used in joint optimization with Gaussian Splats, using vertex gradient projections onto face normals as an error metric.
+
+### Differentiable Marching Tetrahedrons (DMTet)
+A differentiable surface extraction method used to create a triangle mesh from a Signed Distance Field (SDF), introduced by Shen et al. in 2021 [S3, unofficial]. It is used in frameworks like JOC to generate triangle meshes initialized by SDFs from neural fields [S3, unofficial].
+
+### Neural SDF Mesh Extraction with Texture Synthesis
+Extracts a mesh from an optimized neural SDF using Marching Cubes, computes UV mapping (e.g., via Blender Smart UV Project), and generates material textures by densely sampling points on the mesh and splatting material parameters [S4].
+
+## Operating characteristics
+*   **Time Complexity:** $O(R^3)$ for grid generation and density evaluation, where $R$ is the resolution. The Marching Cubes step is linear in the number of voxels.
+*   **Memory Complexity:** $O(R^3)$ to store the density grid and intermediate point tensors. High resolutions (e.g., $R=256$) require significant VRAM for the grid and batched NeRF queries [S1, unofficial][S2].
+*   **Performance:** Depends heavily on the NeRF inference speed. Hash-encoded NeRFs (e.g., Instant-NGP) significantly accelerate the density evaluation step [S2].
+*   **Strengths:** Simple to implement; leverages mature Marching Cubes libraries; produces watertight meshes [S1, unofficial][S2].
+*   **Limitations:** The density field is not a true SDF, leading to potential topological errors or "blobby" surfaces if the threshold is not carefully chosen [S2]. It does not support differentiable rendering directly during extraction, unlike [Differentiable Marching Cubes](9774-differentiable-marching-cubes.md) [S2].
+
+## Background
+The method originates from the standard post-processing pipeline for NeRFs, where the implicit density field is converted to an explicit mesh for downstream applications like 3D printing or game engines [S1, unofficial][S2]. The foundational NeRF paper [Kerbl et al. 2023, implied by S1 context] and subsequent works like [Mildenhall et al. 2020] established the density-based representation. The specific use of Marching Cubes on NeRF density grids is a common technique cited in various implementations and tutorials [S1, unofficial]. Variations involving SDFs and differentiable extraction have been developed to address the limitations of raw density fields [S3, unofficial][S4].
+
+## Sources
+[S1] yashtmy/nerf-3d-vision, https://github.com/yashtmy/nerf-3d-vision, fetched 2026-10-26 (unofficial)
+[S2] High-fidelity 3D Reconstruction of Plants using Neural Radiance Field, https://arxiv.org/abs/2311.04154v1, fetched 2026-10-27
+[S3] Joint Optimization of Triangle Mesh, Material, and Light from Neural Fields with Neural Radiance Cache, https://doi.org/10.48550/arxiv.2305.16800, fetched 2026-10-26 (unofficial)
+[S4] IRON: Inverse Rendering by Optimizing Neural SDFs and Materials from Photometric Images, https://doi.org/10.1109/cvpr52688.2022.00548, fetched 2026-10-26

@@ -1,0 +1,79 @@
+--- v003.md
++++ v004.md
+@@ -42,14 +42,17 @@
+ def load_voxels_to_gpu(voxels):
+     """Load selected non-empty voxels into a 2D texture (Voxels Texture).
+-    Each voxel <x, y, z, v> is encoded in FP32RGBA format."""
++    Each voxel <x, y, z, v> is encoded in FP32RGBA format (RGB: coords, A: value)."""
++    Voxels_Texture = empty_texture()
++    for i, voxel in enumerate(voxels):
++        Voxels_Texture[i] = (voxel.x, voxel.y, voxel.z, voxel.v)
+     return Voxels_Texture
+ 
+ def viewing_transform(Voxels_Texture, viewing_matrix):
+     """Fragment shader: transform voxel coordinates (RGB) using viewing matrix.
+-    Store 2D raster projection in R/G, depth in B, property value in Alpha."""
++    Store 2D raster projection in R/G, depth in B, property value in Alpha (<i, j, b, v>)."""
+     View_Transformed_Texture = empty_texture()
+-    for texel in Voxels_Texture:
+-        texel.R, texel.G = project_2d(texel.R, texel.G, texel.B, viewing_matrix)
+-        texel.B = depth_value(texel.R, texel.G, texel.B, viewing_matrix)
++    for i, texel in enumerate(Voxels_Texture):
++        # Transform 3D coordinates and project to 2D raster space
++        View_Transformed_Texture[i] = (project_2d(texel[:3], viewing_matrix), compute_depth(texel[:3], viewing_matrix), texel[3])
+     return View_Transformed_Texture
+ 
+@@ -58,5 +61,7 @@
+     Key: depth value (B). Value: voxel index in texture.
+     Stores keys and values in separate textures, 4 <key, value> per RGBA texel."""
+-    Sorted_Keys, Sorted_Values = bitonic_sort_network(View_Transformed_Texture.B, range(len(View_Transformed_Texture)))
++    # GPU Bitonic Sort implementation using Multiple Render Targets (MRT)
++    # Key is depth (B), value is original texture index
++    Sorted_Keys, Sorted_Values = bitonic_sort_network([t[1] for t in View_Transformed_Texture], range(len(View_Transformed_Texture)))
+     return Sorted_Keys, Sorted_Values
+ 
+@@ -65,5 +70,6 @@
+     Depth_Sorted_Texture = empty_texture()
+     for i in range(len(Sorted_Keys)):
+-        Depth_Sorted_Texture[i] = apply_sort_mapping(View_Transformed_Texture, Sorted_Keys[i], Sorted_Values[i])
++        # Map sorted keys/values back to original texel data
++        Depth_Sorted_Texture[i] = View_Transformed_Texture[Sorted_Values[i]]
+     return Depth_Sorted_Texture
+ 
+@@ -74,8 +80,12 @@
+     Auxiliary_Texture = empty_texture()
+     for i in range(len(Depth_Sorted_Texture)):
+-        is_boundary = check_slab_boundary(Depth_Sorted_Texture[i], Depth_Sorted_Texture[i+1])
+-        Auxiliary_Texture[i].R, Auxiliary_Texture[i].G = compute_bucket_coords(Depth_Sorted_Texture[i])
+-        Auxiliary_Texture[i].A = compute_bucket_index(Depth_Sorted_Texture[i])
+-        Auxiliary_Texture[i].B = z_inside_frustum() if is_boundary else z_outside_frustum()
++        # Check if current voxel's center is in a slab but the next is not
++        is_boundary = (get_slab_index(Depth_Sorted_Texture[i]) != get_slab_index(Depth_Sorted_Texture[i+1]))
++        Auxiliary_Texture[i] = (
++            compute_bucket_coords(Depth_Sorted_Texture[i]),
++            compute_bucket_index(Depth_Sorted_Texture[i]),
++            z_inside_frustum() if is_boundary else z_outside_frustum(),
++            compute_bucket_index(Depth_Sorted_Texture[i])
++        )
+     return Auxiliary_Texture
+ 
+@@ -85,6 +95,7 @@
+     Buckets_Texture = empty_texture()
+     for texel in Auxiliary_Texture:
+-        if texel.B is inside_frustum():
+-            write_bucket_boundary(Buckets_Texture, texel.A, texel.R, texel.G)
++        # Vertex shader writes to specified positions on texture
++        if texel[2] is inside_frustum():
++            Buckets_Texture[texel[1]] = texel[0]
+     return Buckets_Texture
+ 
+@@ -98,6 +109,9 @@
+         start_bucket = max(0, slab_i - kernel_radius)
+         end_bucket = min(number_of_buckets, slab_i + kernel_radius)
++        # Use R2VB to create VBO from texture data
+         VBO = render_to_vertex_buffer(Buckets_Texture, start_bucket, end_bucket)
++        # DrawArrays with glPoint and Point Sprites extension
+         draw_arrays(VBO, primitive_type="POINTS", extension="POINT_SPRITES")
++        # Project onto sheet buffer and composite with image buffer
+         composite_sheet_buffer()
+ ```

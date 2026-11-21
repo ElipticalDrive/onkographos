@@ -1,0 +1,185 @@
+# Epipolar Sampling with 1D Min/Max Binary Tree Optimization
+
+Also called: 1D min/max tree acceleration, Epipolar light shafts
+
+## Overview
+This method accelerates the calculation of the inscattering integral for volumetric light shafts by casting rays through an epipolar plane defined by the camera and light direction [S1, unofficial]. It utilizes 1D min/max binary trees constructed from shadow map slices to skip large lit or shadowed regions during ray marching, significantly reducing the number of shadow tests required [S1, unofficial]. Unlike sibling methods that optimize traversal order or grid sampling, this approach exploits the geometric coherence of epipolar slices to reduce the shadowing cost from linear to logarithmic per sample [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   Camera position $C$, view matrix, and projection matrix.
+*   Light position (for spot) or direction (for directional), light transform matrix, and shadow map resolution.
+*   Depth buffer and camera-space $z$ texture.
+*   Shadow map texture.
+
+**Outputs:**
+*   Inscaattered light color for each screen pixel.
+
+### Data Structures
+*   **Interpolation Source Texture:** An auxiliary two-channel integer texture. Each entry stores the indices of the two closest ray-marching samples from the same epipolar slice, used for linear interpolation of inscattered light [S1, unofficial].
+*   **Shared Memory Array:** A 1-bit flag array packed as 32-bit unsigned integers, used in the compute shader to indicate discontinuities between adjacent samples in a ray section [S1, unofficial].
+*   **1D Min/Max Binary Tree:** For each epipolar slice, a binary tree where leaves store depth values from the shadow map, and internal nodes store the minimum and maximum depth values of their children [S1, unofficial].
+
+### Steps
+
+1.  **Reconstruct Camera-Space Z:**
+    Reconstruct the camera-space $z$ coordinate from the non-linear depth buffer. This is necessary because $z$ can be safely interpolated linearly, whereas depth cannot [S1, unofficial].
+
+2.  **Compute Epipolar Slice Geometry:**
+    For each epipolar slice, determine the slice origin $O$ and direction $D$ in shadow map UV coordinates.
+    *   Define the epipolar plane normal $\mathbf{N}$ using two vectors in the plane:
+        *   $\mathbf{S}_0$: Direction from camera to light source.
+        *   $\mathbf{S}_1$: Vector from camera to the epipolar slice exit point in world space.
+        $$ \mathbf{N} = \text{cross}(\mathbf{S}_1, \mathbf{S}_0) $$
+    *   Compute the slice direction $\mathbf{D}$ as the cross product of the epipolar plane normal $\mathbf{N}$ and the shadow map plane normal $\mathbf{N}_{shadow}$, as $\mathbf{D}$ lies in both planes:
+        $$ \mathbf{D} = \text{cross}(\mathbf{N}, \mathbf{N}_{shadow}) $$
+    *   **Directional Light Origin:** Transform the camera world position $C$ with the shadow map transform matrix to get $O$ [S1, unofficial].
+    *   **Spot Light Origin:** If the camera is outside the light cone, find a point $P_0$ on the ray, compute intersections with the light cone, and set:
+        $$ O = P_0 + t_{min} \cdot \mathbf{D} $$
+        If the camera is inside the cone, $O$ is the projection of the camera position onto the shadow map plane [S1, unofficial].
+    *   Transform $O$ and $\mathbf{D}$ to shadow map UV coordinates using the light transform matrix [S1, unofficial].
+
+3.  **Render Epipolar Coordinates:**
+    *   Cast an epipolar line through each screen pixel to compute the location in the epipolar texture.
+    *   Account for pixel attribute interpolation bias: The outermost visible screen pixels are biased by 0.5 pixel size inwards. Therefore, the exit points of epipolar lines must be located on a shrunk screen boundary:
+        $$ x_{exit} \in \left[-1 + \frac{1}{W}, 1 - \frac{1}{W}\right], \quad y_{exit} \in \left[-1 + \frac{1}{H}, 1 - \frac{1}{H}\right] $$
+        where $W$ and $H$ are the viewport width and height [S1, unofficial].
+    *   Render a 1D texture containing enter and exit points for each epipolar slice, along with camera-space $z$, into epipolar coordinates. Set up a depth-stencil buffer to mark valid samples [S1, unofficial].
+
+4.  **Construct 1D Min/Max Binary Trees:**
+    *   Use a flip/flop rendering approach with two textures alternately as source and destination.
+    *   **Level 0 (Leaves):** Initialize the first level using the shadow map. Use a `Gather()` instruction to load four samples for PCF filtering, computing conservative minimum and maximum values to ensure the accelerated algorithm produces identical results to visiting all texels [S1, unofficial].
+    *   **Higher Levels:** Construct coarse tree levels by loading two min/max values from the corresponding nodes at the next finer level. Full binary trees are not constructed as coarse levels are rarely reached [S1, unofficial].
+
+5.  **Detect Depth Breaks:**
+    *   Execute a compute shader where each thread group processes one ray section between two neighboring samples, and each thread processes one sample.
+    *   Populate the shared-memory array with 1-bit flags indicating discontinuities between adjacent samples, packed as 32-bit uints [S1, unofficial].
+    *   Identify interpolation source samples using `firstbitlow()` and `firstbithigh()` intrinsic functions to find the first non-zero bit from the lowest and highest order bits, respectively [S1, unofficial].
+    *   Mark ray marching samples in the stencil buffer [S1, unofficial].
+
+6.  **Ray Marching with 1D Min/Max Optimization:**
+    For each epipolar slice, march along the ray direction $\mathbf{D}$ starting from $O$. For each ray section:
+    *   Let $d_{max}$ be the maximum depth at the ends of the current ray section.
+    *   Let $d_{min}$ be the minimum depth at the ends of the current ray section.
+    *   Query the 1D min/max binary tree for the current slice.
+    *   **Skip Lit Regions:** If $d_{max} < \text{tree\_min}$, the section is completely lit. Skip shadow testing and accumulate light [S1, unofficial].
+    *   **Skip Shadowed Regions:** If $d_{min} > \text{tree\_max}$, the section is fully in shadow. Skip the section entirely [S1, unofficial].
+    *   **Refine:** If neither condition is true, descend to the next finer tree level and repeat the test [S1, unofficial].
+    *   If the leaf level is reached, perform standard shadow testing [S1, unofficial].
+
+7.  **Interpolate Inscaattered Light:**
+    *   Compute initial inscattering for ray-marched samples.
+    *   For samples marked for interpolation, use the Interpolation Source Texture to linearly interpolate inscattering between the two closest ray-marching samples from the same slice [S1, unofficial].
+    *   Transform inscattering from epipolar to rectangular coordinates using epipolar and rectangular camera-space $z$ textures to compute bilateral weights [S1, unofficial].
+
+8.  **Fix-up Pass:**
+    *   Pixels marked in the stencil buffer (those that could not be interpolated or had no appropriate samples) undergo an additional ray marching pass.
+    *   This pass uses fewer steps and **no** 1D min/max optimization [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_epipolar_slice_geometry(camera_pos, light_pos_or_dir, shadow_map_transform, shadow_plane_normal):
+    # S0: Camera to Light
+    if is_directional_light(light_pos_or_dir):
+        S0 = normalize(-light_pos_or_dir)
+    else:
+        S0 = normalize(light_pos_or_dir - camera_pos)
+    
+    # S1: Camera to Exit Point (computed per pixel/slice based on shrunk boundary)
+    # S1 is assumed to be provided or computed from screen coordinates
+    # N = cross(S1, S0)
+    # D = cross(N, shadow_plane_normal)
+    
+    # Origin O
+    if is_camera_inside_light_cone(camera_pos, light_pos_or_dir):
+        O = transform(camera_pos, shadow_map_transform)
+    else:
+        # Find intersection with cone
+        P0 = ray_origin
+        t_min = intersect_ray_cone(P0, D, light_pos_or_dir)
+        O = P0 + t_min * D
+        O = transform(O, shadow_map_transform)
+        
+    D_uv = transform(D, shadow_map_transform)
+    return O, D_uv
+
+def build_min_max_tree(shadow_map, level):
+    if level == 0:
+        # Use Gather for conservative min/max
+        return gather_conservative_min_max(shadow_map)
+    else:
+        parent_level = build_min_max_tree(shadow_map, level - 1)
+        # Load two min/max values from finer level
+        return compute_parent_nodes(parent_level)
+
+def ray_march_epipolar_slice(O_uv, D_uv, shadow_map_tree, camera_z, depth_buffer):
+    # Reconstruct camera space z from depth buffer
+    z_cam = reconstruct_camera_z(depth_buffer)
+    
+    # Determine step size and number of steps
+    steps = compute_steps(z_cam)
+    
+    for i in range(steps):
+        # Current position in shadow map
+        pos_uv = O_uv + i * D_uv
+        
+        # Get depth at current position from shadow map tree
+        # Query tree to skip regions
+        shadow_depth = query_min_max_tree(shadow_map_tree, pos_uv)
+        
+        # Compare with camera depth (reconstructed z)
+        if shadow_depth > z_cam:
+            # In shadow
+            accumulate_shadow()
+        else:
+            # Lit
+            accumulate_light()
+
+def detect_depth_breaks(samples):
+    # Shared memory array of 1-bit flags packed as 32-bit uints
+    flags = shared_memory_array()
+    
+    for i in range(len(samples) - 1):
+        if samples[i].z != samples[i+1].z:
+            flags[i] = 1
+        else:
+            flags[i] = 0
+            
+    # Identify interpolation sources
+    low_bit = firstbitlow(flags)
+    high_bit = firstbithigh(flags)
+    
+    return low_bit, high_bit
+```
+
+### Parameters
+*   **Viewport Shrinkage:** The exit points of epipolar lines must be located on a shrunk screen boundary to account for pixel center interpolation bias. The shrinkage factor is $1/W$ and $1/H$ for width and height respectively [S1, unofficial].
+*   **Shadow Map Resolution:** Affects the granularity of the 1D min/max tree. 4k x 4k is cited as a high-performance setting [S1, unofficial].
+*   **Quality Profiles:** Trade-offs between sample count and smoothing. High quality uses more samples; high performance uses fewer, potentially causing artifacts near the light source [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Pixel Attribute Interpolation Bias:** Ignoring the 0.5 pixel size bias causes inefficient sample distribution and inaccurate interpolation, leading to more pixels requiring the fix-up pass [S1, unofficial].
+*   **Spot Light Camera Position:** If the camera is behind or on the light projection plane, the simple directional light origin method fails. The universal solution involving cone intersection must be used [S1, unofficial].
+*   **Colored Light Shafts:** The min/max optimization is less efficient because lit regions cannot be skipped; they must be traversed with a fine step. However, performance remains high (>100 fps) [S1, unofficial].
+*   **No Appropriate Samples:** If no appropriate samples exist for bilateral filtering, the pixel is marked in the stencil buffer and processed with a fallback ray marching pass [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The 1D min/max tree allows skipping large regions, reducing shadow test complexity from linear to logarithmic per sample. Depth break detection is up to 6x faster than direct implementation for long steps [S1, unofficial].
+*   **Memory Complexity:** Requires auxiliary textures for epipolar coordinates, camera-space $z$, interpolation sources, and the min/max trees. Memory usage is approximately 5.5 MB on mobile GPUs [S1, unofficial].
+*   **Performance:**
+    *   **Mobile GPU (Nvidia):** 5.38 ms with 5.5 MB memory [S1, unofficial].
+    *   **Integrated GPU (Intel HD):** 8.85 ms, maintaining interactive frame rates [S1, unofficial].
+    *   **Discrete GPU (Nvidia):** Less than 3.4 ms total processing time for a specific scene; just above 4 ms for a 4k x 4k shadow map with directional light [S1, unofficial].
+    *   **Spot Light Acceleration:** Without 1D min/max tree, ray marching time is 3.3x higher and total frame time is 2x higher [S1, unofficial].
+*   **Strengths:** Fully post-processing, suitable for a wide range of hardware, supports colored light shafts, and provides significant speedups over brute force ray marching.
+*   **Limitations:** Less efficient for colored light shafts due to inability to skip lit regions. Requires careful handling of camera positions relative to spot lights.
+
+## Background
+This technique was developed to accelerate inscattering integral calculations for light shafts, building on the observation that all camera rays in an epipolar slice share the same plane [S1, unofficial]. The concept of using 1D min/max binary trees for epipolar slices was first recognized by Chen et al. [S1, unofficial]. The specific implementation details, including the flip/flop tree construction and depth break detection using compute shaders, are described in Yusov and Egor's work on practical implementation of light scattering rendering [S1, unofficial].
+
+## Sources
+[S1] High-Performance Light Scattering Rendering, https://www.scribd.com/document/748135031/822368Yusov-Egor-Practical-Implementation-of-Light, fetched 2026-10-29 (unofficial)

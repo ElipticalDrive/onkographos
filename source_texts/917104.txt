@@ -1,0 +1,221 @@
+CLI tool and library for 3D Gaussian splat processing and conversion - Carry the splat model (antialiased / 2dgs) from read through to write by slimbuck · Pull Request #297 · playcanvas/splat-transform
+
+Carry the splat model (antialiased / 2dgs) from read through to write by slimbuck · Pull Request #297 · playcanvas/splat-transform · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+slimbuck
+commented
+Jul 30, 2026
+Copy link
+Copy Markdown
+Member
+Scenes trained with antialiasing (mip-splatting style) or as 2DGS need different evaluation than an ordinary scene, but we had no notion of which one we were holding: PLY header comments were parsed and discarded, SPZ's antialiased header bit was read as nothing and written as false, SOG's meta.json had no field for it, and a 2DGS PLY (no scale_2 column) was silently mis-read as a position+colour point cloud because hasGeometric required all eight geometric columns.
+Since the two are mutually exclusive, this adds one enum rather than two flags: SplatModel = 'default' | 'antialiased' | '2dgs' on ChunkSourceMetadata, propagated through every reader, combinator and writer.
+Flags in the wild
+Tool
+Flag
+Brush
+comment SplatRenderMode: default | mip (brush-serde export.rs / import.rs; enum is { Default, Mip }, last match wins, case-insensitive)
+Postshot
+comment antialiased 0 | 1
+SPZ
+header flags byte at offset 14, FLAG_ANTIALIASED = 0x1
+LichtFeld Studio
+no flag — writes no PLY comments and hardcodes antialiased = false on SPZ export
+Brush's is the one with a real reader and writer behind it, so it's what we emit — a file we write is understood by Brush's importer, and Postshot's form is read but never written.
+Read
+PLY comments are matched case-insensitively in both forms, last match winning. A PLY with scale_0/scale_1 but no scale_2 is read as 2dgs regardless of comments — structural evidence outranks a contradicting tag — and the absent column is materialized as a -Infinity log scale (a zero-thickness surfel) so every downstream pass sees a uniform geometric layer. That value needed no new guards: filterNaN already whitelists it for scale columns, quantize-1d-core gives ±Infinity dedicated codebook slots, and compressed-PLY's packUnorm clamps. SOG reads a meta.json "model" entry, warning and falling back to default on an unrecognized value. SPZ maps its antialiased bit.
+Write
+.ply and .compressed.ply carry comment SplatRenderMode: mip | 2dgs; .sog / meta.json carry "model", omitted when default so existing output is unchanged; .spz sets its bit, and warns that it cannot represent 2DGS (clamping the third log scale to -20, matching the compressed-PLY clamp, since the external encoder can't take an infinity). A 2DGS PLY output drops scale_2 again. lod-meta.json deliberately has no entry: the tag lives in each chunk's own SOG meta.json, and containerSource already picks it up from there, so the index never restates or contradicts it. Other output formats have nowhere to record it and drop it silently.
+Combining inputs whose models disagree warns and writes the result as default rather than mistagging — every variant renders acceptably, if not optimally, as ordinary gaussians. --info/--stats report the model (text line only when it isn't default).
+The streaming PLY writer's re-interleave plan needed generalising: dropping scale_2 mid-layer used to trip its packed-canonical-order assertion, so a run now ends where the source words stop being consecutive and geometric becomes two block copies instead of one.
+Breaking
+ChunkSourceMetadata.model is required, so any code building the metadata literally must set it. That's deliberate — it's how the compiler found the eight internal propagation sites that would otherwise have silently dropped the tag — but SuperSplat's SuperSplatChunkSource builds a metadata literal and will need model: 'default' added when it bumps.
+Verification
+794 tests pass (19 new in test/splat-model.test.mjs), lint and typecheck clean. On real scenes: a Postshot-tagged PLY reports model: antialiased and is retagged in Brush's spelling on output, verified through PLY, compressed PLY, SOG, SPZ (bit set, reads back tagged) and LOD (including the nested per-unit SOG metas); a 2DGS PLY reads with a full geometric layer, scale_2 == -Infinity on every row, and writes back tagged without the column, with values either side of the gap checked against a reference on both writer paths; mixed inputs warn and write untagged. Regression against the installed 3.1.6: PLY byte-identical, SOG textures byte-identical, meta.json identical apart from the generator version string.
+Viewer-side support (SuperSplat editor and viewer, PlayCanvas engine) is follow-up work.
+latest
+6ec8010
+slimbuck
+requested a review
+from Copilot
+July 30, 2026 16:01
+slimbuck
+self-assigned this
+Jul 30, 2026
+slimbuck
+added
+the
+enhancement
+New feature or request
+label
+Jul 30, 2026
+Copilot started reviewing on behalf of
+slimbuck
+July 30, 2026 16:02
+View session
+Copilot
+AI
+reviewed
+Jul 30, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR introduces a first-class SplatModel = 'default' | 'antialiased' | '2dgs' tag on ChunkSourceMetadata and propagates it from readers through combinators and into writers, so that training-time evaluation requirements (mip-splatting / 2DGS) are preserved where container formats can represent them.
+Changes:
+Add src/lib/splat-model.ts and make ChunkSourceMetadata.model required, propagating it through read/process/concat/decimate/write paths.
+Teach PLY/SPZ/SOG readers to detect the model (including PLY comment parsing and 2DGS structural detection) and teach PLY/compressed-PLY/SOG/SPZ writers to emit it where supported.
+Add comprehensive tests for model detection/round-tripping and update README/docs accordingly.
+Reviewed changes
+Copilot reviewed 25 out of 25 changed files in this pull request and generated 2 comments.
+Show a summary per file
+File
+Description
+test/splat-model.test.mjs
+New end-to-end tests for model detection, propagation, and format-specific tagging behavior
+test/helpers/test-utils.mjs
+Allow encoding PLY fixtures with custom header comments
+src/lib/writers/write-spz.ts
+Thread model into SPZ writer and warn on 2DGS (unsupported by SPZ)
+src/lib/writers/write-sog.ts
+Write "model" into SOG meta.json only when non-default; thread model through DataTable adapter
+src/lib/writers/write-ply-streaming.ts
+Emit model PLY comment and support dropping scale_2 for 2DGS without breaking run packing
+src/lib/writers/write-compressed-ply.ts
+Emit model PLY comment and thread model through source → DataTable bridge
+src/lib/writers/utils.ts
+Centralize PLY model comment formatting (splatModelComment)
+src/lib/write.ts
+Add model to writeFile API and propagate from ChunkSource into DataTable writers; handle 2DGS PLY column dropping
+src/lib/spz-module.ts
+Thread model into SPZ encoding and set SPZ antialiased flag
+src/lib/splat-model.ts
+Define SplatModel, isSplatModel, and resolveSplatModel
+src/lib/source-info.ts
+Report model in --info/--stats output (text only when non-default)
+src/lib/readers/read-spz.ts
+Parse SPZ antialiased header flag and set meta.model accordingly
+src/lib/readers/read-splat.ts
+Set meta.model = 'default' for .splat (no tag)
+src/lib/readers/read-sog.ts
+Read/validate meta.json "model" (warn and fall back on unknown)
+src/lib/readers/read-ply.ts
+Parse model from PLY comments; infer 2DGS structurally; materialize scale_2 = -Infinity for 2DGS
+src/lib/readers/read-lcc.ts
+Set meta.model = 'default' for LCC (no tag)
+src/lib/ops/concat-source.ts
+Resolve mixed-model concatenation to default and warn on disagreement
+src/lib/index.ts
+Export SplatModel utilities from the public API
+src/lib/decimate/decimate-source.ts
+Preserve meta.model through decimation output
+src/lib/decimate-uniform/decimate-source.ts
+Preserve meta.model through uniform decimation output
+src/lib/compat/data-table.ts
+Add model parameter to dataTableToChunkSource for bridging from untagged DataTables
+src/lib/chunk/source.ts
+Make ChunkSourceMetadata.model required
+src/lib/chunk/in-memory.ts
+Add optional model to in-memory source construction (defaulting to default)
+src/cli/index.ts
+Preserve/resolve model across CLI multi-input combine path that materializes to DataTable
+README.md
+Document model tagging behavior on read/write and --info reporting
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/lib/readers/read-ply.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/lib/spz-module.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+latest
+d368610
+slimbuck
+marked this pull request as ready for review
+July 30, 2026 20:59
+slimbuck
+requested review from
+a team and
+Copilot
+July 30, 2026 20:59
+Copilot started reviewing on behalf of
+slimbuck
+July 30, 2026 21:00
+View session
+Copilot
+AI
+reviewed
+Jul 30, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 25 out of 25 changed files in this pull request and generated no new comments.
+Hide details
+View details
+slimbuck
+merged commit 276dd48
+into
+playcanvas:main
+Jul 30, 2026
+3 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+slimbuck
+deleted the
+aa-dev
+branch
+July 30, 2026 21:12
+slimbuck
+mentioned this pull request
+Aug 14, 2026
+Preserve partial canonical PLY layers for 2DGS compatibility
+#284
+Closed
+slimbuck
+mentioned this pull request
+Sep 25, 2026
+2DGS PLY files fail to import after v2.30.0
+playcanvas/supersplat#975
+Closed
+willeastcott
+mentioned this pull request
+Sep 30, 2026
+docs: track SplatTransform 3.8.0 in the SplatTransform manual and splat format specs
+playcanvas/developer-site#1249
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+enhancement
+New feature or request
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

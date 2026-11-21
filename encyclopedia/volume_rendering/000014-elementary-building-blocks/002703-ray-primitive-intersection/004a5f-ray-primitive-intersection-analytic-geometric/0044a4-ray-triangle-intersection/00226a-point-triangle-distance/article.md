@@ -1,0 +1,186 @@
+# Point-Triangle Distance
+
+Also called: Closest Point on Triangle, Point to Triangle Distance, closestPointOnTriangleToPoint, pointToTriangleDistSqr
+
+## Overview
+Computes the closest point on a triangle to a query point and returns the squared distance, utilizing barycentric coordinates and Voronoi-region decomposition to handle edge and vertex cases [S1][S2, unofficial]. It differs from [Ray-Triangle Intersection](11312-ray-triangle-intersection.md) by solving a proximity minimization problem rather than a ray-primitive intersection, and from [Unsigned Triangle Distance](3587-unsigned-triangle-distance.md) by explicitly returning the barycentric coordinates of the closest point alongside the distance [S1][S2, unofficial].
+
+## How it works
+**Inputs:**
+- Triangle vertices $v_0, v_1, v_2$ (3D vectors).
+- Query point $p$ (3D vector).
+
+**Outputs:**
+- Closest point on the triangle surface.
+- Barycentric coordinates $t_0, t_1$ such that $closest = v_0 + t_0(v_1 - v_0) + t_1(v_2 - v_0)$ [S1].
+- Squared distance from $p$ to the closest point [S1].
+
+**Data Structures:**
+- Standard 3D vector type supporting arithmetic operations and dot product [S1].
+- Scalar floating-point type for parameters $t_0, t_1$ [S1].
+
+**Steps:**
+1. Compute edge vectors:
+   $$edge_0 = v_1 - v_0$$
+   $$edge_1 = v_2 - v_0$$
+2. Compute vector from triangle vertex to query point:
+   $$v_0\_p = v_0 - p$$
+3. Compute dot products:
+   $$a = edge_0 \cdot edge_0$$
+   $$b = edge_0 \cdot edge_1$$
+   $$c = edge_1 \cdot edge_1$$
+   $$d = edge_0 \cdot v_0\_p$$
+   $$e = edge_1 \cdot v_0\_p$$
+4. Compute determinant and parameters:
+   $$det = a \cdot c - b \cdot b$$
+   $$s = b \cdot e - c \cdot d$$
+   $$t = b \cdot d - a \cdot e$$
+5. Determine region based on $s + t$ relative to $det$:
+
+   **Case A: $s + t < det$** (Closest point is inside the triangle or on an edge/vertex)
+   - If $s < 0$ and $t < 0$:
+     - If $d < 0$:
+       $$s = \text{clamp}(-d / a, 0, 1)$$
+       $$t = 0$$
+     - Else:
+       $$s = 0$$
+       $$t = \text{clamp}(-e / c, 0, 1)$$
+   - If $s < 0$ and $t \ge 0$:
+     $$s = \text{clamp}(-d / a, 0, 1)$$
+     $$t = 0$$
+   - If $s \ge 0$ and $t < 0$:
+     $$s = 0$$
+     $$t = \text{clamp}(-e / c, 0, 1)$$
+
+   **Case B: $s + t \ge det$** (Closest point is outside the triangle's edge opposite vertex 0)
+   - If $s < 0$:
+     - Let $tmp_0 = b + d$
+     - Let $tmp_1 = c + e$
+     - If $tmp_1 > tmp_0$:
+       $$s = \text{clamp}((tmp_1 - tmp_0) / (a - 2b + c), 0, 1)$$
+       $$t = 1 - s$$
+     - Else:
+       $$s = 0$$
+       $$t = \text{clamp}(-e / c, 0, 1)$$
+   - If $s \ge 0$ and $t < 0$:
+     - If $a + d > b + e$:
+       $$s = \text{clamp}((c + e - b - d) / (a - 2b + c), 0, 1)$$
+       $$t = 1 - s$$
+     - Else:
+       $$s = \text{clamp}(-e / c, 0, 1)$$
+       $$t = 0$$
+
+6. Compute closest point:
+   $$closest = v_0 + s \cdot edge_0 + t \cdot edge_1$$
+7. Return squared distance:
+   $$dist^2 = \|closest - p\|^2$$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def closest_point_on_triangle(v0, v1, v2, p):
+    edge0 = v1 - v0
+    edge1 = v2 - v0
+    v0_p = v0 - p
+    
+    a = dot(edge0, edge0)
+    b = dot(edge0, edge1)
+    c = dot(edge1, edge1)
+    d = dot(edge0, v0_p)
+    e = dot(edge1, v0_p)
+    
+    det = a * c - b * b
+    s = b * e - c * d
+    t = b * d - a * e
+    
+    if s + t < det:
+        if s < 0 and t < 0:
+            if d < 0:
+                s = clamp(-d / a, 0, 1)
+                t = 0
+            else:
+                s = 0
+                t = clamp(-e / c, 0, 1)
+        elif s < 0:
+            s = clamp(-d / a, 0, 1)
+            t = 0
+        elif t < 0:
+            s = 0
+            t = clamp(-e / c, 0, 1)
+    else:
+        if s < 0:
+            tmp0 = b + d
+            tmp1 = c + e
+            if tmp1 > tmp0:
+                denom = a - 2 * b + c
+                s = clamp((tmp1 - tmp0) / denom, 0, 1)
+                t = 1 - s
+            else:
+                s = 0
+                t = clamp(-e / c, 0, 1)
+        elif t < 0:
+            if a + d > b + e:
+                denom = a - 2 * b + c
+                s = clamp((c + e - b - d) / denom, 0, 1)
+                t = 1 - s
+            else:
+                s = clamp(-e / c, 0, 1)
+                t = 0
+                
+    closest = v0 + s * edge0 + t * edge1
+    dist_sq = dot(closest - p, closest - p)
+    return closest, dist_sq, s, t
+
+def clamp(x, min_val, max_val):
+    if x < min_val: return min_val
+    if x > max_val: return max_val
+    return x
+```
+
+**Parameters:**
+- `Vec3T`: Any vector type supporting arithmetic and dot product [S1].
+- `v0, v1, v2`: Triangle vertices [S1].
+- `p`: Query point [S1].
+
+**Edge Cases and Pitfalls:**
+- Degenerate triangles (zero area, collinear or coincident vertices) are handled implicitly: the face-interior test naturally fails and the code falls through to the nearest edge or vertex result [S1].
+- Division by zero is avoided by the logic structure, as denominators like $a$, $c$, and $a-2b+c$ correspond to squared lengths or edge lengths in degenerate cases, but the conditional checks ensure valid regions are selected [S2, unofficial].
+
+## Subtopics
+
+### [Unsigned Triangle Distance](3587-unsigned-triangle-distance.md)
+Computes the unsigned distance from a query point to a triangle defined by three vertices $a, b, c$. It checks if the point projects inside the triangle to decide between computing the minimum edge distance or the plane distance.
+
+### [Mesh SDF Sampling](7159-mesh-sdf-sampling.md)
+Mesh SDF Sampling constructs a callable signed distance field (SDF) sampler function from a `THREE.BufferGeometry` instance and a world transform matrix. It solves the problem of efficiently evaluating the shortest signed distance from arbitrary world-space coordinates to a triangle mesh surface, where negative values indicate interior points and positive values indicate exterior points. It differs from generic geometry samplers by specifically handling the `THREE.Mesh` abstraction, including automatic world matrix updates, and delegates the core geometric computation to a lower-level geometry sampler.
+
+### [Triangle-Box Intersection Voxelization](7408-triangle-box-intersection-voxelization.md)
+This method voxelizes watertight triangular meshes into Signed Distance Functions (SDFs) or occupancy grids by computing the distance from voxel reference points to mesh faces or by testing for geometric intersection between triangles and voxel boxes. It distinguishes itself from pure SDF-based occupancy derivation by using explicit triangle-box intersection tests to guarantee that any voxel intersecting the mesh surface is marked as occupied, avoiding the "leaky" voxels common in SDF-only approaches. It builds on [Point-Triangle Distance](2776-point-triangle-distance.md) for SDF computation and relies on [Unsigned Triangle Distance](3587-unsigned-triangle-distance.md) concepts for spatial proximity checks.
+
+### [Barycentric Coordinate Calculation](11142-barycentric-coordinate-calculation.md)
+Computes the barycentric coordinates of a 3D point relative to a triangle defined by three vertices. It solves the problem of expressing a point's position within a triangle's local coordinate system, which is a prerequisite for [Point-Triangle Distance](2776-point-triangle-distance.md). It sets itself apart from sibling methods by focusing on the geometric projection and area-based calculation rather than distance minimization or mesh sampling.
+
+### [Triangle Coverage Test](11579-triangle-coverage-test.md)
+The Triangle Coverage Test verifies whether a triangle $T$ is completely contained within the union of three spheres centered at its vertices, with radii determined by a scalar field function $f$ evaluated at those vertices. It solves the problem of ensuring that a discrete sampling of an implicit volume is dense enough to guarantee no gaps exist between the approximating spheres, which is critical for sphere carving algorithms. Unlike general ray-triangle intersection which determines visibility, this test determines topological completeness of the volume approximation. It is distinct from [Point-Triangle Distance](2776-point-triangle-distance.md) by focusing on set containment rather than proximity, and from [Barycentric Coordinate Calculation](11142-barycentric-coordinate-calculation.md) by using barycentric logic only implicitly to define the triangle domain.
+
+### [Zero Set Initialization of Meshes](11845-zero-set-initialization-of-meshes.md)
+Zero Set Initialization of Meshes is a method for initializing the signed distance field (SDF) of a triangular mesh by identifying samples that lie on or near the mesh surface (the "zero set") and assigning them initial signs. It solves the problem of establishing an accurate initial distance field from a polygonal mesh without relying on global topological information. It differs from its sibling [Unsigned Triangle Distance](3587-unsigned-triangle-distance.md) by computing signed distances and from [Mesh SDF Sampling](7159-mesh-sdf-sampling.md) by focusing specifically on the initialization phase for distance transforms rather than general sampling. It builds on [Point-Triangle Distance](2776-point-triangle-distance.md) to determine geometric proximity.
+
+### Unsigned Quadrilateral Distance
+Computes the unsigned distance from a point to a quadrilateral defined by four vertices $a, b, c, d$. It checks if the point is inside the projected quad to decide between edge distance and plane distance [S3, unofficial]. If the point is inside the quad (sum of signs < 3), return the minimum squared distance to the four edges. Otherwise, return the squared distance to the plane containing the quad [S3, unofficial]. Edge distance uses projection: $\text{proj}_{ba}(pa) = ba \cdot \text{clamp}(\frac{ba \cdot pa}{\|ba\|^2}, 0, 1)$ [S3, unofficial]. Parameters: $a, b, c, d$: vec3, the four vertices of the quadrilateral in order [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per triangle, involving a fixed number of arithmetic operations.
+- **Memory Complexity:** $O(1)$ auxiliary space.
+- **Performance:** Highly efficient for single-triangle queries; suitable for GPU implementation due to lack of branching dependencies in the core arithmetic [S1][S2, unofficial].
+- **Strengths:** Robust handling of degenerate triangles; provides barycentric coordinates useful for interpolation [S1].
+- **Limitations:** Not directly applicable to non-planar or complex polygons without decomposition [S3, unofficial].
+
+## Background
+Originating from Ericson's "Real-Time Collision Detection" (Sec. 5.1.5), the method uses Voronoi-region decomposition to efficiently find the closest point on a triangle [S1]. It is widely used in collision detection, physics simulation, and signed distance field computations [S1][S2, S3, unofficial].
+
+## Sources
+[S1] OpenVDB: nanovdb::math Namespace Reference, https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html, fetched 2026-10-24
+[S2] itsyouyi/Voxelizer, https://github.com/itsyouyi/Voxelizer, fetched 2026-10-27 (unofficial)
+[S3] marklundin/glsl-sdf-primitives, https://github.com/marklundin/glsl-sdf-primitives, fetched 2026-10-26 (unofficial)

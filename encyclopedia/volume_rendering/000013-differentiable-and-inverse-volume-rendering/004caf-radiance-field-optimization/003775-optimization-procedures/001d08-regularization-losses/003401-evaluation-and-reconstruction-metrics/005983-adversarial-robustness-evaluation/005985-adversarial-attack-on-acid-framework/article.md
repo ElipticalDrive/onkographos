@@ -1,0 +1,227 @@
+# Adversarial Attack on ACID Framework
+
+Also called: Adversarial Attack on Neural Network Reconstruction, Adversarial attacks to ACID as whole, Antun et al. method, Tiny perturbation computation
+
+## Overview
+This method computes a tiny perturbation $e$ to the input data of the ACID (Adversarial Compressed Sensing Iterative Deepening) framework that maximizes the difference in the reconstructed image while keeping the perturbation small, thereby assessing the stability of the reconstruction system [S1]. It extends the adversarial attack formulation from single neural networks to the entire iterative ACID workflow, which combines deep reconstruction, compressed sensing, and analytic mapping [S1]. Unlike attacks on isolated networks, this method accounts for the feedback loops and multi-module structure of ACID by decomposing the system into modules keyed to projection data ($p$), neural network output ($u$), and image domain ($f$) [S1].
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   $p^{(0)}$: Original tomographic data (collected measurements).
+    *   $A \in \mathbb{R}^{m \times N}$: System matrix, where $m$ is the number of measurements and $N$ is the image dimension [S1].
+    *   $f$: Ground truth image (used for comparison in the loss function) [S1].
+    *   $\Phi$: The deep reconstruction neural network component of ACID, mapping $\mathbb{R}^m \to \mathbb{R}^N$ [S1].
+    *   $\gamma$: Regularization parameter for the perturbation norm [S1].
+    *   $K_{AA}$: Maximum number of iterations for the outer adversarial attack loop [S1].
+    *   $K_{ACID}$: Maximum number of iterations for the inner ACID feedforward loop [S1].
+*   **Outputs**:
+    *   $e$: The computed adversarial perturbation vector [S1].
+
+### Data Structures
+The ACID system is decomposed into three modules based on the domain of the data:
+1.  **Projection Module ($p$)**: Handles the raw data and system matrix operations. Inputs/outputs denoted as $p_i, p_o$.
+2.  **Neural Network Module ($u$)**: The deep learning component where $u = \Phi(p)$. Inputs/outputs denoted as $u_i, u_o$.
+3.  **Image Module ($f$)**: The final reconstructed image space. Inputs/outputs denoted as $f_i, f_o$ [S1].
+
+Gradients are tracked for each module: $\frac{dp_o}{dp_i}$, $\frac{du_o}{du_i}$, and $\frac{df_o}{df_i}$ [S1].
+
+### Algorithm Steps
+The method uses two nested iterative loops: an outer loop for gradient ascent to find the perturbation $e$, and an inner loop for the ACID feedforward and backpropagation process [S1].
+
+1.  **Initialize**: Set initial perturbation $e = 0$ (or small random noise) [G]. Set iteration counter $k_{AA} = 0$.
+2.  **Outer Loop (Adversarial Search)**:
+    *   While $k_{AA} < K_{AA}$ and noise strength condition not met:
+        *   Increment $k_{AA}$.
+        *   **Inner Loop (ACID Forward/Backward)**:
+            *   Compute the perturbed input data: $p_{perturbed} = p^{(0)} + Ae$ [S1].
+            *   Run the ACID reconstruction algorithm for up to $K_{ACID}$ iterations to obtain the reconstructed image $\hat{f}(p^{(0)}, p_{perturbed})$ [S1]. Let this output be $f_e$ [S1].
+            *   Compute the cost function $L_c$ (see Formulas below) [S1].
+            *   Perform backpropagation through the ACID modules to compute the gradient $\frac{dL_c}{de}$ [S1]. This involves computing gradients through the $p$, $u$, and $f$ modules and combining them [S1].
+        *   **Update Perturbation**:
+            *   Update $e$ using gradient ascent: $e \leftarrow e + \eta \frac{dL_c}{de}$, where $\eta$ is the learning rate [S1, G].
+3.  **Stopping Criteria**:
+    *   The outer loop terminates if:
+        1.  The number of iterations reaches $K_{AA}$ [S1].
+        2.  The noise strength (L2-norm) of the adversarial attack exceeds that used in attacking the single neural network component alone [S1].
+
+### Formulas
+The problem is formulated to find a perturbation $e$ that maximizes the output difference subject to a constraint on the perturbation size [S1].
+
+**Constrained Formulation:**
+$$ \hat{e}(f) \in \arg\max_e \|\Phi(p+Ae) - \Phi(p)\|, \quad \text{s.t.} \|e\| \le \sigma $$
+where $\sigma$ bounds the perturbation [S1].
+
+**Unconstrained Lasso-Inspired Objective:**
+To avoid infeasibility, an unconstrained version is used, converted to the image domain where $\Phi(p) = l(f)$:
+$$ e^*(p) \in \arg\max_e \frac{1}{2}\|\Phi(p+Ae) - l(f)\|_2^2 - \frac{\gamma}{2}\|e\|_2^2 $$
+Here, $l(f) = f$ for image-domain post-processing or $l(f) = \Phi(Af)$ for end-to-end networks [S1].
+
+**ACID-Specific Cost Function:**
+For the full ACID workflow, the objective function $D^{(0)+Ae}_l(e)$ is defined as:
+$$ D^{(0)+Ae}_l(e) = \frac{1}{2}\|\hat{f}(p, p^{(0)}+Ae) - f\|_2^2 - \frac{\gamma}{2}\|e\|_2^2 $$
+where $\hat{f}$ is the solution minimizing the ACID objective function [S1].
+
+The cost function $L_c$ is explicitly:
+$$ L_c = \frac{1}{2}\|f_e - f\|_2^2 - \frac{\gamma}{2}\|e\|_2^2 $$
+where $f_e = \hat{f}(p, p^{(0)}+Ae)$ is the output with perturbation and $f$ is the output without [S1].
+
+**Gradient Computation:**
+The gradient of the cost function with respect to the perturbation is split into the gradient of the ACID loss and the regularization term:
+$$ \frac{dL_c}{de} = \frac{d(\frac{1}{2}\|f_e - f\|_2^2)}{de} - \gamma e = \frac{dL_{ACID}}{de} - \gamma e $$
+The term $\frac{dL_{ACID}}{de}$ is computed using the backpropagation algorithm through the decomposed ACID modules ($p, u, f$) [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_adversarial_attack_acid(p0, A, f_ground_truth, Phi, gamma, K_AA, K_ACID, eta):
+    """
+    Computes adversarial perturbation e for the ACID framework.
+    
+    Args:
+        p0: Original tomographic data (m,)
+        A: System matrix (m, N)
+        f_ground_truth: Ground truth image (N,)
+        Phi: Neural network function (maps m-dim to N-dim)
+        gamma: Regularization weight for perturbation norm
+        K_AA: Max iterations for outer adversarial loop
+        K_ACID: Max iterations for inner ACID reconstruction loop
+        eta: Learning rate for gradient ascent
+        
+    Returns:
+        e: Adversarial perturbation vector (m,)
+    """
+    # Initialize perturbation [G]
+    e = np.zeros_like(p0)
+    
+    # Precompute unperturbed output for reference if needed, 
+    # though the cost function compares against f_ground_truth directly.
+    
+    for k_aa in range(K_AA):
+        # Inner Loop: ACID Forward and Backward Pass
+        # 1. Construct perturbed input data
+        p_perturbed = p0 + A @ e
+        
+        # 2. Run ACID reconstruction to get f_e
+        # ACID is an iterative process minimizing Equation 1 in [S1].
+        # We simulate the ACID forward pass for K_ACID iterations.
+        # Note: The exact internal steps of ACID (deep reconstruction, 
+        # compressed sensing, analytic mapping) are encapsulated in run_acid().
+        f_e = run_acid_forward(p0, p_perturbed, Phi, K_ACID)
+        
+        # 3. Compute Cost Function L_c
+        # L_c = 0.5 * ||f_e - f||^2 - (gamma/2) * ||e||^2
+        reconstruction_error = 0.5 * np.sum((f_e - f_ground_truth)**2)
+        perturbation_penalty = 0.5 * gamma * np.sum(e**2)
+        L_c = reconstruction_error - perturbation_penalty
+        
+        # 4. Compute Gradient dL_c/de
+        # dL_c/de = d(L_ACID)/de - gamma * e
+        # L_ACID = 0.5 * ||f_e - f||^2
+        
+        # Compute gradient of reconstruction error w.r.t f_e
+        # d(L_ACID)/df_e = f_e - f_ground_truth
+        grad_L_acid_f = f_e - f_ground_truth
+        
+        # Backpropagate through ACID to get d(L_ACID)/de
+        # This requires the gradients of the ACID modules (p, u, f)
+        # d(L_ACID)/de = (d(L_ACID)/df_e) * (df_e/de)
+        # The term df_e/de is computed via backpropagation through the 
+        # ACID iterations and modules [S1].
+        grad_L_acid_e = backpropagate_acid_gradient(p0, p_perturbed, Phi, K_ACID, grad_L_acid_f)
+        
+        # Total gradient
+        grad_L_c = grad_L_acid_e - gamma * e
+        
+        # 5. Update perturbation using Gradient Ascent
+        e = e + eta * grad_L_c
+        
+        # Stopping Criterion 2: Check noise strength against single NN attack
+        # If ||e||_2 exceeds the threshold from single NN attack, stop [S1]
+        # threshold_single_nn = get_threshold_from_single_nn_attack() # [G] Placeholder for external data
+        # if np.linalg.norm(e) > threshold_single_nn:
+        #     break
+        
+    return e
+
+def run_acid_forward(p0, p_perturbed, Phi, K_ACID):
+    """
+    Simulates the ACID forward pass.
+    ACID iteratively refines the reconstruction.
+    p(0) is original data, p(k) is residual dataset.
+    The reconstruction involves deep reconstruction (Phi), 
+    compressed sensing, and analytic mapping [S1].
+    """
+    # Initial reconstruction using perturbed data
+    # This is a simplified representation of the ACID iterative process [S1]
+    f_current = Phi(p_perturbed)
+    
+    for k in range(K_ACID):
+        # ACID steps:
+        # 1. Deep reconstruction
+        # 2. Compressed sensing-based sparsity promotion
+        # 3. Analytic mapping
+        # 4. Iterative refinement based on residual between p(0) and current estimate
+        # The exact update rule minimizes Equation 1 in [S1]
+        
+        # Placeholder for complex ACID internal logic [G]
+        # In practice, this involves solving a constrained optimization problem
+        # at each step.
+        f_current = update_acid_step(f_current, p0, p_perturbed, Phi)
+        
+    return f_current
+
+def backpropagate_acid_gradient(p0, p_perturbed, Phi, K_ACID, grad_output):
+    """
+    Computes the gradient of the ACID loss w.r.t the perturbation e.
+    Decomposes ACID into modules p, u, f [S1].
+    """
+    # This function implements the backpropagation through the ACID modules
+    # as described in Figure 9 of [S1].
+    # It computes dp_o/dp_i, du_o/du_i, df_o/df_i and combines them.
+    
+    # Since ACID is iterative, we need to backpropagate through each iteration.
+    # The gradient flows from f_e back to e through the ACID operations.
+    
+    # Simplified gradient computation [G]
+    # In reality, this requires storing intermediate states during forward pass
+    # and applying chain rule through each module.
+    
+    # Example structure:
+    # grad_e = 0
+    # for k in reversed(range(K_ACID)):
+    #     grad_e += compute_module_gradient(k, grad_output)
+    
+    # For implementation, one would use automatic differentiation 
+    # if ACID is implemented in a DL framework, or manual backprop 
+    # if using the mathematical decomposition [S1].
+    
+    # Returning a placeholder gradient for structural completeness
+    # The actual gradient is d(L_ACID)/de as derived in [S1]
+    return grad_output @ A.T # Simplified approximation for structure
+```
+
+### Edge Cases and Pitfalls
+*   **Non-linearity**: The neural network $\Phi$ is non-linear, making the global maximum of the objective function difficult to find. The method relies on gradient ascent to find local maxima [S1].
+*   **Infeasibility**: The constrained formulation $\|e\| \le \sigma$ avoids infeasibility issues present in some other adversarial formulations [S1].
+*   **Gradient Complexity**: Computing $\frac{dL_{ACID}}{de}$ is complicated due to the iterative nature of ACID. The backpropagation algorithm must account for both branches contributing to the image reconstruction in ACID [S1].
+*   **Stopping Criteria**: The method requires a threshold from a single neural network attack to determine when to stop the ACID-wide attack, which must be pre-computed [S1].
+
+## Operating characteristics
+*   **Time Complexity**: The method involves an outer loop of $K_{AA}$ iterations, each containing an inner loop of up to $K_{ACID}$ ACID iterations. Each ACID iteration involves forward and backward passes through the neural network and compressed sensing modules. The complexity is roughly $O(K_{AA} \cdot K_{ACID} \cdot C_{ACID})$, where $C_{ACID}$ is the cost of one ACID iteration [S1].
+*   **Memory Complexity**: Requires storing intermediate states for backpropagation through $K_{ACID}$ iterations, leading to higher memory usage compared to single-network attacks [S1].
+*   **Strengths**: Provides a comprehensive stability assessment of the entire ACID framework, not just the deep learning component. It accounts for the interplay between data-driven priors, sparsity, and measurement consistency [S1].
+*   **Limitations**: Computationally expensive due to nested loops and complex gradient computation. Relies on finding local maxima, which may not represent the worst-case scenario [S1].
+*   **When to use**: When evaluating the robustness of the full ACID reconstruction pipeline against adversarial perturbations in the input data [S1].
+*   **When not to use**: For quick stability checks of individual components or when computational resources are limited [S1].
+
+## Background
+The method originates from the work of Antun et al. [S1]. It was developed to assess the stability of well-trained neural networks used in image reconstruction, specifically extending the concept of adversarial attacks from image classification to tomographic reconstruction [S1]. The ACID framework itself combines deep reconstruction, compressed sensing, and analytic mapping to stabilize deep tomographic image reconstruction [S1]. This adversarial attack method is part of the broader effort to understand and mitigate the vulnerabilities of deep learning-based reconstruction methods [S1].
+
+## Sources
+[S1] Stabilizing deep tomographic reconstruction: Part B. Convergence analysis and adversarial attacks., https://doi.org/10.1016/j.patter.2022.100475, fetched 2026-10-26

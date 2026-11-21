@@ -1,0 +1,293 @@
+--- v002.md
++++ v003.md
+@@ -10,5 +10,5 @@
+ 
+ ### Inputs and Outputs
+-*   **Input:** An unstructured grid dataset consisting of $N$ cells. Each cell is defined by four node indices [S1, S2, unofficial]. Each node is defined by three spatial coordinates $(x, y, z)$ and one scalar value $s$ [S1, S2, unofficial].
++*   **Input:** An unstructured grid dataset consisting of $N$ cells. Each cell is defined by four node indices, and each node is defined by three spatial coordinates $(x, y, z)$ and one scalar value $s$ [S1, S2, unofficial].
+ *   **Output:** A 2D image composed of pixels, where each pixel contains a final color and opacity value [S1, S2, unofficial].
+ 
+@@ -16,18 +16,18 @@
+ The data layout is fixed to minimize transfer overhead and simplify indexing [S1, S2, unofficial]:
+ 
+-1.  **Cell Data:** Each cell stores four node indices [S1, S2, unofficial].
+-    *   Size: 16 bytes total (4 indices $\times$ 4 bytes/integer) [S1, S2, unofficial].
+-    *   Layout: `[node_idx_0, node_idx_1, node_idx_2, node_idx_3]` [S1, S2, unofficial].
+-2.  **Node Data:** Each node stores three coordinates and one scalar value [S1, S2, unofficial].
+-    *   Size: 16 bytes total (3 floats $\times$ 4 bytes + 1 float $\times$ 4 bytes) [S1, S2, unofficial].
+-    *   Layout: `[x, y, z, scalar_value]` [S1, S2, unofficial].
+-3.  **Ray Segment:** Generated during scan conversion and sent between processors [S5].
+-    *   Size: 16 bytes total [S1, unofficial].
++1.  **Cell Data:** Each cell stores four node indices.
++    *   Size: 16 bytes total (4 indices $\times$ 4 bytes/integer).
++    *   Layout: `[node_idx_0, node_idx_1, node_idx_2, node_idx_3]`
++2.  **Node Data:** Each node stores three coordinates and one scalar value.
++    *   Size: 16 bytes total (3 floats $\times$ 4 bytes + 1 float $\times$ 4 bytes).
++    *   Layout: `[x, y, z, scalar_value]`
++3.  **Ray Segment:** Generated during scan conversion and sent between processors.
++    *   Size: 16 bytes total.
+     *   Fields:
+-        *   `sample_value` (float, 4 bytes): The integrated color/opacity contribution [S5].
+-        *   `pixel_x` (int, 4 bytes): The x-coordinate in the global image [S5].
+-        *   `pixel_y` (int, 4 bytes): The y-coordinate in the global image [S5].
+-        *   `depth_start` (float, 4 bytes): The starting depth of the segment in view space [S5].
+-        *   `depth_end` (float, 4 bytes): The ending depth of the segment in view space [S5].
++        *   `sample_value` (float, 4 bytes): The integrated color/opacity contribution.
++        *   `pixel_x` (int, 4 bytes): The x-coordinate in the global image.
++        *   `pixel_y` (int, 4 bytes): The y-coordinate in the global image.
++        *   `depth_start` (float, 4 bytes): The starting depth of the segment in view space.
++        *   `depth_end` (float, 4 bytes): The ending depth of the segment in view space.
+     *   *Note:* Depth values are required because segments arrive in unpredictable order and must be sorted back-to-front for correct compositing [S1, unofficial][S5].
+ 
+@@ -37,5 +37,5 @@
+     *   Distribute $N$ cells to $P$ processors using a round-robin assignment policy [S1, S2, unofficial].
+     *   Round-robin disperses connected cells widely to balance load, as connected cells often have similar size and opacity, which would cause imbalance if grouped [S2, unofficial].
+-    *   Each processor receives its local cells and the corresponding node data [S1, unofficial]. In the worst case (no node sharing), transferring $n$ cells requires $80n$ bytes (16 bytes per cell + 64 bytes for unique nodes) [S1, S2, unofficial].
++    *   Each processor receives its local cells and the corresponding node data. In the worst case (no node sharing), transferring $n$ cells requires $80n$ bytes (16 bytes per cell + 64 bytes for unique nodes) [S1, S2, unofficial].
+ 
+ 2.  **Space Partitioning Tree Construction:**
+@@ -64,9 +64,9 @@
+         1.  Scan convert one or more cells.
+         2.  Check for incoming ray segments from other processors.
+-        3.  If segments are available, switch to the merging task: sort the incoming segments by depth and merge them into the local pixel buffers using the Porter-Duff over operator [S1, unofficial].
++        3.  If segments are available, switch to the merging task: sort the incoming segments by depth and merge them into the local pixel buffers using the Porter-Duff over operator.
+         4.  Repeat [S1, unofficial].
+     *   **Asynchronous Send/Receive:**
+         *   Buffer ray segments locally. Use asynchronous send/receive to overlap computation and communication [S1, unofficial].
+-        *   Provide two or more buffers per destination. If a send is pending for a full buffer, place new segments in the companion buffer [S1, unofficial].
++        *   Provide two or more buffers per destination. If a send is pending for a full buffer, place new segments in the companion buffer.
+         *   If both buffers for a destination fill up before the first send completes, switch to the ray merging task to process incoming segments and clear congestion. This prevents deadlock [S1, unofficial].
+     *   **Parameters:**
+@@ -83,113 +83,112 @@
+ 
+ ```python
++def parallel_cell_projection(cells, nodes, num_processors, image_width, image_height, processor_id=0):
++    # 1. Data Distribution
++    local_cells = [c for i, c in enumerate(cells) if i % num_processors == processor_id]
++    local_node_indices = set()
++    for c in local_cells:
++        local_node_indices.update(c.node_indices)
++    local_nodes = {idx: nodes[idx] for idx in local_node_indices}
++    
++    # 2. Space Partitioning Tree Construction
++    # Cooperatively build k-d tree (simplified for pseudocode)
++    kdtree = build_kdtree(local_cells, num_processors)
++    
++    # 3. Rendering Loop
++    for leaf in kdtree.leaves:
++        local_leaf_cells = [c for c in local_cells if c.centroid in leaf.region]
++        
++        for cell in local_leaf_cells:
++            # Scan Conversion
++            projected_verts = project_to_screen(cell.vertices, local_nodes)
++            affected_pixels = rasterize_polygon(projected_verts, image_width, image_height)
++            
++            for px, py in affected_pixels:
++                sample_val = integrate_cell(cell, local_nodes, px, py)
++                depth_start, depth_end = get_depth_range(cell, local_nodes)
++                segment = RaySegment(sample_val, px, py, depth_start, depth_end)
++                
++                # Routing: scanline interleaving
++                dest_proc = py % num_processors
++                send_buffer(dest_proc, segment)
++        
++        # Merge Incoming Segments
++        merge_incoming_segments(processor_id, image_width, image_height)
++
++    # 4. Termination
++    if processor_id == 0:
++        wait_for_termination_messages()
++        broadcast_termination()
++    else:
++        send_termination_message()
++    
++    # 5. Image Assembly
++    subimage = get_scanline_subimage(processor_id, image_height)
++    send_to_host(subimage)
++
++def send_buffer(dest_proc, segment):
++    # Double buffering logic for asynchronous communication
++    if buffers[dest_proc][0].full():
++        if buffers[dest_proc][1].full():
++            merge_incoming_segments(processor_id, image_width, image_height) # Deadlock prevention
++        buffers[dest_proc][1].push(segment)
++    else:
++        buffers[dest_proc][0].push(segment)
++
++def merge_incoming_segments(proc_id, width, height):
++    # Poll and merge
++    for dest in range(num_processors):
++        if buffers[dest][0].not_empty():
++            segments = buffers[dest][0].pop_all()
++            for seg in segments:
++                pixel_buffers[seg.y][seg.x].append(seg)
++    
++    for y in range(height):
++        for x in range(width):
++            segs = pixel_buffers[y][x]
++            if not segs: continue
++            segs.sort(key=lambda s: s.depth_end, reverse=True)
++            c, a = 0.0, 0.0
++            for s in segs:
++                c, a = porter_duff_over(c, a, s.sample_val, s.depth_end - s.depth_start)
++            local_image[y][x] = (c, a)
++
++def porter_duff_over(c1, a1, c2, a2):
++    a_out = a1 + a2 * (1 - a1)
++    c_out = c1 + c2 * (1 - a1)
++    return c_out, a_out
++
++# Helper definitions (self-contained)
+ class RaySegment:
+-    def __init__(self, sample_value, pixel_x, pixel_y, depth_start, depth_end):
+-        self.sample_value = sample_value
+-        self.pixel_x = pixel_x
+-        self.pixel_y = pixel_y
+-        self.depth_start = depth_start
+-        self.depth_end = depth_end
+-
+-def porter_duff_over(c1, a1, c2, a2):
+-    a_out = a1 + a2 * (1.0 - a1)
+-    c_out = c1 + c2 * (1.0 - a1)
+-    return c_out, a_out
+-
+-def parallel_cell_projection(cells, nodes, num_processors, image_width, image_height):
+-    processor_id = 0 # System-dependent rank identifier
+-    local_cells = []
+-    local_nodes = {}
+-    pixel_buffers = {} # Accumulates segments per pixel across the rendering loop
+-
+-    # 1. Data Distribution: Round-robin assignment scatters connected cells to balance load [S1, S2, unofficial]
+-    for i, cell in enumerate(cells):
+-        if i % num_processors == processor_id:
+-            local_cells.append(cell)
+-    # Fetch node data for local cells [S1, S2, unofficial]
+-    for cell in local_cells:
+-        for idx in cell.node_indices:
+-            if idx not in local_nodes:
+-                local_nodes[idx] = nodes[idx]
+-
+-    # 2. Space Partitioning Tree Construction: Cooperatively build identical k-d tree on all processors [S1, unofficial]
+-    kdtree = build_global_kdtree(local_cells, num_processors)
+-
+-    # 3. Rendering Loop
+-    for leaf_node in kdtree.traverse():
+-        local_leaf_cells = [c for c in local_cells if c.centroid in leaf_node.region]
+-
+-        for cell in local_leaf_cells:
+-            # Scan Convert: project cell, identify pixels, integrate color/opacity [S2, S3, unofficial]
+-            projected_vertices = apply_view_projection(cell.vertices)
+-            affected_pixels = rasterize_polygon(projected_vertices, image_width, image_height)
+-
+-            for px, py in affected_pixels:
+-                sample_value = integrate_cell_opacity(cell, local_nodes, px, py)
+-                depth_start, depth_end = compute_depth_range(cell, local_nodes)
+-                segment = RaySegment(sample_value, px, py, depth_start, depth_end)
+-
+-                # Route to processor owning the scanline [S1, unofficial]
+-                dest_processor = py % num_processors
+-                if dest_processor == processor_id:
+-                    if (px, py) not in pixel_buffers:
+-                        pixel_buffers[(px, py)] = []
+-                    pixel_buffers[(px, py)].append(segment)
+-                else:
+-                    post_async_send(segment, dest_processor)
+-
+-        # Merge Incoming Segments
+-        merge_incoming_segments(pixel_buffers)
+-
+-    # 4. Termination: Designated node coordinates termination [S1, unofficial]
+-    if processor_id == 0:
+-        collect_local_termination_messages()
+-        broadcast_global_termination()
+-    else:
+-        send_local_termination_message()
+-
+-    # 5. Image Assembly: Send completed subimage to host [S1, unofficial]
+-    subimage = extract_subimage(pixel_buffers, image_width, image_height)
+-    send_subimage_to_host(subimage)
+-
+-def merge_incoming_segments(pixel_buffers):
+-    # Sort and merge segments for each pixel using Porter-Duff over [S1, unofficial][S5]
+-    for (px, py), segments in pixel_buffers.items():
+-        # Sort back-to-front by depth_end [S1, unofficial]
+-        segments.sort(key=lambda s: s.depth_end, reverse=True)
+-        final_color, final_opacity = 0.0, 0.0
+-        for seg in segments:
+-            # Extract color and opacity from the integrated sample value [G]
+-            c_seg, a_seg = extract_color_opacity(seg.sample_value)
+-            final_color, final_opacity = porter_duff_over(final_color, final_opacity, c_seg, a_seg)
+-        pixel_buffers[(px, py)] = [(final_color, final_opacity)] # Store result
+-
+-def apply_view_projection(vertices):
+-    # Apply view and projection transformations to 3D vertices [S2, unofficial]
+-    return [transform(v) for v in vertices]
+-
+-def rasterize_polygon(projected_vertices, width, height):
+-    # Identify pixels covered by the projected cell polygon [S3, unofficial]
+-    return [(x, y) for x in range(width) for y in range(height) if point_in_polygon(x, y, projected_vertices)]
+-
+-def integrate_cell_opacity(cell, nodes, px, py):
+-    # Integrate color and opacity for the pixel under the cell [S2, unofficial]
+-    return compute_sample(cell, nodes, px, py)
+-
+-def compute_depth_range(cell, nodes):
+-    # Compute starting and ending depth in view space [S5]
+-    return min(v.z for v in cell.vertices), max(v.z for v in cell.vertices)
+-
+-def build_global_kdtree(local_cells, num_processors):
+-    # Parallel partitioning algorithm: alternate cut directions, average positions, assign by centroid [S1, unofficial]
+-    # Returns a tree structure identical on all processors
+-    pass # Implementation details omitted per source constraints
+-
+-def post_async_send(segment, dest):
+-    # Buffer segments locally and post non-blocking send [S1, unofficial]
+-    pass
+-
+-def extract_color_opacity(sample_value):
+-    # Parse color and opacity from the integrated sample value [G]
+-    return sample_value.color, sample_value.opacity
++    def __init__(self, sample_val, x, y, d_start, d_end):
++        self.sample_val = sample_val
++        self.x, self.y = x, y
++        self.depth_start, self.depth_end = d_start, d_end
++
++def build_kdtree(cells, num_procs):
++    # Placeholder for cooperative k-d tree construction logic
++    return type('KDTree', (), {'leaves': [type('Leaf', (), {'region': set()}) for _ in range(num_procs)]})()
++
++def project_to_screen(vertices, nodes):
++    # Apply view/projection matrices to 3D vertices
++    return [(v.x, v.y) for v in vertices]
++
++def rasterize_polygon(projected_verts, width, height):
++    # Identify pixels covered by the projected cell
++    return [(x, y) for x in range(width) for y in range(height)]
++
++def integrate_cell(cell, nodes, px, py):
++    # Integrate color/opacity for this pixel under the cell
++    return 0.5
++
++def get_depth_range(cell, nodes):
++    # Determine depth range in view space
++    return 0.0, 1.0
++
++def wait_for_termination_messages(): pass
++def broadcast_termination(): pass
++def send_termination_message(): pass
++def get_scanline_subimage(proc_id, height): return []
++def send_to_host(subimage): pass
+ ```
+ 
+@@ -197,9 +196,9 @@
+ 
+ ### [Parallel Cell Projection](875-parallel-cell-projection.md)
+-Parallel Cell Projection is a distributed-memory strategy for object-order volume rendering that decomposes the workload into an object-space projection phase and an image-space composition phase. Unlike ray-casting, it avoids the need for global depth-sorting of cells by having each processor scan-convert its local unstructured cells into ray segments, which are then routed to their final image destinations for merging. It sets itself apart from synchronous cell projection by allowing asynchronous communication and task management to hide data transfer overheads.
++Parallel Cell Projection is a parallelization strategy for Cell-Projection Volume Rendering that distributes the computationally expensive task of software-based polygon generation and the subsequent image-space composition across multiple processors or threads. It sets itself apart from synchronous alternatives by employing asynchronous communication and task management to hide data transfer overheads, and from concurrent scan-conversion/composition approaches by strictly separating these phases to reduce inter-processor communication frequency. It is chosen when rendering large unstructured grids on distributed-memory systems to balance load and scale efficiently.
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** The algorithm avoids offline preprocessing, performing low-cost preprocessing (e.g., view-dependent optimization) in parallel [S2, unofficial]. The rendering time is dominated by scan conversion and communication [S1, S2, unofficial].
+-*   **Memory Complexity:** Memory usage is proportional to the local data size and the number of ray segments buffered for asynchronous communication [S1, unofficial].
++*   **Memory Complexity:** Memory usage is proportional to the local data size and the number of ray segments buffered for asynchronous communication [S1, S2, unofficial].
+ *   **Measured Performance:**
+     *   Rendering 0.5 million tetrahedral cells into a 400x400 pixel image takes 0.5 seconds (2 frames per second) on 128 IBM SP2 nodes (excluding display time) [S1, unofficial].

@@ -1,0 +1,95 @@
+# Photon Mapping for Participating Media
+
+Also called: Jensen and Christensen, Nonlinear RTE photon mapping, Photon Maps for Participating Media, Volume Photon Map, nl-RTE PM
+
+## Overview
+Photon Mapping for Participating Media extends the surface-based photon mapping algorithm to handle light transport within volumetric media, introducing a distinct **volume photon map** to estimate radiance via density estimation [S1]. Unlike methods that rely on straight-line shadow rays for single scattering, this approach uses Monte Carlo photon tracing to account for spatially varying optical properties and general phase functions, making it suitable for non-homogeneous materials [S3, book]. It is primarily distinguished by its separation of the volume photon map (used for indirect illumination) from the surface photon map and its reliance on final gathering to reconstruct inscattered light [S1].
+
+## How it works
+The method consists of two main passes: a photon tracing preprocess and a final gather rendering pass.
+
+### Inputs and Outputs
+*   **Inputs:** Light source definitions (position, flux, spectrum), scene geometry, participating media properties (extinction coefficient $\sigma_t$, scattering coefficient $\sigma_s$, albedo, phase function $p$), and camera parameters.
+*   **Outputs:** A rendered image with indirect illumination and inscattered light from participating media.
+
+### Data Structures
+1.  **Volume Photon Map:** A spatial data structure (typically a kd-tree) storing photons that have interacted with the media.
+    *   **Fields per photon:**
+        *   Position $\mathbf{x}$: 3D coordinates.
+        *   Direction of incidence $\boldsymbol{\omega}_i$: 3D vector (required for anisotropic scattering to recover source radiance toward the eye) [S1].
+        *   Flux $W$: Scalar energy value.
+        *   Wavelength/Color: RGB or spectral data.
+    *   **Storage Criteria:** Only photons representing **indirect illumination** are stored. This includes:
+        *   Photons reflected or transmitted by surfaces *before* entering the media.
+        *   Photons that have been scattered at least once *within* the media [S1].
+        *   Photons stored after the first bounce in refractive media (see Subtopics) [S2].
+
+### Algorithm Steps
+
+#### 1. Photon Tracing (Preprocess)
+1.  **Emit Photon:** Generate a photon from a light source with initial flux $W$ and direction $\boldsymbol{\omega}_0$.
+2.  **Trace through Scene:**
+    *   Trace the photon ray through the scene.
+    *   If the photon intersects a surface, apply surface reflection/refraction. If the photon enters a participating medium, begin volume interaction.
+    *   **Volume Interaction:**
+        *   Calculate the distance to the next scattering event $s$ using the extinction coefficient $\sigma_t(\mathbf{x})$:
+            $$ s = -\frac{\ln(r)}{\sigma_t(\mathbf{x})} $$
+            where $r$ is a uniform random number in $(0, 1]$ [S3, book].
+        *   Move the photon to $\mathbf{x}' = \mathbf{x} + s \boldsymbol{\omega}$.
+        *   **Check for Scattering:** If the photon is inside a medium:
+            *   Determine if scattering occurs (based on albedo $\omega = \sigma_s / \sigma_t$).
+            *   If scattering occurs:
+                *   Store the photon in the **Volume Photon Map** at $\mathbf{x}'$. Record position, incidence direction $\boldsymbol{\omega}$, flux $W$, and color [S1][S3, book].
+                *   Select a new scattering direction $\boldsymbol{\omega}'$ using the phase function $p(\boldsymbol{\omega}, \boldsymbol{\omega}')$ (e.g., Schlick phase function) [S1].
+                *   Update flux: $W \leftarrow W \cdot \sigma_s / \sigma_t$ (or similar energy conservation step depending on specific implementation details not fully specified in sources, but generally proportional to scattering probability) [S3, book].
+                *   Continue tracing from $\mathbf{x}'$ in direction $\boldsymbol{\omega}'$.
+            *   If absorption occurs (photon does not scatter):
+                *   Absorb the photon (terminate trace) or reduce flux to zero [S3, book].
+        *   If the photon exits the medium, continue tracing as a surface ray.
+    *   Repeat until the photon is absorbed, escapes the scene, or a maximum bounce count is reached.
+
+#### 2. Final Gather (Rendering)
+1.  **View Ray Tracing:** For each pixel, cast a view ray from the camera.
+2.  **Identify Interaction Points:** Find points $\mathbf{x}$ on the view ray that lie within participating media.
+3.  **Radiance Estimation:**
+    *   For each point $\mathbf{x}$, query the Volume Photon Map for the $k$ nearest photons.
+    *   Estimate the inscattered radiance $L_i(\mathbf{x}, \boldsymbol{\omega})$ using density estimation [S1]:
+        $$ L_i(\mathbf{x}, \boldsymbol{\omega}) \approx \frac{1}{\pi r_k^2} \sum_{j=1}^{k} \frac{W_j}{\sigma_t(\mathbf{x})} p(\boldsymbol{\omega}_j, \boldsymbol{\omega}) $$
+        *Note: The exact formula for density estimation in volume photon mapping is derived by Jensen and Christensen [S1]. The sources cite the derivation but do not provide the explicit final summation formula with all constants (like $n^2$ for refractive media) in the general case. For refractive media, the relationship involves $n^2$ [S2].*
+    *   For anisotropic scattering, use the stored incidence direction $\boldsymbol{\omega}_j$ to correctly evaluate the phase function $p(\boldsymbol{\omega}_j, \boldsymbol{\omega})$ [S1].
+4.  **Composite:** Combine the estimated inscattered radiance with direct illumination and surface contributions to form the final pixel color.
+
+### Parameters
+*   **Number of Photons ($N$):** High number required for accurate convergence; the method is slow due to this requirement [S3, book].
+*   **Number of Nearest Neighbors ($k$):** Used in density estimation. Not given in the sources.
+*   **Phase Function:** e.g., Schlick phase function [S1].
+*   **Maximum Bounce Depth:** Not given in the sources.
+
+### Edge Cases and Pitfalls
+*   **Overestimation:** The method overestimates radiance inside participating media because energy conservation is not enforced within the volume, only at the surface via a nonsymmetric BTDF [S2].
+*   **Performance:** The method can be slow because many photons are required for accurate convergence [S3, book].
+*   **Refractive Media:** In continuously refractive media, straight shadow rays cannot be used for single scattering. Photons must be stored after the first bounce, increasing the required photon count [S2].
+*   **Nonlinear Dependency:** The squared refractive index $n^2$ creates a strong nonlinear dependency that cannot be compensated by simple rescaling of light source fluxes [S2].
+
+## Subtopics
+
+### Photon Mapping for Refractive Media
+A variant of photon mapping for participating media that handles single-scattered light in continuously refractive media where straight shadow rays are insufficient [S2]. It stores photons after the first bounce (unlike nonrefractive media which store after at least two bounces) to solve single scattering via radiance estimation from the photon map [S2]. The key distinction is the handling of basic radiance $\tilde{L}_i$ and scattered radiance $L_i$ via the squared refractive index $n^2$:
+$$ \tilde{L}_i(\mathbf{x}, \boldsymbol{\omega}, v, t) = \frac{1}{n^2} L_i(\mathbf{x}, \boldsymbol{\omega}_i, v, t) $$
+This relationship is derived from the distribution function and energy conservation principles [S2]. The drawback is that the necessary amount of photons to obtain high-quality results increases significantly due to this approach [S2]. The strong nonlinear dependency of $n^2$ cannot be compensated by simple rescaling of light source fluxes [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Slow. Requires a large number of photons for accurate convergence, making the preprocessing step computationally expensive [S3, book].
+*   **Memory Complexity:** High. Stores a large volume photon map containing positions, directions, and fluxes for all scattered photons [S1][S3, book].
+*   **Strengths:** Handles non-homogeneous materials, spatially varying optical properties, and general phase functions effectively [S3, book]. Straightforward handling of single-scattered light in refractive media [S2].
+*   **Limitations:** Overestimates radiance inside the medium due to lack of volume energy conservation [S2]. Performance degrades with complex refractive media due to increased photon requirements [S2].
+*   **When to Use:** Scenes with complex participating media, non-homogeneous materials, or refractive media where single scattering is significant and cannot be handled by simple shadow rays [S2][S3, book].
+*   **When Not to Use:** Real-time applications or scenes requiring strict energy conservation within the volume [S2].
+
+## Background
+Photon Mapping for Participating Media was introduced by Henrik Wann Jensen and Per Christensen [S1][S3, book]. It extends the original photon mapping method, which was limited to surfaces, to participating media by introducing a volume photon map [S1]. The method uses Monte Carlo simulation of photon transport from light sources, accounting for spatially varying optical properties and general phase functions [S3, book]. It was developed to address the limitations of previous methods that were less useful for volume rendering of spatially varying data [S3, book]. The approach has been used in research for simulating fog effects and other atmospheric phenomena [S1].
+
+## Sources
+[S1] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26
+[S2] Refractive radiative transfer equation, https://doi.org/10.1145/2557605, fetched 2026-10-31
+[S3] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (book)

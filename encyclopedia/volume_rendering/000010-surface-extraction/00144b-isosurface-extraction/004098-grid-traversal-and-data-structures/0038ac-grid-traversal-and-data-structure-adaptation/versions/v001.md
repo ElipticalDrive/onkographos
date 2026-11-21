@@ -1,0 +1,30 @@
+# Grid Traversal and Data Structure Adaptation
+
+Also called: Adaptive Isosurfacing, Hierarchical Grid Traversal
+
+## Overview
+This family of methods extracts isosurfaces from scalar fields by adapting the underlying spatial data structure to the geometry, rather than iterating over a fixed uniform grid. By using hierarchical structures like octrees or sparse hash maps, these algorithms reduce memory usage and computational cost by only processing cells where the surface exists or varies significantly. They set themselves apart from sibling methods like [Transvoxel](6277-transvoxel.md) by relying on standard topological triangulation rules (e.g., Marching Cubes) applied to adapted domains, often requiring specific traversal logic to handle mismatched refinement levels between adjacent cells.
+
+## Shared principles
+All methods in this family operate on a discretized domain, typically a regular grid (Cartesian, octree, or tetrahedral) where each cell contains scalar values or occupancy states at its vertices or centers. The core mechanism involves traversing the grid cells and evaluating the data to determine which parts of the domain constitute the surface.
+
+1.  **Domain Traversal**: The algorithm iterates over the volume data structure. For regular grids, this often involves checking each cell or voxel.
+2.  **Surface Determination**: A criterion is applied to identify surface locations. In isosurface methods, this involves comparing scalar values against a threshold (isovalue) to detect sign changes or equality [30-isosurface-extraction.md]. In blocky meshing, this involves checking occupancy states or material IDs to identify exposed boundaries [31-blocky-meshing.md].
+3.  **Primitive Generation**: Geometric primitives (vertices, edges, faces) are generated based on the determined surface locations.
+4.  **Mesh Coherence**: Adjacent primitives are merged or connected to form a coherent mesh, often requiring vertex merging to avoid duplicates and ensure watertightness [30-isosurface-extraction.md].
+
+## Subtopics
+
+### [Marching Cubes with Octree](1259-marching-cubes-with-octree.md)
+Extracts isosurfaces from scalar fields defined on an adaptive octree domain, combining the topological robustness of Marching Cubes with memory efficiency. It sets itself apart by using a standard lookup-table-based triangulation per cell rather than specialized transition cells, and provides a specific domain abstraction (`MC_Domain`) that handles traversal and interpolation internally.
+
+### [Sparse Marching Cubes](3825-sparse-marching-cubes.md)
+Generates a triangle mesh from a sparse set of 3D points with associated scalar values, avoiding the memory overhead of dense 3D grids. It differs by dynamically gathering corner values for active voxels via lookup, rather than iterating over a fixed dense volume.
+
+### [Hierarchical Marching Cubes Enumeration](5223-hierarchical-marching-cubes-enumeration.md)
+A recursive octree traversal algorithm that explicitly enumerates voxel faces, edges, and vertices to extract meshes, delegating to standard Marching Cubes at leaf nodes. It solves the problem of adapting Marching Cubes to non-uniform octrees by ensuring consistent geometric context across potentially mismatched tree depths.
+
+## Background
+The need for grid traversal adaptation arose from the limitations of uniform grid methods (like standard Marching Cubes) when applied to high-resolution or sparse data, where memory consumption scales cubically with resolution [1259-marching-cubes-with-octree.md]. Early implementations focused on octree-based refinement to skip empty space [1259-marching-cubes-with-octree.md]. Later developments addressed the "crack" artifacts caused by mismatched refinement levels by introducing explicit traversal logic for shared faces and edges [5223-hierarchical-marching-cubes-enumeration.md]. Sparse methods emerged to handle point-cloud-derived fields (like SDFs) where the grid is implicitly defined by active voxels [3825-sparse-marching-cubes.md].
+
+## Sources

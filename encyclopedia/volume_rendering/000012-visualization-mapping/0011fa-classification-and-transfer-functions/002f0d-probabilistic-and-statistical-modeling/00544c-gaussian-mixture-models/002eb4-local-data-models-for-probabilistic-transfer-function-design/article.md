@@ -1,0 +1,135 @@
+# Local Data Models for Probabilistic Transfer Function Design
+
+Also called: Local GMM Classification, Probabilistic Transfer Function Design
+
+## Overview
+Local Data Models for Probabilistic Transfer Function Design is an interactive technique that couples high-dimensional, probabilistic, data-centric segmentation with direct 3D spatial interaction to create transfer functions [S1, unofficial]. It solves the problem of unintuitive histogram-space selection and the overgeneralization of global Gaussian Mixture Models (GMMs) by fitting variable GMMs to user-specified local subsets of data [S1, unofficial]. Unlike global fitting methods that may produce excessive small Gaussians in high-density regions, this method estimates models locally, allowing for efficient pre-classified volume ray-casting [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   A volume dataset with associated features (e.g., scalar values, gradient magnitudes).
+*   A user-defined spherical selection tool moving along the surface of the unclassified volume.
+
+**Outputs:**
+*   A probabilistic data model (a mixture of GMMs) for a specific material type.
+*   Class membership probabilities for all voxels in the volume.
+*   A saved classifier for use in volume rendering.
+
+**Data Structures:**
+*   **Histogram:** Represents the feature space. Selection in image space corresponds to a partial histogram selection [S1, unofficial].
+*   **GMM Component:** Characterized by mean $\mu$, variance $\sigma^2$ (or covariance matrix $\Sigma$), and weight $A$. The response of a single component is:
+    $$ g(x) = A \exp\left(-\frac{(x - \mu)^2}{2\sigma^2}\right) $$
+*   **Classification State:** Each voxel $j$ maintains a probability $P_j$ of belonging to the current class and a boolean flag indicating if it is classified [S1, unofficial].
+
+**Parameters:**
+*   $\delta$: A threshold parameter for the probability gradient constraint. Typical value: 0.5 [S1, unofficial].
+
+**Algorithm:**
+
+1.  **User Selection:** The user moves a spherical selection tool along the surface of the unclassified volume. Voxels within the sphere are marked as selected samples [S1, unofficial].
+2.  **Local Model Estimation:** A mixture of GMMs is fitted to the feature values of the selected subset of the histogram using unsupervised learning [S1, unofficial].
+3.  **Initial Classification:** Samples within a predefined confidence interval of the extracted normal distributions are automatically classified with their respective probabilities [S1, unofficial].
+4.  **Neighborhood Extension:** The classification is extended to neighboring data points to ensure spatial and histogram continuity. For each unclassified neighbor $j$ of a classified member $i$:
+    *   Calculate $P_j$, the probability of $j$ belonging to the class based on the GMM.
+    *   Include $j$ in the class if all conditions are met:
+        1.  $P_j$ is significantly above zero.
+        2.  $j$ is a direct neighbor (in image space) to a member $i$ of the class.
+        3.  $P_j > \delta P_i$, where $\delta < 1$ [S1, unofficial].
+5.  **Verification and Saving:** The user inspects the classification. If verified, the local data model is saved to a list of valid classifiers. Members (for a given confidence value) are removed from the unclassified volume to prevent re-classification [S1, unofficial].
+6.  **Rendering:** Pre-classified volume ray-casting is used, where each voxel is assigned class memberships during class construction to avoid evaluating large numbers of Gaussians per sample point on rays [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def local_data_model_classification(volume, features, user_selection_sphere):
+    """
+    volume: 3D array of voxels
+    features: 3D array of feature vectors (e.g., [scalar, gradient])
+    user_selection_sphere: function returning list of voxel indices within sphere
+    """
+    # Step 1: User Selection
+    selected_indices = user_selection_sphere(volume)
+    selected_features = features[selected_indices]
+    
+    # Step 2: Local Model Estimation
+    # Fit GMM to selected features
+    gmm_model = fit_gmm(selected_features)
+    
+    # Step 3: Initial Classification
+    # Initialize classification probabilities for all voxels
+    class_probabilities = np.zeros(volume.shape)
+    classified_mask = np.zeros(volume.shape, dtype=bool)
+    
+    # Calculate probabilities for all voxels based on GMM
+    for voxel_idx in range(volume.size):
+        feat = features[voxel_idx]
+        class_probabilities[voxel_idx] = gmm_model.evaluate(feat)
+        
+    # Mark initial confident samples
+    confidence_threshold = 0.9 # Example value, not specified in source
+    for idx in selected_indices:
+        if class_probabilities[idx] > confidence_threshold:
+            classified_mask[idx] = True
+            
+    # Step 4: Neighborhood Extension
+    delta = 0.5
+    queue = [idx for idx in selected_indices if classified_mask[idx]]
+    
+    while queue:
+        current_idx = queue.pop(0)
+        current_prob = class_probabilities[current_idx]
+        
+        # Get direct neighbors in image space
+        neighbors = get_direct_neighbors(current_idx, volume.shape)
+        
+        for neighbor_idx in neighbors:
+            if not classified_mask[neighbor_idx]:
+                neighbor_prob = class_probabilities[neighbor_idx]
+                
+                # Condition i: Probability significantly above zero
+                if neighbor_prob <= 1e-6:
+                    continue
+                    
+                # Condition ii: Direct neighbor (checked by get_direct_neighbors)
+                
+                # Condition iii: Pj > delta * Pi
+                if neighbor_prob > delta * current_prob:
+                    classified_mask[neighbor_idx] = True
+                    queue.append(neighbor_idx)
+                    
+    # Step 5: Verification and Saving
+    # User verifies visually. If accepted:
+    saved_classifiers.append({
+        'model': gmm_model,
+        'mask': classified_mask,
+        'probabilities': class_probabilities
+    })
+    
+    # Remove members from unclassified volume
+    unclassified_volume_mask = np.logical_not(classified_mask)
+    
+    return saved_classifiers, unclassified_volume_mask
+
+def pre_classified_volume_ray_casting(volume, classifiers):
+    """
+    Uses pre-computed class memberships to speed up rendering.
+    """
+    # Each voxel is assigned class memberships during class construction
+    # Ray casting uses these pre-computed probabilities instead of evaluating GMMs
+    pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** Fitting GMMs is iterative and depends on the number of selected samples and components. Classification involves evaluating the GMM for all voxels and a graph traversal for neighborhood extension.
+*   **Memory Complexity:** Requires storing the GMM parameters for each class and the probability map for all voxels.
+*   **Performance:** Evaluating large numbers of Gaussians per sample point on rays slows down volume rendering significantly [S1, unofficial]. This is alleviated by using pre-classified volume ray-casting, where each voxel is assigned class memberships during class construction [S1, unofficial].
+*   **Strengths:** Interactive, intuitive 3D selection; avoids overgeneralization of global GMMs; efficient rendering via pre-classification.
+*   **Limitations:** Performance degrades with large numbers of Gaussians if pre-classification is not used; requires user interaction for selection.
+
+## Background
+This method was presented by H. Obermaier and K. I. Joy at EuroVis Short Papers in 2013 [S1, unofficial]. It addresses the problems of interactive multi-dimensional transfer function design by coupling high-dimensional, probabilistic, data-centric segmentation with interaction in the natural 3D space of the volume [S1, unofficial]. It is used in fields such as medicine and engineering where distinct materials need to be displayed [S1, unofficial].
+
+## Sources
+[S1] Local Data Models for Probabilistic Transfer Function Design, https://doi.org/10.2312/pe.eurovisshort.eurovisshort2013.043-047, fetched 2026-10-26 (unofficial)

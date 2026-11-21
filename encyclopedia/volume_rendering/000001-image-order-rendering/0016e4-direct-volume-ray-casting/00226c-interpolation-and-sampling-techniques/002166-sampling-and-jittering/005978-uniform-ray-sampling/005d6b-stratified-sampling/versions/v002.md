@@ -1,0 +1,34 @@
+# Stratified Sampling
+Also called: Discrete Volume Rendering, Fragmental Approximate Volume Rendering Method
+## Overview
+Stratified Sampling partitions the ray depth interval $[t_n, t_f]$ into $k$ equal-sized bins and generates one sample per bin, avoiding the clustering and gaps inherent in pure uniform random sampling [S1]. It sets itself apart from its parent [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by guaranteeing coverage of the entire depth range, and from its siblings by providing a structured variance reduction technique for the volume rendering integral.
+## Shared principles
+The method divides the integration interval $[t_n, t_f]$ into $k$ equal-sized bins. The boundaries $t_i$ for $i=0, \dots, k$ are defined as:
+$$ t_i = t_n + i \cdot \frac{t_f - t_n}{k} $$
+For each bin $i$ (where $i=1, \dots, k$), a sample $\tau_i$ is generated. In the randomized (unbiased) variant, a uniform random number $u_i \sim U[0, 1]$ is drawn, and the sample is computed as:
+$$ \tau_i = t_{i-1} + u_i \cdot (t_i - t_{i-1}) $$
+In the deterministic (midpoint) variant, the center of the bin is used:
+$$ \tau_i = 0.5 \cdot (t_{i-1} + t_i) $$
+The 3D position $\mathbf{p}_i$ for each sample is calculated from the ray origin $\mathbf{o}$ and direction $\mathbf{d}$:
+$$ \mathbf{p}_i = \mathbf{o} + \tau_i \mathbf{d} $$
+The rendered color is approximated by summation [S1]:
+$$ \hat{C}(\mathbf{r}) = \sum_{i=1}^{k} T_i \alpha_i c_i $$
+where $c_i$ is the color contribution at $\tau_i$, and $\alpha_i$ and $T_i$ are the opacity and transmittance, respectively:
+$$ \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
+$$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
+where $\sigma_i$ is the density at sample $i$, and $\delta_i = t_i - t_{i-1}$ is the distance between neighboring sampling points [S1].
+## Subtopics
+
+### [Stratified Monte Carlo Radiance Estimate](1373-stratified-monte-carlo-radiance-estimate.md)
+Focuses on the variance reduction of the radiance integral along a single ray segment.
+
+### [Batch Stratified Sampling](2730-batch-stratified-sampling.md)
+Optimizes for batched execution and GPU-accelerated neural rendering pipelines by vectorizing bin boundary and sampling operations.
+
+### [Stratified Ray Sampling](3014-stratified-ray-sampling.md)
+Extends stratification to support linear disparity sampling (`lindisp`) for scenes with large depth variations.
+
+## Background
+Originating from the Neural Radiance Field (NeRF) framework, this method was proposed to approximate the continuous volume rendering integral by dividing the ray segment into parts and uniformly randomly sampling within each part [S1]. It addresses the limitation of fixed offline sampling locations by ensuring better coverage of the ray space.
+## Sources
+[S1] Neural Radiance Field-based Visual Rendering: a Comprehensive Review, https://ieeexplore.ieee.org/abstract/document/11455380, fetched 2026-10-30

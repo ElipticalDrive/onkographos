@@ -1,0 +1,164 @@
+# Absolute Trajectory Error Computation
+
+Also called: ATE, ATE RMSE Calculation, ATE RMSE Computation, Absolute Trajectory Error Measurement, Absolute Trajectory Error RMSE, Ego-Motion Estimation Evaluation
+
+## Overview
+Computes the Root Mean Square Error (RMSE) of the translation component between a ground truth trajectory and an estimated trajectory after optimal alignment. It quantifies the global scale and drift of an ego-motion estimation system by measuring the integrated distance between pose estimates and ground truth [S1]. Unlike relative error metrics, ATE evaluates the absolute consistency of the trajectory in the world frame [S2, unofficial].
+
+## How it works
+**Inputs:**
+- Ground truth trajectory: A sequence of $N$ poses $T_{gt} = \{P_{gt,1}, \dots, P_{gt,N}\}$, where each $P_{gt,i} \in SE(3)$ is a $4 \times 4$ transformation matrix (typically world-to-camera or camera-to-world, must be consistent with estimated poses).
+- Estimated trajectory: A sequence of $N$ poses $T_{est} = \{P_{est,1}, \dots, P_{est,N}\}$, aligned to the same coordinate frame convention.
+- Correspondence: The $i$-th pose in $T_{est}$ corresponds to the $i$-th pose in $T_{gt}$ [S2, unofficial].
+
+**Outputs:**
+- `ate_rmse`: The scalar ATE RMSE value in meters (or units of the ground truth scale) [S2, unofficial].
+- `trans_error`: An array of per-frame translation errors [S3, unofficial].
+
+**Data Structures:**
+- Translation vectors: Extracted from the 4th row, 3rd column (or 3rd row, 4th column depending on convention) of the $4 \times 4$ pose matrices. Let $t_{gt} \in \mathbb{R}^{3 \times N}$ and $t_{est} \in \mathbb{R}^{3 \times N}$ be the stacked translation vectors [S2, unofficial].
+
+**Steps:**
+
+1. **Preprocessing and Alignment:**
+   - Filter out invalid poses. If a ground truth pose contains NaN values, skip the corresponding frame in the estimated trajectory [S2, unofficial].
+   - Normalize estimated rotation quaternions if the input is provided in quaternion form [S2, unofficial].
+   - Align the estimated trajectory to the ground truth trajectory using a similarity transformation (Sim(3)) or rigid transformation (SE(3)) to minimize the alignment error. The standard approach uses Horn's method for absolute orientation [S2, unofficial].
+     - Let $s, R, t$ be the scale, rotation, and translation parameters of the alignment transform.
+     - Compute aligned estimated translations: $t_{est, aligned} = s \cdot R \cdot t_{est} + t$ [S3, unofficial].
+
+2. **Compute Per-Frame Translation Error:**
+   - For each frame $i$, compute the translation error vector:
+     $$ e_{trans, i} = t_{gt, i} - t_{est, aligned, i} $$
+   - Compute the magnitude of the error:
+     $$ e_{trans, i} = \| e_{trans, i} \|_2 = \sqrt{\sum_{j=1}^{3} (e_{trans, i, j})^2} $$
+   - Store $e_{trans, i}$ in an array `trans_error` [S3, unofficial].
+
+3. **Compute ATE RMSE:**
+   - Calculate the mean of the squared translation errors:
+     $$ \text{MSE} = \frac{1}{N} \sum_{i=1}^{N} (e_{trans, i})^2 $$
+   - The ATE RMSE is the square root of the MSE:
+     $$ \text{ATE RMSE} = \sqrt{\text{MSE}} $$
+   - Alternatively, some implementations compute the mean of the errors directly (Mean ATE), but RMSE is the standard metric for "Absolute Trajectory Error" in the context of SLAM evaluation [S1][S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_ate_rmse(gt_poses, est_poses):
+    """
+    Compute Absolute Trajectory Error (ATE) RMSE.
+    
+    Args:
+        gt_poses: List of N 4x4 numpy arrays (ground truth poses).
+        est_poses: List of N 4x4 numpy arrays (estimated poses).
+        
+    Returns:
+        ate_rmse: Float, the ATE RMSE.
+        trans_error: Array of N floats, per-frame translation errors.
+    """
+    N = len(gt_poses)
+    if N == 0:
+        return 100.0, np.array([]) # Pitfall: Return default error if evaluation fails [S2, unofficial]
+
+    # 1. Extract translation vectors
+    # Assuming poses are 4x4 matrices. Translation is typically row 3, cols 0-2 or col 3, rows 0-2.
+    # We assume standard column-major or row-major consistency. 
+    # Here we assume translation is in the 4th column (indices [0:3, 3]) for column-major 
+    # or 4th row (indices [3, 0:3]) for row-major. 
+    # The source [S2, unofficial] mentions "3rd column, 4th row", which implies row 3, cols 0-2 in 0-indexed notation 
+    # if the matrix is stored as [row][col]. Let's assume standard numpy array indexing:
+    # t = pose[3, 0:3] for row-major (common in OpenGL/Python) or pose[0:3, 3] for column-major.
+    # We will use pose[3, 0:3] as per common Python/NumPy convention for row-major matrices.
+    
+    gt_trans = np.array([pose[3, 0:3] for pose in gt_poses])
+    est_trans = np.array([pose[3, 0:3] for pose in est_poses])
+
+    # Filter NaNs
+    valid_mask = ~np.any(np.isnan(gt_trans), axis=1)
+    gt_trans = gt_trans[valid_mask]
+    est_trans = est_trans[valid_mask]
+    N_valid = len(gt_trans)
+    
+    if N_valid == 0:
+        return 100.0, np.array([])
+
+    # 2. Align estimated trajectory to ground truth
+    # Using Horn's method for Sim(3) or SE(3). 
+    # For ATE, often a similarity transform (scale, rotation, translation) is used to align the trajectories.
+    # This step is critical to remove global scale and drift differences.
+    # We implement a simplified SE(3) alignment (Procrustes) here. 
+    # For full Sim(3), scale estimation is added.
+    
+    # Compute centroids
+    mu_gt = np.mean(gt_trans, axis=0)
+    mu_est = np.mean(est_trans, axis=0)
+    
+    # Center the data
+    gt_centered = gt_trans - mu_gt
+    est_centered = est_trans - mu_est
+    
+    # Compute covariance matrix
+    H = est_centered.T @ gt_centered
+    
+    # SVD
+    U, S, Vt = np.linalg.svd(H)
+    
+    # Rotation
+    d = np.linalg.det(Vt.T @ U.T)
+    D = np.eye(3)
+    D[2, 2] = d
+    R = Vt.T @ D @ U.T
+    
+    # Translation
+    t = mu_gt - R @ mu_est
+    
+    # Scale (Optional for Sim(3), but often ATE is computed after SE(3) alignment in some contexts, 
+    # or Sim(3) in others. The source [S2, unofficial] mentions "Align... using Horn's method". 
+    # Horn's method can solve for Sim(3). We will assume Sim(3) alignment for robustness.
+    
+    # Scale factor
+    scale = np.sum(np.square(gt_centered)) / np.sum(np.square(est_centered))
+    scale = np.sqrt(scale)
+    
+    # Apply alignment
+    est_aligned = scale * (est_centered @ R.T) + mu_gt
+    
+    # 3. Compute translation errors
+    e_trans_vec = gt_trans - est_aligned
+    trans_error = np.sqrt(np.sum(e_trans_vec**2, axis=1))
+    
+    # 4. Compute RMSE
+    ate_rmse = np.sqrt(np.mean(trans_error**2))
+    
+    return ate_rmse, trans_error
+```
+
+**Parameters:**
+- `baseline`: In some evaluations, a baseline map processed with a Gaussian blur kernel (size $9 \times 9 \times 9$ voxels, $\sigma=4/3$) is used to compute ATE [S1].
+
+**Edge Cases and Pitfalls:**
+- If trajectory evaluation fails (e.g., no valid poses), ATE RMSE is set to 100.0 [S2, unofficial].
+- Ensure coordinate frame conventions (world-to-camera vs. camera-to-world) are consistent between GT and estimated poses before alignment [S2, unofficial].
+- Precision issues may arise if trajectories are very large or very small; normalization during alignment helps [G].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ for error computation, where $N$ is the number of frames. Alignment is $O(N)$ or $O(N \log N)$ depending on the solver, but typically dominated by the linear scan for error calculation.
+- **Memory Complexity:** $O(N)$ to store translation vectors and errors.
+- **Strengths:** Provides a single scalar metric for global trajectory accuracy. Simple to compute and interpret.
+- **Limitations:** Sensitive to global scale errors if Sim(3) alignment is not used. Does not capture local drift or oscillations as well as relative error metrics.
+- **When to use:** Evaluating the global consistency of SLAM systems, visual odometry, or pose estimation pipelines.
+- **When not to use:** When local accuracy or drift over short intervals is more important than global consistency.
+
+## Background
+- **Origin:** The Absolute Trajectory Error (ATE) was introduced as a standard metric for evaluating ego-motion estimation in SLAM and visual odometry [S1]. It is widely used in benchmarks such as the TUM RGB-D dataset [S1].
+- **Development:** Initially proposed to measure the integrated distance between pose estimates and ground truth, it has become a de facto standard in the field [S1].
+- **Usage:** Commonly used in RGB-D SLAM, Structure from Motion (SfM), and NeRF/Gaussian Splatting pose estimation evaluations [S1][S2, S3, unofficial].
+
+## Sources
+[S1] Compressed Voxel-Based Mapping Using Unsupervised Learning, https://doi.org/10.3390/robotics6030015, fetched 2026-10-26
+[S2] spla-tam/SplaTAM, https://github.com/spla-tam/SplaTAM, fetched 2026-10-27 (unofficial)
+[S3] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)

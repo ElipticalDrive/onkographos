@@ -1,0 +1,41 @@
+# Primitive Representation
+
+Also called: Gaussian Primitives, Splat Primitives
+
+## Overview
+Primitive Representation defines the geometric and appearance attributes of the explicit 3D primitives used to represent a scene in differentiable splatting methods. It solves the ambiguity and inefficiency of volumetric Gaussian mixtures for sharp geometry by defining the fundamental density function, shape, and color storage of each splat [S1, unofficial]. It differs from sibling methods by varying the fundamental density function (e.g., half-Gaussians, surfels) or the parameterization of appearance (e.g., Bézier triangles) while maintaining the core splatting pipeline of projection and alpha compositing.
+
+## Shared principles
+All child methods share the core requirement of defining a 3D primitive with a position, orientation, scale, and appearance attributes [G]. The standard 3D Gaussian primitive is defined by a mean $\boldsymbol{\mu}$ for position, a covariance $\Sigma$ for shape and orientation, and appearance attributes like Spherical Harmonics coefficients and opacity $\alpha$ [G]. Parameterized as $\Sigma^w = R S S^T R^T$ in world space, where $R$ is rotation and $S$ is scaling [G]. The rendering pipeline projects these 3D primitives to 2D screen space [G]. The covariance transforms via the view matrix $W$ and projection Jacobian $J$: $\Sigma = J W \Sigma^w W^T J^T$ [G]. The integral of the 3D density along the view direction yields the 2D splat density [G].
+
+## Subtopics
+
+### [GaussianSet Data Structure](2074-gaussianset-data-structure.md)
+The `GaussianSet` is the core data structure in 3D Gaussian Splatting (3DGS) that stores the explicit attributes of a set of $N$ 3D Gaussian primitives, enabling differentiable volume rendering via GPU rasterization. It solves the problem of efficiently managing high-dimensional geometric and appearance data—position, orientation, scale, opacity, and spherical harmonics coefficients—by organizing them into contiguous tensors suitable for batched processing and gradient-based optimization. Unlike implicit neural fields or hierarchical spatial structures, `GaussianSet` maintains a flat, unstructured list of primitives, prioritizing direct access and parallel computation over spatial locality. See [GaussianSet Data Structure](2074-gaussianset-data-structure.md).
+
+### [2D Gaussian Splatting Rasterization](4815-2d-gaussian-splatting-rasterization.md)
+This method renders a scene represented by 2D Gaussian primitives (surfels) into RGB, alpha, normal, and depth maps using a custom rasterizer. It differs from standard 3D Gaussian Splatting by operating on surfels projected into screen space, accumulating color and geometric attributes via front-to-back alpha compositing [Parent]. It serves as the Tier-1 NumPy reference implementation for 2D Gaussian Splatting, performing ray-surfel intersection per pixel using the projection matrix. See [2D Gaussian Splatting Rasterization](4815-2d-gaussian-splatting-rasterization.md).
+
+### [Gaussian Conditional Probability Formulation](4937-gaussian-conditional-probability-formulation.md)
+This method decomposes a 3D Gaussian probability density into a product of a marginal distribution along the depth axis and a conditional distribution over the 2D coordinates given the depth. It treats the unnormalized 4D Gaussian as a special probability distribution over spatial coordinates $(u, v)$ and time $t$ (or depth), enabling factorization into temporal and conditional spatial components. This factorized approach provides a computationally efficient way to model volumetric data for slice-based rendering or tomographic reconstruction compared to processing the full 3D density directly. See [Gaussian Conditional Probability Formulation](4937-gaussian-conditional-probability-formulation.md).
+
+### [Primitive Geometry and Distribution](6228-primitive-geometry-and-distribution.md)
+This family defines the geometric primitives used to represent 3D scenes in differentiable splatting methods, extending the standard 3D Gaussian ellipsoid to alternative shapes, distributions, and dimensionalities. It solves the limitations of volumetric Gaussian mixtures, such as ambiguous geometry, poor mesh extraction, and inefficient representation of sharp edges or opaque surfaces, by introducing planar disks, fat-tailed distributions, generalized exponential functions, and polyhedral volumes. It differs from sibling methods by varying the fundamental density function or geometric support of the primitive while maintaining the core splatting pipeline of projection and alpha compositing. See [Primitive Geometry and Distribution](6228-primitive-geometry-and-distribution.md).
+
+### [3D Half-Gaussian Splatting](9011-3d-half-gaussian-splatting.md)
+3D Half-Gaussian Splatting (3D-HGS) is a reconstruction kernel for 3D Gaussian Splatting that replaces the standard full 3D Gaussian with a 3D Half-Gaussian to address shape and color discontinuities (Gibbs phenomenon) at object boundaries and texture-rich areas. It achieves higher rendering quality without compromising speed by allowing each half of the split Gaussian to have different opacity values while sharing geometric parameters. Unlike 2D-GS, which performs surface rendering, 3D-HGS retains volumetric rendering to preserve performance while enabling accurate modeling of discontinuous functions. See [3D Half-Gaussian Splatting](9011-3d-half-gaussian-splatting.md).
+
+### [Texture and Appearance Representation](9528-texture-and-appearance-representation.md)
+Texture and Appearance Representation defines how the color $c_i$ of a 3D Gaussian primitive is determined during rendering, extending the basic geometric parameters ($\boldsymbol{\mu}_i, \boldsymbol{\Sigma}_i$) and opacity $\alpha_i$. It solves the limitation of static color storage by enabling high-frequency details or view-dependent effects (specular highlights, anisotropy) without excessively increasing the number of primitives. It sets itself apart from sibling methods like [GaussianSet Data Structure](2074-gaussianset-data-structure.md) by focusing on the semantic definition of color rather than memory layout, and from [Primitive Geometry and Distribution](6228-primitive-geometry-and-distribution.md) by addressing radiance rather than shape [G]. See [Texture and Appearance Representation](9528-texture-and-appearance-representation.md).
+
+### [Bézier Gaussian Triangle](11816-b-zier-gaussian-triangle.md)
+The Bézier Gaussian Triangle (BG-Triangle) is a hybrid 3D primitive representation that combines Bézier triangle surfaces for explicit geometry with 3D Gaussian sub-primitives for appearance, enabling differentiable rendering with sharp boundaries. It solves the problem of blurry or aliased edges common in pure Gaussian splatting by defining the object's silhouette and surface topology via parametric Bézier patches, while using Gaussians only for shading and color. Unlike standard 3D Gaussian Splatting, which relies on the overlap of many opaque Gaussians to form shapes, BG-Triangle maintains distinct, sharp boundaries between primitives, making it particularly suitable for vectorization and compact scene representation. See [Bézier Gaussian Triangle](11816-b-zier-gaussian-triangle.md).
+
+### Gaussian Surfels
+Uses zero-thickness oriented surfels [S1, unofficial].
+
+## Background
+The concept of representing scenes with explicit geometric primitives for differentiable rendering emerged from the need to combine the speed of rasterization with the flexibility of neural fields. The standard 3D Gaussian Splatting approach [Parent] popularized the use of anisotropic 3D Gaussians as the primary primitive. Subsequent research explored alternative primitives to address specific limitations such as sharp edges (Bézier Gaussians), surface accuracy (Surfels, Half-Gaussians), and computational efficiency (Conditional Formulations). The family of Primitive Representations continues to evolve to support diverse applications ranging from static reconstruction to dynamic scenes and texture mapping.
+
+## Sources
+[S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,155 @@
+# HIVE (HIerarchical Volume Encoding)
+Also called: HIerarchical Volume Encoding
+
+## Overview
+HIVE is a plug-and-play module for neural implicit surface reconstruction that explicitly encodes spatial information using hierarchical feature volumes to capture high-frequency details and enforce spatial consistency [S1, S1, unofficial]. It replaces or augments the implicit encoding of MLPs by concatenating features from multiple low-to-high resolution volumes, avoiding the global incoherence of single high-resolution volumes and the hash collisions of hash-table encodings [S1, S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view images $\{I_i\}_{i=1}^N$ and corresponding camera poses. A point $x \in \mathbb{R}^3$ and viewing direction $v \in S^2$.
+*   **Outputs:** A reconstructed 3D surface $S$ defined by the zero-level set of an SDF, and rendered images.
+
+**Data Structures:**
+*   **Feature Volumes:** A set of $K$ 3D grids (volumes). In the basic setting, $K=8$ [S1, S1, unofficial].
+*   **Resolutions:** The volumes have resolutions increasing from $2 \times 2 \times 2$ to $256 \times 256 \times 256$ [S1, S1, unofficial]. The source text specifies the sequence ends at 256 for the initial stage, but mentions high-resolution volumes of 512 or 1024 for the second stage [S1, S1, unofficial].
+*   **Feature Dimension:** Each volume stores a small number of feature channels (e.g., 4 channels as implied by the progression description, though exact channel count per volume is not explicitly fixed in the text, the concatenation implies a fixed total input dimension to the MLP) [S1, S1, unofficial].
+*   **Sparse High-Resolution Volumes:** High-resolution volumes (512 or 1024) are stored as sparse structures, keeping only voxels near the surface [S1, S1, unofficial].
+
+**Numbered Steps:**
+1.  **Stage 1 (Coarse Reconstruction):** Compute an initial surface reconstruction using features from low-to-medium resolution volumes (resolutions 2 to 256) [S1, S1, unofficial].
+    *   For a query point $x$, trilinearly interpolate features from all $K$ volumes.
+    *   Concatenate these features to form $F(x)$ [S1, S1, unofficial].
+    *   Input $F(x)$ to the SDF network to predict the SDF value.
+    *   Render images and minimize the difference between rendered and input images, plus two regularization terms for smoothness [S1, S1, unofficial].
+2.  **Sparsification:** Based on the preliminary surface from Stage 1, sparsify the high-resolution volumes (512 or 1024) [S1, S1, unofficial].
+    *   Keep only voxels located near the surface of the preliminary result.
+    *   Discard empty or distant voxels to reduce memory consumption [S1, S1, unofficial].
+3.  **Stage 2 (Fine Reconstruction):** Finalize the result using features from the sparsified high-resolution volumes [S1, S1, unofficial].
+    *   Query features from the sparse high-resolution volumes (if the point is within the sparse structure) and the dense low-resolution volumes.
+    *   Concatenate and input to the SDF network.
+    *   Optimize the network and volume features to minimize rendering loss and smoothness regularization [S1, S1, unofficial].
+
+**Formulas:**
+*   **Rendering Equation:**
+    $$ C(r) = \int_{t_n}^{t_f} T(t) \rho(t) c(p(t), v) dt $$
+    where $T(t)$ is the accumulated transmittance, $\rho(t)$ is the density, and $c(p(t), v)$ is the color [S1, S1, unofficial].
+*   **Weighting Function:**
+    $$ w(t) = T(t)\rho(t) $$
+    $$ T(t) = e^{-\int_0^t \rho(u) du} $$
+    [S1, S1, unofficial]
+*   **Density from SDF:**
+    $$ \rho(t) = \max\left(-\frac{d\Phi}{dt}(\text{sdf}(p(t))), 0\right) $$
+    where $\Phi_s(x) = (1 + e^{-sx})^{-1}$ is the sigmoid function with sharpness parameter $s$ [S1, S1, unofficial].
+*   **SDF Definition:**
+    $$ S = \{x \in \mathbb{R}^3 \mid \text{sdf}(F(x)) = 0\} $$
+    [S1, S1, unofficial]
+
+**Parameters:**
+*   **Number of Volumes:** 8 in the basic setting [S1, S1, unofficial].
+*   **Resolutions:** 2, 8, 32, 128, 256 (dense); 512, 1024 (sparse, high-res) [S1, S1, unofficial].
+*   **Sharpness $s$:** Not given in the sources.
+*   **Regularization Terms:** Two smoothness terms are used, but their specific mathematical forms are not given in the sources [S1, S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hive_reconstruct(images, cameras):
+    # Initialize 8 dense feature volumes with resolutions [2, 8, 32, 128, 256, 512, 1024, ...]
+    # Note: Source specifies 8 volumes, resolutions 2 to 256 for stage 1.
+    # High-res volumes (512, 1024) are initialized but will be sparsified.
+    volumes = initialize_feature_volumes(resolutions=[2, 8, 32, 128, 256, 512, 1024, 2048]) # 8 volumes total
+    
+    sdf_mlp = initialize_mlp()
+    color_mlp = initialize_mlp()
+    
+    # Stage 1: Coarse Optimization
+    for epoch in range(coarse_epochs):
+        for image, camera in zip(images, cameras):
+            rays = generate_rays(camera)
+            points = sample_points_along_rays(rays, near, far)
+            
+            # Get features from all volumes (dense)
+            features = []
+            for vol in volumes:
+                feat = trilinear_interpolate(vol, points)
+                features.append(feat)
+            
+            # Concatenate features
+            F_x = concatenate(features, dim=-1)
+            
+            # Predict SDF and Color
+            sdf_val = sdf_mlp(F_x)
+            # Color prediction typically uses direction and intermediate features
+            color = color_mlp(F_x, rays.direction)
+            
+            # Render
+            density = compute_density(sdf_val)
+            transmittance = compute_transmittance(density)
+            rendered_color = integrate_density_color(transmittance, density, color)
+            
+            # Loss
+            loss = image_loss(rendered_color, image) + smoothness_regularization(sdf_val)
+            optimize(loss)
+            
+    # Sparsify High-Resolution Volumes
+    # Identify voxels near the surface from Stage 1
+    surface_points = extract_surface(sdf_mlp, volumes)
+    sparse_mask = create_sparse_mask(volumes, surface_points, threshold=1.0)
+    volumes[high_res_indices] = apply_sparsity(volumes[high_res_indices], sparse_mask)
+    
+    # Stage 2: Fine Optimization
+    for epoch in range(fine_epochs):
+        for image, camera in zip(images, cameras):
+            rays = generate_rays(camera)
+            points = sample_points_along_rays(rays, near, far)
+            
+            features = []
+            for i, vol in enumerate(volumes):
+                if i in high_res_indices:
+                    # Only interpolate if point is within sparse structure
+                    if is_inside_sparse_structure(vol, points):
+                        feat = trilinear_interpolate(vol, points)
+                    else:
+                        feat = zero_vector() # Or fallback to lower res
+                else:
+                    feat = trilinear_interpolate(vol, points)
+                features.append(feat)
+            
+            F_x = concatenate(features, dim=-1)
+            sdf_val = sdf_mlp(F_x)
+            color = color_mlp(F_x, rays.direction)
+            
+            density = compute_density(sdf_val)
+            transmittance = compute_transmittance(density)
+            rendered_color = integrate_density_color(transmittance, density, color)
+            
+            loss = image_loss(rendered_color, image) + smoothness_regularization(sdf_val)
+            optimize(loss)
+            
+    return extract_mesh(sdf_mlp, volumes)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Memory Consumption:** High-resolution volumes (512+) consume significant memory if dense. Sparsification is critical [S1, S1, unofficial].
+*   **Hash Collisions:** Avoided by using hierarchical volumes instead of hash tables [S1, S1, unofficial].
+*   **Global Incoherence:** Avoided by low-resolution volumes enforcing spatial consistency [S1, S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Reduced compared to single high-resolution dense volumes due to sparsification and the use of low-dimensional features in high-resolution volumes [S1, S1, unofficial].
+*   **Measured Performance:**
+    *   DTU dataset: NeuS error reduced by 25% (0.84 mm to 0.63 mm) [S1, S1, unofficial].
+    *   DTU dataset: VolSDF error reduced by 23% (0.86 mm to 0.66 mm) [S1, S1, unofficial].
+    *   DTU dataset: NeuralWarp error reduced by 10% (0.68 mm to 0.61 mm) [S1, S1, unofficial].
+    *   EPFL dataset: NeuralWarp error reduced by 31% (full metric) [S1, S1, unofficial].
+*   **Strengths:** Captures high-frequency details, enforces spatial consistency, avoids hash collisions, plug-and-play.
+*   **Limitations:** Requires multi-stage optimization, sparsification adds complexity.
+*   **When to use:** When high-frequency detail and smoothness are both required, and memory is a constraint for high-res volumes.
+*   **When not to use:** If single-stage optimization is required, or if memory is extremely limited even for sparse structures.
+
+## Background
+HIVE was introduced in the paper "HIVE: HIerarchical Volume Encoding for Neural Implicit Surface Reconstruction" [S1, S1, unofficial]. It addresses limitations in existing methods where single high-resolution volumes lead to incoherent shapes and hash-table encodings suffer from collisions [S1, S1, unofficial]. It is demonstrated on DTU, EPFL, and BlendedMVS datasets [S1, S1, unofficial].
+
+## Sources
+[S1] HIVE: HIerarchical Volume Encoding for Neural Implicit Surface Reconstruction, https://doi.org/10.48550/arxiv.2408.01677, fetched 2026-10-26 (unofficial)

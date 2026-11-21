@@ -1,0 +1,72 @@
+# Background Rendering Kernel (Forward)
+## Overview
+A CUDA kernel that renders the background color for rays that have transmitted through the volume [S1, unofficial]. It serves as the final compositing stage in the background rendering kernel, accumulating color from the background layers and adding a constant ambient term based on remaining transmission [S1, unofficial]. It differs from standard equirectangular sampling by using concentric spheres to distribute samples, which helps mitigate aliasing and provides a structured traversal of the background layers [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+- `grid`: Background environment data structure (e.g., layered spherical map).
+- `ray_spec`: Ray origins and directions.
+- `options`: Rendering configuration parameters.
+- `log_transmit`: Per-ray logarithmic transmission values.
+- `output`: Buffer for the resulting background color.
+
+**Data Structures:**
+- `log_transmit`: Array of floats, indexed by `ray_id`. Stores the natural logarithm of the accumulated transmission along the ray through the volume.
+
+**Steps:**
+1. **Initialize Ray Specification**: Extract ray origins and directions from the input buffers for the current thread's `ray_id`.
+2. **Find Background Bounds**: Call `ray_find_bounds_bg` to determine the intersection interval of the ray with the background environment bounds.
+3. **Check Occlusion**: If `log_transmit[ray_id] < -25.0f`, the ray is considered highly occluded. The kernel returns early, skipping background rendering for this ray [S1, unofficial].
+4. **Render Background Forward**: Call `render_background_forward` with the `grid`, `ray_spec`, `options`, `log_transmit`, and `output` buffers. This function samples the background using concentric spheres and composites the result with the transmission [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+@cuda.kernel
+def render_background_kernel_forward(grid, ray_origins, ray_directions, options, log_transmit, output):
+    ray_id = cuda.grid(1)
+    if ray_id >= num_rays:
+        return
+
+    # Step 1: Initialize ray specification
+    origin = ray_origins[ray_id]
+    direction = ray_directions[ray_id]
+    ray_spec = Ray(origin, direction)
+
+    # Step 2: Find background bounds
+    t_min, t_max = ray_find_bounds_bg(ray_spec, grid)
+
+    # Step 3: Check occlusion
+    if log_transmit[ray_id] < -25.0f:
+        return
+
+    # Step 4: Render background forward
+    render_background_forward(grid, ray_spec, options, log_transmit, output, ray_id)
+```
+
+**Parameters:**
+- `log_transmit` threshold: `-25.0f`. Rays with transmission less than $e^{-25}$ are skipped [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **High Occlusion**: Rays with very low transmission (log value < -25) are skipped to save computation. This assumes that the background contribution is negligible for such rays [S1, unofficial].
+- **Precision**: The use of logarithmic transmission requires careful handling of underflow. The threshold of -25 is chosen to balance precision and performance.
+
+## Subtopics
+
+### [Background Rendering via Concentric Spheres](15340-background-rendering-via-concentric-spheres.md)
+This method renders the background environment for rays that have transmitted through the volume by sampling a layered spherical map. It differs from standard equirectangular sampling by using concentric spheres to distribute samples, which helps mitigate aliasing and provides a structured traversal of the background layers. It serves as the final compositing stage in the background rendering kernel, accumulating color from the background layers and adding a constant ambient term based on remaining transmission.
+
+## Operating characteristics
+- **Time Complexity**: Linear with respect to the number of rays, $O(N)$, where $N$ is the number of pixels/rays. The cost per ray depends on the number of samples taken in the background rendering step.
+- **Memory Complexity**: $O(N)$ for storing `log_transmit` and output buffers.
+- **Performance**: The early exit for highly occluded rays can significantly reduce computation time in scenes with dense volumes.
+- **Strengths**: Efficient handling of occluded rays; structured sampling reduces aliasing.
+- **Limitations**: Dependent on the efficiency of `ray_find_bounds_bg` and `render_background_forward`.
+- **When to Use**: Suitable for real-time or near-real-time volume rendering where background quality is important but computational resources are limited.
+- **When Not to Use**: Not suitable for offline rendering where maximum quality is required without performance constraints.
+
+## Background
+The `Background Rendering Kernel (Forward)` is part of the `nerf-factory` project by Kakao Brain [S1, unofficial]. It is designed to integrate background rendering into the volume rendering pipeline, specifically for rays that have passed through the volume. The use of concentric spheres for background sampling is a technique to improve visual quality by reducing aliasing artifacts common in equirectangular sampling.
+
+## Sources
+[S1] kakaobrain/nerf-factory, https://github.com/kakaobrain/nerf-factory, fetched 2026-10-26 (unofficial)

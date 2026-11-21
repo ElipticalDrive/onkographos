@@ -1,0 +1,131 @@
+# Unprefiltered Cubic B-Spline Reconstruction
+
+Also called: Approximating Cububic B-Spline Reconstruction, Cubic B-spline reconstruction, Quasi-interpolating Cubic B-Spline, Standard Cubic B-Spline Filter, cubic Bspline, fourth order B-spline
+
+## Overview
+Unprefiltered Cubic B-Spline Reconstruction is an approximating reconstruction filter used in volume rendering to reconstruct a continuous signal from discrete voxel samples without prior prefiltering [S1, unofficial][S2]. It is classified as a 2-EF (Error Function of order 2) reconstruction, meaning it is quasi-interpolating of order 2 [S2]. Unlike interpolating methods such as [Cubic Interpolation (Mitchell-Netravali)](2073-cubic-interpolation-mitchell-netravali.md), it does not pass through the original sample values; instead, it smooths the data, making it particularly suitable for reconstructing signals corrupted by noise rather than for high-fidelity detail reconstruction [S2].
+
+## How it works
+### Inputs and Outputs
+- **Input**: A 3D volume texture (voxel grid) with discrete sample values $f_k$.
+- **Output**: A reconstructed continuous scalar field value at an arbitrary 3D coordinate.
+
+### Data Structures
+The method relies on the standard cubic B-spline basis function $\beta_3(t)$. No additional data structures (such as prefiltered coefficients) are required, distinguishing it from [Prefiltered Reconstruction](11114-prefiltered-reconstruction.md).
+
+### Formula
+The 1D cubic B-spline filter kernel $h(x)$ is defined piecewise [S1, unofficial][S2]. Let $|x|$ denote the absolute value of $x$.
+
+$$
+h(x) = \beta_3(x) = 
+\begin{cases} 
+0 & \text{if } |x| \ge 2 \\
+\frac{1}{6}(-|x|^3 + 3|x|^2 - 3|x| + 1) & \text{if } 1 \le |x| < 2 \\
+\frac{1}{2}|x|^3 - |x|^2 + \frac{2}{3} & \text{if } |x| < 1 
+\end{cases}
+$$
+
+Note: Source [S1, unofficial] presents an equivalent formulation for $0 \le x < 1$ as $\frac{1}{4}(2|x|^3 - |x|^2 + 3)$ and for $1 \le x < 2$ as $-\frac{1}{6}(|x|^3 - 3|x|^2 + 2|x| + 2)$. These are algebraically identical to the form in [S2] [S1, unofficial][S2].
+
+The reconstructed value $\tilde{f}(t)$ at position $t$ is computed by convolving the samples with the kernel:
+
+$$
+\tilde{f}(t) = \sum_{k=-\infty}^{\infty} f_k \cdot h(t - k)
+$$
+
+In 3D, this is applied separably along each axis. Theoretically, the kernel support spans 64 voxels (4 voxels per axis), but due to the properties of B-splines, it can be evaluated efficiently using only 8 trilinear texture samples via the acceleration technique by Sigg and Hadwiger [S2].
+
+### Parameters
+- **Filter Support**: The kernel has a support of $[-2, 2]$ in each dimension.
+- **Value at Origin**: $h(0) = 2/3$. This means only 30% of the sample value contributes to the reconstructed value at the exact sample location [S1, unofficial].
+
+### Pseudocode
+The following pseudocode implements the 1D unprefiltered cubic B-spline evaluation for a single axis. For 3D, this is applied separably.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cubic_b_spline_kernel(x):
+    """
+    Evaluates the 1D cubic B-spline basis function beta_3(x).
+    """
+    abs_x = abs(x)
+    if abs_x < 1:
+        return 0.5 * (abs_x ** 3) - (abs_x ** 2) + (2.0 / 3.0)
+    elif abs_x < 2:
+        return (-1.0 / 6.0) * (abs_x ** 3) + (abs_x ** 2) - (2.0 * abs_x) + (4.0 / 3.0)
+    else:
+        return 0.0
+
+def reconstruct_unprefiltered_cubic_bspline(volume, x, y, z, voxel_size):
+    """
+    Reconstructs the value at (x, y, z) using unprefiltered cubic B-splines.
+    volume: 3D array of voxel values.
+    x, y, z: Continuous coordinates in world space.
+    voxel_size: Distance between sample centers.
+    
+    Note: This naive implementation sums over the full support.
+    In practice, use the Sigg-Hadwiger acceleration with 8 trilinear fetches [S2].
+    """
+    # Convert to grid coordinates
+    gx = x / voxel_size
+    gy = y / voxel_size
+    gz = z / voxel_size
+    
+    # Determine integer bounds for the support [-2, 2]
+    # Support is 4 units wide. We need samples from floor(g) - 2 to floor(g) + 1
+    # However, standard convolution sums f_k * h(t-k).
+    # We iterate over k such that h(t-k) is non-zero.
+    
+    val = 0.0
+    
+    # 1D reconstruction along X (applied separably)
+    # For brevity, showing 1D logic. 3D is product of 1D filters or separable application.
+    
+    # Find range of k where h(gx - k) > 0
+    # h(t) is non-zero for |t| < 2. So |gx - k| < 2 => gx - 2 < k < gx + 2
+    k_min = int(gx - 2) + 1 # inclusive start
+    k_max = int(gx + 2)     # inclusive end
+    
+    # Ensure bounds are within volume
+    k_min = max(k_min, 0)
+    k_max = min(k_max, volume.shape[0] - 1)
+    
+    for k in range(k_min, k_max + 1):
+        weight = cubic_b_spline_kernel(gx - k)
+        val += volume[k] * weight
+        
+    return val
+```
+
+### Edge Cases and Pitfalls
+- **Oversmoothing**: Due to its strong low-pass filtering characteristics, this filter is not suitable for high-fidelity detail reconstruction [S2]. It is best used for noisy data [S2].
+- **Non-Interpolating**: The filter does not interpolate the data ($h(0) \neq 1$). It is an approximating filter [S1, unofficial].
+- **High-Frequency Attenuation**: Higher-order B-splines (like this 4th-order/3rd-degree spline) attenuate high-frequency signals significantly, which may blur sharp features [S1, unofficial].
+- **Computational Cost**: While the theoretical support is large, efficient implementation using GPU linear filtering is required to avoid the cost of 64 fetches [S2].
+
+## Subtopics
+
+### [Adaptive Filter Size for Rendering Time Reduction](861-adaptive-filter-size-for-rendering-time-reduction.md)
+Reduces the number of texture fetches by adapting the filter kernel size based on rendering time constraints. Choose when performance is critical and some loss of smoothing quality is acceptable.
+
+### [Cubic Interpolation (Mitchell-Netravali)](2073-cubic-interpolation-mitchell-netravali.md)
+An interpolating cubic filter. Choose when preserving sharp details and passing through sample values is more important than noise reduction.
+
+### [Prefiltered Reconstruction](11114-prefiltered-reconstruction.md)
+Applies a prefiltering step to the voxel data before reconstruction to achieve better frequency response. Choose when higher fidelity and reduced aliasing are required, accepting the cost of prefiltering.
+
+## Operating characteristics
+- **Time Complexity**: Theoretical support is $O(1)$ per sample if using the Sigg-Hadwiger acceleration (8 trilinear fetches). Naive implementation is $O(N)$ where $N$ is the number of voxels in the support (64 in 3D).
+- **Memory Complexity**: $O(1)$ additional memory for the unprefiltered method, as no precomputed coefficients are stored [S2].
+- **Strengths**: Simple to implement without prefiltering step; effective at removing uncorrelated noise [S1, unofficial][S2]; continuous second derivative [S1, unofficial].
+- **Limitations**: Strong oversmoothing; not interpolating; high attenuation of high frequencies [S1, unofficial][S2].
+- **When to use**: Noisy data reconstruction; when computational resources for prefiltering are unavailable; when smoothness is preferred over sharpness.
+- **When not to use**: High-fidelity detail reconstruction; data with sharp edges that must be preserved exactly.
+
+## Background
+The cubic B-spline filter is a member of the cubic-spline family with parameters $B=1$ and $C=0$ [S1, unofficial]. It is distinguished from the Catmull-Rom spline (which is interpolating) by being approximating [S1, unofficial]. It is the only cubic-spline function that has a continuous second-order derivative and can reconstruct a straight line [S1, unofficial]. The method is widely used in medical volume rendering and CT scanner point-spread function modeling [S1, unofficial]. The acceleration technique allowing evaluation with 8 trilinear samples was proposed by Sigg and Hadwiger [S2].
+
+## Sources
+[S1] Iso-Surface Volume Rendering : speed and accuracy for medical applications, https://doi.org/10.3990/1.9789036513982, fetched 2026-10-26 (unofficial)
+[S2] Interactively controlling the smoothing and postaliasing effects in volume visualization, https://doi.org/10.1145/1980462.1980488, fetched 2026-11-03

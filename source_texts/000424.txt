@@ -1,0 +1,173 @@
+Procedural World: OpenCL Voxelization
+Saturday, April 9, 2011
+OpenCL Voxelization
+If you are going down the voxel way, odds are at some point you will need to include polygonal assets in your workflow.
+For me it happened when I integrated the output of the architecture L-System into the voxel world. Architecture is produced as a collection of polygonal volumes, I needed to translate those volumes into voxels.
+As usual, it had to be fast. It also needed to be accurate, Sharp features in the original polygon mesh should appear in the voxelized version.
+There are several approaches to voxelization. One is to use the GPU to render slices of the polygonal object and then construct the voxel information out of the slices. Another way to do it is to compute a 3D distance field, that is, the distance from each point in space to the closest polygon surface. In GPU Gems 3 there is a nice implementation of this method. And then there is the classical method, which is to shoot rays to the polygonal solid and construct the voxels from the intersections.
+I chose to implement a flavor of the classical method. The clean intersection points it produced would help later when reconstructing the surface. I also suspected the ray-tracing nature of this approach would translate well into OpenCL or CUDA.
+In particular my method is inspired on this one (PDF link). The article is very detailed, but if you want to skip reading it here is the basic idea:
+It uses a regular grid. Each element in the grid is a voxel. One of the coordinate planes is used to build a Quad-tree. All the triangles in the polygonal mesh are projected into this plane and inserted in the Quad-tree. I stole an image from the article above that illustrates this phase:
+In this image all the triangles are indexed in a Quad-tree aligned to the XZ plane (assuming Y goes up).
+The next step is to shoot rays perpendicular to the Quad-tree plane. Each ray is intersected with all the triangles found in that cell of the Quad-tree. This is actually why a Quad-tree is used. It allows to test only the triangles that potentially intersect the ray.
+Each ray may intersect several triangles along its path. For each voxel that is visited by the ray, the algorithm must find a way to tell whether it is inside or outside the solid. This is actually simple. If we assume the polygonal volume is closed, then it is possible to count how many intersections we passed before getting to the current voxel. If the number is odd, the voxel is inside the volume, if it is even, it is outside.
+This other image, also from the same article, shows this principle:
+And that's it. Once you have sent enough rays to cover the grid, the voxelized solid is there.
+This method, however, could not produce the results I needed. It only tells you if a voxel is solid or not. I needed a 3D density field. Also I wanted it to preserve the sharp corners in the original mesh, which is something this method doesn't consider. And last but not least, this algorithm is not very fast. Ray-casting on CPU quickly becomes expensive as grid resolution goes up.
+This is what I did:
+First, instead of having just one Quad-tree, I built three of them. One for each coordinate plane. I realized I had to cast rays along the three main axis instead of just one as the original method does.
+Why? The original method only cares about voxel occupancy. In my case I needed to record the normals at the intersection points. If rays are shot only in the Y direction, any polygons perpendicular to the plane XZ would never be intersected, their normals would be unknown. And it is not only that. For a sharp edge to be reconstructed, you need at least two intersections inside a voxel. To reconstruct a vertex, you need three rays.
+The following screenshot shows how sharp features are reconstructed. This is a cube that is not aligned with any of the coordinate axis, still its sharp features are preserved.
+The Quad-trees are built on the CPU as a pre-processing phase. It takes less than 1% of the entire cost of the voxelization, so it is something I won't move into the GPU soon.
+Next, the OpenCL voxelization kernel runs. Each instance of the kernel processes a single ray. Before invoking the kernel I make sure all the rays are packaged in sequence, regardless of their direction.
+The ray has access to the corresponding Quad-tree so it can iterate through the list of triangles in that cell of the Quad-tree. For each triangle it will test if there is an intersection. If that is the case, it writes the coordinates to an array.
+Then comes a twist. The voxelization method I described before relies on counting how many intersections were found up to the current voxel. For this to work, the list of intersections needs to be sorted. Sorting the intersections in the CPU is no problem, but inside the OpenCL kernel it could get messy very quickly. How to get around this?
+I realized that it was still possible to determine if a voxel was inside or outside without having to sort the intersections. The trick is to "flip" the occupancy state of all voxels preceding the current intersection point. If the count is odd, the voxel will flip an odd number of times and it will remain set at the end. If the counter is even, the voxel will finish empty.
+You can see this in the following series of images. The intersection points are marked in red, and as you can see they arrive in any order:
+I'm satisfied with the speed of this method. Anyway there are some optimizations I could do. If some restrictions are imposed on the polygonal solids, it will be possible to insert triangles already sorted in the Quad-tree. This means the OpenCL rasterization only will need to do one pass per ray. Right now each intersection requires its own pass.
+But I'm still on the look for a faster voxelization method. If you know of something better please let me know.
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+CUDA,
+OpenCL,
+Voxel,
+Voxelization
+20 comments:
+randallrApril 9, 2011 at 9:17 PM
+You should check out "Fast Parallel Surface and Solid Voxelization on GPUs". http://www.mpi-inf.mpg.de/~mschwarz/papers/vox-siga10.pdf
+ReplyDelete
+Replies
+Reply
+Miguel CeperoApril 9, 2011 at 10:52 PM
+@randallr: Thanks for the link, it is quite interesting. Their method is similar to rendering multiple slices, but it is more robust. They will switch to a different coordinate plane depending on the aligment of individual triangles. They also save on memory and processing by using an octree. It does not produce a distance field I think, also surface normals appear to be lost in the process. But maybe it can be modified to get what I need.
+ReplyDelete
+Replies
+Reply
+joesferApril 10, 2011 at 2:57 AM
+Nice article!
+You may find interesting to read about the technique described in "Single-Pass GPU Solid Voxelization for Real-Time Applications" http://hal.inria.fr/docs/00/34/52/91/PDF/solidvoxelizationAuthorVersion.pdf - I tried it out recently (http://www.joesfer.com/?p=84) and worked pretty well. It uses rasterization and packs the depth information in the color channels (so you're limited to, say 128 voxels in a 32-bit per channel RGBA image, before you have to jump to multipass). Also, just like in your method, fragments don't have to be sorted, but are instead combined using a XOR operation.
+ReplyDelete
+Replies
+Reply
+Miguel CeperoApril 10, 2011 at 2:33 PM
+@joesfer: Thanks. I had ruled out most slicing methods, but this one computes a density function. Normals are derived from gradients, still not sure how well they match the original. Your page is also very interesting. Very nice colonization over the Stanford bunny.
+ReplyDelete
+Replies
+Reply
+AnonymousJune 1, 2011 at 9:59 AM
+You say that the list of intersections has to be sorted. But you only need the count of intersections. Not their order.
+Also in the above grid images which is the ray direction ? And what happens when there are more than one triangles in a voxel. Wouldn't the second intersaction "flip" the result ?
+Thanks
+ReplyDelete
+Replies
+Reply
+Miguel CeperoJune 1, 2011 at 10:33 AM
+@Anonymous: The list of intersection needs to be sorted only in the traditional ray-casting approach. You can read the article I linked to see why.
+In the above images the voxelization is done on a row, so the direction is horizontal. The row is processed from left-to-right, but there is no orientation on the actual ray. This is exactly the trick, the points may come in any order.
+ReplyDelete
+Replies
+Reply
+Miguel CeperoJune 1, 2011 at 10:38 AM
+@Anonymous: If there is more than one triangle in the same voxel the second intersection will flip the result, this is something you actually want. An even number of intersections will mean the voxel is actually empty, since the mesh at that point is too thin to be represented by the voxel grid.
+ReplyDelete
+Replies
+Reply
+StefanJune 27, 2011 at 10:10 PM
+>Ray-casting on CPU quickly becomes
+>expensive as grid resolution goes up.
+Generally it is totally opposite for CPU proper implementations; though, it may be correct if you port GPU optimal implementation to CPU. The data aware adaptive algorithms is a perfect fit for MIMD machines while SIMD is only good for data parallelism. Porting GPU design to CPU is silly unless the goal to make the point. Just compare side-by-side HDVR running on dual X5670 with _ANY_ GPU based volume ray-casting setup (8 x Tesla cluster is fine) for 2K data-sets, the performance difference will be at least x10 times in favor of CPU for high fidelity VR (x16 super-sampling along ray & view-port 2MP).
+ReplyDelete
+Replies
+Reply
+Miguel CeperoJune 27, 2011 at 11:16 PM
+@Stefan: Raycasting may do better in the GPU since there is a lot of coherence between rays. At the same time, distant rays can be decoupled an ran in parallel. So MIMD's perfect fit may not be as good as SIMD, even if you have some misses in your wavefront.
+In the literature I have seen, GPU ray-tracers beat CPU ones per watt. Can you provide information that proves otherwise?
+ReplyDelete
+Replies
+Reply
+StefanJune 28, 2011 at 12:13 AM
+>Raycasting may do better in the GPU
+>since there is a lot of coherence
+>between rays.
+Once you apply subdivision speedups (octree etc...) the code-path coherency does not exist as soon as you descend below cell level; more accurately - if rays density upon projection plane is lower then sampling density along ray even neighbor rays have very likely a different code path for traversal part below cell. Definitely, it is not necessarily a case for regular sampling strategy which works fine for SIMD.
+>Can you provide information that
+>proves otherwise?
+Sure, take the research licence for HDVR and run side-by-side with ANY GPU based VR ray-casting setup for 2K case. You may start from Voreen; I personalty would encourage to run side-by-side with VR engines from medical CT vendors as the most advanced in the VR field.
+ReplyDelete
+Replies
+Reply
+Miguel CeperoJune 28, 2011 at 12:32 AM
+@Stephan: A link to a paper maybe? I remember this one: http://m.wpi.edu/Pubs/ETD/Available/etd-011107-010338/unrestricted/PLohrmann.pdf
+Energy-wise they found CPU was better only for very small resolutions, for bigger resolutions GPU implementations were more efficient.
+Also note my post is about voxelization. The complexity is a lot less than a full fledged ray tracer with many bounces, caustics, etc.
+ReplyDelete
+Replies
+Reply
+StefanJune 28, 2011 at 1:17 AM
+Look, the side-by-side is an ultimate test if you would like to learn the facts not hypes. Regarding article, the "research" goes public if it is hopeless for commercial use, especially it is true for VR. Nevertheless, here the recent article about CPU vs. GPU for VR:
+http://www.cs.utah.edu/~knolla/ovrc.pdf
+My guess is that HDVR is probably around 3 times more efficient then implementation presented in this research.
+ReplyDelete
+Replies
+Reply
+Miguel CeperoJune 28, 2011 at 10:46 AM
+@Stefan: I'm sorry your comment did not show before. It went straight to the spam folder :)
+Interesting article, still it is about a new traversal algorithm, BVH. They do not claim a dual approach is not possible for SIMD, they just compare their new thing with existing GPU volume renderers. Their findings are that when dataset size explodes and no LOD is used, CPU trumps GPU.
+I do not buy into the GPU hype. I would love it if CPUs could do all the stuff I need. For my projects a GPU implementation has topped CPU ones most of the time, not every time. The voxelization I described here works over a regular grid and the datasets are not big. I did see an improvement when I switched to GPU.
+I do think MIMD vs. SIMD is more about developers and algorithm designers. Let's see what comes next for Volumetric Rendering.
+ReplyDelete
+Replies
+Reply
+StefanJuly 14, 2011 at 2:25 PM
+>I do think MIMD vs. SIMD is more about
+>developers and algorithm designers.
+Well, it is not matter of opinions it is matter of actual/factual limitations/capabilities of SIMD/MIMD devices. MIMD may run equally efficient the SIMD friendly algorithms as it runs MIMD-algorithms. SIMD can not run efficiently the MIMD-algorithms. SIMD is a way simpler device so its performance per transistor is higher for SIMD friendly algorithms and it is totally inefficient for MIMD-algorithms. Algorithm designers can not change SIMD limitations, the only option they have is to try to find SIMD-friendly algorithms to solve a specific problem; SIMD is really good only for brute force data-independent problems; as soon as algorithm is data-adaptive it is strictly a MIMD domain (if efficiency is relevant).
+Stefan
+ReplyDelete
+Replies
+Reply
+Miguel CeperoJuly 14, 2011 at 3:52 PM
+@Stefan: It is never about running the same algorithm. It is about solving the same problem from a new angle. That necessarily involves an algorithm designer. You can call that a fact too. It has happened many times in the past, it will continue to happen.
+Also, GPU vs CPU is not the same thing as SIMD vs MIMD. Once you factor wavefronts, local caches, etc, the GPUs are some sort of hybrid and will continue to change into that direction.
+Even if it may not fully apply, I admire you passion on the SIMD vs MIMD, but it should not get to the point where you tell your host he/she is choosing opinions over facts. Regardless of who may be wrong or right, it is one of the oldest insults in the book. This is a place to enjoy. Please stop posting in my forums.
+ReplyDelete
+Replies
+Reply
+StefanJuly 14, 2011 at 11:59 PM
+MCeperoG> Please stop posting in my forums.
+Please delete all my posts from your forum.
+Thank you,
+Stefan
+ReplyDelete
+Replies
+Reply
+ScottFebruary 25, 2013 at 3:16 AM
+I realize this post is almost 2 years old, but you hopefully still get emails when someone posts a reply. I've been through most of your (amazing) posts and have been loving your progress. I was sure you had seen this: http://www.nvidia.com/object/nvidia_research_pub_018.html
+But I couldn't find any references to it in your posts. Great article, it is raycasting instead of polygons and uses CUDA, but uses contouring and has some amazing results.
+Anyway, let me know if you've seen it.
+ReplyDelete
+Replies
+Miguel CeperoFebruary 25, 2013 at 3:52 AM
+Yes, I know about this particular research. I posted about them a while ago, back when we were discussing the Euclideon guys (http://procworld.blogspot.ca/2011/08/unlimited-detail.html). I think the video I linked from Nvidia was removed at some point. I would need to update this with your link. Thanks!
+Delete
+Replies
+Reply
+Reply
+ScottMarch 8, 2013 at 10:53 PM
+Ahh, missed that. Thanks!
+ReplyDelete
+Replies
+Reply
+Tim DavisonNovember 27, 2014 at 4:34 AM
+Hi Miguel, I think your GPU approach is interesting. I'm curious how you ended up calculating the density of a particular voxel?
+A simple extension of Thon's 2004 paper could integrate the volume of a voxel intersected by a triangle(s) by considering how far each ray made it into the voxel. Is this how you did it?
+ReplyDelete
+Replies
+Reply
+Add comment
+Load more...
+Newer Post
+Older Post
+Home
+Subscribe to:
+Post Comments (Atom)

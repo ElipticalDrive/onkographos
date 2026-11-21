@@ -1,0 +1,273 @@
+Subdividing a 3D space into cells or voxels and using positional and/or directional information to directly index into it is a popular method to store and access local data, typically using 3D textures. This has been the basis of many global illumination algorithms, it is been used to store light lists, specular probes and decals…
+
+Spatial hashing for raytraced ambient occlusion – Interplay of Light
+Skip to content
+Subdividing a 3D space into cells or voxels and using positional and/or directional information to directly index into it is a popular method to store and access local data, typically using 3D textures. This has been the basis of many global illumination algorithms, it is been used to store light lists, specular probes and decals that affect a world position as well as volumetric fog. Although it offers very fast access to the data, this approach has the disadvantage of sometimes requiring large amounts of memory something that can limit the coverage of the scene or require cascades of increasing cell size to keep the cost down.
+An alternative to using cascades of 3D textures to store directly indexable data is a sparse representation using arrays instead of 3D textures and using a hash value derived from positional and/or directional (or other) data to produce indices to access the data, also known as spatial hashing.
+To give this approach a try I did a quick implementation of a spatial hash structure and applied it to accelerate and reduce the noise of raytraced ambient occlusion inspired by this paper. The idea behind this is simple, RTAO only depends on the world position and the surface normal and for static scenes at least it is something that can be calculated, cached and reused. RTAO is calculated as normal, for example the output of 1 ray per pixel, randomly selected on a hemisphere, with a radius of 2 metres looks like this
+In this scene, for every world position and every frame we keep recalculating the AO term although nothing really changes. Also, although the RTAO output goes through TAA in the above example it is still noisy and, to make matters worse, the noise is animated and needs a denoising step, typically both temporal (accumulation) and spatial (blurring) to improve the quality.
+Instead of using the RTAO output directly, we can use the corresponding world position and normal to produce a hash value to index into an array that will store the output. Since allocating space to store every world position would be very expensive, we will quantise space creating cells that will accumulate AO for multiple, neighbouring world positions. Some programmer art to hopefully illustrate this:
+Using a hash function h(x) with the position p of each world point as key we can produce a hash value H(p) as follows, using the “nested” approach:
+Like discussed, we will quantise space introducing cells of size s to reduce storage requirements, so the hash value is calculated as
+Adding the cell size to the hash value opens the door to implement lodding later. We also said that AO depends on both position and normal, so to properly index a cell we also need to add the normal to the hash value.
+The value of sn used above is arbitrary, for quantisation. There is a large choice of functions that can produce the hash value we’ll use pcg as a good default option.
+```
+//https://www.shadertoy.com/view/XlGcRh
+uint pcg(uint v)
+{
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+```
+Assuming a hash map structure of size N, we can produce the index to access the cell for the specific world position and normal as such: H(p,n,s) % N.
+Given that the hash map will be, out of necessity, restricted in terms of size, it is likely that conflicts will happen when different positions and normals produce the same hash value. To resolve a conflict first we need to identify it, for that reason we calculate another hash value from the position and normal and store it in the hash map when initialising a new cell to use as a checksum. Similarly to this post, we will use the xxhash32() function.
+```
+//https://www.shadertoy.com/view/XlGcRh
+uint xxhash32(uint p)
+{
+    const uint PRIME32_2 = 2246822519U, PRIME32_3 = 3266489917U;
+    const uint PRIME32_4 = 668265263U, PRIME32_5 = 374761393U;
+    uint h32 = p + PRIME32_5;
+    h32 = PRIME32_4 * ((h32 << 17) | (h32 >> (32 - 17)));
+    h32 = PRIME32_2 * (h32 ^ (h32 >> 15));
+    h32 = PRIME32_3 * (h32 ^ (h32 >> 13));
+    return h32 ^ (h32 >> 16);
+}
+```
+This way, when H(p,n,s) points us to a specific hash map location, we can use the checksum to confirm if the position and normal are valid or different to the ones this particular cell corresponds to.
+On last thing we need to discuss is what happens when the checksums don’t match. There are a lot of approaches to resolve a conflict, in this implementation we will be using linear search (aka linear probing) in which when a conflict is detected neighbouring hashmap entries are inspected to find an empty cell (checksum equals zero). This method is fast because it is cache coherent but not does not offer the best distribution of hash values. From that perspective, a better option would be “rehashing” where a new hash value is created using the hashmap/cell index for example.
+To see all these in code, this is the implementation of the SpatialHash insertion function, adapted from:
+```
+//Adapted from https://gboisse.github.io/posts/this-is-us/
+uint SpatialHash_FindOrInsert(float3 position, float3 normal, float cellSize)
+{
+    // Inputs to hashing
+    int3 p = floor(position / cellSize);
+    int3 n = floor(normal * 3.0);
+    
+    cellSize *= 10000; // cellSize can be small and lead to more conflicts, multiply to increase range
+    
+    uint hashKey = pcg(cellSize + pcg(p.x + pcg(p.y + pcg(p.z + pcg(n.x + pcg(n.y + pcg(n.z)))))));
+       
+    uint cellIndex = hashKey % HASHMAP_SIZE;
+          
+    uint checksum = xxhash32(cellSize + xxhash32(p.x + xxhash32(p.y + xxhash32(p.z + xxhash32(n.x + xxhash32(n.y + xxhash32(n.z)))))));
+    checksum = max(checksum, 1); // 0 is reserved for available cells
+        
+    // Update data structure
+    for (uint i = 0; i < SEARCH_COUNT; i++)
+    {                
+        uint cmp;        
+        InterlockedCompareExchange(hash[cellIndex], 0, checksum, cmp);
+        
+        if (cmp == 0 || cmp == checksum)
+        {
+               return cellIndex; 
+        }
+                         
+        cellIndex++;
+
+        if( cellIndex >= HASHMAP_SIZE)
+            break;
+    }
+
+    return  0xFFFFFFFFu; // out of memory 
+}
+```
+This pretty much implements what we have discussed so far, it uses pcg() and xxhash32() to calculate the hash value and checksum using nesting and linear search to locate an empty cell (checksum equals zero) or a cell with the same checksum. It will search a maximum of SEARCH_COUNT cells (10 in this case) and then it will stop reporting an out of memory result.
+The code that does the actual raytracing and uses the spatial hash to store the RTAO output is as follows
+```
+// resources to store the hash and the cell payload
+RWBuffer<uint>              hash : register(u1);
+RWBuffer<uint>              spatialData : register(u3);
+
+cellSize = 0.1;
+uint cellIndex = SpatialHash_FindOrInsert(worldPos, normal, cellSize, rngState);
+
+if ( cellIndex != 0xFFFFFFFFu )
+{
+	float2 rand = saturate(float2(rand01(rngState), rand01(rngState)));
+
+	float3 rayDir = SampleHemisphere(rand.xy);
+
+	rayDir = normalize(rayDir.x * tangent + rayDir.y * bitangent + rayDir.z * normal);
+
+	RayDesc ray;
+	ray.Origin = worldPos.xyz;
+	ray.TMin = 0.01;
+
+	ray.TMax = 2;
+	ray.Direction = rayDir;
+	
+	uint occlusion = FindHit(Scene, ray);
+	
+	uint data = (occlusion << 16) + 1;
+
+	InterlockedAdd(spatialData[cellIndex], data, originalData);
+	
+	originalOcclusion = originalData >> 16;
+	originalNoofSamples = originalData & 0xFFFF;
+
+	outputRT[screenPos] = float(originalOcclusion + occlusion) / float(originalNoofSamples + 1); 
+}
+```
+The data that we store in the cell payload is the number of hits and the total number of rays. We pack them both in a uint, 16 bits each and use InterlockedAdd to add to the existing cell value. This is fine as long as both values stay within the 16bit uint range. In the end we use both those values to calculate the occlusion factor and output it so that we can see the result.
+And this is the output of the RTAO pass using the spatial hash to store the occlusion, a radius of 2m and a cell size of 10cm:
+First thing we notice is that the image is much less noisy (no denoising has taken place, only TAA) than the traditional RTAO output and in motion it is much more stable. On the other hand, although AO in the distance looks great, closer to the camera it looks very blocky. This is the result of using a constant cell size across the scene.
+To improve this, we can calculate a cell size that varies with distance, adapting the formula from:
+```
+float ComputeCellSize(float d, float f, float Ry, float sp, float smin)
+{	
+    float h = d * tan(f * 0.5);
+    float sw = sp * (h * 2.0) / Ry;
+
+    //From https://history.siggraph.org/wp-content/uploads/2022/08/2020-Talks-Gautron_Real-Time-Ray-Traced-Ambient-Occlusion-of-Complex-Scenes.pdf 
+    //s_wd = 2^(floor(log2(sw / smin))) * smin
+    float exponent = floor(log2(sw / smin));
+    float swd = pow(2.0, exponent) * smin;
+
+    return swd;
+}
+```
+This uses the vertical FOV f, the distance from the camera d, the vertical image resolution Ry, a user defined feature size in screen space sp and an arbitrarily small smin defining the smallest possible feature in world space.
+To demonstrate this in action using a sp value of 10 pixels and a smin value of 0.4, and focusing on 2 cells projected on screen, one on the pillar on the right and one in the far distance, we can see that they appear roughly the same size, although in world space they cover very different in size areas.
+Using this approach to calculate the cell size we can get much better distribution of sizes based on distance and the RTAO quality increases significantly. The following result is produced with sp = 3 and smin = 0.07 and a hashmap that can store 10M cells:
+and a close up to see some more detail.
+The above images are without any denoising, only TAA. Averaging RTAO results in cells works well as a denoising technique.
+We have already hinted the caveat though, the hashmap capacity is limited and eventually it will run out of space. The selected hashing function, the way conflicts are solved as well as the cell size can affect when this happens but it is unavoidable, especially as the camera moves around as in more realistic scenarios.
+In the above screenshot I showcase this flying the camera around, at some point I started seeing black cells, the result of the hashmap not managing to find an empty cell or a cell with the correct checksum.
+To improve this, we will take cell age into account, removing cells that are “old” based on some threshold. Implementation-wise this will need another buffer (hashTime) to store the frame count when a cell was last used. The way the hashmap is updated in SpatialHash_FindOrInsert changes as such:
+```
+// Update data structure
+for (uint i = 0; i < SEARCH_COUNT; i++)
+{                
+	uint cmp;        
+	InterlockedCompareExchange(hash[cellIndex], 0, checksum, cmp);
+	
+	uint originalTime;
+	if (cmp == 0 || cmp == checksum)
+	{
+		InterlockedExchange(hashTime[cellIndex], FrameIndex, originalTime);
+		
+		return cellIndex; 
+	}
+	
+	originalTime = hashTime[cellIndex];
+	if (FrameIndex - originalTime > 20)
+	{
+		uint original;
+		InterlockedExchange(hash[cellIndex], checksum, original);
+		InterlockedExchange(spatialData[cellIndex], 0, original);
+		InterlockedExchange(hashTime[cellIndex], FrameIndex, originalTime);
+	   
+		return cellIndex;
+	}
+	
+	cellIndex++;
+	if (cellIndex >= HASHMAP_SIZE)
+		break;       
+}
+```
+While searching the hashmap, when we find a new cell or a cell with the correct checksum the current frame count is atomically stored in the hashTime buffer. This is the time that particular cell was last used. Else, as we look for appropriate cells in the neighbourhood, we check the time a cell was last used. If it is older that an amount of frames, we empty it and make it available to store RTAO data.
+Performing the same flythrough test as above showcases how this approach can handle the hashmap running out of memory. To stress test it even more, I additionally reduced the hashmap capacity to 1M entries.
+Storing the output of RTAO in the spatial hash reduces noise and increases stability as discussed, but also has another advantage for static scenes, it is possible to stop raytracing after a while and reuse the cached result only to calculate AO:
+```
+uint cellIndex = SpatialHash_FindOrInsert(worldPos, normal, cellSize);
+
+worldPos = originalPos; 
+
+if ( cellIndex != 0xFFFFFFFFu )
+{
+	uint originalData = spatialData[cellIndex];
+	
+	uint originalOcclusion = originalData >> 16;
+	uint originalNoofSamples = originalData & 0xFFFF;
+	
+	if (originalNoofSamples < 500)
+	{
+		float2 rand = saturate(float2(rand01(rngState), rand01(rngState)));
+
+		float3 rayDir = SampleHemisphere(rand.xy);
+
+		rayDir = normalize(rayDir.x * tangent + rayDir.y * bitangent + rayDir.z * normal);
+
+		RayDesc ray;
+		ray.Origin = worldPos.xyz;
+		ray.TMin = 0.01;
+
+		ray.TMax = 2;
+		ray.Direction = rayDir;
+		
+		uint occlusion = FindHit(Scene, ray);
+		
+		uint data = (occlusion << 16) + 1;
+
+		InterlockedAdd(spatialData[cellIndex], data, originalData);
+		
+		originalOcclusion = originalData >> 16;
+		originalNoofSamples = originalData & 0xFFFF;
+
+		outputRT[screenPos] = pow(float(originalOcclusion + occlusion) / float(originalNoofSamples + 1), 1 );
+	}
+	else
+		outputRT[screenPos] = pow(float(originalOcclusion) / float(originalNoofSamples), 1 );
+}
+```
+Looking into the cell data for the given world position and normal, if the number of samples stored there is larger than a threshold, we can use the cell data and skip raytracing for that position.
+As an example, selecting a pixel footprint value sp=5 and a 500 samples per cell threshold we can achieve this level of quality in 0.4ms
+while the original RTAO approach costs 1.72ms
+for a much lower quality and the need for additional denoising (both rendering on an Nvidia 3080 mobile GPU computing AO at 1080p). The extra memory required for the hashmap, cell times and cell payload buffers is about 11.4 MB (1M entries x 4 bytes x 3 buffers).
+One last thing worth discussing: the cost as well as the quality of the spatial hash RTAO depends on the size of the cells as well as the amount of rays we cache in the cell. It may be the case that the output will need an amount of denoising as well if the quality is not good enough for the usecase.
+There is a way to potentially reduce the need for denoising, and this is by jittering the world position used to index the cells:
+```
+float2 rand2 = saturate(float2(rand01(rngState), rand01(rngState)));
+rand2 = 2 * (rand2 - 0.5);
+worldPos += JitterScale * cellSize * (rand2.x * tangent + rand2.y * bitangent);
+
+uint cellIndex = SpatialHash_FindOrInsert(worldPos, normal, cellSize);
+```
+The jitter happens on the tangent-bitangent plane and takes into account the cell size calculated at this distance. Also worth removing the jitter from the world position before raytracing else it may case artifacts.
+The effect of this jittering is to randomly add the RTAO result of a particular cell to its neighbouring cells, which is the equivalent of spatial filtering but at no extra cost and can improve the quality significantly.
+The approach discussed in this post only applies to a static scene, moving models will be the topic of a future investigation.
+Share this:
+Share on X (Opens in new window)
+X
+Share on Bluesky (Opens in new window)
+Bluesky
+Share on Mastodon (Opens in new window)
+Mastodon
+Share on Facebook (Opens in new window)
+Facebook
+Like Loading...
+Related
+Spatial hashing for raytraced ambient occlusion
+3 thoughts on “Spatial hashing for raytraced ambient occlusion”
+Did you add a guard band to the end of the hashmap? Otherwise the final entries have < SEARCH_COUNT possible positions which could also lead to some more black squares.
+November 24, 2025 at 9:55 am
+Reply
+A very interesting read!
+Do I understand correctly that you trace rays from on-screen pixels and then store the results in the hash map, and therefore the hash cells that are not in the immediate view aren’t updated or spawned?
+In that case, what happens to the areas that appear in the frame for the first time, or after their hash cells have been evicted due to age (essentially, disocclusion areas)? Do they exhibit excessive noise until the freshly spawned cells accumulate enough samples?
+November 24, 2025 at 11:11 pm
+Reply
+This is a fascinating approach. I hadn’t really thought through the ramifications of spatial caching until reading this article.
+How variable is the cost as you fly around the scene? (ie due to extra rays cast on disocclusions and when you get closer to surfaces so the bin size reduces)
+I’m also curious how you would determine the ‘correct’ hash map size for your use case. Presumably making it smaller makes it slower due to more probing, but what does that cost curve look like, and how does it relate to quality?
+I also wonder if there is a way to strictly limit the per frame cost by using low-resolution bins as fallbacks for higher-resolution bins – as more empty bins are revealed by disocclusions or on getting closer to surfaces. I guess you could do it with a single frame delay (count the number of requests this frame, then use that to determine the number of requests to fulfill next frame) but it’s not perfect if the number of requests varies quickly between frames.
+November 29, 2025 at 8:28 am
+Reply
+Leave a Reply Cancel reply
+Comment
+Reblog
+Subscribe
+Subscribed
+Interplay of Light
+Have a WordPress.com account? Log in now.
+Interplay of Light
+Copy shortlinkView post in Reader
+Manage subscriptionsSign upLog in
+Report this content
+Collapse this bar
+Loading Comments...
+%d

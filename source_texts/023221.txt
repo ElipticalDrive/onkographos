@@ -1,0 +1,536 @@
+
+
+# F2Plenoxels: fast voxel radiance fields without neural networks for few-shot view synthesis
+
+Jun Peng1 · Chunyi Chen1 · Yunbiao Liu1
+
+Received: 9 October 2025 / Accepted: 12 January 2026 / Published online: 28 January 2026 © The Author(s) 2026
+
+#### Abstract
+
+Radiance field methods, while achieving impressive quality in novel view synthesis, require abundant input views. In the few-shot setting, both Neural Radiance Fields (NeRF) and 3D Gaussian Splatting (3DGS) are highly susceptible to overfitting to the training images, resulting in significant performance degradation at novel viewpoints. Furthermore, the majority of existing sparse-view NeRF-based methods suffer from high computational inefficiency during optimization. To address these limitations, we propose F2Plenoxels (F**ast **F**ew-shot **Plenoxels), a novel and efficient framework for few-shot view synthesis built upon an explicit voxel radiance field representation. F2Plenoxels leverages the discrete nature of voxel grids to integrate a dense depth prior, obtained from a powerful 3D vision foundation model with multi-view consistency, to pre-prune voxels in free space. This key step implicitly regularizes scene geometry and eliminates the computational overhead associated with explicit depth supervision during training. Moreover, we introduce a curriculum training strategy that regularizes the degree of Spherical Harmonics (SH) at the early stage of training to mitigate high-frequency overfitting, thereby further improving geometry accuracy with negligible cost. Crucially, we provide an alternative explanation for near-camera overfitting beyond sampling imbalance and propose transmittance-based gradient scaling to effectively reduce floaters close to cameras. Extensive experiments conducted on synthetic and real-world scenes validate that F2Plenoxels significantly outperforms its baseline. Comparative studies against previous few-shot methods demonstrate the superiority of our framework in terms of both synthesized image quality and training efficiency. Code, data, and demos are available at [https://github.com/PJunGH/](https://github.com/PJunGH/F2Plenoxels) [F2Plenoxels.](https://github.com/PJunGH/F2Plenoxels)
+
+Keywords View synthesis · Neural radiance fields · 3D Gaussian splatting · Few-shot
+
+## 1 Introduction
+
+Novel view synthesis is a long-standing problem in computer vision and graphics, with applications in fields like virtual reality (Xiao et al. 2022\), autonomous driving (Chen et al. 2025b\), and medical image processing (Zhou et al. 2025). Furthermore, it can support downstream tasks like scene classification (Zhang et al. 2024; Huo et al. 2023\) through data augmentation. Currently, radiance field methods–typified by neural radiance fields (NeRF) (Mildenhall et al. 2020) and 3D Gaussian splatting (3DGS) (Kerbl et al. 2023\)–have been the mainstream solution due to their high-fidelity renderings. The original NeRF models scenes using neural networks and renders images via ray marching. However, training NeRF is computationally intensive, requiring hundreds of network queries to calculate the color of a single ray. Instead of pure neural networks, follow-up works (Sun et al. 2022; Fridovich-Keil 2022; Müller et al. 2022; Chen et al. 2022; Fridovich-Keil et al. 2023\) accelerate NeRF training using grid-based representations. Unlike NeRF and its variants, the recent 3DGS approach explicitly represents scenes as sets of 3D Gaussians and utilizes a tile-based rasterizer to render images. Due to its high efficiency and quality, 3DGS has been a primary focus in scene reconstruction and generation research at present (Bao et al. 2025). Although they achieve very good performance, radiance field methods
+
+B Chunyi Chen chenchunyi@hotmail.com
+
+Jun Peng pjun\_cust@outlook.com
+
+Yunbiao Liu liuyunbiaochangchun@gmail.com
+
+1 School of Computer Science and Technology, Changchun University of Science and Technology, Weixing Road No. 7089, Changchun 130022, Jilin, China
+
+require dense input views. When available views are sparse, these methods overfit to training images, leading to significant performance degradation at novel views, as shown by baselines in Fig. 1\(b). Since obtaining dense multi-view data is often impractical or expensive, developing few-shot methods is essential.
+
+Numerous methods have been proposed to address the sparse-view setting, generally falling into two categories. The first category involves generalizable feed-forward models (Yu et al. 2021; Charatan et al. 2024; Chen et al. 2021, 2025a), which are pre-trained on large-scale datasets to enable direct inference on unseen scenes. However, pretraining demands significant computational resources, and performance often degrades when test scenes deviate from the training distribution. Consequently, a second line of research focuses on regularization constraints for per-scene optimization. For instance, FreeNeRF (Yang et al. 2023\) mitigates early-stage overfitting by linearly increasing the visible frequency of positional encoding. Similarly, FourieRF (Gomez et al. 2025) transforms decomposed features into Fourier space via discrete Fourier transform and progressively increases Fourier coefficients during training to achieve frequency regularization. DropGaussian (Park et al. 2025\) proposes randomly removing Gaussians to prevent overfitting. While effective, a key limitation of these regularization techniques is their dependency on specific underlying representations: FreeNeRF targets NeRF, FourieRF is designed for TensoRF (Chen et al. 2022\), and DropGaussian is specific to 3DGS.
+
+Besides the methods mentioned above, some other works introduce extra priors like semantics (Jain et al. 2021) and multi-view diffusion models (Gao et al. 2024). To reduce the shape-radiance ambiguity (Zhang et al. 2020), a significant body of research uses depth priors to regularize geometry from various sources, such as Structure-from-Motion (SfM) (Deng et al. 2022), dense image matchers (Lao et al. 2023\), depth completion networks (Roessle et al. 2022), and monocular depth estimators (Song et al. 2023a; Wang et al. 2023; Zhu et al. 2025\). However, incorporating depth supervision introduces distinct challenges. It increases the computational burden during training and often relies on imperfect data: depth priors from SfM and image matchers are typically sparse (Deng et al. 2022; Lao et al. 2023), while estimated dense depth maps often exhibit non-negligible deviations from ground truth (Roessle et al. 2022; Song et al. 2023a; Wang et al. 2023; Zhu et al. 2025).
+
+In this work, we propose F2Plenoxels, a novel framework for fast few-shot view synthesis based on explicit voxel radiance field representation. Similar to previous methods (Deng et al. 2022; Lao et al. 2023; Roessle et al. 2022; Song et al. 2023a; Wang et al. 2023; Zhu et al. 2025), we also introduce depth prior, but differ in two aspects:
+
+- 1. We acquire depth priors from emerging 3D vision foundation models (Wang et al. 2024, 2025\) due to their powerful ability, which are denser than SfM and image matchers, as well as more accurate and multi-view consistent than depth completion networks and monocular depth estimators.
+- 2. Instead of depth supervision, we quickly prune voxel grids to implicitly impose the geometric constraint before training thanks to the discreteness of voxel representation. This improves training efficiency without the introduction of extra computational cost.
+
+After pruning voxel grids, we use voxel dilation to alleviate overpruning resulting from inevitable artifacts existing in depth prior. Further, inspired by FreeNeRF (Yang et al. 2023) and FourieRF (Gomez et al. 2025), we find that highfrequency representative capacity from spherical harmonics with high degree leads to inaccurate geometry reconstruction at the start of training. We propose a spherical harmonics regularization scheme to further improve coarse geometry obtained from depth-guided voxel pre-pruning. Finally, we address floater artifacts in the near-camera region. While previous studies have proposed various heuristic strategies (Niemeyer et al. 2022; Sun et al. 2023; Zhu et al. 2024) or attribute it to the imbalance of sampling density (Philip and Deschaintre 2023\), we demonstrate that the issue persists even on datasets like LLFF (Mildenhall et al. 2019\) where sampling density is approximately uniform due to view transformation. Based on a formal gradient derivation and analysis, we reveal another potential reason: the exponential decay of transmittance results in samples far away from the camera origin receiving much smaller gradients. To counter this imbalance, we propose transmittance-based gradient scaling to specifically suppress near-camera artifacts. Extensive experiments on synthetic and real datasets (Mildenhall et al. 2020, 2019) validate the effectiveness of our method. As shown in Fig. 1,F2Plenoxels achieves the best image reconstruction accuracy and perceptual quality on Blender (Mildenhall et al. 2020\) dataset in the 4-view setting while being one of the fastest few-shot methods.
+
+In summary, our main contributions are as follows:
+
+- We propose a novel fast radiance field method named F2Plenoxels for improving the performance of view synthesis in the case of sparse input views.
+
+
+
+Fig. 1 Comparison between our F2Plenoxels and other methods on Blender (Mildenhall et al. 2020\) dataset with 4 training views. Baselines (Chen et al. 2022; Kerbl et al. 2023; Sun et al. 2022; Fridovich-Keil 2022\) in Fig. 1\(b) produce lots of floaters in synthesized unseen views.
+
+Ours demonstrates better perceptual quality and reconstruction accuracy while being one of the fastest few-shot methods as shown in Fig. 1\(c)
+
+- To enable fast optimization, we introduce two strategies with little computational cost, i.e. depth-guided voxel pre-pruning and spherical harmonics regularization, which significantly reduce floaters in free space and enhance the accuracy of geometry reconstruction.
+- We also reveal a potential reason for near-camera overfitting, i.e. samples far away from cameras receiving smaller gradients that results from power attenuation during ray propagation, and further propose transmittancebased gradient scaling to decrease near-camera floaters.
+- Different from previous methods with implicit or hybrid radiance field representations, our F2Plenoxels is based on explicit voxel grid representation, which obtains the balance between image quality and training efficiency.
+
+## 2 Related work
+
+#### 2.1 Radiance field representations for view synthesis
+
+Since proposed, NeRF (Mildenhall et al. 2020\) has revolutionized novel view synthesis. Unlike previous methods (Mildenhall et al. 2019; Sitzmann et al. 2019a, b; Lombardi et al. 2019\), NeRF uses coordinate-based neural networks to map positions and viewing directions to volume densities and colors, with more physically accurate rendering formulas (Max 1995\). Despite its remarkable performance improvement, NeRF is very slow to optimize and infer due to hundreds of queries on multilayer perceptrons for per-ray rendering. Instead of pure coordinate-based neural networks, DVGO (Sun et al. 2022) and Plenoxels (Fridovich-Keil 2022\) utilize voxel grids to store scene geometry (volume densities) and appearance (color-related features or spherical harmonic coefficients). The fast trilinear interpolation over voxel grids, replacing network inference, significantly accelerates optimization. Subsequent works (Chen et al. 2022; Fridovich-Keil et al. 2023\) introduce decomposed feature volume representations based on the low-rankness of dense voxel grids, cutting down much storage cost. Recently, Kerbl et al. \(2023) propose the radiance field representation based on 3D Gaussians, which can be effectively rasterized to achieve real-time rendering with high fidelity. In this work, we model radiance fields as voxel grids without neural networks (Fridovich-Keil 2022) for fast training.
+
+## 2.2 Few-shot radiance field reconstruction
+
+When input views are sparse, the performance of radiance field methods significantly degrades. Some works introduce learned or manual priors to cope with ill-posedness resulting from sparse inputs, including semantics (Jain et al. 2021), depth (Deng et al. 2022; Roessle et al. 2022; Song et al. 2023a; Wang et al. 2023; Zhu et al. 2025; Uy et al. 2023; Rau et al. 2025; Xiong et al. 2025; Paliwal et al. 2025; Jang and Pérez-Pellitero 2025\), optical flow (Chen et al. 2023; Zheng et al. 2025\), pixel correspondence (Lao et al. 2023; Paliwal et al. 2025; Jang and Pérez-Pellitero 2025\), visibility (Somraj and Soundararajan 2023), and diffusion prior (Gao et al. 2024; Wynn and Turmukhambetov 2023; Wu et al. 2024; Liu et al. 2025; Xiong et al. 2025). Other works propose various regularization techniques without using any learned prior, such as ray entropy minimization (Kim et al. 2022), mixture density modeling (Seo et al. 2023b\), voxel smoothing (Sun et al. 2023\), dropout (Park et al. 2025), and frequency regularization (Yang et al. 2023; Gomez et al. 2025; Kim et al. 2024\). Next, we will focus on those works most related to our method.
+
+Depth prior In the sparse-view setting, relying solely on the photometric loss causes NeRF and its variants to overfit to training images, making it difficult to converge to good geometry. Therefore, some works leverage depth prior to regularize or supervise geometry. DSNeRF (Deng et al. 2022\) utilizes sparse depths obtained from Structure-from-Motion (SfM) (Schönberger and Frahm 2016) to introduce a ray distribution loss for supervision. DDPNeRF (Roessle et al. 2022\) further pretrains a depth completion network mapping sparse depths from SfM to dense depths and uncertainties, which are used to guide NeRF optimization. DäRF (Song et al. 2023a\) resorts to a strong generalizable monocular depth estimator (MDE) (Ranftl et al. 2021) and proposes the joint optimization of both MDE and radiance fields to alleviating MDE's ambiguity problems like multi-view inconsistency. Instead of SfM, depth completion and MDE, CorresNeRF (Lao et al. 2023) capitalizes on a dense image matcher (Edstedt et al. 2023\) and subsequent triangulation to acquire depth prior. This method yields depth that is denser than SfM-based priors and more accurate and multi-view consistent than those from depth completion and MDE due to effective outlier filtering. Diverging from these approaches, our method acquires a high-quality depth prior from a fast feed-forward 3D vision foundation model (Wang et al. 2025). Crucially, instead of using it as a training-time supervision loss, we leverage this prior to pre-prune voxel grids before optimization, thereby implicitly imposing geometric constraints and boosting training efficiency.
+
+Frequency regularization Previous works have found that the high-frequency representative capacities of radiance fields for dense views are harmful in the sparse-view setting and propose regularizing radiance field training from the perspective of frequency. FreeNeRF (Yang et al. 2023), with implicit radiance field representations purely based on neural networks (Mildenhall et al. 2020; Barron et al. 2021\), progressively increases the frequency bandwidth of positional encoding to alleviate overfitting at the early stage of training. For explicit or hybrid grid-based factorized radiance field representations (Chen et al. 2022; Fridovich-Keil et al. 2023\) with intrinsic high-frequency characteristics, existing works adopt different strategies to restrain these characteristics at the start of training. SynergyNeRF (Kim et al. 2024) integrates multi-plane features into the coordinate-based neural network without positional encoding and conducts curriculum weighting on multi-plane features. This can learn global contexts at the start that stems from the low-frequency bias of multi-layer perceptron and progressively enhance finegrained details due to the integration of multi-plane features. Instead of introducing neural networks, FourieRF (Gomez et al. 2025\) transforms tensorial features into frequency domain based on discrete Fourier transform, where it is easy to control the frequency band from low to high during training. FrugalNeRF (Lin et al. 2025) constructs weightsharing multi-scale grids using downsampling to capture different frequency characteristics and proposes cross-scale geometric adaptation to integrate the respective advantages of all grids. Our approach differs in utilizing a networkfree, explicit voxel grid representation that stores volume densities and Spherical Harmonic (SH) coefficients, without relying on neural networks or feature decomposition. However, we share a similar finding: high-order spherical harmonics are detrimental to radiance field reconstruction from sparse views at the early stage of training. To address this, we propose spherical harmonics regularization to alleviate high-frequency overfitting.
+
+Near-camera floaters Many works find that high volume densities tend to distribute over near-camera areas at the early training. To reduce floaters produced by near-camera overfitting, several heuristic strategies have been proposed. RegNeRF (Niemeyer et al. 2022) restricts the scene sampling space to a small region over early iterations. Similarly, VGOS (Sun et al. 2023) freezes the optimization of peripheral voxels at the early training. Zhu et al. \(2024) propose linearly increasing the number of sampling points along the ray for the reduction of sampling points close to camera origins at the beginning. FreeNeRF (Yang et al. 2023\) and FlipNeRF (Seo et al. 2023a) propose penalizing dense fields near the camera or small blending weights along a ray, respectively. Although all of these tricks are effective, these methods do not delve into the underlying reason for near-camera overfitting. Philip and Deschaintre \(2023) find that high volume densities near the camera stem from sampling imbalance and propose the sampling density based gradient scaling to decrease floaters. In this work, we present a different analysis, revealing an alternative potential reason rooted in the physics of volume rendering. Based on this insight, we propose a corresponding transmittance-based gradient scaling strategy to effectively alleviate near-camera overfitting.
+
+## 3 Method
+
+We propose F2Plenoxels, a novel and effective approach for fast radiance field reconstruction from sparse views. Different from previous fast methods based on 3DGS (Park et al. 2025; Li et al. 2024), decomposed feature volume (Shi et al. 2024; Lin et al. 2025) or the combination of voxel grids and small neural networks (Sun et al. 2023; Xu et al. 2024\), F2Plenoxels capitalizes on voxel grids without neural networks as the radiance field representation. Instead of depth supervision during training, which increases computational cost, F2Plenoxels uses depth prior from the fast feed-forward 3D vision foundation model VGGT (Wang et al. 2025) to prune voxel grids before training (Sec. 3.2\). This reduces parameters to be optimized and implicitly imposes the geometric constraint. To further improve geometric accuracy, we propose a curriculum training strategy to progressively increase the high-frequency representative capacity of radiance fields (Sec. 3.3\). In addition, we find that overfitting is prone to occur at the near-camera area. We reveal another potential reason behind this phenomenon besides sampling imbalance (Philip and Deschaintre 2023\) and propose transmittance-based gradient scaling to reduce near-camera floaters (Sec. 3.4\). We illustrate the overall framework of F2Plenoxels in Fig. 2.
+
+## 3.1 Preliminaries
+
+F2Plenoxels is built on Plenoxels (Fridovich-Keil 2022), a NeRF (Mildenhall et al. 2020\) variant for fast radiance field
+
+
+
+
+
+training and rendering. Before elaborating on F2Plenoxels, we first briefly introduce NeRF and Plenoxels.
+
+NeRF NeRF parameterizes a scene as a multilayer perceptron F-, which maps a 3D position x ∈ R3 and a unit directional vector d ∈ S2 looking at x to volume density σ and color c = (r, g, b), i.e. F- : (x, d) → (σ, c). For a ray r(t) = o + t***d shot into the scene along the direction d from the camera origin o, its color is calculated via volume rendering (Kajiya and Herzen 1984):
+
+$$\mathbf{C}(\mathbf{r}) = \int_{t_n}^{t_f} T(t) \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t), \mathbf{d}) dt, \quad (1)$$
+
+$$T(t) = \exp\left(-\int_{t_n}^t \sigma(\mathbf{r}(s)) ds\right), \quad (2)$$
+
+where T (t) denotes the accumulated transmittance along the ray from*tn* to t; tn and t f are near and far bounds, respectively. This continuous integral can be numerically estimated using the quadrature rule (Max 1995\):
+
+
+$$\hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i, \quad (3)$$
+
+Fig. 2 The overall framework of F2Plenoxels. F2Plenoxels uses the depth prior from 3D vision foundation model VGGT (Wang et al. 2025) to prune voxels before training (Sec. 3.2\). During training, two strategies are applied to alleviate overfitting: 1) SH regularization (Sec. 3.3\)
+
+progressively increases the degree of SH to prevent high-frequency overfitting at the early stage; 2) Gradient scaling (Sec. 3.4\) compensates for gradient imbalance resulting from sampling imbalance or transmittance attenuation to reduce near-camera floaters
+
+$$T_i = \exp \left( - \sum_{j=1}^{i-1} \sigma_j \delta_j \right), \quad (4)$$
+
+where N denotes the number of partitioned bins in the interval [tn, t f ] and δ*i* = ti+1 − ti is the distance between adjacent samples. Given a set of calibrated multi-view images, the multilayer perceptron F is optimized using the mean squared error (MSE) between the rendered and true pixel colors:
+
+
+$$\mathcal{L}_{\text{MSE}} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \left\| C(\mathbf{r}) - \hat{C}(\mathbf{r}) \right\|_2^2, \quad (5)$$
+
+where R is the set of rays in each batch.
+
+Plenoxels Instead of a multilayer perceptron, Plenoxels capitalizes on two sparse voxel grids V D and V*SH to represent a scene. These two grids respectively store volume density σ and spherical harmonic (SH) coefficients **k = (km ) m:−≤m≤ :0≤≤max where m and are the order and the degree of SH, respectively; km ∈ R3 is a set of 3 coefficients corresponding to the RGB components. For any sample point x in a ray r(t) = o+t***d, its volume density and SH coefficients are computed via trilinear interpolation of eight neighboring voxels:
+
+$$\sigma(\mathbf{x}) = \text{ReLU}(\text{interp}(\mathbf{x}, V^D)), \quad (6)$$
+
+k(x) = interp(x, V SH), (7)
+
+where ReLU denotes the Rectified Linear Unit used to keep the volume density of x nonnegative. The color looking at x along the ray direction d is calculated by a linear combination of SH basis functions Y m : S2 → R:
+
+$$\mathbf{c}(\mathbf{d}; \mathbf{k}(\mathbf{x})) = \text{ReLU} \left( \sum_{\ell=0}^{\ell_{\max}} \sum_{m=-\ell}^{\ell} k_{\ell}^m(\mathbf{x}) Y_{\ell}^m(\mathbf{d}) \right). \quad (8)$$
+
+Plenoxels uses the same rendering formula as NeRF, as presented in \(3\) and \(4\). Besides the mean squared loss *L*MSE in \(5\), Plenoxels introduces total variation regularization to smooth the geometry and appearance of a scene:
+
+$$\mathcal{L}_{\text{TV}}(V^{\text{D}}) = \frac{1}{|V|} \sum_{\mathbf{v} \in V} \sqrt{\Delta_{\vec{x}}^2(\mathbf{v}) + \Delta_{\vec{y}}^2(\mathbf{v}) + \Delta_{\vec{z}}^2(\mathbf{v})}, \quad (9)$$
+
+$$\mathcal{L}_{\text{TV}}(V^{\text{SH}}) = \frac{1}{|\mathcal{V}|} \sum_{\mathbf{v} \in \mathcal{V}} \sum_{d \in [D]} \sqrt{\Delta_x^2(\mathbf{v}, d) + \Delta_y^2(\mathbf{v}, d) + \Delta_z^2(\mathbf{v}, d)}, \quad (10)$$
+
+where 2 x (v, d) is the squared difference between the d*th value in voxel **v := (i, j, k) and the d*th value in voxel (*i + 1, j, k), and analogously for 2 y (v, d) and 2 z(v, d); V is a set of voxels in each batch; D is the number of SH coefficients. Due to the much lower computational cost of a trilinear interpolation than a forward neural network inference, Plenoxels is significantly faster than NeRF in terms of training and rendering.
+
+#### 3.2 Depth-guided voxel pre-pruning
+
+Some existing works (Kondo et al. 2021; Lai et al. 2025; Yang et al. 2024b) use the classic Shape-from-Silhouette (Laurentini 1994) to construct the visual hull of the object in the foreground, which can decrease unnecessary samples in free space to accelerate training. In addition, coarse geometric constraints from the visual hull can also decrease floaters in the sparse-view setting. However, the construction of the visual hull requires a binary mask separating the foreground from the background in each image, which is only applicable to simple scenes. Alternatively, many studies (Deng et al. 2022; Lao et al. 2023; Roessle et al. 2022; Rau et al. 2025\) introduce depth priors to supervise geometry. However, this comes at the cost of increased training overhead. Combining the advantages of these two lines of work, we propose using depth prior to prune voxels corresponding to free space before training. This strategy offers two primary benefits: 1) It reduces samples in free space and parameters to be optimized for training acceleration; 2) It implicitly imposes geometric constraint. There are many ways of obtaining depth priors, like COLMAP (Deng et al. 2022), image matchers (Lao et al. 2023), depth completion networks (Roessle et al. 2022\), and monocular depth estimators (Rau et al. 2025\). Instead of these depth sources used by previous works, we obtain depth prior from the 3D vision foundation model VGGT (Wang et al. 2025) based on two reasons: 1) VGGT is completely feedforward and supports a variable number of input views with fast inference; 2) Depth prior from VGGT achieves a balance in density and multi-view consistency due to its powerful ability compared to other depth sources. A detailed comparison and analysis of these different depth sources is presented in Sec. 4.3.2.
+
+Given sparse multi-view images**I** ={In}S 1 , corresponding camera intrinsics K ={Kn}S 1 and extrinsics P ={Pn}S 1 of a scene, we input I into VGGT to obtain their depths1 D = {Dn}S 1 and confidences E ={En}S 1 . To filter low-confidence depths, we manually set a threshold τ to get masks M = {Mn}S 1 :
+
+$$m = \begin{cases} \text{True} & e \geq \tau \\ \text{False} & e < \tau \end{cases}, \quad (11)$$
+
+1 We align depths predicted by VGGT with sparse depths obtained by triangulating corresponding pixels (Edstedt et al. 2023\) using least square. Alternatively, the scaling factor can also be computed by aligning poses predicted by VGGT with known poses.
+
+where m ∈ Mn, e ∈ En. In Algorithm 1, we detail the procedure of using depth prior to prune voxels before training.
+
+#### Algorithm 1 Depth-guided voxel pre-pruning.
+
+Input: voxel grid V (V D or V SH) with resolution [Nx , Ny , Nz], scene bounding box (xa , xb) × (ya , yb) × (za ,zb), camera intrinsics K = {Kn}S 1 and extrinsics P ={Pn}S 1 , depth prior D ={Dn}S 1 and corresponding binary masks M ={Mn}S 1 , ray marching step s
+
+Output: pruned voxel grid V 1: Initialize a grid mask Mg with resolution [Nx , Ny , Nz] whose values are all true 2: Generate ray set R**w ={*R*w *n }S 1 (consisting of origin set O*w and direction set *Q*w) in world frame using **K and P 3: D ← S n=1 Dn[Mn], R*w ← *S n=1 R*w *n [Mn] 4: Transform D and R*w into *D*g and *R*g (consisting of origin set *O*g and direction set *Q*g) in grid frame based on grid resolution and scene bounding box 5: Compute near-bound set *Tn and far-bound set T f of R*g intersected with grid *V 6: Filter rays non-intersected with grid V: R*g ← *R*g[*Tn ≤ T f ], D*g ← *D*g[*Tn ≤ T f }, Tn ← Tn[Tn ≤ T f ], T f ← T f [Tn ≤ T f ] 7: Initialize a ray mask M*r with the same shape as *R*g whose values are all **true 8: T ← Tn 9: while there exist elements in M*r **do 10: Compute positions P = O*g + *T × Q*g where all rays reach during marching forward 11: Determine indexes *I, J , K of voxels occupied by P 12: M*g[*I, J , K]= false 13: T ← T + s 14: M*r [*T ≥ D*g]= **false 15: O*g ← *O*g[*M*r ], *Q*g ← *Q*g[*M*r ], *T ← T [M*r ], *D*g ← *D*g[*M*r ], *M*r ← *M*r [*M*r ] 16: **end while 17: V ← V[M*g] 18: **return V
+
+Although we filter out low-confidence depths, the remaining depths cannot be ensured to be perfectly reliable. For those possibly larger than ground truth, the scene will be overpruned. In addition, even for high-accuracy depths, voxels occupied by the scene surface might also be pruned due to the discreteness of voxel grid representation. To reduce the negative influence brought by overpruning, we use voxel dilation to restore some voxels potentially containing scene context. Both the voxel pruning and subsequent dilation steps are highly efficient, completing the necessary geometry initialization in a matter of seconds using parallel computing.
+
+## 3.3 Spherical harmonics regularization
+
+The high-frequency representative capacities of NeRF and its variants are beneficial for dense inputs, which enables rendering images with rich details. However, in the sparse-view setting, high-frequency components—whether introduced through positional encoding (Mildenhall et al. 2020\) or feature volume decomposition (Chen et al. 2022; Fridovich-Keil et al. 2023; Chan et al. 2022)—lead to significant overfitting to the training images. To this end, some works (Yang et al. 2023; Gomez et al. 2025; Kim et al. 2024; Lin et al. 2025; Song et al. 2023b) propose regularizing the frequency of radiance fields to alleviate overfitting. A common finding among these methods is that high-frequency radiance fields are prone to overfitting at training images with erroneous geometry reconstruction, while low-frequency radiance fields can learn coarse but plausible geometry despite lower image reconstruction quality. This insight has led to two main strategies: either using depth information from low-frequency radiance fields to supervise high-frequency radiance fields training (Lin et al. 2025; Song et al. 2023b\), or implementing frequency control from low to high during training (Yang et al. 2023; Gomez et al. 2025; Kim et al. 2024). Inspired by these methods, we also attempt to apply frequency regularization to explicit voxel radiance fields without grid decomposition, i.e. Plenoxels, for few-shot view synthesis. As established in Sec. 3.1, Plenoxels factorizes color as a weighted sum of a series of SH basis functions. In the fewshot setting, we observe that SH with higher degree are prone to overfitting at training images. As illustrated in Fig. 3, high-degree SH components negatively impact geometry reconstruction and degrade rendering quality on test views.
+
+To this end, we propose a curriculum training strategy called SH regularization to progressively increase the number of SH basis functions:
+
+$$\mathbf{c}(t, T, \mathbf{d}; \mathbf{k}(\mathbf{x})) = \text{ReLU} \left( \sum_{\ell=0}^{\ell_{\max}} \sum_{m=-\ell}^{\ell} \alpha_{\ell}^m(t, T) k_{\ell}^m(\mathbf{x}) Y_{\ell}^m(\mathbf{d}) \right), \quad (12)$$
+
+
+$$\alpha_\ell^m(t, T) = \begin{cases} 1 & \ell = 0 \text{ or } \ell \leq \sqrt{t/T}(\ell_{\max} + 1) - 1 \\ 0 & \ell \geq 1 \text{ and } \ell > \sqrt{t/T}(\ell_{\max} + 1) - 1, \end{cases} \quad (13)$$
+
+where α, k and Y are SH masks, coefficients, and basis functions, respectively; t is the current training iteration; and T is a hyperparameter denoting how many iterations until the full range is reached. Specifically, we only enable the isotropic SH basis function to alleviate high-frequency overfitting at the early stage of training. Then we progressively enable anisotropic SH basis functions corresponding to the same degree from low to high for capturing complex lighting effects and fine-grained textures.
+
+It is important to note the distinction between our approach and previous methods (Yang et al. 2023; Gomez et al. 2025; Kim et al. 2024; Lin et al. 2025; Song et al. 2023b). Those works typically impose frequency constraints on both the geometry and appearance representations, either directly or indirectly. In contrast, our framework already benefits from an implicit geometric constraint provided by the depth-guided voxel pre-pruning in Sec. 3.2. Even so, SH regularization is capable of further improving the geometry reconstruction, as it compensates for potential inaccuracies
+
+Fig. 3 Comparison between Plenoxels (Fridovich-Keil 2022\) with different number of spherical harmonic basis functions at hotdog scene in the 4-view setting. N denotes the number of spherical harmonic basis functions. In the case of sparse views, Plenoxels with more spherical harmonic basis functions is prone to overfitting at training images, leading to worse geometry reconstruction and image rendering at test views
+
+
+
+and remaining artifacts in the coarse geometry established during the initial depth-guided voxel pre-pruning step. The effectiveness of this secondary geometric refinement is validated through our ablation study (Sec. 4.3.1\).
+
+## 3.4 Gradient scaling
+
+We have known that NeRF and its variants are prone to overfit to training images in the few-shot setting. A common phenomenon is that overfitting occurs in regions close to the camera, as shown in Fig. 4. Some previous works (Yang et al. 2023; Niemeyer et al. 2022; Sun et al. 2023) also find this phenomenon and propose different tricks to mitigate near-camera overfitting. Philip and Deschaintre \(2023\) reveal a reason that the imbalance of sampling density leads to near-camera volume receiving more gradients, and propose sampling density based gradient scaling to compensate for the gradient imbalance. Although this strategy effectively restrains the background collapse (Barron et al. 2022) and reduces floaters in 360° inward captured scenes, we find that there still exist lots of floaters at areas near camera on forward facing captured scenes2, as shown in Fig. 4. To this end, we provide another potential explanation for near-camera overfitting: the exponential attenuation of transmittance along the direction of light propagation results in samples far away from the camera origin receiving smaller gradients at the early stage of training. In Fig. 5, we illustrate these two causes leading to gradient imbalance. Next, we will elaborate on sampling density based and transmittance-based gradient scaling schemes, which are used to alleviate gradient imbalance for decreasing near-camera floaters.
+
+#### 3.4.1 Sampling density based gradient scaling
+
+As shown in Fig. 5\(a), the sampling density of any point in the viewing frustum is mainly related to its distance ζ to the camera origin, specifically inversely proportional to ζ 2. Therefore, the sampling density ρ(p) of any position p can be approximated as:
+
+$$\rho(\mathbf{p}) \approx \sum_{i=1}^n v_i(\mathbf{p}) \times \frac{1}{(\zeta_{\mathbf{p}}^i)^2}, \quad (14)$$
+
+where n is the number of cameras, and v*i*(p) is a visibility function (1 if p is in the i*th camera field of view and 0 otherwise). To counteract the gradient imbalance resulting from sampling imbalance, we scale gradients that the photometric loss in \(5\) back-propagates to per-voxel characteristics (including volume density σ and SH coefficients **k) based on the sampling density. The scaling factors s ρ σ and s ρ k for ∇σ*L*MSE and ∇k***L*MSE are both the reciprocal of the sampling density, i.e. *s ρ σ = s ρ k = ρ−1.
+
+#### 3.4.2 Transmittance-based gradient scaling
+
+We know that its energy will be steadily reduced when light propagates forward, i.e. Ti in \(4\) gradually dwindling, as shown in Fig. 5\(b). When all densities in the grid V D are given a relatively large initial value, Ti will decline rapidly, which results in samples far away from the ray origin receiving much smaller gradients compared to those close to the ray origin. Consequently, this causes geomet-
+
+2 For forward facing captured scenes, the sampling density in the viewing frustum can be thought as approximately uniform due to view transformation.
+
+Fig. 4 Near-camera overfitting at flower scene in the sparse-view setting. Plenoxels reconstructed from very sparse inputs (3 views) overfits to training images with higher Peak Signal-to-Noise Ratio (PSNR) than that from denser inputs (29 views), and has more near-camera floaters as shown in depth and point cloud maps
+
+
+
+Fig. 5 Two reasons for near-camera overfitting. (a) Higher sampling density leads to voxels close to the camera receiving more gradients. (b) Samples far away from the camera origin receive smaller gradients due to power attenuation along the direction
+
+
+
+ric surface and appearance to be prone to be located at near-camera areas. Although a very small initial value close to zero makes Ti hardly attenuate, this will lead to very slow optimization or even not converging. To achieve fast optimization and alleviate near-camera overfitting, we propose applying the transmittance-based gradient scaling at the early stage of training. Specifically, we replace ∇k***L*MSE with *s Ti k ×∇k***L*MSE where *s Ti k = Ti −1. Note that different from the sampling density based gradient scaling in Sec. 3.4.1, the transmittance-based gradient scaling only acts on gradients that the photometric loss back-propagates to SH coefficients because transmittance attenuation mainly influences the gradients that SH coefficients receive at the beginning. (Please refer to Appendix A for the detailed derivation and analysis.) Given that the transmittance Ti is the necessary component in volume rendering as shown in \(3\) and the transmittancebased gradient scaling is only applied at the early iterations, the extra computational cost introduced by this strategy is very little.
+
+### 3.5 Optimization
+
+To minimize extra computational cost and maintain the characteristic of fast convergence for voxel radiance fields, the same as Plenoxels, we only combine the photometric loss with total variation regularization as the final optimization objective. Therefore, the total loss is:
+
+$$\mathcal{L}_{\text{Total}} = \mathcal{L}_{\text{MSE}} + \lambda_{\sigma} \mathcal{L}_{\text{TV}}(V^{\text{D}}) + \lambda_{\mathbf{k}} \mathcal{L}_{\text{TV}}(V^{\text{SH}}), \quad (15)$$
+
+where λσ and λ**k** are balancing terms for total variation regularization on grids V D and *V*SH, respectively. The detailed steps of our voxel optimization process are summarized in Algorithm 2.
+
+## 4 Experiments
+
+In this section, we first introduce our experimental setting. Next, we evaluate our method and compare it against state-ofthe-art (SOTA) approaches on two datasets Blender (Mildenhall et al. 2020) and LLFF (Mildenhall et al. 2019). We also conduct the ablation study and a sensitivity analysis of some hyperparameters, and discuss the limitations of our method.
+
+## 4.1 Experimental setup
+
+#### 4.1.1 Datasets
+
+We evaluate our method on the realistically synthetic dataset Blender (Mildenhall et al. 2020\) and real-world dataset LLFF (Mildenhall et al. 2019\). Blender dataset consists
+
+| Algorithm 2       | Voxel optimization.     |                                        |
+|-------------------|-------------------------|----------------------------------------|
+| Input: pruned     | voxel grids V D and     | V SH, input images I ={ In } S         |
+|                   |                         | 1 , cam                               |
+| era intrinsics    | K ={ Kn } S             |                                        |
+|                   | 1 and                   | extrinsics P ={ Pn } S                 |
+| Output: optimized | voxel grids V           | D and V SH                             |
+| 1: V D ← 0 1,     | V SH ← 0                | Initialization                         |
+| 2: R , C ←        | GetAllTrainingRays(     | K , P , I ) Rays and Colors            |
+| 3: for e = 1 to   | E do                    | Epochs                                 |
+| 4: R , C ←        | ShuffleAllTrainingRays( | R , C )                                |
+| 5: for n = 1      | to N do                 | Iterations                             |
+| 6: i ← (          | e − 1 ) ∗ N + n         | Global Iteration Count                 |
+| 7: R , C          | ← GetBatchTrainingRays( | R , C )                                |
+| 8: if i <         | = T then                | Spherical Harmonics Regularization     |
+| 9: V              | SH ← SHRegularization(  | V SH)                                  |
+| 10: end           | if                      |                                        |
+| 11: C ˆ ←         | VolumeRendering(        | R , V D, V SH) Render Ray Colors       |
+| 12: L MSE         | ← MSELoss( C ˆ , C      | ) Mean Squared Error Loss              |
+| 13: ∇ V D         | L MSE, ∇ V SH L MSE     | ← Backpropagate( L MSE, V D, V SH)     |
+| 14:               |                         | Compute Gradients                      |
+| 15: ∇ V D         | L MSE, ∇ V SH L MSE     | ← GradientScaling( ∇ V D L MSE,        |
+| ∇ V SH L MSE)     |                         |                                        |
+| 16: L TV          | ← λσ ∗ TVLoss( V        | D) + λ k ∗ TVLoss( V SH) Total         |
+| Variation         | Loss                    |                                        |
+| 17: ∇ V D         | L TV, ∇ V SH L TV ←     | Backpropagate( L TV, V D, V SH)        |
+| 18:               |                         | Compute Gradients                      |
+| 19: V D,          | V SH ← RMSProp(         | ∇ V D L MSE, ∇ V SH L MSE, ∇ V D L TV, |
+| ∇ V SH L TV)      |                         |                                        |
+| 20:               |                         | Update Voxel Grids                     |
+| 21: end for       |                         |                                        |
+| 22: end for       |                         |                                        |
+| 23: return        | optimized voxel grid    | V D and V SH                           |
+
+of eight 360° inward-facing rendered object scenes, each of which has 100 training views and 200 test views. We randomly select 4 images from the training set without downsampling and evaluate on all test images. LLFF dataset includes eight forward-facing captured indoor or outdoor scenes with 20 to 62 views per scene. Following the train/test split from RegNeRF (Niemeyer et al. 2022), we use every 8th image as the held-out test set and select 3 training images evenly from the remaining. All images used for LLFF are downsampled by a factor of 4.
+
+#### 4.1.2 Evaluation metrics
+
+We employ common quantitative metrics for novel view synthesis to assess our method, including Peak Signal-to-Noise Ratio (PSNR), Structural Similarity Index Measure (SSIM) (Wang et al. 2004\), and Learned Perceptual Image Patch Similarity (LPIPS) (Zhang et al. 2018\). For LPIPS, we utilize the VGG architecture (Simonyan and Zisserman 2015) as the pre-trained backbone. For fairness, we calculate the SSIM and LPIPS scores of all methods based on the same implementation and parameters, including ours and the comparison methods. In addition, we also report the training time at a single NVIDIA Quadro P5000 GPU to evaluate the efficiency.
+
+#### 4.1.3 Comparison methods
+
+We compare against other few-shot methods based on radiance field representations within the last three years (Yang et al. 2023; Wynn and Turmukhambetov 2023; Park et al. 2025; Wang et al. 2023; Zhu et al. 2025; Niemeyer et al. 2022; Sun et al. 2023; Xu et al. 2024; Li et al. 2024; Seo et al. 2023b; Kim et al. 2024; Lin et al. 2025), which can be classified into two categories based on whether they use learned priors or not. For those with different train/test splits or image resolutions from ours, we rerun them using their official GitHub repositories for fairness. In addition, we also list these methods' baselines with different types of radiance field representations.
+
+### 4.1.4 Implementation details
+
+Our implementation is built on Plenoxels' codebase using PyTorch with a custom CUDA extension library. Following Plenoxels, we use RMSProp (Tieleman and Hinton 2012\) to optimize volume densities and SH coefficients. For volume densities, we use a delayed exponential learning rate schedule, where the exponential is scaled by a learning rate of 15 and decays to 0.05 at step 50000 with an initial delay period of 3000. For SH coefficients, we use a pure exponential decay learning rate schedule, with an initial learning rate of 0.01 that decays to 5 × 10−6 at step 50000. On all scenes from two datasets, we train for 10 epochs, each containing 2560 iterations with a batch size of 5000 rays randomly selected from all input images. We approximate the ray color with SH of degree 2 and enable SH regularization at the initial 1280 iterations. The weights λσ and λ**k** in \(15\) for total variation regularization are set as follows: 1) 5 × 10−4 and 5 × 10−2 for Blender dataset; 2) 2.5 × 10−3 and 2.5 × 10−2 for LLFF dataset.
+
+### 4.2 Comparisons
+
+#### 4.2.1 Blender dataset
+
+We quantitatively compare our method with state-of-the-art NeRF-based and 3DGS-based approaches for sparse views, including MixNeRF (Seo et al. 2023b\), SynergyNeRF (Kim et al. 2024), VGOS (Sun et al. 2023\), DropGaussian (Park et al. 2025), ReVoRF (Xu et al. 2024\) and DNGaussian (Li et al. 2024\), as shown in Table 1. In addition, we also report their baselines (Barron et al. 2021; Sun et al. 2022; Fridovich-Keil 2022; Chen et al. 2022; Kerbl et al. 2023) with different radiance field representation models, which lead to the difference in training efficiency. Among all these fewshot methods, ours achieves the best performance in PSNR and LPIPS, and is only 0.001 less than ReVoRF in SSIM. In terms of training efficiency, ours is only slightly lower than DropGaussian but has better image synthesis quality. Compared to our baseline Plenoxels, F2Plenoxels significantly improves the performance and only introduces a little computational cost.
+
+We also qualitatively compare ours with the best methods with different baselines in Fig. 6. In contrast to Plenoxels, MixNeRF, and SynergyNeRF, ours significantly reduces floaters thanks to the usage of depth prior. Although ReVoRF also introduces depth prior, it produces more blurriness, potentially resulting from near-camera overfitting. For the 3DGS-based method DNGaussian, there exist some cluttered needle-like artifacts that do not appear in NeRF-based methods including ours.
+
+#### 4.2.2 LLFF dataset
+
+We quantitatively compare our F2Plenoxels with the latest few-shot methods including FreeNeRF (Yang et al. 2023), VGOS (Sun et al. 2023\), FrugalNeRF (Lin et al. 2025), RegNeRF (Niemeyer et al. 2022\), SparseNeRF (Wang et al. 2023), DiffusioNeRF (Wynn and Turmukhambetov 2023\) and FSGS (Zhu et al. 2025\) in Table 2. Compared to their baselines, these methods effectively improve the performance in the sparse-view setting using regularization technologies (Yang et al. 2023; Sun et al. 2023; Lin et al. 2025) or learned priors (Niemeyer et al. 2022; Wang et al. 2023; Wynn and Turmukhambetov 2023; Zhu et al. 2025). Among those few-shot methods, ours obtains the best SSIM. For PSNR and LPIPS, ours is better than other NeRF-based methods and only inferior to the 3DGS-based method FSGS but has higher training efficiency. Despite a bit more training time than VGOS, image quality is better especially in terms of SSIM. Therefore, it can be said that ours achieves an ideal balance between quality and efficiency. In addition, F2Plenoxels remarkably enhances the performance of our baseline Plenoxels almost without extra computational cost.
+
+We also exhibit qualitative comparisons with the best few-shot methods based on different radiance field representations in Fig. 7. In contrast to our baseline Plenoxels, F2Plenoxels significantly improves the accuracy of geometry and the fidelity of appearance via the implicit constraint from depth-guided voxel pre-pruning. While other methods leverage various depth constraints—such as depth ranking distilled from the monocular depth estimator (SparseNeRF), depth smoothing (VGOS), depth diffusion prior (DiffusioNeRF), and pseudo ground-truth depth supervision from cross-scale geometric adaptation (FrugalNeRF)—these constraints are often coarser than ours, resulting in worse texture details and even reconstruction failures in challenging regions. Although FSGS excels in overall visual perception quality, its rendered images frequently exhibit oversharpening or needle-like artifacts (please see the areas indicated in red).
+
+Table
+
+**1**QuantitativecomparisononBlender(Mildenhalletal.2020)datasetwith4inputviews.Baselinemethodswithdifferentrepresentationtypesarelisted.Few-shotmethodsaredividedintocategoriesperwhetherusinganylearnedpriorornot.↑/↓meansthatlarger/smallernumbersdenotebetterperformance
+
+two
+
+| Method                          | Venue         | Setting   | PSNR ↑ | SSIM ↑ | LPIPS ↓ | Training Time ↓ | Baseline  | Representation               |
+|---------------------------------|---------------|-----------|--------|--------|---------|-----------------|-----------|------------------------------|
+| Mip-NeRF (Barron et al. 2021)   | ICCV 2021     | baseline  | 17.66  | 0.809  | 0.207   | 191 mins        | –         | neural network               |
+| DVGO (Sun et al. 2022)          | CVPR 2022     |           | 16.46  | 0.762  | 0.218   | 20 mins         |           | voxel grids + neural network |
+| Plenoxels (Fridovich-Keil 2022) | CVPR 2022     |           | 17.23  | 0.793  | 0.228   | 12 mins         |           | voxel grids                  |
+| TensoRF (Chen et al. 2022)      | ECCV 2022     |           | 19.35  | 0.800  | 0.189   | 84 mins         |           | decomposed tensors           |
+| 3DGS (Kerbl et al. 2023)        | SIGGRAPH 2023 |           | 16.18  | 0.773  | 0.228   | 19 mins         |           | 3D Gaussians                 |
+| MixNeRF (Seo et al. 2023b)      | CVPR 2023     | w/o prior | 19.08  | 0.819  | 0.210   | 187 mins        | Mip-NeRF  | –                            |
+| VGOS (Sun et al. 2023)          | IJCAI 2023    |           | 18.00  | 0.822  | 0.191   | 17 mins         | DVGO      |                              |
+| SynergyNeRF (Kim et al. 2024)   | ICML 2024     |           | 18.81  | 0.828  | 0.181   | 284 mins        | TensoRF   |                              |
+| DropGaussian (Park et al. 2025) | CVPR 2025     |           | 17.83  | 0.811  | 0.185   | 12 mins         | 3DGS      |                              |
+| DNGaussian (Li et al. 2024)     | CVPR 2024     | w/ prior  | 18.53  | 0.807  | 0.171   | 19 mins         | 3DGS      | –                            |
+| Re VoRF (Xu et al. 2024)        | CVPR 2024     |           | 19.39  | 0.839  | 0.176   | 42 mins         | DVGO      |                              |
+| F 2 Plenoxels (Ours) | –             |           | 19.65  | 0.838  | 0.161   | 14 mins         | Plenoxels |                              |
+
+Thebestsecond-bestandthird-besthighlighted
+
+
+
+Fig. 6 Qualitative comparison on Blender (Mildenhall et al. 2020) dataset with 4 input views. Peak Signal-to-Noise Ratio (PSNR) is provided inside every rendered image. Compared to Plenoxels (Fridovich-Keil 2022) (our baseline), MixNeRF (Seo et al. 2023b\) and Syn-
+
+ergyNeRF (Kim et al. 2024\), F2Plenoxels decreases floater artifacts. F2Plenoxels also exhibits better visual quality than fast few-shot methods DNGaussian (Li et al. 2024\) and ReVoRF (Xu et al. 2024) as shown in close-ups. Please zoom in for better visual comparison
+
+## 4.3 Ablation study
+
+#### 4.3.1 The effectiveness of proposed components
+
+We evaluate the contribution of each component in our approach and their combinations at hotdog scene from Blender dataset with 4 input views. F2Plenoxels includes three components, i.e. depth-guided voxel pre-pruning (DGVP), spherical harmonics regularization (SH Reg.), and gradient scaling (GS). Table 3 reports the quantitative results of various combinations added to the baseline. The results confirm that all three components are individually effective in improving novel view synthesis quality, with DGVP yielding the most significant improvement. Combinations of two components generally lead to further performance gains. An exception is the combination of DGVP and GS, which results in a marginal 0.001 increase in LPIPS compared to independent DGVP—a likely consequence of intricate interactions between geometric constraints and gradient scaling. Crucially, the full model achieves the best performance.
+
+We also show some visual comparisons in Fig. 8. Compared to the baseline, baseline+GS alleviates near-camera overfitting. Baseline+DGVP significantly reduces floaters in free space and baseline+DGVP+SH Reg. improves geometry accuracy as indicated by red arrows. Finally, our full model (baseline+DVGP+SH Reg.+GS) further mitigates near-camera overfitting at some area indicated by light blue arrows, achieving the best visual quality.
+
+#### 4.3.2 The influence of different depth sources
+
+F2Plenoxels pre-prunes voxels using depth prior from the 3D vision foundation model VGGT. Table 4 reports the results3 using depth priors from other sources at room scene from LLFF dataset in the 3-view setting, including Structure-from-Motion (SfM) (Schönberger and Frahm 2016\), a dense image matcher (Edstedt et al. 2023) and a monocular depth estimator (Yang et al. 2024a\). We combine these depth priors and corresponding camera poses to obtain point clouds and visualize them in Fig. 9.
+
+As seen from the table, depth prior from COLMAP4 (Schönberger and Frahm 2016 has negligible influence on the performance compared to the baseline due to its extreme sparsity, as shown in Fig. 9\(a). The depths of sparse points with COLMAP depths may well be correctly reconstructed only based on the photometric loss. For the dense image matcher DKM (Edstedt et al. 2023), we triangulate pairs of pixel correspondence to obtain depths. The same as CorresNeRF (Lao et al. 2023\), we first filter low-confidence correspondences, then increase the number of correspondences using image transformations or by propagating correspondences across image pairs, and finally remove outliers based on projected ray distance (Jeong et al. 2021\) as well as random sample
+
+3 To only validate the effectiveness of depth priors from different sources, we remove the other two components, i.e. SH regularization and gradient scaling.
+
+4 
+
+**Table2**QuantitativecomparisononLLFF(Mildenhallal.2019)datasetwith3inputviews.Baselinemethodswithdifferentrepresentationtypesarelisted.Few-shotmethodsdividedintocategoriesasperwhetherusinganylearnedpriorornot.↑/↓meansthatlarger/smallernumbersdenotebetterperformance
+
+| Two categories as per whether using any learned prior or not. ↑ / ↓ means that large/smaller numbers denote better performance |               |                   |        |        |         |                 |             |                              |  |
+|--------------------------------------------------------------------------------------------------------------------------------|---------------|-------------------|--------|--------|---------|-----------------|-------------|------------------------------|--|
+| Method                                                                                                                         | Venue         | Setting           | PSNR ↑ | SSIM ↑ | LPIPS ↓ | Training Time ↓ | Baseline    | Representation               |  |
+| Mip-NeRF (Barron et al. 2021)                                                                                                  | ICCV 2021     | baseline          | 16.60  | 0.447  | 0.487   | 166 mins        | –           | neural network               |  |
+| DVGO (Sun et al. 2022)                                                                                                         | CVPR 2022     |                   | 16.81  | 0.528  | 0.383   | 22 mins         |             | voxel grids + neural network |  |
+| Pienoxels (Fridovich-Keil 2022)                                                                                                | CVPR 2022     |                   | 16.83  | 0.521  | 0.438   | 23 mins         |             | voxel grids                  |  |
+| Instant-NGP (Müller et al. 2022)                                                                                               | SIGGRAPH 2022 |                   | 16.28  | 0.497  | 0.434   | 66 mins         |             | hash grids                   |  |
+| TensoRF (Chen et al. 2022)                                                                                                     | ECCV 2022     |                   | 13.66  | 0.361  | 0.532   | 48 mins         |             | decomposed tensors           |  |
+| 3DGS (Kerbl et al. 2023)                                                                                                       | SIGGRAPH 2023 |                   | 16.94  | 0.488  | 0.402   | 42 mins         |             | 3D Gaussians                 |  |
+| FreeNeRF (Yang et al. 2023)                                                                                                    | CVPR 2023     | w/o learned prior | 18.73  | 0.562  | 0.384   | 170 mins        | Mip-NeRF    | –                            |  |
+| VGOS (Sun et al. 2023)                                                                                                         | IJCAI 2023    |                   | 19.27  | 0.600  | 0.384   | 16 mins         | DVGO        |                              |  |
+| FrugalNeRF (Lin et al. 2025)                                                                                                   | CVPR 2025     |                   | 18.55  | 0.568  | 0.357   | 80 mins         | TensoRF     |                              |  |
+| RegNeRF (Niemeyer et al. 2022)                                                                                                 | CVPR 2022     | w/ learned prior  | 18.06  | 0.535  | 0.411   | 278 mins        | Mip-NeRF    | –                            |  |
+| DiffusioNeRF (Wynn and Turmukhambetov 2023)                                                                                    | CVPR 2023     |                   | 19.12  | 0.598  | 0.328   | 136 mins        | Instant-NGP |                              |  |
+| SparseNeRF (Wang et al. 2023)                                                                                                  | ICCV 2023     |                   | 19.30  | 0.564  | 0.414   | 265 mins        | Mip-NeRF    |                              |  |
+| FSGS (Zhu et al. 2025)                                                                                                         | ECCV 2024     |                   | 19.72  | 0.654  | 0.268   | 97 mins         | 3DGS        |                              |  |
+| F 2 Pienoxels (Ours)                                                                                                | –             |                   | 19.38  | 0.655  | 0.326   | 23 mins         | Pienoxels   |                              |  |
+
+Thebestsecond-bestandthird-bestarehighlighted
+
+
+
+Fig. 7 Qualitative comparison on LLFF (Mildenhall et al. 2019) dataset in the 3-view setting. Peak Signal-to-Noise Ratio (PSNR) is provided inside every rendered image and local zooms are located below. Compared to NeRF-based methods including Plenoxels (Fridovich-Keil 2022\) (our baseline), SparseNeRF (Wang et al. 2023), VGOS (Sun
+
+et al. 2023\) and FrugalNeRF (Lin et al. 2025), F2Plenoxels enables more realistic rendering. Although 3DGS-based method FSGS exhibits better visual perceptual quality, there exists oversharpening or needlelike artifact as indicated in red. Please zoom in for more details
+
+consensus (RANSAC). Compared to COLMAP, depth prior from DKM is much denser (please see Fig. 9\(b)), which significantly enhances the performance. For the monocular depth estimator DepthAnythingV2 (Yang et al. 2024a), we use sparse but accurate depths from COLMAP to align monocular depths predicted by DepthAnythingV2 based on least square. Despite being much denser than those from DKM (please see Fig. 9\(c)), these depths slightly degrade the performance. This results from intrinsic limitations of monocular depth estimators, e.g. multi-view inconsistency and convexity problem (Miangoleh et al. 2021\) (please see the layered and deformed desktop in Fig. 9\(c)). Thanks to the strong ability of VGGT, depth prior from VGGT is denser than DKM while more precise than DepthAnythingV2 (please see Fig. 9\(d)), hence achieving the best performance among all metrics.
+
+Besides VGGT, we also conduct an experiment using depth prior from the pioneer work DUSt3R (Wang et al. 2024) in the field of 3D vision foundation model and report the result in Table 4. As seen from the table, the performance with depth prior from DUSt3R is superior to DKM and DepthAnythingV2 due to more high-quality depths and
+
+Table 3 Ablation study on three components in our method. DGVP, SH Reg. and GS denotes depth-guided voxel pre-pruning, spherical harmonics regularization, and gradient scaling, respectively. All reported results are at hotdog scene from Blender (Mildenhall et al. 2020\) dataset with 4 input views
+
+| Variant     | DGVP SH Reg. | GS PSNR ↑ | SSIM ↑ | LPIPS ↓ |
+|-------------|--------------|-----------|--------|---------|
+| Baseline    |              | 18.28     | 0.860  | 0.186   |
+| w/ DGVP     |             |           |        |         |
+|             |              | 20.47     | 0.907  | 0.116   |
+| w/ SH Reg.  |             |           |        |         |
+|             |              | 19.22     | 0.876  | 0.166   |
+| w/ GS       |              |          |        |         |
+|             |              | 19.13     | 0.872  | 0.168   |
+| w/o DGVP    |             |          |        |         |
+|             |              | 21.84     | 0.897  | 0.139   |
+| w/o SH Reg. |             |          |        |         |
+|             |              | 20.82     | 0.908  | 0.117   |
+| w/o GS      |            |           |        |         |
+|             |              | 22.19     | 0.918  | 0.106   |
+| Full Model  |            |          |        |         |
+|             |              | 22.70     | 0.920  | 0.103   |
+
+
+
+Fig. 8 Visualization of the ablation on three proposed components in our method at hotdog scene from Blender (Mildenhall et al. 2020) dataset in the 4-view setting. Peak Signal-to-Noise Ratio (PSNR), Structural Similarity Index Measure (SSIM) (Wang et al. 2004\) and Learned Perceptual Image Patch Similarity (LPIPS) are provided inside every rendered image. Compared to the baseline (Fridovich-Keil 2022),
+
+depth-guided voxel pre-pruning (DGVP) significantly reduces floaters in free space. Spherical harmonics regularization (SH Reg.) further improves geometry as indicated in red arrows. Gradient scaling (GS) effectively alleviates near-camera overfitting as indicated by light blue arrows.
+
+better multi-view consistency, but inferior to VGGT which has stronger generalization and higher accuracy. Moreover, DUSt3R requires a post-processing optimization procedure for global alignment, as it only accepts two images per forward inference, making it less efficient than the purely feed-forward VGGT.
+
+#### 4.3.3 The effectiveness of transmittance-based gradient scaling
+
+Table 5 reports the results of the ablation about transmittancebased gradient scaling on LLFF (Mildenhall et al. 2019\) dataset, which verify the effectiveness of this scheme. Figure 10 visualizes rendered images and corresponding depth maps at test view. This qualitative comparison demonstrates that volume densities with larger initial values lead to severer near-camera overfitting due to faster transmittance attenuation. Critically, the introduction of transmittance-based gradient scaling effectively counteracts this effect by mitigating the gradient imbalance, thereby reducing floaters close to cameras and improving geometry.
+
+### 4.3.4 The effectiveness of voxel dilation
+
+We ablate voxel dilation to validate whether this operation can alleviate overpruning or not. Figure 11 shows depthguided voxel pre-pruning without voxel dilation removes some scene content, e.g. branches and leaves, which results
+
+Table 4 Quantitative ablation on depth priors from different sources (top) and VGGT with different confidence thresholds (bottom). All reported results are at room scene from LLFF (Mildenhall et al. 2019\) dataset in the 3-view setting
+
+
+
+| Depth Source Method/Model baseline (w/o depth prior) – Structure-from-Motion COLMAP (Schönberger dense image matcher DKM (Edstedt et al monocular depth estimator DepthAnythingV2 3d vision foundation model DUSt3R (Wang et | and Frah m 2023) (Yang et al 2024a) al 2024 ) | Depth Densitya 0.0 2016 ) 0.02 36.4 100.0 100.0 | (%) Confidence Threshold – – | PSNR ↑ 18.54 18.57 20.17 20.17 20.78 | SSIM ↑ 0.757 0.757 0.807 0.799 0.812 | LPIPS ↓ 0.341 0.342 0.277 0.278 0.268 |
+|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------|-------------------------------------------------|------------------------------|--------------------------------------|--------------------------------------|---------------------------------------|
+| VGGT (Wang et al                                                                                                                                                                                                             | 2025 )                                        | 36.4                                            | 4.58                         | 20.45                                | 0.807                                | 0.280                                 |
+|                                                                                                                                                                                                                              |                                               | 60.0                                            | 2.50                         | 20.94                                | 0.816                                | 0.266                                 |
+|                                                                                                                                                                                                                              |                                               | 90.0 (Ours)                                     | 1.00                         | 21.09                                | 0.820                                | 0.260                                 |
+|                                                                                                                                                                                                                              |                                               | 100.0                                           | 0.42b                        | 21.10                                | 0.820                                | 0.260                                 |
+
+aDepth density is the ratio between the number of pixels with depth prior and the number of all pixels
+
+bAlthough confidence scores output by VGGT are greater than or equal to 1, resizing confidence maps with resolution 518 × 518 could lead to values less than 1, like bicubic interpolation
+
+
+
+
+
+Fig. 9 Point cloud visualization of depth priors from different sources: (a) structure-from-motion (Schönberger and Frahm 2016); (b) dense image matcher (Edstedt et al. 2023); (c) monocular depth estimator (Yang et al. 2024a\); and (d) 3D vision foundation model (Wang et al. 2025)
+
+Table 5 Ablation study about transmittance-based gradient scaling on LLFF (Mildenhall et al. 2019\) dataset in the 3-view setting
+
+|                                    | PSNR ↑ | SSIM ↑ | LPIPS ↓ |
+|------------------------------------|--------|--------|---------|
+| Plenoxels (Fridovich-Kei l 2022 )  | 16.83  | 0.521  | 0.438   |
+| Plenoxels w/ GS (transmittance)    | 17.90  | 0.585  | 0.393   |
+| Bold represents better performance |        |        |         |
+
+
+
+
+
+Fig. 10 Visual comparison of the ablation on transmittance-based gradient scaling (GS) at fortress scene with 3 input views. For our baseline Plenoxels (Fridovich-Keil 2022), volume densities with higher initial
+
+value (σ = 1.0) lead to more floaters close to the camera, but the introduction of transmittance-based gradient scaling significantly alleviates near-camera overfitting and improves image quality
+
+
+
+Fig. 11 Visualization of the ablation on voxel dilation. Voxel dilation alleviates overpruning arising from inaccuracy existing in depth prior, e.g. the leaves of ficus
+
+w/o Voxel Dilation w/ Voxel Dilation
+
+from the inaccuracy of depth prior. But subsequent voxel dilation can restore a part of the scene context. The quantitative results in Table 6 also verify the effectiveness of voxel dilation.
+
+## 4.4 Hyperparameters
+
+### 4.4.1 The confidence threshold for depth prior from VGGT
+
+Our previous analysis in Sec. 4.3.2 demonstrates that the performance of depth-guided voxel pre-pruning is highly dependent on the density and the accuracy of depth prior. Generally speaking, the denser and the more accurate depth prior is, the better the performance is. However, there exists a balance point between density and accuracy. Beyond this point, the further increase in density may not improve performance, or may even lead to degradation if the added depths introduce significant inaccuracies. In this part, we carry out experiments for depth priors from VGGT at various density levels (corresponding to different confidence thresholds). In addition to the 90% density used in main experiments, we compare against 36.4% (matching the density of DKM), 60% and 100% (using all predicted depths). The quantitative results in Table 4 confirm our statement regarding the critical balance between the quantity and quality of depth prior.
+
+## 4.4.2 The duration of SH regularization
+
+We conduct a sensitivity analysis on the hyperparameter T in \(13\), which denotes the final training iteration when SH regularization is active. As seen from Table 7, enabling SH regularization (T > 0) improves the performance. In addition, setting T = 1280 is enough and increasing T has minimal influence on the performance due to the fast convergence of voxel radiance fields.
+
+## 4.5 Discussion and limitations
+
+Beyond the reported training time, we also provide a runtime analysis for ours and existing fast few-shot methods. Figure 12 presents the GPU and memory utilization rates, tested on a single NVIDIA Quadro P5000 GPU with 16G memory using nvidia-ml-py package. To facilitate a clear comparison despite varying total training iterations across methods, we scale the iteration ranges and apply a sliding average for smoothing the curves. As seen from Fig. 12, even with low GPU and memory utilization rates during training, our method exhibits competitive or even less training time compared to other methods, as reported in Table 1. It is possible to increase the GPU utilization rate by improving the code implementation. We also provide the disk storage cost of optimized models in Table 8. Compared to those based on implicit neural network representations, voxel radiance field methods with explicit or hybrid grid representations significantly consume more disk storage (typically exceeding 100 MB). Perhaps we can use existing compression techniques (Rho et al. 2023; Li et al. 2023; Zhao et al. 2023\) to reduce the storage overhead, which needs to be further investigated in the future.
+
+Table 6 Ablation study about voxel dilation on Blender (Mildenhall et al. 2020\) dataset in the 4-view setting
+
+| Voxel dilation | PSNR $\uparrow$ | SSIM $\uparrow$ | LPIPS $\downarrow$ |  |
+|----------------|-----------------|-----------------|--------------------|--|
+|                |                 |                 |                    |  |
+|                | 18.80           | 0.825           | 0.173              |  |
+| ✓              | 19.65    | 0.838    | 0.161       |  |
+
+Table 7 The sensitivity analysis of the final training iteration of spherical harmonics regularization (T )
+
+
+
+| T    | PSNR ↑ | SSIM ↑ | LPIPS ↓ |
+|------|--------|--------|---------|
+| 0    | 20.83  | 0.908  | 0.140   |
+| 1280 | 22.73  | 0.920  | 0.117   |
+| 2560 | 22.63  | 0.920  | 0.116   |
+| 5120 | 22.89  | 0.922  | 0.114   |
+
+A epoch contains 2560 iterations
+
+Fig. 12 Runtime curves of fast few-shot radiance field methods. Left: GPU utilization rate; Right: Memory utilization rate
+
+Table 8 Comparison of model size across fast few-shot radiance field methods
+
+|            | VGOS   | ReVoRF | DNGaussian | DropGaussian | Ours   |
+|------------|--------|--------|------------|--------------|--------|
+| Model Size | 609 MB | 609 MB | 175 MB     | 18 MB        | 241 MB |
+
+
+
+Fig. 13 Limitations. Our method (a) overprunes thin structures like the support frame of drums and (b) cannot synthesize scene context invisible in training views
+
+Besides the large disk storage cost, there are still some other limitations for F2Plenoxels. For example, F2Plenoxels might erroneously prune some voxels containing scene context due to the unreliability of depth prior. While voxel dilation can restore some context, it is often insufficient for accurately recovering very thin structures, as highlighted in Fig. 13\(a). Consistent with most preceding novel view synthesis methods, F2Plenoxels is primarily effective for view interpolation. It does not robustly support view extrapolation and struggles with accurately synthesizing newly revealed (de-occluded) regions, as shown in Fig. 13\(b).
+
+## 5 Conclusion and future work
+
+We have presented F2Plenoxels, a novel fast few-shot view synthesis method based on explicit voxel radiance field representation without neural networks. To enhance the quality of synthesized images as much as possible while maintaining high training efficiency, F2Plenoxels prunes voxel grids using depth prior from the 3D vision foundation model VGGT before training and regularizes the degree of spherical harmonics at the early stage of training. The computational cost introduced by these two strategies is negligible but they significantly improve the quality of synthesized images. In addition, we provide an explanation for the phenomenon that high volume densities tend to be concentrated in the areas close to cameras and propose a transmittance-based gradient scaling mechanism to reduce near-camera floaters. This mechanism is generalizable and applicable to other types of radiance field representations. Extensive experiments at synthesized and real scenes demonstrate the superiority of F2Plenoxels over previous methods.
+
+For future work, we plan to explore the integration of generative models (Ho et al. 2020; Karras et al. 2020) to enable capabilities such as de-occlusion padding and view extrapolation. Furthermore, given that Structure-from-Motion (SfM) can yield noisy or fail to produce camera poses when view overlaps are minimal or scenes are textureless in the few-shot setting, it is critical to investigate few-shot view synthesis methods from noisy or even pose-free inputs for enhanced robustness and practicability.
+
+#### Appendix A: Derivation and analysis for the scheme of transmittance-based gradient scaling
+
+We can obtain the gradient that volume density of the i*th sample at ray **r receives from \(3\) as follows:
+
+| $\nabla_{\sigma_i} \hat{C}(\mathbf{r}) = \delta_i \mathbf{c}_i T_{i+1} - \sum_{k=i+1}^N \delta_i \mathbf{c}_k (T_k - T_{k+1}).$ | (A1) |
+|---------------------------------------------------------------------------------------------------------------------------------|------|
+|                                                                                                                                 |      |
+
+Considering that the grid V*SH is initialized with common SH coefficients, the colors of all samples at ray **r are the same (set as c). In addition, the distance between adjacent samples at ray r can be thought of as approximately equal (set as δ) due to the fixed ray marching step size. Therefore, we have the following approximation:
+
+$$\begin{aligned}\nabla_{\sigma_i} \hat{C}(\mathbf{r}) &= \delta_i \mathbf{c}_i T_{i+1} - \sum_{k=i+1}^N \delta_i \mathbf{c}_k (T_k - T_{k+1}) \\ &\approx \delta \mathbf{c} T_{i+1} - \sum_{k=i+1}^N \delta \mathbf{c} (T_k - T_{k+1}) \\ &= \delta \mathbf{c} T_{N+1},\end{aligned}\tag{A2}$$
+
+which means that gradients that volume densities of all samples at ray r receive are the same for the first iteration and are
+
+mainly influenced by their colors in the subsequent iterations. Similarly, the gradient that the color of the i*th sample at ray **r receives is:
+
+$$\nabla_{\mathbf{c}_i} \hat{C}(\mathbf{r}) = T_i \alpha_i, \quad (\text{A3})$$
+
+$$\alpha_i = 1 - \exp(-\sigma_i \delta_i), \quad (\text{A4})$$
+
+where α*i* denotes the opacity. In the main text, we have known that the color is a linear combination of SH basis functions, as shown in \(8\). According to chain rule, gradients that SH coefficients of the i*th sample at ray **r receive are proportional to ∇c***iC*ˆ(**r):
+
+$$\nabla_{(k_\ell^m)_i} \hat{C}(\mathbf{r}) = Y_\ell^m \cdot \nabla_{\mathbf{c}_i} \hat{C}(\mathbf{r}), \quad (\text{A5})$$
+
+where the proportionality coefficient Y m is only related to ray direction. Similar to grid V*SH, all densities in grid *V D have common initial values and hence the opacity of all samples at ray r is approximately equal for the first iteration. Therefore, ∇(km )i C*ˆ(**r) is mainly associated with the transmittance Ti over the early optimization.
+
+Based on the derivation and analysis above, we propose only scaling gradients that SH coefficients of the i*th sample at ray **r receive using the reciprocal of Ti at the early stage of training, which is 1 when i = 1.
+
+Acknowledgements Not Applicable
+
+Author Contributions Jun Peng: Conceptualization, Methodology, Software, Investigation, Writing – Original Draft; Chunyi Chen: Writing – Review & Editing, Supervision; Yunbiao Liu: Software, Validation.
+
+Funding This work was supported in part by the National Natural Science Foundation of China under Grant U19A2063 and in part by the Jilin Provincial Science and Technology Development Program of China under Grant 20230201080GX.
+
+Data Availability Data and code are available at [https://github.com/](https://github.com/PJunGH/F2Plenoxels)
+
+- [PJunGH/F2Plenoxels.](https://github.com/PJunGH/F2Plenoxels) Declarations Competing Interests The authors have no relevant financial or nonfinancial interests to disclose. Open Access This article is licensed under a Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License, which permits any non-commercial use, sharing, distribution and reproduction in any medium or format, as long as you give appropriate credit to the original author(s) and the source, provide a link to the Creative Commons licence, and indicate if you modified the licensed material. You do not have permission under this licence to share adapted material derived from this article or parts of it. The images or other third party material in this article are included in the article's Creative Commons licence, unless indicated otherwise in a credit line to the material. If material is not included in the article's Creative Commons licence and your intended use is not permitted by statutory regulation or exceeds the permitted use, you will need to obtain permission directly from the copyright holder. To view a copy of this licence, visit [http://creativecommons.org/licenses/by-nc-nd/4.0/.](http://creativecommons.org/licenses/by-nc-nd/4.0/) References Bao Y, Ding T, Huo J et al (2025) 3D Gaussian splatting: Survey, technologies, challenges, and opportunities. IEEE Trans Circuits Syst Video Technol 35(7):6832–6852. [https://doi.org/10.1109/TCSVT.](https://doi.org/10.1109/TCSVT.2025.3538684) [2025.3538684](https://doi.org/10.1109/TCSVT.2025.3538684) Barron JT, Mildenhall B, Tancik M et al (2021) Mip-NeRF: A multiscale representation for anti-aliasing neural radiance fields. In: 2021 IEEE/CVF International Conference on Computer Vision (ICCV), pp 5835–5844.  Barron JT, Mildenhall B, Verbin D et al (2022) Mip-NeRF 360: Unbounded anti-aliased neural radiance fields. In: 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 5460–5469.  Chan ER, Lin CZ, Chan MA et al (2022) Efficient geometry-aware 3D generative adversarial networks. In: 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 16102– 16112.  Charatan D, Li SL, Tagliasacchi A et al (2024) PixelSplat: 3D Gaussian splats from image pairs for scalable generalizable 3D reconstruction. In: 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 19457–19467. [https://doi.org/10.](https://doi.org/10.1109/CVPR52733.2024.01840) [1109/CVPR52733.2024.01840](https://doi.org/10.1109/CVPR52733.2024.01840) Chen A, Xu Z, Zhao F et al (2021) MVSNeRF: Fast generalizable radiance field reconstruction from multi-view stereo. In: 2021 IEEE/CVF International Conference on Computer Vision (ICCV), pp 14104–14113. [https://doi.org/10.1109/ICCV48922.](https://doi.org/10.1109/ICCV48922.2021.01386) [2021.01386](https://doi.org/10.1109/ICCV48922.2021.01386) Chen A, Xu Z, Geiger A et al (2022) TensoRF: Tensorial radiance fields. In: Avidan S, Brostow G, Cissé M, et al (eds) Computer Vision
+- ECCV 2022. Springer Nature Switzerland, Cham, pp 333–350. [https://doi.org/10.1007/978-3-031-19824-3\\_20](https://doi.org/10.1007/978-3-031-19824-3_20) Chen S, Yan B, Sang X et al (2023) Bidirectional optical flow NeRF: High accuracy and high quality under fewer views. In: Proceedings of the AAAI Conference on Artificial Intelligence, pp 359–368.  Chen Y, Xu H, Zheng C et al (2025a) MVSplat: Efficient 3D Gaussian splatting from sparse multi-view images. In: Leonardis A, Ricci E, Roth S et al (eds) Computer Vision – ECCV 2024. Springer Nature Switzerland, Cham, pp 370–386. [https://doi.org/10.1007/](https://doi.org/10.1007/978-3-031-72664-4_21) [978-3-031-72664-4\\_21](https://doi.org/10.1007/978-3-031-72664-4_21) Chen Y, Zhang J, Xie Z et al (2025) S-NeRF++: Autonomous driving simulation via neural reconstruction and generation. IEEE Trans Pattern Anal Mach Intell 47(6):4358–4376. [https://doi.org/](https://doi.org/10.1109/TPAMI.2025.3543072) [10.1109/TPAMI.2025.3543072](https://doi.org/10.1109/TPAMI.2025.3543072) Deng K, Liu A, Zhu JY et al (2022) Depth-supervised NeRF: Fewer views and faster training for free. In: 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 12872– 12881.  Edstedt J, Athanasiadis I, Wadenbäck M et al (2023) DKM: Dense kernelized feature matching for geometry estimation. In: 2023 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 17765–17775. [https://doi.org/10.1109/](https://doi.org/10.1109/CVPR52729.2023.01704) [CVPR52729.2023.01704](https://doi.org/10.1109/CVPR52729.2023.01704) Fridovich-Keil S, Yu A, TancikM et al (2022) Plenoxels: Radiance fields without neural networks. In: IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2022, New Orleans, LA, USA, June 18-24, 2022. IEEE, pp 5491–5500. [https://doi.org/10.](https://doi.org/10.1109/CVPR52688.2022.00542) [1109/CVPR52688.2022.00542](https://doi.org/10.1109/CVPR52688.2022.00542) Fridovich-Keil S, Meanti G, Warburg FR et al (2023) K-Planes: Explicit radiance fields in space, time, and appearance. In: 2023 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 12479–12488. [https://doi.org/10.1109/](https://doi.org/10.1109/CVPR52729.2023.01201) [CVPR52729.2023.01201](https://doi.org/10.1109/CVPR52729.2023.01201) Gao R, Hoły ´nski A, Henzler P et al (2024) CAT3D: Create anything in 3D with multi-view diffusion models. In: Globerson A, Mackey L, Belgrave D et al (eds) Advances in Neural Information Processing Systems, vol 37. Curran Associates, Inc., pp 75468–75494 Gomez D, Gong B, Ovsjanikov M (2025) FourieRF: Few-shot NeRFs via progressive Fourier frequency control. [https://doi.org/10.](https://doi.org/10.48550/arXiv.2502.01405) [48550/arXiv.2502.01405.](https://doi.org/10.48550/arXiv.2502.01405) [arXiv:2502.01405](http://arxiv.org/abs/2502.01405) Ho J, Jain A, Abbeel P (2020) Denoising diffusion probabilistic models. In: Larochelle H, Ranzato M, Hadsell R et al (eds) Advances in Neural Information Processing Systems, vol 33. Curran Associates, Inc., pp 6840–6851 Huo Y, Gang S, Guan C (2023) FCIHMRT: Feature cross-layer interaction hybrid method based on Res2Net and transformer for remote sensing scene classification. Electronics 12(4362). [https://doi.org/](https://doi.org/10.3390/electronics12204362) [10.3390/electronics12204362](https://doi.org/10.3390/electronics12204362) Jain A, Tancik M, Abbeel P (2021) Putting NeRF on a diet: Semantically consistent few-shot view synthesis. In: 2021 IEEE/CVF International Conference on Computer Vision (ICCV), pp 5865–5874.  Jang Y, Pérez-Pellitero E (2025) CoMapGS: Covisibility mapbased Gaussian splatting for sparse novel view synthesis. In: 2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 26779–26788. [https://doi.org/10.1109/](https://doi.org/10.1109/CVPR52734.2025.02494) [CVPR52734.2025.02494](https://doi.org/10.1109/CVPR52734.2025.02494) Jeong Y, Ahn S, Choy C et al (2021) Self-calibrating neural radiance fields. In: 2021 IEEE/CVF International Conference on Computer Vision (ICCV), pp 5826–5834. [https://doi.org/10.1109/](https://doi.org/10.1109/ICCV48922.2021.00579) [ICCV48922.2021.00579](https://doi.org/10.1109/ICCV48922.2021.00579) Kajiya JT, Herzen BV (1984) Ray tracing volume densities. In: Christiansen H (ed) Proceedings of the 11th Annual Conference on Computer Graphics and Interactive Techniques, SIGGRAPH 1984, Minneapolis, Minnesota, USA, July 23-27, 1984. ACM, pp 165–174.  Karras T, Laine S, Aittala M et al (2020) Analyzing and improving the image quality of StyleGAN. In: 2020 IEEE/CVF Conference on computer vision and pattern recognition (CVPR), pp 8107–8116.  Kerbl B, Kopanas G, Leimkuehler T et al (2023) 3D Gaussian splatting for real-time radiance field rendering. ACM Trans Graph 42(4):139:1–139:14. 
+
+
+
+
+
+- Kim M, Seo S, Han B (2022) InfoNeRF: Ray entropy minimization for few-shot neural volume rendering. In: 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 12902–12911.  Kim M, Kim JS, Yun SY et al (2024) Synergistic integration of coordinate network and tensorial feature for improving neural radiance fields from sparse inputs. In: Forty-First International Conference on Machine Learning, ICML 2024, Vienna, Austria, July 21-27, 2024. OpenReview.net Kondo N, Ikeda Y, Tagliasacchi A et al (2021) VaxNeRF: Revisiting the classic for voxel-accelerated neural radiance field. [https://doi.](https://doi.org/10.48550/arXiv.2111.13112) [org/10.48550/arXiv.2111.13112.](https://doi.org/10.48550/arXiv.2111.13112) [arXiv:2111.13112](http://arxiv.org/abs/2111.13112) Lai S, Cui L, Yin J (2025) Fast radiance field reconstruction from sparse inputs. Pattern Recognit 157:110863. [https://doi.org/10.](https://doi.org/10.1016/j.patcog.2024.110863) [1016/j.patcog.2024.110863](https://doi.org/10.1016/j.patcog.2024.110863) Lao Y, Xu X, Cai Z et al (2023) CorresNeRF: Image correspondence priors for neural radiance fields. In: Proceedings of the 37th International Conference on Neural Information Processing Systems. Curran Associates Inc., Red Hook, NY, USA, NIPS '23, pp 40504– 40520 Laurentini A (1994) The visual hull concept for silhouette-based image understanding. IEEE Trans Pattern Anal Mach Intell 16(2):150–
+- 162.  Li J, Zhang J, Bai X et al (2024) DNGaussian: Optimizing sparse-view 3D Gaussian radiance fields with global-local depth normalization. In: 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 20775–20785. [https://doi.org/10.1109/](https://doi.org/10.1109/CVPR52733.2024.01963) [CVPR52733.2024.01963](https://doi.org/10.1109/CVPR52733.2024.01963) Li L, Shen Z, Wang Z et al (2023) Compressing volumetric radiance fields to 1 MB. In: IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2023, Vancouver, BC, Canada, June 17-24, 2023. IEEE, pp 4222–4231. [https://doi.org/10.1109/](https://doi.org/10.1109/CVPR52729.2023.00411) [CVPR52729.2023.00411](https://doi.org/10.1109/CVPR52729.2023.00411) Lin CY, Wu CH, Yeh CH et al (2025) FrugalNeRF: Fast convergence for extreme few-shot novel view synthesis without learned priors. In: IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2025, Nashville, TN, USA, June 11-15, 2025. Computer Vision Foundation / IEEE, pp 11227–11238 Liu X, Chen J, Kao SH et al (2025) Deceptive-NeRF/3DGS: Diffusion-generated pseudo-observations for high-quality sparseview reconstruction. In: Leonardis A, Ricci E, Roth S et al (eds) Computer Vision – ECCV 2024. Springer Nature Switzerland, Cham, pp 337–355. [https://doi.org/10.1007/978-3-031-72640-](https://doi.org/10.1007/978-3-031-72640-8_19) [8\\_19](https://doi.org/10.1007/978-3-031-72640-8_19) Lombardi S, Simon T, Saragih J et al (2019) Neural volumes: Learning dynamic renderable volumes from images. ACM Trans Graph 38(4):65:1–65:14.  Max N (1995) Optical models for direct volume rendering. IEEE Trans Vis Comput Graph 1(2):99–108. [https://doi.org/10.1109/](https://doi.org/10.1109/2945.468400) [2945.468400](https://doi.org/10.1109/2945.468400) Miangoleh SMH, Dille S, Mai L et al (2021) Boosting monocular depth estimation models to high-resolution via content-adaptive multiresolution merging. In: 2021 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 9680–9689. [https://](https://doi.org/10.1109/CVPR46437.2021.00956) [doi.org/10.1109/CVPR46437.2021.00956](https://doi.org/10.1109/CVPR46437.2021.00956) Mildenhall B, Srinivasan PP, Ortiz-Cayon R et al (2019) Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM Trans Graph 38(4):29:1–29:14. [https://doi.org/](https://doi.org/10.1145/3306346.3322980) [10.1145/3306346.3322980](https://doi.org/10.1145/3306346.3322980) Mildenhall B, Srinivasan PP, Tancik M et al (2020) NeRF: Representing scenes as neural radiance fields for view synthesis. In: Vedaldi A, Bischof H, Brox T et al (eds) Computer Vision - ECCV 2020 - 16th European Conference, Glasgow, UK, August 23-28, 2020, Proceedings, Part I, Lecture Notes in Computer Science, vol 12346. Springer, pp 405–421. [https://doi.org/10.1007/978-3-030-58452-](https://doi.org/10.1007/978-3-030-58452-8_24) [8\\_24](https://doi.org/10.1007/978-3-030-58452-8_24) Müller T, Evans A, Schied C et al (2022) Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans Graph 41(4):102:1–102:15.  Niemeyer M, Barron JT, Mildenhall B et al (2022) RegNeRF: Regularizing neural radiance fields for view synthesis from sparse inputs. In: 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 5470–5480. [https://doi.org/10.](https://doi.org/10.1109/CVPR52688.2022.00540) [1109/CVPR52688.2022.00540](https://doi.org/10.1109/CVPR52688.2022.00540) Paliwal A, Ye W, Xiong J et al (2025) CoherentGS: Sparse novel view synthesis with coherent 3D Gaussians. In: Leonardis A, Ricci E, Roth S et al (eds) Computer Vision – ECCV 2024. Springer Nature Switzerland, Cham, pp 19–37. [https://doi.org/10.1007/](https://doi.org/10.1007/978-3-031-73404-5_2) [978-3-031-73404-5\\_2](https://doi.org/10.1007/978-3-031-73404-5_2) Park H, Ryu G, Kim W (2025) DropGaussian: Structural regularization for sparse-view Gaussian splatting. In: 2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 21600–21609.  Philip J, Deschaintre V (2023) Floaters no more: Radiance field gradient scaling for improved near-camera training. In: Ritschel T, Weidlich A (eds) Eurographics Symposium on Rendering. The Eurographics Association.  Ranftl R, Bochkovskiy A, Koltun V (2021) Vision Transformers for dense prediction. In: 2021 IEEE/CVF International Conference on Computer Vision (ICCV), pp 12159–12168. [https://doi.org/10.](https://doi.org/10.1109/ICCV48922.2021.01196) [1109/ICCV48922.2021.01196](https://doi.org/10.1109/ICCV48922.2021.01196) Rau A, Aklilu J, Christopher Holsinger F et al (2025) Depth-guided NeRF training via earth mover's distance. In: Leonardis A, Ricci E, Roth S et al (eds) Computer Vision – ECCV 2024. Springer Nature Switzerland, Cham, pp 1–17. [https://doi.org/10.1007/978-](https://doi.org/10.1007/978-3-031-73039-9_1) [3-031-73039-9\\_1](https://doi.org/10.1007/978-3-031-73039-9_1) Rho D, Lee B, Nam S et al (2023) Masked wavelet representation for compact neural radiance fields. In: IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2023, Vancouver, BC, Canada, June 17-24, 2023. IEEE, pp 20680–20690.  Roessle B, Barron JT, Mildenhall B et al (2022) Dense depth priors for neural radiance fields from sparse input views. In: 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 12882–12891. [https://doi.org/10.1109/](https://doi.org/10.1109/CVPR52688.2022.01255) [CVPR52688.2022.01255](https://doi.org/10.1109/CVPR52688.2022.01255) Schönberger JL, Frahm JM (2016) Structure-from-motion revisited. In: 2016 IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pp 4104–4113. [https://doi.org/10.1109/CVPR.2016.](https://doi.org/10.1109/CVPR.2016.445) [445](https://doi.org/10.1109/CVPR.2016.445) Seo S, Chang Y, Kwak N (2023a) FlipNeRF: Flipped reflection rays for few-shot novel view synthesis. In: 2023 IEEE/CVF International Conference on Computer Vision (ICCV), pp 22826–22836. [https://](https://doi.org/10.1109/ICCV51070.2023.02092) [doi.org/10.1109/ICCV51070.2023.02092](https://doi.org/10.1109/ICCV51070.2023.02092) Seo S, Han D, Chang Y et al (2023b) MixNeRF: Modeling a ray with mixture density for novel view synthesis from sparse inputs. In: 2023 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 20659–20668. [https://doi.org/10.1109/](https://doi.org/10.1109/CVPR52729.2023.01979) [CVPR52729.2023.01979](https://doi.org/10.1109/CVPR52729.2023.01979) Shi R, Wei X, Wang C et al (2024) ZeroRF: Fast sparse view 360◦ reconstruction with zero pretraining. In: 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 21114–21124.  Simonyan K, Zisserman A (2015) Very deep convolutional networks for large-scale image recognition. [https://doi.org/10.48550/arXiv.](https://doi.org/10.48550/arXiv.1409.1556) [1409.1556.](https://doi.org/10.48550/arXiv.1409.1556) [arXiv:1409.1556](http://arxiv.org/abs/1409.1556) Sitzmann V, Thies J, Heide F et al (2019a) DeepVoxels: Learning persistent 3D feature embeddings. In: 2019 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 2432– 2441.  Sitzmann V, Zollhoefer M, Wetzstein G (2019) Scene representation networks: Continuous 3D-structure-aware neural scene represen-
+
+tations. In: Wallach H, Larochelle H, Beygelzimer A et al (eds) Advances in Neural Information Processing Systems, vol 32. Curran Associates Inc Somraj N, Soundararajan R (2023) ViP-NeRF: Visibility prior for sparse input neural radiance fields. In: ACM SIGGRAPH 2023 Conference Proceedings. Association for Computing Machinery, New York, NY, USA, SIGGRAPH '23, pp 1–11. [https://doi.org/10.](https://doi.org/10.1145/3588432.3591539) [1145/3588432.3591539](https://doi.org/10.1145/3588432.3591539) Song J, Park S, An H et al (2023a) DäRF: Boosting radiance fields from sparse input views with monocular depth adaptation. In: Oh A, Naumann T, Globerson A et al (eds) Advances in Neural Information Processing Systems, vol 36. Curran Associates, Inc., pp 68458–68470 Song L, Li Z, Gong X et al (2023b) Harnessing low-frequency neural fields for few-shot view synthesis. [https://doi.org/10.48550/arXiv.](https://doi.org/10.48550/arXiv.2303.08370) [2303.08370.](https://doi.org/10.48550/arXiv.2303.08370) [arXiv:2303.08370](http://arxiv.org/abs/2303.08370) Sun C, Sun M, Chen HT (2022) Direct voxel grid optimization: Super-fast convergence for radiance fields reconstruction. In: 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 5449–5459. [https://doi.org/10.1109/](https://doi.org/10.1109/CVPR52688.2022.00538) [CVPR52688.2022.00538](https://doi.org/10.1109/CVPR52688.2022.00538) Sun J, Zhang Z, Chen J et al (2023) VGOS: Voxel grid optimization for view synthesis from sparse inputs. In: Thirty-Second International Joint Conference on Artificial Intelligence, pp 1414–1422. [https://](https://doi.org/10.24963/ijcai.2023/157) [doi.org/10.24963/ijcai.2023/157](https://doi.org/10.24963/ijcai.2023/157) Tieleman T, Hinton G (2012) RMSProp: Divide the gradient by a running average of its recent magnitude. COURSERA: Neural Netw Mach Learn 4(2):26 Uy MA, Martin-Brualla R, Guibas L et al (2023) SCADE: NeRFs from space carving with ambiguity-aware depth estimates. In: 2023 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 16518–16527. [https://doi.org/10.1109/](https://doi.org/10.1109/CVPR52729.2023.01585) [CVPR52729.2023.01585](https://doi.org/10.1109/CVPR52729.2023.01585) Wang G, Chen Z, Loy CC et al (2023) SparseNeRF: Distilling depth ranking for few-shot novel view synthesis. In: IEEE/CVF International Conference on Computer Vision, ICCV 2023, Paris, France, October 1-6, 2023. IEEE, pp 9031–9042. [https://doi.org/10.1109/](https://doi.org/10.1109/ICCV51070.2023.00832) [ICCV51070.2023.00832](https://doi.org/10.1109/ICCV51070.2023.00832) Wang J, Chen M, Karaev N et al (2025) VGGT: Visual geometry grounded Transformer. In: Proceedings of the Computer Vision and Pattern Recognition Conference, pp 5294–5306 Wang S, Leroy V, Cabon Y et al (2024) DUSt3R: Geometric 3D vision made easy. In: 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 20697–20709. [https://doi.](https://doi.org/10.1109/CVPR52733.2024.01956) [org/10.1109/CVPR52733.2024.01956](https://doi.org/10.1109/CVPR52733.2024.01956) Wang Z, Bovik A, Sheikh H et al (2004) Image quality assessment: From error visibility to structural similarity. IEEE Trans Image Process 13(4):600–612.  Wu R, Mildenhall B, Henzler P et al (2024) ReconFusion: 3D reconstruction with diffusion priors. In: 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) pp 21551– 21561.  Wynn J, Turmukhambetov D (2023) DiffusioNeRF: Regularizing neural radiance fields with denoising diffusion models. In: 2023 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 4180–4189. [https://doi.org/10.1109/](https://doi.org/10.1109/CVPR52729.2023.00407) [CVPR52729.2023.00407](https://doi.org/10.1109/CVPR52729.2023.00407) Xiao L, Nouri S, Hegland J et al (2022) Neuralpassthrough: Learned real-time view synthesis for VR. In: ACM SIGGRAPH 2022 Conference Proceedings. Association for Computing Machinery, New York, NY, USA, SIGGRAPH '22. [https://doi.org/10.1145/](https://doi.org/10.1145/3528233.3530701) [3528233.3530701](https://doi.org/10.1145/3528233.3530701) Xiong H, Muttukuru S, Upadhyay R et al (2025) SparseGS: Real-time 360◦ sparse view synthesis using Gaussian splatting. [https://doi.](https://doi.org/10.48550/arXiv.2312.00206) [org/10.48550/arXiv.2312.00206.](https://doi.org/10.48550/arXiv.2312.00206) [arXiv:2312.00206](http://arxiv.org/abs/2312.00206) Xu Y, Liu B, Tang H et al (2024) Learning with unreliability: Fast few-shot voxel radiance fields with relative geometric consistency. In: 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 20342–20351. [https://doi.org/10.1109/](https://doi.org/10.1109/CVPR52733.2024.01923) [CVPR52733.2024.01923](https://doi.org/10.1109/CVPR52733.2024.01923) Yang J, Pavone M, Wang Y (2023) FreeNeRF: Improving few-shot neural rendering with free frequency regularization. In: IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2023, Vancouver, BC, Canada, June 17-24, 2023. IEEE, pp 8254– 8263.  Yang L, Kang B, Huang Z et al (2024a) Depth anything V2. In: Globerson A, Mackey L, Belgrave D et al (eds) Advances in Neural Information Processing Systems, vol 37. Curran Associates, Inc., pp 21875–21911 Yang W, Shi J, Bai S et al (2024) Clear-Plenoxels: Floaters free radiance fields without neural networks. Knowl-Based Syst 299:112096.  Yu A, Ye V, Tancik M et al (2021) pixelNeRF: Neural radiance fields from one or few Images. In: 2021 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 4576–4585.  Zhang K, Riegler G, Snavely N et al (2020) NeRF++: Analyzing and improving neural radiance fields. [https://doi.org/10.48550/arXiv.](https://doi.org/10.48550/arXiv.2010.07492) [2010.07492.](https://doi.org/10.48550/arXiv.2010.07492) [arXiv:2010.07492](http://arxiv.org/abs/2010.07492) Zhang L, Fu S, Wang W et al (2024) Toward cross-domain classincremental remote sensing scene classification. IEEE Trans Geosci Remote Sens 62:1–13. [https://doi.org/10.1109/TGRS.](https://doi.org/10.1109/TGRS.2024.3453415) [2024.3453415](https://doi.org/10.1109/TGRS.2024.3453415) Zhang R, Isola P, Efros AA et al (2018) The unreasonable effectiveness of deep features as a perceptual metric. In: 2018 IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp 586–595.  Zhao T, Chen J, Leng C et al (2023) TinyNeRF: Towards 100 x compression of voxel radiance fields. Proceed AAAI Conf Artif Intell 37(3):3588–3596. [https://doi.org/10.1609/aaai.v37i3](https://doi.org/10.1609/aaai.v37i3.25469) [.25469](https://doi.org/10.1609/aaai.v37i3.25469) Zheng Y, Jiang Z, He S et al (2025) NexusGS: Sparse view synthesis with epipolar depth priors in 3D Gaussian splatting. In: 2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 26800–26809. [https://doi.org/10.1109/](https://doi.org/10.1109/CVPR52734.2025.02496) [CVPR52734.2025.02496](https://doi.org/10.1109/CVPR52734.2025.02496) Zhou Q, Ye Y, Liu Z et al (2025) Non-local guided neural fields for 4D CT reconstruction. IEEE Trans Circuits Syst Video Technol pp 1–1.  Zhu H, He T, Li X et al (2024) Is vanilla MLP in neural radiance field enough for few-shot view synthesis? In: 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp 20288–20298. [https://doi.org/10.1109/CVPR52733.2024](https://doi.org/10.1109/CVPR52733.2024.01918) [.01918](https://doi.org/10.1109/CVPR52733.2024.01918) Zhu Z, Fan Z, Jiang Y et al (2025) FSGS: Real-time few-shot view synthesis using Gaussian splatting. In: Leonardis A, Ricci E, Roth S et al (eds) Computer Vision – ECCV 2024. Springer Nature Switzerland, Cham, pp 145–163. [https://doi.org/10.1007/978-3-](https://doi.org/10.1007/978-3-031-72933-1_9) [031-72933-1\\_9](https://doi.org/10.1007/978-3-031-72933-1_9) Publisher's Note Springer Nature remains neutral with regard to jurisdictional claims in published maps and institutional affiliations.

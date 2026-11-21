@@ -1,0 +1,265 @@
+# VoxGRAF
+
+Also called: Sparse Voxel Grid GAN, VoxGRAF Sparse Voxel Grid Generation
+
+## Overview
+VoxGRAF is a 3D-aware Generative Adversarial Network that replaces the coordinate-based Multi-Layer Perceptron (MLP) scene representation with a sparse voxel grid generator [S1]. It solves the problem of slow rendering and viewpoint/content entanglement inherent in previous 3D-aware GANs by enabling fast, 3D-consistent image synthesis via a single forward pass to generate the entire 3D scene [S1]. Unlike siblings that query an MLP per sample or use hybrid neural rendering, VoxGRAF generates high-resolution geometry directly on a sparse grid, allowing efficient rendering from arbitrary viewpoints without reducing sample size [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Latent code $z \in \mathbb{R}^M$ sampled from $\mathcal{N}(0,1)$; Camera pose $\xi$ (extrinsics); Camera intrinsics $K$; Optional background latent code.
+*   **Outputs:** Rendered RGB image $\hat{I}$; Alpha mask $\hat{a}$.
+
+**Data Structures:**
+*   **Sparse Voxel Grid:** A 3D grid of resolution $R_G \times R_G \times R_G$.
+    *   **Fields:** Color $c \in \mathbb{R}^3$ and Density $\sigma \in \mathbb{R}^+$ at each voxel vertex.
+    *   **Layout:** Stored as a sparse structure (e.g., using coordinate lists or hash maps) to exclude empty/occluded voxels. The generator outputs dense tensors of shape $\mathbb{R}^{3 \times R_G \times R_G \times R_G}$ and $\mathbb{R}^{1 \times R_G \times R_G \times R_G}$, which are then pruned.
+*   **Sampling Points:** $N$ points along each camera ray $\mathbf{r}$, denoted $\{x_i^{\mathbf{r}}\}_{i=1}^N$.
+
+**Parameters:**
+*   $R_G$: Grid resolution. Typical values: 32, 64, 128 [S1].
+*   $N$: Number of sampling points per ray. Typical value: 48 [S1].
+*   $\tau_T$: Transmittance pruning threshold [S1].
+*   $\tau_\sigma$: Density pruning threshold [S1].
+*   $\tau$: Depth variance loss threshold (hyperparameter defining surface thickness) [S1].
+*   $\lambda_{DV}$: Weight for Depth Variance Loss [S1].
+*   $\lambda$: R1 regularization strength [S1].
+*   Learning Rates: Generator $0.0025$, Discriminator $0.002$ [S1].
+*   Batch Size: 64 [S1].
+
+**Numbered Steps:**
+
+1.  **Foreground Generation:** The foreground generator $G_{f,\theta_{fg}}$ takes $z$ and $\xi$ as input. It produces dense color values $c \in \mathbb{R}^{3 \times R_G \times R_G \times R_G}$ and densities $\sigma \in \mathbb{R}^{1 \times R_G \times R_G \times R_G}$ on a voxel grid of resolution $R_G$ [S1].
+2.  **Pruning:** To enforce sparsity, voxels are discarded based on rendering visibility. For each ray $\mathbf{r}$, let $V_{\mathbf{r}}$ be the set of voxels intersecting the ray. The pruning operator $\rho$ retains voxels $i \in V_{\mathbf{r}}$ if:
+    $$ V_{\mathbf{r}}^p = \{ i \in V_{\mathbf{r}} \mid (T_i > \tau_T) \land (\sigma_i > \tau_\sigma) \} $$
+    where $T_i$ is the transmittance and $\sigma_i$ is the density [S1].
+3.  **Upsampling (Progressive Growing):** After pruning, kept voxels are upsampled via sparse transposed convolutions to increase resolution [S1].
+4.  **Ray Sampling:** For each pixel in the target image, cast a camera ray $\mathbf{r}$ defined by $K$ and $\xi$. Sample $N$ points $x_i^{\mathbf{r}}$ along the ray.
+5.  **Interpolation:** Compute color $c_i^{\mathbf{r}}$ and density $\sigma_i^{\mathbf{r}}$ at each sampling point $x_i^{\mathbf{r}}$ by trilinearly interpolating the values stored at the nearest eight vertices of the voxel grid [S1].
+6.  **Alpha Composition:** Compute the transmittance $T_i^{\mathbf{r}}$ and alpha $\alpha_i^{\mathbf{r}}$ for each sample:
+    $$ \alpha_i^{\mathbf{r}} = 1 - \exp(-\sigma_i^{\mathbf{r}} \delta_i^{\mathbf{r}}) $$
+    $$ T_i^{\mathbf{r}} = \prod_{j=1}^{i-1} (1 - \alpha_j^{\mathbf{r}}) $$
+    where $\delta_i^{\mathbf{r}} = \|x_{i+1}^{\mathbf{r}} - x_i^{\mathbf{r}}\|_2$ is the distance between neighboring sample points [S1].
+7.  **Foreground Rendering:** Compute the foreground color $c_{\mathbf{r}}$ and alpha $a_{\mathbf{r}}$:
+    $$ c_{\mathbf{r}} = \sum_{i=1}^N T_i^{\mathbf{r}} \alpha_i^{\mathbf{r}} c_i^{\mathbf{r}} $$
+    $$ a_{\mathbf{r}} = \sum_{i=1}^N T_i^{\mathbf{r}} \alpha_i^{\mathbf{r}} $$
+    [S1].
+8.  **Background Generation:** Generate a background image using a separate 2D GAN $G_{bg,\theta_b}$ conditioned on the pose [S1].
+9.  **Composition:** Combine foreground and background using alpha composition to produce the final image $\hat{I}$ [S1].
+10. **Refinement (Optional):** Refine the rendered image with a shallow 2D CNN (2 hidden layers, dimension 16, kernel size 3) operating on 3 channels at full resolution to model dataset biases (e.g., eye direction) [S1].
+11. **Discrimination:** The discriminator $D_{\phi}$ compares the generated image $\hat{I}$ to the real image $I_{real}$, conditioned on the camera pose [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class VoxGRAF:
+    def __init__(self, R_G, N_samples, tau_T, tau_sigma, tau_depth_var):
+        self.R_G = R_G
+        self.N_samples = N_samples
+        self.tau_T = tau_T
+        self.tau_sigma = tau_sigma
+        self.tau_depth_var = tau_depth_var
+        
+        # Generators
+        self.G_fg = ForegroundGenerator(R_G) # Outputs dense c, sigma
+        self.G_bg = BackgroundGenerator()     # Outputs background image
+        self.RefineNet = RefineCNN()          # Optional 2D CNN
+        
+        # Discriminator
+        self.D = Discriminator()
+        
+        # Optimizers
+        self.opt_G = torch.optim.Adam(list(self.G_fg.parameters()) + 
+                                      list(self.G_bg.parameters()) + 
+                                      list(self.RefineNet.parameters()), lr=0.0025)
+        self.opt_D = torch.optim.Adam(self.D.parameters(), lr=0.002)
+
+    def prune_grid(self, c_dense, sigma_dense, rays, K, pose):
+        """
+        Prunes the dense voxel grid based on transmittance and density thresholds.
+        Returns sparse coordinates and values.
+        """
+        # 1. Render a proxy view to determine visibility
+        # Sample points along rays
+        points = sample_points_along_rays(rays, self.N_samples)
+        
+        # Interpolate dense grid at points
+        c_interp, sigma_interp = trilinear_interpolate(c_dense, sigma_dense, points)
+        
+        # Compute alpha and transmittance for proxy rendering
+        deltas = compute_deltas(points)
+        alphas = 1.0 - torch.exp(-sigma_interp * deltas)
+        transmittances = compute_transmittance(alphas)
+        
+        # Pruning logic: discard if T < tau_T OR sigma < tau_sigma
+        # Note: In practice, this is done via CUDA kernels on the grid structure
+        # Here we simulate the mask creation for retained voxels
+        valid_mask = (transmittances > self.tau_T) & (sigma_interp > self.tau_sigma)
+        
+        # Identify unique voxels intersecting valid rays
+        # This step typically involves mapping ray samples back to voxel indices
+        # and aggregating. For implementation clarity, we assume a sparse structure
+        # is built from the valid voxels.
+        sparse_coords, sparse_c, sparse_sigma = build_sparse_structure(
+            c_dense, sigma_dense, valid_mask, self.R_G
+        )
+        
+        return sparse_coords, sparse_c, sparse_sigma
+
+    def render_ray(self, sparse_coords, sparse_c, sparse_sigma, ray_origin, ray_direction, K):
+        """
+        Renders a single ray using the sparse voxel grid.
+        """
+        # 1. Sample N points along the ray
+        t_vals = torch.linspace(0, 1, self.N_samples)
+        points = ray_origin + ray_direction.unsqueeze(1) * t_vals.unsqueeze(0)
+        
+        # 2. Trilinear interpolation on sparse grid
+        # Map continuous points to grid coordinates
+        grid_coords = points_to_grid_coords(points, self.R_G)
+        
+        # Interpolate color and density
+        c_vals = sparse_trilinear_interpolate(sparse_coords, sparse_c, grid_coords)
+        sigma_vals = sparse_trilinear_interpolate(sparse_coords, sparse_sigma, grid_coords)
+        
+        # 3. Compute alpha and transmittance
+        # Assuming uniform spacing or pre-computed deltas
+        deltas = compute_deltas_from_points(points)
+        alphas = 1.0 - torch.exp(-sigma_vals * deltas)
+        
+        # Cumulative product for transmittance
+        # T_i = prod_{j=1}^{i-1} (1 - alpha_j)
+        one_minus_alpha = 1.0 - alphas
+        T = torch.cumprod(one_minus_alpha, dim=0)
+        T = torch.cat([torch.ones_like(T[0:1]), T[:-1]], dim=0) # Shift for T_1 = 1
+        
+        # 4. Alpha composition
+        weights = T * alphas
+        color = torch.sum(weights.unsqueeze(-1) * c_vals, dim=0)
+        alpha_mask = torch.sum(weights, dim=0)
+        
+        return color, alpha_mask
+
+    def forward(self, z, pose, K, background_z=None):
+        # 1. Generate dense foreground grid
+        c_dense, sigma_dense = self.G_fg(z, pose)
+        
+        # 2. Prune grid
+        # In training, we prune based on the current pose
+        rays = generate_rays(K, pose, image_resolution=128)
+        sparse_coords, sparse_c, sparse_sigma = self.prune_grid(
+            c_dense, sigma_dense, rays, K, pose
+        )
+        
+        # 3. Render foreground
+        # Render all rays in parallel
+        foreground_colors, foreground_alphas = [], []
+        for ray_o, ray_d in rays:
+            c, a = self.render_ray(sparse_coords, sparse_c, sparse_sigma, ray_o, ray_d, K)
+            foreground_colors.append(c)
+            foreground_alphas.append(a)
+            
+        foreground_colors = torch.stack(foreground_colors)
+        foreground_alphas = torch.stack(foreground_alphas)
+        
+        # 4. Generate background
+        if background_z is None:
+            background_z = torch.randn_like(z)
+        background_img = self.G_bg(background_z, pose)
+        
+        # 5. Composite
+        # background_img is RGB, foreground_alphas is single channel
+        # Combine: I = F * A + B * (1 - A)
+        foreground_colors = foreground_colors.permute(1, 2, 0) # H, W, C
+        foreground_alphas = foreground_alphas.unsqueeze(-1)
+        
+        composite = foreground_colors * foreground_alphas + background_img * (1 - foreground_alphas)
+        
+        # 6. Refine (Optional)
+        if self.RefineNet is not None:
+            composite = self.RefineNet(composite)
+            
+        return composite
+
+    def compute_loss(self, generated_img, real_img, pose, z):
+        # GAN Loss with R1 Regularization
+        # f(t) = -log(1 + exp(-t))
+        # V = E[f(-D(G(z))) + f(D(I)) - lambda * ||grad D(I)||^2]
+        
+        # Generator loss (non-saturating)
+        D_gen = self.D(generated_img, pose)
+        L_gen = -torch.mean(torch.log(1 + torch.exp(-D_gen)))
+        
+        # Discriminator loss
+        D_real = self.D(real_img, pose)
+        D_gen_detached = self.D(generated_img.detach(), pose)
+        
+        # R1 Regularization on real images
+        real_img.requires_grad = True
+        D_real_val = self.D(real_img, pose)
+        grad_real = torch.autograd.grad(
+            outputs=D_real_val.sum(), 
+            inputs=real_img, 
+            create_graph=True
+        )[0]
+        grad_penalty = torch.sum(grad_real**2)
+        grad_penalty = grad_penalty * 10.0 # lambda for R1
+        
+        L_disc = torch.mean(torch.log(1 + torch.exp(-D_gen_detached))) + \
+                 torch.mean(torch.log(1 + torch.exp(D_real))) + \
+                 grad_penalty
+                 
+        # Depth Variance Loss for Generator
+        # Encourages sharp surfaces
+        # Var(z_hat) = E[z_hat^2] - E[z_hat]^2
+        # z_hat = sum(T_i * alpha_i * z_i) / sum(T_i * alpha_i)
+        # This requires access to the rendering internals (z_i positions)
+        # Simplified placeholder for the loss term L_DV
+        L_DV = compute_depth_variance_loss(self.G_fg, z, pose, K, self.tau_depth_var)
+        
+        # Total Generator Loss
+        L_total_G = L_gen + L_DV
+        
+        return L_total_G, L_disc
+
+    def step(self, batch):
+        real_img, pose, K, z = batch
+        
+        # Update Generator
+        self.opt_G.zero_grad()
+        generated_img = self.forward(z, pose, K)
+        L_G, _ = self.compute_loss(generated_img, real_img, pose, z)
+        L_G.backward()
+        self.opt_G.step()
+        
+        # Update Discriminator
+        self.opt_D.zero_grad()
+        _, L_D = self.compute_loss(generated_img, real_img, pose, z)
+        L_D.backward()
+        self.opt_D.step()
+```
+
+**Edge Cases and Pitfalls:**
+*   **Empty Foreground:** Without regularization, the generator may produce empty scenes. The Depth Variance Loss $L_{DV}$ with threshold $\tau$ prevents this by encouraging a single sharp surface [S1].
+*   **Viewpoint/Content Entanglement:** Changing camera pose might alter geometry if not properly conditioned. VoxGRAF conditions on pose $\xi$ (per-image) rather than view direction (per-ray) to mitigate this, though a 2D refinement CNN is often needed for strong dataset biases (e.g., eyes looking at camera) [S1].
+*   **Sparsity vs. Runtime:** Sparse convolutions reduce memory but increase runtime due to coordinate management overhead. VoxGRAF prioritizes faster training by using dense convolutions with zeroed pruned voxels, accepting higher memory usage for speed [S1].
+*   **Pruning Thresholds:** Choosing $\tau_T$ and $\tau_\sigma$ is critical. Too high, and the scene becomes too sparse/incomplete; too low, and sparsity benefits are lost [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time is dominated by the single forward pass of the generator. Once generated, rendering takes milliseconds. For a 256x256 image with 48 samples, standard MLP-based methods require ~3M queries, whereas VoxGRAF uses fast trilinear interpolation [S1].
+*   **Memory Complexity:** Scales with the number of *active* voxels. Sparsity reduces memory significantly compared to dense grids. On FFHQ ($R_G=128$), memory usage is 0.9 GB with Depth Variance Loss (95% sparsity) vs 1.4 GB without (74% sparsity) [S1].
+*   **Performance:** On FFHQ ($R_G=128, R_I=128$), generation time is 198 ms and rendering time is 4 ms with $L_{DV}$. Without $L_{DV}$, generation is 229 ms and rendering is 7 ms. Using dense convolutions with zeroed voxels reduces generation time to 58 ms but increases memory [S1].
+*   **Strengths:** Fast inference (milliseconds per view after generation), 3D consistency, high resolution via sparse grids.
+*   **Limitations:** Requires careful tuning of pruning thresholds and regularization. 2D refinement is needed for certain dataset biases. Training is computationally expensive (3-7 days on 8 V100s) [S1].
+
+## Background
+VoxGRAF was introduced by [S1] as a method to combine the benefits of sparse voxel grids (fast rendering, high resolution) with the generative capabilities of 3D-aware GANs. It addresses the limitations of coordinate-based MLPs (slow rendering, entanglement) and hybrid rendering approaches (viewpoint/content entanglement). The method builds on prior work in sparse voxel novel view synthesis (Plenoxels, DVGO) and 3D-aware GANs (GRAF).
+
+## Sources
+[S1] VoxGRAF: Fast 3D-Aware Image Synthesis with Sparse Voxel Grids, https://doi.org/10.52202/068431-2464, fetched 2026-10-26

@@ -1,0 +1,303 @@
+# Unified Gaussian Splatting Renderer Dispatch
+
+Also called: Gaussian Splatting Renderer Dispatch, render function dispatch, vggt Gaussian Renderer
+
+## Overview
+A unified rendering function that dispatches to specific Gaussian rasterizers (3DGS, 2DGS, or GGGS) based on the model's scale dimensions or explicit mode flag, handling data preparation (means, opacities, SHs) and post-processing of rasterizer outputs (depth, normals, alpha) [S1, unofficial]. It abstracts the backend selection logic, allowing a single entry point to support multiple Gaussian splatting variants by inspecting the input Gaussian properties or configuration flags.
+
+## How it works
+**Inputs:**
+- `pc`: A Gaussian point cloud object containing attributes: `means` (3D positions), `opacities` (scalar opacities), `scales` (log-scales or scales), `rotations` (quaternions), `harmonic`/`features` (SH coefficients), `max_sh_degree`.
+- `viewpoint_camera`: Camera object with `FoVx`, `FoVy`, `viewmatrix`, `projmatrix`, `campos`.
+- `pipe`: Configuration object with flags `compute_cov3D_python`, `convert_SHs_python`, `depth_ratio`.
+- `gs_mode`: Optional explicit mode string ("3DGS", "2DGS", "GGGS").
+- `override_color`: Optional tensor to bypass SH computation.
+- `batch_idx`: Indices to select specific Gaussians from `pc`.
+
+**Outputs:**
+- `render`: Color image tensor.
+- `depth`: Depth map tensor (format depends on mode).
+- `alpha`: Alpha mask tensor.
+- `normal`: Normal map tensor (2DGS/GGGS only).
+
+**Data Structures:**
+- `GaussianRasterizationSettings`: A configuration struct passed to the rasterizer constructor. Fields: `image_height`, `image_width`, `tanfovx`, `tanfovy`, `bg` (background color), `scaling_modifier`, `viewmatrix`, `projmatrix`, `sh_degree`, `campos`, `prefiltered`, `debug`. For GGGS, additional fields: `kernel_size`, `sg_degree`, `require_depth`.
+- `GaussianRasterizer`: The backend instance. Variants: `diff_surfel_rasterization` (2DGS), `diff_gaussian_rasterization` (3DGS), `gggs_diff_gaussian_rasterization` (GGGS).
+
+**Steps:**
+
+1. **Extract Batch Attributes:**
+   Select Gaussian attributes for the current batch:
+   $$ \text{xyz} = \text{pc.means}[\text{batch\_idx}] $$
+   $$ \text{opacity} = \text{pc.opacities}[\text{batch\_idx}].\text{unsqueeze}(-1) $$
+
+2. **Initialize Screenspace Points:**
+   Create a zero tensor for screen-space points to capture gradients:
+   $$ \text{screenspace\_points} = \text{torch.zeros}(\text{xyz.shape}, \text{dtype}=\text{xyz.dtype}, \text{requires\_grad}=\text{True}, \text{device}=\text{"cuda"}) $$
+   [G] The `+ 0` in the source ensures the tensor is on the correct device and dtype.
+
+3. **Compute Tangent FOV:**
+   $$ \text{tanfovx} = \tan(\text{viewpoint\_camera.FoVx} \times 0.5) $$
+   $$ \text{tanfovy} = \tan(\text{viewpoint\_camera.FoVy} \times 0.5) $$
+
+4. **Determine Render Mode:**
+   If `gs_mode` is explicitly set, use it. Otherwise, infer from `pc.scales`:
+   - If `pc.scales[batch_idx].shape[1] == 2`, set `requested_render_mode = "2DGS"`.
+   - Else, set `requested_render_mode = "3DGS"`.
+   [G] GGGS mode is typically selected via explicit `gs_mode` or specific attribute checks not detailed in the scale dimension logic.
+
+5. **Select Rasterizer Classes:**
+   Map `requested_render_mode` to the appropriate `GaussianRasterizationSettings` and `GaussianRasterizer` classes:
+   - "2DGS": `diff_surfel_rasterization`
+   - "3DGS": `diff_gaussian_rasterization`
+   - "GGGS": `gggs_diff_gaussian_rasterization`
+
+6. **Construct Settings:**
+   Initialize `GaussianRasterizationSettings` with:
+   - `image_height`, `image_width`
+   - `tanfovx`, `tanfovy`
+   - `bg` (background color)
+   - `scaling_modifier`
+   - `viewmatrix`, `projmatrix`
+   - `sh_degree`
+   - `campos`
+   - `prefiltered=False`
+   - `debug`
+   For GGGS, additionally pass `kernel_size`, `sg_degree=0`, `require_depth`.
+
+7. **Prepare Covariance:**
+   If `pipe.compute_cov3D_python` is true:
+   - Compute world-space covariance from `scales` and `rotations`.
+   - Transform to pixel space using `ndc2pix` and `world2pix` matrices.
+   - Reshape to `(-1, 9)` in column-major order.
+   Else:
+   - Set `scales` and `rotations` directly from `pc`.
+
+8. **Prepare Colors:**
+   If `override_color` is None and `pipe.convert_SHs_python` is true:
+   - Extract SH features: `shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)`
+   - Compute viewing directions: `dir_pp` (from camera to point), normalize: `dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)`
+   - Evaluate SH: `sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)`
+   - Clamp: `colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)`
+   Else:
+   - Set `shs = pc.harmonics[batch_idx].permute(0, 2, 1)`
+
+9. **Execute Rasterizer:**
+   Call the selected rasterizer with:
+   - `means3D`: xyz
+   - `means2D`: screenspace_points
+   - `shs`: SH coefficients (if not precomputed)
+   - `colors_precomp`: Precomputed colors (if SH conversion used)
+   - `opacity`
+   - `scales`
+   - `rotations`
+   - `cov3D_precomp`
+   For GGGS, also pass `sg_axis`, `sg_sharpness`, `sg_color`.
+
+10. **Post-process 2DGS Outputs:**
+    Extract from `allmap`:
+    - `render_alpha = allmap[1:2]`
+    - `render_normal = allmap[2:5]` (transform to world space)
+    - `render_depth_median = allmap[5:6]`
+    - `render_depth_expected = allmap[0:1] / render_alpha`
+    - `render_dist = allmap[6:7]`
+    Compute surface depth:
+    $$ \text{surf\_depth} = \text{render\_depth\_expected} \times (1 - \text{pipe.depth\_ratio}) + \text{pipe.depth\_ratio} \times \text{render\_depth\_median} $$
+    Compute surface normal:
+    $$ \text{surf\_normal} = \text{depth\_to\_normal}(\text{viewpoint\_camera}, \text{surf\_depth}) \times \text{render\_alpha.detach()} $$
+
+11. **Post-process 3DGS Outputs:**
+    Compute depth from inverse depth:
+    $$ \text{depth} = 1.0 / \text{inv\_depth.clamp(min=1e-6)} $$
+
+12. **Post-process GGGS Outputs:**
+    Retrieve optional attributes `sg_axis`, `sg_sharpness`, `sg_color` from `pc` (handling defaults and tensor dimensions). Return `rendered_median_depth`, `rendered_alpha`, `rendered_normal`.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import torch
+
+def unified_gaussian_splatting_dispatch(pc, viewpoint_camera, pipe, gs_mode=None, override_color=None, batch_idx=None):
+    # 1. Extract Batch Attributes
+    if batch_idx is None:
+        batch_idx = slice(None)
+    xyz = pc.means[batch_idx]
+    opacity = pc.opacities[batch_idx].unsqueeze(-1)
+    
+    # 2. Initialize Screenspace Points
+    screenspace_points = torch.zeros_like(xyz, dtype=xyz.dtype, requires_grad=True, device="cuda")
+    
+    # 3. Compute Tangent FOV
+    tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+    tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+    
+    # 4. Determine Render Mode
+    if gs_mode is not None:
+        requested_render_mode = gs_mode
+    else:
+        # Check scale dimensions to infer mode
+        scales = pc.scales[batch_idx]
+        if scales.shape[1] == 2:
+            requested_render_mode = "2DGS"
+        else:
+            requested_render_mode = "3DGS"
+            
+    # 5. Select Rasterizer Classes
+    if requested_render_mode == "2DGS":
+        from diff_surfel_rasterization import GaussianRasterizationSettings as RasterizationSettings2D
+        from diff_surfel_rasterization import GaussianRasterizer as Rasterizer2D
+    elif requested_render_mode == "GGGS":
+        from gggs_diff_gaussian_rasterization import GaussianRasterizationSettings as RasterizationSettingsGGGS
+        from gggs_diff_gaussian_rasterization import GaussianRasterizer as RasterizerGGGS
+    else: # 3DGS
+        from diff_gaussian_rasterization import GaussianRasterizationSettings as RasterizationSettings3D
+        from diff_gaussian_rasterization import GaussianRasterizer as Rasterizer3D
+        
+    # 6. Construct Settings
+    settings_kwargs = {
+        "image_height": viewpoint_camera.image_height,
+        "image_width": viewpoint_camera.image_width,
+        "tanfovx": tanfovx,
+        "tanfovy": tanfovy,
+        "bg": pipe.bg, # Assuming pipe has bg attribute
+        "scaling_modifier": pipe.scaling_modifier,
+        "viewmatrix": viewpoint_camera.viewmatrix,
+        "projmatrix": viewpoint_camera.projmatrix,
+        "sh_degree": pc.active_sh_degree,
+        "campos": viewpoint_camera.campos,
+        "prefiltered": False,
+        "debug": False
+    }
+    
+    if requested_render_mode == "GGGS":
+        settings_kwargs.update({
+            "kernel_size": pipe.kernel_size,
+            "sg_degree": 0,
+            "require_depth": True
+        })
+        
+    if requested_render_mode == "2DGS":
+        settings = RasterizationSettings2D(**settings_kwargs)
+        rasterizer = Rasterizer2D(rasterizer_settings=settings)
+    elif requested_render_mode == "GGGS":
+        settings = RasterizationSettingsGGGS(**settings_kwargs)
+        rasterizer = RasterizerGGGS(rasterizer_settings=settings)
+    else:
+        settings = RasterizationSettings3D(**settings_kwargs)
+        rasterizer = Rasterizer3D(rasterizer_settings=settings)
+        
+    # 7. Prepare Covariance
+    if pipe.compute_cov3D_python:
+        # Compute cov3D_precomp from scales and rotations
+        # Transform world-space covariance to pixel space
+        # Reshape to (-1, 9) column-major
+        cov3D_precomp = compute_cov3D_python(pc, batch_idx) # [G] Helper function not detailed in source
+    else:
+        cov3D_precomp = None
+        scales = pc.scales[batch_idx]
+        rotations = pc.rotations[batch_idx]
+        
+    # 8. Prepare Colors
+    if override_color is None and pipe.convert_SHs_python:
+        shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)
+        dir_pp = xyz - viewpoint_camera.campos
+        dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
+        sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
+        colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
+        shs = None
+    else:
+        colors_precomp = override_color
+        shs = pc.harmonics[batch_idx].permute(0, 2, 1)
+        
+    # 9. Execute Rasterizer
+    if requested_render_mode == "GGGS":
+        sg_axis = pc.sg_axis[batch_idx] if hasattr(pc, 'sg_axis') else None
+        sg_sharpness = pc.sg_sharpness[batch_idx] if hasattr(pc, 'sg_sharpness') else None
+        sg_color = pc.sg_color[batch_idx] if hasattr(pc, 'sg_color') else None
+        render_out = rasterizer(
+            means3D=xyz,
+            means2D=screenspace_points,
+            shs=shs,
+            colors_precomp=colors_precomp,
+            opacity=opacity,
+            scales=scales,
+            rotations=rotations,
+            cov3D_precomp=cov3D_precomp,
+            sg_axis=sg_axis,
+            sg_sharpness=sg_sharpness,
+            sg_color=sg_color
+        )
+    else:
+        render_out = rasterizer(
+            means3D=xyz,
+            means2D=screenspace_points,
+            shs=shs,
+            colors_precomp=colors_precomp,
+            opacity=opacity,
+            scales=scales,
+            rotations=rotations,
+            cov3D_precomp=cov3D_precomp
+        )
+        
+    # 10, 11, 12. Post-process
+    if requested_render_mode == "2DGS":
+        allmap = render_out
+        render_alpha = allmap[1:2]
+        render_normal = allmap[2:5]
+        # Transform normal to world space [G]
+        render_depth_median = allmap[5:6]
+        render_depth_expected = allmap[0:1] / render_alpha
+        render_dist = allmap[6:7]
+        
+        surf_depth = render_depth_expected * (1 - pipe.depth_ratio) + pipe.depth_ratio * render_depth_median
+        surf_normal = depth_to_normal(viewpoint_camera, surf_depth) * render_alpha.detach()
+        
+        return render_out[0:3], surf_depth, render_alpha, surf_normal
+    elif requested_render_mode == "3DGS":
+        inv_depth = render_out[0] # Assuming first channel is inverse depth
+        depth = 1.0 / inv_depth.clamp(min=1e-6)
+        return render_out[1:4], depth, render_out[0:1], None
+    else: # GGGS
+        rendered_median_depth = render_out.median_depth
+        rendered_alpha = render_out.alpha
+        rendered_normal = render_out.normal
+        return render_out.color, rendered_median_depth, rendered_alpha, rendered_normal
+
+def compute_cov3D_python(pc, batch_idx):
+    # Placeholder for covariance computation logic
+    # Transform world-space covariance to pixel space using ndc2pix and world2pix
+    # Reshape to (-1, 9) column-major
+    pass
+
+def eval_sh(deg, shs, dirs):
+    # Placeholder for SH evaluation
+    pass
+
+def depth_to_normal(cam, depth):
+    # Placeholder for normal computation from depth
+    pass
+```
+
+## Subtopics
+
+### [Gaussian Rasterization Variable Preparation](17689-gaussian-rasterization-variable-preparation.md)
+Prepares a dictionary of PyTorch tensors containing 3D Gaussian parameters filtered by timestep, formatted for the differentiable Gaussian rasterizer. It converts raw learnable parameters (log-scales, logit-opacities, unnormalized rotations) into the physical quantities required by the rasterization kernel (scales, opacities, normalized rotations). It also initializes the 2D mean positions and constructs separate variable sets for color rendering and depth/silhouette rendering.
+
+## Operating characteristics
+- **Time Complexity:** Dominated by the rasterization backend (3DGS, 2DGS, or GGGS). The dispatch and data preparation steps are $O(N)$ where $N$ is the number of Gaussians.
+- **Memory Complexity:** $O(N)$ for storing Gaussian attributes and intermediate tensors (screenspace points, precomputed colors/covariances).
+- **Performance:** Depends on the selected backend. 2DGS may offer better normal estimation but requires more complex post-processing. GGGS adds overhead for spherical Gaussian parameters.
+- **Strengths:** Unified interface for multiple Gaussian splatting variants; automatic mode selection based on geometry; handles SH conversion and covariance computation flexibly.
+- **Limitations:** Requires careful handling of different backend APIs; post-processing logic varies significantly between modes; potential for precision issues in depth computation (e.g., division by alpha).
+- **When to use:** When supporting multiple Gaussian splatting variants (3DGS, 2DGS, GGGS) in a single codebase or when the mode is determined dynamically by input data.
+- **When not to use:** When only one specific variant is needed and performance is critical (direct backend call avoids dispatch overhead).
+
+## Background
+The unified dispatcher is part of the VGGT (Video Gaussian Gaussian Transformer) project, which integrates Gaussian Splatting for 3D reconstruction and rendering. It abstracts the differences between 3DGS, 2DGS, and GGGS rasterizers to provide a consistent interface for rendering Gaussian primitives.
+
+## Sources
+[S1] Zhaoyibinn/VGVGGT, https://github.com/Zhaoyibinn/VGVGGT, fetched 2026-10-27 (unofficial)

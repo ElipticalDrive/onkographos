@@ -1,0 +1,103 @@
+--- v004.md
++++ v005.md
+@@ -4,53 +4,46 @@
+ 
+ ## Overview
+-General NDC Ray Conversion transforms camera-space rays into Normalized Device Coordinates (NDC) space, mapping the viewing frustum to a canonical cube (typically $[-1, 1]^3$ or $[0, 1]^3$) [S1, S4, S6, unofficial]. This technique fixes the near and far clipping planes to constant values (e.g., 0 and 1), removing the need for scene-dependent depth bounds and enabling uniform sampling strategies for forward-facing scenes [S2, S4, unofficial]. It differs from [Pinhole Camera Projection](3162-pinhole-camera-projection-pixel-to-camera.md) by producing a full ray for traversal rather than a single point, and from [Ray Generation from Pixel Coordinates](2514-ray-generation-from-pixel-coordinates.md) by specifically handling the normalization of depth bounds rather than just generating world-space rays [S4, S7, unofficial].
++General NDC Ray Conversion transforms camera-space rays into Normalized Device Coordinates (NDC) space, mapping the viewing frustum to a canonical cube (typically $[-1, 1]^3$) [S1, S4, S6, unofficial]. This technique fixes the near and far clipping planes to constant values (e.g., 0 and 1 or -1 and 1), removing the need for scene-dependent depth bounds and enabling uniform sampling strategies for forward-facing scenes [S2, S4, unofficial]. It differs from [Pinhole Camera Projection](3162-pinhole-camera-projection-pixel-to-camera.md) by producing a full ray for traversal rather than a single point, and from [Ray Generation from Pixel Coordinates](2514-ray-generation-from-pixel-coordinates.md) by specifically handling the normalization of depth bounds rather than just generating world-space rays [S4, S7, unofficial]. The resulting `directions_ndc` are not unit length, and the projection of the original ray does not equal the NDC ray (`projection(origins + t * directions) \neq origins_ndc + t * directions_ndc`) [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `rays_o`: Ray origins in camera space, shape `(batch_size, 3)` or `(H, W, 3)`.
+-- `rays_d`: Ray directions in camera space, shape `(batch_size, 3)` or `(H, W, 3)`.
+-- `focal`: Focal length of the pinhole camera (float).
+-- `W`: Image width in pixels (int).
+-- `H`: Image height in pixels (int).
++- `rays_o`: Ray origins in camera space, shape `(batch_size, 3)` or `(H, W, 3)` [S5, S6, unofficial].
++- `rays_d`: Ray directions in camera space, shape `(batch_size, 3)` or `(H, W, 3)` [S5, S6, unofficial].
++- `focal`: Focal length of the pinhole camera (float) [S6, unofficial].
++- `W`: Image width in pixels (int) [S6, unofficial].
++- `H`: Image height in pixels (int) [S6, unofficial].
+ - `near`: Near plane distance along the negative z-axis (float). Default is 1.0 [S1, S4, unofficial].
+ 
+ **Outputs:**
+-- `rays_o_ndc`: Transformed origins in NDC space, shape `(batch_size, 3)` or `(H, W, 3)`.
+-- `rays_d_ndc`: Transformed directions in NDC space, shape `(batch_size, 3)` or `(H, W, 3)`.
++- `rays_o_ndc`: Transformed origins in NDC space, shape `(batch_size, 3)` or `(H, W, 3)` [S6, unofficial].
++- `rays_d_ndc`: Transformed directions in NDC space, shape `(batch_size, 3)` or `(H, W, 3)` [S6, unofficial].
+ 
+ **Data Structures:**
+-The inputs and outputs are dense floating-point arrays. The z-component of the origin in NDC space maps the near plane to a constant value (typically 1 or 0 depending on convention) and infinity to another constant (typically 3 or 1). The direction vectors are not unit length [S1, unofficial].
++The inputs and outputs are dense floating-point arrays [G]. The z-component of the origin in NDC space maps the near plane to a constant value (typically 1 or 0 depending on convention) and infinity to another constant (typically 3 or 1) [S2, S6, unofficial].
+ 
+ **Steps:**
+ 1.  **Shift Origins to Near Plane:**
+-    Calculate the shift factor $t$ to move the ray origin to the near plane ($z = -near$ in standard camera coordinates, though implementations often assume the camera looks down the negative z-axis and the near plane is at $z = -near$ or $z = near$ depending on the coordinate system handedness. The sources consistently use a shift that places the origin at $z = -near$ relative to the camera center if the camera looks along -z, or simply ensures the projected z-coordinate corresponds to the near plane).
+-    
+-    Using the convention where the camera looks along the negative z-axis and the near plane is at distance `near`:
++    Calculate the shift factor $t$ to move the ray origin to the near plane ($z = -near$ in standard camera coordinates) [S1, S5, S9, unofficial].
+     $$ t = -\frac{near + rays\_o[..., 2]}{rays\_d[..., 2]} $$
+     Update origins:
+     $$ rays\_o = rays\_o + t[..., \text{None}] \cdot rays\_d $$
+-    
+-    *Note: Some implementations (e.g., [S8, unofficial]) use $t = \frac{near - rays\_o[..., 2]}{rays\_d[..., 2]}$. This discrepancy arises from sign conventions in the camera coordinate system (OpenGL vs. DirectX/Blender). The sources [S1, S4, S6, unofficial] use the negative sign convention consistent with OpenGL-style cameras where the camera looks down -z.* [S1, S4, S6, S8, unofficial].
++    Some implementations use $t = \frac{near - rays\_o[..., 2]}{rays\_d[..., 2]}$ due to different sign conventions (e.g., Blender vs. OpenGL) [S7, S8, unofficial].
+ 
+ 2.  **Project Origins to NDC:**
+-    Compute the NDC coordinates for the shifted origins. The x and y components are scaled by the focal length and image dimensions. The z component maps the depth to the NDC range.
+-    
++    Compute the NDC coordinates for the shifted origins [S1, S3, unofficial]. The x and y components are scaled by the focal length and image dimensions [S6, unofficial]. The z component maps the depth to the NDC range [S6, unofficial].
+     $$ o_0 = -\frac{1}{W / (2 \cdot focal)} \cdot \frac{rays\_o[..., 0]}{rays\_o[..., 2]} $$
+     $$ o_1 = -\frac{1}{H / (2 \cdot focal)} \cdot \frac{rays\_o[..., 1]}{rays\_o[..., 2]} $$
+     $$ o_2 = 1 + 2 \cdot \frac{near}{rays\_o[..., 2]} $$
+-    
+-    Here, $o_2$ maps the near plane ($rays\_o[..., 2] = -near$) to $1 + 2(-1) = -1$? No, if $rays\_o[..., 2] = -near$, then $near/rays\_o[..., 2] = -1$, so $o_2 = 1 - 2 = -1$. However, source [S4, unofficial] and [S6, unofficial] state $o_2 = 1 + 2 \cdot near / rays\_o[..., 2]$. If the near plane is at $z=-near$, then $o_2 = -1$. If the near plane is at $z=near$ (camera looks +z), then $o_2 = 3$. The sources [S1, S4, S6, unofficial] generally map the near plane to a specific bound. Source [S2, unofficial] mentions fixing near to 0 and far to 1. Source [S4, unofficial] formula results in $o_2 \in [-1, 1]$ if $rays\_o[..., 2]$ ranges from $-near$ to $-\infty$. Specifically, at $z=-near$, $o_2 = -1$. At $z \to -\infty$, $o_2 \to 1$. Thus the range is $[-1, 1]$.
++    At the near plane ($rays\_o[..., 2] = -near$), $o_2 = -1$. As $rays\_o[..., 2] \to -\infty$, $o_2 \to 1$, mapping the depth range to $[-1, 1]$ [S4, S6, unofficial].
+ 
+ 3.  **Project Directions to NDC:**
+-    Compute the NDC direction components. This accounts for the perspective division difference between the origin and the point at infinity.
+-    
++    Compute the NDC direction components, which accounts for the perspective division difference between the origin and the point at infinity [S6, unofficial].
+     $$ d_0 = -\frac{1}{W / (2 \cdot focal)} \cdot \left( \frac{rays\_d[..., 0]}{rays\_d[..., 2]} - \frac{rays\_o[..., 0]}{rays\_o[..., 2]} \right) $$
+     $$ d_1 = -\frac{1}{H / (2 \cdot focal)} \cdot \left( \frac{rays\_d[..., 1]}{rays\_d[..., 2]} - \frac{rays\_o[..., 1]}{rays\_o[..., 2]} \right) $$
+     $$ d_2 = -2 \cdot \frac{near}{rays\_o[..., 2]} $$
+-    
+-    The direction z-component $d_2$ ensures that the ray in NDC space points towards the correct depth range. At the near plane, $d_2 = 2$. As $z \to -\infty$, $d_2 \to 0$.
++    The direction z-component $d_2$ ensures that the ray in NDC space points towards the correct depth range [S6, unofficial]. At the near plane, $d_2 = 2$. As $z \to -\infty$, $d_2 \to 0$ [S6, unofficial].
+ 
+ 4.  **Stack Results:**
+-    Concatenate the components to form the final NDC rays.
++    Concatenate the components to form the final NDC rays [S4, S6, unofficial].
+     $$ rays\_o\_ndc = [o_0, o_1, o_2] $$
+     $$ rays\_d\_ndc = [d_0, d_1, d_2] $$
+@@ -79,6 +72,4 @@
+     # Step 1: Shift origins to the near plane
+     # t = -(near + rays_o_z) / rays_d_z
+-    # Note: This assumes camera looks along negative z-axis.
+-    # If rays_d_z is 0, this will result in inf/nan.
+     t = -(near + rays_o[..., 2:3]) / rays_d[..., 2:3]
+     rays_o_shifted = rays_o + t * rays_d
+@@ -88,5 +79,4 @@
+     # o1 = -1 / (H / (2*focal)) * (oy / oz)
+     # o2 = 1 + 2 * near / oz
+-    
+     inv_hw = np.array([W / (2.0 * focal), H / (2.0 * focal)])
+     
+@@ -101,10 +91,7 @@
+     # d1 = -1 / (H / (2*focal)) * (dy/dz - oy/oz)
+     # d2 = -2 * near / oz
+-    
+-    # Precompute ox/oz and oy/oz from the shifted origin
+     ox_oz = rays_o_shifted[..., 0:1] / rays_o_shifted[..., 2:3]
+     oy_oz = rays_o_shifted[..., 1:2] / rays_o_shifted[..., 2:3]
+     
+-    # Direction components in camera space
+     dx_dz = rays_d[..., 0:1] / rays_d[..., 2:3]
+     dy_dz = rays_d[..., 1:2] / rays_d[..., 2:3]
+@@ -142,5 +129,5 @@
+ 
+ ## Background
+-General NDC Ray Conversion was introduced in the context of NeRF (Neural Radiance Fields) to handle forward-facing scenes efficiently. It was popularized by the original NeRF paper and subsequent implementations like those in the `nerfies` and `multinerf` repositories [S1, S4, unofficial]. The technique maps the perspective frustum to a canonical cube, allowing for simpler and more robust sampling strategies. It is particularly useful for datasets like LLFF (Look at Light From the Front) where the camera moves primarily in a forward-facing manner [S4, S6, unofficial].
++General NDC Ray Conversion was introduced in the context of NeRF (Neural Radiance Fields) to handle forward-facing scenes efficiently. The technique maps the perspective frustum to a canonical cube, allowing for simpler and more robust sampling strategies. It is particularly useful for datasets like LLFF (Look at Light From the Front) where the camera moves primarily in a forward-facing manner [S4, S6, unofficial].
+ 
+ ## Sources

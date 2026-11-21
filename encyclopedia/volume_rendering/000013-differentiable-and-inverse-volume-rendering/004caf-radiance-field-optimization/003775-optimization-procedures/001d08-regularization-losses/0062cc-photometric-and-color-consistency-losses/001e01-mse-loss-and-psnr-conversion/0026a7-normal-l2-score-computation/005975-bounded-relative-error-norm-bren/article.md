@@ -1,0 +1,127 @@
+# Bounded Relative Error Norm (BREN)
+
+Also called: BREN Property
+
+## Overview
+The Bounded Relative Error Norm (BREN) is a theoretical property of a reconstruction neural network $\Phi$ that ensures the ratio of the L2 norm of the reconstruction error to the L2 norm of the ground truth is bounded by a value strictly less than 1. It serves as a stability condition for convergence analysis in iterative reconstruction frameworks, such as ACID, by guaranteeing that the network output remains close to the ideal reconstruction. It distinguishes itself from standard Lipschitz continuity by normalizing the error bound relative to the signal magnitude, effectively acting as a special case of Lipschitz continuity tailored for relative error control in deep imaging.
+
+## How it works
+The BREN property defines a constraint on the reconstruction network $\Phi$ to ensure it is "well-designed and well-trained." It decomposes the reconstruction error into observable and null-space components and bounds their combined magnitude relative to the ground truth.
+
+**Inputs and Outputs:**
+- Input: A measurement vector $p$ (or $Af^*$), where $A$ is the measurement matrix and $f^*$ is the ground truth image.
+- Output: The reconstructed image $\Phi(p)$.
+
+**Data Structures:**
+- $f^*$: Ground truth image vector.
+- $\Phi(\cdot)$: The reconstruction neural network function.
+- $A$: The measurement matrix (e.g., CT projection matrix).
+- $f_{ob}$: Observable error component.
+- $f_{nl}$: Null-space error component.
+
+**Definitions:**
+The network output is modeled as:
+$$ \Phi(Af^*) = f^* + f_{ob} + f_{nl} $$
+where $f_{ob}$ and $f_{nl}$ represent the error components associated with the ground truth $f^*$ and the measurement matrix $A$.
+
+**BREN Condition:**
+The BREN property holds if:
+$$ \frac{\|\Phi(Af^*) - f^*\|}{\|f^*\|} = \frac{\|f_{ob} + f_{nl}\|}{\|f^*\|} \le (1-\sigma) $$
+where $0 < \sigma < 1$. This implies:
+$$ \|f_{ob} + f_{nl}\| \le (1-\sigma)\|f^*\| $$
+
+**Sufficient Condition for Satisfaction:**
+For a new dataset $p'$ from an underlying image $f'$, the BREN property is satisfied if $f'$ is sufficiently close to a training image $f_{i0}$. Let $L_1$ be the Lipschitz constant of the ideal reconstruction operator $R$, and $L_2$ be the Lipschitz constant of the deep network approximation $\Phi$. Let $\delta_n$ be the bound on the error between the network output and the ideal reconstruction for training data. The condition is:
+$$ \frac{(L_1 + L_2)d_F(f_{i0}, f') + \delta_n}{\|f'\|} < 1 $$
+This simplifies roughly to:
+$$ \frac{(L_1 + L_2)d_F(f_{i0}, f')}{\|f'\|} < 1 $$
+where $d_F$ is the distance metric in the image space $F$.
+
+**Parameters:**
+- $\sigma$: A constant such that $0 < \sigma < 1$. Typical values are not specified, but the ratio must be substantially less than 1.
+- $L_1$: Lipschitz constant of the ideal reconstruction operator $R$.
+- $L_2$: Lipschitz constant of the deep network $\Phi$.
+- $\delta_n$: Bound on the training error $\|\Phi(p^{(i)}) - R(p^{(i)})\|$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def check_bren_property(ground_truth_f_star, reconstructed_f_hat, sigma):
+    """
+    Checks if the BREN property is satisfied for a single reconstruction.
+    
+    Args:
+        ground_truth_f_star: The ground truth image vector f*.
+        reconstructed_f_hat: The network output Phi(Af*).
+        sigma: The margin parameter (0 < sigma < 1).
+        
+    Returns:
+        bool: True if BREN property holds, False otherwise.
+    """
+    # Calculate L2 norms
+    norm_f_star = l2_norm(ground_truth_f_star)
+    
+    # Avoid division by zero for trivial images
+    if norm_f_star == 0:
+        return False # Or handle as undefined
+        
+    # Calculate reconstruction error
+    error_vector = reconstructed_f_hat - ground_truth_f_star
+    norm_error = l2_norm(error_vector)
+    
+    # Calculate relative error
+    relative_error = norm_error / norm_f_star
+    
+    # Check condition: relative_error <= 1 - sigma
+    return relative_error <= (1 - sigma)
+
+def check_bren_sufficient_condition(ideal_recon_R, network_Phi, training_data, new_image_f_prime, L1, L2, delta_n):
+    """
+    Checks the sufficient condition for BREN based on Lipschitz constants and distance to training data.
+    This is a theoretical check, not a direct runtime check for a single inference.
+    
+    Args:
+        L1: Lipschitz constant of ideal reconstruction R.
+        L2: Lipschitz constant of network Phi.
+        delta_n: Bound on training error.
+        new_image_f_prime: The new image f' to be reconstructed.
+        training_data: Set of training images to find closest f_i0.
+        
+    Returns:
+        bool: True if the sufficient condition is met.
+    """
+    # Find closest training image f_i0
+    f_i0 = find_closest_image(new_image_f_prime, training_data)
+    
+    # Calculate distance in image space F
+    d_F = distance_metric(f_i0, new_image_f_prime)
+    
+    # Calculate norm of new image
+    norm_f_prime = l2_norm(new_image_f_prime)
+    
+    if norm_f_prime == 0:
+        return False
+        
+    # Check condition: ((L1 + L2) * d_F + delta_n) / norm_f_prime < 1
+    numerator = (L1 + L2) * d_F + delta_n
+    return (numerator / norm_f_prime) < 1
+```
+
+**Edge Cases and Pitfalls:**
+- If the BREN requirement is not met, the theoretical arguments for convergence analysis (e.g., in ACID) are not valid [S1].
+- The property assumes non-trivial images ($f > 0$) to avoid division by zero [S1].
+- The sufficient condition relies on the new image being "fairly close" to the training dataset. If the dataset is small, $d_F$ may be large, requiring small Lipschitz constants [S1].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources. The check itself is $O(N)$ for L2 norm calculation.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Provides a theoretical guarantee for stability against adversarial attacks and convergence in iterative frameworks. It is a practical expectation for "proper" reconstruction networks in deep imaging [S1].
+- **Limitations:** It is a theoretical property used for analysis rather than a direct optimization loss function. Its satisfaction depends on the network being well-trained and the input being close to the training distribution [S1].
+- **When to use:** Use when analyzing the stability and convergence of deep learning-based tomographic reconstruction methods, particularly in adversarial settings [S1].
+
+## Background
+The BREN property was introduced in the context of stabilizing deep tomographic reconstruction, specifically for the ACID (Adversarial-Coupled Iterative Deep) framework. It is discussed in the paper "Stabilizing deep tomographic reconstruction: Part B. Convergence analysis and adversarial attacks" [S1]. The property is viewed as a special case of Lipschitz continuity and is used to define a "well-designed and well-trained" reconstruction network. Experimental results in CT and MRI cases showed that BREN ratios are substantially less than 1 for various reconstruction networks, although some networks (like AUTOMAP) were found to be more sensitive to perturbations [S1].
+
+## Sources
+[S1] Stabilizing deep tomographic reconstruction: Part B. Convergence analysis and adversarial attacks., https://doi.org/10.1016/j.patter.2022.100475, fetched 2026-10-26

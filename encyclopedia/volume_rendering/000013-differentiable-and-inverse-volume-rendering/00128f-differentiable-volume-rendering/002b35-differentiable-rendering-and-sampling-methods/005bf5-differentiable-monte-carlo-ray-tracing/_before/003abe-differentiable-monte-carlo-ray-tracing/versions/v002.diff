@@ -1,0 +1,138 @@
+--- v001.md
++++ v002.md
+@@ -1,82 +1,36 @@
+ # Differentiable Monte Carlo Ray Tracing
+ 
+-Also called: Differentiable MC Ray Tracing, Differentible Monte Carlo (MC) Ray Tracing
++Also called: Differentiable MC Ray Tracing
+ 
+ ## Overview
+-Differentiable Monte Carlo (MC) Ray Tracing is a rendering technique that computes global illumination by applying automatic differentiation to stochastic ray tracing paths [S1, unofficial]. It enables gradient-based optimization of scene geometry, materials, and lighting by propagating derivatives through the random sampling process [S1, unofficial]. Unlike deterministic ray marching methods, it handles complex visibility and indirect lighting via single-bounce differentiable MC rendering, avoiding the noise and cost associated with multi-bounce path tracing in inverse rendering contexts [S1, unofficial].
++Differentiable Monte Carlo Ray Tracing is a rendering technique that computes global illumination by combining stochastic path sampling with automatic differentiation to propagate gradients from the image plane back to scene parameters (geometry, materials, lights) [S1, unofficial]. It sets itself apart from deterministic ray marching methods by replacing fixed sampling grids with stochastic estimators, which allows for unbiased radiance estimates and accelerates training in voxel-based scene representations by evaluating fewer samples per ray [S1, unofficial]. Unlike previous differentiable MC methods that avoided multi-bounce tracing due to noise and cost, this approach enables single-bounce (and potentially multi-bounce) differentiable MC ray tracing within a joint optimization framework [S1, unofficial].
+ 
+ ## How it works
+-The method integrates standard Monte Carlo path tracing with reverse-mode automatic differentiation (AD) to compute gradients of the rendered image with respect to scene parameters [S2, unofficial].
+-
+-**Inputs:**
+-- Scene representation (e.g., triangle mesh, neural fields) [S1, unofficial].
+-- Material properties (e.g., PBR parameters) [S1, unofficial].
+-- Light sources (e.g., HDR light probes) [S1, unofficial].
+-- Camera parameters [S2, unofficial].
+-
+-**Outputs:**
+-- Rendered image (radiance) [S1, unofficial].
+-- Gradients of the image with respect to inputs [S2, unofficial].
++**Inputs:** Scene geometry (e.g., triangle meshes, neural fields), material properties (e.g., PBR parameters, albedo textures), light sources (e.g., HDR light probes), and camera parameters.
++**Outputs:** Differentiable image radiance and gradients with respect to input parameters.
+ 
+ **Data Structures:**
+-- Path state: Current position, direction, throughput, and accumulated radiance [S2, unofficial].
+-- Visibility function: Boolean indicator $V(e)$ for edge $e$ relative to ray position [S2, unofficial].
++The method relies on standard Monte Carlo path tracing data structures, augmented with automatic differentiation (AD) graphs.
++- **Path State:** Contains current position, direction, throughput, and accumulated radiance.
++- **AD Graph:** Tracks operations on differentiable parameters to enable backpropagation.
++- **Radiance Cache:** An enhancement over traditional radiance caches, used to initialize differentiable marching tetrahedrons (DMTet) and model indirect illumination [S1, unofficial].
+ 
+ **Steps:**
+-1. **Ray Generation:** Generate primary rays from the camera through each pixel [S2, unofficial].
+-2. **Path Tracing:** For each ray, stochastically sample interactions (bounces) with the scene. In the context of JOC, this is limited to single-bounce differentiable MC rendering to manage noise [S1, unofficial].
+-3. **Radiance Estimation:** Compute the contribution of each path sample to the pixel color [S1, unofficial].
+-4. **Differentiation:** Apply automatic differentiation to the path tracing code. Standard AD differentiates the currently traced path but misses boundary effects when visibility changes discretely [S2, unofficial].
+-5. **Gradient Accumulation:** Accumulate gradients for scene parameters (geometry, material, light) [S1, unofficial].
+-
+-**Formulas:**
+-The measurement equation is defined as [S1, unofficial]:
+-$$
+-I = \int W_e(x, \omega) L_i(x, \omega) dx d\omega
+-$$
+-where $W_e$ is the measurement weight and $L_i$ is the incoming radiance [S1, unofficial].
+-
+-Visibility $V(e)$ for an occluder edge $e$ relative to a ray position $y_{ray}$ is a step function [S2, unofficial]:
+-$$
+-V(e) = \begin{cases} 
+-0 & \text{if } e \le y_{ray} \\
+-1 & \text{if } e > y_{ray}
+-\end{cases}
+-$$
+-Naive AD yields zero derivative almost everywhere because $V(e)$ is constant except at the discontinuity [S2, unofficial].
++1. **Ray Generation:** Cast primary rays from the camera through each pixel.
++2. **Stochastic Sampling:** Instead of deterministic ray marching, sample interaction points along the ray or on surfaces using probability density functions (PDFs) [S1, unofficial].
++3. **Radiance Estimation:** Compute the contribution of the sampled path. For global illumination, use a radiance cache to estimate indirect lighting efficiently [S1, unofficial].
++4. **Differentiable Evaluation:** Evaluate the radiance contribution using differentiable primitives. The measurement equation is integrated via Monte Carlo estimation:
++   $$ I = \int W_e(x, \omega) L_i(x, \omega) dx d\omega $$
++   where $W_e$ is the importance function and $L_i$ is the incoming radiance [S1, unofficial].
++5. **Gradient Propagation:** Use reverse-mode automatic differentiation to compute gradients of the image loss with respect to scene parameters. The AD graph traverses the computation history to backpropagate gradients through the stochastic sampling and radiance evaluation steps [S2, unofficial].
++6. **Optimization:** Update scene parameters using the computed gradients [S3].
+ 
+ **Parameters:**
+-- Bounce count: Single-bounce is used in JOC to avoid multi-bounce noise [S1, unofficial].
+-- Sample count: Not specified in sources.
++- **Sample Count:** The number of Monte Carlo samples per pixel. Higher counts reduce variance but increase computation time [S1, unofficial].
++- **Bounce Depth:** The maximum number of light bounces. Single-bounce is commonly used for direct lighting, while multi-bounce is avoided in some implementations due to noise [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Discontinuities:** Naive AD misses the boundary term when an edge crosses a ray, leading to incorrect gradients [S2, unofficial].
+-- **Noise:** Multi-bounce path tracing introduces significant noise and increased iteration time, limiting its use in inverse rendering [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-def differentiable_mc_ray_trace(ray, scene, material, light):
+-    # Initialize path state
+-    throughput = 1.0
+-    radiance = 0.0
+-    
+-    # Single-bounce path tracing (as per JOC)
+-    hit = scene.intersect(ray)
+-    if hit:
+-        # Sample material response
+-        bsdf = material.sample(hit)
+-        new_ray = ray.spawn(hit.position, bsdf.direction)
+-        
+-        # Evaluate light contribution
+-        light_contribution = light.evaluate(hit.position, bsdf.direction)
+-        
+-        # Accumulate radiance
+-        radiance += throughput * bsdf.reflectance * light_contribution
+-        
+-        # Note: Standard AD would differentiate this line.
+-        # However, it misses visibility changes if the hit status changes discretely.
+-        
+-    return radiance
+-```
++- **Visibility Discontinuities:** Naive automatic differentiation misses boundary effects when an occluder edge crosses a ray, as the visibility function is a step function [S2, unofficial]. This requires specialized techniques like edge sampling [S2, unofficial].
++- **Jacobian Factors:** Transformations from UV space to surface and then to camera rays involve Jacobian determinants (geometry term $\frac{\cos(\theta)}{d^2}$). Omitting these can assign equal weight to optimization variables, which may be desirable for convergence but differs from standard Monte Carlo weighting [S3].
+ 
+ ## Subtopics
+@@ -86,19 +40,23 @@
+ 
+ ### Edge Sampling for Visibility Derivatives
+-Edge Sampling is a technique to capture derivative contributions from visibility changes (discontinuities) that normal path samples miss by explicitly sampling discontinuity edges [S2, unofficial]. Unlike naive automatic differentiation which only differentiates the currently traced path and misses boundary effects when an edge crosses a ray, edge sampling captures the missing boundary term [S2, unofficial]. Introduced by Li et al. in 'Differentiable Monte Carlo Ray Tracing through Edge Sampling' at SIGGRAPH Asia 2018 [S2, unofficial].
++Edge sampling is a technique to capture derivative contributions from visibility changes (discontinuities) that normal path samples miss by explicitly sampling discontinuity edges [S2, unofficial]. Unlike naive automatic differentiation which only differentiates the currently traced path and misses boundary effects when an edge crosses a ray, edge sampling captures the missing boundary term [S2, unofficial]. Introduced by Li et al. in 'Differentiable Monte Carlo Ray Tracing through Edge Sampling' at SIGGRAPH Asia 2018 [S2, unofficial].
++
++### Jacobian Factor Omission
++Jacobian factor omission is a method where explicit Jacobian terms (UV mapping distortion and geometry term $\frac{\cos(\theta)}{d^2}$) are omitted from the Monte Carlo weight calculation [S3]. This assigns equal weight to all optimization variables, implicitly introducing a factor $\alpha_j$ that cancels them out in the per-ray objective function [S3]. It contrasts with Tsai et al. [TSG19], where reconstructed surface points are sampled directly and all Jacobian terms are included; Tsai's method is suitable for non-line-of-sight reconstruction with roughly constant observation distances, whereas this method handles varying distances [S3].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Single-bounce MC is faster than multi-bounce, but stochastic sampling is generally slower than deterministic ray marching for simple scenes [S1, unofficial].
+-- **Memory Complexity:** Depends on scene representation (neural fields vs. meshes) [S1, unofficial].
+-- **Performance:** JOC effectively prevents indirect illumination effects from being baked into materials, enabling high-quality reconstruction of triangle meshes, PBR materials, and HDR light probes [S1, unofficial].
+-- **Strengths:** Handles complex visibility and indirect lighting; unbiased estimates [S1, unofficial].
+-- **Limitations:** Multi-bounce path tracing is noisy and computationally expensive; naive AD misses visibility derivatives [S1, unofficial][S2, unofficial].
+-- **When to use:** Inverse rendering where global illumination and material/light optimization are required [S1, unofficial].
+-- **When not to use:** Real-time rendering or scenarios requiring multi-bounce global illumination with strict noise constraints [S1, unofficial].
++- **Time Complexity:** Depends on the number of Monte Carlo samples and path bounces. Single-bounce tracing is faster than multi-bounce [S1, unofficial].
++- **Memory Complexity:** Requires storage for the scene representation (e.g., neural fields, meshes) and the AD graph [S1, unofficial].
++- **Measured Performance:** In voxel-based scene representations like DVGO, Monte Carlo radiance estimates can yield a ×6 speedup over deterministic ray marching with sparsity thresholding [S1, unofficial].
++- **Strengths:** Unbiased estimates, ability to handle complex geometry and materials, acceleration of training in neural rendering [S1, unofficial].
++- **Limitations:** High variance with few samples, noise in multi-bounce tracing [S1, unofficial], missing visibility derivatives without edge sampling [S2, unofficial].
++- **When to Use:** When unbiased gradients are required, or when scene representation evaluation is expensive compared to radiance evaluation [S1, unofficial].
++- **When Not to Use:** When real-time performance is critical and variance is unacceptable, or when visibility derivatives are crucial and edge sampling is not implemented [S2, unofficial].
+ 
+ ## Background
+-Differentiable Monte Carlo Ray Tracing originated from the need to optimize scene parameters via gradients in inverse rendering [S2, unofficial]. The technique was formally introduced by Li et al. in 'Differentiable Monte Carlo Ray Tracing through Edge Sampling' at SIGGRAPH Asia 2018 [S2, unofficial]. It builds on the measurement equation from Veach 1998 [S1, unofficial]. Recent applications include Joint Optimization of Triangle Mesh, Material, and Light from Neural Fields with Neural Radiance Cache (JOC) [S1, unofficial].
++Differentiable Monte Carlo Ray Tracing originated from the need to optimize complex 3D scenes using gradient-based methods. Early differentiable renderers like NVDIFFRECMC avoided multi-bounce path tracing due to noise and cost, limiting them to direct lighting [S1, unofficial]. The Joint Optimization of Triangle Mesh, Material, and Light from Neural Fields with Neural Radiance Cache (NRC) introduced single-bounce differentiable MC ray tracing to jointly optimize geometry, material, and light through backpropagation [S1, unofficial]. Edge sampling was introduced by Li et al. at SIGGRAPH Asia 2018 to handle visibility derivatives [S2, unofficial]. Jacobian factor omission was proposed in texture-space differentiable rendering to simplify optimization by omitting explicit Jacobian terms [S3].
+ 
+ ## Sources
+ [S1] Joint Optimization of Triangle Mesh, Material, and Light from Neural Fields with Neural Radiance Cache, https://doi.org/10.48550/arxiv.2305.16800, fetched 2026-10-26 (unofficial)
+-[S2] Differentiable ray tracing — from paths to gradients | Bai Liping, https://bailiping.com/differentiable-ray-tracing/, fetched 2026-10-28 (unofficial)+[S2] Differentiable ray tracing — from paths to gradients | Bai Liping, https://bailiping.com/differentiable-ray-tracing/, fetched 2026-10-28 (unofficial)
++[S3] Material and Lighting Reconstruction for Complex Indoor Scenes with Texture-space Differentiable Rendering, https://doi.org/10.2312/sr.20211292, fetched 2026-10-29

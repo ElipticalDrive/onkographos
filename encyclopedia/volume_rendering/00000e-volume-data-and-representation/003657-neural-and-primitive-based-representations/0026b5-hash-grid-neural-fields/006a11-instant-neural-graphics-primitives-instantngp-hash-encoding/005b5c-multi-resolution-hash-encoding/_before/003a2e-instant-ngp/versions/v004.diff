@@ -1,0 +1,290 @@
+--- v003.md
++++ v004.md
+@@ -4,154 +4,170 @@
+ 
+ ## Overview
+-Instant-NGP replaces the slow multi-layer perceptron (MLP) of standard Neural Radiance Fields (NeRF) with a multi-resolution hash-encoded feature grid to accelerate training and rendering while maintaining comparable visual quality [S1, S4]. It achieves a 1000–10000× training speedup by leveraging highly optimized GPU hash table lookups, allowing convergence in 2–5 minutes on a single GPU [S1]. Unlike frequency-based encodings that prioritize low-frequency shape capture, hash encoding facilitates both overall shape and local textures, preserving sharpness and fine details [S3].
++Instant-NGP replaces the slow multi-layer perceptron (MLP) of standard Neural Radiance Fields (NeRF) with a multi-resolution hash-encoded feature grid to accelerate training and rendering while maintaining comparable quality [S1, S3, S7]. It achieves a 1000–10000× training speedup, enabling convergence in 2–5 minutes on a single GPU, by leveraging highly optimized GPU hash table lookups to reduce MLP depth and width [S1]. Unlike frequency-based encodings that prioritize low-frequency shape capture, hash encoding facilitates both overall shape and local textures, outperforming vanilla NeRF in preserving sharpness and fine details [S3].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** 3D spatial coordinates $\mathbf{x}$ and view direction $\mathbf{d}$.
+-*   **Output:** Volume density $\sigma$ and RGB color $\mathbf{c}$.
++- **Input:** 3D spatial coordinates $\mathbf{x}$ and view direction $\mathbf{d}$. Auxiliary non-spatial dimensions $\xi$ (e.g., material parameters) may also be provided [S4].
++- **Output:** Volume density $\sigma$ and RGB color $\mathbf{c}$ [S5].
+ 
+ **Data Structures:**
+-1.  **Multi-resolution Hash Grid (MHG):** A set of $L$ hash tables, one for each resolution level $l \in \{0, \dots, L-1\}$.
+-    *   Each table maps 3D grid coordinates to feature vectors.
+-    *   Entry precision: Half-precision (2 bytes) for storage, with a master full-precision copy for stable mixed-precision updates [S4].
+-    *   Feature dimensions per lookup: $F=2$ [S4].
+-    *   Hash table size threshold: Performance remains constant for $T \le 2^{19}$ entries; beyond this, performance drops due to L2 cache limits (e.g., 6 MB on RTX 3090) where $2 \cdot T \cdot F > 6 \cdot 2^{20}$ bytes [S4].
+-2.  **Encoder MLP:** A small network processing the concatenated features.
+-    *   Architecture: 4-layer MLP with dimensions $32 \times 64$, $64 \times 64$, $64 \times 64$, $64 \times 8$ [S5].
+-    *   Input: 32-dimensional vector (concatenated multi-resolution hash features).
+-    *   Output: 8D feature vector $M_i$ and opacity $\alpha_i$ [S5].
+-    *   Activation: GELU [S2].
+-3.  **Decoder MLP:** A small network predicting color.
+-    *   Architecture: 3-layer MLP with dimensions $17 \times 16$, $16 \times 16$, $16 \times 3$ [S5].
+-    *   Input: 17D vector (8D spatial features $M_i$ + 9D view direction encoded via Spherical Harmonics) [S5].
+-    *   Output: 3D RGB color $\mathbf{c}_i$ [S5].
+-4.  **Density Mapping Layer:**
+-    *   For NeRF synthetic datasets: A tiny network with one hidden layer and 64 neurons [S2].
+-    *   For real-world 360 datasets: A linear transform from the feature vector to density [S2].
++1.  **Multi-resolution Hash Grid (MHG):** A set of $L$ hash tables, one per resolution level $l \in \{0, \dots, L-1\}$.
++    -   Each table maps 3D grid coordinates to feature vectors.
++    -   Entry precision: Half-precision (2 bytes) for storage, with a master full-precision copy for stable mixed-precision updates [S4].
++    -   Feature dimension per lookup: $F$. Optimal $F=2$ balances cache locality and memory coherence [S4].
++    -   Hash table size threshold: Performance remains constant for total entries $T \le 2^{19}$. Beyond this, performance drops due to L2 cache limits (e.g., 6 MB on RTX 3090) where $2 \cdot T \cdot F > 6 \cdot 2^{20}$ bytes [S4]. If voxel count exceeds $2^{19}$, positions are hashed to a one-dimensional table [S2].
++2.  **Encoder MLP:** Takes concatenated multi-scale features as input.
++    -   Architecture: 4-layer MLP with dimensions $32 \times 64$, $64 \times 64$, $64 \times 64$, $64 \times 8$ [S5].
++    -   Input: 32-dimensional vector (multiresolution hash encoded position) [S5].
++    -   Output: 8D feature vector $M_i$ and opacity $\alpha_i$ [S5].
++    -   Activation: GELU [S2].
++3.  **Density Mapping Layer:**
++    -   Real-world 360 dataset: Linear transform from feature vector to density [S2].
++    -   NeRF synthetic dataset: Tiny network with one hidden layer and 64 neurons [S2].
++4.  **Decoder MLP:**
++    -   Architecture: 3-layer MLP with dimensions $17 \times 16$, $16 \times 16$, $16 \times 3$ [S5].
++    -   Input: 17D vector (8D spatial features $M_i$ + 9D view direction $\mathbf{d}$ encoded via Spherical Harmonics) [S5].
++    -   Output: 3D RGB color $\mathbf{c}_i$ [S5].
++    -   *Note:* Some implementations use two hidden layers of width 64 with ReLU for non-NeRF tasks [S4].
+ 
+-**Algorithm Steps:**
+-1.  **Hash Encoding:** For each input position $\mathbf{x}$, compute the hash index for each resolution level $l$.
+-    *   The 3D space is subdivided at multiple resolutions.
+-    *   Grid coordinates are hashed to a 1D table. If the number of voxels exceeds $2^{19}$, positions are hashed to a 1D table [S2].
+-    *   Retrieve feature vectors from all $L$ levels.
+-2.  **Feature Concatenation:** Concatenate the feature vectors from all levels into a single input vector for the Encoder MLP.
+-3.  **Encoding:** Pass the concatenated features through the Encoder MLP to obtain the 8D feature vector $M_i$ and opacity $\alpha_i$ [S5].
+-    $$ E(\text{hash}(\mathbf{p}_i); \theta_E) \rightarrow M_i, \alpha_i $$
+-4.  **Directional Encoding:** Encode the view direction $\mathbf{d}$ using Spherical Harmonics (degree 4, resulting in 9 coefficients) [S5].
+-5.  **Decoding:** Concatenate $M_i$ and the SH-encoded direction to form a 17D vector. Pass it through the Decoder MLP to predict RGB color $\mathbf{c}_i$ [S5].
+-    $$ D(M_i, \text{SH}(\mathbf{d}_i); \theta_D) \rightarrow \mathbf{c}_i $$
+-6.  **Density Derivation:** Derive density $\sigma$ from the queried feature vector using the density mapping layer [S2].
+-7.  **Rendering:** Use standard volume rendering (ray marching) with the derived density and color [S1].
+-8.  **Training Optimization:**
+-    *   **Evaluation Order:** Evaluate hash tables level by level for a batch of inputs (all inputs for level 0, then level 1, etc.) to optimize GPU cache usage [S4].
+-    *   **Gradient Skipping:** Skip Adam steps for hash table entries with exactly 0 gradient, saving ~10% performance when gradients are sparse [S4].
+-    *   **Initialization:** MLP weights initialized via Glorot and Bengio [S4]; Hash table entries initialized from $U(-10^{-4}, 10^{-4})$ [S4].
+-    *   **Optimizer:** Adam with $\beta_1=0.9, \beta_2=0.99, \epsilon=10^{-15}$ [S4]. Weak L2 regularization ($10^{-6}$) applied to MLP weights, not hash entries [S4].
++**Numbered Steps:**
++1.  **Hash Encoding:** For each resolution level $l$, hash the input coordinate $\mathbf{x}$ to a table index. Retrieve the feature vector $\mathbf{f}_l$ from the hash table. Concatenate features from all levels to form the input vector for the Encoder MLP [S1, S4].
++2.  **Feature Extraction:** Pass the concatenated features through the Encoder MLP to obtain the 8D feature vector $M_i$ and opacity $\alpha_i$ [S5].
++3.  **Density Estimation:** Derive density $\sigma$ from $M_i$ using the density mapping layer (linear or tiny MLP) [S2].
++4.  **Color Prediction:** Encode view direction $\mathbf{d}$ using Spherical Harmonics (degree 4, yielding 9 coefficients) [S2, S5]. Concatenate $M_i$ and SH coefficients to form the 17D input for the Decoder MLP. Output RGB color $\mathbf{c}_i$ [S5].
++5.  **Rendering:** Use volume rendering (ray marching) with the estimated density and color to compute pixel colors [S1].
+ 
+ **Pseudocode:**
+ ```python
+-# Constants
+-L = 16  # Number of hash levels (example)
+-F = 2   # Feature dimensions per lookup
+-T_max = 2**19  # Cache threshold
++import math
+ 
+-# Data Structures
+-hash_tables = [EmptyHashTable(size=T_max) for _ in range(L)]
+-encoder_mlp = MLP(layers=[32, 64, 64, 64, 8], activation=GELU)
+-decoder_mlp = MLP(layers=[17, 16, 16, 3], activation=ReLU)
+-density_layer = TinyDensityNetwork()  # Or LinearTransform depending on dataset
++def hash_encode(x, hash_tables, num_levels, feature_dim):
++    """
++    Multi-resolution hash encoding.
++    x: (N, 3) input coordinates
++    hash_tables: List of L arrays, each of size T_l
++    num_levels: Number of resolution levels L
++    feature_dim: Feature dimension per level F
++    Returns: (N, L * F) concatenated features
++    """
++    features = []
++    # Evaluate hash tables level by level for cache optimization [S4]
++    for l in range(num_levels):
++        table = hash_tables[l]
++        # Hash function: map 3D coord to table index
++        # Standard implementation uses a simple hash function (e.g., XOR folding)
++        # and handles collisions via probing or chaining.
++        # Here we assume a direct hash function h(x, l) -> index
++        indices = compute_hash_indices(x, l)
++        
++        # Gather features from the table
++        # Table entries are stored as half-precision, but read as float for computation
++        # In practice, this is done via CUDA gather instructions
++        level_features = gather_features(table, indices, feature_dim)
++        features.append(level_features)
++    
++    # Concatenate features from all levels
++    return torch.cat(features, dim=-1)
+ 
+-# Initialization
+-for table in hash_tables:
+-    table.init_uniform(-1e-4, 1e-4)
+-encoder_mlp.init_glorot()
+-decoder_mlp.init_glorot()
++def encoder_mlp(features):
++    """
++    Encoder MLP: 4 layers, dimensions 32->64->64->64->8
++    Input: 32D (L=16 levels, F=2)
++    Output: 8D feature vector + opacity
++    """
++    # Layer 1: 32 -> 64, GELU
++    x = torch.nn.functional.gelu(torch.nn.functional.linear(features, W1, b1))
++    # Layer 2: 64 -> 64, GELU
++    x = torch.nn.functional.gelu(torch.nn.functional.linear(x, W2, b2))
++    # Layer 3: 64 -> 64, GELU
++    x = torch.nn.functional.gelu(torch.nn.functional.linear(x, W3, b3))
++    # Layer 4: 64 -> 8
++    out = torch.nn.functional.linear(x, W4, b4)
++    return out[:, :8], out[:, 8:] # Feature vector, Opacity
+ 
+-def hash_encode(positions, levels):
++def decoder_mlp(spatial_features, view_direction):
+     """
+-    Encodes positions using multi-resolution hash grid.
+-    Returns concatenated features for all levels.
++    Decoder MLP: 3 layers, dimensions 17->16->16->3
++    Input: 17D (8D spatial + 9D SH direction)
++    Output: 3D RGB color
+     """
+-    all_features = []
+-    # Evaluate level by level for cache efficiency [S4]
+-    for l in range(levels):
+-        # Compute grid coordinates for level l
+-        grid_coords = compute_grid_coords(positions, resolution=l)
+-        # Hash coordinates to table indices
+-        indices = hash_function(grid_coords)
+-        # Lookup features from the hash table
+-        features = hash_tables[l].lookup(indices)
+-        all_features.append(features)
+-    # Concatenate features from all levels
+-    # Input dimension becomes L * F
+-    return concatenate(all_features, axis=-1)
++    # Concatenate spatial features and SH-encoded direction
++    input_vec = torch.cat([spatial_features, view_direction], dim=-1)
++    
++    # Layer 1: 17 -> 16, ReLU (or GELU depending on variant)
++    x = torch.nn.functional.relu(torch.nn.functional.linear(input_vec, W5, b5))
++    # Layer 2: 16 -> 16, ReLU
++    x = torch.nn.functional.relu(torch.nn.functional.linear(x, W6, b6))
++    # Layer 3: 16 -> 3
++    color = torch.nn.functional.linear(x, W7, b7)
++    return color
+ 
+-def encode_and_decode(positions, directions):
++def spherical_harmonics_encode(direction, degree=4):
+     """
+-    Full forward pass of Instant-NGP.
++    Encode view direction using Spherical Harmonics.
++    Degree 4 yields 9 coefficients.
++    """
++    # Standard SH basis functions for degree 4
++    # This is a fixed mathematical transformation, not learned
++    return compute_sh_basis(direction, degree)
++
++def train_step(x, d, hash_tables, encoder_weights, decoder_weights, density_weights):
++    """
++    Single training step.
+     """
+     # 1. Hash Encoding
+-    # Input to encoder is 32D (L=16, F=2) [S5]
+-    encoded_features = hash_encode(positions, L)
++    features = hash_encode(x, hash_tables, num_levels=16, feature_dim=2)
+     
+-    # 2. Encoder MLP
+-    # Output: 8D feature vector + opacity
+-    feature_vector, opacity = encoder_mlp(encoded_features)
++    # 2. Encoder
++    spatial_feat, opacity = encoder_mlp(features)
+     
+-    # 3. Directional Encoding
+-    # Spherical Harmonics degree 4 -> 9 coefficients [S5]
+-    sh_coeffs = spherical_harmonic_encode(directions, degree=4)
++    # 3. Density
++    density = density_mapping(spatial_feat, density_weights)
+     
+-    # 4. Decoder Input
+-    # Concatenate 8D feature + 9D SH = 17D [S5]
+-    decoder_input = concatenate([feature_vector, sh_coeffs], axis=-1)
+-    
+-    # 5. Decoder MLP
+-    # Output: 3D RGB color
+-    color = decoder_mlp(decoder_input)
+-    
+-    # 6. Density Mapping
+-    # Derived from feature vector (not explicitly passed to decoder)
+-    density = density_layer(feature_vector)
++    # 4. Decoder
++    sh_dir = spherical_harmonics_encode(d)
++    color = decoder_mlp(spatial_feat, sh_dir)
+     
+     return color, density, opacity
+ 
+-def train_step(positions, directions, target_colors, target_opacities):
+-    """
+-    Training step with gradient skipping optimization.
+-    """
+-    # Forward pass
+-    colors, densities, opacities = encode_and_decode(positions, directions)
+-    
+-    # Compute loss
+-    loss = compute_loss(colors, target_colors)
+-    
+-    # Backward pass
+-    gradients = compute_gradients(loss)
+-    
+-    # Gradient Skipping: Skip updates for hash entries with 0 gradient [S4]
+-    for l in range(L):
+-        zero_grad_indices = find_zero_gradients(gradients, hash_tables[l])
+-        hash_tables[l].skip_update(zero_grad_indices)
+-        
+-    # Update parameters
+-    optimizer.step(encoder_mlp, decoder_mlp, hash_tables, density_layer)
++# Initialization
++# Weights initialized via Glorot uniform [S4]
++# Hash table entries initialized via U(-10^-4, 10^-4) [S4]
++# Optimizer: Adam (beta1=0.9, beta2=0.99, eps=10^-15) [S4]
++# L2 regularization (10^-6) on MLP weights, NOT hash table entries [S4]
++# Gradient skipping for zero gradients in hash table [S4]
+ ```
++
++**Parameters:**
++-   **Hash Table Size ($T$):** Optimal performance for $T \le 2^{19}$ [S4].
++-   **Feature Dimensions ($F$):** 2 [S4].
++-   **Number of Levels ($L$):** 16 for NeRF synthetic, 18 for real-world 360 [S2].
++-   **MLP Width:** 64 neurons for hidden layers [S4, S5].
++-   **Learning Rate:** 0.01 for Adam [S2].
++-   **Activation:** GELU [S2].
++
++**Edge Cases and Pitfalls:**
++-   **Hash Collisions:** Multi-resolution structure helps eliminate ambiguity from hash conflicts [S7].
++-   **Surface Accuracy:** Moderate surface accuracy because it uses a faster density representation rather than explicit surface geometry (SDF) [S1].
++-   **Soft Tissues:** NeRF techniques are sensitive to tissue type; soft tissues have lower contrast and homogeneous textures, leading to artifact-free but potentially less detailed or slightly blurred reconstructions [S3].
+ 
+ ## Subtopics
+ 
++### [Multi-resolution Hash Encoding with Simplex Structure](9584-multi-resolution-hash-encoding-with-simplex-structure.md)
++Multi-resolution Hash Encoding with Simplex Structure replaces the explicit hypercube-based grid of Instant-NGP with a simplex-based structure, using hash tables to store learnable feature vectors at simplex vertices across multiple resolution levels. It solves the memory inefficiency of dense grids in simplicial domains by storing only accessed vertices, avoiding the overhead of explicit ordering for unused vertices. It sets itself apart from standard Instant-NGP by using barycentric interpolation within skewed simplices rather than trilinear interpolation within hypercubes.
++
+ ### F-Hash
+-An extension of multi-resolution hash encoding to four dimensions using Tesseract grids and collision-free minimal perfect hashing [S8, unofficial]. It achieves 10–100× faster convergence than standard hash encoding (e.g., 47.1 dB in 7.4 minutes vs. 23.7 dB in 45.7 minutes on combustion data) with compression ratios of 9.5–55.2× [S8, unofficial].
++F-Hash extends multi-resolution hash encoding to four dimensions using Tesseract grids and collision-free minimal perfect hashing for faster convergence [S8, unofficial]. It achieves 10–100× faster convergence than standard hash encoding (e.g., 47.1 dB in 7.4 minutes vs. 23.7 dB in 45.7 minutes on combustion data) with compression ratios of 9.5–55.2× [S8, unofficial].
+ 
+ ## Operating characteristics
+-*   **Training Speed:** 1000–10000× faster than NeRF, converging in 2–5 minutes on a single GPU [S1]. Converges to 95% of final PSNR in 2.4 ± 0.4 minutes on Blender scenes [S1].
+-*   **Rendering Speed:** 2.4 ± 0.4 FPS on an A100 GPU at 1080p [S1]. This is 12× faster than NeRF (0.2 FPS) but 28× slower than 3D Gaussian Splatting (68.4 FPS) [S1].
+-*   **Quality:** On NeRF Synthetic (Blender) dataset, PSNR = 32.6 ± 0.4 dB [S1]. On Mip-NeRF 360 unbounded dataset, PSNR = 26.4 ± 0.6 dB [S1]. In medical imaging, it outperforms vanilla NeRF and FDK in SSIM, LPIPS, and GMSD metrics [S3].
+-*   **Memory:** Hash table size $T$ affects performance. Performance is stable for $T \le 2^{19}$ but drops significantly beyond due to L2 cache limits [S4].
+-*   **Strengths:** Extremely fast training, good preservation of fine details and sharpness compared to frequency-based methods [S3].
+-*   **Limitations:** Moderate surface accuracy due to faster density representation rather than explicit surface geometry [S1]. Performance sensitive to hash table size relative to GPU cache [S4].
++-   **Training Speed:** 1000–10000× faster than NeRF, converging in 2–5 minutes on a single GPU (e.g., A100) [S1]. Converges to 95% of final PSNR in 2.4 ± 0.4 minutes on Blender scenes [S1].
++-   **Rendering Speed:** 2.4 ± 0.4 FPS at 1080p on an A100 GPU [S1]. This is 12× faster than NeRF (0.2 FPS) but 28× slower than 3D Gaussian Splatting (68.4 FPS) [S1].
++-   **Quality:** On NeRF Synthetic (Blender) dataset, PSNR = 32.6 ± 0.4 dB [S1]. On Mip-NeRF 360 unbounded dataset, PSNR = 26.4 ± 0.6 dB [S1]. In medical imaging (Chest dataset), 3D SSIM = 0.943 vs. 0.885 for vanilla NeRF [S3].
++-   **Memory:** Hash table entries stored at half precision (2 bytes) to optimize performance [S4]. Performance degrades if total hash table size exceeds L2 cache capacity (e.g., 6 MB on RTX 3090) [S4].
++-   **Strengths:** Extremely fast training, suitable for rapid prototyping and real-time feedback during acquisition [S1]. Preserves fine details and sharp edges better than frequency-based encodings [S3].
++-   **Limitations:** Moderate surface accuracy compared to SDF-based methods like NeuS [S1]. Rendering speed is significantly lower than explicit methods like 3DGS [S1]. Performance sensitive to hash table size relative to GPU cache [S4].
+ 
+ ## Background
+-Instant-NGP was introduced by Müller et al. in 2022 [S4]. It was developed to address the slow training and rendering speeds of NeRF by replacing the MLP with a multi-resolution hash-encoded feature grid [S1]. The method was implemented in CUDA and integrated with the tiny-cuda-nn framework to optimize inference and backpropagation [S4]. It has been widely adopted for rapid prototyping and applications requiring immediate visual feedback [S1].
++Instant-NGP (Instant Neural Graphics Primitives) was introduced by Müller et al. in 2022 [S4]. It was developed to address the slow training and rendering speeds of NeRF by replacing the MLP with a multi-resolution hash-encoded feature grid [S1]. The method leverages CUDA and the tiny-cuda-nn framework for optimized inference and backpropagation [S4]. It has been widely adopted for rapid neural rendering and is used in various applications including medical image reconstruction, where it outperforms traditional methods like FDK and vanilla NeRF in preserving structural details [S3].
+ 
+ ## Sources

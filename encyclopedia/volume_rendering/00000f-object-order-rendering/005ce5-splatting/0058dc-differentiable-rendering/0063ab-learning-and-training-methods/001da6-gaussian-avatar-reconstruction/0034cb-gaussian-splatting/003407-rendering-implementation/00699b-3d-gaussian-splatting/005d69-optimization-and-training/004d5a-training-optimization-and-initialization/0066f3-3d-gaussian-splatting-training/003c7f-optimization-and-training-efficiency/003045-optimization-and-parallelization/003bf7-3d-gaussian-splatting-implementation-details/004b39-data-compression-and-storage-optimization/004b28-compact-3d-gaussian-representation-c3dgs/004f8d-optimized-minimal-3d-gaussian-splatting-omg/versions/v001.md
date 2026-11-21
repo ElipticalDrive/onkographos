@@ -1,0 +1,96 @@
+# Optimized Minimal 3D Gaussian Splatting (OMG)
+
+## Overview
+Optimized Minimal 3D Gaussian Splatting (OMG) is a method for compact 3D Gaussian representation that retains per-Gaussian parameterization for geometry (scale and rotation) to handle sparsity, while using a small neural field and Sub-Vector Quantization (SVQ) for appearance features to exploit local continuity [S1]. It achieves state-of-the-art storage compression (e.g., >300× relative to 3DGS in the bicycle scene) while maintaining high visual fidelity, building on [Compact 3D Gaussian Representation (C3DGS)](12927-compact-3d-gaussian-representation-c3dgs.md) by addressing the weakness of neural fields in sparse settings where neighboring Gaussians are further apart [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $N$ 3D Gaussians initialized from training data.
+*   **Output:** A compressed representation consisting of quantized geometric attributes, quantized appearance features, and a set of pruned Gaussians, stored in a single file.
+
+**Data Structures:**
+1.  **Gaussian Attributes:**
+    *   Center position: $p \in \mathbb{R}^{N \times 3}$
+    *   Opacity: $o \in [0, 1]^N$
+    *   3D Scale: $s \in \mathbb{R}^{N \times 3}$
+    *   Rotation (Quaternion): $r \in \mathbb{R}^{N \times 4}$
+    *   SH Coefficients (0-degree, static color): $h^{(0)} \in \mathbb{R}^{N \times 3}$
+    *   SH Coefficients (1-3 degrees, view-dependent color): $h^{(1,2,3)} \in \mathbb{R}^{N \times 45}$
+2.  **Learned Features:**
+    *   Static feature: $T \in \mathbb{R}^{N \times D}$
+    *   View-dependent feature: $V \in \mathbb{R}^{N \times D}$
+    *   $D$ is the feature dimensionality.
+3.  **SVQ Codebooks:**
+    *   For each sub-vector partition $m \in \{1, \dots, M\}$, a codebook $C^{(m)}$ of size $B \times L$.
+    *   $M$ is the number of sub-vectors, $L$ is the sub-vector length, $B$ is the codebook size.
+
+**Numbered Steps:**
+
+1.  **Initialization:** Initialize the Gaussian set using K-means clustering [S1].
+2.  **Feature Learning:** Learn per-Gaussian static feature $T$ and view-dependent feature $V$ [S1].
+3.  **Space Feature Computation:** For each Gaussian $n$, compute the space feature $F_n$ based on its center position $p_n$:
+    $$F_n = \text{MLP}_s(\gamma(p_n))$$
+    where $\gamma(\cdot)$ is positional encoding and $\text{MLP}_s(\cdot)$ is a neural network [S1].
+4.  **Appearance Generation:** Compute static color, opacity, and view-dependent color using the learned features and space feature:
+    $$h^{(0)}_n = \text{MLP}_t(\text{cat}(T_n, F_n))$$
+    $$o_n = \text{MLP}_o(\text{cat}(T_n, F_n))$$
+    $$h^{(1,2,3)}_n = \text{MLP}_v(\text{cat}(V_n, F_n))$$
+    where $\text{cat}(\cdot, \cdot)$ denotes concatenation, and $\text{MLP}_t, \text{MLP}_o, \text{MLP}_v$ are MLPs for static color, opacity, and view-dependent color, respectively [S1].
+5.  **Sub-Vector Quantization (SVQ) Application:**
+    *   **Geometry:** Apply SVQ to geometric attributes $s_n$ and $r_n$ to get quantized vectors $\hat{s}_n$ and $\hat{r}_n$ for rendering [S1].
+    *   **Appearance:** Concatenate appearance features $T_n$ and $V_n$. Apply SVQ to the concatenated vector. Split the result back into quantized components $\hat{T}_n$ and $\hat{V}_n$ to replace $T_n$ and $V_n$ in Equations (3) and (4) [S1].
+    *   **SVQ Formulation:** For a vector $z \in \mathbb{R}^{ML}$, split into $M$ sub-vectors $z_m \in \mathbb{R}^L$. The quantized vector $\hat{z}$ is:
+        $$\hat{z} = q(z; M) = \text{cat}(C^{(1)}[i_1], \dots, C^{(M)}[i_M])$$
+        where the index for sub-vector $m$ is selected as:
+        $$i_m = \arg \min_j \|z_m - C^{(m)}[j]\|_2^2, \quad m \in \{1, \dots, M\}$$
+        [S1].
+6.  **Training Strategy:**
+    *   Train using rendering loss.
+    *   In the final 1,000 iterations, freeze the selected codebook indices and fine-tune only the codebook using the rendering loss [S1].
+7.  **Importance Scoring and Pruning:**
+    *   **Base Importance Score ($\bar{I}_i$):** Determine if Gaussian $i$ is the dominant contributor for at least one ray $\rho$. Let $w_{i,\rho}$ be the blending weight for ray $\rho$ and $N_R$ be the total number of training rays:
+        $$\bar{I}_i = \begin{cases} \sum_{\rho=1}^{N_R} w_{i,\rho} & \text{if } \exists \rho \in \{1, \dots, N_R\} \text{ s.t. } w_{i,\rho} = \max_j w_{j,\rho} \\ 0 & \text{otherwise} \end{cases}$$
+        [S1].
+    *   **Local Distinctiveness:** Approximate neighbor selection by sorting Gaussians in Morton order and selecting adjacent indices as local neighbors. Compute the mean L1 distance to $K$-nearest neighbors $N_i^K$:
+        $$\text{Distinctiveness}_i = \frac{1}{D} \sum_{j \in N_i^K} \|T_i - T_j\|_1$$
+        [S1].
+    *   **Final Importance Score ($I_i$):**
+        $$I_i = \bar{I}_i \left( \frac{1}{D} \sum_{j \in N_i^K} \|T_i - T_j\|_1 \right)^\lambda$$
+        where $\lambda$ is a scaling factor [S1].
+    *   **Thresholding:** Remove low-importance Gaussians using CDF-based thresholding with threshold $\tau$ [S1].
+8.  **Post-processing and Storage:**
+    1.  Apply 16-bit quantization to position $p$ and compress with G-PCC [S1].
+    2.  Huffman encode SVQ indices [S1].
+    3.  Store all components in a single file with LZMA compression [S1].
+
+**Rendering Equation:**
+To render an image, Gaussians are depth-sorted. For a pixel coordinate $x$:
+$$C(x) = \sum_{k=1}^{N(x)} c_k \alpha_k(x) \prod_{j=1}^{k-1} (1 - \alpha_j(x))$$
+where $c_k$ is color, $\alpha_k(x)$ is 2D opacity, and $N(x)$ is the number of Gaussians around $x$ [S1].
+The 2D opacity for Gaussian $n$ is:
+$$\alpha_n(x) = o_n \exp\left(-\frac{1}{2} (x - p'_n)^T \Sigma'_n (x - p'_n)\right)$$
+where $p'_n$ and $\Sigma'_n$ are the projected center and covariance [S1].
+
+**Parameters:**
+*   Threshold $\tau$ values for OMG variants: XS=0.96, X=0.98, M=0.99, L=0.999, XL=0.9999 [S1].
+*   $K$: Number of nearest neighbors for distinctiveness calculation. Not given in the sources.
+*   $\lambda$: Scaling factor for distinctiveness. Not given in the sources.
+*   $D$: Feature dimensionality. Not given in the sources.
+*   $M, L, B$: SVQ parameters (sub-vectors, length, codebook size). Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Sparsity:** Neural fields assume local continuity, which weakens as Gaussians become sparser. OMG mitigates this by retaining per-Gaussian attributes for geometry and using SVQ for appearance [S1].
+*   **Redundancy:** Naive thresholding based on blending weights can remove all similar Gaussians simultaneously or retain redundant ones. The local distinctiveness metric addresses this [S1].
+*   **Training Overhead:** Updating indices and codes at every iteration increases training time. Freezing indices in the final 1K iterations reduces this overhead [S1].
+
+## Operating characteristics
+*   **Storage:** OMG-XS achieves nearly 50% reduction in storage compared to LocoGS-S on Mip-NeRF 360 while retaining PSNR and SSIM [S1]. In the bicycle scene, OMG-XS achieves over 300× compression relative to 3DGS [S1].
+*   **Performance:** OMG consistently shows the smallest storage requirements while maintaining high performance across Mip-NeRF 360, Tanks&Temples, and Deep Blending datasets [S1].
+*   **Strengths:** Effective in extreme compression scenarios; retains high visual fidelity despite reducing Gaussians by an additional 20% compared to Mini-Splatting [S1].
+*   **Limitations:** Requires post-processing steps (G-PCC, Huffman, LZMA) for final storage [S1].
+
+## Background
+OMG was proposed to address the challenges of representing minimal Gaussian primitives efficiently. It builds on the observation that existing neural field approaches weaken in sparse settings, while disregarding continuity leads to inefficient representation [S1]. The method was evaluated on real-world datasets including Mip-NeRF 360, Tanks&Temples, and Deep Blending [S1].
+
+## Sources
+[S1] Optimized Minimal 3D Gaussian Splatting, https://doi.org/10.52202/085713-4534, fetched 2026-10-30

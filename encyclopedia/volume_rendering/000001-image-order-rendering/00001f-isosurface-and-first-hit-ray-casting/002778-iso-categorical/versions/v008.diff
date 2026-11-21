@@ -1,0 +1,106 @@
+--- v007.md
++++ v008.md
+@@ -10,5 +10,5 @@
+ **Data Structures:**
+ - The volume is stored as a 3D grid of integer labels [G].
+-- Clipping planes are defined in world space as pairs of points and outward normals [G].
++- Clipping planes are defined in world space as a point and an outward normal vector [G].
+ - The volume object provides `origin` (3D vector), `spacing` (3D vector), `max_depth` (float), `get_label(voxel)` (int), `get_label_color(label)` (color), and `background_color` (color) [G].
+ 
+@@ -16,16 +16,19 @@
+ 1. **Ray Definition:** Define the view ray $r(t) = \mathbf{o} + t\mathbf{d}$ for the current pixel [G].
+ 2. **Initial March:** Advance along the ray using a fixed step size (default `relative_step_size` = 0.8 voxel) until the first sample point is not clipped by the viewing frustum or clipping planes [S1, unofficial].
+-3. **Exact Voxel Traversal:** From the first valid sample point, perform an exact voxel traversal using the Amanatides & Woo algorithm [S1, unofficial]. This walks through every voxel the ray passes through in order, ensuring no voxel is skipped regardless of the step size [S1, unofficial].
+-4. **Ray Shortening:** Shorten the ray segment by a tiny margin at both ends to prevent rounding errors from reading neighboring voxels when a clipping plane starts exactly on a voxel boundary [S1, unofficial].
+-5. **Label Detection:** During traversal, check each voxel for a non-transparent label. Stop at the first voxel containing a non-transparent label [S1, unofficial].
+-6. **Clipping Evaluation:** Evaluate clipping planes at the exact entry and exit points of each voxel to ensure cut surfaces remain in their correct positions [S1, unofficial].
++3. **Ray Shortening:** Shorten the ray segment by a tiny margin at both ends to prevent rounding errors from reading neighboring voxels when a clipping plane starts exactly on a voxel boundary [S1, unofficial].
++4. **Exact Voxel Traversal:** From the first valid sample point, perform an exact voxel traversal using the Amanatides & Woo algorithm [S1, unofficial]. This walks through every voxel the ray passes through in order, ensuring no voxel is skipped regardless of the step size [S1, unofficial].
++5. **Clipping Evaluation:** Evaluate clipping planes at the exact entry and exit points of each voxel to ensure cut surfaces remain in their correct positions [S1, unofficial].
++6. **Label Detection:** During traversal, check each voxel for a non-transparent label. Stop at the first voxel containing a non-transparent label [S1, unofficial].
+ 7. **Depth Calculation:** Set the pixel's depth to the point where the ray enters the hit voxel, expressed in data coordinates. This avoids the previous error where depth was shifted by half a voxel along each axis, causing incorrect occlusion between layers with different scales [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++import math
++
+ def render_iso_categorical(ray_origin, ray_direction, volume, clipping_planes, step_size=0.8):
+     # 1. Initial march to find first unclipped sample
+     t = 0.0
+-    while t < volume.max_depth:
++    epsilon = 1e-6
++    while t < volume.max_depth - epsilon:
+         pos = ray_origin + t * ray_direction
+         if any(dot(pos - plane_point, plane_normal) < 0 for plane_point, plane_normal in clipping_planes):
+@@ -33,31 +36,53 @@
+             continue
+         break
+-    
+-    # 2. Exact voxel traversal (Amanatides & Woo)
+-    epsilon = 1e-6
++
++    # 2. Amanatides & Woo initialization
+     t_end = volume.max_depth - epsilon
+-    
+-    # Initialize Amanatides & Woo state at current t
+-    voxel = floor((ray_origin + t * ray_direction - volume.origin) / volume.spacing)
+-    t_max = (volume.origin + (voxel + 0.5) * volume.spacing - (ray_origin + t * ray_direction)) / ray_direction
+-    t_delta = volume.spacing / ray_direction
+-    
++    current_pos = ray_origin + t * ray_direction
++    voxel = [math.floor((current_pos[i] - volume.origin[i]) / volume.spacing[i]) for i in range(3)]
++
++    t_max = [0.0, 0.0, 0.0]
++    t_delta = [0.0, 0.0, 0.0]
++    for i in range(3):
++        voxel_min = volume.origin[i] + voxel[i] * volume.spacing[i]
++        voxel_max = voxel_min + volume.spacing[i]
++        if ray_direction[i] > 0:
++            t_max[i] = (voxel_max - current_pos[i]) / ray_direction[i]
++        elif ray_direction[i] < 0:
++            t_max[i] = (voxel_min - current_pos[i]) / ray_direction[i]
++        else:
++            t_max[i] = float('inf')
++        t_delta[i] = volume.spacing[i] / abs(ray_direction[i]) if ray_direction[i] != 0 else float('inf')
++
+     current_t = t
+     while current_t < t_end:
+-        # Check current voxel for non-transparent label
+-        label = volume.get_label(voxel)
+-        if label != 0:
+-            entry_point = ray_origin + current_t * ray_direction
+-            if all(dot(entry_point - plane_point, plane_normal) >= 0 for plane_point, plane_normal in clipping_planes):
+-                depth = (entry_point - volume.origin) / volume.spacing
++        # Compute entry and exit t for this voxel
++        t_entry = current_t
++        t_exit = min(t_max)
++
++        # Evaluate clipping planes at entry and exit points
++        entry_point = ray_origin + t_entry * ray_direction
++        exit_point = ray_origin + t_exit * ray_direction
++        inside = all(dot(entry_point - plane_point, plane_normal) >= 0 and
++                     dot(exit_point - plane_point, plane_normal) >= 0
++                     for plane_point, plane_normal in clipping_planes)
++
++        if inside:
++            label = volume.get_label(voxel)
++            if label != 0:
++                # 3. Depth calculation in data coordinates
++                depth = [(entry_point[i] - volume.origin[i]) / volume.spacing[i] for i in range(3)]
+                 return volume.get_label_color(label), depth
+-        
++
+         # Advance to next voxel
+-        axis = argmin(t_max)
++        axis = min(range(3), key=lambda i: t_max[i])
+         current_t = t_max[axis]
+         t_max[axis] += t_delta[axis]
+         voxel[axis] += 1
+-    
++
+     return volume.background_color, None
++
++def dot(a, b):
++    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+ ```
+ 

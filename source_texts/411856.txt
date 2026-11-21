@@ -1,0 +1,172 @@
+Feature Voxel raymarching is currently performed in a coordinate space that encompasses the entire voxel shape. This results in precision problems if the voxel cell size is too small relative to the shape. Precision problems are most lik...
+
+Relative-to-eye rendering for voxels · Issue #12061 · CesiumGS/cesium · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Relative-to-eye rendering for voxels #12061
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#12933
+Closed
+Relative-to-eye rendering for voxels#12061
+#12933
+Copy link
+Assignees
+Labels
+category - memory/performancecategory - voxelstype - enhancement
+Description
+jjhembd
+opened on Jul 1, 2024
+Issue body actions
+Feature
+Voxel raymarching is currently performed in a coordinate space that encompasses the entire voxel shape. This results in precision problems if the voxel cell size is too small relative to the shape.
+Precision problems are most likely to occur where:
+The number of samples is very large, or
+The data is confined to a small fraction of the shape, as is common in smaller datasets rendered using the ELLIPSOID shape.
+A better option would be to march the ray in eye coordinates, then convert to a perturbation of the shape coordinates relative to the eye position. This would enable us to render massive geospatial datasets as voxels.
+Current approach
+At each step, we compute:
+The ray position in "UV" space. This is a Cartesian space, where the shape is contained within 0 to 1.
+The ray position in "shape UV" space. For BOX shape, this is a simple scalar. For CYLINDER the Cartesian "UV" coordinates are converted to vec3(radius, height, angle). For ELLIPSOID the output is vec3(longitude, latitude, altitude).
+The Jacobian matrix, built from the partial derivatives of the coordinate transform in step 2.
+In code form:
+```
+    vec3 positionUv = u_cameraPositionUv + currentT * viewDirUv;
+    PointJacobianT pointJacobian = convertUvToShapeUvSpaceDerivative(positionUv);
+```
+The ray position in "shape UV" space is then used to look up the appropriate value from the input voxel data.
+Problems with current approach
+If an individual voxel cell is small relative to the size of the shape, the difference between the coordinates of adjacent voxels can be too small to represent in a single precision floating point number (as used on the GPU).
+For example, suppose a voxel dataset has 2 meter sample spacing, but is rendered using the ELLIPSOID shape. Adjacent voxel cells (with different data values) could have longitude coordinates as follows (after scaling to [0, 1] "UV" space):
+0.70000002
+0.70000007
+However, in the single precision floating point calculations on the GPU, both of these numbers will be stored as the same value. The renderer will therefore look up the same value from the input and render both cells with the same color.
+Proposed approach
+Store the camera position in "shape UV" coordinates as a uniform, split into two vec3s representing the high- and low-significance bits. Then, during ray marching,
+Compute the ray position in eye coordinates, as a single precision vec3.
+Convert the eye coordinate position to a perturbation of "shape UV" coordinates relative to the camera position, as a single-precision vec3. For BOX and CYLINDER, this conversion will be exact. For ELLIPSOID, the conversion will use approximations based on the local curvature at the camera position, similar to our approach for vertical exaggeration of 3D Tiles.
+Add the perturbation to the camera position uniform to obtain a voxel coordinate, as two vec3s representing high- and low-significance bits. (When zoomed close to a small voxel cell, the single-precision perturbation will only affect the low-significance bits of the camera. When zoomed out, the low-precision bits will be inaccurate, but the inaccuracy will be negligible at that scale--we will only be rendering the lower LODs from the input data.)
+Use the two-part voxel coordinate to traverse the octree and find the appropriate sample from the input data.
+Required changes
+Some of the harder parts of this approach include:
+Replicating the current glsl convertUvToShapeUvSpaceDerivative methods in JavaScript, to compute the camera position uniform on the CPU.
+Modifying the traversal in Octree.glsl to use a two-part coordinate with high and low bits.
+Activity
+jjhembd
+added
+type - enhancement
+category - memory/performance
+category - voxels
+on Jul 1, 2024
+ggetz
+assigned
+jjhembd
+on Jul 10, 2025
+jjhembd commented on Jul 31, 2025
+jjhembd
+on Jul 31, 2025
+ContributorAuthor
+More actions
+Step 1 is to set 2 uniforms containing low- and high-precision bits for the camera position.
+Existing RTE code
+We have an existing EncodedCartesian class that computes low- and high-bits for position vectors. This follows the strategy laid out in an old blog post. It assumes a pre-determined fixed precision, with an accuracy of approximately 1cm. The setup is optimized for use with vertex buffers containing high- and low-bits for the model position.
+Voxel datasets may need higher precisions in some views, such as when zoomed in close to a dataset with <1m cell size. Also, voxel rendering does not use vertex buffers for the model positions—instead, the shape is defined implicitly. For these reasons, I don't think the EncodedCartesian approach is appropriate for voxels.
+Proposed tile coordinate approach
+The implicit tiling used in the 3DTILES_content_voxels extension to 3D Tiles suggests a different approach: Define the camera position as a tile coordinate in two parts:
+uniform ivec4 cameraTileCoordinate: the x, y, z indices of the tile containing the camera position, along with the level of detail at which the indices are defined, stored in the .w component.
+uniform vec3 cameraTileUv: The position of the camera within the specified tile, stored as a fractional UV-like value between 0.0 and 1.0
+Nuances
+The camera position may be well outside the bounds of the tileset. The indices of the (non-existent) "tile containing the camera" may be negative for some views. However, for rendering purposes, the number should still be useful.
+The level of detail for this camera coordinate is somewhat arbitrary. Practically speaking, it can usually be defined at the maximum level of detail for the tileset. See VoxelProvider.availableLevels. The exception might be at camera positions very far away from the tileset, where a lower level-of-detail might be required to prevent the tile indices from overflowing the ivec4 coordinate.
+Precision discussion
+For a standard ivec4 camera tile coordinate, we will have 31 bits of precision (plus a sign bit). This could potentially divide the Earth and even the atmosphere and lower satellite orbits into ~1cm tiles. However, most real-world tilesets, even with global coverage, will have 23 or fewer availableLevels, with smallest tile dimensions ~2-4m.
+Individual tiles might have 20-40 samples along each dimension, for ~10cm sample sizes. At first glance, this seems like an under-utilization of the 23 bits of precision in vec3 cameraTileUv. However, we need precisions much higher than a sample size, so that individual voxel samples can appear as sharply-defined cells at close zooms. Suppose a tileset has 100m samples, with 40 samples per tile (4km tile size). The cameraTileUv coordinate will have <1mm precision, allowing for sharp rendering of voxel edges without jitter as the camera moves.
+jjhembd commented on Aug 13, 2025
+jjhembd
+on Aug 13, 2025
+ContributorAuthor
+More actions
+Two related issues uncovered during this work:
+Clipping planes matrix is not consistent between VoxelPrimitive and Cesium3DTiles. Use local coordinates for voxel clipping #12813. Fixing this will be a breaking change. It should be done as part of the RTE work, since the clipping plane code will be reworked anyway to use eye coordinates.
+Vertical exaggeration broken for Voxel datasets with ELLIPSOID shape #12811. This is a bug fix, not necessarily a blocker for the RTE work.
+jjhembd commented on Aug 27, 2025
+jjhembd
+on Aug 27, 2025
+ContributorAuthor
+More actions
+Here is a Sandcastle example using procedural data to demonstrate the precision problem in BOX-shaped voxels. I see problems starting around the 10th level of detail, when voxel samples are 1 / 2^13 of the full shape size.
+When zoomed out, there is no problem:
+Zooming in:
+jjhembd commented on Sep 3, 2025
+jjhembd
+on Sep 3, 2025
+Last edited by jjhembd
+ContributorAuthor
+More actions
+Update: here is a zoomed in view from the latest commit on the voxel-rte branch:
+Comparing to main:
+I'll update with links tomorrow, after I merge main so both examples are using the same version of Sandcastle.
+👍React with 👍1Reacted by Sean Lilley
+jjhembd commented on Sep 3, 2025
+jjhembd
+on Sep 3, 2025
+ContributorAuthor
+More actions
+Links for the above screenshots:
+Sandcastle in voxel-rte branch
+Sandcastle in main branch
+jjhembd commented on Sep 12, 2025
+jjhembd
+on Sep 12, 2025
+Last edited by jjhembd
+ContributorAuthor
+More actions
+For cylindrical voxels, here is a zoomed-in view from the main branch:
+In the voxel-rte branch:
+Sandcastle in main branch.
+Sandcastle in the voxel-rte branch
+The above images are at LOD 14, instead of LOD 20 as in the BOX example. There is a slight angular difference between the branches which makes closer comparisons difficult. I am working to verify which one is more correct.
+❤️React with ❤️2Reacted by Gabby Getz and Sean Lilley
+jjhembd commented on Sep 24, 2025
+jjhembd
+on Sep 24, 2025
+ContributorAuthor
+More actions
+Update for ellipsoid voxels.
+Procedural ellipsoid tileset in main branch:
+Same tileset in voxel-rte branch:
+Sandcastle in main branch
+Sandcastle in voxel-rte branch
+There are significant remaining TODO items, including:
+Fix depth test for ELLIPSOID
+Fix BOX and CYLINDER rendering with supplied model matrices or global transforms
+Fix clipping planes
+👍React with 👍1Reacted by Sean Lilley
+jjhembd
+closed this as completedin #12933on Oct 1, 2025
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+jjhembd
+Labels
+category - memory/performancecategory - voxelstype - enhancement
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

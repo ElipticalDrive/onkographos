@@ -1,0 +1,94 @@
+# Multi-Level Morton Code Data Structure
+
+Also called: Adaptive Morton Grid, Multi-Level Memory Structures
+
+## Overview
+The Multi-Level Morton Code Data Structure creates multiple distinct spatial hash grids for different cell sizes on the same underlying particle data by exploiting the self-similarity of Morton codes [S1]. It solves the problem of efficient neighbor searches at various scales in adaptive simulations, allowing particles with different support radii to find neighbors without requiring separate, redundant data structures [S1]. Unlike single-level hash grids, it maintains a hierarchy of resolutions within a single continuous memory layout, distinguishing it from sibling methods like Hierarchical Voxel Block Hashing which use explicit block structures [S1].
+
+## How it works
+**Inputs:** Particle positions $\bar{x}$, support radii $h_i$, maximum grid dimensions $D_{xc}, D_{yc}, D_{zc}$, and simulation parameters $\alpha$ (maximal adaptivity ratio) and $L_{\text{fine}}$ (finest level).
+**Outputs:** A set of hash tables (or continuous arrays) indexed by Morton codes for levels $L \in [0, L_{\max}]$.
+
+**Data Structures:**
+The method stores all data structures in single continuous arrays. For a given level $L$, the hash index is calculated as:
+$$ Z^L(\bar{x}) = L_{\text{nhash}} + Z(\bar{x}^L) $$
+where $Z(\cdot)$ is the standard Morton code function, $\bar{x}^L$ are the integer coordinates at level $L$, and $L_{\text{nhash}}$ is a level-specific offset ensuring unique indices across levels [S1].
+
+**Parameters:**
+*   $C_{\max}$: The largest component of the grid $P = \max(D_{xc}, D_{yc}, D_{zc})$, determining the coarsest cell size [S1].
+*   $C_{\text{fine}}$: The finest cell size, defined as $C_{\text{fine}} = C_{\max} / 2^{L_{\text{fine}}}$ [S1].
+*   $L_{\max}$: The maximum level, calculated as $L_{\max} = \min\left( \log_2 \sqrt{3\alpha}, L_{\text{fine}} \right)$ [S1].
+
+**Steps:**
+1.  **Determine Level for Each Particle:** For each particle $i$ with support radius $h_i$, compute its required level $L_i$:
+    $$ L_i = \text{clamp}\left( -\log_2 \frac{h_i}{C_{\max}}, 0, L_{\text{fine}} - 1 \right) $$
+    This ensures the cell size matches the particle's resolution [S1].
+2.  **Compute Integer Coordinates:** For each level $L$, convert particle position $\bar{x}$ to integer coordinates $\bar{x}^L$:
+    $$ \bar{x}^L = \frac{\bar{x} - D_{\min}}{C_{\max} \cdot 2^{-L}} $$
+    where $D_{\min}$ is the domain minimum [S1].
+3.  **Generate Morton Codes:** Calculate the Morton code $Z(\bar{x}^L)$ for each particle at its assigned level $L_i$ [S1].
+4.  **Store in Continuous Arrays:** Insert particles into the hash structure using the offset index $Z^{L_i}(\bar{x}) = L_{\text{nhash}} + Z(\bar{x}^{L_i})$ [S1].
+5.  **Resolve Asymmetric Interactions:** During neighbor search, if particle $i$ (level $L_i$) interacts with particle $k$ (level $L_k > L_i$) such that $x_{ik} < h_k$, particle $k$ may not see $i$ due to its finer cell size [S1]. To resolve this:
+    *   Calculate the integer coordinate distance for particle $k$'s level: $\bar{x}^{L_k}_{ik} = \bar{x}^{L_i}_k - \bar{x}^{L_k}_k$.
+    *   Check if $k$ fails to see $i$ by verifying if any component of $\bar{x}^{L_k}_{ik}$ has magnitude $> 1$ [S1].
+    *   If the condition is met, atomically update $L_k$ to be at least $L_i$ to ensure $k$ searches distant enough cells to find $i$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_level(h_i, C_max, L_fine):
+    """Compute the level for a particle based on its support radius."""
+    # Clamp ensures level is within [0, L_fine - 1]
+    raw_level = -log2(h_i / C_max)
+    return max(0, min(L_fine - 1, raw_level))
+
+def integer_coords(x, D_min, C_max, L):
+    """Convert continuous position to integer grid coordinates at level L."""
+    cell_size = C_max * (2 ** -L)
+    return (x - D_min) / cell_size
+
+def morton_code(x_int):
+    """Standard Morton code (Z-order) for 3D integer coordinates."""
+    # Implementation of bit interleaving for 3D coordinates
+    # Not given in the sources. [G]
+    pass
+
+def generate_hash_index(level, x_int, L_nhash):
+    """Generate the unique hash index for a particle at a specific level."""
+    return L_nhash + morton_code(x_int)
+
+def resolve_asymmetry(particle_i, particle_k, L_i, L_k, C_max, D_min):
+    """
+    Check if particle k (higher level) fails to see particle i (lower level).
+    If so, update L_k to be at least L_i.
+    """
+    if L_k <= L_i:
+        return L_k
+
+    # Calculate integer coordinates for both particles at level L_k
+    x_k_int_Lk = integer_coords(particle_k.pos, D_min, C_max, L_k)
+    x_i_int_Lk = integer_coords(particle_i.pos, D_min, C_max, L_k)
+
+    # Calculate distance in integer coordinates at level L_k
+    dist_int = x_k_int_Lk - x_i_int_Lk
+
+    # Check if distance exceeds neighbor range (1 cell) in any dimension
+    if max(abs(dist_int.x), abs(dist_int.y), abs(dist_int.z)) > 1:
+        # Atomically update L_k to be at least L_i
+        return max(L_k, L_i)
+    
+    return L_k
+```
+
+## Operating characteristics
+*   **Time Complexity:** Neighbor search is $O(1)$ on average per particle per level, similar to single-level hash grids, but requires checking multiple levels or resolving asymmetries [S1].
+*   **Memory Complexity:** Stores data for all levels $0$ to $L_{\max}$ in continuous arrays. The total memory is proportional to the sum of particles across all levels, but avoids duplication of particle data by sharing the underlying particle list [S1].
+*   **Strengths:** Efficiently handles adaptive particle resolutions without redundant data storage; leverages Morton code self-similarity for fast multi-scale queries [S1].
+*   **Limitations:** Asymmetric interactions require atomic updates and additional checks, adding overhead [S1]. The maximum level is constrained by the adaptivity ratio $\alpha$ and the bit length of the Morton code [S1].
+
+## Background
+The method was introduced in the context of Smoothed Particle Hydrodynamics (SPH) simulations and rendering, specifically in the paper "Multi‐Level Memory Structures for Simulating and Rendering Smoothed Particle Hydrodynamics" [S1]. It addresses the limitations of prior methods that suffered from mismatches between cell size and particle resolution, particularly in anisotropic or non-cubic grids [S1]. The approach utilizes the octree-like structure of Morton codes to ensure that all power-of-2 coarser resolutions follow the same underlying ordering [S1].
+
+## Sources
+[S1] Multi‐Level Memory Structures for Simulating and Rendering Smoothed Particle Hydrodynamics, https://doi.org/10.1111/cgf.14090, fetched 2026-10-28

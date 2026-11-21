@@ -1,0 +1,266 @@
+# Compositional Splatting Strategy
+
+Also called: Compositional Splatting, Gaussian Line Splatting, Gaussian lines, Line-segment-centered primitive splatting, MP-GS Compositional Splatting
+
+## Overview
+Compositional Splatting is a rendering strategy for non-elliptical primitives, specifically Gaussian lines and Gaussian triangles, which decomposes the primitive into its constituent vertices, splats them individually using point-based techniques, and re-sketches the final shape on the image plane [S1, unofficial]. It solves the problem of rendering primitives that lack a simple elliptical boundary, enabling mixed-primitive Gaussian Splatting frameworks to accurately reconstruct sharp edges and flat surfaces [S1, unofficial]. Unlike standard Gaussian Splatting which renders ellipses directly, this method constructs the primitive's silhouette from the common tangents of vertex-based boundary ellipses [S1, unofficial].
+
+## How it works
+The method renders Gaussian lines and Gaussian triangles by treating them as compositions of their vertices. The process involves primitive formulation, compositional splatting of vertices, boundary ellipse formulation, common tangent calculation, and modified alpha blending [S1, unofficial].
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   Primitive type: Gaussian line (2 vertices) or Gaussian triangle (3 vertices).
+    *   Viewpoint parameters: Projection matrix $P$, World-to-view transformation $W$, Jacobian $J$.
+    *   Primitive parameters:
+        *   Gaussian Line: Two 3D vertex coordinates $\mu_1, \mu_2$.
+        *   Gaussian Triangle: First vertex 3D coordinate $\mu_1 \in \mathbb{R}^3$, second and third vertices 2D relative coordinates $\mu_2, \mu_3 \in \mathbb{R}^2$, rotation matrix $R$, and shared covariance matrix $\Sigma$.
+    *   Rendering parameters: Opacity $\alpha$, color $c$.
+*   **Outputs**:
+    *   Image plane pixels with color and opacity values derived from the re-sketched primitive.
+
+### Data Structures
+**Gaussian Triangle**:
+*   $\mu_1$: $\mathbb{R}^3$ (3D coordinate of the first vertex).
+*   $\mu_2$: $\mathbb{R}^2$ (2D relative coordinate of the second vertex in the triangle's local plane).
+*   $\mu_3$: $\mathbb{R}^2$ (2D relative coordinate of the third vertex in the triangle's local plane).
+*   $R$: $3 \times 3$ rotation matrix defining the triangle's orientation.
+*   $\Sigma$: $3 \times 3$ covariance matrix (shared by all three vertices).
+
+**Gaussian Line**:
+*   $\mu_1, \mu_2$: $\mathbb{R}^3$ (3D coordinates of the two endpoints).
+*   $\Sigma$: $3 \times 3$ covariance matrix (shared by both vertices).
+
+### Numbered Steps
+
+**Step 1: Primitive Formulation (3D to Local 2D)**
+For a Gaussian triangle, reconstruct the 3D coordinates of the second and third vertices using the first vertex and the rotation matrix:
+$$
+\mu_2^{3D} = \mu_1 + \mu_2[0] \times (R[:, 0]^T) + \mu_2[1] \times (R[:, 1]^T)
+$$
+$$
+\mu_3^{3D} = \mu_1 + \mu_3[0] \times (R[:, 0]^T) + \mu_3[1] \times (R[:, 1]^T)
+$$
+For a Gaussian line, the vertices are already in 3D space.
+
+**Step 2: Compositional Splatting (Projection)**
+Project each vertex and the shared covariance to the 2D image plane. Let $P$ be the projection matrix and $W$ be the world-to-view transformation.
+$$
+\mu_1^{2D} = (PW\mu_1)[:2]
+$$
+$$
+\mu_2^{2D} = (PW\mu_2^{3D})[:2] \quad (\text{or } (PW\mu_2)[:2] \text{ for lines})
+$$
+$$
+\mu_3^{2D} = (PW\mu_3^{3D})[:2] \quad (\text{for triangles})
+$$
+$$
+\Sigma^{2D} = (J W \Sigma W^T J^T)[:2, :2]
+$$
+Where $J$ is the Jacobian of the affine approximation of the projective transformation [S1, unofficial].
+
+**Step 3: Re-sketching on the Image Plane**
+This step constructs the boundary of the primitive on the image plane.
+
+**Step 3.1: Boundary Ellipse Formulation**
+Define the boundary ellipse for each vertex $i$ as the contour where the Gaussian value is $1/255$. The contour is the set of points $(x,y)$ satisfying $g_i^{ct} = 0$:
+$$
+g_i^{ct} = -2 \ln(255) + \frac{c_\Sigma(x_{\mu_i} - x)^2 + a_\Sigma(y_{\mu_i} - y)^2 + b_\Sigma(x_{\mu_i} - x)(y_{\mu_i} - y)}{a_\Sigma c_\Sigma - b_\Sigma^2} = 0
+$$
+Here, $\Sigma^{2D}$ is decomposed into symmetric matrix elements $a_\Sigma, b_\Sigma, c_\Sigma$. The equation is expanded into the general quadratic form:
+$$
+g_i^{ct} = a_i x^2 + b_i xy + c_i y^2 + d_i x + e_i y + f_i = 0
+$$
+The coefficients $a_i, b_i, c_i, d_i, e_i, f_i$ are derived from $\mu_i^{2D}$ and $\Sigma^{2D}$ [S1, unofficial].
+
+**Step 3.2: Common Tangent Line Measurement**
+Calculate the common tangent lines between pairs of boundary ellipses. This is done by finding the intersection of their dual ellipses.
+1.  Compute the dual ellipse function $g_i^{dual}$ for each boundary ellipse using projective geometry duality:
+    $$
+    \begin{aligned}
+    g_i^{dual} = & \left[ -\frac{1}{4}(e_i)^2 + c_i f_i \right] x^2 + \left[ \frac{1}{2} d_i e_i - b_i f_i \right] xy + \left[ -\frac{1}{4}(d_i)^2 + a_i f_i \right] y^2 \\
+    & + \left[ -c_i d_i + \frac{1}{2} b_i e_i \right] x + \left[ \frac{1}{2} b_i e_i - a_i e_i \right] y - \frac{1}{4}(b_i)^2 + a_i c_i = 0
+    \end{aligned}
+    $$
+2.  Solve the system $g_1^{dual}=0, g_2^{dual}=0$ for the intersection point $(x_s, y_s)$.
+3.  The common tangent line is given by:
+    $$
+    x_s x + y_s y + 1 = 0
+    $$
+    This calculation has $O(1)$ time complexity [S1, unofficial].
+
+**Step 4: Rendering**
+Perform image rendering over the re-sketched primitives using a modified alpha-blending function that accounts for the non-elliptical shape defined by the boundary ellipses and common tangents [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compositional_splatting(primitive_type, vertices_3d, rotation_matrix, covariance_3d, P, W, J):
+    """
+    Renders a Gaussian line or triangle using compositional splatting.
+    
+    Args:
+        primitive_type: 'line' or 'triangle'
+        vertices_3d: List of 3D coordinates. 
+                     For line: [mu1_3d, mu2_3d]
+                     For triangle: [mu1_3d, mu2_2d_rel, mu3_2d_rel]
+                     Note: mu2_2d_rel and mu3_2d_rel are 2D vectors in local plane.
+        rotation_matrix: 3x3 R matrix (required for triangle)
+        covariance_3d: 3x3 Sigma matrix
+        P: Projection matrix
+        W: World-to-view transformation matrix
+        J: Jacobian of projective transformation
+        
+    Returns:
+        Rendered image contribution (color, opacity) for the primitive.
+    """
+    
+    # Step 1: Formulate 3D coordinates for all vertices
+    if primitive_type == 'triangle':
+        mu1_3d = vertices_3d[0]
+        mu2_rel = vertices_3d[1]
+        mu3_rel = vertices_3d[2]
+        
+        # Reconstruct 3D coords for vertices 2 and 3
+        # mu2_3d = mu1 + mu2[0]*R[:,0] + mu2[1]*R[:,1]
+        mu2_3d = mu1_3d + mu2_rel[0] * rotation_matrix[:, 0] + mu2_rel[1] * rotation_matrix[:, 1]
+        mu3_3d = mu1_3d + mu3_rel[0] * rotation_matrix[:, 0] + mu3_rel[1] * rotation_matrix[:, 1]
+        
+        vertex_3ds = [mu1_3d, mu2_3d, mu3_3d]
+    else: # line
+        mu1_3d = vertices_3d[0]
+        mu2_3d = vertices_3d[1]
+        vertex_3ds = [mu1_3d, mu2_3d]
+        
+    num_vertices = len(vertex_3ds)
+    
+    # Step 2: Compositional Splatting (Project to 2D)
+    vertex_2ds = []
+    for mu_3d in vertex_3ds:
+        # Project 3D point to 2D
+        mu_2d = (P @ W @ mu_3d)[:2]
+        vertex_2ds.append(mu_2d)
+        
+    # Project Covariance to 2D
+    # Sigma_2d = (J * W * Sigma * W^T * J^T)[:2, :2]
+    # Note: J is typically computed per-pixel or per-primitive based on affine approximation
+    # Assuming J is provided as the Jacobian of the transformation at the primitive center
+    W_sigma_WT = W @ covariance_3d @ W.T
+    J_W_sigma_WT_JT = J @ W_sigma_WT @ J.T
+    sigma_2d = J_W_sigma_WT_JT[:2, :2]
+    
+    # Step 3: Re-sketching
+    # Step 3.1: Boundary Ellipse Formulation
+    boundary_ellipses = []
+    for i in range(num_vertices):
+        mu_i = vertex_2ds[i]
+        # Extract coefficients a, b, c from Sigma_2d
+        a_sig = sigma_2d[0, 0]
+        b_sig = sigma_2d[0, 1]
+        c_sig = sigma_2d[1, 1]
+        
+        # Calculate general quadratic coefficients for g_i^ct = 0
+        # g_i^ct = -2*ln(255) + (c_sig*(mu_x - x)^2 + a_sig*(mu_y - y)^2 + b_sig*(mu_x - x)*(mu_y - y)) / (a_sig*c_sig - b_sig^2)
+        # Expand to a_i*x^2 + b_i*xy + c_i*y^2 + d_i*x + e_i*y + f_i = 0
+        
+        denom = a_sig * c_sig - b_sig**2
+        log_term = -2 * math.log(255)
+        
+        # Coefficients derivation from the expanded form:
+        # Term x^2: c_sig / denom
+        a_i = c_sig / denom
+        # Term y^2: a_sig / denom
+        c_i = a_sig / denom
+        # Term xy: b_sig / denom
+        b_i = b_sig / denom
+        
+        # Term x: -2 * c_sig * mu_x / denom - b_sig * mu_y / denom
+        d_i = (-2 * c_sig * mu_i[0] - b_sig * mu_i[1]) / denom
+        # Term y: -2 * a_sig * mu_y / denom - b_sig * mu_x / denom
+        e_i = (-2 * a_sig * mu_i[1] - b_sig * mu_i[0]) / denom
+        # Term constant: log_term + (c_sig*mu_x^2 + a_sig*mu_y^2 + b_sig*mu_x*mu_y) / denom
+        f_i = log_term + (c_sig * mu_i[0]**2 + a_sig * mu_i[1]**2 + b_sig * mu_i[0] * mu_i[1]) / denom
+        
+        boundary_ellipses.append({
+            'a': a_i, 'b': b_i, 'c': c_i, 
+            'd': d_i, 'e': e_i, 'f': f_i
+        })
+        
+    # Step 3.2: Common Tangent Line Measurement
+    # For a triangle, we need tangents between (0,1), (1,2), (2,0)
+    # For a line, we need tangent between (0,1)
+    tangent_lines = []
+    if num_vertices == 2:
+        pairs = [(0, 1)]
+    else: # triangle
+        pairs = [(0, 1), (1, 2), (2, 0)]
+        
+    for i, j in pairs:
+        ell_i = boundary_ellipses[i]
+        ell_j = boundary_ellipses[j]
+        
+        # Calculate dual ellipse coefficients for i
+        # g_i^dual = A_i*x^2 + B_i*xy + C_i*y^2 + D_i*x + E_i*y + F_i = 0
+        A_i = -0.25 * ell_i['e']**2 + ell_i['c'] * ell_i['f']
+        B_i = 0.5 * ell_i['d'] * ell_i['e'] - ell_i['b'] * ell_i['f']
+        C_i = -0.25 * ell_i['d']**2 + ell_i['a'] * ell_i['f']
+        D_i = -ell_i['c'] * ell_i['d'] + 0.5 * ell_i['b'] * ell_i['e']
+        E_i = 0.5 * ell_i['b'] * ell_i['e'] - ell_i['a'] * ell_i['e']
+        F_i = -0.25 * ell_i['b']**2 + ell_i['a'] * ell_i['c']
+        
+        # Calculate dual ellipse coefficients for j
+        A_j = -0.25 * ell_j['e']**2 + ell_j['c'] * ell_j['f']
+        B_j = 0.5 * ell_j['d'] * ell_j['e'] - ell_j['b'] * ell_j['f']
+        C_j = -0.25 * ell_j['d']**2 + ell_j['a'] * ell_j['f']
+        D_j = -ell_j['c'] * ell_j['d'] + 0.5 * ell_j['b'] * ell_j['e']
+        E_j = 0.5 * ell_j['b'] * ell_j['e'] - ell_j['a'] * ell_j['e']
+        F_j = -0.25 * ell_j['b']**2 + ell_j['a'] * ell_j['c']
+        
+        # Solve system A_i*x^2 + B_i*xy + C_i*y^2 + D_i*x + E_i*y + F_i = 0
+        # and A_j*x^2 + B_j*xy + C_j*y^2 + D_j*x + E_j*y + F_j = 0
+        # This requires solving for intersection of two conics. 
+        # The source states this is solved to find (x_s, y_s).
+        # A robust implementation would use a resultant or eigenvalue method for pencil of conics.
+        # Here we assume a solver function exists.
+        x_s, y_s = solve_conic_intersection(A_i, B_i, C_i, D_i, E_i, F_i, 
+                                            A_j, B_j, C_j, D_j, E_j, F_j)
+        
+        # Tangent line: x_s * x + y_s * y + 1 = 0
+        tangent_lines.append((x_s, y_s))
+        
+    # Step 4: Rendering
+    # Render using modified alpha blending over the re-sketched shape
+    # The exact blending function is not fully detailed in the source, 
+    # but it operates on the region defined by the boundary ellipses and tangents.
+    return render_modified_alpha_blend(vertex_2ds, tangent_lines, primitive_type)
+
+def solve_conic_intersection(A1, B1, C1, D1, E1, F1, A2, B2, C2, D2, E2, F2):
+    """
+    Solves for the intersection point (x_s, y_s) of two dual ellipses.
+    This is a placeholder for the specific algebraic solution described in [S1, unofficial].
+    In practice, this involves finding the common roots of the two quadratic equations.
+    """
+    # Implementation detail: Not fully specified in source, but O(1) complexity claimed.
+    # A standard approach is to form the pencil of conics and find the degenerate member.
+    raise NotImplementedError("Specific algebraic solver for conic intersection not provided in source.")
+```
+
+### Parameters and Edge Cases
+*   **Threshold**: The boundary ellipse is defined at Gaussian value $1/255$. Points outside this contour are truncated to zero [S1, unofficial].
+*   **Complexity**: Calculating the common tangent line between each pair of boundary ellipses has $O(1)$ time complexity [S1, unofficial].
+*   **Pitfalls**: Numerical instability may occur if the covariance matrix is singular or near-singular. The source notes that avoiding numerical instability is a reason for the $1/255$ truncation [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: The core geometric operation (common tangent calculation) is $O(1)$ per pair of vertices [S1, unofficial]. The overall complexity depends on the number of primitives and the cost of the modified alpha blending.
+*   **Memory Complexity**: Requires storing additional parameters for non-elliptical primitives (relative 2D coordinates for triangles) compared to standard Gaussian ellipses [S1, unofficial].
+*   **Strengths**: Enables accurate reconstruction of sharp edges and flat surfaces using fewer primitives than Gaussian ellipses by using Gaussian lines and triangles [S1, unofficial].
+*   **Limitations**: More complex rendering pipeline due to the need for re-sketching and dual ellipse calculations. Not directly compatible with standard Gaussian Splatting pipelines without modification [S1, unofficial].
+*   **When to use**: When high-fidelity reconstruction of planar surfaces and sharp features is required, and computational resources allow for the additional geometric calculations [S1, unofficial].
+
+## Background
+Compositional Splatting was introduced in the MP-GS (Mixed-Primitive-based Gaussian Splatting) framework [S1, unofficial]. It addresses the limitations of standard Gaussian Splatting, which uses only ellipsoidal primitives, by introducing Gaussian lines and triangles. The method leverages the observation that line segments and triangles can be represented as compositions of their vertices, allowing for a compositional splatting approach [S1, unofficial].
+
+## Sources
+[S1] A Mixed-Primitive-based Gaussian Splatting Method for Surface Reconstruction, https://core.ac.uk/works/308836756, fetched 2026-10-30 (unofficial)

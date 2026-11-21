@@ -1,0 +1,209 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Camera Matrix Ray Generation computes the origin and direction of a primary ray for each pixel in an image based on camera intrinsic parameters (focal length, principal point) and extrinsic parameters (camera-to-world pose) [S10, S13, S16, unofficial]. It solves the problem of mapping 2D raster coordinates to 3D world-space rays, enabling subsequent volume rendering or ray tracing operations [S1, S4, S5, unofficial]. Unlike orthographic generation which uses parallel rays, this method constructs perspective rays that diverge from a single viewpoint [S10, S16, unofficial]. It differs from sample streaming payload methods by explicitly constructing the ray geometry from camera matrices rather than deriving it from pre-computed payloads or object-space offsets [S1509, S1642].
++Camera Matrix Ray Generation computes the origin and direction of a primary ray for each pixel in an image based on camera intrinsic parameters (focal length, principal point) and extrinsic parameters (camera-to-world pose) [S10, S13, S16, unofficial]. It solves the problem of mapping 2D raster coordinates to 3D world-space rays, enabling subsequent volume rendering or ray tracing operations [S1, S4, S5, unofficial]. Unlike orthographic generation which uses parallel rays, this method constructs perspective rays that diverge from a single viewpoint [S10, S16, unofficial].
+ 
+ ## How it works
+@@ -27,5 +27,5 @@
+ 1.  **Generate Pixel Coordinates:** Create 2D meshgrids for pixel indices $i \in [0, W)$ and $j \in [0, H)$ [S10, S16, S20, unofficial].
+ 2.  **Center Pixel Coordinates (Optional):** Add 0.5 to $i$ and $j$ to target pixel centers instead of corners [S7, S13, S20, unofficial]. Note: Some implementations omit this if calibration accuracy is insufficient [S8, unofficial].
+-3.  **Compute Camera-Space Directions:** Calculate unnormalized direction vectors in the camera coordinate system. The camera typically looks along the negative Z-axis (OpenGL convention) or positive Z-axis (OpenCV convention). For the standard OpenGL convention (looking down -Z):
++3.  **Compute Camera-Space Directions:** Calculate unnormalized direction vectors in the camera coordinate system. The camera typically looks along the negative Z-axis (OpenGL convention) or positive Z-axis (OpenCV convention) [S10, S25, S26, S9, unofficial]. For the standard OpenGL convention (looking down -Z):
+     $$
+     \mathbf{d}_{cam} = \begin{bmatrix} \frac{i - c_x}{f_x} \\ -\frac{j - c_y}{f_y} \\ -1 \end{bmatrix}
+@@ -34,7 +34,7 @@
+ 4.  **Transform Directions to World Space:** Rotate the camera-space directions into world space using the rotation part of the camera-to-world matrix:
+     $$
+-    \mathbf{d}_{world} = \mathbf{d}_{cam} \cdot \mathbf{R}_{c2w}^\top
++    \mathbf{d}_{world} = \mathbf{R}_{c2w} \mathbf{d}_{cam}
+     $$
+-    or equivalently $\mathbf{d}_{world} = \mathbf{R}_{c2w} \mathbf{d}_{cam}$ if $\mathbf{d}_{cam}$ is a column vector [S10, S16, S26, S27, unofficial].
++    [S10, S16, S26, S27, unofficial].
+ 5.  **Set Ray Origins:** The ray origin is the camera position in world space, extracted from the translation component of $T_{c2w}$:
+     $$
+@@ -49,92 +49,84 @@
+ ```python
+ def generate_rays(H, W, K, c2w, use_pixel_centers=True, compute_aabb=False, aabb_min=None, aabb_max=None):
+-    """
+-    Generate ray origins and directions for all pixels.
+-    
+-    Args:
+-        H: Image height
+-        W: Image width
+-        K: 3x3 intrinsic matrix [fx, 0, cx; 0, fy, cy; 0, 0, 1]
+-        c2w: 4x4 camera-to-world matrix
+-        use_pixel_centers: Boolean, add 0.5 to pixel coordinates
+-        compute_aabb: Boolean, compute t_min/t_max for AABB
+-        aabb_min: 3-vector, AABB minimum bounds
+-        aabb_max: 3-vector, AABB maximum bounds
+-        
+-    Returns:
+-        rays_o: (H, W, 3) ray origins
+-        rays_d: (H, W, 3) ray directions (normalized)
+-        t_min: (H, W) optional near t-values
+-        t_max: (H, W) optional far t-values
+-    """
+     # 1. Extract intrinsics
+-    fx = K[0, 0]
+-    fy = K[1, 1]
+-    cx = K[0, 2]
+-    cy = K[1, 2]
++    fx = K[0][0]
++    fy = K[1][1]
++    cx = K[0][2]
++    cy = K[1][2]
+     
+     # 2. Extract extrinsics
+-    R_c2w = c2w[:3, :3] # 3x3 rotation
+-    t_c2w = c2w[:3, 3]  # 3-vector translation (camera origin)
++    R_c2w = [row[:3] for row in c2w[:3]]
++    t_c2w = c2w[:3][3]
+     
+-    # 3. Generate pixel coordinates
+-    # Create meshgrid with 'ij' indexing: i varies along rows (height), j along cols (width)
+-    # However, standard convention often uses i for x (width) and j for y (height)
+-    # Let's align with S10: j is rows (0..H-1), i is cols (0..W-1)
+-    j, i = torch.meshgrid(torch.arange(H, dtype=torch.float32), 
+-                          torch.arange(W, dtype=torch.float32), 
+-                          indexing='ij')
++    rays_o = []
++    rays_d = []
++    t_min_list = []
++    t_max_list = []
+     
+-    # 4. Center pixel coordinates
+-    if use_pixel_centers:
+-        i = i + 0.5
+-        j = j + 0.5
++    for j in range(H):
++        row_o = []
++        row_d = []
++        row_tmin = []
++        row_tmax = []
++        for i in range(W):
++            px = float(i)
++            py = float(j)
++            if use_pixel_centers:
++                px += 0.5
++                py += 0.5
++                
++            # 3. Camera-space direction (OpenGL: look down -Z)
++            dx = (px - cx) / fx
++            dy = -(py - cy) / fy
++            dz = -1.0
++            
++            # 4. Transform to world space
++            wx = R_c2w[0][0]*dx + R_c2w[0][1]*dy + R_c2w[0][2]*dz
++            wy = R_c2w[1][0]*dx + R_c2w[1][1]*dy + R_c2w[1][2]*dz
++            wz = R_c2w[2][0]*dx + R_c2w[2][1]*dy + R_c2w[2][2]*dz
++            
++            # 5. Normalize
++            len_d = (wx*wx + wy*wy + wz*wz)**0.5
++            if len_d > 0:
++                wx, wy, wz = wx/len_d, wy/len_d, wz/len_d
++                
++            # 6. Origin
++            ox, oy, oz = t_c2w[0], t_c2w[1], t_c2w[2]
++            
++            row_o.append((ox, oy, oz))
++            row_d.append((wx, wy, wz))
++            
++            if compute_aabb and aabb_min is not None and aabb_max is not None:
++                # 7. Ray-AABB intersection (slab method)
++                def safe_div(num, den):
++                    return num / den if den != 0 else float('inf')
++                    
++                t_x0 = safe_div(aabb_min[0] - ox, wx)
++                t_x1 = safe_div(aabb_max[0] - ox, wx)
++                t_y0 = safe_div(aabb_min[1] - oy, wy)
++                t_y1 = safe_div(aabb_max[1] - oy, wy)
++                t_z0 = safe_div(aabb_min[2] - oz, wz)
++                t_z1 = safe_div(aabb_max[2] - oz, wz)
++                
++                # Ensure t0 < t1
++                if t_x0 > t_x1: t_x0, t_x1 = t_x1, t_x0
++                if t_y0 > t_y1: t_y0, t_y1 = t_y1, t_y0
++                if t_z0 > t_z1: t_z0, t_z1 = t_z1, t_z0
++                
++                t_min = max(t_x0, t_y0, t_z0)
++                t_max = min(t_x1, t_y1, t_z1)
++                
++                row_tmin.append(t_min)
++                row_tmax.append(t_max)
++            else:
++                row_tmin.append(0.0)
++                row_tmax.append(0.0)
++                
++        rays_o.append(row_o)
++        rays_d.append(row_d)
++        t_min_list.append(row_tmin)
++        t_max_list.append(row_tmax)
+         
+-    # 5. Compute camera-space directions (OpenGL convention: look down -Z)
+-    # d_cam = [(i - cx)/fx, -(j - cy)/fy, -1]
+-    # Note: Negative sign on Y because image Y is down, camera V is up
+-    d_cam_x = (i - cx) / fx
+-    d_cam_y = -(j - cy) / fy
+-    d_cam_z = -torch.ones_like(i)
+-    
+-    d_cam = torch.stack([d_cam_x, d_cam_y, d_cam_z], dim=-1) # (H, W, 3)
+-    
+-    # 6. Transform directions to world space
+-    # d_world = d_cam @ R_c2w.T
+-    d_world = torch.sum(d_cam[..., None, :] * R_c2w, dim=-1) # (H, W, 3)
+-    
+-    # 7. Normalize directions
+-    d_world = d_world / torch.norm(d_world, dim=-1, keepdim=True)
+-    
+-    # 8. Set ray origins
+-    # Broadcast t_c2w to (H, W, 3)
+-    rays_o = t_c2w.unsqueeze(0).unsqueeze(0).expand(H, W, 3)
+-    
+-    # 9. Compute AABB intersection if requested
+-    t_min = None
+-    t_max = None
+-    if compute_aabb and aabb_min is not None and aabb_max is not None:
+-        # Ray-AABB intersection for each pixel
+-        # t_min = max((bbox_min - o) / d) for each axis, handling division by zero
+-        # t_max = min((bbox_max - o) / d) for each axis
+-        
+-        # Avoid division by zero by adding small epsilon or handling inf
+-        eps = 1e-8
+-        d_safe = torch.where(torch.abs(d_world) < eps, eps, d_world)
+-        
+-        t1 = (aabb_min - rays_o) / d_safe
+-        t2 = (aabb_max - rays_o) / d_safe
+-        
+-        # t_min is max of mins, t_max is min of maxs
+-        t_min = torch.maximum(torch.minimum(t1, t2), dim=-1).values
+-        t_max = torch.minimum(torch.maximum(t1, t2), dim=-1).values
+-        
+-        # Filter out rays that don't intersect (t_min > t_max)
+-        # Or clamp to valid range
+-        valid = t_min < t_max
+-        t_min = torch.where(valid, t_min, torch.tensor(0.0))
+-        t_max = torch.where(valid, t_max, torch.tensor(0.0))
+-        
+-    return rays_o, d_world, t_min, t_max
++    return rays_o, rays_d, t_min_list, t_max_list
+ ```
+ 
+@@ -160,9 +152,6 @@
+ *   **Time Complexity:** $O(H \times W)$ for generating rays for all pixels, as each pixel's ray is computed independently [S10, S16, unofficial].
+ *   **Memory Complexity:** $O(H \times W)$ to store ray origins and directions [S10, S16, unofficial].
+-*   **Performance:** Highly parallelizable on GPU using compute shaders or tensor operations [S1, S10, unofficial]. Performance is limited by memory bandwidth when storing large ray buffers [S16, unofficial].
+ *   **Strengths:** Accurate perspective projection; supports arbitrary camera poses and intrinsics; efficient batch computation [S10, S16, unofficial].
+-*   **Limitations:** Requires accurate camera calibration; does not handle lens distortion or non-pinhole models without extension [S10, S25, unofficial].
+ *   **When to Use:** Standard perspective rendering, NeRF, volume rendering with known camera poses [S10, S16, unofficial].
+-*   **When Not to Use:** Orthographic rendering (use Orthographic Camera Ray Generation), real-time interactive rendering with dynamic camera where overhead is critical (though still efficient), or when lens effects are needed [S1319, S25].
+ 
+ ## Background
+@@ -180,4 +169,5 @@
+ [S15] an1pse/voxel-traversal, https://github.com/an1pse/voxel-traversal, fetched 2026-10-27 (unofficial)
+ [S16] rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, https://github.com/rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, fetched 2026-10-27 (unofficial)
++[S18] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)
+ [S20] bennyguo/instant-nsr-pl, https://github.com/bennyguo/instant-nsr-pl, fetched 2026-10-27 (unofficial)
+ [S24] 7.6. Neural Radiance Fields for Drones, https://www.roboticsbook.org/S76_drone_learning.html, fetched 2026-10-29 (unofficial)

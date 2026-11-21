@@ -1,0 +1,149 @@
+# MLP with Input Skips
+
+Also called: Skip Connection MLP
+
+## Overview
+An MLP architecture that concatenates the original input vector to intermediate layers, allowing the network to access low-level features at deeper layers [S1, unofficial][S2, unofficial]. It serves as the baseline for standard NeRF-style neural fields, contrasting with SIREN by using ReLU activations and explicit skip connections rather than sinusoidal embeddings [S1, unofficial][S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A tensor of sample points $x$ with shape `[batch, num_samples, in_dim]` (typically 3 for coordinates) and an optional condition tensor $c$ (e.g., view direction) with shape `[batch, feature]` [S3, unofficial].
+- Outputs: Raw density values and RGB color values [S3, unofficial].
+
+**Data Structures:**
+The network consists of a sequence of linear layers. The architecture is defined by:
+- `input_dim`: Dimension of the input vector $x$ [S1, unofficial][S2, unofficial].
+- `hidden_dim`: Dimensionality of the hidden layers [S1, unofficial][S2, unofficial].
+- `n_layers`: Total number of linear layers in the MLP [S1, unofficial][S2, unofficial].
+- `input_skips`: A list of layer indices where the input $x$ is concatenated [S1, unofficial][S2, unofficial].
+- `skip_dim`: Dimension of the skip connection input $z$ (typically equal to `input_dim`) [S1, unofficial][S2, unofficial].
+
+**Initialization:**
+1. Layer 0 takes input dimension `input_dim` and outputs `hidden_dim` [S2, unofficial].
+2. Layers at indices in `input_skips` take `hidden_dim + skip_dim` and output `hidden_dim` [S2, unofficial].
+3. Other layers take `hidden_dim` and output `hidden_dim` [S2, unofficial].
+4. Weights are typically initialized using Glorot uniform initialization [S3, unofficial].
+
+**Forward Pass:**
+1. Reshape input $x$ from `[batch, num_samples, in_dim]` to `[-1, in_dim]` [S1, unofficial][S3, unofficial].
+2. Initialize current feature map $y = x$ [S2, unofficial].
+3. Iterate through each layer $i$ from 0 to `n_layers - 1`:
+   - If $i$ is in `input_skips`, concatenate the original input $x$ to $y$: $y = [y, x]$ [S1, unofficial][S2, unofficial].
+   - Apply linear transformation: $y = W_i y + b_i$ [S2, unofficial].
+   - Apply activation function (typically ReLU): $y = \text{ReLU}(y)$ [S1, unofficial][S2, unofficial].
+4. If a condition $c$ is provided:
+   - Apply a bottleneck layer to the final hidden representation [S3, unofficial].
+   - Tile the condition $c$ to match the batch and sample dimensions [S3, unofficial].
+   - Concatenate the bottleneck features and the tiled condition [S3, unofficial].
+   - Process through a secondary MLP branch (conditioned layers) [S3, unofficial].
+5. Predict raw density and RGB using final linear layers [S3, unofficial].
+
+**Parameters (Typical Values):**
+- `net_depth`: 8 [S3, unofficial].
+- `net_width`: 256 [S3, unofficial].
+- `net_depth_condition`: 1 [S3, unofficial].
+- `net_width_condition`: 128 [S3, unofficial].
+- `skip_layer`: 4 (Add a skip connection to the output of every N layers) [S3, unofficial].
+- `num_rgb_channels`: 3 [S3, unofficial].
+- `num_density_channels`: 1 [S3, unofficial].
+- `net_activation`: ReLU [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Precision: Standard float32 is typically used; float16 may require mixed precision training techniques [S4].
+- Boundaries: Ensure input coordinates are normalized appropriately for the activation function (e.g., ReLU is sensitive to negative values if not centered) [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import jax.numpy as jnp
+from flax import linen as nn
+
+class MLPWithInputSkips(nn.Module):
+    input_dim: int
+    hidden_dim: int
+    n_layers: int
+    input_skips: list
+    num_rgb_channels: int = 3
+    num_density_channels: int = 1
+    net_activation: callable = nn.relu
+
+    def __call__(self, x, condition=None):
+        # x shape: [batch, num_samples, input_dim]
+        batch_size, num_samples, feature_dim = x.shape
+        
+        # Reshape x to [-1, feature_dim]
+        x_flat = x.reshape(-1, feature_dim)
+        
+        # Initialize hidden state
+        y = x_flat
+        
+        # First layer
+        y = nn.Dense(features=self.hidden_dim)(y)
+        y = self.net_activation(y)
+        
+        # Subsequent layers
+        for i in range(1, self.n_layers):
+            if i in self.input_skips:
+                # Concatenate original input to current feature map
+                y = jnp.concatenate([y, x_flat], axis=-1)
+            y = nn.Dense(features=self.hidden_dim)(y)
+            y = self.net_activation(y)
+            
+        # Predict density
+        raw_density = nn.Dense(features=self.num_density_channels)(y)
+        raw_density = raw_density.reshape(batch_size, num_samples, self.num_density_channels)
+        
+        # Handle condition (view direction) if provided
+        if condition is not None:
+            # condition shape: [batch, feature]
+            # Tile condition to match batch and num_samples
+            condition_tiled = jnp.tile(condition[:, None, :], (1, num_samples, 1))
+            condition_flat = condition_tiled.reshape(-1, condition.shape[-1])
+            
+            # Bottleneck layer
+            bottleneck = nn.Dense(features=self.hidden_dim)(y)
+            bottleneck = self.net_activation(bottleneck)
+            
+            # Concatenate bottleneck and condition
+            y_cond = jnp.concatenate([bottleneck, condition_flat], axis=-1)
+            
+            # Process through conditioned layers
+            # Note: Specific structure of conditioned layers depends on implementation
+            # Assuming a simple dense layer for demonstration based on [S3, unofficial]
+            y_cond = nn.Dense(features=self.hidden_dim)(y_cond)
+            y_cond = self.net_activation(y_cond)
+            
+            # Predict RGB
+            raw_rgb = nn.Dense(features=self.num_rgb_channels)(y_cond)
+            raw_rgb = raw_rgb.reshape(batch_size, num_samples, self.num_rgb_channels)
+        else:
+            # Predict RGB from main branch if no condition
+            raw_rgb = nn.Dense(features=self.num_rgb_channels)(y)
+            raw_rgb = raw_rgb.reshape(batch_size, num_samples, self.num_rgb_channels)
+            
+        return raw_rgb, raw_density
+```
+
+## Subtopics
+
+### Neural Codebook Architecture
+A variant where the network shares lower-level layers adjacent to input for color features ($V_c$) and volume density ($V_\sigma$), learning modality-specific features through separate branches at higher levels [S4]. It uses LeakyReLU as the activation function [S4]. The color branch is slightly deeper (two additional layers) and wider than the density branch [S4]. Skip connections allow basic information from the compressed model to pass through, encouraging parameters to capture high-frequency details [S4].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of layers and samples. The skip connections add a constant overhead per skip layer for concatenation.
+- **Memory Complexity:** Linear with respect to the number of parameters. The skip connections do not significantly increase memory usage during inference but require storing the input for concatenation during forward pass if not recomputed [G].
+- **Performance:** Efficient for real-time rendering when combined with acceleration structures. The ReLU activation is computationally cheaper than sinusoidal activations used in SIREN [S1, unofficial][S3, unofficial].
+- **Strengths:** Simple to implement, stable training, good for low-frequency scenes.
+- **Limitations:** May struggle with high-frequency details compared to SIREN or frequency-encoded MLPs [S4].
+- **When to use:** Baseline for neural radiance fields, real-time rendering applications where speed is critical.
+- **When not to use:** Scenes requiring very high-frequency details without frequency encoding.
+
+## Background
+Originated in the context of Neural Radiance Fields (NeRF) [S1, unofficial][S3, unofficial]. It builds on the idea of using MLPs to represent continuous volumetric scenes [S1, unofficial]. The skip connections were introduced to help the network learn high-frequency details by providing direct access to the input coordinates at deeper layers [S1, unofficial][S4].
+
+## Sources
+[S1] omkarchittar/Neural_Radiance_Fields, https://github.com/omkarchittar/Neural_Radiance_Fields, fetched 2026-10-26 (unofficial)
+[S2] Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+[S3] https://github.com/CPREgroup/CaSE-NeRF, https://github.com/CPREgroup/CaSE-NeRF, fetched 2026-10-30 (unofficial)
+[S4] Compact Real-Time Radiance Fields with Neural Codebook, https://doi.org/10.1109/icme55011.2023.00374, fetched 2026-10-26

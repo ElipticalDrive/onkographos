@@ -1,0 +1,136 @@
+# Dynamic VBO with Octree Rendering
+Also called: Sparse Voxel Octree VBO
+## Overview
+A rendering approach for voxel terrain using an octree data structure where a single dynamic Vertex Buffer Object (VBO) is rebuilt every frame to contain geometry for visible octree nodes, combined with an index buffer [S1, unofficial]. Unlike fixed-chunk approaches where VBOs are recreated only when voxel data changes, this method rebuilds the VBO every frame based on visibility, allowing for dynamic LOD and culling [S1, unofficial].
+## How it works
+**Inputs and Outputs**
+- Input: An octree data structure representing the voxel world, camera position, and view frustum parameters [S1, unofficial].
+- Output: A dynamic VBO containing vertex positions and an index buffer defining triangles for all visible, culled boxes [S1, unofficial].
+
+**Data Structures**
+- **Octree Node**: Represents a voxel or a group of voxels, traversed to determine visibility [S1, unofficial].
+- **Dynamic VBO**: A GPU buffer allocated with dynamic usage hints, updated every frame [S1, unofficial].
+- **Index Buffer**: A GPU buffer defining triangle connectivity for the uploaded vertices [S1, unofficial].
+
+**Numbered Steps**
+1. **Traversal and Culling**: Iterate through the octree to determine which boxes (nodes) are visible and should be drawn [S1, unofficial].
+   - Apply frustum culling during the traversal: stop descending into an octree node if it is outside the view frustum [S1, unofficial].
+   - Apply face culling: do not add polygons for visible boxes that have other visible, non-transparent boxes on all sides, and do not add box faces that touch other visible boxes [S1, unofficial].
+2. **Vertex Calculation**: For each selected box, calculate the 3D position of the eight corners [S1, unofficial].
+3. **VBO Upload**: Upload the calculated corner vertices to a dynamic VBO [S1, unofficial].
+4. **Index Buffer Creation**: Create an index buffer that defines which vertices connect to form the triangles for each box [S1, unofficial].
+5. **Rendering**: Draw the indexed geometry using the dynamic VBO [S1, unofficial].
+6. **Rebuild Condition**: Rebuild the vertex buffer when the camera moves if heavy culling is used, or if the octree structure changes [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_dynamic_vbo_octree(octree_root, camera_frustum, vbo, ibo):
+    """
+    Renders the scene by rebuilding a dynamic VBO and index buffer
+    based on octree visibility and culling.
+    """
+    vbo.clear()
+    ibo.clear()
+    
+    visible_nodes = []
+    traverse_octree(octree_root, camera_frustum, visible_nodes)
+    
+    for node in visible_nodes:
+        corners = get_box_corners(node.position, node.size)
+        faces_to_draw = get_visible_faces(node, visible_nodes)
+        
+        start_vertex_idx = len(vbo.vertices)
+        for corner in corners:
+            vbo.vertices.append(corner)
+            
+        for face_indices in faces_to_draw:
+            i0, i1, i2, i3 = face_indices
+            ibo.indices.extend([
+                start_vertex_idx + i0, start_vertex_idx + i1, start_vertex_idx + i2,
+                start_vertex_idx + i0, start_vertex_idx + i2, start_vertex_idx + i3
+            ])
+            
+    vbo.upload_to_gpu()
+    ibo.upload_to_gpu()
+    draw_indexed_triangles(ibo.indices)
+
+def traverse_octree(node, frustum, visible_nodes):
+    if node is None:
+        return
+    if not frustum.intersects(node.bounding_box):
+        return
+    if node.is_leaf and node.is_occupied:
+        visible_nodes.append(node)
+    else:
+        for child in node.children:
+            traverse_octree(child, frustum, visible_nodes)
+
+def get_box_corners(position, size):
+    half = size / 2.0
+    x, y, z = position
+    return [
+        (x - half, y - half, z - half), (x + half, y - half, z - half),
+        (x + half, y + half, z - half), (x - half, y + half, z - half),
+        (x - half, y - half, z + half), (x + half, y - half, z + half),
+        (x + half, y + half, z + half), (x - half, y + half, z + half)
+    ]
+
+def get_visible_faces(node, visible_nodes):
+    # Standard face culling: return faces not occluded by visible neighbors [G]
+    faces = []
+    for face_idx in range(6):
+        neighbor_pos = get_face_neighbor_position(node.position, node.size, face_idx)
+        if not is_neighbor_visible(neighbor_pos, visible_nodes):
+            faces.append(FACE_QUAD_INDICES[face_idx])
+    return faces
+
+def get_face_neighbor_position(pos, size, face_idx):
+    # Returns world position of the adjacent node for a given face [G]
+    half = size / 2.0
+    offsets = [
+        (0, 0, -half), (0, 0, half), (0, -half, 0), (0, half, 0), (-half, 0, 0), (half, 0, 0)
+    ]
+    return (pos[0] + offsets[face_idx][0], pos[1] + offsets[face_idx][1], pos[2] + offsets[face_idx][2])
+
+def is_neighbor_visible(neighbor_pos, visible_nodes):
+    # Checks if a visible node exists at the neighbor position [G]
+    for n in visible_nodes:
+        if n.position == neighbor_pos:
+            return True
+    return False
+
+def draw_indexed_triangles(indices):
+    # Standard draw call for indexed triangle lists [G]
+    pass
+
+FACE_QUAD_INDICES = [
+    (0, 1, 2, 3), (4, 5, 6, 7), (0, 3, 7, 4), (1, 2, 6, 5), (3, 2, 6, 7), (0, 1, 5, 4)
+]
+```
+
+**Parameters**
+- VBO Type: Dynamic VBO, updated every frame [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+- If heavy culling is employed, the set of visible boxes changes with camera movement, necessitating a full rebuild of the VBO rather than just updating changed voxels [S1, unofficial].
+- If the octree structure changes, the VBO must be rebuilt [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Not given in the sources.
+- **Memory Complexity**: Not given in the sources.
+- **Measured Performance**: Not given in the sources.
+- **Scaling**: Performance depends on the number of visible boxes due to the per-frame rebuild requirement [S1, unofficial].
+- **Strengths**: Allows for dynamic LOD and culling [S1, unofficial].
+- **Limitations**: Requires full VBO rebuild when the camera moves under heavy culling [S1, unofficial].
+- **When to use**: Suitable for voxel terrain where dynamic visibility culling is beneficial [S1, unofficial].
+- **When not to use**: Not given in the sources.
+
+## Background
+Origin: This method is described in an informal Q&A on Game Development Stack Exchange [S1, unofficial].
+History: Not given in the sources.
+Usage: Not given in the sources.
+
+## Sources
+[S1] Octrees and Vertex Buffer Objects, https://gamedev.stackexchange.com/questions/45323/octrees-and-vertex-buffer-objects, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,302 @@
+# D-NeRF
+
+Also called: Deformable Neural Radiance Fields, Dynamic NeRF, Neural Radiance Fields for Dynamic Scenes
+
+## Overview
+D-NeRF is a method for synthesizing novel views at an arbitrary point in time of dynamic scenes with complex non-rigid geometries, optimized from a sparse set of input monocular views without ground-truth geometry or multi-view images [S1]. It extends NeRF by introducing time $t$ as an additional input and decomposing the representation into a deformation network and a canonical radiance network [S2]. Unlike naive extensions that map $(x, y, z, t)$ directly to density and radiance, which fail to exploit temporal redundancy, D-NeRF maps dynamic coordinates to a static canonical space (typically $t=0$) before querying the radiance field [S1]. This approach sets it apart from T-NeRF, which uses a 6D input $(x, y, z, \theta, \phi, t)$ without an intermediate canonical mapping [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A sparse set of $T$ RGB images $\{I_t\}_{t=1}^T$ captured by a monocular camera, where $I_t \in \mathbb{R}^{H \times W \times 3}$ is the image at time $t$, and corresponding camera pose matrices $\{T_t\}_{t=1}^T$ where $T_t \in \mathbb{R}^{4 \times 4}$ represents the SE(3) pose [S1, S3].
+*   **Outputs:** A rendered RGB color $C'(p, t)$ for a pixel $p$ at time $t$ given a viewing direction $d$, and the learned parameters for the canonical and deformation networks [S1].
+
+**Data Structures:**
+The model consists of two deep fully connected networks (MLPs) without convolutional layers [S1]:
+1.  **Deformation Network $\Psi_t$:**
+    *   **Architecture:** 8-layer MLP with ReLU activations.
+    *   **Input:** Encoded 3D position $x$ and time $t$.
+    *   **Output:** Displacement vector $\Delta x \in \mathbb{R}^3$. No non-linearity is applied to the output [S1].
+2.  **Canonical Network $\Psi_x$:**
+    *   **Architecture:** 8-layer MLP with ReLU activations.
+    *   **Input:** Encoded canonical position $x' = x + \Delta x$ and viewing direction $d$.
+    *   **Output:** Volume density $\sigma \in \mathbb{R}$ and view-dependent RGB color $c \in \mathbb{R}^3$. A final sigmoid non-linearity is applied to both outputs [S1].
+
+**Positional Encoding:**
+Raw coordinates are encoded into a higher-dimensional space using positional encoding $\gamma(p)$ [S1]:
+$$ \gamma(p) = \langle (\sin(2^l \pi p), \cos(2^l \pi p)) \rangle_{l=0}^{L-1} $$
+The encoder is applied independently to each coordinate and camera view component [S1].
+*   For spatial coordinates $x$: $L = 10$ [S1, S3].
+*   For viewing direction $d$ and time $t$: $L = 4$ [S1, S3].
+
+**Numbered Steps:**
+1.  **Canonical Configuration Definition:** Define the canonical scene as the scene at time $t=0$. Enforce that the deformation displacement is zero at this time: $\Psi_t(x, 0) = 0$ [S1, S3].
+2.  **Ray Sampling:** For a pixel $p$ and time $t$, cast a ray from the camera center $o$ with direction $d$. Sample $N$ points $\{h_n\}_{n=1}^N$ along the ray segment $[h_n, h_f]$ using stratified sampling (drawing samples from evenly-spaced ray bins) [S1].
+3.  **Deformation:** For each sample point $x(h) = o + h d$ at time $t$, compute the displacement $\Delta x$ using the deformation network:
+    $$ \Delta x = \Psi_t(\gamma(x(h)), \gamma(t)) $$
+    Transform the point to canonical space:
+    $$ p(h, t) = x(h) + \Delta x $$
+    [S1, S3].
+4.  **Radiance Query:** Query the canonical network with the transformed point and viewing direction to obtain density and color:
+    $$ [c(p(h, t), d), \sigma(p(h, t))] = \Psi_x(\gamma(p(h, t)), \gamma(d)) $$
+    [S1, S3].
+5.  **Volume Rendering:** Approximate the volume rendering integral via numerical quadrature [S1]. Calculate the transmittance and opacity for each sample:
+    $$ \alpha(h, t, \delta_n) = 1 - \exp(-\sigma(p(h, t)) \delta_n) $$
+    $$ T'(h_n, t) = \exp\left(-\sum_{m=1}^{n-1} \sigma(p(h_m, t)) \delta_m\right) $$
+    where $\delta_n = h_{n+1} - h_n$ is the distance between quadrature points [S1].
+6.  **Pixel Color Computation:** Compute the rendered pixel color $C'(p, t)$:
+    $$ C'(p, t) = \sum_{n=1}^{N} T'(h_n, t) \alpha(h_n, t, \delta_n) c(p(h_n, t), d) $$
+    [S1].
+
+**Parameters:**
+*   **Canonical Time:** $t=0$ [S1].
+*   **Network Depth:** 8 layers for both $\Psi_t$ and $\Psi_x$ [S1].
+*   **Activation:** ReLU for hidden layers; Sigmoid for $\Psi_x$ outputs; Linear for $\Psi_t$ output [S1].
+*   **Training:**
+    *   Image resolution: $400 \times 400$ [S1].
+    *   Iterations: 800,000 [S1].
+    *   Batch size: $N_s = 4096$ rays [S1].
+    *   Samples per ray: 64 [S1].
+    *   Optimizer: Adam with learning rate $5 \times 10^{-4}$, $\beta_1=0.9$, $\beta_2=0.999$, decaying exponentially to $5 \times 10^{-5}$ [S1].
+    *   Loss: Mean Squared Error (MSE) between rendered pixels $C'$ and ground truth pixels $\hat{C}$:
+        $$ \text{Loss} = \frac{1}{N_s} \sum_{i=1}^{N_s} \|\hat{C}(p_i, t) - C'(p_i, t)\|^2 $$
+        [S1].
+    *   Curriculum Learning: Input images are sorted by timestamp and added incrementally to improve convergence [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def positional_encoding(p, L):
+    """
+    Applies positional encoding to input p.
+    p: numpy array of shape (..., D)
+    L: number of frequency bands
+    Returns: numpy array of shape (..., D * 2 * L)
+    """
+    # p is expected to be in range [-1, 1] or similar, scaled appropriately
+    # The formula is <(sin(2^l pi p), cos(2^l pi p))>_{l=0}^{L-1}
+    freq_bands = 2.0 ** np.arange(L) * np.pi
+    # Expand dimensions for broadcasting
+    freq_bands = freq_bands.reshape(1, -1)
+    # p shape: (..., D) -> (..., D, 1)
+    # freq_bands shape: (1, L)
+    # result shape: (..., D, 2, L)
+    encoded = np.concatenate([
+        np.sin(p[..., np.newaxis, np.newaxis] * freq_bands),
+        np.cos(p[..., np.newaxis, np.newaxis] * freq_bands)
+    ], axis=-2)
+    # Flatten the last two dimensions (2, L) into (2*L)
+    return encoded.reshape(*p.shape[:-1], -1)
+
+def deform_network(x_encoded, t_encoded):
+    """
+    8-layer MLP for deformation.
+    x_encoded: encoded position
+    t_encoded: encoded time
+    Returns: displacement delta_x
+    """
+    # Implementation details of the 8-layer MLP are omitted as per standard MLP definition
+    # Input: concat(x_encoded, t_encoded)
+    # Hidden layers: Linear -> ReLU
+    # Output layer: Linear (no activation)
+    # [G] Assuming a standard MLP implementation exists
+    pass
+
+def canonical_network(x_prime_encoded, d_encoded):
+    """
+    8-layer MLP for canonical radiance.
+    x_prime_encoded: encoded canonical position
+    d_encoded: encoded viewing direction
+    Returns: density sigma, color c
+    """
+    # Implementation details of the 8-layer MLP are omitted
+    # Input: concat(x_prime_encoded, d_encoded)
+    # Hidden layers: Linear -> ReLU
+    # Output layer: Linear -> Sigmoid
+    # [G] Assuming a standard MLP implementation exists
+    pass
+
+def render_pixel(p, t, camera_pose, near, far, N_samples):
+    """
+    Renders a single pixel at time t.
+    p: pixel coordinates (u, v)
+    t: time
+    camera_pose: 4x4 SE(3) matrix T_t
+    near, far: ray bounds h_n, h_f
+    N_samples: number of samples along ray
+    Returns: rendered color C'
+    """
+    # 1. Get ray origin and direction
+    # o = camera_pose[:3, 3]
+    # d = unproject(p, camera_pose) # Standard graphics operation
+    # [G] Ray generation logic assumed available
+    
+    # 2. Stratified sampling
+    # Draw N samples from evenly-spaced bins in [near, far]
+    bins = np.linspace(near, far, N_samples + 1)
+    bin_length = (far - near) / N_samples
+    # Add uniform noise to each sample within its bin
+    noise = np.random.uniform(0, bin_length, N_samples)
+    h = bins[:-1] + noise
+    
+    # 3. Sample points on ray
+    # x(h) = o + h * d
+    x_points = o + h[:, np.newaxis] * d[np.newaxis, :]
+    
+    # 4. Deformation
+    # Encode x and t
+    x_enc = positional_encoding(x_points, L=10)
+    t_enc = positional_encoding(np.array([t]), L=4)
+    
+    # Compute displacement
+    delta_x = deform_network(x_enc, t_enc)
+    
+    # Transform to canonical space
+    x_canonical = x_points + delta_x
+    
+    # 5. Query Canonical Network
+    d_enc = positional_encoding(d[np.newaxis, :], L=4)
+    x_can_enc = positional_encoding(x_canonical, L=10)
+    
+    sigma, c = canonical_network(x_can_enc, d_enc)
+    
+    # 6. Volume Rendering
+    # Calculate delta_n
+    delta_n = np.diff(np.concatenate(([near], h, [far])))
+    # Note: The paper defines delta_n = h_{n+1} - h_n. 
+    # In stratified sampling, h_n are the sample centers. 
+    # The paper uses h_n as the sample positions for the integral approximation.
+    # We use the bin edges for delta_n calculation if h_n are centers, 
+    # but the paper formula uses delta_n directly with sigma at h_n.
+    # Standard NeRF implementation: delta_n is distance to next sample.
+    # Here we approximate delta_n as bin_length for simplicity or use diff(h)
+    # The paper says: delta_n = h_{n+1} - h_n. 
+    # If h are sample centers, we need boundaries. 
+    # Let's use the bin edges derived from stratified sampling.
+    # h_samples are centers. Boundaries are h_samples +/- bin_length/2.
+    # However, the paper's Eq 7 uses delta_n in the exponent sum.
+    # Let's stick to the paper's definition: delta_n is distance between quadrature points.
+    # In stratified sampling, points are drawn from bins. 
+    # A common approximation is to use the bin width or distance to next point.
+    # Given the discrete sum in Eq 6, we assume delta_n is the step size.
+    # Let's use the distance to the next sample, or bin width.
+    # The paper states: "delta_n = h_{n+1} - h_n". 
+    # If we treat h_n as the sample points, we need h_{n+1}.
+    # Let's assume h is sorted.
+    delta_n_vals = np.diff(np.sort(np.concatenate(([near], h, [far]))))
+    # Map delta_n to samples. Usually delta_n corresponds to the segment after h_n.
+    # So for sample n, delta_n is distance to h_{n+1}.
+    # We need to align delta_n with sigma and c.
+    # sigma and c are at h.
+    # T' uses sum of sigma * delta.
+    
+    # Re-calculate delta_n aligned with samples
+    # h_sorted = np.sort(h)
+    # delta_n_aligned = np.diff(np.concatenate(([near], h_sorted, [far])))
+    # But h is not necessarily sorted in the array if we just draw.
+    # Let's sort h and corresponding sigma/c.
+    sort_idx = np.argsort(h)
+    h = h[sort_idx]
+    sigma = sigma[sort_idx]
+    c = c[sort_idx]
+    
+    delta_n_aligned = np.diff(np.concatenate(([near], h, [far])))
+    
+    # Calculate alpha and T'
+    # alpha(h, t, delta) = 1 - exp(-sigma * delta)
+    alpha = 1.0 - np.exp(-sigma * delta_n_aligned)
+    
+    # T'(h_n) = exp(-sum_{m=1}^{n-1} sigma_m * delta_m)
+    # Cumulative product of transmittance
+    # Transmittance for segment m is exp(-sigma_m * delta_m)
+    transmittance_segment = np.exp(-sigma * delta_n_aligned)
+    # Cumulative product from start
+    # T'_1 = 1 (exp(0))
+    # T'_2 = T'_1 * transmittance_1
+    # T'_n = T'_{n-1} * transmittance_{n-1}
+    
+    # Using cumprod
+    # transmittance_segment has length N
+    # We need T' for each sample n, which is product of transmittance of previous segments
+    # T'[0] = 1
+    # T'[1] = transmittance_segment[0]
+    # T'[n] = prod(transmittance_segment[:n])
+    
+    cum_trans = np.cumprod(transmittance_segment)
+    T_prime = np.concatenate(([1.0], cum_trans[:-1]))
+    
+    # Color
+    # C' = sum(T'_n * alpha_n * c_n)
+    color = np.sum(T_prime * alpha * c, axis=0)
+    
+    return color
+
+def train_step(images, poses, t_values):
+    """
+    Single training step.
+    images: list of RGB images
+    poses: list of camera poses
+    t_values: list of time values
+    Returns: loss
+    """
+    # 1. Select a random time t and corresponding image
+    idx = np.random.randint(len(images))
+    I_t = images[idx]
+    T_t = poses[idx]
+    t = t_values[idx]
+    
+    # 2. Sample Ns rays
+    Ns = 4096
+    H, W, _ = I_t.shape
+    # Randomly select Ns pixels
+    u = np.random.randint(0, W, Ns)
+    v = np.random.randint(0, H, Ns)
+    
+    # 3. Render these rays
+    # [G] Loop over rays or batched rendering
+    rendered_colors = []
+    for i in range(Ns):
+        p = (u[i], v[i])
+        c = render_pixel(p, t, T_t, near=0.0, far=10.0, N_samples=64)
+        rendered_colors.append(c)
+    
+    rendered_colors = np.array(rendered_colors)
+    
+    # 4. Get ground truth colors
+    gt_colors = I_t[v, u]
+    
+    # 5. Compute Loss
+    loss = np.mean((gt_colors - rendered_colors) ** 2)
+    
+    # 6. Backpropagate
+    # [G] Standard gradient descent step using Adam
+    pass
+    
+    return loss
+```
+
+## Subtopics
+
+### [Dynamic NeRF Guided by Projected Colors](8882-dynamic-nerf-guided-by-projected-colors.md)
+This method is a dynamic Neural Radiance Field (NeRF) variant that replaces the explicit temporal coordinate $t$ with multi-view projected color statistics to improve point correspondence estimation during on-the-fly training. Unlike standard space-time dynamic NeRFs that optimize irregular temporal deformation fields, this approach maps inputs to a "space-color" coordinate system where correspondence is easier to track due to color invariance under motion.
+
+## Operating characteristics
+*   **Time and Memory Complexity:** The method uses two 8-layer MLPs. The complexity is dominated by the forward pass of these networks for each sample along each ray. Memory usage is proportional to the number of network parameters and the training batch size (4096 rays) [S1].
+*   **Measured Performance:** On the 'Hell Warrior' scene, D-NeRF achieves MSE $31 \times 10^{-4}$, PSNR 23.19, SSIM 0.93, LPIPS 0.08, compared to NeRF's MSE $44 \times 10^{-3}$, PSNR 13.52, SSIM 0.81, LPIPS 0.25 [S1]. On the 'T-Rex' scene, D-NeRF achieves MSE $5 \times 10^{-4}$, PSNR 32.80, SSIM 0.98, LPIPS 0.03, compared to NeRF's MSE $21 \times 10^{-3}$, PSNR 18.19, SSIM 0.89, LPIPS 0.14 [S1].
+*   **Scaling:** The model is trained on a single Nvidia GTX 1080 for 2 days for 800k iterations [S1].
+*   **Strengths and Limitations:** D-NeRF effectively handles rigid, articulated, and non-rigid motions from a single monocular camera [S1]. However, it suffers from blurry results when complex scene motions exist because deformation fields are difficult to learn [S4]. It also cannot reconstruct transparent objects or simulate optical effects caused by mapping to a canonical space, as the deformation field must be continuous and cannot handle topological changes [S5].
+*   **When to Use:** Use for dynamic scenes with non-rigid deformations where only sparse monocular views are available and ground-truth geometry is not present [S1].
+*   **When Not to Use:** Avoid for scenes with significant topological changes or transparent objects, as the continuous deformation field cannot model discontinuities or complex light transport effects accurately [S5].
+
+## Background
+D-NeRF was proposed by Albert Pumarola, Enric Corona, Gerard Pons-Moll, and Francesc Moreno-Noguer from the Institut de Robòtica i Informàtica Industrial (CSIC-UPC) and the Max Planck Institute for Informatics [S1]. The paper was published in November 2020 (arXiv) and later in CVPR 2021 [S1]. It extends the original NeRF method [26] to handle dynamic scenes by introducing time as an additional input and decomposing the learning process into a canonical space and a deformation field [S2]. It is compared against Neural Volumes (NV), Scene Representation Networks (SRN), and T-NeRF [S1, S3].
+
+## Sources
+[S1] D-NeRF: Neural Radiance Fields for Dynamic Scenes, https://doi.org/10.1109/cvpr46437.2021.01018, fetched 2026-10-26
+[S2] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S3] Neural Radiance Fields-Comprehensive Survey, https://zenodo.org/records/7597137, fetched 2026-10-26
+[S4] Representing Volumetric Videos as Dynamic MLP Maps, https://arxiv.org/abs/2304.06717, fetched 2026-10-29
+[S5] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31

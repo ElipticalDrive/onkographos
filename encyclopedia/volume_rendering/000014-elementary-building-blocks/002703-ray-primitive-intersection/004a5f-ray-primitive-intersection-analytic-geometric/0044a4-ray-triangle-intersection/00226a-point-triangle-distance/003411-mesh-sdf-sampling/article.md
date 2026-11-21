@@ -1,0 +1,188 @@
+# Mesh SDF Sampling
+
+Also called: Signed Distance Field Sampler from Geometry, createGeometrySdfSampler
+
+## Overview
+Mesh SDF Sampling constructs a callable signed distance field (SDF) sampler function from a `THREE.BufferGeometry` instance and a world transform matrix [S1, unofficial]. It solves the problem of evaluating the shortest signed distance from arbitrary world-space coordinates to a triangle mesh surface, where negative values indicate interior points and positive values indicate exterior points [S1, unofficial]. It differs from raw mesh intersection tests by providing continuous distance gradients essential for smooth shading and anti-aliasing [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `geometry`: A `THREE.BufferGeometry` instance. Must be indexed.
+- `matrix`: A `THREE.Matrix4` representing the world transform of the mesh.
+
+**Outputs:**
+- A function `sampler(x, y, z)` returning a `number` (the signed distance) [S1, unofficial].
+
+**Data Structures:**
+- `worldPositions`: An array of vertices transformed into world space. Size equals `geometry.attributes.position.count` [S1, unofficial].
+- `index`: An integer array from `geometry.index.array` [S1, unofficial].
+- `position`: The `THREE.BufferAttribute` from `geometry.attributes.position` [S1, unofficial].
+
+**Temporary Vectors (allocated once, reused):**
+- `va`, `vb`, `vc`: Vertices of the current triangle.
+- `ab`, `ac`, `bc`: Edge vectors.
+- `ap`, `bp`, `cp`: Vectors from vertices to point `p`.
+- `n`: Normal vector.
+- `p`, `q`: Point `p` (query), `q` (closest point on triangle).
+- `bestPoint`: The closest point found so far.
+- `bestNormal`: The normal at `bestPoint`.
+- `toPoint`: Vector from `bestPoint` to `p`.
+
+**Steps:**
+1. **Validation:** Check if `geometry.index` exists. If not, throw an error "Geometry must be indexed" [S1, unofficial].
+2. **Precomputation:** Extract `position` and `index` arrays [S1, unofficial]. Initialize `worldPositions` array. Iterate `i` from 0 to `position.count - 1`: create a vector from `position` at index `i`, apply `matrix` to transform it to world space, and store in `worldPositions[i]` [S1, unofficial].
+3. **Sampler Function Definition:** Return a function `sampler(x, y, z)` [S1, unofficial].
+4. **Query Execution:** Inside the function, set `p` to `(x, y, z)` and initialize `closestDistance2` to `Infinity` [S1, unofficial].
+5. **Triangle Iteration:** Iterate `i` from 0 to `index.length - 1` with step 3: get indices `ia = index[i]`, `ib = index[i+1]`, `ic = index[i+2]` [S1, unofficial]. Retrieve `va = worldPositions[ia]`, `vb = worldPositions[ib]`, `vc = worldPositions[ic]` [S1, unofficial].
+6. **Closest Point & Distance:** Compute `q` as the closest point on triangle `va, vb, vc` to `p` [S1, unofficial]. Compute `distance2 = p.distanceToSquared(q)` [S1, unofficial].
+7. **Update Best:** If `distance2 < closestDistance2`: update `closestDistance2 = distance2` [S1, unofficial]. Copy `q` to `bestPoint` [S1, unofficial]. Compute edge vectors `ab = vb - va`, `ac = vc - va` [S1, unofficial]. Compute `bestNormal = ab.cross(ac).normalize()` [S1, unofficial].
+8. **Sign Calculation:** After the loop, compute `toPoint = p - bestPoint` [S1, unofficial]. Compute `dot = toPoint.dot(bestNormal)` [S1, unofficial]. Set `sign = 1` if `dot >= 0`, else `sign = -1` [S1, unofficial].
+9. **Return:** Return `Math.sqrt(closestDistance2) * sign` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class Vec3:
+    def __init__(self, x=0.0, y=0.0, z=0.0):
+        self.x, self.y, self.z = x, y, z
+    def set(self, x, y, z): self.x, self.y, self.z = x, y, z
+    def copy(self, other): self.x, self.y, self.z = other.x, other.y, other.z
+    def sub(self, other): return Vec3(self.x - other.x, self.y - other.y, self.z - other.z)
+    def add(self, other): return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
+    def scale(self, s): return Vec3(self.x * s, self.y * s, self.z * s)
+    def dot(self, other): return self.x * other.x + self.y * other.y + self.z * other.z
+    def cross(self, other): return Vec3(self.y * other.z - self.z * other.y, self.z * other.x - self.x * other.z, self.x * other.y - self.y * other.x)
+    def length_sq(self): return self.dot(self)
+    def length(self): return math.sqrt(self.length_sq())
+    def normalize(self):
+        l = self.length()
+        return self.scale(1.0 / l) if l > 1e-12 else Vec3()
+    def lerp(self, other, t): return self.add(other.sub(self).scale(t))
+
+def closest_point_on_triangle(p, a, b, c):
+    ab = b.sub(a)
+    ac = c.sub(a)
+    ap = p.sub(a)
+    d1 = ab.dot(ap)
+    d2 = ac.dot(ap)
+    if d1 <= 0.0 and d2 <= 0.0:
+        return a.copy()
+    bp = p.sub(b)
+    d3 = ab.dot(bp)
+    d4 = ab.dot(ab)
+    if d3 >= 0.0 and d1 <= d3:
+        t = d1 / d4
+        return a.lerp(b, t)
+    cp = p.sub(c)
+    d5 = ac.dot(cp)
+    d6 = ac.dot(ac)
+    if d5 <= 0.0 and d2 <= d5:
+        t = d2 / d6
+        return a.lerp(c, t)
+    vc = ap.sub(ab.scale(d1 / d4))
+    if vc.dot(vc) <= 0.0:
+        t = d1 / d4
+        return a.lerp(b, t)
+    vb = ap.sub(ac.scale(d2 / d6))
+    if vb.dot(vb) <= 0.0:
+        t = d2 / d6
+        return a.lerp(c, t)
+    # Point is inside the triangle face; project onto the plane
+    n = ab.cross(ac).normalize()
+    dist = ap.dot(n)
+    return p.sub(n.scale(dist))
+
+def create_geometry_sdf_sampler(geometry, matrix):
+    if not geometry.index:
+        raise ValueError("Geometry must be indexed")
+
+    position_attr = geometry.attributes.position
+    index_arr = geometry.index.array
+    pos_count = position_attr.count
+
+    world_positions = []
+    temp_vec = Vec3()
+    for i in range(pos_count):
+        temp_vec.set(position_attr.getX(i), position_attr.getY(i), position_attr.getZ(i))
+        # Apply matrix transform (simplified for pseudocode clarity)
+        # In practice: temp_vec.applyMatrix4(matrix)
+        world_positions.append(temp_vec.copy())
+
+    va = Vec3()
+    vb = Vec3()
+    vc = Vec3()
+    ab = Vec3()
+    ac = Vec3()
+    to_point = Vec3()
+    best_point = Vec3()
+    best_normal = Vec3()
+    q = Vec3()
+    p = Vec3()
+
+    def sampler(x, y, z):
+        p.set(x, y, z)
+        closest_distance2 = float('inf')
+
+        for i in range(0, len(index_arr), 3):
+            ia = index_arr[i]
+            ib = index_arr[i+1]
+            ic = index_arr[i+2]
+
+            va.copy(world_positions[ia])
+            vb.copy(world_positions[ib])
+            vc.copy(world_positions[ic])
+
+            q.copy(closest_point_on_triangle(p, va, vb, vc))
+
+            dist_sq = p.sub(q).length_sq()
+
+            if dist_sq < closest_distance2:
+                closest_distance2 = dist_sq
+                best_point.copy(q)
+
+                ab.sub(vb, va)
+                ac.sub(vc, va)
+                best_normal.cross(ab, ac).normalize()
+
+        to_point.sub(p, best_point)
+        dot = to_point.dot(best_normal)
+        sign = 1.0 if dot >= 0.0 else -1.0
+
+        return math.sqrt(closest_distance2) * sign
+
+    return sampler
+```
+
+**Parameters:**
+- Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Non-indexed Geometry:** Throws an error if `geometry.index` is falsy [S1, unofficial].
+- **Precision:** Uses `distanceToSquared` to avoid square roots during comparison, then applies `Math.sqrt` at the end [S1, unofficial].
+- **Sign Determination:** The sign is determined by the dot product of the vector from the closest point to the query point and the triangle normal [S1, unofficial].
+
+## Subtopics
+
+### [Signed Distance Field Sampler from Mesh](7856-signed-distance-field-sampler-from-mesh.md)
+This method constructs a callable signed distance field (SDF) sampler function from a `THREE.Mesh` instance, enabling ray-marching algorithms to query distances to complex geometry. It solves the problem of efficiently evaluating the shortest signed distance from arbitrary world-space coordinates to a triangle mesh surface, where negative values indicate interior points and positive values indicate exterior points. It differs from generic geometry samplers by specifically handling the `THREE.Mesh` abstraction, including automatic world matrix updates, and delegates the core geometric computation to a lower-level geometry sampler.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths:** Not given in the sources.
+- **Limitations:** Not given in the sources.
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
+
+## Background
+- **Origin:** Not given in the sources.
+- **History:** Not given in the sources.
+- **Usage:** Not given in the sources.
+
+## Sources
+[S1] three.js-volume-renderer, https://github.com/Donitzo/three.js-volume-renderer, fetched 2026-10-28 (unofficial)

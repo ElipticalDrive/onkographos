@@ -1,0 +1,224 @@
+Contribute to waldnercharles/chibi development by creating an account on GitHub.
+
+Add realtime global illumination to the 3D renderer by waldnercharles · Pull Request #340 · waldnercharles/chibi · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+waldnercharles
+commented
+Oct 11, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Before: 3D surfaces took only the light that shone on them directly plus a flat ambient color or the sky's light, so shaded floors, walls facing away from the sun and the insides of rooms lost all their color, and emissive surfaces lit nothing but themselves.
+After: Environment has global_illumination (Off, Low, Medium, High). With it on, light bounces between 3D surfaces: a sunlit red floor tints the white wall above it, an emissive lamp lights the floor around it even from outside the view, and the probes' light replaces the hemisphere ambient and the sky's diffuse light. The sky still gives reflections, and ambient occlusion still dims it. Off is the default, and Environments saved before this load the new field as zero, which is Off, so nothing changes for existing scenes and no migration is needed.
+Roadmap items R13a and R13b (R12's lighting modes are this quality enum plus AO and the sky, which already exist).
+How: render/scene3d_gi.c follows DDGI (Majercik et al. 2019). The scene collects every opaque solid, in and out of view, as an analytic proxy: built-in shapes as themselves, a Box Frame as its 12 beams, an imported mesh as its bounding box (rays starting inside a mesh's box pass through it, since the mesh may be open). A probe grid is fit to their bounds and kept, with its light, while it still covers them; a refit resamples each new probe from the light the old probes held where it stands. Each frame a fragment pass traces every probe's rays (spherical Fibonacci, turned randomly per frame) through a BVH over the proxies, rebuilt each frame, lighting hits with the lit pass's sun and light falloffs, shadow rays for the lights whose shadows the lit pass draws (skipping solids whose drawn box holds the light, as the lit pass does for bulbs and lanterns), emission and last frame's probe light (multi-bounce). A second pass folds the rays into an octahedral atlas of irradiance (8x8) and distance moments (16x16), averaging evenly over the first frames and then keeping 95%. The lit pass blends the eight surrounding probes with DDGI's backface and Chebyshev visibility weights; a probe inside a solid holds no light, and where none of the eight holds any, the surface takes its light without GI. Misses return the sky's radiance or the ambient colors, so open ground lights exactly as it did without GI.
+Quality
+Most probes
+Rays per probe
+Off (default)
+none, no passes
+Low
+512
+32
+Medium
+2048
+64
+High
+4096
+128
+GI runs on every backend, GLES 3 and WebGPU included. SDL binds at most 16 fragment samplers everywhere, and the widest lit program already used all 16, so the probes' atlas takes the eighth image's place: with GI on, a 3D surface material may read 7 images instead of 8, and reading 8 is an error that names the material. No project in our repos reads more than 5. Only lit programs drawn while GI is on read the probes (new RENDER_PROGRAM_SCENE3D_GI and _MESH_GI kinds), so scenes with it off compile none of its code. The rays canvas is 4096 texels wide so every target stays within WebGL's common texture limit.
+Also: render_pass_shader replaces occlusion's private fragment-pass loader, the sky exposes its light and harmonics to the probes, and GPU pass timing now charges 3D frames to "3D setup", "3D shadow maps", "3D ambient occlusion", "3D global illumination", "3D surfaces" and "3D post-processing". test/fixtures/scene3d gains a Room scene (red and green walls, a block, an emissive lamp, the field sky, Medium AO and GI) for comparing it against Off; docs/rendering-3d.md has the command.
+Known limits, as follow-ups: rays see a material's component color, not a shader graph's computed base color; meshes trace as their bounds (a triangle BVH would fix thin and concave meshes); more than 4096 traced solids is an error; one solid far from the rest spreads the grid thinner while it lasts; all probes update every frame. Scenes whose solids span more than about 1e18 units pass what the shaders' float math holds, so they take their light without GI (the grid's volume and each solid's inverse frame are worked in double, so scenes up to that size still bounce light).
+Tests: the GI cases moved to new --scene3d-gi and --scene3d-gi-gles selectors, so each selector compiles its shaders within the 60-second limit even with an empty shader cache (--scene3d now takes 55 s cold, against 57 s on main before this change). They cover bounce and emitted light (black without GI), open ground matching the ambient light at every quality, a shadowed lamp inside its bulb and inside a Box Frame, hollow mesh boxes, the fallback where every probe lies inside a solid (from the first frame and from the frame a solid moves around lit probes), a 144-tile floor whose BVH wraps a texture row, a 1e13-unit block that still bounces light and a 1e20-unit one that falls back, two-bounce light gathering over frames, refits and Off resets, the solid limit, the 7-image limit and pass timing. Each fix's case was checked to fail without it. --material-ramps pins the lit pass's sampler counts with and without the probes.
+Checks run on the current head (9b4eaa7, main merged in with the 2D lighting stack): make build, make check-format, make test-native, make test-tools, make test-language-all, make test-list, make package-sdk, and make agent-gpu-test for --scene3d, --scene3d-gi, --material-ramps, --material-pixels, --scene2d and --radiance-depth on llvmpipe (Vulkan), plus --scene3d-gles and --scene3d-gi-gles (GLES 3.2 under Xvfb). The repository's CI workflow is disabled, so these local runs are the evidence. Full render suites remain quarantined by the 60-second policy, and GI's GPU cost on real hardware is not measured yet.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_011gy1bJ9MdvF2XjddhiD6Cf
+Add realtime global illumination to the 3D renderer
+…
+8cbbdd5
+```
+3D surfaces took only direct light plus a flat ambient color or the sky's
+light, so shaded sides and rooms lost their color and emissive surfaces lit
+nothing. Environment gains global_illumination (Off, Low, Medium, High):
+a DDGI probe grid fit to the opaque solids traces rays each frame through
+analytic proxies (built-in shapes, Box Frame beams, mesh boxes) found
+through a BVH, lights the hits as the lit pass does, and folds them into
+octahedral irradiance and distance maps that the lit pass blends with
+DDGI's visibility weights. Misses see the sky or the ambient colors, so
+open ground keeps its light. Off is the default and loads from older
+Environments, so no migration is needed.
+
+Only lit programs drawn while it is on read the probes, so scenes without
+it compile none of its code; with it on, a surface material reads at most
+seven images. Shadow rays skip solids whose drawn box holds the light, as
+the lit pass does, and a probe that comes to lie inside a solid stops
+counting at once. GI cases run under their own --scene3d-gi selectors so
+each stays within the 60-second limit with an empty shader cache.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011gy1bJ9MdvF2XjddhiD6Cf
+```
+chatgpt-codex-connector
+Bot
+commented
+Oct 11, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codex Review Summary
+This comment shows the latest Codex review activity on this pull request.
+Review
+Status
+Commit
+Review trigger
+📝 Code Review
+✅ Completed 2026-10-11T02:11:29.487037Z
+fd400cf
+Manual request
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review" or "@codex security review".
+Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.
+chatgpt-codex-connector
+Bot
+reviewed
+Oct 11, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 8cbbdd5c8b
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+src/render/scene3d_gi.c
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Keep global illumination in range for vast scenes
+…
+fd400cf
+```
+A solid 1e13 units wide overflowed two float products: the grid's volume,
+which made the probe spacing infinite, and the general 4x4 inverse of its
+frame, which left rays missing it, so its light never bounced. Work both in
+double. Past about 1e18 units the shaders' squared distances leave float's
+range too, so such scenes now take their light without global illumination
+instead of reading non-finite probes.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011gy1bJ9MdvF2XjddhiD6Cf
+```
+waldnercharles
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@codex review
+The probe-spacing finding is fixed in fd400cf.
+Generated by Claude Code
+chatgpt-codex-connector
+Bot
+reviewed
+Oct 11, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: fd400cfeda
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+src/render/scene3d_gi.c
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+waldnercharles
+mentioned this pull request
+Oct 11, 2026
+Support glTF texture transforms across Standard material slots
+#345
+Merged
+Merge main into the 3D GI branch
+…
+9b4eaa7
+```
+Main gained the 2D lighting stack (#341 to #359). Both sides add GPU
+selectors next to --scene3d and test helpers in material_graphs.h, so
+this keeps both; component_ids.tsv is regenerated by the build.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011gy1bJ9MdvF2XjddhiD6Cf
+```
+waldnercharles
+merged commit ca73095
+into
+main
+Oct 11, 2026
+waldnercharles
+deleted the
+claude/project-thread-inhgdv-35
+branch
+October 11, 2026 07:14
+waldnercharles
+mentioned this pull request
+Oct 12, 2026
+Prepare scene overrides, fix Metal sky rendering, and relocate examples
+#389
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

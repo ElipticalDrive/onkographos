@@ -1,0 +1,168 @@
+--- v001.md
++++ v002.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** An unstructured grid (mesh) defined by cells and faces; a viewing ray for each pixel; a transfer function mapping scalar values to color and opacity; a pre-integrated table for integration [S3].
++*   **Input:** An unstructured grid defined by cells and faces, a viewing ray for each pixel, a transfer function mapping scalar values to color and opacity, and a pre-integrated table for integration [S3].
+ *   **Output:** A 2D image where each pixel contains the accumulated color and opacity of the ray traversal through the grid [S3].
+ 
+@@ -16,5 +16,5 @@
+ 
+ **Steps:**
+-1.  **Projection:** Determine for each pixel in the screen the fragments of the front boundary faces that project there. Store these fragments in front-to-back order [S1, S2, unofficial].
++1.  **Projection:** Determine for each pixel in the screen the fragments of the front boundary faces that project there, storing them in front-to-back order [S1, S2, unofficial].
+ 2.  **Traversal Initialization:** Cast a ray for each pixel into the scene [S3].
+ 3.  **Exit Detection:** During ray traversal, detect when the ray exits the current cell or the mesh boundary [S1, S2, unofficial].
+@@ -26,72 +26,89 @@
+ **Pseudocode:**
+ ```python
+-def bunyk_ray_casting(mesh, camera, transfer_function, pre_integrated_table):
+-    # Step 1: Project boundary faces to screen space
+-    # For each pixel, find fragments of front boundary faces
++def bunyk_ray_casting(mesh, cam_w, cam_h, transfer_function, pre_integrated_table, depth_buffer):
++    # Data structure: screen_fragments maps pixel coordinates to a list of boundary face fragments
+     screen_fragments = {}
+-    for pixel in screen_pixels:
+-        screen_fragments[pixel] = []
+-        for face in mesh.front_boundary_faces:
+-            # Project face to screen and check intersection with pixel
+-            fragments = project_face_to_pixel(face, pixel, camera)
+-            if fragments:
+-                screen_fragments[pixel].extend(fragments)
+-        # Sort fragments front-to-back
+-        screen_fragments[pixel].sort(key=lambda f: f.depth)
++    for y in range(cam_h):
++        for x in range(cam_w):
++            screen_fragments[(x, y)] = []
++            for face in mesh.front_boundary_faces:
++                # Project face to screen; if it covers pixel, add fragment with depth
++                fragment = project_face_to_pixel(face, (x, y), cam_w, cam_h)
++                if fragment is not None:
++                    screen_fragments[(x, y)].append(fragment)
++            # Sort fragments front-to-back by depth
++            screen_fragments[(x, y)].sort(key=lambda f: f.depth)
+ 
+-    # Step 2-6: Ray Traversal
+-    for pixel in screen_pixels:
+-        ray = camera.get_ray(pixel)
+-        accumulated_color = (0, 0, 0, 0)
+-        current_cell = mesh.get_cell_at(ray.origin)
+-        
+-        while ray.has_intersection(current_cell):
+-            # Integrate through current cell
+-            color, opacity = integrate_cell(current_cell, ray, transfer_function, pre_integrated_table)
+-            accumulated_color = blend(accumulated_color, color, opacity)
+-            
+-            # Move ray to next intersection
+-            t_exit = ray.exit_t(current_cell)
+-            ray.origin = ray.point_at(t_exit)
+-            
+-            # Check if ray exited the mesh
+-            if not mesh.contains(ray.origin):
+-                # Step 4: Determine re-entry using boundary fragments
+-                fragments = screen_fragments[pixel]
+-                next_cell = None
+-                for fragment in fragments:
+-                    if fragment.depth > ray.origin.depth:
+-                        next_cell = fragment.cell
+-                        break
+-                
+-                if next_cell:
++    image = {}
++    for y in range(cam_h):
++        for x in range(cam_w):
++            pixel = (x, y)
++            ray = camera_get_ray(pixel, cam_w, cam_h)
++            accumulated_color = (0.0, 0.0, 0.0, 0.0)
++            current_cell = mesh.get_cell_at(ray.origin)
++            if current_cell is None:
++                continue
++
++            while current_cell is not None:
++                # Integrate through current cell
++                t_exit = ray.exit_t(current_cell)
++                color, opacity = integrate_cell(current_cell, ray, t_exit, transfer_function, pre_integrated_table)
++                accumulated_color = blend_front_to_back(accumulated_color, color, opacity)
++
++                # Advance ray
++                ray.origin = ray.point_at(ray.t + t_exit)
++                ray.t += t_exit
++
++                # Check if ray exited the mesh entirely
++                if not mesh.contains(ray.origin):
++                    # Use pre-computed boundary fragments to find re-entry
++                    next_cell = None
++                    for fragment in screen_fragments[pixel]:
++                        if fragment.depth > ray.origin.depth:
++                            next_cell = fragment.cell
++                            break
+                     current_cell = next_cell
+                 else:
+-                    break # Ray has left the mesh entirely
+-            else:
+-                # Move to next neighbor cell
+-                current_cell = mesh.get_neighbor_cell(current_cell, ray.direction)
++                    # Move to next neighbor cell
++                    current_cell = mesh.get_neighbor_cell(current_cell, ray.direction)
+ 
+-        # Step 7: Intermixed Geometry (if applicable)
+-        # Clip with depth buffer if needed
+-        if intermixed_geometry:
+-            depth = hardware_depth_buffer.get_depth(pixel)
+-            if ray.origin.depth > depth:
+-                accumulated_color = (0, 0, 0, 0) # Occluded
++            # Handle intermixed geometry via depth buffer clipping
++            if depth_buffer is not None:
++                buffer_depth = depth_buffer.get_depth(pixel)
++                if ray.origin.depth > buffer_depth:
++                    accumulated_color = (0.0, 0.0, 0.0, 0.0)
+ 
+-        image[pixel] = accumulated_color
++            image[pixel] = accumulated_color
++    return image
+ 
+-def integrate_cell(cell, ray, transfer_function, pre_integrated_table):
+-    # Use pre-integrated table for speed
++def project_face_to_pixel(face, pixel, cam_w, cam_h):
++    # Standard screen-space projection; returns fragment if face covers pixel, else None
++    screen_coords = world_to_screen(face.vertices, cam_w, cam_h)
++    if pixel in screen_coords.bounding_box:
++        return Fragment(depth=face.centroid_depth, cell=face.cell)
++    return None
++
++def integrate_cell(cell, ray, t_exit, transfer_function, pre_integrated_table):
+     # Sample scalar values along ray segment within cell
+-    samples = sample_cell(cell, ray)
++    samples = [cell.scalar_at(ray.point_at(ray.t + t * (t_exit - ray.t))) for t in [0.0, 0.5, 1.0]]
+     # Map samples to color/opacity using transfer function
++    colors = [transfer_function(s) for s in samples]
+     # Use pre-integrated table to combine samples
+-    return pre_integrated_table.lookup(samples)
++    return pre_integrated_table.lookup(colors)
++
++def blend_front_to_back(accum, color, opacity):
++    # Standard front-to-back alpha blending
++    return (
++        accum[0] + color[0] * color[3] * (1.0 - accum[3]),
++        accum[1] + color[1] * color[3] * (1.0 - accum[3]),
++        accum[2] + color[2] * color[3] * (1.0 - accum[3]),
++        accum[3] + color[3] * (1.0 - accum[3])
++    )
+ ```
+ 
+ **Parameters:**
+-*   **Pre-integrated Table:** Used to accelerate integration. The table size and resolution are not specified in the sources [S3].
+-*   **Transfer Function:** Maps scalar values to color and opacity. The specific form is not detailed, but it is user-controllable [S3].
++*   **Pre-integrated Table:** Used to accelerate integration [S3]. The table size and resolution are not specified in the sources.
++*   **Transfer Function:** Maps scalar values to color and opacity [S3]. The specific form is not detailed, but it is user-controllable [S3].
++*   **When to Use:** Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+@@ -106,5 +123,5 @@
+ *   **Strengths:** Simpler, faster, and more robust to floating-point calculations compared to hierarchical spatial structures [S1, unofficial]. Handles non-convexities without expensive search operations [S1, S2, unofficial].
+ *   **Limitations:** Most memory-intensive solution; not appropriate for large unstructured grids [S3]. Software rendering technique, so it does not benefit from hardware acceleration in the same way as HAVS [S3].
+-*   **When to Use:** Suitable for small to medium-sized unstructured grids where simplicity and robustness are prioritized over memory efficiency.
++*   **When to Use:** Not given in the sources.
+ *   **When Not to Use:** Large unstructured grids due to high memory usage [S3].
+ 

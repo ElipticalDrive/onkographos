@@ -1,0 +1,81 @@
+# Opacity-Thresholded Tile Intersection Filtering
+
+Also called: Alpha-threshold Gaussian Filtering, Synergistic Filtering with Tile Intersections
+
+## Overview
+This method filters out 3D Gaussians during the tile intersection phase of tiled rasterization if their opacity $\tau$ falls below a specified alpha-threshold $\epsilon$, treating their axis-aligned bounding box as effectively empty [S1]. It reduces the number of Gaussians requiring sorting and shading, addressing performance bottlenecks caused by large, mostly transparent Gaussians that intersect many tiles but contribute negligible color [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A list of projected 2D Gaussians, each with screen-space opacity $\tau$ and its axis-aligned bounding box (AABB).
+*   **Output:** A filtered list of (Gaussian, tile) pairs, excluding those with $\tau < \epsilon$.
+
+**Data Structures:**
+*   **Gaussian Attributes:** Each Gaussian $i$ stores its screen-space opacity $\tau_i$.
+*   **Tile Grid:** The image is divided into a grid of tiles (typically $16 \times 16$ pixels per parent article). Each tile maintains a list of candidate Gaussians.
+
+**Parameters:**
+*   **Alpha-threshold ($\epsilon$):** The minimum opacity required for a Gaussian to be considered visible. Gaussians with $\tau < \epsilon$ are discarded [S1]. Typical values are not given in the sources.
+
+**Steps:**
+1.  Compute the screen-space AABB for each Gaussian.
+2.  For each tile, identify Gaussians whose AABB intersects the tile's bounds.
+3.  During the intersection check, evaluate the Gaussian's opacity $\tau$.
+4.  If $\tau < \epsilon$, discard the Gaussian for this tile; its AABB is considered empty [S1].
+5.  If $\tau \ge \epsilon$, add the Gaussian to the tile's candidate list for subsequent sorting and shading [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def opacity_thresholded_tile_intersection(gaussians, tiles, epsilon):
+    """
+    Filter Gaussians based on opacity during tile intersection.
+    
+    Args:
+        gaussians: List of dicts/objects with keys:
+                   - 'opacity': float, screen-space opacity tau.
+                   - 'bbox': tuple (min_x, min_y, max_x, max_y) in screen space.
+        tiles: List of dicts/objects with keys:
+               - 'bbox': tuple (min_x, min_y, max_x, max_y) in screen space.
+               - 'candidates': list to store filtered Gaussians.
+        epsilon (float): Alpha-threshold for filtering.
+        
+    Returns:
+        Updated tiles with filtered candidate lists.
+    """
+    for tile in tiles:
+        tile['candidates'] = []
+        for g in gaussians:
+            # AABB intersection check
+            if (g['bbox'][0] <= tile['bbox'][2] and g['bbox'][2] >= tile['bbox'][0] and
+                g['bbox'][1] <= tile['bbox'][3] and g['bbox'][3] >= tile['bbox'][1]):
+                # Opacity threshold filter
+                if g['opacity'] >= epsilon:
+                    tile['candidates'].append(g)
+                # Else: Gaussian is filtered out (opacity too low)
+    return tiles
+```
+
+**Edge Cases and Pitfalls:**
+*   Backend-specific threshold application semantics vary; preserving non-empty support is not a method-wide invariant [S2, unofficial].
+*   An all-one policy (thresholds set to maximum) does not guarantee reproduction of every backend's native pair list solely from multiplier values due to differing cap and subtraction rules [S2, unofficial].
+
+## Subtopics
+
+### Backend-Specific Threshold Application Semantics
+Describes how exported absolute thresholds $m_g \tau_0$ are applied to Gaussian opacities $\alpha_g$ during tile enumeration, determining whether a primitive participates in rendering [S2, unofficial]. The default Speedy-Splat path compares the threshold directly to $\alpha_g$; if threshold $\ge \alpha_g$, it yields zero tile pairs [S2, unofficial]. The 2DGS and Scaffold-GS ports reject primitives whose opacity cannot exceed the selected threshold [S2, unofficial]. The FastGS port applies $\min(m_g \tau_0, 0.95\alpha_g)$ as the effective threshold cap; if the cap binds (i.e., $0.95\alpha_g < m_g \tau_0$), it subtracts $10^{-6}$ from the capped value before constructing the backend-specific extent [S2, unofficial]. Preserving non-empty support is not a method-wide invariant, and an all-one policy should not be assumed to reproduce every backend's native pair list merely from its multiplier values [S2, unofficial].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Reduces the number of Gaussians processed in subsequent sorting and shading steps, lowering both compute time and GPU memory usage [S1].
+*   **Measured Performance:** Combining this modification with others decreased rendering time on the Bicycle scene at native resolution by a factor of 3.77 and GPU memory usage by a factor of 2.11 compared to the reference implementation [S1].
+*   **Scaling:** Performance gains are greatest at higher resolutions, as there are more duplicated Gaussians and hence $\alpha$-computations [S1]. Render times are more consistent, particularly on the Bicycle scene at native resolution, because large transparent Gaussians no longer affect a significant number of tiles [S1].
+*   **Strengths and Limitations:** Highly effective for scenes with many transparent or low-opacity Gaussians. At low resolutions, increasing tile size (e.g., $16 \times 32$) increases the average render time to 9.77 ms, illustrating why tile size is only increased at higher resolutions [S1].
+*   **When to Use:** Use when rendering scenes with many transparent Gaussians, particularly at high resolutions. Avoid increasing tile dimensions at low resolutions due to overhead [S1].
+
+## Background
+This method is an optimization for 3D Gaussian Splatting rendering that leverages the observation that many Gaussians have low opacity and contribute little to the final image, allowing them to be safely discarded early in the rendering pipeline [S1].
+
+## Sources
+[S1] Fast 3D Gaussian Splatting Rendering via Easily Integrable Improvements, https://doi.org/10.1109/lsp.2024.3521379, fetched 2026-10-26
+[S2] TileSkipper: Region-Adaptive Tile Pruning for 3D Gaussian Splatting, https://arxiv.org/abs/2610.09343, fetched 2026-10-29 (unofficial)

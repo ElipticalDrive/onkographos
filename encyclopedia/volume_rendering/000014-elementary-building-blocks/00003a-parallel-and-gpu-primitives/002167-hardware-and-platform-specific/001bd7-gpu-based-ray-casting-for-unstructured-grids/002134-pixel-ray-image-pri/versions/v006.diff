@@ -1,0 +1,130 @@
+--- v005.md
++++ v006.md
+@@ -12,7 +12,8 @@
+ **Data Structures:**
+ 1. **Sampling Plane:** A 2D image plane with finite dimensions, pixelized with a regular grid of pixel centers at integer offsets from the origin [S1, S2, unofficial].
+-2. **Knot List:** For each pixel, a list of knots $K = [(s_0, t_0), (s_1, t_1), \dots, (s_n, t_n)]$ [S1, S2, unofficial].
++2. **Knot List:** For each pixel, a list of knots $K = [(s_0, t_0, p_0), (s_1, t_1, p_1), \dots, (s_n, t_n, p_n)]$ [S1, S2, unofficial].
+    - $s$: Scalar value [S1, S2, unofficial].
+    - $t$: Distance from the sampling plane along the ray [S1, S2, unofficial].
++   - $p$: 3D intersection point [G].
+    - Ordered such that $t_k < t_{k+1}$ [S1, S2, unofficial].
+ 3. **PRI Texture:** A 2D texture storing the knot lists [S2, unofficial]. The specific packing format is detailed in [PRI Texture Storage](2493-pri-texture-storage.md).
+@@ -36,11 +37,11 @@
+          - If the scalar field is linear within cells, $s$ is interpolated from vertex values at the intersection point [S1, S2, unofficial].
+          - If not linear, samples may be located uniformly along the ray, and $s$ is reconstructed using a filter [S1, S2, unofficial].
+-     - Insert the pair $(s, t)$ into the knot list for this pixel [S1, S2, unofficial].
+-   - *Alternative Implementation:* Use depth peeling on graphics hardware. Render layers of cell faces in depth-sorted order to compute knot values $(s, t)$ directly on the GPU [S1, S2, unofficial].
++     - Insert the triple $(s, t, p)$ into the knot list for this pixel [S1, S2, unofficial].
++   - *Alternative Implementation:* Use depth peeling on graphics hardware to render layers of cell faces in depth-sorted order and compute knot values $(s, t)$ directly on the GPU [S1, S2, unofficial].
+ 
+ 3. **Handle Non-Convexity (Boundary Knots):**
+    - For non-convex grids, a ray may enter and exit the grid multiple times [S1, S2, unofficial].
+-   - For every boundary knot $(s_b, t_b)$ (where the ray enters or exits the volume):
+-     - Insert an additional knot $(0, t_b)$ into the knot list immediately following $(s_b, t_b)$ [S1, S2, unofficial].
++   - For every boundary knot $(s_b, t_b, p_b)$ (where the ray enters or exits the volume):
++     - Insert an additional knot $(0, t_b, p_b)$ into the knot list immediately following $(s_b, t_b, p_b)$ [S1, S2, unofficial].
+    - This creates consecutive pairs of knots with multiplicity two, bounding portions of the ray outside the grid with a scalar value of 0 [S1, S2, unofficial].
+ 
+@@ -78,16 +79,16 @@
+         intersections = find_ray_cell_face_intersections(ray_origin, ray_direction, grid)
+         
+-        for intersection in intersections:
+-            t = distance(ray_origin, intersection.point)
+-            s = reconstruct_scalar_field(intersection.point, grid)
+-            knots.append((s, t))
++        for t, point in intersections:
++            s = reconstruct_scalar_field(point, grid)
++            knots.append((s, t, point))
+             
+         knots.sort(key=lambda k: k[1])
+         
+         processed_knots = []
+-        for i, (s, t) in enumerate(knots):
+-            processed_knots.append((s, t))
+-            if is_boundary_knot(intersection, ray_origin, ray_direction, grid):
+-                processed_knots.append((0, t))
++        for s, t, point in knots:
++            processed_knots.append((s, t, point))
++            # Sources do not specify exact algorithm to check if a knot is on the grid boundary [G]
++            if is_on_grid_boundary(point, grid):
++                processed_knots.append((0, t, point))
+                 
+         pri_knot_lists[pixel.index] = processed_knots
+@@ -128,27 +129,26 @@
+     return interpolate_scalar(point, grid.vertices)
+ 
+-def is_boundary_knot(point, origin, direction, grid):
+-    return is_on_boundary(point, grid)
++def is_on_grid_boundary(point, grid):
++    # Sources do not specify exact algorithm to check if a knot is on the grid boundary [G]
++    return False
+ 
+ def pack_knots_to_texture(knot_lists):
+-    return texture_from_lists(knot_lists)
++    # Sources do not specify exact packing format [G]
++    return None
+ 
+ def simplify_linear_spline(knots):
+     if len(knots) <= 2:
+         return knots
+-    simplified = []
+-    current_segment = [knots[0]]
++    simplified = [knots[0]]
++    start_s, start_t = knots[0][0], knots[0][1]
+     for i in range(1, len(knots) - 1):
+-        s_prev, t_prev = current_segment[-1]
+-        s_curr, t_curr = knots[i]
+-        s_next, t_next = knots[i+1]
+-        if is_collinear(s_prev, t_prev, s_curr, t_curr, s_next, t_next):
+-            continue
+-        else:
+-            current_segment.append(knots[i])
+-            simplified.extend(current_segment)
+-            current_segment = [knots[i]]
+-    current_segment.append(knots[-1])
+-    simplified.extend(current_segment)
++        curr_s, curr_t = knots[i][0], knots[i][1]
++        next_s, next_t = knots[i+1][0], knots[i+1][1]
++        # Check if current point is collinear with start and next
++        cross = (curr_s - start_s) * (next_t - start_t) - (curr_t - start_t) * (next_s - start_s)
++        if abs(cross) > 1e-6:
++            simplified.append(knots[i])
++            start_s, start_t = knots[i][0], knots[i][1]
++    simplified.append(knots[-1])
+     return simplified
+ 
+@@ -174,17 +174,17 @@
+ **Time Complexity:**
+ *   **Construction:** Depends on the number of pixels and intersections. Table 1 in [S1, unofficial] shows construction times for $256 \times 256$ resolution:
+-    *   Blunt Fin (187,395 tets): 29.20 seconds.
+-    *   Combustor (215,040 tets): 86.04 seconds.
+-    *   Liquid Oxygen Post (513,375 tets): 32.84 seconds.
+-    *   SPX (12,936 tets): 4.39 seconds.
++    *   Blunt Fin (187,395 tets): 29.20 seconds [S1, S2, unofficial].
++    *   Combustor (215,040 tets): 86.04 seconds [S1, S2, unofficial].
++    *   Liquid Oxygen Post (513,375 tets): 32.84 seconds [S1, S2, unofficial].
++    *   SPX (12,936 tets): 4.39 seconds [S1, S2, unofficial].
+ *   **Rendering:** Efficient, using slice-based rendering similar to hardware-accelerated regular grid rendering [S1, S2, unofficial].
+ 
+ **Memory Complexity:**
+-*   Proportional to the number of pixels and the average number of knots per spline.
++*   Proportional to the number of pixels and the average number of knots per spline [S1, S2, unofficial].
+ *   Average knots per spline for $256 \times 256$ resolution (from [S1, unofficial]):
+-    *   Blunt Fin: 80 knots/spline.
+-    *   Combustor: 63 knots/spline.
+-    *   Liquid Oxygen Post: 85 knots/spline.
+-    *   SPX: 27 knots/spline.
++    *   Blunt Fin: 80 knots/spline [S1, S2, unofficial].
++    *   Combustor: 63 knots/spline [S1, S2, unofficial].
++    *   Liquid Oxygen Post: 85 knots/spline [S1, S2, unofficial].
++    *   SPX: 27 knots/spline [S1, S2, unofficial].
+ 
+ **Strengths:**
+@@ -200,5 +200,5 @@
+ 
+ ## Background
+-The Pixel Ray Image (PRI) was introduced by Shareef et al. in 2006 [S1, S2, unofficial]. It is an image-based approach designed to allow flexible sample placement and efficient mapping to graphics hardware. It builds on the idea of replacing the unstructured grid with a semi-regular data structure to leverage current trends in hardware performance [S1, S2, unofficial].
++The Pixel Ray Image (PRI) was introduced by Shareef et al. in 2006 [S1, S2, unofficial]. It is an image-based approach designed to allow flexible sample placement and efficient mapping to graphics hardware [S1, S2, unofficial]. It builds on the idea of replacing the unstructured grid with a semi-regular data structure to leverage current trends in hardware performance [S1, S2, unofficial].
+ 
+ ## Sources

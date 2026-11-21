@@ -1,0 +1,234 @@
+My journey of developing a current-gen 3D game engine with Metal-cpp and Vulkan - Add experimental micro voxel volume rendering with sparse brickmap by painfulexistence · Pull Request #61 · painfulexistence/project-vapor
+
+Add experimental micro voxel volume rendering with sparse brickmap by painfulexistence · Pull Request #61 · painfulexistence/project-vapor · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+painfulexistence
+commented
+Jul 5, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Implements an experimental fullscreen voxel raymarching pass that renders a sparse brickmap volume between the main geometry pass and sky rendering. The system uses a two-level DDA (Digital Differential Analyzer) algorithm to efficiently traverse a coarse brick grid and fine-grained voxel data, with proper depth integration for compositing with rasterized geometry.
+Key Changes
+VoxelRaymarchPass: New render pass that executes fullscreen voxel raymarching after MainRenderPass, writing hardware depth so voxels depth-test correctly against rasterized geometry and subsequent passes (sky, fog, bloom)
+Sparse Brickmap Structure:
+Coarse grid stores uint32 entries per 8³ brick cell: empty sentinel (0xFFFFFFFF), uniform-material sentinel (0x80000000 | material), or index into brick pool
+Only mixed (surface) bricks occupy GPU memory; fully-buried terrain collapses to uniform entries
+Significantly reduces memory footprint compared to dense voxel grids
+Procedural Demo Volume Generation (generateVoxelDemoVolume):
+Generates terrain heightfield using Perlin noise with FBM (fractional Brownian motion)
+Carves caves below surface crust
+Adds ore speckles and floating crystal spheres
+Parallelized column fill using thread pool for performance
+Compacts dense scratch grid into sparse brickmap on GPU
+Two-Level DDA Raymarching:
+Coarse pass traverses brick-sized cells
+Fine pass descends into stored bricks for voxel-level detail
+Uniform bricks hit immediately without fine traversal
+Proper normal calculation for surface lighting
+Lighting & Shading:
+Sun shadow support via voxel raycast from hit point
+Hemisphere ambient lighting (sky-tinted above, ground bounce below)
+Per-voxel albedo variation using hash noise for readability
+Integrates with atmosphere system for sun direction/color/intensity
+Render Graph Integration: VelocityPass moved after VoxelRaymarchPass so motion vectors include voxel pixels; temporal denoisers read stale velocity (acceptable for low-frequency effects)
+ImGui Controls: Added "Micro Voxels (Experimental)" panel with:
+Enable/disable toggle
+Volume origin and voxel size adjustment
+Ray step count configuration
+Grid size selection (128³, 256³, 512³)
+Sun shadow and ambient intensity controls
+Volume regeneration and shader hot-reload buttons
+GPU/dense memory usage statistics
+Metal Shader (3d_voxel_raymarch.metal): Fullscreen triangle pass implementing two-level DDA with proper AABB intersection, voxel traversal, and lighting calculations
+Implementation Details
+Includes <cstring> and <thread> headers for memory operations and parallelization
+Lazy initialization: demo volume generated on first enable to avoid startup overhead
+Graceful fallback: voxel pipeline creation wrapped in try-catch to allow shader compilation failures
+Per-frame uniform buffers updated with camera/sun data each frame
+Brick pool and index grid buffers recreated when grid dimensions change
+Comprehensive statistics logging (solid voxel count, fill percentage, brick counts, GPU memory usage)
+https://claude.ai/code/session_01S3jx9NJjEtqcGPPkwebudm
+claude
+added 9 commits
+July 3, 2026 01:29
+feat: experimental micro voxel rendering pass (Metal)
+…
+bc1a845
+```
+Add a raymarched micro-voxel vertical slice to the Metal renderer:
+
+- 3d_voxel_raymarch.metal: fullscreen-triangle fragment shader doing a
+  two-level DDA (8^3-voxel brick skipping + fine per-voxel traversal)
+  over a dense 256^3 uint8 palette grid, with a voxel-raycast sun shadow,
+  hemisphere ambient, per-voxel albedo variation, and hardware depth
+  output so hits composite correctly with rasterized geometry.
+- VoxelRaymarchPass runs between MainRenderPass and SkyAtmospherePass on
+  the resolved color/depth targets; because it writes depth, the sky's
+  equal-test skips voxel pixels and fog/bloom/post treat voxels like any
+  opaque surface.
+- Procedural demo volume (terrain heightfield + caves + ore speckles +
+  floating crystal spheres) generated lazily on first enable (~17 MB);
+  palette + brick occupancy mask rebuilt on regenerate.
+- ImGui "Micro Voxels (Experimental)" section: enable toggle, volume
+  origin/voxel size/ray-step controls, sun shadow toggle, regenerate
+  button, fill statistics. Also exposed via setVoxelRenderingEnabled().
+
+The DDA traversal and volume generation were validated against a
+brute-force fixed-step reference raymarcher over 15k random rays
+(0.02% disagreement, all grazing-corner cases inherent to the
+fixed-step reference).
+
+Metal backend only; disabled by default.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S3jx9NJjEtqcGPPkwebudm
+```
+feat: sparse brickmap storage for micro voxel rendering
+…
+bcce375
+```
+Replace the dense voxel grid with a sparse brickmap:
+
+- Coarse index grid holds one uint32 per 8^3 brick: an empty sentinel
+  (skipped in a single coarse DDA step), a uniform-material sentinel
+  (fully solid brick; the ray hits its entry face immediately with no
+  fine data fetch), or an index into a compacted brick pool.
+- Only mixed (surface) bricks occupy pool memory, so fully-buried
+  terrain interiors and empty air cost 4 bytes per brick instead of
+  512. On the 256^3 demo terrain this roughly halves GPU memory even
+  with caves fragmenting the interior; solid-interior scenes save far
+  more, and it unlocks larger grids.
+- Grid size is now runtime-configurable (128/256/512 per edge) from the
+  ImGui panel; volume generation is parallelized over z slices with
+  std::thread and reports build time and brick statistics.
+- Add a Reload Shader button for raymarch shader iteration without an
+  app restart.
+
+Verified by an updated standalone parity test: full voxel-by-voxel
+reconstruction from the brickmap matches the dense scratch grid, and
+the two-level DDA with pool indirection + uniform-brick early hits
+produces identical results to the previous dense traversal over 15k
+random rays (same 0.02% grazing-corner disagreement vs the fixed-step
+reference).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S3jx9NJjEtqcGPPkwebudm
+```
+Merge remote-tracking branch 'origin/main' into claude/micro-voxel-re…
+…
+c499d64
+```
+…ndering-zyeppz
+
+# Conflicts:
+#	Vapor/src/renderer_metal.cpp
+```
+fix: compute velocity after voxel pass so motion vectors cover voxels
+…
+038f332
+```
+Move VelocityPass from before MainRenderPass to just after the voxel
+raymarch pass, so it reads the full opaque depth buffer (triangles +
+voxels) instead of triangle-only depth. Voxel pixels now get correct
+camera-motion vectors in velocityRT instead of the far-plane/sky
+velocity they picked up when voxels weren't yet in the depth buffer.
+
+Tradeoff: the RT temporal denoisers that consume velocity earlier in
+the frame (AO temporal, point-shadow temporal) now read it one frame
+stale. Acceptable because both trace triangle-only TLAS geometry (no
+voxels), are low-frequency and already denoised, and tolerate stale
+velocity under smooth camera motion. Clouds are unaffected — they
+reproject via prevViewProj directly, not the velocity buffer.
+
+Pure pass reordering; no shader or interface changes.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S3jx9NJjEtqcGPPkwebudm
+```
+Merge remote-tracking branch 'origin/main' into claude/micro-voxel-re…
+…
+f49ab24
+```
+…ndering-zyeppz
+```
+feat: gradient-noise terrain and 5cm default voxels for the demo volume
+…
+85960e6
+```
+The first terrain recipe read as fake: hash-based value noise (blocky,
+axis-aligned plateaus) squared to sharpen peaks, with a height range up
+to 0.92 of the volume edge — a ~0.72 height/width ratio that made the
+terrain look like spikes rather than hills. Replace the heightfield
+with gradient (Perlin-style) noise — hashed unit lattice gradients,
+quintic fade — at gentler amplitude (base 0.10N + 0.34N variation,
+pow 1.6 valley bias), giving a ~0.28 height/width ratio; snow/sand
+lines scale with the new range. Verified the height distribution and
+relief shape with a standalone comparison harness before porting.
+
+Also halve the default voxel size to 5cm (256^3 => a centered 12.8m
+diorama) for finer-grained voxels; grid size and voxel size remain
+adjustable in the ImGui panel.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S3jx9NJjEtqcGPPkwebudm
+```
+feat: Minecraft-style per-pixel corner AO for micro voxels
+…
+56d7a4e
+```
+At each primary hit, darken the point by the solidity of the 8
+neighbors around the hit face (bilinear across the face for a smooth
+per-pixel gradient, not per-vertex banding). 8 extra brickmap lookups
+on hits only; uniform bricks answer without touching the pool. AO
+fully attenuates the hemisphere ambient and darkens direct by a
+stylized 30% so corners stay readable in full sun. aoStrength setting
+(0 disables) exposed in the ImGui panel.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S3jx9NJjEtqcGPPkwebudm
+```
+refactor: generate voxel volume via enkiTS scheduler, not raw std::th…
+…
+3bdbb2d
+```
+…read
+
+The voxel demo generator spawned raw std::threads and joined them, but
+the engine already runs an enkiTS TaskScheduler (EngineCore::
+getTaskScheduler). Use an enki::TaskSet over the z slices instead: it
+draws from the existing persistent worker pool and load-balances the
+partitions, rather than spawning/joining a fresh thread set each
+regenerate. Falls back to a serial fill if the scheduler isn't
+available. Solid-voxel count is accumulated via a relaxed atomic since
+partitions run concurrently. Drops the now-unused <thread> include.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S3jx9NJjEtqcGPPkwebudm
+```
+Merge remote-tracking branch 'origin/main' into claude/micro-voxel-re…
+…
+25cf9d7
+```
+…ndering-zyeppz
+
+# Conflicts:
+#	Vapor/src/renderer_metal.cpp
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

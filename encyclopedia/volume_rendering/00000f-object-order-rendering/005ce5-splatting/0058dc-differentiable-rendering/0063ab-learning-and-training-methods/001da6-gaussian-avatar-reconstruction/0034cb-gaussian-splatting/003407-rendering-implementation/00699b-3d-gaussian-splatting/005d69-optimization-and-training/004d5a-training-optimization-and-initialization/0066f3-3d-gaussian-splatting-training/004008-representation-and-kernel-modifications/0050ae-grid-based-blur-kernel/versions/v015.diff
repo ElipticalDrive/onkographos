@@ -1,0 +1,271 @@
+--- v014.md
++++ v015.md
+@@ -4,162 +4,137 @@
+ 
+ ## Overview
+-Grid-based Blur Kernels replace the multi-layer perceptron (MLP) used in prior works to generate spatially-varying blur kernels with a set of learnable, indexed grid tensors [S1]. This method models spatially-varying blurriness by assigning one of $N_k$ discrete blur kernels to pixels based on a pre-computed sharpness level [S1]. It sets itself apart from sibling methods like Negative Gaussian Splatting by explicitly addressing defocus blur in the rendering pipeline through differentiable convolution, rather than modifying the primitive geometry or opacity [S1].
++Grid-based Blur Kernels address the challenge of modeling spatially-varying blurriness in radiance field optimization by replacing MLP-generated blur kernels with a set of learnable, indexed grid kernels [S1]. Unlike [Negative Gaussian Splatting](9152-negative-gaussian-splatting.md) which modifies primitive attributes, or [Scaffold-GS](9186-scaffold-gs.md) which constrains geometry, this method injects a differentiable blur convolution into the rendering pipeline to explicitly deblur or model defocus [S1]. It sets itself apart from previous works that use MLPs to generate kernels by allowing expressivity improvements via grid size expansion without additional computational cost for kernel generation [S1].
+ 
+ ## How it works
+-**Inputs:**
+-- Clean image $I_c$ (ground truth or intermediate estimate).
+-- Sharpness level map $L$ (pre-computed, quantized defocus map).
+-- Number of training views $N_{img}$.
+-- Number of blur kernels $N_k$.
+-- Kernel size $K$.
+-- Number of channels $C$.
+-
+-**Outputs:**
+-- Blurred image $I_b$.
+-- Optimized blur kernels $\mathcal{B}$.
++**Inputs and Outputs:**
++*   **Inputs:** A set of training views (images), a sharpness level map $L$ (precomputed), and the number of blur kernels $N_k$.
++*   **Outputs:** A blurred image $I_b$ that approximates the ground truth $I_{gt}$, and optimized blur kernels $\mathcal{B}$.
+ 
+ **Data Structures:**
+-- $\mathcal{B}$: Tensor of shape $\mathbb{R}^{N_{img} \times N_k \times K \times K \times C}$.
+-  - $N_{img}$: Number of training views.
+-  - $N_k$: Number of unique sharpness groups/blur kernels.
+-  - $K$: Kernel size (spatial dimension).
+-  - $C$: Number of channels.
+-  - Note: The channel dimension $C$ is often omitted in notation for brevity [S1].
++*   **Blur Kernel Tensor $\mathcal{B}$:** A tensor of shape $\mathbb{R}^{N_{img} \times N_k \times K \times K \times C}$ [S1].
++    *   $N_{img}$: Number of training views.
++    *   $N_k$: Number of unique sharpness groups (blur kernels).
++    *   $K$: Kernel size (spatial dimension).
++    *   $C$: Number of color channels.
++    *   *Note:* The channel dimension $C$ is often omitted for brevity in formulas [S1].
++*   **Sharpness Level Map $L$:** A map where each pixel is assigned an integer value from $0$ to $N_k-1$, indicating its sharpness group [S1].
++*   **Cropped Image $I'_c$:** A tensor of shape $P' \times P' \times K \times K$ derived from the clean image $I_c$ [S1].
+ 
+ **Parameters:**
+-- $K$: Kernel size. Typical value: 11 [S1].
+-- $N_k$: Number of blur kernels. Typical value: 400 [S1].
+-- Learning rate for $\mathcal{B}$: 0.05 [S1].
+-- Initialization: 2D Gaussian distribution [S1].
+-- $P'$: Patch size dimension. In experiments, patch size $P=22$ is used, implying $P'$ relates to the central region of the patch [S1].
++*   $K$: Kernel size. Typical value: 11 [S1].
++*   $N_k$: Number of blur kernels. Typical value: 400 [S1].
++*   Learning Rate: 0.05 for the kernel [S1].
++*   Initialization: 2D Gaussian distribution [S1].
++*   $P'$: Patch size dimension. Typical value: 22 (patch size $P=22$) [S1].
+ 
+-**Steps:**
+-1. **Preprocessing (Sharpness Prior):**
+-   - Estimate a defocus map for every training view using a Defocus Map Estimation Network (DMENet) [S1].
+-   - Quantize the defocus map uniformly into $N_k$ values to create the sharpness level map $L$ [S1].
+-   - Optionally, segment the scene based on depth information (e.g., from MIDAS) to assess focus levels within segments [S1].
+-   - This step is performed once and does not affect training time [S1].
+-
+-2. **Kernel Indexing:**
+-   - For each pixel $(h, w)$ in a training view, determine its sharpness level $L[h,w]$ from the map $L$ [S1].
+-   - Map the pixel to its corresponding blur kernel $w_x$ using the mapping function $F$:
+-     $$ w_x = F(\mathcal{B}, L, x) $$
+-   - Here, $F$ retrieves the kernel from $\mathcal{B}$ based on the view index and the sharpness level $L[h,w]$ [S1].
+-   - Optimization skips convolution for pixels in the 100 groups (out of $N_k$) with the highest sharpness values, as these regions require minimal blurring [S1].
+-
+-3. **Image Cropping:**
+-   - Crop the clean image $I_c$ along height and width with stride 1 to obtain a patch tensor $I_c'$ [S1].
+-   - The shape of $I_c'$ is $P' \times P' \times K \times K$ (omitting channels for brevity in the source notation, but effectively including $C$) [S1].
+-   - $I_c'[h,w,i,j]$ represents the pixel value at offset $(i,j)$ relative to the center $(h,w)$ [S1].
+-
+-4. **Blurred Image Convolution:**
+-   - Compute the blurred image $I_b$ by convolving $I_c'$ with the indexed kernel $w_x$:
+-     $$ I_b[h,w] = \sum_{i=0}^{K} \sum_{j=0}^{K} I_c'[h,w,i,j] w_x[h,w,i,j] $$
+-   - $I_b$ has shape $P' \times P'$ [S1].
+-   - $h, w$ are indices along the height and width of the image and blur kernels [S1].
+-
+-5. **Optimization:**
+-   - Optimize both the blur kernels $\mathcal{B}$ and the neural fields jointly via gradient descent [S1].
+-   - Minimize the reconstruction loss $\mathcal{L}_{recon}$:
+-     $$ \mathcal{L}_{recon} = ||I_b - I_{gt}||_2 $$
+-   - $I_{gt}$ is the ground truth image [S1].
++**Numbered Steps:**
++1.  **Preprocessing (Sharpness Prior):** Estimate a spatially varying defocus map for every training view using a Defocus Map Estimation Network (DMENet) [S1]. Quantize this map uniformly into $N_k$ values to create the sharpness level map $L$ [S1]. Optionally, segment the scene based on depth information (e.g., from MIDAS) to assess focus levels within segments [S1]. This step is performed once before training [S1].
++2.  **Kernel Indexing:** For each pixel $x$ in a training view, determine its sharpness level $L_x$ from the map $L$. Map this level to a specific blur kernel $w_x$ from the grid $\mathcal{B}$ using a mapping function $F$:
++    $$ w_x = F(\mathcal{B}, L, x) $$
++    Here, $F$ simply indexes $\mathcal{B}$ using the view index and the sharpness level $L_x$ [S1].
++3.  **Image Cropping:** Crop the clean image $I_c$ along height and width with stride 1 to obtain $I'_c$ of shape $P' \times P' \times K \times K$ [S1]. This creates a local neighborhood window for each pixel in the target patch [S1].
++4.  **Blurred Image Convolution:** Compute the blurred image $I_b$ at pixel coordinates $(h, w)$ by convolving the cropped clean image with the indexed kernel $w_x$:
++    $$ I_b[h,w] = \sum_{i=0}^{K} \sum_{j=0}^{K} I'_c[h,w,i,j] w_x[h,w,i,j] $$
++    where $h, w$ are indices along the height and width of the image and blur kernels, respectively [S1].
++5.  **Optimization:** Optimize both the blur kernels $\mathcal{B}$ and the underlying neural fields (e.g., NeRF) jointly using the reconstruction loss:
++    $$ \mathcal{L}_{recon} = ||I_b - I_{gt}||_2 $$
++    where $I_{gt}$ is the ground truth image [S1].
+ 
+ **Pseudocode:**
++```python
++def grid_based_blur_kernel_rendering(training_views, sharpness_map_L, B, K, Nk):
++    """
++    training_views: List of images or patches.
++    sharpness_map_L: Tensor of shape (H, W) with integer values in [0, Nk-1].
++    B: Tensor of shape (N_img, Nk, K, K, C).
++    K: Kernel size.
++    Nk: Number of blur kernels.
++    """
++    # Step 1: Preprocessing is assumed done externally to produce L.
++    # Step 2 & 3: For each training view (indexed by v_idx):
++    for v_idx in range(len(training_views)):
++        I_c = training_views[v_idx] # Shape: (H, W, C)
++        P_prime = I_c.shape[0] # Assuming square patches for simplicity
++        
++        # Crop I_c to get I_c' for convolution
++        # I_c' shape: (P_prime, P_prime, K, K, C)
++        # This involves gathering neighbors for each pixel in the patch
++        I_c_prime = crop_image_with_stride(I_c, K) 
++        
++        # Initialize blurred image
++        I_b = zeros_like(I_c)
++        
++        # Get sharpness map for this view
++        L_view = sharpness_map_L[v_idx] # Shape: (P_prime, P_prime)
++        
++        # Step 4: Convolution with indexed kernels
++        for h in range(P_prime):
++            for w in range(P_prime):
++                # Get sharpness level for pixel (h, w)
++                sharpness_level = L_view[h, w]
++                
++                # Index the blur kernel from the grid B
++                # w_x shape: (K, K, C)
++                w_x = B[v_idx, sharpness_level, :, :, :]
++                
++                # Perform convolution for this pixel
++                # I_c_prime[h, w, :, :, :] is the KxKxC patch centered at (h,w)
++                patch = I_c_prime[h, w, :, :, :]
++                
++                # Element-wise multiply and sum
++                I_b[h, w, :] = sum(sum(patch * w_x))
++        
++        # Step 5: Compute Loss
++        # L_recon = ||I_b - I_gt||_2
++        # Backpropagate to update B and neural fields
++        compute_loss_and_update(I_b, I_gt, B)
+ 
+-```python
+-def grid_based_blur_kernel_forward(I_c, L, B, K, N_k, N_img, C, skip_groups):
++def crop_image_with_stride(I_c, K):
+     """
+-    Forward pass for Grid-based Blur Kernel.
+-    
+-    Args:
+-        I_c: Clean image tensor of shape (H, W, C).
+-        L: Sharpness level map of shape (H, W), values in [0, N_k-1].
+-        B: Blur kernels tensor of shape (N_img, N_k, K, K, C).
+-        K: Kernel size.
+-        N_k: Number of blur kernels.
+-        N_img: Current view index (0 to N_img-1).
+-        C: Number of channels.
+-        skip_groups: Set of sharpness levels to skip convolution for.
+-        
+-    Returns:
+-        I_b: Blurred image tensor of shape (H, W, C).
++    Crops the image I_c to create a tensor of local neighborhoods.
++    Returns tensor of shape (H, W, K, K, C)
+     """
+-    H, W, _ = I_c.shape
+-    I_b = torch.zeros_like(I_c)
+-    
+-    # Pre-crop I_c to handle boundary conditions if necessary.
+-    # Assuming I_c is padded or cropped such that valid patches exist.
+-    # The source describes cropping with stride 1 to get I_c' of shape P' x P' x K x K.
+-    # For implementation, we iterate over valid (h, w) and extract patches.
++    H, W, C = I_c.shape
++    I_c_prime = zeros((H, W, K, K, C))
+     
+     for h in range(H):
+         for w in range(W):
+-            sharpness_level = int(L[h, w])
++            # Extract KxK neighborhood centered at (h, w)
++            # Handle boundaries by padding or clamping as needed [G]
++            h_start = max(0, h - K // 2)
++            h_end = min(H, h + K // 2 + 1)
++            w_start = max(0, w - K // 2)
++            w_end = min(W, w + K // 2 + 1)
+             
+-            # Skip convolution for high sharpness groups
+-            if sharpness_level in skip_groups:
+-                # If skipping, the blurred image might just be the center pixel
+-                # or the original pixel, depending on specific implementation.
+-                # The source says "skip convolution", implying the kernel is not applied.
+-                # We assume the output is the center pixel of the patch for skipped groups.
+-                # Extract center pixel from I_c.
+-                # Note: Boundary handling for h,w near edges is not specified in source [G].
+-                # Assuming valid indices for simplicity.
+-                I_b[h, w] = I_c[h, w]
+-                continue
++            # Extract patch
++            patch = I_c[h_start:h_end, w_start:w_end, :]
+             
+-            # Get the blur kernel for this sharpness level and view
+-            # B shape: (N_img, N_k, K, K, C)
+-            kernel = B[N_img, sharpness_level, :, :, :] # Shape: (K, K, C)
++            # Resize or pad patch to exactly KxK if boundaries are hit [G]
++            # For simplicity, assume valid padding or that K is small relative to H,W
++            # In practice, this step gathers the neighbors for the convolution
++            I_c_prime[h, w, :, :, :] = patch # Simplified; actual implementation requires precise indexing
+             
+-            # Extract patch from I_c centered at (h, w)
+-            # Patch shape: (K, K, C)
+-            # We need to handle boundaries. Source implies valid patches.
+-            # Let's assume I_c is padded or we only process interior pixels.
+-            # For a complete implementation, padding is required.
+-            # Here we assume h, w are such that the patch fits.
+-            patch = I_c[max(0, h - K//2):min(H, h + K//2 + 1), 
+-                        max(0, w - K//2):min(W, w + K//2 + 1), :]
+-            
+-            # If patch is smaller than KxK due to boundaries, pad it.
+-            # Source does not specify padding strategy. [G]
+-            # We assume valid centering for the sake of the formula.
+-            if patch.shape[0] < K or patch.shape[1] < K:
+-                # Pad patch to KxK
+-                pad_h = K - patch.shape[0]
+-                pad_w = K - patch.shape[1]
+-                patch = torch.nn.functional.pad(patch, (pad_w//2, pad_w - pad_w//2, 
+-                                                       pad_h//2, pad_h - pad_h//2, 0, 0))
+-            
+-            # Convolve patch with kernel
+-            # I_b[h,w] = sum_{i,j} I_c'[h,w,i,j] * w_x[h,w,i,j]
+-            # This is a dot product over the spatial dimensions for each channel.
+-            blurred_pixel = torch.sum(patch * kernel) # Shape: (C,)
+-            
+-            I_b[h, w] = blurred_pixel
+-            
+-    return I_b
++    return I_c_prime
++```
+ 
+-def compute_loss(I_b, I_gt):
+-    """
+-    Compute MSE loss between blurred image and ground truth.
+-    """
+-    return torch.mean((I_b - I_gt) ** 2)
+-```
++**Edge Cases and Pitfalls:**
++*   **High Sharpness Groups:** Pixels in groups with high sharpness values (clear regions) may skip convolution to save computation. The method skips convolution for pixels in 100 groups of each view with high sharpness values [S1].
++*   **Boundary Conditions:** The cropping operation requires handling image boundaries. The sources do not specify padding strategy, but standard practice involves zero-padding or replication [G].
++*   **Initialization:** Blur kernels are initialized with a 2D Gaussian distribution to provide a reasonable starting point for optimization [S1].
+ 
+ ## Subtopics
+ 
+ ### Sharpness Prior with Defocus Map Estimation
+-A preprocessing variant that estimates a spatially varying defocus map to determine the sharpness level of image pixels, which is used to group pixels for blur kernel assignment [S1]. It uses DMENet (an end-to-end CNN framework) to estimate the defocus map for every training view [S1]. The defocus map is quantized uniformly into $N_k$ values to create the sharpness level map $L$ [S1]. Additionally, it segments the scene based on depth information (from MIDAS) to assess the focus level within each segment [S1]. This step is performed once as preprocessing and does not affect training time [S1].
++This variant refers to the preprocessing step used to generate the sharpness level map $L$ [S1]. It estimates a spatially varying defocus map for every training view using DMENet, an end-to-end CNN framework [S1]. The defocus map is quantized uniformly into $N_k$ values to create the sharpness level map $L$, which divides pixels into $N_k$ groups based on their degree of sharpness [S1]. Additionally, the method may segment the scene based on depth information (from MIDAS) to assess the focus level within each segment, improving the extraction of sharp regions [S1]. This step is generic and can use any operator that reliably measures sharpness, but DMENet and MIDAS are the specific tools cited [S1].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The method reduces the number of required neighboring rays per pixel from $K^2$ to $(P' + K + 1)^2 / P'^2$ compared to random ray sampling in NeRF, where $N \gg P'^2$ [S1]. The sharpness prior is computed once in preprocessing, taking less than a couple of minutes, and does not affect subsequent training or testing times [S1].
+-- **Memory Complexity:** Requires storing the tensor $\mathcal{B}$ of shape $\mathbb{R}^{N_{img} \times N_k \times K \times K \times C}$ [S1].
+-- **Performance:** Successfully renders clean images even from harshly defocused regions [S1].
+-- **Strengths:** Expressivity of blur kernels can be improved by simply increasing the grid size ($N_k$) without extra cost to produce kernels [S1].
+-- **Limitations:** Relies on the accuracy of the defocus map estimation network (DMENet) and depth estimation (MIDAS) [S1].
++*   **Time Complexity:** The method reduces the number of required neighboring rays per ray from $K^2$ to $\frac{K^2}{P'^2}$ compared to random ray sampling in NeRF, due to random patch sampling [S1]. The sharpness prior computation takes less than a couple of minutes and does not affect training or testing times [S1].
++*   **Memory Complexity:** The blur kernel tensor $\mathcal{B}$ has size $N_{img} \times N_k \times K \times K \times C$. With $N_{img}$ views, $N_k=400$, $K=11$, and $C=3$, this is a significant but manageable memory footprint [S1].
++*   **Performance:** The method successfully renders clean images even from harshly defocused regions [S1]. It improves expressivity by increasing grid size without extra cost for kernel generation [S1].
++*   **Strengths:** Joint optimization with neural fields allows rapid convergence [S1]. The grid-based approach is more efficient than MLP-based kernel generation [S1].
++*   **Limitations:** Requires a preprocessing step for sharpness estimation [S1]. Performance depends on the accuracy of the defocus map estimation [S1].
+ 
+ ## Background
+-The method was introduced in "Sharp-NeRF: Grid-based Fast Deblurring Neural Radiance Fields using Sharpness Prior" [S1]. It addresses the limitation of previous works [17, 22, 30] that employed MLPs to generate blur kernels, which are less efficient and expressive than learnable grid-based kernels [S1]. The approach leverages the transversal relation among neighboring rays and depth information to model spatially-varying blurriness [S1].
++The method originates from "Sharp-NeRF: Grid-based Fast Deblurring Neural Radiance Fields using Sharpness Prior" [S1]. It was proposed to address the limitations of NeRF and its derivatives in handling defocus blur by leveraging a sharpness prior and grid-based blur kernels [S1]. The work contrasts with previous methods that used MLPs to generate blur kernels, offering a more scalable and expressive alternative [S1].
+ 
+ ## Sources

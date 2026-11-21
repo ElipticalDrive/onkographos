@@ -1,0 +1,152 @@
+--- v005.md
++++ v006.md
+@@ -1,5 +1,5 @@
+ # Variational Autoencoder-based Compression
+ 
+-Also called: Autoencoders and Variational Autoencoders (VAEs), Probabilistic Autoencoder Compression, VAE-based Compression
++Also called: Autoencoders and Variational Autoencoders (VAEs), Latent feature coding, Probabilistic Autoencoder Compression, VAE-based Compression
+ 
+ ## Overview
+@@ -8,55 +8,82 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A volume dataset $V$ (e.g., a 3D grid of scalar or vector values).
+-- Output: A compressed representation consisting of the latent code $z$ (and potentially hyperparameters for the probabilistic model), and a reconstructed volume $\hat{V}$.
++- Input: Volume data $V$ or a specialized feature tensor $F_c \in \mathbb{R}^{N \times C_F \times H \times W}$ [S2, unofficial].
++- Output: A compressed bitstream $B$ and a reconstructed volume or feature $\hat{V}$ / $\hat{F}_c$ [S2, unofficial].
+ 
+ **Data Structures:**
+-- **Encoder $E$**: A neural network (typically 3D convolutions) mapping $V \rightarrow z$.
+-- **Decoder $D$**: A neural network (typically 3D transposed convolutions or deconvolutions) mapping $z \rightarrow \hat{V}$.
+-- **Latent Code $z$**: A continuous vector or tensor representing the compressed state. In VAEs, $z$ is drawn from a distribution $q(z|V)$, typically parameterized as a Gaussian $\mathcal{N}(\mu, \sigma^2)$ where $\mu$ and $\sigma$ are outputs of the encoder [S1, unofficial].
++- **Analysis Transform $E$**: A neural network mapping input features to hierarchical latent tensors $Z = \{Z_\ell\}$ [S2, unofficial].
++- **Quantizer $Q$**: Converts continuous latents $Z$ into discrete quantized symbols $\hat{Z}$ [S2, unofficial].
++- **Synthesis Transform $D$**: A neural network mapping quantized symbols $\hat{Z}$ back to reconstructed features $\hat{F}_c$ [S2, unofficial].
++- **Entropy Model**: A learned probability distribution $p_\ell(\hat{Z}_{i,\ell,u} | C_{i,\ell,u}, e_\lambda)$ providing context-aware symbol probabilities for arithmetic coding [S2, unofficial].
+ 
+ **Steps:**
+-1. **Encoding**: Pass the input volume $V$ through the encoder $E$ to obtain the parameters of the latent distribution, specifically the mean $\mu$ and log-variance $\log \sigma^2$.
+-2. **Reparameterization**: Sample the latent code $z$ from the distribution $q(z|V) = \mathcal{N}(\mu, \sigma^2)$ using the reparameterization trick: $z = \mu + \sigma \odot \epsilon$, where $\epsilon \sim \mathcal{N}(0, I)$ [S1, unofficial].
+-3. **Decoding**: Pass the latent code $z$ through the decoder $D$ to reconstruct the volume $\hat{V}$.
+-4. **Optimization**: Jointly optimize the encoder and decoder parameters to minimize a loss function that balances reconstruction fidelity and the divergence between the learned latent distribution and a prior (typically a standard normal distribution). The loss typically includes a reconstruction term (e.g., Mean Squared Error) and a Kullback-Leibler (KL) divergence term [S1, unofficial].
++1. **Compute latent representation**: Pass the input through the analysis transform: $Z = \text{Analysis}(F_c; e_\lambda)$ [S2, unofficial].
++2. **Quantize**: Discretize the hierarchical latents: $\hat{Z} = Q(Z)$ [S2, unofficial].
++3. **Entropy-code**: Encode quantized symbols using the entropy model and context $C_{i,\ell,u}$ to produce per-view feature streams $B_i^{feat}$ [S2, unofficial].
++4. **Pack bitstream**: Combine compressed camera metadata $B_{cam}$ and feature streams: $B = \text{Pack}(B_{cam}, \{B_i^{feat}\}_{i=1}^N)$ [S2, unofficial].
++5. **Decode**: Entropy-decode $B_i^{feat}$ to recover $\hat{Z}$, apply the synthesis transform $\hat{F}_c = \text{Synthesis}(\hat{Z}; e_\lambda)$, and reconstruct the volume [S2, unofficial].
++
++**Formulas:**
++- Rate estimation during training: $R = \frac{1}{HW} \sum_{i=1}^N \sum_{\ell} \sum_{u} (-\log_2 p_\ell(\hat{Z}_{i,\ell,u} | C_{i,\ell,u}, e_\lambda))$ [S2, unofficial].
++- Bitstream composition: $B = \text{Pack}(B_{cam}, \{B_i^{feat}\}_{i=1}^N)$ [S2, unofficial].
+ 
+ **Parameters:**
+-- **Latent Dimensionality**: Determined by the architecture of the encoder's bottleneck layer. Not given in the sources.
+-- **Prior Distribution**: Typically a standard normal distribution $\mathcal{N}(0, I)$ [S1, unofficial].
++- $\lambda$: Rate parameter selecting the rate point of a single model [S2, unofficial].
++- $e_\lambda$: Embedding corresponding to rate parameter $\lambda$ [S2, unofficial].
++- $Z$: Hierarchical latent tensors, denoted as $Z = \{Z_\ell\}$ [S2, unofficial].
++- $\hat{Z}$: Quantized symbols of the latent tensors [S2, unofficial].
++- $B_{cam}$: Camera stream storing image shape, number of context views, intrinsics, extrinsics, and near/far bounds, compressed with Deflate [S2, unofficial].
++- $B_i^{feat}$: Feature stream storing entropy-coded quantized latents for one context view [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision**: Floating-point precision in the latent representation affects reconstruction quality.
+-- **Boundaries**: Boundary effects in 3D convolutions may require padding strategies.
+-- **Degenerate Input**: VAEs may struggle with highly sparse or discontinuous data if the probabilistic assumption does not match the data distribution.
++- **Precision**: Quantization of $\hat{Z}$ introduces loss; entropy model accuracy directly controls the rate-distortion trade-off [S2, unofficial].
++- **Boundaries**: Hierarchical latent tensors $Z_\ell$ require careful handling of spatial/channel dimensions $u$ during context modeling to avoid boundary artifacts [S2, unofficial].
++- **Degenerate Input**: The probabilistic latent structure assumes the data distribution matches the model; highly sparse or discontinuous volumes may require specialized entropy models or preprocessing [G].
+ 
+ **Pseudocode:**
+ ```python
+-def train_vae(volume_data, encoder, decoder, optimizer, epochs):
+-    for epoch in range(epochs):
+-        for batch in volume_data:
+-            # Forward pass
+-            mu, log_var = encoder(batch)
+-            
+-            # Reparameterization trick
+-            std = torch.exp(0.5 * log_var)
+-            eps = torch.randn_like(std)
+-            z = mu + std * eps
+-            
+-            # Reconstruction
+-            reconstructed = decoder(z)
+-            
+-            # Loss calculation
+-            reconstruction_loss = mse_loss(reconstructed, batch)
+-            kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
+-            loss = reconstruction_loss + kl_loss
+-            
+-            # Backward pass
+-            optimizer.zero_grad()
+-            loss.backward()
+-            optimizer.step()
++import math
++
++def encode_volume(Fc, analysis_transform, quantizer, entropy_model, e_lambda):
++    # 1. Compute latent representation
++    Z = analysis_transform(Fc, e_lambda)
++    # 2. Quantize
++    Z_hat = quantizer(Z)
++    # 3. Entropy-code quantized symbols
++    bitstreams = []
++    for i, view_Z_hat in enumerate(Z_hat):
++        stream = []
++        for l, block in enumerate(view_Z_hat):
++            for u, symbol in enumerate(block.flatten()):
++                C = entropy_model.get_context(view_Z_hat, l, u)
++                # Rate estimation uses negative log-likelihood
++                rate = -math.log2(entropy_model.probability(symbol, C, e_lambda))
++                stream.append(entropy_model.arith_encode(symbol, rate))
++        bitstreams.append(stream)
++    return bitstreams
++
++def decode_volume(bitstreams, synthesis_transform, entropy_model, e_lambda):
++    # 4. Entropy-decode and reconstruct
++    Z_hat = []
++    for stream in bitstreams:
++        view_Z_hat = []
++        for l in range(num_blocks):
++            block = []
++            for u in range(num_symbols):
++                C = entropy_model.get_context(view_Z_hat, l, u)
++                # Standard arithmetic decoding step
++                symbol = entropy_model.arith_decode(stream, C, e_lambda)
++                block.append(symbol)
++            view_Z_hat.append(block)
++        Z_hat.append(view_Z_hat)
++    # 5. Synthesis transform
++    F_hat_c = synthesis_transform(Z_hat, e_lambda)
++    return F_hat_c
+ ```
+ 
+ ## Subtopics
++
++### [Codebook Model (VQ-VAE)](15192-codebook-model-vq-vae.md)
++The Codebook Model (VQ-VAE) maps continuous input data to a smaller discrete latent space and reconstructs them back to the original domain. It differs from standard Variational Autoencoders by using a categorical distribution over the latent space, replacing continuous latent variables with discrete tokens selected from a learned codebook. This discretization enables efficient sequence modeling and reduces dimensionality significantly, as demonstrated by mapping 128x128 pixel images to 8x8 tokens. Choose this variant when discrete tokenization and sequence modeling are required. [Codebook Model (VQ-VAE)](15192-codebook-model-vq-vae.md)
+ 
+ ### Latent Space Diffusion
+@@ -64,12 +91,12 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Encoding and decoding complexity depends on the neural network architecture (typically $O(N)$ for linear layers or $O(N \log N)$ for attention mechanisms in Transformers) [S1, unofficial].
+-- **Memory Complexity**: The latent code size is significantly smaller than the original volume, determined by the bottleneck dimension [S1, unofficial].
+-- **Measured Performance**: Latent Space Diffusion achieved 61 MB/s decoding throughput on an A100 GPU [S1, unofficial]. Standard autoencoders have been reported to decode in 2 seconds compared to 978 seconds for data-space diffusion (GCDTC) [S1, unofficial].
+-- **Scaling**: Scales with the capacity of the neural network and the available GPU memory [S1, unofficial].
++- **Time Complexity**: Not given in the sources.
++- **Memory Complexity**: The latent code replaces the original grid, reducing storage requirements [S1, unofficial].
++- **Measured Performance**: Latent Space Diffusion achieved 61 MB/s decoding throughput on an A100 GPU [S1, unofficial]. Standard autoencoders decode in 2 seconds compared to 978 seconds for data-space diffusion (GCDTC) [S1, unofficial].
++- **Scaling**: Not given in the sources.
+ - **Strengths**: Enables sampling and interpolation due to probabilistic latent structure; efficient compression for large volumes [S1, unofficial].
+ - **Limitations**: Requires training data and computational resources for training; decoding bottleneck if not optimized (e.g., via latent space diffusion) [S1, unofficial].
+ - **When to Use**: When lossy compression of large volumes is needed, and the latent space can capture semantically meaningful structure [S1, unofficial].
+-- **When Not to Use**: When real-time decoding is critical and hardware acceleration for neural networks is unavailable, or when exact reconstruction is required [S1, unofficial].
++- **When Not to Use**: When exact reconstruction is required, as the method is inherently lossy [S1, unofficial].
+ 
+ ## Background
+@@ -77,3 +104,4 @@
+ 
+ ## Sources
+-[S1] Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)+[S1] Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
++[S2] CodecSplat: Ultra-Compact Latent Coding for Feed-Forward 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2605.25563, fetched 2026-10-29 (unofficial)

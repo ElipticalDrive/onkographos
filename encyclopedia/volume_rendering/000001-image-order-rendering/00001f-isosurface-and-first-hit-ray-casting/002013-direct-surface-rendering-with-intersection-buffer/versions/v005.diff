@@ -1,0 +1,154 @@
+--- v004.md
++++ v005.md
+@@ -113,25 +113,21 @@
+     return (nx, ny, nz)
+ 
+-def bi_linear_interpolate_facet(V, facet_coords, p):
+-    """Interpolate scalar value at point p on a cube facet using 4 bounding voxels."""
+-    x, y = p
+-    v00 = V[facet_coords[0]]
+-    v10 = V[facet_coords[1]]
+-    v01 = V[facet_coords[2]]
+-    v11 = V[facet_coords[3]]
+-    top = v00 * (1-x) + v10 * x
+-    bottom = v01 * (1-x) + v11 * x
+-    return top * (1-y) + bottom * y
+-
+-def fast_voxel_traversal(ray_origin, ray_dir, volume_dims, transverse_flags):
++def bi_linear_interpolate_facet(V, facet_voxels, u, v):
++    """Interpolate scalar value at point (u,v) on a cube facet using 4 bounding voxels."""
++    v00 = V[facet_voxels[0]]
++    v10 = V[facet_voxels[1]]
++    v01 = V[facet_voxels[2]]
++    v11 = V[facet_voxels[3]]
++    top = v00 * (1-u) + v10 * u
++    bottom = v01 * (1-u) + v11 * u
++    return top * (1-v) + bottom * v
++
++def fast_voxel_traversal(ray_origin, ray_dir, volume_dims):
+     """Amanatides and Woo (1987) voxel traversal. Returns cubes in order."""
+     W, H, D = volume_dims
+-    # Initial cube
+     cx, cy, cz = int(ray_origin[0]), int(ray_origin[1]), int(ray_origin[2])
+-    # Step sizes
+     dx = 1.0 if ray_dir[0] > 0 else -1.0
+     dy = 1.0 if ray_dir[1] > 0 else -1.0
+     dz = 1.0 if ray_dir[2] > 0 else -1.0
+-    # T values at next grid boundary
+     t_delta_x = abs(1.0 / ray_dir[0]) if ray_dir[0] != 0 else float('inf')
+     t_delta_y = abs(1.0 / ray_dir[1]) if ray_dir[1] != 0 else float('inf')
+@@ -146,5 +142,4 @@
+         if not (0 <= cx < W-1 and 0 <= cy < H-1 and 0 <= cz < D-1):
+             break
+-        # Advance to next cube
+         if t_max_x < t_max_y:
+             if t_max_x < t_max_z:
+@@ -167,5 +162,4 @@
+     n = normal
+     l = light_dir
+-    # Normalize
+     nl = math.sqrt(n[0]**2 + n[1]**2 + n[2]**2)
+     if nl == 0: return 0.0
+@@ -176,5 +170,4 @@
+     
+     diff = max(0.0, n[0]*l[0] + n[1]*l[1] + n[2]*l[2])
+-    # Specular (simplified)
+     r = (2*(n[0]*l[0] + n[1]*l[1] + n[2]*l[2])*n[0] - l[0],
+          2*(n[0]*l[0] + n[1]*l[1] + n[2]*l[2])*n[1] - l[1],
+@@ -183,5 +176,5 @@
+     if rl == 0: spec = 0.0
+     else:
+-        v = (0, 0, 1) # View direction
++        v = (0, 0, 1)
+         vl = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+         r = (r[0]/rl, r[1]/rl, r[2]/rl)
+@@ -193,8 +186,5 @@
+     """Phase 1: Build transverse flag volume."""
+     W, H, D = V.shape
+-    flags = [[False] * (D-1) for _ in range(H-1)]
+-    for _ in range(W-1):
+-        flags.append([[False] * (D-1) for _ in range(H-1)])
+-    
++    flags = [[[False] * (D-1) for _ in range(H-1)] for _ in range(W-1)]
+     for i in range(W-1):
+         for j in range(H-1):
+@@ -217,5 +207,4 @@
+     intersection_buffer = []
+     
+-    # Precompute voxel normals
+     V_normals = [[[None] * V.shape[2] for _ in range(V.shape[1])] for _ in range(V.shape[0])]
+     for x in range(1, V.shape[0]-1):
+@@ -229,5 +218,5 @@
+             intersections = []
+             
+-            cubes = fast_voxel_traversal(ray_o, ray_d, V.shape, transverse_flags)
++            cubes = fast_voxel_traversal(ray_o, ray_d, V.shape)
+             
+             for cube_idx in cubes:
+@@ -235,13 +224,12 @@
+                     continue
+                 
+-                # Ray-cube intersection to get alpha and beta
+                 cube_min = (cube_idx[0], cube_idx[1], cube_idx[2])
+                 cube_max = (cube_idx[0]+1, cube_idx[1]+1, cube_idx[2]+1)
+-                alpha, beta = 0.0, 0.0
+                 t_min, t_max = 0.0, float('inf')
++                valid = True
+                 for d in range(3):
+                     if ray_d[d] == 0:
+                         if ray_o[d] < cube_min[d] or ray_o[d] > cube_max[d]:
+-                            alpha, beta = None, None
++                            valid = False
+                             break
+                     else:
+@@ -251,20 +239,25 @@
+                         t_min = max(t_min, t1)
+                         t_max = min(t_max, t2)
+-                if alpha is None or t_min >= t_max:
++                if not valid or t_min >= t_max:
+                     continue
+-                alpha, beta = t_min, t_max
+-                
+-                # Evaluate F(alpha) and F(beta)
+-                p_alpha = (ray_o[0] + alpha*ray_d[0], ray_o[1] + alpha*ray_d[1], ray_o[2] + alpha*ray_d[2])
+-                p_beta = (ray_o[0] + beta*ray_d[0], ray_o[1] + beta*ray_d[1], ray_o[2] + beta*ray_d[2])
+-                
+-                # Determine facets and interpolate
+-                # Simplified: assume facet coords based on closest face
+-                facet_alpha = [(int(p_alpha[d]) if ray_d[d] > 0 else int(p_alpha[d])-1) for d in range(3)]
+-                facet_beta = [(int(p_beta[d]) if ray_d[d] > 0 else int(p_beta[d])-1) for d in range(3)]
+-                # Adjust to 2D facet coords for interpolation
+-                # (Omitted for brevity; standard bi-linear interpolation logic applies)
+-                F_alpha = bi_linear_interpolate_facet(V, facet_alpha, (0.5, 0.5))
+-                F_beta = bi_linear_interpolate_facet(V, facet_beta, (0.5, 0.5))
++                p_alpha = (ray_o[0] + t_min*ray_d[0], ray_o[1] + t_min*ray_d[1], ray_o[2] + t_min*ray_d[2])
++                p_beta = (ray_o[0] + t_max*ray_d[0], ray_o[1] + t_max*ray_d[1], ray_o[2] + t_max*ray_d[2])
++                
++                # Determine facet coordinates for interpolation [G]
++                def get_facet_coords_and_uv(p, cube_min, cube_max, ray_d):
++                    for d in range(3):
++                        if abs(p[d] - cube_min[d]) < 1e-6:
++                            u_axis = (d+1)%3
++                            v_axis = (d+2)%3
++                            u = (p[u_axis] - cube_min[u_axis]) / (cube_max[u_axis] - cube_min[u_axis])
++                            v = (p[v_axis] - cube_min[v_axis]) / (cube_max[v_axis] - cube_min[v_axis])
++                            return [(0,0), (1,0), (0,1), (1,1)], (u, v)
++                    return [(0,0), (1,0), (0,1), (1,1)], (0.5, 0.5)
++                
++                facet_voxels_alpha, uv_alpha = get_facet_coords_and_uv(p_alpha, cube_min, cube_max, ray_d)
++                facet_voxels_beta, uv_beta = get_facet_coords_and_uv(p_beta, cube_min, cube_max, ray_d)
++                
++                F_alpha = bi_linear_interpolate_facet(V, facet_voxels_alpha, uv_alpha[0], uv_alpha[1])
++                F_beta = bi_linear_interpolate_facet(V, facet_voxels_beta, uv_beta[0], uv_beta[1])
+                 
+                 if (F_alpha - threshold) * (F_beta - threshold) < 0:
+@@ -274,9 +267,6 @@
+                              p_alpha[2] + t*(p_beta[2]-p_alpha[2]))
+                     
+-                    # Compute Normal
+-                    voxel_corners = [(int(gamma[d]), int(gamma[d+1]), int(gamma[d+2])) for d in range(3)] # Simplified mapping
+                     local_gamma = (gamma[0]-cube_min[0], gamma[1]-cube_min[1], gamma[2]-cube_min[2])
+                     normal = tri_linear_interpolate_normal(V_normals, local_gamma)
+-                    
+                     intensity = phong_shading(normal, (0, 0, 1))
+                     depth = math.sqrt((gamma[0]-ray_o[0])**2 + (gamma[1]-ray_o[1])**2 + (gamma[2]-ray_o[2])**2)

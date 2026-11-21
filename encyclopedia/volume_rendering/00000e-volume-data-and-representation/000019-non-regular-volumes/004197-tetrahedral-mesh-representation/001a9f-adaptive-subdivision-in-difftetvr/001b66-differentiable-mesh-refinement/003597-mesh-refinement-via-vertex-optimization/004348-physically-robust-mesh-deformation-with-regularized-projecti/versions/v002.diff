@@ -1,0 +1,125 @@
+--- v001.md
++++ v002.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-This method jointly optimizes the locations of projected vertices in a volumetric tetrahedral mesh to avoid imprecise predictions, non-uniform distortion, and flipping artifacts that arise from naive projection [S1, unofficial]. It sets itself apart from simple closest-point mapping by introducing a differentiable optimization formulation that combines a robust projection data term with smoothness and orientation regularization terms [S1, unofficial]. It builds on [Mesh Refinement via Vertex Optimization](989-mesh-refinement-via-vertex-optimization.md) by providing the specific objective function and regularization details required for the final deformation step.
++This method jointly optimizes the locations of projected vertices in a volumetric tetrahedral mesh to avoid imprecise predictions, non-uniform distortion, and flipping artifacts that arise from naive projection [S1, unofficial]. It sets itself apart from simple closest-point mapping by introducing a differentiable optimization formulation that combines a robust projection data term with smoothness and orientation regularization terms [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-- **Input**: A voxelized shape and an initial tetrahedral mesh $V$; a neural network $h_\theta(V, \cdot)$ that predicts the closest point on the implicit surface for any given vertex [S1, unofficial].
++- **Input**: A voxelized shape, an initial tetrahedral mesh $V$, and a neural network $h_\theta(V, \cdot)$ that predicts the closest point on the implicit surface for any given vertex [S1, unofficial].
+ - **Output**: A deformed volumetric mesh with optimized vertex positions $V$ [S1, unofficial].
+ 
+@@ -22,22 +22,16 @@
+ - $v_0$: Constant thresholding value to activate the orientation penalty, ensuring a minimum volume of tetrahedra [S1, unofficial].
+ - $\lambda_a, \lambda_b, \lambda_c$: Hyper-parameters for the smooth term, determined via cross-validation [S1, unofficial].
+-- Iterations: 60 iterations for the main optimization [S1, unofficial]. Note: An alternative schedule uses 80 steps with a specific noise decay [S1, unofficial].
++- Iterations: 60 iterations for the main optimization [S1, unofficial]. An alternative schedule uses 80 steps [S1, unofficial].
+ 
+ **Formulas**
+ The total loss function $L(V)$ is defined as [S1, unofficial]:
+-$$
+-L(V) = \sum_{v^s \in V^s} \tilde{L}_{proj}(v^s; h_\theta(V, \cdot)) + R_{smooth}(V) + R_{orientation}(V)
+-$$
++$$L(V) = \sum_{v^s \in V^s} \tilde{L}_{proj}(v^s; h_\theta(V, \cdot)) + R_{smooth}(V) + R_{orientation}(V)$$
+ 
+ 1. **Robust Projection Term** $\tilde{L}_{proj}$:
+-   $$
+-   \tilde{L}_{proj}(v^s; h_\theta(V, \cdot)) = \| v^s - h_\theta(V, v^s) + k n \|_2
+-   $$
++   $$\tilde{L}_{proj}(v^s; h_\theta(V, \cdot)) = \| v^s - h_\theta(V, v^s) + k n \|_2$$
+    where $n \sim \mathcal{N}(0, 1)$ is random Gaussian noise and $k$ is a coefficient that gradually decays to 0 [S1, unofficial].
+ 
+ 2. **Smooth Term** $R_{smooth}(V)$:
+-   $$
+-   R_{smooth}(V) = \lambda_a R_{edge}(V, F^s_{tri}) + \lambda_b R_{laplacian}(V, F^s_{tri}) + \lambda_c R_{normal}(V^s, F^s_{tri})
+-   $$
++   $$R_{smooth}(V) = \lambda_a R_{edge}(V, F^s_{tri}) + \lambda_b R_{laplacian}(V, F^s_{tri}) + \lambda_c R_{normal}(V^s, F^s_{tri})$$
+    - $R_{edge}$: Penalizes extremely long edges.
+    - $R_{laplacian}$: Graph-based Laplacian term.
+@@ -45,31 +39,46 @@
+ 
+ 3. **Orientation Term** $R_{orientation}(V)$:
+-   $$
+-   R_{orientation}(V) = \sum_{c,k} l(M_{c,k})
+-   $$
++   $$R_{orientation}(V) = \sum_{c,k} l(M_{c,k})$$
+    where $l(M_{c,k})$ is defined as [S1, unofficial]:
+-   $$
+-   l(M_{c,k}) = 
+-   \begin{cases} 
+-   -(\det(M_{c,k}) - v_0)^2 \log(\det(M_{c,k})) & \text{if } \det(M_{c,k}) \le v_0 \\
+-   \det(M_{c,k}) & \text{if } \det(M_{c,k}) > v_0
+-   \end{cases}
+-   $$
++   $$l(M_{c,k}) = \begin{cases} -(\det(M_{c,k}) - v_0)^2 \log(\det(M_{c,k})) & \text{if } \det(M_{c,k}) \le v_0 \\ \det(M_{c,k}) & \text{if } \det(M_{c,k}) > v_0 \end{cases}$$
+    The vertices order in $M_{c,k}$ must satisfy the right-hand rule convention such that every tetrahedron in the initial mesh has a positive volume [S1, unofficial].
+ 
+ **Algorithm**
+-1. Initialize vertex positions $V$ from the initial tetrahedral mesh.
+-2. For iteration $t = 1$ to $T$ (where $T=60$ or $T=80$ depending on the variant):
+-   a. Compute the predicted closest points $p^s = h_\theta(V, v^s)$ for all $v^s \in V^s$.
+-   b. Generate random Gaussian noise $n \sim \mathcal{N}(0, 1)$ for each vertex.
+-   c. Determine the noise coefficient $k_t$.
+-      - If using the 60-iteration variant, $k$ decays to 0 [S1, unofficial].
+-      - If using the 80-step variant: Start with $k=0.1$. Decrease $k$ by 0.5 every 10 steps [S1, unofficial].
+-   d. Compute the robust projection residual: $r^s = v^s - p^s + k_t n$.
+-   e. Compute the smooth regularization terms $R_{edge}$, $R_{laplacian}$, and $R_{normal}$ based on current $V$ and $F^s_{tri}$ [S1, unofficial].
+-   f. Compute the orientation regularization terms by calculating $\det(M_{c,k})$ for all tetrahedra and applying the function $l(\cdot)$ [S1, unofficial].
+-   g. Compute the total loss $L(V)$ using the formulas above.
+-   h. Update $V$ using a gradient-based optimizer (e.g., Adam) to minimize $L(V)$ [S1, unofficial].
+-3. Return the final deformed mesh $V$.
++```python
++def optimize_mesh(V, h_theta, F_tri, T=60, k_init=0.1, k_decay=0.5, v0=0.0, lam_a=1.0, lam_b=1.0, lam_c=1.0):
++    # V: vertex positions array
++    # h_theta(V): neural network predicting closest points
++    # F_tri: surface triangles
++    for t in range(1, T + 1):
++        # Noise coefficient schedule: linear decay from k_init
++        k_t = max(0.0, k_init - (t - 1) * k_decay / 10)
++        # Random Gaussian noise n ~ N(0,1) for each vertex
++        n = generate_gaussian_noise(V.shape)
++        # Predicted closest points p^s = h_theta(V, v^s)
++        p = h_theta(V)
++        # Robust projection residual r^s = v^s - p^s + k_t * n
++        r = V - p + k_t * n
++        # Smooth regularization terms (source does not specify exact formulas for R_edge, R_lap, R_norm)
++        R_edge = compute_edge_penalty(V, F_tri)
++        R_lap = compute_laplacian_term(V, F_tri)
++        R_norm = compute_normal_consistency(V, F_tri)
++        R_smooth = lam_a * R_edge + lam_b * R_lap + lam_c * R_norm
++        # Orientation regularization term
++        R_orient = 0.0
++        for k in tetrahedra_indices:
++            # M_{c,k} is 4x4 homogeneous coordinate matrix
++            M = build_homogeneous_matrix(V, k)
++            det_M = determinant(M)
++            if det_M <= v0:
++                R_orient -= (det_M - v0)**2 * log(det_M)
++            else:
++                R_orient += det_M
++        # Total loss L(V)
++        L = sum(norm(r)) + R_smooth + R_orient
++        # Update V using gradient-based optimizer
++        grad_V = compute_gradient(L, V)
++        V = V - learning_rate * grad_V
++    return V
++```
+ 
+ **Edge Cases and Pitfalls**
+@@ -89,5 +98,5 @@
+ This variant specifies a noise schedule for Robust Projection that adds stronger noise at the beginning stage and gradually decreases it at the converge stage [S1, unofficial].
+ - Optimization runs for 80 steps, which is empirically sufficient for a voxel shape to converge to the volumetric mesh [S1, unofficial].
+-- Gaussian noise is added with a ratio $k$ in a linear scheduler to suppress distortion. Starting with initial ratio $k=0.1$, $k$ is decreased by 0.5 every 10 steps until 80 steps are completed [S1, unofficial].
++- Gaussian noise is added with a ratio $k$ in a linear scheduler to suppress distortion. Starting with initial ratio $k=0.1$, $k$ is decreased linearly to 0 over 80 steps [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -98,5 +107,5 @@
+ - **Limitations**: Requires gradient-based optimization; hyper-parameters $\lambda_a, \lambda_b, \lambda_c$ need cross-validation [S1, unofficial].
+ - **When to use**: When generating high-quality volumetric tetrahedral meshes from voxelized shapes or implicit fields, especially when avoiding topological defects like flips is critical [S1, unofficial].
+-- **When not to use**: When computational resources for gradient-based optimization are limited, or when a simpler, faster approximation is acceptable despite potential artifacts [S1, unofficial].
++- **When not to use**: Not given in the sources.
+ 
+ ## Background

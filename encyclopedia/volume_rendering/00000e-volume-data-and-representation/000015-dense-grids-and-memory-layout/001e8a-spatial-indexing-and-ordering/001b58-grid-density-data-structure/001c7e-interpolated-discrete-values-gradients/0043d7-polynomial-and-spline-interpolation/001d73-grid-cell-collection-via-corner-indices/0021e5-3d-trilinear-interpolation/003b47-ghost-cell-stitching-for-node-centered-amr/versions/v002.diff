@@ -1,0 +1,181 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Ghost Cell Stitching is a method for handling data continuity between different Adaptive Mesh Refinement (AMR) levels in node-centered grids by introducing ghost cells at level boundaries [S1, unofficial]. It solves the problem of rendering artifacts (such as cracks or "ghosting") that occur when isosurface extraction or volume rendering requires access to neighboring cells that reside on different processing elements or different refinement levels [S2]. Unlike methods that redistribute the entire dataset, this approach uses simulation-provided abutment information to selectively exchange only the necessary boundary data, ensuring that stitch cells can be generated consistently across coarse-fine interfaces [S2].
++Ghost Cell Stitching is a method for handling data continuity between different Adaptive Mesh Refinement (AMR) levels in node-centered grids by introducing ghost cells at level boundaries [S1, unofficial]. It solves the problem of rendering artifacts (such as cracks or "ghosting") that occur when isosurface extraction or volume rendering requires access to neighboring cells that reside on different processing elements or different refinement levels [S2]. Unlike methods that redistribute the entire dataset, this approach uses simulation-provided abutment information to selectively exchange only the necessary boundary data, ensuring that stitch cells can be generated consistently across coarse-fine interfaces [S2]. It builds on [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md).
+ 
+ ## How it works
+@@ -11,10 +11,10 @@
+ ### Inputs and Outputs
+ *   **Inputs**:
+-    *   AMR dataset consisting of boxes at various refinement levels.
++    *   AMR dataset consisting of boxes at various refinement levels [S2].
+     *   `BoxAbutment` data structure: For each box $B$, this lists the boxes $B^*_0, B^*_1, \dots, B^*_{n-1}$ that $B$ abuts with and the locations of those abutments. This includes abutment for boxes at the same refinement level and nesting for boxes at different refinement levels [S2].
+     *   `BoxToProcessingElement` map: A map indicating which processing element (PE) each box resides on [S2].
+     *   Grid data values for each box [S2].
+ *   **Outputs**:
+-    *   Extended boxes where boundary cells are duplicated as ghost cells.
++    *   Extended boxes where boundary cells are duplicated as ghost cells [S1, unofficial].
+     *   `Ghost Flag Array`: An array specifying for each grid cell whether it is a ghost cell. If flagged, the type is also specified (boundary ghost or invalidation ghost) [S2].
+ 
+@@ -56,7 +56,7 @@
+ When filling the ghost cells during the Unpack phase (or if generating locally without exchange), the following rules determine the values [S2]:
+ 
+-1.  **Domain Boundaries**: If a ghost cell coincides with the boundary of the domain, there is no need to connect to other grids. No ghost data is needed or generated for these edges.
+-2.  **Adjacent Box Values**: If a ghost cell coincides with the cell of an adjacent box (in the same level), the ghost cell must be filled with the value from that adjacent box.
+-3.  **Coarse Parent Values**: If no neighboring box overlapping the ghost cell exists in the same level, the stitch cell (and thus the ghost cell) must be filled with the value from the cell it refines in the parent level ($i-1$). Since a level is always completely contained in its parent level, such a cell always exists. This ensures that several cells in the fine box (corresponding to the refinement ratio) are filled with the coarse grid value, simplifying look-up for connecting coarse grid values in stitch cell generation.
++1.  **Domain Boundaries**: If a ghost cell coincides with the boundary of the domain, there is no need to connect to other grids. No ghost data is needed or generated for these edges [S2].
++2.  **Adjacent Box Values**: If a ghost cell coincides with the cell of an adjacent box (in the same level), the ghost cell must be filled with the value from that adjacent box [S2].
++3.  **Coarse Parent Values**: If no neighboring box overlapping the ghost cell exists in the same level, the stitch cell (and thus the ghost cell) must be filled with the value from the cell it refines in the parent level ($i-1$). Since a level is always completely contained in its parent level, such a cell always exists. This ensures that several cells in the fine box (corresponding to the refinement ratio) are filled with the coarse grid value, simplifying look-up for connecting coarse grid values in stitch cell generation [S2].
+ 4.  **Invalidation**: If a cell is flagged as an invalidation ghost (due to finer grid refinement), it is marked in the `Ghost Flag Array`. Visualization algorithms use this flag to blank out these cells, operating on the original rectilinear grids [S2].
+ 
+@@ -70,12 +70,11 @@
+     Args:
+         boxes: Dict mapping box_id -> Box object. Box object has:
+-               - id: int
+-               - pe_id: int (initially local)
+                - data: 3D array of values
+-               - dimensions: (nx, ny, nz)
++               - ghost_flag_array: array aligned with data
+         box_abutment: Dict mapping box_id -> List of AbutmentInfo.
+                       AbutmentInfo has:
+                       - neighbor_box_id: int
+-                      - abutment_region: List of local cell indices (or coordinates)
++                      - abutment_region_indices: list of local cell indices
++                      - target_indices: list of indices in the neighbor's ghost layer
+         box_to_pe: Dict mapping box_id -> int (PE ID)
+         local_pe_id: int, the ID of the current processing element.
+@@ -86,19 +85,18 @@
+     
+     # Phase 1: Initialize
+-    # Ensure box_to_pe is consistent. In a real MPI setting, this is done via MPI_Allgather.
+-    # Here we assume box_to_pe is provided as input.
++    # box_to_pe is populated via collective communication (e.g., MPI_Allgather)
++    # to map every box_id to its owning PE.
+     
+     # Phase 2: Pack
+-    # Messages[dest_pe_id] = list of (source_box_id, abutment_region_indices, values)
++    # messages[dest_pe_id] stores lists of data to send to each destination PE
+     messages = {pe_id: [] for pe_id in set(box_to_pe.values())}
+     
+     for box_id, box in boxes.items():
+-        # Only process if this box is owned by the local PE
+-        if box.pe_id != local_pe_id:
++        # Only process boxes owned by this PE
++        if box_to_pe[box_id] != local_pe_id:
+             continue
+             
+-        # Get abutting patches
++        # Get abutting patches for this box
+         abutments = box_abutment.get(box_id, [])
+-        
+         for abut in abutments:
+             neighbor_box_id = abut.neighbor_box_id
+@@ -106,45 +104,25 @@
+             
+             # Identify the one layer of cells in the abutment region
+-            # abut.abutment_region_indices contains the local indices of cells
+-            # that need to be sent to the neighbor
+             region_indices = abut.abutment_region_indices
++            values = [box.data[i] for i in region_indices]
+             
+-            # Extract values
+-            values = extract_values(box.data, region_indices)
+-            
+-            # Create message
+             msg = {
+                 'source_box_id': box_id,
+                 'values': values,
+                 'target_box_id': neighbor_box_id,
+-                'target_indices': abut.target_indices # Indices in the neighbor's ghost layer
++                'target_indices': abut.target_indices
+             }
+-            
+             messages[dest_pe_id].append(msg)
+             
+     # Phase 3: Exchange
+     # In MPI, this is MPI_Alltoallv.
+-    # Here we simulate the reception of messages from other PEs.
+-    # received_messages[local_pe_id] contains messages sent TO this PE.
+-    received_messages = {local_pe_id: []}
+-    
+-    # Simulate receiving messages from all other PEs
+-    for src_pe_id, msg_list in messages.items():
+-        if src_pe_id != local_pe_id:
+-            # In real MPI, this data arrives in the local PE's receive buffer
+-            # For simulation, we just collect them
+-            pass 
++    # We simulate the collective exchange by gathering messages destined for local_pe_id.
++    received_messages = []
++    for dest_pe, msg_list in messages.items():
++        if dest_pe == local_pe_id:
++            received_messages.extend(msg_list)
+             
+-    # To implement correctly in a distributed system, we would use:
+-    # send_data = flatten(messages[local_pe_id])
+-    # recv_data = MPI_Alltoallv(send_data, ...)
+-    # received_messages = parse(recv_data)
+-    
+-    # For the sake of this self-contained pseudocode, we assume a function
+-    # that gathers all messages destined for the local PE's boxes.
+-    all_received_msgs = gather_messages_for_local_pe(messages, local_pe_id)
+-    
+     # Phase 4: Unpack
+-    for msg in all_received_msgs:
++    for msg in received_messages:
+         target_box_id = msg['target_box_id']
+         target_indices = msg['target_indices']
+@@ -153,44 +131,13 @@
+         if target_box_id in boxes:
+             target_box = boxes[target_box_id]
+-            # Extend the box with ghost cells if not already present
+-            # Note: In practice, the box structure might need resizing or
+-            # a separate ghost array. Here we assume the box data structure
+-            # supports ghost cells or we update a ghost flag array.
+-            
+-            # Set the values in the ghost cells
+-            set_values(target_box.data, target_indices, values)
+-            
++            # Extend box data structure to accommodate ghost cells if necessary
++            # Set values in ghost cells from incoming message
++            for idx, val in zip(target_indices, values):
++                target_box.data[idx] = val
+             # Mark these cells as ghost cells in the Ghost Flag Array
+-            mark_ghost_cells(target_box, target_indices, type='boundary_ghost')
+-            
++            for idx in target_indices:
++                target_box.ghost_flag_array[idx] = 'boundary_ghost'
++                
+     return boxes
+-
+-def extract_values(data, indices):
+-    """Extracts values from a 3D array given a list of linear indices."""
+-    return [data[i] for i in indices]
+-
+-def set_values(data, indices, values):
+-    """Sets values in a 3D array at given linear indices."""
+-    for i, val in zip(indices, values):
+-        data[i] = val
+-
+-def mark_ghost_cells(box, indices, type):
+-    """
+-    Marks cells in the Ghost Flag Array.
+-    Assumes box has a ghost_flag_array attribute.
+-    """
+-    for idx in indices:
+-        box.ghost_flag_array[idx] = type
+-
+-def gather_messages_for_local_pe(messages, local_pe_id):
+-    """
+-    Simulates the MPI Alltoallv result for the local PE.
+-    Collects all messages where the destination PE is local_pe_id.
+-    """
+-    received = []
+-    for dest_pe, msg_list in messages.items():
+-        if dest_pe == local_pe_id:
+-            received.extend(msg_list)
+-    return received
+ ```
+ 

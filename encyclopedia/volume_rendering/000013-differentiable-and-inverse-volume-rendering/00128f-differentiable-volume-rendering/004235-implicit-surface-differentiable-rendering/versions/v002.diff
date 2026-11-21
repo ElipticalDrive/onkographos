@@ -1,0 +1,182 @@
+--- v001.md
++++ v002.md
+@@ -8,27 +8,27 @@
+ ## How it works
+ **Inputs:**
+-*   A scalar field function $f_\theta(\mathbf{x})$ parameterized by $\theta$ (e.g., a neural network or grid-based representation).
+-*   Camera parameters defining rays $\mathbf{r}$.
+-*   An isovalue $\tau$ defining the surface ($f_\theta(\mathbf{x}) = \tau$).
++*   A scalar field function $f_\theta(\mathbf{x})$ parameterized by $\theta$ [S1].
++*   Camera parameters defining rays $\mathbf{r}$ [G].
++*   An isovalue $\tau$ defining the surface ($f_\theta(\mathbf{x}) = \tau$) [G].
+ 
+ **Outputs:**
+-*   Rendered color buffers $\mathbf{C}$.
+-*   Gradients $\frac{\partial \mathbf{C}}{\partial \theta}$ with respect to the implicit function parameters.
++*   Rendered color buffers $\mathbf{C}$ [S1].
++*   Gradients $\frac{\partial \mathbf{C}}{\partial \theta}$ with respect to the implicit function parameters [G].
+ 
+ **Data Structures:**
+-*   **Sampling Parameters ($U_k$):** A 9-dimensional vector per pixel/patch.
+-    *   6 lattice indices $\mathbf{v}_1, \dots, \mathbf{v}_6$ identifying the 3 grid edges that cross the isosurface.
+-    *   3 barycentric coordinates $\beta_1, \beta_2, \beta_3$ defining the position of the surface point within the generated triangle.
+-*   **G-Buffer ($G_k$):** Contains surface attributes. For implicit surfaces, this typically stores the 3D world-space position $\mathbf{x}$ of the surface point [S1].
++*   **Sampling Parameters ($U_k$):** A 9-dimensional vector per pixel/patch [S1].
++    *   6 lattice indices $\mathbf{v}_1, \dots, \mathbf{v}_6$ identifying the 3 grid edges that cross the isosurface [S1].
++    *   3 barycentric coordinates $\beta_1, \beta_2, \beta_3$ defining the position of the surface point within the generated triangle [S1].
++*   **G-Buffer ($G_k$):** Contains surface attributes. For implicit surfaces, this contains only the 3D world-space position $\mathbf{x}$ of the surface point [S1].
+ 
+ **Algorithm Steps:**
+ 
+ 1.  **Non-Differentiable Sampling ($U$):**
+-    For each pixel, determine the intersection with the isosurface. This step identifies the 3 edges of the grid cell crossed by the isosurface and the barycentric coordinates of the intersection point.
++    For each pixel, determine the intersection with the isosurface. This step identifies the 3 edges of the grid cell crossed by the isosurface and the barycentric coordinates of the intersection point [S1].
+     *   *Pitfall Handling:* The Marching Cubes algorithm is non-differentiable at singularities where neighboring grid values are nearly identical [S1]. To ensure well-defined derivatives, the sampling function $U$ removes samples from grid cells where the scalar values are nearly identical, evaluating the surface only where the derivative is stable [S1].
+     *   Output: $U_k = [\mathbf{v}_1, \dots, \mathbf{v}_6, \beta_1, \beta_2, \beta_3]$ [S1].
+ 
+ 2.  **Differentiable Evaluation ($G$):**
+-    Compute the surface point $\mathbf{x}$ and its attributes using the parameters from $U_k$. This step is fully differentiable with respect to $\theta$.
++    Compute the surface point $\mathbf{x}$ and its attributes using the parameters from $U_k$ [S1]. This step is fully differentiable with respect to $\theta$ [S1].
+     *   Evaluate $f_\theta$ at the 6 lattice vertices $\mathbf{v}_1, \dots, \mathbf{v}_6$. If $f$ is grid-based, perform a lookup [S1].
+     *   Interpolate along the 3 crossing edges to find the coefficients $\alpha_1, \alpha_2, \alpha_3$ that define the triangle vertices. The interpolation along an edge between vertices with values $f_a$ and $f_b$ to reach the isovalue $\tau$ is linear:
+@@ -41,91 +41,46 @@
+ 
+ 3.  **Shading:**
+-    Apply a shading function $\mathcal{C}$ to the attributes in $G_k$ to produce the final color $\mathbf{C}_k$. For implicit surfaces, shading typically uses the position $\mathbf{x}$ to compute normals (via gradients of $f_\theta$) and apply lighting models [S1].
++    Apply a shading function $\mathcal{C}$ to the attributes in $G_k$ to produce the final color $\mathbf{C}_k$ [S1]. For implicit surfaces, $G_k$ contains only 3D world-space positions [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def implicit_surface_rendering(f_theta, camera, isovalue):
+-    """
+-    Renders an implicit surface defined by f_theta.
+-    f_theta: callable, f_theta(x) -> scalar
+-    camera: object with method ray_for_pixel(u, v) -> Ray
+-    isovalue: float, the threshold for the isocontour
+-    """
+-    # 1. Non-differentiable sampling to find U_k
+-    # Note: In a differentiable pipeline, U is not backpropagated through.
+-    # It selects valid grid cells and edge crossings.
+-    pixels = []
+-    for u, v in all_pixel_coordinates():
++def implicit_surface_rendering(f_theta, camera, isovalue, grid):
++    # 1. Non-differentiable sampling U
++    pixels_data = []
++    for u, v in camera.pixel_grid():
+         ray = camera.ray_for_pixel(u, v)
+-        
+-        # Find grid cell intersected by ray
+-        cell = find_intersected_cell(ray, grid)
+-        
+-        # Check for singularity: if neighboring grid values are nearly identical, skip
+-        vals = [f_theta(vertex) for vertex in cell.vertices]
+-        if is_singular(vals):
++        cell = ray_box_intersect(ray, grid.origin, grid.cell_size) # [G]
++        vals = [f_theta(grid.vertex(cell, i)) for i in range(8)]
++        if max(vals) - min(vals) < 1e-6: # [G] singularity guard
+             continue
+-            
+-        # Identify 3 edges crossing the isovalue
+-        crossing_edges = marching_cubes_edges(cell, isovalue)
+-        if len(crossing_edges) != 3:
+-            continue # Should not happen for valid isocontour intersection
+-            
+-        # Compute barycentric coordinates beta for the intersection point
+-        # This involves solving for the intersection of the ray with the triangle
+-        # defined by the 3 crossing edges.
+-        beta = compute_barycentric_coords(ray, crossing_edges, isovalue)
+-        
+-        # U_k: 6 vertex indices, 3 barycentric coords
+-        v_indices = [edge.vertex_indices for edge in crossing_edges]
+-        U_k = v_indices + beta
+-        pixels.append((u, v, U_k))
++        edges = marching_cubes_edges(cell, vals, isovalue) # [G]
++        if len(edges) != 3:
++            continue
++        beta = ray_triangle_intersect(ray, edges, isovalue) # [G]
++        v_indices = [e.v1 for e in edges] + [e.v2 for e in edges]
++        pixels_data.append((u, v, v_indices, beta))
+ 
+     # 2. Differentiable evaluation G
+     g_buffers = []
+-    for u, v, U_k in pixels:
+-        v_indices = U_k[:6]
+-        beta = U_k[3:] # beta1, beta2, beta3
+-        
+-        # Evaluate f at the 6 vertices
+-        # If f is a neural network, this is a forward pass
+-        # If f is a grid, this is a lookup
+-        vertex_values = [f_theta(grid_vertex(v_idx)) for v_idx in v_indices]
+-        
+-        # Interpolate along edges to get triangle vertices p1, p2, p3
+-        # Each edge connects two vertices from v_indices
+-        # alpha_i is the interpolation factor along edge i to reach isovalue
++    for u, v, v_indices, beta in pixels_data:
++        vertex_vals = [f_theta(grid.vertex(cell, idx)) for idx in v_indices]
+         triangle_vertices = []
+-        for i, edge in enumerate(crossing_edges):
+-            v_start, v_end = edge.vertices
+-            f_start = f_theta(v_start)
+-            f_end = f_theta(v_end)
+-            
+-            # Linear interpolation factor
++        for i in range(3):
++            v_start = grid.vertex(cell, v_indices[2*i])
++            v_end = grid.vertex(cell, v_indices[2*i+1])
++            f_start = vertex_vals[2*i]
++            f_end = vertex_vals[2*i+1]
+             alpha = (isovalue - f_start) / (f_end - f_start)
+-            
+-            # Vertex position on the edge
+-            p_edge = lerp(v_start, v_end, alpha)
++            p_edge = v_start + alpha * (v_end - v_start)
+             triangle_vertices.append(p_edge)
+-            
+-        # Interpolate using barycentric coordinates
+-        x = (beta[0] * triangle_vertices[0] + 
+-             beta[1] * triangle_vertices[1] + 
+-             beta[2] * triangle_vertices[2])
+-             
+-        # Compute normal from gradient of f_theta at x
+-        # This requires backpropagation through f_theta
+-        normal = normalize(gradient(f_theta, x))
+-        
+-        g_buffers.append({'position': x, 'normal': normal, 'u': u, 'v': v})
++        x = beta[0] * triangle_vertices[0] + beta[1] * triangle_vertices[1] + beta[2] * triangle_vertices[2]
++        g_buffers.append({'position': x, 'u': u, 'v': v})
+ 
+     # 3. Shading
+     colors = []
+     for g in g_buffers:
+-        # Deferred shading: compute color from position and normal
+-        color = shade(g['position'], g['normal'], light_sources)
++        color = shading_function(g['position']) # [G]
+         colors.append(color)
+-        
+     return colors
+ ```
+@@ -133,13 +88,13 @@
+ **Parameters:**
+ *   **Isovalue ($\tau$):** The scalar value defining the surface. Typical values depend on the normalization of $f_\theta$ [S1].
+-*   **Grid Resolution:** Determines the granularity of the Marching Cubes triangulation. Higher resolution yields smoother surfaces but increases the number of potential singularities and sampling candidates [S1].
++*   **Grid Resolution:** Determines the granularity of the Marching Cubes triangulation [S1].
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Singularities:** Marching Cubes is non-differentiable when neighboring grid values are nearly identical, causing topological changes or degenerate triangles [S1]. The method handles this by discarding samples from such cells in the sampling function $U$ [S1].
+-*   **Topology Changes:** As $\theta$ changes, the isosurface topology may change (e.g., merging or splitting). The method avoids differentiating through these discrete changes by relying on the continuous evaluation $G$ and filtering out unstable samples [S1].
++*   **Topology Changes:** As $\theta$ changes, the isosurface topology may change (e.g., merging or splitting) [G]. The method avoids differentiating through these discrete changes by relying on the continuous evaluation $G$ and filtering out unstable samples [S1].
+ 
+ ## Operating characteristics
+ *   **Memory:** Avoids storing the full mesh topology, reducing memory overhead compared to explicit mesh rendering [S1]. Memory usage is dominated by the storage of the scalar field $f_\theta$ and the G-buffers [S1].
+-*   **Time Complexity:** The sampling step $U$ is non-differentiable and can be optimized using spatial data structures (e.g., BVH) for ray-casting [S1]. The evaluation step $G$ is differentiable and scales with the number of pixels and the cost of evaluating $f_\theta$ [S1].
++*   **Time Complexity:** The sampling step $U$ is non-differentiable [S1]. The evaluation step $G$ is differentiable and scales with the number of pixels and the cost of evaluating $f_\theta$ [S1].
+ *   **Strengths:** Handles complex, evolving topologies naturally; no need to manage mesh connectivity or UVs; differentiable with respect to the implicit function parameters [S1].
+ *   **Limitations:** Cannot differentiate through topological changes (handled by filtering); requires evaluation of $f_\theta$ at multiple points per pixel; performance depends on the efficiency of the implicit function evaluation [S1].
+@@ -148,5 +103,5 @@
+ 
+ ## Background
+-Implicit Surface Differentiable Rendering was introduced in "Differentiable Surface Rendering via Non-Differentiable Sampling" (2021) [S1]. It extends the concept of differentiable rendering to implicit surfaces by leveraging the Marching Cubes algorithm [24] for parameterization. The key insight is to separate the non-differentiable topological decisions (sampling) from the differentiable geometric evaluation (interpolation) [S1]. This approach builds on earlier work in differentiable rendering [G] and implicit surface rendering [S1]. It is particularly relevant in the context of neural rendering and inverse rendering, where optimizing the parameters of an implicit surface is required [S1].
++Implicit Surface Differentiable Rendering was introduced in "Differentiable Surface Rendering via Non-Differentiable Sampling" (2021) [S1]. It renders implicit surfaces as isocontours of a function $f_\theta: \mathbb{R}^3 \to \mathbb{R}$ using a parameterization derived from Marching Cubes triangulation, allowing differentiable evaluation without storing full mesh topology [S1]. The key insight is to separate the non-differentiable topological decisions (sampling) from the differentiable geometric evaluation (interpolation) [S1]. This approach builds on earlier work in differentiable rendering [G] and implicit surface rendering [S1]. It is particularly relevant in the context of neural rendering and inverse rendering, where optimizing the parameters of an implicit surface is required [S1].
+ 
+ ## Sources

@@ -1,0 +1,503 @@
+Repo: https://github.com/farisyahz/Project5-WebGPU-Gaussian-Splat-Viewer
+Demo: https://farisyahz.github.io/Project5-WebGPU-Gaussian-Splat-Viewer/
+Completed:
+
+Point-cloud MVP transform and Gaussian splat renderer
+Tile-based sorting and compute rasterizer
+f16 preprocessing
+Tight splat bounds, GPU profiling, and debug views
+Performance analysis, screenshots, and a 70-second feature video
+
+Feedback: N/A
+
+Project 5: Faris Rafie Syahzani by farisyahz · Pull Request #11 · CIS5650-Fall-2026/Project5-WebGPU-Gaussian-Splat-Viewer · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Project 5: Faris Rafie Syahzani
+#11
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Open
+farisyahz
+wants to merge
+11
+commits into
+CIS5650-Fall-2026:main
+base:
+main
+Branches
+Tags
+Loading
+Loading
+from
+farisyahz:main
+Uh oh!
+There was an error while loading. Please reload this page.
+Open
+Project 5: Faris Rafie Syahzani
+#11
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+11 commits
+Select commit
+Hold shift + click to select a range
+942a892
+Part 1: add MVP transform to point cloud shader
+farisyahz Oct 26, 2026
+48bebd7
+Part 2: gaussian splat renderer (preprocess, sort, indirect quad draw)
+farisyahz Oct 26, 2026
+96599f7
+Extra credit: tile-based sorting and compute rasterizer, GPU profiling
+farisyahz Oct 26, 2026
+0f727d8
+Extra credit: f16 preprocess compute shader
+farisyahz Oct 26, 2026
+ad9a1e3
+Optimization: opacity-aware axis-aligned splat bounds
+farisyahz Oct 26, 2026
+29df7e6
+Add partial benchmark results to dev notes
+farisyahz Oct 26, 2026
+1c511c5
+Add debug views for intermediate pipeline stages
+farisyahz Oct 27, 2026
+8880f06
+Fix f16 opacity overflow; tune debug view scales
+farisyahz Oct 27, 2026
+d884927
+Add benchmark harness, raw measurements and plotting script
+farisyahz Oct 27, 2026
+d95270c
+Write README with pipeline walkthrough, extra credit and performance …
+farisyahz Oct 27, 2026
+002e00b
+Prepare to submit
+farisyahz Oct 27, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Previous commit
+Next
+Next commit
+Part 2: gaussian splat renderer (preprocess, sort, indirect quad draw)
+```
+- preprocess compute: frustum culling, 3D/2D covariance, conic/radius, SH color
+- depth keys + indirect dispatch for the radix sort
+- instanced quad rendering via drawIndirect with conic-based alpha and over blending
+- GUI: gaussian multiplier, frustum culling toggle, workgroup size
+```
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+farisyahz
+committed
+Oct 26, 2026
+commit 48bebd7fa393cd679d0bc6d2d71981fe6f423931
+There are no files selected for viewing
+43 changes: 43 additions & 0 deletions
+43
+DEV_NOTES.md
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -7,3 +7,46 @@ and gotchas so the final README can be written from them.
+- `point_cloud.wgsl`: `clip = proj * view * pos` (model matrix is identity; the PLY is already in world space).
+- Camera conventions (from `camera.ts`): view space is +Z forward (`clip.w = view.z`),
+projection flips Y, near = 0.01, far = 100.
+## Part 2 — Gaussian renderer (quad rasterization)
+Pipeline per frame: reset counters (`queue.writeBuffer`) → preprocess compute → radix sort →
+copy `keys_size` into the indirect draw's instance count → instanced triangle-strip quads (`drawIndirect`).
+### Shader organisation
+- The preprocess module is assembled on the host from pieces so the f16 variant can reuse the entry points:
+`preprocess_common.wgsl` (structs, bindings, helpers) + `preprocess.wgsl` (f32 math: SH, 3D/2D covariance,
+`project_gaussian`) + `preprocess_entries.wgsl` (entry points).
+- Explicit bind group layouts for preprocess (instead of `layout: 'auto'`) so one set of bind groups works for
+every preprocess entry point and unused bindings aren't stripped.
+### Preprocess details
+- Near-plane cull at view z < 0.2 (always on, avoids dividing by ~0); frustum cull on NDC center outside ±1.2
+(toggleable in the GUI for the performance analysis).
+- Quaternion stored w-first (rot_0 = w). Σ = R S Sᵀ Rᵀ with scale = exp(s) * gaussian_multiplier.
+- 2D cov via EWA: J·W·Σ·Wᵀ·Jᵀ (Jacobian clamped to 1.3× FOV like the reference CUDA rasterizer), +0.3 px² low-pass.
+- radius = ceil(3·sqrt(λ_max)); quad half-size in NDC = radius·2/viewport.
+- Opacity = sigmoid(raw); color from SH (degree from the file, 3 for the provided scenes); view dir = pos − cam_pos.
+- Sort key = `~bitcast<u32>(view_z)` — positive floats keep order as u32, inverting makes the ascending radix sort
+give back-to-front order. `sort_dispatch.dispatch_x` is atomically bumped every 256*15 keys.
+- Splats are written compacted (index from the `atomicAdd`), sort payload = splat index.
+- Preprocess dispatch is 2D when it would exceed 65535 workgroups (e.g. 1M+ gaussians with workgroup size 16/32).
+### Splat layout (32 B)
+pos (2×f32), conic (3×f32), size (f16x2), color rg (f16x2), color b + opacity (f16x2).
+Position and conic kept in f32 on purpose: conic of a large splat is ~1e-6 px⁻² (f16 denormal) and f16 NDC
+positions jitter by ~0.5 px on a 1080p+ screen.
+### Rendering
+- Vertex: `splats[sorted_indices[instance]]`, expand corner by ±size, pass flat color/opacity/conic/center (px).
+- Fragment: d = center_px − frag.xy (both y-down pixel space), power = −½(a dx² + c dy²) − b dx dy,
+alpha = min(0.99, opacity·e^power), discard if power > 0 or alpha < 1/255.
+- Blend: src-alpha / one-minus-src-alpha (back-to-front "over"), no depth buffer.
+### GUI additions
+`frustum_culling` checkbox and `workgroup_size` dropdown (32–256, rebuilds the preprocess pipeline) for perf analysis.
+### Testing setup
+- Headless Chrome (puppeteer-core, `--enable-unsafe-webgpu`) uploads the PLY + cameras and screenshots the canvas.
+- Scenes: bonsai.ply (272,956 gaussians), bicycle_30000.cleaned.ply (1,063,091 gaussians).
+- First results: bicycle default camera looks like the reference; headless fps ~74 gaussian vs ~120 point cloud
+(vsync-capped, need proper GPU timing for the analysis).
+196 changes: 185 additions & 11 deletions
+196
+src/renderers/gaussian-renderer.ts
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -1,11 +1,15 @@
+import { PointCloud } from '../utils/load';
+import preprocessCommonWGSL from '../shaders/preprocess_common.wgsl';
+import preprocessWGSL from '../shaders/preprocess.wgsl';
+import preprocessEntriesWGSL from '../shaders/preprocess_entries.wgsl';
+import renderWGSL from '../shaders/gaussian.wgsl';
+import { get_sorter,c_histogram_block_rows,C } from '../sort/sort';
+import { Renderer } from './renderer';
+export interface GaussianRenderer extends Renderer {
+set_gaussian_multiplier: (value: number) => void,
+set_frustum_culling: (enabled: boolean) => void,
+set_workgroup_size: (size: number) => void,
+}
+// Utility to create GPU buffers
+Expand All
+@@ -21,6 +25,11 @@ const createBuffer = (
+return buffer;
+};
+// keep in sync with `Splat` in the shaders
+const c_size_splat = 8 * 4;
+const c_size_render_settings = 4 * 4;
+const c_max_workgroups_per_dim = 65535;
+export default function get_renderer(
+pc: PointCloud,
+device: GPUDevice,
+Expand All
+@@ -29,58 +38,223 @@ export default function get_renderer(
+): GaussianRenderer {
+const sorter = get_sorter(pc.num_points, device);
+// ===============================================
+// Initialize GPU Buffers
+// ===============================================
+const nulling_data = new Uint32Array([0]);
+const splat_buffer = createBuffer(
+device, 'splats', pc.num_points * c_size_splat, GPUBufferUsage.STORAGE,
+);
+// vertex_count, instance_count, first_vertex, first_instance
+const indirect_draw_buffer = createBuffer(
+device, 'indirect draw', 4 * 4,
+GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+new Uint32Array([4, pc.num_points, 0, 0]),
+);
+// gaussian_scaling, sh_deg, frustum_culling, key_capacity
+const render_settings = new Float32Array([1.0, pc.sh_deg, 1.0, 0.0]);
+const render_settings_buffer = createBuffer(
+device, 'render settings', c_size_render_settings,
+GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+render_settings,
+);
+const update_render_settings = () => device.queue.writeBuffer(render_settings_buffer, 0, render_settings);
+// only used by the tile renderer, but part of the shared preprocess layout
+const splat_counter_buffer = createBuffer(
+device, 'splat counter', 4, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+);
+// ===============================================
+// Create Compute Pipeline and Bind Groups
+// ===============================================
+const preprocess_pipeline = device.createComputePipeline({
+const buffer_entry = (binding: number, type: GPUBufferBindingType): GPUBindGroupLayoutEntry => ({
+binding, visibility: GPUShaderStage.COMPUTE, buffer: { type },
+});
+// explicit layouts so the bind groups can be shared by all preprocess entry points
+const preprocess_layouts = [
+device.createBindGroupLayout({
+label: 'preprocess camera + settings',
+entries: [buffer_entry(0, 'uniform'), buffer_entry(1, 'uniform')],
+}),
+device.createBindGroupLayout({
+label: 'preprocess gaussians',
+entries: [buffer_entry(0, 'read-only-storage'), buffer_entry(1, 'read-only-storage'), buffer_entry(2, 'storage')],
+}),
+device.createBindGroupLayout({
+label: 'preprocess sort',
+entries: [0, 1, 2, 3, 4].map(i => buffer_entry(i, 'storage')),
+}),
+];
+const preprocess_pipeline_layout = device.createPipelineLayout({
+label: 'preprocess',
+layout: 'auto',
+bindGroupLayouts: preprocess_layouts,
+});
+const preprocess_module = device.createShaderModule({
+label: 'preprocess',
+code: preprocessCommonWGSL + preprocessWGSL + preprocessEntriesWGSL,
+});
+let workgroup_size = C.histogram_wg_size;
+const create_preprocess_pipeline = (entryPoint: string) => device.createComputePipeline({
+label: `preprocess ${entryPoint}`,
+layout: preprocess_pipeline_layout,
+compute: {
+module: device.createShaderModule({ code: preprocessWGSL }),
+entryPoint: 'preprocess',
+module: preprocess_module,
+entryPoint,
+constants: {
+workgroupSize: C.histogram_wg_size,
+sortKeyPerThread: c_histogram_block_rows,
+workgroupSize: workgroup_size,
+sortKeysPerDispatch: C.histogram_wg_size * c_histogram_block_rows,
+},
+},
+});
+let preprocess_pipeline = create_preprocess_pipeline('preprocess');
+const camera_bind_group = device.createBindGroup({
+label: 'preprocess camera',
+layout: preprocess_layouts[0],
+entries: [
+{ binding: 0, resource: { buffer: camera_buffer } },
+{ binding: 1, resource: { buffer: render_settings_buffer } },
+],
+});
+const gaussian_bind_group = device.createBindGroup({
+label: 'preprocess gaussians',
+layout: preprocess_layouts[1],
+entries: [
+{ binding: 0, resource: { buffer: pc.gaussian_3d_buffer } },
+{ binding: 1, resource: { buffer: pc.sh_buffer } },
+{ binding: 2, resource: { buffer: splat_buffer } },
+],
+});
+const sort_bind_group = device.createBindGroup({
+label: 'sort',
+layout: preprocess_pipeline.getBindGroupLayout(2),
+layout: preprocess_layouts[2],
+entries: [
+{ binding: 0, resource: { buffer: sorter.sort_info_buffer } },
+{ binding: 1, resource: { buffer: sorter.ping_pong[0].sort_depths_buffer } },
+{ binding: 2, resource: { buffer: sorter.ping_pong[0].sort_indices_buffer } },
+{ binding: 3, resource: { buffer: sorter.sort_dispatch_indirect_buffer } },
+{ binding: 4, resource: { buffer: splat_counter_buffer } },
+],
+});
+// ===============================================
+// Create Render Pipeline and Bind Groups
+// ===============================================
+const render_shader = device.createShaderModule({ label: 'gaussian render', code: renderWGSL });
+const render_pipeline = device.createRenderPipeline({
+label: 'gaussian render',
+layout: 'auto',
+vertex: {
+module: render_shader,
+entryPoint: 'vs_main',
+},
+fragment: {
+module: render_shader,
+entryPoint: 'fs_main',
+targets: [{
+format: presentation_format,
+// splats are drawn back to front => standard "over" blending
+blend: {
+color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+},
+}],
+},
+primitive: {
+topology: 'triangle-strip',
+},
+});
+const render_bind_group = device.createBindGroup({
+label: 'gaussian render',
+layout: render_pipeline.getBindGroupLayout(0),
+entries: [
+{ binding: 0, resource: { buffer: camera_buffer } },
+{ binding: 1, resource: { buffer: splat_buffer } },
+// sorting ends after an even number of passes => the result is back in ping_pong[0]
+{ binding: 2, resource: { buffer: sorter.ping_pong[0].sort_indices_buffer } },
+],
+});
+// ===============================================
+// Command Encoder Functions
+// ===============================================
+const dispatch_preprocess = (encoder: GPUCommandEncoder, pipeline: GPUComputePipeline) => {
+const num_workgroups = Math.ceil(pc.num_points / workgroup_size);
+const x = Math.min(num_workgroups, c_max_workgroups_per_dim);
+const y = Math.ceil(num_workgroups / x);
+const pass = encoder.beginComputePass({ label: 'preprocess' });
+pass.setPipeline(pipeline);
+pass.setBindGroup(0, camera_bind_group);
+pass.setBindGroup(1, gaussian_bind_group);
+pass.setBindGroup(2, sort_bind_group);
+pass.dispatchWorkgroups(x, y);
+pass.end();
+};
+const preprocess = (encoder: GPUCommandEncoder) => {
+// reset the visible gaussian count and the sort dispatch size
+device.queue.writeBuffer(sorter.sort_info_buffer, 0, nulling_data);
+device.queue.writeBuffer(sorter.sort_dispatch_indirect_buffer, 0, nulling_data);
+dispatch_preprocess(encoder, preprocess_pipeline);
+};
+const render = (encoder: GPUCommandEncoder, texture_view: GPUTextureView) => {
+// instance count = number of visible gaussians written by the preprocess step
+encoder.copyBufferToBuffer(sorter.sort_info_buffer, 0, indirect_draw_buffer, 4, 4);
+const pass = encoder.beginRenderPass({
+label: 'gaussian render',
+colorAttachments: [
+{
+view: texture_view,
+loadOp: 'clear',
+clearValue: { r: 0, g: 0, b: 0, a: 1 },
+storeOp: 'store',
+}
+],
+});
+pass.setPipeline(render_pipeline);
+pass.setBindGroup(0, render_bind_group);
+pass.drawIndirect(indirect_draw_buffer, 0);
+pass.end();
+};
+// ===============================================
+// Return Render Object
+// ===============================================
+return {
+frame: (encoder: GPUCommandEncoder, texture_view: GPUTextureView) => {
+preprocess(encoder);
+sorter.sort(encoder);
+render(encoder, texture_view);
+},
+camera_buffer,
+set_gaussian_multiplier: (value: number) => {
+render_settings[0] = value;
+update_render_settings();
+},
+set_frustum_culling: (enabled: boolean) => {
+render_settings[2] = enabled ? 1.0 : 0.0;
+update_render_settings();
+},
+set_workgroup_size: (size: number) => {
+workgroup_size = size;
+preprocess_pipeline = create_preprocess_pipeline('preprocess');
+},
+};
+}
+24 changes: 23 additions & 1 deletion
+24
+src/renderers/renderer.ts
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -49,10 +49,19 @@ export default async function init(
+fps: 0.0,
+gaussian_multiplier: 1,
+renderer: 'pointcloud',
+frustum_culling: true,
+workgroup_size: 256,
+ply_file: '',
+cam_file: '',
+};
+// re-applies the GUI state when a new scene creates a new gaussian renderer
+function apply_gaussian_params(r: GaussianRenderer) {
+r.set_gaussian_multiplier(params.gaussian_multiplier);
+r.set_frustum_culling(params.frustum_culling);
+r.set_workgroup_size(params.workgroup_size);
+}
+const pane = new Pane({
+title: 'Config',
+expanded: true,
+Expand Down
+Expand Up
+@@ -86,6 +95,7 @@ export default async function init(
+const pc = await load(uploadedFile, device);
+pointcloud_renderer = get_renderer_pointcloud(pc, device, presentation_format, camera.uniform_buffer);
+gaussian_renderer = get_renderer_gaussian(pc, device, presentation_format, camera.uniform_buffer);
+apply_gaussian_params(gaussian_renderer);
+renderers = {
+pointcloud: pointcloud_renderer,
+gaussian: gaussian_renderer,
+Expand Down
+Expand Up
+@@ -121,7 +131,19 @@ export default async function init(
+'gaussian_multiplier',
+{min: 0, max: 1.5}
+).on('change', (e) => {
+//TODO: Bind constants to the gaussian renderer.
+gaussian_renderer?.set_gaussian_multiplier(e.value);
+});
+}
+{
+pane.addInput(params, 'frustum_culling').on('change', (e) => {
+gaussian_renderer?.set_frustum_culling(e.value);
+});
+}
+{
+pane.addInput(params, 'workgroup_size', {
+options: { '32': 32, '64': 64, '128': 128, '256': 256 },
+}).on('change', (e) => {
+gaussian_renderer?.set_workgroup_size(e.value);
+});
+}
+Expand Down
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

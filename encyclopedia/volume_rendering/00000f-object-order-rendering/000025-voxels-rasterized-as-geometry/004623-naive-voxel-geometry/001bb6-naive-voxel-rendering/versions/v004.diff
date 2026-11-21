@@ -1,0 +1,149 @@
+--- v003.md
++++ v004.md
+@@ -13,10 +13,10 @@
+ **Data Structures:**
+ The core data structure is a list of occupied voxel coordinates, typically stored in a `HashSet<IVec3>` or a flat array [S3, S4, unofficial]. For implementations requiring per-voxel attributes (color, normal), a flat array or interleaved buffer is used [G].
+-- **Vertex Buffer Layout:** Vertices are stored in a `std::vector<GLfloat>` in interleaved order for 6 faces. Each face has 6 vertices (2 triangles). The order for the 'front' face (Z+) is: (-,-,+), (-,+,+), (+,+,+), (-,-,+), (+,-,+), (+,+,+) [S4, unofficial].
++- **Vertex Buffer Layout:** Vertices are stored in a `std::vector<GLfloat>` in interleaved triangle-strip-like order for 6 faces [S4, unofficial]. Each face has 6 vertices (2 triangles) [S4, unofficial]. The order for the 'front' face (Z+) is: $(-,-,+)$, $(-,+,+)$, $(+,+,+)$, $(-,-,+)$, $(+,-,+)$, $(+,+,+)$ [S4, unofficial].
+ - **Normal Buffer:** Normals are stored in a separate `std::vector<GLfloat>` with 108 entries (3 floats per vertex × 6 vertices per face × 6 faces) [S4, unofficial].
+-- **Color Buffer:** Colors are associated with triangles. For 6 faces × 2 triangles, there are 12 color entries (3 floats each: R, G, B), assuming flat shading per triangle [S4, unofficial].
++- **Color Buffer:** Colors are associated with triangles [S4, unofficial]. For 6 faces × 2 triangles, there are 12 color entries (3 floats each: R, G, B), assuming flat shading per triangle [S4, unofficial].
+ 
+ **Coordinate Transformation:**
+-Voxel indices $(i, j, k)$ are transformed into world space. For a dense grid with bounds $P_{min}$ and $P_{max}$ and dimension $N_{dim}$, the world position $P_{world}$ of a voxel center is calculated as [S4, unofficial]:
++Voxel indices $(i, j, k)$ are transformed into world space [G]. For a dense grid with bounds $P_{min}$ and $P_{max}$ and dimension $N_{dim}$, the world position $P_{world}$ of a voxel center is calculated as [S4, unofficial]:
+ $$
+ P_{world} = P_{min} + \frac{I_{voxel}}{N_{dim}} \times (P_{max} - P_{min})
+@@ -28,18 +28,19 @@
+ 2. **Iteration:** Iterate through all voxel coordinates $(x, y, z)$ in the grid [S3, S4, unofficial].
+ 3. **Frustum Culling:** Check if the voxel's world position exceeds the camera's frustum border (e.g., Y coordinate check); if so, skip rendering [S2, unofficial].
+-4. **Back-face Culling:** If `cullInvisibleFaces` is enabled, calculate the view-space normal. Compute the dot product between the view-space normal and the vector from the voxel to the camera (view-space origin). If the result is $< 0$, the face is back-facing and is discarded [S2, unofficial].
+-5. **Geometry Generation:** For each active voxel, generate 36 vertices representing 6 faces. Calculate vertex positions in local space relative to the voxel center, transform to world space using grid coordinates and voxel size [S4, unofficial], transform to view space using the Model-View (MV) matrix [S2, unofficial], then to clip space using the Projection (P) matrix [S2, unofficial]. Emit vertices with texture coordinates [S2, unofficial].
+-6. **Rasterization:** Submit the generated primitives to the graphics pipeline. The depth buffer resolves visibility for opaque voxels [S2, S3, unofficial].
++4. **Back-face Culling:** If `cullInvisibleFaces` is enabled, calculate the view-space normal [S2, unofficial]. Compute the dot product between the view-space normal and the vector from the voxel to the camera (view-space origin) [S2, unofficial]. If the result is $< 0$, the face is back-facing and is discarded [S2, unofficial].
++5. **Geometry Generation:** For each active voxel, generate 36 vertices representing 6 faces [S4, unofficial]. Calculate vertex positions in local space relative to the voxel center, transform to world space using grid coordinates and voxel size [S4, unofficial], transform to view space using the Model-View (MV) matrix [S2, unofficial], then to clip space using the Projection (P) matrix [S2, unofficial]. Emit vertices with texture coordinates [S2, unofficial].
++6. **Rasterization:** Submit the generated primitives to the graphics pipeline [G]. The depth buffer resolves visibility for opaque voxels [S2, S3, unofficial].
+ 7. **Update:** If dynamic, re-upload updated voxel positions and data to GPU buffers [S5, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def render_naive_voxels(voxels: List[Voxel], mv_matrix: Matrix, p_matrix: Matrix, frustum: Frustum, cull_invisible_faces: bool = True):
++def render_naive_voxels(voxels: list, mv_matrix: list, p_matrix: list, frustum: object, cull_invisible_faces: bool = True) -> tuple:
+     """
+     Renders a list of voxels as individual cubes.
+-    voxels: List of objects with attributes: x, y, z (grid coords), color (r,g,b), active (bool)
+-    mv_matrix: Model-View matrix (4x4)
+-    p_matrix: Projection matrix (4x4)
++    voxels: List of dicts with keys: x, y, z (grid coords), color (tuple of 3 floats), active (bool)
++    mv_matrix: 4x4 Model-View matrix (list of lists)
++    p_matrix: 4x4 Projection matrix (list of lists)
+     frustum: Object with method contains(position) -> bool
++    Returns: (vertices: list of vec3, colors: list of vec3)
+     """
+     voxel_size = 1.0
+@@ -49,23 +50,24 @@
+ 
+     for voxel in voxels:
+-        if not voxel.active:
++        if not voxel.get('active', True):
+             continue
+ 
+         # 1. Frustum Culling
+-        world_pos = vec3(voxel.x * voxel_size, voxel.y * voxel_size, voxel.z * voxel_size)
++        world_pos = [voxel['x'] * voxel_size, voxel['y'] * voxel_size, voxel['z'] * voxel_size]
+         if not frustum.contains(world_pos):
+             continue
+ 
+         # 2. Transform center to view space
+-        view_center = mv_matrix * vec4(world_pos, 1.0)
++        view_center = mat_vec_mul(mv_matrix, [world_pos[0], world_pos[1], world_pos[2], 1.0])
+ 
+-        # 3. Generate Cube Geometry (6 faces, 2 triangles each, 6 vertices per face)
++        # 3. Generate Cube Geometry (6 faces, 6 vertices each in triangle-strip order)
++        # Face normals and corner offsets (local space)
+         faces = [
+-            (vec3(0, 0, 1), [(-half_size, -half_size, half_size), (half_size, -half_size, half_size), (half_size, half_size, half_size), (-half_size, half_size, half_size)]), # Front
+-            (vec3(0, 0, -1), [(half_size, -half_size, -half_size), (-half_size, -half_size, -half_size), (-half_size, half_size, -half_size), (half_size, half_size, -half_size)]), # Back
+-            (vec3(0, 1, 0), [(-half_size, half_size, -half_size), (half_size, half_size, -half_size), (half_size, half_size, half_size), (-half_size, half_size, half_size)]), # Top
+-            (vec3(0, -1, 0), [(-half_size, -half_size, half_size), (half_size, -half_size, half_size), (half_size, -half_size, -half_size), (-half_size, -half_size, -half_size)]), # Bottom
+-            (vec3(1, 0, 0), [(half_size, -half_size, half_size), (half_size, -half_size, -half_size), (half_size, half_size, -half_size), (half_size, half_size, half_size)]), # Right
+-            (vec3(-1, 0, 0), [(-half_size, -half_size, -half_size), (-half_size, -half_size, half_size), (-half_size, half_size, half_size), (-half_size, half_size, -half_size)])  # Left
++            ([0, 0, 1], [[-half_size, -half_size, half_size], [half_size, -half_size, half_size], [half_size, half_size, half_size], [-half_size, half_size, half_size]]), # Front
++            ([0, 0, -1], [[half_size, -half_size, -half_size], [-half_size, -half_size, -half_size], [-half_size, half_size, -half_size], [half_size, half_size, -half_size]]), # Back
++            ([0, 1, 0], [[-half_size, half_size, -half_size], [half_size, half_size, -half_size], [half_size, half_size, half_size], [-half_size, half_size, half_size]]), # Top
++            ([0, -1, 0], [[-half_size, -half_size, half_size], [half_size, -half_size, half_size], [half_size, -half_size, -half_size], [-half_size, -half_size, -half_size]]), # Bottom
++            ([1, 0, 0], [[half_size, -half_size, half_size], [half_size, -half_size, -half_size], [half_size, half_size, -half_size], [half_size, half_size, half_size]]), # Right
++            ([-1, 0, 0], [[-half_size, -half_size, -half_size], [-half_size, -half_size, half_size], [-half_size, half_size, half_size], [-half_size, half_size, -half_size]])  # Left
+         ]
+ 
+@@ -73,25 +75,33 @@
+             # Back-face culling
+             if cull_invisible_faces:
+-                view_normal = normalize(mv_matrix * vec4(face_normal_local, 0.0))
+-                view_vector = normalize(-view_center.xyz)
++                view_normal = normalize(mat_vec_mul(mv_matrix, [face_normal_local[0], face_normal_local[1], face_normal_local[2], 0.0]))
++                view_vector = normalize([-view_center[0], -view_center[1], -view_center[2]])
+                 if dot(view_normal, view_vector) < 0:
+                     continue
+ 
+-            # Two triangles per quad: (0,1,2) and (0,2,3)
+-            tri_indices = [(0, 1, 2), (0, 2, 3)]
+-            for tri in tri_indices:
+-                for idx in tri:
+-                    local_v = corners[idx]
+-                    # Transform local vertex to world, then to view, then to clip
+-                    world_v = world_pos + local_v
+-                    view_v = mv_matrix * vec4(world_v, 1.0)
+-                    clip_v = p_matrix * view_v
+-                    # Store clip coordinates (hardware performs perspective divide)
+-                    vertices.append(clip_v.xyz)
+-                    colors.append(voxel.color)
++            # Triangle-strip order: v0, v1, v2, v0, v3, v2
++            strip_indices = [0, 1, 2, 0, 3, 2]
++            for idx in strip_indices:
++                local_v = corners[idx]
++                # Transform local vertex to world, then to view, then to clip
++                world_v = [world_pos[0] + local_v[0], world_pos[1] + local_v[1], world_pos[2] + local_v[2]]
++                view_v = mat_vec_mul(mv_matrix, [world_v[0], world_v[1], world_v[2], 1.0])
++                clip_v = mat_vec_mul(p_matrix, view_v)
++                # Store clip coordinates (hardware performs perspective divide)
++                vertices.append([clip_v[0], clip_v[1], clip_v[2]])
++                colors.append(voxel['color'])
+ 
+-    # Upload vertices and colors to GPU buffers
+-    # Draw call with vertex count
+-    pass
++    return vertices, colors
++
++# Helper math functions (standard vector operations)
++def mat_vec_mul(M, v):
++    return [sum(M[i][j] * v[j] for j in range(4)) for i in range(4)]
++
++def dot(a, b):
++    return sum(x * y for x, y in zip(a, b))
++
++def normalize(v):
++    mag = dot(v, v) ** 0.5
++    return [x / mag for x in v]
+ ```
+ 
+@@ -102,6 +112,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Performance:** Performance degrades quadratically or worse with scene size because every voxel generates 36 vertices. Increasing platform size from 32x32 to 64x64 increases vertex count by 16x [S3, unofficial].
+-- **No Adjacency Culling:** The engine does not cull faces hidden by adjacent voxels. Every voxel generates full geometry regardless of neighbors, leading to high vertex buffer overhead [S4, unofficial].
++- **Performance:** Performance degrades quadratically or worse with scene size because every voxel generates 36 vertices [S3, unofficial]. Increasing platform size from 32x32 to 64x64 increases vertex count by 16x [S3, unofficial].
++- **No Adjacency Culling:** The engine does not cull faces hidden by adjacent voxels [S4, unofficial]. Every voxel generates full geometry regardless of neighbors, leading to high vertex buffer overhead [S4, unofficial].
+ - **Precision:** Using integer grid indices (`IVec3`) ensures alignment but requires careful conversion to floating-point world coordinates [S3, unofficial].
+ - **Memory Limits:** Extremely slow and memory intensive; can crash the kernel or cause swapping issues with large datasets [S6, unofficial].
+@@ -113,7 +123,7 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(V)$, where $V$ is the number of voxels. Each voxel requires linear-time geometry generation and submission relative to the grid size [S3, S4, unofficial].
+-- **Memory Complexity:** $O(V)$ for vertex buffers. Each voxel consumes 36 vertices × 3 floats × 4 bytes = 432 bytes for positions alone, plus normals and colors [S4, unofficial].
+-- **Measured Performance:** On a 32x32x1 platform, naive rendering is feasible. On larger scales (e.g., 1k³ resolution), it generates nearly a million quads, causing significant CPU-GPU bandwidth bottlenecks due to frequent buffer uploads [S1, S3, unofficial].
++- **Time Complexity:** $O(V)$, where $V$ is the number of voxels [S3, S4, unofficial]. Each voxel requires linear-time geometry generation and submission relative to the grid size [S3, S4, unofficial].
++- **Memory Complexity:** $O(V)$ for vertex buffers [S4, unofficial]. Each voxel consumes 36 vertices × 3 floats × 4 bytes = 432 bytes for positions alone, plus normals and colors [S4, unofficial].
++- **Measured Performance:** On a 32x32x1 platform, naive rendering is feasible [S3, unofficial]. On larger scales (e.g., 1k³ resolution), it generates nearly a million quads, causing significant CPU-GPU bandwidth bottlenecks due to frequent buffer uploads [S1, S3, unofficial].
+ - **Strengths:** Simple implementation; no complex spatial data structures required; works well for small, dense scenes or debugging [S4, unofficial].
+ - **Limitations:** Extremely inefficient for large scenes; no LOD; no occlusion culling between adjacent voxels; high draw call overhead if not instanced [S1, S3, S4, unofficial].

@@ -1,0 +1,272 @@
+--- v036.md
++++ v037.md
+@@ -8,56 +8,55 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D grid of voxels. For each voxel, a scalar field value $V$ is computed by accumulating contributions from metaballs (blobs) and a floor term [S1, unofficial].
+-*   **Output:** A stream of triangles (positions and normals) rendered immediately to the GPU.
++*   **Input:** A 3D grid of voxels [S1, unofficial].
++*   Field generation computes the 3D scalar field by accumulating contributions from all metaballs and a floor term for each voxel [S1, unofficial].
++*   **Output:** A stream of triangles (positions and normals) rendered immediately to the GPU [S1, unofficial].
+ 
+ **Data Structures:**
+ The method uses fixed-size typed arrays to buffer vertex data before flushing to the GPU [S1, unofficial].
+-*   `posArray`: `Float32Array` of size `maxCount * 3`. Stores vertex positions $(x, y, z)$.
+-*   `normalArray`: `Float32Array` of size `maxCount * 3`. Stores vertex normals $(nx, ny, nz)$.
+-*   `uvArray`: `Float32Array` of size `maxCount * 2`. Stores UV coordinates (if enabled).
+-*   `colorArray`: `Float32Array` of size `maxCount * 4`. Stores vertex colors (if enabled).
++*   `posArray`: `Float32Array` of size `maxCount * 3` [S1, unofficial].
++*   `normalArray`: `Float32Array` of size `maxCount * 3` [S1, unofficial].
++*   `uvArray`: `Float32Array` of size `maxCount * 2` [S1, unofficial].
++*   `colorArray`: `Float32Array` of size `maxCount * 4` [S1, unofficial].
+ *   `maxCount`: Integer, typically 4096 [S1, unofficial].
+-*   `count`: Integer, tracking the number of vertices currently in the buffer.
++*   `count`: Integer, tracking the number of vertices currently in the buffer [S1, unofficial].
+ *   `hasPos`, `hasNormal`, `hasUV`, `hasColor`: Boolean flags indicating which attributes are populated [S1, unofficial].
+ 
+ **Lookup Tables:**
+ The algorithm relies on the precomputed data structures defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md):
+-1.  **Edge Intersection Table (`edgeTable`)**: 256 entries, 12-bit bitmask per entry.
+-2.  **Triangle Connection Table (`triangleTable`)**: $256 \times 16$ array. Rows indexed by case index $C$. Columns store edge indices grouped in triplets, terminated by `-1`.
++1.  **Edge Intersection Table (`edgeTable`)**: 256 entries, 12-bit bitmask per entry [G].
++2.  **Triangle Connection Table (`triangleTable`)**: $256 \times 16$ array [G].
++Rows indexed by case index $C$ [G].
++Columns store edge indices grouped in triplets, terminated by `-1` [G].
+ 
+ **Algorithm Steps:**
+ 
+ 1.  **Field Evaluation:** For each voxel in the 3D grid, compute the scalar field value $V$ by summing contributions from all metaballs and the floor term [S1, unofficial].
+-2.  **Case Index Calculation:** Determine the 8-bit case index $C$ for the current voxel based on the scalar values $V(v_i)$ at its 8 vertices relative to the isovalue $I$. If $V(v_i) < I$, bit $i$ is set to 1; otherwise 0. The bit assignment must match the vertex ordering assumed by the LUT [10327-lookup-table-and-ambiguity-handling].
+-3.  **Lookup:** Use $C$ to index into `edgeTable` to find intersected edges and `triangleTable` to find the triangle connectivity (triplets of edge indices) [S1, unofficial].
+-4.  **Vertex Interpolation:** For each intersected edge, interpolate the vertex position and normal on the isosurface.
+-    *   Position $P$ on edge between vertices $v_a$ and $v_b$ with values $V_a$ and $V_b$:
+-        $$ t = \frac{I - V_a}{V_b - V_a} $$
+-        $$ P = v_a + t \cdot (v_b - v_a) $$
+-    *   Normal $N$ is computed as the normalized gradient of the scalar field at $P$ [G].
++2.  **Case Index Calculation:** Determine the 8-bit case index $C$ for the current voxel based on the scalar values $V(v_i)$ at its 8 vertices relative to the isovalue $I$ [G].
++If $V(v_i) < I$, bit $i$ is set to 1; otherwise 0 [G].
++The bit assignment must match the vertex ordering assumed by the LUT [G].
++3.  **Lookup:** Use $C$ to index `edgeTable` to find intersected edges and `triangleTable` to find the triangle connectivity (triplets of edge indices) [S1, unofficial].
++4.  **Vertex Interpolation:** For each intersected edge, interpolate the vertex position and normal on the isosurface [G].
++Position $P$ on edge between vertices $v_a$ and $v_b$ with values $V_a$ and $V_b$:
++$$ t = \frac{I - V_a}{V_b - V_a} $$
++$$ P = v_a + t \cdot (v_b - v_a) $$
++Normal $N$ is computed as the normalized gradient of the scalar field at $P$, or interpolated from vertex normals [G].
+ 5.  **Immediate Mode Batching:**
+-    *   Initialize `count = 0`.
++    *   Initialize `count = 0` and flags to false [S1, unofficial].
+     *   For each triangle generated:
+-        *   Add the 3 vertices to `posArray` and `normalArray`.
+-        *   Check for buffer overflow: If `count >= maxCount - 3`, flush the buffer (see Flush step).
+-        *   Increment `count` by 3.
++        *   Add the 3 vertices to `posArray` and `normalArray` at `count * 3` offsets [S1, unofficial].
++        *   Check for buffer overflow: If `count >= maxCount - 3`, flush the buffer (see Flush step) [S1, unofficial].
++        *   Increment `count` by 3 [S1, unofficial].
+     *   **Flush:**
+-        *   If `count == 0`, return.
++        *   If `count == 0`, return [S1, unofficial].
+         *   Zero out remaining entries in `posArray` and `normalArray` from `count * 3` to `length` to prevent garbage data [S1, unofficial].
+         *   Bind `posArray` and `normalArray` to GPU buffers using `gl.bufferData` with `DYNAMIC_DRAW` [S1, unofficial].
+         *   Enable vertex attribute arrays and set pointers to the buffer data [S1, unofficial].
+         *   Call `gl.drawArrays` with primitive type `TRIANGLES`, offset 0, and count `count` [S1, unofficial].
+-        *   Reset `count = 0`.
++        *   Reset `count = 0` and flags [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# Constants
+ MAX_COUNT = 4096
+-PRIMITIVE_TYPE = "TRIANGLES"
+-PRIM_SIZE = 3
+-ISOSURFACE_VALUE = 0.0
+-
+-# Buffers
+ pos_array = [0.0] * (MAX_COUNT * 3)
+ normal_array = [0.0] * (MAX_COUNT * 3)
+@@ -72,5 +71,4 @@
+     pos_array[count * 3 + 2] = z
+     has_pos = True
+-    count += 1
+ 
+ def add_vertex_normal(nx, ny, nz):
+@@ -80,38 +78,15 @@
+     normal_array[count * 3 + 2] = nz
+     has_normal = True
+-    count += 1
+ 
+ def add_triangle(o1, o2, o3):
+-    """
+-    Copies positions and normals from offsets o1, o2, o3 in the arrays
+-    to the current count position, then increments count.
+-    If buffer is full, flushes.
+-    """
+     global count
+-    # Copy position
+-    pos_array[count * 3 + 0] = pos_array[o1 * 3 + 0]
+-    pos_array[count * 3 + 1] = pos_array[o1 * 3 + 1]
+-    pos_array[count * 3 + 2] = pos_array[o1 * 3 + 2]
+-    pos_array[count * 3 + 3] = pos_array[o2 * 3 + 0]
+-    pos_array[count * 3 + 4] = pos_array[o2 * 3 + 1]
+-    pos_array[count * 3 + 5] = pos_array[o2 * 3 + 2]
+-    pos_array[count * 3 + 6] = pos_array[o3 * 3 + 0]
+-    pos_array[count * 3 + 7] = pos_array[o3 * 3 + 1]
+-    pos_array[count * 3 + 8] = pos_array[o3 * 3 + 2]
+-    
+-    # Copy normal
+-    normal_array[count * 3 + 0] = normal_array[o1 * 3 + 0]
+-    normal_array[count * 3 + 1] = normal_array[o1 * 3 + 1]
+-    normal_array[count * 3 + 2] = normal_array[o1 * 3 + 2]
+-    normal_array[count * 3 + 3] = normal_array[o2 * 3 + 0]
+-    normal_array[count * 3 + 4] = normal_array[o2 * 3 + 1]
+-    normal_array[count * 3 + 5] = normal_array[o2 * 3 + 2]
+-    normal_array[count * 3 + 6] = normal_array[o3 * 3 + 0]
+-    normal_array[count * 3 + 7] = normal_array[o3 * 3 + 1]
+-    normal_array[count * 3 + 8] = normal_array[o3 * 3 + 2]
+-    
++    for i in range(3):
++        pos_array[count * 3 + i] = pos_array[o1 * 3 + i]
++        pos_array[count * 3 + 3 + i] = pos_array[o2 * 3 + i]
++        pos_array[count * 3 + 6 + i] = pos_array[o3 * 3 + i]
++        normal_array[count * 3 + i] = normal_array[o1 * 3 + i]
++        normal_array[count * 3 + 3 + i] = normal_array[o2 * 3 + i]
++        normal_array[count * 3 + 6 + i] = normal_array[o3 * 3 + i]
+     count += 3
+-    
+-    # Check for overflow before adding next triangle
+     if count >= MAX_COUNT - 3:
+         flush_and_render()
+@@ -121,34 +96,23 @@
+     if count == 0:
+         return
+-    
+-    # Zero out remaining buffer space to avoid garbage rendering
+     for i in range(count * 3, MAX_COUNT * 3):
+         pos_array[i] = 0.0
+         normal_array[i] = 0.0
+-        
+-    # Bind buffers to GPU
+     # gl.bufferData(GL_ARRAY_BUFFER, pos_array, DYNAMIC_DRAW)
+-    # gl.bufferData(GL_ARRAY_BUFFER, normal_array, DYNAMIC_DRAW)
+-    
+-    # Enable vertex attributes
+     # gl.enableVertexAttribArray(pos_attr)
+-    # gl.vertexAttribPointer(pos_attr, 3, FLOAT, FALSE, 0, 0)
+-    # if has_normal:
+-    #     gl.enableVertexAttribArray(normal_attr)
+-    #     gl.vertexAttribPointer(normal_attr, 3, FLOAT, FALSE, 0, 0)
+-    
+-    # Draw
+-    # gl.drawArrays(TRIANGLES, 0, count)
+-    
+-    # Reset state
++    # gl.vertexAttribPointer(pos_attr, 3, GL_FLOAT, GL_FALSE, 0, 0)
++    # if has_normal: ...
++    # gl.drawArrays(GL_TRIANGLES, 0, count)
+     count = 0
+     has_pos = False
+     has_normal = False
+ 
++def interpolate_vertex(edge_idx, voxel_origin, vertex_values):
++    # Standard MC edge interpolation [G]
++    # Returns (position, normal)
++    pass
++
+ def process_voxel(x, y, z):
+-    # 1. Compute scalar field value V for the voxel
+     V = compute_scalar_field(x, y, z)
+-    
+-    # 2. Compute case index C
+     C = 0
+     for i in range(8):
+@@ -156,42 +120,26 @@
+         if vi < ISOSURFACE_VALUE:
+             C |= (1 << i)
+-            
+-    # 3. Lookup triangles
+     if edge_table[C] == 0:
+-        return # No intersection
+-        
++        return
+     triangles = triangle_table[C]
+-    
+-    # 4. Generate vertices for each triangle
++    vertex_offsets = []
+     for k in range(0, 16, 3):
+         e1 = triangles[k]
+         e2 = triangles[k+1]
+         e3 = triangles[k+2]
+-        
+         if e1 == -1: break
+-        
+-        # Interpolate vertices on edges e1, e2, e3
+         v1 = interpolate_vertex(e1, x, y, z)
+         v2 = interpolate_vertex(e2, x, y, z)
+         v3 = interpolate_vertex(e3, x, y, z)
+-        
+-        # Add to buffer
+-        # Note: In immediate mode, we might add vertices individually or copy them
+-        # The source describes adding positions/normals and then copying for triangles
+-        # Here we assume v1, v2, v3 are already in the buffer at some offsets or we add them directly
+-        
+-        # Simplified: Add vertices to buffer at current count positions
+-        # Then call add_triangle with those offsets
+-        
+-        # This part depends on specific implementation of vertex storage.
+-        # Based on source: "Copy positions from pos array at offsets o1, o2, o3"
+-        # We assume v1, v2, v3 are stored at indices corresponding to their edge intersections
+-        
+-        # For the sake of complete pseudocode, we assume a helper to get edge vertex index
+-        idx1 = get_edge_vertex_index(e1)
+-        idx2 = get_edge_vertex_index(e2)
+-        idx3 = get_edge_vertex_index(e3)
+-        
+-        add_triangle(idx1, idx2, idx3)
++        add_vertex_position(v1[0], v1[1], v1[2])
++        add_vertex_normal(v1[3], v1[4], v1[5])
++        offset1 = count
++        add_vertex_position(v2[0], v2[1], v2[2])
++        add_vertex_normal(v2[3], v2[4], v2[5])
++        offset2 = count
++        add_vertex_position(v3[0], v3[1], v3[2])
++        add_vertex_normal(v3[3], v3[4], v3[5])
++        offset3 = count
++        add_triangle(offset1, offset2, offset3)
+ ```
+ 
+@@ -201,19 +149,24 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Buffer Overflow:** The code checks `count >= maxCount - 3` before drawing to ensure space for a triangle. If exceeded, it flushes immediately [S1, unofficial].
+-*   **Ambiguity:** Cases 46, 47, 98, 99, 210, 213, 214, 215 contain saddle points. The standard LUT uses a fixed triangulation, which can cause cracks if adjacent voxels resolve ambiguity differently [10327-lookup-table-and-ambiguity-handling].
+-*   **Precision:** Floating-point interpolation errors may cause small gaps at high resolutions.
++*   **Buffer Overflow:** The code checks `count >= maxCount - 3` before drawing to ensure space for a triangle [S1, unofficial].
++*   **Ambiguity:** Cases 46, 47, 98, 99, 210, 213, 214, 215 contain saddle points [G].
++The standard LUT uses a fixed triangulation, which can cause cracks if adjacent voxels resolve ambiguity differently [G].
++*   **Precision:** Floating-point interpolation errors may cause small gaps at high resolutions [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels. Each voxel is processed independently.
+-*   **Memory Complexity:** $O(1)$ auxiliary memory (fixed-size buffers). The scalar field storage is $O(N)$ if stored, or $O(1)$ if computed on the fly per voxel (though typically stored for efficiency).
+-*   **Measured Performance:** Limited by CPU bottlenecks at high resolutions or high blob counts [S1, unofficial].
+-*   **Strengths:** Simple implementation, easy to debug, serves as a reference for GPU implementations.
+-*   **Limitations:** Poor scalability due to CPU-bound field evaluation and geometry generation. High CPU-GPU transfer overhead if not batched effectively.
+-*   **When to use:** Reference implementation, low-resolution previews, or educational purposes.
+-*   **When not to use:** High-resolution real-time rendering, large datasets.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels [G].
++*   **Memory Complexity:** $O(1)$ auxiliary memory (fixed-size buffers) [G].
++The scalar field storage is $O(N)$ if stored, or $O(1)$ if computed on the fly per voxel [G].
++*   **Measured Performance:** Limited by CPU bottlenecks at high resolutions or blob counts [S1, unofficial].
++*   **Strengths:** Simple implementation, easy to debug, serves as a reference for GPU implementations [G].
++*   **Limitations:** Poor scalability due to CPU-bound field evaluation and geometry generation [G].
++High CPU-GPU transfer overhead if not batched effectively [G].
++*   **When to use:** Reference implementation, low-resolution previews, or educational purposes [G].
++*   **When not to use:** High-resolution real-time rendering, large datasets [G].
+ 
+ ## Background
+-The CPU Immediate Mode Marching Cubes implementation is inspired by Gregg Tavares' (Greggman) metaballs demo [S1, unofficial]. It uses classic Marching Cubes tables from Paul Bourke [S1, unofficial]. The project is part of the `WebGL2-GPU-Marching-Cubes` repository by 3merillon [S1, unofficial].
++The CPU Immediate Mode Marching Cubes implementation is inspired by Gregg Tavares' (Greggman) metaballs demo [S1, unofficial].
++It uses classic Marching Cubes tables from Paul Bourke [S1, unofficial].
++The project is part of the `WebGL2-GPU-Marching-Cubes` repository by 3merillon [S1, unofficial].
+ 
+ ## Sources

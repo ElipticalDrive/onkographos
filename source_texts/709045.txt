@@ -1,0 +1,102 @@
+概要：タスク感度／符号量で「省略するlatent gridを1個」選ぶ 現C3′を基準に、画像ごとに最大1個のlatent gridを省略する独立variantを実装・検証する。 まず既存checkpointでgrid別の影響とbitsを診断し、その後に復号規約を備えた省略＋再最適化を比較する。#28のROI・#29の蒸留は併用しない。Issue更新のみでGPU実験を開始しない。 今回の出発点 #49のC3/C3′4rate比較、#50の4方式比較、#26のYOLO転移...
+
+暫定: タスク感度と符号量に基づくC3潜在表現の容量配分 · Issue #30 · ken2129/c3_neural_compression · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+暫定: タスク感度と符号量に基づくC3潜在表現の容量配分 #30
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+暫定: タスク感度と符号量に基づくC3潜在表現の容量配分#30
+Copy link
+Description
+ken2129
+opened on Oct 6, 2026
+Issue body actions
+概要：タスク感度／符号量で「省略するlatent gridを1個」選ぶ
+現C3′を基準に、画像ごとに最大1個のlatent gridを省略する独立variantを実装・検証する。 まず既存checkpointでgrid別の影響とbitsを診断し、その後に復号規約を備えた省略＋再最適化を比較する。#28のROI・#29の蒸留は併用しない。Issue更新のみでGPU実験を開始しない。
+今回の出発点
+#49のC3/C3′4rate比較、#50の4方式比較、#26のYOLO転移評価は完了済み。#26のC3′−C3は低→高rate順に−2.1903／+0.2425／−4.0329／−6.9520 AP点。rate不一致と小標本の限定があり、検出器依存と整合する観測を原因特定や同rate効果と取り違えない。既存比較やteacher自身の再評価を未実施へ戻さない。
+容量変更を一方式に絞る
+初期案はgrid単位の省略。num_grids総当たり、可変bit精度、更新頻度配分、画像領域の細分maskは今回は扱わない。C3のlatent gridは解像度の異なる画像表現で、検出器FPNと同じ意味的階層ではない。「細かいgrid＝小物体専用」と仮定しない。
+1. 再最適化なしの感度診断
+#49校正20枚の検証済み現C3′ checkpointから、全grid復元と各gridを一つずつ0へ置換した復元を作る。GTや評価D2/YOLOのAPを選択器へ渡さない。
+teacherは現C3′の固定torchvision teacher。元画像featureはdetach。各grid gの感度は同じfeature L1定義の差 ΔD_g=D_feature(omit g)−D_feature(full)。MSEの増分とgrid別推定bits B_gも記録する。
+この操作は診断画像であり、ゼロ化しただけの出力へ「grid bits=0で圧縮成功」とラベルを付けない。全grid/単一省略を比較し、単一gridの影響を複数gridへ加算一般化しない。
+teacher重み・入力・目的署名・保存復元との一致を確認する。既存の完全stateがない画像では新たな最適化を黙って始めず在庫不足を報告する。
+2. 画像ごとの固定選択規則（初期実装案）
+全gridの短い共通pilot状態から全候補を1回ずつ復元し、上のΔD_gとB_gを計算する。pilot step数sは現C3′のnoise500の一部（初期候補s=50）とし、接続・費用試験で確定する。50は今回の設計案で、既存の承認や論文標準値ではない。
+task-aware selectorはS_g=ΔD_g/max(B_g,1 bit)を最小にするgridを選ぶ。負のΔDは改善候補としてそのまま残し、0へclipしない。B_g=0の候補は除外、同点は小さいgrid indexを優先する。
+side bitsを含めた見込み節約が正になる候補だけを対象とし、候補がなければ「省略なし」。初回は最大1個とし、途中でmaskを再選択しない。
+選択したgridを以降は固定0にして更新対象から除き、残りnoise(500−s)＋最大50 STEを続ける。他のlatent・synthesis・entropy networkの更新範囲、loss、数値条件、初期RNGは対照と同じ。pilotを別予算として隠さず500stepへ含め、感度計算の追加forward費用を別途加算する。
+selectorは符号化時に元画像teacherだけを参照する。GT・D2/YOLO APによる画像ごとのgrid選択は禁止。最終評価前に規則を凍結し、評価画像ではこの同じ規則を適用する。
+3. 必須対照
+現C3′ full-grid：主対照。共通pilotを含め同じstep数の経路を確認
+task-aware single-grid omission：上記の感度/bit規則
+rate-only single-grid omission：同じ候補と省略規約でB_g最大を選ぶ。単に大きいgridを削るだけとの差を調べる
+通常C3：共通参照として対応確認後に再利用
+同stepでは追加感度計算分が増えるので、少数の校正画像で同時間上限の補助比較も計画する。別候補lossやROIを追加せず、比較が増える場合は上限を先に再確定する。
+復号・bitsの定義を先に実装する
+decoderは元のG-grid形状と順序を保持し、省略gridの位置へ既知の0 tensorを再挿入する。synthesis入力channelを減らして別architectureにしない。
+省略番号を「なし＋G候補」の固定長enumで送り、初期規約はceil(log2(G+1)) bits。G・shape・gain・量子化精度・network構造など、decoderに必要で既存の共有規約から復元できない情報は全て追加課金する。このenumは研究用の明示的な推定overheadで、実bitstream実装済みとは呼ばない。
+省略gridのentropy symbolは送らない。entropy modelが他gridや省略位置をcontextに参照する場合は、encoder/decoderとも同じ既知0を使い、残るsymbolの条件付きlikelihoodを省略状態で再計算する。元の全grid bitsからB_gを引くだけで最終rateを作らない。
+synthesis/entropy networkの量子化parameter bitsを従来通り含める。省略しても使うnetworkのbitsをゼロ扱いしない。選択規則自体は共通コード、画像別選択結果は上記header。追加送信物があれば一覧へ追記する。
+teacher・元画像・省略された値を受け取れないdecoder-onlyテストで、header＋残存latent＋量子化network＋共有configだけから同じPNGになることを検証する。
+復号依存の因果順序を実装上保証できない場合は省略符号化段階を停止。診断のゼロ化画像だけで圧縮性能を結論づけない。実bitstreamを作らない限り主rateは全推定bits＋明示headerの推定値。
+実装・勾配検証
+全grid／省略なしのcompatibility modeで現C3′の復元・loss・勾配・bitsを再現し、新headerはrate内訳として別に検証。選択は離散なencoder処理でstop-gradientとし、選択後の残存latent／networkに有限の勾配が届き、省略gridは更新されずteacher全重みが固定であることを試験する。feature正規化は現C3′の層別L1平均を変えない。shape/gain・空候補・負感度・tiny bits・tie・header roundtrip・entropy contextの単体試験を追加する。
+共通の実験設計・選択規則
+以下は今回具体化した実装・実験案であり、既存の実装済み機能や承認済みGPU条件とは区別する。#35が全体順序と依存を管理する。#28／#29／#30は同じ現C3′を基準にした独立variantとし、相互に積み重ねない。
+基準：通常C3と現C3′。現C3′は画像MSE係数1、feature L1係数0.1、FPN 0–3各0.25、500 noise＋最大50 STEを出発条件とする。teacherは#49のtorchvision Faster R-CNN ResNet-50 FPN COCO_V1を固定し、D2評価器とは区別する。数値設定・RNG・初期化・checkpoint/量子化選択は#49の固定実装と照合し、変更しない部分を再利用する。
+入力：短辺800／長辺上限1333のD2 uint8 resize後に圧縮。native PNGと元座標box変換、D2の追加resizeなしを維持。YOLO評価は#26の固定8.3.0／yolov8m／letterbox・NMS経路を再利用し、codec入力resizeと区別する。
+校正：#49の校正20枚を開発用とし、固定順先頭画像の接続試験→事前固定した小subset→校正20枚へ進む。#49の旧評価20枚も既に観測済みで、新しい独立最終評価とは呼ばない。
+初回rate案は低・中の目標0.10／0.225 bppの2点。これは今回の設計案で、各variantの到達可能性・費用を校正開始前に確定する。各方式のλは各画像のmean bppだけで調整し、同じλを同rateとしない。初期候補と追加候補の上限、補間規則、目標±10%と方式間差10%（通常C3分母）の判定を事前固定する。上限内で揃わなければ未達を残し、評価側で再調整しない。
+variant係数の選択は校正側だけで行う。固定候補全点を残し、採用を最大1設定に絞る選択指標・tie breakを校正APを見る前に決める。例としてD2を選択用、YOLOを転移確認用に固定する場合、YOLOの結果で候補を選び直さない。選択方針を変更したら変更時点以降を新計画として扱う。
+最終評価：新しい非重複画像集合を使用履歴・抽出seed・manifestで固定し、画像数Nを費用見積りと必要な支持数から承認前に確定する。暫定: 物体領域を重視する特徴損失でC3を機械向けに最適化 #28–30の条件を全て凍結してから共通の最終評価へ進み、先行variantの最終APを後続variantの調整に使わない。難しければ各variantへ別の未見集合を割り当てる。いずれの方式も最終APによるλ・seed・checkpoint再選択は禁止。
+主rate：各画像の全推定bits／D2 resize済み非padding画素数の算術平均。latent、量子化synthesis/entropy network、復号に必要なside informationを含める。YOLO入力画素数や元JPEG画素数へ分母を変えず、actual bitstreamとは呼ばない。
+主評価：固定D2と固定YOLOそれぞれの集合COCO bbox AP@[.50:.95]、AP50/75・サイズ別AP、JPEG baselineからの低下、通常C3／現C3′との差。検出器間のAP絶対値を直接引かず、GTは校正/評価指標だけに使用し、画像ごとの符号化lossやteacher信号生成へ渡さない。小標本の優越性・信頼区間を無根拠に主張しない。
+画像・入力・実装・数値設定・bits・完了attemptが一致する既存baselineは再利用する。不一致な基準のみ必要分を新規測定し、旧成果物を無条件に同じ曲線へ混ぜない。同じstep数は同じ計算量ではないため、wall time、teacher追加処理、load/compile、peak memory、失敗も記録する。
+予算・停止・成果物
+許可環境で読取在庫確認と変更箇所のCPU単体試験を計画する。実行前にsource commit・teacher/評価器version・hashと設定を固定する。
+GPU接続試験は、それ自体の時間・容量上限を承認してから行う。1画像の実測で校正・失敗候補・全対照・最終評価の累計GPU時間/経過時間/容量/最低空きを見積もり、上限と停止条件をまとめて承認する。過去の無制限予算やGPU2台の許可を流用しない。
+勾配切断、teacher更新、非有限値、入力/座標/hash不整合、rate未達、時間・容量上限で該当段階を停止し、原因と未完範囲を記録する。安全な修正後の再試行も承認済み上限内、性能を見た無制限retryはしない。
+1 Issue・1結果PRに、実装・CPU検証・校正全候補・独立評価全点・図PNG/PDF・CSV/JSON・統合研究日記（目的／実施／結果／考察／決定／未完）を集約する。PR作成だけで科学作業終了としない。
+公開は数値・必要コードcommit・再現手順・検証要約。画像ID一覧、実画像・重み・全予測・checkpoint、モデル/入力識別hash、内部パス、環境詳細は許可された私有保存先へ保持。新しい送信先・削除・購入は別承認。全体方針に従い、他者GPUジョブに干渉しない。
+改善しない・判定不能も完了可能。ユーザーのレビュー／merge判断に委ね、無断merge/closeや次のGPU実験は行わない。
+このIssue固有の完了条件
+既存checkpointからgrid別Δfeature/MSE/bitsを診断し、単なるzero化と省略符号化を区別
+selectorとrate-only対照、共通pilot、単一grid制約、decoder再構成規約を実装・試験
+headerと全network/latent/side bits、残存entropy再計算を監査し、decoder-onlyでPNG一致を確認
+校正で全候補のAP–total bpp–時間と選択頻度を記録し、独立評価の規則・条件を凍結
+独立評価D2/YOLO、追加探索コスト、rate-onlyとの差を図表/単一PRに残す、又は具体的な停止理由を記録
+容量の削減と単なる計算予算配分を区別し、暫定: C3の最適化予算とbpp–AP・圧縮時間の関係を調べる #24／#35へ結果を返す
+一次資料・差分
+C3公式latent実装：multi-resolution grids／quantization経路。実装時に使用commitを固定し、gainと復号経路を照合する。
+C3論文：network parameterの符号費を落とさない。
+Latent Space Masking：機械向けlatent選択の先行例。本案のgrid単位・固定0再挿入・画像ごとのC3再最適化と同一方式とは扱わない。#33で目的・単位・復号情報・計算費用の差を確認し、「容量配分」だけを新規性としない。
+Activity
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

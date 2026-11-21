@@ -1,0 +1,31 @@
+# Visualization and Rendering Techniques
+
+Also called: Isosurface Rendering, Optimized Mesh Reference, 2+D Pen-and-Ink
+
+## Overview
+This family encompasses methods for visualizing the boundary defined by a specific scalar value (isovalue) within a volumetric dataset. It solves the problem of conveying shape and depth from implicit data by either extracting an explicit polygonal mesh or computing surface intersections on-the-fly via raymarching [S1, S3, unofficial]. It is distinguished from direct volume rendering by isolating the specific isosurface rather than accumulating light through the entire volume, and from general surface extraction by focusing on the final visual representation pipeline [S3, unofficial].
+
+## Shared principles
+All methods in this family operate on a discretized domain, typically a regular grid (Cartesian, octree, or tetrahedral) where each cell contains scalar values or occupancy states at its vertices or centers. The core mechanism involves traversing the grid cells and evaluating the data to determine which parts of the domain constitute the surface [G].
+
+1.  **Domain Traversal**: The algorithm iterates over the volume data structure [G]. For regular grids, this often involves checking each cell or voxel [G].
+2.  **Surface Determination**: A criterion is applied to identify surface locations. In isosurface methods, this involves comparing scalar values against a threshold (isovalue) to detect sign changes or equality [30-isosurface-extraction.md]. In blocky meshing, this involves checking occupancy states or material IDs to identify exposed boundaries [31-blocky-meshing.md].
+3.  **Primitive Generation**: Geometric primitives (vertices, edges, faces) are generated based on the determined surface locations [G].
+4.  **Mesh Coherence**: Adjacent primitives are merged or connected to form a coherent mesh, often requiring vertex merging to avoid duplicates and ensure watertightness [30-isosurface-extraction.md].
+
+## Subtopics
+
+### [Optimized Mesh Reference](1888-optimized-mesh-reference.md)
+A theoretical performance baseline for indirect isosurface visualization. It represents the best-case scenario where an explicit mesh is rendered with zero overhead for geometry extraction or occlusion culling. It serves to measure the theoretical upper bound of rendering performance by evaluating a highly-optimized explicit mesh representation, allowing researchers to assess how close a proposed pipeline comes to the ideal efficiency of forward mesh rendering. Unlike direct ray-marching references, it isolates the rasterization cost of an already-extracted and optimized surface.
+
+### [Isosurface Rendering](7669-isosurface-rendering.md)
+A method that extracts and visualizes a specific boundary within a volumetric dataset by identifying voxels where the scalar field value equals a user-defined threshold. Unlike direct volume rendering which accumulates light through the entire volume, this method renders only the surface defined by the isovalue, requiring explicit lighting calculations to convey shape and depth. It is distinguished from its sibling [Optimized Mesh Reference](1888-optimized-mesh-reference.md) by its reliance on raymarching against the raw volume data to find the surface intersection on the fly, rather than rendering a pre-computed polygonal mesh.
+
+### 2+D Pen-and-Ink for Volume Visualization
+A non-photorealistic technique where 2D strokes are generated based on 3D information associated with original 3D objects, treating isosurfaces as opaque objects for image buffer generation [S1, unofficial]. The process involves extracting isosurfaces from the raw dataset and treating them as opaque objects to generate image buffers representing properties including lighting, depth, normals, horizontal curvature, and vertical curvature [S1, unofficial]. These image buffers are then used as inputs to different pen-and-ink filters to synthesize a final image [S1, unofficial].
+
+## Background
+The application of pen-and-ink methods to volume visualization was pioneered by Treavett and Chen [TC00], who introduced the 2+D method [S1, unofficial]. This approach treats isosurfaces as opaque objects to generate G-buffers (in Saito and Takahashi's terminology) for subsequent non-photorealistic rendering [S1, unofficial]. The method claims to provide pen-and-ink drawings close to those made by hand with very little user interaction, though supporting evidence for these assertions is limited [S1, unofficial].
+
+## Sources
+[S1] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)

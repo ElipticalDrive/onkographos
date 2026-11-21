@@ -1,0 +1,698 @@
+What changed
+
+
+Gaussian cache format. GaussianCache is a new cooked asset for animated gaussian splat previews. It holds:
+
+a splat LOD tree whose merges are moment-matched;
+nested driver meshes, built with meshopt_simplify;
+temporal levels T0–T3;
+driver motion, stored as prediction residuals on a 16-bit grid and compressed with the meshoptimizer vertex codec;
+per-attribute splat streams with meshoptimizer filters.
+
+The cache is split into progressive chunks. Chunk 0 is at most 256 KB for avatars and items, and at most 1 MiB for worlds, so a viewer can render while the rest downloads.
+
+
+GPU splat renderer.
+
+Compute passes pose the driver meshes, choose the LOD cut and pose the splats.
+A GPU radix sort orders the splats by depth.
+Splats draw as EWA quads with the standard 3DGS Jacobian clamp.
+GaussianSplatComponent and GaussianCacheComponent render caches, and a streaming loader accepts chunks as they arrive.
+Draw order is deterministic when the renderer can hold every node, which bakes always can.
+
+
+
+Bake command. A new library, XREngine.GaussianBaking, plus the editor command --bake-splat-preview. It:
+
+loads a cooked prefab or world from a pak;
+samples surfaces;
+bakes lit-projection color from 32 views (64 for worlds);
+builds the tree, the drivers, the splat bindings and the cache;
+writes the cache with stable asset IDs and reads it back to check it;
+records loop videos (VP9 and H.264 OpenH264, 1080p and 480p) and WebP posters through an external ffmpeg;
+writes report.json. Each failure kind has its own exit code.
+
+
+
+meshoptimizer. The Meshoptimizer.NET package is replaced by native meshoptimizer v1.3, built from source at a locked commit by Tools/Dependencies/Build-Meshoptimizer.ps1 and called through P/Invoke. The ExecTool bootstrap runs the script. The dependency report generator now encodes spaces and parentheses in local license links, so its output reproduces the committed, encoded rows.
+
+
+Opaque deferred pass. State buckets used to be ordered by object hash codes. They are now ordered by first insertion at each grouping level (shader, material, render options, mesh renderer). The grouping is the same as before, but the order is now the same in every process, and the sort does not allocate after warm-up.
+
+
+Merge with master. The branch merges master 4cb65968b. Both new CI steps are kept: master's Streamline staging and this branch's meshoptimizer build. Master split the Windows Editor publish job into parallel jobs, so the meshoptimizer build now runs in their shared prepare-windows-editor action. docs/work is removed, as master moved work docs out of this repository. The validation below was done after the merge of dea102234; the later master changes touch only CI workflows and browser smoke scripts.
+
+
+Breaking changes
+
+GaussianSplatComponent is no longer a ModelComponent. Older cooked content that holds it as a model component fails to load, with CookedBinary.UnknownMember under the runtime read budget.
+ShaderHelper.GaussianSplatVertex and ShaderHelper.GaussianSplatFragment are removed. The splat renderer has its own shaders.
+GaussianCache.AcceptChunk now returns bool. When two components share one cache, a chunk that has already been accepted returns false; it no longer throws.
+Gaussian cache format version 0 is rejected. Only CurrentFormatVersion = 1 loads.
+In each chunk, triangle sections are decoded before the other sections, and splat bindings are checked against the decoded triangle count. Any other reader of the format, such as a future WGSL port, must decode in the same order.
+A loose cooked cache root cannot load through Engine.Assets.Load in a non-published build, because that path uses the YAML reader. A runtime viewer must load the cache from a published archive or add a direct cooked read. The bake's read-back uses PublishedCookedAssetReader.
+
+Why
+The web app's world, avatar and item previews should come from the engine's own renderer instead of three.js, and they should animate. This PR is the engine side of the first two rollout steps: the cache format, the renderer, and an offline bake that turns a cooked prefab or world into a streamable cache plus loop videos. The browser viewer comes in later steps.
+Validation
+
+
+Solution build (XRENGINE.slnx, Debug) after the merge with master: 0 warnings, 0 errors.
+
+
+Full unit suite after the merge: 8 failed, 6,258 passed, 6 skipped, 6,272 total.
+
+The 8 failures also fail on master dea102234. They are in NAudioTransportTests (1), GpuBvhFrustumParityIntegrationTests (2) and RenderProfileComparisonTests (5).
+Before the merge, the branch and its old base bd4a4fb0a had the same 407 failing tests.
+The 377 new tests all pass.
+
+
+
+GPU and ffmpeg hardware tests ran on an RTX 4070.
+
+
+Acceptance bakes of the fixture content:
+
+
+
+Bake
+Result
+Time
+Chunk 0
+Total cache
+Warnings
+
+
+
+
+Avatar
+ready
+41 s
+12,850 B
+277,896 B (8 chunks)
+none
+
+
+Item
+ready
+4 min 14 s
+16,870 B
+673,851 B
+none
+
+
+World
+ready
+5 min 20 s
+92,161 B
+3,461,512 B
+clip-static
+
+
+
+
+
+Determinism: each bake was run twice, in separate processes, and every output file except report.json was byte-identical. After the merge with master, the avatar bake gave the same content hash and the same 14 files.
+
+
+Loop check:
+
+The avatar loop is 7.75 s: the clip repeats 4 times during one camera orbit.
+The step from the last frame back to the first is as smooth as any two neighbouring frames.
+Every video carries BT.709 colour tags.
+
+
+
+Failure checks:
+
+A missing pak exits with code 3 and writes only report.json.
+An unrelated folder given as --output is refused with exit code 2 and is not changed.
+
+
+
+Risks and follow-ups
+
+Build prerequisite. A normal build now needs the native meshoptimizer DLL. Run Tools/Dependencies/Build-Meshoptimizer.ps1, or the ExecTool bootstrap, which needs git, CMake and a C++ toolchain. Design-time builds do not fail without it. The same script should build linux-x64, but that has not been tried. Build the DLL once in CI so that every bake machine gives the same output.
+ffmpeg. ffmpeg is an external tool and is not shipped. The code never selects libx264. The local bakes used a GPL ffmpeg build; a production worker should use an LGPL build if GPL obligations matter.
+Black worlds after engine start. A cooked world that loads after the engine has started captures black. The bake avoids this by loading its input first, but a live viewer will load worlds at runtime, so the root cause must be found before that.
+Skinned prefabs in cooked worlds. These do not animate: the engine rebinds their bones incorrectly. So world bakes come out still, with the warning clip-static.
+glTF import. The native glTF importer may store one joint's inverse bind matrix transposed. It was seen on the skinned-morph-animated fixture.
+Untrusted uploads. The bake is not yet hardened for them. It needs a read budget, a type allow-list, decompression limits, input caps, an overall timeout and sandboxing before it may process uploads.
+Draw order from several threads. If a pass with bucket sorting gets render commands from several threads at once, the bucket order follows which thread takes the lock first.
+Not checked by eye:
+
+the bake shows no window or taskbar entry;
+orbit and "frame selected" on splat components in the editor;
+the loop videos themselves.
+
+
+
+Licensing and contribution rights
+
+ I created this contribution or identified every third-party source and
+compatible license.
+ I disclosed material AI-assisted code and reviewed it for licensing,
+correctness, and security.
+ By submitting this pull request, I accept LEGAL/CONTRIBUTING.md for
+contributions made through this GitHub account and confirm my authority,
+or the organization that owns this work has signed it privately.
+ This change does not add or alter a dependency. If it does, I ran
+Tools/Generate-Dependencies.ps1 and reviewed the generated notices.
+
+This change does alter a dependency: Meshoptimizer.NET 1.0.7 is replaced by native meshoptimizer v1.3, which is MIT-licensed. Tools/Reports/Generate-Dependencies.ps1 now lists it, and docs/DEPENDENCIES.md is updated. The generator was run and the meshoptimizer notice was reviewed: its generated row matches the committed one.
+Versioned shader/converter changes
+Not applicable.
+
+Add animated gaussian splat previews: cache format, renderer and bake command by BlackJaxDev · Pull Request #94 · BlackJaxDev/XRENGINE · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add animated gaussian splat previews: cache format, renderer and bake command
+#94
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Merged
+BlackJaxDev
+merged 59 commits into
+master
+from
+xrengine-web-rendering
+Oct 29, 2026
+Uh oh!
+There was an error while loading. Please reload this page.
+Merged
+Add animated gaussian splat previews: cache format, renderer and bake command
+#94
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+59 commits
+Select commit
+Hold shift + click to select a range
+e0337ff
+Add cooked bake input loader and bake fixtures
+BlackJaxDev Oct 26, 2026
+d33072b
+Add hidden bake host and multi-view capture
+BlackJaxDev Oct 26, 2026
+b03a2ee
+Log shared GL context release failures at worker exit
+BlackJaxDev Oct 26, 2026
+691c2f9
+Load bake input before engine start and keep captures linear
+BlackJaxDev Oct 26, 2026
+77b57a7
+Build meshoptimizer 1.3 from source
+BlackJaxDev Oct 26, 2026
+17dfd41
+Resolve native meshoptimizer explicitly and copy it to the publish root
+BlackJaxDev Oct 26, 2026
+d5820e5
+Bind meshoptimizer codecs, filters and point functions
+BlackJaxDev Oct 26, 2026
+91a021d
+Add GaussianCache asset types
+BlackJaxDev Oct 26, 2026
+38bcd0d
+Add GaussianCache encoding primitives
+BlackJaxDev Oct 27, 2026
+043da4e
+Add GaussianCache motion codec
+BlackJaxDev Oct 27, 2026
+0aabc7c
+Harden GaussianCache motion store and add splat stream container
+BlackJaxDev Oct 27, 2026
+40b25e9
+Add deformed surface evaluation and bake motion selection
+BlackJaxDev Oct 27, 2026
+40046f3
+Add bake surface sampling
+BlackJaxDev Oct 27, 2026
+721c917
+Add driver hierarchy and splat binding
+BlackJaxDev Oct 27, 2026
+e568a17
+Scale driver simplification targets to the vertex budget
+BlackJaxDev Oct 27, 2026
+962fdbd
+Skip sliver triangles and verify splat bindings
+BlackJaxDev Oct 27, 2026
+00607e2
+Add splat LOD tree builder
+BlackJaxDev Oct 27, 2026
+dddc5cd
+Add lit-projection color baking
+BlackJaxDev Oct 27, 2026
+e05f08e
+Test lit-projection color scale below the maximum luminance
+BlackJaxDev Oct 27, 2026
+562cec5
+Add GaussianCache builder and chunk acceptance
+BlackJaxDev Oct 27, 2026
+a49fe65
+Render gaussian splats as sorted instanced quads
+BlackJaxDev Oct 27, 2026
+021d92c
+Build the gaussian splat quad from positions only
+BlackJaxDev Oct 27, 2026
+772fd9d
+Report gaussian splat components in the browser capability audit
+BlackJaxDev Oct 27, 2026
+0dd5e9b
+Clamp the gaussian splat projection Jacobian to the view guard band
+BlackJaxDev Oct 27, 2026
+f0d8789
+Add the CPU reference of gaussian cache playback
+BlackJaxDev Oct 27, 2026
+928f55f
+Add GaussianCacheComponent playback
+BlackJaxDev Oct 27, 2026
+a8a93cd
+Name the scene node in the gaussian cache overflow warning
+BlackJaxDev Oct 27, 2026
+19fe5a7
+Read gaussian cache overflow through a fenced copy and gate cache swi…
+BlackJaxDev Oct 27, 2026
+571d5f8
+Record gaussian preview loops and posters
+BlackJaxDev Oct 27, 2026
+26f2ae9
+Write gaussian cache splats at their node slots for a fixed draw order
+BlackJaxDev Oct 27, 2026
+270d342
+Add the gaussian bake pipeline and run it from bake-splat-preview
+BlackJaxDev Oct 27, 2026
+26904af
+Load gaussian bake input before the engine starts
+BlackJaxDev Oct 27, 2026
+68fa1ec
+Add bake-splat-preview command and record bake progress
+BlackJaxDev Oct 27, 2026
+870d31a
+Refuse to replace an output folder that is not a bake output
+BlackJaxDev Oct 27, 2026
+5e8742c
+Fail a prepared bake when its stage cannot load and report only writt…
+BlackJaxDev Oct 27, 2026
+c1e62b0
+Test chunk 0 retries and use one enabled rule for bake content
+BlackJaxDev Oct 27, 2026
+81b7451
+Draw opaque state buckets in first insertion order
+BlackJaxDev Oct 28, 2026
+06cbb6a
+Hold the last loaded frame at the end of ping-pong and once playback
+BlackJaxDev Oct 28, 2026
+eb1d062
+Check splat bindings against the packed cache data
+BlackJaxDev Oct 28, 2026
+1376608
+Skip non-finite capture samples in the color bake
+BlackJaxDev Oct 28, 2026
+3efd6fd
+Replace an output folder only when it is a bake output
+BlackJaxDev Oct 28, 2026
+8c25094
+Bound the gaussian cache reader by format limits
+BlackJaxDev Oct 28, 2026
+1a913b2
+Serialize chunk acceptance when components share one cache
+BlackJaxDev Oct 28, 2026
+f49bbc7
+Keep the grouping of opaque state buckets in first insertion order
+BlackJaxDev Oct 28, 2026
+b16bf6a
+Repeat short animated clips so the turntable takes at least 6 s
+BlackJaxDev Oct 28, 2026
+3606009
+Read the written cache files back through the runtime path
+BlackJaxDev Oct 28, 2026
+9d7de1e
+Warn when no grid can meet the position error
+BlackJaxDev Oct 28, 2026
+7fbf8ef
+Encode the loop videos as tagged BT.709 limited-range YUV
+BlackJaxDev Oct 28, 2026
+626d9d5
+Correct the grid, duration, and shared context release docs
+BlackJaxDev Oct 28, 2026
+5b3798b
+Document the native meshoptimizer step and keep design-time builds wo…
+BlackJaxDev Oct 28, 2026
+52084d1
+Record the breaking changes of the gaussian preview work
+BlackJaxDev Oct 28, 2026
+a80358d
+Tag the BT.709 primaries and transfer on the loop video frames
+BlackJaxDev Oct 28, 2026
+4f695d7
+Test that chunk decode read errors become DecodeFailed
+BlackJaxDev Oct 28, 2026
+7ba478b
+Sort the opaque state-bucket runs with a cached comparison so the sor…
+BlackJaxDev Oct 28, 2026
+5805046
+Check the stable asset IDs on bake read-back, retry the report read, …
+BlackJaxDev Oct 28, 2026
+625ce07
+Merge master into the gaussian preview branch
+BlackJaxDev Oct 28, 2026
+df91e96
+Merge master into the gaussian preview branch
+BlackJaxDev Oct 28, 2026
+fff086a
+Encode spaces and parentheses in local license links of the dependenc…
+BlackJaxDev Oct 28, 2026
+6bcd54f
+Merge master into xrengine-web-rendering
+BlackJaxDev Oct 29, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Previous commit
+Next
+Next commit
+Render gaussian splats as sorted instanced quads
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+BlackJaxDev
+committed
+Oct 27, 2026
+commit a49fe655e3a803be6b3231efb6aeb4ac6e30efa2
+There are no files selected for viewing
+33 changes: 0 additions & 33 deletions
+33
+Build/CommonAssets/Shaders/Gaussian/GaussianSplat.fs
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Load diff
+This file was deleted.
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+99 changes: 0 additions & 99 deletions
+99
+Build/CommonAssets/Shaders/Gaussian/GaussianSplat.vs
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Load diff
+This file was deleted.
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+62 changes: 62 additions & 0 deletions
+62
+Build/CommonAssets/Shaders/Gaussian/GaussianSplatKeys.comp
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -0,0 +1,62 @@
+#version 460
+// Writes one (depth key, splat index) pair for each splat slot. An ascending sort of the
+// keys puts the splats in order from far to near, which back-to-front blending needs.
+// Slots at or past the visible count, and splats behind the camera, get the culled key,
+// so they sort to the end and the quad vertex shader skips them.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+struct GaussianSplat
+{
+vec4 centerOpacity;
+vec4 rotation;
+vec4 scalePad;
+vec4 linearColor;
+};
+layout(std430, binding = 46) readonly buffer GaussianSplats
+{
+GaussianSplat splats[];
+};
+layout(std430, binding = 47) writeonly buffer GaussianSplatOrder
+{
+uvec2 orderPairs[];
+};
+layout(std430, binding = 48) readonly buffer GaussianSplatVisibleCount
+{
+uint visibleCount;
+};
+uniform uint SplatCapacity;
+uniform mat4 ModelViewMatrix;
+const uint CulledKey = 0xFFFFFFFFu;
+// Maps a float to an unsigned integer that has the same order as the float.
+uint OrderedUint(float value)
+{
+uint bits = floatBitsToUint(value);
+return (bits & 0x80000000u) != 0u ? ~bits : (bits | 0x80000000u);
+}
+void main()
+{
+uint index = gl_GlobalInvocationID.x;
+if (index >= SplatCapacity)
+return;
+uint key = CulledKey;
+if (index < min(visibleCount, SplatCapacity))
+{
+// The camera looks along -Z in view space, so the depth along its forward axis is -z.
+vec3 viewPosition = (ModelViewMatrix * vec4(splats[index].centerOpacity.xyz, 1.0)).xyz;
+float viewDepth = -viewPosition.z;
+if (viewDepth > 0.0)
+key = CulledKey - OrderedUint(viewDepth);
+}
+orderPairs[index] = uvec2(key, index);
+}
+22 changes: 22 additions & 0 deletions
+22
+Build/CommonAssets/Shaders/Gaussian/GaussianSplatQuad.fs
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -0,0 +1,22 @@
+#version 460
+// Evaluates one gaussian splat and writes premultiplied color for "over" blending
+// (source factor One, destination factor OneMinusSrcAlpha).
+layout(location = 0) in vec2 FragEllipseOffset;
+layout(location = 1) flat in vec4 FragColorOpacity;
+layout(location = 0) out vec4 OutColor;
+const float MinimumAlpha = 1.0 / 255.0;
+void main()
+{
+// FragEllipseOffset is in sigma units along the eigenvectors, so its squared length
+// is d^T * inverse(covariance) * d.
+float alpha = FragColorOpacity.a * exp(-0.5 * dot(FragEllipseOffset, FragEllipseOffset));
+if (alpha < MinimumAlpha)
+discard;
+OutColor = vec4(FragColorOpacity.rgb * alpha, alpha);
+}
+139 changes: 139 additions & 0 deletions
+139
+Build/CommonAssets/Shaders/Gaussian/GaussianSplatQuad.vs
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -0,0 +1,139 @@
+#version 460
+// Draws one screen-space quad for each sorted gaussian splat (one instance per order slot).
+// The quad covers 3 sigma along the eigenvectors of the projected 2D covariance (EWA splatting).
+layout(location = 0) in vec3 Position; // Quad corner. X and Y are -1 or 1.
+struct GaussianSplat
+{
+vec4 centerOpacity;
+vec4 rotation;
+vec4 scalePad;
+vec4 linearColor;
+};
+layout(std430, binding = 46) readonly buffer GaussianSplats
+{
+GaussianSplat splats[];
+};
+layout(std430, binding = 47) readonly buffer GaussianSplatOrder
+{
+uvec2 orderPairs[];
+};
+layout(std430, binding = 48) readonly buffer GaussianSplatVisibleCount
+{
+uint visibleCount;
+};
+uniform mat4 ModelMatrix;
+uniform mat4 ViewMatrix_VTX;
+uniform mat4 ProjMatrix_VTX;
+uniform float ScreenWidth;
+uniform float ScreenHeight;
+uniform float SplatScale;
+// Offset from the splat center in eigenvector space, in units of sigma.
+layout(location = 0) out vec2 FragEllipseOffset;
+// Linear RGB color and opacity.
+layout(location = 1) flat out vec4 FragColorOpacity;
+const uint CulledKey = 0xFFFFFFFFu;
+const float QuadExtentSigma = 3.0;
+// Low-pass filter added to the projected covariance, in square pixels.
+const float LowPassPixels = 0.3;
+// Puts all quad vertices at one point outside the clip volume, so the quad makes no fragments.
+void Collapse()
+{
+gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+FragEllipseOffset = vec2(0.0);
+FragColorOpacity = vec4(0.0);
+}
+// Rotation matrix of a quaternion (x, y, z, w). The columns are the rotated local axes.
+mat3 QuaternionToMatrix(vec4 q)
+{
+vec4 n = normalize(q);
+float x = n.x;
+float y = n.y;
+float z = n.z;
+float w = n.w;
+return mat3(
+1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + w * z), 2.0 * (x * z - w * y),
+2.0 * (x * y - w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + w * x),
+2.0 * (x * z + w * y), 2.0 * (y * z - w * x), 1.0 - 2.0 * (x * x + y * y));
+}
+void main()
+{
+uint instance = uint(gl_InstanceID);
+if (instance >= visibleCount)
+{
+Collapse();
+return;
+}
+uvec2 pair = orderPairs[instance];
+if (pair.x == CulledKey)
+{
+Collapse();
+return;
+}
+GaussianSplat splat = splats[pair.y];
+mat4 modelView = ViewMatrix_VTX * ModelMatrix;
+vec4 viewCenter = modelView * vec4(splat.centerOpacity.xyz, 1.0);
+vec4 clipCenter = ProjMatrix_VTX * viewCenter;
+if (!(clipCenter.w > 0.0))
+{
+Collapse();
+return;
+}
+// The columns are the view-space axes of the splat, scaled by sigma: W * R * S.
+vec3 sigma = max(splat.scalePad.xyz * SplatScale, vec3(1e-7));
+mat3 sigmaAxes = mat3(modelView) * QuaternionToMatrix(splat.rotation) * mat3(
+sigma.x, 0.0, 0.0,
+0.0, sigma.y, 0.0,
+0.0, 0.0, sigma.z);
+// Jacobian J of the pixel position with respect to the view position at the splat center:
+// d(clip.xy / clip.w) = (P_row_xy - (clip.xy / clip.w) * P_row_w) / clip.w, scaled to pixels.
+vec3 projectionRowX = vec3(ProjMatrix_VTX[0][0], ProjMatrix_VTX[1][0], ProjMatrix_VTX[2][0]);
+vec3 projectionRowY = vec3(ProjMatrix_VTX[0][1], ProjMatrix_VTX[1][1], ProjMatrix_VTX[2][1]);
+vec3 projectionRowW = vec3(ProjMatrix_VTX[0][3], ProjMatrix_VTX[1][3], ProjMatrix_VTX[2][3]);
+float inverseW = 1.0 / clipCenter.w;
+vec2 halfViewport = 0.5 * vec2(ScreenWidth, ScreenHeight);
+vec3 jacobianX = halfViewport.x * inverseW * (projectionRowX - clipCenter.x * inverseW * projectionRowW);
+vec3 jacobianY = halfViewport.y * inverseW * (projectionRowY - clipCenter.y * inverseW * projectionRowW);
+// T = J * W * R * S. The 2D covariance is T * transpose(T) plus the low-pass filter.
+vec3 tx = jacobianX * sigmaAxes;
+vec3 ty = jacobianY * sigmaAxes;
+float a = dot(tx, tx) + LowPassPixels;
+float b = dot(tx, ty);
+float c = dot(ty, ty) + LowPassPixels;
+// Eigenvalues and eigenvectors of the symmetric 2x2 covariance [a b; b c].
+float middle = 0.5 * (a + c);
+float radius = length(vec2(0.5 * (a - c), b));
+float majorVariance = middle + radius;
+float minorVariance = max(middle - radius, 1e-6);
+vec2 majorAxis = abs(b) > 1e-12
+? normalize(vec2(b, majorVariance - a))
+: (a >= c ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
+vec2 minorAxis = vec2(-majorAxis.y, majorAxis.x);
+// In eigenvector space, d^T * inverse(covariance) * d is the squared length of the offset in sigma.
+vec2 ellipseOffset = Position.xy * QuadExtentSigma;
+vec2 pixelOffset =
+ellipseOffset.x * sqrt(majorVariance) * majorAxis +
+ellipseOffset.y * sqrt(minorVariance) * minorAxis;
+gl_Position = clipCenter + vec4(pixelOffset / halfViewport * clipCenter.w, 0.0, 0.0);
+FragEllipseOffset = ellipseOffset;
+FragColorOpacity = vec4(splat.linearColor.rgb, splat.centerOpacity.w);
+}
+3 changes: 2 additions & 1 deletion
+3
+XREngine.GaussianBaking/Surface/DeformedSurfaceEvaluator.cs
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -81,7 +81,8 @@ private static void BuildLayout(SceneNode root, DeformedSurface surface)
+root.IterateComponents<RenderableComponent>(component =>
+{
+if (component is GaussianSplatComponent || !IsRendered(component, root))
+// Gaussian splat components are not renderable mesh components, so the walk does not see them.
+if (!IsRendered(component, root))
+return;
+foreach (RenderableMesh renderableMesh in component.Meshes)
+Expand Down
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

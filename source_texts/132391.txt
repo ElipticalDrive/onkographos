@@ -1,0 +1,290 @@
+Workshop on Material Appearance Modeling
+MANER Conference - Material Appearance Network for Education and Research (2024)
+J. Y. Hardeberg and H. Rushmeier (Editors)
+Neural Texture Block Compression
+S. Fujieda1
+and T. Harada1
+1 Advanced Micro Devices, Inc.
+Figure 1: Neural Texture Block Compression (NTBC) encodes multiple textures in a single material in BC formats with reduced storage size
+while maintaining reasonable quality. NTBC models are trained per material as pre-processing and inferences with trained models saved on
+the disk are executed once per material to achieve its block-compressed data.
+Abstract
+Block compression is a widely used technique to compress textures in real-time graphics applications, offering a reduction
+in storage size. However, their storage efficiency is constrained by the fixed compression ratio, which substantially increases
+storage size when hundreds of high-quality textures are required. In this paper, we propose a novel block texture compression
+method with neural networks, Neural Texture Block Compression (NTBC). NTBC learns the mapping from uncompressed textures to block-compressed textures, which allows for significantly reduced storage costs without any change in the shaders. Our
+experiments show that NTBC can achieve reasonable-quality results with up to about 45% less storage footprint, preserving
+real-time performance with a modest computational overhead at the texture loading phase in the graphics pipeline.
+CCS Concepts
+• Computing methodologies → Image compression; Texturing; Image representations;
+1. Introduction
+The desire for more immersive experiences in games and virtual
+reality increases the demand for high visual fidelity in real-time
+graphics applications. To meet this demand, textures play a crucial role in providing detailed and realistic surfaces through material properties such as diffuse color, normal maps, and other
+BRDF information. However, each material property requires a
+high-resolution texture which consumes a large amount of storage.
+Block Compression (BC) is one of the most popular techniques to
+reduce the storage footprint of textures. BC has different types of
+formats (BC1-BC7), which are supported by most modern GPUs
+and graphics APIs such as DirectX [Mic20]. These formats offer
+the desirable random-access property with fixed-rate block compression, where each 4 × 4 texel block is compressed to a fixed
+number of bytes. BC1 and BC4 compress each block to 8 bytes,
+while other formats compress it to 16 bytes. Therefore, a single
+4k texture compressed even with BC1 or BC4 requires 8 MB of
+storage, which reaches the magnitude of gigabytes for a scene with
+© 2024 The Authors.
+Proceedings published by Eurographics - The European Association for Computer Graphics.
+This is an open access article under the terms of the Creative Commons Attribution License, which
+permits use, distribution and reproduction in any medium, provided the original work is properly
+cited.
+DOI: 10.2312/mam.20241178
+https://www.eg.org
+https://diglib.eg.org
+2 of 4
+S. Fujieda & T. Harada / Neural Texture Block Compression
+hundreds of 4k textures that are common in modern high-quality
+games.
+In this work, we propose a novel neural BC approach, Neural
+Texture Block Compression (NTBC). NTBC employs multi-layer
+perceptions (MLPs) to simultaneously encode block-compressed
+data of all textures in one material, achieving lower bit rates than
+the standard BC while producing the same block-compressed data
+format.
+NTBC is meant to reduce the texture footprint on the disk. Network weights are stored in the disk which are loaded into the memory. Then inference is executed to reconstruct block-compressed
+texture data which are copied to VRAM. Therefore, it does not require any change in the shaders, which makes our method easier to
+adopt in the existing graphics pipelines. This paper focuses on BC1
+and BC4, which are the simplest and most widely used for RGB
+and single-channel textures, respectively.
+The main contributions of this work are as follows:
+• We introduce Neural Texture Block Compression (NTBC), a
+novel block compression based on MLPs optimized specifically
+for each material.
+• We use multi-resolution feature grids compressed through
+quantization-aware training for better model optimization and
+storage efficiency.
+• Our experiments show that NTBC can encode 4k textures in one
+material within a few minutes and infer block-compressed data
+with a modest overhead on a single GPU.
+2. Related Work
+Block compression is a texture compression technique for reducing texture size by encoding non-overlapping 4 × 4 texel blocks
+into fixed-size structures. Though it has a set of seven formats,
+BC1 – BC7, our targets in this work are BC1 and BC4 because
+of their simplicity. BC1 encodes each block of RGB images into a
+8-byte structure. This structure has two 16-bit RGB565 endpoints
+and a set of 16 2-bit indices to look up the corresponding texel color
+from a color palette. The palette contains four colors with two additional colors linearly interpolated between the endpoints. BC1 has
+another mode to support a 1-bit alpha channel, but it is not our focus in this work. On the other hand, BC4 is a specialized version
+of BC1 for single-channel images. While utilizing the same 8-byte
+block size as BC1, BC4 employs two 8-bit endpoints and a 3-bit
+index per pixel to reference an 8-color palette. This palette consists
+of the endpoints and either four or six linearly interpolated values,
+depending on whether the first endpoint numerically exceeds the
+second. In cases with fewer interpolated values, special values 0
+and 1 are incorporated. The expanded palette and increased endpoint precision enable BC4 to achieve higher quality than BC1 for
+single-channel cases.
+Neural network-based image compression methods commonly
+use a multi-resolution feature grid that stores latent embeddings
+of the input images in each grid cell [MESK22, TMND∗ 23].
+Vaidyanathan et al. [VSW∗ 23] propose a neural compression
+method specifically designed for textures. They use a specialized
+architecture to encode multiple textures and their mipmap chains
+together with a small MLP and compressed representation of tailored feature grids. Block-compressed features (BCf) [WDOHN24]
+is the novel approach using BC6 to compress learned neural texture features and decompress them in a real-time renderer. It uses
+BC as the means of compressing neural features instead of learning
+the encoding of block-compressed data. Inspired by these neural
+texture compression methods, our method also encodes multiple
+textures using small MLPs. However, unlike them, we focus on
+block compression itself and propose a method to encode blockcompressed data that can be easily integrated into existing graphics
+pipelines.
+3. Method
+Our goal is to construct a neural model encoding block-compressed
+data in BC1 and BC4 formats. In this section, we first describe the
+naive approach to tackle the problem and then extend it to NTBC,
+considering BC1 with a single texture for brevity. The methods can
+be easily extended to multiple textures by modifying the number of
+output nodes in each network, and a discussion for an extension to
+BC4 can be found in our supplemental document.
+3.1. Naive Approach
+Colors on the palette cn are linearly interpolated between two endpoints for each block e0 , e1 ∈ R3 with weights wn with the following equation:
+cn = (1 − wn ) · e0 + wn · e1 ,
+(1)
+where n is a 2-bit index per pixel (0 ≤ n ≤ 3) and wn = n3 . These
+e0 , e1 , and n (i.e wn ) consist of block-compressed data, so the
+straightforward way to encode them using neural networks (NNs)
+is to directly optimize them through differentiation of Eq. 1. Fig. 2
+illustrates the architecture of this naive approach. We prepare two
+different MLPs to predict endpoints and weights, referred to as the
+endpoint network and the weight network, respectively. The endpoint network takes the 2D normalized block indices, s,t ∈ [0, 1],
+as inputs and predicts endpoints eˆ0 , eˆ1 for each block. The weight
+network uses the 2D texture coordinates, u, v ∈ [0, 1], as inputs, infers floating-point weights wˆ f for each texel, and then, quantizes
+wˆ f to wn to construct block-compressed data. These 2D inputs are
+encoded with multi-resolution feature grids which excel at representing spatially-varying features.
+The naive approach is trained to minimize the discrepancy between reference uncompressed colors and decoded colors derived
+from eˆ0 , eˆ1 , and wn . To enhance training efficiency and optimize for
+discrete weights wn , a two-stage training procedure is employed:
+During the initial 80% of training iterations, an L2 loss function
+is applied to decoded colors generated from eˆ0 , eˆ1 , and floatingpoint weights wˆ f . Subsequently, the endpoint network is fine-tuned
+for the remaining iterations using quantized weights wn , while the
+weights of the weight network are frozen. However, the resulting
+block-compressed data show only limited-quality results in our experiments. This is because weights are high-frequency and not spatially correlated, which makes it hard for MLPs to be directly optimized. This motivates us to propose the method of Neural Texture
+Block Compression.
+© 2024 The Authors.
+Proceedings published by Eurographics - The European Association for Computer Graphics.
+S. Fujieda & T. Harada / Neural Texture Block Compression
+Figure 2: Naive approach. Two MLPs infer weights and endpoints.
+Values in yellow squares form a compressed block.
+3 of 4
+Figure 3: Neural Texture Block Compression. Two MLPs infer endpoints and uncompressed colors. Weight indices n are computed using predicted endpoints and colors. A resulting compressed block
+is indicated by yellow squares.
+3.2. Neural Texture Block Compression
+4. Results
+NTBC does not directly optimize weights as the naive approach.
+Instead, it predicts the original uncompressed color using the color
+network as illustrated in Fig. 3. Uncompressed colors are lowerfrequency and more spatially correlated than weights, which is easier for MLPs to learn. Inputs to the color network are 2D texture coordinates encoded with multi-resolution feature grids, and it infers
+uncompressed colors ĉ. To construct block-compressed data from
+the predicted eˆ0 , eˆ1 , and ĉ, we first compute colors on the palette
+cˆn from eˆ0 and eˆ1 using Eq. 1. Then, we calculate distances dn between cˆn and ĉ in the color space, and take the argmin operation
+for dn . As a result, this operation produces a 2-bit index n for each
+texel:
+We implemented the naive approach and NTBC from scratch using
+C++ and HIP [AMD23b] for GPU programming language to train
+the models and run inference on GPUs. All the evaluations in this
+paper are performed on a single AMD Radeon™ RX 7900 XT GPU
+on a Windows machine.
+n = argmin(dn ) = argmin(∥ĉ − cˆn ∥).
+(2)
+Similar to the naive approach, NTBC is trained to minimize errors between reference uncompressed and decoded colors. To facilitate model optimization further, we train the color
+and endpoint networks independently by considering the additional
+loss for the predicted colors ĉ and for the predicted endpoints
+eˆ0 , eˆ1 , respectively. Reference endpoints e0 , e1 for each block are
+achieved from block-compressed data computed with Compressonator [AMD23a]. More details of the training procedure can be
+found in our supplemental document.
+3.3. Model Configurations
+We use small MLPs for all networks having three hidden layers
+with 64 neurons each with half-precision floating points. A sigmoid
+activation function is applied to all output layers to predict the values in the range of [0, 1]. Empirical evaluation of various activation
+functions for three hidden layers indicated that a selu activation
+function [KUMH17] is the most effective. Multi-resolution feature
+grids have different configurations for 2D block indices and texture
+coordinates. The 2D block indices are represented using 7 levels
+with the finest resolution of 1, 024, while 8 levels with the finest
+resolution of 2, 048 are employed for the 2D texture coordinates.
+All grids comprise 2D features per level and a coarsest resolution
+of 16. Reducing the model size, we compress these feature grids
+through quantization-aware training into 8-bit integers. The details
+can be found in the supplemental document.
+© 2024 The Authors.
+Proceedings published by Eurographics - The European Association for Computer Graphics.
+Evaluation Methods and Dataset. NTBC encodes blockcompressed data in BC1 and BC4 formats in this work. We use
+two distinct models to encode RGB and single-channel textures as
+BC1 and BC4, respectively, for both the naive approach and NTBC.
+To the best of our knowledge, no existing method compresses textures using NNs in BC formats. Therefore, in this paper, we evaluate NTBC compared to the reference BC with Compressonator
+and the naive approach. To compress RGB textures with BC1 using Compressonator, we used two refine steps for the compression
+setting. To evaluate our approach, we collected 10 different materials from [Dem24] and [Pol24]. Materials contain different numbers
+of RGB and single-channel textures, whose resolutions are 40962 .
+The results for all materials and more details for this dataset can be
+found in our supplemental document.
+Evaluation. We evaluate our method using the PSNR metrics
+computed against uncompressed textures. The naive and NTBC
+are trained for 20k iterations with all textures in the material.
+Fig. 1 and Fig. 4 shows compression results for MetalPlates013
+and Carpet015 materials from [Dem24]. Though the PSNR values
+of NTBC are lower than the standard BC due to a bit blurred results, NTBC shows visually equivalent results, despite using about
+33% to 45% less storage. Fig. 4 also contains results of the naive
+approach which shows visible block artifacts. NTBC significantly
+alleviates the artifacts, which results in higher PSNR values.
+Performance. We evaluate the training and inference performances of our NTBC implementation using six 4k textures in the
+MetalPlates013 material. These performances are similar for all
+materials regardless of the number of textures. First, Fig. 5 shows
+the training times of NTBC over PSNR averaged over all the textures in the material. We can achieve almost saturated results after
+20k iterations, which takes about 16 minutes. Meanwhile, results of
+a certain quality can be obtained in just less than 100 seconds with
+about 2 dB below the optimal results. Next, for the inference performance, NTBC predicts block-compressed data instead of loading
+4 of 4
+S. Fujieda & T. Harada / Neural Texture Block Compression
+Naive
+NTBC
+Ref. BC
+40 MB
+30.98 dB
+37.44 dB
+Diffuse, BC1
+26.74 MB
+Disp., BC4
+27.81 dB
+Figure 5: NTBC training times vs. average PSNRs over six 4k textures in the MetalPlates013 material.
+port mipmap chains and more advanced block compression formats
+such as BC6H and BC7, to achieve more flexibility and better quality.
+38.53 dB
+44.20 dB
+53.06 dB
+Figure 4: Zoom-ins of diffuse and displacement textures in the
+Carpet015 material from [Dem24], compressed with different approaches.
+Ackowledgements
+We thank Sylvain Meunier for his inspiring study and insights for
+this project. We also thank Joel Jordan at AMD for his feedback
+and help with the publication.
+References
+block-compressed textures from the disk, and then texel values are
+decoded from the compressed data using the existing BC decompression method at runtime. Therefore, the inference times are simply overhead of NTBC compared to the standard BC. Reconstructing block-compressed data of all the textures in MetalPlates013 requires 49.84 ms using NTBC. However, when processing the material containing solely RGB or single-channel textures, the computational workload is reduced to a single model execution, resulting
+in 25.57 ms. It is still practical for real-time applications because
+the inference is executed only once per material instead of loading
+textures from the disk.
+[AMD23a] AMD:
+Compressonator.
+compressonator/, 2023. 3
+5. Conclusion and Future Work
+[MESK22] M ÜLLER T., E VANS A., S CHIED C., K ELLER A.: Instant
+neural graphics primitives with a multiresolution hash encoding. ACM
+Trans. Graph. 41, 4 (July 2022). 2
+In this paper, we introduced Neural Texture Block Compression
+which learns encoding functions of block-compressed data for multiple textures in one material. It has been designed to be compatible
+with existing block compression formats, BC1 and BC4, with the
+reduced storage size, and can be used as a drop-in replacement for
+existing graphics pipelines. We have shown that NTBC can achieve
+better compression ratios than the standard BC while producing
+reasonable-quality textures. The standard BC requires 8 MB for a
+single 4k texture, while NTBC only consumes 26.74 MB regardless
+of the number of textures in the material. Therefore, our approach
+has advantages in terms of storage efficiency if a material contains
+four or more textures.
+We consider this work as a first step towards learning-based
+block compression and believe that there is still much potential
+to improve the quality and compression ratio. In the future, we
+plan to explore other input encoding using frequency information
+such as local positional encoding [FYH23], and a more sophisticated loss function that considers the perceptual quality of colors in luminance-chrominance space to prevent color degradation.
+Additionally, we believe that our method can be extended to sup-
+https://gpuopen.com/
+[AMD23b] AMD: HIP Documentation. https://rocm.docs.
+amd.com/projects/HIP/en/latest/index.html, 2023. 3
+[Dem24] D EMES L.: ambientcg, 2024. URL: https://ambientcg.
+com/. 3, 4
+[FYH23] F UJIEDA S., YOSHIMURA A., H ARADA T.: Local Positional
+Encoding for Multi-Layer Perceptrons. In Pacific Graphics Short Papers
+and Posters (2023). 4
+[KUMH17] K LAMBAUER G., U NTERTHINER T., M AYR A., H OCHRE ITER S.: Self-normalizing neural networks. In Proceedings of the
+31st International Conference on Neural Information Processing Systems (2017), p. 972–981. 3
+[Mic20] M ICROSOFT:
+Texture
+block
+compression
+in
+direct3d
+11.
+https://learn.microsoft.
+com/en-us/windows/win32/direct3d11/
+texture-block-compression-in-direct3d-11,
+2020.
+1
+[Pol24]
+Poly haven, 2024. URL: https://polyhaven.com/. 3
+[TMND∗ 23] TAKIKAWA T., M ÜLLER T., N IMIER -DAVID M., E VANS
+A., F IDLER S., JACOBSON A., K ELLER A.: Compact neural graphics
+primitives with learned hash probing. In SIGGRAPH Asia 2023 Conference Papers (2023). 2
+[VSW∗ 23] VAIDYANATHAN K., S ALVI M., W RONSKI B., A KENINE M ÖLLER T., E BELIN P., L EFOHN A.: Random-Access Neural Compression of Material Textures. In Proceedings of SIGGRAPH (2023).
+2
+[WDOHN24] W EINREICH C., D E O LIVEIRA L., H OUDARD A.,
+NADER G.: Real-time neural materials using block-compressed features.
+Computer Graphics Forum 43, 2 (2024), e15013. 2
+© 2024 The Authors.
+Proceedings published by Eurographics - The European Association for Computer Graphics.

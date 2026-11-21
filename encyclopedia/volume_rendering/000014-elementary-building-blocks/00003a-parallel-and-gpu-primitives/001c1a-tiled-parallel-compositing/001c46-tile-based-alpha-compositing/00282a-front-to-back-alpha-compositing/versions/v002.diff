@@ -1,0 +1,144 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # Front-to-Back Alpha Compositing
+ 
+-Also called: Alpha Compositing, Alpha Compositing with Front-to-Back Blending, Front-to-Back Blending, Over Operator, Porter-Duff Over, Running Transmittance Compositing
++Also called: Alpha Compositing with Front-to-Back Blending, Front-to-Back Blending, Over Operator, Porter-Duff Over, Running Transmittance Compositing
+ 
+ ## Overview
+@@ -9,14 +9,14 @@
+ **Inputs:**
+ - A set of $N$ splats (Gaussians), each defined by:
+-  - Center $\mathbf{x}_i = (u_i, v_i)$ in screen space.
+-  - Inverse 2D covariance matrix $\Sigma'^{-1}_i$ (defining the ellipse shape/orientation).
+-  - Intrinsic opacity scalar $\alpha_i \in [0, 1]$.
+-  - Color vector $\mathbf{c}_i$ (typically RGB).
+-  - Depth $Z_c$ (used for sorting).
+-- Image dimensions (width, height).
++  - Center $\mathbf{x}_i = (u_i, v_i)$ in screen space [S1, unofficial].
++  - Inverse 2D covariance matrix $\Sigma'^{-1}_i$ (defining the ellipse shape/orientation) [S1, unofficial].
++  - Intrinsic opacity scalar $\alpha_i \in [0, 1]$ [S1, unofficial].
++  - Color vector $\mathbf{c}_i$ (typically RGB) [S1, unofficial].
++  - Depth $Z_c$ (used for sorting) [S1, unofficial].
++- Image dimensions (width, height) [S1, unofficial].
+ - Early termination threshold $\epsilon$ (typically $10^{-4}$) [S1, unofficial].
+ 
+ **Outputs:**
+-- Final image $\mathbf{C}$ with dimensions matching the input image.
++- Final image $\mathbf{C}$ with dimensions matching the input image [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -50,79 +50,44 @@
+ import numpy as np
+ 
+-def front_to_back_compositing(splats, image_width, image_height, epsilon=1e-4):
++def composite_pixel(splats_sorted, pixel_coords, epsilon=1e-4):
+     """
+-    Composites splats front-to-back for a given image.
++    Composites splats front-to-back for a single pixel.
+     
+     Args:
+-        splats: List of dicts with keys:
+-            'center': (u, v) tuple
+-            'cov_inv': 2x2 numpy array (inverse covariance)
+-            'alpha': float (intrinsic opacity)
+-            'color': (r, g, b) tuple or array
+-            'depth': float (for sorting)
+-        image_width: int
+-        image_height: int
+-        epsilon: float, threshold for early termination
++        splats_sorted: List of splat dicts sorted by depth (nearest first).
++        pixel_coords: Tuple (u, v) of the pixel's screen coordinates.
++        epsilon: Float threshold for early termination.
+         
+     Returns:
+-        final_image: numpy array of shape (H, W, 3)
++        final_color: numpy array of shape (3,) with RGB values.
+     """
+-    # Sort splats by depth (nearest first)
+-    sorted_splats = sorted(splats, key=lambda s: s['depth'])
++    T = 1.0
++    C = np.array([0.0, 0.0, 0.0])
+     
+-    # Initialize output image
+-    final_image = np.zeros((image_height, image_width, 3), dtype=np.float32)
+-    
+-    # Pre-allocate transmittance and color accumulators for all pixels
+-    # T[i, j] is the transmittance for pixel (j, i)
+-    T = np.ones((image_height, image_width), dtype=np.float32)
+-    
+-    # Iterate through each splat
+-    for splat in sorted_splats:
++    for splat in splats_sorted:
++        # Extract splat properties
+         cx, cy = splat['center']
+         cov_inv = splat['cov_inv']
+         alpha_intrinsic = splat['alpha']
+-        color = np.array(splat['color'])
++        color = splat['color']
+         
+-        # Create meshgrid for pixel coordinates
+-        # y corresponds to rows (height), x to columns (width)
+-        y, x = np.mgrid[0:image_height, 0:image_width]
++        # Compute effective alpha at this pixel
++        dx = pixel_coords[0] - cx
++        dy = pixel_coords[1] - cy
++        # Quadratic form: (x - x_i)^T Sigma'^-1 (x - x_i)
++        quad = (cov_inv[0, 0] * dx**2 + 
++                cov_inv[1, 1] * dy**2 + 
++                2 * cov_inv[0, 1] * dx * dy)
++        alpha_eff = alpha_intrinsic * np.exp(-0.5 * quad)
+         
+-        # Vectorized computation of effective alpha for all pixels
+-        # dx, dy are vectors from pixel to splat center
+-        dx = x - cx
+-        dy = y - cy
+-        
+-        # Quadratic form: (x - x_i)^T Sigma'^-1 (x - x_i)
+-        # Stack dx, dy into a 2xN matrix for each pixel? 
+-        # Better: use broadcasting for 2D grid
+-        # Let v = [dx, dy]^T. We compute v^T cov_inv v.
+-        # cov_inv is 2x2.
+-        # term1 = cov_inv[0,0]*dx^2 + cov_inv[1,1]*dy^2 + 2*cov_inv[0,1]*dx*dy
+-        term1 = cov_inv[0, 0] * dx**2 + cov_inv[1, 1] * dy**2 + 2 * cov_inv[0, 1] * dx * dy
+-        
+-        # Gaussian falloff
+-        gaussian_falloff = np.exp(-0.5 * term1)
+-        
+-        # Effective alpha
+-        alpha_eff = alpha_intrinsic * gaussian_falloff
+-        
+-        # Update color: C += T * alpha_eff * color
+-        # Only update pixels where alpha_eff is significant? 
+-        # The formula applies everywhere, but alpha_eff ~ 0 outside ellipse.
+-        final_image += (T[:, :, np.newaxis] * alpha_eff[:, :, np.newaxis] * color[np.newaxis, np.newaxis, :])
+-        
+-        # Update transmittance: T *= (1 - alpha_eff)
+-        T *= (1 - alpha_eff)
++        # Update accumulated color and transmittance
++        C += T * alpha_eff * color
++        T *= (1.0 - alpha_eff)
+         
+         # Early termination check
+-        # If T is below epsilon, no further splats will contribute significantly.
+-        # We can mask out these pixels to save computation in subsequent splats.
+-        # However, in a simple loop over splats, we just continue. 
+-        # Optimization: if all T < epsilon, we can stop entirely.
+-        if np.all(T < epsilon):
++        if T < epsilon:
+             break
+             
+-    return final_image
++    return C
+ ```
+ 
+@@ -130,5 +95,7 @@
+ - **Sort Order:** Splats must be processed from nearest to farthest. If processed far-to-near without adjusting the compositing math, occlusion inverts, causing far splats to wrongly paint over near ones [S1, unofficial].
+ - **Sort-Order Flips (Popping Artifacts):** 3DGS sorts splats by their center depth $Z_c$. Since splats are 3D blobs with extent, overlapping splats can swap order as the camera moves, causing flickering. This is a speed/quality trade-off [S1, unofficial].
+-- **Precision:** The transmittance $T$ decays exponentially. If $T$ becomes very small, floating-point precision issues may arise, though early termination mitigates this.
++- **Precision:** The transmittance $T$ decays exponentially. If $T$ becomes very small, floating-point precision issues may arise, though early termination mitigates this [G].
++- **Tiling Optimization:** For large images, split the image (e.g., 128×128) into tiles (e.g., 16×16) and compute which splats' ellipses overlap each tile using a cheap bounding-box test on center ± a few standard deviations. Most tiles touch only 2–4 splats, which makes tiling fast [S1, unofficial].
++- **Worked Example:** Compositing three splats (red $\alpha=0.5$, green $\alpha=0.6$, blue $\alpha=0.8$) at a single pixel yields $\mathbf{C} \approx (0.5, 0.30, 0.16)$ with leftover transmittance $T = 0.04$ [S1, unofficial].
+ 
+ ## Subtopics

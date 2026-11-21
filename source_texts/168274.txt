@@ -1,0 +1,103 @@
+For years, applications that employ the Visualization Toolkit (VTK) have used OpenGL almost exclusively to draw scenes. OpenGL rasterizes polygons onto pixels. Rasterization serves as the most commonly used rendering algorithm today. Alternatives to rasterization exist, and these alternatives have their own merits. Such alternatives include ray tracing. Ray tracing offers built-in effects, such as […]
+
+Ray-traced Rendering Revisited
+Skip Navigation
+Home
+News
+Blog
+post
+Ray-traced Rendering Revisited
+July 21, 2016
+David DeMarle, Ken Martin and Carson Brownlee
+For years, applications that employ the Visualization Toolkit (VTK) have used OpenGL almost exclusively to draw scenes. OpenGL rasterizes polygons onto pixels. Rasterization serves as the most commonly used rendering algorithm today. Alternatives to rasterization exist, and these alternatives have their own merits. Such alternatives include ray tracing. Ray tracing offers built-in effects, such as translucency and reflectance, as well as performance that scales logarithmically with geometric complexity. Intel® and Kitware have recently completed a project that tightly integrates ray tracing with VTK. The result, which will first appear in VTK 7.1 and already appears in ParaView 5.1, adds the Intel® OSPRay ray-tracing engine to VTK.
+Background
+One reason why rasterization is prevalent in the field of scientific visualization is that, until recently, ray tracing performed too slowly to interactively explore data that changes frequently. To render data, ray tracers first spatially sort it through an O(n) operation. OSPRay, which has highly optimized the sort, can process over a hundred million polygons per second. Once ray tracers sort the data, they employ a faster O(log N) search operation in which the frame rate is largely independent of the scene size. This search operation optimizes interactive rendering performance on central processing units (CPUs) and scales up to the limits of system memory.
+For the ray-tracing engine in VTK, the development team chose the OSPRay ray tracer. OSPRay is an open-source, scalable, and portable ray-tracing engine that produces high-performance, high-fidelity visualizations on Intel® CPUs. OSPRay provides a powerful, fast, and easy-to-use rendering library. The library runs well on everything from laptops, to workstations, to distributed compute nodes in high-performance computing (HPC) systems. In addition, OSPRay enables applications that combine interactive surface- and volume-based visualizations.
+OSPRay takes advantage of the inherent parallelism found in ray tracing. It maps data onto single instruction, multiple data (SIMD) vector units through the process of vectorization and onto multiple compute cores through the process of multithreading. To vectorize shading operations, OSPRay employs the Intel® Single program, multiple data Program Compiler (ISPC). ISPC abstracts away specific vector sizes from various instruction sets such as Streaming SIMD Extensions (SSE), Advanced Vector Extensions (AVX), and AVX-512. To perform multithreading, OSPRay takes advantage of Threading Building Blocks (TBB) from Intel®. TBB is a highly optimized library that implements a sophisticated task-stealing system to balance rendering workloads across all available cores. Together, ISPC and TBB allow OSPRay to use all of the available compute power found in Intel® CPU hardware. This compute power optimizes rendering performance.
+An image of a synthetic data set demonstrates ambient occlusion. OSPRay rendered the data set and scaled the implicit cylinders within ParaView.
+Recently, the Texas Advanced Computing Center (TACC) connected VTK to OSPRay within the pvOSPRay ParaView plug-in. Like the pvManta ParaView plug-in, the core of pvOSPRay consists of a set of concrete VTK rendering subclasses. These subclasses use a new underlying rendering application programming interface (API).
+The pvOSPRay plug-in is somewhat similar to the OpenGL 2 backend, with which users can compile VTK to get a new set of updated OpenGL interface classes. Unlike in OpenGL 2, in pvOSPRay, the class names are distinct from their OpenGL 1 counterparts. As a result, applications can simultaneously use OpenGL classes and ray-tracing classes. Nevertheless, to use pvOSPRay, the application code must be changed. In addition, pvOSPRay does not permit two sets of rendering subclasses to share a rendering state.
+To address these issues and to better realize the capabilities of OSPRay within ParaView and other VTK-enabled applications, Intel® and Kitware more tightly integrated the core of the pvOSPRay plug-in with VTK. To make it easier for application writers to use OSPRay, VTK delivers the new code in an optional module instead of in an external repository. Regression tests evaluate the module with the rest of the toolkit.
+Now, instead of having a set of subclasses, VTK automatically instantiates the right helper classes. The vtkRenderPass class is responsible for the instantiations. This encapsulation makes it trivial to use OSPRay in applications, and it allows applications to swap back and forth between ray-tracing and rasterizing images at runtime.
+Guide to OSPRay in VTK
+The Rendering/OSPRay sub-directory or “Module” of the master branch of VTK houses the source code for the new OSPRay interface. The first step to make use of the interface is to activate the vtkRenderingOSPRay module in CMake. Note that VTK requires OSPRay version 0.10.0 or newer. This requirement implies the utilization of C++11 settings to compile the toolkit. Once VTK compiles, OSPRay-related regression tests can run in the toolkit. Rendering/OSPRay/Testing houses the source code for these tests. The following code demonstrates how VTK implements ray tracing:
+```
+#include "vtkOSPRayPass.h"
+...
+vtkOSPRayPass* osprayPass = vtkOSPRayPass::New();
+...
+if (useOSPRay)
+  {
+  renderer->SetPass(osprayPass);
+  }
+else
+  {
+  renderer->SetPass(NULL);
+  }
+```
+The interface in VTK remains the same regardless of whether the toolkit uses the legacy OpenGL rendering backend or the new OpenGL 2 backend. VTK can quickly swap between rasterizing and rendering images. VTK takes less than two-hundredths of a second to draw the dragon model from Stanford University on a laptop, and it takes less than four-hundredths of a second to draw the Lucy model from Stanford University on a laptop.
+For complex scenes with hundreds of millions of primitives, it may take a few seconds for OSPRay to create its acceleration structures on the first swap. Subsequent swaps, however, take very little time, as osprayPass maintains an internal scene-graph representation in-between swaps. In addition, on every render, VTK reuses the unchanged parts of the representation from the previous frame.
+By default, the appearance of the scene with OSPRay looks very similar to the appearance of the scene with OpenGL. As TestOSPRayRenderMesh demonstrates, the new backend preserves standard VTK rendering options as much as possible. These options include surface, wire-frame, and points representations; colors; color mapping; and lighting, texture, and geometric transformations. Nevertheless, ray-traced images will be distinct from rasterized images.
+VTK renders with OpenGL (left) and OSPRay (right).
+As with the pvManta plug-in, OSPRay draws lines and points as cylinders and spheres. The use of a world-space sizing heuristic that is one-thousandth of the diagonal of an object produces images that are close to what the use of vtkProperty::LineWidth and PixelSize default settings for OpenGL produce. The selection of different rendering options can further adjust the sizes. OSPRay can scale all points and lines to constant sizes. OSPRay can also now scale spheres and cylinders according to point-aligned scalar quantities. A transfer function can optionally map scalar values. The following code applies a ray-tracing point-scaling function:
+```
+mapperInfo = mapper->GetInformation();
+mapperInfo->Set(
+  vtkOSPRayActorNode::ENABLE_SCALING(), 1);
+mapperInfo->Set(
+  vtkOSPRayActorNode::SCALE_ARRAY_NAME(), 
+  "name of a scalar array");
+vtkPiecewiseFunction *scaleFunction = 
+  vtkPiecewiseFunction::New();
+scaleFunction->AddPoint(0.0, 0.0);
+scaleFunction->AddPoint(0.1, 2.0);
+...
+mapperInfo->Set(
+  vtkOSPRayActorNode::SCALE_FUNCTION(), 
+  scaleFunction);
+```
+Interaction is particularly fast with a single sample and without advanced rendering effects. The use of advanced settings improve the image quality but slow render times. Advanced settings include the number of anti-aliasing samples per pixel, the number of ambient-occlusion shading samples, and the number of alpha-blending render stages. The below code provides an example:
+```
+rendererInfo = renderer->GetInformation();
+if (realTimeRender)
+  {
+  rendererInfo->Set(
+    vtkOSPRayRendererNode::SAMPLES_PER_PIXEL(), 1);
+  rendererInfo->Set(
+    vtkOSPRayRendererNode::AMBIENT_SAMPLES(), 0);
+  rendererInfo->Set(
+    vtkOSPRayRendererNode::MAX_FRAMES(), 1);
+  }
+else
+  {
+  rendererInfo->Set(
+    vtkOSPRayRendererNode::SAMPLES_PER_PIXEL(), 4);
+  rendererInfo->Set(
+    vtkOSPRayRendererNode::AMBIENT_SAMPLES(), 4);
+  rendererInfo->Set(
+    vtkOSPRayRendererNode::MAX_FRAMES(), 2);
+  }
+```
+In OSPRay, the use of space-sorting acceleration structures eliminates unnecessary intersection tests. Above a certain ratio of scene primitives to image resolution, the frame rate for camera motion will exceed the frame rate for OpenGL rasterization. That is to say, the frame rate of the ray tracer depends on the number of pixels in a scene. The frame rate of the rasterizer, however, depends on the number of primitives in the scene. Therefore, above a certain number of polygons, the ray tracer will render images faster.
+Results from the manyspheres.py benchmark in ParaView on two machines compare frame times for OpenGL and OSPRay, as screen resolution and data resolution double.
+Aesthetics are important too, especially for showcase-type images and movies. OSPRay can support ambient occlusion lighting queries to effectively convey the meso-scale structure of complex objects. With ambient occlusion, features like internal cavities stand out much more clearly. These features appear darker than outward-facing regions, which acquire more light.
+A prototype of a new version of ParaView generates a path-traced OSPRay rendering of a data set, which pertains to
+magnetic reconnection.
+The VTK development team is working to bring photo-realistic rendering capabilities to VTK. To accomplish this, the team is exposing the path-tracing option in OSPRay and adding controls to define the shape, color, and placement of advanced light sources.
+Implementation
+Overall, VTK now offers a more complete separation of rendering state and rendering implementation than of Rendering/Core classes and Rendering/OpenGL* classes. The separation makes it possible to swap in different rendering backends at runtime at minimal cost.
+A new vtkRenderPass class manages the process of swapping backends. During the process, render passes take over responsibility for or augment the standard rendering pipeline of VTK. The standard pipeline asks rendering classes in the Rendering/SceneGraph module (e.g., vtkRenderer, vtkCamera, vtkLight, vtkActor, vtkVolume, and vtkMapper) to traverse the connected hierarchy, while they make OpenGL calls that correspond to the internal rendering state. The Rendering/SceneGraph module provides a new standard for examining the rendering state in VTK and executing arbitrary operations on it. At the moment, the module contains operations that construct the scene graph, update the scene graph to reflect the core rendering state, and make calls to draw the scene graph, respectively. The module hands off the details of the operations to subclasses such as the Rendering/OSPRay subclasses.
+Conclusion
+The new OSPRay-VTK interface streamlines the steps it takes to obtain ray-traced imagery from VTK. Especially for point sprite visualizations, OSPRay brings a new level of visual fidelity to VTK. The new fast, scalable, software-based rendering engine in VTK is important for many HPC-class machines as well.
+The development team is actively working to bring the volume-rendering capability of OSPRay to the new Rendering/SceneGraph module. As mentioned above, the team is also working to expose the high-fidelity path-tracing option in OSPRay within the new VTK framework.
+OSPRay has opened up many doors. It allows VTK to implicitly draw spheres and cylinders. In the future, it will also enable VTK to directly render isosurfaces and constructive solid geometry data, which will reduce the need for intermediary mesh representations. Finally, the ability to make very fast ray queries within VTK has great potential to aid data-processing filters that do not have close relations to rendering.
+Acknowledgement
+This work is part of the Intel® Software Defined Visualization initiative. Learn more at http://www.sdvis.org.
+David DeMarle is a staff research and development engineer at Kitware, where he contributes to both ParaView and VTK. He teaches professional development and training courses for these product applications
+Ken Martin is chairman and chief financial officer of Kitware. He is a developer of VTK and a coauthor of the textbook “The Visualization Toolkit: An Object Oriented Approach to Computer Graphics.”
+Carson Brownlee is a member of the research and engineering group that develops the OSPRay ray-tracing framework at Intel®. He focuses on large-scale interactive ray tracing. He has worked on various ray-tracing
+implementations in major scientific visualization packages.
+Jefferson Amstutz is a part of the Software Defined Visualization team at Intel®. He mainly contributes to the OSPRay project. His research interests focus on multi-hit ray-traversal algorithms and applications. He also enjoys the lifelong journey of learning to express code that is suitable for human consumption.
+Tags:
+Kitware Source Quarterly MagazineParaViewScientific ComputingThe Source Issue 38VTK
+Leave a ReplyCancel reply

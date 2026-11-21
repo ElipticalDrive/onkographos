@@ -1,0 +1,145 @@
+--- v005.md
++++ v006.md
+@@ -1,58 +1,105 @@
+ # CLM
+-Also called: CPU-GPU Memory Barrier Removal, Smart Caching Policy for Gaussian States
++Also called: CLM (CPU-Local Memory), Early Adam Update, CLM Pipelining, CPU-GPU Memory Barrier Removal, Smart Caching Policy for Gaussian States
+ 
+ ## Overview
+-CLM is a training optimization method for 3D Gaussian Splatting that eliminates the performance bottleneck of frequent GPU memory barriers by dynamically migrating Gaussian states between CPU and GPU memory [S1, unofficial]. It solves the problem of VRAM exhaustion and transfer latency during optimization by employing a smart caching policy that retains only the most frequently updated Gaussians on the GPU [S1, unofficial]. Unlike [FastGS](9177-fastgs.md) which focuses on kernel fusion, or [Fused Backward and Optimizer](9597-fused-backward-and-optimizer.md) which optimizes the compute graph, CLM optimizes data placement [S1, unofficial].
++CLM is an optimization technique for 3D Gaussian Splatting (3DGS) training that eliminates the GPU memory barrier by offloading Gaussian model states to CPU memory and overlapping CPU-based Adam optimizer updates with subsequent GPU rendering passes [S2]. It addresses the high memory consumption and communication overhead inherent in naive offloading approaches by implementing a smart caching policy and a pipelined execution schedule [S1, unofficial][S2]. Unlike standard in-core training, CLM allows the Adam optimizer to update finalized Gaussians on the CPU before the entire training batch completes, effectively hiding offloading latency behind computation [S2].
+ 
+ ## How it works
+-**Inputs:** The set of 3D Gaussian parameters $\theta$ (position, covariance, opacity, spherical harmonics coefficients) stored primarily in CPU memory.
+-**Outputs:** Updated Gaussian parameters $\theta'$ after an optimization step, with the subset of "hot" Gaussians residing in GPU memory for immediate rasterization.
++CLM operates by partitioning the training batch into microbatches and managing the lifecycle of Gaussian parameters across CPU and GPU memory. The method relies on the observation that many Gaussians are finalized (i.e., no longer accessed) in earlier microbatches of a batch, allowing their parameter updates to be computed on the CPU while the GPU processes subsequent microbatches [S2].
+ 
+-**Data Structures:**
+-1.  **CPU Storage:** The full list of $N$ Gaussians. Each Gaussian $i$ stores its parameters $\theta_i$.
+-2.  **GPU Cache:** A subset of $K$ Gaussians ($K \ll N$) currently resident in GPU global memory.
+-3.  **Access Counter/Heatmap:** A metadata structure tracking the frequency of updates or visibility for each Gaussian index $i$.
++### Inputs and Outputs
++*   **Inputs:** A batch of $B$ training views (microbatches $S_0, \dots, S_{B-1}$), the current Gaussian parameters $\theta$ (position, covariance, opacity, spherical harmonics), and the Adam optimizer state.
++*   **Outputs:** Updated Gaussian parameters $\theta'$ and rendered images for the batch.
+ 
+-**Algorithm Steps:**
+-1.  **Initialization:** Load the initial Gaussian parameters into CPU memory. Identify the initial set of $K$ most relevant Gaussians (e.g., those closest to the camera or with highest opacity) and transfer them to the GPU cache [S1, unofficial].
+-2.  **Rasterization:** Perform the differentiable alpha-blending rasterization using only the Gaussians present in the GPU cache [S1, unofficial]. This avoids the barrier of waiting for all $N$ Gaussians to be on the GPU.
+-3.  **Gradient Computation:** Compute gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ for the Gaussians in the cache. For Gaussians not in the cache, gradients are zero or negligible for this step [S1, unofficial].
+-4.  **Update & Tracking:** Apply the optimizer update to the cached Gaussians. Increment the access/update counter for these Gaussians [S1, unofficial].
+-5.  **Cache Management (Smart Caching):**
+-    *   Evaluate the access counters.
+-    *   Identify the $K$ Gaussians with the highest recent activity (heat).
+-    *   Identify the $K$ least active Gaussians currently in the GPU cache.
+-    *   Transfer the least active Gaussians from GPU to CPU.
+-    *   Transfer the most active Gaussians from CPU to GPU [S1, unofficial].
+-6.  **Repeat:** Iterate through training steps.
++### Data Structures
++1.  **Gaussian State Storage:** Gaussian attributes are stored in pinned CPU memory. To optimize transfer, attributes are concatenated and padded so that all attributes of a single Gaussian are contiguous and cache-line aligned [S2].
++2.  **Finalization Map ($L_g$):** For each Gaussian $g$, a value $L_g$ is computed, representing the index of the last microbatch that accesses $g$. If $g$ is not accessed in the batch, $L_g = 0$ (or undefined, depending on implementation, but effectively not updated) [S2].
++    $$ L_g = \max \{ i \mid g \in S_i \} $$
++3.  **Double Buffer:** A double buffer design is used in the pipelining stage to enable parameter prefetching and delayed gradient offloading [S2].
++4.  **Signal Buffer:** A signal buffer in CPU pinned memory synchronizes the GPU communication stream and the CPU Adam thread [S2].
+ 
+-**Parameters:**
+-*   $K$: Cache size. Not given in the sources.
+-*   Threshold for "frequently updated": Not given in the sources.
++### Algorithm Steps
++1.  **Pre-compute Finalization Indices:** Before training the batch, compute $L_g$ for all Gaussians $g$ in the scene based on the current microbatch schedule [S2].
++2.  **Microbatch Scheduling:** Schedule microbatches to maximize spatial locality ($S_{i+1} \cap S_i$ is large) and ensure that more Gaussians are finalized in earlier microbatches to maximize CPU-GPU overlap [S2].
++3.  **Iterative Microbatch Processing:** For each microbatch $j$ from $0$ to $B-1$:
++    a.  **Prefetch Parameters:** Load the parameters for Gaussians required by microbatch $j$ from CPU memory to GPU memory. This is done using a **Selective Loading Kernel** [S2].
++        *   The kernel initiates from the GPU to avoid CPU-GPU coordination overhead.
++        *   It loads in-frustum Gaussian parameters from pinned CPU memory to GPU registers and then to GPU memory [S2].
++        *   It splits attributes from the contiguous CPU buffer and concatenates only the in-frustum attributes into GPU memory [S2].
++    b.  **GPU Forward/Backward:** Perform the differentiable rasterization forward pass and backward pass for microbatch $j$ on the GPU [S2].
++    c.  **Gradient Offloading:** Transfer the computed gradients for the updated Gaussians from GPU to CPU memory. A custom kernel handles this transfer efficiently [S2].
++    d.  **CPU Adam Update (Early Update):** At the end of microbatch $j$, identify all Gaussians $g$ where $L_g = j$. Use the CPU Adam optimizer to update these Gaussians [S2].
++        *   This update occurs on a dedicated CPU thread that releases the Python GIL, allowing concurrent execution with the GPU [S2].
++        *   Synchronization is handled via the signal buffer: the GPU sets a gradient completion signal via DMA, triggering the CPU thread [S2].
++    e.  **Cache Management:** Gaussians that have been finalized ($L_g = j$) may be evicted from GPU memory or kept in a cache if they are likely to be reused in future batches (smart caching) [S1, unofficial][S2].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Standard floating-point precision is assumed for parameters. [G] Ensure that transferring parameters between CPU and GPU does not introduce alignment issues; use contiguous memory buffers.
+-*   **Boundaries:** If a Gaussian becomes critical (e.g., due to a sudden camera move) but is not in the cache, it must be loaded. The sources note that a single distant view could require access to the full scene, causing high transfer overhead [S2, unofficial]. CLM mitigates this by caching, but extreme cases may still stall.
+-*   **Degenerate Input:** If the scene is small enough to fit entirely in VRAM, the overhead of the caching policy may outweigh benefits. [G] A simple check `if N * size_of_gaussian < VRAM_capacity` can bypass CLM.
++### Pseudocode
++```python
++# Initialize Gaussian states in pinned CPU memory
++# Compute L_g for all g in batch
++L_g = {g: max([i for i, S_i in enumerate(batch) if g in S_i], default=0) for g in Gaussians}
++
++# Dedicated CPU thread for Adam updates
++def cpu_adam_thread():
++    while True:
++        wait_for_signal(signal_buffer) # Wait for GPU to finish gradient offload
++        # Find Gaussians finalized in the current microbatch
++        finalized_gaussians = [g for g, l in L_g.items() if l == current_microbatch_index]
++        # Update only these Gaussians using CPU Adam
++        for g in finalized_gaussians:
++            update_gaussian_cpu(g, gradients[g])
++        signal_buffer.reset()
++
++# Start CPU thread
++start_thread(cpu_adam_thread)
++
++for j in range(B): # B is batch size
++    # 1. Selective Loading: Load required Gaussians from CPU to GPU
++    # Kernel handles splitting/concatenating and in-frustum culling
++    gpu_params = selective_load_kernel(cpu_memory, Gaussians_in_S_j)
++    
++    # 2. GPU Forward/Backward Pass
++    gradients = gpu_backward_pass(gpu_params, view_j)
++    
++    # 3. Gradient Offloading: Copy gradients to CPU
++    # Custom kernel for efficient transfer
++    cpu_gradients = gradient_offload_kernel(gradients, Gaussians_in_S_j)
++    
++    # 4. Signal CPU to update finalized Gaussians
++    signal_buffer.set_signal(j)
++    
++    # Note: CPU Adam update happens concurrently in the background thread
++    # for Gaussians where L_g == j
++```
++
++### Parameters and Edge Cases
++*   **Batch Size ($B$):** Larger batches allow more opportunities for overlap but increase the number of Gaussians finalized in the last microbatch, reducing overlap potential [S2].
++*   **Spatial Locality:** The effectiveness of CLM depends heavily on the microbatch schedule. Poor scheduling reduces the intersection between consecutive microbatches, increasing communication overhead [S2].
++*   **Last Microbatch Overhead:** Gaussians finalized in the last microbatch ($L_g = B-1$) do not have their CPU Adam computation overlapped with subsequent GPU work, creating a bottleneck [S2].
++*   **Memory Usage:** CLM significantly reduces GPU memory usage for model states but slightly increases "other" memory usage due to the double buffer design [S2].
+ 
+ ## Subtopics
+ 
++### [Gaussians Cache Mechanism](17565-gaussians-cache-mechanism.md)
++A dynamic store, query, and release mechanism to avoid re-inferencing reference views that share the same relative pose and features across consecutive iterations. It tracks recently used Gaussians and reuses them across training iterations to reduce CPU-GPU data transfer.
++
+ ### Out-of-Core Training and Rendering
+-A framework that extends the concept of CLM by storing the *entire* scene in CPU RAM and dynamically streaming only visible Gaussians to GPU memory, enabling training and rendering of scenes exceeding VRAM on a single consumer GPU. It differs from CLM by using a hierarchical Level-of-Detail (LoD) model and Sequential Point Trees (SPTs) for view-dependent selection, rather than just a flat cache. Choose this when the scene size exceeds available VRAM significantly. Link: [Out-of-Core Training and Rendering](9177-out-of-core-training-and-rendering.md) (Note: No specific article ID provided in prompt, so link to parent or sibling if available, otherwise leave blank or link to general concept. The prompt asks for links to other articles. Since no specific article ID is given for this variant, I will link to the parent or note it as a variant). *Correction*: The prompt says "Links to other articles use the file names given below". No file name is given for this variant. I will omit the link or link to the parent if appropriate, but the instruction says "link to it instead". I will provide a descriptive link placeholder or link to the parent if it's the best fit. However, the prompt says "Siblings: ...". This variant is a child. I will link to [Out-of-Core Training and Rendering](9177-out-of-core-training-and-rendering.md) as a placeholder if it existed, but since it doesn't, I will link to the parent [Optimization and Training Efficiency](9264-optimization-and-training-efficiency.md) or leave it unlinked if no ID is provided. The prompt says "Links to other articles use the file names given below". No file name is given for the subtopic. I will not invent a file name. I will link to the parent [Optimization and Training Efficiency](9264-optimization-and-training-efficiency.md) as the closest available reference, or simply state the link is not provided. *Re-reading*: "Links to other articles use the file names given below". The list of siblings has IDs. The subtopics do not. I will not provide a link for the subtopic if no ID is given.
++A framework storing the full scene in CPU RAM and dynamically streaming only visible Gaussians to GPU memory, enabling training and rendering of scenes exceeding VRAM on a single consumer GPU. It uses a lightweight caching system and a hierarchical Level-of-Detail (LoD) model to manage data access. A pitfall is that a single distant view could require access to the full scene, causing high transfer overhead [S3, unofficial].
++
++### Selective Loading Kernel
++A custom CUDA kernel that loads Gaussian parameters from pinned CPU memory to GPU registers and then to GPU memory, initiated from the GPU to avoid CPU-GPU coordination overhead. It splits Gaussian attributes from the contiguous CPU memory buffer and concatenates only the in-frustum Gaussian attributes together into GPU memory. It also handles the efficient transfer of gradients from GPU to CPU memory [S2].
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(K)$ for rasterization per step, where $K$ is the cache size, instead of $O(N)$ [S1, unofficial]. Cache management adds $O(N)$ or $O(K \log K)$ overhead depending on implementation [S1, unofficial].
+-**Memory Complexity:** $O(N)$ on CPU, $O(K)$ on GPU [S1, unofficial].
+-**Measured Performance:** Not given in the sources.
+-**Scaling:** Scales to larger scenes by keeping GPU memory usage constant ($K$) while CPU memory scales with $N$ [S1, unofficial].
+-**Strengths:** Reduces GPU memory pressure; avoids frequent full-scene transfers; improves training speed for large scenes [S1, unofficial].
+-**Limitations:** High transfer overhead if the view changes drastically (e.g., distant view requiring full scene access) [S2, unofficial].
+-**When to use:** When VRAM is limited and the scene is large, but not so large that out-of-core streaming (like [Out-of-Core Training and Rendering](9177-out-of-core-training-and-rendering.md)) is required.
+-**When not to use:** When the scene fits entirely in VRAM, or when the overhead of cache management exceeds the benefit of reduced rasterization time.
++*   **Time Complexity:** The method reduces overall training time by overlapping communication and CPU Adam computation with GPU computation. The pipeline runtime is notably shorter than the combined computation and communication duration in naive offloading [S2].
++*   **Memory Complexity:** Significantly reduces GPU memory usage for Gaussian model states, allowing training on GPUs with limited VRAM. However, it increases CPU memory usage and slightly elevates "other" GPU memory usage due to double buffering [S2].
++*   **Performance:** On RTX 2080 Ti and RTX 4090, CLM provides significant speedups over naive offloading. The acceleration results from overlapping communication with computation and reduced communication volume by transferring only in-frustum Gaussians [S2].
++*   **Strengths:** Enables training of large scenes on consumer GPUs; reduces memory barrier; overlaps CPU and GPU work.
++*   **Limitations:** Requires careful microbatch scheduling for optimal performance; overhead for Gaussians finalized in the last microbatch; increased CPU memory usage [S2].
+ 
+ ## Background
+-CLM was introduced as a method to remove the GPU memory barrier in 3D Gaussian Splatting optimization [S1, unofficial]. It is part of the broader effort to optimize training efficiency in differentiable volume rendering [S1, unofficial]. The method is cited in the context of other optimization techniques like Grendel-GS and TideGS [S1, unofficial].
++CLM was introduced in the paper "CLM: Removing the GPU Memory Barrier for 3D Gaussian Splatting" [S2]. It builds upon the Grendel training framework and gsplat rasterization kernels [S2]. The method addresses the limitations of naive offloading, where communication and CPU Adam overheads account for more than 50% of training time [S2]. It is part of a broader family of optimization techniques for 3D Gaussian Splatting, including Out-of-Core methods like TideGS and A LoD of Gaussians [S1, S3, unofficial].
+ 
+ ## Sources
+ [S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+-[S2] A LoD of Gaussians: Unified Training and Rendering for Ultra-Large Scale Reconstruction with External Memory, https://doi.org/10.48550/arXiv.2507.01110, fetched 2026-10-28 (unofficial)+[S2] CLM: Removing the GPU Memory Barrier for 3D Gaussian Splatting, https://doi.org/10.1145/3779212.3790140, fetched 2026-10-31
++[S3] A LoD of Gaussians: Unified Training and Rendering for Ultra-Large Scale Reconstruction with External Memory, https://doi.org/10.48550/arXiv.2507.01110, fetched 2026-10-28 (unofficial)

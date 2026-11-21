@@ -1,0 +1,181 @@
+# Semi-Analytical Volume Rendering with Trilinear Interpolation
+
+Also called: Analytical Integration with Trilinear Reconstruction, Köhler's Method, Semi-Analytical Preintegration for Hexahedral Cells, Semi-Analytical Volume Rendering, Trilinear Preintegration
+
+## Overview
+Semi-analytical volume rendering with trilinear interpolation is a direct volume ray casting technique for hexahedral cells that eliminates topological artifacts such as discontinuities and holes in isosurfaces by analytically determining optimal sampling points along the ray [S2]. It sets itself apart from standard trilinear interpolation [1531-trilinear-interpolation.md] by replacing uniform sampling with a piecewise-linear approximation over monotonic intervals defined by the analytical extrema of the reconstructed signal, ensuring no isovalue is missed [S2].
+
+## How it works
+**Inputs:**
+- Scalar field values $s_{ijk}$ at the 8 corners $(i,j,k) \in \{0,1\}^3$ of a hexahedral cell [S2].
+- Ray entry point $(x_0, y_0, z_0)$ and exit point $(x_1, y_1, z_1)$ in normalized cell coordinates $[0,1]^3$ [S2].
+- Transfer functions: color $c(s)$ and opacity $\tau(s)$ [S2].
+
+**Outputs:**
+- Accumulated color intensity $I$ for the ray segment traversing the cell [S2].
+
+**Data Structures:**
+- Coefficients $a, b, c, d$ of the cubic polynomial $s(t)$ [S2].
+- List of valid extrema $R = \{r_1, r_2, \dots\}$ within $[0,1]$ [S2].
+- Monotonic intervals defined by sorted sampling points $T = \{0, r_1, r_2, 1\}$ [S2].
+
+**Steps:**
+
+1. **Ray Parametrization:**
+   Compute the direction vector components as differences between exit and entry coordinates:
+   $$v_x = x_1 - x_0, \quad v_y = y_1 - y_0, \quad v_z = z_1 - z_0$$
+   The ray is parametrized as $x(t) = x_0 + t v_x$, $y(t) = y_0 + t v_y$, $z(t) = z_0 + t v_z$ for $t \in [0,1]$ [S2].
+
+2. **Signal Reconstruction (Cubic Polynomial):**
+   Substitute the ray parametrization into the trilinear interpolation formula to obtain $s(t) = a t^3 + b t^2 + c t + d$ [S2]. The coefficients are linear combinations of the corner values $s_{ijk}$ and ray parameters:
+   $$a = (s_{100} - s_{000} + s_{010} + s_{001} + s_{111} - s_{110} - s_{011} - s_{101}) v_x v_y v_z$$
+   Coefficients $b, c, d$ are derived similarly by collecting terms of $t^2, t^1, t^0$ respectively, resulting in sums of 8 terms each involving $s_{ijk}$ multiplied by products of $x_0, y_0, z_0$ and $v_x, v_y, v_z$ [S2].
+
+3. **Extrema Calculation:**
+   Compute the derivative $s'(t) = 3a t^2 + 2b t + c$ [S2]. Find the roots of this quadratic equation:
+   $$t = \frac{-2b \pm \sqrt{4b^2 - 12ac}}{6a}$$
+   If $a=0$, solve the linear equation $2b t + c = 0$ [G]. If $a=0$ and $b=0$, the function is constant and has no extrema [G].
+
+4. **Pruning and Sorting:**
+   - Discard any roots $t$ such that $t < 0$ or $t > 1$ [S2].
+   - Sort the remaining valid extrema $r_i$ in ascending order [S2].
+   - Define the sampling points $T = [0, r_1, r_2, \dots, 1]$ [S2].
+
+5. **Interval Approximation:**
+   For each consecutive pair of sampling points $t_i, t_{i+1}$ in $T$, approximate the signal $s(t)$ as a linear interpolation between the values at the endpoints:
+   $$s_{lin}(t') = (1-t') s(t_i) + t' s(t_{i+1}), \quad t' \in [0,1]$$
+   where $t'$ is the local parameter within the normalized interval $[0,1]$ [S2]. Let $L_i = t_{i+1} - t_i$ be the length of the interval [S2].
+
+6. **Preintegration:**
+   Compute the contribution of each interval using preintegration functions $C$ and $\alpha$ [S2]. The total intensity is accumulated using front-to-back alpha compositing:
+   $$I \approx C(s(0), s(r_1), L_0) + (1 - \alpha(s(0), s(r_1), L_0)) C(s(r_1), s(r_2), L_1) + \dots$$
+   where
+   $$C(a, b, L) = \int_0^1 c((1-t') a + t' b) L e^{-\int_0^{t'} \tau((1-u) a + u b) L du} dt'$$
+   $$\alpha(a, b, L) = 1 - e^{-\int_0^1 \tau((1-t') a + t' b) L dt'}$$
+   In practice, these integrals are evaluated via numerical quadrature or lookup tables [G].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def semi_analytical_trilinear_render(s_corners, x0, y0, z0, x1, y1, z1, c_func, tau_func):
+    """
+    s_corners: list of 8 floats [s000, s100, s010, s001, s101, s011, s110, s111]
+    x0,y0,z0: entry point in [0,1]^3
+    x1,y1,z1: exit point in [0,1]^3
+    c_func: color transfer function (returns RGB tuple)
+    tau_func: opacity transfer function (returns float)
+    """
+    vx, vy, vz = x1 - x0, y1 - y0, z1 - z0
+    a, b, c, d = compute_cubic_coefficients(s_corners, x0, y0, z0, vx, vy, vz)
+    roots = solve_quadratic(3*a, 2*b, c)
+    valid_extrema = sorted([r for r in roots if 0.0 <= r <= 1.0])
+    sampling_points = [0.0] + valid_extrema + [1.0]
+    
+    accumulated_alpha = 0.0
+    accumulated_color = [0.0, 0.0, 0.0]
+    
+    for i in range(len(sampling_points) - 1):
+        t_start, t_end = sampling_points[i], sampling_points[i+1]
+        L = t_end - t_start
+        s_start, s_end = eval_cubic(a, b, c, d, t_start), eval_cubic(a, b, c, d, t_end)
+        interval_color, interval_alpha = preintegrate_interval(s_start, s_end, L, c_func, tau_func)
+        accumulated_color = [accumulated_color[k] + (1.0 - accumulated_alpha) * interval_color[k] for k in range(3)]
+        accumulated_alpha += (1.0 - accumulated_alpha) * interval_alpha
+    return accumulated_color, accumulated_alpha
+
+def eval_trilinear(s_corners, x, y, z):
+    return (s_corners[0]*(1-x)*(1-y)*(1-z) + s_corners[1]*x*(1-y)*(1-z) +
+            s_corners[2]*(1-x)*y*(1-z) + s_corners[3]*(1-x)*(1-y)*z +
+            s_corners[4]*x*(1-y)*z + s_corners[5]*(1-x)*y*z +
+            s_corners[6]*x*y*(1-z) + s_corners[7]*x*y*z)
+
+def compute_cubic_coefficients(s_corners, x0, y0, z0, vx, vy, vz):
+    # Coefficients for s(t) = a*t^3 + b*t^2 + c*t + d
+    # a is explicitly defined [S2]
+    a = (s_corners[1] - s_corners[0] + s_corners[2] + s_corners[3] + s_corners[7] - s_corners[6] - s_corners[5] - s_corners[4]) * vx * vy * vz
+    # b, c, d are computed similarly as linear combinations of corner values [S2]
+    # We evaluate s(t) at t=0, 1/3, 2/3, 1 and solve the linear system
+    t_pts = [0.0, 1.0/3.0, 2.0/3.0, 1.0]
+    s_pts = [eval_trilinear(s_corners, x0 + t*vx, y0 + t*vy, z0 + t*vz) for t in t_pts]
+    # Solve Vandermonde system for b, c, d (a is known)
+    # Using Cramer's rule or Gaussian elimination for 3x3 system
+    # Simplified: solve for b, c, d given a
+    # t^3 coefficients are known, so we solve for remaining
+    M = [[t**2 for t in t_pts], [t for t in t_pts], [1.0 for _ in t_pts]]
+    rhs = [s - a*t**3 for s, t in zip(s_pts, t_pts)]
+    b, c, d = solve_linear_system(M, rhs)
+    return a, b, c, d
+
+def eval_cubic(a, b, c, d, t): return ((a*t + b)*t + c)*t + d
+
+def solve_quadratic(A, B, C):
+    if abs(A) < 1e-9:
+        return [-C/B] if abs(B) > 1e-9 else []
+    disc = B*B - 4*A*C
+    if disc < 0: return []
+    sqrt_disc = disc**0.5
+    return [(-B - sqrt_disc)/(2*A), (-B + sqrt_disc)/(2*A)]
+
+def solve_linear_system(M, rhs):
+    n = len(rhs)
+    for i in range(n):
+        max_row = i
+        for k in range(i+1, n):
+            if abs(M[k][i]) > abs(M[max_row][i]): max_row = k
+        M[i], M[max_row] = M[max_row], M[i]
+        rhs[i], rhs[max_row] = rhs[max_row], rhs[i]
+        for k in range(i+1, n):
+            factor = M[k][i] / M[i][i]
+            for j in range(i, n): M[k][j] -= factor * M[i][j]
+            rhs[k] -= factor * rhs[i]
+    x = [0.0]*n
+    for i in range(n-1, -1, -1):
+        x[i] = rhs[i]
+        for j in range(i+1, n): x[i] -= M[i][j] * x[j]
+        x[i] /= M[i][i]
+    return x
+
+def preintegrate_interval(s_start, s_end, L, c_func, tau_func, steps=16):
+    color_integral = [0.0, 0.0, 0.0]
+    tau_integral = 0.0
+    dt = 1.0 / steps
+    accumulated_opacity = 0.0
+    for i in range(steps):
+        t_prime = (i + 0.5) * dt
+        s_val = (1.0 - t_prime)*s_start + t_prime*s_end
+        c_val = c_func(s_val)
+        tau_val = tau_func(s_val)
+        tau_integral += tau_val * dt
+        accumulated_opacity += tau_val * dt
+        weight = L * (1.0 - t_prime)
+        color_integral = [color_integral[k] + weight * c_val[k] * math.exp(-accumulated_opacity * L) for k in range(3)]
+    alpha = 1.0 - math.exp(-tau_integral * L)
+    return color_integral, alpha
+```
+
+## Subtopics
+
+### [Local Phong Shading with Semi-Analytical Integration](1345-local-phong-shading-with-semi-analytical-integration.md)
+This method extends semi-analytical volume rendering by incorporating local Phong diffuse shading into the integration process. It solves the problem of accurate lighting in volume rendering by reconstructing the shading function as a quadratic polynomial along the ray, allowing for analytical integration of the light contribution. It sets itself apart from scalar-only semi-analytical methods by requiring at most one additional sampling point per cell to capture the shading extremum, while maintaining the topological accuracy of the underlying trilinear interpolation.
+
+### AMR Cell Splitting for Continuity
+A technique to handle hybrid cells in Adaptive Mesh Refinement (AMR) by propagating cell splits from the lower level cell to the higher level cell to ensure continuity across cell faces [S2]. It identifies hybrid cells (sharing an edge/face with a different level cell) and propagates splits by adding 'source split points' (using the higher-level cell's value) and 'destination split points' (using bilinearly interpolated values from a shared face) to the lower-level cell [S2]. This ensures continuity across cell faces either by using the neighbor's value or by matching the interpolation scheme of the neighbor cell, avoiding artifacts [S2].
+
+## Operating characteristics
+- **Time Complexity:** The method requires solving a quadratic equation and evaluating preintegration functions for each monotonic interval [S2]. The number of intervals is small (at most 3), making it faster than high-frequency uniform sampling for preserving topology [S2].
+- **Memory Complexity:** Requires storage for preintegration tables or numerical quadrature routines [G].
+- **Performance:** Efficient on current graphics hardware when combined with a hybrid CPU-GPU mesh traversal technique [S2].
+- **Strengths:** Guarantees topological accuracy of isosurfaces; avoids missing isovalues; handles arbitrary transfer functions [S2].
+- **Limitations:** As the topology is consistent from one frame to another, the only remaining kind of artifacts is wobbling of the surfaces and structures inside the cells as the viewpoint changes [S2]. Complex coefficient calculation for the cubic polynomial [S2].
+- **When to use:** High-quality visualization of AMR datasets with hexahedral cells where topological accuracy is critical [S2].
+
+## Background
+Originated in a 2009 paper by [S2] titled "High-Quality, Semi-Analytical Volume Rendering for AMR...", this method was developed to address the challenges of visualizing Adaptive Mesh Refinement (AMR) datasets [S2]. It builds on the need for view-order cell traversal and high-quality rendering of hexahedral cells in AMR meshes, which often suffer from discontinuities in isosurfaces due to piecewise linear approximations [S2]. The method extends standard trilinear interpolation by leveraging the analytical properties of the reconstructed signal to determine sampling points [S2].
+
+## Sources
+[S1] 5 Forward Projection through Voxel Volumes, https://www.cvl.isy.liu.se/education/undergraduate/tsbb31/download/TurbellPhDCh5.pdf, fetched 2026-10-25 (unofficial)
+[S2] High-Quality, Semi-Analytical Volume Rendering for AMR ..., https://people.freedesktop.org/~marcheu/vis09-amr.pdf, fetched 2026-10-26

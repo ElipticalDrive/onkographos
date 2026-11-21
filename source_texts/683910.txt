@@ -1,0 +1,237 @@
+Hello, I want to write a program that does the reverse of the PotreeConverter in Go. I want the input to be the Potree Octree data and the output to be a LAS file. I would appreciate it if you could point me in the right direction.
+
+How to Convert Potree Octree data to LAS (Reverse of PotreeConverter) (version 1.6) · Issue #1349 · potree/potree · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+How to Convert Potree Octree data to LAS (Reverse of PotreeConverter) (version 1.6) #1349
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+How to Convert Potree Octree data to LAS (Reverse of PotreeConverter) (version 1.6)#1349
+Copy link
+Description
+AdamAtamnia
+opened on Aug 11, 2023
+Issue body actions
+Hello,
+I want to write a program that does the reverse of the PotreeConverter in Go.
+I want the input to be the Potree Octree data and the output to be a LAS file.
+I would appreciate it if you could point me in the right direction.
+Activity
+pierraug31 commented on Jan 16, 2024
+pierraug31
+on Jan 16, 2024
+More actions
+Hello, I have the same problem, do you have updates?
+adam-atamnia commented on Jan 16, 2024
+adam-atamnia
+on Jan 16, 2024
+More actions
+It has been a very long time since I worked on this project so I dont remember the details but I think I was able to find a solution.
+Here are my notes that should explain everything. I hope you find them useful:
+I was able to code my own solution for point cloud extraction from volume using code from here #549 (comment), and by using some of the code for point cloud extraction from profiles found in Potree itself (profile.js).
+Here is what I did:
+I added this in the following files:
+VolumePanel.js
+```
+// imports
+import {CSVExporter} from "../../exporter/CSVExporter.js";
+import { LASExporter } from "../../exporter/LASExporter.js";
+import {Points} from "../../Points.js";
+
+...
+
+export class VolumePanel extends MeasurePanel {
+
+	constructor(...){
+		this.elContent = $(`
+			<div ...>
+				...
+				<li style="margin-top: 10px">
+					<a id="download_volume_csv" href="#" download="volume.csv">
+						Download CSV
+					</a>
+				</li>
+
+				<li style="margin-top: 10px">
+					<a id="download_volume_las" href="#" download="volume.las">
+						Download LAS
+					</a>
+				</li>
+				...
+			</div>
+			
+		`)
+	}
+
+	...
+
+	let csvBtn = this.elContent.find('#download_volume_csv')
+	csvBtn.click(() => {
+		let points = this.getVolumePoints();
+		let string = CSVExporter.toString(points);
+	
+		let blob = new Blob([string], { type: "text/string" });
+		csvBtn.attr('href', URL.createObjectURL(blob));
+	})
+	
+	let lasBtn = this.elContent.find('#download_volume_las')
+	lasBtn.click(() => {
+		let points = this.getVolumePoints();
+		let buffer = LASExporter.toLAS(points);
+	
+		let blob = new Blob([buffer], {type: "application/octet-binary"});
+		lasBtn.attr('href', URL.createObjectURL(blob));
+	})
+	
+	
+	getVolumePoints() {
+		for (let pointcloud of this.viewer.scene.pointclouds) {
+			console.log(pointcloud);
+		}
+	
+		const pointCloud = window.viewer.scene.pointclouds[0];
+		const measurement = this.measurement;
+	
+		const pointNodes = pointCloud.visibleNodes.map((node, index) => {
+			return node.getPointsInBox(measurement);
+		});
+	
+		const flatNodes = pointNodes.flat();
+	
+		let points = new Points();
+		points.boundingBox = measurement.boundingBox;
+		points.numPoints = flatNodes.length/3;//3 because xyz
+		points.data["position"] = new Float32Array(flatNodes);
+	
+		return points;
+	
+	}
+
+	...
+
+}
+```
+PointCloudOctree.js
+```
+export class PointCloudOctreeNode extends PointCloudTreeNode {
+	...
+
+	// modified similarly to: https://github.com/potree/potree/issues/549#issuecomment-1176164943
+	getPointsInBox(boxNode) {
+		if (!this.sceneNode) {
+			return null;
+		}
+	
+		const attributes = this.geometryNode.geometry.attributes;
+		const position = attributes.position;
+		const worldToBox = boxNode.matrixWorld.clone().invert();
+		const objectToBox = new THREE.Matrix4().multiplyMatrices(
+			worldToBox,
+			this.sceneNode.matrixWorld
+		);
+		let inBox = [];
+	
+		console.log(attributes)
+	
+		for (let i = 0; i < position.count; i++) {
+			const pos = new THREE.Vector3();
+			const arr = position.array;
+			const x = arr[3 * i];
+			const y = arr[3 * i + 1];
+			const z = arr[3 * i + 2];
+			pos.set(x, y, z);
+			pos.applyMatrix4(objectToBox);
+	
+			if (-0.5 < pos.x && pos.x < 0.5) {
+				if (-0.5 < pos.y && pos.y < 0.5) {
+					if (-0.5 < pos.z && pos.z < 0.5) {
+						//const classification = attributes.classification.array[i];
+						let point = new THREE.Vector3(x, y, z);
+						point.applyMatrix4(this.sceneNode.matrixWorld);
+						position.array[3 * i] = point.x;
+						position.array[3 * i + 1] = point.y;
+						position.array[3 * i + 2] = point.z;
+						// instead of returning and array of vectors, each xyz is a separate element in the array
+						// this is because LASConverter.js and CSVConverter.js expect this kind of format in the data field
+						inBox.push(position.array[3 * i]);
+						inBox.push(position.array[3 * i + 1]);
+						inBox.push(position.array[3 * i + 2]);
+					}
+				}
+			}
+		}
+	
+		return inBox;
+	}
+	...
+}
+```
+Important findings
+LASConverter.js and CSVConverter.js, expect an object of type “Points” found in Points.js. (Even though it’s not clear because JS does not have types).
+These are the fields of the “Points” object:
+boundingBox: Box3 {min: Vector3, max: Vector3, isBox3: true}
+data: {}
+numPoints: 114
+In the “data” object field of the “Points” object, you can add one or more of the following fields depending on the data you have in the point cloud:
+classification: Uint8Array(114)
+color: Uint8Array(456)
+intensity: Float32Array(114)
+mileage: Float64Array(114)
+number of returns: Uint8Array(114)
+position: Float64Array(342)
+return number: Uint8Array(114)
+source id: Uint16Array(114)
+Note that these are thes same as the fields found in the attributes variable in the PointCloudOctree.js code:
+I copied it here again:
+```
+const attributes = this.geometryNode.geometry.attributes;
+const position = attributes.position;
+```
+In the PointCloudOctree.js code, I only add the “position” Float32Array field which takes care of all the points’ xyz coordinates, but we can modify the code a bit to add all the attributes.
+I found that if you add “viewer.setServer("");” in the Html, a button will appear called “Prepare Download” in the “Scene” tab under the “Properties” section when you select a volume with the volume mesurement tool. Unfortunately, I do not know what the is meant to do and how to make it work. I asked the developer by email and made a stackoverflow question but no one answered. So this is why I made my own solution.
+Issue
+The bounding box of the Points object passed to the LasConverter is always this:
+boundingBox: Box3
+max: Vector3 {x: 0.5, y: 0.5, z: 0.5, isVector3: true}
+min: Vector3 {x: -0.5, y: -0.5, z: -0.5, isVector3: true}
+which it should not be (it should be the same bounding box as the selected volume on the web interface)
+This is because the this.mesurments field in VolumePanel class (which is the box representing the selected volume in the web interface) has always this (the one shown above) bounding box. It might be a bug or I might have missed something.
+Implications:
+Despite this, points are correctly retrieved from the selected volume because the bounding box is not needed for that. Rather we use the matrixWorld attribute as shown in the code above.
+The only problem is that if one chooses to export the points as a LAS file, the points will be correct but the bounding box will be incorrect. As a temporary fix, you can use a [lastools](https://lastools.github.io/) called lasinfo by executing command lasinfo.exe -repair_bb volume.las to fit the bounding box to the points.
+To my knowledge, exporting the points as CSV has no issues because only the points are exported and not the bounding box.
+ZHUYUEHAN1 commented on Oct 23, 2024
+ZHUYUEHAN1
+on Oct 23, 2024
+Last edited by ZHUYUEHAN1
+More actions
+how to find all the positions?
+I have 720000 point data,
+pointCloud.pcoGeometry.root.children[].geometry.attributes.position.array only have 200000
+pointCloud.visibleNodes.geometryNode.geometry.attributes.position.array have 600000
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

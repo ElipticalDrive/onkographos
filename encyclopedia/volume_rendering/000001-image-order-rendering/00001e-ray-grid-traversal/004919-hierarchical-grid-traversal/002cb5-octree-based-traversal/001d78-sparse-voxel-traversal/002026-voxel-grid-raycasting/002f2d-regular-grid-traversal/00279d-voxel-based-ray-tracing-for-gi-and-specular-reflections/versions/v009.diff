@@ -1,0 +1,348 @@
+--- v008.md
++++ v009.md
+@@ -4,212 +4,180 @@
+ 
+ ## Overview
+-Voxel-based Ray Tracing is a global illumination (GI) and specular reflection fallback method that uses Digital Differential Analyzer (3D-DDA) traversal through a uniform block-occupancy voxel grid to sample indirect lighting and reflections [S1, unofficial]. It serves as a drop-in replacement for Screen-Space Ray Tracing (SSRT) for GI and a fallback for Screen-Space Reflections (SSR) when coverage is incomplete, combining sky occlusion with Light Propagation Volumes (LPV) colour bleeding [S1, unofficial]. Unlike sibling methods that rely solely on screen-space data, this method leverages a pre-computed 3D voxel grid populated in the shadow pass to provide scene-wide illumination data [S1, unofficial].
++This method implements a voxel-based ray tracing system using 3D Digital Differential Analyzer (3D-DDA) traversal through a block-occupancy grid to provide global illumination (GI) and specular reflection fallbacks [S1, unofficial]. It serves as a drop-in replacement for Screen-Space Ray Tracing (SSRT) for indirect lighting and a fallback for Screen-Space Reflections (SSR) when coverage is incomplete [S1, unofficial]. Unlike standard voxel raycasting which often relies on volume density, this method operates on a binary occupancy grid combined with Light Propagation Volumes (LPV) data, distinguishing it from [Optimised Voxel Ray Marching](4240-optimised-voxel-ray-marching.md) which typically handles continuous density fields [S1, unofficial].
+ 
+ ## How it works
+-The method operates on a uniform 3D voxel grid representing the scene's Axis-Aligned Bounding Box (AABB) [S1, unofficial]. It consists of four core functions: `VoxelDDA` for traversal, `SampleVoxelLighting` for data retrieval, `ApplyVoxelRT` for GI, and `VoxelReflectionFallback` for specular reflections [S1, unofficial].
++The method extends the parent [Regular Grid Traversal](5939-regular-grid-traversal.md) by integrating specific lighting lookups and hemisphere sampling for GI, and a single-pass specular trace for reflections.
+ 
+ ### Inputs and Outputs
+-*   **Inputs**:
+-    *   `ray_origin`: World-space ray origin in feet-relative coordinates consistent with existing camera systems [S1, unofficial].
+-    *   `ray_direction`: Normalized world-space ray direction.
+-    *   `voxel_grid`: A 128³ block-occupancy grid stored in `imgVoxelMask`, populated each frame in the shadow pass [S1, unofficial].
+-    *   `lpv_data`: Light Propagation Volumes texture storing propagated light information [S1, unofficial].
+-    *   `sky_color`: Sky contribution colour [S1, unofficial].
+-    *   `VOXEL_GI_SAMPLES`: Number of hemisphere rays for GI sampling (default 4) [S1, unofficial].
+-    *   `VOXEL_GI_STEPS`: Configurable maximum steps for GI traversal [S1, unofficial].
+-    *   `VOXEL_REFL_STEPS`: Configurable maximum steps for reflection traversal [S1, unofficial].
+-*   **Outputs**:
+-    *   `indirect_color`: Blended indirect lighting colour for GI [S1, unofficial].
+-    *   `reflection_color`: Specular reflection colour for fallback [S1, unofficial].
++*   **Inputs:**
++    *   Ray origin $o$ and direction $d$ (normalized).
++    *   Voxel grid resolution: $128^3$ blocks [S1, unofficial].
++    *   Grid bounds: $[p_1, p_2]$ (feet-relative world-space coordinates) [S1, unofficial].
++    *   LPV (Light Propagation Volumes) texture/buffer containing indirect color data [S1, unofficial].
++    *   Sky color contribution.
++*   **Outputs:**
++    *   Indirect lighting color (for GI).
++    *   Reflected color (for specular fallback).
++    *   Hit position (face-center) and surface normal (axis-aligned) [S1, unofficial].
+ 
+ ### Data Structures
+-*   **Voxel Grid**: A 128³ grid of occupancy masks stored in `imgVoxelMask` [S1, unofficial]. Each cell indicates whether a block exists at that location [S1, unofficial].
+-*   **LPV Data**: Texture storing propagated light information [S1, unofficial]. Accessed at feet-relative world-space coordinates [S1, unofficial].
++*   **Voxel Grid (`imgVoxelMask`):** A $128 \times 128 \times 128$ block-occupancy grid stored in a shader image buffer [S1, unofficial]. Populated each frame in the shadow pass [S1, unofficial].
++*   **LPV Data:** Stored in a texture or image buffer, accessible via `GL_ARB_shader_image_load_store` [S1, unofficial].
++
++### Parameters
++*   `VOXEL_GI_SAMPLES`: Number of cosine-weighted hemisphere rays for GI sampling. Default: 4 [S1, unofficial].
++*   `VOXEL_GI_STEPS`: Maximum number of steps in voxel GI ray traversal [S1, unofficial].
++*   `VOXEL_REFL_STEPS`: Maximum number of steps in voxel reflection ray traversal [S1, unofficial].
++*   `VOXEL_RT_REFLECTIONS`: Feature flag to enable specular reflection fallback. Commented out by default [S1, unofficial].
++*   `VOXEL_GI`: Indirect effect mode identifier, value 6 [S1, unofficial].
+ 
+ ### Algorithm Steps
+-1.  **VoxelDDA Traversal**: Perform 3D-DDA traversal through the voxel grid [S1, unofficial]. Calculate distances to the next cell boundary along each axis ($t_x, t_y, t_z$) [S1, unofficial]. Advance the coordinate with the smallest distance [S1, unofficial]. Handle grid bounds and sign-safe boundary distances [S1, unofficial]. Include a ray bias to avoid self-intersection and handle near-parallel rays gracefully [S1, unofficial]. Return the face-centre position and the axis-aligned normal of the hit face [S1, unofficial]. Stop when the ray exits the grid bounds or reaches the step limit [S1, unofficial].
+-2.  **SampleVoxelLighting**: Given the hit face position from `VoxelDDA`, sample the LPV data [S1, unofficial]. Offset the sampling coordinate by half a block in front of the hit face to obtain the indirect colour at the surface from propagated light [S1, unofficial].
+-3.  **ApplyVoxelRT (GI)**: Trace `VOXEL_GI_SAMPLES` (default 4) cosine-weighted hemisphere rays from the surface point [S1, unofficial]. For each ray, call `VoxelDDA` to find a hit [S1, unofficial]. If a hit is found, call `SampleVoxelLighting` to get the LPV colour bounce [S1, unofficial]. Blend the sky contribution with the LPV colour bounce at hit surfaces [S1, unofficial]. Return the accumulated indirect colour [S1, unofficial].
+-4.  **VoxelReflectionFallback (Specular)**: Activated only when screen-space reflection misses (indicated by `environmentReflection.a < 1`) [S1, unofficial]. Perform a single specular DDA ray trace using `VoxelDDA` with `VOXEL_REFL_STEPS` [S1, unofficial]. If a hit is found, sample the voxel colour using `SampleVoxelLighting` [S1, unofficial]. Scale the voxel lighting to match typical sky-reflection brightness ranges to avoid visual mismatch [S1, unofficial]. Return the scaled colour [S1, unofficial].
++
++1.  **VoxelDDA (Traversal):** Perform 3D DDA traversal over the $128^3$ grid.
++    *   Handle grid bounds and sign-safe boundary distances [S1, unofficial].
++    *   Apply **Ray Bias**: Add a small epsilon to the ray origin along the direction vector to avoid self-intersection and handle near-parallel rays gracefully [S1, unofficial].
++    *   Return the hit face-center position and the axis-aligned normal of the face entered [S1, unofficial].
++
++2.  **SampleVoxelLighting (GI Lookup):**
++    *   At the hit position from `VoxelDDA`, sample the LPV data.
++    *   Offset the sample location by half a block in front of the hit face (along the normal) to obtain the indirect color from propagated light [S1, unofficial].
++
++3.  **ApplyVoxelRT (GI Integration):**
++    *   Trace `VOXEL_GI_SAMPLES` cosine-weighted hemisphere rays around the surface normal [S1, unofficial].
++    *   For each ray, use `VoxelDDA` to find intersections.
++    *   If a hit occurs, retrieve color via `SampleVoxelLighting`.
++    *   Blend the sky contribution with the LPV color bounce at hit surfaces [S1, unofficial].
++
++4.  **VoxelReflectionFallback (Specular):**
++    *   Activated only when screen-space reflection misses (indicated by `environmentReflection.a < 1`) [S1, unofficial].
++    *   Perform a single specular DDA ray trace using `VoxelDDA`.
++    *   Scale the resulting voxel lighting to match typical sky-reflection brightness ranges to avoid visual mismatch [S1, unofficial].
++    *   Fill in the LPV-sampled voxel color if the trace succeeds [S1, unofficial].
+ 
+ ### Pseudocode
++
+ ```python
+-import math
+-import random
+-
+-def normalize(v):
+-    l = math.sqrt(sum(x*x for x in v))
+-    return [x/l for x in v] if l > 0 else [0.0, 0.0, 0.0]
+-
+-def cross(a, b):
+-    return [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]]
+-
+-def texture(tex, coords):
+-    return [0.0, 0.0, 0.0] # [G] Standard 3D texture fetch
+-
+-def VoxelDDA(ray_origin, ray_direction, voxel_size, grid_size, max_steps, is_occupied):
++def voxel_dda(ray_origin, ray_direction, grid_min, grid_max, grid_res, ray_bias_epsilon):
+     """
+-    Perform 3D-DDA traversal over the voxel grid.
+-    Returns (hit_position, hit_normal) or None if no hit.
++    Perform 3-D DDA traversal over the voxel grid.
++    Returns: (hit_position, hit_normal) or None if no hit.
+     """
+-    current_cell = [math.floor(ray_origin[i] / voxel_size) for i in range(3)]
++    # Apply ray bias to avoid self-intersection [S1, unofficial]
++    biased_origin = ray_origin + ray_direction * ray_bias_epsilon
+     
+-    step = [0, 0, 0]
+-    t_delta = [0.0, 0.0, 0.0]
+-    t_max = [0.0, 0.0, 0.0]
+-    INF = float('inf')
++    # Initialize traversal using parent Regular Grid Traversal logic
++    # (See 5939-regular-grid-traversal.md for tMax, tDelta, step initialization)
++    X, Y, Z, tMaxX, tMaxY, tMaxZ, tDeltaX, tDeltaY, tDeltaZ, stepX, stepY, stepZ = \
++        init_regular_grid_traversal(biased_origin, ray_direction, grid_min, grid_max, grid_res)
+     
+-    for i in range(3):
+-        if ray_direction[i] > 0:
+-            step[i] = 1
+-            t_max[i] = ((current_cell[i] + 1) * voxel_size - ray_origin[i]) / ray_direction[i]
+-            t_delta[i] = voxel_size / ray_direction[i]
+-        elif ray_direction[i] < 0:
+-            step[i] = -1
+-            t_max[i] = (current_cell[i] * voxel_size - ray_origin[i]) / ray_direction[i]
+-            t_delta[i] = voxel_size / abs(ray_direction[i])
+-        else:
+-            step[i] = 0
+-            t_max[i] = INF
+-            t_delta[i] = INF
+-            
+-    epsilon = 1e-4
+-    t_max[0] += epsilon
+-    t_max[1] += epsilon
+-    t_max[2] += epsilon
++    max_steps = 128 * 3  # Approximate max steps for 128^3 grid diagonal [G]
++    steps = 0
+     
+-    for _ in range(max_steps):
+-        if not (0 <= current_cell[0] < grid_size and
+-                0 <= current_cell[1] < grid_size and
+-                0 <= current_cell[2] < grid_size):
++    while 0 <= X < grid_res.x and 0 <= Y < grid_res.y and 0 <= Z < grid_res.z:
++        steps += 1
++        if steps > max_steps:
+             return None
+             
+-        if is_occupied(current_cell):
+-            t_hit = min(t_max[0], t_max[1], t_max[2])
+-            hit_pos = [ray_origin[i] + ray_direction[i] * t_hit for i in range(3)]
++        # Check occupancy in imgVoxelMask [S1, unofficial]
++        if is_voxel_occupied(X, Y, Z):
++            # Calculate face-center position and normal based on which boundary was crossed
++            # This requires tracking which tMax triggered the step
++            hit_pos, hit_normal = calculate_face_hit(biased_origin, ray_direction, X, Y, Z, 
++                                                     tMaxX, tMaxY, tMaxZ, stepX, stepY, stepZ)
++            return hit_pos, hit_normal
+             
+-            normal = [0.0, 0.0, 0.0]
+-            if t_max[0] <= t_max[1] and t_max[0] <= t_max[2]:
+-                normal[0] = step[0]
+-            elif t_max[1] <= t_max[0] and t_max[1] <= t_max[2]:
+-                normal[1] = step[1]
++        # Advance to next cell
++        if tMaxX < tMaxY:
++            if tMaxX < tMaxZ:
++                X += stepX
++                tMaxX += tDeltaX
+             else:
+-                normal[2] = step[2]
+-                
+-            return (hit_pos, normal)
+-            
+-        if t_max[0] <= t_max[1]:
+-            if t_max[0] <= t_max[2]:
+-                current_cell[0] += step[0]
+-                t_max[0] += t_delta[0]
++                Z += stepZ
++                tMaxZ += tDeltaZ
++        else:
++            if tMaxY < tMaxZ:
++                Y += stepY
++                tMaxY += tDeltaY
+             else:
+-                current_cell[2] += step[2]
+-                t_max[2] += t_delta[2]
+-        else:
+-            if t_max[1] <= t_max[2]:
+-                current_cell[1] += step[1]
+-                t_max[1] += t_delta[1]
+-            else:
+-                current_cell[2] += step[2]
+-                t_max[2] += t_delta[2]
++                Z += stepZ
++                tMaxZ += tDeltaZ
+                 
+     return None
+ 
+-def SampleVoxelLighting(hit_position, hit_normal, lpv_data, voxel_size):
++def sample_voxel_lighting(hit_position, hit_normal, lpv_buffer):
+     """
+     Read LPV data half a block in front of the hit face.
+     """
+-    sample_pos = [hit_position[i] + hit_normal[i] * (voxel_size * 0.5) for i in range(3)]
+-    return texture(lpv_data, sample_pos)
++    # Offset by half block size in the direction of the normal
++    block_size = (grid_max - grid_min) / grid_res
++    sample_pos = hit_position + hit_normal * (block_size / 2.0)
++    
++    # Sample LPV buffer at sample_pos [S1, unofficial]
++    indirect_color = texture_lpv(lpv_buffer, sample_pos)
++    return indirect_color
+ 
+-def cosine_weighted_hemisphere_sample(surface_normal):
++def apply_voxel_rt(surface_normal, sky_color, lpv_buffer):
+     """
+-    Generate a cosine-weighted hemisphere ray direction [G].
++    Drop-in replacement for ApplySSRT().
++    Traces VOXEL_GI_SAMPLES cosine-weighted hemisphere rays.
+     """
+-    u = random.random()
+-    v = random.random()
+-    phi = 2.0 * math.pi * u
+-    cos_theta = math.sqrt(v)
+-    sin_theta = math.sqrt(1.0 - v)
++    num_samples = VOXEL_GI_SAMPLES # Default 4 [S1, unofficial]
++    total_indirect = vec3(0.0)
+     
+-    if abs(surface_normal[0]) > 0.9:
+-        up = [0.0, 1.0, 0.0]
+-    else:
+-        up = [1.0, 0.0, 0.0]
++    for i in range(num_samples):
++        # Generate cosine-weighted hemisphere ray
++        ray_dir = cosine_weighted_hemisphere_sample(surface_normal)
+         
+-    tangent = normalize(cross(surface_normal, up))
+-    bitangent = cross(surface_normal, tangent)
++        # Trace ray
++        hit_pos, hit_normal = voxel_dda(surface_position, ray_dir, grid_min, grid_max, 
++                                        grid_res, ray_bias_epsilon)
++        
++        if hit_pos is not None:
++            # Get LPV color at hit
++            lpv_color = sample_voxel_lighting(hit_pos, hit_normal, lpv_buffer)
++            total_indirect += lpv_color
++        else:
++            # No hit: contribute sky color (sky occlusion) [S1, unofficial]
++            total_indirect += sky_color
++            
++    # Average samples
++    return total_indirect / num_samples
++
++def voxel_reflection_fallback(view_dir, normal, environment_reflection, lpv_buffer):
++    """
++    Single specular DDA ray trace.
++    Activated only when environment_reflection.a < 1 [S1, unofficial].
++    """
++    # Reflect view direction
++    reflect_dir = reflect(-view_dir, normal)
+     
+-    local_dir = [sin_theta * math.cos(phi), sin_theta * math.sin(phi), cos_theta]
+-    return [
+-        tangent[0]*local_dir[0] + bitangent[0]*local_dir[1] + surface_normal[0]*local_dir[2],
+-        tangent[1]*local_dir[0] + bitangent[1]*local_dir[1] + surface_normal[1]*local_dir[2],
+-        tangent[2]*local_dir[0] + bitangent[2]*local_dir[1] + surface_normal[2]*local_dir[2]
+-    ]
+-
+-def ApplyVoxelRT(surface_position, surface_normal, sky_color, lpv_data, voxel_size, grid_size, is_occupied, num_samples, max_steps):
+-    """
+-    Drop-in replacement for ApplySSRT.
+-    Traces hemisphere rays for GI.
+-    """
+-    total_indirect = [0.0, 0.0, 0.0]
++    # Trace single ray
++    hit_pos, hit_normal = voxel_dda(surface_position, reflect_dir, grid_min, grid_max, 
++                                    grid_res, ray_bias_epsilon)
+     
+-    for _ in range(num_samples):
+-        ray_dir = cosine_weighted_hemisphere_sample(surface_normal)
+-        hit = VoxelDDA(surface_position, ray_dir, voxel_size, grid_size, max_steps, is_occupied)
+-        
+-        if hit is not None:
+-            hit_pos, hit_normal = hit
+-            lpv_color = SampleVoxelLighting(hit_pos, hit_normal, lpv_data, voxel_size)
+-            total_indirect = [total_indirect[i] + lpv_color[i] for i in range(3)]
+-        else:
+-            total_indirect = [total_indirect[i] + sky_color[i] for i in range(3)]
+-            
+-    return [total_indirect[i] / num_samples for i in range(3)]
+-
+-def VoxelReflectionFallback(view_ray_origin, view_ray_direction, environment_reflection, lpv_data, voxel_size, grid_size, is_occupied, max_steps):
+-    """
+-    Specular reflection fallback when SSR misses.
+-    """
+-    if environment_reflection[3] >= 1.0:
+-        return environment_reflection[:3]
+-        
+-    hit = VoxelDDA(view_ray_origin, view_ray_direction, voxel_size, grid_size, max_steps, is_occupied)
+-    
+-    if hit is not None:
+-        hit_pos, hit_normal = hit
+-        voxel_color = SampleVoxelLighting(hit_pos, hit_normal, lpv_data, voxel_size)
+-        
+-        brightness_scale_factor = 1.5  # [G] Matches typical sky-reflection brightness ranges
+-        scaled_color = [voxel_color[i] * brightness_scale_factor for i in range(3)]
++    if hit_pos is not None:
++        lpv_color = sample_voxel_lighting(hit_pos, hit_normal, lpv_buffer)
++        # Scale voxel lighting to match typical sky-reflection brightness [S1, unofficial]
++        scaled_color = scale_to_sky_brightness(lpv_color)
+         return scaled_color
+     else:
+-        return environment_reflection[:3]
++        return environment_reflection # Fallback to existing env reflection if miss
+ ```
+ 
+-### Parameters
+-*   `VOXEL_GI_SAMPLES`: Number of cosine-weighted hemisphere rays for GI sampling. Default: 4 [S1, unofficial].
+-*   `VOXEL_GI_STEPS`: Configurable parameter for the number of steps in voxel GI ray traversal [S1, unofficial].
+-*   `VOXEL_REFL_STEPS`: Configurable parameter for the number of steps in voxel reflection ray traversal [S1, unofficial].
+-*   `VOXEL_RT_REFLECTIONS`: Feature flag to enable specular reflection fallback. Commented out by default [S1, unofficial].
+-*   `VOXEL_GI`: Indirect effect mode identifier, value 6, added to the `indirect_effect` enum [S1, unofficial].
+-
+ ### Edge Cases and Pitfalls
+-*   **Hardware Requirements**: Requires LPV (Light Propagation Volumes) and `GL_ARB_shader_image_load_store` support. Gracefully degrades to SSRT if these are not met [S1, unofficial].
+-*   **Precision Issues**: Division-by-zero or NaN sources in TAA resolve pass (e.g., `invTonemap()`) can produce black pixel artifacts, especially on hardware with aggressive FP16 FTZ behaviour (e.g., NVIDIA RTX 5000 series). Epsilon guards are required to prevent division by zero [S1, unofficial].
+-*   **Self-Intersection**: Ray bias must be included in DDA traversal to avoid self-intersection and handle near-parallel rays gracefully [S1, unofficial].
+-*   **Visual Mismatch**: Reflection fallback must scale voxel lighting to match typical sky-reflection brightness ranges to avoid visual mismatch [S1, unofficial].
++*   **Hardware Support:** Requires LPV and `GL_ARB_shader_image_load_store` support. Gracefully degrades to SSRT if these are not met [S1, unofficial].
++*   **Precision Artifacts:** Division-by-zero or NaN sources in related passes (e.g., TAA resolve) can produce black pixel artifacts, especially on hardware with aggressive FP16 FTZ behavior (e.g., NVIDIA RTX 5000 series) [S1, unofficial]. Epsilon guards are required in tonemapping and blending calculations [S1, unofficial].
++*   **Self-Intersection:** Near-parallel rays or origins inside voxels require ray bias to prevent immediate re-intersection [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Not given in the sources [S1, unofficial].
+-*   **Memory Complexity**: Not given in the sources [S1, unofficial].
+-*   **Performance**: Depends on grid resolution (128³) and step limits. The method is efficient as it avoids complex scene traversal, relying on the uniform grid structure [S1, unofficial].
+-*   **Strengths**: Provides scene-wide GI and reflections independent of camera position or screen-space coverage. Drop-in replacement for SSRT [S1, unofficial].
+-*   **Limitations**: Requires LPV and specific OpenGL extensions. Lower resolution than path tracing. Artifacts may occur if LPV data is not properly propagated [S1, unofficial].
+-*   **When to Use**: When screen-space methods (SSRT/SSR) fail due to occlusion or incomplete coverage, and LPV is available [S1, unofficial].
+-*   **When Not to Use**: When hardware does not support required extensions or LPV is not enabled [S1, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of steps in the DDA traversal. For GI, complexity is $O(S \cdot N)$ where $S$ is `VOXEL_GI_SAMPLES` (default 4) [S1, unofficial].
++*   **Memory Complexity:** $O(V)$ for the voxel grid, where $V = 128^3$ blocks [S1, unofficial]. No additional buffers are needed beyond the existing LPV and mask textures [S1, unofficial].
++*   **Strengths:** Provides global illumination and reflections in scenes where screen-space methods fail (e.g., off-screen objects, low coverage) [S1, unofficial]. Drop-in replacement for SSRT [S1, unofficial].
++*   **Limitations:** Relies on the quality of the LPV propagation. Blocky artifacts may appear at low resolutions. Requires specific hardware features (`GL_ARB_shader_image_load_store`) [S1, unofficial].
++*   **When to Use:** When screen-space GI/Reflections are insufficient or unavailable, and LPV is already in use.
++*   **When Not to Use:** On hardware lacking required GL extensions, or when high-fidelity, smooth reflections are required without the blocky nature of voxel data.
+ 
+ ## Background
+-The method was implemented by nyzxor as a pull request to the Eclipse-Shader (an edit of Chocapic13 V9 / Bliss) for Minecraft, integrated via Iris [S1, unofficial]. It was merged into the Unstable branch on May 22, 2026 [S1, unofficial]. The implementation builds on the principles of 3D-DDA traversal shared by the Regular Grid Traversal family [4091-voxel-based-ray-tracing-for-gi-and-specular-reflections, 4240-optimised-voxel-ray-marching] and links to [Regular Grid Traversal](5939-regular-grid-traversal.md) [S1, unofficial].
++This method was implemented by nyzxor as a pull request to the Eclipse-Shader (an edit of Chocapic13 V9 / Bliss) for Minecraft, integrated via the Iris shader mod [S1, unofficial]. It was added to provide an alternative global illumination method and a fallback for specular reflections [S1, unofficial]. The implementation utilizes the existing 128³ block-occupancy voxel grid (`imgVoxelMask`) populated in the shadow pass, requiring no new buffers or passes [S1, unofficial].
+ 
+ ## Sources

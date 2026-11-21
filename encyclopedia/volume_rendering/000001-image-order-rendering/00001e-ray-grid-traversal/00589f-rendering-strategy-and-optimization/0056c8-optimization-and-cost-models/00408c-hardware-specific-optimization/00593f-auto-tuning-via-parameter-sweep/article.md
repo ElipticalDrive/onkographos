@@ -1,0 +1,181 @@
+# Auto-tuning via Parameter Sweep
+
+Also called: Parameter Sweep, Performance Sweep
+
+## Overview
+Auto-tuning via parameter sweep is a method for determining optimal execution parameters for volume rendering kernels by empirically measuring performance across a defined set of tunable values, rather than relying on code generation or complex search heuristics [S2, unofficial]. It solves the problem of hardware-specific performance variability by identifying the parameter combination that yields the best runtime for a given architecture and workload [S1][S2, unofficial]. Unlike [GPU CSG Ray Tracing with Uniform Grid Index](4098-gpu-csg-ray-tracing-with-uniform-grid-index.md) which focuses on geometric traversal logic, or [UltraVis Cache Optimization](10355-ultravis-cache-optimization.md) which focuses on memory layout, this method treats the kernel as a black box to find the best configuration of block sizes, concurrency, and memory layouts [S2, unofficial].
+
+## How it works
+**Inputs:**
+*   Target hardware platform (CPU or GPU).
+*   Tunable parameter space (e.g., tile sizes, thread block dimensions, concurrency levels, memory layouts, early ray termination flags).
+*   Representative test workloads (e.g., specific views, data sets).
+
+**Outputs:**
+*   A mapping of parameter combinations to measured execution times.
+*   The optimal parameter set for the specific hardware and workload.
+
+**Data Structures:**
+The method does not define a specific internal data structure for the sweep itself, but relies on the underlying rendering structures defined in [Ray-grid traversal](17-ray-grid-traversal.md). The sweep iterates over a Cartesian product of parameter sets.
+
+**Steps:**
+1.  **Define Parameter Space:** Identify the tunable parameters relevant to the target hardware. For CPU tests, this includes image tile sizes (width and height) [S2, unofficial]. For GPU tests, this includes thread block sizes [S2, unofficial].
+2.  **Generate Test Configurations:** Create a list of all parameter combinations to evaluate.
+    *   For CPU: Iterate over tile sizes where width and height vary over $\{1, 2, 4, 8, 16, 32, 64, 128\}$ [S2, unofficial].
+    *   For GPU: Iterate over thread block sizes where width and height vary over $\{1, 2, 4, 8, 16\}$, excluding invalid configurations such as $1\times1$, $1\times2$, and $2\times1$ blocks [S2, unofficial].
+3.  **Execute Benchmarks:** For each configuration, run the rendering kernel on the test workloads.
+    *   Vary concurrency levels (e.g., 1-way to 8-way on CPU, fixed on GPU) [S2, unofficial].
+    *   Vary memory layouts (e.g., Array-order vs. Z-order) [S2, unofficial].
+    *   Vary algorithmic flags (e.g., with/without Early Ray Termination (ERT)) [S2, unofficial].
+4.  **Measure Performance:** Record the execution time for each run.
+    *   On CPU, use standard timing utilities such as `gettimeofday()` [S1].
+    *   Average results over multiple views to reduce variance [S2, unofficial].
+5.  **Analyze Results:** Compare the measured times to identify the configuration with the minimum execution time.
+
+**Formulas:**
+While the sweep itself is empirical, the resulting optimal parameters may be used in cost models. For example, in the context of the source data, cost parameters are derived via linear least squares analysis of the timing data [S1]:
+
+$$ C_{Ru} = 8.75 \times 10^{-7} N + (6.50 \times 10^{-5} + 4.31 \times 10^{-12} N) N_R $$
+
+$$ C_{Rm} = 3.21 \times 10^{-5} N + (0.87 \times 10^{-5} + 2.5 \times 10^{-10} N) N_R $$
+
+Where:
+*   $N$ is the problem size (grid dimension).
+*   $N_R$ is the number of reduced grid points.
+*   $C_{Ru}$ is the cost per element for uniform subsampling data reduction.
+*   $C_{Rm}$ is the cost per element for multiresolution subsampling data reduction.
+
+**Parameters and Typical Values:**
+*   **CPU Tile Sizes:** Width and height from $\{1, 2, 4, 8, 16, 32, 64, 128\}$ [S2, unofficial].
+*   **GPU Thread Block Sizes:** Width and height from $\{1, 2, 4, 8, 16\}$ [S2, unofficial].
+*   **GPU Minimum Threads:** Blocks must have at least 4 threads to saturate warp throughput on NVIDIA/Fermi architectures; blocks with fewer than 4 threads are excluded [S2, unofficial].
+*   **Concurrency Levels:** Tested at 1, 2, 4, and 8-way concurrency for CPU; fixed concurrency for GPU [S2, unofficial].
+
+**Pitfalls:**
+*   **Warp Saturation:** On GPUs like NVIDIA/Fermi, using thread blocks with fewer than four threads fails to saturate the computational throughput of a warp, leading to suboptimal performance measurements if not excluded [S2, unofficial].
+*   **Overhead Dominance:** For very small tile sizes (e.g., $1\times1$), thread creation and synchronization overhead may dominate computation, skewing results for large-scale parallel systems [S2, unofficial].
+*   **Measurement Noise:** Timing must be averaged over multiple views and runs to account for system noise and cache effects [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def auto_tune_parameter_sweep(platform, parameter_space, workloads):
+    """
+    Performs a parameter sweep to find optimal rendering parameters.
+    
+    Args:
+        platform: 'CPU' or 'GPU'
+        parameter_space: Dictionary of parameter names and their candidate values.
+                         Example: {'tile_size': [1, 2, 4, 8, 16, 32, 64, 128], 
+                                   'memory_layout': ['array', 'z_order'],
+                                   'ert': [True, False]}
+        workloads: List of test views/data sets.
+        
+    Returns:
+        best_config: The parameter combination with the lowest average runtime.
+        results: Dictionary mapping config to average runtime.
+    """
+    results = {}
+    
+    # Generate all combinations of parameters
+    configs = generate_combinations(parameter_space)
+    
+    for config in configs:
+        # Apply GPU-specific constraints
+        if platform == 'GPU':
+            if not is_valid_gpu_block(config['block_size']):
+                continue
+        
+        # Apply CPU-specific constraints (if any)
+        if platform == 'CPU':
+            if not is_valid_cpu_tile(config['tile_size']):
+                continue
+
+        total_time = 0.0
+        count = 0
+        
+        for workload in workloads:
+            # Set up the rendering kernel with the current configuration
+            setup_kernel(config)
+            
+            # Measure execution time
+            # Note: Use platform-specific high-resolution timer
+            start_time = get_timestamp()
+            render(workload)
+            end_time = get_timestamp()
+            
+            elapsed = end_time - start_time
+            total_time += elapsed
+            count += 1
+            
+        avg_time = total_time / count
+        results[tuple(sorted(config.items()))] = avg_time
+        
+    # Find the configuration with the minimum average time
+    best_config = min(results, key=results.get)
+    return best_config, results
+
+def is_valid_gpu_block(block_size):
+    """
+    Checks if a GPU thread block size is valid.
+    Excludes blocks with fewer than 4 threads on NVIDIA/Fermi.
+    Excludes 1x1, 1x2, and 2x1 blocks.
+    """
+    width, height = block_size
+    total_threads = width * height
+    
+    # Exclude specific invalid shapes
+    if (width == 1 and height == 1):
+        return False
+    if (width == 1 and height == 2):
+        return False
+    if (width == 2 and height == 1):
+        return False
+        
+    # Exclude blocks with fewer than 4 threads
+    if total_threads < 4:
+        return False
+        
+    return True
+
+def get_timestamp():
+    """
+    Returns the current time in seconds.
+    Uses platform-specific implementation (e.g., gettimeofday for CPU).
+    """
+    import time
+    return time.time()
+```
+
+## Subtopics
+
+### Cost Model Calibration
+Using sweep results to derive linear regression coefficients for performance models (e.g., $C_{Ru}$, $C_{Rm}$) [S1].
+
+### Concurrency Tuning
+Evaluating the impact of thread count and work assignment strategies (dynamic vs. static) on CPU performance [S2, unofficial].
+
+### Memory Layout Optimization
+Comparing Array-order vs. Z-order memory layouts to determine cache efficiency for specific tile sizes [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The sweep time is proportional to the product of the number of parameter combinations and the number of test workloads. For example, the CPU test battery on AMD/MagnyCours involved 5120 tests (10 views $\times$ 64 block sizes $\times$ 2 memory layouts $\times$ 2 concurrency levels $\times$ 2 ERT states) [S2, unofficial]. The Intel/Nehalem tests involved 7680 tests plus an additional 7680 for concurrency variation [S2, unofficial]. GPU tests involved 880 tests over 22 block sizes, 2 memory layouts, and 2 ERT states [S2, unofficial].
+*   **Memory Complexity:** Low. The method primarily stores timing results and does not require significant additional memory beyond the rendering buffers themselves.
+*   **Strengths:**
+    *   Hardware-specific: Captures real-world performance including cache effects, branch prediction, and warp saturation [S2, unofficial].
+    *   Simple: Does not require complex code generation or heuristic search algorithms [S2, unofficial].
+    *   Comprehensive: Can evaluate multiple interacting parameters (tile size, concurrency, memory layout) simultaneously [S2, unofficial].
+*   **Limitations:**
+    *   Slow: Exhaustive search can be computationally expensive, especially with many parameters [S2, unofficial].
+    *   Workload-dependent: Optimal parameters may vary significantly between different data sets and views [S2, unofficial].
+    *   Static: Does not adapt to runtime changes in data distribution or scene complexity.
+*   **When to use:** When deploying to a specific, fixed hardware platform where performance is critical and the parameter space is manageable.
+*   **When not to use:** When targeting multiple heterogeneous architectures, or when the parameter space is too large for exhaustive search.
+
+## Background
+Auto-tuning via parameter sweep was employed in early parallel volume rendering research to optimize performance on multi-core CPUs and early GPUs. Key studies include experiments on the SGI Origin with 250 MHz R10000 chips [S1] and later tests on AMD/MagnyCours, Intel/Nehalem, and NVIDIA/Fermi architectures [S2, unofficial]. The method was used to determine cost parameters for performance models and to identify optimal tile sizes and memory layouts for raycasting kernels.
+
+## Sources
+[S1] Comparison of remote visualization strategies for interactive exploration of large data sets, https://digital.library.unt.edu/ark:/67531/metadc710831/?q=multiresolution volume rendering, fetched 2026-10-28
+[S2] Multi-core and Many-core Shared-memory Parallel Raycasting Volume Rendering Optimization and Tuning, https://digital.library.unt.edu/ark:/67531/metadc829701/?q=empty space skipping volume rendering, fetched 2026-10-28 (unofficial)

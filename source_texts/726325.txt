@@ -1,0 +1,536 @@
+Contribute to CyborgSquirrel/gsviawt development by creating an account on GitHub.
+
+Reproduce + port 3D Gaussian Splatting (fit_3dgs.py) by ClaudeMaxwell · Pull Request #44 · CyborgSquirrel/gsviawt · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ClaudeMaxwell
+commented
+Sep 28, 2026
+Copy link
+Copy Markdown
+Collaborator
+Summary
+Phase 1: got the original graphdeco-inria/gaussian-splatting repo running in Docker and reproduced its reported metrics on tandt/truck (PSNR 25.49 / SSIM 0.885 vs. the paper's 25.19 / 0.879).
+Phase 2: ported the reference algorithm onto this repo's own shape (Hydra + Lightning + wandb + shared module.py callbacks, matching fit_gsplat.py), using gsplat.rasterization + gsplat.strategy.DefaultStrategy for rendering/densification instead of diff-gaussian-rasterization. This is a faithful port, not a from-scratch reimplementation: free xyz, real growing/shrinking densification, SH degree ramp, opacity reset — everything the earlier abandoned fit_3dgs.py prototype skipped.
+Vendors gaussian-splatting/ (COLMAP parsing, camera math) and a patched gsplat-src/ (v1.5.3 + the upstream fix for a real operator-precedence bug in DefaultStrategy's opacity-reset scheduling — step % reset_every == 0 & step > 0 silently never fires due to Python operator precedence).
+fit_3dgs.py validated against both the vendored reference and the Phase 1 repro on truck: PSNR 25.75 / SSIM 0.890 / LPIPS 0.172 (1.98M Gaussians) — in line with both.
+Extended with load_scene_h5(), a drop-in alternative scene loader for our own render_objaverse.py h5 captures (no COLMAP data) instead of a real capture — same (pcd, scene_extent, train_cams, test_cams) shape downstream, so the rest of the training loop doesn't care which loader ran. Verified on the 50-view and 250-view porsche renders (PSNR 33.6 / 36.6 on held-out views), including a world-space Chamfer-distance check of the fitted geometry against the depth-peel-unprojected ground truth point cloud (not just the photometric loss).
+Test plan
+Phase 1 repro matches the paper's reported truck metrics
+fit_3dgs.py on truck matches both the Phase 1 repro and the paper within normal implementation variance
+fit_3dgs.py h5 path (load_scene_h5) runs cleanly end-to-end on the 50-view and 250-view porsche datasets, full 30k iterations, no crashes
+Camera convention sanity-checked by projecting the world origin through a train view and confirming it lands at image center at the expected depth
+Chamfer distance between fitted Gaussian means and depth-unprojected GT point cloud computed for both porsche runs, confirming geometric (not just photometric) accuracy
+CyborgSquirrel
+and others
+added 3 commits
+September 23, 2026 18:27
+gs_decoder.py: add zero-init option, sigmoid-bounded color, guard zer…
+…
+b2b8ed8
+```
+…o-norm rotation
+
+- zero_init_last_conv: zeroes the decoder's final 1x1 conv weight+bias
+  instead of the usual Xavier-uniform per-group init, for experimenting
+  with a "blank slate" starting point.
+- sh_dc now goes through (sigmoid(raw)-0.5)/SH_C0 instead of a fully
+  unconstrained raw value, so the rendered color evaluates to exactly
+  sigmoid(raw) -- bounded in (0,1), same pattern as opacity.
+- rotation gets a +1e-6 nudge before normalize, guarding the exact-zero
+  raw quaternion case (e.g. under zero_init_last_conv) that would
+  otherwise normalize to a still-zero, invalid unit quaternion.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+fit_gsplat.py: add random per-item background compositing, enable wan…
+…
+cee5279
+```
+…db by default
+
+random_bg: composites both the predicted render and the ground truth
+onto the same random per-item background color before the l1/dssim
+terms, train stage only -- never val, never get_preview_source's
+panel/orbit visualizations (they don't call render()/_photom_loss).
+
+Also flip conf/gsplat.yaml's wandb.mode default from disabled to
+online -- disabled was tripping up several things.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+train_gs.py: fixed-source training/val support, random bg compositing…
+…
+49df3b3
+```
+…, bugfixes
+
+New GSPairDataset options (gs_dataset.py):
+- source_views: restrict which catalog rows are eligible as a SOURCE view.
+- allow_source_as_target: let the source view land in its own target list.
+- target_views: restrict which views are eligible as a TARGET, so a
+  fixed-source train_ds can exclude a held-out validation set.
+- GSFixedSourceDataset: new dataset indexed by held-out TARGET view
+  instead of by source row -- fixes GSPairDataset's own row-indexed val
+  collapsing to 0/1 rows when there's only one eligible source view, which
+  meant no real per-epoch validation signal for single-fixed-source runs.
+  Wired into GSDataModule via new data.val_target_views/val_targets_per_item.
+
+loss.random_bg: same random per-item background compositing as
+fit_gsplat.py's new option, train stage only, never touching
+_preview_entry's panels/orbit videos (they don't call model_forward).
+
+Bugfixes found along the way:
+- cfg.loss.photom.for was invalid Python (`for` is a reserved keyword) --
+  switched to bracket access, cfg.loss.photom["for"].
+- _step's g() reshape hardcoded the full source+target view count instead
+  of the actual rendered-view count, breaking as soon as loss.photom.for
+  excludes a view type.
+- views_seen incremented by the full view count instead of the actual
+  rendered-view count.
+- model_forward's pred_alpha was accidentally assigned from pred_rgb
+  (dead until random_bg needed real alpha values).
+
+Also adds model.zero_init_last_conv wiring (gs_decoder.py's new option)
+and module.py's ScaleLayersCallback (per-depth-peel-layer scale heatmap,
+reading the new unflattened gauss_layers entry _preview_entry now
+includes alongside its flattened gauss).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+CyborgSquirrel
+reviewed
+Sep 28, 2026
+View reviewed changes
+Comment thread
+conf/fit_3dgs.yaml
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Vendor gsplat, port a faithful fit_3dgs.py (COLMAP + h5 scenes)
+…
+a6fbf10
+```
+Squashed history of three commits into one clean commit -- the first of
+those originally vendored the FULL Inria gaussian-splatting reference
+repo (107M) before a later commit trimmed it down to the ~6 pure-Python
+files actually used; squashing avoids permanently carrying that 102MB
+of now-deleted blobs in this branch's history.
+
+Ports the original graphdeco-inria/gaussian-splatting algorithm onto
+this repo's own shape (Hydra + Lightning + wandb + shared module.py
+callbacks, matching fit_gsplat.py), rendering with gsplat.rasterization
++ gsplat.strategy.DefaultStrategy instead of diff-gaussian-rasterization.
+A faithful port, not a from-scratch reimplementation: free `xyz`, real
+growing/shrinking densification, SH degree ramp, opacity reset.
+
+  - gsplat-src/: vendored at commit 6e8c837f (past the v1.5.3 PyPI
+    release, before main's unrelated namespace refactor) with the
+    upstream fix for a real operator-precedence bug in DefaultStrategy's
+    opacity-reset scheduling (`step % reset_every == 0 & step > 0` --
+    `&` binds tighter than `==`/`>`, so that condition never fires),
+    plus a one-line c++17->c++20 patch for our torch/CUDA version.
+  - gaussian-splatting/: trimmed to just dataset_readers.py/
+    colmap_loader.py (COLMAP parsing), graphics_utils.py/sh_utils.py/
+    general_utils.py (math utils), and lpipsPyTorch/ (final eval) --
+    not the full reference repo, no CUDA extensions built or vendored.
+    dataset_readers.py's `from scene.gaussian_model import
+    BasicPointCloud` patched to `from utils.graphics_utils import
+    BasicPointCloud` (where it's actually defined) to avoid dragging in
+    gaussian_model.py's `from simple_knn._C import distCUDA2` (a
+    compiled CUDA extension this repo doesn't build -- scale init uses
+    cKDTree instead).
+  - fit_3dgs.py: load_scene() (COLMAP) and load_scene_h5() (this repo's
+    own render_objaverse.py h5 captures, no COLMAP data) both return the
+    same (pcd, scene_extent, train_cams, test_cams) shape, so the rest
+    of the training loop doesn't care which loader ran.
+
+Validated: COLMAP path matches both the vendored reference and the
+paper's reported truck metrics (PSNR 25.75 / SSIM 0.890 vs. paper's
+25.19 / 0.879). h5 path validated on the 50-view and 250-view porsche
+renders (PSNR 33.6 / 36.6 on held-out views), including a world-space
+Chamfer-distance check of the fitted geometry against the depth-peel-
+unprojected ground truth point cloud, not just the photometric loss.
+Both scene loaders re-verified end-to-end against a freshly rebuilt
+image after the vendor trim.
+```
+CyborgSquirrel
+force-pushed
+the
+3dgs-paper-repro
+branch
+from
+6f29534 to
+a6fbf10
+Compare
+September 28, 2026 08:07
+CyborgSquirrel
+reviewed
+Sep 28, 2026
+View reviewed changes
+Comment thread
+fit_3dgs.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+CyborgSquirrel
+added 3 commits
+September 28, 2026 10:40
+fit_3dgs.py: resolution=auto (not -1), warnings.warn for the once-onl…
+…
+f8d2613
+```
+…y warning
+
+Addresses PR review comments:
+  - conf/fit_3dgs.yaml's resolution sentinel was the reference's own -1,
+    an unexplained magic number outside that context. Renamed to "auto"
+    (_resolution_for/_coerce_resolution updated to match; {1,2,4,8} keep
+    dividing directly).
+  - The hand-rolled WARN_RESOLUTION={"done": False} dict for "warn about
+    >1.6K images only once" is exactly what the stdlib warnings module
+    already does by default (each (message, category, module, lineno)
+    only prints once under the default filter) -- swapped the manual
+    bookkeeping for a plain warnings.warn() call.
+```
+fit_3dgs.py: add gaussian_layout=layered, fit_gsplat.py-shaped seeding
+…
+04827c7
+```
+New option (default stays "set", the existing free-xyz + densification
+behavior): gaussian_layout=layered seeds one Gaussian per depth-peel hit
+in the primary train view's 6-layer peel -- fit_gsplat.py's own seeding,
+reused verbatim via init_gaussians_layered() (which calls
+fit_gsplat.init_gaussians() directly rather than reimplementing the
+unprojection/KNN-scale/front-pixel-colour logic a third time) -- and
+disables densification/pruning entirely (self.strategy stays None,
+every call into it guarded), since growing/splitting/pruning would
+break the fixed 1:1 Gaussian<->(u,v,layer) correspondence layered mode
+exists to preserve.
+
+Only valid with hdf5_path (needs depth_peel/depth_intrinsics -- COLMAP
+scenes and depth-less h5s raise a clear SystemExit, checked before
+training starts).
+
+Color model stays full SH (sh0/shN, degree ramp) same as "set" mode --
+not fit_gsplat.py's flat sigmoid color -- so training itself is
+otherwise identical between the two layouts; the params stay a plain
+flat ParameterDict either way, gsplat/DefaultStrategy/render() never
+see anything shaped like a grid. "layered" only changes how the seed
+is built, that densify/prune never runs, and that one extra file gets
+written: save_output_layered() scatters the final flat params back
+into a fit_gsplat.py-schema (H, W, L, .) grid .h5 (gaussian_means/
+scales/quats/opacities/colors + layer_valid, colors DC-only baked down
+from sh0 since that schema has no SH slot), written alongside the
+usual flat .h5/.ply, so orbit_video.py and anything else built for
+fit_gsplat.py's own output can consume a layered run unmodified --
+verified directly (orbit_video.py rendered the grid .h5 with no
+changes needed).
+
+Verified end-to-end on the 50-view porsche h5: seeded exactly 14,880
+Gaussians from the primary view's depth peel, count stayed exactly
+14,880 through training (confirming densify/prune truly never ran),
+final eval and grid-.h5 write both succeeded.
+```
+fit_3dgs.py: layered mode keeps opacity reset, only kills grow/prune
+…
+0435392
+```
+Fix: gaussian_layout=layered previously skipped self.strategy entirely
+(set to None, every call site guarded), which also silently disabled
+DefaultStrategy's periodic opacity reset -- a separate mechanism inside
+step_post_backward, gated independently by reset_every rather than
+refine_start_iter/refine_every, and one that only mutates existing
+Gaussians' opacity in place (never adds/removes/reorders any), so it's
+perfectly compatible with the fixed layer stack layered mode needs.
+Only densify/prune actually needed to go.
+
+Now the SAME DefaultStrategy object and call sites run in both layout
+modes -- layered just pushes refine_start_iter past cfg.iters, so grow/
+prune's own "step > refine_start_iter" gate never trips for the whole
+run, while step_post_backward's opacity-reset block (and the per-step
+grad2d/count bookkeeping) keep running exactly as they would in "set"
+mode.
+
+Verified by spying on gsplat.strategy.default.reset_opa during a 25-iter
+layered run with opacity_reset_interval=10: fired twice (steps 10, 20)
+while the Gaussian count stayed exactly 14880 -> 14880 throughout.
+```
+CyborgSquirrel
+reviewed
+Sep 28, 2026
+View reviewed changes
+Comment thread
+fit_3dgs.py
+Outdated
+self.views_seen = 0
+self.final_loss = float("nan")
+self.step_count = 0
+self.layered = layered
+CyborgSquirrel
+Sep 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+don't make layered a bool, just keep the explicit string value
+it's already in cfg just grab it from there, don't pointlessly clutter the constructor with params
+ClaudeMaxwell
+Sep 28, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fair, that was clutter. Fixed in e1a7024 -- reads self.gaussian_layout = str(cfg.get("gaussian_layout", "set")) directly in init, kept as the string throughout, no ctor param.
+CyborgSquirrel
+reviewed
+Sep 28, 2026
+View reviewed changes
+Comment thread
+fit_3dgs.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+CyborgSquirrel
+and others
+added 8 commits
+September 28, 2026 11:11
+fit_3dgs.py: read gaussian_layout from cfg directly, not a ctor bool
+…
+e1a7024
+```
+Addresses PR review comment: Fit3DGSLightningModule already gets the
+full cfg -- no need for a separate layered=True/False constructor
+param when self.cfg.gaussian_layout is right there. Reads it once in
+__init__ (self.gaussian_layout = str(cfg.get("gaussian_layout",
+"set"))) and keeps the explicit "set"/"layered" string throughout
+(refine_start_iter's branch) instead of collapsing it to a bool.
+main()'s call site drops the now-redundant layered=(...) argument.
+```
+fit_3dgs.py: gaussian_layout has no Python-side default, cfg is the s…
+…
+183b230
+```
+…ource
+
+Addresses PR review comment: cfg.get("gaussian_layout", "set") let the
+key be silently absent from a config and fall back to "set" -- a
+second, Python-side default duplicating conf/fit_3dgs.yaml's own
+`gaussian_layout: set`. Plain cfg.gaussian_layout attribute access
+instead, in both places that read it (main(), Fit3DGSLightningModule.
+__init__) -- OmegaConf raises ConfigAttributeError if the key is
+actually missing, instead of silently picking a default.
+```
+module.py/fit_3dgs.py: fix PanelCallback/OrbitCallback never firing
+…
+333b129
+```
+Root cause: trainer.global_step, under MANUAL optimization, is driven
+entirely by hooks Lightning injects onto LightningOptimizer proxies'
+own .step() method (see lightning's manual.py _ManualOptimization
+on_run_start/_on_before_step/_on_after_step). fit_3dgs.py's
+training_step calls .step() directly on the raw torch.optim.Adam
+objects it built itself (deliberately -- gsplat's grow/prune/reset
+tensor surgery needs the real optimizers, and there are 6 separate
+ones, one per param group, which would inflate Lightning's per-.step()
+-call counter 6x if routed through the proxies anyway), so those hooks
+never fire and trainer.global_step silently stays 0 for the entire
+run -- confirmed directly by instrumenting a run and watching it sit
+at 0 across 10/10 training_step calls.
+
+Two places in this codebase read trainer.global_step and both broke
+silently as a result:
+  - module.py's PanelCallback/OrbitCallback/ScaleLayersCallback all gate
+    their "step" cadence on `n = trainer.global_step; if n == 0 or n %
+    every_n_steps != 0: return` -- with n stuck at 0, that first
+    condition is always true, so none of them EVER fired for a single
+    fit_3dgs.py run. Verified via the wandb API: every prior fit_3dgs.py
+    run (both COLMAP and h5, both "set" and "layered" layout) logged
+    zero panel/orbit media, only scalar metrics.
+  - fit_3dgs.py's own get_preview_source() used trainer.global_step as
+    its cache key -- even once the above were fixed, this would have
+    kept returning the exact same frame from the FIRST cache miss
+    forever (same key every call), instead of a fresh one each time
+    cadence fires.
+
+Fix: module._completed_steps(trainer, pl_module) -- trainer.global_step
+for a LightningModule using automatic optimization (fit_gsplat.py/
+train_gs.py, both unaffected, since Lightning drives their single
+optimizer's .step() itself), pl_module.step_count for one using manual
+optimization (fit_3dgs.py already tracks that, accurately, for its own
+should_stop/LR-schedule/SH-degree-ramp bookkeeping). All three
+module.py callbacks now read cadence through it; fit_3dgs.py's
+get_preview_source() cache key uses self.step_count directly.
+
+Verified: a 40-iter run with callbacks.panel.every_n_steps=10 and
+callbacks.orbit.every_n_steps=20 synced 12 media files this time (was
+always 0) -- 4 distinct panel PNGs (steps 0/2/5/7) and 2 distinct orbit
+MP4s each for train/val (steps 3/8), confirming both the cadence gate
+and the cache-key fix (different content each firing, not the same
+frame repeated).
+```
+fit_3dgs.py: opacity_reset_interval=null properly disables the reset
+…
+60391bc
+```
+Was: disabling periodic opacity reset meant a caller had to know to pass
+some CLI number bigger than iters (e.g. opacity_reset_interval=1000000)
+-- a magic sentinel with no meaning of its own, easy to get wrong (too
+small and it quietly still fires; tied to nothing if iters ever changes).
+
+gsplat.strategy.DefaultStrategy itself has no boolean "off" for this --
+checked directly against gsplat-src and its own examples, reset_every is
+always a plain int, gated only by `step % reset_every == 0 and step > 0`.
+So the sentinel can't be avoided at the library level, but it doesn't need
+to leak to the config surface: opacity_reset_interval=null now means
+exactly what it says, and __init__ does the int(cfg.iters) + 1 conversion
+itself, once, in one place, documented -- not something every caller has
+to reinvent.
+
+Verified by spying on gsplat.strategy.default.reset_opa: null -> 0 calls
+across 25 iterations, opacity_reset_interval=10 (unaffected default path)
+-> 2 calls as expected.
+```
+fit_3dgs.py: merge training_step/validation_step into one _step
+…
+4482bac
+```
+training_step and validation_step were two independent, hand-written
+copies of the same render+loss logic -- exactly the kind of duplication
+that silently drifts: validation_step never logged views_seen at all,
+not because that was a deliberate choice, just because nobody kept the
+copy in sync. fit_gsplat.py/train_gs.py already solved this with one
+_step(stage, batch, batch_idx) shared by both training_step and
+validation_step; this file gets the same shape.
+
+Everything that mutates optimizer/strategy state -- backward, the 6
+optimizers' .step(), gsplat's grow/prune/reset, the means-LR/SH-degree
+schedule, should_stop -- stays gated behind `if stage == "train":`
+inside the one _step, same as fit_gsplat.py gates its own train-only
+bits (random_bg, final_loss). views_seen is now logged on every call,
+both stages (bare "views_seen" key, no stage prefix, matching
+fit_gsplat.py exactly), but only incremented on train -- so a val entry
+holds the last train value instead of the metric having a gap.
+
+Verified: a 200-iter smoke run logged views_seen 225 times (200 train +
+25 val calls), val entries correctly holding the last train value
+instead of being skipped; loss/Gaussian-count trajectory identical to
+before the refactor on both the h5 (porsche) and COLMAP (truck) paths.
+```
+fit_3dgs.py: layered mode -- means = frozen original + optimizable of…
+…
+e345c0c
+```
+…fset
+
+Was: layered mode's means was one free tensor, initialized to the
+depth-peel-seeded position, indistinguishable afterward from set mode's
+fully-free xyz. Now: means_original (a buffer, requires_grad=False,
+never touched by any optimizer) holds the seeded position permanently;
+self.params["means"] is repurposed to hold an OFFSET from it instead
+(zero-initialized, so training starts exactly at the seed), still a
+real Parameter with its own Adam optimizer -- "original should be
+frozen, offset should be optimizable" means self.params["means"]'s key
+name doesn't change (gsplat.strategy.DefaultStrategy.check_sanity
+asserts "means" is present in both params and optimizers_dict), just
+what it represents does.
+
+Fit3DGSLightningModule._active_means() is the one place that resolves
+means_original + offset into the actual world-space position --
+render()/get_preview_source()/run_final_eval()/params_np() all go
+through it now instead of reading self.params["means"] directly as if
+it were always a position (params_np() specifically: the saved .h5/
+.ply/grid.h5 all still get real positions, not raw offsets, so no
+output-format changes needed).
+
+Added cfg.mean_offset_reg_weight (default 0.01, untuned): an L2 penalty
+on the offset itself (self.params["means"].pow(2).sum(-1).mean()),
+added to the train loss only, pulling Gaussians back toward their
+seeded origin instead of letting the offset drift unconstrained. No
+effect in "set" mode -- means has no offset split there at all,
+_active_means() just returns self.params["means"] unchanged.
+
+Verified: means_original.requires_grad is False, the offset's
+requires_grad is True and its magnitude actually grows away from zero
+during training; _active_means() == means_original + offset exactly;
+the saved .h5's "means" dataset is in real-position range (~[-0.5,
+0.5], matching the object's known unit-cube normalization), not the
+offset's much smaller range; higher mean_offset_reg_weight measurably
+shrinks the trained offset's magnitude (mean squared offset: 8.9e-5 at
+weight=0 vs 7.9e-5 at weight=1.0, same seed/steps); "set" mode
+regression-checked unchanged (identical Gaussian count/loss on truck).
+```
+fit_3dgs.py: separate photom_loss variable, logged on its own
+…
+ef0ab8a
+```
+_step now names the L1+D-SSIM combo photom_loss explicitly (was just
+"loss", immediately reused/overwritten once mean_offset_reg got folded
+in -- same variable meaning two different things at two points in the
+function) and logs it as its own metric (loss/photom), independent of
+whatever non-photometric terms end up folded into the full `loss` that
+actually gets optimized. Non-photometric terms fold into `loss`, never
+back into photom_loss.
+
+Also fixes a real mislabeling this surfaced: mean_offset_reg was being
+stuffed into `parts` and logged as "loss/photom_mean_offset_reg" by the
+photom-breakdown loop -- it's not a photometric term. It's now logged
+separately as loss/mean_offset_reg (train stage only, since that's the
+only stage it's ever computed).
+
+Verified via a log-call spy: layered mode now logs
+train|val/loss/photom (new) alongside the existing train|val/loss
+(total) and .../loss/photom_{l1,dssim} breakdown, with
+train/loss/mean_offset_reg present (train only, correctly NOT under
+"photom_"); "set" mode logs the same loss/photom key but never
+mean_offset_reg at all (it's layered-only, as intended).
+```
+delete fit_gsplat.py; move its runtime deps into module.py
+…
+bc9ccfb
+```
+fit_gsplat.py isn't used as a standalone entry point anymore, but four
+things it defined were still real runtime imports elsewhere: SH_C0,
+init_gaussians and _scatter_grid (fit_3dgs.py's layered mode) and
+make_viewmats (orbit_video.py, also SH_C0; gs_decoder.py, SH_C0 only).
+Moved all four (plus the private _logit helper init_gaussians needs)
+into module.py, next to the other camera-convention/shared-building-block
+code fit_3dgs.py/train_gs.py/orbit_video.py already pull from there.
+Updated the four import sites accordingly and deleted fit_gsplat.py and
+its own conf/gsplat.yaml.
+
+Verified: module.py, fit_3dgs.py, train_gs.py, gs_decoder.py and
+orbit_video.py all import cleanly in the container venv post-move.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+CyborgSquirrel
+merged commit 3d070cd
+into
+master
+Sep 28, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,153 @@
+# Differentiable Inverse Graphics Framework
+
+Also called: Analysis-by-synthesis with differentiable rendering, Differentiable Inverse Rendering for Joint Reconstruction, End-to-end differentiable inverse graphics, Inverse parameter optimization pipeline, Joint geometry and reflectance reconstruction
+
+## Overview
+The Differentiable Inverse Graphics Framework simultaneously reconstructs 3D geometry, diffuse/specular reflectance, and environment lighting from multi-view photography by minimizing photometric error in a differentiable rendering pipeline [S1, S2, unofficial]. It solves the inverse problem of inferring latent scene parameters from observed images by treating the renderer as a differentiable function that maps parameters to pixels, enabling gradient-based optimization [S2, unofficial]. Unlike sibling methods that may rely on fixed priors or specific rendering backends, this framework provides a general analysis-by-synthesis loop where the rendering equation is implemented in the forward pass and loss gradients are backpropagated to update geometry, materials, and lighting [S2, unofficial]. It sets itself apart by explicitly handling the joint optimization of geometry, BRDF parameters, and lighting sources using a physically-based Monte Carlo path tracer (Mitsuba2) with alternating parameter updates to manage memory constraints [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of RGB images $I = \{I_k\}$ from arbitrary viewpoints $k=1 \dots K$.
+*   **Output:** Optimized scene parameters $\theta = \{\theta_g, \theta_d, \theta_s, \theta_l\}$ representing geometry, diffuse reflectance, specular reflectance, and lighting.
+
+**Data Structures:**
+The scene is represented by a parametric vector $\theta$:
+*   $\theta_g$: Set of 3D positions corresponding to mesh vertices $\{x_0, \dots, x_N\}$.
+*   $\theta_d$: Set of diffuse per-vertex color reflectances $\{\theta_d(x_0), \dots, \theta_d(x_N)\}$, where $\theta_d(x) \in \mathbb{R}^3$.
+*   $\theta_s$: Set of specular reflectance parameters (e.g., roughness $\alpha$).
+*   $\theta_l$: Set of isotropic point sources for environment lighting $\{l_0, l_1, \dots, l_M\}$, where $l_n$ is the intensity of the $n$-th light source.
+
+**Formulas:**
+The image formation for a pixel at coordinate $u$ is:
+$$ I(u) = L(\boldsymbol{\omega}_o; x) \Delta t $$
+where $x \in \mathbb{R}^3$ is the 3D coordinate, $\boldsymbol{\omega}_o$ is the outgoing direction, and $\Delta t$ is the camera exposure time [S1, unofficial].
+
+The radiance $L_o$ from a non-emitting surface point $x$ is given by the rendering equation:
+$$ L_o(x, \boldsymbol{\omega}_o) = L_e(x, \boldsymbol{\omega}_o) + \int_{\Omega} f_r(x, \boldsymbol{\omega}_i, \boldsymbol{\omega}_o) L_i(x, \boldsymbol{\omega}_i) (\boldsymbol{n} \cdot \boldsymbol{\omega}_i) \, d\boldsymbol{\omega}_i $$
+where $L_e$ is emitted radiance, $f_r$ is the BRDF, $L_i$ is incoming radiance, $\boldsymbol{n}$ is the surface normal, and $\Omega$ is the hemisphere of incoming directions [S2, unofficial]. The environment lighting is approximated as a set of isotropic point sources, and ray tracing iterates up to a maximum bounce count $T$ [S1, unofficial].
+
+The optimization minimizes the objective function:
+$$ \mathcal{O} = \sum_{k=1}^K \| M_k I_k - \Phi_k(\theta_g, \theta_d, \theta_s, \theta_l) \|_2^2 $$
+where $\Phi_k$ is the differentiable renderer for view $k$, and $M_k$ is a binary mask [S1, unofficial]. The general loss formulation includes regularization:
+$$ \mathcal{L}(\theta) = \| I_{\text{obs}} - R(\theta) \|^2 + \lambda_{g}\, \text{GeomReg}(\theta) + \lambda_{m}\, \text{MatReg}(\theta) + \dots $$
+where $R(\theta)$ is the rendered image and $\lambda_g, \lambda_m$ are regularization weights [S2, unofficial].
+
+**Parameters:**
+*   $T$: Maximum number of ray bounces. Value: 3 [S1, unofficial].
+*   spp: Samples per pixel. Value: 1 for iterative optimization, 16 for final output [S1, unofficial].
+*   $\alpha$: Surface roughness parameter. Value: 0.1 [S1, unofficial].
+*   Optimizer: Adam [S1, S2, unofficial].
+*   Learning rates (example): $\lambda_d = 0.1, \lambda_g = 0.5, \lambda_s = 0.01, \lambda_l = 0.05$ [S1, unofficial].
+
+**Steps:**
+1.  **Initialization:** Initialize the virtual scene parameters roughly matching the real world using Structure-from-Motion (e.g., Colmap) to estimate initial geometry and camera poses [S1, unofficial].
+2.  **Masking:** Generate a precomputed binary mask $M_k$ for each view using segmentation (e.g., GrabCut) to remove background pixel contribution from the objective calculation [S1, unofficial].
+3.  **Alternating Optimization:** Iteratively update one parameter set $\theta \in \{\theta_d, \theta_g, \theta_s, \theta_l\}$ while keeping others unchanged to manage GPU memory [S1, unofficial].
+4.  **Forward Pass:** For the current parameter set, render the image $\hat{I} = \Phi(\theta)$ using a differentiable path tracer (e.g., Mitsuba2) [S1, unofficial].
+5.  **Loss Computation:** Compute the photometric error $\mathcal{L} = \| M_k I_k - \hat{I} \|_2^2$ [S1, unofficial].
+6.  **Backward Pass:** Compute gradients $\nabla_\theta \mathcal{L}$ via automatic differentiation through the renderer [S1, S2, unofficial].
+7.  **Update:** Update $\theta$ using the Adam optimizer [S1, unofficial].
+8.  **Repeat:** Steps 3-7 until convergence or maximum iterations (e.g., 400 iterations per viewpoint) [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def differentiable_inverse_graphics(images, masks, initial_geometry):
+    """
+    Reconstructs geometry, reflectance, and lighting from images.
+    images: List of RGB images I_k
+    masks: List of binary masks M_k
+    initial_geometry: Initial mesh vertices from Colmap
+    """
+    # Initialize parameters
+    theta_g = initial_geometry.vertices
+    theta_d = random_uniform_color(len(theta_g))
+    theta_s = {"roughness": 0.1}
+    theta_l = [0.5] * 10  # Initial light intensities
+    
+    optimizer = Adam([theta_g, theta_d, theta_s, theta_l], lr=0.01)
+    
+    # Hyperparameters
+    max_iterations = 400
+    max_bounces = 3
+    spp_opt = 1
+    
+    for iteration in range(max_iterations):
+        # Alternate optimization: update one parameter set at a time
+        # Update Geometry
+        optimizer.zero_grad()
+        rendered_img = render(theta_g, theta_d, theta_s, theta_l, spp=spp_opt, bounces=max_bounces)
+        loss = sum((mask * (img - rendered_img))**2 for img, mask in zip(images, masks))
+        loss.backward()
+        optimizer.step(theta_g)
+        
+        # Update Diffuse Reflectance
+        optimizer.zero_grad()
+        rendered_img = render(theta_g, theta_d, theta_s, theta_l, spp=spp_opt, bounces=max_bounces)
+        loss = sum((mask * (img - rendered_img))**2 for img, mask in zip(images, masks))
+        loss.backward()
+        optimizer.step(theta_d)
+        
+        # Update Specular Reflectance
+        optimizer.zero_grad()
+        rendered_img = render(theta_g, theta_d, theta_s, theta_l, spp=spp_opt, bounces=max_bounces)
+        loss = sum((mask * (img - rendered_img))**2 for img, mask in zip(images, masks))
+        loss.backward()
+        optimizer.step(theta_s)
+        
+        # Update Lighting
+        optimizer.zero_grad()
+        rendered_img = render(theta_g, theta_d, theta_s, theta_l, spp=spp_opt, bounces=max_bounces)
+        loss = sum((mask * (img - rendered_img))**2 for img, mask in zip(images, masks))
+        loss.backward()
+        optimizer.step(theta_l)
+        
+    return theta_g, theta_d, theta_s, theta_l
+
+def render(theta_g, theta_d, theta_s, theta_l, spp, bounces):
+    """
+    Differentiable rendering using Mitsuba2.
+    """
+    # Construct scene from parameters
+    scene = Scene(vertices=theta_g, diffuse=theta_d, specular=theta_s, lights=theta_l)
+    # Render with specified samples and bounces
+    image = scene.render(spp=spp, max_bounces=bounces)
+    return image
+```
+
+**Edge Cases and Pitfalls:**
+*   **Background Dominance:** Background pixels can dominate the objective value. Solution: Use precomputed binary masks $M_k$ from GrabCut segmentation [S1, unofficial].
+*   **GPU Memory:** Limited GPU memory prevents simultaneous optimization of all parameters. Solution: Alternate between updating each parameter set while keeping others unchanged [S1, unofficial].
+*   **Visibility Discontinuities:** Silhouette edges cause gradient issues. Handled by MC edge sampling, area-sampling, or thin-band relaxed indicators [S2, unofficial].
+*   **Precision:** Using spp=1 during optimization reduces variance but increases noise; spp=16 is used for final output [S1, unofficial].
+
+## Subtopics
+
+### [Differentiable Re-rendering Module](14687-differentiable-re-rendering-module.md)
+A raytracing-based differentiable renderer that uses a Volumetric Spherical Gaussian (VSG) lighting representation and predicted intrinsic properties (albedo, normals, depth) to re-render an input image, enforcing an energy-conserving image formation process. It provides supervision via re-rendering error, ensuring that predicted geometry and reflectance are physically correct by enforcing that the input image should be retrieved if the predictions are re-rendered. It sets itself apart from sibling methods by enabling the estimation of a complete continuous light field function, including HDR and high-frequency spatial and angular details, despite being trained with only LDR images.
+
+### [Physically Based Differentiable Rendering](14937-physically-based-differentiable-rendering.md)
+Physically Based Differentiable Rendering (PBDR) is a rendering approach that differentiates through physically based integrators, such as path tracing, to preserve derivatives of light transport operations. It solves the inverse rendering problem by enabling gradient-based optimization to estimate latent 3D scene parameters (geometry, materials, lighting) from observed images. Unlike rasterization-based differentiable renderers, PBDR preserves the physical accuracy of the rendering equation, allowing for the optimization of complex material properties and lighting conditions.
+
+### [Differentiable Uncalibrated Imaging Framework](15690-differentiable-uncalibrated-imaging-framework.md)
+The Differentiable Uncalibrated Imaging Framework addresses the problem of image reconstruction when the measurement coordinates (e.g., sensor locations, projection angles) are uncertain or the system is out of calibration. It formulates the problem as measurement interpolation at unknown nodes, supervised by the forward operator, by jointly optimizing a continuous measurement representation and the uncertain coordinates. Unlike methods that fine-tune a neural network for unknown coordinates or train on a family of operators, this framework reevaluates measurements via a continuous representation for a single example, avoiding the need for fine-tuning or handling distributional tradeoffs. It builds on [Differentiable Inverse Graphics Framework](7617-differentiable-inverse-graphics-framework.md) by introducing a specific mechanism for handling coordinate uncertainty through joint optimization of representation parameters and input coordinates.
+
+### Neural Programmatic Scene Code Pipeline
+A pipeline where an image is encoded into a discrete scene program (geometry, materials, arrangements) via an encoder and LLM/programmatic decoder, which is then rendered by any downstream renderer [S2, unofficial]. Training is performed purely on code or numeric losses, not image losses, allowing the discrete scene program to be optimized [S2, unofficial]. The pipeline flow is: $I \xrightarrow{\Phi} E \xrightarrow{f_\theta} (s_1, ..., s_N) \xrightarrow{h} S$, where $I$ is input image, $E$ is encoded representation, $f_\theta$ generates scene tokens/parameters $s_i$, and $h$ renders scene program $S$ [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** ~140ms per iteration [S1, unofficial]. Total iterations: 400 per viewpoint [S1, unofficial].
+*   **Memory Complexity:** High, due to GPU memory constraints of physically-based rendering. Mitigated by alternating parameter updates and downsampling images 8x [S1, unofficial].
+*   **Performance:** Physics-based MC approaches achieve low reconstruction errors (RE≈0.0087 vs Mitsuba's 0.0102) and normal MAE of 9.81° with sparse Gaussian basis [S2, unofficial]. Point-based splatting and hybrid methods achieve PSNR 38–43 dB and normal MAE ≈4–11° [S2, unofficial].
+*   **Strengths:** Enables photo-realistic novel view synthesis, environment light editing, and joint reconstruction of geometry and reflectance [S1, unofficial]. Handles complex geometry and various reflection types [S1, unofficial].
+*   **Limitations:** Computationally expensive. Limited to scenes that can be approximated by the parametric model (mesh + point lights). Sensitive to initialization [S1, unofficial].
+*   **When to use:** When high-fidelity reconstruction of geometry, materials, and lighting from multi-view images is required, and computational resources are available.
+*   **When not to use:** For real-time applications or when only geometry is needed without material/lighting details.
+
+## Background
+The Differentiable Inverse Graphics Framework originates from the work of Li et al. (2021), who proposed an efficient method to reconstruct scene 3D geometry and reflectance from multi-view photography using conventional hand-held cameras [S1, unofficial]. The method automatically builds a virtual scene in a differentiable rendering system (Mitsuba2) that roughly matches the real world's scene parameters, optimized by minimizing photometric objectives alternatingly and stochastically [S1, unofficial]. It builds on the principles of analysis-by-synthesis and differentiable rendering, extending them to joint optimization of geometry, BRDF, and lighting [S2, unofficial]. The framework has been implemented in Mitsuba2 differentiable renderer [S1, unofficial]. Initial geometry is typically obtained from Colmap [S1, unofficial].
+
+## Sources
+[S1] Shape and Reflectance Reconstruction in Uncontrolled Environments by Differentiable Rendering, https://doi.org/10.48550/arxiv.2110.12975, fetched 2026-10-26 (unofficial)
+[S2] Differentiable Inverse Graphics Framework, https://www.emergentmind.com/topics/end-to-end-differentiable-inverse-graphics-framework, fetched 2026-10-29 (unofficial)

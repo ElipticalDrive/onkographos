@@ -1,0 +1,896 @@
+# Greedy-Voxel-Meshing
+A simple C# implementation of the greedy meshing algorithm for voxel terrain generation, using a 3D array of block locations
+
+### Assets/Editor/WorldEditor.cs
+```
+using UnityEditor;
+using UnityEngine;
+
+[CustomEditor(typeof(World))]
+public class WorldEditor : Editor
+{
+    public override void OnInspectorGUI()
+    {
+        DrawDefaultInspector();
+
+        var world = (World)target;
+
+        if (GUILayout.Button("Generate"))
+        {
+            var chunk = new Chunk(world.ChunkSize, Vector3Int.zero, world.NoiseSettings);
+            var meshData = chunk.GetGreedyMesh();
+
+            SpawnChunk(meshData, chunk);
+        }
+    }
+
+    void SpawnChunk(MeshData meshData, Chunk chunk)
+    {
+        var obj = new GameObject(chunk.Pos.ToString());
+        obj.transform.position = chunk.Pos;
+
+        obj.AddComponent<MeshFilter>().sharedMesh = meshData.ToMesh();
+        obj.AddComponent<MeshRenderer>();
+        obj.AddComponent<MeshCollider>();
+
+        Debug.Log(chunk.GenerationTime);
+    }
+}
+```
+
+### Assets/Player Scripts/MouseLook.cs
+```
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class MouseLook : MonoBehaviour
+{
+    [Header("Player")]
+    public Transform Player;
+    public Vector3 CamOffset;
+
+    [Header("Camera")]
+    public float Sensitivity;
+    public float ClampAngle;
+
+    float rotY; // rotation around the up/y axis
+    float rotX; // rotation around the right/x axis
+
+    void Start()
+    {
+        Vector3 rot = transform.localRotation.eulerAngles;
+        rotY = rot.y;
+        rotX = rot.x;
+
+        Cursor.visible = false;
+        Cursor.lockState = CursorLockMode.Locked;
+    }
+
+    void Update()
+    {
+        Look();
+        RotatePlayer();
+    }
+
+    void Look()
+    {
+        float mouseX = Input.GetAxisRaw("Mouse X");
+        float mouseY = -Input.GetAxisRaw("Mouse Y");
+
+        rotY += mouseX * Sensitivity;
+        rotX += mouseY * Sensitivity;
+
+        rotX = Mathf.Clamp(rotX, -ClampAngle, ClampAngle);
+
+        transform.rotation = Quaternion.Euler(rotX, rotY, 0.0f);
+    }
+
+    void RotatePlayer()
+    {
+        Player.eulerAngles = new Vector3(0, transform.eulerAngles.y, 0);
+        transform.position = Player.transform.position + CamOffset;
+    }
+}
+```
+
+### Assets/Player Scripts/PlayerMining.cs
+```
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class PlayerMining : MonoBehaviour
+{
+    public Transform cam;
+    public World world;
+
+    void Update()
+    {
+        if (Input.GetMouseButtonDown(0))
+            Mine();
+
+        if (Input.GetMouseButtonDown(1))
+            Build();
+    }
+
+    void Mine()
+    {
+        if (Physics.Raycast(cam.position, cam.forward, out RaycastHit hit))
+        {
+            var hitPoint = cam.position + cam.forward * (hit.distance + 0.5f);
+
+            var chunk = world.ChunkBeingEdited(hit.collider.name);
+            var hitPos = new Vector3Int(Mathf.RoundToInt(hitPoint.x), Mathf.RoundToInt(hitPoint.y), Mathf.RoundToInt(hitPoint.z));
+            var blockPos = hitPos - chunk.Pos;
+
+            try
+            {
+                chunk.Blocks[chunk.GetCell(blockPos.x, blockPos.y, blockPos.z)].Type = BlockType.Air;
+
+                var newMeshData = chunk.GetGreedyMesh();
+                world.EditChunk(newMeshData, chunk);
+            }
+            catch (System.Exception) { }
+        }
+    }
+
+    void Build()
+    {
+        if (Physics.Raycast(cam.position, cam.forward, out RaycastHit hit))
+        {
+            var hitPoint = cam.position + cam.forward * (hit.distance - 0.5f);
+
+            var chunk = world.ChunkBeingEdited(hit.collider.name);
+            var hitPos = new Vector3Int(Mathf.RoundToInt(hitPoint.x), Mathf.RoundToInt(hitPoint.y), Mathf.RoundToInt(hitPoint.z));
+            var blockPos = hitPos - chunk.Pos;
+
+            try
+            {
+                chunk.Blocks[chunk.GetCell(blockPos.x, blockPos.y, blockPos.z)].Type = BlockType.Grass;
+
+                var newMeshData = chunk.GetGreedyMesh();
+                world.EditChunk(newMeshData, chunk);
+            }
+            catch (System.Exception) { }
+        }
+    }
+}
+```
+
+### Assets/Player Scripts/PlayerMovement.cs
+```
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class PlayerMovement : MonoBehaviour
+{
+    public Rigidbody rb;
+
+    [Header("Movement Values")]
+    public float MovementSpeed;
+    public float JumpForce;
+    public float DragForce;
+    public float Gravity;
+
+    [Header("Ground Checking")]
+    public Transform Feet;
+    public float Radius;
+    public LayerMask GroundLayer;
+
+    public bool IsGrounded
+    {
+        get
+        {
+            return Physics.CheckSphere(Feet.position, Radius, GroundLayer);
+        }
+    }
+
+    void Update()
+    {
+        Jump();
+    }
+
+    void FixedUpdate()
+    {
+        Move();
+        AddGravity();
+        AddDrag();
+    }
+
+    void Move()
+    {
+        var x = Input.GetAxisRaw("Horizontal");
+        var z = Input.GetAxisRaw("Vertical");
+
+        var direction = transform.right * x + transform.forward * z;
+        direction = MovementSpeed * direction.normalized;
+
+        rb.AddForce(direction);
+    }
+
+    void Jump()
+    {
+        if (!Input.GetKeyDown(KeyCode.Space) || !IsGrounded)
+            return;
+
+        rb.velocity = new Vector3(rb.velocity.x, JumpForce, rb.velocity.z);
+    }
+
+    void AddGravity()
+    {
+        rb.AddForce(Gravity * Vector3.down);
+    }
+
+    void AddDrag()
+    {
+        rb.velocity = new Vector3
+        (
+            rb.velocity.x * DragForce,
+            rb.velocity.y,
+            rb.velocity.z * DragForce
+        );
+    }
+}
+```
+
+### Assets/Terrain Scripts/Block.cs
+```
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class Block
+{
+    public Vector3Int Pos;
+    public BlockType Type;
+
+    public Block(Vector3Int pos, BlockType type)
+    {
+        Pos = pos;
+        Type = type;
+    }
+}
+
+public enum BlockType
+{
+    Air,
+    Grass
+}
+```
+
+### Assets/Terrain Scripts/Chunk.cs
+```
+using System;
+using System.Diagnostics;
+using System.Threading.Tasks;
+using UnityEngine;
+
+public class Chunk
+{
+    public Block[] Blocks;
+    public Vector3Int Size;
+    public Vector3Int Pos;
+
+    MeshData meshData;
+    public long GenerationTime;
+
+    public Chunk(Vector3Int size, Vector3Int pos, NoiseSettings settings)
+    {
+        Size = size;
+        Pos = pos;
+
+        InitializeBlocks(settings);
+    }
+
+    void InitializeBlocks(NoiseSettings settings)
+    {
+        Blocks = new Block[Size.x * Size.y * Size.z];
+
+        Parallel.For(0, Size.x, (x) =>
+        {
+            {
+                for (int z = 0; z < Size.z; z++)
+                {
+                    int yPos = Mathf.RoundToInt(Noise.GetValue(x + Pos.x, z + Pos.z, settings));
+
+                    for (int y = 0; y < Size.y; y++)
+                    {
+                        var blockType = y < yPos ? BlockType.Grass : BlockType.Air;
+                        Blocks[GetCell(x, y, z)] = new Block(new Vector3Int(x, y, z), blockType);
+                    }
+                }
+            }
+        });
+    }
+
+    /// <summary>
+    /// Mesh data is generated using greedy meshing algorithm.
+    /// Quite fast and mesh is very optimal
+    /// </summary>
+    /// <param name="callback"></param>
+    public MeshData GetGreedyMesh()
+    {
+        var timer = new Stopwatch();
+        timer.Start();
+
+        var meshData = GreedyMeshing.OptimizeChunk(this);
+
+        GenerationTime = timer.ElapsedMilliseconds;
+        timer.Stop();
+
+        return meshData;
+    }
+
+    public int GetCell(int x, int y, int z)
+    {
+        return z + Size.z * (y + Size.y * x);
+    }
+}
+```
+
+### Assets/Terrain Scripts/GreedyMeshing.cs
+```
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public static class GreedyMeshing
+{
+    static readonly HashSet<Vector3> scannedBlocks = new HashSet<Vector3>();
+
+    public static MeshData OptimizeChunk(Chunk chunk)
+    {
+        scannedBlocks.Clear();
+
+        var meshes = GetGreedyMeshes(chunk);
+
+        var meshData = new MeshData();
+
+        foreach (var mesh in meshes)
+        {
+            meshData.AddCube(mesh.Start, mesh.End);
+        }
+
+        return meshData;
+    }
+
+    static GreedyMesh[] GetGreedyMeshes(Chunk chunk)
+    {
+        var meshes = new List<GreedyMesh>();
+        var currentMesh = new GreedyMesh();
+
+        for (int z = 0; z < chunk.Size.z; z++)
+        {
+            for (int y = 0; y < chunk.Size.y; y++)
+            {
+                for (int x = 0; x < chunk.Size.x; x++)
+                {
+                    if (scannedBlocks.Count == chunk.Blocks.Length)
+                        return meshes.ToArray();
+
+                    var block = chunk.Blocks[chunk.GetCell(x, y, z)];
+                    bool blockIsValid = IsValidBlock(block);
+
+                    if (blockIsValid)
+                    {
+                        if (currentMesh.IsNull)
+                        {
+                            currentMesh.Start = block.Pos;
+                            currentMesh.End = block.Pos;
+                            currentMesh.IsNull = false;
+
+                            scannedBlocks.Add(block.Pos);
+                        }
+                        else
+                        {
+                            currentMesh.End = block.Pos;
+                            scannedBlocks.Add(block.Pos);
+                        }
+                    }
+                    else if (!currentMesh.IsNull && !blockIsValid)
+                    {
+                        meshes.Add(ExtendOnY(currentMesh, chunk));
+                        currentMesh = new GreedyMesh();
+                    }
+                }
+
+                if (!currentMesh.IsNull)
+                {
+                    meshes.Add(ExtendOnY(currentMesh, chunk));
+                    currentMesh = new GreedyMesh();
+                }
+            }
+        }
+
+        return meshes.ToArray();
+    }
+
+    static GreedyMesh ExtendOnY(GreedyMesh currentMesh, Chunk chunk)
+    {
+        var includedBlocks = new List<Vector3>();
+
+        for (int y = currentMesh.Start.y + 1; y < chunk.Size.y; y++)
+        {
+            bool canExtendOnY = true;
+
+            for (int x = currentMesh.Start.x; x <= currentMesh.End.x; x++)
+            {
+                var block = chunk.Blocks[chunk.GetCell(x, y, currentMesh.Start.z)];
+
+                if (!IsValidBlock(block))
+                {
+                    canExtendOnY = false;
+                    break;
+                }
+                else
+                    includedBlocks.Add(block.Pos);
+            }
+
+            if (canExtendOnY)
+            {
+                currentMesh.End.y++;
+
+                for (int i = 0; i < includedBlocks.Count; i++)
+                {
+                    scannedBlocks.Add(includedBlocks[i]);
+                }
+                includedBlocks.Clear();
+            }
+            else
+                return ExtendOnZ(currentMesh, chunk);
+        }
+
+        return ExtendOnZ(currentMesh, chunk);
+    }
+
+    static GreedyMesh ExtendOnZ(GreedyMesh currentMesh, Chunk chunk)
+    {
+        var includedBlocks = new List<Vector3>();
+
+        for (int z = currentMesh.Start.z + 1; z < chunk.Size.z; z++)
+        {
+            for (int y = currentMesh.Start.y; y <= currentMesh.End.y; y++)
+            {
+                bool canExtendOnY = true;
+
+                for (int x = currentMesh.Start.x; x <= currentMesh.End.x; x++)
+                {
+                    var block = chunk.Blocks[chunk.GetCell(x, y, z)];
+
+                    if (!IsValidBlock(block))
+                    {
+                        canExtendOnY = false;
+                        break;
+                    }
+                    else
+                        includedBlocks.Add(block.Pos);
+                }
+
+                if (!canExtendOnY)
+                    return currentMesh;
+            }
+
+            for (int i = 0; i < includedBlocks.Count; i++)
+            {
+                scannedBlocks.Add(includedBlocks[i]);
+            }
+            includedBlocks.Clear();
+
+            currentMesh.End.z++;
+        }
+
+        return currentMesh;
+    }
+
+    static bool IsValidBlock(Block block)
+    {
+        return block.Type != BlockType.Air && !scannedBlocks.Contains(block.Pos);
+    }
+}
+
+public class GreedyMesh
+{
+    public Vector3Int Start;
+    public Vector3Int End;
+
+    public bool IsNull = true;
+}
+```
+
+### Assets/Terrain Scripts/MeshData.cs
+```
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
+using UnityEngine;
+
+public class MeshData
+{
+    public List<Vector3> Vertices = new List<Vector3>();
+    public List<int> Triangles = new List<int>();
+    public List<Vector2> UVs = new List<Vector2>();
+
+    public void AddCube(Vector3 StartPos, Vector3 EndPos)
+    {
+        var offset = new Vector3(0.5f, 0.5f, 0.5f);
+        var startPos = StartPos - offset;
+        var endPos = EndPos + offset;
+
+        var vertices = new Vector3[]
+        {
+            new Vector3(startPos.x, startPos.y, startPos.z), // left bottom back
+            new Vector3(endPos.x, startPos.y, startPos.z), // right bottom back
+            new Vector3(endPos.x, endPos.y, startPos.z), // right top back
+            new Vector3(startPos.x, endPos.y, startPos.z), // left top back
+            new Vector3(startPos.x, startPos.y, endPos.z), // left bottom front
+            new Vector3(endPos.x, startPos.y, endPos.z), // right bottom front
+            new Vector3(endPos.x, endPos.y, endPos.z), // right top front 
+            new Vector3(startPos.x, endPos.y, endPos.z) // left top front
+        };
+
+        var uvs = Textures.instance.TextureDict[BlockType.Grass];
+
+        AddQuad(vertices[0], vertices[1], vertices[2], vertices[3], true); // back
+        AddQuad(vertices[4], vertices[5], vertices[6], vertices[7], false); // front
+        AddQuad(vertices[0], vertices[4], vertices[5], vertices[1], true); // bottom
+        AddQuad(vertices[3], vertices[7], vertices[6], vertices[2], false); // top
+        AddQuad(vertices[4], vertices[0], vertices[3], vertices[7], true); // left
+        AddQuad(vertices[5], vertices[1], vertices[2], vertices[6], false); // right
+
+        UVs.AddRange(uvs[BlockFace.Back]);
+        UVs.AddRange(uvs[BlockFace.Front]);
+        UVs.AddRange(uvs[BlockFace.Bottom]);
+        UVs.AddRange(uvs[BlockFace.Top]);
+        UVs.AddRange(uvs[BlockFace.Left]);
+        UVs.AddRange(uvs[BlockFace.Right]);
+    }
+
+    void AddQuad(Vector3 a, Vector3 b, Vector3 c, Vector3 d, bool outward)
+    {
+        var triangles = outward ? new int[] { 2, 1, 0, 3, 2, 0 } : new int[] { 0, 1, 2, 0, 2, 3 };
+        AddTriangles(triangles, Vertices.Count);
+
+        Vertices.AddRange(new Vector3[] { a, b, c, d });
+    }
+
+    public void AddTriangles(int[] triangles, int increment)
+    {
+        foreach (var triangle in triangles)
+        {
+            Triangles.Add(triangle + increment);
+        }
+    }
+
+    public Mesh ToMesh()
+    {
+        var mesh = new Mesh()
+        {
+            vertices = Vertices.ToArray(),
+            triangles = Triangles.ToArray(),
+            uv = UVs.ToArray()
+        };
+
+        mesh.RecalculateNormals();
+        mesh.RecalculateTangents();
+        mesh.Optimize();
+
+        return mesh;
+    }
+}
+```
+
+### Assets/Terrain Scripts/Noise.cs
+```
+using UnityEngine;
+
+public static class Noise
+{
+    public static float GetValue(float x, float y, NoiseSettings settings)
+    {
+        #region Random Offset
+
+        System.Random randNumGen = new System.Random(settings.Seed);
+
+        float offsetX = randNumGen.Next(-10000, 10000) + settings.Offset.x;
+        float offsetY = randNumGen.Next(-10000, 10000) + settings.Offset.y;
+
+        #endregion
+
+        float sampleX = x / settings.Scale + offsetX;
+        float sampleY = y / settings.Scale + offsetY;
+
+        float noiseValue = Mathf.PerlinNoise(sampleX, sampleY);
+
+        return noiseValue * settings.HeightScale;
+    }
+}
+
+[System.Serializable]
+public struct NoiseSettings
+{
+    public float Scale, HeightScale;
+    public int Seed;
+    public Vector2 Offset;
+}
+```
+
+### Assets/Terrain Scripts/Textures.cs
+```
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class Textures : MonoBehaviour
+{
+    public static Textures instance;
+
+    public Texture[] textures;
+    public Dictionary<BlockType, Dictionary<BlockFace, Vector2[]>> TextureDict;
+
+    void Awake()
+    {
+        instance = this;
+
+        Initialize();
+    }
+
+    void Initialize()
+    {
+        TextureDict = new Dictionary<BlockType, Dictionary<BlockFace, Vector2[]>>();
+
+        foreach (var texture in textures)
+        {
+            texture.Initialize();
+            TextureDict.Add(texture.Type, texture.UVs);
+        }
+    }
+}
+
+[System.Serializable]
+public struct Texture
+{
+    public BlockType Type;
+    public Face[] Faces;
+
+    public Dictionary<BlockFace, Vector2[]> UVs;
+
+    public void Initialize()
+    {
+        UVs = new Dictionary<BlockFace, Vector2[]>();
+
+        foreach (var face in Faces)
+        {
+            var adjustedUVs = new Vector2[face.UVs.Length];
+
+            for (int i = 0; i < adjustedUVs.Length; i++)
+            {
+                adjustedUVs[i] = face.UVs[i] / 8f;
+            }
+
+            UVs.Add(face.blockFace, adjustedUVs);
+        }
+    }
+}
+
+[System.Serializable]
+public struct Face
+{
+    public BlockFace blockFace;
+    public Vector2[] UVs;
+}
+
+public enum BlockFace
+{
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Front,
+    Back
+}
+```
+
+### Assets/Terrain Scripts/World.cs
+```
+using System;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class World : MonoBehaviour
+{
+    [Header("World Settings")]
+    public int ViewDistanceInChunks;
+    public Transform Player;
+    public Dictionary<Vector3, ChunkObj> Chunks = new Dictionary<Vector3, ChunkObj>();
+
+    [Header("Chunk Settings")]
+    public Vector3Int ChunkSize;
+    public NoiseSettings NoiseSettings;
+    public Material material;
+
+    bool LoadedWorld;
+    int originalViewDistance;
+
+    void Start()
+    {
+        GenerateWorld();
+    }
+
+    void Update()
+    {
+        ActivateChunks();
+    }
+
+    async void GenerateWorld()
+    {
+        while (Application.isPlaying)
+        {
+            var playerPos = GetPlayerPos();
+            var meshes = new List<ChunkMesh>();
+
+            if (!LoadedWorld)
+            {
+                originalViewDistance = ViewDistanceInChunks;
+                ViewDistanceInChunks = 1;
+            }
+
+            await Task.Run(() =>
+            {
+                for (int x = -ViewDistanceInChunks * ChunkSize.x; x < ViewDistanceInChunks * ChunkSize.x; x += ChunkSize.x)
+                {
+                    for (int z = -ViewDistanceInChunks * ChunkSize.z; z < ViewDistanceInChunks * ChunkSize.z; z += ChunkSize.z)
+                    {
+                        var chunkPos = new Vector3Int(x + playerPos.x, 0, z + playerPos.z);
+
+                        if (!Chunks.ContainsKey(chunkPos))
+                        {
+                            try
+                            {
+                                var chunk = new Chunk(ChunkSize, chunkPos, NoiseSettings);
+                                var meshData = chunk.GetGreedyMesh();
+
+                                meshes.Add(new ChunkMesh() { chunk = chunk, data = meshData });
+                            }
+                            catch (Exception e) { Debug.LogError(e.Message); }
+                        }
+                    }
+                }
+            });
+
+            foreach (var mesh in meshes)
+            {
+                SpawnChunk(mesh.data, mesh.chunk);
+                await Task.Delay(Mathf.RoundToInt(Time.deltaTime * 1000));
+            }
+
+            // Wait a frame
+            await Task.Delay(Mathf.RoundToInt(Time.deltaTime * 1000));
+
+            if (!LoadedWorld)
+            {
+                SpawnPlayer();
+            }
+
+            if (ViewDistanceInChunks != originalViewDistance)
+                ViewDistanceInChunks++;
+
+            LoadedWorld = true;
+        }
+    }
+
+    void SpawnPlayer()
+    {
+        Player.gameObject.SetActive(true);
+    }
+
+    void ActivateChunks()
+    {
+        var playerPos = GetPlayerPos();
+
+        foreach (var chunk in Chunks)
+        {
+            if (Vector3.Distance(chunk.Key, playerPos) < ViewDistanceInChunks * ChunkSize.x) 
+            {
+                chunk.Value.obj.SetActive(true);
+                continue;
+            }
+
+            chunk.Value.obj.SetActive(false);
+        }
+
+        StaticBatchingUtility.Combine(gameObject);
+    }
+
+    void SpawnChunk(MeshData meshData, Chunk chunk)
+    {
+        if (Chunks.ContainsKey(chunk.Pos))
+            return;
+
+        var obj = new GameObject(chunk.Pos.ToString())
+        {
+            layer = 7
+        };
+        obj.transform.position = chunk.Pos;
+        obj.transform.SetParent(transform);
+
+        obj.AddComponent<MeshFilter>().sharedMesh = meshData.ToMesh();
+        obj.AddComponent<MeshRenderer>().sharedMaterial = material;
+        obj.AddComponent<MeshCollider>();
+
+        var chunkObj = new ChunkObj()
+        {
+            chunk = chunk,
+            obj = obj
+        };
+
+        Chunks.Add(chunk.Pos, chunkObj);
+    }
+
+    public void EditChunk(MeshData meshData, Chunk chunk)
+    {
+        if (!Chunks.ContainsKey(chunk.Pos))
+            return;
+
+        var obj = Chunks[chunk.Pos].obj;
+
+        obj.GetComponent<MeshFilter>().sharedMesh = meshData.ToMesh();
+        obj.GetComponent<MeshRenderer>().material = material;
+        Destroy(obj.GetComponent<MeshCollider>());
+        obj.AddComponent<MeshCollider>();
+
+        var chunkObj = new ChunkObj()
+        {
+            chunk = chunk,
+            obj = obj
+        };
+
+        Chunks[chunk.Pos] = chunkObj;
+    }
+
+    public Vector3Int GetPlayerPos()
+    {
+        // Round by chunk size
+        return new Vector3Int
+        (
+            Mathf.RoundToInt(Player.position.x / ChunkSize.x) * ChunkSize.x,
+            0,
+            Mathf.RoundToInt(Player.position.z / ChunkSize.z) * ChunkSize.z
+        );
+    }
+
+    public Chunk ChunkBeingEdited(string objName)
+    {
+        // Remove the parentheses
+        if (objName.StartsWith("(") && objName.EndsWith(")"))
+        {
+            objName = objName.Substring(1, objName.Length - 2);
+        }
+
+        // split the items
+        string[] sArray = objName.Split(',');
+
+        // store as a Vector3
+        Vector3 result = new Vector3(
+            float.Parse(sArray[0]),
+            float.Parse(sArray[1]),
+            float.Parse(sArray[2]));
+
+        return Chunks[result].chunk;
+    }
+}
+
+public struct ChunkObj
+{
+    public Chunk chunk;
+    public GameObject obj;
+}
+
+public struct ChunkMesh
+{
+    public Chunk chunk;
+    public MeshData data;
+}
+```

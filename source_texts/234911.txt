@@ -1,0 +1,138 @@
+Steve's Game Library — Rust game-building libraries for AI coding agents - Design GPU draw lists and two-phase occlusion culling (#24) by stevepryde · Pull Request #175 · stevepryde/sgl
+
+Design GPU draw lists and two-phase occlusion culling (#24) by stevepryde · Pull Request #175 · stevepryde/sgl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+stevepryde
+commented
+Oct 5, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Part of #24. Design only (AR-9): amends specs/sgl3d-architecture.md for roadmap 22, GPU-driven culling and occlusion culling, and settles the open question of where two-phase occlusion culling sits in the stage order. No code; implementation follows after the AR-10 review, in the sequence below. Revised after the first AR-10 round (B1–B3, S1–S12 and the nits; see the review thread).
+Where it plugs in
+Stage order. Prepare ends with the cull stage's early phase (after deform) for every GPU-built view: the instance cull, then the section cull, appending visible sections to each set's draw. Opaque, with occlusion culling off, keeps the device's form (fused or two-pass) and draws the one set. With it on, the stage takes its two-pass form and the renderer interleaves: G-buffer early → cull late (pyramid from the opaque depth, late instance cull, late section cull) → G-buffer late (+ the anisotropy fallback at Equal over both sets) → cull pyramid (for next frame) → [ray-traced shadows, Design hardware ray tracing and ray-traced shadows (roadmap 13) #174] → sky → lighting once over both sets at Equal → ambient occlusion.
+Contracts touched. Draw lists (two builders, one executor; GPU-built lists for the camera's opaque+masked population and the cascades; no view built both ways), Scene records (draw candidates, level chains, sets; visible/capture_visible bits in the object record; the DrawInstance gains a first index and triangle count), Ray source (per-mesh section tables packed by PreparedModel), Raster geometry (GPU-built cascades pull positions from the ray source and bind no slab), Bind groups (the cull stage lays out its own), History (the pyramid), Settings (Settings::occlusion_culling, off by default), Diagnostics (geometry_stats_for_model under the feature), the stage-operation sentence (named encode parts the stage order interleaves).
+Deleted when implemented. The CPU builder's camera opaque/masked population and the frame's culled cascade population (no fallback path remains: the GPU lists need only compute and indirect execution); the per-frame O(instances) walks for those views; the CPU builder's equal-depth ownership guarantee for the views it no longer builds (CHANGELOG migration: depth offset or a decal for coplanar overlays).
+Decisions
+Draw form: Bevy's meshlet hardware raster (9d12036 crates/bevy_pbr/src/meshlet/: cull_instances.wesl, cull_clusters.wesl 79-91, visibility_buffer_hardware_raster.wesl 31-54 and 69-83, visibility_buffer_raster_node.rs 592, cull_shared.wesl). One draw_indirect per (pipeline, material) set and phase, whose instances are the visible sections; the vertex entry emits a NaN dummy vertex past the section's triangle count. Draws are O(sets) on every backend, which fixes B1: wgpu issues one draw per command on Metal and WebGPU and validates each, so a batched list at SGL3D: streamed and editable worlds at bounded cost #19 scale would have encoded tens of thousands of commands per frame. Sections are the existing 128-triangle range-hierarchy leaves (SECTION_TRIANGLES dropped, no "split your mesh" migration); the section tables (bounds, first index, triangle count per leaf) are packed into the model's ray words by PreparedModel.
+Two-level culling (instance then section) and two-phase occlusion culling from Bevy's GPU preprocessing and meshlet cull (gpu_preprocessing.rs 148-166, 1545-1603; gpu_preprocess.rs 274-322, 1450-1489; mesh_preprocess.wesl 263-349; cull_shared.wesl 123-203): early phase at the previous pose through the previous jittered view-projection against last frame's pyramid, late phase at the current pose through the current jittered one; the camera history already keeps the previous jitter (S6; Bevy view/mod.rs 1214-1226, prepass/mod.rs 782-799).
+No fallback path, no feature requests (B2): the set's cluster region is bound as the draw-instance vertex buffer, so first_instance and first_vertex are always 0: INDIRECT_FIRST_INSTANCE is not needed, DX12's builtins are correct with or without wgpu's indirect validation (S8), and no device draws these views another way. The late set lives in a second region per set, so no GPU-written first instance is needed either. MULTI_DRAW_INDIRECT_COUNT is not used.
+Ownership (B3): each GPU-built view's draw list (visible list, late list, dispatches, cluster regions, commands, statistics words) is the view's (layer 4), lent to the cull stage to write and to the shadow/opaque stages to draw; the cull stage owns pipelines, layouts, bind groups and the camera's pyramid. The stage order names the interleaved encode parts as renderer calls; the "same few operations" sentence allows named encode parts.
+Two-pass form only (S1): occlusion culling never splits the fused pass (that would load+store every opaque target twice); only the G-buffer pass splits, the lighting pass draws both sets once at Equal (as Bevy's main pass), composing with Design hardware ray tracing and ray-traced shadows (roadmap 13) #174's RT-shadow slot between the pyramid and the lighting pass. The setting's cost is the two-pass form's second geometry pass + the late G-buffer load/store + two pyramid builds, measured against fused on both routes.
+Retained scene-owned candidates per (instance, mesh); level chains per (model, mesh); sets own regions and commands placed by scene::ranges and re-placed only when a set outgrows its region (S4); instance bits live in the object record and material bits in the set record, so edits never rewrite candidates wholesale; a scene index of instances holding blended meshes makes the CPU blended walk O(blended instances) (S11).
+Conservative f32 tests (S3): per-view pose-free planes and magnitude rows in f64 on the CPU, the pose applied in f32 under a margin; projected_error moves to shading beside its WGSL twin; the GPU LOD is SGL3D's own (Bevy has visibility ranges only); cascades admit level 0 only (S2); tests assert conservativeness against the existing triangle-clip oracle and against the CPU's LOD admission.
+Dedicated depth pyramid: Bevy's SPD-derived downsample_depth.wesl (min-reduce, previous power of two), in two layouts of six storage textures with a uniform instead of immediates (S7: recorded departure; floor 6, WebGPU default 4, adapter limits requested); the cull pipelines bind at most 7 storage buffers (S3D-1 floor 8). Crystal's and Velvet's hierarchies keep the nearest depth and are built too late: not reusable.
+Statistics (S9): per-view GPU totals read back without blocking, map requested at finish_frame; geometry_stats describes the most recent completed frame (none before one completes) with that frame's blended CPU counts; diagnostic_draws synchronous (commands encoded); geometry_stats_for_model under diagnostics (per-candidate visible sections). Same-frame stats tests and the instances example change with PR 2.
+Setting: Settings::occlusion_culling: bool, off by default (Bevy's opt-in) until PR 3 measures a net saving on both routes on Apple and records it. GPU draw lists themselves are not a setting and have no diagnostics layer; the existing culling layer makes the cull accept everything.
+AR-12: six planes, eight corners, (MAX_MESH_LODS + 1) × 8 corners, MAX_MESH_SECTIONS (65,536) per mesh striding 64 a workgroup (typed refusal in PreparedModel), fixed pyramid mips; every indirect dispatch past 65,535 workgroups is remapped to 2D (Bevy's remap_1d_to_2d_dispatch.wesl); list capacities equal the candidate count so appends cannot overflow.
+Citations corrected (nits): zero-initialised pyramid on Bevy's first frame; depth.rs dispatches 683-698; pipeline keys 274-322; Bevy's WebGPU mode is preprocessing-only, gated on IMMEDIATES and the storage limits; Bevy's cascade occlusion culling is partial (light.rs 2058 TODO), so cascade occlusion is a measured follow-up, not a port; Bevy's downsample_depth.wesl has no licence header, so the port carries Bevy's notice and AMD's MIT notice for SPD.
+Round two (delta review at b4b4fec)
+Blocking: the early section cull now queues occluded sections to a late section queue (Bevy's cull_clusters.wesl 50-58 second-pass queue), consumed by the late section cull after the late instance cull queues its instances' sections; the visible list, late list and queue share one lists buffer so the section cull stays at 7 storage buffers; the self-correction claim now covers instances and sections.
+Deforming candidates append all sections untested (rest-pose leaf bounds); region capacity counts the most sections among a chain's levels, with a slot < capacity guard (wgpu zeroes a draw past the bound buffer, render.rs 430-460); opaque parts named G-buffer (per phase), lighting, ambient occlusion; the 2D remap linearises from the args buffer, not num_workgroups (DX12 reports 0); section first indices are mesh-relative and only the table's start word is rebased; the view writes its commands whole in its per-frame reset from the scene's set table.
+Nits: finite out-of-clip dummy vertex (not NaN); one set per (deforming variant, material); the pulled caster form (with unclipped-depth variants) joins the packed_vertex.wgsl readers; Equal passes draw early then late regions in set order; GPU-built views count sections by mobility and draws as commands encoded; the instance cull tests the chosen level's bounds; S3D-1 now lists indirect execution; the one-workgroup-per-candidate section cull is measured against one thread per section in PR 2.
+Round three (delta review at b60b890)
+Blocking: producers only bump counts in the lists buffer; a finalize dispatch (one workgroup, direct) derives each indirect dispatch's arguments, clamped to capacity and 2D-remapped, into a separate dispatch buffer that no indirectly dispatched pass binds (wgpu tracks buffers whole: compute.rs 323-333, track/buffer.rs 755-767); the count and side for linearisation are written beside the count in the lists.
+Queue entries carry the level with the section index (two words); a chainless candidate holds its mesh's section count; the late section cull is one dispatch over the late-passed candidates (a workgroup each, striding) plus the queue (64 entries a workgroup), so no invocation walks a mesh's sections serially; an append past a region's capacity subtracts its add back, so instance_count ends at capacity.
+Nits: queue capacity worded as the regions'; lists fail-safe stated (producers skip writes past capacity, the finalize clamps counts).
+Round four (review at 99d8342, merge-after-nits)
+Visible-list and queue entries carry the chosen level's mesh word (not the level), so the section cull reads section counts and tables from the mesh record and binds no chain (7 storage buffers); the early finalize also writes the late instance cull's arguments, since the late list is final after the early instance cull; the early instance cull is a direct dispatch with its count and 2D side from the CPU in the uniform; the side is computed in integers (x = min(n, 65,535), y = ⌈n / 65,535⌉, linearised by x); statistics count only the sections appended within capacity.
+Proposed PR sequence
+Measure (diagnostics only, no rendering change). (a) Hidden share and saving in ms: a diagnostics pass over the source-id target marks the object indices with ≥1 visible pixel, read back without blocking; a diagnostics switch makes the CPU builder skip the instances hidden in the last completed frame (an oracle, image incorrect by design), so the opaque and cascade timing groups with and without the skip give the saving an instance-granular culler could reach. (b) The two-pass form (fused_opaque layer off: the G-buffer pass as Bevy's prepass, lighting at Equal) timed with and without the skip against the fused form, so sgl-core: ping-pong turns on the first and last frame steps #393's finding is re-measured with culling. (c) A CPU build+encode baseline per view on Metal and Chrome at SGL3D: streamed and editable worlds at bounded cost #19 scale. Routes: the streaming example (open; the Stevecraft-scale reference, SGL3D: streamed and editable worlds at bounded cost #19) and the irradiance-volume example's cave (enclosed); Hyperdrive stays pinned to the 0.1.0 release (release on hold), so the examples stand in and the owner runs Stevecraft itself. No empty-pass probe.
+GPU draw lists (frustum + LOD, two-level, cluster draws). shading::culling layouts and shading::lod; PreparedModel section tables; scene::candidates (candidates, chains, sets, regions; diagnostic_resources); view::draw_list GPU lists and the executor's draw_indirect path and dummy-vertex entry; stages/cull early phase; camera + cascades on GPU lists; the CPU camera/cascade populations deleted; stats readback; MAX_MESH_LODS/MAX_MESH_SECTIONS refusals. Tests at real boundaries: GPU frustum never drops a triangle the clip oracle keeps; GPU LOD never coarser than the CPU admits; GPU-built vs CPU-built (instance, mesh) sets for a frustum-only frame (the CPU builder still exists for probe captures, which gives the oracle); abandoned-then-submitted frame; the refusals. Per-view GPU and encode time on Metal and Chrome before/after. CHANGELOG (ownership guarantee withdrawn, stats latency and Option, geometry_stats_for_model under diagnostics, LOD/section caps, DrawInstance), README, docs/features.md, culling README.
+Two-phase occlusion culling. Pyramid port with notices, late phase, the opaque stage's early/late G-buffer passes and Equal lighting over both sets, Settings::occlusion_culling, docs/settings.md, per-pass timings on both routes (RD-6); decide the default from the numbers. Tests: wall-and-box readback counts (behind: culled; in front: kept; reset frame: nothing occlusion-culled); pyramid mips vs a CPU min-reduction.
+Follow-ups, each measured first: cascade occlusion culling (SGL3D's own design; Bevy's is partial); browser timing of the per-set draws; whether the second pyramid build earns its keep.
+Open risks
+The two-pass form's second geometry pass may cost more than occlusion saves on open routes (what sgl-core: ping-pong turns on the first and last frame steps #393 found without culling); PR 1 measures it with culling before PR 3, and the setting is off by default.
+Section-level cluster draws run the vertex shader for dummy vertices of partially filled leaves and, for cascades, lose the indexed draws' vertex reuse; PR 2 measures per-view GPU time against the CPU builder before deleting it.
+Cluster-list memory is Σsections per set region per view (≈2.8 MB per view at SGL3D: streamed and editable worlds at bounded cost #19 scale; the camera holds two regions): ~17 MB at that scale. An 8-byte entry (candidate + section indices, two dependent loads per vertex) is the fallback if memory, not time, binds.
+Instance order within a set is the atomic append order: coplanar surfaces of different draws no longer have a defined winner; withdrawn explicitly with a migration note.
+Design hardware ray tracing and ray-traced shadows (roadmap 13) #174 touches the same rows (stage-order step 5, Bind groups, History, Settings, Diagnostics, Open questions); the textual conflicts are small and whichever lands second rebases; the semantics compose (RT shadows between the pyramid and the lighting pass).
+Validation: bun scripts/license-notices.ts check and bun test scripts pass (9 tests). No cargo run (design only).
+🤖 Generated with Claude Code
+stevepryde
+mentioned this pull request
+Oct 5, 2026
+Design hardware ray tracing and ray-traced shadows (roadmap 13)
+#174
+Merged
+Design GPU draw lists and two-phase occlusion culling (#24)
+…
+6fa9289
+```
+Amend the SGL3D architecture (AR-9) for roadmap 22. The camera's opaque
+and masked surfaces and each directional cascade draw from lists the GPU
+builds in the form of Bevy's meshlet hardware raster: one indirect draw
+per set and phase whose instances are the visible sections of the range
+hierarchy's leaves, culled in two levels (instance, then section) from a
+retained candidate list the scene keeps up with its edits, with levels of
+detail chosen on the GPU and Bevy's two-phase occlusion test against a
+dedicated depth pyramid. Occlusion culling runs in the opaque stage's
+two-pass form with the G-buffer pass split and the lighting pass once
+over both sets at Equal, composing with ray-traced shadows. Draw-list
+buffers belong to the view layer; the cull stage owns its pipelines and
+the pyramid; a finalize derives the indirect dispatches. No fallback
+path, feature or builtin offset is needed. Record the browser's
+behaviour, the setting (off by default, as Bevy's), the statistics'
+readback, what is not taken, and close the open question of where
+two-phase occlusion culling sits. Rebased onto the hardware ray tracing
+design (#174), whose stage-order, bind-group, history, settings and
+diagnostics text this merges with by hand.
+
+Part of #24
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+stevepryde
+force-pushed
+the
+claude/issue-24
+branch
+from
+f8951e4 to
+6fa9289
+Compare
+October 5, 2026 08:00
+stevepryde
+merged commit 3645763
+into
+main
+Oct 5, 2026
+This was referenced Oct 5, 2026
+Measure what occlusion culling could save (#24 PR 1)
+#180
+Merged
+Build the camera's and cascades' draw lists on the GPU (#24 PR 2)
+#190
+Merged
+Encode the opaque stage in its named parts (#24 prerequisite)
+#195
+Merged
+Cull the camera's hidden geometry in two phases (#24 PR 3)
+#199
+Merged
+stevepryde
+deleted the
+claude/issue-24
+branch
+October 13, 2026 08:21
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

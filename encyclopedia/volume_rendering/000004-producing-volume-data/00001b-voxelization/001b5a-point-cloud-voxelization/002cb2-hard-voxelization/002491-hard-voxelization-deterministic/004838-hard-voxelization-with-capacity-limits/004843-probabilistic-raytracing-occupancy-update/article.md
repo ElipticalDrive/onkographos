@@ -1,0 +1,164 @@
+# Probabilistic Raytracing Occupancy Update
+Also called: Occupancy Log-Odds Update, Raytraced Probability Update
+
+## Overview
+This method updates voxel occupancy probabilities by combining direct point insertions with raytracing hits and misses, incrementing log-odds on hits and decrementing on misses, bounded by min/max thresholds [S1, unofficial]. It differs from deterministic hard voxelization by introducing probabilistic confidence measures for voxel occupancy, allowing for smoother integration of sparse point cloud data into dense voxel grids [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A list of 3D points, a voxel grid with chunks and cells, configuration parameters (`cfg_`), and an origin point for raytracing.
+- **Output:** Updated voxel grid where cell occupancy probabilities (`prob_log`) are adjusted based on point insertions and raytracing results.
+
+**Data Structures:**
+- **Chunk:** Contains an accessor for cell values and a state flag (`MODIFIED`).
+- **Cell:** Contains:
+  - `points`: Array of 3D points.
+  - `num_points`: Number of points in the cell.
+  - `raytrace_id`: Integer identifier for the current raytracing pass.
+  - `prob_log`: Log-odds value representing occupancy probability.
+- **Configuration (`cfg_`):**
+  - `do_raytracing`: Boolean flag to enable/disable raytracing.
+  - `prob_hit`: Log-odds increment per ray hit.
+  - `prob_miss`: Log-odds increment per ray miss (decreases probability).
+  - `occupancy_max_threshold`: Maximum `prob_log` value.
+  - `occupancy_min_threshold`: Minimum `prob_log` value.
+  - `max_points_per_voxel`: Maximum points allowed per voxel.
+
+**Numbered Steps:**
+1. **Point Insertion:** For each point:
+   - Check if the point is finite. If not, skip.
+   - Convert the point to voxel coordinates.
+   - If `cfg_.do_raytracing` is true, store the voxel coordinate in `raytrace_hits_`.
+   - Determine the chunk index for the voxel coordinate.
+   - If the chunk is not in the neighbor window, skip.
+   - If the cell exists and `num_points < max_points_per_voxel`, add the point to the cell.
+   - If the cell does not exist or is full, create a new cell with the point.
+   - Mark the chunk as `MODIFIED`.
+
+2. **Raytracing Pass:**
+   - If `cfg_.do_raytracing` is true:
+     - Define a callback function `clear` for the RayIterator:
+       - For each hit coordinate:
+         - Determine the chunk index.
+         - If the chunk is in the neighbor window:
+           - Get the cell value.
+           - If the cell exists and `raytrace_id != raytrace_iter_id_`:
+             - Update `raytrace_id` to `raytrace_iter_id_`.
+             - Update `prob_log`: `prob_log = max(prob_log + prob_miss, occupancy_min_threshold)`.
+             - Mark the chunk as `MODIFIED`.
+           - If the cell does not exist, do not create it (to avoid memory bloat).
+     - Iterate through `raytrace_hits_`:
+       - For each hit coordinate `to`:
+         - Determine the chunk index.
+         - If the chunk is in the neighbor window:
+           - Get the cell value.
+           - If the cell exists and `raytrace_id != raytrace_iter_id_`:
+             - Update `raytrace_id` to `raytrace_iter_id_`.
+             - Update `prob_log`: `prob_log = min(prob_log + prob_hit, occupancy_max_threshold)`.
+             - Mark the chunk as `MODIFIED`.
+     - Clear `raytrace_hits_`.
+     - Increment `raytrace_iter_id_`.
+
+**Formulas:**
+- For hits: $prob\_log_{new} = \min(prob\_log_{old} + prob\_hit, occupancy\_max\_threshold)$
+- For misses: $prob\_log_{new} = \max(prob\_log_{old} + prob\_miss, occupancy\_min\_threshold)$
+
+**Parameters:**
+- `prob_miss`: Log-odds increment per ray miss. Value not specified in the code [S1, unofficial].
+- `prob_hit`: Log-odds increment per ray hit. Value not specified in the code [S1, unofficial].
+- `occupancy_max_threshold`: Maximum `prob_log` value. Value not specified in the code [S1, unofficial].
+- `occupancy_min_threshold`: Minimum `prob_log` value. Value not specified in the code [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Redundant Updates:** `raytrace_iter_id_` prevents redundant updates within the same raytracing pass. Cells must be checked against it before updating [S1, unofficial].
+- **Missing Cells:** The RayIterator callback must handle missing cells gracefully. The code logs an error but does not create cells to avoid memory bloat [S1, unofficial].
+- **Precision:** Log-odds values can become very large or small. Ensure that the thresholds are set appropriately to prevent overflow or underflow [G].
+- **Boundary Conditions:** Points outside the neighbor window are ignored. Ensure that the neighbor window is large enough to capture relevant data [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_occupancy(points, origin, cfg_, chunk_map_, current_source_chunk_idx_, raytrace_hits_, raytrace_iter_id_):
+    insert_count = 0
+    out_of_range_count = 0
+    rejected_count = 0
+
+    for p in points:
+        if not is_finite(p):
+            continue
+
+        voxel_coord = v3d_to_voxel_coord(p)
+        if cfg_.do_raytracing:
+            raytrace_hits_.append(voxel_coord)
+
+        point_chunk_idx = get_corresponding_chunk_idx(voxel_coord)
+        if not is_neighbor_chunk(current_source_chunk_idx_, point_chunk_idx):
+            out_of_range_count += 1
+            continue
+
+        point_chunk = chunk_map_[point_chunk_idx]
+        val = point_chunk.accessor.value(voxel_coord)
+
+        if val is not None:
+            if val.num_points < cfg_.max_points_per_voxel:
+                val.points[val.num_points] = p
+                val.num_points += 1
+            else:
+                rejected_count += 1
+        else:
+            val = Cell()
+            val.points[0] = p
+            val.num_points = 1
+            point_chunk.accessor.set_value(voxel_coord, val)
+
+        point_chunk.state = Chunk.State.MODIFIED
+        insert_count += 1
+
+    if cfg_.do_raytracing:
+        def clear(coord):
+            chunk_idx = get_corresponding_chunk_idx(coord)
+            if is_neighbor_chunk(current_source_chunk_idx_, chunk_idx):
+                chunk = chunk_map_[chunk_idx]
+                val = chunk.accessor.value(coord)
+                if val is not None:
+                    if val.raytrace_id != raytrace_iter_id_:
+                        val.raytrace_id = raytrace_iter_id_
+                        val.prob_log = max(val.prob_log + cfg_.prob_miss, cfg_.occupancy_min_threshold)
+                        chunk.state = Chunk.State.MODIFIED
+                # If val is None, do not create cell
+            return True
+
+        from_coord = v3d_to_voxel_coord(origin)
+        for to in raytrace_hits_:
+            chunk_idx = get_corresponding_chunk_idx(to)
+            if is_neighbor_chunk(current_source_chunk_idx_, chunk_idx):
+                chunk = chunk_map_[chunk_idx]
+                val = chunk.accessor.value(to)
+                if val is not None:
+                    if val.raytrace_id != raytrace_iter_id_:
+                        val.raytrace_id = raytrace_iter_id_
+                        val.prob_log = min(val.prob_log + cfg_.prob_hit, cfg_.occupancy_max_threshold)
+                        chunk.state = Chunk.State.MODIFIED
+
+        raytrace_hits_.clear()
+        raytrace_iter_id_ += 1
+
+    return insert_count, out_of_range_count, rejected_count
+```
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of points and raytracing hits. Raytracing adds overhead proportional to the number of rays and their lengths.
+- **Memory Complexity:** Linear with respect to the number of voxels and points. The `raytrace_hits_` list grows with the number of points.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales with the number of points and the size of the neighbor window. Parallelization is noted as a work-in-progress [S1, unofficial].
+- **Strengths:** Provides probabilistic occupancy information, which can be useful for applications requiring confidence measures.
+- **Limitations:** Not intended for real-time performance [S1, unofficial]. Memory usage can increase if cells are created for missing data (though the current implementation avoids this).
+- **When to Use:** When probabilistic occupancy information is needed and real-time performance is not a critical requirement.
+- **When Not to Use:** When real-time performance is required or when memory usage is a significant constraint.
+
+## Background
+This method is part of the `voxlvoxl` project, an unofficial implementation of voxel-based localization and mapping [S1, unofficial]. It builds on the concept of hard voxelization with capacity limits, adding probabilistic updates via raytracing.
+
+## Sources
+[S1] goguma426/voxlvoxl, https://github.com/goguma426/voxlvoxl, fetched 2026-10-28 (unofficial)

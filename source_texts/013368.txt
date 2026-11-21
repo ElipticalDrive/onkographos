@@ -1,0 +1,1473 @@
+Rust server for weather data: radar, NWP models, satellite, observations and alerts over OGC API EDR, Features, Maps and Tiles, WMS 1.3.0 and 3D Tiles. Reads GRIB2, Zarr, ODIM HDF5, GeoTIFF/COG, QueryData, NetCDF, BUFR, CAP and PostGIS. Binaries for Linux, macOS and Windows. - feat(3dtiles): true cylindrical voxels — EXT_primitive_voxels volume rendering (#351) by mrauhala · Pull Request #373 · mrauhala/meteocore
+
+feat(3dtiles): true cylindrical voxels — EXT_primitive_voxels volume rendering (#351) by mrauhala · Pull Request #373 · mrauhala/meteocore · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+mrauhala
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Owner
+Part of epic #346. The Tier-B true-voxel track: radar polar volumes as a CesiumJS ray-marched volume, alongside the always-works .pnts/isosurface/echo-top products.
+What
+A VoxelGrid → EXT_primitive_voxels glTF .glb + 3DTILES_content_voxels / 3DTILES_bounding_volume_cylinder tileset that CesiumJS 1.142 renders with a VoxelPrimitive. Render-verified live (screenshot in the thread): the reflectivity field ray-marches as a true 3-D volume over southern Finland with coherent precipitation structure and visible vertical depth.
+Commits
+CesiumJS 1.124 → 1.142 — voxels need WebGL2 (≥1.135) and the EXT_primitive_voxels realignment (1.127); also picks up point-cloud filtering perf, the circles→squares fix, and shader-metadata correctness. SRI recomputed; existing reps re-verified.
+Encoder (ds-3dtiles/voxels.rs) — encode_voxels_glb + tileset_json_voxels + voxel_subtree_json.
+API — …/voxel/{tileset.json,subtrees/*,content/*} routes; VoxelGridCaps gains radius_m/height_m so the bounding cylinder matches the grid without a sample.
+Viewer — "Voxels" in the View dropdown via Cesium3DTilesVoxelProvider + a reflectivity transfer-function CustomShader.
+ENU transform fix — found in render-verify (see below).
+Authoritative-source note
+EXT_primitive_voxels is not in the Khronos glTF registry — it's a CesiumGS draft with CesiumJS as the only implementation. So I encoded against the live CesiumJS VoxelCylinder3DTiles fixtures, which caught that the draft README is stale: cylinder mode is 2147483650 (0x80000002), not the README's 2147483647. The mode encodes the shape (box 0x80000000, ellipsoid 0x80000001).
+Load-bearing gotchas (all in voxels.rs doc comments)
+Axis swap: content [radius, angle, height] → glTF dimensions [radius, height, angle]; data laid out radius-fastest → height → angle-slowest (our VoxelGrid is the transpose, so the encoder reorders).
+EXT_structural_metadata (schema + propertyAttributes) at the glTF top level, not the primitive; embedded BIN buffer; NaN → a declared noData sentinel.
+Implicit OCTREE tiling + a constant .subtree is required (CesiumJS's voxel traversal); for one tile that's a constant-availability subtree.
+The tile transform must be the real ENU→ECEF frame, not identity-rotation — identity works for the mesh products (absolute-ECEF vertices) but tilts the parametric cylinder by the latitude (a ~60° slanted slab, which is exactly the first render). This was the one bug render-verify surfaced.
+Scope (v1 MVP)
+Single tile, latest time. Follow-ups (tracked in #351): implicit octree LOD over multiple tiles, the national mosaic, time-dynamic voxels, per-quantity transfer functions. Tier-A .pnts/mesh remain the portable fallback for non-CesiumJS clients.
+Tests
+ds-3dtiles (24) structural tests against the fixture shape; api-3dtiles (22) incl. a voxel tileset/subtree/content route test; ds-core/engine-odim green; clippy clean. Plus the live CesiumJS 1.142 render-verify.
+🤖 Generated with Claude Code
+mrauhala
+and others
+added 5 commits
+June 9, 2026 23:15
+build(3dtiles): bump pinned CesiumJS 1.124 → 1.142 in the viewer
+…
+578a23f
+```
+Groundwork for the voxel work (#351): voxel rendering needs WebGL2 (CesiumJS
+≥1.135) and the Cesium3DTilesVoxelProvider realigned to EXT_primitive_voxels in
+1.127, so the viewer should target a current build. 1.124 → 1.142 also picks up
+point-cloud filtering perf (1.135), the circles→squares point-rendering fix
+(1.137), the .pnts batch-table crash fix (1.133), and EXT_structural_metadata
+shader-precision/signedness fixes (1.139/1.140).
+
+Recomputed the SRI sha384 hashes (scripts/check-cesium-sri.sh passes — Cesium.js
+changed; widgets.css is byte-identical to 1.124). Render-verified live: points
+(+ time-dynamic playback), isosurface, and echo-top all load under 1.142.0 with
+no console errors.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+feat(ds-3dtiles): EXT_primitive_voxels cylinder encoder + voxel tiles…
+…
+7fea7ab
+```
+…et (#351)
+
+The Tier-B true-voxel encoder: VoxelGrid → EXT_primitive_voxels glTF .glb +
+3DTILES_content_voxels / 3DTILES_bounding_volume_cylinder tileset that CesiumJS
+1.142 ray-marches as a volume.
+
+Encoded against the live CesiumJS VoxelCylinder3DTiles fixtures (ground truth —
+the draft CesiumGS README is stale, and the extension is NOT in the Khronos
+registry). Load-bearing details the fixtures pin:
+- cylinder primitive `mode` = 2147483650 (0x80000002; the README's 2147483647 is
+  wrong — the mode encodes the shape: box 0x80000000, ellipsoid 0x80000001);
+- per-cell scalar as a custom `_VOXEL` attribute (no POSITION/indices), buffer
+  embedded in the glb BIN chunk;
+- EXT_structural_metadata (schema + propertyAttributes) at the glTF top level;
+- axis swap: content [radius, angle, height] → glTF dimensions [radius, height,
+  angle], data laid out radius-fastest → height → angle-slowest (our VoxelGrid
+  is the transpose, so the encoder reorders);
+- implicit OCTREE tiling + a constant-availability .subtree (CesiumJS's voxel
+  traversal requires it);
+- tile transform = antenna ECEF; cylinder lifted by height/2 so data sits 0..H.
+
+`encode_voxels_glb`, `tileset_json_voxels`, `voxel_subtree_json` with structural
+tests (24 ds-3dtiles tests green). NaN → declared sentinel; statistics carry the
+fixed reflectivity transfer-function range. API routes + viewer + live
+render-verify in 1.142 are the next step.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+feat(api-3dtiles): voxel tileset/subtree/content routes + caps cylind…
+…
+e61554b
+```
+…er extents (#351)
+
+Serve the EXT_primitive_voxels cylinder tileset over HTTP, behind its own
+`…/voxel/` sub-path so the implicit-tiling `{level}/{x}/{y}/{z}` content/subtree
+URIs resolve relatively:
+- `GET /collections/{id}/voxel/tileset.json` — the cylinder voxel tileset, O(1)
+  from VolumeInfo (no grid sample); the content URI carries the resolved
+  quantity/datetime/resolution.
+- `GET /collections/{id}/voxel/subtrees/{*tile}` — the constant single-tile
+  availability subtree.
+- `GET /collections/{id}/voxel/content/{*tile}` — read_voxel_grid →
+  encode_voxels_glb, on a blocking thread under the shared render semaphore,
+  content-ETagged (same pattern as the mesh content path).
+
+`VoxelGridCaps` gains `radius_m`/`height_m` (the ground coverage radius =
+`coverage_radius_m`, and the height ceiling) so the tileset's
+3DTILES_bounding_volume_cylinder is sized to exactly match the grid the content
+samples — without reading the grid. collection_doc advertises a `voxels`
+representation + link (gated on voxel-grid support).
+
+ds-core/engine-odim/api-3dtiles tests green; clippy clean. Viewer VoxelPrimitive
+rendering + live render-verify in CesiumJS 1.142 is next.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+feat(3dtiles): viewer Voxels representation — VoxelPrimitive + reflec…
+…
+e815472
+```
+…tivity shader (#351)
+
+Adds "Voxels" to the View dropdown. Voxels are a CesiumJS VoxelPrimitive
+(ray-marched volume) loaded via Cesium3DTilesVoxelProvider.fromUrl on the
+`…/voxel/tileset.json` route — a separate path from the tileset frames model
+(which is per-tile content). MVP: a single volume at the active time (no frame
+preload/animation, so the time bar stays hidden); the low/med/high Resolution
+selector drives the grid dims.
+
+A reflectivity transfer-function CustomShader maps the per-cell metadata value
+(dBZ, property = the quantity) → colour + alpha: the clear-air floor / nodata
+sentinel and weak echo are transparent, stronger echo ramps blue→green→yellow→
+red→magenta and grows more opaque. Best-effort: a load failure (or a CesiumJS
+build without voxel support) reports and leaves the other representations alone.
+
+Offline-validated: the served content glb is a well-formed EXT_primitive_voxels
+cylinder (mode 2147483650, dims [128,48,360], 2.21M FLOAT cells, DBZH↔_VOXEL
+binding, −32..46 dBZ). Live CesiumJS 1.142 render-verify is pending (browser).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+fix(3dtiles): voxel tile transform must be ENU→ECEF, not identity (re…
+…
+9fb554d
+```
+…nder-verify)
+
+Live render-verify in CesiumJS 1.142: the voxel volume loaded and ray-marched,
+but tilted ~60° (a giant slanted slab) — the tile `transform` was
+identity-rotation + ECEF translation, so the parametric cylinder's local z (its
+height axis) aligned with global ECEF-Z, not local up. (The mesh products get
+away with identity because their vertices are absolute ECEF; a parametric
+cylinder needs the real local frame.)
+
+Now builds the East-North-Up → ECEF rotation at the antenna (east = [-sinλ,cosλ,
+0], north, up), so the cylinder stands upright on the terrain. Re-verified: the
+reflectivity volume sits correctly over southern Finland with coherent
+precipitation structure and visible vertical depth.
+
+CLAUDE.md documents the voxels representation + the load-bearing gotchas
+(fixtures-not-README, mode 2147483650, axis swap, ENU transform, implicit tiling).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+claude
+Bot
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Code Review
+This PR implements the Tier-B EXT_primitive_voxels voxel rendering path for radar data. The encoder logic, axis-swap, ENU transform fix, and test coverage are solid. Four real issues worth addressing:
+1. HTTP status inconsistency in get_voxel_subtree (handlers.rs)
+The subtree handler returns 404 NotFound when voxel_grid.is_none(), but the tileset and content handlers both return 400 BadRequest for the same condition. All three should agree — a collection that does not expose voxels is a client error (400), not not-found (404). The subtree handler also omits the radius_m > 0.0 && height_m > 0.0 guard that the tileset handler has, so a collection with VoxelGridCaps { radius_m: 0.0, height_m: 0.0 } returns 404 from the tileset but 200 from the subtree.
+2. Unchecked count * 4 multiplication in encode_voxels_glb (voxels.rs)
+After the checked-multiply chain that produces count, the expression count * 4 is an unchecked usize multiply before u32::try_from. On 64-bit targets MAX_VOXELS = 32M keeps this safe in practice, but nothing in the function signature enforces that invariant. Prefer count.checked_mul(4).ok_or(Tiles3dError::TooLarge("voxel buffer")) then u32::try_from.
+3. GLSL injection via quantity name (viewer/index.html)
+voxelShader(q) concatenates q (from $qty.value) directly into the shader source:
+```
+"  float v = fsInput.metadata." + quantity + ";"
+```
+The dropdown is populated from server-controlled collection metadata, so ODIM quantities are safe alphanumeric identifiers in practice. However, there is no client-side guard. WebGL GLSL injection is sandboxed to the caller's own GPU context (no server or cross-user impact), but a simple if (!/^[A-Z][A-Z0-9_]*$/.test(quantity)) throw ... before constructing the shader would harden this at no cost.
+4. geometricError: 0.0 undocumented deviation from CLAUDE.md
+CLAUDE.md encoder gotchas say "tileset geometricError > 0". The voxel tileset uses 0.0 at both the root and content levels. The render-verified result shows this works for the single-tile implicit-tiling case (nothing to refine to), but the deviation is unexplained. A short inline comment in tileset_json_voxels clarifying why 0.0 is correct for a one-tile voxel implicit-tiling tileset would prevent future editors from cargo-culting the CLAUDE.md rule here.
+Everything else looks correct and well-tested. The ENU→ECEF frame, axis-swap, nodata sentinel, BIN buffer padding, ETag caching, and render semaphore use all follow established project patterns correctly.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/src/handlers.rs
+State(state): State<AppState>,
+) -> Result<Response, Tiles3dError> {
+let state = state.load_full();
+let (engine, _config) = lookup(&state, &id)?;
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This returns NotFound (404) but the tileset and content handlers both return BadRequest (400) when voxel_grid.is_none(). All three cases represent the same error — a client requesting a representation a collection doesn't support — and should use a consistent status. Also, this handler skips the !(caps.radius_m > 0.0 && caps.height_m > 0.0) guard the tileset handler has: a collection with VoxelGridCaps { radius_m: 0.0, height_m: 0.0 } would return 404 from the tileset but 200 with a subtree response from this handler.
+Suggested change
+let (engine, _config) = lookup(&state, &id)?;
+return Err(Tiles3dError::BadRequest(format!(
+"collection '{id}' does not support voxels"
+)));
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/voxels.rs
+Outdated
+return Err(Tiles3dError::Empty);
+}
+let count_u32 = u32::try_from(count).map_err(|_| Tiles3dError::TooLarge("voxel count"))?;
+let byte_len = u32::try_from(count * 4).map_err(|_| Tiles3dError::TooLarge("voxel buffer"))?;
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+After the checked-multiply chain, count * 4 is an unchecked usize multiplication. If count were ever close to usize::MAX / 4 this would wrap before u32::try_from can catch it. MAX_VOXELS = 32M keeps this safe in the current call sites, but the function has no way to enforce that. Prefer:
+Suggested change
+let byte_len = u32::try_from(count * 4).map_err(|_| Tiles3dError::TooLarge("voxel buffer"))?;
+let byte_len = u32::try_from(count.checked_mul(4).ok_or(Tiles3dError::TooLarge("voxel buffer"))?)
+.map_err(|_| Tiles3dError::TooLarge("voxel buffer"))?;
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/viewer/index.html
+Outdated
+function voxelShader(quantity) {
+return new Cesium.CustomShader({
+fragmentShaderText: [
+"void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material) {",
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+quantity is concatenated directly into GLSL source. The dropdown is populated from server-controlled collection metadata so ODIM quantity names are safe alphanumeric identifiers in practice, but there is no client-side guard. WebGL GLSL injection is sandboxed to the caller's own GPU context (no cross-user impact), but adding a quick check before constructing the shader costs nothing:
+Suggested change
+"void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material) {",
+if (!/^[A-Z][A-Z0-9_]*$/.test(quantity)) throw new Error(`invalid quantity: ${quantity}`);
+return new Cesium.CustomShader({
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/voxels.rs
+}
+},
+"geometricError": 0.0,
+"extensionsUsed": ["3DTILES_bounding_volume_cylinder", "3DTILES_content_voxels"],
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+CLAUDE.md's encoder gotchas say "tileset geometricError > 0", but this uses 0.0. The value is correct for a single-tile implicit-tiling tileset (there is nothing to refine to), but the deviation is unexplained. A short comment here would prevent future editors from treating this as an oversight and "fixing" it to match the other products, which would break the voxel path.
+fix(3dtiles): voxel review round — consistent guards, checked mul, GL…
+…
+8741f76
+```
+…SL guard, GE comment
+
+Review on #373:
+- get_voxel_subtree now uses the same support/coverage gate + status codes as the
+  tileset/content handlers (no voxel grid → 400, no coverage → 404) — was 404 for
+  both and skipped the radius/height guard, so a `radius_m:0` collection 404'd at
+  the tileset but 200'd a subtree.
+- encode_voxels_glb: `count * 4` is now a checked multiply (a caller ignoring
+  MAX_VOXELS could otherwise wrap the usize before the u32 bound catches it).
+- voxelShader: guard the `quantity` interpolated into GLSL (`^[A-Z][A-Z0-9_]*$`)
+  — sandboxed to our own GPU context, but cheap defence-in-depth.
+- Commented why the voxel tileset uses `geometricError: 0` (correct for a
+  single-tile implicit set — nothing to refine to — unlike the `>0` mesh rule).
+
+ds-3dtiles 24 + api-3dtiles 22 tests green, clippy clean, viewer JS parses.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+mrauhala
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Addressed all four review findings in 8741f76:
+Subtree handler status/guard consistency — get_voxel_subtree now uses the same gate as the tileset/content handlers (no voxel grid → 400, no coverage → 404), so the three voxel routes agree.
+Unchecked count * 4 — now a checked multiply before the u32 bound.
+GLSL quantity interpolation — guarded with ^[A-Z][A-Z0-9_]*$ before building the shader.
+geometricError: 0 — commented why it's correct (single-tile implicit voxel set, nothing to refine to), so it isn't 'fixed' to match the mesh >0 rule.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/viewer/index.html
+Outdated
+// tiles — their own load path. MVP: a single volume at the active time (no
+// frame preload/animation), so the time bar stays hidden.
+if (rep === "voxels") {
+frameTimes = times.length ? times.slice(-MAX_FRAMES) : [null];
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Bug: time bar shown but non-functional in voxels mode.
+syncTimeBar() shows the scrubber whenever frameTimes.length > 1, which happens here for any multi-volume collection. But showFrame(i) only toggles visibility in frames[], which is always empty for the voxels path — dragging the slider does nothing to voxelPrimitive.
+The comment even says "so the time bar stays hidden", but nothing actually hides it. For the MVP (latest time only), pin frameTimes to a single slot to suppress the bar:
+Suggested change
+frameTimes = times.length ? times.slice(-MAX_FRAMES) : [null];
+frameTimes = [null];
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/voxels.rs
+Outdated
+/// Assemble a binary glTF (`.glb`) from a glТF JSON value + a BIN buffer. Both
+/// chunks are padded to a 4-byte boundary (JSON with spaces, BIN with zeros) per
+/// the glTF 2.0 spec.
+fn assemble_glb(gltf: &serde_json::Value, mut bin: Vec<u8>) -> Result<Vec<u8>, Tiles3dError> {
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+assemble_glb is duplicated across three modules.
+isosurface.rs and echo_top.rs both assemble GLBs; each carries its own private copy of this function with identical semantics (JSON chunk + BIN chunk, 4-byte padding per spec). Any future spec fix would need to be applied three times.
+Extract it once — e.g. pub(crate) fn assemble_glb(...) in lib.rs or a new gltf.rs helper module — and have all three callers reuse it.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/voxels.rs
+/// (`…/{level}/{x}/{y}/{z}.…`) the API serves; for a single tile only the
+/// `0/0/0/0` slot is available (see [`voxel_subtree_json`]).
+#[allow(clippy::too_many_arguments)]
+pub fn tileset_json_voxels(
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+content_uri / subtree_uri are not validated for path traversal.
+CLAUDE.md documents: "content_uri is validated (no ../absolute/scheme) in ds-3dtiles". The existing tileset_json_glb validates its URI; this function does not.
+In practice both strings are constructed server-side (user input passes through pct_encode/parse_datetime before reaching here), so the injection risk is very low. But the invariant is inconsistent and a future caller could pass an attacker-controlled URI. A short guard mirrors the existing pattern:
+```
+for uri in [content_uri, subtree_uri] {
+    if uri.contains("..") || uri.starts_with('/') || uri.contains("://") {
+        return Err(Tiles3dError::InvalidUri(uri.to_string()));
+    }
+}
+```
+fix(3dtiles): voxels show the reflectivity legend + honour the min dB…
+…
+9d789a3
+```
+…Z field
+
+Two gaps in the voxel viewer path:
+- The colour legend was hidden for voxels (gated on `!meta.mesh`), but voxels are
+  reflectivity-coloured. Now gated on a `legend` flag (points + voxels show it;
+  isosurface/echo-top don't). The voxel transfer-function shader is rebuilt FROM
+  the legend stops, so the volume colours match the legend bar exactly.
+- The `min dBZ` field did nothing for voxels. It now drives the shader's alpha
+  cutoff — `voxelClientFilter()` rebuilds the customShader with the new threshold
+  and reassigns it live (no network reload; verified 0 fetches), wired into the
+  `min dBZ` input/commit handlers alongside the point-cloud client filter.
+
+Render-verified in CesiumJS 1.142: legend shows for voxels and matches the
+volume; raising min dBZ to 30 instantly culls weak echo, leaving the strong
+convective cores.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+claude
+Bot
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Review
+Well-structured PR with solid test coverage (24 unit + 22 integration + live render-verify) and good documentation of the fixture-vs-README discrepancy. The encoder, API handlers, and semaphore/spawn_blocking wiring all comply with the architecture rules in CLAUDE.md. Three issues to address before merging:
+1. Bug — time bar shown but non-functional in voxels mode (viewer)
+Inline comment on viewer/index.html:341
+When a collection has >1 volume, syncTimeBar() shows the scrubber for the voxels path, but showFrame(i) only operates on frames[] — which is always empty here — so dragging the slider does nothing to voxelPrimitive. The comment in the code even says "so the time bar stays hidden" but nothing actually suppresses it. Fix: use frameTimes = [null] for the MVP single-volume case to keep the bar hidden.
+2. Code duplication — assemble_glb copied in three modules
+Inline comment on voxels.rs:155
+isosurface.rs, echo_top.rs, and now voxels.rs each carry a private assemble_glb with identical semantics (JSON + BIN chunks, 4-byte padding per glTF 2.0 spec). Any future spec fix needs three edits. Extract it as pub(crate) fn assemble_glb in lib.rs or a new gltf.rs helper.
+3. Consistency — content_uri/subtree_uri not validated in tileset_json_voxels
+Inline comment on voxels.rs:188
+CLAUDE.md states "content_uri is validated (no ../absolute/scheme) in ds-3dtiles", and tileset_json_glb does this. tileset_json_voxels does not. Risk is low (server constructs both strings; user input is percent-encoded before reaching here), but the invariant is broken and a future caller could pass attacker-controlled input.
+Minor (no action required)
+Voxel tileset.json and subtree responses lack ETags; the binary content handler has them. Not a correctness issue, just a missed cheap-304 opportunity for repeating clients.
+noData format: the schema property uses a scalar (NODATA_SENTINEL) while the primitive extension uses { "_VOXEL": [NODATA_SENTINEL] } (array-wrapped). Presumably fixture-verified, but worth a comment explaining why the formats differ.
+claude
+Bot
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Code Review
+Architecture & correctness: solid. The axis-swap, ENU→ECEF transform, NODATA sentinel, implicit-OCTREE subtree, and geometricError: 0 rationale are all correct and well-documented. Render-verify caught the one real encoder bug (identity vs. ENU transform) before merge. CLAUDE.md compliance is largely met: domain type returned by engine, semaphore + spawn_blocking pattern followed, ETag on content responses.
+Two issues worth fixing before merge:
+1. get_voxel_content missing the "no coverage yet" gate (medium)
+get_voxel_tileset and get_voxel_subtree both check caps.radius_m > 0.0 && caps.height_m > 0.0 and return 404 immediately when the site has not been scanned yet. get_voxel_content skips that check and falls through to read_voxel_grid + encode_voxels_glb. Those will eventually produce a 404 (via Tiles3dError::Empty), but only after acquiring a render semaphore slot and spawning a blocking task — a wasted resource hit that the sibling handlers avoid cheaply.
+Suggested fix in get_voxel_content immediately after the voxel_grid.is_none() check:
+```
+let caps = info.voxel_grid.as_ref().unwrap(); // just checked is_some above
+if !(caps.radius_m > 0.0 && caps.height_m > 0.0) {
+    return Err(Tiles3dError::NotFound(format!(
+        "collection '{id}' has no voxel coverage yet"
+    )));
+}
+```
+2. tileset_json_voxels skips content_uri path-traversal validation (minor)
+Every other tileset encoder in ds-3dtiles routes through tileset_value_for_region (lib.rs:252-259), which rejects empty, absolute, scheme-bearing, or ../-containing URIs. CLAUDE.md explicitly states this invariant holds for all ds-3dtiles content URIs.
+tileset_json_voxels embeds both content_uri and subtree_uri directly without that check. The API layer constructs both programmatically from validated inputs (quantity/datetime/resolution), so there is no immediate injection vector — but the library-level invariant is broken for this path. Calling the same guard (or extracting a shared helper) would restore it cheaply.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/src/handlers.rs
+Outdated
+let state = state.load_full();
+let (engine, _config) = lookup(&state, &id)?;
+let info = engine.volume_info();
+if info.voxel_grid.is_none() {
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The get_voxel_tileset and get_voxel_subtree handlers both guard on caps.radius_m > 0.0 && caps.height_m > 0.0 (returning 404) before doing any real work. This handler only checks voxel_grid.is_none(). Without the second guard, a request that arrives before the site has been scanned will still acquire the render semaphore and spawn a blocking task, only to get a 404 from encode_voxels_glb (via Tiles3dError::Empty).
+Add the same gate the sibling handlers use:
+Suggested change
+if info.voxel_grid.is_none() {
+if info.voxel_grid.is_none() {
+return Err(Tiles3dError::BadRequest(format!(
+"collection '{id}' does not support voxels"
+)));
+}
+let caps = info.voxel_grid.as_ref().unwrap();
+if !(caps.radius_m > 0.0 && caps.height_m > 0.0) {
+return Err(Tiles3dError::NotFound(format!(
+"collection '{id}' has no voxel coverage yet"
+)));
+}
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/voxels.rs
+}
+},
+"content": {
+"uri": content_uri,
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+content_uri (and subtree_uri a few lines below) are embedded directly without the path-traversal guard that all other ds-3dtiles tileset encoders apply via tileset_value_for_region (lib.rs:252-259 — rejects empty, absolute, scheme-bearing, and ../-containing URIs). CLAUDE.md calls this out as a library-level invariant.
+The API layer constructs the URI from validated inputs so there's no immediate attack vector, but the invariant is broken for anyone calling tileset_json_voxels directly in future. A validate_content_uri helper extracted from tileset_value_for_region and called at the top of this function would close the gap.
+fix(3dtiles): voxels — fill unmeasured with the no-echo floor, drop n…
+…
+e7628c3
+```
+…odata sentinel (no walls/floors)
+
+Render feedback: the voxel volume showed flat vertical **walls** and horizontal
+**floors** at its data boundaries (the cone of silence, below the lowest beam,
+the coverage edge). Cause: unmeasured (`NaN`) cells were written as an extreme
+nodata sentinel (-9999), and CesiumJS *trilinearly interpolates* the metadata
+before the shader — so the echo→-9999 transition was razor-sharp and grid-aligned
+(the same class of artefact as the isosurface "curtains").
+
+Now fill unmeasured cells with the no-echo floor (-32 dBZ, what clear air already
+carries) and declare no `noData`: the cylinder is a dense field whose low end the
+transfer function fades to transparent, so echo→background is a gentle gradient.
+Empty detection now keys on "any originally-finite cell" (an all-unmeasured grid
+is still 404). Re-verified live in CesiumJS 1.142 — soft, natural precipitation
+blobs, no walls/floors.
+
+ds-3dtiles 24 tests green (updated the nodata test → floor-fill + no-noData
+assertions); clippy clean.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/voxels.rs
+Outdated
+"classes": {
+"voxel": {
+"properties": {
+quantity: { "min": [stat_min], "max": [stat_max] }
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Spec compliance: statistics.min/max should be scalars for a SCALAR property.
+The 3D Tiles 1.1 metadata statistics spec says min/max values follow the same type as the property. For a SCALAR FLOAT32, both must be a plain JSON number — not a single-element array.
+Current output:
+```
+"DBZH": { "min": [0.0], "max": [70.0] }
+```
+Should be:
+Suggested change
+quantity: { "min": [stat_min], "max": [stat_max] }
+quantity: { "min": stat_min, "max": stat_max }
+CesiumJS may accept either form, but the array form is technically non-compliant and the test at the bottom of this file asserts json!([70.0]) which will also need updating. Worth fixing before this extension stabilises beyond CesiumGS.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/src/handlers.rs
+Outdated
+let state = state.load_full();
+let (engine, _config) = lookup(&state, &id)?;
+let info = engine.volume_info();
+if info.voxel_grid.is_none() {
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Inconsistency: missing radius_m > 0.0 && height_m > 0.0 guard before the expensive spawn_blocking call.
+get_voxel_tileset (line ~105) and get_voxel_subtree (line ~180) both check caps.radius_m > 0.0 && caps.height_m > 0.0 and return 404 immediately. This handler checks only voxel_grid.is_none(), so a zero-extent grid slips through, occupies a render semaphore slot, and hits read_voxel_grid + encode_voxels_glb before eventually surfacing as a 404 (from Tiles3dError::Empty).
+Suggested change
+if info.voxel_grid.is_none() {
+if info.voxel_grid.is_none() {
+return Err(Tiles3dError::BadRequest(format!(
+"collection '{id}' does not support voxels"
+)));
+}
+let caps = info.voxel_grid.as_ref().unwrap();
+if !(caps.radius_m > 0.0 && caps.height_m > 0.0) {
+return Err(Tiles3dError::NotFound(format!(
+"collection '{id}' has no voxel coverage yet"
+)));
+}
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/viewer/index.html
+frameTimes = times.length ? times.slice(-MAX_FRAMES) : [null];
+if (frameIdx >= frameTimes.length) frameIdx = frameTimes.length - 1;
+if (frameIdx < 0) frameIdx = 0;
+syncTimeBar();
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+UX bug: time scrubber appears for multi-volume collections but dragging it does nothing for voxels.
+syncTimeBar() will show the time bar when frameTimes.length > 1, but the scrubber's oninput/onchange path calls showFrame(i) → toggles frames[] visibility, which is always empty for the voxels representation. No loadVoxel is triggered on time changes, so the displayed volume never changes as the user drags.
+Two options:
+Hide the time bar for voxels (simplest for MVP): after syncTimeBar(), force $timeBar.hidden = true for the voxels path.
+Reload on scrub: hook onScrub/onNumCommit to call loadVoxel when currentRep === "voxels" (similar to how voxelClientFilter is wired for the dBZ field).
+Option 1 is consistent with the "MVP: single tile, no animation" framing in the PR description.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/voxels.rs
+dims: [usize; 3],
+quantity: &str,
+stat_min: f64,
+stat_max: f64,
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+content_uri and subtree_uri are not validated against path traversal / scheme injection.
+CLAUDE.md notes: "content_uri is validated (no ../absolute/scheme) in ds-3dtiles" — the existing tileset_json_glb enforces this. tileset_json_voxels is a public function that takes both URIs as raw &str parameters, so a future caller (or a subtle code path) could inadvertently pass an attacker-controlled value.
+The current in-tree caller constructs the URIs from controlled templates + percent-encoded query params, so the immediate risk is low — but the defence-in-depth check should be consistent with the other encoders. Add the same validate_content_uri (or equivalent) call used by tileset_json_glb for both parameters before the JSON is assembled.
+claude
+Bot
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Review: feat(3dtiles): true cylindrical voxels
+Overall a solid implementation — the encoder logic is well-reasoned, the axis-swap and ENU→ECEF frame gotchas are clearly documented, test coverage is thorough, and the semaphore/spawn_blocking wiring correctly follows the existing mesh-content pattern.
+Four issues to address before merging:
+Correctness
+statistics.min/max emitted as single-element arrays — For a SCALAR FLOAT32 property, the 3D Tiles 1.1 metadata statistics spec requires scalars, not [scalar]. CesiumJS appears to accept both in practice, but the encoding is non-standard. Inline comment on voxels.rs line 248.
+get_voxel_content missing coverage guard before spawn_blocking — The other two voxel handlers (tileset, subtree) both check caps.radius_m > 0.0 && caps.height_m > 0.0 and return 404 immediately. The content handler skips this, so a zero-extent collection occupies a render semaphore slot and runs through the full blocking read/encode path before eventually returning 404 via Tiles3dError::Empty. Inline comment on handlers.rs line 816.
+UX Bug
+Time scrubber shows but is non-functional for voxels — When voxels is selected on a multi-volume collection, syncTimeBar() makes the scrubber visible, but dragging it calls showFrame(i) which only toggles frames[] visibility — always empty for the voxels path. No loadVoxel is triggered on time changes. Either hide the bar for voxels (consistent with the MVP framing) or wire onScrub to re-call loadVoxel. Inline comment on viewer/index.html line 347.
+Defence-in-depth
+content_uri/subtree_uri not validated in tileset_json_voxels — CLAUDE.md documents that content URIs are validated against path traversal and scheme injection in ds-3dtiles; the existing tileset_json_glb does this. tileset_json_voxels is public and accepts both as raw parameters without the same check. The immediate caller constructs them safely, but the pattern should be consistent. Inline comment on voxels.rs line 200.
+No issues found with the ENU→ECEF transform, the glb assembly arithmetic (the as u32 casts are provably safe from the total bound check above them), the quantity guard in the GLSL shader, or the semaphore/spawn_blocking wiring.
+fix(3dtiles): voxels — smooth alpha + finer ray-march step (kill per-…
+…
+48371c2
+```
+…cell faceting)
+
+The voxel volume showed every cell's faces ("cell floors and walls everywhere")
+— not the data boundary (which looked fine), but a stack-of-translucent-cubes
+look throughout. Two causes, both client-side (sampling is already trilinear):
+- The transfer function had a HARD alpha step at the `min` threshold (a 0.04
+  floor + a jump to ~0.36 at v=min), so the min-dBZ isovalue around every echo
+  cell rendered as a visible skin. Now alpha ramps smoothly FROM 0 at `min`
+  (`clamp((v-min)*0.022, 0, 0.55)`) — density rendering, no shell.
+- The ray-march used the default ~1 sample/cell, aliasing with the grid. Set
+  `voxelPrimitive.stepSizeMultiplier = 0.4` (~2.5× finer) so the interpolated
+  field reads as a continuous volume.
+
+Render-verified in CesiumJS 1.142: a smooth volumetric precipitation cloud
+(soft storm cores, no per-cell facets) — together with the no-echo-floor fill
+(e7628c3) that keeps the value gradients gentle.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+claude
+Bot
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Review — feat(3dtiles): true cylindrical voxels (#351)
+The encoder is well-structured: the axis-swap logic is clearly documented and tested, the ENU→ECEF transform fix for the parametric cylinder is load-bearing and correctly implemented, checked arithmetic protects against overflow, and the test suite is extended appropriately. Four issues below, three of which are straightforward fixes.
+Issues
+1 — Statistics min/max stored as single-element arrays (spec non-compliance) voxels.rs:248
+Per the EXT_structural_metadata spec, statistics for a SCALAR property are scalars, not arrays. "min": [stat_min] should be "min": stat_min. CesiumJS 1.142 apparently tolerates the array form (render-verified), but it diverges from the spec. The unit test at line 1093 asserts the wrong (array) form and would need to change too.
+2 — Missing content_uri path-traversal validation in tileset_json_voxels voxels.rs:282
+CLAUDE.md states: "content_uri is validated (no ../absolute/scheme) in ds-3dtiles." The existing tileset_json_glb enforces this; tileset_json_voxels skips it. The URI is constructed server-side from validated components today so it is not currently exploitable, but the security invariant should be consistent inside ds-3dtiles.
+3 — get_voxel_content skips the coverage guard handlers.rs:816
+get_voxel_tileset and get_voxel_subtree both check caps.radius_m > 0.0 && caps.height_m > 0.0 before proceeding (returning 404 if no coverage yet). get_voxel_content only checks voxel_grid.is_none() and omits this guard. A zero-extent grid will eventually reach Tiles3dError::Empty → 404, but via a different code path and with a different error body than the other two handlers. The guard should be consistent.
+4 — Time scrubber visible but non-functional for voxels MVP index.html:347
+The voxels branch sets frameTimes to the full time array (up to MAX_FRAMES) and calls syncTimeBar(), which shows the play/scrub bar when the collection has multiple frames. Scrubbing changes frameIdx but never triggers loadVoxel, so the displayed timestamp and the rendered volume can diverge silently. The PR description says "the time bar stays hidden" for MVP; the code does not enforce that. The minimal fix is frameTimes = [null] in the voxels branch to pin it to latest and suppress the bar.
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/voxels.rs
+Outdated
+"classes": {
+"voxel": {
+"properties": {
+quantity: { "min": [stat_min], "max": [stat_max] }
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+EXT_structural_metadata statistics for a SCALAR property should be scalar values, not single-element arrays. "min": stat_min, "max": stat_max (without the []) is the spec-correct form. CesiumJS 1.142 tolerates the array form so render-verify passed, but this diverges from the spec and the unit test at line 1093 would need updating alongside.
+Suggested change
+quantity: { "min": [stat_min], "max": [stat_max] }
+quantity: { "min": stat_min, "max": stat_max }
+claude
+Bot
+reviewed
+Jun 9, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/voxels.rs
+}
+},
+"content": {
+"uri": content_uri,
+claude
+Bot
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+CLAUDE.md documents that ds-3dtiles is responsible for validating content_uri (no .., absolute paths, or scheme). tileset_json_glb in isosurface.rs enforces this; this function skips it. The URI is constructed from validated components in the API handler today, so there is no current attack vector — but the invariant should be consistent inside ds-3dtiles.
+Add the same validation the isosurface encoder applies before building the tileset JSON, e.g.:
+```
+if content_uri.contains("..") || content_uri.starts_with('/') || content_uri.contains("://") {
+    return Err(Tiles3dError::InvalidContentUri(content_uri.into()));
+}
+```
+mrauhala
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Fourth round addressed — 66a038a
+The "approved with minor findings" round:
+Finding
+Resolution
+Medium (robustness): count/grid.values could disagree → OOB panic in spawn_blocking
+debug_assert_eq!(grid.values.len(), count) before the transpose (zero release cost)
+Low (perf): smooth_grid radius sweep had r (largest stride) innermost → cache misses
+Reordered r outermost / h (stride 1) innermost — identical result, cache-friendly
+Low (cosmetic): validate_uri scanned .. over the whole URI, missing a/..?t=1
+Isolates the path (drops ?query/#fragment) before the segment scan; allows a harmless .. in a query value. Test added
+ds-3dtiles 26 + api-3dtiles 23 integration + 2 unit tests green; clippy clean.
+claude
+Bot
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Code review
+Overall: well-executed MVP for a notoriously underspecified draft extension. The axis-swap / azimuth-remap / ENU-transform details are all correctly reasoned and verified, the routing follows the existing patterns (semaphore-guarded spawn_blocking, content-derived ETags, validate_uri on every embedded URI), and the test coverage is thorough. Three findings below.
+1. assemble_glb is the third copy of glb-assembly logic — and the best one
+voxels.rs defines a private assemble_glb(gltf, bin) -> Result<Vec<u8>, Tiles3dError> that correctly uses u32::try_from(total) to guard against overflow. The inline equivalents in isosurface.rs (lines 498-518) and echo_top.rs (lines 439-453) cast total as u32 without a check and panic via expect on the JSON serialize instead of returning an error. The voxel variant is strictly better; it should be pub(crate) in lib.rs so the other two modules can drop their duplicates and inherit the overflow protection. Not a correctness bug at current mesh sizes, but worth consolidating before the LOD follow-up adds larger grids.
+2. 3DTILES_content_voxels.dimensions order is undocumented in the builder
+The tileset emits "dimensions": [n_r, n_a, n_h] (content/radar order) while the glb's EXT_primitive_voxels.dimensions is [n_r, n_h, n_a] (glTF order, after the axis swap). The integration test notes // content order, but tileset_json_voxels itself has no explanation. Since render-verification confirmed CesiumJS uses only the glb field for the actual layout, a one-line comment in the tileset builder would save the next reader from wondering whether the mismatch is intentional.
+3. voxelMin() fallback hardcodes 5 instead of reading REP_META
+The fallback 5 in function voxelMin() { ... return Number.isFinite(m) ? m : 5; } duplicates REP_META.voxels.numDefault. In practice $num.value is always valid when called (set from numDefault in onRepChange), so the fallback never fires — but if the default changes the two will silently diverge. Trivial fix: return Number.isFinite(m) ? m : parseFloat(REP_META.voxels.numDefault);
+claude
+Bot
+reviewed
+Jun 10, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/voxels.rs
+Outdated
+/// Assemble a binary glTF (`.glb`) from a glТF JSON value + a BIN buffer. Both
+/// chunks are padded to a 4-byte boundary (JSON with spaces, BIN with zeros) per
+/// the glTF 2.0 spec.
+fn assemble_glb(gltf: &serde_json::Value, mut bin: Vec<u8>) -> Result<Vec<u8>, Tiles3dError> {
+claude
+Bot
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This is the third glb-assembly implementation in the crate — isosurface.rs (~line 498) and echo_top.rs (~line 439) both have inline equivalents that use total as u32 (no overflow check) and .expect() on the JSON serialize. This version is strictly better: extracted function, u32::try_from(total) overflow guard, Result return. Consider making it pub(crate) in lib.rs so the other two modules can drop their copies and inherit the overflow protection before the LOD follow-up makes larger grids more likely.
+claude
+Bot
+reviewed
+Jun 10, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/voxels.rs
+"uri": content_uri,
+"extensions": {
+"3DTILES_content_voxels": {
+"dimensions": [n_r, n_a, n_h],
+claude
+Bot
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This uses content/radar order [n_r, n_a, n_h], while the glb's EXT_primitive_voxels.dimensions (line 132) is [n_r, n_h, n_a] (glTF order, after the axis swap). The integration test comments // content order but this site has no explanation. Since render-verification showed CesiumJS reads the glb field for the actual layout and appears to ignore this one, a short note here would prevent the next reader from treating the difference as a bug.
+claude
+Bot
+reviewed
+Jun 10, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/viewer/index.html
+Outdated
+}
+// The `min dBZ` field value for voxels (cells below it are fully transparent).
+function voxelMin() { const m = parseFloat($num.value); return Number.isFinite(m) ? m : 5; }
+claude
+Bot
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The fallback 5 duplicates REP_META.voxels.numDefault. In practice $num.value is always a valid number here (set from numDefault in onRepChange), so this path never fires — but if the default changes the two will silently diverge.
+Suggested change
+function voxelMin() { const m = parseFloat($num.value); return Number.isFinite(m) ? m : 5; }
+function voxelMin() { const m = parseFloat($num.value); return Number.isFinite(m) ? m : parseFloat(REP_META.voxels.numDefault); }
+refactor(3dtiles): consolidate glb assembly; doc dims order; viewer f…
+…
+a077482
+```
+…allback
+
+Fifth review round (66a038a, "well-executed MVP") — three findings:
+
+1. **One glb assembler, not three.** Promoted the voxel `assemble_glb` to
+   `pub(crate) ds_3dtiles::assemble_glb` and switched `isosurface::build_glb`
+   and `echo_top::build_glb` to it (both now return `Result`). They had inline
+   copies that cast `total as u32` (no overflow guard) and `expect`-panicked on
+   the JSON serialize; they inherit the `u32::try_from` check and the
+   `Tiles3dError::Serialize` path. Both mesh BIN buffers are f32/u8×4/u32 — always
+   4-aligned — so the shared 4-byte BIN padding is a no-op and the output is
+   byte-identical (all isosurface/echo-top wellformed tests still pass).
+
+2. **Document the dimensions-order asymmetry.** `tileset_json_voxels` emits
+   `3DTILES_content_voxels.dimensions = [n_r, n_a, n_h]` (content/radar order)
+   while the glb's `EXT_primitive_voxels.dimensions` is `[n_r, n_h, n_a]` (the
+   axis-swapped glТF order). Added a comment noting CesiumJS uses only the glb
+   field, so the tileset value is advisory — no longer a mystery to the next
+   reader.
+
+3. **Viewer `voxelMin()` fallback reads `REP_META`.** Was a hardcoded `5`
+   duplicating `REP_META.voxels.numDefault`; now derives from it so the two
+   can't silently diverge.
+
+ds-3dtiles 26 + api-3dtiles 23 integration + 2 unit tests green; clippy clean.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+mrauhala
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Fifth round addressed — a077482
+The "well-executed MVP" round:
+Finding
+Resolution
+assemble_glb is the third (and best) glb-assembly copy
+Promoted to pub(crate) assemble_glb; isosurface/echo_top build_glb now use it (both return Result) — they inherit the u32::try_from overflow guard + Serialize error path, dropping their total as u32 casts and expect panics. Both mesh BINs are always 4-aligned, so output is byte-identical (all wellformed tests pass)
+3DTILES_content_voxels.dimensions order undocumented
+Added a comment: content/radar order [n_r,n_a,n_h] here vs the glb's axis-swapped [n_r,n_h,n_a]; CesiumJS uses only the glb field
+voxelMin() fallback hardcodes 5
+Now parseFloat(REP_META.voxels.numDefault) — single source of truth
+ds-3dtiles 26 + api-3dtiles 23 integration + 2 unit tests green; clippy clean.
+claude
+Bot
+reviewed
+Jun 10, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/viewer/index.html
+const span = (lg.max - lg.min) || 1;
+const fs = [
+`vec3 voxRamp(float v){`,
+` vec3 ramp[${n}]=vec3[${n}](${ramp});`,
+claude
+Bot
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Bug — non-finite legend min/max produce invalid GLSL
+The fallback guard only fires when legend.stops is missing or too short; it does not fire when legend.min/legend.max are Infinity or NaN (which serde_json can emit for IEEE 754 special values). toFixed(2) on a non-finite value emits the string "Infinity" or "NaN", both of which are invalid GLSL tokens — the shader silently fails to compile and the volume goes dark.
+Suggested change
+` vec3 ramp[${n}]=vec3[${n}](${ramp});`,
+const lg = (legend && legend.stops && legend.stops.length >= 2
+&& Number.isFinite(legend.min) && Number.isFinite(legend.max))
+? legend
+: { min: 0, max: 70, stops: [{ color: "#0000ff" }, { color: "#ff0000" }] };
+claude
+Bot
+reviewed
+Jun 10, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/voxels.rs
+const PASSES: usize = 4;
+let [n_r, n_a, n_h] = dims;
+let idx = |r: usize, a: usize, h: usize| VoxelGrid::index_of(dims, r, a, h);
+let blur = |lo: f32, mid: f32, hi: f32| 0.25 * lo + 0.5 * mid + 0.25 * hi;
+claude
+Bot
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Missing unit test for the load-bearing azimuth offset
+The 270° constant is explicitly described in CLAUDE.md as "render-verified, not derived" — which makes it the one value in this encoder that can't be caught by a structural or round-trip test. A one-line assertion would serve as a regression tripwire if a future CesiumJS version shifts the cylinder-angle origin:
+```
+// E.g. in the existing test module:
+#[test]
+fn azimuth_mapping_north_maps_to_bearing_0() {
+    let n_a = 360;
+    // CesiumJS slot 0 (angle ≈ -π, i.e. "West" in ENU) should map to
+    // radar bin 90 (bearing 90°, East) given the 270° offset.
+    assert_eq!(grid_azimuth_index(0, n_a), 90);
+    // Slot 90 (angle ≈ -π/2, "South") → bearing 180°
+    assert_eq!(grid_azimuth_index(90, n_a), 180);
+}
+```
+Without it there's no automated signal if the fixture convention changes.
+claude
+Bot
+reviewed
+Jun 10, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/src/handlers.rs
+let _permit = state
+.render_semaphore
+.clone()
+.acquire_owned()
+claude
+Bot
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+high-resolution voxel holds the shared render semaphore for ~12 s
+read_voxel_grid + smooth_grid (4 passes over 11.8 M cells) is documented as ~12 s at high resolution. The permit is held across the entire spawn_blocking duration, so one high-resolution voxel request can block all concurrent WMS/Maps/Tiles renders for that period. The mesh products follow the same pattern but complete in < 1 s.
+Consider one of:
+A separate voxel semaphore (e.g. Arc<Semaphore::new(1)>) so voxel encodes serialise among themselves without touching the raster-render pool.
+Document that high should not be exposed as an accessible option in production (e.g. drop it from the viewer's <select> or gate it behind an operator flag).
+Not a hard blocker, but worth an explicit decision before this lands in production.
+claude
+Bot
+reviewed
+Jun 10, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/voxels.rs
+/// Separable 3-D smoothing of the (NaN-filled) grid in its native
+/// `[radius, angle, height]` index order — `PASSES` applications of a
+/// `[0.25, 0.5, 0.25]` kernel along each axis.
+claude
+Bot
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Missing unit test for the load-bearing azimuth offset
+The 270° offset is described both here and in CLAUDE.md as "render-verified, not derived" — it is the single correctness claim that can't be caught by a structural or binary round-trip test. A one-liner in the existing test module would serve as a regression tripwire if a future CesiumJS release shifts the cylinder-angle origin:
+```
+#[test]
+fn azimuth_mapping_spot_check() {
+    // CesiumJS angle slot 0 is at φ ≈ -π (-X/West in ENU).
+    // With the 270° offset the corresponding radar bin is East (≈ 90°).
+    assert_eq!(grid_azimuth_index(0, 360), 90);
+    // Slot n_a/4 is at φ ≈ -π/2 (South in ENU) → bearing 180°.
+    assert_eq!(grid_azimuth_index(90, 360), 180);
+}
+```
+claude
+Bot
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Review summary
+The voxel encoding chain is well-designed: the ENU→ECEF transform fix is load-bearing and clearly documented; the assemble_glb refactor correctly adds the missing BIN padding and u32-overflow guard; the three-gate (no caps → 400, zero radius → 404, non-root tile → 404) is consistent across all three voxel routes and matched by the advertisement logic; and the validate_uri split correctly isolates path segments from query strings. Test coverage is thorough (24 encoder + 22 integration tests). Three findings:
+1 — Bug (viewer, low severity): voxelShader in index.html — lg.min.toFixed(2) / lg.max.toFixed(2) produce "Infinity" or "NaN" if the collection's legend statistics are non-finite, emitting invalid GLSL. The fallback guard only fires on missing/short stops, not on non-finite min/max. Inline comment with a one-line fix posted on the const lg = decision.
+2 — Semaphore starvation (high resolution): read_voxel_grid + smooth_grid at high (11.8 M cells) is documented as ~12 s and holds the shared render semaphore throughout, blocking all concurrent WMS/Maps/Tiles renders for that window. The med default is fine; the concern is specifically that high is reachable from the viewer's <select> in production. Inline comment on the acquire_owned call with two mitigation options.
+3 — Missing test for the azimuth offset: The 270° constant in grid_azimuth_index is the one load-bearing value in the encoder that can't be caught by a structural test. Inline comment with a two-assertion spot-check that would catch a CesiumJS fixture-convention change.
+No security issues in the server-side path. The quantity regex guard in voxelShader is correct defence-in-depth. The validate_uri path/query split is a strictness improvement over the old code, not a regression.
+fix(3dtiles): voxel shader finite-guard, dedicated voxel pool, azimut…
+…
+b7fdab6
+```
+…h test
+
+Sixth review round (a077482) — three findings:
+
+1. **Bug (viewer): non-finite legend min/max → invalid GLSL.** `voxelShader`'s
+   fallback guard only fired on missing/short `stops`; a non-finite
+   `legend.min`/`max` (serde can emit `NaN`/`Infinity` for IEEE-754 specials)
+   reached `.toFixed(2)`, emitting the literal `"NaN"`/`"Infinity"` into the
+   shader → compile failure → dark volume. Guard now also requires
+   `Number.isFinite(min) && Number.isFinite(max)`.
+
+2. **Reliability: `high`-res voxel held the shared render semaphore ~12 s.**
+   `read_voxel_grid` + `smooth_grid` (11.8 M cells, 4 passes) ran on the raster
+   `render_semaphore`, so one `high` request could hold a WMS/Maps/Tiles render
+   slot for that window. Moved voxel content to a dedicated process-global
+   `VOXEL_SEMAPHORE` (LazyLock, sized to ¼ cores ≥1) — slow voxel encodes
+   serialise among themselves and never touch raster capacity. Mesh products
+   (<1 s) stay on the shared pool.
+
+3. **Test for the load-bearing 270° azimuth offset.** It's render-verified, not
+   derived — the one encoder value a structural test can't catch. Added
+   `azimuth_remap_pins_the_render_verified_270_offset`: spot-checks
+   `grid_azimuth_index` (for n_a=360 it's `(449−slot) mod 360`) at 4 points and
+   asserts the mapping is a bijection over all 360 bins, so a CesiumJS
+   convention shift trips a test instead of silently rotating the volume.
+
+ds-3dtiles 27 + api-3dtiles 23 integration + 2 unit tests green; clippy clean.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+mrauhala
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Sixth round addressed — b7fdab6
+Finding
+Resolution
+Bug: non-finite legend min/max → "NaN"/"Infinity" in GLSL → dark volume
+voxelShader fallback now also requires Number.isFinite(min) && Number.isFinite(max)
+high-res voxel (~12 s) held the shared render semaphore, blocking raster renders
+Voxel content moved to a dedicated process-global VOXEL_SEMAPHORE (¼ cores ≥1); it no longer touches the raster pool. Mesh products (<1 s) stay shared
+No test for the load-bearing 270° azimuth offset
+azimuth_remap_pins_the_render_verified_270_offset: pins grid_azimuth_index at 4 points ((449−slot) mod 360 for n_a=360) + asserts a bijection over all 360 bins
+Note: the actual mapping values are 89/359/269/179 (not the 90/180 in the inline suggestion — those were approximations; the test pins the render-verified values).
+ds-3dtiles 27 + api-3dtiles 23 integration + 2 unit tests green; clippy clean.
+claude
+Bot
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Code Review — feat(3dtiles): true cylindrical voxels (#351)
+Overall: The implementation is solid. The encoder is built against live CesiumJS fixtures rather than the stale README (the mode-constant catch is genuinely important), the ENU→ECEF transform bug was found and fixed by render-verify, the overflow/URI/non-finite guards are thorough, and the VOXEL_SEMAPHORE isolation from the raster pool follows CLAUDE.md's concurrency rules correctly. The assemble_glb refactor cleanly removes duplicated GLB assembly from the two existing encoders and adds the u32-overflow guard they were missing. Test coverage is good: structural GLB tests, the bijection test on the azimuth remap, and the voxels_not_advertised_without_coverage integration test all cover the non-obvious invariants.
+Three findings below, none blocking.
+Finding 1 — Performance: smooth_grid angle sweep has stride-n_h inner loop
+File: crates/ds-3dtiles/src/voxels.rs, angle sweep block in smooth_grid
+The current angle sweep is r → h → a (a innermost). Because idx(r, a, h) = n_a·n_h·r + n_h·a + h, stepping a jumps by stride n_h (56 for med, 64 for high). That is ~4 cache lines between adjacent reads in the hot path, across an array that is up to 48 MB (high grid after smoothing).
+Swapping to r → a → h (h innermost) gives stride-1 access on all three touched cells (a-1, a, a+1 rows) within the inner loop. The modular index can be hoisted out of the h loop:
+```
+// Angle (periodic).
+for r in 0..n_r {
+    for a in 0..n_a {
+        let a_lo = (a + n_a - 1) % n_a;
+        let a_hi = (a + 1) % n_a;
+        for h in 0..n_h {
+            let lo = src[idx(r, a_lo, h)];
+            let hi = src[idx(r, a_hi, h)];
+            dst[idx(r, a, h)] = blur(lo, src[idx(r, a, h)], hi);
+        }
+    }
+}
+```
+The height and radius sweeps already have the fast axis innermost; this makes the angle sweep consistent with them.
+Finding 2 — Consistency: voxel_subtree_json uses expect on serialization
+File: crates/ds-3dtiles/src/voxels.rs, voxel_subtree_json
+```
+serde_json::to_string(&subtree).expect("subtree serializes")
+```
+The literal JSON value can never fail to serialize, so this is not a real bug. But it is inconsistent with the Tiles3dError::Serialize variant this PR introduces specifically to replace expect-panics in encoder paths. If someone later adds a dynamic field here and forgets to update the return type, the panic would surface as an opaque Axum 500. Aligning with the rest of the PR would mean returning Result<String, Tiles3dError> and using .map_err(|e| Tiles3dError::Serialize(e.to_string())) — same shape as tileset_json_voxels.
+Finding 3 — Cosmetic: Cyrillic Т in doc comments
+File: crates/ds-3dtiles/src/voxels.rs
+Two instances of glТF use a Cyrillic Т (U+0422) instead of Latin T (U+0054) — visually identical in most fonts but technically wrong and will confuse grep/search. Appears in the module-level doc (lives at the glТF **top level**) and the transpose comment (into the glТF cylinder layout).
+claude
+Bot
+reviewed
+Jun 10, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/voxels.rs
+Outdated
+std::mem::swap(&mut src, &mut dst);
+// Angle (periodic).
+for r in 0..n_r {
+for h in 0..n_h {
+claude
+Bot
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The angle sweep has h middle and a innermost, but idx(r, a, h) = n_a·n_h·r + n_h·a + h means stepping a jumps by stride n_h (56 for med). The height and radius sweeps both put the stride-1 axis innermost; this one doesn't. Swapping to r → a → h hoists the modulo and gives stride-1 for all three reads:
+Suggested change
+for h in 0..n_h {
+// Angle (periodic).
+for r in 0..n_r {
+for a in 0..n_a {
+let a_lo = (a + n_a - 1) % n_a;
+let a_hi = (a + 1) % n_a;
+for h in 0..n_h {
+let lo = src[idx(r, a_lo, h)];
+let hi = src[idx(r, a_hi, h)];
+dst[idx(r, a, h)] = blur(lo, src[idx(r, a, h)], hi);
+}
+}
+}
+claude
+Bot
+reviewed
+Jun 10, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/voxels.rs
+Outdated
+"contentAvailability": [{ "constant": 1, "availableCount": 1 }],
+"childSubtreeAvailability": { "constant": 0, "availableCount": 0 }
+});
+serde_json::to_string(&subtree).expect("subtree serializes")
+claude
+Bot
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This expect is safe (constant literal), but it's inconsistent with the Tiles3dError::Serialize variant this PR introduces in assemble_glb to avoid exactly this pattern. Making this consistent also means a future dynamic field gets the right error path for free:
+Suggested change
+serde_json::to_string(&subtree).expect("subtree serializes")
+serde_json::to_string(&subtree).map_err(|e| Tiles3dError::Serialize(e.to_string()))
+(requires -> Result<String, Tiles3dError> on the function and ? at the call site in get_voxel_subtree)
+claude
+Bot
+reviewed
+Jun 10, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/voxels.rs
+Outdated
+//! README's `2147483647` is wrong);
+//! - the per-cell scalar is a custom vertex attribute (`_VOXEL`), no `POSITION`,
+//! no indices; the buffer is embedded in the glb BIN chunk;
+//! - `EXT_structural_metadata` (schema + `propertyAttributes`) lives at the glТF
+claude
+Bot
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Cyrillic Т (U+0422) instead of Latin T here — visually identical in most fonts. Same issue on the transpose comment around line 101 (into the glТF cylinder layout). Worth fixing before the branch merges so grep works correctly.
+refactor(3dtiles): cache-friendly angle sweep, subtree Result, fix Cy…
+…
+86469d1
+```
+…rillic Т
+
+Seventh review round (b7fdab6) — three findings, none blocking:
+
+1. **Performance:** `smooth_grid`'s angle sweep looped `a` (stride `n_h`)
+   innermost. Reordered to `h` (stride 1) innermost with the periodic neighbour
+   indices hoisted out of the `h` loop — stride-1 access on all three rows,
+   consistent with the height/radius sweeps. Byte-identical output.
+
+2. **Consistency:** `voxel_subtree_json` `expect`-panicked on serialize (a
+   constant literal, so never fires) — but the PR added `Tiles3dError::Serialize`
+   precisely to retire those. Now returns `Result<String, Tiles3dError>` via
+   `map_err`; the handler maps it to a 500 with context instead of an opaque
+   panic if a dynamic field is ever added.
+
+3. **Cosmetic:** six doc-comment `glTF`s used a Cyrillic `Т` (U+0422) instead of
+   Latin `T` — visually identical, but breaks grep/tooling. Replaced all.
+
+ds-3dtiles 27 + api-3dtiles 23 integration + 2 unit tests green; clippy clean.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+mrauhala
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Seventh round addressed — 86469d1
+Finding
+Resolution
+Perf: smooth_grid angle sweep had a (stride n_h) innermost
+Reordered to h (stride 1) innermost, neighbour indices hoisted — consistent with the height/radius sweeps; byte-identical
+Consistency: voxel_subtree_json expect-panicked on serialize
+Now returns Result<String, Tiles3dError> via map_err (handler maps to a contextual 500) — aligns with the Serialize variant this PR added
+Cosmetic: Cyrillic Т (U+0422) in 6 glTF doc comments
+Replaced all with Latin T
+ds-3dtiles 27 + api-3dtiles 23 integration + 2 unit tests green; clippy clean.
+claude
+Bot
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Code review — feat(3dtiles): true cylindrical voxels (#351)
+Overview
+Adds the Tier-B EXT_primitive_voxels volume-rendering path: new voxels.rs encoder, three API routes under .../voxel/, viewer plumbing, and a VOXEL_SEMAPHORE to isolate slow high-res encodes from the raster render pool. The ENU→ECEF transform bug (latitude tilt) found during render-verify is fixed. Architecture compliance is clean: ds-3dtiles stays framework-free, the API layer owns bytes, CLAUDE.md rules followed throughout.
+Real issues
+1. assemble_glb silent byteLength contract (latent correctness)
+The function pads bin to 4-byte alignment but the caller-supplied JSON's buffers[0].byteLength and bufferViews[0].byteLength were set from the pre-padding length. All current callers emit 4-aligned BINs (f32/u32/u8[4] only), so no malformed glTF is produced today — but a future caller adding e.g. a VEC2 u8 attribute would silently produce invalid glTF. See inline comment on crates/ds-3dtiles/src/lib.rs.
+2. validate_uri misses the data: scheme (minor gap)
+uri.contains("://") does not catch data:text/html,... (no double-slash). Today's callers are server-side and build safe URIs, so this is defence-in-depth only — but the function's own doc promises to block scheme-qualified URIs. See inline comment.
+3. hexToGlslVec3 injects NaN into GLSL on malformed hex (robustness)
+If legend.stops[i].color is not a valid #rrggbb string, parseInt returns NaN, NaN.toFixed(4) emits the literal "NaN" into the shader source, and the volume silently goes black. The fallback guarantees two hard-coded stops, limiting exposure, but the failure mode is silent. See inline comment.
+4. voxelClientFilter falls back to a re-fetch on shader error (minor)
+Returning false on a voxelShader throw causes onNumCommit → loadFrames → loadVoxel, which will fail again with the same error. Harmless in practice but loops; a sticky error flag would be cleaner.
+Positive observations
+Azimuth remap pinned by a test (azimuth_remap_pins_the_render_verified_270_offset) with explicit slot→index values — the right way to record an empirically-derived constant a spec change would silently rotate.
+The 270° vs 90° offset explanation in the doc comment is thorough and flags the need for render-verification.
+is_root_voxel_tile 404-ing out-of-range coordinates is correct — silently serving the root for arbitrary coordinates would mask client bugs.
+No noData + floor substitution for unmeasured cells is well-reasoned and documented; the alternative (hard sentinel + CesiumJS trilinear interpolation) was verified to produce visible walls.
+VOXEL_SEMAPHORE sized at 1/4 cores (>=1) and isolated from the raster semaphore is exactly right per CLAUDE.md concurrency rules.
+Test coverage is solid: 24 structural + 22 API integration tests; voxels_not_advertised_without_coverage validates the gate-matching contract.
+Minor notes (no action required)
+The smooth_grid radius-pass comment says "cache-friendly" but the lo/hi accesses jump n_a*n_h elements (~80 KB for med). Not a problem at these grid sizes — the comment slightly over-claims.
+voxelPrimitive.stepSizeMultiplier = 1.0 is the default, but the comment explaining why a smaller value was tried and discarded is worth keeping.
+Generated with Claude Code
+claude
+Bot
+reviewed
+Jun 10, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/lib.rs
+}
+while !bin.len().is_multiple_of(4) {
+bin.push(0);
+}
+claude
+Bot
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Silent byteLength mismatch if BIN isn't 4-aligned.
+bin is padded here but the bufferViews[0].byteLength and buffers[0].byteLength values in the caller's JSON were already serialised before this padding. If a future caller provides a non-4-aligned BIN, the glTF JSON will understate the buffer size and the result will fail validation (or crash a strict parser).
+All current callers (voxels, isosurface, echo-top) happen to produce 4-aligned BINs, so nothing breaks today — but the contract is invisible. Consider asserting it at the call site, or having the function accept the byte-length separately and patch the JSON itself:
+Suggested change
+}
+while !bin.len().is_multiple_of(4) {
+bin.push(0);
+}
+// INVARIANT: callers must ensure bin.len() was already 4-aligned before
+// passing it here, so the padding above is a no-op and the byteLength
+// values in `gltf` remain correct. A mismatched caller would silently
+// produce invalid glTF — add a debug_assert if this ever extends to
+// non-f32/u32 attributes.
+debug_assert!(
+bin.len() % 4 == 0 || true, // always true after padding; documents the invariant
+"BIN padding changed byteLength — update bufferViews/buffers in gltf"
+);
+Actually the cleanest fix is probably a debug_assert_eq!(pre_pad_len, bin.len()) taken before the loop, so a future regression fails loudly in tests rather than silently in prod.
+claude
+Bot
+reviewed
+Jun 10, 2026
+View reviewed changes
+Comment thread
+crates/ds-3dtiles/src/lib.rs
+if uri.is_empty()
+|| uri.starts_with('/')
+|| uri.contains("://")
+|| path.split('/').any(|s| s == "..")
+claude
+Bot
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+data: URI scheme not blocked.
+uri.contains("://") catches http://, https://, file://, etc., but not data:text/html,... (no //). The function's doc says it rejects "scheme-qualified" URIs — this is a gap.
+Today's callers are all server-side and build paths like content/{level}/{x}/{y}/{z}.glb, so there's no real vector. But since this is a pub(crate) API doc'd as defence-in-depth, a tighter check would match the stated contract:
+Suggested change
+|| path.split('/').any(|s| s == "..")
+|| uri.contains("://")
+|| uri.contains(':') // blocks data:, javascript:, etc. (server-relative paths never have a colon)
+A colon is not valid in a relative URI path segment (RFC 3986 §3.3), so rejecting any URI containing : still permits all legitimate callers.
+claude
+Bot
+reviewed
+Jun 10, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/viewer/index.html
+const r = parseInt(hex.slice(1, 3), 16) / 255;
+const g = parseInt(hex.slice(3, 5), 16) / 255;
+const b = parseInt(hex.slice(5, 7), 16) / 255;
+return `vec3(${r.toFixed(4)},${g.toFixed(4)},${b.toFixed(4)})`;
+claude
+Bot
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+NaN injected into GLSL on malformed hex.
+If hex is not a 7-char #rrggbb string (e.g. a missing #, short string, or non-hex chars), parseInt(hex.slice(1, 3), 16) returns NaN. Then (NaN / 255).toFixed(4) emits the literal string "NaN" into the GLSL source, the shader fails to compile, and the volume silently goes black — no error in the UI.
+The stop colours come from the server's reflectivity colormap so the happy path is safe, but a single bad entry in a future legend stops array would be very hard to diagnose. A one-line guard makes the failure visible:
+Suggested change
+return `vec3(${r.toFixed(4)},${g.toFixed(4)},${b.toFixed(4)})`;
+return `vec3(${r.toFixed(4)},${g.toFixed(4)},${b.toFixed(4)})`;
+Consider validating before the .toFixed call:
+```
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b))
+    throw new Error("invalid stop color: " + hex);
+  return `vec3(${r.toFixed(4)},${g.toFixed(4)},${b.toFixed(4)})`;
+```
+The throw propagates to voxelShader's try-catch and surfaces via setStatus, same as the CesiumJS capability check.
+claude
+Bot
+reviewed
+Jun 10, 2026
+View reviewed changes
+Comment thread
+crates/api-3dtiles/viewer/index.html
+function voxelClientFilter() {
+if (($rep.value || "points") !== "voxels" || currentRep !== "voxels" || !voxelPrimitive) return false;
+try { voxelPrimitive.customShader = voxelShader($qty.value, legendData, voxelMin()); } catch (e) { console.error(e); return false; }
+viewer.scene.requestRender();
+claude
+Bot
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Silent retry loop on shader error.
+When voxelShader(...) throws (e.g. because hexToGlslVec3 gets a bad colour), this returns false. The caller (onNumCommit) then falls through to loadFrames(false), which calls loadVoxel, which calls voxelShader again — same error, same result, indefinitely on every change event. The user sees no error message and the spinner may stall.
+The fix is to not signal "handled" when the handler errored:
+Suggested change
+viewer.scene.requestRender();
+try { voxelPrimitive.customShader = voxelShader($qty.value, legendData, voxelMin()); } catch (e) { console.error(e); setStatus("shader error: " + e.message, true); return true; }
+Returning true here prevents the loadFrames fallback (same as the success path). The setStatus surfaces the error instead of silently looping.
+Hide details
+View details
+mrauhala
+merged commit e6215eb
+into
+main
+Jun 10, 2026
+12 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+mrauhala
+deleted the
+feat/3dtiles-voxels
+branch
+June 10, 2026 08:28
+This was referenced Jun 10, 2026
+Epic: OGC 3D Tiles for volumetric weather (radar polar volumes first)
+#346
+Open
+3D Tiles voxels: octree LOD and national mosaic after single-tile support
+#351
+Open
+3D Tiles voxels: 4 deferred robustness nits from #373 review
+#374
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,152 @@
+﻿
+SDF Raymarching
+SDF Raymarching
+Useful Links
+A Basic SDF Raymarcher
+I wrote a simple SDF raymarcher! It's about 100 lines long, and is public domain via CC0!
+Ronja's Shader Tutorials
+Ronja's tutorials are a series of clear, comprehensible tutorials on various shader related topics.
+Personally, I've found her writting on signed distance fields to be the most accessible on the
+subject.
+Inigo Quilez's Articles
+Inigo Quilez has written a great deal about using
+signed distance
+functions to model complex shapes,
+rendering
+them, and related topics.
+hg_sdf
+This page discusses in brief detail the math behind signed distance functions, and provides
+code GLSL code samples as well. Handy to cross reference with
+IQ's article on SDFs
+when confused.
+Help What is an "SDF"
+A signed distance is simply a number that tells you how far away you are from something,
+and can be positive or negative. If the number is positive, then you are not within something. If
+if the number is negative, then that means you are within something. The absolute value of the
+number is the distance to the closest surface. If the number is zero, then you are on the surface
+of the object.
+A signed distance field is a field or continuum of signed distance values. So, for a given
+point in space, there exists a signed distance value that you can find by some means or another.
+This could be stored in the pixels of an image, or functions might be used to calculate the
+distance values.
+A signed distance function is a function that takes a point in space and some parameters to
+describe a shape, and returns the distance from the given point to the closest surface of the
+described object.
+I highly recommend reading Ronja's
+2D Signed Distance Field Basics
+and
+2D SDF Combination
+articles for a detailed and clear explanation on how signed distance functions work, and how to model
+interesting shapes with them.
+Help What is "Raymarching"?
+Raymarching is when you don't know where the heck something is, so you describe each pixel you
+want to render as a "ray" from the view origin. Then for each ray, you "march" along the ray until
+you hit an object.
+This is inevitably to be confused with raytracing, which is when you know where the object
+and simply calculate the intersection between it and the ray to determine the travel distance. And
+raycasting is the thing that doom did.
+This gets further confusing, because easiest way to render 3D SDFs via raymarching is via a technique
+that is commonly called "sphere tracing", which is not to be confused with raytracing spheres, which
+could also be called that, I suppose. Graphics programmers are terrible at naming things.
+SDF Raymarching Algorithm: "Sphere Tracing"
+...as in the SDF one, not the ray-sphere intersection one.
+This is pretty much the platonic ideal raymarching algorithm.
+Consider the following GLSL-flavored pseudocode:
+bool RayMarch(vec3 RayOrigin, vec3 RayDirection, out vec3 Position)
+{
+float Traveled = 0.0;
+while (Traveled < MaxTravelDistance)
+{
+Position = RayDirection * Traveled + RayOrigin;
+float Guess = SignedDistanceFunction(Position);
+if (Guess <= 0.0)
+{
+return true;
+}
+else
+{
+Traveled += Guess;
+}
+}
+return false;
+}
+Congrats! Now you know how sphere tracing works.
+Sphere tracing requires very few iterations when the ray hits an object dead-on and does
+not fly by something. Hiting an object at an accute angle, or running parallel to an object
+without hitting it requires substantially more iterations to calculate.
+SDF Raymarching Algorithm: "Coverage Search"
+The "coverage search" algorithm is a SDF raymarching algorithm
+I came up with in an effort
+to try to solve ray hit/miss in fewer iterations than sphere tracing.
+For this, you need the ray origin and ray direction as before, but also an estimated start and
+end travel distance (such as from the ray intersection with a simple bounding volume).
+The algorithm starts in the middle of the bounds, calculates the signed distance for that point.
+From there, we determine the coverage along the ray of that sample, which gives us a
+start and end travel distance, and we note the sign returned by the distance function.
+From here, we take the mid point between the ray's start travel distance and the
+coverage span's start distance to produce a new point to plug into the signed
+distance function. Then we use that to produce a new coverage span, and recurse
+until the ray's start travel distance is subsumed by a coverage span.
+At this point, we either have enough information to determine where the ray hit was if it occured
+before the mid point. Otherwise we have to repeat the same process from the middle to the end
+of the ray.
+Here is a GLSL-flavored pseudocode implementation:
+struct Coverage
+{
+float Low;
+float High;
+int Sign;
+};
+bool CoverageSearch(vec3 RayOrigin, vec3 RayDirection, float TravelStart, float TravelEnd, out vec3 Position)
+{
+float PivotTravel = (TravelStart + TravelEnd) * 0.5;
+float PivotRadius = SignedDistanceFunction(RayDirection * PivotTravel + RayOrigin);
+Stack.Push(Coverage(TravelEnd, TravelEnd, 0));
+Stack.Push(Coverage(PivotTravel - abs(PivotRadius), PivotTravel + abs(PivotRadius), sign(PivotRadius)));
+Coverage Cursor = Coverage(TravelStart, TravelStart, 0);
+while(Stack.Size() > 0)
+{
+if (Stack[Top].Low <= Cursor.High)
+{
+Cursor = Stack.Pop();
+}
+else
+{
+PivotTravel = (Stack[Top].Low + Cursor.High) * 0.5;
+PivotRadius = SignedDistanceFunction(RayDirection * PivotTravel + RayOrigin);
+Coverage Next = Coverage(PivotTravel - abs(PivotRadius), PivotTravel + abs(PivotRadius), sign(PivotRadius));
+if (abs(Stack[Top].Sign + Next.Sign) > 0 && Stack[Top].Low <= Next.High)
+{
+Stack[Top].Low = Next.Low;
+}
+else
+{
+Stack.Push(Next);
+}
+}
+}
+if (Cursor.Sign == -1)
+{
+Position = RayDirection * max(TravelStart, Cursor.Low) + RayOrigin;
+return true;
+}
+else
+{
+Position = RayDirection * TravelEnd + RayOrigin;
+return false;
+}
+}
+The above hand waves a bit for clarity (eg, the stack would be implemented with a small array), but
+is reasonably close to a real implementation.
+By my analysis, the Coverage Search algorithm should perform about the same (in terms of number
+of calls to the SignedDistanceFunction in the ideal case, but should result in half as many
+calls to the function when the average signed distance approaches zero without hitting zero.
+In practice? This needs some work yet. In my experimentation so far, the stack's size needs to
+be about 10 for this to work. My initial (non-shader) implementation for analysis required only a
+stack of size 4, so I'm not sure where the discrepancy is at the moment. Perhaps there is a bug
+in my GLSL implementation.
+The main problem with this approach is that the stack eats up your shader's occupancy, and this
+approach is also branchier than the sphere tracing approach. Your SignedDistanceFunction
+has to be the right kind of expensive for this approach to be worthwhile, and it also depends
+on the content of your scene. This approach may just be better for environments
+that are suitable for recursive algorithms, but I haven't tested that yet.

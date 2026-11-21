@@ -1,0 +1,176 @@
+Contribute to taojin-6/volumetric_kit_recon development by creating an account on GitHub.
+
+feat(mesh): the draw command, written by the kernel that counts it by taojin-6 · Pull Request #49 · taojin-6/volumetric_kit_recon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+taojin-6
+commented
+Aug 3, 2026
+Copy link
+Copy Markdown
+Owner
+Blocker 4 — the last of the four MarchingCubesConfig's TODO(mesh) enumerates. Stacked on #48, which is stacked on #47.
+The counter becomes the command
+The count round-tripped to the host because nothing else was possible: counter_ was four bytes with no INDIRECT_BUFFER usage and no place on DeviceMesh, so no vkCmdDrawIndexedIndirect could be expressed.
+VkDrawIndexedIndirectCommand's first field is indexCount, and the kernel's atomic already sits at offset 0. So counting three per triangle instead of one makes the accumulator the command's own index count — the extraction writes a drawable command as a side effect of work it was already doing:
+```
+uint tri = atomicAdd(index_count, 3u) / 3u;
+```
+The quotient is the triangle's slot exactly as before. The units changed; tri didn't.
+One line of GLSL, no second dispatch. That mattered: a finalize kernel would need another submit_single_time, which blocks on a fence — adding a full GPU round trip to save a host one.
+Three details that aren't incidental
+The command lives in the slot, not beside the ring. It's part of the mesh — a consumer drawing generation N reads it for its whole frame, so one shared command would hand N+1's count to N's draw. Same hazard #48's arena ring exists for, on 20 bytes instead of 50 MB.
+Clamped before any handle escapes. The kernel counts triangles it dropped as well as ones it wrote — deliberately, since that over-count is what the host refits from — so on an undersized guess indexCount exceeds the arena and a draw would read past it. The refit re-runs and the second pass fits, so a caller's command is in range either way; the clamp makes that true by construction rather than by tracing control flow, for four bytes on a buffer already mapped and already read.
+The GLSL name went with the meaning. tri_count holding an index count is the quietly-wrong label this repo keeps conventions in platform-neutral code to avoid. It's index_count in a DrawCommand block now.
+Coverage
+Pinned by the suite, not by inspection: reverting the atomic to count triangles fails recon_mesh_marching_cubes and its sparse counterpart. The new assertions cover the handle, both usage bits, and that the command rings with the slots.
+What is not asserted: instanceCount == 1 and the three zero offsets. They have no observable effect until something issues a draw, and nothing in recon can — gfx's indirect-vs-direct pixel-equality test is what closes that, on the side that owns the draw. Said so in the test rather than leaving it to be assumed.
+26/26 green, pre-commit clean.
+Seam B after this
+All four blockers are addressed across #47, #48 and this. What remains is outside recon: gfx#87 reimplemented against current main (its four open questions have answers now — the app owns the dependency and gates on the host, ring depth is frames-in-flight + 1, recon writes the whole command, UINT32), and then the iOS app binds directly and download() + upload_mesh() delete — ~53 MB through the host per remesh for data that never left the device.
+🤖 Generated with Claude Code
+feat(mesh): the draw command, written by the kernel that counts it
+…
+bb84632
+```
+Blocker 4, and the last of the four between recon's device mesh and the
+renderer drawing it. The count round-tripped to the host because there
+was nothing else it could do: counter_ was four bytes with no
+INDIRECT_BUFFER usage and no place on DeviceMesh, so no
+vkCmdDrawIndexedIndirect could be expressed at all.
+
+The counter *becomes* the command. VkDrawIndexedIndirectCommand's first
+field is indexCount, and the kernel's atomic already lives at offset 0 --
+so counting three per triangle instead of one makes the accumulator the
+command's own index count, and the extraction writes a drawable command
+as a side effect of the work it was doing anyway. The quotient is the
+triangle's slot exactly as before: the units changed, `tri` did not.
+
+That is one line of GLSL and no second dispatch. The alternatives were
+worse in kind, not just in size -- a finalize kernel would cost another
+submit_single_time, and submit_single_time blocks on a fence, so it
+would add a full GPU round trip per extract to save a host one.
+
+The command lives in the slot, not beside the ring. It is part of the
+mesh: a consumer drawing generation N reads it for the duration of its
+frame, so one shared command would hand N+1's count to N's draw -- the
+same hazard the arena ring exists for, on 20 bytes instead of 50 MB.
+
+Clamped before any handle escapes. The kernel counts triangles it
+*dropped* as well as ones it wrote, deliberately, because that
+over-count is what the host refits from -- so on an undersized guess
+indexCount ends larger than the arena and a draw would read past it. The
+refit re-runs and the second pass fits, so a caller's command is in
+range either way; the clamp makes that true by construction rather than
+by tracing the control flow, for four bytes on a buffer already mapped
+and already read.
+
+The GLSL name went with the meaning: `tri_count` holding an index count
+is the kind of quietly-wrong label this repo keeps conventions in
+platform-neutral code to avoid. It is `index_count` in a `DrawCommand`
+block now.
+
+Pinned by the suite rather than by inspection: reverting the atomic to
+count triangles fails recon_mesh_marching_cubes and its sparse
+counterpart. What the tests do *not* assert is instanceCount and the
+three offsets -- they have no observable effect until something issues a
+draw, and nothing here can. gfx's indirect-vs-direct pixel-equality test
+is what closes that, on the side that owns the draw. 26/26 green.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+force-pushed
+the
+feat/seam-b-indirect-draw
+branch
+from
+d6a4afe to
+bb84632
+Compare
+August 3, 2026 07:27
+taojin-6
+changed the base branch from
+feat/seam-b-arena-ring
+to
+main
+August 3, 2026 07:27
+fix(mesh): count indices consistently, and bound the command everywhere
+…
+5428790
+```
+Review of the draw-command slice found that changing what the append
+atomic counts moved every site that reads it, and only some moved.
+
+- The uint32 overflow guard still bounded triangles while the counter had
+  become indices, leaving it 3x too loose -- and 2^32 % 3 == 1, so a wrap
+  also desynchronises the /3 that recovers the slot index, corrupting the
+  surface while returning ok. Bound in indices.
+- The clamp that bounds indexCount by the arena ran only where the loop's
+  exit condition already makes it a provable no-op, and was skipped on the
+  two failure returns that actually leave the command past the end. Moved
+  to those, where at slot_count == 1 a live DeviceMesh names that buffer.
+- The GLSL contract sentence became false in the same edit; it is the
+  specification the refit protocol rests on, so restate it in indices.
+  The open-coded 3 is now kIndicesPerTriangle on both sides of the ABI.
+
+Two adjacent bugs, neither about the command:
+
+- The host extract overloads claim a slot but return no generation, and
+  download does not release, so a consumer at slot_count > 1 exhausted the
+  ring and then failed permanently. They release their own slot now.
+- The empty extract advanced the generation without stamping a slot;
+  released_through_ is a high-water mark, so retiring the empty generation
+  marked the still-drawn mesh's slot released too. It claims and stamps a
+  slot, and zeroes its command instead of inheriting a live count.
+
+Nothing pinned the command: mutating emitted*3 to emitted passed the whole
+suite, and reverting the atomic to count triangles passed the sparse one
+(dense and sparse share mcEmitCell). The config test now reads the command
+back through vkCmdCopyBuffer -- making it a real consumer of
+extra_indirect_usage -- and the sparse test pins the units against the
+fixture's analytic surface area. Both mutations fail now.
+
+Also: queue_families on MarchingCubesConfig reaching all three buffers,
+sharing_mode published on DeviceMesh, valid() covering the command,
+static_asserts on the command layout, and the host-visible placement
+recorded as a TODO rather than left invisible.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Hide details
+View details
+taojin-6
+merged commit 2fc9b88
+into
+main
+Aug 3, 2026
+12 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+taojin-6
+deleted the
+feat/seam-b-indirect-draw
+branch
+August 9, 2026 07:29
+taojin-6
+mentioned this pull request
+Oct 23, 2026
+build: core 0.19.0; the viewer on gfx with it
+#271
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

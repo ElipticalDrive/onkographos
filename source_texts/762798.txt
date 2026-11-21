@@ -1,0 +1,1370 @@
+arXiv:2606.01493v1 [cs.CV] 31 May 2026
+SplatShot: 3D Face Avatar Generation from a Single
+Unconstrained Photo
+Zhixuan Ge
+Rice University
+Houston, TX 77005
+zg33@rice.edu
+Hao Liang
+Rice University
+Houston, TX 77005
+hl106@rice.edu
+Soumendu Majee
+Samsung Research America
+Plano, TX 75023
+email
+Joanni Li
+Rice University
+Houston, TX 77005
+jl561@rice.edu
+Ashok Veeraraghavan
+Rice University
+Houston, TX 77005
+vashok@rice.edu
+Guha Balakrishnan
+Rice University
+Houston, TX 77005
+guha@rice.edu
+Input
+Output 3DGS Avatars
+Figure 1: From a casual group photo to individual 3D face avatars. Given a single unconstrained
+photograph (left), SplatShot produces an explicit 3D Gaussian Splatting (3DGS) [1] face avatar for
+each individual that can be rendered from novel viewpoints (right).
+Abstract
+Reconstructing a photorealistic 3D face avatar from a single unconstrained photograph is challenging: feed-forward 3D Gaussian Splatting (3DGS) models degrade
+on out-of-distribution inputs, while pretrained diffusion models produce highfidelity images but lack multi-view consistency. We observe that these paradigms
+are fundamentally complementary: explicit 3D representations guarantee geometric
+consistency, whereas 2D diffusion priors ensure photorealism. Building on this, we
+propose SplatShot, a training-free framework that couples these representations
+directly within the denoising process. Given a base 3DGS face model and a single
+reference image, we jointly denoise all target views using a per-step 3D feedback
+loop. At each timestep, we predict clean images from the noisy latents, refit the
+Preprint.
+3DGS to these multi-view predictions, and back-propagate the photometric discrepancy between the 3DGS re-renderings and 2D predictions into the noise estimate.
+This steers the sampling trajectory toward strictly 3D-coherent, identity-faithful outputs. Experiments on diverse in-the-wild images demonstrate that SplatShot produces 3D avatars with superior identity preservation, photorealism, and multi-view
+consistency. Code is available at https://github.com/hliang2/SplatShot.
+1
+Introduction
+3D face avatar generation has broad applications in telepresence, augmented and virtual reality,
+gaming, and digital content creation. The ultimate, yet most challenging, objective is taking a single
+“in-the-wild” portrait, captured under arbitrary lighting and pose, and producing a complete 3D
+representation that is photorealistic from all viewpoints while faithfully preserving the subject’s
+identity. Despite significant progress, this remains an open problem: existing methods struggle to
+simultaneously maintain strict geometric consistency, preserve identity, and generalize to arbitrary,
+out-of-distribution images.
+Current approaches fall into three categories, each facing distinct trade-offs. First, explicit 3D
+representations (e.g., NeRF [2], 3DGS [1]) achieve high quality via per-subject optimization but
+require dense multi-view captures. Feed-forward 3D variants(e.g., GAGAvatar [3], FastAvatar [4])
+alleviate this capture requirement but generalize poorly to in-the-wild inputs due to domain-specific
+training. Second, 2D generative models trained with 3D awareness(e.g., EG3D [5]) generate highly
+photorealistic faces but sample views independently, resulting in severe multi-view inconsistency.
+Even multi-view trained diffusion models [6, 7] suffer from over-smoothing and domain sensitivity.
+Finally, Score Distillation Sampling (SDS) [8] and its variants use 2D priors to guide 3D generation
+but notoriously exhibit mode-seeking behavior. This yields over-saturated, low-diversity outputs that
+fail to balance identity fidelity with geometric plausibility.
+We start from a core observation: explicit 3D models and 2D diffusion models have complementary
+weaknesses. An explicit 3DGS representation naturally enforces multi-view consistency, but its
+rendering quality is bottlenecked by the input views used to fit it. Conversely, a pretrained diffusion
+model provides strong priors for high-fidelity image generation but lacks a mechanism to coordinate outputs across disparate views. By forcing these representations to inform each other during
+generation, we achieve results that are simultaneously high-quality and strictly 3D-consistent.
+This insight forms the basis of our framework, SplatShot. We assume a single given input photograph
+defining the target identity. Starting from an existing 3DGS face model (of a prior identity) to provide
+a structured initialization, we initiate an iterative diffusion denoising process with this model in a
+feedback loop. At each denoising timestep, we: (1) predict the clean images x̂0 from the current
+noisy latents, (2) refit the 3DGS model to these multi-view predictions, (3) re-render from the
+updated 3DGS, and (4) back-propagate the photometric discrepancy between the re-renderings and
+predictions into the noise estimate. At early denoising steps (high noise levels), we observe that x̂0 is
+heavily corrupted and unsuitable for supervising 3DGS fitting. We address this via a noise mixture
+mechanism, producing a geometry-anchored estimate robust enough for guidance even at high noise
+levels. As denoising progresses, the diffusion model drives realism while the 3DGS model enforces
+tight geometric agreement, ultimately yielding a photorealistic and 3D-coherent Gaussian avatar.
+Crucially, our framework is training-free, requires no fine-tuning of any model component, and
+works out-of-the-box with off-the-shelf pretrained models. Extensive evaluations on a diverse
+set of in-the-wild images demonstrate that SplatShot outperforms representative baselines across
+multiple prior categories. To the best of our knowledge, we are the first to demonstrate high-fidelity,
+unconstrained 3D Gaussian face avatar generation from an arbitrary single in-the-wild image without
+requiring lengthy subject-specific optimization. By producing 3DGS representations with superior
+identity preservation, photorealism, and strict multi-view consistency, SplatShot establishes a new
+state-of-the-art for practical single-image 3D avatar creation.
+2
+Related Work
+We discuss the most representative related work below and provide an expanded list in Appendix.
+2
+2.1
+Single-Image 3D Face and Head Reconstruction
+Reconstructing 3D faces from images has evolved from parametric morphable models [9], which offer
+semantic control but lack fine details, to neural rendering approaches like NeRF [2] and 3D Gaussian
+Splatting (3DGS) [1]. While the latter achieve high photorealism, per-subject optimization typically
+requires dense, calibrated multi-view captures. To relax this requirement, feed-forward methods
+predict 3DGS avatars directly from single images [10]. However, their quality is heavily bounded
+by training distributions; models trained on curated datasets degrade on in-the-wild inputs, and
+multi-view diffusion often yields over-smoothed outputs, yet lacking geometry consistency. SplatShot
+sidesteps these domain gaps by coupling an explicit 3D representation with a broadly pretrained 2D
+diffusion model strictly at inference time, eliminating the need for task-specific training.
+2.2
+Coupling 2D Models with 3D Representations
+2D generative models have achieved remarkable photorealism for face synthesis, from VAEs [11],
+GANs [12] to diffusion models [13]. Extending these to 3D, methods such as EG3D [5] and related
+approaches [14] incorporate explicit 3D representations into the generative pipeline, but require
+3D-aware training data or specialized architectures that limit generalization. Score Distillation
+Sampling (SDS) [8] and its variants [15] offer a training-free alternative by using 2D diffusion priors
+to optimize 3D representations, though they are prone to over-saturation and mode collapse. Our
+method extends this to a bidirectional coupling: the diffusion model and 3DGS iteratively inform
+each other within the denoising loop, jointly improving photorealism and geometric consistency.
+A parallel line of work edits exist"A portrait
+ing 3DGS scenes by manipulating
+with hair,
+...
+eyes,
+mouth,
+cross-attention maps to enforce multiskin."
+view consistency [16]. These methods
+inverse-render 2D attention maps onto
+3D Gaussians and re-project them, en...
+suring different views attend to the
+Input
+Condition
+same content at consistent locations.
+Output
+Attention maps averaged across timesteps
+This is effective for text-guided editing, where tokens are semantically dis- Figure 2: Cross-attention maps. Text tokens (top) activate
+entangled (e.g., “hair” activates over over semantically distinct regions; image tokens (bottom)
+hair, “eyes” over eyes; Fig. 2, top) overlap broadly without spatial disentanglement.
+and edits preserve the base geometry.
+However, identity-conditioned generation breaks both assumptions. Image-based conditioning tokens [17] lack disentangled semantics and activate broadly across the entire face (Fig. 2, bottom),
+causing shared attention to blend incompatible, view-dependent information. Moreover, transferring
+identity requires geometric deformation that fixed-geometry attention sharing cannot accommodate.
+This motivates our explicit 3D feedback loop operating in image space, allowing both appearance
+and geometry to evolve during denoising.
+3
+Token "hair"
+Token "eyes"
+Token "mouth"
+Token "skin"
+Token 1
+Token 2
+Token 3
+Token 4
+Preliminaries
+3D Gaussian Splatting. A 3D Gaussian Splatting (3DGS) model M represents a scene using K anisotropic Gaussians {Gk } [1]. Each Gaussian has 59 parameters: center µk ∈ R3 ,
+opacity αk ∈ [0, 1], 48 spherical harmonic (SH) color coefficients ck , and a covariance matrix
+Σk = Rk Sk2 RkT (factored into a rotation Rk and diagonal scale Sk ). The framework performs
+differentiable rasterization to render an image from camera parameters (extrinsics and intrinsics)
+v: Iˆ = R(M, v), where R(·, ·) alpha-blends the colors of Gaussians intersecting each cast ray:
+PD
+Q
+C = d=1 cd αd j<d (1 − αj ). The model’s parameters are optimized by minimizing a standard
+photometric loss between rendered and target images:
+Lphoto (I, ˆ
+I) = λ1 ∥I − ˆ
+I∥1 + λ2 (1 − SSIM(I, ˆ
+I)),
+(1)
+where λ1 and λ2 are weighting coefficients.
+Denoising Diffusion Implicit Models (DDIMs). DDIMs [18] define a deterministic sampling
+process over a learned reverse diffusion trajectory with T total timesteps. Starting from a clean image
+3
+Iterative
+Updates
+Input Iin
+Img2Img
+Diffusion
+Matched Base
+3DGS
+ª
+Final 3DGS
+Update
+UNet
+Noise
+Latents
+Input Iin
+Latents
+ª
+Adjusted Noise
+-
+Predicted Clean Images
+gradient
+3DGS
+ª
+Photometric Loss
+Multi-View Rendering
+Figure 3: Method overview. (Top) Given an input photograph Iin , SplatShot selects a matching
+base 3DGS model M and iteratively refines it through a 3DGS-guided img2img diffusion process,
+producing a final 3DGS avatar. (Bottom) At each denoising step, the UNet predicts per-view noise
+v
+ϵt,v
+θ conditioned on Iin , from which predicted clean images x̂0 are decoded. These images are used
+to update M, which is then re-rendered from all views. The photometric loss g between the predicted
+images and the 3DGS re-renderings is backpropagated to adjust the noise, and the adjusted noise
+produces the latents for the next timestep.
+x0 , the forward process produces a noisy latent at any timestep t ∈ {1, . . . , T }:
+xt = αt x0 + σt ϵgt ,
+ϵgt ∼ N (0, I),
+(2)
+where αt and σt are noise schedule parameters. In the reverse process, a noise prediction network
+ϵθ (·, ·, ·) estimates the noise at each step: ϵtθ = ϵθ (xt , t, c) conditioned on context c. We get the
+predicted clean image by:
+xt − σt ϵtθ
+x̂0 =
+,
+(3)
+αt
+and the image at the previous timestep by:
+xt−1 = αt−1 x̂0 + σt−1 ϵtθ .
+(4)
+For latent diffusion models [13], this entire process is performed on latent codes xt rather than on
+pixels, defined by an encoder E(·) and decoder D(·) that map images to and from the latent space.
+4
+Method
+Given a single unconstrained input photograph Iin , our goal is to produce a 3DGS model that captures
+the depicted identity and renders photorealistically from novel viewpoints. We assume access to a set
+of pretrained “base” 3DGS face models, a latent diffusion model comprising an encoder E, decoder
+D, and noise prediction network ϵθ , as well as a differentiable 3DGS renderer R (Sec. 3).
+SplatShot first automatically selects the base model M whose facial attributes (e.g., face shape,
+skin tone, hairstyle) best match Iin to provide a structured initialization to the optimization process
+(see Appendix for details on our selection scheme). Using M, we render V images from different
+views and proceed with an iterative, three-step scheme: (1) denoise each view using the diffusion
+model to match the input identity, (2) refit M to these denoised images and re-render them, and
+(3) back-propagate the photometric discrepancy between the 3D re-renderings and the 2D diffusion
+predictions into the noise space. Through this joint optimization, the diffusion model is steered toward
+4
+3D-consistent outputs while the 3DGS model converges on the target identity, mutually reinforcing
+photorealism and geometric strictness.
+We show the method overview in Figure 3, and detail this iterative framework in §4.1, and a crucial
+strategy to encourage stable early-step guidance in §4.2.
+4.1
+3DGS-Guided Iterative Denoising Framework
+Let us denote the set of input views from base model M by {I v }. We first encode these images
+into the diffusion model’s latent space via E to yield a set of latent codes {xv0 }. We then add noise
+following Eq. 2 up to a starting timestep ts = ⌊s · T ⌋, where s ∈ (0, 1]. Starting from partial noise
+rather than pure noise (ts < T ) preserves coarse structural cues from the base model’s renderings,
+providing a more stable initialization for the 3DGS guidance loop. The following denoising procedure
+proceeds from t = ts to t = 0.
+Step 1: Per-View Image Generation with Diffusion. At timestep t, we independently predict
+v
+noise for each view ϵt,v
+θ = ϵθ (xt , t, c), where c encodes the identity from Iin via an image-based
+adapter (e.g., IP-Adapter [17]). We then recover the predicted clean latent x̂v0 via Eq. 3 and decode
+the corresponding image: Iˆv = D(x̂v0 ). Because we process each view independently, these images
+lack explicit cross-view consistency.
+Step 2: 3DGS Model Update. We update all Gaussian parameters of M with {Iˆv } for N gradient
+steps using the loss function in Eq. 1. Fine-tuning M across timesteps in this manner allows facial
+structure to evolve progressively and naturally resolve per-view inconsistencies into a geometrically
+plausible consensus rather than reproducing artifacts of any single view.
+Step 3: 3DGS-Guided Noise Adjustment. Finally, we use the fine-tuned M to steer the predicted
+per-view noises towards image sets with 3D consistency. Let g = Lphoto (Iˆv , R(M, v)) compute
+the loss between the diffusion-generated views from Step 1 and current M-rendered views. We
+compute per-view noise adjustments via:
+t,v
+ϵt,v
+θ ← ϵθ − λ ·
+∂g
+,
+∂ϵt,v
+θ
+(5)
+where λ is a hyperparameter. The gradient ∂g/∂ϵt,v
+θ can be computed via the chain rule:
+∂g
+∂ x̂v0 ∂g
+=
+·
+,
+∂ x̂v0
+∂ϵt,v
+∂ϵt,v
+θ
+θ
+(6)
+where ∂ x̂v0 /∂ϵt,v
+= −σt /αt from Eq. 3 and ∂g/∂ x̂v0 may be computed via auto-differentiation
+θ
+through D. Finally, we compute the next latents xvt−1 using this adjusted noise via Eq. 4 and continue
+the DDIM denoising chain moving back to Step 1. And at the end of the diffusion process (time step
+t = 0), we can render the final views using M.
+4.2
+Noise Mixture for Early-Step Stability
+The above procedure assumes that the generated views Iˆv from Step 1 are good signals to supervise
+3DGS fitting. However, we find that at early denoising steps (large t), the predicted x̂0 from
+Eq. 3 is severely corrupted with over-saturated colors and incoherent backgrounds (see Fig. 4,
+top). Refitting M to such targets causes catastrophic, unrecoverable shifts to Gaussian parameters,
+derailing convergence.
+Because we control the forward noising process, we have access to the ground-truth noise ϵgt added
+during initialization (Eq. 2). Substituting ϵgt into Eq. 3 recovers substantially cleaner images, but
+breaks the computational graph because ϵgt carries no gradient from ϵθ . To maintain both stability
+and differentiability, we mix the two noises:
+t,v
+v
+ϵt,v
+mix = w · ϵθ + (1 − w) · ϵgt ,
+(7)
+where w ∈ [0, 1]. We then obtain the hybrid clean prediction by substituting ϵvmix into Eq. 3. The
+predicted noise component preserves the gradient flow required for geometry guidance (Eq. 6), while
+the ground-truth component ensures a smooth transition that prevents 3DGS collapse (Fig. 4, bottom).
+5
+Classic: with U-Net predicted noise
+...
+Ours: with mixed noise (U-Net predicted noise
++ ground truth noise
+)
+...
+Input
+Base
+t = 800
+DDIM clean image prediction
+t=0
+Figure 4: Noise composition affects the structural progression of generated faces during the
+diffusion denoising process (see § 4.2). Top: using predicted noise alone yields corrupted early-step
+predictions with over-saturated colors and unstable backgrounds. Bottom (Ours): our noise mixture
+mechanism (Eq. 7) blends predicted and ground-truth noise, producing stable, identity-consistent
+predictions from the first step, enabling reliable 3DGS fitting throughout the denoising process.
+5
+Experiments
+We evaluated SplatShot on single-view 3D face reconstruction using 6,279 randomly selected images
+from the CelebA [21] and FFHQ [12] datasets, capturing a diverse distribution of ages, ethnicities,
+poses, lighting conditions, and accessories. We collected 300 base 3DGS models (M) pretrained on
+multi-view sequences from the NeRSemble dataset [22].
+Baselines. We compare against representative methods from three categories: (1) single-image to
+3DGS: LAM [19], DreamGaussian [15], GAGAvatar [3], FastAvatar [4]. (2) diffusion-based methods:
+Human-3Diffusion [7], FaceLift [20], Arc2Avatar [6]. (3) 3DGS editing: Intergsedit [16] (while
+Intergsedit primarily focuses on text-based editing, we re-implement on top of their framework for
+image-based editing. See §A.7.1 for details).
+Implementation details. We use Stable Diffusion v1.5 as the base diffusion model, augmented with
+IP-Adapter-Plus-Face [17] for identity conditioning and ControlNet [23] for pose control. The 3DGS
+model is implemented using gsplat [24]. We render V = 16 views from the base model. During
+geometry-guided denoising, we perform 50 DDIM steps with a strength of s = 0.6. The 3DGS refit
+uses 1,000 iterations at the first guidance step and 200 at subsequent steps. We set the noise mixture
+weight to w = 0.4 and the 3DGS-guidance weight to λ = 50,000. All experiments are conducted on
+a single NVIDIA A100 GPU. A detailed implementation is in Appendix §A.1.
+Metrics. We consider several metrics across different dimensions. Identity fidelity: CSIM measures
+ArcFace [25] cosine similarity between the reference image and near-frontal generated views. AKD
+measures the average normalized 3D landmark distance estimated by DECA [26]. 3D consistency:
+CV-CSIM measures pairwise ArcFace [25] similarity across generated views. AED measures
+expression coefficient drift estimated by DECA [26]. Photo quality: We report FID [27] on nearfrontal views against FFHQ, and CLIP-IQA [28] as a no-reference perceptual quality score. (Because
+our outputs are rendered avatars rather than natural photographs, FID is interpreted comparatively
+rather than as an absolute photorealism measure.)
+5.1
+Qualitative Comparison
+Fig. 5 presents qualitative comparisons across five identities with varying appearances, poses, ages,
+and occlusions. We present two novel views per identity to assess visual quality and multi-view
+consistency. Intergsedit exhibits limited identity control under image-based guidance and produces
+blurry novel views. Diffusion-based baselines (Arc2Avatar, FaceLift, Human-3Diffusion) often
+generate plausible individual images but suffer from identity drift and inconsistent details across
+views. Feed-forward 3DGS methods (LAM, GAGAvatar, DreamGaussian, FastAvatar) produce
+6
+Intergsedit
+LAM
+Human3Di
+FaceLift
+Arc2Avatar
+DrGaussian GAGAvatar FastAvatar
+Ours
+Figure 5: Qualitative comparison on 3D face avatar generation from a single image. Given a
+single unconstrained input (left), we compare our method with Intergsedit [16], LAM [19], Human3Diffusion [7], FaceLift [20], Arc2Avatar [6], DreamGaussian [15], GAGAvatar [3], and FastAvatar [4]. Previous methods yield synthetic-looking results, struggle with out-of-distribution inputs,
+produce low-quality novel views, or suffer from identity mismatch. In contrast, SplatShot renderings
+maintain identity and geometric consistency across views. The base 3DGS models for Intergsedit and
+Ours are shown in the bottom-left corner of each input. Additional examples are in Appendix.
+explicit 3D outputs but exhibit visible artifacts, synthetic-looking textures, or identity mismatch on
+challenging in-the-wild inputs.
+In contrast, SplatShot produces sharper, highly identity-faithful 3DGS renderings, even under challenging conditions like occlusions, extreme ages, diverse skin tones, and non-frontal poses. The
+novel views remain consistent in facial structure and appearance, demonstrating the advantage of
+optimizing an explicit 3DGS avatar as the final output. We show additional qualitative results and
+multi-view outputs from diffusion in the Appendix.
+5.2
+Quantitative Comparison
+Table 1 reports quantitative results on 100 FFHQ identities (16 rendered views each). SplatShot
+achieves best or highly competitive performance across all metrics. It secures the highest CV7
+Table 1: Quantitative comparison of various methods on FFHQ (100 identities, 16 views each).
+We use colors to denote the first and second places. SplatShot achieves best or highly competitive
+performance across all metrics.
+Input
+Method
+CSIM↑ CV-CSIM↑ AKD(×10−2 ) ↓ AED↓ FID↓ CLIP-IQA↑
+Intergsedit [16]
+LAM [19]
+Human-3Di [7]
+FaceLift [20]
+Arc2Avatar [6]
+DreamGaussian [15]
+GAGAvatar [3]
+FastAvatar [4]
+.525
+.584
+.481
+.648
+.608
+.663
+.701
+.345
+.592
+.623
+.546
+.664
+.801
+.661
+.577
+.811
+1.96
+1.80
+1.20
+1.22
+1.12
+2.16
+1.07
+1.85
+.285
+.270
+.179
+.246
+.240
+.276
+.190
+.266
+288
+277
+268
+242
+257
+262
+246
+230
+.239
+.369
+.399
+.399
+.621
+.290
+.566
+.549
+SplatShot (ours)
+.698
+.832
+0.92
+.202
+216
+.633
+Base
+Novel View Renderings
+Input
+Base
+Novel View Renderings
+Figure 6: Effect of base 3DGS model selection. Each pair of rows shows the same input generated
+with two different base models. Identity is successfully transferred in both cases, but hairstyle and
+head shape are largely inherited from the base. This is expected: trained identity encoders typically
+crop out hair, and hair geometry is inherently less stable for 3DGS reconstruction. We therefore
+prioritize hairstyle matching in our base selection algorithm (§A.1.2). More results in Fig.10, 11
+CSIM, lowest AKD, lowest FID, and highest CLIP-IQA, indicating superior cross-view consistency,
+accurate facial geometry, and excellent perceptual quality. It also ranks second in CSIM and remains
+competitive in AED, confirming strong reference identity preservation and expression stability.
+Compared to feed-forward 3DGS methods, SplatShot dramatically improves photo quality and multiview consistency while maintaining comparable identity fidelity. Compared to diffusion baselines,
+SplatShot provides far stronger cross-view consistency.
+5.3
+Ablation Study
+Table 2 ablates key design choices across 20 identities (16 views each), evaluating identity fidelity
+(CSIM), 3D consistency (CV-CSIM), and perceptual quality (CLIP-IQA). We provide visual examples
+in Fig. 7. Without geometry guidance (λ = 0), CSIM remains moderate but CV-CSIM drops sharply,
+showing that the 3DGS feedback loop is vital for cross-view coherence. Setting λ = 5 × 104 provides
+the optimal balance; excessive guidance over-constrains the diffusion output and degrades all metrics.
+Relying solely on predicted noise (w = 1) forces Gaussians to compensate for inconsistent early-step
+predictions, yielding unstable geometry (Fig. 7, middle). Lowering w stabilizes these predictions by
+blending in ground-truth noise, with w = 0.4 performing best. The denoising strength (s) dictates
+the balance between identity transfer and base preservation: lower values retain the base appearance,
+while higher values (e.g., s = 0.6) enable strong identity transfer at a slight consistency trade-off.
+Using V = 16 views offers a strong trade-off for consistency, and increasing refit steps M beyond
+200 yields diminishing returns. Removing ControlNet pose conditioning degrades both identity and
+consistency, as the generated faces drift from their intended viewpoints.
+We additionally show the effect of varying the base model in Fig. 6: the same input with different
+bases produces consistent identity but with hairstyle largely inherited from each base, as trained
+identity encoders typically crop out hair and hair geometry is inherently challenging for 3DGS. This
+motivates our base selection algorithm, which prioritizes hairstyle matching (details in §A.1.2). The
+denoising strength s controls also how much the output departs from the base geometry: lower s
+preserves the base appearance while higher s allows the facial structure itself to change (Fig. 7),
+confirming that the base model serves as a soft anchor rather than a rigid constraint. We show more
+results and a detailed analysis in §A.4, Fig. 10, 11.
+8
+5 x 104
+0
+Input
+Guidance scale λ
+105
+1
+Base
+0.7
+Noise mixture ω
+0.4
+0.6
+0.3
+Diffusion strength s
+Output: rendering from 3DGS
+Figure 7: Visual examples of ablation study. Left to right: effect of guidance scale λ, hybrid weight
+w, and denoising strength s. Without guidance (λ = 0), 3DGS rendering lacks 3D consistency
+in novel views. Excessive guidance (λ = 100,000) over-constrains the output. Without hybrid
+prediction (w = 1), early inconsistent predictions force Gaussians to compensate with unstable
+positions and colors, degrading rendering quality. Lower w stabilizes the predictions. Lower strength
+(s = 0.3) preserves the base geometry and appearance with limited identity transfer, while higher
+strength (s = 0.6) allows stronger transfer including changes to facial structure.
+Table 2: Ablation study on key design choices. * denotes default. Best per group is highlighted.
+Term
+Setting
+Guidance λ
+4
+Hybrid w
+0 10 5×10 * 10
+CSIM↑
+.56 .60
+CV-CSIM↑ .38 .57
+CLIP-IQA↑ .45 .52
+6
+4
+.70
+.83
+.63
+5
+1
+Strength s
+.7 .4* .1 .3 .6* .8
+Views V
+Refit M
+CtrlNet
+8 16* 32 50 200* 500 w/o w/*
+.64 .64 .69 .70 .69 .41 .70 .74 .68 .70 .67 .64 .70 .73 .65 .70
+.84 .82 .82 .83 .81 .89 .83 .74 .61 .83 .86 .69 .83 .83 .74 .83
+.61 .39 .48 .63 .63 .67 .63 .56 .59 .63 .60 .52 .63 .65 .45 .63
+Discussion and Conclusion
+Our results suggest that unconstrained single-image avatar generation benefits from combining imagespace generative priors with an explicit 3D representation. Feed-forward 3D avatar methods such as
+GAGAvatar, FastAvatar, and LAM can produce stable outputs when the input is close to their training
+distribution, but often struggle with in-the-wild photos that differ in pose, lighting, accessories, or
+capture quality. Diffusion-based methods such as FaceLift, Arc2Avatar, and Human-3Diffusion
+benefit from strong 2D image priors and can synthesize plausible individual views, but these views
+are not always explained by a single coherent 3D representation. In contrast, SplatShot uses diffusion
+to improve realism while repeatedly projecting multi-view predictions back into an explicit 3DGS
+avatar, leading to renderings that better preserve identity and remain consistent across novel views.
+Additional challenging cases, including incomplete captures and large pose or lighting variations,
+are provided in the Appendix. Notably, although GAGAvatar obtains strong CSIM in our evaluation,
+its high-fidelity outputs rely on a neural rendering stage; when these outputs are refit into a 3DGS,
+severe artifacts appear, as shown in Fig. 9.
+Demographic Fairness. We further evaluate identity preservation
+across demographic subgroups in Table (right). SplatShot obtains
+similar CSIM scores across race and age groups, with only modest
+variation across subgroups. This suggests that the method does not
+strongly favor a single demographic group in our evaluation. We
+attribute this in part to using pretrained image generative priors and
+test-time 3DGS fitting rather than learning a feed-forward mapping
+solely from a curated 3D avatar dataset.
+Demographic
+CSIM↑
+Caucasian
+African
+Asian
+Hispanic
+Children
+Elderly
+.72
+.69
+.69
+.70
+.66
+.67
+Dataset
+.70
+Limitations. Our method has several limitations. First, iterative
+3DGS refitting makes the pipeline slower than feed-forward methods, taking approximately 3
+minutes per identity on an A100 compared with seconds for GAGAvatar or FastAvatar. We explored
+flow-matching-based[29] generation as a faster alternative, but found that it led to less consistent
+multi-view outputs; details and negative results are provided in the Appendix. Second, our geometry
+is anchored by base models trained on NeRSemble [22], whose captures primarily cover the frontal
+180-degree range; as a result, we have not yet evaluated our framework on back-view avatar generation.
+9
+Additionally, since hairstyle is largely inherited from the base model rather than the input image, a
+poor hairstyle match between the input and the selected base can result in discrepancies. Finally,
+while our method handles common accessories such as sunglasses and earrings (Fig. 5), hats remain
+challenging. This is partly because NeRSemble lacks hat examples, and partly because the face
+identity encoder can entangle headwear with identity cues, treating hats as part of the person rather
+than a removable accessory. We show a failure case in Appendix Fig. 12.
+Broader Impacts. By combining our method with off-the-shelf face detection [30], we build an
+end-to-end system that takes an unconstrained photograph, including a casual group photo (Fig. 1),
+and produces individual 3D avatars without additional input. This has applications in AR/VR, gaming,
+telepresence, and digital content creation, where scalable avatar generation from everyday photos
+could lower the barrier to personalized 3D experiences. However, the same capability may also
+enable unauthorized digital replicas, deepfakes, or identity misuse. We therefore recommend that
+deployments incorporate consent mechanisms. In our system implementation, we embed watermarks
+into images produced by our pipeline to support tracing and provenance verification.
+References
+[1] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, George Drettakis, et al. 3d gaussian splatting for
+real-time radiance field rendering. ACM Trans. Graph., 42(4):139–1, 2023.
+[2] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng.
+Nerf: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65
+(1):99–106, 2021.
+[3] Xuangeng Chu and Tatsuya Harada. Generalizable and animatable gaussian head avatar. Advances in
+Neural Information Processing Systems, 37:57642–57670, 2024.
+[4] Hao Liang, Zhixuan Ge, Soumendu Majee, Ashish Tiwari, GM Godaliyadda, Ashok Veeraraghavan, and
+Guha Balakrishnan. Fastavatar: Instant 3d gaussian splatting for faces from single unconstrained poses.
+arXiv preprint arXiv:2508.18389, 2025.
+[5] Eric R Chan, Connor Z Lin, Matthew A Chan, Koki Nagano, Boxiao Pan, Shalini De Mello, Orazio Gallo,
+Leonidas J Guibas, Jonathan Tremblay, Sameh Khamis, et al. Efficient geometry-aware 3d generative
+adversarial networks. In Proceedings of the IEEE/CVF conference on computer vision and pattern
+recognition, pages 16123–16133, 2022.
+[6] Dimitrios Gerogiannis, Foivos Paraperas Papantoniou, Rolandos Alexandros Potamias, Alexandros Lattas,
+and Stefanos Zafeiriou. Arc2avatar: Generating expressive 3d avatars from a single image via id guidance.
+In Proceedings of the Computer Vision and Pattern Recognition Conference, pages 10770–10782, 2025.
+[7] Yuxuan Xue, Xianghui Xie, Riccardo Marin, and Gerard Pons-Moll. Human-3diffusion: realistic avatar
+creation via explicit 3d consistent diffusion models. Advances in Neural Information Processing Systems,
+37:99601–99645, 2024.
+[8] Ben Poole, Ajay Jain, Jonathan T Barron, and Ben Mildenhall. Dreamfusion: Text-to-3d using 2d diffusion.
+arXiv preprint arXiv:2209.14988, 2022.
+[9] Volker Blanz and Thomas Vetter. Face recognition based on fitting a 3d morphable model. IEEE
+Transactions on pattern analysis and machine intelligence, 25(9):1063–1074, 2003.
+[10] Taekyung Ki, Dongchan Min, and Gyeongsu Chae. Learning to generate conditional tri-plane for 3d-aware
+expression controllable portrait animation. In European Conference on Computer Vision, pages 476–493.
+Springer, 2024.
+[11] Diederik P Kingma and Max Welling. Auto-encoding variational bayes. arXiv preprint arXiv:1312.6114,
+2013.
+[12] Tero Karras, Samuli Laine, and Timo Aila. A style-based generator architecture for generative adversarial
+networks. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages
+4401–4410, 2019.
+[13] Robin Rombach, Andreas Blattmann, Dominik Lorenz, Patrick Esser, and Björn Ommer. High-resolution
+image synthesis with latent diffusion models. In Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, pages 10684–10695, 2022.
+10
+[14] Jingxiang Sun, Xuan Wang, Lizhen Wang, Xiaoyu Li, Yong Zhang, Hongwen Zhang, and Yebin Liu.
+Next3d: Generative neural texture rasterization for 3d-aware head avatars. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition, pages 20991–21002, 2023.
+[15] Jiaxiang Tang, Jiawei Ren, Hang Zhou, Ziwei Liu, and Gang Zeng. Dreamgaussian: Generative gaussian
+splatting for efficient 3d content creation. arXiv preprint arXiv:2309.16653, 2023.
+[16] Minghao Wen, Shengjie Wu, Kangkan Wang, and Dong Liang. Intergsedit: Interactive 3d gaussian
+splatting editing with 3d geometry-consistent attention prior. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 26136–26145, 2025.
+[17] Hu Ye, Jun Zhang, Sibo Liu, Xiao Han, and Wei Yang. Ip-adapter: Text compatible image prompt adapter
+for text-to-image diffusion models. arXiv preprint arXiv:2308.06721, 2023.
+[18] Jiaming Song, Chenlin Meng, and Stefano Ermon. Denoising diffusion implicit models. arXiv preprint
+arXiv:2010.02502, 2020.
+[19] Yisheng He, Xiaodong Gu, Xiaodan Ye, Chao Xu, Zhengyi Zhao, Yuan Dong, Weihao Yuan, Zilong Dong,
+and Liefeng Bo. Lam: large avatar model for one-shot animatable gaussian head. In Proceedings of the
+Special Interest Group on Computer Graphics and Interactive Techniques Conference Conference Papers,
+pages 1–13, 2025.
+[20] Weijie Lyu, Yi Zhou, Ming-Hsuan Yang, and Zhixin Shu. Facelift: Learning generalizable single image 3d
+face reconstruction from synthetic heads. In Proceedings of the IEEE/CVF International Conference on
+Computer Vision, pages 12691–12701, 2025.
+[21] Ziwei Liu, Ping Luo, Xiaogang Wang, and Xiaoou Tang. Deep learning face attributes in the wild. In
+Proceedings of the IEEE international conference on computer vision, pages 3730–3738, 2015.
+[22] Tobias Kirschstein, Shenhan Qian, Simon Giebenhain, Tim Walter, and Matthias Nießner. Nersemble:
+Multi-view radiance field reconstruction of human heads. ACM Transactions on Graphics (TOG), 42(4):
+1–14, 2023.
+[23] Lvmin Zhang, Anyi Rao, and Maneesh Agrawala. Adding conditional control to text-to-image diffusion
+models. In Proceedings of the IEEE/CVF international conference on computer vision, pages 3836–3847,
+2023.
+[24] Vickie Ye, Ruilong Li, Justin Kerr, Matias Turkulainen, Brent Yi, Zhuoyang Pan, Otto Seiskari, Jianbo Ye,
+Jeffrey Hu, Matthew Tancik, and Angjoo Kanazawa. gsplat: An open-source library for gaussian splatting.
+Journal of Machine Learning Research, 26(34):1–17, 2025.
+[25] Jiankang Deng, Jia Guo, Xue Niannan, and Stefanos Zafeiriou. Arcface: Additive angular margin loss for
+deep face recognition. In CVPR, 2019.
+[26] Yao Feng, Haiwen Feng, Michael J. Black, and Timo Bolkart. Learning an animatable detailed 3d
+face model from in-the-wild images. ACM Trans. Graph., 40(4), July 2021. ISSN 0730-0301. doi:
+10.1145/3450626.3459936. URL https://doi.org/10.1145/3450626.3459936.
+[27] Martin Heusel, Hubert Ramsauer, Thomas Unterthiner, Bernhard Nessler, and Sepp Hochreiter. Gans
+trained by a two time-scale update rule converge to a local nash equilibrium. Advances in neural information
+processing systems, 30, 2017.
+[28] Jianyi Wang, Kelvin CK Chan, and Chen Change Loy. Exploring clip for assessing the look and feel of
+images. In Proceedings of the AAAI conference on artificial intelligence, volume 37, pages 2555–2563,
+2023.
+[29] Hanshu Yan, Xingchao Liu, Jiachun Pan, Jun Hao Liew, Qiang Liu, and Jiashi Feng. Perflow: Piecewise
+rectified flow as universal plug-and-play accelerator. Advances in Neural Information Processing Systems,
+37:78630–78652, 2024.
+[30] Jiankang Deng, Jia Guo, Evangelos Ververas, Irene Kotsia, and Stefanos Zafeiriou. Retinaface: Single-shot
+multi-level face localisation in the wild. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 5203–5212, 2020.
+[31] Mathilde Caron, Hugo Touvron, Ishan Misra, Hervé Jégou, Julien Mairal, Piotr Bojanowski, and Armand
+Joulin. Emerging properties in self-supervised vision transformers. In Proceedings of the IEEE/CVF
+international conference on computer vision, pages 9650–9660, 2021.
+11
+[32] Yiwen Chen, Zilong Chen, Chi Zhang, Feng Wang, Xiaofeng Yang, Yikai Wang, Zhongang Cai, Lei
+Yang, Huaping Liu, and Guosheng Lin. Gaussianeditor: Swift and controllable 3d editing with gaussian
+splatting. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages
+21476–21485, 2024.
+[33] Yuxuan Wang, Xuanyu Yi, Zike Wu, Na Zhao, Long Chen, and Hanwang Zhang. View-consistent 3d
+editing with gaussian splatting. In European conference on computer vision, pages 404–420. Springer,
+2024.
+[34] Amir Hertz, Ron Mokady, Jay Tenenbaum, Kfir Aberman, Yael Pritch, and Daniel Cohen-Or. Prompt-toprompt image editing with cross attention control. arXiv preprint arXiv:2208.01626, 2022.
+[35] Xingchao Liu, Chengyue Gong, and Qiang Liu. Flow straight and fast: Learning to generate and transfer
+data with rectified flow. arXiv preprint arXiv:2209.03003, 2022.
+[36] William AP Smith, Alassane Seck, Hannah Dee, Bernard Tiddeman, Joshua B Tenenbaum, and Bernhard
+Egger. A morphable face albedo model. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 5011–5020, 2020.
+[37] Volker Blanz and Thomas Vetter. A morphable model for the synthesis of 3d faces. In Seminal Graphics
+Papers: Pushing the Boundaries, Volume 2, pages 157–164. 2023.
+[38] Ruilong Li, Karl Bladin, Yajie Zhao, Chinmay Chinara, Owen Ingraham, Pengda Xiang, Xinglei Ren,
+Pratusha Prasad, Bipin Kishore, Jun Xing, et al. Learning formation of physically-based face attributes. In
+Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 3410–3419,
+2020.
+[39] Edgar Tretschk, Ayush Tewari, Vladislav Golyanik, Michael Zollhöfer, Christoph Lassner, and Christian
+Theobalt. Non-rigid neural radiance fields: Reconstruction and novel view synthesis of a dynamic scene
+from monocular video. In Proceedings of the IEEE/CVF international conference on computer vision,
+pages 12959–12970, 2021.
+[40] Keunhong Park, Utkarsh Sinha, Jonathan T Barron, Sofien Bouaziz, Dan B Goldman, Steven M Seitz, and
+Ricardo Martin-Brualla. Nerfies: Deformable neural radiance fields. In Proceedings of the IEEE/CVF
+international conference on computer vision, pages 5865–5874, 2021.
+[41] Yiyu Zhuang, Hao Zhu, Xusen Sun, and Xun Cao. Mofanerf: Morphable facial neural radiance field. In
+European conference on computer vision, pages 268–285. Springer, 2022.
+[42] Yang Hong, Bo Peng, Haiyao Xiao, Ligang Liu, and Juyong Zhang. Headnerf: A real-time nerf-based
+parametric head model. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 20374–20384, 2022.
+[43] Guy Gafni, Justus Thies, Michael Zollhofer, and Matthias Nießner. Dynamic neural radiance fields for
+monocular 4d facial avatar reconstruction. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 8649–8658, 2021.
+[44] Marcel C. Buehler, Gengyan Li, Erroll Wood, Leonhard Helminger, Xu Chen, Tanmay Shah, Daoye Wang,
+Stephan Garbin, Sergio Orts-Escolano, Otmar Hilliges, Dmitry Lagun, Jérémy Riviere, Paulo Gotardo,
+Thabo Beeler, Abhimitra Meka, and Kripasindhu Sarkar. Cafca: High-quality novel view synthesis of
+expressive faces from casual few-shot captures. In ACM SIGGRAPH Asia 2024 Conference Paper. 2024.
+doi: 10.1145/3680528.3687580. URL https://doi.org/10.1145/3680528.
+[45] Alex Trevithick, Matthew Chan, Michael Stengel, Eric Chan, Chao Liu, Zhiding Yu, Sameh Khamis,
+Manmohan Chandraker, Ravi Ramamoorthi, and Koki Nagano. Real-time radiance fields for single-image
+portrait view synthesis. ACM Transactions on Graphics (TOG), 42(4):1–15, 2023.
+[46] Yuelang Xu, Lizhen Wang, Zerong Zheng, Zhaoqi Su, and Yebin Liu. 3d gaussian parametric head model.
+In European Conference on Computer Vision, pages 129–147. Springer, 2024.
+[47] Helisa Dhamo, Yinyu Nie, Arthur Moreau, Jifei Song, Richard Shaw, Yiren Zhou, and Eduardo PérezPellitero. Headgas: Real-time animatable head avatars via 3d gaussian splatting. In European Conference
+on Computer Vision, pages 459–476. Springer, 2024.
+[48] Xiaobao Wei, Peng Chen, Ming Lu, Hui Chen, and Feng Tian. Graphavatar: Compact head avatars with
+gnn-generated 3d gaussians. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 39,
+pages 8295–8303, 2025.
+12
+[49] Shengjie Ma, Yanlin Weng, Tianjia Shao, and Kun Zhou. 3d gaussian blendshapes for head avatar
+animation. In ACM SIGGRAPH 2024 Conference Papers, pages 1–10, 2024.
+[50] Shenhan Qian, Tobias Kirschstein, Liam Schoneveld, Davide Davoli, Simon Giebenhain, and Matthias
+Nießner. Gaussianavatars: Photorealistic head avatars with rigged 3d gaussians. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 20299–20309, 2024.
+[51] Zhijing Shao, Zhaolong Wang, Zhuang Li, Duotun Wang, Xiangru Lin, Yu Zhang, Mingming Fan, and
+Zeyu Wang. Splattingavatar: Realistic real-time human avatars with mesh-embedded gaussian splatting. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 1606–1616,
+2024.
+[52] Jun Xiang, Xuan Gao, Yudong Guo, and Juyong Zhang. Flashavatar: High-fidelity head avatar with
+efficient gaussian embedding. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 1802–1812, 2024.
+[53] Muhammed Kocabas, Jen-Hao Rick Chang, James Gabriel, Oncel Tuzel, and Anurag Ranjan. Hugs:
+Human gaussian splats. In Proceedings of the IEEE/CVF conference on computer vision and pattern
+recognition, pages 505–515, 2024.
+[54] Yuelang Xu, Benwang Chen, Zhe Li, Hongwen Zhang, Lizhen Wang, Zerong Zheng, and Yebin Liu.
+Gaussian head avatar: Ultra high-fidelity head avatar via dynamic gaussians. In Proceedings of the
+IEEE/CVF conference on computer vision and pattern recognition, pages 1931–1941, 2024.
+[55] Zhiyin Qian, Shaofei Wang, Marko Mihajlovic, Andreas Geiger, and Siyu Tang. 3dgs-avatar: Animatable
+avatars via deformable 3d gaussian splatting. In Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, pages 5020–5030, 2024.
+[56] Jack Saunders, Charlie Hewitt, Yanan Jian, Marek Kowalski, Tadas Baltrusaitis, Yiye Chen, Darren Cosker,
+Virginia Estellers, Nicholas Gydé, Vinay P Namboodiri, et al. Gasp: Gaussian avatars with synthetic priors.
+In Proceedings of the Computer Vision and Pattern Recognition Conference, pages 271–280, 2025.
+[57] Peizhi Yan, Rabab Ward, Qiang Tang, and Shan Du. Gaussian deja-vu: Creating controllable 3d gaussian
+head-avatars with enhanced generalization and personalization abilities. In Proceedings of the Winter
+Conference on Applications of Computer Vision (WACV), pages 276–286, February 2025.
+[58] Liangxiao Hu, Hongwen Zhang, Yuxiang Zhang, Boyao Zhou, Boning Liu, Shengping Zhang, and Liqiang
+Nie. Gaussianavatar: Towards realistic human avatar modeling from a single video via animatable 3d
+gaussians. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages
+634–644, 2024.
+[59] Cong Wang, Di Kang, Heyi Sun, Shenhan Qian, Zixuan Wang, Linchao Bao, and Song-Hai Zhang. Mega:
+Hybrid mesh-gaussian head avatar for high-fidelity rendering and head editing. In Proceedings of the
+Computer Vision and Pattern Recognition Conference, pages 26274–26284, 2025.
+[60] Simon Giebenhain, Tobias Kirschstein, Martin Rünz, Lourdes Agapito, and Matthias Nießner. Npga:
+Neural parametric gaussian avatars. In SIGGRAPH Asia 2024 Conference Papers (SA Conference Papers
+’24), December 3-6, Tokyo, Japan, 2024. ISBN 979-8-4007-1131-2/24/12. doi: 10.1145/3680528.3687689.
+[61] Xueting Li, Shalini De Mello, Sifei Liu, Koki Nagano, Umar Iqbal, and Jan Kautz. Generalizable one-shot
+3d neural head avatar. Advances in Neural Information Processing Systems, 36:47239–47250, 2023.
+[62] Zhiyuan Ma, Xiangyu Zhu, Guo-Jun Qi, Zhen Lei, and Lei Zhang. Otavatar: One-shot talking face avatar
+with controllable tri-plane rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 16901–16910, 2023.
+[63] Phong Tran, Egor Zakharov, Long-Nhat Ho, Anh Tuan Tran, Liwen Hu, and Hao Li. Voodoo 3d: Volumetric
+portrait disentanglement for one-shot 3d head reenactment. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 10336–10348, 2024.
+[64] Haotian Yang, Hao Zhu, Yanru Wang, Mingkai Huang, Qiu Shen, Ruigang Yang, and Xun Cao. Facescape:
+a large-scale high quality 3d face dataset and detailed riggable 3d face prediction. In Proceedings of the
+ieee/cvf conference on computer vision and pattern recognition, pages 601–610, 2020.
+[65] Wojciech Zielonka, Timo Bolkart, and Justus Thies. Towards metrical reconstruction of human faces. In
+European conference on computer vision, pages 250–269. Springer, 2022.
+13
+[66] Jiahe Li, Jiawei Zhang, Xiao Bai, Jin Zheng, Xin Ning, Jun Zhou, and Lin Gu. Talkinggaussian: Structurepersistent 3d talking head synthesis via gaussian splatting. In European Conference on Computer Vision,
+pages 127–145. Springer, 2024.
+[67] Yufeng Zheng, Wang Yifan, Gordon Wetzstein, Michael J Black, and Otmar Hilliges. Pointavatar:
+Deformable point-based head avatars from videos. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, pages 21057–21067, 2023.
+[68] Weichuang Li, Longhao Zhang, Dong Wang, Bin Zhao, Zhigang Wang, Mulin Chen, Bang Zhang,
+Zhongjian Wang, Liefeng Bo, and Xuelong Li. One-shot high-fidelity talking-head synthesis with deformable neural radiance field. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 17969–17978, 2023.
+[69] Haoyu Ma, Tong Zhang, Shanlin Sun, Xiangyi Yan, Kun Han, and Xiaohui Xie. Cvthead: One-shot controllable head avatar with vertex-feature transformer. In Proceedings of the IEEE/CVF Winter Conference
+on Applications of Computer Vision, pages 6131–6141, 2024.
+[70] Songlin Yang, Wei Wang, Yushi Lan, Xiangyu Fan, Bo Peng, Lei Yang, and Jing Dong. Learning dense
+correspondence for nerf-based face reenactment. In Proceedings of the AAAI Conference on Artificial
+Intelligence, volume 38, pages 6522–6530, 2024.
+[71] Xuangeng Chu, Yu Li, Ailing Zeng, Tianyu Yang, Lijian Lin, Yunfei Liu, and Tatsuya Harada. Gpavatar:
+Generalizable and precise head avatar from image (s). arXiv preprint arXiv:2401.10215, 2024.
+[72] Zhenhui Ye, Tianyun Zhong, Yi Ren, Jiaqi Yang, Weichuang Li, Jiawei Huang, Ziyue Jiang, Jinzheng He,
+Rongjie Huang, Jinglin Liu, et al. Real3d-portrait: One-shot realistic 3d talking portrait synthesis. arXiv
+preprint arXiv:2401.08503, 2024.
+[73] Shengze Wang, Xueting Li, Chao Liu, Matthew Chan, Michael Stengel, Henry Fuchs, Shalini De Mello,
+and Koki Nagano. Coherent 3d portrait video reconstruction via triplane fusion. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 10712–10722, June
+2025.
+[74] Ali Razavi, Aaron Van den Oord, and Oriol Vinyals. Generating diverse high-fidelity images with vq-vae-2.
+Advances in neural information processing systems, 32, 2019.
+[75] Tero Karras, Samuli Laine, Miika Aittala, Janne Hellsten, Jaakko Lehtinen, and Timo Aila. Analyzing and
+improving the image quality of stylegan. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 8110–8119, 2020.
+[76] Tero Karras, Miika Aittala, Samuli Laine, Erik Härkönen, Janne Hellsten, Jaakko Lehtinen, and Timo
+Aila. Alias-free generative adversarial networks. Advances in neural information processing systems, 34:
+852–863, 2021.
+[77] Prafulla Dhariwal and Alexander Nichol. Diffusion models beat gans on image synthesis. Advances in
+neural information processing systems, 34:8780–8794, 2021.
+[78] Yu Deng, Jiaolong Yang, Jianfeng Xiang, and Xin Tong. Gram: Generative radiance manifolds for
+3d-aware image generation. In Proceedings of the IEEE/CVF conference on computer vision and pattern
+recognition, pages 10673–10683, 2022.
+[79] Sizhe An, Hongyi Xu, Yichun Shi, Guoxian Song, Umit Y Ogras, and Linjie Luo. Panohead: Geometryaware 3d full-head synthesis in 360deg. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 20950–20959, 2023.
+[80] Heyuan Li, Ce Chen, Tianhao Shi, Yuda Qiu, Sizhe An, Guanying Chen, and Xiaoguang Han. Spherehead:
+stable 3d full-head synthesis with spherical tri-plane representation. In European Conference on Computer
+Vision, pages 324–341. Springer, 2024.
+[81] Jingxiang Sun, Xuan Wang, Yichun Shi, Lizhen Wang, Jue Wang, and Yebin Liu. Ide-3d: Interactive
+disentangled editing for high-resolution 3d-aware portrait synthesis. ACM Transactions on Graphics (ToG),
+41(6):1–10, 2022.
+[82] Hao Liang, Pietro Perona, and Guha Balakrishnan. Benchmarking algorithmic bias in face recognition:
+An experimental approach using synthetic faces and human evaluation. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision, pages 4977–4987, 2023.
+14
+[83] Zhengyi Wang, Cheng Lu, Yikai Wang, Fan Bao, Chongxuan Li, Hang Su, and Jun Zhu. Prolificdreamer:
+High-fidelity and diverse text-to-3d generation with variational score distillation. Advances in neural
+information processing systems, 36:8406–8441, 2023.
+[84] Rui Chen, Yongwei Chen, Ningxin Jiao, and Kui Jia. Fantasia3d: Disentangling geometry and appearance
+for high-quality text-to-3d content creation. In Proceedings of the IEEE/CVF international conference on
+computer vision, pages 22246–22256, 2023.
+[85] Yixun Liang, Xin Yang, Jiantao Lin, Haodong Li, Xiaogang Xu, and Yingcong Chen. Luciddreamer:
+Towards high-fidelity text-to-3d generation via interval score matching. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition, pages 6517–6526, 2024.
+[86] Yukang Cao, Yan-Pei Cao, Kai Han, Ying Shan, and Kwan-Yee K Wong. Dreamavatar: Text-and-shape
+guided 3d human avatar generation via diffusion models. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, pages 958–968, 2024.
+[87] Zhenglin Zhou, Fan Ma, Hehe Fan, Zongxin Yang, and Yi Yang. Headstudio: Text to animatable head
+avatars with 3d gaussian splatting. In European Conference on Computer Vision, pages 145–163. Springer,
+2024.
+[88] Junjie Wang, Jiemin Fang, Xiaopeng Zhang, Lingxi Xie, and Qi Tian. Gaussianeditor: Editing 3d gaussians
+delicately with text instructions. In Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition, pages 20902–20911, 2024.
+[89] Jing Wu, Jia-Wang Bian, Xinghui Li, Guangrun Wang, Ian Reid, Philip Torr, and Victor Adrian Prisacariu.
+Gaussctrl: Multi-view consistent text-driven 3d gaussian splatting editing. In European conference on
+computer vision, pages 55–71. Springer, 2024.
+[90] Minghao Chen, Iro Laina, and Andrea Vedaldi. Dge: Direct gaussian 3d editing by consistent multi-view
+editing. In European conference on computer vision, pages 74–92. Springer, 2024.
+[91] Jingyu Zhuang, Di Kang, Yan-Pei Cao, Guanbin Li, Liang Lin, and Ying Shan. Tip-editor: An accurate 3d
+editor following both text-prompts and image-prompts. ACM Transactions on Graphics (ToG), 43(4):1–12,
+2024.
+[92] Dong In Lee, Hyeongcheol Park, Jiyoung Seo, Eunbyung Park, Hyunje Park, Ha Dam Baek, Sangheon
+Shin, Sangmin Kim, and Sangpil Kim. Editsplat: Multi-view fusion and attention-guided optimization for
+view-consistent 3d scene editing with 3d gaussian splatting. In Proceedings of the Computer Vision and
+Pattern Recognition Conference, pages 11135–11145, 2025.
+[93] Kunhao Liu, Fangneng Zhan, Muyu Xu, Christian Theobalt, Ling Shao, and Shijian Lu. Stylegaussian:
+Instant 3d style transfer with gaussian splatting. In SIGGRAPH Asia 2024 Technical Communications,
+pages 1–4. 2024.
+[94] Qixun Wang, Xu Bai, Haofan Wang, Zekui Qin, Anthony Chen, Huaxia Li, Xu Tang, and Yao Hu. Instantid:
+Zero-shot identity-preserving generation in seconds. arXiv preprint arXiv:2401.07519, 2024.
+[95] Zhen Li, Mingdeng Cao, Xintao Wang, Zhongang Qi, Ming-Ming Cheng, and Ying Shan. Photomaker:
+Customizing realistic human photos via stacked id embedding. In Proceedings of the IEEE/CVF conference
+on computer vision and pattern recognition, pages 8640–8650, 2024.
+[96] Dongxu Li, Junnan Li, and Steven Hoi. Blip-diffusion: Pre-trained subject representation for controllable
+text-to-image generation and editing. Advances in Neural Information Processing Systems, 36:30146–
+30166, 2023.
+[97] Yuxiang Wei, Yabo Zhang, Zhilong Ji, Jinfeng Bai, Lei Zhang, and Wangmeng Zuo. Elite: Encoding
+visual concepts into textual embeddings for customized text-to-image generation. In Proceedings of the
+IEEE/CVF international conference on computer vision, pages 15943–15953, 2023.
+15
+A
+Technical Appendices and Supplementary Material
+A.1
+Implementation Details
+A.1.1
+Pretrained Models
+We use Stable Diffusion v1.5 (Realistic Vision V4.0) with the stabilityai/sd-vae-ft-mse VAE as the
+diffusion backbone, running in float16 precision. Identity conditioning is provided by IP-Adapter
+Plus Face using a CLIP ViT-H/14 image encoder (scale 0.8), and pose conditioning by ControlNet
+(control_v11p_sd15_openpose, scale 0.6). For 3DGS, we use gsplat with base models pretrained
+on NeRSemble [22] sequences. Each base model uses degree-3 spherical harmonics and contains
+approximately 100K Gaussians, stored in PLY format. All renderings use a black background.
+A.1.2
+Base 3DGS Model Selection
+Given an input identity image, we select the most geometrically compatible NeRSemble base 3DGS by
+computing weighted feature similarity in the embedding space of DINO ViT-B/16 [31]. Specifically,
+we extract patch-level features from three semantically meaningful facial regions (hair, skin, and
+overall face shape) and compute a weighted cosine similarity score with weights 0.4, 0.3, and 0.3
+respectively. These weights were chosen to prioritize hair structure, which most strongly determines
+the geometric complexity of the 3D reconstruction, while also accounting for skin tone and overall
+facial geometry.
+A.1.3
+Diffusion Denoising
+We use a DDIM scheduler with T = 1000 timesteps and a linear beta schedule (βstart = 0.00085,
+βend = 0.012). We run 50 inference steps with denoising strength s = 0.6 (ts = 600), classifier-free
+guidance scale 4.0, and a null text input. The hybrid clean prediction weight is fixed at w = 0.4
+throughout denoising; we do not anneal w because at later steps the latent xt dominates the prediction
+and the noise component has diminishing influence.
+A.1.4
+3DGS Refitting
+At each guidance step, we refit the 3DGS using separate Adam optimizers per parameter group
+(positions: 1.6 × 10−4 , scales: 5 × 10−3 , rotations: 1 × 10−3 , opacities: 5 × 10−2 , SH0 : 2.5 × 10−3 ,
+SH1+ : 1.25 × 10−4 ; all with ϵ = 10−15 ). The first guidance step uses M = 1,000 refit iterations;
+subsequent steps use M = 200. The photometric loss uses λ1 = 0.8 (L1) and λ2 = 0.2 (SSIM),
+sampling one random view per iteration. The geometry guidance weight is λ = 50,000, with a loss
+scaling factor of 1000 for numerical stability during backpropagation through the VAE decoder. We
+do not perform Gaussian densification during refitting, as it causes tensor size mismatches when
+parameters are carried across timesteps.
+A.1.5
+Computational Cost
+We report end-to-end runtime per identity under our evaluation setting, including preprocessing,
+generation or optimization, and rendering of evaluation views when required. Our full pipeline takes
+approximately 3 minutes per identity on a single NVIDIA A100 GPU, with peak memory usage of
+approximately 24GB. For comparison, FastAvatar [4] takes about 3 seconds, FaceLift [20] about 20
+seconds, LAM [19] about 65 seconds, GAGAvatar [3] about 107 seconds, DreamGaussian [15] about
+182 seconds, GaussianEdit [16, 32, 33] about 4 minutes, Human-3Diffusion [7] about 5 minutes, and
+Arc2Avatar [6] about 3.5 hours per identity. Thus, our method is slower than feed-forward avatar
+methods, but comparable to or faster than optimization-heavy and diffusion-based 3D generation
+baselines, while producing an explicit 3DGS avatar as the final output. For the quantitative evaluation
+on 100 identities, our method requires roughly 5 A100 GPU-hours; scaling to the full 6,279-image
+evaluation would require approximately 314 A100 GPU-hours.
+A.1.6
+Evaluation Protocol
+We evaluate all methods using a unified manifest-based protocol. For each method, generated outputs
+are organized by identity and paired with the corresponding source image. Generated views are
+16
+sorted by parsed camera angle when available, and otherwise by natural filename order. We use all
+generated views for cross-view consistency and no-reference perceptual quality, and use the six most
+frontal views for identity similarity and FID. Before metric computation, images are padded to square
+and resized to avoid cropping off-center faces.
+For methods that produce an explicit 3D representation, we render the final representation from the
+evaluation cameras. For methods whose released pipelines directly output generated or rendered
+views, we evaluate those outputs under the closest matching camera or pose setting. For SplatShot,
+all reported metrics are computed on the final 3DGS renderings rather than intermediate diffusion
+predictions, since the explicit 3DGS avatar is the final output.
+A.2
+Algorithm of SplatShot
+Algorithm 1 summarizes the complete geometry-guided denoising procedure described in §4.
+Algorithm 1 3DGS-Guided Iterative Denoising
+Require: Base 3DGS model M, input image Iin , V camera views
+Require: Diffusion model (E, D, ϵθ ), guidance weight λ, noise mixture weight w, refit steps N ,
+strength s
+Ensure: Final 3DGS model M, generated views {Iˆv }
+1: Render base views: I v ← R(M, v) for all v
+2: Encode conditioning: c ← ImageAdapter(Iin )
+3: Encode to latent: xv0 ← E(I v ) for all v
+4: Sample noise: ϵvgt ∼ N (0, I) for all v
+5: Compute starting step: ts ← ⌊s · T ⌋
+6: Add noise: xvts ← αts xv0 + σts ϵvgt
+▷ Eq. 2
+7: for t = ts , . . . , 1 do
+8:
+for v = 1, . . . , V do
+▷ Step 1: Per-view generation
+v
+9:
+ϵt,v
+θ ← ϵθ (xt , t, c)
+t,v
+v
+10:
+ϵt,v
+▷ Eq. 7
+mix ← w · ϵθ + (1 − w) · ϵgt
+t,v
+▷ Eq. 3
+11:
+x̂v0 ← (xvt − σt ϵmix )/αt
+12:
+Iˆv ← D(x̂v0 )
+13:
+end for
+14:
+for n = 1, . . . , N do
+▷ Step 2: 3DGS model update
+15:
+Sample view v, render Irv ← R(M, v)
+16:
+Update M by ∇M Lphoto (Irv , Iˆv )
+▷ Eq. 1
+17:
+end for
+18:
+for v = 1, . . . , V do
+▷ Step 3: Noise adjustment
+19:
+g ← Lphoto (Iˆv , R(M, v))
+t,v
+t,v
+20:
+ϵt,v
+▷ Eq. 5
+θ ← ϵθ − λ · ∂g/∂ϵθ
+21:
+end for
+22:
+for v = 1, . . . , V do
+▷ DDIM step
+t,v
+v
+v
+23:
+xt−1 ← αt−1 x̂0 + σt−1 ϵθ
+▷ Eq. 4
+24:
+end for
+25: end for
+26: return M, {Iˆv }
+A.3
+3D Consistency of Diffusion-based Baseline Outputs
+Methods that rely on a 2D enhancer or neural renderer to produce their final output may appear
+high-quality when viewed individually, but their outputs are not guaranteed to be 3D-consistent.
+To demonstrate this, we take GAGAvatar[3]’s multi-view outputs, fit a 3DGS model using the
+same cameras and optimization procedure, and render from novel viewpoints. As shown in Fig. 9,
+GAGAvatar’s refitted 3DGS produces severe artifacts including floaters, fragmented geometry, and
+broken structure, confirming that the original outputs cannot be reconciled into a coherent 3D model.
+In contrast, our outputs produce clean novel-view renderings under the same procedure, as the
+17
+geometry guidance during denoising ensures that the generated views are already mutually consistent
+in 3D.
+Reference
+Novel View Renderings
+Figure 9: Novel view renderings from refitted 3DGS. Top: GAGAvatar’s outputs refitted to a 3DGS
+and rendered from novel viewpoints. The severe artifacts (floaters, fragmented geometry, inconsistent
+structure) reveal that GAGAvatar’s multi-view outputs are not 3D-consistent, as its visual quality
+relies on a 2D neural renderer rather than an explicit 3D representation. Bottom: our method’s outputs
+refitted under the same procedure, producing clean and coherent novel views.
+A.4
+The effect of base 3DGS model
+We investigate the role of the base 3DGS model through two complementary experiments.
+Same base, different inputs (Fig. 10). We fix a single base model and vary the input across diverse
+identities. In all cases, facial features (skin tone, eye shape, facial structure) change to match the
+input, while hairstyle remain largely inherited from the base. This holds consistently across both base
+models shown (top and bottom four rows use different bases). The pattern arises because trained
+identity encoders like IP-Adapter operate on tightly cropped face regions that exclude most hair,
+so hair is largely absent from the identity signal. Additionally, hair geometry is inherently less
+stable for 3DGS due to its fine, semi-transparent structure, making the model more resistant to hair
+modifications during refitting.
+Same input, different bases (Fig. 11). We fix a single input and generate avatars using four
+different base models per identity. The reference identity is preserved across all bases, but hairstyle
+and clothing vary with each base. Notably, facial features such as nose shape and jawline do adapt to
+the input even when the base has a substantially different face structure, confirming that the geometry
+guidance acts as a soft anchor that permits structural changes where the identity signal is strong.
+This disentanglement motivates our base selection algorithm, which prioritizes hairstyle similarity
+over other attributes, since hairstyle is the feature most inherited from the base and least controllable
+through identity conditioning.
+A.5
+Additional Qualitative Results
+We present qualitative results of our method on the CelebA-3D dataset in Figures 12, 13, 14. For each
+identity, we show the input CelebA-HQ photograph alongside six rendered views of the generated 3D
+Gaussian avatar at evenly spaced azimuth angles, demonstrating consistent geometry and appearance
+across viewpoints. Results span a diverse range of identities including varied ages, ethnicities, hair
+styles, and lighting conditions, highlighting the generalization capability of our pipeline.
+A.6
+Multi-view Outputs from Diffusion v.s. 3DGS Renderings
+Fig. 15 shows additional results on diverse CelebA-HQ identities. For each identity, we display
+the input image alongside multi-view renderings from both the final 3DGS model and the diffusion
+18
+outputs. Across varying genders, ages, skin tones, and lighting conditions, the method consistently
+preserves the reference identity while maintaining cross-view geometric coherence. The 3DGS
+renderings are slightly smoother due to the Gaussian representation, while the diffusion outputs retain
+finer texture details.
+A.7
+A.7.1
+Alternative approaches and negative results
+GaussianEdit: Attention-Based Baseline Implementation
+Background: attention injection for text-guided editing. Cross-attention maps in the diffusion
+UNet control where each conditioning token influences the generated image. For text-guided
+editing[34], injecting attention maps from a source prompt into an edited prompt enables localized
+edits while preserving unrelated structure. Fig. 16 illustrates this: changing “red lipstick” to “dark
+lipstick” without attention injection alters the entire face structure (right), while injecting the source
+cross-attention maps for the first 80% of denoising timesteps restricts the edit to the lips only (middle),
+leaving other features intact. This demonstrates that text tokens have spatially disentangled control
+over generation.
+Edit w/o attention Edit w/ attention
+injection
+injection
+Original Image
+Figure 16: Attention injection for text-guided editing. Left: source image. Middle: editing with
+attention injection preserves structure and localizes the change. Right: editing without injection
+causes unintended structural changes.
+Extension to 3DGS: inverse-forward rendering. To enforce this consistency across multiple
+views of a 3DGS scene, prior work [16, 32, 33] inverse-renders the 2D attention maps onto the 3D
+Gaussians. For each Gaussian Gk , its attention value for token n is computed by accumulating 2D
+attention across all views, weighted by alpha-compositing weights:
+P v
+w · Av (πv (Gk ), n)
+(n)
+ak = v k P v
+,
+(8)
+v wk
+where πv (Gk ) is the projection of Gk in view v and wkv is its compositing weight. These 3D-consistent
+values are then forward-rendered back to 2D via standard splatting:
+Y
+X (n)
+Ãv (p, n) =
+ak · αkv (p)
+(1 − αjv (p)),
+(9)
+k
+j<k
+replacing the original per-view attention maps in the UNet so that all views share a geometrically
+consistent attention distribution.
+Our reimplementation. We apply this inverse-forward procedure to every image token from IPAdapter conditioning, rather than text tokens. At each denoising step, we extract cross-attention maps
+between spatial features and image tokens, perform the 3D aggregation and re-projection using M and
+known cameras, and substitute the original maps. As shown in Table 1 and Fig. 5, this yields limited
+improvement: unlike text tokens, image tokens activate broadly and lack spatial disentanglement
+(Fig. 2), so the 3D-aggregated maps are themselves poorly localized, and the consistency enforcement
+blends incompatible view-dependent information rather than resolving it.
+19
+A.8
+PeRFlow: Accelerated Sampling via Rectified Flow
+To reduce runtime, we experimented with PeRFlow [29], which is based on rectified flow matching [35]. Unlike standard diffusion models that learn a gradual denoising process over many steps,
+flow matching learns a direct transport map between the noise distribution N (0, I) and the data
+distribution along straight-line trajectories in latent space. PeRFlow distills these trajectories into a
+few-step process, enabling high-quality generation in as few as 4-8 function evaluations compared to
+the 50 steps used in our standard DDIM pipeline.
+Input
+Final Diffusion output
+Final 3DGS renderings
+Figure 17: PeRFlow results. With only 4 sampling steps, the diffusion outputs (left) appear
+reasonable individually but the 3DGS renderings (right) reveal poor multi-view consistency due to
+insufficient guidance iterations.
+Since our geometry guidance operates at each denoising step, fewer steps would proportionally
+reduce the number of 3DGS refitting iterations and overall runtime. However, with only 4-8 guidance
+opportunities, the feedback loop cannot progressively resolve cross-view inconsistencies (Fig. 17).
+While the per-view diffusion outputs appear individually plausible, the 3DGS renderings reveal clear
+multi-view artifacts, comparable to running our full method without guidance. A sufficient number of
+guidance steps is essential for our iterative framework; efficient guidance scheduling under few-step
+sampling remains an interesting direction for future work.
+A.8.1
+Guided Forward Diffusion.
+We further experimented with a geometry-anchored forward diffusion process. The standard img2img
+approach adds noise to the input images in a single step to reach timestep tstart , which can introduce
+3D-inconsistent structure into the noisy latents before denoising even begins. To mitigate this, we
+proposed a Markovian forward process where noise is added incrementally across multiple steps, and
+at each forward step we refit the 3DGS model to the partially-noised predictions and re-render from
+all views, ensuring that the noise added at each step is geometrically consistent across viewpoints.
+While this approach is theoretically well-motivated and did not degrade output quality, in practice it
+yielded only marginal improvements in 3D consistency over the standard single-step noise addition,
+likely because the mixed noise is already sufficient to correct any inconsistencies introduced during
+the forward process. The primary drawback is that this guided forward process roughly doubles the
+inference time, making it impractical for our pipeline. We therefore omit it from the final method.
+A.9
+Full list of related work
+We now present a full list of related works. We introduce the background in §2.
+A.9.1
+Single-Image 3D Face and Head Reconstruction
+Parametric morphable models
+NeRF-based
+[2, 39–45]
+3DGS-based
+[1, 7, 46–60].
+Feed-forward 3DGS
+[9, 36–38]
+[3, 4, 10, 19, 61, 61–73]
+20
+A.9.2
+Coupling 2D Models with 3D Representations
+2D generative models on faces
+[12, 74–77]
+3D-aware training on 2D models
+SDS and its variants
+3DGS editing
+[5, 14, 42, 78–82]
+[6, 8, 83–87]
+[16, 32, 33, 88–93]
+Image-based conditioning tokens
+[17, 94–97]
+21
+017
+018
+092
+093
+094
+095
+096
+097
+098
+099
+100
+102
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+117
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+130
+131
+132
+133
+134
+135
+136
+137
+138
+139
+140
+141
+142
+143
+144
+145
+146
+147
+148
+149
+150
+151
+162
+163
+164
+165
+166
+167
+168
+170
+171
+172
+173
+174
+175
+176
+177
+178
+179
+180
+181
+182
+183
+184
+Figure 8: Example identities in the NeRSemble dataset. These sequences serve as the geometric base
+for our 3D avatar generation pipeline.
+22
+Input
+Base
+Novel View Renderings
+Figure 10: Same base model, different input images. Top 4 and bottom 4 models have different
+input images (left), and same base 3DGS model (second column).
+23
+Input
+Base
+Novel View Renderings
+Figure 11: Same input image, different base models. Top 4 and bottom 4 models share a same
+input image (left), with different 3DGS base models (second column).
+24
+00000
+00002
+00003
+00004
+00005
+00006
+00007
+00008
+00009
+00010
+00011
+00012
+00013
+00014
+00015
+00016
+00017
+00018
+00019
+00020
+00021
+00022
+00023
+00024
+00025
+00026
+00027
+00028
+00029
+00030
+Figure 12: CelebA-3D generation results (identities 00000–00029). For each identity, the leftmost
+image is the input CelebA-HQ photograph, followed by six rendered views of the generated 3D
+Gaussian avatar at evenly spaced azimuth angles.
+25
+00031
+00032
+00033
+00034
+00035
+00036
+00037
+00038
+00039
+00040
+00041
+00042
+00043
+00044
+00045
+00046
+00047
+00048
+00049
+00050
+00051
+00052
+00053
+00054
+00055
+00056
+00057
+00058
+00059
+00060
+Figure 13: CelebA-3D generation results (identities 00030–00059).
+26
+00061
+00062
+00063
+00064
+00065
+00066
+00067
+00068
+00069
+00070
+00071
+00072
+00073
+00074
+00075
+00076
+00077
+00078
+00079
+00080
+00081
+00082
+00083
+00084
+00085
+00086
+00087
+00088
+00089
+00090
+Figure 14: CelebA-3D generation results (identities 00060–00089).
+27
+Figure 15: Qualitative comparison between diffusion outputs and 3DGS renderings for identities
+00090–00097. For each identity, the source CelebA-HQ photograph is shown at the top, with the
+3DGS-rendered views (left column) and diffusion-generated views (right column).
+28

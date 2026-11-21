@@ -1,0 +1,238 @@
+A C++ version of Minkowski Engine. Contribute to QuiteLiterallyConnor/Minkowski4CPP development by creating an account on GitHub.
+
+perf(gaussian): separable, batched SSIM filter on CPU (train step -42 / -59 / -68 % at 128 / 256 / 512 px) by itsSio · Pull Request #42 · QuiteLiterallyConnor/Minkowski4CPP · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+itsSio
+commented
+Nov 2, 2026
+Copy link
+Copy Markdown
+Contributor
+SUMMARY
+The Gaussian trainer's loss uses ssim(). On the CPU, ssim() filtered five moment images (μx, μy, E[x²], E[y²], E[xy]) with five dense 11×11 depthwise conv2d calls. After #30 made the CPU rasterizer fast, these convolutions dominate the CPU train step at 256–512 px (a probe showed ~110 ms of a step at 256 px, scaling with pixels, not with Gaussians).
+The 11×11 Gaussian window is the outer product of a 1-D kernel, and zero padding separates as well. So on the CPU the five moments are now stacked as 15 planes (5 moments × 3 channels) and filtered by one vertical and one horizontal 1-D depthwise convolution:
+22 instead of 121 taps per pixel;
+2 instead of 5 convolutions, in both forward and backward.
+The math is the same; only float32 rounding differs. CUDA keeps the dense cuDNN path unchanged, because a probe showed the separable form is not faster there.
+Result (CPU, 5000 splats, 6 order-alternated rounds): train step −42 % / −59 % / −68 % at 128 / 256 / 512 px, with 256 and 512 px faster in every round.
+TECHNICAL DETAILS
+MinkowskiEngine/gaussian/gaussian_trainer.cpp, ssim():
+CPU branch: planes = cat({x, y, x*x, y*y, x*y}, 1) → conv2d(planes, k_vertical[15,1,w,1], pad (w/2, 0), groups 15) → conv2d(·, k_horizontal[15,1,1,w], pad (0, w/2), groups 15) → split(3, 1) into the five moments.
+CUDA branch: unchanged (dense window × window depthwise filter per moment).
+The SSIM map and its mean are computed as before from the moments.
+Numerics against the dense float64 reference: value |Δ| < 3e-8, gradient relative error ~2e-6 (float32 rounding of a different summation order).
+Memory: the 15-plane intermediate raises the peak working set at 512 px (see BENCHMARKS).
+No API change.
+TESTING
+New tests/gaussian/test_gaussian_ssim.cpp (registered in gaussian_tests):
+gaussian_ssim_identical_images_is_one.
+gaussian_ssim_matches_dense_reference_cpu: value and gradient against a dense float64 reference, for windows 11/7/3/1, non-square images, and an image smaller than the window.
+gaussian_ssim_matches_dense_reference_cuda: the same checks on CUDA.
+gaussian_ssim_rejects_bad_arguments.
+suite
+main f4ac612
+this PR (47cbd77 = d47d86c + main f4ac612)
+gaussian_tests CPU
+36 passed, 0 failed, 4 skipped
+39 passed, 0 failed, 5 skipped
+adaptive_tests CPU
+119 passed, 0 failed, 1 skipped
+119 passed, 0 failed, 1 skipped
+gaussian_tests CUDA
+—
+46 passed, 0 failed, 0 skipped (4 new incl. the CUDA reference test)
+adaptive_tests CUDA
+—
+123 passed, 0 failed, 0 skipped
+The round-4 run on the earlier base 1ace388 gave CPU gaussian 39/0/5 and adaptive 81/0, and CUDA gaussian 46/0/0 and adaptive 84/0.
+BENCHMARKS
+The A/B used gaussian_render_bench --devices cpu --counts 5000 --sizes 128,256,512 --train --warmup 1 --iterations 5. It compares main (1ace388, the base this change was written on; the trainer code is unchanged since) with this change, using 6 rounds that alternate the order every round (main first in rounds 0/2/4), all in one benchmark lock (08:51–08:53). The host was contended at about 41 % background CPU from other processes (load gate timed out). Values are medians over 30 iterations [min–max].
+px
+metric
+main
+this PR
+change
+rounds faster
+128
+train step
+60.3 ms (45.4–126.1)
+34.7 ms (27.9–121.9)
+−42.5 %
+5/6
+256
+train step
+142.3 ms (112.7–300.6)
+58.5 ms (49.6–135.0)
+−58.9 %
+6/6
+512
+train step
+433.8 ms (381.0–788.7)
+140.0 ms (109.0–246.9)
+−67.7 %
+6/6
+128 / 256 / 512
+render fwd+bwd (no SSIM)
+39.1 / 56.7 / 83.4 ms
+30.7 / 48.7 / 77.4 ms
+−21 / −14 / −7 %
+(SSIM not involved: noise)
+512
+process peak working set
+234 MB
+278 MB
++19 %
+15-plane intermediates
+128 / 256
+process peak working set
+195 MB
+195 MB
+0 %
+—
+GPU memory / kernel time
+n/a
+n/a
+CUDA path unchanged
+Throughput: train steps per second at 128 / 256 / 512 px go from 16.6 / 7.0 / 2.3 to 28.9 / 17.1 / 7.1.
+History, kept for the record. The round-4 A/B (4 rounds at 98–99 % host load, while a VM was running) was inconclusive: per-round changes flipped sign at 128 and 256 px, and only 512 px was faster in 4/4 rounds. No PR was opened then. This quieter rerun is the evidence for this PR.
+MACHINE LEARNING RESULTS
+n/a. Training quality is unchanged: the SSIM value matches the reference within 3e-8 and its gradient within ~2e-6 relative, as tested.
+TRADEOFFS
+Peak working set +19 % at 512 px (234 → 278 MB) from the 15-plane intermediate. 128 and 256 px are unchanged.
+CPU only. On CUDA the separable form measured slower than cuDNN's dense depthwise filter (probe: dense 3.4–4.2 ms vs separable 5.0–6.0 ms), so CUDA keeps the old code.
+Float32 results differ from the dense filter in the last bits (summation order). Results are deterministic.
+The benchmark host was contended (~41 %); absolute times are pessimistic.
+REPRODUCTION
+Commits: change d47d86c; this branch 47cbd77 (main f4ac612 merged, no conflicts).
+Benchmark binaries: gaussian_render_bench built from 1ace388 (main at the time) and from d47d86c, CPU LibTorch 2.15.0.
+Hardware: Ryzen 5 5600X 6C/12T, 16 GB RAM, RTX 2080 SUPER 8 GB (sm_75, driver 610.88), Windows 11, MSVC 19.44, CUDA 13.4.3, LibTorch 2.15.0.
+Docker was not available on the test host. The native toolchain mirrors docker/cuda-profile.sh, and upstream CI builds docker/Dockerfile for this PR.
+🤖 Generated with Claude Code
+itsSio
+and others
+added 3 commits
+November 2, 2026 00:28
+fix(bench): name the CUDA allocator StatType portably (fixes the CUDA…
+…
+4bb14b7
+```
+… 12.4 CI build)
+
+LibTorch 2.5.1 (docker profile 124) defines StatType in c10::CachingDeviceAllocator; 2.15 moved it to c10::CachingAllocator and re-exports it from c10::CachingDeviceAllocator with a using-directive. adaptive_kmap_bench and gaussian_render_bench used the 2.15-only name, so build-and-publish (124) fails on every PR.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+perf(gaussian): separable, batched SSIM filter on CPU for the trainer…
+…
+d47d86c
+```
+… loss
+
+ssim() filtered five moment images with five dense 11x11 depthwise conv2d
+calls. On CPU these dominate the train step at 256-512 px. The Gaussian window
+is the outer product of the 1-D kernel (and zero padding separates too), so on
+CPU the moments are now stacked as 15 planes and filtered by one vertical and
+one horizontal 1-D depthwise conv: 22 instead of 121 taps per pixel and 2
+instead of 5 convolutions (forward and backward). Same math; float32 rounding
+differs (< 3e-8 in the value, ~2e-6 relative in the gradient).
+
+CUDA keeps the dense cuDNN path unchanged: a probe showed the separable form
+is not faster there.
+
+Adds tests/gaussian/test_gaussian_ssim.cpp: value and gradient against a
+dense float64 reference (windows 11/7/3/1, non-square images, image smaller
+than the window) on CPU and CUDA, identical images give 1, argument checks.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/main' into perf/gaussian-ssim-se…
+…
+47cbd77
+```
+…parable
+```
+itsSio
+commented
+Nov 2, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Technical summary
+Investigated. After #30 sped up the CPU rasterizer, profiling the CPU train step showed ~110 ms per step at 256 px left over after the renderer's forward and backward. This cost scales with pixel count, not with the number of Gaussians. It is the SSIM loss: five dense 11×11 depthwise convolutions over the three colour channels.
+Change. On the CPU, the five moments are stacked into 15 planes and filtered by two 1-D depthwise passes (vertical, then horizontal): 22 taps per pixel instead of 121, and 2 convolutions instead of 5. CUDA keeps cuDNN's dense filter, because in a standalone probe the separable form was slower on CUDA.
+Tests. I added test_gaussian_ssim.cpp: value and gradient against a dense float64 reference on CPU and CUDA (window sizes 11/7/3/1, non-square images, an image smaller than the window), plus SSIM(x, x) = 1 and argument checks.
+suite
+main
+this PR
+CPU gaussian_tests
+36/0/4
+39/0/5
+CUDA gaussian_tests
+—
+46/0/0
+adaptive_tests
+—
+unchanged (CPU 119/0/1, CUDA 123/0/0)
+The value matches the dense reference within 3e-8, and the gradient within ~2e-6 relative.
+Benchmarks. The first attempt (round 4) was inconclusive because a VM kept the host at ~99 % CPU, so no PR was opened then. This rerun ran at ~41 % background load: 6 order-alternated rounds, 5000 splats.
+px
+train step change
+rounds faster
+128
+−42.5 %
+5/6
+256
+−58.9 %
+6/6
+512
+−67.7 %
+6/6
+Training throughput at 512 px goes from 2.3 to 7.1 steps/s. The cost is +19 % peak working set at 512 px (234 → 278 MB).
+Compatibility. No API change, and the CUDA path is untouched. CPU float32 results differ only in the last bits, and they are deterministic.
+Further possible improvements.
+Keep the planes in channels-last layout, or reuse a scratch buffer, to remove the +44 MB at 512 px.
+Fuse the SSIM map computation into one pass over the filtered moments.
+🤖 Generated with Claude Code
+itsSio
+and others
+added 2 commits
+November 2, 2026 10:20
+Merge upstream main into fix/cu124-cuda-stat-type
+…
+38b23ec
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge fix/cu124-cuda-stat-type (QuiteLiterallyConnor#32) so the CUDA …
+…
+28b172e
+```
+…12.4 CI build compiles
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+itsSio
+mentioned this pull request
+Nov 2, 2026
+perf(gaussian): fused CUDA SSIM forward + backward (stacked on #42; training step -9 % at 512 px, -22 % at 1024 px)
+#50
+Open
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

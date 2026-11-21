@@ -1,0 +1,113 @@
+# Opacity Split for Cloning
+
+Also called: Cloning Strategy for Gaussian Splatting, Revising Densification Opacity Initialization
+
+## Overview
+Opacity Split for Cloning is a method to initialize the opacity of cloned 3D Gaussian primitives to maintain transmittance consistency, preventing the cloned child from having less impact than the parent alone [S2]. It solves the problem where standard cloning in 3D Gaussian Splatting causes the parent and child to jointly attenuate the background transmittance more than the parent did alone, biasing the alpha blending process [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: A parent Gaussian $g_{parent}$ with opacity $\alpha_{old}$ selected for cloning [S2].
+*   Output: $N$ Gaussians (the parent and $N-1$ clones, or $N$ clones replacing the parent) with updated opacity $\alpha_{new}$ [S1, S2].
+
+**Data Structures:**
+*   Gaussian definition follows the parent's shared principles: mean $\mu_k \in \mathbb{R}^3$, covariance $\Sigma_k$, opacity $\alpha_k \in [0, 1]$, and spherical harmonic coefficients $\mathbf{c}_k$ [Parent].
+
+**Steps:**
+1.  **Select Parent:** Identify a Gaussian $g_{parent}$ with opacity $\alpha_{old}$ to be cloned [S2].
+2.  **Calculate New Opacity:** Compute the target opacity $\alpha_{new}$ for all resulting Gaussians using the transmittance preservation formula [S2].
+    *   For the specific case of cloning into two entities (parent + 1 clone) as described in [S2]:
+        $$ \alpha_{new} = 1 - \sqrt{1 - \alpha_{old}} $$
+    *   For the general case of cloning into $N$ identical copies as described in [S1], where the total transmittance must be preserved:
+        $$ (1 - \alpha_{new})^N = 1 - \alpha_{old} \implies \alpha_{new} = 1 - (1 - \alpha_{old})^{1/N} $$
+3.  **Assign Opacity:** Set $\alpha_{parent} = \alpha_{new}$ and $\alpha_{clone} = \alpha_{new}$ for all $N-1$ clones [S2].
+4.  **Handle Covariance:** [S1] states that opacity adjustment alone is insufficient because Gaussians are not point sources, so the covariance $\Sigma$ must also be altered. [S1] proposes minimizing the error of integrated 1D slices passing through the Gaussian centers:
+    $$ \text{minimize } \left\| \int_{-\infty}^{\infty} \mathbf{C}^{new}(x) dx - \int_{-\infty}^{\infty} \mathbf{C}^{old}(x) dx \right\|_2^2, \quad \forall \mathcal{S} $$
+    where $\mathcal{S}$ represents arbitrary slices and $x$ denotes points along the slice [S1]. This ensures the integral of the color/radiance along any slice through the center is preserved [S1]. The exact analytical update equation for $\Sigma$ is not provided in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Gaussian:
+    def __init__(self, mu, sigma, alpha, c):
+        self.mu = mu
+        self.sigma = sigma
+        self.alpha = alpha
+        self.c = c
+    def copy(self):
+        return Gaussian(self.mu.copy(), self.sigma.copy(), self.alpha, self.c.copy())
+
+def opacity_split_for_cloning(gaussian, num_clones):
+    """
+    Computes the split opacity for a cloned Gaussian.
+    
+    Args:
+        gaussian: Gaussian object with attribute 'alpha' (float in [0, 1]).
+        num_clones: Integer N, the total number of resulting Gaussians.
+        
+    Returns:
+        new_alpha: The opacity value to assign to all resulting Gaussians.
+    """
+    alpha_old = gaussian.alpha
+    
+    if num_clones <= 0:
+        raise ValueError("num_clones must be at least 1")
+        
+    # Guard for numerical stability when alpha_old is very close to 1 [G]
+    if alpha_old >= 1.0:
+        return 1.0
+        
+    # General formula from [S1]: (1 - alpha_new)^N = 1 - alpha_old
+    new_alpha = 1.0 - (1.0 - alpha_old) ** (1.0 / num_clones)
+    return new_alpha
+
+def clone_gaussian_with_opacity_split(gaussian, num_total_gaussians):
+    """
+    Clones a Gaussian and splits its opacity according to [S1, S2].
+    
+    Args:
+        gaussian: The parent Gaussian to clone.
+        num_total_gaussians: The total number of Gaussians after cloning.
+        
+    Returns:
+        List of new Gaussian objects.
+    """
+    new_alpha = opacity_split_for_cloning(gaussian, num_total_gaussians)
+    new_gaussians = []
+    
+    for _ in range(num_total_gaussians):
+        new_g = gaussian.copy()
+        new_g.alpha = new_alpha
+        
+        # [S1] Covariance Σ must also be altered to minimize slice integral error.
+        # The exact update formula for Σ is not provided in the sources.
+        
+        new_gaussians.append(new_g)
+        
+    return new_gaussians
+```
+
+**Parameters:**
+*   $N$ (`num_clones`): The number of resulting Gaussians. Typically $N=2$ (parent + 1 clone) in standard densification steps [S2], but the formula generalizes to any $N$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Point Source Assumption:** Equation $(1 - \alpha_{new})^N = 1 - \alpha_{old}$ is derived assuming point sources or identical spatial overlap. Since Gaussians have extent ($\Sigma$), this opacity split alone is insufficient to perfectly preserve rasterization if $\Sigma$ is not also adjusted [S1].
+*   **Transmittance Bias:** If standard cloning is used (copying $\alpha_{old}$ to both parent and child), the combined transmittance becomes $(1-\alpha_{old})^2$, which is lower than $(1-\alpha_{old})$, causing excessive darkening/occlusion of background elements [S2].
+*   **Numerical Stability:** When $\alpha_{old}$ is very close to 1, $(1-\alpha_{old})$ approaches 0. Care must be taken in floating-point arithmetic to avoid `NaN` or `Inf` results when taking roots or logs [G].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per Gaussian cloned. The opacity calculation involves a constant number of arithmetic operations [G].
+*   **Memory Complexity:** $O(1)$ additional memory per clone [G].
+*   **Strengths:** Simple to implement; effectively mitigates the transmittance bias introduced by naive cloning; preserves the visual appearance of the scene during densification [S2].
+*   **Limitations:** Does not address the spatial extent mismatch (covariance) unless combined with covariance adjustment [S1]. Relies on the assumption that cloned Gaussians are perfectly co-located [S1].
+*   **When to use:** When performing densification via cloning in 3D Gaussian Splatting to prevent artifacts caused by incorrect opacity accumulation [S2].
+
+## Background
+*   **Origin:** The specific formula $\alpha_{new} = 1 - \sqrt{1 - \alpha_{old}}$ for $N=2$ is attributed to Bulo et al. (2024) [S2]. The generalization to $N$ copies and the discussion of covariance adjustment are discussed in the context of 3D Gaussian Splatting as Markov Chain Monte Carlo [S1].
+*   **History:** Standard 3D Gaussian Splatting clones Gaussians by copying all attributes, including opacity, which causes issues with alpha blending transmittance [S2]. Subsequent works like Bulo et al. (2024) and PixelGS (Zhang et al., 2024) proposed modifications to densification criteria and opacity initialization to correct this [S2].
+*   **Usage:** Used in advanced implementations of 3D Gaussian Splatting training pipelines, particularly those focusing on adaptive density control and high-fidelity reconstruction [S2].
+
+## Sources
+[S1] 3D Gaussian Splatting as Markov Chain Monte Carlo, https://ubc-vision.github.io/3dgs-mcmc/, fetched 2026-10-26
+[S2] Improving Adaptive Density Control for 3D Gaussian Splatting, https://doi.org/10.5220/0013308500003912, fetched 2026-10-30

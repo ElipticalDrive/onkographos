@@ -1,0 +1,214 @@
+# PSCD-GS
+
+Also called: PSCD-GS Densification, Role-Aware Perception-Structure Collaborative Densification, Role-Aware Perception-Structure Collaborative Densification for 3D Gaussian Splatting
+
+## Overview
+PSCD-GS is a densification strategy for 3D Gaussian Splatting that replaces hard semantic labels with continuous memberships in four roles (perception-dominant, structure-dominant, co-dominant, and low-response) to guide candidate selection, clone/split decisions, and split placement [S1, unofficial]. It integrates image-space perceptual responses with multi-view structural evidence, allowing primitives to respond to both types of evidence simultaneously rather than forcing a binary choice [S1, unofficial]. Unlike sibling methods that rely solely on gradients or reconstruction errors, PSCD-GS uses a role-aware framework to coordinate densification based on the complementary characteristics of the scene [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Current Gaussian set $\mathcal{G}_k$ (positions $\mu$, covariances $\Sigma$, opacities $\alpha$, spherical harmonics coefficients), training views, precomputed perceptual maps, perceptual tensors, image-boundary responses, and camera-neighbor graph.
+*   **Outputs:** Updated Gaussian set $\mathcal{G}_{k+1}$ with new primitives added via cloning or splitting, and removed primitives via pruning.
+
+**Data Structures:**
+*   **Gaussian Primitive $i$:** Contains position $\mu_i \in \mathbb{R}^3$, covariance $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (or scale $s_i$ and rotation $q_i$), opacity $\alpha_i$, and appearance coefficients.
+*   **Evidence Scores:** $P_i$ (perceptual), $Q_i$ (structural).
+*   **Role Weights:** $\rho^{PQ}_i, \rho^{P}_i, \rho^{Q}_i, \rho^{0}_i$ (sum to 1).
+*   **Structural Maps:** Depth discontinuity $D$, multi-view consistency $M$, boundary response $B$, reliability gate $RB$.
+
+**Parameters:**
+*   $a^P, a^Q$: Sigmoid steepness for perceptual/structural memberships.
+*   $\tau^P, \tau^Q$: Sigmoid thresholds for perceptual/structural memberships.
+*   $\alpha$: Coefficient controlling maximum evidence bonus in candidate score (Eq. 9).
+*   $K_{max}$: Maximum number of candidates per event.
+*   $r_{grow}$: Fraction of current representation $N_k$ allowed for densification.
+*   $N_{max}$: Global cap on total number of primitives.
+*   $\tau_D$: Threshold for candidate selection score $D_i$.
+*   $\kappa^{PQ}$: Base split preference coefficient for co-dominant role.
+*   $\tau_s$: Scale threshold; spatially large Gaussians ($s_i > \tau_s$) are always split.
+*   $\tau_r$: Threshold for split tendency.
+*   $\sigma_{fit}$: Variance parameter for fit confidence exponential decay.
+*   $K_{dir}$: Normalization factor for directional confidence.
+*   $\tau_{dir}$: Threshold for branch confidence $c^X_i$.
+*   $N_s$: Split factor, set to 2 for binary split.
+*   $\eta_\delta$: Fraction of parent standard deviation for child displacement.
+*   $\beta_q$: Exponential moving average factor for quantile calibration.
+*   $\epsilon_{cal}, \epsilon$: Small constants for numerical stability.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def PSCD_GS_Densification(Gaussians, TrainingViews, PrecomputedCues, DensificationInterval):
+    """
+    Perform one densification event for 3D Gaussian Splatting using PSCD-GS.
+    """
+    # 1. Snapshot and Render Depth
+    # Treat current Gaussian parameters as a synchronized snapshot
+    Snapshot = Gaussians.copy()
+    # Render depth maps at evidence resolution for training views
+    DepthMaps = RenderDepth(Snapshot, TrainingViews)
+    
+    # 2. Refresh Structural Maps
+    # Use Eq. (3) and Eq. (4) from source to compute D, M, B, RB
+    StructuralMaps = ComputeStructuralMaps(DepthMaps, TrainingViews, PrecomputedCues)
+    
+    # 3. Auxiliary Compositing Pass
+    # Accumulate contribution-weighted perceptual, structural, visibility, and tensor statistics
+    # This pass renders the scene and aggregates statistics per Gaussian
+    Stats = AccumulateStatistics(Snapshot, TrainingViews, StructuralMaps, PrecomputedCues)
+    
+    # 4. Compute Evidence Scores
+    # Eq. (5)-(7): Calibrate raw responses to Gaussian-level scores Pi and Qi
+    # If quantile span collapses, retain previous range; if no valid range, set to 0
+    Pi, Qi = ComputeEvidenceScores(Stats, DensificationInterval)
+    
+    # 5. Compute Continuous Role Weights
+    # Eq. (8): Map scores to smooth memberships and factorize into joint roles
+    mP = Sigmoid(aP * (Pi - tauP))
+    mQ = Sigmoid(aQ * (Qi - tauQ))
+    rhoPQ = mP * mQ
+    rhoP = mP * (1 - mQ)
+    rhoQ = (1 - mP) * mQ
+    rho0 = (1 - mP) * (1 - mQ)
+    
+    # 6. Select Candidates
+    # Eq. (9): Compute priority Di and select TopK candidates
+    # Gi: Gradient-based priority
+    # Si: Role-weighted evidence score
+    # Di: Combined score
+    Gi = Stats.Grad / (Stats.Grad + tau_g + epsilon)
+    Si = rhoPQ * Pi + rhoP * Qi + (rhoQ + rho0) * (Pi + Qi) / 2
+    Di = Gi + alpha * (1 - Gi) * Si
+    
+    # Calculate growth budget
+    Kk = Max(0, Min(K_max, Floor(r_grow * N_k), N_max - N_k))
+    
+    # Select candidates with Di >= tau_D, excluding those scheduled for pruning
+    Candidates = TopK(Di, Kk, Condition=(Di >= tau_D) and (i not in PruningSet))
+    
+    # 7. Process Candidates
+    NewPrimitives = []
+    ParentsToRemove = []
+    
+    for g in Candidates:
+        # Eq. (10): Assign clone or split
+        # Compute split tendency based on role
+        ZetaQ = Qi / (Pi + Qi + epsilon)
+        R_split = rhoPQ * kappa_PQ + (1 - kappa_PQ) * ZetaQ
+        
+        # If scale > tau_s, always split. Otherwise, use R_split vs tau_r
+        if g.scale > tau_s or R_split >= tau_r:
+            Operation = SPLIT
+        else:
+            Operation = CLONE
+            
+        if Operation == SPLIT:
+            # Eq. (11)-(14): Estimate branch direction and confidence
+            # Compute contribution-weighted tensors for perceptual (P) and structural (Q) branches
+            # For each view v, compute tensor F^X_v,i
+            # Fuse across views to get F^X_i
+            # Compute eigenvalues Lambda^X_1,i >= Lambda^2_i >= Lambda^3_i
+            # Direction d^X_i = eigmax(F^X_i)
+            # Confidence c^X_i = (Lambda^X_1,i - Lambda^2_i) / (Lambda^X_1,i + epsilon) * Min(1, Sum(c^X_v,i) / K_dir)
+            
+            # Combine branches using soft memberships
+            # H_role = mP * cP * dP * dP^T + mQ * cQ * dQ * dQ^T
+            # Final direction d_i = eigmax(H_role)
+            # Displacement delta_i = eta_delta * sqrt(d_i^T Sigma_i d_i) * d_i
+            
+            # Check confidence threshold tau_dir
+            if cP < tau_dir and cQ < tau_dir:
+                # Fallback: If fused evidence is conflicting/isotropic and parent is isotropic,
+                # use original 3DGS sampling from N(0, Sigma_i)
+                Children = Original3DGS_Split(g)
+            else:
+                # Place split children symmetrically
+                mu_plus = g.mu + delta_i
+                mu_minus = g.mu - delta_i
+                # Child scales: s_i / (0.8 * N_s) with N_s = 2
+                # Inherit rotation, opacity, appearance
+                Children = [
+                    Gaussian(mu_plus, g.Sigma, g.alpha, g.SH, g.scale / 1.6),
+                    Gaussian(mu_minus, g.Sigma, g.alpha, g.SH, g.scale / 1.6)
+                ]
+            NewPrimitives.extend(Children)
+            ParentsToRemove.append(g)
+            
+        else: # CLONE
+            # Clone parent parameters at same initial center
+            Clone = Gaussian(g.mu, g.Sigma, g.alpha, g.SH, g.scale)
+            NewPrimitives.append(Clone)
+            
+    # 8. Update Gaussians
+    # Insert new primitives, remove split parents
+    Gaussians = (Gaussians - ParentsToRemove) + NewPrimitives
+    
+    # Apply original 3DGS pruning rules
+    Gaussians = ApplyPruning(Gaussians)
+    
+    # Reset event statistics, retain opacity-reset schedule
+    ResetEventStats()
+    
+    return Gaussians
+```
+
+**Detailed Steps:**
+
+1.  **Precomputation:** Before optimization, precompute perceptual maps, perceptual tensors, image-boundary responses, and camera-neighbor graph [S1, unofficial].
+2.  **Ordinary Training:** During standard iterations, accumulate original view-space positional gradients over the current densification interval. No role decision is made [S1, unofficial].
+3.  **Densification Event:**
+    *   Treat current Gaussian parameters as a synchronized snapshot.
+    *   Render depth maps at evidence resolution for training views [S1, unofficial].
+    *   Refresh structural maps ($D, M, B, RB$) using Eq. (3) and Eq. (4) [S1, unofficial].
+    *   Perform an auxiliary compositing pass to accumulate contribution-weighted perceptual, structural, visibility, and tensor statistics [S1, unofficial].
+    *   Compute Gaussian-level evidence scores $P_i$ and $Q_i$ using Eq. (5)–(7). Calibration uses exponential moving average of quantiles. If the quantile span collapses, the previous valid range is retained; if no valid range exists, the branch is set to zero to prevent amplifying constant responses [S1, unofficial].
+    *   Compute continuous role weights using Eq. (8):
+        $$m^P_i = \sigma[a^P(P_i - \tau^P)], \quad m^Q_i = \sigma[a^Q(Q_i - \tau^Q)]$$
+        $$\rho^{PQ}_i = m^P_i m^Q_i, \quad \rho^{P}_i = m^P_i(1 - m^Q_i), \quad \rho^{Q}_i = (1 - m^P_i)m^Q_i, \quad \rho^{0}_i = (1 - m^P_i)(1 - m^Q_i)$$
+    *   Select candidates $C_k$ under the event-wise growth budget using Eq. (9):
+        $$G_i = \frac{\bar{g}_i}{\bar{g}_i + \tau_g + \epsilon}, \quad S_i = \rho^{PQ}_i P_i + \rho^{P}_i Q_i + \frac{\rho^{Q}_i + \rho^{0}_i}{2}(P_i + Q_i)$$
+        $$D_i = G_i + \alpha(1 - G_i)S_i, \quad K_k = \max(0, \min[K_{max}, \lfloor r_{grow} N_k \rfloor, N_{max} - N_k])$$
+        $$C_k = \text{TopK}_{K_k} \{i : D_i \ge \tau_D, i \notin P_k\}$$
+        where $P_k$ is the set of primitives scheduled for pruning [S1, unofficial].
+    *   For each candidate, assign clone or split using Eq. (10):
+        $$\zeta^Q_i = \frac{Q_i}{P_i + Q_i + \epsilon}, \quad R^{split}_i = \rho^{PQ}_i \kappa^{PQ} + (1 - \kappa^{PQ})\zeta^Q_i$$
+        $$o_i = \begin{cases} \text{split} & \text{if } s_i > \tau_s \lor R^{split}_i \ge \tau_r \\ \text{clone} & \text{otherwise} \end{cases}$$
+        A spatially large Gaussian ($s_i > \tau_s$) is always split to avoid duplicating oversized support [S1, unofficial].
+    *   If assigned to split, estimate branch direction and confidence using Eq. (11)–(14). For branch $X \in \{P, Q\}$:
+        $$a^X_{v,i} = \frac{\lambda^X_{v,i} - \lambda^2_{v,i}}{\lambda^X_{v,i} + \lambda^2_{v,i} + \epsilon}$$
+        $$\xi^X_{v,i} = \min\left(1, \frac{\sum_u w_i(u) X^X_v(u)}{\tau_X}\right)$$
+        $$f^X_{v,i} = \exp\left(-\frac{\text{norm}^2(A^v_i z^X_{v,i} - e^X_{v,i})}{2 \sigma^2_{fit}}\right)$$
+        $$r^P_{v,i} = 1, \quad r^Q_{v,i} = \frac{\sum_u w_i(u) M_k(u)}{C_i + \epsilon}$$
+        $$c^X_{v,i} = a^X_{v,i} \xi^X_{v,i} f^X_{v,i} r^X_{v,i}$$
+        Fused confidence and direction:
+        $$F^X_i = \sum_v c^X_{v,i} t^X_{v,i} t^X_{v,i}$$
+        Eigenvalues $\Lambda^X_{1,i} \ge \Lambda^2_i \ge \Lambda^3_i$.
+        $$d^X_i = \text{eigmax}(F^X_i), \quad c^X_i = \frac{\Lambda^X_{1,i} - \Lambda^2_i}{\Lambda^X_{1,i} + \epsilon} \min\left(1, \frac{\sum_v c^X_{v,i}}{K_{dir}}\right)$$
+    *   Place split children using Eq. (15). If confidence is insufficient (e.g., $c^X_i < \tau_{dir}$ for both branches, or fused evidence is isotropic), fall back to original 3DGS sampling from $N(0, \Sigma_i)$ [S1, unofficial].
+        $$H^{role}_i = m^P_i c^P_i d^P_i d^{P^T}_i + m^Q_i c^Q_i d^Q_i d^{Q^T}_i$$
+        $$d_i = \text{eigmax}(H^{role}_i)$$
+        $$\delta_i = \eta_\delta \sqrt{d_i^T \Sigma_i d_i}$$
+        $$\mu^\pm_i = \mu_i \pm \delta_i d_i$$
+        Children scales are set to $s_i / (0.8 N_s)$ with $N_s=2$. Children inherit parent rotation, opacity, and appearance [S1, unofficial].
+    *   If assigned to clone, clone the parent parameters at the same initial center [S1, unofficial].
+    *   Insert new primitives, remove split parents, apply original 3DGS pruning rules, reset event statistics, retain opacity-reset schedule, and resume ordinary optimization [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Quantile Collapse:** If the current quantile span collapses during calibration, the previous valid calibration range is retained. Before a valid range is available, the branch is set to zero to prevent amplifying a nearly constant response field into artificial evidence [S1, unofficial].
+*   **Large Gaussians:** A spatially large Gaussian ($s_i > \tau_s$) is always split, irrespective of its role, because cloning would duplicate the same oversized support [S1, unofficial].
+*   **Isotropic Fallback:** If the fused evidence is conflicting or nearly isotropic (low eigenvalue gap), and parent covariance is also nearly isotropic, PSCD-GS falls back to original 3DGS split sampling from $N(0, \Sigma_i)$ [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Role construction and candidate scoring are linear in the number of active Gaussians $O(N)$. The $3 \times 3$ linear solves and eigendecompositions are restricted to the selected split candidates. The additional operations affect only the training-time densification stage [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ persistent storage for Gaussian parameters. Additional temporary storage for structural maps and statistics during the densification event [S1, unofficial].
+*   **Performance:** Experiments on MipNeRF 360, Deep Blending, and Tanks & Temples show that PSCD-GS achieves competitive or leading dataset-level image-quality averages [S1, unofficial].
+*   **Strengths:** Integrates complementary perceptual and structural cues; continuous memberships allow gradual transitions between roles; avoids artificial evidence from constant responses.
+*   **Limitations:** Requires precomputation of perceptual and structural cues; densification logic is more complex than standard 3DGS; relies on hyperparameter tuning ($\tau^P, \tau^Q, \alpha, \tau_D$, etc.) [S1, unofficial].
+
+## Background
+PSCD-GS was proposed as a densification strategy for 3D Gaussian Splatting to address the limitations of existing methods that rely on gradients, reconstruction errors, or isolated regional cues [S1, unofficial]. It was introduced in the paper "PSCD-GS: Role-Aware Perception-Structure Collaborative Densification for 3D Gaussian Splatting" [S1, unofficial]. The method builds on the original 3DGS training loop but replaces the hard assignment of densification roles with a continuous, role-aware framework [S1, unofficial].
+
+## Sources
+[S1] PSCD-GS: Role-Aware Perception-Structure Collaborative Densification for 3D Gaussian Splatting, https://doi.org/10.21203/rs.3.rs-10466466/v1, fetched 2026-10-26 (unofficial)

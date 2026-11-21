@@ -1,0 +1,472 @@
+--- v002.md
++++ v003.md
+@@ -4,84 +4,63 @@
+ 
+ ## Overview
+-Uncertainty-aware NeRF (U-NeRF) is a neural radiance field variant that explicitly models aleatoric uncertainty for both rendered color and depth, outputting Gaussian distributions rather than deterministic values [S1]. It addresses the limitations of standard NeRF in Scene Coordinate Regression (SCR) by providing pixel-level reliability metrics that allow for the filtering of synthetic data artifacts and the weighting of training samples [S1]. Unlike standard NeRF which minimizes mean squared error, U-NeRF optimizes the negative log-likelihood (NLL) of the rendered distributions, augmented by a variance-weighting term to prevent premature convergence in hard-to-fit regions [S1].
++Uncertainty-aware NeRF (U-NeRF) is a NeRF variant that separately predicts uncertainties for rendered color and depth images to reveal data reliability at the pixel level, addressing artifacts and redundancy in synthetic data for Scene Coordinate Regression (SCR) [S1]. It renders pixel color and depth as Gaussian distributions, providing mean and variance estimates for uncertainty-aware visual localization [S1]. Unlike standard NeRF which outputs deterministic values, U-NeRF models the aleatoric uncertainty of the scene representation, allowing for the filtering of poorly rendered images and the weighting of pixels in downstream regression losses [S1].
+ 
+ ## How it works
+-### Inputs and Outputs
+-**Inputs:**
+-*   3D position $\mathbf{x} \in \mathbb{R}^3$.
+-*   Viewing direction $\mathbf{d} \in \mathbb{R}^3$ (normalized).
+-*   Camera ray parameters for volume rendering: origin $\mathbf{o}$, direction $\mathbf{d}$, near/far bounds $[t_n, t_f]$.
+-*   Training targets: Ground truth color $\mathbf{C}(r)$ and depth $z(r)$ for sampled rays $r$.
+-
+-**Outputs:**
+-*   For a given $(\mathbf{x}, \mathbf{d})$: Volume density $\tau$, mean color $\bar{\mathbf{c}}$, and pre-activation color variance $\bar{\sigma}_c^2$.
+-*   For a given ray $r$: Rendered mean color $\hat{C}(r)$, rendered color variance $\hat{\sigma}_C^2(r)$, rendered mean depth $\hat{z}(r)$, and rendered depth variance $\hat{\sigma}_z^2(r)$.
+-
+-### Data Structures
+-The core data structure is a Multi-Layer Perceptron (MLP) [S1].
+-*   **Input Layer:** Concatenated positional encoding $\phi(\mathbf{x}, \mathbf{d})$. The positional encoding $\phi(\cdot)$ is applied to both position and direction as in standard NeRF [S1].
+-*   **Hidden Layers:** Standard MLP layers (dimensions not specified in sources) [S1].
+-*   **Output Layer:** A tuple $(\tau, \bar{\mathbf{c}}, \bar{\sigma}_c^2)$ [S1].
+-    *   $\tau$: Scalar volume density.
+-    *   $\bar{\mathbf{c}}$: Vector of mean RGB color values.
+-    *   $\bar{\sigma}_c^2$: Scalar pre-Softplus variance prediction for color [S1].
+-
+-### Numbered Steps
+-
+-1.  **Sampling:** For a camera ray $r(t) = \mathbf{o} + t\mathbf{d}$ traversing $[t_n, t_f]$, partition the interval into $N$ bins. Sample $N$ points $t_i$ uniformly within each bin (hierarchical stratified sampling) [S1].
+-2.  **MLP Inference:** For each sample point $t_i$ along the ray, compute position $\mathbf{x}_i$ and direction $\mathbf{d}$. Pass $\phi(\mathbf{x}_i, \mathbf{d})$ through the MLP to obtain $\tau_i$, $\bar{\mathbf{c}}_i$, and $\bar{\sigma}_c^2_i$ [S1].
+-3.  **Variance Activation:** Apply the Softplus activation function to the pre-activation variance to ensure positivity:
+-    $$ \sigma_c^2_i = \text{Softplus}(\bar{\sigma}_c^2_i) $$
+-    [S1]
+-4.  **Weight Computation:** Compute the volume rendering weight $w_i$ for each sample [S1]:
+-    $$ w_i = T_i (1 - \exp(-\tau_i \delta_i)) $$
+-    where $\delta_i = t_{i+1} - t_i$ and $T_i = \exp(-\sum_{j=1}^{i-1} \tau_j \delta_j)$ is the transmittance [S1].
+-5.  **Color Rendering:** Compute the expected color $\hat{C}(r)$ and its variance $\hat{\sigma}_C^2(r)$ by aggregating the sample distributions. Assuming independent Gaussian distributions for sampled points, the rendered color is Gaussian $\hat{C} \sim \mathcal{N}(\bar{C}, \bar{\sigma}_C^2)$ [S1]:
+-    $$ \hat{C}(r) = \sum_{i=1}^N w_i \bar{\mathbf{c}}_i $$
+-    $$ \hat{\sigma}_C^2(r) = \sum_{i=1}^N w_i^2 \sigma_c^2_i $$
+-    [S1]
+-6.  **Depth Rendering:** Compute the expected depth $\hat{z}(r)$ and its variance $\hat{\sigma}_z^2(r)$ [S1]:
+-    $$ \hat{z}(r) = \sum_{i=1}^N w_i t_i $$
+-    $$ \hat{\sigma}_z^2(r) = \sum_{i=1}^N w_i (t_i - \hat{z}(r))^2 $$
+-    [S1]
+-7.  **Loss Calculation:** Compute the color loss $L_{color}$ and depth loss $L_{depth}$ using the Negative Log-Likelihood (NLL) [S1].
+-8.  **Optimization:** Minimize the total loss $L_{overall}$ with respect to the MLP parameters [S1].
+-
+-### Formulas
+-
+-**Color Loss with Variance Weighting:**
+-Standard NLL optimization can lead to sub-optimal mean fits because badly-fit regions receive increasingly less weight as their uncertainty decreases (premature convergence) [S1]. To address this, U-NeRF introduces a variance-weighting term $\hat{\sigma}_C^{-2\zeta}$ acting as an adaptive learning rate, using a stop-gradient operation $\lfloor \cdot \rfloor$ to prevent gradients from flowing through the weighting term itself [S1]:
+-
+-$$ L_{color} = \sum_{r \in R} \lfloor \hat{\sigma}_C(r)^{-2\zeta} \rfloor L(r) $$
+-
+-where $L(r)$ is the standard NLL for color:
+-
+-$$ L(r) = \frac{\|\mathbf{C}(r) - \hat{C}(r)\|_2^2}{2\hat{\sigma}_C^2(r)} + \log \hat{\sigma}_C(r) $$
+-
+-[ S1 ]
+-
+-**Depth Loss:**
+-The depth loss is a standard NLL on the output depth distribution [S1]:
+-
+-$$ L_{depth} = \sum_{r \in R} \left( \frac{\|\hat{z}(r) - z(r)\|_2^2}{2\hat{\sigma}_z^2(r)} + \log \hat{\sigma}_z(r) \right) $$
+-
+-[ S1 ]
+-
+-**Total Objective:**
+-$$ L_{overall} = L_{color} + \lambda L_{depth} $$
+-
+-[ S1 ]
+-
+-### Parameters
+-*   $\zeta$: Interpolation parameter for the color loss weighting. $\zeta=0$ corresponds to standard NLL; $\zeta=1$ corresponds to MSE weighting. It balances uncertainty estimation and fit quality, specifically to mitigate the ignorance of hard-to-fit regions [S1]. Typical value not explicitly stated in sources [S1].
+-*   $\lambda$: Weight for the depth loss term in the overall objective function [S1]. Value not explicitly stated in sources [S1].
+-*   $N$: Number of sampled points along the ray. Not explicitly stated in sources [S1].
+-
+-### Edge Cases and Pitfalls
+-*   **Premature Convergence:** Standard NLL minimization leads to sub-optimal mean fits because regions that are poorly fit initially have high variance, but as they improve, their variance drops, causing them to receive less gradient weight. This is addressed by the stop-gradient variance weighting term [S1].
+-*   **Theoretical Grounding:** Methods like NeRF-W apply volume rendering over standard deviation $\sigma_C$ instead of variance $\sigma_C^2$. U-NeRF uses $\sigma_C^2$ as it is theoretically grounded for the sum of independent Gaussian variances [S1].
+-*   **Invalid Views:** During data selection for SCR, views with rendered depth smaller than a minimum threshold $z_{min}$ are considered invalid and pruned [S1].
+-
+-### Pseudocode
++**Inputs and Outputs:**
++*   **Inputs:** 3D position $\mathbf{x}$, viewing direction $\mathbf{d}$, and their positional encodings $\phi(\mathbf{x}, \mathbf{d})$. Ground truth RGB color $C(r)$ and depth $z(r)$ for training rays $r$.
++*   **Outputs:** For each ray $r$, the expected color $\hat{C}(r)$, color variance $\hat{\sigma}_C^2(r)$, expected depth $\hat{z}(r)$, and depth variance $\hat{\sigma}_z^2(r)$.
++
++**Data Structures:**
++The core model is a single Multi-Layer Perceptron (MLP) [S1].
++*   **MLP Output:** A tuple $(\tau, \bar{\mathbf{c}}, \bar{\sigma}_c^2)$ where:
++    *   $\tau$: Volume density (scalar).
++    *   $\bar{\mathbf{c}}$: Mean view-dependent RGB color (vector of size 3).
++    *   $\bar{\sigma}_c^2$: Pre-Softplus variance prediction for color (scalar). This value is processed through a Softplus activation to ensure valid variance $\sigma_c^2 > 0$ [S1].
++
++**Numbered Steps:**
++
++1.  **Positional Encoding:** Transform input position $\mathbf{x}$ and direction $\mathbf{d}$ using positional encoding $\phi(\cdot)$ [S1].
++    $$ \phi(\mathbf{x}, \mathbf{d}) = [\mathbf{x}, \sin(2^{d_1}\pi\mathbf{x}), \cos(2^{d_1}\pi\mathbf{x}), \dots, \sin(2^{d_2-1}\pi\mathbf{x}), \cos(2^{d_2-1}\pi\mathbf{x})] $$
++    *(Note: The specific frequency powers $d_1, d_2$ follow the standard NeRF definition provided in the parent article [14428-sparse-view-and-few-shot-optimization.md].)*
++
++2.  **MLP Forward Pass:** Query the MLP with $\phi(\mathbf{x}, \mathbf{d})$ to obtain density $\tau$, mean color $\bar{\mathbf{c}}$, and pre-activation variance $\bar{\sigma}_c^2$ for each sample point along the ray [S1].
++    $$ (\tau, \bar{\mathbf{c}}, \bar{\sigma}_c^2) = \text{MLP}(\phi(\mathbf{x}, \mathbf{d})) $$
++
++3.  **Variance Activation:** Apply Softplus to the predicted variance to ensure positivity [S1].
++    $$ \sigma_c^2 = \text{Softplus}(\bar{\sigma}_c^2) $$
++
++4.  **Volume Rendering (Color):** Compute the expected color $\hat{C}(r)$ and its variance $\hat{\sigma}_C^2(r)$ by aggregating samples along the ray $r$ [S1].
++    *   Compute weights $w_i$ for $N$ samples:
++        $$ w_i = T_i (1 - \exp(-\tau_i \delta_i)) $$
++        $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \tau_j \delta_j\right) $$
++        $$ \delta_i = t_{i+1} - t_i $$
++    *   Compute mean color:
++        $$ \hat{C}(r) = \sum_{i=1}^{N} w_i \bar{\mathbf{c}}_i $$
++    *   Compute color variance (assuming independent distributions for sampled scene points) [S1]:
++        $$ \hat{\sigma}_C^2(r) = \sum_{i=1}^{N} w_i^2 \sigma_{c_i}^2 $$
++
++5.  **Volume Rendering (Depth):** Compute the expected depth $\hat{z}(r)$ and its variance $\hat{\sigma}_z^2(r)$ [S1].
++    *   Expected depth:
++        $$ \hat{z}(r) = \sum_{i=1}^{N} w_i t_i $$
++    *   Depth variance:
++        $$ \hat{\sigma}_z^2(r) = \sum_{i=1}^{N} w_i (t_i - \hat{z}(r))^2 $$
++
++6.  **Loss Computation:** Calculate the training losses [S1].
++    *   **Color Loss ($L_{color}$):** Uses a $\zeta$-NLL loss to address hard-to-fit regions. Standard NLL leads to sub-optimal mean fits because badly-fit regions receive increasingly less weights. The variance-weighting term acts as an adaptive learning rate [S1].
++        $$ L_{color} = \sum_{r \in R} \lfloor \hat{\sigma}_C(r) \rfloor^{-2\zeta} L(r) $$
++        Where $L(r)$ is the standard NLL term:
++        $$ L(r) = \frac{\|C(r) - \hat{C}(r)\|_2^2}{2\hat{\sigma}_C^2(r)} + \log \hat{\sigma}_C(r) $$
++        The operator $\lfloor \cdot \rfloor$ denotes the stop-gradient operation, preventing gradients from flowing through the variance term in the weighting factor [S1].
++    *   **Depth Loss ($L_{depth}$):** Standard NLL on the output depth [S1].
++        $$ L_{depth} = \sum_{r \in R} \left( \frac{\|\hat{z}(r) - z(r)\|_2^2}{2\hat{\sigma}_z^2(r)} + \log \hat{\sigma}_z(r) \right) $$
++
++7.  **Optimization:** Minimize the overall objective function [S1]:
++    $$ L_{overall} = L_{color} + \lambda L_{depth} $$
++
++**Parameters:**
++*   $\zeta$: Interpolation parameter for the color loss weighting. $\zeta=0$ corresponds to standard NLL, $\zeta=1$ corresponds to MSE. It balances uncertainty estimation and fit quality, specifically to prevent the model from ignoring hard-to-fit regions [S1]. Typical value not explicitly stated in sources.
++*   $\lambda$: Weight for the depth loss term in the overall objective function [S1].
++
++**Pseudocode:**
+ 
+ ```python
+@@ -90,184 +69,156 @@
+ import torch.nn.functional as F
+ 
++def positional_encoding(x, d, min_deg=0, max_deg=10):
++    """
++    Standard NeRF positional encoding.
++    x: (..., 3) position
++    d: (..., 3) direction
++    Returns concatenated encoding.
++    """
++    scales = [2**i for i in range(min_deg, max_deg)]
++    xb = torch.reshape((x.float()[..., None, :] * scales), (*x.shape[:-1], -1))
++    db = torch.reshape((d.float()[..., None, :] * scales), (*d.shape[:-1], -1))
++    encoding = torch.cat([x, torch.sin(xb), torch.cos(xb),
++                          d, torch.sin(db), torch.cos(db)], dim=-1)
++    return encoding
++
+ class UncertaintyNeRF(nn.Module):
+-    def __init__(self, num_samples, z_min, z_max, lambda_depth=1.0, zeta=0.5):
++    def __init__(self, MLP_hidden_dim=256, num_layers=8):
++        super().__init__()
++        # Single MLP as per [S1]
++        layers = []
++        in_dim = 3 * (2 * 10 * 2 + 1) + 3 * (2 * 10 * 2 + 1) # Approximate PE dim
++        # Note: Exact PE dim depends on implementation details not fully specified, 
++        # but standard NeRF uses 60 dims for pos + 60 for dir = 120.
++        # We define the MLP structure generically.
++        
++        # Input -> Hidden
++        layers.append(nn.Linear(120, MLP_hidden_dim))
++        layers.append(nn.ReLU())
++        
++        for _ in range(num_layers - 2):
++            layers.append(nn.Linear(MLP_hidden_dim, MLP_hidden_dim))
++            layers.append(nn.ReLU())
++            
++        # Output layer: Density, Mean Color, Pre-variance
++        layers.append(nn.Linear(MLP_hidden_dim, 1 + 3 + 1)) # tau, c_bar, sigma_bar_sq
++        
++        self.mlp = nn.Sequential(*layers)
++
++    def forward(self, x, d):
+         """
+-        Initialize Uncertainty-aware NeRF.
+-        
+-        Args:
+-            num_samples (int): Number of samples per ray (N).
+-            z_min (float): Minimum valid depth for pruning.
+-            z_max (float): Maximum valid depth for pruning.
+-            lambda_depth (float): Weight for depth loss term.
+-            zeta (float): Interpolation parameter for color loss weighting.
++        x: (..., 3) 3D positions
++        d: (..., 3) Viewing directions
++        Returns: tau, c_bar, sigma_bar_sq
+         """
+-        super().__init__()
+-        self.num_samples = num_samples
+-        self.z_min = z_min
+-        self.z_max = z_max
+-        self.lambda_depth = lambda_depth
+-        self.zeta = zeta
+-        
+-        # MLP Architecture
+-        # Input: Positional encoded (x, d)
+-        # Output: (density, mean_color, pre_variance_color)
+-        # Note: Specific hidden layer dimensions are not given in sources [S1]
+-        self.mlp = self._build_mlp()
+-
+-    def _build_mlp(self):
+-        # Placeholder for MLP definition. 
+-        # Must output: density (1), mean_color (3), pre_variance_color (1)
+-        # The variance output must be processed with Softplus during inference.
+-        pass
+-
+-    def positional_encoding(self, x, d):
+-        """
+-        Apply positional encoding to position and direction.
+-        Standard NeRF positional encoding is assumed [S1].
+-        """
+-        # Implementation details of positional encoding not provided in sources [S1]
+-        pass
+-
+-    def forward(self, rays_o, rays_d, near, far):
+-        """
+-        Render a batch of rays.
+-        
+-        Args:
+-            rays_o: (B, 3) Ray origins.
+-            rays_d: (B, 3) Ray directions.
+-            near: (B,) Near plane distances.
+-            far: (B,) Far plane distances.
+-            
+-        Returns:
+-            color_mean: (B, 3) Rendered mean color.
+-            color_var: (B,) Rendered color variance.
+-            depth_mean: (B,) Rendered mean depth.
+-            depth_var: (B,) Rendered depth variance.
+-        """
+-        B = rays_o.shape[0]
+-        N = self.num_samples
+-        
+-        # 1. Stratified Sampling
+-        # Partition [near, far] into N bins and sample uniformly
+-        # t_vals = ... (stratified sampling logic)
+-        # t_vals shape: (B, N)
+-        t_vals = self._stratified_sampling(near, far, N)
+-        
+-        # 2. Compute Sample Points
+-        # t_i = t_vals
+-        # x_i = rays_o + t_i.unsqueeze(-1) * rays_d.unsqueeze(1)
+-        # x_i shape: (B, N, 3)
+-        # d_i = rays_d.unsqueeze(1).expand(-1, N, -1)
+-        x_i = rays_o.unsqueeze(1) + t_vals.unsqueeze(-1) * rays_d.unsqueeze(1)
+-        d_i = rays_d.unsqueeze(1).expand(-1, N, -1)
+-        
+-        # 3. MLP Inference
+-        # phi = positional_encoding(x_i, d_i)
+-        # outputs: density, mean_color, pre_var_color
+-        # density shape: (B, N, 1)
+-        # mean_color shape: (B, N, 3)
+-        # pre_var_color shape: (B, N, 1)
+-        phi = self.positional_encoding(x_i, d_i)
+-        density, mean_color, pre_var_color = self.mlp(phi)
+-        
+-        # 4. Softplus for Variance
+-        var_color = F.softplus(pre_var_color)
+-        
+-        # 5. Compute Weights
+-        # delta = t_vals[:, 1:] - t_vals[:, :-1]
+-        # Add padding for the last bin or handle boundary conditions
+-        # Standard NeRF hierarchical stratified sampling logic [S1]
+-        delta = t_vals[:, 1:] - t_vals[:, :-1]
+-        # Handle last sample if necessary (not specified in sources [S1])
+-        
+-        # Transmittance T_i
+-        # alpha = 1 - torch.exp(-density * delta)
+-        # T_i = torch.cumprod(1 - alpha, dim=1)
+-        # w_i = T_i * alpha
+-        # Note: Exact implementation of hierarchical sampling weights not fully detailed in sources [S1]
+-        # Using standard volume rendering weights definition from Eq.1 [S1]
+-        alpha = 1.0 - torch.exp(-density * delta)
+-        T = torch.cumprod(1.0 - alpha, dim=1)
+-        # Prepend 1.0 for T_1
+-        T = torch.cat([torch.ones_like(T[:, :1]), T], dim=1)
+-        weights = T * alpha
+-        
+-        # 6. Render Color
+-        # color_mean = sum(w_i * c_i)
+-        color_mean = torch.sum(weights * mean_color, dim=1)
+-        
+-        # color_var = sum(w_i^2 * var_i)
+-        color_var = torch.sum(weights**2 * var_color, dim=1)
+-        
+-        # 7. Render Depth
+-        # depth_mean = sum(w_i * t_i)
+-        depth_mean = torch.sum(weights * t_vals, dim=1)
+-        
+-        # depth_var = sum(w_i * (t_i - depth_mean)^2)
+-        depth_var = torch.sum(weights * (t_vals - depth_mean.unsqueeze(1))**2, dim=1)
+-        
+-        return color_mean, color_var, depth_mean, depth_var
+-
+-    def _stratified_sampling(self, near, far, N):
+-        """
+-        Generate stratified samples along the ray.
+-        """
+-        # Not given in the sources. Standard NeRF implementation required.
+-        pass
+-
+-    def compute_loss(self, color_mean, color_var, depth_mean, depth_var, 
+-                     gt_color, gt_depth):
+-        """
+-        Compute the total loss.
+-        
+-        Args:
+-            color_mean: (B, 3)
+-            color_var: (B,)
+-            depth_mean: (B,)
+-            depth_var: (B,)
+-            gt_color: (B, 3)
+-            gt_depth: (B,)
+-            
+-        Returns:
+-            loss: Scalar loss value.
+-        """
+-        # Color Loss
+-        # L(r) = ||C - C_hat||^2 / (2 * var) + log(sqrt(var))
+-        # Note: log(sigma) = 0.5 * log(var)
+-        color_nll = (torch.sum((gt_color - color_mean)**2, dim=1) / (2 * color_var) + 
+-                     0.5 * torch.log(color_var))
+-        
+-        # Variance weighting with stop gradient
+-        # weight = floor(sigma^(-2*zeta))
+-        # sigma = sqrt(var)
+-        sigma = torch.sqrt(color_var)
+-        weight = torch.detach(sigma**(-2 * self.zeta))
+-        
+-        L_color = torch.sum(weight * color_nll)
+-        
+-        # Depth Loss
+-        # L_depth = sum( ||z - z_hat||^2 / (2 * var) + log(sqrt(var)) )
+-        depth_nll = (torch.sum((gt_depth - depth_mean)**2, dim=0) / (2 * depth_var) + 
+-                     0.5 * torch.log(depth_var))
+-        L_depth = torch.sum(depth_nll)
+-        
+-        # Total Loss
+-        loss = L_color + self.lambda_depth * L_depth
+-        
+-        return loss
++        phi = positional_encoding(x, d)
++        out = self.mlp(phi)
++        tau = out[..., 0:1]
++        c_bar = out[..., 1:4]
++        sigma_bar_sq = out[..., 4:5]
++        return tau, c_bar, sigma_bar_sq
++
++def render_ray(t_near, t_far, num_samples, x, d, model):
++    """
++    Renders a single ray with uncertainty.
++    """
++    # Stratified sampling
++    t_vals = torch.linspace(t_near, t_far, num_samples)
++    # Add jitter for stratified sampling
++    t_jitter = torch.rand_like(t_vals) * (t_far - t_near) / num_samples
++    t_samples = t_vals + t_jitter
++    
++    # Interpolate positions and directions along the ray
++    # Assuming x is origin, d is direction
++    pts = x[:, None, :] + t_samples[None, :, None] * d[:, None, :]
++    dirs = d[:, None, :] # Direction is constant along ray
++    
++    # Query MLP
++    tau, c_bar, sigma_bar_sq = model(pts, dirs)
++    
++    # Apply Softplus to variance
++    sigma_sq = F.softplus(sigma_bar_sq)
++    
++    # Compute deltas
++    deltas = t_samples[1:] - t_samples[:-1]
++    # Handle last delta if needed, usually approximated or zero
++    deltas = torch.cat([deltas, torch.zeros_like(deltas[..., :1])], dim=-1)
++    
++    # Compute weights
++    # alpha = 1 - exp(-tau * delta)
++    # T = exp(-sum(tau * delta))
++    tau_delta = tau * deltas
++    alpha = 1.0 - torch.exp(-tau_delta)
++    T = torch.cumsum(tau_delta, dim=-1)
++    T = torch.exp(-T)
++    # Prepend 1.0 for the first transmittance
++    T = torch.cat([torch.ones_like(T[..., :1]), T[..., :-1]], dim=-1)
++    
++    weights = T * alpha
++    
++    # Render Color Mean
++    c_mean = torch.sum(weights[..., None] * c_bar, dim=-2)
++    
++    # Render Color Variance (Sum of w_i^2 * sigma_i^2)
++    # Note: sigma_sq is per sample
++    c_var = torch.sum(weights**2 * sigma_sq, dim=-2)
++    
++    # Render Depth Mean
++    z_mean = torch.sum(weights * t_samples, dim=-1)
++    
++    # Render Depth Variance (Sum of w_i * (t_i - z_mean)^2)
++    # Need to broadcast z_mean correctly
++    z_mean_expanded = z_mean[..., None]
++    z_var = torch.sum(weights * (t_samples - z_mean_expanded)**2, dim=-1)
++    
++    return c_mean, c_var, z_mean, z_var
++
++def compute_loss(c_gt, z_gt, c_mean, c_var, z_mean, z_var, zeta, lambda_depth):
++    """
++    Computes the total loss.
++    """
++    # Color Loss: Zeta-NLL
++    # L(r) = ||C - C_hat||^2 / (2 * sigma_C^2) + log(sigma_C)
++    # Weighting term: floor(sigma_C)^(-2*zeta)
++    
++    # Stop gradient on variance for weighting
++    sigma_c_stop = c_var.detach()
++    
++    # NLL term for color
++    nll_color = (c_gt - c_mean)**2 / (2 * c_var + 1e-8) + torch.log(torch.sqrt(c_var + 1e-8))
++    
++    # Adaptive learning rate weighting
++    weight = sigma_c_stop**(-2 * zeta)
++    l_color = torch.mean(weight * nll_color)
++    
++    # Depth Loss: NLL
++    nll_depth = (z_gt - z_mean)**2 / (2 * z_var + 1e-8) + torch.log(torch.sqrt(z_var + 1e-8))
++    l_depth = torch.mean(nll_depth)
++    
++    l_total = l_color + lambda_depth * l_depth
++    
++    return l_total
+ ```
+ 
++**Edge Cases and Pitfalls:**
++*   **Premature Convergence:** Standard NLL optimization leads to sub-optimal mean fits because badly-fit regions receive increasingly less weights, causing the model to ignore them. This is addressed by the variance-weighting term with stop-gradient [S1].
++*   **Theoretical Grounding:** NeRF-W applies volume rendering over $\sigma_C$ (standard deviation) instead of $\sigma_C^2$ (variance). The authors state this is not theoretically grounded; U-NeRF uses $\sigma_C^2$ [S1].
++
++## Subtopics
++
++### Scene Reliability Annotation
++A semi-automatic process to mark background regions, moving occluders, saturated highlights, and strongly reflective areas as low-reliability regions, converting them into binary masks to reduce viewpoint-dependent artifacts [S2]. These masks are propagated into the cross-view weighting term so that inconsistent evidence contributes less to the optimization, constraining the influence of occluded and high-reflectivity regions [S2]. This distinguishes it from the standard NeRF baseline which excludes reliability masks and cross-view consistency regularization [S2].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the MLP inference for $N$ samples per ray and the volume rendering integration. Similar to standard NeRF [S1].
+-*   **Memory Complexity:** Requires storing additional variance outputs from the MLP and intermediate variance terms during rendering. Similar to standard NeRF [S1].
+-*   **Performance:** Provides uncertainty estimates that allow for filtering of poorly rendered images and weighting of pixels in SCR training, improving efficiency by requiring only a small portion of the training set [S1].
+-*   **Strengths:** Theoretically grounded variance aggregation ($\sigma_C^2$); adaptive learning rate via variance weighting prevents premature convergence; provides both color and depth uncertainty [S1].
+-*   **Limitations:** Standard NLL optimization without weighting leads to sub-optimal mean fits; requires careful tuning of $\zeta$ and $\lambda$ [S1].
+-*   **When to use:** When uncertainty-aware novel view synthesis is needed for downstream tasks like visual localization or Scene Coordinate Regression, particularly when synthetic data redundancy and artifacts are concerns [S1].
+-*   **When not to use:** When deterministic rendering is sufficient and computational overhead of variance estimation is prohibitive; when the theoretical grounding of variance-based NLL is not required [S1].
++*   **Time and Memory Complexity:** The method uses a single MLP, reducing training cost compared to dual-branch architectures [S1]. It employs depth-guided sampling to further optimize efficiency [S1].
++*   **Performance:** The rendered data (RGB-D with uncertainty) is used to train Scene Coordinate Regression (SCR) networks. The method allows for uncertainty-guided novel view selection, selecting samples with the most information gain. This results in high efficiency, requiring only a small portion of the training set while delivering comparable or better performance [S1].
++*   **Strengths:** Provides pixel-level reliability metrics; effectively filters poorly rendered images; improves spatial geometric fidelity by reducing artifacts from viewpoint imbalance and material-dependent reflections [S1, S2].
++*   **Limitations:** Requires ground truth depth for the depth loss term $L_{depth}$ [S1]. The semi-automatic annotation for reliability masks requires manual effort [S2].
++*   **When to use:** When rendering RGB-D images with uncertainty estimation for novel view synthesis in visual localization pipelines, particularly when dealing with synthetic data redundancy or artifacts [S1].
+ 
+ ## Background
+-Uncertainty-aware NeRF (U-NeRF) was introduced to address challenges in Scene Coordinate Regression (SCR), specifically the high cost of obtaining diverse 2D-3D ground truth and the inefficiency of learning accurate mappings with large sample sets [S1]. It leverages the compact scene representation of NeRF to synthesize novel views with uncertainty estimation, which are then used to train SCR networks via evidential deep learning [S1]. The method distinguishes itself from NeRF-W by using variance $\sigma_C^2$ instead of standard deviation $\sigma_C$ for volume rendering, citing theoretical grounding [S1]. It also incorporates insights from ActiveNeRF but uses a $\zeta$-NLL loss to cope with sub-optimal performance in hard-to-fit regions [S1].
++Uncertainty-aware NeRF was introduced to address challenges in Scene Coordinate Regression (SCR), specifically the high cost of obtaining diverse 2D-3D ground truth and the inefficiency of learning accurate mappings with large sample sizes [S1]. The method leverages NeRF's ability to express compact scene representations and enable realistic view synthesis through differentiable volume rendering [S1]. It builds on the standard NeRF architecture [Parent] but extends it to model aleatoric uncertainty. The approach is similar to ActiveNeRF but adopts a $\zeta$-NLL loss to cope with sub-optimal performance associated with standard NLL minimization [S1].
+ 
+ ## Sources
+-[S1] Leveraging Neural Radiance Fields for Uncertainty-Aware Visual Localization, https://doi.org/10.1109/icra57147.2024.10610126, fetched 2026-10-26+[S1] Leveraging Neural Radiance Fields for Uncertainty-Aware Visual Localization, https://doi.org/10.1109/icra57147.2024.10610126, fetched 2026-10-26
++[S2] High fidelity three dimensional reconstruction and interactive visualization of public art sculptures using neural radiance fields, https://link.springer.com/article/10.1007/s44163-026-02441-3, fetched 2026-10-26

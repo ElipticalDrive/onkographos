@@ -1,0 +1,191 @@
+--- v005.md
++++ v006.md
+@@ -4,70 +4,135 @@
+ 
+ ## Overview
+-This method regularizes 3D Gaussian kernels by transforming their covariance matrices to enforce a "half-Gaussian" shape, effectively modeling sharp transitions between object surfaces and empty space [S1]. It sets itself apart from sibling methods like [Geometry Regularization](14222-geometry-regularization.md) by explicitly constructing ellipsoids that are truncated along a plane aligned with the surface normal, rather than relying solely on implicit SDF consistency or planarity priors [S1].
++This method regularizes 3D Gaussian primitives by transforming their covariance matrices to enforce half-Gaussian (half-ellipsoid) geometry, ensuring that the primitives model sharp transitions between object surfaces and empty space rather than unstructured density clouds [S1]. It sets itself apart from sibling methods like [Frequency Regularization](6130-frequency-regularization.md) and [Hard and Soft Depth Regularization](9178-hard-and-soft-depth-regularization.md) by operating directly on the geometric parameterization of the splats during training, effectively cutting Gaussians in half along their surface normals to prevent "ghosting" or double-sided rendering artifacts common in standard 3D Gaussian Splatting [S1].
+ 
+ ## How it works
+-**Inputs:** The standard 3D Gaussian parameters: mean position $\mu$, covariance matrix $\Sigma$ (3x3 symmetric positive definite), opacity $\alpha$, and spherical harmonic coefficients for color $c$. The surface normal $n$ at the Gaussian's position is required, typically derived from nearby points or a depth map [S1].
+-**Outputs:** A regularized covariance matrix $\sigma$ in world space, which replaces $\Sigma$ during rasterization.
++The method modifies the optimization of the covariance matrix $\Sigma$ of each Gaussian primitive. Instead of optimizing a full ellipsoid, the covariance is transformed into a local basis aligned with the surface normal, regularized to represent a half-ellipsoid, and transformed back to world space. This transformation is applied periodically during training.
+ 
+-**Data Structures:**
+-*   $\Sigma$: 3x3 symmetric matrix.
+-*   $n$: 3D vector $(n_x, n_y, n_z)$.
+-*   $v_1, v_2$: 3D basis vectors.
+-*   $basis$: 3x3 matrix where columns are $v_1, v_2, n$.
+-*   $cov$: 3x3 matrix in the local basis.
+-*   $\sigma$: 3x3 regularized covariance matrix.
++### Inputs and Outputs
++*   **Input:** The current covariance matrix $\Sigma \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite) and the surface normal vector $n \in \mathbb{R}^3$ associated with the Gaussian.
++*   **Output:** A regularized covariance matrix $\sigma \in \mathbb{R}^{3 \times 3}$ representing a half-Gaussian.
+ 
+-**Algorithm:**
+-The regularization is applied every 5000 training iterations [S1].
++### Data Structures
++The covariance matrix is stored as a $3 \times 3$ symmetric matrix. In standard 3D Gaussian Splatting implementations, this is often encoded as a 6-element vector or a $4 \times 4$ matrix with specific constraints. For this method, we assume access to the full $3 \times 3$ matrix $\Sigma$ in world space.
+ 
+-1.  **Normalize Normal:**
+-    $$n \leftarrow n / \|n\|$$
++### Parameters
++*   **Regularization Interval:** The transformation is performed every 5000 iterations [S1].
++*   **Opacity Threshold (Densification/Pruning):** Increased to $0.01$ [S1].
++*   **Opacity Reset (Half-Gaussians):** Set to $0.02$ [S1].
++*   **Scaling Factor:** The minimum of the modified diagonal elements is divided by 100 to ensure stability [S1].
+ 
+-2.  **Construct Basis Vectors:**
+-    If $n_x = 0$ and $n_y = 0$:
+-    $$v_1 \leftarrow (1, 0, 0)$$
+-    $$v_2 \leftarrow (0, 1, 0)$$
+-    Else:
+-    $$v_1 \leftarrow (n_y, -n_x, 0) / \|(n_y, -n_x, 0)\|$$
+-    $$v_2 \leftarrow (n \times v_1) / \|n \times v_1\|$$
+-    [G] The cross product $n \times v_1$ ensures $v_2$ is orthogonal to both $n$ and $v_1$.
++### Algorithm Steps
++1.  **Normalize Normal:** Normalize the surface normal vector $n$ to unit length:
++    $$ n \leftarrow \frac{n}{\|n\|} $$
++2.  **Construct Basis:** Construct an orthonormal basis matrix $B$ using $n$ and two orthogonal vectors $v_1, v_2$ in the tangent plane.
++    *   If $n_x = 0$ and $n_y = 0$ (i.e., $n$ is aligned with the Z-axis):
++        $$ v_1 = (1, 0, 0) $$
++        $$ v_2 = (0, 1, 0) $$
++    *   Otherwise:
++        $$ v_1 \leftarrow \frac{(n_y, -n_x, 0)}{\|(n_y, -n_x, 0)\|} $$
++        $$ v_2 \leftarrow \frac{n \times v_1}{\|n \times v_1\|} $$
++    *   Concatenate vectors to form the basis matrix $B$:
++        $$ B = [v_1, v_2, n] $$
++        where $B$ is a $3 \times 3$ matrix with columns $v_1, v_2, n$.
++3.  **Transform to Basis Space:** Project the world-space covariance $\Sigma$ into the local basis coordinate system:
++    $$ \text{cov} \leftarrow B^T \Sigma B $$
++4.  **Compute Modified Diagonal/Off-Diagonal Elements:** Calculate the Schur complement-like terms for the tangent plane components. Let $\text{cov}_{ij}$ denote the element at row $i$, column $j$ of the matrix $\text{cov}$ (0-indexed).
++    $$ a' \leftarrow \text{cov}_{0,0} - \frac{\text{cov}_{0,2}^2}{\text{cov}_{2,2}} $$
++    $$ b' \leftarrow \text{cov}_{0,1} - \frac{\text{cov}_{0,2} \cdot \text{cov}_{1,2}}{\text{cov}_{2,2}} $$
++    $$ c' \leftarrow \text{cov}_{1,1} - \frac{\text{cov}_{1,2}^2}{\text{cov}_{2,2}} $$
++5.  **Construct Regularized Covariance in Basis Space:** Create a new matrix $\sigma_{\text{local}}$ in the basis space. The top-left $2 \times 2$ block represents the tangent plane covariance, and the normal direction is heavily penalized to enforce the "half" geometry.
++    $$ \sigma_{\text{local}} = \begin{bmatrix} a' & b' & 0 \\ b' & c' & 0 \\ 0 & 0 & \frac{\min(a', c')}{100} \end{bmatrix} $$
++    Note: The off-diagonal terms involving the normal ($\text{cov}_{0,2}$ and $\text{cov}_{1,2}$) are set to 0, effectively decoupling the tangent plane from the normal direction in the regularized form. The normal variance is set to a small fraction of the tangent variances.
++6.  **Transform Back to World Space:**
++    $$ \sigma \leftarrow B \sigma_{\text{local}} B^T $$
++7.  **Update Parameters:** Replace the Gaussian's covariance with $\sigma$.
+ 
+-3.  **Form Basis Matrix:**
+-    $$basis \leftarrow [v_1 | v_2 | n]$$
+-    (Concatenate $v_1, v_2, n$ as columns).
++### Pseudocode
++```python
++import numpy as np
+ 
+-4.  **Transform Covariance to Basis Space:**
+-    $$cov \leftarrow basis^T \cdot \Sigma \cdot basis$$
++def regularize_half_gaussian_covariance(cov_world: np.ndarray, normal: np.ndarray) -> np.ndarray:
++    """
++    Transforms a 3D Gaussian covariance matrix into a half-Gaussian form
++    aligned with the given surface normal.
++    
++    Args:
++        cov_world: 3x3 symmetric covariance matrix in world space.
++        normal: 3D normal vector (not necessarily normalized).
++        
++    Returns:
++        Regularized 3x3 covariance matrix in world space.
++    """
++    # 1. Normalize normal
++    n = normal / np.linalg.norm(normal)
++    
++    # 2. Construct basis
++    # Check if normal is aligned with Z-axis to avoid division by zero or degenerate cross products
++    if np.isclose(n[0], 0.0) and np.isclose(n[1], 0.0):
++        v1 = np.array([1.0, 0.0, 0.0])
++        v2 = np.array([0.0, 1.0, 0.0])
++    else:
++        # v1 is orthogonal to n and lies in the XY plane projection
++        v1 = np.array([n[1], -n[0], 0.0])
++        v1 = v1 / np.linalg.norm(v1)
++        
++        # v2 is orthogonal to both n and v1
++        v2 = np.cross(n, v1)
++        v2 = v2 / np.linalg.norm(v2)
++        
++    # Basis matrix B: columns are v1, v2, n
++    B = np.column_stack((v1, v2, n))
++    
++    # 3. Transform covariance to basis space
++    cov_local = B.T @ cov_world @ B
++    
++    # 4. Compute modified elements
++    # cov_local is 3x3. Indices are [row, col]
++    cov_00 = cov_local[0, 0]
++    cov_11 = cov_local[1, 1]
++    cov_22 = cov_local[2, 2]
++    cov_01 = cov_local[0, 1]
++    cov_02 = cov_local[0, 2]
++    cov_12 = cov_local[1, 2]
++    
++    # Avoid division by zero if cov_22 is extremely small
++    if cov_22 < 1e-8:
++        cov_22 = 1e-8
++        
++    a_prime = cov_00 - (cov_02 ** 2) / cov_22
++    b_prime = cov_01 - (cov_02 * cov_12) / cov_22
++    c_prime = cov_11 - (cov_12 ** 2) / cov_22
++    
++    # 5. Construct regularized local covariance
++    # The normal direction variance is scaled down significantly
++    min_tangent_var = min(a_prime, c_prime)
++    normal_var = min_tangent_var / 100.0
++    
++    sigma_local = np.array([
++        [a_prime, b_prime, 0.0],
++        [b_prime, c_prime, 0.0],
++        [0.0, 0.0, normal_var]
++    ])
++    
++    # 6. Transform back to world space
++    sigma_world = B @ sigma_local @ B.T
++    
++    return sigma_world
++```
+ 
+-5.  **Compute Modified Diagonal/Off-Diagonal Elements:**
+-    $$a' \leftarrow cov[0, 0] - \frac{cov[0, 2]^2}{cov[2, 2]}$$
+-    $$b' \leftarrow cov[0, 1] - \frac{cov[0, 2] \cdot cov[1, 2]}{cov[2, 2]}$$
+-    $$c' \leftarrow cov[1, 1] - \frac{cov[1, 2]^2}{cov[2, 2]}$$
+-
+-6.  **Construct Regularized Covariance in Basis Space:**
+-    $$\sigma_{local} = \begin{bmatrix} a' & b' & 0 \\ b' & c' & 0 \\ 0 & 0 & \min(a', c') / 100 \end{bmatrix}$$
+-    [G] The element at $[2,2]$ is scaled down significantly to enforce the "half" nature, effectively flattening the Gaussian along the normal direction relative to the tangent plane.
+-
+-7.  **Transform Back to World Space:**
+-    $$\sigma \leftarrow basis \cdot \sigma_{local} \cdot basis^T$$
+-
+-**Parameters:**
+-*   **Opacity Threshold for Densification/Pruning:** Increased to 0.01 [S1].
+-*   **Opacity Reset for Half-Gaussians:** Set to 0.02 [S1].
+-*   **Regularization Frequency:** Every 5000 iterations [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Degenerate Normal:** If $n_x=0$ and $n_y=0$ (normal is aligned with Z-axis), the fallback basis vectors $(1,0,0)$ and $(0,1,0)$ are used to avoid division by zero in the cross-product or normalization steps [S1].
+-*   **Singularity in $cov[2,2]$:** The formulas for $a', b', c'$ divide by $cov[2,2]$. If $cov[2,2]$ is near zero, numerical instability may occur. The sources do not specify a guard for this, but standard practice would involve a small epsilon [G].
+-*   **Positive Definiteness:** The resulting $\sigma$ must remain positive definite for valid Gaussian rendering. The construction ensures the top-left 2x2 block retains the structure of the original covariance projected onto the tangent plane, but the scaling of the normal component ($\min(a', c')/100$) drastically reduces variance along the normal.
++### Edge Cases and Pitfalls
++*   **Degenerate Normals:** If the normal vector is zero or near-zero, the basis construction fails. The code must handle this by defaulting to a standard basis or skipping regularization [S1].
++*   **Positive Definiteness:** The regularization process may result in a covariance matrix that is not strictly positive definite if $a'$ or $c'$ become negative due to numerical errors or ill-conditioned inputs. A guard should ensure eigenvalues are non-negative [G].
++*   **Frequency of Application:** Applying this transformation too frequently may hinder convergence, as it restricts the shape of the Gaussians. The source specifies every 5000 iterations [S1].
+ 
+ ## Operating characteristics
+-*   **Performance:** On the Mip-NeRF 360 dataset, 3D-HGS with an Efficient Rasterizer achieves 125 FPS and 29.66 PSNR using 3.8M kernels, compared to 3DGS which uses 3.2M kernels [S1]. On Tank & Dengin, it achieves 160 FPS and 24.45 PSNR with 1.8M kernels [S1]. On Tank & Blending, it achieves 126 FPS and 29.76 PSNR with 2.6M kernels [S1].
+-*   **Accuracy:** Consistently outperforms original 3D Gaussian Splatting across all metrics (PSNR, etc.) on evaluated datasets [S1].
+-*   **Strengths:** Effectively eliminates dust and noise; models sharp transitions between object surfaces and empty space better than full Gaussians [S1].
+-*   **Limitations:** Requires surface normal estimation; adds computational overhead for the covariance transformation step (though mitigated by the efficient rasterizer) [S1].
++*   **Time Complexity:** The transformation involves matrix multiplications ($3 \times 3$) and vector operations, which are $O(1)$ per Gaussian. However, it is only applied every 5000 iterations, so the overhead per training step is negligible.
++*   **Memory Complexity:** No additional memory is required beyond the existing Gaussian parameters.
++*   **Performance:** On the Mip-NeRF 360 dataset, 3D-HGS with an efficient rasterizer achieves 125 FPS and 29.66 PSNR using 3.8M kernels, compared to 3DGS which uses 3.2M kernels [S1]. On Tank & Dengin, it achieves 160 FPS and 24.45 PSNR with 1.8M kernels [S1]. On Tank & Blending, it achieves 126 FPS and 29.76 PSNR with 2.6M kernels [S1].
++*   **Strengths:** Improves PSNR over standard 3DGS across all evaluated datasets. The half-Gaussian geometry better models sharp surface boundaries, reducing artifacts.
++*   **Limitations:** Requires accurate surface normals for the transformation. If normals are noisy or unavailable, the regularization may produce suboptimal results. The method increases the number of kernels required compared to 3DGS in some datasets (e.g., 3.8M vs 3.2M on Mip-NeRF 360) [S1].
+ 
+ ## Background
+-The method was introduced in the paper "3D-HGS: 3D Half-Gaussian Splatting" [S1]. It builds upon the 3D Gaussian Splatting framework [Parent](6269-regularization-and-geometry-constraints.md) by modifying the kernel shape to be a "half-Gaussian," which is more suitable for representing surfaces with sharp boundaries. The approach is evaluated against Scaffold, mip-splatting, and MCMC architectures [S1].
++The method was introduced in the paper "3D-HGS: 3D Half-Gaussian Splatting" [S1]. It builds upon the principles of [Regularization and Geometry Constraints](6269-regularization-and-geometry-constraints.md), specifically leveraging geometric priors to enforce planarity and surface alignment. The approach was evaluated against Scaffold, mip-splatting, and MCMC architectures, demonstrating consistent improvements in rendering quality [S1].
+ 
+ ## Sources

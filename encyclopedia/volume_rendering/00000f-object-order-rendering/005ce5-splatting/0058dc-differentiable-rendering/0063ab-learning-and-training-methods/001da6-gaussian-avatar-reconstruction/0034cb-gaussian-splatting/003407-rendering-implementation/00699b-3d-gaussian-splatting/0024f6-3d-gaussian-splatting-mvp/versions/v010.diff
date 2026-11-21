@@ -1,0 +1,418 @@
+--- v009.md
++++ v010.md
+@@ -4,199 +4,210 @@
+ 
+ ## Overview
+-3D Gaussian Splatting MVP is a self-contained, pure-PyTorch implementation of the core 3D Gaussian Splatting algorithm [S1, unofficial]. It solves the problem of providing a readable, educational reference for the differentiable rendering pipeline without relying on custom CUDA kernels or optimized rasterizers [S1, unofficial]. It sets itself apart from production implementations like the [3D Gaussian Splatting Differentiable Rasterizer](2813-3d-gaussian-splatting-differentiable-rasterizer.md) by using explicit Python loops for rasterization and omitting advanced features such as spherical harmonics, tile-based sorting, and adaptive density control [S1, unofficial].
++3D Gaussian Splatting MVP is a self-contained, pure-PyTorch implementation of the core 3D Gaussian Splatting algorithm [S1, unofficial]. It solves the problem of providing a readable, educational reference for the differentiable rendering pipeline without relying on custom CUDA kernels or optimized C++ extensions [S1, unofficial]. It sets itself apart from production implementations by using explicit Python loops for rasterization and omitting advanced features like spherical harmonics, adaptive density control, and tile-based sorting, prioritizing mathematical clarity over rendering speed [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ 3D Gaussians defined by their parameters, a pinhole camera model (view and projection matrices), and a target image resolution $(H, W)$.
+-*   **Outputs:** A rendered RGB image of size $(H, W, 3)$ and depth information.
+-
+-**Data Structures:**
+-Each Gaussian $i$ is represented by the following fields [S1, unofficial]:
+-*   `mean`: 3D position $(x, y, z)$ in world space.
+-*   `scale`: 3D scaling factors $(s_x, s_y, s_z)$ stored in log-space.
+-*   `rotation`: Unit quaternion $(q_w, q_x, q_y, q_z)$ representing orientation.
+-*   `opacity`: Scalar $\alpha_i \in [0, 1]$.
+-*   `color`: RGB vector $(r, g, b)$.
+-
+-The covariance matrix $\Sigma$ is constructed implicitly from scale and rotation to ensure it is symmetric positive semi-definite (PSD) [S1, unofficial]:
+-$$ \Sigma = R S S^T R^T $$
+-where $R$ is the rotation matrix derived from the unit quaternion, and $S = \text{diag}(s_x, s_y, s_z)$ is the scale matrix [S1, unofficial].
+-
+-**Algorithm Steps:**
+-
+-1.  **Camera Transformation:** Transform the Gaussian mean $\mu$ from world space to camera space using the view matrix $W$ [S1, unofficial].
+-2.  **Covariance Transformation:** Transform the 3D covariance matrix $\Sigma$ into the camera frame [S1, unofficial]:
+-    $$ \Sigma_{cam} = W \Sigma W^T $$
+-3.  **2D Projection:** Project the 3D covariance to the 2D image plane using the EWA (Elliptical Weighted Average) / Zwicker-style projection Jacobian $J$ [S1, unofficial]:
+-    $$ \Sigma_{2d} = J W \Sigma W^T J^T $$
+-    A small isotropic dilation (blur) is added to $\Sigma_{2d}$ for numerical stability [S1, unofficial].
+-4.  **Depth Sorting:** Sort the Gaussians by their depth $z$ in camera space. The implementation uses `argsort`, which is non-differentiable across order changes; gradients flow through the values given the fixed ordering [S1, unofficial].
+-5.  **Rasterization (Per-Pixel Compositing):** For each pixel $(u, v)$, iterate through the sorted Gaussians. Compute the 2D Gaussian weight $w_{i}$ for the pixel based on the Mahalanobis distance using $\Sigma_{2d}$. Perform front-to-back alpha compositing [S1, unofficial]:
+-    $$ C = \sum_{i=1}^{N} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+-    where $c_i$ is the color and $\alpha_i$ is the opacity of the $i$-th Gaussian contributing to the pixel. The term $\prod (1 - \alpha_j)$ represents the accumulated transmittance [S1, unofficial].
+-
+-**Pseudocode:**
+-
++The method implements the forward pass of differentiable volume rendering for 3D Gaussians. It assumes the scene is represented by a set of $N$ 3D Gaussians, each defined by a mean position, a covariance matrix (parameterized by scale and rotation), an opacity, and a color.
++
++### Inputs and Outputs
++*   **Inputs:**
++    *   $N$ Gaussians, each with parameters: mean $\mu \in \mathbb{R}^3$, scale $s \in \mathbb{R}^3$ (log-space), rotation $q \in \mathbb{R}^4$ (unit quaternion), color $c \in \mathbb{R}^3$, opacity $\alpha \in [0, 1]$.
++    *   Camera extrinsics $W \in \mathbb{R}^{4 \times 4}$ (world-to-camera transformation).
++    *   Camera intrinsics $K \in \mathbb{R}^{3 \times 3}$ (projection matrix).
++    *   Image dimensions $H, W$.
++*   **Outputs:**
++    *   Rendered image $I \in \mathbb{R}^{H \times W \times 3}$.
++    *   (Optional) Depth map and transmittance for auxiliary losses.
++
++### Data Structures
++The Gaussian attributes are stored in PyTorch tensors of shape $(N, \text{field})$.
++*   `means`: $(N, 3)$, world-space coordinates.
++*   `scales`: $(N, 3)$, log-scale factors.
++*   `rotations`: $(N, 4)$, unit quaternions $(w, x, y, z)$.
++*   `opacities`: $(N, 1)$, scalar opacity values.
++*   `colors`: $(N, 3)$, RGB color values.
++
++### Covariance Construction
++The 3D covariance matrix $\Sigma$ is constructed from the scale and rotation parameters to ensure it is symmetric positive semi-definite (PSD) [S1, unofficial].
++
++1.  Convert the unit quaternion $q$ to a $3 \times 3$ rotation matrix $R$.
++2.  Create a diagonal scale matrix $S = \text{diag}(e^{s_x}, e^{s_y}, e^{s_z})$.
++3.  Compute the covariance:
++    $$ \Sigma = R S S^T R^T $$
++
++### 2D Screen-Space Covariance Projection
++The 3D covariance is projected onto the 2D image plane using the EWA (Elliptical Weighted Average) / Zwicker-style projection [S1, unofficial].
++
++1.  Transform the mean $\mu$ to camera space: $\mu_c = W \mu$.
++2.  Transform the covariance to camera space: $\Sigma_c = W \Sigma W^T$.
++3.  Compute the projection Jacobian $J$. For a pinhole camera, $J$ relates changes in 3D camera-space coordinates to changes in 2D screen coordinates. It is derived from the perspective projection equations:
++    $$ J = \begin{bmatrix} \frac{\partial u}{\partial x} & \frac{\partial u}{\partial y} & \frac{\partial u}{\partial z} \\ \frac{\partial v}{\partial x} & \frac{\partial v}{\partial y} & \frac{\partial v}{\partial z} \end{bmatrix} $$
++    Specifically, if $K = \begin{bmatrix} f_x & 0 & c_x \\ 0 & f_y & c_y \\ 0 & 0 & 1 \end{bmatrix}$, then for a point $(X, Y, Z)$ in camera space:
++    $$ J = \begin{bmatrix} \frac{f_x}{Z} & 0 & -\frac{f_x X}{Z^2} \\ 0 & \frac{f_y}{Z} & -\frac{f_y Y}{Z^2} \end{bmatrix} $$
++4.  Compute the 2D covariance:
++    $$ \Sigma_{2d} = J \Sigma_c J^T $$
++5.  Add a small isotropic dilation $\sigma_{blur}^2 I$ to $\Sigma_{2d}$ for numerical stability and to prevent singularities when $Z \to 0$ or for very small Gaussians [S1, unofficial].
++
++### Rasterization Steps
++The rasterizer processes Gaussians in a specific order to ensure correct alpha compositing.
++
++1.  **Transform Means:** Transform all Gaussian means from world space to camera space using $W$ [S1, unofficial].
++2.  **Transform Covariances:** Transform the 3D covariance matrices into the camera frame as described above [S1, unofficial].
++3.  **Project to 2D:** Compute $\Sigma_{2d}$ for each Gaussian [S1, unofficial].
++4.  **Depth Sort:** Sort the Gaussians by their depth (z-coordinate in camera space) in front-to-back order. The implementation uses `argsort` on the z-coordinates [S1, unofficial].
++5.  **Splat and Composite:** Iterate over the sorted Gaussians and update the image buffers using front-to-back alpha compositing [S1, unofficial].
++
++#### Pseudocode
+ ```python
+ import torch
+ import numpy as np
+ 
+-def render_gaussians_mvp(gaussians, camera, image_h, image_w):
++def quaternion_to_rotation_matrix(q):
++    """Convert unit quaternion (w, x, y, z) to 3x3 rotation matrix."""
++    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
++    # Standard conversion formula
++    R = torch.stack([
++        1 - 2*(y**2 + z**2), 2*(x*y - w*z), 2*(x*z + w*y),
++        2*(x*y + w*z), 1 - 2*(x**2 + z**2), 2*(y*z - w*x),
++        2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x**2 + y**2)
++    ], dim=1).reshape(-1, 3, 3)
++    return R
++
++def compute_jacobian(mean_cam, K):
++    """Compute the 2x3 projection Jacobian for a single point in camera space."""
++    x, y, z = mean_cam[:, 0], mean_cam[:, 1], mean_cam[:, 2]
++    fx, fy = K[0, 0], K[1, 1]
++    cx, cy = K[0, 2], K[1, 2]
++    
++    # Jacobian elements
++    # du/dx = fx/z, du/dy = 0, du/dz = -fx*x/z^2
++    # dv/dx = 0, dv/dy = fy/z, dv/dz = -fy*y/z^2
++    
++    J = torch.zeros(mean_cam.shape[0], 2, 3, device=mean_cam.device)
++    J[:, 0, 0] = fx / z
++    J[:, 0, 2] = -fx * x / (z**2)
++    J[:, 1, 1] = fy / z
++    J[:, 1, 2] = -fy * y / (z**2)
++    return J
++
++def render_gaussians_mvp(means, scales, rotations, opacities, colors, W, K, H, W_img):
+     """
+-    Pure PyTorch implementation of 3D Gaussian Splatting MVP.
+-    
+-    Args:
+-        gaussians: Dict with keys 'mean' (N,3), 'scale' (N,3), 'rotation' (N,4), 
+-                   'opacity' (N,), 'color' (N,3).
+-        camera: Dict with 'view_matrix' (4,4) and 'proj_matrix' (4,4).
+-        image_h, image_w: Integer image dimensions.
+-        
+-    Returns:
+-        rendered_image: (H, W, 3) tensor.
++    Pure PyTorch MVP rasterizer.
+     """
+-    N = gaussians['mean'].shape[0]
+-    device = gaussians['mean'].device
++    N = means.shape[0]
+     
+     # 1. Transform means to camera space
+     # Homogeneous coordinates
+-    means_homo = torch.cat([gaussians['mean'], torch.ones(N, 1, device=device)], dim=1)
+-    means_cam_homo = camera['view_matrix'] @ means_homo.T # (4, N)
+-    means_cam = means_cam_homo[:3, :].T # (N, 3)
+-    
+-    # 2. Transform Covariance to camera space
+-    # Construct R from quaternion
+-    R = quaternion_to_rotation_matrix(gaussians['rotation']) # (N, 3, 3)
+-    S = torch.diag_embed(torch.exp(gaussians['scale'])) # (N, 3, 3)
+-    Sigma = R @ S @ S.transpose(1, 2) @ R.transpose(1, 2) # (N, 3, 3)
+-    
+-    # Transform Sigma
+-    Sigma_cam = camera['view_matrix'][:3, :3] @ Sigma @ camera['view_matrix'][:3, :3].transpose(1, 2)
++    means_h = torch.cat([means, torch.ones(N, 1, device=means.device)], dim=1)
++    means_cam = (W @ means_h.T).T[:, :3]
++    
++    # 2. Construct 3D covariance and transform to camera space
++    R = quaternion_to_rotation_matrix(rotations)
++    S = torch.diag_embed(torch.exp(scales)) # S is 3x3 diagonal
++    Sigma_3d = torch.bmm(torch.bmm(R, S), torch.bmm(S, R.transpose(1, 2))) # R S S^T R^T
++    
++    # Transform covariance: Sigma_c = W Sigma W^T
++    # Note: W is 4x4. We only need the upper 3x3 part for covariance transformation
++    W_3x3 = W[:3, :3]
++    Sigma_cam = torch.bmm(torch.bmm(W_3x3, Sigma_3d), W_3x3.transpose(1, 2))
+     
+     # 3. Project to 2D
+-    # Jacobian J approximates the projection. 
+-    # For MVP, we use a simplified projection assuming perspective divide is handled or approximated.
+-    # Standard EWA projection: Sigma_2d = J * W * Sigma * W^T * J^T
+-    # J depends on the camera projection matrix and depth.
+-    # Here we assume a simplified orthographic-like or pre-computed J for MVP clarity.
+-    # In a full implementation, J is derived from the projection matrix.
+-    # For this MVP, we assume J is available or computed as:
+-    # J = d(x,y)/d(X,Y,Z) * d(X,Y,Z)/d(x,y,z) ... 
+-    # Simplified: Use the upper 2x2 of the view-projection Jacobian scaled by depth.
+-    
+-    # Compute depth for sorting and projection scaling
+-    depth = means_cam[:, 2] # (N,)
+-    
+-    # Approximate Jacobian for MVP (assuming standard pinhole)
+-    # J_2d = (1/z) * [ f_x 0; 0 f_y ] * R_cam_to_img
+-    # For MVP simplicity, we assume the projection matrix provides the necessary scaling.
+-    # Let's assume we have fx, fy from camera intrinsics or proj matrix.
+-    fx = camera['proj_matrix'][0, 0]
+-    fy = camera['proj_matrix'][1, 1]
+-    
+-    # Jacobian J (2x3) for each gaussian
+-    # d(u)/d(X) = fx/z, d(u)/d(Y) = 0, d(u)/d(Z) = -fx*X/Z^2
+-    # d(v)/d(X) = 0, d(v)/d(Y) = fy/z, d(v)/d(Z) = -fy*Y/Z^2
+-    X, Y, Z = means_cam[:, 0], means_cam[:, 1], means_cam[:, 2]
+-    J = torch.zeros(N, 2, 3, device=device)
+-    J[:, 0, 0] = fx / Z
+-    J[:, 0, 2] = -fx * X / (Z**2)
+-    J[:, 1, 1] = fy / Z
+-    J[:, 1, 2] = -fy * Y / (Z**2)
+-    
+-    # Sigma_2d = J @ Sigma_cam @ J.T
+-    Sigma_2d = torch.bmm(torch.bmm(J, Sigma_cam), J.transpose(1, 2)) # (N, 2, 2)
+-    
+-    # Add small isotropic blur for stability
+-    Sigma_2d[:, 0, 0] += 0.3 # blur_x
+-    Sigma_2d[:, 1, 1] += 0.3 # blur_y
++    J = compute_jacobian(means_cam, K)
++    Sigma_2d = torch.bmm(torch.bmm(J, Sigma_cam), J.transpose(1, 2))
++    
++    # Add isotropic blur for stability
++    blur = 0.3 # Typical small value
++    Sigma_2d[:, 0, 0] += blur
++    Sigma_2d[:, 1, 1] += blur
+     
+     # 4. Depth Sort
+-    # argsort is non-differentiable across order changes [S1, unofficial]
+-    sorted_indices = torch.argsort(depth, descending=True) # (N,)
++    depths = means_cam[:, 2]
++    sort_indices = torch.argsort(depths, dim=0)
+     
+     # Gather sorted attributes
+-    sorted_means = means_cam[sorted_indices]
+-    sorted_Sigma_2d = Sigma_2d[sorted_indices]
+-    sorted_opacity = gaussians['opacity'][sorted_indices]
+-    sorted_color = gaussians['color'][sorted_indices]
+-    
+-    # 5. Rasterization
+-    # Create grid of pixel coordinates
+-    y, x = torch.meshgrid(torch.arange(image_h, device=device), torch.arange(image_w, device=device), indexing='ij')
+-    # Center coordinates
+-    x = x.float() - image_w / 2.0
+-    y = y.float() - image_h / 2.0
+-    
+-    # Initialize output buffers
+-    accumulated_color = torch.zeros(image_h, image_w, 3, device=device)
+-    accumulated_alpha = torch.zeros(image_h, image_w, device=device)
+-    
+-    # Loop over Gaussians (for readability, not vectorized over H,W,N) [S1, unofficial]
++    means_cam_sorted = means_cam[sort_indices]
++    Sigma_2d_sorted = Sigma_2d[sort_indices]
++    opacities_sorted = opacities[sort_indices]
++    colors_sorted = colors[sort_indices]
++    
++    # 5. Splat and Composite
++    # Initialize buffers
++    out_color = torch.zeros(H, W_img, 3, device=means.device)
++    out_alpha = torch.zeros(H, W_img, 1, device=means.device)
++    
++    # Precompute bounding boxes for each Gaussian to limit pixel updates
++    # This is a simplification; a full MVP might iterate all pixels or use a sparse grid
++    # For readability, we iterate Gaussians and update pixels within their bounding box
++    
+     for i in range(N):
+-        mu = sorted_means[i] # (3,)
+-        cov = sorted_Sigma_2d[i] # (2, 2)
+-        alpha = sorted_opacity[i]
+-        color = sorted_color[i] # (3,)
+-        
+-        # Compute Mahalanobis distance for all pixels
+-        # diff = (pixel_coord - mu_xy)
+-        # We need to broadcast mu_xy to (H, W, 2)
+-        mu_xy = mu[:2] # (2,)
+-        diff = torch.stack([x - mu_xy[0], y - mu_xy[1]], dim=-1) # (H, W, 2)
+-        
+-        # dist = diff^T @ Sigma_2d^-1 @ diff
+-        # Inverse of 2x2 matrix
+-        det = cov[0,0]*cov[1,1] - cov[0,1]*cov[1,0]
+-        inv_cov = torch.zeros(2, 2, device=device)
+-        inv_cov[0, 0] = cov[1, 1] / det
+-        inv_cov[1, 1] = cov[0, 0] / det
+-        inv_cov[0, 1] = -cov[0, 1] / det
+-        inv_cov[1, 0] = -cov[1, 0] / det
+-        
+-        # dist = sum(diff @ inv_cov * diff, dim=-1)
+-        dist = torch.sum(diff @ inv_cov * diff, dim=-1) # (H, W)
+-        
+-        # Gaussian weight
+-        weight = torch.exp(-0.5 * dist)
+-        
+-        # Effective alpha
+-        eff_alpha = 1.0 - torch.exp(-alpha * weight)
+-        
+-        # Front-to-back compositing
+-        # T_prev = 1 - accumulated_alpha
+-        # C_new = C_prev + eff_alpha * T_prev * color
+-        # A_new = A_prev + eff_alpha * T_prev
+-        
+-        T_prev = 1.0 - accumulated_alpha
+-        accumulated_color = accumulated_color + eff_alpha.unsqueeze(-1) * T_prev.unsqueeze(-1) * color.unsqueeze(0).unsqueeze(0)
+-        accumulated_alpha = accumulated_alpha + eff_alpha * T_prev
+-        
+-    return accumulated_color
+-
+-def quaternion_to_rotation_matrix(q):
+-    """Convert unit quaternion (w, x, y, z) to rotation matrix (3,3)."""
+-    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+-    R = torch.zeros(q.shape[0], 3, 3, device=q.device)
+-    R[:, 0, 0] = 1 - 2 * (y**2 + z**2)
+-    R[:, 0, 1] = 2 * (x*y - w*z)
+-    R[:, 0, 2] = 2 * (x*z + w*y)
+-    R[:, 1, 0] = 2 * (x*y + w*z)
+-    R[:, 1, 1] = 1 - 2 * (x**2 + z**2)
+-    R[:, 1, 2] = 2 * (y*z - w*x)
+-    R[:, 2, 0] = 2 * (x*z - w*y)
+-    R[:, 2, 1] = 2 * (y*z + w*x)
+-    R[:, 2, 2] = 1 - 2 * (x**2 + y**2)
+-    return R
++        mu = means_cam_sorted[i]
++        cov2d = Sigma_2d_sorted[i]
++        alpha = opacities_sorted[i]
++        color = colors_sorted[i]
++        
++        # Inverse 2D covariance
++        cov2d_inv = torch.inverse(cov2d)
++        
++        # Determine bounding box in screen space
++        # Eigenvalues of cov2d give the spread
++        eigvals, eigvecs = torch.linalg.eigh(cov2d)
++        # Radius is typically 3 standard deviations
++        radius_x = 3.0 * torch.sqrt(eigvals[0])
++        radius_y = 3.0 * torch.sqrt(eigvals[1])
++        
++        # Project mean to screen
++        u = K[0, 0] * mu[0] / mu[2] + K[0, 2]
++        v = K[1, 1] * mu[1] / mu[2] + K[1, 2]
++        
++        u_min = max(0, int(u - radius_x))
++        u_max = min(W_img, int(u + radius_x))
++        v_min = max(0, int(v - radius_y))
++        v_max = min(H, int(v + radius_y))
++        
++        # Create grid of pixel coordinates
++        ys, xs = torch.meshgrid(torch.arange(v_min, v_max), torch.arange(u_min, u_max), indexing='ij')
++        pixel_coords = torch.stack([xs.float(), ys.float()], dim=-1) # (H', W', 2)
++        
++        # Compute 2D Gaussian weights
++        # delta = pixel - mean
++        delta = pixel_coords - torch.tensor([u, v], device=means.device)
++        # exponent = -0.5 * delta^T Sigma_inv delta
++        exponent = -0.5 * torch.sum(delta @ cov2d_inv * delta, dim=-1)
++        weight = torch.exp(exponent)
++        
++        # Alpha contribution
++        # a = alpha * weight
++        a = alpha * weight
++        
++        # Transmittance from previous layers (accumulated)
++        # T_i = product(1 - a_j) for j < i
++        # We need to track T for each pixel. 
++        # Since we are in a loop, we can maintain a global T buffer.
++        
++        # Update buffers
++        # T_current = out_alpha[v_min:v_max, u_min:u_max]
++        # new_alpha = a * (1 - T_current)
++        # out_color += color * new_alpha
++        # out_alpha += new_alpha
++        
++        # Vectorized update for the bounding box
++        T_current = out_alpha[v_min:v_max, u_min:u_max] # (H', W', 1)
++        new_alpha = a.unsqueeze(-1) * (1 - T_current)
++        
++        out_color[v_min:v_max, u_min:u_max] += color * new_alpha
++        out_alpha[v_min:v_max, u_min:u_max] += new_alpha
++
++    return out_color
+ ```
+ 
+-**Parameters:**
++### Parameters
+ *   **Camera Model:** Pinhole camera with `look_at` function using OpenCV/COLMAP convention [S1, unofficial].
+-*   **Blur:** Isotropic dilation added to $\Sigma_{2d}$ for stability [S1, unofficial].
+-*   **Optimization:** Adam optimizer is used for fitting Gaussians to training images [S1, unofficial].
+-*   **Loss:** Photometric L1 + MSE [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Depth Sort Non-Differentiability:** The `argsort` operation used for depth sorting is non-differentiable across order changes. Gradients flow through the values given the ordering, which is accepted for the fit-from-scratch demo but can cause instability if the order changes frequently during optimization [S1, unofficial].
+-*   **Precision:** The MVP implementation is not optimized for numerical precision at scale; it is intended for small scenes (e.g., 40 Gaussians) [S1, unofficial].
++*   **Optimization:** Adam optimizer is used for fitting Gaussians to images [S1, unofficial].
++*   **Loss:** Photometric L1 loss and MSE [S1, unofficial].
++*   **Iterations:** 600 iterations for the demo [S1, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Depth Sort Non-Differentiability:** The depth sort uses `argsort`, which is non-differentiable across order changes. Gradients flow through the values given the ordering, which is accepted for the fit-from-scratch demo [S1, unofficial].
++*   **Precision:** A small isotropic dilation is added to the 2D covariance to prevent numerical instability when the Gaussian is far from the camera or very small [S1, unofficial].
++*   **Boundaries:** Pixels outside the image bounds or behind the camera ($Z \le 0$) should be discarded or handled to avoid division by zero in projection [G].
+ 
+ ## Subtopics
+@@ -229,4 +240,7 @@
+ TR-Gaussians is a 3D Gaussian Splatting-based representation designed for the high-fidelity, real-time rendering of planar transmission and reflection effects, such as those found in indoor glass panes. Unlike vanilla 3D Gaussian Splatting, which overfits training images by mixing transmission and reflection into low-opacity artifacts, TR-Gaussians explicitly decomposes the scene into real geometry (transmission) and virtual geometry (reflection) using a learnable reflection plane. This separation prevents the entanglement of real scene geometry with virtual reflections, ensuring that reflections remain coherent and artifact-free in novel views where the real scene is occluded or unobserved.
+ 
++### [DOF-GS](18284-dof-gs.md)
++DOF-GS is a 3D Gaussian Splatting framework that incorporates a finite-aperture camera model to explicitly model and render depth-of-field (DOF) effects, enabling post-capture control of aperture and focal distance. Unlike previous NeRF-based techniques that simulate defocus via expensive per-ray blur kernels or recent 3DGS methods that use black-box neural networks for shape offsets, DOF-GS blurs individual Gaussians based on learnable Circle-of-Confusion (CoC) cues before compositing, allowing efficient, differentiable, and intuitive DOF adjustment.
++
+ ### 3D Gaussian Splatting with Vector Clustering and Entropy Encoding
+ A method that utilizes vector clustering to encode color and geometric attributes into two codebooks, using a sensitivity-aware KMeans method [S2]. For disk data storage, SASCGS utilizes the entropy encoding method DEFLATE, which combines the LZ77 algorithm and Huffman coding, to compress the data [S2]. On the MipNeRF360 dataset, SASCGS achieves SSIM 0.801, PSNR 26.98, LPIPS 0.238, and a size of 28.80 MB [S2].
+@@ -242,14 +256,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The MVP implementation uses a Python loop over Gaussians and pixels, resulting in $O(N \cdot H \cdot W)$ complexity per frame, which is significantly slower than the tile-based CUDA rasterizer used in production [S1, unofficial].
+-*   **Memory Complexity:** Stores all Gaussian parameters in memory. No tile-based memory optimization is applied [S1, unofficial].
+-*   **Performance:** End-to-end run takes ~30 seconds on CPU for a 64x64 image [S1, unofficial].
+-*   **Strengths:** High readability, no custom CUDA kernels required, suitable for educational purposes and debugging the mathematical pipeline [S1, unofficial].
+-*   **Limitations:** Extremely slow for large scenes, lacks view-dependent shading (spherical harmonics), no adaptive density control, and non-differentiable depth sorting [S1, unofficial].
+-*   **When to use:** For learning the core mathematics of 3D Gaussian Splatting, debugging the rasterization pipeline, or running small-scale experiments on CPU [S1, unofficial].
+-*   **When not to use:** For real-time rendering, large-scale scene reconstruction, or production applications [S1, unofficial].
++*   **Time Complexity:** The MVP implementation uses a Python loop over Gaussians, making it $O(N \cdot H \cdot W)$ in the worst case if bounding boxes are not used, or $O(N \cdot A)$ where $A$ is the average area of a Gaussian's bounding box. It is significantly slower than the tile-based CUDA rasterizer used in production 3DGS.
++*   **Memory Complexity:** $O(N)$ to store Gaussian attributes and $O(H \cdot W)$ for the output buffers.
++*   **Measured Performance:** End-to-end run takes ~30 seconds on CPU for a 64x64 image [S1, unofficial].
++*   **Strengths:** High readability, no external dependencies beyond PyTorch/Numpy, suitable for educational purposes and debugging the mathematical pipeline.
++*   **Limitations:** Slow performance, lacks optimizations like tile-based sorting, spherical harmonics for view-dependent color, and adaptive density control [S1, unofficial].
++*   **When to use:** For learning the core algorithm, debugging, or when GPU acceleration is unavailable.
++*   **When not to use:** For production rendering, large-scale scenes, or real-time applications.
+ 
+ ## Background
+-3D Gaussian Splatting MVP was introduced as a self-contained Jupyter notebook implementation of the core 3D Gaussian Splatting algorithm (Kerbl et al., SIGGRAPH 2023) in pure PyTorch [S1, unofficial]. It was created to serve as a teaching reference, allowing users to "grind on the math" without the complexity of custom CUDA kernels [S1, unofficial]. The implementation intentionally skips advanced features like tile-based rasterization, spherical harmonics, and adaptive density control to maintain clarity [S1, unofficial].
++The 3D Gaussian Splatting MVP notebook was introduced as a contribution to the `diffuse-experiment` repository [S1, unofficial]. It implements the core algorithm from the original 3D Gaussian Splatting paper (Kerbl et al., SIGGRAPH 2023) but in pure PyTorch [S1, unofficial]. The implementation is intended as a teaching reference, allowing users to "grind on the math" without the complexity of custom CUDA kernels [S1, unofficial]. It was developed by Devin AI integration and committed to the repository in May 2026 [S1, unofficial].
+ 
+ ## Sources

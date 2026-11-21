@@ -1,0 +1,96 @@
+# Brick Traversal
+
+Also called: Ray Marching with Alpha Compositing & Sample Ratio Adjustment, TraverseBrick
+
+## Overview
+Brick Traversal is a ray-marching kernel that samples a volumetric brick texture, adjusts alpha and RGB values for variable step sizes, and composites the result into a destination color using front-to-back alpha blending [S1, unofficial]. It accounts for a "sample ratio" ($r$) between the ray step and the brick's internal resolution to adjust sampling density across hierarchical levels [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray origin ($\mathbf{O}$), ray direction ($\mathbf{D}$), brick bounds, brick texture data, accumulated destination color/alpha ($c_{dst}, a_{dst}$), global ray step size ($RayStepSize$), current brick depth ($curDepth$), octree depth minus one ($OctTreeDepthMinusOne$), and brick step size scalar ($k_{BrickStepSizeScalar}$) [S1, unofficial].
+*   **Output:** Composite color ($c_{dst}$) and accumulated alpha ($a_{dst}$) [S1, unofficial].
+
+**Data Structures:**
+The method operates on the following variables:
+*   `dst`: Accumulated destination color and alpha [S1, unofficial].
+*   `src`: Fetched texel color and alpha [S1, unofficial].
+*   `rayWorldPosition`: Current world-space ray position [S1, unofficial].
+*   `curBrickRayPos`: Current brick-local ray position [S1, unofficial].
+
+**Parameters:**
+*   $r$ (sampleRatio): The ratio of the ray step size to the brick's effective voxel size. It is computed as $r = k_{BrickStepSizeScalar}^{OctTreeDepthMinusOne - curDepth}$ for constant nodes, or derived from $curBrickDepth$ for textured bricks [S1, unofficial].
+
+**Steps:**
+1.  **Compute Intersection:** Calculate the time to exit the brick bounds ($t_{exit}$) using a ray-box intersection routine [S1, unofficial].
+2.  **Calculate Steps:** Determine the ray step size in world space: $rayStepSize = RayStepSize \times r$. Calculate the number of steps: $numSteps = \lfloor t_{exit} / rayStepSize \rfloor + 1$ [S1, unofficial].
+3.  **Initialize:** Set `rayWorldPosition` and `curBrickRayPos` to the brick entry point. Initialize $c_{dst} = (0,0,0,0)$ and $a_{dst} = 0$ [G].
+4.  **Loop:** For $i$ from $0$ to $numSteps - 1$:
+    a.  **Advance World Ray:** Update the world position: $rayWorldPosition += worldRayStep$ where $worldRayStep = \mathbf{D} \times RayStepSize$ [S1, unofficial].
+    b.  **Early Exit Check:** If $a_{dst} > 0.995$, subtract $(i+1)$ from $numSteps$, advance $rayWorldPosition$ by the remaining steps to the exit point, and return [S1, unofficial].
+    c.  **Fetch Texel:** Sample the brick texture at `curBrickRayPos` to get source color $c_{src}$ and alpha $a_{src}$ [S1, unofficial].
+    d.  **Adjust Values:** Compute adjusted alpha and color: $a_{adj} = 1 - (1 - a_{src})^r$ and $c_{adj} = c_{src} \times r$ [S1, unofficial].
+    e.  **Composite:** Update the destination using front-to-back blending: $c_{dst} = (1 - a_{dst}) \times c_{adj} + c_{dst}$ [S1, unofficial]. The accumulated alpha updates as $a_{dst} = a_{dst} + a_{adj} \times (1 - a_{dst})$ [G].
+    f.  **Advance Brick Ray:** Update the brick-space ray position: $curBrickRayPos += brickRayStep$ where $brickRayStep = \mathbf{D} \times rayStepSize$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_ray_box_intersection(origin, direction, bounds_min, bounds_max):
+    t_min = (bounds_min - origin) / direction
+    t_max = (bounds_max - origin) / direction
+    t_enter = max(min(t_min), min(t_max))
+    t_exit = min(max(t_min), max(t_max))
+    return t_exit if t_exit > t_enter else -1.0
+
+def sample_texture(tex, pos):
+    # Standard 3D texture fetch; returns (color, alpha)
+    return tex[pos]
+
+def brick_traversal(ray_origin, ray_direction, brick_bounds_min, brick_bounds_max, 
+                    brick_texture, dst_color, dst_alpha, ray_step_size, 
+                    cur_depth, oct_tree_depth_minus_one, k_scalar):
+    t_exit = compute_ray_box_intersection(ray_origin, ray_direction, brick_bounds_min, brick_bounds_max)
+    if t_exit < 0:
+        return dst_color, dst_alpha
+
+    sample_ratio = k_scalar ** (oct_tree_depth_minus_one - cur_depth)
+    step_size = ray_step_size * sample_ratio
+    num_steps = int(t_exit / step_size) + 1
+
+    cur_brick_pos = ray_origin + ray_direction * t_exit
+    world_step = ray_direction * ray_step_size
+    brick_step = ray_direction * step_size
+    ray_world_pos = ray_origin + ray_direction * t_exit
+
+    for i in range(num_steps):
+        ray_world_pos += world_step
+
+        if dst_alpha > 0.995:
+            remaining = num_steps - (i + 1)
+            ray_world_pos += world_step * remaining
+            break
+
+        src_color, src_alpha = sample_texture(brick_texture, cur_brick_pos)
+        adj_alpha = 1.0 - (1.0 - src_alpha) ** sample_ratio
+        adj_color = src_color * sample_ratio
+
+        dst_color = (1.0 - dst_alpha) * adj_color + dst_color
+        dst_alpha = dst_alpha + adj_alpha * (1.0 - dst_alpha)
+
+        cur_brick_pos += brick_step
+
+    return dst_color, dst_alpha
+```
+
+**Edge Cases and Pitfalls:**
+*   **Early Exit Positioning:** When $a_{dst} > 0.995$, the loop breaks. It is critical to advance $rayWorldPosition$ to the exact exit point of the brick to prevent visual artifacts in subsequent rays or passes [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] apecoraro/VoxVizThesis, https://github.com/apecoraro/VoxVizThesis, fetched 2026-10-27 (unofficial)

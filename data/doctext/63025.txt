@@ -1,0 +1,1611 @@
+RehearsalNeRF: Decoupling Intrinsic Neural
+Fields of Dynamic Illuminations for Scene Editing
+Changyeon Won1† , Hyunjun Jung1† , Jungu Cho1,3 ,
+Seonmi Park1 , Chi-Hoon Lee3 , Hae-Gon Jeon2*
+1 Department of AI Convergence, GIST,
+Gwangju, Korea.
+Seoul, Korea.
+3 AI R&D Division, CJ Corporation, Seoul, Korea.
+arXiv:2603.27948v3 [cs.CV] 10 Jul 2026
+2 Department of Artificial Intelligence, Yonsei University,
+*Corresponding author(s). E-mail(s): earboll@yonsei.ac.kr;
+Contributing authors: cywon1997@gm.gist.ac.kr;
+hyunjun.jung@gm.gist.ac.kr; jungu.cho@cj.net;
+bluesky1000@gm.gist.ac.kr; chi.lee@cj.net;
+† These authors contributed equally to this work.
+Abstract
+Although there has been significant progress in neural radiance fields, an issue
+on dynamic illumination changes still remains unsolved. Different from relevant
+works that parameterize time-variant/-invariant components in scenes, subjects’
+radiance is highly entangled with their own emitted radiance and lighting colors
+in spatio-temporal domain. In this paper, we present a new effective method to
+learn disentangled neural fields under the severe illumination changes, named
+RehearsalNeRF. Our key idea is to leverage scenes captured under stable lighting
+like rehearsal stages, easily taken before dynamic illumination occurs, to enforce
+geometric consistency between the different lighting conditions. In particular,
+RehearsalNeRF employs a learnable vector for lighting effects which represents
+illumination colors in a temporal dimension and is used to disentangle projected
+light colors from scene radiance. Furthermore, our RehearsalNeRF is also able
+to reconstruct the neural fields of dynamic objects by simply adopting off-theshelf interactive masks. To decouple the dynamic objects, we propose a new
+regularization leveraging optical flow, which provides coarse supervision for the
+color disentanglement. We demonstrate the effectiveness of RehearsalNeRF by
+showing robust performances on novel view synthesis and scene editing under
+dynamic illumination conditions. Our source code and video datasets will be
+publicly available. Project Page: https://wcy199705.github.io/RehearsalNeRF
+1
+Keywords: Neural Radiance field, Inverse Rendering, Intrinsic Decomposition
+1 Introduction
+Neural Radiance Fields (NeRFs) (Mildenhall et al, 2020) represent a scene as neural
+implicit functions and enable to render photo-realistic images from arbitrary viewpoints. For wider applicability of NeRFs, their variant representations for dynamic
+motions (Wu et al, 2022; Zhang et al, 2023; Park et al, 2021a,b; Li et al, 2021;
+Pumarola et al, 2021; Weng et al, 2022; Peng et al, 2021) have been actively studied.
+Existing dynamic radiance fields synthesize sequential frames with novel viewpoints
+by decoupling static and dynamic objects (Wu et al, 2022; Zhang et al, 2023), topological deformation (Park et al, 2021a,b; Li et al, 2021; Pumarola et al, 2021), and
+human movements (Weng et al, 2022; Peng et al, 2021). It is worth noting that the
+word, ‘dynamic’, refers subjects’ motions only. In this work, we extend the definition
+of the ‘dynamic’ to varying illuminations as well as subjects’ motions during taking
+an input video.
+Estimating and manipulating scene illuminations, such as intrinsic image decomposition (Barrow et al, 1978; Horn, 1974), relighting (Debevec et al, 2000; Xu et al, 2018)
+and shape-from-shading (Zhang et al, 1999), has been considered as one of classical
+research issues. There is a common assumption in these works that light sources are
+stable and predictable. Nevertheless, the main challenge of them is that the solution is
+not unique due to limited image resolution, noise and inaccurate camera geometry. To
+alleviate the challenges, proper prior information, such as depth geometry (Chen and
+Koltun, 2013; El Helou et al, 2021; Maier et al, 2017), lighting directions (Somanath
+and Kurz, 2021; Wang et al, 2021a) and segmentation masks (Munkberg et al, 2022),
+is available, making their inferences more tractable.
+Despite the significant efforts of the previous works, there has been no attempt
+to explicitly handle varying illuminations in NeRFs. Unfortunately, NeRFs have no
+ability to learn neural fields under dynamic illuminations because the radiance of
+illumination can be considered as that of either static or dynamic objects, referred to
+illumination-radiance ambiguity.
+As the first step toward addressing this issue, we need to find a proper prior to
+reduce the ambiguity of dynamic illuminations in neural fields. Our key observation is
+that the dynamic illuminations, intense and rapid lighting intensity and color changes
+during recording input videos, are created artificially in controlled situations, such
+as plays, shows and concerts. As they often come with a rehearsal stage without the
+dynamic lighting effects before starting main stages, we use the video on the rehearsal
+stage as a prior. Although motions of the dynamic object in the rehearsal stage are
+not perfectly aligned with that of the main stage, it is valuable to represent scene
+geometry and to disentangle objects’ own colors and the dynamic lighting effects in
+neural fields.
+In this work, we present a Rehearsal prior-based Neural Radiance Fields
+(RehearsalNeRF) to synthesize and edit novel viewpoint images of a scene under
+2
+Baseline(D2NeRF)
+Illumination
+handling
+Input: Dynamic scene with
+dynamic lighting effects
+Reference Frame
+Joint Learning
+NeRF without
+light handling
+𝝉
+Lighting
+Ours
+Motion
+Decoupling dynamic lighting, dynamic
+object and static object
+𝝉
+Result: Decoupled
+dynamic object
+Change of motion + frozen light
+Frozen motion + change of light
+Fig. 1 RehearsalNeRF jointly optimizes five neural fields for dynamic lighting and static/moving
+subjects in a training step. Each field cannot only be rendered independently, but can also be composited at once to represent a whole scene. Compared to the baseline (Wu et al, 2022), the details
+from RehearsalNeRF are distinguishable and the rendered colors are well decoupled from the scene
+lights. We provide a variety of applications for video editing, such as controlling lighting while stopping motion and vice versa.
+dynamic lighting environments. As shown in Fig. 1, our RehearsalNeRF learns to
+decouple dynamically changing illuminations and dynamic/static objects, simultaneously. To do this, we exploit the fact that scene geometry is consistent regardless of
+the lighting changes, except for regions of moving subjects, and the principle that a
+color is sum of emitted light energy from a surface. Our RehearsalNeRF first takes
+both rehearsal and main stage videos as inputs. With these inputs, we reconstruct
+three neural fields for static, dynamic objects and dynamically changing illuminations
+from lighting effects, respectively.
+To be specific, we develop a joint optimization for decoupling dynamic illuminations
+from moving/static objects in the scene. The main challenges of the joint optimization are two-fold: (1) optimizing dynamic illuminations is highly ill-posed due to the
+illumination-radiance ambiguity. Moreover, rapid illumination changes make learning
+radiance fields difficult; (2) learning a density field of dynamic objects is disturbed by
+shading changes from the illuminations as well.
+To solve the problems, we first introduce a learnable illumination vector to disentangle time-variant global and local illuminations of scenes. Different from existing
+appearance methods (Martin-Brualla et al, 2021; Tancik et al, 2022), it is an explicit
+representation with editable capability. We then find dense correspondences between
+a main stage and its rehearsal stage via optical flow estimation to account for color
+information of dynamic objects. Because optical flow is erroneous due to the illumination difference between them, we apply a regularizeration for the temporally consistent
+prediction. Finally, we design an additional regularizer using the rehearsal prior for
+robust supervision to decouple illuminations and static objects’ own colors.
+We demonstrate the effectiveness of RehearsalNeRF by qualitatively and quantitatively evaluating it over state-of-the-art methods for NeRFs in the dynamic domain. In
+addition, our work is also applicable to areas of video manipulations including freezing
+motions under varying lights and vice versa.
+3
+2 Related Works
+Dynamic neural scene representations There are three types of works categorizing dynamic neural scene representations: deformation of non-rigid parts, motions
+with human priors and decoupling dynamic part.
+To represent moving/deformable objects in a scene, D-NeRF (Pumarola et al, 2021)
+proposes neural implicit representations consisting of deformation fields and canonical
+fields to handle non-rigid motions. Nerfies (Park et al, 2021a) uses per-frame deformation latent codes, instead of time-stamps. HyperNeRF (Park et al, 2021b) extends
+the Nerfies to account for topological changes using high-dimensional hyperspace. For
+human motions, H-NeRF (Xu et al, 2021) and HumanNeRF (Weng et al, 2022) use
+human body templates (Alldieck et al, 2021; Loper et al, 2015) to train the person in
+a canonical space. RigNeRF (Athar et al, 2022) focuses on the deformation of headpose and facial expressions using 3D morphable face model (Blanz and Vetter, 1999).
+Here, the template misalignment often has negative impacts on the reconstruction
+quality. To separate moving foregrounds from static backgrounds, several works have
+used priors such as optical flow (Li et al, 2021; Gao et al, 2021), 3D depth (Li et al,
+2021; Gao et al, 2021; Xian et al, 2021) and segmentation masks (Zhang et al, 2021a;
+Tschernezki et al, 2021; Li et al, 2023; Jiang et al, 2022). Without any prior information, D2 NeRF (Wu et al, 2022) decouples static and dynamic components, and handles
+shadow effects of moving objects in a self-supervised manner. NeRFPlayer (Song et al,
+2023) predicts sample-wise probabilities of being static, deforming and newness in a
+4D spatio-temporal space.
+However, the previous works assume that a dynamic scene is under stable illumination conditions, and focus only on separating moving contents from static ones. In
+this case, the illumination-radiance ambiguity still remains, making them to confuse
+static objects as dynamic components.
+Neural representations for lighting and editing Thanks to the powerful 3D
+scene and light modeling capacities of neural implicit representations, there have
+been widely studied in intrinsic image decomposition (Ye et al, 2023), inverse rendering (Munkberg et al, 2022; Boss et al, 2021a,b, 2022; Srinivasan et al, 2021; Zhang
+et al, 2021b; Lyu et al, 2022; Zhang et al, 2022) and shape-from-shading (Ling et al,
+2023; Yang et al, 2022; Zeng et al, 2023). Works in (Munkberg et al, 2022; Boss
+et al, 2021a,b, 2022; Srinivasan et al, 2021; Zhang et al, 2021b; Lyu et al, 2022)
+jointly optimize lighting, materials and scene geometry from multi-view images for
+neural representations using a differentiable renderer which is a learnable implementation of physically-based rendering (PBR) equation. Relighting (Srinivasan et al,
+2021; Lyu et al, 2022) with neural representations deals with global illuminations, 3D
+geometry and material information from a set of images with unconstrained known
+lighting locations. NeRV (Srinivasan et al, 2021) takes multiple images captured under
+known lighting conditions and produces a 3D representation of a scene, enabling to
+render novel viewpoint images with arbitrary lighting directions. ShadowNeuS (Ling
+et al, 2023) uses a shadow ray supervision to reconstruct neural signed distance fields
+from single-view images under multiple lighting conditions. IRON (Zhang et al, 2022)
+improves a quality of geometry predictions and achieves the better relighting results
+by leveraging depth discontinuity on sampling. Recently, an inverse rendering done by
+4
+(Sec. III.A)
+𝜓𝑆
+𝐱
+3D
+coord.
+𝜓𝐷
+𝐝
+𝜓𝐼
+View
+dir.
+𝜓𝐿
+𝑐𝑆
+ℒr𝑒ℎ
+𝜎𝑆
+(Sec. III.D)
+Time
+𝑣ℎ
+Static objects 𝑆
+(S, V)
+Rehearsal stage 𝐶መ𝑟𝑒ℎ
+Main stage 𝐶መ𝑚𝑎𝑖𝑛
+ℒdyn (Sec. III.C)
+ℒrecon
+Dynamic objects 𝐷
+𝑖
+𝑃𝐻
+𝜏
+𝜓𝐴
+𝑐𝐷
+𝜎𝐷
+Intensity 𝐼
+𝑓𝑟𝑔𝑏
+𝑐𝐿
+(Sec. III.B)
+σ 𝑃𝐻 𝑣ℎ (t) = 𝐻
+𝐶𝑚𝑎𝑖𝑛
+×
+Rendering
+Lighting effects 𝐿
+Volume rendering
+Fig. 2 An overview of RehearsalNeRF in training phase. Our RehearsalNeRF consists of five neural
+fields for rendering static, dynamic objects and illuminations. Each field takes location (x), viewing
+direction (d) and time-stamp (τ ) for the same sample point as input, except the time-stamp for
+the static fields. They are used to infer the radiance. Particularly, the illumination field predicts the
+probability PH of the illumination vector vh corresponding to τ . To decouple static/dynamic objects
+and illumination components of the main stage video well, two additional regularizations, Lreh and
+Ldyn , using the rehearsal prior, are designed.
+optimizing 3D Gaussians (Shi et al, 2023; Liang et al, 2023) are proposed and shows
+faithful relighting results using PBR.
+We note that they only handle object-centric scenes with 360◦ observations. IntrinsicNeRF (Ye et al, 2023), which seems be similar with ours, optimizes editable neural
+representation of room-scale scenes. This decomposes a scene into reflectance and shading using a basic illumination model (Phong, 1975), but does not handle time-variant
+lighting effects.
+Appearance embedding for NeRF Following generative latent optimization (Bojanowski et al, 2018), many NeRF extensions use trainable latent codes for
+per-image appearance variations (Martin-Brualla et al, 2021; Turki et al, 2022; Tancik et al, 2022), time-varying components (Li et al, 2022b; Park et al, 2021a,b) and
+manipulation (Schwarz et al, 2020; Wang et al, 2022; Niemeyer and Geiger, 2021).
+NeRF-in-the-wild (Martin-Brualla et al, 2021) proposes a latent appearance modeling
+to address the scene inconsistency caused by different lighting conditions of unstructured photo-collections. Mega-NeRF (Turki et al, 2022) and Block-NeRF (Tancik et al,
+2022) handle the issue in large-scale scenes by embedding scene appearances like illumination changes according to camera poses into latent codes. DyNeRF (Li et al,
+2022b) uses NeRF framework as a baseline and use temporal latent codes, allowing
+neural fields to be changed in time domain. CLIP-NeRF (Wang et al, 2022) shows
+editable NeRF with text prompts to manipulate shapes and appearances of neural fields. GRAF (Schwarz et al, 2020) and GIRAFFE (Niemeyer and Geiger, 2021)
+present 3D-aware controllable image synthesis using conditional neural fields. The
+objective of appearance embedding in the above methods is to facilitate matching with
+a canonical appearance for images under varying illuminations, yet cannot disentangle lighting effects from the scene. In contrast, our appearance embedding learns to
+explain dynamic lighting changes over time and shows the editable capability such as
+relighting and illumination color tune.
+5
+Predicted
+with 𝜏
+𝜓𝐿
+Sliced
+on 𝜏
+𝑃𝐻
+𝑣ℎ
+Illumination
+vector
+⨂
+Main stage – Rehearsal stage
+Top-𝑘 hue
+Back prop.
+hue selection
+Prediction
+Illumination vector 𝑣ℎ
+(a) Initialization of learnable illumination vector
+Time
+Main stage
+Color matching
+Decoupled object
+Rehearsal
+(b) Learning illumination vector
+Fig. 3 Visualizations of the procedure how to work the illumination vector. (a) The initialization
+of the learnable illumination vector is done by sampling the hue channel of the dynamic lighting
+from the difference between the rehearsal and the main stage video. (b) Back propagation from the
+rendered hue channel is achieved by computing a weighted sum of the probability PH and the slice
+of the vh for time τ , which finally optimize the hue channel of the dynamic lighting effects.
+3 Methodology
+Given a camera ray r(t) = o + td with near and far bound tn and tf , respectively,
+where o is a ray origin and d ∈ R3 is a ray direction, NeRFs render view dependent
+colors C̃(r) as follows:
+Z tf
+C̃(r) =
+T (t)σ(r(t))c(r(t), d) dt, s.t.
+ Z t
+
+T (t) = exp −
+σ(r(s))ds ,
+tn
+(1)
+tn
+where c(x, d) and σ(x) denote a spatially-view-dependent radiance and a spatiallydependent density at spatial location x ∈ R3 with a depth t, respectively. With the
+radiance fields of the scene built, we propose a novel neural scene representation
+pipeline which decouples components of dynamic lighting effects and objects, depicted
+in Fig. 2. We refer to a scene with both dynamic illuminations and objects as main
+stage, and without them as rehearsal stage. We first handle dynamic illumination
+change through separate neural fields (3.1) with a learnable illumination vector (3.2).
+Then, we jointly optimize to resolve the illumination-radiance ambiguity on dynamic
+(3.3) and static objects (3.4) with the proposed two regularizers.
+3.1 NeRF for Dynamic Illuminations
+For decoupling illuminations from static and dynamic objects each, we adopt
+D2 NeRF (Wu et al, 2022) as a baseline, and compute a density σS and a radiance cS
+of static objects by using MLP layers ψS . We also calculate a density σD and a radiance cD of dynamic objects from another MLP layers ψD . We thus obtain a radiance
+cL of a dynamic illuminations by building multiple neural fields, whose overall process
+is denoted as function FL below:
+ψS : (x, d) → (σS , cS ), ψD : (x, d, τ ) → (σD , cD ),
+ψA : (cx , cL ) → (αx ), FL : (x, d, τ ) → (cL ), s.t. x ∈ [S, D],
+6
+(2)
+where τ ∈ R is a temporal coordinate, and the MLP ψA predicts a brightness of
+the illumination entangled with static and dynamic objects, αS ∈ R3 and αD ∈ R3 ,
+respectively.
+Here, we reformulate the volume rendering of NeRF (Mildenhall et al, 2020) as an
+explicit way to form editable radiances. We first introduce a learnable illumination
+vector vh for a self-supervision of the illuminations generated by light sources, and the
+function FL to render time-varying illumination radiance cL , consisting of a neural
+field ψL . Details for the illumination vector and rendering the radiance of dynamic
+illumination cL with FL will be described in 3.2.
+The composite rendering of the baseline (Wu et al, 2022) assumes that placing
+objects in the same position is physically impossible. However, the lighting effects
+exist on object surfaces in our problem setup. Considering this property, we modify
+the composite rendering equation for static and dynamic objects in the main stage by
+combining the radiances of illuminations as below1 :
+CSmain =
+Z tf
+T ′ σS β(cS + αS ⊙ cL ) dt, CD
+main =
+tn
+Z tf
+T ′ σD β(cD + αD ⊙ cL ) dt,
+tn
+
+ Z t
+′
+(σS (r(s)) + σD (r(s), τ )) ds
+and β(x) =
+s.t. T (t) = exp −
+tn
+x
+,
+x+1
+(3)
+where CSmain and CD
+main are the rendered color of the static and dynamic objects in
+main stage, respectively. The β is the tone-mapping operator (Srinivasan et al, 2021)
+and ⊙ is the Hadamard operator. In this equation, α plays a role in a balancing term
+for the brightness of reflected rays in illuminations. The brightness α depends on both
+radiance of objects and illuminations because an amount of the reflected light energy
+is closely related to the surface color. For example, a blue-colored surface reflects
+wavelength radiations for blue color when an incident light color is white. When a
+blue-colored light is projected onto a blue- and red-colored surface, the blue-colored
+surface becomes brighter while the red-colored surface absorbs the light.
+Based on Eq. 3, the colors of the main stage Cmain and lighting effects CL
+main can
+be rendered individually as follows:
+Cmain (r, τ ) = CSmain (r, τ ) + CD
+main (r, τ ),
+Z tf
+Z tf
+′
+where CL
+(r,
+τ
+)
+=
+T
+σ
+β(α
+⊙
+c
+)
+dt
++
+T ′ σD β(αD ⊙ cL ) dt.
+S
+S
+L
+main
+tn
+(4)
+tn
+The color of static objects C̃S and dynamic objects C̃D without any dynamic illumination can be rendered based on Eq. 1 by using its corresponding density and radiance
+field from ψS and ψD , respectively.
+1
+We omit writing t for the simplicity from now
+7
+3.2 Learning Illumination Vector
+Artificial lights in the main stage emit highly saturated colors, and the light energy
+varies according to a physical distance between the light source and its projected
+surface. In contrast, the hue channel of the light source is invariant to the distance.
+It means that the hue values are globally similar in the whole scene (Zimmer et al,
+2011). Due to this property, we utilize HSV color space to represent the radiance field
+for lighting effects, instead of conventional RGB color space.
+For hue values H, we formulate vh as a global, explicit and learnable component
+that contains candidate hue information of dynamic illuminations along with the time
+domain, as inspired by the concept of Ye et al (2023) and Meka et al (2016). As
+shown in Fig. 3 (a), for effectively training vh , we initialize the vh by taking centroids
+of k-means clustering (Meka et al, 2016) of the hue values that have different colors
+between the rehearsal and the main stage scene.
+Fig. 3 (b) describes that the back propagation across the dynamic illumination
+rendering pipeline updates vh . To render the dynamic illumination from the function
+in Eq. 2, we first build two neural fields, ψL and ψI , to infer HSV color and intensity
+i ∈ R of the dynamic illumination, respectively:
+ψL : (x, d, τ ) → (S, V, PH , σL ), ψI : (x, d, τ ) → (i).
+(5)
+At last, we compute a saturation channel S, a value channel V of the radiance and
+a probability vector PH from ψL , whose number of candidates is k. PH is used to
+calculate the hue channel H corresponding to hue values of vh in a time τ , and the
+color of dynamic illumination can be computed as below:
+H=
+k
+X
+PH,j vh,j (τ ),
+cL = frgb (H, S, V ) × i,
+(6)
+j=1
+where vh,j (τ ) is a hue candidate at a specific time τ and hue index j. PH,j is the
+probability corresponding to the vh,j (τ ), and frgb is a function for converting HSV
+to RGB channels. The vh (τ ) is an explicit vector and capable of explaining spatiallyinvariant illumination colors. PH contributes to continuous hue value expression across
+the image. In total, we can render the radiance of the dynamic illumination cL .
+3.3 Regularization for Illuminations on Dynamic Objects
+As done in the baseline (Wu et al, 2022), decoupling dynamic and static components
+can be achieved with two separate neural radiance fields. However, it is infeasible to
+extract dynamic illuminations because the color changes of the scene do not depend
+on the illumination changes only, especially for dynamic objects by their motions. We
+address this problem by leveraging the illumination vector vh as a prior to identifying
+color of rays scattered by the light sources and the rehearsal prior. As shown in Fig. 3
+(b), vh facilitates to account for the illuminations on dynamic objects. If the hue
+values of pixels belonging to moving objects are similar to vh , we can effectively render
+their colors, entangled with the ray colors, using knowledge of vh . Then, the entangled
+8
+colors can be effectively disentangled when the rehearsal prior provides colors of the
+dynamic objects as a coarse supervision. In consideration of this observation, we design
+a regularization Ldynamic which establishes a link of color information between the
+rehearsal prior and the dynamic object’s neural field ψD using optical flow (Teed and
+Deng, 2020) G as follows:
+Ldyn (r, τ ) = Mmain ∥Ereh→main {Greh→main (Mreh ⊙ Ĉreh ) − C̃D }∥22
++
+2
+X
+dynamic
+2
+∥Eτdynamic
++i→τ {Gτ +i→τ (C̃D (r, τ + i)) − C̃D (r, τ )}∥2 ,
+(7)
+i=−2
+where Greh→main is the optical flow from rehearsal video to main stage video, and
+Gτdynamic
+is the optical flow between the rendered dynamic object at time τ + i and
++i→τ
+time τ . E refers to the confidence of the optical flow prediction (Li et al, 2019),
+Ĉreh is a color of rehearsal video, and Mmain and Mreh are binary masks of moving
+objects, predicted by an off-the-shelf interactive segmentation (Cheng et al, 2021),
+from main stage and rehearsal video, respectively. To decouple the moving objects
+from the illuminations, this regularization cooperates with the color supervision in
+which the dynamic illumination is rendered:
+Lrecon (r, τ ) = ∥Ĉmain (r, τ ) − Cmain (r, τ )∥22 ,
+(8)
+where Ĉmain (r, t) is the true color of the camera ray r at time τ in the main stage. The
+regularization in Eq. 7 also guides to learn the temporal coherency among the predicted
+colors of the dynamic objects. It helps the ψD to overcome the illumination-radiance
+ambiguity because the dynamic objects’ own colors are not changed significantly over
+time.
+3.4 Regularization for Illuminations on Static Objects
+Apart from the illumination vector vh for dynamic objects, illuminations on static
+objects should be considered. Here, we use the rehearsal prior one more time as
+in Sec. 3.3. Since the rehearsal prior provides information for scene geometry and
+subjects’ original colors, we expect it to work in the static objects.
+We train our radiance fields representing the static objects ψS with the rehearsal
+prior based on a loss Lreh which is defined as below:
+Lreh (r, τ ) = (1 − Mreh )∥Ĉreh (r, τ ) − C̃S (r, τ )∥22
++ (1 − Mmain )∥Ĉmain (r, τ ) − CSmain (r, τ )∥22
++ (1 − Mmain )∥C̃S (r, τ ) − (C̃S (r, τ ) + C̃D (r, τ ))∥22 ,
+(9)
+where Ĉreh (r, t) refers to the ground-truth color in the rehearsal stage. The first and
+second terms in 9 induce disentangling dynamic illuminations and static objects. The
+illumination-radiance ambiguity is resolved by leveraging the color of the rehearsal
+prior. The optimization of the illumination vector vh is conducted through rendering
+9
+the main stage. The third term mitigates the problem of neural fields not being learned
+in regions where Mreh and Mmain do not overlap in the rendered image by providing
+a self-supervision for these regions. One important byproduct of this term is that, at
+this point, our method works in the absence of dynamic objects in the rehearsal stage.
+We can thus avoid a motion alignment issue between the main and rehearsal stage.
+Lastly, the remaining issue is to disentangle static and dynamic objects. We address
+this issue by designing another regularization as below:
+Lp (r, τ ) = Mmain
+σS (r, τ )
+σD (r, τ )
++ (1 − Mmain )
+.
+σS (r, τ ) + σD (r, τ )
+σS (r, τ ) + σD (r, τ )
+(10)
+This regularization penalizes static objects in density fields, and vise versa. Thanks
+to this, we can decouple them in the density fields.
+4 Experiments
+4.1 Implementation Details
+The neural fields (ψS , ψD and ψL ) of our RehearsalNeRF are implemented with a
+hybrid model of K-Planes (Fridovich-Keil et al, 2023) and D2 NeRF (Wu et al, 2022).
+Note that the neural fields can be replaced by other dynamic NeRF models. A training
+procedure of RehearsalNeRF requires a day for 120K iterations with 3,072 batch sizes
+on a single RTX 3090 GPU. We train our RehearsalNeRF with the following loss L :
+L(r, τ )
+=
+Lrecon (r, τ ) + λdyn Ldyn (r, τ ) + λreh Lreh (r, τ ) + λp Lp (r, τ ).
+(11)
+In our implementation, λdyn , λreh and λp are empirically set to 0.01, 0.5 and 0.01,
+respectively. In the experiments, we set the number of clustering of k-means algorithm
+to 5 because of the number of light sources in the main stages.
+4.2 Experiment Setup
+Datasets. Since public datasets for dynamic NeRFs (Li et al, 2022b; Broxton et al,
+2020) are limited to scenes captured under stable illuminations, we construct a video
+dataset for dance stages taken under dynamic colored lighting environments. Following the problem setting, our dataset contains pre-captured rehearsal videos under
+the stable lighting conditions before turning on the dynamic illuminations. Camera
+parameters are obtained from COLMAP (Schönberger and Frahm, 2016). We build a
+dataset consisting of synchronized multi-view videos whose spatial and temporal resolutions are 2704×1520 and 120 FPS, respectively. For this, we use an array of 20
+GoPro HERO cameras and take 10 video clips whose running time is 2.5 seconds. In
+the experiment, we downsample the spatial resolution by a factor of 2 and the frame
+rate to 30 FPS, similar to the previous work (Li et al, 2022b).
+As mentioned earlier, our work is the first attempt to handle dynamic illuminations
+in NeRF, and we cannot carry out an apple-to-apple comparison with publicly available
+neural rendering methods. Therefore, we have no choice but to conduct a limited
+10
+D2NeRF
+K-Planes
+TensoIR
+PBR
+N/A
+N/A
+TensoIR
+VR
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+Ours
+N/A
+Main stage(GT)
+NVS
+Scene editing
+Static only
+Dynamic only
+Illum. only
+Fig. 4 Qualitative comparisons on our real-world dataset. The goal of scene editing is to render
+the red-colored illumination. Only our method produces the high-quality edited scenes through the
+successful dynamic illumination decomposition.
+Table 1 Quantitative comparison of novel view synthesis performance on our real-world dataset.
+We compare results from the original dataset and the temporally subsampled version (taking every
+5th frame) to evaluate robustness against rapid scene dynamics.
+Original Dataset
+Subsampled Dataset (5× Speed)
+Method
+Full Image
+PSNR↑ SSIM↑
+Dynamic Objects
+PSNR↑ SSIM↑
+Full Image
+PSNR↑ SSIM↑
+Dynamic Objects
+PSNR↑ SSIM↑
+D2 NeRF (Wu et al, 2022)
+K-Planes (Fridovich-Keil et al, 2023)
+TensoIR PBR (Jin et al, 2023)
+TensoIR VR (Jin et al, 2023)
+4DGaussian (Wu et al, 2024)
+29.776
+28.113
+18.681
+28.663
+28.199
+0.857
+0.867
+0.707
+0.865
+0.851
+22.962
+25.122
+16.934
+21.918
+24.523
+0.978
+0.984
+0.972
+0.978
+0.984
+28.274
+27.849
+16.955
+28.389
+28.189
+0.853
+0.854
+0.708
+0.848
+0.842
+21.899
+25.784
+15.347
+23.238
+24.245
+0.976
+0.986
+0.971
+0.981
+0.983
+Ours
+28.250
+0.851
+26.318
+0.986
+28.666
+0.845
+27.090
+0.988
+evaluation of dynamic lighting effects. Unfortunately, it is infeasible to obtain the
+ground truth dynamic lighting effects which are highly entangled in the objects. As
+an alternative, we additionally collect a synthetic dataset simulated by Unity (Juliani
+et al, 2018). This dataset consists of 4 scenes whose number of frames is 30, and diverse
+lighting and motions exist.
+Comparison methods. For strictly fair comparison, we modify comparison methods for handling dynamic illuminations as below:
+(1) D2 NeRF (Wu et al, 2022) disentangles dynamic and static objects. As in Park et al
+(2021b), using it as a baseline, we apply an appearance latent vector to embed the
+illumination environment. The latent vector allow us to interpolate and manipulate
+the lighting changes.
+(2) K-Planes (Fridovich-Keil et al, 2023) consists of six planes to represent dynamic
+motions. By adding time-variant appearance embedding to their 4D dynamic volume
+representation, we can manipulate the time-variant illumination.
+(3) TensoIR (Jin et al, 2023) also introduces an appearance tensor, so we can learn and
+infer the time-varying illumination and editing. We adopt the same training scheme
+11
+Scene 16- frame 16
+D2NeRF
+TensoIR VR
+TensoIR PBR
+4DGaussian
+K-Planes
+Ours
+Fig. 5 Qualitative comparison of novel view synthesis performance for dynamic objects on our
+real-world dataset. The second row presents error map between rendered image and GT. Our model
+consistently achieves superior quality in dynamic regions.
+with Chen and Liu (2022). TensoIR is optimized by using physically based rendering
+(PBR) with the help of volume rendering (VR). Both results are reported in this
+evaluation.
+(4) 4DGaussian (Wu et al, 2024) leverages a 4D voxel field to decode temporal features
+for 3DGS parameters, enabling dynamic scene representation. However, it does not
+separate dynamic illumination from dynamic objects. To verify the impact of this
+limitation, we measure its novel view synthesis performance, focusing on how well it
+reconstructs dynamic objects under dynamic illuminations.
+4.3 Results for Novel View Synthesis
+We evaluate the novel view synthesis (NVS) performance of RehearsalNeRF using
+PSNR and SSIM (Wang et al, 2004) as quantitative metrics. Evaluations are conducted
+on both our real-world dataset and a synthetic dataset that simulates dance stages
+with complex illumination.
+We first evaluate ReheasrsalNeRF on our real-world dataset in in Tab. 1. Regarding the results, D2 NeRF and K-Planes exhibit the higher PSNR and SSIM values
+than ours. That is because of their overfitting issue. They directly learn highly entangled color representations without considering the illumination–radiance ambiguity
+over time, and the naive appearance embeddings used in these methods are insufficient to disentangle the radiance fields of dynamic objects from illumination. TensoIR
+with PBR fails because the illumination change disturbs learning scene geometry.
+Meanwhile, TensoIR with VR renders plausible results because it also overfits to the
+illumination changes in the radiance field. Consequently, this overfitting degrades their
+ability to accurately reconstruct dynamic objects (see Fig. 5) and further limits their
+scene-editing capabilities (as demonstrated in Fig. 4).
+To verify that the baselines’ high performance stems from overfitting rather than
+true robustness, we conducted further evaluations on more dynamic scenarios. We constructed a temporally subsampled dataset by taking every 5th frame from the original
+videos, effectively simulating rapid motion (5× speed). While existing approaches lack
+the capability to handle such rapid dynamics, our pipeline is specifically designed to
+12
+Ground Truth
+D2 NeRF
+TensoIR VR TensoIR PBR 4DGaussian
+K-Planes
+Ours
+Fig. 6 Qualitative comparison of NVS performance for dynamic objects on the temporally subsampled real-world dataset. Due to rapid motion, baselines struggle to reconstruct the fine details of
+dynamic objects.
+Table 2 Quantitative evaluation for novel view synthesis and scene editing on our synthetic dataset
+with state-of-the-art methods. To evaluate scene editing performance, we construct a synthetic video
+dataset with time-shifted lighting effects relative to the original video used as the learning objective.
+Method
+Novel View Synthesis
+Scene Editing
+PSNR ↑
+SSIM ↑
+PSNR ↑
+SSIM ↑
+D2 NeRF (Wu et al, 2022)
+K-Planes (Fridovich-Keil et al, 2023)
+TensoIR PBR (Jin et al, 2023)
+TensoIR VR (Jin et al, 2023)
+27.234
+27.495
+15.056
+28.769
+0.872
+0.864
+0.668
+0.885
+25.201
+25.783
+15.153
+27.762
+0.864
+0.853
+0.671
+0.883
+Ours
+30.117
+0.883
+29.186
+0.878
+disentangle dynamic lighting from dynamic objects. As reported in Tab. 1, although
+K-Planes maintains a marginal lead in SSIM for full images, our method achieves
+the highest PSNR across all compared models. Crucially, as scene dynamics increase,
+competing methods suffer significant degradation due to severe color inconsistencies.
+This trend is particularly evident in the dynamic object evaluation, where our method
+demonstrates superior fidelity. This observation is qualitatively corroborated by Fig. 6,
+which illustrates the loss of fine details in dynamic objects produced by the baselines.
+Our robustness is further demonstrated on our synthetic dataset in Tab. 2
+and Fig. 7, which features severe lighting conditions. Although the videos suffer from
+the degradation of the objects’ textures (Fig. 8 (b)) and saturated colors (Fig. 8 (c)),
+our disentanglement technique operates to characterize the extent of temporal changes
+of pixels related to the lighting effects. Please refer to our Appendix C.2 for more
+analysis.
+4.4 Results for Scene Editing
+Quantitative comparison. Our ultimate goal of this work is to show the capability
+of the explicit representation for dynamic illuminations. To demonstrate it, we propose
+an exclusive evaluation protocol that generates lighting effects of videos in time from
+its 10-frame shifted version. The scene editing evaluation is conducted on our synthetic
+dataset.
+13
+NVS
+SE
+D2NeRF
+K-Planes
+TensoIR PBR
+TensoIR VR
+Ours
+GT
+Fig. 7 Qualitative comparison for scene editing on the synthetic dataset. The comparison methods
+fail to handle the harsh illuminations, mistakenly optimizing dynamic lights as dynamic objects.
+(a) Real-world dataset
+(b) Texture degradation
+(c) High saturation
+Fig. 8 Examples from our real-world (a) and synthetic datasets (b,c). The synthetic dataset allows
+us to test ours and the comparison models in severe illumination conditions, including (b) texture
+degradation and (c) highly saturated regions.
+Table 3 Quantitative comparison of dynamic lighting disentanglement on our synthetic dataset.
+We report L2 loss, L1 loss, and PSNR.
+Method
+L2 (×1000) ↓
+L1 (×1000) ↓
+PSNR ↑
+K-Planes
+D2 NeRF
+14.897
+3.147
+81.276
+17.811
+19.523
+25.245
+Ours
+0.398
+7.630
+34.972
+For strictly fair comparison, we replace the appearance time code for D2 NeRF and
+K-Planes, which is embedded in a training phase. For TensoIR, we make the shifted
+version of the appearance tensor by 10 frames in a lighting dimension.
+In Tab. 2, our method outperforms them. If the illumination is incorrectly decoupled, the predicted colors of objects differ from their original colors, which have a
+negative impact on the PSNR values of the comparison methods.
+Qualitative comparison. Fig. 4 shows the qualitative comparisons on our realworld dataset for scene editing and its corresponding scene decomposition. For scene
+editing, we extract an appearance embedding from a red-colored illumination in the
+main stage video frame, and use it as the appearance vector.
+As illustrated in Fig. 4, the comparison methods, adopting implicit representation
+for dynamic components, face the challenges in lighting color synthesis. Furthermore,
+the scene decomposition into simple dynamic and static objects suffers from rendering
+them under the entangled illuminations. In particular, they fail to represent spread
+lighting effects on dynamic objects.
+In contrast, our RehearsalNeRF demonstrates the remarkable capabilities in both
+scene editing and decomposition. In the synthetic dataset, as shown in Fig. 7, ours
+reveals the significant performance gap from the comparison methods.
+14
+Dynamic lighting effects
+Error Map
+Ground Truth
+Fig. 9
+D2 NeRF
+Ours
+K-Planes
+Qualitative comparison of dynamic lighting disentanglement.
+Dynamic light disentanglement To evaluate the quality of dynamic lighting disentanglement, as shown in Ground Truth of Fig. 9, we obtain ground truth dynamic
+lighting effects maps by calculating the difference between images from the main and
+rehearsal stages, while masking out dynamic objects. For the baselines, we extract
+dynamic lighting effects by subtracting the rendered static parts from the full rendered
+images. We then quantify the performance by measuring the errors between the ground
+truth maps and the estimated lighting effects from the baselines. The quantitative and
+qualitative results are demonstrated in Tab. 3 and Fig. 9, respectively.
+Application. RehearsalNeRF allows to control scene components like subjects’
+motions and illuminations using our novel explicit and continuous representation. In
+Fig. 10 (a), we can change the time zone of the lighting by tuning τ on the illumination vector vh . We can also manipulate the illumination colors by manually defining
+colors of vh , whose example is in Fig. 10 (b). As shown in Fig. 10 (c), we can modulate the light brightness with the intensity value i of ψI , and artificially make the
+spatially-varying intensity by assigning new factors to the i.
+In the Appendix A, we also show an interesting application to confocal fluorescence
+microscopy, which makes novel viewpoint images on both cells and tissues captured
+under multiple light sources with different wavelengths.
+4.5 Ablation Study
+In Tab. 4 and Fig. 12, we demonstrate the effectiveness of the regularization Ldyn ,
+Lreh , the hue initialization for illumination vector vh , ψA , and our novel rendering
+procedure of light colors cL in Sec. 3.2. Each component contributes to the performance
+of our RehearsalNeRF, whose analyses are described below:
+(1) Without Ldyn , SSIM values slightly increase due to optical flow confidence predictions, where reliable pixels are sparsely distributed. It offers a limited supervision
+of rehearsal prior. Although the radiance field attempts to recover a continuous signal, the discrete nature of rehearsal prior observations can degrade the SSIM values.
+Conversely, PSNR values may improve as it focuses on minimizing the mean-squared
+error in ours.
+(2) Learning ψA enables the accurate color representation when illuminations have a
+impact on surface appearances. Conversely, omitting ψA results in the lower PSNR
+15
+Ref.
+(a)
+(b)
+(c)
+Brighter 𝑖
+Darker 𝑖
+Left-bright 𝑖
+Middle-bright 𝑖
+Right-bright 𝑖
+Zero intensity
+Fig. 10 Qualitative results for scene editing. (a) We shift the lighting effects to the former frame
+(see yellow allows). Note that, we do not modify the intensity of illuminations at this point. (b) We
+tune vh with the red-colored illumination. (c) An impact on the modified intensity value i. We can
+infer the brighter and darker illumination by applying the lower and higher value of i, respectively.
+Plus, we can implement the spatially-variant adjustment.
+Aligned View
+Input
+Main Stage
+Misaligned
+View
+Input
+Rehearsal Stage
+1) Novel View
+Synthesis
+K-Planes
+Rendered
+Rehearsal Stage
+2) Reheasal
+NeRF
+Experimental Results
+Fig. 11 Handling a large misalignment of cameras between the main stage and the rehearsal stage.
+Table 4 Ablation study for NVS on both real-world and synthetic dataset, and SE.
+Ours
+w/o Ldyn
+w/o Lreh
+w/o vh hue init.
+w/o ψA
+w direct ψL → cL
+NVS(Real-world)
+PSNR
+SSIM
+28.250
+0.851
+27.787 0.859
+27.845
+0.827
+27.378
+0.832
+28.229
+0.845
+28.345
+0.816
+NVS(Synthetic)
+PSNR
+SSIM
+30.117 0.883
+29.769
+0.879
+25.896
+0.852
+29.439
+0.878
+30.040 0.885
+28.908
+0.871
+SE(Synthetic)
+PSNR
+SSIM
+29.186 0.878
+25.948
+0.859
+25.190
+0.846
+28.574
+0.872
+29.104 0.880
+27.820
+0.864
+but higher SSIM because static objects are dominant in a scene. Static objects show
+color variations solely caused by dynamic illuminations, whereas dynamic objects are
+influenced by both their motions and dynamic illuminations. Therefore, for static
+objects, optimizing ψA may be unnecessary, as the continuous representation tends to
+yield smooth results, which might reduce the SSIM values.
+(3) We can compute the illumination color cL directly from the neural field ψL ,
+bypassing the method in Sec. 3.2. It unexpectedly achieves the higher PSNR values
+for real-world novel view synthesis. However, this may indicate a potential overfitting issue where ψL learns the entangled lighting colors on object surfaces. They also
+lack scene editing capabilities demonstrated in Sec. 4.4 because they are able to only
+manipulate the appearance embedding.
+16
+Static
+objects
+Dynamic
+objects
+N/A
+Illumination
+Rehearsal
+N/A
+Scene
+editing
+Target frame
+Render
+N/A
+w direct 𝜓𝐿 → 𝑐𝐿
+w/o 𝜓𝐴
+w/o 𝑣ℎ hue init
+w/o ℒ𝑟𝑒ℎ
+w/o ℒ𝑑𝑦𝑛
+Ours
+GT
+Fig. 12 Visualizations of the results on ablation study. We can see that each component of our
+RehearsalNeRF contributes to the visually pleasing looks. The dynamic object disappearance (yellow
+arrow), incorrect scene editing (green arrow) and inaccurate shadow (blue arrow) are observed if we
+do not have either one of the proposed components.
+Table 5 Quantitative result for experiments with time mis-sync rehearsal videos.
+Ours
+PSNR
+SSIM
+28.046 0.883
+Ground Truth
+Ours
++30 frame shift
+PSNR SSIM
+28.039 0.882
+Lighting Effects
++60 frame shift
+PSNR
+SSIM
+28.069 0.883
+Only use 1st frame
+PSNR
+SSIM
+28.005
+0.881
+Dynamic Objects
+Fig. 13 Experimental results when the subjects are captured with the bulky LED screen. Adjusting
+the hyper-parameter k makes it possible to represent complex lighting effects, such as those from an
+LED screen.
+4.6 Analysis
+Due to several assumptions (eg, aligned cameras between rehearsal and main stages)
+in this pipeline, RehearsalNeRF may not seem to address various real-world scenarios.
+In this section, we address concerns about practicality and show the robustness of our
+RehearsalNeRF in many scenarios.
+Camera setups Our work assumes that the cameras between the main stage and
+rehearsal stage are aligned, as it utilizes the difference in pixel values to initialize the
+17
+…
+Rehearsal video
+…
+…
++30 frame shifted
++60 frame shifted
+Only use 1st frame
+Mis-aligned rehearsal
+GT
+Rendering
+Static
+Dynamic
+Illumination
+Fig. 14 Experimental results with non-synchronized rehearsal video input. The time shift between
+the rehearsal and main stage videos results in a misalignment of dynamic motions. Using only the first
+frame of the rehearsal video as the rehearsal prior exacerbates this misalignment. Our RehearsalNeRF
+remains unaffected by such misalignments.
+Big mask
+Rendering
+Scene editing
+Small mask
+Rendering
+Scene editing
+Fig. 15 Results with various sizes of mask. The impact of the mask is marginal and our method
+robustly produce novel view and edited scene.
+Cam trajectory
+Rehearsal video
+Rendering
+Scene editing
+Main stage video
+(a) Mis-aligned rehearsal video
+Rehearsal video
+Rendering
+Scene editing
+(b) Rehearsal video with different performer
+Main w/o white light
+Rehearsal video
+Rendering
+Scene editing
+(c) Main stage video without white light
+Main stage video
+Rehearsal video
+Rendering
+Scene editing
+(d) Rehearsal video with different performer’s position
+Fig. 16 Results with various rehearsal prior conditions.
+illumination vector vh . However, as demonstrated in Fig. 11, even if this assumption
+is violated, the challenge can be easily addressed by synthesizing the Rehearsal videos
+for each camera position on the main stage through novel view synthesis.
+Complex lighting effects In the hue initialization, the number of light sources
+determines the number of clusters in k-means clustering. This approach may seem
+ineffective in environments with a large number of light sources. However, the colors of the complex lighting can be represented by a few hue values. To verify this,
+we carry out the real-world experiment in scenes in front of a large LED screen
+whose resolution 3, 360 × 1, 620 (5,443,200 light sources in total). As demonstrated
+in Fig. 13, RehearsalNeRF sufficiently represents these complex lighting effects by
+adjusting hyper-parameter k.
+18
+Performance video input
+Generated rehearsal prior
+NVS rendering
+Scene editing
+Fig. 17 Qualitative results for the generative rehearsal prior. We demonstrate our rehearsal-free
+pipeline using a generative rehearsal prior. The rehearsal images are generated from a single frame
+of the input video without any lighting effects. Our model operates effectively with the generated
+rehearsal prior without performance degradation. While the rehearsal prior is essential to our model,
+its accuracy does not need to be strict, nor does it have to be captured from real data.
+Mis-sync between main and rehearsal video The proposed real-world dataset
+consists of videos synchronized between the rehearsal stage and the main stage through
+the music. However, even when synchronization between the two stages is impossible, RehearsalNeRF still operates effectively due to the regularization for dynamic
+objects (3.3). To demonstrate this, we present the rendering outcomes for rehearsal
+videos shifted by +30 and +60 frames in Fig. 14 and Tab. 5. We also evaluate our
+RehearsalNeRF using a rehearsal prior that consists solely of the first frame image
+of the rehearsal video. It is noticeable that our RehearsalNeRF consistently produces
+high-quality results, regardless of aligned motion.
+Quality of mask In Fig. 15, we report qualitative results with different mask size.
+The size of masks are modulated by erosion and dilatation operation. Our method
+shows stable novel view synthesis and scene editing quality, even with largely varying
+mask sizes.
+Rehearsal prior conditions To validate that our rehearsal prior does not require
+strict conditions, we conduct the following experiments, and they show plausible
+results in rendering and scene editing: (1) In Fig. 16 (a), we intentionally make a
+rehearsal video which is mis-aligned with the main stage video. To do this, we utilize 3D Gaussian splatting (Kerbl et al, 2023) to generate a video with an arbitrary
+pose; (2) In Fig. 16 (b), we use a rehearsal and main stage video whose performers are
+different. In addition, their clothes and motions are not identical. To handle this situation, we modify Eq. 3 by simply multiplying a learnable variable by cS and cD before
+rendering to account for their brightness; (3) In Fig. 16 (c), we make the main stage
+video darker through a gamma correction. We simply multiply a learnable variable
+by cS and cD before rendering to account for their brightness. Since the white light
+changes the intensity of object’s radiance regardless of their own colors, the learnable
+variable could compensate the loss of the white light in the main stage; (3) In Fig. 16
+(d), we show that our method works well in the extreme case where the performer’s
+pose and distance from the camera array are significant changed between the main
+and rehearsal stages.
+Generative rehearsal prior Although we propose and evaluate several strategies
+to relax this requirement, acquiring rehearsal data may still be challenging in practice.
+To address this issue more fundamentally, we further demonstrate that our algorithm
+can be applied using only the performance video by introducing a generative rehearsal
+prior. Specifically, we extract the first frame from the input video set (which contains
+19
+highly dynamic lighting effects) remove its illumination using a generative model, and
+use the resulting images as a rehearsal prior. Fig. 17 presents both the generative
+rehearsal prior and the results produced by our rehearsal-video-free model. We use the
+Nano Banana Pro model served from Google Gemini-3 Pro. Despite slight residual illumination artifacts and multi-view inconsistencies in the generated rehearsal prior, our
+model produces plausible results without noticeable performance degradation. These
+results highlight the strong potential of the generative rehearsal prior for improving
+the generalization of our proposed method. Importantly, although the rehearsal prior
+plays a crucial role in our model, it does not require high-fidelity accuracy and can be
+obtained from generated data rather than real captures.
+5 Conclusion
+In this paper, we present a novel approach that trains and renders neural fields
+for dynamic scenes captured under drastically changing illuminations. The proposed
+method decouples dynamic lighting effects from static/moving objects. For this, our
+key idea is to devise the rehearsal prior, which can be easily taken before turning on
+lights for the main stage. In addition, we leverage the light color-adaptive vectors and
+the semantic-aware regulerizations to jointly optimize neural fields for static/dynamic
+objects and varying illuminations. We demonstrate the effectiveness of the proposed
+method by showing impressive results on novel view synthesis and scene editing under
+dynamic illuminations.
+Limitation Directions for improvement exist. Since our work focuses on dynamic
+scene representations for short clips, efficient training schemes are needed for long
+sequence videos.
+Data Availability The authors declare that the data supporting the findings of
+this study are available in the supplementary information files. These files include
+the source code, video demos, and consent forms for using the performers’ portraits
+in the datasets. Furthermore, the real-world datasets reported in the manuscript are
+available from the first authors on reasonable request.
+Acknowledgments
+This research was supported by CJ Corporation. This work was also supported
+by the Institute of Information & Communications Technology Planning & Evaluation (IITP) grants funded by the Korea government (MSIT) (RS-2020-II201361, No.
+RS-2024-00457882 and No.RS-2025-25441838, Development of a human foundation
+model for human-centric universal artificial intelligence and training of personnel)
+and the National Research Foundation of Korea(NRF) grant funded by the Korea
+government(MSIT)(RS-2024-00338439).
+Declarations
+Financial Interest: Changyeon Won, Hyunjun Jung and Seonmi Park received a Ph
+D stipend from Gwangju Institute of Science and Technology (GIST). Hae-Gon Jeon
+20
+received salaries from GIST. Jungu Cho and Chi-Hoon Lee received salaries from CJ
+Corporation.
+Appendix A
+Application: Confocal Fluorescence
+Microscopy
+Table A1 Similarity of input/output configurations between confocal fluorescence microscopy and
+RehearsalNeRF.
+Illumination
+Sensor
+Subject
+Output
+Confocal fluorescence microscope
+RehearsalNeRF
+various wavelength LEDs/Lasers
+multiple detectors
+live cells and tissues
+3D volume rendering of live cells and tissues
+dynamic illuminations at a concert hall
+multiple cameras
+performers
+radiance fields for components of a scene
+We demonstrate that our RehearsalNeRF can also be extended to other domains.
+As an example, we show a potential application to a confocal fluorescence microscope.
+Before describing the feasible scenario of our framework, we would like to introduce a
+concept of the confocal fluorescence microscope.
+The confocal fluorescence microscope is an optical microscope to scan cells and
+tissues and to be used for studying the properties of them. As the name suggests, the
+microscopes use the fluorescence to generate an image with much higher intensity light
+sources which excite fluorescent species in a sample of interest. And, the confocal fluorescence microscope is devised to take higher resolutions and contrast images than
+that of the fluorescence microscope by blocking out-of-focus lights in image formulations. Capturing multiple 2D images at either different depths (Wang et al, 2021b)
+or various viewpoints (i.e. light field microscopy (Browning et al, 2022)) in a sample enables 3D reconstruction and volume rendering of its structure. In particular, it
+becomes essential to investigate spatial arrangement of live cells and tissues with high
+precision in sciences, which is useful for assigning the localization to specific cellular
+compartments or finding out the relationships between them (Jonkman et al, 2020).
+In total, we claim that the system configuration, inputs and outputs of the confocal fluorescence microscopes are very similar with those of our RehearsalNeRF as
+described in Tab. A1.
+Following this scenario of the confocal fluorescence microscope, we provide an
+example to demonstrate the potential application. In Hontani et al (2021), a set of
+images for a mouse brain captured using a fluorescence microscopy is available. Using
+the images, we first make a composite image and then project it onto a regular grid for
+the multiview image acquisition, which becomes the input of our RehearsalNeRF. By
+training RehearsalNeRF with these images, we can synthesize novel views of specific
+cells or entire of cells. As shown in Fig. A1, our RehearsalNeRF achieves the wellreconstructed spatial arrangement of the mouse brain. In the submitted video demo,
+we present rendering results that are synthesized by our RehearsalNeRF; please refer
+it. If this framework were extended to a temporal dataset consisting of flourescence
+21
+RehearsalNeRF
+(a) Activation depending on the wavelengths
+(b) Multi-view observation
+(c) Composite Rendering
+Fig. A1 Applying RehearsalNeRF framework to confocal fluorescence microscopy. (a) Each sample
+type exhibits different activations according to the wavelengths of exposed lights. (b) Through multiview observation such as light field microscopy, we can generate multi view images which can be
+used to train RehearsalNeRF. (c) We can render the 3D volume of the subject. Please check our
+supplementary video.
+microscope images, it could lead to the discovery of many interesting properties of
+cells and tissues by expanding into 4D domain (3D + time).
+Appendix B
+Diversity of Our Dataset
+Since the advent of NeRF, new datasets have been taken whenever new problems are
+defined. We collect a new dataset with dynamic scenes with changing illumination, a
+unique situation that has not been addressed before. Our dataset ensures the diversity
+with respect to the number of dancers, choreography, costumes, and backgrounds,
+compared to the public datasets for NeRFs, as reported in Tab. B2 and Fig. B2. As
+mentioned in the main manuscript, we also produce a synthetic dataset to test the
+robustness of our method for harder cases including intense light effects and highly
+saturated object surfaces. Furthermore, our dataset contains songs corresponding to
+the dances, which can be useful for multi-modal learning applications such as motion
+generation based on music.
+Fig. B2 Examples of main stage video in our dataset. The real-world dataset are sampled in the
+upper row and the synthetic dataset in the lower row.
+22
+Table B2 Statistic of public datasets for NeRFs with dynamic motion and our dataset
+Dataset
+Nerfies Validation Rig (Park et al, 2021a)
+Neural 3D video (Li et al, 2022b)
+Meet Room (Li et al, 2022a)
+Ours (real-world)
+Ours (synthetic)
+Original, hue: 240
+# of scenes
+4
+6
+3
+10
+4
+# of dynamic subjects
+3
+1
+3
+4
+4
+# of backgrounds
+3
+2
+1
+3
+4
+Frozen Light
+(b) Dynamic motions with the frozen lighting effect
+Hue:60
+Hue
+Hue:120
+Hue:180
+Frozen Motion
+(a) Controllable light
+(c) Dynamic lighting effects with the frozen motion
+Fig. C3 Applications of RehearsalNeRF to video manipulation. (a) We can change the light colors
+after recording the video. (b) Our RehearsalNeRF produces the natural-looking dance video under
+artificially stopping the light effects. (c) We show a video with the frozen motion, but the light sources
+still work. Please check our supplementary video.
+Appendix C
+C.1
+More Experimental Results
+Video manipulation
+Accurate disentanglement of neural fields for dynamic illuminations and scene objects
+in the time domain can facilitate many applications. As examples, we show video
+editing applications such as time stop effect (a.k.a bullet-time) by manipulating the
+temporal flow of the decoupled neural fields.
+A controllable light effect that tunes light colors after taking the video is one of
+the applications of our RehearsalNeRF. Thanks to the accurate neural representation
+for dynamic lights, we can artificially direct the various light color effects in Fig. C3
+(a). Another interesting application is to freeze the subject’s motion and light colors.
+As shown in Fig. C3 (b) and (c), since the illumination neural fields are supervised
+independently for the motion and geometry of the subject, we can easily produce the
+videos that show natural-looking motions in artificially fixed light conditions and vice
+versa.
+C.2
+Analysis on synthetic dataset
+The synthetic dataset is designed to simulate high-intensity lighting setups, which
+can lead to texture degradation and color saturation in objects. This enables us to
+test our RehearsalNeRF in scenarios where real-world datasets cannot cover. In our
+experiments, we evaluate the performance of our model and compare it with the
+comparison methods under varying intensities of dynamic illumination. As depicted in
+23
+No lights
+Low intensity lights
+High intensity lights
+Extreme intensity lights
+Fig. C4 Examples of synthetic datasets under various light intensities in dynamic illumination.
+From left to right, we incrementally increase the intensity of lights. The intensity predominantly used
+in our main paper corresponds to the ’high intensity’ setting, as shown in the third column.
+Fig. C4, we have created a synthetic dataset from no lighting to the extreme lighting
+conditions. We then assess the PSNR and SSIM values for novel view synthesis on the
+scene illustrated in Fig. C4.
+K-planes
+Ours
+TensoIR VR
+K-planes
+Tensor PBR
+Ours
+28.56
+TensoIR VR
+28.29
+27.61
+23.75
+23.33
+21.98
+21.54
+22.067
+17.21
+11.42
+No lights
+15.71
+15.49
+10.67
+10.73
+Low intensity
+High intensity
+Extreme intensity
+No lights
+TensoIR VR
+0.734
+0.644
+0.629
+Low intensity
+0.462
+0.467
+Tensor PBR
+0.736
+0.622
+0.459
+0.224
+0.217
+0.226
+0.237
+No lights
+Low intensity
+High intensity
+Extreme intensity
+SSIM across dynamic objects
+27.13
+26.9
+26.74
+15.06
+High intensity
+Extreme intensity
+No lights
+PSNR across static objects
+0.737
+K-planes
+Ours
+0.734
+0.722
+TensoIR VR
+0.715
+0.721
+0.706
+0.707
+0.698
+0.622
+0.473
+27.29
+10.75
+0.725
+0.645
+27.01
+11.59
+11.04
+Ours
+0.735
+27.81
+TensoIR VR
+26.99
+26.07
+26.64
+Tensor PBR
+27.09
+25.74
+26.24
+19.01
+16.33
+10.97
+K-planes
+27.14
+Ours
+27.71
+27.64
+27.2
+PSNR across dynamic objects
+0.727
+27.97
+K-planes
+27.8
+21.48
+20.12
+17.36
+27.1
+Tensor PBR
+27.5
+27.86
+0.537
+No lights
+Tensor PBR
+0.727
+0.715
+0.68
+0.725
+High intensity
+Low intensity
+K-planes
+Ours
+0.728
+0.725 0.723
+0.704
+High intensity
+Extreme intensity
+Extreme intensity
+No lights
+TensoIR VR
+0.707
+0.722
+Tensor PBR
+0.727
+0.707
+0.704
+0.614
+0.526
+SSIM across static objects
+14.83
+PSNR across entire image
+0.555
+Low intensity
+15.25
+11.56
+0.696
+0.69
+0.61
+0.601
+High intensity
+Extreme intensity
+0.544
+Low intensity
+SSIM across entire image
+Fig. C5 Quantitative results for the synthetic dataset under the lighting conditions with varying
+intensities. We evaluate the results across dynamic objects, static objects, and the entire image.
+In Figure C5, we present the results of novel view synthesis for only dynamic
+objects, only static objects and the entire image. We employ ground truth masks
+for this evaluation, and compare ours with K-planes (Fridovich-Keil et al, 2023) and
+TensorIR (Jin et al, 2023). Notably, the significant performance gap between our
+RehearsalNeRF and the other methods is observed when assessments are confined to
+dynamic objects. This implies that dynamic illumination significantly hinders learning dynamic objects in neural fields. Moreover, the reason why our RehearsalNeRF
+exhibits the best performance on dynamic objects is that the Ldyn works well for the
+shapes of dynamic objects. This capability stems from the fact that the loss term
+leverages the rehearsal priors and optical flow, which provide coarse clues for shape
+reconstruction. The performance gap becomes noticeable as the intensity increases.
+This trend is consistent in the dynamic objects as well as both the static objects
+24
+Table D3 Comparison of computational efficiency. We report the peak GPU memory usage during
+inference, training time, and inference time measured on a single RTX 3090 GPU.
+Method
+VRAM (MB)
+Training Time (sec)
+Inference Time (sec)
+D2 NeRF
+K-Planes
+TensoIR VR
+TensoIR PBR
+3,739
+1,081
+2,449
+15,641
+16,406
+10,491
+27,110
+27,110
+72.10
+7.93
+3.54
+66.70
+Ours
+1,639
+32,250
+14.80
+and the entire image. In conclusion, our RehearsalNeRF is robust to handling intense
+lighting conditions as well.
+Appendix D
+Computational resource
+We report runtime and resource analysis as your request in Tab. D3. For a fair comparison, we standardize the batch size to 1024 rays and conduct all experiments on
+the synthetic dataset using a single NVIDIA RTX 3090 GPU. We report the peak
+GPU memory usage as measured by nvidia-smi. Our model exhibits a longer training
+time compared to other methods due to its architectural complexity. Addressing this
+limitation is left for future work. Possible directions include incorporating geometric
+priors or adopting more fast coordinate-based methods, such as Instant-NGP.
+References
+Alldieck T, Xu H, Sminchisescu C (2021) imghum: Implicit generative models of 3d
+human shape and articulated pose. In: Proceedings of the IEEE/CVF International
+Conference on Computer Vision (ICCV)
+Athar S, Xu Z, Sunkavalli K, et al (2022) Rignerf: Fully controllable neural 3d portraits. In: Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR)
+Barrow H, Tenenbaum J, Hanson A, et al (1978) Recovering intrinsic scene characteristics. Comput vis syst 2(3–26):2
+Blanz V, Vetter T (1999) A morphable model for the synthesis of 3d faces. In:
+Proceedings of the 26th annual conference on Computer graphics and interactive
+techniques
+Bojanowski P, Joulin A, Lopez-Paz D, et al (2018) Optimizing the latent space of
+generative networks. In: Proceedings of the International Conference on Machine
+Learning (ICML)
+Boss M, Braun R, Jampani V, et al (2021a) Nerd: Neural reflectance decomposition
+from image collections. In: Proceedings of the IEEE/CVF International Conference
+on Computer Vision (ICCV)
+25
+Boss M, Jampani V, Braun R, et al (2021b) Neural-pil: Neural pre-integrated lighting
+for reflectance decomposition. In: Proceedings of the Neural Information Processing
+Systems (NeurIPS)
+Boss M, Engelhardt A, Kar A, et al (2022) Samurai: Shape and material from
+unconstrained real-world arbitrary image collections. In: Proceedings of the Neural
+Information Processing Systems (NeurIPS)
+Browning CM, Mayes S, Mayes SA, et al (2022) Microscopy is better in color: development of a streamlined spectral light path for real-time multiplex fluorescence
+microscopy. Biomedical Optics Express 13(7):3751–3772
+Broxton M, Flynn J, Overbeck R, et al (2020) Immersive light field video with a
+layered mesh representation. ACM Transactions on Graphics (TOG) 39(4):86–1
+Chen Q, Koltun V (2013) A simple model for intrinsic image decomposition with depth
+cues. In: Proceedings of the IEEE/CVF International Conference on Computer
+Vision (ICCV)
+Chen Z, Liu Z (2022) Relighting4d: Neural relightable human from videos. In:
+Proceedings of the European Conference on Computer Vision (ECCV)
+Cheng HK, Tai YW, Tang CK (2021) Modular interactive video object segmentation:
+Interaction-to-mask, propagation and difference-aware fusion. In: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)
+Debevec P, Hawkins T, Tchou C, et al (2000) Acquiring the reflectance field of a
+human face. In: Proceedings of the 27th annual conference on Computer graphics
+and interactive techniques
+El Helou M, Zhou R, Susstrunk S, et al (2021) Ntire 2021 depth guided image relighting
+challenge. In: Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR)
+Fridovich-Keil S, Meanti G, Warburg F, et al (2023) K-planes: Explicit radiance fields
+in space, time, and appearance. In: Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR)
+Gao C, Saraf A, Kopf J, et al (2021) Dynamic view synthesis from dynamic monocular
+video. In: Proceedings of the IEEE/CVF International Conference on Computer
+Vision (ICCV)
+Hontani Y, Xia F, Xu C (2021) Multicolor three-photon fluorescence imaging with
+single-wavelength excitation deep in mouse brain. Science advances 7(12):eabf3531
+Horn BK (1974) Determining lightness from an image. Computer graphics and image
+processing 3(4):277–299
+26
+Jiang W, Yi KM, Samei G, et al (2022) Neuman: Neural human radiance field from
+a single video. In: Proceedings of the European Conference on Computer Vision
+(ECCV)
+Jin H, Liu I, Xu P, et al (2023) Tensoir: Tensorial inverse rendering. In: Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)
+Jonkman J, Brown CM, Wright GD, et al (2020) Tutorial: guidance for quantitative
+confocal microscopy. Nature protocols 15(5):1585–1611
+Juliani A, Berges VP, Teng E, et al (2018) Unity: A general platform for intelligent
+agents. arXiv preprint arXiv:180902627
+Kerbl B, Kopanas G, Leimkuehler T, et al (2023) 3d gaussian splatting for real-time
+radiance field rendering. In: Proceedings of ACM SIGGRAPH
+Li L, Shen Z, Wang Z, et al (2022a) Streaming radiance fields for 3d video synthesis.
+In: Proceedings of the Neural Information Processing Systems (NeurIPS)
+Li T, Slavcheva M, Zollhoefer M, et al (2022b) Neural 3d video synthesis from multiview video. In: Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR)
+Li Z, Dekel T, Cole F, et al (2019) Learning the depths of moving people by watching
+frozen people. In: Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR)
+Li Z, Niklaus S, Snavely N, et al (2021) Neural scene flow fields for space-time view
+synthesis of dynamic scenes. In: Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR)
+Li Z, Wang Q, Cole F, et al (2023) Dynibar: Neural dynamic image-based rendering.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR)
+Liang Z, Zhang Q, Feng Y, et al (2023) Gs-ir: 3d gaussian splatting for inverse
+rendering. Arxiv 2311.16473
+Ling J, Wang Z, Xu F (2023) Shadowneus: Neural sdf reconstruction by shadow ray
+supervision. In: Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR)
+Loper M, Mahmood N, Romero J, et al (2015) Smpl: A skinned multi-person linear
+model. ACM Transactions on Graphics (TOG) 34(6):1–16
+Lyu L, Tewari A, Leimkühler T, et al (2022) Neural radiance transfer fields for
+relightable novel-view synthesis with global illumination. In: Proceedings of the
+European Conference on Computer Vision (ECCV)
+27
+Maier R, Kim K, Cremers D, et al (2017) Intrinsic3d: High-quality 3d reconstruction by joint appearance and geometry optimization with spatially-varying lighting.
+In: Proceedings of the IEEE/CVF International Conference on Computer Vision
+(ICCV)
+Martin-Brualla R, Radwan N, Sajjadi MS, et al (2021) Nerf in the wild: Neural radiance fields for unconstrained photo collections. In: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR)
+Meka A, Zollhöfer M, Richardt C, et al (2016) Live intrinsic video. In: Proceedings of
+ACM SIGGRAPH
+Mildenhall B, Srinivasan PP, Tancik M, et al (2020) NeRF: Representing scenes as
+neural radiance fields for view synthesis. In: Proceedings of the European Conference
+on Computer Vision (ECCV)
+Munkberg J, Hasselgren J, Shen T, et al (2022) Extracting triangular 3d models,
+materials, and lighting from images. In: Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR)
+Niemeyer M, Geiger A (2021) Giraffe: Representing scenes as compositional generative
+neural feature fields. In: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR)
+Park K, Sinha U, Barron JT, et al (2021a) Nerfies: Deformable neural radiance fields.
+In: Proceedings of the IEEE/CVF International Conference on Computer Vision
+(ICCV)
+Park K, Sinha U, Hedman P, et al (2021b) Hypernerf: A higher-dimensional representation for topologically varying neural radiance fields. ACM Transactions on
+Graphics (TOG) 40(6)
+Peng S, Zhang Y, Xu Y, et al (2021) Neural body: Implicit neural representations with
+structured latent codes for novel view synthesis of dynamic humans. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR)
+Phong BT (1975) Illumination for computer generated pictures. Communications of
+the ACM 18(6):311–317
+Pumarola A, Corona E, Pons-Moll G, et al (2021) D-nerf: Neural radiance fields for
+dynamic scenes. In: Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR)
+Schönberger JL, Frahm JM (2016) Structure-from-motion revisited. In: Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)
+28
+Schwarz K, Liao Y, Niemeyer M, et al (2020) Graf: Generative radiance fields for
+3d-aware image synthesis. In: Proceedings of the Neural Information Processing
+Systems (NeurIPS)
+Shi Y, Wu Y, Wu C, et al (2023) Gir: 3d gaussian inverse rendering for relightable
+scene factorization. Arxiv 2312.05133
+Somanath G, Kurz D (2021) Hdr environment map estimation for real-time augmented
+reality. In: Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR)
+Song L, Chen A, Li Z, et al (2023) Nerfplayer: A streamable dynamic scene representation with decomposed neural radiance fields. IEEE Transactions on Visualization
+and Computer Graphics 29(5):2732–2742
+Srinivasan PP, Deng B, Zhang X, et al (2021) Nerv: Neural reflectance and visibility fields for relighting and view synthesis. In: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR)
+Tancik M, Casser V, Yan X, et al (2022) Block-nerf: Scalable large scene neural view
+synthesis. In: Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR)
+Teed Z, Deng J (2020) Raft: Recurrent all-pairs field transforms for optical flow. In:
+Proceedings of the European Conference on Computer Vision (ECCV)
+Tschernezki V, Larlus D, Vedaldi A (2021) Neuraldiff: Segmenting 3d objects that
+move in egocentric videos. In: 2021 International Conference on 3D Vision (3DV)
+Turki H, Ramanan D, Satyanarayanan M (2022) Mega-nerf: Scalable construction
+of large-scale nerfs for virtual fly-throughs. In: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR)
+Wang C, Chai M, He M, et al (2022) Clip-nerf: Text-and-image driven manipulation of
+neural radiance fields. In: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR)
+Wang Z, Bovik AC, Sheikh HR, et al (2004) Image quality assessment: from error
+visibility to structural similarity. IEEE Transactions on Image Processing (TIP)
+13(4):600–612
+Wang Z, Philion J, Fidler S, et al (2021a) Learning indoor inverse rendering with
+3d spatially-varying lighting. In: Proceedings of the IEEE/CVF International
+Conference on Computer Vision (ICCV)
+Wang Z, Zhu L, Zhang H, et al (2021b) Real-time volumetric reconstruction of biological dynamics with light-field microscopy and deep learning. Nature methods
+29
+18(5):551–556
+Weng CY, Curless B, Srinivasan PP, et al (2022) Humannerf: Free-viewpoint rendering of moving people from monocular video. In: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR)
+Wu G, Yi T, Fang J, et al (2024) 4d gaussian splatting for real-time dynamic scene
+rendering. In: Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR)
+Wu TW, Zhong F, Tagliasacchi A, et al (2022) D2 nerf: Self-supervised decoupling of
+dynamic and static objects from a monocular video. In: Proceedings of the Neural
+Information Processing Systems (NeurIPS)
+Xian W, Huang JB, Kopf J, et al (2021) Space-time neural irradiance fields for freeviewpoint video. In: Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR)
+Xu H, Alldieck T, Sminchisescu C (2021) H-nerf: Neural radiance fields for rendering
+and temporal reconstruction of humans in motion. In: Proceedings of the Neural
+Information Processing Systems (NeurIPS)
+Xu Z, Sunkavalli K, Hadap S, et al (2018) Deep image-based relighting from optimal
+sparse samples. ACM Transactions on Graphics (TOG) 37(4):1–13
+Yang W, Chen G, Chen C, et al (2022) S3 -nerf: Neural reflectance field from shading
+and shadow under a single viewpoint. In: Proceedings of the Neural Information
+Processing Systems (NeurIPS)
+Ye W, Chen S, Bao C, et al (2023) Intrinsicnerf: Learning intrinsic neural radiance fields for editable novel view synthesis. In: Proceedings of the IEEE/CVF
+International Conference on Computer Vision (ICCV), pp 339–351
+Zeng C, Chen G, Dong Y, et al (2023) Relighting neural radiance fields with shadow
+and highlight hints. In: Proceedings of ACM SIGGRAPH
+Zhang B, Xu W, Zhu Z, et al (2023) Detachable novel views synthesis of dynamic scenes
+using distribution-driven neural radiance fields. arXiv preprint arXiv:230100411
+Zhang J, Liu X, Ye X, et al (2021a) Editable free-viewpoint video using a layered
+neural representation. ACM Transactions on Graphics (TOG) 40(4):1–18
+Zhang K, Luan F, Wang Q, et al (2021b) PhySG: Inverse rendering with spherical
+gaussians for physics-based material editing and relighting. In: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)
+Zhang K, Luan F, Li Z, et al (2022) Iron: Inverse rendering by optimizing neural
+sdfs and materials from photometric images. In: Proceedings of the IEEE/CVF
+30
+Conference on Computer Vision and Pattern Recognition (CVPR)
+Zhang R, Tsai PS, Cryer JE, et al (1999) Shape-from-shading: a survey. IEEE
+Transactions on Pattern Analysis and Machine Intelligence (TPAMI) 21(8):690–706
+Zimmer H, Bruhn A, Weickert J (2011) Optic flow in harmony. International Journal
+on Computer Vision (IJCV) 93:368–388
+31

@@ -1,0 +1,1053 @@
+Ray Marching
+Ray Marching
+[
+_rn_rayMrch
+]
+Contents
+1.
+Intersection AlgorithmsGPU implicit signed distance
+2.
+Marching
+3.
+Distance Estimators
+4.
+Sphere Tracing
+5.
+Some Distance Estimators
+-
+Sphere
+-
+Plane
+-
+Box
+-
+Rounded Box
+-
+Torus
+-
+Wheel
+-
+Cylinder
+6.
+Computing Normals
+7.
+A Simple GLSL Ray Caster
+-
+C++ Shader Launch
+-
+GLSL Ray Setup
+-
+GLSL Intersection
+8.
+Operations on Distance Estimators
+9.
+Some Useful Operators
+-
+Union
+-
+Intersection
+-
+Subtraction
+-
+Repetition
+-
+Transformation
+-
+Blending
+10.
+Increasing Performance
+-
+Over-Relaxation
+-
+Bounding Spheres
+-
+Reintroducing Analytic Roots
+-
+Other Optimization Strategies
+11.
+Some Online Examples in GLSL
+-
+Educational
+-
+Aspirational
+12.
+Further Reading
+Ray marching is an alternative to analytic
+methods for discovering intersections between a light transport
+ray and the scene. The structure of the ray marching algorithm
+makes it amenable to rendering scenes constructed from
+operations on solid objects, amorphous surfaces, and
+participating media, which have no explicit surface.
+Analytic intersection is extremely efficient. Renderers based on
+it can render simple scenes interactively on a CPU, which is
+great for learning and experimentation. Ray marching is less
+efficient. So, this chapter also introduces Graphics Processing
+Unit (GPU) programming to enable you to build a real-time ray
+marching renderer.
+© 2014 Morgan McGuire
+A reference scene defined by implicit surfaces ray traced at 60fps on
+GeForce 650M using the techniques described in this document.
+© 2013 Pablo Roman Andrioli
+An impressive open source demo of real-time ray-traced implicit surface fractals
+by Kali (Pablo Roman Andrioli), implemented in about 300 lines of
+GLSL.
+Intersection AlgorithmsGPU implicit signed distance
+Most computational graphics rendering methods are based on ray-surface
+intersection. The three major ray-surface algorithms are:
+Analytic ray intersection
+Numerical intersection by ray marching
+Rasterization with a depth buffer
+Analytic ray intersection and ray marching
+use implicit surface definitions. For example, the
+unit-meter sphere is implicitly defined by the set of points satisfying
+$$\{X\hasType{\reals^3\si{m}} ~|~ g(X) = 0\si{m}\}$$
+$$h(X\hasType{\reals^3\si{m}}) = |X| - 1\si{m}.$$
+That is, the zero-crossing of the function $h\hasType{\reals^3\si{m}\to\reals\si{m}}$ measuring signed
+distance from the surface of the sphere.
+Analytic ray-surface intersection gives a closed-form solution by
+solving for the distance parameter $t$ for which the
+explicit equation of a ray,
+$$X(t\hasType{\reals\si{m}}) = P\hasType{\reals^3\si{m}} + \w\hasType{\sphere} t$$
+satisfies the implicit equation of the scene, in this case, a
+sphere. While analytic solutions exist for some cases, such as
+ray-sphere and ray-triangle intersection, there is no
+general analytic solution possible for arbitrary ray-surface
+intersection.
+Ray marching is an algorithm for numerical
+estimation of arbitrary ray-surface intersections. It works for
+arbitrary implicit surfaces (although most of the optimizations
+that make it practical for real-time use require a surface
+definition with certain properties).
+The simplest form of ray marching begins at the ray origin and
+samples the implicit surface at regular intervals, terminating
+when the function crosses zero. This is of course both slow and
+innaccurate. Fortunately, any numerical root-finding strategy,
+such as the secant method or Newton-Raphson iteration, can be
+employed to accelerate it or improve its accuracy. For example,
+choosing the step size between successive samples based on the
+derivative of the surface gives faster convergence and more
+accuracy. Binary search near the zero crossing is a good way to
+identify the intersection with arbitrary accuracy for continuous
+implicit surface definitions.
+Rasterization with a depth buffer is an
+amortization of analytic ray intersection over many rays that
+relies on both explicit and implicit surface definitions. It
+processes many rays for each surface, instead of many surfaces
+for each ray. Because of this, it relies on an auxillary
+image-space structure called the depth buffer to
+keep track of the currently-known closest surface location to
+the camera at each image sample. (There are also rasterization
+methods that perform sophisticated clipping of primitives
+against each other to avoid this structure, however their
+increased run time cost puts them out of favor today.)
+Rasterization is extremely efficient for triangle meshes on
+massively parallel hardware, and algorithms are known for some
+other primitives such as lines, rectangles, and disks. However,
+because it requires both analytic implicit and explicit
+equations, rasterization is highly constrained to such
+primitives.
+Marching
+Consider an example of solving for the root of the equation that
+gives the intersection of a ray $P +\w t$ and a general sphere with center
+point $C$ and radius $r$,
+$$g(t\hasType{\reals\si{m}}) = ||P + \w t - C || - r = 0\si{m}.$$
+The simplest implementation of ray marching iterates $t$ through
+the domain of function $g$ in fixed $\Delta t$ steps:
+def findRootNaive$(g\hasType{\reals\si{m}\to\reals\si{m}}) \hasType{\reals\si{m}}$:
+$\Delta t\hasType{\reals\si{m}} = 0.01\si{m}$
+$t\hasType{\reals\si{m}} = 0\si{m}$
+while $g(t) \neq 0\si{m}$:
+$t = t + \Delta t$
+return $t$
+This “marches” through every point $X(t) = P + \w t$ on
+the ray until it finds a $t$ that yields an $X$ on the surface of the
+sphere.
+Of course, this naive ray marching scheme is unlikely to
+exactly land on the exact value of $t$ for which $g(t) = 0\si{m}$, so
+the code will almost always loop forever. A better solution
+enforces a maximum distance bound and seeks the first value at
+which $g$ crosses from positive to nonpositive, at which point the
+ray must have passed through the surface:
+def findRoot($g\hasType{\reals\si{m}\to\reals\si{m}}$, maxDistance$\hasType{\reals\si{m}})\hasType{\reals\si{m}}$:
+$\Delta t \hasType{\reals\m} = 0.01\si{m}$
+$t\hasType{\reals\si{m}} = 0\si{m}$
+while ($t$ < maxDistance) and ($g(t) > 0\si{m}$):
+$t = t + \Delta t$
+return $t$
+We can further refine this approach using binary search within the
+final fixed interval $[t_{n-1}, t_{n}]$ in which $g$ crossed from positive
+to nonpositive values.
+Ray marching with fixed steps has three advantages over analytic ray intersections:
+Very simple to implement
+Works for any implicitly defined surface
+Naturally extends to integration of scattering in participating media, such as fog
+Ray marching with fixed steps has two obvious disadvantages over
+analytic ray tracing. The first is that it can miss the
+intersection for a non-convex shape. The second is that it takes
+at least linear time in the distance to the intersection for
+rays that do intersect the surface and linear time in
+maxDistance for rays that do not intersect. Analytic
+ray tracing is guaranteed to not only find the intersection, but
+do it in constant time.
+We can mitigate both the performance disadvantage and the missed
+intersection disadvantage of fixed-step ray marching with a
+simple improvement that only slightly constrains the surface
+description.
+Distance Estimators
+We originally defined $g(t) = h(P + \w t) = 0\si{m}$ as the
+surface. The ray marching algorithm implicitly required only
+that $g(t) > 0\si{m}$ at the ray origin $P$ and $g$ was
+continuous. Now, let us require the surface to be an embedded
+manifold without boundary, i.e., the surface of a solid object,
+and refine our constraints so that $g$ and $h$ are signed
+distance estimators: require that $g(t) = h(P + \w t)$ is less than or
+equal to than the true distance to the surface from point $X(t) = P + \w
+t$.
+Because we're working with surfaces in three dimensions and
+will wish to cast rays from many different origins (e.g.,
+primary rays, shadow rays, mirror rays), it will be
+convenient to define a distance estimator on three-space
+instead of the ray parameter.
+We now formally define function $h(X) = g(P + \w t)$ be a signed distance
+estimator for a surface. For the sphere, one function that
+satisfies this is simply the original implicit equation:
+$h_\mathrm{sphere}(X) = ||X - C|| - r$.
+The $h(X) = 0\si{m}$ surface is sometimes called the
+isosurface, although technically it is the $h = 0\si{m}$
+isosurface. Fluids are often modeled with a large number of
+particles, which are collectively rendered by forming a single
+distance estimator that is the sum of a large number of so-called blobby
+distance estimators. In this case, the term level set is
+sometimes used to describe the surface.
+Sphere Tracing
+Given a signed distance estimator, $h(X)$, we now have an upper
+bound on how far is safe to step to avoid marching the ray over
+the intersection. Because $h$ returns a bound on the distance in
+any direction, we can move at least that far along the
+direction $\w$ of the ray. In other words, if we consider a
+sphere of radius $h(X)$ of possible locations to visit from
+point $X$, that sphere at most touches (i.e., is tangent to) the primitive
+(...which is also a sphere in our example) that we're tracing
+against, and may not even touch it.
+That new virtual sphere of possible locations to visit
+can't possibly intersect the primitive more deeply because of
+the distance estimator guarantee. So, we can jump to testing the
+next point at the surface of the virtual sphere. This method for
+advancing the ray is called sphere tracing
+[Hart1996Sphere]
+. Note that the “sphere” in the
+name refers to the sphere within which the algorithm can safely
+march from its current location; the method can trace any
+primitive, and intersects the primitives with rays, not spheres.
+def sphereTrace($P\hasType{\reals^3\si{m}}, w\hasType{\sphere}, h\hasType{\reals^3\si{m}\to\reals\si{m}}, \mathrm{maxDistance}\hasType{\reals\si{m}})\hasType{\reals\si{m}}$:
+# How close we want to get to the surface
+$\epsilon\hasType{\reals\si{m}} = 0.0000001\si{m}$
+# Enforce this minimum step through space
+minStep$\hasCodeType{\reals\si{m}}$ = $0.0001\si{m}$
+$t\hasType{\reals\si{m}} = 0\si{m}$
+$\Delta t \hasType{\reals\si{m}} = h(P + \w t)$
+while ($t$ < maxDistance) and ($\Delta t$ > $\epsilon$):
+$t = t + \max(\Delta t, \mathrm{minStep})$
+$\Delta t = h(P + \w t)$
+return $t$
+Why is iteration necessary? Doesn't $h$ give the distance to
+the surface immediately? If $h$ gave the exact distance to
+the surface, then the while loop would be
+unnecessary. However, recall that $h$ is a conservative
+estimate of the distance. If the surface is 1m from a point
+$X$, then $h(X)$ might return 0.1m. So, we must iterate until
+$h(X)$ converges to zero, or at least very nearly so.
+The minStep constant is necessary to ensure that
+the ray continues to advance even when asymptotically
+approaching a surface. It is particularly important for
+achieving reasonable performance in the face of an overly
+conservative distance estimator or at locations where the ray
+just barely passes by the surface. One could additionally impose
+an explicit iteration limit independent of the minimum step
+size. Keinert et al.
+[2014]
+recommend tracking
+and returning $t$ corresponding to the closest point ever found
+to the ray instead of the marching end point when terminating
+after a fixed number of iterations.
+As before, we can extend this root finding method to perform
+binary search to refine the end hit point. Because $h$ is a
+signed distance estimator, we can even do so fairly efficiently.
+Once the
+ray passes through the surface we can re-approach it accurately
+from the inside.
+Some Distance Estimators
+For these definitions, let $\max(\vec{v}) = \max(x_v, y_v,
+z_v)$, $|\vec{v}|=(|x_v|, |y_v|, |z_v|)$, and let $\max(\vec{a},
+\vec{b}) = (\max(x_a, x_b), \max(y_a, y_b), \max(z_a,
+z_b))$. The code samples are in GLSL using some common utilities
+and HLSL compatibility definitions:
+#define Vector2 vec2
+#define Point3 vec3
+#define Vector3 vec3
+#define lerp mix
+float maxComponent(vec3 v) { return max(v.x, max(v.y, v.z)); }
+float saturate(float x) { return clamp(x, 0.0, 1.0); }
+Sphere
+The sphere about point $C$ with radius $r$:
+Math
+GLSL
+$$h(X) = \|X - C\| - r$$
+float sphereDistance(Point3 X, Point3 C, float r) {
+return length(X - C) - r;
+}
+Plane
+The plane with point $C$ and normal $\n$:
+Math
+GLSL
+$$h(X) = (X - C) \cdot \n$$
+float planeDistance(Point3 X, Point3 C, Vector3 n) {
+return dot(X - C, r);
+}
+Box
+The box with center $C$ and vector $\vec{b}$ from the center to the first-quadrant corner:
+Math
+GLSL
+$$\nonumber \mbox{Let } \vec{d} = |X - C| - \vec{b}$$
+$$h(X) = \min(\max(d), 0) + \left\| \max(d, (0,0,0)) \right\|$$
+float boxDistance(Point3 X, Vector3 b) {
+Vector3 d = abs(X - C) - b;
+return min(maxComponent(d), 0) + length(max(d, Vector3(0, 0, 0)));
+}
+Rounded Box
+The hollow rounded box with center $C$, edge half-lengths in vector $\vec{b}$, and rounding radius $r$:
+Math
+GLSL
+$$h(X) = \left\| \max\left(|X - C| - \vec{b}, (0,0,0) \right) \right\| - r$$
+float roundedBoxDistance(Point3 X, Vector3 b, float r) {
+return length(max(abs(X - C) - b, Vector3(0, 0, 0))) - r;
+}
+Torus
+The torus about the $x$-axis with centroid $C$, minor radius $r$, and major radius $R$:
+Math
+GLSL
+$$h(X) = \left\| \left( \left\| \sqrt{(x_X - x_C)^2 + (z_X - z_C)^2} - R \right\| , y_X - y_C \right) \right\| - r$$
+float torusDistance(Point3 X, Point3 C, float R, float r) {
+return length(vec2(length(X.xz - C.xz) - R, X.y - C.y)) - r;
+}
+Wheel
+The “wheel” about the $x$-axis with centroid $C$, minor radius $r$, and major radius $R$ is the same as the torus above, but with a non-Euclidean definition of distance:
+Math
+GLSL
+$$h(X) = \left\| \left( \left\| \sqrt{(x_X - x_C)^2 + (z_X - z_C)^2} - R \right\|, y_X - y_C \right) \right\|_8 - r$$
+Here, $\| \vec{v} \|_n$ is the $n$-norm: $\sqrt[n]{x_v^n + y_v^n + z_v^n}$. Higher-order norms like this can be substituted into most distance estimators to square off edges; compare the wheel on the right to the torus above it.
+// x^8
+float pow8(float x) {
+x *= x; // x^2
+x *= x; // x^4
+return x * x; // x^8
+}
+// The L8-norm, ||v||_8
+float length8(Vector2 v) {
+return pow(pow8(v.x) + pow8(v.y), 1.0);
+}
+float wheelDistance(Point3 X, Point3 C, float R, float r) {
+return length8(Vector2(length(X.xz - C.xz) - r, X.y - C.y)) - R;
+}
+Cylinder
+The cylinder with centroid $C$, radius $r$, and half-height $e$:
+Math
+GLSL
+$$\nonumber \mbox{Let } \vec{d} = \left| \left( \left\| \sqrt{(x_X - x_C)^2 + (z_X - z_C)^2} - r \right\| , y_X - y_C\right) \right| - (r, e)$$
+$$h(X) = \min(\max(x_d, y_d), 0) + \| \max(\vec{d}, (0,0)) \|$$
+float cylinderDistance(Point3 X, Point3 C, float r, float e) {
+Vector2 d = abs(Vector2(length(X.xz - C.xz), X.y - C.y)) - Vector2(r, e);
+return min(maxComponent(d), 0) + length(max(d, Vector2(0, 0)));
+}
+Computing Normals
+The gradient of any function on 3-space can be approximated by numerical differentiation:
+$$\nonumber\nabla h(X) = \left(\frac{\partial h(X)}{\partial x}, \frac{\partial h(X)}{\partial y},\frac{\partial h(X)}{\partial z}\right)$$
+$$\nonumber \approx \tfrac{1}{2\epsilon}\left(
+h(X + \hat{x}\epsilon) - h(X - \hat{x}\epsilon),
+h(X + \hat{y}\epsilon) - h(X - \hat{y}\epsilon),
+h(X + \hat{z}\epsilon) - h(X - \hat{z}\epsilon)\right)$$
+$$\approx\tfrac{1}{\epsilon}\left[\left(h(X + \hat{x}\epsilon),h(X + \hat{y}\epsilon),h(X + \hat{z}\epsilon) \right) - h(X) \cdot (1, 1, 1)\right]$$
+If the distance estimator is not too conservative near the surface,
+or at least is conservative by the same factor in all directions, we
+can use this to find the surface normal.
+For a point $X$ that is near but not on the surface, normalizing the
+gradient by dividing through by its length gives the surface
+normal vector to the nearby surface.
+Placing $X$ exactly
+on the surface can be problematic for this computation,
+however. For example, for a sufficiently curvy surface, a particular
+$\epsilon$ value chosen may place all samples of $h$ at another
+location on the surface, for which $h = 0\si{m}$.
+Reasonable four- and six-sample approximations of the normal are thus:
+Vector3 fastNormal(Point3 X) {
+const float e = 1e-4;
+float d = sceneDistance(X);
+return normalize(Vector3(
+sceneDistance(X + Vector3(e, 0, 0)),
+sceneDistance(X + Vector3(0, e, 0)),
+sceneDistance(X + Vector3(0, 0, e))) - Vector3(d, d, d));
+}
+Vector3 normal(Point3 X) {
+const float e = 1e-4;
+const Vector3 u = Vector3(e, 0, 0);
+const Vector3 v = Vector3(0, e, 0);
+const Vector3 w = Vector3(e, 0, e);
+return normalize(Vector3(
+sceneDistance(X + u) - sceneDistance(X - u),
+sceneDistance(X + v) - sceneDistance(X - v),
+sceneDistance(X + w) - sceneDistance(X - w)));
+}
+A Simple GLSL Ray Caster
+This section describes the ray casting portion of a simple GLSL ray
+marching tracer that runs on the GPU using the G3D Innovation Engine 10. See
+http://codeheartjs.com/examples/raytrace/
+for a comparable CPU Javascript version that runs in a web browser, and
+http://codeheartjs.com/examples/fastraytrace/ for an optimized
+Javascript version. See my
+gpu-tracing-tutorial.zip
+for a working example of an analytic ray tracer in C++ and
+GLSL against which to compare this ray marcher's structure. You can inject
+the ray marcher directly into that program structure as well.
+C++ Shader Launch
+The GLSL ray marcher below uses rasterization to submit two giant
+triangles that cover the entire viewport, under a 2D projection
+matrix. It then launches the ray tracing shader kernel at each pixel,
+passing it the 3D camera's orientation and projection matrix. The C++
+syntax for setting up this call in OpenGL (from App::onGraphics3D) is:
+rd->push2D();
+Args args;
+args.setUniform("cameraToWorldMatrix", activeCamera()->frame());
+args.setUniform("tanHalfFieldOfViewY",
+float(tan(activeCamera()->projection().fieldOfViewAngle() / 2.0f)));
+// Projection matrix, for writing to the depth buffer.
+Matrix4 projectionMatrix;
+activeCamera()->getProjectUnitMatrix(rd->viewport(), projectionMatrix);
+args.setUniform("projectionMatrix22", projectionMatrix[2][2]);
+args.setUniform("projectionMatrix23", projectionMatrix[2][3]);
+// A cube map Texture
+m_skybox->setShaderArgs(args, "skybox.", Sampler::cubeMap());
+// Set the domain of the shader to the viewport rectangle
+args.setRect(rd->viewport());
+LAUNCH_SHADER("trace.pix", args);
+rd->pop2D();
+GLSL Ray Setup
+The GLSL code within the referenced trace.pix shader sets
+up the primary ray and then marches it through the scene. I've also
+rigged it to write a depth buffer value that is compatible with
+rasterization so that rasterized and ray traced primitives may be
+mixed in the frame buffer. Furthermore, this enables the use of
+standard post-processing tricks such as single-image depth of field,
+or even depth-buffer based ambient occlusion as a post process.
+#version 410 // -*- c++ -*-
+#include <g3dmath.glsl>
+#include <Texture/Texture.glsl>
+// Input arguments from the C++ program
+uniform mat4x3 cameraToWorldMatrix;
+uniform float tanHalfFieldOfViewY;
+uniform float projectionMatrix22, projectionMatrix23;
+uniform TextureCube skybox;
+// Output to the App::m_framebuffer (assume post-processed tonemap and gamma encoding)
+out Radiance3 pixelRadiance;
+void main() {
+// Generate an eye ray in camera space, and then transform to world space
+// Primary ray origin
+Point3 P = cameraToWorldMatrix[3];
+// Primary ray direction
+Vector3 w = Matrix3(cameraToWorldMatrix) *
+normalize(Vector3((gl_FragCoord.xy - g3d_FragCoordExtent / 2.0) *
+Vector2(1, -1), g3d_FragCoordExtent.y /
+( -2.0 * tanHalfFieldOfViewY)));
+float distance = inf;
+pixelRadiance = traceRay(P, w, distance);
+// Camera space z value
+float csZ = maxDist / w.z;
+// Pack into standard OpenGL depth buffer format to make the result
+// compatible with rasterization and post-processing.
+gl_FragDepth = (maxDist == inf) ? 1.0 :
+((projectionMatrix22 * csZ + projectionMatrix23) / -csZ);
+}
+GLSL Intersection
+© 2013 Morgan McGuire
+The result of the simple
+GLSL ray marcher.
+The actual tracing code is below. This example defines the scene to
+be a single, yellow sphere at the origin with a radius of 1m. To make
+it easier to orient the viewer when investigating the scene with the
+default camera, I also placed a cube map skybox in the background.
+For a full ray tracer, we'd shade the intersection ray and possibly
+spawn additional rays for reflection, refraction, and shadows.
+float sceneDistance(Point3 X) {
+const Point3 C = Point3(0,0,0);
+const float r = 1.0;
+return length(X - C) - r;
+}
+// Trace the ray P + w * t.
+// Returns true if something was hit.
+// Sets L_o if the ray reached infinity or if it hit something before distance
+// If something was hit, updates distance
+bool traceRay(Point3 P, Vector3 w, out L_o, inout float distance) {
+const float maxDistance = 1e10;
+const int maxIterations = 50;
+const float closeEnough = 1e-2;
+float t = 0;
+for (int i = 0; i < maxIterations; ++i) {
+float dt = sceneDistance(P + w * t);
+t += dt;
+if (dt < closeEnough) {
+distance = t;
+L_o = Radiance3(1, 1, 0);
+return true;
+} else if (t > distance) {
+// Too far; there is some known closer intersection
+return false;
+}
+}
+// Reached infinity
+L_o = texture(skybox.sampler, w).rgb * skybox.readMultiplyFirst.rgb;
+return false;
+}
+This setup of using minimal OpenGL to launch a full-screen ray
+marcher is common in the modern demoscene. Many examples of
+artistically impressive demos and intros based around this technique
+can be found at pouet.net.
+Smaller single-shader examples with source code can be found at
+shadertoy.com and glslsandbox.com.
+Operations on Distance Estimators
+An advantage of modeling surfaces with distance estimators is that
+it is much easier to perform operations on whole shapes in that
+model than it is when they have explicit triangle representations or
+direct implicit definitions.
+Operators on distance estimators are higher-order functions: they
+take functions as input and return functions as output. In a
+language such as Javascript or Scheme that has full support for
+closures, this can be implemented directly with functions. (As was done
+in the http://codeheartjs.com/examples/raytrace example from the previous section, which runs in a web browser.)
+In a language such as Java or C++, classes
+and inheritance can mimic the design pattern. A simple
+substitution-compiled language like GLSL with provides none of these
+language features for abstracting computation. They can be emulated
+using macros and overloading or one can directly expand that code by
+hand, for example,
+float unionDistance(float d1, float d2) { return min(d1, d2); }
+float twoSphere(Point3 X) {
+return unionDistance(sphereDistance(X, Point3(-1, 0, 0), 1),
+sphereDistance(X, Point3( 1, 0, 0), 1));
+}
+Some Useful Operators
+Union
+Union selects the closer of two surfaces. This is equivalent to a set sum on the points (but not a distance sum of the estimators).
+Math
+GLSL
+$$(h \cup f)(X) = \min(h(X), f(X))$$
+#define surfaceUnion(h, f, X) min(h(X), f(X))
+Intersection
+Intersection selects the farther of two surfaces.
+Math
+GLSL
+$$(h \cap f)(X) = \max(h(X), f(X))$$
+#define intersectSurface(h, f, X) max(h(X), f(X))
+Subtraction
+The set difference (subtraction) of two surfaces turns one inside out and then intersects its outside it with the other's inside.
+Math
+GLSL
+$$(h - f)(X) = \max(h(X), -f(X))$$
+#define subtractSurface(h, f, X) max(h(X), -f(X))
+Repetition
+Any distance function can be tiled across space with period $\vec{v}$ across the dimensions.
+Math
+GLSL
+$$\mathrm{repeat}(h, \vec{p})(X) = h\left(\left(X~\mathrm{mod}~\vec{v}\right) - \vec{v}/2\right)$$
+#define repeat(h, period, X) h(mod(X, period))
+Note that floating-point modulo in GLSL is notated with the
+mod function, not the % operator as in
+C++.
+Transformation
+Transforming a shape is equivalent (from the reference frame of the
+distance estimator) to inversely transforming the points tested
+against it. In doing so, we need to be careful about how we have
+scaled space, however. To transform a shape by an invertible
+$4\times4$ rotation-translation-dilation (dilation means a uniform scale along all axes)
+matrix $M$,
+Math
+GLSL
+$$(M h)(X) = h(M^{-1} X) \cdot \det M$$,
+where the expression on the right is the
+determinant $M$.
+#define transformSurface(h, M, X)\
+h((inverse(M) * vec4(X, 1.0)).xyz) * determinant(M)
+In practice, this is inefficient unless M is known at compile time
+or the inverse and determinant are explicitly passed as uniform arguments.
+Because rotation, translation, and non-zero dilation all have
+trivial inverses and determinants it is not usually necessary to
+apply the full inverse and determinant operations. For example
+scaling a primitive by scalar factor $s > 0$ is simply:
+Math
+GLSL
+$$\mathrm{scale}(h\hasType{\reals^3\m\to\reals\si{m}}, s\hasType{\reals})(X) = h(X/s) \cdot s$$.
+#define scaleSurface(h, s, X) (h(X / (s)) * (s))
+Note that if a transformation of a simple primitive is desired, it may
+be more efficient to let $C = (0, 0,0)$ in the original primitive's
+definition so that it is centered at the origin and then perform a
+single transformation to the desired reference frame.
+Blending
+With some care to preserve the conservative property of distance
+estimation, shapes can be blended for a kind of smooth
+union. Hoffman and Hopcroft
+[1985]
+derive the general
+case of this, which is commonly referred to as a union using a
+“smooth min” (smin) function in place of a typical min function.
+There are many smin functions, with a variety of performance and quality tradeoffs. Iñigo Quilez
+[2008]
+and I recommend this fast polynomial version:
+float smin(float a, float b, float blendRadius) {
+float c = saturate(0.5 + (b - a) * (0.5 / blendRadius));
+return lerp(b, a, c) - blendRadius * c * (1.0 - c);
+}
+Increasing Performance
+Performance is always a concern in rendering. The performance of ray
+marching can be increased at the cost of image quality by increasing
+the minimum step size and accepted distance from the surface, and by
+decreasing the maximum iterations permitted and resolution. However,
+it can also be increased by algorithmic improvements that do not
+affect image quality. Instead, the cost is some of the elegant
+simplicity of the naive method. However, compared to analytic ray
+casting and rasterization, optimized ray marching remains remarkably
+straightforward and accessible to implement.
+Over-Relaxation
+Keinert et al.
+[2014]
+make an
+observation that allows decreasing the number of iterations before
+binary search by up to a factor of two. Hart's sphere tracing uses
+the distance estimator $h$ to create a series of
+“unbounding” spheres as the ray approaches a
+surface. The $h(X)=0\si{m}$ isosurface cannot lie within any of these
+spheres. Therefore, if the unbounding spheres at $X$ and $Y$
+overlap, the surface cannot intersect the line segment $XY$.
+This observation allows speculatively advancing the ray by $\Delta t
+= k \cdot h(X)$ for $1 \leq k \leq 2$ under the following process. Let the new point
+be $Y = X + \hat{\omega}\Delta t$. If $h(Y) \geq k \cdot h(X)$, then
+there was no intersection on $XY$ and the speculative advancement
+was conservative and can be accepted. Otherwise the ray can still be
+advanced from $X$ by $\Delta t = h(X)$. Keinert et al. call this
+over-relaxed sphere tracing (figure~\ref{fig:relaxation}. Naive
+sphere tracing advances the ray with only $k=1$, often discovering
+that the next point redundantly covers the interval just traversed.
+© 2014 Keinert et al.
+Top: sample points in white and ``unbounding spheres'' in purple from sphere
+tracing. Bottom: Over-relaxed sphere tracing can speculatively take
+larger steps (red) until it fails to find consecutive bounds
+(yellow) and falls back to sphere tracing.
+Over-relaxation is obviously most useful when the distance estimator
+in space is overly conservative for distance to the surface
+along the ray. There is a tradeoff between setting $k$
+close to 2 to gain the largest possible step and setting $k$ close
+to 1 to reduce the number of times the speculative advancement
+fails. Because success doubles the step distance and failure doubles
+the number of evaluations of distance estimator $h$ per iteration,
+over-relaxed sphere tracing can double or halve the performance
+compared to naive sphere tracing. Keinert et al. observe that
+$k=1.2$ gives a net 25% reduction in tracing time for the complex
+urban environment shown in the figure below, which appeared in the
+Mercury demoscene production The Timeless.
+© 2014 Mercury
+The Timeless demoscene production rendered with
+sphere tracing optimizations
+to implicit surface ray marching
+Bounding Spheres
+When working with implicit surfaces, operations on distance
+estimators make it possible to build complex scenes by layering
+operations on simple primitives. Doing so offers great expressive
+power and programming elegance at a potentially high performance
+cost. This is because rays that pass nowhere near a surface must
+still evaluate the distance function for it.
+The parse tree of a complicated set of operations on distance estimators inherently
+forms a scene graph tree. Performance can be increased by avoiding descending
+branches of that tree that do not affect the result. This kind of
+pruning is a common computer science operation and yields
+order-of-growth increases, unlike the kind of small constant factor
+that can be obtained by micro-optimizing within a single distance
+estimator.
+The easiest way to prune the tree is to abort computation within a
+distance estimator when an early, inexpensive test determines that
+the ray is very far from the surface. A simple bounding sphere
+accomplishes this and correctly returns a still-conservative
+value. For example, let expensiveDE be a
+computationally-expensive distance estimator for an surface that is
+known to be entirely contained within the sphere with center
+C and radius r. A fast bounding estimator
+first tests how close the point X is to the bounding sphere. This
+must be a distance less than that to the true surface. It then only
+invokes the full, expensive estimator if X lies within the
+bounding sphere.
+float boundingDE(Point3 X, Point3 C, float r) {
+float t = length(X - C) - r;
+if (t > 0) { return t; } else { return expensiveDE(X); }
+}
+Square root is one of the most expensive operations to perform on a
+GPU. We can slightly increase the performance of the slow case of boundingDE
+without affecting the fast case by delaying the square root until
+the inside of the slow branch:
+float boundingDE(Point3 X, Point3 C, float rSquared) {
+Point3 v = X - C;
+float tSquared = dot(v, v) - rSquared;
+if (tSquared > 0) {
+return sqrt(tSquared);
+} else {
+return expensiveDE(X);
+}
+}
+It is also a good idea to branch to the full, expensive distance
+estimator if X is even close to the sphere. That is because the
+silhouettes of objects are the most expensive to trace using a
+numerical root finder. A ray passing by in a direction tangent to
+the surface appears to be very close to the surface to the
+omni-directional distance estimator, so the ray marching iterator
+takes very small steps, even though the ray is not actually
+approaching the surface quickly.
+Introducing a false silhouette
+around each object through the bounding sphere can exacerbate this
+problem. We can separate the bounding radius from the test value to
+avoid that:
+float boundingDE(Point3 X, Point3 C, float rSquared) {
+Point3 v = X - C;
+float tSquared = dot(v, v) - rSquared;
+if (tSquared > rSquared * 0.2) {
+return sqrt(tSquared);
+} else {
+return expensiveDE(X);
+}
+}
+Reintroducing Analytic Roots
+Geometric planes are are large surfaces that can cover a large
+amount of the screen. A ray caster following any ray near the plane
+will be constrained to march in steps no larger than the elevation
+of the ray above the plane, which may be quite small compared to the
+true distance to the next intersection with the scene.
+We can obtain a good speedup for scenes that containh ground planes by
+performing the (efficient) analytic intersection with the plane and
+then using the ray marcher only for other surfaces. Spheres are a
+border case. The distance estimator is extremely fast and yields
+good estimates along the ray on the interior and far from the
+sphere. Yet, for rays that pass near the silhouette, an analytic
+solution is far faster than a ray marched one.
+The figures below shows on top a rendering of a
+scene composed of implicit surfaces. On the bottom is a
+visualization of the number of invocations of the scene distance
+estimator at each pixel, where brighter pixels are more
+expensive. This scene uses the analytic ground plane and bounding
+sphere optimizations.
+© 2015 Morgan McGuire
+A reference scene of many different shapes defined by implicit surfaces.
+The distance estimator and ray marcher was used for primary rays,
+(soft) shadow rays, and ambient occlusion.
+© 2015 Morgan McGuire
+Visualization of the number of scene distance estimator invocations
+at each pixel; black = 0, white = 20.
+Note that in the above figures, silhouettes and surfaces seen at glancing
+angles are far more expensive than the interiors of objects, which
+are almost as efficient to trace as the ground plane itself. The
+screw-like shape and the heightfield are expensive because they have
+very conservative distance estimators. The silhouettes of shadows
+are also expensive--those are places where the ray for the
+visibility query to the light passes close to a surface and thus
+slows down as it approaches.
+Other Optimization Strategies
+Soft shadows, ambient occlusion, and in some cases antialiased
+pixels and depth of field can all be approximated efficiently using
+distance estimators because they track how close a point is to all
+surfaces in the scene. Under analytic ray tracing, these instead
+must be estimated using tens or hundreds of rays per pixel.
+Once objects are surrounded in bounding spheres, traditional spatial
+subdivision data structures can be applied to them. For example, it
+is simple to compute a bounding volume hierarchy on the bounding
+spheres.
+However, using a data structure on a GPU in graphics mode
+is a bit tricky because GLSL executes function invocation by
+inlining. Thus there is no true recursion for traversing a tree in a
+natural way. This also makes it hard to implement reflection and
+refraction at the same surface under Whitted ray tracing, since that
+creates a tree of rays. (Path tracing, photon tracing, and one of
+reflection or refraction without the other can all be implemented
+using loops.)
+There are two ways to build an explicit stack to work around the lack of recursion. One is to build
+the stack global memory using OpenGL 4 image buffer operations. This
+has awkward syntax and can be slow. Another is to build the stack in
+local memory. This can be accomplished for recursive rays on recent
+hardware using code like the listing below. A similar explicit stack
+can be used to traverse data structures.
+struct RayStackFrame {
+Point3 origin;
+Vector3 direction;
+Color3 weight;
+};
+RayStackFrame stack[MAX_STACK];
+int stackTop = 0;
+...
+stack[0] = RayStackFrame(X, w, Color3(1, 1, 1));
+while (stackTop >= 0) {
+Color3 weight = stack[stackTop].weight;
+...
+if (reflection) {
+// cast a recursive ray by pushing onto the stack
+// and attenuating by the magnitude of the BSDF impulse
+...
+++stackTop;
+}
+L_o += weight * L_scattered;
+}
+Beware that local memory is significantly slower than register
+memory (where other local variables are stored), although
+significantly faster than global memory. Local memory is frequently
+implemented as a portion of the L1 cache. Also beware that on older
+hardware without local memory support, relative indexing into an
+array can compile to a chain of conditionals because there are no
+relative memory operations on arrays.
+Some register-only tree
+traversal strategies developed the introduction of local and global
+memory write operations are appropriate for older hardware and may
+find renewed value for performance even on newer
+targets
+[Horn2007Stack]
+[Popov2007Stackless]
+.
+Analytic and numerical roots can be mixed within a scene, as we did
+for the ground plane. Our simple ray tracer produces depth buffer
+values compatible with OpenGL's triangle rasterization, so implicit
+surfaces may be mixed freely with all primary ray strategies.
+Some Online Examples in GLSL
+Educational
+I wrote these three heavily-documented examples to demonstrate how
+to set up an analytic and a ray marching renderer. These are on the
+Shadertoy website, which uses WebGL, a limited version of the full
+OpenGL supported by G3D. So, the code is a little less efficient and
+clear than the best case, but has the advantage of running in most
+current web browsers.
+© 2013 Morgan McGuire
+Analytic Tracer
+© 2013 Morgan McGuire
+Mandelbulb Explained
+© 2013 Morgan McGuire
+Legos. (Lego is a trademark of The Lego Group)
+Aspirational
+These three examples are by Iñigo Quilez, a graphics
+professional who's worked at Pixar and Oculus Story Studio. He's
+long contributed to the demoscene and online graphics
+community. These are three of the most impressive demos on the
+Shadertoy website and good (if a bit hard for the novice to parse)
+examples of how to use the implicit surface techniques described in
+this document.
+© 2014 Iñigo Quilez
+Dolphin.
+© 2013 Iñigo Quilez
+Mike.
+© 2013 Iñigo Quilez
+Elevated.
+Further Reading
+Implicit surfaces were first rendered using numerical root finding
+by Blinn
+[1982]
+. They've since
+been advanced significantly through research by many others. Gomes
+et al. give a good survey in their
+book
+[2009]
+.
+The academic graphics community has largely worked in parallel with
+the demoscene community, which has been ray tracing these in real
+time with similar techniques since at least the early 2000's, but
+which has only recently begun to document and share their methods
+widely. Quilez has been a leading voice in spreading information
+about demoscene techniques through his personal website, the Shadertoy website, and
+recently some public presentations
+[Quilez20084k]
+and online
+videos
+[Quilez2014Video]
+. Swoboda's GDC 2012
+presentation
+[2012]
+overviews the material from
+this document and then describes some of the performance issues on
+modern GPUs.
+I've simplified some of the details of sphere tracing and distance
+estimators in this explanation. See Hart's SIGGRAPH course notes
+[1993]
+or Liktor's survey
+paper
+[2008]
+for more details on the mathematical
+constraints and ways of choosing optimal step sizes based on
+derivatives. See Keinert et al.'s
+[2014]
+paper for the current state of
+the art.
+One of the most interesting applications of numerical methods for
+ray intersection is rendering fractals, which by definition have
+difficult surfaces to intersect (since they have unbounded
+area!)
+[Hart1989Fractal]
+.
+An alternative approach for rendering surfaces that do not admit
+analytic intersection solutions is to convert them to an
+approximation that does, for example, a triangle mesh. A popular
+method for doing so is Lorensen's and Cline's marching cubes
+algorithm
+[1987]
+. Conversely, it
+is often desirable to convert an existing triangle mesh into a
+signed distance function for integration with a ray marcher (e.g.,
+to achieve warping and smooth blending). Akleman and
+Chen
+[1999]
+give one implementation
+of such an operation. Swoboda
+[2012]
+discusses
+both triangle-to-implicit conversion and reverse in the context of
+modern GPUs.
+The particular form of implicit surface defined by distance from a
+point set is very popular for modeling fluids. Fedkiw worked
+extensively with these and the book that he coauthored is a good
+reference
+[Osher2003LevelSet]
+. There's an entire subfield of
+rendering called point-based graphics that directly ray traces such
+representations, sometimes using implicit surface methods.
+References
+[Akleman1999Distance]
+Ergun Akleman
+and
+Jianer Chen
+in 1999 Shape Modeling International,
+p. 72-79,
+March1,
+1999.
+Official URL: http://doi.ieeecomputersociety.org/10.1109/SMA.1999.749326
+10.1109/SMA.1999.749326
+[Blinn1982Blobs]
+James F. Blinn
+ACM Transactions on Graphics 1:3,
+p. 235-256,
+ACM,
+New York, NY, USA,
+July1982.
+Official URL: http://doi.acm.org/10.1145/357306.357310
+10.1145/357306.357310
+[Gomes2009Implicit]
+Abel Gomes, Irina Voiculescu, Joaquim Jorge, Brian Wyvill,
+and
+Callum Galbraith
+Springer Publishing Company, Incorporated,
+2009.
+[Hart1989Fractal]
+J. C. Hart, D. J. Sandin,
+and
+L. H. Kauffman
+in Proceedings of the 16th Annual Conference on Computer Graphics and Interactive Techniques,
+p. 289-296,
+ACM,
+New York, NY, USA,
+1989.
+Official URL: http://doi.acm.org/10.1145/74333.74363
+Free URL: http://graphics.cs.illinois.edu/sites/default/files/rtqjs.pdf
+10.1145/74333.74363
+[Hart1993Course]
+John C. Hart
+p. 1-16,
+SIGGRAPH'93 Course Notes: Design, Visualization and Animation of Implicit Surfaces,
+1993.
+Free URL: http://graphics.cs.illinois.edu/sites/default/files/rtis-tr.pdf
+[Hart1996Sphere]
+John C. Hart
+The Visual Computer 12:10,
+p. 527-545,
+Springer,
+1996.
+Free URL: http://bit.ly/1KJcnsO
+[Hoffman1985Blend]
+C. Hoffman
+and
+J. Hopcroft
+The Visual Computer,
+p. 92-100,
+1985.
+Free URL: http://www.cs.purdue.edu/homes/cmh/distribution/papers/Geometry/geo1.pdf
+[Horn2007Stack]
+Daniel Reiter Horn, Jeremy Sugerman, Mike Houston,
+and
+Pat Hanrahan
+in Proceedings of the 2007 Symposium on Interactive 3D Graphics and Games,
+p. 167-174,
+ACM,
+New York, NY, USA,
+2007.
+Official URL: http://doi.acm.org/10.1145/1230100.1230129
+10.1145/1230100.1230129
+[Keinert2014Sphere]
+Benjamin Keinert, Henry Schäafer, Johann Korndörfer, Urs Ganse,
+and
+Marc Stamminger
+in Proceedings of Smart Tools & Apps for Graphics,
+Andrea Giachetti
+(ed.),
+p. 1-8,
+EuroGraphics,
+2014.
+Official URL: http://diglib.eg.org/EG/DL/LocalChapterEvents/ItalChap/STAG2014/001-008.pdf
+Free URL: http://lgdv.cs.fau.de/get/2234
+[Liktor2008Implicit]
+Gábor Liktor
+Computer Graphics and Geometry Journal 10:3,
+2008.
+Free URL: http://www.cescg.org/CESCG-2008/papers/TUBudapest-Liktor-Gabor.pdf
+[Lorensen1987MarchingCubes]
+William E. Lorensen
+and
+Harvey E. Cline
+in Proceedings of the 14th Annual Conference on Computer Graphics and Interactive Techniques,
+p. 163-169,
+ACM,
+New York, NY, USA,
+1987.
+Official URL: http://doi.acm.org/10.1145/37401.37422
+Free URL: https://www.cs.virginia.edu/johntran/GLunch/marchingcubes.pdf
+10.1145/37401.37422
+[Osher2003LevelSet]
+Stanley Osher
+and
+Ronald P. Fedkiw
+Springer,
+New York, N.Y.,
+2003.
+Official URL: http://opac.inria.fr/record=b1099358
+[Popov2007Stackless]
+Stefan Popov, Johannes Gunther, Hans-Peter Seidel,
+and
+Philipp Slusallek
+Computer Graphics Forum 26:3,
+p. 415-424,
+2007.
+Official URL: http://dblp.uni-trier.de/db/journals/cgf/cgf26.html#PopovGSS07
+[Quilez20084k]
+Iñigo Quilez
+Talk at NVScene,
+August22,
+2008.
+Free URL: http://www.iquilezles.org/www/material/nvscene2008/rwwtt.pdf
+[Quilez2008Distance]
+Iñigo Quilez
+2008.
+Official URL: http://www.iquilezles.org/www/articles/distfunctions/distfunctions.htm
+[Quilez2014Video]
+Iñigo Quilez
+YouTube Video,
+July14,
+2014.
+Free URL: https://www.youtube.com/watch?v=0ifChJ0nJfM
+[Swoboda2012Procedural]
+Matt Swoboda
+Talk at the Game Developers Conference,
+2012.
+Free URL: http://directtovideo.wordpress.com/2012/03/15/get-my-slides-from-gdc2012/

@@ -1,0 +1,76 @@
+# Embedded Deformation (Stage I)
+Also called: ARAP Deformation, Deformation Graph
+
+## Overview
+Embedded Deformation (Stage I) applies As-Rigid-As-Possible (ARAP) geometric deformation to 3D Gaussian Splatting (3DGS) representations using a deformation graph of control nodes [S1]. It differs from direct Gaussian displacement by estimating per-Gaussian affine transformations via endpoint sampling to mitigate visual artifacts caused by the mismatch between deformed geometry and the radiance field [S1].
+
+## How it works
+**Inputs:**
+*   Set of 3D Gaussians, each defined by center $p_i$, covariance $\Sigma_i$, opacity $\alpha_i$, and spherical harmonics coefficients $H_i$.
+*   User-defined constraints $q_l$ for specific control points.
+
+**Outputs:**
+*   Deformed Gaussian centers $\tilde{p}_i$.
+*   Deformed covariance matrices $\tilde{\Sigma}_i$ (via rotation $r$ and scaling $s$).
+*   Rotated spherical harmonics.
+
+**Data Structures:**
+*   **Deformation Graph:** A graph where vertices are control points $g_j$ and edges connect neighbors.
+*   **Control Point Affine Transform:** Each node $j$ stores a $3 \times 3$ matrix $A_j$ and a $3 \times 1$ translation vector $t_j$.
+*   **Gaussian Endpoints:** For each Gaussian, 6 endpoints $Q = [q_1, \dots, q_6] \in \mathbb{R}^{3 \times 6}$ located at $\pm 2\sigma$ along the three principal axes.
+
+**Steps:**
+
+1.  **Construct Deformation Graph:**
+    *   Select control points from the set of Gaussian centers using Furthest Point Sampling (FPS) [S1].
+    *   Construct edge connections between control points using the K-Nearest Neighbors (KNN) algorithm [S1].
+
+2.  **Define Energies:**
+    Minimize the total energy $E_{geo}$ to find optimal $A_j$ and $t_j$:
+    $$ E_{geo} = \sum_j \left( w_{rot} E_{rot}(A_j) + w_{reg} E_{reg}(A_j) \right) + w_{con} E_{con} $$
+    where:
+    *   $E_{rot}(A)$ measures deviation from rigid rotation. Let $c_1, c_2, c_3 \in \mathbb{R}^3$ be the column vectors of $A$:
+        $$ E_{rot}(A) = (c_1 \cdot c_2)^2 + (c_1 \cdot c_3)^2 + (c_2 \cdot c_3)^2 + (c_1 \cdot c_1 - 1)^2 + (c_2 \cdot c_2 - 1)^2 + (c_3 \cdot c_3 - 1)^2 $$
+    *   $E_{reg}(A)$ penalizes sharp translational changes between adjacent control nodes $k$:
+        $$ E_{reg}(A) = \sum_k \| A(g_k - g) + g + t - (g_k + t_k) \|^2 $$
+        Here, $g$ and $t$ are the translation and matrix of the current node, and $g_k, t_k$ are those of neighbor $k$.
+    *   $E_{con}$ enforces user constraints $q_l$ for deformed control point positions $\tilde{g}_l$:
+        $$ E_{con} = \sum_l \| \tilde{g}_l - q_l \|^2 $$
+
+3.  **Optimize Transformations:**
+    Solve for $A_j$ and $t_j$ that minimize $E_{geo}$ [S1].
+
+4.  **Displace Embedded Geometries:**
+    Compute the deformed position $\tilde{v}_i$ for any embedded geometry point $v_i$ (e.g., Gaussian center or endpoint) using weights $w_j(v_i)$ inherited from control node $j$:
+    $$ \tilde{v}_i = \sum_j w_j(v_i) \left( A_j (v_i - g_j) + g_j + t_j \right) $$
+    where $g_j$ is the original position of control node $j$ [S1].
+
+5.  **Reconstruct Gaussians:**
+    *   For each Gaussian, select 6 endpoints along the three axes at twice the standard deviation from the center [S1].
+    *   Displace these endpoints using the Embedded Deformation formula above.
+    *   Let $P \in \mathbb{R}^{3 \times 6}$ be the matrix of original endpoints and $\tilde{P} \in \mathbb{R}^{3 \times 6}$ be the matrix of deformed endpoints.
+    *   Estimate the local deformation matrix $M$:
+        $$ M = \tilde{P} Q^\top (Q Q^\top)^{-1} $$
+        where $Q$ is the matrix of original endpoint positions [S1].
+    *   Perform polar decomposition on $M$ to obtain rotation $r$ and scaling $s$ [S1].
+    *   Update the Gaussian's covariance matrix using $r$ and $s$.
+    *   Rotate the spherical harmonics coefficients corresponding to the new rotation $r$ [S1].
+
+**Parameters:**
+*   $w_{rot} = 1$
+*   $w_{reg} = 10$
+*   $w_{con} = 100$ [S1]
+
+**Pitfalls:**
+*   Direct geometric deformation causes visual artifacts under large deformations due to the mismatch between deformed Gaussians and the deformed radiance field [S1]. This method addresses the geometry but requires Stage II to align with the radiance field [S1].
+
+## Operating characteristics
+*   **Complexity:** Depends on the number of control points, their neighbors (KNN), and the number of Gaussians. Optimization of $E_{geo}$ is typically solved via least squares or iterative solvers.
+*   **Strengths:** Provides physically plausible, rigid-like deformation for point clouds and meshes; avoids the need for explicit mesh topology in Gaussian Splatting.
+*   **Limitations:** Does not fully correct radiance field misalignment artifacts on its own; requires a second stage for full consistency [S1].
+
+## Background
+Embedded deformation was originally introduced for meshes and point clouds [S1]. In the context of 3DGS, it is adapted to handle the particle-like nature of Gaussians. This method is part of a two-stage pipeline for ARAP deformation of Gaussian Radiance Fields [S1].
+
+## Sources
+[S1] As-Rigid-As-Possible Deformation of Gaussian Radiance Fields, https://doi.org/10.1109/TVCG.2025.3555404, fetched 2026-10-30

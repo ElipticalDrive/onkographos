@@ -1,0 +1,123 @@
+# Bucket-based Spatial Indexing
+
+Also called: BB index lookup, Bucket-based Spatial Indexing for Primitive Rendering, Grid-based bucket mapping
+
+## Overview
+Bucket-based spatial indexing maps 3D primitives to a 3D grid of buckets using bounding box indices, enabling fast spatial queries during rendering by iterating only over relevant buckets [S1, unofficial].
+
+## How it works
+**Inputs:** A set of 3D primitives, each defined by a bounding box $[minV, maxV]$ where $minV, maxV \in \mathbb{R}^3$, and a spatial grid configuration [S1, unofficial].
+**Outputs:** A hash map `mapping` where keys are integer bucket indices and values are lists of `UpdatePattern` objects containing rendering data [S1, unofficial].
+
+**Data Structures:**
+*   `UpdatePatternPoint`: A structure containing `pos` (`Vec3`), `pointDisplayParams`, `normal`, and other display metadata [S1, unofficial].
+*   `UpdatePattern`: A container of `UpdatePatternPoint` objects [S1, unofficial].
+*   `mapping`: A hash map (`std::unordered_map<int, UpdatePattern>`) keyed by integer bucket indices [S1, unofficial].
+
+**Algorithm Steps:**
+1. Compute bounding box indices for the primitive's spatial extent using `calculateIndicesFromBB(params, minV, maxV)` [S1, unofficial].
+2. Iterate over each `bucketIndex` [S1, unofficial].
+3. Look up the bucket in `mapping` hash map. If not found, skip [S1, unofficial].
+4. Iterate over each `UpdatePatternPoint` in the bucket [S1, unofficial].
+5. Apply geometric clipping/thickness checks against the primitive's bounds [S1, unofficial].
+6. If inside bounds, push rendering data to `render` list [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def bucket_based_spatial_index(primitives, grid_params, mapping):
+    """
+    Maps primitives to buckets and retrieves relevant points for rendering.
+    primitives: List of objects with 'minV' (Vec3), 'maxV' (Vec3), and 'thickness' (float)
+    grid_params: Configuration for bucket size and origin
+    mapping: Hash map keyed by integer bucket indices, values are lists of UpdatePatternPoint
+    """
+    render_list = []
+
+    # Step 1: Compute bounding box indices for each primitive
+    for primitive in primitives:
+        minV = primitive.minV
+        maxV = primitive.maxV
+        bucket_indices = calculate_indices_from_bb(grid_params, minV, maxV)
+
+        # Step 2: Iterate over each bucketIndex
+        for bucket_idx in bucket_indices:
+            # Step 3: Look up the bucket in mapping hash map. If not found, skip.
+            if bucket_idx not in mapping:
+                continue
+
+            bucket_points = mapping[bucket_idx]
+
+            # Step 4: Iterate over each UpdatePatternPoint in the bucket
+            for pt in bucket_points:
+                # Step 5: Apply geometric clipping/thickness checks against the primitive's bounds
+                if is_point_valid(pt, minV, maxV, primitive.thickness):
+                    # Step 6: If inside bounds, push rendering data to render list
+                    render_list.append(pt)
+
+    return render_list
+
+def calculate_indices_from_bb(params, minV, maxV):
+    """
+    Maps bounding box coordinates to discrete integer bucket indices.
+    params: Grid parameters (cell_size, origin)
+    minV, maxV: Bounding box corners
+    Returns: List of integer bucket indices covering the primitive's extent
+    """
+    # Source does not specify the exact discretization formula; standard grid mapping applies [G].
+    cell_size = params.cell_size
+    origin = params.origin
+    min_idx = [int((minV[i] - origin[i]) / cell_size) for i in range(3)]
+    max_idx = [int((maxV[i] - origin[i]) / cell_size) for i in range(3)]
+    indices = []
+    for i in range(min_idx[0], max_idx[0] + 1):
+        for j in range(min_idx[1], max_idx[1] + 1):
+            for k in range(min_idx[2], max_idx[2] + 1):
+                indices.append((i, j, k))
+    return indices
+
+def is_point_valid(pt, minV, maxV, thickness):
+    """
+    Checks if a point is within the primitive's bounds, considering thickness.
+    """
+    # Check outer bounds: minV < ptCoords < maxV
+    if not (minV.x < pt.pos.x < maxV.x and
+            minV.y < pt.pos.y < maxV.y and
+            minV.z < pt.pos.z < maxV.z):
+        return False
+
+    # Apply thickness clipping if applicable
+    if thickness > 0:
+        inner_min = [minV.x + thickness, minV.y + thickness, minV.z + thickness]
+        inner_max = [maxV.x - thickness, maxV.y - thickness, maxV.z - thickness]
+        # Skip if strictly inside inner bounds: minV + thickness < ptCoords < maxV - thickness
+        if (inner_min[0] < pt.pos.x < inner_max[0] and
+            inner_min[1] < pt.pos.y < inner_max[1] and
+            inner_min[2] < pt.pos.z < inner_max[2]):
+            return False
+
+    return True
+```
+
+**Parameters:**
+*   `thickness`: Float value defining the wall thickness for hollow cuboids. Typical value: 0.8 [S1, unofficial].
+*   `grid_params`: Defines the spatial resolution and origin of the bucket grid. Not given in the sources [G].
+
+**Edge Cases and Pitfalls:**
+*   **Missing Buckets:** Bucket lookup may fail if the primitive's bounding box falls outside pre-populated grid cells or if `calculateIndicesFromBB` produces indices not present in `mapping` [S1, unofficial]. This is handled by `if (it == mapping.end()) continue;` [S1, unofficial].
+*   **Precision:** Floating-point comparisons for bounds and thickness checks must handle edge cases where points lie exactly on boundaries [G].
+
+## Subtopics
+
+### Hollow Cuboid Rendering with Thickness Clipping
+Renders a cuboid as a hollow box by excluding points that lie strictly inside the inner bounds offset by `thickness` from each face [S1, unofficial]. The algorithm computes the bounding box $[minV, maxV]$ from geometry vertices [S1, unofficial]. If `thickness > 0`, it checks if a point is strictly inside the inner box: $minV + thickness < ptCoords < maxV - thickness$ [S1, unofficial]. If true, the point is skipped [S1, unofficial]. If the point is within outer bounds $minV < ptCoords < maxV$, it is added to the render list [S1, unofficial]. The `CuboidGeometry` structure contains corners `v1`, `v2` (`Vec3`), `thickness` (`float`), and `isWireframe` (`bool`) [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Originating from practical implementations in volumetric display and real-time rendering systems, this method is documented in the `Volumetric-display` repository [S1, unofficial].
+
+## Sources
+[S1] quertzuiop/Volumetric-display, https://github.com/quertzuiop/Volumetric-display, fetched 2026-10-26 (unofficial)

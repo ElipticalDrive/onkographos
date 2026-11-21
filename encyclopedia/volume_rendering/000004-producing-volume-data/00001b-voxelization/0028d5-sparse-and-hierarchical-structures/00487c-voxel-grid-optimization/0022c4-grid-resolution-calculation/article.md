@@ -1,0 +1,75 @@
+# Grid Resolution Calculation
+Also called: proportional grid, voxel count
+## Overview
+This method calculates the discrete resolution of a 3D voxel grid based on a target number of voxels along the Y-axis and the aspect ratio of the scene's bounding box [S1, unofficial]. It builds on [Voxel Grid Optimization](4131-voxel-grid-optimization.md) by ensuring the grid dimensions fit the specified physical volume while maintaining a consistent aspect ratio [S1, unofficial].
+## How it works
+**Inputs:**
+- `voxels_on_y`: Target number of voxels along the Y-axis (integer) [S1, unofficial].
+- `size`: Bounding box dimensions as a 3D vector $(size.x, size.y, size.z)$ [S1, unofficial].
+
+**Outputs:**
+- `Grid X`, `Grid Y`, `Grid Z`: The calculated number of voxels in each dimension [S1, unofficial].
+
+**Data Structures:**
+- `size`: A 3D vector of floating-point values representing width, height, and depth [S1, unofficial].
+- `Grid`: A 3D vector of unsigned integers representing the resolution in each dimension [S1, unofficial].
+
+**Steps:**
+1. Set the Y-axis resolution to the target value:
+   $$Grid.Y = \text{voxels\_on\_y}$$
+2. Calculate the X-axis resolution by scaling the Y-resolution by the aspect ratio of the bounding box width to height, rounding up to the nearest integer:
+   $$Grid.X = \lceil \text{voxels\_on\_y} / size.y \times size.x \rceil$$
+3. Calculate the Z-axis resolution by scaling the Y-resolution by the aspect ratio of the bounding box depth to height, rounding up to the nearest integer:
+   $$Grid.Z = \lceil \text{voxels\_on\_y} / size.y \times size.z \rceil$$
+
+**Parameters:**
+- `voxels_on_y`: Typical values depend on the desired visual fidelity and memory constraints. Not given in the sources [G].
+- `size`: Determined by the scene's bounding box. Not given in the sources [G].
+
+**Edge Cases and Pitfalls:**
+- Division by zero: If `size.y` is zero, the calculation is undefined. A guard should check for this [G].
+- Precision: Use floating-point arithmetic for the intermediate scaling before applying the ceiling function to avoid truncation errors [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def calculate_grid_resolution(voxels_on_y: int, size_x: float, size_y: float, size_z: float) -> tuple[int, int, int]:
+    """
+    Calculate grid resolution based on target Y voxels and bounding box size.
+    
+    Args:
+        voxels_on_y: Target number of voxels on the Y-axis.
+        size_x, size_y, size_z: Bounding box dimensions.
+        
+    Returns:
+        Grid resolution (x, y, z).
+    """
+    if size_y == 0:
+        raise ValueError("Bounding box height (size_y) cannot be zero.")
+        
+    grid_y = voxels_on_y
+    grid_x = math.ceil((voxels_on_y / size_y) * size_x)
+    grid_z = math.ceil((voxels_on_y / size_y) * size_z)
+    
+    return (grid_x, grid_y, grid_z)
+```
+## Subtopics
+
+### Adaptive Voxel Spacing
+This variant adjusts voxel grid resolution dynamically using a quality parameter to balance performance and detail [S2, unofficial]. The quality parameter ranges from 0.0f to 3.0f, adjustable by key presses (+/-) [S2, unofficial]. The X and Y voxel sizes are calculated as $(2.0f \times vw.aspx) / vw.xdim \times (1.0f + quality \times 4.0f)$, while the Z voxel size is $(2.0f \times vw.aspz) / 200.0f \times (1.0f + quality)$ [S2, unofficial]. This method allows for real-time adjustment of granularity based on user preference or performance constraints [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources [G].
+- **Memory Complexity:** Not given in the sources [G].
+- **Strengths:** Simple to implement; ensures the grid aspect ratio matches the scene bounding box [S1, unofficial].
+- **Limitations:** Not given in the sources [G].
+- **When to use:** When a fixed target resolution along one axis is desired, and the scene aspect ratio is known [S1, unofficial].
+- **When not to use:** Not given in the sources [G].
+## Background
+This method is used in voxelization pipelines where the grid dimensions must align with the scene's bounding box proportions [S1, unofficial].
+## Sources
+[S1] loryruta/voxelizer, https://github.com/loryruta/voxelizer, fetched 2026-10-27 (unofficial)
+[S2] jtomori/holographic_fractals, https://github.com/jtomori/holographic_fractals, fetched 2026-10-26 (unofficial)

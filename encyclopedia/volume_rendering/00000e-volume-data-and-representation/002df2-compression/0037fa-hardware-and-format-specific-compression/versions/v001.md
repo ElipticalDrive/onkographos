@@ -1,0 +1,26 @@
+# Hardware and Format Specific Compression
+
+Also called: Format-Specific Compression, Hardware-Optimized Compression
+
+## Overview
+This family encompasses compression techniques that exploit specific hardware capabilities or data format constraints rather than general statistical redundancy. It addresses the problem of memory bandwidth and storage inefficiency by mapping volumetric data into formats natively supported by GPU architectures or specialized hardware accelerators. Unlike general-purpose methods like [Arithmetic Encoding](2127-arithmetic-encoding.md) or [Wavelet and Transform-based Compression](6879-wavelet-and-transform-based-compression.md), these methods prioritize decoding speed and hardware compatibility, often at the cost of flexibility or compression ratio. They are distinct from [Sparse structures](5-sparse-structures.md) which rely on spatial sparsity, and from [Deferred Filtering Architecture for Compressed Volumes](857-deferred-filtering-architecture-for-compressed-volumes.md) which focuses on rendering pipeline integration.
+
+## Shared principles
+The children in this family share no common algorithmic mechanism beyond the general principles of [Compression](4-compression.md). They differ fundamentally in their target domain (frequency vs. spatial, spectral vs. color) and their reliance on specific hardware formats.
+
+## Subtopics
+
+### [16-bit Floating Point Format for Spectra](1163-16-bit-floating-point-format-for-spectra.md)
+This method defines a custom 16-bit floating point format to represent the frequency domain spectrum in volume rendering, reducing memory cost compared to 64-bit double precision while maintaining acceptable precision. It is specifically designed for frequency domain rendering pipelines (such as those using the Hartley transform) where the dynamic range of spectral coefficients necessitates floating point representation, distinguishing it from integer or fixed-point compression methods.
+
+### [Color Packing (RGBA)](5142-color-packing-rgba.md)
+Color Packing (RGBA) is a lossless compression method that maps 4-component floating-point color vectors into a compact 4-byte unsigned integer representation, reducing memory bandwidth and storage requirements for volume rendering data. It differs from [16-bit Floating Point Format for Spectra](1163-16-bit-floating-point-format-for-spectra.md) by using 8-bit integer precision per channel instead of 16-bit floating point, offering higher density at the cost of quantization error.
+
+### RGB Channel Packing (VTC)
+This variant packs three time steps of volumetric data into the Red, Green, and Blue channels of a 3D texture, then applies standard Video Texture Compression (VTC) algorithms designed for 3D-RGB data. This approach exploits temporal redundancy by treating time as a spatial dimension, leveraging hardware-accelerated VTC decoders. It is suitable for time-varying volumes where temporal correlation is high, but requires hardware support for VTC or efficient software emulation [S1].
+
+## Background
+The need for hardware-specific compression arises from the bottleneck between GPU memory and processing units. Early work by Fout et al. [FAM∗ 05] explored vector quantization for multivariate time-varying volumes [S1]. Nagayasu et al. [NIH08] introduced the RGB channel packing with VTC approach [S1]. Ko et al. [KLW∗ 08] combined Haar wavelets with delta encoding for predictive frames [S1]. Mensman et al. [MRH10] used block-based delta encoding with LZO compression [S1]. She et al. [SBN11] further developed delta encoding techniques [S1]. The 16-bit floating point format for spectra addresses the precision requirements of frequency-domain rendering, while RGBA packing addresses the bandwidth needs of color data in spatial-domain rendering.
+
+## Sources
+[S1] A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

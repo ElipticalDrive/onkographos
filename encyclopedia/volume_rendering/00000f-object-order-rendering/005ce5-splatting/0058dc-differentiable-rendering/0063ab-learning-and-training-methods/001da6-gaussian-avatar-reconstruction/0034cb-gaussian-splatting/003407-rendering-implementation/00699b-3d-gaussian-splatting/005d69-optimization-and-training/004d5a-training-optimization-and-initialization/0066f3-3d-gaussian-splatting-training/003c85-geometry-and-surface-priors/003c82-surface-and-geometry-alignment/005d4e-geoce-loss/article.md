@@ -1,0 +1,174 @@
+# GeoCE Loss
+
+Also called: Geometric Contrastive Loss
+
+## Overview
+GeoCE (Geometric Contrastive Embedding) is a geometric supervision method used in 3D Gaussian Splatting training to ensure that learned scene tokens cluster by physical surface rather than by viewpoint [S1, unofficial]. It solves the problem where feature-space similarity does not guarantee geometric consistency, by explicitly aligning token cosine similarities with 3D proximity [S1, unofficial]. Unlike sibling methods that enforce hard constraints on Gaussian positions or normals, GeoCE shapes the latent token space using a soft contrastive target derived from unprojected patch depths, allowing multiple patches observing the same surface to share high similarity weights [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:**
+    *   A set of $N$ geometry tokens $\{\mathbf{g}_i\}_{i=1}^N$, where each token $\mathbf{g}_i$ corresponds to an image patch observed from a specific camera view.
+    *   Ground-truth camera poses and intrinsics for the training views.
+    *   Depth maps for the training views (precomputed, e.g., by DA3-Giant) [S1, unofficial].
+*   **Outputs:**
+    *   A scalar loss value $\mathcal{L}_{\mathrm{geo}}$ that penalizes discrepancies between token similarity and 3D proximity.
+
+**Data Structures**
+*   **Tokens:** $\mathbf{g}_i \in \mathbb{R}^d$, $\ell_2$-normalized [S1, unofficial].
+*   **Anchors:** A subset of tokens sampled as anchors. The method samples 2048 tokens per scene as anchors during training [S1, unofficial].
+*   **3D Points:** For each anchor $i$, a 3D point $\mathbf{p}_i$ is computed by unprojecting the median-depth pixel of its associated patch using the ground-truth camera [S1, unofficial].
+*   **Bandwidths:** A scalar $\sigma_i$ for each anchor, derived from local patch texture [S1, unofficial].
+
+**Parameters**
+*   $\tau = 0.1$: Temperature parameter for the softmax [S1, unofficial].
+*   $\lambda_{\mathrm{geo}} = 0.05$: Weight for the GeoCE loss in the total objective [S1, unofficial].
+*   $K = 2048$: Number of anchor tokens sampled per scene [S1, unofficial].
+*   Grid size: $4 \times 4$ pixels for depth averaging [S1, unofficial].
+
+**Algorithm Steps**
+1.  **Anchor Sampling:** Randomly sample $K$ tokens from the current batch of scene tokens to serve as anchors.
+2.  **3D Unprojection:** For each anchor $i$, identify its associated image patch. Compute the median depth $d_i$ of the valid pixels in this patch. Unproject the center of the patch (or the median-depth pixel) using the ground-truth camera intrinsics and pose to obtain the 3D anchor point $\mathbf{p}_i$ [S1, unofficial].
+3.  **Validity Check:** Exclude anchors whose patches have valid depth on fewer than half of their pixels [S1, unofficial].
+4.  **Bandwidth Calculation:**
+    *   Compute the base bandwidth $\sigma$ as the scene-wise median 3D distance between adjacent patch points [S1, unofficial].
+    *   For each anchor $i$, compute the mean image-gradient energy of its patch to rank texture complexity.
+    *   Calculate the per-token bandwidth $\sigma_i$ by log-interpolating between $\sigma$ (for the flattest patch) and $0.4\sigma$ (for the most textured patch), based on the patch's rank in gradient energy [S1, unofficial].
+5.  **Target Weight Computation:**
+    *   For each pair of anchors $(i, j)$ with $i \neq j$, compute the soft target weight $w_{ij}$ based on their 3D Euclidean distance:
+        $$ w_{ij} \propto \exp \left( -\frac{\|\mathbf{p}_i - \mathbf{p}_j\|^2}{2\sigma_i \sigma_j} \right) $$
+    *   The weight $w_{ij}$ represents the probability that tokens $i$ and $j$ observe the same surface region. Patches with high 3D proximity receive high weights [S1, unofficial].
+    *   Normalize $w_{ij}$ such that $\sum_{j \neq i} w_{ij} = 1$ for each $i$ (implicit in the cross-entropy formulation) [S1, unofficial].
+6.  **Loss Computation:**
+    *   Compute the cosine similarity between all pairs of anchor tokens: $s_{ij} = \mathbf{g}_i^\top \mathbf{g}_j$ (assuming $\ell_2$-normalized tokens) [S1, unofficial].
+    *   Calculate the GeoCE loss using cross-entropy between the target distribution $w_{ij}$ and the predicted similarity distribution:
+        $$ \mathcal{L}_{\mathrm{geo}} = -\sum_{i} \sum_{j \neq i} w_{ij} \log \frac{\exp(\mathbf{g}_i^\top \mathbf{g}_j / \tau)}{\sum_{k \neq i} \exp(\mathbf{g}_i^\top \mathbf{g}_k / \tau)} $$
+    *   This loss pushes the token cosine similarities to match the soft target distribution weighted by 3D proximity [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def geoce_loss(geometry_tokens, anchors_indices, cameras, depth_maps, sigma_base, tau=0.1):
+    """
+    Computes the GeoCE loss for a batch of scene tokens.
+    
+    Args:
+        geometry_tokens: Tensor of shape (N, D), L2-normalized geometry tokens.
+        anchors_indices: List of K indices into geometry_tokens to use as anchors.
+        cameras: List of camera objects with intrinsics and poses for the views.
+        depth_maps: Dictionary mapping view_id to depth map tensor.
+        sigma_base: Base bandwidth (scene-wise median 3D distance).
+        tau: Temperature parameter.
+        
+    Returns:
+        Scalar loss value.
+    """
+    K = len(anchors_indices)
+    anchors_tokens = geometry_tokens[anchors_indices]  # Shape (K, D)
+    
+    # Step 2 & 3: Unproject and filter anchors
+    valid_anchors = []
+    anchor_points = []
+    anchor_grad_energies = []
+    
+    for idx in anchors_indices:
+        # Identify the view and patch associated with token idx
+        # [G] Implementation detail: assumes a mapping from token index to (view_id, patch_bbox) exists.
+        view_id, patch_bbox = get_token_view_and_patch(idx)
+        
+        depth_map = depth_maps[view_id]
+        patch_depths = extract_patch_depths(depth_map, patch_bbox)
+        
+        # Check validity: at least half pixels must have valid depth
+        if count_valid_depth(patch_depths) < 0.5 * patch_depths.numel():
+            continue
+            
+        # Compute median depth
+        median_depth = torch.median(patch_depths[patch_depths > 0])
+        
+        # Unproject to 3D
+        p_i = unproject_pixel(view_id, patch_bbox.center, median_depth, cameras[view_id])
+        
+        # Compute gradient energy for bandwidth interpolation
+        grad_energy = compute_mean_gradient_energy(view_id, patch_bbox)
+        
+        valid_anchors.append(idx)
+        anchor_points.append(p_i)
+        anchor_grad_energies.append(grad_energy)
+        
+    if len(valid_anchors) < 2:
+        return 0.0
+        
+    K_valid = len(valid_anchors)
+    anchor_points = torch.stack(anchor_points) # Shape (K_valid, 3)
+    anchor_tokens = geometry_tokens[valid_anchors] # Shape (K_valid, D)
+    
+    # Step 4: Calculate per-token bandwidths
+    # Rank patches by gradient energy
+    sorted_indices = torch.argsort(anchor_grad_energies)
+    # Log-interpolate sigma_i from sigma_base (flattest) to 0.4 * sigma_base (most textured)
+    # [G] Assuming linear rank mapping to log-space interpolation
+    min_sigma = 0.4 * sigma_base
+    max_sigma = sigma_base
+    
+    sigmas = []
+    for rank, idx in enumerate(sorted_indices):
+        # Normalize rank to [0, 1]
+        t = rank / (K_valid - 1)
+        # Log-interpolation: log(sigma_i) = (1-t)*log(max_sigma) + t*log(min_sigma)
+        log_sigma = (1 - t) * torch.log(torch.tensor(max_sigma)) + t * torch.log(torch.tensor(min_sigma))
+        sigmas.append(torch.exp(log_sigma))
+    sigmas = torch.tensor(sigmas)
+    
+    # Step 5: Compute target weights
+    # Compute pairwise distances
+    dists = torch.cdist(anchor_points, anchor_points) # Shape (K_valid, K_valid)
+    # Compute weights w_ij proportional to exp(-dist^2 / (2 * sigma_i * sigma_j))
+    # [G] Using broadcasting for sigma_i and sigma_j
+    sigma_matrix = sigmas.unsqueeze(1) * sigmas.unsqueeze(0)
+    weights = torch.exp(-dists**2 / (2 * sigma_matrix))
+    
+    # Exclude self-connections
+    weights = weights * (1 - torch.eye(K_valid, device=weights.device))
+    
+    # Normalize weights for each row i
+    weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
+    
+    # Step 6: Compute loss
+    # Compute cosine similarities (tokens are L2-normalized)
+    similarities = anchor_tokens @ anchor_tokens.T # Shape (K_valid, K_valid)
+    
+    # Softmax over j != i
+    # [G] Subtract max for numerical stability
+    exp_sim = torch.exp(similarities / tau)
+    exp_sim = exp_sim * (1 - torch.eye(K_valid, device=exp_sim.device))
+    sum_exp_sim = exp_sim.sum(dim=1, keepdim=True)
+    
+    log_probs = torch.log(exp_sim / (sum_exp_sim + 1e-8) + 1e-8)
+    
+    # Cross-entropy: - sum_i sum_j w_ij log(p_j|i)
+    loss = -torch.sum(weights * log_probs)
+    
+    return loss
+```
+
+**Edge Cases and Pitfalls**
+*   **Invalid Depth:** Patches with insufficient valid depth are excluded. If too few anchors remain valid, the loss cannot be computed [S1, unofficial].
+*   **Precision:** Median depth computation should handle outliers in depth maps [S1, unofficial].
+*   **Bandwidth Scaling:** The bandwidth $\sigma_i$ scales with local patch spacing. Incorrect scaling can lead to overly local or overly global similarity targets [S1, unofficial].
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** $O(K^2)$ per batch, where $K$ is the number of sampled anchors (2048). This is negligible compared to the rendering and clustering steps [S1, unofficial].
+*   **Memory Complexity:** $O(K^2)$ to store the pairwise distance and weight matrices [S1, unofficial].
+*   **Performance:** GeoCE enables the formation of compact, surface-aligned Gaussian clusters, improving reconstruction quality (PSNR) while reducing the number of required Gaussians [S1, unofficial].
+*   **Strengths:** Explicitly enforces geometric consistency in the latent space, preventing viewpoint-based clustering artifacts. Works with unposed cameras when combined with TokenBA [S1, unofficial].
+*   **Limitations:** Requires accurate depth maps (or depth estimation) for the training views. Performance depends on the quality of the median depth and the validity of the 3D unprojection [S1, unofficial].
+
+## Background
+GeoCE was introduced in the ZipSplat paper (2026) as part of a framework for few-shot 3D Gaussian Splatting [S1, unofficial]. It addresses the limitation of previous methods where clustering in feature space did not guarantee geometric coherence. By aligning token similarity with 3D proximity, it enables more robust scene representation, particularly in scenarios with limited views or unposed cameras [S1, unofficial].
+
+## Sources
+[S1] ZipSplat: Fewer Gaussians, Better Splats, https://doi.org/10.48550/arXiv.2606.05102, fetched 2026-10-29 (unofficial)

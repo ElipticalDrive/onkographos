@@ -1,0 +1,100 @@
+# Neural Textures
+
+
+## Overview
+Neural Textures is a deferred neural rendering technique that achieves novel view synthesis, scene editing, animation synthesis, or free viewpoint relighting by optimizing a high-dimensional neural texture jointly with a neural renderer [S1]. Unlike methods that optimize volumetric fields or implicit surfaces directly in 3D space, Neural Textures maps the texture to a simple 3D proxy surface, sampling it via the standard graphics pipeline to produce features that are decoded into an image [S1]. This approach produces standard physically based textures that are compatible with traditional renderers, distinguishing it from purely implicit neural field representations [S1].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A 3D proxy mesh (simplified geometry representing the scene), initial texture parameters, and camera poses.
+- **Output:** Optimized neural texture parameters and a rendered image for a given camera view.
+
+**Data Structures:**
+The core data structure is the **Neural Texture**, which is a high-dimensional feature map stored on the 3D proxy surface.
+- **Texture Map:** A 2D array (or set of arrays for RGB and transparency) associated with the UV coordinates of the proxy mesh.
+- **Proxy Mesh:** A simplified 3D surface with UV unwrapping. The mesh topology must be sufficient to represent the scene's geometry for the purpose of texture sampling, though it may not capture fine geometric details [S1].
+
+**Steps:**
+1. **Proxy Surface Definition:** Define a simple 3D proxy surface that approximates the scene's geometry. This surface is used as the domain for the neural texture [S1].
+2. **Texture Sampling:** For each pixel in the target image, determine the corresponding point on the proxy surface using ray intersection or rasterization. Sample the neural texture at the UV coordinates of this point to obtain a high-dimensional feature vector [S1].
+3. **Feature Decoding:** Pass the sampled feature vector through a neural network (the neural renderer) to decode it into color (and optionally transparency or other attributes) [S1].
+4. **Rendering:** Compose the decoded colors into the final image. If using a differentiable path tracer, integrate the contributions over the pixel area [S1].
+5. **Optimization:** Minimize the difference between the rendered image and a reference image (or apply regularization) with respect to the neural texture parameters and potentially the proxy mesh parameters [S1].
+
+**Formulas:**
+Let $T(u, v)$ be the neural texture function mapping UV coordinates to a feature vector $\mathbf{f}$.
+Let $R(\mathbf{f}, \boldsymbol{\theta})$ be the neural renderer function mapping the feature vector and camera pose $\boldsymbol{\theta}$ to a color $\mathbf{c}$.
+The rendered color for a pixel is:
+$$ \mathbf{c} = R(T(u, v), \boldsymbol{\theta}) $$
+where $(u, v)$ are the UV coordinates of the point on the proxy surface intersected by the pixel's ray [S1].
+
+**Parameters:**
+- **Proxy Mesh Complexity:** Not given in the sources.
+- **Neural Network Architecture:** Not given in the sources.
+- **Optimization Method:** Stochastic gradient descent or similar, using a differentiable renderer [S1].
+
+**Edge Cases and Pitfalls:**
+- **Proxy Mesh Accuracy:** If the proxy mesh is too simple, it may fail to represent occlusions or complex geometry, leading to artifacts. If it is too complex, it may overfit to noise [S1].
+- **UV Distortion:** Severe UV distortion can lead to poor texture sampling and artifacts [S1].
+- **Ambiguity:** In cases of significant occlusion or view-dependent effects, the neural texture may struggle to disambiguate features from different viewpoints [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Neural Textures optimization step
+# Note: This is a simplified representation. Actual implementation requires a differentiable renderer.
+
+def optimize_neural_textures(proxy_mesh, reference_images, camera_poses, neural_renderer, learning_rate):
+    # Initialize neural texture parameters
+    texture_params = initialize_texture_params(proxy_mesh)
+    
+    # Initialize optimizer
+    optimizer = Adam([texture_params], lr=learning_rate)
+    
+    for iteration in range(num_iterations):
+        # Select a random reference image and its camera pose
+        ref_img, cam_pose = random_sample(reference_images, camera_poses)
+        
+        # Render the scene using the current neural texture
+        rendered_img = render_with_neural_texture(proxy_mesh, texture_params, cam_pose, neural_renderer)
+        
+        # Compute loss (e.g., L2 loss between rendered and reference image)
+        loss = compute_loss(rendered_img, ref_img)
+        
+        # Backpropagate and update texture parameters
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+    return texture_params
+
+def render_with_neural_texture(proxy_mesh, texture_params, cam_pose, neural_renderer):
+    # 1. Intersect rays from camera with proxy mesh
+    # 2. Get UV coordinates for intersection points
+    # 3. Sample neural texture at UV coordinates to get feature vectors
+    # 4. Decode feature vectors using neural renderer to get colors
+    # 5. Compose colors into image
+    # Implementation details depend on the specific differentiable renderer used
+    pass
+```
+
+## Subtopics
+
+### [Global NTS](18021-global-nts.md)
+Global NTS is a Neural Texture Stack (NTS) variant that achieves novel view synthesis by directly conditioning texture generation on the global camera pose $\boldsymbol{\theta}$, replacing the local texture embedding used in the base Neural Textures method. Unlike Local NTS, which relies on local geometric correspondence and deformation fields, Global NTS models the entire texture variation globally, allowing it to generate new topological spaces (e.g., reconstructing occluded objects like a belt on pants) but suffering from ambiguous textures due to poor information reuse across different observation spaces.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Strengths:** Produces standard physically based textures compatible with traditional renderers; enables novel view synthesis, scene editing, and relighting [S1].
+- **Limitations:** Requires a suitable proxy mesh; may suffer from ambiguity in occluded regions; optimization can be computationally expensive [S1].
+- **When to Use:** When the goal is to produce textures usable in traditional renderers while enabling novel view synthesis or editing [S1].
+- **When Not to Use:** When high-fidelity geometric detail is required and cannot be approximated by a simple proxy mesh [S1].
+
+## Background
+Neural Textures was introduced in the paper "Material and Lighting Reconstruction for Complex Indoor Scenes with Texture-space Differentiable Rendering" [S1]. The method builds on deferred neural rendering techniques [TZN19] and aims to produce physically based textures that can be used in traditional rendering pipelines [S1]. It utilizes a differentiable path tracer (Mitsuba 2) for optimization [S1].
+
+## Sources
+[S1] Material and Lighting Reconstruction for Complex Indoor Scenes with Texture-space Differentiable Rendering, https://doi.org/10.2312/sr.20211292, fetched 2026-10-29

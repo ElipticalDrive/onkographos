@@ -1,0 +1,190 @@
+# 3D/2D Hybrid Gaussian Rasterization with Fallback Sigma
+
+## Overview
+This method renders 3D Gaussians by combining a screen-space 2D Gaussian approximation with a ray-surfel 3D sigma calculation to determine the tighter bounding sigma for alpha attenuation [S1, unofficial]. It computes a fallback 2D sigma based on pre-computed screen-space means and selects the minimum of the 3D and 2D sigmas to define the effective spread for each Gaussian during accumulation [S1, unofficial].
+## How it works
+**Inputs:**
+- `means`: 3D positions of $N$ Gaussians, shape $[N, 3]$.
+- `opacities`: Opacity values of $N$ Gaussians, shape $[N]$.
+- `colors`: Rendered colors per Gaussian, shape $[N, 3]$.
+- `normals`: Normals per Gaussian, shape $[N, 3]$.
+- `means2d_np`: Pre-computed 2D screen-space means for each camera, shape $[C, N, 2]$.
+- `cameras`: Camera parameters for $C$ views.
+- `backgrounds`: Optional background colors per camera, shape $[C, 3]$.
+
+**Outputs:**
+- `render_colors`: Rendered RGB images, shape $[C, H, W, 3]$.
+- `render_normals`: Rendered normal images, shape $[C, H, W, 3]$.
+- `render_alphas`: Accumulated alpha images, shape $[C, H, W, 1]$.
+
+**Parameters:**
+- `MAX_ALPHA`: Maximum alpha value per Gaussian [S1, unofficial].
+- `ALPHA_THRESHOLD`: Minimum alpha to process [S1, unofficial].
+- `TRANSMITTANCE_THRESHOLD`: Minimum transmittance to continue loop [S1, unofficial].
+- `EPSILON`: Depth threshold for skipping, $10^{-10}$ [S1, unofficial].
+
+**Steps:**
+1. **Initialization**: Initialize `render_colors`, `render_normals`, and `render_alphas` to zero [S1, unofficial]. Initialize transmittance $T = 1.0$ for each pixel [S1, unofficial].
+2. **Pixel Loop**: Iterate over each pixel $(p_y, p_x)$ and camera $c$ [S1, unofficial].
+3. **Gaussian Loop**: Iterate over each Gaussian $g_i$ (index $gid$) [S1, unofficial].
+   a. **Coordinate Transformation**: Calculate temporary coordinates $tmp[0], tmp[1], tmp[2]$ by projecting the 3D mean of the Gaussian into the camera space [S1, unofficial].
+   b. **Depth Check**: If $|tmp[2]| < 10^{-10}$, skip this Gaussian [S1, unofficial].
+   c. **Screen-Space Coordinates**: Calculate screen-space coordinates:
+      $$u_s = \frac{tmp[0]}{tmp[2]}$$
+      $$v_s = \frac{tmp[1]}{tmp[2]}$$
+      [S1, unofficial]
+   d. **3D Sigma Calculation**: Calculate the 3D sigma based on the ray-surfel intersection distance:
+      $$\sigma_{3d} = u_s^2 + v_s^2$$
+      [S1, unofficial]
+   e. **2D Fallback Sigma Calculation**: Retrieve the pre-computed 2D mean $\mu = \text{means2d\_np}[c, gid]$ [S1, unofficial]. Calculate differences:
+      $$dx = p_x - \mu[0]$$
+      $$dy = p_y - \mu[1]$$
+      Calculate the 2D fallback sigma:
+      $$\sigma_{2d} = 2.0 \times (dx^2 + dy^2)$$
+      [S1, unofficial]
+   f. **Hybrid Sigma Selection**: Select the tighter bound:
+      $$\sigma = 0.5 \times \min(\sigma_{3d}, \sigma_{2d})$$
+      [S1, unofficial]
+   g. **Sigma Validation**: If $\sigma < 0.0$, skip the Gaussian [S1, unofficial].
+   h. **Alpha Calculation**: Calculate the alpha value:
+      $$\alpha = \min(\text{opacities}[gid] \times \exp(-\sigma), \text{MAX\_ALPHA})$$
+      [S1, unofficial]
+   i. **Alpha Threshold**: If $\alpha < \text{ALPHA\_THRESHOLD}$, skip the Gaussian [S1, unofficial].
+   j. **Transmittance Check**: If current transmittance $T < \text{TRANSMITTANCE\_THRESHOLD}$, break the Gaussian loop for this pixel [S1, unofficial].
+   k. **Accumulation**: Calculate weight:
+      $$w = T \times \alpha$$
+      Add to color and normal buffers:
+      $$\text{render\_colors}[c, p_y, p_x] += w \times \text{colors}[gid]$$
+      $$\text{render\_normals}[c, p_y, p_x] += w \times \text{normals}[gid]$$
+      Update transmittance:
+      $$T \leftarrow T \times (1.0 - \alpha)$$
+      [S1, unofficial]
+4. **Alpha Finalization**: After the Gaussian loop, set:
+   $$\text{render\_alphas}[c, p_y, p_x, 0] = 1.0 - T$$
+   [S1, unofficial]
+5. **Background Compositing**: If `backgrounds` is not None:
+   a. Convert `backgrounds` to array `bg_np` [S1, unofficial].
+   b. For each camera $c$, add background contribution:
+      $$\text{render\_colors}[c] += (1.0 - \text{render\_alphas}[c]) \times \text{bg\_np}[c]$$
+      [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def hybrid_gaussian_rasterization(means, opacities, colors, normals, means2d, cameras, backgrounds, MAX_ALPHA=1.0, ALPHA_THRESHOLD=1e-4, TRANSMITTANCE_THRESHOLD=1e-4):
+    """
+    Renders Gaussians using hybrid 3D/2D sigma fallback.
+    Assumes SH degree 0 for simplicity as per source [S1, unofficial].
+    """
+    C = len(cameras)
+    N = len(means)
+    H, W = cameras[0].height, cameras[0].width
+    
+    # Initialize output buffers
+    render_colors = [[[ [0.0, 0.0, 0.0] for _ in range(W)] for _ in range(H)] for _ in range(C)]
+    render_normals = [[[ [0.0, 0.0, 0.0] for _ in range(W)] for _ in range(H)] for _ in range(C)]
+    render_alphas = [[[[0.0]] for _ in range(W)] for _ in range(H)] for _ in range(C)
+    
+    for c in range(C):
+        # Initialize transmittance per pixel
+        T = [[1.0 for _ in range(W)] for _ in range(H)]
+        
+        for py in range(H):
+            for px in range(W):
+                if T[py][px] < TRANSMITTANCE_THRESHOLD:
+                    break
+                
+                for gid in range(N):
+                    # Project 3D mean to camera space
+                    tmp = transform_point(means[gid], cameras[c].viewmat)
+                    
+                    if abs(tmp[2]) < 1e-10:
+                        continue
+                    
+                    us = tmp[0] / tmp[2]
+                    vs = tmp[1] / tmp[2]
+                    
+                    # 3D Sigma
+                    sigma_3d = us * us + vs * vs
+                    
+                    # 2D Fallback Sigma
+                    mu = means2d[c][gid]
+                    dx = px - mu[0]
+                    dy = py - mu[1]
+                    sigma_2d = 2.0 * (dx * dx + dy * dy)
+                    
+                    # Hybrid Sigma
+                    sigma = 0.5 * min(sigma_3d, sigma_2d)
+                    
+                    if sigma < 0.0:
+                        continue
+                    
+                    alpha = min(opacities[gid] * math.exp(-sigma), MAX_ALPHA)
+                    
+                    if alpha < ALPHA_THRESHOLD:
+                        continue
+                    
+                    weight = T[py][px] * alpha
+                    
+                    render_colors[c][py][px][0] += weight * colors[gid][0]
+                    render_colors[c][py][px][1] += weight * colors[gid][1]
+                    render_colors[c][py][px][2] += weight * colors[gid][2]
+                    
+                    render_normals[c][py][px][0] += weight * normals[gid][0]
+                    render_normals[c][py][px][1] += weight * normals[gid][1]
+                    render_normals[c][py][px][2] += weight * normals[gid][2]
+                    
+                    T[py][px] *= (1.0 - alpha)
+                
+                render_alphas[c][py][px][0] = 1.0 - T[py][px]
+        
+        if backgrounds is not None:
+            bg = backgrounds[c]
+            for py in range(H):
+                for px in range(W):
+                    alpha_val = render_alphas[c][py][px][0]
+                    render_colors[c][py][px][0] += (1.0 - alpha_val) * bg[0]
+                    render_colors[c][py][px][1] += (1.0 - alpha_val) * bg[1]
+                    render_colors[c][py][px][2] += (1.0 - alpha_val) * bg[2]
+            
+    return render_colors, render_normals, render_alphas
+
+def transform_point(point, viewmat):
+    """Transform a single 3D point to camera space."""
+    # Homogeneous coordinates
+    point_homo = [point[0], point[1], point[2], 1.0]
+    # Matrix-vector multiplication
+    transformed = [
+        sum(viewmat[i][j] * point_homo[j] for j in range(4))
+        for i in range(4)
+    ]
+    return transformed[:3]
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision**: Division by zero in $tmp[2]$ is handled by the $10^{-10}$ threshold [S1, unofficial].
+- **Boundaries**: Screen-space coordinates $u_s, v_s$ can be large for distant Gaussians, leading to large $\sigma_{3d}$. The fallback $\sigma_{2d}$ helps mitigate this by using pre-computed means [S1, unofficial].
+- **Degenerate Input**: If $\sigma < 0.0$, the Gaussian is skipped, preventing invalid alpha calculations [S1, unofficial].
+
+## Subtopics
+
+### [3D Gaussian Splatting Differentiable Rasterizer > Backward Pass](8352-3d-gaussian-splatting-differentiable-rasterizer-backward-pas.md)
+Computes gradients for end-to-end training.
+
+### [Image-Based Gaussian Splatting (IBGS)](8764-image-based-gaussian-splatting-ibgs.md)
+Augments 3DGS with a neural network for color residuals.
+
+### [3D Gaussian Splatting Rendering with Language Features](12439-3d-gaussian-splatting-rendering-with-language-features.md)
+Renders language features alongside RGB.
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] RobotFlow-Labs/gsplat-mlx, https://github.com/RobotFlow-Labs/gsplat-mlx, fetched 2026-10-27 (unofficial)

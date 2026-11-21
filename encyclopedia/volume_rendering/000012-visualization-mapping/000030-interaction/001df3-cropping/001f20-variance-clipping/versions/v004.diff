@@ -1,0 +1,174 @@
+--- v003.md
++++ v004.md
+@@ -1,90 +1,112 @@
+ # Variance Clipping
++
++Also called: Local Variance
++
+ ## Overview
+-Variance clipping is a history rectification technique used in Temporal Anti-Aliasing (TAA) for volumetric rendering that constructs a tight bounding box for valid color values based on the statistical mean and variance of a neighborhood of samples [S1, unofficial]. It solves the problem of ghosting artifacts during rapid illumination changes by adapting the clipping region to the local signal distribution, allowing it to reconstruct signals faster than fixed-bound methods [S1, unofficial]. It sets itself apart from [AABB Clamping](2019-aabb-clamping.md) and [AABB Clipping](1444-clipping.md) by using a statistically derived, typically smaller, clipping region that reacts more precisely to changes, though at the cost of higher temporal instability [S1, unofficial].
++Variance clipping is a history rectification technique used in temporal anti-aliasing (TAA) for volumetric rendering that constructs a tight bounding box for valid history samples based on the statistical distribution (mean and variance) of colors in the current frame's neighborhood [S1, unofficial]. It solves the problem of ghosting artifacts by discarding history samples that fall outside the statistically probable range of current-frame colors, adapting more quickly to sudden illumination changes than simple extent-based clipping [S1, unofficial]. It sets itself apart from its sibling [AABB Clamping](2019-aabb-clamping.md) by using a distribution-based bound rather than a fixed geometric extent, and from [Variance Clipping](1970-variance-clipping.md)'s parent [Cropping](1648-cropping.md) by operating on color data statistics rather than spatial volume geometry.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of $N$ color samples $\{c_i\}$ from the current frame's neighborhood, where each $c_i$ is a vector (typically RGB) [S1, unofficial].
+-*   **Output:** A clipping interval $[c_{min}, c_{max}]$ for each color component, used to clamp or clip the history value [S1, unofficial].
++- Input: A set of $N$ color samples $\{c_i\}_{i=1}^N$ from the current frame's neighborhood (e.g., a pixel or froxel and its spatial/temporal neighbors).
++- Input: A user-defined parameter $\gamma$ (gamma) controlling the clipping strength.
++- Output: A clipping interval $[c_{min}, c_{max}]$ for each color component.
+ 
+ **Data Structures:**
+-*   $N$: Integer count of samples in the neighborhood [S1, unofficial].
+-*   $c_i$: Vector of color values for sample $i$ [S1, unofficial].
+-*   $\mu$: Vector of sample means [S1, unofficial].
+-*   $\sigma$: Vector of standard deviations [S1, unofficial].
+-*   $\gamma$: Scalar user-defined parameter [S1, unofficial].
++- $c_i$: A vector of color values (e.g., RGB) for the $i$-th sample.
++- $N$: The number of samples in the neighborhood.
++- $\mu$: The sample mean vector.
++- $\sigma$: The sample standard deviation vector.
+ 
+ **Steps:**
+-1.  Compute the first sample moment $m_1$ by summing all color samples component-wise:
+-    $$m_1 = \sum_{i=1}^N c_i \quad (2.3)$$
+-2.  Compute the second sample moment $m_2$ by summing the squared color samples component-wise:
+-    $$m_2 = \sum_{i=1}^N c_i^2 \quad (2.4)$$
+-3.  Calculate the sample mean $\mu$ by dividing $m_1$ by $N$ component-wise:
+-    $$\mu = \frac{1}{N}m_1 \quad (2.5)$$
+-4.  Calculate the standard deviation $\sigma$ component-wise: first compute the variance estimate $\frac{1}{N} m_2 - \mu^2$, take the absolute value to handle floating-point inaccuracies that might result in negative values, and then take the square root:
+-    $$\sigma = \sqrt{\left| \frac{1}{N} m_2 - \mu^2 \right|} \quad (2.6)$$
+-5.  Construct the clipping bounds using the user-defined gamma parameter $\gamma$:
+-    $$c_{min} = \mu - \gamma \sigma \quad (2.7)$$
+-    $$c_{max} = \mu + \gamma \sigma \quad (2.8)$$
+-6.  Clip the history value $c_{hist}$ to the interval $[c_{min}, c_{max}]$ for each component [S1, unofficial].
++1. Compute the first sample moment $m_1$ by summing all color vectors component-wise:
++   $$m_1 = \sum_{i=1}^N c_i \quad (2.3)$$
++2. Compute the second sample moment $m_2$ by summing the squared color vectors component-wise:
++   $$m_2 = \sum_{i=1}^N c_i^2 \quad (2.4)$$
++3. Calculate the sample mean $\mu$ by dividing $m_1$ by $N$ component-wise:
++   $$\mu = \frac{1}{N}m_1 \quad (2.5)$$
++4. Calculate the sample standard deviation $\sigma$ component-wise:
++   $$\sigma = \sqrt{\left| \frac{1}{N} m_2 - \mu^2 \right|} \quad (2.6)$$
++   The absolute value is taken to avoid negative values caused by floating-point inaccuracies.
++5. Construct the min-max clipping interval using the user-defined parameter $\gamma$:
++   $$c_{min} = \mu - \gamma \sigma \quad (2.7)$$
++   $$c_{max} = \mu + \gamma \sigma \quad (2.8)$$
++
++**Parameters:**
++- $\gamma$ (gamma): A user-defined parameter that controls the size of the clipping box and therefore the strength of clipping. Larger values result in a wider acceptance region [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- Floating-point inaccuracies can lead to negative values under the square root in the standard deviation calculation; the absolute value operation mitigates this [S1, unofficial].
++- Variance clipping exhibits the highest Temporal Instability (TI) relative to the baseline EMA among tested techniques, making it prone to flickering in static scenes [S1, unofficial].
++- Performing history rectification directly in RGB color space can produce color-related artifacts because RGB channels are highly correlated, leading to poorly aligned bounding boxes [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def variance_clipping(samples, history, gamma):
+-    # samples: list of vectors c_i, each of length C (e.g., 3 for RGB)
+-    # history: vector c_hist of length C
+-    # gamma: scalar float controlling clipping strength
++def variance_clipping(samples, gamma):
++    """
++    Compute variance-based clipping bounds for a set of color samples.
++    
++    Args:
++        samples: List of color vectors (e.g., [r, g, b]), shape (N, 3).
++        gamma: User-defined parameter controlling clipping strength.
++        
++    Returns:
++        c_min: Lower bound vector.
++        c_max: Upper bound vector.
++    """
+     N = len(samples)
+-    C = len(samples[0])
++    if N == 0:
++        raise ValueError("No samples provided")
++        
++    # Convert to numpy-like array for component-wise operations
++    # In a pure Python implementation, this would be done via list comprehensions
++    # or explicit loops over components.
+     
+-    # Step 1 & 2: Compute moments component-wise
+-    m1 = [0.0] * C
+-    m2 = [0.0] * C
++    # Step 1: First sample moment m1 = sum(c_i)
++    m1 = [0.0, 0.0, 0.0]
+     for c in samples:
+-        for k in range(C):
++        for k in range(3):
+             m1[k] += c[k]
+-            m2[k] += c[k] ** 2
+             
+-    # Step 3: Mean
+-    mu = [m1[k] / N for k in range(C)]
++    # Step 2: Second sample moment m2 = sum(c_i^2)
++    m2 = [0.0, 0.0, 0.0]
++    for c in samples:
++        for k in range(3):
++            m2[k] += c[k] * c[k]
++            
++    # Step 3: Sample mean mu = (1/N) * m1
++    mu = [m1[k] / N for k in range(3)]
+     
+-    # Step 4: Standard deviation (component-wise)
+-    var = [(m2[k] / N) - (mu[k] ** 2) for k in range(C)]
+-    sigma = [abs(v) ** 0.5 for v in var]
++    # Step 4: Standard deviation sigma = sqrt(|(1/N) * m2 - mu^2|)
++    sigma = [0.0, 0.0, 0.0]
++    for k in range(3):
++        variance_term = (m2[k] / N) - (mu[k] * mu[k])
++        # Absolute value to avoid negative values from floating-point inaccuracies
++        sigma[k] = (variance_term ** 0.5) if variance_term >= 0 else 0.0
++        
++    # Step 5: Clipping interval
++    c_min = [mu[k] - gamma * sigma[k] for k in range(3)]
++    c_max = [mu[k] + gamma * sigma[k] for k in range(3)]
+     
+-    # Step 5: Bounds
+-    c_min = [mu[k] - gamma * sigma[k] for k in range(C)]
+-    c_max = [mu[k] + gamma * sigma[k] for k in range(C)]
+-    
+-    # Step 6: Clip history value to bounds
+-    clipped = [max(c_min[k], min(c_max[k], history[k])) for k in range(C)]
+-    return clipped
++    return c_min, c_max
+ ```
+-
+-**Parameters:**
+-*   $\gamma$ (Gamma): User-defined parameter controlling the size of the clipping box and the strength of clipping. Tighter bounds (smaller $\gamma$) allow faster adaptation to changes but increase temporal instability [S1, unofficial]. Not given in the sources.
+-
+-**Pitfalls:**
+-*   **Temporal Instability:** Variance clipping exhibits the highest Temporal Instability (TI) relative to the baseline EMA among tested techniques [S1, unofficial]. This is a direct trade-off for its ability to quickly reject incorrect history during rapid changes [S1, unofficial].
+-*   **Floating-Point Inaccuracy:** The variance calculation $\frac{1}{N} m_2 - \mu^2$ can yield negative values due to floating-point precision limits [S1, unofficial]. The absolute value operation in Eq. (2.6) is required to prevent NaNs or errors [S1, unofficial].
+-*   **Color Correlation:** Performing this rectification directly in RGB space can produce color-related artifacts because RGB channels are highly correlated, leading to poorly aligned bounding boxes [S1, unofficial]. This is often mitigated by transforming to a luminance-chrominance space like YCoCg first [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [YCoCg Color Space Rectification](1971-ycocg-color-space-rectification.md)
+-A variant that transforms colors into a luminance-chrominance space (YCoCg or YCrCb) before applying variance clipping. It decouples luminance and chrominance to orient the rectification bounds along the luma direction, reducing color-related ghosting and temporal color bleeding. Choose this when RGB-based variance clipping causes color bleeding or poor alignment with the color distribution.
++A variant that transforms reprojected historical color data into a luminance-chrominance color space (YCoCg or YCrCb) before applying bounding-box clipping. It sets itself apart by decoupling luminance and chrominance to reduce chroma-related ghosting, which is a known issue when applying variance clipping directly in RGB space. Choose this when color bleeding artifacts are prominent due to high channel correlation.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources [S1, unofficial].
+-*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+-*   **Measured Performance:** In a step response scenario (light turning on), variance clipping produced the lowest RMSE (0.002977) among tested techniques, indicating it is the best at reconstructing the signal during quick illumination introduction [S1, unofficial]. However, it exhibited the highest Temporal Instability (TI P = 0.004217, a 190.23% increase over baseline) [S1, unofficial].
+-*   **Strengths:** Tighter bounds allow the algorithm to adapt to changes much more quickly and precisely than fixed AABB methods. It operates entirely on current-frame data, making it easier to implement than methods requiring historical bounds [S1, unofficial].
+-*   **Limitations:** High temporal instability can cause flickering or jitter in static scenes or scenes with subtle changes. Sensitive to the choice of $\gamma$ [S1, unofficial].
+-*   **When to use:** When rapid adaptation to illumination changes is prioritized over stability, or in scenes with high dynamic range lighting changes [G].
+-*   **When not to use:** In static scenes or scenes with subtle temporal variations where stability is more important than rapid convergence [G].
++- **Time Complexity:** $O(N)$ where $N$ is the number of samples in the neighborhood, as it requires a single pass to compute sums and squared sums.
++- **Memory Complexity:** $O(1)$ auxiliary space if computed incrementally, or $O(N)$ if storing all samples.
++- **Measured Performance:** In a step response scenario (sudden illumination change), variance clipping produced the lowest RMSE (0.002977) compared to AABB Clamp/Clip (0.003136) and Baseline EMA (0.009724), indicating it is the best at reconstructing the signal when light is quickly introduced [S1, unofficial]. However, it exhibits the highest Temporal Instability (TI), with a 190.23% increase in TI P95 relative to the baseline [S1, unofficial].
++- **Strengths:** Tighter bounds allow the algorithm to adapt to changes much more quickly and precisely than extent-based methods [S1, unofficial]. It operates entirely on current-frame data, making it easier to implement than methods requiring historical data analysis [S1, unofficial].
++- **Limitations:** High temporal instability can cause flickering. Direct application in RGB space leads to color artifacts due to channel correlation [S1, unofficial].
++- **When to use:** When rapid adaptation to illumination changes is prioritized over stability, or when used in conjunction with color space transformations like YCoCg to mitigate color artifacts.
++- **When not to use:** In static scenes where temporal stability is critical, or if RGB color space artifacts are unacceptable without rectification.
+ 
+ ## Background
+-Variance clipping was introduced as an extension of clipping against the current frame color extent, relying instead on the statistical distribution of values in the neighborhood to produce a smaller clipping region [S1, unofficial]. It is identified as the best technique at reconstructing signals during quick illumination introduction [S1, unofficial]. The method is discussed in the context of Temporal Anti-Aliasing for real-time froxel-based volumetric rendering [S1, unofficial].
++Variance clipping was introduced as a history rectification technique for temporal anti-aliasing in volumetric rendering [S1, unofficial]. It extends the concept of clipping against the current frame color extent by relying on the statistical distribution of values in the neighborhood [S1, unofficial]. The method was evaluated in the context of real-time froxel-based volumetric rendering, where it was found to be effective at reducing ghosting artifacts during dynamic scenes [S1, unofficial]. The term "Local Variance" is also used in the context of volume visualization to describe the variance in the neighborhood of a voxel, which is used to distinguish tissues based on spatial coherence, such as removing CT streaking artifacts by selecting high-variance voxels [S2, unofficial].
+ 
+ ## Sources
+-[S1] Temporal Anti-Aliasing for Real-Time Froxel-Based Volumetric Rendering - Advances in volumetric temporal anti-aliasing for real-time rendering of participating media, https://openalex.org/W7218067689, fetched 2026-11-01 (unofficial)+[S1] Temporal Anti-Aliasing for Real-Time Froxel-Based Volumetric Rendering - Advances in volumetric temporal anti-aliasing for real-time ren dering of participating media, https://openalex.org/W7218067689, fetched 2026-11-01 (unofficial)
++[S2] Multi-Dimensional Transfer Function Design Using Sorted Histograms, https://doi.org/10.2312/vg/vg06/001-008, fetched 2026-10-26 (unofficial)

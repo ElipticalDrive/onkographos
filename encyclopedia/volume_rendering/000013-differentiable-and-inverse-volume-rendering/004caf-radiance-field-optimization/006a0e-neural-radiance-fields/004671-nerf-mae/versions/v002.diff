@@ -1,0 +1,348 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Posed RGB images used to train an initial implicit NeRF, and the resulting explicit 4D radiance/density grid $G$.
+-*   **Output:** A reconstructed 4D volume $R \in \mathbb{R}^{H \times W \times D \times 4}$ containing predicted radiance (RGB) and opacity ($\alpha$).
++*   **Input:** Posed RGB images used to train an initial implicit NeRF, and the resulting explicit 4D radiance/density grid $G$ [S1].
++*   **Output:** A reconstructed 4D volume $R \in \mathbb{R}^{H \times W \times D \times 4}$ containing predicted radiance (RGB) and opacity ($\alpha$) [S1].
+ 
+ **Data Structures:**
+@@ -82,204 +82,182 @@
+ 
+ class NeRFMAE:
+-    def __init__(self, H=160, W=160, D=160, p=4, m=0.75, E=96):
++    def __init__(self, H=160, W=160, D=160, p=4, m=0.75, E=96, window_size=4):
+         self.H, self.W, self.D = H, W, D
+         self.p = p
+         self.m = m
+         self.E = E
++        self.window_size = window_size
+         self.num_patches = (H // p) * (W // p) * (D // p)
+-        
+-        # Encoder: 3D Swin Transformer
+-        self.encoder = SwinTransformer3D(
+-            input_dim=4, 
+-            embed_dim=E, 
+-            depths=[2, 2, 18, 2], 
+-            num_heads=[3, 6, 12, 24], 
+-            window_size=4
+-        )
+-        
+-        # Decoder: Lightweight Transposed Convs
+-        # Feature pyramid from encoder stages f0..f3
+-        # Decoder stages attach to each f_i
+-        self.decoder_stages = nn.ModuleList([
+-            nn.Sequential(
+-                nn.ConvTranspose3d(768, 768, kernel_size=3, padding=1), # Simplified for f3
+-                nn.LayerNorm(768),
+-                nn.GELU()
+-            ),
+-            nn.Sequential(
+-                nn.ConvTranspose3d(384, 384, kernel_size=3, padding=1), # Simplified for f2
+-                nn.LayerNorm(384),
+-                nn.GELU()
+-            ),
+-            nn.Sequential(
+-                nn.ConvTranspose3d(192, 192, kernel_size=3, padding=1), # Simplified for f1
+-                nn.LayerNorm(192),
+-                nn.GELU()
+-            ),
+-            nn.Sequential(
+-                nn.ConvTranspose3d(96, 96, kernel_size=3, padding=1), # Simplified for f0
+-                nn.LayerNorm(96),
+-                nn.GELU()
+-            )
+-        ])
+-        
++
++        # Patch embedding: 3D conv merging partitioning and linear embedding
++        self.patch_embed = nn.Conv3d(4, E, kernel_size=p, stride=p)
++
++        # Encoder: 4 stages of Swin Transformer 3D blocks
++        # Depths: [2, 2, 18, 2], Heads: [3, 6, 12, 24]
++        self.encoder_stages = nn.ModuleList()
++        embed_dims = [E, E*2, E*4, E*8] # Patch merging doubles channels
++        for i in range(4):
++            stage = []
++            for _ in range([2, 2, 18, 2][i]):
++                stage.append(SwinTransformer3DBlock(embed_dims[i], window_size, [3, 6, 12, 24][i]))
++            self.encoder_stages.append(nn.Sequential(*stage))
++            if i < 3: # Patch merging after each block except last
++                self.encoder_stages.append(nn.Sequential(
++                    PatchMerging3D(embed_dims[i], embed_dims[i+1]),
++                    nn.LayerNorm(embed_dims[i+1]),
++                    nn.Linear(embed_dims[i+1], embed_dims[i+1])
++                ))
++
++        # Decoder: 4 stages with transposed convs
++        # d0 = f3. di = Conv(d_{i-1} + D(fi))
++        self.decoder_stages = nn.ModuleList()
++        for i in range(3, -1, -1):
++            self.decoder_stages.append(nn.ConvTranspose3d(embed_dims[i], embed_dims[i], kernel_size=3, padding=1))
++
+         self.final_block = nn.Sequential(
+-            nn.Conv3d(96, 96, kernel_size=3, padding=1),
++            nn.Conv3d(embed_dims[0], embed_dims[0], kernel_size=3, padding=1),
+             nn.ReLU(),
+-            nn.Conv3d(96, 4, kernel_size=3, padding=1),
++            nn.Conv3d(embed_dims[0], 4, kernel_size=3, padding=1),
+             nn.Sigmoid()
+         )
+-        
+-        # Embedding layer merging patch partitioning and linear embedding
+-        self.patch_embed = nn.Conv3d(4, E, kernel_size=p, stride=p)
+-
+-    def extract_grid(self, nerf_model, camera_poses):
+-        """
+-        Extract explicit grid G from implicit NeRF.
+-        G shape: (H, W, D, 4)
+-        """
+-        # Implementation detail: Query NeRF at all grid points for all camera directions
+-        # and average. This step is external to the MAE training loop but required for input.
+-        # Returns G
+-        pass
+ 
+     def forward(self, G):
+         # G: (B, 4, H, W, D)
+         B = G.shape[0]
+-        
++
+         # 1. Masking
+-        # Randomly mask 75% of patches
+         num_masked = int(self.num_patches * self.m)
+         mask_indices = torch.randperm(self.num_patches)[:num_masked]
+-        # Create mask tensor for patches
+         patch_mask = torch.zeros(self.num_patches)
+         patch_mask[mask_indices] = 1.0
+-        
+-        # Reshape G to patches
+-        # G: (B, 4, H, W, D) -> Patches: (B, num_patches, p*p*p*4)
++
++        # Reshape to patches: (B, num_patches, p*p*p*4)
+         patches = G.unfold(2, self.p, self.p).unfold(3, self.p, self.p).unfold(4, self.p, self.p)
+         patches = patches.permute(0, 5, 6, 7, 1, 2, 3).reshape(B, -1, self.p**2 * 4)
+-        
+-        # Apply mask: set masked patches to 0 (or keep original values for reconstruction target)
+-        # The encoder only sees unmasked patches.
+-        # For simplicity in this pseudocode, we pass all patches to encoder but mask internally
+-        # or zero out masked inputs. Standard MAE zeros out masked inputs.
++
++        # Zero out masked patches
+         masked_patches = patches * (1 - patch_mask.unsqueeze(0).unsqueeze(-1))
+-        
++        masked_grid = masked_patches.reshape(B, 4, self.H, self.W, self.D)
++
+         # 2. Patch Embedding
+-        # Reshape back to volume-like structure for Conv3d? 
+-        # Source says "3D convolutional operation that merges patch partitioning and linear embedding"
+-        # This implies Conv3d with stride=p on the original grid or reshaped grid.
+-        # Let's assume we reshape masked_patches back to (B, 4, H, W, D) with zeros in masked areas
+-        masked_grid = patches.reshape(B, 4, H, W, D)
+-        
+         x = self.patch_embed(masked_grid) # (B, E, H/p, W/p, D/p)
+-        
+-        # 3. Positional Encoding
+-        pos_embed = self.get_3d_pos_embed(x.shape[2], x.shape[3], x.shape[4])
++
++        # 3. Positional Encoding [G]
++        pos_embed = self._get_3d_pos_embed(x.shape[2], x.shape[3], x.shape[4])
+         x = x + pos_embed
+-        
+-        # 4. Encoder
+-        # Encoder outputs feature pyramid F = [f0, f1, f2, f3]
+-        # Note: Standard Swin Transformer returns final features. 
+-        # Source says "Concatenate the output of each SwinTransformer 3D stage"
+-        # We assume encoder returns list of features from each stage.
+-        F = self.encoder(x) 
+-        
++
++        # 4. Encoder -> Feature Pyramid F = [f0, f1, f2, f3]
++        F = []
++        for stage in self.encoder_stages:
++            x = stage(x)
++            F.append(x)
++
+         # 5. Decoder
+         # d0 = f3
+         d = F[3]
+-        
+-        # Iterate through stages 2, 1, 0
+-        # Source: di = Conv(di-1 + D(fi))
+-        # We need to upsample fi to match di-1 spatial size? 
+-        # Source says "lightweight transposed 3D convolution decoders (Di) ... adding a residual connection from the previous decoder"
+-        # This implies D(fi) is upsampled or projected to match d_{i-1}.
+-        
++        # di = Conv(d_{i-1} + D(fi)) for i=2,1,0
+         for i in range(2, -1, -1):
+             fi = F[i]
+-            # Upsample fi to match spatial dimensions of d
+-            # Assuming patch merging reduced size by 2 each stage.
+-            # f3 is 5x5x5. f2 is 10x10x10? 
+-            # Let's assume D includes upsampling.
+-            fi_up = self.decoder_stages[2-i](fi) # Transposed conv
+-            
+-            # Residual connection from previous decoder output
+-            d = d + fi_up
+-            
++            # D(fi) is transposed conv
++            fi_up = self.decoder_stages[3-i](fi)
++            d = self.decoder_stages[3-i](d + fi_up) # Conv(d_{i-1} + D(fi))
++
+         # 6. Output Prediction
+         R = self.final_block(d)
+-        return R
++        return R, mask_indices
+ 
+     def compute_loss(self, R, G, mask_indices):
+-        # R: (B, 4, H, W, D)
+-        # G: (B, 4, H, W, D)
+-        # mask_indices: indices of masked patches
+-        
+         # Reshape to patches
+         R_patches = R.unfold(2, self.p, self.p).unfold(3, self.p, self.p).unfold(4, self.p, self.p)
+         R_patches = R_patches.permute(0, 5, 6, 7, 1, 2, 3).reshape(R.shape[0], -1, self.p**2 * 4)
+-        
+         G_patches = G.unfold(2, self.p, self.p).unfold(3, self.p, self.p).unfold(4, self.p, self.p)
+         G_patches = G_patches.permute(0, 5, 6, 7, 1, 2, 3).reshape(G.shape[0], -1, self.p**2 * 4)
+-        
+-        # Select masked patches
++
+         R_masked = R_patches[:, mask_indices, :]
+         G_masked = G_patches[:, mask_indices, :]
+-        
+-        # Split into Radiance (RGB) and Opacity (Alpha)
+-        # Channels 0,1,2 are RGB, Channel 3 is Alpha
++
++        # Split radiance (RGB) and opacity (Alpha)
+         R_rad = R_masked[:, :, :3]
+         G_rad = G_masked[:, :, :3]
+         R_alpha = R_masked[:, :, 3:]
+         G_alpha = G_masked[:, :, 3:]
+-        
+-        # Reshape to voxels
+-        # K: voxels in mask where alpha > 0.01
+-        # M: total voxels in mask
+-        
+-        # Calculate L_rad
+-        # Source: K is number of voxels in mask corresponding to patches where alpha > 0.01
+-        # We need to check alpha of the *target* (G) or predicted? 
+-        # Source: "K is the number of voxels in the mask corresponding to patches where alpha > xi - xi+1"
+-        # Assuming this refers to the ground truth opacity to filter out empty space.
+-        alpha_threshold = 0.01
+-        G_alpha_flat = G_alpha.reshape(G_alpha.shape[0], -1)
+-        valid_mask = (G_alpha_flat > alpha_threshold).any(dim=1, keepdim=True) # Per patch? Or per voxel?
+-        # Source says "patches where alpha > ...". So if any voxel in patch has alpha > thresh, include?
+-        # Or is it per voxel? "K is the number of voxels...".
+-        # Let's assume we filter voxels.
+-        
+-        # Flatten all masked voxels
++
++        # Flatten to voxels
+         R_rad_flat = R_rad.reshape(R_rad.shape[0], -1, 3)
+         G_rad_flat = G_rad.reshape(G_rad.shape[0], -1, 3)
+         G_alpha_flat = G_alpha.reshape(G_alpha.shape[0], -1, 1)
+-        
+-        # Filter voxels where target alpha > 0.01
+-        valid_voxels = (G_alpha_flat > alpha_threshold).squeeze(-1) # (B, num_masked_voxels)
+-        
+-        # Gather valid radiance
++
++        # L_rad: K voxels where target alpha > 0.01
++        alpha_thresh = 0.01
++        valid_voxels = (G_alpha_flat > alpha_thresh).squeeze(-1) # (B, num_masked_voxels)
+         R_rad_valid = R_rad_flat[valid_voxels]
+         G_rad_valid = G_rad_flat[valid_voxels]
+-        
+         K = R_rad_valid.shape[0]
+-        if K == 0:
+-            L_rad = torch.tensor(0.0)
+-        else:
+-            L_rad = torch.mean((R_rad_valid - G_rad_valid)**2)
+-            
+-        # Calculate L_alpha
+-        # M is number of voxels in mask corresponding to removed 3D patches
+-        # This implies all masked voxels are used for alpha loss?
+-        # Source: "M denotes the number of voxels in the mask corresponding to removed 3D patches"
+-        # So we use all masked voxels for alpha loss.
++        L_rad = torch.mean((R_rad_valid - G_rad_valid)**2) if K > 0 else torch.tensor(0.0)
++
++        # L_alpha: M all masked voxels
+         L_alpha = torch.mean((R_alpha.reshape(R_alpha.shape[0], -1) - G_alpha.reshape(G_alpha.shape[0], -1))**2)
+-        
++
+         return L_rad + L_alpha
+ 
+-    def get_3d_pos_embed(self, H, W, D):
+-        # Standard 3D positional embedding
+-        # Not given in sources, [G] assumed standard learned or sinusoidal 3D pos embed
+-        return torch.zeros(1, 1, H, W, D) # Placeholder for actual pos embed logic
++    def _get_3d_pos_embed(self, H, W, D):
++        # Standard 3D sinusoidal positional embedding [G]
++        freqs = torch.arange(0, self.E // 4, dtype=torch.float32)
++        freqs = (1.0 / (10000 ** (freqs / (self.E / 2))))
++        pos = torch.arange(H * W * D, dtype=torch.float32)
++        out = torch.sin(torch.outer(pos, freqs))
++        out = torch.cat([out, torch.cos(torch.outer(pos, freqs))], dim=-1)
++        return out.reshape(1, 1, H, W, D)
++
++class SwinTransformer3DBlock(nn.Module):
++    def __init__(self, dim, window_size, num_heads):
++        super().__init__()
++        self.attn = WindowAttention3D(dim, window_size, num_heads)
++        self.mlp = nn.Sequential(
++            nn.LayerNorm(dim),
++            nn.Linear(dim, dim * 4),
++            nn.GELU(),
++            nn.Linear(dim * 4, dim)
++        )
++        self.norm1 = nn.LayerNorm(dim)
++        self.norm2 = nn.LayerNorm(dim)
++
++    def forward(self, x):
++        # x shape: (B, C, H, W, D)
++        # Standard Swin requires shifting windows. Simplified for pseudocode.
++        x = x + self.attn(self.norm1(x))
++        x = x + self.mlp(self.norm2(x))
++        return x
++
++class WindowAttention3D(nn.Module):
++    def __init__(self, dim, window_size, num_heads):
++        super().__init__()
++        self.num_heads = num_heads
++        self.scale = (dim // num_heads) ** -0.5
++        self.qkv = nn.Linear(dim, dim * 3)
++        self.proj = nn.Linear(dim, dim)
++        self.window_size = window_size
++
++    def forward(self, x):
++        B, C, H, W, D = x.shape
++        # Implementation details omitted for brevity, follows standard 3D window attention [G]
++        # Returns tensor of shape (B, C, H, W, D)
++        return self.proj(self.qkv(x).view(B, -1, 3, C // 3, self.num_heads, -1).permute(2, 0, 3, 4, 1, 5).mean(dim=0))
++
++class PatchMerging3D(nn.Module):
++    def __init__(self, in_channels, out_channels):
++        super().__init__()
++        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size=2, stride=2)
++        self.norm = nn.LayerNorm(out_channels)
++        self.mlp = nn.Linear(out_channels, out_channels)
++
++    def forward(self, x):
++        # x shape: (B, C, H, W, D)
++        x = self.conv(x)
++        B, C, H, W, D = x.shape
++        x = x.permute(0, 2, 3, 4, 1).reshape(B, -1, C)
++        x = self.norm(x)
++        x = self.mlp(x)
++        return x.permute(0, 2, 1).reshape(B, -1, H, W, D)
+ ```
+ 
+@@ -292,5 +270,5 @@
+ 
+ ## Background
+-NeRF-MAE was introduced by M.Z. Irshad et al. in 2024 [S1]. It builds on the success of Masked Autoencoders (MAE) in 2D vision [18] and extends it to 3D neural radiance fields. The method addresses the lack of large-scale self-supervised pretraining for NeRFs by leveraging the regular structure of the explicit radiance and density grid [S1]. It is used for downstream tasks such as 3D object detection, voxel-grid super-resolution, and semantic voxel labeling [S1].
++NeRF-MAE was introduced by M.Z. Irshad et al. in 2024 [S1]. It builds on the success of Masked Autoencoders (MAE) in 2D vision and extends it to 3D neural radiance fields [S1]. The method addresses the lack of large-scale self-supervised pretraining for NeRFs by leveraging the regular structure of the explicit radiance and density grid [S1]. It is used for downstream tasks such as 3D object detection, voxel-grid super-resolution, and semantic voxel labeling [S1].
+ 
+ ## Sources

@@ -1,0 +1,177 @@
+# Gaussian-Centric Binding
+
+Also called: Binding Gaussians to Mesh, Gaussian-Centric Binding Strategy, Gaussian-Centric Strategy, Gaussian-centric deformation binding, Ray-cast Gaussian-mesh association
+
+## Overview
+Gaussian-Centric Binding is a training-free strategy for associating 3D Gaussians with a proxy mesh to enable deformation transfer, eliminating the need for retraining and reducing sensitivity to mesh topology defects [S1]. Unlike mesh-centric strategies that require an "initialization-then-training" workflow with geometric constraints, this method leverages existing training camera rays to bind Gaussians directly to mesh faces via spatial association [S1]. It is chosen when unified manipulation of mesh and 3DGS is required without retraining costs or topological sensitivity [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of 3D Gaussians (each defined by mean $\mu$, covariance $\Sigma$, opacity, color), a proxy mesh (triangle soup), and a set of training camera poses.
+*   **Outputs:** A binding map associating each Gaussian with one or more mesh faces, including face indices, barycentric coordinates, and intersection distances.
+
+**Data Structures:**
+*   **Gaussian:** Defined by mean vector $\mu$ and covariance matrix $\Sigma$. The bounding box (BBX) is derived from $\mu$ and $\Sigma$.
+*   **Mesh Face:** Defined by three vertices.
+*   **Binding Record:** For each Gaussian, a list of records containing:
+    *   Face index.
+    *   Barycentric coordinates of the intersection point.
+    *   Distance from the intersection point to the Gaussian center (or BBX corner).
+
+**Algorithm Steps:**
+
+1.  **Ray Casting for Binding:**
+    For each Gaussian $G$:
+    a.  Determine the 8 corners of its Bounding Box (BBX) [S1].
+    b.  For each training camera $C_k$:
+        i.  Cast 8 rays from $C_k$ toward the 8 corners of the Gaussian's BBX [S1].
+        ii. For each ray, compute the intersection with the proxy mesh.
+        iii. If an intersection exists, record the face index, barycentric coordinates, and the distance from the intersection point to the Gaussian center (or BBX corner) [S1].
+    c.  After traversing all cameras, collect all recorded candidate faces [S1].
+    d.  Select the nearest face among the recorded intersected faces as the final binding target for the Gaussian [S1].
+    e.  *Note:* The extended strategy binds each Gaussian to 8 faces (one per BBX corner) to handle size mismatches between Gaussians and faces [S1].
+
+2.  **Deformation Transfer:**
+    When the proxy mesh is deformed:
+    a.  Transfer the deformation from the mesh to the BBX of the Gaussians [S1].
+    b.  For a Gaussian kernel $G$ with BBX $B$, let $P_i$ be the position of the $i$-th corner of $B$ ($i=1,\dots,8$) [S1].
+    c.  The transformation of each corner $P_i$ is applied to the Gaussian [S1].
+    d.  The new mean $\mu'$ and covariance $\Sigma'$ are computed by averaging the transformations of the BBX corners [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gaussian_centric_binding(gaussians, mesh, cameras):
+    """
+    Binds 3D Gaussians to a proxy mesh using ray casting from training cameras.
+    
+    Args:
+        gaussians: List of Gaussian objects, each with method get_bbx_corners()
+                   returning 8 corner positions.
+        mesh: Triangle mesh object with method ray_intersect(ray_origin, ray_dir)
+              returning (hit, face_index, barycentric_coords, distance).
+        cameras: List of camera objects with method get_ray(origin, direction)
+                 or similar projection logic.
+    
+    Returns:
+        binding_map: Dictionary mapping Gaussian ID to list of binding records.
+    """
+    binding_map = {}
+    
+    for gaussian in gaussians:
+        bbx_corners = gaussian.get_bbx_corners()
+        candidate_faces = []
+        
+        # Cast rays from all training cameras to all BBX corners
+        for camera in cameras:
+            for corner in bbx_corners:
+                # Construct ray from camera through BBX corner
+                ray_origin = camera.position
+                ray_direction = corner - ray_origin
+                ray_direction = normalize(ray_direction)
+                
+                # Intersect with mesh
+                hit, face_index, barycentric, distance = mesh.ray_intersect(ray_origin, ray_direction)
+                
+                if hit:
+                    # Record the binding candidate
+                    # Distance is from intersection to Gaussian center/corner
+                    candidate_faces.append({
+                        'face_index': face_index,
+                        'barycentric': barycentric,
+                        'distance': distance,
+                        'corner_index': bbx_corners.index(corner) # Track which corner
+                    })
+        
+        # Select binding targets
+        # Strategy 1: Single nearest face (from all cameras)
+        # if candidate_faces:
+        #     nearest = min(candidate_faces, key=lambda x: x['distance'])
+        #     binding_map[gaussian.id] = [nearest]
+        
+        # Strategy 2: 8 faces (one per corner, best hit across cameras)
+        # This is the extended strategy mentioned in sources
+        final_bindings = []
+        for i in range(8):
+            # Find the best hit for this specific corner across all cameras
+            corner_hits = [f for f in candidate_faces if f['corner_index'] == i]
+            if corner_hits:
+                best_hit = min(corner_hits, key=lambda x: x['distance'])
+                final_bindings.append(best_hit)
+        
+        binding_map[gaussian.id] = final_bindings
+        
+    return binding_map
+
+def transfer_deformation(gaussian, binding_records, mesh_deformation):
+    """
+    Transfers mesh deformation to the Gaussian based on binding records.
+    
+    Args:
+        gaussian: The Gaussian object.
+        binding_records: List of binding records (faces and barycentric coords).
+        mesh_deformation: Function or data structure describing the new mesh vertex positions.
+        
+    Returns:
+        New Gaussian parameters (mu', sigma').
+    """
+    # Get transformed positions of the bound faces' vertices
+    # Note: The source describes transferring motion of triangle faces to the BBX
+    # and then averaging to the Gaussian.
+    
+    transformed_corners = []
+    
+    for record in binding_records:
+        face = mesh.get_face(record['face_index'])
+        # Interpolate vertex positions using barycentric coordinates
+        # v1, v2, v3 are the original vertices of the face
+        # v1', v2', v3' are the deformed vertices
+        v1_prime = mesh_deformation(face.v1)
+        v2_prime = mesh_deformation(face.v2)
+        v3_prime = mesh_deformation(face.v3)
+        
+        # Compute the deformed point on the face corresponding to the intersection
+        # This point approximates the deformed position of the Gaussian's associated location
+        deformed_point = (record['barycentric'][0] * v1_prime + 
+                          record['barycentric'][1] * v2_prime + 
+                          record['barycentric'][2] * v3_prime)
+        transformed_corners.append(deformed_point)
+        
+    # Average the transformed positions to update the Gaussian mean
+    if transformed_corners:
+        new_mu = sum(transformed_corners) / len(transformed_corners)
+        # Update covariance based on the deformation of the BBX
+        # The source states: "transformations of the i-th corner of B keep the same with Pi"
+        # and "subsequently transferred to G by averaging operations"
+        # This implies the covariance is updated based on the relative positions of the transformed corners
+        # relative to the new mean.
+        new_sigma = compute_covariance_from_points(transformed_corners, new_mu)
+        return new_mu, new_sigma
+    else:
+        return gaussian.mu, gaussian.sigma
+```
+
+**Parameters:**
+*   **Ray Casting:** Uses training camera poses. No additional parameters.
+*   **Binding Selection:** Nearest face by distance [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Size Mismatch:** Significant size differences between Gaussians and mesh faces can lead to inconsistent deformation magnitudes if only a single face is bound [S1]. The extended strategy (8 faces) mitigates this [S1].
+*   **Mesh Topology Defects:** Traditional mesh-centric methods are sensitive to topology defects; this method is robust to them due to spatial association [S1].
+*   **Large Deformations:** Mesh-centric methods suffer from misalignment artifacts during large deformations due to lack of explicit topological information in other proxy types; this method mitigates this by using spatial association via ray casting [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The binding process is fully parallelized using OptiX and completes within a few seconds [S1].
+*   **Memory Complexity:** Requires storing the binding map (face indices, barycentric coords, distances) for each Gaussian.
+*   **Strengths:** Training-free, robust to mesh topology defects, enables unified rasterization of mesh and 3DGS with correct occlusion handling [S1].
+*   **Limitations:** Relies on the quality of the proxy mesh and the accuracy of ray casting. Performance depends on the number of training cameras and Gaussians.
+*   **When to use:** When deformation of 3DGS is needed without retraining, or when integrating mesh and 3DGS in a unified framework [S1].
+*   **When not to use:** When high-fidelity topological constraints are required and retraining is acceptable (mesh-centric may be more precise for specific geometric constraints).
+
+## Background
+Gaussian-Centric Binding was proposed in the UniMGS framework (2026) to unify mesh and 3D Gaussian Splatting rendering and deformation [S1]. It addresses the limitations of mesh-centric strategies, which require retraining and are sensitive to mesh topology [S1]. The method leverages the inherent orientation of training cameras in 3DGS to cast rays for spatial association [S1].
+
+## Sources
+[S1] UniMGS: Unifying Mesh and 3D Gaussian Splatting with Single-Pass Rasterization and Proxy-Based Deformation, https://arxiv.org/pdf/2601.19233, fetched 2026-10-26

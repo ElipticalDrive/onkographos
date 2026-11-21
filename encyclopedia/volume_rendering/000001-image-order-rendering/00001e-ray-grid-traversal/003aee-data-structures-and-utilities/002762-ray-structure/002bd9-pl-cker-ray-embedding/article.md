@@ -1,0 +1,101 @@
+# Plücker Ray Embedding
+
+## Overview
+Plücker Ray Embedding parameterizes a 3D ray using Plücker coordinates to create a representation independent of scale, camera position, and focal length [S1, unofficial]. It maps a ray defined by origin $\mathbf{o}$ and direction $\mathbf{v}$ into a 16-dimensional multivector using the cross product between the camera location and ray direction [S1, unofficial]. Unlike extrinsic/intrinsic matrix parameterizations, this method enables robust modulation of camera poses to image features in neural rendering frameworks [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `pluecker_ray`: Tensor of shape `[..., 6]`. The last dimension contains the ray parameters, with indices 0–2 representing the origin $\mathbf{o}$ and indices 3–5 representing the direction $\mathbf{v}$ [S2, unofficial].
+
+**Outputs:**
+- `multivector`: Tensor of shape `[..., 16]` [S2, unofficial].
+
+**Data Structures:**
+- The multivector is a 16-element vector where specific indices store the direction and permuted/negated origin components [S2, unofficial].
+
+**Steps:**
+1. Initialize `mv` as a zero tensor of shape `[..., 16]` with the same device and dtype as `pluecker_ray` [S2, unofficial].
+2. Assign the direction vector $\mathbf{v}$ (from input indices 3:6) to multivector indices 5:8 [S2, unofficial].
+3. Assign the cross product component $\mathbf{o} \times \mathbf{v}$ to multivector indices 8, 9, 10 using the source's explicit index mapping: index 8 receives input index 2, index 9 receives negative input index 1, and index 10 receives input index 0 [S2, unofficial].
+4. (Indices 0–4 and 11–15 remain zero as per initialization and lack of assignment in the source [S2, unofficial].)
+
+**Extracting Plücker Ray from Multivector:**
+To reverse the embedding:
+1. Concatenate `mv[..., 10]`, `-mv[..., 9]`, `mv[..., 8]`, and `mv[..., 5:8]` to reconstruct the original 6D ray tensor [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def embed_pluecker_ray(pluecker_ray: torch.Tensor) -> torch.Tensor:
+    """
+    Embeds a ray [o_x, o_y, o_z, v_x, v_y, v_z] into a 16D multivector.
+    Follows the index mapping from [S2, unofficial].
+    """
+    shape = pluecker_ray.shape[:-1]
+    mv = torch.zeros(*shape, 16, device=pluecker_ray.device, dtype=pluecker_ray.dtype)
+    
+    # Assign direction v (input indices 3:6) to multivector indices 5:8
+    mv[..., 5] = pluecker_ray[..., 3]
+    mv[..., 6] = pluecker_ray[..., 4]
+    mv[..., 7] = pluecker_ray[..., 5]
+    
+    # Assign cross product components via explicit index mapping
+    mv[..., 8] = pluecker_ray[..., 2]  # input index 2
+    mv[..., 9] = -pluecker_ray[..., 1] # negative input index 1
+    mv[..., 10] = pluecker_ray[..., 0] # input index 0
+    
+    return mv
+
+def extract_pluecker_ray(mv: torch.Tensor) -> torch.Tensor:
+    """
+    Extracts ray [o_x, o_y, o_z, v_x, v_y, v_z] from 16D multivector.
+    Follows the extraction logic from [S2, unofficial].
+    """
+    o_x = mv[..., 10]
+    o_y = -mv[..., 9]
+    o_z = mv[..., 8]
+    v_x = mv[..., 5]
+    v_y = mv[..., 6]
+    v_z = mv[..., 7]
+    
+    return torch.cat([o_x.unsqueeze(-1), o_y.unsqueeze(-1), o_z.unsqueeze(-1), 
+                      mv[..., 5:8]], dim=-1)
+```
+
+**Parameters:**
+- Not given in the sources.
+
+**Edge Cases:**
+- Not given in the sources.
+
+## Subtopics
+
+### Ray Bundle
+A collection of rays sharing a common origin or structure. Chosen when processing multiple rays simultaneously for batched rendering. See [Ray Bundle](2179-ray-bundle.md).
+
+### RayBatch container
+A data structure for batching ray parameters for efficient GPU processing. Chosen for high-throughput rasterization or ray marching. See [RayBatch container](4187-raybatch-container.md).
+
+### Hit Record Structure
+Stores intersection details (point, normal, distance) for a ray. Chosen when ray-object intersection results need to be retained for shading. See [Hit Record Structure](4953-hit-record-structure.md).
+
+### Ray Segments Spec
+Defines sub-segments of a ray for adaptive traversal. Chosen when ray length varies significantly or adaptive sampling is required. See [Ray Segments Spec](12496-ray-segments-spec.md).
+
+## Operating characteristics
+- Time complexity: Not given in the sources.
+- Memory complexity: Not given in the sources.
+- Strengths: Invariant to camera scale, position, and focal length [S1, unofficial]. Facilitates feature fusion in multi-view transformers [S1, unofficial].
+- Limitations: The specific index mapping for the cross product components differs from the standard geometric formula $\mathbf{o} \times \mathbf{v} = (o_y v_z - o_z v_y, o_z v_x - o_x v_z, o_x v_y - o_y v_x)$, requiring strict adherence to the source's layout [S2, unofficial]. The 16D vector is sparse, with only 6 elements populated [S2, unofficial].
+- When to use: When integrating camera rays into neural networks that require geometric invariance [S1, unofficial].
+- When not to use: Not given in the sources.
+
+## Background
+Plücker coordinates provide a homogeneous representation of lines in 3D space [G]. In computer vision and rendering, they are used to parameterize rays independently of the camera's intrinsic and extrinsic parameters [S1, unofficial]. This allows for robust feature fusion across multiple views in neural reconstruction models, such as the Fusion ViT described in [S1, unofficial]. The specific 16D multivector embedding and index mapping originates from the GAI-GS repository [S2, unofficial], while the theoretical motivation for using Plücker rays for scale/position invariance is detailed in X-GRM [S1, unofficial].
+
+## Sources
+[S1] X-GRM: Large Gaussian Reconstruction Model for Sparse-view X-rays to Computed Tomography, https://doi.org/10.48550/arXiv.2505.15235, fetched 2026-10-27 (unofficial)
+[S2] NorahCadeJS/GAI-GS, https://github.com/NorahCadeJS/GAI-GS, fetched 2026-10-27 (unofficial)

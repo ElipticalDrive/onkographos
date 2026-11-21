@@ -1,0 +1,311 @@
+【WIP】GPUのatomic演算とsubgroup演算の練習帳（GLSL/OpenGL）
+GLSL
+atomic
+tech
+atomic演算とsubgruop演算
+GPUでスレッド間でデータをやりとりできると、処理の自由度がかなり上がります。もっとも基本的なアプローチが atomic演算(atomic operation) です。その他にもshared memoryを使ったり subgroup演算(subgroup operation) を使ったりできます。atomic演算とsubgroup演算について、一度コードで挙動を実感できるといいかなと思うので、いくつか簡単な例を書いてみます。shared memoryはこの記事では扱いません。
+atomic演算
+複数のGPUスレッドからグローバルメモリ（バッファ）に値を書きこむときは衝突を回避するためにatomic演算を使います。
+例1. 簡単なグローバルカウンター
+まずは一番簡単なところから始めましょう。バッファにカウンターとなるuintの変数を用意して、各GPUスレッドでインクリメントしてみます。
+コードは短く書くためPythonのModernGLを使っています。本題はシェーダなのでホストコードはなんでもかまいません。
+コンテキストを作成します。
+```
+import moderngl
+import numpy as np
+
+ctx = moderngl.create_context(standalone=True)
+```
+カウンター用のストレージバッファを作成します。
+```
+count =  np.zeros((1)).astype('uint32').tobytes() # count = [0]
+count_buffer = ctx.buffer(count)
+count_buffer.bind_to_storage_buffer(0)
+```
+さて、本題のCompute shaderです。Countバッファを書いておき、mainではatomicAdd()を使ってcountをインクリメントします。スレッド数は64としておきましょう。
+```
+compute_shader = ctx.compute_shader(f'''
+#version 430
+layout(local_size_x = 64) in;
+layout(binding = 0, std430) buffer Count {{
+    uint count;
+}};
+
+void main() {{
+    atomicAdd(count, 1);
+}}
+''')
+```
+実際に実行してみて、カウントの結果を見てみます。
+```
+# WorkGroupは1つで実行
+compute_shader.run(group_x=1)
+
+# 結果を取得して出力
+count_result = np.frombuffer(count_buffer.read(), dtype='uint32')
+print("count_result:", count_result)
+
+# Bufferをクリア
+count_buffer.clear()
+```
+出力結果は以下のようになるはずです。期待通り動いていますね。ちなみに、atomicAdd()を使わずにcount++のように書いてみると、間違った結果が返ってくるのが実感できると思います。
+```
+count_result: [64]
+```
+例2. インデックスの取得
+インクリメントできることは分かりました。では、当該スレッドは何番目にインクリメントしたのか確認してみましょう。
+結果は配列に格納してCPU側で確認できるようにしておきます。配列用のバッファを新しく作成します。
+```
+array =  np.zeros((64)).astype('uint32').tobytes()
+array_buffer = ctx.buffer(array)
+array_buffer.bind_to_storage_buffer(1)
+```
+シェーダを書きます。uint index = atomicAdd(count, 1)と書くとインデックスが確認できます。atomic演算では、atomicAdd()に限らず、当該スレッドの演算直前の値が返されます。
+```
+compute_shader = ctx.compute_shader(f'''
+#version 430
+layout(local_size_x = 64) in;
+
+layout(binding = 0, std430) buffer Count {{
+    uint count;
+}};
+layout(binding = 1, std430) buffer Array {{
+    uint array[];
+}};
+
+void main() {{
+    uint gid = gl_GlobalInvocationID.x;
+    uint index = atomicAdd(count, 1);
+    array[gid] = index;
+}}
+''')
+```
+実行してみると、0から63までの値が配列に詰まっているはずです。このように、各スレッドでuniqueなインデックスが取得できます。この例では綺麗に昇順で並んでいますが、順序は保証されないはずです（仕様あたっていませんが）。
+```
+compute_shader.run(group_x=1)
+print("count:", np.frombuffer(count_buffer.read(), dtype='uint32'))
+print("array:", np.frombuffer(array_buffer.read(), dtype='uint32'))
+
+count_buffer.clear()
+array_buffer.clear()
+```
+```
+count: [64]
+array: [ 0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23
+ 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47
+ 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63]
+```
+例3. 条件を満たす値だけカウントして配列にパックする
+今までは全スレッドで同じ処理をしていました。これでは結果が明らかですから、あまり意味がありません。もう少し実用的な例にしてみましょう。
+今回の設定はこうです。
+各スレッドで何かしらの値を計算する
+条件を満たす場合だけカウントする
+条件を満たす場合だけ計算した値を配列にパックする（連続的に詰める）
+ここでは適当にvalue = gid * gidとして値を計算し、それが100の倍数であった場合はatomicAdd()でインクリメントします。さらに、atomicAdd()で返されるインデックスを使用して配列に値を入れます。
+```
+compute_shader = ctx.compute_shader(f'''
+#version 430
+layout(local_size_x = 64) in;
+
+layout(binding = 0, std430) buffer Count {{
+    uint count;
+}};
+layout(binding = 1, std430) buffer Array {{
+    uint array[];
+}};
+
+void main() {{
+    uint gid = gl_GlobalInvocationID.x;
+    uint value = gid * gid;
+    if(value % 100 == 0){{
+        uint index = atomicAdd(count, 1);
+        array[index] = value;
+    }}
+}}
+''')
+```
+さて、実行してみると、100の倍数である平方数が配列に連続して入っているはずです。条件を満たすのは7個だったようです。
+```
+compute_shader.run(group_x=1)
+print("count:", np.frombuffer(count_buffer.read(), dtype='uint32'))
+print("array:", np.frombuffer(array_buffer.read(), dtype='uint32'))
+
+count_buffer.clear()
+array_buffer.clear()
+```
+```
+count: [7]
+array: [   0  100  400  900 1600 2500 3600    0    0    0    0    0    0    0
+    0    0    0    0    0    0    0    0    0    0    0    0    0    0
+    0    0    0    0    0    0    0    0    0    0    0    0    0    0
+    0    0    0    0    0    0    0    0    0    0    0    0    0    0
+    0    0    0    0    0    0    0    0]
+```
+色々なatomic演算
+atomicAdd(inout int mem, int data): 加算
+Min, Max
+atomicMin(inout int mem, int data): Min
+atomicMax(inout int mem, int data): Max
+論理演算
+atomicAnd(inout int mem, int data): 論理And
+atomicOr(inout int mem, int data): 論理Or
+atomicXor(inout int mem, int data): 論理Xor
+スワップ
+atomicExchange(inout int mem, int data): スワップして元の値を返す。
+atomicCompSwap(inout int mem, uint compare, uint data): memとcompareが等しければスワップ。スワップしたかどうかにかかわらず元の値を返す。
+```
+// こんな挙動
+int old = mem;
+if(mem == compare) { mem = data; }
+return old;
+```
+atomicCounter
+atomicCounterという専用の関数もありますがVulkanでは使わなくなりました。例で示したようにatomicAdd()で同じことができます。
+atomicCounter
+atomicCounterDecrement
+atomicCounterIncrement
+subgroup演算
+atomic演算の簡単な例はここまでにして、一度subgroup演算の練習もします。
+subgroupはハードウェアで実際に一緒に実行されるスレッドの束のことで、NVIDIAにおけるwarp、AMDにおけるwaveのクロスベンダー呼称です。スレッド数はNVIDIAなら32スレッド、AMDなら64スレッドと異なっています。subgroup演算はwarp-level intrinsics、wave intrinsicsと対応するはずです。
+subgroup演算は、subgroup内のスレッド同士で協調するような演算になっています。atomic演算とは違い、グローバルメモリに対する同期とは関係ありません。そのため、atomic演算よりも高速な処理が期待できます。
+例4. subgroup内のカウントとインデックスの取得
+atomic演算でやったように、カウントとインデックスの取得を書いてみます。
+subgroup演算にはGLSL拡張機能が必要です。
+```
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+```
+subgroupAdd(int value)では、valueをsubgroup内の全スレッドで合計した値を計算します。全スレッドで同じ値が返ってくるので、これでカウントが可能です。
+subgroupExclusiveAdd(int value)では、valueをsubgroup内の当該スレッドよりも若い番号のスレッドで合計した値を計算します。スレッドごとに異なる値が返ってくるので、これでインデックスが取得できます。
+```
+counts =  np.zeros((2)).astype('uint32').tobytes() # count = [0]
+counts_buffer = ctx.buffer(counts)
+counts_buffer.bind_to_storage_buffer(0)
+
+compute_shader = ctx.compute_shader(f'''
+#version 430
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+layout(local_size_x = 64) in;
+
+layout(binding = 0, std430) buffer Count {{
+    uint counts[];
+}};
+layout(binding = 1, std430) buffer Array {{
+    uint array[];
+}};
+
+void main() {{
+    uint gid = gl_GlobalInvocationID.x;
+    counts[gid / 32] = subgroupAdd(1);
+    uint index = subgroupExclusiveAdd(1);
+    array[gid] = index;
+}}
+''')
+
+compute_shader.run(group_x=1)
+print("counts:", np.frombuffer(counts_buffer.read(), dtype='uint32'))
+print("array:", np.frombuffer(array_buffer.read(), dtype='uint32'))
+
+counts_buffer.clear()
+array_buffer.clear()
+```
+さて、実行結果は以下のようになりました。
+```
+count: [32 32]
+array: [ 0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23
+ 24 25 26 27 28 29 30 31  0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15
+ 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31]
+```
+この結果はNVIDIAかAMDかによって変わってしまいます。私のGPUはNVIDIA製なので、シェーダを64スレッドで起動すると、32スレッドのsubgroup2つで処理されます。32スレッドなのでcountは32となり、インデックスは2つのsubgroupで計算されるので0-31が2回詰まっています。
+例5. subgroupAddでatomicAddを削減して高速化する
+atomicAddよりもsubgroupAddの方が高速な処理が期待できると述べました。例1のグローバルなカウンターでは全スレッドでatomicAddを使っていましたが、これをsubgroupAddで削減することができます。
+手順はこうです。
+subgrpupAddでsubgroup内で先に合計値を計算する
+subgroupElectでsubgroup内で最も若いスレッドでのみifブロックに入る
+ifブロック内でsubgroup内の合計値をatomicAddでcountに加算する
+```
+compute_shader = ctx.compute_shader(f'''
+#version 430
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+layout(local_size_x = 64) in;
+
+layout(binding = 0, std430) buffer Count {{
+    uint count;
+}};
+layout(binding = 1, std430) buffer Array {{
+    uint array[];
+}};
+
+void main() {{
+    uint gid = gl_GlobalInvocationID.x;
+    uint tmp = subgroupAdd(1);
+    if(subgroupElect()) {{
+        atomicAdd(count, tmp);
+    }}
+}}
+''')
+
+
+compute_shader.run(group_x=1)
+print("count:", np.frombuffer(count_buffer.read(), dtype='uint32'))
+
+count_buffer.clear()
+```
+実行してみると、例1と同じ結果が得られました。
+```
+count: [64]
+```
+例6. subgroupBallotで何個のスレッドが条件を満たしたのかを計算する
+例3では、各スレッドで計算した値によって条件分岐が発生していました。ここで、
+subgroup内で何個のスレッドが条件を満たしたのか？
+当該スレッドが条件を満たしていた場合、条件を満たすスレッド内では何番目にあたるのか？
+といった情報が欲しくなります。それを可能にするのが、subgroupBallot関連の関数です。
+この例では、とりあえずsubgroup内の何個のスレッドが条件を満たしたのかを取得します。
+2つの処理が必要です。
+subgroupBallot()で全スレッドの条件（bool値）をuvec4のビット列として集める
+そのビット列の中の1の数をsubgroupBallotBitCount()でカウントする
+```
+compute_shader = ctx.compute_shader(f'''
+#version 430
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+layout(local_size_x = 64) in;
+
+layout(binding = 0, std430) buffer Count {{
+    uint counts[];
+}};
+layout(binding = 1, std430) buffer Array {{
+    uint array[];
+}};
+
+void main() {{
+    uint gid = gl_GlobalInvocationID.x;
+                                    
+    uint value = gid * gid;
+    uvec4 vote = subgroupBallot(value % 100 == 0);
+    counts[gid / 32] = subgroupBallotBitCount(vote);
+}}
+''')
+
+compute_shader.run(group_x=1)
+print("counts:", np.frombuffer(counts_buffer.read(), dtype='uint32'))
+
+counts_buffer.clear()
+```
+結果です。例3で100の倍数の平方数は7個だったと確認しましたが、平方数の数列内のはじめ32個の中に4つ（0 100 400 900）、その後の32個の中に3つ（1600 2500 3600）あったということが分かります。
+```
+counts: [4 3]
+```
+このように、全スレッドのbool値を一度ビット列として集めてから所望の操作をするという流れです。ビット列の型はuvec4ですから、128ビットです。NVIDIAでもAMDでも問題なく全スレッドの値が格納できます。
+例7. 配列に連続的に詰める問題でatomicAddを削減する
+カウントであればatomicAddの削減も難しくありませんでした。では次に配列に連続的に値を詰める問題でもatomicAddを削減してみましょう。
+ここでsubgroupBallotが効いてきます。
+TODO: subgroupの注意点について記載
+TODO: subgroupBallotで任意のmaskを使う例
+Discussion

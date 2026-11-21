@@ -1,0 +1,260 @@
+--- v005.md
++++ v006.md
+@@ -4,149 +4,134 @@
+ 
+ ## Overview
+-Russian Roulette is an unbiased probabilistic technique used to terminate volumetric paths or ray-marching loops when their contribution becomes negligible, replacing biased threshold-based early termination [S1, unofficial][S4, unofficial]. It prevents infinite loops or excessive computation in transparent or dense regions by stochastically killing paths with low weight while scaling up the weight of surviving paths to maintain an unbiased expected value [S3, unofficial][S4, unofficial]. Unlike simple threshold cutoffs which introduce systematic bias, Russian Roulette preserves statistical correctness at the cost of increased variance (noise) [S2, unofficial].
++Russian Roulette is a randomized early-out technique used in Monte Carlo volume rendering to probabilistically terminate ray marching paths when their contribution becomes negligible, thereby removing the statistical bias introduced by deterministic threshold-based early termination [S1, unofficial][S2, unofficial][S3, unofficial]. Unlike deterministic cutoffs which simply discard remaining contributions, Russian Roulette kills the path with a calculated probability while scaling up the weight of surviving paths to maintain an unbiased expectation of the final pixel color [S4, unofficial][S5, unofficial]. It is distinct from [Empty-space skipping](1002-empty-space-skipping.md) and [Bounding Volume Culling](1239-bounding-volume-culling.md) because it operates on the accumulated throughput/opacity of the ray rather than spatial occupancy, and from [Early Stop](1790-early-stop.md) because it preserves statistical correctness at the cost of increased variance [S3, unofficial][S5, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** Current path/ray contribution weight (or transmittance) $W$ (or $T$), a termination probability parameter $p_{rr}$ (or $q$), and a uniform random number generator [S4, unofficial][S5, unofficial].
+-- **Output:** Updated weight $W'$ (or $T'$) and a boolean flag indicating whether the path continues or terminates [S4, unofficial][S5, unofficial].
++- **Input:** Current accumulated transmittance (or throughput) $T$ (or $\beta$), current path contribution weight $W$, and a random number generator.
++- **Output:** Updated transmittance/weight $T'$ or $W'$, and a boolean flag indicating whether the ray should continue or terminate.
+ 
+ **Data Structures:**
+-- **Weight/Transmittance:** A scalar (for single-channel transmittance) or a vector/spectrum (for RGB color contributions) [S4, unofficial][S6].
+-- **Random Number:** A single float $\xi$ or $u$ uniformly distributed in $[0, 1]$ [S4, unofficial][S5, unofficial].
++- **Transmittance ($T$):** A scalar or vector (e.g., `Spectrum` in PBRT) representing the fraction of light surviving from the ray origin to the current sample point. Initialized to 1.0 [S5, unofficial].
++- **Contribution Weight ($W$):** The accumulated product of phase functions, albedos, and geometric terms along the path [S4, unofficial].
++- **Random Number ($\xi$ or $u$):** A uniform random variable in $[0, 1]$ [S1, unofficial][S4, unofficial].
+ 
+ **Parameters:**
+-- **Termination Probability ($p_{rr}$ or $q$):** Determined by the magnitude of the current weight. For color paths, it is often derived from the maximum component of the weight or transmittance [S3, unofficial][S4, unofficial]. For simple transmittance checks, a constant multiplier $d$ is used where $p_{rr} = 1 - 1/d$ [S1, unofficial][S5, unofficial].
+-- **Threshold:** A minimum value for transmittance/weight below which Russian Roulette is considered (e.g., $10^{-3}$) [S1, unofficial][S5, unofficial].
+-- **Multiplier ($d$):** An integer $> 1$ controlling termination frequency. Common value is $d=2$ [S1, unofficial][S5, unofficial].
++- **Threshold ($\tau$):** A small positive value (e.g., $10^{-3}$) below which Russian Roulette is considered [S5, unofficial].
++- **Continuation Probability ($p_{cont}$) or Compensation Factor ($D$):**
++  - In the scalar/transmittance formulation, $D > 1$ is a compensation factor. The probability of termination is $1 - 1/D$, and the probability of continuation is $1/D$ [S1, unofficial][S5, unofficial].
++  - In the path-weight formulation, $p_{rr}$ is the termination probability. The continuation probability is $1 - p_{rr}$ [S4, unofficial].
++  - Typical values: $D=2$ (50% chance of continuation) [S5, unofficial]; $p_{rr}$ often set to the maximum component of the transmittance or weight [S4, unofficial][S6].
+ 
+-**Steps:**
+-1. **Evaluate Weight:** Compute the current accumulated transmittance $T$ or path weight $W$ after a scattering event or sample integration [S4, unofficial][S5, unofficial].
+-2. **Check Threshold:** If $T$ (or $W$) falls below a minimum threshold (e.g., $10^{-3}$), apply Russian Roulette to avoid bias from simple cutoffs [S1, unofficial][S4, unofficial][S5, unofficial].
+-3. **Determine Termination Probability:**
+-   - *Method A (Constant Multiplier):* Set $p_{rr} = 1 - 1/d$ (e.g., $0.5$ if $d=2$) [S1, unofficial][S5, unofficial].
+-   - *Method B (Dynamic):* Set $q = \max(0, 1 - \max(\text{components of } W))$ based on the weight's magnitude [S4, unofficial][S6].
+-4. **Generate Random Number:** Sample $\xi \sim U[0, 1]$ [S4, unofficial][S5, unofficial].
+-5. **Decision:**
+-   - If $\xi < q$ (or $\xi > 1/d$ in Method A logic), terminate the path. Set $W' = 0$ (or $T' = 0$) [S4, unofficial][S5, unofficial].
+-   - Otherwise, continue. Scale the weight to compensate for the probability of termination: $W' = W / (1 - q)$ (or $T' = T \cdot d$) [S4, unofficial][S5, unofficial].
+-6. **Continue:** Proceed with the next sample or scattering event using $W'$ [S4, unofficial][S5, unofficial].
++**Numbered Steps:**
++1. **Check Threshold:** If the accumulated transmittance $T$ (or weight $W$) is greater than or equal to the threshold $\tau$, continue marching without applying Russian Roulette.
++2. **Generate Random Number:** Sample a uniform random number $\xi \in [0, 1]$ [S1, unofficial][S4, unofficial].
++3. **Determine Termination:**
++   - **Scalar/Transmittance Formulation:** If $\xi > 1/D$ (or $\xi > p_{cont}$ where $p_{cont} = 1/D$), terminate the ray. Set $T' = 0$ [S1, unofficial][S5, unofficial].
++   - **Path Weight Formulation:** If $\xi < p_{rr}$, terminate the path. Set $W' = 0$ [S4, unofficial].
++4. **Compensate Weight:**
++   - **Scalar/Transmittance Formulation:** If the ray continues, update the transmittance: $T' = T \cdot D$ [S1, unofficial][S5, unofficial].
++   - **Path Weight Formulation:** If the path continues, update the weight: $W' = W / (1 - p_{rr})$ [S4, unofficial]. Note: Some sources define $p_{rr}$ as the continuation probability, in which case $W' = W / p_{rr}$ [S4, unofficial]. The standard unbiased estimator requires dividing by the *continuation* probability.
++5. **Update State:** Replace $T$ with $T'$ (or $W$ with $W'$) and continue the marching loop. If terminated, break the loop.
+ 
+ **Formulas:**
+-The expected value of the weight remains unchanged:
+-$$ E[W'] = (1 - p_{rr}) \cdot 0 + p_{rr} \cdot \frac{W}{p_{rr}} = W $$
+-Where $p_{rr}$ is the probability of *continuing* (survival probability) in the scaling formula, or $q$ is the probability of *termination* [S4, unofficial].
++The expected value of the updated weight $W'$ must equal the original weight $W$ to ensure unbiasedness [S4, unofficial]:
++$$ E[W'] = (1 - p_{cont}) \cdot 0 + p_{cont} \cdot \frac{W}{p_{cont}} = W $$
++Where $p_{cont}$ is the probability of continuing [S4, unofficial].
++
++In the PBRT implementation, the termination probability $q$ is derived from the maximum component of the scaled beta ($\beta$) [S6]:
++$$ q = \max(0, 1 - \beta_{max}) $$
++If $\xi < q$, the path is terminated. Otherwise, $\beta$ is divided by $1 - q$ [S6].
+ 
+ **Pseudocode:**
+ ```python
+-import random
++def russian_roulette(transmittance, threshold=1e-3, compensation_factor=2.0):
++    """
++    Applies Russian Roulette to a ray marching loop.
++    
++    Args:
++        transmittance: Current accumulated transmittance (float or Spectrum).
++        threshold: Minimum transmittance to consider termination.
++        compensation_factor: D > 1. Probability of continuation is 1/D.
++        
++    Returns:
++        new_transmittance: Updated transmittance if continuing, 0 if terminated.
++        continue_ray: Boolean, True if the ray should continue marching.
++    """
++    # Step 1: Check if we are below the threshold
++    # For Spectrum, we might check the average or max component.
++    # Here we assume a scalar transmittance for simplicity, or check max component.
++    if transmittance >= threshold:
++        return transmittance, True
+ 
+-def russian_roulette(weight, d=2.0, threshold=1e-3):
++    # Step 2: Generate random number
++    r = random_uniform(0.0, 1.0)
++
++    # Step 3: Determine termination
++    # Probability of continuation is 1/D.
++    # If r < 1/D, we continue. If r >= 1/D, we terminate.
++    # Note: S1/S5 say "if r > 1/D, terminate". This implies continuation if r <= 1/D.
++    # Let's align with S5: "if rand() > 1/d ... break". So continue if rand() <= 1/d.
++    
++    continue_prob = 1.0 / compensation_factor
++    
++    if r > continue_prob:
++        # Terminate
++        return 0.0, False
++    else:
++        # Continue and compensate
++        # Multiply transmittance by D to compensate for the reduced probability
++        new_transmittance = transmittance * compensation_factor
++        return new_transmittance, True
++
++def pbrt_style_russian_roulette(beta, eta_scale, sampler, depth, max_depth):
+     """
+-    Applies Russian Roulette to a volumetric path weight or transmittance.
+-    Args:
+-        weight: Current transmittance or path weight (scalar or vector/spectrum).
+-        d: Multiplier controlling termination frequency. d > 1.
+-        threshold: Minimum weight to trigger RR.
+-    Returns:
+-        new_weight: Scaled weight if continuing, 0.0 if terminated.
+-        continue_path: Boolean indicating if the path should continue.
++    PBRT-style Russian Roulette for volumetric path tracing.
++    Based on [S6].
+     """
+-    if weight < threshold:
+-        # Method A: Constant multiplier (S1, S5)
+-        # Probability of termination = 1 - 1/d
+-        # Probability of continuation = 1/d
+-        u = random.uniform(0.0, 1.0)
+-        if u > 1.0 / d:
+-            return 0.0, False  # Terminate path
+-        return weight * d, True  # Continue, scale up
++    # Compute scaled beta
++    rr_beta = beta * eta_scale / sampler.average()
++    
++    # Sample random number
++    u_rr = sampler.get_1d()
++    
++    # Check if we should apply RR
++    # Only apply if max component is < 1 and depth > 1
++    if rr_beta.max_component_value() < 1.0 and depth > 1:
++        # Calculate termination probability q
++        q = max(0.0, 1.0 - rr_beta.max_component_value())
+         
+-    # Method B: Dynamic probability based on max component (S4, S6)
+-    # Uncomment for vector/spectrum weights:
+-    # max_comp = max(abs(c) for c in weight)
+-    # q = max(0.0, 1.0 - max_comp)
+-    # u = random.uniform(0.0, 1.0)
+-    # if u < q: return 0.0, False
+-    # return weight / (1.0 - q), True
+-        
+-    return weight, True
+-
+-def ray_march_volume(ray_origin, ray_direction, volume, num_samples):
+-    t0, t1 = ray_intersect(ray_origin, ray_direction, volume)
+-    if t1 - t0 <= 0:
+-        return 0.0, 1.0  # No intersection, full transparency, zero color
+-
+-    transmittance = 1.0
+-    color = 0.0
+-    step_size = (t1 - t0) / num_samples
+-
+-    for i in range(num_samples):
+-        pos = ray_origin + ray_direction * (t0 + i * step_size)
+-        sample = volume_sample(pos)
+-        tau = sample.extinction * step_size
+-        transmittance *= exp(-tau)
+-
+-        if transmittance < 1e-3:
+-            new_transmittance, continue_path = russian_roulette(transmittance, d=2.0)
+-            if not continue_path:
+-                transmittance = 0.0
+-                break
+-            transmittance = new_transmittance
+-
+-        alpha = 1.0 - exp(-sample.extinction * step_size)
+-        color += sample.emission * transmittance * alpha
+-
+-    return color, transmittance
+-
+-def ray_intersect(origin, direction, volume):
+-    return 0.0, 1.0  # Standard ray-volume intersection
+-
+-def volume_sample(pos):
+-    return type('Sample', (), {'extinction': 1.0, 'emission': 0.0})()  # Standard volume lookup
+-
+-def exp(x):
+-    return 2.718281828 ** x  # Standard exponential
++        if u_rr < q:
++            # Terminate
++            return 0.0, False
++        else:
++            # Continue and compensate
++            new_beta = beta / (1.0 - q)
++            return new_beta, True
++    else:
++        return beta, True
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Bias:** Simply breaking the loop when transmittance drops below a threshold without scaling introduces bias by removing the contribution of the volume beyond the cutoff [S4, unofficial].
+-- **Noise:** Russian Roulette increases variance (noise) compared to biased early termination [S2, unofficial].
+-- **Zero Intersection:** If the ray does not intersect the volume or the intersection length is zero, transmittance is set to 1.0 and color to 0.0 to avoid unnecessary computation [S5, unofficial].
+-- **Depth:** In path tracing, RR is typically applied after the first bounce (depth > 1) to avoid terminating the initial camera ray prematurely [S6].
++- **Bias from Simple Cutoff:** Simply breaking the loop when transmittance drops below a threshold introduces bias by removing the contribution of the volume beyond the cutoff point [S5, unofficial]. Russian Roulette corrects this [S1, unofficial].
++- **Noise:** While unbiased, Russian Roulette increases variance (noise) in the image because it introduces binary outcomes (kill vs. scale up) [S3, unofficial].
++- **Zero Intersection:** If a ray does not intersect the volume or the intersection length is zero, transmittance is set to 1.0 and color contribution is 0, avoiding unnecessary computation [S5, unofficial].
++- **Precision:** Using a very small threshold or a very large compensation factor can lead to numerical instability or extremely high variance paths [S5, unofficial].
+ 
+ ## Subtopics
+ 
+-### Empty-space skipping
+-Skips voxels known to be empty using acceleration structures [G]. Does not involve probabilistic termination but reduces the number of samples processed before RR might be needed [G]. [Link](1002-empty-space-skipping.md)
+-
+-### Bounding Volume Culling
+-Uses bounding volumes to skip entire regions of the volume [G]. Complementary to RR, which handles the probabilistic termination within the remaining path [G]. [Link](1239-bounding-volume-culling.md)
+-
+-### Early Stop
+-A biased method that terminates the loop when a fixed threshold of opacity/transmittance is reached [S1, unofficial]. Faster but incorrect. RR is the unbiased alternative [S1, unofficial]. [Link](1790-early-stop.md)
+-
+-### Ray Marching with Dithering and Early Termination
+-Combines dithering for noise reduction with early termination [G]. RR can be used to make the early termination unbiased [S1, unofficial]. [Link](3565-ray-marching-with-dithering-and-early-termination.md)
+-
+-### Depth-Prior Ray Truncation
+-Uses depth information (e.g., from a depth map) to truncate rays [G]. Different from RR which uses path weight [G]. [Link](5456-depth-prior-ray-truncation.md)
+-
+-### Opacity-based Early Termination
+-Terminates based on accumulated opacity. Similar to threshold-based early stop. RR removes the bias [S1, unofficial]. [Link](7920-opacity-based-early-termination.md)
+-
+-### Adaptive Termination
+-Adjusts termination criteria based on local scene complexity or variance [G]. RR can be a component of adaptive strategies [G]. [Link](8183-adaptive-termination.md)
++### [Russian Roulette Early Ray Termination](13726-russian-roulette-early-ray-termination.md)
++A sophisticated acceleration technique that probabilistically terminates rays based on accumulated opacity, replacing deterministic threshold-based cutoffs. It differs from standard early termination by allowing rays to continue with scaled weights even when opacity is high, thereby reducing computation while maintaining unbiased expectations through variance masking.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Reduces the average number of samples per ray, especially in transparent or dense volumes where transmittance drops quickly [G].
+-- **Memory Complexity:** No additional memory overhead beyond the random number generator state [G].
+-- **Measured Performance:** In a cloud rendering example, unbiased RR took 161s compared to 2556s for a biased max-depth approach [S4, unofficial].
+-- **Scaling:** More effective in scenes with high variance or large transparent regions. Less effective in uniformly dense volumes where transmittance drops to zero quickly anyway [G].
+-- **Strengths:** Unbiased results; prevents infinite loops; reduces computation in low-contribution paths [S3, unofficial][S4, unofficial].
+-- **Limitations:** Increases image noise (variance); requires careful tuning of termination probability; not suitable for deterministic rendering requirements [S2, unofficial].
+-- **When to Use:** When unbiased results are required and the volume has significant transparent regions or high variance. Prefer forward integration over backward integration as it allows early termination when transparency drops [S5, unofficial].
+-- **When Not to Use:** When deterministic results are needed; when the volume is uniformly dense and transmittance drops to zero rapidly without RR; when noise is unacceptable without further variance reduction techniques [G].
++- **Time Complexity:** Reduces the average number of samples per ray, especially in dense volumes where transmittance drops quickly. Rendering with Russian Roulette took 161s compared to 2556s without it (biased, max depth 200) in one test case [S4, unofficial].
++- **Memory Complexity:** No additional memory overhead beyond the random number generator state.
++- **Scaling:** More effective in dense volumes where transmittance drops below the threshold frequently. Less effective in transparent volumes where rays often traverse the entire volume [S5, unofficial].
++- **Strengths:** Unbiased results; significant speedup in dense media; prevents infinite loops in absorbing media [S5, unofficial].
++- **Limitations:** Increases image noise (variance); requires careful tuning of threshold and compensation factor; not suitable for deterministic rendering requirements [S3, unofficial].
++- **When to Use:** When unbiased Monte Carlo rendering is required, and the volume is dense enough that transmittance drops below a threshold frequently. Prefer forward integration over backward integration as it allows early termination when transparency drops [S5, unofficial].
++- **When Not to Use:** When deterministic results are required; in very transparent volumes where the overhead of RR might outweigh the benefits; if noise is unacceptable without sufficient sampling budget.
+ 
+ ## Background
+-Russian Roulette was originally developed for Monte Carlo particle-tracing methods to avoid simulating particles with low weights while maintaining unbiased results [S1, unofficial][S3, unofficial]. It was adapted for volume rendering as an unbiased alternative to early ray termination (threshold-based termination) [S1, unofficial][S4, unofficial]. The technique is widely used in modern path tracers and volumetric integrators, such as PBRT, to handle transmittance and path weights [S4, unofficial][S6].
++Russian Roulette was originally developed for Monte Carlo particle-tracing methods to avoid simulating particles with low weights without biasing the results [S2, unofficial]. It was adapted for volume rendering to provide an unbiased alternative to threshold-based early ray termination [S2, unofficial][S5, unofficial]. The technique is widely used in modern path tracers like PBRT [S5, unofficial][S6] and is a standard component of unbiased volume rendering pipelines.
+ 
+ ## Sources
+@@ -156,4 +141,3 @@
+ [S4] Volumetric Rendering using Path Tracing, https://zydak.github.io/Clouds/index.html, fetched 2026-10-27 (unofficial)
+ [S5] Ray Marching: Getting it Right!, https://www.scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers//ray-marching-get-it-right.html, fetched 2026-10-28 (unofficial)
+-[S6] 14.2 Volume Scattering Integrators, https://pbr-book.org/4ed/Light_Transport_II_Volume_Rendering/Volume_Scattering_Integrators, fetched 2026-10-29
+-[S7] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)+[S6] 14.2 Volume Scattering Integrators, https://pbr-book.org/4ed/Light_Transport_II_Volume_Rendering/Volume_Scattering_Integrators, fetched 2026-10-29

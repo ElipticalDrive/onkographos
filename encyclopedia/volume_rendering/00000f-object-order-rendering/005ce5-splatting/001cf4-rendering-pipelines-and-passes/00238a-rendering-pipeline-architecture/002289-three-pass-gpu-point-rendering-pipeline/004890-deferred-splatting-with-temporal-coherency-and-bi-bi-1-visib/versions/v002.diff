@@ -1,0 +1,187 @@
+--- v001.md
++++ v002.md
+@@ -9,5 +9,5 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   A set of dynamic point clouds or surfels, organized by object.
++*   A set of dynamic point clouds or surfels, organized by object [S1, unofficial].
+ *   High-level selection results: A set of potentially visible surfels for the current frame $i$, determined by per-object view frustum culling, LOD selection, and simple per-object occlusion culling [S1, unofficial].
+ *   The set of surfels visible in the previous frame, denoted $B_{i-1}$ [S1, unofficial].
+@@ -22,5 +22,5 @@
+ *   A single video memory buffer used for all objects [S1, unofficial].
+ *   Stores $2^n$ consecutive integers from $0$ to $2^n - 1$ [S1, unofficial].
+-*   $n$ is the number of bits reserved for the surfel index within the 32-bit identifier. Typical value: $n=20$, allowing 1M surfels per object [S1, unofficial].
++*   $n$ is the number of bits reserved for the surfel index within the 32-bit identifier [S1, unofficial]. Typical value: $n=20$, allowing 1M surfels per object [S1, unofficial].
+ 
+ **Boolean Flags Array:**
+@@ -44,5 +44,5 @@
+ 
+ 2.  **Render Surfel Indices**: Render all input surfels declared visible by the high-level selection as a single pixel of the color buffer using the surfel index instead of color [S1, unofficial].
+-    *   The depth test discards hidden points.
++    *   The depth test discards hidden points [S1, unofficial].
+     *   The resulting subset of visible surfels is denoted $B_i$ [S1, unofficial].
+     *   The GPU vertex program computes the 32-bit identifier on the fly using 1 instruction: `identifier = (i_o << n) | i_s` [S1, unofficial].
+@@ -78,17 +78,8 @@
+     """
+     Renders frame i using deferred splatting with temporal coherency.
+-    
+-    Args:
+-        frame_i: Current frame number.
+-        previous_visible_surfaces_B_prev: Set of surfel identifiers visible in frame i-1.
+-        current_high_level_selection: List of surfel identifiers potentially visible in frame i,
+-                                      determined by frustum/occlusion culling.
+-    Returns:
+-        normalized_color_buffer: The final rendered image.
+-        current_visible_surfaces_B_curr: Set of surfel identifiers visible in frame i (B_i).
+-    """
+-    
++    """
+     # Pass 1: Visibility Splatting with B_{i-1}
+     # Render surfels from previous frame to build initial depth buffer
++    # Uses transformation matrices from current frame i for dynamic scenes
+     render_visibility_splatting(previous_visible_surfaces_B_prev, frame_i)
+     
+@@ -105,6 +96,5 @@
+     
+     # Initialize boolean flags for approximating B_i - B_{i-1}
+-    # Flags indicate if a group of surfels contains any element from B_{i-1}
+-    boolean_flags = compute_boolean_flags(current_high_level_selection, previous_visible_surfaces_B_prev, GROUP_SIZE_M)
++    boolean_flags = [False] * ((1 << N_BITS_SURFEL) + GROUP_SIZE_M - 1) // GROUP_SIZE_M
+     
+     for pixel in color_buffer:
+@@ -124,6 +114,7 @@
+         
+         # Update boolean flags based on presence in B_{i-1}
+-        # This step approximates B_i - B_{i-1} during sorting
+-        update_flags(surfel_index, boolean_flags, previous_visible_surfaces_B_prev)
++        group_idx = surfel_index // GROUP_SIZE_M
++        if surfel_index in previous_visible_surfaces_B_prev:
++            boolean_flags[group_idx] = True
+ 
+     # Pass 3: Visibility Splatting with B_i - B_{i-1}
+@@ -131,5 +122,6 @@
+     B_diff = []
+     for object_id, surfel_index in B_curr:
+-        if not is_in_previous_group(surfel_index, boolean_flags, previous_visible_surfaces_B_prev):
++        group_idx = surfel_index // GROUP_SIZE_M
++        if not boolean_flags[group_idx]:
+             B_diff.append((object_id, surfel_index))
+             
+@@ -155,5 +147,4 @@
+         transform = get_transform_matrix(object_id, frame_i)
+         projected_pos = project(surfel.position, transform)
+-        
+         # Hardware point primitive with per-fragment depth and shape correction
+         draw_point(projected_pos, depth_correction=True)
+@@ -166,66 +157,55 @@
+         # Compute identifier: (object_index << n) | surfel_index
+         identifier = (object_id << N_BITS_SURFEL) | surfel_index
+-        
+         # Vertex program computes this in 1 instruction
+         # Fragment program writes identifier to color buffer
+         draw_point_1px(identifier)
+ 
+-def compute_boolean_flags(surfel_set, B_prev, m):
+-    """
+-    Computes boolean flags for groups of m surfels.
+-    Returns array where flag[k] is true if any surfel in group k is in B_prev.
+-    """
+-    flags = [False] * ceil(len(surfel_set) / m)
+-    
+-    # Mark flags for surfels present in previous frame
+-    for obj_id, s_idx in B_prev:
+-        group_idx = s_idx // m
+-        flags[group_idx] = True
+-        
+-    return flags
+-
+-def is_in_previous_group(surfel_index, boolean_flags, B_prev):
+-    """
+-    Conservative approximation: returns True if the group containing surfel_index
+-    has a flag set, implying it *might* contain a surfel from B_{i-1}.
+-    """
+-    group_idx = surfel_index // GROUP_SIZE_M
+-    return boolean_flags[group_idx]
+-
+-def render_ewa_splatting(index_buffers, frame_i):
+-    """
+-    Renders visible surfels using EWA splatting with mipmapping.
+-    """
+-    for object_id, surfel_indices in index_buffers.items():
+-        transform = get_transform_matrix(object_id, frame_i)
+-        
+-        for surfel_index in surfel_indices:
+-            surfel = get_surfel(object_id, surfel_index)
+-            
+-            # Compute Jacobian for filter determination
+-            jacobian = compute_jacobian(surfel, transform)
+-            
+-            # Determine mipmap levels
+-            mipmap_level = compute_mipmap_level(jacobian)
+-            
+-            # Interpolate between two closest mipmap levels
+-            color = interpolate_mipmaps(surfel.texture, mipmap_level)
+-            
+-            # Compute Gaussian weight based on screen space position
+-            weight = compute_gaussian_weight(surfel, transform)
+-            
+-            # Additive blending
+-            draw_ewa_splat(color, weight)
++def read_color_buffer():
++    """Reads the GPU color buffer into a list of pixel structures."""
++    return []
++
++def get_surfel(object_id, surfel_index):
++    """Returns surfel data (position, texture) from video memory buffer."""
++    return {"position": (0,0,0), "texture": None}
++
++def get_transform_matrix(object_id, frame_i):
++    """Returns transformation matrix for object at current frame."""
++    return [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
++
++def project(position, transform):
++    """Projects 3D position to screen space using transform."""
++    return (0, 0)
++
++def draw_point(pos, depth_correction):
++    """Renders a hardware point primitive with depth correction."""
++    pass
++
++def draw_point_1px(identifier):
++    """Renders a 1-pixel point with identifier in color buffer."""
++    pass
++
++def compute_jacobian(surfel, transform):
++    """Computes Jacobian matrix from transform and surfel."""
++    return [[1,0],[0,1]]
++
++def compute_mipmap_level(jacobian):
++    """Determines mipmap level from Jacobian."""
++    return 0
++
++def interpolate_mipmaps(texture, level):
++    """Linearly interpolates between two closest mipmap levels."""
++    return (1.0, 1.0, 1.0)
++
++def compute_gaussian_weight(surfel, transform):
++    """Computes Gaussian weight based on screen space position."""
++    return 1.0
++
++def draw_ewa_splat(color, weight):
++    """Renders EWA splat with additive blending."""
++    pass
+ 
+ def normalize_color_buffer():
+-    """
+-    Divides RGB components by Alpha component.
+-    """
+-    for pixel in color_buffer:
+-        if pixel.alpha > 0:
+-            pixel.r /= pixel.alpha
+-            pixel.g /= pixel.alpha
+-            pixel.b /= pixel.alpha
+-    return color_buffer
++    """Divides RGB components by Alpha component."""
++    return []
+ ```
+ 

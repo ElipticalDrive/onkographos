@@ -1,0 +1,161 @@
+# Dynamic Octree Voxel Storage
+
+Also called: Dynamic Sparse Voxel Octree with Morton Codes (Note: While the sibling article shares this alias, the source describes a dictionary-based leaf storage rather than Morton code ordering, so the alias is listed for context but the implementation differs)
+
+## Overview
+Dynamic Octree Voxel Storage is a spatial partitioning structure for storing 3D voxels that supports automatic subdivision based on voxel density and bounds size [S1, unofficial]. It differs from static octrees by growing dynamically during insertion and using a dictionary-based leaf storage for voxels rather than fixed arrays or Morton code ordering [S1, unofficial]. It solves the problem of efficiently managing sparse 3D data where the density of occupied voxels varies significantly across the volume [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D voxel position (`Vector3`) and voxel data (`Voxel`).
+- Output: The updated octree structure with the voxel inserted.
+
+**Data Structures:**
+The core structure is `OctreeNode`. According to [S1, unofficial], it contains the following fields:
+- `depth`: `int`
+- `bounds`: `Bounds` (defines the spatial extent of the node)
+- `IsLeaf`: `bool`
+- `voxels`: `Dictionary<Vector3, Voxel>` (stores voxels at this node if it is a leaf)
+- `Children`: `OctreeNode[8]` (array of 8 child nodes, null if leaf)
+- `capacity`: `int` (maximum number of voxels allowed in this leaf)
+- `mesh`: `OctreeMesh` (reference to associated mesh data)
+- `tree`: `Octree` (reference to the parent octree instance)
+
+**Formulas:**
+The capacity of a leaf node is calculated based on its bounds size [S1, unofficial]:
+$$ capacity = \text{clamp}\left(\frac{size^3}{3}, minBoundsSize, maxCapacity\right) $$
+Where:
+- $size$ is the extent of the bounds (specifically the x-dimension as per [S1, unofficial]).
+- $minBoundsSize$ is the minimum bounds extent required to allow subdivision.
+- $maxCapacity$ is the maximum number of voxels a leaf can hold.
+
+**Parameters:**
+- `maxCapacity`: 5000 [S1, unofficial].
+- `minBoundsSize`: 7.0f [S1, unofficial].
+
+**Steps:**
+1. **Check Bounds:** Determine if the voxel position is within the current node's bounds.
+   - If outside, trigger the `Grow()` routine. Note: The source [S1, unofficial] states that `Grow()` is a stub with commented-out implementation, meaning out-of-bounds insertions do nothing and voxels are silently dropped.
+   - If inside, proceed to insertion logic.
+2. **Leaf Check:** If the current node is a leaf:
+   - Add the voxel to the `voxels` dictionary.
+   - Check if the number of voxels exceeds `capacity`.
+   - If capacity is exceeded AND the bounds size is greater than or equal to `minBoundsSize`:
+     - Subdivide the node.
+     - Redistribute existing voxels from the dictionary to the 8 child nodes.
+     - Re-insert the new voxel into the appropriate child node.
+3. **Non-Leaf Check:** If the current node is not a leaf:
+   - Determine the octant index for the voxel position relative to the node's center.
+   - Recursively insert the voxel into the corresponding child node.
+
+**Octant Index Calculation:**
+The octant index is determined by comparing the voxel's coordinates to the node's center [S1, unofficial]:
+- Bit 4 (value 16): Set if $x > center.x$.
+- Bit 2 (value 4): Set if $y > center.y$.
+- Bit 1 (value 2): Set if $z > center.z$.
+The octant index is the sum of the set bits.
+
+**Subdivision:**
+Child node centers are calculated by adding or subtracting half the parent's half-size (quarterSize) based on the octant index bits [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class OctreeNode:
+    def __init__(self, bounds, depth, tree_ref):
+        self.depth = depth
+        self.bounds = bounds
+        self.IsLeaf = True
+        self.voxels = {}  # Dictionary<Vector3, Voxel>
+        self.Children = [None] * 8
+        self.capacity = self.calculate_capacity(bounds.size)
+        self.mesh = None
+        self.tree = tree_ref
+
+    def calculate_capacity(self, size):
+        # clamp(size^3 / 3, minBoundsSize, maxCapacity)
+        # Note: minBoundsSize is a threshold for subdivision, not a clamp lower bound for capacity
+        # Based on [S1, unofficial]: capacity = clamp(size^3 / 3, minBoundsSize, maxCapacity)
+        # However, minBoundsSize is 7.0f (a length), capacity is an int (count).
+        # The source text says: "clamped between minBoundsSize and maxCapacity".
+        # This is likely a documentation error in the source, as minBoundsSize is a length.
+        # We will assume the clamp is on the capacity value, but minBoundsSize is used for subdivision check.
+        # Re-reading [S1, unofficial]: "Node capacity is calculated as the volume of the bounds divided by 3, clamped between minBoundsSize and maxCapacity"
+        # And "minBoundsSize is the minimum bounds extent (x-dimension) required to allow a node to subdivide"
+        # These two statements are contradictory if minBoundsSize is a length.
+        # We will implement the capacity formula as stated, but note the potential error.
+        # Given maxCapacity=5000, and minBoundsSize=7.0, if size=7, size^3/3 = 343/3 = 114.
+        # If minBoundsSize is used as a lower bound for capacity, it would be 7.
+        # We will follow the formula literally as per [S1, unofficial].
+        val = (size ** 3) / 3
+        return clamp(val, 7, 5000) # Using 7 as minBoundsSize value for clamp, though semantically questionable
+
+    def insert(self, position, voxel):
+        if not self.bounds.contains(position):
+            # Grow is a stub in [S1, unofficial]
+            self.grow()
+            return
+
+        if self.IsLeaf:
+            self.voxels[position] = voxel
+            if len(self.voxels) > self.capacity and self.bounds.size >= 7.0:
+                self.subdivide()
+                # Redistribute existing voxels
+                for pos, vox in list(self.voxels.items()):
+                    self.voxels.pop(pos)
+                    self.insert_into_children(pos, vox)
+                # Re-insert new voxel
+                self.insert_into_children(position, voxel)
+        else:
+            self.insert_into_children(position, voxel)
+
+    def insert_into_children(self, position, voxel):
+        octant = self.get_octant(position)
+        if self.Children[octant] is None:
+            # Create child node
+            child_bounds = self.get_child_bounds(octant)
+            self.Children[octant] = OctreeNode(child_bounds, self.depth + 1, self.tree)
+        self.Children[octant].insert(position, voxel)
+
+    def get_octant(self, position):
+        center = self.bounds.center
+        octant = 0
+        if position.x > center.x:
+            octant |= 16 # Bit 4
+        if position.y > center.y:
+            octant |= 4  # Bit 2
+        if position.z > center.z:
+            octant |= 2  # Bit 1
+        return octant
+
+    def subdivide(self):
+        self.IsLeaf = False
+        for i in range(8):
+            child_bounds = self.get_child_bounds(i)
+            self.Children[i] = OctreeNode(child_bounds, self.depth + 1, self.tree)
+
+    def get_child_bounds(self, octant):
+        # Calculate child center by adding/subtracting quarterSize based on octant bits
+        # quarterSize = bounds.halfSize / 2
+        # This is a simplified representation; exact implementation depends on Bounds class
+        pass
+
+    def grow(self):
+        # Stub implementation in [S1, unofficial]
+        pass
+```
+
+## Operating characteristics
+- **Time Complexity:** Insertion is $O(1)$ on average for dictionary operations, but $O(N)$ for redistribution during subdivision if many voxels are present. Subdivision itself is $O(1)$ if no redistribution is needed.
+- **Memory Complexity:** Memory usage is proportional to the number of voxels plus the overhead of the octree nodes. Dictionary overhead is higher than array-based storage.
+- **Strengths:** Dynamic growth allows handling of sparse data efficiently. Dictionary storage allows easy lookup by position.
+- **Limitations:** The `Grow()` method is not implemented, leading to silent data loss for out-of-bounds voxels [S1, unofficial]. Dictionary-based storage may have higher memory overhead and slower iteration compared to array-based or Morton-code-based structures.
+- **When to use:** Suitable for applications where voxel density is highly variable and out-of-bounds growth is not critical or is handled externally.
+- **When not to use:** When strict memory efficiency is required or when out-of-bounds growth is essential.
+
+## Background
+The structure is described in the source [S1, unofficial], which is an unofficial GitHub repository for procedural generation. The specific implementation details are derived from the code comments and structure within this repository.
+
+## Sources
+[S1] ForlornU/ProceduralGeneration, https://github.com/ForlornU/ProceduralGeneration, fetched 2026-10-27 (unofficial)

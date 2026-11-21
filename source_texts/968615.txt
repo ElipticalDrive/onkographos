@@ -1,0 +1,619 @@
+Add noInterop setting to GlobalSettings (defaults to true)
+ Parse --interop command line argument in GUI Main.cpp (enables interop mode)
+ Modify CudaGeometryBuffers to support non-interop mode with CPU/GPU memory transfers
+ Modify GeometryKernelsService::extractObjectData to handle both interop and non-interop modes (no separate method)
+ Simplify SimulationCudaFacade::copyBuffersFromCudaToOpenGL - delegate buffer details to CudaGeometryBuffers
+ Update _GeometryBuffers class to support uploading from host memory
+ Add GeometryTests for getNumRenderObjects and tryCopyBuffersFromCudaToOpenGL (no-interop mode only)
+ Build and test the changes
+
+Usage
+
+Default: ./alien (runs in no-interop mode, uses CPU-GPU memory transfers)
+Enable interop: ./alien --interop (uses CUDA-OpenGL interop for rendering)
+
+
+
+
+Original prompt
+
+Implement the following extension: if alien is executed with --no-interop parameter, no cuda-opengl-interop api should be called. instead the memory should be copied between cou and gpu.
+
+
+
+
+💡 You can make Copilot smarter by setting up custom instructions, customizing its development environment and configuring Model Context Protocol (MCP) servers. Learn more Copilot coding agent tips in the docs.
+
+Add --no-interop parameter to disable CUDA-OpenGL interoperability by Copilot · Pull Request #339 · chrxh/alien · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add --no-interop parameter to disable CUDA-OpenGL interoperability
+#339
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Merged
+chrxh
+merged 10 commits into
+develop
+from
+copilot/add-no-interop-parameter-handling
+Jan 5, 2026
+Uh oh!
+There was an error while loading. Please reload this page.
+Merged
+Add --no-interop parameter to disable CUDA-OpenGL interoperability
+#339
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+10 commits
+Select commit
+Hold shift + click to select a range
+0621309
+Initial plan
+Copilot Jan 3, 2026
+464c482
+Add --no-interop parameter to disable CUDA-OpenGL interoperability
+Copilot Jan 3, 2026
+dab791d
+Refactor no-interop mode: move buffer details to CudaGeometryBuffers,…
+Copilot Jan 3, 2026
+c38c52f
+Add parameterized GeometryTests for interop and non-interop modes
+Copilot Jan 3, 2026
+530a430
+Code simplified
+chrxh Jan 4, 2026
+87001de
+Restructure GeometryTests: non-parameterized getNumRenderObjects, par…
+Copilot Jan 4, 2026
+b183260
+Simplify GeometryTests to use no-interop mode only
+Copilot Jan 4, 2026
+c842ad9
+Fix crash in MainLoopController
+chrxh Jan 5, 2026
+c9c3aa2
+Change default to no-interop mode and rename CLI parameter to --interop
+Copilot Jan 5, 2026
+0713e27
+Renamings
+chrxh Jan 5, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Previous commit
+Next
+Next commit
+Add --no-interop parameter to disable CUDA-OpenGL interoperability
+```
+When the --no-interop flag is provided to the ALIEN GUI:
+- CUDA-OpenGL interop API calls are bypassed
+- Rendering data is copied from GPU to CPU using cudaMemcpy
+- CPU-side data is uploaded to OpenGL buffers via glBufferSubData
+
+This is useful for systems where CUDA-OpenGL interop doesn't work.
+
+Co-authored-by: chrxh <73127001+chrxh@users.noreply.github.com>
+```
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+Copilot
+and
+chrxh
+committed
+Jan 3, 2026
+commit 464c4821e3a1e6e70ea7ff76a1fcae0d56a17cad
+There are no files selected for viewing
+11 changes: 11 additions & 0 deletions
+11
+source/Base/GlobalSettings.cpp
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -134,6 +134,7 @@ struct GlobalSettingsImpl
+{
+boost::property_tree::ptree _tree;
+bool _debugMode = false;
+bool _noInterop = false;
+};
+Expand All
+@@ -153,6 +154,16 @@ void GlobalSettings::setDebugMode(bool value) const
+_impl->_debugMode = value;
+}
+bool GlobalSettings::isNoInterop() const
+{
+return _impl->_noInterop;
+}
+void GlobalSettings::setNoInterop(bool value) const
+{
+_impl->_noInterop = value;
+}
+bool GlobalSettings::getValue(std::string const& key, bool defaultValue)
+{
+bool result;
+Expand Down
+3 changes: 3 additions & 0 deletions
+3
+source/Base/GlobalSettings.h
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -16,6 +16,9 @@ class GlobalSettings
+bool isDebugMode() const;
+void setDebugMode(bool value) const;
+bool isNoInterop() const;
+void setNoInterop(bool value) const;
+bool getValue(std::string const& key, bool defaultValue);
+void setValue(std::string const& key, bool value);
+Expand Down
+149 changes: 149 additions & 0 deletions
+149
+source/EngineGpuKernels/CudaGeometryBuffers.cu
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -5,6 +5,9 @@
+#endif
+#include <cuda_gl_interop.h>
+#include <algorithm>
+#include "CudaMemoryManager.cuh"
+namespace
+{
+Expand Down
+Expand Up
+@@ -69,3 +72,149 @@ void CudaGeometryBuffers::registerBuffers(GeometryBuffers const& buffers)
+}
+detonationEventBuffer = registerBufferResource(buffers->getVboForDetonationEvents());
+}
+void CudaGeometryBuffers::allocateBuffersForNoInterop(NumRenderObjects const& numObjects)
+{
+auto& memoryManager = CudaMemoryManager::getInstance();
+// Allocate or reallocate cell buffer
+auto requiredCellCapacity = std::max(numObjects.cells * 2, static_cast<uint64_t>(100000));
+if (numObjects.cells >= deviceCellBufferCapacity) {
+if (deviceCellBuffer != nullptr) {
+memoryManager.freeMemory(deviceCellBuffer);
+}
+memoryManager.acquireMemory(requiredCellCapacity, deviceCellBuffer);
+deviceCellBufferCapacity = requiredCellCapacity;
+}
+// Allocate or reallocate energy particle buffer
+auto requiredEnergyParticleCapacity = std::max(numObjects.energyParticles * 2, static_cast<uint64_t>(100000));
+if (numObjects.energyParticles >= deviceEnergyParticleBufferCapacity) {
+if (deviceEnergyParticleBuffer != nullptr) {
+memoryManager.freeMemory(deviceEnergyParticleBuffer);
+}
+memoryManager.acquireMemory(requiredEnergyParticleCapacity, deviceEnergyParticleBuffer);
+deviceEnergyParticleBufferCapacity = requiredEnergyParticleCapacity;
+}
+// Allocate or reallocate location buffer
+auto requiredLocationCapacity = std::max(numObjects.locations * 2, static_cast<uint64_t>(1000));
+if (numObjects.locations >= deviceLocationBufferCapacity) {
+if (deviceLocationBuffer != nullptr) {
+memoryManager.freeMemory(deviceLocationBuffer);
+}
+memoryManager.acquireMemory(requiredLocationCapacity, deviceLocationBuffer);
+deviceLocationBufferCapacity = requiredLocationCapacity;
+}
+// Allocate or reallocate selected object buffer
+auto requiredSelectedObjectCapacity = std::max(numObjects.selectedObjects * 2, static_cast<uint64_t>(10000));
+if (numObjects.selectedObjects >= deviceSelectedObjectBufferCapacity) {
+if (deviceSelectedObjectBuffer != nullptr) {
+memoryManager.freeMemory(deviceSelectedObjectBuffer);
+}
+memoryManager.acquireMemory(requiredSelectedObjectCapacity, deviceSelectedObjectBuffer);
+deviceSelectedObjectBufferCapacity = requiredSelectedObjectCapacity;
+}
+// Allocate or reallocate line index buffer
+auto requiredLineIndexCapacity = std::max(numObjects.lineIndices * 2, static_cast<uint64_t>(100000));
+if (numObjects.lineIndices >= deviceLineIndexBufferCapacity) {
+if (deviceLineIndexBuffer != nullptr) {
+memoryManager.freeMemory(deviceLineIndexBuffer);
+}
+memoryManager.acquireMemory(requiredLineIndexCapacity, deviceLineIndexBuffer);
+deviceLineIndexBufferCapacity = requiredLineIndexCapacity;
+}
+// Allocate or reallocate triangle index buffer
+auto requiredTriangleIndexCapacity = std::max(numObjects.triangleIndices * 2, static_cast<uint64_t>(100000));
+if (numObjects.triangleIndices >= deviceTriangleIndexBufferCapacity) {
+if (deviceTriangleIndexBuffer != nullptr) {
+memoryManager.freeMemory(deviceTriangleIndexBuffer);
+}
+memoryManager.acquireMemory(requiredTriangleIndexCapacity, deviceTriangleIndexBuffer);
+deviceTriangleIndexBufferCapacity = requiredTriangleIndexCapacity;
+}
+// Allocate or reallocate selected connection buffer
+auto requiredSelectedConnectionCapacity = std::max(numObjects.connectionArrowVertices * 2, static_cast<uint64_t>(100000));
+if (numObjects.connectionArrowVertices >= deviceSelectedConnectionBufferCapacity) {
+if (deviceSelectedConnectionBuffer != nullptr) {
+memoryManager.freeMemory(deviceSelectedConnectionBuffer);
+}
+memoryManager.acquireMemory(requiredSelectedConnectionCapacity, deviceSelectedConnectionBuffer);
+deviceSelectedConnectionBufferCapacity = requiredSelectedConnectionCapacity;
+}
+// Allocate or reallocate attack event buffer
+auto requiredAttackEventCapacity = std::max(numObjects.attackEventVertices * 2, static_cast<uint64_t>(10000));
+if (numObjects.attackEventVertices >= deviceAttackEventBufferCapacity) {
+if (deviceAttackEventBuffer != nullptr) {
+memoryManager.freeMemory(deviceAttackEventBuffer);
+}
+memoryManager.acquireMemory(requiredAttackEventCapacity, deviceAttackEventBuffer);
+deviceAttackEventBufferCapacity = requiredAttackEventCapacity;
+}
+// Allocate or reallocate detonation event buffer
+auto requiredDetonationEventCapacity = std::max(numObjects.detonationEventVertices * 2, static_cast<uint64_t>(10000));
+if (numObjects.detonationEventVertices >= deviceDetonationEventBufferCapacity) {
+if (deviceDetonationEventBuffer != nullptr) {
+memoryManager.freeMemory(deviceDetonationEventBuffer);
+}
+memoryManager.acquireMemory(requiredDetonationEventCapacity, deviceDetonationEventBuffer);
+deviceDetonationEventBufferCapacity = requiredDetonationEventCapacity;
+}
+}
+void CudaGeometryBuffers::freeBuffersForNoInterop()
+{
+auto& memoryManager = CudaMemoryManager::getInstance();
+if (deviceCellBuffer != nullptr) {
+memoryManager.freeMemory(deviceCellBuffer);
+deviceCellBuffer = nullptr;
+deviceCellBufferCapacity = 0;
+}
+if (deviceEnergyParticleBuffer != nullptr) {
+memoryManager.freeMemory(deviceEnergyParticleBuffer);
+deviceEnergyParticleBuffer = nullptr;
+deviceEnergyParticleBufferCapacity = 0;
+}
+if (deviceLocationBuffer != nullptr) {
+memoryManager.freeMemory(deviceLocationBuffer);
+deviceLocationBuffer = nullptr;
+deviceLocationBufferCapacity = 0;
+}
+if (deviceSelectedObjectBuffer != nullptr) {
+memoryManager.freeMemory(deviceSelectedObjectBuffer);
+deviceSelectedObjectBuffer = nullptr;
+deviceSelectedObjectBufferCapacity = 0;
+}
+if (deviceLineIndexBuffer != nullptr) {
+memoryManager.freeMemory(deviceLineIndexBuffer);
+deviceLineIndexBuffer = nullptr;
+deviceLineIndexBufferCapacity = 0;
+}
+if (deviceTriangleIndexBuffer != nullptr) {
+memoryManager.freeMemory(deviceTriangleIndexBuffer);
+deviceTriangleIndexBuffer = nullptr;
+deviceTriangleIndexBufferCapacity = 0;
+}
+if (deviceSelectedConnectionBuffer != nullptr) {
+memoryManager.freeMemory(deviceSelectedConnectionBuffer);
+deviceSelectedConnectionBuffer = nullptr;
+deviceSelectedConnectionBufferCapacity = 0;
+}
+if (deviceAttackEventBuffer != nullptr) {
+memoryManager.freeMemory(deviceAttackEventBuffer);
+deviceAttackEventBuffer = nullptr;
+deviceAttackEventBufferCapacity = 0;
+}
+if (deviceDetonationEventBuffer != nullptr) {
+memoryManager.freeMemory(deviceDetonationEventBuffer);
+deviceDetonationEventBuffer = nullptr;
+deviceDetonationEventBufferCapacity = 0;
+}
+}
+25 changes: 25 additions & 0 deletions
+25
+source/EngineGpuKernels/CudaGeometryBuffers.cuh
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -7,6 +7,7 @@
+struct CudaGeometryBuffers
+{
+// CUDA-OpenGL interop resources (used when interop is enabled)
+cudaGraphicsResource* vertexBuffer = nullptr;
+cudaGraphicsResource* energyParticleBuffer = nullptr;
+cudaGraphicsResource* locationBuffer = nullptr;
+Expand All
+@@ -17,5 +18,29 @@ struct CudaGeometryBuffers
+cudaGraphicsResource* attackEventBuffer = nullptr;
+cudaGraphicsResource* detonationEventBuffer = nullptr;
+// CUDA device buffers for non-interop mode (data is copied to CPU then uploaded to OpenGL)
+CellVertexData* deviceCellBuffer = nullptr;
+EnergyParticleVertexData* deviceEnergyParticleBuffer = nullptr;
+LocationVertexData* deviceLocationBuffer = nullptr;
+SelectedObjectVertexData* deviceSelectedObjectBuffer = nullptr;
+unsigned int* deviceLineIndexBuffer = nullptr;
+unsigned int* deviceTriangleIndexBuffer = nullptr;
+ConnectionArrowVertexData* deviceSelectedConnectionBuffer = nullptr;
+AttackEventVertexData* deviceAttackEventBuffer = nullptr;
+DetonationEventVertexData* deviceDetonationEventBuffer = nullptr;
+// Capacity tracking for device buffers
+uint64_t deviceCellBufferCapacity = 0;
+uint64_t deviceEnergyParticleBufferCapacity = 0;
+uint64_t deviceLocationBufferCapacity = 0;
+uint64_t deviceSelectedObjectBufferCapacity = 0;
+uint64_t deviceLineIndexBufferCapacity = 0;
+uint64_t deviceTriangleIndexBufferCapacity = 0;
+uint64_t deviceSelectedConnectionBufferCapacity = 0;
+uint64_t deviceAttackEventBufferCapacity = 0;
+uint64_t deviceDetonationEventBufferCapacity = 0;
+void registerBuffers(GeometryBuffers const& buffers);
+void allocateBuffersForNoInterop(NumRenderObjects const& numObjects);
+void freeBuffersForNoInterop();
+};
+44 changes: 44 additions & 0 deletions
+44
+source/EngineGpuKernels/GeometryKernelsService.cu
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -177,3 +177,47 @@ void GeometryKernelsService::extractObjectData(
+KERNEL_CALL(cudaExtractDetonationEventData, data, mappedDetonationEventBuffer, _numDetonationEventVertices);
+CHECK_FOR_CUDA_ERROR(cudaGraphicsUnmapResources(1, &renderingData.detonationEventBuffer));
+}
+void GeometryKernelsService::extractObjectDataNoInterop(
+SettingsForSimulation const& settings,
+SimulationData data,
+CudaGeometryBuffers& renderingData,
+RealRect const& visibleWorldRect)
+{
+auto const& gpuSettings = settings.cudaSettings;
+float2 const visibleTopLeft{visibleWorldRect.topLeft.x, visibleWorldRect.topLeft.y};
+// Extract cell data to device buffer
+KERNEL_CALL(cudaExtractCellData, data, renderingData.deviceCellBuffer);
+// Extract energy particle data to device buffer
+KERNEL_CALL(cudaExtractEnergyParticleData, data, renderingData.deviceEnergyParticleBuffer);
+// Extract location data to device buffer
+setValueToDevice(_numLocations, static_cast<uint64_t>(0));
+KERNEL_CALL_1_1(cudaExtractLocationData, data, renderingData.deviceLocationBuffer, _numLocations, visibleTopLeft);
+// Extract selected object data to device buffer
+setValueToDevice(_numSelectedObjects, static_cast<uint64_t>(0));
+KERNEL_CALL(cudaExtractSelectedObjectData, data, renderingData.deviceSelectedObjectBuffer, _numSelectedObjects);
+// Extract line indices to device buffer
+setValueToDevice(_numLineIndices, static_cast<uint64_t>(0));
+KERNEL_CALL(cudaExtractLineIndices, data, renderingData.deviceLineIndexBuffer, _numLineIndices);
+// Extract triangle indices to device buffer
+setValueToDevice(_numTriangleIndices, static_cast<uint64_t>(0));
+KERNEL_CALL(cudaExtractTriangleIndices, data, renderingData.deviceTriangleIndexBuffer, _numTriangleIndices);
+// Extract selected connection data to device buffer
+setValueToDevice(_numSelectedConnectionVertices, static_cast<uint64_t>(0));
+KERNEL_CALL(cudaExtractSelectedConnectionData, data, renderingData.deviceSelectedConnectionBuffer, _numSelectedConnectionVertices);
+// Extract attack event data to device buffer
+setValueToDevice(_numAttackEventVertices, static_cast<uint64_t>(0));
+KERNEL_CALL(cudaExtractAttackEventData, data, renderingData.deviceAttackEventBuffer, _numAttackEventVertices);
+// Extract detonation event data to device buffer
+setValueToDevice(_numDetonationEventVertices, static_cast<uint64_t>(0));
+KERNEL_CALL(cudaExtractDetonationEventData, data, renderingData.deviceDetonationEventBuffer, _numDetonationEventVertices);
+}
+1 change: 1 addition & 0 deletions
+1
+source/EngineGpuKernels/GeometryKernelsService.cuh
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -21,6 +21,7 @@ public:
+void restorePositions(SettingsForSimulation const& settings, SimulationData data);
+NumRenderObjects getNumRenderObjects(SettingsForSimulation const& settings, SimulationData data, RealRect const& visibleWorldRect);
+void extractObjectData(SettingsForSimulation const& settings, SimulationData data, CudaGeometryBuffers& renderingData, RealRect const& visibleWorldRect);
+void extractObjectDataNoInterop(SettingsForSimulation const& settings, SimulationData data, CudaGeometryBuffers& renderingData, RealRect const& visibleWorldRect);
+Comment thread
+Outdated
+chrxh
+Jan 3, 2026
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+@copilot do not add an extra method for the non interop case. extractObjectData should handle this.
+Copilot
+AI
+Jan 3, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed in dab791d. Removed extractObjectDataNoInterop - extractObjectData now handles both interop and non-interop modes internally by checking GlobalSettings::get().isNoInterop().
+private:
+GeometryKernelsService() = default;
+Expand Down
+71 changes: 69 additions & 2 deletions
+71
+source/EngineGpuKernels/SimulationCudaFacade.cu
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -1,11 +1,13 @@
+#include <functional>
+#include <iostream>
+#include <list>
+#include <vector>
+#include <cuda/helper_cuda.h>
+#include <cuda_runtime.h>
+#include <Base/Exceptions.h>
+#include <Base/GlobalSettings.h>
+#include <Base/LoggingService.h>
+#include <Base/Macros.h>
+Expand Down
+Expand Up
+@@ -130,9 +132,74 @@ void _SimulationCudaFacade::copyBuffersFromCudaToOpenGL(GeometryBuffers const& g
+GeometryKernelsService::get().correctPositionsForRendering(_settings, simulationData, visibleWorldRect);
+auto numRenderObjects = GeometryKernelsService::get().getNumRenderObjects(_settings, simulationData, visibleWorldRect);
+geometryBuffers->updateNumObjects(numRenderObjects);
+_cudaGeometryBuffers->registerBuffers(geometryBuffers);
+GeometryKernelsService::get().extractObjectData(_settings, simulationData, *_cudaGeometryBuffers, visibleWorldRect);
+if (GlobalSettings::get().isNoInterop()) {
+// No-interop mode: use device buffers and copy to CPU, then upload to OpenGL
+_cudaGeometryBuffers->allocateBuffersForNoInterop(numRenderObjects);
+GeometryKernelsService::get().extractObjectDataNoInterop(_settings, simulationData, *_cudaGeometryBuffers, visibleWorldRect);
+syncAndCheck();
+// Copy from device to host and upload to OpenGL
+if (numRenderObjects.cells > 0) {
+Comment thread
+Outdated
+chrxh
+Jan 3, 2026
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+@copilot hide all these details here about the concrete buffers away from SimulationCudaFacade. Maybe CudaGeometryBuffers is a better place for this.
+Copilot
+AI
+Jan 3, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Refactored in dab791d. Moved all buffer copying logic to CudaGeometryBuffers::copyToOpenGL() method. SimulationCudaFacade::copyBuffersFromCudaToOpenGL() now just calls _cudaGeometryBuffers->copyToOpenGL(geometryBuffers, numRenderObjects).
+std::vector<CellVertexData> hostCellBuffer(numRenderObjects.cells);
+CHECK_FOR_CUDA_ERROR(cudaMemcpy(hostCellBuffer.data(), _cudaGeometryBuffers->deviceCellBuffer, numRenderObjects.cells * sizeof(CellVertexData), cudaMemcpyDeviceToHost));
+geometryBuffers->uploadCellData(hostCellBuffer.data(), numRenderObjects.cells);
+}
+if (numRenderObjects.energyParticles > 0) {
+std::vector<EnergyParticleVertexData> hostEnergyParticleBuffer(numRenderObjects.energyParticles);
+CHECK_FOR_CUDA_ERROR(cudaMemcpy(hostEnergyParticleBuffer.data(), _cudaGeometryBuffers->deviceEnergyParticleBuffer, numRenderObjects.energyParticles * sizeof(EnergyParticleVertexData), cudaMemcpyDeviceToHost));
+geometryBuffers->uploadEnergyParticleData(hostEnergyParticleBuffer.data(), numRenderObjects.energyParticles);
+}
+if (numRenderObjects.locations > 0) {
+std::vector<LocationVertexData> hostLocationBuffer(numRenderObjects.locations);
+CHECK_FOR_CUDA_ERROR(cudaMemcpy(hostLocationBuffer.data(), _cudaGeometryBuffers->deviceLocationBuffer, numRenderObjects.locations * sizeof(LocationVertexData), cudaMemcpyDeviceToHost));
+geometryBuffers->uploadLocationData(hostLocationBuffer.data(), numRenderObjects.locations);
+}
+if (numRenderObjects.selectedObjects > 0) {
+std::vector<SelectedObjectVertexData> hostSelectedObjectBuffer(numRenderObjects.selectedObjects);
+CHECK_FOR_CUDA_ERROR(cudaMemcpy(hostSelectedObjectBuffer.data(), _cudaGeometryBuffers->deviceSelectedObjectBuffer, numRenderObjects.selectedObjects * sizeof(SelectedObjectVertexData), cudaMemcpyDeviceToHost));
+geometryBuffers->uploadSelectedObjectData(hostSelectedObjectBuffer.data(), numRenderObjects.selectedObjects);
+}
+if (numRenderObjects.lineIndices > 0) {
+std::vector<unsigned int> hostLineIndexBuffer(numRenderObjects.lineIndices);
+CHECK_FOR_CUDA_ERROR(cudaMemcpy(hostLineIndexBuffer.data(), _cudaGeometryBuffers->deviceLineIndexBuffer, numRenderObjects.lineIndices * sizeof(unsigned int), cudaMemcpyDeviceToHost));
+geometryBuffers->uploadLineIndices(hostLineIndexBuffer.data(), numRenderObjects.lineIndices);
+}
+if (numRenderObjects.triangleIndices > 0) {
+std::vector<unsigned int> hostTriangleIndexBuffer(numRenderObjects.triangleIndices);
+CHECK_FOR_CUDA_ERROR(cudaMemcpy(hostTriangleIndexBuffer.data(), _cudaGeometryBuffers->deviceTriangleIndexBuffer, numRenderObjects.triangleIndices * sizeof(unsigned int), cudaMemcpyDeviceToHost));
+geometryBuffers->uploadTriangleIndices(hostTriangleIndexBuffer.data(), numRenderObjects.triangleIndices);
+}
+if (numRenderObjects.connectionArrowVertices > 0) {
+std::vector<ConnectionArrowVertexData> hostSelectedConnectionBuffer(numRenderObjects.connectionArrowVertices);
+CHECK_FOR_CUDA_ERROR(cudaMemcpy(hostSelectedConnectionBuffer.data(), _cudaGeometryBuffers->deviceSelectedConnectionBuffer, numRenderObjects.connectionArrowVertices * sizeof(ConnectionArrowVertexData), cudaMemcpyDeviceToHost));
+geometryBuffers->uploadSelectedConnectionData(hostSelectedConnectionBuffer.data(), numRenderObjects.connectionArrowVertices);
+}
+if (numRenderObjects.attackEventVertices > 0) {
+std::vector<AttackEventVertexData> hostAttackEventBuffer(numRenderObjects.attackEventVertices);
+CHECK_FOR_CUDA_ERROR(cudaMemcpy(hostAttackEventBuffer.data(), _cudaGeometryBuffers->deviceAttackEventBuffer, numRenderObjects.attackEventVertices * sizeof(AttackEventVertexData), cudaMemcpyDeviceToHost));
+geometryBuffers->uploadAttackEventData(hostAttackEventBuffer.data(), numRenderObjects.attackEventVertices);
+}
+if (numRenderObjects.detonationEventVertices > 0) {
+std::vector<DetonationEventVertexData> hostDetonationEventBuffer(numRenderObjects.detonationEventVertices);
+CHECK_FOR_CUDA_ERROR(cudaMemcpy(hostDetonationEventBuffer.data(), _cudaGeometryBuffers->deviceDetonationEventBuffer, numRenderObjects.detonationEventVertices * sizeof(DetonationEventVertexData), cudaMemcpyDeviceToHost));
+geometryBuffers->uploadDetonationEventData(hostDetonationEventBuffer.data(), numRenderObjects.detonationEventVertices);
+}
+} else {
+// Interop mode: use CUDA-OpenGL interoperability
+_cudaGeometryBuffers->registerBuffers(geometryBuffers);
+GeometryKernelsService::get().extractObjectData(_settings, simulationData, *_cudaGeometryBuffers, visibleWorldRect);
+syncAndCheck();
+}
+GeometryKernelsService::get().restorePositions(_settings, simulationData);
+syncAndCheck();
+}
+Expand Down
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

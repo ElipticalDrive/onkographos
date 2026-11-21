@@ -1,0 +1,439 @@
+--- v012.md
++++ v013.md
+@@ -4,249 +4,207 @@
+ 
+ ## Overview
+-Sensitivity-Aware Vector Clustering is a compression scheme for 3D Gaussian Splatting that reduces storage requirements by grouping spherical harmonic (SH) coefficients and Gaussian shape parameters (scale and rotation) into compact codebooks [S1, S2]. It distinguishes itself from standard vector quantization by using a gradient-based sensitivity measure to weight the distance metric during clustering, prioritizing the preservation of parameters that significantly impact image quality [S1]. This method is typically followed by quantization-aware fine-tuning and entropy encoding to achieve high compression ratios with minimal visual degradation [S1].
++Sensitivity-Aware Vector Clustering is a compression scheme for 3D Gaussian Splatting that reduces storage requirements by grouping spherical harmonic (SH) coefficients and Gaussian shape parameters (scale and rotation) into compact codebooks using sensitivity-aware vector quantization [S1, S2]. It distinguishes itself from standard post-training quantization by deriving a sensitivity measure for each parameter to guide the clustering process, prioritizing the preservation of parameters that significantly affect image quality [S1].
+ 
+ ## How it works
+-
+-### Inputs and Outputs
+-**Inputs:**
+-- A set of optimized 3D Gaussians, each defined by position, opacity, scale, rotation, and SH coefficients for color [S1].
+-- A set of training images with known camera parameters [S1].
+-- Hyperparameters: Codebook size $K$, sensitivity thresholds $\beta_c$ (for color) and $\beta_g$ (for shape), decay factor $\lambda_d$, batch sizes, and number of update steps [S1].
+-
+-**Outputs:**
+-- Two codebooks: one for SH coefficients (color) and one for Gaussian shape parameters (rotation and scale) [S1].
+-- For each Gaussian, two indices pointing to the respective codebook entries [S1].
+-- Compressed scene data (indices and codebooks) encoded using DEFLATE [S1].
+-
+-### Data Structures
+-1.  **Codebook Entry (Shape):** Stores 7 scalar values: 4 for the quaternion (rotation) and 3 for the scaling vector [S1].
+-2.  **Codebook Entry (Color):** Stores the SH coefficient vector (e.g., 48 values for degree 3) [S1].
+-3.  **Gaussian Record:** Stores position, opacity, and two 32-bit unsigned integer indices pointing to the color and shape codebooks [S1].
+-
+-### Algorithm Steps
+-
+-1.  **Sensitivity Calculation:**
+-    Compute the sensitivity $S(p)$ for each parameter $p$ of every Gaussian. The sensitivity is defined as the normalized sum of the gradients of the total image energy $E$ with respect to the parameter $p$ over all training images [S1, S2]:
+-    $$ S(p) = \frac{\sum_{i=1}^{N} \frac{\partial E_i}{\partial p_i}}{\sum_{i=1}^{N} P_i} $$
+-    where $N$ is the number of training images, $P_i$ is the number of pixels in image $i$, and $E_i$ is the total image energy (sum of RGB components) for image $i$ [S1, S2].
+-    
+-    For a vector $x$ (e.g., a set of SH coefficients or a shape parameter vector), the sensitivity $S(x)$ is the maximum sensitivity among its components $d$:
+-    $$ S(x) = \max_d S(x_d) $$
+-    This is computed via a single backward pass over the training images for each parameter [S1].
+-
+-2.  **Codebook Initialization:**
+-    Initialize the codebooks randomly with a uniform distribution within the minimum and maximum values observed for each parameter in the scene [S1].
+-
+-3.  **Sensitivity-Aware Clustering (k-Means):**
+-    Perform k-Means clustering to populate the codebooks. The clustering uses a weighted distance metric $D(x, c_k)$ between a vector $x$ and a centroid $c_k$:
++**Inputs and Outputs:**
++*   **Input:** An optimized set of 3D Gaussians, each defined by position, opacity, SH coefficients (color), and shape parameters (rotation and scale) [S1].
++*   **Output:** Two codebooks (one for color/SH, one for shape), indices mapping each Gaussian to its codebook entries, and the compressed bitstream [S1].
++
++**Data Structures:**
++*   **Codebook Entry (Shape):** 4 scalar values for quaternion (rotation) plus 3 scalar values for scaling [S1].
++*   **Codebook Entry (Color):** SH coefficient vector [S1].
++*   **Gaussian Index:** 32-bit unsigned integer pointing to an entry in the respective codebook [S1].
++
++**Step 1: Sensitivity Calculation**
++Calculate the sensitivity $S(p)$ for each scene parameter $p$ by computing its contribution to the training images [S1, S2]. The sensitivity is defined as the gradient of the total image energy with respect to the parameter, normalized by the number of pixels [S1, S2]:
++
++$$ S(p) = \frac{\sum_{i=1}^{N} \frac{\partial E_i}{\partial p_i}}{\sum_{i=1}^{N} P_i} $$
++
++Where:
++*   $N$ is the number of training images [S1, S2].
++*   $E_i$ is the total image energy (sum of RGB components) for image $i$ [S1, S2].
++*   $P_i$ is the number of pixels in image $i$ [S1, S2].
++*   $\frac{\partial E_i}{\partial p_i}$ is the gradient of the energy with respect to parameter $p$ [S1, S2].
++
++For a vector $x$ (e.g., a set of SH coefficients or a shape vector), the sensitivity $S(x)$ is defined as the maximum sensitivity over its components $d$ [S1]:
++
++$$ S(x) = \max_d S(x_d) $$
++
++This sensitivity is computed via a single backward pass over each of the training images [S1].
++
++**Step 2: Codebook Initialization**
++Initialize codebooks randomly with a uniform distribution within the minimum and maximum values of each parameter [S1].
++
++**Step 3: Sensitivity-Aware Clustering**
++Encode color information (SH coefficients) and Gaussian parameters (scale and rotation) into two separate codebooks via sensitivity-aware vector clustering [S1, S2].
++
++1.  **Filtering High-Sensitivity Vectors:** Identify SH vectors with sensitivity higher than a threshold $\beta_c$. These vectors are not clustered but are added directly to the codebook to preserve critical visual details [S1]. A similar threshold $\beta_g$ is used for Gaussian shape parameters [S1].
++2.  **Weighted Distance:** For the remaining vectors, compute the pairwise weighted distance $D(x, c_k)$ between a vector $x$ and a centroid $c_k$ [S1]:
++
+     $$ D(x, c_k) = S(x) \|x - c_k\|_2^2 $$
+-    where $S(x)$ is the sensitivity of vector $x$ [S1].
+-    
+-    **Handling High-Sensitivity Vectors:**
+-    - For SH coefficients: Identify vectors with sensitivity higher than threshold $\beta_c$. These are excluded from the standard clustering process and added directly to the codebook [S1].
+-    - For Shape parameters: Identify vectors with sensitivity higher than threshold $\beta_g$. These are also excluded from clustering and added directly to the codebook [S1].
+-    - Cluster the remaining vectors using the weighted distance metric [S1].
+-
+-    **Batched Update Strategy:**
+-    Due to memory constraints, a batched strategy is used [S1]:
+-    - Pick a random subset (batch) of vectors.
+-    - Compute the assignment of these vectors to the nearest centroids based on $D(x, c_k)$.
+-    - Update centroids using a moving average with decay factor $\lambda_d$:
+-      $$ c_k^{new} = \lambda_d c_k^{old} + (1 - \lambda_d) \frac{\sum_{x_i \in A(k)} S(x_i) x_i}{\sum_{x_i \in A(k)} S(x_i)} $$
+-      where $A(k)$ is the set of vectors assigned to centroid $c_k$ in the current batch [S1].
+-    - Repeat for the specified number of update steps [S1].
+-
+-    **Normalization:**
+-    After each update step, re-normalize each codebook vector representing a covariance matrix by dividing it through the trace of the covariance metric to counteract floating-point errors that may lead to non-unit scaling vectors [S1].
+-
+-4.  **Decomposition:**
+-    Decompose each codebook entry for shape parameters (covariance matrices) into rotation (quaternion) and scale (vector) parameters using eigenvalue decomposition. This is required for quantization-aware training [S1].
+-
+-5.  **Quantization-Aware Fine-Tuning:**
+-    Fine-tune the scene parameters (including codebook entries) on the training set to recover information lost during clustering [S1, S2].
+-    - **Forward Pass:** Simulate quantization using Min-Max Quantization. Consider a specific number of bits and the moving average of each parameter's min/max values [S2].
+-    - **Backward Pass:** Ignore the simulated quantization and calculate the gradient for the parameter without quantization [S2].
+-    - Optimize position, opacity, scaling, color, and codebook entries [S2].
+-
+-6.  **Entropy Encoding:**
+-    - Order the Gaussians according to their positions along a Z-order curve (Morton order) to exploit spatial coherence [S1, S2].
+-    - Compress the set of Gaussians (indices) and codebooks using DEFLATE (LZ77 + Huffman coding) [S1, S2].
+-
+-### Pseudocode
++
++    Where $S(x)$ is the sensitivity of vector $x$ [S1].
++3.  **Assignment:** Assign each vector to the centroid with the minimum distance [S1].
++4.  **Centroid Update:** Update centroids using the weighted average formula [S1]:
++
++    $$ c_k = \frac{1}{\sum_{x_i \in A(k)} S(x_i)} \sum_{x_i \in A(k)} S(x_i) x_i $$
++
++    Where $A(k)$ is the set of vectors assigned to centroid $c_k$ [S1].
++
++**Batched Clustering Strategy:**
++To improve performance, use a batched clustering strategy [S1]:
++1.  Pick a random subset of vectors (batch size $2^{18}$ for color features, $2^{20}$ for Gaussian parameters) [S1].
++2.  Compute the update step for the centroids based on the batch [S1].
++3.  Update the global centroids using a moving average with decay factor $\lambda_d$ [S1].
++
++**Handling Normalization Errors:**
++Clustering normalized covariance matrices can lead to non-unit scaling vectors due to floating-point errors [S1]. To counteract this, re-normalize each codebook vector after each update step by dividing it through the trace of the covariance metric [S1].
++
++**Decomposition:**
++After clustering, decompose each codebook entry (covariance matrix) into rotation and scale parameters using eigenvalue decomposition [S1]. This is required for quantization-aware training, as direct optimization of the matrix is not possible [S1]. The final codebook stores 4 scalar values for quaternion (rotation) and 3 scalar values for scaling [S1].
++
++**Step 4: Quantization-Aware Fine-Tuning**
++Fine-tune parameters on the training set using quantization-aware training with Min-Max Quantization to regain information lost during clustering [S1, S2].
++
++1.  **Forward Pass:** Simulate quantization considering a certain number of bits and the moving average of each parameter's min/max values [S2].
++2.  **Backward Pass:** Ignore simulated quantization and calculate the gradient for the parameter without quantization [S2].
++3.  **Optimization:** Perform optimization steps (e.g., 5000 steps) to adjust the codebook entries and Gaussian parameters [S1].
++
++**Step 5: Entropy Encoding**
++Compress the set of Gaussians and codebooks using DEFLATE [S1, S2].
++1.  Order the Gaussians by Z-order (Morton order) based on their positions to leverage spatial coherence [S1, S2].
++2.  Apply DEFLATE (LZ77 + Huffman coding) to the ordered indices and codebook data [S1, S2].
++
++**Pseudocode:**
+ 
+ ```python
+ import numpy as np
+ 
+-def compute_sensitivity(ground_truth_images, rendered_images, params):
+-    """
+-    Computes sensitivity S(p) for each parameter p.
+-    params: list of parameter vectors (e.g., SH coeffs, shape params).
+-    """
+-    # E is total image energy (sum of RGB)
+-    # Gradient of E w.r.t p is computed via backprop
+-    sensitivities = {}
+-    for p in params:
+-        # Compute gradient of energy w.r.t p
+-        grad = compute_gradient(ground_truth_images, rendered_images, p)
+-        # Sum gradients over all images
+-        sum_grad = np.sum(np.abs(grad))
+-        # Normalize by number of pixels (simplified, assuming equal P_i for brevity)
+-        # In practice, P_i varies per image
+-        sensitivities[p] = sum_grad
+-    return sensitivities
+-
+-def sensitivity_aware_kmeans(vectors, sensitivities, K, lambda_d, batch_size, num_steps):
+-    """
+-    Performs sensitivity-aware k-Means clustering.
+-    vectors: array of shape (N, D)
+-    sensitivities: array of shape (N,)
+-    K: codebook size
+-    lambda_d: decay factor
+-    """
+-    # Initialize centroids randomly within min/max of vectors
+-    centroids = np.random.uniform(vectors.min(), vectors.max(), (K, vectors.shape[1]))
+-    
+-    for step in range(num_steps):
+-        # Pick random batch
+-        indices = np.random.choice(vectors.shape[0], batch_size, replace=False)
+-        batch_vectors = vectors[indices]
+-        batch_sens = sensitivities[indices]
++def calculate_sensitivity(gradient_sum, pixel_counts):
++    """
++    Calculate sensitivity S(p) for a parameter p.
++    gradient_sum: Sum of gradients dE/dp over all training images.
++    pixel_counts: Sum of pixels P_i over all training images.
++    """
++    return gradient_sum / pixel_counts
++
++def sensitivity_aware_kmeans(vectors, sensitivities, centroids, decay_factor, batch_size):
++    """
++    Perform one step of sensitivity-aware k-Means clustering.
++    vectors: Array of shape (N, D) containing the vectors to cluster.
++    sensitivities: Array of shape (N,) containing sensitivity S(x) for each vector.
++    centroids: Array of shape (K, D) containing current centroids.
++    decay_factor: Lambda_d for moving average update.
++    batch_size: Number of vectors to process in this step.
++    """
++    # Select random batch
++    indices = np.random.choice(len(vectors), size=batch_size, replace=False)
++    batch_vectors = vectors[indices]
++    batch_sensitivities = sensitivities[indices]
++    
++    # Compute distances: D(x, ck) = S(x) * ||x - ck||^2
++    # Expand dimensions for broadcasting: (batch, 1, D) - (1, K, D)
++    diff = batch_vectors[:, np.newaxis, :] - centroids[np.newaxis, :, :]
++    sq_dist = np.sum(diff ** 2, axis=2)  # (batch, K)
++    weighted_dist = sq_dist * batch_sensitivities[:, np.newaxis]  # (batch, K)
++    
++    # Assign to nearest centroid
++    assignments = np.argmin(weighted_dist, axis=1)  # (batch,)
++    
++    # Update centroids using moving average
++    for k in range(centroids.shape[0]):
++        mask = assignments == k
++        if np.sum(mask) > 0:
++            assigned_vectors = batch_vectors[mask]
++            assigned_sensitivities = batch_sensitivities[mask]
++            
++            # Weighted average for new centroid
++            weight_sum = np.sum(assigned_sensitivities)
++            new_centroid = np.sum(assigned_vectors * assigned_sensitivities[:, np.newaxis], axis=0) / weight_sum
++            
++            # Update global centroid with decay
++            centroids[k] = (1 - decay_factor) * centroids[k] + decay_factor * new_centroid
++            
++            # Re-normalize if necessary (example for shape parameters)
++            # centroids[k] = normalize_covariance(centroids[k])
++            
++    return centroids
++
++def decompose_covariance_matrix(cov_matrix):
++    """
++    Decompose covariance matrix into quaternion and scale.
++    cov_matrix: 3x3 covariance matrix.
++    Returns: quaternion (4,), scale (3,)
++    """
++    # Eigenvalue decomposition
++    eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
++    
++    # Ensure positive eigenvalues for scaling
++    eigenvalues = np.maximum(eigenvalues, 1e-6)
++    
++    # Scale is sqrt of eigenvalues
++    scale = np.sqrt(eigenvalues)
++    
++    # Rotation from eigenvectors
++    # Convert rotation matrix to quaternion
++    # Note: Implementation details for R2Q depend on convention
++    quaternion = rotation_matrix_to_quaternion(eigenvectors)
++    
++    return quaternion, scale
++
++def compress_scene(gaussians, sh_codebook, shape_codebook, morton_order_indices):
++    """
++    Compress the scene data.
++    gaussians: List of Gaussian objects.
++    sh_codebook: Codebook for SH coefficients.
++    shape_codebook: Codebook for shape parameters.
++    morton_order_indices: Indices to sort Gaussians by Morton order.
++    """
++    # Sort Gaussians by Morton order
++    sorted_gaussians = [gaussians[i] for i in morton_order_indices]
++    
++    # Create indices for each Gaussian
++    sh_indices = []
++    shape_indices = []
++    
++    for g in sorted_gaussians:
++        # Find closest index in codebooks
++        sh_idx = find_closest_codebook_entry(g.sh_coeffs, sh_codebook)
++        shape_idx = find_closest_codebook_entry(g.shape_params, shape_codebook)
++        sh_indices.append(sh_idx)
++        shape_indices.append(shape_idx)
+         
+-        # Compute weighted distances
+-        # D(x, ck) = S(x) * ||x - ck||^2
+-        # Expand dimensions for broadcasting
+-        diff = batch_vectors[:, np.newaxis, :] - centroids[np.newaxis, :, :] # (B, K, D)
+-        sq_dist = np.sum(diff**2, axis=2) # (B, K)
+-        weighted_dist = sq_dist * batch_sens[:, np.newaxis] # (B, K)
+-        
+-        # Assign to nearest centroid
+-        assignments = np.argmin(weighted_dist, axis=1) # (B,)
+-        
+-        # Update centroids using moving average
+-        for k in range(K):
+-            mask = assignments == k
+-            if np.sum(mask) > 0:
+-                assigned_vectors = batch_vectors[mask]
+-                assigned_sens = batch_sens[mask]
+-                
+-                # Weighted average
+-                sum_weighted = np.sum(assigned_sens[:, np.newaxis] * assigned_vectors, axis=0)
+-                sum_weights = np.sum(assigned_sens)
+-                new_centroid = sum_weighted / sum_weights
+-                
+-                # Moving average update
+-                centroids[k] = lambda_d * centroids[k] + (1 - lambda_d) * new_centroid
+-                
+-                # Re-normalize if shape parameter (covariance matrix)
+-                if is_shape_parameter(k):
+-                    centroids[k] = re_normalize(centroids[k])
+-                    
+-    return centroids
+-
+-def compress_scene(gaussians, color_codebook, shape_codebook, beta_c, beta_g):
+-    """
+-    Compresses 3D Gaussians using sensitivity-aware clustering.
+-    """
+-    # 1. Compute sensitivities for all parameters
+-    all_sh_coeffs = [g.sh for g in gaussians]
+-    all_shape_params = [g.shape for g in gaussians]
+-    
+-    sh_sens = compute_sensitivity_for_vectors(all_sh_coeffs)
+-    shape_sens = compute_sensitivity_for_vectors(all_shape_params)
+-    
+-    # 2. Separate high-sensitivity vectors
+-    high_sens_sh_indices = np.where(sh_sens > beta_c)[0]
+-    high_sens_shape_indices = np.where(shape_sens > beta_g)[0]
+-    
+-    low_sens_sh = [all_sh_coeffs[i] for i in range(len(gaussians)) if i not in high_sens_sh_indices]
+-    low_sens_shape = [all_shape_params[i] for i in range(len(gaussians)) if i not in high_sens_shape_indices]
+-    
+-    # 3. Cluster low-sensitivity vectors
+-    color_codebook = sensitivity_aware_kmeans(low_sens_sh, sh_sens[low_sens_sh_indices], K=4096, lambda_d=0.8, batch_size=2**18, num_steps=100)
+-    shape_codebook = sensitivity_aware_kmeans(low_sens_shape, shape_sens[low_sens_shape_indices], K=4096, lambda_d=0.8, batch_size=2**20, num_steps=800)
+-    
+-    # 4. Add high-sensitivity vectors to codebooks
+-    for idx in high_sens_sh_indices:
+-        color_codebook.append(all_sh_coeffs[idx])
+-    for idx in high_sens_shape_indices:
+-        shape_codebook.append(all_shape_params[idx])
+-        
+-    # 5. Assign indices to Gaussians
+-    compressed_gaussians = []
+-    for i, g in enumerate(gaussians):
+-        if i in high_sens_sh_indices:
+-            color_idx = len(color_codebook) - (len(high_sens_sh_indices) - np.sum(high_sens_sh_indices < i)) # Simplified index logic
+-            # In practice, map original index to new codebook position
+-        else:
+-            # Find nearest centroid in color_codebook
+-            color_idx = find_nearest(color_codebook, g.sh)
+-            
+-        if i in high_sens_shape_indices:
+-            shape_idx = ... # Similar logic
+-        else:
+-            shape_idx = find_nearest(shape_codebook, g.shape)
+-            
+-        compressed_gaussians.append({
+-            'pos': g.pos,
+-            'opacity': g.opacity,
+-            'color_idx': color_idx,
+-            'shape_idx': shape_idx
+-        })
+-        
+-    # 6. Sort by Morton order
+-    morton_order = compute_morton_order([g['pos'] for g in compressed_gaussians])
+-    compressed_gaussians = [compressed_gaussians[i] for i in morton_order]
+-    
+-    # 7. Encode with DEFLATE
+-    data = encode(compressed_gaussians, color_codebook, shape_codebook)
+-    return deflate(data)
++    # Compress indices and codebooks using DEFLATE
++    compressed_data = deflate_encode(sh_indices, shape_indices, sh_codebook, shape_codebook)
++    
++    return compressed_data
+ ```
+ 
+-### Parameters
+-- **Codebook Size ($K$):** 4096 [S1].
+-- **Sensitivity Threshold for SH ($\beta_c$):** $6 \times 10^{-7}$ [S1].
+-- **Sensitivity Threshold for Shape ($\beta_g$):** $3 \times 10^{-6}$ [S1].
+-- **Decay Factor ($\lambda_d$):** 0.8 [S1].
+-- **Batch Size (Color):** $2^{18}$ [S1].
+-- **Batch Size (Shape):** $2^{20}$ [S1].
+-- **Update Steps (SH):** 100 [S1].
+-- **Update Steps (Shape):** 800 [S1].
+-- **Quantization-Aware Training Steps:** 5000 [S1].
+-
+-### Edge Cases and Pitfalls
+-- **Floating Point Errors:** Clustering normalized covariance matrices can lead to non-unit scaling vectors due to floating-point errors. This is mitigated by re-normalizing each codebook vector after each update step by dividing it through the trace of the covariance metric [S1].
+-- **High Sensitivity Vectors:** A small percentage (<5%) of SH coefficients have very high sensitivity. These must be excluded from clustering and added directly to the codebook to prevent significant rendering errors [S1].
++**Parameters:**
++*   $\lambda_d$: Decay factor for the moving average in batched clustering. Typical value: 0.8 [S1].
++*   Batch size for color features: $2^{18}$ [S1].
++*   Batch size for Gaussian parameters: $2^{20}$ [S1].
++*   Codebook size $K$: 4096 [S1].
++*   $\beta_c$: Sensitivity threshold for SH coefficients. Gaussians with sensitivity $> \beta_c$ are excluded from clustering and added directly to the codebook. Typical value: $6 \times 10^{-7}$ [S1].
++*   $\beta_g$: Sensitivity threshold for Gaussian shape parameters. Typical value: $3 \times 10^{-6}$ [S1].
++*   Optimization steps for quantization-aware fine-tuning: 5000 [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Floating Point Errors:** Clustering normalized covariance matrices can lead to non-unit scaling vectors. This is handled by re-normalizing each codebook vector after each update step by dividing it through the trace of the covariance metric [S1].
++*   **High Sensitivity Vectors:** A small percentage of SH coefficients (< 5%) have high sensitivity. These must be excluded from clustering and added directly to the codebook to maintain visual quality [S1].
+ 
+ ## Operating characteristics
+-
+-### Time and Memory Complexity
+-- **Memory:** The method reduces storage by a factor of up to 31× on real-world scenes [S1]. The primary memory saving comes from replacing full SH and shape vectors with indices into small codebooks (size $K=4096$) [S1].
+-- **Time:** Clustering is performed in batches to manage memory. The batched strategy with moving average updates allows for efficient processing of large scenes [S1]. Rendering speed can be up to 4× higher than uncompressed versions on lightweight GPUs due to reduced memory bandwidth requirements [S1].
+-
+-### Strengths and Limitations
+-- **Strengths:** Achieves high compression rates with minimal visual quality degradation [S1]. Enables real-time rendering on low-power devices and web browsers via WebGPU [S1]. The sensitivity-aware approach ensures that critical visual details are preserved [S1].
+-- **Limitations:** Requires a training phase for sensitivity calculation and clustering [S1]. The method is specific to 3D Gaussian Splatting representations [S1].
+-
+-### When to Use
+-- Use when storage or bandwidth is constrained, and real-time rendering on limited hardware is required [S1].
+-- Use when the scene has high redundancy in color and shape parameters [S1].
+-
+-### When Not to Use
+-- Use when the scene has very few high-sensitivity features that dominate the visual quality, as clustering might still introduce artifacts if not handled carefully (though the method addresses this with $\beta_c$) [S1].
+-- Use when dynamic scenes require frequent updates to the codebooks, as clustering is a static compression technique [S1].
++*   **Compression Ratio:** Achieves up to 31× compression on real-world scenes with minimal degradation of visual quality [S1].
++*   **Rendering Speed:** Enables real-time rendering on lightweight GPUs, up to 4× higher framerates than the original 3DGS via an optimized GPU compute pipeline [S1].
++*   **Memory:** Significantly reduces memory consumption, making it suitable for network streaming and low-power devices [S1].
++*   **Strengths:** Preserves visual quality by prioritizing sensitive parameters; efficient rendering due to codebook lookups; suitable for web-based rendering (WebGPU) [S1].
++*   **Limitations:** Requires a fine-tuning phase (quantization-aware training) which adds to the post-processing time; sensitivity calculation requires backward passes over training images [S1].
+ 
+ ## Background
+-
+-### Origin
+-Sensitivity-Aware Vector Clustering was proposed by Niedemayr et al. in 2024 [S1]. The paper "Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis" introduced this method as part of a broader compression pipeline for 3D Gaussian Splatting [S1].
+-
+-### History and Development
+-The method builds on the observation that SH coefficients and Gaussian shape parameters in 3DGS are highly redundant [S1]. It draws inspiration from volumetric NeRF compression and deep network weight quantization [S1]. The sensitivity measure is derived from the gradient of the image energy, similar to techniques used in neural network pruning and quantization [S1].
+-
+-### Applications
+-The method is used for compressed 3D Gaussian Splatting representations, enabling efficient storage and transmission of 3D scenes for applications like network streaming and rendering on low-power devices [S1]. It has been implemented in WebGPU for browser-based rendering [S1].
++*   **Origin:** Proposed by Niedemayr et al. in 2024 [S1].
++*   **Context:** Developed to address the high memory consumption of 3D Gaussian Splatting, making it suitable for applications like network streaming and rendering on low-power devices [S1].
++*   **Relation to NeRF:** Inspired by volumetric radiance field compression methods that use vector clustering [S1].
+ 
+ ## Sources
+-
+ [S1] Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis, https://doi.org/10.1109/cvpr52733.2024.00985, fetched 2026-10-26
+ [S2] Visibility-Based Geometry Pruning of Neural Plenoptic Scene Representations, https://doi.org/10.1109/tmm.2025.3618548, fetched 2026-10-26

@@ -1,0 +1,135 @@
+# Deformed element ray intersection
+
+Also called: Wiley et al. method for deformed quadratic tetrahedra
+
+## Overview
+This method determines the ray segments that intersect deformed finite elements, addressing the problem where the mapping from a standard element shape (e.g., a regular tetrahedron) to physical simulation space is non-linear [S1, book]. It is distinct from linear tetrahedron intersection methods because it handles higher-order polynomial mappings, requiring the calculation of multiple intersection segments and an approximate inverse mapping to evaluate scalar functions [S1, book].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a deformed finite element (specifically a quadratic tetrahedron) defined by its control points/vertices in physical space and their corresponding coordinates in the standard reference element.
+*   **Output:** A set of ray parameter intervals $[t_{start}, t_{end}]$ representing the segments of the ray that lie within the deformed element.
+
+**Data Structures**
+The deformed element is represented by its vertices. For a quadratic tetrahedron, this includes the 4 corner vertices and 6 mid-edge vertices, defining the non-linear mapping [S1, book]. The mapping function $\mathbf{x}(\mathbf{u})$ maps a point $\mathbf{u}$ in the standard reference tetrahedron to physical space $\mathbf{x}$ [S1, book].
+
+**Steps**
+1.  **Formulate the Intersection Equation:** The intersection of the ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ with the deformed element boundary is found by solving for $t$ such that $\mathbf{r}(t)$ lies on the boundary of the element. Since the element is defined by a non-linear mapping, this involves solving a polynomial equation derived from the element's geometry [S1, book].
+2.  **Solve for Intersection Parameters:** For deformed quadratic tetrahedra, the boundary conditions lead to polynomial equations in $t$. Wiley et al. [57] provide the method to determine these segments. This typically involves finding the roots of the polynomial that define the entry and exit points of the ray into the deformed volume [S1, book].
+3.  **Identify Valid Segments:** Collect all real, positive roots $t$. Sort them. The intervals between consecutive roots (or from the first root to infinity, bounded by the element's extent) represent the segments where the ray intersects the deformed element. Note that a ray can intersect a deformed element in more than one segment due to the non-linear deformation [S1, book].
+4.  **Approximate Inverse Mapping:** For any point $\mathbf{x}$ on a valid ray segment within the element, the scalar function (e.g., density) is evaluated in the standard reference space. This requires the inverse map $\mathbf{u} = \mathbf{x}^{-1}(\mathbf{x})$. Since an analytical inverse may not exist or be complex, it is approximated using polynomial splines along the ray segments [S1, book].
+5.  **Evaluate Scalar Function:** Use the approximated inverse map to find the coordinates $\mathbf{u}$ in the standard element. Evaluate the scalar function defined on the standard element at $\mathbf{u}$ [S1, book].
+
+**Formulas**
+*   Ray: $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$
+*   Deformed Element Mapping: $\mathbf{x}(\mathbf{u})$, where $\mathbf{u}$ are barycentric coordinates in the reference tetrahedron.
+*   Inverse Mapping Approximation: $\mathbf{u} \approx S(\mathbf{x})$, where $S$ is a polynomial spline approximation [S1, book].
+*   Scalar Evaluation: $f(\mathbf{x}) = f_{ref}(S(\mathbf{x}))$, where $f_{ref}$ is the function defined on the reference element [S1, book].
+
+**Parameters**
+*   Polynomial degree: Determined by the finite element order (e.g., quadratic for quadratic tetrahedra) [S1, book].
+*   Integration method: After segments are found, integration can use equally spaced sampling or Gaussian integration for smoother transfer functions [S1, book].
+
+**Edge Cases and Pitfalls**
+*   **Multiple Segments:** A ray may intersect a deformed element in multiple disjoint segments. The method must correctly identify all such segments [S1, book].
+*   **Inverse Mapping:** An inverse map is strictly required to evaluate the scalar function at a point on the ray, as the function is typically defined on the standard element [S1, book].
+*   **Precision:** Solving high-order polynomials for intersection can be numerically sensitive.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def deformed_element_ray_intersection(ray_origin, ray_direction, element):
+    """
+    Determines ray segments intersecting a deformed quadratic tetrahedron.
+    
+    Args:
+        ray_origin: 3D vector, origin of the ray.
+        ray_direction: 3D vector, direction of the ray.
+        element: Object containing the deformed quadratic tetrahedron data,
+                 including vertex positions in physical space and reference
+                 space mapping coefficients.
+    
+    Returns:
+        List of tuples (t_start, t_end) representing valid ray segments.
+    """
+    # Step 1: Formulate the polynomial equation for intersection
+    # The boundary of the deformed element is defined by the mapping.
+    # For a quadratic tetrahedron, this results in a polynomial in t.
+    # The exact coefficients depend on the specific deformation and element geometry.
+    # This step involves deriving the polynomial P(t) = 0 where P represents
+    # the condition that the ray point lies on the element boundary.
+    # [G] In practice, this requires solving the intersection of the ray with
+    # the curved faces of the deformed element.
+    
+    polynomial_coeffs = compute_intersection_polynomial(ray_origin, ray_direction, element)
+    
+    # Step 2: Solve for roots
+    # Find all real, positive roots of the polynomial.
+    roots = solve_polynomial_roots(polynomial_coeffs)
+    valid_roots = [t for t in roots if t > 0]
+    valid_roots.sort()
+    
+    # Step 3: Identify segments
+    # Intervals between consecutive roots are potential segments.
+    segments = []
+    if not valid_roots:
+        return segments
+        
+    # The first root is an entry point. The next is an exit, etc.
+    # We assume the ray starts outside the element.
+    for i in range(0, len(valid_roots) - 1, 2):
+        t_start = valid_roots[i]
+        t_end = valid_roots[i+1]
+        segments.append((t_start, t_end))
+        
+    # Note: If the ray starts inside, the first segment might start at t=0.
+    # This requires a point-in-element test for the ray origin.
+    # [G] A point-in-deformed-element test is needed to handle this case.
+    
+    return segments
+
+def evaluate_scalar_at_ray_point(ray_origin, ray_direction, t, element):
+    """
+    Evaluates the scalar function at a point on the ray within a deformed element.
+    
+    Args:
+        ray_origin: 3D vector.
+        ray_direction: 3D vector.
+        t: Parameter along the ray.
+        element: Deformed element data.
+        
+    Returns:
+        Scalar value at the point.
+    """
+    # Point in physical space
+    point_physical = ray_origin + t * ray_direction
+    
+    # Approximate inverse mapping to reference space
+    # Using polynomial splines as per Wiley et al.
+    point_reference = approximate_inverse_map(point_physical, element)
+    
+    # Evaluate scalar function in reference space
+    scalar_value = evaluate_scalar_in_reference_space(point_reference, element)
+    
+    return scalar_value
+```
+
+## Subtopics
+
+### Ray Bending via Deformation Field
+This variant is used in NeRF editing contexts where a deformed tetrahedral mesh $T'$ corresponds to an original mesh $T$. It bends casting rays by calculating the displacement of sampled points via barycentric interpolation [S2]. Rays are cast to the space containing the deformed mesh $T'$ [S2]. For each sampled point, the tetrahedron in $T'$ containing it is identified [S2]. Using the correspondence between $T$ and $T'$, the displacement $\Delta p$ from the deformed vertices to the original vertices is obtained via barycentric interpolation of the four vertices of the containing tetrahedron [S2]. The displacement $\Delta p$ is added to the sampled point's coordinate $p$ to predict density and RGB values using a network $\zeta$: $(\zeta(p + \Delta p), \zeta(d)) \rightarrow (\sigma, c)$ [S2]. A pitfall is that sampled points outside the tetrahedral mesh $T'$ are not moved, meaning parts of the ray outside the mesh are not bent [S2].
+
+## Operating characteristics
+*   **Complexity:** The complexity is dominated by solving high-order polynomial equations for intersection, which is more expensive than linear intersection. The number of segments can be greater than one, increasing the number of evaluations [S1, book].
+*   **Performance:** Accuracy is higher for smoothly varying transfer functions when combined with Gaussian integration [S1, book].
+*   **Strengths:** Handles non-linear deformations accurately, essential for finite element visualization [S1, book].
+*   **Limitations:** Requires complex inverse mapping approximations; multiple intersection segments increase computational cost [S1, book].
+*   **When to use:** When visualizing data on deformed finite element meshes where linear approximations are insufficient [S1, book].
+
+## Background
+The method was introduced by Wiley et al. [57] for determining ray segments intersecting deformed quadratic tetrahedra [S1, book]. It addresses the challenges of volume rendering with finite elements where the mapping to physical space is non-linear [S1, book].
+
+## Sources
+[S1] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (book)
+[S2] NeRF-Editing: Geometry Editing of Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.01781, fetched 2026-10-26

@@ -1,0 +1,208 @@
+--- v005.md
++++ v006.md
+@@ -4,14 +4,14 @@
+ 
+ ## Overview
+-Ray marching with single scattering is a real-time technique for rendering volumetric clouds by discretizing the Radiative Transfer Equation (RTE) along view rays and approximating light transport with a single scattering event [S3, unofficial]. It combines procedural noise for density generation with a physically-based lighting model to produce dynamic, three-dimensional cloudscapes [S1, S3, unofficial]. It is distinguished from multi-scattering methods by its computational efficiency, trading physical accuracy for performance, and from billboard-based methods by its ability to render volumetric depth and internal structure [S2, S3, unofficial].
++Ray marching with single scattering is a real-time technique for rendering volumetric clouds by discretizing the Radiative Transfer Equation (RTE) along view rays and approximating light transport with a single scattering event [S3, unofficial]. It combines procedural noise for density generation with a physically-based lighting model to produce dynamic, three-dimensional cloudscapes [S1, S3, unofficial]. It is distinguished from multi-scattering methods by its computational efficiency, trading physical accuracy for performance, and from billboard-based methods by its ability to render volumetric depth and internal structure [S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Camera position $\mathbf{o}$, normalized view direction $\mathbf{d}$, cloud bounding box (AABB), sun position $\mathbf{L}_{pos}$, sun color $\mathbf{C}_{sun}$, ambient color $\mathbf{C}_{amb}$, cloud layer height limits ($h_{min}, h_{max}$), and procedural noise textures (Weather Map, Base Noise, Edge Detail) [S1, S3, unofficial].
+-*   **Outputs:** Final pixel color $C_{final}$ [S1, unofficial].
++*   **Inputs:** Camera origin $\mathbf{o}$, normalized view direction $\mathbf{d}$, sun direction $\mathbf{d}_{\text{sun}}$, sun color $\mathbf{C}_{\text{sun}}$, ambient color $\mathbf{C}_{\text{amb}}$, cloud bounding box (AABB), cloud layer height limits ($h_{\min}, h_{\max}$), and procedural noise textures (Weather Map, Base Noise, Edge Detail) [S1, S3, unofficial].
++*   **Outputs:** Final pixel color $C_{\text{final}}$ [S1, unofficial].
+ 
+ **Data Structures:**
+ 1.  **Weather Map (2D Texture):**
+-    *   Format: RGBA, Float32.
++    *   Format: RGBA, Float32 [S2, unofficial].
+     *   Red Channel: Base cloud coverage ($0.0$ to $1.0$) [S3, unofficial].
+     *   Blue Channel: Cloud type ($0.0$=stratus, $0.5$=stratocumulus, $1.0$=cumulus) [S3, unofficial].
+@@ -21,4 +21,69 @@
+ 3.  **Edge Detail Texture (3D Texture, $32 \times 32 \times 32$):**
+     *   Channels: High-frequency inverse Worley noise at increasing frequencies [S3, unofficial].
++
++**Algorithm Steps:**
++1.  **Initialization:**
++    *   Compute ray direction $\mathbf{d} = \text{normalize}(\mathbf{s} - \mathbf{o})$, where $\mathbf{s}$ is the screen position and $\mathbf{o}$ is the eye position [S1, unofficial].
++    *   Compute sky color using $\mathbf{d}$ [S1, unofficial].
++    *   Initialize main transmittance $T = 1.0$, accumulated color $C = 0$, and distance $t = 0.0$ [S1, unofficial].
++    *   Set scene variables (scattering/absorption coefficients) based on time of day [S1, unofficial].
++2.  **Main Ray Marching Loop:**
++    *   Iterate $i$ from $0$ to `MAX_STEPS` [S1, unofficial].
++    *   Calculate position $\mathbf{p} = \mathbf{o} + t \mathbf{d}$ [S1, unofficial].
++    *   **Bounding Check:** If $\mathbf{p}$ is outside the cloud bounding box or cloud layer height limits, skip or break [S3, unofficial].
++    *   **Density Evaluation:**
++        *   Sample base noise $\rho_{\text{base}}$ from the 3D texture at $\mathbf{p}$ [S3, unofficial].
++        *   Sample edge detail $\rho_{\text{edge}}$ from the 32x32x32 texture at $\mathbf{p}$ [S3, unofficial].
++        *   Combine noise: Use fBm of low-frequency inverse Worley channels to modulate the Perlin-Worley noise [S3, unofficial].
++        *   Apply height modulation: Modulate density with a linear gradient from $h_{\min}$ to $h_{\max}$ [S3, unofficial].
++        *   Apply weather map: Scale density by coverage from the Weather Map Red channel [S3, unofficial].
++        *   Final density $\rho = \text{clamp}(\text{combined noise}, 0.0, 1.0)$ [S1, unofficial].
++    *   **Optimization:** If $\rho < 0.01$, increment $t$ by `STEP_SIZE` and continue [S1, unofficial].
++    *   **Light Marching (Single Scattering):**
++        *   Initialize light transmittance $T_{\text{light}} = 1.0$, light distance $t_{\text{light}} = 0.0$ [S1, unofficial].
++        *   Compute light direction $\mathbf{d}_{\text{light}} = \text{normalize}(\mathbf{d}_{\text{sun}} - \mathbf{p})$ [S1, unofficial].
++        *   Iterate $j$ from $0$ to `MAX_STEPS_LIGHT` [S1, unofficial].
++        *   Calculate light position $\mathbf{p}_{\text{light}} = \mathbf{p} + t_{\text{light}} \mathbf{d}_{\text{light}}$ [S1, unofficial].
++        *   Sample density $\rho_{\text{light}}$ at $\mathbf{p}_{\text{light}}$ [S1, unofficial].
++        *   Update light transmittance: $T_{\text{light}} \leftarrow T_{\text{light}} \cdot e^{-\rho_{\text{light}} \cdot \text{extinctionCoeff} \cdot \text{STEP\_SIZE\_LIGHT} \cdot 1.5}$ [S1, unofficial].
++        *   If $T_{\text{light}} < 0.05$, break light loop [S1, unofficial].
++        *   Increment $t_{\text{light}}$ by `STEP_SIZE_LIGHT` [S1, unofficial].
++    *   **Scattering Calculation:**
++        *   Compute phase function value $f_p$ using $\mathbf{d}$ and $\mathbf{d}_{\text{light}}$ [S1, unofficial].
++        *   Compute $L_s = \mathbf{C}_{\text{sun}} \cdot T_{\text{light}} \cdot f_p \cdot 6.0$ [S1, unofficial].
++        *   Compute $L_a = \mathbf{C}_{\text{amb}} \cdot 0.7$ [S1, unofficial].
++        *   Compute local scattering contribution: $S = (L_s + L_a) \cdot T \cdot \rho \cdot \text{STEP\_SIZE}$ [S1, unofficial].
++    *   **Accumulation:**
++        *   $C \leftarrow C + S$ [S1, unofficial].
++        *   Update main transmittance: $T \leftarrow T \cdot e^{-\rho \cdot \text{extinctionCoeff} \cdot \text{STEP\_SIZE} \cdot 1.5}$ [S1, unofficial].
++        *   If $T < 0.01$, break main loop [S1, unofficial].
++        *   Increment $t$ by `STEP_SIZE` [S1, unofficial].
++        *   If $t > 20.0$, break main loop [S1, unofficial].
++3.  **Final Composition:**
++    *   $C_{\text{final}} = C + T \cdot \text{sky}$ [S1, unofficial].
++    *   Output $C_{\text{final}}$ [S1, unofficial].
++
++**Formulas:**
++*   **Henyey-Greenstein Phase Function:**
++    $$ f_p(\cos \theta) = \left( \text{mix}(F, B, 0.4) \right) \cdot 0.4 $$
++    Where:
++    $$ F = \frac{1 - g_1^2}{(1 + g_1^2 - 2 g_1 \cos \theta)^{1.5}} $$
++    $$ B = \frac{1 - g_2^2}{(1 + g_2^2 - 2 g_2 \cos \theta)^{1.5}} $$
++    [S1, unofficial]
++*   **In-scattered Radiance ($L_s$):**
++    $$ L_s = L_{\text{sun}} T f_p $$
++    [S3, unofficial]
++*   **Ambient Radiance ($L_a$):**
++    $$ L_a = L_{\text{ambient}} (1 - e^{-\rho}) $$
++    [S3, unofficial]
++*   **Transmittance Update:**
++    $$ T_k = T_{k-1} e^{-\alpha \rho \Delta s} $$
++    [S3, unofficial]
++*   **Radiance Update:**
++    $$ L_k = L_{k-1} + (L_a + L_s) T_k \Delta s $$
++    [S3, unofficial]
++*   **Sky Color:**
++    $$ \text{sky} = \text{mix}(\text{skyBottom}, \text{skyTop}, \text{clamp}(\mathbf{d}_y \cdot 0.5 + 0.5, 0.0, 1.0)) $$
++    [S1, unofficial]
+ 
+ **Parameters:**
+@@ -34,74 +99,11 @@
+ *   `g2`: -0.2 (backward anisotropy) [S1, unofficial].
+ 
+-**Formulas:**
+-*   **Henyey-Greenstein Phase Function:**
+-    $$ f_p(\cos \theta) = \left( \text{mix}(F, B, 0.4) \right) \cdot 0.4 $$
+-    Where:
+-    $$ F = \frac{1 - g_1^2}{(1 + g_1^2 - 2 g_1 \cos \theta)^{1.5}} $$
+-    $$ B = \frac{1 - g_2^2}{(1 + g_2^2 - 2 g_2 \cos \theta)^{1.5}} $$
+-    [S1, unofficial]
+-*   **In-scattered Radiance ($L_s$):**
+-    $$ L_s = L_{\text{sun}} T f_p $$
+-    [S3, unofficial]
+-*   **Ambient Radiance ($L_a$):**
+-    $$ L_a = L_{\text{ambient}} (1 - e^{-\rho}) $$
+-    [S3, unofficial]
+-*   **Transmittance Update:**
+-    $$ T_k = T_{k-1} e^{-\alpha \rho \Delta s} $$
+-    [S3, unofficial]
+-*   **Radiance Update:**
+-    $$ L_k = L_{k-1} + (L_a + L_s) T_k \Delta s $$
+-    [S3, unofficial]
+-*   **Sky Color:**
+-    $$ \text{sky} = \text{mix}(\text{skyBottom}, \text{skyTop}, \text{clamp}(\mathbf{d}_y \cdot 0.5 + 0.5, 0.0, 1.0)) $$
+-    [S1, unofficial]
+-
+-**Algorithm Steps:**
+-1.  **Initialization:**
+-    *   Compute ray direction $\mathbf{d} = \text{normalize}(\mathbf{s} - \mathbf{o})$, where $\mathbf{s}$ is the screen position and $\mathbf{o}$ is the eye position [S1, unofficial].
+-    *   Compute sky color using $\mathbf{d}$ [S1, unofficial].
+-    *   Initialize main transmittance $T = 1.0$, accumulated color $C = 0$, and distance $t = 0.0$ [S1, unofficial].
+-    *   Set scene variables (scattering/absorption coefficients) based on time of day [S1, unofficial].
+-
+-2.  **Main Ray Marching Loop:**
+-    *   Iterate $i$ from $0$ to `MAX_STEPS` [S1, unofficial].
+-    *   Calculate position $\mathbf{p} = \mathbf{o} + t \mathbf{d}$ [S1, unofficial].
+-    *   **Bounding Check:** If $\mathbf{p}$ is outside the cloud bounding box or cloud layer height limits, skip or break [S3, unofficial]. [G: Implementation note: Check AABB intersection before sampling].
+-    *   **Density Evaluation:**
+-        *   Sample base noise $\rho_{base}$ from the 3D texture at $\mathbf{p}$ [S3, unofficial].
+-        *   Sample edge detail $\rho_{edge}$ from the 32x32x32 texture at $\mathbf{p}$ [S3, unofficial].
+-        *   Combine noise: Use fBm of low-frequency inverse Worley channels to modulate the Perlin-Worley noise [S3, unofficial].
+-        *   Apply height modulation: Modulate density with a linear gradient from $h_{min}$ to $h_{max}$ [S3, unofficial].
+-        *   Apply weather map: Scale density by coverage from the Weather Map Red channel [S3, unofficial].
+-        *   Final density $\rho = \text{clamp}(\text{combined noise}, 0.0, 1.0)$ [S1, unofficial].
+-    *   **Optimization:** If $\rho < 0.01$, increment $t$ by `STEP_SIZE` and continue [S1, unofficial].
+-    *   **Light Marching (Single Scattering):**
+-        *   Initialize light transmittance $T_{light} = 1.0$, light distance $t_{light} = 0.0$ [S1, unofficial].
+-        *   Compute light direction $\mathbf{d}_{light} = \text{normalize}(\mathbf{L}_{pos} - \mathbf{p})$ [S3, unofficial].
+-        *   Iterate $j$ from $0$ to `MAX_STEPS_LIGHT` [S1, unofficial].
+-        *   Calculate light position $\mathbf{p}_{light} = \mathbf{p} + t_{light} \mathbf{d}_{light}$ [S1, unofficial].
+-        *   Sample density $\rho_{light}$ at $\mathbf{p}_{light}$ [S1, unofficial].
+-        *   Update light transmittance: $T_{light} \leftarrow T_{light} \cdot e^{-\rho_{light} \cdot \text{extinctionCoeff} \cdot \text{STEP\_SIZE\_LIGHT} \cdot 1.5}$ [S1, unofficial]. [G: The factor 1.5 is specific to the source implementation; standard Beer-Lambert uses $\sigma_t \Delta t$].
+-        *   If $T_{light} < 0.05$, break light loop [S1, unofficial].
+-        *   Increment $t_{light}$ by `STEP_SIZE_LIGHT` [S1, unofficial].
+-    *   **Scattering Calculation:**
+-        *   Compute phase function value $f_p$ using $\mathbf{d}$ and $\mathbf{d}_{light}$ [S1, unofficial].
+-        *   Compute $L_s = \mathbf{C}_{sun} \cdot T_{light} \cdot f_p \cdot 6.0$ [S1, unofficial]. [G: The factor 6.0 is a scaling constant from the source].
+-        *   Compute $L_a = \mathbf{C}_{amb} \cdot 0.7$ [S1, unofficial]. [G: Source uses fixed ambient multiplier].
+-        *   Compute local scattering contribution: $S = (L_s + L_a) \cdot T \cdot \rho \cdot \text{STEP\_SIZE}$ [S1, unofficial]. [G: Derived from combining S1 accumulation and S3 radiance update].
+-    *   **Accumulation:**
+-        *   $C \leftarrow C + S$ [S1, unofficial].
+-        *   Update main transmittance: $T \leftarrow T \cdot e^{-\rho \cdot \text{extinctionCoeff} \cdot \text{STEP\_SIZE} \cdot 1.5}$ [S1, unofficial].
+-        *   If $T < 0.01$, break main loop [S1, unofficial].
+-        *   Increment $t$ by `STEP_SIZE` [S1, unofficial].
+-        *   If $t > 20.0$, break main loop [S1, unofficial].
+-
+-3.  **Final Composition:**
+-    *   $C_{final} = C + T \cdot \text{sky}$ [S1, unofficial].
+-    *   Output $C_{final}$ [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Precision & Boundaries:** The algorithm uses a fixed maximum distance of $20.0$ and a transmittance threshold of $0.01$ to terminate early [S1, unofficial]. WebGL 1 does not support dynamic loop bounds, requiring `STEP_SIZE` and `STEP_SIZE_LIGHT` to be hardcoded constants [S2, unofficial].
++*   **Degenerate Input:** Aliasing artifacts become noticeable when the camera is positioned inside the cloud volume [S3, unofficial]. The method cannot render two clouds vertically layered at the same position [S3, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def ray_march_single_scattering(camera_origin, camera_dir, sun_pos, sun_color, ambient_color, 
++def ray_march_single_scattering(camera_origin, camera_dir, sun_dir, sun_color, ambient_color, 
+                                 weather_map, base_noise, edge_detail, bounds_min, bounds_max,
+                                 h_min, h_max, max_steps=50, step_size=0.08, max_steps_light=5, step_size_light=0.6):
+@@ -159,5 +161,5 @@
+             
+         # Light marching
+-        light_dir = normalize(sun_pos - p)
++        light_dir = normalize(sun_dir - p)
+         transmittance_light = 1.0
+         t_light = 0.0
+@@ -209,4 +211,19 @@
+     
+     return mix(forward, backward, 0.4) * 0.4
++
++def is_inside_box(p, min, max):
++    return p.x >= min.x and p.x <= max.x and p.y >= min.y and p.y <= max.y and p.z >= min.z and p.z <= max.z
++
++def sample_base_noise(p):
++    # Returns density from 3D texture (128x128x128)
++    return texture3D(base_noise, p).r
++
++def sample_edge_detail(p):
++    # Returns erosion factor from 3D texture (32x32x32)
++    return texture3D(edge_detail, p).r
++
++def sample_weather_map(p):
++    # Returns coverage from 2D texture
++    return texture2D(weather_map, p)
+ ```
+ 
+@@ -216,6 +233,8 @@
+ *   **Performance:** Achieves 2.6 ms frame time at 1440p on an AMD Ryzen 5 7600X CPU and AMD Radeon RX 7900 XT GPU [S3, unofficial].
+ *   **Strengths:** Real-time performance; dynamic wind simulation via texture scrolling; configurable cloud types and weather patterns [S3, unofficial].
+-*   **Limitations:** Single scattering approximation lacks physical accuracy for thick clouds; aliasing artifacts when the camera is inside the volume; cannot render vertically layered clouds at the same position [S3, unofficial].
+-*   **Scaling:** Performance scales with cloud layer thickness; reducing thickness yields major performance gains [S3, unofficial].
++*   **Limitations:** Single scattering approximation lacks physical accuracy for thick clouds [S1, S3, unofficial]. Noticeable aliasing occurs when the camera is inside the cloud volume [S3, unofficial]. The approach cannot render two clouds vertically layered at the same position [S3, unofficial].
++*   **Scaling:** Performance scales with cloud layer thickness; reducing thickness yields major performance gains by enabling smaller/fewer ray marching steps [S3, unofficial].
++*   **When to use:** Suitable for real-time applications requiring dynamic, volumetric cloudscapes where performance is prioritized over strict physical accuracy [S3, unofficial].
++*   **When not to use:** Unsuitable for offline rendering requiring multiple scattering, or for close-up camera shots inside the volume where aliasing becomes prominent [S3, unofficial].
+ 
+ ## Background

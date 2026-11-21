@@ -1,0 +1,166 @@
+# Texture Spreading Backprojection
+
+Also called: Texture Spreading
+
+## Overview
+Texture Spreading Backprojection is a GPU-accelerated method for reconstructing volume data from projection images by mapping projection data onto volume slices via texture mapping [S1, unofficial]. It solves the problem of efficiently aggregating multi-angle projection data into a 3D volume without requiring intermediate merge operations [S1, unofficial]. It is distinguished from its sibling methods by grouping spreading operations per slice and using a large texture sheet for accumulation, which eliminates the need for a final merge step but requires all projections to remain in memory throughout the reconstruction [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** A set of 2D projection images (one per projection angle), volume dimensions (width, height, depth/slices).
+- **Outputs:** A 3D volume dataset (stack of slices).
+
+**Data Structures:**
+- **Projection Textures:** Each projection image is bound as a 2D texture.
+- **Texture Sheet:** A large 2D texture container (sheet) composed of sub-textures, where each sub-texture holds the contribution from a single projection angle for the current slice being processed.
+- **Slice Stack:** A buffer or texture stack representing the current volume slice being reconstructed. Only one slice stack is maintained in memory at a time [S1, unofficial].
+
+**Steps:**
+1. **Initialize Slice Processing:** Select the current volume slice index $z$ to reconstruct.
+2. **Create Texture Sheet:** Allocate a large texture sheet. For each projection angle $i$ (where $i = 0 \dots N-1$ and $N$ is the number of projections):
+   - Bind the $i$-th projection image as a 2D texture.
+   - Perform a "spreading" operation: map the projection data onto the texture sheet's sub-texture region corresponding to angle $i$. This involves transforming the 2D projection coordinates into the coordinate space of the volume slice.
+3. **Multi-Pass Accumulation:** Execute a fragment shader pass over the texture sheet:
+   - For each fragment (voxel location) in the current slice, sample the sub-textures from all projection angles.
+   - Sum the sampled values from all sub-textures to compute the final voxel value for the current slice.
+4. **Store Slice:** Save the accumulated result for slice $z$ to the output volume stack.
+5. **Advance Slice:** Increment $z$ and repeat steps 2–4 until all slices are reconstructed.
+
+**Formulas:**
+Let $V(x,y,z)$ be the voxel value at coordinates $(x,y,z)$.
+Let $P_i(u,v)$ be the pixel value at coordinates $(u,v)$ in projection $i$.
+Let $T_i(x,y)$ be the transformation mapping voxel coordinates $(x,y)$ in slice $z$ to the coordinate system of projection $i$.
+The value for voxel $(x,y,z)$ is computed as:
+$$ V(x,y,z) = \sum_{i=0}^{N-1} P_i(T_i(x,y)) $$
+where $T_i(x,y)$ determines the sampling location on the $i$-th projection for the voxel at $(x,y)$ in slice $z$ [S1, unofficial].
+
+**Parameters:**
+- **Number of Projections ($N$):** Determined by the acquisition geometry.
+- **Texture Sheet Size:** Must be large enough to hold all $N$ sub-textures. Size depends on projection resolution and $N$.
+
+**Edge Cases and Pitfalls:**
+- **Memory Constraints:** All projections must remain in GPU memory until the entire volume is reconstructed. This can lead to memory traffic congestion and pipeline stalls on GPUs with limited bandwidth [S1, unofficial].
+- **Precision:** Using integer representations for input data can reduce memory traffic and alleviate bandwidth issues, but may introduce quantization errors [S1, unofficial].
+- **Boundary Conditions:** Proper handling of projection boundaries is required to avoid sampling invalid data during the spreading operation.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def texture_spreading_backprojection(projections, volume_dims):
+    """
+    Reconstructs a volume using texture spreading backprojection.
+    
+    Args:
+        projections: List of 2D arrays, each representing a projection image.
+        volume_dims: Tuple (width, height, depth) of the output volume.
+        
+    Returns:
+        3D array representing the reconstructed volume.
+    """
+    num_projections = len(projections)
+    width, height, depth = volume_dims
+    volume = np.zeros((width, height, depth), dtype=np.float32)
+    
+    # Create a large texture sheet to hold contributions from all projections
+    # The sheet size must accommodate all projection textures
+    sheet_size = determine_sheet_size(projections)
+    texture_sheet = create_texture_sheet(sheet_size)
+    
+    for z in range(depth):
+        # Clear the current slice in the texture sheet or accumulation buffer
+        clear_texture_sheet(texture_sheet)
+        
+        # Step 1: Spread each projection onto the texture sheet
+        for i in range(num_projections):
+            projection_texture = projections[i]
+            # Compute transformation matrix T_i for this projection angle
+            # T_i maps voxel coordinates (x,y) in slice z to projection coordinates (u,v)
+            transform_matrix = compute_transformation_matrix(i, z, volume_dims)
+            
+            # Spread the projection data onto the sub-texture region for angle i
+            spread_projection_to_sheet(
+                texture_sheet, 
+                projection_texture, 
+                transform_matrix, 
+                sub_texture_index=i
+            )
+        
+        # Step 2: Multi-pass accumulation in fragment shader
+        # Sum all sub-textures in the sheet to reconstruct the current slice
+        current_slice = accumulate_slice_from_sheet(texture_sheet, num_projections)
+        
+        # Store the reconstructed slice
+        volume[:, :, z] = current_slice
+        
+    return volume
+
+def determine_sheet_size(projections):
+    """
+    Determines the size of the texture sheet based on projection dimensions.
+    Implementation detail: [G] Typically, the sheet is a 2D texture with 
+    dimensions large enough to hold all projection textures side-by-side or 
+    in a grid. Exact layout depends on GPU texture limits.
+    """
+    # Placeholder for implementation-specific logic
+    # Not given in the sources.
+    pass
+
+def create_texture_sheet(size):
+    """
+    Creates a GPU texture object of the specified size.
+    """
+    # Placeholder for GPU texture creation
+    # Not given in the sources.
+    pass
+
+def clear_texture_sheet(sheet):
+    """
+    Clears the texture sheet to zero.
+    """
+    # Placeholder for GPU clear operation
+    # Not given in the sources.
+    pass
+
+def spread_projection_to_sheet(sheet, projection, transform_matrix, sub_texture_index):
+    """
+    Spreads a single projection onto a sub-texture region of the sheet.
+    """
+    # Placeholder for GPU fragment shader logic
+    # Not given in the sources.
+    pass
+
+def accumulate_slice_from_sheet(sheet, num_projections):
+    """
+    Accumulates values from all sub-textures in the sheet to form a slice.
+    """
+    # Placeholder for GPU fragment shader logic
+    # Not given in the sources.
+    pass
+
+def compute_transformation_matrix(projection_index, slice_z, volume_dims):
+    """
+    Computes the transformation matrix for a specific projection and slice.
+    """
+    # Placeholder for geometric calculation
+    # Not given in the sources.
+    pass
+```
+
+## Subtopics
+
+### Voxel-Centric Transformation Backprojection
+An alternative implementation where transformation matrices are computed for each voxel to designate its sampling locations on the projections [S1, unofficial]. Instead of spreading projection data onto a texture sheet, this method iterates through all projection angles in the fragment shader for each voxel, fetching and summing sample values from the projections directly [S1, unofficial]. It offers a different memory access pattern compared to texture spreading, potentially trading off memory bandwidth for computational complexity in transformation calculations [S1, unofficial].
+
+## Operating characteristics
+- **Memory Usage:** Requires all projection images to remain in GPU memory simultaneously until the entire volume is reconstructed [S1, unofficial]. This can be a significant limitation for large datasets or high-resolution projections.
+- **Time Complexity:** Proportional to the number of voxels in the volume times the number of projections, $O(W \times H \times D \times N)$, where $W,H,D$ are volume dimensions and $N$ is the number of projections. Each voxel requires sampling from all projections.
+- **Performance:** Can suffer from memory bandwidth bottlenecks due to the large amount of projection data accessed repeatedly [S1, unofficial]. Using integer representations for input data can help alleviate bandwidth issues [S1, unofficial].
+- **Strengths:** No merge operation is needed at the end, as only one slice stack is maintained [S1, unofficial]. This simplifies the pipeline and reduces intermediate storage requirements.
+- **Limitations:** High memory consumption. Not suitable for scenes or datasets that exceed available GPU memory.
+
+## Background
+Texture Spreading Backprojection was originally used for parallel-beam projection geometry by [CM03] and later extended to cone-beam geometry by [MX06] [S1, unofficial]. It is a technique developed to leverage GPU texture mapping hardware for efficient volume reconstruction from projections.
+
+## Sources
+[S1] GPU-Accelerated D2VR, https://doi.org/10.2312/vg/vg06/023-030, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,130 @@
+Repo: NikaGeospatial/onlymap-js Labels: enhancement, layers, data-layer, 3d Effort: Medium → High (three-stage after source verification: Stage 1 — PointCloudLayer registry entry + registerFormat decoders, ~1 week, renders correctly but ...
+
+Point cloud layers — LAS/LAZ/PLY direct, plus streamed 3D Tiles / COPC at scale · Issue #24 · NikaGeospatial/onlymap-js · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Point cloud layers — LAS/LAZ/PLY direct, plus streamed 3D Tiles / COPC at scale #24
+New issue
+Copy link
+New issue
+Copy link
+Open
+Task
+Open
+Point cloud layers — LAS/LAZ/PLY direct, plus streamed 3D Tiles / COPC at scale#24
+Task
+Copy link
+Assignees
+Labels
+new-featurea new implementationa new implementation
+Description
+lawrencenika
+opened on Jul 22, 2026
+Issue body actions
+Repo: NikaGeospatial/onlymap-js
+Labels: enhancement, layers, data-layer, 3d
+Effort: Medium → High (three-stage after source verification: Stage 1 — PointCloudLayer registry entry + registerFormat decoders, ~1 week, renders correctly but loads big clouds slowly through the per-row accessor pipeline; Stage 1.5 — a binary-attributes fast path the codebase doesn't have yet (LayerData variant + accessor skip + worker decode + attribute-based picking), ~1–1.5 weeks, what makes 1M points actually fast; Stage 2 — scale via Tile3DLayer ergonomics + gated COPC, ~1.5–2 weeks.)
+Basis: OnlyMapJS source at v0.3.x (layer-registry.ts loadClass seam, data-layer.ts registerFormat, the COGLayer lazy-chunk precedent) + a survey of the 2026 point-cloud web stack. Demand signal (3D deep-dive, table 4, row 3): AV/robotics simulation — perception/planning stacks are validated against city-to-highway-scale LiDAR replay before road deployment; LiDAR market ~$3–4B at ~18%+ CAGR, plus survey/as-built/forestry/corridor demand. All external refs are plain-text, deliberately not hyperlinked — no cross-repo backlinks.
+TL;DR;
+LiDAR scanners and drones produce "point clouds" — clouds of millions of individual measured points that reconstruct a 3D scene (a construction site, a forest, a street). Right now OnlyMapJS can't display these at all. This ticket adds that, in two tiers: a straightforward version that works for a scan of reasonable size, and a "handles a whole city's worth of points without choking the browser" version for massive datasets, which streams in only what's currently visible instead of loading everything at once.
+Summary — two problems wearing one name
+"Point cloud support" is really two features with very different cost, and shipping them as one blurs the estimate. Stage 1 is nearly free: a small/medium cloud (a scan, a survey tile) is just deck.gl's PointCloudLayer fed by a loaders.gl loader that already exists — but OnlyMapJS ships no point-cloud layer type and no point-cloud data format today. Stage 2 is the hard one: city-to-region scale (hundreds of millions to billions of points) can't be a flat buffer — it needs octree LOD + streaming, which in the deck.gl world means the Tile3DLayer path (.pnts / glTF-points 3D Tiles) or the emerging COPC single-file range-read format.
+```
+flowchart TB
+  subgraph s1["Stage 1 — flat clouds (cheap, ships first)"]
+    F["LAS / LAZ / PLY / PCD"] -->|"registerFormat + laz-perf WASM"| PC["PointCloudLayer<br/>(new registry entry via loadClass)"]
+    PC --> R1["render ≤ ~1M pts @60fps<br/>(chunk past ~10M)"]
+  end
+  subgraph s2["Stage 2 — scale (octree LOD + streaming)"]
+    COPC["COPC (LAZ 1.4, range-read)"] -.->|"needs LAS 1.4 loader — gap"| TL
+    T3D[".pnts / glTF-points<br/>3D Tiles + tileset.json"] -->|"Tiles3DLoader (bundled)"| TL["Tile3DLayer<br/>(already registered)"]
+    TL --> R2["frustum cull + screen-space-error LOD<br/>tile load/unload → billions of pts"]
+  end
+```
+Loading
+Corrected baseline — verified in source
+Tile3DLayer is already registered (layer-registry.ts) and, via loaders.gl's Tiles3DLoader, renders .pnts 3D Tiles point clouds with real LOD/streaming (per-tile PointCloudLayer sublayers, frustum cull, screen-space-error, tile load/unload). Stage 2's rendering path substantially exists — the work is ingestion ergonomics and a point-cloud-tuned schema, not a new renderer.
+No PointCloudLayer in the curated registry, and no point-cloud format in data-layer.ts (ARROW/CSV/SHAPEFILE/KML ship; LAS/LAZ/PLY/PCD do not). Stage 1 is genuinely missing.
+The seams are ready. registerLayer({ loadClass }) lazy-loads a layer's chunk on first use (the COGLayer precedent) — perfect for keeping the LAS decode + PointCloudLayer out of the core bundle. registerFormat({ match, parse }) lazy-imports a decoder and returns LayerData; the point-columnar ColumnarData shape (arrowTableToColumnar, rowsToColumnar) is exactly how a decoded cloud's positions/colors should land (typed arrays, not per-point objects).
+Evidence (described, never linked)
+Formats & loaders. loaders.gl ships LASLoader, PLYLoader, PCDLoader, DracoLoader, and the tiled Tiles3DLoader/I3SLoader. Sharp caveat (verified against npm + source): the las module handles LAS/LAZ up to v1.3 only — not v1.4, and COPC mandates LAS 1.4, so the stock loader cannot read a COPC file. The copc module is worse than experimental — it is unpublished (private: true, a v5 alpha; the npm registry has no @loaders.gl/copc at all), so it cannot even be installed on the v4 line. The v5 alpha las rework adds selectable backends (laz-perf/copc/laz-rs), so the LAS 1.4/COPC story likely changes at loaders.gl v5 — one more reason to gate rather than build against it now. LAZ decompression is WASM (laz-perf / laz-rs). So: LAS≤1.3/LAZ/PLY/PCD parse client-side today; COPC requires preprocess-to-3D-Tiles until loaders.gl v5 lands.
+PointCloudLayer perf — and an honest constraint in OUR pipeline. The layer renders each point as a screen-facing triangle (3× the vertex count of raw GL.POINTS; verified in its _getModel) with no built-in tiling/LOD. deck's documented fast path for large static clouds is binary attributes (data.attributes.getPosition typed arrays built in a worker) — but OnlyMapJS has no such path today: every get-* accessor compiles to a per-row JS function, ColumnarData materializes a row-object array on first pick (rowsMemo in data-layer.ts), and nothing in buildLayers constructs deck's {length, attributes} form. Through the existing pipeline, a 1M-point cloud means ~3M+ boxed accessor calls at load and a million row objects on first pick — it renders, but load and first-pick are slow. The steady-state ~1M@60fps figure is a GPU number and survives; the load path is the real Stage-1 constraint, priced below as Stage 1.5.
+Octree LOD (Stage 2). Potree's octree is additive (a node draws in addition to its ancestors; visible nodes chosen by point budget / screen-space error, hierarchy loaded on demand). COPC collapses that octree + LAZ 1.4 into one range-readable file (the "COG for point clouds"): a reader identifies it from the first ~589 bytes then issues HTTP range requests for only the nodes in view — no tiling service, no exploded EPT file tree. Demonstrated browser scale (Potree lineage): hundreds of billions of points.
+Adjacency — splats. 3D Gaussian splatting (.ply/.splat/.spz, the glTF KHR_gaussian_splatting extension direction) converges onto the same glTF-points + 3D-Tiles-LOD substrate this ticket builds — worth designing Stage 2 so a splat layer can reuse it later, but classic LiDAR is the target here (splats are their own ticket).
+Design
+Stage 1 — PointCloudLayer + point-cloud formats
+Register PointCloudLayer via loadClass (lazy chunk). Add a POINT_CLOUD_FORMAT to data-layer.ts matching .las/.laz/.ply/.pcd (lazy-importing the loaders.gl loader + laz-perf on first use) and returning positions/colors/intensity as columnar typed arrays. Attribute grammar mirrors the ScatterplotLayer idiom:
+```
+<!-- a survey scan: direct LAS, colored by classification -->
+<om-layer id="scan" type="PointCloudLayer" data="site-scan.laz"
+  point-size="2" get-color="classify($classification, [2,5,6], ramp('tab10'))" pickable></om-layer>
+
+<!-- intensity shading -->
+<om-layer id="corridor" type="PointCloudLayer" data="powerline.las"
+  point-size="1.5" get-color="scale($intensity, sequential, ramp('viridis'), domain=[0,255])"></om-layer>
+```
+Guardrails: a decoded cloud over a point-count threshold emits a dev notice recommending Stage 2 / tiling. Auto-chunking past the single-buffer ceiling is not a detail — buildLayers (runtime-core.ts) constructs exactly one deck layer per om-layer IR, so chunking means registering PointCloudLayer as a custom CompositeLayer wrapper via the loadClass seam whose renderLayers() splits the data into N sublayers: per-chunk self-consistent {length, columns} views (compiled columnar accessors read info.data), per-chunk updateTriggers, and picking-index remap (chunk-local info.index → global row) so selection and rowAt still address the original dataset. Note: lazy registry entries skip mergeDerivedProps, so the wrapper's attribute schema is fully hand-authored.
+Stage 1.5 — the binary fast path (priced explicitly, not assumed): extend LayerData with a deck-native {length, attributes} variant; teach attribute-resolution.ts to skip compiling accessors that binary attributes supply (and fingerprint the buffers for updateTriggers); decode in a worker returning transferable typed arrays; answer picks (rowAt) from attribute lookup instead of row materialization. This is what makes "1M points loads fast and picks fast" true — without it Stage 1 is "renders fine, loads and first-picks slowly," which is acceptable for a v1 but must be said out loud.
+Stage 2 — scale via Tile3DLayer (mostly ergonomics) + a COPC path
+.pnts / glTF-points 3D Tiles already stream through the registered Tile3DLayer; Stage 2 adds point-cloud-tuned attributes (point-size, get-color over tile metadata, point-budget → screen-space-error) and documents the "convert once with PotreeConverter/Entwine/py3dtiles, serve the tileset" pipeline (consistent with docs/3d-assets.md's convert-upstream philosophy). COPC is the format to target for "single file, range-read, no tiling step"; because the stock LAS loader can't read LAS 1.4, the COPC path is gated behind the experimental loader maturing (open Q) — until then, preprocess-to-3D-Tiles is the supported scale answer.
+Implementation plan
+Stage 1 — layer — the CompositeLayer wrapper registered via loadClass (chunk-splitting renderLayers(), picking-index remap, hand-authored schema: get-position, get-color, get-normal, point-size, size-units, pickable, opacity).
+Stage 1 — formats — POINT_CLOUD_FORMAT in data-layer.ts (lazy loaders.gl loader + laz-perf); decode → columnar typed arrays; KNOWN_UNSHIPPED entries removed as each lands.
+Stage 1 — guardrails — point-count dev notice recommending tiling; honest docs on load-time cost until Stage 1.5.
+Stage 1.5 — binary fast path — {length, attributes} LayerData variant; accessor-compile skip + buffer fingerprinting in attribute-resolution.ts; worker decode with transferable arrays; attribute-based rowAt picking.
+Stage 2 — Tile3DLayer point-cloud ergonomics — point-tuned attrs, point-budget, metadata-driven color; the convert-upstream doc.
+Stage 2 — COPC (gated on loaders.gl v5) — the module is unpublished today; adopt when the v5 las backend rework ships; until then, documented preprocess-to-3D-Tiles.
+Doc-sync — README data-formats + 3D rows; docs/ point-cloud page (Stage 1 direct vs Stage 2 tiled decision table); skill + llms.txt; html-data.ts + gen; architecture traceability + changelog; example page + dev/build-public.ts + npm run test:public.
+Non-goals
+In-browser tiling / octree construction (PotreeConverter/Entwine's job) — convert upstream, ingest the tiled result (the docs/3d-assets.md rule).
+E57 (no mainstream browser loader) — preprocess-only; a KNOWN_UNSHIPPED hint.
+Point-cloud editing / classification authoring — render + inspect, not edit.
+Gaussian splats — the converging cousin; its own ticket, though Stage 2 is designed not to preclude it.
+Server-side potree/EPT services — the library is client-side; it consumes standards.
+Acceptance criteria
+A .laz and a .ply render via PointCloudLayer with point-size and a get-color accessor (classification + intensity ramps); LAZ decompresses via laz-perf in a lazy chunk.
+A cloud past the point-count threshold emits the dev notice and auto-chunks without the author writing multiple layers; core bundle unaffected when no point cloud is used (CI size check).
+A .pnts / glTF-points 3D Tiles cloud streams through Tile3DLayer with point-tuned styling and LOD, at a scale a flat PointCloudLayer cannot reach.
+Picking returns per-point attributes (classification/intensity) on the standard pick object.
+COPC path documented with its current gating; preprocess-to-3D-Tiles works as the scale answer today.
+All doc-sync surfaces updated.
+Open design questions (max 3)
+COPC now or gated: vendor copc.js + laz-perf ourselves (owning real maintenance) to ship single-file range-read streaming before loaders.gl v5, or gate and lead with preprocess-to-3D-Tiles? Proposed: gate — the upstream copc module is unpublished and the v5 las backend rework will change the landscape; vendoring now buys months, not a moat.
+Auto-chunk threshold: what point count triggers the dev notice / internal chunking, and is it device-aware (GPU memory probe) or a fixed constant? Proposed: fixed conservative constant + notice; device probe later.
+Intensity/classification vocabulary: expose raw LAS attribute names (intensity, classification, returnNumber) as accessor fields directly, or normalize to a documented set? Proposed: pass through raw names — surveyors already know them.
+Activity
+lawrencenika
+assigned
+howllian27
+on Jul 22, 2026
+lawrencenika
+added the
+Task
+issue type on Jul 22, 2026
+lawrencenika
+added
+new-featurea new implementationa new implementation
+on Jul 22, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+howllian27
+Labels
+new-featurea new implementationa new implementation
+Type
+Task
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

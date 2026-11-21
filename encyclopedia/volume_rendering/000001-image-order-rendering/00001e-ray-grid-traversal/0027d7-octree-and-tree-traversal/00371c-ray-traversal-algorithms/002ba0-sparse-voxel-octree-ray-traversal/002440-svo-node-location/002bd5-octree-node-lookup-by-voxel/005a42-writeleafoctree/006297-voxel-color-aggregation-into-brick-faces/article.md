@@ -1,0 +1,212 @@
+# Voxel Color Aggregation into Brick Faces
+
+
+## Overview
+This method aggregates per-voxel color data from a flat fragment list into the specific geometric positions (corners, edges, faces, and center) of a 3D texture brick representing a leaf node in a Sparse Voxel Octree (SVO). It builds on [WriteLeafOctree](16593-writeleafoctree.md), which maps voxel attributes to brick coordinates. Unlike simple accumulation, this method computes averaged colors for all topological elements of a voxel unit to support higher-order interpolation or ray-tracing queries that sample these intermediate positions.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A list of voxel fragments, each containing a node address and a color value.
+*   **Output:** Updated `brickPool_value` texture, a 3D image buffer storing RGBA8 colors for the brick's geometric primitives.
+
+**Data Structures:**
+*   `nodePool_color`: `uniform readonly uimageBuffer` (format `r32ui`). Stores the brick address for each SVO node.
+*   `brickPool_value`: `uniform volatile image3D` (format `rgba8`). The target texture where aggregated colors are written.
+*   `nodeMap`: `uniform usampler2D`.
+*   `levelAddressBuffer`: `uniform usamplerBuffer`.
+*   `nodeMapOffset`: `uniform ivec2[8]`.
+*   `nodeMapSize`: `uniform ivec2[8]`.
+*   `numLevels`: `uniform uint`.
+
+**Algorithm:**
+The shader processes each voxel fragment. For each fragment, it determines the target leaf node, retrieves the associated brick address, loads the 8 constituent voxel colors of that brick, computes the aggregated color for each geometric primitive, and writes the result back to the brick.
+
+1.  **Get Node Address:** Call `getThreadNode()` to retrieve the SVO node address associated with the current thread/fragment.
+2.  **Check Validity:** If `nodeAddress == NODE_NOT_FOUND`, terminate the shader invocation.
+3.  **Retrieve Brick Address:** Load the brick address from `nodePool_color`. The node address is converted to an integer index: `idx = int(nodeAddress)`. The brick address is extracted from the x-component of the loaded vec3: `brickAddress = uintXYZ10ToVec3(imageLoad(nodePool_color, idx)).x`.
+4.  **Load Voxel Colors:** Load the 8 voxel colors from `brickPool_value` into an array `voxelValues[8]`. The indices are derived from `brickAddress` and `childOffsets[i]` for $i=0..7$:
+    $$ \text{voxelValues}[i] = \text{imageLoad}(\text{brickPool\_value}, \text{brickAddress} + 2 \times \text{childOffsets}[i]) $$
+    *Note: The source uses `2 * childOffsets[i]`. The exact definition of `childOffsets` is not provided in the source text, but it maps the 8 octants of the voxel unit to the brick's internal coordinate system.*
+5.  **Compute Center Color:** Calculate the average of all 8 voxels.
+    $$ \text{col} = \sum_{i=0}^{7} 0.125 \times \text{voxelValues}[i] $$
+    Store at `brickAddress + ivec3(1, 1, 1)`.
+6.  **Compute Face X Color:** Average the 4 voxels with positive X index (indices 1, 3, 5, 7).
+    $$ \text{col} = 0.25 \times (\text{voxelValues}[1] + \text{voxelValues}[3] + \text{voxelValues}[5] + \text{voxelValues}[7]) $$
+    Store at `brickAddress + ivec3(2, 1, 1)`.
+7.  **Compute Face X Neg Color:** Average the 4 voxels with negative/zero X index (indices 0, 2, 4, 6).
+    $$ \text{col} = 0.25 \times (\text{voxelValues}[0] + \text{voxelValues}[2] + \text{voxelValues}[4] + \text{voxelValues}[6]) $$
+    Store at `brickAddress + ivec3(0, 1, 1)`.
+8.  **Compute Face Y Color:** Average the 4 voxels with positive Y index (indices 2, 3, 6, 7).
+    $$ \text{col} = 0.25 \times (\text{voxelValues}[2] + \text{voxelValues}[3] + \text{voxelValues}[6] + \text{voxelValues}[7]) $$
+    Store at `brickAddress + ivec3(1, 2, 1)`.
+9.  **Compute Face Y Neg Color:** Average the 4 voxels with negative/zero Y index (indices 0, 1, 4, 5).
+    $$ \text{col} = 0.25 \times (\text{voxelValues}[0] + \text{voxelValues}[1] + \text{voxelValues}[4] + \text{voxelValues}[5]) $$
+    Store at `brickAddress + ivec3(1, 0, 1)`.
+10. **Compute Face Z Color:** Average the 4 voxels with positive Z index (indices 4, 5, 6, 7).
+    $$ \text{col} = 0.25 \times (\text{voxelValues}[4] + \text{voxelValues}[5] + \text{voxelValues}[6] + \text{voxelValues}[7]) $$
+    Store at `brickAddress + ivec3(1, 1, 2)`.
+11. **Compute Face Z Neg Color:** Average the 4 voxels with negative/zero Z index (indices 0, 1, 2, 3).
+    $$ \text{col} = 0.25 \times (\text{voxelValues}[0] + \text{voxelValues}[1] + \text{voxelValues}[2] + \text{voxelValues}[3]) $$
+    Store at `brickAddress + ivec3(1, 1, 0)`.
+12. **Compute Edge (1,0,0) Color:** Average voxels 0 and 1.
+    $$ \text{col} = 0.5 \times (\text{voxelValues}[0] + \text{voxelValues}[1]) $$
+    Store at `brickAddress + ivec3(1, 0, 0)`.
+13. **Compute Edge (0,1,0) Color:** Average voxels 0 and 2.
+    $$ \text{col} = 0.5 \times (\text{voxelValues}[0] + \text{voxelValues}[2]) $$
+    Store at `brickAddress + ivec3(0, 1, 0)`.
+14. **Compute Edge (1,2,0) Color:** Average voxels 2 and 3.
+    $$ \text{col} = 0.5 \times (\text{voxelValues}[2] + \text{voxelValues}[3]) $$
+    Store at `brickAddress + ivec3(1, 2, 0)`.
+15. **Compute Edge (2,1,0) Color:** Average voxels 3 and 1.
+    $$ \text{col} = 0.5 \times (\text{voxelValues}[3] + \text{voxelValues}[1]) $$
+    Store at `brickAddress + ivec3(2, 1, 0)`.
+16. **Compute Edge (0,0,1) Color:** Average voxels 0 and 4.
+    $$ \text{col} = 0.5 \times (\text{voxelValues}[0] + \text{voxelValues}[4]) $$
+    Store at `brickAddress + ivec3(0, 0, 1)`.
+17. **Compute Edge (0,2,1) Color:** Average voxels 2 and 6.
+    $$ \text{col} = 0.5 \times (\text{voxelValues}[2] + \text{voxelValues}[6]) $$
+    Store at `brickAddress + ivec3(0, 2, 1)`.
+18. **Compute Edge (2,2,1) Color:** Average voxels 3 and 7.
+    $$ \text{col} = 0.5 \times (\text{voxelValues}[3] + \text{voxelValues}[7]) $$
+    Store at `brickAddress + ivec3(2, 2, 1)`.
+19. **Compute Edge (2,0,1) Color:** Average voxels 1 and 5.
+    $$ \text{col} = 0.5 \times (\text{voxelValues}[1] + \text{voxelValues}[5]) $$
+    Store at `brickAddress + ivec3(2, 0, 1)`.
+20. **Compute Edge (0,1,2) Color:** Average voxels 4 and 6.
+    $$ \text{col} = 0.5 \times (\text{voxelValues}[4] + \text{voxelValues}[6]) $$
+    Store at `brickAddress + ivec3(0, 1, 2)`.
+21. **Compute Edge (1,2,2) Color:** Average voxels 6 and 7.
+    $$ \text{col} = 0.5 \times (\text{voxelValues}[6] + \text{voxelValues}[7]) $$
+    Store at `brickAddress + ivec3(1, 2, 2)`.
+22. **Compute Edge (2,1,2) Color:** Average voxels 5 and 7.
+    $$ \text{col} = 0.5 \times (\text{voxelValues}[5] + \text{voxelValues}[7]) $$
+    Store at `brickAddress + ivec3(2, 1, 2)`.
+23. **Compute Edge (1,0,2) Color:** Average voxels 4 and 5.
+    $$ \text{col} = 0.5 \times (\text{voxelValues}[4] + \text{voxelValues}[5]) $$
+    Store at `brickAddress + ivec3(1, 0, 2)`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Global uniforms
+# nodePool_color: uimageBuffer (r32ui)
+# brickPool_value: image3D (rgba8)
+# childOffsets: array of 8 integers (defined elsewhere in the pipeline)
+# NODE_NOT_FOUND: constant integer
+
+def aggregate_voxel_colors(thread_id):
+    # 1. Get node address
+    node_address = get_thread_node()
+    
+    # 2. Check validity
+    if node_address == NODE_NOT_FOUND:
+        return
+
+    # 3. Load brick address
+    # imageLoad returns vec3, we take x component
+    brick_addr_vec = imageLoad(nodePool_color, int(node_address))
+    brick_address = uintXYZ10ToVec3(brick_addr_vec).x
+
+    # 4. Load 8 voxel values
+    voxel_values = [vec4(0.0)] * 8
+    for i in range(8):
+        offset = 2 * childOffsets[i]
+        voxel_values[i] = imageLoad(brickPool_value, brick_address + ivec3(offset))
+
+    # 5. Center (1,1,1)
+    center_col = vec4(0.0)
+    for i in range(8):
+        center_col += 0.125 * voxel_values[i]
+    imageStore(brickPool_value, brick_address + ivec3(1, 1, 1), center_col)
+
+    # 6. Face X Pos (2,1,1)
+    face_x_pos = 0.25 * (voxel_values[1] + voxel_values[3] + voxel_values[5] + voxel_values[7])
+    imageStore(brickPool_value, brick_address + ivec3(2, 1, 1), face_x_pos)
+
+    # 7. Face X Neg (0,1,1)
+    face_x_neg = 0.25 * (voxel_values[0] + voxel_values[2] + voxel_values[4] + voxel_values[6])
+    imageStore(brickPool_value, brick_address + ivec3(0, 1, 1), face_x_neg)
+
+    # 8. Face Y Pos (1,2,1)
+    face_y_pos = 0.25 * (voxel_values[2] + voxel_values[3] + voxel_values[6] + voxel_values[7])
+    imageStore(brickPool_value, brick_address + ivec3(1, 2, 1), face_y_pos)
+
+    # 9. Face Y Neg (1,0,1)
+    face_y_neg = 0.25 * (voxel_values[0] + voxel_values[1] + voxel_values[4] + voxel_values[5])
+    imageStore(brickPool_value, brick_address + ivec3(1, 0, 1), face_y_neg)
+
+    # 10. Face Z Pos (1,1,2)
+    face_z_pos = 0.25 * (voxel_values[4] + voxel_values[5] + voxel_values[6] + voxel_values[7])
+    imageStore(brickPool_value, brick_address + ivec3(1, 1, 2), face_z_pos)
+
+    # 11. Face Z Neg (1,1,0)
+    face_z_neg = 0.25 * (voxel_values[0] + voxel_values[1] + voxel_values[2] + voxel_values[3])
+    imageStore(brickPool_value, brick_address + ivec3(1, 1, 0), face_z_neg)
+
+    # 12. Edge (1,0,0)
+    edge_100 = 0.5 * (voxel_values[0] + voxel_values[1])
+    imageStore(brickPool_value, brick_address + ivec3(1, 0, 0), edge_100)
+
+    # 13. Edge (0,1,0)
+    edge_010 = 0.5 * (voxel_values[0] + voxel_values[2])
+    imageStore(brickPool_value, brick_address + ivec3(0, 1, 0), edge_010)
+
+    # 14. Edge (1,2,0)
+    edge_120 = 0.5 * (voxel_values[2] + voxel_values[3])
+    imageStore(brickPool_value, brick_address + ivec3(1, 2, 0), edge_120)
+
+    # 15. Edge (2,1,0)
+    edge_210 = 0.5 * (voxel_values[3] + voxel_values[1])
+    imageStore(brickPool_value, brick_address + ivec3(2, 1, 0), edge_210)
+
+    # 16. Edge (0,0,1)
+    edge_001 = 0.5 * (voxel_values[0] + voxel_values[4])
+    imageStore(brickPool_value, brick_address + ivec3(0, 0, 1), edge_001)
+
+    # 17. Edge (0,2,1)
+    edge_021 = 0.5 * (voxel_values[2] + voxel_values[6])
+    imageStore(brickPool_value, brick_address + ivec3(0, 2, 1), edge_021)
+
+    # 18. Edge (2,2,1)
+    edge_221 = 0.5 * (voxel_values[3] + voxel_values[7])
+    imageStore(brickPool_value, brick_address + ivec3(2, 2, 1), edge_221)
+
+    # 19. Edge (2,0,1)
+    edge_201 = 0.5 * (voxel_values[1] + voxel_values[5])
+    imageStore(brickPool_value, brick_address + ivec3(2, 0, 1), edge_201)
+
+    # 20. Edge (0,1,2)
+    edge_012 = 0.5 * (voxel_values[4] + voxel_values[6])
+    imageStore(brickPool_value, brick_address + ivec3(0, 1, 2), edge_012)
+
+    # 21. Edge (1,2,2)
+    edge_122 = 0.5 * (voxel_values[6] + voxel_values[7])
+    imageStore(brickPool_value, brick_address + ivec3(1, 2, 2), edge_122)
+
+    # 22. Edge (2,1,2)
+    edge_212 = 0.5 * (voxel_values[5] + voxel_values[7])
+    imageStore(brickPool_value, brick_address + ivec3(2, 1, 2), edge_212)
+
+    # 23. Edge (1,0,2)
+    edge_102 = 0.5 * (voxel_values[4] + voxel_values[5])
+    imageStore(brickPool_value, brick_address + ivec3(1, 0, 2), edge_102)
+```
+
+**Parameters and Edge Cases:**
+*   **`childOffsets`**: The source does not define the values of `childOffsets`. An implementer must determine the mapping of the 8 octants to the brick's internal coordinate system. Typically, this maps the 8 voxels of a unit cube to specific indices in the brick texture.
+*   **Precision**: The input format is `rgba8`. Aggregation involves averaging, which may result in values that fit within 8-bit integer range if the inputs are consistent, but intermediate calculations should use higher precision (e.g., `float`) to avoid quantization artifacts before storing back to `rgba8`.
+*   **Concurrency**: The `brickPool_value` is declared `volatile`. If multiple threads write to the same brick (e.g., if the SVO structure allows overlapping leaf nodes or if the mapping is not 1:1), atomic operations or a reduction pass may be required. The source code does not show atomic operations, implying that the `WriteLeafOctree` stage ensures unique brick assignment per thread or that the aggregation is idempotent/ordered.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per voxel fragment. The number of operations is constant (8 loads, 23 stores, fixed arithmetic).
+*   **Memory Complexity:** $O(1)$ additional memory per thread (local variables for 8 voxels and intermediate colors).
+*   **Performance:** Performance is limited by memory bandwidth to `brickPool_value`. The use of `volatile` may prevent certain optimizations.
+*   **Strengths:** Provides pre-computed colors for all geometric primitives of a voxel, facilitating efficient ray-tracing or interpolation in subsequent stages.
+*   **Limitations:** Requires loading all 8 voxels even if only one primitive is needed. The lack of atomic operations suggests strict constraints on thread-to-brick mapping.
+
+## Background
+This method is part of the Voxel Cone Tracing pipeline, specifically the preparation phase for rendering. It is implemented in the `Voxel-Cone-Tracing` repository by league1991 [S1, unofficial]. The technique aggregates color data to support the cone tracing algorithm, which approximates indirect illumination by sampling the SVO with cones. The aggregation into faces and edges allows for more accurate sampling of the volume's color field at sub-voxel positions.
+
+## Sources
+[S1] league1991/Voxel-Cone-Tracing, https://github.com/league1991/Voxel-Cone-Tracing, fetched 2026-10-26 (unofficial)

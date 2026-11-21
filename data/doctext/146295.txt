@@ -1,0 +1,1121 @@
+Preprint
+S TEREO G AUSSIANS : F EED -F ORWARD
+3D G AUSSIAN S PLATTING FROM S TEREO I MAGES
+Boyuan Tian∗ Huangying Zhan* † Zhan Li‡ Shin-Fang Chng
+Hanwen Yang Zirui Wang Yi Xu
+Goertek Alpha Labs
+arXiv:2609.38592v1 [cs.CV] 29 Sep 2026
+A BSTRACT
+Feed-forward 3D Gaussian Splatting (3DGS) enables reconstruction without perscene optimisation, but practical stereo-camera applications require nearby-view
+extrapolation beyond the input views. Stereo depth anchors visible surfaces, yet
+rendering newly exposed regions also requires learned appearance and additional
+scene capacity. We introduce StereoGaussians, which predicts a metric 3DGS
+representation from a single calibrated stereo pair. It reuses intermediate representations from frozen pretrained stereo networks to predict Gaussian attributes,
+while calibrated disparity anchors the geometry. A second Gaussian layer and
+an expanded image canvas provide capacity for disoccluded and outside-field-ofview content. For training, we construct SceneSplat-Stereo from quality-filtered
+3DGS teachers, pairing stereo inputs with nearby target views across 803 training
+scenes. Experiments on unseen real and photorealistic stereo benchmarks demonstrate improvements over strong view-synthesis baselines, while ablation studies
+support our main design choices.
+1
+I NTRODUCTION
+Feed-forward 3D Gaussian Splatting (3DGS) predicts renderable scenes without per-scene optimisation (Charatan et al., 2024; Chen et al., 2024; Xu et al., 2025b). For XR headsets, stereo rigs,
+and spatial video, a single calibrated stereo pair must support nearby-view extrapolation, revealing
+surfaces hidden from the inputs or extending beyond their field of view. Unlike interpolation between posed context views, this requires predicting content outside the observed coverage. Stereo
+calibration provides metric geometry for visible surfaces, but accurate matching alone cannot determine how newly exposed regions render. Monocular predictors infer geometry and scale from image
+priors; calibrated stereo instead supplies a metric reference for learning a renderable representation.
+Our central idea is to transfer pretrained stereo representations beyond their final disparity output.
+Stereo networks encode both correspondence and image context (Wen et al., 2025; 2026), providing features from which to learn Gaussian appearance, opacity, and shape. StereoGaussians couples
+these frozen features with a trainable predictor: calibrated depth anchors the geometry, while rendering supervision learns the attributes needed for novel views. A second Gaussian layer adds capacity
+behind visible surfaces, and an expanded prediction canvas adds support outside the input frustum.
+Together, these mechanisms connect stereo geometry with learned scene content for nearby-view
+extrapolation. The encoder remains frozen, allowing rendering supervision to train the Gaussian
+predictor while preserving the pretrained stereo mapping.
+Learning this mapping requires stereo inputs paired with posed target views of the same static scene.
+Existing correspondence datasets often lack this supervision, while synthetic scenes and dynamic
+captures can introduce appearance gaps or scene inconsistencies. We address this training-data gap
+with SceneSplat-Stereo, rendering calibrated stereo pairs and nearby targets from quality-filtered
+real-scene 3DGS teachers. This combines controlled camera sampling, static-scene consistency,
+and reconstructed real-scene appearance. Target displacements beyond the stereo baseline expose
+regions that correspondence supervision alone does not cover.
+∗
+Equal contribution.
+Corresponding author.
+‡
+Work done while Zhan Li was with Goertek Alpha Labs.
+†
+1
+Preprint
+Our contributions are:
+1. Stereo-to-target training data at scale. SceneSplat-Stereo supplies approximately 324 K
+calibrated stereo pairs and 3.24 M target images across 803 training scenes. Its teacherbased construction enables consistent rendering supervision, supporting stronger crossdataset generalisation and perceptual quality than the evaluated existing stereo training
+datasets on the two novel-view synthesis benchmarks.
+2. Stereo representation transfer for Gaussian prediction. StereoGaussians maps a single
+stereo pair to a reusable metric 3DGS representation, combining frozen stereo features
+and depth-anchored attributes with two-layer, expanded-canvas prediction for disoccluded
+regions and scene content beyond the reference field of view.
+3. State-of-the-art zero-shot view synthesis. StereoGaussians achieves state-of-the-art performance among the evaluated methods on real and photorealistic stereo benchmarks. Ablations establish the contributions of pretrained stereo features, two-layer geometry, and
+expanded prediction coverage to rendering quality.
+2
+R ELATED W ORK
+Feed-forward Gaussian prediction. pixelSplat (Charatan et al., 2024), MVSplat (Chen et al.,
+2024), MVSGaussian (Liu et al., 2024), and DepthSplat (Xu et al., 2025b) predict Gaussians from
+posed views. DepthSplat combines multi-view matching with pretrained monocular depth features
+to connect depth estimation and Gaussian prediction. GS-LRM (Zhang et al., 2024) predicts Gaussians with transformers, while Long-LRM (Chen et al., 2025) scales to longer image sequences
+and wider scene coverage. NoPoSplat (Ye et al., 2025b), Splatt3R (Smart et al., 2024), and AnySplat (Jiang et al., 2025) relax camera requirements; YoNoSplat (Ye et al., 2025a) supports both
+posed and unposed inputs. ReSplat (Xu et al., 2025a) refines Gaussians through rendering feedback.
+Single-image methods such as Splatter Image (Szymanowicz et al., 2024), Flash3D (Szymanowicz
+et al., 2025), and SHARP (Mescheder et al., 2025) infer geometry and appearance from monocular
+priors, including additional scene capacity for surfaces not directly visible in the input image.
+Transformer-based view synthesis. LVSM (Jin et al., 2025) synthesises target images using
+learned latent tokens or direct input-to-target attention. Efficient-LVSM (Jia et al., 2026) separates
+input and target processing through decoupled co-refinement attention. These approaches synthesise
+views without predicting an explicit Gaussian scene.
+Stereo representations and view synthesis. RAFT-Stereo (Lipson et al., 2021), IGEV (Xu et al.,
+2023), and FoundationStereo (Wen et al., 2025) learn correspondence and context features for disparity estimation; Fast-FoundationStereo (Wen et al., 2026) studies efficient zero-shot stereo. StereoNeRF (Lee et al., 2024) combines pretrained stereo features with depth-guided plane sweeping and
+a stereo depth loss for NeRF rendering from multiple pairs. Stereo-GS (Huang et al., 2025) uses
+global attention to fuse pairwise stereo features and separate geometry and appearance heads for
+pose-free multi-view Gaussian reconstruction. WorldMirror (Liu et al., 2026) incorporates camera
+and depth priors into joint geometry and Gaussian prediction. In our approach, calibrated disparity anchors metric geometry, while frozen stereo features condition Gaussian attributes. Two-layer
+prediction and an expanded canvas support nearby-view extrapolation from a single stereo pair.
+Stereo and view-synthesis data. RealEstate10K (Zhou et al., 2018) and DL3DV (Ling et al.,
+2024) provide posed video for view synthesis. Middlebury (Scharstein et al., 2014) and DrivingStereo (Yang et al., 2019) benchmark stereo matching, while Flickr1024 (Wang et al., 2019b)
+supports stereo super-resolution. SceneFlow (Mayer et al., 2016) and IRS (Wang et al., 2019a)
+provide synthetic geometric supervision, but correspondence data need not include posed target
+views for rendering supervision. StereoNVS (Lee et al., 2024) provides stereo-to-target views,
+and SceneSplat-7K (Li et al., 2025) provides real-scene Gaussians. SceneSplat-Stereo builds on
+these teachers to jointly control stereo calibration and target-view sampling, producing appearanceconsistent supervision for nearby-view extrapolation.
+2
+Preprint
+(a) Camera Sampling from a 3DGS Teacher
+(b) Generated Sample
+Stereo pair
+Quality-filtered
+3DGS teacher
+Nearby target
+views
+Left view
+Right view
+Target-view supervision
+Stereo pair
+x 10 nearby target views
+Reference pose
+Additional annotations
+Original camera trajectory
+(from training sequence)
+Intrinsics
+Relative target poses
+Valid masks
+K
+T1 ... T10
+M
+Figure 1: SceneSplat-Stereo synthetic data generation. (a) Camera sampling. A quality-filtered
+real-scene 3DGS teacher renders a calibrated stereo pair and ten nearby targets around a reference
+pose from the source trajectory. (b) Generated sample. Stereo inputs and target images are accompanied by intrinsics, relative target poses, and opacity-derived valid masks. Camera placement is
+schematic and illustrates the relative arrangement of input and target views.
+3
+S CENE S PLAT-S TEREO DATASET
+SceneSplat-Stereo pairs calibrated stereo inputs with nearby target views rendered from the same
+static 3DGS teacher. This provides consistent appearance and known camera poses for learning
+stereo-to-3DGS prediction. Figure 1 illustrates the camera sampling and rendering pipeline, which
+preserves the reconstructed teacher’s real-scene appearance. The input pair provides a metric geometric reference, while surrounding targets supervise rendering as surfaces become visible and
+image coverage changes. Table 1 compares its combination of stereo input, target-view supervision,
+static-scene consistency, and real-scene appearance with existing datasets used for stereo matching
+and novel-view synthesis under different supervision settings.
+Sources and splits. We use the ScanNetGS and ScanNetPPGS-V2 subsets of SceneSplat-7K (Li
+et al., 2025), selecting them for their scene scale and capture coverage for nearby rendering. The
+quality-filtered pool is split into 803 training and 50 validation scenes, with no scene overlap. Training contains approximately 324 K stereo pairs, each with ten separately rendered targets (3.24 M
+target images). For the default model, StereoNVS and ReplicaGS serve only as test datasets. Source
+counts and validation sampling are detailed in Appendix B and Table 5.
+Rendering and quality control. For each reference pose, we translate the right camera by baseline
+B along the local x-axis, retaining its orientation and intrinsics to form a rectified pair. Ten target
+cameras translate by radius ρ along fixed Fibonacci-sphere directions, with no rotation or overlapbased rejection. Samples include calibration, relative target poses, and opacity-derived valid masks,
+used for ReplicaGS evaluation but not training.
+We retain teachers with released reconstruction PSNR above 30 dB at 30K optimisation steps, selecting scenes by reconstruction fidelity. Three quality tiers set B and ρ, with target displacement
+two to three times the stereo baseline. Training samples four of the ten targets per pair, exposing
+the predictor to varied nearby viewpoints across iterations. The exact tiers, filtering counts, and
+rendering protocol are given in Appendix B.
+3
+Preprint
+Table 1: Dataset comparison for feed-forward stereo-to-3DGS prediction. Scale reports scenes (or
+sequences) / input images, counting both stereo views or individual monocular frames; separately
+rendered targets are excluded. See Appendix B for details on dataset-specific counting conventions
+and the supervision available from each source.
+Data source
+Scenes / images
+RealEstate10K (Zhou et al., 2018)
+DL3DV-10K (Ling et al., 2024)
+Middlebury v3 (Scharstein et al., 2014)
+Flickr1024 (Wang et al., 2019b)
+InStereo2K (Bao et al., 2020)
+KITTI (Geiger et al., 2012)
+DrivingStereo (Yang et al., 2019)
+SceneFlow (Mayer et al., 2016)
+IRS (Wang et al., 2019a)
+StereoNVS (Lee et al., 2024)
+SceneSplat-Stereo
+80K / 10M
+10.5K / 51.2M
+30 / 60
+1K / 2K
+– / 4.1K
+789 / 1.6K
+42 / 364K
+2.2K / 79.6K
+70 / 207K
+103 / 17.6K
+803 / 648K
+4
+S TEREO G AUSSIANS
+4.1
+OVERVIEW
+Stereo input
+Target-view sup.
+Static scenes
+Real appearance
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+Given a calibrated rectified stereo pair (IL , IR ), intrinsics K, and baseline B, StereoGaussians predicts Gaussians G = {(xi , si , qi , αi , ci )}N
+i=1 in the left-camera frame, using the standard 3DGS
+position, scale, rotation, opacity, and colour attributes (Kerbl et al., 2023). A frozen stereo encoder
+supplies intermediate features for attribute prediction and disparity for metric geometry. A trainable
+predictor constructs two Gaussian layers on an expanded image canvas, providing capacity for disoccluded and outside-FoV content. The decoder and predictor learn through differentiable Gaussian
+rendering with target-image supervision from SceneSplat-Stereo; the stereo encoder remains frozen.
+Figure 2 shows the pipeline.
+4.2
+T RANSFERRING STEREO REPRESENTATIONS TO 3DGS
+The encoder exposes a left-reference disparity map d and aligned multiscale features {F s } through
+a backbone-specific interface. A DPT-style decoder D concatenates each feature scale with resized
+reference RGB and stereo depth z (Eq. 3), then projects and fuses the features coarse-to-fine into a
+dense full-resolution descriptor for downstream Gaussian attribute prediction:
+
+Φ = D {[F s , ↓s IL , ↓s z]}s ∈ RC×H×W .
+(1)
+Here [·, ·] denotes channel concatenation and ↓s resizes inputs to feature scale s. After canvas extension (§4.4), a convolutional predictor H maps the extended inputs, denoted by tildes, to attribute
+residuals for both layers and a separate back-layer depth offset:
+(θfront , θback , ∆z) = H([I˜L , z̃, Φ̃]).
+(2)
+Its shared regressor feeds three output branches. This feature pathway conditions Gaussian prediction on pretrained stereo representations beyond the final disparity map. Encoder interfaces and
+decoder/head implementation details are given in Appendix A.
+4.3
+G EOMETRY- ANCHORED G AUSSIAN PREDICTION
+For reference pixel p = (u, v), calibrated disparity defines metric depth
+
+
+fx B
+, zmin , zmax ,
+z(p) = clip
+d(p)
+(3)
+where fx is the horizontal focal length in pixels. The front layer retains this processed depth. Each
+layer ℓ predicts a two-channel output oℓ giving image-plane offsets (δu,ℓ , δv,ℓ ) = σ(oℓ )− 21 , bounded
+to half a canvas pixel per axis. Its centre is
+xℓ (p) = zℓ (p)K̃ −1 [u + δu,ℓ , v + δv,ℓ , 1]⊤ ,
+4
+(4)
+Preprint
+(a) Stereo Geometry &
+Representation
+Stereo Input
+(b) Extrapolation-aware Gaussian Representation
+2D view (expanded canvas)
+3D view (Gaussian layers)
+Expanded canvas (larger FoV)
+Original FoV
+Left
+Visible
+surface
+Render to a nearby view
+Disocclusion
+capacity
+Back layer
+Right
+Stereo
+Encoder
+(c) Extrapolation &
+Supervision
+enables outside-FoV Gaussians
+Front layer
+Target view
+Rendering-based supervision
+Prediction
+GT
+Outside-FoV
+capacity
+Left view
+Depth
+Descriptor
+Rendering
+Losses
+3DGS
+Target view may reveal:
+Stereo
+Features
+(descriptor)
+Disp. → Depth
+Gaussian attribute predictor
+Disocclusion
+regions
+Outside-FoV
+regions
+Figure 2: StereoGaussians overview. (a) Stereo geometry and representation. Frozen stereo features and calibrated depth condition Gaussian prediction. (b) Extrapolation-aware representation.
+Two layers and an expanded canvas support disoccluded and outside-FoV content. (c) Extrapolation and supervision. Target-view rendering trains the decoder and attribute predictor. Scene and
+Gaussian illustrations are schematic.
+where zℓ and canvas intrinsics K̃ are specified below.
+We adapt SHARP’s residual attribute composition (Mescheder et al., 2025): geometry and reference colour define base attributes, while the predictor learns bounded multiplicative scale updates, additive
+p quaternion updates, and opacity updates in logit space. The isotropic base scale
+s0,ℓ = κzℓ / fx fy follows the metric pixel footprint. Our adaptation fixes front-layer stereo depth
+and bounds image-plane offsets, whereas SHARP also refines inverse depth through its composer.
+A separate branch determines back-layer depth, with no subsequent depth residual. We also replace RGB composition with degree-2 spherical-harmonic (SH) residuals around a reference-image
+DC base. These constraints provide a structural prior without an additional supervision loss. Full
+attribute equations, activations, and constants are given in Appendix A.2.
+4.4
+E XTRAPOLATION - AWARE PREDICTION
+Back layer. Both layers have separate attribute outputs at every canvas pixel. The front layer uses
+zfront = z̃; the back layer uses
+zback (p) = max z̃(q) + softplus(∆z(p)),
+q∈N9 (p)
+(5)
+where N9 (p) is a 9 × 9 neighbourhood. The local maximum provides a deeper anchor near depth
+boundaries, and the learned positive offset adjusts its depth under rendering supervision. Both the
+centre and base footprint use this final depth. We concatenate the two layers; learned attributes and
+visibility determine their contributions to a target view, without an edge mask restricting the back
+layer to a predefined subset of image pixels.
+Expanded field of view. After decoding at the original resolution, we extend IL , z, and Φ by edge
+replication to (H + 2P ) × (W + 2P ), where P is the padding per side. Canvas intrinsics retain
+the focal lengths and shift the principal point to (cx + P, cy + P ), so padded pixels define rays
+outside the original image frustum. The predictor operates on the full canvas, using the extended
+depth for both layer constructions above. Target cameras retain their original resolution and intrinsics; padded Gaussians receive the same rendering supervision through the target pixels they cover.
+Canvas implementation details are given in Appendix A.1.
+5
+Preprint
+Table 2: Zero-shot comparison using the default 16-pixel padding. Our model is trained on
+SceneSplat-Stereo. Baselines retain their respective pretraining. Bold indicates the best score in
+each column for the corresponding dataset and evaluation metric.
+StereoNVS
+ReplicaGS
+Method
+PSNR ↑
+SHARP-mono
+SHARP-stereo
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+18.845
+18.767
+Single-view feed-forward 3DGS
+0.6140
+0.2604
+23.388
+0.6030
+0.2788
+23.363
+0.7877
+0.7808
+0.2103
+0.2164
+MVSplat
+DepthSplat
+17.458
+17.977
+Sparse-view feed-forward 3DGS
+0.7248
+0.2087
+14.705
+0.7498
+0.2024
+16.388
+0.5342
+0.6161
+0.4152
+0.3270
+Efficient-LVSM
+LVSM
+15.319
+19.796
+22.780
+25.772
+0.7539
+0.8409
+0.2210
+0.1701
+FS-forward-splat
+FS-naive-GS
+Stereo geometry without learned prediction
+15.734
+0.6583
+0.2891
+17.017
+16.008
+0.6636
+0.2802
+17.918
+0.7846
+0.8090
+0.3009
+0.2303
+StereoGaussians
+21.261
+0.9447
+0.0818
+5
+E XPERIMENTS
+5.1
+E XPERIMENTAL SETUP
+SSIM ↑
+LPIPS ↓
+Transformer-based NVS
+0.4646
+0.4752
+0.6450
+0.2460
+0.7549
+0.1653
+30.266
+Training and evaluation. Our default uses the FoundationStereo encoder and predictor of §4,
+with two Gaussian layers, no back-layer edge mask, and 16-pixel FoV padding. Our architectural
+ablations train at 256 × 256 for 30K steps with batch size 32, using full-image MSE plus 0.05 LPIPS
+and selecting the checkpoint with highest validation PSNR. SceneSplat-Stereo pairs are sampled
+uniformly with four random targets per pair. Full training and validation details are in Appendices A
+and B, including optimisation, model selection, and target sampling.
+We evaluate zero-shot on StereoNVS (8 real-world scenes, 224 pairs) and ReplicaGS (8 held-out
+photorealistic scenes, 800 pairs, 8 000 targets). Neither test set is used to train or validate the default SceneSplat-Stereo model. We report PSNR, SSIM, and LPIPS-VGG; ReplicaGS metrics use
+opacity-derived valid masks for teacher-supported regions (Appendix C).
+Baselines. We compare MVSplat (Chen et al., 2024), DepthSplat (Xu et al., 2025b),
+SHARP (Mescheder et al., 2025), LVSM (Jin et al., 2025), and Efficient-LVSM (Jia et al., 2026).
+SHARP-mono uses the reference image; SHARP-stereo concatenates independent left/right predictions in the reference frame. FS-forward-splat and FS-naive-GS use FoundationStereo depth with
+forward splatting and hand-specified Gaussian attributes, respectively. Table 2 evaluates released
+models with their original pretraining under the zero-shot transfer protocol. Baseline settings are
+detailed in Appendix D, including pretrained model selection and LVSM camera preprocessing.
+5.2
+Z ERO - SHOT NOVEL - VIEW SYNTHESIS
+StereoGaussians outperforms all compared baselines on both test sets across PSNR, SSIM, and
+LPIPS (Table 2). Relative to LVSM, the strongest released baseline in PSNR, it gains 1.465 dB on
+StereoNVS and 4.494 dB on ReplicaGS. Both FS baselines lag behind despite using the same stereo
+backbone, indicating that strong geometry alone is insufficient without learned Gaussian prediction.
+Qualitative comparisons appear in Figure 3 and Appendix G.1.
+Higher-resolution models. The same architecture supports 5122 and 10242 stereo inputs and
+target-view rendering (Appendix E).
+6
+Preprint
+Input stereo pair
+SHARP
+DepthSplat
+Ours
+LVSM
+GT
+Figure 3: Qualitative novel-view comparison on StereoNVS (top two rows) and ReplicaGS (bottom two rows). Each row shows the input stereo pair, predictions from representative methods
+SHARP, DepthSplat, and LVSM, StereoGaussians (Ours), and ground truth (GT). Prediction panels
+report PSNR in dB.
+Table 3: Training-data comparison for StereoGaussians (top) and DepthSplat on SceneSplat-Stereo
+(bottom). Feature init.: DA-V2 + UniMatch; FT: RE10K fine-tuning. StereoNVS-to-StereoNVS
+evaluation is in-domain. Bold denotes the best out-of-domain result in each column.
+StereoNVS
+ReplicaGS
+Training dataset / model
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+StereoNVS
+IRS
+SceneSplat-Stereo
+22.707
+19.656
+21.261
+0.7585
+0.6546
+0.7549
+0.2024
+0.2412
+0.1653
+23.929
+24.614
+30.266
+0.8914
+0.8421
+0.9447
+0.1935
+0.1873
+0.0818
+DepthSplat (feature init.)
+DepthSplat (RE10K FT)
+16.063
+21.152
+0.4861
+0.7313
+0.4018
+0.2057
+21.764
+28.996
+0.7026
+0.9206
+0.2350
+0.0911
+5.3
+T RAINING DATA AND SAME - DATA COMPARISON
+We train StereoGaussians on three datasets (Table 3, top). StereoNVS uses its training split; IRS
+preparation is in Appendix F. On ReplicaGS, SceneSplat-Stereo gains 6.337/5.652 dB over StereoNVS/IRS training, with better SSIM and LPIPS. On StereoNVS, it improves LPIPS relative to
+in-domain training (0.1653 versus 0.2024), which has higher PSNR/SSIM, and exceeds IRS on all
+three metrics. These results support cross-dataset transfer and perceptual quality.
+Same-data method comparison. We choose DepthSplat for its shared feed-forward multi-view
+Gaussian prediction formulation; LVSM uses transformers to synthesise images without explicit
+Gaussians. We train DepthSplat from pretrained depth features or fine-tune its RE10K model on our
+data (Table 3; Appendix D). Fine-tuning gains 3.175/12.608 dB over the released model on StereoNVS/ReplicaGS, improving ReplicaGS SSIM/LPIPS but slightly worsening them on StereoNVS.
+StereoGaussians leads across all six metrics, with 1.270 dB higher ReplicaGS PSNR and 0.0404
+lower StereoNVS LPIPS than fine-tuned DepthSplat. Combined with our ablations, this supports
+method benefits beyond the training data alone.
+7
+Preprint
+Table 4: Ablations of input conditioning, frozen stereo encoders, Gaussian prediction, and FoV
+expansion under a shared training and zero-shot evaluation protocol. Each block varies the default
+in §5.1; variant definitions are given in §5.4–5.5.
+Variant
+StereoNVS
+ReplicaGS
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓
+Shared default
+21.261
+0.7549
+0.1653
+30.266
+0.9447
+0.0818
+(A) Input conditioning
+Without descriptor
+20.752
+Without RGB-D conditioning 21.269
+0.7417
+0.7594
+0.1871
+0.1717
+28.284
+29.953
+0.9362
+0.9391
+0.1045
+0.0915
+(B) Frozen stereo encoder
+Fast-FoundationStereo
+20.876
+0.7409
+0.1737
+29.404
+0.9368
+0.0876
+(C) Gaussian prediction design
+Without back layer
+21.081
+Hard edge mask
+21.351
+Soft edge mask
+21.125
+Without composer
+21.875
+0.7506
+0.7573
+0.7527
+0.7510
+0.1698
+0.1643
+0.1662
+0.1887
+26.440
+27.421
+30.256
+30.029
+0.9255
+0.9314
+0.9452
+0.9445
+0.0988
+0.0951
+0.0816
+0.0845
+(D) FoV padding per side
+without padding
+32 pixels
+64 pixels
+0.7238
+0.7600
+0.7689
+0.1956
+0.1639
+0.1612
+21.534
+30.188
+30.165
+0.8884
+0.9445
+0.9443
+0.1393
+0.0823
+0.0823
+5.4
+18.093
+22.400
+23.189
+T RANSFERRING FROZEN STEREO REPRESENTATIONS
+Table 4 compares variants with frozen encoders under the common schedule; Appendix G.2 provides
+qualitative comparisons on both test datasets.
+Feature pathway and RGB-D conditioning. Removing the DPT descriptor retains RGB and
+stereo geometry but reduces PSNR by 0.509/1.982 dB on StereoNVS/ReplicaGS, with worse SSIM
+and LPIPS (block A). Figure 4 shows corresponding tabletop distortions and foreground-boundary
+artifacts. RGB-D conditioning improves LPIPS on both benchmarks and ReplicaGS PSNR by
+0.313 dB, with little change in StereoNVS PSNR. This ablation removes RGB-D from the decoder
+and predictor, retaining stereo features and metric depth anchors.
+Different frozen encoders. Our framework also transfers pretrained representations from FastFoundationStereo (Wen et al., 2026). With an adapted feature interface and a separately trained
+predictor, this variant reaches 20.876/29.404 dB on StereoNVS/ReplicaGS (block B), exceeding
+the released external baselines in PSNR and LPIPS on both sets. Implementation details for both
+encoders are in Appendix A.
+5.5
+G AUSSIAN PREDICTION DESIGN
+Second-layer capacity. Removing the back layer retains stereo-anchored front Gaussians but reduces PSNR by 0.180/3.826 dB on StereoNVS/ReplicaGS (Table 4, block C). The desk/chair regions in Figure 4 show missing content and disrupted occlusion boundaries; the full model better
+reconstructs these exposed regions.
+Hard and soft edge masks. We test back-layer opacity masks: hard masks zero opacity outside depth-edge regions, while soft masks attenuate it (Appendix A.2). Qualitatively, both promote
+clearer front/back separation and back-layer specialisation in occluded content. Rendering gains
+vary across datasets (Table 4, block C), so we use the simpler ungated design as the default.
+8
+Preprint
+Input stereo pair
+Full
+w/o descriptor
+w/o back layer
+w/o composer
+w/o padding
+GT
+Figure 4: Qualitative ablations. Each row shows the input stereo pair, the full model, variants
+without the feature descriptor, back layer, composer, or FoV padding, and ground truth (GT). Red
+outlines highlight missing content and distortions near occlusion boundaries and in newly exposed
+image-boundary regions; corresponding full-model and GT regions provide visual references. Prediction panels report PSNR in dB.
+Attribute composition. The attribute priors in §4.3 improve LPIPS on both datasets and all three
+ReplicaGS metrics. Composition lowers StereoNVS LPIPS from 0.1887 to 0.1653 and improves
+SSIM, while the composer-free variant has 0.614 dB higher PSNR. ReplicaGS PSNR rises by
+0.237 dB. We retain composition for its consistent perceptual gains on both benchmarks.
+Field-of-view expansion. At fixed 2562 resolution, removing 16-pixel padding lowers PSNR by
+3.168/8.732 dB on StereoNVS/ReplicaGS and worsens SSIM and LPIPS (block D). Using 64 pixels
+instead improves StereoNVS PSNR/LPIPS by 1.928 dB/0.0034 but lowers ReplicaGS PSNR by
+0.101 dB. Our 16-pixel default uses a smaller canvas and fewer Gaussians. Figure 4 shows empty
+target-border bands without padding, which the full model fills more completely.
+6
+C ONCLUSION AND D ISCUSSION
+StereoGaussians transfers frozen stereo features into metric 3DGS prediction from a single calibrated pair. Two-layer prediction and an expanded canvas support nearby-view extrapolation,
+while SceneSplat-Stereo supplies consistent target-view supervision from static 3DGS teachers.
+The model achieves state-of-the-art performance among evaluated methods on StereoNVS and
+ReplicaGS. Experiments demonstrate the effectiveness of SceneSplat-Stereo for cross-dataset generalisation, while ablations establish the benefits of stereo feature transfer and prediction capacity
+for newly exposed regions.
+DepthSplat also benefits from SceneSplat-Stereo fine-tuning, while StereoGaussians retains better
+test scores. Together with transfer from both frozen encoders, this supports a practical route from
+calibrated stereo to reusable Gaussian scenes.
+Limitations and directions. Fixed front-layer depth limits stereo-error correction, and teacher artifacts can persist despite reconstruction-quality filtering. Our evaluation focuses on nearby views.
+Future work includes geometry refinement, supervision from real target photographs, and extending
+evaluation to larger viewpoint changes and region-specific measures of rendering quality in disoccluded and newly exposed outside-FoV regions.
+9
+Preprint
+AI U SE S TATEMENT
+We used generative AI tools to assist with manuscript preparation, including improving grammar,
+wording, clarity, and organisation. We also used these tools to create selected illustrative components
+in Figures 1 and 2, which serve explanatory purposes and do not represent experimental outputs.
+In addition, AI tools assisted with experimental code development and optimisation, as well as the
+execution of experiments. The reported numerical results were obtained by running the experimental
+code. We reviewed the AI-assisted code changes and verified the reported experimental results
+against the corresponding experimental outputs. We take full responsibility for the final manuscript,
+experimental methodology, implementation, and reported results.
+R EPRODUCIBILITY S TATEMENT
+Section 3 and Appendix B describe the construction of SceneSplat-Stereo, including source-scene
+selection, data splits, camera sampling, and rendering settings. Section 4 and Appendix A specify
+the model architecture, frozen stereo features, Gaussian parameterisation, and training hyperparameters. Section 5.1 and Appendices C–D describe the evaluation datasets, metrics, and baseline
+configurations. Appendices E–F provide additional details on higher-resolution experiments and
+IRS data preparation.
+R EFERENCES
+Wei Bao, Wei Wang, Yuhua Xu, Yulan Guo, Siyu Hong, and Xiaohu Zhang. InStereo2K: A large
+real dataset for stereo matching in indoor scenes. Science China Information Sciences, 2020.
+David Charatan, Sizhe Li, Andrea Tagliasacchi, and Vincent Sitzmann. pixelSplat: 3D Gaussian
+splats from image pairs for scalable generalizable 3D reconstruction. In CVPR, 2024.
+Yuedong Chen, Haofei Xu, Chuanxia Zheng, Bohan Zhuang, Marc Pollefeys, Andreas Geiger, TatJen Cham, and Jianfei Cai. MVSplat: Efficient 3D Gaussian splatting from sparse multi-view
+images. In ECCV, 2024.
+Ziwen Chen, Hao Tan, Kai Zhang, Sai Bi, Fujun Luan, Yicong Hong, Fuxin Li, and Zexiang Xu.
+Long-LRM: Long-sequence large reconstruction model for wide-coverage Gaussian splats. In
+ICCV, 2025. URL https://arxiv.org/abs/2410.12781.
+Andreas Geiger, Philip Lenz, and Raquel Urtasun. Are we ready for autonomous driving? the KITTI
+vision benchmark suite. In CVPR, 2012.
+Xiufeng Huang, Ka Chun Cheung, Runmin Cong, Simon See, and Renjie Wan. Stereo-GS: Multiview stereo vision model for generalizable 3D Gaussian Splatting reconstruction. In ACM Multimedia, 2025. URL https://arxiv.org/abs/2507.14921.
+Xiaosong Jia, Yihang Sun, Junqi You, Songbur Wong, Zichen Zou, Junchi Yan, Zuxuan Wu, and YuGang Jiang. Efficient-LVSM: Faster, cheaper, and better large view synthesis model via decoupled
+co-refinement attention. In International Conference on Learning Representations, 2026. URL
+https://arxiv.org/abs/2602.06478.
+Lihan Jiang, Yucheng Mao, Linning Xu, Tao Lu, Kerui Ren, Yichen Jin, Xudong Xu, Mulin Yu,
+Jiangmiao Pang, Feng Zhao, Dahua Lin, and Bo Dai. AnySplat: Feed-forward 3D Gaussian
+Splatting from unconstrained views. ACM Transactions on Graphics (SIGGRAPH Asia), 2025.
+URL https://arxiv.org/abs/2505.23716.
+Haian Jin, Hanwen Jiang, Hao Tan, Kai Zhang, Sai Bi, Tianyuan Zhang, Fujun Luan, Noah Snavely,
+and Zexiang Xu. LVSM: A large view synthesis model with minimal 3d inductive bias. In
+The Thirteenth International Conference on Learning Representations, 2025. URL https:
+//openreview.net/forum?id=QQBPWtvtcn.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3d Gaussian splatting for real-time radiance field rendering. In ACM Transactions on Graphics (SIGGRAPH),
+2023.
+10
+Preprint
+Haechan Lee, Wonjoon Jin, Seung-Hwan Baek, and Sunghyun Cho. Generalizable novel-view
+synthesis using a stereo camera. In CVPR, 2024.
+Yue Li, Qi Ma, Runyi Yang, Huapeng Li, Mengjiao Ma, Bin Ren, Nikola Popovic, Nicu Sebe,
+Ender Konukoglu, Theo Gevers, et al. SceneSplat: Gaussian splatting-based scene understanding
+with vision-language pretraining. In Proceedings of the IEEE/CVF International Conference on
+Computer Vision (ICCV), 2025.
+Lu Ling et al. DL3DV-10K: A large-scale scene dataset for deep learning-based 3D vision. In
+CVPR, 2024.
+Lahav Lipson, Zachary Teed, and Jia Deng. RAFT-Stereo: Multilevel recurrent field transforms for
+stereo matching. In 3DV, 2021.
+Tianqi Liu, Guangcong Wang, Shoukang Hu, Liao Shen, Xinyi Ye, Yuhang Zang, Zhiguo Cao, Wei
+Li, and Ziwei Liu. MVSGaussian: Fast generalizable Gaussian Splatting reconstruction from
+multi-view stereo. In ECCV, 2024. URL https://arxiv.org/abs/2405.12218.
+Yifan Liu, Zhiyuan Min, Zhenwei Wang, Junta Wu, Tengfei Wang, Yixuan Yuan, Yawei Luo, and
+Chunchao Guo. WorldMirror: Universal 3D world reconstruction with any-prior prompting. In
+ICML, 2026. URL https://arxiv.org/abs/2510.10726.
+Nikolaus Mayer, Eddy Ilg, Philip Hausser, Philipp Fischer, Daniel Cremers, Alexey Dosovitskiy,
+and Thomas Brox. A large dataset to train convolutional networks for disparity, optical flow, and
+scene flow estimation. In CVPR, 2016.
+Lars Mescheder, Wei Dong, Shiwei Li, Xuyang Bai, Marcel Santos, Peiyun Hu, Bruno Lecouat,
+Mingmin Zhen, Amaël Delaunoy, Tian Fang, Yanghai Tsin, Stephan R. Richter, and Vladlen
+Koltun. SHARP: Monocular view synthesis in less than a second. In arXiv preprint
+arXiv:2512.10685, 2025.
+Daniel Scharstein, Heiko Hirschmuller, York Kitajima, Greg Krathwohl, Nera Nesic, Xi Wang, and
+Porter Westling. High-resolution stereo datasets with subpixel-accurate ground truth. In GCPR,
+2014.
+Brandon Smart, Chuanxia Zheng, Iro Laina, and Victor Adrian Prisacariu. Splatt3r: Zero-shot
+Gaussian splatting from uncalibrated image pairs. In arXiv, 2024.
+Stanislaw Szymanowicz, Christian Rupprecht, and Andrea Vedaldi. Splatter image: Ultra-fast
+single-view 3D reconstruction. In CVPR, 2024.
+Stanislaw Szymanowicz, Eldar Insafutdinov, Chuanxia Zheng, Dylan Campbell, João F. Henriques,
+Christian Rupprecht, and Andrea Vedaldi. Flash3D: Feed-forward generalisable 3D scene reconstruction from a single image. In 3DV, 2025.
+Qiang Wang, Shaohuai Zheng, Qing Yan, Fei Deng, Kaiyong Zhao, and Xiaowen Chu. IRS: A large
+naturalistic indoor robotics stereo dataset to train deep models for disparity and surface normal
+estimation. arXiv preprint arXiv:1912.09678, 2019a.
+Yingqian Wang, Longguang Wang, Jungang Yang, Wei An, and Yulan Guo. Flickr1024: A largescale dataset for stereo image super-resolution. In ICCV Workshops, 2019b.
+Bowen Wen, Matthew Trepte, Joseph Aribido, Jan Kautz, Orazio Gallo, and Stan Birchfield. FoundationStereo: Zero-shot stereo matching. In CVPR, 2025.
+Bowen Wen, Shaurya Dewan, and Stan Birchfield. Fast-FoundationStereo: Real-time zero-shot
+stereo matching. In CVPR, 2026.
+Gangwei Xu, Xianqi Wang, Xiaohuan Ding, and Xin Yang. Iterative geometry encoding volume for
+stereo matching. In CVPR, 2023.
+Haofei Xu, Daniel Barath, Andreas Geiger, and Marc Pollefeys. ReSplat: Learning recurrent Gaussian splatting. arXiv preprint arXiv:2510.08575, 2025a. URL https://arxiv.org/abs/
+2510.08575.
+11
+Preprint
+Haofei Xu, Songyou Peng, Fangjinhua Wang, Hermann Blum, Daniel Barath, Andreas Geiger, and
+Marc Pollefeys. DepthSplat: Connecting Gaussian splatting and depth. In CVPR, 2025b.
+Guorun Yang, Xiao Song, Chaoqing Huang, Zhidong Deng, Jianping Shi, and Bolei Zhou. DrivingStereo: A large-scale dataset for stereo matching in autonomous driving scenarios. In CVPR,
+2019.
+Botao Ye, Boqi Chen, Haofei Xu, Daniel Barath, and Marc Pollefeys. YoNoSplat: You only need
+one model for feedforward 3D Gaussian Splatting. arXiv preprint arXiv:2511.07321, 2025a. URL
+https://arxiv.org/abs/2511.07321.
+Botao Ye, Sifei Liu, Haofei Xu, Xueting Li, Marc Pollefeys, Ming-Hsuan Yang, and Songyou Peng.
+No pose, no problem: Surprisingly simple 3d gaussian splats from sparse unposed images. In
+The Thirteenth International Conference on Learning Representations, 2025b. URL https:
+//openreview.net/forum?id=P4o9akekdf.
+Kai Zhang, Sai Bi, Hao Tan, Yuanbo Xiangli, Nanxuan Zhao, Kalyan Sunkavalli, and Zexiang
+Xu. GS-LRM: Large reconstruction model for 3D Gaussian Splatting. In ECCV, 2024. URL
+https://arxiv.org/abs/2404.19702.
+Tinghui Zhou, Richard Tucker, John Flynn, Graham Fyffe, and Noah Snavely. Stereo magnification:
+Learning view synthesis using multiplane images. ACM Transactions on Graphics, 37(4), 2018.
+12
+Preprint
+A
+I MPLEMENTATION DETAILS
+Optimisation. We optimise the trainable decoder and predictor using AdamW with a learning
+rate of 4 × 10−4 , weight decay 0.01, and momentum coefficients (β1 , β2 ) = (0.9, 0.999). The
+OneCycleLR schedule uses 2 700 warm-up steps (9% of training), with initial and final learningrate division factors of 25 and 100, respectively.
+Training and model selection. Training lasts 30 000 steps, with validation every 3 000 steps. All
+test results use the model selected by the highest validation PSNR.
+Rendering objective. Given a target image IT and its rendered prediction IˆT , we minimise L =
+MSE(IT , IˆT ) + 0.05 LPIPSVGG (IT , IˆT ). Supervision is applied to target views.
+Stereo feature extraction. The frozen FoundationStereo encoder supplies disparity and image,
+context, and recurrent features aligned with the left reference view. These outputs provide the geometric anchors and decoder inputs used for Gaussian prediction. Input RGB values in [0, 1] are
+rescaled to [0, 255] and undergo the encoder’s ImageNet normalisation.
+Fast-FoundationStereo variant. We use a frozen pretrained Fast-FoundationStereo model1 with
+a single GRU layer, eight recurrent updates, and PyTorch cost-volume construction. Its decoder
+uses left-reference image features and RGB-D at each scale; context and recurrent features are not
+included. This feature selection differs from the FoundationStereo variant described above. Both
+variants in Table 4, block B, use the two-layer geometry and attribute composition of §4, with
+unmasked back-layer opacity and 16-pixel canvas padding. Each predictor is trained separately at
+256 × 256 with batch size 32 for 30 000 steps.
+A.1
+D ENSE PREDICTOR AND CANVAS
+At each feature scale, the decoder concatenates the available encoder features with resized RGB and
+depth, projecting them to 128 channels with a 1 × 1 convolution, group normalisation, and GELU.
+RGB is resized bilinearly and depth by nearest-neighbour interpolation. In Eq. 1, s is the spatial
+downsampling factor, so inputs at scale s = 4 have size H/4 × W/4. Residual convolution units
+and coarse-to-fine fusion blocks yield a 128-channel descriptor at the original image resolution.
+After edge-replication padding, a regressor with two 3 × 3 convolutions and an intermediate GELU
+maps [I˜L , z̃, Φ̃] to a 128-channel tensor h. Each output branch processes [h, I˜L , Φ̃] using a 3 × 3
+convolution, group normalisation, GELU, and a final 3×3 convolution. The front and back branches
+each output 37 channels: opacity (1), image-plane offset (2), scale (3), quaternion (4), and degree-2
+SH coefficients (27). A separate branch outputs the scalar back-layer depth offset.
+Canvas geometry. Only the regressor and output branches operate on the expanded canvas; the
+dense decoder operates at the original resolution. Edge replication extends the reference RGB,
+processed depth, and descriptor, so padded inputs inherit the nearest border pixel’s values. In pixel
+coordinates, the focal lengths are unchanged and the principal point shifts as
+c̃x = cx + P,
+c̃y = cy + P.
+(6)
+The front layer uses the extended depth directly, and the back layer applies Eq. 5 to that same
+extended map. Each layer’s centre follows its sub-pixel-shifted canvas ray in Eq. 4. The predictor
+uses replicate-padded convolutions and the RGB, depth, and descriptor inputs specified in Eq. 2. The
+same attribute constraints and rendering objective apply across the original and extended regions. In
+normalised intrinsics, canvas expansion gives f˜xn = fxn W/(W + 2P ) and c̃nx = (cnx W + P )/(W +
+2P ), with analogous vertical expressions. The target cameras retain their own intrinsics and original
+resolution.
+1
+Pretrained model identifier: 23-36-37.
+13
+Preprint
+A.2
+ATTRIBUTE COMPOSITION
+The following specifies our adaptation of SHARP’s residual attribute composition (Mescheder et al.,
+2025), including the geometry constraints, SH parameterisation, and numerical settings used in our
+model.
+For each layer ℓ, the attribute branch outputs image-plane offsets oℓ and residuals
+(δs,ℓ , δq,ℓ , δα,ℓ , δc,ℓ ). The centre is defined in Eq. 4; the remaining attributes are composed as
+
+sℓ (p) = clip s0,ℓ (p)ϕ(δs,ℓ ), smin , smax ,
+(7a)
+qℓ (p) = normalise(qid + rδq,ℓ ),
+αℓ (p) = σ(logit(α0 ) + δα,ℓ ),
+c0,ℓ (p) = RGB2SH(I˜L (p)) + δc,0,ℓ .
+(7b)
+(7c)
+(7d)
+p
+Here s0,ℓ = κzℓ / fx fy is an isotropic base scale. The bounded sigmoid multiplier ϕ acts independently on each axis, allowing anisotropic scales; qid is the identity quaternion, r scales rotation
+residuals, and α0 is the opacity base. The final equation specifies the DC term of degree-2 SH appearance. At zero attribute residual, each layer uses its depth-defined centre, base footprint, and
+reference-image colour.
+Stereo z-depth is clipped to [0.1, 10] m before canvas extension. For each layer, the image-plane
+displacement is σ(o) − 12 , bounded to half a canvas pixel on each axis. The front layer uses the
+processed stereo depth directly. Back-layer depth follows Eq. 5. Its depth branch is zero-initialised,
+so the initial increment above the pooled depth is ln 2 ≈ 0.69 m.
+p
+Scale and rotation. The isotropic base scale is s0 = 0.5zℓ / fx fy , with focal lengths in pixels.
+The three predicted scales are s = clip(s0 ϕ(δs ), 10−10 , 3) in metres, where
+ϕ(t) = 4.8 σ(1.5t + ln 0.2) + 0.2.
+This multiplier has ϕ(0) = 1 and ϕ′ (0) = 1. Rotation uses r = 0.1 and qid = (0, 0, 0, 1); the
+covariance is R(q) diag(s)2 R(q)⊤ in the reference-camera frame.
+Opacity and colour. The opacity base is α0 = 0.99. For degree-2 SH, the DC base is
+RGB2SH(c) = (c − 0.5)/C0 , with C0 ≈ 0.2821. Higher-order SH residuals at degree j are scaled
+by 0.1 · 0.25j . Both layers use the same reference-image colour base and separate attribute outputs. Within the attribute branches, only scale and SH output channels are zero-initialised; opacity,
+image-plane offset, and quaternion outputs start small but nonzero. The initial Gaussian attributes
+therefore include small deviations from their zero-residual values.
+Scale-residual clamps. Before composition, raw scale residuals are upper-bounded as δs ←
+min(δs , c), where c = 4 + ln(exp(scap ) − 1). For front-layer Gaussians, scap = 0.3 within a
+dilated disparity-edge band (relative-gradient threshold 0.05, dilation 8 pixels). For all back-layer
+Gaussians, scap = 0.5. These thresholds bound the scale multipliers to approximately 4.73 and
+4.89, respectively, close to the composer’s bound of 5. They constrain dimensionless multipliers of
+the depth-dependent base scale. The default model uses unmasked back-layer opacity.
+Edge-mask variants. For the design exploration in §5.5, both masking variants retain two Gaussian layers and gate only back-layer opacity. For a binary disparity-edge-region mask M , hard
+′
+′
+masking uses αback
+= M αback ; soft masking uses αback
+= [β + (1 − β)M ]αback with β = 0.3,
+leaving opacity unchanged inside the edge region and scaling it to 30% of its original value outside. These opacity gates differ from the scale-residual clamps above and are not used in the default
+model.
+B
+DATASET GENERATION DETAILS
+Dataset comparison conventions. Table 1 uses dataset-specific counting scopes: KITTI combines
+the 2012 and 2015 train/test sets; SceneFlow counts training scenes only; and IRS counts scene
+14
+Preprint
+Table 5: Dataset composition. Slash-separated counts denote train / val; training and validation are
+scene-disjoint. ReplicaGS is test-only. Pair and target counts describe the stored training pool or
+the selected validation/test views; training draws four of the ten stored targets per pair. Counts with
+K/M are rounded. Teacher PSNR averages over the quality-filtered source pool (train and validation
+together), or the eight ReplicaGS test scenes.
+Subset
+Split
+Scenes Stereo pairs Target views Teacher PSNR
+ScanNetGS
+Train / Val 491 / 30
+ScanNetPPGS-V2 Train / Val 312 / 20
+Total
+Train / Val 803 / 50
+ReplicaGS
+Test
+175K / 150
+149K / 100
+324K / 250
+1.75M / 600
+1.49M / 400
+3.24M / 1K
+31.69
+33.04
+–
+800
+8K
+41.21
+8
+instances. StereoNVS combines real and synthetic subsets, with approximate counts. SceneSplatStereo reports its training split, and – denotes an unavailable scene count. The data properties
+also require several qualifications. Flickr1024 stereo pairs are uncalibrated. IRS has no released
+camera poses for target-view supervision; our pose-recovery procedure is described in Appendix F.
+StereoNVS’s real-appearance checkmark applies only to its real subset.
+Source selection. We select ScanNetGS and ScanNetPPGS-V2 from SceneSplat-7K for their
+scene scale and coverage for nearby rendering. This selection targets scenes with sufficient capture coverage to support nearby novel views. Filtering by released teacher PSNR strictly above
+30 dB retains 521 of 1 613 ScanNetGS scenes and 332 of 956 ScanNetPPGS-V2 scenes. Table 5
+summarises the resulting training, validation, and test counts.
+Scene splits and counts. The quality-filtered pool contains 853 scenes. With seed 42, we sample
+30 of the 521 ScanNetGS scenes and 20 of the 332 ScanNetPPGS-V2 scenes uniformly without replacement for validation, assigning the remainder to training. ScanNetGS contributes 174 621 training stereo pairs and 1 746 210 targets; ScanNetPPGS-V2 contributes 149 196 pairs and 1 491 960
+targets. Training samples pairs uniformly from the combined 323 817-pair pool. Validation uses
+five evenly spaced pairs per held-out scene and the first four stored targets per pair, for 250 pairs and
+1 000 targets in total.
+Reference and target cameras. Reference poses follow the complete supplied camera trajectories
+in their original order. For ScanNetGS and ReplicaGS, these coincide with the teacher training
+poses. For ScanNetPPGS-V2, 80.6% are teacher training poses and 19.4% correspond to frames
+excluded from teacher fitting by blur filtering; none are teacher evaluation poses. All reference
+images are rendered from the teachers at these poses. Let TL be the reference camera-to-world
+transform. The right camera is TR = TL Trans(B, 0, 0), and target j is Tj = TL Trans(ρuj ), where
+the ten unit directions uj are fixed Fibonacci-sphere directions. All cameras share the reference
+orientation. Directions are shared across frames and scenes; only B and ρ vary with teacher quality.
+Target generation does not reject views based on overlap.
+Quality tiers. Teacher quality is the released per-scene reconstruction PSNR at 30K optimisation
+steps. ScanNet evaluates the teacher on its training views. ScanNet++ evaluates on DSLR test frames
+that are also included in teacher fitting through its combined train-and-test split. The threshold
+therefore measures reconstruction fidelity, not held-out-view generalisation. These within-scene
+teacher protocols are distinct from our scene-disjoint split: all generated views of a scene belong to
+the same student training, validation, or test set. We retain scenes strictly above 30 dB and apply the
+baseline and target-radius tiers in Table 6. The smallest tier contains 730 of the 803 training scenes
+(approximately 91%). All eight ReplicaGS test scenes use B = 0.10 m and ρ = 0.20 or 0.30 m
+according to the same rule.
+Rendering and valid masks. Images are rendered using antialiased gsplat at the teachers’ native resolutions: 616 × 456 for ScanNetGS, 1752 × 1168 for ScanNetPPGS-V2, and 1200 × 680
+for ReplicaGS, then stored as JPEG with quality 92. Camera poses are expressed in a common
+15
+Preprint
+Table 6: Teacher-quality tiers, stereo baselines, target radii, and scene counts. Scene counts are
+ordered as ScanNetGS / ScanNetPPGS-V2.
+Teacher PSNR
+B (m)
+ρ (m)
+Train scenes
+Val scenes
+(30, 35) dB
+[35, 40) dB
+[40, ∞) dB
+0.05
+0.10
+0.10
+0.10
+0.20
+0.30
+473 / 257
+18 / 48
+0/7
+28 / 14
+2/6
+0/0
+OpenCV convention, including the corresponding axis conversion for ScanNet++ sources. Each
+target includes a valid mask, defined by rendered alpha ≥ 0.5. The training objective is full-image
+MSE plus 0.05 LPIPS and does not use this mask. Four targets are selected randomly from the ten
+stored views per training sample. ReplicaGS evaluation uses all ten and applies valid masks.
+C
+E VALUATION - SET DETAILS
+StereoNVS. We use the 8 paper-holdout real-world scenes from StereoNVS-Real, giving 224 calibrated stereo-to-target evaluation pairs with COLMAP-estimated camera poses. For the default
+model, this benchmark tests zero-shot transfer to captured stereo imagery.
+ReplicaGS. ReplicaGS is used only for evaluation. It contains 8 held-out photorealistic Replica
+scenes rendered from optimised 3DGS teachers using known rendering camera parameters. Each
+scene provides a 2 000-frame trajectory; we select 100 evenly spaced reference poses per scene,
+yielding 800 stereo pairs, and render ten nearby target views per pair, yielding 8 × 100 × 10 =
+8 000 target views. The mean teacher PSNR across the eight scenes is 41.21 dB. PSNR, SSIM, and
+LPIPS are evaluated within a valid mask marking target regions supported by the teacher rendering
+(rendered alpha ≥ 0.5).
+Camera accuracy and image alignment. ReplicaGS uses known rendering intrinsics and extrinsics, while StereoNVS uses captured images with estimated camera poses. Residual calibration or
+pose errors can affect image alignment and pixelwise metrics on StereoNVS. We compare methods
+within each benchmark under its evaluation protocol, accounting for their distinct image and camera
+sources.
+D
+BASELINE IMPLEMENTATION DETAILS
+Pretrained model selection. Both SHARP-mono and SHARP-stereo use SHARP’s official pretrained checkpoint. For MVSplat, DepthSplat, LVSM, and Efficient-LVSM, we use their respective
+256 × 256 versions.
+LVSM camera preprocessing. Following LVSM’s camera normalisation, we recenter and
+rotation-align the poses and rescale translations by 1/(1.35 ∥t∥max ). Evaluation uses the designated
+target views for each input pair.
+DepthSplat trained on SceneSplat-Stereo. Table 3 includes two training routes. The featureinit. variant initialises the monocular branch with Depth Anything V2 and the multi-view branch
+with UniMatch, following DepthSplat’s feature initialisation recipe (Xu et al., 2025b), then trains
+on SceneSplat-Stereo without RE10K view-synthesis training. The RE10K FT variant instead finetunes a complete RE10K-trained DepthSplat model on SceneSplat-Stereo. Both are evaluated zeroshot on StereoNVS and the eight-scene ReplicaGS benchmark; the released RE10K model is reported in Table 2.
+Feature initialisation gives better ReplicaGS scores but worse StereoNVS scores than the released
+RE10K model. RE10K fine-tuning improves all three ReplicaGS metrics and StereoNVS PSNR,
+while StereoNVS SSIM/LPIPS change from 0.7498/0.2024 to 0.7313/0.2057. StereoGaussians exceeds both variants on all six test metrics, supporting its effectiveness when the competing method
+also uses SceneSplat-Stereo for view-synthesis training.
+16
+Preprint
+E
+H IGHER - RESOLUTION TRAINING AND EVALUATION
+We additionally train the default architecture at 512 × 512 and 1024 × 1024, initialising the trainable
+predictor independently at each resolution. The pretrained stereo encoder remains frozen. Both runs
+use the same optimiser recipe and 30 000 training steps and validation-based model selection, and
+are evaluated at their training resolution. Padding scales proportionally from 16 pixels at 2562 to 32
+at 5122 and 64 at 10242 . Table 7 also includes the 2562 / pad-64 variant as a separate reference; its
+relative padding margin is larger.
+Table 7: Higher-resolution reference results using the same model architecture. Each predictor is
+trained from scratch for 30K steps and evaluated at its training resolution, with a frozen pretrained
+stereo encoder. Batch denotes effective batch size (GPUs × per-GPU batch). Padding scales with
+resolution except for the additional 2562 / pad-64 reference.
+Resolution
+Pad
+Batch
+StereoNVS
+ReplicaGS
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓
+2562 (default)
+16 32 (1 × 32) 21.261
+2562 (larger FoV) 64 32 (1 × 32) 23.189
+0.7549
+0.7689
+0.1653
+0.1612
+30.266
+30.165
+0.9447
+0.9443
+0.0818
+0.0823
+5122
+10242
+0.7090
+0.7183
+0.2274
+0.2935
+29.676
+29.615
+0.9306
+0.9324
+0.1061
+0.1350
+32 24 (2 × 12) 20.414
+64 32 (8 × 4) 19.861
+The 5122 and 10242 models attain 20.414 and 19.861 dB on StereoNVS, and 29.676 and 29.615 dB
+on ReplicaGS, respectively. These runs demonstrate support for higher-resolution stereo inputs and
+target-view rendering with the same prediction architecture. Each model is evaluated using targets
+at its own training resolution. The 5122 run uses effective batch size 24; the 2562 and 10242 runs
+use 32. Table 7 reports all three quality metrics and the corresponding settings.
+F
+T RAINING - DATA PREPARATION DETAILS
+This section details the IRS preparation used for the training-data comparison in §5.3 and Table 3.
+IRS camera reconstruction. IRS does not release camera extrinsics. We reconstruct each scene
+variant independently with COLMAP from its left images, fixing the intrinsics at fx = fy = 480,
+(cx , cy ) = (480, 270) for 960 × 540 images. We retain the largest reconstruction and recover metric scale using the median ratio of ground-truth depth z = 48/d to reconstructed depth at matched
+sparse points. Right-camera poses follow from the rectified 0.1 m baseline. We retain reconstructions with at least 150 registered frames, mean reprojection error at most 1.5 pixels, and scale-ratio
+IQR at most 25% of its median, yielding 63 scene variants.
+IRS target selection and training. Targets are existing left-image frames from the original synthetic trajectories. Reference frames are sampled at translation or rotation increments of at least 5 cm
+or 5◦ . Target candidates lie 3–40 cm away with at most 30◦ rotation and a projected-point frustum
+coverage of at least 0.4. Coverage measures the fraction of reference depth points projected in front
+of the target camera and inside its image, without an occlusion test. Up to eight targets are selected
+by proximity of this coverage to 0.8. The resulting pool has 47 703 reference pairs and 303 196
+targets, split into 55 training and eight validation scene variants. Training uses the 38 286 training
+pairs with at least four targets, sampling four per pair under the default 2562 , 30K-step, batch-32
+recipe. Validation uses 40 pairs and 160 targets for best-PSNR checkpoint selection.
+SceneSplat-Stereo provides 803 training scenes and 323 817 stereo pairs. Its stronger ReplicaGS
+performance and lowest LPIPS on both benchmarks (Table 3) demonstrate its effectiveness as training data for cross-dataset generalisation and perceptual quality.
+17
+Preprint
+G
+A DDITIONAL QUALITATIVE RESULTS
+G.1
+C OMPARISON WITH NOVEL - VIEW SYNTHESIS BASELINES
+Figures 5–8 extend the comparison in §5.2 with 16 examples from each benchmark. Each row shows
+a stereo input pair and the corresponding target-view predictions. The displayed PSNR values are
+per-example scores; aggregate results are reported in Table 2.
+Figure 5: Additional baseline comparisons on StereoNVS (1/2). Columns show the left and right
+inputs, SHARP, DepthSplat, LVSM, StereoGaussians (Ours), and ground truth (GT). Prediction panels report PSNR in dB. In these lobby, plant, outdoor-seating, and sofa examples, our model better
+preserves furniture contours and the separation between foreground objects and their surroundings.
+18
+Preprint
+Figure 6: Additional baseline comparisons on StereoNVS (2/2). Column order and score annotations follow Figure 5. These examples include wooden desks, closely spaced chairs and tables,
+a cleaning cart, and small decorative objects. Our predictions retain clearer object boundaries and
+more of the small-scale structure in the cart and decorations.
+Captured-image evaluation. The StereoNVS examples illustrate transfer to real captured imagery, including clutter, thin structures, and changes in visibility. The furniture and cleaning-cart
+views show improved boundary definition and object structure, complementing the zero-shot results
+in Table 2.
+19
+Preprint
+Figure 7: Additional baseline comparisons on ReplicaGS (1/2). Columns show the stereo inputs,
+SHARP, DepthSplat, LVSM, StereoGaussians (Ours), and GT, with per-example PSNR in dB. The
+display panels, cushions, floor patterns, and sofa boundaries are more faithfully reproduced by our
+model in these examples. Several baseline predictions exhibit displaced structures, blurred textures,
+or missing content near image boundaries.
+20
+Preprint
+Figure 8: Additional baseline comparisons on ReplicaGS (2/2). Column order and score annotations follow Figure 7. Examples cover tabletops, wall partitions, a furnished living room, framed
+pictures, and a dining area. Our model better maintains straight architectural edges and furniture
+placement, while reducing the distortions and missing border regions visible in several baseline renderings.
+Teacher-rendered evaluation. ReplicaGS uses teacher-rendered targets from held-out scenes
+(Appendix C). The furniture contours, wall edges, and floor patterns provide visual evidence of
+the rendering fidelity reflected in Table 2.
+21
+Preprint
+G.2
+Q UALITATIVE ABLATIONS
+Figures 9–12 complement Table 4 and Figure 4. They compare the full model with variants that remove the DPT descriptor, back Gaussian layer, attribute composer, or canvas padding. Comparisons
+are made within each row; the baseline and ablation grids do not always show the same input or
+target views.
+Figure 9: Qualitative ablations on StereoNVS (1/2). Columns show the stereo inputs, full model,
+four ablated variants, and GT. Prediction panels report PSNR in dB. Removing the descriptor or
+back layer degrades table and chair boundaries in the outdoor examples. Removing padding leaves
+uncovered border regions, particularly in the sofa views.
+Feature conditioning. The descriptor-free variant retains RGB and stereo geometry but loses the
+learned feature pathway into Gaussian prediction. The tabletop and chair distortions illustrate that
+metric depth alone does not determine the Gaussian attributes needed for faithful target-view rendering.
+22
+Preprint
+Figure 10: Qualitative ablations on StereoNVS (2/2). The layout follows Figure 9. The desk
+and chair examples expose missing regions and distorted boundaries in the ablated predictions. The
+cleaning cart and small decorations show changes in fine structure and appearance. The full model
+reduces these artifacts and better preserves the depicted objects’ structure.
+Attribute composition. The composer improves local appearance and boundary quality around
+the wooden furniture and small objects in these examples. These visual improvements complement its lower LPIPS on both benchmarks and higher StereoNVS SSIM (Table 4); the quantitative
+comparison is discussed in §5.5.
+23
+Preprint
+Figure 11: Qualitative ablations on ReplicaGS (1/2). Columns follow Figure 9, with per-example
+PSNR in dB. Removing the descriptor reduces fidelity around cushions and floor patterns. Removing
+the back layer can introduce missing content, including the upper region of the bright display scene.
+Without padding, black bands appear at newly exposed image boundaries in several views.
+Additional Gaussian capacity. The back layer adds capacity behind the stereo-anchored front
+layer. Its removal can leave gaps when the target view reveals content beyond foreground boundaries. The full model fills these regions more completely in the displayed examples, consistent with
+the ReplicaGS degradation measured for the single-layer variant in Table 4.
+24
+Preprint
+Figure 12: Qualitative ablations on ReplicaGS (2/2). The layout follows Figure 9. The office-chair
+and dining-table views reveal gaps around foreground objects when the descriptor or back layer is
+removed. The no-padding variant additionally leaves large uncovered regions at the target image
+borders. The full model improves coverage while retaining clearer furniture and wall boundaries.
+Prediction-canvas coverage. Removing padding restricts Gaussian prediction to the original
+reference-image canvas. The black bands along the office, wall, and dining-table views demonstrate
+the resulting loss of coverage under viewpoint changes. Extending the canvas reduces these gaps
+and provides more complete target-view coverage, complementing the PSNR, SSIM, and LPIPS
+improvements in Table 4.
+25

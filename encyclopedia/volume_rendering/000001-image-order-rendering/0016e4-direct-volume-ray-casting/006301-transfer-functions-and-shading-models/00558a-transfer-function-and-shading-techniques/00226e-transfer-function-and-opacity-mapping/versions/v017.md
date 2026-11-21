@@ -1,0 +1,67 @@
+# Transfer Function and Opacity Mapping
+
+Also called: RayCast.fx transferFunction, Transfer Function Application
+
+## Overview
+Transfer Function and Opacity Mapping defines the mechanism by which scalar volume data $V(\mathbf{p})$ is converted into visual properties (color $\mathbf{c}$ and opacity $\alpha$) for direct volume ray casting [S2, unofficial]. It solves the problem of perceptual mapping, allowing users to highlight specific structures within a scalar field by assigning distinct RGBA values to specific data ranges [S2, unofficial]. Unlike [Direct Volume Rendering with Phong Illumination](8307-direct-volume-rendering-with-phong-illumination.md), which focuses on lighting models, or [Pre-integrated Volume Rendering](5327-pre-integrated-volume-rendering.md), which focuses on integration accuracy, this family focuses strictly on the parameterization and application of the mapping function $T: V \rightarrow (\mathbf{c}, \alpha)$ [G].
+
+## Shared principles
+The family operates on the scalar field $V(\mathbf{p})$ sampled at positions $\mathbf{p}$ along the ray. The core mechanism involves a transfer function $T$ that maps the scalar value to a color vector $\mathbf{c} \in [0,1]^3$ and an opacity scalar $\alpha \in [0,1]$:
+$$ T: V \rightarrow (\mathbf{c}, \alpha) $$
+These values are subsequently used in the front-to-back compositing equation defined in [Direct volume ray casting](19-direct-volume-ray-casting.md). Transfer functions are typically parameterized by control points $(V_k, \mathbf{c}_k, \alpha_k)$ with interpolation between points [S2, 2789, unofficial].
+
+## Subtopics
+
+### [Opacity Correction for Slice Count Invariance](1277-opacity-correction-for-slice-count-invariance.md)
+Compensates for brightness changes when the number of rendered slices varies, ensuring consistent visual density regardless of resolution. It scales per-sample opacity inversely proportional to the slice count. Choose this when resolution independence is required.
+
+### [Direct Volume Rendering with Interactive Piecewise Transfer Function](2068-direct-volume-rendering-with-interactive-piecewise-transfer-.md)
+Maps scalar voxel values to RGBA using a piecewise linear transfer function defined by five control points, compositing in two separate passes (RGBA volume creation then compositing). Choose this for simple, interactive, non-shaded volume visualization.
+
+### [Alpha-to-Weight Computation (Forward)](2373-alpha-to-weight-computation-forward.md)
+Calculates rendering weights $w_i$ and transmittance $T_i$ from per-sample opacity values $\alpha_i$. It solves the conversion of local opacity to global accumulation weights. Choose this when implementing efficient ray-casting kernels that require explicit weight/transmittance arrays.
+
+### [SDF-based Opacity Derivation via Logistic CDF](3233-sdf-based-opacity-derivation-via-logistic-cdf.md)
+Computes discrete opacity by integrating a density function derived from a Signed Distance Function (SDF) and the CDF of the logistic distribution. It ensures weight functions peak at surface intersections. Choose this for implicit surface rendering where geometric accuracy is prioritized over scalar density.
+
+### [Silhouette Shading](8222-silhouette-shading.md)
+Accentuates isosurface boundaries by modifying color and opacity based on the dot product of the surface normal and view direction. It produces a "bubble-like" effect. Choose this to improve depth perception of semi-transparent objects.
+
+### [Topology-Based Direct Volume Rendering](8480-topology-based-direct-volume-rendering.md)
+Applies topological segmentation (e.g., contour trees) to guide rendering attributes. It solves the problem of distinguishing overlapping nested structures. Choose this for complex scalar fields with multiple distinct topological objects.
+
+### [Piecewise Linear Mapping and Integration](9000-piecewise-linear-mapping-and-integration.md)
+Provides methods to map scalar data to opacity using piecewise linear approximations and integrate them. It focuses on structural linearity for analytical integration or simple interpolation. Choose this for standard, efficient linear transfer functions.
+
+### [Style Transfer and Illustrative Rendering](13031-style-transfer-and-illustrative-rendering.md)
+Extends DVR by mapping scalar values to style indices or descriptors rather than direct RGB colors, enabling non-photorealistic rendering. Choose this for artistic or illustrative visualization styles.
+
+### [Volume Rendering Pipeline Configuration](13088-volume-rendering-pipeline-configuration.md)
+Configures the static rendering pipeline parameters (transfer functions, lighting, sampling) that map scalar data to visual properties. Choose this for setting up the overall rendering environment rather than specific per-sample mapping algorithms.
+
+### Palette-based Alpha Cutoff
+Applies a hard cutoff to sampled volume values before palette mapping, discarding values outside a specified range and scaling the remaining alpha [S3, unofficial]. It computes alpha using two step functions: $\alpha = \text{clamp}(\text{step}(minCutoffValue, meanValue) \times \text{step}(meanValue, maxCutoffValue) \times alphaMultiplier, 0.0, 1.0)$ [S3, unofficial]. The RGB color is sampled from a horizontal palette texture at the normalized mean value [S3, unofficial]. Parameters include `minCutoffValue` (default $10^{-3}$), `maxCutoffValue` (default $1 - 10^{-3}$), and `alphaMultiplier` (default $1.0$) [S3, unofficial].
+
+### VNetL-16-4
+An architecture creating 16 semantic channels in the encoder, mapped to color and opacity via an MLP-based TF [S4, unofficial]. It replaces the VNet encoder with VNetLight (one less downsampling level) to produce 16 semantic channels [S4, unofficial]. The color TF is an MLP with a 16-channel hidden layer (ReLU) producing 3 RGB channels (sigmoid) [S4, unofficial]. The layout is Encoder: VNet16, TF: MLP1, Accumulation: Alpha, Decoder: Identity [S4, unofficial].
+
+### Dynamic Opacity via Specular Highlights
+A technique using dynamic opacity as a function of specular highlights to allow additional information in partially transparent parts, leveraging the human visual system's ability to complete shapes [S5, unofficial]. It excludes certain data-value ranges from transparency modulation to allow clear views of inner structures [S5, unofficial]. Parameters include the Specularity/Transparency Ratio and Depth (fuzzy clipping) [S5, unofficial].
+
+### Specular Highlight Augmentation
+Selectively boosts opacity in regions of high specular highlight to mitigate the loss of specular contribution due to low opacity [S6]. It calculates the specular contribution ($spec = \text{pow}(\text{dot}(\text{lightDir}, \text{normal}), \text{shininess})$) and updates sample alpha: $\alpha_{sample} = \alpha_{base} + spec \times \mu_{spec}$ [S6]. The parameter $\mu_{spec}$ depends on surface thickness, base opacity, and ray-stepping size [S6].
+
+### Gradient/Angle-based MIP Transfer Function
+Assigns optical properties based on gradient magnitude and the angle between the viewing direction and the gradient vector, using Maximum Intensity Projection (MIP) compositing [S7, unofficial]. It avoids complex transfer functions by deriving opacity from geometric cues [S7, unofficial]. Optional level lines may be rendered to improve spatial perception [S7, unofficial].
+
+## Background
+The concept of transfer functions in volume rendering originated with Levoy's foundational work on direct volume rendering, establishing the mapping of scalar density to color and opacity [G]. Early implementations used piecewise linear functions defined by control points [S2, unofficial]. The introduction of Programmable Transfer Functions (PTFs) on GPUs allowed for more complex, non-linear mappings and real-time interaction [S2, unofficial]. Recent developments include topology-based methods for handling complex scalar fields [S1, unofficial] and style transfer techniques for illustrative rendering [S1, 11445-illustrative-volume-rendering-with-style-transfer, unofficial].
+
+## Sources
+[S1] pengliu916/DynamicVolumeRayCasting, https://github.com/pengliu916/DynamicVolumeRayCasting, fetched 2026-10-26 (unofficial)
+[S2] jose-villegas/VolumeRendering, https://github.com/jose-villegas/VolumeRendering, fetched 2026-10-27 (unofficial)
+[S3] here, https://github.com/Donitzo/three.js-volume-renderer, fetched 2026-10-28 (unofficial)
+[S4] Deep Direct Volume Rendering: Learning Visual Feature Mappings From Exemplary Images, https://doi.org/10.48550/arxiv.2106.05429, fetched 2026-10-26 (unofficial)
+[S5] Illustrative Visualization for Medicine and Science, https://doi.org/10.2312/egt.20061068, fetched 2026-10-26 (unofficial)
+[S6] Visualization of WiFi Signals Using Programmable Transfer Functions, https://doi.org/10.3390/info13050224, fetched 2026-10-27
+[S7] Enhanced perception in volume visualization, https://doi.org/10.5821/dissertation-2117-94929, fetched 2026-10-26 (unofficial)

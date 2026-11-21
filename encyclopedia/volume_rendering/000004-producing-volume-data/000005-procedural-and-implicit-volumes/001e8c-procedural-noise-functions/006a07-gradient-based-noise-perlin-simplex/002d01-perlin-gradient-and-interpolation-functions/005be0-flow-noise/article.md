@@ -1,0 +1,91 @@
+# Flow Noise
+
+Also called: Advection Noise, Perlin Flow Noise
+
+## Overview
+Flow Noise is a procedural noise function designed to generate time-varying, swirling, and advected textures, primarily for physically-based simulations of fluids and gases [S1, S2]. It differs from standard Perlin noise by introducing a time-dependent advection step that displaces the sampling coordinates, creating a sense of continuous flow and swirling motion rather than static, frozen noise patterns [S1, S2].
+
+## How it works
+Flow Noise extends the standard Perlin noise framework by applying a velocity field to advect the input coordinates before evaluating the noise function. This creates a coherent, turbulent look suitable for smoke, fire, and water surfaces.
+
+**Inputs:**
+- $P \in \mathbb{R}^3$: The spatial position to evaluate.
+- $t \in \mathbb{R}$: The time parameter.
+- $scale \in \mathbb{R}$: The spatial frequency scale (optional, typically 1.0).
+- $speed \in \mathbb{R}$: The advection speed factor (optional, typically 1.0).
+
+**Outputs:**
+- $f \in \mathbb{R}$: The scalar noise value.
+
+**Data Structures:**
+Flow Noise relies on the underlying Perlin noise implementation. It requires:
+1. A permutation table $P$ of size 512 (or 256 extended), containing integers $0..255$.
+2. A gradient function $G(i, x, y, z)$ that returns a dot product between a pseudo-random gradient vector and the input vector, based on index $i$.
+
+**Steps:**
+1. **Compute Advection Velocity:** Calculate a velocity vector $V$ using a secondary noise function (often the same Perlin noise function or a derivative-based variant) at position $P$ and time $t$. This velocity field drives the advection.
+   $$ V = \text{NoiseVelocity}(P, t) $$
+   [G] The velocity field is typically derived from the curl of a noise field or a scaled noise gradient to ensure incompressibility or coherent flow. In the original Perlin/Neyret formulation, it often involves evaluating noise at offset positions to estimate local flow.
+
+2. **Advect Coordinates:** Displace the original position $P$ by the velocity vector scaled by time and speed to get the advected position $P'$.
+   $$ P' = P + V \cdot speed \cdot t $$
+   [G] In discrete implementations, $t$ might be treated as a small delta or accumulated time. The advection is usually linear for simplicity in real-time rendering.
+
+3. **Evaluate Noise:** Compute the standard Perlin noise value at the advected position $P'$ with the given scale.
+   $$ f = \text{PerlinNoise}(P' \cdot scale) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def flow_noise(P, t, scale=1.0, speed=1.0):
+    # Step 1: Compute velocity field
+    # The velocity is often derived from the noise function itself or its derivatives.
+    # A common approach is to use the noise value at P and a slightly offset P to estimate flow.
+    # For simplicity, we assume a helper function that returns a 3D velocity vector.
+    V = compute_velocity_field(P, t)
+    
+    # Step 2: Advect the position
+    P_advected = P + V * speed * t
+    
+    # Step 3: Evaluate standard Perlin noise at the advected position
+    # This assumes a standard Perlin noise implementation is available
+    result = perlin_noise(P_advected * scale)
+    
+    return result
+
+def compute_velocity_field(P, t):
+    # [G] Specific implementation of velocity field generation varies.
+    # A simple approximation uses the gradient of the noise function.
+    # Or, it may use a separate noise function for the velocity components.
+    # Here we assume a placeholder for the specific velocity calculation method
+    # described in Perlin & Neyret [PN01], which often involves curl noise or
+    # simple advection of coordinates.
+    
+    # Example: Using noise derivatives for velocity (curl noise is more complex)
+    # This is a simplified representation. The original paper details specific
+    # lattice-based velocity calculations.
+    
+    # Return a 3D vector representing local flow
+    return Vector3(
+        noise_derivative_x(P, t),
+        noise_derivative_y(P, t),
+        noise_derivative_z(P, t)
+    )
+```
+[Note: The exact formula for $V$ in Perlin & Neyret [PN01] involves evaluating the noise function at multiple points to construct a velocity field that advects the coordinates. The pseudocode above abstracts this into `compute_velocity_field`. Implementers should refer to the original paper for the precise lattice-based velocity calculation.]
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per sample, assuming constant-time Perlin noise evaluation. The advection step adds a constant number of noise evaluations (typically 1-3 for velocity estimation).
+- **Memory Complexity:** $O(1)$ for the permutation table and gradient vectors.
+- **Strengths:** Produces visually appealing, turbulent, and flowing textures without requiring explicit fluid simulation. It is computationally efficient compared to solving Navier-Stokes equations.
+- **Limitations:** The flow is not physically accurate (not incompressible unless specifically designed, e.g., curl noise). It can exhibit artifacts if the advection speed is too high relative to the noise frequency.
+- **When to use:** Ideal for visual effects like smoke, fire, clouds, and water surfaces where a "noisy" flow is desired without full simulation.
+- **When not to use:** When physical accuracy (mass conservation, vorticity) is critical; use curl noise or actual fluid simulation instead.
+
+## Background
+Flow Noise was introduced by Ken Perlin and Fabrice Neyret in 2001 [S1, S2]. It was developed to address the need for procedural noise functions that could simulate dynamic, flowing phenomena in computer graphics, such as smoke and fire, which static noise functions could not adequately represent. It builds upon the foundational Perlin noise algorithm [Per85] by adding a temporal advection component.
+
+## Sources
+[S1] A Survey of Procedural Noise Functions, https://www.cs.umd.edu/~zwicker/publications/SurveyProceduralNoise-CGF10.pdf, fetched 2026-10-27
+[S2] State of the Art in Procedural Noise Functions, https://www-sop.inria.fr/reves/Basilic/2010/LLCDDELPZ10/LLCDDELPZ10STARPNF.pdf, fetched 2026-10-27

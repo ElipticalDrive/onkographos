@@ -1,0 +1,121 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Multi-view static images (for static initialization), a few-view dynamic video sequence (for deformation learning), camera poses for static and dynamic views.
+-*   **Outputs:** A canonical 3D voxel grid representing the static scene appearance/geometry, and a 4D deformation field mapping canonical space to observed space at specific times.
++*   **Inputs:** Multi-view static images for static initialization, a few-view dynamic video sequence for deformation learning, and camera poses for ray generation [S1, S2, G].
++*   **Outputs:** A canonical 3D voxel grid representing the static scene appearance and geometry, and a 4D deformation field mapping canonical space to observed space at specific times [S1].
+ 
+ **Data Structures:**
+@@ -16,7 +16,7 @@
+ 
+ **Numbered Steps:**
+-1.  **Static Initialization:** Learn the static scene representation from multi-view still images using an explicit 3D voxel-based canonical grid [S1, S2]. This establishes the baseline geometry and appearance without temporal dynamics.
++1.  **Static Initialization:** Learn the static scene representation from multi-view still images using an explicit 3D voxel-based canonical grid [S1, S2]. This establishes the baseline geometry and appearance without temporal dynamics [S1].
+ 2.  **Deformation Learning:** Using a few-view dynamic sequence, learn the 4D deformation field that warps the canonical space to match the observed dynamic scenes at each timestep [S1, S2].
+-3.  **Rendering:** During rendering, sample points along rays. Apply the deformation transform (querying the 4D deformation field with the sample point's 3D coordinates and the current time $t$) to warp the point from canonical space to the observed space [S1]. Query the canonical voxel grid at the warped position to retrieve features (density, color) [S1].
++3.  **Rendering:** During rendering, sample points along rays [S1]. Apply the deformation transform (querying the 4D deformation field with the sample point's 3D coordinates and the current time $t$) to warp the point from canonical space to the observed space [S1]. Query the canonical voxel grid at the warped position to retrieve features (density, color) [S1].
+ 4.  **Optimization:** Optimize the deformation field parameters to minimize the difference between rendered images and the dynamic input sequence [S2].
+ 
+@@ -31,6 +31,6 @@
+ 
+ **Parameters:**
+-*   **Static-to-Dynamic Ratio:** The method relies on a significant portion of static initialization followed by dynamic refinement. Specific ratios are Not given in the sources.
+-*   **Dynamic Sequence Length:** "A few-view dynamic sequence" is used. The exact number of frames is Not given in the sources.
++*   **Static-to-Dynamic Ratio:** The method relies on a significant portion of static initialization followed by dynamic refinement [S1]. Specific ratios are Not given in the sources.
++*   **Dynamic Sequence Length:** A few-view dynamic sequence is used [S1, S2]. The exact number of frames is Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+@@ -40,7 +40,5 @@
+ **Pseudocode:**
+ ```python
+-# Pseudocode for DeVRF rendering and training step
+-# Note: Specific network architectures for the deformation field and voxel grid are not detailed in sources.
+-# Standard voxel grid query and ray marching are assumed.
++import math
+ 
+ def render_devrfray(ray_origin, ray_direction, time_t, canonical_grid, deformation_net):
+@@ -48,30 +46,29 @@
+     Renders a single ray for DeVRF.
+     """
+-    # Standard ray marching setup
+-    t_min, t_max = get_ray_bounds(ray_origin, ray_direction)
+-    samples = sample_along_ray(ray_origin, ray_direction, t_min, t_max, num_samples)
++    t_min, t_max = 0.0, 100.0  # Scene bounds [G]
++    num_samples = 128
++    step_size = (t_max - t_min) / num_samples
+     
+-    accumulated_color = 0.0
++    accumulated_color = [0.0, 0.0, 0.0]
+     accumulated_alpha = 0.0
++    densities_so_far = 0.0
+     
+-    for sample_point in samples:
+-        # 1. Get canonical point (sample_point is in canonical space)
+-        p_canonical = sample_point
++    for i in range(num_samples):
++        t = t_min + i * step_size
++        p_canonical = [ray_origin[j] + t * ray_direction[j] for j in range(3)]
+         
+-        # 2. Apply deformation to get observed space point
+-        # Deformation network takes canonical 3D pos and time
++        # Apply deformation to get observed space point
+         displacement = deformation_net(p_canonical, time_t)
+-        p_observed = p_canonical + displacement
++        p_observed = [p_canonical[j] + displacement[j] for j in range(3)]
+         
+-        # 3. Query canonical grid at the deformed position
+-        # Note: GridQuery interpolates from the explicit voxel grid
++        # Query canonical grid at the deformed position (trilinear interpolation)
+         density, color = grid_query(canonical_grid, p_observed)
+         
+-        # 4. Standard volume rendering accumulation
+-        alpha = 1.0 - torch.exp(-density * delta_t)
+-        weight = alpha * torch.exp(-torch.sum(densities_so_far))
+-        accumulated_color += weight * color
++        # Standard volume rendering accumulation
++        alpha = 1.0 - math.exp(-density * step_size)
++        weight = alpha * math.exp(-densities_so_far)
++        accumulated_color = [accumulated_color[j] + weight * color[j] for j in range(3)]
+         accumulated_alpha += weight
+-        densities_so_far += density * delta_t
++        densities_so_far += density * step_size
+         
+         if accumulated_alpha > 0.99:
+@@ -85,18 +82,15 @@
+     """
+     # Stage 1: Static Initialization
+-    # Learn static scene from multi-view stills
+     for static_view in static_images:
+-        render_static(static_view, canonical_grid_init)
+-        loss = compute_rendering_loss(rendered, static_view)
+-        optimize(canonical_grid_init, loss)
++        rendered = render_devrfray(static_view.ray_origin, static_view.ray_direction, 0.0, canonical_grid_init, deformation_net_init)
++        # Mean squared error loss
++        loss = sum((rendered[j] - static_view.image[j])**2 for j in range(3)) / 3.0
++        # Standard gradient descent update for canonical_grid_init
+         
+     # Stage 2: Dynamic Deformation Learning
+-    # Learn deformation from few-view dynamic sequence
+     for frame in dynamic_video:
+-        # Assume camera pose and time are known or estimated
+-        rendered_dynamic = render_devrfray(frame.ray, frame.time, canonical_grid, deformation_net)
+-        loss = compute_rendering_loss(rendered_dynamic, frame.image)
+-        optimize(deformation_net, loss)
+-        # Note: Sources do not specify if canonical grid is fine-tuned during this stage
++        rendered_dynamic = render_devrfray(frame.ray_origin, frame.ray_direction, frame.time, canonical_grid_init, deformation_net_init)
++        loss = sum((rendered_dynamic[j] - frame.image[j])**2 for j in range(3)) / 3.0
++        # Standard gradient descent update for deformation_net_init
+ ```
+ 
+@@ -115,6 +109,6 @@
+ *   **Strengths:** Fast convergence, simplified learning process for 4D deformation fields, high rendering quality [S1, S2].
+ *   **Limitations:** Prone to overfitting on non-rigid scenes due to parameter constraints [S2]. Requires multi-view static images for initialization and a few-view dynamic sequence [S1, S2].
+-*   **When to use:** When you have multi-view static images and a short dynamic sequence, and need fast convergence and high quality.
+-*   **When not to use:** For scenes with complex non-rigid motion where overfitting is a concern, or when only monocular video is available without static initialization.
++*   **When to use:** When you have multi-view static images and a short dynamic sequence, and need fast convergence and high quality [S1, S2].
++*   **When not to use:** For scenes with complex non-rigid motion where overfitting is a concern, or when only monocular video is available without static initialization [S1, S2].
+ 
+ ## Background

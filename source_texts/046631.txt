@@ -1,0 +1,89 @@
+# BEVFusion 体素化算子 SYCL 移植 — 工作说明与使用指南
+
+> 本文件说明：做了什么、文件夹里是什么、怎么编译运行。
+
+## 1. 这是什么
+
+把 NVIDIA BEVFusion 的 PointPillars 激光雷达体素化 CUDA 算子（hash-table + scatter + reduce_mean，half 精度，XYZ/ZYX 坐标序）移植到 Intel SYCL，在 Intel Arc Graphics [0xb080] GPU 上跑通并优化。
+
+- **平台**：Intel Arc Graphics [0xb080] (B390, ~29GB)，oneAPI 2025.3.3，OpenCL 后端。
+- **源算子**：CUDA-BEVFusion 的 `lidar-voxelization.cu`。
+- **工作目录**：`/work/bevfusion_migration/`。
+
+## 2. 做了什么
+
+1. **移植**：CUDA → SYCL，忠实保留 half 精度 + XYZ/ZYX 坐标序 + hash-table 开放寻址算法。3 个 kernel：`build_hash_table`（插点入 hash 表）/ `voxelization`（lookup + scatter 点特征）/ `reduce_mean`（每体素求均值输出 half）。
+2. **正确性验证**：合成小数据逐 bit 对 CPU 参考（`ALL TESTS PASSED`）+ 真实 24 万点 ±1 邻接边界分析（`REAL-DATA TEST PASSED`）。
+3. **性能对比**：同平台对比 hash-table 版 vs Intel dense 版 → BEVFusion 细参数下 dense OOM，只有 hash-table 能跑。
+4. **性能优化**：4 项优化（relaxed 原子 / 去 host sync / 去 memset / reduce_mean 寄存器累加），累计 wall **3.5-3.8×**（240k 真实点云 1.938→0.530ms）。
+5. **性能极限**：瓶颈 voxelization 是 memory-latency-bound（hash 表随机访存，算法固有），不改算法已近实用极限。
+
+## 3. 目录结构
+
+```
+/work/bevfusion_migration/
+├── README.md                          # 本文件（工作说明 + 使用指南）
+├── build.sh                           # 编译脚本（编 6 个目标）
+├── common/                            # 共享头文件
+│   ├── launch.hpp                     # linear_launch + 原子序开关 + profiling 支持
+│   ├── dtype.hpp                      # nvtype::half 等类型别名（对齐 NVIDIA API）
+│   └── check.hpp                      # 校验/断言宏
+├── cvcuda_ops/                        # 下一个算子移植预留目录（空，勿删）
+├── lidar_voxelization/
+│   ├── voxelizer.cpp                  # 核心 SYCL 体素化算子（opt4 累计版）
+│   ├── voxelizer.hpp                  # 接口声明 + last_profile() 计时接口
+│   ├── dense_ref/                     # B 路对比用：Intel dense 参考实现
+│   │   ├── pointpillars/voxelizer.{cpp,hpp}
+│   │   └── common/voxelizer_utils.hpp
+│   └── test/
+│       ├── correctness/               # 合成正确性测试
+│       │   ├── test_voxelizer.cpp     # 源码
+│       │   └── test_voxelizer         # 编译后二进制（无参数）
+│       ├── real/                      # 真实点云正确性 + 性能测试
+│       │   ├── test_voxelizer_real.cpp
+│       │   ├── test_voxelizer_real         # baseline (seq_cst，优化前)
+│       │   └── test_voxelizer_real_relaxed # opt4 (relaxed，优化后，日常用)
+│       ├── profile/                   # C 路逐 kernel profiling 测试
+│       │   ├── test_voxelizer_profile.cpp
+│       │   ├── test_voxelizer_profile         # baseline (seq_cst)
+│       │   └── test_voxelizer_profile_relaxed # opt4 (relaxed)
+│       ├── bench_compare/             # B 路 hash vs dense 对比测试
+│       │   ├── test_bench_compare.cpp
+│       │   └── test_bench_compare     # 编译后二进制
+│       └── data/
+│           ├── real/                  # 真实点云（nuScenes .bin，[N,5] float32）
+│           │   ├── 291e7331922541cea98122b607d24831.bin   # 240k 点
+│           │   └── 3615d82e7e8546fea5f181157f42e30b.bin   # 267k 点
+│           └── synthetic/             # 合成点云（均匀随机，最坏原子竞争负载）
+│               ├── synth_50000.bin
+│               ├── synth_100000.bin
+│               ├── synth_500000.bin
+│               └── synth_1000000.bin
+└── test_intel_env/                    # 早期 oneAPI 学习实验（与体素化无关，环境验证用）
+    ├── test.cpp / test
+    ├── test_buffer.cpp / test_buffer / test_buffer_debug
+    └── vector-add-usm.cpp / vector-add-usm / vector-add-host.cpp
+```
+
+**组织原则**：每个测试文件夹里源码 `.cpp` 和编译后的二进制放一起；点云按真实/合成分开；早期学习实验单独隔离在 `test_intel_env/`。
+
+## 4. 怎么编译
+
+宿主机有 `icpx`（容器里没有，**必须宿主机编译**）：
+
+```bash
+cd /work/bevfusion_migration
+bash build.sh
+```
+
+编出 6 个二进制，自动放到对应 `test/` 子文件夹。默认 4 个目标是 seq_cst baseline，2 个 `_relaxed` 目标加 `-DVOX_RELAXED_ATOMICS`（opt4）。
+
+## 5. 怎么运行
+
+> **必须**带 `ONEAPI_DEVICE_SELECTOR=opencl:gpu` —— Level Zero 后端在这台机器有 bug 会段错误。
+> 建议每个 SSH session 先 export 一次，后面就不用每次写了：
+> ```bash
+> export ONEAPI_DEVICE_SELECTOR=opencl:gpu
+> ```
+
+下面命令都假设你在 `/work/bevfusion_migration` 根目录（注意路径前缀）。

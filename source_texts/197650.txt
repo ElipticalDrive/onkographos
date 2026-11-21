@@ -1,0 +1,108 @@
+Rendering Planetwide Volumetric Clouds in Skybolt – Prograda
+Skip to content
+The Skybolt engine was built for rendering realistic planetary environments at multiple visual scales, viewed from the planet surface, outer space, and anywhere in between. This article describes techniques used to render clouds in Skybolt. Our goals for the clouds system were:
+Seamlessly mix real-world cloud coverage maps with procedural cloud modeling to achieve high detail across multiple visual scales.
+Simulate light scattering in clouds and atmosphere, achieving a range of lighting conditions from clear skies to overcast.
+Skybolt’s implementation uses a similar approach to cloud systems implemented in the Frostbite Engine[1] and Horizon Zero Dawn[2]. Our approach is as follows:
+Model clouds in a 3D procedural volume, driven by 2D and 3D textures mixed at various scales.
+Render the volume by marching along rays from the camera. At each ray-march step, accumulate luminance and transmission loss, approximating occlusion and multi-scattering.
+Apply Aerial Perspective, that is, atmospheric scattering effects between the camera and the cloud.
+Apply cloud shadow and occlusion masking to the scene under the clouds. The occlusion must be applied to both solid geometry, and atmospheric particles which reflect light toward the camera.
+Modeling Cloud Shapes
+Skybolt’s clouds are represented as a 3D density volume. The volume is shaped as a shell around the planet, with an inner radius equal to the planet radius plus minimum cloud layer height, and outer radius equal to planet radius plus maximum cloud layer height. During rendering, we perform ray vs sphere intersect tests against the inner and outer radii to determine the start and end points for ray-marching.
+Since storing voxel data for a planet-sized volume would be prohibitively expensive, we generate the density field procedurally on read during render time. The density field is driven by input textures at different detail scales:
+2D global cloud coverage texture
+8096 x 8096 map, giving a base resolution of 5 km per pixel.
+We interpret each pixel as a coverage value from 0% to 100%.
+2D tiling cloud coverage modulation texture
+Modulates the global coverage map to produce high frequency cloud shapes.
+Generated from fractal Worley noise.
+2D tiling cloud type texture
+Blends between different cloud types in different locations.
+Cloud type is defined as having a unique top height, bottom height, and density.
+Generated from fractal Perilin noise.
+3D volume cloud density texture
+128 x 128 x 128 volume texture that modulates density, generated from fractal Worley noise.
+Global cloud coverage map. Source: NASA Blue Marble
+Cloud coverage detail texture, generated from fractal Worley noise.
+Cloud type texture, generated from fractal Perlin noise.
+2D slice of 3D cloud density volume texture.
+Coverage textures are modulated using a method inspired by the ‘erosion’ method used in Horizon Zero Dawn[2]. The idea of erosion modulation is that higher detail is applied by subtracting from the bounds of shapes defined by the lower detail maps. This ensures the bounding hull of a cloud at high detail is always contained by the low detail hull. This property is important for ray-marching because it ensures no high detail area are unintentionally skipped while marching through the lower detail volume.
+Erosion makes use of the following remapping function:
+```
+float remap(float value, float valueMin, float valueMax)
+{
+	return (value - valueMin) / (valueMax - valueMin);
+}
+```
+As per the Horizon approach[2], low detail is eroded by high detail by:
+```
+float result = saturate(remap(lowDetail, 1 - highDetail, 1.0));
+```
+A consequence of erosion that the mean value of the output no longer matches the mean value of the input, resulting in a difference in cloud coverage fraction between input and output. Since our goal is to achieve visual consistency between scales, we modified the operation as follows to preserve the mean value between scales:
+```
+float f = 1.0 - lowDetail;
+float h = 0.4; // adjustable filter
+
+float a = highDetail * (1.0-h) + h;
+float result = saturate(remap(a, f, f + h));
+```
+This modification preserves the output intensity range and mean, and provides an adjustable filter to control coverage falloff at cloud edges. The grey curve in the graph below shows how the output (y axis) value changes with respect to the high detail coverage value (x axis) and the low detail map coverage value (blue line). The mean output can be seen to scale linearly between [0, 1] with respect to the low detail value between [0, 1]. For comparison, the red area shows the original erosion method giving non-linear output. The Desmos graph is available here.
+Adaptive Ray-Marching
+Skybolt uses an adaptive ray-marching algorithm to integrate the volume. The idea behind adaptive ray marching is to adjust the step size dynamically to only take samples where necessary. The algorithm works as follows:
+Define a ray beginning at the camera, directed into the volume.
+Advance along ray one big step, and sample density of the low detail volume.
+If the density is zero, repeat step 2. Otherwise, move one big step backwards along the ray.
+Advance along the ray in small steps, sampling the high detail volume, integrating luminance and transmission at each step. Continue until we hit an area of zero density, then go to step 2.
+We increase the size of the small steps with distance from the camera, since more distant clouds can be rendered with less visual fidelity.
+Multiple Scattering
+We implemented a multiple scattering approximation developed by Wrenninge for the movie Oz The Great And Powerful[3]. The method was later used by Hillaire in the Frostbite Engine[2]. The approximation is simple to implement and efficient to compute, as no additional light paths need to be evaluated. Instead, a single scattering path is evaluated N times with different coefficients, and summed. Each successive addition represents an extra bounce, or octave, in the multiple scattering integral. The coefficients are calculated to simulate light transport on the equivalent multiple scattering path for that octave number. The result is an addition of multiple scattering energy which would otherwise be missing from a single scattering only solution. The Skybolt implementation is shown below:
+```
+vec3 luminance = vec3(0);
+for (int N = 0; N < 3; ++N) // multi scattering octaves
+{
+	// Calculate multi-scattering approximation coefficients.
+	// Using a falloff base of 0.5 looks fine for all coefficients,
+	// but they can be tuned individually if needed.
+	float k = pow(0.5, N);
+	float albedoMScatK = k;
+	float extinctionMScatK = k;
+	float hgMScatK = k;
+
+	// Perform single scattering calculation modified by the coefficients
+	float beer = pow(transmittance, extinctionMScatK);
+	float phaseFunction = mix(oneOnFourPi, hg, hgMScatK);
+	
+	luminance += occlusion * sunIrradiance * albedo * albedoMScatK * beer * phaseFunction;
+}
+```
+As the number of bounces increases, the light direction becomes more random. This is modeled by mixing the Henyey-Greenstein phase function toward uniform scattering, given by 1 divided by the 4 pi normalization factor for energy conservation.
+```
+mix(oneOnFourPi, hg, hgMScat)
+```
+Single scattering vs 3 octaves of multiple scattering
+Aerial Perspective
+Aerial perspective is the phenomenon where the scene further from the camera appears tinted blue due to sun and skylight reflecting off particles in the atmosphere and ‘in-scattering’ toward the camera.
+Cloud aerial perspective off/on
+Skybolt uses Bruneton’s phyiscally based atmospheric scattering model[4] to compute atmospheric scattering. The model is highly realistic and has been validated against libRadtran[5], a well tested model used in the atmospheric sciences. We followed the approach used in the Frostbite engine to combine the effects of atmospheric scattering and volumetric clouds in a physically plausible way.
+In this approach, during ray marching we calculate the transmittance-weighted average cloud distance along the ray. This distance is then used to evaluate in-scattering and transmittance loss from atmospheric particles using Bruenton’s model. We then use this result to adjust the integrated cloud luminance using the formula:
+```
+vec3 finalLuminance = cloudLuminance * transmittance + inScattering;
+```
+Scene Shadows and Occlusion
+Cloud shadows and ambient occlusion is calculated at each vertex of objects under the cloud layer. We calculate shadowing by sampling cloud coverage at a point where the ray connecting the vertex to the sun intersects the cloud layer. We calculate ambient occlusion the same way, except that we sample a low resolution mip-map of the global cloud coverage texture to obtain an averaged occlusion approximation.
+Cloud shadows cast on terrain
+As well as applying occlusion to each vertex, we also account for occlusion of light scattered by the atmospheric into the view ray. This is done by multiplying the Bruneton in-scattering term by the cloud occlusion factor.
+Cloud occlusion off/on
+Cloud occlusion off/on
+Future Work
+In the future the system could be improved in several ways:
+Add the ability to stack multiple cloud layers at different altitudes.
+Support a wider range of cloud shape textures and parameters to more accurately model different cloud types, for example cumulus, cumulonimbus, stratus, cirrus etc.
+Improve performance by combining samples spread across multiple frames.
+References
+Hillaire, S. 2016, Physically Based Sky, Atmosphere and Cloud Rendering in Frostbite, https://blog.selfshadow.com/publications/s2016-shading-course
+Schneider, A. 2015, The Real-time Volumetric Cloudscapes of Horizon: Zero Dawn, http://advances.realtimerendering.com/s2015/index.html
+Wrenninge, M. 2013, Oz: The Great and Volumetric, http://magnuswrenninge.com/wp-content/uploads/2010/03/Wrenninge-OzTheGreatAndVolumetric.pdf
+Bruneton, E. 2017, Precomputed Atmospheric Scattering, https://ebruneton.github.io/precomputed_atmospheric_scattering
+Bruneton, E. 2016, Qualitative and Quantitative Evaluation of 8 Clear Sky Models, https://arxiv.org/pdf/1612.04336.pdf

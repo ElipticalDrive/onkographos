@@ -1,0 +1,154 @@
+# Light Ray Extinction Optimization
+
+Also called: Light Ray Visibility Optimization, Direct Illumination Extinction Optimization
+
+## Overview
+Light Ray Extinction Optimization accelerates the computation of direct illumination in Monte Carlo volume rendering by optimizing the extinction coefficient estimates along rays connecting scattering vertices to light sources [S1]. While the parent method, Optimized Ray Casting, focuses on visibility along camera rays, this technique extends the optimization to the light transport path, reducing variance in shadowed or complex volumetric regions [S1]. It is distinct from camera-ray optimization because the scattering locations are stochastic, requiring the data structure to be rebuilt for each set of light rays rather than updated progressively [S1].
+
+## How it works
+**Inputs:**
+*   The scene's volume density field (implicit or explicit).
+*   The phase function for scattering events.
+*   The light source geometry and emission profile.
+*   The data structure used for visibility optimization (typically a hierarchical structure like a tree or grid-based structure capable of merging segments, as described in [Optimized Ray Casting](11373-optimized-ray-casting.md)).
+
+**Outputs:**
+*   Optimized extinction coefficient $\mu'_*(y)$ at any point $y$ along a light ray.
+*   Transmittance estimates between a scattering vertex and the light source.
+
+**Data Structures:**
+The method reuses the same data structure employed for camera-ray visibility optimization. This structure maintains a set of segments representing intervals of constant or approximated extinction. Key operations include:
+*   `insert(list, candidate)`: Inserts a new segment or sample point into the structure.
+*   `merge()`: Combines adjacent or redundant segments to reduce structure size.
+*   `evaluate(y)`: Queries the structure to retrieve the optimized extinction coefficient $\mu'_*(y)$ at a specific location $y$ [S1].
+
+**Algorithm Steps:**
+
+1.  **Sample Light Rays:** For each scattering vertex $y$ determined during the rendering process (via delta tracking on camera rays), cast a ray towards the light source [S1].
+2.  **Stratified Sampling:** Draw a fixed number of stratified samples along the light ray segment between $y$ and the light source. The number of samples is a parameter; 200 samples are recommended as a trade-off between accuracy and speed [S1].
+3.  **Build Data Structure:** Insert the stratified samples into the optimization data structure. Since scattering locations change stochastically across frames or passes, the data structure is built from scratch for each set of light rays rather than updated incrementally [S1].
+    *   *Note:* Splitting of existing segments or discarding of redundant samples is only necessary for progressive updates. For a standard per-pass build, these operations can be omitted to simplify implementation [S1].
+4.  **Compute Optimized Extinction:** When estimating transmittance or sampling collisions for the light ray, query the data structure to obtain the optimized extinction coefficient $\mu'_*(y)$ at the current position [S1].
+5.  **Delta Tracking with Optimized Coefficients:** Use $\mu'_*(y)$ to compute the decision probabilities for the delta tracking algorithm along the light ray. This allows for more efficient sampling of scattering events compared to using the raw or unoptimized density [S1].
+6.  **Handle Multiple Scattering (Optional):** If multiple scattering is supported, sample additional rays at new scattering locations according to the phase function. Apply the same optimization process to these new light rays [S1].
+7.  **Ratio Tracking (Advanced):** In implementations using ratio tracking [NSJ14], multiple vertices are produced during transmittance estimation. Each vertex requires an optimized extinction value, necessitating repeated queries to the data structure [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_light_ray_extinction(scattering_vertex, light_source, data_structure, num_samples=200):
+    """
+    Optimizes extinction estimation for a ray from a scattering vertex to a light source.
+    
+    Args:
+        scattering_vertex: The 3D position y where scattering occurred.
+        light_source: Object defining the light's position and emission.
+        data_structure: The hierarchical structure for extinction optimization.
+        num_samples: Number of stratified samples to draw (default 200).
+        
+    Returns:
+        The optimized data structure ready for transmittance queries.
+    """
+    # 1. Define the ray segment from scattering vertex to light source
+    # Note: For area lights, this may involve multiple rays or a representative direction.
+    ray_origin = scattering_vertex
+    ray_direction = normalize(light_source.position - ray_origin)
+    ray_length = distance(ray_origin, light_source.position)
+    
+    # 2. Generate stratified samples along the ray
+    # Stratified sampling ensures uniform coverage of the path
+    sample_positions = generate_stratified_samples(ray_origin, ray_direction, ray_length, num_samples)
+    
+    # 3. Evaluate raw extinction at sample positions
+    # This assumes a function get_density(p) exists from the volume dataset
+    raw_extinctions = [get_density(p) for p in sample_positions]
+    
+    # 4. Build the data structure from scratch
+    # Since scattering locations are stochastic, we do not merge with previous frames
+    # We insert samples into the structure. 
+    # Optimization: Skip segment splitting/discarding if not doing progressive updates.
+    data_structure.clear()
+    for i in range(len(sample_positions)):
+        data_structure.insert(sample_positions[i], raw_extinctions[i])
+    
+    # 5. Merge redundant segments if the structure supports it
+    # This step reduces memory usage and query time
+    data_structure.merge()
+    
+    return data_structure
+
+def query_optimized_extinction(position, data_structure):
+    """
+    Retrieves the optimized extinction coefficient at a given position.
+    
+    Args:
+        position: The 3D point y to query.
+        data_structure: The built optimization structure.
+        
+    Returns:
+        mu_prime_star: The optimized extinction coefficient.
+    """
+    return data_structure.evaluate(position)
+
+def render_light_contribution(scattering_vertex, light_source, data_structure):
+    """
+    Computes the direct illumination contribution using optimized extinction.
+    """
+    # Rebuild structure for this specific light ray
+    optimized_structure = compute_light_ray_extinction(scattering_vertex, light_source, data_structure)
+    
+    # Use delta tracking along the light ray
+    # The decision probabilities are computed using the optimized extinction
+    current_pos = scattering_vertex
+    transmittance = 1.0
+    
+    while current_pos is within light source bounds:
+        # Get optimized extinction at current position
+        mu_opt = query_optimized_extinction(current_pos, optimized_structure)
+        
+        # Compute decision probability for delta tracking
+        # P(scatter) = mu_opt / mu_max (where mu_max is the majorant)
+        # P(absorb) = 1 - P(scatter)
+        
+        # Sample event
+        event = sample_delta_tracking_event(mu_opt)
+        
+        if event == SCATTER:
+            # Compute scattering contribution
+            contribution = transmittance * light_source.emission * phase_function(current_pos, light_source)
+            return contribution
+        elif event == ABSORB:
+            break
+        else:
+            # Move to next collision
+            distance = sample_distance(mu_opt)
+            current_pos += ray_direction * distance
+            transmittance *= exp(-mu_opt * distance)
+            
+    return 0.0
+```
+
+**Parameters:**
+*   **Number of samples:** 200 samples per light ray is recommended as a good trade-off between accuracy and speed [S1].
+*   **Progressive Updates:** Splitting of segments or discarding of samples is optional and only required for progressive rendering updates. For standard per-pass builds, these can be left out [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Stochastic Scattering Locations:** Because scattering vertices are determined stochastically, the data structure cannot be reused across frames. It must be rebuilt from scratch for each set of light rays [S1].
+*   **Long Transport Paths:** Optimizing extinction along very long transport paths (e.g., multiple scattering events far from the camera) is computationally costly and may yield no visual improvement [S1].
+*   **Memory Allocation:** The method requires a static allocation for light ray optimization (e.g., 156MB as reported for the HEPTANE dataset) plus per-pixel allocations for structure sizes and offsets [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The cost is dominated by building the data structure for each light ray. With 200 samples, the overhead is low. On the HEPTANE dataset with 5000 samples per pixel, render times dropped from 51.7s (reference) to 21.47s–37s depending on the number of samples used for optimization [S1].
+*   **Memory Complexity:** Requires a static allocation independent of resolution (e.g., 156MB) plus per-pixel allocations for the data structure [S1].
+*   **Strengths:** Significantly reduces variance in direct illumination, especially in shadowed regions or complex volumetric scenes. Improves visualization quality without excessive computational cost.
+*   **Limitations:** Cannot be easily integrated into progressive rendering due to the stochastic nature of scattering locations. Optimizing for multiple scattering events far from the camera is inefficient.
+*   **When to Use:** When direct illumination variance is high and the scene contains complex shadowing or participating media.
+*   **When Not to Use:** When memory is extremely constrained, or when the scene is optically thin and variance is already low.
+
+## Background
+Light Ray Extinction Optimization was introduced in the context of view-dependent visibility optimization for Monte Carlo volume visualization [S1]. It builds upon the idea of optimizing camera-ray visibility by extending the same hierarchical data structure techniques to light rays. The method addresses the challenge of efficiently computing transmittance in participating media, where standard delta tracking can be inefficient due to high variance in dense regions. By optimizing the extinction coefficient estimates, the method allows for more efficient sampling of light transport paths.
+
+## Sources
+[S1] View‐Dependent Visibility Optimization for Monte Carlo Volume Visualization, https://doi.org/10.1111/cgf.70064, fetched 2026-11-05

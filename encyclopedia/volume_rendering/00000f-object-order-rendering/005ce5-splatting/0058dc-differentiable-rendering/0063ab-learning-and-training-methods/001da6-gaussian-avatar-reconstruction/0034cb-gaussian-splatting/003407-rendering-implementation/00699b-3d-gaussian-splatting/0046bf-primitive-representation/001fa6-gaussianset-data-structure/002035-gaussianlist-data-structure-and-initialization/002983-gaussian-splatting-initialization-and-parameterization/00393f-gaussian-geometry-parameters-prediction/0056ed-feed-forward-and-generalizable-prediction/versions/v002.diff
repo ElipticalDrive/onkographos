@@ -1,0 +1,164 @@
+--- v001.md
++++ v002.md
+@@ -1,98 +1,55 @@
+ # Feed-forward and Generalizable Prediction
+ 
+-Also called: Pose-free Gaussian Splatting, Generalizable 3D Gaussian Splatting, Instant Gaussian Prediction
++Also called: Zero-shot Gaussian Splatting, Pose-free Gaussian Splatting, Foundation Model-based Gaussian Prediction
+ 
+ ## Overview
+-Feed-forward and generalizable prediction methods for 3D Gaussian Splatting (3DGS) replace the iterative, per-scene optimization of standard 3DGS with a single forward pass of a neural network to predict Gaussian parameters directly from input images [S2, unofficial][S3]. This approach solves the problem of slow reconstruction and the dependency on accurate camera poses (e.g., from COLMAP) or dense input views [S1, S2, unofficial]. Unlike inverse methods that optimize a scene representation for a specific set of images, these models are trained on large datasets to generalize to unseen scenes, enabling real-time novel view synthesis and 3D reconstruction from sparse, uncalibrated, or unordered image inputs [S1, S2, unofficial][S3].
++Feed-forward and generalizable prediction methods for 3D Gaussian Splatting (3DGS) replace the iterative, per-scene optimization of standard 3DGS with a single forward pass of a neural network to predict Gaussian parameters directly from input images [S2, unofficial][S3]. This approach solves the problem of slow reconstruction and the dependency on accurate camera poses (typically obtained via Structure-from-Motion) by leveraging pretrained foundation models for geometry and appearance [S1, S2, unofficial]. Unlike inverse methods that optimize a scene representation for a specific set of views, these models generalize across scenes, enabling novel view synthesis and 3D reconstruction from uncalibrated, unordered, or sparse image sets without fine-tuning [S1, unofficial][S3].
+ 
+ ## How it works
+-The core objective is to learn a mapping $\Phi$ from input images $I$ to a set of 3D Gaussian primitives $G$. The specific implementation varies by variant, but the general pipeline involves encoding input views, predicting geometric and appearance attributes, and rendering them via differentiable rasterization for loss computation.
++The core methodology involves a neural network that takes one or more input images as input and outputs a set of 3D Gaussian primitives (position, rotation, scale, opacity, color, and potentially other features) in a single inference step [S2, unofficial][S3]. The specific implementation varies by variant, but generally follows these patterns:
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** One or more RGB images $I \in \mathbb{R}^{H \times W \times 3}$. Inputs may be uncalibrated (unknown intrinsics/extrinsics) or sparse [S2, unofficial][S3].
+-*   **Outputs:** A set of 3D Gaussians $G = \{ \mu_i, \Sigma_i, \alpha_i, c_i, \dots \}$, where $\mu_i$ is position, $\Sigma_i$ is covariance, $\alpha_i$ is opacity, and $c_i$ is color/appearance [S2, unofficial][S3].
++*   **Inputs:** One or more RGB images ($I$). Inputs may be uncalibrated (unknown intrinsics/extrinsics) or calibrated [S2, unofficial][S3].
++*   **Outputs:** A set of 3D Gaussians $G = \{ \mu_i, \Sigma_i, \alpha_i, c_i, \dots \}$, where $\mu_i$ is the mean position, $\Sigma_i$ is the covariance matrix, $\alpha_i$ is opacity, and $c_i$ is color [S2, unofficial][S3]. Some variants also output additional features (e.g., human biomechanical features) [S3].
+ 
+ ### Data Structures
+-The output is typically a set of Gaussian primitives. In per-pixel prediction methods (e.g., Splatt3R), the output is a dense map of parameters aligned with the input image resolution [S2, unofficial]. In sparse prediction methods (e.g., AnySplat), the output is a variable-sized list of Gaussians [S1, unofficial].
++The output is typically a set of Gaussian primitives. Each Gaussian is defined by:
++*   **Position ($\mu$):** 3D vector in world or camera coordinates [S2, unofficial][S3].
++*   **Covariance ($\Sigma$):** $3 \times 3$ symmetric positive semi-definite matrix, reparameterized as $\Sigma = R(q) S(s) S(s)^T R(q)^T$, where $q \in \mathbb{R}^4$ is a rotation quaternion and $s \in \mathbb{R}^3$ is a scale vector [S2, unofficial][S3].
++*   **Opacity ($\alpha$):** Scalar in $[0, 1]$ [S2, unofficial][S3].
++*   **Color ($c$):** Can be view-independent (constant RGB) or view-dependent (Spherical Harmonics coefficients) [S2, unofficial][S5].
++*   **Additional Features:** Some methods predict feature vectors $f$ for specific applications (e.g., human pose) [S3].
+ 
+-### General Algorithm (Per-Pixel Prediction Variant)
+-The following pseudocode describes the architecture and training process of Splatt3R, a representative feed-forward method [S2, unofficial].
+-
+-```python
+-def feed_forward_gaussian_prediction(image_pair):
+-    # 1. Encoding
+-    # Use a shared Vision Transformer (ViT) encoder to extract features
+-    # from both input images I1 and I2.
+-    f1, f2 = ViT_encoder(I1), ViT_encoder(I2)
+-    
+-    # 2. Cross-Attention and Decoding
+-    # Apply cross-attention transformers to fuse information between views.
+-    # These components are frozen if based on a pretrained foundation model
+-    # like MASt3R.
+-    f1_fused, f2_fused = CrossAttentionTransformer(f1, f2)
+-    
+-    # 3. Gaussian Parameter Prediction
+-    # A parallel 'Gaussian head' (e.g., DPT architecture) predicts
+-    # offsets, rotations, scales, opacities, and colors for each pixel.
+-    # Predict 3D point locations X_hat in the coordinate frame of I1.
+-    X_hat, Confidence = PointCloudHead(f1_fused)
+-    
+-    # Predict Gaussian attributes:
+-    # Offsets Delta (R3), Rotations q (R4, normalized), 
+-    # Scales s (R3, exp), Opacities alpha (R, sigmoid), 
+-    # and Spherical Harmonics S (R3xd) or constant color.
+-    Delta, q, s, alpha, S = GaussianHead(f1_fused)
+-    
+-    # 4. Construct Gaussian Primitives
+-    # Calculate mean position: mu = x + Delta
+-    mu = X_hat + Delta
+-    
+-    # Calculate covariance matrix Sigma from rotation q and scale s
+-    # Sigma = R(q) * S(s) * S(s)^T * R(q)^T
+-    Sigma = ComputeCovariance(q, s)
+-    
+-    # 5. Union of Primitives
+-    # Construct final Gaussian set from both images' predictions
+-    G = Union(Gaussians_from(I1, mu, Sigma, alpha, S), 
+-              Gaussians_from(I2, mu, Sigma, alpha, S))
+-    
+-    return G
+-
+-def compute_loss(G, target_image, context_images, gt_depth, gt_poses):
+-    # 1. Loss Masking
+-    # Calculate mask M to prevent supervising unseen/occluded regions.
+-    # Unproject target image points to 3D, reproject to context views.
+-    # Mask is 1 if: inside frustum AND rendered depth matches GT depth.
+-    M = CalculateLossMask(target_image, context_images, gt_depth, gt_poses)
+-    
+-    # 2. Rendering
+-    # Render image I_hat from Gaussians G using differentiable rasterization
+-    I_hat = DifferentiableRasterize(G)
+-    
+-    # 3. Loss Calculation
+-    # Weighted sum of masked MSE and LPIPS losses
+-    L = lambda_MSE * MSE(M * I_hat, M * target_image) + \
+-        lambda_LPIPS * LPIPS(M * I_hat, M * target_image)
+-        
+-    return L
+-```
++### Numbered Steps (General Pipeline)
++1.  **Image Encoding:** Input images are encoded using a shared backbone, often a Vision Transformer (ViT) or a foundation model like MASt3R, DUSt3R, or Spann3R [S1, S2, unofficial][S3].
++2.  **Feature Extraction:** The backbone extracts dense feature maps or pointmaps. Foundation models like MASt3R predict 3D point locations and confidence maps in a reference camera frame [S2, unofficial].
++3.  **Gaussian Parameter Prediction:** A parallel "Gaussian head" (e.g., DPT architecture or convolutional heads) predicts Gaussian attributes from the encoded features [S2, unofficial][S3].
++    *   For each pixel or point, offsets $\Delta$ are predicted to refine the position: $\mu = x + \Delta$ [S2, unofficial].
++    *   Rotations $q$, scales $s$, opacities $\alpha$, and colors $c$ are predicted [S2, unofficial][S3].
++    *   Activation functions are applied: normalization for quaternions, exponential for scales/offsets, and sigmoid for opacities [S2, unofficial].
++4.  **Scene Construction:** The predicted parameters form the set of 3D Gaussians. In some methods, the final set is the union of primitives predicted from multiple input images [S2, unofficial].
++5.  **Rendering (Optional for Training):** The predicted Gaussians are rasterized using differentiable splatting to render novel views [S2, unofficial][S3].
++6.  **Loss Calculation (Training):** The rendered images are compared to ground truth images using losses such as MSE, LPIPS, SSIM, and photometric/depth losses [S2, unofficial][S3].
+ 
+ ### Formulas
+-*   **Gaussian Mean:** $\mu = x + \Delta$, where $x$ is the predicted 3D point and $\Delta$ is the offset [S2, unofficial].
+-*   **Covariance Matrix:** $\Sigma = R(q) S(s) S(s)^T R(q)^T$, ensuring positive semi-definiteness [S2, unofficial].
+-*   **2D Projection:** $\Sigma' = J W \Sigma W^T J^T$, where $W$ is the view transformation matrix and $J$ is the Jacobian of the affine approximation of the projective transform [S3].
+-*   **Rendering (Alpha Blending):** $C = \sum_{i \in N} c_i \alpha'_i \prod_{j=1}^{i-1} (1 - \alpha'_j)$, where $c_i$ is color and $\alpha'_i$ is the effective opacity [S3].
+-*   **Loss Function:** $L = \lambda_{MSE} L_{MSE}(M \odot \hat{I}, M \odot I) + \lambda_{LPIPS} L_{LPIPS}(M \odot \hat{I}, M \odot I)$ [S2, unofficial].
++*   **Gaussian Position:** $\mu = x + \Delta$, where $x$ is the point predicted by the foundation model and $\Delta$ is the offset predicted by the Gaussian head [S2, unofficial].
++*   **Covariance Matrix:** $\Sigma = R(q) S(s) S(s)^T R(q)^T$ [S2, unofficial][S3].
++*   **2D Covariance Projection:** $\Sigma' = J W \Sigma W^T J^T$, where $W$ is the view transformation matrix and $J$ is the Jacobian of the affine approximation of the projective transform [S3].
++*   **Rendering (Alpha Blending):** $C = \sum_{i \in N} c_i \alpha'_i \prod_{j=1}^{i-1} (1 - \alpha'_j)$, where $c_i$ is color, $\alpha'_i$ is the effective opacity, and $N$ is the set of splatted Gaussians [S3].
++*   **Loss Function (Splatt3R):** $L = \lambda_{MSE} L_{MSE}(M \odot \hat{I}, M \odot I) + \lambda_{LPIPS} L_{LPIPS}(M \odot \hat{I}, M \odot I)$, where $M$ is a loss mask [S2, unofficial].
++*   **Loss Function (HFGaussian):** $L = L_{image} + L_{depth} + L_{pose} + L_{feature}$, where $L_{image} = \beta L_{mae} + \gamma L_{ssim}$ [S3].
+ 
+ ### Parameters
+-*   **Input Resolution:** 512 × 512 pixels [S2, unofficial][S3].
+-*   **Activation Functions:** Normalization for quaternions, exponential for scales/offsets, sigmoid for opacities [S2, unofficial].
+-*   **Loss Weights:** $\lambda_{MSE}$ and $\lambda_{LPIPS}$ are tuned hyperparameters [S2, unofficial].
+-*   **Overlap Thresholds:** Hyperparameters $\phi$ and $\psi$ control the minimum pixel overlap between context and target images during training (e.g., Close: 0.9, Wide: 0.5) [S2, unofficial].
++*   **Input Resolution:** Typically 512 × 512 pixels [S2, unofficial][S3].
++*   **Training Dataset:** ScanNet++ for general scenes [S2, unofficial]; Human datasets for HFGaussian [S3].
++*   **Hyperparameters:** Overlap thresholds $\phi$ and $\psi$ control context/target image selection (e.g., Close: 0.9, 0.9; Very Wide: 0.3, 0.3) [S2, unofficial].
++*   **Learning Rate:** $2 \times 10^{-4}$ [S3].
++*   **Batch Size:** 4 [S3].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Loss Masking:** Supervising rendering loss for pixels not visible in context views (obscured or outside frustums) is counterproductive and degrades performance. A loss masking strategy based on frustum culling and covisibility testing is critical [S2, unofficial].
+-*   **Local Minima:** Training 3D Gaussian Splats directly from stereo views can get stuck in local minima. Splatt3R addresses this by first optimizing the 3D point cloud's geometry loss, then the novel view synthesis objective [S2, unofficial].
+-*   **Extrapolation:** Existing methods often fail to extrapolate beyond the stereo baseline. Loss masking allows training with wider baselines and extrapolated viewpoints [S2, unofficial].
++*   **Loss Masking:** Supervising rendering loss for pixels not visible in context views (obscured or outside frustums) is counterproductive. A loss masking strategy based on frustum culling and covisibility testing is critical for strong performance, especially on extrapolated viewpoints [S2, unofficial].
++*   **Blurry Details:** Disabling perceptual losses (LPIPS) causes blurry renderings, while disabling geometric losses (L1/SSIM) creates edge artifacts [S5].
++*   **View-Dependent Artifacts:** In human-centric models, eyes may appear uncanny if trained on view-dependent data (subjects looking at camera) without spherical harmonics [S5].
++*   **Memory Limits:** Processing large numbers of images with dense pointmaps can exceed GPU memory limits if not managed incrementally [S1, unofficial].
+ 
+ ## Subtopics
+@@ -107,16 +64,18 @@
+ SparSplat is a generalizable, feed-forward model that maps a set of sparse input images (typically 3) and their camera poses to a pixel-aligned map of 2D Gaussian Splatting (2DGS) parameters in a single forward pass. It solves the joint problem of fast multi-view 3D shape reconstruction and novel view synthesis (NVS) from sparse views, leveraging deep features from foundation models like DINOv2 and MASt3R. It differs from its sibling [MVSGaussian](8985-gsgen.md) by using 2DGS primitives instead of 3D Gaussians, which ensures consistent depth across views and enables coherent TSDF mesh extraction, whereas prior generalizable GS methods are primarily optimized for NVS and fail to produce coherent surface reconstructions.
+ 
+-### 3D-aware Image Synthesis via Sparse Voxel Grids
+-A 3D-aware image synthesis generator that predicts color and density values on a sparse voxel grid, conditioned on camera pose [S6]. It uses a mapping network with 2 layers and 64 channels, with a channel base of 4000 (reduced from StyleGAN2's 32768) to account for higher parameter count in 3D convolutions [S6]. Skip connections add an upsampled version of the output grid of the previous layer to the input of the next layer [S6]. The generator is conditioned on a camera pose represented by a rotation matrix and a translation vector, yielding a 12-dimensional input vector [S6]. It outputs coefficients of spherical harmonics for color (degree 0) and multiplies the network's density output by a factor of 30 to facilitate generating high density values for sharp surfaces [S6].
++### [AnySplat Pipeline](12847-anysplat-pipeline.md)
++A 3D-aware image synthesis generator that predicts color and density values on a sparse voxel grid, conditioned on camera pose. It uses a mapping network with 2 layers and 64 channels, with a channel base of 4000. It conditions the generator on a 12-dimensional camera pose vector (rotation matrix and translation vector) and outputs spherical harmonics coefficients (degree 0) for color. The density output is multiplied by a factor of 30 to facilitate sharp surfaces.
+ 
+ ## Operating characteristics
+-*   **Speed:** Feed-forward methods achieve real-time or near-real-time reconstruction. Splatt3R reconstructs scenes at 4 FPS at 512 × 512 resolution, with rendering at real-time speeds [S2, unofficial]. HFGaussian achieves 25 FPS for human avatar estimation [S3].
+-*   **Memory:** ZeroGS runs on a 24GB consumer-level GPU for hundreds of images [S1, unofficial].
+-*   **Accuracy:** Splatt3R achieves PSNR 19.66, SSIM 0.757, LPIPS 0.234 on ScanNet++ test scenes with close view overlap [S2, unofficial]. HFGaussian achieves a PSNR of 32.43, closely matching GPS-Gaussian's 32.55 [S3].
+-*   **Strengths:** No per-scene optimization required; works with uncalibrated/unordered images; real-time rendering.
+-*   **Limitations:** Quality may be lower than iteratively optimized 3DGS with perfect poses; dependent on the generalization capability of the trained model; may struggle with highly dynamic or unseen scene types [S1, S2, unofficial].
++*   **Time Complexity:** Inference is $O(1)$ with respect to scene complexity, as it is a single forward pass, unlike iterative optimization which scales with the number of optimization steps [S2, unofficial][S3].
++*   **Memory Complexity:** Depends on the network architecture and input resolution. Runs on consumer-level GPUs (e.g., 24GB) for hundreds of images when using incremental pipelines [S1, unofficial].
++*   **Performance:** Splatt3R achieves 4 FPS inference at 512 × 512 resolution [S2, unofficial]. HFGaussian achieves 25 FPS rendering [S3].
++*   **Strengths:** Fast reconstruction, no need for camera poses or depth, generalizes to unseen scenes, real-time rendering [S2, unofficial][S3].
++*   **Limitations:** Quality may be lower than iteratively optimized 3DGS, especially in textureless regions or with sparse inputs. Requires large training datasets for generalization [S2, unofficial][S3].
++*   **When to Use:** When fast reconstruction from uncalibrated images is needed, or when camera poses are unavailable.
++*   **When Not to Use:** When maximum possible visual fidelity is required and computational time is not a constraint.
+ 
+ ## Background
+-Feed-forward 3D Gaussian Splatting emerged to address the computational bottleneck of iterative optimization in standard 3DGS [S2, unofficial]. It builds on foundation models for 3D reconstruction like DUSt3R and MASt3R, which predict dense point clouds from uncalibrated image pairs [S1, S2, unofficial]. By extending these architectures to predict Gaussian attributes (opacity, scale, rotation, color), methods like Splatt3R [S2, unofficial] and ZeroGS [S1, unofficial] enable pose-free, generalizable novel view synthesis. HFGaussian [S3] extends this to human-centric applications, integrating biomechanical features.
++Feed-forward Gaussian Splatting emerged from the need to accelerate the reconstruction process of 3DGS, which traditionally requires iterative optimization and accurate camera poses [S2, unofficial]. Early methods like Splatt3R extended foundation models like MASt3R to predict Gaussian attributes directly [S2, unofficial]. Subsequent works like ZeroGS introduced incremental pipelines to handle unordered images [S1, unofficial], while HFGaussian specialized the approach for human avatars with integrated biomechanical features [S3]. The field continues to evolve with variants focusing on sparse views, 2DGS, and specific applications like human modeling [S1, unofficial][S3].
+ 
+ ## Sources

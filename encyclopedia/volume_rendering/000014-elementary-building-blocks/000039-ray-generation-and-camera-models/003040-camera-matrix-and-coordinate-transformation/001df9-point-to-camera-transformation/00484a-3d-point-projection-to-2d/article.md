@@ -1,0 +1,153 @@
+# 3D Point Projection to 2D
+
+Also called: Camera Projection and Unprojection, Point Projection, project, unproject
+
+## Overview
+This method transforms 3D points from world coordinates into 2D image coordinates, computing both the pixel location and a visibility mask indicating whether the point lies in front of the camera [S1, S3, unofficial]. It solves the problem of determining the 2D pixel location and visibility of 3D geometry for a specific camera view [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `points`: A tensor of 3D points in world coordinates, shape `[..., 3]` [S2, S3, unofficial].
+- `extrinsics`: A 4x4 camera-to-world (c2w) matrix or batch of matrices [S2, S4, unofficial].
+- `intrinsics`: A 3x3 camera intrinsic matrix or batch of matrices [S3, S4, unofficial].
+
+**Outputs:**
+- `pixel_locations`: 2D pixel coordinates, shape `[..., 2]` [S1, S3, unofficial].
+- `in_front_of_camera`: A boolean mask, shape `[..., 1]`, indicating if the point is in front of the camera [S1, S3, unofficial].
+
+**Data Structures:**
+- Points are represented as homogeneous coordinates `xyz_h` of shape `[..., 4]`, where the fourth component is 1.0 [S2, S3, S4, unofficial].
+- Vectors (directions) are represented as homogeneous coordinates `v_h` of shape `[..., 4]`, where the fourth component is 0.0 [S4, unofficial].
+
+**Steps:**
+
+1. **Homogenize Points:** Append a 1.0 component to the last dimension of the input points to convert them to homogeneous coordinates [S2, S3, S4, unofficial].
+   $$xyz_h = [x, y, z, 1.0]$$
+   [S2, S3, S4, unofficial]
+
+2. **Transform to Camera Space:** Apply the inverse of the extrinsics matrix to the homogeneous points to transform them from world space to camera space [S2, S3, unofficial]. This is a rigid-body transformation implemented via matrix multiplication or Einstein summation `einsum(transformation, homogeneous_coordinates, "... i j, ... j -> ... i")` [S4, unofficial].
+   $$points_{cam\_h} = \text{extrinsics}^{-1} \times xyz_h$$
+   [S2, S3, unofficial]
+
+3. **Check Visibility:** Determine if points are in front of the camera by checking the Z coordinate (the last element of the camera-space homogeneous vector, which corresponds to the depth) [S2, S3, unofficial].
+   $$in\_front\_of\_camera = points_{cam\_h}[..., -1] \ge 0$$
+   [S3, unofficial]
+
+4. **Project to Image Space:**
+   a. Drop the homogeneous component to get 3D camera-space points:
+   $$points_{cam} = points_{cam\_h}[..., :-1]$$
+   [S3, unofficial]
+   b. Normalize by depth (perspective division). To avoid division by zero, add a small epsilon (default `torch.finfo(torch.float32).eps`) to the depth, and replace infinite depth values with a large finite value (default `1e8`) [S2, S4, unofficial].
+   $$points_{norm} = \frac{points_{cam}}{\text{clamp}(points_{cam}[..., 2:], \epsilon, \infty)}$$
+   [S2, S4, unofficial]
+   c. Multiply by the intrinsic matrix $K$ to get pixel coordinates [S3, S4, unofficial].
+   $$pixel\_coords_{hom} = K \times points_{norm}$$
+   [S3, S4, unofficial]
+   The first two components of `pixel_coords_hom` are the final 2D pixel locations $(u, v)$ [S1, S3, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def project_3d_to_2d(points, extrinsics, intrinsics, epsilon=None, infinity=1e8):
+    """
+    Projects 3D world points to 2D image coordinates.
+    
+    Args:
+        points: Tensor of shape [..., 3] containing 3D world coordinates.
+        extrinsics: Tensor of shape [..., 4, 4] containing camera-to-world matrices.
+        intrinsics: Tensor of shape [..., 3, 3] containing camera intrinsic matrices.
+        epsilon: Small value to prevent division by zero. Defaults to torch.finfo(torch.float32).eps.
+        infinity: Value used to replace infinite depth values. Defaults to 1e8.
+        
+    Returns:
+        pixel_locations: Tensor of shape [..., 2] containing 2D pixel coordinates.
+        in_front_of_camera: Tensor of shape [..., 1] boolean mask.
+    """
+    if epsilon is None:
+        epsilon = torch.finfo(torch.float32).eps
+
+    # Step 1: Homogenize points (append 1.0)
+    # points shape: [..., 3] -> [..., 4]
+    ones = torch.ones_like(points[..., :1])
+    points_h = torch.cat([points, ones], dim=-1)
+    
+    # Step 2: Transform to camera space
+    # extrinsics is c2w, so we need w2c = extrinsics^{-1}
+    # Using einsum for batched matrix multiplication: w2c @ points_h
+    # w2c shape: [..., 4, 4], points_h shape: [..., 4]
+    # Result: [..., 4]
+    w2c = torch.inverse(extrinsics)
+    points_cam_h = torch.einsum('...ij,...j->...i', w2c, points_h)
+    
+    # Step 3: Check visibility (Z >= 0)
+    # points_cam_h[..., -1] is the Z coordinate in camera space
+    in_front_of_camera = points_cam_h[..., -1:] >= 0
+    
+    # Step 4: Project to 2D
+    # Drop homogeneous component to get 3D camera space points
+    points_cam = points_cam_h[..., :-1]
+    
+    # Normalize by depth (Z)
+    # Replace infinities with large finite value, then clamp to epsilon
+    z = points_cam[..., 2:]
+    z = torch.where(torch.isinf(z), infinity, z)
+    z = torch.clamp(z, min=epsilon)
+    points_norm = points_cam / z
+    
+    # Multiply by intrinsics
+    # intrinsics shape: [..., 3, 3], points_norm shape: [..., 3]
+    # Result: [..., 3] (homogeneous pixel coordinates)
+    pixel_coords_h = torch.einsum('...ij,...j->...i', intrinsics, points_norm)
+    
+    # Extract 2D pixel locations (x, y)
+    pixel_locations = pixel_coords_h[..., :2]
+    
+    return pixel_locations, in_front_of_camera
+```
+
+**Pitfalls:**
+- Projected eigenvectors are generally not orthogonal in 2D image space, even if the original 3D tensor was symmetric with orthogonal eigenvectors [S5, unofficial].
+- Points exactly on the camera plane ($z=0$) cause division by zero; clamping or adding epsilon is required [S1, S4, unofficial].
+
+## Subtopics
+
+### [Perspective Projection of Points](4037-perspective-projection-of-points.md)
+Perspective projection maps 3D world points to 2D image coordinates using a pinhole camera model, where a line joining the 3D point to the center of projection intersects the image plane. It solves the problem of determining the 2D pixel location and visibility of 3D geometry for a specific camera view.
+
+### [Depth Estimation from Point Cloud](8043-depth-estimation-from-point-cloud.md)
+This method generates a depth map for a novel camera viewpoint by projecting an existing 3D point cloud onto the 2D image plane and resolving occlusions. It solves the problem of converting sparse or implicit 3D geometry into an explicit per-pixel depth buffer, distinguishing itself from volumetric rendering by relying on discrete point proximity rather than ray-marching through a density field.
+
+### Reprojection of 2D Features to 3D Space
+For a query 3D point $p$, an observed 2D view $I_m$, camera pose $\xi_m$, and intrinsics $K_m$, the corresponding 2D pixel features $F_p^m$ are retrieved using the reprojection function $P$ [S7]. If the projected 3D point lies inside the image boundaries, the nearest pixel's features are selected and duplicated to the 3D point; if it lies outside, a zero vector is assigned [S7]. Nearest neighbor interpolation is used instead of bilinear interpolation or kernel functions, though advanced techniques may address discretization issues [S7].
+
+### Depth-Guided Projection
+Given an RGB image $I_i$ and its estimated depth map $D_i$, the 3D point cloud $p_i$ is calculated using intrinsic parameters $K_i$ and extrinsic parameters $\xi_i$ via $p_i = P^{-1}(D_i, K_i, \xi_i)$ [S8]. This point cloud is then projected to another view $j$ to find corresponding pixels, where the color of pixels projected from $I_j$ onto $I_i$ is $I_{i,j} = P(I_j, K_j, \xi_j, p_i)$ [S8]. Reprojection error is computed to filter out invalid pairs and mitigate occlusion effects [S8].
+
+### PPC Colorization via Forward Projection
+For a point $X$ in 3D space with world coordinates $X_w$, forward projection to camera coordinates $X_c$ is performed using the 4x4 extrinsic matrix $d$ (containing translation $t$ and rotation $R$): $\tilde{X}_c = d\tilde{X}_w$, where $\tilde{X}$ denotes homogeneous coordinates [S9]. 2D pixel coordinates $x_c$ are obtained by normalizing homogeneous image coordinates $\tilde{x}_c$ by depth, where $\tilde{x}_c = K\tilde{X}_c$, using the known camera intrinsic matrix $K$ [S9]. The center of each occupied voxel is used as the starting position to reduce aliasing artifacts [S9]. Occlusion is identified by grouping points projecting to the same pixel $(u,v)$ into set $P_{uv}$. The point with the minimum $z$-value in camera coordinates is marked as non-occluded ($P^*_{uv} = \arg \min_{P_i \in P_{uv}} z_i$), and remaining points are marked as occluded [S9]. Occluded voxels are filled with the average color of all non-occluded views for the same point, creating an 'RGB main' triplet suitable for renderers without plenoptic color support [S9].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ for $N$ points, as each point undergoes a constant number of matrix multiplications and divisions [G].
+- **Memory Complexity:** $O(N)$ to store the input points and output pixel locations/masks [G].
+- **Strengths:** Efficiently maps 3D geometry to 2D image space, enabling visibility checks and pixel-based feature retrieval [G].
+- **Limitations:** Does not handle occlusion resolution within the projection step itself (requires additional logic like depth sorting or z-buffering) [G]. Projected eigenvectors are generally not orthogonal in 2D image space, even if the original 3D tensor was symmetric with orthogonal eigenvectors [S5, unofficial].
+- **When to use:** When rendering 3D points to 2D images, computing visibility masks, or retrieving 2D features for 3D points [G].
+- **When not to use:** When occlusion handling is required as part of the projection (use Depth Estimation from Point Cloud or PPC Colorization instead) [G].
+
+## Background
+The method originates from standard computer graphics and multi-view geometry, utilizing the pinhole camera model and homogeneous coordinates [G]. It is a fundamental building block in volume rendering pipelines, particularly in neural rendering methods like NeRF and 3D Gaussian Splatting, where 3D points (or Gaussians) are projected to 2D for rasterization or feature aggregation [G]. The use of OpenGL-style modelview and projection matrices for eigenvector projection is documented in image-space tensor field visualization [S5, unofficial].
+
+## Sources
+[S1] albertgassol1/vf-nerf, https://github.com/albertgassol1/vf-nerf, fetched 2026-10-26 (unofficial)
+[S2] cvg/depthsplat, https://github.com/cvg/depthsplat, fetched 2026-10-27 (unofficial)
+[S3] cvg/NoPoSplat, https://github.com/cvg/NoPoSplat, fetched 2026-10-27 (unofficial)
+[S4] pulangk97/VoLoDSplat, https://github.com/pulangk97/VoLoDSplat, fetched 2026-10-27 (unofficial)
+[S5] Image-Space Tensor Field Visualization Using a LIC-like Method, https://doi.org/10.1007/978-3-642-21608-4_11, fetched 2026-10-27 (unofficial)
+[S6] mesh_to_sdf, https://github.com/marian42/mesh_to_sdf, fetched 2026-10-28 (unofficial)
+[S7] GRF: Learning a General Radiance Field for 3D Representation and Rendering, https://doi.org/10.1109/iccv48922.2021.01490, fetched 2026-10-26
+[S8] ViCA-NeRF: View-Consistency-Aware 3D Editing of Neural Radiance Fields, https://arxiv.org/abs/2402.00864v1, fetched 2026-10-26
+[S9] A Comparative Assessment Of Implicit and Explicit Plenoptic Scene Representations, https://inria.hal.science/hal-04709909v1, fetched 2026-10-26

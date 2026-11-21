@@ -1,0 +1,101 @@
+--- v002.md
++++ v003.md
+@@ -19,5 +19,5 @@
+ 1.  **Initialization:** Store `fmap1`, `fmap2`, `num_levels`, and `radius`. Initialize an empty list `corr_pyramid` [S1, unofficial].
+ 2.  **All-Pairs Correlation:** Compute the raw correlation between `fmap1` and `fmap2` using Einstein summation:
+-    $$ \text{corr}_{raw} = \text{torch.einsum}(\text{'aijk,aijh->ajkh'}, \text{fmap1}, \text{fmap2}) $$
++    $$ \text{corr}_{\text{raw}} = \text{torch.einsum}(\text{'aijk,aijh->ajkh'}, \text{fmap1}, \text{fmap2}) $$
+     resulting in shape $(B, H, W_1, W_2)$ [S1, unofficial]. Reshape to $(B, H, W_1, 1, W_2)$ [S1, unofficial].
+ 3.  **Normalization:** Normalize the correlation by dividing by $\sqrt{D}$, where $D$ is the feature dimension [S1, unofficial].
+@@ -25,14 +25,13 @@
+ 5.  **Inference Query (`__call__`):**
+     *   **Coordinate Normalization:** Given input coordinates `coords` (shape $(B, H, W, 2)$), normalize them to $[-1, 1]$:
+-        $$ x_{norm} = \frac{2 \cdot x_{grid}}{W - 1} - 1 $$
+-        $$ y_{norm} = \frac{2 \cdot y_{grid}}{H - 1} - 1 $$
++        $$ x_{\text{norm}} = \frac{2 \cdot x_{\text{grid}}}{W - 1} - 1 $$
++        $$ y_{\text{norm}} = \frac{2 \cdot y_{\text{grid}}}{H - 1} - 1 $$
+         Concatenate along the last dimension to form `grid` [S1, unofficial].
+     *   **Level-wise Sampling:** For each level $i$ in `range(num_levels)`:
+-        *   Retrieve $\text{corr}_{lvl}$ from `corr_pyramid` [S1, unofficial].
++        *   Retrieve $\text{corr}_{\text{lvl}}$ from `corr_pyramid` [S1, unofficial].
++        *   Scale the centroid coordinates by $2^i$: $\text{coords}_{\text{scaled}} = \text{grid} / 2^i$ [S1, unofficial].
+         *   Create delta offsets for the disparity (x) dimension: $\Delta x = \text{linspace}(-r, r, 2r+1)$ and $\Delta y = 0$ [S1, unofficial].
+-        *   Create a meshgrid of $\Delta y$ and $\Delta x$ [S1, unofficial].
+-        *   Scale the centroid coordinates by $2^i$: $\text{coords}_{scaled} = \text{coords} / 2^i$ [S1, unofficial].
+-        *   Add the delta offsets to the scaled centroid coordinates to get sampling coordinates $\text{coords}_{lvl}$ [S1, unofficial].
+-        *   Sample the correlation volume $\text{corr}_{lvl}$ at $\text{coords}_{lvl}$ using bilinear sampling [S1, unofficial].
++        *   Compute sampling coordinates by adding $\Delta x$ to the x-component of $\text{coords}_{\text{scaled}}$ and setting the y-component offset to zero: $\text{coords}_{\text{lvl}} = \text{cat}([\text{coords}_{\text{scaled}}[..., 0:1] + \Delta x, \text{coords}_{\text{scaled}}[..., 1:2]], \text{dim}=-1)$ [S1, unofficial].
++        *   Sample the correlation volume $\text{corr}_{\text{lvl}}$ at $\text{coords}_{\text{lvl}}$ using bilinear sampling [S1, unofficial].
+         *   Reshape the sampled output to $(B, H, W, -1)$ and append to `out_pyramid` [S1, unofficial].
+     *   **Final Output:** Concatenate all tensors in `out_pyramid` along the last dimension, permute to $(B, C, H, W)$, make contiguous, and cast to float [S1, unofficial].
+@@ -71,5 +70,5 @@
+ 
+     def __call__(self, coords):
+-        # coords shape: (B, H, W, 2)
++        # coords shape: (B, H, W, 2) in pixel coordinates
+         # Normalize coordinates to [-1, 1]
+         x_grid, y_grid = coords[..., 0:1], coords[..., 1:2]
+@@ -82,24 +81,25 @@
+         for i in range(self.num_levels):
+             corr_lvl = self.corr_pyramid[i]
+-            # Scale coordinates
++            # Scale coordinates by 2^i
+             coords_scaled = grid / (2 ** i)
+-            # Create delta offsets
++            # Create 1D delta offsets for x (disparity), y offset is zero
+             r = self.radius
+             dx = torch.linspace(-r, r, 2 * r + 1, device=coords.device)
+-            dy = torch.zeros_like(dx)
+-            # Meshgrid and stack offsets
+-            dy_grid, dx_grid = torch.meshgrid(dy, dx, indexing='ij')
+-            offsets = torch.stack([dx_grid, dy_grid], dim=-1)  # (2r+1, 2r+1, 2)
+-            # Add offsets to scaled coordinates
+-            coords_lvl = coords_scaled.unsqueeze(3).unsqueeze(4) + offsets.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+-            # Sample correlation
+-            # corr_lvl: (B*H*W1, 1, 1, W2)
+-            # coords_lvl: (B, H, W, 2r+1, 2)
+-            # Reshape for grid_sample: (N, C, H, W) and (N, H', W', 2)
+-            N = coords_lvl.shape[0] * coords_lvl.shape[1] * coords_lvl.shape[2]
++            # coords_scaled: (B, H, W, 2)
++            # dx: (2r+1,)
++            # Add dx to x-component, keep y-component unchanged (offset 0)
++            coords_lvl = torch.cat([coords_scaled[..., 0:1] + dx, coords_scaled[..., 1:2]], dim=-1)
++            # coords_lvl shape: (B, H, W, 2r+1, 2)
++            
++            # Prepare for grid_sample: (N, C, H', W') and (N, H', W', 2)
++            B_s, H_s, W_s, D_s, _ = coords_lvl.shape
++            N = B_s * H_s * W_s
+             corr_reshaped = corr_lvl.view(N, 1, 1, corr_lvl.shape[-1])
+-            coords_reshaped = coords_lvl.view(N, coords_lvl.shape[2], coords_lvl.shape[3], 2)
++            coords_reshaped = coords_lvl.view(N, 1, D_s, 2)
++            
++            # Sample correlation using bilinear interpolation
+             sampled = F.grid_sample(corr_reshaped, coords_reshaped, align_corners=True, mode='bilinear')
+-            sampled = sampled.view(coords.shape[0], coords.shape[1], coords.shape[2], -1)
++            # sampled shape: (N, 1, 1, 2r+1)
++            sampled = sampled.view(B_s, H_s, W_s, -1)
+             out_pyramid.append(sampled)
+ 
+@@ -111,15 +111,15 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Division by $\sqrt{D}$ requires $D > 0$.
+-*   **Boundaries:** Coordinate normalization assumes $W > 1$ and $H > 1$ to avoid division by zero.
+-*   **Coordinate Scaling:** Off-by-one errors can occur if `coords` are not properly normalized to $[-1, 1]$ before division by $2^i$.
+-*   **Tensor Layout:** The `einsum` string `'aijk,aijh->ajkh'` assumes a specific dimension ordering; mismatched input layouts will produce incorrect correlation shapes.
++*   **Precision:** Division by $\sqrt{D}$ requires $D > 0$ [G].
++*   **Boundaries:** Coordinate normalization assumes $W > 1$ and $H > 1$ to avoid division by zero [G].
++*   **Coordinate Scaling:** Off-by-one errors can occur if `coords` are not properly normalized to $[-1, 1]$ before division by $2^i$ [S1, unofficial].
++*   **Tensor Layout:** The `einsum` string `'aijk,aijh->ajkh'` assumes a specific dimension ordering; mismatched input layouts will produce incorrect correlation shapes [S1, unofficial].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Not given in the sources.
+ *   **Memory Complexity:** Not given in the sources.
+-*   **Performance:** Efficient for inference due to pre-computed pyramid. The source does not provide specific measured performance numbers on hardware/resolution.
+-*   **Strengths:** Multi-scale support via pyramid; efficient sampling.
+-*   **Limitations:** High memory usage for large images; requires custom bilinear sampler for the specific tensor layout.
++*   **Performance:** Efficient for inference due to pre-computed pyramid. The source does not provide specific measured performance numbers on hardware/resolution [S1, unofficial].
++*   **Strengths:** Multi-scale support via pyramid; efficient sampling [S1, unofficial].
++*   **Limitations:** High memory usage for large images; requires custom bilinear sampler for the specific tensor layout [S1, unofficial].
+ 
+ ## Background

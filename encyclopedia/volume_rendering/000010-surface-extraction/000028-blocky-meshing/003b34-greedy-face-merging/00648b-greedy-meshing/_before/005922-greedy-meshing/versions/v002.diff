@@ -1,0 +1,275 @@
+--- v001.md
++++ v002.md
+@@ -4,54 +4,59 @@
+ 
+ ## Overview
+-Greedy Meshing is a surface extraction algorithm that reduces vertex count and draw calls in voxel rendering by merging adjacent coplanar faces of the same block type into maximal rectangles [S1, S2, S3, unofficial]. It builds on [Chunked Voxel Mesh Generation with Face Culling and Quad Expansion](3133-chunked-voxel-mesh-generation-with-face-culling-and-quad-exp.md) by processing the chunk's block array to generate optimized geometry for all 6 faces, handling visibility culling against neighbors [S1, S2, unofficial]. Unlike naive per-block meshing, it iteratively expands horizontal and vertical dimensions to form quads [S1, S2, unofficial]. It differs from [Greedy Meshing (Front Face)](16000-greedy-meshing-front-face.md) and [Greedy Meshing (Back Face)](16006-greedy-meshing-back-face.md) by typically handling all visible faces (front, back, left, right, top, bottom) in a unified or parallelized manner [S2, S3, unofficial].
++Greedy Meshing is a surface extraction algorithm that reduces vertex count and draw calls in voxel rendering by merging adjacent coplanar faces of the same block type into maximal rectangles [S1, S2, S3, unofficial]. It builds on [Chunked Voxel Mesh Generation with Face Culling and Quad Expansion](3133-chunked-voxel-mesh-generation-with-face-culling-and-quad-exp.md) by processing the chunk's block array to generate optimized geometry for all 6 faces, handling visibility culling against neighbors [S1, S2, unofficial]. Unlike naive per-block meshing, it iteratively expands horizontal and vertical dimensions to form quads, and unlike [Greedy Meshing (Back Face)](16006-greedy-meshing-back-face.md), it typically handles all visible faces (front, back, left, right, top, bottom) in a unified or parallelized manner [S2, S3, unofficial]. It sets itself apart from [Chunk-based Marching Cubes with Face Combination](4158-chunk-based-marching-cubes-with-face-combination.md) by operating on discrete block boundaries rather than isosurfaces, preserving the blocky aesthetic while maximizing quad size for opaque geometry.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A 3D chunk of voxels (size $CHUNK\_SIZE \times CHUNK\_SIZE \times CHUNK\_SIZE$), neighbor face data for all 6 directions, and a mapping of block IDs.
+-- **Output:** A list of quads (rectangles) with position, size, block ID, and normal for each visible face.
++- Input: A 3D chunk of voxels (size $CHUNK\_SIZE \times CHUNK\_SIZE \times CHUNK\_SIZE$), neighbor face data for all 6 directions, and a mapping of block IDs.
++- Output: A list of quads (rectangles) with position, dimensions, block ID, and normal for each visible face.
+ 
+ **Data Structures:**
+-1.  **PaddedChunk:** An array of `VoxelBlock` with size $PADDED\_CHUNK\_VOLUME$. The inner chunk (original voxels) is offset by +1 in all dimensions (indices 1 to $CHUNK\_SIZE$). The outer layer (indices 0 and $CHUNK\_SIZE+1$) contains neighbor face data [S1, S1, unofficial].
+-2.  **Rows:** `uint64_t` arrays of size $CHUNK\_SIZE \times CHUNK\_SIZE \times 3$. Each element represents a column of voxels along one axis. Bit $i$ is 1 if the voxel at index $i$ is solid [S2, unofficial].
+-3.  **Sides:** `bvec2` array of size $CHUNK\_SIZE \times CHUNK\_SIZE \times 3$. Each element has 2 bools: `x` is true if the block before the row is solid, `y` is true if the block after the row is solid [S2, unofficial].
+-4.  **Planes:** `uint64_t` array of size $CHUNK\_SIZE \times CHUNK\_SIZE \times idCount \times 6$. Contains 64-bit rows containing 1 if the face must be rendered, 0 otherwise. Layout: `planes[y + depth * CHUNK_SIZE + idToIndex[id] * CHUNK_SIZE * CHUNK_SIZE + 2 * axis * CHUNK_SIZE * CHUNK_SIZE * idCount]` for positive direction, and `planes[y + depth * CHUNK_SIZE + idToIndex[id] * CHUNK_SIZE * CHUNK_SIZE + (2 * axis + 1) * CHUNK_SIZE * CHUNK_SIZE * idCount]` for negative direction [S2, unofficial].
++1.  **PaddedChunk**: An array of `VoxelBlock` with size $PADDED\_CHUNK\_VOLUME$. The inner chunk (original voxels) is offset by +1 in all dimensions (indices 1 to $CHUNK\_SIZE$). The outer layer (indices 0 and $CHUNK\_SIZE+1$) contains neighbor face data [S1, unofficial].
++2.  **Rows**: `uint64_t` bitmasks of size $CHUNK\_SIZE \times CHUNK\_SIZE \times 3$. Each bit represents a solid block along one axis [S2, unofficial].
++3.  **Sides**: `bvec2` array of size $CHUNK\_SIZE \times CHUNK\_SIZE \times 3$. Each element has 2 bools: `x` is true if the block before the row is solid, `y` is true if the block after is solid [S2, unofficial].
++4.  **Planes**: `uint64_t` array of size $CHUNK\_SIZE \times CHUNK\_SIZE \times idCount \times 6$. Contains 64-bit rows where a bit is 1 if the face must be rendered [S2, unofficial].
++5.  **ID Mapping**: `idToIndex` and `indexToId` arrays mapping block IDs to compact indices $0 \dots idCount-1$ [S2, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Initialize Padded Volume:** Create a padded array of size `PADDED_CHUNK_VOLUME` filled with `VoxelBlock::Empty` [S1, unofficial].
+-2.  **Fill Padding:** For each of the 6 face directions, iterate through the chunk slices to find the boundary. Assign the voxel from the neighboring face to the padded array at the corresponding index using `padded_linearize(padded_coords(spec, u, v))` [S1, unofficial]. Neighbor faces must be provided for all six directions to correctly fill the 1-voxel padding [S1, unofficial].
+-3.  **Map Block IDs:** Identify contained block IDs in the chunk. Create `idToIndex` and `indexToId` arrays to map contained IDs to a smallest possible range $[0, idCount)$ [S2, unofficial].
+-4.  **Generate Binary Solid Blocks:** Iterate over the chunk voxels. For each column along the X, Y, and Z axes, set the corresponding bit in the `rows` array if the block is not `Empty` [S2, unofficial]. Update `sides` arrays to track if blocks adjacent to the chunk boundary are solid [S2, unofficial].
+-5.  **Generate Binary Planes:** For each axis (X, Y, Z), iterate through the `rows` and `sides` to determine visible faces.
+-    -   For positive direction: `shiftedRow = row >> 1`. If `side.y`, `shiftedRow |= (uint64_t)1 << 63`. `faceRow = row & ~shiftedRow`.
+-    -   For negative direction: `shiftedRow = row << 1`. If `side.x`, `shiftedRow |= 1`. `faceRow = row & ~shiftedRow`.
+-    -   For each set bit in `faceRow`, calculate the depth, get the block ID, and set the corresponding bit in the `planes` array [S2, unofficial].
+-6.  **Greedy Meshing (Quad Expansion):** For each of the 6 cube normals, depth, and block ID:
+-    -   Iterate through the rows of the `planes` array for that face.
+-    -   Find the first set bit `x`.
+-    -   Expand width: Calculate `width` by finding the number of consecutive set bits starting at `x`. Use `checkMask` and `deleteMask` to verify consistency across rows.
+-    -   Expand height: Iterate `y` downwards. While the `checkMask` matches the bits in subsequent rows, increment `height` and clear the bits in those rows using `deleteMask` to prevent double-counting.
+-    -   Add a rectangle (quad) with position $(x, y)$, size $(width, height)$, depth, and block ID to the output list.
+-    -   Skip the processed bits and continue [S2, unofficial].
++1.  **Initialize Padded Volume**: Create `PaddedChunk` of size $PADDED\_CHUNK\_VOLUME$ filled with `VoxelBlock::Empty` [S1, unofficial].
++2.  **Fill Padding with Neighbors**: For each of the 6 face directions, iterate $u, v$ from 0 to $CHUNK\_SIZE$. Calculate the padded linear index using `padded_linearize`. Assign the voxel from the neighboring face to the padded array at this index [S1, unofficial].
++3.  **Process Chunk Voxels**: Iterate $bx, by, bz$ from 0 to $CHUNK\_SIZE$. If the block is not `Empty`, calculate the padded index (offset by +1) and assign the mapped block ID to `PaddedChunk` [S1, unofficial].
++4.  **Generate Binary Solid Blocks**:
++    -   Initialize `rows` and `sides` arrays [S2, unofficial].
++    -   For each $(x, z)$ column, iterate through the sorted vertical IDs. For each solid block at world $y$, set the corresponding bit in `rows` for the x, y, and z axes [S2, unofficial].
++    -   Handle boundary conditions: if a block is at $y=-1$ relative to the chunk, set `sides.x` to true; if at $y=CHUNK\_SIZE$, set `sides.y` to true [S2, unofficial].
++    -   Propagate side information from neighboring chunks if the current chunk is at a boundary [S2, unofficial].
++5.  **Generate Binary Planes**:
++    -   For each of the 3 axes (x, y, z), iterate $y$ (rows) and $x$ (columns) [S2, unofficial].
++    -   Get the `row` bitmask and `side` vector for the current position [S2, unofficial].
++    -   **Positive Direction**: Calculate `shiftedRow = row >> 1`. If `side.y` is true, set the MSB: `shiftedRow |= (1 << 63)`. The face row is `faceRow = row & ~shiftedRow`. For each set bit in `faceRow` (at depth `d`), calculate the 3D position, retrieve the block ID, and set the corresponding bit in the `planes` array for the positive face of that ID [S2, unofficial].
++    -   **Negative Direction**: Calculate `shiftedRow = row << 1`. If `side.x` is true, set the LSB: `shiftedRow |= 1`. The face row is `faceRow = row & ~shiftedRow`. For each set bit, set the corresponding bit in the `planes` array for the negative face of that ID [S2, unofficial].
++6.  **Generate Optimized Mesh (Greedy Merge)**:
++    -   For each of the 6 normals and each block ID index, iterate through the depth slices [S2, unofficial].
++    -   For each slice, iterate $y$ from 0 to $CHUNK\_SIZE$ [S2, unofficial].
++    -   Get the `row` bitmask. Find the first set bit `x` (using `ctz`) [S2, unofficial].
++    -   **Expand Width**: Calculate `width` by finding the number of consecutive 1s starting at `x` (using `ctz(~row)` on the shifted row) [S2, unofficial]. Create a `checkMask` covering these bits and a `deleteMask` as its inverse [S2, unofficial].
++    -   **Expand Height**: Initialize `height = 1`. While `y + height < CHUNK_SIZE` and `(planes[startIndex + y + height] & checkMask) == checkMask`, clear the bits in the lower rows (`planes[...] &= deleteMask`) and increment `height` [S2, unofficial].
++    -   **Record Quad**: Add a rectangle with position $(x, y)$, depth, dimensions $(width, height)$, and block ID to the output list [S2, unofficial].
++    -   **Skip**: Advance `x` by `width`, then skip any subsequent zeros in the row [S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def greedy_meshing(chunk_size, chunk_voxels, neighbor_faces, id_map):
+-    # 1. Initialize padded volume
++def greedy_meshing(chunk_voxels, neighbor_faces, chunk_size):
++    # 1. Initialize Padded Chunk
+     padded_size = chunk_size + 2
+-    padded_volume = [VoxelBlock.Empty] * (padded_size ** 3)
++    padded_chunk = [VoxelBlock.Empty] * (padded_size ** 3)
+     
+-    # 2. Fill padding with neighbor data
++    # 2. Fill Padding
+     for direction in [Direction.X_POS, Direction.X_NEG, Direction.Y_POS, Direction.Y_NEG, Direction.Z_POS, Direction.Z_NEG]:
+-        spec = get_face_spec(direction)
+-        neighbor_data = neighbor_faces[direction]
++        face_data = neighbor_faces[direction]
+         for u in range(chunk_size):
+             for v in range(chunk_size):
+-                coords = padded_coords(spec, u, v)
+-                padded_volume[padded_linearize(coords)] = neighbor_data[u, v]
++                coords = get_padded_coords(direction, u, v)
++                padded_chunk[linearize(coords)] = face_data[u, v]
+                 
+-    # 3. Map IDs
+-    contained_ids = set()
++    # 3. Fill Inner Chunk
+     for x in range(chunk_size):
+         for y in range(chunk_size):
+@@ -59,37 +64,26 @@
+                 block = chunk_voxels[x, y, z]
+                 if block != VoxelBlock.Empty:
+-                    contained_ids.add(id_map[block])
+-    id_to_index = {id: i for i, id in enumerate(sorted(contained_ids))}
+-    index_to_id = {i: id for id, i in id_to_index.items()}
+-    id_count = len(id_to_index)
++                    padded_coords = (x + 1, y + 1, z + 1)
++                    padded_chunk[linearize(padded_coords)] = block
++                    
++    # 4. Generate Binary Rows and Sides
++    rows = zeros((3, chunk_size, chunk_size), dtype=uint64)
++    sides = zeros((3, chunk_size, chunk_size), dtype=bool) # Simplified bvec2 logic
+     
+-    # 4. Generate Binary Solid Blocks (Rows and Sides)
+-    rows = [[0] * chunk_size for _ in range(chunk_size * 3)]
+-    sides = [[False, False] for _ in range(chunk_size * chunk_size * 3)]
++    # ... (Implementation of generateBinarySolidBlocks logic from [S2, unofficial]) ...
++    # For each axis, populate rows with solid bits and sides with boundary flags
+     
+-    for axis in range(3):
+-        for i in range(chunk_size):
+-            for j in range(chunk_size):
+-                # Determine column indices based on axis
+-                # ... (logic to map 2D coords to 3D column) ...
+-                col = get_column(axis, i, j)
+-                for k in range(chunk_size):
+-                    if col[k] != VoxelBlock.Empty:
+-                        rows[axis * chunk_size * chunk_size + i * chunk_size + j] |= (1 << k)
+-                # Determine side flags
+-                # ... (logic to check boundary neighbors) ...
+-                
+     # 5. Generate Binary Planes
+-    planes = [[0] * (chunk_size * chunk_size * id_count * 6) for _ in range(chunk_size)]
++    planes = zeros((6, chunk_size, chunk_size, id_count), dtype=uint64)
+     
+     for axis in range(3):
+         for y in range(chunk_size):
+             for x in range(chunk_size):
+-                row = rows[axis * chunk_size * chunk_size + y * chunk_size + x]
+-                side = sides[axis * chunk_size * chunk_size + y * chunk_size + x]
++                row = rows[axis, y, x]
++                side = sides[axis, y, x]
+                 
+-                # Positive direction
++                # Positive Face
+                 shifted_row = row >> 1
+-                if side[1]: shifted_row |= (1 << 63)
++                if side.y: shifted_row |= (1 << 63)
+                 face_row = row & ~shifted_row
+                 
+@@ -98,13 +92,11 @@
+                     face_row &= ~(1 << depth)
+                     pos = get_position(axis, x, y, depth)
+-                    block_id = get_block_id(pos, chunk_voxels)
+-                    if block_id in id_to_index:
+-                        idx = id_to_index[block_id]
+-                        plane_idx = y + depth * chunk_size + idx * chunk_size * chunk_size + 2 * axis * chunk_size * chunk_size * id_count
+-                        planes[plane_idx] |= (1 << x)
++                    block_id = get_block_id(pos)
++                    if block_id != 0:
++                        planes[2 * axis, y, depth, id_to_index[block_id]] |= (1 << x)
+                         
+-                # Negative direction
++                # Negative Face
+                 shifted_row = row << 1
+-                if side[0]: shifted_row |= 1
++                if side.x: shifted_row |= 1
+                 face_row = row & ~shifted_row
+                 
+@@ -113,34 +105,37 @@
+                     face_row &= ~(1 << depth)
+                     pos = get_position(axis, x, y, depth)
+-                    block_id = get_block_id(pos, chunk_voxels)
+-                    if block_id in id_to_index:
+-                        idx = id_to_index[block_id]
+-                        plane_idx = y + depth * chunk_size + idx * chunk_size * chunk_size + (2 * axis + 1) * chunk_size * chunk_size * id_count
+-                        planes[plane_idx] |= (1 << x)
++                    block_id = get_block_id(pos)
++                    if block_id != 0:
++                        planes[2 * axis + 1, y, depth, id_to_index[block_id]] |= (1 << x)
+ 
+-    # 6. Greedy Meshing
++    # 6. Greedy Merge
+     quads = []
+     for normal in range(6):
+         for id_idx in range(id_count):
+             for depth in range(chunk_size):
+-                start_idx = normal * chunk_size * chunk_size * id_count + id_idx * chunk_size * chunk_size + depth * chunk_size
++                start_index = normal * chunk_size**2 * id_count + id_idx * chunk_size**2 + depth * chunk_size
+                 for y in range(chunk_size):
+-                    row = planes[start_idx + y]
++                    row = planes[start_index + y]
+                     if row == 0: continue
++                    
+                     x = ctz(row)
+                     row >>= x
++                    
+                     while x < chunk_size:
+-                        # Expand width
+-                        width = ctz(~row) if ~row != 0 else 64
++                        # Expand Width
++                        if row == 0: width = chunk_size - x
++                        else: width = ctz(~row)
++                        
+                         check_mask = (row << (64 - width)) >> (64 - width - x)
+                         delete_mask = ~check_mask
+                         row >>= width
+                         
+-                        # Expand height
++                        # Expand Height
+                         height = 1
+                         while y + height < chunk_size:
+-                            if (planes[start_idx + y + height] & check_mask) != check_mask:
++                            next_row = planes[start_index + y + height]
++                            if (next_row & check_mask) != check_mask:
+                                 break
+-                            planes[start_idx + y + height] &= delete_mask
++                            planes[start_index + y + height] &= delete_mask
+                             height += 1
+                             
+@@ -148,6 +143,7 @@
+                         x += width
+                         
+-                        # Skip zeros
+-                        skip = ctz(row) if row != 0 else 64
++                        # Skip Zeros
++                        if row == 0: skip = chunk_size - x
++                        else: skip = ctz(row)
+                         x += skip
+                         row >>= skip
+@@ -157,11 +153,11 @@
+ 
+ **Parameters:**
+-- `CHUNK_SIZE`: Typically 16 or 32 [S2, S5, unofficial].
+-- `PADDED_CHUNK_VOLUME`: $(CHUNK\_SIZE + 2)^3$ [S1, S5, unofficial].
++-   `CHUNK_SIZE`: Typically 16 or 32 [S5, unofficial].
++-   `PADDED_CHUNK_VOLUME`: $(CHUNK\_SIZE + 2)^3$ [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- Transparent solids (glass, leaves), water, fluids, and plants are NOT merged. They are output as 1x1 primitives to preserve draw order and cell-specific attributes [S3, unofficial].
+-- Neighbor faces must be provided for all six directions to correctly fill the 1-voxel padding. If a neighbor face is empty, the corresponding padding voxels remain `Empty` [S1, unofficial].
+-- Precision issues may arise if `uint64_t` is insufficient for large chunks, but standard chunk sizes fit within 64 bits [S2, unofficial].
++-   Neighbor faces must be provided for all six directions to correctly fill the 1-voxel padding. If a neighbor face is empty, the corresponding padding voxels remain `Empty` [S1, unofficial].
++-   Transparent solids (glass, leaves), water, fluids, and plants are NOT merged. They are output as 1x1 primitives to preserve draw order and cell-specific attributes [S3, unofficial].
++-   Greedy meshing is slower than naive face extraction (1.16-1.47x wall-clock time) [S3, unofficial].
+ 
+ ## Subtopics
+@@ -177,26 +173,12 @@
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-- Time: $O(N)$ where $N$ is the number of voxels, but with a higher constant factor than naive meshing due to the greedy expansion logic [S3, unofficial].
+-- Memory: $O(N)$ for the padded volume, rows, sides, and planes arrays [S2, S1, unofficial].
+-
+-**Measured Performance:**
+-- Greedy meshing is slower than naive face extraction (1.16-1.47x wall-clock time) [S3, unofficial].
+-- It trades computation time for triangle count reduction. Quad reduction results: flat shape -99.8% (4,608 → 10), rolling shape -82.7% (5,558 → 960), checkerboard 0.0% [S3, unofficial].
+-- On real terrain, it cuts solid vertices by about 35% around the castle, 30% on wooded plains and 16% in mountains [S5, unofficial].
+-
+-**Strengths and Limitations:**
+-- Strengths: Significant reduction in draw calls and vertex count for flat or rolling terrain [S3, S5, unofficial].
+-- Limitations: Slower generation time, especially on checkerboard patterns where no merging occurs [S3, unofficial]. Does not merge transparent or special blocks [S3, unofficial].
+-
+-**When to Use:**
+-- Use when draw call reduction is critical and terrain is not highly detailed or checkerboard-like [S3, unofficial].
+-- Use when seamless borders and AO are required [S5, unofficial].
+-
+-**When Not to Use:**
+-- Use naive meshing when generation speed is more important than render performance, or for highly complex, non-merged geometries [S3, unofficial].
++-   **Time Complexity**: Slower than naive face extraction, typically 1.16-1.47x wall-clock time [S3, unofficial]. The complexity is dominated by the greedy expansion pass, which is $O(N)$ where $N$ is the number of voxels, but with a higher constant factor due to bitmask operations and neighbor checks.
++-   **Memory Complexity**: Requires storage for `rows`, `sides`, and `planes` arrays. `planes` size is $6 \times CHUNK\_SIZE^2 \times idCount$ bits.
++-   **Performance**: On flat terrain, quad reduction can be up to 99.8% (e.g., 4,608 quads to 10) [S3, unofficial]. On rolling terrain, ~82.7% reduction [S3, unofficial]. On checkerboard patterns, 0% reduction [S3, unofficial].
++-   **Strengths**: Significantly reduces draw calls and vertex count for opaque, flat surfaces.
++-   **Limitations**: Does not merge transparent or complex geometry. Computationally more expensive per frame than simple culling.
+ 
+ ## Background
+-Greedy Meshing originated in the context of voxel game engines like Minecraft to optimize rendering of large voxel worlds. It is widely used in modern voxel engines to balance memory usage and rendering performance. The method is implemented in various open-source projects such as Infinigen, GLVoxelTerrain, and mc-meshing [S1, S2, S3, unofficial].
++Greedy Meshing is widely used in voxel-based games and simulations to optimize rendering performance. It is implemented in various engines, including those using Rust/WASM for browser-based rendering [S5, unofficial], Unreal Engine subsystems [S4, unofficial], and custom C++ terrain generators [S2, unofficial]. The method trades increased CPU time for reduced GPU draw calls, making it suitable for dynamic voxel worlds where geometry changes frequently.
+ 
+ ## Sources

@@ -1,0 +1,92 @@
+# Forward Rendering Pipeline with Closed-Form SG Integration
+
+Also called: Forward Rendering Pipeline
+
+## Overview
+This method performs differentiable forward rendering of scenes defined by Signed Distance Functions (SDFs) and Spherical Gaussian (SG) approximations for appearance. It solves the rendering equation by representing both the environment lighting and the Bidirectional Reflectance Distribution Function (BRDF) as SGs, allowing the integral to be computed in closed form. It sets itself apart from sibling methods like [Instant-NSR-PL Forward Pass](2540-instant-nsr-pl-forward-pass.md) by explicitly modeling the specular component via SGs for relighting, rather than relying solely on neural radiance fields or implicit neural representations without explicit physics-based material parameters.
+
+## How it works
+**Inputs:**
+*   Ray origin $o$ and direction $d$.
+*   Scene geometry defined by SDF $S(x; \Theta)$ and its parameters $\Theta$.
+*   Appearance parameters:
+    *   Environment map represented by $M$ SGs with parameters $\{\xi_k, \lambda_k, \mu_k\}_{k=1}^M$.
+    *   Specular BRDF parameters $\{\lambda, \mu\}$.
+    *   Diffuse albedo MLP parameters $\Phi$.
+
+**Outputs:**
+*   Observed color $L_o(\omega_o; x)$ for the ray.
+
+**Data Structures:**
+*   **Spherical Gaussian (SG):** Defined by amplitude $\xi$, sharpness $\lambda$, and direction $\mu$.
+*   **MLP:** A multi-layer perceptron mapping position $x$ to diffuse albedo $a$.
+
+**Steps:**
+1.  **Sphere Tracing:** Find the intersection point $x$ between the ray $r = o + td$ and the surface $S(x; \Theta)$ using sphere tracing [S1].
+2.  **Normal Computation:** Compute the surface normal $n = \nabla_x S$ at $x$ using automatic differentiation [S1].
+3.  **Albedo Computation:** Compute the diffuse albedo $a(x; \Phi)$ at $x$ by evaluating the MLP [S1].
+4.  **Closed-Form Integration:** Compute the color by evaluating the rendering equation in closed form using the SG approximation [S1].
+
+**Formulas:**
+The rendering equation involves the incident radiance $L_i(\omega_i)$ and the BRDF $f_r(\omega_o, \omega_i; x)$. Both are represented with SGs. The geometry term $\omega_i \cdot n$ is approximated as an SG [S1]:
+$$
+\omega_i \cdot n \approx G(\omega_i; 0.0315, n, 32.7080) - 31.7003 \quad (9)
+$$
+The observed color $L_o(\omega_o; x)$ is computed by integrating the multiplication of the environment map SGs, the warped specular BRDF SG, and the geometry term approximation in closed form [S1].
+
+**Parameters:**
+*   $\{\xi_k, \lambda_k, \mu_k\}_{k=1}^M$: Environment map SG parameters.
+*   $\{\lambda, \mu\}$: Specular BRDF parameters.
+*   $\Phi$: Diffuse albedo MLP parameters.
+
+**Edge Cases:**
+*   Precision in automatic differentiation for normal computation [S1].
+*   Degenerate input where the ray does not intersect the surface (handled by sphere tracing termination rules from parent).
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def forward_rendering_pipeline(ray_o, ray_d, sdf_params, env_sg_params, brdf_params, albedo_mlp_params):
+    # Step 1: Sphere Tracing to find intersection x
+    x = sphere_trace(ray_o, ray_d, sdf_params)
+    
+    # Step 2: Compute normal via automatic differentiation
+    n = compute_gradient(sdf_params, x)
+    
+    # Step 3: Compute diffuse albedo
+    a = albedo_mlp_forward(x, albedo_mlp_params)
+    
+    # Step 4: Closed-form SG integration
+    # Approximate geometry term as SG
+    # G(omega_i; 0.0315, n, 32.7080) - 31.7003
+    # Integrate multiplication of env SGs, specular BRDF SG, and geometry term
+    color = closed_form_sg_integration(
+        env_sg_params, 
+        brdf_params, 
+        n, 
+        ray_d, 
+        a
+    )
+    
+    return color
+```
+
+## Subtopics
+
+### Closed-Form SG Integration for Rendering
+Integrates the multiplication of Spherical Gaussians representing the environment map, warped specular BRDF, and geometry term approximation in closed form to compute the observed color $L_o(\omega_o; x)$. The optimizable parameters are $\{\xi_k, \lambda_k, \mu_k\}_{k=1}^M$ (environment map), $\{\lambda, \mu\}$ (specular BRDF), and $\Phi$ (diffuse albedo MLP) [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Determined by sphere tracing steps and the closed-form evaluation of SG integrals, which is generally efficient compared to Monte Carlo integration.
+*   **Memory Complexity:** Depends on the number of SGs $M$ for the environment map and the size of the MLP for albedo.
+*   **Strengths:** Fully differentiable with respect to all parameters, enabling inverse rendering and optimization. Closed-form integration avoids sampling noise.
+*   **Limitations:** Relies on the SG approximation for the BRDF and geometry term, which may not capture all high-frequency lighting effects perfectly.
+*   **When to use:** When differentiable rendering with explicit material parameters and relighting capabilities is required.
+*   **When not to use:** When high-fidelity global illumination beyond SG approximation is needed without significant computational overhead.
+
+## Background
+Originated in the PhySG paper (Li et al., 2021) [S1]. It builds on [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md) by adding a physics-based appearance model using Spherical Gaussians. It is used for inverse rendering, material editing, and relighting of 3D scenes.
+
+## Sources
+[S1] PhySG: Inverse Rendering with Spherical Gaussians for Physics-based Material Editing and Relighting, https://doi.org/10.1109/cvpr46437.2021.00541, fetched 2026-10-26

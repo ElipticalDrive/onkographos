@@ -1,0 +1,134 @@
+--- v003.md
++++ v004.md
+@@ -1,122 +1,26 @@
+ # Regular Grid Traversal
++
++Also called: Grid Traversal Algorithm
++
+ ## Overview
+-Regular Grid Traversal accelerates ray-scene intersection by stepping through a uniform 3D grid of cells, skipping empty space without primitive tests [G]. It differs from hierarchical methods (e.g., [Sparse Voxel Traversal](5228-sparse-voxel-tracing.md)) by using a fixed-size array, offering high cache efficiency on GPUs for uniform data but requiring $O(N^3)$ memory [S3, Regular Grid](3950-regular-grid.md).
++Regular Grid Traversal is a ray-grid traversal method that accelerates ray-primitive intersection tests by mapping primitives to a uniform 3D voxel grid and stepping through occupied cells using 3D-DDA [S1, 3950-regular-grid]. It solves the problem of redundant intersection tests in dense scenes by skipping empty space, reducing the number of primitive intersection checks [3950-regular-grid]. Unlike [Voxel Grid Raycasting](2218-voxel-grid-raycasting.md) which typically renders volumetric density, this method accelerates geometric ray tracing by storing primitive pointers in voxels [3950-regular-grid]. It differs from [Hierarchical Grid Traversal](52-name.md) by using a flat, uniform structure without hierarchical levels, and from [Sparse Voxel Traversal](5228-sparse-voxel-tracing.md) by not using sparse data structures like octrees [3950-regular-grid].
+ 
+ ## Shared principles
+-All children use a 3D Digital Differential Analyzer (3D-DDA) to traverse the grid [G]. The ray origin is mapped to an initial cell $(X, Y, Z)$ [G]. Distances to the next grid boundary in each axis are tracked via $tMax$ and $tDelta$. $tDelta$ is constant per axis: $tDeltaX = dx / |dir_x|$ [G]. $tMax$ is updated by adding $tDelta$ when the ray crosses a boundary [G]. The ray advances to the nearest boundary ($min(tMaxX, tMaxY, tMaxZ)$) [G].
+-
+-```python
+-class Vec3:
+-    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
+-    def __add__(self, o): return Vec3(self.x+o.x, self.y+o.y, self.z+o.z)
+-    def __sub__(self, o): return Vec3(self.x-o.x, self.y-o.y, self.z-o.z)
+-    def __mul__(self, s): return Vec3(self.x*s, self.y*s, self.z*s)
+-
+-class ObjectList:
+-    def __init__(self, primitive, next_node=None):
+-        self.primitive = primitive
+-        self.next = next_node
+-
+-def build_regular_grid(primitives, p1, p2, N):
+-    grid = [None] * (N * N * N)
+-    dx = (p2.x - p1.x) / N
+-    dy = (p2.y - p1.y) / N
+-    dz = (p2.z - p1.z) / N
+-    dx_r, dy_r, dz_r = 1.0/dx, 1.0/dy, 1.0/dz
+-
+-    for prim in primitives:
+-        bv1, bv2 = prim.aabb_min, prim.aabb_max
+-        x1 = int((bv1.x - p1.x) * dx_r); x2 = int((bv2.x - p1.x) * dx_r) + 1
+-        y1 = int((bv1.y - p1.y) * dy_r); y2 = int((bv2.y - p1.y) * dy_r) + 1
+-        z1 = int((bv1.z - p1.z) * dz_r); z2 = int((bv2.z - p1.z) * dz_r) + 1
+-        x1 = max(0, x1); x2 = min(N-1, x2)
+-        y1 = max(0, y1); y2 = min(N-1, y2)
+-        z1 = max(0, z1); z2 = min(N-1, z2)
+-
+-        for x in range(x1, x2):
+-            for y in range(y1, y2):
+-                for z in range(z1, z2):
+-                    idx = x + y * N + z * N * N
+-                    c_min = Vec3(p1.x + x*dx, p1.y + y*dy, p1.z + z*dz)
+-                    c_max = c_min + Vec3(dx, dy, dz)
+-                    if (c_min.x < bv2.x and c_max.x > bv1.x and
+-                        c_min.y < bv2.y and c_max.y > bv1.y and
+-                        c_min.z < bv2.z and c_max.z > bv1.z):
+-                        grid[idx] = ObjectList(prim, grid[idx])
+-    return grid
+-
+-def trace_ray(origin, direction, grid, p1, p2, N):
+-    dx = (p2.x - p1.x) / N
+-    dy = (p2.y - p1.y) / N
+-    dz = (p2.z - p1.z) / N
+-    inv_d = Vec3(1.0/abs(direction.x), 1.0/abs(direction.y), 1.0/abs(direction.z))
+-    
+-    t1 = (p1.x - origin.x) * inv_d.x; t2 = (p2.x - origin.x) * inv_d.x
+-    t3 = (p1.y - origin.y) * inv_d.y; t4 = (p2.y - origin.y) * inv_d.y
+-    t5 = (p1.z - origin.z) * inv_d.z; t6 = (p2.z - origin.z) * inv_d.z
+-    t_enter = max(max(min(t1,t2), min(t3,t4)), min(t5,t6))
+-    t_exit = min(min(max(t1,t2), max(t3,t4)), max(t5,t6))
+-    if t_enter > t_exit or t_exit < 0: return None
+-    t_entry = max(t_enter, 0.0)
+-    
+-    entry_pos = origin + direction * t_entry
+-    X = int((entry_pos.x - p1.x) / dx)
+-    Y = int((entry_pos.y - p1.y) / dy)
+-    Z = int((entry_pos.z - p1.z) / dz)
+-    X = max(0, min(N-1, X)); Y = max(0, min(N-1, Y)); Z = max(0, min(N-1, Z))
+-    
+-    t_delta_x = dx / abs(direction.x)
+-    t_delta_y = dy / abs(direction.y)
+-    t_delta_z = dz / abs(direction.z)
+-    step_x = 1 if direction.x > 0 else -1
+-    step_y = 1 if direction.y > 0 else -1
+-    step_z = 1 if direction.z > 0 else -1
+-    
+-    t_max_x = ((X + (1 if direction.x > 0 else 0)) * dx - entry_pos.x) / direction.x
+-    t_max_y = ((Y + (1 if direction.y > 0 else 0)) * dy - entry_pos.y) / direction.y
+-    t_max_z = ((Z + (1 if direction.z > 0 else 0)) * dz - entry_pos.z) / direction.z
+-    
+-    while 0 <= X < N and 0 <= Y < N and 0 <= Z < N:
+-        node = grid[X + Y * N + Z * N * N]
+-        while node is not None:
+-            hit_t = node.primitive.intersect(origin, direction)
+-            if hit_t is not None:
+-                hit_pt = origin + direction * hit_t
+-                c_min = Vec3(p1.x + X*dx, p1.y + Y*dy, p1.z + Z*dz)
+-                c_max = c_min + Vec3(dx, dy, dz)
+-                if c_min.x <= hit_pt.x < c_max.x and c_min.y <= hit_pt.y < c_max.y and c_min.z <= hit_pt.z < c_max.z:
+-                    return hit_t
+-                node.primitive.ray_id = origin.id
+-            node = node.next
+-            
+-        if t_max_x < t_max_y:
+-            if t_max_x < t_max_z:
+-                t_max_x += t_delta_x; X += step_x
+-            else:
+-                t_max_z += t_delta_z; Z += step_z
+-        else:
+-            if t_max_y < t_max_z:
+-                t_max_y += t_delta_y; Y += step_y
+-            else:
+-                t_max_z += t_delta_z; Z += step_z
+-    return None
+-```
++The family shares the mechanism of 3D Digital Differential Analyzer (3D-DDA) traversal to step through a uniform 3D grid [4091-voxel-based-ray-tracing-for-gi-and-specular-reflections, 4240-optimised-voxel-ray-marching]. The grid partitions the scene's Axis-Aligned Bounding Box (AABB) into $N^3$ uniform cells [3950-regular-grid]. Rays are advanced by calculating the distance to the next cell boundary along each axis, advancing the coordinate with the smallest distance [3950-regular-grid, 4091-voxel-based-ray-tracing-for-gi-and-specular-reflections]. The traversal stops when the ray exits the grid bounds or finds a primitive intersection [3950-regular-grid].
+ 
+ ## Subtopics
+ 
+ ### [Regular Grid](3950-regular-grid.md)
+-A spatial acceleration structure dividing an AABB into a fixed-size uniform 3D grid of cells(3950-regular-grid.md). Sets apart by partitioning space into disjoint sub-blocks where primitives can belong to multiple cells, unlike BVH which partitions primitives(3950-regular-grid.md). Choose for scenes with uniform data distribution on GPUs(3950-regular-grid.md).
++A standard implementation using a flat 1D array of primitive lists. It is optimal for uniform data distribution on GPUs due to cache efficiency [3950-regular-grid]. Choose it for general-purpose ray tracing where scene density is uniform.
+ 
+ ### [Voxel-based Ray Tracing for GI and Specular Reflections](4091-voxel-based-ray-tracing-for-gi-and-specular-reflections.md)
+-A voxel-based ray tracing system using DDA through a 128³ block-occupancy grid for GI and specular reflection fallbacks(4091-voxel-based-ray-tracing-for-gi-and-specular-reflections.md). Sets apart by integrating with Light Propagation Volumes (LPV) and acting as a drop-in replacement for Screen-Space Ray Tracing(4091-voxel-based-ray-tracing-for-gi-and-specular-reflections.md). Choose when screen-space coverage is incomplete or for sky occlusion with LPV colour bleeding(4091-voxel-based-ray-tracing-for-gi-and-specular-reflections.md).
++Uses a 128³ occupancy grid to sample Light Propagation Volumes (LPV) for indirect lighting and reflection fallbacks [4091-voxel-based-ray-tracing-for-gi-and-specular-reflections]. Choose it for global illumination and screen-space reflection fallbacks.
+ 
+ ### [Optimised Voxel Ray Marching](4240-optimised-voxel-ray-marching.md)
+-A fixed-step ray traversal algorithm for voxel-based scenes minimizing computational overhead by keeping block lookups within the current working chunk(4240-optimised-voxel-ray-marching.md). Sets apart by replacing global coordinate arithmetic with bitwise operations for chunk indexing(4240-optimised-voxel-ray-marching.md). Choose for hierarchical voxel maps where reducing bitshifts and multiplications per step is critical(4240-optimised-voxel-ray-marching.md).
++Optimizes traversal by caching chunk references and using bit-shifts for indexing, avoiding repeated calculations [4240-optimised-voxel-ray-marching]. Choose it for sparse voxel worlds with fixed chunk sizes to reduce computational overhead.
+ 
+ ## Background
+-Regular grids are a foundational spatial acceleration structure in ray tracing [G]. They partition space into disjoint sub-blocks, unlike BVH which partitions primitives [S2, S3, Regular Grid](3950-regular-grid.md). Effective on GPUs due to spatial locality [S3, Regular Grid](3950-regular-grid.md).
++The method originates from early ray tracing research, where grid traversal algorithms were developed to determine cells traversed by a ray [S1]. The algorithm is similar to rasterization but must find all traversed cells, unlike Bresenham's line algorithm which produces visually acceptable lines without finding all pixels [S1]. The performance is modeled by two constants: $T_{setup}$ (setup time) and $T_{step}$ (time to advance between cells) [S1]. Low $T_{setup}$ benefits low-resolution grids, while high $T_{step}$ hurts performance in larger grids [S1].
+ 
+ ## Sources
+-[S1] Voxel-based Ray Tracing for GI and Specular Reflections notes
+-[S2] Optimised Voxel Ray Marching notes
+-[S3] Regular Grid notes+[S1] A Survey on Exploiting Grids for Ray Tracing, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/089-096, fetched 2026-10-24

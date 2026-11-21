@@ -1,0 +1,120 @@
+--- v003.md
++++ v004.md
+@@ -25,6 +25,6 @@
+ **Method Steps:**
+ 
+-1.  **Compute Base Effective Rate:** Calculate the dilution-compensated base learning rate $\eta_{eff}$. For standard passes, $\eta_{eff} = \eta_{base}$. For residual passes of the progressive fitter, $\eta_{eff} = 0.03$ [S1, unofficial].
+-2.  **Apply Dimensionality Scaling:** For shape and position parameters, scale the effective rate by $P_D / P^2$, where $P_D = D + D(D+1)/2$ is the number of position and Cholesky parameters per splat ($P_D=5$ for 2D, $P_D=9$ for 3D) [S1, unofficial]. For $D \ge 4$, multiply by an additional factor $D^{0.8}$ to account for larger spatial search [S1, unofficial]. (Note: $P$ is not defined in the sources [S1, unofficial].)
++1.  **Compute Base Effective Rate:** Calculate the dilution-compensated base learning rate $\eta_{eff}$. For standard passes, $\eta_{eff} = \eta_{base}$ [S1, unofficial]. For residual passes of the progressive fitter, $\eta_{eff} = 0.03$ [S1, unofficial].
++2.  **Apply Dimensionality Scaling:** For shape and position parameters, scale the effective rate by $P_D / P^2$, where $P_D = D + D(D+1)/2$ is the number of position and Cholesky parameters per splat ($P_D=5$ for 2D, $P_D=9$ for 3D) [S1, unofficial]. For $D \ge 4$, multiply by an additional factor $D^{0.8}$ to account for larger spatial search [S1, unofficial].
+ 3.  **Assign Learning Rates per Parameter Group:** Amplitudes receive $3\times \eta_{eff}$, positions receive $1.5\times \eta_{eff}$, and shape parameters receive the dimensionality-scaled $\eta_{eff}$ [S1, unofficial].
+ 4.  **Apply Learning Rate Schedule:** Use a ReduceLROnPlateau scheduler on the regularized training loss with patience 15 iterations, factor 0.9, threshold $10^{-3}$, and floor $10^{-8}$ [S1, unofficial].
+@@ -42,12 +42,9 @@
+ 
+ def compute_adaptive_lr(base_lr, dimension, is_residual_pass=False):
+-    """
+-    Computes the effective learning rate scaling factors based on dimensionality.
+-    """
++    """Computes the effective learning rate scaling factors based on dimensionality."""
+     current_lr = 0.03 if is_residual_pass else base_lr
+     P_D = dimension + (dimension * (dimension + 1)) / 2
++    # Source formula is P_D / P^2; P is undefined in the sources [S1, unofficial]
+     if dimension <= 3:
+-        # Source states scaling by P_D / P^2, but P is undefined [S1, unofficial].
+-        # We apply P_D as the primary scaling numerator.
+         scale_factor = P_D 
+     else:
+@@ -55,9 +52,10 @@
+     return current_lr, scale_factor
+ 
+-def adam_update_with_adaptive_scaling(params, grads, state, lr_base=0.01, dim=3, is_residual=False):
++def adam_update_with_adaptive_scaling(param_groups, lr_base=0.01, is_residual=False):
+     """
+     Performs Adam update with adaptive scaling for Gaussian Splatting parameters.
++    param_groups: list of dicts, each containing 'params', 'type' ('amplitude', 'position', 'shape'), and 'state'.
+     """
+-    current_lr, shape_scale = compute_adaptive_lr(lr_base, dim, is_residual)
++    current_lr, shape_scale = compute_adaptive_lr(lr_base, 3, is_residual)
+     amp_mult = 3.0
+     pos_mult = 1.5
+@@ -65,40 +63,40 @@
+     beta2 = 0.999
+     eps = 1e-8
+-    
+-    for param in params:
+-        grad = grads[param]
+-        if param not in state:
+-            state[param] = {'m': torch.zeros_like(param), 'v': torch.zeros_like(param), 'step': 1}
+-            
+-        m = state[param]['m']
+-        v = state[param]['v']
+-        step = state[param]['step']
+-        
+-        m.mul_(beta1).add_(grad, alpha=1 - beta1)
+-        v.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+-        
+-        m_hat = m / (1 - beta1 ** step)
+-        v_hat = v / (1 - beta2 ** step)
+-        
+-        # Parameter type identification is not specified in the sources.
+-        # Implementers should classify parameters by name or group index.
+-        param_type = 'unknown' # [Comment: Sources do not specify type identification logic]
+-        
+-        if param_type == 'amplitude':
+-            eta = current_lr * amp_mult
+-        elif param_type == 'position':
+-            eta = current_lr * pos_mult
+-        elif param_type == 'shape':
+-            eta = current_lr * shape_scale
+-        else:
+-            eta = current_lr
+-            
+-        step_size = eta * (m_hat / (torch.sqrt(v_hat) + eps))
+-        param.add_(step_size, alpha=-1)
+-        state[param]['step'] = step + 1
++
++    for group in param_groups:
++        for param in group['params']:
++            grad = param.grad
++            if grad is None:
++                continue
++            if param not in group['state']:
++                group['state'][param] = {'m': torch.zeros_like(param), 'v': torch.zeros_like(param), 'step': 1}
++
++            state = group['state'][param]
++            m = state['m']
++            v = state['v']
++            step = state['step']
++
++            m.mul_(beta1).add_(grad, alpha=1 - beta1)
++            v.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
++
++            m_hat = m / (1 - beta1 ** step)
++            v_hat = v / (1 - beta2 ** step)
++
++            if group['type'] == 'amplitude':
++                eta = current_lr * amp_mult
++            elif group['type'] == 'position':
++                eta = current_lr * pos_mult
++            elif group['type'] == 'shape':
++                eta = current_lr * shape_scale
++            else:
++                eta = current_lr
++
++            step_size = eta * (m_hat / (torch.sqrt(v_hat) + eps))
++            param.add_(step_size, alpha=-1)
++            state['step'] = step + 1
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Undefined $P$:** The scaling formula $P_D / P^2$ references $P$, which is not defined in the source text [S1, unofficial]. Implementers should treat the scaling factor as empirically derived from $P_D$.
++*   **Undefined $P$:** The scaling formula $P_D / P^2$ references $P$, which is not defined in the source text [S1, unofficial].
+ *   **Dimensionality:** The scaling factor changes behavior for $D \ge 4$, introducing an empirical $D^{0.8}$ term to stabilize convergence [S1, unofficial].
+ *   **Gradient Dilution:** The base learning rate must be adjusted for gradient dilution in progressive fitting (residual passes use 0.03) [S1, unofficial].
+@@ -127,5 +125,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per iteration for $N$ parameters. Fused implementations reduce overhead by integrating the update step into the rendering kernel [S1, S3, unofficial].
++*   **Time Complexity:** $O(N)$ per iteration for $N$ parameters [G]. Fused implementations reduce overhead by integrating the update step into the rendering kernel [S1, S3, unofficial].
+ *   **Memory Complexity:** Fused implementations and state discarding (TideGS) reduce memory footprint by avoiding intermediate gradient storage and discarding states for evicted blocks [S3, S4, unofficial].
+ *   **Performance:** The adaptive scaling stabilizes convergence in higher dimensions ($D \ge 4$) and accelerates amplitude convergence [S1, unofficial].

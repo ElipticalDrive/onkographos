@@ -1,0 +1,237 @@
+# Sparse Ray Marching (Training)
+
+Also called: Grid-based ray marching, Ray Marching (Training)
+
+## Overview
+Sparse Ray Marching (Training) is a GPU-accelerated algorithm that traces rays through a hierarchical sparse voxel grid to collect 3D positions, directions, step sizes, and t-values for training neural radiance fields [S1, S2, unofficial]. It solves the inefficiency of uniform sampling by skipping empty regions using a density bitfield, dynamically allocating memory based on actual occupancy rather than fixed worst-case bounds [S1, S2, unofficial]. It differs from its siblings by explicitly decoupling the counting of occupied samples from the writing of sample data, allowing for dynamic memory allocation based on actual occupancy rather than fixed worst-case bounds, while supporting an optimization where the maximum allocation size is estimated from previous training epochs [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs:**
+*   `rays_o`: Ray origins, shape `(N, 3)` [S1, unofficial].
+*   `rays_d`: Ray directions, shape `(N, 3)` [S1, unofficial].
+*   `near` and `far`: Ray bounds [S1, unofficial].
+*   `density_bitfield`: Sparse density representation (e.g., hashed grid or bitfield) [S1, S2, unofficial].
+*   `cascades`: Hierarchical grid levels [S1, unofficial].
+*   `scale`: Grid scaling factor [S1, unofficial].
+*   `exp_step_factor`: Exponential factor to scale step sizes [S1, unofficial].
+*   `grid_size`: Base grid resolution for the density bitfield [S1, unofficial].
+*   `max_samples`: Maximum number of samples per ray [S1, unofficial].
+*   `noise`: Uniform random perturbation added to the first sample of each ray to reduce aliasing [S1, unofficial].
+*   `perturb`: Boolean flag enabling random jittering of the initial sampling position [S2, unofficial].
+*   `bound`: Spatial extent of the grid [S2, unofficial].
+*   `H`: Resolution of the cubic density grid ($H \times H \times H$) [S2, unofficial].
+*   `density_thresh`: Threshold for occupied space [S2, unofficial].
+*   `dt_min`, `dt_max`: Minimum and maximum step sizes [S2, unofficial].
+*   `dt_gamma`: Gamma factor for step size scaling [S2, unofficial].
+*   `rays_alive`: Array of active ray indices [S2, unofficial].
+*   `rays_t`: Array of current t-values for active rays [S2, unofficial].
+*   `counter`: Global counter for total samples [S1, unofficial].
+
+**Outputs:**
+*   `xyzs`: Sample positions, shape `(total_samples, 3)` [S1, unofficial].
+*   `dirs`: Sample directions, shape `(total_samples, 3)` [S1, unofficial].
+*   `deltas`: Step sizes, shape `(total_samples, 2)` where `deltas[i, 0]` is the step length and `deltas[i, 1]` is the t-value difference [S1, S2, unofficial].
+*   `ts`: T-values, shape `(total_samples)` [S1, unofficial].
+
+**Data Structures:**
+*   `density_bitfield`: A sparse structure mapping 3D coordinates to density values. In the NGP variant, this is a hashed grid [S1, unofficial].
+*   `rays_alive`: A 1D array storing indices of rays that are still being traced [S2, unofficial].
+*   `rays_t`: A 1D array storing the current traversal position $t$ for each ray in `rays_alive` [S2, unofficial].
+*   `counter`: A scalar or 1D array tracking the total number of valid samples written to the output buffers [S1, unofficial].
+
+**Parameters:**
+*   `N_THREAD`: Number of threads per block in the CUDA kernel launch, typically 256 [S2, unofficial].
+*   `mean_density`: Average density of the grid, used as a fallback density threshold if the specific threshold function returns a lower value [S2, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Initialization:**
+    *   Generate random noise for each ray: `noise = torch.rand_like(rays_o[:, 0])` [S1, unofficial].
+    *   Initialize thread index `n`. If `n >= n_alive` (number of alive rays), return [S2, unofficial].
+    *   Load ray index `ray_idx = rays_alive[n]` and current t-value `t = rays_t[n]` [S2, unofficial].
+    *   If `perturb` is true, initialize a PCG32 random number generator with seed `(n, perturb)` and add `dt_min * rng.next_float()` to `t` [S2, unofficial].
+
+2.  **Ray Marching Loop:**
+    *   Loop while `t < far` and `step < n_step` (current step count for this ray) [S2, unofficial].
+    *   Calculate current point $(x, y, z)$ by clamping $ox + t \cdot dx$, $oy + t \cdot dy$, $oz + t \cdot dz$ to $[-bound, bound]$ [S2, unofficial].
+    *   Map $(x, y, z)$ to grid indices $(nx, ny, nz)$ by clamping $0.5 \cdot (coord \cdot rbound + 1) \cdot H$ to $[0, H-1]$, where $rbound = 1 / bound$ [S2, unofficial].
+    *   Query grid density at index $nx \cdot H \cdot H + ny \cdot H + nz$ [S2, unofficial].
+
+3.  **Occupancy Check and Sampling:**
+    *   If `density > density_thresh` (or `mean_density` if threshold is lower):
+        *   Write `xyz`, `dir`, and `delta` to output buffers at the current `counter` position [S2, unofficial].
+        *   Calculate step size $dt = \text{clamp}(t \cdot dt\_gamma, dt\_min, dt\_max)$ [S2, unofficial].
+        *   Update $t \leftarrow t + dt$ [S2, unofficial].
+        *   Record `delta[0] = dt` and `delta[1] = t - last_t` [S2, unofficial].
+        *   Update `last_t = t` [S2, unofficial].
+        *   Increment `step` and `counter` [S2, unofficial].
+    *   Else (empty space):
+        *   Calculate distance to next voxel boundary in x, y, z using `signf(dx)`, `signf(dy)`, `signf(dz)` [S2, unofficial].
+        *   Compute $tt = t + \max(0, \min(tx, ty, tz))$ [S2, unofficial].
+        *   Advance $t$ in a do-while loop until $t \ge tt$, using the same $dt$ calculation as occupied space [S2, unofficial].
+
+4.  **Finalization:**
+    *   Extract total sample count: `total_samples = counter[0]` [S1, unofficial].
+    *   Flatten outputs to `total_samples`: `xyzs = xyzs[:total_samples]`, `dirs = dirs[:total_samples]`, `deltas = deltas[:total_samples]`, `ts = ts[:total_samples]` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sparse_ray_marching_train(rays_o, rays_d, near, far, density_bitfield, cascades, scale, exp_step_factor, grid_size, max_samples, noise, perturb, bound, H, density_thresh, dt_min, dt_max, dt_gamma, rays_alive, rays_t, counter):
+    """
+    Sparse Ray Marching for Training.
+    """
+    n_alive = len(rays_alive)
+    total_samples = 0
+    
+    # Output buffers (pre-allocated with max_samples * num_rays for safety, or dynamically resized)
+    # In practice, these are often large enough to hold worst-case, then sliced.
+    xyzs = torch.zeros((max_samples * n_alive, 3), device=rays_o.device)
+    dirs = torch.zeros((max_samples * n_alive, 3), device=rays_o.device)
+    deltas = torch.zeros((max_samples * n_alive, 2), device=rays_o.device)
+    ts = torch.zeros((max_samples * n_alive), device=rays_o.device)
+    
+    rbound = 1.0 / bound
+    
+    for n in range(n_alive):
+        ray_idx = rays_alive[n]
+        t = rays_t[n]
+        ox, oy, oz = rays_o[ray_idx]
+        dx, dy, dz = rays_d[ray_idx]
+        
+        # Perturbation
+        if perturb:
+            # PCG32 RNG initialization with seed (n, perturb)
+            # rng = PCG32(seed=(n, perturb))
+            # t += dt_min * rng.next_float()
+            t += dt_min * 0.5 # Placeholder for RNG, assuming uniform [0,1) for simplicity in pure Python context without external lib
+            
+        last_t = t
+        step = 0
+        
+        while t < far and step < max_samples:
+            # Clamp to bound
+            x = torch.clamp(ox + t * dx, -bound, bound)
+            y = torch.clamp(oy + t * dy, -bound, bound)
+            z = torch.clamp(oz + t * dz, -bound, bound)
+            
+            # Map to grid indices
+            nx = torch.clamp((0.5 * (x * rbound + 1) * H).long(), 0, H - 1)
+            ny = torch.clamp((0.5 * (y * rbound + 1) * H).long(), 0, H - 1)
+            nz = torch.clamp((0.5 * (z * rbound + 1) * H).long(), 0, H - 1)
+            
+            # Query density
+            # density = density_bitfield.query(nx, ny, nz)
+            # For demonstration, assume a function exists
+            density = query_density(density_bitfield, nx, ny, nz)
+            
+            if density > density_thresh:
+                # Occupied
+                idx = total_samples
+                xyzs[idx] = torch.stack([x, y, z])
+                dirs[idx] = torch.stack([dx, dy, dz])
+                
+                dt = torch.clamp(t * dt_gamma, dt_min, dt_max)
+                t_new = t + dt
+                
+                deltas[idx, 0] = dt
+                deltas[idx, 1] = t_new - last_t
+                ts[idx] = t
+                
+                last_t = t_new
+                step += 1
+                total_samples += 1
+                t = t_new
+            else:
+                # Empty space: skip to next voxel boundary
+                # signf function
+                sign_x = 1.0 if dx > 0 else -1.0
+                sign_y = 1.0 if dy > 0 else -1.0
+                sign_z = 1.0 if dz > 0 else -1.0
+                
+                # Distance to next boundary in each axis
+                # tx = (sign_x * bound - x) / dx if dx != 0 else inf
+                # ty = (sign_y * bound - y) / dy if dy != 0 else inf
+                # tz = (sign_z * bound - z) / dz if dz != 0 else inf
+                # Note: The source mentions "distance to next voxel boundary", implying grid-aligned boundaries.
+                # For a simple implementation, we might just jump by a small epsilon or use the grid step.
+                # However, the source says: "Compute tt = t + max(0, min(tx, ty, tz))"
+                # This implies calculating the t-value of the next grid plane intersection.
+                
+                # Simplified boundary jump for empty space
+                # In a real sparse grid, this would involve traversing the hierarchy.
+                # Here we assume a simple jump based on grid resolution if not using a full BVH.
+                # The source notes: "Advance t in a do-while loop until t >= tt"
+                
+                # Calculate t to next grid plane
+                # This is complex without explicit grid structure details in the source.
+                # We will use a placeholder for the "next voxel boundary" calculation.
+                tt = t + dt_min # Placeholder for actual boundary calculation
+                
+                # Do-while loop to advance t
+                while t < tt:
+                    dt = torch.clamp(t * dt_gamma, dt_min, dt_max)
+                    t += dt
+                    
+    # Flatten outputs
+    xyzs = xyzs[:total_samples]
+    dirs = dirs[:total_samples]
+    deltas = deltas[:total_samples]
+    ts = ts[:total_samples]
+    
+    counter[0] = total_samples
+    
+    return xyzs, dirs, deltas, ts
+
+def query_density(bitfield, nx, ny, nz):
+    # Placeholder for actual density query logic
+    # In NGP, this involves hashing and interpolation
+    return 0.0
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Floating-point precision issues may arise when clamping coordinates or calculating boundary distances. Use appropriate epsilon values [G].
+*   **Boundaries:** Rays starting outside the bound or hitting the bound exactly need careful handling to avoid infinite loops or out-of-bounds access [G].
+*   **Degenerate Input:** Rays with zero length or direction need to be filtered out or handled specially [G].
+*   **Memory Allocation:** Dynamic allocation based on occupancy requires careful management of output buffers to avoid overflow. Pre-allocation with a safety margin is common [S2, unofficial].
+
+## Subtopics
+
+### [CUDA Ray Marching (IDDR-NGP Backend)](5788-cuda-ray-marching-iddr-ngp-backend.md)
+A GPU-accelerated ray marching kernel that samples points along rays using a hashed density grid, supporting adaptive step sizes and perturbation. It differs from standard uniform ray marching by integrating adaptive stepping and perturbation directly into the sampling loop, and from dense voxel tracing by operating on a sparse hashed grid structure.
+
+### [Training Ray Marching (Forward Only)](6205-training-ray-marching-forward-only.md)
+A two-pass GPU algorithm that samples a ray through a sparse voxel grid (density bitfield) to collect 3D positions, directions, step sizes (deltas), and t-values for training neural radiance fields. It sets itself apart from its siblings by explicitly decoupling the counting of occupied samples from the writing of sample data, allowing for dynamic memory allocation based on actual occupancy rather than fixed worst-case bounds, while supporting an optimization where the maximum allocation size is estimated from previous training epochs.
+
+### [Sparse Packed Radiance Field Tracer](13126-sparse-packed-radiance-field-tracer.md)
+The Sparse Packed Radiance Field Tracer is a differentiable rendering method for sparse, packed radiance fields that generates a variable number of samples per ray, packed into a flat tensor structure. It solves the inefficiency of standard ray marching by using a sparse acceleration structure to sample only within occupied cells, resulting in a custom number of samples per ray rather than a fixed grid. Unlike its siblings, it explicitly manages the "packed" data layout where rays with different intersection counts share a single contiguous buffer, requiring specific reduction operations to handle boundaries between rays.
+
+### [Sparse Grid Volume Rendering (Foreground)](15051-sparse-grid-volume-rendering-foreground.md)
+Sparse Grid Volume Rendering (Foreground) is a CUDA-based volume rendering method that traces rays through a sparse voxel grid to compute final color and log-transmittance using volume rendering with spherical harmonics (SH) coefficients. It differs from its siblings by explicitly managing warp-level parallelism for SH basis evaluation and accumulation, utilizing shared memory for warp-local data to minimize global memory traffic, and employing early termination based on transmission thresholds. Unlike [CUDA Ray Marching (IDDR-NGP Backend)](5788-cuda-ray-marching-iddr-ngp-backend.md) which uses hash encoding, or [Sparse Packed Radiance Field Tracer](13126-sparse-packed-radiance-field-tracer.md) which may use different interpolation schemes, this method relies on trilinear interpolation over a sparse connectivity structure.
+
+### Differentiable Ray Marching (SRN variant)
+A technique using LSTM to adaptively sample points along a query ray until it finds the intersection with the scene, then passing this point to a pixel generator network [S3, unofficial]. It employs an LSTM to adaptively sample points along the query ray, continuing sampling until the intersection of the query ray with the scene is found, and then passes the intersection point through a pixel generator network to yield color directly [S3, unofficial].
+
+### Object-space AImC
+An approach to avoid suppression of context behind the focus object by suppressing only those samples of the context object that are in front of the focus object [S4]. The countersink geometry defines the region of different levels of sparseness, but the starting position of the ray is not changed [S4]. During the ray traversal of final image synthesis, each sample location is evaluated whether it belongs to the countersink area or not [S4]. Outside the countersink area, the context is represented using a more dense representation, and inside, a more sparse form is chosen [S4]. Unlike image-space AImC where the level of sparseness is constant for all samples of one object along a particular ray, object-space AImC has a level of sparseness that is not constant for one object along a particular ray [S4].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the sparsity of the grid and the distribution of occupied space. In the worst case (fully occupied), it is $O(N \cdot M)$ where $N$ is the number of rays and $M$ is the maximum samples per ray. In practice, it is significantly faster due to skipping empty space.
+*   **Memory Complexity:** $O(N \cdot M)$ for output buffers if pre-allocated, or $O(\text{total\_samples})$ if dynamically resized. The density bitfield size depends on the grid resolution and hierarchy [S1, S2, unofficial].
+*   **Measured Performance:** Tested with RTX 2080 Ti, CUDA 11.3, 32GB RAM [S1, unofficial].
+*   **Scaling:** Scales well with the number of rays and grid resolution, provided the sparse structure is efficient.
+*   **Strengths:** Efficiently skips empty space, reducing computational waste. Dynamic memory allocation based on occupancy.
+*   **Limitations:** Requires careful management of dynamic memory. Performance depends on the quality of the sparse grid and density threshold.
+*   **When to Use:** Training neural radiance fields where most of the scene is empty or background.
+*   **When Not to Use:** Dense scenes with little empty space, or when real-time inference with fixed latency is required (use Inference Ray Marching instead).
+
+## Background
+Sparse Ray Marching (Training) is a method used in the context of Neural Radiance Fields (NeRF) and related techniques for training. It was popularized by implementations such as `ngp_pl` [S1, unofficial] and `cv-master-ex` [S2, unofficial]. The method builds on the idea of sparse voxel grids for efficient volume rendering [S1, S2, unofficial].
+
+## Sources
+[S1] kwea123/ngp_pl, https://github.com/kwea123/ngp_pl, fetched 2026-10-26 (unofficial)
+[S2] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)
+[S3] Combining Volume Rendering with Adaptive Ray Marching in Neural ..., https://adaptivevolumerenderer.github.io/, fetched 2026-10-28 (unofficial)
+[S4] Importance-Driven Feature Enhancement in Volume Visualization, https://doi.org/10.1109/tvcg.2005.62, fetched 2026-11-05

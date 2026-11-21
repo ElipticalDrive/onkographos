@@ -1,0 +1,211 @@
+--- v001.md
++++ v002.md
+@@ -1,19 +1,15 @@
+ # Structure of Arrays (SoA) Ray Buffer
+ 
+-Also called: SoA Ray Buffer, Vertical Ray Layout
+ 
+ ## Overview
+-The Structure of Arrays (SoA) Ray Buffer is a memory layout strategy for ray data optimized for GPU coalesced access, storing ray properties in separate contiguous arrays per attribute [S1, unofficial]. It solves the problem of inefficient memory bandwidth utilization in ray tracing by ensuring that threads in a warp access contiguous memory locations for the same attribute, rather than strided access across interleaved structures [S1, unofficial]. It sets itself apart from its siblings by explicitly managing the trade-off between memory footprint (via conditional graylization) and computational throughput, whereas variants like SSE Packet Architecture focus on SIMD register packing for CPU or hybrid execution [S2, unofficial].
++The Structure of Arrays (SoA) Ray Buffer is a memory layout strategy for ray data optimized for GPU coalesced access, storing ray properties in separate contiguous arrays per attribute [S1, unofficial].
+ 
+ ## How it works
+-The method organizes ray state into distinct, contiguous device arrays. Each array corresponds to a specific ray attribute, allowing the GPU to fetch a full ray's data for a warp by loading one word from each array, achieving coalesced memory transactions.
+-
+ **Inputs and Outputs:**
+-*   **Input:** Ray generation parameters (origin, direction), t-range bounds, and a mask indicating valid rays.
+-*   **Output:** A set of device pointers to contiguous arrays containing ray state, ready for traversal and shading kernels.
++*   **Input:** Ray origin, direction, t-range bounds, and a mask indicating valid rays [S1, unofficial].
++*   **Output:** A set of device pointers to contiguous arrays containing ray state [S1, unofficial].
+ 
+ **Data Structures:**
+-The layout consists of base arrays allocated for `totalRays` elements. The exact fields and types are:
+-
++The layout consists of base arrays allocated for `totalRays` elements [S1, unofficial]. The exact fields and types are:
+ 1.  `cameraCenterX_Device`: `float`
+ 2.  `cameraCenterY_Device`: `float`
+@@ -24,7 +20,7 @@
+ 7.  `near_t_Device`: `float`
+ 8.  `far_t_Device`: `float`
+-9.  `gtMask_Device`: `uchar` (unsigned char)
++9.  `gtMask_Device`: `uchar`
+ 10. `accumulatedDensity_Device`: `float`
+-11. `accumulatedWeights_Device`: `float`
++11. `accumulatedWeights_Device`: `float` [S1, unofficial]
+ 
+ **Conditional Allocation:**
+@@ -39,18 +35,16 @@
+     17. `gtRed_Device`: `uchar`
+     18. `gtGreen_Device`: `uchar`
+-    19. `gtBlue_Device`: `uchar`
++    19. `gtBlue_Device`: `uchar` [S1, unofficial]
+ 
+ **Parameters:**
+-*   `totalRays`: The total number of rays to allocate. This is calculated based on the dataset size and any mask filtering applied [S1, unofficial].
++*   `totalRays`: The total number of rays to allocate [S1, unofficial].
+ *   `graylized`: Boolean flag determining whether ground truth and accumulated color are stored as a single gray channel or split into RGB [S1, unofficial].
+ *   `whiteBKGD`: Boolean flag affecting ground truth color computation; if true, adds white background fill [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  Determine `totalRays` based on the image resolution and any active ray mask filtering [S1, unofficial].
+-2.  Allocate the 11 base arrays (`cameraCenter`, `direction`, `t-range`, `mask`, `density`, `weights`) with size `totalRays` [S1, unofficial].
+-3.  Check the `graylized` flag:
+-    *   If true, allocate `accumulatedGray_Device` and `gtGray_Device` [S1, unofficial].
+-    *   If false, allocate `accumulatedRed/Green/Blue_Device` and `gtRed/Green/Blue_Device` [S1, unofficial].
+-4.  Initialize the arrays. `cameraCenter` and `direction` are populated from the camera projection matrix. `near_t` and `far_t` are set to the clipping planes. `gtMask` is initialized based on visibility. Color/density arrays are zero-initialized [S1, unofficial].
++1.  Allocate 11 base arrays (origin, direction, t-range, mask, density, weights) with size `totalRays` [S1, unofficial].
++2.  If `graylized` is true, allocate 2 gray arrays [S1, unofficial].
++3.  Else, allocate 6 color arrays (3 accumulated, 3 ground truth) [S1, unofficial].
++4.  Initialize `totalRays` based on dataset size and mask filtering [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -58,70 +52,60 @@
+ def allocate_soa_ray_buffer(total_rays: int, graylized: bool, white_bkgd: bool):
+     """
+-    Allocates and initializes the SoA Ray Buffer.
++    Allocates the SoA Ray Buffer according to the specified layout and parameters.
+     """
+-    # Base arrays (11 total)
+-    camera_center_x = [0.0] * total_rays
+-    camera_center_y = [0.0] * total_rays
+-    camera_center_z = [0.0] * total_rays
+-    
+-    direction_x = [0.0] * total_rays
+-    direction_y = [0.0] * total_rays
+-    direction_z = [0.0] * total_rays
+-    
+-    near_t = [0.0] * total_rays
+-    far_t = [0.0] * total_rays
+-    
+-    gt_mask = [0] * total_rays  # uchar
+-    
+-    accumulated_density = [0.0] * total_rays
+-    accumulated_weights = [0.0] * total_rays
+-    
+-    # Conditional arrays
++    # Step 1: Allocate 11 base arrays
++    cameraCenterX_Device = [0.0] * total_rays
++    cameraCenterY_Device = [0.0] * total_rays
++    cameraCenterZ_Device = [0.0] * total_rays
++    directionX_Device = [0.0] * total_rays
++    directionY_Device = [0.0] * total_rays
++    directionZ_Device = [0.0] * total_rays
++    near_t_Device = [0.0] * total_rays
++    far_t_Device = [0.0] * total_rays
++    gtMask_Device = [0] * total_rays
++    accumulatedDensity_Device = [0.0] * total_rays
++    accumulatedWeights_Device = [0.0] * total_rays
++
++    # Step 2 & 3: Conditional allocation
+     if graylized:
+-        accumulated_gray = [0.0] * total_rays
+-        gt_gray = [0] * total_rays  # uchar
+-        color_arrays = None
++        accumulatedGray_Device = [0.0] * total_rays
++        gtGray_Device = [0] * total_rays
++        accumulatedRed_Device = accumulatedGreen_Device = accumulatedBlue_Device = None
++        gtRed_Device = gtGreen_Device = gtBlue_Device = None
+     else:
+-        accumulated_red = [0.0] * total_rays
+-        accumulated_green = [0.0] * total_rays
+-        accumulated_blue = [0.0] * total_rays
+-        gt_red = [0] * total_rays  # uchar
+-        gt_green = [0] * total_rays  # uchar
+-        gt_blue = [0] * total_rays  # uchar
+-        accumulated_gray = None
+-        gt_gray = None
+-        
+-    # Note: Actual population of camera_center and direction requires
+-    # camera intrinsic/extrinsic matrices, which are inputs to the broader system.
+-    # This function handles the memory layout structure as defined in [S1, unofficial].
+-    
++        accumulatedRed_Device = [0.0] * total_rays
++        accumulatedGreen_Device = [0.0] * total_rays
++        accumulatedBlue_Device = [0.0] * total_rays
++        gtRed_Device = [0] * total_rays
++        gtGreen_Device = [0] * total_rays
++        gtBlue_Device = [0] * total_rays
++        accumulatedGray_Device = gtGray_Device = None
++
++    # Step 4: Initialize totalRays based on dataset size and mask filtering
++    # (Handled by the calling routine; this function assumes total_rays is provided)
++
+     return {
+         "base": {
+-            "camera_center_x": camera_center_x,
+-            "camera_center_y": camera_center_y,
+-            "camera_center_z": camera_center_z,
+-            "direction_x": direction_x,
+-            "direction_y": direction_y,
+-            "direction_z": direction_z,
+-            "near_t": near_t,
+-            "far_t": far_t,
+-            "gt_mask": gt_mask,
+-            "accumulated_density": accumulated_density,
+-            "accumulated_weights": accumulated_weights
++            "cameraCenterX_Device": cameraCenterX_Device,
++            "cameraCenterY_Device": cameraCenterY_Device,
++            "cameraCenterZ_Device": cameraCenterZ_Device,
++            "directionX_Device": directionX_Device,
++            "directionY_Device": directionY_Device,
++            "directionZ_Device": directionZ_Device,
++            "near_t_Device": near_t_Device,
++            "far_t_Device": far_t_Device,
++            "gtMask_Device": gtMask_Device,
++            "accumulatedDensity_Device": accumulatedDensity_Device,
++            "accumulatedWeights_Device": accumulatedWeights_Device
+         },
+         "color": {
+-            "accumulated_gray": accumulated_gray,
+-            "gt_gray": gt_gray,
+-            "accumulated_red": accumulated_red if not graylized else None,
+-            "accumulated_green": accumulated_green if not graylized else None,
+-            "accumulated_blue": accumulated_blue if not graylized else None,
+-            "gt_red": gt_red if not graylized else None,
+-            "gt_green": gt_green if not graylized else None,
+-            "gt_blue": gt_blue if not graylized else None
+-        },
+-        "params": {
+-            "total_rays": total_rays,
+-            "graylized": graylized,
+-            "white_bkgd": white_bkgd
++            "accumulatedGray_Device": accumulatedGray_Device,
++            "gtGray_Device": gtGray_Device,
++            "accumulatedRed_Device": accumulatedRed_Device,
++            "accumulatedGreen_Device": accumulatedGreen_Device,
++            "accumulatedBlue_Device": accumulatedBlue_Device,
++            "gtRed_Device": gtRed_Device,
++            "gtGreen_Device": gtGreen_Device,
++            "gtBlue_Device": gtBlue_Device
+         }
+     }
+@@ -129,25 +113,16 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Using `float` for density and weights may lead to precision loss in deep volumes or high dynamic range scenes. [G] Consider using `half` precision if supported by the hardware to save memory, but verify accuracy.
+-*   **Boundaries:** `near_t` and `far_t` must be strictly positive and `near_t < far_t`. Degenerate rays (zero length direction) should be filtered out before allocation or handled with a mask to prevent division by zero in traversal.
+-*   **Memory Alignment:** On GPU, arrays should be aligned to 16-byte boundaries for optimal coalescing. The `uchar` arrays (`gt_mask`, `gt_color`) may require padding if mixed with `float` arrays in a single struct, but in SoA they are separate, so alignment is handled by the allocator.
++Not given in the sources.
+ 
+ ## Subtopics
+ 
+ ### SSE Packet Architecture
+-A data layout strategy for coherent ray tracing where ray information is stored vertically within a packet to exploit SIMD (SSE) parallelism [S2, unofficial]. It sets itself apart by operating on groups of neighboring or similar rays in packets, performing computations on SIMD groups of four rays (packlets) and masking differing hit results [S2, unofficial]. Choose this when targeting CPU or hybrid architectures with strong SIMD support and high spatial coherence. Ray directions are stored as separate arrays of X, Y, Z components (vertical), rather than a single horizontal array of 3-vectors, and arrays are 16-byte-aligned to permit access to a packlet of four rays in a single SSE register [S2, unofficial]. Hit results (position, normals) are also stored in aligned SSE arrays within the packet structure [S2, unofficial].
++A data layout strategy for coherent ray tracing where ray information is stored vertically within a packet to exploit SIMD (SSE) parallelism [S2, unofficial]. It sets itself apart from its siblings by operating on groups of neighboring or similar rays in packets, performing computations on SIMD groups of four rays (packlets) and masking differing hit results [S2, unofficial]. Choose this when targeting CPU or hybrid architectures with strong SIMD support and high spatial coherence [G]. Ray directions are stored as separate arrays of X, Y, Z components (vertical), rather than a single horizontal array of 3-vectors, and arrays are 16-byte-aligned to permit access to a packlet of four rays in a single SSE register [S2, unofficial]. Hit results (position, normals) are also stored in aligned SSE arrays within the packet structure [S2, unofficial]. See parent: [Ray Buffer Reordering](4073-ray-buffer-reordering.md).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** O(1) per ray for memory access, assuming coalesced access patterns. The overhead of managing multiple arrays is negligible compared to the memory bandwidth savings.
+-*   **Memory Complexity:** O(N) where N is the number of rays. The memory footprint is determined by the number of attributes. For RGB mode, the footprint is larger than gray mode due to 6 additional arrays vs 2.
+-*   **Measured Performance:** Optimized for GPU coalesced access [S1, unofficial]. Specific performance metrics are not given in the sources.
+-*   **Scaling:** Scales linearly with the number of rays. Performance is limited by memory bandwidth rather than compute, as the SoA layout maximizes bandwidth utilization.
+-*   **Strengths:** Maximizes memory bandwidth efficiency on GPUs by ensuring coalesced access. Flexible memory usage via graylization.
+-*   **Limitations:** Increased complexity in kernel code due to multiple array accesses. Higher memory footprint in RGB mode.
+-*   **When to use:** High-performance GPU ray tracing where memory bandwidth is the bottleneck.
+-*   **When not to use:** CPU ray tracing with low coherence, or when memory footprint is critically constrained and gray mode is insufficient.
++Not given in the sources.
+ 
+ ## Background
+-The SoA Ray Buffer is a technique used in modern ray tracing engines to optimize memory access patterns. It is based on the general principle of Structure of Arrays, which is well-known in computer science for improving cache locality and vectorization. The specific implementation described here is from the Clear-plenoxels project [S1, unofficial]. The SSE Packet Architecture variant is described in a thesis on ray tracing implicit surfaces [S2, unofficial].
++The method is described in a GitHub repository [S1, unofficial]. A related vertical layout strategy for SIMD execution is detailed in a thesis on ray tracing implicit surfaces [S2, unofficial].
+ 
+ ## Sources

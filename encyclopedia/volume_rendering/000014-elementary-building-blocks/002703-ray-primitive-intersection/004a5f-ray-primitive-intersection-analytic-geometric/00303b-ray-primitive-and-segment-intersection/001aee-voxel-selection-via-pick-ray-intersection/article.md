@@ -1,0 +1,135 @@
+# Voxel selection via pick ray intersection
+
+Also called: Basic picker, Pick ray intersection for voxel selection, Voxel Picking with Bresenham's Algorithm, Voxel Selecting
+
+## Overview
+This method extracts spatial information from a simulation by mapping 2D screen coordinates to 3D voxel indices, serving as a direct manipulation interface for tasks such as segmentation seed selection [S1, S2, S3, unofficial]. It differs from [Reverse Index Map for Voxel Location](1097-reverse-index-map-for-voxel-location.md) by computing the intersection dynamically rather than relying on a pre-computed index texture, and from [Ray-Box Intersection for Interaction](2638-ray-box-intersection-for-interaction.md) by focusing on identifying the specific seed voxel for segmentation rather than just the entry point for fluid injection [S1, S2, S3, unofficial].
+
+## How it works
+**Inputs:**
+- Screen coordinates $(x_{screen}, y_{screen})$ from user input (mouse click/drag) [S2, S3, unofficial].
+- Camera projection parameters (orthographic view matrix and viewport dimensions) [S1, S2, unofficial].
+- Volume bounding box definition (min/max extents in world space) [S2, unofficial].
+- Voxel grid resolution (dimensions $N_x, N_y, N_z$) [S1, S2, unofficial].
+
+**Outputs:**
+- 3D voxel index $(i, j, k)$ corresponding to the intersected voxel [S2, S3, unofficial].
+
+**Data Structures:**
+- **Pick Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$. In orthographic projection, $\mathbf{o}$ is derived from the screen position mapped to the near plane, and $\mathbf{d}$ is constant (view direction) [S1, S2, unofficial].
+- **Volume Bounding Box:** Axis-aligned box defined by $\mathbf{B}_{min}$ and $\mathbf{B}_{max}$ [S2, unofficial].
+
+**Steps:**
+1. **Ray Generation:** Construct the pick ray from screen coordinates. For orthographic projection, map $(x_{screen}, y_{screen})$ to world space coordinates on the camera's near plane to determine ray origin $\mathbf{o}$. The ray direction $\mathbf{d}$ is the negative view vector (or forward vector depending on coordinate system) [S1, S2, unofficial].
+2. **Bounding Box Intersection:** Perform ray-box intersection tests to find the closest point of intersection between the pick ray and the volume's rectangular solid [S2, unofficial]. This uses standard ray-tracing techniques [S2, unofficial].
+3. **Voxel Selection:** If an intersection exists, determine the voxel index $(i, j, k)$ at the intersection point. The sources indicate this can be implemented using a modified Bresenham's Algorithm to traverse the voxel grid from the entry point [S1, unofficial]. Alternatively, direct coordinate conversion from the intersection point to voxel indices is used [S2, S3, unofficial].
+4. **Return Index:** Output the integer voxel coordinates $(i, j, k)$ [S2, S3, unofficial].
+
+**Formulas:**
+- Ray Origin (Orthographic): $\mathbf{o} = \mathbf{C} + x_{world} \mathbf{R} + y_{world} \mathbf{U} + z_{near} \mathbf{D}$, where $\mathbf{C}$ is camera center, $\mathbf{R}, \mathbf{U}$ are right/up vectors, and $z_{near}$ is the near plane distance [S1, S2, unofficial].
+- Ray-Box Intersection: Standard slab method or parametric intersection to find $t_{min}$ and $t_{max}$ [S2, unofficial].
+- Voxel Index: $i = \lfloor \frac{x_{intersect} - B_{min,x}}{V_x} \rfloor$, $j = \lfloor \frac{y_{intersect} - B_{min,y}}{V_y} \rfloor$, $k = \lfloor \frac{z_{intersect} - B_{min,z}}{V_z} \rfloor$, where $V_x, V_y, V_z$ are voxel dimensions [S2, S3, unofficial].
+
+**Parameters:**
+- Projection Type: Orthographic only [S1, unofficial].
+- Grid Resolution: Depends on simulation volume [S1, S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Perspective Projection:** The described implementation does not support perspective projections; it is limited to orthographic views [S1, unofficial].
+- **Out-of-Bounds:** If the screen coordinate does not intersect the volume bounding box, no voxel is selected [S2, unofficial].
+- **Precision:** Integer voxel indices must be clamped to valid grid ranges $[0, N_x-1], [0, N_y-1], [0, N_z-1]$ [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def select_voxel(screen_x, screen_y, camera, volume_bounds, voxel_size):
+    # Step 1: Generate pick ray (Orthographic only)
+    # Map screen coordinates to world space on near plane
+    # Assuming camera has right (R), up (U), forward (F) vectors and position (C)
+    # and viewport width/height are known
+    aspect = camera.viewport_width / camera.viewport_height
+    # Normalize screen coords to [-1, 1] range (adjust based on actual API)
+    nx = (2.0 * screen_x / camera.viewport_width) - 1.0
+    ny = (2.0 * screen_y / camera.viewport_height) - 1.0
+    
+    # Scale by view frustum dimensions at near plane
+    # For orthographic, this is often fixed or based on ortho width/height
+    view_width = camera.ortho_width
+    view_height = view_width / aspect
+    
+    ray_origin = camera.position + \
+                 (nx * view_width * 0.5) * camera.right + \
+                 (ny * view_height * 0.5) * camera.up
+    
+    ray_direction = -camera.forward # Orthographic ray direction is constant
+    
+    # Step 2: Ray-Box Intersection
+    # Standard slab method
+    t_min = -float('inf')
+    t_max = float('inf')
+    
+    for axis in range(3):
+        if abs(ray_direction[axis]) < 1e-8:
+            # Ray is parallel to slab
+            if ray_origin[axis] < volume_bounds.min[axis] or ray_origin[axis] > volume_bounds.max[axis]:
+                return None # No intersection
+        else:
+            inv_d = 1.0 / ray_direction[axis]
+            t1 = (volume_bounds.min[axis] - ray_origin[axis]) * inv_d
+            t2 = (volume_bounds.max[axis] - ray_origin[axis]) * inv_d
+            t_min = max(t_min, min(t1, t2))
+            t_max = min(t_max, max(t1, t2))
+            
+        if t_min > t_max:
+            return None # No intersection
+            
+    if t_max < 0:
+        return None # Box is behind ray
+        
+    # Use closest intersection point
+    t = t_min if t_min > 0 else t_max # Prefer positive t
+    intersection_point = ray_origin + t * ray_direction
+    
+    # Step 3: Convert intersection point to voxel index
+    # Assuming volume bounds align with voxel grid start
+    voxel_x = int((intersection_point.x - volume_bounds.min.x) / voxel_size.x)
+    voxel_y = int((intersection_point.y - volume_bounds.min.y) / voxel_size.y)
+    voxel_z = int((intersection_point.z - volume_bounds.min.z) / voxel_size.z)
+    
+    # Clamp to valid range
+    voxel_x = max(0, min(voxel_x, volume_bounds.resolution.x - 1))
+    voxel_y = max(0, min(voxel_y, volume_bounds.resolution.y - 1))
+    voxel_z = max(0, min(voxel_z, volume_bounds.resolution.z - 1))
+    
+    return (voxel_x, voxel_y, voxel_z)
+```
+
+## Subtopics
+
+### [Reverse Index Map for Voxel Location](1097-reverse-index-map-for-voxel-location.md)
+Uses a pre-computed index texture for direct lookup from screen to voxel, avoiding runtime ray casting. Choose when performance is critical and memory allows for the index map.
+
+### [BrushController](2362-brushcontroller.md)
+Uses DDA raycasting for dynamic voxel painting/erasing with brush volumes. Choose when editing voxel data directly is required.
+
+### [Ray-Box Intersection for Interaction](2638-ray-box-intersection-for-interaction.md)
+Focuses on geometric intersection for fluid injection or placement. Choose when the specific voxel index is less important than the world position for simulation effects.
+
+### [Voxel Picking via Face Normal Detection](15231-voxel-picking-via-face-normal-detection.md)
+Uses face normals from mesh geometry to determine voxel indices. Choose when working with voxelized meshes rather than regular grids.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ for ray-box intersection and coordinate conversion. Bresenham's traversal is $O(N)$ where $N$ is the number of voxels traversed, but typically only the entry voxel is needed for seed selection [S1, S2, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary memory [S1, S2, unofficial].
+- **Performance:** Quick and reliable for orthographic views [S2, unofficial].
+- **Strengths:** Intuitive user interface for segmentation; simple implementation for orthographic projections [S1, S3, unofficial].
+- **Limitations:** Does not support perspective projections [S1, unofficial]. Accuracy depends on voxel grid alignment [S2, unofficial].
+
+## Background
+The method originated in the context of volume visualization and segmentation applications, specifically the SIV (Segmentation of Isosurfaces in Volumes) system [S2, unofficial]. It was also independently implemented in homebrew voxel engines for real-time simulation interaction [S1, unofficial]. The technique leverages the regular structure of voxel grids to simplify ray-primitive intersection, often employing Bresenham's algorithm for grid traversal [S1, unofficial]. It is used in medical imaging and scientific visualization for seed point selection during isosurface segmentation [S3, unofficial].
+
+## Sources
+[S1] Homebrew Voxel Engine, http://weigert.vsos.ethz.ch/2019/10/27/homebrew-voxel-engine/, fetched 2026-10-26 (unofficial)
+[S2] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)
+[S3] Efficient and Effective Volume Visualization with Enhanced Isosurface Rendering, https://doi.org/10.48550/arxiv.1202.5360, fetched 2026-10-26 (unofficial)

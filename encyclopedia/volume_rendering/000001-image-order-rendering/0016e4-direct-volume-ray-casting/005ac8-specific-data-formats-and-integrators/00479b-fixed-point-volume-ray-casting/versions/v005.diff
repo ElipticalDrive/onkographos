@@ -1,0 +1,360 @@
+--- v004.md
++++ v005.md
+@@ -4,246 +4,165 @@
+ 
+ ## Overview
+-Fixed-Point Volume Ray Casting is a direct volume rendering technique that replaces standard floating-point arithmetic with fixed-point operations for interpolation and accumulation to improve computational efficiency [S1]. It is specifically implemented in the Visualization Toolkit (VTK) via the `vtkFixedPointVolumeRayCastMapper` class [S1][S2, unofficial]. Unlike general-purpose ray casting which may rely on hardware floating-point units, this method optimizes performance by intercepting decimal parts and using integer-based arithmetic, making it particularly suitable for large-scale volumetric datasets such as seismic or medical images where memory bandwidth and CPU cycles are constrained [S1][S4, unofficial]. It builds on the standard front-to-back compositing algorithm but introduces optimizations like `MinMaxVolume` generation to skip empty voxels [S1].
++Fixed-Point Volume Ray Casting is a direct volume rendering technique that replaces standard floating-point arithmetic with fixed-point arithmetic for interpolation and accumulation to improve computational efficiency [S1]. Implemented primarily via VTK's `vtkFixedPointVolumeRayCastMapper`, it is designed to handle large volumetric datasets, such as seismic or medical images, by optimizing the ray casting loop through early termination and empty voxel skipping [S1][S4, unofficial]. It distinguishes itself from floating-point counterparts by trading some precision for speed, specifically avoiding time-consuming floating-point operations and decimal interception during the resampling phase [S1].
+ 
+ ## How it works
+-
+ ### Inputs and Outputs
+ **Inputs:**
+-1.  **Volumetric Data:** A structured 3D grid stored in `vtkImageData`. The data consists of scalar values (e.g., seismic intensity, Hounsfield units) with associated dimensions, spacing, and origin [S1][S4, unofficial].
+-2.  **Transfer Functions:**
+-    *   **Color Transfer Function (`vtkColorTransferFunction`):** Maps scalar values to RGB colors [S1][S2, unofficial].
+-    *   **Opacity Transfer Function (`vtkPiecewiseFunction`):** Maps scalar values to opacity ($\alpha$) [S1][S2, unofficial].
++*   **Volume Data:** A structured 3D grid stored in `vtkImageData`. The scalar data is typically a 1-component array (e.g., `int16`, `uint16`, `float32`) [S4, unofficial][S1]. For seismic data, this may originate from SEG-Y format, which consists of a 3200-byte header string, a 400-byte binary header, and trace headers, though the mapper expects preprocessed `vtkImageData` [S1].
++*   **Transfer Functions:**
++    *   **Color Transfer Function (`vtkColorTransferFunction`):** Maps scalar values to RGB colors [S1].
++    *   **Opacity Transfer Function (`vtkPiecewiseFunction`):** Maps scalar values to opacity $\alpha$ [S1].
+     *   **Gradient Transfer Function (Optional):** Maps gradient magnitude to opacity/weight for edge enhancement [S2, unofficial].
+-3.  **Lighting Properties:** Shading coefficients (ambient, diffuse, specular) and specular power [S2, unofficial].
+-4.  **Camera/View:** View direction, clipping planes, and sample distance [S1][S3, unofficial].
++*   **Volume Properties:** Shading coefficients (ambient, diffuse, specular), interpolation type, and light position [S1][S2, unofficial].
++*   **Camera/View:** View frustum and clipping planes [S3, unofficial].
+ 
+ **Outputs:**
+-*   A 2D image (framebuffer) where each pixel color is the result of ray casting through the volume [S1].
++*   **Image Buffer:** A 2D RGBA image rendered to the screen or off-screen buffer [S1].
+ 
+ ### Data Structures
+-*   **`vtkImageData`:** Represents the volume.
+-    *   **Dimensions:** `(z, y, x)` or `(nx, ny, nz)` depending on source convention. In DICOM contexts, derived from `(Columns, Rows, NumSlices)` [S4, unofficial].
+-    *   **Spacing:** `(dx, dy, dz)`. $dx, dy$ from pixel spacing; $dz$ from slice thickness or distance between slice locations [S4, unofficial].
+-    *   **Origin:** Typically `(0, 0, 0)` or patient coordinate system origin [S4, unofficial].
+-    *   **Scalars:** 1-component array of the original pixel data type (e.g., `int16`, `float32`) [S4, unofficial].
+-*   **`vtkVolumeProperty`:** Stores color, opacity, and interpolation settings.
+-*   **`vtkFixedPointVolumeRayCastMapper`:** The mapper instance. It internally maintains a `MinMaxVolume` (precomputed min/max values for sub-volumes) to optimize ray traversal [S1].
++The core data structure is `vtkImageData`, which defines:
++*   **Dimensions:** $(Z, Y, X)$, derived from the input volume [S4, unofficial].
++*   **Spacing:** $(\Delta x, \Delta y, \Delta z)$, derived from pixel spacing and slice thickness [S4, unofficial].
++*   **Origin:** $(0, 0, 0)$ or patient coordinates [S4, unofficial].
++*   **Scalars:** The raw voxel values [S4, unofficial].
+ 
+-### Parameters
+-*   **Sample Distance:** Controls the step size along the ray. A common heuristic is `pixel_diagonal / 5` [S3, unofficial]. The pixel diagonal is $\sqrt{dx^2 + dy^2}$.
+-*   **Interpolation Type:** Linear interpolation is preferred to avoid the "staircase" artifacts of nearest-neighbor, despite higher computational cost [S1][S4, unofficial].
+-*   **Shading:** Enabled via `ShadeOn()`. Default coefficients: Ambient=0.2, Diffuse=0.9, Specular=0.2, SpecularPower=10 [S2, unofficial].
+-*   **Scalar Opacity Unit Distance:** Often set equal to the sample distance to ensure opacity accumulates correctly relative to physical depth [S3, unofficial].
++The mapper internally may generate a `MinMaxVolume` (precomputed min/max values for sub-volumes) to optimize ray casting by skipping empty regions [S1].
+ 
+ ### Algorithm Steps
++The rendering process follows the standard direct volume ray casting pipeline, modified for fixed-point arithmetic:
+ 
+-1.  **Preprocessing (MinMaxVolume Generation):**
+-    The mapper analyzes the input `vtkImageData` to generate a `MinMaxVolume`. This structure stores the minimum and maximum scalar values for blocks of voxels. This allows the ray caster to skip entire regions of empty or uniform data during rendering [S1].
+-
+-2.  **Ray Initialization:**
+-    For each pixel in the output image:
+-    *   Construct a ray from the camera origin through the pixel center into the volume.
+-    *   Determine the entry and exit points of the ray within the volume bounds.
+-    *   Calculate the number of samples based on the sample distance.
+-
+-3.  **Ray Casting Loop (Front-to-Back Compositing):**
+-    Initialize accumulated color $C_{acc} = (0, 0, 0)$ and accumulated opacity $\alpha_{acc} = 0$.
+-    
+-    For each sample point $i$ along the ray:
+-    a.  **Optimization Check:** Use the `MinMaxVolume` to check if the current voxel block contains any data that contributes to the image (i.e., non-zero opacity/color). If the block is empty or fully transparent, skip to the next block [S1].
+-    
+-    b.  **Sampling:**
+-        *   Calculate the 3D coordinate $(x, y, z)$ of the sample point.
+-        *   Since sample points are rarely integers, perform **trilinear interpolation** on the scalar values of the 8 surrounding voxels to get the scalar value $s$ [S1][S4, unofficial].
+-        *   *Note:* The "fixed-point" aspect involves performing this interpolation and subsequent accumulation using fixed-point arithmetic (integer operations with implicit scaling) rather than floating-point, to reduce CPU overhead [S1].
+-
+-    c.  **Transfer Function Evaluation:**
+-        *   Retrieve color $C(s)$ from the Color Transfer Function.
+-        *   Retrieve opacity $\alpha(s)$ from the Opacity Transfer Function.
+-        *   If shading is enabled, compute the gradient at $(x, y, z)$ (via finite differences) and calculate lighting (diffuse/specular) to modulate the color $C(s)$ [S2, S4, unofficial].
+-
+-    d.  **Compositing:**
+-        Update the accumulated color and opacity using the front-to-back alpha blending equation:
+-        $$
+-        \alpha_{new} = \alpha_{acc} + (1 - \alpha_{acc}) \cdot \alpha(s)
+-        $$
+-        $$
+-        C_{new} = C_{acc} + (1 - \alpha_{acc}) \cdot \alpha(s) \cdot C(s)
+-        $$
+-        Update state:
+-        $$
+-        \alpha_{acc} = \alpha_{new}
+-        $$
+-        $$
+-        C_{acc} = C_{new}
+-        $$
+-
+-    e.  **Early Termination:**
+-        If $\alpha_{acc}$ is close to 1 (e.g., $> 0.99$), the pixel is effectively opaque. Terminate the ray casting loop for this pixel to save computation [S1].
+-
+-4.  **Output:**
+-    Store $C_{acc}$ as the final color for the pixel.
++1.  **Initialization:** Instantiate `vtkFixedPointVolumeRayCastMapper` and set the input `vtkImageData` [S4, unofficial]. Configure `vtkVolumeProperty` with transfer functions and shading parameters [S1].
++2.  **Ray Generation:** For each pixel in the output image, generate a ray from the camera origin through the pixel center into the volume [S1].
++3.  **Sampling:**
++    *   Determine sample positions along the ray. The sample distance $d_s$ is typically set to the pixel diagonal divided by a factor (e.g., 5) or a fixed value like 1.0 [S3, unofficial].
++    *   **Fixed-Point Interpolation:** Unlike standard ray casting which uses floating-point interpolation, this method uses fixed-point arithmetic for interpolation [S1]. Sampling points are often non-integers; linear interpolation is preferred over nearest-neighbor to avoid obvious edges, despite higher computational cost [S1][S4, unofficial]. The fixed-point implementation intercepts decimal parts to accelerate arithmetic [S1].
++4.  **Classification:**
++    *   Retrieve the scalar value $s$ at the interpolated sample position.
++    *   Map $s$ to color $C$ and opacity $\alpha$ using the transfer functions [S1].
++    *   If gradient-based shading is enabled, compute the gradient magnitude and adjust opacity/weight [S2, unofficial].
++5.  **Compositing (Front-to-Back):**
++    *   Initialize accumulated color $C_{acc} = (0,0,0,0)$ and accumulated opacity $\alpha_{acc} = 0$ [S1].
++    *   For each sample $i$ along the ray:
++        *   Calculate the contribution of the current sample:
++            $$ C_{acc} = C_{acc} + C_i \cdot \alpha_i \cdot (1 - \alpha_{acc}) $$
++            $$ \alpha_{acc} = \alpha_{acc} + \alpha_i \cdot (1 - \alpha_{acc}) $$
++        *   **Early Termination:** If $\alpha_{acc}$ approaches 1 (e.g., $> 0.99$), the pixel is effectively opaque. Skip the remaining voxels along the ray to eliminate invalid computation [S1].
++6.  **Empty Voxel Skipping:** Use the precomputed `MinMaxVolume` or boundary checks to skip over empty elements (voxels with no contribution) [S1].
++7.  **Shading:** If `ShadeOn()` is enabled, calculate lighting effects (diffuse/specular) based on the gradient of the volume data at the sample point [S1][S4, unofficial]. Note that classification data is used after interpolation to filter high-frequency color components [S1].
++8.  **Output:** Write the final $C_{acc}$ to the pixel buffer [S1].
+ 
+ ### Pseudocode
+-
+ ```python
+-def fixed_point_volume_ray_cast(volume_data, camera, transfer_functions, shading_enabled):
++def fixed_point_volume_ray_cast(volume_data, camera, transfer_functions, properties):
+     """
+-    Simulates the core logic of vtkFixedPointVolumeRayCastMapper.
+-    Note: Actual VTK implementation uses C++ fixed-point arithmetic.
+-    This pseudocode illustrates the algorithmic steps.
++    Simulates the core fixed-point volume ray casting loop.
++    Note: Actual VTK implementation uses hardware-specific fixed-point optimizations.
+     """
++    # 1. Setup
++    width, height = camera.image_width, camera.image_height
++    output_image = zeros((height, width, 4))
+     
+-    # 1. Preprocessing: Generate MinMaxVolume for optimization
+-    # This is done once per volume update.
+-    min_max_volume = generate_min_max_volume(volume_data)
++    # Precomputed min/max for optimization (from MinMaxVolume)
++    min_max_volume = compute_min_max_volume(volume_data)
+     
+-    width, height = camera.image_width, camera.image_height
+-    output_image = zeros((height, width, 3))
++    # Sample distance
++    pixel_diagonal = sqrt(volume_data.spacing[0]**2 + volume_data.spacing[1]**2)
++    sample_distance = pixel_diagonal / 5.0  # Typical value from [S3, unofficial]
+     
++    # 2. Ray Loop
+     for y in range(height):
+         for x in range(width):
+-            # 2. Ray Initialization
+-            ray_origin, ray_direction = camera.get_ray(x, y)
++            ray_origin = camera.get_origin()
++            ray_direction = camera.get_ray_direction(x, y)
+             
+-            # Calculate intersection with volume bounds
+-            t_min, t_max = intersect_volume_bounds(ray_origin, ray_direction, volume_data.bounds)
++            # Normalize direction
++            ray_direction = normalize(ray_direction)
+             
+-            if t_min > t_max:
+-                continue # Ray misses volume
++            # Intersect ray with volume bounding box
++            t_min, t_max = intersect_bounding_box(ray_origin, ray_direction, volume_data.bounds)
++            
++            if t_max < t_min:
++                output_image[y, x] = (0, 0, 0, 0)
++                continue
+                 
+-            # 3. Ray Casting Loop
+-            sample_distance = calculate_sample_distance(volume_data.spacing)
+-            num_samples = int((t_max - t_min) / sample_distance)
+-            
+-            acc_color = [0.0, 0.0, 0.0]
++            # Initialize compositing
++            acc_color = (0.0, 0.0, 0.0, 0.0)
+             acc_alpha = 0.0
+             
+-            for i in range(num_samples):
+-                t = t_min + i * sample_distance
+-                point = ray_origin + t * ray_direction
++            # 3. Sample Loop
++            t = t_min
++            while t < t_max:
++                # Get sample position
++                pos = ray_origin + ray_direction * t
+                 
+-                # Optimization: Check MinMaxVolume
+-                if not min_max_volume.has_contribution(point):
+-                    # Skip to next relevant block or continue
++                # Check if pos is inside volume
++                if not is_inside_volume(pos, volume_data):
++                    t += sample_distance
+                     continue
+                 
+-                # Sampling: Trilinear Interpolation
+-                scalar_value = trilinear_interpolate(volume_data, point)
++                # Fixed-point interpolation: Sample scalar value
++                # In VTK, this uses fixed-point arithmetic to avoid float overhead [S1]
++                scalar_val = interpolate_fixed_point(pos, volume_data)
+                 
+-                # Transfer Functions
+-                color = transfer_functions.color_map(scalar_value)
+-                alpha = transfer_functions.opacity_map(scalar_value)
++                # Classification
++                color, alpha = transfer_functions.map(scalar_val)
+                 
+                 # Shading (if enabled)
+-                if shading_enabled:
+-                    gradient = compute_gradient(volume_data, point)
+-                    color = apply_lighting(color, gradient, camera.light_position)
++                if properties.shade_on:
++                    gradient = compute_gradient(pos, volume_data)
++                    # Apply lighting model (diffuse/specular) [S2, unofficial]
++                    # Note: VTK applies classification after interpolation [S1]
++                    pass 
+                 
+-                # Front-to-Back Compositing
+-                # Formula: C_out = C_in + (1 - alpha_in) * alpha * C
+-                #         alpha_out = alpha_in + (1 - alpha_in) * alpha
++                # Front-to-back compositing
++                # C_acc = C_acc + C * alpha * (1 - alpha_acc)
++                # alpha_acc = alpha_acc + alpha * (1 - alpha_acc)
+                 
+-                weight = (1.0 - acc_alpha) * alpha
+-                acc_color[0] += weight * color[0]
+-                acc_color[1] += weight * color[1]
+-                acc_color[2] += weight * color[2]
+-                acc_alpha += weight
++                weight = alpha * (1.0 - acc_alpha)
++                acc_color = acc_color + color * weight
++                acc_alpha = acc_alpha + weight
+                 
+-                # Early Termination
+-                if acc_alpha > 0.99:
++                # Early termination
++                if acc_alpha >= 0.99:
+                     break
++                
++                t += sample_distance
+             
+-            output_image[y, x] = acc_color
++            output_image[y, x] = (acc_color[0], acc_color[1], acc_color[2], acc_alpha)
+             
+     return output_image
+-
+-def trilinear_interpolate(volume, point):
+-    """
+-    Performs trilinear interpolation on the 3D volume grid.
+-    """
+-    # Convert world coordinates to grid indices
+-    ix, iy, iz = world_to_grid(point, volume.spacing, volume.origin)
+-    
+-    # Get fractional parts
+-    fx = ix - floor(ix)
+-    fy = iy - floor(iy)
+-    fz = iz - floor(iz)
+-    
+-    # Get 8 surrounding voxel values
+-    # Handle boundary checks (clamp or wrap)
+-    v000 = volume.data[floor(ix), floor(iy), floor(iz)]
+-    v100 = volume.data[ceil(ix), floor(iy), floor(iz)]
+-    v010 = volume.data[floor(ix), ceil(iy), floor(iz)]
+-    v110 = volume.data[ceil(ix), ceil(iy), floor(iz)]
+-    v001 = volume.data[floor(ix), floor(iy), ceil(iz)]
+-    v101 = volume.data[ceil(ix), floor(iy), ceil(iz)]
+-    v011 = volume.data[floor(ix), ceil(iy), ceil(iz)]
+-    v111 = volume.data[ceil(ix), ceil(iy), ceil(iz)]
+-    
+-    # Interpolate along x
+-    v00 = lerp(v000, v100, fx)
+-    v01 = lerp(v010, v110, fx)
+-    v10 = lerp(v001, v101, fx)
+-    v11 = lerp(v011, v111, fx)
+-    
+-    # Interpolate along y
+-    v0 = lerp(v00, v01, fy)
+-    v1 = lerp(v10, v11, fy)
+-    
+-    # Interpolate along z
+-    return lerp(v0, v1, fz)
+-
+-def lerp(a, b, t):
+-    return a + t * (b - a)
+ ```
+ 
++### Parameters and Typical Values
++*   **Interpolation Type:** Linear is preferred to avoid edge artifacts, despite higher cost [S1][S4, unofficial].
++*   **Sample Distance:** Often set to `pixel_diagonal / 5.0` or `1.0` [S3, unofficial].
++*   **Shading Coefficients:**
++    *   Ambient: 0.2 [S2, unofficial]
++    *   Diffuse: 0.9 [S2, unofficial]
++    *   Specular: 0.2 [S2, unofficial]
++    *   Specular Power: 10 [S2, unofficial]
++*   **Opacity Points (Example):** (120, 0.0), (250, 1.0), (520, 1.0), (650, 0.0) [S2, unofficial].
++*   **Color Points (Example):** (120, 0.999, 0.384, 0.384), (250, 1.0, 1.0, 0.705), (520, 1.0, 1.0, 1.0), (650, 1.0, 1.0, 1.0) [S2, unofficial].
++
+ ### Edge Cases and Pitfalls
+-1.  **Precision:** Fixed-point arithmetic truncates decimal parts. While this improves speed, it can introduce quantization artifacts in interpolation if the scaling factor is not chosen carefully [S1].
+-2.  **Empty Voxels:** Large volumes often contain significant empty space. Failure to use `MinMaxVolume` or similar culling techniques results in wasted cycles interpolating and compositing zero-opacity data [S1].
+-3.  **Slice Ordering:** When constructing volumes from DICOM slices, incorrect ordering or non-uniform Z-spacing can distort the volume geometry. The Z-spacing must be calculated as the absolute difference between consecutive slice locations, assuming uniformity [S4, unofficial].
+-4.  **Memory Usage:** Large 3D datasets (e.g., seismic data) can exhaust system memory. Memory-mapped files are recommended to map file segments to the process address space efficiently [S1].
++*   **Precision:** Fixed-point arithmetic may introduce quantization errors compared to floating-point [S1].
++*   **Interpolation Artifacts:** Nearest-neighbor interpolation causes obvious edges; linear is required for smooth results [S1].
++*   **Z-Spacing Calculation:** If DICOM slices are not contiguous or ordered, calculating Z-spacing as `abs(SliceLocation[i] - SliceLocation[i+1])` may yield incorrect depth [S4, unofficial].
++*   **Memory Usage:** Large 3D datasets (e.g., seismic) can consume significant resources. Memory-mapped files are recommended for efficient I/O [S1].
++*   **Empty Voxels:** Failure to skip empty voxels leads to wasted computation. The `MinMaxVolume` optimization is critical for performance [S1].
+ 
+ ## Operating characteristics
+-
+-### Time and Memory Complexity
+-*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the average number of samples per ray. Early termination reduces $M$ for opaque regions. The `MinMaxVolume` optimization reduces the effective $M$ by skipping empty blocks [S1].
+-*   **Memory Complexity:** $O(V)$ for the volume data, plus $O(V/8)$ or similar for the `MinMaxVolume` structure, where $V$ is the total number of voxels [S1].
+-
+-### Measured Performance
+-*   **Hardware:** Tested on Intel Core i5 3.20 GHz with 4.0 GB RAM [S1].
+-*   **Efficiency:** VTK's fixed-point mapper is reported to be more efficient than standard OpenGL-based software rendering in some graphic processing aspects, though OpenGL is the standard hardware-accelerated approach [S1]. The fixed-point approach avoids time-consuming floating-point arithmetic [S1].
+-
+-### Strengths and Limitations
+-*   **Strengths:**
+-    *   High performance for large datasets due to fixed-point arithmetic and `MinMaxVolume` culling [S1].
+-    *   Good image quality with linear interpolation [S1].
+-    *   Caching of calculation results avoids recalculation if the volume or view does not change significantly [S1].
+-*   **Limitations:**
+-    *   Linear interpolation is computationally more expensive than nearest-neighbor [S1].
+-    *   Fixed-point arithmetic may lack the precision of floating-point for very large dynamic ranges [S1].
+-    *   Requires preprocessing (`MinMaxVolume` generation) which adds initial latency [S1].
+-
+-### When to Use
+-*   Use when rendering large volumetric datasets (e.g., seismic, medical) on CPU-based rendering pipelines where floating-point performance is a bottleneck.
+-*   Use when early termination and empty voxel skipping are critical for performance.
+-*   Do not use if hardware-accelerated ray tracing (GPU) is available, as modern GPUs handle floating-point ray marching more efficiently.
++*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the average number of samples per ray. Early termination reduces $S$ for opaque regions.
++*   **Memory Complexity:** $O(V)$ for the volume data, plus $O(V/8)$ or similar for the `MinMaxVolume` optimization structure [S1].
++*   **Performance:** Offers a balance between performance and accuracy [S4, unofficial]. Fixed-point arithmetic improves operation efficiency by avoiding time-consuming floating-point operations [S1]. It is considered more efficient than standard OpenGL-based implementations in some aspects [S1].
++*   **Strengths:** High image quality, efficient handling of large datasets via fixed-point math and early termination, good support for medical and seismic data formats [S1][S4, unofficial].
++*   **Limitations:** Fixed-point precision limits dynamic range compared to floating-point. Requires preprocessed `vtkImageData`. Not suitable for unstructured grids without conversion [S1].
++*   **When to Use:** When rendering large, structured volumetric datasets (seismic, medical) where performance is critical and fixed-point precision is sufficient.
++*   **When Not to Use:** When high dynamic range or extreme precision is required, or when working with unstructured data.
+ 
+ ## Background
+-
+-### Origin
+-The `vtkFixedPointVolumeRayCastMapper` is part of the Visualization Toolkit (VTK), a widely used open-source library for 3D computer graphics, image processing, and visualization [S1][S2, unofficial]. The specific technique of using fixed-point arithmetic for volume ray casting was highlighted in research on 3D seismic data visualization, where it was implemented to handle the large data sizes typical of SEG-Y format seismic files [S1].
+-
+-### History and Development
+-*   **VTK:** VTK has been a standard tool for scientific visualization since the 1990s. The `vtkFixedPointVolumeRayCastMapper` was developed as an alternative to `vtkVolumeRayCastMapper` (which uses floating-point) to address performance issues in specific domains [S1].
+-*   **Seismic Visualization:** The technique was notably applied in systems for 3D seismic data field visualization, often integrated with MFC (Microsoft Foundation Class) frameworks on Windows platforms [S1].
+-*   **Comparison:** While OpenGL is the standard for graphics, VTK is considered more advanced in some graphic processing aspects for scientific data, offering higher-level abstractions and optimized mappers like the fixed-point variant [S1].
+-
+-### Usage
+-*   Commonly used in medical imaging (DICOM volumes) and geophysical data visualization (SEG-Y seismic data) [S1][S2, S4, unofficial].
+-*   Often paired with `vtkVolumeRayCastCompositeFunction` for the compositing logic [S1].
++Fixed-Point Volume Ray Casting was developed as part of the Visualization Toolkit (VTK) library, specifically within the `vtkFixedPointVolumeRayCastMapper` class [S1]. It was designed to address the computational demands of 3D seismic data visualization, which involves large datasets in SEG-Y format [S1]. The method leverages the fact that many volume rendering operations (interpolation, accumulation) can be approximated with fixed-point arithmetic to gain speed, particularly on hardware where floating-point units were historically less efficient or when integer arithmetic was preferred for throughput [S1]. It is widely used in seismic exploration and medical imaging visualization systems [S1][S2, unofficial].
+ 
+ ## Sources
+-
+ [S1] Research on 3D Visualization Method of Seismic Data, https://doi.org/10.14257/ijsip.2016.9.5.39, fetched 2026-10-26
+ [S2] comedate/VolumeRendering, https://github.com/comedate/VolumeRendering, fetched 2026-10-27 (unofficial)

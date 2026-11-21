@@ -1,0 +1,2966 @@
+PARALLEL RANDOMIZED TUCKER DECOMPOSITION
+ALGORITHMS∗
+arXiv:2211.13028v2 [math.NA] 9 Jun 2023
+RACHEL MINSTER† , ZITONG LI‡ , AND GREY BALLARD†
+Abstract. The Tucker tensor decomposition is a natural extension of the singular value decomposition (SVD) to multiway data. We propose to accelerate Tucker tensor decomposition algorithms
+by using randomization and parallelization. We present two algorithms that scale to large data and
+many processors, significantly reduce both computation and communication cost compared to previous deterministic and randomized approaches, and obtain nearly the same approximation errors.
+The key idea in our algorithms is to perform randomized sketches with Kronecker-structured random
+matrices, which reduces computation compared to unstructured matrices and can be implemented
+using a fundamental tensor computational kernel. We provide probabilistic error analysis of our
+algorithms and implement a new parallel algorithm for the structured randomized sketch. Our experimental results demonstrate that our combination of randomization and parallelization achieves
+accurate Tucker decompositions much faster than alternative approaches. We observe up to a 16×
+speedup over the fastest deterministic parallel implementation on 3D simulation data.
+1. Introduction. Tucker decompositions are low-rank tensor approximations
+capable of approximating multidimensional data with large compression rates while
+maintaining high accuracy. Large scale multidimensional data arises from many applications such as simulations of partial differential equations, data mining, facial
+recognition, and imaging. Processing these data requires computationally efficient
+methods. Randomized algorithms have been used to efficiently compute Tucker decompositions in works such as [1, 4, 9, 11, 25, 27, 30, 33], but the growing size of data
+is outpacing even randomized algorithms. Scaling these methods to handle large data
+calls for efficient parallelization. Many high-performance implementations of deterministic algorithms have been developed for Tucker decompositions [3, 7, 21, 12, 24].
+We develop both sequential and parallel randomized algorithms that efficiently compute Tucker decompositions of large-scale multidimensional data by reducing both
+computation and communication compared to previous work.
+As we review in § 2, there are two dominant computational kernels to computing
+a Tucker decomposition: computing matrix singular value decompositions (SVD) and
+computing tensor-times-matrix (TTM) products. For the deterministic algorithms
+HOSVD [14] (Alg. 2.1) and STHOSVD [29] (Alg. 2.2), computing the SVD is the
+typical bottleneck, and various methods trade off accuracy for reduced computational
+complexity. Our goal is to reduce the complexity of the SVD computation via randomization and remove it as the dominant cost without sacrificing too much accuracy.
+Existing randomized Tucker approaches, discussed in § 3, apply low-rank matrix approximation algorithms in place of matrix SVDs. These matrix algorithms include
+randomized range finder [17] (RRF, see Alg. 2.3), which computes part of the low-rank
+approximation and involves a slight overestimate of the target rank, or randomized
+SVD [17] (RandSVD, see Alg. 2.4), which involves a second pass over the data to
+obtain the final approximation with the exact target rank.
+We propose two randomized algorithms in § 4, one based on HOSVD and one
+based on STHOSVD, which have comparable accuracy and running time. In our
+algorithms, we use the RRF approach with Kronecker-structured random matrices,
+which reduces the computational complexity of the sketch compared to previous ran∗ This work is supported by the National Science Foundation under Grant No. CCF-1942892.
+† Wake Forest University, Winston-Salem, NC (minsterr@wfu.edu, ballard@wfu.edu)
+‡ University of California Irvine, Irvine, CA (zitongl5@uci.edu)
+1
+domized approaches. As a significant added practical benefit, the Kronecker structure
+reduces the amount of random number generation compared to unstructured random
+matrices such as Gaussian. Furthermore, we propose a deterministic truncation of
+the resulting core (with overestimated ranks) in order to achieve the exact target
+ranks, obtaining the same effect as RandSVD-based approaches at much lower cost.
+We show that our HOSVD-based algorithm can be as computationally efficient as
+our STHOSVD-based algorithm by employing a dimension tree optimization to avoid
+recomputation across sketches using memoization.
+To accompany our algorithms, we develop probabilistic error guarantees in § 5
+for a randomized matrix algorithm using a Kronecker product of random matrices.
+We use the matrix results to obtain theoretical guarantees for our Tucker algorithms.
+Our bounds differ from previous results by accounting for the Kronecker structure
+and rank truncation in our algorithms and by reducing the probability of failure and
+amplification factors.
+In § 6, we describe the parallelization of our proposed algorithms for distributed
+memory using the TuckerMPI library [3], allowing us to scale the algorithms to large
+datasets that cannot be processed on a single server. While previous work has combined randomization and parallelization, our implementation is the first to parallelize
+the randomized sketch, which significantly reduces the computational cost. Moreover,
+in exploiting the Kronecker structure of our sketch, we implement a new parallel algorithm that communicates less data than the algorithm used by TuckerMPI and in
+fact minimizes interprocessor communication for the computation [2].
+Our experimental results are presented in § 7. We validate the error guarantees
+of § 5 and show empirically that our structured random matrices are just as accurate
+as standard Gaussian random matrices. Using synthetic data as well as two large
+simulation datasets, we demonstrate that our parallel randomized algorithms given
+in § 6 scale well to thousands of cores and outperform alternative deterministic and
+randomized algorithms, achieving speedups of up to 16× over the state-of-the-art
+implementation of the best deterministic algorithm.
+2. Background. We first review the relevant background on tensors and randomized algorithms for matrices. For more details on tensors, see [22], and for more
+details on randomized algorithms, see [17].
+2.1. Tensor notation and operations. A tensor X ∈ Rn1 ×n2 ×···×nd is a d-way
+array. We can unfold a d-mode tensor along each of its modes, or dimensions; the
+mode-j unfolding, denoted X(j) , is a matrix with columns formed as the mode-j fibers
+of the tensor. Let ∥·∥ denote the tensor norm, which generalizes the matrix Frobenius
+norm. Since the following products will be frequently usedQ
+to describe the Q
+sizes and
+d
+i−1
+ranks of a tensor, we define the following notations: n⊛ = k=1 nk , n4
+=
+i
+k=1 nk ,
+Q
+Q
+d
+5
+⊘
+ni = k=i+1 nk , ni = k̸=i nk .
+One key operation for tensors is the tensor-times-matrix product, or TTM. A
+tensor X ∈ Rn1 ×n2 ×···×nd is multiplied along mode j by a matrix A ∈ Rm×nj , denoted
+by X ×j A, to obtain a tensor Y ∈ Rn1 ×···×nj−1 ×m×nj+1 ×···×nd . This product can also
+be expressed in terms of its mode-j unfolding as Y(j) = AX(j) . We can also multiply
+a tensor X ∈ Rn1 ×···×nd by up to d matrices Aj ∈ Rmj ×nj , j = 1, . . . , d, across
+distinct modes to obtain Y = X ×1 A1 ×2 A2 × · · · ×d Ad ∈ Rm1 ×···×md . We call this
+product a multi-TTM; it is also known as a multilinear multiplication. If unfolded
+⊤
+along mode j, we have Y(j) = Aj X(j) (Ad ⊗ · · · ⊗ Aj+1 ⊗ Aj−1 ⊗ · · · ⊗ A1 ) , where
+⊗ is the matrix Kronecker product.
+2
+2.2. Tucker Decomposition. The Tucker decomposition of a given tensor X ∈
+Rn1 ×···×nd of multirank r = (r1 , . . . , rd ), where rj = rank(X(j) ) for each j, represents
+X as the product of a core tensor G ∈ Rr1 ×···×rd and d factor matrices Uj ∈ Rnj ×rj
+such that X = G ×1 U1 × · · · ×d Ud . We can also obtain a low-rank approximation to
+X in the Tucker form by taking the target rank (r1 , . . . , rd ), or size of the core tensor
+G, to be less than the ranks of the unfoldings in each mode.
+Higher-Order SVD (HOSVD) and Sequentially Truncated HOSVD. Two algorithms that compute low-rank Tucker decompositions of tensors are the higher-order
+SVD (HOSVD) [14] and sequentially truncated HOSVD (STHOSVD) [29]. The
+HOSVD algorithm forms each factor matrix Uj from the first rj left singular vectors
+of the mode unfolding X(j) , and once all the factor matrices are computed, computes
+⊤
+the core tensor as G = X ×1 U⊤
+1 × · · · ×d Ud (see Alg. 2.1).
+Algorithm 2.1 HOSVD [14]
+Algorithm 2.2 STHOSVD [29]
+1: function [G, {Uj }] = HOSVD(X, r)
+2:
+for j = 1 : d do
+3:
+Uj = first rj left sing. vecs. of X(j)
+4:
+end for
+⊤
+5:
+G = X ×1 U⊤
+1 × · · · × d Ud
+6: end function
+1: function [G, {Uj }] = STHOSVD(X, r)
+2:
+G=X
+3:
+for j = 1 : d do
+4:
+Uj = first rj left singular vecs. of G(j)
+5:
+G = G ×j U⊤
+j
+6:
+end for
+7: end function
+The STHOSVD algorithm is similar to HOSVD, but instead of handling all modes
+independently, it processes the modes in a predetermined sequence. After the first
+factor matrix is computed from the first rj left singular vectors of X(j) , we truncate
+in that mode by computing a partially truncated core tensor via a TTM with the
+factor matrix, G ×j U⊤
+j . We then use the partially truncated core G for the next
+mode instead of the full tensor X, as shown in Alg. 2.2.
+2.3. Randomized Matrix Algorithms. The randomized range finder algorithm, made popular by [17] and shown in Alg. 2.3, efficiently computes a low-rank
+representation of a matrix M ∈ Rm×n . Given a target rank r and oversampling parameter p, we multiply M by a random matrix Ω ∈ Rn×ℓ with ℓ = r + p such that
+ℓ < m, to form Y ∈ Rm×ℓ , a matrix made up of random linear combinations of the
+columns of M. We then compute a thin QR decomposition of Y to obtain a matrix
+Q ∈ Rm×ℓ whose range is a good estimate of the range of M. Projecting M onto
+the range of Q gives us the low-rank approximation M ≈ QQ⊤ M. We can choose
+any random distribution for random matrix Ω. In this paper, we will consider both
+subsampled random Hadamard transform (SRHT) and standard Gaussian matrices.
+Note that the resulting approximation from Alg. 2.3 is actually rank-ℓ. If we
+seek a rank-r approximation, further truncation is necessary. One way of truncating
+is to take a thin SVD of Q⊤ M, which is the process taken in the randomized SVD
+algorithm in [17], reproduced in Alg. 2.4. We will adapt this truncation method in
+the algorithms developed in later sections.
+Algorithm 2.3 Randomized Range Algorithm 2.4 Randomized SVD [17]
+Finder [17]
+1: function [U, Σ, V] = RandSVD(M, r, Ω)
+1: function Q = RandRangeFinder(M, Ω)
+2:
+Y = MΩ
+3:
+Compute thin QR Y = QR
+4: end function
+2:
+Q = RandRangeFinder(M, Ω)
+3:
+B = Q⊤ M
+4:
+Compute thin SVD B = ÛΣV⊤
+5:
+U = QÛ(:, 1 : r)
+6:
+Truncate Σ = (1 : r, 1 : r), V = V(:, 1 : r)
+7: end function
+3
+3. Related Work. Our work builds on three different categories of previous
+work, namely randomized algorithms for Tucker decompositions, probabilistic analysis
+of randomized algorithms, and parallel algorithms for tensor computations.
+Randomized Algorithms. There has been much previous work on randomized algorithms for Tucker decompositions; a good survey of this work can be found in [1]. The
+basic algorithms for randomized HOSVD and randomized STHOSVD are proposed
+in [33], while later work improves on the algorithms in various ways. One important
+distinction among randomized algorithms is the rank of the output approximation.
+In [30, 33], the approximation has rank ℓ = r + p as the randomized range finder
+(Alg. 2.3) is used without additional truncation. Other algorithms, such as those
+presented in [9, 27] do not oversample at all, limiting the potential accuracy of their
+methods. In [11], the authors use the randomized range finder, but truncate by only
+taking the first rj columns of each factor matrix. The randomized SVD algorithm
+(Alg. 2.4) can be applied instead to both oversample and more accurately obtain the
+desired rank-r approximation, which is done in [4, 25]. Our approach is most similar
+to the randomized SVD approach, but we apply it in a holistic manner, as discussed
+in § 4.1.
+Another common improvement to the basic randomized algorithms comes from
+exploiting structure in the random matrices used to reduce storage and/or computational costs, as well as the number of random entries generated. Khatri-Rao products
+of random matrices are used in [9, 27], compact random matrices are employed in [4],
+and Kronecker products of random matrices are used in [10, 11]. Our work is most similar to [11] as we also employ Kronecker products, but our algorithms improve upon
+those in [11] by truncating to the desired target rank in a more accurate manner.
+Kronecker product structure has also been exploited in other tensor decompositions
+besides Tucker decompositions: in [5, 19], Kronecker products of random matrices are
+used to accelerate algorithms for CP decompositions; while in [13], Kronecker product
+structure was exploited in the context of the tensor-train decomposition. We also discuss how to implement our algorithms on distributed systems and provide improved
+probabilistic analysis.
+Error Analysis. To accompany the discussed randomized algorithms, other work
+has developed probabilistic error analysis. Analysis for the standard version of randomized HOSVD is presented in [16, 25], and for the standard randomized STHOSVD
+algorithm in [9, 25] for Khatri-Rao products of Gaussian matrices and dense Gaussian
+random matrices, respectively. Previous error analysis has been done for a randomized STHOSVD algorithm employing Kronecker products of subsampled randomized
+Fourier transform (SRFT) matrices in [11], but we make several improvements on this
+work. Our error bound, for our algorithms with Kronecker products of the real-valued
+equivalent of SRFTs, i.e., subsampled randomized Hadamard transform (SRHT) matrices, has an improved error constant and a smaller probability of failure.
+Parallel Algorithms. Our parallel algorithms and implementation, described in
+§ 6, are built upon the foundation of TuckerMPI [3] and its improvements [24]. TuckerMPI is a C++/MPI library that implements the STHOSVD algorithm to compute
+Tucker decompositions of large dense tensors that are distributed across machines.
+It implements many other utilities such as file I/O and subroutines such as parallel
+TTM, that we use in our algorithms and experiments. Other parallel implementations
+of Tucker algorithms have been developed for both dense [7] and sparse [21] tensors.
+The most similar work to ours combines parallelism and randomization to compute
+Tucker decompositions of dense tensors [12]. The approach taken by Choi, Liu, and
+Chakaravarthy [12] is to employ STHOSVD (Alg. 2.2) and compute the SVD of G(j)
+4
+by computing its Gram matrix in parallel and then sequentially applying randomized
+SVD (Alg. 2.4) to the Gram matrix. Our approach differs in that we parallelize the
+randomized algorithm and avoid the Gram matrix computation; we provide a more
+detailed comparison in § 6.4.
+We propose a novel implementation of a parallel algorithm for the Multi-TTM
+computation in § 6.1. Communication lower bounds for this computation and theoretical algorithms that achieve those lower bounds are presented in [2]. The Multi-TTM
+algorithm that we present in this paper can be seen as a specialization of [2, Alg. 8.1],
+but our implementation is novel. We also highlight previous optimizations of tensor
+computations using dimension trees, a memoization technique. First introduced in
+[26] in the context of computing gradients of the CP decomposition optimization problem, dimension trees have also been used for Tucker decompositions. For example,
+the Higher-Order Orthogonal Iteration (e.g., [15]) benefits from storing and reusing
+intermediate quantities across tensor modes as demonstrated in [20]. We use the dimension tree approach in a different context in one of our randomized algorithms;
+this process is described in § 4.4.
+4. Sequential Algorithms. We present our novel sequential algorithms before
+discussing how they may be implemented in parallel. There are several different
+variations of algorithms we will present, and we provide a hierarchy diagram for how
+they relate in Figure 1. The first optimizations we show, using sequential truncation
+and randomization, have been developed in previous work. We then progress to
+using a Kronecker product of random matrices within the randomized algorithms,
+and then finally reusing Kronecker factors in the HOSVD case. The two most efficient
+algorithms we present are in the leftmost boxes of the two main subtrees: randomized
+STHOSVD with Kronecker products (Alg. 4.3) and randomized HOSVD with reused
+Kronecker factors (Alg. 4.4).
+run
+.T
+c.
+No
+t
+Ra
+ed
+ck
+er
+ne
+HOSVD
+(Alg. 2.1)
+N
+ot
+ro
+rSTHOSVD
+(Alg. 4.2)
+K
+K
+rSTHKron
+(Alg. 4.3)
+STHOSVD
+(Alg. 2.2)
+t
+No
+er
+ck
+ne
+ro
+No
+t
+R
+an
+d
+om
+iz
+No
+t
+nd
+om
+ize
+d
+Seq
+e
+us s
+Re ctor
+Fa
+rHKron-re
+(Alg. 4.4)
+No
+t
+rHOSVD
+(Alg. 4.1)
+rHKron
+(Alg. A.1)
+Fig. 1: Hierarchy of algorithms
+In all the algorithms presented in this section, we employ a holistic truncation approach. Given a tensor X, target rank r = (r1 , . . . , rd ), and oversampling parameter p
+and letting ℓj = rj +p for j = 1, . . . , d, we first apply the randomized range finder algorithm (Alg. 2.3) to each mode unfolding, and obtain an initial core Ĝ ∈ Rℓ1 ×···×ℓd . We
+then apply the truncation phase of Alg. 2.4 by computing a deterministic STHOSVD
+of Ĝ such that Ĝ ≈ G ×1 V1 × · · · ×d Vd . The rank-r representation of X is then
+X ≈ G ×1 Û1 V1 × · · · ×d Ûd Vd .
+5
+4.1. Randomized HOSVD/STHOSVD. The first algorithms we present are
+the basic form of randomized algorithms on which we improve throughout the paper.
+Algs. 4.1 and 4.2 are similar to other randomized projection algorithms for Tucker
+decompositions found in [1, 25] except for the truncation approach. Instead of directly
+applying the randomized SVD algorithm (Alg. 2.4) to each mode unfolding, we take
+the holistic approach described above. We can use this technique both with HOSVD,
+shown in Alg. 4.1, and STHOSVD, shown in Alg. 4.2.
+Algorithm 4.1 Randomized HOSVD
+Algorithm 4.2 Randomized STHOSVD
+1: function [G, {Uj }] = rHOSVD(X, r, p)
+1: function [G, {Uj }] = rSTHOSVD(X, r, p)
+2:
+Ĝ = X
+3:
+for j = 1 : d do
+2:
+for j = 1 : d do
+n⊘ ×ℓ
+3:
+Draw Ω ∈ R j j
+4:
+Ûj = RandRangeFinder(X(j) , Ω)
+5:
+end for
+⊤
+⊤
+6:
+Ĝ = X ×1 Û1 × · · · ×d Ûd
+7:
+[G, {Vj }] = STHOSVD(Ĝ, r)
+8:
+Uj = Ûj Vj for j = 1, . . . , d
+9: end function
+4:
+5:
+r 4 n5 ×ℓ
+Draw Ω ∈ R j j j
+Ûj = RandRangeFinder(Ĝ(j) , Ω)
+⊤
+6:
+Ĝ = Ĝ ×j Ûj
+7:
+end for
+8:
+[G, {Vj }] = STHOSVD(Ĝ, r)
+9:
+Uj = Ûj Vj for j = 1, . . . , d
+10: end function
+4.2. Randomized HOSVD/STHOSVD with Kronecker product. Our
+main algorithm combines the HOSVD/STHOSVD algorithms with a special case
+of the randomized range finder algorithm used on each mode unfolding. Within
+the randomized range finder, we will represent the random matrix Ω as a Kronecker product of random matrices each with a small number of columns instead
+of a single large Ω. This allows us both to employ a Multi-TTM operation instead of matrix multiplication, reducing the computational complexity, and to exploit properties of tall-and-skinny matrices in our parallel algorithms. Specifically, for
+a tensor X ∈ Rn1 ×···×nd , rank r = (r1 , . . . , rd ), and oversampling parameter p with
+⊘
+T
+ℓj = rj +p, define Ωj ∈ Rnj ×ℓj as Ωj = (Φj,d ⊗ · · · ⊗ Φj,j+1 ⊗ Φj,j−1 ⊗ · · · ⊗ Φj,1 ) ,
+sj,k ×nk
+with Φj,k ∈ R
+a random matrix from some distribution (e.g. Gaussian, SRHT,
+etc.), and S ∈ Nd×d a matrix of subranks. We define S to have entries sj,k the k-th
+subrank for mode j where k ̸= j, and diagonal entries sj,j = 1 for j = 1, . . . , d, such
+Qd
+that the row products k=1 sj,k = ℓj , for j = 1, . . . , d. We summarize the steps for
+our algorithm in STHOSVD form in Alg. 4.3 (rSTHKron), and include an HOSVD
+version in Alg. A.1. Note that Lines 5 to 7 in Alg. 4.3 consist of applying randomized range finder to the current mode unfolding using the Kronecker product as our
+random matrix.
+Algorithm 4.3 Randomized STHOSVD with Kronecker product
+1: function [G, {Uj }] = rSTHKron(X, r, p)
+2:
+Ĝ = X
+3:
+Compute matrix of subranks S
+4:
+for j = 1 : d do
+5:
+Draw d − 1 random matrices Φj,k ∈ Rsj,k ×ℓk for k < j and Φj,k ∈ Rsj,k ×nk for k > j
+6:
+Y ← Ĝ ×1 Φj,1 × · · · ×j−1 Φj,j−1 ×j+1 Φj,j+1 × · · · ×d Φj,d
+7:
+Compute thin QR Y (j) = Ûj R
+T
+8:
+Ĝ = Ĝ ×j Ûj
+9:
+end for
+10:
+[G, {Vj }] = STHOSVD(Ĝ, r)
+11:
+Uj = Ûj Vj for j = 1, . . . , d
+12: end function
+6
+Qd
+Choosing subranks. The restriction on the subranks S is that k̸=j sj,k = ℓj =
+rj +p for each row j = 1, . . . d. In practice, we can actually choose the subranks so that
+Qd
+k̸=j sj,k ≥ ℓj . Satisfying this looser condition means we are essentially increasing
+the oversampling we are already doing through parameter p. This frees us to use
+heuristics to choose the subranks. We choose each row of S to be composed of d − 1
+integer factors of ℓj . In the case that ℓj does not have exactly d − 1 integer factors, we
+adjust the oversampling parameter until we can obtain the correct number of factors.
+4.3. Randomized HOSVD with Kronecker Factor Reuse. An additional
+adaption we make to reduce the number of random values generated and computation
+is to reuse the components of the Kronecker product Ω. Instead of generating d − 1
+random matrices for each mode as in Alg. 4.3, we generate d random matrices {Φj }
+once, and use different combinations of d − 1 of those same matrices in each mode.
+This approach is summarized in Alg. 4.4. One benefit of this approach is that we
+generate significantly fewer random entries. We can also, as will be addressed in § 6,
+implement dimension trees to reduce computational cost. This variation only works
+for the HOSVD approach as the size of each Φj remains the same, while it would
+change after each mode in an STHOSVD approach.
+Algorithm 4.4 Randomized HOSVD with Kronecker product re-using factors
+1: function [G, {Uj }] = rHKron(X, r, p)
+2:
+Compute subranks s
+3:
+Draw d random matrices Φk ∈ Rsk ×nk for k = 1, . . . , d
+4:
+for j = 1 : d do
+5:
+Y ← X ×1 Φ1 × · · · ×j−1 Φj−1 ×j+1 Φj+1 × · · · ×d Φd
+6:
+Compute thin QR Y (j) = Uj R
+7:
+end for
+⊤
+⊤
+8:
+Ĝ = X ×1 Û1 × · · · ×d Ûd
+9:
+[G, {Vj }] = STHOSVD(Ĝ, r)
+10:
+Uj = Ûj Vj for j = 1, . . . , d
+11: end function
+Choosing subranks. Note that in this case we compute only one vector of subranks
+s ∈ Nd , instead of a matrix as in Alg. 4.3. We compute these subranks heuristically
+as well, and in this case in a straightforward manner, deriving the formula si =
+Qd
+Qd−1
+1
+⌈( j=1 ℓj ) d−1 /ℓi ⌉, from the conditions s ∈ Nd and k=1 sk ≥ ℓj for j = 1, . . . , d.
+This formula, while more straightforward, is more constricting than the method we
+use to compute subranks for Alg. 4.3 because sj ℓj is approximately fixed for each
+mode j. This can create problems when computing with tensors with skewed modes
+and ranks, so we recommend not reusing Kronecker factors in these cases.
+4.4. Dimension Tree Optimization. In Line 5 of Alg. 4.4, we perform a multiTTM to compute the sketch tensor Y for each mode, resulting in d multi-TTM products. Notice, however, that the d − 1 random matrices that we use in each multi-TTM
+are drawn from the same set of d random matrices {Φ1 , . . . , Φd }. Thus a significant
+number of computations in each multi-TTM are repeated and can be reused. The dimension tree concept, which has been employed to reduce computational complexity
+in other algorithms [7, 20], also applies in this situation. In our implementation, we
+use a binary tree with d leaf nodes for a d-way tensor. For example, given a 4-way
+tensor X and four random matrices {Φ1 , Φ2 , Φ3 , Φ4 }, the 4 multi-TTM operations
+that would be carried out without a dimension tree are shown in the four leaf nodes of
+Figure 2. The dimension tree provides an efficient way to perform the computations
+shared between each pair of adjacent leaf nodes and store the results in memory to
+7
+reduce computation. For a d-way tensor X ∈ Rn×···×n and d random matrices {Φj }
+each of size r × n, the cost of using dimension trees to sketch every unfolding of X is
+shown in Table 1. When r ≪ n, both costs are approximated by the first terms in the
+summations. As d increases, the cost reduction that comes from using a dimension
+tree increases proportionally to d/2.
+X
+X ×3 Φ3 ×4 Φ4
+X ×3 Φ3 ×4 Φ4 ×2 Φ2
+X ×1 Φ1 ×2 Φ2
+X ×3 Φ3 ×4 Φ4 ×1 Φ1
+X ×1 Φ1 ×2 Φ2 ×4 Φ4
+X ×1 Φ1 ×2 Φ2 ×3 Φ3
+Fig. 2: Dimension tree for computing the sketches of a 4-way tensor X in Alg. 4.4.
+d=3
+d=4
+d=5
+with dimTree
+2(2rn3 + 3r2 n2 )
+2(2rn4 + 2r2 n3 + 4r3 n2 )
+2(2rn5 + 2r2 n4 + 3r3 n3 + 5r4 n2 )
+without dimTree
+2(3rn3 + 3r2 n2 )
+2(4rn4 + 4r2 n3 + 4r3 n2 )
+2(5rn5 + 5r2 n4 + 5r3 n3 + 5r4 n2 )
+Table 1: Complexity reduction examples that can be achieved using dimension trees.
+4.5. Computational Complexity. To analyze the computational cost of our
+algorithms, we consider the notationally simpler case with a d-mode tensor X ∈
+Rn×···×n , target rank (r, . . . , r), and oversampling parameter p, letting ℓ = r + p. We
+will also let the subranks {sj,k } and {sk } all be the same value, which we denote as
+s = ℓd−1 . Assume s < r ≪ n.
+There are two dominant costs for each algorithm presented: computing an SVD
+for each mode, and forming the core tensor via a multi-TTM or a series of TTMs
+(in the STHOSVD case). We show the leading terms of both dominant steps for the
+standard algorithms, Algs. 2.1 and 2.2, and compare to those for Algs. 4.1 to 4.4 in
+Table 2. More details on the cost analysis for Algs. 2.1 and 2.2 can be found in [29],
+while more details on the analysis for Alg. 4.1 and Alg. 4.2 can be found in [25]. Based
+on the terms shown in Table 2, we advocate the use of either Alg. 4.3 or Alg. 4.4, and
+we show more detailed analysis on these two algorithms in Appendix B.
+Algorithm
+HOSVD (2.1)
+STHOSVD (2.2)
+rHOSVD (4.1)
+rSTHOSVD (4.2)
+rSTHOSVDkron (4.3)
+rHOSVDkronreuse (4.4)
+Leading term
+SVD
+TTM
+dnd+1
+2rnd
+nd+1
+2rnd
+2dℓnd
+2ℓnd
+2ℓnd
+2ℓnd
+1
+d
+d−1
+2ℓ
+2ℓnd
+n
+1
+d
+4ℓ d−1 n
+2ℓnd
+Table 2: Computational Cost
+4.6. Comparison with Previous Work. We compare our sequential algorithms with previous approaches, in particular those based on the use of randomized
+SVD [25] and Kronecker-structured random matrices [11]. As summarized in [1],
+8
+randomization can be used in multiple ways to compute Tucker approximations of
+tensors. The most similar approaches to Algs. 4.1 and 4.2 are [25, Algs. 3.1 and
+3.2]. These algorithms replace the deterministic SVD within Algs. 2.1 and 2.2 with
+randomized SVD (Alg. 2.4). The randomized SVD requires computing the thin SVD
+of the projection of the approximate column space; it increases the computational
+cost compared to randomized range finder by a constant factor greater than 2. Because Algs. 4.1 and 4.2 use randomized range finder (Alg. 2.3), they involve only one
+operation with the input (the random sketch) at the expense of working with the
+oversampled rank ℓ rather than the target rank r until the final core truncation step.
+The oversampled ranks are only slightly larger than the target ranks, so Algs. 4.1
+and 4.2 are computationally cheaper than [25, Algs. 3.1 and 3.2].
+The Kronecker-structured random sketches of Algs. 4.3 and 4.4 are similar to
+[11, Alg. 3.1]. This algorithm uses a Sampled Random Fourier Transform to sketch
+each mode’s matricization within STHOSVD. Besides using a complex-valued random
+matrix, the key difference with Alg. 4.3 is the truncation strategy: after computing
+the thin QR decomposition of the sketched matrix with ℓ columns, all but the first r
+columns are truncated. As we demonstrate in § 7.1, our truncation strategy using a
+deterministic STHOSVD of the core tensor computes a more accurate approximation.
+To the best of our knowledge, reusing Kronecker factors and exploiting the possible memoization of temporary quantities as presented in § 4.3 and 4.4 have not been
+considered before.
+5. Error Analysis. We now present error guarantees for Algs. 4.3 and 4.4.
+Let T = [G; U1 , . . . , Ud ] be the approximation from either algorithm, and T̂ =
+[Ĝ; Û1 , . . . , Ûd ] be the intermediate rank-ℓ approximation. The overall form of the
+error is
+εtotal = ∥X − T∥ ≤ ∥X − T̂∥ + ∥T̂ − T∥ = εrand + εcore ,
+where εrand represents the error from forming the rank-ℓ approximation, and εcore
+represents the error in truncating the approximation to rank r. The component εcore
+is equivalent to the error in computing the STHOSVD of Ĝ, which we can see from
+
+
+εcore = ∥ Ĝ − G ×1 V1 × · · · ×d Vd ×1 Û1 × · · · ×d Ûd ∥ = ∥Ĝ − G ×1 V1 × · · · ×d Vd ∥,
+where the second equality follows from the orthonormality of {Ûj }. We can then
+2
+apply the error bound
+for
+ STHOSVD [29, Theorem 6.5] to initial core Ĝ, i.e, εcore ≤
+
+Pd Pℓj
+2
+i=rj +1 σi Ĝ(j) , where σi (A) denotes the ith singular value of A.
+j=1
+Then, as Ĝ is a random quantity, we need to relate the singular values of Ĝ(j)
+to the singular values of X(j) to get a deterministic upper bound. Because matrices
+{Ûj } are orthonormal, the mode-wise singular values of Ĝ cannot be larger than those
+of X. A formal proof of this fact can be found in Appendix C. Thus, we have
+(5.1)
+ε2core ≤
+ℓj
+d
+X
+X
+
+σi2 X(j) .
+j=1 i=rj +1
+The rest of this section considers the component εrand . Starting with an error
+bound for randomized range finder (Alg. 2.3) using a Kronecker product of SRHT
+matrices, we extend the results to an error bound for our HOSVD-type algorithm
+(Alg. 4.4) and discuss how to adapt the proof for our STHOSVD-type algorithm
+(Alg. 4.3).
+9
+5.1. Matrix Bound. Q
+Qq
+q
+Random Matrix. Let n = j=1 nj and ℓ = j=1 sj . We will consider a Kronecker
+product of SRHT matrices of the form
+Ω = D(H1 ⊗ H2 ⊗ · · · ⊗ Hq ) ∈ Rn×ℓ ,
+(5.2)
+where D ∈ Rn×n is a diagonal matrix with i.i.d. entries from the Rademacher distribution, i.e. either 1 or −1 with equal probability, and for each j = 1, . . . , q, Hj ∈ Rnj ×sj
+is formed from sj randomly sampled columns of an nj × nj Walsh-Hadamard matrix scaled by √1nj . Due to this scaling, Ω is orthonormal. Also note that the {Hj }
+matrices are generated independently.
+Notation. We now introduce the setup and notation for our main theorem. Following the notation of [17], let X = UΣV⊤ be the SVD of matrix X ∈ Rm×n with
+m ≤ n. Fix target rank r, and partition the SVD as
+
+  ⊤
+Σ1
+V1
+(5.3)
+X=U
+,
+Σ2 V ⊤
+2
+with Σ1 ∈ Rr×r , Σ2 ∈ R(m−r)×(m−r) , V1 ∈ Rn×r , and V2 ∈ Rn×(m−r) such that V1
+and V2 have orthonormal columns. Now let Ω ∈ Rn×ℓ be the random matrix defined
+in (5.2), and define
+Ω2 = V⊤
+2 Ω.
+Ω1 = V ⊤
+1 Ω,
+(5.4)
+We are interested in bounding the largest singular values of Ω†1 and Ω2 . We will
+use the orthonormality of Ω2 to bound its largest singular values, but the argument
+is more complicated for Ω1 . Here we will adapt the approach in [31], allowing for the
+application to a Kronecker product of independent SRHT matrices and making other
+minor improvements. This bound is stated in Lemma 5.1, which we will then use to
+prove our approximation error bound. We prove Lemma 5.1 in Appendix D.
+Lemma 5.1. Let Ω1 ∈ Rr×ℓ as defined in (5.4), with Q
+Ω ∈ Rn×ℓ the Kronecker
+Qq
+q
+product of q SRHT matrices as defined in (5.2), where n = j=1 nj and ℓ = j=1 sj .
+Let α, β > 1 be real numbers that satisfy
+(5.5)
+min{sk } ≥
+k
+α2 β
+(r2 + r).
+(α − 1)2
+1
+Then σ2 1(Ω1 ) ≤ αn
+ℓ , with probability at least 1 − β 2 .
+min
+Remark 5.2. The bound in Lemma 5.1 contains a factor of n, the number of
+rows of Kronecker product Ω. This factor is not present in singular value bounds for
+Gaussian random matrices, and is a consequence of using SRHT matrices, as seen in
+bounds involving a single SRHT matrix in [28]. We choose to use SRHT instead of
+Gaussian matrices in our context because the Kronecker product of Gaussian matrices
+is no longer Gaussian, while the Kronecker product of SRHT matrices retains some
+SRHT properties. In the empirical results shown in § 7.1, we see that using SRHT
+matrices produces similar accuracy to Gaussian matrices; we anticipate that future
+work in random matrix theory will be able to improve this factor.
+Theorem 5.3. Let X̂ = QQ⊤ X be the approximation given by the randomized
+range finder of matrix X ∈ Rm×n with target rank r, oversampling parameter p such
+that ℓ = r + p ≤ min{m, n}, and random sampling matrix Ω as defined in (5.2). Let
+α, β > 1 satisfy (5.5). Then, with probability at least 1 − β12 ,
+10
+
+1/2
+
+ min{m,n}
+X
+αn
+∥X − QQ⊤ X∥F ≤  1 +
+σi2 (X) .
+ℓ
+i=r+1
+Proof. Immediately from [17, Theorem 9.1] and recalling the partitioning from
+(5.3) and (5.4), we have
+(5.6)
+∥X − QQ⊤ X∥2F = ∥(I − QQ⊤ )X∥2F ≤ ∥Σ2 ∥2F + ∥Σ2 Ω2 Ω†1 ∥2F
+
+
+≤ 1 + ∥Ω2 ∥22 ∥Ω†1 ∥22 ∥Σ2 ∥2F ,
+We can apply the singular value bounds from Lemma 5.1 to obtain the bounds for
+2
+∥Ω†1 ∥22 . With probability at least 1 − β12 , ∥Ω†1 ∥22 = σ2 1(Ω1 ) ≤ αn
+ℓ . For ∥Ω2 ∥2 ,
+min
+⊤
+we use properties of both V2 and Ω: ∥Ω2 ∥2 = ∥V⊤
+2 Ω∥2 ≤ ∥Ω∥2 = 1, as V2
+has orthonormal rows, and Ω has orthonormal columns as the Kronecker product of matrices with orthonormal columns. Combining these bounds, we obtain
+1
+∥Ω2 ∥22 ∥Ω†1 ∥22 ≤ αn
+ℓ with probability at least 1 − β 2 . From (5.6), we now have
+
+
+P
+min{m,n} 2
+∥Σ2 ∥2F = 1 + αn
+∥X − QQ⊤ X∥2F ≤ 1 + αn
+σi (X), and the result foli=r+1
+ℓ
+ℓ
+lows.
+5.2. Tensor Bound. To generalize the result from Theorem 5.3 to higher dimensions, we first need a result that expresses the error in a Tucker decomposition in
+terms of the error in each mode.
+Lemma 5.4 ([29, Theorem 5.1]). Let X ∈ Rn1 ×···×nd and let Pj ∈ Rnj ×nj for
+j = 1, . . . , d be a sequence of orthogonal projectors. Then
+d
+∥X − X
+×
+Pj ∥2 =
+j=1
+d
+X
+j−1
+∥X
+j=1
+×
+Pi ×j (I − Pj ) ∥2 ≤
+i=1
+d
+X
+∥X − X ×j Pj ∥2 .
+j=1
+Qd
+Recall the notation n⊘
+j =
+k̸=j nk . We present our main error bound result in
+Theorem 5.5, which we frame as the error bound for Alg. 4.4. This result can be
+adapted to also apply to Alg. 4.3 by following similar techniques to [25, Theorem 3.2].
+We include the details for completeness in Appendix E.
+Theorem 5.5. Let T = [G; U1 , . . . , Ud ] be the approximation given by Alg. 4.4
+to X ∈ Rn1 ×···×nd with target rank r = (r1 , . . . , rd ) and oversampling parameter p.
+Let ℓj = rj + p for j = 1, . . . , d. Then, for sequences {αj }dj=1 and {βj }dj=1 satisfying
+Pd
+(5.5), the following bound holds with probability at least 1 − j=1 β12 ,
+j
+1/2
+
+1/2 
+! nj
+ℓj
+d
+d
+X
+X
+X
+X
+
+αj n⊘
+j
+1+
+σi2 X(j)  .
+∥X − T∥ ≤ 
+σi2 (X(j) ) + 
+ℓ
+j
+j=1
+i=r +1
+j=1 i=r +1
+j
+j
+Proof. Using (5.1) to bound εcore , we need only to bound εrand . From Lemma 5.4,
+we have for T̂ = [Ĝ; Û1 , . . . , Ûd ] computed as the intermediate rank-ℓ approximation,
+d
+∥X− T̂∥2 = ∥X−X
+×
+j=1
+⊤
+Ûj Ûj ∥2 ≤
+d
+X
+⊤
+∥X−X×j Ûj Ûj ∥2 =
+j=1
+d
+X
+⊤
+∥X(j) − Ûj Ûj X(j) ∥2F ,
+j=1
+where the last equality comes from unfolding the tensor along the j-th mode for
+j = 1, . . . d. We now apply the matrix bound from Theorem 5.3 on each term in this
+11
+⊤
+sum, which gives ∥X(j) − Ûj Ûj X(j) ∥2F ≤
+
+1+
+αj n⊘
+j
+ℓj
+
+Pnj
+2
+i=rj +1 σi (X(j) ), except with
+failure probability at most β12 . Then the failure probability for the entire sum is the
+j
+union of all d failure probabilities for each mode, which is bounded above by the sum
+of those probabilities by the union bound. Thus,
+(5.7)
+d
+X
+d
+X
+⊤
+∥X − T̂∥2 ≤
+∥X(j) − Ûj Ûj X(j) ∥2F ≤
+j=1
+j=1
+except with probability at most
+α j n⊘
+j
+1+
+ℓj
+!
+nj
+X
+σi2 (X(j) ),
+i=rj +1
+Pd
+1
+j=1 βj2 . Then, taking square roots gives εrand .
+Combining (5.7) and (5.1), the total error in approximation is
+
+1/2 
+1/2
+! nj
+ℓj
+d
+d
+X
+X
+X
+X
+
+αj n⊘
+j
+εtotal ≤ 
+1+
+σi2 (X(j) ) + 
+σi2 X(j)  ,
+ℓ
+j
+j=1
+i=r +1
+j=1 i=r +1
+j
+with probability at least 1 −
+j
+Pd
+1
+j=1 βj2 .
+We consider this result pessimistic due to the factor of n⊘
+j that comes directly
+from our analysis of SRHT matrices, but does not appear in our accuracy experiments
+in § 7.1. We anticipate that this factor could be improved in future analysis. Also
+note that the result of Theorem 5.5 differs from [11, Theorem 4.2] in two main ways:
+our probability of failure is smaller ( β12 per mode compared to β1 ), and our constant in
+εrand is smaller as we divide by ℓj for each j. Additionally, we use a different diagonal
+matrix that is not a Kronecker product.
+6. Parallel Algorithms. We design and develop parallel implementations for
+all the randomized algorithms listed in Table 2. Our implementations are based
+on TuckerMPI [3], which uses the STHOSVD algorithm. Similarly to TuckerMPI,
+our implementations leverage distributed-memory clusters to efficiently compute the
+Tucker decomposition of large multidimensional datasets. We employ the following
+data distribution scheme, proposed in [3], in our implementations. To distribute
+a d-way input tensor, the processors are organized in a d-way processor grid, the
+dimensions of which are user-determined. Each processor owns a subtensor of the
+input tensor. For example, for a 8 × 6 × 2 tensor and a 2 × 3 × 1 processor grid, each
+processor owns a 4 × 2 × 2 subtensor. All matrices involved in our algorithms are
+stored redundantly by every processor.
+In the following sections we describe two optimizations for computing the sketch
+tensor via multi-TTMs as well as parallel implementations of the two algorithms from
+§ 4 with the smallest computational cost, Alg. 4.3 and Alg. 4.4. We also compare our
+implementations with previous work from [12].
+6.1. All-at-Once Multi-TTM. The multi-TTM operation is one of the most
+expensive kernels of our algorithms and appears twice; we compute a multi-TTM both
+to form the sketch tensor Y and to form the core tensor Ĝ (e.g. in Line 5 of Alg. 4.4).
+It is thus crucial to optimize this operation.
+A parallel implementation of a single TTM is proposed in [3]. One way to implement the multi-TTM is to simply perform this existing TTM algorithm multiple
+times, as shown in Alg. 6.1; we call this approach the in-sequence multi-TTM or
+IS-mTTM. Note that in the algorithms bars over letters denote local data. In this
+12
+in-sequence approach, a reduce-scatter is performed at the end of each TTM operation, reducing the amount of data each processor owns so that the computation cost
+in the next TTM is also reduced. Generally, this approach performs additional communications to obtain lower computational cost. However, depending on the size of
+the local tensor, the reduction in computational cost may not justify the increased
+communication cost.
+Our algorithm is shown in Alg. 6.2, which we call the all-at-once multi-TTM or
+Algorithm 6.1 In-sequence multi-TTM
+Algorithm 6.2 All-at-once multi-TTM
+1: function Ȳ = IS-mTTM(X̄, j, {Mj }, P)
+2:
+(p1 , . . . , pd ) = procID(P)
+3:
+T̄ = X̄
+4:
+for i = 1 : d and i ̸= j do
+5:
+F = P(p1 , . . . , pi−1 , :, pi+1 , . . . , pd )
+6:
+T̄(i) = M̄i T̄(i)
+7:
+Ȳ (i) =Reduce-Scatter(T̄(i) , F)
+8:
+end for
+9: end function
+1: function Ȳ = AAO-mTTM(X̄, j, {Mj }, P)
+2:
+(p1 , . . . , pd ) = procID(P)
+3:
+T̄ = X̄
+4:
+for i = 1 : d and i ̸= j do
+5:
+T̄(i) = M̄i T̄(i)
+6:
+end for
+7:
+S = P(:, . . . , :, pj , :, . . . , :)
+8:
+Ȳ (j) = Reduce-Scatter(T̄(j) , S)
+9: end function
+AAO-mTTM. In this approach, we avoid communication until all matrices have been
+multiplied with the local tensor. This strategy reduces communication by increasing
+the cost of storage and computation.
+The most significant difference between Alg. 6.1 and Alg. 6.2 is that at the end
+of any iteration i of the in-sequence approach, we form the intermediate result Y =
+X ×1 M1 × · · · ×i Mi ; in the all-at-once approach, each processor stores a contribution
+to Y until all iterations are completed and the all-reduce at the end of the algorithm
+forms the final result.
+6.1.1. Cost Analysis. To simplify the notation, we assume that the input tensor is a d-way cubic tensor X ∈ Rn×···×n , that the processor tensor is size q in each
+mode (q d = P processors in total), and that the input matrices {Mi }di=1 are of the
+same size s × n with s < n. With this notation, we analyze the per-processor compuation and communication costs of performing the multi-TTM X ×1 M1 × · · · ×j−1
+Mj−1 ×j+1 Mj+1 ×· · ·×d Md using Alg. 6.2 and compare it with that of using Alg. 6.1.
+The computational cost of Alg. 6.1 can be written as
+!
+ d
+
+d
+X
+sn
+s2 nd−1
+sd n
+si nd−i+1
+(6.1)
+Cin-sequence = 2
++
++ ... + d = 2
+,
+qd
+qd
+q
+qd
+i=1
+and the computational cost of Alg. 6.2 can be written as
+
+(6.2)
+Call-at-once = 2
+snd
+s2 nd−1
+sd n
++ d−1 + ... + 2
+d
+q
+q
+q
+
+=2
+d
+X
+si nd−i+1
+i=1
+q d−i+1
+!
+.
+The ith terms of the summations in both (6.2) and (6.1) represent the cost of
+multiplying the local factor matrix M̄i of size s × nq and the ith mode unfolding
+of tensor Ȳ = X̄ ×1 M̄1 × · · · ×i−1 M̄i−1 . In Alg. 6.1, due to the reduce-scatter
+i−1 d−i
+n
+. In Alg. 6.2, M̄i is of the same size.
+at each iteration, Ȳ(i) is of size nq × s qd−1
+i−1
+d−i
+n
+However, since the reduction is delayed until the last mode, Ȳ(i) is of size nq × s qd−i
+.
+Comparing (6.1) and (6.2), it is easy to see that the computational cost of an all-atonce multi-TTM is always higher than that of an in-sequence multi-TTM because
+13
+each of the summands in (6.2) is at least as large as the corresponding term in (6.1).
+This increase can be small, however, in certain cases. Note the two series of summands
+are geometric and have the same leading term. For (6.1), the ratio of the series is ns
+while the ratio of the series in (6.2) is sq
+n . As the subranks become smaller compared
+to the tensor dimensions (i.e. s ≪ n), the sums of the two series get closer to their
+first terms and thus their difference becomes smaller.
+Using the same notations and the α-β-γ model [8], we can express the communication cost of Alg. 6.1 and Alg. 6.2. In Alg. 6.2, there is only one communication
+step at the end where all P processors communicate their local tensor T̄. T̄ is a d-way
+tensor with size s for all of its modes except for the jth mode which has size nq . There d−1 
+fore, the communication cost for each processor is: αO(log P ) + βO s q n . The
+communication cost of Alg. 6.1 is more complicated because there are d − 1 communication steps and each one involves T̄ (i) which is changing in size. At the ith iteration
+i−1 d−i
+n
+of the for loop, T̄ (i) has size s × s qd−1
+. Therefore, the communication cost can be
+P
+
+ d−1 
+d−1 si nd−i
+sn
+written as αO(d log q) + βO
+=
+αO(log
+P
+)
++
+βO
+. We obtain
+d−1
+i=1 q
+q d−1
+the right hand side of the equation using the assumption that s ≪ n so that the
+summation is approximated by its first summand. When sq < n, the communication
+n
+cost of all-at-once multi-TTM is smaller. As the ratio sq
+increases, the benefits of
+using all-at-once multi-TTM become more substantial.
+6.2. Dimension Tree Optimization. In § 4.4, we discuss how dimension trees
+can be used to make the randomized sketches less expensive for Alg. 4.4. In Alg. 6.3,
+we present an implementation using AAO-mTTM. Here, m and n are sets of integers
+in the range [1, d]. This algorithm returns Y(j) , the sketch of X(j) in tensor format,
+for all integers j ∈ [1, d]. Since dimension trees are a tool for reusing only local
+intermediate results, Alg. 6.3 can also be modified to use IS-mTTM.
+Algorithm 6.3 All modes multi-TTM using the dimension tree optimization and
+all-at-once multi-TTM.
+1: function {Y(j) } =All-Modes-Multi-TTM(X̄, {Φ̄j }, m, n, P)
+2:
+(p1 , . . . , pd ) = procID(P)
+3:
+Ȳ = X̄
+4:
+for i ∈ n do
+5:
+Ȳ (i) = Φ̄i Ȳ (i)
+6:
+end for
+7:
+if m only contains 1 integer, j then
+8:
+S = P(:, . . . , pj , . . . , :)
+(j)
+9:
+Ȳ
+= Reduce-Scatter(Ȳ, S)
+10:
+else
+11:
+split m in equal half m1 and m2
+12:
+All-Modes-Multi-TTM(Ȳ, {Φ̄j }, m1 , m2 , P)
+13:
+All-Modes-Multi-TTM(Ȳ, {Φ̄j }, m2 , m1 , P)
+14:
+end if
+15: end function
+6.3. Principal Algorithms. We now combine the discussed multi-TTM approaches and the dimension tree optimization within parallel implementations of our
+two best algorithms, Algs. 4.3 and 4.4. The pseudocode is provided in Algs. 6.4
+and 6.5, respectively. Note that for both of these algorithms, when the size of core Ĝ
+is large, it is better to perform the in-sequence multi-TTM as described in Alg. 6.1 to
+produce a distributed Ĝ so that the parallel STHOSVD can be used to reduce cost.
+14
+When Ĝ is very small, performing STHOSVD in parallel can be counterproductive as
+the communication cost will dominate; it is better in this case to perform an all-gather
+among all processors after the in-sequence multi-TTM, producing Ĝ redundantly on
+every processor and then use the sequential STHOSVD.
+Algorithm 6.4 Parallel algorithm for Alg. 4.3
+1: function rSTHKron(X, r, p, P)
+▷ X is distributed, the local part of X is denoted as X̄
+2:
+Ĝ = X
+3:
+Redundantly compute matrix of subranks S
+4:
+for i = 1:d do
+5:
+for j = 1:d and j ̸= i do
+6:
+Redundantly draw d − 1 random matrices Φi,j ∈ Rnj ×si,j
+7:
+end for
+8:
+Ȳ ← AAO-mTTM(Ĝ, i, {Φi,1 . . . Φi,d }, P)
+▷ Can also use in-sequence multi-TTM
+9:
+Y = All-Gather(Ȳ, P)
+10:
+Ûi = QR(Y (i) )
+▷ QR is serial as every processor owns global Y
+T
+▷ For a single TTM we use the implementation proposed in [3]
+11:
+Ĝ ← TTM(Ĝ, Ûi , i)
+12:
+end for
+13:
+[G, {Vi }] = STHOSVD(Ĝ, r)
+14:
+for i = 1, . . . , d do
+15:
+Ui = Ûi Vi
+▷ Computed with local matrix multiplication
+16:
+end for
+17: end function
+Algorithm 6.5 Parallel algorithm for Alg. 4.4 with all-at-once multi-TTM and dimension trees
+1: function rHKron-re(X, r, p, P)
+2:
+Compute subranks s
+3:
+for i = 1:d do
+4:
+Redundantly draw d − 1 random matrices Φi ∈ Rsi ×ni
+5:
+end for
+6:
+{Y(1) , . . . , Y(d) } = All-Modes-Multi-TTM(X̄, {Φ1 , . . . , Φd }, {1, . . . , d}, ∅, P)
+7:
+for i = 1:d do
+(i)
+8:
+Ûi =QR(Y (i) )
+▷ Serial QR decomposition of the mode i unfolding of Y(i)
+9:
+end for
+T
+T
+10:
+Ĝ = IS-mTTM(X̄, ∅, {Û1 , . . . , Ûd }, P)
+11:
+[G, {Vj }] = STHOSVD(Ĝ, r)
+12:
+for i = 1, . . . , d do
+13:
+Ui = Ûi Vi
+▷ Computed with local matrix multiplication
+14:
+end for
+15: end function
+6.4. Comparison to Previous Work. We compare our parallel algorithms
+with previous approaches, namely the parallel STHOSVD algorithm in [3] and the
+approach from [12]. Assume that the input tensor is a d-way tensor X ∈ Rn×···×n
+with rank (r, r, . . . , r) and that each mode of the d-way processor tensor has size q. We
+also assume that s < r < l ≪ n where s is the subrank for each mode and ℓ = r + p
+with p the oversampling parameter. Here s = ℓ1/(d−1) ≈ r1/(d−1) . In [12], Choi
+et al. proposed a data distribution scheme and a tensor matricization strategy that
+reduces the communication costs of the Gram and TTM kernels. More specifically, in
+this new method, before the Gram computation, communication is performed every
+other mode to redistribute the tensor unfolding from a 2D distribution to a blockcolumn 1D distribution, which can avoid the communication cost of the later TTM
+operations required to form the core tensor. This method is shown to achieve speedup
+15
+over the parallel implementation proposed in [3]. However, these optimizations are not
+suitable for our randomized algorithms for the following reason. Instead of computing
+the Gram matrix of each mode unfolding, we compute each mode sketch with a multiTTM. Since each sketch is much smaller at the end of the multi-TTM, it is beneficial
+to delay communicating the sketches as much as possible before all multi-TTM’s are
+completed. However, the redistribution proposed by [12] requires every processor to
+communicate the entire uncompressed local tensor before the computation. While
+[12] also uses randomization to reduce computation, their focus is on reducing the
+cost of computing the eigenvectors of the Gram matrix, which is achieved by using a
+modified randomized SVD to replace the eigendecomposition.
+To illustrate the benefit of using Kronecker-structured random matrices, we also
+compare Alg. 6.4 and Alg. 6.5 with the parallel version of Alg. 4.2, which uses dense
+Gaussian random matrices. The parallelized Alg. 4.2 is very similar to Alg. 6.4 with
+the only difference being that we use the parallel multi-TTM to apply the Kroneckerstructured random matrices to the input tensor while in parallelized Alg. 4.2 we use a
+single parallel TTM operation to apply each of the dense Gaussian random matrices.
+Algorithm
+Form {U}
+Form {U}
+Form G
+Form G
+comp cost
+comm cost
+comp cost
+comm cost
+nd+1
+P
+d
+αO(dP 1/d ) + βO( nP )
+d
+2 rn
+P
+αO(log P ) + βO( rn
+1−1/d )
+STHOSVD [3]
+n
+[12]
+d+1
+d
+P
+r
+Alg. 6.4
+2
+Alg. 6.5
+4r
+1/(d−1)
+n
+d
+P
+1/(d−1)
+P
+nd
+d
+d−1
+P
+αO(dP ) + βO( nP )
+2 rn
+P
+αO(d log P ) + βO( drn
+)
+P 1/d
+d
+2 rn
+P
+αO(log P ) + βO( rn
+1−1/d )
+αO(d log P ) + βO( drn
+1/d )
+2 rn
+P
+d
+αO(log P ) + βO( rn
+1−1/d )
+P
+d−1
+P
+d−1
+P
+Table 3: Comparison of computation and communication cost per processor. More
+details can be found in Appendix G.
+7. Experimental Results. We now demonstrate the numerical benefits of our
+algorithms by considering the accuracy of our sequential algorithms in § 7.1, the
+performance of the multi-TTM and dimension tree optimizations in § 7.2 and 7.3,
+respectively, and the performance of the parallel implementations of our randomized
+algorithms on synthetic data in § 7.4 and on two real datasets in § 7.5 and 7.6.
+Computing platform. The results shown in § 7.1 are generated by running MATLAB implementations of the sequential algorithms on a single node server. The experiments shown from § 7.2 to § 7.6 are run on the Andes cluster at Oak Ridge
+Leadership Computing Facility. The system consists of 704 compute nodes with 2
+AMD EPYC 7302 16-core CPU’s and 256 GB of RAM. We directly call OpenBLAS
+and the Netlib implementation of LAPACK for local linear algebra kernels, which are
+the only available libraries on Andes.
+7.1. Accuracy Results. We present an experiment on a synthetic tensor that
+demonstrates the accuracy of our algorithms compared to existing deterministic and
+randomized algorithms. In this experiment, we use both SRHT and Gaussian random
+matrices to compare numerical accuracy to the theoretical results we derived in § 5.
+We construct a synthetic 3-way tensor X ∈ R500×500×500 by forming a (super-)
+diagonal tensor with geometrically decreasing entries and multiplying that tensor by
+a random orthogonal matrix along each mode. We set the largest entry of the original
+tensor to be 1 and choose the rate at which the core entries decrease to be 0.4 so that
+the 40th entry is approximately machine precision. In our experiment, we compress
+16
+this tensor to rank (10, 10, 10) using an oversampling parameter of p = 5. We show
+boxplots of the relative error over 100 trials in Figure 3, comparing results from all our
+algorithms (Algs. 4.1 to 4.4) using Gaussian random matrices as well as our principal
+algorithms (Algs. 4.3 and 4.4) using SRHT random matrices. We also compare our
+truncation strategy to the strategy in [11], and compare the relative error from all
+randomized algorithms to the relative error obtained from deterministic STHOSVD,
+Alg. 2.2.
+In Figure 3, we see that the relative errors for all our randomized algorithms
+deviate from the deterministic relative error by at most 10% for the given rank (the
+medians are within 1%) Also, the relative errors for each trial are very close together
+with each algorithm, as even the outliers are within the same order of magnitude,
+with a standard deviation of 1.9 × 10−5 . Regardless of random matrix distribution
+or whether we reuse Φj matrices or generate new matrices for each mode, we do not
+lose significant accuracy compared to either the deterministic or standard randomized
+approaches. We can also see that the truncation strategy we employ in Algs. 4.1 to 4.4
+is much more consistently accurate than the strategy in [11].
+1.2
+·10−4
+Gaussian Random Matrices
+STHOSVD
+1.15
+1.2
+SRHT Random Matrices
+·10−4
+·10−3
+Truncation Comparison (Gaussian)
+4
+1.15
+1.1
+1.1
+1.05
+1.05
+1
+1
+3
+2
+1
+[1
+1
+]t
+ru
+nc
+.
+4.
+3
+lg
+.
+lg
+A
+A
+.4
+.4
+.3
+lg
+.4
+A
+.4
+.4
+.3
+.4
+lg
+A
+4.
+lg
+A
+lg
+.
+A
+A
+lg
+.4
+.1
+2
+0
+Fig. 3: Boxplots of relative errors for our randomized algorithms using Gaussian
+random matrices (left) and SRHT random matrices (center) compared to the relative
+error for STHOSVD for the synthetic tensor with geometrically decreasing values. We
+also compare the truncation methods we use to those used in [11] (right).
+We show an additional accuracy experiment in Appendix F. Overall, we see comparable relative error for Algs. 4.3 and 4.4 to both deterministic STHOSVD and
+existing randomized approaches. While our theoretical results (Theorem 5.5) apply
+only to SRHT matrices, these experimental results suggest that Gaussian matrices
+perform comparably in terms of accuracy.
+7.2. In-Sequence TTM vs All-At-Once TTM. To compare the performance
+of the two TTM approaches we discuss in § 6.1, we conduct an experiment performing
+an in-sequence multi-TTM and an all-at-once multi-TTM of a 3-way tensor X ∈
+R800×800×800 with matrices U, V, W ∈ Rs×800 , with varying s. For this experiment,
+we use 64 cores (2 nodes) arranged in a 4 × 4 × 4 processor grid. The results of
+this experiment are shown in Figure 4a, where we can see that when the matrices
+have relatively few rows (when sq ≪ n), the all-at-once multi-TTM is much more
+communication-efficient. We observe speedups ranging from 27% to over 2×. This
+n
+fits our prediction in § 6.1. However, when sq
+is very large (i.e. the s = 5 case), both
+n
+algorithms are cheap and communication is not as dominant. When sq
+is small, allat-once multi-TTM has increased computational cost, and also loses its advantage in
+communication cost. In this case, in-sequence multi-TTM is preferred to all-at-once
+multi-TTM. For this reason, we think the all-at-once optimization is more suitable
+for the sketching phase where the random matrices tend to have very few rows.
+17
+Note that the gray bars in Figure 4a represent overhead cost. For in-sequence
+multi-TTM, this overhead mainly comes from reorganizing the data in memory before
+and after communication (MPI collectives). Since all-at-once multi-TTM avoids those
+communication steps, it also avoids those reorganizing costs. For higher dimensions,
+n
+the benefits of all-at-once multi-TTM still depend on sq
+being large. If this ratio is
+fixed, all-at-once multi-TTM will continue to outperform in-sequence multi-TTM.
+7.3. Dimension Tree Optimization. To demonstrate the benefits of using dimension trees, we run Alg. 4.4 with and without dimension trees on synthetic tensors
+with an increasing number of modes such that the total size of the input tensor and
+its rank are kept close to constant. We benchmark the time it takes for both methods
+to apply the random matrices {Φ} to the input tensor and present the results in Figure 4b. This computation corresponds to Line 5 of Alg. 4.4. Since the communication
+and overhead costs are low, we see that the practical speedup from using dimension
+trees aligns closely with the theoretical prediction, with a computational reduction of
+d/2 as described in § 4.4.
+·10−2
+0.84
+IS-computation
+IS-communication
+IS-others
+AAO-computation
+AAO-communication
+AAO-others
+Seconds
+10
+noDimTree-comp
+noDimTree-comm
+noDimTree-others
+dimTree-comp
+dimTree-comm
+dimTree-others
+3
+5
+Seconds
+15
+1.39
+2
+1.53
+1.98
+2.62
+1
+0
+1.27
+1.35
+5
+10
+1.49
+2.17
+20
+40
+80
+0
+160
+s
+(a) Comparing the performance of all-atonce multi-TTM and in-sequence multiTTM by multiplying a 800 × 800 × 800
+synthetic tensor with an s × 800 matrix
+on all modes (s ∈ [5, 160]). The processor
+grid used is 4 × 4 × 4. The labels on top of
+bars indicate the overall speedup achieved
+by all-at-once multi-TTM compared to insequence multi-TTM.
+d=3
+n=4000
+s=20
+d=4
+n=500
+s=5
+d=5
+n=145
+s=3
+(b) Performance gain by using the dimension
+tree optimization for Alg. 4.4. We compute the
+sketch of a cubic synthetic n-way tensor where
+each mode has the same size n, resulting in a
+cubic d-way core tensor with each mode having
+the same size s. The labels on top of the bars
+show speedup gained by using dimension trees.
+Fig. 4: Performance benefits of our multi-TTM and dimension tree optimizations
+7.4. Strong scaling on synthetic data. In this experiment we benchmark four
+variations of our randomized algorithms and STHOSVD as a baseline, scaling from 2
+nodes (64 cores) to 32 nodes (1024 cores) on a fixed problem size. The input tensor is
+a 410 × 410 × 410 × 410 single-precision synthetic tensor (≈ 113 GB) constructed from
+multiplying a 20 × 20 × 20 × 20 randomly generated core with four 410 × 20 random
+matrices. No noise is added to this synthetic tensor so it is exactly low rank. This
+size is close to the largest tensor we can fit in the memory of 2 nodes, which makes
+the timing results more consistent and less influenced by noise in the system. Any
+order of modes used to compute the multi-TTM will not affect the performance as the
+tensor size and rank are the same across modes. All six algorithms are given target
+ranks (20, 20, 20, 20) and the randomized ones use oversampling parameter p = 3.
+The results are presented in Figure 5, where we see that all six algorithms presented scale well to 1024 cores. All randomized algorithms outperform the determinis18
+tic STHOSVD, and the randomized algorithms that use Kronecker-structured random
+matrices outperform the parallel version of Alg. 4.2. A noticeable speedup of 3–4×
+is achieved by using Alg. 6.4 compared to STHOSVD. The second-best algorithm is
+Alg. 6.5 with the dimension tree optimization achieving 2–3× speedup. Note that
+the use of all-at-once multi-TTM provided little improvement over in-sequence multiTTM in this case, because the compression ratio is very high so the multi-TTMs are
+not bottlenecks. We can also see that the dimension tree optimization does provide
+noticeable and consistent speedup for Alg. 6.5.
+STHOSVD
+parallel 4.2
+6.4 without AAO-mTTM
+6.4
+6.5 without dimTree
+6.5
+4
+Seconds
+2
+1
+0.5
+0.25
+64
+128
+256
+512
+Number of cores
+1024
+Fig. 5: Strong scaling of different algorithm variants
+7.5. Miranda dataset. The Miranda dataset [6, 32] contains three-dimensional
+simulation data of the density ratios of a non-reacting flow of viscous/diffusive fluids.
+This dataset is 3072×3072×3072. Its values are in single-precision and range between
+1 and 3. We show visualizations for this dataset in Appendix H.1.
+In this experiment, we compare five variations of our randomized algorithms as
+well as the deterministic STHOSVD algorithm using the Miranda dataset. We use 4
+nodes (128 cores) organized as a 1 × 8 × 16 tensor. The target rank we choose for this
+run is (502, 504, 361), which corresponds to a 10−2 reconstruction error (estimated
+using pre-computed singular values of the unfolding of the data tensor for each mode).
+"
+#
+1
+The subrank matrix we used for Alg. 6.4 is 30
+6
+39
+1
+61
+13
+17 . For Alg. 6.5, the subrank
+1
+vector we used is (20, 20, 26). The relative error achieved by STHOSVD is 0.0094,
+while the relative errors of the randomized algorithms Algs. 4.2, 6.4 and 6.5 are 0.0234,
+0.0194, and 0.0189, respectively, which are all within 2.5× of the deterministic error.
+The performance results are recorded in Figure 6a, and we visualize reconstructed
+tensors from Algs. 2.2, 4.2 and 6.5 in Appendix H.1. First, we note that STHOSVD
+is particularly slow when compared to the randomized algorithms, in this case partly
+because the Miranda dataset has fewer modes and each mode is large. As a result,
+the Gram matrices are large and the eigendecompositions of those Gram matrices are
+expensive. Moreover, the eigendecompositions are carried out redundantly on every
+processor due to the TuckerMPI assumption of small individual mode dimensions.
+(More details on the parallel implementation of STHOSVD can be found in [3]). The
+randomized algorithms, on the other hand, can avoid this expensive step completely,
+and we see up to a 16× speedup, comparing Alg. 6.4 to STHOSVD. In the next section,
+we compare the performance of all the algorithms again with a higher-order tensor
+where each mode is relatively small. In that case, the Gram matrices are smaller and
+the eigendecompositions are cheaper, so the deterministic algorithm appears more
+competitive.
+Also note that random number generation (forming the random matrices {Ω}) in
+19
+Alg. 4.2 takes up a large percentage of the total time. These results demonstrate the
+benefits of generating fewer random numbers by using Kronecker-structured random
+matrices. Now, comparing the computation cost (red bar) of Alg. 4.2 with that of
+the following algorithms to the right, we can see that using Kronecker-structured
+random matrices further reduces the computation cost of forming the factor matrices
+as we have predicted. Among the algorithms that use Kronecker-structured random
+matrices, Alg. 6.4 and Alg. 6.5 achieve the best performance. Comparing multiTTM methods, we see that using either IS-mTTM or AAO-mTTM in Alg. 6.4 results
+in very similar performance. Although AAO-mTTM achieved a 3× speedup in the
+communication cost of forming the factor matrices (pink bar) over IS-mTTM, the
+absolute speedup is not significant because the communication cost using IS-mTTM
+is already very small. This is mostly due to the subranks being very small compared
+to the size of the input tensor. Finally, we note that with our optimizations, applying
+the factor matrices to truncate the input tensor (the blue and light blue bars) now
+becomes the bottleneck of the algorithm.
+7.6. Stats-Planar dataset. The SP dataset is generated from the simulation of
+a statistically stationary planar (SP) methane-air flame [23]. The data has dimensions
+500 × 500 × 500 × 11 × 400, with the first 3 modes representing a 3D spatial grid, the
+4th mode representing 11 variables, and the 5th mode representing time steps. This
+data has been used in previous studies such as [3] to demonstrate the effectiveness
+of Tucker decomposition algorithms. In this work, we use the single-precision-maxnormalized version of this dataset. We visualize the 250th slice for each of the first
+three modes of the SP tensor in Appendix H.1.
+Similarly to the experiment on the Miranda dataset, we compare five variations
+of the randomized algorithm and the deterministic STHOSVD algorithm using 1024
+cores (32 nodes). The target rank we use is (31, 38, 35, 6, 11), which is the rank
+returned by the STHOSVD algorithm
+satisfying a 10−2 error tolerance. The subrank
+
+vector we used for Alg. 6.5 is 2 2 2 3 4 and the subrank matrix used for
+Alg. 6.4 is
+
+
+0
+3
+3
+2
+2
+3 0 4 2 2
+
+
+2 5 0 2 2 .
+2 2 2 0 2
+2
+2
+2
+2
+0
+The relative error achieved by STHOSVD on this dataset is 0.0028, while the relative
+errors of the randomized algorithms Algs. 4.2, 6.4 and 6.5 are 0.0050, 0.0079, and
+0.0079, respectively, which are all within 3× of the deterministic error.
+The performance results are shown in Figure 6b. The speedup of the randomized
+algorithms appears less dramatic compared to the results from the Miranda dataset,
+which is mainly due to the difference in dimensions of these two datasets. Recall
+that compared to the Miranda dataset, the SP tensor is of higher order but has a
+smaller size in each mode. As a result, the sequential eigendecomposition in the
+STHOSVD algorithm is no longer as expensive. We also see that Algs. 6.4 and 6.5
+are still the best-performing algorithms. Alg. 4.2 suffers from slow random number
+generation, similar to the experiments on the Miranda dataset. Finally, forming the
+factor matrices is no longer a bottleneck for tensors with more cubical dimensions. In
+this case, accelerating the computations applying these factor matrices to derive the
+core tensor will become a more important issue.
+20
+96
+..
+.
+15
+Form {Û}-comp
+Form {Û}-comp
+Form {Û}-comm
+20
+Form {Û}-comm
+Form Ĝ-comp
+Form Ĝ-comp
+Seconds
+10
+Form Ĝ-comm
+Form G
+Rand matrix gen
+Others
+15
+Seconds
+Form Ĝ-comm
+Form G
+Rand matrix gen
+Others
+10
+5
+5
+di
+m
+6.
+5
+Tr
+e
+e
+4
+6.
+T
+M
+t
+ou
+w
+ith
+5
+6.
+6.
+4
+w
+-m
+T
+A
+O
+A
+ith
+ou
+t
+w
+6.
+5
+(a) Comparing the performance of all algorithms on Miranda dataset
+.2
+D
+l4
+SV
+O
+H
+ST
+pa
+ra
+lle
+6.
+5
+m
+di
+ith
+ou
+t
+A
+O
+ou
+t
+A
+pa
+ith
+6.
+4
+w
+Tr
+ee
+6.
+M
+2
+T
+4.
+-m
+T
+le
+l
+SV
+ra
+l
+O
+H
+ST
+4
+0
+D
+0
+(b) Comparing the performance of all algorithms on SP dataset
+Fig. 6: Performance breakdown of all algorithms on our two real datasets
+8. Conclusions and Future Work. We develop new randomized algorithms
+using a Kronecker product of random matrices that significantly decrease the computational cost in computing a Tucker decomposition. By accelerating the sketching
+step using Kronecker products, we remove the SVD as the dominant computational
+bottleneck. Our algorithms also reduce the number of random entries generated,
+which, as shown in our experiment results, could result in significant savings in the
+runtime compared to standard randomized algorithms. As the SVD step is no longer
+the dominant computation, future directions include accelerating the TTM computation, the other dominant portion of computing a Tucker decomposition, perhaps
+through a one-pass approach similar to [27]. We develop probabilistic error bounds
+for our algorithms using SRHT matrices as they generalize to Kronecker products
+better than Gaussian matrices. The empirical results comparing Gaussian and SRHT
+matrices show that the error incurred from using SRHT matrices is not any worse
+than using Gaussian matrices. Our theoretical bounds are pessimistic in comparison,
+so there is room for improvement in the analysis, another potential future direction.
+We implement our new randomized algorithms in parallel, developing a new algorithm
+that parallelizes the most expensive SVD component. Previous approaches such as
+[12] parallelize other components, leaving the most expensive part to be computed
+locally. Overall, we show in this work that choosing a random matrix that fits the
+structure of our problem is beneficial. The dense Gaussian matrix typically used
+in RandSVD in particular is not required, and performance is greatly improved by
+exploiting appropriate structure.
+Appendix A. Additional Algorithm: Randomized HOSVD with Kronecker product. We now include the case of Alg. 4.4 where we generate an independent set of Kronecker factors for each mode.
+Appendix B. Detailed Complexity Analysis for Algs. 4.3 and 4.4.
+Cost of Alg. 4.3. First consider Alg. 4.3 (rSTHKron). We form the sketch Y for
+mode j in Line 6, involving an intermediate core tensor as well as random matrices
+{Φk }dk̸=j . The intermediate core at iteration j has dimensions
+21
+Algorithm A.1 Randomized HOSVD with Kronecker product
+1: function [G, {Uj }] = rHKron(X, r, p)
+2:
+Compute matrix of subranks S
+3:
+for j = 1 : d do
+4:
+Draw d − 1 random matrices Φj,k ∈ Rsj,k ×nk for k = 1, . . . , j − 1, j + 1, . . . , d
+5:
+Y ← X ×1 Φj,1 × · · · ×j−1 Φj,j−1 ×j+1 Φj,j+1 × · · · ×d Φj,d
+6:
+Compute thin QR Y (j) = Ûj R
+7:
+end for
+T
+T
+8:
+Ĝ = X ×1 Û1 × · · · ×d Ûd
+9:
+[G, {Vj }] = STHOSVD(Ĝ, r)
+10:
+Uj = Ûj Vj for j = 1, . . . , d
+11: end function
+ℓ × · · · × ℓ × n × · · · × n,
+{z
+}
+| {z } |
+(B.1)
+j−1
+d−j+1
+d
+and the matrices {Φk }j−1
+k=1 have dimensions s × ℓ, while the matrices {Φk }k=j+1 have
+dimensions n × ℓ. We can compute the multi-TTM with any order of modes, but the
+most efficient in this particular case is to start with a mode in which the dimension is
+n. Without loss of generality, we thus compute the product in reverse order of modes.
+Then, we have two separate cases corresponding
+to the different dimensions of the Φ
+Pd−j+1
+matrices. For modes d to j + 1, the cost is i=1 2si ℓj−1 nd+2−i−j . The cost for
+Pj−2
+modes j − 1 to 1 is i=1 2ℓj−i sd−j+i+1 .
+In Line 8, we perform a single TTM to compute the intermediate core. In mode
+j, we compute a TTM with core Ĝ with the same dimensions as in (B.1), and factor
+⊤
+matrix Ûj with dimensions n × ℓ. The cost of this product is 2ℓj nd−j+1 . Putting all
+modes together, the dominant costs of Alg. 4.3 are
+!
+d−j+1
+j−2
+d
+X
+X
+X
+j d−j+1
+i j−1 d+2−i−j
+j−1 d−j+i+1
+2
+ℓ n
++
+sℓ n
++
+ℓ s
+.
+j=1
+i=1
+i=1
+Cost of Alg. 4.4. Now considering Alg. 4.4, the sketch is computed in Line 5 of the
+full tensor X ∈ Rn×n×···×n and random matrices Φj ∈ Rs×n for j = 1, . . . , d. For any
+Pd−1
+mode, the cost is i=1 2si nd−i+1 . Then without the dimension tree optimization, the
+Pd−1
+cost for all modes is d i=1 2si nd−i+1 . Incorporating dimension trees as discussed in
+§P
+4.4 reduces the constant 2d to 4, so the cost of Line 5 in Alg. 4.4 for all modes is
+d−1
+4 i=1 si nd+1−i .
+After all the modes are processed, we compute the core via a multi-TTM in Line 8
+in Alg. 4.4 of tensor X ∈ Rn×n×···×n and factor matrices Ûj for j = 1, . . . , d. The cost
+Pd
+of this multi-TTM, computing in any order of modes, is j=1 2ℓj nd+1−j . Combining
+all the costs, including d sketch computations and core computations, the complexity
+of Alg. 4.4 is
+d−1
+d
+X
+X
+i d+1−i
+4
+sn
++2
+ℓj nd+1−j .
+i=1
+j=1
+Note that we do not include the core truncation step in Line 10 of Alg. 4.3 or Line 9
+of Alg. 4.4 in the dominant costs as the leading order term in this cost is only ℓd+1
+for all algorithms. We also ignore the cost of the thin QR factorizations in Line 6 in
+Alg. 4.4 and Line 7 in Alg. 4.3 as that cost is 2dℓ2 n in all three algorithms.
+Appendix C. Bounds on Core Singular Values.
+22
+R
+Lemma C.1. Let tensors X ∈ Rn1 ×···×nd , Y ∈ Rℓ1 ×···×ℓd and matrices Uj ∈
+⊤
+with orthonormal columns such that Y = X ×1 U⊤
+1 × · · · ×d Ud . Then
+nj ×ℓj
+
+
+σi Y(j) ≤ σi X(j)
+for each mode j and for each i = 1, . . . , min{ℓj , ℓ⊘
+j }.
+Proof. First consider an m × n matrix B and matrix A = BV for V with
+k orthonormal columns. We can show that σi (A) ≤ σi(B) for any index i =
+1, . . . , min{m, k}. Consider first that A is a submatrix of B V V⊥ , implying that
+A⊤ A is a principal submatrix of . Then we can directly apply the Cauchy interlacing
+theorem [18, Theorem 4.3.28] to see that σi (A) = λi (A⊤ A) ≤ λi (B⊤ B) = σi (B).
+The same argument applies to the transpose of A = U⊤ B for U with orthonormal
+columns. Thus, for U and V with orthonormal columns and A = U⊤ BV, σi (A) ≤
+σi (B) for i ranging from 1 to the minimum of the numbers of columns of U and V.
+Now, let A = Y(j) , recalling that Y(j) = Uj X(j) (Ud ⊗Ud−1 ⊗· · ·⊗Uj+1 ⊗Uj−1 ⊗
+· · · ⊗ U1 ). Recall that the Kronecker product of matrices with orthonormal columns
+also has orthonormal columns. Thus, σi (Y(j) ) ≤ σi (X(j) ) for i = 1, . . . , min{ℓj , ℓ⊘
+j }
+and j = 1, . . . , d.
+Appendix D. Proof of Lemma 5.1.
+r×n
+for notational simplicity, and recall that Ω =
+Proof. Let W = V⊤
+1 ∈ R
+D(H1 ⊗ · · · ⊗ Hq ) is the Kronecker product of independent
+SRHT Q
+matrices where
+Qq
+q
+D ∈ Rn×n and Hj ∈ Rnj ×sj for every j, given n = j=1 nj and ℓ = j=1 sj . Define
+⊤
+r×r
+r×ℓ
+G = (WΩ)(WΩ) ∈ R . Note that WΩ is equivalent to Ω1 ∈ R .
+Our approach will focus on the elementwise representation of G and will be composed of 3 main steps: first, we will express the elements of G in terms of two
+summands M and N that can be bounded more easily; second, we will obtain a de2
+terministic bound for ∥M∥2 and then bound E[Nij
+], which is the bulk of the proof;
+and third, we use our result from the previous step in conjunction with Markov’s inequality to obtain a concentration inequality for ∥N∥2 . Combining all these pieces will
+then give us the desired bound. Note that our three main steps follow the approach
+of [31], which analyzes the case where Ω is a single SRHT matrix.
+Define H = H1 ⊗ H2 ⊗ · · · ⊗ Hq , letting the Kronecker product of subsampled
+Hadamard matrices be H for ease of notation. Then we have another way to express
+G as
+(D.1)
+G = (WΩ)(WΩ)⊤ = WDHH⊤ DW⊤ = WDFDW⊤ ,
+letting F = HH⊤ . There are some important properties of D and F we will need,
+which we now explore. The diagonal matrix D has i.i.d. entries drawn from the
+Rademacher distribution so that EDa = 0 and Da2 = 1 for a = 1, . . . , n.
+Each element of F can be written as a product of the entries of individual Gram
+⊤
+⊤
+⊤
+matrices Hj H⊤
+j . Specifically, Fab = (H1 H1 )i1 j1 (H2 H2 )i2 j2 · · · (Hq Hq )iq jq , with a
+the linear index with respect to i1 , . . . , iq and b the linear index with respect to
+j1 , . . . , jq . This representation allows us to break dependent expressions down into
+their independent parts, as each Hi is independent from Hj when i ̸= j. We can then
+write the expectation of Fab as
+(D.2)
+⊤
+⊤
+EFab = E(H1 H⊤
+1 )i1 j1 E(H2 H2 )i2 j2 · · · E(Hq Hq )iq jq .
+From [31, Eqn. 38], we have that E(Hk H⊤
+k )ik jk = 0 for ik ̸= jk . If a ̸= b, then ik ̸= jk
+for at least one k. Combining this and (D.2), we can say that EFab = 0 for a ̸= b. Now
+23
+consider the case where a = b. From [31, Eqn. 37], we have that (Hk H⊤
+k )ik ik = sk /nk
+deterministically. Then,
+q
+Y
+ℓ
+sk
+= .
+(D.3)
+Faa =
+nk
+n
+k=1
+2
+2
+2
+The last piece we will need is E[Fab
+]. From [31, Eqn. 39], E[(Hk H⊤
+k )ik jk ] = sk /nk for
+2
+2
+2
+ik ̸= jk , and E[(Hk H⊤
+k )ik ik ] = sk /nk from above. If a ̸= b, then ik′ ̸= jk′ for at least
+′
+one k . Combining this and (D.2),
+q
+(D.4)
+2
+E[Fab
+]≤
+ℓ2
+ℓ2
+sk′ Y s2k
+ℓ2
+=
+= ∗ 2,
+≤
+2
+2
+2
+2
+nk ′
+nk
+sk′ n
+mink {sk }n
+sk n
+k=1
+k̸=k′
+letting s∗k = mink {sk }.
+With all these pieces in mind, we begin the main steps of the proof. We start
+with an elementwise representation of G, using the form in (D.1), with
+n
+X
+Wia Da Fab Db Wjb
+Gij =
+=
+a,b=1
+n
+X
+n
+X
+a=1
+a=1
+Wia Wja Da2 Faa +
+Wia Da
+n
+X
+Wjb Db Fab ,
+b=1
+b̸=a
+for 1 ≤ i, j ≤ r. Consider the first term, where we have isolated the case a = b.
+As the rows ofPW are orthonormal,
+Da2 = 1, and Faa = ℓ/n, Gij can be written as
+Pn
+n
+ℓ
+Gij = n δij + a=1 Wia Da b=1 Wjb Db Fab , where δij is the Kronecker delta which
+b̸=a
+is 1 when i = j and 0 otherwise. Defining M ∈ Rr×r to be the diagonal matrix
+with ℓ/n
+entry, and letting N ∈ Rr×r be the matrix with entries
+Pnas each diagonal
+Pn
+Nij = a=1 Wia Da b=1 Wjb Db Fab , we have G = M + N.
+b̸=a
+As M is a diagonal matrix, we can easily see ∥M∥2 = ℓ/n. P
+Bounding ∥N∥ is
+r
+2
+trickier; our approach will be to use the fact E∥N∥22 ≤ E∥N∥2F = i,j=1 E[Nij
+] and
+2
+first bound E[Nij ]. We start by expanding the product
+(D.5)
+
+
+
+n
+n
+n
+n
+X
+X
+
+X
+ X
+2
+Wic Dc
+Wjf Df Fcf 
+E[Nij
+] = E
+Wia Da
+Wjb Db Fab  
+
+
+a=1
+=E
+n
+X
+a=1
+c=1
+b=1
+b̸=a
+f =1
+f ̸=c
+
+2
+n
+n
+n
+n
+X
+X
+X
+X
+
+2 
+Wia
+Wjb Db Fab  + E
+Wia Wic Da Dc
+Wjb Db Fab
+Wjf Df Fcf ,
+
+a,c=1
+a̸=c
+b=1
+b̸=a
+b=1
+b̸=a
+f =1
+f ̸=c
+which we have separated into the terms where a = c and a ̸= c. Consider the first
+term of (D.5), where a = c. As W is a deterministic matrix, the expectation only
+affects the terms with Db and Fab , so we have
+
+2
+
+2
+n
+n
+n
+n
+X
+X
+X
+X
+
+
+
+2 
+2
+(D.6)
+E
+Wia
+Wjb Db Fab  =
+Wia
+E
+Wjb Db Fab  .
+
+a=1
+a=1
+b=1
+b̸=a
+24
+b=1
+b̸=a
+Now consider the expectation portion of (D.6) for a fixed 1 ≤ a ≤ n. We can expand
+this product and distribute the expectation as
+
+2
+n
+n
+n
+X
+X
+X
+
+
+E
+Wjb Db Fab  = E
+Wjb Db Fab
+Wjf Df Faf
+b=1
+b̸=a
+=
+n
+X
+b=1
+b̸=a
+f =1
+f ̸=a
+Wjb Wjf E[Db Df Fab Faf ] =
+n
+X
+b,f =1
+b,f ̸=a
+2
+2
+Wjb
+E[Fab
+]+
+b=1
+b̸=a
+n
+X
+Wjb Wjf E[Db Df Fab Faf ]
+b,f =1
+b,f ̸=a
+b̸=f
+where the last equality separates terms into where b = f and where b ̸= f , respectively.
+From (D.4) and as the rows of W are normalized, we can write the term where b = f
+Pn
+Pn
+ℓ2
+2
+2
+2 ℓ2
+as b=1 Wjb
+E[Fab
+] ≤ b=1 Wjb
+2 = s∗ n2 . The term where b ̸= f can be written
+s∗
+kn
+k
+b̸
+=
+a
+Pn
+Pn
+as
+b,f =1 Wjb Wjf EDb EDf E[Fab Faf ] = 0 from
+b,f =1 Wjb Wjf E[Db Df Fab Faf ] =
+b,f ̸=a
+b̸=f
+b,f ̸=a
+b̸=f
+EDb = 0.These two results can be combined into the expectation portion of (D.6) to
+
+2
+Pn
+Pn
+Pn
+ℓ2
+2
+2 ℓ2
+obtain a=1 Wia
+E
+≤ a=1 Wia
+b=1 Wjb Db Fab
+s∗ n2 = s∗ n2 .
+k
+b̸=a
+k
+We now focus on the second term of (D.5), where a ̸= c. We split up both of the
+last two sums to extract the terms where b = c and where f = a, giving
+n
+X
+E
+Wia Wic Da Dc
+a,c=1
+a̸=c
+n
+X
+E
+a,c=1
+a̸=c
+n
+X
+Wjb Db Fab
+b=1
+b̸=a
+n
+X
+Wjf Df Fcf =
+f =1
+f ̸=c
+
+n
+X
+
+Wia Wic Da Dc Wjc Dc Fac +
+b=1
+a̸=b̸=c
+
+
+n
+X
+
+
+Wjb Db Fab  
+Wjf Df Fcf 
+Wja Da Fca +
+.
+f =1
+a̸=f ̸=c
+We expand this product into four terms we can bound separately, as
+E
+n
+X
+a,c=1
+a̸=c
+(D.7a)
+
+
+Wia Wic Da Dc Wjc Dc Fac +
+n
+X
+b=1
+a̸=b̸=c
+=E
+n
+X
+
+
+n
+X
+
+
+Wjb Db Fab  
+Wjf Df Fcf 
+Wja Da Fca +
+
+f =1
+a̸=f ̸=c
+Wia Wic Da Dc Wjc Wja Dc Da Fac Fca
+a,c=1
+a̸=c
+(D.7b)
++E
+n
+X
+a,c=1
+a̸=c
+(D.7c)
++E
+n
+X
+n
+X
+Wia Wic Da Dc
+Wjb Db Fab
+b=1
+a̸=b̸=c
+Wia Wic Da Dc Wjc Dc Fac
+a,c=1
+a̸=c
+(D.7d)
++E
+n
+X
+n
+X
+Wjf Df Fcf
+f =1
+a̸=f ̸=c
+n
+X
+Wjf Df Fcf
+f =1
+a̸=f ̸=c
+Wia Wic Da Dc Wja Da Fca
+a,c=1
+a̸=c
+n
+X
+Wjb Db Fab .
+b=1
+a̸=b̸=c
+Consider (D.7a). As Dk2 = 1 and F is symmetric, the expectation is just affected by
+25
+2
+Fac
+. We then have
+E
+n
+X
+n
+X
+Wia Wic Da Dc Wjc Wja Dc Da Fac Fca =
+a,c=1
+a̸=c
+≤
+2
+Wia Wic Wjc Wja E[Fac
+]
+a,c=1
+a̸=c
+n
+n
+ℓ2 X
+ℓ2 X
+W
+W
+W
+W
+≤
+Wia Wic Wjc Wja
+ia
+ic
+jc
+ja
+s∗k n2 a,c=1
+s∗k n2 a,c=1
+a̸=c
+2
+ℓ
+= ∗ 2
+sk n
+n
+X
+!2
+Wia Wja
+a=1
+=
+i2
+ℓ2
+ℓ2 h
+⊤
+=
+δ
+WW
+.
+ij
+s∗k n2
+s∗k n2
+ij
+In all three of the remaining parts, (D.7b), (D.7c), and (D.7d), distributing the expectation to the independent random components gives us the expectation of the product
+of independent Rademacher entries. This means all three of these parts are equal to
+0.
+2
+2
+2
+With all these pieces, we now have E[Nij
+] ≤ s∗ℓn2 + δij s∗ℓn2 . With the bound on
+k
+k
+2
+E[Nij
+], we can now bound the expectation of the norm of N: E∥N∥22 ≤ E∥N∥2F =
+Pr
+Pr
+2
+2
+2
+E i,j=1 Nij
+≤ s∗ℓn2 i,j=1 (1 + δij ) = (r2 + r) s∗ℓn2 . Then, using Markov’s inequality,
+k
+2
+2
+k
+with probability at least 1 − β12 .
+∥N∥22 ≤ β(rs∗+r)ℓ
+n2
+k
+Now consider the term ∥G† ∥2 . Recalling that G = M + N, we can express this
+−1
+−1 †
+instead as G = (I + NM−1 )M. Then we can write G† = M
+) . TakP∞(I + NM
+†
+−1
+−1 †
+−1 k
+n
+ing norms, we have ∥G ∥2 ≤ ∥M ∥2 ∥(I + NM ) ∥2 ≤ ℓ k=0 ∥NM ∥2 , where
+P∞
+we use the Taylor expansion (I + NM−1 )† = k=0 (−NM−1 )k (see [18, Corollary
+k
+P∞
+5.6.16] for more details). We can then write ∥G† ∥2 ≤ nℓ k=0 ∥N∥2 ∥M−1 ∥2 .
+We now considerq∥N∥2 ∥M−1 ∥2 before the entire expression. As ∥M−1 ∥2 = n/ℓ,
+β(r 2 +r)
+≤ 1 − α1 , with probability at least 1 − β12 , where the last
+s∗
+k
+k
+P∞
+inequality comes from (5.5). Then, ∥G† ∥2 ≤ nℓ k=0 1 − α1 = nα
+ℓ . Our smallest
+1
+= ∥G† ∥2 ≤ αn
+,
+with
+probability
+at least 1 − β12 .
+singular value is then σ2 (WΩ)
+ℓ
+min
+∥N∥2 ∥M−1 ∥2 ≤
+Taking the square root, we obtain the desired result.
+Appendix E. STHOSVD Error Analysis.
+Theorem E.1. Let T = [G; U1 , . . . , Ud ] be the approximation given by Alg. 4.3
+to X ∈ Rn1 ×···×nd with target rank r = (r1 , . . . , rd ) and oversampling parameter p.
+Let ℓj = rj + p for j = 1, . . . , d. Then for sequences {αj }dj=1 and {βj }dj=1 satisfying
+Pd
+(5.5), the following bound holds with probability at least 1 − j=1 β12 ,
+j
+1/2 
+1/2
+
+!
+ℓj
+d
+d
+X
+X
+X
+X
+α j n⊘
+j
+∥X − T∥ ≤ 
+1+
+σi2 (X(j) ) + 
+σi2 (X(j) ) .
+ℓ
+j
+j=1
+i=r +1
+j=1 i=r +1
+j
+j
+Proof. The quantity εcore is bounded from (5.1), so we only consider εrand . Let
+(j)
+Ĝ
+⊤
+⊤
+= X ×1 Û1 ×2 · · · ×j Ûj be the partially truncated core tensor after processing
+mode j, and let T̂
+(j)
+= Ĝ
+(j)
+×1 Û1 ×2 · · · ×j Ûj the resulting partial approximation
+26
+to X. From the first equality of Lemma 5.4, we have
+⊤
+⊤
+∥X − T̂∥2 = ∥X − X ×1 Û1 Û1 ×2 · · · ×d Ûd Ûd ∥2
+=
+d
+X
+∥T̂
+(j−1)
+− T̂
+(j) 2
+∥Ĝ
+(j−1)
+×1 Û1 ×2 · · · ×j−1 Ûj−1 ×j (I − Ûj Ûj )∥2 .
+∥
+j=1
+=
+d
+X
+⊤
+j=1
+Consider the j-th term in the sum. We unfold to obtain
+∥T̂
+(j−1)
+− T̂
+⊤
+(j) 2
+(j−1)
+∥ = ∥(I − Ûj Ûj )Ĝ(j)
+(I ⊗ · · · ⊗ I ⊗Ûj−1 ⊗ · · · ⊗ Û1 )⊤ ∥2F
+| {z }
+d−j
+⊤
+(j−1)
+≤ ∥(I − Ûj Ûj )Ĝ(j) ∥2 ,
+as the columns of factor matrices Ûj are orthonormal for all j = 1, . . . , d. We can
+⊤
+(j−1)
+then apply Theorem 5.3 to ∥(I − Ûj Ûj )Ĝ(j)
+⊤
+(j−1) 2
+∥(I − Ûj Ûj )Ĝ(j)
+∥ ≤
+∥, giving
+! nj
+X
+αj n⊘
+(j−1)
+j
+σi2 (Ĝ(j) ),
+1+
+ℓj
+i=r +1
+j
+(j−1)
+except with probability at most β12 . As Ĝ
+is a random quantity, we must bound
+j
+(j−1)
+this by the singular values of X. We can directly apply Lemma C.1 to Ĝ
+=
+(j−1)
+⊤
+⊤
+X ×1 Û1 ×2 · · · ×j Ûj relating the singular values of Ĝ
+to those of X. Thus,
+∥T̂
+(j−1)
+− T̂
+αj n⊘
+j
+1+
+rj
+(j) 2
+∥ ≤
+nj
+X
+!
+σi2 (X(j) ),
+i=ℓj +1
+except with probability at most β12 . The failure probability for the entire sum is the
+j
+union of all d failure probabilities for each mode, bounded above by the sum of those
+probabilities by the union bound. Then,
+∥X − T̂∥2 =
+d
+X
+∥T̂
+(j−1)
+− T̂
+(j) 2
+∥
+j=1
+≤
+αj n⊘
+j
+1+
+ℓj
+d
+X
+j=1
+!
+nj
+X
+σi2 (X(j) ),
+i=rj +1
+Pd
+except with probability at most j=1 β12 . Taking square roots gives εrand . Combining
+j
+εrand and εcore , the total error is then
+
+1/2 
+1/2
+! nj
+ℓj
+d
+d
+X
+X
+X
+X
+α j n⊘
+j
+∥X − T∥ ≤ 
+1+
+σi2 (X(j) ) + 
+σi2 (X(j) ) .
+ℓ
+j
+j=1
+i=r +1
+j=1 i=r +1
+j
+j
+27
+Appendix F. Accuracy.
+We construct a different synthetic tensor for our
+second accuracy experiment. For this case, we generate X ∈ R500×500×500 to be a
+random 3-way tensor with true rank (50, 50, 50) and added 10−4 relative Gaussian
+noise. We use p = 5 for our oversampling parameter. In Figure 7, we plot the
+relative error resulting from our algorithms with increasing target rank. We compare
+our algorithms to the deterministic STHOSVD as well as the randomized algorithm
+using one large random matrix. In the left plot, we show the relative error from
+all algorithms using Gaussian random matrices, and in the right plot, we show the
+relative error from our suggested algorithms using SRHT random matrices. In both
+plots, the relative error for all algorithms is large until we reach the true rank. At
+that point, the error drops close to the noise level, but the randomized algorithms
+have a higher relative error than the deterministic. All the randomized algorithms
+are comparable to each other, with errors exceeding the deterministic algorithm by
+factors of 2 to 7×.
+SRHT Random Matrix
+100
+10−1
+10−1
+10−2
+Alg. 2.2
+Alg. 4.1
+Alg. 4.2
+Alg. A.1
+Alg. 4.3
+Alg. 4.4
+10−3
+10−4
+10−5
+Relative Error
+Relative Error
+Gaussian Random Matrix
+100
+0
+20
+10−2
+10−3
+Alg. 2.2
+Alg. 4.3
+Alg. 4.4
+10−4
+40
+60
+Target Rank
+80
+10−5
+100
+0
+20
+40
+60
+Target Rank
+80
+100
+Fig. 7: Relative error of our randomized algorithms with Gaussian (left) and SRHT
+(right) random matrices as the target rank (r, r, r) increases on the synthetic tensor
+with true rank (50, 50, 50) and 10−4 relative Gaussian noise.
+Appendix G. Computation and Communication Cost Comparison with
+Previous Work. In this section, we compare the leading terms of the per-processor
+computation and communication cost of performing the Tucker decomposition using
+the four algorithms listed in Table 3. We will go over the expressions in each cell row
+by row. To reiterate notations, the input tensor is a d-way tensor X ∈ Rn×···×n with
+rank (r, r, . . . , r) and the size of each mode of the d-way processor tensor is q. We also
+assume that s < r < l ≪ n where s is the subrank for each mode and ℓ = r + p with
+p the oversampling parameter.
+For the STHOSVD algorithm analyzed in [3, Section 7], the computation cost
+of forming the factor matrices includes computing the Gram matrices of the tensor
+unfoldings and the eigendecomposition of those Gram matrices. Computing the Gram
+matrices dominates the cost in this scenario. Furthermore, although there are d
+Gram matrices, one for each mode, the latter d − 1 Gram matrices are much cheaper
+to compute than the first; this reduction is due to the truncation occurring after
+processing each mode of the tensor. Therefore, when comparing the computation and
+bandwidth cost, we count only the first Gram matrix computation. For computation
+d+1
+cost, the leading term is n P , resulting from multiplying the local tensor unfolding of
+size nq × ( nq )d−1 with its own transpose. Leveraging the symmetry, the constant
+prefactor is 1. Considering bandwidth cost, computing the first Gram matrix is
+d
+dominated by an all-to-all on the local input tensor which has nP elements. Since
+28
+latency cost is not affected by truncation of the tensor, we count all d Gram matrix
+computations. The point-to-point all-to-all collective is performed over the processor
+fiber, so the cost is O(q) = O(P 1/d ) per mode.
+Forming the core tensor requires d TTMs. Again, due to truncation, we count
+only the first TTM as the leading computational cost. In the first TTM, we multiply
+the local factor matrix of size r × nq with the local tensor unfolding of size nq × ( nq )d−1 ,
+d
+which leads us to the term 2 rn
+P . The communication involves one reduce-scatter on
+the product of the local factor matrix and the local input tensor, leading us to the
+d−1
+term βO(r( nq )d−1 ) = βO( Prn1−1/d ). For latency cost, there are d reduce-scatters, one
+for each mode, over the processor fiber, yielding O(d log q) = O(log P ) messages.
+For the algorithm proposed by Choi et al. in [12], the computational cost of
+forming the factor matrices is the same as stated above since they also compute the
+SVD through local eigendecomposition of the Gram matrices. The same applies to
+the computation cost of forming the core tensor.
+The communication differs slightly. In this algorithm, for every other mode,
+an all-to-all among all the processors is performed to redistribute the global tensor
+unfolding into a 1D block-column fashion, which contributes αO(dP ) to the latency
+d
+cost and βO( nP ) to the bandwidth cost. Again we only count the first all-to-all for
+bandwidth due to truncation of the tensor in subsequent modes. Computing the
+Gram matrices requires an additional d all-reduces among all the processors, which
+contributes αO(d log P ) and βO(dn2 ) to the latency and bandwidth cost respectively,
+but these are lower order terms. Forming the core tensor does not require additional
+communication given the redistributions described above.
+In Alg. 6.4, the computation cost of forming the factor matrices is dominated by
+the cost of forming the 1st factor matrix due to truncation, which is further dominated
+n
+by the cost of multiplying the first random matrix of size s× P 1/d
+with the local tensor
+d
+unfolding. Thus the leading term arrives at 2s nP , which has leading order term
+1/(d−1)
+d
+2 r P n . Using the all-at-once multi-TTM algorithm, the communication is that
+of a reduction of only the final result, which has dimensions (n/P 1/d ) × s × · · · × s,
+for a cost of αO(log P ) + βO(sd−1 n/P 1/d ). This cost is consistent across modes.
+Forming the core in Alg. 6.4 has similar computation and communication cost to that
+n
+of the STHOSVD algorithm except for the sizes of the factor matrices are l × P 1/d
+,
+but the leading order term in the costs stays the same. This assumes the in-sequence
+Multi-TTM algorithm is used, as in our implementation.
+In Alg. 6.5, the computation cost of forming the factor matrices is double that of
+Alg. 4.3 because the cost is dominated by the first two internal nodes of the dimension
+tree, each of which involves multiplying one random matrix with the local input
+tensor. The communication cost of forming the factor matrices is also similar to that
+of Alg. 6.4. For Alg. 6.5, the leading terms of the computation and communication
+cost of forming the core tensor are the same as that of Alg. 6.4.
+Appendix H. Additional Experiments.
+H.1. Miranda and SP visualizations. We show a three-dimensional visualization of a portion of the original Miranda tensor in Figure 8.
+To validate the effectiveness of our algorithms on the Miranda tensor, we compare
+visualizations of a slice of the reconstructed tensor computed via Algs. 2.2, 4.2 and 6.5.
+The slices are shown in Figure 9. All three algorithms achieve a reconstruction error of
+0.01 and very little difference can be seen between the results of the algorithms and the
+29
+x
+y
+Fig. 8: Three-dimensional visualization of a subtensor of the Miranda tensor, with
+indices from 1200 to 1700 in each mode
+original data, shown in the first row. Note that we picked Alg. 6.5 as a representative
+algorithm while Alg. 6.4 and Alg. A.1 with AAO-mTTM generate similar results.
+We also visualize the slices of the the original SP tensor as well as of the tensors
+reconstructed from the decompositions computed by our randomized algorithms in
+Figure 10. We can see that all of the algorithms preserve the significant features of
+the three slices although some compression artifacts can be seen. One reason why
+these artifacts are more noticeable, compared to the results we get from the Miranda
+dataset, is that we are zooming into a much smaller portion (500 × 500 instead of
+3072 × 3072) of the total tensor.
+REFERENCES
+[1] S. Ahmadi-Asl, S. Abukhovich, M. G. Asante-Mensah, A. Cichocki, A. H. Phan,
+T. Tanaka, and I. Oseledets, Randomized algorithms for computation of Tucker decomposition and higher order SVD (HOSVD), IEEE Access, 9 (2021), pp. 28684–28706,
+https://doi.org/10.1109/ACCESS.2021.3058103.
+[2] H. Al Daas, G. Ballard, L. Grigori, S. Kumar, and K. Rouse, Communication lower
+bounds and optimal algorithms for multiple tensor-times-matrix computation, Tech. Report
+2207.10437, arXiv, 2022, https://doi.org/10.48550/ARXIV.2207.10437.
+[3] G. Ballard, A. Klinvex, and T. G. Kolda, TuckerMPI: A parallel C++/MPI software package for large-scale data compression via the Tucker tensor decomposition, ACM Transactions on Mathematical Software, 46 (2020), https://doi.org/10.1145/3378445.
+[4] K. Batselier, W. Yu, L. Daniel, and N. Wong, Computing low-rank approximations of largescale matrices with the tensor network randomized SVD, SIAM Journal on Matrix Analysis
+and Applications, 39 (2018), pp. 1221–1244, https://doi.org/10.1137/17M1140480.
+[5] C. Battaglino, G. Ballard, and T. G. Kolda, A practical randomized CP tensor decomposition, SIAM Journal on Matrix Analysis and Applications, 39 (2018), pp. 876–901,
+https://doi.org/10.1137/17M1112303.
+[6] W. H. Cabot and A. W. Cook, Reynolds number effects on Rayleigh–Taylor instability with
+possible implications for type ia supernovae, Nature Physics, 2 (2006), pp. 562–568, https:
+//doi.org/10.1038/nphys361.
+[7] V. T. Chakaravarthy, J. W. Choi, D. J. Joseph, X. Liu, P. Murali, Y. Sabharwal, and
+D. Sreedhar, On optimizing distributed Tucker decomposition for dense tensors, in 2017
+IEEE International Parallel and Distributed Processing Symposium (IPDPS), May 2017,
+30
+mode 1
+mode 2
+mode 3
+0
+0
+0
+1000
+1000
+1000
+2000
+2000
+2000
+3000
+0
+1000 2000 3000
+STHOSVD mode 1
+0
+3000
+0
+1000 2000 3000
+STHOSVD mode 2
+0
+3000
+1000
+1000
+1000
+2000
+2000
+2000
+3000
+0
+1000 2000 3000
+rSTHKron mode 1
+0
+3000
+0
+1000 2000 3000
+rSTHKron mode 2
+0
+3000
+1000
+1000
+2000
+2000
+2000
+0
+1000 2000 3000
+rHKron-re mode 1
+0
+3000
+0
+1000 2000 3000
+rHKron-re mode 2
+0
+1000 2000 3000
+0
+1000 2000 3000
+rSTHKron mode 3
+0
+1000
+3000
+0
+STHOSVD mode 3
+0
+3000
+0
+1000 2000 3000
+rHKron-re mode 3
+0
+1000
+1000
+1000
+2000
+2000
+2000
+3
+2.5
+2
+3000
+0
+1000 2000 3000
+3000
+0
+1000 2000 3000
+3000
+1.5
+0
+1000 2000 3000
+1
+Fig. 9: 1500-th slices of the original Miranda tensor for each mode (first row) compared
+to reconstructions of the 1500-th slices generated by STHOSVD (second row), Alg. 6.4
+(third row), and Alg. 6.5 (last row)
+pp. 1038–1047, https://doi.org/10.1109/IPDPS.2017.86.
+[8] E. Chan, M. Heimlich, A. Purkayastha, and R. van de Geijn, Collective Communication:
+Theory, Practice, and Experience, Concurrency and Computation: Practice and Experience, 19 (2007), pp. 1749–1783, https://doi.org/10.1002/cpe.1206.
+[9] M. Che and Y. Wei, Randomized algorithms for the approximations of Tucker and the tensor
+train decompositions, Advances in Computational Mathematics, 45 (2019), pp. 395–428,
+https://doi.org/10.1007/s10444-018-9622-8.
+[10] M. Che, Y. Wei, and H. Yan, The computation of low multilinear rank approximations of
+tensors via power scheme and random projection, SIAM Journal on Matrix Analysis and
+Applications, 41 (2020), pp. 605–636, https://doi.org/10.1137/19M1237016.
+[11] M. Che, Y. Wei, and H. Yan, An efficient randomized algorithm for computing the approximate Tucker decomposition, Journal of Scientific Computing, 88 (2021), pp. 1–29,
+https://doi.org/10.1007/s10915-021-01545-5.
+[12] J. Choi, X. Liu, and V. Chakaravarthy, High-performance dense Tucker decomposition
+31
+mode 1
+mode 2
+mode 3
+200
+200
+200
+400
+400
+400
+200
+400
+STHOSVD mode 1
+200
+400
+STHOSVD mode 2
+200
+200
+200
+200
+400
+400
+400
+200
+400
+rSTHKron mode 1
+200
+400
+rSTHKron mode 2
+200
+200
+200
+400
+400
+400
+200
+400
+rHKron-re mode 2
+400
+rSTHKron mode 3
+200
+200
+400
+rHKron-re mode 1
+400
+STHOSVD mode 3
+200
+400
+rHKron-re mode 3
+1
+0.8
+200
+200
+200
+400
+400
+400
+0.6
+0.4
+200
+400
+200
+400
+0.2
+200
+400
+0
+Fig. 10: 250th slices of the original SP tensor for each mode (first row) compared
+to reconstruction of the 250th slices generated by STHOSVD (second row), Alg. 6.4
+(third row), and Alg. 6.5 (last row)
+on GPU clusters, in SC18: International Conference for High Performance Computing,
+Networking, Storage and Analysis, IEEE, 2018, pp. 543–553, https://doi.org/10.1109/SC.
+2018.00045.
+[13] H. A. Daas, G. Ballard, P. Cazeaux, E. Hallman, A. Miedlar, M. Pasha, T. W. Reid,
+and A. K. Saibaba, Randomized algorithms for rounding in the tensor-train format, arXiv
+preprint arXiv:2110.04393, (2021).
+[14] L. De Lathauwer, B. De Moor, and J. Vandewalle, A multilinear singular value decomposition, SIAM journal on Matrix Analysis and Applications, 21 (2000), pp. 1253–1278,
+https://doi.org/10.1137/S0895479896305696.
+[15] L. De Lathauwer, B. De Moor, and J. Vandewalle, On the best rank-1 and rank-(r1 ,r2
+,. . .,rn) approximation of higher-order tensors, SIAM Journal on Matrix Analysis and
+Applications, 21 (2000), pp. 1324–1342, https://doi.org/10.1137/S0895479898346995.
+[16] N. B. Erichson, K. Manohar, S. L. Brunton, and J. N. Kutz, Randomized CP tensor
+decomposition, Machine Learning: Science and Technology, 1 (2020), p. 025012, https:
+32
+//doi.org/10.1088/2632-2153/ab8240.
+[17] N. Halko, P.-G. Martinsson, and J. A. Tropp, Finding structure with randomness: Probabilistic algorithms for constructing approximate matrix decompositions, SIAM review, 53
+(2011), pp. 217–288, https://doi.org/10.1137/090771806.
+[18] R. A. Horn and C. R. Johnson, Matrix analysis, Cambridge University Press, 2012.
+[19] R. Jin, T. G. Kolda, and R. Ward, Faster Johnson–Lindenstrauss transforms via Kronecker
+products, Information and Inference: A Journal of the IMA, 10 (2021), pp. 1533–1562,
+https://doi.org/10.1093/imaiai/iaaa028.
+[20] O. Kaya and Y. Robert, Computing dense tensor decompositions with optimal dimension
+trees, Algorithmica, 81 (2019), pp. 2092–2121, https://doi.org/10.1007/s00453-018-0525-3.
+[21] O. Kaya and B. Uçar, High performance parallel algorithms for the Tucker decomposition of
+sparse tensors, in 45th International Conference on Parallel Processing (ICPP ’16), 2016,
+pp. 103–112, https://doi.org/http://dx.doi.org/10.1109/ICPP.2016.19.
+[22] T. G. Kolda and B. W. Bader, Tensor decompositions and applications, SIAM review, 51
+(2009), pp. 455–500, https://doi.org/10.1137/07070111X.
+[23] H. Kolla, X.-Y. Zhao, J. H. Chen, and N. Swaminathan, Velocity and reactive scalar
+dissipation spectra in turbulent premixed flames, Combustion Science and Technology, 188
+(2016), pp. 1424–1439, https://doi.org/10.1080/00102202.2016.1197211.
+[24] Z. Li, Q. Fang, and G. Ballard, Parallel Tucker decomposition with numerically accurate
+SVD, in 50th International Conference on Parallel Processing, ICPP ’21, New York, NY,
+USA, August 2021, ACM, p. 11, https://doi.org/10.1145/3472456.3472472.
+[25] R. Minster, A. K. Saibaba, and M. E. Kilmer, Randomized algorithms for low-rank tensor
+decompositions in the Tucker format, SIAM Journal on Mathematics of Data Science, 2
+(2020), pp. 189–215, https://doi.org/10.1137/19M1261043.
+[26] A.-H. Phan, P. Tichavsky, and A. Cichocki, Fast alternating LS algorithms for high order
+CANDECOMP/PARAFAC tensor factorizations, IEEE Transactions on Signal Processing,
+61 (2013), pp. 4834–4846, https://doi.org/10.1109/TSP.2013.2269903.
+[27] Y. Sun, Y. Guo, C. Luo, J. Tropp, and M. Udell, Low-rank Tucker approximation of a
+tensor from streaming data, SIAM Journal on Mathematics of Data Science, 2 (2020),
+pp. 1123–1150, https://doi.org/10.1137/19M1257718.
+[28] J. A. Tropp, Improved analysis of the subsampled randomized Hadamard transform, Advances in Adaptive Data Analysis, 3 (2011), pp. 115–126, https://doi.org/10.1142/
+S1793536911000787.
+[29] N. Vannieuwenhoven, R. Vandebril, and K. Meerbergen, A new truncation strategy for
+the higher-order singular value decomposition, SIAM Journal on Scientific Computing, 34
+(2012), pp. A1027–A1052, https://doi.org/10.1137/110836067.
+[30] A. S. J. W. Wolf, Low rank tensor decompositions for high dimensional data approximation,
+recovery and prediction, PhD thesis, Technical University of Berlin, 2019, https://doi.org/
+10.14279/depositonce-8109.
+[31] F. Woolfe, E. Liberty, V. Rokhlin, and M. Tygert, A fast randomized algorithm for the
+approximation of matrices, tech. report, Tech. rep. 1380, Yale University, Department of
+Computer Science, 2007.
+[32] K. Zhao, S. Di, X. Lian, S. Li, D. Tao, J. Bessac, Z. Chen, and F. Cappello, SDRBench:
+Scientific data reduction benchmark for lossy compressors, in 2020 IEEE International
+Conference on Big Data (Big Data), IEEE, 2020, pp. 2716–2724, https://doi.org/10.1109/
+BigData50022.2020.9378449.
+[33] G. Zhou, A. Cichocki, and S. Xie, Decomposition of big tensors with low multilinear rank,
+arXiv preprint arXiv:1412.1885, (2014), https://doi.org/10.48550/arXiv.1412.1885.
+33

@@ -1,0 +1,211 @@
+--- v003.md
++++ v004.md
+@@ -1,54 +1,144 @@
+ # Visibility-Based Pruning
+ 
+-Also called: Gradient-based Pruning, Zero-gradient Pruning
++Also called: Gradient-based Pruning, Visibility mask pruning, Visibility-Based Geometry Pruning, Zero-gradient Pruning
+ 
+ ## Overview
+-Visibility-Based Pruning removes surfels that were never reached during the backward pass, which occurs when they are persistently occluded, lie outside all camera frustums, or fail the kernel cutoff test at every pixel [S1, unofficial].
++Visibility-Based Pruning removes 3D scene elements (points, voxels, or Gaussians) by analyzing their visibility across a set of training camera viewpoints, minimizing rendering distortion while maintaining object watertightness [S1]. It differs from opacity-based or gradient-magnitude-only methods by explicitly modeling geometric occlusion and frustum containment to identify elements that contribute no information to the rendered views [S1][S2, unofficial]. This method is a core component of adaptive density control in 3D Gaussian Splatting, where it complements opacity and loss-based pruning to remove unstable or low-contribution primitives [Parent].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: A set of surfels $S$, each tracking its cumulative screen-space gradient magnitude across all training views, along with a flag indicating the end of a training epoch [S1, unofficial].
+-- Output: A pruned subset $S' \subset S$ containing only surfels that received non-zero gradients [S1, unofficial].
++The method operates by constructing a visibility mask for all scene elements across all training views and pruning those that fail to meet a minimum visibility threshold. Two primary implementations exist: one based on geometric projection (thickness) [S1] and one based on gradient accumulation (zero-gradient) [S2, unofficial].
+ 
+-**Data Structures:**
+-- Each surfel stores geometric and appearance parameters, plus a floating-point field tracking the cumulative screen-space gradient magnitude accumulated over the epoch [S1, unofficial]. The exact field name is implementation-defined [G].
++### Inputs and Outputs
++*   **Inputs:**
++    *   Set of $N$ 3D elements (points/surfels/Gaussians) $P_w = \{p_i\}_{i=1}^N$ in World Coordinate Space, where $p_i = (x_i, y_i, z_i)$ [S1].
++    *   Set of $K$ training camera poses $D = \{d_j\}_{j=1}^K$, where each $d_j$ is a $4 \times 4$ extrinsic matrix containing rotation $R$ and translation $t$ [S1].
++    *   Camera intrinsic matrix $K$ (assumed known or constant) [S1].
++    *   Parameters:
++        *   $\tau$ (thickness): Number of closest points to consider visible per pixel [S1].
++        *   $\nu$ (MVE): Minimum Views per Element threshold [S1].
++        *   $\epsilon$: Small quantity to prevent stagnation in gradient-based variants (typically 0.01) [S3].
++        *   $\tau_v$: Visibility threshold for view-frequency (in Anchor Pruning variant) [S3].
++*   **Outputs:**
++    *   Pruned set of elements $P'_w \subset P_w$.
++    *   Binary visibility mask $O \in \{0, 1\}^{N \times K}$ [S1].
+ 
+-**Steps:**
+-1. **Accumulate Gradients:** During the training epoch, for each surfel $i$ rendered in view $v$, compute the loss gradient projected to screen space and add its magnitude to the surfel's cumulative field [S1, unofficial].
+-2. **Check Zero Gradient:** At the epoch boundary, iterate through all surfels in $S$ [S1, unofficial].
+-3. **Prune:** Remove any surfel whose cumulative screen-space gradient magnitude equals zero [S1, unofficial].
++### Data Structures
++*   **Visibility Mask ($O$):** A binary matrix of size $N \times K$. $O_{nk} = 1$ if element $n$ is visible in view $k$, and $0$ otherwise [S1].
++*   **Visibility Count ($S$):** A vector of size $N$, where $S_n = \sum_{k=1}^K O_{nk}$ [S1].
+ 
+-**Formula:**
+-$$ S' = \{ s_i \in S \mid \sum_{v \in \text{Views}} \|\nabla_{\text{screen}} \mathcal{L}_i^{(v)}\| > 0 \} $$
+-Where:
+-- $S$: Set of surfels at the start of the epoch.
+-- $S'$: Set of surfels after pruning.
+-- $s_i$: The $i$-th surfel.
+-- $\nabla_{\text{screen}} \mathcal{L}_i^{(v)}$: Screen-space gradient of the loss for surfel $i$ in view $v$.
+-[S1, unofficial]
++### Algorithm: Geometric Visibility Mask Construction
++This procedure constructs the visibility mask $O$ based on geometric occlusion [S1].
+ 
+-**Parameters:**
+-- Threshold: $0.0$ (exact zero check) [S1, unofficial].
++1.  **Projection:** For each camera pose $d_j \in D$ (where $j=1 \dots K$):
++    a. For each element $p_i \in P_w$ (where $i=1 \dots N$):
++        i. Convert $p_i$ to homogeneous coordinates $\tilde{p} = [x_i, y_i, z_i, 1]^T$.
++        ii. Transform to Camera Coordinate System (CCS): $\tilde{p}_c = d_j \tilde{p}$.
++        iii. Compute homogeneous image coordinates: $\tilde{x}_c = K \tilde{p}_c$.
++        iv. Normalize by depth $z_c$ (the third component of $\tilde{p}_c$) to obtain 2D pixel coordinates: $(u, v) = \pi(p_i) = (\tilde{x}_c[0]/\tilde{x}_c[2], \tilde{x}_c[1]/\tilde{x}_c[2])$.
++        v. Check if $(u, v)$ is within the image bounds. If not, mark $p_i$ as invisible for view $j$ ($O_{ij} = 0$) and continue to next element.
++2.  **Grouping:** For each pixel $(u, v)$ in the image, identify the set of elements $M_{uv} = \{p_i \mid \pi(p_i) = (u, v)\}$ projected to that pixel [S1].
++3.  **Occlusion Culling (Thickness):**
++    a. Sort elements in $M_{uv}$ by their $z$-value in the Camera Coordinate System (ascending, i.e., closest to camera first).
++    b. Mark the $\tau$ elements with the smallest $z$-values as visible.
++    c. Mark all remaining elements in $M_{uv}$ as occluded (invisible) for view $j$.
++    d. Update $O_{ij}$ accordingly: $O_{ij} = 1$ if visible, $0$ if occluded or out of bounds [S1].
++4.  **Repeat:** Steps 1-3 for all $K$ camera poses to fill the mask $O$ [S1].
+ 
+-**Edge Cases and Pitfalls:**
+-- **Numerical Precision:** The source specifies an exact zero check, implying any non-zero accumulation survives pruning [S1, unofficial]. Implementers should ensure gradients are not artificially clamped to zero during accumulation [G].
+-- **First Epoch:** If a surfel is initialized but never rendered (e.g., completely outside all frustums), its gradient remains zero and it is pruned immediately, which is intended behavior [S1, unofficial].
++### Algorithm: Pruning Decision
++After constructing $O$, elements are removed based on visibility counts [S1] or gradient history [S2, unofficial].
+ 
+-**Pseudocode:**
++1.  **Calculate Visibility Counts:** For each element $n \in \{1 \dots N\}$, compute the number of visible views:
++    $$ S_n = \sum_{k=1}^K O_{nk} $$
++2.  **Prune:** Remove element $n$ if:
++    $$ S_n < \nu $$
++    where $\nu$ is the Minimum Views per Element (MVE) parameter [S1].
++
++### Algorithm: Zero-Gradient Variant (Surfel-based)
++In surfel-based representations, pruning is performed at the end of each training epoch [S2, unofficial].
++
++1.  **Accumulate Gradients:** During the backward pass, accumulate the screen-space gradient magnitude for each surfel across all views.
++2.  **Check Gradient:** Identify surfels whose cumulative screen-space gradient magnitude is zero.
++3.  **Prune:** Remove surfels with zero cumulative gradient. A zero gradient implies the surfel was never reached during the backward pass (persistently occluded, outside frustums, or failed kernel cutoff) and carried no information [S2, unofficial].
++
++### Pseudocode
+ ```python
+-def visibility_based_pruning(surfels, epoch_end_flag):
++def compute_visibility_mask(points, cameras, intrinsics, thickness):
+     """
+-    Removes surfels with zero cumulative screen-space gradient magnitude.
++    Computes the N x K visibility mask O.
++    points: List of N 3D points (x, y, z)
++    cameras: List of K extrinsic matrices (4x4)
++    intrinsics: 3x3 intrinsic matrix K
++    thickness: int, number of closest points to mark visible per pixel
+     """
+-    if not epoch_end_flag:
+-        return surfels
++    N = len(points)
++    K = len(cameras)
++    O = [[0 for _ in range(K)] for _ in range(N)]
+     
+-    pruned_surfels = []
+-    for surfel in surfels:
+-        if surfel.cumulative_gradient > 0.0:
+-            pruned_surfels.append(surfel)
+-        surfel.cumulative_gradient = 0.0  # Reset for next epoch [G]
+-        
+-    return pruned_surfels
++    # Group points by pixel for each view
++    # pixel_points[view_idx][u][v] = list of (point_idx, z_cam)
++    pixel_points = [[{} for _ in range(cameras[0].height)] for _ in range(K)]
++    
++    for k in range(K):
++        extrinsic = cameras[k]
++        for i in range(N):
++            p = points[i]
++            # Homogeneous world coord
++            p_hom = [p[0], p[1], p[2], 1.0]
++            
++            # Transform to camera coords
++            p_cam_hom = mat_mul(extrinsic, p_hom)
++            z_cam = p_cam_hom[2]
++            
++            # Check if in front of camera
++            if z_cam <= 0:
++                continue
++                
++            # Project to image coords
++            p_img_hom = mat_mul(intrinsics, p_cam_hom)
++            u = p_img_hom[0] / p_img_hom[2]
++            v = p_img_hom[1] / p_img_hom[2]
++            
++            # Check bounds
++            if 0 <= u < cameras[0].width and 0 <= v < cameras[0].height:
++                u_int = int(u)
++                v_int = int(v)
++                if (u_int, v_int) not in pixel_points[k][v_int]:
++                    pixel_points[k][v_int][u_int] = []
++                pixel_points[k][v_int][u_int].append((i, z_cam))
++                
++    # Determine visibility based on thickness
++    for k in range(K):
++        for v in range(cameras[0].height):
++            for u in range(cameras[0].width):
++                if (u, v) in pixel_points[k][v]:
++                    candidates = pixel_points[k][v][u]
++                    # Sort by z_cam (ascending)
++                    candidates.sort(key=lambda x: x[1])
++                    
++                    # Mark top 'thickness' as visible
++                    for idx in range(len(candidates)):
++                        point_idx = candidates[idx][0]
++                        if idx < thickness:
++                            O[point_idx][k] = 1
++                        else:
++                            O[point_idx][k] = 0
++                            
++    return O
++
++def prune_by_visibility(points, O, mve_threshold):
++    """
++    Prunes points based on visibility mask O and MVE threshold.
++    """
++    N = len(points)
++    pruned_indices = []
++    
++    for i in range(N):
++        # Sum of visible views
++        visible_views = sum(O[i])
++        if visible_views < mve_threshold:
++            pruned_indices.append(i)
++            
++    # Return new list of points excluding pruned indices
++    return [p for idx, p in enumerate(points) if idx not in pruned_indices]
+ ```
+ 
+@@ -56,16 +146,22 @@
+ 
+ ### Isolation-Based Pruning
+-Removes surfels lacking neighbors within their kernel support radius, identifying geometrically degenerate single-surfel groups that cannot form coherent surface layers [S1, unofficial]. It sets itself apart from visibility pruning by targeting spatial isolation rather than gradient absence [S1, unofficial]. Choose it when surface coherence is critical and isolated noise points are present [S1, unofficial].
++A variant that removes surfels with no neighbors within their kernel support radius. It queries the spatial index to check for neighbors; surfels with no such neighbor are considered isolated, forming degenerate single-surfel groups with low accumulated weight and coverage, and are removed [S2, unofficial]. This complements visibility pruning by removing geometrically disconnected artifacts that might still have non-zero gradients if they briefly entered a frustum but lack surface coherence [S2, unofficial].
+ 
+ ### Anchor Pruning with View-Frequency
+-Removes redundant and ineffective anchors that cause floaters by evaluating view-frequency instead of opacity alone [S2]. It sets itself apart by correlating anchor selection probability in training views with received gradients [S2]. Choose it when insufficiently optimized anchors degrade rendering quality and storage overhead [S2].
++A variant used in Octree-GS that removes redundant anchors based on "view-frequency" rather than opacity alone. View-frequency is the probability that an anchor is selected in training views, correlating with the received gradient. Anchors with view-frequency below a threshold $\tau_v$ are removed. This prevents artifacts from insufficiently optimized anchors that are not visible in most training frustums [S3]. It also involves computing average opacity over $T$ iterations and adjusting loss gradients with $\epsilon=0.01$ for selected anchors [S3].
+ 
+ ## Operating characteristics
+-Time and memory complexity are not given in the sources. The method adds negligible overhead to the standard rendering pass [G]. It is strictly a training-time optimization and is not used for real-time inference without training [G]. It efficiently removes primitives that carry no scene information [S1, unofficial].
++*   **Time Complexity:** $O(N \cdot K \cdot \log(\text{avg\_points\_per\_pixel}))$ for mask construction due to sorting points by depth per pixel [S1]. Pruning decision is $O(N \cdot K)$ for summing the mask, or $O(N)$ if the mask is pre-computed [S1].
++*   **Memory Complexity:** $O(N \cdot K)$ to store the visibility mask $O$ [S1]. For large $N$ and $K$, this can be significant, though bit-packing can reduce this to $N \cdot K / 8$ bytes.
++*   **Strengths:** Explicitly handles occlusion and self-occlusion, preserving "watertightness" of the object [S1]. Effective at removing floating artifacts caused by elements that are rarely visible [S1]. Does not require ground-truth geometry [S1].
++*   **Limitations:** Requires forward projection of all points for all views, which can be computationally expensive during training if done every epoch [S1]. The choice of $\tau$ (thickness) affects the perceived object thickness and pruning aggressiveness; too low $\tau$ may remove valid surface points, too high may retain occluded noise [S1].
++*   **When to use:** Inward-facing scenes with central camera disposition, where self-occlusion is the primary source of redundancy [S1]. When maintaining geometric consistency is more important than absolute minimal element count.
++*   **When not to use:** Large-scale outdoor scenes with sparse camera coverage where self-occlusion is less predictable or where frustum culling alone is insufficient [S1].
+ 
+ ## Background
+-It is part of the adaptive density control strategy for 3D Gaussian Splatting variants that use surfels [S1, unofficial]. The method leverages the fact that surfels not reached in the backward pass carry no scene information [S1, unofficial].
++Visibility-Based Geometry Pruning was proposed to address model size reduction in neural plenoptic scene representations, applicable to both NeRF-like and splatting-based methods [S1]. It leverages the scene's disposition to acquired viewpoints to orient pruning, minimizing distortion losses by exploring redundancies [S1]. The method was introduced in a 2025 paper by authors investigating inward-facing scenes [S1]. Variants like zero-gradient pruning are used in 3D Surface Splatting (3DSS) for inverse rendering [S2, unofficial], and view-frequency pruning is used in Octree-GS for LOD-structured rendering [S3].
+ 
+ ## Sources
+-[S1] 3DSS: 3D Surface Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2605.05876, fetched 2026-10-26 (unofficial)
+-[S2] Octree-GS: Towards Consistent Real-time Rendering with LOD-Structured 3D Gaussians, https://doi.org/10.1109/tpami.2025.3568201, fetched 2026-10-27+[S1] Visibility-Based Geometry Pruning of Neural Plenoptic Scene Representations, https://doi.org/10.1109/tmm.2025.3618548, fetched 2026-10-26
++[S2] 3DSS: 3D Surface Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2605.05876, fetched 2026-10-26 (unofficial)
++[S3] Octree-GS: Towards Consistent Real-time Rendering with LOD-Structured 3D Gaussians, https://doi.org/10.1109/tpami.2025.3568201, fetched 2026-10-27

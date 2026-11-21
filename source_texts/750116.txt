@@ -1,0 +1,2083 @@
+ADELE - Adaptive Delaunay Grids for High-Fidelity Mesh-Native
+Reconstruction
+arXiv:2609.06723v1 [cs.CV] 6 Sep 2026
+JOHANNES WEIDENFELLER, ETH Zurich, Switzerland
+SHAOFEI WANG, Beijing Institute for General Artificial Intelligence, China
+PHILIPP FÜRNSTAHL, University of Zurich, Switzerland and Balgrist University Hospital, Switzerland
+SIYU TANG, ETH Zurich, Switzerland
+Fig. 1. Qualitative comparison of mesh reconstructions from multi-view images. Existing methods based on 3D Gaussian Splatting (PGSR, 2DGS) or meshgaussian-hybrid optimization (MiLO) produce meshes with noticeable artifacts or oversmoothed surfaces. Our method directly optimizes a locally refinable
+tetrahedral grid with a novel depth-offset rendering formulation, yielding high-quality meshes with sharp geometric details and well-distributed triangles.
+Meshes remain the most practical representation for geometry reasoning
+and integration into graphics pipelines, yet existing reconstruction methods
+struggle to produce high-quality meshes. Most state-of-the-art approaches
+initially learn an intermediate representation (NeRF/3DGS) and treat mesh
+extraction as a post-processing step, which often leads to oversmoothed
+surfaces or poor quality meshes with excessive triangle counts. Existing
+Authors’ Contact Information: Johannes Weidenfeller, ETH Zurich, Zurich, Switzerland,
+johannes.weidenfeller@ai.ethz.ch; Shaofei Wang, Beijing Institute for General Artificial
+Intelligence, Beijing, China, sfwang0928@gmail.com; Philipp Fürnstahl, University of
+Zurich, Zurich, Switzerland and Balgrist University Hospital, Zurich, Switzerland; Siyu
+Tang, ETH Zurich, Zurich, Switzerland.
+This work is licensed under a Creative Commons Attribution 4.0 International License.
+SA Conference Papers ’26, Kuala Lumpur, Malaysia
+© 2026 Copyright held by the owner/author(s).
+ACM ISBN 979-8-4007-2842-6/2026/12
+https://doi.org/10.1145/3829340.3842214
+mesh-native optimization methods alleviate some of these issues but suffer
+from fixed-resolution discretizations and unstable optimization behavior.
+In this paper, we introduce an adaptive mesh-based optimization framework and a practical mesh rendering technique to address these challenges.
+Our representation combines an optimizable Delaunay-triangulated tetrahedral grid with a multi-resolution hash grid. The former is refined through
+point pruning and insertion, while the latter provides latent features for
+SDF/appearance value predictions. We use volumetric rendering to bootstrap
+a coarse geometry while leveraging mesh-based rendering for recovering
+fine-grained details. Additionally, we propose a differentiable, rasterizationbased depth-offset rendering formulation, reducing geometric artifacts and
+improving reconstruction quality. Our method significantly outperforms
+existing mesh optimization approaches across a variety of object-centric
+benchmarks while being competitive with state-of-the-art NeRF/3DGS methods. Code and additional results are available on our project page.
+CCS Concepts: • Computing methodologies → Reconstruction; Mesh
+models; Machine learning approaches.
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+2
+•
+Johannes Weidenfeller, Shaofei Wang, Philipp Fürnstahl, and Siyu Tang
+Additional Key Words and Phrases: Surface Reconstruction, Mesh Reconstruction, Novel View Synthesis, Neural Radiance Fields, Differentiable Rendering
+ACM Reference Format:
+Johannes Weidenfeller, Shaofei Wang, Philipp Fürnstahl, and Siyu Tang.
+2026. ADELE - Adaptive Delaunay Grids for High-Fidelity Mesh-Native
+Reconstruction. In SIGGRAPH Asia 2026 Conference Papers (SA Conference
+Papers ’26), December 01–04, 2026, Kuala Lumpur, Malaysia. ACM, New York,
+NY, USA, 20 pages. https://doi.org/10.1145/3829340.3842214
+1
+Introduction
+Reconstructing detailed geometry from multiview images is a longstanding problem in computer vision and graphics, with numerous
+applications in 3D modeling, virtual reality, and robotics. Recent
+advances in neural radiance fields (NeRF) [Mildenhall et al. 2020]
+and 3D Gaussian Splatting (3DGS) [Kerbl et al. 2023] have led to a
+blossoming of radiance field-based reconstruction methods [Guédon and Lepetit 2024b; Huang et al. 2024; Li et al. 2023; Oechsle
+et al. 2021; Wang et al. 2021; Yariv et al. 2021; Yu et al. 2024c],
+which achieve unprecedented levels of detailed geometry recovery
+from only a small set of images (e.g., 20-100 images). However, these
+methods rely on either neural fields or Gaussians to represent the radiance fields, which are less suitable for standard graphics pipelines,
+where polygonal meshes remain the most practical representation
+for geometry reasoning and downstream tasks. Consequently, most
+existing works treat mesh extraction as a post-processing step, typically using Marching Cubes/Tetrahedra [Li et al. 2023; Oechsle
+et al. 2021; Wang et al. 2021; Yariv et al. 2021; Yu et al. 2024c], TSDF
+fusion [Guédon et al. 2025b; Huang et al. 2024], or Poisson surface
+reconstruction [Guédon et al. 2025b; Guédon and Lepetit 2024b;
+Huang et al. 2024; Peng et al. 2021]. This often leads to either a
+loss of fine geometric details or excessively dense meshes that are
+impractical for real-world applications. Furthermore, the extracted
+meshes usually exhibit reduced rendering fidelity compared to the
+intermediate representation.
+Another line of work incorporates the mesh extraction step in the
+optimization pipeline and optimizes meshes directly in an end-toend fashion [Frühauf et al. 2024; Hasselgren et al. 2022; Munkberg
+et al. 2022]. These methods provide a direct link between the optimized mesh and the rendered output and allow the use of regularizers to improve mesh quality. However, existing approaches
+typically rely on fixed-resolution discretizations, which limit the
+adaptive allocation of geometric detail and constrain reconstruction
+fidelity, particularly in regions with complex geometry. In addition,
+optimizing explicit mesh representations remains sensitive to local
+geometric artifacts and unstable surface updates during training.
+In this paper, we present ADELE, an adaptive mesh-native reconstruction framework designed to address the limitations of existing
+multi-view mesh reconstruction methods. To enable high-resolution
+reconstruction, our representation is built on an optimizable tetrahedral grid that is periodically rebuilt using Delaunay triangulation [Binninger et al. 2025; Govindarajan et al. 2025; Guédon et al.
+2025a]. The grid can be initialized uniformly and adaptively refined
+during optimization through point pruning and insertion. This allows us to extract meshes with fine geometric detail and locally
+adaptive resolution while remaining computationally efficient. To
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+enhance optimization stability, we utilize a hybrid approach combining volumetric and mesh-based rendering. Specifically, we found
+that using volumetric rendering in early training stages stabilizes
+training, but cannot produce sharp details if employed in later stages;
+we thus use volumetric rendering to bootstrap a coarse geometry
+and later transition to mesh-based rendering to recover fine-grained
+details. Additionally, we employ a differentiable mesh rendering
+strategy based on a lightweight depth-offset sampling scheme. Since
+the optimization is carried out in an end-to-end fashion, regularization terms that improve mesh quality can be seamlessly integrated
+into the training objective.
+To summarize, our contributions are as follows.
+• We propose a hybrid geometric representation that combines
+an adaptive grid-based representation using Delaunay triangulation with a multi-resolution hash encoding, enabling
+flexible geometry learning from random or uniform initialization. The representation supports hybrid optimization using both volumetric and mesh-based rendering supervision,
+substantially improving optimization stability during early
+training.
+• We introduce a differentiable mesh rendering strategy that
+samples colors at multiple depth offsets around the rasterized
+surface.
+• We analyze biases in the DTU evaluation protocol, showing that it can favor mesh extraction strategies with open or
+incomplete surfaces. To mitigate this issue, we propose a simple filtering scheme that enables more consistent geometric
+evaluations across reconstruction methods.
+• We validate our method through extensive experiments on
+DTU, BlendedMVS, NeRF Synthetic, and Stanford ORB, significantly outperforming state-of-the-art mesh-based reconstruction methods in terms of geometric reconstruction quality.
+2 Related Work
+2.1 Radiance Fields
+The introduction of Neural radiance fields (NeRF) [Mildenhall et al.
+2020] led to major advancements in the task of novel view synthesis. Follow-up works improved its anti-aliasing abilities [Barron et al. 2021; Hu et al. 2023], generalization and scalability to
+large, unbounded environments [Barron et al. 2022], and explored
+more efficient representations using voxel grids [Alex Yu and Sara
+Fridovich-Keil et al. 2022; Müller et al. 2022; Sun et al. 2022] or tensor decompositions [Chen et al. 2022, 2023b,c]. More recently, 3D
+Gaussian Splatting [Kerbl et al. 2023] (3DGS) has enabled lightning
+fast optimization and real-time rendering of 3D scenes with impressive fidelity, on both object-centric and unbounded scenes. Since
+then, the community has witnessed a surge of interest in this representation, and an abundance of follow-up works were proposed to
+further improve its efficiency [Fang and Wang 2024a,b; Kheradmand
+et al. 2025; Ye et al. 2024] and rendering quality [Liang et al. 2024;
+Yu et al. 2024a].
+ADELE - Adaptive Delaunay Grids for High-Fidelity Mesh-Native Reconstruction
+2.2
+Neural Surface Reconstruction
+A number of works [Wang et al. 2021; Yariv et al. 2021] extend NeRF
+for surface reconstruction by converting learnable signed distance
+fields (SDFs) into volumetric density, followed by volumetric rendering. Further advances [Li et al. 2023; Rosu and Behnke 2023;
+Wang et al. 2023a] improve the efficiency and extend applications
+to large-scale scenes by leveraging efficient multi-resolution feature grids [Müller et al. 2022]. More recently, several works have
+shifted focus toward surface reconstruction through 3DGS. Early
+approaches improve the surface quality extracted from 3DGS scenes
+by introducing explicit regularization terms [Guédon and Lepetit
+2024b], or by training hybrid representations that jointly optimize a
+3DGS scene and an SDF [Chen et al. 2023a; Yu et al. 2024b]. Methods
+such as 2DGS [Huang et al. 2024] and GaussianSurfels [Dai et al.
+2024] model scenes with 2D Gaussian primitives that more naturally
+align with the underlying surface geometry. Despite these advances,
+most Gaussian-based reconstruction methods still rely on surface
+extraction performed after training, typically using TSDF fusion or
+Poisson surface reconstruction, which often produce oversmoothed
+surfaces and fail to capture high-curvature details. To overcome this
+limitation, Gaussian Opacity Fields (GOF) [Yu et al. 2024c] propose
+building a tetrahedral grid from the bounding boxes of Gaussians
+and extracting iso-surfaces from these tetrahedral grids. However,
+this mesh extraction strategy remains a separate post-processing
+step, leading to a mismatch in the optimized representation and the
+extracted surface.
+2.3
+Mesh-based Reconstruction
+Mesh-based reconstruction methods directly optimize mesh geometry through differentiable rendering. Early work optimized vertex
+positions under a fixed initial topology or relied on heuristics for
+topology changes [Chen et al. 2019, 2021; Jatavallabhula et al. 2019].
+NVDiffrec [Munkberg et al. 2022] jointly optimizes geometry, texture, and lighting on a uniform tetrahedral-grid SDF, with follow-ups
+improving mesh extraction [Frühauf et al. 2024; Shen et al. 2023]
+or adopting a more physically plausible rendering model [Hasselgren et al. 2022]. These methods, however, remain bottlenecked by
+uniform grid resolution and cannot recover fine geometry. Adaptive Delaunay and tetrahedral structures [Delaunay 1934; Lee and
+Schachter 1980] have been explored for radiance-field [Gu et al. 2024;
+Kulhanek and Sattler 2023] and, more recently, mesh-based reconstruction. TetWeave [Binninger et al. 2025] introduces an adaptive
+Delaunay grid for efficient mesh extraction; its extraction is conceptually close to ours, but its multi-view reconstruction is restricted to
+object-centric scenes with ground-truth depth supervision. RadiantFoam [Govindarajan et al. 2025] renders directly with Voronoi cells
+(the dual of Delaunay), but targets novel view synthesis only and
+does not extract meshes. Triangle Splatting [Held et al. 2026b] and
+MeshSplatting [Held et al. 2026a] optimize unstructured triangle
+soups for high-quality rendering of large-scale scenes, with the latter connecting the primitives into a mesh through a single Delaunay
+triangulation at the end of optimization. The resulting meshes are
+well suited for rendering, but exhibit irregularities and limited accuracy as surface reconstructions. MILo [Guédon et al. 2025a] extracts
+meshes from Delaunay sites derived from Gaussian bounding boxes,
+•
+3
+yet renders through the Gaussian branch and supervises the mesh
+only via mutual depth/normal losses rather than image gradients.
+Our method instead optimizes an adaptive Delaunay tetrahedral
+grid end-to-end with image-space losses, enabling local refinement
+of fine-grained detail while remaining computationally efficient.
+2.4
+Mesh-based Rendering
+Another central challenge in mesh-based reconstruction lies in the
+discontinuous nature of mesh rendering, which complicates optimization. Differentiable renderers help mitigate this problem by
+enabling gradient flow through discontinuities. NVDiffrast [Laine
+et al. 2020] introduces edge anti-aliasing to provide gradients along
+triangle boundaries, while alpha-blending approaches [Liu et al.
+2019; Ravi et al. 2020] propagate gradients across occluded surfaces
+at the cost of rendering efficiency. Another line of work leverages
+meshes as an auxiliary data structure to accelerate rendering and
+improve appearance quality. To approximate volumetric samples
+and better handle fuzzy geometry, several approaches construct
+multi-layer structures around an extracted base mesh [Esposito et al.
+2025; Wang et al. 2023b] or bake trained radiance fields into optimized polygon layers for efficient inference [Sharma et al. 2024].
+Similarly, other methods [Guédon and Lepetit 2024a,b] rely on a
+mesh to anchor surface-aligned 3D Gaussians or to confine them
+within an enclosing shell. Binary Opacity Grids [Reiser et al. 2024]
+instead anneal a sparse voxel grid of soft opacities into hard occupancies before mesh extraction. However, these techniques are
+predominantly evaluated on novel view synthesis, with little to no
+analysis of the quality of the recovered surface itself. Most closely
+related is the concurrent work Mesh Splatting [Zhang et al. 2026b],
+which softens a mesh into semi-transparent blended layers. While
+conceptually similar to our method, it exhibits lower performance
+on the evaluated datasets and struggles to capture high-frequency
+details. Our approach instead builds directly on NVDiffrast, retaining its computational efficiency while introducing a locally adaptive
+sampling mechanism that, as shown in our ablations, stabilizes
+training and reduces geometric artifacts.
+3 Method
+3.1 Geometric Representation
+We represent the scene geometry using a discretized signed distance
+function (SDF), combining a tetrahedral grid with a multi-resolution
+hash grid. Formally, the tetrahedral grid is defined by a set of 𝑛 𝑣
+vertices V and 𝑛𝑡 tetrahedra T:
+V = {v𝑖 ∈ R3 | 𝑖 = 1, . . . , 𝑛 𝑣 },
+T ⊆ V4 .
+We encode the SDF using a multi-resolution hash grid 𝑠ˆ : R3 → R.
+To extract a mesh from this representation, we query the SDF at
+the vertices of the tetrahedral grid to obtain discrete SDF samples
+𝑠𝑖 = 𝑠ˆ(v𝑖 ). We extract a mesh by applying the Marching Tetrahedra
+algorithm [Doi and Koide 1991]. Specifically, for any edge connecting vertices (v𝑖 , v 𝑗 ) with differing SDF signs, a mesh vertex v𝑖 𝑗 is
+placed along the edge according to
+v𝑖 𝑗 =
+|𝑠𝑖 | v 𝑗 + |𝑠 𝑗 | v𝑖
+.
+|𝑠𝑖 | + |𝑠 𝑗 |
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+4
+•
+Johannes Weidenfeller, Shaofei Wang, Philipp Fürnstahl, and Siyu Tang
+Fig. 2. Overview of our framework. We represent scene geometry using an adaptive tetrahedral grid whose connectivity is maintained via Delaunay
+triangulation (§ 3.1) and whose vertex positions are optimizable (§ 3.2). SDF values at grid vertices are queried from a multi-resolution hash grid, and a mesh is
+extracted using the Marching Tetrahedra algorithm (DMTet). The mesh is rasterized via NVDiffrast to obtain depth and normal maps. For each pixel, we
+perform depth-offset sampling (§ 3.4) to generate multiple 3D sample points x𝑖 around the surface. These points, along with the viewing direction d and
+surface normal n, are fed through an appearance hash grid and a color MLP to produce pixel colors. During early training, a volumetric rendering branch
+(dashed blue) provides additional supervision to stabilize optimization (§ 3.3). The final output is supervised with an L1 photometric loss against ground-truth
+images along with mask and mesh regularization losses (§ 3.5).
+Finally, the mesh vertices extracted from any tetrahedron are connected with one or two triangle faces, resulting in a watertight
+mesh.
+uniform Dirichlet distribution:
+vnew =
+4
+∑︁
+𝑘=1
+3.2
+Grid Optimization
+In our method, we treat the vertex positions of the tetrahedral grid
+as optimizable parameters. Inspired by [Govindarajan et al. 2025],
+we periodically update the grid connectivity using Delaunay triangulation. This strategy also enables the addition and removal of
+grid vertices, analogous to the densification and pruning used in
+3DGS. New vertices are inserted at fixed iterations, ensuring that
+the grid progressively captures finer scene details. Similar to common densification schemes in other representations [Govindarajan
+et al. 2025; Kerbl et al. 2023], we use a gradient-based heuristic to
+identify regions requiring higher resolution. For each grid vertex
+v𝑖 , we maintain an exponential moving average of the positional
+gradient magnitude and periodically sample from existing tetrahedrons for subdivision; the probability of selecting a tetrahedron 𝑇 𝑗
+is proportional to the average tracked gradient magnitude of its
+corner vertices v 𝑗1 , . . . , v 𝑗4 :
+𝑏𝑘 v 𝑗𝑘 ,
+with
+4
+∑︁
+𝑏𝑖 = 1.
+(1)
+𝑖=1
+To maintain computational efficiency and eliminate unnecessary
+interior geometry, we also regularly prune vertices based on their
+contribution to the scene. We define a vertex as passive if it does
+not contribute to the rendered output of any training view. We
+periodically remove these passive vertices, retaining only those
+that are immediate neighbors of active (contributing) vertices to
+maintain a valid support region. Figure 3 shows how the grid adapts
+to the reconstructed geometry as the optimization progresses. The
+combination of adaptive densification and pruning ensures that
+the tetrahedral grid remains both expressive and computationally
+tractable throughout the optimization process.
+4
+𝑝 (𝑇 𝑗 ) ∝
+1 ∑︁
+|∇v 𝑗𝑘 L|.
+4
+𝑘=1
+Here |∇v 𝑗𝑘 L| denotes the exponential moving average of the positional gradient magnitude at vertex v 𝑗𝑘 . This sampling strategy
+ensures that densification focuses on regions contributing the most
+to the optimization error. For a sampled tetrahedron, a new vertex vnew is inserted by sampling barycentric coordinates 𝑏𝑖 from a
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+Fig. 3. Adaptive tetrahedral grid optimization. Starting from a uniform
+initialization (left), the grid progressively adapts to the scene geometry
+through Delaunay-site (i.e., vertex) movement, densification, and pruning. Periodic Delaunay re-triangulation maintains valid grid connectivity
+throughout optimization.
+ADELE - Adaptive Delaunay Grids for High-Fidelity Mesh-Native Reconstruction
+3.3
+Hybrid Training
+We find that optimizing our representation using purely mesh-based
+inverse rendering is highly sensitive to the initial state of the SDF.
+To enhance optimization stability, we introduce a hybrid training
+strategy. Specifically, we utilize a volumetric rendering objective
+to bootstrap a stable, coarse geometry during the early stages of
+training. As the optimization progresses, we smoothly transition to
+mesh-based rendering, which is better suited for recovering sharp,
+fine-grained surface details.
+Mesh-based rendering. For a given input view, we rasterize the
+mesh extracted from the tetrahedral grid using NVDiffrast [Laine
+et al. 2020] to obtain anti-aliased normal and depth maps. Let 𝑑 and
+n denote the depth and normal of a pixel, respectively, and let x
+be the 3D point obtained by unprojecting 𝑑. We predict the color 𝑐
+using a shallow network that takes as input an appearance feature of
+the 3D location x, the encoded viewing direction d, and the surface
+normal n:
+
+
+(2)
+𝑐 = MLP𝑐𝑜𝑙 Φ𝑎𝑝𝑝 (x) , d, Φ𝑛 (n) ,
+where Φ𝑎𝑝𝑝 is a multi-resolution hash encoding and Φ𝑛 is a spherical
+harmonic encoding.
+Volumetric Rendering. Leveraging the underlying hash grid encoding, we adopt the formulation of NeuS [Wang et al. 2021] to transform SDF values into volumetric densities and compute compositing
+weights for samples along each ray. The color at each sample location is evaluated via Equation 2 where the surface normals are
+derived from the analytical gradient of the hash-grid-defined SDF.
+We phase out the volumetric supervision by gradually reducing its
+loss weight over the course of training. Using only volumetric rendering for the whole training process is detrimental to performance,
+as shown in our experiments (Sec. 4.3). Further details regarding the
+volumetric optimization branch are provided in the supplementary
+material.
+3.4
+Depth Offset Sampling
+•
+5
+depth values 𝑑𝑖 around the rendered depth 𝑑 for each pixel and blend
+their corresponding colors. We model the SDF as locally planar in
+orientation of the mesh normal. Similar to NeuS [Wang et al. 2021],
+we assume that the opacity along the ray follows a sigmoid curve
+centered at the intersection point, that is,
+Ψ(𝑡) =
+1
+,
+1 + 𝑒 𝜎 𝑓 (𝑡 )
+where 𝑓 (𝑡) denotes the SDF along the ray parameterized by 𝑡. Here,
+𝜎 is a learnable parameter that controls the steepness of the opacity
+function. To draw 𝑛 depth samples, we perform inverse sampling
+with respect to Ψ. For each sampled position x𝑖 , its corresponding
+color 𝑐𝑖 is computed via Eq. 2. The final pixel color is then obtained
+as a weighted average over all sampled colors according to their
+contribution 𝑤𝑖 to the ray opacity
+∑︁
+𝐶=
+𝑤𝑖 𝑐𝑖 .
+(3)
+𝑖
+Details of the sampling procedure and the computation of the
+weights 𝑤𝑖 are included in the supplementary material. Since we
+perform inverse sampling with respect to the opacity function, the
+parameter 𝜎 controls the width of the sampling region around the
+extracted mesh. In practice, we optimize this parameter as part of
+the training.
+To analyze the impact of this strategy on the optimization dynamics, we evaluate how depth-offset rendering affects the alignment of
+mesh gradients g with the viewing direction d by measuring their
+cosine similarity 𝑟 = |g⊤ d|/∥g∥. Figure 4 illustrates 𝑟 for 𝑁 = 1, 3,
+and 5 mesh offset samples. The results show that increasing the
+sample count yields gradients that are more strongly oriented along
+the viewing direction. By encouraging updates that shift the surface perpendicular to the image plane, the optimization can more
+effectively escape local minima, facilitating the correction of convex
+artifacts and the recovery of concave structures.
+3.5
+Training Losses
+We directly supervise our representation using a photometric 𝐿1 loss between the input images and the images rendered from our
+model,
+∑︁
+𝐼𝑐 − 𝐼ˆ𝑐 1 ,
+(4)
+Lphoto =
+𝑐 ∈𝐶
+Fig. 4. Depth-offset sampling. Per-pixel alignment between the RGB reconstruction loss gradient w.r.t. mesh position and the viewing direction for
+different numbers of offset samples 𝑁 . Red indicates strong alignment with
+the viewing direction, while blue denotes largely perpendicular gradients.
+Increasing 𝑁 leads to progressively stronger alignment with the viewing
+direction.
+where 𝐼𝑐 denotes the input image for camera 𝑐, 𝐼ˆ𝑐 denotes the corresponding rendered image, and 𝐶 is the set of all cameras. When
+available, we also employ a mask loss to supervise the rendered
+opacity, given by
+Lmask =
+∑︁
+2
+𝑀𝑐 − 𝑀ˆ 𝑐 2 ,
+(5)
+𝑐 ∈𝐶
+Despite the hybrid supervision signal, the optimization at times
+becomes trapped in local minima, leading to undesirable convex
+artifacts (see Fig. 8). To facilitate training via the mesh-based rendering path, we introduce a differentiable depth-offset rendering
+strategy. Rather than evaluating a single point, we sample multiple
+where 𝑀𝑐 denotes the ground-truth mask for camera 𝑐 and 𝑀ˆ 𝑐
+denotes the rendered opacity mask. Our full loss function is then
+given by
+L = 𝜆photo Lphoto + 𝜆mask Lmask,
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+6
+•
+Johannes Weidenfeller, Shaofei Wang, Philipp Fürnstahl, and Siyu Tang
+37
+40
+55
+63
+65
+69
+83
+97
+105
+106
+110
+114
+118
+122
+Mean
+Time
+implicit
+1.90
+1.14
+1.00
+0.37
+1.60
+1.26
+1.37
+0.72
+1.85
+0.81
+0.93
+0.35
+0.58
+0.49
+0.43
+0.35
+2.28
+1.25
+1.10
+0.87
+1.27
+0.70
+0.65
+0.54
+1.47
+0.72
+0.57
+0.53
+1.67
+1.29
+1.48
+1.29
+2.05
+1.18
+1.09
+0.97
+1.07
+0.70
+0.83
+0.73
+0.88
+0.66
+0.52
+0.47
+2.53
+1.08
+1.20
+0.74
+1.06
+0.42
+0.35
+0.32
+1.15
+0.61
+0.49
+0.41
+0.96
+0.55
+0.54
+0.43
+1.49
+0.86
+0.84
+0.61
+> 12ℎ
+> 12ℎ
+> 12ℎ
+> 12ℎ
+3DGS [Kerbl et al. 2023]
+SuGaR [Guédon and Lepetit 2024b]
+GaussianSurfels [Dai et al. 2024]
+2DGS [Huang et al. 2024]
+GOF [Yu et al. 2024c]
+RaDe-GS [Zhang et al. 2026a]
+PGSR [Chen et al. 2025]
+2.14
+1.47
+0.66
+0.48
+0.50
+0.46
+0.34
+1.53
+1.33
+0.93
+0.91
+0.82
+0.73
+0.58
+2.08
+1.13
+0.54
+0.39
+0.37
+0.33
+0.29
+1.68
+0.61
+0.41
+0.39
+0.37
+0.38
+0.29
+3.49
+2.25
+1.06
+1.01
+1.12
+0.79
+0.78
+2.21
+1.71
+1.14
+0.83
+0.74
+0.75
+0.58
+1.43
+1.15
+0.85
+0.81
+0.73
+0.76
+0.54
+2.07
+1.63
+1.29
+1.36
+1.18
+1.19
+1.01
+2.22
+1.62
+1.53
+1.27
+1.29
+1.22
+0.73
+1.75
+1.07
+0.79
+0.76
+0.68
+0.62
+0.51
+1.79
+0.79
+0.82
+0.70
+0.77
+0.70
+0.49
+2.55
+2.45
+1.58
+1.40
+0.90
+0.78
+0.69
+1.53
+0.98
+0.45
+0.40
+0.42
+0.36
+0.31
+1.52
+0.88
+0.66
+0.76
+0.66
+0.68
+0.37
+1.50
+0.79
+0.53
+0.52
+0.49
+0.47
+0.38
+1.96
+1.33
+0.88
+0.80
+0.74
+0.68
+0.53
+11.2 m
+∼ 1h
+6.7 m
+10.9 m
+30m
+8.3m
+60m
+Triangle Splatting [Held et al. 2026b]
+MeshSplatting [Held et al. 2026a]
+MILo [Guédon et al. 2025a]
+Mesh Splatting [Zhang et al. 2026b]
+IMLS-Splatting [Yang et al. 2025]
+Ours
+0.98
+0.77
+0.43
+0.46
+0.52
+0.41
+1.07
+0.72
+0.74
+0.73
+1.02
+0.54
+1.07
+0.74
+0.34
+0.49
+0.37
+0.28
+0.51
+0.60
+0.37
+0.43
+0.32
+0.32
+1.67
+0.89
+0.80
+0.77
+0.86
+0.93
+1.44
+1.00
+0.74
+0.82
+0.50
+0.58
+1.17
+0.81
+0.70
+0.65
+0.48
+0.50
+1.32
+1.09
+1.21
+1.03
+1.15
+1.16
+1.75
+1.19
+1.22
+0.95
+0.76
+0.71
+0.98
+0.58
+0.66
+0.52
+0.59
+0.58
+0.96
+0.68
+0.62
+0.58
+0.37
+0.37
+1.11
+0.93
+0.80
+0.59
+0.67
+0.59
+0.56
+0.63
+0.37
+0.37
+0.33
+0.33
+0.93
+0.66
+0.76
+0.44
+0.33
+0.32
+0.72
+0.59
+0.48
+0.42
+0.34
+0.33
+1.06
+0.79
+0.68
+0.62
+0.57
+0.53
+—
+—
+25m
+23m
+11 m
+30m*
+mesh
+24
+NeRF [Mildenhall et al. 2020]
+VolSDF [Yariv et al. 2021]
+NeuS [Wang et al. 2021]
+Neuralangelo [Li et al. 2023]
+Gaussian
+Table 1. Quantitative comparison of geometric reconstruction on the DTU dataset. We report Chamfer distance (mm, ↓) for 15 test scenes, grouped
+by representation type: implicit (NeRF-based), Gaussian (3DGS-based), and mesh-based methods. Colors indicate 1st , 2nd , and 3rd place per scene.
+Our method achieves lower mean Chamfer distance among mesh-based approaches while performing on par with state-of-the-art radiance-field methods.
+Baseline runtimes are from [Guédon et al. 2025a] (RTX 4090, 24 GB); ours were measured on an H200 (141 GB)*.
+Table 2. Quantitative comparison of geometric reconstruction on the BlendedMVS dataset. We report Chamfer distance (mm, ↓) for 18 test scenes.
+Colors indicate 1st , 2nd , and 3rd place per scene. Our method achieves the best mean Chamfer distance among mesh-based methods.
+Method
+Basketball
+Bear
+Bread
+Camera
+Clock
+Cow
+Dog
+Doll
+Dragon
+Durian
+Fountain
+Gundam
+House
+Jade
+Man
+Monster
+Sculpture
+Stone
+Mean
+NeuS
+Surfels
+SuGar
+PGSR
+2.96
+1.59
+8.00
+0.92
+3.00
+1.52
+9.73
+1.05
+2.85
+1.41
+7.65
+0.74
+2.61
+1.75
+7.77
+1.51
+2.75
+5.08
+9.21
+1.64
+2.04
+3.21
+8.69
+1.09
+2.75
+2.97
+9.27
+1.35
+2.17
+2.32
+8.75
+1.33
+2.95
+2.93
+9.76
+1.51
+3.14
+4.01
+8.04
+1.63
+3.03
+2.65
+9.05
+1.50
+1.62
+0.97
+7.32
+0.92
+3.23
+1.76
+7.28
+1.18
+4.25
+3.49
+10.7
+3.01
+2.29
+2.23
+9.29
+1.17
+1.92
+1.36
+8.20
+0.97
+2.10
+3.07
+8.98
+1.25
+2.51
+2.02
+9.19
+1.08
+2.68
+2.46
+8.71
+1.35
+IMLS-Splatting
+Mesh Splatting
+MILo
+Ours
+2.48
+1.26
+0.83
+0.91
+1.86
+1.16
+0.95
+1.14
+2.69
+0.75
+1.46
+0.95
+3.61
+1.75
+1.01
+1.19
+2.96
+1.99
+2.03
+2.60
+2.80
+1.30
+1.38
+1.23
+2.85
+2.08
+2.23
+1.73
+2.32
+2.02
+1.42
+1.44
+2.39
+1.57
+1.36
+1.38
+3.35
+2.36
+1.35
+2.19
+2.83
+2.37
+2.47
+1.71
+1.78
+0.90
+0.79
+0.68
+3.01
+1.94
+1.45
+1.70
+5.10
+3.27
+3.02
+2.85
+2.61
+1.52
+2.90
+1.35
+1.99
+1.30
+1.13
+0.92
+2.04
+1.64
+2.31
+1.27
+2.85
+1.64
+1.09
+1.28
+2.75
+1.71
+1.62
+1.47
+4 Experiments
+4.1 Datasets and Metrics
+We evaluate our method on common reconstruction datasets: NeRF
+Synthetic [Mildenhall et al. 2020], DTU [Jensen et al. 2014], and
+BlendedMVS [Yao et al. 2020]. The NeRF Synthetic dataset consists
+of eight synthetic objects rendered in Blender. The DTU dataset
+comprises real-world object scans captured in a controlled indoor
+environment with fixed lighting and calibrated camera poses. The
+BlendedMVS dataset consists of in-the-wild captures with intricate
+shapes. In the supplementary material, we additionally report on
+the Stanford-ORB [Kuang et al. 2023] benchmark from which we
+select the five most complex objects. Following existing work, we
+report the Chamfer distance for 15 scenes of the DTU dataset and
+18 scenes from the low-res set of the BlendedMVS dataset, using
+official evaluation protocols. For the NeRF Synthetic dataset, we
+report the PSNR and SSIM metrics.
+4.2
+Results
+DTU Dataset. Table 1 reports the Chamfer distances of meshes
+reconstructed by our method compared to a range of baselines based
+on implicit representations, Gaussian splatting, and native mesh
+representations across 15 scenes from the DTU dataset. We caution
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+that the DTU ground truth point clouds are incomplete, failing to
+capture the backsides of target objects due to the limited coverage
+of captured views. This missing geometry naturally biases the evaluation metric in favor of methods that produce incomplete or open
+meshes, such as TSDF fusion-based approaches like PGSR. To ensure
+a fair comparison, we apply a straightforward filtering procedure to
+our results, removing any triangles from our reconstructed meshes
+that are not visible in at least two input views. We provide a more
+detailed discussion regarding this dataset bias in the supplementary
+material. Quantitatively, our approach significantly outperforms
+the state-of-the-art mesh-based method, MILo, and performs on par
+with the overall state-of-the-art approach, PGSR. Qualitatively, our
+mesh-based reconstruction excels at capturing high-curvature geometry and sharp edges while competing methods tend to produce
+oversmooth meshes with missing details (Fig. 5).
+BlendedMVS. Table 2 reports the Chamfer distance of mesh reconstruction methods across 18 scenes from the BlendedMVS dataset.
+We observed that both MILo and PGSR diverge on several instances
+of the BlendedMVS and Stanford ORB datasets when trained without
+foreground masks. To ensure a fair comparison, we augmented both
+baselines with an auxiliary 𝐿2 mask loss term identical to the one
+employed in our optimization. We set the loss weight to 𝜆𝑚𝑎𝑠𝑘 = 0.1
+ADELE - Adaptive Delaunay Grids for High-Fidelity Mesh-Native Reconstruction
+•
+7
+Fig. 5. Qualitative comparison on the DTU dataset. We compare mesh reconstructions on two challenging scenes. 2DGS and MiLO produce oversmoothed
+surfaces that lose geometric detail. PGSR captures some details but exhibits surface noise. Our method reconstructs sharp edges and high-frequency details
+while maintaining clean mesh quality, as visible in the roof tiles and the bird’s textured feathers.
+for both competing methods, maintaining a consistent ratio between
+the photometric image loss and the mask loss when compared to our
+method. Our method yields significant improvements over the closest mesh-based reconstruction methods. These quantitative gains
+are further supported by the qualitative comparisons shown in Fig. 7.
+Our method requires roughly 32 GB of peak GPU memory, making
+it more memory-intensive than competing approaches. Reducing
+the batch size lowers the memory footprint below 24 GB and cuts
+runtime to 14 minutes with only a marginal loss in quality. A more
+detailed discussion of this trade-off is provided in the supplementary
+material.
+Table 3. Quantitative comparison on NeRF Synthetic. PSNR (↑) and
+SSIM (↑) under two rendering protocols: Native rendering uses each method’s
+own renderer (3DGS for PGSR/MiLO, neural-shaded mesh rasterization for
+ours); Extracted-mesh rendering renders the extracted mesh shaded with a
+per-vertex diffuse albedo.
+Render
+Native
+Mesh
+Render
+NeRF Synthetic. We also evaluate the performance our method
+on the NeRF Synthetic dataset. Quantitative results are reported
+in Table 3. For each method we report two sets of metrics: (i) the
+method’s native renderer (3DGS-based for PGSR and MILo, mesh
+rasterization with neural shading for ours), and (ii) novel-view synthesis from the extracted mesh shaded only with the per-vertex
+diffuse albedo. For our method, the per-vertex diffuse color is obtained by uniformly sampling 32 hemisphere directions around the
+surface normal, querying the appearance model along each outgoing direction, and taking the cosine-weighted average. The drop in
+PSNR between native rendering and mesh-only rendering is substantially smaller for ADELE than for PGSR and MILo. This suggests
+that ADELE captures scene fidelity directly in the reconstructed
+geometry, whereas competing approaches rely more heavily on
+learned rendering representations to reproduce fine-scale appearance details. Qualitative comparisons (Fig. 9) further confirm that
+our method recovers fine-grained geometric detail more faithfully
+than the competing approaches. Additional novel-view synthesis
+results are provided in the supplementary material.
+Native
+Mesh
+Method
+PGSR
+MILo
+NVDiffrec
+Ours
+PGSR
+MILo
+Ours
+Chair
+31.62
+32.69
+31.60
+31.68
+27.12
+24.28
+28.61
+Drums
+24.69
+25.52
+24.10
+24.42
+16.40
+21.74
+23.14
+Ficus
+28.60
+34.67
+30.88
+29.48
+22.13
+24.39
+27.05
+Hotdog
+35.09
+34.82
+33.04
+34.00
+29.60
+28.56
+30.64
+PSNR↑
+Lego
+31.67
+33.77
+29.14
+30.79
+27.41
+24.98
+29.70
+Mats.
+28.93
+29.11
+26.74
+26.41
+14.86
+22.00
+22.20
+Mic
+33.81
+33.51
+30.78
+32.25
+24.95
+24.80
+26.91
+Ship
+29.14
+30.76
+26.12
+28.43
+24.69
+24.67
+23.49
+Avg
+30.44
+31.85
+29.05
+29.68
+23.40
+24.43
+26.47
+Method
+PGSR
+MILo
+NVDiffrec
+Ours
+PGSR
+MILo
+Ours
+Chair
+0.981
+0.980
+0.969
+0.978
+0.939
+0.915
+0.958
+Drums
+0.939
+0.951
+0.916
+0.939
+0.848
+0.874
+0.916
+Ficus
+0.948
+0.986
+0.970
+0.957
+0.899
+0.901
+0.946
+Hotdog
+0.981
+0.981
+0.973
+0.976
+0.958
+0.947
+0.964
+SSIM↑
+Lego
+0.971
+0.977
+0.949
+0.964
+0.921
+0.891
+0.953
+Mats.
+0.943
+0.955
+0.923
+0.915
+0.723
+0.858
+0.865
+Mic
+0.985
+0.987
+0.977
+0.979
+0.929
+0.898
+0.948
+Ship
+0.900
+0.902
+0.833
+0.867
+0.812
+0.795
+0.801
+Avg
+0.956
+0.965
+0.939
+0.946
+0.879
+0.885
+0.919
+Table 4. Ablation studies on the DTU and BMVS datasets. We report the
+Chamfer Distance (↓) for different variants of our method on both datasets.
+Configuration
+DTU ↓ BMVS ↓
+Full Model (ours)
+w/o Mesh-Based Rendering
+w/o Hybrid Training
+w/o Densification
+w/o Offset Sampling
+0.53
+0.79
+0.72
+0.59
+0.55
+1.47
+3.17
+1.98
+5.37
+1.56
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+8
+•
+4.3
+Johannes Weidenfeller, Shaofei Wang, Philipp Fürnstahl, and Siyu Tang
+Ablation Studies
+We conduct extensive ablation studies on the DTU and BMVS
+datasets to evaluate the contribution of individual components in
+our method, the results of which are summarized in Table 4 and
+Figure 8.
+Mesh-Based Rendering. We evaluate the benefit of mesh-based
+rendering within our optimization pipeline by training an SDF hashgrid using only volumetric rendering following the NeuS formulation, accelerated with a learned occupancy grid. We then extract
+meshes using our adaptively triangulated grid, initialized with 250k
+uniformly sampled points and identical densification steps to our optimization routine. The resulting reconstructions show incomplete
+and messy geometry with missing parts of the scene.
+Hybrid Training. To ablate the proposed hybrid training strategy,
+we evaluate a variant without volumetric training. Several scenes
+exhibit severe artifacts, particularly under spherical initialization.
+This highlights the sensitivity of purely mesh-based optimization
+to initialization quality and demonstrates the importance of the
+volumetric rendering signal for stabilizing the optimization process.
+Grid Densification and Pruning. We analyze the effect of our
+locally refinable tetrahedral grid obtained via Delaunay triangulation by evaluating a variant of the method in which only the initial
+grid vertices are optimized, without applying the proposed gradientguided refinement strategy. The visual comparison clearly shows
+that the extracted meshes are overly simplified and lack detail.
+Offset Sampling. While offset sampling incurs a modest increase in
+computational cost due to the additional samples required per batch,
+it reduces scene-specific failure cases, most prominently convex
+artifacts. Its contribution to the aggregate metrics is small, but it
+leads to noticeable qualitative improvements in the affected scenes.
+Additional examples are provided in the supplementary material.
+4.4
+Large Scale Scenes
+For unbounded scenes, the spherical initialization used in the objectcentric case is insufficient. We instead initialize from a coarse SDF
+derived from the predicted depth of a feed-forward model (VGGT)
+and learn a residual field relative to this base geometry. Details of
+the initialization and hyperparameters are included in the supplementary material. Figure 6 shows qualitative results on the Tanks
+and Temples dataset. Our method recovers high-fidelity geometry
+in the primary subject areas, but remains confined to a bounded
+region of interest at the scene center, leaving background areas
+unmodeled.
+5
+Conclusion
+Our evaluation across various object-centric benchmarks demonstrates that direct mesh optimization, without reliance on auxiliary
+explicit primitives, serves as a viable alternative for 3D reconstruction. Notably, our method excels in recovering fine-grained details
+and sharp edges, highlighting the inherent difficulties that diffuse
+or density-based representations face when reconstructing such
+high-frequency features. However, the current pipeline still faces
+some limitations. It requires more memory than competing baselines, remains susceptible to geometric artifacts in regions with high
+specularity, and is restricted to a region of interest in unbounded
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+Fig. 6. Examples of mesh reconstructions obtained with our method on the
+TnT dataset.
+scenes. We believe that incorporating stronger initialization techniques and improved appearance models could effectively mitigate
+these ambiguities.
+ADELE - Adaptive Delaunay Grids for High-Fidelity Mesh-Native Reconstruction
+•
+9
+Fig. 7. Qualitative comparison on the BlendedMVS dataset. For each scene, we show the ground truth image, our rendered image, our predicted mesh
+normals, and mesh reconstructions from our method, PGSR, and MiLO. Our method produces detailed meshes that faithfully capture object silhouettes and
+detailed surface normals. PGSR produces overly smooth surfaces, while MILo suffers from high frequency artefacts. Best viewed zoomed in.
+Fig. 8. Ablational results on scenes of the DTU and BlendedMVS datasets. The top row shows results produced by our full method, while the bottom row
+presents results from different ablation variants.
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+10
+•
+Johannes Weidenfeller, Shaofei Wang, Philipp Fürnstahl, and Siyu Tang
+Ground Truth
+NVDiffrec
+MiLO
+PGSR
+Ours
+Fig. 9. Qualitative comparison on the NeRF Synthetic dataset. We compare mesh reconstructions from NVDiffrec, MILO, PGSR, and our method.
+NVDiffrec produces noisy surfaces with limited geometric detail. MILO reconstructs more detailed meshes but exhibit artifacts around the object silhouette.
+PGSR is lacking fine-grained details and additionally suffers from missing geometry due to its post processing steps. Our method recovers fine-grained
+geometry, such as individual leaves and the microphone grille, while maintaining clean surface quality.
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+ADELE - Adaptive Delaunay Grids for High-Fidelity Mesh-Native Reconstruction
+References
+Alex Yu and Sara Fridovich-Keil, Matthew Tancik, Qinhong Chen, Benjamin Recht, and
+Angjoo Kanazawa. 2022. Plenoxels: Radiance Fields without Neural Networks. In
+CVPR.
+Jonathan T. Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo MartinBrualla, and Pratul P. Srinivasan. 2021. Mip-NeRF: A Multiscale Representation for
+Anti-Aliasing Neural Radiance Fields. In ICCV.
+Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman.
+2022. Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields. CVPR (2022).
+Alexandre Binninger, Ruben Wiersma, Philipp Herholz, and Olga Sorkine-Hornung.
+2025. TetWeave: Isosurface Extraction using On-The-Fly Delaunay Tetrahedral
+Grids for Gradient-Based Mesh Optimization. ACM Trans. on Graphics 44, 4 (8
+2025).
+Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. 2022. TensoRF:
+Tensorial Radiance Fields. In ECCV.
+Anpei Chen, Zexiang Xu, Xinyue Wei, Siyu Tang, Hao Su, and Andreas Geiger. 2023b.
+Dictionary Fields: Learning a Neural Basis Decomposition. ACM Trans. on Graphics
+42, 4 (2023), 1–12.
+Anpei Chen, Zexiang Xu, Xinyue Wei, Siyu Tang, Hao Su, and Andreas Geiger. 2023c.
+Factor Fields: A Unified Framework for Neural Fields and Beyond. arXiv.org
+2302.01226 (2023).
+Danpeng Chen, Hai Li, Weicai Ye, Yifan Wang, Weijian Xie, Shangjin Zhai, Nan Wang,
+Haomin Liu, Hujun Bao, and Guofeng Zhang. 2025. PGSR: Planar-Based Gaussian
+Splatting for Efficient and High-Fidelity Surface Reconstruction . IEEE Transactions
+on Visualization & Computer Graphics 31, 09 (2025).
+Hanlin Chen, Chen Li, Yunsong Wang, and Gim Hee Lee. 2023a. NeuSG: Neural Implicit
+Surface Reconstruction with 3D Gaussian Splatting Guidance. arXiv.org 2312.00846
+(2023).
+Wenzheng Chen, Jun Gao, Huan Ling, Edward James Smith, Jaakko Lehtinen, Alec Jacobson, and Sanja Fidler. 2019. Learning to Predict 3D Objects with an Interpolationbased Differentiable Renderer. In NeurIPS.
+Wenzheng Chen, Joey Litalien, Jun Gao, Zian Wang, Clement Fuji Tsang, Sameh Khamis,
+Or Litany, and Sanja Fidler. 2021. DIB-R++: Learning to Predict Lighting and Material
+with a Hybrid Differentiable Renderer. In NeurIPS.
+Pinxuan Dai, Jiamin Xu, Wenxiang Xie, Xinguo Liu, Huamin Wang, and Weiwei Xu.
+2024. High-quality Surface Reconstruction using Gaussian Surfels. In SIGGRAPH
+2024 Conference Papers.
+Boris Delaunay. 1934. Sur la sphère vide. Bulletin de l’Académie des Sciences de l’URSS,
+Classe des sciences mathématiques et naturelles 6 (1934), 793–800.
+Akio Doi and Akio Koide. 1991. An Efficient Method of Triangulating Equi-Valued
+Surfaces by Using Tetrahedral Cells. IEICE TRANSACTIONS on Information E74-D, 1
+(January 1991), 214–224.
+Stefano Esposito, Anpei Chen, Christian Reiser, Samuel Rota Bulò, Lorenzo Porzi, Katja
+Schwarz, Christian Richardt, Michael Zollhoefer, Peter Kontschieder, and Andreas
+Geiger. 2025. Volumetric Surfaces: Representing Fuzzy Geometries with Layered
+Meshes. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR).
+Guangchi Fang and Bing Wang. 2024a. Mini-Splatting: Representing Scenes with a
+Constrained Number of Gaussians. In ECCV.
+Guangchi Fang and Bing Wang. 2024b. Mini-Splatting2: Building 360 Scenes within
+Minutes via Aggressive Gaussian Densification. arXiv.org 2411.12788 (2024).
+Maximilian Frühauf, Hayko Riemenschneider, Markus Gross, and Christopher Schroers.
+2024. QUADify: Extracting Meshes with Pixel-level Details and Materials from
+Images. In CVPR.
+Shrisudhan Govindarajan, Daniel Rebain, Kwang Moo Yi, and Andrea Tagliasacchi.
+2025. Radiant Foam: Real-Time Differentiable Ray Tracing. In ICCV.
+Chun Gu, Zeyu Yang, Zijie Pan, Xiatian Zhu, and Li Zhang. 2024. Tetrahedron Splatting
+for 3D Generation. In NeurIPS.
+Antoine Guédon, Diego Gomez, Nissim Maruani, Bingchen Gong, George Drettakis, and
+Maks Ovsjanikov. 2025a. MILo: Mesh-In-the-Loop Gaussian Splatting for Detailed
+and Efficient Surface Reconstruction. ACM Trans. on Graphics (2025).
+Antoine Guédon, Tomoki Ichikawa, Kohei Yamashita, and Ko Nishino. 2025b. MAtCha
+Gaussians: Atlas of Charts for High-Quality Geometry and Photorealism From
+Sparse Views. In CVPR.
+Antoine Guédon and Vincent Lepetit. 2024a. Gaussian Frosting: Editable Complex
+Radiance Fields with Real-Time Rendering. ECCV (2024).
+Antoine Guédon and Vincent Lepetit. 2024b. SuGaR: Surface-Aligned Gaussian Splatting
+for Efficient 3D Mesh Reconstruction and High-Quality Mesh Rendering. In CVPR.
+Yuan-Chen Guo. 2022.
+Instant Neural Surface Reconstruction.
+https://github.com/bennyguo/instant-nsr-pl.
+Jon Hasselgren, Nikolai Hofmann, and Jacob Munkberg. 2022. Shape, Light, and
+Material Decomposition from Images using Monte Carlo Rendering and Denoising.
+In NeurIPS.
+Jan Held, Sanghyun Son, Renaud Vandeghen, Daniel Rebain, Matheus Gadelha, Yi Zhou,
+Anthony Cioppa, Ming C. Lin, Marc Van Droogenbroeck, and Andrea Tagliasacchi.
+2026a. MeshSplatting: Differentiable Rendering with Opaque Meshes. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR).
+•
+11
+7320–7329.
+Jan Held, Renaud Vandeghen, Adrien Deliege, Abdullah Hamdi, Daniel Rebain, Silvio
+Giancola, Anthony Cioppa, Bernard Ghanem, Andrea Vedaldi, Andrea Tagliasacchi,
+and Marc Van Droogenbroeck. 2026b. Triangle Splatting for Real-Time Radiance
+Field Rendering. In Proceedings of the International Conference on 3D Vision (3DV).
+Wenbo Hu, Yuling Wang, Lin Ma, Bangbang Yang, Lin Gao, Xiao Liu, and Yuewen
+Ma. 2023. Tri-MipRF: Tri-Mip Representation for Efficient Anti-Aliasing Neural
+Radiance Fields. In ICCV.
+Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and Shenghua Gao. 2024. 2D
+Gaussian Splatting for Geometrically Accurate Radiance Fields. In SIGGRAPH 2024
+Conference Papers. Association for Computing Machinery.
+Krishna Murthy Jatavallabhula, Edward Smith, Jean-Francois Lafleche, Clement
+Fuji Tsang, Artem Rozantsev, Wenzheng Chen, Tommy Xiang, Rev Lebaredian,
+and Sanja Fidler. 2019. Kaolin: A PyTorch Library for Accelerating 3D Deep Learning Research. arXiv.org 1911.05063 (2019).
+Rasmus Jensen, Anders Dahl, George Vogiatzis, Engin Tola, and Henrik Aanæs. 2014.
+Large Scale Multi-view Stereopsis Evaluation. In CVPR.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 2023.
+3d gaussian splatting for real-time radiance field rendering. ACM Trans. Graph. 42,
+4 (2023), 139–1.
+Shakiba Kheradmand, Delio Vicini, George Kopanas, Dmitry Lagun, Kwang Moo Yi,
+Mark Matthews, and Andrea Tagliasacchi. 2025. StochasticSplats: Stochastic Rasterization for Sorting-Free 3D Gaussian Splatting. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision (ICCV).
+Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. 2017. Tanks and
+Temples: Benchmarking Large-Scale Scene Reconstruction. ACM Trans. on Graphics
+36, 4 (2017).
+Zhengfei Kuang, Yunzhi Zhang, Hong-Xing Yu, Samir Agarwala, Shangzhe Wu, and Jiajun Wu. 2023. Stanford-ORB: A Real-World 3D Object Inverse Rendering Benchmark.
+In NeurIPS.
+Jonas Kulhanek and Torsten Sattler. 2023. Tetra-NeRF: Representing Neural Radiance
+Fields Using Tetrahedra. In ICCV.
+Samuli Laine, Janne Hellsten, Tero Karras, Yeongho Seol, Jaakko Lehtinen, and Timo
+Aila. 2020. Modular Primitives for High-Performance Differentiable Rendering.
+ACM Trans. on Graphics 39, 6 (2020).
+Der-Tsai Lee and Bruce J Schachter. 1980. Two algorithms for constructing a Delaunay
+triangulation. In International Journal of Computer and Information Sciences. Vol. 9.
+Springer, 219–242.
+Zhaoshuo Li, Thomas Müller, Alex Evans, Russell H Taylor, Mathias Unberath, MingYu Liu, and Chen-Hsuan Lin. 2023. Neuralangelo: High-Fidelity Neural Surface
+Reconstruction. In CVPR.
+Zhihao Liang, Qi Zhang, Wenbo Hu, Ying Feng, Lei Zhu, and Kui Jia. 2024. AnalyticSplatting: Anti-Aliased 3D Gaussian Splatting via Analytic Integration. In ECCV.
+Shichen Liu, Tianye Li, Weikai Chen, and Hao Li. 2019. Soft Rasterizer: A Differentiable
+Renderer for Image-Based 3D Reasoning. In ICCV.
+Ilya Loshchilov and Frank Hutter. 2019. Decoupled Weight Decay Regularization. In 7th
+International Conference on Learning Representations, ICLR 2019, New Orleans, LA,
+USA, May 6-9, 2019. OpenReview.net. https://openreview.net/forum?id=Bkg6RiCqY7
+Ricardo Martin-Brualla, Noha Radwan, Mehdi S. M. Sajjadi, Jonathan T. Barron, Alexey
+Dosovitskiy, and Daniel Duckworth. 2021. NeRF in the Wild: Neural Radiance Fields
+for Unconstrained Photo Collections. In CVPR.
+Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. 2020. NeRF: Representing scenes as neural radiance fields
+for view synthesis. In ECCV.
+Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. 2022. Instant
+Neural Graphics Primitives with a Multiresolution Hash Encoding. ACM transactions
+on graphics (TOG) 41, 4 (2022), 1–15.
+Jacob Munkberg, Wenzheng Chen, Jon Hasselgren, Alex Evans, Tianchang Shen,
+Thomas Müller, Jun Gao, and Sanja Fidler. 2022. Extracting Triangular 3D Models,
+Materials, and Lighting From Images. In CVPR.
+Michael Oechsle, Songyou Peng, and Andreas Geiger. 2021. UNISURF: Unifying Neural
+Implicit Surfaces and Radiance Fields for Multi-View Reconstruction. In ICCV.
+Songyou Peng, Chiyu Max Jiang, Yiyi Liao, Michael Niemeyer, Marc Pollefeys, and
+Andreas Geiger. 2021. Shape As Points: A Differentiable Poisson Solver. In NeurIPS.
+Nikhila Ravi, Jeremy Reizenstein, David Novotny, Taylor Gordon, Wan-Yen Lo, Justin
+Johnson, and Georgia Gkioxari. 2020. Accelerating 3D Deep Learning with PyTorch3D. arXiv.org 2007.08501 (2020).
+Christian Reiser, Stephan Garbin, Pratul P. Srinivasan, Dor Verbin, Richard Szeliski, Ben
+Mildenhall, Jonathan T. Barron, Peter Hedman, and Andreas Geiger. 2024. Binary
+Opacity Grids: Capturing Fine Geometric Detail for Mesh-Based View Synthesis.
+SIGGRAPH (2024).
+Radu Alexandru Rosu and Sven Behnke. 2023. PermutoSDF: Fast Multi-View Reconstruction with Implicit Surfaces using Permutohedral Lattices. In CVPR.
+Gopal Sharma, Daniel Rebain, Andrea Tagliasacchi, and Kwang Moo Yi. 2024. Volumetric
+Rendering with Baked Quadrature Fields. ECCV (2024).
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+12
+•
+Johannes Weidenfeller, Shaofei Wang, Philipp Fürnstahl, and Siyu Tang
+Tianchang Shen, Jacob Munkberg, Jon Hasselgren, Kangxue Yin, Zian Wang, Wenzheng
+Chen, Zan Gojcic, Sanja Fidler, Nicholas Sharp, and Jun Gao. 2023. Flexible Isosurface
+Extraction for Gradient-Based Mesh Optimization. ACM Trans. on Graphics 42, 4
+(2023).
+Cheng Sun, Min Sun, and Hwann-Tzong Chen. 2022. Direct Voxel Grid Optimization:
+Super-Fast Convergence for Radiance Fields Reconstruction. In CVPR.
+Fangjinhua Wang, Marie-Julie Rakotosaona, Michael Niemeyer, Richard Szeliski, Marc
+Pollefeys, and Federico Tombari. 2024. UniSDF: Unifying Neural Representations for
+High-Fidelity 3D Reconstruction of Complex Scenes with Reflections. In NeurIPS.
+Jianyuan Wang, Minghao Chen, Nikita Karaev, Andrea Vedaldi, Christian Rupprecht,
+and David Novotny. 2025. VGGT: Visual Geometry Grounded Transformer. In
+CVPR.
+Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku Komura, and Wenping
+Wang. 2021. NeuS: Learning Neural Implicit Surfaces by Volume Rendering for
+Multi-view Reconstruction. In NeurIPS.
+Yiming Wang, Qin Han, Marc Habermann, Kostas Daniilidis, Christian Theobalt, and
+Lingjie Liu. 2023a. NeuS2: Fast Learning of Neural Implicit Surfaces for Multi-view
+Reconstruction. In ICCV.
+Zian Wang, Tianchang Shen, Merlin Nimier-David, Nicholas Sharp, Jun Gao, Alexander
+Keller, Sanja Fidler, Thomas Müller, and Zan Gojcic. 2023b. Adaptive Shells for
+Efficient Neural Radiance Field Rendering. ACM Trans. Graph. 42, 6, Article 259
+(2023).
+Kaizhi Yang, Liu Dai, Isabella Liu, Xiaoshuai Zhang, Xiaoyan Sun, Xuejin Chen, Zexiang
+Xu, and Hao Su. 2025. IMLS-Splatting: Efficient Mesh Reconstruction from Multiview Images via Point Representation. ACM Transactions on Graphics (TOG) 44
+(2025), 1 – 11. https://api.semanticscholar.org/CorpusID:280537344
+Yao Yao, Zixin Luo, Shiwei Li, Jingyang Zhang, Yufan Ren, Lei Zhou, Tian Fang, and
+Long Quan. 2020. BlendedMVS: A Large-scale Dataset for Generalized Multi-view
+Stereo Networks. Computer Vision and Pattern Recognition (CVPR) (2020).
+Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. 2021. Volume rendering of neural
+implicit surfaces. In NeurIPS.
+Vickie Ye, Ruilong Li, Justin Kerr, Matias Turkulainen, Brent Yi, Zhuoyang Pan, Otto
+Seiskari, Jianbo Ye, Jeffrey Hu, Matthew Tancik, and Angjoo Kanazawa. 2024. gsplat:
+An Open-Source Library for Gaussian Splatting. Journal of Machine Learning
+Research 26 (2024).
+Mulin Yu, Tao Lu, Linning Xu, Lihan Jiang, Yuanbo Xiangli, and Bo Dai. 2024b. GSDF:
+3DGS Meets SDF for Improved Rendering and Reconstruction. In NeurIPS.
+Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger. 2024a.
+Mip-Splatting: Alias-free 3D Gaussian Splatting. In CVPR.
+Zehao Yu, Torsten Sattler, and Andreas Geiger. 2024c. Gaussian Opacity Fields: Efficient
+Adaptive Surface Reconstruction in Unbounded Scenes. ACM Trans. on Graphics 43,
+6 (2024), 271:1–271:13.
+Baowen Zhang, Chuan Fang, Rakesh Shrestha, Yixun Liang, Xiao-Xiao Long, and Ping
+Tan. 2026a. RaDe-GS: Rasterizing Depth in Gaussian Splatting. ACM Trans. Graph.
+45, 2 (2026).
+Ruiqi Zhang, JiachengWU, and Jie Chen. 2026b. Mesh Splatting for End-to-end Multiview Surface Reconstruction. In The Fourteenth International Conference on Learning
+Representations. https://openreview.net/forum?id=PSgps4JXTb
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+ADELE - Adaptive Delaunay Grids for High-Fidelity Mesh-Native Reconstruction
+A
+Implementation Details
+Our implementation builds upon the Instant-NSR-PL [Guo 2022]
+codebase, which combines NeuS with multiresolution hash encodings as introduced in Instant-NGP [Müller et al. 2022], and adds
+full support for PyTorch Lightning. We normalize each scene’s coordinate system such that it is centered around the approximate
+intersection point of all camera viewing directions and scaled so that
+the distance between the closest camera and the scene center equals
+1. The tetrahedral grid and hash-grid encoder are both initialized at
+the scene center with a radius of 0.6.
+We encode both the SDF and the local appearance function in a
+single hashgrid consisting of 16 levels, with a minimum resolution of
+32 and a maximum resolution of 2048. Its feature MLP contains one
+hidden layer of 64 neurons and employs weight normalization. The
+color network is an MLP with two hidden layers of 64 neurons and
+uses 4th-degree spherical harmonics to encode normal directions.
+We initialize the tetrahedral grid with 250k points sampled uniformly within the region of interest, and the SDF is initialized as a
+sphere with a radius of 0.5. The representation is trained jointly with
+volumetric and mesh-based rendering for 3000 iterations, followed
+by 1500 iterations using only mesh-based rendering. We anneal
+the mesh-based loss from 0.5 to 1 and the volumetric loss from 0.5
+to 0 between iterations 1000 and 3000. Grid densification starts at
+iteration 2000, where 50% of the tetrahedra are subdivided every
+200 iterations until reaching a maximum of 1M points.
+During training, each batch uses between 1 and 3 samples for the
+offset sampling procedure, where the number of samples is drawn
+uniformly at random per batch. We find that mixing different sample
+counts yields more stable convergence. We optimize with batches of
+4 input images and an adaptive number of rays during volumetric
+training as well as gradient accumulation across 4 batches. Optimization is performed using the AdamW optimizer [Loshchilov and Hutter 2019] (Adam with decoupled weight decay) with 𝛽 = [0.9, 0.99],
+a learning rate of 1e-4 for tetrahedral vertex positions, and 1e-2 for
+all other parameters. For our final model, we set 𝜆mask = 1.0, and
+𝜆photo = 10.0. All experiments for our method were conducted on
+an NVIDIA H200 GPU with 141 GB of memory.
+A.1
+Volumetric Rendering Details
+To facilitate faster rendering and avoid evaluating samples in empty
+space, we employ a multiresolution occupancy grid. This grid is
+updated every 16 iterations based on the signed distance function
+(SDF) values of random samples drawn within each voxel. For ray
+marching, we evaluate at most 1280 samples per ray. We utilize
+a dynamic batch size to maximize GPU utilization, adjusting the
+number of rays per batch based on the average number of volumetric
+samples required per ray in previous iterations. We begin with a
+batch size of 256 rays and cap the maximum at 8192 rays.
+Loss Terms. Similar to the mesh-based rendering branch, we
+𝑣𝑜𝑙
+supervise the volumetric branch with a photometric loss L𝑝ℎ𝑜𝑡𝑜
+and
+𝑣𝑜𝑙 (see Equations 4 and 5 in the main text). In addia mask loss L𝑚𝑎𝑠𝑘
+tion, we employ an Eikonal regularization term L𝑒𝑖𝑘 to encourage
+the learned field to approximate a valid signed distance function.
+This is defined as the ℓ1 -error between the gradient norm of the SDF
+samples and unity:
+L𝑒𝑖𝑘 =
+1 ∑︁
+(∥∇𝑓 (x)∥ 2 − 1) 2 ,
+|S|
+•
+13
+(6)
+x∈ S
+where S represents the set of sampled points and 𝑓 (x) denotes
+the SDF value at point x. The gradient of the SDF for each sample
+is derived analytically. We find that Eikonal regularization has a
+significantly positive impact, particularly for scenes captured inthe-wild with complicated lighting conditions. The full volumetric
+loss function is given by:
+𝑣𝑜𝑙
+𝑣𝑜𝑙
+L𝑣𝑜𝑙 = 𝜆𝑝ℎ𝑜𝑡𝑜 L𝑝ℎ𝑜𝑡𝑜
++ 𝜆𝑚𝑎𝑠𝑘 L𝑚𝑎𝑠𝑘
++ 𝜆𝑒𝑖𝑘 L𝑒𝑖𝑘 ,
+(7)
+where 𝜆𝑝ℎ𝑜𝑡𝑜 , 𝜆𝑚𝑎𝑠𝑘 , and 𝜆𝑒𝑖𝑘 are weighting parameters controlling the strength of the individual terms. We set 𝜆𝑝ℎ𝑜𝑡𝑜 = 10.0,
+𝜆𝑚𝑎𝑠𝑘 = 1.0, and 𝜆𝑒𝑖𝑘 = 0.1.
+The total loss function for the joint optimization is defined as
+follows:
+L = 𝜆𝑚𝑒𝑠ℎ L𝑚𝑒𝑠ℎ + 𝜆𝑣𝑜𝑙 L𝑣𝑜𝑙 .
+(8)
+To transition from the hybrid initialization to the final mesh-based
+optimization, we employ a linear annealing schedule. We initialize
+both 𝜆𝑚𝑒𝑠ℎ and 𝜆𝑣𝑜𝑙 to 0.5. Between iterations 1000 and 3000, we
+linearly anneal 𝜆𝑚𝑒𝑠ℎ to 1.0 and 𝜆𝑣𝑜𝑙 to 0.0, effectively fading out
+the volumetric branch once the coarse geometry is established.
+A.2
+Depth Offset Sampling
+In the mesh-based rendering path, we sample multiple depth values
+𝑑𝑖 around the rendered depth 𝑑 for each pixel where individual
+depth samples are computed as follows. We assume that the SDF
+is locally planar, oriented in the direction of the mesh normal. Let
+o denote the camera origin and 𝑡 0 the intersection point of the ray
+and the mesh under the ray parameterization o + 𝑡d. The SDF 𝑓 (𝑡)
+along the ray is then linear
+𝑓 (𝑡) = (n · d)(𝑡 − 𝑡 0 ).
+Note that we consider the camera to lie outside the observed surface;
+hence, the SDF decreases along the ray. Similar to NeuS [Wang et al.
+2021], we assume that the opacity along the ray follows a sigmoid
+curve centered at the intersection point, that is,
+1
+,
+1 + 𝑒 𝜎 𝑓 (𝑡 )
+see Figure 10 for an illustration. Here, 𝜎 is a learnable parameter
+that controls the steepness of the opacity function. To draw 𝑛 depth
+samples, we perform inverse sampling with respect to Ψ. Specifically,
+we divide the range of the opacity function, [0, 1], into 𝑛 intervals
+with corresponding midpoints
+Ψ(𝑡) =
+𝑇𝑖 + 𝑇𝑖+1
+,
+𝑖 ∈ {0, . . . , 𝑛},
+2
+where 𝑇0 = 0, 𝑇𝑛+1 = 1, and the remaining
+𝑇𝑖 are sampled via
+
+𝑖
+stratified sampling, i.e., 𝑇𝑖 ∼ 𝑈 𝑖 −1
+𝑛 , 𝑛 . Using the inverse transform
+of Ψ given by
+!
+
+𝛼
+log 1−𝛼
+log 1−𝛼
+𝛼
+−1
+−1
+Ψ (𝛼) = 𝑓
+= 𝑡0 +
+,
+𝜎
+(n · d) 𝜎
+[𝑇𝑖 ,𝑇𝑖+1 ],
+𝛼𝑖 =
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+14
+•
+Johannes Weidenfeller, Shaofei Wang, Philipp Fürnstahl, and Siyu Tang
+we calculate the 3D positions along the ray corresponding to the
+sampled interval midpoints
+x𝑖 = o + Ψ −1 (𝛼𝑖 )d.
+For each sampled position x𝑖 , its corresponding color 𝑐𝑖 is computed
+via Eq. 2. The final pixel color is then obtained as a weighted average
+over all sampled colors according to their contribution to the ray
+opacity
+∑︁
+(𝑇𝑖+1 − 𝑇𝑖 ) 𝑐𝑖 .
+𝐶=
+(9)
+𝑖
+Fig. 11. Initialization Examples. Visualizations of the coarse initial meshes
+derived from VGGT depth priors, which serve as the base geometry for our
+residual learning framework.
+B.2
+Fig. 10. Depth-offset sampling. (Left) We sample multiple points along
+each camera ray by performing inverse sampling with respect to the opacity
+function Ψ(𝑡 ). The sigmoid shape of Ψ concentrates samples near the
+mesh surface, where the SDF transitions through zero. (Right) early stage
+reconstruction rendered using sampled depth offsets.
+B
+Initial SDF
+We leverage strong priors from large-scale pretrained models to
+obtain a coarse preliminary mesh estimate. Specifically, we utilize
+VGGT [Wang et al. 2025] to predict camera poses and per-view
+depth maps. These predictions are subsequently employed to extract
+an initial mesh via TSDF fusion. Figure 11 illustrates examples of
+these initial meshes for scenes from the Tanks and Temples (TnT)
+dataset [Knapitsch et al. 2017].
+This initial mesh is distilled into a discretized SDF, denoted as
+𝑠 0 , stored on a static 3D grid by computing the exact SDF value for
+each grid vertex. During optimization, the query for the SDF value
+at a point x is composed of the trilinear interpolation of the base
+grid 𝑠 0 and a learnable residual 𝑠𝑟𝑒𝑠 parameterized by a hashgrid:
+𝑠 (x) = 𝑠 0 (x) + 𝜆𝑟𝑒𝑠 𝑠𝑟𝑒𝑠 (x),
+(10)
+where 𝜆𝑟𝑒𝑠 is a hyperparameter governing the magnitude of the
+learned residual. We restrict explicit mesh reconstruction to a predetermined region of interest (ROI) centered on the scene. To model
+the background environment outside this region, we employ a separate environment light, represented as a 2D hash grid and a shallow
+decoder MLP. This network takes as input the viewing direction,
+mapped to [0, 1] 2 via spherical coordinates, and outputs the corresponding background color.
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+Large-scale scenes often exhibit complex lighting conditions, rendering our single-MLP color model prone to geometric artifacts. To mitigate this, we adopt the appearance model from UniSDF [Wang et al.
+2024], which decomposes outgoing radiance into view-dependent
+and reflected components.
+For a sample along a camera ray at position x, let d denote the
+viewing direction, n the surface normal, and 𝝃 the appearance vector
+obtained from the appearance hash grid. We compute the reflected
+viewing direction 𝝎 𝑟 as:
+𝝎 𝑟 = d − 2(d · n)n.
+Large-Scale Reconstruction
+In this section, we discuss details of the initialization and implementation in large-scale reconstruction scenarios.
+B.1
+Appearance Model
+(11)
+The architecture consists of a blending weight MLP 𝑓𝑤 and two distinct radiance field MLPs: 𝑓𝑐𝑎𝑚 , which models the view-dependent
+component, and 𝑓𝑟𝑒 𝑓 , which models the reflection-dependent component. The components are computed as follows:
+c𝑐𝑎𝑚 = 𝑓𝑐𝑎𝑚 (x, d, n, 𝝃 )
+(12)
+c𝑟𝑒 𝑓 = 𝑓𝑟𝑒 𝑓 (x, 𝝎 𝑟 , n, 𝝃 )
+(13)
+𝑤 = 𝜎 (𝑓𝑤 (x, n, 𝝃 )),
+(14)
+where 𝜎 (·) denotes the sigmoid function. The final color c is obtained
+via linear blending:
+c = 𝑤c𝑟𝑒 𝑓 + (1 − 𝑤)c𝑐𝑎𝑚 .
+(15)
+Differing from the original formulation described in UniSDF, this
+blending is performed at the sample level, prior to volume rendering integration. Furthermore, to account for exposure variations
+inherent in the TnT dataset, we optimize per-image appearance
+embeddings following [Martin-Brualla et al. 2021].
+B.3
+Implementation Details
+Initialization. To extract the initial coarse geometry, we filter depth
+predictions from VGGT, retaining only the top 50% of the most confident pixels. The remaining depth estimates are integrated using
+TSDF fusion with a voxel size of 0.02. The resulting mesh is discretized into a 3D grid with a resolution of 643 to form the base SDF
+𝑠 0 . The weights of the residual hashgrid are randomly initialized,
+and the residual scaling factor is set to 𝜆𝑟𝑒𝑠 = 0.1.
+ADELE - Adaptive Delaunay Grids for High-Fidelity Mesh-Native Reconstruction
+Optimization and Scheduling. We define the ROI as a cubic
+¯ where 𝑑¯ is the median disvolume with a side length of 1.5 × 𝑑,
+tance from the cameras to the scene center (computed as the mean
+camera position). We extend the optimization to 10,000 iterations.
+Accordingly, the densification schedule is adapted to run from iteration 4,000 to 8,000, with a minimum interval of 400 steps between
+densification events. Pruning is performed every 1,000 iterations,
+starting from iteration 4,000. For hybrid training, the weights 𝜆mesh
+and 𝜆vol are initialized to 0.5. Between iterations 4,000 and 8,000, we
+linearly anneal 𝜆mesh to 1.0 and 𝜆vol to 0.0.
+Network Architecture. The color MLPs 𝑓𝑟𝑒 𝑓 and 𝑓𝑐𝑎𝑚 comprise
+two hidden layers with 64 neurons each, while the weight MLP 𝑓𝑤
+contains a single hidden layer of 64 neurons. The background model
+utilizes a multi-resolution hash grid with 12 levels, a minimum
+resolution of 16, a maximum resolution of 338, and 2 features per
+level, followed by a single-layer MLP with 64 neurons.
+Hyperparameters. We use a learning rate of 5 × 10−4 for grid
+positions and 0.05 for the background network parameters. All
+other network parameters are optimized with a learning rate of
+0.005. A linear learning rate warmup is applied over the first 1,000
+steps. Unless otherwise specified, all other parameters match those
+described in the main methodology.
+C
+Mesh Regularization
+A significant advantage of optimizing a mesh based representation
+in an end-to-end fashion is the ability to directly regularize the
+mesh based on desirable properties. We showcase this advantage
+by implementing a regularization term, previously introduced in
+[Binninger et al. 2025], which penalizes angles in the output mesh
+that deviate from 𝜋3 to promote equilateral triangles:
+Lfairness =
+3 
+∑︁ 1 ∑︁
+𝜋 2
+𝑓
+𝜃𝑖 −
+,
+3 𝑖=1
+3
+𝑓 ∈𝐹
+𝑓
+where 𝐹 denotes the set of all mesh faces, and 𝜃 𝑖 represents the
+interior angles of face 𝑓 . Figure 12 shows the effect of this regularizer on the reconstructed mesh under a regularization strength of
+𝜆 𝑓 𝑎𝑖𝑟𝑛𝑒𝑠𝑠 = 0.01. We find that introducing this fairness term comes
+at a slight disadvantage to visual and geometric accuracy; therefore,
+we do not include it in the evaluation of our main method.
+D
+DTU Evaluation Bias
+During evaluation of the DTU dataset, we observed that the standard
+evaluation protocols exhibit a bias toward methods that produce incomplete or open-surface meshes. This arises from the fact that the
+ground truth point clouds represent only the front-facing surfaces of
+objects, leaving the backsides and occluded regions undefined. Our
+method, which recovers a closed, watertight mesh, also reconstructs
+unseen back-facing surfaces. In contrast, TSDF-fusion-based methods, such as PGSR, generally extract only the visible front-facing
+surface, resulting in an open mesh that inherently overlaps better
+with the partial ground truth. Points sampled from unobserved or
+sparsely observed reconstructed back-facing surfaces often lack
+corresponding nearest neighbors in the incomplete ground truth
+point clouds. Although these regions are geometrically valid under a
+watertight reconstruction assumption, they nevertheless contribute
+•
+15
+Fig. 12. Incorporating a triangle regularization term that penalizes deviations from regular triangles in the output mesh leads to a more evenly
+tesselated reconstructed surface (right) than our base method (left).
+significantly to the overall error term, see Figure 13. To ensure a
+fair comparison, we apply a simple visibility-based filtering procedure that removes triangles in sparsely observed regions before
+evaluation. Specifically, we render each reconstructed mesh at twice
+the input resolution from every training view and mark any triangle visible in at most one view as unobserved. We then remove all
+vertices whose incident triangles are exclusively unobserved. The
+resulting mesh preserves the front-facing surface almost entirely
+while discarding the back-facing regions that the ground truth does
+not cover, as illustrated in Figure 13. We emphasize that this filtering
+does not improve the geometric quality of the reconstruction itself,
+and is applied solely to align the support of our prediction with that
+of the ground truth so that the comparison against baseline methods
+is not skewed by the choice of surface representation. Beyond the
+standard geometric evaluations, we further encourage taking into
+account visual comparisons of the extracted meshes.
+E
+Memory Analysis
+We conduct an extensive analysis of peak GPU memory consumption (VRAM) and training runtime on the DTU dataset (Tab. 5). Our
+full method requires approximately 32 GB of peak GPU memory,
+allowing training to fit within a high-end consumer or workstation
+GPU. In addition, we evaluate a more memory-efficient variant of
+our approach that achieves only slightly reduced reconstruction
+quality while simultaneously reducing training time and lowering
+the memory footprint to below 24 GB. This variant uses a batch size
+of a single image together with gradient accumulation over four optimization steps, thereby significantly decreasing the instantaneous
+memory requirements. A substantial portion of the current memory
+consumption originates from the RadFoam-based Delaunay triangulation procedure. Replacing this component with a CPU-based
+triangulation implementation could further reduce GPU memory
+usage, albeit at the cost of increased runtime. We further note that
+we were unable to reproduce the runtimes reported in MILo when
+re-running their publicly available codebase, consistently observing substantially longer training times instead. Consequently, the
+runtimes reported in our memory benchmark differ from both the
+values stated in the main paper and those originally reported by the
+authors.
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+16
+•
+Johannes Weidenfeller, Shaofei Wang, Philipp Fürnstahl, and Siyu Tang
+results indicate that all three methods achieve comparable geometric accuracy across the majority of the dataset with the exception
+of some outliers. Qualitatively (Fig. 14), PGSR exhibits severe artifacts on the highly reflective pitcher scene, while MiLo does not
+capture the object silhouette well. In contrast, our method achieves
+detailed reconstruction while avoiding the aforementioned artifacts
+but exhibits artifacts on the rough reflective surface of the gnome
+scene.
+Table 6. Quantitative comparison on Stanford ORB. We report Chamfer
+distance (↓) scaled by 2𝑒3 as proposed in the official evaluation guidelines,
+and triangle count of the extracted meshes.
+Fig. 13. Reconstructed meshes and corresponding error maps for a scene
+from the DTU dataset. Discarded points are colored in blue, while evaluated
+points are shown in grey for low error and red for high error. Our method
+produces closed meshes, whereas PGSR reconstructs only a front-facing
+surface. Notably, points reconstructed by our method near the mesh boundaries exhibit significant error contributions. This problem is largely resolved
+by our filtering proecdure.
+Table 5. Comparison of memory usage, runtime, and reconstruction quality
+on DTU. Peak VRAM is measured during training; runtime is the average
+wall-clock training time per scene; Chamfer distance is the mean over all
+evaluated scenes (lower is better).
+Method
+Avg. Peak
+VRAM (GB)
+Max. Peak
+VRAM (GB)
+Avg. Runtime
+(min)
+Chamfer
+Distance ↓
+PGSR
+MiLO
+3.9
+5.2
+5.5
+8.9
+41.4
+69.6
+0.53
+0.68
+ADELE (full)
+ADELE (smaller batch)
+31.9
+21.4
+33.1
+22.5
+30.3
+14
+0.53
+0.56
+F Additional Results
+F.1 Stanford ORB
+In this section we report additional geometric reconstruction results on the Stanford ORB dataset. For all methods evaluated on
+this dataset, we perform a culling step on the reconstructed meshes,
+removing any triangles that are not visible from at least one training
+view. This post-processing step ensures that the evaluation focuses
+on surface geometry actually supervised by the input images and
+does not penalize spurious interior geometry. Table 6 presents the
+Chamfer Distance metrics for the selected Stanford ORB scenes. The
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+F.2
+Scene
+PGSR
+MiLO
+Ours
+Gnome
+0.21
+0.21
+0.42
+Chamfer Distance × 2𝑒3 ↓
+Cactus Ball Teapot Pitcher
+0.08
+0.07
+0.16
+2.10
+0.12
+0.11
+0.21
+0.90
+0.05
+0.05
+0.14
+0.99
+Avg
+0.52
+0.31
+0.33
+Scene
+PGSR
+MiLO
+Ours
+Gnome
+890k
+427k
+655k
+Cactus
+420k
+214k
+309k
+Triangle Count↓
+Ball Teapot
+756k
+485k
+336k
+386k
+662k
+439k
+Avg
+636k
+294k
+496k
+Pitcher
+631k
+105k
+414k
+Novel View Synthesis
+We report additional novel view synthesis results on DTU and Stanford ORB for ADELE, MILo, and PGSR (Table 7). For the ORB dataset
+these correspond to PSNR on unseen views, whereas for DTU we report PSNR for the training views as there is no common test/training
+split and the methods were trained on all images. Figure 15 shows a
+comparison of diffuse renderings of the extracted meshes.
+Under each method’s native rendering, PGSR and MILo benefit
+from their full volumetric 3DGS pipeline, while our method renders
+a single-surface intersection via mesh rasterization. This gap in
+expressiveness is reflected in the average PSNR scores. Under the
+diffuse shading protocol ADELE outperforms PGSR and MILo on
+both Stanford ORB and DTU. Qualitatively (Fig. 15), our diffuse renderings preserve sharp, high-frequency appearance detail, whereas
+PGSR and MILo smooth over fine structure as a consequence of less
+accurate underlying geometry. We acknowledge that the extractedmesh rendering protocol is also an imperfect appearance metric. By
+reducing each reconstruction to a diffuse-shaded mesh, it discards
+the view-dependent appearance the underlying methods model, so
+lower absolute PSNR values under this protocol do not necessarily
+indicate worse geometry. We nevertheless report it as a complementary evaluation to the native-rendering scores, which structurally
+favor volumetric and Gaussian-based methods.
+F.3
+Qualitative Results
+Figure 16 presents normals of meshes reconstructed with our method
+for all scenes of the DTU dataset used in the evaluation. Figure 17
+provides additional ablation results for the depth offset rendering
+technique, illustrating how it alleviates artefacts that arise when
+training with regular mesh-based rendering.
+ADELE - Adaptive Delaunay Grids for High-Fidelity Mesh-Native Reconstruction
+•
+17
+Fig. 14. Qualitative comparison on the Stanford ORB dataset. For each scene, we show the ground truth image, our rendered image, our predicted mesh
+normals, and mesh reconstructions from our method, PGSR, and MiLO. Our method produces detailed meshes that faithfully capture object silhouettes and
+surface+details. PGSR struggles with reflective surfaces, while MiLO tends to produce simplified geometry that misses fine-grained features such as the
+gnome’s beard and the cactus spines.
+Table 7. Novel-view synthesis under two rendering protocols. Native rendering uses each method’s own renderer (3DGS for PGSR and MiLo, neural-shaded
+mesh rasterization for ours); Extracted-mesh rendering renders the extracted mesh shaded with a per-vertex diffuse albedo. We report PSNR (↑) on Stanford
+ORB (top) and DTU (bottom).
+Render
+Native
+Mesh
+Render
+Native
+Mesh
+Method
+PGSR
+MiLo
+Ours
+PGSR
+MiLo
+Ours
+24
+34.62
+35.77
+30.99
+14.36
+14.30
+14.44
+37
+30.39
+32.94
+28.67
+13.84
+13.68
+13.96
+40
+34.12
+35.43
+30.98
+16.11
+15.93
+16.37
+Method
+PGSR
+MiLo
+Ours
+PGSR
+MiLo
+Ours
+55
+36.59
+37.24
+33.70
+17.32
+17.05
+17.51
+Gnome
+37.91
+37.01
+35.24
+30.93
+30.34
+31.27
+63
+39.02
+41.41
+35.40
+19.22
+19.10
+19.47
+65
+36.21
+37.35
+34.13
+14.90
+14.71
+15.36
+PSNR↑ – Stanford ORB
+Cactus Ball Teapot Pitcher
+37.85 36.91
+37.43
+31.46
+37.17
+34.80 37.57
+32.98
+35.09 37.45 35.85
+32.96
+32.25 31.04 31.56
+27.91
+31.73
+29.38
+29.71
+29.56
+31.73
+30.80 32.15
+28.33
+69
+34.13
+35.40
+31.49
+19.32
+19.04
+18.95
+PSNR↑ – DTU
+83
+97
+42.95 34.60
+42.59 34.82
+36.88 30.84
+21.83 17.87
+21.57 17.60
+22.00 18.33
+105
+39.49
+38.90
+34.42
+18.08
+17.82
+18.55
+106
+38.45
+41.03
+36.95
+20.50
+20.32
+20.89
+Avg
+36.31
+35.91
+35.31
+30.74
+30.14
+30.86
+110
+37.05
+38.06
+36.08
+19.44
+19.31
+19.74
+114
+33.82
+34.69
+32.40
+16.29
+16.07
+16.61
+118
+40.68
+42.18
+38.91
+20.89
+20.77
+20.91
+122
+41.66
+42.95
+40.59
+21.58
+21.48
+21.28
+Avg
+36.92
+38.05
+34.16
+18.10
+17.92
+18.29
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+18
+•
+Johannes Weidenfeller, Shaofei Wang, Philipp Fürnstahl, and Siyu Tang
+Fig. 15. Diffuse-shaded renderings of extracted geometry. Comparison on representative scenes from NeRF Synthetic and BlendedMVS. ADELE produces
+sharp, realistic renderings that preserve fine appearance detail, whereas PGSR and MILo smooth over high-frequency content as a consequence of their less
+accurate geometric reconstruction.
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+ADELE - Adaptive Delaunay Grids for High-Fidelity Mesh-Native Reconstruction
+•
+19
+Fig. 16. Full results of our method on the 15 scenes of the DTU dataset used in the evaluation of the main paper.
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.
+20
+•
+Johannes Weidenfeller, Shaofei Wang, Philipp Fürnstahl, and Siyu Tang
+Fig. 17. Effect of depth offset rendering. Training with regular mesh rendering (top) produces both convex and concave surface artefacts across a variety of
+scenes. Training with depth offset rendering (bottom) largely eliminates them.
+SA Conference Papers ’26, December 01–04, 2026, Kuala Lumpur, Malaysia.

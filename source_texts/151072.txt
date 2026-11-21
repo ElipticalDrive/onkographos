@@ -1,0 +1,2505 @@
+1
+RYU, LEE: LINEARMASK-GS
+LinearMask-GS: Stable-Mask Importance
+Pruning for Compact 3D Gaussian Splatting
+Donghun Ryu1
+1
+Department of Intelligent
+Semiconductor Engineering
+Chung-Ang University
+Seoul, Republic of Korea
+2
+School of Electrical and Electronics
+Engineering
+Chung-Ang University
+Seoul, Republic of Korea
+donghun0621@cau.ac.kr
+arXiv:2609.10095v1 [cs.CV] 9 Sep 2026
+Minhyeok Lee1,2†
+mlee@cau.ac.kr
+Abstract
+3D Gaussian Splatting (3DGS) enables real-time novel view synthesis but produces
+millions of primitives through adaptive densification, leading to significant storage overhead. Learned-mask pruning methods such as LP-3DGS address this by assigning each
+Gaussian a learnable mask to identify and prune redundant primitives. However, we
+identify a limitation of this paradigm: the steep slope of the Gumbel-Sigmoid activation
+drives mask values to the extremes within the short mask-training window, before the
+importance ranking has stabilized, producing a sharply bimodal distribution from which
+that ranking can no longer be reliably recovered. We propose LinearMask-GS, which
+replaces Gumbel-Sigmoid with a linear increment activation that keeps mask values in
+a mid-confidence regime throughout mask training, producing a stable, unimodal mask
+distribution whose ranking tracks importance. On Mip-NeRF 360, our method achieves
+3.6× and 1.6× Gaussian reductions over 3DGS and LP-3DGS, respectively, while maintaining or improving rendering quality. For outdoor scenes, it yields a 1.6× reduction
+(from 2.18M to 1.36M) with notable gains in PSNR (+0.38 dB), SSIM (+0.025), and
+LPIPS (-0.029).
+1
+Introduction
+3D Gaussian Splatting (3DGS) [13] has become a leading representation for novel view synthesis, achieving high-fidelity real-time rendering by encoding scenes as millions of explicit
+Gaussian primitives. Despite this rendering efficiency, the adaptive densification process routinely produces millions of primitives, and a standard outdoor scene in Mip-NeRF 360 [1]
+can exceed 1GB in storage [28], limiting deployment on resource-constrained devices.
+Prior methods reduce this overhead either by compressing per-Gaussian attributes [15,
+21, 28], which leaves the primitive count and rasterization cost unchanged, or by pruning low-importance Gaussians post hoc [5, 6, 22], which lacks feedback from scene opti© 2026. The copyright of this document resides with its authors.
+It may be distributed unchanged freely in print or electronic forms.
+† Corresponding author.
+Accepted to the British Machine Vision Conference (BMVC) 2026.
+2
+RYU, LEE: LINEARMASK-GS
+mization and often discards geometrically essential primitives, yielding suboptimal quality–
+compression trade-offs (Sec. 2).
+LP-3DGS [31] addresses this by learning a per-Gaussian soft mask jointly with the
+scene, using a Gumbel-Sigmoid activation so the mask can be optimized end-to-end and
+then thresholded into a hard keep/prune decision. This couples pruning with scene optimization, but we observe that the soft mask it produces is, by the time pruning happens, no longer
+a faithful summary of importance.
+The learned mask saturates before importance ranking stabilizes. The GumbelSigmoid activation used in LP-3DGS is steep: small changes in the underlying parameter
+swing the mask all the way to 0 or 1, so the mask collapses to these two extreme values
+long before the per-Gaussian importance signal has settled into a meaningful ranking. This
+saturation is a property of the activation itself rather than of the brevity of the mask-training
+window: with the pruning point held fixed, extending the window monotonically worsens
+saturation (Sec. 3.3). As shown in Fig. 1(a, b), the resulting distribution is sharply twopeaked (i.e., bimodal), with almost every value pinned to either 0 or 1, and which side a
+Gaussian lands on is largely an artifact of early optimization rather than its true contribution
+to the rendered image. Pruning a distribution like this is unreliable: the ranking induced
+by ψi reflects the side of saturation more than the magnitude of importance, and the standard remedy of enforcing a minimum-survival ratio [31] prevents geometry collapse without
+addressing this underlying cause.
+To address this, we propose LinearMask-GS, a learned-mask pruning framework that
+targets the cause of this brittleness by changing how the mask is shaped during training.
+We replace Gumbel-Sigmoid with a linear increment activation whose gentle slope keeps
+mask values in the middle of the [0, 1] range, a mid-confidence regime, throughout the
+mask-training window, rather than letting them saturate at 0 or 1. The resulting distribution (Fig. 1(c, d)) is unimodal, so the relative order of mask values is preserved rather than
+collapsed onto 0 and 1, and hard pruning therefore operates on a stable ranking rather than
+a two-peaked one. Because the activation only changes how the mask is shaped, not how
+it is applied, LinearMask-GS integrates without architectural modifications into a range of
+Gaussian-based backbones, including 3DGS [13], 2DGS [12], DropGaussian [24], OctreeGS [25], and FastGS [26].
+Our main contributions are as follows:
+• We identify that the steep activation of learned-mask pruning saturates the soft mask
+at 0 or 1 before the importance ranking stabilizes, a failure mode that longer masktraining windows worsen rather than fix, yielding a two-peaked distribution from
+which that ranking can no longer be reliably recovered.
+• We propose the linear increment masking activation, whose gentle slope keeps mask
+values away from the boundaries and yields a unimodal distribution whose ranking is
+preserved rather than collapsed, on which a simple top-ρN selection gives a reliable
+hard-pruning decision.
+• On Mip-NeRF 360, Tanks & Temples, and Deep Blending, LinearMask-GS achieves
+better quality–compression trade-offs than existing learned-mask and pruning baselines on 3DGS, and the same masking module transfers without modification to 2DGS,
+DropGaussian, Octree-GS, and FastGS.
+RYU, LEE: LINEARMASK-GS
+2
+Related Work
+2.1
+Novel View Synthesis
+3
+While Neural Radiance Fields (NeRF) [1, 19, 20] achieve high-quality novel view synthesis,
+dense ray marching limits their real-time application. 3D Gaussian Splatting (3DGS) [13]
+overcomes this by combining explicit 3D Gaussian primitives with a fast tile-based rasterizer. Subsequent methods have extended this framework to improve anti-aliasing [29],
+scaling [17], and surface reconstruction via 2D oriented disks (2DGS) [12]. Despite these
+advances, adaptive densification leaves all of them with millions of primitives and the attendant memory and storage overhead (Sec. 1).
+2.2
+Gaussian Compression and Pruning
+To reduce storage costs without modifying the number of Gaussians, several works compress per-Gaussian attributes via vector quantization, residual quantization of color and rotation, or post-training codecs based on entropy coding and region-adaptive hierarchical transforms [8, 15, 21, 28]. While effective at reducing per-attribute storage, these methods leave
+the total number of Gaussian primitives unchanged and thus do not alleviate rasterization
+time complexity.
+Pruning methods directly reduce the Gaussian count by removing redundant primitives.
+The original 3DGS [13] periodically culls Gaussians with low opacity or excessively large
+scale as part of adaptive density control. LightGaussian [5] prunes low-scoring primitives
+by a heuristic significance score, and Mini-Splatting [6] reorganizes Gaussian positions via
+a densification-and-sampling pipeline. RadSplat [22] shows that taking the per-view maximum blending weight as the importance score yields a more stable and discriminative signal
+than summation-based alternatives. Despite their utility, these heuristic methods rely on
+manually tuned thresholds and treat pruning as a post-hoc step decoupled from scene geometry optimization, leading to accidental removal of geometrically essential primitives. Our
+method overcomes these limitations by coupling pruning decisions directly with scene reconstruction through learned importance masks.
+2.3
+Differentiable Gaussian Pruning
+To overcome the limitations of manual thresholding, recent work introduces end-to-end differentiable masking frameworks. LP-3DGS [31] assigns a learnable binary mask to each
+Gaussian and jointly optimizes masks alongside scene parameters, accumulating importance
+scores by summing pixel-level blending weights and binarizing them through a GumbelSigmoid activation. Taming-3DGS [18] and Reduced-3DGS [23] extend this paradigm with
+explicit Gaussian count budgets and attribute quantization, respectively, targeting deployment on resource-limited hardware.
+While these methods demonstrate the benefit of jointly learning pruning decisions and
+scene geometry, they inherit summation-based score inflation and, more fundamentally, the
+premature saturation of the steep Gumbel-Sigmoid mask; our approach addresses both with
+max-pooling aggregation and a linear-increment activation that restores a stable ranking for
+the top-ρN rule (Secs. 3.2–3.3).
+4
+3
+RYU, LEE: LINEARMASK-GS
+Method
+We propose a differentiable pruning framework that jointly optimizes per-Gaussian mask
+parameters alongside scene geometry, compressing Gaussian-based representations while
+largely preserving PSNR, SSIM, and LPIPS. We develop it on 3DGS [13] and 2DGS [12],
+and show that it transfers without modification to other backbones (Sec. 4).
+After an initial geometric warm-up phase using the standard Gaussian Splatting pipeline,
+the framework proceeds in three stages: (1) computing a max-pooled importance score Si
+for each primitive to evaluate view-count-invariant relevance (Sec. 3.2), (2) jointly optimizing per-Gaussian learnable mask parameters with the proposed linear increment activation,
+which keeps mask values away from 0 and 1 throughout the mask-training window (Sec. 3.3),
+and (3) applying a hard-pruning rule that retains the top-ρN Gaussians ranked by ψi , where
+ρ is the minimum-survival ratio, followed by fine-tuning of the remaining scene (Sec. 3.4).
+3.1
+Preliminaries
+3D Gaussian Splatting. 3DGS [13] represents a scene as a set of N anisotropic Gaussian
+primitives. Each Gaussian i is parameterized by a mean position µ i ∈ R3 , a covariance matrix
+⊤
+Σi = Ri Si S⊤
+i Ri (decomposed into a rotation matrix Ri and a diagonal scaling matrix Si ), an
+opacity logit oi ∈ R, and spherical harmonic coefficients encoding view-dependent color ci .
+Primitives are projected and depth-sorted to compute color C via front-to-back alpha
+compositing:
+N
+C = ∑ ci αi ∏(1 − α j ),
+i=1
+j<i
+
+
+αi = σ (oi ) · exp − 12 d⊤ Σ−1
+d
+,
+i,2D
+(1)
+Here, d is the 2D offset to the projected center, Σi,2D is the covariance, and σ (·) is the
+sigmoid. The per-Gaussian blending weight at pixel p under viewpoint k is:
+k,p
+k,p
+wk,p
+i = αi ∏(1 − α j ),
+(2)
+j<i
+which measures the fractional contribution of Gaussian i to the rendered pixel color.
+2D Gaussian Splatting. 2DGS [12] replaces 3D ellipsoids with oriented 2D disk primitives embedded in 3D space, improving multi-view geometric consistency. Its compositing
+follows the same front-to-back formulation as Eq. (1) (with an explicit ray-splat intersection), and the blending weight wk,p
+i retains the form of Eq. (2), providing a unified interface
+for importance score computation across both representations.
+3.2
+Importance Score via Max-Pooling
+A key design choice in differentiable Gaussian pruning is how to aggregate per-pixel, perview blending weights into a single scalar importance score Si for each Gaussian. Several
+prior methods adopt summation-based aggregation [6, 31]:
+K
+Sisum = ∑ ∑ wk,p
+i ,
+k=1 p
+(3)
+5
+RYU, LEE: LINEARMASK-GS
+where the sum runs over all K training viewpoints and all pixels p. This formulation inflates scores for Gaussians in densely observed regions, reducing the discriminability of the
+importance signal.
+To address this, we adopt the max-pooling aggregation proposed by RadSplat [22] to
+compute importance scores over all training views:
+
+
+Si = max max wk,p
+.
+(4)
+i
+k∈{1,...,K}
+p
+This captures the peak contribution of a Gaussian in its most favorable viewpoint, providing a
+view-count-invariant measure of geometric relevance. A Gaussian that contributes strongly
+to at least one view retains a high score regardless of how many views overlap the same
+region, effectively mitigating the view-count inflation associated with Eq. (3).
+3.3
+Differentiable Pruning via Linear Increment Masking
+Mask formulation. We assign each Gaussian i a learnable scalar parameter mi ∈ R, initialized to 1 to ensure all primitives start fully visible and participate equally in the initial
+geometric optimization. The per-Gaussian mask value is:
+ψi = f (mi · Si ),
+(5)
+where f : R → [0, 1] is the mask activation and Si is the importance score from Eq. (4).
+During rendering, the opacity of each Gaussian is modulated as:
+α̃ik,p = ψi · αik,p ,
+(6)
+so that Gaussians with ψi ≈ 0 are differentiably suppressed while gradients flow through
+both mi and the scene parameters concurrently.
+Linear increment activation.
+fGS (x) =
+LP-3DGS [31] employs Gumbel-Sigmoid as f :
+1
+
+,
+log(x)+g0 −g1
+1 + exp −
+t
+g0 , g1 ∼ Gumbel(0, 1),
+(7)
+where t is the temperature parameter. The steep slope of fGS near its midpoint causes a small
+change in mi · Si to produce a large change in ψi , so mask outputs are pushed toward 0 or
+1 within the short mask-training window before the importance score Si has stabilized. As
+shown in Fig. 1(a, b), this yields a two-peaked ψi distribution pinned at 0 and 1. We refer
+to this behavior as mask instability: which extreme each mask lands on reflects an artifact
+of early optimization more than the magnitude of Si itself. This instability stems from the
+activation’s steepness rather than from the window length: with the pruning point fixed at
+iteration 20k, extending the Gumbel-Sigmoid mask window from 500 to 2,500 and 5,000
+iterations monotonically increases the saturated fraction (51.1% → 54.8% → 56.2% on three
+scenes) while PSNR plateaus, whereas the linear ranking is robust to window placement
+(window starts of 15k/17.5k/19.5k change final PSNR by ≤ 0.14 dB); see Sec. 4 of the
+supplementary material.
+We therefore propose the linear increment activation:
+fLI (x; τ) = clip(τ · (x − 0.5) + 0.5, 0, 1) ,
+(8)
+6
+RYU, LEE: LINEARMASK-GS
+where τ > 0 is a slope hyperparameter. With a small slope (we use τ=0.1), fLI has a wide
+unsaturated range and is monotone-linear in its active interval, so a change in mi · Si produces a proportionally small change in ψi . As a result, mask values stay close to the neutral
+midpoint 0.5 throughout mask training and the output distribution remains unimodal and
+centered away from 0 and 1, as shown in Fig. 1(c, d). We refer to this property as mask stability: because the values stay spread across the mid-range instead of collapsing to a binary
+indicator, their relative order is preserved rather than compressed onto the saturation points,
+so ψi yields a stable ranking for pruning. Quantitatively, across the nine Mip-NeRF 360
+scenes at iteration 20,000, the Linear mask distribution shows 0.00% saturation (ψi < 0.1 or
+ψi > 0.9) and 99.99% of values lying in the interval [0.3, 0.7], with a per-Gaussian standard
+deviation of only 0.018. In contrast, Gumbel-Sigmoid saturates 51.19% of mask values and
+retains only 20.28% in [0.3, 0.7], with a much larger standard deviation of 0.380.
+Hard pruning via top-ρN selection. At the end of mask training, we convert the soft
+mask values into a hard keep/prune decision. Because the linear-increment activation keeps
+ψi unimodal and centered around 0.5, the relative order of mask values is preserved rather
+than compressed onto the saturation points, so ψi provides a stable ranking. We exploit this
+by directly retaining the top-ρN Gaussians by ψi , where ρ = 0.30 is the minimum-survival
+ratio and N the total number of Gaussians:
+K = top-ρN Gaussians ranked by ψi .
+(9)
+Gaussians in K are retained and the rest are permanently pruned. This rule plays the same
+role as the minimum-survival ratio in LP-3DGS (bounding the kept fraction to prevent geometry collapse), but because ψi here is unimodal and its rank tracks importance, the kept
+set follows the underlying importance ranking instead of the early saturation outcome.
+Throughout the mask-training phase, the soft mask value ψi ∈ [0, 1] produced by the
+linear-increment activation is applied directly as an opacity multiplier via Eq. (6), so gradients propagate through both mi and the scene parameters without hard discretization. The
+hard-pruning rule of Eq. (9) is applied only once at the end of mask training, as described in
+Sec. 3.4.
+3.4
+Training Objective and Schedule
+The total training loss combines photometric reconstruction and mask sparsity:
+Ltotal = (1 − λD ) L1 + λD (1 − SSIM) + λm Lmask ,
+(10)
+where L1 is the pixel-wise ℓ1 loss, SSIM is the structural similarity metric [27], and λD = 0.2
+follows the default 3DGS setting [13]. The sparsity term follows LP-3DGS [31]:
+Lmask =
+1 N
+∑ |mi |,
+N i=1
+(11)
+which encourages the mask parameters mi to shrink during training, thereby reducing the
+corresponding soft mask values after scaling by Si . We set λm = 5 × 10−4 and τ = 0.1 for the
+linear increment activation, using a separate AdamW optimizer [16] for {mi } at a learning
+rate of 5 × 10−2 .
+7
+Number of Gaussians
+RYU, LEE: LINEARMASK-GS
+600000
+300000
+500000
+250000
+400000
+200000
+300000
+150000
+200000
+100000
+100000
+50000
+0
+0.0
+0.2
+0.4
+0.6
+Mask value i
+0.8
+0
+0.0
+1.0
+(a) Gumbel-Sigmoid, outdoor scenes
+500000
+250000
+Number of Gaussians
+300000
+400000
+300000
+200000
+100000
+0.2
+0.4
+0.6
+Mask value i
+0.8
+0.4
+0.6
+Mask value i
+0.8
+1.0
+(b) Gumbel-Sigmoid, indoor scenes
+600000
+0
+0.0
+0.2
+1.0
+(c) Linear increment (Ours), outdoor scenes
+200000
+150000
+100000
+50000
+0
+0.0
+0.2
+0.4
+0.6
+Mask value i
+0.8
+1.0
+(d) Linear increment (Ours), indoor scenes
+Figure 1: Mask ψi distribution at the end of mask training, aggregated separately over MipNeRF 360’s outdoor (5 scenes) and indoor (4 scenes) sets. (a, b) Gumbel-Sigmoid produces
+a two-peaked distribution pinned at 0 and 1; the fraction above ψ = 0.5 is scene-dependent
+(∼52% outdoor, ∼40% indoor), reflecting that which side each mask lands on is unrelated
+to importance. (c, d) Linear increment yields a unimodal distribution near ψ = 0.5 (mean
+∼0.44 indoor, ∼0.49 outdoor), so the relative order of mask values is preserved and the topρN pruning in Eq. (9) operates on a stable ranking.
+Optimization schedule. Training proceeds for 30,000 iterations in total. For both the
+3DGS and 2DGS backbones, we warm up the standard pipeline for 19,500 iterations to ensure geometric convergence before activating the mask module. During the subsequent 500iteration mask training phase (iterations 19,500–20,000), the max-pooling importance scores
+Si from Eq. (4) are recomputed every 20 iterations to reflect ongoing geometric changes. At
+iteration 20,000, we apply the hard-pruning rule of Eq. (9) introduced in Sec. 3.3: the top-ρN
+Gaussians ranked by ψi are kept, where ρ is the minimum-survival ratio. We use ρ = 0.30
+as the default and study its effect in Sec. 4. The remaining primitives are fine-tuned without
+the mask loss for the remainder of training.
+8
+RYU, LEE: LINEARMASK-GS
+4
+Experiments
+4.1
+Experimental Setup
+Datasets. We evaluate LinearMask-GS on three novel view synthesis benchmarks: MipNeRF 360 [1] (9 scenes), Tanks and Temples [14] (2 outdoor scenes), and Deep Blending [11] (2 indoor scenes).
+Baselines. We compare LinearMask-GS against generic novel view synthesis and scene
+representation baselines (Plenoxels [7], INGP [20], Mip-NeRF 360 [1], 3DGS [13], and
+2DGS [12]), as well as 3DGS-based pruning and compression methods (Compact3DGS [15],
+LightGaussian [5], EAGLES [8], RadSplat [22], Mini-Splatting [6], and LP-3DGS [31]). In
+Table 1, we additionally report a retrained baseline (3DGS∗ ) to provide a fair comparative
+reference trained under our identical hardware and schedule. Note that for LP-3DGS, we
+evaluate its official implementation but apply max-pooling aggregation instead of its original
+summation-based method. This provides a stronger baseline and ensures a fair comparison
+by strictly isolating the effect of the mask activation function.
+Evaluation metrics. Rendering quality is assessed via PSNR, SSIM [27], and LPIPS [30].
+Compression efficiency is measured by the surviving Gaussian count and storage size (MB).
+Implementation details. We implement LinearMask-GS in PyTorch, building upon the
+official 3DGS codebase [13]. The slope τ=0.1 (grid search over {0.01, 0.05, 0.1, 0.5}),
+minimum-survival ratio ρ=0.30, and mask weight λm =5 × 10−4 are tuned on a held-out
+set and fixed across all scenes; sensitivity analyses are provided in the supplementary material. Training follows the standard 30,000-iteration 3DGS schedule. We train the 3DGSand 2DGS-backbone runs on a single NVIDIA RTX 3090 GPU, and the FastGS-backbone
+run (LinearMask-GS⋆ ) on a single NVIDIA RTX 4090 GPU, following the hardware setup
+of the FastGS paper [26]. For a fair wall-clock comparison, the training-time measurements
+in Table 2 are all collected on a single RTX 4090.
+4.2
+Main Results
+We evaluate LinearMask-GS against scene representation and pruning baselines on three
+standard benchmarks: Mip-NeRF 360 [1], Tanks & Temples [14], and Deep Blending [11].
+For all datasets, we follow the standard evaluation protocol of 3DGS [13], where every eighth
+image is reserved for testing. We report PSNR (dB), SSIM, LPIPS, and the number of Gaussians (M) on all benchmarks, plus FPS and storage (MB) on Mip-NeRF 360 (measured on
+the same hardware for reproduced methods, and taken from the original papers for literature
+baselines).
+Mip-NeRF 360. Table 1 summarizes results across all nine scenes against three families
+of baselines: the original 3DGS backbone with its retrained reference and the LP-3DGS
+learned-mask parent; compression- and pruning-oriented systems; and recent fast-training
+pipelines. Compared to the vanilla 3DGS [13] backbone, our method reduces the Gaussian count from 3.36M to 0.94M (a 3.6× reduction) while improving PSNR from 27.21 to
+27.70 dB. Against our primary pruning baseline LP-3DGS [31], LinearMask-GS surpasses
+RYU, LEE: LINEARMASK-GS
+9
+it by 0.23 dB in PSNR and 0.0135 in SSIM with 1.6× fewer Gaussians, while maintaining
+comparable rendering speed (591 vs. 588 FPS).
+Compared to recent compression methods (HAC [2], HAC++ [3]) and aggressive pruning baselines (Mini-Splatting [6], Speedy-Splat [9]), LinearMask-GS achieves competitive PSNR with substantially fewer Gaussians than compression methods while maintaining higher quality than the most aggressive pruning baselines (see Table 1 for details).
+For a budget-matched comparison with the most aggressive pruning baseline, we additionally constrain LinearMask-GS⋆ to Speedy-Splat’s budget of 0.30M Gaussians: over
+three independent seeds it reaches 27.40 dB / 0.798 / 0.230, versus 26.91 / 0.781 / 0.295 for
+Speedy-Splat, i.e., better on all three metrics at the same budget, and still ahead at 0.25M
+(27.06 / 0.791 / 0.241); see Sec. 11 of the supplementary material. Applying LinearMask-GS
+on the FastGS backbone (LinearMask-GS⋆ , last row), where LinearMask-GS substitutes
+FastGS’s post-densification VCP module, further compresses the FastGS output from 0.40M
+to 0.38M Gaussians while improving PSNR by 0.13 dB over FastGS (27.69 vs. 27.56 dB)
+and reducing storage to 94.89 MB. This indicates that our masking strategy can replace specialized post-densification pruning components in fast-training pipelines while improving
+rendering quality.
+Figure 3 summarizes this advantage through efficiency metrics across all three quality
+dimensions (109 /(LPIPS × #G), PSNR/#G, SSIM/#G), on which LinearMask-GS achieves
+the highest score against the 3DGS and LP-3DGS reference rows; a per-scene LPIPS-vs-#G
+visualization is provided in Sec. 5 of the supplementary material.
+Tanks & Temples and Deep Blending. On the Tanks & Temples and Deep Blending
+benchmarks, LinearMask-GS⋆ (FastGS-backbone variant that substitutes FastGS’s postdensification VCP module with our learned mask) reaches 24.18 dB PSNR and 0.825 SSIM
+with 0.29M Gaussians on Tanks & Temples, and 30.11 dB PSNR and 0.899 SSIM with
+0.29M Gaussians on Deep Blending. This places LinearMask-GS⋆ in the sub-million primitive regime of recent fast-training baselines while achieving the best PSNR on Tanks & Temples average (24.18 dB), Dr Johnson (29.67 dB), and Deep Blending average (30.11 dB),
+surpassing FastGS and other fast-training methods on these metrics. The supplementary
+material provides the full quantitative comparison against recent fast-training and compact
+3DGS baselines, together with per-scene score tables for both benchmarks.
+Qualitative comparison. Figure 2 shows per-pixel absolute error maps for three representative Mip-NeRF 360 scenes (Bicycle, Flowers, Counter); error maps for the remaining
+six scenes are provided in the supplementary material. For each scene, error maps are visualized under a scene-specific colormap (blue to red indicates low to high absolute error),
+and per-image PSNR and MAE are reported below each panel. Across all nine scenes,
+LinearMask-GS produces lower MAE and fewer saturated high-error (red) regions than both
+LP-3DGS and 3DGS. The improvement is most visible in texture-dense outdoor scenes such
+as Flowers and Stump, where 3DGS error maps show large red areas around the foliage and
+3DGS PSNR drops to 20.19 and 24.94 dB respectively, while LinearMask-GS retains 23.49
+and 27.07 dB with substantially cleaner error maps. In indoor scenes such as Counter and
+Kitchen, the per-image PSNR margin over 3DGS exceeds 2.7 dB, reflecting more accurate
+reconstruction of fine structures like the countertop and the toy loader despite using fewer
+Gaussians overall (Table 1).
+10
+RYU, LEE: LINEARMASK-GS
+Table 1: Quantitative results on Mip-NeRF 360. All 3DGS- and 2DGS-backbone results
+are obtained under the same RTX 3090 environment as the baselines for a like-for-like comparison; the FastGS-backbone variant (⋆) follows the FastGS hardware setup (RTX 4090).
+Baselines: (i) 3DGS and its retrained reference 3DGS∗ , (ii) LP-3DGS evaluated with maxpooling for a matched comparison (Sec. 4.4), and (iii) recent compression, pruning, and
+fast-training methods. ⋆: our method as a VCP substitute on FastGS. “–”: metric not reported. Best per column in bold.
+Method
+LPIPS↓
+PSNR↑
+SSIM↑
+#G (M)↓
+FPS↑
+Storage (MB)↓
+Plenoxels [7]
+INGP-base [20]
+INGP-big [20]
+Mip-NeRF 360 [1]
+0.463
+0.371
+0.331
+0.237
+23.08
+25.30
+25.59
+27.69
+0.626
+0.671
+0.699
+0.792
+–
+–
+–
+–
+6.79
+11.70
+9.43
+0.06
+2100.0
+13.0
+48.0
+8.6
+3DGS [13]
+3DGS∗
+LP-3DGS [31]
+0.214
+0.222
+0.2258
+27.21
+27.46
+27.47
+0.815
+0.812
+0.8119
+3.36
+3.35
+1.48
+134.00
+120.00
+588.00
+734.0
+746.0
+314.12
+Compression-oriented
+Compact3DGS [15]
+EAGLES [8]
+HAC (high-rate) [2]
+HAC++ (high-rate) [3]
+0.247
+0.238
+0.2296
+0.2307
+27.08
+27.16
+27.77
+27.82
+0.798
+0.809
+0.8109
+0.8109
+1.39
+1.71
+2.26
+1.85
+128.00
+131.00
+–
+–
+48.8
+54.0
+22.94
+19.38
+Pruning-oriented
+LightGaussian [5]
+RadSplat [22]
+Mini-Splatting [6]
+PUP 3D-GS [10]
+Speedy-Splat [9]
+0.231
+0.218
+0.217
+0.2719
+0.295
+26.54
+27.08
+27.34
+26.67
+26.91
+0.798
+0.811
+0.822
+0.7862
+0.781
+1.05
+1.92
+0.49
+–
+0.30
+189.00
+165.00
+178.00
+204.81
+552.00
+154.5
+189.2
+132.8
+74.65
+–
+Fast-training systems
+Taming 3DGS [18]
+DashGaussian [4]
+FastGS [26]
+0.261
+0.218
+0.261
+27.48
+27.73
+27.56
+0.794
+0.817
+0.797
+0.68
+2.40
+0.40
+221.00
+155.00
+579.00
+–
+–
+99.44
+LinearMask-GS (Ours)
+LinearMask-GS⋆ (FastGS backbone)
+0.2095
+0.2227
+27.70
+27.69
+0.8254
+0.8029
+0.94
+0.38
+591.14
+344.60
+226.76
+94.89
+Training time. Table 2 reports mean training time over the nine Mip-NeRF 360 scenes, all
+measured on a single RTX 4090. On the 3DGS backbone, LinearMask-GS is 2.12 minutes
+faster than its learned-mask parent LP-3DGS while reaching a much more compact final
+model with higher PSNR and SSIM (0.94M vs. 1.48M Gaussians, Table 1), and incurs only
+a 0.9-minute overhead over the unpruned 3DGS baseline despite the added mask-training
+and fine-tuning stages. On the FastGS backbone, LinearMask-GS⋆ reduces training time
+(1.93 to 1.81 minutes) while removing additional primitives: the brief mask-learning stage
+is more than offset by faster iterations on the already-pruned model, yielding a net saving; a
+full timing breakdown is provided in Sec. 13 of the supplementary material.
+4.3
+Generality across Backbones
+2DGS. We apply LinearMask-GS to the official 2DGS [12] codebase to test the generality
+of our framework across different Gaussian representations. While 3DGS and 2DGS utilize
+different geometric primitives, they share a consistent alpha-compositing pipeline, allowing
+our max-pooling score and linear activation to be applied without structural changes.
+As shown in Table 3, on the nine Mip-NeRF 360 scenes LinearMask-GS reduces the
+11
+RYU, LEE: LINEARMASK-GS
+Table 2: Training-time comparison on Mip-NeRF 360 (minutes, averaged over nine scenes).
+All rows are measured on a single RTX 4090. ⋆: our method on FastGS.
+Method
+Train Time (min)↓
+3DGS [13]
+LP-3DGS [31]
+LinearMask-GS (Ours)
+Taming 3DGS [18]
+DashGaussian [4]
+FastGS [26]
+LinearMask-GS⋆ (FastGS backbone)
+12.10
+15.12
+13.00
+5.36
+6.35
+1.93
+1.81
+Mip-NeRF 360
+GT
+LinearMask-GS(ours)
+LP-3DGS
+3DGS
+LinearMask-GS(ours)
+Error map
+LP-3DGS
+Error map
+3DGS
+Error map
+27.60 dB
+25.13 dB
+24.19 dB
+MAE 0.0267
+MAE 0.0362
+MAE 0.0554
+23.49 dB
+21.15 dB
+20.19 dB
+MAE 0.0446
+MAE 0.0752
+MAE 0.0928
+31.45 dB
+30.40 dB
+28.71 dB
+MAE 0.0131
+MAE 0.0177
+MAE 0.0389
+Bicycle
+Flowers
+Counter
+Figure 2: Per-scene qualitative comparison on three representative Mip-NeRF 360 scenes
+(Bicycle, Flowers, Counter). Each row: GT, renders from LinearMask-GS / LP-3DGS /
+3DGS (PSNR below), then per-pixel absolute error maps for the same three (MAE below;
+scene-specific blue-to-red colormap). LinearMask-GS consistently shows lower error and
+fewer saturated red regions; remaining six scenes in the supplement.
+LPIPS Efficiency
+SSIM Efficiency
+70
+2.0
+60
+10000
+8000
+6000
+4000
+SSIM per 1M Gaussians
+12000
+PSNR Efficiency
+Method
+3DGS
+LP-3DGS
+Ours
+PSNR per 1M Gaussians
+Efficiency Score (1e9 / (LPIPS * G))
+14000
+50
+40
+30
+1.5
+1.0
+20
+0.5
+2000
+0
+10
+All AVG
+Indoor AVG
+Category
+Outdoor AVG
+0
+All AVG
+Indoor AVG
+Category
+Outdoor AVG
+0.0
+All AVG
+Indoor AVG
+Outdoor AVG
+Category
+Figure 3: Efficiency scores on Mip-NeRF 360 across three metrics (109 /(LPIPS × #G),
+PSNR/#G, SSIM/#G). LinearMask-GS achieves the highest score on all three, indicating
+superior perceptual quality per Gaussian.
+2DGS Gaussian count by 2.9× (from 1.06M to 0.36M) while improving PSNR by 0.22 dB
+and SSIM by 0.009, with LPIPS rising only marginally (by 0.008). This indicates that our
+12
+RYU, LEE: LINEARMASK-GS
+importance masking successfully identifies redundant 2D disks without sacrificing perceptual quality.
+DropGaussian and Octree-GS. Beyond 2DGS, we further test LinearMask-GS on two
+additional Gaussian-based backbones with different representational structures: DropGaussian [24], which regularizes 3D Gaussians through stochastic dropout, and Octree-GS [25],
+which uses hierarchical anchor structures. On DropGaussian, we evaluate five LLFF scenes
+(9-view) with the masked model repeated over three independent training runs. Averaged
+over the runs, LinearMask-GS improves PSNR on every scene, by +0.31 to +0.52 dB over
+the unpruned backbone, while retaining 41% fewer primitives than the Gumbel variant (perscene results in Sec. 12 of the supplementary material). The single fern run of Table 3 gives
+a smaller gain (+0.03 dB at a 2.8× reduction), indicating that single runs of this sparseview backbone are noisy. On Octree-GS, the amsterdam scene from Bungee-NeRF shows
+a 2.9× anchor reduction (1.09M to 0.38M) with +0.12 dB PSNR and SSIM/LPIPS within
+0.002 of the reference; on the bicycle and garden scenes of Mip-NeRF 360, anchors drop
+by 40.2% relative to the Gumbel variant at a mean PSNR change of −0.11 dB. Across all
+three Octree-GS scenes, quality thus moves by at most ≈0.1 dB in either direction while
+anchors are reduced by 40% or more. Table 3 consolidates these results alongside the 2DGS
+comparison, and additionally reports the 2DGS variant with the linear-increment activation
+replaced by Gumbel-Sigmoid; the activation-level comparison across backbones is analyzed
+in Sec. 4.4.
+Table 3: Generality of LinearMask-GS across alternative Gaussian-based backbones, applied as a downstream pruning stage. #Primitives counts Gaussians for 2DGS and DropGaussian, and anchors for Octree-GS. 2DGS results average over the nine Mip-NeRF 360
+scenes; DropGaussian uses fern (LLFF) and Octree-GS uses amsterdam (Bungee-NeRF). “+
+LP-3DGS (Gumbel)” matches “+ LinearMask-GS” except in activation (see Sec. 4.3). Best
+per column in bold.
+Backbone
+Method
+LPIPS↓
+PSNR↑
+SSIM↑
+#Primitives↓
+2DGS [12]
+2DGS (no pruning)
++ LP-3DGS (Gumbel)
++ LinearMask-GS∗
+0.2586
+0.2734
+0.2663
+26.7390
+26.9261
+26.9583
+0.7935
+0.8022
+0.8025
+1,063,924
+628,840
+364,448
+DropGaussian [24]
+DropGaussian (no pruning)
++ LP-3DGS (Gumbel)
++ LinearMask-GS
+0.1106
+0.1098
+0.1087
+26.6495
+26.6658
+26.6756
+0.8806
+0.8813
+0.8815
+104,877
+62,182
+37,433
+Octree-GS [25]
+Octree-GS (no pruning)
++ LP-3DGS (Gumbel)
++ LinearMask-GS
+0.0917
+0.0908
+0.0928
+27.8570
+27.9280
+27.9720
+0.9184
+0.9192
+0.9191
+1,094,939
+648,221
+380,726
+4.4
+Ablation Study
+We ablate the core design choices of LinearMask-GS on the Mip-NeRF 360 dataset: the
+importance aggregation, the mask activation, and the minimum-survival ratio ρ. Unless
+stated otherwise, all variants use the default configuration: λm = 5 × 10−4 , τ = 0.1, and ρ =
+0.30. Detailed analyses of training convergence and additional hyperparameter sensitivity
+(sparsity weight λm and slope τ) are provided in the supplementary material.
+RYU, LEE: LINEARMASK-GS
+13
+Aggregation and activation. Table 4 presents a full factorial comparison of summationbased [6] and max-pooling [22] aggregation against Gumbel-Sigmoid [31] and linear increment activations. Note that the “Max + Gumbel-Sigmoid” variant corresponds exactly to the
+LP-3DGS baseline reported in Table 1. For the summation-based variants (rows 1–2), we
+use ρ = 0.40 following the pruning statistics of LP-3DGS [31]; max-pooling variants use the
+default ρ = 0.30. Under max-pooling, replacing Gumbel-Sigmoid with the linear increment
+activation reduces the Gaussian count from 1.48M to 0.94M and improves both PSNR (27.47
+to 27.70 dB) and LPIPS (0.2258 to 0.2095). Under summation, the linear-increment variant
+reduces the count from 1.43M to 1.26M with nearly identical PSNR/LPIPS, indicating that
+the view-count inflation introduced by summation aggregation dominates the effect of the
+activation choice and obscures the stability benefit that Linear provides. The combination of
+max-pooling aggregation and the linear-increment activation gives the best operating point
+and is used in LinearMask-GS.
+Ranking reliability. The premise of top-ρN pruning is that the ranking induced by ψi
+tracks importance, so we test this directly: with hard pruning disabled, the mask ranking
+through the window is compared against a held-out proxy, the max-pooled contribution of
+each Gaussian (Eq. (4)) at iteration 30k (protocol in Sec. 3 of the supplementary material).
+Across all nine Mip-NeRF 360 scenes, at the pruning decision point: (i) re-sampling the
+Gumbel noise alone flips 47.3% of keep/prune decisions (46–48% on every scene; rank
+correlation between two noise draws < 0.1), so the sampled decision is governed by activation noise rather than by a stable learned ranking, whereas the linear mask is deterministic
+(0% flips); (ii) 52.2% of Gumbel-Sigmoid mask values are saturated under this protocol
+versus 0.00% for linear, consistent with the 51.19% observed under the standard schedule
+(Sec. 3.3); (iii) the Spearman correlation between the mask ranking and the proxy is 0.29 for
+linear versus 0.16 for Gumbel-Sigmoid (1.8× higher overall and 2.8× on outdoor scenes;
+per-iteration curves in the supplementary material).
+Contribution of the learned mask. To isolate what the mask adds over its ingredients, we also prune directly by the raw score: same schedule, top-30% by Si at 20k,
+then identical fine-tuning (“Max + none” in Table 4). This mask-free baseline is strong
+(27.57 dB / 0.8231 / 0.2143 at 0.96M), yet our learned mask is ahead on eight of the nine
+scenes at a smaller budget (+0.13 dB at 0.94M; the only exception is Treehill; per-scene
+results in Sec. 10 of the supplement). The Gumbel-Sigmoid mask falls below it (27.47 dB,
+1.48M): once the ranking saturates, a learned mask is worse than none. With the rankingreliability analysis above, this locates the gain: not max-pooling or fine-tuning, both shared
+with these baselines, but the stability of the ranking itself.
+Minimum-survival ratio ρ. We sweep ρ ∈ {0.10, 0.20, 0.30, 0.40, 0.50} on all nine MipNeRF 360 scenes for both the linear-increment activation and the matched Gumbel-Sigmoid
+baseline under the identical top-ρN rule of Eq. (9) (Secs. 8–9 of the supplementary material).
+Two observations follow. First, the two quality–compression curves share the same shape:
+quality improves steeply up to ρ=0.30 and largely saturates beyond it (over ρ=0.30→0.50,
+PSNR gains total +0.04 dB for linear and +0.11 dB for Gumbel-Sigmoid). Within the linear sweep, ρ=0.20 removes too many meaningful primitives (−0.28 dB), whereas ρ=0.40
+retains 34% more Gaussians for only +0.03 dB, so we keep ρ=0.30 as the default. Second,
+the curves differ in position: because top-ρN retains the same fraction of a near-identical
+14
+RYU, LEE: LINEARMASK-GS
+primitive pool, equal ρ implies matched budgets (#G differs by ≤ 0.01M), and at every ρ
+the linear-increment activation sits +0.40–0.48 dB above the Gumbel-Sigmoid baseline at
+the same budget. The gap does not close anywhere on the sweep: the baseline’s best point
+(27.33 dB at ρ=0.50, 1.57M) falls below even the linear ρ=0.20 setting (27.42 dB at 0.63M,
+2.5× fewer primitives) and never reaches our default (27.70 dB at 0.94M) despite 67% more
+primitives. The stable ranking thus does not reshape the trade-off; it selects a better subset
+at every budget, shifting the entire curve.
+Table 4: Full factorial ablation of importance aggregation and mask activation on MipNeRF 360, extended with a mask-free baseline that prunes directly by the raw max-pooled
+score Si (“none”). ✓ marks the components used in LinearMask-GS. Best results are in bold.
+Aggregation
+Activation
+PSNR↑
+SSIM↑
+LPIPS↓
+#G (M)↓
+Sum [6]
+Sum [6]
+Max [22]
+Max [22]
+Max ✓ [22]
+Gumbel-Sigmoid [31]
+Linear increment
+None (top-ρN by Si )
+Gumbel-Sigmoid [31]
+Linear increment ✓
+27.12
+27.05
+27.57
+27.47
+27.70
+0.805
+0.806
+0.8231
+0.8119
+0.8254
+0.239
+0.238
+0.2143
+0.2258
+0.2095
+1.43
+1.26
+0.96
+1.48
+0.94
+Activation choice across backbones. The factorial ablation above is conducted on the
+3DGS backbone. To verify that the activation itself, rather than the masking framework,
+drives the gain, we compare the two activations on DropGaussian and Octree-GS with the
+mask window, sparsity loss, importance score, and target keep ratio held identical (the “+
+LP-3DGS (Gumbel)” vs. “+ LinearMask-GS” rows of Table 3). The linear-increment activation prunes 40% (DropGaussian, fern) and 41% (Octree-GS, amsterdam) further than
+the Gumbel-Sigmoid variant while maintaining or improving quality; since these backbones
+use markedly different mask-training schedules (1,500 and 4,000 iterations), the activation
+choice, not merely the masking framework, governs the achievable quality–compression
+trade-off.
+5
+Conclusion
+In this work, we identified a limitation of existing learned-mask pruning for 3D Gaussian
+Splatting and introduced LinearMask-GS to address it. The steep slope of Gumbel-Sigmoid
+pushes mask values to 0 or 1 before the importance ranking stabilizes, a failure that longer
+mask-training windows exacerbate rather than fix, producing a two-peaked distribution from
+which that ranking can no longer be reliably recovered. Replacing it with a linear-increment
+activation keeps mask values in the mid-confidence regime and preserves their ranking, so
+a simple top-ρN selection suffices, and this single change transfers without modification
+across diverse Gaussian-based backbones.
+Limitations. The slope τ and ratio ρ are tuned on a held-out set (Sec. 4.1) and fixed across
+scenes; the brief mask window can leave specular or transparent regions under-discriminated,
+and the global ρ sets an overall rather than per-region budget. The method also inherits
+the static-scene assumption of its backbones; scene-adaptive scheduling and dynamic-scene
+extensions are left for future work.
+RYU, LEE: LINEARMASK-GS
+15
+Acknowledgments
+This work was partly supported by the National Research Foundation of Korea (NRF)
+grant funded by the Korea government (MSIT) (RS-2024-00337250), by the Korea Institute
+for Advancement of Technology (KIAT) grant funded by the Korea government (MOTIE)
+(P0023718, Inorganic Light-emitting Display Expert Training Program for Display Technology Transition), and by the Institute of Information & Communications Technology
+Planning & Evaluation (IITP, AI Computing Support Project for R&D) grant funded by the
+Korea government (MSIT) (RS-2026-25505492, High-Performance Research AI Computing
+Infrastructure Support at the 2 PFLOPS Scale).
+References
+[1] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. Mip-NeRF 360: Unbounded anti-aliased neural radiance fields. In CVPR, pages
+5470–5479, 2022.
+[2] Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi, and Jianfei Cai. HAC:
+Hash-grid assisted context for 3D gaussian splatting compression. arXiv preprint
+arXiv:2403.14530, 2024.
+[3] Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi, and Jianfei Cai. HAC++:
+Towards 100x compression of 3D gaussian splatting. arXiv preprint arXiv:2501.12255,
+2025.
+[4] Youyu Chen, Junjun Jiang, Kui Jiang, Xiao Tang, Zhihao Li, Xianming Liu, and Yinyu
+Nie. DashGaussian: Optimizing 3D gaussian splatting in 200 seconds. arXiv preprint
+arXiv:2503.18402, 2025.
+[5] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, and Zhangyang Wang.
+LightGaussian: Unbounded 3D gaussian compression with 15x reduction and 200+
+FPS. In NeurIPS, pages 140138–140158, 2024.
+[6] Guangchi Fang and Bing Wang. Mini-splatting: Representing scenes with a constrained number of gaussians. In ECCV, pages 165–181, 2024.
+[7] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and
+Angjoo Kanazawa. Plenoxels: Radiance fields without neural networks. In CVPR,
+pages 5501–5510, 2022.
+[8] Sharath Girish, Kamal Gupta, and Abhinav Shrivastava. EAGLES: Efficient accelerated 3D gaussians with lightweight encodings. In ECCV, pages 54–71, 2024.
+[9] Alex Hanson, Allen Tu, Geng Lin, Vasu Singla, Matthias Zwicker, and Tom Goldstein. Speedy-Splat: Fast 3D gaussian splatting with sparse pixels and sparse primitives. arXiv preprint arXiv:2412.00578, 2025.
+[10] Alex Hanson, Allen Tu, Vasu Singla, Mayuka Jayawardhana, Matthias Zwicker, and
+Tom Goldstein. PUP 3D-GS: Principled uncertainty pruning for 3D gaussian splatting.
+arXiv preprint arXiv:2406.10219, 2025.
+16
+RYU, LEE: LINEARMASK-GS
+[11] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and
+Gabriel Brostow. Deep blending for free-viewpoint image-based rendering. ACM TOG,
+37(6):1–15, 2018.
+[12] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and Shenghua Gao. 2D gaussian splatting for geometrically accurate radiance fields. In ACM SIGGRAPH Conference Papers, pages 1–11, 2024.
+[13] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, George Drettakis, et al. 3D
+gaussian splatting for real-time radiance field rendering. ACM TOG, 42(4):139–1,
+2023.
+[14] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples:
+Benchmarking large-scale scene reconstruction. ACM TOG, 36(4):1–13, 2017.
+[15] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko, and Eunbyung Park. Compact 3D gaussian splatting for static and dynamic radiance fields. arXiv preprint
+arXiv:2408.03822, 2024.
+[16] Ilya Loshchilov and Frank Hutter. Decoupled weight decay regularization. arXiv
+preprint arXiv:1711.05101, 2017.
+[17] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai.
+Scaffold-GS: Structured 3D gaussians for view-adaptive rendering. In CVPR, pages
+20654–20664, 2024.
+[18] Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl, Markus Steinberger, Francisco Vicente Carrasco, and Fernando De La Torre. Taming 3DGS: High-quality radiance fields with limited resources. In ACM SIGGRAPH Asia Conference Papers, pages
+1–11, 2024.
+[19] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. NeRF: Representing scenes as neural radiance fields for view
+synthesis. Communications of the ACM, 65(1):99–106, 2021.
+[20] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM TOG, 41(4):1–15,
+2022.
+[21] Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann. Compressed 3D
+gaussian splatting for accelerated novel view synthesis. In CVPR, pages 10349–10358,
+2024.
+[22] Michael Niemeyer, Fabian Manhardt, Marie-Julie Rakotosaona, Michael Oechsle,
+Daniel Duckworth, Rama Gosula, Keisuke Tateno, John Bates, Dominik Kaeser, and
+Federico Tombari. RadSplat: Radiance field-informed gaussian splatting for robust
+real-time rendering with 900+ FPS. In International Conference on 3D Vision (3DV),
+pages 134–144, 2025.
+[23] Panagiotis Papantonakis, Georgios Kopanas, Bernhard Kerbl, Alexandre Lanvin, and
+George Drettakis. Reducing the memory footprint of 3D gaussian splatting. Proceedings of the ACM on Computer Graphics and Interactive Techniques, 7(1):1–17, 2024.
+RYU, LEE: LINEARMASK-GS
+17
+[24] Hyunwoo Park, Gun Ryu, and Wonjun Kim. DropGaussian: Structural regularization
+for sparse-view gaussian splatting. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), pages 21600–21609, 2025.
+[25] Kerui Ren, Lihan Jiang, Tao Lu, Mulin Yu, Linning Xu, Zhangkai Ni, and Bo Dai.
+Octree-GS: Towards consistent real-time rendering with LOD-structured 3D gaussians.
+arXiv preprint arXiv:2403.17898, 2024.
+[26] Shiwei Ren, Tianci Wen, Yongchun Fang, and Biao Lu. FastGS: Training 3D gaussian
+splatting in 100 seconds. arXiv preprint arXiv:2511.04283, 2025.
+[27] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality
+assessment: From error visibility to structural similarity. IEEE TIP, 13(4):600–612,
+2004.
+[28] Shuzhao Xie, Weixiang Zhang, Chen Tang, Yunpeng Bai, Rongwei Lu, Shijia Ge, and
+Zhi Wang. MesonGS: Post-training compression of 3D gaussians via efficient attribute
+transformation. In ECCV, pages 434–452, 2024.
+[29] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger. Mipsplatting: Alias-free 3D gaussian splatting. In CVPR, pages 19447–19456, 2024.
+[30] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The
+unreasonable effectiveness of deep features as a perceptual metric. In CVPR, pages
+586–595, 2018.
+[31] Zhaoliang Zhang, Tianchen Song, Yongjae Lee, Li Yang, Cheng Peng, Rama Chellappa, and Deliang Fan. LP-3DGS: Learning to prune 3D gaussian splatting. In
+NeurIPS, pages 122434–122457, 2024.
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+1
+Supplementary Material
+LinearMask-GS: Stable-Mask Importance Pruning for Compact
+3D Gaussian Splatting
+Donghun Ryu1
+1
+Department of Intelligent
+Semiconductor Engineering
+Chung-Ang University
+Seoul, Republic of Korea
+2
+School of Electrical and Electronics
+Engineering
+Chung-Ang University
+Seoul, Republic of Korea
+donghun0621@cau.ac.kr
+Minhyeok Lee1,2†
+mlee@cau.ac.kr
+This document provides supplementary material referenced in the main paper. It includes
+additional analyses of training convergence, hyperparameter sensitivity, and mask-entropy
+evolution; a quantitative analysis of the reliability of the learned mask ranking and of the
+effect of the mask-window length and placement; per-scene quantitative results on MipNeRF 360; the full Tanks & Temples and Deep Blending comparison; per-scene qualitative
+comparisons and minimum-survival-ratio ρ sweeps for both the linear-increment activation
+and the matched Gumbel-Sigmoid baseline; a mask-free pruning baseline, a budget-matched
+comparison with Speedy-Splat, and an extended cross-backbone evaluation; a decomposition
+of the mask-learning speed gap on the FastGS backbone; and a description of the accompanying video.
+1
+Additional Experimental Results
+In this section, we present additional analyses supporting LinearMask-GS, including training
+convergence profiles and sensitivity analyses for key hyperparameters.
+1.1
+Training convergence
+Figure 1 plots PSNR and SSIM from iteration 19,500 onward. LinearMask-GS reaches
+higher PSNR and SSIM than LP-3DGS within the 500-iteration mask-training phase (iter.
+19,500–20,000) and maintains this advantage through fine-tuning. The faster convergence
+reflects the gentle slope of the linear-increment activation, which keeps mask values away
+from the saturation boundaries that Gumbel-Sigmoid reaches early in the mask-training window. As discussed in the main paper, this consistent gradient flow translates to substantially
+better efficiency scores across all metric dimensions.
+© 2026. The copyright of this document resides with its authors.
+It may be distributed unchanged freely in print or electronic forms.
+† Corresponding author.
+2
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+Figure 1: Training convergence. PSNR (dB) and SSIM after iteration 19,500 on MipNeRF 360. LinearMask-GS converges faster and to higher values than LP-3DGS.
+1.2
+Sensitivity to sparsity weight λm
+Figure 2 evaluates λm ∈ {10−4 , 5 × 10−4 , 10−3 , 5 × 10−3 }, using the same per-Gaussian efficiency scores (109 /(LPIPS × #G), PSNR/#G, SSIM/#G) as Figure 3 of the main paper.
+The default λm = 5 × 10−4 achieves the best LPIPS-based efficiency score. Larger values
+increase sparsity at the cost of perceptual quality, while smaller values provide insufficient
+regularization; all variants with λm ∈ [10−4 , 5 × 10−4 ] robustly outperform LP-3DGS.
+Figure 2: Sensitivity to λm . Efficiency score under varying λm on Mip-NeRF 360. The
+default λm = 5 × 10−4 (highlighted) yields the best LPIPS-based efficiency score.
+1.3 Sensitivity to slope τ
+The main paper reports the primary grid search over τ ∈ {0.01, 0.05, 0.1, 0.5}. Figure 3 evaluates an extended range τ ∈ {0.01, 0.05, 0.1, 0.25, 0.5, 1.0}. The linear-increment activation
+is robust to the choice of slope: efficiency scores remain high across 0.01 ≤ τ ≤ 0.5, and
+in PSNR terms every τ ∈ [0.05, 0.5] stays within 0.1 dB of the default. The default τ = 0.1
+gives the best balance, while only extreme values (e.g., τ = 1.0) show a noticeable reduction
+in efficiency.
+3
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+PSNR Efficiency (All AVG)
+15
+10
+5
+0.87
+0.85
+0.4
+0.2
+.5
+.0
+=1
+.25
+=0
+=0
+.0
+=0
+.1
+(
+.5
+=1
+.25
+=0
+=0
+.05
+fau
+lt)
+=0
+Linear Increment
+0.87
+0.6
+.1
+(
+De
+.01
+.0
+0.87
+0.8
+0.0
+=0
+.5
+=1
+.25
+=0
+=0
+.05
+fau
+lt)
+=0
+.1
+(
+De
+.01
+0.87
+.05
+20
+0.87
+fau
+lt)
+28.27
+0
+=0
+0
+29.05
+De
+1000
+29.14
+.01
+2000
+29.34
+29.26
+=0
+3000
+29.05
+25
+SSIM per 1M Gaussians
+4000
+30
+1.0
+=0
+4367.66
+PSNR per 1M Gaussians
+5008.49 5052.97 5055.30 5032.39 5008.49
+=0
+5000
+SSIM Efficiency (All AVG)
+35
+=0
+Efficiency Score (1e9 / (LPIPS * G))
+LPIPS Efficiency (All AVG)
+6000
+Linear Increment
+Linear Increment
+Figure 3: Sensitivity to τ. Efficiency score under varying slope τ on Mip-NeRF 360. The
+default τ = 0.1 (highlighted) achieves the best LPIPS-based efficiency score.
+2 Prevention of Premature Binarization
+A key advantage of LinearMask-GS is the prevention of premature binarization, where the
+Gumbel-Sigmoid activation forcefully pushes mask values toward 0 or 1 before the model
+has adequately evaluated their contribution to the scene. To empirically validate this, we
+analyze the evolution of mask entropy during the mask-training phase. The binary entropy
+of a per-Gaussian mask value ψi is
+H(ψi ) = −ψi log ψi − (1 − ψi ) log(1 − ψi ).
+(1)
+A higher entropy indicates that mask values remain concentrated around 0.5, so the corresponding Gaussians are still under active evaluation; a near-zero entropy implies the values
+have collapsed to the extremes (0 or 1), committing to a prune/keep decision before that
+evaluation has stabilized.
+Mask Entropy Evolution (Averaged across 9 Scenes)
+0.8
+Mean Mask Entropy
+0.7
+0.6
+0.5
+LP-3DGS (Gumbel-Sigmoid)
+LinearMask-GS (Ours)
+0.4
+0.3
+0.2
+0.1
+0
+00
+0
+90
+20
+Training Iteration
+19
+0
+80
+19
+0
+70
+19
+19
+60
+0
+0.0
+Figure 4: Mask entropy evolution. Mean binary entropy of mask values across all nine MipNeRF 360 scenes during the measured pruning phase (iterations 19,600–20,000). Shaded
+regions show standard deviation.
+4
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+As shown in Figure 4, LP-3DGS exhibits a low entropy (≈ 0.33) throughout this phase,
+confirming that the Gumbel-Sigmoid activation drives an early hard decision. In contrast,
+LinearMask-GS maintains a substantially higher and stable entropy (≈ 0.69), and the narrow standard-deviation band across the nine scenes indicates the robustness of the linearincrement activation. This sustained intermediate regime helps preserve high-frequency details, such as bicycle spokes and foliage, rather than pruning them prematurely.
+3 Ranking reliability of the learned mask
+This section details the protocol behind the ranking-reliability statistics reported in Section 4.4 of the main paper.
+Protocol. For each of the nine Mip-NeRF 360 scenes we train two runs that are identical
+except for the mask activation (Gumbel-Sigmoid vs. linear increment), with hard pruning
+disabled so that the mask evolution can be observed without feedback from primitive removal. We snapshot the mask ψ every 100 iterations over the measured part of the mask
+window (iterations 19,600–20,000) and, after training continues to 30,000 iterations, compute a held-out contribution proxy for every Gaussian: its max-pooled rendering contribution
+(Eq. 4 of the main paper) at iteration 30k.
+Metrics. (i) Decision stability: at the pruning decision point (20k), we re-sample the Gumbel noise and re-apply the top-ρN rule; the flip fraction is the share of Gaussians whose
+keep/prune decision changes between two independent noise draws. (ii) Saturation: the
+fraction of ψ values outside [0.1, 0.9]. (iii) Ranking fidelity: the Spearman correlation between the ranking induced by ψ and the proxy ranking.
+Results. Re-sampling the Gumbel noise alone flips 47.3% of keep/prune decisions on average (46–48% on every scene), and the rank correlation between two independent noise
+draws is below 0.1: the sampled decision is governed by activation noise rather than by a
+stable learned ranking. The linear mask is deterministic (0% flips). Saturation reaches 52.2%
+for Gumbel-Sigmoid under this no-pruning protocol vs. 0.00% for linear; the corresponding
+figure under the standard schedule of the main paper is 51.19% (Section 3.3), i.e., disabling
+pruning does not alter the picture. The Spearman correlation against the 30k proxy is 0.29
+for linear vs. 0.16 for Gumbel-Sigmoid (1.8× higher overall and 2.8× on outdoor scenes).
+Figure 5 plots both statistics across the mask window; the narrow per-scene spread shows
+the statistics are scene-invariant rather than driven by a few scenes.
+4 Effect of mask-window length and placement
+A natural question is whether a longer mask-training window would let the Gumbel-Sigmoid
+mask escape saturation. It does not; it makes saturation worse. We sweep the placement of
+the mask window on three scenes (Bicycle, Flowers, Counter) by moving its start to 15k,
+17.5k, or 19.5k with the end held at the 20k pruning point, so that the sweep simultaneously varies the window length (5,000, 2,500, and 500 iterations). Under Gumbel-Sigmoid,
+the saturated fraction at the decision point rises monotonically as the window lengthens,
+from 51.1% to 54.8% to 56.2%, while PSNR plateaus (the two longest windows differ by
+5
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+(a) Spearman corr. vs. 30k proxy
+(b) Keep/prune flip fraction
+Figure 5: Ranking reliability on Mip-NeRF 360 across the mask-training window. (a) Spearman correlation between the mask ranking and the held-out max-pooled contribution proxy
+at 30k. (b) Fraction of keep/prune decisions flipped by re-sampling the Gumbel activation
+noise; the linear-increment mask is deterministic. Shaded regions show the min–max range
+over the nine scenes.
+±0.05 dB). The linear-increment activation is not fully exempt from this trend: its saturated
+fraction also grows with the window, from 0.0012% to 0.0606% to 0.0782%. It does so,
+however, at a level at least 700× below Gumbel-Sigmoid, and in all nine scene–window
+cells (3 scenes × 3 window settings) the Gumbel-Sigmoid fraction exceeds the linear one.
+Its final PSNR varies by at most 0.14 dB across the three placements. Table 1 summarises
+the sweep.
+Table 1: Effect of the mask-window length on saturation, with the pruning point held fixed
+at 20k. Moving the window start keeps the end at the pruning point, so length and placement
+vary along a single axis. The saturated fraction is the share of ψi outside [0.1, 0.9] at the
+decision point, averaged over the three scenes (Bicycle, Flowers, Counter). Lengthening the
+window raises saturation for both activations, but the linear increment remains at least 700×
+below Gumbel-Sigmoid at every setting. Quality does not compensate: Gumbel-Sigmoid
+PSNR differs by ±0.05 dB between the two longest windows, and the linear increment by at
+most 0.14 dB across all three placements, so window duration is not the binding factor.
+Mask window
+Saturated fraction at 20k (↓)
+Start
+Length
+Gumbel-Sigmoid
+Linear increment
+19.5k
+17.5k
+15.0k
+500
+2,500
+5,000
+51.1%
+54.8%
+56.2%
+0.00%
+0.06%
+0.08%
+Longer exposure to the steep activation simply gives mask values more time to reach the
+saturation boundaries; under the fixed-pruning-point protocol, the binding factor is activation
+steepness, not window duration. The asymmetry mirrors the ranking-reliability analysis of
+Section 3: a ranking that is stable in time and deterministic in noise is insensitive to when it
+is read out, whereas a saturating one degrades the longer it saturates.
+6
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+5
+Per-Scene Quantitative Metrics on Mip-NeRF 360
+Tables 2–6 detail the per-scene performance on the nine Mip-NeRF 360 scenes. Our method
+consistently matches or outperforms the LP-3DGS pruning baseline in LPIPS, PSNR, and
+SSIM, while using a drastically smaller number of Gaussians (Table 5) and storage footprint
+(Table 6). Figure 6 visualizes the same per-scene trade-off: each marker is one scene, and
+lower-left is better.
+(a) Outdoor scenes
+(b) Indoor scenes
+Figure 6: Per-scene LPIPS vs. number of Gaussians on Mip-NeRF 360. Each marker is one
+scene; lower-left is better. LinearMask-GS (⋆) reaches comparable or lower LPIPS with
+substantially fewer Gaussians than LP-3DGS (•).
+Table 2: LPIPS scores (↓) for Mip-NeRF 360 scenes. † Literature rows (Plenoxels, INGPbase, Mip-NeRF 360, 3DGS) report the values given in the original papers; the per-scene
+entries in those rows are approximate reproductions and do not always average to them. The
+LP-3DGS and Ours rows are means of our per-scene measurements.
+Method
+Bicycle
+Bonsai
+Counter
+Kitchen
+Room
+Stump
+Garden
+Flowers
+Treehill
+Avg.
+Plenoxels
+INGP-base
+Mip-NeRF 360
+3DGS
+LP-3DGS
+0.534
+0.495
+0.354
+0.205
+0.253
+0.421
+0.245
+0.198
+0.205
+0.183
+0.451
+0.364
+0.211
+0.204
+0.187
+0.354
+0.285
+0.154
+0.129
+0.120
+0.472
+0.185
+0.225
+0.220
+0.201
+0.485
+0.421
+0.285
+0.215
+0.242
+0.351
+0.325
+0.175
+0.103
+0.128
+0.521
+0.485
+0.395
+0.336
+0.367
+0.578
+0.534
+0.364
+0.317
+0.351
+0.463†
+0.371†
+0.237†
+0.214†
+0.226
+Ours
+0.211
+0.182
+0.187
+0.120
+0.200
+0.210
+0.109
+0.336
+0.331
+0.210
+6
+Full quantitative comparison on Tanks & Temples and
+Deep Blending
+Table 7 provides the complete scene-wise comparison on Tanks & Temples and Deep Blending that was summarized in Section 4.2 of the main paper. We extend the comparison
+with recent fast-training and compact 3DGS baselines, using their scene-wise paper results
+when available. The final two rows report the main LinearMask-GS result and the FastGSbackbone variant LinearMask-GS⋆ .
+7
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+† Literature rows (Plenoxels, INGP-
+Table 3: PSNR scores (↑) for Mip-NeRF 360 scenes.
+base, Mip-NeRF 360, 3DGS) report the values given in the original papers; the per-scene
+entries in those rows are approximate reproductions and do not always average to them. The
+LP-3DGS and Ours rows are means of our per-scene measurements.
+Method
+Bicycle
+Bonsai
+Counter
+Kitchen
+Room
+Stump
+Garden
+Flowers
+Treehill
+Avg.
+Plenoxels
+INGP-base
+Mip-NeRF 360
+3DGS
+LP-3DGS
+21.73
+22.17
+24.37
+25.25
+25.10
+25.54
+28.31
+33.46
+31.13
+32.09
+24.85
+26.85
+29.55
+28.70
+28.94
+24.71
+27.54
+32.23
+30.32
+31.52
+22.51
+30.54
+31.63
+30.63
+31.49
+23.23
+24.12
+26.40
+26.55
+26.69
+23.51
+24.96
+26.98
+27.41
+27.29
+20.07
+21.14
+21.52
+21.52
+21.38
+21.54
+22.05
+22.49
+22.49
+22.71
+23.08†
+25.30†
+27.69†
+27.21†
+27.47
+Ours
+25.67
+32.02
+29.05
+31.50
+31.70
+26.94
+27.75
+21.86
+22.85
+27.70
+Table 4: SSIM scores (↑) for Mip-NeRF 360 scenes. † Literature rows (Plenoxels, INGPbase, Mip-NeRF 360, 3DGS) report the values given in the original papers; the per-scene
+entries in those rows are approximate reproductions and do not always average to them. The
+LP-3DGS and Ours rows are means of our per-scene measurements.
+Method
+Bicycle
+Bonsai
+Counter
+Kitchen
+Room
+Stump
+Garden
+Flowers
+Treehill
+Avg.
+Plenoxels
+INGP-base
+Mip-NeRF 360
+3DGS
+LP-3DGS
+0.447
+0.495
+0.685
+0.771
+0.744
+0.864
+0.912
+0.941
+0.938
+0.946
+0.795
+0.854
+0.894
+0.905
+0.914
+0.782
+0.831
+0.920
+0.922
+0.931
+0.878
+0.899
+0.913
+0.913
+0.926
+0.498
+0.542
+0.744
+0.775
+0.771
+0.701
+0.723
+0.813
+0.868
+0.855
+0.351
+0.431
+0.583
+0.605
+0.584
+0.315
+0.378
+0.632
+0.638
+0.636
+0.626†
+0.671†
+0.792†
+0.815†
+0.812
+Ours
+0.779
+0.944
+0.913
+0.931
+0.925
+0.787
+0.872
+0.623
+0.655
+0.825
+Table 5: Number of final Gaussians (millions, ↓) for Mip-NeRF 360 scenes. † 3DGS values
+are those reported in the original paper; the per-scene entries in this row are approximate
+reproductions and do not average to it. The LP-3DGS and Ours rows are means of our perscene measurements.
+Method
+Bicycle
+Bonsai
+Counter
+Kitchen
+Room
+Stump
+Garden
+Flowers
+Treehill
+Avg.
+3DGS
+LP-3DGS
+5.7M
+2.51M
+1.3M
+0.54M
+1.2M
+0.51M
+1.8M
+0.88M
+1.5M
+0.48M
+3.3M
+2.01M
+5.8M
+2.83M
+3.6M
+1.75M
+3.8M
+1.80M
+3.36M†
+1.48M
+Ours
+1.75M
+0.37M
+0.35M
+0.53M
+0.45M
+1.41M
+1.52M
+1.02M
+1.10M
+0.94M
+Table 6: Storage size (MB, ↓) for Mip-NeRF 360 scenes. † 3DGS values are those reported
+in the original paper; the per-scene entries in this row are approximate reproductions and do
+not average to it. The LP-3DGS and Ours rows are means of our per-scene measurements.
+Method
+Bicycle
+Bonsai
+Counter
+Kitchen
+Room
+Stump
+Garden
+Flowers
+Treehill
+Avg.
+3DGS
+LP-3DGS
+1450.2
+557.9
+340.8
+101.6
+320.5
+95.2
+480.2
+175.0
+390.4
+90.4
+1050.2
+471.7
+1280.5
+568.6
+750.4
+369.0
+850.1
+397.7
+734.0†
+314.1
+Ours
+432.1
+88.4
+83.5
+125.1
+86.4
+333.5
+395.4
+240.4
+256.0
+226.8
+7
+Per-scene qualitative comparison (remaining six scenes)
+Figure 7 extends Figure 2 of the main paper with per-pixel absolute error maps for the six
+Mip-NeRF 360 scenes that were not shown there: Garden, Stump, Treehill (outdoor), and
+Bonsai, Kitchen, Room (indoor). The visualization conventions are identical to the main
+paper’s Figure 2: per-image PSNR is reported below each rendered image and per-image
+MAE below each error map, and each scene uses its own blue-to-red colormap from low to
+high absolute error. Across all six scenes, LinearMask-GS produces lower MAE and fewer
+8
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+saturated high-error (red) regions than both LP-3DGS and 3DGS.
+Figure 7: Per-pixel qualitative comparison on the six Mip-NeRF 360 scenes not shown in
+the main paper’s Figure 2. Each row shows one scene; columns from left to right show
+the ground truth, the rendered images from LinearMask-GS (ours), LP-3DGS, and 3DGS,
+followed by per-pixel absolute error maps for the same three methods. Per-image PSNR
+(dB) is reported below each render and per-image MAE below each error map; error maps
+use a scene-specific blue-to-red colormap (low to high absolute error).
+8
+Minimum-survival ratio ρ sweep for the
+linear-increment activation
+Figure 8 shows the per-scene LPIPS curves against the number of Gaussians for ρ ∈
+{0.20, 0.30, 0.40}, and Table 8 extends the sweep to ρ ∈ {0.10, 0.20, 0.30, 0.40, 0.50} with
+overall, outdoor, and indoor averages, mirroring the format of Table 9. Under the linearincrement activation, ψi is unimodal and its relative order is preserved rather than collapsed
+onto the saturation points (Section 3.3 of the main paper), so the top-ρN rule selects a
+consistent, importance-ordered subset whose size is set by ρ.
+Across every scene, LPIPS decreases monotonically as ρ increases, at the expected cost
+of more retained Gaussians. The returns are asymmetric about a knee at ρ=0.30: ρ=0.20
+produces a visible LPIPS increase on most scenes (−0.28 dB PSNR on aggregate), indicating
+that this regime removes too many geometrically meaningful primitives, whereas ρ=0.40
+retains 34% more Gaussians for only +0.03 dB and a 0.006 LPIPS gain. We therefore use
+ρ=0.30 as the default operating point. We emphasize that the linear-increment activation
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+9
+does not exempt the trade-off from saturation: beyond ρ=0.30 its aggregate PSNR gains
+total only +0.04 dB up to ρ=0.50, just as the Gumbel-Sigmoid baseline saturates over the
+same range. The benefit of the stable ranking lies not in the shape of this curve but in its
+position, which Section 9 quantifies.
+Figure 8: Effect of the minimum-survival ratio ρ on Mip-NeRF 360: per-scene LPIPS vs.
+number of Gaussians for ρ ∈ {0.20, 0.30, 0.40}. Lower LPIPS with fewer Gaussians indicates a better quality–compression trade-off. Increasing ρ monotonically reduces LPIPS at
+the cost of more retained Gaussians; ρ=0.20 already produces a visible LPIPS increase on
+most scenes, while ρ=0.40 retains significantly more primitives without proportional perceptual gains. We use ρ=0.30 as the default operating point.
+9 ρ sweep: linear increment vs. the matched
+Gumbel-Sigmoid baseline
+Table 9 provides the analogous ρ sweep for the matched Gumbel-Sigmoid baseline (i.e.,
+LP-3DGS with max-pooling aggregation, the “Max + Gumbel-Sigmoid” row of Table 4 in
+the main paper), under the identical top-ρN rule and schedule as Table 8. Because top-ρN
+retains the same fraction of a near-identical primitive pool, equal ρ implies matched budgets:
+#G differs by at most 0.01M at every ρ, so each row of the two tables is a same-budget
+comparison.
+Both curves saturate beyond ρ=0.30. For Gumbel-Sigmoid, PSNR rises by +0.49 dB
+from ρ=0.10 to 0.20 and +0.24 dB from 0.20 to 0.30, then by only +0.11 and +0.00 dB; for
+the linear increment, the corresponding steps are +0.48, +0.28, +0.03, and +0.01 dB. The
+10
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+shape of the quality–compression trade-off is therefore not what separates the two activations: both follow the diminishing returns of the scene’s importance spectrum, with retained
+Gaussians scaling nearly linearly in ρ while quality gains collapse past the knee.
+What separates them is position. At every ρ in the sweep, the linear-increment activation
+is +0.40 to +0.48 dB PSNR above the Gumbel-Sigmoid baseline at the same budget, and
+the baseline cannot match the linear curve anywhere: its best point (27.33 dB / 0.2321
+LPIPS at ρ=0.50 with 1.57M Gaussians) falls below even the linear ρ=0.20 setting
+(27.42 dB / 0.2194 LPIPS at 0.63M, i.e., 2.5× fewer primitives), and it does not reach
+the linear default (27.70 dB / 0.2095 at ρ=0.30 with 0.94M; Table 1 of the main paper)
+despite using 67% more primitives. The outdoor-vs.-indoor split shows the offset is broad
+rather than scene-specific: at every ρ in this sweep, the Gumbel-Sigmoid baseline lags the
+linear increment in both subsets on all three metrics at every ρ (Table 8): the outdoor PSNR
+margin ranges from +0.48 to +0.55 dB and the indoor margin from +0.29 to +0.44 dB,
+with SSIM and LPIPS showing the same sign throughout.
+These same-budget deficits are the downstream signature of the ranking analysis in Section 3: a saturated, noise-driven mask still produces a ρ-curve of the ordinary shape, but
+the subset it selects at each budget is less aligned with importance, and this appears as a
+near-uniform vertical offset of the entire curve rather than as a change in its slope.
+10 Direct pruning by the raw max-pooled score
+To isolate the contribution of the learned mask beyond its ingredients, we prune directly
+by the raw max-pooled importance score: the schedule is identical to LinearMask-GS, but
+at iteration 20k the top-30% of Gaussians by Si (Eq. 4 of the main paper) are retained
+with no learned mask, followed by the same fine-tuning. On the nine Mip-NeRF 360
+scenes this mask-free baseline reaches 27.5725 dB / 0.8231 / 0.2143 at 0.9612M, while
+the learned mask reaches higher PSNR on eight of the nine scenes at a smaller budget
+(27.7044 dB / 0.8254 / 0.2095 at 0.9444M), a +0.1319 dB gain. The sole exception is Treehill (−0.17 dB), the scene with the largest sky and distant-vegetation area, where the raw
+score already ranks primitives well. Table 10 reports the per-scene PSNR.
+11 Budget-matched comparison with Speedy-Splat
+Table 1 of the main paper compares methods at their native operating points, where SpeedySplat uses 0.30M Gaussians. For a comparison at a matched primitive budget, we retrain
+LinearMask-GS⋆ (FastGS backbone) under primitive budgets of 0.25M, 0.30M, and 0.35M.
+Averaged over the nine Mip-NeRF 360 scenes and three independent seeds at 0.30M,
+LinearMask-GS⋆ reaches 27.40 dB / 0.798 / 0.230, vs. 26.91 / 0.781 / 0.295 for SpeedySplat, i.e., better on all three metrics at the identical budget. It remains ahead even at the
+smaller 0.25M budget, and improves further at 0.35M (Table 11).
+12 Extended cross-backbone evaluation
+Table 3 of the main paper evaluates DropGaussian on a single LLFF scene (fern) and OctreeGS on a single Bungee-NeRF scene (amsterdam). Here we extend both.
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+11
+DropGaussian: five scenes, three runs. We evaluate five LLFF scenes (9-view; fern,
+flower, fortress, horns, and room) with the masked model repeated over three independent
+training runs (the public DropGaussian code does not expose an explicit seed flag, so repetitions correspond to independent launches). Averaged over the three runs, LinearMask-GS
+improves PSNR on every scene, by +0.31 to +0.52 dB (mean +0.42 dB) over the unpruned
+backbone, while retaining 41% fewer primitives than the Gumbel variant (Table 12). The
+single fern run reported in Table 3 of the main paper gives a smaller gain (+0.03 dB), indicating that single runs of this sparse-view backbone are noisy and motivating the repeated
+protocol used here. Table 12 reports the per-scene, per-run results.
+Octree-GS: two additional scenes. Beyond amsterdam (a 2.9× anchor reduction at
++0.12 dB; Table 3 of the main paper), we evaluate the bicycle and garden scenes of MipNeRF 360: anchors drop by 40.2% relative to the Gumbel variant at a mean PSNR change
+of −0.11 dB. We report the two scene sets separately rather than averaging them, since the
+sign of the (small) PSNR change differs; across all three scenes, quality moves by at most
+≈0.1 dB in either direction while the anchor count is reduced by 40% or more.
+13 Why mask learning is so fast on the FastGS backbone
+As reported in Table 2 of the main paper, applying our mask on the FastGS backbone
+(LinearMask-GS⋆ ) does not increase, and in fact reduces, the total training time, whereas
+the 3DGS-backbone variant adds a mask-training stage on top of the base pipeline. This section explains why. We first decompose the mask-learning speed gap (Table 14), then account
+for the net change in total training time over the 20k–30k iteration range (Table 15).
+Mask-learning speed gap. The mask-learning procedure that takes 110 s on the 3DGS
+backbone completes in only 4.6 s on the FastGS backbone; both are measured on the same
+RTX 4090, so the gap reflects the backbone and rasterizer rather than any hardware difference. Table 14 attributes this 24× gap to two directly measured factors. The dominant factor
+is the number of Gaussians present when the mask window begins (Factor 1, 6.36×): averaged over the nine Mip-NeRF 360 scenes, the 3DGS backbone enters the mask window with
+3.14 M Gaussians, whereas FastGS has already reduced this to 0.493 M through its cumulative pruning events, so each mask-training iteration rasterizes about 6.36× fewer primitives.
+The second factor is the FastGS rasterizer itself (Factor 2, 3.7×), which processes far fewer
+tiles per splat. The two factors combine to 6.36 × 3.7 ≈ 24×, consistent with the directly
+measured times since 110 s/24 ≈ 4.6 s.
+Net effect on total training time. Although LinearMask-GS⋆ adds a 4.6 s mask-learning
+stage that FastGS does not have, it more than recovers this cost during the rest of training.
+Table 15 reports the wall-clock time over the 20k–30k iteration range, averaged across the
+nine Mip-NeRF 360 scenes. Because LinearMask-GS⋆ prunes additional primitives, it renders fewer Gaussians per iteration and completes this range in 28.3 s versus 39.2 s for FastGS
+native, a 10.9 s saving. Subtracting the 4.6 s mask-learning cost still leaves a net saving of
+6.3 s per scene, which is why the total training time in Table 2 of the main paper decreases
+from 1.93 to 1.81 minutes rather than increasing.
+12
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+In short, the speed advantage of LinearMask-GS⋆ comes entirely from operating on a
+backbone that has already pruned most primitives before mask learning begins, combined
+with a faster rasterizer, and not from any change to the masking formulation itself, which is
+identical across backbones.
+14 Supplementary Video
+Alongside this document, we provide a supplementary video archive containing splitscreen comparison renderings for all 13 evaluated scenes (9 from Mip-NeRF 360, 2 from
+Deep Blending, and 2 from Tanks & Temples). Each video compares rendered test views
+in a 2 × 2 grid: ground truth (top-left), 3DGS (top-right), LP-3DGS (bottom-left), and
+LinearMask-GS (bottom-right). Each panel displays the total number of Gaussians used.
+Despite using substantially fewer Gaussians, our method preserves perceptual quality comparable to the original 3DGS and superior to LP-3DGS, retaining high-frequency details.
+13
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+Table 7: Quantitative comparison on Tanks & Temples and Deep Blending. Best values are
+in bold. Fast-training baseline rows use the scene-wise values reported by FastGS [9]; ⋆
+marks our FastGS-backbone run that substitutes the VCP module with LinearMask-GS.
+Method
+Plenoxels [4]
+INGP-Base [8]
+INGP-Big [8]
+Mip-NeRF 360 [1]
+3DGS [6]
+LP-3DGS [10]
+Mini-Splatting [3]
+Speedy-Splat [5]
+Taming-3DGS [7]
+DashGaussian [2]
+FastGS [9]
+LinearMask-GS
+LinearMask-GS⋆
+Metric
+PSNR↑
+SSIM↑
+LPIPS↓
+PSNR↑
+SSIM↑
+LPIPS↓
+PSNR↑
+SSIM↑
+LPIPS↓
+PSNR↑
+SSIM↑
+LPIPS↓
+PSNR↑
+SSIM↑
+LPIPS↓
+#G (M)↓
+PSNR↑
+SSIM↑
+LPIPS↓
+#G (M)↓
+PSNR↑
+SSIM↑
+LPIPS↓
+#G (M)↓
+PSNR↑
+SSIM↑
+LPIPS↓
+#G (M)↓
+PSNR↑
+SSIM↑
+LPIPS↓
+#G (M)↓
+PSNR↑
+SSIM↑
+LPIPS↓
+#G (M)↓
+PSNR↑
+SSIM↑
+LPIPS↓
+#G (M)↓
+PSNR↑
+SSIM↑
+LPIPS↓
+#G (M)↓
+PSNR↑
+SSIM↑
+LPIPS↓
+#G (M)↓
+Tanks & Temples
+Truck
+Train
+Avg
+23.221 18.927 21.074
+0.774
+0.663
+0.718
+0.335
+0.422
+0.378
+23.260 20.170 21.715
+0.779
+0.666
+0.722
+0.274
+0.386
+0.330
+23.383 20.456 21.919
+0.800
+0.689
+0.744
+0.249
+0.360
+0.304
+24.912 19.523 22.217
+0.857
+0.660
+0.758
+0.159
+0.354
+0.256
+25.187 21.097 23.142
+0.879
+0.802
+0.840
+0.148
+0.218
+0.183
+1.09
+2.59
+1.84
+25.376 21.822 23.599
+0.877
+0.807
+0.842
+0.154
+0.222
+0.188
+1.33
+0.58
+0.96
+25.320 21.600 23.460
+0.879
+0.809
+0.844
+0.139
+0.223
+0.181
+0.32
+0.28
+0.30
+25.180 21.590 23.380
+0.863
+0.768
+0.816
+0.192
+0.292
+0.242
+0.26
+0.11
+0.18
+25.270 22.500 23.890
+0.865
+0.802
+0.833
+0.187
+0.240
+0.214
+0.27
+0.37
+0.32
+25.800 22.190 24.000
+0.886
+0.819
+0.853
+0.150
+0.206
+0.178
+1.43
+1.00
+1.21
+25.730 22.570 24.150
+0.872
+0.805
+0.839
+0.178
+0.242
+0.210
+0.25
+0.23
+0.24
+25.793 22.546 24.170
+0.882
+0.811
+0.846
+0.151
+0.223
+0.187
+0.78
+0.33
+0.55
+25.787 22.565 24.176
+0.861
+0.790
+0.825
+0.172
+0.236
+0.204
+0.31
+0.26
+0.29
+Deep Blending
+Dr Johnson Playroom
+23.142
+22.980
+0.787
+0.802
+0.521
+0.499
+27.750
+19.483
+0.839
+0.754
+0.381
+0.465
+28.257
+21.665
+0.854
+0.779
+0.352
+0.428
+29.140
+29.657
+0.901
+0.900
+0.237
+0.252
+28.766
+30.044
+0.899
+0.906
+0.244
+0.241
+3.31
+2.33
+29.223
+30.154
+0.901
+0.908
+0.248
+0.248
+1.65
+1.15
+29.510
+30.470
+0.905
+0.908
+0.246
+0.241
+0.60
+0.51
+29.070
+29.770
+0.898
+0.898
+0.269
+0.274
+0.31
+0.18
+29.040
+29.960
+0.888
+0.901
+0.292
+0.264
+0.19
+0.40
+29.130
+30.170
+0.903
+0.909
+0.250
+0.243
+1.51
+2.38
+29.500
+30.570
+0.898
+0.905
+0.275
+0.266
+0.25
+0.19
+29.602
+30.583
+0.903
+0.909
+0.245
+0.245
+0.99
+0.70
+29.672
+30.555
+0.900
+0.898
+0.264
+0.270
+0.33
+0.25
+Avg
+23.061
+0.794
+0.510
+23.616
+0.796
+0.423
+24.961
+0.816
+0.390
+29.398
+0.900
+0.244
+29.405
+0.902
+0.242
+2.82
+29.690
+0.905
+0.248
+1.40
+29.990
+0.907
+0.244
+0.56
+29.420
+0.898
+0.272
+0.25
+29.500
+0.894
+0.278
+0.29
+29.650
+0.906
+0.246
+1.94
+30.030
+0.901
+0.270
+0.22
+30.093
+0.906
+0.245
+0.85
+30.113
+0.899
+0.267
+0.29
+14
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+Table 8: ρ sweep for the linear-increment activation on Mip-NeRF 360 (top-ρN rule, identical schedule to Table 9). Overall averages are over all nine scenes; outdoor averages are over
+five scenes (Bicycle, Flowers, Garden, Stump, Treehill) and indoor averages over four scenes
+(Bonsai, Counter, Kitchen, Room). #G in millions of Gaussians. Overall SSIM/LPIPS are
+the subset averages recombined as (5 out + 4 in)/9 and may differ from the independently
+rounded values of Table 1 of the main paper in the last digit. The default ρ=0.30 row
+matches Table 1 of the main paper.
+ρ
+0.10
+0.20
+0.30
+0.40
+0.50
+PSNR↑
+Overall (9 scenes)
+SSIM↑ LPIPS↓ #G (M)↓
+PSNR↑
+Outdoor (5 scenes)
+SSIM↑ LPIPS↓ #G (M)↓
+PSNR↑
+Indoor (4 scenes)
+SSIM↑ LPIPS↓
+26.94
+27.42
+27.70
+27.73
+27.74
+0.7951
+0.8127
+0.8254
+0.8267
+0.8271
+24.58
+24.81
+25.01
+25.02
+25.03
+0.7080
+0.7260
+0.7432
+0.7440
+0.7440
+29.89
+30.68
+31.07
+31.11
+31.12
+0.9040
+0.9210
+0.9283
+0.9300
+0.9310
+0.2478
+0.2194
+0.2095
+0.2031
+0.2012
+0.31
+0.63
+0.94
+1.26
+1.57
+0.2780
+0.2510
+0.2394
+0.2320
+0.2310
+0.45
+0.91
+1.36
+1.81
+2.26
+#G (M)↓
+0.2100
+0.1800
+0.1723
+0.1670
+0.1640
+0.14
+0.28
+0.43
+0.57
+0.71
+Table 9: ρ sweep for the matched Gumbel-Sigmoid baseline on Mip-NeRF 360. Overall
+averages are over all nine scenes; outdoor averages are over five scenes (Bicycle, Flowers,
+Garden, Stump, Treehill) and indoor averages over four scenes (Bonsai, Counter, Kitchen,
+Room). #G in millions of Gaussians. As ρ grows, PSNR/LPIPS gains shrink rapidly for both
+activations while #G scales nearly linearly; even at ρ=0.50, this baseline does not reach the
+LinearMask-GS default (27.70 dB at 0.94M, ρ=0.30; see Table 1 of the main paper and
+Table 8).
+ρ
+0.10
+0.20
+0.30
+0.40
+0.50
+PSNR↑
+Overall (9 scenes)
+SSIM↑ LPIPS↓ #G (M)↓
+PSNR↑
+Outdoor (5 scenes)
+SSIM↑ LPIPS↓ #G (M)↓
+PSNR↑
+Indoor (4 scenes)
+SSIM↑ LPIPS↓
+26.49
+26.98
+27.22
+27.33
+27.33
+0.7773
+0.7968
+0.8037
+0.8073
+0.8091
+24.03
+24.33
+24.49
+24.53
+24.55
+0.6775
+0.7011
+0.7093
+0.7136
+0.7158
+29.57
+30.29
+30.63
+30.82
+30.82
+0.9021
+0.9164
+0.9217
+0.9244
+0.9257
+0.2929
+0.2590
+0.2449
+0.2370
+0.2321
+0.32
+0.64
+0.95
+1.26
+1.57
+0.3456
+0.3070
+0.2903
+0.2812
+0.2751
+0.46
+0.92
+1.37
+1.82
+2.26
+#G (M)↓
+0.2270
+0.1991
+0.1881
+0.1819
+0.1783
+0.14
+0.28
+0.43
+0.57
+0.71
+Table 10: Per-scene PSNR (dB, ↑) of direct top-30% pruning by the raw max-pooled score
+vs. LinearMask-GS on Mip-NeRF 360. Identical schedule and fine-tuning; the only difference is the learned mask. The learned mask wins on eight of nine scenes, the exception being
+Treehill.
+Method
+Bicycle
+Bonsai
+Counter
+Kitchen
+Room
+Stump
+Garden
+Flowers
+Treehill
+Avg.
+Direct top-30% by Si
+25.4887
+31.8328
+28.8942
+31.3281
+31.5274
+26.7869
+27.5812
+21.6934
+23.0198
+27.5725
+LinearMask-GS (Ours)
+25.6700
+32.0200
+29.0500
+31.5000
+31.7000
+26.9400
+27.7500
+21.8600
+22.8500
+27.7044
+∆
++0.1813
++0.1872
++0.1558
++0.1719
++0.1726
++0.1531
++0.1688
++0.1666
+−0.1698
++0.1319
+Table 11: Budget-matched comparison with Speedy-Splat on Mip-NeRF 360, averaged over
+nine scenes. LinearMask-GS⋆ rows use the FastGS backbone; all rows are means over three
+independent seeds. At the 0.30M budget the three seeds give 27.38, 27.40 and 27.41 dB, a
+spread of 0.03 dB, so even the weakest seed leads Speedy-Splat by 0.47 dB.
+Method
+#G↓
+PSNR↑
+SSIM↑
+LPIPS↓
+Speedy-Splat
+Ours
+Ours
+Ours
+0.30M
+0.25M
+0.30M
+0.35M
+26.91
+27.06
+27.40
+27.60
+0.781
+0.791
+0.798
+0.802
+0.295
+0.241
+0.230
+0.224
+15
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+Table 12: DropGaussian + LinearMask-GS on five LLFF scenes (9-view). PSNR values
+for the masked model are means over three independent training runs (the public code exposes no seed flag, so repetitions correspond to independent launches); the unpruned and
+Gumbel-variant reference columns are the single-run values also used in Table 3 of the main
+paper. Note the two reference points: ∆PSNR is measured against the unpruned backbone,
+whereas the reduction is measured against the Gumbel variant, following the convention of
+Section 4.4 of the main paper.
+No pruning
+PSNR↑ (dB)
++ LinearMask-GS
+∆
+fern
+flower
+fortress
+horns
+room
+26.6495
+27.8341
+31.2183
+27.9452
+32.6074
+26.9623
+28.2594
+31.7365
+28.4328
+32.9710
++0.3128
++0.4253
++0.5182
++0.4876
++0.3636
+62,182
+82,070
+72,125
+90,304
+57,442
+36,656
+48,233
+42,431
+53,379
+33,741
+41.05%
+41.23%
+41.17%
+40.89%
+41.26%
+Mean
+29.2509
+29.6724
++0.4215
+72,825
+42,888
+41.12%
+Scene
+#Primitives↓
++ LP-3DGS (Gumbel) + LinearMask-GS
+Reduction
+Table 13: Octree-GS + LinearMask-GS per-scene results. Amsterdam is the Bungee-NeRF
+scene of Table 3 of the main paper; Bicycle and Garden are the two added Mip-NeRF 360
+scenes. As in Table 12, ∆PSNR is measured against the unpruned backbone and the reduction
+against the Gumbel variant.
+No pruning
+PSNR↑ (dB)
++ LinearMask-GS
+∆
++ LP-3DGS (Gumbel)
+#Anchors↓
++ LinearMask-GS
+Reduction
+amsterdam (Bungee-NeRF)
+27.8570
+27.9720
++0.1150
+648,221
+380,726
+41.27%
+bicycle (Mip-NeRF 360)
+garden (Mip-NeRF 360)
+25.1034
+27.1481
+25.0053
+27.0226
+600,012
+500,045
+356,827
+300,877
+40.53%
+39.83%
+Mean (2 added scenes)
+26.1258
+26.0140
+−0.0981
+−0.1255
+550,029
+328,852
+40.18%
+Scene
+−0.1118
+Table 14: Decomposition of the mask-learning speed gap between 3DGS LinearMask and
+the FastGS-backbone variant (LinearMask-GS⋆ ) on Mip-NeRF 360, both measured on the
+same RTX 4090. Both per-factor speedups are directly measured. The #Gaussians values are
+averaged over the nine scenes. The two factors combine to 6.36 × 3.7 ≈ 24×, consistent with
+the measured mask-learning times of 110 s (3DGS backbone) and 4.6 s (FastGS backbone),
+since 110/24 ≈ 4.6.
+#
+Factor
+3DGS LinearMask
+FastGS
+(LinearMask-GS⋆ )
+Speedup
+1
+#Gaussians at mask window
+Rasterizer implementation
+Pre-prune 0.493 M
+(9-scene avg)
+FastGS rasterizer (far
+fewer tiles per splat)
+6.36×
+2
+Pre-prune 3.14 M (9scene avg)
+Standard Inria rasterizer (full bbox per
+splat)
+Combined speedup (6.36 × 3.7)
+Measured mask-learning time (3DGS vs. FastGS backbone)
+Consistency check: 110 s/24 ≈ 4.6 s
+3.7×
+≈24×
+110 s vs. 4.6 s
+✓
+16
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+Table 15: Net training-time effect of LinearMask-GS⋆ on the FastGS backbone, averaged
+over the nine Mip-NeRF 360 scenes. The added mask-learning cost (4.6 s) is more than
+offset by the faster 20k–30k iteration range (10.9 s saved from rendering fewer primitives),
+for a net saving of 6.3 s per scene.
+Component
+Time (s)
+20k–30k range, FastGS native
+20k–30k range, LinearMask-GS⋆
+39.2
+28.3
+Range speedup
+Added mask-learning cost
+−10.9
++4.6
+Net change per scene
+−6.3
+RYU, LEE: LINEARMASK-GS (SUPPLEMENTARY)
+17
+References
+[1] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. Mip-NeRF 360: Unbounded anti-aliased neural radiance fields. In CVPR, pages
+5470–5479, 2022.
+[2] Youyu Chen, Junjun Jiang, Kui Jiang, Xiao Tang, Zhihao Li, Xianming Liu, and Yinyu
+Nie. DashGaussian: Optimizing 3D gaussian splatting in 200 seconds. arXiv preprint
+arXiv:2503.18402, 2025.
+[3] Guangchi Fang and Bing Wang. Mini-splatting: Representing scenes with a constrained number of gaussians. In ECCV, pages 165–181, 2024.
+[4] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and
+Angjoo Kanazawa. Plenoxels: Radiance fields without neural networks. In CVPR,
+pages 5501–5510, 2022.
+[5] Alex Hanson, Allen Tu, Geng Lin, Vasu Singla, Matthias Zwicker, and Tom Goldstein. Speedy-Splat: Fast 3D gaussian splatting with sparse pixels and sparse primitives. arXiv preprint arXiv:2412.00578, 2025.
+[6] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, George Drettakis, et al. 3D
+gaussian splatting for real-time radiance field rendering. ACM TOG, 42(4):139–1,
+2023.
+[7] Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl, Markus Steinberger, Francisco Vicente Carrasco, and Fernando De La Torre. Taming 3DGS: High-quality radiance fields with limited resources. In ACM SIGGRAPH Asia Conference Papers, pages
+1–11, 2024.
+[8] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM TOG, 41(4):1–15,
+2022.
+[9] Shiwei Ren, Tianci Wen, Yongchun Fang, and Biao Lu. FastGS: Training 3D gaussian
+splatting in 100 seconds. arXiv preprint arXiv:2511.04283, 2025.
+[10] Zhaoliang Zhang, Tianchen Song, Yongjae Lee, Li Yang, Cheng Peng, Rama Chellappa, and Deliang Fan. LP-3DGS: Learning to prune 3D gaussian splatting. In
+NeurIPS, pages 122434–122457, 2024.

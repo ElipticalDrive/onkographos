@@ -1,0 +1,127 @@
+# Local 3D Regression Hyperplane Gradient Estimation
+Also called: Hyperplane Gradient Estimation, Local 3D Regression Gradient Estimation
+
+## Overview
+Local 3D Regression Hyperplane Gradient Estimation is a high-quality gradient estimation method for volume data that approximates the gradient vector by fitting a local 3D regression hyperplane to the density function within a neighborhood [S1, unofficial]. It solves the problem of inaccurate gradient approximation inherent in simple finite differences, providing smoother specular effects in Phong illumination by reducing approximation error [S1, unofficial]. It differs from Central Differences by estimating the density function via regression rather than using simple linear differences between neighboring voxels, resulting in higher approximation quality at the cost of increased computational effort [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar volume dataset $V$ and a target sample point location $\mathbf{p} = (x, y, z)$.
+*   **Output:** A gradient vector $\nabla V$ at $\mathbf{p}$.
+
+**Data Structures:**
+*   **Voxel Neighborhood:** The method uses the eight surrounding voxels of the current sample point location in the volume data set [S1, unofficial]. Let these voxels be indexed $i=1 \dots 8$.
+*   **Coordinates & Values:** Each voxel $i$ has a 3D coordinate $\mathbf{p}_i = (x_i, y_i, z_i)$ and a scalar density value $d_i = V(\mathbf{p}_i)$ [S1, unofficial].
+
+**Steps:**
+1.  **Define Local Neighborhood:** Identify the 8 voxels surrounding the sample point of interest [S1, unofficial].
+2.  **Formulate Linear Model:** Assume the density function $d$ in the local neighborhood can be approximated by a linear hyperplane:
+    $$ d(\mathbf{p}) = a x + b y + c z + e $$
+    where $a, b, c$ are the coefficients corresponding to the partial derivatives $\frac{\partial d}{\partial x}, \frac{\partial d}{\partial y}, \frac{\partial d}{\partial z}$, and $e$ is the intercept [S1, unofficial].
+3.  **Construct System of Equations:** For each of the 8 voxels $i$, form the equation:
+    $$ a x_i + b y_i + c z_i + e = d_i $$
+    This results in an overdetermined linear system $A \mathbf{w} = \mathbf{d}$, where:
+    $$ A = \begin{bmatrix} x_1 & y_1 & z_1 & 1 \\ x_2 & y_2 & z_2 & 1 \\ \vdots & \vdots & \vdots & \vdots \\ x_8 & y_8 & z_8 & 1 \end{bmatrix}, \quad \mathbf{w} = \begin{bmatrix} a \\ b \\ c \\ e \end{bmatrix}, \quad \mathbf{d} = \begin{bmatrix} d_1 \\ d_2 \\ \vdots \\ d_8 \end{bmatrix} $$
+4.  **Solve for Coefficients:** Solve the least-squares problem to find $\mathbf{w}$:
+    $$ \mathbf{w} = (A^T A)^{-1} A^T \mathbf{d} $$
+5.  **Extract Gradient:** The gradient vector $\nabla V$ is given by the first three coefficients:
+    $$ \nabla V = \begin{bmatrix} a \\ b \\ c \end{bmatrix} $$
+
+**Parameters:**
+*   Neighborhood size: 8 voxels (the eight surrounding voxels of the current sample point location) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Geometry:** If the 8 voxels are collinear or coplanar in a way that makes $A^T A$ singular, the inverse cannot be computed. [G] In practice, ensure the neighborhood is not degenerate (e.g., by using a full 3x3x3 or ensuring non-coplanar distribution).
+*   **Precision:** Solving the normal equations $(A^T A)^{-1}$ can be numerically unstable if the condition number of $A^T A$ is high. [G] Using QR decomposition or SVD for solving the least-squares problem is recommended for stability.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def local_3d_regression_gradient(volume, center_coord):
+    """
+    Estimate gradient at center_coord using 8 surrounding voxels.
+    volume: 3D list of density values.
+    center_coord: (x, y, z) float tuple, the sample point.
+    Returns: gradient vector (dx, dy, dz)
+    """
+    x, y, z = center_coord
+    ix, iy, iz = int(x), int(y), int(z)
+    
+    # Coordinates of the 8 corners of the voxel containing the sample point
+    corners = [
+        (ix, iy, iz), (ix+1, iy, iz), (ix, iy+1, iz), (ix+1, iy+1, iz),
+        (ix, iy, iz+1), (ix+1, iy, iz+1), (ix, iy+1, iz+1), (ix+1, iy+1, iz+1)
+    ]
+    
+    # Density values at these corners
+    densities = []
+    for cx, cy, cz in corners:
+        if 0 <= cx < len(volume) and 0 <= cy < len(volume[0]) and 0 <= cz < len(volume[0][0]):
+            densities.append(volume[cx][cy][cz])
+        else:
+            densities.append(0.0)  # [G] Default to 0 for out-of-bounds, though source doesn't specify
+            
+    # Construct matrix A (8x4) and vector d (8)
+    A = [[cx, cy, cz, 1.0] for cx, cy, cz in corners]
+    d = densities
+    
+    # Compute A^T A (4x4) and A^T d (4)
+    ATA = [[0.0]*4 for _ in range(4)]
+    ATd = [0.0]*4
+    for i in range(4):
+        for j in range(4):
+            for k in range(8):
+                ATA[i][j] += A[k][i] * A[k][j]
+        for k in range(8):
+            ATd[i] += A[k][i] * d[k]
+            
+    # Solve 4x4 system ATA * w = ATd using Gaussian elimination
+    w = solve_4x4(ATA, ATd)
+    
+    # w = [a, b, c, e]
+    return (w[0], w[1], w[2])
+
+def solve_4x4(A, b):
+    # Gaussian elimination with partial pivoting for 4x4 system
+    n = 4
+    M = [A[i][:] + [b[i]] for i in range(n)]
+    for i in range(n):
+        max_row = i
+        for k in range(i+1, n):
+            if abs(M[k][i]) > abs(M[max_row][i]):
+                max_row = k
+        M[i], M[max_row] = M[max_row], M[i]
+        pivot = M[i][i]
+        for k in range(i+1, n):
+            factor = M[k][i] / pivot
+            for j in range(i, n+1):
+                M[k][j] -= factor * M[i][j]
+    # Back substitution
+    x = [0.0]*n
+    for i in range(n-1, -1, -1):
+        x[i] = M[i][n]
+        for j in range(i+1, n):
+            x[i] -= M[i][j] * x[j]
+        x[i] /= M[i][i]
+    return x
+```
+
+## Subtopics
+
+### [Local Linear Fitting via PCA](14751-local-linear-fitting-via-pca.md)
+Local Linear Fitting via PCA estimates local geometric structure (gradients and orientations) in multivariate volume data by performing Principal Component Analysis on a spatial neighborhood of samples. It solves the problem of accurate direction reconstruction in sparse or noisy regions where central-sample data is insufficient. It is distinguished from sibling methods by its use of spatial-domain Monte Carlo sampling to filter spurious correlations, ensuring that fitted directions reflect local spatial continuity rather than global data distribution.
+
+## Operating characteristics
+*   **Time Complexity:** Higher than Central Differences due to the matrix inversion or least-squares solve for each voxel/sample [S1, unofficial]. Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Higher approximation quality, smoother specular effects in Phong illumination [S1, unofficial].
+*   **Limitations:** Increased computational effort compared to simple finite differences [S1, unofficial].
+*   **When to use:** When image quality (specifically specular highlights) is critical and computational resources allow for higher cost per voxel [S1, unofficial].
+*   **When not to use:** Not given in the sources.
+
+## Background
+This method was implemented as part of a rendering pipeline's classification step [S1, unofficial]. It was introduced as a high-quality alternative to Central Differences to improve the realism of specular effects by reducing gradient approximation error [S1, unofficial]. Not given in the sources.
+
+## Sources
+[S1] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)

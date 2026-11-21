@@ -1,0 +1,221 @@
+# Volume Deformation via Scattered Data Interpolation
+
+Also called: RBF-based Volume Deformation, Scattered Data Interpolation for Volume Deformation
+
+## Overview
+This method deforms volumetric objects by reducing the complexity of 3D manipulation to a 2D user-guided illustration. The user defines control points on a 2D projection (slice, MIP, or composite) and displaces them; scattered data interpolation using Radial Basis Functions (RBFs) generates a 2D displacement map, which is then extruded into a 3D displacement map and applied to the volume [S1]. It differs from [Incremental Scaling Algorithm](7792-incremental-scaling-algorithm.md) and [Incremental Geometric Transformation](10583-incremental-geometric-transformation.md) by relying on global smooth interpolation from sparse 2D handles rather than local voxel-wise or mesh-element-wise transformations, allowing for complex, plausible deformations with minimal user input [S1].
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** A volumetric representation (e.g., signed distance field for surface models, or CT/MR voxel grid) [S1]. A 2D image derived from the volume (slice, MIP, or composite) [S1]. A set of $N$ control points $X = \{x_1, \dots, x_N\}$ in $\mathbb{R}^2$ and their corresponding target displacements $D = \{d_1, \dots, d_N\}$ in $\mathbb{R}^2$ [S1].
+*   **Output:** A deformed volumetric dataset [S1].
+
+### Data Structures
+*   **Control Points:** Array of $N$ 2D coordinates $(x_i, y_i)$ and 2D displacement vectors $(dx_i, dy_i)$.
+*   **RBF Coefficients:** Computed on CPU. For each component (x-displacement, y-displacement), a system of linear equations is solved.
+    *   Matrix $\Phi$: $N \times N$ matrix where $\Phi_{ij} = \phi(\|x_i - x_j\|)$ [S1].
+    *   Matrix $P$: $N \times 3$ matrix where row $i$ is $(1, x_i, y_i)$ [S1].
+    *   Coefficients $\alpha$ (size $N$) and $\gamma$ (size 3) for x-displacement; $\beta$ (size $N$) and $\lambda$ (size 3) for y-displacement [S1].
+*   **Displacement Map:** 2D texture/grid of size $W \times H$ (typically $256 \times 256$) storing 2D vectors $(u, v)$ [S1].
+*   **3D Displacement Map:** 3D texture/grid storing 3D vectors $(u, v, w)$ derived from the 2D map [S1].
+
+### Parameters
+*   **Radial Basis Function:** Wendland’s polynomial $\psi_{3,1}(r) = (1 - r)_+^4 (4r + 1)$, where $(1 - r)_+^4 = (1 - r)^4$ for $0 \le r \le 1$ and $0$ otherwise. This provides $C^2$ continuity and compact support [S1].
+*   **Polynomial Degree:** $k=1$ to ensure the deformation is "as-affine-as-possible" [S1]. Polynomials are $p_k(x) = \gamma_0 x + \gamma_1 y + \gamma_2$ and $q_k(x) = \lambda_0 x + \lambda_1 y + \lambda_2$ [S1].
+*   **Control Points Count:** $N$ ranges from $<8$ to $32$. Limited by GPU architecture constraints in the source implementation [S1].
+*   **Resolution:** $256 \times 256$ for the 2D displacement map generation [S1].
+
+### Steps
+
+1.  **User Interaction:** The user views a 2D projection of the volume (slice, MIP, or composite) [S1]. The user places $N$ control points $x_i$ on the image and drags them to new positions, defining displacements $d_i = [dx_i, dy_i]^T$ [S1].
+2.  **Solve RBF Coefficients (CPU):** Construct and solve the linear systems for the x and y components of the displacement field independently [S1].
+    *   For x-displacement:
+        $$
+        \begin{pmatrix} \Phi & P \\ P^T & 0 \end{pmatrix} \begin{pmatrix} \alpha \\ \gamma \end{pmatrix} = \begin{pmatrix} d_x \\ 0 \end{pmatrix}
+        $$
+    *   For y-displacement:
+        $$
+        \begin{pmatrix} \Phi & P \\ P^T & 0 \end{pmatrix} \begin{pmatrix} \beta \\ \lambda \end{pmatrix} = \begin{pmatrix} d_y \\ 0 \end{pmatrix}
+        $$
+    *   Here, $\Phi_{ij} = \psi_{3,1}(\|x_i - x_j\|)$ and $P_{i} = (1, x_i, y_i)$ [S1].
+    *   Use a linear algebra solver (e.g., LAPACK) [S1].
+3.  **Generate 2D Displacement Map (GPU):** Evaluate the RBF interpolant for every pixel $(x, y)$ in the $256 \times 256$ grid [S1].
+    *   $u(x, y) = \sum_{i=1}^N \alpha_i \psi_{3,1}(\|x - x_i\|) + \gamma_0 x + \gamma_1 y + \gamma_2$
+    *   $v(x, y) = \sum_{i=1}^N \beta_i \psi_{3,1}(\|x - x_i\|) + \lambda_0 x + \lambda_1 y + \lambda_2$
+    *   Store $(u, v)$ in the 2D displacement map texture [S1].
+4.  **Extrude to 3D Displacement Map:** Apply a user-defined rule to extend the 2D displacement $(u, v)$ into the z-dimension to create $D_{3D}(x, y, z) = (u_{3D}, v_{3D}, w_{3D})$ [S1].
+    *   **Replication:** $D_{3D}(x, y, z) = (u(x, y), v(x, y), 0)$. The 2D displacement is replicated along the z-axis [S1].
+    *   **Modulation:** $D_{3D}(x, y, z) = (f(z)u(x, y), f(z)v(x, y), 0)$. A function $f(z)$ modulates the displacement. For example, $f(z)=z$ creates a smooth transition from zero [S1].
+    *   **Interpolation:** Interpolate between multiple 2D displacement maps (e.g., from different control point configurations) using tri-linear interpolation provided by graphics hardware to create progressive deformations [S1].
+5.  **Apply Deformation:** Use inverse warping to apply the 3D displacement map to the volume. For each sample point $p$ in the deformed volume, compute the source position $p_{src} = p - D_{3D}(p)$ and sample the original volume at $p_{src}$ [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def solve_rbf_coefficients(control_points, displacements):
+    """
+    Solve for RBF coefficients on CPU.
+    control_points: Nx2 array of (x, y)
+    displacements: Nx2 array of (dx, dy)
+    Returns: alpha, gamma (for x), beta, lambda (for y)
+    """
+    N = control_points.shape[0]
+    
+    # Define Wendland's psi_3,1
+    def psi(r):
+        return np.where(r <= 1.0, (1.0 - r)**4 * (4.0 * r + 1.0), 0.0)
+    
+    # Compute distance matrix
+    # ||x_i - x_j||
+    dists = np.sqrt(np.sum((control_points[:, np.newaxis, :] - control_points[np.newaxis, :, :])**2, axis=2))
+    Phi = psi(dists)
+    
+    # Construct P matrix: [1, x, y]
+    P = np.ones((N, 3))
+    P[:, 1] = control_points[:, 0]
+    P[:, 2] = control_points[:, 1]
+    
+    # Construct the block matrix for the linear system
+    # [[Phi, P], [P^T, 0]]
+    A = np.zeros((N + 3, N + 3))
+    A[:N, :N] = Phi
+    A[:N, N:] = P
+    A[N:, :N] = P.T
+    # A[N:, N:] remains zeros
+    
+    # Solve for x-displacement
+    d_x = displacements[:, 0]
+    rhs_x = np.zeros(N + 3)
+    rhs_x[:N] = d_x
+    
+    # Solve linear system A * [alpha; gamma] = rhs_x
+    # Using a standard solver like numpy.linalg.solve
+    coeffs_x = np.linalg.solve(A, rhs_x)
+    alpha = coeffs_x[:N]
+    gamma = coeffs_x[N:]
+    
+    # Solve for y-displacement
+    d_y = displacements[:, 1]
+    rhs_y = np.zeros(N + 3)
+    rhs_y[:N] = d_y
+    
+    coeffs_y = np.linalg.solve(A, rhs_y)
+    beta = coeffs_y[:N]
+    lambda_ = coeffs_y[N:]
+    
+    return alpha, gamma, beta, lambda_
+
+def generate_2d_displacement_map(alpha, gamma, beta, lambda_, control_points, resolution=256):
+    """
+    Generate 2D displacement map on GPU (simulated here).
+    Evaluates RBF interpolant at each pixel.
+    """
+    # Create grid coordinates
+    y, x = np.mgrid[0:resolution, 0:resolution]
+    coords = np.stack((x, y), axis=-1).reshape(-1, 2)
+    
+    # Compute distances from each pixel to each control point
+    # dists shape: (num_pixels, N)
+    dists = np.sqrt(np.sum((coords[:, np.newaxis, :] - control_points[np.newaxis, :, :])**2, axis=2))
+    
+    # Apply Wendland's psi_3,1
+    def psi(r):
+        return np.where(r <= 1.0, (1.0 - r)**4 * (4.0 * r + 1.0), 0.0)
+    
+    Phi_pixels = psi(dists) # (num_pixels, N)
+    
+    # Compute polynomial part for x
+    # p_k(x) = gamma_0 * x + gamma_1 * y + gamma_2
+    poly_x = gamma[0] * x.flatten() + gamma[1] * y.flatten() + gamma[2]
+    
+    # Compute polynomial part for y
+    # q_k(x) = lambda_0 * x + lambda_1 * y + lambda_2
+    poly_y = lambda_[0] * x.flatten() + lambda_[1] * y.flatten() + lambda_[2]
+    
+    # Compute RBF part
+    # sum(alpha_i * psi(||x - x_i||))
+    rbf_x = np.dot(Phi_pixels, alpha)
+    rbf_y = np.dot(Phi_pixels, beta)
+    
+    # Total displacement
+    u = rbf_x + poly_x
+    v = rbf_y + poly_y
+    
+    # Reshape to image
+    u_map = u.reshape(resolution, resolution)
+    v_map = v.reshape(resolution, resolution)
+    
+    return np.stack((u_map, v_map), axis=-1)
+
+def extrude_3d_displacement(2d_map, rule='replication', z_func=None):
+    """
+    Extrude 2D displacement map to 3D.
+    2d_map: HxWx2 array
+    rule: 'replication', 'modulation', or 'interpolation'
+    z_func: function f(z) for modulation
+    """
+    H, W, _ = 2d_map.shape
+    # Assuming volume depth D is known or inferred, here we just show the logic
+    # For replication, the 3D map is just the 2D map repeated along Z
+    if rule == 'replication':
+        # D_3D(x, y, z) = D(x, y)
+        # In implementation, this is often handled by texture sampling or simple broadcasting
+        return 2d_map # Conceptually repeated along Z
+    
+    elif rule == 'modulation':
+        # D_3D(x, y, z) = f(z) * D(x, y)
+        # This requires iterating over Z or using texture array interpolation
+        # For a single slice representation in code:
+        if z_func is None:
+            z_func = lambda z: z # Default f(z) = z
+        # In a full 3D texture, each voxel (x,y,z) gets value f(z)*D(x,y)
+        pass 
+    
+    elif rule == 'interpolation':
+        # Interpolate between multiple 2D maps
+        pass
+
+def apply_deformation(volume, displacement_map_3d):
+    """
+    Apply 3D displacement to volume using inverse warping.
+    """
+    # For each sample point p in the deformed volume grid:
+    # p_src = p - displacement_map_3d[p]
+    # deformed_volume[p] = volume[p_src]
+    pass
+```
+
+### Edge Cases and Pitfalls
+*   **GPU Limitations:** Current GPU architectures (as per source) limit the maximum number of control points to 32 due to texture/register constraints [S1].
+*   **Rigidity Constraints:** To keep parts of the object fixed (e.g., legs of a horse), a rigidity constraint can be added as the distance to the horizontal plane where the object stands, modifying the linear system (Eq. 6 in source) [S1].
+*   **Discontinuities (Cuts):** To support cuts, RBFs can be decoupled by dividing control points into sets (e.g., red and green) and moving them in opposite directions [S1].
+*   **Precision:** The use of compactly supported RBFs (Wendland) ensures that only nearby control points affect a given voxel, improving computational efficiency and numerical stability for large $N$ [S1].
+
+## Operating characteristics
+
+*   **Time Complexity:**
+    *   **CPU (Coefficient Solving):** Solving the linear system is $O(N^3)$ for dense matrix inversion, but $N$ is small ($<32$). Measured time: 0.25 to 2.4 ms for 8 to 32 control points on a Pentium M 1.6 GHz [S1].
+    *   **GPU (Displacement Map Generation):** $O(W \cdot H \cdot N)$ for evaluating the RBF at each pixel. Measured time: ~20 ms for a $256 \times 256$ image on a Quadro FX Go1400 [S1]. CPU generation takes 633 ms (8 points) to 2200 ms (32 points) for the same resolution [S1].
+*   **Memory Complexity:**
+    *   Storage for $\Phi$ ($N \times N$), $P$ ($N \times 3$), and coefficients is negligible for small $N$.
+    *   Displacement maps: $256 \times 256 \times 2$ floats for 2D map; $256 \times 256 \times D \times 3$ floats for 3D map (where $D$ is volume depth).
+*   **Performance:** The GPU-based displacement map generation is essential for real-time interaction, being significantly faster than CPU-based evaluation [S1].
+*   **Strengths:** Reduces 3D deformation complexity to 2D; allows for smooth, plausible deformations with few control points; supports various extrusion rules for 3D context [S1].
+*   **Limitations:** Limited to 32 control points on older GPU architectures; 2D input limits the types of deformations that can be intuitively specified (e.g., complex 3D twisting might be hard to guide from a 2D slice) [S1].
+*   **When to Use:** Interactive deformation of CT/MR images, surface models (via SDFs), and scientific illustration where user-guided, smooth deformation is desired [S1].
+*   **When Not to Use:** When precise, local, non-smooth deformations are required without interpolation artifacts, or when the number of control points exceeds GPU limits [S1].
+
+## Background
+
+*   **Origin:** Proposed by C. Correa, D. Silver, and M. Chen in 2007 [S1].
+*   **History:** The method builds on earlier work in inverse warping for volume rendering [CSC06b, CSC06a] and scattered data interpolation techniques [RM95]. It addresses the need for intuitive, user-guided deformation of large volumetric datasets, which are computationally expensive to manipulate directly [S1].
+*   **Usage:** Applied to deforming CT/MR images, surface models (represented as signed distance fields), and for generating scientific illustrations and animations. Examples include horse models, CT knee/abdomen/head datasets, and lobster datasets [S1].
+
+## Sources
+
+[S1] Volume Deformation via Scattered Data Interpolation, https://doi.org/10.2312/vg/vg07/091-098, fetched 2026-10-29

@@ -1,0 +1,291 @@
+--- v008.md
++++ v009.md
+@@ -4,45 +4,181 @@
+ 
+ ## Overview
+-InstantNGP is a neural field architecture designed for instant training and rendering of 3D scenes by combining a multiresolution hash grid with a tiny MLP [S1, unofficial]. It solves the latency bottleneck of traditional NeRF MLPs by leveraging hardware-accelerated memory locality and bilinear interpolation to achieve high-frequency detail representation with minimal compute [S1, unofficial]. Unlike standard NeRF MLPs that rely solely on positional encoding, InstantNGP decouples feature storage from the neural network, enabling training in seconds rather than hours [S1, unofficial].
++InstantNGP is a neural field architecture designed for instant training and rendering of 3D scenes by combining a multiresolution hash grid with a lightweight multi-layer perceptron (MLP) [S1, unofficial]. It solves the latency bottleneck of traditional NeRF MLPs by leveraging hardware-accelerated memory locality and bilinear interpolation, enabling training times reduced from hours to seconds [S1, unofficial]. Unlike standard NeRF MLPs that rely on positional encoding or unbounded inward-facing parameterizations, InstantNGP uses a bounded hash-grid lookup to map spatial coordinates to dense feature vectors, which are then summed and fed into a small MLP to predict density and color [S1, S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** 3D spatial coordinate $\mathbf{x} \in \mathbb{R}^3$ and viewing direction $\mathbf{d} \in \mathbb{R}^3$.
+-*   **Output:** Volume density $\sigma$ and view-dependent color $\mathbf{c}$.
+-
+-**Data Structures:**
+-The core data structure is a multiresolution hash grid.
+-*   **Hash Grid:** A collection of $L$ levels (resolutions). Each level $l$ consists of a hash table mapping 3D coordinates to feature vectors.
+-*   **Hash Table:** Maps integer indices to feature vectors. The size of the hash maps is typically $2^{19}$ [S3].
+-*   **Feature Vector:** A dense vector of floats stored in the grid. The dimensionality is not explicitly defined in the primary sources for the base architecture, but variants use 128 or 64 units [S3][S5, unofficial].
+-*   **MLP:** A small Multi-Layer Perceptron that takes the hashed features as input.
+-
+-**Steps:**
+-1.  **Coordinate Hashing:** For a given 3D position $\mathbf{x}$, compute the hash index for each resolution level $l$. The hash function maps the continuous coordinate to an integer index in the hash table [S1, unofficial].
+-2.  **Feature Lookup:** Retrieve the feature vector $\mathbf{f}_l$ from the hash table at the computed index for each level $l$ [S1, unofficial].
+-3.  **Interpolation:** Perform trilinear interpolation of the feature vectors from the 8 surrounding grid cells at each resolution level to obtain smooth features $\hat{\mathbf{f}}_l$ [S1, unofficial].
+-4.  **Concatenation:** Concatenate the interpolated features from all resolution levels: $\mathbf{F} = [\hat{\mathbf{f}}_1; \hat{\mathbf{f}}_2; \dots; \hat{\mathbf{f}}_L]$ [S1, unofficial].
+-5.  **Positional Encoding (Optional):** In some implementations (e.g., MonoSDF), the input position $\mathbf{x}$ is also encoded using standard positional encoding before hashing, or the hash grid replaces it entirely [S2, unofficial].
+-6.  **MLP Forward Pass:** Pass the concatenated features $\mathbf{F}$ and the encoded viewing direction $\mathbf{d}$ through the tiny MLP [S1, unofficial].
+-    *   The MLP consists of a few linear layers with ReLU activations [S1, unofficial].
+-    *   The final layer outputs $\sigma$ and $\mathbf{c}$ [S1, unofficial].
+-
+-**Formulas:**
+-*   Hash Index: $h_l(\mathbf{x}) = \text{Hash}(\mathbf{x}, l)$
+-*   Interpolated Feature: $\hat{\mathbf{f}}_l = \text{TrilinearInterpolate}(\mathbf{x}, l)$
+-*   Concatenated Feature: $\mathbf{F} = \bigoplus_{l=1}^{L} \hat{\mathbf{f}}_l$
+-*   Output: $[\sigma, \mathbf{c}] = \text{MLP}(\mathbf{F}, \mathbf{d})$
+-
+-**Parameters:**
++The method maps 3D spatial coordinates $\mathbf{x}$ and viewing directions $\mathbf{d}$ to volume density $\sigma$ and emitted color $\mathbf{c}$ using a hash-encoded feature vector processed by a tiny MLP [S1, S2, unofficial].
++
++### Inputs and Outputs
++*   **Input:** 3D position $\mathbf{x} \in \mathbb{R}^3$ and viewing direction $\mathbf{d} \in \mathbb{R}^3$.
++*   **Output:** Volume density $\sigma \in \mathbb{R}$ and view-dependent color $\mathbf{c} \in \mathbb{R}^3$.
++
++### Data Structures
++The core data structure is a multiresolution hash grid consisting of $L$ levels. Each level $l \in \{0, \dots, L-1\}$ contains a hash table mapping 3D coordinates to feature vectors.
++
++**Hash Grid Level $l$:**
++*   **Resolution:** $N_l \times N_l \times N_l$ (e.g., $16^3, 32^3, \dots, 256^3$).
++*   **Hash Table Size:** $T = 2^{19}$ entries [S3].
++*   **Feature Vector Size:** $F$ dimensions (typically 2 or 4 per level, though specific $F$ is not explicitly defined in the provided notes, the sum of features is implied) [S1, unofficial][S3].
++*   **Hash Function:** Maps a 3D coordinate to an index in the hash table. The hash function handles coordinates within the normalized domain $[0, 1]^3$.
++
++**MLP Layers:**
++The MLP consists of a shared feature processing layer followed by separate density and color prediction heads.
++*   **Shared Layer:** Input size $L \times F$ (sum of features from all levels). Output size $H_{shared}$.
++*   **Density Head:** Input size $H_{shared}$. Output size 1 ($\sigma$).
++*   **Color Head:** Input size $H_{shared} + H_{dir}$ (where $H_{dir}$ is the encoded view direction size, or the view direction is processed separately). Output size 3 ($\mathbf{c}$).
++
++*Note: The exact hidden unit counts for the "tiny MLP" in the base InstantNGP architecture are not explicitly detailed in the provided notes beyond the general description of "tiny MLP" [S1, unofficial]. Specific variants (MonoSDF, Flash Cache, INGP-NeRF) provide specific layer counts [S2, unofficial][S3][S5, unofficial].*
++
++### Numbered Steps
++1.  **Coordinate Normalization:** Normalize the input 3D position $\mathbf{x}$ to the domain $[0, 1]^3$. If the scene is unbounded, apply a contraction mapping (e.g., to a unit ball) [S1, unofficial].
++2.  **Multi-Resolution Hash Lookup:** For each resolution level $l$:
++    a.  Compute the voxel coordinates of $\mathbf{x}$ at level $l$.
++    b.  Compute the hash index $h = \text{hash}(\mathbf{x}, l) \pmod T$.
++    c.  Retrieve the feature vector $\mathbf{v}_l$ from the hash table at index $h$.
++    d.  Perform trilinear interpolation between the 8 surrounding voxels to obtain a continuous feature vector $\mathbf{f}_l$ [S1, unofficial].
++3.  **Feature Summation:** Sum the interpolated feature vectors from all levels: $\mathbf{f}_{total} = \sum_{l=0}^{L-1} \mathbf{f}_l$.
++4.  **Feature Processing:** Pass $\mathbf{f}_{total}$ through the shared MLP layers.
++    a.  Apply linear transformation: $\mathbf{h} = W_1 \mathbf{f}_{total} + b_1$.
++    b.  Apply activation function (typically ReLU): $\mathbf{h}' = \text{ReLU}(\mathbf{h})$ [S4].
++5.  **Density Prediction:**
++    a.  Pass $\mathbf{h}'$ through the density head: $\sigma = W_\sigma \mathbf{h}' + b_\sigma$.
++    b.  Apply exponential activation to ensure positivity: $\sigma = \exp(\sigma)$ [G].
++6.  **View Direction Encoding:** Encode the viewing direction $\mathbf{d}$ using spherical harmonics or positional encoding [G].
++7.  **Color Prediction:**
++    a.  Concatenate the processed features $\mathbf{h}'$ and the encoded view direction $\mathbf{d}_{enc}$.
++    b.  Pass through the color head MLP: $\mathbf{c}_{raw} = W_c [\mathbf{h}'; \mathbf{d}_{enc}] + b_c$.
++    c.  Apply sigmoid activation to bound color to $[0, 1]$: $\mathbf{c} = \text{sigmoid}(\mathbf{c}_{raw})$ [G].
++
++### Formulas
++*   **Hash Index:** $h = \text{hash}(\lfloor \mathbf{x} \cdot N_l \rfloor, l) \pmod T$
++*   **Interpolated Feature:** $\mathbf{f}_l = \text{TrilinearInterpolation}(\text{HashGrid}_l, \mathbf{x})$
++*   **Total Feature:** $\mathbf{f}_{total} = \sum_{l=0}^{L-1} \mathbf{f}_l$
++*   **Density:** $\sigma = \exp(W_\sigma \cdot \text{ReLU}(W_1 \mathbf{f}_{total} + b_1) + b_\sigma)$
++*   **Color:** $\mathbf{c} = \text{sigmoid}(W_c \cdot [\text{ReLU}(W_1 \mathbf{f}_{total} + b_1); \mathbf{d}_{enc}] + b_c)$
++
++### Parameters
++*   **Hash Map Size:** $T = 2^{19}$ [S3].
+ *   **Optimizer:** Adam [S1, unofficial].
+-*   **Learning Rate:** Schedule from $10^{-2}$ to $10^{-4}$ [S1, unofficial].
+-*   **Iterations:** 20,000 iterations [S1, unofficial].
+-*   **Batch Size:** 1024 rays per batch [S1, unofficial].
++*   **Learning Rate Schedule:** $10^{-2} \to 10^{-4}$ [S1, unofficial].
++*   **Iterations:** 20,000 [S1, unofficial].
+ *   **Occupancy Grid:** Utilized to skip empty space during training [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Hash Collisions:** The hash function may map different coordinates to the same index. The sources do not specify the collision resolution strategy beyond the hash table size [S3].
+-*   **Negative Coordinates:** Standard hash grids are bounded to $[0, 1]^d$. Handling negative coordinates requires specific mapping techniques (see [Unbounded Hash-Grid with Negative Integer Mapping](13889-unbounded-hash-grid-with-negative-integer-mapping.md)) [S1, unofficial].
+-*   **Precision:** Bilinear interpolation assumes differentiable sample positions; gradients are computed through the interpolation weights [S1, unofficial].
++### Edge Cases and Pitfalls
++*   **Negative Coordinates:** The standard hash grid is bounded to $[0, 1]^3$. Negative coordinates must be handled via contraction or negative-integer mapping extensions [S1, unofficial][S3].
++*   **Hash Collisions:** With a finite hash table size ($2^{19}$), collisions occur. The hash function and table size are chosen to minimize impact [S3].
++*   **Activation Artifacts:** Removing ReLU from the MLP leads to artifacts, particularly around sharp edges, due to inconsistent histograms [S4].
++
++### Pseudocode
++
++```python
++import math
++
++def hash_function(coord, level, table_size):
++    """
++    Simple hash function for demonstration.
++    In practice, a more robust hash like the one in InstantNGP is used.
++    """
++    # Convert float coord to integer voxel index
++    voxel = [int(c * (1 << level)) for c in coord]
++    # Simple hash
++    h = (voxel[0] * 73856093 ^ voxel[1] * 19349663 ^ voxel[2] * 83492791) % table_size
++    return h
++
++def trilinear_interpolation(grid, coord, level, table_size):
++    """
++    Perform trilinear interpolation of features from the hash grid.
++    """
++    # Determine voxel size for this level
++    voxel_size = 1.0 / (1 << level)
++    
++    # Get fractional part of coordinate
++    frac = [c / voxel_size for c in coord]
++    base_voxel = [int(f) for f in frac]
++    
++    # Get 8 surrounding voxels
++    features = []
++    for i in range(2):
++        for j in range(2):
++            for k in range(2):
++                vx = (base_voxel[0] + i) % (1 << level)
++                vy = (base_voxel[1] + j) % (1 << level)
++                vz = (base_voxel[2] + k) % (1 << level)
++                
++                # Hash lookup
++                h = hash_function([vx * voxel_size, vy * voxel_size, vz * voxel_size], level, table_size)
++                # Retrieve feature vector (assuming size F)
++                feat = grid[level][h]
++                features.append((feat, i, j, k))
++    
++    # Interpolate
++    # This is a simplified interpolation; actual implementation uses weights
++    # based on distance to corners.
++    result = [0.0] * len(features[0][0])
++    for feat, i, j, k in features:
++        w = (frac[0] - i) * (frac[1] - j) * (frac[2] - k) # Placeholder weight
++        # Correct weights should be based on distance to the specific corner
++        # For simplicity, we assume uniform contribution for this example
++        # In reality, weights are calculated as:
++        # w_x = 1 if i==0 else frac[0]-1, etc.
++        # Sum of weights should be 1.
++        for d in range(len(result)):
++            result[d] += feat[d] # Simplified
++            
++    return result
++
++def instantngp_forward(x, d, hash_grids, table_size, mlp_weights):
++    """
++    Forward pass of InstantNGP Network Architecture.
++    """
++    # 1. Multi-resolution hash lookup
++    total_features = [0.0] * 256 # Assuming total feature size
++    levels = [0, 1, 2, 3, 4, 5, 6, 7] # Example levels
++    
++    for l in levels:
++        feat = trilinear_interpolation(hash_grids, x, l, table_size)
++        for d_idx in range(len(total_features)):
++            total_features[d_idx] += feat[d_idx]
++            
++    # 2. Shared MLP
++    h = [0.0] * 128 # Hidden size
++    W1 = mlp_weights['W1']
++    b1 = mlp_weights['b1']
++    
++    for i in range(128):
++        sum_val = 0.0
++        for j in range(len(total_features)):
++            sum_val += W1[i][j] * total_features[j]
++        h[i] = sum_val + b1[i]
++        h[i] = max(0, h[i]) # ReLU
++        
++    # 3. Density Prediction
++    W_sigma = mlp_weights['W_sigma']
++    b_sigma = mlp_weights['b_sigma']
++    sigma_raw = 0.0
++    for i in range(128):
++        sigma_raw += W_sigma[i] * h[i]
++    sigma_raw += b_sigma
++    sigma = math.exp(sigma_raw)
++    
++    # 4. Color Prediction
++    # Encode view direction d (simplified)
++    d_enc = [math.sin(2**i * math.pi * d[j]) for i in range(10) for j in range(3)]
++    
++    concat = h + d_enc
++    W_c = mlp_weights['W_c']
++    b_c = mlp_weights['b_c']
++    
++    c = [0.0] * 3
++    for i in range(3):
++        sum_val = 0.0
++        for j in range(len(concat)):
++            sum_val += W_c[i][j] * concat[j]
++        c[i] = sum_val + b_c[i]
++        
++    # Sigmoid
++    c = [1.0 / (1.0 + math.exp(-x)) for x in c]
++    
++    return sigma, c
++```
+ 
+ ## Subtopics
+@@ -52,5 +188,5 @@
+ 
+ ### [Tiny MLP for Density and Color Estimation](8555-tiny-mlp-for-density-and-color-estimation.md)
+-The Tiny MLP is a lightweight neural network component used in Rip-NeRF to estimate the density $\tau$ and view-dependent color $c$ of a sampled sphere $S$. It builds on [InstantNGP Network Architecture](5049-instantngp-network-architecture.md) by mapping the Ripmap-Encoding feature vector $f$ and the encoded view direction $d$ to radiance properties. It sets itself apart from sibling methods like [iNGP Texture Storage](5826-ingp-texture-storage.md) by using a dedicated small MLP for density/color prediction rather than relying solely on texture lookups for these specific outputs, and differs from [HyperINR](10461-hyperinr.md) by using a fixed-width MLP with specific activation constraints rather than hypernetworks.
++The Tiny MLP is a lightweight neural network component used in Rip-NeRF to estimate the density $\tau$ and view-dependent color $c$ of a sampled sphere $S$. It builds on InstantNGP Network Architecture by mapping the Ripmap-Encoding feature vector $f$ and the encoded view direction $d$ to radiance properties. It sets itself apart from sibling methods like iNGP Texture Storage by using a dedicated small MLP for density/color prediction rather than relying solely on texture lookups for these specific outputs, and differs from HyperINR by using a fixed-width MLP with specific activation constraints rather than hypernetworks.
+ 
+ ### HyperINR
+@@ -61,42 +197,32 @@
+ 
+ ### [Unbounded Hash-Grid with Negative Integer Mapping](13889-unbounded-hash-grid-with-negative-integer-mapping.md)
+-This method extends the Instant-NGP hash-grid encoding to support unbounded input domains by modifying the hash function to handle negative integers without structured collisions. It solves the problem of applying neural field representations, originally designed for normalized $[0, 1]^d$ inputs, to large-scale scenes with arbitrary coordinate ranges. It differs from its parent [InstantNGP Network Architecture](5049-instantngp-network-architecture.md) by replacing the bounded hash lookup with a negative-integer-aware mapping and by computing positional gradients directly from interpolation weights rather than assuming non-differentiable sample positions.
++This method extends the Instant-NGP hash-grid encoding to support unbounded input domains by modifying the hash function to handle negative integers without structured collisions. It solves the problem of applying neural field representations, originally designed for normalized $[0, 1]^d$ inputs, to large-scale scenes with arbitrary coordinate ranges. It differs from its parent InstantNGP Network Architecture by replacing the bounded hash lookup with a negative-integer-aware mapping and by computing positional gradients directly from interpolation weights rather than assuming non-differentiable sample positions.
+ 
+ ### [INGeo](15132-ingeo.md)
+-INGeo is a method that accelerates 3D scene reconstruction training by leveraging noisy geometry priors (e.g., from RGB-D sensors or COLMAP) converted into an occupancy grid, aiming for instant reconstruction on edge devices. It builds on [InstantNGP Network Architecture](5049-instantngp-network-architecture.md) by initializing the occupancy grid with prior geometry and applying density scaling to ensure rays terminate quickly at the surface, addressing the slow convergence of randomly initialized weights.
+-
+-#### Flash Cache Implementation
+-*   **NGP Resolution:** Maximum grid resolution for the fast cache NGP is 256 [S3].
+-*   **MLP Architecture:** The fast cache NGP uses a 4-layer MLP with 128 hidden units [S3].
+-*   **S:** The number of sample-point distances predicted by the fast cache is 8 [S3].
+-*   **Hash Map Size:** Size of the hash maps for all NGPs is $2^{19}$ [S3].
+-
+-#### Upsampling Activations
+-*   **Definition:** An extension that reduces processing time by computing intermediate network activations at a lower resolution and upsampling them to full resolution before density proposal [S4].
+-*   **Steps:**
+-    1.  Record intermediate activations $A^{(\ell)}$ at a reduced resolution of $w/2 \times h/2 \times N_c/2 \times N_h$ [S4].
+-    2.  Upsample the reduced-resolution activations to full resolution using nearest neighbor interpolation [S4].
+-*   **Parameters:**
+-    *   Layer index $\ell$: Best performance is observed at $\ell = 1$ [S4].
+-    *   Function configuration $f_2$: The specific activation/weight configuration that performed best in experiments for Blender and LLFF datasets [S4].
+-*   **Performance:** On the Blender dataset with $\ell=1$ and $f_2$, the method achieves PSNR 23.69, SSIM 0.704, LPIPS 0.267 with a 44% speedup over the baseline [S4].
+-*   **Comparison:** Differs from full-resolution activation extraction by trading negligible visual quality loss for significant speedup, whereas DONeRF filters along depth and neighboring rays for smoothing [S4].
+-*   **Usage:** Applied to NeRF and Mip-NeRF architectures on Blender and LLFF datasets to reduce processing time [S4].
+-
+-#### INGP-NeRF
+-*   **Parameters:** Maximum time step $T$ is set to 8. Initial target time step $t^*$ is initialized to 7 after pretraining [S5, unofficial].
+-*   **Layout:** The INGP-NeRF backbone uses a multiresolution hash-grid representation followed by lightweight density and color networks. The density network has 1 hidden layer with 128 units. The color network has 2 hidden layers with 128 units. Nonlinear activations are replaced with PLIF neurons. Output PLIF layers accumulate temporal estimates of density $\sigma$ and color $\mathbf{c}$ [S5, unofficial].
++INGeo is a method that accelerates 3D scene reconstruction training by leveraging noisy geometry priors (e.g., from RGB-D sensors or COLMAP) converted into an occupancy grid, aiming for instant reconstruction on edge devices. It builds on InstantNGP Network Architecture by initializing the occupancy grid with prior geometry and applying density scaling to ensure rays terminate quickly at the surface, addressing the slow convergence of randomly initialized weights.
++
++### [Scene Scale Consistency Scoring](15618-scene-scale-consistency-scoring.md)
++Scene Scale Consistency Scoring (SSCS) is a post-processing heuristic used to detect and remove floating artifacts in neural radiance fields by comparing occupancy grids from models trained with different bounding box scales. It distinguishes itself from sibling methods like Occupancy Clustering by exploiting the geometric invariance of real scene structures against the scale-dependent manifestation of artifacts, thereby filtering out inconsistent density before clustering is applied.
++
++### Flash Cache Implementation
++The Flash Cache Implementation uses a fast cache NGP with a maximum grid resolution of 256 and a 4-layer 128-hidden-unit MLP to predict $S=8$ sample-point distances [S3]. The hash maps for all NGPs have a size of $2^{19}$ [S3]. This variant is used for predicting distances and features in the cache, differing from the material NGP which uses a maximum resolution of 2048 and a 2-layer 64-hidden-unit MLP [S3].
++
++### Upsampling Activations
++This extension reduces processing time by computing intermediate network activations at a lower resolution and upsampling them to full resolution before density proposal [S4]. It records intermediate activations $A^{(\ell)}$ at a reduced resolution of $w/2 \times h/2 \times N_c/2 \times N_h$, then upsamples using nearest neighbor interpolation [S4]. The best performance is observed at layer index $\ell = 1$ and function configuration $f_2$ [S4]. On the Blender dataset, this achieves PSNR 23.69, SSIM 0.704, LPIPS 0.267 with a 44% speedup over the baseline [S4]. It differs from full-resolution activation extraction by trading negligible visual quality loss for significant speedup, whereas DONeRF filters along depth and neighboring rays for smoothing [S4]. It is applied to NeRF and Mip-NeRF architectures on Blender and LLFF datasets [S4].
++
++### INGP-NeRF
++INGP-NeRF uses a multiresolution hash-grid representation followed by lightweight density and color networks [S5, unofficial]. The density network contains one hidden layer with 128 units, and the color network contains two hidden layers with 128 units [S5, unofficial]. Nonlinear activations are replaced with PLIF neurons, and output PLIF layers accumulate temporal estimates of density $\sigma$ and color $\mathbf{c}$ [S5, unofficial]. The maximum time step is set to $T=8$, and the initial target time step $t^*$ is initialized to 7 after pretraining [S5, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is significantly faster than standard NeRF, typically completing in 20,000 iterations [S1, unofficial]. Rendering is accelerated by the hash grid's hardware-friendly memory access patterns [S1, unofficial].
+-*   **Memory Complexity:** The hash grid size is configurable, with a common setting of $2^{19}$ entries [S3]. The MLP is tiny, with hidden layers of 128 or 256 units [S2, unofficial][S3].
++*   **Time Complexity:** Training is significantly faster than standard NeRF, typically completing in 20,000 iterations [S1, unofficial]. The use of hash grids allows for $O(1)$ feature lookup per resolution level, making inference fast.
++*   **Memory Complexity:** Memory usage is dominated by the hash grid size ($2^{19}$ entries per level) and the MLP weights. The hash grid size is fixed and relatively small compared to dense voxel grids [S3].
+ *   **Measured Performance:** InstantNGP enables training in seconds to minutes, compared to hours for vanilla NeRF [S1, unofficial].
+-*   **Strengths:** Extremely fast training and rendering; supports high-frequency details via multiresolution hashing; efficient memory usage [S1, unofficial].
+-*   **Limitations:** Hash collisions may affect accuracy; requires careful tuning of hash table size and resolution levels; unbounded scenes require modifications [S1, unofficial].
+-*   **When to Use:** Ideal for applications requiring rapid iteration, real-time rendering, or training on limited hardware [S1, unofficial].
+-*   **When Not to Use:** Not suitable for unbounded scenes without modification; may suffer from artifacts if hash collisions are frequent [S1, unofficial].
++*   **Strengths:** Extremely fast training and rendering; hardware-accelerated interpolation; compact memory footprint.
++*   **Limitations:** Bounded input domain (requires contraction for unbounded scenes); potential hash collisions; less smooth gradients compared to Fourier encoding [S1, unofficial][S3].
++*   **When to Use:** When fast training and real-time rendering are prioritized over absolute highest quality or unbounded scene support.
++*   **When Not to Use:** When unbounded scenes are required without modification, or when maximum geometric smoothness is critical without additional regularization.
+ 
+ ## Background
+-InstantNGP was introduced as part of the "Instant Neural Graphics Primitives" framework [S1, unofficial]. It builds on the NeRF MLP Architecture [910-nerf-mlp-architecture.md] by replacing positional encoding with a multiresolution hash grid [S1, unofficial]. The method was developed to address the slow training times of traditional NeRFs, enabling instant training and rendering [S1, unofficial]. It has been widely adopted in various neural rendering pipelines, including MonoSDF [S2, unofficial] and Flash Cache [S3].
++InstantNGP was introduced as a method for instant neural graphics primitives, leveraging multiresolution hash encoding to accelerate NeRF training and rendering [S1, unofficial]. It builds on the NeRF MLP Architecture by replacing positional encoding with hash grids [S1, unofficial]. The method has been widely adopted and extended, including variants like MonoSDF, Flash Cache, and INGP-NeRF [S2, unofficial][S3][S5, unofficial]. It is part of the broader family of neural and primitive-based representations for volume data [S1, unofficial].
+ 
+ ## Sources

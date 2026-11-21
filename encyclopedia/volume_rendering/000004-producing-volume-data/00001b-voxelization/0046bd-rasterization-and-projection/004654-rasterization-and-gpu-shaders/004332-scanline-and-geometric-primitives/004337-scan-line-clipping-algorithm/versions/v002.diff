@@ -1,0 +1,137 @@
+--- v001.md
++++ v002.md
+@@ -7,9 +7,9 @@
+ 
+ ## How it works
+-The algorithm processes a source primitive $r$ against a set of higher-priority primitives already present in the CFB. It operates in a hierarchical scan-line order (Z, then Y, then X) to efficiently cull occluded regions.
++The algorithm processes a source primitive $r$ against a set of higher-priority primitives already present in the CFB [S1]. It operates in a hierarchical scan-line order (Z, then Y, then X) to efficiently cull occluded regions [S1].
+ 
+ ### Inputs and Outputs
+-*   **Input**: The source primitive $r$ (defined by its bounding box and voxel value), the current CFB state, and a priority list of existing primitives.
+-*   **Output**: Updated CFB entries for the visible voxels of $r$.
++*   **Input**: The source primitive $r$ (defined by its bounding box and voxel value), the current CFB state, and a priority list of existing primitives [S1].
++*   **Output**: Updated CFB entries for the visible voxels of $r$ [S1].
+ 
+ ### Data Structures
+@@ -42,71 +42,66 @@
+ ### Pseudocode
+ ```python
+-def scan_line_clip(primitive_r, cfb, inter_table):
+-    # inter_table is sorted by Zmin, Ymin, Xmin
+-    # primitive_r has bounds: Zmin, Zmax, Ymin, Ymax, Xmin, Xmax
+-    
++def scan_line_clip(primitive_r, cfb, inter_table, zoom_x, zoom_y, zoom_z):
++    # inter_table: list of higher-priority primitives, sorted by Zmin, Ymin, Xmin
++    # primitive_r: source primitive with attributes Zmin, Zmax, Ymin, Ymax, Xmin, Xmax, value
++    # Each primitive has attributes: Zmin, Ymin, Xmin, left_x, right_x, id, next_id
++
+     # Save processor state (jacks) [S1]
+-    save_state()
+-    
+-    # Z-Scan Loop
++
+     for z_scan in range(primitive_r.Zmin, primitive_r.Zmax + 1):
+-        # Remove primitives from InterTable that are below the current Zscan
+-        # i.e., those with Zmin > z_scan
++        # Remove primitives from InterTable below current Zscan
+         inter_table = [p for p in inter_table if p.Zmin <= z_scan]
+-        
+-        # Create Active Table: primitives intersecting z_scan
+-        active_table = [p for p in inter_table if p.intersects_plane(z_scan)]
+-        
+-        # Sort primitives in Active Table by Y then X
+-        active_table.sort(key=lambda p: (p.Ymin, p.Xmin))
+-        
+-        # Y-Scan Loop
++
++        # Sort primitives in InterTable by Y then X intersecting Zscan line
++        active_table = sorted(
++            [p for p in inter_table if p.Zmin <= z_scan <= p.Zmax],
++            key=lambda p: (p.Ymin, p.Xmin)
++        )
++
+         for y_scan in range(primitive_r.Ymin, primitive_r.Ymax + 1):
+-            if not active_table:
++            if len(active_table) < 2:
+                 break
+-                
++
+             # Initialize bounds with the leftmost primitive
+             left_prim = active_table[0]
+-            right_bound = left_prim.right_x_at(y_scan, z_scan)
+-            left_bound = left_prim.left_x_at(y_scan, z_scan)
+-            
++            right_bound = left_prim.right_x
++            right_prim = active_table[1]
++            left_bound = right_prim.left_x
++
+             # X-Scan Clipping Loop
+-            while left_bound < right_bound and active_table:
+-                # Get next "right" primitive
+-                right_prim = active_table.pop(0)
+-                left_bound = right_prim.left_x_at(y_scan, z_scan)
+-                
+-                # Check adjacency in the original sorted list logic
+-                # Note: The source logic implies checking if the previous 'left' 
+-                # and current 'right' were adjacent in the sorted sequence.
+-                # Since we pop, we need to track the previous left primitive.
+-                # Re-interpreting source: "If 'left' and 'right' are adjacent in sorted list"
+-                # This implies we compare the current right_prim with the one 
+-                # that defined the previous left_bound.
+-                
+-                # If they are adjacent (no gaps/overlaps from other higher priority items between them)
+-                if are_adjacent_in_sorted_list(left_prim, right_prim):
+-                    # Set run from RightBound to LeftBound
+-                    write_voxel_run(cfb, y_scan, z_scan, right_bound, left_bound, primitive_r.value)
+-                    
+-                    # Get next left and right
+-                    if active_table:
++            while left_bound < right_bound and len(active_table) >= 2:
++                # Get next 'right' primitive and update LeftBound
++                # (right_prim is already the next one after left_prim)
++
++                # Check adjacency in sorted list
++                if right_prim.id == left_prim.next_id:
++                    # Set run from RightBound to LeftBound along Yscan line to voxel value of r
++                    for x in range(right_bound, left_bound):
++                        # Replicate voxels according to Zoom registers [S1]
++                        for dz in range(zoom_z):
++                            for dy in range(zoom_y):
++                                for dx in range(zoom_x):
++                                    # Apply Colour Mode, Texture Mask, Voxel_Ops [S1]
++                                    cfb[x + dx, y_scan + dy, z_scan + dz] = primitive_r.value
++
++                    # Get next 'left' and 'right' primitives from the list
++                    active_table.pop(0)
++                    active_table.pop(0)
++                    if len(active_table) >= 2:
+                         left_prim = active_table[0]
+-                        right_bound = left_prim.right_x_at(y_scan, z_scan)
+-                        left_bound = left_prim.left_x_at(y_scan, z_scan)
++                        right_bound = left_prim.right_x
++                        right_prim = active_table[1]
++                        left_bound = right_prim.left_x
+                     else:
+                         break
+                 else:
+-                    # Get next left primitive and update RightBound
+-                    if active_table:
+-                        left_prim = active_table[0]
+-                        new_right_edge = left_prim.right_x_at(y_scan, z_scan)
+-                        if new_right_edge > right_bound:
+-                            right_bound = new_right_edge
+-                    else:
+-                        break
+-            
+-    # Restore processor state [S1]
+-    restore_state()
++                    # Get the next 'left' primitive and update RightBound
++                    active_table.pop(0)
++                    left_prim = active_table[0]
++                    if left_prim.right_x > right_bound:
++                        right_bound = left_prim.right_x
++                    # left_bound remains the left edge of the current right_prim
++
++    # Restore processor state (jacks) [S1]
+ ```
+ 

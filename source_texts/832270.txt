@@ -1,0 +1,154 @@
+Contribute to openvdb/fvdb-reality-capture development by creating an account on GitHub.
+
+Route unscented-transform projection through a torch.autograd.Function by lorenzobagnol · Pull Request #332 · openvdb/fvdb-reality-capture · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+lorenzobagnol
+commented
+Sep 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Summary
+GaussianSplat3d._do_projection's branch for distorted camera models (every COLMAP model except SIMPLE_PINHOLE/PINHOLE) called _C.project_gaussians_unscented_fwd directly instead of through a torch.autograd.Function, unlike the analytic/pinhole branch just below it. This silently disconnected the op from the autograd graph: the photometric/image loss produced zero gradient on means/quats/log_scales for any scene using SIMPLE_RADIAL, RADIAL, or OPENCV cameras — no error, no warning. Gaussians never moved from their SfM-seeded positions except via MCMC's stochastic relocation resampling, with loss driven only by rendering-independent regularization terms.
+Companion PR on fvdb-core, adding the CUDA backward kernel this depends on: openvdb/fvdb-core#766
+Full root-cause writeup and validation methodology: openvdb/fvdb-core#767 (see also #333 in this repo, a short cross-link)
+What this changes
+_gaussian_autograd.py: adds _ProjectGaussiansUnscentedFn, a torch.autograd.Function pairing the existing forward op with the new project_gaussians_unscented_bwd CUDA kernel. Raises NotImplementedError for calc_compensations=True or any camera model other than OPENCV_RADTAN_5, matching what the new backward kernel actually supports.
+gaussian_splatting.py: _do_projection's UT branch now calls _ProjectGaussiansUnscentedFn.apply(...) instead of the raw _C call.
+Validation
+Verified through the actual call path (this repo's own CameraModel enum -> _camera_model_to_cpp -> the new autograd Function) against the compiled kernel on a real GPU — not just a synthetic direct call. Forward output is bit-identical to the previous direct-call path (same op, just now autograd-tracked); means.grad, quats.grad, log_scales.grad are all finite and nonzero where they previously were 0.0/None. See the companion PR (openvdb/fvdb-core#766) for the finite-difference validation of the kernel itself, including one caveat (an eigenvector-direction approximation in the covariance-orientation gradient, documented and quantified there).
+🤖 Generated with Claude Code
+lorenzobagnol
+requested a review
+from a team
+as a code owner
+September 9, 2026 21:02
+lorenzobagnol
+requested review from
+harrism and
+matthewdcong
+and removed request for
+a team
+September 9, 2026 21:02
+linux-foundation-easycla
+Bot
+commented
+Sep 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+The committers listed above are authorized under a signed CLA.
+✅ login: lorenzobagnol / name: lorenzobagnol (f55363b)
+This was referenced Sep 9, 2026
+Unscented-transform Gaussian projection has no backward kernel — photometric gradient never reaches means/quats/log_scales for any distorted camera model
+openvdb/fvdb-core#767
+Open
+Unscented-transform (distorted-camera) projection trains with zero photometric gradient — see openvdb/fvdb-core#767
+#333
+Open
+Add missing backward kernel for unscented-transform Gaussian projection
+openvdb/fvdb-core#766
+Open
+Route unscented-transform projection through a torch.autograd.Function
+…
+a656f3c
+```
+GaussianSplat3d._do_projection's branch for distorted camera models
+(every COLMAP model except SIMPLE_PINHOLE/PINHOLE) called
+_C.project_gaussians_unscented_fwd directly instead of through a
+torch.autograd.Function, unlike the analytic/pinhole branch just below
+it. This silently disconnected the op from the autograd graph: the
+photometric/image loss produced zero gradient on
+means/quats/log_scales for any scene using SIMPLE_RADIAL, RADIAL, or
+OPENCV cameras -- no error, no warning, just Gaussians that never move
+from their SfM-seeded positions except via MCMC's stochastic
+relocation, with loss driven only by rendering-independent
+regularization terms.
+
+Adds _ProjectGaussiansUnscentedFn (a torch.autograd.Function pairing
+the existing forward op with a new project_gaussians_unscented_bwd
+CUDA kernel added on the fvdb-core-fork side -- see that repo's
+companion PR) and wires it into _do_projection in place of the direct
+call. Scope-checked: raises NotImplementedError for
+calc_compensations=True or any camera model other than
+OPENCV_RADTAN_5 (SIMPLE_RADIAL/RADIAL/OPENCV), matching what the new
+backward kernel actually supports, rather than silently producing
+wrong gradients outside that scope.
+
+Validated end-to-end through this exact call path (reality-capture's
+CameraModel enum -> _camera_model_to_cpp -> the new autograd Function)
+against the compiled kernel on a real GPU: forward output matches the
+previous direct-call path exactly, and means/quats/log_scales all
+receive finite, correctly-signed, nonzero gradient where they
+previously received none.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Signed-off-by: lorenzobagnol <lorenzobgl@gmail.com>
+```
+lorenzobagnol
+force-pushed
+the
+fix/unscented-projection-backward-gradient
+branch
+2 times, most recently
+from
+926a42e to
+a656f3c
+Compare
+September 10, 2026 20:20
+lorenzobagnol
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Author
+Closing as superseded.
+This PR fixed the unscented-transform projection path having zero gradient
+on means/quats/log_scales for distortion camera models, by routing it
+through a torch.autograd.Function backed by a new backward kernel
+(openvdb/fvdb-core#766).
+Since this was opened, #338 merged and rewrote this exact layer
+(_gaussian_autograd.py, which this PR patches, no longer exists) onto
+fvdb.functional. It fixes the same gradient gap, but through a different
+mechanism: rasterize_world_space_gaussians, a ray-based world-space
+rasterizer with its own forward/backward that differentiates straight
+through the 3D Gaussian parameters, bypassing the screen-space UT projection
+this PR touches entirely. project_gaussians_ut_fwd's docstring now points
+callers at that path explicitly.
+So the bug this PR fixed is already fixed on main, by different code.
+Keeping this open would mean reintroducing a deleted file against a design
+the project has since moved past. openvdb/fvdb-core#766 is still open for
+discussion on whether the lower-level screen-space backward kernel is wanted
+independently of this.
+lorenzobagnol
+closed this
+Oct 18, 2026
+lorenzobagnol
+deleted the
+fix/unscented-projection-backward-gradient
+branch
+November 5, 2026 14:19
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,149 @@
+Part of the 3-D stimulus epic #76. Depends on #68 (scene UBO) and #70 (real normals). Roadmap: dev/3D_ROADMAP.md §10.1, §B.2. Explicitly not physically based rendering. One directional light, Lambert diffuse, Blinn-Phong specular. Cheap ...
+
+feat(server/render): basic lighting — ambient + one directional light, Unlit/Phong shading · Issue #71 · braemons/vstimd · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+feat(server/render): basic lighting — ambient + one directional light, Unlit/Phong shading #71
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+feat(server/render): basic lighting — ambient + one directional light, Unlit/Phong shading#71
+Copy link
+Labels
+3d3-D stimulus rendering3-D stimulus renderingenhancementNew feature or requestNew feature or request
+Milestone
+Base 3D rendering
+Description
+joschaschmiedt
+opened on Jul 10, 2026
+Issue body actions
+Part of the 3-D stimulus epic #76. Depends on #68 (scene UBO) and #70 (real normals). Roadmap:
+dev/3D_ROADMAP.md §10.1, §B.2.
+Explicitly not physically based rendering. One directional light, Lambert diffuse,
+Blinn-Phong specular. Cheap enough to be free at our geometry counts.
+Scene-global lighting
+Lighting is a scene property, not a per-stimulus one (roadmap §10.1). Add to SceneState.config:
+```
+pub ambient_light: Deferred<[f32; 3]>,   // RGB
+pub sun_direction: Deferred<glam::Vec3>, // normalised, world space
+pub sun_color:     Deferred<[f32; 3]>,
+```
+Flip them in SceneState::apply_flip alongside camera (#68) and the stimuli. Defaults: ambient
+[0.1, 0.1, 0.1], sun direction (-0.5, -1.0, -0.3).normalize(), sun colour [1, 1, 1].
+Normalise sun_direction on write, not in the shader — a zero or unnormalised vector from a
+client should not produce NaN pixels. Reject a zero-length vector with
+ERROR_CODE_INVALID_ARGUMENT in #72.
+The Scene UBO from #68 already reserves ambient, sun_dir, sun_color. This issue just
+populates them, so no layout change and no descriptor churn.
+Shading
+Shading3D is already on Material3D from #69 and already travels in the push constants from #68
+(shading: u32, 0 = Unlit, 1 = Phong). Branch on it in the fragment shader.
+```
+// mesh3d.wgsl, fragment
+let tex = textureSample(albedo_tex, albedo_samp, in.uv);   // 1×1 white when untextured
+let base = pc.albedo * tex * in.color;
+
+if (pc.shading == 0u) {           // Unlit
+    return vec4(base.rgb + pc.emissive, base.a);
+}
+
+let n = normalize(in.world_normal);
+let l = -scene.sun_dir;                       // sun_dir points *from* the light
+let v = normalize(scene.camera_pos - in.world_pos);
+let h = normalize(l + v);
+
+let diffuse  = max(dot(n, l), 0.0);
+let specular = pow(max(dot(n, h), 0.0), 32.0) * step(0.0, diffuse);
+
+let lit = base.rgb * (scene.ambient + scene.sun_color * diffuse)
+        + scene.sun_color * specular * 0.25;
+
+return vec4(lit + pc.emissive, base.a);
+```
+Notes on the details that matter:
+step(0.0, diffuse) on the specular term. Without it, back-facing fragments get a specular
+highlight. Classic Blinn-Phong bug.
+Specular exponent hardcoded to 32. Material3D (feat(server/scene): Transform3D, Material3D, and the Sphere3D/Cube3D stimulus variants #69) carries no roughness or shininess knob,
+by design — we do not do PBR. If a per-material exponent turns out to be wanted, add
+shininess: f32 then; there are 32 spare bytes in the push-constant budget.
+Normal matrix. feat(server/render): 3-D infrastructure — depth buffer, Camera3D, mesh3d pipeline #68's vertex shader computes a true inverse-transpose. This is load-bearing
+here, not pedantry: feat(server/render): cube and UV-sphere mesh generation + device-local mesh cache #70 folds radius and half_size into the model matrix as scale, so an
+ellipsoid or an unequal-sided cube is non-uniformly scaled by construction. Verify with the
+ellipsoid test below before trusting any Phong screenshot.
+The luminance constraint — read this before touching the shader
+This is a psychophysics instrument. A stimulus whose measured luminance depends on which code
+path drew it is a broken instrument.
+Shading3D::Unlit must be exactly that: albedo, untouched. No ambient term, no * 1.0
+scaling, no tone mapping, no gamma applied that the 2-D path does not also apply. An unlit sphere
+with albedo = X and a 2-D circle with fill_color = X must produce bit-identical pixel
+values. That is the acceptance criterion below, and it is not a nice-to-have — it is what makes
+3-D stimuli usable in an experiment that also shows 2-D stimuli.
+Corollaries:
+Do lighting maths in linear space. Textures are uploaded as R8G8B8A8_SRGB (feat(server/render): cube and UV-sphere mesh generation + device-local mesh cache #70) so the
+sampler linearises for free.
+The colour attachment format is whatever the swapchain gives us, and the 2-D path writes
+straight into it. Do not add an sRGB encode step in mesh3d.wgsl that solid.wgsl lacks.
+This interacts with Add gamma correction by exponent #55 (gamma correction by exponent). Whatever gamma stage lands there
+must sit after both paths, applied uniformly. Cross-link the issues.
+Files
+server/shaders/mesh3d.wgsl — fragment shading branch
+server/src/scene/scene_state.rs — three Deferred lighting fields; apply_flip
+server/src/scene/scene_config.rs — serde fields (config round-trip)
+server/src/render/render_frame.rs — populate the lighting half of the scene UBO
+Acceptance
+Luminance invariance: an Unlit sphere with albedo = (0.6, 0.6, 0.6, 1.0) and a 2-D
+circle with fill_color = (0.6, 0.6, 0.6, 1.0) produce identical framebuffer values.
+Assert on a readback, not by eye.
+A Phong sphere lit from (-1, 0, 0) is bright on its -X side and falls off to the
+ambient term on its +X side.
+No specular highlight appears on surfaces facing away from the light.
+Ellipsoid normals: a sphere with scale = (1, 3, 1) under Phong shades as a smooth
+ellipsoid. If the terminator looks like a sphere's, the inverse-transpose is wrong.
+Equivalently: a cube with half_size = (1, 10, 1) has uniformly lit faces.
+sun_direction = (0,0,0) is rejected with INVALID_ARGUMENT; no NaN reaches the
+framebuffer.
+Lighting fields survive a config save/load round-trip.
+Frame time unchanged for a 2-D-only scene, and for an Unlit 3-D scene vs. a Phong one
+the difference is within noise at our triangle counts (render/benchmark.rs).
+Activity
+joschaschmiedt
+added
+enhancementNew feature or requestNew feature or request
+3d3-D stimulus rendering3-D stimulus rendering
+on Jul 10, 2026
+joschaschmiedt
+added a parent issue on Jul 10, 2026
+Add 3-D stimulus support: sphere and cube, textured and untextured #76
+joschaschmiedt
+added this to the v0.2.0 milestone on Jul 10, 2026
+joschaschmiedt
+added a commit that references this issue on Sep 14, 2026
+feat(server/render): Ambient + one directional light, Unlit/Phong sha…
+...
+5c8e308
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+3d3-D stimulus rendering3-D stimulus renderingenhancementNew feature or requestNew feature or request
+Type
+No type
+Projects
+No projects
+Milestone
+Base 3D renderingNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

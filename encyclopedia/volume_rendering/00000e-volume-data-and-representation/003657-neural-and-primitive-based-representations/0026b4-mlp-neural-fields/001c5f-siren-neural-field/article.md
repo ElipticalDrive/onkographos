@@ -1,0 +1,139 @@
+# SIREN Neural Field
+
+Also called: H-Siren Implicit Neural Representation, SIREN, SIREN activations, Sine Neural Field, Sinusoidal Representation Networks, Sitzmann et al. (2020b) periodic activation
+
+## Overview
+SIREN (Sinusoidal Representation Networks) is a coordinate-based implicit neural representation that maps continuous spatial coordinates to signal values (e.g., voxel intensity, density, or color) using a Multi-Layer Perceptron (MLP) with sinusoidal activation functions [S1][S2, unofficial][S4, unofficial]. It solves the problem of representing high-frequency details and computing well-behaved derivatives in neural fields, which standard ReLU-based MLPs fail to do due to spectral bias and zero second derivatives [S2, unofficial][S4, unofficial]. Unlike [MLP Neural Fields](3854-mlp-neural-fields.md) which typically use ReLU or tanh, SIREN’s periodic activations allow it to capture intricate volumetric structures and fine details that would otherwise be smoothed away [S1][S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+The network takes a coordinate vector $\mathbf{x} \in \mathbb{R}^d$ (typically 3D spatial coordinates $(x, y, z)$, potentially augmented with viewing direction or time) and outputs a signal vector $\mathbf{y} \in \mathbb{R}^k$ (e.g., scalar intensity, or density $\sigma$ and color $\mathbf{c}$) [S1][S3, unofficial][S4, unofficial].
+
+**Data Structures:**
+The model is an MLP defined by weights $\theta$ [S4, unofficial]. The architecture consists of a sequential stack of linear transformations and sine activations [S2, unofficial].
+*   **SineLayer:** A linear transformation followed by $\sin(\omega \cdot \mathbf{z} + \mathbf{b})$.
+*   **Linear:** A standard affine transformation $\mathbf{W}\mathbf{z} + \mathbf{b}$.
+
+**Parameters:**
+*   `in_features`: Dimensionality of input coordinates (typically 3) [S2, unofficial].
+*   `hidden_features`: Width of hidden layers [S2, unofficial].
+*   `hidden_layers`: Number of hidden sine layers [S2, unofficial].
+*   `out_features`: Dimensionality of output values (1 for scalar, 4 for density+color) [S2, unofficial].
+*   `bias`: Boolean, whether linear layers carry a bias (default `True`) [S2, unofficial].
+*   `last_layer_linear`: Boolean, if `True`, the final layer is linear; otherwise, it is a SineLayer (default `False`) [S2, unofficial].
+*   `first_omega_0`: Frequency parameter for the first layer (default `20.0`) [S2, unofficial].
+*   `hidden_omega_0`: Frequency parameter for hidden layers (default `20.0`) [S2, unofficial].
+
+**Initialization:**
+Proper initialization is critical for SIREN to function correctly [S2, unofficial].
+1.  **First Layer:** Weights $W_1$ are initialized uniformly from $[-1/n_{in}, 1/n_{in}]$, where $n_{in}$ is `in_features` [S2, unofficial].
+2.  **Hidden Layers:** For layer $i > 1$, weights $W_i$ are initialized uniformly from $[-\sqrt{6/n_{prev}} / \omega_0, \sqrt{6/n_{prev}} / \omega_0]$, where $n_{prev}$ is the input dimension of that layer and $\omega_0$ is `hidden_omega_0` [S2, unofficial].
+3.  **Final Layer:** If `last_layer_linear` is `True`, weights are initialized uniformly from $[-\sqrt{6/n_{prev}} / \omega_{hidden}, \sqrt{6/n_{prev}} / \omega_{hidden}]$, where $\omega_{hidden}$ is `hidden_omega_0` [S2, unofficial]. If `last_layer_linear` is `False`, the final layer uses the same sine initialization as hidden layers but with `hidden_omega_0` [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def init_siren(in_features, hidden_features, hidden_layers, out_features,
+               bias=True, last_layer_linear=False,
+               first_omega_0=20.0, hidden_omega_0=20.0):
+    layers = []
+    # First layer
+    fan_in = in_features
+    fan_out = hidden_features
+    w1 = uniform(-1.0 / fan_in, 1.0 / fan_in, (fan_out, fan_in))
+    b1 = zeros(fan_out) if bias else None
+    layers.append((Linear(w1, b1), Sine(first_omega_0)))
+    # Hidden layers
+    for _ in range(hidden_layers):
+        fan_in = hidden_features
+        fan_out = hidden_features
+        wi = uniform(-sqrt(6.0 / fan_in) / hidden_omega_0,
+                     sqrt(6.0 / fan_in) / hidden_omega_0,
+                     (fan_out, fan_in))
+        bi = zeros(fan_out) if bias else None
+        layers.append((Linear(wi, bi), Sine(hidden_omega_0)))
+    # Output layer
+    fan_in = hidden_features
+    fan_out = out_features
+    wo = uniform(-sqrt(6.0 / fan_in) / hidden_omega_0,
+                 sqrt(6.0 / fan_in) / hidden_omega_0,
+                 (fan_out, fan_in))
+    bo = zeros(fan_out) if bias else None
+    if last_layer_linear:
+        layers.append(Linear(wo, bo))
+    else:
+        layers.append((Linear(wo, bo), Sine(hidden_omega_0)))
+    return layers
+
+def forward_siren(layers, x):
+    # x shape: [..., in_features]
+    x = clone(x).requires_grad_(True)  # Enable gradients for coordinate derivatives
+    for layer in layers:
+        if isinstance(layer, tuple):
+            linear, act = layer
+            x = act(linear(x))
+        else:
+            x = layer(x)
+    return x
+```
+
+**Training:**
+The network is trained end-to-end by minimizing a loss function (e.g., L1 or smoothL1) between the predicted signal values and ground truth data (e.g., voxel intensities or rendered images) [S1][S3, unofficial]. Typical training involves 1000 steps for image fitting, where SIREN converges to a sharp reconstruction much faster than ReLU-MLPs [S2, unofficial]. For volumetric data, architectures with 3 layers and 30-230 neurons per layer are effective for small volumes, balancing performance and memory [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Spectral Bias:** Standard ReLU networks struggle with high-frequency details; SIREN mitigates this via sine activations [S2, unofficial][S3, unofficial].
+*   **Memory vs. Inference:** While SIREN decouples memory cost from spatial resolution (fixed network size), inference cost is high as each query requires a full forward pass [S3, unofficial][S4, unofficial].
+*   **Derivatives:** SIREN supports higher-order derivatives, which is essential for methods requiring normals or curvatures [S4, unofficial][S7].
+
+## Subtopics
+
+### [Fourier Positional Encoding](1267-fourier-positional-encoding.md)
+Fourier Positional Encoding maps low-dimensional input coordinates into a higher-dimensional space using a multi-resolution sequence of sine and cosine functions at exponentially increasing frequencies. It solves the problem of spectral bias in neural networks, where standard architectures struggle to learn high-frequency details from raw inputs. By lifting inputs to a Fourier feature space, it enables the subsequent MLP to represent fine-scale scene variations more effectively. It differs from [SIREN Neural Field](1250-siren-neural-field.md) by serving as a fixed preprocessing step for the MLP input rather than relying on sine activations within the network layers themselves, and from [Uncertainty-Aware SIREN](10449-uncertainty-aware-siren.md) by not explicitly modeling uncertainty in the encoding domain.
+
+### [Uncertainty-Aware SIREN](10449-uncertainty-aware-siren.md)
+Uncertainty-Aware SIREN is a method for estimating prediction confidence in implicit neural representations (INRs) of steady-state vector fields. It addresses the gap where standard neural fields do not quantify prediction confidence, which is critical for downstream scientific decisions. It sets itself apart from its parent [SIREN Neural Field](1250-siren-neural-field.md) by augmenting the architecture with residual blocks and dropout layers to output uncertainty metrics alongside the predicted vector values, and from siblings like [Fourier Positional Encoding](1267-fourier-positional-encoding.md) by focusing on epistemic and aleatoric uncertainty quantification rather than frequency representation.
+
+### Single Field Fitting
+Single Field Fitting renders single-object fits via Probabilistic Directed Distance Fields (PDDF), requiring a single network evaluation per pixel [S7]. Normals and curvatures are obtained using one or more backward passes for the same oriented point used in the single forward pass [S7]. The implementation uses SIREN MLPs (sine nonlinearity) to allow for higher-order derivatives [S7]. In ablation experiments on the Stanford Bunny, 100K samples of each data type were used, except for the ablated one, with held-out errors measured on 25K samples per type [S7]. Ablating S-type data damages performance across all sample types, likely due to difficulties in knowing when to transition between weight field components [S7]. Ablating T-type data is the most damaging for $L_\xi$-A error, as T-type samples are effectively the hardest subset of A-type data [S7].
+
+### MDF Extraction and UDF Estimation
+This variant trains a small SIREN network $g_v$ (5 hidden layers, size 128) mapping position to $K_c$ candidate directions: $g_v: \mathbb{R}^3 \rightarrow S^2 \times K_c$ [S7]. Given a position $p$, candidates are $\{v^*_i\} = g_v(p)$ [S7]. The loss for training $g_v$ is:
+$$ L_{v^*} = \frac{1}{K_c} \sum_i [d(p, v^*_i(p)) - \xi(p, v^*_i(p))] + \frac{2\tau_{in}}{K_c^2 - K_c} \sum_i \sum_{j \neq i} v^*_i(p)^T v^*_j(p) + \frac{\tau_d}{K_c} \sum_i [v^*_i(p)^T n(p, v^*_i(p)) + 1]^2 $$
+Parameters are $K_c = 5$, $\tau_n = 5 \times 10^{-3}$, $\tau_d = 0.1$ [S7]. Optimization runs for $10^4$ iterations using Adam (LR: $10^{-4}$, $\beta_1=0.9$, $\beta_2=0.999$) with 4096 points per update, uniformly drawn from the bounding volume [S7].
+
+### FFEINR
+FFEINR applies implicit neural representations to flow field super-resolution using spatially and temporally decoupled SIREN networks enhanced by ConvLSTM-based feature extraction to enable arbitrary-scale upscaling [S4, unofficial]. This approach has only been demonstrated on 2D flow fields [S4, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Memory:** Memory cost is decoupled from spatial resolution. A fixed-size network (e.g., ~5.7 MB for a 3-layer SIREN) can represent a volume at arbitrary query density, avoiding the GPU memory overflow associated with explicit voxel grids [S1][S3, unofficial][S4, unofficial].
+*   **Time:** Inference cost is high per query, requiring a full network forward pass for each point [S3, unofficial][S4, unofficial]. Fitting time can take minutes to hours depending on network capacity and target fidelity [S3, unofficial][S4, unofficial].
+
+**Measured Performance:**
+*   SIREN reaches a sharp reconstruction in ~100 steps for image fitting, whereas ReLU-MLP fails to reach similar quality in 2000 steps [S2, unofficial].
+*   SIREN outperforms other INR-based compression techniques using ReLU or tanh activation functions [S4, unofficial][S6, unofficial].
+*   A 3-layer SIREN with 30-230 neurons per layer offers satisfactory performance for small volume data while substantially cutting GPU memory usage [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** High-frequency detail representation, well-behaved derivatives (enabling normals/curvatures), resolution-independent inference, compact memory footprint [S2, unofficial][S4, unofficial][S7].
+*   **Limitations:** High per-query inference cost, long fitting times, potential for diminishing returns in reconstruction quality beyond ~230 neurons per layer for small volumes [S1][S3, unofficial].
+
+**When to Use:**
+*   Use when memory is constrained but high resolution is needed [S3, unofficial][S4, unofficial].
+*   Use when derivatives (normals, curvature) are required [S3, unofficial][S7].
+*   Use when high-frequency details are critical and ReLU networks fail [S2, unofficial][S4, unofficial].
+
+**When Not to Use:**
+*   Use when real-time inference per pixel is required without caching or acceleration structures [S4, unofficial].
+*   Use when the scene is very large and fitting time is prohibitive [S4, unofficial].
+
+## Background
+SIREN was introduced as a method to overcome the limitations of ReLU-based MLPs in implicit neural representations [S4, unofficial][S6, unofficial]. ReLU networks have a zero second derivative and cannot model high-order signals, limiting their capacity to represent fine details [S4, unofficial][S6, unofficial]. SIREN uses the Sine function as the activation function to model fine details and enable higher-order derivatives [S4, unofficial][S6, unofficial]. It has been applied to medical image compression, volumetric super-resolution, and scientific volume analysis [S1][S3, unofficial][S4, unofficial][S6, unofficial]. The architecture typically consists of an MLP with periodic activation functions, mapping 3D spatial coordinates to voxel intensity values [S1].
+
+## Sources
+[S1] An end-to-end implicit neural representation architecture for medical volume data., https://doi.org/10.1371/journal.pone.0314944, fetched 2026-10-26
+[S2] Yonghao-Lee/differentiable-rendering, https://github.com/Yonghao-Lee/differentiable-rendering, fetched 2026-10-26 (unofficial)
+[S3] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
+[S4] Bournemouth University Research Online [BURO] -  A Novel Implicit Neural Representation for Volume Data., https://eprints.bournemouth.ac.uk/38355/, fetched 2026-10-29 (unofficial)
+[S5] Probabilistic Directed Distance Fields for Ray-Based Shape Representations, https://doi.org/10.1109/tpami.2025.3594225, fetched 2026-10-29 (unofficial)

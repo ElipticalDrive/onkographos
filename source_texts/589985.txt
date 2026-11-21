@@ -1,0 +1,152 @@
+Hi François, From working with lidar scans in various environments (Mostly underground mines), I've come to realize that water holes, grid meshes or glass often tend to create unprecise points behind the surface. This affects the Icp and...
+
+Hidden Point Removal (qhull) (feature upgrade) · Issue #486 · norlab-ulaval/libpointmatcher · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Hidden Point Removal (qhull) (feature upgrade) #486
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Hidden Point Removal (qhull) (feature upgrade)#486
+Copy link
+Description
+dagata-mining
+opened on Dec 17, 2021
+Issue body actions
+Hi François,
+From working with lidar scans in various environments (Mostly underground mines), I've come to realize that water holes, grid meshes or glass often tend to create unprecise points behind the surface. This affects the Icp and induce an unwanted error. So I implemented on my side a filter based on a hidden point removal approach:
+https://www.researchgate.net/publication/200018717_Direct_visibility_of_point_sets
+I implemented an octree based approach for fast hidden point removal in my SLAM. It worked pretty well on my side. I would see a that approach a new type of filter for Libpointmatcher. As you can see in my bit of code I'm using PCL, I'm sure there is way to implement it without it, and I'd like to investigate that, but I wanted to seek out the interest of this approach on your guys side, or if it has already been implemented.
+```
+      void cleanCloudHull(pcl::PointCloud<pcl::PointXYZI>::Ptr inputCloud, Transform origin, double maxDistance = 0, double octreeSize = 0.025, double fParam = 2)
+{
+    // Generate the voxel for improving search speed
+    pcl::octree::OctreePointCloudSearch<pcl::PointXYZI> octree(octreeSize);
+    octree.setInputCloud(inputCloud);
+    // update bounding box automatically
+    octree.defineBoundingBox();
+    // add points in the tree
+    octree.addPointsFromInputCloud();
+
+    std::vector<pcl::Indices> octreeIn;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr sphericalCloud(new pcl::PointCloud<pcl::PointXYZ>);
+    // Get Highest radius
+    double maxRadius = 0;
+    origin = origin.inverse();
+    for (auto it = octree.leaf_begin(); it != octree.leaf_end(); ++it)
+    {
+        Eigen::Vector3f voxel_min, voxel_max;
+        octree.getVoxelBounds(it, voxel_min, voxel_max);
+        pcl::PointXYZ voxelLowBound(voxel_min[0], voxel_min[1],voxel_min[2]);
+        voxelLowBound = pcl::transformPoint(voxelLowBound, origin.toEigen3f());
+
+        double r2 = sqrt(pow(voxelLowBound.x,2)+pow(voxelLowBound.y,2)+pow(voxelLowBound.z,2));
+        if (r2 < maxDistance || maxDistance <= 0.0 )
+        {
+            pcl::Indices indices;
+            it.getLeafContainer().getPointIndices(indices);
+            octreeIn.push_back(indices);
+            sphericalCloud->push_back(voxelLowBound);
+            if (maxRadius < r2)
+            {
+                maxRadius = r2;
+            }
+        }
+    }
+    maxRadius *= pow(10.0,fParam) * 2;
+    // Inverting the sphericals
+    for (size_t i = 0; i < sphericalCloud->size();i++)
+    {
+        pcl::PointXYZ point = sphericalCloud->at(i);
+        double r = sqrt(pow(point.x,2)+pow(point.y,2)+pow(point.z,2));
+        r = (maxRadius/r) - 1.0;
+        point.x *= r;
+        point.y *= r;
+        point.z *= r;
+        sphericalCloud->at(i)= point;
+    }
+
+    // Create ConvexHull
+    pcl::ConvexHull< pcl::PointXYZ > chull;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_hull (new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointIndices hull_leaves_indices;
+    chull.setInputCloud(sphericalCloud);
+    chull.reconstruct(*cloud_hull);
+    chull.getHullPointIndices (hull_leaves_indices);
+
+    // Clean
+    cloud_hull ->clear();
+    sphericalCloud ->clear();
+    pcl::PointIndices::Ptr inliers (new pcl::PointIndices ());
+    for(size_t l=0; l<hull_leaves_indices.indices.size(); ++l) {
+        int leafIndex = hull_leaves_indices.indices[l];
+        pcl::Indices octreePts = octreeIn[leafIndex];
+        for (int ii = 0; ii < octreePts.size(); ++ii) {
+            // Get 3D from laser scan
+            inliers->indices.push_back(octreePts[ii]);
+        }
+    }
+    pcl::ExtractIndices<pcl::PointXYZI> extract;
+    extract.setInputCloud (inputCloud);
+    extract.setIndices (inliers);
+    extract.setNegative (false);
+    extract.filter (*inputCloud);
+}
+```
+Activity
+pomerlef commented on Dec 17, 2021
+pomerlef
+on Dec 17, 2021
+Collaborator
+More actions
+Always happy to get new filters!
+I can see advantages for extracting local visible maps in a large point cloud when doing real-time localization. Do you have screenshots of before and after? I'm curious about the water effect. But we ofter observe reflection caused by glasses, but there is typically a hole on the glass so it's hard to confirm that we are behind a surface :
+dagata-mining commented on Dec 18, 2021
+dagata-mining
+on Dec 18, 2021
+Last edited by dagata-mining
+ContributorAuthor
+More actions
+Yes, here's an example of a scan where the points where going through a mesh grid with small holes. The points returned from the mesh where blurry : Here's the texture:
+Here's the before (yellow points are the unwanted points):
+Here's the after with a 2.5cm octree size and a fparam of 2
+You can send me some samples with the origin view point origin at (0,0,0) and I'll run it to see the results.
+pomerlef commented on Dec 22, 2021
+pomerlef
+on Dec 22, 2021
+Collaborator
+More actions
+The data can be retrieved from here: https://projects.asl.ethz.ch/datasets/doku.php?id=laserregistration:apartment:home
+I think pose id 6-7 see the windows.
+zgxsin commented on Jun 1, 2022
+zgxsin
+on Jun 1, 2022
+More actions
+Hey, I also found the feature very useful. I have tried the API from Open3D, which looks quite good. Is there any plan to have this feature in libpointmacher?
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

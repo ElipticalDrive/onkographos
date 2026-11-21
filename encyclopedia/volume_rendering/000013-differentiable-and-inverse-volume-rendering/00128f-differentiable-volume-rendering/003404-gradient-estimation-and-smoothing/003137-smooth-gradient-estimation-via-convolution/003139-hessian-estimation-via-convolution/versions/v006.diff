@@ -1,0 +1,318 @@
+--- v005.md
++++ v006.md
+@@ -4,170 +4,194 @@
+ 
+ ## Overview
+-Hessian Estimation via Convolution computes the second-order spatial derivatives (the Hessian matrix) of a scalar volume density field by convolving the field with a kernel that combines Gaussian smoothing and second-order differentiation. It solves the problem of obtaining stable, differentiable curvature information required for higher-order optimization in differentiable volume rendering. It is distinguished from its sibling [Gradient Estimation (Our Grad.)](6476-gradient-estimation-our-grad.md) by operating on the gradient of the gradient rather than the function itself, mapping a scalar field to an $n \times n$ matrix field, and requiring specialized handling of signed kernels via CDF inversion for diagonal elements.
++Hessian Estimation via Convolution computes the second-order spatial derivatives of a scalar volume field by convolving the field with a kernel that combines Gaussian smoothing and second-order differentiation. It solves the problem of obtaining the Hessian matrix required for higher-order differentiable rendering (e.g., Hessian-vector products) while maintaining differentiability through the smoothing step [S1]. It is distinguished from its sibling [Gradient Estimation (Our Grad.)](6476-gradient-estimation-our-grad.md) by computing the full $n \times n$ matrix of second derivatives rather than the $n$-dimensional gradient vector, and from [Smooth Gradient Marginalization](6472-smooth-gradient-marginalization.md) by explicitly modeling the curvature (Hessian) rather than marginalizing gradient uncertainty [S1].
+ 
+ ## How it works
+-**Inputs:**
+-- Scalar volume density function $f(\tau)$, where $\tau \in \mathbb{R}^n$.
+-- Smoothing parameter $\sigma$.
+-- Dimension $n$.
+-
+-**Outputs:**
+-- Hessian matrix field $H(\tau) \in \mathbb{R}^{n \times n}$, where $H_{ij} = \frac{\partial^2 f}{\partial \tau_i \partial \tau_j}$.
++**Inputs:** A scalar volume function $f(\tau)$ defined on $\mathbb{R}^n$, a smoothing standard deviation $\sigma$, and the dimension $n$.
++**Outputs:** An $n \times n$ Hessian matrix field $H$, where $H_{ij} = \frac{\partial^2 f}{\partial \tau_i \partial \tau_j}$.
+ 
+ **Data Structures:**
+-- **Pre-sorted Inverse Indices:** A lookup table storing the inverse CDF values for diagonal elements. The table is 1D-tabulated over the range $[-10\sigma, 10\sigma]$ for each dimension $i$. It allows $O(1)$ access to sample from the diagonal kernel. [S1]
++*   **Hessian Matrix:** An $n \times n$ symmetric matrix. Due to symmetry ($H_{ij} = H_{ji}$), only the upper triangular part (including diagonal) needs to be computed and stored [S1].
++*   **CDF Lookup Table:** For diagonal elements, a 1D array storing pre-computed values of the Cumulative Distribution Function (CDF) $P^H_{ii}$ over the range $[-10\sigma, 10\sigma]$, along with pre-sorted inverse indices for $O(1)$ sampling access [S1].
+ 
+ **Method Steps:**
+ 
+-1.  **Define the Convolution Kernel:**
+-    The differential operator for the Hessian is $D^H = \nabla^2 = \frac{\partial^2}{\partial \tau_i \partial \tau_j}$. The combined kernel $D^H \kappa_{i,j}(\tau)$ is derived by applying the second-order derivative to the Gaussian smoothing kernel $N(\tau, \sigma)$. [S1]
+-
+-    The kernel is defined piecewise for diagonal ($i=j$) and off-diagonal ($i \neq j$) elements:
+-
++1.  **Define the Kernel:** The convolution kernel $D^H \kappa_{i,j}(\tau)$ combines the Gaussian $N(\tau, \sigma)$ with the second-order differential operator $\nabla^2$ [S1]:
+     $$
+-    D^H \kappa_{i,j}(\tau) =
+-    \begin{cases}
+-    \left( -\frac{\tau_i^2}{\sigma^2} + \frac{1}{\sigma^2} \right) \cdot N(\tau, \sigma) & \text{if } i = j \\
+-    \frac{\tau_i \tau_j}{\sigma^4} \cdot N(\tau, \sigma) & \text{if } i \neq j
++    D^H \kappa_{i,j}(\tau) = \begin{cases} 
++    \left( -\frac{\tau_i^2}{\sigma^2} + \frac{1}{\sigma^2} \right) N(\tau, \sigma) & \text{if } i = j \\
++    \frac{\tau_i \tau_j}{\sigma^4} N(\tau, \sigma) & \text{if } i \neq j
+     \end{cases}
+     $$
+-
+-    where $N(\tau, \sigma) = \frac{1}{(2\pi\sigma^2)^{n/2}} \exp\left(-\frac{\|\tau\|^2}{2\sigma^2}\right)$. [S1]
++    where $N(\tau, \sigma) = \frac{1}{(2\pi\sigma^2)^{n/2}} \exp\left(-\frac{\|\tau\|^2}{2\sigma^2}\right)$ [S1].
+ 
+ 2.  **Sample Diagonal Elements ($i=j$):**
+-    The diagonal kernel is signed, so it cannot be directly used as a probability density function (PDF). Instead, the Cumulative Distribution Function (CDF) $P^H_{ii}$ is constructed. [S1]
+-
+-    The CDF for the $i$-th diagonal element is:
+-
++    The diagonal elements correspond to the second derivative along a single axis. The probability density function (PDF) is derived from the kernel, and its CDF $P^H_{ii}(u)$ is given by [S1]:
+     $$
+-    P^H_{ii}(\tau_i = u) =
+-    \begin{cases}
+-    \frac{1}{4\sigma} \exp\left(-\frac{u^2}{2\sigma^2}\right) & \text{if } u < -\sigma \\
+-    0.5 + \frac{1}{4\sigma} \exp\left(-\frac{u^2}{2\sigma^2}\right) & \text{if } u \in [-\sigma, \sigma] \\
+-    1 - \frac{1}{4\sigma} \exp\left(-\frac{u^2}{2\sigma^2}\right) & \text{if } u > \sigma
++    P^H_{ii}(\tau_i = u) = \begin{cases} 
++    \frac{1}{4\sigma} \left( -u + \sigma \right) \exp\left( -\frac{u^2}{2\sigma^2} \right) & \text{if } u < -\sigma \\
++    0.5 + \frac{1}{4\sigma} \left( u + \sigma \right) \exp\left( -\frac{u^2}{2\sigma^2} \right) & \text{if } u \in [-\sigma, \sigma] \\
++    1 - \frac{1}{4\sigma} \left( u - \sigma \right) \exp\left( -\frac{u^2}{2\sigma^2} \right) & \text{if } u > \sigma
+     \end{cases}
+     $$
+-
+-    This is a transcendental equation with no closed-form inverse. [S1]
+-    - Pre-compute the CDF values on a 1D grid over $[-10\sigma, 10\sigma]$.
+-    - Store pre-sorted inverse indices to allow $O(1)$ sampling. [S1]
+-    - Sample $\tau_i$ using this lookup.
++    Since the inverse CDF has no closed-form solution, sample $\tau_i$ by:
++    a. Generating a uniform random number $r \in [0, 1]$.
++    b. Using the pre-sorted inverse indices on the 1D lookup table (range $[-10\sigma, 10\sigma]$) to find $\tau_i$ such that $P^H_{ii}(\tau_i) \approx r$ [S1].
++    c. Sampling the remaining $n-1$ dimensions $\tau_{k \neq i}$ independently from the standard Gaussian $N(0, \sigma)$ [S1].
++    d. Evaluating the kernel $D^H \kappa_{i,i}(\tau)$ at the sampled $\tau$ [S1].
+ 
+ 3.  **Sample Off-Diagonal Elements ($i \neq j$):**
+-    The off-diagonal kernel is the product of two first-order gradient kernels. Since the partial gradients are independent, the off-diagonal element is sampled by multiplying two independent samples from the gradient distribution. [S1]
+-    - Sample $\tau_i$ and $\tau_j$ independently from the gradient distribution derived in [Gradient Estimation (Our Grad.)](6476-gradient-estimation-our-grad.md).
+-    - Compute the kernel value using $\frac{\tau_i \tau_j}{\sigma^4} N(\tau, \sigma)$.
++    The off-diagonal kernel is the product of two first-order gradient kernels. Sample $\tau_i$ and $\tau_j$ independently using the gradient sampling method described in [Gradient Estimation (Our Grad.)](6476-gradient-estimation-our-grad.md) (Eq. 17 in [S1]), and sample all other dimensions $\tau_{k \neq i,j}$ from $N(0, \sigma)$ [S1]. Evaluate the kernel $D^H \kappa_{i,j}(\tau)$ [S1].
+ 
+-4.  **Sample Remaining Dimensions:**
+-    For dimensions $k \notin \{i, j\}$, sample $\tau_k$ independently from the standard Gaussian distribution $N(0, \sigma)$. [S1]
+-
+-5.  **Estimate and Accumulate:**
+-    - Evaluate the density $f(\tau)$ at the sampled point.
+-    - Weight the evaluation by the kernel value $D^H \kappa_{i,j}(\tau)$.
+-    - Exploit the symmetry of the Hessian matrix ($H_{ij} = H_{ji}$) to reduce computations. [S1]
+-    - Average the weighted samples to estimate $H_{ij}$.
++4.  **Estimate:**
++    Average the kernel evaluations over $M$ samples to estimate $H_{ij}$. Exploit symmetry by computing only $i \le j$ and copying to $H_{ji}$ [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+ import math
+-import random
++import numpy as np
+ 
+-def sample_hessian_element(f, sigma, i, j, precomputed_inverse_indices):
++def sample_hessian_diagonal(i, n, sigma, cdf_table, inv_indices, num_samples):
+     """
+-    Estimates a single element H_ij of the Hessian matrix.
++    Samples the diagonal element H_ii using the CDF lookup method.
++    cdf_table: 1D array of P^H_ii values for tau in [-10*sigma, 10*sigma]
++    inv_indices: Pre-sorted indices mapping CDF values to tau positions
+     """
+-    n = len(f.dimensions) # Assuming f is defined on n dimensions
++    estimates = []
++    for _ in range(num_samples):
++        # 1. Sample tau_i from the 1D marginal CDF
++        r = np.random.uniform(0, 1)
++        # Binary search or direct lookup in inv_indices to find tau_i
++        tau_i = lookup_tau_from_cdf(r, cdf_table, inv_indices)
++        
++        # 2. Sample other dimensions from standard Gaussian
++        tau_other = np.random.normal(0, sigma, size=n-1)
++        
++        # 3. Construct full tau vector
++        tau = np.zeros(n)
++        tau[i] = tau_i
++        # Fill remaining indices with tau_other
++        other_indices = [k for k in range(n) if k != i]
++        for idx, k in enumerate(other_indices):
++            tau[k] = tau_other[idx]
++            
++        # 4. Evaluate Kernel D^H kappa_{i,i}
++        # N(tau, sigma)
++        norm_factor = 1.0 / (math.pow(2 * math.pi * sigma**2, n/2))
++        exp_term = math.exp(-np.sum(tau**2) / (2 * sigma**2))
++        gaussian = norm_factor * exp_term
++        
++        # Diagonal kernel part: (-tau_i^2/sigma^2 + 1/sigma^2)
++        kernel_val = (-tau[i]**2 / sigma**2 + 1.0 / sigma**2) * gaussian
++        estimates.append(kernel_val)
++        
++    return np.mean(estimates)
++
++def sample_hessian_off_diagonal(i, j, n, sigma, num_samples):
++    """
++    Samples the off-diagonal element H_ij by multiplying independent gradient samples.
++    """
++    estimates = []
++    for _ in range(num_samples):
++        # Sample tau_i and tau_j independently using gradient sampling logic
++        # Gradient kernel PDF is proportional to tau * exp(-tau^2/2sigma^2)
++        # This requires sampling from the distribution |tau| * exp(-tau^2/2sigma^2)
++        # For simplicity, assuming access to a generic gradient sampler function
++        tau_i = sample_gradient_marginal(i, sigma)
++        tau_j = sample_gradient_marginal(j, sigma)
++        
++        # Sample other dimensions from standard Gaussian
++        tau_other = np.random.normal(0, sigma, size=n-2)
++        
++        tau = np.zeros(n)
++        tau[i] = tau_i
++        tau[j] = tau_j
++        other_indices = [k for k in range(n) if k != i and k != j]
++        for idx, k in enumerate(other_indices):
++            tau[k] = tau_other[idx]
++            
++        # Evaluate Kernel D^H kappa_{i,j}
++        norm_factor = 1.0 / (math.pow(2 * math.pi * sigma**2, n/2))
++        exp_term = math.exp(-np.sum(tau**2) / (2 * sigma**2))
++        gaussian = norm_factor * exp_term
++        
++        # Off-diagonal kernel part: (tau_i * tau_j) / sigma^4
++        kernel_val = (tau[i] * tau[j] / sigma**4) * gaussian
++        estimates.append(kernel_val)
++        
++    return np.mean(estimates)
++
++def compute_hessian(volume_function, n, sigma, num_samples):
++    """
++    Computes the Hessian matrix using importance sampling.
++    """
++    # Pre-compute CDF table for diagonal elements (Example for n=3, i=0)
++    # In practice, this is done once per sigma
++    tau_range = np.linspace(-10*sigma, 10*sigma, 1000)
++    cdf_values = []
++    for u in tau_range:
++        # Calculate P^H_ii(u) based on the piecewise formula
++        cdf_values.append(calculate_cdf_diagonal(u, sigma))
++    cdf_table = np.array(cdf_values)
++    inv_indices = np.argsort(cdf_table) # Pre-sorted indices
+     
+-    # 1. Sample dimensions involved in the derivative
+-    if i == j:
+-        # Diagonal element: Use pre-sorted inverse indices for CDF inversion
+-        # u is the sampled value for tau_i
+-        u = sample_from_precomputed_cdf(precomputed_inverse_indices[i], sigma)
+-        tau_i = u
+-        tau_j = u # i == j
++    H = np.zeros((n, n))
++    
++    for i in range(n):
++        for j in range(i, n):
++            if i == j:
++                H[i, j] = sample_hessian_diagonal(i, n, sigma, cdf_table, inv_indices, num_samples)
++            else:
++                H[i, j] = sample_hessian_off_diagonal(i, j, n, sigma, num_samples)
++            H[j, i] = H[i, j] # Exploit symmetry
++            
++    return H
++
++def calculate_cdf_diagonal(u, sigma):
++    """
++    Calculates the CDF P^H_ii(u) for the diagonal element.
++    """
++    if u < -sigma:
++        return (1.0 / (4 * sigma)) * (-u + sigma) * math.exp(-u**2 / (2 * sigma**2))
++    elif u <= sigma:
++        return 0.5 + (1.0 / (4 * sigma)) * (u + sigma) * math.exp(-u**2 / (2 * sigma**2))
+     else:
+-        # Off-diagonal element: Product of two independent gradient samples
+-        tau_i = sample_gradient_element(sigma, i)
+-        tau_j = sample_gradient_element(sigma, j)
+-        
+-    # 2. Sample remaining dimensions from standard Gaussian
+-    tau = [0.0] * n
+-    tau[i] = tau_i
+-    tau[j] = tau_j
+-    
+-    for k in range(n):
+-        if k != i and k != j:
+-            tau[k] = random.gauss(0, sigma)
+-            
+-    # 3. Compute Kernel Value
+-    # Gaussian N(tau, sigma)
+-    norm_factor = 1.0 / math.pow(2 * math.pi * sigma * sigma, n / 2.0)
+-    exp_arg = -sum(t * t for t in tau) / (2 * sigma * sigma)
+-    N_tau_sigma = norm_factor * math.exp(exp_arg)
+-    
+-    if i == j:
+-        kernel_val = (-tau_i * tau_i / (sigma * sigma) + 1.0 / (sigma * sigma)) * N_tau_sigma
+-    else:
+-        kernel_val = (tau_i * tau_j / math.pow(sigma, 4)) * N_tau_sigma
+-        
+-    # 4. Evaluate Density and Return Weighted Sample
+-    density_val = f.evaluate(tau)
+-    return density_val * kernel_val
+-
+-def sample_gradient_element(sigma, dim):
+-    """
+-    Helper to sample from the 1D Gaussian gradient distribution.
+-    Corresponds to Eq 17 in [S1]: kernel is -tau_i/sigma^2 * N.
+-    This requires its own CDF inversion or rejection sampling.
+-    For brevity, assuming a standard implementation exists.
+-    """
+-    # Placeholder for the specific gradient sampling logic from [S1] Sec 3.2
+-    # The gradient kernel is signed, so it also requires CDF construction.
+-    # This function returns a sample tau_i distributed according to the gradient kernel.
+-    pass
+-
+-def sample_from_precomputed_cdf(inverse_indices, sigma):
+-    """
+-    Samples u from the diagonal CDF using pre-sorted inverse indices.
+-    """
+-    # Generate uniform random number
+-    r = random.random()
+-    # Binary search or direct lookup in pre-sorted indices to find u
+-    # such that CDF(u) approx r
+-    # This is O(1) access as per [S1]
+-    pass
++        return 1.0 - (1.0 / (4 * sigma)) * (u - sigma) * math.exp(-u**2 / (2 * sigma**2))
+ ```
+ 
+ **Parameters:**
+-- $\sigma$: Smoothing bandwidth. Typical values depend on the scene resolution and desired noise reduction. The sampling range is explicitly bounded to $[-10\sigma, 10\sigma]$ for the diagonal CDF. [S1]
++*   $\sigma$: Standard deviation of the Gaussian kernel. Typical values depend on the volume resolution and desired smoothness. Not given in the sources.
++*   `num_samples`: Number of Monte Carlo samples per element. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-- **Signed Kernel:** The diagonal kernel is signed, preventing direct PDF sampling. Failure to use the CDF inversion method will result in incorrect sampling. [S1]
+-- **Transcendental Equation:** The diagonal CDF has no closed-form inverse. Approximation errors in the 1D table can introduce bias. [S1]
+-- **Symmetry:** The Hessian is symmetric. Ignoring this leads to redundant computations and potential numerical inconsistency between $H_{ij}$ and $H_{ji}$. [S1]
++*   **Transcendental CDF:** The inverse CDF for diagonal elements cannot be expressed in closed form. A lookup table with binary search or pre-sorted indices is required [S1].
++*   **Symmetry:** The Hessian is symmetric. Failing to exploit this doubles the computational cost unnecessarily [S1].
++*   **Off-diagonal Independence:** Off-diagonal elements are sampled by multiplying independent gradient samples. This relies on the factorization of the kernel, which holds for the Gaussian derivative [S1].
+ 
+ ## Subtopics
+ 
+ ### [Aggregate Importance Sampling](6471-aggregate-importance-sampling.md)
+-A variance reduction technique that samples from a mixture distribution of all convolution kernels, reducing computational complexity from $O(n^2)$ to $O(1)$ function evaluations per iteration.
++Aggregate Importance Sampling (AIS) is a variance reduction technique for estimating differential quantities (such as gradients or Hessians) in differentiable volume rendering by reducing the number of required function evaluations. It addresses the high computational cost of non-aggregate importance sampling, which requires $O(n)$ or $O(n^2)$ evaluations for an $n$-dimensional output, by sampling from a mixture distribution representing the average of all convolution kernels. Unlike non-aggregate methods that optimize each dimension individually, AIS performs a single function evaluation per iteration, trading a slight increase in variance for a linear reduction in computational complexity.
+ 
+ ### [Second Directional Derivative](11718-second-directional-derivative.md)
+-A scalar attribute derived from the Hessian that measures curvature along the gradient direction, useful for distinguishing sharp edges from overlapping volumes.
++The second directional derivative is a scalar attribute used in volume rendering to distinguish sharp edges from overlapping volumetric regions where gradient magnitude alone is insufficient. It measures the curvature of the intensity function along the direction of the gradient, providing a more precise edge characterization than the Laplacian approximation.
+ 
+ ### [Edge location estimation via second-order derivative](15889-edge-location-estimation-via-second-order-derivative.md)
+-Uses the zero-crossing of the second-order derivative to locate step edges, relying on the continuity of the reconstruction filter.
++This method determines the location of a step edge in continuous unsampled data by identifying the zero-crossing of the second-order derivative of the reconstructed signal. It relies on the principle that the maximum of the first derivative (the point-spread function) corresponds to the edge location. Unlike value-based methods, which find the midpoint between sample values, this approach is sensitive to the continuity properties of the reconstruction filter, making it unreliable for standard low-order interpolation schemes.
++
++### Separable Hessian and Gradient Computation
++A method to compute the Hessian matrix and gradient vector of a volume by decomposing the 3D Gaussian derivative convolution into three sequential 1D convolutions, reducing computational complexity [S2]. The decomposition exploits the separability of the Gaussian kernel: $\partial^o I = \partial_x^a \partial_y^b \partial_z^c I = G_{\sigma}^{(a)} * G_{\sigma}^{(b)} * G_{\sigma}^{(c)} * I$, where $a+b+c=o \in \{1, 2\}$ determines the order of derivation, and $G_{\sigma}(x) = \frac{1}{\sqrt{2\pi}\sigma} \exp(-\frac{x^2}{2\sigma^2})$ is the Gaussian filter [S2]. A direct application would require 18 1D convolutions for the Hessian, but by reusing intermediate results (e.g., $G_{\sigma}(x)*I$ three times and $G'_{\sigma}(x)*I$ twice), the number is reduced to 15 convolutions for the Hessian and 8 for the gradient [S2]. In benchmarks using a kernel size $k=7$ on a Pentium III 800 MHz, computing eigenvalues of the Hessian was on average 2.7 times more expensive than computing the gradient magnitude [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(n^2)$ function evaluations without Importance Sampling (IS). With IS, it remains $O(n^2)$. With Aggregate IS, it reduces to $O(1)$. [S1]
+-- **Memory Complexity:** Requires storage for the pre-sorted inverse indices for diagonal elements, proportional to the grid resolution over $[-10\sigma, 10\sigma]$. [S1]
+-- **Strengths:** Provides stable second-order derivative estimates necessary for Newton-type optimization methods. The convolution approach allows the differential operator to move inside the integral, enabling differentiable rendering. [S1]
+-- **Limitations:** Higher computational cost than first-order gradient estimation due to the $n^2$ matrix size. The diagonal sampling requires pre-computation and lookup tables. [S1]
+-- **When to use:** When higher-order optimization (e.g., Newton's method) is required for convergence speed or accuracy in differentiable volume rendering. [S1]
+-- **When not to use:** When computational resources are limited and first-order gradients suffice, or when the scene does not require curvature information for edge detection.
++*   **Time Complexity:** $O(n^2)$ function evaluations without Importance Sampling (IS), $O(n^2)$ with IS, and $O(1)$ with Aggregate IS [S1].
++*   **Memory Complexity:** $O(n^2)$ to store the Hessian matrix. The CDF lookup table requires $O(\sigma^{-1})$ storage per dimension [S1].
++*   **Strengths:** Provides exact second-order derivatives for differentiable rendering. The CDF-based sampling for diagonal elements is efficient ($O(1)$ access) after pre-computation [S1].
++*   **Limitations:** The transcendental nature of the diagonal CDF requires pre-computation and lookup. Off-diagonal sampling relies on the product of independent gradients, which may introduce variance [S1].
++*   **When to use:** When higher-order differentiability (e.g., for Newton-style optimization or curvature-based regularization) is required in volume rendering [S1].
++*   **When not to use:** When only first-order gradients are sufficient, or when computational resources are extremely limited and Aggregate IS is not applicable [S1].
+ 
+ ## Background
+-The method originates from the work of Fischer and Ritschel, who introduced smooth differentiation by convolution for gradient estimation. The Hessian estimation via convolution extends this framework to second-order derivatives. It was formally detailed in "Stochastic Gradient Estimation for Higher-Order Differentiable Rendering" (2025). The approach builds on the principle that smoothing and differentiation can be combined into a single kernel, which is then sampled using importance sampling to reduce variance. [S1]
++The method was introduced by Fischer and Ritschel in "Stochastic Gradient Estimation for Higher-Order Differentiable Rendering" [S1]. It extends the concept of smooth differentiation by convolution, originally developed for gradients, to second-order derivatives. The approach allows the differential operator to move inside the integral of the rendering equation, enabling the use of Monte Carlo estimation for Hessian computation [S1]. The separable implementation details were further explored in "Salient Representation of Volume Data" [S2].
+ 
+ ## Sources
+-[S1] Stochastic Gradient Estimation for Higher-Order Differentiable Rendering, https://doi.org/10.1109/iccv51701.2025.02618, fetched 2026-10-29+[S1] Stochastic Gradient Estimation for Higher-Order Differentiable Rendering, https://doi.org/10.1109/iccv51701.2025.02618, fetched 2026-10-29
++[S2] Salient Representation of Volume Data, https://doi.org/10.2312/vissym/vissym01/203-212, fetched 2026-10-30

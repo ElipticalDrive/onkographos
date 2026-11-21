@@ -1,0 +1,110 @@
+# Global Chamfer Distance
+
+
+## Overview
+Global Chamfer Distance measures the global geometric accuracy of a reconstructed mesh surface by computing the bidirectional Chamfer Distance between uniformly sampled point sets from the reconstruction and the ground truth. It is distinguished from its siblings by evaluating the entire surface geometry rather than specific features (like edges) or relative transforms, serving as a standard metric for absolute reconstruction error [S1].
+
+## How it works
+**Inputs:**
+- $\mathbf{S}_r$: A set of points uniformly sampled from the surface of the reconstructed mesh.
+- $\mathbf{S}_{\text{gt}}$: A set of points uniformly sampled from the ground truth surface.
+
+**Outputs:**
+- $\text{CD}_{\text{glo}}$: The scalar global Chamfer Distance value.
+
+**Data Structures:**
+- Point sets $\mathbf{S}_r$ and $\mathbf{S}_{\text{gt}}$ are typically stored as arrays of 3D coordinates $(x, y, z)$.
+- The cardinality of each set is fixed at 300,000 points [S1].
+
+**Parameters:**
+- Number of sampled points: 300,000 per surface [S1].
+
+**Steps:**
+1. Sample 300,000 points uniformly from the reconstructed mesh surface to form $\mathbf{S}_r$.
+2. Sample 300,000 points uniformly from the ground truth surface to form $\mathbf{S}_{\text{gt}}$.
+3. Compute the directed Chamfer Distance from $\mathbf{S}_r$ to $\mathbf{S}_{\text{gt}}$:
+   $$ d(\mathbf{S}_r \to \mathbf{S}_{\text{gt}}) = \frac{1}{|\mathbf{S}_r|} \sum_{\mathbf{x} \in \mathbf{S}_r} \min_{\mathbf{y} \in \mathbf{S}_{\text{gt}}} \|\mathbf{x} - \mathbf{y}\|_2 $$
+4. Compute the directed Chamfer Distance from $\mathbf{S}_{\text{gt}}$ to $\mathbf{S}_r$:
+   $$ d(\mathbf{S}_{\text{gt}} \to \mathbf{S}_r) = \frac{1}{|\mathbf{S}_{\text{gt}}|} \sum_{\mathbf{y} \in \mathbf{S}_{\text{gt}}} \min_{\mathbf{x} \in \mathbf{S}_r} \|\mathbf{y} - \mathbf{x}\|_2 $$
+5. Sum the two directed distances to obtain the symmetric Global Chamfer Distance:
+   $$ \text{CD}_{\text{glo}} = d(\mathbf{S}_r \to \mathbf{S}_{\text{gt}}) + d(\mathbf{S}_{\text{gt}} \to \mathbf{S}_r) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def global_chamfer_distance(points_r: np.ndarray, points_gt: np.ndarray) -> float:
+    """
+    Computes the Global Chamfer Distance between two point sets.
+    
+    Args:
+        points_r: Array of shape (N, 3) representing points from the reconstructed mesh.
+        points_gt: Array of shape (M, 3) representing points from the ground truth.
+        
+    Returns:
+        The symmetric Chamfer Distance.
+    """
+    # Ensure inputs are numpy arrays of floats
+    points_r = np.asarray(points_r, dtype=np.float32)
+    points_gt = np.asarray(points_gt, dtype=np.float32)
+    
+    # Calculate pairwise squared Euclidean distances
+    # Shape: (N, M)
+    # Using broadcasting: (N, 1, 3) - (1, M, 3) -> (N, M, 3) -> sum along axis 2
+    diff = points_r[:, np.newaxis, :] - points_gt[np.newaxis, :, :]
+    sq_dist = np.sum(diff ** 2, axis=2)
+    
+    # Find minimum distance for each point in r to any point in gt
+    min_dist_r_to_gt = np.min(sq_dist, axis=1)
+    
+    # Find minimum distance for each point in gt to any point in r
+    # Transpose the distance matrix to swap axes
+    min_dist_gt_to_r = np.min(sq_dist.T, axis=1)
+    
+    # Compute mean directed distances
+    mean_dist_r_to_gt = np.mean(np.sqrt(min_dist_r_to_gt))
+    mean_dist_gt_to_r = np.mean(np.sqrt(min_dist_gt_to_r))
+    
+    # Symmetric Chamfer Distance
+    cd_glo = mean_dist_r_to_gt + mean_dist_gt_to_r
+    
+    return cd_glo
+```
+
+**Edge Cases and Pitfalls:**
+- **Sampling Uniformity:** The metric assumes uniform sampling. Non-uniform sampling (e.g., biased towards high-curvature areas) will skew the distance calculation [S1].
+- **Precision:** The Euclidean norm $\|\cdot\|_2$ is used. Floating-point precision errors in distance calculations can accumulate, though typically negligible for standard double-precision arithmetic [S1].
+- **Degenerate Input:** If either surface is empty, the distance is undefined. The method requires valid, closed or open manifold surfaces capable of uniform point sampling [S1].
+
+## Subtopics
+
+### Geometric Consistency Metric
+A scale-normalized consistency measure used to evaluate geometric consistency between reconstructed and reference surfaces, rather than an absolute metrological error [S2]. It differs from Global Chamfer Distance by normalizing the error by the bounding box diagonal and requiring prior ICP alignment [S2].
+- **Definition:** $E_{geo} = \frac{1}{2D} \left[ \frac{1}{|P|} \sum_{p \in P} \min_{q \in Q} \|p - q\|^2 + \frac{1}{|Q|} \sum_{q \in Q} \min_{p \in P} \|q - p\|^2 \right]$ [S2].
+- **Inputs:** $P$ (100,000 points from reconstructed surface), $Q$ (100,000 points from reference surface), $D$ (diagonal length of reference bounding box) [S2].
+- **Steps:**
+  1. Align surfaces using Iterative Closest Point (ICP) registration [S2].
+     - Maximum correspondence distance: 1% of the reference bounding-box diagonal [S2].
+     - Convergence tolerance: $10^{-6}$ [S2].
+     - Maximum iterations: 50 [S2].
+  2. Sample 100,000 points uniformly from both surfaces [S2].
+  3. Compute the normalized symmetric nearest-surface distance using the formula above [S2].
+- **When to choose:** Use when comparing reconstructions of the same object under different scales or when absolute metric accuracy is less important than relative geometric consistency [S2].
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot M)$ for naive implementation where $N$ and $M$ are the number of points in each set. With 300,000 points, this is computationally expensive without spatial acceleration structures (e.g., KD-trees) [S1].
+- **Memory Complexity:** $O(N + M)$ to store the point sets. The pairwise distance matrix requires $O(N \cdot M)$ memory if computed explicitly, which is prohibitive for 300K points ($9 \times 10^{10}$ entries). Efficient implementations must use iterative nearest-neighbor searches or spatial indexing [S1].
+- **Measured Performance:** Computed using 300K sampled points per surface [S1].
+- **Strengths:** Provides a single scalar value for global geometric accuracy; simple to understand and implement [S1].
+- **Limitations:** Sensitive to sampling density; does not account for local geometric features like edges or boundaries specifically (unlike $CD_{nme}$ or $CD_{bde}$) [S1].
+- **When to use:** For evaluating overall surface reconstruction quality against a ground truth mesh [S1].
+- **When not:** When local feature preservation (e.g., sharp edges) is the primary concern, or when surfaces are not aligned (Global CD assumes alignment, whereas Geometric Consistency Metric explicitly handles alignment) [S1, S2].
+
+## Background
+Global Chamfer Distance was introduced as a metric for evaluating the geometric accuracy of reconstructed meshes, specifically in the context of neural unsigned distance functions (UDFs) and zero-level set extraction [S1]. It is derived from the general definition of Chamfer Distance, which measures the bidirectional distance between two point sets [S1]. The metric is part of a family of Chamfer-based metrics that also includes variants for non-manifold edges ($CD_{nme}$) and boundary edges ($CD_{bde}$) [S1].
+
+## Sources
+[S1] Dual Contouring over Expanded Cubes (DCx) for Zero-Level Set Extraction from Neural Unsigned Distance Functions, https://doi.org/10.1145/3811388, fetched 2026-11-06
+[S2] High fidelity three dimensional reconstruction and interactive visualization of public art sculptures using neural radiance fields, https://link.springer.com/article/10.1007/s44163-026-02441-3, fetched 2026-10-26

@@ -1,0 +1,135 @@
+# Octree Iteration with Culling
+
+Also called: Octree Culling, OctreeIterator
+
+## Overview
+Octree Iteration with Culling is a traversal method that visits only the leaf nodes of a sparse voxel octree that intersect a specified spatial region, typically an axis-aligned bounding box (AABB) [S1, unofficial]. It solves the problem of efficiently identifying relevant geometry for rendering or raycasting by skipping empty or non-intersecting subtrees, thereby reducing the number of nodes processed compared to a full tree traversal [S1, unofficial]. It differs from sibling methods like [Octree Traversal with Fixed-Size Leaf Volumes](3900-octree-traversal-with-fixed-size-leaf-volumes.md) by supporting arbitrary leaf sizes and dynamic culling regions, and from [Hierarchical Ray Marching](5238-hierarchical-ray-marching.md) by focusing on node enumeration rather than direct volume integration [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `root`: The root node of the sparse voxel octree.
+- `region`: A `BoxIntersector` object defining the AABB to cull against. If `null`, the entire tree is traversed [S1, unofficial].
+
+**Outputs:**
+- An iterator yielding leaf nodes (octants) that intersect the `region` [S1, unofficial].
+
+**Data Structures:**
+- **Node**: Contains `min` and `max` vectors defining its AABB, and a reference to its 8 children (indexed 0-7). Leaf nodes have no children [S1, unofficial].
+- **BoxIntersector**: Provides an `intersectsBox(b)` method that returns `true` if the AABB `b` intersects the intersector's region [S1, unofficial].
+- **Trace**: A stack (array) of nodes visited during traversal [S1, unofficial].
+- **Indices**: An array of integers parallel to `Trace`, storing the current child index (0-7) being processed for each node in the trace [S1, unofficial].
+
+**Algorithm:**
+The method uses an iterative depth-first traversal to avoid recursion overhead.
+
+1. **Initialization (`reset`)**:
+   - Clear `Trace` and `Indices`.
+   - If `root` exists and (`region` is `null` or `region.intersectsBox(root.min, root.max)` is `true`):
+     - Push `root` to `Trace`.
+     - Push `0` to `Indices`.
+   - Else:
+     - `Trace` remains empty.
+
+2. **Iteration (`next`)**:
+   - Let `depth` be `Trace.length - 1`.
+   - Loop while `depth >= 0`:
+     - Let `current_node` be `Trace[depth]`.
+     - Let `current_index` be `Indices[depth]`.
+     - Increment `Indices[depth]` by 1.
+     - If `current_index < 8`:
+       - Let `child` be the child node of `current_node` at index `current_index`.
+       - If `child` exists:
+         - If `region` is `null` OR `region.intersectsBox(child.min, child.max)` is `true`:
+           - Push `child` to `Trace`.
+           - Push `0` to `Indices`.
+           - Increment `depth`.
+           - Continue loop (process new child).
+         - Else:
+           - Continue loop (cull this child, try next sibling).
+       - Else (`child` is null, i.e., leaf):
+           - Pop `Trace` and `Indices`.
+           - Decrement `depth`.
+           - Return `current_node` as the result.
+     - Else (`current_index >= 8`, all children processed):
+       - Pop `Trace` and `Indices`.
+       - Decrement `depth`.
+   - If loop exits (stack empty), return `null` (done).
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class OctreeIterator:
+    def __init__(self, root, region=None):
+        self.root = root
+        self.region = region
+        self.trace = []
+        self.indices = []
+        self.reset()
+
+    def reset(self):
+        self.trace = []
+        self.indices = []
+        if self.root is not None:
+            if self.region is None or self.region.intersects_box(self.root.min, self.root.max):
+                self.trace.append(self.root)
+                self.indices.append(0)
+
+    def next(self):
+        depth = len(self.trace) - 1
+        
+        while depth >= 0:
+            current_node = self.trace[depth]
+            current_index = self.indices[depth]
+            
+            # Increment index for next time we visit this depth
+            self.indices[depth] += 1
+            
+            if current_index < 8:
+                child = current_node.children[current_index]
+                
+                if child is not None:
+                    # Check culling
+                    if self.region is None or self.region.intersects_box(child.min, child.max):
+                        # Push child to stack
+                        self.trace.append(child)
+                        self.indices.append(0)
+                        depth += 1
+                        # Continue loop to process the new child
+                        continue
+                    else:
+                        # Culled, try next sibling in next iteration
+                        continue
+                else:
+                    # Leaf node found
+                    self.trace.pop()
+                    self.indices.pop()
+                    depth -= 1
+                    return current_node
+            else:
+                # All 8 children processed, backtrack
+                self.trace.pop()
+                self.indices.pop()
+                depth -= 1
+                
+        return None
+```
+
+**Edge Cases:**
+- **Empty Tree**: `root` is `None`; `reset` leaves trace empty; `next` returns `None` immediately [S1, unofficial].
+- **No Intersection**: If `root` does not intersect `region`, `reset` leaves trace empty; `next` returns `None` [S1, unofficial].
+- **Precision**: AABB intersection tests must handle floating-point inaccuracies at boundaries. The source uses standard AABB intersection logic [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ where $N$ is the number of leaf nodes intersecting the region. In the worst case (full tree), it is proportional to the number of nodes in the tree. Culling reduces this significantly for sparse regions [S1, unofficial].
+- **Memory Complexity**: $O(D)$ where $D$ is the depth of the octree, for the trace stack [S1, unofficial].
+- **Strengths**: Efficient for sparse data; avoids recursion; flexible culling region [S1, unofficial].
+- **Limitations**: Requires AABB intersection tests for every node visited; not optimized for ray-specific ordering (unlike [Ray-Direction Child Ordering](5462-ray-direction-child-ordering.md)) [S1, unofficial].
+- **When to use**: When rendering or querying a sparse voxel octree with a specific view frustum or selection box [S1, unofficial].
+
+## Background
+This method is implemented in the `sparse-octree` library by vanruesc [S1, unofficial]. It provides a generic iterator interface for traversing octrees with optional spatial culling, commonly used in 3D graphics applications for efficient node enumeration [S1, unofficial].
+
+## Sources
+[S1] sparse-octree module, https://github.com/vanruesc/sparse-octree, fetched 2026-10-27 (unofficial)

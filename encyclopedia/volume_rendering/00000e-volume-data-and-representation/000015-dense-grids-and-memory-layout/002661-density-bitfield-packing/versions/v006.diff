@@ -1,0 +1,107 @@
+--- v005.md
++++ v006.md
+@@ -8,71 +8,54 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A density grid `grid` of shape $[C, H^3]$ containing floating-point values, where $H$ is the spatial dimension and $H$ is even ($H \% 2 == 0$) [S1, S2, unofficial]. $C$ represents the number of channels or batches.
++*   **Input:** A density grid `grid` of shape $[C, H^3]$ (or $[C, H, H, H]$) containing floating-point values, where $H$ is the spatial dimension and $H \% 2 == 0$ [S1, S2, unofficial]. $C$ represents the number of channels or batches.
+ *   **Input:** A threshold scalar `thresh` used for binarization [S1, S2, unofficial].
+ *   **Output:** A bitfield `bitfield` of shape $[C, H^3 / 8]$ with data type `uint8` [S1, S2, unofficial].
+ 
+ **Data Structures:**
+-The output `bitfield` stores 8 density samples per byte. For a given channel $c$ and spatial index $(i, j, k)$, the corresponding bit in the bitfield is set if the density value exceeds the threshold. The linear index in the bitfield is derived from the linear index in the grid divided by 8.
++The output `bitfield` stores 8 density samples per byte [S1, S2, unofficial]. For a given channel $c$ and linear grid index $idx$, the corresponding bit in the bitfield is set if the density value exceeds the threshold [S1, S2, unofficial]. The linear index in the bitfield is derived from the linear index in the grid divided by 8 [S1, S2, unofficial].
+ 
+ **Steps:**
+-1.  Ensure the input `grid` is a contiguous tensor in memory (e.g., CUDA tensor) [S1, unofficial].
+-2.  Calculate the size of the output bitfield: $N = C \cdot H^3 / 8$ [S1, unofficial].
+-3.  Iterate through each element of the grid. For each density value $v$ at index $idx$:
+-    *   Determine the bit position: $b = idx \pmod 8$.
+-    *   Determine the byte position: $byte\_idx = \lfloor idx / 8 \rfloor$.
+-    *   If $v \ge \text{thresh}$, set the $b$-th bit of `bitfield[byte_idx]` to 1. Otherwise, set it to 0 [S1, S2, unofficial].
+-4.  Return the `bitfield` [S1, unofficial].
++1.  Ensure the input grid is a contiguous tensor [S1, unofficial].
++2.  Calculate the output buffer size $N = C \cdot H^3 / 8$ [S1, unofficial].
++3.  Invoke the backend packing kernel `_backend.packbits(grid, N, thresh, bitfield)` [S1, unofficial].
++4.  The kernel iterates through each element of the grid [S1, S2, unofficial]. For each density value $v$ at linear index $idx$:
++    *   Determine the bit position: $b = idx \pmod 8$ [S1, S2, unofficial].
++    *   Determine the byte position: $byte\_idx = \lfloor idx / 8 \rfloor$ [S1, S2, unofficial].
++    *   If $v \ge \text{thresh}$, set the $b$-th bit of `bitfield[byte_idx]` to 1 [S1, S2, unofficial].
++5.  Return the `bitfield` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-import torch
+-
+-def packbits(grid: torch.Tensor, thresh: float) -> torch.Tensor:
++def packbits(grid: list, thresh: float) -> list:
+     """
+     Packs a floating-point density grid into a bitfield.
+     
+     Args:
+-        grid: Float tensor of shape [C, H, H, H] or [C, H^3]. H must be even.
++        grid: Flat list of floats of shape [C, H^3]. H must be even.
+         thresh: Float threshold for binarization.
+         
+     Returns:
+-        uint8 tensor of shape [C, H^3 / 8].
++        List of uint8 values of shape [C, H^3 / 8].
+     """
+-    # Ensure contiguous memory layout [S1, unofficial]
+-    if not grid.is_contiguous():
+-        grid = grid.contiguous()
+-        
+-    # Flatten grid to [C, H^3] if not already [S2, unofficial]
+-    if grid.dim() == 4:
+-        grid = grid.view(grid.size(0), -1)
+-        
+-    C, H3 = grid.shape
+-    N = C * H3 // 8
++    total_voxels = len(grid)
++    N = total_voxels // 8
++    bitfield = [0] * N
+     
+-    # Initialize output bitfield [S1, S2, unofficial]
+-    bitfield = torch.zeros((C, N), dtype=torch.uint8, device=grid.device)
+-    
+-    # Binarize and pack
+-    # Create mask for values >= thresh
+-    mask = (grid >= thresh).to(torch.uint8) # Shape: [C, H^3]
+-    
+-    # Reshape mask to [C, N, 8] to group 8 bits per byte
+-    mask = mask.view(C, N, 8)
+-    
+-    # Convert bits to byte values
+-    # bit 0 is LSB, bit 7 is MSB
+-    weights = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], dtype=torch.uint8, device=grid.device)
+-    bitfield = torch.sum(mask * weights, dim=2)
+-    
++    for idx, v in enumerate(grid):
++        if v >= thresh:
++            byte_idx = idx // 8
++            bit_pos = idx % 8
++            bitfield[byte_idx] |= (1 << bit_pos)
++            
+     return bitfield
+ ```
+ 
+ **Parameters:**
+-*   `thresh`: The density threshold. Values $\ge$ `thresh` are considered occupied (bit 1), values $<$ `thresh` are empty (bit 0) [S1, S2, unofficial]. Typical values depend on the specific density representation (e.g., 0.0 for signed distance fields, or a small positive epsilon for neural radiance fields) [G].
++*   `thresh`: The density threshold. Values $\ge$ `thresh` are considered occupied (bit 1), values $<$ `thresh` are empty (bit 0) [S1, S2, unofficial]. Typical values: Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Grid Dimensions:** The height $H$ must be even to ensure $H^3$ is divisible by 8 without remainder in the packing logic if processed in chunks, though the total size $H^3/8$ is an integer regardless. The source explicitly requires $H \% 2 == 0$ [S1, S2, unofficial].
+-*   **Precision:** Floating-point comparisons against `thresh` should be consistent across CPU and GPU implementations [S1, S2, unofficial].
+-*   **Contiguity:** The input grid must be contiguous to ensure efficient memory access during the packing kernel execution [S1, unofficial].
++*   **Grid Dimensions:** The height $H$ must be even ($H \% 2 == 0$) as required by the implementation [S1, S2, unofficial].
++*   **Precision:** Floating-point comparisons against `thresh` determine occupancy [S1, S2, unofficial].
++*   **Memory Layout:** The grid must be contiguous for the backend kernel execution [S1, unofficial].
+ 
+ ## Subtopics
+@@ -89,5 +72,5 @@
+ 
+ ## Background
+-Density Bitfield Packing is a technique used in volume rendering and solid voxelization to optimize ray traversal [S1, S2, S3, unofficial]. It is often employed in conjunction with neural radiance fields (NeRF) and real-time rendering applications [S1, S2, unofficial]. The specific implementation details described here are derived from unofficial repositories related to ER-NeRF and IDDR-NGP [S1, S2, unofficial]. The concept of using bitfields for occupancy is also related to solid voxelization techniques for translucency and CSG operations [S3, unofficial].
++Density Bitfield Packing is a technique used in volume rendering to optimize ray traversal [S1, S2, unofficial]. It is also applied in solid voxelization for translucency and CSG operations [S3, unofficial]. The specific implementation details described here are derived from unofficial repositories related to ER-NeRF and IDDR-NGP [S1, S2, unofficial].
+ 
+ ## Sources

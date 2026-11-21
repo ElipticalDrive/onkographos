@@ -1,0 +1,1044 @@
+Arxiv
+VOXELTTO: VOXEL -A LIGNED F EED -F ORWARD 3D
+G AUSSIAN S PLATTING WITH T EST-T IME O PTIMIZA TION
+arXiv:2609.21498v1 [cs.CV] 18 Sep 2026
+Yibin Zhao∗
+East China University of Science and Technology
+Shanghai, China
+Y20230063@mail.ecust.edu.cn
+Yihan Pan∗
+Shanghai Open University
+Shanghai, China
+email@ou.sh.cn
+Wenli Yang, Jun Nan & Jianjun Yi†
+East China University of Science and Technology
+Shanghai, China
+{Y30260694,Y20240039}@mail.ecust.edu.cn, jjyi@ecust.edu.cn
+Figure 1: VoxelTTO directly regresses a geometrically accurate Gaussian-splatting scene from posed
+images. It precisely aligns camera poses and improves RGB and depth rendering in both input and
+test views across indoor–outdoor and synthetic–realworld scenes.
+A BSTRACT
+Recent feed-forward 3D Gaussian Splatting (3DGS) methods typically regress
+pixel-aligned Gaussian primitives, often causing excessive overlap and artifacts,
+while inaccuracies in predicted camera poses can lead to misalignment in novelview synthesis (NVS). We present VoxelTTO, a feed-forward framework for reconstructing geometrically accurate 3DGS scenes from an arbitrary number of
+images and optional camera parameters. VoxelTTO aggregates dense image features into a global voxel representation and decodes Gaussians from voxel features, breaking the pixel-to-Gaussian correspondence. To exploit known camera
+∗
+†
+These authors contributed equally.
+Corresponding author.
+1
+Arxiv
+parameters while keeping the pretrained visual foundation model (VFM) parameters frozen, we introduce test-time optimization (TTO) that adapts lightweight
+LoRA modules using pose supervision. We further replace vanilla 3DGS rasterization with stochastic solid volume rendering during training and inference,
+improving geometric fidelity. Training updates only the voxel-aligned Gaussian
+reconstruction modules, requiring 80 GPU hours. Experiments on Replica, Tanks
+and Temples, and DTU demonstrate improved RGB-D NVS and camera-pose estimation relative to prior methods.
+1
+I NTRODUCTION
+Conventional 3D reconstruction systems from images rely on multistage pipelines comprising
+feature matching Sarlin et al. (2020); DeTone et al. (2018) and structure from motion (SfM)
+Schönberger & Frahm (2016). Recent VFMs Wang et al. (2025a; 2024b) offer an end-to-end alternative, using a large Transformer to directly predict 3D attributes from arbitrary image collections.
+Despite their strong geometric priors, point-map and depth-map representations produced by VFMs
+often fail to capture fine details and photorealistic appearance. By contrast, 3DGS Kerbl et al.
+(2023), and their extensions Huang et al. (2024); Lu et al. (2024) use richer scene representations
+to deliver accurate NVS. However, these methods commonly recover camera parameters with SfM
+before performing costly per-scene optimization. Some approaches directly predict 3DGS scenes Xu
+et al. (2025); Charatan et al. (2024); Chen et al. (2024), but they typically require accurate camera
+parameters and can degrade in complex scenes. More recent methods Jiang et al. (2025); Lin et al.
+(2025); Ye et al. (2025) extend the feed-forward VFMs to 3DGS. They regress pixel-aligned 3DGS
+scenes directly from unposed images, but their geometric accuracy remains limited. Several VFMs
+encode camera parameters within the backbone to exploit additional priors and improve prediction
+accuracy Keetha et al. (2026); Lin et al. (2025); Jiang et al. (2025). Nevertheless, the resulting
+accuracy remains insufficient, and persists substantial misalignment during test-view synthesis.
+In this work, we present VoxelTTO, a voxel-aligned feed-forward 3DGS framework with test-time
+optimization (TTO). VoxelTTO reconstructs geometrically accurate 3DGS scenes from arbitrary
+numbers of images and optional camera parameters. When camera priors are available, it supports
+accurate NVS from test views. To reduce excessive overlap and artifacts, VoxelTTO departs from
+conventional pixel-aligned feed-forward 3DGS, upsamples patch tokens from a frozen VFM backbone with DPT and fuses them into global voxels. A sparse convolutional U-Net encodes the voxel
+features, and an appearance-geometry decoupled self-splitting MLP regresses Gaussian primitive
+parameters. We replace 3DGS rasterization with stochastic solid volume rendering, which provides
+stronger geometric supervision during optimization and improves geometric fidelity for NVS .
+To exploit camera priors, TTO inserts LoRA modules into the VFM backbone. Pose-supervised
+adaptation of these modules improves alignment between predicted and ground-truth camera parameters. During training, we freeze the VFM backbone and optimize only the Voxel-Aligned FeedForward 3DGS module. This design introduces 75.3M trainable parameters, significantly reduces
+training cost to 80 GPU hours, and is compatible with any VGGT-style VFMs.
+Our main contributions are as follows:
+• We propose VoxelTTO, a voxel-aligned feed-forward 3DGS reconstruction framework that
+recovers geometrically accurate scenes from arbitrary image collections and optional camera parameters.
+• We introduce voxel-aligned feed-forward 3DGS and stochastic solid volume rendering supervision to reduce excessive overlap and artifacts while strengthening geometry.
+• We introduce pose-supervised TTO to exploit camera priors and improve alignment.
+• Extensive experiments across multiple datasets demonstrate improved camera-pose estimation and more accurate RGB-D rendering in both input and test views compared to existing
+feed-forward 3DGS methods.
+2
+Arxiv
+2
+R ELATED W ORKS
+2.1
+O PTIMIZATION -BASED N OVEL -V IEW S YNTHESIS
+Neural radiance fields (NeRF) Mildenhall et al. (2020) model scene density and view-dependent
+color with neural fields, but ray-wise volume rendering is computationally expensive. 3DGS Kerbl
+et al. (2023) represents scenes with anisotropic Gaussian primitives and enables real-time NVS;
+subsequent work improves its geometric representation Huang et al. (2024); Dai et al. (2024) and
+optimization Huang et al. (2025); Guédon & Lepetit (2024). Stochastic solid volume rendering is
+equivalent to 3DGS rasterization under suitable conditions Miller et al. (2023); Zhang et al. (2026);
+Gomez et al. (2026) and improves depth and surface reconstruction.
+These optimization-based methods require accurate camera parameter, which are typically estimated
+with SfM pipelinesSchönberger & Frahm (2016); Schönberger et al. (2016); Wang et al. (2024a;b).
+Several methods jointly optimize camera parameters and 3DGS scenes, but generally require sequential images Keetha et al. (2024); Fu et al. (2024) or depth maps Ha et al. (2024). Vanilla 3DGS
+initializes primitives by KNN distances from a colored point cloud and optimizes each scene independently Kerbl et al. (2023). Subsequent research s directly regress a 3DGS scene from images and
+camera parameters without optimization Charatan et al. (2024); Chen et al. (2024); Xu et al. (2025).
+2.2
+V ISUAL F OUNDATION M ODELS
+Image-based reconstruction has traditionally relied on separate SfM and dense-reconstruction
+stages. Recent VFMs directly regress 3D scene information from multiple views. Dust3R Wang
+et al. (2024b) uses self and cross-attention to infer aligned point maps and camera parameters from
+image pairs. VGGT alternates single image attention with global attention to regress depth maps,
+point maps, and camera parameters, from arbitrary views. Later work increases model accuracyLin
+et al. (2025); Wang et al. (2026) and improves order invariance Wang et al. (2025c). Several VFMs
+Jiang et al. (2025); Lin et al. (2025); Ye et al. (2025) further support direct regression of 3DGS.
+Their Gaussian primitives are usually pixel-aligned with depth maps, which inevitably introduces
+excessive overlap and rendering artifacts. Directly regressing Gaussians from fixed tokens Ren et al.
+(2026); Li et al. (2026) alleviates this issue but commonly sacrifices geometric accuracy.
+VFM geometry is predicted across views and may not strictly satisfy multiview constraints. Testtime optimization (TTO) has shown benefits for Vision Transformer tasks Han et al. (2026) and
+been applied to VFMs Elflein et al. (2026). Recent TCO inserts LoRA modules into attention layers
+and constrains them using known camera parameters and depth maps, improving pose estimation
+and dense reconstruction Zhou et al. (2026). Unlike approaches that encode depth maps or camera
+parameters into the backbone Keetha et al. (2026); Lin et al. (2025); Jiang et al. (2025), TCO adapts
+lightweight modules without changing the base VFM architecture.
+3
+M ETHOD
+Figure 2: Overview of the VoxelTTO pipeline.
+3
+Arxiv
+We propose VoxelTTO, a feed-forward method that predicts a 3DGS scene from multiview images
+and optional camera parameters. By aggregating dense features into voxels and processing them
+with a sparse-convolutional U-Net, VoxelTTO delivers high geometric fidelity and appearance performance. TTO further addresses the misalignment commonly observed when VGGT-style VFMs
+predict Gaussian-splatting scenes, improving accuracy in test views.
+3.1
+P RELIMINARIES AND C HALLENGES
+VFMs Wang et al. (2025a; 2024b) use a large Transformer Φθ to learn cross-view visual repreM
+sentations from M uncalibrated images I = {Im }m=1 . Separate prediction heads Γψ recover 3D
+H×W ×3
+scene information, including point maps Pm ∈ R
+, depth maps Dm ∈ RH×W , and camera
+parameters gm , as shown in Equation 1.
+(Pm , Dm , gm ) = Γψ (Φθ (I)) ,
+m = 1, . . . , M
+(1)
+3DGS VFMs typically upsample patch tokens with DPT to obtain pixel-aligned Gaussian attributes
+(center µq , opacity σq , rotation quaternion rq , scale sq , and color cq ). Such methods often lack
+multiview consistency and create excessive overlap, producing artifacts. Direct token-to-Gaussian
+methods commonly have lower geometric accuracy Li et al. (2026).
+To exploit camera priors, several VFMs Keetha et al. (2026); Lin et al. (2025); Jiang et al. (2025) encode ground-truth camera parameters ggt as tokens before the backbone and incorporate them during
+inference. Although fusing auxiliary camera parameters with RGB features improves performance,
+it changes the architecture and prevents direct reuse of unconstrained VFMs. Moreover, the inferred
+camera parameters gm can still differ substantially from ggt . Even after Umeyama SIM(3) alignment
+Umeyama (1991), this error causes substantial caemra misalignment in subsequent NVS.
+3.2
+3.2.1
+VOXEL -A LIGNED F EED -F ORWARD 3DGS
+N ETWORK A RCHITECTURE
+VoxelTTO uses DINOv2 Oquab et al. (2023) to extract multiview patch tokens and employs alternating attention to model the scene. We add LoRA to the alternating-attention layers for TTO, as
+detailed in subsection 3.3. The frozen VFM backbone first predicts a depth map Dm , camera parameters gm , and confidence map Km for each view. We add a feature DPT that upsamples patch
+tokens into dense pixel features Fm ∈ RH×W ×C . We then back-project pixels into world coordinates, obtaining a dense feature point cloud P = {(pl , al , fl , κl )}L
+l=1 , where pl , al , fl , and κl
+denote point coordinate, color, feature, and confidence, respectively. To reduce memory use and
+avoid excessive overlap, we aggregate the point
+P cloud into
+Pvoxel features. Let Pv denote the points
+within voxel v. Its feature center is xv = l∈Pv κl pl / l∈Pv κl , which is not constrained to the
+regular voxel center and thus preserves geometric accuracy. Voxel color av and feature fv are also
+confidence-weighted averages. We define voxel confidence as κv = minl∈Pv κl to reduce the impact of unreliable points. A 3D U-Net refines the voxel features for scene understanding. Sparse
+convolutions Contributors (2022) avoid computation in empty voxels.
+To increase the representational capacity of each voxel, we decode every voxel feature fv into n
+Gaussian primitives, allowing one voxel to represent complex local detail. To avoid entangling geometry and appearance during optimization Li et al. (2026), we use separate geometry and appearance branches, Dgeo and Dapp . Centers, rotation quaternions, scales, and opacities of n Gaussian
+primitives are decoded by Dgeo . Second-order spherical-harmonic coefficients are decoded by Dapp .
+3.2.2
+S TOCHASTIC S OLID VOLUME R ENDERING
+To further improve the geometric accuracy of NVS, we use stochastic solid volume renderingMiller
+et al. (2023) instead of vanilla 3DGS rasterization. With an appropriate vacancy function v, volume
+rendering of the stochastic solid is equivalent to 3DGS rasterization Zhang et al. (2026), as shown
+in Equation 2, where ω is the ray direction, σ(x, ω) is the stochastic solid attenuation coefficient at
+4
+Arxiv
+point x along the ray, T (t) is accumulated transmittance at position t, and c is the directional color.
+
+ Z t
+ω ⊤ ∇v(x)
+σ(x(s), ω) ds
+σ(x, ω) = ω ⊤ ∇ log v(x) =
+T (t) = exp −
+v(x)
+tn
+(2)
+Z t
+f
+C=
+T (t) σ(x(t), ω) c(x(t), ω) dt
+tn
+An appropriate vacancy v is required to obtain images equivalent to 3DGS rasterization.
+p
+GGGSZhang et al. (2026) proves that the renderings are equivalent when v(x) =
+1 − G(x).
+The accumulated transmittance is then computed as shown in Equation 3, where t∗i is the location
+of the Gaussian maximum along the ray.
+p
+ 1 − Gi (t), t ≤ t∗i ,
+1 − Gi (t∗i )
+Ti (t) =
+(3)
+, t > t∗i .
+p
+1 − Gi (t)
+For depth rendering, we use the median depth, defined by the point where T (tmed ) = 0.5 with a
+fixed number of bisection iterations. During backpropagation, we differentiate the fixed condition
+T (tmed ) = 0.5 with respect to Gaussian parameters θ, as shown in Equation 4.
+∂T
+∂T ∂tmed
+(4)
++
+=0
+∂t ∂θ
+∂θ
+Figure 3: Geometric advantages of stochastic solid volume rendering over 3DGS rasterization.
+As shown in Figure 3, stochastic solid volume rendering produces RGB images that are nearly
+identical to 3DGS rasterization for the same Gaussian scene. For depth rendering, however, it offers
+a clear geometric advantage by reducing holes and blurred boundaries.
+3.3
+T EST-T IME O PTIMIZATION FOR VFM S
+For reconstruction from posed images, some VFMs encode camera parameters with an MLP and
+inject them directly into the Transformer. Although this approach improves geometric accuracy,
+the improvement is insufficient for test views NVS. As shown in Figure 4, AnySplat maintains
+reasonable input view quality despite artifacts, but produces misalignment in test views.
+Figure 4: Test-view misalignment after injecting camera parameters.
+To address this issue, we introduce LoRA Hu et al. (2021) into the VFM backbone and perform TTO.
+Following the DA3 architecture Lin et al. (2025), our network has 40 attention layers. Layers 1–12
+5
+Arxiv
+use single-view attention, whereas layers 13–40 alternate between single-view and global attention.
+We add LoRA to the Q, K, and V projections in layers 13–40. Each layer shares a down-projection
+matrix A, while their up-projection matrices B are independent.
+When aligned camera parameters are provided, we compute the optional TTO loss after camera
+decoding and update the LoRA parameters by backpropagation. After fixed iterations, the backbone
+produces more accurate camera parameters aligned with groundtruth cameras. VGGT-style VFMs
+usually use the first image as the scene coordinate frame, and image-based reconstruction has scale
+ambiguity. We therefore align poses before calculating the loss. We fix the first ground-truth camera
+pose to the identity matrix. The rotation loss is constructed from the relative rotation between
+predicted rotations Rpi and ground-truth rotations Rgi , as shown in Equation 5.
+Lrot =
+M
+
+i
+1 Xh
+⊤
+3 − tr (Rpi ) Rgi .
+2M i=1
+(5)
+PM
+To address scale ambiguity, we normalize each translation set by mean scale s = M −1 i=1 ∥ti ∥2 ,
+computed separately for the predicted and ground-truth translations. The scale-normalized translation loss is then calculated by SmoothL1. We also supervise camera intrinsics. The VFM parameterizes intrinsics as k = (fx , fy , cx , cy ), and we directly apply SmoothL1 to the predicted and groundtruth values. The camera-based TTO objective is LTTO = λpose (Lrot + wt Ltrans ) + λK Lintrinsics .
+3.4
+T RAINING
+3.4.1
+DATASETS
+We train VoxelTTO on ScanNet Dai et al. (2017), Infinigen Raistrick et al. (2023), ARKitScenes
+Baruch et al. (2021), and DL3DV-10K Ling et al. (2024). These datasets span indoor and outdoor
+environments as well as synthetic and real-world scenes. All datasets contain sequential frames. For
+each dataset, we define a minimum and maximum frame gap, randomly select the interval between
+the first and last frame within that range, and sample frames from it.
+3.4.2
+T RAINING D ETAILS
+Our architecture follows DA3-GIANT, uses L = 40 alternating-attention layers as described in
+subsection 3.3, and is initialized with pretrained weights Lin et al. (2025). The full model has 1.39B
+parameters, of only 75.3M parameters are trainable We optimize for 30K iterations with Adam, an
+initial lr of 3 × 10−6 , cosine annealing, 2K warm-up iterations, and a minimum lr of 10−8 . Each
+sample contains 3–16 frames resized to 224 × 448. Training takes 40 hours on 2 RTX PRO 6000.
+As the VFM remains frozen, only the voxel-aligned feed-forward 3DGS module is optimized. The
+loss contains rendered-depth loss Ldepth and rendered-RGB loss Lrgb , as shown in Equation 6.
+ℓ1
+ssim
+1
+L = Ldepth + Lrgb = λℓd1 Lℓdepth
++ λalign Lalign
+depth + λℓ1 Lrgb + λssim Lrgb
+(6)
+1
+Here, Lℓdepth
+supervises rendered depth with ground-truth depth, whereas Lalign
+depth enforces alignment
+1
+with VFM-predicted depth. Lℓrgb
+and Lssim
+are
+the
+ℓ
+and
+SSIM
+Wang
+et
+al.
+(2004) losses between
+1
+rgb
+rendered and ground-truth images. We set λℓd1 , λalign , λℓ1 , and λssim to 0.25, 0.25, 0.9, and 1.0.
+4
+E XPERIMENTS
+4.1
+BASELINES
+We compare VoxelTTO with state-of-the-art (SOTA) baselines from two families: VGGT-style
+VFMs Wang et al. (2025a) and pixelSplat-style Charatan et al. (2024) feed-forward 3DGS. VFM
+baselines include AnySplat Jiang et al. (2025), YoNoSplat Ye et al. (2025), DepthAnything3 Lin
+et al. (2025), and MapAnythingKeetha et al. (2026). All support reconstruction from unposed images. AnySplat and DepthAnything3 support camera-parameter encoding. The initialization of
+vanilla 3DGS is used on MapAnything. Kerbl et al. (2023). pixelSplat-style methods typically require camera parameters; we evaluate VolSplat Wang et al. (2025b) and MVSplat Chen et al. (2024).
+6
+Arxiv
+Experiments are conducted on the Replica Straub et al. (2019), Tanks and Temples Knapitsch et al.
+(2017), and DTU Aanæ s et al. (2016) datasets, including indoor and outdoor, synthetic and realworld, scene-level and object-level scenarios.
+4.2
+RGB N OVEL -V IEW S YNTHESIS
+Following prior worksKerbl et al. (2023), we compare RGB NVS performance across VoxelTTO and
+the baselines. We use PSNR (P), SSIM (S) Wang et al. (2004), and LPIPS (L) Zhang et al. (2018).
+As shown in Table 1 and Figure 5, VoxelTTO performs strongly in both input and test views. TTO
+reduces pose-estimation error from the VFM backbone and substantially improves test-view NVS.
+Figure 5: Qualitative RGB novel-view synthesis results for test views.
+Table 1: Quantitative RGB novel-view synthesis results for input and test views.
+Method
+Replica Dataset
+Input Views
+TAT Dataset
+Test Views
+Input Views
+Test Views
+P↑
+S↑
+L↓
+P↑
+S↑
+L↓
+P↑
+S↑
+L↓
+P↑
+S↑
+L↓
+VolSplat
+16.15
+MVSplat
+19.97
+AnySplat
+23.25
+YoNoSplat
+24.52
+DepthAnything3 23.64
+MapAnything
+14.35
+Ours (w/o TTO) 29.28
+Ours
+29.91
+0.667
+0.759
+0.825
+0.809
+0.837
+0.579
+0.890
+0.896
+0.471
+0.318
+0.200
+0.262
+0.208
+0.533
+0.174
+0.170
+15.44
+19.41
+17.78
+11.57
+22.82
+17.95
+25.83
+28.54
+0.636
+0.736
+0.681
+0.635
+0.817
+0.757
+0.827
+0.876
+0.467
+0.319
+0.359
+0.432
+0.243
+0.227
+0.196
+0.172
+15.45
+16.48
+17.34
+13.61
+19.20
+12.66
+23.74
+20.89
+0.595
+0.615
+0.645
+0.477
+0.621
+0.497
+0.767
+0.656
+0.419
+0.380
+0.311
+0.516
+0.348
+0.570
+0.247
+0.347
+16.33
+15.05
+12.71
+13.29
+17.68
+14.66
+14.71
+19.23
+0.733
+0.522
+0.440
+0.660
+0.556
+0.592
+0.485
+0.565
+0.241
+0.460
+0.478
+0.304
+0.413
+0.381
+0.475
+0.391
+4.3
+D EPTH N OVEL -V IEW S YNTHESIS
+Figure 6: Qualitative depth novel-view synthesis results for test views.
+7
+Arxiv
+To assess the geometric accuracy, we compare depth NVS performance with each baseline. We
+report the absolute error RMSE (cm), relative error Rel, and depth accuracy δτ at several thresholds.
+P
+Relative error (AbsRel) is adapted for relative depth error: Rel = (1/N ) i∈P (|dˆi −di |/di ). Depth
+accuracy δτ is the proportion of pixels satisfying max(dˆi /di , di /dˆi ) < τ . As shown in Figure 6 and
+Table 2, VoxelTTO’s geometric accuracy is higher than the baselines in both input and test views.
+TTO mitigates the misalignment caused by VFM and substantially improves test-view geometry.
+Table 2: Quantitative depth novel-view synthesis results for input and test views.
+Method
+Input Views
+Test Views
+RMSE↓ Rel↓ δ1.05 ↑ δ1.10 ↑ δ1.25 ↑ RMSE↓ Rel↓ δ1.05 ↑ δ1.10 ↑ δ1.25 ↑
+Replica Dataset
+VolSplat
+MVSplat
+AnySplat
+YoNoSplat
+DepthAnything3
+MapAnything
+Ours (w/o TTO)
+Ours
+TAT Dataset
+VolSplat
+MVSplat
+AnySplat
+YoNoSplat
+DepthAnything3
+MapAnything
+Ours (w/o TTO)
+Ours
+4.4
+102.8
+216.0
+33.72
+23.47
+125.5
+13.30
+7.394
+6.167
+30.42
+69.26
+9.582
+7.281
+43.27
+3.559
+0.777
+0.688
+11.88
+1.984
+59.05
+51.07
+28.30
+82.69
+98.57
+98.66
+22.55
+3.894
+76.88
+75.58
+46.40
+93.74
+99.22
+99.29
+46.78
+9.261
+86.14
+94.78
+57.85
+98.12
+99.66
+99.72
+202.2
+1649
+35.92
+242.1
+172.0
+37.96
+9.032
+6.945
+63.89
+446.1
+10.78
+78.73
+38.69
+10.15
+1.115
+0.866
+0.812
+11.84
+45.43
+0.304
+64.18
+44.80
+98.14
+98.86
+2.443
+25.77
+67.09
+0.692
+71.19
+68.37
+98.83
+99.24
+6.859
+42.37
+89.86
+2.643
+76.29
+86.92
+99.38
+99.58
+490.7
+894.3
+117.4
+511.5
+456.9
+139.9
+82.07
+90.63
+33.73
+71.98
+4.793
+37.06
+41.44
+6.560
+2.079
+2.875
+9.984
+0.911
+70.01
+8.018
+18.76
+67.01
+96.35
+90.12
+19.13
+1.809
+90.98
+15.69
+36.71
+81.11
+97.45
+95.83
+41.25
+4.739
+96.95
+33.54
+60.34
+94.77
+98.49
+98.15
+69.15
+143.7
+499.1
+83.57
+299.4
+512.4
+63.93
+46.22
+31.05
+76.57
+360.3
+47.59
+30.49
+399.1
+7.035
+3.235
+9.058
+0.343
+5.405
+7.480
+3.934
+15.28
+52.39
+86.75
+18.01
+0.699
+15.37
+15.38
+8.181
+28.06
+78.84
+95.16
+42.70
+2.203
+30.40
+38.70
+23.29
+31.31
+95.44
+98.33
+P OSE E STIMATION
+Table 3: Quantitative camera-pose estimation results.
+Method
+Replica
+◦
+Rot ( )
+Table 4: Chamfer distances for
+surface alignment on DTU.
+TAT
+Trans (m)
+◦
+Rot ( )
+Trans (m)
+Mean↓ Max↓ Mean↓ Max↓ Mean↓ Max↓ Mean↓ Max↓
+AnySplat
+7.320
+YoNoSplat
+4.769
+DepthAnything3 0.324
+MapAnything
+4.438
+Ours (w/o TTO) 0.301
+Ours
+0.220
+12.77
+6.172
+0.549
+5.544
+0.494
+0.316
+0.106
+0.063
+0.004
+0.056
+0.006
+0.002
+0.470
+0.174
+0.011
+0.106
+0.014
+0.006
+3.516
+5.318
+0.682
+3.232
+1.636
+0.262
+4.871
+6.593
+1.009
+3.649
+2.040
+0.356
+0.135
+0.115
+0.030
+0.065
+0.047
+0.020
+0.501
+0.378
+0.084
+0.117
+0.145
+0.057
+Method
+Acc.↓ Com.↓ Over.↓
+VoxelTTO
+(wo. TTO)
+5.556 9.159 7.357
+VoxelTTO
+3.719 4.853 4.286
+(Camera Enc.)
+VoxelTTO
+2.952 3.880 3.416
+We use absolute translation error and rotation error to evaluate the poses. Translation error is the Euclidean distance between predicted and ground truth. Rotation error is the
+distance
+ geodesic
+
+ on the
+
+⊤
+rotation manifold between prediction and ground truth: eR = arccos (tr Rpred Rgt − 1)/2 .
+As shown in Table 3, VoxelTTO freezes both the VFM backbone and pose decoder. Therefore,
+removing TTO yields pose-estimation accuracy comparable to DA3. The DA3 result in Table 3
+uses encoded camera parameters and is consequently slightly improved. Adding TTO substantially
+improves alignment between predicted and ground-truth poses.
+4.5
+S URFACE A LIGNMENT
+As coupled errors in VFM poses and depth maps can displace the predicted point cloud from the
+ground-truth surface, further validation is carried on DTU. We compare VoxelTTO without TTO,
+VoxelTTO with DA3 camera-parameter encoding Lin et al. (2025) instead of TTO, and the full
+VoxelTTO model. Following DTUAanæ s et al. (2016), we report accuracy (Acc.), completeness
+(Com.), and their mean (Over.), which are all computed with Chamfer distance. As shown in Table 4,
+camera-parameter encoding suppresses misalignment to some extent. VoxelTTO further reduces
+accuracy, completeness, and overall distance.
+8
+Arxiv
+4.6
+A BLATION S TUDIES
+Table 5: Ablation studies on test-view RGB-D NVS under Replica dataset.
+RMSE AbsRel
+δ
+↑ δ1.10 ↑ δ1.25 ↑
+(cm)↓ (%)↓ 1.05
+Experiment
+Setting
+PSNR↑ SSIM↑ LPIPS↓
+Number of
+Gaussian Splits
+1
+2 (Ours)
+4
+27.82
+28.54
+28.35
+0.866
+0.876
+0.876
+0.172
+0.172
+0.179
+8.09
+6.95
+7.21
+0.94
+0.87
+0.86
+98.71
+98.87
+98.93
+99.10
+99.24
+99.24
+99.47
+99.59
+99.54
+Stochastic Solid
+Volume Rendering
+V-V (Ours)
+V-R
+R-R
+R-V
+28.54
+27.11
+21.52
+22.37
+0.876
+0.865
+0.774
+0.798
+0.172
+0.188
+0.269
+0.260
+6.95
+12.01
+27.58
+15.82
+0.87
+1.24
+4.05
+3.04
+98.87
+97.96
+87.76
+89.32
+99.24
+98.62
+95.11
+97.03
+99.59
+99.15
+97.10
+98.66
+Voxel
+Size
+0.0015
+0.002 (Ours)
+0.003
+0.005
+29.34
+28.54
+26.78
+23.44
+0.891
+0.876
+0.856
+0.798
+0.142
+0.172
+0.211
+0.290
+6.62
+6.95
+9.45
+15.22
+0.83
+0.87
+1.18
+2.45
+99.04
+98.87
+98.32
+93.17
+99.36
+99.24
+98.88
+97.15
+99.64
+99.59
+99.32
+98.47
+Depth
+Loss
+Ours
+No Ldepth
+28.54
+28.25
+0.876
+0.873
+0.172
+0.171
+6.95
+7.49
+0.87
+0.94
+98.87
+98.67
+99.24
+99.10
+99.59
+99.53
+All the ablation studies are shown in Table 5. For the self-splitting Gaussian decoder, we evaluate
+the number of Gaussians splits per voxel. Increasing the number of splits improves geometry and
+appearance, but the improvement from 2 to 4 splits is no longer substantial. To evaluate the effect of
+stochastic solid volume rendering on geometry, we compare it with 3DGS rasterization during both
+training and inference. Using 3DGS rasterization substantially reduces appearance and geometric
+accuracy under both stages. Here, V-R denotes stochastic solid volume-rendering supervision (V)
+during training and 3DGS rasterization (R) for NVS at inference. We compare different voxel sizes
+in voxel-aligned 3DGS. Both appearance and geometric performance decline as voxel size increases.
+Balancing performance and computation, and following prior work Jiang et al. (2025), we set the
+size to 0.002m. An RGB loss Lrgb is required to regress color. We therefore ablate the depth loss
+separately. Removing the depth loss slightly reduces geometric accuracy. We further evaluate the
+effect of TTO iterations. As shown in Figure 7, test-view appearance performance (LPIPS) and
+geometric performance (AbsRel) improve substantially as the number of TTO iterations increases.
+We select 20 iterations by balancing accuracy and efficiency.
+Figure 7: Test-view RGB-D synthesis perfor- Figure 8: Runtime of individual modules in Voxmance at different TTO iteration counts.
+elTTO without TTO and in the baselines.
+4.7
+RUNTIME
+For ten 518 × 518 images, VoxelTTO without TTO takes 2.304 s, compared with 2.293 s for DA3,
+indicating negligible overhead from voxel decoding (Figure 8). We retain frozen attention computations in BF16 and LoRA computations in Float32, while baselines use their official precision. BF16
+reduces backbone runtime from 1.959 s to 0.1956 s. Each TTO step requires 0.2662 s forward and
+0.075 s backward, so 20 steps complete in under 7 s and total runtime is under 7.4 s.
+9
+Arxiv
+5
+C ONCLUSION
+We presented VoxelTTO, a voxel-aligned feed-forward 3DGS framework with test-time optimization. First, it reduces the excessive overlap and artifacts of pixel-aligned feed-forward 3DGS by aggregating dense pixel features into global voxel features. A sparse 3D voxel U-Net and self-splitting
+decoder regress Gaussian attributes. Stochastic solid volume rendering replaces 3DGS rasterization
+during training and inference, improving the geometric accuracy of the Gaussian scene. Second,
+pose-supervised TTO adapts lightweight LoRA modules in the VFM backbone to align predicted
+camera parameters with the provided camera priors. Extensive experiments on DTU, Replica, and
+T&T show that VoxelTTO reconstructs geometrically accurate 3DGS scenes and achieves SOTA
+test-view RGB and depth rendering accuracy.
+AI USE STATEMENT
+In this work, we did not use generative AI tools for any tasks requiring disclosure under the ICLR
+2027 AI Policy for Authors. We used generative AI tools solely for language editing and improving
+the readability of the manuscript; create or edit software code. We have reviewed all AI-assisted
+work. All AI-assisted edits were carefully reviewed by the authors to ensure correctness and to
+preserve the intended technical meaning. We take responsibility for the final content of this work,
+including text, claims or artifacts produced with the aid of generative AI.
+R EPRODUCIBILITY STATEMENT
+The train dataset can be found in:
+ScanNetDai et al. (2017)https://scannetpp.mlsg.cit.tum.de/scannetpp; InfinigenRaistrick et al. (2023)https://github.com/princeton-vl/infinigen; ARKitScenesBaruch et al. (2021)https://github.com/apple-aiml-research/ARKitSce
+nes; DL3DVLing et al. (2024)https://dl3dv-10k.github.io/DL3DV-10K/
+The eval dataset can be found in
+ReplicaStraub et al. (2019)https://github.com/facebookresearch/replica-dat
+aset; Tanks and TemplesKnapitsch et al. (2017)https://www.tanksandtemples.org/;
+DTUAanæ s et al. (2016)http://roboimagedata.compute.dtu.dk/?page_id=36
+The code can be found in
+https://anonymous.4open.science/r/VoxelTTO-0432 and https://anonym
+ous.4open.science/r/Geometry-Grounded-Gaussian-Splatting-1B46
+ACKNOWLEDGMENTS
+Acknowledgment The authors gratefully acknowledge the financial support from the Zhejiang
+Provincial “Pioneer” and “Leading Goose + X” Science and Technology Program (Grant No.
+2026C02A1220), the Shanghai Science and Technology Action Plan (Grant No. 21JM0010300), the
+Shanghai Aerospace Science and Technology Innovation Fund (SAST) (Grant No. 2021-037), the
+Special Fund for Technology Innovation Support Projects of Shanghai (Grant Nos. 2021-cyxt-kj1,
+XTCX-KJ-2022-37, and HCXBCY-2023-046), and the National Defense Basic Scientific Research
+Program of China (Grant No. JCKY2021606B002).
+R EFERENCES
+Henrik Aanæ s, Rasmus R. Jensen, George Vogiatzis, Engin Tola, and Anders B. Dahl. Large-scale
+data for multiple-view stereopsis. International Journal of Computer Vision, 120(2):153–168,
+2016. doi: 10.1007/s11263-016-0902-9.
+Gilad Baruch, Zhuoyuan Chen, Afshin Dehghan, Tal Dimry, Yuri Feigin, Peter Fu, Thomas Gebauer,
+Brandon Joffe, Daniel Kurz, Arik Schwartz, et al. Arkitscenes–a diverse real-world dataset for 3d
+indoor scene understanding using mobile rgb-d data. arXiv preprint arXiv:2111.08897, 2021.
+10
+Arxiv
+David Charatan, Sizhe Li, Andrea Tagliasacchi, and Vincent Sitzmann. pixelsplat: 3d gaussian
+splats from image pairs for scalable generalizable 3d reconstruction. In CVPR, 2024.
+Yuedong Chen, Haofei Xu, Chuanxia Zheng, Bohan Zhuang, Marc Pollefeys, Andreas Geiger, TatJen Cham, and Jianfei Cai. Mvsplat: Efficient 3d gaussian splatting from sparse multi-view
+images. arXiv preprint arXiv:2403.14627, 2024.
+Spconv Contributors. Spconv: Spatially sparse convolution library. https://github.com/t
+raveller59/spconv, 2022.
+Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, and Matthias
+Nießner. Scannet: Richly-annotated 3d reconstructions of indoor scenes. In Proc. Computer
+Vision and Pattern Recognition (CVPR), IEEE, 2017.
+Pinxuan Dai, Jiamin Xu, Wenxiang Xie, Xinguo Liu, Huamin Wang, and Weiwei Xu. High-quality
+surface reconstruction using gaussian surfels. In ACM SIGGRAPH 2024 Conference Papers.
+Association for Computing Machinery, 2024.
+Daniel DeTone, Tomasz Malisiewicz, and Andrew Rabinovich. Superpoint: Self-supervised interest
+point detection and description. In Proceedings of the IEEE conference on computer vision and
+pattern recognition workshops, pp. 224–236, 2018.
+Sven Elflein, Ruilong Li, Sérgio Agostinho, Zan Gojcic, Laura Leal-Taixé, Qunjie Zhou, and Aljosa
+Osep. Vgg-t3 : Offline feed-forward 3d reconstruction at scale. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), 2026.
+Yang Fu, Sifei Liu, Amey Kulkarni, Jan Kautz, Alexei A. Efros, and Xiaolong Wang. Colmapfree 3d gaussian splatting. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pp. 20796–20805, June 2024.
+Diego Gomez, Antoine Guédon, Nissim Maruani, Bingchen Gong, and Maks Ovsjanikov. From
+blobs to spokes: High-fidelity surface reconstruction via oriented gaussians, 2026. URL https:
+//arxiv.org/abs/2604.07337.
+Antoine Guédon and Vincent Lepetit. Sugar: Surface-aligned gaussian splatting for efficient 3d
+mesh reconstruction and high-quality mesh rendering. CVPR, 2024.
+Seongbo Ha, Jiung Yeon, and Hyeonwoo Yu. Rgbd gs-icp slam. In European conference on computer vision, pp. 180–197. Springer, 2024.
+Dongchen Han, Yining Li, Tianyu Li, Zixuan Cao, Ziming Wang, Jun Song, Yu Cheng, Bo Zheng,
+and Gao Huang. Vit3 : Unlocking test-time training in vision. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2026.
+Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang,
+and Weizhu Chen. Lora: Low-rank adaptation of large language models. arXiv preprint
+arXiv:2106.09685, 2021.
+Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and Shenghua Gao. 2d gaussian splatting
+for geometrically accurate radiance fields. In SIGGRAPH 2024 Conference Papers. Association
+for Computing Machinery, 2024. doi: 10.1145/3641519.3657428.
+Han Huang, Yulun Wu, Chao Deng, Ge Gao, Ming Gu, and Yu-Shen Liu. Fatesgs: Fast and accurate
+sparse-view surface reconstruction using gaussian splatting with depth-feature consistency. In
+Proceedings of the AAAI Conference on Artificial Intelligence, 2025.
+Lihan Jiang, Yucheng Mao, Linning Xu, Tao Lu, Kerui Ren, Yichen Jin, Xudong Xu, Mulin Yu,
+Jiangmiao Pang, Feng Zhao, et al. Anysplat: Feed-forward 3d gaussian splatting from unconstrained views. ACM Transactions on Graphics (TOG), 44(6):1–16, 2025.
+Nikhil Keetha, Jay Karhade, Krishna Murthy Jatavallabhula, Gengshan Yang, Sebastian Scherer,
+Deva Ramanan, and Jonathon Luiten. Splatam: Splat track & map 3d gaussians for dense rgb-d
+slam. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition,
+pp. 21357–21366, 2024.
+11
+Arxiv
+Nikhil Keetha, Norman Müller, Johannes Schönberger, Lorenzo Porzi, Yuchen Zhang, Tobias Fischer, Arno Knapitsch, Duncan Zauss, Ethan Weber, Nelson Antunes, Jonathon Luiten, Manuel
+Lopez-Antequera, Samuel Rota Bulò, Christian Richardt, Deva Ramanan, Sebastian Scherer, and
+Peter Kontschieder. MapAnything: Universal feed-forward metric 3D reconstruction. In International Conference on 3D Vision (3DV). IEEE, 2026.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3d gaussian splatting for real-time radiance field rendering. ACM Transactions on Graphics, 42(4), July 2023.
+URL https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/.
+Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking
+large-scale scene reconstruction. ACM Transactions on Graphics, 36(4), 2017.
+Yinglong Li, Donghui Shen, Xiaoyu Zhang, Zhichao Ye, Hongyu Wu, Aimin Hao, Guofeng Zhang,
+and Haomin Liu. Querysplat: Decoupling geometry and appearance representations in 3dgs prediction. arXiv preprint arXiv:2608.01186, 2026.
+Haotong Lin, Sili Chen, Jun Hao Liew, Donny Y. Chen, Zhenyu Li, Guang Shi, Jiashi Feng, and
+Bingyi Kang. Depth anything 3: Recovering the visual space from any views. arXiv preprint
+arXiv:2511.10647, 2025.
+Lu Ling, Yichen Sheng, Zhi Tu, Wentian Zhao, Cheng Xin, Kun Wan, Lantao Yu, Qianyu Guo,
+Zixun Yu, Yawen Lu, et al. Dl3dv-10k: A large-scale scene dataset for deep learning-based 3d
+vision. In 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp.
+22160–22169. IEEE, 2024.
+Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai. Scaffold-gs:
+Structured 3d gaussians for view-adaptive rendering. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pp. 20654–20664, 2024.
+Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and
+Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020.
+Bailey Miller, Hanyu Chen, Alice Lai, and Ioannis Gkioulekas. Objects as volumes: A stochastic
+geometry view of opaque solids. IEEE, 2023.
+Maxime Oquab, Timothée Darcet, Theo Moutakanni, Huy V. Vo, Marc Szafraniec, Vasil Khalidov,
+Pierre Fernandez, Daniel Haziza, Francisco Massa, Alaaeldin El-Nouby, Russell Howes, Po-Yao
+Huang, Hu Xu, Vasu Sharma, Shang-Wen Li, Wojciech Galuba, Mike Rabbat, Mido Assran,
+Nicolas Ballas, Gabriel Synnaeve, Ishan Misra, Herve Jegou, Julien Mairal, Patrick Labatut, Armand Joulin, and Piotr Bojanowski. Dinov2: Learning robust visual features without supervision,
+2023.
+Alexander Raistrick, Lahav Lipson, Zeyu Ma, Lingjie Mei, Mingzhe Wang, Yiming Zuo, Karhan
+Kayan, Hongyu Wen, Beining Han, Yihan Wang, Alejandro Newell, Hei Law, Ankit Goyal, Kaiyu
+Yang, and Jia Deng. Infinite photorealistic worlds using procedural generation. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 12630–12641, 2023.
+Jiawei Ren, Michal Tyszkiewicz, Jiahui Huang, and Zan Gojcic. Tokengs: Decoupling 3d gaussian prediction from pixels with learnable tokens. Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, 2026.
+Paul-Edouard Sarlin, Daniel DeTone, Tomasz Malisiewicz, and Andrew Rabinovich. Superglue:
+Learning feature matching with graph neural networks. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pp. 4938–4947, 2020.
+Johannes Lutz Schönberger and Jan-Michael Frahm. Structure-from-motion revisited. In Conference on Computer Vision and Pattern Recognition (CVPR), 2016.
+Johannes Lutz Schönberger, Enliang Zheng, Marc Pollefeys, and Jan-Michael Frahm. Pixelwise
+view selection for unstructured multi-view stereo. In European Conference on Computer Vision
+(ECCV), 2016.
+12
+Arxiv
+Julian Straub, Thomas Whelan, Lingni Ma, Yufan Chen, Erik Wijmans, Simon Green, Jakob J.
+Engel, Raul Mur-Artal, Carl Ren, Shobhit Verma, Anton Clarkson, Mingfei Yan, Brian Budge,
+Yajie Yan, Xiaqing Pan, June Yon, Yuyang Zou, Kimberly Leon, Nigel Carter, Jesus Briales, Tyler
+Gillingham, Elias Mueggler, Luis Pesqueira, Manolis Savva, Dhruv Batra, Hauke M. Strasdat,
+Renzo De Nardi, Michael Goesele, Steven Lovegrove, and Richard Newcombe. The Replica
+dataset: A digital replica of indoor spaces. arXiv preprint arXiv:1906.05797, 2019.
+Shinji Umeyama. Least-squares estimation of transformation parameters between two point patterns.
+IEEE Transactions on pattern analysis and machine intelligence, 13(4):376–380, 1991.
+Jianyuan Wang, Nikita Karaev, Christian Rupprecht, and David Novotny. Vggsfm: Visual geometry
+grounded deep structure from motion. In Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, pp. 21686–21697, 2024a.
+Jianyuan Wang, Minghao Chen, Nikita Karaev, Andrea Vedaldi, Christian Rupprecht, and David
+Novotny. Vggt: Visual geometry grounded transformer. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2025a.
+Jianyuan Wang, Minghao Chen, Shangzhan Zhang, Nikita Karaev, Johannes Schönberger, Patrick
+Labatut, Piotr Bojanowski, David Novotny, Andrea Vedaldi, and Christian Rupprecht. Vggt-ω,
+2026. URL https://arxiv.org/abs/2605.15195.
+Shuzhe Wang, Vincent Leroy, Yohann Cabon, Boris Chidlovskii, and Jerome Revaud. Dust3r: Geometric 3d vision made easy. In CVPR, 2024b.
+Weijie Wang, Yeqing Chen, Zeyu Zhang, Hengyu Liu, Haoxiao Wang, Zhiyuan Feng, Wenkang Qin,
+Feng Chen, Zheng Zhu, Donny Y. Chen, and Bohan Zhuang. Volsplat: Rethinking feed-forward
+3d gaussian splatting with voxel-aligned prediction. arXiv preprint arXiv:2509.19297, 2025b.
+Yifan Wang, Jianjun Zhou, Haoyi Zhu, Wenzheng Chang, Yang Zhou, Zizun Li, Junyi Chen, Jiangmiao Pang, Chunhua Shen, and Tong He. π 3 : Permutation-Equivariant Visual Geometry Learning. arXiv preprint arXiv:2507.13347, 2025c.
+Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment:
+from error visibility to structural similarity. IEEE transactions on image processing, 13(4):600–
+612, 2004.
+Haofei Xu, Songyou Peng, Fangjinhua Wang, Hermann Blum, Daniel Barath, Andreas Geiger, and
+Marc Pollefeys. Depthsplat: Connecting gaussian splatting and depth. In CVPR, 2025.
+Botao Ye, Boqi Chen, Haofei Xu, Daniel Barath, and Marc Pollefeys. Yonosplat: You only need
+one model for feedforward 3d gaussian splatting, 2025.
+Baowen Zhang, Chenxing Jiang, Heng Li, Shaojie Shen, and Ping Tan. Geometry-grounded gaussian splatting. arXiv preprint arXiv:2601.17835, 2026.
+Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable
+effectiveness of deep features as a perceptual metric. In CVPR, 2018.
+Lei Zhou, Haoyu Wu, Akshat Dave, and Dimitris Samaras. Learning 3d reconstruction with priors
+in test time. arXiv preprint arXiv:2604.03878, 2026.
+13

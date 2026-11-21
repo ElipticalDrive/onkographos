@@ -1,0 +1,127 @@
+--- v001.md
++++ v002.md
+@@ -4,88 +4,74 @@
+ 
+ ## Overview
+-Sub-Froxel Temporal Jittering is a technique for real-time volumetric rendering that offsets the sampling position within a froxel along the camera's depth axis to enable temporal supersampling and anti-aliasing. It distinguishes itself from full 3D jittering by restricting movement to the z-axis, thereby reducing spatial variance in the x and y directions to improve temporal stability when accumulating history [S1, unofficial].
++Sub-Froxel Temporal Jittering is a technique for real-time volumetric rendering that offsets the sampling position within a froxel along the camera's depth axis to enable temporal supersampling and anti-aliasing [S1, unofficial]. It distinguishes itself from full 3D jittering by restricting movement to the z-axis, thereby reducing spatial variance in the x and y directions to improve temporal stability when accumulating history [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Current frame camera transformation (position and rotation).
+-- Previous frame's froxel data (density and in-scattered radiance).
+ - Reprojection vector describing camera movement from previous to current frame [S1, unofficial].
+-- A pre-calculated low-discrepancy sequence of jitter offsets (e.g., Halton sequence) [S1, unofficial].
++- A pre-calculated low-discrepancy sequence of jitter offsets [S1, unofficial].
++- Froxel center position in camera space [S1, unofficial].
+ 
+ **Outputs:**
+-- Jittered in-scattered radiance and density values for the current frame's froxel grid.
++- Jittered sampling position for the current frame's froxel grid [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Jitter Sequence:** A 1D array of floating-point offsets. For depth-only jittering, this is a 1D array of length $N$ (typically 8 or 16). For 3D jittering, it is a 3D array or list of 3D vectors [S1, unofficial].
+-- **Reprojection Vector:** A 4D vector or matrix component describing camera translation/rotation. It is constant for all froxels in a frame, as froxels are static world-space entities [S1, unofficial].
++- **Jitter Sequence:** A 1D array of floating-point offsets for depth-only jittering, or a 3D array/list for full 3D jittering [S1, unofficial]. Commonly uses Halton(2,3) of length 8 or 16, or Halton(2,3,5) of length 16 [S1, unofficial].
++- **Reprojection Vector:** A vector describing camera translation and rotation between frames [S1, unofficial]. It is constant for all froxels in a frame, as froxels represent static world-space positions [S1, unofficial].
+ 
+ **Steps:**
+-1. **Acquire Jitter Index:** Determine the current frame index $f$ (modulo the sequence length $L$). Retrieve the jitter offset $\mathbf{j}$ from the pre-calculated sequence at index $f$ [S1, unofficial].
+-2. **Check Reprojection Validity:** Calculate the reprojection vector for the current froxel. If the reprojected position lies outside the bounds of the history buffer, skip jittering and use the current frame's sample directly. This is because jittering is only beneficial when blending with history [S1, unofficial].
+-3. **Determine Jitter Dimension:**
+-   - If using **1D (Depth-Only) Jittering**: Set the x and y components of the offset to 0. The offset is applied only along the z-axis (camera forward direction) [S1, unofficial].
+-   - If using **3D Jittering**: Use the full 3D offset from the sequence (e.g., Halton(2,3,5)) [S1, unofficial].
+-4. **Compute Sampling Position:**
+-   - Let $\mathbf{p}_{center}$ be the center of the current froxel in camera space.
+-   - Let $\mathbf{j}_{scaled}$ be the jitter offset scaled by the froxel's dimensions (or a fixed sub-froxel step size) [S1, unofficial].
+-   - The jittered sampling position is $\mathbf{p}_{sample} = \mathbf{p}_{center} + \mathbf{j}_{scaled}$ [S1, unofficial].
+-5. **Evaluate Radiance:** In the compute shader, evaluate the participating media density and in-scattered radiance at $\mathbf{p}_{sample}$ [S1, unofficial].
+-6. **Accumulate:** Blend the current frame's sample with the reprojected history sample using a temporal accumulation weight [S1, unofficial].
++1. Center the sampling point at the middle of the current froxel in camera space [S1, unofficial].
++2. Acquire a per-frame sub-froxel jitter offset from a pre-defined low-discrepancy sequence [S1, unofficial]. Each froxel uses the same per-frame offset [S1, unofficial].
++3. Check reprojection validity: If the reprojection vector points outside the history buffer, skip jittering and use the centered sampling position directly, as jittering is only useful when blending with history [S1, unofficial].
++4. Apply the jitter offset to the sampling position within the froxel [S1, unofficial]. For depth-only jittering, apply the offset only to the z-axis (camera forward direction), remaining centered in the x and y directions [S1, unofficial].
++5. Evaluate participating media density and in-scattered radiance at the jittered sampling position in the compute shader [S1, unofficial].
++6. Blend the current frame's sample with the reprojected history sample using temporal accumulation [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Pre-calculated Halton(2,3) sequence of length 16 for 1D jitter
++# Pre-calculated Halton(2,3) sequence of length 16 for 1D depth jitter
+ HALTON_1D = [0.5, 0.25, 0.75, 0.125, 0.625, 0.375, 0.875, 0.0625, 
+-             0.5625, 0.3125, 0.8125, 0.0625, 0.5625, 0.3125, 0.8125, 0.0625] 
+-# Note: Exact Halton values depend on implementation; the source cites Halton(2,3) of length 16 [S1, unofficial]
++             0.5625, 0.3125, 0.8125, 0.0625, 0.5625, 0.3125, 0.8125, 0.0625]
+ 
+ def sub_froxel_jittering(froxel_center_camera_space, froxel_depth, frame_index, reprojection_valid):
+     """
+-    froxel_center_camera_space: vec3
++    froxel_center_camera_space: vec3 (center of froxel in camera space)
+     froxel_depth: float (size of froxel along z-axis)
+-    frame_index: int
+-    reprojection_valid: bool
++    frame_index: int (current frame number)
++    reprojection_valid: bool (true if reprojection vector points inside history buffer)
+     """
+     if not reprojection_valid:
+-        # If reprojection fails, no jittering is applied; use center or raw sample [S1, unofficial]
++        # If reprojection fails, no sub-froxel temporal jittering is applied [S1, unofficial]
+         return froxel_center_camera_space
+-    
+-    # Acquire jitter offset from pre-defined set [S1, unofficial]
+-    # Using 1D depth-only jittering as per Frostbite implementation [S1, unofficial]
++
++    # Acquire per-frame sub-froxel jitter offset from pre-defined set [S1, unofficial]
+     jitter_index = frame_index % 16
+     jitter_value = HALTON_1D[jitter_index]
+-    
+-    # Scale jitter to froxel depth. 
+-    # The source states offsetting along depth, remaining centered in x and y [S1, unofficial].
+-    # Assuming jitter_value is in [0, 1], we map it to a fraction of the froxel depth.
+-    # A common approach is to offset by (jitter_value - 0.5) * depth to center the range around 0,
+-    # or simply jitter_value * depth if the sequence is designed for positive offsets.
+-    # The source does not specify the exact scaling formula, but implies a direct offset [S1, unofficial].
+-    # [G] Standard practice for sub-pixel jitter is to map [0,1] to [-0.5, 0.5] or [0, 1] relative to size.
+-    # Given "offset from the center", we assume a symmetric range.
++
++    # Center the sampling point in the middle of the froxel, then offset only along depth [S1, unofficial]
++    # [G] Standard sub-froxel jitter maps [0, 1] to [-0.5, 0.5] relative to froxel size.
+     offset_z = (jitter_value - 0.5) * froxel_depth
+-    
+-    # Apply jitter only along z-axis (depth) [S1, unofficial]
++
++    # Apply jitter offset only to the z-axis, remaining centered in x and y [S1, unofficial]
+     jittered_position = froxel_center_camera_space
+     jittered_position.z += offset_z
+-    
++
+     return jittered_position
+ ```
+ 
+ **Parameters:**
+-- **Sequence Length:** 8 or 16 is common [S1, unofficial].
+-- **Sequence Type:** Halton(2,3) for 1D, Halton(2,3,5) for 3D [S1, unofficial].
+-- **Jitter Axis:** Z-axis (depth) only for 1D jittering [S1, unofficial].
++- Sequence Type: Halton(2,3) for 1D, Halton(2,3,5) for 3D [S1, unofficial].
++- Sequence Length: 8 or 16 [S1, unofficial].
++- Jitter Axis: Z-axis (depth) only for 1D jittering [S1, unofficial].
+ 
+ **Edge Cases:**
+-- **Reprojection Failure:** If the reprojection vector points outside the history buffer, jittering is skipped, and the current frame sample is returned directly [S1, unofficial].
+-- **View-Dependent Phase Functions:** Highly view-dependent phase functions can cause artifacts in reprojected history, but this is noted as out of scope for the primary description [S1, unofficial].
++- Reprojection Failure: If the reprojection vector points outside the history buffer, jittering is skipped and the current frame sample is returned directly [S1, unofficial].
++- View-Dependent Phase Functions: Highly view-dependent phase functions can cause artifacts in reprojected history data, though this is noted as out of scope for the primary method description [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Temporal Stability:** High. By restricting jitter to the z-axis, spatial variance in x and y is minimized, which is critical for stable temporal accumulation in froxel-based rendering [S1, unofficial].
+-- **Performance:** Low overhead. The jitter offset is pre-calculated and passed as a shader parameter, requiring no additional computation per froxel beyond the offset addition [S1, unofficial].
+-- **Memory:** Minimal. Requires storing a small pre-calculated sequence (e.g., 16 floats) [S1, unofficial].
+-- **Strengths:** Reduces flickering and aliasing in static participating media without introducing significant spatial noise [S1, unofficial].
+-- **Limitations:** Only effective when reprojection is valid. Does not address view-dependent phase function artifacts [S1, unofficial].
++- Temporal Stability: High. Restricting jitter to the z-axis minimizes spatial variance in x and y, which is critical for stable temporal accumulation [S1, unofficial].
++- Performance: Low overhead. The jitter offset is pre-calculated and passed as a shader parameter, requiring no additional per-froxel computation beyond the offset addition [S1, unofficial].
++- Memory: Minimal. Requires storing a small pre-calculated sequence (e.g., 16 floats) [S1, unofficial].
++- Strengths: Reduces flickering and aliasing in static participating media without introducing significant spatial noise [S1, unofficial].
++- Limitations: Only effective when reprojection is valid. Does not address view-dependent phase function artifacts [S1, unofficial].
+ 
+ ## Background

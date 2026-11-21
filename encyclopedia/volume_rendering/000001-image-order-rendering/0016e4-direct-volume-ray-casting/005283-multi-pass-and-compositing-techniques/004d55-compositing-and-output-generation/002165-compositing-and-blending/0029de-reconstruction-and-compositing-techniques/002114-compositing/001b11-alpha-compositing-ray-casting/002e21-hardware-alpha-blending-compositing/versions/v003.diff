@@ -1,0 +1,112 @@
+--- v002.md
++++ v003.md
+@@ -4,24 +4,24 @@
+ 
+ ## Overview
+-Hardware Alpha Blending Compositing is a technique for direct volume ray casting that leverages the fixed-function or programmable pipeline of a GPU to perform the front-to-back (Over) or back-to-front (Under) compositing equations during rasterization [S2, book]. It solves the problem of accumulating transmittance and color along a ray by mapping the scalar volume data to texture alpha channels and rendering proxy geometry (such as slices or splats) with specific blend factors [S1, unofficial][S2, book]. It differs from software-based accumulation by offloading the per-sample arithmetic to the hardware blend unit, and from [Back-to-Front Compositing](2078-back-to-front-compositing.md) by relying on the GPU's depth buffer and blend state rather than explicit sorting or shader-based accumulation loops [S2, book].
++Hardware Alpha Blending Compositing is a technique for direct volume ray casting that leverages the GPU's fixed-function or programmable pipeline to perform front-to-back (Over) or back-to-front (Under) compositing equations during rasterization [S2, book]. It solves the problem of accumulating transmittance and color along a ray by mapping scalar volume data to texture alpha channels and rendering proxy geometry (such as slices or splats) with specific blend factors [S1, unofficial][S2, book]. It differs from software-based accumulation by offloading per-sample arithmetic to the hardware blend unit, and from [Back-to-Front Compositing](2078-back-to-front-compositing.md) by relying on the GPU's depth buffer and blend state rather than explicit sorting or shader-based accumulation loops [S2, book].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D scalar volume dataset; camera parameters (position, orientation, projection); proxy geometry (e.g., quads representing slices or splats) positioned along the ray path.
+-*   **Output:** A 2D color buffer containing the composited volume image.
++*   **Input:** A 3D scalar volume dataset; camera parameters (position, orientation, projection); proxy geometry (e.g., quads representing slices or splats) positioned along the ray path [S1, unofficial][S2, book].
++*   **Output:** A 2D color buffer containing the composited volume image [S2, book].
+ 
+ **Data Structures:**
+ *   **Volume Texture:** A 2D or 3D texture where the RGB channels store the color (or luminance) and the Alpha channel stores the opacity derived from the scalar value [S1, unofficial].
+-    *   *Layout:* RGBA8 (8 bits per channel) is typical. The alpha value is mapped from the scalar intensity [S1, unofficial].
+-*   **Proxy Geometry:** A set of polygons (typically quads) representing the volume slices or splats.
+-    *   *Layout:* Vertex positions define the spatial location of the sample along the ray.
++    *   *Layout:* RGBA8 (8 bits per channel) is typical [G]. The alpha value is mapped from the scalar intensity [S1, unofficial].
++*   **Proxy Geometry:** A set of polygons (typically quads) representing the volume slices or splats [S1, unofficial].
++    *   *Layout:* Vertex positions define the spatial location of the sample along the ray [G].
+ 
+ **Steps:**
+-1.  **Texture Preparation:** Map the scalar luminance/intensity value of the volume data directly to the alpha channel of the RGBA texture buffer. This replaces binary alpha testing (alpha=0 or 255) with a continuous ramp, which is required for proper visual blending of semi-transparent slices [S1, unofficial].
++1.  **Texture Preparation:** Map the scalar luminance/intensity value directly to the alpha channel of the RGBA texture buffer, replacing binary alpha testing (alpha=0 or 255) with a continuous ramp required for proper visual blending of semi-transparent slices [S1, unofficial].
+     *   *Formula:* $\alpha_{tex} = f(\text{luminance})$, where $f$ is a mapping function (e.g., linear or thresholded ramp) [S1, unofficial].
+-2.  **Blend State Configuration:** Enable blending and set the source and destination blending factors based on the desired compositing operator [S2, book].
+-    *   For the **Over operator** (front-to-back): Set `glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)` [S1, unofficial]. This corresponds to the equation $C_o = \alpha_s C_s + (1 - \alpha_s) C_d$ [S2, book].
+-    *   For the **Under operator** (back-to-front): Set source factor to $(1 - \text{destination alpha})$ and destination factor to $1$ [S2, book].
+-3.  **Geometry Rendering:** Render the proxy geometry (slices/splats) in the correct order (front-to-back for Over, back-to-front for Under) [S2, book].
++2.  **Blend State Configuration:** Enable blending and set source/destination factors based on the compositing operator [S2, book].
++    *   For the **Over operator** (front-to-back): Set source factor to $1$ and destination factor to $(1 - \text{source alpha})$ [S2, book]. This corresponds to $C_o = C_s + (1 - \alpha_s)C_d$ and $\alpha_o = \alpha_s + (1 - \alpha_s)\alpha_d$ [S2, book].
++    *   For the **Under operator** (back-to-front): Set source factor to $(1 - \text{destination alpha})$ and destination factor to $1$ [S2, book]. This corresponds to $C_o = (1 - \alpha_d)C_s + C_d$ and $\alpha_o = 1 - (1 - \alpha_s)(1 - \alpha_d)$ [S2, book].
++3.  **Geometry Rendering:** Render proxy geometry in the correct order (front-to-back for Over, back-to-front for Under) [S2, book].
+     *   *Note:* If using slices, ensure the Z-positioning is calculated correctly. Using integer division for depth calculation (e.g., `2 * i / z`) causes incorrect Z-positioning because it evaluates to 0 when `2 * i < z` and 1 otherwise, resulting in only two distinct depth planes instead of continuous slices. At least one operand must be cast to float [S1, unofficial].
+ 4.  **Depth Testing:** Use the depth buffer to handle occlusion. If blending opaque geometry into the volume, the opaque geometry must be drawn *before* the volume. Otherwise, the depth test will cull proxy fragments that are inside the opaque objects [S2, book].
+@@ -30,25 +30,34 @@
+ **Pseudocode:**
+ ```python
+-# 1. Setup
+-glEnable(GL_BLEND)
+-# For standard front-to-back (Over) compositing
+-glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+-glEnable(GL_TEXTURE_2D)
++def hardware_alpha_blend_compositing(samples, operator="over"):
++    """
++    Simulates hardware alpha blending compositing exactly as described in the evidence.
++    samples: list of tuples (color_r, color_g, color_b, alpha, depth)
++    operator: 'over' for front-to-back, 'under' for back-to-front
++    """
++    # Initialize accumulated color and alpha to zero
++    acc_color = [0.0, 0.0, 0.0]
++    acc_alpha = 0.0
+ 
+-# 2. Render Opaque Geometry (if any)
+-# Must be done before volume to prevent depth culling of volume fragments
+-render_opaque_geometry()
++    # Process samples in the required order
++    for c_r, c_g, c_b, a, _ in samples:
++        if operator == "over":
++            # Hardware blend factors: src=1, dst=(1-src_alpha)
++            # Equation: C_o = C_s + (1 - alpha_s) * C_d
++            #           alpha_o = alpha_s + (1 - alpha_s) * alpha_d
++            acc_color[0] = c_r + (1.0 - a) * acc_color[0]
++            acc_color[1] = c_g + (1.0 - a) * acc_color[1]
++            acc_color[2] = c_b + (1.0 - a) * acc_color[2]
++            acc_alpha = a + (1.0 - a) * acc_alpha
++        else: # under
++            # Hardware blend factors: src=(1-dst_alpha), dst=1
++            # Equation: C_o = (1 - alpha_d) * C_s + C_d
++            #           alpha_o = 1 - (1 - alpha_s) * (1 - alpha_d)
++            acc_color[0] = (1.0 - acc_alpha) * c_r + acc_color[0]
++            acc_color[1] = (1.0 - acc_alpha) * c_g + acc_color[1]
++            acc_color[2] = (1.0 - acc_alpha) * c_b + acc_color[2]
++            acc_alpha = 1.0 - (1.0 - a) * (1.0 - acc_alpha)
+ 
+-# 3. Render Volume Slices
+-# Assuming 'slices' is a list of proxy quads with pre-calculated float Z positions
+-for slice in slices:
+-    glBindTexture(GL_TEXTURE_2D, slice.texture_id)
+-    # Ensure Z-position uses float division to avoid integer truncation pitfalls
+-    # glVertex3f(x, y, float(2 * i) / float(z) - 1.0)
+-    render_quad(slice.vertices)
+-
+-# 4. Final Composite (if using Under operator or separate buffers)
+-# If separate buffers were used for geometry and volume,
+-# composite them here using geometry depth values for culling.
++    return acc_color, acc_alpha
+ ```
+ 
+@@ -71,14 +80,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of proxy fragments (slices/splats) rendered. The hardware blend unit performs the compositing in constant time per fragment [S2, book].
+-*   **Memory Complexity:** $O(1)$ additional memory per fragment for the blend state, plus storage for the volume texture and depth buffer [S2, book].
+-*   **Performance:** Generally fast for moderate slice counts due to hardware acceleration. However, it can suffer from overdraw if many slices are rendered per pixel [S2, book].
+-*   **Strengths:** Simple implementation using standard OpenGL/DirectX states; leverages GPU hardware for blending; avoids CPU-side accumulation loops [S2, book].
+-*   **Limitations:** Requires correct rendering order (front-to-back for Over); depth buffer conflicts with opaque geometry; limited to simple compositing operators (Over/Under); DVI-based hardware compositing is specialized and not general-purpose [S1, unofficial][S2, book][S3, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of proxy fragments (slices/splats) rendered [G].
++*   **Memory Complexity:** $O(1)$ additional memory per fragment for the blend state, plus storage for the volume texture and depth buffer [G].
++*   **Strengths:** Simple implementation using standard graphics states; leverages GPU hardware for blending; avoids CPU-side accumulation loops [S2, book].
++*   **Limitations:** Requires correct rendering order; depth buffer conflicts with opaque geometry; limited to simple Over/Under operators; DVI-based hardware compositing is specialized and not general-purpose [S1, unofficial][S2, book][S3, unofficial].
+ *   **When to Use:** When rendering simple volume slices or splats with standard alpha blending and when hardware acceleration is desired without custom shaders [S2, book].
+ *   **When Not to Use:** When complex compositing operators are needed; when opaque geometry and volume must be blended seamlessly in a single pass without separate buffers; when high precision or custom accumulation is required [S2, book].
+ 
+ ## Background
+-Hardware Alpha Blending Compositing was developed as a method to leverage existing GPU hardware for volume rendering, moving away from software-based accumulation. It is based on the standard alpha compositing equations (Over and Under operators) [S2, book]. The technique has been used in various contexts, including standard OpenGL volume rendering tutorials [S1, unofficial] and specialized visualization clusters like the HP MDS Visualization cluster, which used special-purpose compositing hardware (HP Sepia-2a) for distributed rendering [S3, unofficial].
++Hardware Alpha Blending Compositing was developed as a method to leverage existing GPU hardware for volume rendering, moving away from software-based accumulation [S2, book]. It is based on the standard alpha compositing equations (Over and Under operators) [S2, book]. The technique has been used in various contexts, including standard OpenGL volume rendering tutorials [S1, unofficial] and specialized visualization clusters like the HP MDS Visualization cluster, which used special-purpose compositing hardware (HP Sepia-2a) for distributed rendering [S3, unofficial].
+ 
+ ## Sources

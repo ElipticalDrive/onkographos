@@ -1,0 +1,117 @@
+# Boundary Face Center Value Adjustment
+
+Also called: Modifying the center value of a boundary face
+
+## Overview
+Boundary Face Center Value Adjustment is a technique used in multiresolution isosurface extraction to ensure continuity of the isosurface at boundaries where resolution levels change [S1, unofficial]. It solves the problem where an isosurface intersects opposite edges of a boundary face, which can cause visual cracks if the high-resolution isoline does not pass through specific intersection points [S1, unofficial]. It sets itself apart from sibling methods by intentionally modifying the underlying scalar data values at boundary face centers rather than post-processing the mesh geometry or reconnecting polygons [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Scalar field data $V$.
+*   Isovalue threshold $iso$.
+*   A boundary face $F$ at a multiresolution boundary where resolution differs by one level.
+*   Vertices of the face: $v_1, v_2, v_3, v_4$.
+*   Center vertex $c$ of the face.
+*   Midpoint $m$ of the edge connecting the two vertices on the low-resolution side (or derived from geometry).
+*   Scalar value at a specific intersection point $p$ on the high-resolution edge.
+
+**Outputs:**
+*   Updated scalar value $v(c)$ at the center vertex $c$.
+
+**Data Structures:**
+*   The scalar field is stored in a multiresolution hierarchy (e.g., wavelet tree).
+*   Boundary faces are identified as those shared between cells of different resolution levels.
+*   Each face has a center vertex $c$ whose scalar value is stored separately or derived.
+
+**Steps:**
+1.  Identify boundary faces where the isosurface intersects.
+2.  For each such face, determine if the isoline intersects opposite edges. If it intersects adjacent edges, no adjustment is typically needed for continuity along the shared boundary [S1, unofficial].
+3.  If the isoline intersects opposite edges, calculate the scalar value at the center vertex $c$ to force the high-resolution isoline to pass through a specific intersection point $p$ on one of the high-resolution edges.
+4.  Apply the adjustment formula based on the scalar value $e$ at point $p$.
+5.  (Optional/Reversible) To undo the modification before further processing (like forward wavelet transform), restore $v(c)$ to the average of the four vertex values.
+
+**Formulas:**
+Let $e$ be the scalar value at point $p$ (normalized or relative to the isovalue context as per the source's garbled text, likely $e = V(p) - iso$ or similar, but the source uses $e$ directly in the conditional). The source text is garbled, but the logic implies:
+Let $m'$ be the scalar value at the midpoint $m$ (or a related reference value).
+Let $v(m')$ be the scalar value at $m$.
+
+The update rule for $v(c)$ is:
+If $e > 0.5$:
+$$ e = 2e - 1 $$
+$$ v(c) = iso - e \cdot (m' - v(m')) + v(m') $$
+Else:
+$$ e = 2e $$
+$$ v(c) = iso - e \cdot (m' - v(m')) + v(m') $$
+
+*Note: The source text contains significant OCR errors in the formula. The variable $m'$ and $v(m')$ are not clearly defined in the provided text snippet, but the structure suggests a linear interpolation or correction based on the error $e$ and a reference value $m$. The term $iso - e \cdot (m' - v(m')) + v(m')$ resembles a correction to align the value at $c$ such that the isoline passes through $p$. Without clearer source text, the exact definition of $m'$ and $v(m')$ is ambiguous, but the conditional structure is preserved.*
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adjust_boundary_face_center(v, iso, p, m, m_prime, v_m_prime):
+    """
+    Adjusts the scalar value at the center of a boundary face to ensure
+    isosurface continuity.
+    
+    Args:
+        v: Dictionary or array of scalar values at vertices.
+        iso: Isovalue threshold.
+        p: Point on the high-resolution edge where the isoline must pass.
+        m: Midpoint of the edge on the low-resolution side.
+        m_prime: Reference scalar value (definition ambiguous in source).
+        v_m_prime: Scalar value at m_prime.
+        
+    Returns:
+        New scalar value for the center vertex c.
+    """
+    # Calculate e, the scalar value at p. 
+    # Source text is garbled: "e = scalar value at p". 
+    # Assuming e is the value V(p) or a normalized error. 
+    # Given the condition e > 0.5, it likely refers to a normalized value 
+    # or the value relative to a range. We assume e is provided or calculated 
+    # as V(p) for the sake of structure, but the source implies e is derived.
+    # Let's assume e is the scalar value at p for the conditional check.
+    e = v[p] 
+    
+    if e > 0.5:
+        e = 2 * e - 1
+        v_c = iso - e * (m_prime - v_m_prime) + v_m_prime
+    else:
+        e = 2 * e
+        v_c = iso - e * (m_prime - v_m_prime) + v_m_prime
+        
+    return v_c
+
+def restore_boundary_face_center(v, face_vertices):
+    """
+    Reverses the adjustment by setting the center value to the average 
+    of the four vertices.
+    """
+    v1, v2, v3, v4 = face_vertices
+    v_center = (v[v1] + v[v2] + v[v3] + v[v4]) / 4.0
+    return v_center
+```
+
+**Parameters:**
+*   Isovalue $iso$: The threshold for surface extraction.
+*   Threshold for $e$: 0.5.
+
+**Edge Cases and Pitfalls:**
+*   **Opposite Edges Intersection:** If the isoline passes through opposite edges, it may be impossible to adjust $v(c)$ so that the high-resolution isoline passes through *both* intersection points $p$ and $q$. The implementation adjusts the value so the isoline passes through $p$, guaranteeing coincidence along at least half the face. This may cause hairline cracks on the other half [S1, unofficial].
+*   **Reversibility:** The modification is reversible. Before performing any iteration of the forward wavelet transform involving only the high-resolution region, restore the scalar values at the centers of all faces along multiresolution boundaries by setting the scalar value at the center of a face to the average of the scalar values of its four vertices [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The change at a particular vertex is a function of only its immediate neighbor and the current isovalue, making the operation efficient [S1, unofficial].
+*   **Memory Complexity:** Requires storage for the scalar field and identification of boundary faces. No additional large data structures are mentioned.
+*   **Measured Performance:** Experimental results on multiresolution boundary faces intersecting the isosurface show that approximately 4.19% develop cracks [S1, unofficial]. The maximum crack area is 2.84% of the low-resolution boundary face area, while the average crack area is 1.22% [S1, unofficial].
+*   **Strengths:** Efficient, local operation; ensures continuity along at least half the face; reversible.
+*   **Limitations:** May leave hairline cracks on the other half of the face in specific geometric configurations (opposite edge intersections).
+
+## Background
+*   **Origin:** The technique is described in "Seamless Multiresolution Isosurfaces Using Wavelets" [S1, unofficial].
+*   **History:** It is part of a broader approach to multiresolution isosurfacing that uses wavelets to manage data resolution and addresses the specific issue of cracks at resolution boundaries.
+*   **Usage:** Used in volume rendering and scientific visualization where seamless isosurfaces are required across multiresolution datasets.
+
+## Sources
+[S1] Seamless Multiresolution Isosurfaces Using Wavelets, https://digital.library.unt.edu/ark:/67531/metadc702274/, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,165 @@
+# Volume Texture Ping-Pong Swap
+
+Also called: 3D Texture Field Manager, Double-Buffered Volume Upload
+
+## Overview
+Manages dynamic 3D scalar fields in GPU memory using a double-buffered ping-pong swap to avoid full re-uploads on field updates [S1, unofficial]. It differs from [3D Texture Initialization](13158-3d-texture-initialization.md) by handling subsequent updates efficiently, and from [Volume Atlas Texture Update](7157-volume-atlas-texture-update.md) by operating on single 3D textures rather than atlas layouts.
+
+## How it works
+**Inputs:** A scalar field data array (shape $N_x \times N_y \times N_z$), a boolean flag `float32Filterable`, and an optional new field for updates.
+**Outputs:** An OpenGL/WebGPU 3D texture bound to a sampling node, ready for ray marching.
+
+**Data Structures:**
+The manager maintains two texture slots (ping-pong buffers). Each slot contains:
+- `texture`: The GPU texture object.
+- `data`: The CPU-side float32 or float16 array backing the texture.
+- `version`: An integer counter, incremented on each update to signal the shader to re-sample.
+- `format`: `R32F` (Float32Array) or `R16F` (Uint16Array/HalfFloat).
+- `min`, `max`: Normalization bounds for the field.
+
+**Steps:**
+
+1. **Initialization (`createVolumeTexture`):**
+   - Allocate the first `Data3DTexture` slot.
+   - Determine format: If `float32Filterable` is true, use `R32F` with `LinearFilter`; otherwise, fallback to `R16F` with `Uint16Array` [S1, unofficial].
+   - Compute `min` and `max` of the input field data.
+   - **Edge Case Handling:**
+     - If `min == max`, set `max = min + 1` to prevent division by zero during normalization [S1, unofficial].
+     - Replace any non-finite values (NaN, Inf) in the data with `min`. If all values are non-finite, use 0 [S1, unofficial].
+   - Upload data to the GPU texture.
+   - Bind the texture to the TSL sampling node.
+
+2. **Update (`setField`):**
+   - Check if `newField.shape` matches the current field shape. If not, return `false` (caller must rebuild) [S1, unofficial].
+   - Identify the inactive ping-pong slot.
+   - Copy `newField` data into the inactive slot's CPU buffer.
+   - Increment the inactive slot's `version` property.
+   - Update the sampling node's value to point to the inactive slot.
+   - The GPU driver handles the asynchronous upload of the inactive slot's data.
+
+3. **Disposal (`dispose`):**
+   - Call `dispose()` on both ping-pong textures.
+   - Clear VRAM ledger entries.
+   - Double disposal is idempotent [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class VolumeTexturePingPongSwap:
+    def __init__(self, field, float32_filterable):
+        self.float32_filterable = float32_filterable
+        self.slots = [None, None]
+        self.active_slot_index = 0
+        self.create_texture(field)
+
+    def create_texture(self, field):
+        # Determine format
+        if self.float32_filterable:
+            dtype = np.float32
+            gl_format = 'R32F'
+        else:
+            dtype = np.float16
+            gl_format = 'R16F'
+
+        # Handle non-finite values
+        data = np.array(field, dtype=np.float32)
+        if not np.isfinite(data).any():
+            data[:] = 0.0
+        else:
+            finite_data = data[np.isfinite(data)]
+            if finite_data.size > 0:
+                min_val = np.min(finite_data)
+                # Replace non-finite with min
+                data[~np.isfinite(data)] = min_val
+            else:
+                min_val = 0.0
+                data[:] = 0.0
+        
+        max_val = np.max(data)
+        
+        # Prevent division by zero
+        if min_val == max_val:
+            max_val = min_val + 1.0
+
+        # Create first slot
+        self.slots[0] = {
+            'data': data.astype(dtype),
+            'min': min_val,
+            'max': max_val,
+            'version': 1,
+            'texture': upload_to_gpu(data, gl_format)
+        }
+        self.slots[1] = None # Second slot allocated on first update or pre-allocated
+        
+        # Bind to node
+        bind_texture(self.slots[0]['texture'])
+
+    def set_field(self, new_field):
+        # Check shape match
+        if new_field.shape != self.slots[self.active_slot_index]['data'].shape:
+            return False
+
+        # Swap to inactive slot
+        inactive_index = 1 - self.active_slot_index
+        
+        # Allocate inactive slot if not exists
+        if self.slots[inactive_index] is None:
+            dtype = np.float32 if self.float32_filterable else np.float16
+            self.slots[inactive_index] = {
+                'data': np.zeros_like(new_field, dtype=dtype),
+                'min': 0,
+                'max': 1,
+                'version': 0,
+                'texture': None
+            }
+
+        # Copy data
+        new_data = np.array(new_field, dtype=np.float32)
+        if not np.isfinite(new_data).any():
+            new_data[:] = 0.0
+        else:
+            finite_data = new_data[np.isfinite(new_data)]
+            if finite_data.size > 0:
+                min_val = np.min(finite_data)
+                new_data[~np.isfinite(new_data)] = min_val
+            else:
+                min_val = 0.0
+                new_data[:] = 0.0
+        
+        max_val = np.max(new_data)
+        if min_val == max_val:
+            max_val = min_val + 1.0
+
+        self.slots[inactive_index]['data'][:] = new_data.astype(self.slots[inactive_index]['data'].dtype)
+        self.slots[inactive_index]['min'] = min_val
+        self.slots[inactive_index]['max'] = max_val
+        self.slots[inactive_index]['version'] += 1
+        
+        # Upload and swap
+        upload_to_gpu(self.slots[inactive_index]['data'], 'R32F' if self.float32_filterable else 'R16F')
+        bind_texture(self.slots[inactive_index]['texture'])
+        self.active_slot_index = inactive_index
+        return True
+
+    def dispose(self):
+        for slot in self.slots:
+            if slot is not None:
+                delete_gpu_texture(slot['texture'])
+        self.slots = [None, None]
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ for swap logic, $O(N)$ for data copy/upload where $N$ is the number of voxels.
+- **Memory Complexity:** $2 \times N \times \text{bytes\_per\_voxel}$.
+- **Strengths:** Avoids full texture recreation for dynamic fields. Efficient for frequent updates.
+- **Limitations:** Requires shape consistency. Fallback to 16-bit may reduce precision.
+- **When to use:** Dynamic scalar fields (e.g., time-varying density).
+- **When not to use:** Static fields (use [3D Texture Initialization](13158-3d-texture-initialization.md)).
+
+## Background
+Originated in the `webpic` project by rusaitis [S1, unofficial]. Designed to manage dynamic 3D scalar fields in GPU memory efficiently.
+
+## Sources
+[S1] rusaitis/webpic, https://github.com/rusaitis/webpic, fetched 2026-10-27 (unofficial)

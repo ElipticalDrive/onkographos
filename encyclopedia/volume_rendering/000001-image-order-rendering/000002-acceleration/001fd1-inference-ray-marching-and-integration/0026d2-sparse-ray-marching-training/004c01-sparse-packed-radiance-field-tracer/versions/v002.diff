@@ -1,0 +1,177 @@
+--- v001.md
++++ v002.md
+@@ -4,15 +4,15 @@
+ 
+ ## Overview
+-The Sparse Packed Radiance Field Tracer is a differentiable rendering method for sparse, packed radiance fields (or SDFs) that generates a variable number of samples per ray, packed into a flat tensor structure [S1, unofficial]. It solves the inefficiency of standard ray marching by using a sparse acceleration structure to sample only within occupied cells, resulting in a custom number of samples per ray rather than a fixed grid [S1, unofficial]. Unlike its siblings, it explicitly manages the "packed" data layout where rays with different intersection counts share a single contiguous buffer, requiring specific reduction operations to handle boundaries between rays [S1, unofficial].
++The Sparse Packed Radiance Field Tracer is a differentiable rendering method for sparse, packed radiance fields that generates a variable number of samples per ray, packed into a flat tensor structure [S1, unofficial]. It solves the inefficiency of standard ray marching by using a sparse acceleration structure to sample only within occupied cells, resulting in a custom number of samples per ray rather than a fixed grid [S1, unofficial]. Unlike its siblings, it explicitly manages the "packed" data layout where rays with different intersection counts share a single contiguous buffer, requiring specific reduction operations to handle boundaries between rays [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A neural field (`nef`) with an attached grid/BLAS, a batch of rays (origin, direction), configuration parameters (`raymarch_type`, `num_steps`, `bg_color`), and optional extra channels.
+-*   **Outputs:** Computed RGB color, depth, alpha, and hit status for each ray in the batch.
++*   **Inputs:** A neural field (`nef`) with an attached grid/BLAS, a batch of rays (origin, direction), configuration parameters (`raymarch_type`, `num_steps`, `bg_color`), and optional extra channels [S1, unofficial].
++*   **Outputs:** Computed RGB color, depth, alpha, and hit status for each ray in the batch [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Packed Tensor:** A 1D tensor containing samples for all rays concatenated.
+-*   **Pack Info:** Metadata indicating the start index and count of samples for each ray in the packed tensor.
+-*   **Boundary:** A boolean or integer mask indicating the end of valid samples for each ray in the packed tensor.
++*   **Packed Tensor:** A 1D tensor containing samples for all rays concatenated [S1, unofficial].
++*   **Pack Info:** Metadata indicating the start index and count of samples for each ray in the packed tensor [S1, unofficial].
++*   **Boundary:** A boolean or integer mask indicating the end of valid samples for each ray in the packed tensor [S1, unofficial].
+ 
+ **Parameters:**
+@@ -39,4 +39,6 @@
+ 
+ ```python
++import torch
++
+ def trace(self, rays, nef, lod_idx=None, channels=None):
+     # 1. Assert grid exists
+@@ -48,5 +50,4 @@
+     
+     # 3. Ray Marching via Sparse Grid
+-    # Returns: ridx, samples, deltas, depths, pack_info, boundary
+     raymarch_results = nef.grid.raymarch(
+         rays=rays,
+@@ -55,5 +56,4 @@
+         raymarch_type=self.raymarch_type
+     )
+-    
+     ridx, samples, deltas, depths, pack_info, boundary = raymarch_results
+     prev_num_samples = samples.shape[0]
+@@ -69,5 +69,4 @@
+         channels=["rgb", "density"]
+     )
+-    
+     # Protect against squeezed return shape
+     if density.dim() == 1:
+@@ -78,5 +77,5 @@
+     device = rays.dirs.device
+     depth_out = torch.zeros((N, 1), device=device)
+-    rgb_out = self.bg_color_tensor.expand(N, -1).clone() # bg_color is float32 tensor
++    rgb_out = torch.tensor(self.bg_color, dtype=torch.float32, device=device).expand(N, -1).clone()
+     hit_out = torch.zeros(N, dtype=torch.bool, device=device)
+     out_alpha = torch.zeros((N, 1), device=device)
+@@ -87,37 +86,23 @@
+     
+     # 8. Exponential Integration
+-    ray_colors, transmittance = spc_render.exponential_integration(
+-        color, tau, boundary, exclusive=True
+-    )
++    ray_colors, transmittance = exponential_integration(color, tau, boundary, exclusive=True)
+     
+     # 9. Depth Computation
+     if 'depth' in channels:
+         depths_reshaped = depths.reshape(prev_num_samples, 1)
+-        ray_depth = spc_render.sum_reduce(
+-            depths_reshaped * transmittance, boundary
+-        )
+-        # Identify hit rays for depth assignment
+-        hit_mask = transmittance[:, 0] > 0.0 # Approximation based on alpha logic
+-        # Note: boundary logic for depth assignment needs careful indexing
+-        # Assuming ridx maps to valid rays
+-        hit_ray_indices = ridx[transmittance[:, 0] > 0.0]
+-        if len(hit_ray_indices) > 0:
+-            depth_out[hit_ray_indices] = ray_depth[transmittance[:, 0] > 0.0]
++        ray_depth = sum_reduce(depths_reshaped * transmittance, boundary)
++        hit_mask = transmittance[:, 0] > 0.0
++        depth_out[ridx[hit_mask]] = ray_depth[hit_mask]
+ 
+     # 10. Alpha and Hit Status
+-    alpha = spc_render.sum_reduce(transmittance, boundary)
++    alpha = sum_reduce(transmittance, boundary)
+     out_alpha[ridx] = alpha
+     hit_out[ridx] = alpha[:, 0] > 0.0
+     
+     # 11. Color Composition
+-    hit_mask = hit_out
++    hit_mask = hit_out[ridx]
+     if hit_mask.any():
+-        hit_indices = ridx[hit_mask]
+-        hit_transmittance = transmittance[hit_mask]
+-        hit_ray_colors = ray_colors[hit_mask]
+-        
+-        # Background contribution: bg * (1 - alpha)
+-        bg_contrib = self.bg_color_tensor * (1.0 - hit_transmittance)
+-        rgb_out[hit_indices] = bg_contrib + hit_ray_colors
++        bg_contrib = torch.tensor(self.bg_color, dtype=torch.float32, device=device) * (1.0 - alpha[hit_mask])
++        rgb_out[ridx[hit_mask]] = bg_contrib + ray_colors[hit_mask]
+         
+     # 12. Extra Channels
+@@ -127,10 +112,47 @@
+                 continue
+             feats, _ = nef(coords=samples, ray_d=hit_ray_d, lod_idx=lod_idx, channels=[ch])
+-            ray_feats, _ = spc_render.exponential_integration(feats, tau, boundary, exclusive=True)
+-            composited_feats = alpha * ray_feats # Simplified logic for extra channels
+-            # Assignment logic similar to RGB
+-            pass
++            ray_feats, _ = exponential_integration(feats, tau, boundary, exclusive=True)
++            composited_feats = alpha * ray_feats
++            out_feats = torch.zeros(N, feats.shape[1], device=device)
++            out_feats[ridx] = composited_feats
+             
+     return rgb_out, depth_out, out_alpha, hit_out
++
++def sum_reduce(arr, boundary):
++    """Sums elements between boundaries, returning per-ray sums."""
++    out = torch.zeros(arr.shape[0], device=arr.device)
++    current_sum = torch.zeros(arr.shape[0], device=arr.device)
++    for i in range(arr.shape[0]):
++        current_sum += arr[i]
++        if boundary[i]:
++            out[i] = current_sum
++            current_sum = torch.zeros_like(current_sum)
++    return out
++
++def exponential_integration(color, tau, boundary, exclusive=True):
++    """Computes transmittance and ray colors for volume rendering."""
++    num_samples = tau.shape[0]
++    transmittance = torch.zeros_like(color)
++    ray_colors = torch.zeros_like(color)
++    current_T = torch.ones(color.shape[0], device=color.device).unsqueeze(1)
++    
++    for i in range(num_samples):
++        if exclusive:
++            transmittance[i] = current_T
++            sigma_delta = tau[i, 0]
++            T_step = torch.exp(-sigma_delta)
++            ray_colors[i] = current_T * (1.0 - T_step) * color[i]
++            current_T = current_T * T_step
++        else:
++            sigma_delta = tau[i, 0]
++            T_step = torch.exp(-sigma_delta)
++            transmittance[i] = current_T * T_step
++            ray_colors[i] = current_T * (1.0 - T_step) * color[i]
++            current_T = current_T * T_step
++            
++        if boundary[i]:
++            current_T = torch.ones(color.shape[0], device=color.device).unsqueeze(1)
++            
++    return ray_colors, transmittance
+ ```
+ 
+@@ -152,14 +174,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of occupied cells intersected by rays. For 'voxel' mode, it is proportional to the number of intersected cells times `num_steps`. For 'ray' mode, it is proportional to `num_steps` per ray, with culling overhead.
+-*   **Memory Complexity:** Linear with respect to the total number of samples across all rays. The packed tensor format minimizes overhead compared to jagged arrays.
+-*   **Performance:** Efficient for scenes with sparse geometry, as it avoids sampling empty space. Performance degrades if the scene is dense, as most rays will intersect many cells.
+-*   **Strengths:** Differentiable, handles variable sample counts efficiently, integrates with sparse acceleration structures.
+-*   **Limitations:** Requires a compatible neural field and grid structure. 'step_size' is currently unused, limiting control over sampling density in some modes.
+-*   **When to Use:** When rendering sparse radiance fields or SDFs where most of the volume is empty, and differentiability is required.
+-*   **When Not to Use:** For dense volumes where fixed-step ray marching might be more cache-friendly, or when hardware acceleration for sparse structures is not available.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Performance:** Not given in the sources.
++*   **Strengths:** Differentiable, handles variable sample counts efficiently, integrates with sparse acceleration structures [S1, unofficial].
++*   **Limitations:** Requires a compatible neural field and grid structure. 'step_size' is currently unused, limiting control over sampling density in some modes [S1, unofficial].
++*   **When to Use:** When rendering sparse radiance fields or SDFs where most of the volume is empty, and differentiability is required [G].
++*   **When Not to Use:** For dense volumes where fixed-step ray marching might be more cache-friendly, or when hardware acceleration for sparse structures is not available [G].
+ 
+ ## Background
+-The Sparse Packed Radiance Field Tracer is part of the NVIDIA Kaolin-Wisp framework, introduced in the context of SIGGRAPH 2022 demos for interactive neural rendering [S1, unofficial]. It builds upon the concept of "packed" tensors for variable-length data, a technique popularized in libraries like Kaolin for efficient batched operations on sparse data [S1, unofficial]. The method is designed to work with Neural Geometric LODs and sparse occupancy structures (BLAS) to enable real-time rendering of high-fidelity neural fields.
++The Sparse Packed Radiance Field Tracer is part of the NVIDIA Kaolin-Wisp framework, introduced in the context of SIGGRAPH 2022 demos for interactive neural rendering [S1, unofficial]. It builds upon the concept of "packed" tensors for variable-length data, a technique popularized in libraries like Kaolin for efficient batched operations on sparse data [S1, unofficial]. The method is designed to work with Neural Geometric LODs and sparse occupancy structures (BLAS) to enable real-time rendering of high-fidelity neural fields [S1, unofficial].
+ 
+ ## Sources

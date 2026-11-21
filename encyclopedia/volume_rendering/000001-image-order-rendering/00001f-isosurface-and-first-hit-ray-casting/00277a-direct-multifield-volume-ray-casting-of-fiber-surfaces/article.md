@@ -1,0 +1,253 @@
+# Direct Multifield Volume Ray Casting of Fiber Surfaces
+
+Also called: Direct Fiber Surface Rendering, Direct fiber surface ray casting, Direct ray casting of fiber surfaces, Fiber Surface Ray Casting, Fiber surface ray tracing
+
+## Overview
+Direct multifield volume ray casting of fiber surfaces is a rendering method for bivariate volume data that visualizes fiber surfaces (contours defined by a path in 2D range space) without explicit geometry extraction [S1]. It samples directly along rays in domain space and performs geometric tests in range space using a signed distance field derived from fiber surface control polygons (FSCPs) [S1]. Unlike mesh extraction methods such as Marching Cubes, which produce piecewise-linear approximations and are costly for large data, this method enables real-time exploration, dynamic modification, and pixel-exact rendering with lower preprocess time [S1]. Compared to direct volume rendering with threshold-based transfer functions, it is roughly an order of magnitude faster for fine brush sizes [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A bivariate volumetric field $\mathbf{f}: \mathbb{R}^3 \rightarrow \mathbb{R}^2$, defined by two scalar fields $f_1(\mathbf{x})$ and $f_2(\mathbf{x})$ [S1]. A Fiber Surface Control Polygon (FSCP), which is a closed polygon in the 2D range space $\mathbb{R}^2$ defining the target fiber surface [S1].
+*   **Output:** A rendered image where pixels corresponding to the fiber surface are shaded, and others are transparent or background-colored [S1].
+
+**Data Structures:**
+1.  **Bivariate Volume Data:** Stored in 3D textures [S1]. Each voxel contains a pair of values $(f_1, f_2)$ [S1].
+2.  **Distance Field:** A 2D texture of resolution $R \times R$ (typically $64 \times 64$) [S1]. Each channel stores the signed distance from a point in range space to the nearest segment of the FSCP [S1]. Positive values indicate outside the polygon; negative values indicate inside [S1]. Up to 4 FSCPs can be visualized simultaneously using up to 4 channels [S1].
+3.  **Macrocell Grid:** A uniform 3D grid of macrocells [S1]. Each macrocell covers an $n \times n \times n$ volume of voxels (typically $n=3$, though $4^3$ or $8^3$ are used for larger datasets) [S1].
+4.  **Boolean Grid:** A 3D texture storing boolean values for each macrocell [S1]. A value of `true` indicates the macrocell's range-space bounding box overlaps with the FSCP; `false` indicates no overlap [S1]. Four boolean values are stored per macrocell to support up to 4 FSCPs [S1].
+
+**Precomputation:**
+1.  **Distance Field Computation:** For each FSCP, compute a 2D signed distance field [S1]. For each texel in the $R \times R$ grid, calculate the minimum distance to all segments of the FSCP [S1]. Assign positive values for points outside and negative for points inside [S1]. This takes approximately 1-2 milliseconds for 4 FSCPs with 4 segments each [S1].
+2.  **Macrocell Grid Construction:** Build a single-level uniform grid [S1]. For each macrocell, compute the minimum and maximum values of both fields ($f_{min}, f_{max}, g_{min}, g_{max}$) over the voxels it contains [S1]. To prevent missing fibers, include the minima and maxima of forward-adjacent voxels [S1].
+3.  **Boolean Grid Assignment:** For each macrocell, check if its range-space bounding box (defined by min/max values) overlaps with the FSCP [S1]. If overlap exists, set the corresponding boolean value in the 3D texture to `true`; otherwise, set it to `false` [S1]. This step is parallelized using OpenMP, yielding a 2x-4x speedup with 6 threads [S1].
+
+**Rendering Algorithm:**
+The rendering is performed in a shader using a two-level loop structure: outer loop for macrocell traversal and inner loop for ray marching within the macrocell [S1].
+
+1.  **Macrocell Traversal:** Traverse the macrocell grid using a 3D Digital Differential Analyzer (3DDDA) [S1].
+2.  **Boolean Check:** For the current macrocell, fetch the precomputed boolean value from the 3D texture [S1]. If `false`, skip the macrocell (empty space optimization) [S1]. If `true`, proceed to ray marching [S1].
+3.  **Ray Marching:** Within the macrocell, march along the ray in segments of size $\delta t$ (measured in voxel units) [S1]. Typical segment sizes are 0.1, but smaller sizes (e.g., 0.025) improve accuracy at the cost of performance [S1].
+4.  **Data Fetching:** For each ray segment $[p_0, p_1]$, fetch the bivariate volume data at the endpoints:
+    $$ \mathbf{fs}_0 = \text{fetch}(\mathbf{f}(p_0)) = (f_1(p_0), f_2(p_0)) $$
+    $$ \mathbf{fs}_1 = \text{fetch}(\mathbf{f}(p_1)) = (f_1(p_1), f_2(p_1)) $$
+5.  **Distance Fetching:** Fetch the signed distance field values at the range-space endpoints:
+    $$ d_0 = \text{fetch}(\text{distance}(\mathbf{fs}_0)) $$
+    $$ d_1 = \text{fetch}(\text{distance}(\mathbf{fs}_1)) $$
+6.  **Intersection Test:** Apply the rule of signs (Bolzano's theorem) [S1]. If $d_0 \cdot d_1 < 0$, a root (intersection with the fiber surface) exists within the segment [S1].
+7.  **Intersection Refinement:** Calculate the intersection point $\mathbf{fs}_t$ in range space using linear interpolation:
+    $$ d_t = \left| \frac{d_0}{d_0 - d_1} \right| $$
+    $$ \mathbf{fs}_t = \mathbf{fs}_0 + d_t \cdot (\mathbf{fs}_1 - \mathbf{fs}_0) $$
+    Map $\mathbf{fs}_t$ back to the domain space parameter $t$ to find the 3D position $p_t$ [S1].
+8.  **Shading:** Compute the gradient of the implicit fiber surface at $p_t$ [S1]. The fiber surface is defined by the linear combination $g(\mathbf{x}) = a f_1(\mathbf{x}) + b f_2(\mathbf{x})$, where $(a, b)$ is the coordinate of $\mathbf{fs}_t$ in the range space [S1]. The gradient is:
+    $$ \nabla C = a \nabla f_1(p_t) + b \nabla f_2(p_t) $$
+    Compute $\nabla f_1$ and $\nabla f_2$ using multiple central-difference neighbor stencils to capture higher frequency variations [S1]. Use $\nabla C$ for Phong-like shading (ambient, diffuse, specular) [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def point_to_segment_dist(px, py, x1, y1, x2, y2):
+    dx, dy = x2 - x1, y2 - y1
+    if dx == 0 and dy == 0:
+        return math.hypot(px - x1, py - y1)
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)))
+    proj_x, proj_y = x1 + t * dx, y1 + t * dy
+    return math.hypot(px - proj_x, py - proj_y)
+
+def signed_distance_to_fscp(f, g, segments):
+    min_dist = float('inf')
+    for (x1, y1), (x2, y2) in segments:
+        d = point_to_segment_dist(f, g, x1, y1, x2, y2)
+        if d < min_dist:
+            min_dist = d
+    crossings = 0
+    for (x1, y1), (x2, y2) in segments:
+        if ((y1 > g) != (y2 > g)) and (f < (x2 - x1) * (g - y1) / (y2 - y1) + x1):
+            crossings += 1
+    return -min_dist if (crossings % 2 == 1) else min_dist
+
+def precompute_distance_field(fscp_segments, R=64):
+    dist_field = [[0.0] * R for _ in range(R)]
+    for y in range(R):
+        for x in range(R):
+            f_val, g_val = x / (R - 1), y / (R - 1)
+            dist_field[y][x] = signed_distance_to_fscp(f_val, g_val, fscp_segments)
+    return dist_field
+
+def box_overlaps_fscp(bx1, by1, bx2, by2, segments):
+    for (x1, y1), (x2, y2) in segments:
+        if bx1 <= x1 <= bx2 and by1 <= y1 <= by2: return True
+        if bx1 <= x2 <= bx2 and by1 <= y2 <= by2: return True
+    return True
+
+def build_boolean_grid(volume_data, macrocell_size, fscp_segments):
+    dims = (len(volume_data), len(volume_data[0]), len(volume_data[0][0]))
+    num_mc = (dims[0] // macrocell_size, dims[1] // macrocell_size, dims[2] // macrocell_size)
+    bool_grid = [[[0] * num_mc[2] for _ in range(num_mc[1])] for _ in range(num_mc[0])]
+    for z in range(num_mc[2]):
+        for y in range(num_mc[1]):
+            for x in range(num_mc[0]):
+                x_end = min(x * macrocell_size + macrocell_size + 1, dims[0])
+                y_end = min(y * macrocell_size + macrocell_size + 1, dims[1])
+                z_end = min(z * macrocell_size + macrocell_size + 1, dims[2])
+                f_min, f_max, g_min, g_max = float('inf'), float('-inf'), float('inf'), float('-inf')
+                for i in range(x * macrocell_size, x_end):
+                    for j in range(y * macrocell_size, y_end):
+                        for k in range(z * macrocell_size, z_end):
+                            f, g = volume_data[i][j][k]
+                            if f < f_min: f_min = f
+                            if f > f_max: f_max = f
+                            if g < g_min: g_min = g
+                            if g > g_max: g_max = g
+                if box_overlaps_fscp(f_min, g_min, f_max, g_max, fscp_segments):
+                    bool_grid[x][y][z] = 1
+    return bool_grid
+
+def sample_volume(volume_data, p):
+    x, y, z = p
+    ix, iy, iz = int(x), int(y), int(z)
+    fx, fy, fz = x - ix, y - iy, z - iz
+    def v(i, j, k): return volume_data[i][j][k]
+    f1 = (1-fx)*(1-fy)*(1-fz)*v(ix,iy,iz)[0] + fx*(1-fy)*(1-fz)*v(ix+1,iy,iz)[0] + \
+         (1-fx)*fy*(1-fz)*v(ix,iy+1,iz)[0] + fx*fy*(1-fz)*v(ix+1,iy+1,iz)[0] + \
+         (1-fx)*(1-fy)*fz*v(ix,iy,iz+1)[0] + fx*(1-fy)*fz*v(ix+1,iy,iz+1)[0] + \
+         (1-fx)*fy*fz*v(ix,iy+1,iz+1)[0] + fx*fy*fz*v(ix+1,iy+1,iz+1)[0]
+    f2 = (1-fx)*(1-fy)*(1-fz)*v(ix,iy,iz)[1] + fx*(1-fy)*(1-fz)*v(ix+1,iy,iz)[1] + \
+         (1-fx)*fy*(1-fz)*v(ix,iy+1,iz)[1] + fx*fy*(1-fz)*v(ix+1,iy+1,iz)[1] + \
+         (1-fx)*(1-fy)*fz*v(ix,iy,iz+1)[1] + fx*(1-fy)*fz*v(ix+1,iy,iz+1)[1] + \
+         (1-fx)*fy*fz*v(ix,iy+1,iz+1)[1] + fx*fy*fz*v(ix+1,iy+1,iz+1)[1]
+    return (f1, f2)
+
+def sample_distance(dist_field, fs):
+    R = len(dist_field)
+    x, y = int(fs[0] * (R - 1)), int(fs[1] * (R - 1))
+    fx, fy = fs[0] * (R - 1) - x, fs[1] * (R - 1) - y
+    d00 = dist_field[y][x]
+    d10 = dist_field[y][x+1] if x+1 < R else d00
+    d01 = dist_field[y+1][x] if y+1 < R else d00
+    d11 = dist_field[y+1][x+1] if x+1 < R and y+1 < R else d00
+    return (1-fx)*(1-fy)*d00 + fx*(1-fy)*d10 + (1-fx)*fy*d01 + fx*fy*d11
+
+def compute_gradient(volume_data, p, field_idx):
+    eps = 0.001
+    x, y, z = p
+    def val(dx, dy, dz):
+        try: return volume_data[int(x+dx)][int(y+dy)][int(z+dz)][field_idx]
+        except: return volume_data[int(x)][int(y)][int(z)][field_idx]
+    return (val(eps,0,0) - val(-eps,0,0)) / (2*eps), \
+           (val(0,eps,0) - val(0,-eps,0)) / (2*eps), \
+           (val(0,0,eps) - val(0,0,-eps)) / (2*eps)
+
+def phong_shading(p_hit, normal, ray_dir):
+    # Simplified Phong shading
+    diff = max(0.0, sum(a*b for a,b in zip(normal, ray_dir)))
+    return (0.2 + 0.8 * diff, 0.2 + 0.8 * diff, 0.2 + 0.8 * diff)
+
+def render_fiber_surface(ray_origin, ray_direction, volume_data, dist_field, bool_grid, macrocell_size, segment_size):
+    dims = (len(volume_data), len(volume_data[0]), len(volume_data[0][0]))
+    num_mc = (dims[0] // macrocell_size, dims[1] // macrocell_size, dims[2] // macrocell_size)
+    
+    # 3DDDA initialization
+    inv_dir = (1.0/ray_direction[0], 1.0/ray_direction[1], 1.0/ray_direction[2])
+    mc_pos = (int(ray_origin[0] // macrocell_size), int(ray_origin[1] // macrocell_size), int(ray_origin[2] // macrocell_size))
+    t_max = 1000.0
+    t = 0.0
+    
+    while 0 <= mc_pos[0] < num_mc[0] and 0 <= mc_pos[1] < num_mc[1] and 0 <= mc_pos[2] < num_mc[2]:
+        if bool_grid[mc_pos[0]][mc_pos[1]][mc_pos[2]]:
+            # Compute macrocell ray bounds
+            mc_min = (mc_pos[0]*macrocell_size, mc_pos[1]*macrocell_size, mc_pos[2]*macrocell_size)
+            mc_max = (mc_min[0]+macrocell_size, mc_min[1]+macrocell_size, mc_min[2]+macrocell_size)
+            t1 = (mc_min[0] - ray_origin[0]) * inv_dir[0]
+            t2 = (mc_max[0] - ray_origin[0]) * inv_dir[0]
+            t_min = max(min(t1, t2), 0.0)
+            t1 = (mc_min[1] - ray_origin[1]) * inv_dir[1]
+            t2 = (mc_max[1] - ray_origin[1]) * inv_dir[1]
+            t_min = max(t_min, min(t1, t2))
+            t1 = (mc_min[2] - ray_origin[2]) * inv_dir[2]
+            t2 = (mc_max[2] - ray_origin[2]) * inv_dir[2]
+            t_max_mc = max(min(t1, t2), 0.0)
+            t_max_mc = min(t_max_mc, t_max)
+            
+            t = max(t, t_min)
+            while t < t_max_mc:
+                t_next = min(t + segment_size, t_max_mc)
+                p0 = (ray_origin[0] + t * ray_direction[0], ray_origin[1] + t * ray_direction[1], ray_origin[2] + t * ray_direction[2])
+                p1 = (ray_origin[0] + t_next * ray_direction[0], ray_origin[1] + t_next * ray_direction[1], ray_origin[2] + t_next * ray_direction[2])
+                
+                fs0 = sample_volume(volume_data, p0)
+                fs1 = sample_volume(volume_data, p1)
+                d0 = sample_distance(dist_field, fs0)
+                d1 = sample_distance(dist_field, fs1)
+                
+                if d0 * d1 < 0:
+                    dt = abs(d0 / (d0 - d1))
+                    fs_t = (fs0[0] + dt * (fs1[0] - fs0[0]), fs0[1] + dt * (fs1[1] - fs0[1]))
+                    t_hit = t + dt * (t_next - t)
+                    p_hit = (ray_origin[0] + t_hit * ray_direction[0], ray_origin[1] + t_hit * ray_direction[1], ray_origin[2] + t_hit * ray_direction[2])
+                    
+                    a, b = fs_t
+                    grad_f1 = compute_gradient(volume_data, p_hit, 0)
+                    grad_f2 = compute_gradient(volume_data, p_hit, 1)
+                    normal = (a*grad_f1[0] + b*grad_f2[0], a*grad_f1[1] + b*grad_f2[1], a*grad_f1[2] + b*grad_f2[2])
+                    return phong_shading(p_hit, normal, ray_direction)
+                t = t_next
+        
+        # Advance 3DDDA
+        t_next_mc = float('inf')
+        for d in range(3):
+            if ray_direction[d] > 0:
+                t_next_mc = min(t_next_mc, (mc_pos[d] + 1) * macrocell_size - ray_origin[d]) * inv_dir[d]
+            else:
+                t_next_mc = min(t_next_mc, mc_pos[d] * macrocell_size - ray_origin[d]) * inv_dir[d]
+        if t_next_mc > t_max: break
+        t = t_next_mc
+        for d in range(3):
+            if ray_direction[d] > 0 and t_next_mc == ((mc_pos[d] + 1) * macrocell_size - ray_origin[d]) * inv_dir[d]:
+                mc_pos = (mc_pos[0] + (1 if d==0 else 0), mc_pos[1] + (1 if d==1 else 0), mc_pos[2] + (1 if d==2 else 0))
+            elif ray_direction[d] < 0 and t_next_mc == (mc_pos[d] * macrocell_size - ray_origin[d]) * inv_dir[d]:
+                mc_pos = (mc_pos[0] - (1 if d==0 else 0), mc_pos[1] - (1 if d==1 else 0), mc_pos[2] - (1 if d==2 else 0))
+                
+    return (0.0, 0.0, 0.0)
+```
+
+**Parameters:**
+*   **Macrocell size ($n$):** Number of voxels per dimension in a macrocell [S1]. Typical value is 3, though $4^3$ or $8^3$ are used for larger datasets [S1]. Smaller sizes increase performance but require more traversal steps [S1].
+*   **Segment size:** Length of the ray marching step in voxel units [S1]. Smaller sizes improve accuracy but reduce performance [S1]. Typical values are 0.1, with 0.025 or 0.00625 for higher accuracy [S1].
+*   **Distance field resolution:** $64 \times 64$ array is used [S1].
+*   **FSCP:** Closed polygon in range space [S1]. Can be convex or concave [S1].
+
+**Edge Cases and Pitfalls:**
+*   **False Negatives:** If segment endpoints have distance field values with the same sign, the method may miss the fiber surface intersection [S1].
+*   **False Positives:** If segment endpoints have distance field values with different signs, false intersections may be reported [S1].
+*   **Segment Size Sensitivity:** If the ray segment size is too large, the image in range space becomes a complex curve intersecting fiber segments multiple times [S1]. Sufficient sampling is required in domain space so that piecewise-linear segments (chords) closely approximate the image of the ray in range space [S1].
+*   **Floating Point Error:** For very small segment sizes, accuracy is limited by floating point precision and the discretization of the distance field [S1].
+*   **Missing Surface Parts:** If the FSCP is very small (e.g., a thin line), the intersection detection may lose parts of the fiber surface [S1].
+*   **Concave Polygons:** Cross product alone cannot determine inside/outside for concave polygons [S1]. The distance field handles this by using signed distances (positive outside, negative inside) [S1].
+*   **Multiple FSCPs:** Distance fields for multiple FSCPs cannot be merged [S1]. Each FSCP requires its own distance field [S1].
+*   **Exact Extraction:** For trilinearly interpolated cubic cells, exact fiber surfaces cannot be extracted as a polygonal mesh because individual fibers may have multiple connected components and intersections can be complex (e.g., at least 12 fiber components in specific cases) [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Worst-case time complexity for uniform grid rendering is $O(N^{3/2})$, where $N$ is the number of voxels [S1]. Best-case is $O(1)$ due to empty space skipping [S1]. Histogram computation is $O(N)$ [S1].
+*   **Memory Complexity:** Requires storage for the bivariate volume data, the 2D distance field ($64 \times 64$ per FSCP), and the 3D boolean grid for macrocells [S1].
+*   **Performance:**
+    *   On an NVIDIA GeForce GT 650M mobile GPU, the method achieves 16 fps at 1024x1024 resolution for a coal combustion simulation dataset [S1].
+    *   For the Homo-Lumo $4^3$ dataset, performance is >20 fps [S1].
+    *   For the 256^3 Enzo dataset, performance is 3.98 fps on a mobile GPU [S1]. The 512^3 dataset runs at 2.76 fps, which is 0.77x the speed of the 256^3 dataset despite having 8x more voxels [S1].
+    *   Using a 3D tricubic B-spline filter increases rendering time by 3x compared to the base method (8 fps vs 23 fps on Homo-Lumo) [S1].
+    *   Preprocess speedup: 6 OpenMP threads yield a 2x-4x speedup depending on the dataset [S1].
+*   **Strengths:** Real-time exploration, dynamic modification of FSCPs, pixel-exact rendering, support for higher-order interpolation (e.g., B-splines) without intractable analytical intersection calculations, and efficient empty space skipping via macrocells [S1].
+*   **Limitations:** Less robust than analytical intersection methods; sensitive to segment size and FSCP frequency; cannot guarantee root isolation; distance fields for multiple FSCPs cannot be merged [S1].
+*   **When to use:** When interactive exploration of bivariate fiber surfaces is required, especially for large datasets where mesh extraction is too slow, and when higher-order interpolation is desired [S1].
+*   **When not to use:** When exact geometric extraction of the fiber surface mesh is required, or when the data has very high frequency relative to the segment size, leading to excessive false positives/negatives [S1].
+
+## Background
+*   **Origin:** The method was introduced in the paper "Direct Multifield Volume Ray Casting of Fiber Surfaces" [S1].
+*   **History:** Fiber surfaces generalize isosurfaces to bivariate data by taking the inverse image of a 1-manifold path in the range space [S1]. Previous methods relied on mesh extraction (e.g., Marching Cubes), which is costly and non-interactive [S1]. This method was developed to enable real-time exploration of multifield data, such as coal combustion simulations in the Uintah framework [S1].
+*   **Usage:** Used in the Uintah framework for analyzing fluid dynamic simulations, specifically coal combustion systems (BSF and OFC datasets) [S1]. Implemented in a FSCP editor allowing interactive exploration [S1].
+
+## Sources
+[S1] Direct Multifield Volume Ray Casting of Fiber Surfaces, https://doi.org/10.1109/tvcg.2016.2599040, fetched 2026-10-26

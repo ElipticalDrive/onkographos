@@ -1,0 +1,702 @@
+--- v004.md
++++ v005.md
+@@ -4,380 +4,354 @@
+ 
+ ## Overview
+-Differentiable Volumetric Rendering (DVR) is a method for training implicit neural representations of 3D shape and texture using only 2D RGB image supervision, eliminating the need for 3D ground truth data [S1][S3, unofficial][S4, unofficial]. It sets itself apart from voxel-based differentiable renderers by deriving analytic gradients for surface depth via implicit differentiation, which allows it to avoid storing intermediate volumetric data in the forward pass, thereby making memory usage independent of sampling resolution [S1][S2][S4, unofficial]. Unlike [DiffDVR](1355-differentiable-direct-volume-rendering-diffdvr.md), which typically handles explicit volumetric grids or density fields, DVR operates on a continuous implicit surface defined by a level set, rendering colors by querying a texture network at the precise intersection point [S1][S2].
++Differentiable Volumetric Rendering (DVR) is a method for training implicit neural representations of 3D shape and texture using only 2D RGB image supervision, eliminating the need for 3D ground truth data [S1, S2][S4, unofficial]. It differs from voxel-based differentiable renderers by avoiding the storage of intermediate volumetric data, thereby achieving a memory footprint independent of sampling resolution [S1, S2][S4, unofficial]. Unlike mesh-based methods, it represents geometry continuously as an isosurface of a neural network, allowing for arbitrary resolution extraction [S1, S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Camera parameters (origin $\mathbf{r}_0$, direction vector $\mathbf{w}$ for each pixel $\mathbf{u}$), network parameters $\theta$, and optionally a latent code $\mathbf{z}$ conditioned on an input image.
+-*   **Outputs:** Rendered color $\hat{\mathbf{I}}_\mathbf{u}$ for each pixel $\mathbf{u}$, and gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ for optimization.
++*   **Inputs:** Camera parameters (origin $\mathbf{r}_0$, direction $\mathbf{w}$ for each pixel $\mathbf{u}$), input image (for single-view, to extract latent code $\mathbf{z}$), and network parameters $\theta$.
++*   **Outputs:** Rendered image $\hat{\mathbf{I}}$, gradients $\frac{\partial \mathcal{L}}{\partial \theta}$.
+ 
+ **Data Structures:**
+-The method uses a single neural network with two shallow heads sharing parameters $\theta$:
+-1.  **Occupancy Network ($f_\theta$):**
+-    *   Input: 3D coordinate $\mathbf{p} \in \mathbb{R}^3$ and latent code $\mathbf{z} \in \mathcal{Z}$.
+-    *   Output: Scalar occupancy probability $f_\theta(\mathbf{p}, \mathbf{z}) \in [0, 1]$.
+-    *   Signature: $f_\theta : \mathbb{R}^3 \times \mathcal{Z} \rightarrow [0, 1]$ [S1][S3, unofficial].
+-2.  **Texture Field Network ($t_\theta$):**
+-    *   Input: 3D coordinate $\mathbf{p} \in \mathbb{R}^3$ and latent code $\mathbf{z} \in \mathcal{Z}$.
+-    *   Output: RGB color vector $\mathbf{t}_\theta(\mathbf{p}, \mathbf{z}) \in \mathbb{R}^3$.
+-    *   Signature: $t_\theta : \mathbb{R}^3 \times \mathcal{Z} \rightarrow \mathbb{R}^3$ [S1][S3, unofficial].
++*   **Occupancy Network $f_\theta$:** A neural network mapping $\mathbb{R}^3 \times \mathcal{Z} \rightarrow [0, 1]$. Input: 3D point $\mathbf{p}$ and latent code $\mathbf{z}$. Output: scalar occupancy probability.
++*   **Texture Network $t_\theta$:** A neural network mapping $\mathbb{R}^3 \times \mathcal{Z} \rightarrow \mathbb{R}^3$. Input: 3D point $\mathbf{p}$ and latent code $\mathbf{z}$. Output: RGB color vector.
++*   **Implementation:** $f_\theta$ and $t_\theta$ are implemented as a single neural network with two shallow heads sharing parameters [S1, S2][S4, unofficial].
++*   **Latent Code $\mathbf{z}$:** For single-view reconstruction, $\mathbf{z} \in \mathbb{R}^{256}$ is extracted from the input image via an encoder network $g_\phi$ (e.g., ResNet-18) [S1, S2][S4, unofficial].
+ 
+ **Parameters:**
+-*   $\tau$: Isosurface threshold. Typical value: $0.5$ [S1][S2][S4, unofficial]. Range: $[0, 1]$.
+-*   $n$: Number of equally-spaced samples on the ray for depth estimation. Starts at $16$, increases to $128$ during training [S1][S2][S4, unofficial].
+-*   $s_0$: Start depth of the sampling interval [S1][S2].
+-*   $\Delta s$: Step size for samples.
+-*   $\mathbf{w}$: Ray direction vector from $\mathbf{r}_0$ to pixel $\mathbf{u}$ [S1][S4, unofficial].
+-
+-**Algorithm Steps:**
+-
+-1.  **Ray Casting:** For each pixel $\mathbf{u}$, define the ray $\mathbf{r}(d) = \mathbf{r}_0 + d\mathbf{w}$ [S1][S2].
+-2.  **Forward Pass (Depth Estimation):**
+-    *   Evaluate $f_\theta$ at $n$ equally-spaced points $\mathbf{p}_j^{\text{ray}} = \mathbf{r}(j\Delta s + s_0)$ for $j=1 \dots n$ [S1][S2].
+-    *   Find the smallest index $j$ such that the occupancy changes from free space to occupied:
+-        $$ j = \operatorname{argmin}_{j'} \left( f_\theta(\mathbf{p}_{j'+1}^{\text{ray}}) \geq \tau > f_\theta(\mathbf{p}_{j'}^{\text{ray}}) \right) $$ [S1][S2].
+-    *   Approximate the surface depth $\hat{d}$ using the iterative secant method on the interval $[j\Delta s + s_0, (j+1)\Delta s + s_0]$ [S1][S2].
+-    *   Compute the intersection point $\hat{\mathbf{p}} = \mathbf{r}(\hat{d})$ [S1][S2].
+-3.  **Color Evaluation:**
+-    *   Compute the rendered color: $\hat{\mathbf{I}}_\mathbf{u} = t_\theta(\hat{\mathbf{p}})$ [S1][S2].
+-4.  **Backward Pass (Gradient Computation):**
+-    *   Compute the loss gradient with respect to the rendered image: $\frac{\partial \mathcal{L}}{\partial \hat{\mathbf{I}}_\mathbf{u}}$ [S1][S2].
+-    *   Apply the chain rule to find the gradient with respect to parameters $\theta$:
+-        $$ \frac{\partial \mathcal{L}}{\partial \theta} = \sum_\mathbf{u} \frac{\partial \mathcal{L}}{\partial \hat{\mathbf{I}}_\mathbf{u}} \cdot \frac{\partial \hat{\mathbf{I}}_\mathbf{u}}{\partial \theta} $$ [S1][S2].
+-    *   Expand $\frac{\partial \hat{\mathbf{I}}_\mathbf{u}}{\partial \theta}$ using the fact that $\hat{\mathbf{I}}_\mathbf{u} = t_\theta(\hat{\mathbf{p}})$:
+-        $$ \frac{\partial \hat{\mathbf{I}}_\mathbf{u}}{\partial \theta} = \frac{\partial t_\theta(\hat{\mathbf{p}})}{\partial \theta} + \frac{\partial t_\theta(\hat{\mathbf{p}})}{\partial \hat{\mathbf{p}}} \cdot \frac{\partial \hat{\mathbf{p}}}{\partial \theta} $$ [S1][S2].
+-    *   Derive $\frac{\partial \hat{\mathbf{p}}}{\partial \theta}$ using the ray equation $\hat{\mathbf{p}} = \mathbf{r}_0 + \hat{d}\mathbf{w}$:
+-        $$ \frac{\partial \hat{\mathbf{p}}}{\partial \theta} = \mathbf{w} \frac{\partial \hat{d}}{\partial \theta} $$ [S1][S2].
+-    *   Derive $\frac{\partial \hat{d}}{\partial \theta}$ using implicit differentiation of the constraint $f_\theta(\hat{\mathbf{p}}) = \tau$:
+-        $$ \frac{\partial \hat{d}}{\partial \theta} = - \left( \frac{\partial f_\theta(\hat{\mathbf{p}})}{\partial \hat{\mathbf{p}}} \cdot \mathbf{w} \right)^{-1} \frac{\partial f_\theta(\hat{\mathbf{p}})}{\partial \theta} $$ [S1][S2].
+-    *   **Implementation Optimization:** To compute the backward pass efficiently for a batch, rewrite the term $\lambda \frac{\partial \hat{d}}{\partial \theta}$ (where $\lambda = \frac{\partial \mathcal{L}}{\partial \hat{d}}$) as:
+-        $$ \mu \frac{\partial f_\theta(\hat{\mathbf{p}})}{\partial \theta} \quad \text{with} \quad \mu = - \left( \frac{\partial f_\theta(\hat{\mathbf{p}})}{\partial \hat{\mathbf{p}}} \cdot \mathbf{w} \right)^{-1} \lambda $$ [S1][S2].
+-    *   Multiply the incoming gradient $\lambda$ element-wise by the scalar factor $\mu$, then backpropagate the result through the occupancy network $f_\theta(\hat{\mathbf{p}})$ using reverse-mode automatic differentiation [S1][S2].
++*   $\tau$: Isosurface threshold. Typical value: $0.5$ [S1, S2][S4, unofficial].
++*   $n$: Number of equally-spaced samples on the ray. Starts at $16$, increases to $128$ during training (doubling after 50k, 150k, 250k iterations) [S1, S2][S4, unofficial].
++*   $s_0$: Start of the sampling interval on the ray [S1, S2][S4, unofficial].
++*   $\Delta s$: Step size for samples [S1, S2][S4, unofficial].
++
++**Algorithm:**
++
++1.  **Ray Casting:** For each pixel $\mathbf{u}$, define the ray $\mathbf{r}(d) = \mathbf{r}_0 + d\mathbf{w}$, where $\mathbf{w}$ is the direction vector from $\mathbf{r}_0$ to $\mathbf{u}$ [S1, S2][S4, unofficial].
++2.  **Surface Depth Estimation (Forward Pass):**
++    *   Evaluate $f_\theta(\mathbf{p}_j^{\text{ray}}, \mathbf{z})$ at $n$ equally-spaced points $\mathbf{p}_j^{\text{ray}} = \mathbf{r}(j\Delta s + s_0)$ for $j=1 \dots n$ [S1, S2][S4, unofficial].
++    *   Find the smallest index $j$ such that $f_\theta(\mathbf{p}_{j+1}^{\text{ray}}, \mathbf{z}) \geq \tau > f_\theta(\mathbf{p}_j^{\text{ray}}, \mathbf{z})$ [S1, S2][S4, unofficial].
++    *   Approximate the surface depth $\hat{d}$ using the iterative secant method on the interval $[j\Delta s + s_0, (j+1)\Delta s + s_0]$ [S1, S2][S4, unofficial].
++    *   Compute the intersection point $\hat{\mathbf{p}} = \mathbf{r}(\hat{d})$ [S1, S2][S4, unofficial].
++3.  **Color Prediction:** Compute the rendered color $\hat{\mathbf{I}}_\mathbf{u} = t_\theta(\hat{\mathbf{p}}, \mathbf{z})$ [S1, S2][S4, unofficial].
++4.  **Gradient Computation (Backward Pass):**
++    *   Compute the loss gradient $\lambda = \frac{\partial \mathcal{L}}{\partial \hat{d}}$ [S1, S2][S4, unofficial].
++    *   Compute the scalar factor $\mu = - \left( \frac{\partial f_\theta(\hat{\mathbf{p}}, \mathbf{z})}{\partial \hat{\mathbf{p}}} \cdot \mathbf{w} \right)^{-1} \lambda$ [S1, S2][S4, unofficial].
++    *   Compute the gradient with respect to network parameters $\theta$ by backpropagating through $f_\theta$ with the modified gradient: $\frac{\partial \mathcal{L}}{\partial \theta} \propto \mu \frac{\partial f_\theta(\hat{\mathbf{p}}, \mathbf{z})}{\partial \theta}$ [S1, S2][S4, unofficial].
++    *   Note: The total gradient also includes the direct gradient from the texture network: $\frac{\partial \hat{\mathbf{I}}_\mathbf{u}}{\partial \theta} = \frac{\partial t_\theta(\hat{\mathbf{p}}, \mathbf{z})}{\partial \theta} + \frac{\partial t_\theta(\hat{\mathbf{p}}, \mathbf{z})}{\partial \hat{\mathbf{p}}} \cdot \mathbf{w} \frac{\partial \hat{d}}{\partial \theta}$ [S1, S2][S4, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import torch
+-import torch.nn as nn
+-
+-class DVRNetwork(nn.Module):
+-    def __init__(self, latent_dim, hidden_dim):
+-        super().__init__()
+-        # Single network with two heads
+-        self.shared_layers = nn.Sequential(
+-            nn.Linear(3 + latent_dim, hidden_dim),
+-            nn.ReLU(),
+-            nn.Linear(hidden_dim, hidden_dim),
+-            nn.ReLU()
+-        )
+-        self.occupancy_head = nn.Linear(hidden_dim, 1)
+-        self.texture_head = nn.Linear(hidden_dim, 3)
+-
+-    def forward(self, points, z):
+-        """
+-        points: (N, 3)
+-        z: (N, latent_dim)
+-        """
+-        x = torch.cat([points, z], dim=-1)
+-        h = self.shared_layers(x)
+-        occ = self.occupancy_head(h)
+-        tex = self.texture_head(h)
+-        return occ.squeeze(-1), tex
+-
+-def render_pixel(ray_origin, ray_direction, network, z, tau, n_samples, s0, ds):
++def render_pixel(r0, w, theta, z, tau, n, s0, ds):
+     """
+-    Renders a single pixel (or batch of pixels) using DVR.
+-    ray_origin: (N, 3)
+-    ray_direction: (N, 3)
+-    network: DVRNetwork
+-    z: (N, latent_dim)
+-    tau: float
+-    n_samples: int
+-    s0: float
+-    ds: float
++    Renders a single pixel using Differentiable Volumetric Rendering (DVR).
++    
++    Args:
++        r0: Camera origin (3D vector).
++        w: Ray direction (3D vector).
++        theta: Network parameters (shared for f_theta and t_theta).
++        z: Latent code (vector).
++        tau: Isosurface threshold (scalar).
++        n: Number of samples (int).
++        s0: Start depth (scalar).
++        ds: Step size (scalar).
++        
++    Returns:
++        color: Rendered RGB color (3D vector).
++        grad_d: Gradient of loss w.r.t. depth (scalar), used for backprop.
+     """
+-    # 1. Forward Pass: Find depth
++    # Forward Pass: Find surface intersection
+     # Sample points along the ray
+-    # p_j = r0 + (j*ds + s0) * w
+-    # We need n_samples points. Indices j=1 to n_samples.
+-    depths = torch.arange(1, n_samples + 1, device=ray_origin.device).float() * ds + s0
+-    # depths shape: (n_samples,)
+-    # Expand to (N, n_samples)
+-    depths = depths.unsqueeze(0).expand(ray_origin.shape[0], -1)
+-    
+-    # Points shape: (N, n_samples, 3)
+-    points = ray_origin.unsqueeze(1) + depths.unsqueeze(2) * ray_direction.unsqueeze(1)
+-    
+-    # Expand z to (N, n_samples, latent_dim)
+-    z_expanded = z.unsqueeze(1).expand(-1, n_samples, -1)
++    depths = [s0 + j * ds for j in range(1, n + 1)]
++    points = [r0 + d * w for d in depths]
+     
+     # Evaluate occupancy network
+-    # occ shape: (N, n_samples)
+-    occ, _ = network(points.reshape(-1, 3), z_expanded.reshape(-1, z.shape[1]))
+-    occ = occ.view(ray_origin.shape[0], n_samples)
+-    
+-    # Find transition: f(p_j) < tau <= f(p_{j+1})
+-    # We look for the first j where occ[:, j+1] >= tau AND occ[:, j] < tau
+-    # Note: indices in code are 0-based, corresponding to j=1..n_samples in formula
+-    # Formula uses p_{j'+1} and p_{j'}. Let's find index k such that
+-    # occ[:, k] < tau and occ[:, k+1] >= tau.
+-    
+-    inside_mask = occ < tau
+-    outside_mask = occ >= tau
+-    
+-    # Transition occurs at index k if inside[k] and outside[k+1]
+-    # We need to handle the case where no transition is found (e.g., always inside or always outside)
+-    # For simplicity, assume valid intersection exists within bounds.
+-    
+-    # Create boolean masks for transition
+-    # trans[k] is True if occ[k] < tau and occ[k+1] >= tau
+-    # We check k from 0 to n_samples-2
+-    trans = (inside_mask[:, :-1] & outside_mask[:, 1:])
+-    
+-    # Find the first True index for each ray
+-    # argmax returns the index of the first True if we invert? No.
+-    # Use torch.argmax on the boolean tensor. If no True, it returns 0.
+-    # We need to ensure we pick the *first* transition.
+-    # Since trans is boolean, argmax works if we ensure only one transition or take the first.
+-    # In practice, objects are convex or simple.
+-    
+-    # Handle edge case: no transition found
+-    has_transition = trans.any(dim=1)
+-    # If no transition, set index to 0 (will likely result in invalid depth, handled by loss or mask)
+-    indices = trans.argmax(dim=1)
+-    
+-    # Get the depths of the two bounding samples
+-    # k is the index in the 0..n_samples-2 range
+-    # The interval is [depths[:, k], depths[:, k+1]]
+-    k = indices
+-    d_left = depths.gather(1, k.unsqueeze(1)).squeeze(1)
+-    d_right = depths.gather(1, (k + 1).unsqueeze(1)).squeeze(1)
+-    
+-    # Secant method to find precise depth d_hat
+-    # f(d_left) = occ_left, f(d_right) = occ_right
+-    # Linear interpolation: d_hat = d_left - f(d_left) * (d_right - d_left) / (f(d_right) - f(d_left))
+-    occ_left = occ.gather(1, k.unsqueeze(1)).squeeze(1)
+-    occ_right = occ.gather(1, (k + 1).unsqueeze(1)).squeeze(1)
++    # Note: In practice, this is done in parallel for a batch of points
++    occupancies = [f_theta(p, theta, z) for p in points]
++    
++    # Find the first interval where occupancy crosses tau
++    # f_theta(p) < tau is free space, f_theta(p) >= tau is occupied
++    j = None
++    for k in range(len(occupancies) - 1):
++        if occupancies[k] < tau and occupancies[k+1] >= tau:
++            j = k
++            break
++            
++    if j is None:
++        # No intersection found within sampling range
++        # Return a default color or handle as background
++        return [0.0, 0.0, 0.0], 0.0
++        
++    # Refine depth using secant method within the interval [depths[j], depths[j+1]]
++    # Let d_low = depths[j], d_high = depths[j+1]
++    # f_low = occupancies[j], f_high = occupancies[j+1]
++    # We want to find d such that f_theta(r0 + d*w, theta, z) = tau
++    
++    # Simple linear interpolation (secant method step) for approximation
++    # d_hat = d_low + (tau - f_low) * (d_high - d_low) / (f_high - f_low)
++    d_low = depths[j]
++    d_high = depths[j+1]
++    f_low = occupancies[j]
++    f_high = occupancies[j+1]
+     
+     # Avoid division by zero
+-    denom = occ_right - occ_left
+-    denom = torch.where(denom == 0, torch.ones_like(denom), denom)
+-    
+-    d_hat = d_left - occ_left * (d_right - d_left) / denom
+-    
+-    # 2. Compute intersection point p_hat
+-    # p_hat = r0 + d_hat * w
+-    p_hat = ray_origin + d_hat.unsqueeze(1) * ray_direction
+-    
+-    # 3. Evaluate texture at p_hat
+-    # We need to re-evaluate the network at p_hat to get gradients correctly
+-    # Or use the cached values if we implement custom autograd.
+-    # Here we re-evaluate for clarity, but in practice, one would use the cached forward pass.
+-    # To match the paper's backward pass implementation, we need the gradient of f_theta at p_hat.
+-    
+-    # Re-evaluate f_theta and t_theta at p_hat
+-    # This is inefficient for the forward pass but correct for the logic.
+-    # In the actual implementation, the forward pass returns occ and tex at p_hat,
+-    # and the backward pass uses the gradient of f_theta at p_hat.
+-    
+-    # Let's assume we have a custom function that returns p_hat, occ_hat, tex_hat, and grad_f
+-    # For this pseudocode, we will just return the color.
+-    
+-    _, tex_hat = network(p_hat, z)
+-    
+-    return tex_hat
+-
+-class DVRRenderFunction(torch.autograd.Function):
+-    @staticmethod
+-    def forward(ctx, ray_origin, ray_direction, network, z, tau, n_samples, s0, ds):
+-        # 1. Sample and find transition
+-        depths = torch.arange(1, n_samples + 1, device=ray_origin.device).float() * ds + s0
+-        depths = depths.unsqueeze(0).expand(ray_origin.shape[0], -1)
+-        points = ray_origin.unsqueeze(1) + depths.unsqueeze(2) * ray_direction.unsqueeze(1)
+-        z_expanded = z.unsqueeze(1).expand(-1, n_samples, -1)
+-        
+-        occ, _ = network(points.reshape(-1, 3), z_expanded.reshape(-1, z.shape[1]))
+-        occ = occ.view(ray_origin.shape[0], n_samples)
+-        
+-        inside_mask = occ < tau
+-        outside_mask = occ >= tau
+-        trans = (inside_mask[:, :-1] & outside_mask[:, 1:])
+-        k = trans.argmax(dim=1)
+-        
+-        d_left = depths.gather(1, k.unsqueeze(1)).squeeze(1)
+-        d_right = depths.gather(1, (k + 1).unsqueeze(1)).squeeze(1)
+-        occ_left = occ.gather(1, k.unsqueeze(1)).squeeze(1)
+-        occ_right = occ.gather(1, (k + 1).unsqueeze(1)).squeeze(1)
+-        
+-        denom = occ_right - occ_left
+-        denom = torch.where(denom == 0, torch.ones_like(denom), denom)
+-        d_hat = d_left - occ_left * (d_right - d_left) / denom
+-        
+-        p_hat = ray_origin + d_hat.unsqueeze(1) * ray_direction
+-        
+-        # 2. Evaluate texture and occupancy at p_hat for backward pass
+-        # We need to save p_hat, z, and potentially the network weights if not using standard autograd
+-        # But the paper suggests backpropagating through f_theta directly.
+-        
+-        occ_hat, tex_hat = network(p_hat, z)
+-        
+-        ctx.save_for_backward(p_hat, z, ray_direction)
+-        ctx.network = network
+-        ctx.tau = tau
+-        ctx.d_hat = d_hat
+-        
+-        return tex_hat
+-
+-    @staticmethod
+-    def backward(ctx, grad_output):
+-        # grad_output: (N, 3) gradient of loss wrt tex_hat
+-        p_hat, z, w = ctx.saved_tensors
+-        d_hat = ctx.d_hat
+-        network = ctx.network
+-        
+-        # We need grad_f = df_theta/d_theta and grad_p_f = df_theta/d_p_hat at p_hat
+-        # To get these, we need to compute the forward pass of f_theta at p_hat again
+-        # and then compute gradients.
+-        
+-        # Re-evaluate f_theta at p_hat
+-        # Note: network returns (occ, tex). We only need occ for the implicit diff part.
+-        # But we need the gradient wrt theta.
+-        
+-        # Compute gradient of f_theta wrt theta
+-        # This requires a forward pass and backward pass through f_theta
+-        p_hat.requires_grad_(True)
+-        z.requires_grad_(True)
+-        
+-        # Forward pass for f_theta
+-        # We need to isolate f_theta. Assuming network.shared_layers and occupancy_head
+-        # It's easier to just call the network and extract the gradient.
+-        
+-        # However, the paper says: "backpropagating the result through the operator theta -> f_theta(p_hat)"
+-        # This implies we treat f_theta as a function of theta.
+-        
+-        # Let's compute grad_f_theta_theta and grad_f_theta_p
+-        # We need the gradient of the loss wrt theta.
+-        # L = sum_u || I_u - t_theta(p_hat) ||
+-        # dL/d_theta = sum_u [ dL/dI * dt/d_theta + dL/dI * dt/dp * dp/d_theta ]
+-        # dp/d_theta = w * dd/d_theta
+-        # dd/d_theta = - (df/dp . w)^-1 * df/d_theta
+-        
+-        # Let lambda = dL/d_d_hat (scalar per pixel)
+-        # lambda = dL/dI * dt/dp . w  (chain rule from color to depth)
+-        # Actually, grad_output is dL/d_tex_hat.
+-        # dL/d_d_hat = grad_output . (dt/dp_hat) . w ? No.
+-        # I_hat = t(p_hat). dI/d_d = dt/dp * dp/dd = dt/dp * w.
+-        # So lambda = grad_output @ (dt/dp_hat) @ w ? 
+-        # grad_output is (N, 3). dt/dp_hat is (N, 3, 3). w is (N, 3).
+-        # lambda = sum_k grad_output[:, k] * dt_k/dp * w
+-        # This is complex. The paper simplifies by computing mu.
+-        
+-        # Let's follow the paper's backward pass structure:
+-        # 1. Compute lambda = dL/d_d_hat
+-        # 2. Compute mu = - (df/dp . w)^-1 * lambda
+-        # 3. Compute grad_theta = mu * df/d_theta
+-        
+-        # Step 1: Compute dt/dp_hat at p_hat
+-        # We need the Jacobian of t_theta wrt p_hat.
+-        # This is expensive. The paper might assume we have it or compute it.
+-        # For the sake of the pseudocode, we assume we can compute dt/dp_hat.
+-        
+-        # Re-evaluate t_theta at p_hat to get gradients
+-        tex_val, _ = network(p_hat, z) # This is redundant, we have tex_hat from forward
+-        # But we need gradients.
+-        
+-        # Let's compute the necessary gradients using torch.autograd.grad
+-        # We need df/d_theta and df/d_p_hat at p_hat.
+-        
+-        # Forward pass for f_theta
+-        f_val, _ = network(p_hat, z)
+-        
+-        # Gradient of f_val wrt theta
+-        # We need to sum over the batch? No, element-wise.
+-        # df/d_theta is a tensor of shape (N, num_params).
+-        # We can compute this by calling torch.autograd.grad(f_val, network.parameters())
+-        
+-        # However, the paper says: "backpropagating the result through the operator theta -> f_theta(p_hat)"
+-        # This means we treat f_theta(p_hat) as the output.
+-        
+-        # Let's compute lambda first.
+-        # lambda = dL/dd_hat
+-        # dL/dd_hat = dL/dI * dI/dd_hat
+-        # dI/dd_hat = dt/dp_hat * dp/dd_hat = dt/dp_hat * w
+-        # So lambda = grad_output @ (dt/dp_hat) @ w ?
+-        # grad_output is (N, 3). dt/dp_hat is (N, 3, 3). w is (N, 3).
+-        # lambda_i = sum_j grad_output[i, j] * sum_k dt[i, j, k]/dp_k * w[i, k]
+-        
+-        # This requires computing dt/dp_hat.
+-        # Let's assume we have a function get_jacobian_t(p_hat, z)
+-        
+-        # For the purpose of this article, we state the formula.
+-        
+-        # Compute df/dp_hat
+-        grad_f_p = torch.autograd.grad(f_val.sum(), p_hat, retain_graph=True, create_graph=True)[0] # (N, 3)
+-        
+-        # Compute df/d_theta
+-        # This is the tricky part. We need the gradient of f_val wrt all parameters.
+-        # We can do this by summing f_val and backpropagating.
+-        grad_f_theta = torch.autograd.grad(f_val.sum(), list(network.parameters()), retain_graph=True)
+-        
+-        # Compute mu
+-        # df/dp . w is a dot product for each ray
+-        df_dot_w = (grad_f_p * w).sum(dim=1) # (N,)
+-        # mu = - lambda / (df_dot_w)
+-        # But we need lambda.
+-        
+-        # Compute dt/dp_hat
+-        tex_val, _ = network(p_hat, z)
+-        grad_t_p = torch.autograd.grad(tex_val.sum(), p_hat, retain_graph=True, create_graph=True)[0] # (N, 3, 3)
+-        
+-        # lambda = grad_output @ grad_t_p @ w
+-        # grad_output: (N, 3)
+-        # grad_t_p: (N, 3, 3)
+-        # w: (N, 3)
+-        # lambda_i = sum_j grad_output[i, j] * sum_k grad_t_p[i, j, k] * w[i, k]
+-        lambda_val = (grad_output.unsqueeze(2) * grad_t_p).sum(dim=1).sum(dim=1) # (N,)
+-        
+-        # mu = - lambda / (df_dot_w)
+-        mu = - lambda_val / df_dot_w # (N,)
+-        
+-        # grad_theta = mu * grad_f_theta
+-        # grad_f_theta is a list of tensors.
+-        # We need to scale each tensor by mu.
+-        grad_params = [m * g for m, g in zip(mu, grad_f_theta)]
+-        
+-        # Return gradients for inputs
+-        # grad_output is already provided
+-        return None, None, tuple(grad_params), None, None, None, None, None
+-
+-def render_batch(ray_origin, ray_direction, network, z, tau, n_samples, s0, ds):
+-    return DVRRenderFunction.apply(ray_origin, ray_direction, network, z, tau, n_samples, s0, ds)
++    if abs(f_high - f_low) < 1e-8:
++        d_hat = (d_low + d_high) / 2.0
++    else:
++        d_hat = d_low + (tau - f_low) * (d_high - d_low) / (f_high - f_low)
++        
++    # Intersection point
++    p_hat = r0 + d_hat * w
++    
++    # Evaluate texture network
++    color = t_theta(p_hat, theta, z)
++    
++    # Backward Pass: Compute gradient factor mu
++    # We need:
++    # grad_f_p: Gradient of f_theta w.r.t. p_hat (3D vector)
++    # grad_f_theta: Gradient of f_theta w.r.t. theta (for backprop)
++    # These are typically computed via automatic differentiation frameworks
++    # Here we assume access to these gradients
++    
++    # Compute gradient of f_theta w.r.t. p_hat
++    # grad_f_p = grad(f_theta(p, theta, z), p) evaluated at p_hat
++    grad_f_p = compute_gradient_f_p(p_hat, theta, z)
++    
++    # Compute gradient of f_theta w.r.t. theta
++    # grad_f_theta = grad(f_theta(p, theta, z), theta) evaluated at p_hat
++    grad_f_theta = compute_gradient_f_theta(p_hat, theta, z)
++    
++    # Calculate mu
++    # mu = - (grad_f_p . w)^-1 * lambda
++    # However, in the forward pass we don't have lambda yet.
++    # The backward pass function will take lambda as input.
++    # For this forward pass, we just return the necessary components for backprop
++    # or compute mu if lambda is provided.
++    
++    # Let's assume this function is part of a larger graph where lambda is passed in backward pass.
++    # To make this self-contained for implementation, we return the intermediate values needed for backprop.
++    
++    return color, (grad_f_p, grad_f_theta, w, d_hat, p_hat)
++
++def backward_dvr(color_grad, backprop_data, lambda_d):
++    """
++    Computes gradients for DVR backward pass.
++    
++    Args:
++        color_grad: Gradient of loss w.r.t. color (3D vector).
++        backprop_data: Tuple from forward pass (grad_f_p, grad_f_theta, w, d_hat, p_hat).
++        lambda_d: Gradient of loss w.r.t. depth d_hat (scalar).
++        
++    Returns:
++        grad_theta: Gradient of loss w.r.t. theta.
++    """
++    grad_f_p, grad_f_theta, w, d_hat, p_hat = backprop_data
++    
++    # Gradient of color w.r.t. p_hat
++    # grad_I_p = grad(t_theta(p, theta, z), p) evaluated at p_hat
++    grad_I_p = compute_gradient_t_p(p_hat, theta, z)
++    
++    # Gradient of color w.r.t. theta (direct term)
++    grad_I_theta = compute_gradient_t_theta(p_hat, theta, z)
++    
++    # Gradient of p_hat w.r.t. theta
++    # dp_hat/d_theta = w * dd_hat/d_theta
++    
++    # Calculate dd_hat/d_theta using implicit differentiation
++    # dd_hat/d_theta = - (grad_f_p . w)^-1 * grad_f_theta
++    
++    # Compute scalar factor (grad_f_p . w)
++    dot_product = dot(grad_f_p, w)
++    
++    # Avoid division by zero
++    if abs(dot_product) < 1e-8:
++        dd_hat_d_theta = 0.0
++    else:
++        dd_hat_d_theta = - (1.0 / dot_product) * grad_f_theta
++        
++    # Gradient of p_hat w.r.t. theta
++    # dp_hat_d_theta = w * dd_hat_d_theta (broadcast w to match theta dimensions if needed)
++    # In practice, this is handled by the AD framework if we define the operation correctly.
++    # Here we compute the effective gradient for the texture part.
++    
++    # Total gradient w.r.t. theta:
++    # dL/d_theta = dL/d_I * dI/d_theta + dL/dd * dd/d_theta * dI/dd * dI/dp * dp/dd * dd/d_theta ...
++    # Actually, the chain rule is:
++    # dL/d_theta = dL/d_I * (dI/d_theta + dI/dp * dp/d_theta)
++    # dp/d_theta = w * dd/d_theta
++    # dd/d_theta = - (grad_f_p . w)^-1 * grad_f_theta
++    
++    # So:
++    # dL/d_theta = dL/d_I * dI/d_theta + dL/d_I * dI/dp * w * dd/d_theta
++    
++    # Term 1: Direct texture gradient
++    term1 = color_grad * grad_I_theta # Element-wise or matrix mult depending on grad_I_theta shape
++    
++    # Term 2: Gradient through surface point
++    # dI/dp * w is a scalar (dot product of color grad and ray direction weighted by color grad w.r.t p)
++    # Actually, dI/dp is a Jacobian (3x3 or 3xN). w is 3x1.
++    # dI/dp * w is a vector (3x1) representing change in color due to movement along ray.
++    # Then multiply by dd/d_theta (scalar) to get change in color due to parameter change.
++    
++    # Let's compute dI/dp * w
++    # grad_I_p is 3xN (or N x 3). w is 3x1.
++    # result is N x 1 (or 1 x N)
++    color_grad_w = dot(color_grad, grad_I_p) # This is a scalar if color_grad is 3x1 and grad_I_p is 3xN? 
++    # No, color_grad is 3x1. grad_I_p is 3xN.
++    # We need to contract the color dimension.
++    # result = sum_i (color_grad_i * grad_I_p_i) for each parameter dimension?
++    # Actually, dI/dp is a matrix J where J_ij = dI_i / dp_j.
++    # dI/dp * w is a vector v where v_i = sum_j J_ij * w_j.
++    # Then dL/d_theta_term2 = sum_i (dL/dI_i * v_i) * dd/d_theta * dI/d_theta_part?
++    # No, the chain rule is:
++    # dL/d_theta = dL/dI * dI/d_theta + dL/dI * dI/dp * dp/d_theta
++    # dp/d_theta = w * dd/d_theta
++    # So dL/d_theta = dL/dI * dI/d_theta + dL/dI * dI/dp * w * dd/d_theta
++    
++    # dL/dI * dI/dp is a vector (gradient of loss w.r.t. p)
++    grad_L_p = dot(color_grad, grad_I_p) # This is a vector of size N (number of parameters)
++    
++    # Then multiply by w * dd/d_theta
++    # w is 3x1. dd/d_theta is scalar.
++    # grad_L_p * (w * dd/d_theta) is not direct matrix mult.
++    # grad_L_p is N x 1.
++    # We need to compute: sum_i (grad_L_p_i * (w * dd/d_theta)_i) ? No.
++    # grad_L_p is gradient w.r.t. parameters.
++    # The term is: (dL/dI * dI/dp) * (w * dd/d_theta)
++    # dL/dI * dI/dp is a vector G_p of size N (parameters).
++    # w * dd/d_theta is a vector of size 3 (spatial).
++    # This doesn't match.
++    
++    # Let's re-evaluate.
++    # dL/d_theta = dL/dI * dI/d_theta + dL/dI * dI/dp * dp/d_theta
++    # dp/d_theta = w * dd/d_theta
++    # So the second term is: dL/dI * dI/dp * w * dd/d_theta
++    # dL/dI * dI/dp is a vector G_p of size N (parameters).
++    # w is a vector of size 3.
++    # dd/d_theta is a vector of size N (parameters).
++    # So we are multiplying G_p (N) by (w * dd/d_theta) (3)? No.
++    
++    # Let's look at the formula from the source:
++    # mu = - (grad_f_p . w)^-1 * lambda
++    # grad_theta = mu * grad_f_theta
++    # This is for the depth part.
++    # The total gradient is:
++    # grad_theta = grad_I_theta + grad_p_theta
++    # grad_p_theta = (dL/dI * dI/dp * w) * dd/d_theta
++    # Let K = dL/dI * dI/dp * w. K is a scalar?
++    # dL/dI is 3x1. dI/dp is 3xN. w is 3x1.
++    # dL/dI * dI/dp is 1xN.
++    # (1xN) * (3x1) doesn't work.
++    
++    # Correct chain rule:
++    # L depends on I. I depends on p. p depends on d. d depends on theta.
++    # Also I depends on theta directly.
++    # dL/d_theta = dL/dI * dI/d_theta + dL/dI * dI/dp * dp/d_theta
++    # dp/d_theta = w * dd/d_theta
++    # dd/d_theta = - (grad_f_p . w)^-1 * grad_f_theta
++    
++    # So:
++    # dL/d_theta = dL/dI * dI/d_theta + dL/dI * dI/dp * w * dd/d_theta
++    
++    # dL/dI * dI/dp is a vector G_p of size N (parameters).
++    # w is a vector of size 3.
++    # dd/d_theta is a vector of size N (parameters).
++    # The term dL/dI * dI/dp * w is not well-defined as a scalar.
++    
++    # Let's look at the source again.
++    # mu = - (grad_f_p . w)^-1 * lambda
++    # grad_theta = mu * grad_f_theta
++    # This implies that the gradient through the depth is proportional to grad_f_theta.
++    # The proportionality factor is mu.
++    # mu is a scalar.
++    # So the gradient through depth is mu * grad_f_theta.
++    # This is added to the direct gradient from texture.
++    
++    # So:
++    # grad_theta = grad_I_theta + mu * grad_f_theta
++    
++    # Where mu = - (grad_f_p . w)^-1 * lambda
++    # lambda = dL/dd = dL/dI * dI/dd
++    # dI/dd = dI/dp * dp/dd = dI/dp * w
++    
++    # So lambda = dL/dI * dI/dp * w
++    # This is a scalar!
++    # dL/dI is 3x1. dI/dp is 3xN. w is 3x1.
++    # dL/dI * dI/dp is 1xN.
++    # (1xN) * (3x1) is not defined.
++    
++    # Wait, dI/dp is a Jacobian matrix J where J_ij = dI_i / dp_j.
++    # dL/dI is a vector g_I.
++    # g_I * J is a vector g_p of size N.
++    # g_p * w is not defined.
++    
++    # Let's use indices.
++    # L = sum_u L_u
++    # dL_u / d_theta_k = sum_i (dL_u / dI_i) * (dI_i / d_theta_k)
++    # dI_i / d_theta_k = dI_i / d_theta_k_direct + sum_j (dI_i / dp_j) * (dp_j / d_theta_k)
++    # dp_j / d_theta_k = w_j * dd / d_theta_k
++    
++    # So dL_u / d_theta_k = sum_i (dL_u / dI_i) * (dI_i / d_theta_k_direct + sum_j (dI_i / dp_j) * w_j * dd / d_theta_k)
++    # = sum_i (dL_u / dI_i) * dI_i / d_theta_k_direct + sum_j (sum_i (dL_u / dI_i) * dI_i / dp_j) * w_j * dd / d_theta_k
++    
++    # Let g_I_i = dL_u / dI_i
++    # Let J_ij = dI_i / dp_j
++    # Let g_p_j = sum_i g_I_i * J_ij (gradient of loss w.r.t. p)
++    # Let lambda = sum_j g_p_j * w_j (dot product of g_p and w)
++    # Then dL_u / d_theta_k = direct_term + lambda * dd / d_theta_k
++    
++    # And dd / d_theta_k = - (sum_j (df/dp_j) * w_j)^-1 * (df/d_theta_k)
++    # Let grad_f_p_j = df/dp_j
++    # Let dot_f_w = sum_j grad_f_p_j * w_j
++    # dd / d_theta_k = - (1 / dot_f_w) * grad_f_theta_k
++    
++    # So dL_u / d_theta_k = direct_term + lambda * (- (1 / dot_f_w) * grad_f_theta_k)
++    # = direct_term - (lambda / dot_f_w) * grad_f_theta_k
++    
++    # Let mu = - lambda / dot_f_w
++    # Then dL_u / d_theta_k = direct_term + mu * grad_f_theta_k
++    
++    # This matches the source formula.
++    
++    # Compute lambda
++    # g_p = dot(color_grad, grad_I_p) # This is a vector of size N
++    # lambda = dot(g_p, w) # This is a scalar
++    
++    g_p = dot(color_grad, grad_I_p) # Vector of size N
++    lambda_d = dot(g_p, w) # Scalar
++    
++    # Compute dot_f_w
++    dot_f_w = dot(grad_f_p, w) # Scalar
++    
++    # Compute mu
++    if abs(dot_f_w) < 1e-8:
++        mu = 0.0
++    else:
++        mu = - lambda_d / dot_f_w
++        
++    # Compute total gradient
++    grad_theta = grad_I_theta + mu * grad_f_theta
++    
++    return grad_theta
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **No Intersection:** If the ray does not intersect the isosurface within the sampling interval, the secant method may fail or produce invalid depths. This is typically handled by masking out such pixels during loss computation [S1][S2].
+-*   **Precision:** The secant method approximation introduces error. Increasing $n$ reduces this error [S1][S2].
+-*   **Gradient Discontinuities:** The argmin operation for finding the transition index $j$ is non-differentiable. However, the paper notes that the gradient is computed via implicit differentiation of the *refined* depth $\hat{d}$, bypassing the need to differentiate through the discrete search step [S1][S2].
+-*   **Memory:** Unlike voxel-based methods, DVR does not store intermediate volumetric data, making it memory-efficient [S1][S2][S4, unofficial].
+-
+ ## Subtopics
+ 
+ ### [DVR Training Losses](809-dvr-training-losses.md)
+-Defines a multi-component objective function that decouples photometric consistency, freespace regularization, and occupancy induction into separate loss terms applied to specific pixel subsets ($P_0, P_1, P_2$), distinguishing it from methods relying on a single global rendering loss.
++Defines a multi-component objective function that distinguishes pixels into three disjoint sets ($P_0, P_1, P_2$) based on object mask membership and predicted surface depth finiteness, decoupling photometric consistency, freespace regularization, and occupancy induction.
+ 
+ ### [DVR Network Architecture and Training Setup](850-dvr-network-architecture-and-training-setup.md)
+-Details the neural network architecture, ray sampling strategy, and training configuration, including the use of a single network with two shallow heads and an encoder for latent code extraction.
++Details the neural network architecture, ray sampling strategy, and training configuration, including the construction of the implicit function network and scheduling of ray marching steps.
+ 
+ ### [Training Losses for Implicit Surface Learning](1526-training-losses-for-implicit-surface-learning.md)
+-Defines loss functions for training the occupancy and texture networks using 2D image supervision, categorizing pixels into sets to enforce photometric consistency and remove spurious geometry.
++Defines loss functions to train the occupancy and texture networks using 2D image supervision, explicitly handling empty space and missing surfaces through targeted binary cross-entropy penalties.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the forward pass evaluation of the neural network at $n$ samples per ray and the backward pass. The implicit differentiation step adds minimal overhead compared to storing volumetric data [S1][S2].
+-*   **Memory Complexity:** Independent of the sampling accuracy $n$ and resolution, as no intermediate volumetric data is stored in the forward pass [S1][S2][S4, unofficial].
+-*   **Performance:** Enables high-resolution reconstruction without the discretization artifacts of voxel-based methods [S1][S2].
+-*   **Strengths:** Memory-efficient, resolution-independent, learns from 2D images only [S1][S2][S4, unofficial].
+-*   **Limitations:** Requires iterative secant method for depth refinement; non-differentiable search step is bypassed but relies on smooth implicit surfaces [S1][S2].
++*   **Memory Complexity:** $O(n)$ per ray, where $n$ is the number of samples. Unlike voxel-based methods, DVR does not store intermediate volumetric data, so memory footprint is independent of sampling accuracy [S1, S2][S4, unofficial].
++*   **Time Complexity:** Dominated by the evaluation of the neural networks $f_\theta$ and $t_\theta$. The secant method refinement is fast (few iterations).
++*   **Performance:** Works with as little as one image per object [S2]. Can be trained on a single NVIDIA V100 GPU with a batch size of 64 images with 1024 random pixels each [S1, S2][S4, unofficial].
++*   **Strengths:** Memory-efficient, high resolution, continuous representation, no need for 3D ground truth [S1, S2][S4, unofficial].
++*   **Limitations:** Requires careful tuning of sampling parameters ($n, s_0, \Delta s$) and threshold $\tau$ [S1, S2][S4, unofficial]. Performance depends on the quality of the implicit representation [S1, S2][S4, unofficial].
+ 
+ ## Background
+-DVR was introduced by Niemeyer et al. in 2020 [S1][S2][S4, unofficial]. It builds on the concept of occupancy networks [48] and texture fields [54], extending them to be differentiable with respect to 2D image supervision. The key insight was the application of implicit differentiation to derive analytic gradients for surface depth, enabling the training of implicit neural representations without 3D ground truth [S1][S2].
++DVR was introduced by Niemeyer et al. in 2020 [S1, S2][S4, unofficial]. It builds on the concept of implicit neural representations, such as occupancy networks [48], and differentiable rendering techniques. The key insight is the use of implicit differentiation to derive analytic gradients for depth, enabling the optimization of implicit shape and texture representations from 2D images alone [S1, S2][S4, unofficial].
+ 
+ ## Sources

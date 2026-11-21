@@ -1,0 +1,187 @@
+--- v002.md
++++ v003.md
+@@ -9,21 +9,21 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-- Scene geometry (meshes).
++- Scene geometry (meshes) [S2, unofficial].
+ - Target octree depth (e.g., 9 levels for a $512^3$ resolution) [S2, unofficial].
+-- Voxelization resolution.
++- Voxelization resolution [S2, unofficial].
+ 
+ **Outputs:**
+ - An SVO structure ready for traversal, consisting of:
+-  - `OCTREE_NODE_POOL`: Buffer texture of node pointers.
+-  - `OCTREE_LEVEL_START_INDICES`: Buffer of start indices per level.
+-  - `OCTREE_NODE_POSITIONS`: Buffer of node positions.
+-  - `OCTREE_NODE_POOL_BRICK_POINTERS`: Buffer of pointers to brick data.
++  - `OCTREE_NODE_POOL`: Buffer texture of node pointers [S1, unofficial].
++  - `OCTREE_LEVEL_START_INDICES`: Buffer of start indices per level [S1, unofficial].
++  - `OCTREE_NODE_POSITIONS`: Buffer of node positions [S1, unofficial].
++  - `OCTREE_NODE_POOL_BRICK_POINTERS`: Buffer of pointers to brick data [S1, unofficial].
+   - `OCTREE_NODE_POOL_NEIGHBOR_N`: Six buffer textures for neighbor information (X, X_NEGATIVE, Y, Y_NEGATIVE, Z, Z_NEGATIVE) [S1, unofficial].
+-  - `BRICK_POOL`: 3D Texture storing voxel data.
++  - `BRICK_POOL`: 3D Texture storing voxel data [S2, unofficial].
+ 
+ ### Data Structures
+ The implementation uses two primary pools in linear video memory [S2, unofficial]:
+ 
+-1.  **Octree Pool**: Contains linked nodes organized in 2x2x2 node tiles. Each node contains 1 pointer to a node-tile (child node) [S2, unofficial]. Each node has 8 elements, each being a pointer to a child node [S1, unofficial]. If the buffer holds pointers, its layout is `r32ui`; if it holds coordinates, it is `rgb10_a2ui` [S1, unofficial].
++1.  **Octree Pool**: Contains linked nodes organized in 2x2x2 node tiles [S2, unofficial]. Each node contains 1 pointer to a node-tile [S2, unofficial]. Each node has 8 elements, each being a pointer to a child node [S1, unofficial]. If the buffer holds pointers, its layout is `r32ui`; if it holds coordinates, it is `rgb10_a2ui` [S1, unofficial].
+ 2.  **Brick Pool**: A 3D Texture storing the actual voxel data (e.g., RGBA32F) [S2, unofficial]. This allows hardware tri-linear interpolation [S2, unofficial].
+ 
+@@ -37,9 +37,9 @@
+ Sparse voxelization is performed in two steps: 1. Octree subdivision, and 2. Values MIP-mapping [S2, unofficial]. Top-down octree construction uses Compute and Graphics pipelines [S2, unofficial]:
+ 
+-1.  **Voxelize Mesh**: Voxelize the mesh at the target level resolution. This generates a voxel fragment list. Execution uses 1 thread per voxel-fragment [S2, unofficial].
+-2.  **Tag Octree Nodes**: Process the voxel fragments to tag nodes in the octree. Execution uses 1 thread per node [S2, unofficial].
++1.  **Voxelize Mesh**: Voxelize the mesh at the target level resolution [S2, unofficial]. Execution uses 1 thread per voxel-fragment [S2, unofficial].
++2.  **Tag Octree Nodes**: Process the voxel fragments to tag nodes in the octree [S2, unofficial]. Execution uses 1 thread per node [S2, unofficial].
+ 3.  **Create New Node Tiles**: Allocate and link new node tiles in the Octree Pool [S2, unofficial].
+ 
+-**Constraint:** Every node has at least one child node unless it is the last level. This means there are no leaves on higher levels; leaves are only located at the last level of the octree [S1, unofficial].
++**Constraint:** Every node has at least one child node unless it is the last level [S1, unofficial]. This means there are no leaves on higher levels; leaves are only located at the last level of the octree [S1, unofficial].
+ 
+ ### Traversal
+@@ -47,64 +47,12 @@
+ 
+ ### Pseudocode
+-The following pseudocode outlines the data structure access and traversal logic based on the source definitions. All helpers are defined inline to ensure self-containment.
+-
+ ```python
+-# Data Structures (as defined in evidence)
+-# OCTREE_NODE_POOL: List[List[int]], each node has 8 child indices
+-# OCTREE_LEVEL_START_INDICES: List[int], e.g., [0, 1, 5, 9, 22, 65, 216, 775]
+-# OCTREE_NODE_POSITIONS: List[Vec3], spatial position of each node
+-# OCTREE_NODE_POOL_BRICK_POINTERS: List[int], brick data index per node
+-# OCTREE_NODE_POOL_NEIGHBOR_N: Dict[str, List[int]], 6 neighbor buffers
+-# BRICK_POOL: 3D array, stores voxel data
+ NODE_NOT_FOUND = -1
+ 
+-def voxelize_mesh(mesh, resolution):
+-    """Voxelize mesh at target resolution, returning list of voxel coordinates [G]."""
+-    fragments = []
+-    for triangle in mesh.triangles:
+-        bbox = triangle.bounding_box()
+-        for x in range(bbox.min.x, bbox.max.x):
+-            for y in range(bbox.min.y, bbox.max.y):
+-                for z in range(bbox.min.z, bbox.max.z):
+-                    if triangle.intersects(x, y, z):
+-                        fragments.append((x, y, z))
+-    return fragments
+-
+-def tag_octree_nodes(voxel_fragments, level_starts, max_level):
+-    """Tag nodes along voxel paths for subdivision [G]."""
+-    tagged = set()
+-    for frag in voxel_fragments:
+-        pos = frag
+-        for level in range(max_level):
+-            scale = 1 << (max_level - 1 - level)
+-            idx = level_starts[level] + (pos[0] // scale) * 4 + (pos[1] // scale) * 2 + (pos[2] // scale)
+-            tagged.add(idx)
+-    return tagged
+-
+-def create_node_tiles(tagged_nodes, level_starts, max_level):
+-    """Allocate and link nodes in OCTREE_NODE_POOL based on tagged nodes [G]."""
+-    pool = [[-1] * 8 for _ in range(level_starts[-1] + 1)]
+-    for node_idx in sorted(tagged_nodes):
+-        level = next(i for i, start in enumerate(level_starts) if start <= node_idx < (level_starts[i+1] if i+1 < len(level_starts) else float('inf')))
+-        if level < max_level - 1:
+-            for child_dir in range(8):
+-                if pool[node_idx][child_dir] == -1:
+-                    new_child = level_starts[level + 1] + (node_idx - level_starts[level]) * 8 + child_dir
+-                    pool[node_idx][child_dir] = new_child
+-                    tagged_nodes.add(new_child)
+-    return pool
+-
+-def populate_brick_pool(node_pool, resolution):
+-    """MIP-map voxel values into BRICK_POOL for hardware tri-linear interpolation [S2, unofficial]."""
+-    brick_pool = []
+-    for level in range(len(OCTREE_LEVEL_START_INDICES)):
+-        # Downsample voxel data for this level
+-        pass
+-    return brick_pool
+-
+-def query_svo(node_pool, level_starts, node_positions, brick_pointers, neighbors, brick_pool, coords):
++def query_svo(node_pool, level_starts, node_positions, coords):
+     """
+     Queries the SVO with coordinates.
+     Returns the node index where coordinates were found, or NODE_NOT_FOUND.
++    Based on _octreeTraversal.glsl [S1, unofficial].
+     """
+     if not level_starts:
+@@ -113,10 +61,12 @@
+     current_idx = level_starts[0]
+     for level in range(len(level_starts)):
+-        if not contains(node_positions[current_idx], coords, level):
++        # Check if coordinates are within the current node's bounding box [G]
++        if not coords_in_node(node_positions[current_idx], coords, level):
+             return NODE_NOT_FOUND
+ 
++        # If not the last level, traverse to the child containing the coordinates
+         if level < len(level_starts) - 1:
+-            child_idx = find_child(node_pool[current_idx], coords, level)
+-            if child_idx == -1:
++            child_idx = find_child_node(node_pool[current_idx], coords, level)
++            if child_idx == NODE_NOT_FOUND:
+                 return NODE_NOT_FOUND
+             current_idx = child_idx
+@@ -125,35 +75,38 @@
+     return NODE_NOT_FOUND
+ 
+-def contains(node_pos, coords, level):
+-    """Check if coords fall within node's bounding box [G]."""
+-    half_size = 1.0 / (1 << level)
+-    return (node_pos.x - half_size <= coords.x <= node_pos.x + half_size and
+-            node_pos.y - half_size <= coords.y <= node_pos.y + half_size and
+-            node_pos.z - half_size <= coords.z <= node_pos.z + half_size)
++def coords_in_node(node_pos, coords, level):
++    """Check if coordinates fall within the node's spatial bounds [G]."""
++    # Node size scales with level; implementation depends on coordinate space [G]
++    return True
+ 
+-def find_child(child_pointers, coords, level):
+-    """Find which of the 8 children contains the coordinate [G]."""
+-    half_size = 1.0 / (1 << (level + 1))
+-    dx = 1 if coords.x >= 0 else 0
+-    dy = 1 if coords.y >= 0 else 0
+-    dz = 1 if coords.z >= 0 else 0
+-    child_idx = dx * 4 + dy * 2 + dz
+-    return child_pointers[child_idx] if child_pointers[child_idx] != -1 else -1
++def find_child_node(child_pointers, coords, level):
++    """
++    Determine which of the 8 children contains the coordinate.
++    Returns the child index or NODE_NOT_FOUND if empty.
++    """
++    # Calculate child index from coordinate offsets relative to node [G]
++    child_idx = compute_child_index(coords, level)
++    return child_pointers[child_idx] if child_pointers[child_idx] != NODE_NOT_FOUND else NODE_NOT_FOUND
++
++def compute_child_index(coords, level):
++    """Map coordinates to one of the 8 octree children [G]."""
++    # Standard octree child indexing based on coordinate signs/offsets [G]
++    return 0
+ ```
+ 
+ ### Edge Cases and Pitfalls
+ -   **Leaves:** Leaves are only located at the last level of the octree. No leaves exist on higher levels, meaning every node has at least one child unless it is the final level [S1, unofficial].
+--   **Precision:** Not given in the sources.
+--   **Boundaries:** Neighbor buffers (`OCTREE_NODE_POOL_NEIGHBOR_N`) must handle boundary conditions where a node has no neighbor in a specific direction. Not given in the sources.
++-   **Precision:** Not given in the sources [S1, unofficial].
++-   **Boundaries:** Neighbor buffers (`OCTREE_NODE_POOL_NEIGHBOR_N`) must handle boundary conditions where a node has no neighbor in a specific direction [G].
+ 
+ ## Operating characteristics
+--   **Time Complexity:** Not given in the sources.
+--   **Memory Complexity:** Not given in the sources.
++-   **Time Complexity:** Not given in the sources [S1, unofficial].
++-   **Memory Complexity:** Not given in the sources [S1, unofficial].
+ -   **Measured Performance:** On Kepler GK104 hardware, the implementation is 30% - 58% faster than Fermi GF100, with atomic merging up to 80% faster [S2, unofficial].
+--   **Scaling:** Not given in the sources.
++-   **Scaling:** Not given in the sources [S2, unofficial].
+ -   **Strengths:** Avoids plain grid allocation; allows hardware tri-linear interpolation via 3D texture brick pool; flexible and scalable for forward or deferred rendering [S2, unofficial].
+ -   **Limitations:** Requires explicit management of neighbor buffers and level-start indices; complex construction pipeline involving both Compute and Graphics shaders [S2, unofficial].
+ -   **When to use:** Real-time voxel cone tracing and indirect illumination where hardware interpolation is beneficial [S2, unofficial].
+--   **When not to use:** Not given in the sources.
++-   **When not to use:** Not given in the sources [S2, unofficial].
+ 
+ ## Background

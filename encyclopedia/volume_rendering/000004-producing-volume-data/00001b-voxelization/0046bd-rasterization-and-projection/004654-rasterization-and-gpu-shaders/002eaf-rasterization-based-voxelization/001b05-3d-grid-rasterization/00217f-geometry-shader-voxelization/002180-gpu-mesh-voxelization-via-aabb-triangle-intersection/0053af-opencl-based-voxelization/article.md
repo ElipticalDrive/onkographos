@@ -1,0 +1,138 @@
+# OpenCL-based Voxelization
+
+Also called: Parallelized Voxelization using OpenCL
+
+## Overview
+This method converts a triangular mesh into a voxel grid by dispatching compute threads to test for intersections between mesh facets and voxel cubes. It distinguishes itself from CPU-based approaches by leveraging OpenCL for parallel execution, achieving up to 260 times faster computation [S1]. It builds on [GPU Mesh Voxelization via AABB-Triangle Intersection](2541-gpu-mesh-voxelization-via-aabb-triangle-intersection.md) by optimizing memory access patterns for the specific geometry of triangular facets.
+
+## How it works
+**Inputs:** A triangular mesh $M$ with $n$ triangles; user-defined voxel grid parameters (origin $p_0$, dimensions $d_x, d_y, d_z$, diagonal $\Delta p$).
+**Outputs:** A 1D array of length $d_x d_y d_z$ storing material information for each voxel.
+
+**Data Structures:**
+1.  **Preprocessed Mesh Array:** A contiguous `float` array of length $9n$. For triangle $i$, elements $9i$ to $9i+8$ store the $x,y,z$ coordinates of vertices $v_0, v_1, v_2$ respectively. This ensures coalesced memory access [S1].
+2.  **Voxel Grid Representation:** Defined by origin $p_0 \in \mathbb{R}^3$, dimensions $d \in \mathbb{N}^+$ (where $d = (d_x, d_y, d_z)$), and voxel diagonal $\Delta p \in \mathbb{R}^3$. The grid covers the Axis-Aligned Bounding Box (AABB) of the mesh [S1].
+3.  **Output Array:** 1D array of size $d_x d_y d_z$. Index $i$ corresponds to voxel $(x,y,z)$ via $i = x + y d_x + z d_x d_y$ [S1].
+
+**Algorithm Steps:**
+
+1.  **Input Preparation:** Construct the preprocessed mesh array. Sort vertex coordinates per triangle into a single contiguous buffer to avoid cluttered memory access caused by separate vertex/index arrays [S1].
+2.  **Grid Construction:** Calculate the AABB of the mesh using min/max vertex coordinates. Define the voxel grid parameters $p_0, d, \Delta p$. Allocate the output array [S1].
+3.  **Kernel Execution:** Dispatch work-items. Each work-item (or group) processes voxel/facet intersections.
+    *   **Index Mapping:** If processing by voxel index $i$, calculate grid coordinates:
+        $$ z = \lfloor i / (d_x d_y) \rfloor $$
+        $$ y = \lfloor (i - z d_x d_y) / d_x \rfloor $$
+        $$ x = i - z d_x d_y - y d_x $$
+        [S1]
+    *   **Voxel Corner Calculation:** Calculate the minimum corner $o$ of voxel $V(x,y,z)$:
+        $$ o = p_0 + \langle \Delta p, (x, y, z) \rangle $$
+        where $\langle \cdot, \cdot \rangle$ is the dot product. The voxel is defined by corners $p=o$ and $p+\Delta p$ [S1].
+    *   **Facet/Voxel Overlap Test:** For each triangle $T$ with vertices $v_0, v_1, v_2$:
+        1.  Calculate normal $n$ of $T$.
+        2.  Calculate critical point $c$ relative to the voxel's diagonal $\Delta p$:
+            $$ c = \begin{cases} (\Delta p_x, 0, 0) & \text{if } n_x > 0 \\ (0, 0, 0) & \text{if } n_x \le 0 \end{cases}, \begin{cases} (0, \Delta p_y, 0) & \text{if } n_y > 0 \\ (0, 0, 0) & \text{if } n_y \le 0 \end{cases}, \begin{cases} (0, 0, \Delta p_z) & \text{if } n_z > 0 \\ (0, 0, 0) & \text{if } n_z \le 0 \end{cases} $$
+            More precisely, component $k$ is $\Delta p_k$ if $n_k > 0$, else $0$ [S1].
+        3.  Perform the overlap test based on the separating axis theorem variant [S1].
+        4.  If an intersection is detected, mark the voxel in the output array [S1].
+
+**Parameters:**
+*   **Local Size:** Number of work-items per work-group. Best practice suggests maximization, but limited local memory often forces reliance on global memory [S1].
+*   **Global Size:** Total number of work-items [S1].
+
+**Pitfalls:**
+*   **Memory Access:** Standard mesh formats (separate vertex/index arrays) cause slow, uncoalesced access. Preprocessing into a contiguous float array is required [S1].
+*   **Global Memory Limits:** Efficient OpenCL programming limits global memory access to a maximum of two per kernel execution (one read, one write). Excessive access compromises performance [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for OpenCL Kernel Logic
+# Assumes preprocessed mesh data is available in global memory
+# Assumes voxel grid parameters (p0, dx, dy, dz, dp) are available
+
+def voxelization_kernel(global_id, mesh_data, p0, dx, dy, dz, dp, output_array):
+    # 1. Calculate voxel coordinates from global ID
+    # Map 1D global ID to 3D grid coordinates
+    i = global_id
+    if i >= dx * dy * dz:
+        return
+
+    z = i // (dx * dy)
+    remainder = i - z * dx * dy
+    y = remainder // dx
+    x = remainder - y * dx
+
+    # 2. Calculate voxel minimum corner
+    # o = p0 + dot(dp, (x, y, z))
+    o_x = p0.x + dp.x * x
+    o_y = p0.y + dp.y * y
+    o_z = p0.z + dp.z * z
+    
+    # Voxel bounds
+    p_min = (o_x, o_y, o_z)
+    p_max = (o_x + dp.x, o_y + dp.y, o_z + dp.z)
+
+    # 3. Iterate over all triangles to test for intersection
+    # Note: In a full implementation, this loop might be optimized or 
+    # structured differently (e.g., one thread per voxel vs one per triangle).
+    # Based on [S1], the method relies on facet/cube overlapping tests.
+    
+    num_triangles = len(mesh_data) // 9
+    
+    for t in range(num_triangles):
+        # Fetch vertices for triangle t
+        base_idx = t * 9
+        v0 = (mesh_data[base_idx], mesh_data[base_idx+1], mesh_data[base_idx+2])
+        v1 = (mesh_data[base_idx+3], mesh_data[base_idx+4], mesh_data[base_idx+5])
+        v2 = (mesh_data[base_idx+6], mesh_data[base_idx+7], mesh_data[base_idx+8])
+        
+        # Calculate normal n
+        # e1 = v1 - v0, e2 = v2 - v0
+        e1 = (v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2])
+        e2 = (v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2])
+        
+        # Cross product e1 x e2
+        nx = e1[1]*e2[2] - e1[2]*e2[1]
+        ny = e1[2]*e2[0] - e1[0]*e2[2]
+        nz = e1[0]*e2[1] - e1[1]*e2[0]
+        n = (nx, ny, nz)
+        
+        # Calculate critical point c
+        # c_k = dp_k if n_k > 0 else 0
+        cx = dp.x if nx > 0 else 0.0
+        cy = dp.y if ny > 0 else 0.0
+        cz = dp.z if nz > 0 else 0.0
+        c = (cx, cy, cz)
+        
+        # Perform overlap test
+        # The source [S1] states the method is an enhanced separating axis theorem.
+        # It verifies validity of intersection. 
+        # If intersecting, mark voxel.
+        if is_facet_voxel_intersect(v0, v1, v2, p_min, p_max, n, c):
+            output_array[i] = 1 # Mark as occupied
+            break # Optimization: stop checking other triangles if already marked
+
+def is_facet_voxel_intersect(v0, v1, v2, p_min, p_max, n, c):
+    # Placeholder for the specific separating axis test logic described in [S1].
+    # The core logic involves checking the projection of the triangle and voxel
+    # against the normal and critical point vectors.
+    # Since the exact boolean logic of the "enhanced SAT" is not fully detailed 
+    # in the provided text beyond the calculation of n and c, 
+    # this function represents the verification step mentioned.
+    # In practice, this would check if the triangle's plane intersects the voxel
+    # and if the intersection polygon overlaps with the voxel volume.
+    return True # Implementation detail omitted in source [S1]
+```
+
+## Operating characteristics
+*   **Performance:** Up to 99.6% reduction or 260 times decrease in computation time compared to conventional single-thread CPU approaches [S1].
+*   **Complexity:** Linear with respect to the number of triangles and voxels, but heavily dependent on memory access patterns.
+*   **Strengths:** High parallelism on heterogeneous hardware (GPU/CPU); optimized memory access via data preprocessing [S1].
+*   **Limitations:** Performance is constrained by the trade-off between local size maximization and global memory access limits. Limited local memory often forces reliance on slower global memory [S1].
+*   **When to use:** When voxelizing large triangular meshes on hardware supporting OpenCL, and memory bandwidth is a bottleneck for standard CPU approaches.
+
+## Background
+This method was developed in the context of heterogeneous computing for computer graphics, specifically for voxel-based modeling in virtual orthopaedic surgery platforms [S1]. It adopts an enhanced version of the separating axis theorem [11] from prior work [21], requiring fewer operations than standard implementations [S1].
+
+## Sources
+[S1] Fast and cross-vendor OpenCL-based implementation for voxelization of triangular mesh models, https://www.tandfonline.com/doi/abs/10.1080/16864360.2018.1486961, fetched 2026-10-31

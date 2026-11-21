@@ -1,0 +1,170 @@
+--- v001.md
++++ v002.md
+@@ -1,4 +1,5 @@
+ # Simultaneous Algebraic Reconstruction Technique (SART)
+ 
++Also called: SART (Simultaneous ART), Simultaneous ART
+ 
+ ## Overview
+@@ -13,7 +14,7 @@
+ *   The system matrix $A$ is not stored explicitly due to memory constraints (e.g., a $512^3$ volume with 360 1.5-megapixel projections requires ~280 GB for single-precision $A$) [S1, unofficial]. Instead, $A$ is accessed implicitly via geometric ray tracing functions during forward and backprojection [S1, unofficial].
+ *   $a_{ij}$ represents the contribution of voxel $j$ to ray $i$, computed as the intersection length or weight [S1, unofficial].
+-*   $x^{(t)}$ is the volume estimate at iteration $t$.
+-*   $\hat{p}^{(t)}$ is the estimated projection vector at iteration $t$.
+-*   $c^{(t)}$ is the normalized correction factor vector at iteration $t$.
++*   $x^{(t)}$ is the volume estimate at iteration $t$ [S1, unofficial].
++*   $\hat{p}^{(t)}$ is the estimated projection vector at iteration $t$ [S1, unofficial].
++*   $c^{(t)}$ is the normalized correction factor vector at iteration $t$ [S1, unofficial].
+ 
+ **Algorithm Steps:**
+@@ -29,5 +30,5 @@
+         6.  **Backprojection:** Update all voxels $j = 1 \dots n$ using the aggregated corrections from the current subset $S$:
+             $$ x_j^{(t+1)} = x_j^{(t)} + \alpha \frac{\sum_{i \in \mathcal{S}} c_i^{(t)} a_{ij}}{\sum_{i \in \mathcal{S}} a_{ij}} $$
+-            The numerator aggregates the weighted corrections from all rays $i$ in subset $S$ that pass through voxel $j$. The denominator normalizes by the total weight of rays in $S$ passing through voxel $j$ [S1, unofficial].
++            The numerator aggregates the weighted corrections from all rays $i$ in subset $S$ that pass through voxel $j$ [S1, unofficial]. The denominator $\sum_{i \in \mathcal{S}} a_{ij}$ is the sum of contributions of all rays in $S$ to voxel $j$ [S1, unofficial].
+     7.  End loop over projections.
+ 8.  End loop over iterations.
+@@ -38,6 +39,5 @@
+ def sart(A_getter, p, alpha, T, num_voxels, num_rays, projection_sets):
+     """
+-    A_getter: function(i, j) -> float, returns a_ij. 
+-              Called implicitly for forward/backprojection.
++    A_getter: function(i, j) -> float, returns a_ij.
+     p: array of shape (num_rays,)
+     alpha: float, relaxation parameter (0 < alpha < 2)
+@@ -48,55 +48,15 @@
+                      for one projection image.
+     """
+-    # Initialize volume estimate
+     x = [0.0] * num_voxels
+-    
++
+     for t in range(1, T + 1):
+-        # Create a temporary copy for the update to ensure consistency within iteration
+-        # Note: Standard SART updates x in place using the current x(t) for all rays in S
+-        # before moving to the next S. The formula uses x^(t) for forward projection
+-        # and updates x^(t+1) based on aggregated corrections.
+-        # However, the standard algorithm description implies x is updated sequentially 
+-        # across subsets S within the same iteration t, or that x^(t) is fixed for the 
+-        # forward projection of all S. 
+-        # The source [S1, unofficial] says: "x_j^(t+1) = x_j^(t) + ...". This implies x^(t) is the 
+-        # value at the start of the iteration t. 
+-        # But the loop structure in Algorithm 1 shows x_j^(t+1) being updated inside 
+-        # the loop over S. This suggests that for the first S, x is updated to an 
+-        # intermediate state, and subsequent S use this intermediate state? 
+-        # Or does it mean x^(t) is used for ALL forward projections in iteration t, 
+-        # and the updates are accumulated into x^(t+1)?
+-        # Let's look at Eq 2.1: x_j^(t+1) = x_j^(t) + alpha * ...
+-        # The RHS uses c_i^(t). c_i^(t) uses p_i - p_hat_i^(t). 
+-        # p_hat_i^(t) uses x_k^(t).
+-        # If x is updated in place inside the loop over S, then for the second S, 
+-        # x is no longer x^(t). 
+-        # Standard SART implementations usually accumulate the backprojection term 
+-        # for all rays in the iteration before updating x. 
+-        # However, Algorithm 1 in [S1, unofficial] writes:
+-        # for all S:
+-        #   compute p_hat, c
+-        #   for j: x_j^(t+1) = x_j^(t) + ...
+-        # This notation x_j^(t+1) suggests a separate buffer or that the update is 
+-        # based on x^(t). If it were in-place, it would likely be x_j = x_j + ...
+-        # Given the "simultaneous" nature and the formula structure, it is safest 
+-        # to assume x^(t) is fixed for the forward projection of all rays in iteration t,
+-        # and the backprojection updates are accumulated. 
+-        # But Algorithm 1 explicitly puts the x update inside the S loop.
+-        # Let's stick to the literal Algorithm 1 structure from [S1, unofficial], but note that 
+-        # x_j^(t) on the RHS must refer to the value at the START of iteration t.
+-        
+-        # To implement strictly as per Algorithm 1 in [S1, unofficial]:
+-        # We need to store x^(t) before the S loop.
+-        x_prev = x[:] # Copy of x at start of iteration t
+-        
++        x_prev = x[:]  # x^(t)
+         for S in projection_sets:
+-            # Forward Projection for rays in S
+-            # Compute p_hat_i for i in S
++            # Forward Projection & Correction for rays in S
+             p_hat = [0.0] * len(S)
+-            ray_sum_denom = [0.0] * len(S) # Sum of a_ik for each ray i
+-            
++            c = [0.0] * len(S)
++            ray_sum_denom = [0.0] * len(S)
++
+             for idx, i in enumerate(S):
+-                # Compute p_hat_i = sum_k a_ik * x_k^(t)
+-                # And sum_k a_ik
+                 p_hat_val = 0.0
+                 ray_sum = 0.0
+@@ -107,31 +67,7 @@
+                 p_hat[idx] = p_hat_val
+                 ray_sum_denom[idx] = ray_sum
++                c[idx] = (p[i] - p_hat[idx]) / ray_sum_denom[idx]
+ 
+-            # Correction
+-            c = [0.0] * len(S)
+-            for idx, i in enumerate(S):
+-                p_i = p[i]
+-                c[idx] = (p_i - p_hat[idx]) / ray_sum_denom[idx]
+-
+-            # Backprojection
+-            # Update x_j^(t+1)
+-            # We accumulate the update term for each voxel
+-            # Note: The formula is x_j^(t+1) = x_j^(t) + alpha * (sum_{i in S} c_i a_ij) / (sum_{i in S} a_ij)
+-            # This implies the update is specific to the subset S.
+-            # If we have multiple S in one iteration t, do we add them up?
+-            # Algorithm 1 says: for all S: ... x_j^(t+1) = ...
+-            # This suggests that x is updated sequentially for each S.
+-            # However, the notation x_j^(t+1) is confusing if updated multiple times.
+-            # Usually, SART iterates over subsets (Ordered Subsets). 
+-            # If S_all is the set of ALL projection images, and we loop over them,
+-            # then each S is a full projection image.
+-            # The update equation divides by sum_{i in S} a_ij.
+-            # If we update x in place, the next S uses the updated x.
+-            # But the forward projection uses x^(t).
+-            # So we must use x_prev for forward projection, but update x in place?
+-            # Or update a new x_next?
+-            # Let's assume x is updated in place, but forward projection always uses x_prev.
+-            
+-            # Precompute voxel sums for denominator of backprojection
++            # Backprojection: compute denominator per voxel for this subset S
+             voxel_ray_sum = [0.0] * num_voxels
+             for idx, i in enumerate(S):
+@@ -139,6 +75,6 @@
+                     a_ik = A_getter(i, k)
+                     voxel_ray_sum[k] += a_ik
+-            
+-            # Apply update
++
++            # Update voxels
+             for j in range(num_voxels):
+                 if voxel_ray_sum[j] == 0:
+@@ -149,8 +85,5 @@
+                     numerator += c[idx] * a_ij
+                 x[j] = x_prev[j] + alpha * (numerator / voxel_ray_sum[j])
+-                
+-        # End of iteration t
+-        # x is now x^(t+1)
+-        
++
+     return x
+ ```
+@@ -173,11 +106,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Each iteration involves a forward projection and a backprojection for all rays. Complexity is proportional to $T \times m \times (\text{avg voxels per ray})$.
++*   **Time Complexity:** Each iteration involves a forward projection and a backprojection for all rays [S1, unofficial]. Complexity is proportional to $T \times m \times (\text{avg voxels per ray})$ [G].
+ *   **Memory Complexity:** $O(n + m)$ for storing $x$, $p$, and intermediate buffers. $O(1)$ for $A$ (matrix-free) [S1, unofficial].
+ *   **Performance:** Faster convergence and better noise resilience than ART [S1, unofficial]. Amenable to parallelization on graphics hardware [S1, unofficial].
+ *   **Strengths:** Intuitive geometric interpretation, better stability against noise, faster convergence than ART [S1, unofficial].
+-*   **Limitations:** No formal convergence proof for the general case [S1, unofficial]. High computational cost per iteration compared to analytical methods like FDK [S1, unofficial].
++*   **Limitations:** No formal convergence proof for the general case [S1, unofficial].
+ *   **When to use:** When high-quality reconstruction is needed and computational resources allow for iterative methods; when noise resilience is critical [S1, unofficial].
+-*   **When not to use:** When real-time performance is required and analytical methods suffice; when memory for $x$ and $p$ is extremely limited (though less critical than ART's sequential nature).
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+@@ -185,3 +118,5 @@
+ 
+ ## Sources
+-[S1] Industrial Computed Tomography using Proximal Algorithm, https://doi.org/10.25781/kaust-th10i, fetched 2026-10-27 (unofficial)+[S1] Industrial Computed Tomography using Proximal Algorithm, https://doi.org/10.25781/kaust-th10i, fetched 2026-10-27 (unofficial)
++[S2] Précision et qualité en reconstruction tomographique : algorithmes et applications, https://doi.org/10.70675/d2bc4875z6a5az46afz9289z2fe16b3a43f3, fetched 2026-10-30 (unofficial)
++[S3] plot_radon_transform.rst.txt, https://scikit-image.org/docs/stable/_sources/auto_examples/transform/plot_radon_transform.rst.txt, fetched 2026-10-30 (unofficial)

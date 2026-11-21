@@ -1,0 +1,2851 @@
+Efficient Scene Appearance Aggregation for Level-of-Detail Rendering
+YANG ZHOU, University of California, Santa Barbara, USA
+TAO HUANG, University of California, Santa Barbara, USA
+RAVI RAMAMOORTHI, University of California, San Diego, USA
+PRADEEP SEN, University of California, Santa Barbara, USA
+LING-QI YAN, University of California, Santa Barbara, USA
+arXiv:2409.03761v1 [cs.GR] 19 Aug 2024
+log2 ( resolution )
+3
+9
+voxel size (WS)
+world diameter
+100%
+0.1%
+Fig. 1. Left: Metropolis, a cityscape rendered with our scene aggregation approach. The scene includes 82 unique buildings and 270 instances and originally
+requires 46.9 GB to store, making it challenging to render while stay in in-core memory. Our representation drastically reduces the size to 5.33 GB while
+preserving the detailed appearance. Right Top: Each instance selects the appropriate LoD resolution where the projected voxel size matches the pixel footprint
+(rounded to the nearest power of two). Right Bottom: As a result, close-view instances are rendered with finer voxels while distant instances are rendered
+with coarser voxels.
+Creating an appearance-preserving level-of-detail (LoD) representation for
+arbitrary 3D scenes is a challenging problem. The appearance of a scene is an
+intricate combination of both geometry and material models, and is further
+complicated by correlation due to the spatial configuration of scene elements.
+We present a novel volumetric representation for the aggregated appearance
+of complex scenes and an efficient pipeline for LoD generation and rendering. The core of our representation is the Aggregated Bidirectional Scattering
+Distribution Function (ABSDF) that summarizes the far-field appearance of all
+surfaces inside a voxel. We propose a closed-form factorization of the ABSDF
+that accounts for spatially varying and orientation-varying material parameters. We tackle the challenge of capturing the correlation existing locally
+within a voxel and globally across different parts of the scene. Our method
+faithfully reproduces appearance and achieves higher quality than existing
+scene filtering methods while being inherently efficient to render. The memory footprint and rendering cost of our representation are independent of
+the original scene complexity.
+CCS Concepts: • Computing methodologies → Reflectance modeling;
+Visibility.
+Additional Key Words and Phrases: level-of-detail, aggregation, prefiltering,
+appearance modeling
+Authors’ addresses: Yang Zhou, yzhou426@cs.ucsb.edu, University of California, Santa
+Barbara, Santa Barbara, California, USA; Tao Huang, tao_huang@ucsb.edu, University
+of California, Santa Barbara, Santa Barbara, California, USA; Ravi Ramamoorthi, ravir@
+cs.ucsd.edu, University of California, San Diego, La Jolla, California, USA; Pradeep Sen,
+psen@ece.ucsb.edu, University of California, Santa Barbara, Santa Barbara, California,
+USA; Ling-Qi Yan, lingqi@cs.ucsb.edu, University of California, Santa Barbara, Santa
+Barbara, California, USA.
+1
+INTRODUCTION
+Modern physically based rendering is widely adopted to synthesize
+photorealistic images, animations, and immersive 3D experiences.
+Generating content at such level of realism requires large-scale assets with extremely detailed geometry, textures, and sophisticated
+material models. This presents significant challenges to the rendering process both in terms of storage and speed. Among them,
+one prominent issue comes from the mismatch between scene complexity and image resolution. In an open-world environment, it is
+typical to only have a small portion of the scene contribute to the
+foreground, while the majority of the scene is minified in the background. It is wasteful to load and render the entirety of the scene
+when the image resolution is not even enough to resolve the details.
+Moreover, the rendering cost of different pixels can be highly uneven. Some pixels may cover a drastically more complex part of the
+scene than others and thus require an excessive sampling budget
+for convergence. On the other hand, ignoring such complexity often
+leads to aliasing, artifacts or incorrect appearance.
+Level-of-detail (LoD) techniques reduce the heavy, unbalanced
+rendering cost by converting, or prefiltering, the original scene to
+a multi-scale representation in a precomputation step. Depending
+on how much detail is required for each pixel, only an appropriate
+scale of the representation is accessed and used for rendering. In
+this way, LoD techniques are able to decouple rendering cost from
+the original scene complexity and distribute the cost evenly among
+pixels.
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+2 •
+Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan
+In order to improve efficiency, LoD techniques usually perform
+simplification to the original geometry. A key challenge for any
+LoD technique is that it should preserve the original appearance
+after the simplification. When viewed at distance, the appearance is
+a compound phenomenon of both geometry and material models.
+Simply discarding or averaging geometry would result in appearance mismatch and artifacts [Luebke et al. 2003]. Instead, the technique should condense the effect of the original geometry into the
+simplified representation. This process can be called appearance aggregation. It is important to realize that the aggregated appearance
+can be more complex than, say, the original material models because
+it describes more information. However, it can still be advantageous
+performance-wise compared to tracing the explicit geometry.
+Many existing LoD solutions converts geometry to volumes for filtering or downsampling. The recurring difficulty for these solutions
+is the loss of geometric correlation. We lose track of how the geometry is distributed locally within a volume when it is abstracted away.
+Furthermore, if multiple regions are simplified separately, we lose
+track of the long-range visibility caused by the specific spatial configuration between geometry of different regions. Correlation exists
+ubiquitously in different types of scenes, such as those containing
+large, connected surface or regularly organized structures. Ignoring
+correlation leads to incorrect appearance for the LoD representation.
+In this work, we propose an efficient volumetric scene appearance
+aggregation method for LoD rendering. Our representation supports
+arbitrary types of scenes geometry from completely opaque surfaces
+to stochastically distributed structures, and a wide range of appearance from glossy to diffuse. At the heart of our representation is
+the Aggregated Bidirectional Scattering Distribution Function (ABSDF) that summarizes the appearance of all surfaces inside a voxel.
+Contrary to existing volume-based methods, our method inherently keeps track of long-range correlation by recording the global
+visibility originated from a voxel and from the scene boundary. Simultaneously, we propose a novel truncated ellipsoid primitive to
+better handle the local correlation within a voxel. We focus on the
+appearance of a scene at far field, as is the case when an LoD representation gains the most benefit. Similar to Bako et al. [2023], we
+focus on the appearance with direct illumination, which is arguably
+the more challenging part compared to the indirectly illuminated
+counterpart as it is subject to more visible artifacts such as leaking
+and bloating. Our method achieves high rendering fidelity by preserving the complex visual appearance caused by both geometry
+and materials (Fig. 1, Fig. 15, and Fig. 16).
+To summarize, our contributions include:
+• A novel formulation for representing and rendering far-field scene
+aggregates for arbitrary scenes with the Aggregated Bidirectional
+Scattering Distribution Function (ABSDF).
+• A closed-form factorization of the aggregated appearance that
+captures all-frequency and view-dependent effects. The resulting
+model supports efficient evaluation and importance sampling.
+• A practical solution that handles local correlation by truncated ellipsoid primitives and long-range correlation by recording global
+visibility.
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+• An efficient scene aggregation pipeline that is scalable to large,
+complex assets and offers asymptotic memory saving and rendering speed boost.
+2
+RELATED WORK
+Representing scenes and appearance at multiple scales to improve
+rendering efficiency and quality is a long-standing problem in computer graphics. We draw inspiration from various previous work
+ranging from surface-based approaches to volume-based approaches,
+together with hybrid approaches in between. In addition, the recent
+advances of neural representations provide a set of new tools proven
+to be effective in certain graphics applications.
+Mesh simplification. Polygon meshes are by far the most common
+representation of 3D models in computer graphics. A large amount
+of study has been focused on algorithms that simplify a complex
+mesh by collapsing edges and merging vertices [Hoppe 1996; Garland and Heckbert 1997]. Some attempts have been made to extend
+mesh simplification to consider appearance to a limited extent [She
+et al. 2019; Cook et al. 2007]. Mesh simplification techniques are
+widely employed in movie and video game production [Karis et al.
+2021]. However, they are fundamentally unable to preserve the complex appearance that is a combination of both detailed geometry
+and material models. More recently, Hasselgren et al. [2021] jointly
+optimize triangle meshes and material parameters to minimize the
+image-space difference to the target scene by a differentiable rasterizer. However, the shading model is limited to be the same before
+and after optimization. The optimization also ignores global effects
+such as shadows.
+Surface appearance filtering. Surface-based filtering techniques
+focus on filtering the spatially-varying material attributes and microscale geometric details while keeping the original macro-scale
+surface geometry. Normal map filtering, for example, converts the
+normal directions inside a footprint to a normal distribution function (NDF) to preserve highlights when viewed from afar [Toksvig
+2005; Han et al. 2007; Olano and Baker 2010; Kaplanyan et al. 2016].
+Xu et al. propose to jointly mipmap BRDF and normal maps [Xu et al.
+2017]. Glints rendering [Yan et al. 2014, 2016] focuses on resolving
+the highlight from specular micro-geometry, which is essentially the
+same problem. However, both the spatial resolution of the normal
+maps and the angular resolution of the NDFs are much higher. The
+source normal maps can also be procedurally generated to alleviate
+the high memory cost [Jakob et al. 2014; Zirr and Kaplanyan 2016;
+Wang et al. 2020]. Displacement map filtering incorporates the microscale geometric details provided by displacement maps inside a
+footprint into a shading model [Dupuy et al. 2013; Wu et al. 2019].
+Bi-scale material design models the macro-scale appearance of an
+object by designing its microscale details and aggregates their appearance [Wu et al. 2011; Iwasaki et al. 2012]. Bidirectional texture
+functions (BTFs) represent non-parametric 6D spatially-varying surface appearance. Filtering BTFs offers significant memory savings
+and a performance boost [Jarabo et al. 2014]. Surface-based techniques successfully simplify microscale details by prefiltering them
+into an appearance model. However, they do not alter macro-scale
+Efficient Scene Appearance Aggregation for Level-of-Detail Rendering
+geometry, thus they are not helpful when macro-scale geometry is
+the dominant factor in scene complexity.
+Volumetric appearance models and filtering. Using volumes to represent complex geometry has been explored extensively since first
+introduced by Kajiya and Kay [1989]. Volumes are traditionally used
+to accelerate the rendering of dense, unstructured geometry such
+as fur, hair, and foliage [Neyret 1998; Moon et al. 2008]. Jakob et al.
+[2010] proposes the microflake theory that extends the radiative
+transfer equation (RTE) [Chandrasekhar 1960] to anisotropic participating media, enabling volumes to represent a wider range of
+appearance such as fabric and cloth [Zhao et al. 2011, 2012]. Heitz
+et al. [2015] further proposes the SGGX distribution to construct
+efficient microflake phase functions that support linear interpolation and closed-form importance sampling. As a high-resolution
+volume can be very memory-intensive, several works consider the
+problem of downsampling microflake volumes while preserving
+the important self-shadowing effect [Zhao et al. 2016; Loubet and
+Neyret 2018]. The classic volumetric light transport theory that
+builds on the RTE assumes independently distributed scatterers and
+thus does not support spatial correlation, limiting its expressiveness for general scene representation. More recently, it has been
+further extended to support spatially-correlated participating media through different formulations [Jarabo et al. 2018; Bitterli et al.
+2018]. Vicini et al. [2021] proposes an empirical non-exponential
+transmittance model that, while not physically-based, improves the
+ability to model correlation and opaque surfaces when combined
+with data-driven optimization. While volume-based techniques are
+able to simplify macro-scale geometry, volumetric light transport
+itself is significantly harder to solve than surface light transport
+and typically takes a longer time to converge for Monte Carlo path
+tracing.
+Another line of works focuses on building efficient voxel-based
+data structures. Crassin et al. [2009] and Laine and Karras [2010]
+propose different variants of a sparse voxel octree (SVO) to render
+massive volumes at interactive rates. The SVO data structure can be
+further specialized to support even higher resolution [Kämpe et al.
+2013]. Building on top of SVO, Heitz and Neyret [2012] proposes
+a representation to filter the appearance of detailed surfaces with
+the ability to reproduce view-dependent effects and account for
+correlation of occlusion and attributes with visibility. However, they
+only support opaque surfaces modeled by a boundary representation.
+Thus, their work is not applicable to a wide variety of subjects
+consisting of dense, unstructured geometry.
+Hybrid approaches. A number of works attempt to combine the
+advantages of surface-based techniques and volume-based techniques. Dupuy et al. [2016] draws a theoretical connection between
+microfacet and microflake theories. Granular material rendering
+techniques achieve acceleration by switching representation at different scales of light transport [Moon et al. 2007; Meng et al. 2015;
+Müller et al. 2016; Zhang and Zhao 2020]. Grains are only explicitly
+traced during initial bounces. For longer-scale light transport and
+multiple scattering, grains are replaced with a volumetric representation that is rendered by volumetric path tracing and eventually
+diffusion methods. Loubet and Neyret [2017] proposes a hybrid
+LoD technique that performs a binary classification on the input
+• 3
+scene to divide it into a mesh part and a volume part at each scale.
+Subsequently, the mesh part undergoes mesh simplification and the
+volume part is represented by a microflake participating medium.
+While the idea sounds straightforward, the classification unfortunately suffers from ambiguity and the technique produces artifacts
+when misclassification happens. Additionally, mesh simplification
+may drastically alter surface curvature that results in incorrect
+glossy appearance, as shown in Fig. 13.
+Neural representations. Neural implicit representations are shown
+to be particularly effective at compactly reconstructing signals in
+low-dimensional spaces such as radiance fields and shapes [Mildenhall et al. 2020; Lombardi et al. 2021; Martel et al. 2021; Müller et al.
+2022; Park et al. 2019]. While most works focus on point-wise query
+and inference, some techniques build multi-scale representations
+that support range queries for anti-aliasing [Barron et al. 2021;
+Takikawa et al. 2021]. However, most neural implicit representations are unable to model full appearance, with limited capability
+for relighting [Bi et al. 2020; Lyu et al. 2022; Baatz et al. 2022]. For a
+more comprehensive review, we refer readers to two recent surveys
+on the subject [Tewari et al. 2022; Xie et al. 2022].
+Traditional surface-based techniques can be enhanced by neural
+components. Kuznetsov et al. [2021, 2022] achieve BTF compression
+and filtering by simultaneously training a latent texture pyramid and
+a small multilayer perceptron (MLP) decoder that supports isotropic
+range queries. Gauthier et al. [2022] improve normal map filtering
+by using a MLP cascade to learn downsampling kernels.
+Recently, Bako et al. [2023] propose a deep learning based
+appearance-prefiltering framework. An input scene is converted to
+a volumetric representation where each voxel records a monochromatic phase function, an average albedo, and a 4D view-dependent
+coverage mask. To reduce the otherwise infeasible memory requirement, each type of data is compressed by a separate encoder-decoder
+network that produces per-voxel latent vectors. The volume is rendered by a beam tracer that traverses the voxels and decodes them
+for shading and transmittance computation. The method preserves
+accurate appearance but at a heavy cost in both precomputation and
+rendering. The typical precomputation time is reported to be 0.5 to
+2 days on a GPU cluster with 256 NVIDIA Volta GPUs. The compressed per-voxel size is still large with 256 floats. In addition, the
+beam tracer must traverse voxels ordered by distance to correctly
+compute transmittance by accumulating the coverage masks from
+each voxel. In contrast, our method only requires a much lighter
+precomputation pass, a smaller memory cost, offers much faster
+rendering speed, and results in similar rendering quality. Weier
+et al. [2023] propose a neural prefiltering pipeline by learning a
+compressed representation of the intra-voxel light transport. Two
+independent networks for appearance and visibility are trained with
+a multi-level feature grid. The method handles diffuse-like appearance well and supports indirect lighting. However, it struggles at
+preserving glossy appearance and capturing all-frequency directional signals.
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+4
+•
+Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan
+3
+FAR-FIELD APPEARANCE AGGREGATION AND
+FACTORIZATION
+3.1 Overview
+Table 1. Table of notation.
+Our goal is to develop an appearance-preserving representation of
+a scene that is independent of the original geometry complexity,
+which we term scene aggregate. Fig. 2 provides an overview of our
+method. When measured externally, the general light transport
+of a scene aggregate can be characterized as an 8D function of
+incident/outgoing positions (on a suitable bound of the scene) and
+directions, similar to a BSSRDF. However, directly computing and
+storing such a function is impractical due to the prohibitive memory
+requirement. It is also not necessary as one might as well simply
+switch back to the original representation for near-field appearance.
+Therefore, our formulation is based on the far-field assumption.
+When a scene is sufficiently far from the measuring sensor and
+emitters that the sensor can no longer distinguish the internal spatial
+structure, we may drop the positional dependency by integrating the
+8D light transport function over positions. The resulting 4D function
+of incident/outgoing directions describes the far-field appearance
+of the scene aggregate and we name it Aggregated Bidirectional
+Scattering Distribution Function (ABSDF), again due to its similarity
+to a BSDF. In §3, §4, and §5, we define the ABSDF and present an
+efficient, closed-from factorization of it.
+In practice, an entire scene is usually too large to be considered
+far-field all together. We apply spatial subdivision to the scene at
+a suitable resolution given a certain pixel footprint such that the
+subset of the scene included in each voxel satisfies the far-field assumption. This introduces the subsequent problem of accumulating
+the outgoing radiance from voxels and eventually measuring the
+pixel intensities. Crucially, the accumulation problem is non-trivial
+because the spatial configuration of voxels is not independent. Traditional volumetric representations model a scene as independently
+distributed particles, which is incorrect because a scene made of
+surfaces typically exhibits spatial correlation and ignoring such correlation leads to artifacts or inaccurate appearance. In §6, we analyze
+the problem of spatial correlation in detail, discuss our strategies
+to preserve correlation, and derive the formulation for voxel accumulation. We provide a summary for commonly used symbols
+throughout the paper in Table 1.
+3.2
+Defining ABSDF
+𝐿𝑜 (𝑥, 𝜔𝑜 ) =
+S2
+𝑓 (𝑥, 𝜔𝑖 , 𝜔𝑜 )𝐿𝑖 (𝑥, 𝜔𝑖 )⟨𝑛𝑥 · 𝜔𝑖 ⟩𝑉 (𝑥, 𝜔𝑖 ) d𝜔𝑖 ,
+(1)
+where 𝑓 (𝑥, 𝜔𝑖 , 𝜔𝑜 ) is the surface BRDF at 𝑥, and we explicitly write
+the visibility term 𝑉 (𝑥, 𝜔𝑖 ). We are interested in the average outgoing radiance from 𝐴 when viewed from 𝜔𝑜 , which can be written
+as a weighted average of per-point outgoing radiance masked by
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+𝑓ˆ
+𝑓ˆnovis
+𝑛
+𝑝 𝑁 (𝑛)
+𝐷 sggx (𝑛)
+𝛽
+𝛾
+𝑝𝑌 (𝛾)
+𝐵
+𝑐 (𝜔)
+𝑉ˆ
+𝑉ˆ𝑏
+⟨− · −⟩
+Explanation
+A set of surfaces (in a voxel)
+Surface area of 𝐴
+Projected surface area of 𝐴 along 𝜔
+Aggregated Bidirectional Scattering
+Distribution Function (ABSDF)
+ABSDF without visibility
+Surface normal
+Surface normal distribution function
+SGGX distribution parameterized by
+eigenbasis 𝑅 and roughness
+𝜶 ≔ (𝛼𝑥 , 𝛼 𝑦 )
+Material parameters at point 𝑥,
+including roughness 𝛼, basecolor 𝛽 𝑐
+(spectral), metallic 𝛽𝑚 (scalar), and
+specular intensity 𝛽 𝑠 (scalar)
+Concatenation of 𝑛 and 𝛽
+Joint distribution of 𝛾
+Truncated ellipsoid primitive
+Primitive coverage
+Aggregated interior visibility
+Aggregated boundary visibility
+Clamped dot product
+Def.
+§3.2, Eq. 2
+§3.2, Eq. 3
+§3.3, Eq. 7
+§3.3, Eq. 8
+§3.3
+§3.3
+§3.3
+§3.3
+§6.1
+§6.1, Eq. 24
+§6.2, Eq. 25
+§6.2, Eq. 26
+another visibility term along 𝜔𝑜 :
+∫
+1
+𝐿𝑜 (𝑥, 𝜔𝑜 )⟨𝑛𝑥 · 𝜔𝑜 ⟩𝑉 (𝑥, 𝜔𝑜 ) d𝑥,
+|𝐴|𝜔
+∫ 𝑜 𝐴
+|𝐴|𝜔𝑜 =
+⟨𝑛𝑥 · 𝜔𝑜 ⟩ d𝑥,
+𝐿𝑜 (𝜔𝑜 ) =
+(2)
+𝐴
+where |𝐴|𝜔𝑜 is the projected area of 𝐴 along 𝜔𝑜 . We can apply the
+far-field assumption such that the incident radiance is independent
+of positions 𝐿𝑖 (𝑥, 𝜔𝑖 ) ≈ 𝐿𝑖 (𝜔𝑖 ) and rearrange Eq. 2 by reordering
+the integrations:
+∫
+𝑓ˆ(𝜔𝑖 , 𝜔𝑜 )𝐿𝑖 (𝜔𝑖 ) d𝜔𝑖 ,
+∫ 
+1
+𝑓ˆ(𝜔𝑖 , 𝜔𝑜 ) =
+𝑓 (𝑥, 𝜔𝑖 , 𝜔𝑜 )⟨𝑛𝑥 · 𝜔𝑖 ⟩⟨𝑛𝑥 · 𝜔𝑜 ⟩
+|𝐴|𝜔𝑜 𝐴
+
+𝑉 (𝑥, 𝜔𝑖 )𝑉 (𝑥, 𝜔𝑜 ) d𝑥 .
+𝐿𝑜 (𝜔𝑜 ) =
+We consider a subset of a scene 𝐴 that consists of a set of surfaces.
+From a point 𝑥 ∈ 𝐴, the outgoing radiance given some direct incident
+radiance 𝐿𝑖 (𝑥, 𝜔𝑖 ) is calculated by the following equation [Cohen
+and Wallace 1993]:
+∫
+Symbol
+𝐴
+|𝐴|
+|𝐴|𝜔
+S2
+(3)
+We define 𝑓ˆ(𝜔𝑖 , 𝜔𝑜 ) as the ABSDF of 𝐴 as it captures the intrinsic
+geometrical and material characteristics of 𝐴 and is independent
+of external sensors or emitters. It is not hard to see that the ABSDF satisfies energy conservation as long as 𝑓 (𝑥, 𝜔𝑖 , 𝜔𝑜 ) is energyconserving. The ABSDF can be interpreted as an extension of the
+effective BRDF [Wu et al. 2011] where surfaces are not longer confined to a macrosurface or a heightfield, but allowed to be arranged
+arbitrarily in free space. It also satisfies a generalized form of reciprocity that is similar to the situation in the microflake theory [Jakob
+Efficient Scene Appearance Aggregation for Level-of-Detail Rendering
+• 5
+Fig. 2. An overview of our method. We start by voxelizing a scene such that the voxel size matches the given pixel footprint. For each voxel, we model its
+aggregated appearance by its ABSDF. To preserve the local spatial correlation, we use a truncated ellipsoid primitive that describes the intra-voxel geometric
+distribution. To preserve the long-range correlation, we record global aggregated visibility. Both lead to accurate voxel accumulation that is order-independent.
+et al. 2010]. To summarize:
+∫
+𝑓ˆ(𝜔𝑖 , 𝜔𝑜 ) d𝜔𝑖 ≤ 1
+S2
+|𝐴|𝜔𝑜 𝑓ˆ(𝜔𝑖 , 𝜔𝑜 ) = |𝐴|𝜔𝑖 𝑓ˆ(𝜔𝑜 , 𝜔𝑖 )
+(4)
+(5)
+We note ∫
+that it is possible to use the visible projected area
+|𝐴𝑣 (𝜔𝑜 )| = 𝐴 ⟨𝑛𝑥 · 𝜔𝑜 ⟩𝑉 (𝑥, 𝜔𝑜 ) d𝑥 as the normalization term in
+Eq. 3. In fact, the choice is not critical as the term will eventually be
+cancelled out (Eq. 24, Eq. 28). We choose to use |𝐴|𝜔𝑜 for simplicity.
+In practice, neither |𝐴𝑣 (𝜔𝑜 )| nor |𝐴|𝜔𝑜 needs to be computed or
+stored.
+3.3
+A Closed-form Factorization of the ABSDF
+According to Eq. 3, an ABSDF is defined by integrating the product
+of base material, foreshortening factors, and bidirectional visibility
+over the underlying surfaces. This is challenging, as in general, no
+closed-form solution exists. However, we would also like to avoid
+stochastic evaluation or numerical integration which would greatly
+increase the rendering cost and undermine the purpose of scene
+aggregation. To achieve closed-form evaluation and importance
+sampling, we factor the ABSDF with the following steps.
+Separate Visibility. We perform a splitting approximation that
+separates the integration of the bidirectional visibility from the rest:
+∫
+1
+𝑓ˆ(𝜔𝑖 , 𝜔𝑜 ) ≈
+𝑓 (𝑥, 𝜔𝑖 , 𝜔𝑜 )⟨𝑛𝑥 · 𝜔𝑖 ⟩⟨𝑛𝑥 · 𝜔𝑜 ⟩ d𝑥
+|𝐴|𝜔𝑜 𝐴
+∫
+(6)
+1
+𝑉 (𝑥, 𝜔𝑖 )𝑉 (𝑥, 𝜔𝑜 ) d𝑥 .
+|𝐴| 𝐴
+This is similar to the approximation by Jiménez et al. [2016]. We
+focus on the first integral in the rest of this section and further
+describe how to incorporate visibility into our framework in §6.2.
+The distribution form of the ABSDF. With the visibility terms separated, we convert the ABSDF into a convolution between the base
+material and the joint distribution of material parameters. Similar operations have been employed in normal map and displacement map
+filtering techniques [Han et al. 2007; Olano and Baker 2010; Dupuy
+et al. 2013], but they usually only consider the distribution of surface
+normals. Our formulation can be seen as a generalization that incorporates all spatially-varying parameters. Let 𝛾𝑥 B (𝑛𝑥 , 𝛽𝑥 ) be a
+vector consisting of surface normal and all material parameters at 𝑥.
+It can also be interpreted as a value of a random vector 𝑌 with joint
+PDF 𝑝𝑌 (𝛾). We can rewrite the ABSDF (no visibility) as follows:
+∫
+1
+𝑓ˆnovis (𝜔𝑖 , 𝜔𝑜 ) =
+𝑓 (𝜔𝑖 , 𝜔𝑜 ; 𝛾𝑥 )⟨𝑛𝑥 · 𝜔𝑖 ⟩⟨𝑛𝑥 · 𝜔𝑜 ⟩ d𝑥
+|𝐴|𝜔𝑜 𝐴
+∫
+|𝐴|
+𝑓 (𝜔𝑖 , 𝜔𝑜 ; 𝛾)⟨𝑛 · 𝜔𝑖 ⟩⟨𝑛 · 𝜔𝑜 ⟩𝑝𝑌 (𝛾) d𝛾,
+=
+|𝐴|𝜔𝑜 Γ
+(7)
+where Γ is the product space of all parameters.
+Surface normal distribution function. The marginal distribution of
+surface normals 𝑝 𝑁 (𝑛), or the surface NDF, is important as it affects
+the glossiness and anisotropy of the aggregated appearance. It can
+also be complex because the underlying surfaces may be arbitrarily
+oriented. We use a mixture of the SGGX distribution [Heitz et al.
+2015] as a compact yet expressive representation for the surface
+NDF:
+𝑘
+∑︁
+𝑝 𝑁 (𝑛) =
+𝑤𝑖 𝐷 𝑖sggx (𝑛),
+(8)
+𝑖=1
+where the weights {𝑤𝑖 } are positive and sum to 1. We describe the
+fitting process for the mixture model in §7.1.
+As will be seen in §4 and §5.2, ours factorization involves convolving 𝑝 𝑁 (𝑛) with another isotropic spherical distribution 𝑔(𝜔; 𝑛). Because 𝑝 𝑁 (𝑛) is a mixture of SGGX lobes, the result is the sum of the
+convolution between each lobe 𝐷 𝑖sggx (𝑛) and 𝑔(𝜔; 𝑛). We propose
+to represent the per-lobe convolution as a similar but roughened
+SGGX. We first parameterize an SGGX distribution by its eigenbasis 𝑅 B (𝜔 1, 𝜔 2, 𝜔 3 ) and anisotropic roughness 𝜶 ≔ (𝛼𝑥 , 𝛼 𝑦 ). The
+parameterization is detailed in the supplemental document. The
+convolution can then be written as
+∫
+𝑔(𝜔; 𝑛)𝐷 sggx (𝑛; 𝑅, 𝜶 ) d𝑛 ≈ 𝐷 sggx (𝜔; 𝑅, 𝜶 + ),
+(9)
+S2
+where 𝑅 stays fixed but 𝜶 gains additional values. This is inspired
+by Xu et al. [2013], where a similar approximation is made for
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+6 •
+Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan
+anisotropic Spherical Gaussians. While Xu et al. seeks a symbolic
+approximation, we simply perform a nonlinear least-square fit to
+find the best mapping 𝜶 + = 𝑀 (𝜶 , 𝑔). Note that this mapping is
+scene-independent and typically smooth, thus only requiring precomptation once and negligible storage. We observe accurate fits
+for all our target distributions 𝑔. We provide derivation details and
+numerical validation with different 𝑔 in the supplemental document.
+Following Eq. 9, the post-convolution distribution for the entire
+𝑝 𝑁 (𝑛) is
+𝐷 conv (𝜔) =
+∫
+S2
+𝑔(𝜔; 𝑛)𝑝 𝑁 (𝑛) d𝑛 ≈
+𝑘
+∑︁
+𝑖=𝑖
+𝑤𝑖 𝐷 𝑖sggx (𝜔; 𝑅𝑖 , 𝜶 +𝑖 ). (10)
+Base material. The ABSDF is dependent on the underlying surface
+base materials. For the widest applicability, it is desirable to support
+material models used by existing assets. Therefore, we target the
+Disney Principled BRDF [Burley 2012], which is one of the most
+commonly used models in production and capable of recreating
+a wide range of appearance. The Disney BRDF is a sophisticated
+model consisting of multiple lobes. We preserve its core feature but
+make three modifications to the original model:
+(1) For diffuse reflection, we use the simpler Lambertian model
+instead of the original empirical model with retro-reflection.
+(2) We omit the optional sheen and clearcoat lobes.
+(3) We assume surfaces are double-sided.
+The modified model can be written as
+𝑓disney (𝜔𝑖 , 𝜔𝑜 ) = 𝑓𝑑 (𝜔𝑖 , 𝜔𝑜 ) + 𝑓𝑠 (𝜔𝑖 , 𝜔𝑜 ),
+1
+𝑓𝑑 (𝜔𝑖 , 𝜔𝑜 ) = (1 − 𝛽𝑚 )𝛽 𝑐 ,
+𝜋
+(11)
+𝐷 (𝜔ℎ ; 𝛼)𝐺 (𝜔𝑖 , 𝜔𝑜 ; 𝛼)  𝑚
+𝑓𝑠 (𝜔𝑖 , 𝜔𝑜 ) =
+𝛽 𝐹 (𝜔ℎ , 𝜔𝑜 ; 𝛽 𝑐 )+
+4|𝑛 · 𝜔𝑜 ||𝑛 · 𝜔𝑖 |
+
+(1 − 𝛽𝑚 )𝐹 (𝜔ℎ , 𝜔𝑜 ; 𝛽 𝑠 ) ,
+where 𝑓𝑠 (𝜔𝑖 , 𝜔𝑜 ) is the specular component that consists of both
+metallic and dielectric Fresnel reflection, 𝑓𝑑 (𝜔𝑖 , 𝜔𝑜 ) is the diffuse
+component, 𝐷 (𝜔ℎ ) is the Trowbridge-Reitz (GGX) distribution as
+the microfacet distribution, 𝐺 (𝜔𝑖 , 𝜔𝑜 ) is the shadowing-masking
+function, and 𝐹 (𝜔ℎ , 𝜔𝑜 ; 𝑟 0 ) is the Schlick Fresnel reflectance:
+𝐹 (𝜔ℎ , 𝜔𝑜 ; 𝑟 0 ) = 𝑟 0 (1 − F𝑐 ) + F𝑐 ,
+F𝑐 = (1 − |𝜔ℎ · 𝜔𝑜 |) 5,
+where 𝑟 0 is the normal incidence reflectance (either 𝛽 𝑐 for the metallic lobe or 𝛽 𝑠 for the dielectric lobe). The model is controlled by a set
+of parameters 𝛽 B (𝛼, 𝛽 𝑐 , 𝛽𝑚 , 𝛽 𝑠 ) = (roughness, basecolor, metallic, specular intensity), which can all be spatially-varying. We now
+focus on factoring of each component, starting from the simpler
+diffuse component.
+4 DIFFUSE ABSDF FACTORIZATION
+We substitute 𝑓𝑑 (𝜔𝑖 , 𝜔𝑜 ) into the integral of Eq. 7 and perform a
+split by first assuming 𝛽 𝑐 and 𝛽𝑚 are orientation-independent. This
+means the joint parameter PDF 𝑝𝑌 (𝛾) becomes a product of two
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+marginal PDFs 𝑝𝑌 (𝛾) ≈ 𝑝 (𝛽 𝑐 , 𝛽𝑚 )𝑝 𝑁 (𝑛) and we have
+∫
+𝑓𝑑 (𝜔𝑖 , 𝜔𝑜 ; 𝛾)⟨𝑛 · 𝜔𝑖 ⟩⟨𝑛 · 𝜔𝑜 ⟩𝑝𝑌 (𝛾) d𝛾 ≈
+(12)
+Γ
+∫
+∫
+1
+(1 − 𝛽𝑚 )𝛽 𝑐 𝑝 (𝛽 𝑐 , 𝛽𝑚 ) d𝛽 𝑐 d𝛽𝑚
+⟨𝑛 · 𝜔𝑖 ⟩⟨𝑛 · 𝜔𝑜 ⟩𝑝 𝑁 (𝑛) d𝑛.
+𝜋 [0,1] 2
+S2
+We extend our formulation to handle orientation-varying material
+parameters in §5.4. After the splitting, the left integral can be simply represented by the means and second-order moments of the
+parameters
+∫
+(1 − 𝛽𝑚 )𝛽 𝑐 𝑝 (𝛽 𝑐 , 𝛽𝑚 ) d𝛽 𝑐 d𝛽𝑚 = E[𝛽 𝑐 ] − E[𝛽𝑚 𝛽 𝑐 ]. (13)
+[0,1] 2
+For the right integral, we follow Wang et al. [2009] and fit the
+clamped dot product function by a Spherical Gaussian (SG). Because SGs are closed under multiplication with a closed-form expression [Wang et al. 2009], we can expand the right integral of
+Eq. 12 as
+∫
+∫
+⟨𝑛 · 𝜔𝑖 ⟩⟨𝑛 · 𝜔𝑜 ⟩𝑝 𝑁 (𝑛) d𝑛 ≈
+𝑐 · SG(𝜔ℎ ; 𝑛, 𝜅)𝑝 𝑁 (𝑛) d𝑛, (14)
+S2
+S2
+where 𝑐 is the amplitude and 𝜅 is the concentration for the product
+SG. We refer readers to Wang et al. [2009] for the full expressions for
+them. Notably, the product SG becomes a function of the half vector
+𝜔ℎ . The problem is then reduced to the convolution between an SG
+and an SGGX, which we solve by employing the convolution technique described in Eq. 10. This comes with a table 𝜶 + = 𝑀1 (𝜶 , 𝜅).
+Eq. 14 then can be evaluated in closed form given the surface NDF
+𝑝 𝑁 (𝑛).
+5
+SPECULAR ABSDF FACTORIZATION
+Next, we describe how to factorize the more challenging specular
+component of the ABSDF. Together with the diffuse component, our
+complete factorization will be validated at the end of the section.
+We start by substituting 𝑓𝑠 (𝜔𝑖 , 𝜔𝑜 ) into the integral of Eq. 7 and
+expanding it as
+∫
+𝑓𝑠 (𝜔𝑖 , 𝜔𝑜 ; 𝛾)⟨𝑛 · 𝜔𝑖 ⟩⟨𝑛 · 𝜔𝑜 ⟩𝑝𝑌 (𝛾) d𝛾 =
+Γ
+1h
+(1 − F𝑐 )
+4
+∫
+Γ
+RD𝑝𝑌 (𝛾) d𝛾 + F𝑐
+R = 𝛽𝑚 𝛽 𝑐 + (1 − 𝛽𝑚 )𝛽 𝑠 ,
+∫
+Γ
+i
+D𝑝𝑌 (𝛾) d𝛾 ,
+(15)
+D = 𝐷 (𝜔ℎ ; 𝑛, 𝛼)𝐺 (𝜔𝑖 , 𝜔𝑜 ; 𝑛, 𝛼)1(𝑛 · 𝜔𝑜 )1(𝑛 · 𝜔𝑖 ),
+where 1(·) is the Heaviside (step) function that evaluates to 0 or
+1. 1(𝑛 · 𝜔𝑜 ) and 1(𝑛 · 𝜔𝑖 ) appear due to the clamped dot products
+in Eq. 7. Similar to §4, we split the green highlighted integral in
+Eq. 15 by assuming 𝑝𝑌 (𝛾) ≈ 𝑝𝑌1 (𝛽 𝑐 , 𝛽𝑚 , 𝛽 𝑠 )𝑝𝑌2 (𝑛, 𝛼) and extend
+the formulation to handle orientation-varying material parameters
+in §5.4:
+∫
+∫
+∫
+D𝑝𝑌2 (𝛾) d𝛾 ,
+RD𝑝𝑌 (𝛾) d𝛾 ≈
+R𝑝𝑌1 (𝛾) d𝛾
+(16)
+Γ
+Γ1
+Γ2
+where Γ1 and Γ2 are the product space of (𝛽 𝑐 , 𝛽𝑚 , 𝛽 𝑠 ) and (𝑛, 𝛼),
+respectively. Once again, the left integral can be simply represented
+Efficient Scene Appearance Aggregation for Level-of-Detail Rendering
+by the means and second-order moments of the parameters
+∫
+R𝑝𝑌1 (𝛾) d𝛾 = E[𝛽𝑚 𝛽 𝑐 ] + E[𝛽 𝑠 ] − E[𝛽𝑚 𝛽 𝑠 ].
+Γ1
+(17)
+For the yellow highlighted integral in Eq. 15 and Eq. 16, we propose
+a closed-form solution with several small, scene-independent precomputed tables. The total storage for the tables is less than 5MB in
+practice. We focus on the characteristic microfacet distribution term
+𝐷, which we now call 𝐷 mic in the rest of §5 for better clarity. The
+shadowing-masking term 𝐺 is in general very smooth [Ashikhmin
+et al. 2000; Wang et al. 2009; Kaplanyan et al. 2016]. Our strategy is
+based on the convolution technique described in §3.3 and include
+three steps:
+• §5.1: Identify the aggregated microfacet distribution 𝐷ˆ mic (𝜔ℎ ).
+• §5.2: Convolve 𝐷ˆ mic (𝜔ℎ ) with the surface NDF 𝑝 𝑁 (𝑛) to get the
+post-convolution distribution 𝐷 conv (𝜔ℎ ).
+• §5.3: Apply a scaling factor 𝑆 (𝜔𝑖 , 𝜔𝑜 ) to 𝐷 conv (𝜔ℎ ) to correct
+leaking beacuse surfaces can be back-facing either to view or
+lights.
+We now proceed to describe each step in detail. The complete model
+is summarized at end of the section (§5.5, Fig. 3). Additional derivation details and numerical validation are available in the supplemental document.
+5.1
+Aggregated Microfacet Distribution
+As roughness 𝛼 can vary on the surfaces of 𝐴, the microfacet distribution can no longer be represented by one GGX lobe. Let A be
+the underlying random variable for the roughness and 𝑝 A (𝛼) be its
+marginal density function. The aggregated microfacet distribution
+is the expectation of the microfacet distribution
+∫
+ˆ
+𝐷 mic (𝜔ℎ ) =
+𝐷 mic (𝜔ℎ ; 𝛼)𝑝 A (𝛼) d𝛼 .
+(18)
+[0,1]
+We should represent 𝑝 A (𝛼) by a parametric distribution while acknowledging that 𝛼 is bounded in [0,1]. A Gaussian distribution is
+thus not a valid choice. Instead, we use a beta distribution B(𝛼; 𝑎, 𝑏)
+which has the correct support and is reasonably expressive. The
+shape parameters 𝑎 and 𝑏 can be easily estimated (see supplemental
+document). Eq. 18 can be interpreted as the weighted average of
+infinite GGX lobes with different possible 𝛼. Since there is no closedform solution for it, we further propose to approximate 𝐷ˆ mic (𝜔ℎ )
+by a weighted average of 2 lobes:
+𝐷ˆ mic (𝜔ℎ ) ≈ 𝑚 1 𝐷 mic (𝜔ℎ ; 𝛼 1 ) + 𝑚 2 𝐷 mic (𝜔ℎ ; 𝛼 2 ),
+(19)
+where 𝑚 1 + 𝑚 2 = 1. The approximation can be extended to use an
+arbitrary number 𝑘 of lobes, but we find 𝑘 = 2 provides a good
+balance between cost and accuracy. We perform a nonlinear least
+square fit to find the best mapping (𝑚 1, 𝛼 1, 𝛼 2 ) = 𝑀2 (𝑎, 𝑏) given the
+shape parameters of the beta distribution and store it as a small 2D
+table.
+5.2
+Convolution with Surface NDF
+The aggregated microfacet distribution 𝐷ˆ mic (𝜔ℎ ) is then convolved
+with the surface NDF 𝑝 𝑁 (𝑛). This is similar to normal map filtering
+and specular shading antialiasing techniques [Olano and Baker 2010;
+Kaplanyan et al. 2016]. We use the convolution technique described
+• 7
+in Eq. 10 for it and find the best mapping 𝜶 + = 𝑀3 (𝜶 , 𝛼), which
+is stored as a small 3D table. Because both 𝐷ˆ mic and 𝑝 𝑁 (𝑛) are
+mixtures, the convolution can be carried out per pair of lobes:
+𝐷 conv (𝜔ℎ ) =
+𝑖𝑗
+𝐷 conv (𝜔ℎ )
+∫
+S2
+𝐷ˆ mic (𝜔ℎ ; 𝑛)𝑝 𝑁 (𝑛) d𝑛 =
+𝑖
+≈ 𝐷 sggx (𝜔; 𝑅 , 𝜶
+𝑖𝑗
+𝑖
+𝑘 ∑︁
+2
+∑︁
+𝑖=1 𝑗=1
+𝑖𝑗
+𝑤𝑖 𝑚𝑖 𝑗 𝐷 conv (𝜔ℎ ),
+𝑗
+= 𝑀3 (𝜶 , 𝑀3 (𝛼 𝑖 ))),
+(20)
+𝑗
+where we denote 𝑀3 (𝛼 𝑖 ) as a shorthand for fitting a beta distribution
+for 𝛼 𝑖 and querying 𝑀3 for the roughness of the 𝑗-th 𝐷 mic lobe
+(Eq. 19).
+5.3
+Correction for Conditioned Angular Domain
+So far, we have ignored the Heaviside function terms 1(𝑛 · 𝜔𝑖 )
+and 1(𝑛 · 𝜔𝑜 ) in D. Alternatively, when integrating D𝑝𝑌2 (𝛾), the
+angular domain should not be the full sphere S2 , but only a subset
+conditioned on 𝜔𝑖 and 𝜔𝑜 : X = X𝜔𝑖 ,𝜔𝑜 B {𝑛 ∈ S2 |(𝑛 · 𝜔𝑖 ) >
+0, (𝑛 · 𝜔𝑜 ) > 0}. Intuitively speaking, the conditioned domain avoids
+the incorrect contribution when 𝜔𝑖 and 𝜔𝑜 are from different sides
+of the surface Otherwise, the ABSDF will suffer from leaking. This
+complicates the problem because Eq. 20 is not exactly a spherical
+convolution when the integration domain is X . To keep the efficient
+convolution-based solution while addressing the potential leaking,
+we rewrite Eq. 9 and apply the following approximation:
+∫
+𝐷 mic (𝜔ℎ ; 𝑛, 𝛼)𝐷 sggx (𝑛; 𝑅, 𝜶 ) d𝑛
+∫
+𝐷 mic (𝜔ℎ ; 𝑛, 𝛼)𝐷 sggx (𝑛; 𝑅, 𝜶 ) d𝑛
+= 𝐷 sggx (𝜔; 𝑅, 𝜶 + ) X
+(21)
+𝐷 sggx (𝜔; 𝑅, 𝜶 + )
+∫
+
+𝐷 mic (𝜔ℎ ; 𝑛, 𝛼) d𝑛 
+≈ 𝐷 sggx (𝜔; 𝑅, 𝜶 + ) ∫X
+≔ 𝑆 (𝜔𝑖 , 𝜔𝑜 ; 𝛼) .
+𝐷 (𝜔 ; 𝑛, 𝛼) d𝑛
+S2 mic ℎ
+X
+Effectively, we replace the 𝐷 sggx term in both the right numerator
+and denominator
+with a constant term of 1. We name the numerator
+∫
+of 𝑆, X 𝐷 mic (𝜔ℎ ; 𝑛, 𝛼) d𝑛, the shape term, as it reflects the geometric
+shape of the angular domain X . Computing the shape term requires
+integrating a GGX over X , which is a “spherical lune” formed by the
+intersection of two hemispheres. Note that X can be decomposed
+into two spherical triangles, and the problem reduces to integrating
+a GGX over a spherical triangle, which can be solved in closed form
+using Linearly Transformed Cosines (LTC) [Heitz et al. 2016]. We
+−1 = 𝑀 (𝛼)
+precompute the inverse LTC transform into a 1D table𝑇LTC
+4
+(different from Heitz et al. [2016], there is only roughness variation
+in our case). The denominator of 𝑆 is the normalization term for
+a GGX in the
+spherical domain and can be easily precomputed as
+∫
+another 1D table S2 𝐷 mic (𝜔ℎ ; 𝑛, 𝛼) d𝑛 = 𝑀5 (𝛼).
+Finally, we utilize the fact that the microfacet shadowing-masking
+term 𝐺 is very smooth. Therefore, we simply multiply it to each
+lobe post convolution. We arrive at the following expression for the
+yellow highlighted integral in Eq. 16:
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+8 •
+∫
+Γ2
+Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan
+D𝑝𝑌2 (𝛾) d𝛾 ≈
+𝑘 ∑︁
+2
+∑︁
+𝑖=1 𝑗=1
+𝑖𝑗
+𝑤𝑖 𝑚𝑖 𝑗 𝐷 conv (𝜔ℎ ) 𝑆 𝑖 𝑗 (𝜔𝑖 , 𝜔𝑜 ) 𝐺 𝑖 𝑗 (𝜔𝑖 , 𝜔𝑜 ),
+𝑆 𝑖 𝑗 (𝜔𝑖 , 𝜔𝑜 ) = 𝑆 (𝜔𝑖 , 𝜔𝑜 ; 𝛼 𝑖 𝑗 ),
+𝑖𝑗
+𝑖
+(22)
+𝑖𝑗
+𝐺 (𝜔𝑖 , 𝜔𝑜 ) = 𝐺 (𝜔𝑖 , 𝜔𝑜 , 𝑅 , 𝜶 ).
+The expression consists of contributions from all convolved NDF
+lobes (Eq. 20). Each term is multiplied by its scaling factor to account for the conditioned angular domain (Eq. 21). Eq. 22 can be
+evaluated in closed form given the surface NDF 𝑝 𝑁 (𝑛) and the first
+two moments of roughness 𝛼.
+5.4
+Orientation-varying Parameters
+We have previously assumed that 𝛽 𝑐 , 𝛽𝑚 , and 𝛽 𝑠 are independent
+of orientation in order to perform the split in Eq. 12 and Eq. 16. To
+lift this limitation, we notice that both Eq. 13 and Eq. 17 collapse to
+simple combinations of moments (means and second-order mixed
+moments) of 𝛽 𝑐 , 𝛽𝑚 , and 𝛽 𝑠 . Therefore, we extend our formulation
+by augmenting the moments to be orientation-varying. As an example, when calculating the mean of a parameter E[𝛽] for a particular
+direction 𝜔, each sample on the surfaces should be weighted to
+reflect its influence on 𝜔. In other words, each sample is “splatted”
+to the spherical domain with a spherical function 𝑠 (𝜔) as the kernel,
+followed by normalization. The directional moments can thus be
+defined as
+∫
+∫
+𝛽𝑥 𝛽𝑥′ 𝑠 (𝑇𝑥 𝜔) d𝑥
+𝛽𝑥 𝑠 (𝑇𝑥 𝜔) d𝑥
+𝐴
+′
+, E𝑠 [𝛽𝛽 ] = 𝐴 ∫
+,
+E𝑠 [𝛽] = ∫
+𝜔
+𝜔
+𝑠 (𝑇𝑥 𝜔) d𝑥
+𝑠 (𝑇𝑥 𝜔) d𝑥
+𝐴
+𝐴
+(23)
+where 𝑇𝑥 is the local transform at 𝑥. The surface NDF is implicitly
+accounted for by transforming 𝜔 into the local coordinate system.
+The kernel 𝑠 (𝜔) is different for each component of the ABSDF: For
+the specular component, it is the microfacet distribution; for the
+diffuse component, it is the SG in Eq. 14. Finally, we query the
+directional moments at 𝜔ℎ when evaluating Eq. 13 and Eq. 17.
+Now that the moments become orientation-varying, we can no
+longer store them as simple scalars. In practice, we find that it is
+usually sufficient to coarsely partition the spherical domain (e.g.,
+3 × 3) because the angular frequency usually decreases as the scale
+of aggregation becomes larger. Each surface sample can then be
+splatted to the partition during precomputation (see §7.1).
+5.5
+Summary and Validation
+The derivation of our factorized ABSDF is complete at this point.
+We conclude this section with a brief summary of the complete
+model with a schematic diagram Fig. 3. The ABSDF (Eq. 7) with
+the base material (Eq. 11) is the linear sum of a diffuse compoennt
+(Eq. 12) and a specular component (Eq. 15). The diffuse component
+is decomposed to a moment term (Eq. 13) and convolution term
+(Eq. 14). The specular component is decomposed similarly (Eq. 17),
+but the convolution (Eq. 20) needs to be performed with care given
+to the base distribution (Eq. 18) and the domain (Eq. 21). Finally, the
+moments can be augmented to be orientation-varying (Eq. 23). A
+total of 5 small, scene-independent precomputed tables are utilized
+in different components as highlighted in Fig. 3.
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+Fig. 3. Schematic diagram of our full factorized ABSDF model. The usages
+of precomputed tables 𝑀1 , ..., 𝑀5 are highlighted.
+In Fig. 4, we compare our factored ABSDF results to the ground
+truth and further, the fitting results of the recent neural solution presented by Weier et al. [2023]. Their network (named the “appearance
+network”) consists of a multi-resolution hash grid encoding [Müller
+et al. 2022] for spatial coordinates, spherical harmonics encodings
+for incident and outgoing directions, and a multi-layer perceptron
+to produce the final output. We use the exact same architecture and
+hyperparameters as Weier et al. [2023] with 8 features per level and
+8 degrees of spherical harmonics. We follow a similar training procedure by feeding a large batch of stochastic queries to the network
+each iteration and optimizing for relative 𝐿2 loss.
+The Helmet example presents a particularly challenging case
+with highly glossy anisotropic highlights, which we are able to
+reconstruct well. On the other hand, the appearance network suffers
+from various artifacts, including color shift, “blotchiness”, mode
+collapse, and perhaps most significantly, loss of highlights. This
+could be due to not enough features to capture the spatial variety
+and that the spherical harmonics encoding cannot handle high
+frequency signals. The network could potentially benefit from more
+features and a better directional encoding, but will likely become
+much larger. For the more diffuse Palm example, we are able to
+capture the dual-mode shape reasonably well thanks to the multilobe surface NDF representation. The appearance network performs
+relatively better on this example but still produces worse accuracy
+than ours.
+In Fig. 5, we demonstrate the necessity of supporting orientationvarying material parameters and the effectiveness of our method.
+We aggregate a displaced surface with basecolor varying based
+on orientation and render it from 3 views. The surface exhibits
+drastically different appearance from different views and our method
+correctly captures this view-dependent appearance.
+6
+CORRELATION-AWARE APPEARANCE
+ACCUMULATION
+So far, we have presented the definition and an efficient solution
+for the aggregated appearance of a voxel. In order to render a scene
+aggregate, we need to accumulate the outgoing radiance contributions of multiple voxels for each pixel. Intuitively speaking, voxel
+accumulation requires two pieces of information: (1) sub-voxel geometry distribution, and (2) the inter-occlusion across voxels. A
+core challenge arises from the fact that spatial correlation generally
+exists in a 3D scene made of surfaces. In the following, we motivate
+the importance of preserving spatial correlation and discuss our
+design to model the necessary information for voxel accumulation.
+Efficient Scene Appearance Aggregation for Level-of-Detail Rendering
+(b) Reference
+(c) Ours
+(d) Weier [2023]
+PSNR (dB):
+39.63
+PSNR (dB):
+59.31
+(e) Reference
+(f) Ours
+(g) Weier [2023]
+33.15
+55.48
+45.27
+46.94
+56.08
+38.82
+Palm
+Helmet
+(a) Setup
+• 9
+Fig. 4. We select voxels from each scene, highlighted in (a), and compare the ground truth ABSDFs (b)/(e) to our factored ABSDFs (c)/(f) and the appearance
+network fitted results (d)/(g). Each plot contains 8 × 8 2D outgoing slices in the lat-long coordinate system with different incident directions. Our results
+achieve better accuracy both qualitatively and quantitatively with lower RMSE. We encourage readers to zoom in for better comparison. Exposure is adjusted
+for clarity.
+View 1
+View 2
+View 3
+(a) Setup
+(b) Ref.
+(c) Ours (d) Naïve
+Fig. 5. When a scene has orientation-varying material parameters (a), our
+method (c) captures the view dependency and matches the reference (b),
+while ignoring it leads to incorrect results (d).
+With these components, we formulate the process of accumulating
+voxel contributions into pixel intensity.
+6.1
+Truncated Ellipsoid Primitive
+Most volumetric representations produce cube-shaped voxels. For
+each voxel, it is implicitly assumed that surfaces behave like uncorrelated particles and are independently and uniformly distributed
+inside. This has been the de facto choice and one may argue that
+with sufficient spatial subdivision, the raw resolution could compensate for the simplicity of this assumption. However, it is important
+to realize that scene aggregation is more than an image-space signal
+reconstruction problem. The Nyquist-Shannon sampling rate is thus
+not twice the image resolution, but twice the highest frequency of
+geometric details, which can be much higher (if not unbounded) for
+a scene consisting of hard surfaces. Because it is infeasible to reach
+such a sampling rate, ignoring the spatial correlation inside each
+voxel does negatively impact appearance. We demonstrate this by a
+minimal example in the following.
+In this double-counting example illustrated in Fig. 6, a simple plane
+is discretized into diagonally neighboring voxels and is viewed from
+aside. The voxel size is chosen to be half of the pixel footprint to
+match the image-space Nyquist-Shannon sampling rate. Because the
+voxels have thickness, whenever the film plane is not axis-aligned,
+some points on the film plane receive contributions from more
+than one voxel. This is clearly wrong because if we perform ray
+casting from the film plane, a ray only intersects the ground-truth
+geometry once. The mismatch is fundamentally because geometry is
+not distributed uniformly inside a voxel. It could also be interpreted
+as strong correlation between different voxels: whenever a ray hits
+one voxel, it should never hit another. However, simple voxels fail to
+capture this information and result in systematic error. In particular,
+the error manifests as an objectionable checkerboard-like artifact.
+We also provide magnified renders with higher image resolution
+that better illustrate the source of this artifact.
+To improve the accuracy of voxel accumulation, we consider
+ways to support non-uniform intra-voxel distribution. Common
+approaches that introduce further subdivision within a single voxel,
+such as using a coverage mask, are essentially no different from
+brute-force supersampling. They are not cost-effective as we discussed earlier. Instead, we propose to fit a bounding ellipsoid for
+the geometry in each voxel and define the new voxel primitive as
+the intersection of the voxel and the ellipsoid. The new truncated
+ellipsoid primitive is much more effective at adapting to different
+geometry distributions: when the voxel includes a flat surface or a
+fiber-like thin structure, the primitive now provides a much tighter
+fit; when the voxel includes unstructured geometry, it falls back
+to a cube shape. As shown in Fig. 6 (c), the new primitive greatly
+reduces the artifacts while also producing a tighter object silhouette.
+Note that we never need to explicitly store the cube-ellipsoid intersection; it is sufficient to store the separate shapes and calculate
+the properties of the intersection on-the-fly. Because the primitive
+is a bounding volume, it should support “semi-transparency” to
+reflect the quantity of the underlying geometry as the geometry is
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+10
+•
+Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan
+abstracted away (Fig. 8 (a)). We define the primitive coverage of a
+truncated ellipsoid primitive as
+|𝐴|𝜔
+,
+(24)
+|𝐵|𝜔
+where |𝐴|𝜔 and |𝐵|𝜔 are the projected areas of the surfaces bounded
+by the primitive and the primitive itself, respectively. As will be
+shown in §6.3, the primitive coverage is useful when accumulating the contributions from multiple voxels, though the numerator
+|𝐴|𝜔 will be canceled and never explicitly needed. For simplicity,
+we use an efficient Monte Carlo estimator to calculate |𝐵|𝜔 , the
+projected area of the intersection of a cube and an ellipsoid, detailed in the supplemental document. Alternatively, it is possible
+to explicitly calculate the projected area by integrating over the
+projected contour using Green’s theorem. The truncated ellipsoid
+primitive provides a good trade-off in practice as it is easy to fit and
+compact to store. See §7.1 for details. Recently, 3D Gaussians have
+been shown to be effective at representing radiance fields [Kerbl
+et al. 2023]. Our primitive bears some resemblance to a 3D Gaussian
+but is ultimately designed for a different purpose. The truncation
+avoids the ambiguity in defining the inter-occlusion between the
+otherwise overlapping primitives. It also makes precomputation
+and rendering more straightforward in practice.
+Render
+Illustration
+𝑐 (𝜔) =
+Difference
+0.1
+Magnified
+0.0
+(a) Reference
+(b) Simple
+(c) Trunc. Ellipsoid
+Fig. 6. Compared to the reference, LoD with a simple cube primitive results
+in a bloated silhouette and worse, structured artifacts on the red plane. With
+the help of the truncated ellipsoid primitive, our method produces a tighter
+silhouette and more importantly, artifact free results. We encourage readers
+to zoom in to better identify the checkerboard-like artifact.
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+6.2 Aggregated Visibility
+In order to accurately accumulate the contributions of voxels, we
+need to model the visibility between them when the input scene is
+heterogeneous with a varying degree of spatial correlation. Existing
+works show that when spatial correlation exists, transmittance is
+no longer exponential and cannot be modeled only by extinction
+coefficients [Jarabo et al. 2018; Bitterli et al. 2018; Vicini et al. 2021].
+Hypothetically, it might be appealing to augment the traditional
+volumetric models with more parameters per voxel. However, simply enhancing the local representation is unlikely to be sufficient
+because spatial correlation is inherently a long-range effect and it is
+necessary to model the interaction between voxels. Another attempt
+is to record and accumulate the coverage masks of voxels [Bako
+et al. 2023]. This is again similar to brute-force supersampling and
+requires an impractical amount of memory.
+Instead of modeling the visibility by local properties, we propose
+to model it as a global function. Recall that we produce the split
+visibility integral in Eq. 6. We further separate the visibility along
+incident and outgoing directions:
+∫
+1
+𝑉 (𝑥, 𝜔𝑖 )𝑉 (𝑥, 𝜔𝑜 ) d𝑥 ≈ 𝑉ˆ (𝜔𝑖 )𝑉ˆ (𝜔𝑜 ),
+|𝐴| 𝐴
+∫
+(25)
+1
+𝑉ˆ (𝜔) =
+𝑉 (𝑥, 𝜔) d𝑥,
+|𝐴| 𝐴
+where 𝑉ˆ (𝜔) is the average visibility from points on the surfaces
+𝐴 inside a voxel through the entire scene along 𝜔, and we name
+it aggregated interior visibility (AIV). We illustrate how modeling
+the global visibility naturally captures spatial correlation by a flatland example shown in Fig. 7. We consider the accumulation of
+three voxels in two configurations where the results are different
+due to different types of inter-voxel correlation. In (a), the first two
+voxels are negatively correlated, while in (b), they are positively
+correlated. Both configurations have identical per-voxel visibilities
+(transmittance) 𝑣ˆ𝑖 and coverages 𝑐𝑖 as denoted in (c). The traditional
+volumetric model is thus not able to recognize the correlation and
+produces an incorrect result by applying the Beer-Lambert law. By
+explicitly tracking the global AIV 𝑉ˆ𝑖 , our method naturally incorporates correlation and produces correct accumulation results.
+A slightly different matter arises when a scene aggregate is placed
+in front of a background or other external objects. In order to correctly blend the contribution from the scene aggregate and the
+external environment, we need to keep track of another type of
+aggregated visibility with origins not on surfaces but in the free
+space. Let 𝑃 be a pixel footprint in world space observing the scene
+aggregate from direction 𝜔. Intuitively, we would like to know the
+average visibility from points on 𝑃 through the entire scene along
+𝜔. However, caution is needed as we should only count the subset
+of 𝑃, 𝑃 + , such that rays originated from 𝑃 + actually intersect the
+scene aggregate primitives, as illustrated in Fig. 8. We define this
+aggregated boundary visibility (ABV) as
+∫
+1
+𝑉ˆ𝑏 (𝜔; 𝑃 + ) = +
+𝑉 (𝑥, 𝜔) d𝑥 .
+(26)
+|𝑃 | 𝑃 +
+As the name implies, the ABV term only needs to be defined on the
+2D “boundary” that encloses the 3D scene aggregate. The bound
+can be any suitable manifold that is reasonably tight such that no
+Efficient Scene Appearance Aggregation for Level-of-Detail Rendering
+11
+𝑨
+𝑃+
+(a)
+•
+(b)
+𝐵
+v
+𝑃
+(a)
+𝑃1+
+𝐵1
+𝑃2+
+(c)
+𝑃3+
+𝑃
+v1
+v2
+𝐵2
+𝐵3
+v3
+(b)
+(d)
+(e)
+Fig. 7. Even if voxels have identical local properties, different types of
+inter-voxel correlation leads to different accumulation results ((a) and (b)).
+While the traditional volumetric model (c) is unable to distinguish these two
+cases and produces wrong results, our method accounts for this correlation
+naturally by tracking global visibility ((d) and (e)).
+external objects intersect it. In our implementation, the ABV term
+is precomputed and stored on the boundary faces of the voxels.
+The aggregated visibility functions, AIV and ABV, represent highdimensional (5D and 4D, respectively) and all-frequency signals.
+Therefore, we choose to represent them in the Haar wavelet basis. We discuss the details of truncation and further compression
+strategies in §7.2.
+Discussion. In their work, Weier et al. [2023] propose to learn
+binary visibility by a visibility network and optimize the binary
+threshold by a weighted F-Measure. The network is trained for pervoxel visibility query given a pair of vertices on the boundary of a
+voxel. During rendering, a ray is partitioned into multiple segments
+that intersect different voxels and the visibility of each segment is
+queried separately. We argue that this approach is theoretically limited to handle aggregated inter-voxel correlation due to two reasons.
+First, there is no aggregation of visibility at all as the network only
+supports point-to-point query without any consideration of filter
+footprint. Second, this approach essentially assumes no correlation
+between voxels as both training and inference is performed in a
+per-voxel manner. As discussed and illustrated in Fig. 7, even when
+individual voxels produce identical statistics, different combinations
+can still lead to different accumulation visibility. In addition, in their
+global illumination rendering, an indirect ray is simply spawned
+from the entry point of current voxel on its boundary with the new
+scattering direction, which is then used to query the network. This
+ignores the fact that scattering could happen anywhere inside the
+voxel and lead to a distribution over exiting positions.
+6.3
+Evaluating Pixel Intensity
+We are now ready to present how to evaluate pixel intensity by
+accumulating the outgoing radiance of voxels under the far-field
+Fig. 8. (a) 𝑃 + is the subset of a pixel footprint 𝑃 that is covered by a primitive
+𝐵. A point outside 𝑃 + is guaranteed not to be covered by the underlying
+geometry (green). For a point inside 𝑃 + , it may (red) or may not (yellow)
+be covered by the underlying geometry. After the geometry is abstracted
+away, this notion of semi-transparency of 𝐵 is preserved by the primitive
+coverage 𝑐 (𝜔 p ). (b) When there are multiple voxels, each primitive covers a
+Ð
+subset of the pixel footprint 𝑃𝑘+ and their union becomes 𝑃 + : 𝑃 + = 𝑘 𝑃𝑘+ .
+assumption. Assuming a pinhole camera and a box pixel reconstruction filter, the intensity of a pixel is the integration of the receiving
+radiance over the footprint 𝑃 along its direction 𝜔 p :
+∫
+1
+𝐼=
+𝐿𝑖 (𝑥 p, 𝜔 p ) d𝑥 p .
+(27)
+|𝑃 | 𝑃
+We first consider the case of a single voxel and background as
+illustrated in Fig. 8. The value of the integrand in Eq. 27 depends
+on whether 𝑥 p is “covered” by the truncated ellipsoid primitive 𝐵 of
+the voxel, defined as whether the ray spawned from 𝑥 p intersects 𝐵.
+Let 𝑃 + be the subset of 𝑃 that is covered, and 𝑃 − ≔ 𝑃 \ 𝑃 + :
+(1) If 𝑥 p ∈ 𝑃 − , 𝐿𝑖 (𝑥 p, 𝜔 p ) simply evaluates to the background radiance 𝐿𝑏 (−𝜔 p ). Note that 𝐿𝑏 does not depend on position due to
+the far-field assumption.
+(2) Otherwise, 𝑥 p ∈ 𝑃 + and 𝐿𝑖 (𝑥 p, 𝜔 p ) is a blend between the outgoing radiance of the voxel, 𝐿𝑜 (−𝜔 p ) as defined in Eq. 3, and the
+background radiance by the primitive coverage 𝑐 (𝜔 p ) as defined
+in Eq. 24.
+Therefore, the pixel intensity becomes
+∫
+1 
+𝐿𝑜 (−𝜔 p )𝑐 (𝜔 p ) + 𝐿𝑏 (−𝜔 p ) (1 − 𝑐 (𝜔 p )) d𝑥 p +
+𝐼=
+|𝑃 | 𝑃 +
+∫
+(28)
+
+𝐿𝑏 (−𝜔 p ) d𝑥 p .
+𝑃−
+Notice that the integrands do not depend on 𝑥 p at all because all
+the quantities are aggregated. We can thus collapse the integrals to
+
+|𝑃 + | 
+𝐼=
+𝐿𝑜 (−𝜔 p )𝑐 (𝜔 p ) + 𝐿𝑏 (−𝜔 p ) (1 − 𝑐 (𝜔 p )) +
+|𝑃 |
+(29)
+|𝑃 − |
+𝐿𝑏 (−𝜔 p ),
+|𝑃 |
+where the fraction |𝑃 + |/|𝑃 | is the pixel coverage in the common
+sense (not to be confused with the primitive coverage).
+It is straightforward to extend the above formulation to support
+multiple voxels. Let {v𝑘 } be a list of voxels with truncated ellipsoid
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+12
+•
+Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan
+|𝑃𝑘+ |
+|𝑃 |
+𝑐𝑘
+𝑉ˆ𝑏
+v1
+v2
+v3
+v4
+Fig. 9. Illustrating several terms that appear in Eq. 30: The per-voxel pixel
+coverage (top left), primitive coverage (top right), and the global ABV required to compose the background (bottom).
+primitives {𝐵𝑘 }. The pixel intensity is the sum of the contributions
+from all voxels:
+𝐼=
+∑︁ |𝑃 + |
+𝑘
+|𝑃 + |
+𝑘 𝑘
+𝐿 (−𝜔 p )𝑐𝑘 (𝜔 p ) +
+𝐿 (−𝜔 p )𝑉ˆ𝑏 (𝜔 p )+
+|𝑃 | 𝑜
+|𝑃 | 𝑏
+|𝑃 − |
+𝐿 (−𝜔 p ),
+|𝑃 | 𝑏
+(30)
+Ð
+where 𝑃𝑘+ is the subset of 𝑃 covered by 𝐵𝑘 and 𝑃 + = 𝑘 𝑃𝑘+ . Eq. 30
+is similar to Eq. 29 except that the aggregated boundary visibility
+𝑉ˆ𝑏 (𝜔 p ) replaces (1 −𝑐 (𝜔 p )) in the second term. This is because now
+we require the average visibility from 𝑃 + through the entire scene to
+reconstruct the silhouette of the scene aggregate and compose the
+background. Fig. 9 illustrates several terms in Eq. 30. We note that
+the voxel accumulation described by Eq. 30 is order-independent.
+Traditionally, ray marching or back-to-front alpha blending is required for resolving the occlusion (transmittance) between voxels.
+However, we have already done so in a correlation-aware manner
+as we have precomputed global visibility as aggregated visibility
+functions. Therefore, the accumulation during rendering reduces to
+a simple summation where each voxel modulates its contribution
+by its AIV. This order-independent property allows efficient parallel
+implementations.
+7 SCENE AGGREGATION PIPELINE
+In this section, we describe the pipeline of converting an input scene
+to our aggregated representation and rendering the scene aggregate
+with suitable LoD selection. In particular, we discuss the practical
+strategy to compress visibility data, which occupies the majority of
+the memory footprint.
+7.1
+Precomputation
+The precomputation first performs discretization of the input scene.
+We utilize the sparsity of typical scenes and discretize the input
+scene into a hierarchy consisting of multiple levels of sparse grids.
+Each level doubles the spatial resolution of the one in the previous
+level. Due to the sparsity, the actual growth rate of non-empty voxel
+count is only quadratic instead of cubic as a function of resolution.
+We report the sparsity of all scenes used in Table 2. In our current
+implementation, each level is precomputed separately. However, it
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+is possible to cache and reuse collected data across levels, which we
+leave for future optimization.
+For each level, the precomputation involves two stages. The first
+stage precomputes the “interior” of the scene. For each non-empty
+voxel, we need to acquire the following information:
+(1) The total surface area |𝐴| within the voxel (for normalization).
+(2) The first two moments of roughness 𝛼.
+(3) Directional moments of material parameters 𝛽 𝑐 , 𝛽𝑚 , and 𝛽 𝑠
+(Eq. 23) with angular resolution 𝑑.
+(4) The surface normal distribution 𝑝 𝑁 (𝑛) function represented
+by one or a mixture of SGGX distributions with 𝑘 components
+(Eq. 8).
+(5) The ellipsoid of the truncated ellipsoid primitive as an affine
+transform.
+(6) Wavelet basis coefficients for the aggregated visibility (Eq. 25
+and Eq. 26).
+Apart from the surface area which can be computed analytically,
+the rest of the information is estimated via Monte Carlo sampling
+and ray tracing. We uniformly sample the surfaces within the voxel.
+The sample budget is a tunable parameter. It should not be too low
+to avoid noisy estimation. As smaller voxels contain fewer surfaces,
+we find that one suitable strategy is to allocate sample budget to
+be inversely proportional to the square of the resolution of current
+level. This strategy also helps balance the computation cost across
+different levels. Each surface sample includes position, normal, and
+material parameters looked up from texture maps. We then proceed
+to estimate each type of information respectively:
+Roughness moments. These are straightforward to compute by
+moving averages.
+Directional moments. An easy way to estimate directional moments is to simply evaluate Eq. 23 at the center direction of each
+angular grid cell. However, this is prone to aliasing for highly glossy
+surface samples. Instead, for each surface sample, we warp a low discrepancy sequence to S2 by the weight kernel 𝑔. Then we compute
+the numerator and the denominator of Eq. 23 for each sequence element and splat them to separate angular grids. We accumulate the
+contribution for all surface samples and perform the normalization
+(division) at the end.
+Surface normal distribution. For a single SGGX component, we
+follow the estimation method by Heitz et al. [2015]. For a mixture,
+we perform a K-means clustering on the surface normal samples
+and fit each cluster as one component, similar to the process by
+Zhao et al. [2016]. The initial cluster centers are selected to be away
+from each other. Furthermore, to avoid undesirable homogeneous
+clusters, we repeat the fitting for 1 to a maximum of 𝑘 components
+and choose the result that yields the highest likelihood. In practice,
+we find 𝑘 ≤ 4 are sufficient for most cases.
+Truncated ellipsoid primitive. Finding the optimal minimum volume enclosing ellipsoid is a semidefinite programming problem
+that can be costly to solve [Todd 2016]. Instead, we compute the
+approximate minimum bounding ellipsoid for a voxel with a simple
+heuristic. We first perform Principal Component Analysis (PCA) on
+the sampled positions and transform them to the unit cube by the
+(b) Ref.
+(c) Ours
+(d) Ref.
+(e) Ours
+32.84
+42.63
+PSNR (dB):
+32.17
+37.72
+PSNR (dB):
+28.76
+26.99
+Fig. 11. Visualizing coverage for all five scenes in Fig. 13. Our ABV term
+accurately reconstructs partial coverage (transmittance) for different types
+of scenes after compression.
+323
+PSNR (dB):
+Aggregated visibility coefficients. We trace visibility rays with
+uniformly sampled directions starting from each surface sample
+and project the results to the Haar wavelet basis. We use the equalarea mapping [Clarberg 2008] to parameterize the spherical domain.
+Again, the visibility sample rate should not be too low to avoid
+noisy estimation. However, when there are a sufficient number of
+surface samples, the cost of tracing visibility can be amortized. In
+practice, we find 16-64 rays per surface sample is enough. In Fig. 10,
+we visualize the AIV terms and compare our compressed terms to
+the references.
+The second stage of the precomputation handles the ABV term.
+Recall that this term is only defined on the boundary of the entire
+scene. Therefore, after scene discretization, we precompute it for
+the boundary faces of the voxels. The list of boundary faces can be
+determined by one simple flood fill iteration. For each boundary
+face, we consider all directions in its inward facing hemisphere. For
+each direction, we cast visibility rays with origin uniformly sampled
+on the face to estimate the average visibility. We use concentric
+mapping [Shirley and Chiu 1997] to parameterize the hemispherical
+domain and obtain a 2D visibility map. The map is then projected to
+the Haar wavelet basis. The ABV contains a high-frequency signal
+as it is responsible for reconstructing the silhouette of the scene.
+In practice, we choose a relatively high angular resolution of 642
+for accurate reconstruction. Fig. 11 shows the accurate coverage
+reconstruction with our ABV term.
+7.2
+Compression Strategy for Visibility Data
+In order to preserve all-frequency information, we represent both
+types of visibility: the aggregated interior visibility (AIV), and the
+aggregated boundary visibility (ABV) by wavelet coefficients. Typically, we are able to perform nonlinear approximation and truncate
+643
+Fig. 10. Visualizing the AIV terms of selected voxels. Each spherical plot
+is parameterized by the equal-area mapping [Clarberg 2008]. The waveletbased projection and compression is able to preserve the high-frequency
+visibility.
+eigenvectors. We then compute a bounding sphere and transform it
+back to world space to obtain a bounding ellipsoid. The resulting
+ellipsoid is tight enough for our purposes.
+13
+PT Ref.
+(a) Setup
+•
+Ours (643 )
+Efficient Scene Appearance Aggregation for Level-of-Detail Rendering
+(a) PT Ref. (High Res.) (b) No CPCA
+(c) ABV
+(d) ABV+AIV
+Fig. 12. We apply CPCA to compress both the aggregated boundary (ABV)
+and interior visibility (AIV) data. In this example, we reach a ∼ 4× compression ratio while having little impact on the visual quality.
+a large number of coefficients while preserving good quality. However, this is not enough when the angular resolution is high. We
+typically use 322 resolution for AIV and 642 resolution for ABV as
+it is responsible for reconstructing a sharp silhouette. Even with
+a typical 90% to 95% truncation rate, the memory cost can still be
+high as the spatial resolution grows. Therefore, we further apply
+Clustered Principal Component Analysis (CPCA), which is proven
+to be effective at compressing basis coefficients [Sloan et al. 2003;
+Liu et al. 2004]. One performance issue for CPCA is that PCA has
+cubic time complexity and quadratic space complexity with respect
+to input data matrix size. Thus, it becomes impractical to directly
+apply it to a fine LoD level. We apply a simple heuristic by dividing a
+level into individual blocks of no more than 643 and applying CPCA
+to each block separately. This works well in practice, since a large
+extent of spatial locality is still preserved in each block that can
+be exploited by CPCA. It is possible to develop more sophisticated
+methods to scale CPCA or compress coefficients which is left for
+future work.
+In Fig. 12, we validate the effectiveness of our current CPCAbased compression. For this Colortree scene, we compress AIV to
+30 clusters each with 10 representatives and ABV to 30 clusters
+each with 60 representatives. Each representative still goes through
+coefficient truncation after CPCA. Overall, we gain an extra ∼ 4×
+compression ratio without negatively impacting the visual quality.
+7.3
+Rendering with LoD Selection
+The rendering of our scene aggregate follows Eq. 30. For each pixel,
+we need to determine the list of voxels {v𝑘 } whose primitives {𝐵𝑘 }
+cover the pixel footprint 𝑃 and compute the pixel coverage |𝑃𝑘+ |/|𝑃 |
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+14
+•
+Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan
+Algorithm 1 Rendering a scene aggregate 𝑆 given a cone with
+center ray 𝑟 and aperture 𝜃 .
+1: function Render(𝑆, 𝑟 , 𝜃 )
+𝑡, 𝑡 max = intersect(𝑆.bound, 𝑟 )
+𝑠 = base voxel size of 𝑆
+4:
+𝜔 = direction of 𝑟
+5:
+𝐼 = 0, 𝑉ˆ𝑏 = 1
+6:
+while 𝑡 < 𝑡 max do
+7:
+level = floor(log2(tan(0.5 · 𝜃 )·𝑡/𝑠))
+8:
+v𝑘 , △𝑡 = DDAToNextVoxel(𝑟, 𝑡, S[level].grid)
+9:
+if v𝑘 is on the boundary of 𝑆 then
+10:
+𝑉ˆ𝑏 = EvaluateABV(𝑡, 𝜔)
+11:
+end if
+12:
+if intersect(𝐵𝑘 , 𝑟 ) then
+13:
+𝐿𝑜 = 0
+14:
+for 𝑖 = 1 to 𝑚 do
+15:
+𝐿𝑜 += (1/𝑚) · MISDirectLighting(v𝑘 )
+16:
+⊲ incident AIV by 𝑉ˆ𝑖 = EvaluateAIV(v𝑘 , 𝜔𝑖 )
+17:
+end for
+18:
+𝑉ˆ𝑜 = EvaluateAIV(v𝑘 , −𝜔)
+19:
+𝐼 += 𝐿𝑜 · 𝑉ˆ𝑜 · |𝐴𝑘 | / |𝐵𝑘 |𝜔
+20:
+⊲ See supplemental document
+21:
+end if
+22:
+𝑡 += △𝑡
+23:
+end while
+24:
+𝐿ˆ𝑏 = EvaluateBackground(−𝜔)
+25:
+𝐼 += 𝐿ˆ𝑏 · 𝑉ˆ𝑏
+26:
+return 𝐼
+27: end function
+2:
+3:
+for each 𝑘. In our current implementation, we choose to compute
+it by multi-sampled ray casting. Each ray traverses the discretized
+scene by a digital differential analyzer (DDA). For each encountered voxel, we compute and accumulate its outgoing radiance 𝐿𝑜𝑘
+with the primitive coverage 𝑐𝑘 (Eq. 24). Note that the traversal can
+be in arbitrary order, which enables possible rasterization-based
+approaches.
+To utilize the different LoDs included in the hierarchy, we can
+enhance the above procedure by associating each ray with a cone
+aperture that covers the pixel footprint, akin to ray differentials
+[Igehy 1999]. During the traversal of each ray, we determine the
+LoD level by the cross section size of the cone. In our current implementation, we switch to a coarser LoD only at the boundary of the
+coarser voxels for efficiency. A continuous LoD blending scheme
+is possible but more costly. Algo. 1 provides pseudocode for the
+rendering procedure.
+To enable next event estimation (NEE) with multiple importance
+sampling (Algo. 1, line 15), we develop a straightforward importance
+sampling routine for our factored ABSDF 𝑓ˆnovis (Eq. 7) as follows:
+(1) Pick one component between the specular and diffuse components. This can be done simply by uniform sampling.
+(2) For the specular component, we first pick one convolved lobe
+from ?? based on the lobe weights 𝑤 𝑗 . Then we sample the
+corresponding SGGX distribution.
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+(3) For the diffuse component, note that we cannot directly sample
+a convolved lobe from Eq. 14 because 𝜅𝑖 𝑗 cannot be determined
+without 𝜔𝑖 . Therefore, we resort to a simple strategy by assuming a fixed 𝜅 during importance sampling. The rest is similar
+to the specular case: we pick one convolved lobe (but with the
+fixed 𝜅) and sample the corresponding SGGX distribution.
+The corresponding PDF computation is also straightforward. The
+sample budget for NEE is decoupled from the ray casting sample
+budget.
+8
+RESULTS AND DISCUSSION
+In this section, we provide rendering results produced by our scene
+aggregation pipeline and detailed comparison to existing techniques.
+We implement our method in a custom CPU renderer using Embree
+[Wald et al. 2014] as the ray tracing backend for precomputation
+and reference generation. The sparse hierarchical data structure is
+implemented using OpenVDB/NanoVDB [Museth 2013, 2021]. All
+timings are measured on a desktop machine with an Intel i9-13900K
+CPU and 64 GB of main memory. Unless otherwise stated, we use
+path-traced images with direct illumination as reference.
+We compare our method to three current state-of-the-art methods: the hybrid mesh-volume LoD method (HybridLoD) [Loubet and
+Neyret 2017], the non-exponential transmittance volumetric model
+(NonExp) [Vicini et al. 2021], and the deep appearance prefiltering
+(DAP) [Bako et al. 2023]. For HybridLoD, we use the official implementation provided by authors with modifications for asset loading
+purposes. For NonExp, we re-implemented the method based on the
+paper as the source code is not available. For DAP, we used the authors’ pre-trained results as training is prohibitively expensive and
+requires a GPU cluster. We provide different images from references
+and provide root mean squared error (RMSE) to evaluate the quality
+of each method. In addition, we provide a supplementary video
+with varying magnification levels, camera rotation, and lighting
+conditions to demonstrate the temporal stability of our method.
+Rendering Quality Comparison. In Fig. 13, we compare our method
+to HybridLoD and NonExp on a set of scenes with varying geometric
+and material characteristics. For each scene, we show the rendered
+results using 2 different LoD scales, 323 and 644 . The image resolutions are 322 and 642 , chosen such that a voxel roughly projects to
+the footprint of a pixel. High resolution references are provided to
+better visualize the setup. The Helmet scene has relatively low geometric complexity but it consists of large specular surfaces which
+are traditionally challenging for LoD methods. The Chandelier scene
+has intricate geometric structure with varying degree of curvature
+that produces anisotropic highlights. The Tower scene features organized thin structures that lead to correlated partial occlusion. Finally,
+the Palm and the Oleander scene have larger complexity with both
+unstructured (leaves) and structured (trunk) geometry.
+For all scenes, our results achieve superior quality and produce
+closer matches to references, as can be verified by the difference
+images and the RMSE errors. HybridLoD tends to produce bloated,
+over transparent results, which is especially noticeable at coarser
+LoD resolution. This could be due to both misclassification (too
+much volume) and the neglect of correlation. Moreover, the mesh
+simplification process could undesirably alter the curvature of the
+Efficient Scene Appearance Aggregation for Level-of-Detail Rendering
+•
+15
+Table 2. Scene Configuration. For all scenes: Surface NDF mixture component count is set to 𝑘 ≤ 4; AIV is recorded at 322 angular resolution; ABV is recorded
+at 642 angular resolution. At most top 10% basis coefficients are kept. More are truncated as long as the reconstruction preserves more than 95% accuracy.
+*Instanced triangle count. † This scene is composed of instances of multiple aggregated objects. We only report the largest object.
+Scene
+Helmet
+Chandelier
+Tower
+Palm
+Oleander
+Coral Reef
+Forest
+Metropolis
+Original
+#Tris Memory
+15K
+7.7 MB
+106K
+11.7 MB
+453K
+45.7 MB
+2.2M 349.6 MB
+2.7M 398.8 MB
+4.1M 513.0 MB
+16.2M (*175.2M)
+2.5 GB
+88.6M (*301.8M)
+46.9 GB
+Max Res.
+2563
+2563
+2563
+2563
+2563
+2563
+5123
+† 2563
+original geometry, causing loss of highlights (Helmet and Chandelier). NonExp achieves better quality than HybridLoD in general,
+but still suffers from several issues. The transmittance optimization
+accounts for some correlation but is usually not perfect, as shown
+in the Chandelier renders (too leaky) and the Palm renders (too
+opaque). The method ignores the complexity in material and results
+in glossy appearance mismatch (Helmet and Chandelier). Ultimately,
+the empirical exponential-linear blending model is unlikely to satisfy all constraints required to match transmittance for all directions.
+In addition, we find that it is highly sensitive to the empirical ray
+offset parameter as a different value drastically alters brightness.
+We follow the authors’ suggestion and offset scattered rays by one
+voxel for all results.
+Comparison to DAP. In Fig. 14, we provide a separate comparison to DAP as we only use their pretrained asset. The Oak scene
+presents two difficulties including the glinty appearance from the
+highly glossy material and the hard shadow cast by a directional
+light. Our method is able to capture the highlight accurately, but
+fails to reconstruct the hard shadow perfectly due to the coefficient
+truncation and compression error. This can be alleviated with more
+conservative truncation/compression parameters at the cost of a
+larger memory footprint. Overall, our method is able to reach a
+comparable visual quality (slightly better in terms of RMSE). We emphasize that our method only requires a fraction of precomputation
+time, memory cost, and rendering time to reach such quality.
+Complex Scenes. We showcase the practicality of our method by
+demonstrating results on significantly more complex scenes. Each
+scene shown in this part features a collection of assets with multiple
+geometric parts and materials. We compare our results to references
+but not to other methods, because they require either non-trivial
+engineering effort or excessive precomputation budget to support
+assets at this scale.
+The Coral Reef scene in Fig. 1 includes a variety of geometry (flat
+surfaces and unstructured details) and materials (glossy and diffuse).
+The environment light features a dynamic range of 80,000:1 and
+produces strong highlights on glossy surfaces. Despite the challenging configuration, our results accurately preserve the appearance
+across different scales. The insets show how our method deals with
+a particularly challenging part with numerous thin glossy branches.
+Occupancy
+2.36%
+1.39%
+1.66%
+1.25%
+3.71%
+3.18%
+2.86%
+† 7.01%
+Ours
+Total Mem.
+155.1 MB
+180.6 MB
+255.8 MB
+216.2 MB
+327.6 MB
+209.5 MB
+1.06 GB
+5.33 GB
+Precomp. Time
+1583 sec
+748 sec
+1108 sec
+1345 sec
+3537 sec
+1624 sec
+16064 sec
+18254 sec
+Table 3. Statistics of the rendering results in Fig. 13. Memory consumption
+and render times are measured using 643 LoD resolution and 1024 samples
+per pixel for all methods.
+Helmet
+Mem. (MB)
+Time (sec)
+RMSE
+Chandelier
+Mem. (MB)
+Time (sec)
+RMSE
+Tower
+Mem. (MB)
+Time (sec)
+RMSE
+Palm
+Mem. (MB)
+Time (sec)
+RMSE
+Oleander
+Mem. (MB)
+Time (sec)
+RMSE
+PT Ref.
+7.7
+1.37
+—
+PT Ref.
+11.7
+1.46
+—
+PT Ref.
+45.7
+1.66
+—
+PT Ref.
+349.6
+2.93
+—
+PT Ref.
+398.8
+4.56
+—
+Ours
+9.7
+1.68
+0.158
+Ours
+6.4
+1.74
+0.075
+Ours
+9.6
+1.20
+0.022
+Ours
+7.3
+1.81
+0.024
+Ours
+12.8
+5.12
+0.027
+HybridLoD
+5.1
+23.78
+0.302
+HybridLoD
+6.6
+32.33
+0.112
+HybridLoD
+4.3
+19.72
+0.050
+HybridLoD
+4.0
+30.50
+0.109
+HybridLoD
+4.1
+84.78
+0.090
+NonExp
+1.0
+57.36
+0.238
+NonExp
+0.5
+51.08
+0.099
+NonExp
+0.7
+37.13
+0.038
+NonExp
+0.5
+56.79
+0.098
+NonExp
+1.4
+192.39
+0.045
+At the coarsest scale, even our multi-lobe NDF does not have sufficient angular resolution to resolve all the highlights, resulting in a
+slightly darker look. However, this is alleviated at finer scales.
+The Forest scene in Fig. 16 features the largest single-object geometric complexity. It has 16.2 million unique triangles and 175.2
+million after instancing. Our results remain close to references at
+the three LoD scales shown (1283 , 2563 , and 5123 ). We note that
+the memory cost of our method is agnostic to whether or not the
+original scene contains instanced geometry.
+Finally, our method supports assembly of multiple aggregated objects and instancing for even larger scenes. The Metropolis cityscape
+in Fig. 1 is composed of 82 unique aggregated objects and 270 instances. Each instance selects its level based on its screen-space projection size so that content far away can be rendered with coarser
+LoDs accordingly (Fig. 1, right). Different instances are treated as
+uncorrelated and ABVs are used to compute the partial occlusion
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+16
+•
+Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan
+PT Ref. (High Res.)
+PT Ref.
+Ours
+0.0
+Difference
+HybridLoD
+1.0
+0.0
+Difference
+1.0
+NonExp
+0.0
+Difference
+1.0
+Helmet
+323
+643
+0.165 / 0.158
+0.266 / 0.302
+0.203 / 0.238
+RMSE:
+0.059 / 0.075
+0.098 / 0.112
+0.064 / 0.099
+RMSE:
+0.020 / 0.022
+0.063 / 0.050
+0.033 / 0.038
+RMSE:
+0.029 / 0.024
+0.131 / 0.109
+0.070 / 0.098
+RMSE:
+0.028 / 0.027
+0.098 / 0.090
+0.049 / 0.045
+Chandelier
+323
+RMSE:
+643
+Tower
+323
+643
+Palm
+323
+643
+Oleander
+323
+643
+Fig. 13. Rendering results by our and existing methods on a variety of scenes. All images are rendered using 1024 samples per pixel. Each result is compared
+to the corresponding reference and the difference image is displayed on the side with RMSE provided. Our results achieve superior quality for all five scenes.
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+Efficient Scene Appearance Aggregation for Level-of-Detail Rendering
+0.25 RMSE: 0.026
+0.0
+(a) PT Reference
+(b) Ours (2563 )
+0.031
+(c) DAP (2563 )
+Fig. 14. We compare our method to DAP with their pretrained Oak scene.
+Despite the small imperfection of the hard shadow cast on the tree trunk
+due to visibility coefficient truncation and compression, our result overall
+reaches similar visual quality.
+between them. This is where the LoD approach truly shines as our
+representation provides nearly an order-of-magnitude of memory
+saving. In fact, we are not even able to generate reference for this
+scene in our testing environment: The original scene costs 46.9 GB
+alone and when taking into account the auxiliary data structures
+such as mipmaps and the BVH, the total memory would have exceeded the 64 GB main memory of our testing machine, requiring
+out-of-core rendering. Our representation only costs 5.33 GB and
+Fig. 1 takes 1300 seconds to render at 1280 × 540 resolution with
+2048 samples per pixel.
+Performance. In Table 2, we report the configuration for all scenes,
+including both the original version and our representation. It is clear
+that all scenes have a large degree of sparsity. As expected, the memory footprint of our representation is largely independent of the
+original scene complexity. While our method cannot beat the explicit representation for small scenes, the asymptotical benefit is
+evident for larger scenes. Recall that the memory footprint scales
+quadratically with respect to LoD resolution. If a model only occupies a small portion of the rendered image, then only a coarser LoD
+level with much smaller memory is needed. It is possible to further
+reduce the memory footprint with a more optimized implementation, e.g., by quantizing the stored data. GPU ray tracing is likely to
+reduce the precomputation time by an order of magnitude.
+In Table 3, we compare the memory consumption and rendering
+times required by our method, HybridLoD, and NonExp. At a relatively modest resolution of 643 , all methods reduce the memory
+consumption, especially for more complicated models. However, our
+method does require more memory than HybridLoD and NonExp
+mainly due to the high-dimensional aggregated visibility data even
+after compression. Performance wise, none of the methods show
+significant advantage over the PT baseline at equal samples. In fact,
+HybridLoD and NonExp are significantly slower, likely due to the
+complexity of (nested) ray marching or sampling. We note that the
+baseline is backed by highly optimized ray tracing kernels from
+Embree, and our CPU re-implementation of NonExp is relatively
+•
+17
+unoptimized. Our method is much more comparable to the baseline,
+as it is simpler with precomputed aggregated visibility (Eq. 30). The
+equal-sample comparison could be unfavorable to our and other LoD
+methods because they are already prefiltered and should require
+fewer samples to reach the same or similar quality. In the following,
+we assess how our method improves efficiency under equal time.
+Thanks to appearance aggregation, we are able to render complex
+scenes efficiently. Fig. 17 shows equal-time rendering comparison
+for the Forest scene. The performance improvement comes from two
+aspects: First, we avoid spending a large number of samples to trace
+explicit geometry as our representation is already anti-aliased. This
+allows us to perform splitting and allocate more samples for lighting
+(Algo. 1, line 14). Moreover, we do not need to trace shadow rays
+either, since the visibility information is readily available from the
+precomputed AIV. The variance reduction is modest, as ray tracing
+is highly optimized by Embree. Again, our rendering speed can be
+further improved with a GPU implementation.
+Ablation Study. In Table 4 and Fig. 18, we conduct an ablation
+study on the impact of parameters to accuracy and cost. For each
+model, we precompute it with the “maximum” configuration to serve
+as the control, where up to 4 surface NDF lobes are allowed and
+no compression is applied at all. We then vary each parameter and
+assess its affect on rendering quality, memory requirement, and time
+compared to the control. The benefit of using multiple NDF lobes
+is more prominent in the Chandelier scene to capture the glossy
+base material together with curved surfaces; it is not obvious in the
+more diffuse Oleander scene. For both types of aggregated visibility,
+10% coefficient truncation only introduces barely recognizable error,
+while 1% truncation results in visible inaccuracy. Finally, by keeping
+only 1 CPCA representative, CPCA is reduced to simple vector
+quantization and approximates per-cluster subspaces poorly. The
+visibility data is high dimensional and thus compression parameters
+greatly affects the final memory requirement. All parameters affect
+the shading cost but it is minor compared to voxel traversal and
+intersection test.
+Limitations. Our method has several limitations that could serve
+as fruitful topics for future research. As prefaced, so far we have
+been focusing on direct illumination. In order for a scene aggregate
+to support global illumination, multiple scattering between different
+parts of the scene should be modeled. This brings new challenges
+as discretizing and aggregating individual regions will inevitably
+lose the information about how different regions interact with each
+other. One possible approach is to precompute and aggregate the
+entire transport from the external environment to a given region.
+The definition of ABSDF should be extended accordingly in this
+case.
+Two more limitations stem from the separate approximations
+made in Eq. 6 and Eq. 25. Eq. 6 assumes independence between
+visibility and material in a single voxel which could lead to certain
+artifacts as illustrated in Fig. 19. However, this is alleviated as the
+spatial resolution grows, since the correlated parts are more likely
+to be grouped into different voxels. Eq. 25 assumes independence
+between visibility along two directions. This could lead to incorrect
+occlusion when, for example, the camera and the light source are collocated. To the best of our knowledge, compactly representing the
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+18
+•
+643
+Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan
+1283
+2563
+1282
+2562
+(a) Ours
+5122
+(b) PT Reference
+643
+1282
+1283
+2562
+2563
+5122
+(c) Ours
+(d) PT Ref.
+Fig. 15. Our method captures the complex visual appearance of the Coral Reef scene that consists of a variety of geometry and materials. We show (a) the
+renders with our representation at 3 scales (643 , 1283 , and 2563 ) and compare them to (b) path-traced (PT) references. Image resolutions are chosen such that
+one voxel approximately projects to the footprint of a single pixel (1282 , 2562 , and 5122 ). We highlight a challenging part that features partial transparency and
+a glossy material on the right.
+Table 4. Ablation study analyzing the impact of parameters on appearance and cost. Given the “maximum” configuration with up to 4 surface NDF lobes and
+no compression, we change each paramter and show how it affects accuracy, memory requirement, and render time. Please refer to Fig. 18 for rendered results.
+Scene
+Mem. (MB)
+Chandelier
+Time (sec)
+643
+RMSE
+Chandelier Time (sec)
+(alt. view) RMSE
+Mem. (MB)
+Oleander
+Time (sec)
+3
+64
+RMSE
+Oleander Time (sec)
+(alt. view) RMSE
+Maximum
+70.1
+1.91
+0.070
+2.86
+0.242
+125.8
+5.13
+0.025
+8.06
+0.046
+1 NDF Lobe
+69.5 (0.99×)
+1.87 (0.98×)
+0.077
+2.72 (0.95×)
+0.322
+124.5 (0.99×)
+5.03 (0.98×)
+0.025
+7.90 (0.98×)
+0.046
+10% AIV
+48.9 (0.70×)
+1.91 (1.00×)
+0.070
+2.83 (0.99×)
+0.247
+66.6 (0.53×)
+5.13 (1.00×)
+0.026
+7.93 (0.98×)
+0.047
+general 4D correlated bidirectional visibility remains an open problem for LoD techniques. In practice, we find that this assumption
+rarely causes noticeable artifacts.
+Finally, it would be desirable to further support material models
+beyond the Disney BRDF. For example, foliage often exhibits nonnegligible subsurface scattering effects. One simple extension to
+our current ABSDF factorization could be to model an extra diffuse
+transmission component.
+9
+CONCLUSION
+We present an efficient scene appearance aggregation method for
+LoD rendering. Our method is based on a novel formulation for
+far-field scene aggregation with the definition of ABSDF, which
+captures the aggregated appearance of all surfaces within a volume.
+We develop a closed-form factorization of the ABSDF that supports
+all-frequency and view-dependent effects with handy evaluation
+and sampling procedures. Our representation naturally accounts for
+long-range correlation by recording two types of global visibility,
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+1% AIV
+46.8 (0.67×)
+1.62 (0.85×)
+0.081
+2.40 (0.84×)
+0.290
+60.7 (0.48×)
+4.57 (0.89×)
+0.028
+6.77 (0.84×)
+0.047
+10% ABV
+31.2 (0.44×)
+1.81 (0.95×)
+0.071
+2.77 (0.97×)
+0.246
+154.7 (0.62×)
+5.08 (0.99×)
+0.032
+7.66 (0.95×)
+0.055
+1% ABV
+27.3 (0.39×)
+1.78 (0.93×)
+0.101
+2.72 (0.95×)
+0.266
+77.4 (0.58×)
+5.18 (1.01×)
+0.116
+7.90 (0.98×)
+0.088
+1 CPCA Rep.
+27.2 (0.37×)
+1.85 (0.97×)
+0.078
+2.63 (0.92×)
+0.251
+71.2 (0.57×)
+5.14 (1.00×)
+0.053
+7.81 (0.97×)
+0.070
+the aggregated interior visibility and the aggregated boundary visibility. Our truncated ellipsoid primitive improves the preservation
+of local correlation compared to the naïve cubic primitive. We have
+demonstrated the accuracy of our method on a variety of scenes
+with different geometric and material characteristics and its scalability to large, complex scenes. Our results achieve higher quality than
+those from state-of-the-art LoD techniques. While our implementation is far from optimized, we can already show the asymptotic
+advantages of our representation in terms of memory footprint and
+rendering speed compared to the original representation. We believe
+our work is highly relevant to improving the scalability of physically
+based rendering, enabling the generation of richer, more realistic
+3D content.
+REFERENCES
+Michael Ashikhmin, Simon Premoze, and Peter Shirley. 2000. A microfacet-based BRDF
+generator, Judith R. Brown and Kurt Akeley (Eds.). ACM Trans. Graph., 65–74.
+https://doi.org/10.1145/344779.344814
+Efficient Scene Appearance Aggregation for Level-of-Detail Rendering
+1283
+2563
+5123
+•
+19
+Ours
+2 ray spp
+5 nee spp
+PT
+18 spp
+(a) Ours
+RMSE: 0.042
+(b) PT Reference
+0.036
+Fig. 17. Equal-time rendering comparison. Both images are rendered for 1
+second. Our method performs splitting to improve efficiency by allocating 5
+NEE samples per ray sample.
+0.035
+0.25
+0.0
+(c) Difference
+Fig. 16. Our results faithfully preserve the partial coverage, visibility, and
+appearance of the large Forest scene at different scales. The difference
+images are scaled for clarity.
+Hendrik Baatz, Jonathan Granskog, Marios Papas, Fabrice Rousselle, and Jan Novák.
+2022. NeRF-Tex: Neural Reflectance Field Textures. Comput. Graph. Forum 41, 6
+(2022), 287–301. https://doi.org/10.1111/cgf.14449
+Steve Bako, Pradeep Sen, and Anton Kaplanyan. 2023. Deep Appearance Prefiltering.
+ACM Trans. Graph. 42, 2 (2023), 23:1–23:23. https://doi.org/10.1145/3570327
+Jonathan T. Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo MartinBrualla, and Pratul P. Srinivasan. 2021. Mip-NeRF: A Multiscale Representation for
+Anti-Aliasing Neural Radiance Fields. In 2021 IEEE/CVF International Conference
+on Computer Vision, ICCV 2021, Montreal, QC, Canada, October 10-17, 2021. IEEE,
+5835–5844. https://doi.org/10.1109/ICCV48922.2021.00580
+Sai Bi, Zexiang Xu, Pratul P. Srinivasan, Ben Mildenhall, Kalyan Sunkavalli, Milos
+Hasan, Yannick Hold-Geoffroy, David J. Kriegman, and Ravi Ramamoorthi. 2020.
+Neural Reflectance Fields for Appearance Acquisition. CoRR abs/2008.03824 (2020).
+arXiv:2008.03824
+Benedikt Bitterli, Srinath Ravichandran, Thomas Müller, Magnus Wrenninge, Jan Novák,
+Steve Marschner, and Wojciech Jarosz. 2018. A radiative transfer framework for
+non-exponential media. ACM Trans. Graph. 37, 6 (2018), 225. https://doi.org/10.
+1145/3272127.3275103
+Brent Burley. 2012. Physically-based shading at disney. ACM Trans. Graph. 2012, 1–7.
+Subrahmanyan Chandrasekhar. 1960. Radiative Transfer. New York.
+Petrik Clarberg. 2008. Fast Equal-Area Mapping of the (Hemi)Sphere using SIMD. J.
+Graph. Tools 13, 3 (2008), 53–68. https://doi.org/10.1080/2151237X.2008.10129263
+Michael F Cohen and John R Wallace. 1993. Radiosity and realistic image synthesis.
+Morgan Kaufmann.
+Robert L. Cook, John Halstead, Maxwell Planck, and David Ryu. 2007. Stochastic
+simplification of aggregate detail. ACM Trans. Graph. 26, 3 (2007), 79. https:
+//doi.org/10.1145/1276377.1276476
+Cyril Crassin, Fabrice Neyret, Sylvain Lefebvre, and Elmar Eisemann. 2009. GigaVoxels:
+ray-guided streaming for efficient and detailed voxel rendering. In Proceedings of
+the 2009 Symposium on Interactive 3D Graphics, SI3D 2009, February 27 - March 1,
+2009, Boston, Massachusetts, USA, Eric Haines, Morgan McGuire, Daniel G. Aliaga,
+Manuel M. Oliveira, and Stephen N. Spencer (Eds.). ACM, 15–22. https://doi.org/10.
+1145/1507149.1507152
+Jonathan Dupuy, Eric Heitz, and Eugene d’Eon. 2016. Additional Progress Towards the
+Unification of Microfacet and Microflake Theories. In 27th Eurographics Symposium
+on Rendering, Rendering - Experimental Ideas & Implementations, EGSR 2016, EI&I
+Track, Dublin, Ireland, June 22-24, 2016, Elmar Eisemann and Eugene Fiume (Eds.).
+Eurographics Association, 55–63. https://doi.org/10.2312/sre.20161210
+Jonathan Dupuy, Eric Heitz, Jean-Claude Iehl, Pierre Poulin, Fabrice Neyret, and Victor
+Ostromoukhov. 2013. Linear efficient antialiased displacement and reflectance
+mapping. ACM Trans. Graph. 32, 6 (2013), 211:1–211:11. https://doi.org/10.1145/
+2508363.2508422
+Michael Garland and Paul S. Heckbert. 1997. Surface simplification using quadric error
+metrics, G. Scott Owen, Turner Whitted, and Barbara Mones-Hattal (Eds.). ACM
+Trans. Graph., 209–216. https://doi.org/10.1145/258734.258849
+Alban Gauthier, Robin Faury, Jérémy Levallois, Théo Thonat, Jean-Marc Thiery, and
+Tamy Boubekeur. 2022. Mipnet: Neural normal-to-anisotropic-roughness mip mapping. ACM Transactions on Graphics 41, 6 (2022), 1–12.
+Charles Han, Bo Sun, Ravi Ramamoorthi, and Eitan Grinspun. 2007. Frequency domain
+normal map filtering. ACM Trans. Graph. 26, 3 (2007), 28. https://doi.org/10.1145/
+1276377.1276412
+Jon Hasselgren, Jacob Munkberg, Jaakko Lehtinen, Miika Aittala, and Samuli Laine.
+2021. Appearance-Driven Automatic 3D Model Simplification.. In EGSR (DL). 85–97.
+Eric Heitz, Jonathan Dupuy, Cyril Crassin, and Carsten Dachsbacher. 2015. The SGGX
+microflake distribution. ACM Trans. Graph. 34, 4 (2015), 48:1–48:11. https://doi.org/
+10.1145/2766988
+Eric Heitz, Jonathan Dupuy, Stephen Hill, and David Neubelt. 2016. Real-time polygonallight shading with linearly transformed cosines. ACM Transactions on Graphics
+(TOG) 35, 4 (2016), 1–8.
+Eric Heitz and Fabrice Neyret. 2012. Representing Appearance and Pre-filtering Subpixel
+Data in Sparse Voxel Octrees. In Proceedings of the EUROGRAPHICS Conference on
+High Performance Graphics 2012, Paris, France, June 25-27, 2012, Carsten Dachsbacher,
+Jacob Munkberg, and Jacopo Pantaleoni (Eds.). Eurographics Association, 125–134.
+https://doi.org/10.2312/EGGH/HPG12/125-134
+Hugues Hoppe. 1996. Progressive Meshes, John Fujii (Ed.). ACM Trans. Graph., 99–108.
+Homan Igehy. 1999. Tracing Ray Differentials, Warren N. Waggenspack (Ed.). ACM
+Trans. Graph., 179–186. https://doi.org/10.1145/311535.311555
+Kei Iwasaki, Yoshinori Dobashi, and Tomoyuki Nishita. 2012. Interactive bi-scale
+editing of highly glossy materials. ACM Trans. Graph. 31, 6 (2012), 144:1–144:7.
+https://doi.org/10.1145/2366145.2366163
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+20 •
+Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan
+Maximum
+1 NDF Lobe
+10% AIV Coeff. 1% AIV Coeff. 10% ABV Coeff. 1% ABV Coeff.
+1 CPCA Rep.
+1.0
+0.0
+(Alt. View)
+Difference
+Chandelier 643
+PT Ref.
+0.0
+0.4
+0.0
+(Alt. View)
+Difference
+Oleander 643
+Difference
+1.0
+Difference
+0.4
+0.0
+Fig. 18. Ablation study analyzing the impact of parameters on appearance and cost. All images are rendered using 1024 samples per pixel. Difference images
+between each configuration and the corresponding reference are provided. Please refer to Table 4 for statistics.
+Wenzel Jakob, Adam Arbree, Jonathan T. Moon, Kavita Bala, and Steve Marschner. 2010.
+A radiative transfer framework for rendering materials with anisotropic structure.
+ACM Trans. Graph. 29, 4 (2010), 53:1–53:13. https://doi.org/10.1145/1778765.1778790
+Wenzel Jakob, Milos Hasan, Ling-Qi Yan, Jason Lawrence, Ravi Ramamoorthi, and Steve
+Marschner. 2014. Discrete stochastic microfacet models. ACM Trans. Graph. 33, 4
+(2014), 115:1–115:10. https://doi.org/10.1145/2601097.2601186
+Adrián Jarabo, Carlos Aliaga, and Diego Gutierrez. 2018. A radiative transfer framework
+for spatially-correlated materials. ACM Trans. Graph. 37, 4 (2018), 83. https:
+//doi.org/10.1145/3197517.3201282
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+Adrián Jarabo, Hongzhi Wu, Julie Dorsey, Holly E. Rushmeier, and Diego Gutierrez.
+2014. Effects of Approximate Filtering on the Appearance of Bidirectional Texture
+Functions. IEEE Trans. Vis. Comput. Graph. 20, 6 (2014), 880–892. https://doi.org/10.
+1109/TVCG.2014.2312016
+Jorge Jiménez, Xianchun Wu, Angelo Pesce, and Adrian Jarabo. 2016. Practical real-time
+strategies for accurate indirect occlusion. SIGGRAPH 2016 Courses: Physically Based
+Shading in Theory and Practice (2016).
+James T. Kajiya and Timothy L. Kay. 1989. Rendering fur with three dimensional
+textures. ACM Trans. Graph. (1989), 271–280. https://doi.org/10.1145/74333.74361
+Efficient Scene Appearance Aggregation for Level-of-Detail Rendering
+(a) Render with 1 voxel
+(b) Render with 23 voxels
+Fig. 19. (a) Due the separate visibility approximation (Eq. 6), our method
+cannot handle correlation between visibility and material in a single voxel.
+The render averages the contribution from the red and green materials. (b)
+However, this limitation is mitigated as the voxelization resolution increases.
+Viktor Kämpe, Erik Sintorn, and Ulf Assarsson. 2013. High resolution sparse voxel
+DAGs. ACM Trans. Graph. 32, 4 (2013), 101:1–101:13. https://doi.org/10.1145/
+2461912.2462024
+Anton S. Kaplanyan, Stephan Hill, Anjul Patney, and Aaron E. Lefohn. 2016. Filtering
+distributions of normals for shading antialiasing. In Proceedings of High Performance
+Graphics, HPG 2016, Dublin, Ireland, June 20-22, 2016, David Luebke and Steven
+Molnar (Eds.). Eurographics Association, 151–162. https://doi.org/10.2312/hpg.
+20161201
+Brian Karis, Rune Stubbe, and Graham Wihlidal. 2021. A Deep Dive into Nanite
+Virtualized Geometry. In ACM SIGGRAPH 2021 Talks.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 2023.
+3d gaussian splatting for real-time radiance field rendering. ACM Transactions on
+Graphics (ToG) 42, 4 (2023), 1–14.
+Alexandr Kuznetsov, Krishna Mullia, Zexiang Xu, Milos Hasan, and Ravi Ramamoorthi.
+2021. NeuMIP: multi-resolution neural materials. ACM Trans. Graph. 40, 4 (2021),
+175:1–175:13. https://doi.org/10.1145/3450626.3459795
+Alexandr Kuznetsov, Xuezheng Wang, Krishna Mullia, Fujun Luan, Zexiang Xu, Milos
+Hasan, and Ravi Ramamoorthi. 2022. Rendering Neural Materials on Curved Surfaces, Munkhtsetseg Nandigjav, Niloy J. Mitra, and Aaron Hertzmann (Eds.). ACM
+Trans. Graph., 9:1–9:9. https://doi.org/10.1145/3528233.3530721
+Samuli Laine and Tero Karras. 2010. Efficient sparse voxel octrees. In Proceedings of
+the 2010 Symposium on Interactive 3D Graphics, SI3D 2010, February 19-21, 2010,
+Washington, DC, USA, Daniel G. Aliaga, Manuel M. Oliveira, Amitabh Varshney,
+and Chris Wyman (Eds.). ACM, 55–63. https://doi.org/10.1145/1730804.1730814
+Xinguo Liu, Peter-Pike J. Sloan, Heung-Yeung Shum, and John Snyder. 2004. AllFrequency Precomputed Radiance Transfer for Glossy Objects. In Proceedings of the
+15th Eurographics Workshop on Rendering Techniques, Norköping, Sweden, June 21-23,
+2004, Alexander Keller and Henrik Wann Jensen (Eds.). Eurographics Association,
+337–344. https://doi.org/10.2312/EGWR/EGSR04/337-344
+Stephen Lombardi, Tomas Simon, Gabriel Schwartz, Michael Zollhöfer, Yaser Sheikh,
+and Jason M. Saragih. 2021. Mixture of volumetric primitives for efficient neural
+rendering. ACM Trans. Graph. 40, 4 (2021), 59:1–59:13. https://doi.org/10.1145/
+3450626.3459863
+Guillaume Loubet and Fabrice Neyret. 2017. Hybrid mesh-volume LoDs for all-scale
+pre-filtering of complex 3D assets. Comput. Graph. Forum 36, 2 (2017), 431–442.
+https://doi.org/10.1111/cgf.13138
+Guillaume Loubet and Fabrice Neyret. 2018. A new microflake model with microscopic
+self-shadowing for accurate volume downsampling. Comput. Graph. Forum 37, 2,
+111–121. https://doi.org/10.1111/cgf.13346
+David Luebke, Martin Reddy, Jonathan D Cohen, Amitabh Varshney, Benjamin Watson,
+and Robert Huebner. 2003. Level of detail for 3D graphics. Morgan Kaufmann.
+Linjie Lyu, Ayush Tewari, Thomas Leimkühler, Marc Habermann, and Christian
+Theobalt. 2022. Neural Radiance Transfer Fields for Relightable Novel-View
+Synthesis with Global Illumination. In Computer Vision - ECCV 2022 - 17th European Conference, Tel Aviv, Israel, October 23-27, 2022, Proceedings, Part XVII
+(Lecture Notes in Computer Science, Vol. 13677), Shai Avidan, Gabriel J. Brostow,
+Moustapha Cissé, Giovanni Maria Farinella, and Tal Hassner (Eds.). Springer, 153–
+169. https://doi.org/10.1007/978-3-031-19790-1_10
+Julien N. P. Martel, David B. Lindell, Connor Z. Lin, Eric R. Chan, Marco Monteiro,
+and Gordon Wetzstein. 2021. Acorn: adaptive coordinate networks for neural scene
+representation. ACM Trans. Graph. 40, 4 (2021), 58:1–58:13. https://doi.org/10.1145/
+3450626.3459785
+Johannes Meng, Marios Papas, Ralf Habel, Carsten Dachsbacher, Steve Marschner,
+Markus H. Gross, and Wojciech Jarosz. 2015. Multi-scale modeling and rendering of
+granular materials. ACM Trans. Graph. 34, 4 (2015), 49:1–49:13. https://doi.org/10.
+1145/2766949
+Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. 2020. NeRF: Representing Scenes as Neural Radiance Fields
+for View Synthesis. In Computer Vision - ECCV 2020 - 16th European Conference,
+Glasgow, UK, August 23-28, 2020, Proceedings, Part I (Lecture Notes in Computer
+Science, Vol. 12346), Andrea Vedaldi, Horst Bischof, Thomas Brox, and Jan-Michael
+•
+21
+Frahm (Eds.). Springer, 405–421. https://doi.org/10.1007/978-3-030-58452-8_24
+Jonathan T. Moon, Bruce Walter, and Steve Marschner. 2008. Efficient multiple scattering
+in hair using spherical harmonics. Vol. 27. 31. https://doi.org/10.1145/1360612.
+1360630
+Jonathan T. Moon, Bruce Walter, and Stephen R. Marschner. 2007. Rendering Discrete Random Media Using Precomputed Scattering Solutions. In Proceedings
+of the Eurographics Symposium on Rendering Techniques, Grenoble, France, 2007,
+Jan Kautz and Sumanta N. Pattanaik (Eds.). Eurographics Association, 231–242.
+https://doi.org/10.2312/EGWR/EGSR07/231-242
+Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. 2022. Instant
+neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph.
+41, 4 (2022), 102:1–102:15. https://doi.org/10.1145/3528223.3530127
+Thomas Müller, Marios Papas, Markus H. Gross, Wojciech Jarosz, and Jan Novák. 2016.
+Efficient rendering of heterogeneous polydisperse granular media. ACM Trans.
+Graph. 35, 6 (2016), 168:1–168:14. https://doi.org/10.1145/2980179.2982429
+Ken Museth. 2013. VDB: High-resolution sparse volumes with dynamic topology. ACM
+Trans. Graph. 32, 3 (2013), 27:1–27:22. https://doi.org/10.1145/2487228.2487235
+Ken Museth. 2021. NanoVDB: A GPU-Friendly and Portable VDB Data Structure
+For Real-Time Rendering And Simulation. ACM Trans. Graph., 1:1–1:2. https:
+//doi.org/10.1145/3450623.3464653
+Fabrice Neyret. 1998. Modeling, Animating, and Rendering Complex Scenes Using
+Volumetric Textures. IEEE Trans. Vis. Comput. Graph. 4, 1 (1998), 55–70. https:
+//doi.org/10.1109/2945.675652
+Marc Olano and Dan Baker. 2010. LEAN mapping. In Proceedings of the 2010 Symposium
+on Interactive 3D Graphics, SI3D 2010, February 19-21, 2010, Washington, DC, USA,
+Daniel G. Aliaga, Manuel M. Oliveira, Amitabh Varshney, and Chris Wyman (Eds.).
+ACM, 181–188. https://doi.org/10.1145/1730804.1730834
+Jeong Joon Park, Peter R. Florence, Julian Straub, Richard A. Newcombe, and Steven
+Lovegrove. 2019. DeepSDF: Learning Continuous Signed Distance Functions for
+Shape Representation. In IEEE Conference on Computer Vision and Pattern Recognition,
+CVPR 2019, Long Beach, CA, USA, June 16-20, 2019. Computer Vision Foundation /
+IEEE, 165–174. https://doi.org/10.1109/CVPR.2019.00025
+Jiangfeng She, Xiaoyan Gu, Junzhong Tan, Ming Tong, and Chaofan Wang. 2019. An
+appearance-preserving simplification method for complex 3D building models. Trans.
+GIS 23, 2 (2019), 275–293. https://doi.org/10.1111/tgis.12518
+Peter Shirley and Kenneth Chiu. 1997. A Low Distortion Map Between Disk and Square.
+J. Graphics, GPU, & Game Tools 2, 3 (1997), 45–52. https://doi.org/10.1080/10867651.
+1997.10487479
+Peter-Pike Sloan, Jesse Hall, John Hart, and John Snyder. 2003. Clustered Principal
+Components for Precomputed Radiance Transfer. ACM Trans. Graph. 22, 3 (jul 2003),
+382–391. https://doi.org/10.1145/882262.882281
+Towaki Takikawa, Joey Litalien, Kangxue Yin, Karsten Kreis, Charles T. Loop, Derek
+Nowrouzezahrai, Alec Jacobson, Morgan McGuire, and Sanja Fidler. 2021. Neural
+Geometric Level of Detail: Real-Time Rendering With Implicit 3D Shapes. In IEEE
+Conference on Computer Vision and Pattern Recognition, CVPR 2021, virtual, June
+19-25, 2021. Computer Vision Foundation / IEEE, 11358–11367. https://doi.org/10.
+1109/CVPR46437.2021.01120
+Ayush Tewari, Justus Thies, Ben Mildenhall, Pratul P. Srinivasan, Edgar Tretschk,
+Yifan Wang, Christoph Lassner, Vincent Sitzmann, Ricardo Martin-Brualla, Stephen
+Lombardi, Tomas Simon, Christian Theobalt, Matthias Nießner, Jonathan T. Barron,
+Gordon Wetzstein, Michael Zollhöfer, and Vladislav Golyanik. 2022. Advances in
+Neural Rendering. Comput. Graph. Forum 41, 2 (2022), 703–735. https://doi.org/10.
+1111/cgf.14507
+Michael J. Todd. 2016. Minimum volume ellipsoids - theory and algorithms. MOS-SIAM
+Series on Optimization, Vol. 23. SIAM.
+Michael Toksvig. 2005. Mipmapping Normal Maps. J. Graph. Tools 10, 3 (2005), 65–71.
+https://doi.org/10.1080/2151237X.2005.10129203
+Delio Vicini, Wenzel Jakob, and Anton Kaplanyan. 2021. A non-exponential transmittance model for volumetric scene representations. ACM Trans. Graph. 40, 4 (2021),
+136:1–136:16. https://doi.org/10.1145/3450626.3459815
+Ingo Wald, Sven Woop, Carsten Benthin, Gregory S. Johnson, and Manfred Ernst. 2014.
+Embree: a kernel framework for efficient CPU ray tracing. ACM Trans. Graph. 33, 4
+(2014), 143:1–143:8. https://doi.org/10.1145/2601097.2601199
+Beibei Wang, Milos Hasan, Nicolas Holzschuch, and Ling-Qi Yan. 2020. Example-Based
+Microstructure Rendering with Constant Storage. ACM Trans. Graph. 39, 5 (2020),
+162:1–162:12. https://doi.org/10.1145/3406836
+Jiaping Wang, Peiran Ren, Minmin Gong, John M. Snyder, and Baining Guo. 2009. Allfrequency rendering of dynamic, spatially-varying reflectance. ACM Trans. Graph.
+28, 5 (2009), 133. https://doi.org/10.1145/1618452.1618479
+Philippe Weier, Tobias Zirr, Anton Kaplanyan, Ling-Qi Yan, and Philipp Slusallek. 2023.
+Neural Prefiltering for Correlation-Aware Levels of Detail. ACM Trans. Graph.
+Hongzhi Wu, Julie Dorsey, and Holly E. Rushmeier. 2011. Physically-based interactive
+bi-scale material design. ACM Trans. Graph. 30, 6 (2011), 145. https://doi.org/10.
+1145/2070781.2024179
+Lifan Wu, Shuang Zhao, Ling-Qi Yan, and Ravi Ramamoorthi. 2019. Accurate appearance preserving prefiltering for rendering displacement-mapped surfaces. ACM
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+22 •
+Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan
+Trans. Graph. 38, 4 (2019), 137:1–137:14. https://doi.org/10.1145/3306346.3322936
+Yiheng Xie, Towaki Takikawa, Shunsuke Saito, Or Litany, Shiqin Yan, Numair Khan,
+Federico Tombari, James Tompkin, Vincent Sitzmann, and Srinath Sridhar. 2022.
+Neural Fields in Visual Computing and Beyond. Comput. Graph. Forum 41, 2 (2022),
+641–676. https://doi.org/10.1111/cgf.14505
+Chao Xu, Rui Wang, Shuang Zhao, and Hujun Bao. 2017. Real-Time Linear BRDF
+MIP-Mapping. Comput. Graph. Forum 36, 4 (2017), 27–34. https://doi.org/10.1111/
+cgf.13221
+Kun Xu, Wei-Lun Sun, Zhao Dong, Dan-Yong Zhao, Run-Dong Wu, and Shi-Min Hu.
+2013. Anisotropic spherical Gaussians. ACM Trans. Graph. 32, 6 (2013), 209:1–209:11.
+https://doi.org/10.1145/2508363.2508386
+Ling-Qi Yan, Milos Hasan, Wenzel Jakob, Jason Lawrence, Steve Marschner, and Ravi
+Ramamoorthi. 2014. Rendering glints on high-resolution normal-mapped specular
+surfaces. ACM Trans. Graph. 33, 4 (2014), 116:1–116:9. https://doi.org/10.1145/
+2601097.2601155
+Ling-Qi Yan, Milos Hasan, Steve Marschner, and Ravi Ramamoorthi. 2016. Positionnormal distributions for efficient rendering of specular microstructure. ACM Trans.
+Graph. 35, 4 (2016), 56:1–56:9. https://doi.org/10.1145/2897824.2925915
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+Cheng Zhang and Shuang Zhao. 2020. Multi-Scale Appearance Modeling of Granular
+Materials with Continuously Varying Grain Properties. In 31st Eurographics Symposium on Rendering, EGSR 2020 - Digital Library Only Track, London, UK, June 29 July 3, 2020, Carsten Dachsbacher and Matt Pharr (Eds.). Eurographics Association,
+25–37. https://doi.org/10.2312/sr.20201134
+Shuang Zhao, Frédo Durand, and Ravi Ramamoorthi. 2016. Downsampling scattering
+parameters for rendering anisotropic media. ACM Trans. Graph. 35, 6 (2016), 166:1–
+166:11. https://doi.org/10.1145/2980179.2980228
+Shuang Zhao, Wenzel Jakob, Steve Marschner, and Kavita Bala. 2011. Building volumetric appearance models of fabric using micro CT imaging. ACM Trans. Graph. 30,
+4 (2011), 44. https://doi.org/10.1145/2010324.1964939
+Shuang Zhao, Wenzel Jakob, Steve Marschner, and Kavita Bala. 2012. Structure-aware
+synthesis for predictive woven fabric appearance. ACM Trans. Graph. 31, 4 (2012),
+75:1–75:10. https://doi.org/10.1145/2185520.2185571
+Tobias Zirr and Anton S. Kaplanyan. 2016. Real-time rendering of procedural multiscale
+materials, Chris Wyman and Cem Yuksel (Eds.). ACM Trans. Graph., 139–148.
+https://doi.org/10.1145/2856400.2856409
+Efficient Scene Appearance Aggregation for Level-of-Detail Rendering
+(Supplemental Document)
+CCS Concepts: • Computing methodologies → Reflectance modeling;
+Visibility.
+Additional Key Words and Phrases: level-of-detail, aggregation, prefiltering,
+appearance modeling
+1 DETAILS AND VALIDATION IN ABSDF
+FACTORIZATION
+We provide additional derivation details and numerical validation
+for different steps involved in our ABSDF factorization.
+SGGX-based Precomputed Convolution
+In the main article, we propose to represent the convolution of
+an SGGX distribution and an isotropic spherical distribution 𝑔 as
+another SGGX with the same eigenvectors. We first describe our
+parameterization of SGGX for this purpose. Given an SGGX matrix
+𝑆 with eigenbasis (𝜔 1, 𝜔 2, 𝜔 3 ) and projected area 𝜎 (𝜔 1 ) ≤ 𝜎 (𝜔 2 ) ≤
+𝜎 (𝜔 3 ), we can always scale the entire matrix by 1/𝜎 2 (𝜔 3 ). The
+result is still a valid SGGX matrix:
+×10 2
+RMSE
+1.1
+20 × 20 × 20 × 2 for its resolution in practice. In Fig 2, we visualize
+our fit using a single SGGX and compare it to the ground-truth
+convolution in different configurations. In Fig 1, we plot the RMSE
+error between our fit and the ground truth with varying 𝜅.
+In §??, we convolve an SGGX with a GGX microfacet distribution:
+𝑔(𝜔ℎ ) = 𝐷 (𝜔ℎ ; 𝑛, 𝛼) and compute a 3D mapping 𝜶 + = 𝑀2 (𝜶 , 𝛼)
+(two channels). We use 50 × 50 × 50 × 2 for its resolution in practice.
+Similarly, we provide visualization and error plots to compare our
+fit to the ground truth in Fig 1 and Fig 3.
+𝜎 2 (𝜔 )
+1
+0 0ª
+© 𝜎 2 (𝜔 3 )
+𝑆
+­
+2 (𝜔 ) ®
+𝑇
+′
+𝜎
+2
+= (𝜔 1, 𝜔 2, 𝜔 3 ) ­ 0
+𝑆 = 2
+0® (𝜔 1, 𝜔 2, 𝜔 3 ) , (1)
+­
+𝜎 (𝜔 3 )
+𝜎 2 (𝜔 3 ) ®
+0 1¬
+« 0
+It is shown by Heitz et al. [2015] (supplemental document) that 𝑆 ′
+is a double-sided GGX with roughness 𝛼𝑥 = 𝜎 (𝜔 1 )/𝜎 (𝜔 3 ), 𝛼 𝑦 =
+𝜎 (𝜔 1 )/𝜎 (𝜔 3 ), and tangent frame 𝑅 = (𝜔 1, 𝜔 2, 𝜔 3 ). Therefore, we
+can re-parameterize the SGGX as 𝐷 sggx (𝑛; 𝑅, 𝜶 ), where 𝜶 = (𝛼𝑥 , 𝛼 𝑦 ).
+Following Eq. ?? in the main article, the post-convolution distribution is a roughened SGGX 𝐷 sggx (𝑛; 𝑅, 𝜶 + ), where 𝜶 + includes the
+additional roughness gained from the convolution. We use nonlinear
+least-square fit to find the best mapping that gives the additional
+roughness from the original roughness the parameters of 𝑔. The
+ground-truth convolution is computed by Monte Carlo integration
+with a large number of samples. In the following, we validate the
+accuracy of this technique for the two encountered target distributions.
+In §??, we convolve an SGGX with a Spherical Gaussian (SG):
+𝑔(𝜔) = SG(𝜔; 𝑛, 𝜅) and compute a 3D mapping 𝜶 + = 𝑀1 (𝜶 , 𝜅)
+(two channels). As we only consider a small range of 𝜅, we use
+Authors’ addresses: Yang Zhou, yzhou426@cs.ucsb.edu, University of California, Santa
+Barbara, Santa Barbara, California, USA; Tao Huang, tao_huang@ucsb.edu, University
+of California, Santa Barbara, Santa Barbara, California, USA; Ravi Ramamoorthi, ravir@
+cs.ucsd.edu, University of California, San Diego, La Jolla, California, USA; Pradeep Sen,
+psen@ece.ucsb.edu, University of California, Santa Barbara, Santa Barbara, California,
+USA; Ling-Qi Yan, lingqi@cs.ucsb.edu, University of California, Santa Barbara, Santa
+Barbara, California, USA.
+0.7
+0.6
+0.5
+0.4
+0.3
+0.2
+0.1
+0.0
+1.2
+x=0.1,
+x=0.3,
+x=0.6,
+x=0.8,
+1
+y=0.7
+y=0.5
+y=0.4
+y=0.2
+2
+3
+Convolution kernel
+4
+(a)
+×10 2
+x=0.1,
+x=0.3,
+x=0.6,
+x=0.8,
+1.0
+0.8
+RMSE
+arXiv:2409.03761v1 [cs.GR] 19 Aug 2024
+YANG ZHOU, University of California, Santa Barbara, USA
+TAO HUANG, University of California, Santa Barbara, USA
+RAVI RAMAMOORTHI, University of California, San Diego, USA
+PRADEEP SEN, University of California, Santa Barbara, USA
+LING-QI YAN, University of California, Santa Barbara, USA
+y=0.7
+y=0.5
+y=0.4
+y=0.2
+0.6
+0.4
+0.2
+0.0
+0.0
+0.2
+0.4
+0.6
+0.8
+Convolution kernel
+1.0
+(b)
+Fig. 1. (a) RMSE of our SGGX-SG convolution fit with varying 𝜅. Note that
+we only consider a small range of 𝜅 because we only use SG to represent
+the clamped dot product term. (b) RMSE of our SGGX-GGX convolution fit
+with varying 𝛼.
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+2 •
+Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan
+1.2
+Aggregated Microfacet Distribution
+In §??, we use a beta distribution to represent the roughness distribution 𝑝 A (𝛼) = B(𝛼; 𝑎, 𝑏). Let 𝜇 and 𝜎 2 be the mean and the variance,
+the shape parameters of a beta distribution can be estimated as
+𝑎 = −𝜇 (𝜎 2 + 𝜇 2 − 𝜇)/𝜎 2,
+𝑏 = (𝜎 2 + 𝜇 2 − 𝜇)(𝜇 − 1)/𝜎 2 .
+(2)
+Correction for Conditioned Angular Domain
+We validate the approximation made in Eq. ?? in a set of configurations including different shapes of the SGGX and the angular
+domain X . Fig 5 to 8 visualizes our approximation and compare it
+to the ground-truth. Our approximation qualitatively matches the
+geometric characteristics of the original distribution and the conditioned domain, and in general achieves reasonable accuracy. The
+source of error comes from the constant contribution assumption
+in the shape term in Eq. ??. This results in under- or overestimates
+in some cases. For example, our approximation produces slightly
+darker results in Fig 6, row 2 and 3, but slightly brighter results in
+row 4. In Fig 8, row 5 and 6, our lobe shapes are slightly stretched
+compared to references.
+2 TRUNCATED ELLIPSOID PRIMITIVE PROJECTED
+AREA
+We provide an efficient Monte Carlo estimator to calculate the projected area of the intersection of a cube and an ellipsoid. We first
+uniformly sample points on the visible ellipsoid [Heitz et al. 2015].
+Then, we cast a line from each point along 𝜔 to test if it intersects
+the cube. The ratio of intersection times the full ellipsoid projected
+area provides an estimator to |𝐵|𝜔 . Algorithm 1 provides the pseudocode. In practice, we optimize the implementation by using a
+fixed sample budget of 𝑁 = 16 and by early-exiting if the ellipsoid
+is fully contained by the cube or vice versa.
+3 VISIBILITY COMPRESSION DETAILS
+As described in §??, we employ Clustered Principal Component
+Analysis (CPCA) to compress the aggregated visibility (both AIV
+and ABV). The method is similar to that of Sloan et al. [2003] and Liu
+et al. [2004], but we describe some of its details for completeness.
+Given a set of input visibility data, we first partition the angular
+domain: This is both to reduce the problem size and improve angular
+locality. Since we parameterize by the equal-area mapping [Clarberg
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+1: function ProjectedArea(𝐵, 𝜔)
+𝑀 ← the ellipsoid matrix, 𝑐 ← the ellipsoid center
+𝑄 ← the cube
+4:
+Compute an orthonormal basis Ω = (𝜔𝑥 , 𝜔 𝑦 , 𝜔) from 𝜔
+5:
+𝑀𝜔−1 ← Ω𝑇 𝑀 −1 Ω
+−1 ← the upper left 2x2 block of 𝑀 −1
+6:
+𝑀𝜔𝑥
+𝑦
+𝜔
+7:
+Compute the Cholesky decomposition of 𝑀𝜔−1 : 𝑀𝜔−1 = 𝐿𝐿𝑇
+8:
+for 𝑖 = 1 to 𝑁 do
+Sample a point on unit√︁disk (𝑥, 𝑦) and lift it to the unit
+9:
+upper hemisphere: 𝑝 ← (𝑥, 𝑦, 1 − 𝑥 2 − 𝑦 2 )
+10:
+Warp 𝑝 to the visible ellipsoid surface: 𝑝 ← 𝐿𝑝
+11:
+Transform 𝑝 back to world space: 𝑝 ← Ω𝑝 + 𝑐
+12:
+Cast a line 𝑙 that passes 𝑝 in direction 𝜔
+13:
+if 𝑙 intersects 𝑄 then
+14:
+𝑚 ←𝑚+1
+15:
+end if
+16:
+end for
+√︃
+−1 )
+17:
+return 𝑚
+·
+𝜋
+det(𝑀𝜔𝑥
+𝑦
+𝑁
+18: end function
+2:
+3:
+We validate the effectiveness of this approach by estimating 𝑝 A (𝛼)
+from a set of roughness maps used for actual assets for the main article. Fig 4 shows the roughness maps, the ground-truth histograms
+and our estimated beta distributions. Our fits are reasonably accurate and adapt to the different modes of real data. It is clear that a
+Gaussian distribution would have exceeded the valid [0, 1] range
+of 𝛼 (e.g. map 1, 3, and 4). A truncated Gaussian can be restricted
+within the valid range and may produce similar quality, but the
+fitting process is more tedious. We then validate the effectiveness of
+Eq. ?? by comparing our 2-lobe fit to the ground-truth aggregated
+microfacet distributions as well as a single-lobe fit with simple averaged roughness. Our fits are overall more accurate and guaranteed
+to be never worse than the simple fits.
+1.3
+Algorithm 1 Computing the projected area along 𝜔 of a truncated
+ellipsoid primitive 𝐵.
+2008], we simply partition the entire domain into 4 × 4 angular tiles.
+CPCA is applied individually to each group of tiles that cover the
+same subset of the domain. Note that many tiles are completely
+visible or occluded and can be culled away early.
+Let 𝐶 be the visibility matrix of a cluster of tiles where each
+column is one tile flattened to 1D and subtracted by the cluster
+mean. The standard principal component analysis (PCA) involves
+computing the (reduced) singular value decomposition (SVD) of 𝐶:
+𝐶 = 𝑈 Σ𝑉 T .
+(3)
+Next, we take the top 𝑘 left-singular vectors from the 𝑘 leftmost
+columns of 𝑈 as the representative tiles (instead of the more common right-singular vectors from columns of 𝑉 ). For efficiency, we
+follow Sloan et al. [2003] and compute the eigendecomposition of
+either 𝐶𝐶T or 𝐶T𝐶, whichever is smaller. Both produce eigenvalues
+equal to Σ2 . The eigenvectors of 𝐶𝐶T is 𝑈 ; The eigenvectors of 𝐶T𝐶
+is the right-singular vectors 𝑉 from which 𝑈 can be computed via
+𝑈 = 𝐶𝑉 Σ −1 . When possible, we only solve for the top eigenpairs
+by the Lanczos algorithm [Golub and Van Loan 2013; Qiu 2016].
+Finally, each representative tile goes through wavelet compression with non-standard 2D Haar wavelet. During rendering, it is
+unnecessary to decompress the entire tile. The wavelet coefficients
+can be arranged as an implicit sparse quadtree that supports random
+access [Lalonde 1997]. To evaluate visibility of a given direction,
+we can traverse a path down the tree, following a child if its basis
+supports the direction being evaluated.
+REFERENCES
+Petrik Clarberg. 2008. Fast Equal-Area Mapping of the (Hemi)Sphere using SIMD. J.
+Graph. Tools 13, 3 (2008), 53–68. https://doi.org/10.1080/2151237X.2008.10129263
+Gene H Golub and Charles F Van Loan. 2013. Matrix computations. JHU press.
+Eric Heitz, Jonathan Dupuy, Cyril Crassin, and Carsten Dachsbacher. 2015. The SGGX
+microflake distribution. ACM Trans. Graph. 34, 4 (2015), 48:1–48:11. https://doi.org/
+10.1145/2766988
+Efficient Scene Appearance Aggregation for Level-of-Detail Rendering (Supplemental Document)
+0.0
+Original
+1.0
+Kernel
+Conv. Ours
+Conv. Ref.
+Original
+Kernel
+Conv. Ours
+𝛼𝑥 = 0.1, 𝛼 𝑦 = 0.7, 𝜅 = 1.0
+𝛼𝑥 = 0.1, 𝛼 𝑦 = 0.7, 𝜅 = 2.0
+𝛼𝑥 = 0.1, 𝛼 𝑦 = 0.7, 𝜅 = 3.0
+𝛼𝑥 = 0.1, 𝛼 𝑦 = 0.7, 𝜅 = 4.0
+𝛼𝑥 = 0.3, 𝛼 𝑦 = 0.5, 𝜅 = 1.0
+𝛼𝑥 = 0.3, 𝛼 𝑦 = 0.5, 𝜅 = 2.0
+𝛼𝑥 = 0.3, 𝛼 𝑦 = 0.5, 𝜅 = 3.0
+𝛼𝑥 = 0.3, 𝛼 𝑦 = 0.5, 𝜅 = 4.0
+𝛼𝑥 = 0.6, 𝛼 𝑦 = 0.4, 𝜅 = 1.0
+𝛼𝑥 = 0.6, 𝛼 𝑦 = 0.4, 𝜅 = 2.0
+𝛼𝑥 = 0.6, 𝛼 𝑦 = 0.4, 𝜅 = 3.0
+𝛼𝑥 = 0.6, 𝛼 𝑦 = 0.4, 𝜅 = 4.0
+𝛼𝑥 = 0.8, 𝛼 𝑦 = 0.2, 𝜅 = 1.0
+𝛼𝑥 = 0.8, 𝛼 𝑦 = 0.2, 𝜅 = 2.0
+𝛼𝑥 = 0.8, 𝛼 𝑦 = 0.2, 𝜅 = 3.0
+𝛼𝑥 = 0.8, 𝛼 𝑦 = 0.2, 𝜅 = 4.0
+• 3
+Conv. Ref.
+Fig. 2. Convolving an SGGX with an SG kernel. Our fits closely matches the references in different configurations. Note that 𝜅 is small because we only use
+SG to represent the clamped dot product term.
+Paul Lalonde. 1997. Representations and uses of light distribution functions. Ph. D.
+Dissertation. University of British Columbia.
+Xinguo Liu, Peter-Pike J. Sloan, Heung-Yeung Shum, and John Snyder. 2004. AllFrequency Precomputed Radiance Transfer for Glossy Objects. In Proceedings of the
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+4
+•
+0.0
+Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan
+Original
+1.0
+Kernel
+Conv. Ours
+Conv. Ref.
+Original
+Kernel
+Conv. Ours
+𝛼𝑥 = 0.1, 𝛼 𝑦 = 0.7, 𝛼 = 0.1
+𝛼𝑥 = 0.1, 𝛼 𝑦 = 0.7, 𝛼 = 0.2
+𝛼𝑥 = 0.1, 𝛼 𝑦 = 0.7, 𝛼 = 0.4
+𝛼𝑥 = 0.1, 𝛼 𝑦 = 0.7, 𝛼 = 0.6
+𝛼𝑥 = 0.3, 𝛼 𝑦 = 0.5, 𝛼 = 0.1
+𝛼𝑥 = 0.3, 𝛼 𝑦 = 0.5, 𝛼 = 0.2
+𝛼𝑥 = 0.3, 𝛼 𝑦 = 0.5, 𝛼 = 0.4
+𝛼𝑥 = 0.3, 𝛼 𝑦 = 0.5, 𝛼 = 0.6
+𝛼𝑥 = 0.6, 𝛼 𝑦 = 0.4, 𝛼 = 0.1
+𝛼𝑥 = 0.6, 𝛼 𝑦 = 0.4, 𝛼 = 0.2
+𝛼𝑥 = 0.6, 𝛼 𝑦 = 0.4, 𝛼 = 0.4
+𝛼𝑥 = 0.6, 𝛼 𝑦 = 0.4, 𝛼 = 0.6
+𝛼𝑥 = 0.8, 𝛼 𝑦 = 0.2, 𝛼 = 0.1
+𝛼𝑥 = 0.8, 𝛼 𝑦 = 0.2, 𝛼 = 0.2
+𝛼𝑥 = 0.8, 𝛼 𝑦 = 0.2, 𝛼 = 0.4
+𝛼𝑥 = 0.8, 𝛼 𝑦 = 0.2, 𝛼 = 0.6
+Conv. Ref.
+Fig. 3. Convolving an SGGX with a GGX kernel. Our fits closely matches the references in different configurations.
+15th Eurographics Workshop on Rendering Techniques, Norköping, Sweden, June 21-23,
+2004, Alexander Keller and Henrik Wann Jensen (Eds.). Eurographics Association,
+337–344. https://doi.org/10.2312/EGWR/EGSR04/337-344
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+Yixuan Qiu. 2016. Spectra: C++ library for large scale eigenvalue problems. https:
+//spectralib.org/ (Date accessed: 07.08.2024).
+Peter-Pike Sloan, Jesse Hall, John Hart, and John Snyder. 2003. Clustered Principal
+Components for Precomputed Radiance Transfer. ACM Trans. Graph. 22, 3 (jul 2003),
+Efficient Scene Appearance Aggregation for Level-of-Detail Rendering (Supplemental Document)
+Map 1
+Ref.
+Beta fit
+𝑝 (𝛼)
+7.0
+6.0
+5.0
+4.0
+3.0
+2.0
+1.0
+0.0
+0.0
+Map 2
+0.2
+0.4
+0.6
+4.0
+0.8
+3.5
+3.0
+2.5
+2.0
+1.5
+1.0
+0.5
+0.0
+1.0 0.0
+𝐷 (𝜔𝑚 )
+3.0
+0.4
+0.6
+0.8
+1.0
+0.4
+0.6
+0.8
+m)
+1.0
+0.0
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+0.0
+0.0
+1.0
+0.8
+0.7
+0.6
+0.5
+0.4
+0.3
+0.2
+0.0
+Ref.
+Ours
+Simple
+1.5
+1.0
+0.5
+0.2
+0.4
+0.6
+= cos 1 (n
+0.8
+m)
+1.0
+0.0
+0.0
+4.0
+2.0
+2.0
+2.0
+Ref.
+Ours
+Simple
+0.5
+= cos 1 (n
+0.0
+0.0
+6.0
+4.0
+2.0
+0.2
+0.4
+0.6
+= cos 1 (n
+0.8
+m)
+Ref.
+Beta fit
+8.0
+6.0
+4.0
+0.2
+Map 5
+Ref.
+Beta fit
+8.0
+6.0
+1.0
+0.2
+10.0
+Ref.
+Beta fit
+10.0
+1.5
+1.0
+Map 4
+8.0
+2.0
+2.0
+0.0
+0.0
+12.0
+Ref.
+Beta fit
+2.5
+Ref.
+Ours
+Simple
+Map 3
+• 5
+0.2
+0.2
+0.4
+0.4
+0.6
+0.6
+= cos 1 (n
+0.0
+0.0
+0.8
+1.0
+Ref.
+Ours
+Simple
+3.0
+2.5
+2.0
+1.5
+1.0
+0.5
+0.0
+1.0
+0.0
+0.8
+m)
+0.2
+0.4
+0.6
+0.8
+1.0
+Ref.
+Ours
+Simple
+0.2
+0.4
+0.6
+= cos 1 (n
+0.8
+m)
+1.0
+Fig. 4. Fitting the distributions of a set of roughness maps as beta distributions and the aggregated microfacet distributions by our 2-lobe weighted sum.
+382–391. https://doi.org/10.1145/882262.882281
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+6 •
+Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan
+0.0
+Kernel
+0.5
+Clamped Orig.
+Ref.
+Ours
+Fig. 5. Convolving an SGGX with a GGX over an restricted domain X . The kernel has roughness 𝛼 = 0.2 and the original SGGX has roughness 𝛼𝑥 = 0.3, 𝛼 𝑦 = 0.3.
+The contribution of the original distribution is clamped to black by X .
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+Efficient Scene Appearance Aggregation for Level-of-Detail Rendering (Supplemental Document)
+0.0
+Kernel
+0.5
+Clamped Orig.
+Ref.
+• 7
+Ours
+Fig. 6. Convolving an SGGX with a GGX over an restricted domain X . The kernel has roughness 𝛼 = 0.4 and the original SGGX has roughness 𝛼𝑥 = 0.3, 𝛼 𝑦 = 0.3.
+The contribution of the original distribution is clamped to black by X .
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+8 •
+Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan
+0.0
+Kernel
+0.5
+Clamped Orig.
+Ref.
+Ours
+Fig. 7. Convolving an SGGX with a GGX over an restricted domain X . The kernel has roughness 𝛼 = 0.2 and the original SGGX has roughness 𝛼𝑥 = 0.8, 𝛼 𝑦 = 0.2.
+The contribution of the original distribution is clamped to black by X .
+, Vol. 1, No. 1, Article . Publication date: October 2024.
+Efficient Scene Appearance Aggregation for Level-of-Detail Rendering (Supplemental Document)
+0.0
+Kernel
+0.5
+Clamped Orig.
+Ref.
+• 9
+Ours
+Fig. 8. Convolving an SGGX with a GGX over an restricted domain X . The kernel has roughness 𝛼 = 0.4 and the original SGGX has roughness 𝛼𝑥 = 0.8, 𝛼 𝑦 = 0.2.
+The contribution of the original distribution is clamped to black by X .
+, Vol. 1, No. 1, Article . Publication date: October 2024.

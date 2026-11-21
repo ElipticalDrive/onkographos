@@ -1,0 +1,225 @@
+# Density Grid Sampler (JNeRF)
+
+## Overview
+The Density Grid Sampler is a ray-marching acceleration technique used in neural radiance fields (NeRF) that employs a 3D occupancy grid to skip empty space and a non-uniform sampling strategy to concentrate samples in high-density regions [S1, unofficial]. It distinguishes itself from uniform ray marching by using cascaded density grids to handle varying scene scales and combining uniform background samples with non-uniform foreground samples to balance rendering quality and computational cost [S1, unofficial].
+
+## How it works
+The method operates in two phases: grid maintenance (updating the density field) and ray sampling (using the field to guide ray marching).
+
+### Inputs and Outputs
+**Inputs:**
+- `rays_o`: Origin coordinates of rays, shape $(N, 3)$.
+- `rays_d`: Direction vectors of rays, shape $(N, 3)$.
+- `transforms`: Camera-to-world transformation matrices.
+- `img_ids`: Image identifiers for metadata.
+- `model`: The neural network containing the density function `model.density`.
+- `density_grid`: The current state of the density grid.
+
+**Outputs:**
+- `coords`: Sampled 3D positions along rays, shape $(N_{total}, 3)$.
+- `rays_index`: Mapping from samples to ray indices.
+- `rays_numsteps`: Number of samples per ray.
+- `rays_numsteps_counter`: Cumulative count of samples.
+- `rgb`: Rendered color values.
+- `alpha`: Rendered opacity values.
+
+### Data Structures
+The sampler relies on two primary grid structures [S1, unofficial]:
+
+1.  **Density Grid (`density_grid`)**:
+    -   **Type**: 1D array of `float32`.
+    -   **Size**: $NERF\_CASCADES \times NERF\_GRIDSIZE^3$.
+    -   **Content**: Stores the accumulated density values ($\sigma$) for each voxel.
+    -   **Update**: Updated via exponential moving average (EMA) with decay `density_grid_decay`.
+
+2.  **Density Grid Bitfield (`density_grid_bitfield`)**:
+    -   **Type**: 1D array of `uint8`.
+    -   **Size**: $(NERF\_GRIDSIZE^3 \times NERF\_CASCADES) / 8$.
+    -   **Content**: Stores occupancy bits. A bit is set if the corresponding voxel in the density grid has a non-zero density value, allowing for fast traversal of empty space.
+
+### Parameters
+-   `NERF_CASCADES`: Number of cascaded grids. Default is 5. Calculated as $\lceil \log_2(aabb\_scale) \rceil + 1$ if $aabb\_scale > 2^{NERF\_CASCADES-1}$ [S1, unofficial].
+-   `NERF_GRIDSIZE`: Resolution of each density grid. Fixed at 128 [S1, unofficial].
+-   `MAX_STEP`: Maximum number of steps per ray. Fixed at 1024 [S1, unofficial].
+-   `NERF_RENDERING_NEAR_DISTANCE`: Minimum distance for rendering. Fixed at 0.05 [S1, unofficial].
+-   `NERF_MIN_OPTICAL_THICKNESS`: Minimum optical thickness threshold for non-uniform sampling. Fixed at 0.01 [S1, unofficial].
+-   `density_grid_decay`: EMA decay factor for density grid updates. Fixed at 0.95 [S1, unofficial].
+-   `update_den_freq`: Frequency (in training steps) to update the density grid. Default is 16 [S1, unofficial].
+-   `update_block_size`: Batch size for processing density grid samples during MLP evaluation. Default is 5,000,000 [S1, unofficial].
+-   `n_uniform_density_grid_samples`: Number of uniform samples to generate.
+-   `n_nonuniform_density_grid_samples`: Number of non-uniform samples to generate.
+-   `ema_step`: Current EMA step counter.
+-   `max_cascade`: Maximum cascade index.
+
+### Algorithm Steps
+
+#### 1. Density Grid Initialization
+If the training step is 0 and the dataset does not contain pre-computed ray data, initialize the density grid by calling `mark_untrained_density_grid` with focal lengths and transforms. Otherwise, zero-initialize the `density_grid` [S1, unofficial].
+
+#### 2. Sample Generation
+Generate two sets of candidate samples to populate the density grid for the next update:
+
+1.  **Uniform Samples**: Call `generate_grid_grid_samples_nerf_nonuniform` with `density_grid`, `n_uniform_density_grid_samples`, `ema_step`, `max_cascade`, and a threshold of -0.01. This returns positions and indices.
+2.  **Non-Uniform Samples**: Call `generate_grid_samples_nerf_nonuniform` with `density_grid`, `n_nonuniform_density_grid_samples`, `ema_step`, `max_cascade`, and `NERF_MIN_OPTICAL_THICKNESS`. This returns positions and indices.
+
+Concatenate the uniform and non-uniform positions into `_density_grid_positions` and indices into `_density_grid_indices`. Reshape `_density_grid_positions` to $(-1, 3)$ [S1, unofficial].
+
+#### 3. MLP Evaluation
+Iterate over `_density_grid_positions` in blocks of size `update_block_size`. For each block, call `model.density` to compute the density values. Concatenate the results into `_mlp_out` [S1, unofficial].
+
+#### 4. Splat to Grid
+Update the temporary density grid `density_grid_tmp` by splatting the MLP outputs to the corresponding voxel indices. Use `splat_grid_samples_nerf_max_nearest_neighbor` with `_density_grid_indices`, `_mlp_out`, `density_grid_tmp`, and the total sample count. This operation performs a max-neighbor splat to update the grid values [S1, unofficial].
+
+#### 5. Ray Sampling
+Execute the ray sampler `rays_sampler.execute` using `rays_o`, `rays_d`, `density_grid_bitfield`, `metadata`, `img_ids`, and `transforms`. This function uses the bitfield to skip empty voxels and returns:
+-   `coords`: Sample coordinates.
+-   `rays_index`: Ray indices for each sample.
+-   `rays_numsteps`: Number of steps per ray.
+-   `rays_numsteps_counter`: Cumulative step counter [S1, unofficial].
+
+#### 6. Coordinate Compaction (Optional)
+If using FP16 precision or specific compaction requirements, call `model(coords_pos, coords_dir)` to get initial outputs, then call `compacted_coords` to produce `coords_compacted`, `rays_numsteps_compacted`, and `compacted_numstep_counter`. This step optimizes memory layout for subsequent processing [S1, unofficial].
+
+#### 7. RGB Calculation
+Call `calc_rgb` with `network_outputs`, `coords`, `rays_numsteps`, `density_grid_mean`, and optionally `rays_numsteps_compacted` and `background_color`. This function performs volume rendering integration to produce the final `rgb` and `alpha` values [S1, unofficial].
+
+### Dynamic Step Size Calculation
+For ray marching within the grid, the step size is dynamically calculated based on the cone angle to maintain consistent visual quality across different distances [S1, unofficial].
+
+Constants:
+-   $SQRT3 = 1.73205080757$
+-   $STEPSIZE = \frac{SQRT3}{NERF\_STEPS}$
+-   $MIN\_CONE\_STEPSIZE = STEPSIZE$
+-   $MAX\_CONE\_STEPSIZE = STEPSIZE \times 2^{NERF\_CASCADES - 1} \times \frac{NERF\_STEPS}{NERF\_GRIDSIZE}$
+
+Function `calc_dt(t, cone_angle)`:
+$$
+dt = \text{clamp}(t \times \text{cone\_angle}, MIN\_CONE\_STEPSIZE, MAX\_CONE\_STEPSIZE)
+$$
+where $\text{clamp}(val, lower, upper)$ returns $lower$ if $val < lower$, $upper$ if $val > upper$, and $val$ otherwise [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def density_grid_sampler_init(training_step, dataset_has_ray_data, focal_lengths, transforms):
+    """Initialize the density grid."""
+    if training_step == 0 and not dataset_has_ray_data:
+        density_grid = mark_untrained_density_grid(focal_lengths, transforms)
+    else:
+        density_grid = zeros(NERF_CASCADES * NERF_GRIDSIZE**3, dtype=float32)
+    return density_grid
+
+def generate_samples(density_grid, n_uniform, n_nonuniform, ema_step, max_cascade):
+    """Generate uniform and non-uniform samples."""
+    # Uniform samples with threshold -0.01
+    pos_uniform, idx_uniform = generate_grid_grid_samples_nerf_nonuniform(
+        density_grid, n_uniform, ema_step, max_cascade, -0.01
+    )
+    
+    # Non-uniform samples with NERF_MIN_OPTICAL_THICKNESS
+    pos_nonuniform, idx_nonuniform = generate_grid_samples_nerf_nonuniform(
+        density_grid, n_nonuniform, ema_step, max_cascade, NERF_MIN_OPTICAL_THICKNESS
+    )
+    
+    # Concatenate
+    positions = concatenate([pos_uniform, pos_nonuniform], axis=0)
+    indices = concatenate([idx_uniform, idx_nonuniform], axis=0)
+    
+    # Reshape positions to (-1, 3)
+    positions = reshape(positions, (-1, 3))
+    return positions, indices
+
+def update_density_grid(positions, indices, model, density_grid_tmp, update_block_size):
+    """Evaluate MLP and splat results to the grid."""
+    total_samples = positions.shape[0]
+    mlp_out = []
+    
+    # Iterate in blocks
+    for i in range(0, total_samples, update_block_size):
+        block = positions[i : i + update_block_size]
+        # Call model.density on block
+        block_out = model.density(block)
+        mlp_out.append(block_out)
+    
+    mlp_out = concatenate(mlp_out, axis=0)
+    
+    # Splat to grid using max nearest neighbor
+    splat_grid_samples_nerf_max_nearest_neighbor(
+        indices, mlp_out, density_grid_tmp, total_samples
+    )
+    return density_grid_tmp
+
+def ray_march(rays_o, rays_d, density_grid_bitfield, metadata, img_ids, transforms):
+    """Sample rays using the density grid bitfield."""
+    coords, rays_index, rays_numsteps, rays_numsteps_counter = rays_sampler.execute(
+        rays_o, rays_d, density_grid_bitfield, metadata, img_ids, transforms
+    )
+    return coords, rays_index, rays_numsteps, rays_numsteps_counter
+
+def calc_rgb_dynamic_step(coords, rays_numsteps, density_grid_mean, background_color=None):
+    """Calculate RGB and Alpha with dynamic step size."""
+    # Implementation of calc_rgb using dynamic step size logic
+    # dt = clamp(t * cone_angle, MIN_CONE_STEPSIZE, MAX_CONE_STEPSIZE)
+    # ... volume rendering integration ...
+    rgb, alpha = calc_rgb(coords, rays_numsteps, density_grid_mean, background_color)
+    return rgb, alpha
+
+def run_density_grid_sampler(rays_o, rays_d, model, density_grid, training_step, dataset_has_ray_data, 
+                             focal_lengths, transforms, img_ids, metadata, ema_step, max_cascade,
+                             n_uniform, n_nonuniform, update_block_size):
+    """Main execution flow."""
+    
+    # 1. Initialize if needed
+    if training_step == 0 and not dataset_has_ray_data:
+        density_grid = mark_untrained_density_grid(focal_lengths, transforms)
+    else:
+        density_grid = zeros_like(density_grid)
+        
+    # 2. Generate samples
+    positions, indices = generate_samples(density_grid, n_uniform, n_nonuniform, ema_step, max_cascade)
+    
+    # 3. Update grid (if in training mode)
+    density_grid_tmp = zeros_like(density_grid)
+    update_density_grid(positions, indices, model, density_grid_tmp, update_block_size)
+    
+    # Update density_grid with EMA if required by update_den_freq
+    # density_grid = density_grid * density_grid_decay + density_grid_tmp * (1 - density_grid_decay)
+    
+    # 4. Ray Sampling
+    coords, rays_index, rays_numsteps, rays_numsteps_counter = ray_march(
+        rays_o, rays_d, density_grid, metadata, img_ids, transforms
+    )
+    
+    # 5. Compaction (if FP16 or required)
+    # coords_compacted, rays_numsteps_compacted, compacted_numstep_counter = compacted_coords(coords, ...)
+    
+    # 6. RGB Calculation
+    rgb, alpha = calc_rgb_dynamic_step(coords, rays_numsteps, density_grid.mean())
+    
+    return rgb, alpha, coords, rays_numsteps
+```
+
+### Edge Cases and Pitfalls
+-   **Precision**: FP16 precision may require coordinate compaction to avoid memory overhead and precision loss during large batch processing [S1, unofficial].
+-   **Empty Space**: The bitfield must be correctly maintained; if `density_grid` is not updated frequently enough, the bitfield may lag, causing rays to sample empty space unnecessarily or miss dense regions [S1, unofficial].
+-   **Cascades**: If the scene scale (`aabb_scale`) exceeds $2^{NERF\_CASCADES-1}$, the number of cascades must be increased to maintain resolution [S1, unofficial].
+-   **Optical Thickness**: The `NERF_MIN_OPTICAL_THICKNESS` threshold determines the granularity of non-uniform sampling. A value too low may result in excessive samples; too high may miss fine details [S1, unofficial].
+
+## Operating characteristics
+-   **Time Complexity**: The grid update phase is $O(N_{samples} \times D)$ where $N_{samples}$ is the number of generated samples and $D$ is the MLP depth. Ray sampling is $O(N_{rays} \times N_{steps})$ but reduced by skipping empty voxels via the bitfield.
+-   **Memory Complexity**: $O(NERF\_CASCADES \times NERF\_GRIDSIZE^3)$ for the density grid and bitfield. With default values (5 cascades, 128 resolution), this is approximately $5 \times 128^3 \times 4$ bytes $\approx 5$ MB for the density grid and $5 \times 128^3 / 8$ bytes $\approx 1$ MB for the bitfield.
+-   **Performance**: Accelerates rendering by skipping empty space, particularly effective in large scenes with sparse geometry. Non-uniform sampling improves quality in dense regions.
+-   **Strengths**: Efficient handling of large scenes, adaptive resolution via cascades, reduced memory footprint compared to dense voxel grids.
+-   **Limitations**: Requires frequent grid updates to stay accurate, may introduce artifacts if the grid is stale, limited by the fixed grid resolution.
+-   **When to Use**: Large-scale NeRF training/rendering where empty space dominates.
+-   **When Not to Use**: Small scenes with dense geometry where uniform sampling might be simpler and equally effective.
+
+## Background
+The Density Grid Sampler is part of the JNeRF implementation, an unofficial Jittor-based NeRF framework [S1, unofficial]. It builds upon the concept of occupancy grids for ray marching acceleration, originally popularized in works like "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" and subsequent optimizations using hierarchical grids or hash tables. The specific implementation with cascaded grids and non-uniform sampling is detailed in the JNeRF repository [S1, unofficial].
+
+## Sources
+[S1] Jittor/JNeRF, https://github.com/Jittor/JNeRF, fetched 2026-10-27 (unofficial)

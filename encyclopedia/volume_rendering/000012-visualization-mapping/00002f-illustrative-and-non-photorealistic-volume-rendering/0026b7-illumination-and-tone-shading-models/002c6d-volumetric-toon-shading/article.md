@@ -1,0 +1,76 @@
+# Volumetric Toon Shading
+
+Also called: Fragment Shader Toon-Shading for Volumes, Interactive volume cartoon shading, Toon-Shading for Volumes, Toon-shading via 3D normal map
+
+## Overview
+Volumetric Toon Shading is a non-photorealistic rendering technique that simulates cel shading for volumetric datasets without requiring explicit surface vertices or mesh extraction [S1, unofficial]. It differs from surface-based NPR methods by operating directly on fragment-level data using a 3D normal map, allowing for interactive rendering of stylized volumes where features are defined by local gradient properties rather than discrete geometry [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar field (volume data), a parallel light direction vector $L$, and two user-specified tone registers [S1, unofficial].
+*   **Output:** A 2D image with discrete tonal shading [S1, unofficial].
+
+**Data Structures:**
+1.  **3D Normal Map:** A 3D texture storing gray-scale gradients of the volume data in its RGB components [S1, unofficial].
+2.  **Toon-Shading Texture:** A 1D texture used for nearest-neighbor interpolation to create discontinuities between illuminated and shadowed points [S1, unofficial].
+
+**Steps:**
+1.  Render a three-dimensional normal map storing gray-scale gradients in the RGB components [S1, unofficial].
+2.  Issue the parallel light vector $L$ as a constant color in the texture combiner stage [S1, unofficial].
+3.  For each fragment, look up the normal vector $N$ from the 3D normal map and compute the dot product $D = L \cdot N$ using per-fragment arithmetic [S1, unofficial].
+4.  Add an optional offset to $D$ to enable arbitrary mapping of shades to tones [S1, unofficial].
+5.  Use the resulting dot product value to trigger a multiplexer in the texture combiner stage [S1, unofficial].
+6.  If the value is greater than $0.5$, the multiplexer outputs the first register; otherwise, it outputs the second register [S1, unofficial].
+7.  Write user-specified tones to the two registers to define the final rendered shades [S1, unofficial].
+
+**Parameters:**
+*   **Threshold:** The multiplexer threshold is $0.5$, separating illuminated points from shadow points [S1, unofficial].
+*   **Offset:** An additive offset applied to the dot product before the threshold comparison, allowing arbitrary mapping of shades to tones [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dot(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def sample_nearest(tex, coord):
+    # Standard nearest-neighbor lookup: clamp and index
+    idx = max(0, min(len(tex) - 1, int(coord * len(tex))))
+    return tex[idx]
+
+def volumetric_toon_shading(fragment_pos, normal_map_3d, light_dir, toon_lut_1d, 
+                           tone_1, tone_2, threshold=0.5, offset=0.0):
+    # 1. Look up normal from 3D normal map (gray-scale gradients in RGB)
+    N = normal_map_3d.sample(fragment_pos).rgb
+    
+    # 2. Compute dot product with light direction (issued as constant color)
+    D = dot(N, light_dir)
+    
+    # 3. Apply offset
+    D_adjusted = D + offset
+    
+    # 4. Trigger multiplexer based on threshold
+    if D_adjusted > threshold:
+        selected_tone = tone_1
+    else:
+        selected_tone = tone_2
+        
+    # 5. Alternative software path: use dot product as 1D texture coordinate
+    # with nearest-neighbor interpolation to create discontinuity
+    # color = sample_nearest(toon_lut_1d, D_adjusted)
+    
+    return selected_tone
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Requires storage for the 3D normal map (same resolution as volume data) and the 1D toon-shading texture [S1, unofficial].
+*   **Strengths:** Interactive performance due to hardware-accelerated fragment shading and texture combiners; avoids the need for explicit surface vertices [S1, unofficial].
+*   **Limitations:** Not given in the sources.
+
+## Background
+The method was introduced in "Interactive volume illustration" [S1, unofficial]. It adapts polygonal toon-shading techniques to volumetric data by replacing vertex-based normal interpolation with per-fragment gradient lookup via a 3D normal map [S1, unofficial]. The approach integrates directly with direct volume rendering algorithms via 3D texture maps and can be combined with hatch-based rendering methods [S1, unofficial].
+
+## Sources
+[S1] Interactive volume illustration, https://openalex.org/W2147354080, fetched 2026-10-27 (unofficial)

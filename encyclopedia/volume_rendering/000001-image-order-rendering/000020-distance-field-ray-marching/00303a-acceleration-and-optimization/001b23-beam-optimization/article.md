@@ -1,0 +1,146 @@
+# Beam Optimization
+
+Also called: Ray Batching, Ray Grouping Optimization
+
+## Overview
+Beam optimization is a technique to improve the performance of primary rays in distance-field ray marching by grouping adjacent rays and marching them together in a single step [S1][S2, unofficial]. It reduces computations for rays far from geometry by treating a block of pixels as a single unit, splitting only when necessary [S2, unofficial]. It sets itself apart from sibling methods like [Performance Optimizations for SDF Ray Marching](1629-performance-optimizations-for-sdf-ray-marching.md) by focusing on spatial coherence of ray bundles rather than per-ray acceleration structures or early stopping logic [G].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A set of primary rays covering a pixel region (typically a beam).
+- Output: Hit distances or intersection points for the rays in the beam.
+
+**Data Structures:**
+- **Beam Group:** A rectangular block of pixels [G].
+  - Fields: `origins` (list of ray origins), `directions` (list of ray directions), `center_origin`, `center_direction`, `size` (width/height in pixels).
+  - The group is defined by its center pixel's ray for marching purposes [S2, unofficial].
+
+**Steps:**
+1. **Initialize Group:** Start with a beam of size $B \times B$ pixels (typically $8 \times 8$) [S1]. Calculate the center ray $(o_c, d_c)$ for the group [G].
+2. **March Center Ray:** Perform standard Sphere Tracing along the center ray $d_c$ from origin $o_c$ [S2, unofficial].
+3. **Check Collision Potential:** Let $d_{min}$ be the smallest distance to the scene geometry found during the march step. Let $R_{group}$ be the maximum distance from the center ray to any corner of the beam group at the current step position. If $d_{min} > R_{group}$, the entire group is safe from collision at this step [S2, unofficial].
+4. **Split Decision:** If $d_{min} \le R_{group}$, there is a potential collision for at least one ray in the group. Split the group into four sub-groups (quadrants) [S2, unofficial].
+5. **Recursive Marching:** Each new sub-group repeats steps 2-4 using its own center ray [S2, unofficial].
+6. **Termination:**
+   - If a group steps far enough into the scene to be discarded entirely, stop processing that group [S2, unofficial].
+   - If a group contains only one ray and it has hit an object, record the hit and stop [S2, unofficial].
+   - The closer the groups are to a target, the more likely it is for a higher amount of sub-groups to be created due to the decreased distance to the geometry, making less pixels fit inside the group [S2, unofficial].
+
+**Parameters:**
+- Beam size: $8 \times 8$ pixels is a common setting [S1].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Comparing $d_{min}$ with $R_{group}$ requires careful handling of floating-point precision, especially when rays are nearly parallel or the group is large [G].
+- **Degenerate Input:** If the scene has no geometry, the entire beam may be discarded early, which is efficient [G]. If geometry is dense, the beam may split frequently, approaching per-ray performance [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def beam_optimization(ray_origins, ray_directions, scene_eval, beam_size=8, max_steps=1000, epsilon=1e-4):
+    # Standard sphere tracing helper
+    def sphere_trace(origin, direction, max_steps, epsilon):
+        t = 0.0
+        for _ in range(max_steps):
+            d_min = scene_eval(origin + t * direction)
+            if d_min < epsilon:
+                return t
+            if d_min <= 0:
+                return t
+            t += d_min
+        return float('inf')
+
+    # Initialize beams from ray origins and directions
+    beams = []
+    n = len(ray_origins)
+    for i in range(0, n, beam_size * beam_size):
+        chunk_o = ray_origins[i:i+beam_size*beam_size]
+        chunk_d = ray_directions[i:i+beam_size*beam_size]
+        if len(chunk_o) < beam_size * beam_size:
+            break
+        center_idx = beam_size * beam_size // 2
+        beams.append({
+            'origins': chunk_o,
+            'directions': chunk_d,
+            'center_origin': chunk_o[center_idx],
+            'center_direction': chunk_d[center_idx],
+            'size': beam_size
+        })
+        
+    results = {}
+
+    while beams:
+        current_beam = beams.pop()
+        center_o = current_beam['center_origin']
+        center_d = current_beam['center_direction']
+        b_size = current_beam['size']
+        
+        # March center ray
+        hit_dist = sphere_trace(center_o, center_d, max_steps, epsilon)
+        
+        # Calculate max distance from center ray to any ray in beam at hit_dist
+        # Approximated using unit pixel spacing and small-angle assumption [G]
+        R_group = hit_dist * (b_size - 1) / 2.0 if hit_dist != float('inf') else float('inf')
+        
+        if hit_dist == float('inf') or hit_dist > R_group:
+            # No collision possible for any ray in this beam
+            for ray_id, _ in enumerate(current_beam['origins']):
+                results[ray_id] = hit_dist
+        else:
+            # Potential collision, split beam
+            if b_size == 1:
+                # Single ray hit
+                results[0] = hit_dist
+            else:
+                new_size = b_size // 2
+                half = new_size
+                for q in range(4):
+                    qy = (q // 2) * half
+                    qx = (q % 2) * half
+                    sub_origins = []
+                    sub_dirs = []
+                    for y in range(half):
+                        for x in range(half):
+                            idx = (qy + y) * b_size + (qx + x)
+                            if idx < len(current_beam['origins']):
+                                sub_origins.append(current_beam['origins'][idx])
+                                sub_dirs.append(current_beam['directions'][idx])
+                    if sub_origins:
+                        center_idx = len(sub_origins) // 2
+                        beams.append({
+                            'origins': sub_origins,
+                            'directions': sub_dirs,
+                            'center_origin': sub_origins[center_idx],
+                            'center_direction': sub_dirs[center_idx],
+                            'size': new_size
+                        })
+    return results
+```
+
+## Subtopics
+
+### Beam Optimization for Soft Shadows
+An extension of beam optimization to soft shadows by shooting a beam of rays from the view-sample position to the area light to find conservative furthest distances [S1].
+- **Definition:** Uses a beam of four rays per pixel from the view-sample position to the area light [S1].
+- **Steps:**
+  1. Shoot a beam of four rays per pixel from the view-sample position to the area light [S1].
+  2. Find the conservative furthest distance along these rays where no geometry is intersected [S1].
+  3. Shorten all shadow rays accordingly based on the conservative furthest distance [S1].
+  4. Trace the same beam rays in the reverse direction (from the light source) to find a conservative interval where geometry may be intersected [S1].
+- **Pitfall:** Pixels whose entire beams have no intersection with geometry require no additional shadow rays, which is an optimization opportunity [S1].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the scene density. In empty space, beams are discarded early, leading to near-constant time per beam [G]. In dense scenes, beams split frequently, approaching $O(N)$ where $N$ is the number of pixels [G].
+- **Memory Complexity:** Low, as it processes beams iteratively using a stack or queue [G]. The broader rendering system uses a DAG data structure, but beam optimization itself requires minimal auxiliary memory [S1].
+- **Measured Performance:** Improves performance of primary rays by reducing redundant intersection tests for rays far from geometry [S1][S2, unofficial].
+- **Strengths:** Reduces computation for rays in empty space; simple to implement with existing sphere tracing logic [S2, unofficial].
+- **Limitations:** May not provide significant benefits in highly complex scenes where beams split often; requires careful calculation of beam offsets [S2, unofficial].
+- **When to Use:** When primary rays cover large areas of empty space; when hardware supports efficient parallel processing of ray bundles [G].
+- **When Not to Use:** When the scene is extremely dense and beams rarely stay intact; when per-ray precision is critical and beam approximation introduces errors [G].
+
+## Background
+Beam optimization was described by Laine and Karras [S1]. It is used in high-resolution sparse voxel DAG rendering to improve performance [S1]. The technique leverages the spatial coherence of primary rays to reduce the number of intersection tests [S1][S2, unofficial].
+
+## Sources
+[S1] High resolution sparse voxel DAGs, https://www.researchgate.net/publication/262367808_High_resolution_sparse_voxel_DAGs, fetched 2026-10-27
+[S2] Sphere Tracing GPU An evaluation of the Sphere Tracing algorithm and a GPU designed to run it, https://odr.chalmers.se/items/37b0e53f-fc76-4b0e-96d8-8e864573ada9/full, fetched 2026-10-29 (unofficial)

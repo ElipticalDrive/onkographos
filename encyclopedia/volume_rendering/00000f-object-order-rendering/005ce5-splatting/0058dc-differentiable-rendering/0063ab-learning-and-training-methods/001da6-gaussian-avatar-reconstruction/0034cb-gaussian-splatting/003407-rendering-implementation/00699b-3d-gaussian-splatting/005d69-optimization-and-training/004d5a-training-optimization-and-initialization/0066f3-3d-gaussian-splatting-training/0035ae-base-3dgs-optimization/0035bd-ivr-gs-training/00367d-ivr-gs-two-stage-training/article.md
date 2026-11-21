@@ -1,0 +1,76 @@
+# iVR-GS Two-Stage Training
+
+Also called: Base 3DGS + Editable Gaussian Optimization, Two-Stage Training for 3DGS
+
+## Overview
+iVR-GS Two-Stage Training is a training strategy for Inverse Volume Rendering with Gaussian Splatting (iVR-GS) that decouples the reconstruction of static scene geometry from the optimization of editable primitives [S1]. It solves the problem of slow convergence and excessive memory usage when optimizing editable Gaussian primitives from scratch [S1]. By first establishing a base 3D Gaussian Splatting (3DGS) model, it accelerates optimization and reduces the number of required primitives compared to one-stage training, while maintaining similar reconstruction quality [S1].
+
+## How it works
+The method consists of two sequential optimization phases.
+
+**Inputs and Outputs:**
+*   **Input:** A set of multi-view images of the target scene.
+*   **Output:** A composed model consisting of a base 3DGS representation and a set of editable Gaussian primitives [S1].
+
+**Data Structures:**
+1.  **Base 3DGS Model:** Standard 3D Gaussian primitives defined by position, covariance, opacity, and spherical harmonics coefficients for view-dependent color [S1].
+2.  **Editable Gaussian Primitives:** Additional Gaussian primitives optimized to enable scene editing capabilities [S1].
+
+**Steps:**
+
+1.  **Base 3DGS Training:**
+    *   Initialize a standard 3DGS model.
+    *   Optimize the base 3DGS parameters to capture the basic scene geometry.
+    *   Run for 30,000 iterations [S1].
+    *   *Note:* This step establishes the foundational radiance field and geometry without the complexity of editability constraints [S1].
+
+2.  **Editable Gaussian Optimization:**
+    *   Initialize editable Gaussian primitives on top of the converged base 3DGS geometry [S1].
+    *   Optimize the parameters of these editable primitives to enable scene editing.
+    *   Run for 10,000 iterations [S1].
+    *   *Note:* This step fine-tunes the representation specifically for editability, leveraging the stable geometry from Stage I [S1].
+
+**Parameters:**
+*   Base 3DGS iterations: 30,000 [S1].
+*   Editable Gaussian iterations: 10,000 [S1].
+*   Total iterations: 40,000 [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Initialization:** The editable primitives must be initialized on the base 3DGS geometry. Initializing from scratch (one-stage) leads to slower convergence [S1].
+*   **Precision:** Standard 3DGS optimization precision applies to Stage I. Stage II focuses on the delta required for editability [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ivr_gs_two_stage_training(images):
+    # Stage I: Train base 3DGS
+    base_gaussians = initialize_3dgs(images)
+    for iteration in range(30000):
+        # Standard 3DGS optimization step
+        base_gaussians = optimize_3dgs_step(base_gaussians, images, iteration)
+    
+    # Stage II: Optimize editable primitives
+    editable_gaussians = initialize_editable_primitives(base_gaussians)
+    for iteration in range(10000):
+        # Optimization step for editability
+        editable_gaussians = optimize_editable_step(editable_gaussians, base_gaussians, images, iteration)
+        
+    return composed_model(base_gaussians, editable_gaussians)
+```
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** Two-stage training takes 40,000 iterations total (30,000 + 10,000) [S1]. One-stage training takes 40,000 iterations from scratch [S1]. However, two-stage training is over 2× faster in wall-clock time than one-stage training [S1].
+*   **Memory Complexity:** Two-stage training uses fewer primitives and results in smaller file sizes compared to one-stage training [S1]. For example, on the VolVis scene, two-stage training used 375,352 primitives (8.8 MB) versus 711,169 primitives (16.7 MB) for one-stage [S1].
+*   **Quality:** Both methods achieve similar reconstruction quality (PSNR and LPIPS) [S1].
+*   **Strengths:** Faster optimization, smaller model size, fewer primitives [S1].
+*   **Limitations:** Requires two distinct phases; initial base model must be sufficiently converged before Stage II [S1].
+
+## Background
+The method was introduced in the iVR-GS paper [S1]. It addresses the inefficiencies of optimizing editable Gaussian primitives directly from scratch, which was found to be slow and resource-intensive [S1]. The two-stage approach was validated on datasets like five-jet and supernova [S1].
+
+## Sources
+[S1] iVR-GS: Inverse Volume Rendering for Explorable Visualization via Editable 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2025.3567121, fetched 2026-10-26

@@ -1,0 +1,140 @@
+# NERFACC: A GENERAL NERF ACCELERATION TOOLBOX.
+
+Ruilong Li University of California, Berkeley ruilongli@berkeley.edu
+
+Matthew Tancik University of California, Berkeley tancik@berkeley.edu
+
+Angjoo Kanazawa University of California, Berkeley kanazawa@berkeley.edu
+
+### ABSTRACT
+
+We propose NerfAcc, a toolbox for efficient volumetric rendering of radiance fields. We build on the techniques proposed in Instant-NGP [1], and extend these techniques to not only support bounded static scenes, but also for dynamic scenes and unbounded scenes. NerfAcc comes with a user-friendly Python API, and is ready for plug-and-play acceleration of most NeRFs. Various examples are provided to show how to use this toolbox. Code can be found here: . 1
+
+# 1 Introduction
+
+Neural Radiance Fields (NeRFs) [2] are a groundbreaking technique for 3D representation, which model the geometry and view-dependent appearance of the scene by using a multi-layer perceptron (MLP). In the past two years, they have been proven to be quite powerful in many downstream applications in 3D such as static/dynamic scene reconstruction [3, 4, 5, 6], relighting [7, 8, 9, 10, 11] and content generation [12, 13, 14]. Using differentiable volumetric rendering [15], a radiance field can be optimized / trained from calibrated RGB images alone. However, with the vanilla MLP NeRF, such an optimization process usually takes days to converge on a single scene, and tens of seconds to render a single image.
+
+Recently, many works have demonstrated that the NeRF optimization and inference process can be drastically accelerated by incorporating explicit 3D voxels into the radiance field representation [16, 17, 1, 18]. However, voxel-based radiance fields are less flexible than the MLP-based representation as they are only applicable to a single, static scene. Applications to dynamic scene reconstruction [5, 19, 20] and generalization across multiple scenes [21, 22, 7] have not benefited yet from those methods.
+
+Despite all variations of the radiance field representations and applications, most of them share the same volumetric rendering process – cast a ray into the space and accumulate the colors along the ray. However, not too much attention has been spent on exploring an efficient volumetric rendering process that is easily applicable to any downstream applications. A few works such as Plenoctrees [16] and Instant-NGP [1] incorporate some techniques for efficient volumetric rendering such as skipping empty and occluded areas, but are highly customized for bounded static scenes and use specialized CUDA implementations making it difficult to extend to other applications.
+
+In this work, we propose a toolbox, NerfAcc for "NeRF Accelration", which focuses on efficient volumetric rendering of radiance fields. We build on the techniques proposed in Instant-NGP [1], and extend those techniques to support not only bounded static scenes, but also the dynamic scenes and unbounded scenes. We also provide a user friendly Python API written with PyTorch [23], which is ready for plug-and-play acceleration of most NeRFs. Various examples are included to show how to use the NerfAcc toolbox to accelerate existing NeRF methods.
+
+### With the NerfAcc toobox,
+
+- The vanilla NeRF model [2] with an 8-layer MLP can be trained to better quality (+0.5 PSNR) in 1 hour rather than 1 ∼ 2 days as in the paper.
+
+1This write-up matches with NerfAcc v0.3.5. For the latest features in NerfAcc, Please check out our more recent write-up at 
+
+- The Instant-NGP NeRF [1] model can be trained to equal quality with 4.5 minutes in Python, comparing to the official pure CUDA implementation.
+- The D-NeRF [19] model for dynamic scenes can be trained on 1 hour rather than 2 days as in the paper, and with better quality (+2.0 PSNR).
+
+## 2 Design
+
+In NerfAcc, the volumetric rendering pipeline is broken down into two steps, ray marching and differentiable rendering. Here we dive into each step to introduce some techniques that we incorporated for efficient volumetric rendering.
+
+#### 2.1 Ray Marching
+
+Ray marching is the process of casting a ray through the scene and generating discrete samples along the ray. As those samples will later be evaluated by a radiance field, which is usually the main bottleneck of the entire pipeline, efficiency can be achieved by reducing the number of samples as much as possible during ray marching. As shown in the volumetric rendering Equation 1, a sample would have little contribution to the final image color C(r), if it has either low opacity αi or low transmittance Ti . In other words, during ray marching we can safely skip samples that are in the empty or occluded regions as they do not contribute to the final image.
+
+
+
+| $C(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i, \quad \text{where } T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right), \quad \alpha_i = (1 - \exp(\sigma_i \delta_i)), \quad (1)$ |
+|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+
+Pruning Empty and Occluded Regions. However during training, finding the empty and occluded regions is not straightforward. In NerfAcc, we incorporate the idea of using an Occupancy Grid from Instant-NGP [1] 2 , in which a binary grid is cached and updated during training to store which areas in the scene are empty (e.g., αi < 1e−2). We skip occluded regions by terminating the marching early based on the transmittance (e.g., Ti < 1e−4) along the ray, similar to Instant-NGP [1] and PlenOctrees [16]. Note, for skipping occluded regions, we need to know the precise density of the samples along the ray to compute transmittance. So a user-defined radiance field (e.g., MLP NeRF or Instant-NGP NeRF) is evaluated to get the density, but with gradients disabled to minimize the computation.
+
+GPU Memory Efficiency. One way to apply the aforementioned pruning during marching, is to first over-generate samples for each ray, and then selectively keep the samples that matter. This can be done efficiently in Python with parallelization across all the samples, but is not memory friendly as it can over allocate the GPU memory that is needed in the first place. For a scene that has dense surface such as the Lego scene in the NeRF-Synthetic dataset, the pruning process can get rid of 98% of the samples when training converges. To minimize the GPU usage, NerfAcc prunes the empty space while marching, resulting in samples only in the non-emtpy space. This changes the parallelization from samples to rays, which is slightly less efficiently but allows one to use significantly less GPU memory to generate much denser samples.
+
+GPU Parallelization. There are in general two options for GPU parallelization: across rays or across samples. In most of the cases, the total number of valid samples in the scene is much larger than the total number of rays. As a result, we would prefer to parallelize across samples whenever possible. In NerfAcc, we minimize operations that are parallelized across rays. Operations that are independent of rays, such as computing sample opacity from sample density, are done with parallelization across samples.
+
+Scene Contraction for Unbounded Scene As the Occupancy Grid from Instant-NGP [1] only supports bounded scenes3 , we incorporate the scene contraction idea4 from Mip-NeRF 360 [24] to support unbounded scenes. When querying into the occupancy grid, a non-linear function is applied to the coordinates to map the unbounded space into a finite grid. With this single change, NerfAcc is able to reconstruct bounded scenes as well as unbounded scenes.
+
+See Instant-NGP Appendix E.2 for details
+
+3 Instant-NGP proposes multi-scale grids to support a really large scenes but is still bounded.
+
+4 See Eq. 10 in the Mip-NeRF 360 paper
+
+#### 2.2 Differentiable Rendering
+
+Differentiable rendering is the process of accumulating the color of the samples along the rays, into pixel colors. In this step we make use of the user-defined radiance field in an differentiable way – all the outputs of the radiance field will receive gradients from pixel supervisions. We follow Equation 1 to perform the accumulation. Any sample attributes, not just colors, are supported and can be rendered in a differentiable way by NerfAcc, such as depth and opacity. We parallelize across all the samples in this step to maximize the GPU utilization.
+
+### 3 Plug-and-Play
+
+As the idea of NerfAcc is to perform efficient ray marching and volumetric rendering, it can work with any userdefined radiance field. To plug the NerfAcc rendering pipeline into the code and enjoy the acceleration, user only needs to define two functions (sigma\_fn, rgb\_sigma\_fn) with the customized radiance field. Blow is an example of plug-and-play:
+
+ import torch from torch import Tensor import nerfacc radiance\_field = ... # network : a NeRF model optimizer = ... # network optimizer rays\_o : Tensor = ... # ray origins . ( n\_rays , 3) rays\_d : Tensor = ... # ray normalized directions . ( n\_rays , 3) def sigma\_fn ( t\_starts : Tensor , t\_ends : Tensor , ray\_indices : Tensor ) -> Tensor : """ Query density values from a user - defined radiance field. : params t\_starts : Start of the sample interval along the ray . : params t\_ends : End of the sample interval along the ray . : params ray\_indices : Ray indices that each sample belongs to . : returns The post - activation density values . """ t\_origins = rays\_o [ ray\_indices ] # ( n\_samples , 3) t\_dirs = rays\_d [ ray\_indices ] # ( n\_samples , 3) positions = t\_origins + t\_dirs \* ( t\_starts + t\_ends ) / 2.0 sigmas = radiance\_field . query\_density ( positions ) return sigmas # ( n\_samples , 1) def rgb\_sigma\_fn ( t\_starts : Tensor , t\_ends : Tensor , ray\_indices : Tensor ) -> Tuple [ Tensor , Tensor ]: """ Query rgb and density values from a user - defined radiance field . : params t\_starts : Start of the sample interval along the ray . : params t\_ends : End of the sample interval along the ray . : params ray\_indices : Ray indices that each sample belongs to . : returns The post - activation rgb and density values . """ t\_origins = rays\_o [ ray\_indices ] # ( n\_samples , 3) t\_dirs = rays\_d [ ray\_indices ] # ( n\_samples , 3) positions = t\_origins + t\_dirs \* ( t\_starts + t\_ends ) / 2.0 rgbs , sigmas = radiance\_field ( positions , condition = t\_dirs ) return rgbs , sigmas # ( n\_samples , 3) , ( n\_samples , 1) # Efficient Raymarching : Skip empty and occluded space . packed\_info , t\_starts , t\_ends = nerfacc . ray\_marching ( rays\_o , rays\_d , sigma\_fn = sigma\_fn , near\_plane =0.2 , far\_plane =1.0 , early\_stop\_eps =1 e -4 , alpha\_thre =1 e -2 , ) # Differentiable Volumetric Rendering . # colors : ( n\_rays , 3) . opaicity : ( n\_rays , 1) . depth : ( n\_rays , 1) . color , opacity , depth = nerfacc . rendering (
+
+ rgb\_sigma\_fn , packed\_info , t\_starts , t\_ends 50 ) 51 # Optimize the radience field . optimizer . zero\_grad () loss = F. mse\_loss ( color , color\_gt ) loss . backward () optimizer . step ()
+
+# 4 Example Usages
+
+We provide four example usages of NerfAcc on different radiance field representations, on different type of scenes, including dynamic scenes and unbounded scenes. The results below indicate that NerfAcc is a universal acceleration tool for various NeRFs. Our experiments are all conducted on a single NVIDIA TITAN RTX GPU.
+
+#### 4.1 Vanilla MLP NeRF in 1 hour.
+
+In this example we trained an 8-layer-MLP with the same structure as the one in the original NeRF [2] method. We used the train split for training and test split for evaluation as in the NeRF paper. The training memory footprint is about 10GB. The results on the NeRF-Synthetic dataset is shown here:
+
+|                         | Lego  | Mic   | Materials | Chair | Hotdog | Ficus | Drums | Ship  | Mean  |
+|-------------------------|-------|-------|-----------|-------|--------|-------|-------|-------|-------|
+| NeRF [2] (PSNR: ∼ days) | 32.54 | 32.91 | 29.62     | 33.00 | 36.18  | 30.13 | 25.01 | 28.65 | 31.00 |
+| Ours (PSNR: ∼ 1 hr)     | 33.69 | 33.76 | 29.73     | 33.32 | 35.80  | 32.52 | 25.39 | 28.18 | 31.55 |
+| Ours (Training time)    | 58min | 53min | 46min     | 62min | 56min  | 42min | 52min | 49min | 52min |
+
+Table 1: Performance on NeRF-Synthetic dataset.
+
+Note. The vanilla NeRF paper uses two MLPs for course-to-fine sampling. Instead here we only use a single MLP with more samples (1024). Both methods accomplish the same goal of dense sampling around the surface. NerfAcc inherently skips samples away from the surface so we can simply increase the number of samples with a single MLP, to achieve the same goal with the coarse-to-fine sampling, without run-time or memory issue.
+
+#### 4.2 Instant-NGP in 4.5 minutes.
+
+In this example we trained a Instant-NGP NeRF model on the NeRF-Synthetic dataset. We adopt the same settings proposed in the Instant-NGP paper, which uses train split for training and test split for evaluation. The training memory footprint is about 3GB.
+
+| PSNR                         | Lego  | Mic   | Materials | Chair | Hotdog | Ficus | Drums | Ship  | Mean  |
+|------------------------------|-------|-------|-----------|-------|--------|-------|-------|-------|-------|
+| Instant-NGP [1] (~ 4.5 mins) | 35.87 | 36.22 | 29.08     | 35.10 | 37.48  | 30.61 | 23.85 | 30.62 | 32.35 |
+| Ours (~ 4.5 mins)            | 35.50 | 36.16 | 29.14     | 35.23 | 37.15  | 31.71 | 24.88 | 29.91 | 32.46 |
+
+Table 2: Performance on NeRF-Synthetic dataset.
+
+Note. The Instant-NGP paper makes use of the alpha channel in the images to apply random background augmentation during training. For fair comparison, we rerun their code with a constant white background during both training and testing. Also it is worth to mention that we didn't strictly follow the training recipe in the Instant-NGP paper, such as the learning rate schedule etc, as the purpose of this benchmark is to showcase instead of reproducing the paper.
+
+#### 4.3 D-NeRF in 1 hour.
+
+In this example we trained a 8-layer-MLP for the radiance field and a 4-layer-MLP for the warping field, (similar to the T-NeRF model in the D-NeRF paper) on the D-NeRF dataset. We used train split for training and test split for evaluation. The training memory footprint is about 11GB.
+
+| PSNR                  | Bouncing balls | Hell warrior | Hook  | Jumping jacks | Lego  | Mutant | Standup | Trex  | Mean  |
+|-----------------------|----------------|--------------|-------|---------------|-------|--------|---------|-------|-------|
+| D-NeRF [19] ( ∼ days) | 38.93          | 25.02        | 29.25 | 32.80         | 21.64 | 31.29  | 32.79   | 31.75 | 30.43 |
+| Ours ( ∼ 1 hr)        | 39.49          | 25.58        | 31.86 | 32.73         | 24.32 | 35.55  | 35.90   | 32.33 | 32.22 |
+| Ours (Training time)  | 37min          | 52min        | 69min | 64min         | 44min | 79min  | 79min   | 39min | 58min |
+
+Table 3: Performance on D-NeRF Synthetic dataset.
+
+Note. The Occupancy Grid used in this example is shared by all the frames. In other words, instead of using it to store the opacity of an area at a single timestamp, Here we use it to store the maximum opacity at this area over all the timestamps. It is not optimal but still makes the rendering very efficient.
+
+### 4.4 Unbounded Scene in 20 minutes.
+
+Here we trained an Instant-NGP NeRF on the Mip-NeRF 360 dataset. We used the train split for training and test split for evaluation. The training memory footprint is about 8GB.
+
+| PSNR                        | Garden | Bicycle | Bonsai | Counter | Kitchen | Room  | Stump | Mean  |
+|-----------------------------|--------|---------|--------|---------|---------|-------|-------|-------|
+| NeRF++ [25] ( ∼ days)       | 24.32  | 22.64   | 29.15  | 26.38   | 27.80   | 28.87 | 24.34 | 26.21 |
+| Mip-NeRF 360 [24] ( ∼ days) | 26.98  | 24.37   | 33.46  | 29.55   | 32.23   | 31.63 | 28.65 | 29.55 |
+| Ours ( ∼ 20 mins)           | 25.41  | 22.97   | 30.71  | 27.34   | 30.32   | 31.00 | 23.43 | 27.31 |
+| Ours (Training time)        | 25min  | 17min   | 19min  | 23min   | 28min   | 20min | 17min | 21min |
+
+Table 4: Performance on Mip-NeRF 360 dataset.
+
+Note. Even though we are comparing with NeRF++ and Mip-NeRF 360, the model and losses are different. There are many ideas from those papers that could be helpful for the performance. We didn't adopt them in these experiments as they are tangential to the library.
+
+# 5 Conclusion
+
+We have demonstrated a general acceleration toolbox, NerfAcc, for accelerating various NeRFs in different applications. It is built on top of the ideas from Instant-NGP [1], Plenoctrees [16] and Mip-NeRF 360 [24] for efficient volumetric rendering. With NerfAcc, various NeRF models can be trained in 1 hour with better performance. We provide full Python API for NerfAcc, which makes it ready for plug-and-play in future research.
+
+## References
+
+[1] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. arXiv preprint arXiv:2201.05989, 2022. [2] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021. [3] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku Komura, and Wenping Wang. Neus: Learning neural implicit surfaces by volume rendering for multi-view reconstruction. arXiv preprint arXiv:2106.10689, 2021. [4] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit surfaces. Advances in Neural Information Processing Systems, 34:4805–4815, 2021. [5] Ruilong Li, Julian Tanke, Minh Vo, Michael Zollhofer, Jurgen Gall, Angjoo Kanazawa, and Christoph Lassner. Tava: Template-free animatable volumetric actors. arXiv preprint arXiv:2206.08929, 2022. [6] Sida Peng, Junting Dong, Qianqian Wang, Shangzhan Zhang, Qing Shuai, Xiaowei Zhou, and Hujun Bao. Animatable neural radiance fields for modeling dynamic human bodies. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 14314–14323, 2021.
+
+[7] Z Kuang, K Olszewski, M Chai, Z Huang, P Achlioptas, and S Tulyakov. Neroic: Neural object capture and rendering from online image collections, 2021. [8] Sai Bi, Zexiang Xu, Pratul Srinivasan, Ben Mildenhall, Kalyan Sunkavalli, Miloš Hašan, Yannick Hold-Geoffroy, David Kriegman, and Ravi Ramamoorthi. Neural reflectance fields for appearance acquisition. arXiv preprint arXiv:2008.03824, 2020. [9] Xiuming Zhang, Pratul P Srinivasan, Boyang Deng, Paul Debevec, William T Freeman, and Jonathan T Barron. Nerfactor: Neural factorization of shape and reflectance under an unknown illumination. ACM Transactions on Graphics (TOG), 40(6):1–18, 2021. [10] Pratul P Srinivasan, Boyang Deng, Xiuming Zhang, Matthew Tancik, Ben Mildenhall, and Jonathan T Barron. Nerv: Neural reflectance and visibility fields for relighting and view synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 7495–7504, 2021. [11] Kai Zhang, Fujun Luan, Qianqian Wang, Kavita Bala, and Noah Snavely. Physg: Inverse rendering with spherical gaussians for physics-based material editing and relighting. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5453–5462, 2021. [12] Ajay Jain, Ben Mildenhall, Jonathan T Barron, Pieter Abbeel, and Ben Poole. Zero-shot text-guided object generation with dream fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 867–876, 2022. [13] Ben Poole, Ajay Jain, Jonathan T Barron, and Ben Mildenhall. Dreamfusion: Text-to-3d using 2d diffusion. arXiv preprint arXiv:2209.14988, 2022. [14] Quan Meng, Anpei Chen, Haimin Luo, Minye Wu, Hao Su, Lan Xu, Xuming He, and Jingyi Yu. Gnerf: Ganbased neural radiance field without posed camera. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 6351–6361, 2021. [15] Nelson Max. Optical models for direct volume rendering. IEEE Transactions on Visualization and Computer Graphics, 1(2):99–108, 1995. [16] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and Angjoo Kanazawa. Plenoctrees for real-time rendering of neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 5752–5761, 2021. [17] Alex Yu, Sara Fridovich-Keil, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels: Radiance fields without neural networks. arXiv preprint arXiv:2112.05131, 2021. [18] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. Tensorf: Tensorial radiance fields. arXiv preprint arXiv:2203.09517, 2022. [19] Albert Pumarola, Enric Corona, Gerard Pons-Moll, and Francesc Moreno-Noguer. D-nerf: Neural radiance fields for dynamic scenes. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 10318–10327, 2021. [20] Keunhong Park, Utkarsh Sinha, Jonathan T Barron, Sofien Bouaziz, Dan B Goldman, Steven M Seitz, and Ricardo Martin-Brualla. Nerfies: Deformable neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 5865–5874, 2021. [21] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa. pixelnerf: Neural radiance fields from one or few images. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 4578–4587, 2021. [22] Qianqian Wang, Zhicheng Wang, Kyle Genova, Pratul P Srinivasan, Howard Zhou, Jonathan T Barron, Ricardo Martin-Brualla, Noah Snavely, and Thomas Funkhouser. Ibrnet: Learning multi-view image-based rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 4690–4699, 2021. [23] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, et al. Pytorch: An imperative style, high-performance deep learning library. Advances in neural information processing systems, 32, 2019. [24] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded anti-aliased neural radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5470–5479, 2022. [25] Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen Koltun. Nerf++: Analyzing and improving neural radiance fields. arXiv preprint arXiv:2010.07492, 2020.

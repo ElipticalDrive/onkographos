@@ -1,0 +1,290 @@
+--- v004.md
++++ v005.md
+@@ -1,156 +1,163 @@
+ # 2D Texture-Based Volume Rendering
+ 
+-Also called: Object-aligned slice projection, Proxy geometry with 2D textures, Texture-based VR with 2D textures, VR Basado en Texturas 2D, View-Aligned Slice Rendering, VolumeRover2, cvc::volslice
++Also called: 2D Texture Mapping, 2D Texture Volume Rendering, 2DTM, NodeVolumeTextureRender, VR Basado en Texturas 2D
+ 
+ ## Overview
+-2D Texture-Based Volume Rendering is a GPU-accelerated object-order technique that represents volumetric data as stacks of 2D textures, projecting them onto axis-aligned proxy geometry and compositing them back-to-front using hardware blending [S1, S3, unofficial]. Unlike 3D texture methods that sample a single trilinearly interpolated volume, this approach relies on bilinear interpolation of 2D slices, making it historically significant for early real-time rendering but prone to specific interpolation artifacts [S1, S3, unofficial].
++2D Texture-Based Volume Rendering is an object-space technique that renders volumetric data by decomposing it into a set of parallel, object-aligned 2D slices stored in texture maps, which are then projected onto the image plane and composited back-to-front [S1, unofficial][S2, unofficial][S3, unofficial]. It solves the problem of real-time volume visualization on hardware lacking native 3D texture support by substituting trilinear interpolation with hardware-accelerated bilinear interpolation [S3, unofficial][S6, unofficial]. Unlike [3-Pass Texture Mapping with Compositing](1354-3-pass-texture-mapping-with-compositing.md) which may use view-aligned geometry, this method relies on fixed axis-aligned stacks, trading image quality for broad compatibility and speed [S6, unofficial][S12].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D scalar volume dataset (dimensions $D_x \times D_y \times D_z$), a camera view matrix (local-to-clip), and a transfer function (color/opacity mapping) [S1, S2, S3, unofficial].
+-*   **Output:** A 2D image with accumulated color and opacity [S1, S3, unofficial].
++*   **Input:** A 3D scalar volume dataset $V$ of dimensions $D_x \times D_y \times D_z$. A viewing direction vector $\vec{v}$ derived from the modelview matrix. A transfer function $T(v)$ mapping scalar values to RGBA.
++*   **Output:** A 2D image buffer $I$ of size $H \times W \times 3$ (RGB).
+ 
+ **Data Structures:**
+-1.  **2D Texture Stacks:** The volume is decomposed into three sets of 2D textures, one for each axis (X, Y, Z) [S3, unofficial].
+-    *   **Format:** `GL_LUMINANCE` (stores single-component opacity) [S3, unofficial]. Note: `GL_INTENSITY` is unsupported on some legacy hardware [S3, unofficial].
+-    *   **Dimensions:** Power-of-two padding. If the original volume dimension is $D$, the texture width/height is the smallest power of two $P \ge D$ [S3, unofficial].
+-    *   **Content:** Pre-classified opacity values. Color is applied during rendering via multiplication with a user-defined tissue color [S3, unofficial].
+-    *   **Total Textures:** $N_{total} = D_x + D_y + D_z$ [S3, unofficial].
+-    *   **Memory:** $P^2 \times N_{total}$ bytes (assuming 1 byte per texel) [S3, unofficial]. For a $181 \times 217 \times 181$ volume, this requires 579 textures of $256 \times 256$ pixels, totaling 37,945,344 bytes [S3, unofficial].
+-2.  **Proxy Geometry:** Axis-aligned quadrilaterals or triangle fans representing the slices [S3, unofficial].
+-    *   **Texture Coordinates:** Computed in the vertex shader as an affine map of model coordinates (`vertexMC`), eliminating the need for a separate texture coordinate array [S2, unofficial].
+-    *   **Clipping:** Generated using a 256-case plane/cube clipping table to handle intersections with the volume bounding box [S2, unofficial].
+-3.  **Transfer Function:** A 256x1 RGBA Look-Up Table (LUT) [S2, unofficial].
++The volume is pre-processed into three stacks of 2D textures, one for each major axis (X, Y, Z).
++*   **Texture Stack:** A list of 2D textures. For the X-axis stack, there are $D_x$ textures, each of size $D_y \times D_z$.
++*   **Texel Format:** RGBA.
++    *   **RGB:** Emission coefficient $I_{emit}$ (color).
++    *   **A:** Inverse absorption coefficient $(1 - \vartheta_k)$, where $\vartheta_k$ is the absorption at sample point $k$ [S3, unofficial].
++*   **Proxy Geometry:** For each slice, a polygon (typically a triangle fan or quad) representing the intersection of the slicing plane with the volume bounding box. Vertices are ordered back-to-front relative to the camera [S5, unofficial].
+ 
+-**Numbered Steps:**
+-1.  **Preparation (Offline/Initialization):**
+-    *   For each axis $A \in \{X, Y, Z\}$:
+-        *   Extract 2D slices aligned with axis $A$ [S3, unofficial].
+-        *   Pad each slice to power-of-two dimensions ($P \times P$) [S3, unofficial].
+-        *   Upload to GPU as `GL_LUMINANCE` textures [S3, unofficial].
+-2.  **Render Loop (Per Frame):**
+-    *   **Axis Selection:** Calculate the angle between the volume's principal axes and the projection plane (or camera view direction). Select the axis $A_{best}$ with the smallest angle [S3, unofficial].
+-    *   **Slice Count Calculation:** Compute the number of slices $N$ to render:
+-        $$ N = 2 \cdot (10 + \text{max\_planes} \cdot q^3) $$
+-        where $\text{max\_planes}$ is the maximum allowed planes and $q$ is a quality factor [S2, unofficial].
+-    *   **Cap:** Limit $N$ to $10 \cdot \text{max\_planes}$ per frame [S2, unofficial].
+-    *   **Sweep Generation:**
+-        *   Compute slice positions based on the camera's local-to-clip matrix and the volume's local bounding box [S2, unofficial].
+-        *   Perform the sweep in "legacy ratio space" (normalized coordinates) to preserve plane parallelism and spacing, then map to the caller's box via uniform scale and translation [S2, unofficial].
+-        *   Generate triangle-fan polygons for each slice using the 256-case plane/cube clipping table [S2, unofficial].
+-        *   Order polygons back-to-front relative to the camera [S2, unofficial].
+-    *   **Culling/Clipping:**
+-        *   **Near-plane peel:** Dim or cull slices closer than a specific fraction of the diagonal to the near plane [S2, unofficial].
+-        *   **Sub-cube crop:** Clip texture coordinates to valid volume bounds to prevent sampling outside the volume [S2, unofficial].
+-    *   **Rendering:**
+-        *   Bind the selected axis's texture stack [S3, unofficial].
+-        *   Set blend state: `SRC_ALPHA / ONE_MINUS_SRC_ALPHA`, depth writing disabled [S2, unofficial].
+-        *   For each slice polygon (back-to-front):
+-            *   Vertex Shader: Compute texture coordinates from vertex model coordinates [S2, unofficial].
+-            *   Fragment Shader: Sample the 2D texture [S3, unofficial]. Multiply the sampled luminance (opacity) by the user-defined tissue color [S3, unofficial].
+-            *   Hardware Blending: Accumulate color and opacity into the framebuffer [S3, unofficial].
++**Steps:**
++
++1.  **Preprocessing (Offline/Initialization):**
++    For each axis $A \in \{X, Y, Z\}$:
++    *   Extract 2D slices perpendicular to $A$.
++    *   Apply the transfer function $T$ to each voxel value $v$ to compute color $C$ and opacity $\alpha$.
++    *   Store $C$ in RGB and $\alpha$ in the Alpha channel of the corresponding 2D texture.
++    *   Generate proxy geometry for each slice by clipping the volume bounding box against the slice plane [S5, unofficial].
++
++2.  **View Direction Selection:**
++    *   Extract the rotation matrix $R$ from the current ModelView matrix [S3, unofficial].
++    *   Transform the initial viewing direction $\vec{v}_{init} = (0, 0, -1)$: $\vec{v}_{world} = R \cdot \vec{v}_{init}$.
++    *   Find the component with the maximum absolute value: $n_{max} = \text{argmax}_i |v_{world}[i]|$.
++    *   Select the texture stack corresponding to axis $n_{max}$. If $v_{world}[n_{max}] > 0$, render in increasing order; otherwise, decreasing order [S3, unofficial].
++    *   *Constraint:* The chosen stack's normal must be within $\pm 45^\circ$ of the viewing direction to avoid edge-on artifacts [S6, unofficial][S8].
++
++3.  **Rendering Loop (Back-to-Front):**
++    For each slice $k$ in the selected stack, from farthest to nearest:
++    *   **Geometry:** Bind the proxy polygon for slice $k$.
++    *   **Texturing:** Bind the 2D texture for slice $k$. The rasterizer performs bilinear interpolation on the texture coordinates [S3, unofficial].
++    *   **Compositing:** Blend the fragment color into the frame buffer using alpha blending.
++        The radiative transfer equation is discretized as:
++        $$ I(s_k) = I(s_{k-1}) \cdot \vartheta_k + I_{emit}(s_k) \cdot (1 - \vartheta_k) $$
++        where $I_{emit}(s_k)$ is the color from the texture RGB, and $(1 - \vartheta_k)$ is the texture Alpha [S3, unofficial].
++        The hardware blending equation (e.g., `glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)`) implements:
++        $$ C_{dest} = C_{src} \cdot A_{src} + C_{dest} \cdot (1 - A_{src}) $$
++        Substituting $C_{src} = I_{emit}$ and $A_{src} = (1 - \vartheta_k)$ yields the correct integration [S3, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-# Standard OpenGL blend factors
+-SRC_ALPHA = 770
+-ONE_MINUS_SRC_ALPHA = 771
++def render_2d_texture_volume(volume_data, modelview_matrix, image_buffer):
++    # 1. Preprocessing: Create 3 stacks of 2D textures
++    # Each stack contains 2D textures where RGB=Color, A=Opacity
++    stacks = {}
++    for axis in ['X', 'Y', 'Z']:
++        stacks[axis] = []
++        for i in range(volume_data.shape[axis]):
++            slice_data = extract_slice(volume_data, axis, i)
++            rgba_slice = apply_transfer_function(slice_data)
++            stacks[axis].append(create_2d_texture(rgba_slice))
+ 
+-def render_2d_texture_volume(volume_dims, camera_matrix, max_planes, quality):
+-    # Inputs: volume_dims (Dx, Dy, Dz), camera_matrix (4x4 local-to-clip), 
+-    # max_planes (int), quality (float)
+-    # Assumes textures_X, textures_Y, textures_Z are pre-uploaded as P x P textures
++    # 2. Select Stack based on View Direction
++    # Extract rotation from ModelView matrix
++    R = extract_rotation(modelview_matrix)
++    view_dir = R @ np.array([0.0, 0.0, -1.0])
+     
+-    # 1. Axis Selection
+-    view_vector = normalize([-camera_matrix[0][2], -camera_matrix[1][2], -camera_matrix[2][2]])
+-    axes = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+-    angles = [1.0 - dot(axis, view_vector) for axis in axes]
+-    best_axis = ['X', 'Y', 'Z'][argmin(angles)]
++    # Find axis with max absolute component
++    abs_view = np.abs(view_dir)
++    max_axis_idx = np.argmax(abs_view)
++    axes = ['X', 'Y', 'Z']
++    selected_axis = axes[max_axis_idx]
+     
+-    # 2. Determine Slice Count
+-    N = 2 * (10 + max_planes * (quality ** 3))
+-    N = min(N, 10 * max_planes)
++    # Determine direction (increasing or decreasing)
++    if view_dir[max_axis_idx] > 0:
++        direction = 'increasing'
++    else:
++        direction = 'decreasing'
++        
++    selected_stack = stacks[selected_axis]
++    if direction == 'decreasing':
++        selected_stack = reversed(selected_stack)
++
++    # 3. Render Slices Back-to-Front
++    # Initialize image buffer to black
++    image_buffer[:] = 0.0
+     
+-    # 3. Generate Slices
+-    polygons = []
+-    for i in range(N):
+-        ratio = i / N
+-        # Legacy ratio space mapped to caller's box via uniform scale and translation [S2, unofficial]
+-        world_pos = [camera_matrix[0][3] + ratio * camera_matrix[0][2],
+-                     camera_matrix[1][3] + ratio * camera_matrix[1][2],
+-                     camera_matrix[2][3] + ratio * camera_matrix[2][2]]
+-        # 256-case plane/cube clipping table intersects plane with box [S2, unofficial]
+-        poly = generate_fan_polygon(world_pos, volume_dims)
+-        polygons.append(poly)
+-    # Order polygons back-to-front relative to camera [S2, unofficial]
+-    polygons.sort(key=lambda p: -dot(p.center, view_vector))
+-    
+-    # 4. Render
+-    set_blend_mode(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)
+-    set_depth_write(False)
+-    bind_texture_stack(textures[best_axis])
+-    
+-    for poly in polygons:
+-        # Vertex shader computes texcoords as affine map of vertexMC [S2, unofficial]
+-        # Fragment shader samples 2D texture, multiplies luminance by tissue color [S3, unofficial]
+-        draw_polygon(poly)
++    for slice_texture in selected_stack:
++        # Generate proxy geometry for this slice
++        # Geometry is a polygon clipped to the volume bounding box
++        poly = generate_slice_polygon(slice_texture.index, selected_axis)
++        
++        # Bind texture and geometry
++        bind_texture(slice_texture)
++        bind_geometry(poly)
++        
++        # Rasterize and Blend
++        # Hardware performs:
++        # C_dest = C_src * A_src + C_dest * (1 - A_src)
++        # where C_src is RGB from texture, A_src is Alpha from texture
++        rasterize_and_blend()
+ 
+-def dot(v1, v2):
+-    return sum(a * b for a, b in zip(v1, v2))
+-
+-def normalize(v):
+-    mag = dot(v, v) ** 0.5
+-    return [x / mag for x in v]
+-
+-def argmin(lst):
+-    return lst.index(min(lst))
+-
+-def generate_fan_polygon(plane_pos, volume_dims):
+-    # Uses 256-case plane/cube clipping table to intersect plane with box [S2, unofficial]
+-    # Returns triangle-fan geometry with 3D texture coordinates
+-    return {"vertices": [], "texcoords": [], "order": "back-to-front"}
+-
+-def set_blend_mode(src, dst):
+-    pass
+-
+-def set_depth_write(enabled):
+-    pass
+-
+-def bind_texture_stack(stack):
+-    pass
+-
+-def draw_polygon(poly):
+-    pass
++    return image_buffer
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Bilinear Interpolation Artifacts:** Since only 2D textures are used, interpolation is bilinear [S1, unofficial]. This ignores the third dimension, causing visible "banding" artifacts around the volume [S3, unofficial].
+-*   **Popping Artifacts:** Switching between X, Y, and Z texture sets during rotation causes visible jumps due to changes in interpolation artifacts or memory swap times [S3, unofficial].
+-*   **Sampling Frequency Change:** Rotating the camera changes the sampling frequency [S3, unofficial]. If planes become perpendicular to the projection plane, they may disappear from the final image [S3, unofficial].
+-*   **VTK OIT Conflict:** VTK 9's default Order-Independent Translucency (OIT) breaks compositing by averaging colors (X-ray look) [S2, unofficial]. Must disable OIT (`UseOITOff`) to use legacy blending [S2, unofficial].
+-*   **Off-Origin Volume Bug:** If the volume box is offset from the origin, VTK's AUTO VBO shift-scale re-centers vertex data [S2, unofficial]. Deriving texcoords from `vertexMC` then reads the wrong corner (density 0) [S2, unofficial]. Fix: Set `DISABLE_SHIFT_SCALE` [S2, unofficial].
+-*   **GLES3 Precision:** On WebGL2/GLES3, `sampler3D` has no default precision (compile error if unqualified) and `sampler2D` defaults to `lowp` (insufficient for LUT addressing) [S2, unofficial]. Both must be declared `highp` [S2, unofficial].
++*   **Banding/Artifacts:** Bilinear interpolation ignores the third dimension, causing "staircase" or banding artifacts, especially when zooming [S2, unofficial][S18, unofficial].
++*   **Stack Switching:** Abrupt switching between X, Y, and Z stacks causes visible popping artifacts due to different sampling positions [S3, unofficial][S18, unofficial].
++*   **Edge-on Slices:** If the view angle is close to $45^\circ$ from the slice normal, slices become edge-on, leading to aliasing and incorrect sampling [S6, unofficial][S12].
++*   **Opacity Scaling:** The distance between sampling points along the viewing ray varies with angle. Opacity values may need scaling to maintain consistent density perception [S17].
++*   **VTK OIT Conflict:** In VTK 9+, Order-Independent Translucency (OIT) breaks this method by averaging colors. `UseOITOff()` must be enabled [S5, unofficial].
++*   **Negative Values:** Logarithmic transfer functions (if used) fail on zero/negative values [S9, unofficial][S10, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Novel Sampling Scheme for Slice Based Volume Rendering](953-novel-sampling-scheme-for-slice-based-volume-rendering.md)
+-A variant that eliminates stack-switching and jagged boundary artifacts by generating proxy geometry using multiple object-aligned 2D texture stacks clipped by planes extending from the front-facing edges of the volume's bounding box.
++A variant that renders multiple object-aligned 2D texture stacks simultaneously, clipped by planes extending from the front-facing edges of the volume's bounding box. It eliminates stack-switching and jagged boundary artifacts by approximating uniform ray-casting sampling more closely than spherical shells, while avoiding their geometry overhead.
++
++### [Interpolation of Arbitrary Slices (Multi-Texture Blending)](2089-interpolation-of-arbitrary-slices-multi-texture-blending.md)
++Renders arbitrary (non-axis-aligned) slices by interpolating between two adjacent object-aligned 2D textures using multi-texturing hardware. It decomposes the arbitrary slice into polygon strips spanning only two textures, reducing polygon count by half compared to single-texture approaches, but is limited by memory bandwidth.
++
++### [Multi-Texture Interpolation](2200-multi-texture-interpolation.md)
++Eliminates fixed-slice banding artifacts by computing intermediate slices on the fly using GPU combiners to perform real trilinear interpolation. Unlike the Novel Sampling Scheme, it retains standard slice projection but enhances the interpolation step between adjacent slices.
++
++### [Slice-Based Volume Rendering with HSV Transfer Function](4329-slice-based-volume-rendering-with-hsv-transfer-function.md)
++Uses an HSV (Hue, Saturation, Value) transfer function mapped via parametric equations rather than a lookup table. It simulates 3D texture access via a 2D texture array (sprite sheet) for slice indexing, allowing intuitive color control and real-time performance on fixed-function hardware.
++
++### SGI Octane2 Volume Rendering Pipeline
++A specific hardware pipeline for SGI Octane2 with V-series cards that uses 3D pixel textures via `glDrawPixels` or `glCopyPixels` [S20]. It renders slices, pixel-textures them with a quantized normal volume for shading, and blends them. It requires a scratch/auxiliary buffer because pixel texture does not occur directly per-fragment during rasterization [S20].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of slices $N$ and the number of pixels covered by the proxy geometry. $N$ is determined by the formula $N = 2 \cdot (10 + \text{max\_planes} \cdot q^3)$ [S2, unofficial].
+-*   **Memory Complexity:** $O(P^2 \cdot (D_x + D_y + D_z))$ for storing 2D texture stacks, where $P$ is the power-of-two padding dimension [S3, unofficial]. For a $181 \times 217 \times 181$ volume, this requires 579 textures of $256 \times 256$ pixels, totaling ~37.9 MB [S3, unofficial].
+-*   **Performance:** Very fast on modern GPUs due to reliance on rasterization hardware and hardware blending [S2, S3, unofficial]. Historically enabled real-time rendering on early GPUs (e.g., GeForce 256) [S1, unofficial].
+-*   **Strengths:** Intuitive, easy to implement, leverages mature 2D texture hardware, efficient for interactivity [S1, S3, unofficial].
+-*   **Limitations:** Severe artifacts from bilinear interpolation (banding), popping artifacts during axis switching, reduced accuracy compared to trilinear interpolation [S1, S3, unofficial].
+-*   **When to Use:** Legacy hardware, simple interactive visualization where speed is prioritized over high-fidelity volume quality [S1, S3, unofficial].
+-*   **When Not to Use:** High-quality offline rendering, scenes requiring precise trilinear interpolation, or when popping artifacts are unacceptable [S1, S3, unofficial].
++*   **Time Complexity:** $O(N \cdot H \cdot W)$, where $N$ is the number of slices and $H \times W$ is the image resolution. Performance depends on image size, not scene complexity [S6, unofficial].
++*   **Memory Complexity:** $O(D_x D_y D_z)$ for storing three full texture stacks. This is a significant limitation; for a $181 \times 217 \times 181$ volume, memory usage can exceed 37 MB for main memory creation of textures alone [S3, unofficial][S18, unofficial].
++*   **Performance:** Historically much faster than ray casting on older hardware, achieving near-interactive rates (e.g., 1.6 fps on a Pentium-IV with QuadroFX 3400) [S1, unofficial][S7, unofficial]. Modern GPUs have closed the gap with ray casting, but 2D texture mapping remains efficient for simple interactivity [S7, unofficial].
++*   **Strengths:** Compatible with older hardware lacking 3D texture support; leverages standard bilinear interpolation hardware; simple implementation [S6, unofficial][S12].
++*   **Limitations:** Lower image quality than ray casting or 3D texture methods due to bilinear interpolation artifacts; high memory consumption for three stacks; visible artifacts during rotation (stack switching, edge-on sampling) [S3, unofficial][S6, unofficial][S7, unofficial].
++*   **When to Use:** Legacy hardware, simple interactive previews, or when 3D texture support is unavailable.
++*   **When Not to Use:** High-quality offline rendering, volumes requiring precise trilinear interpolation, or scenes with frequent large rotations where stack-switching artifacts are unacceptable.
+ 
+ ## Background
+-*   **Origin:** Developed after 2D texture mapping became available on GPUs, preceding 3D texture support. Engel et al. provided an excellent introduction to these algorithms [S1, unofficial].
+-*   **History:** Studied extensively in the early 2000s (e.g., VolumeRover2 by Thane Bajaj, UT Austin, 2002-2003) [S2, unofficial]. Rezk-Salama et al. later proposed multi-texture methods to approximate trilinear interpolation using bilinear operations [S1, unofficial].
+-*   **Usage:** Used in early real-time volume renderers and educational demonstrations. Ported to modern contexts like `cvc::volslice` for compatibility with legacy rendering pipelines [S2, unofficial].
++The method was introduced by Cabral et al. [Cabral94] as one of the first to use texture mapping capabilities for volume rendering [S1, unofficial]. It was further developed by Lacroute and Levoy [7], who proposed using object-aligned slices to substitute trilinear with bilinear interpolation, though their original implementation did not use texturing hardware [S17]. Engel et al. [Engel01] provided an excellent introduction and improved quality with pre-integrated volume rendering [S1, unofficial][S2, unofficial]. The technique was used by companies such as Silicon Graphics in their InfiniteReality system and is supported by many modern graphics hardware devices [S7, unofficial].
+ 
+ ## Sources
+-[S1] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)
+-[S2] cvc::volslice: port VolumeRover2's view-aligned slice volume renderer, https://github.com/transfix/libcvc/pull/332, fetched 2026-10-26 (unofficial)
+-[S3] Texture Mapping Based Volume Rendering, https://www.ciroduran.com/files/Tesis.pdf, fetched 2026-10-29 (unofficial)+[S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
++[S2] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)
++[S3] Volume rendering techniques for general purpose graphics hardware, https://opus4.kobv.de/opus4-fau/files/9/Dissertation.pdf, fetched 2026-10-26 (unofficial)
++[S4] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
++[S5] cvc::volslice: port VolumeRover2's view-aligned slice volume renderer, https://github.com/transfix/libcvc/pull/332, fetched 2026-10-26 (unofficial)
++[S6] [PDF] Direct Volume Rendering | CGL @ ETHZ, https://cgl.ethz.ch/teaching/former/scivis_07/Notes/stuff/StuttgartCourse/VIS-Modules-06-Direct_Volume_Rendering.pdf, fetched 2026-10-26 (unofficial)
++[S7] Volume Ray Casting Techniques and Applications using ..., https://halogenica.net/bin/graphics/volume-rendering-using-gpgpu/Thesis.pdf, fetched 2026-10-27 (unofficial)
++[S8] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
++[S9] SREESUBBARAYUDU/Parallel_Volume_Rendering, https://github.com/SREESUBBARAYUDU/Parallel_Volume_Rendering, fetched 2026-10-27 (unofficial)
++[S10] overhaul88/Parallel_Volume_Rendering, https://github.com/overhaul88/Parallel_Volume_Rendering, fetched 2026-10-27 (unofficial)
++[S11] Fast volume rendering using a shear-warp factorisation ... - ResearchGate, https://www.researchgate.net/publication/243763776_Fast_volume_rendering_using_a_shear-warp_factorisation_of_the_viewing_transform, fetched 2026-10-27 (abstract only, unofficial)
++[S12] 13.3 2D Texture Volume, https://www.opengl.org/archives/resources/code/samples/advanced/advanced97/notes/node182.html, fetched 2026-10-27
++[S13] 13.3 2D Texture Volume, https://web.tecgraf.puc-rio.br/~ismael/Cursos/Cidade_CG/labs/OpenGL/OpenGL_siggraph1998/node227.html, fetched 2026-10-27
++[S14] 16.2.3 2D Texture Volume, http://bluevoid.com/opengl/sig00/advanced00/notes/node309.html, fetched 2026-10-27
++[S15] 16.2.3 2D Texture Volume, https://www.opengl.org/archives/resources/code/samples/sig99/advanced99/notes/node300.html, fetched 2026-10-27
++[S16] Interactive Volume Rendering On PC Hardware (PDF), http://gd.tuwien.ac.at/visual/OpenQVis/Publ.2000.5.pdf, fetched 2026-10-27 (unofficial)
++[S17] Interactive Volume Rendering on Standard PC Graphics ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/VolVisforPCHardware.pdf, fetched 2026-10-28
++[S18] Texture Mapping Based Volume Rendering, https://www.ciroduran.com/files/Tesis.pdf, fetched 2026-10-29 (unofficial)
++[S19] NodeVolumeTextureRender (MIPAV API Documentation), https://mipav.cit.nih.gov/documentation/api/gov/nih/mipav/view/renderer/J3D/surfaceview/NodeVolumeTextureRender.html, fetched 2026-10-30
++[S20] PDF Interactive Volume Rendering Using Multi-Dimensional Transfer Functions ..., https://collections.lib.utah.edu/dl_files/d4/e4/d4e47bfc09e54eee9f532e4f22b17e9214f4c755.pdf, fetched 2026-10-27

@@ -1,0 +1,63 @@
+# GauHuman
+
+Also called: HUGS (Human Gaussian Splats)
+
+## Overview
+GauHuman is a method for high-fidelity dynamic human reconstruction from monocular video that adapts 3D Gaussian Splatting (3DGS) to the specific geometry and topology of the human body. It solves the problem of inefficient optimization and artifact generation in dynamic scenes by redesigning the densification primitives and incorporating pose refinement. It sets itself apart from vanilla 3DGS by replacing standard density-based splitting with a human-aware prune/split/clone mechanism, and from other body methods like [GaussianBody](9209-gaussianbody.md) by focusing on efficient optimization speed rather than physical cloth priors.
+
+## How it works
+GauHuman builds on [3D Gaussian Splatting Training](3761-3d-gaussian-splatting-training.md) by modifying the densification and optimization steps to handle dynamic human motion.
+
+**Inputs and Outputs:**
+*   **Inputs:** A sequence of monocular RGB images of a human subject performing actions; an initial SMPL or similar parametric human model estimate (for pose); camera intrinsics and extrinsics.
+*   **Outputs:** A set of 3D Gaussians representing the human body and clothing, optimized for novel view synthesis and real-time rendering.
+
+**Data Structures:**
+The method maintains the standard 3DGS Gaussian attributes: position $\mathbf{p}$, opacity $\alpha$, spherical harmonics coefficients $\mathbf{c}$, and covariance matrix $\mathbf{\Sigma}$ (parameterized as rotation $\mathbf{R}$ and scale $\mathbf{s}$). Additionally, it incorporates:
+1.  **Pose Refinement Module:** A network or optimization variable that refines the global pose parameters over time.
+2.  **Weight Field Module:** A lightweight MLP or set of weights that modulates Gaussian contributions to capture fine details (e.g., clothing folds) that standard Gaussians might miss.
+
+**Method Steps:**
+1.  **Initialization:** Initialize Gaussians based on the initial human pose estimate. Unlike standard SfM points, these are distributed over the human surface or volume.
+2.  **Joint Optimization:** Optimize Gaussian attributes ($\mathbf{p}, \alpha, \mathbf{c}, \mathbf{R}, \mathbf{s}$), pose parameters, and weight field parameters simultaneously.
+3.  **Redesigned Densification:**
+    *   **Prune:** Remove Gaussians with low opacity or those not contributing to the human silhouette, using a threshold adapted for dynamic motion.
+    *   **Split/Clone:** Instead of splitting based solely on gradient magnitude, the method uses a human-aware criterion. Gaussians are split if they are located on high-curvature regions of the human body or if the pose refinement indicates significant motion in that region. This prevents the "exploding" Gaussian artifacts common in dynamic scenes.
+4.  **Pose Refinement:** Update the global pose parameters to align the canonical human shape with the observed frames, reducing misalignment artifacts.
+5.  **Weight Field Learning:** Train the weight field to adjust the opacity or color of Gaussians, allowing for finer detail representation without increasing the Gaussian count excessively.
+6.  **Rendering:** Render the scene using standard differentiable rasterization of Gaussians, weighted by the learned weight field.
+
+**Formulas:**
+The total loss $\mathcal{L}$ is a combination of photometric loss and regularization terms specific to the human domain:
+$$ \mathcal{L} = \mathcal{L}_{photo} + \lambda_{pose} \mathcal{L}_{pose} + \lambda_{weight} \mathcal{L}_{weight} $$
+Where $\mathcal{L}_{photo}$ is the standard L1 + SSIM loss. $\mathcal{L}_{pose}$ regularizes the pose refinement to stay within plausible human motion bounds. $\mathcal{L}_{weight}$ ensures the weight field does not overfit. [G] The exact formulation of $\mathcal{L}_{pose}$ and $\mathcal{L}_{weight}$ is not detailed in the provided sources, but they serve to constrain the optimization to physically plausible human dynamics.
+
+**Parameters:**
+*   Training time: Minutes (specifically, efficient enough for minute-level training).
+*   Rendering speed: 166 FPS.
+
+**Edge Cases and Pitfalls:**
+*   **Sparse Views:** Monocular input can lead to ambiguity. The method mitigates this by using the human prior (SMPL-like structure) during initialization and optimization.
+*   **Dynamic Clothing:** Fast-moving clothing can cause artifacts. The weight field module helps capture these fine details, but extreme occlusion may still result in floating Gaussians if not handled by the joint optimization with the scene (see Subtopics).
+
+## Subtopics
+
+### Joint Human & Scene Optimization
+This variant optimizes human and scene Gaussians jointly. The human model acts as a constraint for the scene reconstruction, which helps mitigate floating Gaussians (floaters) that typically appear in areas around intersections or occlusions when using sparse input views. This approach contrasts with sequential optimization (scene first, then human) which is prone to such artifacts [S3].
+
+## Operating characteristics
+*   **Time Complexity:** Training is highly efficient, completing in minutes. This is a significant improvement over iterative neural radiance field methods.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Achieves real-time rendering at 166 FPS [S1][S2, unofficial].
+*   **Strengths:** Minute-level training time; real-time rendering; high-fidelity dynamic human reconstruction from monocular video.
+*   **Limitations:** Relies on monocular input, which may suffer from depth ambiguity without strong priors; performance may degrade with extreme occlusions or very sparse views unless joint optimization is used.
+*   **When to use:** When real-time rendering and fast training are required for dynamic human avatars from monocular video.
+*   **When not to use:** When multi-view stereo data is available and higher geometric accuracy is needed without relying on human priors; when physical cloth simulation is required (use [GaussianBody](9209-gaussianbody.md) instead).
+
+## Background
+GauHuman was introduced as part of the recent advances in 3D Gaussian Splatting applications for dynamic digital human modeling. It addresses the limitations of standard 3DGS in dynamic scenes by redesigning the densification process. It is cited alongside other methods like GaussianBody, GaussianAvatar, and SplattingAvatar in surveys of 3DGS advancements [S1][S2, unofficial]. The method is also known as HUGS (Human Gaussian Splats) in some contexts [S3].
+
+## Sources
+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)
+[S3] HUGS: Human Gaussian Splats, https://doi.org/10.1109/cvpr52733.2024.00055, fetched 2026-10-26

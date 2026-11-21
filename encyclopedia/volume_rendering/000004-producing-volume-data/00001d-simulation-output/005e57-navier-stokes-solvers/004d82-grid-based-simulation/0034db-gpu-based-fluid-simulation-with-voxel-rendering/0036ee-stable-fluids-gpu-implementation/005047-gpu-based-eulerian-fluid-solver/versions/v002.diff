@@ -1,0 +1,210 @@
+--- v001.md
++++ v002.md
+@@ -4,61 +4,82 @@
+ 
+ ## Overview
+-A GPU-based Eulerian fluid solver that simulates and renders volumetrics at VR resolutions and refresh rates using operator splitting to approximately solve the Navier-Stokes equations [S1]. It sets itself apart by utilizing half-precision 3D textures for state storage and a specific geometric multigrid configuration to achieve interactive frame rates on consumer hardware, building on [Stable Fluids (GPU Implementation)](7906-stable-fluids-gpu-implementation.md).
++A GPU-based Eulerian fluid solver that simulates and renders volumetrics at VR resolutions and refresh rates by using operator splitting to approximately solve the Navier-Stokes equations [S1]. It distinguishes itself by integrating a custom injection kernel for source terms and a geometric multigrid pressure solver optimized for half-precision 3D textures, enabling interactive frame rates on consumer hardware [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Voxel position, timestep ($\Delta t$), and scene-specific parameters (e.g., buoyancy coefficients).
+-*   **Outputs:** Updated velocity, density, and temperature fields.
++*   **Inputs:** Voxel position, timestep ($\Delta t$), grid dimensions, and source definitions (density, temperature, forces).
++*   **Outputs:** Updated velocity, density, and temperature fields stored in 3D textures.
+ 
+ **Data Structures:**
+-State is tracked at each grid cell center. The fields are:
+-1.  **Velocity:** 3-component vector.
+-2.  **Density:** Scalar.
+-3.  **Temperature:** Scalar.
++*   State is tracked at each grid cell center.
++*   Fields: Velocity ($\mathbf{u}$), Density ($\rho$), Temperature ($T$).
++*   Storage: 3D textures with 16-bit float formats (half-precision) [S1].
++*   Voxel scale: 1.5 cm [S1].
+ 
+-These are stored in 3D textures using 16-bit float formats (half-precision) [S1].
++**Steps:**
+ 
+-**Numbered Steps:**
+-1.  **Injection:** A custom injection kernel receives voxel position and timestep. It adds density and temperature to the simulation and applies arbitrary forces, such as buoyancy [S1].
+-2.  **Advection:** Semi-Lagrangian advection is performed using a MacCormack backtrace [S1].
+-    *   Velocity is sampled using linear interpolation during the backtrace.
+-    *   All advected properties (velocity, density, temperature) are resampled using cubic interpolation [S1].
++1.  **Injection:** A custom kernel receives voxel position and timestep. It adds density and temperature to the simulation and applies arbitrary forces, such as buoyancy [S1].
++2.  **Advection:**
++    *   Uses semi-Lagrangian advection with a MacCormack backtrace [S1].
++    *   Linear sampling is used for velocity during the backtrace [S1].
++    *   Cubic interpolation is used for the final resample of all advected properties [S1].
+     *   Vorticity confinement force is optionally applied [S1].
+-3.  **Projection:** Pressure projection is solved using geometric multigrid with a single V-cycle [S1].
+-    *   Smoothing uses Jacobi iteration.
+-    *   The V-cycle consists of 1 pre-smooth pass and 2 post-smooth passes [S1].
+-    *   Transfer operators are full-weight (prolongation) and trilinear (restriction) [S1].
+-    *   On the 3rd, coarsest grid, red-black Gauss-Seidel with successive over-relaxation (SOR) is used for the solve [S1].
+-
+-**Parameters:**
+-*   **Voxel scale:** 1.5 cm [S1].
+-*   **Multigrid levels:** 3 levels (implied by "3rd, coarsest grid") [S1].
+-*   **Smoothing passes:** 1 pre-smooth, 2 post-smooth [S1].
++3.  **Projection:**
++    *   Pressure projection is solved using geometric multigrid with a single V-cycle [S1].
++    *   The V-cycle uses 1 pre-smooth and 2 post-smooth passes [S1].
++    *   Full-weight and trilinear transfer operators are used [S1].
++    *   Jacobi iteration is used for smoothing [S1].
++    *   On the 3rd, coarsest grid, red-black Gauss-Seidel with successive over-relaxation (SOR) is used [S1].
+ 
+ **Pseudocode:**
++
+ ```python
+-def step_simulation(grid, dt):
++def solve_step(grid, dt):
+     # 1. Injection
+     # Custom kernel adds density, temperature, and forces (e.g., buoyancy)
+     # based on voxel position and dt.
+-    apply_injection(grid, dt)
++    inject_sources(grid, dt)
+ 
+     # 2. Advection
+     # Semi-Lagrangian advection with MacCormack backtrace
+-    advect_velocity_mac_cormack(grid, dt)
+-    advect_scalars_cubic(grid, dt)
++    advect_velocity(grid, dt, sample_type='linear')
++    advect_properties(grid, dt, sample_type='cubic')
+     
+     # Optional vorticity confinement
+-    apply_vorticity_confinement(grid, dt)
++    if apply_vorticity_confinement:
++        apply_vorticity_confinence(grid, dt)
+ 
+     # 3. Projection
+-    # Geometric multigrid V-cycle
++    # Geometric multigrid with single V-cycle
+     solve_pressure_multigrid(grid)
+ 
+-def advect_velocity_mac_cormack(grid, dt):
+-    # Backtrace step: sample velocity using linear interpolation
+-    # Forward step: resample using cubic interpolation
+-    # (Implementation details of MacCormack specific to this solver)
+-    pass
++def inject_sources(grid, dt):
++    # Iterates over active voxels
++    for voxel in grid.active_voxels:
++        # Add density and temperature
++        grid.density[voxel] += source_density(voxel.pos, dt)
++        grid.temperature[voxel] += source_temperature(voxel.pos, dt)
++        # Apply forces like buoyancy
++        grid.velocity[voxel] += force_buoyancy(grid.temperature[voxel], dt)
++
++def advect_velocity(grid, dt, sample_type):
++    # Backtrace step for velocity
++    # Uses linear sampling for velocity during backtrace
++    old_velocity = grid.velocity.copy()
++    for voxel in grid:
++        # Trace back along velocity field
++        trace_pos = voxel.pos - old_velocity[voxel] * dt
++        # Linear sampling for velocity backtrace
++        grid.velocity[voxel] = sample_linear(grid.velocity, trace_pos)
++
++def advect_properties(grid, dt, sample_type):
++    # Advect density and temperature
++    # Uses cubic interpolation for final resample
++    for field in [grid.density, grid.temperature]:
++        old_field = field.copy()
++        for voxel in grid:
++            trace_pos = voxel.pos - grid.velocity[voxel] * dt
++            # Cubic interpolation for resample
++            field[voxel] = sample_cubic(old_field, trace_pos)
+ 
+ def solve_pressure_multigrid(grid):
+@@ -67,56 +88,49 @@
+     jacobi_smooth(grid, iterations=1)
+     
+-    # Coarsen using trilinear transfer
+-    coarse_grid = restrict(grid)
++    # Coarsening: Full-weight and trilinear transfer
++    coarse_grids = create_coarse_grids(grid, levels=3)
+     
+-    # Solve on coarsest grid (3rd level) using red-black Gauss-Seidel with SOR
+-    solve_coarsest_grid_red_black_sor(coarse_grid)
++    # Solve on coarsest grid (3rd level)
++    # Red-black Gauss-Seidel with SOR
++    solve_coarsest_grid(coarse_grids[2], method='red_black_gauss_seidel_sor')
+     
+-    # Prolongate using full-weight transfer
+-    grid.residual += prolongate(coarse_grid)
++    # Prolongation and Post-smoothing
++    for i in range(2, 0, -1):
++        prolongate_and_correct(coarse_grids[i], coarse_grids[i-1])
++        jacobi_smooth(coarse_grids[i-1], iterations=2)
+     
+-    # Post-smoothing: 2 Jacobi passes
+-    jacobi_smooth(grid, iterations=2)
++    # Apply correction to fine grid
++    apply_pressure_correction(grid, coarse_grids[0])
++
++def jacobi_smooth(grid, iterations):
++    for _ in range(iterations):
++        for voxel in grid:
++            # Standard Jacobi update for pressure
++            grid.pressure[voxel] = update_jacobi(grid.pressure, voxel)
++
++def solve_coarsest_grid(grid, method):
++    if method == 'red_black_gauss_seidel_sor':
++        # Red-black ordering
++        for color in ['red', 'black']:
++            for voxel in grid.get_voxels_by_color(color):
++                # Gauss-Seidel with SOR
++                grid.pressure[voxel] = update_gauss_seidel_sor(grid.pressure, voxel)
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Half-precision storage is used; the source notes negligible visual impact but acknowledges bandwidth constraints [S1].
+-*   **Resolution:** Performance is limited by low simulation resolution necessary for VR on current hardware [S1].
+ 
+ ## Subtopics
+ 
+-### Free-Slip Boundary Condition Enforcement
+-Handles boundary conditions for fluid velocity. [Free-Slip Boundary Condition Enforcement](7908-free-slip-boundary-condition-enforcement.md)
+-
+-### Projection Method
+-The mathematical framework for enforcing incompressibility. [Projection Method](8336-projection-method.md)
+-
+-### Operator Splitting for Fluid Dynamics
+-The technique of separating advection, diffusion, and pressure steps. [Operator Splitting for Fluid Dynamics](12465-operator-splitting-for-fluid-dynamics.md)
++### [FluidX12 Simulation Pipeline](16601-fluidx12-simulation-pipeline.md)
++FluidX12 is a real-time volume rendering pipeline that simulates smoke using an Eulerian grid method to solve the Navier-Stokes equations. It distinguishes itself by integrating viewport-resolution independent anti-aliased ray marching on interior faces in cube-map space, allowing for high-quality volumetric rendering at interactive frame rates. Unlike standard fluid solvers that output static data, this pipeline couples the simulation state directly with a specialized ray-marching renderer that supports both 2D and 3D domains.
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   Memory: 3D textures with half-precision floats for velocity, density, and temperature [S1].
+-*   Time: Linear with respect to grid size per stage, dominated by advection and multigrid projection [S1].
+-
+-**Measured Performance:**
+-Tested on NVIDIA RTX 3080 with a 1.5 cm voxel scale [S1]:
+-*   **Smoke Rings (232 x 232 x 160):** Total 9.63 ms.
+-*   **Dust Devil (160 x 256 x 160):** Total 9.65 ms.
+-*   **Wall of Fire (200 x 200 x 200):** Total 9.73 ms.
+-All scenarios meet the 11.11 ms budget for 90 Hz VR [S1].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Capable of simulating and rendering at VR resolutions and refresh rates [S1]. Half-precision storage doubles performance on bandwidth-constrained portions [S1].
+-*   **Limitations:** Limited by low simulation resolution necessary to run in VR on current hardware [S1].
+-
+-**When to use:**
+-Interactive VR volumetric simulation where frame rate is critical.
+-
+-**When not to use:**
+-High-fidelity offline rendering requiring higher resolution or thin flame combustion (not currently supported) [S1].
++*   **Performance:** On an NVIDIA RTX 3080, the solver achieves frame times well within the 11.11ms budget for 90 Hz VR [S1].
++    *   Smoke Rings (232x232x160): 9.63ms total [S1].
++    *   Dust Devil (160x256x160): 9.65ms total [S1].
++    *   Wall of Fire (200x200x200): 9.73ms total [S1] [S1].
++*   **Memory:** Uses half-precision (16-bit float) 3D textures for velocity, density, and temperature, effectively doubling performance on bandwidth-constrained portions [S1].
++*   **Limitations:** Primarily limited by low simulation resolution necessary to run in VR on current hardware [S1].
+ 
+ ## Background
+-Originated by Charlie Shenton in 2023 with the "Ignis" solver, presented at SIGGRAPH Asia 2023 Posters [S1]. It builds on Stam's operator splitting [S1] and Selle's MacCormack advection [S1].
++The method is presented in "Ignis: Eulerian Fluid Simulation and Rendering at VR Frame Rates" by Charlie Shenton (SIGGRAPH Asia 2023 Posters) [S1]. It builds on operator splitting [Stam 1999] and MacCormack backtrace advection [Selle et al. 2008].
+ 
+ ## Sources

@@ -1,0 +1,161 @@
+# Deforming SDF Sphere with Noise
+
+Also called: Animated Noise SDF Sphere, Animated SDF Displacement, SDF Sphere with Noise Displacement, Signed Distance Field (SDF) Sphere with Noise Displacement
+
+## Overview
+This method defines an implicit surface by displacing the radius of a base sphere using animated procedural noise, creating a time-varying organic shape [S1, unofficial]. It distinguishes itself from static SDF primitives by combining a low-frequency sinusoidal "breathing" modulation with high-frequency fractal Brownian motion (fBM) and sinusoidal products to generate complex surface topology [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+*   **Inputs**:
+    *   $\mathbf{p}$: The 3D point in world space to evaluate.
+    *   $t$: The global animation time (`g_time`).
+    *   `sphere_radius`: The base radius $R$ of the sphere.
+    *   `noise_amplitude`: The scaling factor $A_{noise}$ for the displacement magnitude.
+*   **Outputs**:
+    *   $d(\mathbf{p})$: The signed distance from $\mathbf{p}$ to the deformed surface.
+
+### Data Structures
+No auxiliary data structures are required; the method relies on scalar arithmetic and vector operations [S1, unofficial].
+
+### Parameters
+*   `sphere_radius` ($R$): Base radius of the sphere [S1, unofficial].
+*   `noise_amplitude` ($A_{noise}$): Scaling factor for displacement magnitude [S1, unofficial].
+*   `g_time` ($t$): Global time variable, advancing per frame [S1, unofficial].
+
+### Formulas
+The signed distance is calculated as:
+$$
+d(\mathbf{p}) = \|\mathbf{p}\| - (r(t) + D(\mathbf{p}, t))
+$$
+
+Where:
+1.  **Base Radius** $r(t)$:
+    $$
+    r(t) = R + A_{breath} \sin(\omega_{breath} t)
+    $$
+    With $A_{breath} = 0.25$ and $\omega_{breath} = 2.0$ [S1, unofficial].
+
+2.  **Sinusoidal Displacement** $D_{sin}$:
+    $$
+    D_{sin} = \sin(16 x + \phi) \sin(16 y + \phi) \sin(16 z + \phi)
+    $$
+    Where $\phi = 6.0 t$ [S1, unofficial].
+
+3.  **fBM Displacement** $D_{fbm}$:
+    $$
+    D_{fbm} = \text{fBM}(2\mathbf{p} + \mathbf{v}(t))
+    $$
+    Where $\mathbf{v}(t) = (t, 0.7t, 1.3t)$ [S1, unofficial].
+
+4.  **Total Displacement** $D$:
+    $$
+    D = A_{noise} \left( 0.6 D_{sin} + 0.8 (D_{fbm} - 0.5) \right)
+    $$
+    The term $(D_{fbm} - 0.5)$ centers the fBM output, assuming it ranges in $[0, 1]$ [S1, unofficial].
+
+### Steps
+1.  Calculate the time-varying base radius $r$ using the sine wave modulation [S1, unofficial].
+2.  Calculate the phase offset $\phi$ for the sinusoidal component [S1, unofficial].
+3.  Compute the sinusoidal displacement $D_{sin}$ by multiplying three sine waves modulated by the point coordinates and phase [S1, unofficial].
+4.  Compute the fBM displacement $D_{fbm}$ by evaluating the noise function at a scaled and time-shifted position [S1, unofficial].
+5.  Combine the sinusoidal and fBM components into a total displacement $D$, weighted by `noise_amplitude` [S1, unofficial].
+6.  Return the signed distance as the Euclidean norm of $\mathbf{p}$ minus the sum of the displaced radius $r$ and displacement $D$ [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class Vec3:
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+    def __mul__(self, s):
+        return Vec3(self.x * s, self.y * s, self.z * s)
+    def __add__(self, other):
+        return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
+    def norm(self):
+        return math.sqrt(self.x**2 + self.y**2 + self.z**2)
+
+def hash3d(v):
+    # Standard deterministic hash for value noise [G]
+    h = int(v.x * 127.1 + v.y * 311.7 + v.z * 74.7)
+    h = (h << 13) ^ h
+    return 1.0 - 2.0 * ((h * (h * h * 15731 + 789221) + 1376312589) & 0x7fffffff) / 0x7fffffff
+
+def value_noise(p):
+    # Trilinear interpolation of surrounding hash values [G]
+    ix, iy, iz = int(math.floor(p.x)), int(math.floor(p.y)), int(math.floor(p.z))
+    fx, fy, fz = p.x - ix, p.y - iy, p.z - iz
+    fx, fy, fz = fx*fx*(3-2*fx), fy*fy*(3-2*fy), fz*fz*(3-2*fz)
+    def lerp(a, b, t): return a + t * (b - a)
+    n00 = lerp(hash3d(Vec3(ix, iy, iz)), hash3d(Vec3(ix+1, iy, iz)), fx)
+    n10 = lerp(hash3d(Vec3(ix, iy+1, iz)), hash3d(Vec3(ix+1, iy+1, iz)), fx)
+    n01 = lerp(hash3d(Vec3(ix, iy, iz+1)), hash3d(Vec3(ix+1, iy, iz+1)), fx)
+    n11 = lerp(hash3d(Vec3(ix, iy+1, iz+1)), hash3d(Vec3(ix+1, iy+1, iz+1)), fx)
+    return lerp(lerp(n00, n10, fy), lerp(n01, n11, fy), fz)
+
+def fractal_brownian_motion(p, octaves=4):
+    # Layered value noise with decreasing amplitude and frequency [G]
+    val = 0.0
+    amp = 1.0
+    freq = 1.0
+    for _ in range(octaves):
+        val += amp * value_noise(p * freq)
+        amp *= 0.5
+        freq *= 2.0
+    return val
+
+def signed_distance(p, g_time, sphere_radius, noise_amplitude):
+    # 1. Base radius breathes over time
+    r = sphere_radius + 0.25 * math.sin(g_time * 2.0)
+    
+    # 2. Phase for sinusoidal displacement
+    phase = g_time * 6.0
+    
+    # 3. Sinusoidal displacement component
+    sin_disp = math.sin(16.0 * p.x + phase) * math.sin(16.0 * p.y + phase) * math.sin(16.0 * p.z + phase)
+    
+    # 4. Fractal Brownian Motion displacement
+    time_shift = Vec3(g_time, g_time * 0.7, g_time * 1.3)
+    scaled_p = Vec3(p.x * 2.0, p.y * 2.0, p.z * 2.0)
+    fbm = fractal_brownian_motion(scaled_p + time_shift)
+    
+    # 5. Total displacement
+    displacement = noise_amplitude * (0.6 * sin_disp + 0.8 * (fbm - 0.5))
+    
+    # 6. Final SDF
+    return p.norm() - (r + displacement)
+
+def sphere_trace(orig, dir, max_steps=128, min_step=0.01, sphere_radius=1.5, noise_amplitude=1.0, g_time=0.0):
+    pos = Vec3(orig.x, orig.y, orig.z)
+    for _ in range(max_steps):
+        d = signed_distance(pos, g_time, sphere_radius, noise_amplitude)
+        if d < 0.0:
+            return True
+        step = max(d * 0.1, min_step)
+        pos = Vec3(pos.x + dir.x * step, pos.y + dir.y * step, pos.z + dir.z * step)
+    return False
+```
+
+### Edge Cases and Pitfalls
+*   **fBM Range**: The formula assumes `fractal_brownian_motion` returns values in $[0, 1]$; if the implementation returns $[-1, 1]$, the centering term $(D_{fbm} - 0.5)$ will shift the displacement bias [S1, unofficial].
+*   **Precision**: High-frequency sine terms ($16x$) may cause precision issues if coordinates are large; normalizing or clamping input coordinates might be necessary for stability in large scenes [G].
+*   **Self-Intersection**: Large `noise_amplitude` values can cause the surface to fold over itself, leading to incorrect normals if computed via gradient, though the SDF value remains valid for ray marching [G].
+
+## Operating characteristics
+*   **Time Complexity**: Not given in the sources.
+*   **Memory Complexity**: Not given in the sources.
+*   **Strengths**: Not given in the sources.
+*   **Limitations**: Not given in the sources.
+*   **When to use**: Not given in the sources.
+*   **When not to use**: Not given in the sources.
+
+## Background
+The method is implemented in the `OmerNYU/Kaboom_Diffusion` repository, which provides a ray-marched renderer using Signed Distance Fields [S1, unofficial]. The displacement combines sinusoidal products and fBM to animate the implicit surface [S1, unofficial].
+
+## Sources
+[S1] OmerNYU/Kaboom_Diffusion, https://github.com/OmerNYU/Kaboom_Diffusion, fetched 2026-10-26 (unofficial)

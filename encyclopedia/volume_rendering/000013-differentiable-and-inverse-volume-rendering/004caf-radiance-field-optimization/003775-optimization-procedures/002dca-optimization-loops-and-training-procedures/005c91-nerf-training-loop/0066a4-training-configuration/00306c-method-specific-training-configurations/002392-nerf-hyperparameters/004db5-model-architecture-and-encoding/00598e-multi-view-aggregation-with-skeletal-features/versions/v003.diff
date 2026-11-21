@@ -1,0 +1,226 @@
+--- v002.md
++++ v003.md
+@@ -4,175 +4,79 @@
+ 
+ ## Overview
+-This method improves pose refinement and feature representation in articulated neural radiance fields by incorporating multi-view constraints when motion is captured from multiple cameras. It differs from single-view approaches by averaging joint rotation estimates across views without requiring camera calibration, and combines time-augmented skeletal features with pixel-aligned image features via a cross-attention mechanism to produce robust density and color predictions [S1, S2, unofficial].
++This method aggregates complementary geometric and appearance information from multiple camera views to enhance the radiance field representation of dynamic humans. It combines time-augmented skeletal features, which provide robust geometric priors via a SMPL model, with pixel-aligned image features, which capture high-frequency visual details. By using a cross-attention mechanism to weigh these features based on their compatibility, the method resolves ambiguities in single-view observations and improves rendering quality for articulated subjects [S1, unofficial]. It differs from standard NeRF by explicitly integrating skeletal priors and multi-view consistency through attention, rather than relying solely on positional encoding of raw coordinates [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of $C$ input images $I_{c,t}$ at time $t$; a query 3D point $x \in \mathbb{R}^3$; viewing direction $d \in \mathbb{R}^3$; skeletal pose parameters $\theta_k$; and camera parameters.
+-*   **Outputs:** Predicted density $\tilde{\tau}_t(x)$ and color $\tilde{r}^g_{bt}(x)$ for the query point.
++*   **Inputs:** A 3D query point $x \in \mathbb{R}^3$ in world space; a set of $C$ input images $I_{c,t}$ at time $t$; camera parameters for each view; a SMPL model instance at time $t$; and the viewing direction $d \in \mathbb{R}^3$.
++*   **Outputs:** Volume density $\tilde{\sigma}_t(x)$ and RGB color $\tilde{r}^g_{bt}(x)$ for the query point.
+ 
+ **Data Structures:**
+-*   Skeletal features $s^0_{c,t}$: Retrieved via trilinear interpolation in SMPL space using SparseConvNet. Dimension $d$.
+-*   Pixel-aligned features $p^x_{c,t}$: Retrieved by projecting $x$ onto image $I_{c,t}$. Dimension $d$.
+-*   Keys and Values: Learned linear projections $k(\cdot)$ and $v(\cdot)$ mapping features to key/value spaces.
++*   **Skeletal Features ($s^0_{c,t}$):** A dense 3D volume of features $d$-dimensional, defined on the SMPL mesh vertices and interpolated into space.
++*   **Pixel-aligned Features ($p^x_{c,t}$):** A $d$-dimensional feature vector extracted from the image $I_{c,t}$ corresponding to the 2D projection of $x$.
++*   **Attention Weights ($mv\_att^x$):** A $C \times C$ matrix representing cross-view compatibility.
+ 
+ **Steps:**
+ 
+-1.  **Pose Initialization (Multi-view Constraint):**
+-    For each joint $k$, initialize the rotation $\theta_k$ by averaging individual joint rotation estimates from all $V$ views $v \in [1, \dots, V]$. Rotations are relative to the parent and root, allowing averaging without camera calibration. Global position and orientation remain view-specific [S1, unofficial].
+-    
+-    The multi-view loss function used for refinement is:
+-    $$
+-    L_{MV}(\theta, \phi) = \sum_{v} \sum_{k} \left( d(C_\phi(\theta_k, \omega_{k,0}^{(v)}, \omega_{k,1}^{(v)}), I_k) + \lambda_\theta \|\theta_k - \hat{\theta}_k\|^2 + \lambda_t \|\frac{\partial^2 \theta_k}{\partial t^2}\|^2 \right)
+-    $$
+-    where $\theta_k$ is shared across all views, but $\omega_{k,0}^{(v)}$ and $\omega_{k,1}^{(v)}$ (relative camera position and orientation) are estimated independently per view [S1, unofficial].
++1.  **Retrieve Skeletal Feature:**
++    Map the query point $x$ to the local coordinate space of the SMPL model at time $t$. Retrieve the skeletal feature $s^0_{c,t}$ at this location using trilinear interpolation within the SparseConvNet representation of the SMPL volume [S1, unofficial]. This feature is time-augmented, encoding geometric deviations of the SMPL vertices.
+ 
+-2.  **Feature Retrieval:**
+-    *   Retrieve skeletal feature $s^0_{c,t}$ at query location $x$ via trilinear interpolation in SMPL space [S2, unofficial].
+-    *   Sample pixel-aligned image feature $p^x_{c,t}$ via direct $\mathbb{R}^3 \rightarrow \mathbb{R}^2$ projection of $x$ on image $I_{c,t}$ [S2, unofficial].
++2.  **Sample Pixel-aligned Feature:**
++    Project the query point $x$ onto the 2D image plane of each camera view $c$ to obtain pixel coordinates. Sample the feature $p^x_{c,t}$ from the image $I_{c,t}$ at these coordinates. This feature is time-specific and represents the exact visual appearance at the query location [S1, unofficial].
+ 
+-3.  **Multi-view Cross-Attention:**
+-    Construct attention weights $mv\_att^x \in \mathbb{R}^{C \times C}$ using dot product between skeletal keys and pixel-aligned keys, scaled by dimension:
+-    $$
+-    mv\_att^x = \psi \left( \frac{1}{\sqrt{d}} k(s^0_{1:C,t}) \cdot k(p^x_{1:C,t})^T \right)
+-    $$
+-    where $\psi$ is the softmax operator along the second axis (columns) [S2, unofficial].
++3.  **Construct Multi-view Cross-Attention:**
++    Let $s^0_{1:C,t} = \{s^0_{c,t} \mid c=1,\dots,C\}$ and $p^x_{1:C,t} = \{p^x_{c,t} \mid c=1,\dots,C\}$ be the sets of skeletal and pixel-aligned features across all $C$ views.
++    Compute keys $k(\cdot)$ and values $v(\cdot)$ for both feature types using learned linear layers (independent from temporal transformers).
++    Calculate the attention weights $mv\_att^x \in \mathbb{R}^{C \times C}$ using the dot product between skeletal keys and pixel-aligned keys, scaled by dimension:
++    $$ mv\_att^x = \psi \left( \frac{k(s^0_{1:C,t}) \cdot k(p^x_{1:C,t})^T}{\sqrt{d}} \right) $$
++    where $\psi$ is the softmax operator applied along the second axis (columns) [S1, unofficial]. This highlights confident observations where skeletal and image features are compatible.
+ 
+-4.  **View-wise Representation:**
+-    Compute view-wise representation $z^x_{1:C,t}$ by combining weighted pixel-aligned values and skeletal values:
+-    $$
+-    z^x_{1:C,t} = mv\_att^x \cdot v(p^x_{1:C,t}) + v(s^0_{1:C,t})
+-    $$
+-    where $z^x_{c,t} \in \mathbb{R}^d$ [S2, unofficial].
++4.  **Compute View-wise Representation:**
++    Aggregate the values from both feature types using the attention weights:
++    $$ z^x_{1:C,t} = mv\_att^x \cdot v(p^x_{1:C,t}) + v(s^0_{1:C,t}) $$
++    Here, $z^x_{c,t} \in \mathbb{R}^d$ is the view-wise representation for view $c$. The term $mv\_att^x \cdot v(p^x_{1:C,t})$ re-weights the pixel-aligned features based on skeletal compatibility, while $v(s^0_{1:C,t})$ adds the skeletal value directly [S1, unofficial].
+ 
+-5.  **Meta-time and Meta-view Representation:**
+-    Compute the final representation $z^x_t$ as the mean across all views:
+-    $$
+-    z^x_t = \frac{1}{C} \sum_{c=1}^{C} z^x_{c,t}
+-    $$
+-    [S2, unofficial].
++5.  **Compute Meta-time and Meta-view Representation:**
++    Average the view-wise representations across all $C$ views to obtain a single robust feature vector $z^x_t \in \mathbb{R}^d$:
++    $$ z^x_t = \frac{1}{C} \sum_{c=1}^{C} z^x_{c,t} $$
++    This step fuses multi-view information into a meta-representation [S1, unofficial].
+ 
+-6.  **Density and Color Prediction:**
+-    *   Density $\tilde{\tau}_t(x)$ is computed using an MLP $\text{MLP}_\tau$ with four linear layers applied to $z^x_t$ [S2, unofficial].
+-    *   Color $\tilde{r}^g_{bt}(x)$ is computed using an MLP $\text{MLP}_{rgb}$ with two linear layers. The input is the mean of pixel-aligned values $v(p^x_{c,t})$ concatenated with the positional encoding $\gamma_d(d)$ of the viewing direction $d$:
+-        $$
+-        \tilde{r}^g_{bt}(x) = \text{MLP}_{rgb} \left( \frac{1}{C} \sum_{c=1}^{C} v(p^x_{c,t}) ; \gamma_d(d) \right)
+-        $$
+-        where $\gamma_d: \mathbb{R}^3 \rightarrow \mathbb{R}^{6 \times l}$ is a positional encoding with $2 \times l$ basis functions [S2, unofficial].
++6.  **Predict Density:**
++    Pass $z^x_t$ through a Multi-Layer Perceptron $MLP_\sigma$ consisting of four linear layers to predict the volume density:
++    $$ \tilde{\sigma}_t(x) = MLP_\sigma(z^x_t) $$
+ 
+-**Pseudocode:**
+-
+-```python
+-def multi_view_aggregation(query_point_x, viewing_direction_d, images, skeletal_features, num_views, feature_dim):
+-    """
+-    Computes density and color for a query point using multi-view aggregated features.
+-    
+-    Args:
+-        query_point_x: 3D point (x, y, z)
+-        viewing_direction_d: 3D viewing direction vector
+-        images: List of C images I_{c,t}
+-        skeletal_features: Pre-computed skeletal features in SMPL space
+-        num_views: Number of views C
+-        feature_dim: Dimension d of features
+-        
+-    Returns:
+-        density: Scalar density value
+-        color: RGB color vector
+-    """
+-    
+-    # Step 1: Retrieve features
+-    skeletal_keys = []
+-    pixel_keys = []
+-    pixel_values = []
+-    skeletal_values = []
+-    
+-    for c in range(num_views):
+-        # Retrieve skeletal feature via trilinear interpolation in SMPL space
+-        s0_c_t = interpolate_skeletal_feature(skeletal_features, query_point_x)
+-        
+-        # Sample pixel-aligned feature via direct projection
+-        p_x_c_t = project_to_image(images[c], query_point_x)
+-        
+-        # Project to keys and values using learned layers
+-        k_s = linear_projection_keys(s0_c_t)
+-        k_p = linear_projection_keys(p_x_c_t)
+-        v_p = linear_projection_values(p_x_c_t)
+-        v_s = linear_projection_values(s0_c_t)
+-        
+-        skeletal_keys.append(k_s)
+-        pixel_keys.append(k_p)
+-        pixel_values.append(v_p)
+-        skeletal_values.append(v_s)
+-        
+-    # Stack into matrices: C x d
+-    S_keys = stack(skeletal_keys) # C x d
+-    P_keys = stack(pixel_keys)    # C x d
+-    P_vals = stack(pixel_values)  # C x d
+-    S_vals = stack(skeletal_values) # C x d
+-    
+-    # Step 2: Compute Attention Weights
+-    # Dot product scaled by 1/sqrt(d)
+-    dot_products = matmul(S_keys, transpose(P_keys)) / sqrt(feature_dim)
+-    
+-    # Softmax along the second axis (columns)
+-    # mv_att is C x C
+-    mv_att = softmax(dot_products, axis=1)
+-    
+-    # Step 3: Compute View-wise Representation
+-    # z_{1:C,t} = mv_att * v(P) + v(S)
+-    # mv_att (C x C) @ P_vals (C x d) -> C x d
+-    weighted_pixel_vals = matmul(mv_att, P_vals)
+-    
+-    # Add skeletal values
+-    z_viewwise = weighted_pixel_vals + S_vals # C x d
+-    
+-    # Step 4: Compute Meta-time and Meta-view Representation
+-    # Mean across views
+-    z_meta = mean(z_viewwise, axis=0) # d
+-    
+-    # Step 5: Compute Density
+-    # MLP_tau with 4 linear layers
+-    density = mlp_density(z_meta)
+-    
+-    # Step 6: Compute Color
+-    # Mean of pixel-aligned values
+-    mean_pixel_vals = mean(P_vals, axis=0) # d
+-    
+-    # Positional encoding of viewing direction
+-    pos_enc = positional_encoding(viewing_direction_d)
+-    
+-    # Concatenate and pass through MLP_rgb (2 linear layers)
+-    color_input = concatenate(mean_pixel_vals, pos_enc)
+-    color = mlp_color(color_input)
+-    
+-    return density, color
+-```
++7.  **Predict Color:**
++    Compute the mean of the pixel-aligned values across views: $\bar{v}_p = \frac{1}{C} \sum_{c=1}^{C} v(p^x_{c,t})$.
++    Apply positional encoding $\gamma_d(d)$ to the viewing direction $d$ (using $2 \times l$ basis functions as in [28]).
++    Concatenate the mean pixel-aligned value and the encoded direction, then pass through $MLP_{rgb}$ (two linear layers):
++    $$ \tilde{r}^g_{bt}(x) = MLP_{rgb} \left( [\bar{v}_p; \gamma_d(d)] \right) $$
++    Note: The source formula shows $MLP_{rgb}$ taking the mean of values and the direction encoding [S1, unofficial].
+ 
+ **Parameters:**
+-*   $\lambda_\theta, \lambda_t$: Regularization weights for pose refinement [S1, unofficial].
+-*   $d$: Feature dimension [S2, unofficial].
+-*   $l$: Half the number of basis functions in positional encoding [S2, unofficial].
++*   $d$: Feature dimension (Not given in the sources).
++*   $C$: Number of input views.
++*   $l$: Number of frequency bands for directional encoding (Not given in the sources).
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Camera Calibration:** The method assumes relative camera position and orientation are unknown or uncalibrated, relying on relative rotations for averaging [S1, unofficial].
+-*   **Projection Errors:** Direct $\mathbb{R}^3 \rightarrow \mathbb{R}^2$ projection may fail if the query point is not visible in a view; handling of occluded views is not explicitly detailed in the provided notes [S2, unofficial].
+-*   **Sparse Convolution:** Requires efficient implementation of SparseConvNet for trilinear interpolation in SMPL space [S2, unofficial].
++*   **Occlusion:** If a query point is occluded in some views, the pixel-aligned features $p^x_{c,t}$ may be noisy. The attention mechanism mitigates this by down-weighting incompatible views, but extreme occlusion may require robust skeletal priors.
++*   **SMPL Accuracy:** The skeletal feature retrieval depends on the accuracy of the SMPL pose estimation. Errors in SMPL pose will propagate to $s^0_{c,t}$, potentially misleading the attention weights [S1, unofficial].
++*   **Trilinear Interpolation:** Sampling from the SparseConvNet volume requires careful handling of boundaries outside the SMPL mesh. [G] Points outside the SMPL volume should be handled with a fallback or clamping to avoid NaNs.
+ 
+ ## Subtopics
+ 
+ ### [SparseConvNet-based Skeletal Feature Sampling](16444-sparseconvnet-based-skeletal-feature-sampling.md)
+-Samples time-augmented skeletal features at arbitrary 3D query points by diffusing discrete skeletal features into a continuous 3D volume using sparse convolutions. It differs from dense voxelization by processing only occupied voxels, improving efficiency for large 3D spaces. Choose this when memory efficiency for large scenes is critical.
++This method samples time-augmented skeletal features at arbitrary 3D query points by diffusing discrete skeletal features into a continuous 3D volume using sparse convolutions. It differs from dense voxelization by processing only occupied voxels, significantly improving efficiency for large 3D spaces. It is chosen when computational efficiency is critical and the scene contains large empty regions. See [SparseConvNet-based Skeletal Feature Sampling](16444-sparseconvnet-based-skeletal-feature-sampling.md).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of views $C$, the number of joints $L$, and the feature dimension $d$. The cross-attention mechanism involves matrix multiplications of size $C \times C$ and $C \times d$, making it $O(C^2 d + C d^2)$ per query point.
+-*   **Memory Complexity:** Requires storing features for all views and joints. Sparse convolutions reduce memory usage compared to dense voxelization [S2, unofficial].
+-*   **Strengths:** Improves pose refinement without camera calibration; effectively combines geometric (skeletal) and appearance (image) features; robust to multi-view inconsistencies via attention [S1, S2, unofficial].
+-*   **Limitations:** Requires accurate skeletal pose estimation; sensitive to projection errors if views are occluded; computational cost increases with the number of views [S1, S2, unofficial].
+-*   **When to Use:** Multi-view human performance rendering where camera calibration is unavailable or unreliable.
+-*   **When Not to Use:** Single-view scenarios; scenes without articulated human subjects.
++*   **Time Complexity:** Dominated by the multi-view attention mechanism, which is $O(C^2 \cdot d)$ for the attention weights and $O(C \cdot d)$ for the aggregation, plus the MLP inference. The SparseConvNet sampling is efficient due to sparsity.
++*   **Memory Complexity:** Requires storing the SparseConvNet volume for skeletal features and the image features for all views. The attention matrix is $C \times C$.
++*   **Strengths:** Effectively combines geometric priors (SMPL) with visual details (images). Handles multi-view inconsistencies via attention. Improves rendering quality for articulated humans.
++*   **Limitations:** Relies on accurate SMPL pose estimation. Computationally more expensive than standard NeRF due to multi-view processing and attention.
++*   **When to use:** Dynamic human rendering where multi-view consistency and geometric priors are beneficial.
++*   **When not to use:** Static scenes without articulated subjects, or resource-constrained environments where SMPL inference and multi-view attention are too costly.
+ 
+ ## Background
+-Originated in the context of Articulated Neural Radiance Fields (A-NeRF) and Neural Human Performer. A-NeRF introduced multi-view constraints for pose refinement using relative rotations [S1, unofficial]. Neural Human Performer extended this by aggregating skeletal and pixel-aligned features via cross-attention for generalizable radiance fields [S2, unofficial].
++The method originates from the "Neural Human Performer" paper, which introduces a framework for learning generalizable radiance fields for human performance rendering. It builds on the idea of using skeletal priors (SMPL) to regularize the radiance field, extending it with multi-view aggregation to handle dynamic scenes and multiple viewpoints [S1, unofficial]. The multi-view pose refinement variant is described in "A-NeRF," which focuses on articulated neural radiance fields for learning human shape, appearance, and pose, incorporating multi-view constraints for pose refinement [S2, unofficial].
+ 
+ ## Sources
+-[S1] A-NeRF: Articulated Neural Radiance Fields for Learning Human Shape, Appearance, and Pose, https://doi.org/10.48550/arxiv.2102.06199, fetched 2026-10-30 (unofficial)
+-[S2] Neural Human Performer: Learning Generalizable Radiance Fields for Human Performance Rendering, https://doi.org/10.48550/arxiv.2109.07448, fetched 2026-10-30 (unofficial)+[S1] Neural Human Performer: Learning Generalizable Radiance Fields for Human Performance Rendering, https://doi.org/10.48550/arxiv.2109.07448, fetched 2026-10-30 (unofficial)
++[S2] A-NeRF: Articulated Neural Radiance Fields for Learning Human Shape, Appearance, and Pose, https://doi.org/10.48550/arxiv.2102.06199, fetched 2026-10-30 (unofficial)

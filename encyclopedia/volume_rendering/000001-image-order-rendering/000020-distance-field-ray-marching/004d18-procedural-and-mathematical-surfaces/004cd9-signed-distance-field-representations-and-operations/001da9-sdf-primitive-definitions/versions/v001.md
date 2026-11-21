@@ -1,0 +1,72 @@
+# SDF Primitive Definitions
+
+Also called: Signed Distance Field Primitives, Implicit Surface Primitives, Analytical SDFs
+
+## Overview
+SDF Primitive Definitions provide the fundamental analytical building blocks for distance-field ray marching by defining the signed Euclidean distance from any point in 3D space to the surface of a geometric primitive [S2, S5, S6, S12, unofficial]. This method solves the problem of representing complex 3D geometry as a continuous scalar field, replacing explicit mesh topology with implicit distance evaluations [S4, unofficial]. Unlike [Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md) which composites primitives, or [SDF Transformation](1086-sdf-transformation.md) which modifies the input coordinate space, this family defines the fundamental geometric primitives themselves [G]. It is distinguished from mesh-based rendering by allowing complex scenes to be constructed via simple arithmetic on scalar values, providing a conservative distance estimate that guarantees no surface is closer than $d(\mathbf{p})$, preventing ray overshooting [S6, S12, unofficial].
+
+## Shared principles
+All SDF primitives adhere to the definition of a Signed Distance Function (SDF). An SDF is a function $d(\mathbf{p})$ that, given a query point $\mathbf{p} \in \mathbb{R}^3$, returns the shortest Euclidean distance to the nearest surface of the primitive [S2, S5, S6, S12, unofficial]. The sign of the result indicates the point's position relative to the surface:
+- $d(\mathbf{p}) < 0$: The point is inside the primitive.
+- $d(\mathbf{p}) = 0$: The point lies exactly on the surface.
+- $d(\mathbf{p}) > 0$: The point is outside the primitive.
+
+The core mathematical property that enables safe sphere tracing is the Lipschitz condition with constant 1. This guarantees that for any two points $\mathbf{p}_1$ and $\mathbf{p}_2$, $|d(\mathbf{p}_1) - d(\mathbf{p}_2)| \le \|\mathbf{p}_1 - \mathbf{p}_2\|$. Consequently, the value $d(\mathbf{p})$ represents a lower bound on the distance to any other part of the geometry, ensuring that advancing the ray by exactly $d(\mathbf{p})$ will never overshoot the surface [S12, unofficial].
+
+Primitives are typically defined in local coordinate space (centered at the origin, aligned with axes) and transformed to world space via affine transformations (rotation, translation, scaling) applied to the query point $\mathbf{p}$ before evaluation, or by transforming the primitive parameters [G]. Common primitives include spheres, boxes (AABBs), planes, cylinders, cones, and tori [S2, S4, S10, S11, unofficial].
+
+## Subtopics
+
+### [Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md)
+[Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md) is a method for composing multiple SDF primitives into a single implicit surface representing their geometric union. It solves the problem of defining complex scenes without triangle meshes by evaluating the minimum distance from a query point to any primitive in the scene. Unlike [Boolean Operations on Distance Fields](1961-boolean-operations-on-distance-fields.md), which generalizes to intersection and complement, or [Smooth SDF Composition](2685-smooth-sdf-composition.md), which blends surfaces, this method strictly enforces the nearest-surface control required for safe sphere tracing. It builds on [SDF Primitive Definitions](1578-sdf-primitive-definitions.md) by aggregating their outputs.
+
+### [Signed Distance Field (SDF) Primitive Definition](890-signed-distance-field-sdf-primitive-definition.md)
+[A Signed Distance Field (SDF) Primitive Definition](890-signed-distance-field-sdf-primitive-definition.md) defines the fundamental geometric primitives themselves, such as spheres, boxes, and capsules [G]. It is distinguished from [Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md) which composites primitives, or [SDF Transformation](1086-sdf-transformation.md) which modifies the input coordinate space. It is distinguished from mesh-based rendering by allowing complex scenes to be constructed via simple arithmetic on scalar values, providing a conservative distance estimate that guarantees no surface is closer than $d(\mathbf{p})$, preventing ray overshooting.
+
+### [Distance to Natural Quadrics](1559-distance-to-natural-quadrics.md)
+[Distance to Natural Quadrics](1559-distance-to-natural-quadrics.md) provides closed-form Signed Distance Functions (SDFs) for standard solid modeling primitives: planes, spheres, cylinders, cones, and tori. It solves the problem of efficiently querying the Euclidean distance from a query point to these geometric surfaces, which is the core operation in ray marching (sphere tracing). Unlike constructive methods that combine simpler shapes, this method provides direct analytical solutions for complex primitives like tori and cones, which are essential for modeling organic or structural elements without approximation errors. It is distinct from [Constructive SDF Modeling](871-constructive-sdf-modeling-min-combination.md) because it handles primitives that cannot be easily decomposed into unions/intersections of boxes or spheres, and from [Distance to Superquadrics](1561-distance-to-superquadrics.md) because it operates in the standard Euclidean metric rather than $L_p$ norms.
+
+### [Pyroclastic Sphere Primitive](1579-pyroclastic-sphere-primitive.md)
+[Pyroclastic Sphere Primitive](1579-pyroclastic-sphere-primitive.md) is a signed distance field (SDF) primitive that creates organic, turbulent shapes suitable for pyroclastic or fluid-like visual effects by displacing a base sphere's distance function with procedural noise. It distinguishes itself from static SDF primitives by combining a low-frequency sinusoidal "breathing" modulation with high-frequency fractal Brownian motion (fBM) and sinusoidal products to generate complex, time-varying surface topology.
+
+### [Infinite Tiling with Modulo](1632-infinite-tiling-with-modulo.md)
+[Infinite Tiling with Modulo](1632-infinite-tiling-with-modulo.md) is a technique for rendering infinite repeating patterns by using the modulo operator to fold space, allowing a single primitive SDF to be tiled infinitely. It enables ray-marched fractal renderers like Mandelbulbs and Menger sponges by tiling a scene infinitely at essentially zero extra cost. It sets itself apart from [Constructive SDF Modeling](871-constructive-sdf-modeling.md) by avoiding explicit boolean combinations for repetition, instead relying on spatial folding to handle periodicity.
+
+### [Boolean Operations on Distance Fields](1961-boolean-operations-on-distance-fields.md)
+[Boolean Operations on Distance Fields](1961-boolean-operations-on-distance-fields.md) combines primitive distance functions to construct complex implicit surfaces using Constructive Solid Geometry (CSG) logic. This method solves the problem of modeling arbitrary composite shapes without requiring mesh topology, by evaluating the scalar field of the resulting volume at any point in space. It is distinguished from [Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md) by its strict adherence to exact set-theoretic Boolean logic (min/max) rather than smooth approximations, although smooth variants exist.
+
+#### Offset Surface Evaluation
+- **Definition**: A global offset surface is defined geometrically by the implicit equation $d(p) = 0$, where $d(p)$ is the point-to-set distance to a closed skeleton geometry $S$ [S1]. When $d$ is constant, the surface fleshes out the skeleton [S1]. The point-to-set distance is defined as a search through the entire set for the closest point [S1]. If $S$ has a surface normal defined everywhere, the closest point is one of the points on the surface [S1]. It computes the distance from a point to a surface generated by offsetting a skeleton geometry by a fixed distance [S1].
+- **Parameter**: $c$: constant offset distance applied to the skeleton [S1].
+- **Code**: The closest point on a space curve $\mathbf{p}(t)$ satisfies: $(\mathbf{p}(t) - \mathbf{0}) \cdot \mathbf{p}'(t) = 0$ (Eq. 35) [S1].
+- **Pitfall**: Global offsets can create interior surfaces that cause problems in ray-tracing and CSG operations [S1].
+- **Comparison**: Global offsets are implicit and avoid interior surfaces; local offsets are parametric and can cause gradient discontinuities or high-degree algebraic representations [S1].
+
+#### Recursive Signed Distance Fields
+- **Definition**: A technique to compose recursive and fractal scenes by adding a loop to the signed distance function and applying a tiling operator on each iteration [S2, unofficial].
+- **Step**: Wrap recursive construction in bounding boxes to mitigate performance costs. The bounding box is formed by adding a slightly larger version of the primitive distance field base [S2, unofficial].
+- **Pitfall**: Recursive SDFs are costly and impact performance significantly, even with low recursion levels [S2, unofficial].
+
+#### Cylindrical SDF Primitives
+- **Definition**: A technique for rendering implicit geometry defined by Signed Distance Functions (SDFs) using ray marching, specifically for a cap cylinder shape [S3, unofficial].
+- **Step**: Define capCylinder function: $d = \text{abs}(\text{vec2f}(\text{length}(p.yz), p.x)) - \text{vec2}(r, h)$; return $\min(\max(d.x, d.y), 0.) + \text{length}(\max(d, \text{vec2f}(0.)))$ [S3, unofficial]. Calculate distance to outer cylinder: $d2 = \text{capCylinder}(p - \text{vec3f}(0.22, 0.5, 0.5), 0.171, \text{OUTER\_RADIUS})$ [S3, unofficial]. Calculate distance to inner cylinder: $d1 = \text{capCylinder}(p - \text{vec3f}(\text{LIGHT\_POS} + 0.22, 0.5, 0.5), 0.171, \text{INNER\_RADIUS})$ [S3, unofficial]. Return boolean-like SDF: return $\max(-d1, d2)$ [S3, unofficial]. Calculate normal using finite differences with $h=0.001$ and kernel $k=\text{vec2f}(1, -1)$: $\text{normalize}( k.xyy \cdot \text{map}(p + k.xyy \cdot h) + k.yyx \cdot \text{map}(p + k.yyx \cdot h) + k.yxy \cdot \text{map}(p + k.yxy \cdot h) + k.xxx \cdot \text{map}(p + k.xxx \cdot h) )$ [S3, unofficial]. Ray march geometry: Initialize $d = \text{map}(pp)$, $t = \text{abs}(d)$, counter = 0. Loop while counter < 30 and $d > 0.001$: $d = \text{map}(pp + t \cdot \text{rayReflect})$, $t += \text{abs}(d)$, counter++. If $d \le 0.01$, $pp += t \cdot \text{rayReflect}$ [S3, unofficial].
+- **Parameter**: OUTER_RADIUS: Radius of the outer cylinder, value 0.4255 [S3, unofficial]. INNER_RADIUS: Radius of the inner cylinder (light source), value 0.385 [S3, unofficial]. LIGHT_POS: X-offset for the inner cylinder, value 0.035 [S3, unofficial].
+
+#### SDF Room with Planks
+- **Definition**: Computes the signed distance to a room shape composed of two bounding boxes (b1, b2) and a plank surface (b3). The plank surface is repeated periodically along the x-axis with a period of 8 units [S4, unofficial].
+- **Step**: 1. Compute absolute x-coordinate of point p: `float px = abs(p.x);` 2. Compute integer division of px by 8: `int d_px = px / 8;` 3. Compute remainder of px by 8: `px -= d_px * 8;` 4. Construct plank position vector: `vec3 plank_position(px, p.y, p.z);` 5. Compute distance to plank shape b3 at plank_position: `float distance_plank = b3->Distance(plank_position);` 6. Compute distances to boxes b1 and b2 at original point p. 7. Return the minimum of the negated minimum of b1 and b2 distances and the plank distance [S4, unofficial].
+- **Layout**: The Room struct inherits from Shape and contains pointers to three Shape objects (b1, b2, b3) and a Material pointer m [S4, unofficial].
+- **Pitfall**: The modulo operation for periodic repetition uses integer division and subtraction instead of the fmod function for performance. The code comments note this 'even faster modulo' takes 6.1s compared to 6.3s for the while-loop version, but standard fmod or remainder functions are also shown as alternatives [S4, unofficial].
+
+## Background
+The concept of using Signed Distance Fields for rendering was popularized by John C. Hart in his 1989 paper "Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces" [S1]. Hart introduced the term "sphere tracing" to describe the algorithm that uses the SDF value as a safe step size, guaranteeing convergence without overshooting the surface. This method provided a robust alternative to polygon-based rendering for complex implicit surfaces.
+
+Subsequent work expanded the library of available primitives. The use of modulo operations for infinite tiling and recursive structures became a staple of raymarched fractal art, as documented in various educational resources and projects [S2, S3, S4, unofficial]. The formulation of Boolean operations (union, intersection, difference) using min and max functions allows for Constructive Solid Geometry (CSG) modeling directly in the shader or compute kernel, enabling complex scene composition without explicit mesh data [S2, S4, S8, unofficial].
+
+Modern implementations often include specialized primitives for specific visual effects, such as the Pyroclastic Sphere for organic noise-based displacement [S1], and optimized variants for specific hardware or rendering pipelines, such as WebGPU-based implementations [S3, unofficial]. The family continues to evolve with techniques for handling deformations, differentiable rendering, and neural SDFs, but the core analytical primitives remain the foundation of the technique.
+
+## Sources
+[S1] Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces, https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27
+[S2] PDF COS 426 Final Project Writeup Raymarching with Signed Distance Fields, https://jbaum98.github.io/cos426_final_project/writeup.pdf, fetched 2026-10-27 (unofficial)
+[S3] HectorArellanoDev/WebGPUVoxelConeTracing, https://github.com/HectorArellanoDev/WebGPUVoxelConeTracing, fetched 2026-10-26 (unofficial)
+[S4] AlerianEmperor/SDF-Sphere-Tracing, https://github.com/AlerianEmperor/SDF-Sphere-Tracing, fetched 2026-10-26 (unofficial)

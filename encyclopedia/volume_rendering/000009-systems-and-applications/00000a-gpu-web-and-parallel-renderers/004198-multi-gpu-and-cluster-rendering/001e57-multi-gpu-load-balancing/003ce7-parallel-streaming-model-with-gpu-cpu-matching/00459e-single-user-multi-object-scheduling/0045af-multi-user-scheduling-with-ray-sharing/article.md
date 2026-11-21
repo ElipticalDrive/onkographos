@@ -1,0 +1,151 @@
+# Multi-User Scheduling with Ray Sharing
+
+Also called: Multi-user Scheduling Scheme, TaskAssigner Policy
+
+## Overview
+A scheduling scheme for cloud-based neural volume rendering that improves efficiency for multiple users viewing the same object from adjacent angles by sharing rendered rays and preventing starvation [S1, unofficial]. It distinguishes itself from single-user scheduling by explicitly categorizing rendering tasks into "Heavy" (shareable) and "Light" (necessary) types, allowing parallel execution of unique view requirements while amortizing the cost of common geometry across users [S1, unofficial].
+
+## How it works
+The method operates on a cluster with a Master Node (containing `TaskAssigner`) and a `RenderFarm` of GPUs. It optimizes response time $T$ by identifying overlapping rays between users and caching them.
+
+### Inputs and Outputs
+*   **Inputs**: Set of $n$ users, each requesting a view of the same 3D object (e.g., a NeRF or i-NOLF model). Each user $i$ has a target FPS ($FPS_i$).
+*   **Outputs**: Rendered frames for each user, scheduled to minimize total response time $T$ while maintaining fairness and preventing starvation.
+
+### Data Structures
+1.  **Task Classification**:
+    *   **Shareable Rays ($S$)**: Rays common to adjacent angles or global views. Treated as **Heavy Tasks**.
+    *   **Necessary Rays ($i$)**: Rays specific to a user's unique viewing angle. Treated as **Light Tasks**.
+2.  **Farms**:
+    *   **HeavyFarm**: Dedicated queue for Heavy Tasks (shareable rays).
+    *   **LightFarm**: Pool of available GPUs for Light Tasks (necessary rays).
+3.  **Historical Table**: Caches reusable tasks (previously rendered shareable rays) to guide offline rendering [S1, unofficial].
+4.  **User State**:
+    *   `loaded_tasks`: Number of tasks currently loaded for user $u$.
+    *   `target_time`: Calculated deadline for the next frame.
+    *   `starved`: Boolean flag indicating if the user is in a starvation state.
+
+### Parameters
+*   $n$: Number of users.
+*   $k$: Constant coefficient for mesh rendering time [S1, unofficial].
+*   $T_M$: Time for mesh rendering [S1, unofficial].
+*   $T_N$: Time for i-NOLF (or neural) rendering [S1, unofficial].
+*   $FPS_i$: Target frames per second for user $i$ [S1, unofficial].
+*   $t_i$: Moving average of job completion time in seconds for user $i$ [S1, unofficial].
+*   $w_i$: Calculated wait time for user $i$ [S1, unofficial].
+
+### Formulas
+The total response time $T$ is optimized in three stages:
+
+1.  **Baseline (No Sharing)**:
+    $$ T = k T_{MS} + T_{NS} \times n + \sum_{i=0}^{n} (k T_{Mi} + T_{Ni}) $$
+    Where $T_{MS}$ and $T_{NS}$ are mesh and neural times for the shared base, and $T_{Mi}, T_{Ni}$ are per-user specific times [S1, unofficial].
+
+2.  **With Ray Sharing (Parallel Light Tasks)**:
+    Shareable rays are rendered once (Heavy), and necessary rays are rendered in parallel (Light). The total time is dominated by the slowest user's specific task:
+    $$ T = k T_{MS} + T_{NS} + \max_{i=0}^{n} (k T_{Mi} + T_{Ni}) $$
+    [S1, unofficial]
+
+3.  **With Offline Caching**:
+    Shareable rays are pre-rendered and cached. The response time depends only on the specific necessary rays for each user:
+    $$ T = \max_{i \subset n} (k T_{Mi} + T_{Ni}) $$
+    [S1, unofficial]
+
+4.  **Starvation Wait Time**:
+    $$ w_i = \frac{1}{FPS_i} - t_i $$
+    [S1, unofficial]
+
+### Steps
+1.  **Identify Tasks**: For each user, classify rays into Shareable ($S$) and Necessary ($i$).
+2.  **Assign to Farms**:
+    *   Place all Shareable Rays (Heavy Tasks) into `HeavyFarm`.
+    *   Send Necessary Rays (Light Tasks) to available GPUs in `LightFarm` for parallel rendering [S1, unofficial].
+3.  **Cache Management**: Maintain a historical table of rendered shareable rays. Use this to guide `RenderFarm` to render shareable rays offline in advance, enabling the optimization in Formula 3 [S1, unofficial].
+4.  **Calculate Wait Time**: For each user $i$, compute $w_i$ using their target $FPS_i$ and moving average completion time $t_i$ [S1, unofficial].
+5.  **Check Starvation**: If a task has not started within $w_i$ after the last frame, mark the user as starved [S1, unofficial].
+6.  **Resolve Starvation**: If any starved tasks exist:
+    *   Enter starvation state.
+    *   Deny new client requests.
+    *   Render all pending tasks for starved users on `RenderFarm` until resolved.
+    *   Allow new requests only after resolution [S1, unofficial].
+7.  **Schedule Rendering**: Execute the scheduling loop (see Pseudocode).
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def nephele_scheduling_policy(users, render_farm, current_time):
+    """
+    Implements the NEPHELE scheduling policy for multi-user ray sharing.
+    """
+    while render_farm.is_available():
+        # 1. Update user states
+        for user in users:
+            user.loaded_tasks = count_loaded_tasks(user)
+            # T_last_frame is the timestamp of the last completed frame for this user
+            user.target_time = user.T_last_frame + user.w_i
+        
+        # 2. Sort users by load and urgency
+        # Sort primarily by loaded_tasks (ascending), then by target_time (ascending)
+        sort(users, key=lambda u: (u.loaded_tasks, u.target_time))
+        
+        # 3. Resolve starvation first
+        starved_users = [u for u in users if u.target_time <= current_time]
+        
+        while starved_users:
+            # Deny new requests to prioritize starved users
+            deny_new_client_requests()
+            
+            for user in starved_users:
+                # Render all pending tasks for the starved user on the RenderFarm
+                render_all_tasks_for_user(user, render_farm)
+                update_render_time(user)
+            
+            # Re-evaluate starvation status after rendering
+            starved_users = [u for u in users if u.target_time <= current_time]
+            
+            # Allow new requests only when no users are starved
+            allow_new_client_requests()
+        
+        # 4. Render until RenderFarm is full
+        max_supported_rays = render_farm.max_capacity_rays
+        remaining_rays = max_supported_rays
+        
+        for user in users:
+            # If not enough rays left for this user, skip to next
+            if remaining_rays < rays_required_for_user(user):
+                break
+            
+            # Render shared (Heavy) tasks first
+            for task in user.shared_tasks:
+                render_task_on_farm(task, render_farm)
+                # Update render time for ALL users who share this task
+                update_render_time_for_all_users_of_task(task)
+                remaining_rays -= rays_in_task(task)
+            
+            # Render dedicated (Light) tasks
+            for task in user.dedicated_tasks:
+                render_task_on_farm(task, render_farm)
+                update_render_time(user)
+                remaining_rays -= rays_in_task(task)
+```
+
+### Edge Cases and Pitfalls
+*   **Precision in Wait Time**: If $t_i$ approaches or exceeds $1/FPS_i$, $w_i$ becomes zero or negative, immediately triggering starvation. This requires robust handling of floating-point comparisons [S1, unofficial].
+*   **Ray Count Mismatch**: The pseudocode assumes `rays_required_for_user` can be calculated. In practice, this depends on the resolution and field of view, which must be mapped to ray counts [G].
+*   **Offline Caching Latency**: The optimization $T = \max (k T_{Mi} + T_{Ni})$ relies on shareable rays being pre-rendered. If the cache is cold or the object changes, the system falls back to the slower sharing model [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: The scheduling loop runs per frame. Sorting users is $O(n \log n)$. Rendering is bounded by the `RenderFarm` capacity. The theoretical speedup comes from reducing the serial sum $\sum (k T_{Mi} + T_{Ni})$ to a parallel max $\max (k T_{Mi} + T_{Ni})$ [S1, unofficial].
+*   **Memory Complexity**: Requires storage for the Historical Table (cache of shareable rays) and per-user state. The size depends on the number of unique shareable ray configurations [S1, unofficial].
+*   **Performance**: Improves rendering efficiency $E$ (inverse of $T$) by maximizing shareable rays. Allows multiple necessary rays for different angles to render in parallel [S1, unofficial].
+*   **Strengths**: Prevents starvation for users with high latency or slow GPUs; leverages redundancy in adjacent views; supports high FPS targets for VR/AR [S1, unofficial].
+*   **Limitations**: Requires users to view the same object from adjacent angles to benefit from sharing; overhead of managing Heavy/Light farms and starvation states [S1, unofficial].
+*   **When to Use**: Multi-user cloud rendering scenarios (e.g., VR/AR, shared NeRF assets) where users view similar content [S1, unofficial].
+*   **When Not to Use**: Single-user rendering or users viewing completely different objects with no ray overlap [S1, unofficial].
+
+## Background
+The method was introduced in the NEPHELE system, a neural platform for cloud radiance rendering, by Luo et al. in 2023 [S1, unofficial]. It addresses the limitations of round-robin fairness policies in meeting FPS requirements for multiple users viewing the same 3D asset. The system demonstrates applications in cloud VR/AR and sharing NeRF assets on mobile devices [S1, unofficial].
+
+## Sources
+[S1] NEPHELE: A Neural Platform for Highly Realistic Cloud Radiance Rendering, https://arxiv.org/abs/2303.04086v1, fetched 2026-10-27 (unofficial)

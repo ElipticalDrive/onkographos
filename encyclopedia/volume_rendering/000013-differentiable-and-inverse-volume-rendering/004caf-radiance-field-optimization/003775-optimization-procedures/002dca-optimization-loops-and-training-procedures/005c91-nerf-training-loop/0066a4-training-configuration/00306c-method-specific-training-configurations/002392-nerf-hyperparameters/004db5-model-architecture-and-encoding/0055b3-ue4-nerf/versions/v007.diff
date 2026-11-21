@@ -1,0 +1,422 @@
+--- v006.md
++++ v007.md
+@@ -1,258 +1,194 @@
+ # UE4-NeRF
+ 
+-Also called: Neural Radiance Field for Real-Time Rendering of Large-Scale Scene
++Also called: UE4-NeRF: Neural Radiance Field for Real-Time Rendering of Large-Scale Scene
+ 
+ ## Overview
+-UE4-NeRF is a neural rendering system designed for the real-time interactive rendering of large-scale 3D scenes by partitioning the environment into sub-NeRFs represented by textured polygonal meshes [S1]. It solves the limitations of standard NeRFs regarding training time and real-time performance on large scales by integrating a neural shader into the Unreal Engine 4 (UE4) rasterization pipeline [S1]. Unlike sibling methods that rely on dense voxel grids or static hash tables for the entire scene, UE4-NeRF uses continuously optimized regular octahedra meshes and Level of Detail (LOD) hierarchies to achieve high frame rates at 4K resolution [S1].
++UE4-NeRF is a neural rendering system designed for the real-time interactive rendering of large-scale 3D scenes by partitioning the environment into sub-NeRFs represented as textured polygonal meshes and integrating them into the Unreal Engine 4 (UE4) rasterization pipeline [S1]. Unlike standard differentiable volume rendering methods that rely on ray marching through dense grids, UE4-NeRF uses a mesh-based representation with a neural shader, enabling real-time frame rates (up to 43 FPS at 4K) and scene editing capabilities that are difficult to achieve with pure volume rendering [S1]. It distinguishes itself from siblings like [Mobile-NeRF](13622-mobile-nerf.md) by using regular octahedra to handle tilted surfaces and storing opacity in texture maps to support semi-transparent objects, and from [Block-NeRF](13622-block-nerf.md) by supporting non-grid scene structures like mountainous terrain [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A set of posed images (typically from drone capture) with GPS metadata; camera poses; scene bounding box.
+-*   **Outputs:** A set of textured polygonal meshes (octahedra) with associated feature/opacity texture atlases; a compiled HLSL fragment shader for UE4; real-time rendered video frames.
++UE4-NeRF maps 3D spatial coordinates and viewing directions to color and opacity by training separate neural networks for partitioned scene blocks, which are then deployed as HLSL shaders within a rasterization engine.
+ 
+-**Data Structures:**
+-1.  **Scene Partitioning:** The large scene is divided into $N$ blocks. Each block has a training area slightly larger than the scene area to create overlapping borders for smooth transitions [S1].
+-2.  **Mesh Representation:** Each block is represented by a set of regular octahedra.
+-    *   **Geometry:** An octahedron has 6 vertices and 8 exterior triangular faces. The method uses 20 faces total (8 exterior, 12 interior) to handle tilted surfaces [S1].
+-    *   **Vertex Optimization:** Vertex positions are learnable parameters optimized during training [S1].
+-    *   **LOD Hierarchy:** Multiple levels of mesh detail are trained. Coarser meshes (fewer octahedra or simplified geometry) are used for higher observation heights [S1].
+-3.  **Texture Atlas:** Stores per-vertex or per-face feature vectors and opacity values. This replaces the dense grid lookup of Instant-NGP for the final rendering stage [S1].
+-4.  **Neural Shader (HLSL):** An implementation of the Encoder-Decoder MLP in High-Level Shading Language. It takes the feature vector from the texture atlas and the viewing direction as input, and outputs the final color [S1].
++### Inputs and Outputs
++*   **Inputs:** A set of posed images (typically from drones) with GPS metadata; camera poses $(o, d)$ where $o$ is the origin and $d$ is the viewing direction; scene geometry defined by partitioned blocks.
++*   **Outputs:** Real-time rendered color images $\mathbf{c}$ at high resolution (e.g., 4K); textured polygonal meshes for each block; opacity and feature vector textures.
+ 
+-**Network Architecture:**
+-The method employs an Encoder-Decoder MLP structure [S1].
+-*   **Encoder Network ($E$):**
+-    *   Input: Positional information $\mathbf{p}_i$ encoded via multi-resolution hash encoding (from Instant-NGP) [S1].
+-    *   Structure: 4-layer MLP.
+-    *   Dimensions: $32 \times 64$, $64 \times 64$, $64 \times 64$, $64 \times 8$ [S1].
+-    *   Output: Opacity $\alpha_i$ and an 8-dimensional feature vector $\mathbf{M}_i$ [S1].
+-*   **Decoder Network ($D$):**
+-    *   Input: Feature vector $\mathbf{M}_i$ and viewing direction $\mathbf{d}_i$ encoded via Spherical Harmonics (SH) [S1].
+-    *   Structure: 3-layer MLP.
+-    *   Dimensions: $17 \times 16$, $16 \times 16$, $16 \times 3$ [S1].
+-    *   Output: Final color $\mathbf{c}_i$ [S1].
++### Data Structures
++1.  **Scene Partitioning:** The large-scale scene is divided into $n$ blocks. Each block's training area is slightly larger than the corresponding scene area to create overlapping borders for smooth transitions [S1].
++2.  **Grid Initialization:** For each block, a $128 \times 128 \times 128$ grid is initialized [S1].
++3.  **Polygonal Mesh:**
++    *   Vertices are derived from the center point of each grid cell and its six neighbors (front, back, left, right, top, bottom) [S1].
++    *   The mesh is constructed using regular octahedra. Each octahedron has 20 faces: 8 exterior and 12 interior [S1].
++    *   Vertex positions are optimized during training [S1].
++4.  **Texture Atlas:** Stores feature vectors and opacity information for the mesh vertices/faces [S1].
++5.  **Neural Network Parameters:**
++    *   **Encoder MLP ($E$):** 4 layers. Dimensions: $32 \times 64$, $64 \times 64$, $64 \times 64$, $64 \times 8$. Inputs: Hash-encoded position $p_i$. Outputs: Opacity $\alpha_i$ and 8-dimensional feature vector $M_i$ [S1].
++    *   **Decoder MLP ($D$):** 3 layers. Dimensions: $17 \times 16$, $16 \times 16$, $16 \times 3$. Inputs: Feature vector $M_i$ and hashed direction $SH(d_i)$. Outputs: Color $\mathbf{c}_i$ [S1].
++6.  **Level of Detail (LOD) Hierarchy:** Multiple mesh resolutions are trained for different observation heights. Coarser meshes are used for higher observation heights to maintain real-time performance [S1].
+ 
+-**Numbered Steps:**
++### Steps
++1.  **Coordinate Transformation:** Convert GPS-captured drone imagery coordinates to the UE4 coordinate system. In this system, the X-axis points east, the Y-axis points south, and the Z-axis points up. Apply a 100:1 scale conversion (UE4 units to real-world units) [S1].
++2.  **Block Partitioning:** Partition the large scene into multiple blocks. Train a coarse model for sub-region segmentation to capture overall terrain and building outlines. Filter images associated with sub-regions and use a mask to exclude pixels outside the scene area [S1].
++3.  **Mesh Initialization:** Initialize the $128 \times 128 \times 128$ grid. Select center points and six neighbors to create polygonal meshes based on regular octahedra (20 faces) [S1].
++4.  **Training Loop:**
++    *   For each block, train the Encoder-Decoder network for 80,000 epochs on a single Nvidia RTX 3090 GPU [S1].
++    *   **Encoding:** Apply multi-resolution hash encoding (from Instant-NGP) to the position $p_i$ [S1].
++    *   **Feature Extraction:** Compute $M_i, \alpha_i = E(\text{hash}(p_i); \theta_E)$ [S1].
++    *   **Color Prediction:** Compute $\mathbf{c}_i = D(M_i, SH(d_i); \theta_D)$ [S1].
++    *   **Optimization:** Continuously optimize vertex positions of the meshes and the network parameters $\theta_E, \theta_D$ [S1].
++    *   **Acceleration:** Implement computationally intensive portions using CUDA to utilize GPU parallel computing [S1].
++5.  **Mesh Extraction:** Extract pre-rendered polygonal meshes at different levels of detail. These meshes are initially coarse and texture-less during training, but the network outputs encode the texture maps (features and opacity) [S1].
++6.  **Shader Deployment:** Implement the Decoder MLP as a High-Level Shading Language (HLSL) fragment shader in UE4. The shader takes the feature vectors (from the texture atlas) as input and outputs colors [S1].
++7.  **Rendering:** Combine the extracted meshes with the UE4 rasterization pipeline. Use the LOD hierarchy to select the appropriate mesh resolution based on the camera's observation height [S1].
++8.  **Scene Editing (Optional):** Import traditional 3D models (.obj, .fbx) into the scene. UE4 handles occlusion automatically, skipping neural shader computation for occluded regions [S1].
+ 
+-1.  **Coordinate Transformation:**
+-    *   Apply UE4 coordinate system: X-axis points East, Y-axis points South, Z-axis points Up [S1].
+-    *   Apply scale conversion: 100:1 (UE4 units to real-world units) using GPS data [S1].
+-
+-2.  **Block Partitioning:**
+-    *   Divide the large-scale scene into multiple blocks [S1].
+-    *   Train a coarse segmentation model to capture overall terrain and building outlines [S1].
+-    *   Filter images for each sub-region and mask out pixels outside the scene area to handle overlapping borders [S1].
+-
+-3.  **Mesh Initialization:**
+-    *   Initialize a $128 \times 128 \times 128$ grid for the block [S1].
+-    *   Select the center point of each grid cell along with its six neighbors (front, back, left, right, top, bottom) [S1].
+-    *   Construct regular octahedra from these points. Use 20 faces (8 exterior, 12 interior) to ensure stable convergence on tilted surfaces [S1].
+-
+-4.  **Training Loop (Per Block):**
+-    *   **Ray Casting:** For each pixel, define ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{d} = (\theta, \phi)$ is the viewing direction [S1].
+-    *   **Intersection:** Calculate the intersection of the ray with the polygonal meshes to determine sampling points [S1].
+-    *   **Encoding:** Encode the spatial position $\mathbf{p}_i$ of the intersection point using multi-resolution hash encoding [S1].
+-    *   **Encoder Forward:** Compute $\mathbf{M}_i, \alpha_i = E(\text{hash}(\mathbf{p}_i); \theta_E)$ [S1].
+-    *   **Direction Encoding:** Encode viewing direction $\mathbf{d}_i$ using Spherical Harmonics [S1].
+-    *   **Decoder Forward:** Compute color $\mathbf{c}_i = D(\mathbf{M}_i, \text{SH}(\mathbf{d}_i); \theta_D)$ [S1].
+-    *   **Loss Calculation:** Compare $\mathbf{c}_i$ with the ground truth pixel color. Use PSNR/SSIM and LPIPS for evaluation [S1].
+-    *   **Optimization:** Update $\theta_E$, $\theta_D$, and the vertex positions of the octahedra [S1].
+-    *   **Hardware:** Implement computationally intensive parts (hash encoding, MLP) in CUDA for GPU parallelization [S1].
+-    *   **Iterations:** Train for 80,000 epochs per block [S1].
+-
+-5.  **Pre-rendering and LOD Extraction:**
+-    *   Extract polygonal meshes at different levels of detail (LOD) [S1].
+-    *   Generate texture atlases storing the optimized feature vectors and opacity [S1].
+-    *   Compile the Encoder-Decoder network into an HLSL fragment shader [S1].
+-
+-6.  **Real-Time Rendering (UE4 Integration):**
+-    *   Import the extracted meshes and texture atlases into UE4 [S1].
+-    *   Assign the HLSL shader to the mesh materials [S1].
+-    *   Use LOD hierarchy: select coarser meshes for higher camera heights to maintain performance [S1].
+-    *   Render using UE4's rasterization pipeline [S1].
+-
+-**Pseudocode:**
+-
++### Pseudocode
+ ```python
+ # UE4-NeRF Training and Rendering Logic
+ 
+-class UE4NeRF:
+-    def __init__(self, scene_bounds, grid_size=128):
+-        self.scene_bounds = scene_bounds
+-        self.grid_size = grid_size
+-        # Encoder: 4-layer MLP (32->64->64->64->8)
+-        self.encoder_weights = initialize_mlp([32, 64, 64, 64, 8])
+-        # Decoder: 3-layer MLP (17->16->16->3)
+-        # Input dim 17 = 8 (features) + 9 (SH coefficients for degree 2)
+-        self.decoder_weights = initialize_mlp([17, 16, 16, 3])
+-        
+-        # Mesh parameters (vertices of octahedra)
+-        self.mesh_vertices = initialize_octahedra_grid(grid_size, scene_bounds)
+-        
+-        # Hash encoding table (from Instant-NGP)
+-        self.hash_table = initialize_hash_table()
++def transform_coordinates(gps_data):
++    """
++    Convert GPS coordinates to UE4 coordinate system.
++    X: East, Y: South, Z: Up. Scale: 100:1.
++    """
++    # Implementation details for coordinate transformation are not fully specified in sources.
++    # [G] Standard affine transformation applying rotation and scaling.
++    return ue4_coords
+ 
+-    def coordinate_transform(self, gps_coords):
+-        """
+-        Transform GPS coordinates to UE4 space.
+-        X: East, Y: South, Z: Up. Scale 100:1.
+-        """
+-        # Implementation depends on specific GPS projection, 
+-        # assuming input is already in a local tangent plane or similar.
+-        ue4_x = gps_coords.x * 100.0
+-        ue4_y = -gps_coords.y * 100.0  # South is positive Y in UE4 if North is negative? 
+-                                       # Note: Source says Y points South. Standard UE4 Y is forward.
+-                                       # Assuming standard mapping where South is +Y.
+-        ue4_z = gps_coords.z * 100.0
+-        return Vector3(ue4_x, ue4_y, ue4_z)
++def partition_scene(scene_bounds, image_list):
++    """
++    Partition large scene into blocks with overlapping borders.
++    """
++    blocks = []
++    for block_region in scene_bounds:
++        # Filter images associated with the sub-region
++        block_images = filter_images(image_list, block_region)
++        # Mask out pixels outside the scene area
++        block_images = apply_mask(block_images, block_region)
++        blocks.append(block_images)
++    return blocks
+ 
+-    def encode_position(self, position):
+-        """Multi-resolution hash encoding."""
+-        return hash_encode(position, self.hash_table)
++def initialize_mesh(grid_size=128):
++    """
++    Initialize polygonal mesh using regular octahedra.
++    """
++    # Initialize 128x128x128 grid
++    grid = create_grid(grid_size)
++    vertices = []
++    for cell in grid:
++        center = cell.center
++        neighbors = get_neighbors(cell, direction=['front', 'back', 'left', 'right', 'top', 'bottom'])
++        # Create octahedron faces (20 faces: 8 exterior, 12 interior)
++        faces = create_octahedron_faces(center, neighbors)
++        vertices.extend(faces.vertices)
++    return Mesh(vertices, faces)
+ 
+-    def encode_direction(self, direction):
+-        """Spherical Harmonics encoding."""
+-        # Degree 2 SH has 9 coefficients
+-        return spherical_harmonic_basis(direction, degree=2)
++def train_block(block_images, mesh, epochs=80000):
++    """
++    Train Encoder-Decoder network for a specific block.
++    """
++    # Encoder: 4-layer MLP (32x64, 64x64, 64x64, 64x8)
++    encoder = MLP(layers=[32, 64, 64, 64, 8])
++    # Decoder: 3-layer MLP (17x16, 16x16, 16x3)
++    # Input to decoder is [Feature_Vector (8) + Hashed_Direction (9)] = 17 dims
++    decoder = MLP(layers=[17, 16, 16, 3])
++    
++    # Multi-resolution hash encoding (Instant-NGP)
++    hash_encoder = MultiResolutionHashEncoder()
++    
++    for epoch in range(epochs):
++        for image in block_images:
++            # Sample rays from image pixels
++            rays = sample_rays(image)
++            
++            # Encode positions
++            hash_pos = hash_encoder.encode(rays.positions)
++            
++            # Forward pass through Encoder
++            features, opacity = encoder(hash_pos)
++            
++            # Encode directions
++            hash_dir = hash_encoder.encode(rays.directions)
++            
++            # Concatenate features and hashed directions
++            # [G] Assuming direction hash output is 9 dimensions to match 17 input
++            decoder_input = concatenate(features, hash_dir)
++            
++            # Forward pass through Decoder
++            predicted_color = decoder(decoder_input)
++            
++            # Compute loss against ground truth image pixels
++            loss = compute_loss(predicted_color, image.colors)
++            
++            # Backpropagate and update weights
++            update_weights(encoder, decoder, loss)
++            
++            # [G] Vertex optimization step is mentioned but specific algorithm not detailed.
++            # Typically involves gradient descent on vertex positions to minimize reprojection error.
++            optimize_mesh_vertices(mesh, rays, predicted_color, opacity)
+ 
+-    def encoder_forward(self, hash_encoded_pos):
+-        """
+-        E(hash(p_i); theta_E) -> M_i, alpha_i
+-        """
+-        x = hash_encoded_pos
+-        for layer in self.encoder_weights[:-1]:
+-            x = relu(linear(x, layer))
+-        # Last layer outputs 8 features + 1 opacity
+-        raw_output = linear(x, self.encoder_weights[-1])
+-        features = raw_output[:8]
+-        opacity_raw = raw_output[8]
+-        opacity = sigmoid(opacity_raw) # Ensure valid opacity
+-        return features, opacity
++def deploy_shader(mesh, encoder, decoder):
++    """
++    Deploy trained model as HLSL fragment shader in UE4.
++    """
++    # Extract texture atlas storing feature vectors and opacity
++    texture_atlas = extract_texture_atlas(mesh, encoder, decoder)
++    
++    # Generate HLSL code for the fragment shader
++    hls_code = generate_hls(decoder)
++    
++    # Load into UE4
++    ue4_shader = UE4.load_shader(hls_code, texture_atlas)
++    return ue4_shader
+ 
+-    def decoder_forward(self, features, sh_direction):
+-        """
+-        D(M_i, SH(d_i); theta_D) -> c_i
+-        Input concat: features (8) + SH (9) = 17
+-        """
+-        x = concat(features, sh_direction)
+-        for layer in self.decoder_weights[:-1]:
+-            x = relu(linear(x, layer))
+-        color = linear(x, self.decoder_weights[-1])
+-        color = sigmoid(color) # Ensure RGB in [0,1]
+-        return color
+-
+-    def train_block(self, images, poses, epochs=80000):
+-        """
+-        Train a single block.
+-        """
+-        for epoch in range(epochs):
+-            for image, pose in zip(images, poses):
+-                # 1. Ray generation
+-                rays = generate_rays(pose, image.shape)
+-                
+-                # 2. Mesh Intersection
+-                # Find intersection points t for each ray with the octahedra mesh
+-                intersections = ray_mesh_intersect(rays, self.mesh_vertices)
+-                
+-                # 3. Sampling and Network Forward
+-                loss = 0
+-                for ray, intersection in zip(rays, intersections):
+-                    if intersection is None:
+-                        continue
+-                    
+-                    p_i = ray.origin + ray.direction * intersection.t
+-                    d_i = ray.direction
+-                    
+-                    # Encode
+-                    h_p = self.encode_position(p_i)
+-                    sh_d = self.encode_direction(d_i)
+-                    
+-                    # Encoder
+-                    M_i, alpha_i = self.encoder_forward(h_p)
+-                    
+-                    # Decoder
+-                    c_i = self.decoder_forward(M_i, sh_d)
+-                    
+-                    # Ground truth pixel color
+-                    c_gt = get_pixel_color(image, ray.pixel_coords)
+-                    
+-                    # Loss (e.g., MSE)
+-                    loss += mse(c_i, c_gt)
+-                
+-                # 4. Backpropagation
+-                # Update encoder weights, decoder weights, and mesh vertices
+-                gradients = compute_gradients(loss, [self.encoder_weights, self.decoder_weights, self.mesh_vertices])
+-                update_parameters(gradients)
+-
+-    def render_realtime(self, camera_pose, resolution):
+-        """
+-        Render using UE4 rasterization pipeline.
+-        """
+-        # 1. Select LOD based on camera height
+-        lod_mesh = select_lod_mesh(self.mesh_vertices, camera_pose.height)
+-        
+-        # 2. Rasterize mesh to screen space
+-        screen_coords = rasterize(lod_mesh, camera_pose)
+-        
+-        # 3. For each pixel, fetch feature vector from texture atlas
+-        #    and compute color using HLSL shader logic
+-        for pixel in screen_coords:
+-            feature_vector = fetch_texture_atlas(pixel.uv)
+-            view_direction = compute_view_direction(pixel, camera_pose)
+-            sh_dir = self.encode_direction(view_direction)
+-            
+-            # Execute HLSL equivalent
+-            color = self.decoder_forward(feature_vector, sh_dir)
+-            
+-            set_pixel_color(pixel, color)
+-        
+-        return frame_buffer
++def render_realtime(camera, mesh_hierarchy, ue4_shader):
++    """
++    Render scene using LOD hierarchy.
++    """
++    # Select mesh level based on camera height
++    mesh_level = select_lod(mesh_hierarchy, camera.height)
++    
++    # Rasterize mesh using UE4 pipeline
++    # The neural shader computes color for each fragment
++    color = ue4_shader.render(mesh_level)
++    return color
+ ```
+ 
+-**Parameters:**
+-*   **Grid Initialization Size:** $128 \times 128 \times 128$ [S1].
++### Parameters
++*   **Grid Size:** $128 \times 128 \times 128$ [S1].
+ *   **Octahedron Faces:** 20 total (8 exterior, 12 interior) [S1].
+-*   **Encoder MLP Layers:** 4 layers, dimensions $32 \times 64$, $64 \times 64$, $64 \times 64$, $64 \times 8$ [S1].
+-*   **Decoder MLP Layers:** 3 layers, dimensions $17 \times 16$, $16 \times 16$, $16 \times 3$ [S1].
++*   **Encoder MLP:** 4 layers, dimensions $32 \times 64$, $64 \times 64$, $64 \times 64$, $64 \times 8$ [S1].
++*   **Decoder MLP:** 3 layers, dimensions $17 \times 16$, $16 \times 16$, $16 \times 3$ [S1].
+ *   **Training Hardware:** 1 Nvidia RTX 3090 GPU [S1].
+ *   **Training Iterations:** 80,000 epochs per block [S1].
+-*   **Coordinate System:** X=East, Y=South, Z=Up [S1].
+-*   **World Scale:** 100:1 [S1].
+-*   **Hash Encoding:** Multi-resolution hash encoding from Instant-NGP [S1].
+-*   **Directional Encoding:** Spherical Harmonics (SH) [S1].
++*   **Coordinate System:** X-axis East, Y-axis South, Z-axis Up [S1].
++*   **World Scale:** 100:1 (UE4 units to real-world units) [S1].
++*   **Evaluation Metrics:** PSNR, SSIM, LPIPS [S1].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Tilted Surfaces:** Mobile-NeRF suffers from slow/unstable convergence on tilted surfaces. UE4-NeRF mitigates this by using regular octahedra with 20 faces [S1].
+-*   **Transparency:** Mobile-NeRF cannot handle transparent/semi-transparent objects (water, glass) due to opacity binarization. UE4-NeRF stores opacity in texture maps, allowing semi-transparent rendering, though this increases computational overhead and reduces frame rates [S1].
+-*   **Pre-rendering Gaps:** Pre-rendering cannot capture rays from all viewing angles, potentially resulting in gaps or holes in the final scene [S1].
++### Edge Cases and Pitfalls
++*   **Tilted Surfaces:** Mobile-NeRF suffers from slow/unstable convergence on tilted surfaces. UE4-NeRF addresses this by using regular octahedra [S1].
++*   **Semi-transparent Objects:** Mobile-NeRF cannot handle transparent/semi-transparent objects (water, glass, plastic) due to opacity binarization. UE4-NeRF stores opacity in texture maps to mitigate this [S1]. However, semi-transparent objects (e.g., vegetation) increase computational overhead, reducing frame rates [S1].
++*   **Pre-rendering Gaps:** Pre-rendering cannot capture rays from all viewing angles, potentially resulting in gaps or holes in the final rendered scene [S1].
+ *   **Exposure Matching:** Consistent exposure matching with original images is difficult in UE4, causing evaluation metrics (PSNR/SSIM) to underestimate actual reconstruction quality [S1].
+ *   **Memory Overhead:** Rendering large scenes (square kilometers) incurs significant memory overhead. Increasing accuracy further amplifies memory consumption [S1].
+ *   **Hardware Dependency:** Requires CUDA and NVIDIA GPUs [S1].
+ 
+-## Subtopics
+-
+-### Block-NeRF
+-Partitions scenes into grid structures. UE4-NeRF is generally suitable for various scene types including mountainous terrain, unlike Block-NeRF which is limited to grid structures [S1].
+-
+-### Mobile-NeRF
+-Uses octahedra but suffers from slow convergence on tilted surfaces and cannot handle semi-transparent objects. UE4-NeRF improves convergence and supports transparency via texture atlases [S1].
+-
+-### Mega-NeRF
+-Trains hundreds of NeRFs for large scenes. UE4-NeRF trains significantly faster per block (40 mins vs 36 hours) and achieves higher FPS at higher resolutions (4K vs 800x800) [S1].
+-
+-### Instant-NGP
+-Provides the multi-resolution hash encoding used in UE4-NeRF for training acceleration [S1].
+-
+ ## Operating characteristics
+-*   **Training Time:** 40 minutes per block on 1x RTX 3090. Total scene time: 1 hour + (40 minutes $\times$ n/4) for n blocks [S1]. This is ~1000x faster than Mobile-NeRF and ~54x faster per block than Mega-NeRF [S1].
+-*   **Rendering Performance:** Real-time rendering at 4K resolution with up to 43 FPS on level-1 mesh hierarchy. 50 FPS on full scene at 2K resolution; $\ge$70 FPS on individual blocks at 2K resolution [S1].
+-*   **Memory:** Significant memory overhead for large scenes (square kilometers). Memory consumption increases with accuracy [S1].
+-*   **Strengths:** Real-time interactive rendering of large-scale scenes; integration with UE4 allows for scene editing (importing .obj/.fbx); handles semi-transparent objects better than Mobile-NeRF; high fidelity on dense textures and small objects (e.g., power lines) compared to Mip-NeRF [S1].
+-*   **Limitations:** Requires NVIDIA GPUs and CUDA; pre-rendering artifacts (gaps/holes); exposure matching issues in UE4 affect metric evaluation; semi-transparent objects (vegetation) reduce frame rates due to computational overhead [S1].
+-*   **When to Use:** Large-scale outdoor scenes (farmland, construction sites, industrial parks) captured by drones where real-time interaction and scene editing are required [S1].
+-*   **When Not to Use:** Small-scale indoor scenes (overkill); scenes requiring extreme precision in exposure matching without post-processing; hardware-constrained environments without NVIDIA GPUs [S1].
++*   **Training Speed:** 1000× faster than Mobile-NeRF [S1].
++    *   Time per block: 40 minutes on 1×RTX 3090 [S1].
++    *   Time for full scene ($n$ blocks): 1 hour + (40 minutes × $n/4$) on 1×RTX 3090 [S1].
++    *   Comparison: Mobile-NeRF takes 48h/block on 4×3090; Mega-NeRF takes 36h/block on 1×3090 [S1].
++*   **Rendering Performance:**
++    *   Real-time rendering at 4K resolution with up to 43 FPS [S1].
++    *   50 FPS on full scene at 2K resolution [S1].
++    *   ≥70 FPS on individual blocks at 2K resolution [S1].
++    *   Comparison: Mobile-NeRF max 35 FPS at 2K (block only); Mega-NeRF max 60 FPS at 800×800 [S1].
++*   **Scaling:** Uses a Level of Detail (LOD) hierarchy. Coarser meshes are used for higher observation heights to ensure real-time performance [S1].
++*   **Strengths:** Real-time interactive rendering of large-scale scenes; supports scene editing (importing .obj/.fbx); handles semi-transparent objects; handles tilted surfaces better than Mobile-NeRF; avoids blurriness on natural scenes compared to Mip-NeRF [S1].
++*   **Limitations:** Requires NVIDIA GPUs; high memory overhead for large scenes; pre-rendering artifacts (gaps/holes); evaluation metrics may be pessimistic due to exposure mismatch; semi-transparent objects reduce frame rates [S1].
++*   **When to use:** Real-time interactive visualization of large-scale outdoor scenes (farmland, construction sites, industrial parks) where editing capabilities are needed.
++*   **When not to use:** Small-scale indoor scenes (overhead of partitioning); scenes requiring extreme accuracy in transparent object rendering without performance loss; environments without NVIDIA GPUs.
+ 
+ ## Background
+-UE4-NeRF was introduced in the paper "UE4-NeRF: Neural Radiance Field for Real-Time Rendering of Large-Scale Scene" [S1]. It was developed to address the limitations of NeRF in real-time rendering of large-scale scenes, specifically targeting applications in virtual reality, computer games, and the Metaverse [S1]. The method combines the neural representation of NeRF with the rasterization pipeline of Unreal Engine 4 (UE4) [S1]. It builds on techniques from Mobile-NeRF (octahedra representation), Block-NeRF (scene partitioning), and Instant-NGP (hash encoding) [S1]. The system was evaluated on drone-captured large-scale scenes (Farmland, Construction site, Industrial parks) and the Mega-NeRF public dataset [S1].
++UE4-NeRF was introduced in the paper "UE4-NeRF: Neural Radiance Field for Real-Time Rendering of Large-Scale Scene" [S1]. It was developed to address the limitations of existing NeRF methods in real-time rendering and scene editing for large-scale environments. The method combines NeRF with the Unreal Engine 4 rasterization pipeline, leveraging LOD techniques and multi-resolution hash encoding (from Instant-NGP) to achieve real-time performance [S1]. It is used in UE4 for drone-captured large-scale scenes and evaluated on the Mega-NeRF public dataset [S1].
+ 
+ ## Sources

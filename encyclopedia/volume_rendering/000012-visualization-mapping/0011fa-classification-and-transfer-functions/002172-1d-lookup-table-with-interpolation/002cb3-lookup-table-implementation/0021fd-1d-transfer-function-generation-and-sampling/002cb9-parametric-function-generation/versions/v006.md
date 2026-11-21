@@ -1,0 +1,52 @@
+# Parametric Function Generation
+
+
+## Overview
+Parametric Function Generation constructs transfer functions by evaluating mathematical functions of a normalized scalar input to determine color and opacity values, rather than relying on piecewise linear interpolation between user-defined control points. It differs from sibling methods like [Voxel Color Mapping](2970-voxel-color-mapping.md) and [Color Specification](3969-color-specification.md) by defining the mapping through continuous analytical formulas (e.g., Gaussians, sigmoids, or trigonometric functions) rather than explicit lookup table entries or discrete color specifications.
+
+## Shared principles
+The family shares the mechanism of mapping a normalized scalar input $t \in [0, 1]$ to an RGBA output vector $\mathbf{C}$ using a parametric equation. The input $t$ is typically derived from the parent method [1D Transfer Function Generation and Sampling](2689-1d-transfer-function-generation-and-sampling.md), which normalizes raw voxel values. The output is a 4-channel vector where the first three channels represent RGB color and the fourth represents alpha (opacity). The specific parametric form varies by child method, but the core operation is the evaluation of a function $f(t)$ that yields $\mathbf{C}$.
+
+## Subtopics
+
+### [Cosine Palette Color Mapping](3359-cosine-palette-color-mapping.md)
+Cosine Palette Color Mapping generates smooth, perceptually uniform color gradients by evaluating a parametric cosine function with distinct phase offsets for each RGB channel. It differs from sibling methods like the [Gaussian Transfer Function](4408-gaussian-transfer-function.md) or [Sigmoid Function with Jacobian](6497-sigmoid-function-with-jacobian.md) by relying on trigonometric interference rather than probability distributions or logistic curves, producing vibrant, continuous transitions without explicit piecewise definitions. See [Cosine Palette Color Mapping](3359-cosine-palette-color-mapping.md).
+
+### [Gaussian Transfer Function](4408-gaussian-transfer-function.md)
+The Gaussian Transfer Function is a parametric method for generating a 4-channel RGBA lookup table (LUT) using three additive Gaussian basis functions to control color and opacity based on normalized scalar input values. It constructs the LUT by evaluating Gaussian bumps at fixed Red, Green, and Blue color channels to highlight specific scalar ranges. See [Gaussian Transfer Function](4408-gaussian-transfer-function.md).
+
+### [Style Function Animation](5853-style-function-animation.md)
+The Style Function Animation is a module that generates a time-varying coefficient $S(t)$ to modify the rendering style of volume data based on user interaction events. It solves the problem of smoothly transitioning visualization parameters (such as opacity or projection type) in response to user engagement, such as zooming or rotating. Unlike static transfer functions, this method provides a dynamic factor that blends between different rendering styles (e.g., Direct Volume Rendering and Maximum Intensity Projection) based on the duration and spatial proximity of user interaction. See [Style Function Animation](5853-style-function-animation.md).
+
+### [Sigmoid Function with Jacobian](6497-sigmoid-function-with-jacobian.md)
+Computes the logistic sigmoid function $\sigma(x)$ and its derivative $\sigma'(x)$ simultaneously. It is used in volume rendering and differentiable rendering pipelines to map scalar inputs to probabilities or soft boundaries, enabling gradient-based optimization. It is distinguished from sibling methods like [Gaussian Transfer Function](4408-gaussian-transfer-function.md) by its S-shaped monotonicity and its explicit provision of the Jacobian (derivative) for backpropagation, which is critical for differentiable renderers. See [Sigmoid Function with Jacobian](6497-sigmoid-function-with-jacobian.md).
+
+### Rainbow Transfer Function Preset
+**Definition**: Generates a transfer function initialized with a 7-segment rainbow color map spanning $[0, 1]$, with no Gaussian objects [S1, unofficial].
+**Steps**:
+1. Create TF with given resolution [S1, unofficial].
+2. Clear existing controls [S1, unofficial].
+3. Add 7 ColorControls at positions $0/6, 1/6, 2/6, 3/6, 4/6, 5/6, 6/6$ [S1, unofficial].
+4. Assign RGB values: $(0, 0.364706, 1), (0, 1, 0.976471), (0, 1, 0.105882), (0.968627, 1, 0), (1, 0.490196, 0), (1, 0, 0), (0.662745, 0, 1)$ [S1, unofficial].
+5. Clear Gaussian objects [S1, unofficial].
+6. Call `updateColorMap()` [S1, unofficial].
+
+### Random Transfer Function Generation
+**Definition**: Generates a random transfer function LUT [S2, unofficial].
+**Steps**:
+1. Clear the LUT [S2, unofficial].
+2. Iterate `i` from 0 to `n_bins - 1`. If `i == 0`, push `glm::vec4(0)`. Otherwise, push `glm::vec4(randf(), randf(), randf(), randf())` [S2, unofficial].
+3. Call `upload_gpu()` [S2, unofficial].
+**Parameters**: `n_bins`: Number of bins. Default value is 8 [S2, unofficial].
+
+### Range Selection Function
+**Definition**: A function defined as a product of threshold functions, used to generalize the approach of defining materials via range selections in the histogram [S3, unofficial].
+**Formula**: $\Theta(x) = \prod_i \theta_i(s_i(x))$, where $\theta_i$ are threshold functions (typically trapezoids and ramps) with value range $[0.0, 1.0]$, and $s_i(x)$ is the value of variate $i$ at position $x$ [S3, unofficial].
+
+## Background
+The concept of parametric transfer functions allows for smooth, continuous mapping of scalar data to visual properties, avoiding the jagged edges of piecewise linear interpolation. The Gaussian Transfer Function approach is implemented in the [wilsonCernWq/TransferFunctionModule](https://github.com/wilsonCernWq/TransferFunctionModule) repository [S1, unofficial]. The Style Function Animation technique is described in the [nihofm/volren](https://github.com/nihofm/volren) renderer [S2, unofficial]. The Range Selection Function is introduced in the paper "Multi-Dimensional Transfer Function Design Using Sorted Histograms" [S3, unofficial].
+
+## Sources
+[S1] wilsonCernWq/TransferFunctionModule, https://github.com/wilsonCernWq/TransferFunctionModule, fetched 2026-10-27 (unofficial)
+[S2] nihofm/volren: Simple OpenGL-based renderer for ..., https://github.com/nihofm/volren, fetched 2026-10-29 (unofficial)
+[S3] Multi-Dimensional Transfer Function Design Using Sorted Histograms, https://doi.org/10.2312/vg/vg06/001-008, fetched 2026-10-26 (unofficial)

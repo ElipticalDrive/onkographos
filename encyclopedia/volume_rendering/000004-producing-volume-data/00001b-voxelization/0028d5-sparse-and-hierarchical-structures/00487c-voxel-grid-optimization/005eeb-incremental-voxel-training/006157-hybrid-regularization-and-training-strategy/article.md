@@ -1,0 +1,204 @@
+# Hybrid Regularization and Training Strategy
+
+Also called: Coarse-to-fine Hybrid Training, Occupancy Mask Extraction and Implicit-Explicit Optimization
+
+## Overview
+Hybrid Regularization and Training Strategy is a two-stage optimization method for voxel-based neural radiance fields that mitigates overfitting in explicit feature grids by leveraging an implicit neural network for initialization [S1, S2]. It solves the problem of deterministic integration prone to overfitting at specific voxels when features are directly optimized, which leads to degenerate solutions like floaters or holes in sparse input scenarios [S1, S2]. It sets itself apart from pure explicit regularization by using an intermediate implicit phase to provide a powerful initialization, and from pure implicit methods by discarding the network to allow direct grid optimization for higher final quality [S1, S2].
+
+## How it works
+The method consists of three sequential phases: Coarse Geometry Search, Implicit Optimization, and Explicit Optimization.
+
+### Inputs and Outputs
+**Inputs:**
+*   Training images and camera poses.
+*   Target voxel grid resolution $R$ (e.g., $128^3$ or $160^3$) [S1].
+*   Sparsity regularization weight $\lambda_s = 1e-5$ [S1, S2].
+*   Alpha threshold for pruning $\tau_\alpha = 0.01$ [S1, S2].
+
+**Outputs:**
+*   Optimized feature grid values for occupied voxels.
+*   Binary occupancy mask.
+*   Weights for density and color decoders.
+
+### Data Structures
+1.  **Implicit MLP:**
+    *   Architecture: 1 input layer, 8 hidden layers (512 neurons each), 1 output layer (32 neurons) [S1, S2].
+    *   Activations: ReLU for all layers except the last one (linear) [S1, S2].
+    *   Input: Vertex coordinates.
+    *   Modification: Positional encoding of vertex coordinates is concatenated to the output of the 4th hidden layer [S1, S2].
+2.  **Density Decoder:**
+    *   Architecture: 1 input layer, 1 hidden layer (32 neurons), 1 output layer (33 neurons) [S1].
+    *   Activations: ReLU for hidden layer, linear for output [S1].
+3.  **Color Decoder:**
+    *   Architecture: 1 input layer (32 neurons), 1 output layer (3 neurons) [S1].
+    *   Activations: ReLU for input (implied by architecture description, though typically input is just data), sigmoid for output [S1].
+4.  **Voxel Grid:**
+    *   Stores feature vectors (dimension 32) for occupied voxels [S1].
+    *   Binary occupancy mask indicating occupied vs. empty space [S1, S2].
+    *   Parameters stored in half-precision (float16) to optimize model size [S1, S2].
+
+### Numbered Steps
+
+**Phase 1: Coarse Geometry Search**
+1.  Initialize a low-resolution voxel grid with resolution $R/4$ (e.g., $32^3$ if target is $128^3$) [S1, S2].
+2.  Initialize features randomly [S1].
+3.  Train the model for 5 epochs using explicit regularization [S1, S2].
+4.  Extract an unsupervised occupancy mask from the density outputs of the coarse model [S1, S2].
+5.  Discard the weights and features of the coarse model [S1, S2].
+6.  Prune voxels based on the occupancy mask using $\tau_\alpha = 0.01$ [S1, S2].
+
+**Phase 2: Implicit Optimization**
+1.  Initialize the implicit MLP with random weights [S1].
+2.  Train the implicit MLP for 1000 epochs [S1, S2].
+3.  During training, use the Adam optimizer with learning rate $1e-3$ (if in coarse phase) or $5e-4$ (fine stage) [S1, S2]. *Note: Sources specify $1e-3$ for coarse and $5e-4$ for fine. The implicit stage is part of the fine stage setup, so $5e-4$ is used [S1, S2].*
+4.  Sample rays with batch size 16384 (NeRF-synthetic) or 8192 (Tanks and Temples) [S1, S2].
+5.  Compute photometric loss and sparsity regularization loss [S1, S2].
+
+**Phase 3: Explicit Optimization**
+1.  Extract feature values from the trained implicit MLP for the corners of the voxel grid [S1].
+2.  Initialize the explicit feature grid using these extracted corner values [S1].
+3.  Discard the implicit MLP [S1, S2].
+4.  Train the explicit feature grid for 1000 epochs [S1, S2].
+5.  Use the Adam optimizer with learning rate $5e-4$ [S1, S2].
+6.  Apply sparsity regularization loss [S1, S2].
+7.  Prune voxels again using $\tau_\alpha = 0.01$ after the fine stage [S1, S2].
+
+### Formulas
+**Sparsity Regularization Loss:**
+$$ L_{sparsity} = \lambda_s \sum_i \frac{\sigma_i^2}{\log(1 + \frac{\sigma_i^2}{0.5})} $$
+Where:
+*   $\sigma_i$ is the $i$-th accumulated density [S1, S2].
+*   $\lambda_s$ is the regularization weight, set to $1e-5$ [S1, S2].
+*   This loss favors sparsity and prevents the model from predicting background color in empty space [S1, S2].
+
+### Parameters
+*   **Implicit MLP Layers:** 8 hidden layers, 512 neurons each [S1, S2].
+*   **Feature Dimension:** 32 [S1, S2].
+*   **Training Epochs:** 1000 for implicit stage, 1000 for explicit stage [S1, S2].
+*   **Coarse Epochs:** 5 [S1, S2].
+*   **Optimizer:** Adam [S1, S2].
+*   **Learning Rate:** $1e-3$ for coarse geometry searching, $5e-4$ for fine stage (implicit and explicit) [S1, S2].
+*   **Batch Size:** 16384 for NeRF-synthetic, 8192 for Tanks and Temples [S1, S2].
+*   **Sparsity Weight ($\lambda_s$):** $1e-5$ [S1, S2].
+*   **Pruning Threshold ($\tau_\alpha$):** $0.01$ [S1, S2].
+*   **Rendering Threshold ($\tau_t$):** $0.01$ [S1, S2].
+
+### Edge Cases and Pitfalls
+*   **Overfitting:** Deterministic integration is prone to overfitting at certain voxels when features are explicitly trained directly [S1, S2]. The hybrid strategy solves this by using the implicit MLP to provide a powerful initialization that avoids overfitting [S1, S2].
+*   **Empty Space:** Without the occupancy mask, the model may optimize features in empty space, leading to artifacts. The unsupervised mask extraction prevents this [S1, S2].
+*   **Precision:** Parameters are stored in half-precision (float16) to optimize model size, which may introduce precision issues if not handled carefully during optimization [S1, S2].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybrid_regularization_training(training_images, camera_poses, target_resolution):
+    """
+    Implements the Hybrid Regularization and Training Strategy.
+    """
+    # Phase 1: Coarse Geometry Search
+    coarse_resolution = target_resolution // 4
+    coarse_grid = initialize_voxel_grid(coarse_resolution)
+    coarse_features = random_initialize_features(coarse_grid)
+    
+    # Train coarse model for 5 epochs
+    for epoch in range(5):
+        rays = sample_rays(training_images, camera_poses, batch_size=16384)
+        # Use coarse grid and random features
+        densities = compute_density(coarse_grid, coarse_features, rays)
+        # Extract occupancy mask unsupervised
+        occupancy_mask = extract_occupancy_mask(densities, threshold=0.01)
+        # Prune empty voxels
+        prune_voxels(coarse_grid, occupancy_mask)
+    
+    # Discard coarse model weights and features
+    coarse_features = None
+    
+    # Phase 2: Implicit Optimization
+    # Initialize Implicit MLP
+    implicit_mlp = initialize_implicit_mlp(
+        input_dim=3, 
+        hidden_layers=8, 
+        hidden_neurons=512, 
+        output_dim=32
+    )
+    
+    # Train Implicit MLP for 1000 epochs
+    for epoch in range(1000):
+        rays = sample_rays(training_images, camera_poses, batch_size=16384)
+        # Get features from implicit MLP
+        features = implicit_mlp(rays.vertex_coordinates)
+        # Concatenate positional encoding to 4th hidden layer output (handled inside MLP)
+        
+        # Compute losses
+        densities = compute_density_from_features(features)
+        colors = compute_color_from_features(features)
+        photometric_loss = compute_photometric_loss(colors, rays.target_colors)
+        sparsity_loss = compute_sparsity_loss(densities, lambda_s=1e-5)
+        total_loss = photometric_loss + sparsity_loss
+        
+        # Update implicit MLP weights
+        implicit_mlp.update_weights(total_loss, lr=5e-4, optimizer='Adam')
+    
+    # Extract features from implicit MLP for voxel grid corners
+    voxel_grid = initialize_voxel_grid(target_resolution)
+    voxel_features = extract_features_from_mlp(implicit_mlp, voxel_grid.corners)
+    
+    # Phase 3: Explicit Optimization
+    # Discard implicit MLP
+    implicit_mlp = None
+    
+    # Train explicit grid for 1000 epochs
+    for epoch in range(1000):
+        rays = sample_rays(training_images, camera_poses, batch_size=16384)
+        # Interpolate features from voxel grid
+        features = interpolate_features(voxel_features, rays.vertex_coordinates)
+        
+        # Compute losses
+        densities = compute_density_from_features(features)
+        colors = compute_color_from_features(features)
+        photometric_loss = compute_photometric_loss(colors, rays.target_colors)
+        sparsity_loss = compute_sparsity_loss(densities, lambda_s=1e-5)
+        total_loss = photometric_loss + sparsity_loss
+        
+        # Update voxel features directly
+        voxel_features.update_gradients(total_loss, lr=5e-4, optimizer='Adam')
+        
+        # Prune empty voxels
+        prune_voxels(voxel_features, occupancy_mask, threshold=0.01)
+        
+    return voxel_features, occupancy_mask
+
+def compute_sparsity_loss(densities, lambda_s):
+    """
+    Computes the sparsity regularization loss.
+    L_sparsity = lambda_s * sum(sigma_i^2 / log(1 + sigma_i^2 / 0.5))
+    """
+    loss = 0.0
+    for sigma in densities:
+        term = (sigma ** 2) / math.log(1 + (sigma ** 2) / 0.5)
+        loss += term
+    return lambda_s * loss
+```
+
+## Subtopics
+
+### Feature Grid Optimization (Explicit vs Implicit Regularization)
+Explicit regularization directly optimizes grid values via gradient-based methods, requiring less time and GPU memory but producing lower quality metrics [S1]. Implicit regularization uses an MLP auto-encoder to predict features from spatial coordinates, offering higher quality but requiring more resources [S1]. Hybrid regularization combines both: it starts with explicit initialization, moves to implicit optimization for 1000 epochs, extracts corner features, and then returns to explicit optimization [S1]. On the Lego scene, explicit regularization took 16 hours with 22GB peak GPU memory, while hybrid regularization required 60 hours and 40GB [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The method is computationally expensive due to the two-stage training process. On the Lego scene, hybrid regularization took 60 hours compared to 16 hours for explicit regularization [S1].
+*   **Memory Complexity:** Peak GPU memory usage is approximately 40 GB on an NVIDIA A100 GPU [S1, S2]. This is significantly higher than explicit regularization (22 GB) [S1].
+*   **Performance:** The method achieves high-quality results, superior to explicit regularization [S1]. It enables real-time rendering by leveraging sparsity and half-precision storage [S1, S2].
+*   **Strengths:** Prevents overfitting in explicit grids, handles sparse inputs well, and enables real-time rendering through sparsity [S1, S2].
+*   **Limitations:** High computational cost and memory usage compared to explicit methods [S1].
+*   **When to use:** When high-quality novel view synthesis is required and computational resources are sufficient [S1].
+*   **When not to use:** When training time or GPU memory is constrained [S1].
+
+## Background
+The method was introduced in the NeRFLight paper by Rivas-Manzaneque et al. in 2023 [S1, S2]. It builds on the idea of hybrid regularization proposed in [48] (DIVeR-64) to address overfitting in deterministic integration [S1, S2]. The approach is part of the NeRFLight framework, which aims to provide fast and light neural radiance fields using a shared feature grid [S1, S2].
+
+## Sources
+[S1] NeRFLight: Fast and Light Neural Radiance Fields using a Shared Feature Grid, https://doi.org/10.1109/cvpr52729.2023.01195, fetched 2026-10-26
+[S2] NeRFLight: Fast and Light Neural Radiance Fields using a Shared Feature Grid, https://openaccess.thecvf.com/content/CVPR2023/html/Rivas-Manzaneque_NeRFLight_Fast_and_Light_Neural_Radiance_Fields_Using_a_Shared_CVPR_2023_paper.html, fetched 2026-10-27

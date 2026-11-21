@@ -1,0 +1,242 @@
+# Parallel Volume Rendering for Computational Flow Imaging
+
+Also called: CFI Parallel Volume Rendering, Preprocessed Raytracing for CFI
+
+## Overview
+Parallel Volume Rendering for Computational Flow Imaging (CFI) is a method for visualizing refractive index or density fields from Computational Fluid Dynamics (CFD) simulations on distributed-memory supercomputers [S1, unofficial]. It solves the problem of integral errors caused by intersecting or overlapping curvilinear CFD grids by converting them into rectilinear multi-block voxel fields [S1, unofficial]. Unlike cell projection, which double-counts overlapping segments, or simple resampling, which creates unmanageably large regular grids, this method uses preprocessing to distribute voxels into balanced, regular regions for efficient parallel ray-casting [S1, unofficial].
+
+## How it works
+**Inputs:** Curvilinear, multi-zone, overlapping CFD grid data (e.g., hexahedral cells) representing flow fields (density, refractive index).
+**Outputs:** Rendered images (shadowgraph, schlieren, or interferometric) or field data.
+
+**Data Structures:**
+1.  **Voxel Grid:** A set of voxels derived from the continuous CFD geometry. Each voxel stores the physical property value (e.g., density $\rho$) and its position.
+2.  **Region Block:** A regular sub-region of the flow field, defined by equal divisions along the $x$ and $y$ coordinates. Each block is assigned to a specific processor in the distributed system.
+
+**Parameters:**
+*   **Integration Rule:** Trapezoidal rule [S1, unofficial].
+*   **Communication:** MPI (Message Passing Interface) [S1, unofficial].
+*   **Hardware:** Distributed-memory architecture (e.g., Beowulf cluster with switch-based interconnect) [S1, unofficial].
+*   **Language:** C++ [S1, unofficial].
+
+**Steps:**
+
+1.  **Voxelization:** Convert the continuous geometric representation of the curvilinear CFD grids into a discrete set of voxels [S1, unofficial]. This step maps the irregular grid cells to a voxel representation, avoiding the need for high-rate resampling to a single regular grid [S1, unofficial].
+2.  **Region Division:** Divide the entire flow field into regular regions by equally partitioning the domain along the $x$ and $y$ coordinates [S1, unofficial].
+3.  **Load Balancing:** Distribute the voxels into these regions such that each region contains approximately the same number of voxels [S1, unofficial]. This mitigates load imbalances caused by the varying sizes and shapes of the original CFD cells, which can differ by several orders of magnitude due to adaptive mesh refinement [S1, unofficial].
+4.  **Distribution:** Assign each region (block of voxels) to a different processor in the parallel distributed-memory system using MPI [S1, unofficial].
+5.  **Rendering (Ray-Casting):** For each pixel, cast a ray through the volume. The ray traversal is performed locally on the processor holding the relevant blocks. Each line integral process searches through all voxels in its assigned block [S1, unofficial].
+
+**Formulas:**
+The optical intensity $I$ is calculated via line-of-sight integration. The integration is performed according to the trapezoidal rule over $n$ segments along the light path [S1, unofficial].
+
+For **Shadowgraph** systems, which respond to the second derivative of flow density $\rho$, the intensity is proportional to:
+$$ I \propto \int \left( \frac{\partial^2 \rho}{\partial x^2} + \frac{\partial^2 \rho}{\partial y^2} \right) dz $$
+Discretized for $n$ segments, this involves summing the contributions of the second derivatives at specific points [S1, unofficial].
+
+For **Schlieren** systems, which respond to the first derivative, the intensity depends on the orientation of the knife-edge or color filter:
+*   Vertical knife-edge:
+    $$ I \propto \int \frac{\partial \rho}{\partial x} dz $$
+*   Horizontal knife-edge:
+    $$ I \propto \int \frac{\partial \rho}{\partial y} dz $$
+[S1, unofficial]
+
+For **Interferometric** systems (e.g., Mach-Zehnder), the light intensity is proportional to the fringe shift, which relates to the line integral of the refractive index (or density) [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Global constants and MPI setup assumed
+# MPI_Comm_rank() returns the ID of the current processor
+# MPI_Comm_size() returns the total number of processors
+
+def parallel_cfi_rendering(cfd_grids, image_width, image_height):
+    """
+    Main entry point for Parallel CFI Volume Rendering.
+    """
+    # Step 1: Voxelization
+    # Convert continuous curvilinear CFD grids into a set of voxels.
+    # Each voxel contains position (x, y, z) and property value (e.g., density).
+    all_voxels = voxelize(cfd_grids)
+    
+    # Step 2: Region Division & Step 3: Load Balancing
+    # Divide the flow field into regular regions along x and y.
+    # Distribute voxels to regions such that each region has ~equal voxel count.
+    # This balances the load across processors despite varying cell sizes.
+    regions = create_balanced_regions(all_voxels)
+    
+    # Step 4: Distribution
+    # Assign regions to processors.
+    # In a real MPI implementation, this involves gathering voxels for this rank.
+    my_voxels = get_voxels_for_current_rank(regions)
+    
+    # Step 5: Rendering
+    # Initialize output image
+    image = new Image(image_width, image_height)
+    
+    # Parallelize over pixels or blocks
+    for y in range(image_height):
+        for x in range(image_width):
+            # Cast ray for this pixel
+            ray = cast_ray(x, y)
+            
+            # Perform line-of-sight integration
+            # The ray searches through all voxels in the assigned blocks
+            intensity = integrate_ray(ray, my_voxels)
+            
+            image.set_pixel(x, y, intensity)
+            
+    return image
+
+def voxelize(cfd_grids):
+    """
+    Converts curvilinear CFD cells into a set of voxels.
+    Returns a list of Voxel objects.
+    """
+    voxels = []
+    for cell in cfd_grids:
+        # Map the continuous geometric representation of the cell to voxels.
+        # The specific voxelization algorithm (e.g., grid-based sampling) 
+        # is not detailed in the source, but the goal is to eliminate 
+        # overlap errors inherent in cell projection.
+        cell_voxels = map_cell_to_voxels(cell)
+        voxels.extend(cell_voxels)
+    return voxels
+
+def create_balanced_regions(all_voxels):
+    """
+    Divides the flow field into regular regions along x and y.
+    Distributes voxels to ensure each region has approximately the same number of voxels.
+    """
+    # Determine bounds of the flow field
+    min_x, max_x = get_min_max(all_voxels, 'x')
+    min_y, max_y = get_min_max(all_voxels, 'y')
+    
+    # Equally divide the field along x and y coordinates
+    # The number of divisions is determined by the number of processors or desired block size
+    num_processors = MPI_Comm_size()
+    # Simple grid division strategy
+    divisions_x = int(sqrt(num_processors))
+    divisions_y = int(sqrt(num_processors))
+    
+    regions = []
+    for i in range(divisions_x):
+        for j in range(divisions_y):
+            region = {
+                'x_start': min_x + i * (max_x - min_x) / divisions_x,
+                'x_end': min_x + (i + 1) * (max_x - min_x) / divisions_x,
+                'y_start': min_y + j * (max_y - min_y) / divisions_y,
+                'y_end': min_y + (j + 1) * (max_y - min_y) / divisions_y,
+                'voxels': []
+            }
+            regions.append(region)
+            
+    # Distribute voxels into regions
+    for voxel in all_voxels:
+        for region in regions:
+            if region['x_start'] <= voxel.x < region['x_end'] and \
+               region['y_start'] <= voxel.y < region['y_end']:
+                region['voxels'].append(voxel)
+                break
+                
+    # Re-balance if necessary to ensure equal voxel counts per region
+    # (Implementation detail: redistribute voxels from over-loaded to under-loaded regions)
+    regions = balance_regions(regions)
+    
+    return regions
+
+def get_voxels_for_current_rank(regions):
+    """
+    Returns the voxels assigned to the current MPI rank.
+    """
+    rank = MPI_Comm_rank()
+    # Assuming regions are distributed round-robin or by contiguous blocks to ranks
+    # The source states: "voxels in different regions are distributed into different parts"
+    # and "every processor requires the same amount of storage space"
+    return regions[rank]['voxels']
+
+def cast_ray(x, y):
+    """
+    Creates a ray vector for pixel (x, y).
+    """
+    # Ray origin and direction depend on camera setup
+    # Not specified in detail, assumed standard perspective/orthographic projection
+    return Ray(origin=(x, y, 0), direction=(0, 0, 1))
+
+def integrate_ray(ray, voxels):
+    """
+    Performs line-of-sight integration using the trapezoidal rule.
+    """
+    # Sort voxels along the ray direction (z-axis)
+    sorted_voxels = sort_voxels_by_z(voxels, ray)
+    
+    # Trapezoidal rule integration
+    # Sum contributions of segments along the ray path
+    integral = 0.0
+    for i in range(len(sorted_voxels) - 1):
+        v1 = sorted_voxels[i]
+        v2 = sorted_voxels[i+1]
+        
+        # Calculate integrand value (e.g., density derivative for schlieren)
+        # The specific derivative (1st or 2nd) depends on the CFI mode
+        val1 = get_integrand(v1)
+        val2 = get_integrand(v2)
+        
+        # Distance between voxels along the ray
+        dz = abs(v2.z - v1.z)
+        
+        # Trapezoidal rule: (val1 + val2) / 2 * dz
+        integral += (val1 + val2) / 2.0 * dz
+        
+    return integral
+
+def get_integrand(voxel):
+    """
+    Returns the appropriate integrand value based on the CFI mode.
+    Shadowgraph: 2nd derivative of density.
+    Schlieren: 1st derivative of density.
+    Interferometry: Density/Refractive index.
+    """
+    # Placeholder for specific derivative calculation
+    # The source notes that the algorithm calculates values of the appropriate integrand
+    # at certain points.
+    return voxel.density # Simplified; actual implementation requires derivative computation
+
+def balance_regions(regions):
+    """
+    Ensures each region has approximately the same number of voxels.
+    """
+    # This step addresses the load imbalance caused by varying voxel sizes/shapes.
+    # Voxels are moved between regions to equalize counts.
+    # Exact rebalancing algorithm is not specified in the source.
+    # [G] A simple approach is to sort all voxels by a space-filling curve 
+    # and assign them to regions in order, ensuring balanced counts.
+    all_voxels = [v for r in regions for v in r['voxels']]
+    all_voxels.sort(key=lambda v: v.x + v.y) # Simple heuristic
+    
+    new_regions = []
+    voxels_per_region = len(all_voxels) // len(regions)
+    
+    for i, region in enumerate(regions):
+        start_idx = i * voxels_per_region
+        end_idx = start_idx + voxels_per_region if i < len(regions) - 1 else len(all_voxels)
+        region['voxels'] = all_voxels[start_idx:end_idx]
+        new_regions.append(region)
+        
+    return new_regions
+```
+
+## Operating characteristics
+*   **Time Complexity:** The preprocessing (voxelization and distribution) has a cost, but the rendering speed is improved by having fewer voxels to search in each block [S1, unofficial]. The total searching speed increases as more blocks with fewer voxels are created, despite the distribution cost [S1, unofficial].
+*   **Memory Complexity:** Memory usage is proportional to the number of voxels. This method avoids the excessive memory requirements of resampling to a high-resolution regular grid [S1, unofficial].
+*   **Performance:** Tested on a Beowulf cluster (9 nodes, 800 MHz Pentium III, 100 Mb/s Ethernet) with datasets of ~0.5 million hexahedral cells [S1, unofficial]. The method showed significant performance improvement over cell projection and simple resampling [S1, unofficial].
+*   **Strengths:** Eliminates integral errors from overlapping grids; balances load across processors; efficient for large-scale distributed systems.
+*   **Limitations:** Requires preprocessing overhead; load imbalances are unavoidable but reduced; performance depends on the efficiency of the voxelization and distribution steps [S1, unofficial].
+
+## Background
+Computational Flow Imaging (CFI) is a technique for flow visualization that simulates optical wave interaction with flow fields to generate digital images (shadowgraph, schlieren, interferometric) [S1, unofficial]. Traditional methods like cell projection suffer from integral errors when dealing with intersecting or overlapping curvilinear CFD grids [S1, unofficial]. Simple resampling to a regular grid is inefficient due to high storage and rendering costs [S1, unofficial]. This parallel volume rendering method was developed to address these issues on distributed-memory supercomputers, specifically implemented in C++ using MPI [S1, unofficial].
+
+## Sources
+[S1] DTIC ADA409188: Parallel Volume Rendering Algorithms for Computational Flow Imaging, https://archive.org/details/DTIC_ADA409188, fetched 2026-10-26 (unofficial)

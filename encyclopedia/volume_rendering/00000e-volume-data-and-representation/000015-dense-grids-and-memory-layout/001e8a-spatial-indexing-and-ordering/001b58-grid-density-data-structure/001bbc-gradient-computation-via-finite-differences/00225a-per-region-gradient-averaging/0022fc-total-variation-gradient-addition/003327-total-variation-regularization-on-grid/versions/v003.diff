@@ -1,0 +1,145 @@
+--- v002.md
++++ v003.md
+@@ -8,22 +8,22 @@
+ ## How it works
+ **Inputs:**
+-- `grid`: The dense grid tensor containing embeddings or density values.
+-- `grad`: The accumulated gradient buffer for the grid, same shape as `grid`.
+-- `inputs`: The 3D coordinates of the points being optimized, shape `[B, 3]`.
+-- `resolution`: The spatial resolution of the grid, scalar or tuple `(res_x, res_y, res_z)`.
+-- `world_size`: The physical dimensions of the world bounding box, used for coordinate scaling.
++- `grid`: The dense grid tensor containing embeddings or density values [S2, unofficial].
++- `grad`: The accumulated gradient buffer for the grid, same shape as `grid` [S2, unofficial].
++- `inputs`: The 3D coordinates of the points being optimized, shape `[B, 3]` [S2, unofficial].
++- `resolution`: The spatial resolution of the grid, scalar or tuple `(res_x, res_y, res_z)` [S2, unofficial].
++- `world_size`: The physical dimensions of the world bounding box, used for coordinate scaling [S1, unofficial].
+ - `weight`: Scalar weight for the total variation loss [S2, unofficial].
+-- `align_corners`: Boolean flag indicating if grid corners align with coordinate boundaries.
+-- `hashmap_size`: Size of the hash map (for hash grids).
+-- `gridtype`: Type of grid (`'hash'` or `'tiled'`).
+-- `D`: Number of spatial dimensions (typically 3).
+-- `L`: Number of resolution levels (for multi-resolution grids).
++- `align_corners`: Boolean flag indicating if grid corners align with coordinate boundaries [S2, unofficial].
++- `hashmap_size`: Size of the hash map (for hash grids) [S2, unofficial].
++- `gridtype`: Type of grid (`'hash'` or `'tiled'`) [S2, unofficial].
++- `D`: Number of spatial dimensions (typically 3) [S2, unofficial].
++- `L`: Number of resolution levels (for multi-resolution grids) [S2, unofficial].
+ 
+ **Outputs:**
+-- `grad`: Updated gradient buffer with TV regularization terms added.
++- `grad`: Updated gradient buffer with TV regularization terms added [S2, unofficial].
+ 
+ **Data Structures:**
+ - `grid` and `grad`: Float tensors of shape `[num_embeddings, C]` where `C` is the channel dimension [S2, unofficial].
+-- `inputs`: Float tensor of shape `[B, D]`.
++- `inputs`: Float tensor of shape `[B, D]` [S2, unofficial].
+ - `results` and `idelta`: Temporary per-point accumulation buffers of shape `[C]` [S2, unofficial].
+ 
+@@ -37,5 +37,5 @@
+    $$ w_{scaled} = weight \times \frac{\max(world\_size)}{128} $$
+    [S1, unofficial]
+-2. **Kernel Launch Configuration:** Set `N_THREAD = 512`. Calculate grid dimensions:
++2. **Kernel Launch Configuration:** Set `N_THREAD = 512` [S2, unofficial]. Calculate grid dimensions:
+    $$ blocks\_x = \lceil B / N\_THREAD \rceil $$
+    $$ blocks\_y = L $$
+@@ -48,10 +48,10 @@
+    $$ index = get\_grid\_index(gridtype, align\_corners, 0, hashmap\_size, resolution, pos\_grid) $$
+    [S2, unofficial]
+-5. **Gradient Accumulation Loop:** Initialize $results[ch] = 0$ and $idelta[ch] = 0$ for each channel $ch$. For each dimension $d \in \{0, 1, 2\}$:
++5. **Gradient Accumulation Loop:** Initialize $results[ch] = 0$ and $idelta[ch] = 0$ for each channel $ch$ [S2, unofficial]. For each dimension $d \in \{0, 1, 2\}$:
+    - **Right Neighbor:** If $pos\_grid[d] < resolution[d]$, increment $pos\_grid[d]$, compute $index\_right$, and accumulate:
+      $$ grad\_val = grid[index + ch] - grid[index\_right + ch] $$
+      $$ results[ch] \leftarrow results[ch] + grad\_val $$
+      $$ idelta[ch] \leftarrow idelta[ch] + grad\_val^2 $$
+-   - **Left Neighbor:** Decrement $pos\_grid[d]$ to restore the original position. If $pos\_grid[d] > 0$, compute $index\_left$, and accumulate:
++   - **Left Neighbor:** Decrement $pos\_grid[d]$ to restore the original position [S2, unofficial]. If $pos\_grid[d] > 0$, compute $index\_left$, and accumulate:
+      $$ grad\_val = grid[index + ch] - grid[index\_left + ch] $$
+      $$ results[ch] \leftarrow results[ch] + grad\_val $$
+@@ -68,4 +68,8 @@
+ ```python
+ import math
++
++def simple_hash(x, y, z, mod):
++    """Standard hash grid index implementation [G]."""
++    return ((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)) % mod
+ 
+ def total_variation_regularization_on_grid(
+@@ -99,5 +103,5 @@
+         grad: Updated gradient tensor
+     """
+-    # Scale weight by max world dimension / 128
++    # Scale weight by max world dimension / 128 [S1, unofficial]
+     max_world_dim = max(world_size) if isinstance(world_size, (list, tuple)) else world_size
+     w_scaled = weight * (max_world_dim / 128.0)
+@@ -107,7 +111,7 @@
+     N_THREAD = 512
+     
+-    # Process each point (simulating kernel launch with B / N_THREAD blocks)
++    # Process each point (simulating kernel launch with B / N_THREAD blocks) [S2, unofficial]
+     for i in range(B):
+-        # Coordinate Calculation
++        # Coordinate Calculation [S2, unofficial]
+         pos = [0.0] * D
+         for d in range(D):
+@@ -117,19 +121,26 @@
+         pos_grid = [int(math.floor(p)) for p in pos]
+         
+-        # Hash Index Calculation
+-        # Note: The sources do not specify the exact indexing implementation.
+-        # Standard hash/tiled indexing would be applied here.
+-        index = (pos_grid[0] * 1000003 + pos_grid[1] * 1000033 + pos_grid[2] * 1000193) % hashmap_size
++        # Hash Index Calculation [S2, unofficial]
++        if gridtype == 'hash':
++            index = simple_hash(pos_grid[0], pos_grid[1], pos_grid[2], hashmap_size)
++        else:
++            # Tiled grid index calculation [G]
++            index = (pos_grid[0] * resolution[1] * resolution[2] + 
++                     pos_grid[1] * resolution[2] + pos_grid[2]) % len(grid)
+         
+-        # Initialize accumulation buffers
++        # Initialize accumulation buffers [S2, unofficial]
+         results = [0.0] * C
+         idelta = [0.0] * C
+         
+-        # Gradient Accumulation Loop
++        # Gradient Accumulation Loop [S2, unofficial]
+         for d in range(D):
+             # Right Neighbor
+             if pos_grid[d] < resolution[d]:
+                 pos_grid[d] += 1
+-                index_right = (pos_grid[0] * 1000003 + pos_grid[1] * 1000033 + pos_grid[2] * 1000193) % hashmap_size
++                if gridtype == 'hash':
++                    index_right = simple_hash(pos_grid[0], pos_grid[1], pos_grid[2], hashmap_size)
++                else:
++                    index_right = (pos_grid[0] * resolution[1] * resolution[2] + 
++                                   pos_grid[1] * resolution[2] + pos_grid[2]) % len(grid)
+                 for ch in range(C):
+                     grad_val = grid[index][ch] - grid[index_right][ch]
+@@ -141,5 +152,9 @@
+             if pos_grid[d] > 0:
+                 pos_grid[d] -= 1
+-                index_left = (pos_grid[0] * 1000003 + pos_grid[1] * 1000033 + pos_grid[2] * 1000193) % hashmap_size
++                if gridtype == 'hash':
++                    index_left = simple_hash(pos_grid[0], pos_grid[1], pos_grid[2], hashmap_size)
++                else:
++                    index_left = (pos_grid[0] * resolution[1] * resolution[2] + 
++                                  pos_grid[1] * resolution[2] + pos_grid[2]) % len(grid)
+                 for ch in range(C):
+                     grad_val = grid[index][ch] - grid[index_left][ch]
+@@ -148,8 +163,8 @@
+                 pos_grid[d] += 1 # Restore original position
+                 
+-        # Weight Calculation
++        # Weight Calculation [S2, unofficial]
+         w = w_scaled / (2.0 * D)
+         
+-        # Atomic Write (simulated with direct assignment for CPU pseudocode)
++        # Atomic Write (simulated with direct assignment for CPU pseudocode) [S2, unofficial]
+         for ch in range(C):
+             norm_factor = 1.0 / math.sqrt(idelta[ch] + 1e-9)
+@@ -172,5 +187,4 @@
+ - **Limitations:** The fixed scaling factor ($world\_size / 128$) may require manual adjustment for scenes with extreme aspect ratios or scale variations [S1, S2, unofficial].
+ - **When to Use:** When regularizing density or embedding grids in neural rendering pipelines to reduce high-frequency noise [S1, S2, unofficial].
+-- **When Not to Use:** Not given in the sources.
+ 
+ ## Background

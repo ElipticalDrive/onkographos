@@ -1,0 +1,194 @@
+--- v001.md
++++ v002.md
+@@ -4,86 +4,89 @@
+ 
+ ## Overview
+-Ray-guided volume rendering with missing brick reporting is an out-of-core rendering technique where the working set (the minimal subset of volume data required to render an image) is determined dynamically during the ray-casting process rather than in advance [S1, unofficial][S2]. It solves the problem of memory overflow in large-scale volume rendering by streaming only the bricks actually accessed by the rays, ensuring optimal accuracy by never loading data that will not be used [S1, unofficial][S2]. Unlike methods that estimate the working set beforehand, which can lead to sub-optimal memory utilization, this approach minimizes the working-set size by reporting missing bricks on the GPU for subsequent frames [S1, unofficial][S2]. It builds on [Acceleration](18-acceleration.md) by integrating empty-space skipping and early ray termination with on-demand data loading.
++Ray-guided volume rendering with missing brick reporting is an out-of-core rendering technique where the working set (the minimal subset of volume data required to render an image) is determined dynamically during the ray-casting process rather than in advance [S1, unofficial][S2]. It solves the problem of memory bottlenecks in large-scale volume rendering by streaming only the bricks accessed by the rays, ensuring optimal accuracy by never loading data that will not be used [S1, unofficial][S2]. It sets itself apart from sibling methods like [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md) or [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md) by explicitly handling data availability: when a required brick is missing from the GPU cache, the method reports this "missing brick" to a subsystem for subsequent paging, rather than attempting to approximate the data or failing [S2]. This builds on the acceleration principles of [Acceleration](18-acceleration.md) by integrating data streaming directly into the rendering loop.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Ray origin and direction, current volume state (brick cache), missing brick report from previous frames.
+-*   **Output:** Rendered pixel color, updated ray state (`rayResumePos`, `rayResumeColor`), missing brick list for the next frame.
++The method operates on the GPU, performing both ray accumulation and brick identification in parallel to minimize overhead [S2]. It relies on a brick cache (e.g., a 3D texture pool) storing individual bricks of different resolutions in an unordered manner [S1, unofficial]. An additional data structure tracks the residency status of each brick in the volume [S1, unofficial].
++
++**Inputs:**
++*   Ray origin and direction.
++*   Volume dataset organized into hierarchical bricks (multi-resolution).
++*   Current GPU brick cache state.
++*   Missing brick reporting subsystem (hash table).
++
++**Outputs:**
++*   Accumulated color and opacity for the pixel.
++*   Updated missing brick report for the next frame.
++*   Resume state (`rayResumePos`, `rayResumeColor`) for interrupted rays.
+ 
+ **Data Structures:**
+-1.  **Brick Cache:** A GPU texture pool (e.g., 3D textures) storing individual bricks of different resolutions in GPU memory in an unordered manner [S1, unofficial][S2].
+-2.  **Residency Map:** An additional data structure storing for each brick in the volume whether it is resident in the cache or not [S1, unofficial]. This is used for address translation, mapping sample locations in reference space (e.g., normalized coordinates in a $[0, 1]^3$ unit cube) to texture coordinates within the corresponding brick in the cache [S1, unofficial].
+-3.  **Missing Brick Hash Table:** A lock-free hash table stored in an image load store buffer, used to record missing bricks identified during ray-casting [S2]. It uses atomic load/store operations to coordinate disk access and update the volume pool [S2].
++1.  **Brick Cache:** Unordered collection of bricks in GPU memory. Each brick has a unique identifier and associated sampling rates/resolutions.
++2.  **Residency Map:** A data structure (e.g., hash map or bitfield) indicating if a specific brick ID is currently resident in the cache [S1, unofficial].
++3.  **Missing Brick Hash Table:** A lock-free, set-based linearly-probed hash table stored in an image load store buffer. It uses the brick identifier as the hash key to ensure multiple rays requesting the same brick map to the same position, minimizing table size and duplicate entries [S2].
+ 
+ **Algorithm Steps:**
+-The rendering loop processes each ray independently. The following pseudocode implements the core logic described in [S2].
++1.  **Initialization:** For each ray, initialize the accumulated color `color` to `rayResumeColor` (from the previous frame if the ray was interrupted) and set a boolean flag `terminated` to `true` [S2]. The flag indicates whether a missing brick has been encountered for the current ray in the current frame.
++2.  **Ray Loop:** Repeat the following until the ray exits the volume bounds or saturates (accumulated opacity reaches 1.0):
++    a.  **Compute Level of Detail (LoD):** Calculate the required LoD based on the current ray depth (distance from origin) [S2].
++    b.  **Get Brick:** Call `GetBrick(ray)` to retrieve the brick ID and the `samplingRate` currently available for that brick at the computed LoD [S2]. `GetBrick` always returns some data (likely a coarser version if the finest is missing) [S2].
++    c.  **Address Translation:** Use the residency map to translate the sample location from the global reference space (e.g., normalized $[0, 1]^3$) to local texture coordinates within the retrieved brick [S1, unofficial]. Retrieve the offsets for the brick from the pool using `PoolOffsets(brick)` [S2].
++    d.  **Check Resolution:** Compare the `samplingRate` returned by `GetBrick` with `RequiredSamplingForLOD(LoD)` [S2].
++    e.  **Report Missing Brick:** If `samplingRate` is not equal to `RequiredSamplingForLOD(LoD)`, the data is undersampled for the desired quality [S2].
++        i.  Call `ReportMissingBrick(brick)` to add the brick ID to the hash table [S2].
++        ii. If `terminated` is `true` (this is the first missing brick encountered for this ray in this frame), set `terminated` to `false` and store the current ray position in `rayResumePos` [S2]. This allows rendering to resume from this point in the next frame.
++    f.  **Raycast:** Perform the raycasting step using the current `ray`, `stepSize`, and `offsets` [S2]. Update `color` and `ray` position.
++3.  **Finalization:**
++    a.  Update `rayResumeColor` with the final accumulated `color` [S2].
++    b.  If the ray completed successfully (did not stop due to a missing brick), set `rayResumePos` to a special `FINISHED` state [S2].
+ 
++**Pseudocode:**
+ ```python
+-def RayGuidedVolumeRendering(ray, rayResumeColor, rayResumePos, hash_table):
+-    """
+-    Renders a single ray using ray-guided volume rendering with missing brick reporting.
+-    
+-    Args:
+-        ray: Current ray state (origin, direction, depth).
+-        rayResumeColor: Accumulated color from previous frame if ray was interrupted.
+-        rayResumePos: Position where rendering was interrupted in the previous frame.
+-        hash_table: GPU-based lock-free hash table for missing brick reporting.
+-        
+-    Returns:
+-        color: Final accumulated color.
+-        new_rayResumePos: Position to resume from in the next frame, or FINISHED.
+-        new_rayResumeColor: Accumulated color to pass to next frame.
+-    """
+-    # Initialize state
++# Global state per ray from previous frame
++rayResumeColor = vec4(0.0)
++rayResumePos = vec3(0.0)
++isFinished = false
++
++def RayGuidedRender(ray, volume, cache, hashTable):
+     color = rayResumeColor
+-    terminated = True  # Assume ray will finish unless a missing brick is found
++    terminated = True  # Assume ray will finish unless interrupted
+     
+     # Loop until ray exits volume or saturates
+-    while not (ray.exits_volume() or ray.saturated()):
++    while ray.depth < volume.exitDepth and not ray.saturated:
+         
+-        # 1. Compute Level of Detail (LoD) based on ray depth
++        # 1. Determine required resolution
+         lod = ComputeLOD(ray.depth)
+         
+-        # 2. Retrieve brick and its current sampling rate
+-        # GetBrick always returns some data, but it may be at a lower resolution than requested
+-        brick, sampling_rate = GetBrick(ray, lod)
++        # 2. Retrieve available brick and its sampling rate
++        # GetBrick returns the best available brick, potentially coarser than requested
++        brick_id, samplingRate = GetBrick(ray, lod)
+         
+-        # 3. Get offsets for the brick from the pool
+-        offsets = PoolOffsets(brick)
++        # 3. Address translation and offset retrieval
++        # Translate global ray position to local brick coordinates
++        offsets = PoolOffsets(brick_id)
+         
+-        # 4. Check if the retrieved brick is too coarse (undersampled)
+-        if sampling_rate != RequiredSamplingForLOD(lod):
+-            # Report the missing brick to the hash table
+-            ReportMissingBrick(hash_table, brick)
++        # 4. Check if data is undersampled
++        requiredRate = RequiredSamplingForLOD(lod)
++        
++        if samplingRate != requiredRate:
++            # Data is missing or too coarse
++            ReportMissingBrick(hashTable, brick_id)
+             
+-            # If this is the first missing brick encountered for this ray
++            # Record interruption point if this is the first missing brick
+             if terminated:
+                 terminated = False
+-                # Store the position where the first missing brick occurred
+                 rayResumePos = ray.position
+                 
+-        # 5. Perform raycasting step using the ray, step size, and offsets
+-        color = RaycastStep(ray, step_size, offsets, color)
++        # 5. Perform integration step
++        color = RaycastStep(ray, stepSize, offsets, color)
+         
+-    # Update resume state for next frame
+-    new_rayResumeColor = color
++    # Save state for next frame
++    rayResumeColor = color
+     
+-    if ray.done():
+-        new_rayResumePos = FINISHED
++    if not terminated:
++        # Ray was interrupted by missing data
++        pass
+     else:
+-        # If terminated is still True, the ray finished without missing bricks
+-        # If terminated is False, we already set rayResumePos to the first missing brick location
+-        pass # rayResumePos is already set if terminated became False
+-        
+-    return color, rayResumePos, new_rayResumeColor
+-
+-def ReportMissingBrick(hash_table, brick):
+-    """
+-    Adds a brick identifier to the lock-free hash table.
+-    Hashes based on brick ID so multiple rays requesting the same brick
+-    hash to the same position, keeping the table size small.
+-    """
+-    brick_id = GetBrickID(brick)
+-    hash_table.insert(brick_id)
++        rayResumePos = FINISHED
++        isFinished = True
+ ```
+ 
+@@ -94,30 +97,27 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Undersampling:** If data is undersampled (too coarse), the renderer displays a coarser version initially but progressively refines regions with finer resolution data until sampled at a single voxel per pixel or the maximum data resolution available [S2].
+-*   **Write Hazards:** Since locks do not exist in GLSL, the hash table must be lock-free to handle write hazards from multiple rays [S2].
+-*   **Address Translation:** Correctly mapping reference space coordinates to brick-local texture coordinates is critical for sampling [S1, unofficial].
++*   **Undersampling:** If data is undersampled, the renderer displays a coarser version initially but progressively refines regions with finer resolution data until sampled at a single voxel per pixel or the maximum data resolution is reached [S2].
++*   **Write Hazards:** The lock-free hash table must handle concurrent writes from multiple rays requesting the same brick. Linear probing with atomic operations is used to manage this [S2].
++*   **Spatial Coherency:** Neighboring rays likely request the same bricks. The hash table design exploits this by hashing on brick ID, ensuring duplicate requests map to the same entry, keeping the table small [S2].
+ 
+ ## Subtopics
+ 
+ ### [Greedy Brick Request Strategy](2843-greedy-brick-request-strategy.md)
+-The Greedy Brick Request Strategy is a data-loading heuristic used in ray-guided volume rendering to manage out-of-core brick requests. It addresses the problem of missing volume data by requesting all intermediate levels of detail (LoD) along a ray's path when a higher-resolution brick is unavailable, rather than waiting for the final required resolution. Unlike the [Global strategy](2843-global-brick-request-strategy.md), which only requests the final necessary brick, the Greedy strategy floods the request hash table with intermediate bricks. This approach is distinct because it prioritizes iterative visual refinement and faster convergence of the image quality over minimizing the total number of unique brick requests per frame. It allows a ray to sample at its final resolution quickly, which can cause earlier ray termination, and has been found to produce more pleasing progress information and converge in the fewest number of frames.
++The Greedy Brick Request Strategy is a data-loading heuristic used in ray-guided volume rendering to manage out-of-core brick requests. It addresses the problem of missing volume data by requesting all intermediate levels of detail (LoD) along a ray's path when a higher-resolution brick is unavailable, rather than waiting for the final required resolution. Unlike the [Global strategy](2843-global-brick-request-strategy.md), which only requests the final necessary brick, the Greedy strategy floods the request hash table with intermediate bricks. This approach is distinct because it prioritizes iterative visual refinement and faster convergence of the image quality over minimizing the total number of unique brick requests per frame. It produces more pleasing intermediate progress and converges in fewer frames because it allows rays to sample at their final resolution quickly, potentially triggering earlier ray termination.
+ 
+ ### Global Brick Request Strategy
+-The Global Brick Request Strategy is a method where a ray only requests the bricks absolutely required to satisfy the final rendering request, leaving space in the hash table for other rays. When a brick is missing, it increments the Level of Detail (LoD) and looks up the brick at the new resolution, continuing until a missing brick is no longer reported. Unlike the 'Greedy' strategy, the Global strategy does not request intermediate bricks. It generates the final correct image quickest in terms of raw completion but may produce less pleasing intermediate progress [S2].
+-
+-### GPU-based missing brick reporting via hash table
+-This is a subsystem for recording missing bricks identified during ray-casting on the GPU, using a lock-free hash table stored in an image load store buffer to coordinate disk access and update the volume pool. It uses the `GL_ARB_shader_image_load_store` extension (core in OpenGL 4.2) to create an image buffer independent of the current rendering buffer. It implements a set-based linearly-probed lock-free hash table using atomic load/store operations. Hashing is based on the brick identifier so that multiple rays requesting the same brick hash to the same position, keeping the table size small. This approach avoids the limitations of multiple render targets, which are limited in number and ignore spatial coherency, leading to duplicate values and larger texture reads back [S2].
++The Global Brick Request Strategy is a data-loading heuristic where a ray only requests the bricks absolutely required to satisfy the final rendering request, leaving space in the hash table for other rays. When a brick is missing, the algorithm increments the Level of Detail (LoD) and looks up the brick at the new resolution, continuing until a missing brick is no longer reported. Unlike the 'Greedy' strategy, the Global strategy does not request intermediate bricks. It generates the final correct image quickest in terms of raw completion but may produce less pleasing intermediate progress [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The per-frame cost is dominated by ray casting and hash table insertions. The hash table operations are $O(1)$ on average due to the lock-free design [S2].
+-*   **Memory Complexity:** The working set is minimized to only the bricks accessed during rendering [S1, unofficial]. The hash table size depends on the number of unique missing bricks per frame, which is kept small by hashing on brick ID [S2].
+-*   **Measured Performance:** The method scales to extremely large data sets [S2]. The 'Greedy' strategy converges in the fewest number of frames and produces more pleasing intermediate progress, while the 'Global' strategy generates the final correct image quickest in terms of raw completion [S2].
+-*   **Strengths:** Optimal accuracy (never loads unused data), minimal working set size, efficient GPU-based parallelization of brick identification [S1, unofficial][S2].
+-*   **Limitations:** Requires multiple frames to converge to the final image if data is missing. The 'Greedy' strategy may flood the hash table with requests [S2].
+-*   **When to use:** Large-scale volume rendering where data does not fit in GPU memory and interactive or progressive refinement is desired [S1, unofficial][S2].
+-*   **When not to use:** When a single-frame exact result is required and data can fit in memory, or when latency per frame is critical and convergence speed is less important than raw completion time of the final image [S2].
++*   **Time Complexity:** The per-frame cost is dominated by the ray casting itself. The overhead of brick identification is minimal as it parallelizes effectively on the GPU [S2]. The hash table operations are $O(1)$ on average due to the lock-free linear probing design [S2].
++*   **Memory Complexity:** The working set is minimized to only the bricks accessed during rendering [S1, unofficial]. The hash table size is proportional to the number of unique missing bricks per frame, which is kept small by hashing on brick IDs and exploiting spatial coherency [S2].
++*   **Performance:** The method scales to extremely large datasets by streaming data on demand [S2]. It avoids the conservative memory estimates of earlier approaches [S1, unofficial].
++*   **Strengths:** Optimal accuracy (never loads unused data), efficient GPU utilization, handles large datasets out-of-core.
++*   **Limitations:** Requires multiple frames to converge to full resolution for regions with missing data. The "Greedy" strategy may generate more hash table entries than necessary, while the "Global" strategy may have slower visual convergence.
++*   **When to use:** Large-scale volume rendering where the entire dataset cannot fit in GPU memory and interactive or near-interactive frame rates are required.
++*   **When not to use:** Small datasets that fit entirely in GPU memory, or applications requiring single-frame full-resolution accuracy without iterative refinement.
+ 
+ ## Background
+-Ray-guided volume rendering was introduced as a scalable approach to handle large biomedicinal datasets [S1, unofficial][S2]. Early approaches produced conservative estimates of the working set, leading to sub-optimal memory utilization [S1, unofficial]. The specific method with missing brick reporting using a GPU-based hash table was developed to overcome the limitations of multiple render targets for reporting missing data [S2]. The technique draws inspiration from patchwork of previous works including octree-based [CNLE09, BPH14, DLJL22] and page-table hierarchy-based [HBJP12, FSK13, SCRL20] address translation methods [S1, unofficial].
++Ray-guided volume rendering was introduced as a scalable approach to handle large biomedicinal and scientific datasets [S1, unofficial][S2]. Early approaches produced conservative estimates of the working set, leading to sub-optimal memory utilization [S1, unofficial]. The specific method using missing brick reporting with a GPU-based hash table was developed to overcome the limitations of multiple render targets, which were limited in number and ignored spatial coherency [S2]. The technique leverages OpenGL 4.2 features (`GL_ARB_shader_image_load_store`) to implement efficient, lock-free data structures on the GPU [S2]. It represents a shift from pre-computing access patterns to dynamic, ray-driven data streaming [S1, unofficial].
+ 
+ ## Sources

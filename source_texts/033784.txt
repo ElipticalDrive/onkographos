@@ -1,0 +1,1180 @@
+arXiv:2610.21634v1 [cs.CV] 15 Oct 2026
+Anchor3DGS: Feed-Forward 3D Gaussian Splatting
+with Compact Anchor-Based Representation
+Sheng Ye1,2,∗ , Jiangke Lin2 , Fudong Wang2 , Yi Yuan2,† , Zhen-Hui Dong1 , Yong-Jin Liu1,‡
+1
+Tsinghua University
+2
+Ant Group, Inclusion AI
+{yec22, dzh23}@mails.tsinghua.edu.cn, liuyongjin@tsinghua.edu.cn
+{linjiangke.ljk, wangfudong.wfd, yy464236}@antgroup.com
+Abstract
+Recent feed-forward 3D Gaussian Splatting (3DGS) methods have enabled effective
+multi-view 3D reconstruction by predicting Gaussian primitives in a single forward
+pass. However, existing approaches predominantly adopt a pixel-aligned paradigm
+that predicts one Gaussian per input pixel, coupling the Gaussian count to the
+input resolution and number of views. This also leads to redundant primitives in
+textureless regions and insufficient coverage in geometrically complex areas. We
+present Anchor3DGS, a pose-free feed-forward 3DGS framework that replaces
+pixel-aligned prediction with a compact anchor-based representation. Guided
+by information entropy, our method places a set of 3D anchors in the scene,
+concentrating them in regions of higher visual complexity while maintaining broad
+spatial coverage. Each anchor performs occlusion-aware aggregation of multiview image features, exchanges information with other anchors, and is decoded
+into a set of local Gaussians. A lightweight feature enhancement module further
+refines the coarse RGB output from Gaussian splatting and improves rendering
+fidelity. Extensive experiments on diverse benchmark datasets demonstrate that
+our Anchor3DGS achieves state-of-the-art novel view synthesis quality while only
+using an order of magnitude fewer Gaussian primitives.
+1
+Introduction
+Reconstructing 3D scenes and synthesizing novel views from multiple 2D captures is a fundamental
+problem in computer vision and graphics, with broad applications in robotics, autonomous driving,
+gaming, and virtual reality. The pioneering NeRF [19] represents scenes as an implicit radiance field
+optimized via volume rendering, while subsequent 3DGS [13] employs differentiable rasterization of
+anisotropic 3D Gaussians to achieve real-time, high-fidelity rendering. Despite its success, standard
+3DGS requires a time-consuming per-scene optimization process. To address this limitation, a
+growing line of work has explored feed-forward 3DGS reconstruction [4, 6, 34, 7, 32], which trains
+generalizable models on large-scale datasets to directly predict 3D Gaussians from input views in
+a single forward pass. Recent advances have further eliminated the dependency on pre-computed
+camera poses [38, 11, 9], enabling truly end-to-end reconstruction from uncalibrated images.
+However, current feed-forward approaches adopt a pixel-aligned paradigm in which one Gaussian
+is predicted for each input pixel. While conceptually straightforward, this design suffers from
+three key limitations: (1) Redundancy—textureless or homogeneous regions consume as many
+Gaussians as detail-rich areas, yielding redundant primitives and wasted capacity; (2) Insufficient
+*Work done during an internship at Ant Group.
+† Project lead.
+‡ Corresponding author.
+40th Conference on Neural Information Processing Systems (NeurIPS 2026).
+Uncalibrated Input views
+GS number: 602K
+PSNR: 17.26
+Pixel-aligned 3DGS (AnySplat)
+Rendered Images
+GS number: 262K
+Anchor-based 3DGS (Ours)
+PSNR: 20.81
+Rendered Images
+Figure 1: Anchor3DGS reconstructs 3D scenes from uncalibrated multi-view images. Our anchorbased representation achieves better rendering quality with fewer Gaussians, and avoids the empty
+holes that pixel-aligned methods (e.g., AnySplat [11]) commonly leave in poorly observed regions.
+coverage—poorly observed regions cannot be faithfully reconstructed, since each Gaussian is
+predicted independently from a single pixel, without leveraging contextual information from wellobserved neighbors; and (3) Input dependency—the total Gaussian count is strictly tied to the input
+resolution and view count rather than to the scene itself, preventing efficient reconstruction.
+In this work, we present Anchor3DGS, a feed-forward framework that takes uncalibrated multi-view
+images as input and outputs 3D Gaussians of the scene (see Fig. 1). Our key insight is that a scene’s
+3D structure has no intrinsic connection to the number of input views or pixels that happen to observe
+it. We therefore propose to lift Gaussian allocation into 3D space: we represent the scene with a set
+of anchors whose spatial distribution is guided by scene content, while the total number of anchors
+is a hyperparameter, independent of image resolution and view count.
+Our framework consists of several key components: (i) Entropy-guided anchor sampling. Our 3D
+anchor sampling strategy simultaneously ensures broad spatial coverage of the scene and adaptively
+allocates more anchors to regions exhibiting higher visual complexity, as identified by local information entropy. Entropy automatically guides 3D anchors to where they are needed most: few anchors
+suffice for low-complexity regions (e.g., white walls or sky), while many anchors concentrate on
+high-complexity regions (e.g., intricate structures or rich textures). (ii) Multi-view anchor aggregation
+and local decoding. Each 3D anchor aggregates visual features from all input views under occlusionaware weighting, and is decoded into a small set of neighboring Gaussians that represent its local
+3D region. Anchors also exchange information with each other, allowing those in poorly observed
+regions to leverage the context from well-observed neighbors and still produce plausible appearances.
+In contrast, pixel-aligned methods often leave visible holes in such regions. (iii) Feature enhancement.
+Beyond standard attributes, each Gaussian is also assigned a feature vector. These features are later
+splatted and decoded by a lightweight network, which compensates for the high-frequency details
+missing from the coarse splatted RGB image.
+Extensive experiments across benchmark datasets validate the effectiveness of our method. In sparseview settings (3 and 6 input views), Anchor3DGS significantly outperforms existing state-of-the-art
+baselines. In dense-view settings (32 input views), Anchor3DGS achieves comparable rendering
+quality while requiring an order of magnitude fewer Gaussians. This demonstrates that a compact
+anchor-based representation can match the fidelity of pixel-aligned approaches with greater efficiency.
+Our contributions can be summarized as follows:
+• We propose Anchor3DGS, a novel anchor-based feed-forward 3DGS framework that
+replaces the pixel-aligned paradigm with a compact anchor-based representation, decoupling
+the Gaussian count from input image resolution and the number of input views.
+• We introduce three key designs—entropy-guided anchor sampling, occlusion-aware anchor
+aggregation and local decoding, and feature enhancement—which together enable highfidelity novel view synthesis with fine details.
+• We achieve state-of-the-art performance on multiple benchmark datasets with substantially
+fewer Gaussians than existing methods, demonstrating that our method yields a more
+compact yet equally effective representation.
+2
+2
+Related Work
+Per-Scene Novel View Synthesis. Neural Radiance Fields (NeRF) [19] pioneered novel view
+synthesis by representing scenes as continuous density and radiance fields, and optimizing them
+via differentiable volume rendering. Despite subsequent improvements [27, 17, 2, 20, 41, 12], the
+expensive ray sampling in volume rendering still prevents real-time performance. 3D Gaussian
+Splatting (3DGS) [13, 33] instead represents scenes as explicit anisotropic 3D Gaussians and exploits
+differentiable tile-based rasterization, achieving real-time speed with superior quality. However, both
+NeRF- and 3DGS-based methods require accurate camera poses, typically from a costly Structurefrom-Motion (SfM) pipeline such as COLMAP [24]. To remove this dependency, several works [3,
+10, 14, 8] attempt to jointly optimize the camera poses and the scene representation. Nevertheless, all
+these methods still rely on tedious per-scene optimization. In contrast, our Anchor3DGS directly
+predicts camera poses and 3D Gaussians in a feed-forward pass within seconds.
+Feed-Forward Novel View Synthesis. Feed-forward novel view synthesis avoids per-scene optimization by learning generalizable priors from large-scale datasets. Early works [40, 29, 5] condition
+the NeRF representation on image features aggregated from input views, enabling cross-scene generalization without per-scene retraining. Following the success of 3DGS, subsequent feed-forward
+works [26, 4, 6, 7, 34, 32, 31, 42] replace NeRF with explicit Gaussian primitives for higher rendering
+quality and faster speed. As representative examples, pixelSplat [4] employs epipolar attention to
+infer a dense depth probability distribution for predicting 3D Gaussians from image pairs, whereas
+MVSplat [6] incorporates multi-view stereo principles by constructing explicit cost volumes for more
+accurate geometric reconstruction. A recent line of pose-free feed-forward methods [38, 44, 37, 11]
+further eliminates the reliance on known camera parameters. By leveraging robust geometric priors
+from 3D foundation models [30, 28], FLARE [44] and AnySplat [11] can simultaneously infer the
+camera poses of input images and the matching geometry-aligned 3D Gaussians. Despite these
+advances, all aforementioned feed-forward 3DGS methods typically predict Gaussians in a dense,
+pixel-aligned manner, resulting in massive redundant Gaussians. Although AnySplat [11] applies
+post-hoc voxelization for Gaussian reduction, this fails to address the root cause, and the remaining
+Gaussians are still far from compact. Instead, we decouple Gaussian allocation from the pixel-aligned
+paradigm and model the scene using a compact set of 3D anchors. A few concurrent works [1, 22] also
+attempt to explore compact representations using learnable tokens, whereas we explicitly leverage
+3D scene structure and visual complexity to guide Gaussian allocation.
+3
+Method
+The key idea of our method is to represent the scene with a compact set of 3D anchors, rather than
+being strictly bound to the input image pixels. Each anchor represents a local 3D region: it is placed
+on a geometry-aware scene scaffold, gathers information from multiple views, exchanges information
+with other anchors, and is finally decoded into a set of local Gaussians. In this way, the scene
+representation is organized directly in 3D space, with its size controlled by the anchor budget.
+Concretely, given a set of uncalibrated input images I = {Iv }Vv=1 , we first build a multi-view
+geometric scaffold using a VGGT-based pose-free geometry backbone [28], which predicts camera
+parameters C = {Cv }Vv=1 and per-view depth maps D = {Dv }Vv=1 . By unprojecting the predicted
+depth maps with the predicted cameras, we obtain scene points P in 3D space, from which we
+sample a fixed number of anchors guided by local image entropy. Each anchor is then encoded into a
+latent token zn through occlusion-aware multi-view feature aggregation and cross-anchor interaction.
+Finally, each token is decoded into K local Gaussian primitives, yielding the final Gaussian set
+K
+G = {gm }N
+m=1 . Fig. 2 illustrates the overall pipeline of Anchor3DGS.
+3.1
+Pose-Free Geometry Initialization
+Before constructing anchors, we first build a geometry-aware 3D scaffold of the scene. The role of
+this stage is to lift the uncalibrated input images into a consistent geometric space on which anchors
+can be placed and reasoned about. To this end, we employ a VGGT-based [28] backbone model as a
+strong multi-view geometry prior.
+3
+1 Geometry Scaffold Initialization
+2 Entropy-Guided
+Anchor Sampling
+3 Multi-view
+Anchor Encoding
+4 GS Decoding & Rendering
+Local GS
+Decoding
+…
+Predicted
+Cameras
+Uniform
+Sampling
+3DGS Representation
+Project
+Base RGB
+Geometry
+Backbone
+…
+3D Point Cloud
+Entropy
+Sampling
+Occlusion-Aware
+Aggregation
+Feature
+Enhance
+UNet
+⊕
+Sampled 3D
+Scene Anchors
+Depth Maps
+Feature Map
+Self-Attention
+Probability
+Refined RGB
+Encoded 3D Anchors
+Figure 2: Overview of Anchor3DGS. Given uncalibrated multi-view images, (1) a VGGT-based [28]
+geometry backbone first predicts the scene’s geometric scaffold. (2) A fixed budget of 3D anchors
+is then sampled from the scaffold, combining uniform sampling with entropy-guided sampling. (3)
+Each anchor is projected back into all input views to gather features via occlusion-aware aggregation,
+and then interacts with other anchors through self-attention. (4) Finally, each anchor is decoded into
+a set of local Gaussians, which are rasterized and refined to yield the final RGB output.
+Given input images I = {Iv }Vv=1 with Iv ∈ RH×W ×3 , the geometry backbone predicts for each
+view a camera extrinsic Ev ∈ R3×4 , a camera intrinsic Kv ∈ R3×3 , and a depth map Dv ∈ RH×W .
+We denote the overall predicted camera parameters by C = {Cv }Vv=1 with Cv = (Ev , Kv ). Using
+C, we unproject each depth map Dv into a per-view 3D point map Pv ∈ RH×W ×3 , and denote the
+resulting set of 3D scene points by P = {Pv }Vv=1 .
+This geometric scaffold serves two purposes in our method. First, the scene points in P provide a
+geometry-aware 3D candidate pool for anchor sampling. Second, the predicted camera parameters
+C allow every anchor to be projected back into the input views, which is essential for subsequent
+multi-view feature aggregation and occlusion reasoning. Based on this geometric scaffold, our final
+representation is built as a fixed-size set of 3D anchors with features in scene space.
+3.2
+Entropy-Guided Anchor Sampling
+An effective allocation should both broadly cover the scene and place more anchors in visually
+complex regions where finer local representation is needed. To capture such complexity, we compute
+a Shannon entropy map [25, 45] for each input image. We first convert the RGB image to grayscale,
+quantize the grayscale values into bins, and compute a local histogram within a sliding window
+around each pixel. The entropy at image location u is then
+E(u) = −
+B
+X
+pb (u) log pb (u),
+(1)
+b=1
+where pb (u) is the fraction of pixels in the local window around u whose quantized grayscale values
+fall into the b-th bin. Regions with simple appearance, such as smooth walls or sky, tend to have
+low entropy, while textured structures and local boundaries tend to have high entropy. We use this
+quantity as a direct and training-free measure of local visual complexity (shown in Fig. 3).
+Given the scene points P = {Pv }Vv=1 , we construct the anchor set using two complementary steps.
+We first perform coarse grid subsampling over the 3D points P to obtain anchors that broadly cover
+the scene. We then sample anchors from the full set of scene points with probabilities proportional to
+the entropy values at their associated image locations, so that more anchors are allocated to visually
+complex regions. Together, these two subsets form the final anchor set A:
+A = Auni ∪ Aent = {an }N
+n=1 ,
+an ∈ R3 ,
+(2)
+where N is a fixed anchor budget. In this way, scene points provide anchor location candidates
+in 3D, while the final number of anchors is independent of the input resolution and the number of
+input views. In addition, for each anchor an , we estimate a local spacing value dn by averaging the
+4
+Input View
+Entropy Map
+Uniform Anchor
+Entropy-Guided Anchor
+Figure 3: Uniform sampling ensures broad spatial coverage but wastes anchors (red dots) on uninformative regions (e.g., textureless sky). In contrast, our entropy-guided sampling allocates more
+anchors to visually complex regions while still maintaining coverage of the scene.
+distances to its k nearest neighboring anchors:
+1 X
+dn =
+k
+∥an − aj ∥2 .
+(3)
+j∈Nk (n)
+This spacing value provides a geometric density cue that will later be used to modulate the spatial
+extent of local Gaussian decoding.
+3.3
+Occlusion-Aware Multi-View Anchor Aggregation
+With anchors allocated in scene space, the next step is to encode them for local Gaussian decoding.
+This differs from pixel-aligned Gaussian prediction, where each primitive corresponds to a single
+pixel observation from a specific view. In Anchor3DGS, each anchor represents a local 3D region in
+the scene, and is therefore encoded by aggregating information from multiple views.
+For each anchor an , we first compute an initial anchor embedding that captures both anchor position
+and local geometric scale information:
+qgeo
+n = MLP(ϕ(an , log dn )),
+(4)
+where ϕ(·) denotes Fourier positional encoding [19] applied to the 3D anchor coordinates and the
+logarithm of its local spacing dn . Using the predicted camera parameters C, we project each anchor
+an onto every input view and bilinearly sample the feature map Fv (extracted by the VGGT-based
+backbone in Sec. 3.1) at the projected location, yielding a per-view anchor feature fn,v ∈ RC . For
+occ
+each sampled feature fn,v , we also estimate an occlusion weight wn,v
+∈ (0, 1), which attenuates the
+occ
+contribution of occluded views. Specifically, we calculate wn,v by comparing the camera-space depth
+zn,v of the anchor with the depth value z̃n,v sampled from Dv (provided by the geometry backbone
+in Sec. 3.1) at the same projected location. If the anchor lies behind the visible surface, then zn,v will
+be noticeably larger than z̃n,v , indicating likely occlusion; otherwise, the anchor is visible and its
+sampled feature can be trusted. We formalize this intuition as follows:
+∆n,v =
+zn,v − z̃n,v
+,
+|z̃n,v | + ϵ
+occ
+wn,v
+= σ(−τ ∆n,v ),
+(5)
+where σ(·) is the sigmoid function and τ controls the sharpness to depth discrepancies. We then
+aggregate the per-view features fn,v biased by the occlusion weights:
+
+occ
+αn,v = softmaxv MLP([qgeo
+n , fn,v ]) + log wn,v ,
+fnagg =
+V
+X
+αn,v fn,v .
+(6)
+v=1
+occ
+The MLP scores each per-view feature’s relevance to the anchor, while the additive log wn,v
+term
+suppresses occluded features. Together, they yield a weighting that jointly considers feature informativeness and geometric visibility. Finally, the geometry-aware embedding qgeo
+n and the aggregated
+feature fnagg are concatenated, and refined jointly across all N anchors via self-attention blocks:
+geo agg N
+{zn ∈ RD }N
+n=1 = SelfAttn({[qn , fn ]}n=1 ). This cross-anchor interaction allows anchors in
+weakly observed regions to draw context from better-observed neighbors, producing more coherent
+anchor embeddings {zn } for subsequent Gaussian decoding.
+5
+3.4
+Anchor-to-Gaussian Decoding and Rendering
+After occlusion-aware aggregation, each anchor an is associated with an embedding zn . We then
+decode these embeddings into the final 3D Gaussians. Our goal is to keep the overall representation
+compact while still allowing each anchor to model a sufficiently rich local 3D region in both geometry
+and appearance. To this end, we decode a set of local Gaussians around each anchor.
+Specifically, we introduce a set of K learnable slot embeddings {sk }K
+k=1 (one per decoded Gaussian)
+shared across all anchors. For each anchor embedding zn , we combine it with each slot embedding
+sk and decode both a local Gaussian offset ∆xn,k and a set of Gaussian attributes θ n,k :
+∆xn,k = MLPoff ([zn , sk ]),
+xn,k = an + dn ∆xn,k ,
+θ n,k = MLPgs ([zn , sk ]).
+(7)
+Thus, the final center xn,k of each decoded Gaussian is obtained by adding to the anchor an a local
+offset ∆xn,k scaled by the anchor’s local spacing dn (discussed in Sec. 3.2), allowing anchors in
+sparse regions to decode Gaussians over a wider spatial extent. The decoded Gaussian attributes
+include: θ n,k = (on,k , Σn,k , cn,k , hn,k ), where o is the opacity, Σ is the covariance, c is the base
+RGB, and h is a feature vector that encodes high-frequency details for subsequent refinement. For
+simplicity, we re-index the resulting N K Gaussians by a single index i in the following.
+To render a target view, we rasterize the predicted Gaussians using the differentiable pipeline of
+3DGS [13]. Each 3D Gaussian is first projected to 2D plane with mean µi and covariance Σ′i . The
+opacity contribution of Gaussian i at pixel u is then modulated by:
+
+
+−1
+(8)
+αi (u) = oi exp − 12 (u − µi )⊤ Σ′i (u − µi ) .
+Sorting all Gaussians by depth and accumulating from front to back yields the transmittance Ti (u) =
+Q
+j<i (1 − αj (u)). Together, Ti and αi serve as the alpha-compositing weights that, combined with
+the per-Gaussian color ci , give the standard 3DGS RGB rendering. In our setting, since each Gaussian
+additionally carries a feature vector hi , we also feed it through the same rasterizer to obtain a feature
+map Fsplat that is aligned with the rendered base image Ibase :
+X
+X
+Ibase (u) =
+Ti (u) αi (u) ci , Fsplat (u) =
+Ti (u) αi (u) hi .
+(9)
+i
+i
+The two outputs are produced by the same compositing weights and therefore share identical geometric structures. The coarse image Ibase provides geometry-consistent base color signals, while the
+feature map Fsplat provides higher-dimensional appearance cues. Finally, a lightweight UNet-based
+enhancement network takes Fsplat as input and predicts an RGB residual ∆I to yield the final refined
+image Iˆ = Ibase + ∆I. This design decouples compact 3D scene modeling from high-frequency appearance recovery, while preserving multi-view consistency: since both Ibase and Fsplat are rasterized
+from the same 3D Gaussians, the residual ∆I inherits its geometric structure from the underlying 3D
+representation rather than being hallucinated in 2D.
+4
+Training
+We train Anchor3DGS on five public multi-view datasets: DL3DV [16], ScanNet++ [39], Hypersim [23], BlendedMVS [36], and Waymo [18]. These datasets cover synthetic and real-world
+captures, indoor and outdoor scenes, and object-scale to street-scale settings, which enhances the
+model’s generalization ability to unseen scenarios. For each training scene, we sample a set of context
+views as input. For datasets with sequentially ordered captures (e.g., DL3DV [16]), we adopt an
+index-based sampler that selects two boundary frames at a chosen index gap, and samples additional
+context views from intermediate frame indices between them. For datasets without a sequential
+ordering (e.g., ScanNet++ [39]), we instead use a ranking-based sampler that ranks all views by the
+camera-pose distance (rotation angle and translation) relative to a randomly chosen reference, and
+then selects context views from this distance-sorted list. In both cases, the extent covered by the
+selected context views (an index gap or a rank window) is randomized across iterations, producing a
+mixture of small- and wide-baseline configurations during training.
+Our model is trained end-to-end by minimizing a combination of photometric and geometric losses.
+The photometric term consists of a pixel-wise MSE loss and a perceptual LPIPS [43] loss between
+6
+VR-NeRF
+PSNR SSIM LPIPS
+#GS
+MipNeRF360
+PSNR SSIM LPIPS
+#GS
+DL3DV
+PSNR SSIM LPIPS
+#GS
+3 views
+NoPoSplat [38]
+FLARE [44]
+DA3 [15]
+AnySplat [11]
+Ours
+20.52
+20.64
+19.87
+21.31
+23.69
+0.686
+0.692
+0.656
+0.729
+0.764
+0.433
+0.452
+0.464
+0.340
+0.320
+0.60M
+0.60M
+0.60M
+0.49M
+0.26M
+16.89
+16.92
+12.84
+15.65
+21.36
+0.449
+0.447
+0.330
+0.624
+0.678
+0.493
+0.498
+0.634
+0.331
+0.307
+0.60M
+0.60M
+0.60M
+0.38M
+0.26M
+17.29
+16.08
+18.24
+17.74
+21.22
+0.509
+0.468
+0.510
+0.625
+0.683
+0.451
+0.498
+0.376
+0.308
+0.280
+0.60M
+0.60M
+0.60M
+0.51M
+0.26M
+6 views
+Table 1: Quantitative comparison of the sparse-view novel view synthesis (3 and 6 input views)
+on VR-NeRF [35], MipNeRF360 [2], and DL3DV [16]. We report PSNR, SSIM, LPIPS, and the
+number of predicted Gaussian primitives (#GS). Bold indicates the best.
+NoPoSplat [38]
+FLARE [44]
+DA3 [15]
+AnySplat [11]
+Ours
+20.61
+19.96
+21.32
+22.45
+24.03
+0.712
+0.697
+0.690
+0.758
+0.781
+0.445
+0.478
+0.403
+0.321
+0.312
+1.20M
+1.20M
+1.20M
+1.03M
+0.26M
+16.81
+15.38
+18.40
+19.01
+22.39
+0.457
+0.409
+0.472
+0.613
+0.663
+0.494
+0.583
+0.389
+0.283
+0.278
+1.20M
+1.20M
+1.20M
+0.70M
+0.26M
+15.93
+15.36
+18.97
+18.42
+20.70
+0.477
+0.457
+0.539
+0.613
+0.649
+0.545
+0.564
+0.349
+0.316
+0.303
+1.20M
+1.20M
+1.20M
+0.98M
+0.26M
+Setting
+Method
+the refined renderings Iˆ and the ground-truth images I. To regularize the geometry of the decoded
+Gaussians, we additionally apply a depth-consistency loss that encourages the depth rasterized
+from the Gaussians to agree with the depth maps predicted by the geometry backbone in Sec. 3.1.
+Therefore, the full training loss is:
+L = λmse Lmse + λlpips Llpips + λdepth Ldepth .
+5
+Experiments
+5.1
+Experimental Setup
+(10)
+Evaluation Datasets & Baselines. Following AnySplat [11], we evaluate the novel view synthesis
+quality on VR-NeRF [35] and MipNeRF360 [2] datasets. We also test on a held-out subset of
+DL3DV [16] that is disjoint from training. Together, these benchmarks jointly cover object-centric,
+indoor, and outdoor scenes, providing a comprehensive evaluation.
+We compare Anchor3DGS against recent pose-free feed-forward 3DGS methods: NoPoSplat [38],
+FLARE [44], Depth Anything 3 (DA3) [15], and AnySplat [11]. Among them, NoPoSplat and
+FLARE are tailored for sparse-view inputs and do not scale to dense-view inputs, so we only include
+them in the sparse-view comparison (3 and 6 views). In the dense-view setting (32 views), we also
+report VGGT+3DGS as a per-scene optimization reference. We compute PSNR, SSIM, and LPIPS
+between the rendered images and the ground-truth images. To further reflect the compactness of our
+representation, we also report the number of Gaussian primitives (#GS) for each scene.
+Implementation Details. We set the anchor budget to N = 32,768 and decode K = 8 Gaussians
+per anchor, yielding roughly 0.26M Gaussians per scene independent of input resolution and view
+count. The dimension of each anchor embedding zn is 128, and the dimension of per-Gaussian feature
+vector h (used for rendering refinement) is 16. We initialize the geometry backbone of Anchor3DGS
+with the pretrained VGGT [28] weights and fine-tune it jointly with the rest of the network using a
+0.1× smaller learning rate, while keeping the patch-embedding layer frozen. The model is trained on
+8 NVIDIA H20 GPUs for 30,000 iterations (about 2–3 days). We use the AdamW optimizer with
+a peak learning rate of 2 × 10−4 and 1,000 warmup steps. During training, the number of context
+views per scene is randomly sampled between 2 and 16, and the maximum input resolution is set to
+448 pixels on the longer side. At inference time, all images are resized to 448 × 448 resolution. For
+the training loss weights, we set λmse = 1.0, λlpips = 0.05, and λdepth = 0.1.
+5.2
+Quantitative Results
+We first evaluate Anchor3DGS in the sparse-view setting (3 and 6 input views). As shown in
+Tab. 1, our method consistently achieves the best PSNR, SSIM, and LPIPS across all three benchmark
+datasets. The improvements are most pronounced on MipNeRF360 and DL3DV, where Anchor3DGS
+7
+Table 2: Dense-view rendering results (32 input views) on VR-NeRF [35] and DL3DV [16]. We also
+report the storage size of the predicted Gaussians and the inference time on a single H800 GPU.
+Method
+VR-NeRF
+PSNR SSIM LPIPS #GS
+DL3DV
+Storage Time PSNR SSIM LPIPS #GS
+Storage Time
+VGGT+3DGS [13] 23.08 0.762 0.301 0.44M 109MB 6min 19.34 0.627 0.312 1.16M 288MB 8min
+DA3 [15]
+AnySplat [11]
+Ours
+22.38 0.751 0.350 6.42M 1.03GB 1.9s
+24.05 0.819 0.309 4.75M 779MB 2.8s
+24.56 0.815 0.297 0.26M 35MB 2.9s
+19.38 0.544 0.341 6.42M 1.03GB 2.0s
+18.76 0.565 0.371 3.98M 653MB 2.8s
+19.52 0.593 0.364 0.26M 35MB 3.1s
+Sparse-View (3 views)
+NoPoSplat
+AnySplat
+Ours
+Ground-Truth
+VGGT+3DGS
+Dense-View (32 views)
+DA3
+Ours
+Ground-Truth
+Figure 4: Qualitative comparison of novel view synthesis. Our method recovers sharper textures and
+finer details while mitigating artifacts in poorly observed regions.
+achieves PSNR gains of over 2 dB compared to the best baseline under each setting. These gains stem
+from two advantages of our anchor-based design: entropy-guided sampling concentrates capacity on
+visually complex regions, while cross-anchor self-attention propagates context to poorly-observed
+areas, mitigating the holes prevalent in pixel-aligned methods. Notably, Anchor3DGS achieves these
+gains with only 0.26M Gaussians per scene, showing that a compact anchor-based representation can
+yield both higher fidelity and greater efficiency in the sparse-view setting.
+Furthermore, we test Anchor3DGS in the dense-view setting (32 input views), where the input already
+provides rich coverage of the scene. As shown in Tab. 2, our method provides comparable rendering
+quality against state-of-the-art pixel-aligned baselines, while requiring an order of magnitude fewer
+Gaussians and smaller storage footprint. Since the anchor number is decoupled from the input views,
+our #GS stays at 0.26M regardless of view count, whereas pixel-aligned methods produce several
+million Gaussians with no corresponding quality gain. The VGGT+3DGS also provides a strong
+reference but represents a different paradigm—it requires minutes of optimization per scene, whereas
+Anchor3DGS directly predicts the 3DGS representation from the input views in a feed-forward pass
+within seconds. Despite this efficiency gap, our method still achieves on-par rendering quality.
+5.3
+Qualitative Results
+Fig. 4 presents qualitative comparisons under both sparse-view and dense-view settings. In the sparseview setting, the representative method NoPoSplat [38] tends to produce overly blurry renderings,
+while AnySplat [11] frequently leaves holes in poorly observed regions. Our method alleviates both
+issues, yielding coherent structure and visually appealing results across different scenes. In the
+dense-view setting, our renderings remain on par with the state-of-the-art baselines while using an
+8
+Table 3: Ablation study results on VR-NeRF [35] dataset. Bold indicates the best.
+PSNR ↑
+3 views
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+32 views
+SSIM ↑
+LPIPS ↓
+w/o enhancement
+w/o self-attention
+w/o occ-aggregation
+w/o entropy-sample
+22.50
+23.03
+23.28
+22.16
+0.754
+0.750
+0.756
+0.733
+0.345
+0.323
+0.330
+0.355
+24.13
+24.38
+24.29
+24.17
+0.807
+0.808
+0.813
+0.804
+0.324
+0.303
+0.305
+0.318
+Full model (Ours)
+23.69
+0.764
+0.320
+24.56
+0.815
+0.297
+Configuration
+wo/ enhancement
+w/ enhancement
+wo/ entropy-sample
+w/ entropy-sample
+Figure 5: Rendering metrics under varying anchor count N and decoded Gaussians K (left), and
+qualitative comparisons of removing the enhancement module and entropy-guided sampling (right).
+order of magnitude fewer Gaussian primitives. Our method recovers sharp textures and fine details,
+and avoids the fragmented, needle-like artifacts commonly exhibited by optimization-based 3DGS
+pipelines. More visualization results are provided in the Appendix.
+5.4
+Ablation Study
+We conduct the ablation study to validate each key design of Anchor3DGS. Tab. 3 reports results on
+VR-NeRF [35] under both sparse-view (3 views) and dense-view (32 views) settings. Removing any
+component causes a quality drop, confirming that all four designs contribute to the final performance.
+(i) w/o enhancement removes the enhancement UNet for refinement, which leads to consistent
+degradation as the splatted RGB alone struggles to recover fine high-frequency details. (ii) w/o
+self-attention disables cross-anchor interaction so each anchor is encoded independently, and (iii)
+w/o occ-aggregation replaces occlusion-aware multi-view aggregation with plain mean pooling.
+Both of them impair the encoded anchor features and thus degrade rendering performance. (iv) w/o
+entropy-sample replaces entropy-guided sampling with uniform grid subsampling, which causes
+noticeable PSNR drop (−1.53 dB at 3 views). This indicates that our strategy allocates the limited
+anchor budget more reasonably. We further examine how performance varies with anchor count
+N and decoded Gaussians per anchor K in Fig. 5. The results confirm that our default setting
+(N = 32,768 and K=8) effectively balances rendering quality and Gaussian compactness.
+6
+Conclusion
+We present Anchor3DGS, a pose-free feed-forward 3DGS framework that replaces the prevailing
+pixel-aligned paradigm with a compact anchor-based paradigm. By placing a fixed number of 3D
+anchors on a geometry-aware scaffold, our method decouples the Gaussian count from the input
+resolution and view number, and instead allocates representation capacity according to scene content.
+Three key designs—entropy-guided anchor sampling, occlusion-aware multi-view aggregation, and
+feature-based rendering refinement—together enable high-fidelity novel view synthesis. Extensive
+experiments across multiple datasets demonstrate that Anchor3DGS achieves state-of-the-art ren9
+dering quality in sparse-view settings. In dense-view settings, Anchor3DGS attains comparable
+quality while using an order of magnitude fewer Gaussians and lower storage cost, validating the
+effectiveness and efficiency of our compact anchor-based representation. Beyond view synthesis,
+such a compact anchor-based representation naturally serves as a global geometric memory [46],
+offering a promising substrate for future video world models.
+Despite the advancements, Anchor3DGS still has limitations. The performance of our method relies
+on the prediction quality of the geometry backbone. When the backbone produces inaccurate poses
+or noisy depth maps, the resulting anchor placement may degrade and harm the final rendering. In
+addition, since the anchor budget is fixed regardless of scene scale, very large or unbounded scenes
+may benefit from a scene-adaptive budget, which we leave as future work.
+Acknowledgments and Disclosure of Funding
+This work was supported by the National Natural Science Foundation of China (62332019,
+62461160309) and NSFC-RGC Joint Research Scheme N_HKU705/24.
+References
+[1] Honggyu An, Jaewoo Jung, Mungyeom Kim, Sunghwan Hong, Chaehyun Kim, Kazumi Fukuda,
+Minkyeong Jeon, Jisang Han, Takuya Narihira, Hyuna Ko, et al. C3g: Learning compact 3d
+representations with 2k gaussians. arXiv preprint arXiv:2512.04021, 2025.
+[2] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Mipnerf 360: Unbounded anti-aliased neural radiance fields. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition, pages 5470–5479, 2022.
+[3] Wenjing Bian, Zirui Wang, Kejie Li, Jia-Wang Bian, and Victor Adrian Prisacariu. Nope-nerf:
+Optimising neural radiance field with no pose prior. In Proceedings of the IEEE/CVF conference
+on computer vision and pattern recognition, pages 4160–4169, 2023.
+[4] David Charatan, Sizhe Lester Li, Andrea Tagliasacchi, and Vincent Sitzmann. pixelsplat: 3d
+gaussian splats from image pairs for scalable generalizable 3d reconstruction. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern recognition, pages 19457–19467,
+2024.
+[5] Anpei Chen, Zexiang Xu, Fuqiang Zhao, Xiaoshuai Zhang, Fanbo Xiang, Jingyi Yu, and
+Hao Su. Mvsnerf: Fast generalizable radiance field reconstruction from multi-view stereo. In
+Proceedings of the IEEE/CVF international conference on computer vision, pages 14124–14133,
+2021.
+[6] Yuedong Chen, Haofei Xu, Chuanxia Zheng, Bohan Zhuang, Marc Pollefeys, Andreas Geiger,
+Tat-Jen Cham, and Jianfei Cai. Mvsplat: Efficient 3d gaussian splatting from sparse multi-view
+images. In European conference on computer vision, pages 370–386. Springer, 2024.
+[7] Yuedong Chen, Chuanxia Zheng, Haofei Xu, Bohan Zhuang, Andrea Vedaldi, Tat-Jen Cham,
+and Jianfei Cai. Mvsplat360: Feed-forward 360 scene synthesis from sparse views. Advances
+in Neural Information Processing Systems, 37:107064–107086, 2024.
+[8] Zhen-Hui Dong, Sheng Ye, Yu-Hui Wen, Nannan Li, and Yong-Jin Liu. Towards better
+robustness: Progressively joint pose-3dgs learning for arbitrarily long videos. arXiv preprint
+arXiv:2501.15096, 2025.
+[9] Zhiwen Fan, Wenyan Cong, Kairun Wen, Kevin Wang, Jian Zhang, Xinghao Ding, Danfei Xu,
+Boris Ivanovic, Marco Pavone, Georgios Pavlakos, et al. Instantsplat: Sparse-view gaussian
+splatting in seconds. arXiv preprint arXiv:2403.20309, 2024.
+[10] Yang Fu, Sifei Liu, Amey Kulkarni, Jan Kautz, Alexei A Efros, and Xiaolong Wang. Colmapfree 3d gaussian splatting. In Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition, pages 20796–20805, 2024.
+10
+[11] Lihan Jiang, Yucheng Mao, Linning Xu, Tao Lu, Kerui Ren, Yichen Jin, Xudong Xu, Mulin
+Yu, Jiangmiao Pang, Feng Zhao, et al. Anysplat: Feed-forward 3d gaussian splatting from
+unconstrained views. ACM Transactions on Graphics (TOG), 44(6):1–16, 2025.
+[12] Xinyi Jing, Tao Yu, Renyuan He, Yu-Kun Lai, and Kun Li. Frnerf: Fusion and regularization
+fields for dynamic view synthesis. Computational Visual Media, 11(5):965–981, 2025.
+[13] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3d gaussian
+splatting for real-time radiance field rendering. ACM Trans. Graph., 42(4):139:1–139:14, 2023.
+[14] Chin-Yang Lin, Cheng Sun, Fu-En Yang, Min-Hung Chen, Yen-Yu Lin, and Yu-Lun Liu.
+Longsplat: Robust unposed 3d gaussian splatting for casual long videos. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision, pages 27412–27422, 2025.
+[15] Haotong Lin, Sili Chen, Junhao Liew, Donny Y Chen, Zhenyu Li, Guang Shi, Jiashi Feng, and
+Bingyi Kang. Depth anything 3: Recovering the visual space from any views. arXiv preprint
+arXiv:2511.10647, 2025.
+[16] Lu Ling, Yichen Sheng, Zhi Tu, Wentian Zhao, Cheng Xin, Kun Wan, Lantao Yu, Qianyu Guo,
+Zixun Yu, Yawen Lu, et al. Dl3dv-10k: A large-scale scene dataset for deep learning-based
+3d vision. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 22160–22169, 2024.
+[17] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai. Scaffoldgs: Structured 3d gaussians for view-adaptive rendering. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition, pages 20654–20664, 2024.
+[18] Jieru Mei, Alex Zihao Zhu, Xinchen Yan, Hang Yan, Siyuan Qiao, Liang-Chieh Chen, and
+Henrik Kretzschmar. Waymo open dataset: Panoramic video panoptic segmentation. In
+European Conference on Computer Vision, pages 53–72. Springer, 2022.
+[19] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi,
+and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. In
+Computer Vision - ECCV 2020 - 16th European Conference, Glasgow, UK, August 23-28, 2020,
+Proceedings, Part I, pages 405–421. Springer, 2020.
+[20] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics
+primitives with a multiresolution hash encoding. ACM transactions on graphics (TOG), 41(4):
+1–15, 2022.
+[21] Jeremy Reizenstein, Roman Shapovalov, Philipp Henzler, Luca Sbordone, Patrick Labatut, and
+David Novotny. Common objects in 3d: Large-scale learning and evaluation of real-life 3d
+category reconstruction. In Proceedings of the IEEE/CVF international conference on computer
+vision, pages 10901–10911, 2021.
+[22] Jiawei Ren, Michal Jan Tyszkiewicz, Jiahui Huang, and Zan Gojcic. Tokengs: Decoupling 3d
+gaussian prediction from pixels with learnable tokens. arXiv preprint arXiv:2604.15239, 2026.
+[23] Mike Roberts, Jason Ramapuram, Anurag Ranjan, Atulit Kumar, Miguel Angel Bautista, Nathan
+Paczan, Russ Webb, and Joshua M Susskind. Hypersim: A photorealistic synthetic dataset for
+holistic indoor scene understanding. In Proceedings of the IEEE/CVF international conference
+on computer vision, pages 10912–10922, 2021.
+[24] Johannes L Schönberger, Enliang Zheng, Jan-Michael Frahm, and Marc Pollefeys. Pixelwise
+view selection for unstructured multi-view stereo. In European conference on computer vision,
+pages 501–518. Springer, 2016.
+[25] Claude Elwood Shannon. A mathematical theory of communication. The Bell system technical
+journal, 27(3):379–423, 1948.
+[26] Stanislaw Szymanowicz, Chrisitian Rupprecht, and Andrea Vedaldi. Splatter image: Ultra-fast
+single-view 3d reconstruction. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 10208–10217, 2024.
+11
+[27] Dor Verbin, Peter Hedman, Ben Mildenhall, Todd E. Zickler, Jonathan T. Barron, and Pratul P.
+Srinivasan. Ref-nerf: Structured view-dependent appearance for neural radiance fields. In
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2022, New Orleans,
+LA, USA, June 18-24, 2022, pages 5481–5490. IEEE, 2022.
+[28] Jianyuan Wang, Minghao Chen, Nikita Karaev, Andrea Vedaldi, Christian Rupprecht, and David
+Novotny. Vggt: Visual geometry grounded transformer. In Proceedings of the Computer Vision
+and Pattern Recognition Conference, pages 5294–5306, 2025.
+[29] Qianqian Wang, Zhicheng Wang, Kyle Genova, Pratul P Srinivasan, Howard Zhou, Jonathan T
+Barron, Ricardo Martin-Brualla, Noah Snavely, and Thomas Funkhouser. Ibrnet: Learning
+multi-view image-based rendering. In Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, pages 4690–4699, 2021.
+[30] Shuzhe Wang, Vincent Leroy, Yohann Cabon, Boris Chidlovskii, and Jerome Revaud. Dust3r:
+Geometric 3d vision made easy. In Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, pages 20697–20709, 2024.
+[31] Weijie Wang, Yeqing Chen, Zeyu Zhang, Hengyu Liu, Haoxiao Wang, Zhiyuan Feng, Wenkang
+Qin, Feng Chen, Zheng Zhu, Donny Y Chen, et al. Volsplat: Rethinking feed-forward 3d
+gaussian splatting with voxel-aligned prediction. arXiv preprint arXiv:2509.19297, 2025.
+[32] Yunsong Wang, Tianxin Huang, Hanlin Chen, and Gim Hee Lee. Freesplat: Generalizable 3d
+gaussian splatting towards free view synthesis of indoor scenes. Advances in Neural Information
+Processing Systems, 37:107326–107349, 2024.
+[33] Tong Wu, Yu-Jie Yuan, Ling-Xiao Zhang, Jie Yang, Yan-Pei Cao, Ling-Qi Yan, and Lin Gao.
+Recent advances in 3d gaussian splatting. Computational Visual Media, 10(4):613–642, 2024.
+[34] Haofei Xu, Songyou Peng, Fangjinhua Wang, Hermann Blum, Daniel Barath, Andreas Geiger,
+and Marc Pollefeys. Depthsplat: Connecting gaussian splatting and depth. In Proceedings of
+the Computer Vision and Pattern Recognition Conference, pages 16453–16463, 2025.
+[35] Linning Xu, Vasu Agrawal, William Laney, Tony Garcia, Aayush Bansal, Changil Kim, Samuel
+Rota Bulò, Lorenzo Porzi, Peter Kontschieder, Aljaž Božič, et al. Vr-nerf: High-fidelity
+virtualized walkable spaces. In SIGGRAPH Asia 2023 Conference Papers, pages 1–12, 2023.
+[36] Yao Yao, Zixin Luo, Shiwei Li, Jingyang Zhang, Yufan Ren, Lei Zhou, Tian Fang, and Long
+Quan. Blendedmvs: A large-scale dataset for generalized multi-view stereo networks. In
+Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages
+1790–1799, 2020.
+[37] Botao Ye, Boqi Chen, Haofei Xu, Daniel Barath, and Marc Pollefeys. Yonosplat: You only
+need one model for feedforward 3d gaussian splatting. arXiv preprint arXiv:2511.07321, 2025.
+[38] Botao Ye, Sifei Liu, Haofei Xu, Xueting Li, Marc Pollefeys, Ming-Hsuan Yang, and Songyou
+Peng. No pose, no problem: Surprisingly simple 3d gaussian splats from sparse unposed
+images. In The Thirteenth International Conference on Learning Representations, ICLR 2025,
+Singapore, April 24-28, 2025. OpenReview.net, 2025.
+[39] Chandan Yeshwanth, Yueh-Cheng Liu, Matthias Nießner, and Angela Dai. Scannet++: A highfidelity dataset of 3d indoor scenes. In Proceedings of the IEEE/CVF International Conference
+on Computer Vision, pages 12–22, 2023.
+[40] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa. pixelnerf: Neural radiance fields
+from one or few images. In Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition, pages 4578–4587, 2021.
+[41] Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen Koltun. Nerf++: Analyzing and
+improving neural radiance fields. arXiv preprint arXiv:2010.07492, 2020.
+[42] Kai Zhang, Sai Bi, Hao Tan, Yuanbo Xiangli, Nanxuan Zhao, Kalyan Sunkavalli, and Zexiang
+Xu. Gs-lrm: Large reconstruction model for 3d gaussian splatting. In European Conference on
+Computer Vision, pages 1–19. Springer, 2024.
+12
+[43] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of deep features as a perceptual metric. In Proceedings of the IEEE
+conference on computer vision and pattern recognition, pages 586–595, 2018.
+[44] Shangzhan Zhang, Jianyuan Wang, Yinghao Xu, Nan Xue, Christian Rupprecht, Xiaowei Zhou,
+Yujun Shen, and Gordon Wetzstein. Flare: Feed-forward geometry, appearance and camera
+estimation from uncalibrated sparse views. In Proceedings of the Computer Vision and Pattern
+Recognition Conference, pages 21936–21947, 2025.
+[45] Zicheng Zhang, Xiangting Meng, Ke Wu, and Wenchao Ding. Sparsesplat: Towards applicable feed-forward 3d gaussian splatting with pixel-unaligned prediction. arXiv preprint
+arXiv:2604.03069, 2026.
+[46] Qinghua Zheng, Huan Liu, Xiaoqing Zhang, Caixia Yan, Xiangyong Cao, Tieliang Gong,
+Yong-Jin Liu, Bin Shi, Zhen Peng, Xiaocen Fan, et al. Machine memory intelligence: Inspired
+by human memory mechanisms. Engineering, 2025.
+13
+Appendix
+A
+More Implementation Details
+Model Architecture. Our geometry backbone is a VGGT-based [28] model with a ViT architecture.
+The backbone takes V uncalibrated images as input and produces multi-scale tokens, from which
+we take the intermediate features at layers {4, 11, 17, 23} and fuse them through a DPT-style head
+into per-view feature maps Fv ∈ R128×H×W used for anchor feature aggregation. For anchor
+encoding, we first apply Fourier positional encoding with L=6 frequencies (yielding 3 + 6×3×2=39
+dimensions) on the anchor coordinates and concatenate log dn as an additional density signal. After
+multi-view aggregation, each anchor feature is refined by 4 self-attention blocks, where each block
+uses RMSNorm pre-normalization, multi-head self-attention with head_dim=128 (4 heads), and an
+MLP layer with expansion ratio 4. The feature enhancement module is a 3-level UNet with channel
+widths {64, 128, 256} from shallow to deep. Downsampling uses 3×3 convolutions with stride 2,
+upsampling uses 4×4 transposed convolutions followed by a 3×3 convolution, and skip connections
+concatenate encoder and decoder features at each level. A final 1 × 1 convolution produces the
+3-channel RGB residual ∆I. The weights and biases of the final convolution are zero-initialized, so
+the network behaves as an identity mapping at the start of training.
+Datasets. We train on five public multi-view datasets covering diverse scene types: DL3DV [16]
+(real-world indoor and outdoor scenes), ScanNet++ [39] (real-world indoor scenes), Hypersim [23]
+(synthetic indoor scenes), BlendedMVS [36] (object-centric and aerial scenes), and Waymo [18]
+(outdoor driving scenes). These datasets are mixed with sampling probabilities 0.4, 0.2, 0.2, 0.1, 0.1
+respectively. All training images are resized so that the longer side equals 448 pixels, with intrinsics
+rescaled accordingly. For evaluation, following AnySplat [11], we report results on three benchmarks:
+VR-NeRF [35] (4 scenes), MipNeRF360 [2] (4 scenes), and DL3DV [16] (10 held-out scenes).
+Testing Protocol. Because our task takes uncalibrated images as input, evaluation must rely on
+camera poses predicted by the model itself. We follow the testing protocol of AnySplat [11]. Given a
+test scene with context views and held-out target views, we run the model twice: (i) On context views
+alone, we obtain the predicted context poses C (1) and the scene’s 3D Gaussians G. (ii) On the union
+of context and target views, we obtain a second set of poses C (2) that includes the target views. Since
+the two passes can produce slightly different context poses, we apply a Procrustes alignment between
+the context poses in C (1) and C (2) , and use the resulting transform to map the target poses in C (2)
+into the coordinate frame of G. We then render G at the aligned target poses and compute metrics
+against ground-truth images. For NoPoSplat [38], which does not predict input camera poses, we
+follow the original protocol and recover target camera poses via a 200-step test-time optimization
+that minimizes the MSE between the rendered image and the ground-truth image.
+B
+Additional Experimental Results
+B.1
+Camera Pose Estimation
+Since our geometry backbone also recovers camera parameters, we also evaluate pose estimation on
+the Co3Dv2 [21] dataset. Following [28, 11], we adopt the AUC metric that computes relative pose
+accuracy over a range of angular thresholds, and set thresholds as 10, 20, and 30 degrees. As shown in
+Tab. A1, our geometry backbone outperforms both AnySplat [11] and the original VGGT [28] across
+all AUC thresholds. This suggests that jointly training the geometry backbone with our anchor-based
+3DGS pipeline does not compromise the underlying pose estimation ability.
+B.2
+Novel-View Synthesis with Denser Views
+To further examine how our anchor-based representation scales with denser inputs, we extend the
+dense-view evaluation to 64 context views on VR-NeRF [35] and DL3DV [16] datasets. Results are
+reported in Tab. A2. Consistent with the 32-view setting, our method remains competitive with or
+better than prior pixel-aligned feed-forward baselines (i.e., DA3 [15], AnySplat [11]) in rendering
+metrics while using roughly one to two orders of magnitude fewer Gaussian primitives.
+14
+Table A1: Camera pose estimation results on Co3Dv2 [21] dataset. We report AUC at angular
+thresholds of 10, 20, and 30 degrees. Bold indicates the best.
+Method
+VGGT [28]
+AnySplat [11]
+Ours
+AUC@10 ↑
+AUC@20 ↑
+AUC@30 ↑
+50.4
+53.1
+54.8
+67.2
+73.1
+74.0
+74.9
+80.8
+81.5
+Table A2: Novel-view synthesis with 64 context views on VR-NeRF [35] and DL3DV [16]. We also
+report the number (#GS) and storage size of the predicted Gaussians.
+VR-NeRF
+PSNR SSIM LPIPS #GS
+Method
+DL3DV
+Storage PSNR SSIM LPIPS #GS
+Storage
+VGGT+3DGS [13] 23.74 0.780 0.289 0.46M 114MB 20.69 0.667 0.270 1.39M 345MB
+DA3 [15]
+AnySplat [11]
+Ours
+B.3
+21.91 0.725 0.365 12.8M 2.10GB 19.64 0.564 0.328 12.8M 2.10GB
+23.63 0.797 0.318 8.97M 1.47GB 18.71 0.567 0.369 7.43M 1.22GB
+24.01 0.799 0.311 0.26M 35MB 19.33 0.585 0.367 0.26M 35MB
+Rendering Speed Analysis
+We further investigate whether our feature-enhancement UNet can become a rendering-time bottleneck. To quantify its impact, we compare the per-frame rendering speed of our method against two
+pixel-aligned feed-forward baselines on VR-NeRF [35] dataset. For each view configuration, we run
+the model to obtain the predicted Gaussians, then measure the rendering speed over 100 rendering
+passes on a single H20 GPU. The averaged FPS is reported in Tab. A3.
+Table A3: Rendering speed analysis on VR-NeRF [35] dataset. #GS denotes the number of predicted
+Gaussians; FPS is the per-frame 3DGS rendering speed averaged over 100 iterations.
+Method
+6 views
+#GS
+FPS ↑
+32 views
+#GS
+FPS ↑
+64 views
+#GS
+FPS ↑
+DA3 [15]
+AnySplat [11]
+Ours
+1.20M
+1.03M
+0.26M
+6.42M
+4.75M
+0.26M
+12.8M
+8.97M
+0.26M
+361.1
+375.4
+179.4
+146.3
+176.7
+190.6
+85.9
+120.5
+187.4
+The enhancement UNet is lightweight, so our rendering speed still notably exceeds real-time requirements. Because our anchor-based representation produces a constant ∼0.26M Gaussians regardless
+of the number of input views, our rendering speed stays stable across all configurations. In contrast,
+pixel-aligned baselines produce #GS proportional to input views, and their FPS drops sharply from
+∼360 (6 views) to under 86 (64 views). In particular, our FPS is 1.6× faster than AnySplat and 2.2×
+faster than DA3 at 64 views, and the gap can keep widening as the view count increases.
+B.4
+Multi-View Consistency Analysis
+To verify the impact of the enhancement 2D UNet on multi-view consistency, we conduct a dedicated
+experiment. On an interpolated novel-view (virtual camera) trajectory, we measure the adjacent-view,
+depth-based reprojection warping error (RMSE) in Tab. A4, masked to co-visible and geometrically
+consistent pixels. The variant without the UNet and the UNet-refined render share identical geometry
+backbone and anchor-based decoder, so their difference isolates the UNet.
+The UNet clearly improves rendering quality, while the increase in warping RMSE over the variant
+without the UNet (consistent reference) is marginal, indicating that it introduces minimal multi-view
+inconsistency. The reason is structural: the feature map fed to the UNet is rasterized from the same
+3D Gaussians with the same alpha-compositing weights as the base image, so the predicted residual
+15
+Table A4: Multi-view consistency analysis on VR-NeRF [35] dataset. We report the RMSE metric.
+Warping RMSE ↓ (traj)
+with UNet
+without UNet (reference)
+6 input views
+32 input views
+0.01187
+0.00974
+0.01018
+0.00970
+inherits the 3D geometric structure of the underlying representation rather than being hallucinated in
+2D image space. Furthermore, the enhancement 2D UNet is lightweight, which inherently limits its
+capacity to introduce multi-view artifacts.
+B.5
+More Ablation Results
+We provide additional ablation studies besides the analysis in the main paper. Tab. A5 reports the
+component ablation on DL3DV [16] under 3, 6, and 32 input views, and Fig. A1 shows the rendering
+metrics under varying anchor count N and decoded Gaussians per anchor K on DL3DV [16]
+and MipNeRF360 [2]. The conclusions are consistent with the main paper: removing any single
+component (UNet enhancement, anchor attention, occlusion-aware aggregation, or entropy-sample)
+consistently degrades rendering quality, and our default setting (N =32,768 and K=8) provides a
+favorable balance between rendering performance and Gaussian compactness.
+Table A5: Ablation study on DL3DV [16] dataset under 3, 6, and 32 input views.
+Configuration
+3 views
+6 views
+32 views
+PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS
+w/o enhancement
+w/o self-attention
+w/o occ-aggregation
+w/o entropy-sample (uniform)
+w/o entropy-sample (voxel)
+18.81
+20.88
+21.00
+20.93
+20.32
+0.647
+0.673
+0.675
+0.669
+0.630
+0.334
+0.292
+0.295
+0.290
+0.345
+19.62
+20.81
+20.72
+20.67
+19.73
+0.622
+0.648
+0.642
+0.634
+0.594
+0.358
+0.312
+0.317
+0.309
+0.376
+18.66
+19.43
+19.03
+19.21
+18.34
+0.564
+0.588
+0.576
+0.580
+0.537
+0.424
+0.375
+0.390
+0.373
+0.446
+Full model (Ours)
+21.22
+0.683
+0.280
+20.70
+0.649
+0.303
+19.52
+0.593
+0.364
+DL3DV Dataset
+MipNeRF360 Dataset
+Figure A1: Rendering metrics under varying anchor count N and decoded Gaussians per anchor K
+on DL3DV [16] and MipNeRF360 [2] datasets.
+Furthermore, we investigate whether the improvement stems from the anchor representation itself
+or from the fine-tuned geometry backbone. We keep the identical fine-tuned VGGT backbone, and
+replace only the prediction head: the anchor head is swapped for a standard pixel-aligned decoder
+(one Gaussian per pixel, as in AnySplat [11]). We report the average metrics in Tab. A6.
+16
+Table A6: Ablation study on the anchor representation. We compare our anchor-based head with a
+standard pixel-aligned decoder under the identical fine-tuned VGGT backbone.
+3 views
+6 views
+32 views
+PSNR
+SSIM
+LPIPS PSNR
+SSIM
+LPIPS PSNR
+SSIM
+LPIPS
+VR-NeRF
+Setting
+Backbone + Pixel Decoder
+21.59
+0.736
+0.339
+22.48
+0.760
+0.319
+24.24
+0.818
+0.304
+AnySplat [11]
+21.31
+0.729
+0.340
+22.45
+0.758
+0.321
+24.05
+0.819
+0.309
+Anchor3DGS (Ours)
+23.69
+0.764
+0.320
+24.03
+0.781
+0.312
+24.56
+0.815
+0.297
+DL3DV
+Dataset
+Backbone + Pixel Decoder
+17.89
+0.632
+0.305
+18.81
+0.620
+0.312
+19.02
+0.576
+0.369
+AnySplat [11]
+17.74
+0.625
+0.308
+18.42
+0.613
+0.316
+18.76
+0.565
+0.371
+Anchor3DGS (Ours)
+21.22
+0.683
+0.280
+20.70
+0.649
+0.303
+19.52
+0.593
+0.364
+The results isolate two effects. (i) The backbone contribution — comparing our backbone + pixel
+decoder against AnySplat [11] — is small: +0.28 / +0.03 / +0.19 dB on VR-NeRF [35] dataset and
++0.15 / +0.39 / +0.26 dB on DL3DV [16] dataset at 3 / 6 / 32 views, confirming that fine-tuning
+the backbone alone does not explain our rendering improvement. (ii) The anchor contribution —
+comparing Anchor3DGS against our backbone + pixel decoder — is substantial: +2.10 dB (VRNeRF 3 views) and +3.33 dB (DL3DV 3 views), narrowing to +0.32 / +0.50 dB at 32 views. The
+performance gain therefore primarily comes from the anchor-based representation rather than the finetuned backbone. Unlike pixel-aligned decoders that predict one Gaussian per pixel and leave holes in
+poorly-observed regions, our anchors aggregate multi-view context through attention mechanism and
+concentrate capacity in high-entropy regions via entropy-guided sampling.
+C
+Broader Social Impacts
+Anchor3DGS is a general-purpose feed-forward 3D reconstruction and novel view synthesis method,
+and we expect its social impact to be generally positive. By predicting a compact set of 3D Gaussians
+from uncalibrated images in a single forward pass, our method substantially reduces the per-scene
+optimization cost of conventional 3DGS pipelines. This efficiency lowers the computational and
+memory footprint of 3D content creation, and also makes high-quality 3D reconstruction more
+accessible to downstream applications such as virtual and augmented reality, robotics, autonomous
+driving simulation, and immersive telepresence. On the other hand, like other photorealistic novel
+view synthesis techniques, our method could be misused. Realistic renderings of reconstructed scenes
+might be repurposed to fabricate misleading visual content, and unconstrained reconstruction from
+publicly available imagery raises potential privacy concerns regarding individuals or private spaces
+captured in the input views. These risks can be mitigated through standard practices, including
+responsible data curation, watermarking or provenance tracking of synthesized content, and obtaining
+proper consent before reconstructing scenes that contain private property.
+D
+More Visualizations
+We provide more visual comparisons with baseline methods in Fig. A2. Despite its compact representation, our method is still able to generate high-quality renderings with sharp textures and fine details.
+Please refer to our supplementary video for more novel view rendering results of our method.
+17
+AnySplat
+DA3
+Ours
+Ground-Truth
+Figure A2: More qualitative comparisons against existing feed-forward methods.
+18

@@ -1,0 +1,105 @@
+# OpenGL Client State Array Rendering
+
+Also called: OpenGL Rendering with Client State Arrays, RenderQuadArrays, RenderQuadGeometry, RenderTriangleArrays
+
+## Overview
+This method renders pre-generated voxel mesh data by configuring OpenGL's legacy client state arrays for vertices, normals, and colors, supporting both indexed and non-indexed drawing [S1, unofficial]. It sets itself apart from its siblings by relying on client-side memory pointers passed directly to the driver during draw calls, rather than pre-uploaded Vertex Buffer Objects (VBOs) or procedural geometry generation in shaders [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: A host-side memory buffer containing interleaved or separated vertex positions, normals, colors, and optional indices.
+- **Output**: Rasterized triangles or quads on the screen.
+
+**Data Structures**
+The vertex data layout consists of:
+- **Position**: 3 floats (x, y, z) [S1, unofficial].
+- **Normal**: 3 floats [S1, unofficial].
+- **Color**: 4 floats (RGBA) [S1, unofficial].
+- **Indices**: Unsigned integers (for indexed drawing) [S1, unofficial].
+
+**Steps**
+The rendering process involves setting up the OpenGL matrix stack, binding the client-side data, and issuing draw commands. The following pseudocode demonstrates the `RenderTriangleArrays` variant, which is the foundational pattern for the other variants [S1, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_triangle_arrays(geometry_position, chunk_size, vertex_buffer, normal_buffer, color_buffer, vertex_count):
+    # 1. Push the current matrix to preserve state
+    glPushMatrix()
+    
+    # 2. Translate by the geometry's world position
+    # geometryPosition is a vector, CHUNK_SIZE is a scalar
+    translate_matrix = glm.translate(glm.mat4(1.0), geometry_position * chunk_size)
+    glMultMatrixf(translate_matrix)
+    
+    # 3. Bind the vertex buffer (client-side pointer in legacy OpenGL)
+    # In modern OpenGL, this would be a VBO binding, but here we use client pointers
+    # Note: The source implies a buffer object is bound or referenced, 
+    # but the core mechanism is the client pointer setup.
+    # [S1, unofficial]
+    
+    # 4. Enable and set vertex array
+    glEnableClientState(GL_VERTEX_ARRAY)
+    # Pointer: 3 floats, stride 0, offset 0
+    glVertexPointer(3, GL_FLOAT, 0, vertex_buffer)
+    
+    # 5. Enable and set normal array
+    glEnableClientState(GL_NORMAL_ARRAY)
+    # Pointer: 3 floats, stride 0, offset 0 (assuming interleaved or separate buffer logic handled by offset)
+    # [S1, unofficial]
+    glNormalPointer(GL_FLOAT, 0, normal_buffer)
+    
+    # 6. Enable and set color array
+    glEnableClientState(GL_COLOR_ARRAY)
+    # Pointer: 4 floats, stride 0, offset 0
+    glColorPointer(4, GL_FLOAT, 0, color_buffer)
+    
+    # 7. Draw the primitives
+    # [S1, unofficial]
+    glDrawArrays(GL_TRIANGLES, 0, vertex_count)
+    
+    # 8. Disable states
+    glDisableClientState(GL_COLOR_ARRAY)
+    glDisableClientState(GL_NORMAL_ARRAY)
+    glDisableClientState(GL_VERTEX_ARRAY)
+    
+    # 9. Pop matrix
+    glPopMatrix()
+```
+
+**Variants**
+1. **RenderQuadArrays**: Identical to `RenderTriangleArrays` but calls `glDrawArrays(GL_QUADS, ...)` instead of `GL_TRIANGLES` [S1, unofficial].
+2. **RenderQuadGeometry**: Uses indexed drawing. It sets the provoking vertex convention to `GL_FIRST_VERTEX_CONVENTION`, binds an element array buffer, and calls `glDrawElements(GL_QUADS, ...)` [S1, unofficial].
+
+**Parameters**
+- `BUFFER_OFFSET(0)`: A macro used to specify the buffer offset, assumed to be 0 [S1, unofficial].
+- `stride`: In the source mesh generation, a stride of 24 bytes per vertex is implied by the calculation `int stride = 24*voxelCounter`, suggesting a tightly packed structure or specific alignment [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+- **Precision**: Floating-point precision issues may arise if `geometryPosition * CHUNK_SIZE` results in large world coordinates, affecting vertex shader precision.
+- **Boundaries**: The method assumes the vertex buffers are valid and accessible by the client. If the buffer is freed before the draw call, it causes a crash.
+- **Degenerate Input**: Empty meshes or zero vertex counts should be checked before calling draw functions to avoid undefined behavior.
+
+## Subtopics
+
+### [OpenGL Mesh Setup (VAO/VBO/EBO)](11322-opengl-mesh-setup-vao-vbo-ebo.md)
+This method initializes OpenGL vertex arrays and buffers for a static mesh, uploading vertex positions, normals, and texture coordinates to GPU memory for rendering via indexed triangle lists. It sets apart from its siblings by explicitly managing the lifecycle of Vertex Array Objects (VAO), Vertex Buffer Objects (VBO), and Element Buffer Objects (EBO) to decouple host-side data structures from GPU-side storage, supporting both indexed and non-indexed drawing through a unified buffer upload pipeline.
+
+### [Immediate Mode to Array Mode Optimization](17332-immediate-mode-to-array-mode-optimization.md)
+Immediate Mode to Array Mode Optimization is a technique to optimize rendering performance by replacing the immediate mode API (`glBegin`/`glEnd` with per-vertex calls) with array-based drawing commands (`glDrawArrays`/`glDrawElements`), reducing driver overhead and state changes. It further improves performance by storing vertex data in GPU memory (Buffer Object) rather than client memory, reducing transfer overhead. This method builds on [OpenGL Client State Array Rendering](11008-opengl-client-state-array-rendering.md) by introducing the Vertex Buffer Object (VBO) extension.
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ where $N$ is the number of vertices or indices, as each vertex is processed once per draw call.
+- **Memory Complexity**: $O(N)$ for storing vertex data in client memory.
+- **Performance**: Slower than VBO-based rendering because data is transferred from client memory to the GPU for every draw call, causing high bus utilization and driver overhead [S1, unofficial].
+- **Strengths**: Simple implementation, no need for complex buffer management or upload pipelines.
+- **Limitations**: High CPU/GPU synchronization overhead, not suitable for large-scale dynamic scenes.
+- **When to use**: Small, static meshes or prototyping.
+- **When not to use**: Large voxel terrains or dynamic scenes requiring frequent updates.
+
+## Background
+This method originates from the legacy OpenGL pipeline (OpenGL 1.x/2.x), where client state arrays were the standard way to pass vertex data to the GPU [S1, unofficial]. It was widely used in early voxel terrain engines before the adoption of VBOs and modern OpenGL.
+
+## Sources
+[S1] Shilghter/VoxelTerrain, https://github.com/Shilghter/VoxelTerrain, fetched 2026-10-27 (unofficial)
+[S2] OpenGL Mesh Setup (VAO/VBO/EBO), https://github.com/..., fetched 2026-10-27 (unofficial)

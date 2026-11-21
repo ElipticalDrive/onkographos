@@ -1,0 +1,1933 @@
+OpenVDB - Sparse volume data structure and tools. Contribute to AcademySoftwareFoundation/openvdb development by creating an account on GitHub.
+
+NanoVDB: migrate off the dual-space buffers and deprecate the DeviceBuffer name (CUDA) by harrism · Pull Request #2301 · AcademySoftwareFoundation/openvdb · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+harrism
+commented
+Aug 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+What this PR is, and why
+This is the migrate-and-deprecate step of the memory-management work under #2232. Grid storage is moving from the dual-space DeviceBuffer (one object holding a host copy and a device copy, moved with deviceUpload/deviceDownload) to the single-space cuda::Buffer with explicit transfers (cuda::copyTo). This PR migrates everything inside NanoVDB and then deprecates the old name — designed so that nobody is broken and nobody gets a warning they cannot act on:
+cuda::DeviceBuffer becomes a deprecated alias for the renamed implementation class. The GPU tools' default buffer types name the implementation directly, so code that relies on defaults — most user code — compiles without any warning until the defaults change at removal, one or more releases from now. Only code that spells DeviceBuffer sees the warning, and the message carries the migration recipe.
+cuda::copyTo adopts the source handle's metadata — validated once, when that handle was constructed from raw bytes — so transfers run no kernel and are callable from host-only translation units (cuda/HandleStorage.h). The validation kernel keeps guarding the real trust boundary: constructing a handle from raw bytes.
+Cross-stream ordering, which DeviceBuffer handled with internal events, is the documented four-line CUDA-event pattern in cuda/Buffer.h — matching cuda::buffer (CCCL) and RMM.
+UnifiedBuffer intentionally keeps its name here: its replacement (ManagedResource, added in this PR, plus the multi-GPU tool that defaults to it) completes in the multi-GPU follow-up in the same release, with the identical alias treatment.
+Commits, in review order
+Tool entry points accept single-space buffers — the tools allocated results through the duck-typed create() that cuda::Buffer doesn't have; a small bridge (cuda/HandleStorage.h) dispatches to create() or the buffer's memory resource. Plus the friendly copy() diagnostic from the NanoVDB: cuda::copyTo cross-space transfers and pinned-buffer GridHandles (CUDA) #2292 review.
+ManagedResource — cudaMallocManaged-backed; a handle over it exposes both the host and device accessors over one allocation (the UnifiedBuffer migration target). Also restores four buffer headers missing from the install list.
+TopologyBuilder's two dual members split into pinned host staging + resource-allocated device buffers, with the upload mechanics in one place instead of six tools.
+MeshToGrid's 15 internal buffers onto resource-backed cuda::Buffer (it predated the earlier scratch conversions); fixes its sidecar being hard-coded to DeviceBuffer, which meant the SidecarBufferT parameter never compiled with any other type.
+SignedFloodFill's root pass onto ManagedResource (the out-of-bounds read documented in NanoVDB: cuda::SignedFloodFill's root-tile pass reads out of bounds on the device (confirmed with compute-sanitizer) #2300 is pre-existing and unchanged here; its fix belongs to that issue).
+All 15 CUDA examples migrated — including three pre-existing example bugs found on the way (a grid-index example whose "GPU" output was computed on the CPU, a deprecated shim use, a dead #if 0).
+The deprecation itself — rename + deprecated alias, with the tests keeping their coverage of the still-shipping dual paths under file-local warning suppression.
+CUDA headers out of example host files — the topology drivers are plain .cpp; transfers route through their .cu companions (plus an old signature mismatch fixed).
+copyTo adopts metadata and becomes host-callable — deletes the transfer-helper pattern the previous commit needed, removes a scratch allocation and two synchronizing round trips per device transfer (net −59 lines).
+Review-round polish — comment style, the rename rationale documented at the class, one over-deletion restored.
+Testing
+Full CPU/CUDA/buffer/memory-resource/mgpu suites green at every step (155+63+46+19+11 on RTX 6000 Ada); example programs run-verified where buildable; python module builds; a two-translation-unit link check confirms the rename preserves the cross-TU constructor instantiation; a host-only probe TU calling copyTo compiles under g++ and clang.
+🤖 Generated with Claude Code
+harrism
+requested a review
+from kmuseth
+as a code owner
+August 27, 2026 02:46
+harrism
+marked this pull request as draft
+August 27, 2026 03:23
+harrism
+marked this pull request as ready for review
+August 27, 2026 04:57
+harrism
+mentioned this pull request
+Aug 27, 2026
+NanoVDB Python: GPU/device bindings (nanovdb.cuda)
+#2225
+Open
+harrism
+and others
+added 10 commits
+August 27, 2026 05:18
+NanoVDB: let every tool entry point allocate single-space handle stor…
+…
+47f2569
+```
+…age (CUDA)
+
+The GPU tools build their result handle through the duck-typed static
+BufferT::create(size, pool, device, stream), so a single-space buffer type
+(cuda::Buffer over a memory resource) did not compile at any entry point.
+The new cuda/HandleStorage.h provides the bridge: createDeviceStorage
+allocates through create() for buffers that provide it and through the
+pool buffer's resource otherwise, and deviceStorageData returns the device
+address either way (data() for single-space, deviceData() for dual). The
+PointsToGrid family, TopologyBuilder (serving the topology ops and
+MeshToGrid), IndexToGrid, addBlindData and VoxelBlockManager entry points
+now allocate through the bridge; addBlindData also drops its
+dual-space-only static_assert and orders its allocation on the stream it
+already runs on.
+
+The no-argument GridHandle::copy() now names its default-construction
+requirement in a static_assert instead of failing inside the pool
+construction, backed by a BufferIsDefaultConstructible detector beside the
+other trait companions.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+NanoVDB: add cuda::ManagedResource with both-space handle support (CUDA)
+…
+a209cdd
+```
+ManagedResource is a synchronous memory resource over cudaMallocManaged,
+the migration target for UnifiedBuffer users: its allocations are valid on
+the host and the device, so a handle over cuda::Buffer<std::byte,
+ManagedResource> parses its metadata on the host and exposes both accessor
+families over the same allocation. The classification comes from a new
+DEVICE_ACCESSIBLE resource marker (detected by
+is_device_accessible_resource and forwarded by ResourceRef and
+AsyncFromSync, like HOST_ACCESSIBLE): a buffer whose resource is
+host-accessible AND device-accessible sets both hasHostSingle and
+hasDeviceSingle, and the handle gates now distinguish device-only
+single-space buffers (device metadata parse, host accessors are
+compile-time errors) from both-space ones (host parse, everything
+available). GridHandle's write/read and NodeManagerHandle follow the same
+rule.
+
+Also adds the four buffer/resource headers missing from
+NANOVDB_INCLUDE_CUDA_FILES, so installed trees ship cuda/Buffer.h and
+cuda/PinnedResource.h alongside the new ManagedResource.h and
+HandleStorage.h.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+NanoVDB: split TopologyBuilder's dual-space staging into explicit hos…
+…
+3b8130b
+```
+…t and device buffers (CUDA)
+
+The builder's two remaining dual-space members carried a host side and a
+device side inside one DeviceBuffer: mProcessedRoot (the consumer tools
+build the new root topology on the host, then upload) and mData (the
+builder parameters, written on the host and uploaded once). They are now
+explicit: pinned host staging (so the uploads stay asynchronous, matching
+the DeviceBuffer behavior) plus a device buffer allocated through the
+builder's injected resource, with allocateProcessedRoot /
+uploadProcessedRoot / uploadData carrying the mechanics once instead of
+per tool. The six consumers (the five topology ops and MeshToGrid) each
+lose their DeviceBuffer::create + deviceUpload pair, and the early release
+in the empty-grid path frees both sides through the new members.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+NanoVDB: move MeshToGrid's device scratch onto resource-backed buffer…
+…
+6c90bf8
+```
+…s (CUDA)
+
+MeshToGrid predated the builder scratch conversions, so its three device
+members and twelve local scratch buffers still allocated through the
+dual-space DeviceBuffer, paying for host mirrors nothing read and
+bypassing the injected resource. They are now
+cuda::Buffer<std::byte, ResourceRef<ResourceT>> like the other builders,
+allocated through the resource the class already takes (TopologyBuilder
+gains a public ref() accessor for consumers sharing its instance), with
+early releases through destroy() on the retained stream.
+
+The UDF sidecar buffer was hard-coded to DeviceBuffer, so the
+SidecarBufferT template parameter never compiled with any other type; it
+now allocates through the entry-point bridge, honoring the caller's
+sidecar prototype buffer.
+
+Two ride-alongs from review: PointsToGrid's storage null-check message now
+names the reachable failure (a buffer type producing no device memory)
+instead of allocation failure, and IndexToGrid's commented-out
+synchronization line is deleted.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+NanoVDB: SignedFloodFill's root pass onto managed-resource buffers (C…
+…
+bb4bf03
+```
+…UDA)
+
+The root-tile scanline pass interleaves host access with device reads of
+the same bytes, which is what UnifiedBuffer provided; it now uses
+cuda::Buffer over ManagedResource. One behavioral difference: the old
+buffer reserved virtual address space and grew in place, so pointers
+survived resize; the new buffer reallocates on growth past the 64 reserved
+tiles, and the tree pointer is re-derived after the resize.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+NanoVDB: migrate the CUDA examples onto explicit host-device grid tra…
+…
+9024ee1
+```
+…nsfers (CUDA)
+
+The examples taught the dual-space workflow: build or read into a
+DeviceBuffer handle, deviceUpload, use both sides, deviceDownload. All 15
+CUDA examples now hold the grid in a host handle and move it with
+cuda::copyTo -- the migration story external code will follow. Device-side
+image and particle scratch becomes cuda::Buffer with explicit copies for
+results, and voxels_to_grid demonstrates the full single-space flow: the
+builder allocates its result directly in a cuda::Buffer, kernels use the
+device handle, and copyTo brings the grid back for validation. Streams are
+scoped to outlive the device handles whose buffers free on them.
+
+Three pre-existing example defects fixed along the way: index_grid passed
+its host grid where its kernel launcher expects the device grid, so the
+example's GPU output was never produced on the GPU; nodemanager used the
+deprecated cudaCreateNodeManager shim through an output parameter, now the
+resource-taking overload; and a dead #if 0 alternative is deleted.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+NanoVDB: deprecate the dual-space DeviceBuffer name (CUDA)
+…
+a657de1
+```
+The class is renamed to DualDeviceBuffer -- a transitional implementation
+name -- and the public DeviceBuffer spelling becomes a deprecated alias
+whose message carries the migration recipe. The GPU tools' buffer-type
+defaults name the implementation directly, so code that relies on the
+defaults compiles without any warning until the defaults change at
+removal; only code that names DeviceBuffer is warned, and it is the code
+that has an action available. The legacy CudaDeviceBuffer alias retargets
+to the implementation so a use fires one warning, not two. The python
+bindings keep their surface by naming the implementation internally, and
+the NanoVDB tests keep exercising the dual-space paths -- which still
+ship and need the coverage -- under translation-unit-local suppression
+with a comment stating the policy.
+
+cuda::Buffer's stream contract now documents the four-line event recipe
+for handing buffer contents to another stream, which replaces the
+event tracking DeviceBuffer carried. Also migrates the last device-only
+DeviceBuffer scratch in the dilate example onto cuda::Buffer, and fixes a
+pre-existing signature mismatch in the raytrace_level_set OpenVDB
+comparison path that only an OpenVDB-enabled build would have hit.
+
+UnifiedBuffer intentionally keeps its name for now: its replacement story
+(ManagedResource plus the DistributedPointsToGrid re-plumb) lands in the
+multi-GPU follow-up in the same release, and the alias treatment applies
+there identically.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+NanoVDB: keep CUDA headers out of the examples' host files (CUDA)
+…
+a0fcfc6
+```
+The topology example drivers are plain .cpp translation units, and
+including cuda/GridHandle.cuh there fails on every host compiler; they
+route transfers through helpers in their _kernels.cu companions and hold
+the returned handles through host-safe headers. Also fixes a pre-existing
+signature mismatch in raytrace_level_set's OpenVDB comparison path, owns
+the voxel example's input arrays as cuda::Buffer, and moves the multi-GPU
+example onto the implementation name it migrates away from with
+UnifiedBuffer.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+NanoVDB: cuda::copyTo adopts the source handle's metadata and becomes…
+…
+b37039f
+```
+… host-callable (CUDA)
+
+A handle-to-handle copy re-validated bytes it had just copied from an
+already-validated handle: copyTo ended by constructing the destination
+handle, whose single-space constructor runs the chain-validation kernel.
+The metadata was validated once, when the source handle was constructed
+from raw bytes -- so copyTo now adopts it, through a HandleFactory that is
+the one gateway to building a handle from trusted metadata. With no kernel
+in the transfer path, copyTo (and the storage helpers) move to the
+host-includable cuda/HandleStorage.h: a plain C++ translation unit linked
+against the CUDA runtime can transfer grid handles directly.
+
+That deletes the transfer-helper pattern from every example -- the eight
+host-main programs call copyTo themselves and their .cu companions lose
+their uploadGrid shims -- and removes the metadata scratch allocation and
+two synchronizing round trips from every device-destination transfer. The
+validation kernel keeps guarding the real trust boundary: constructing a
+handle from raw bytes.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+NanoVDB: review-round polish (CUDA)
+…
+06d0d74
+```
+From the pre-publication review: trailing comments this work added get a
+space before the slashes (closing-brace labels keep the surrounding
+files' form); a comment narrating the language rather than the library is
+deleted; the DualDeviceBuffer class doc states why the type is renamed
+while its header is not; and the openvdb-to-nanovdb example's host-side
+print function, deleted one line too eagerly by the helper-removal pass,
+is restored.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+harrism
+force-pushed
+the
+nanovdb-dual-buffer-deprecation
+branch
+from
+0b6521d to
+06d0d74
+Compare
+August 27, 2026 05:19
+swahtz
+added
+the
+nanovdb
+label
+Aug 28, 2026
+NanoVDB: correct DeviceBuffer.h's doxygen file tag
+…
+c4b0354
+```
+The \file tag named DualDeviceBuffer.h, a file that does not exist:
+the header deliberately keeps its long-standing name and include path,
+as its own class note explains. A \file tag that does not match the
+actual file name detaches doxygen's file page from the header.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+swahtz
+reviewed
+Sep 1, 2026
+View reviewed changes
+Comment thread
+nanovdb/nanovdb/GridHandle.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+reviewed
+Sep 1, 2026
+View reviewed changes
+Comment thread
+nanovdb/nanovdb/tools/cuda/SignedFloodFill.cuh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+reviewed
+Sep 1, 2026
+View reviewed changes
+Comment thread
+nanovdb/nanovdb/cuda/DeviceBuffer.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+reviewed
+Sep 1, 2026
+View reviewed changes
+Comment thread
+nanovdb/nanovdb/cuda/HandleStorage.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+reviewed
+Sep 1, 2026
+View reviewed changes
+Comment thread
+nanovdb/nanovdb/cuda/HandleStorage.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+reviewed
+Sep 1, 2026
+View reviewed changes
+Comment thread
+nanovdb/nanovdb/GridHandle.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+reviewed
+Sep 1, 2026
+View reviewed changes
+Comment thread
+nanovdb/nanovdb/cuda/NodeManager.cuh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+harrism
+commented
+Sep 2, 2026
+View reviewed changes
+Comment thread
+nanovdb/nanovdb/cuda/HandleStorage.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+harrism
+added 4 commits
+September 2, 2026 02:38
+NanoVDB: synchronize copyTo for host-readable managed destinations (C…
+…
+ec26d38
+```
+…UDA)
+
+cuda::copyTo documents that a host-readable destination synchronizes
+before returning, but the sync condition tested hasDeviceSingle alone,
+so a ManagedResource destination - host-readable and device-accessible
+from the same allocation - returned with the copy still in flight and
+host reads through the handle raced it. The condition now keys on
+host readability, so pinned and managed destinations synchronize and
+device-only destinations stay stream-ordered.
+
+The copy direction is now cudaMemcpyDefault: every pointer involved is
+a UVA address, so the runtime infers the direction, as the distributed
+builder's cross-device copies already rely on.
+
+The stream-safety warning now states the source-lifetime contract for
+sources without a retained stream: a synchronous-resource (pinned)
+source frees immediately on destruction, unordered against the still-
+asynchronous copy, so the caller synchronizes the stream before
+destroying it.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+NanoVDB: name the device-only buffer predicate and refresh transfer docs
+…
+bfc450d
+```
+BufferIsDeviceOnly names the hasDeviceSingle-and-not-hasHostSingle
+predicate that gates the handles' host accessors, replacing its 19
+hand-spelled repetitions across the handle headers.
+
+The DeviceBuffer deprecation text predated the metadata-adopting
+copyTo: it claimed transfers run a validation kernel and belong in CUDA
+translation units. copyTo is kernel-free and host-callable, and lives
+in cuda/HandleStorage.h - the doc, the alias message, and
+GridHandle::copy(pool)'s error message now say so (the latter pointed
+at copy(), whose error then pointed at copyTo; it now names the
+destination directly). Also drops a duplicated include.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+NanoVDB: point copy()'s cross-space error at copyTo's actual header
+…
+e8224fe
+```
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+NanoVDB: drop a comment restating cudaMemcpyDefault's contract
+…
+e1d146d
+```
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+harrism
+mentioned this pull request
+Sep 2, 2026
+NanoVDB: default Mask's copy constructor
+#2310
+Merged
+NanoVDB: suppress nanobind's header diagnostics for Windows CUDA bind…
+…
+2064cd9
+```
+…ing builds
+
+The -isystem exemption holds for nvcc with a GCC/Clang host, but with an
+MSVC host nvcc confers no system-header status (nanobind's headers also
+arrive via its own -I, which wins there), so the Windows CI still failed
+on nanobind's AcademySoftwareFoundation#177/AcademySoftwareFoundation#550 diagnostics under --Werror=all-warnings. Those
+two diagnostics are now suppressed by number for the binding TUs on
+Windows only; everywhere else the system-include exemption carries it.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+harrism
+mentioned this pull request
+Sep 9, 2026
+CI: pin nanobind to 2.5.0 on Windows
+#2317
+Merged
+Revert "NanoVDB: suppress nanobind's header diagnostics for Windows C…
+…
+31ed89c
+```
+…UDA binding builds"
+
+This reverts commit 2064cd9.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+swahtz
+reviewed
+Sep 9, 2026
+View reviewed changes
+Comment thread
+nanovdb/nanovdb/cuda/HandleStorage.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+pendingchanges/nanovdb.txt
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+harrism
+added 4 commits
+September 9, 2026 11:06
+Merge remote-tracking branch 'upstream/master' into nanovdb-dual-buff…
+…
+2e48923
+```
+…er-deprecation
+```
+NanoVDB: refresh the DeviceBuffer deprecation release note
+…
+7f94557
+```
+The note still described transfers as running a validation kernel and
+belonging in CUDA translation units, which the metadata-adopting copyTo
+made false; it now matches the header documentation.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+NanoVDB: validate the whole grid chain when a handle is built from ho…
+…
+8b20c01
+```
+…st bytes
+
+The host-buffer constructor only checked the first header's magic before
+copying metadata out of the chain, so a header claiming a grid larger
+than its allocation, a wrong grid index, or more grids than the buffer
+holds produced a handle whose metadata was trusted downstream - and,
+since cuda::copyTo adopts a source handle's metadata instead of
+re-parsing on the device, such a handle could now cross to the device
+without the rejection the device parse used to provide.
+
+Host construction now runs the same chain validation the device parse
+performs: every header must be valid, carry its expected index and the
+chain's total count, and fit inside the buffer. This covers the
+host-buffer constructor and the host side of the dual-buffer
+constructor, which shared the unvalidated copy. Regression test forges
+each header field on a valid grid and expects construction to throw.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+NanoVDB: correct the ManagedResource release note on metadata validation
+…
+895c05e
+```
+A handle over a managed cuda::Buffer validates its metadata through the
+device, since a host parse could race the kernels producing the grid;
+the note said it parsed on the host.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+```
+harrism
+mentioned this pull request
+Sep 9, 2026
+NanoVDB: per-device memory resources for DistributedPointsToGrid and deprecate UnifiedBuffer (CUDA)
+#2319
+Merged
+swahtz
+approved these changes
+Sep 9, 2026
+View reviewed changes
+swahtz
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks for addressing my comments. This is looking great.
+Merge remote-tracking branch 'upstream/master' into nanovdb-dual-buff…
+…
+95ef982
+```
+…er-deprecation
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+# Conflicts:
+#	nanovdb/nanovdb/GridHandle.h
+#	nanovdb/nanovdb/python/PyGridValidator.cc
+#	nanovdb/nanovdb/python/cuda/PyDeviceBuffer.cc
+#	nanovdb/nanovdb/python/cuda/PyDeviceGridHandle.cu
+```
+Hide details
+View details
+swahtz
+merged commit 78eaf15
+into
+AcademySoftwareFoundation:master
+Sep 10, 2026
+16 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+harrism
+mentioned this pull request
+Sep 10, 2026
+NanoVDB: injectable CUDA memory resources — design & roadmap
+#2232
+Open
+3 of 4 tasks
+swahtz
+mentioned this pull request
+Sep 11, 2026
+Finish adopting NanoVDB's injectable CUDA memory resources (openvdb #2232): move grid storage off the dual-space TorchDeviceBuffer
+openvdb/fvdb-core#770
+Closed
+sifakis
+added a commit
+to sifakis/openvdb
+that referenced
+this pull request
+Sep 14, 2026
+ex_connected_components_cuda: name the dual-space buffer DualDeviceBu…
+…
+db65b0b
+```
+…ffer
+
+AcademySoftwareFoundation#2301 deprecated the cuda::DeviceBuffer alias, renaming the implementation to
+cuda::DualDeviceBuffer so the attribute reaches only external code. The example
+still spelled the old name for its grid handle and its retain-mask scratch,
+which is now a deprecation warning and, with NANOVDB_CUDA_WERROR, an error.
+
+Use the new name, matching what every tool's getHandle default was changed to.
+The per-translation-unit suppression pragma that TestNanoVDB.cu and
+TestMemoryResource.cu carry is deliberately not used here: that is for tests
+that keep exercising the deprecated surface on purpose, which this is not.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+swahtz
+mentioned this pull request
+Sep 16, 2026
+NanoVDB Python: restructure to mirror the C++ NanoVDB API
+#2337
+Open
+swahtz
+added a commit
+to swahtz/openvdb
+that referenced
+this pull request
+Sep 16, 2026
+NanoVDB Python: GPU/device bindings (nanovdb.cuda)
+…
+0d3d9b1
+```
+Relayer PR AcademySoftwareFoundation#2225 onto the AcademySoftwareFoundation#2337 branch (feature/nanovdb_python_develop),
+which reintroduces the AcademySoftwareFoundation#2219 API restructure after its revert on master.
+The change set is the squashed net diff of the previous
+feature/nanovdb_python_gpu tip (240b188) against its master merge base.
+
+Adaptations to the AcademySoftwareFoundation#2337 base and to master's buffer deprecations:
+
+- Bind the CUDA types under their non-deprecated names, DualDeviceBuffer
+  and DualUnifiedBuffer (AcademySoftwareFoundation#2301, AcademySoftwareFoundation#2319). The Python API is unchanged; the
+  single-space redesign tracked in AcademySoftwareFoundation#2232 is a separate decision.
+- Keep the nanovdb.cuda.DeviceBuffer class, which AcademySoftwareFoundation#2337 unbound as a
+  zero-method type: here it carries from_external, recordUse and the
+  CAI / DLPack interop and is the return type of tools.cuda.meshToGrid.
+- Replace the removed tools.createOnIndexGrid with
+  tools.createNanoGridOnIndex in examples, tests and docstrings.
+- Use the callPyBuildT dispatcher from PyBuildTypes.h for deviceGrid(n).
+- Follow AcademySoftwareFoundation#2305 on the device side: nanovdb.cuda.createDeviceNodeManager
+  returns the typed device NodeManager directly and the
+  DeviceNodeManagerHandle class with its mgr() hop is gone. The owning
+  C++ handle lives in an nb::capsule behind reference_internal, and
+  keep_alive<0,1> still ties the manager to the source device grid.
+- Keep the leafValues() camelCase name and AcademySoftwareFoundation#2337's stride static_assert;
+  rename the remaining leaf_values / log2_block_width mentions.
+- Skip the compile_options tests when importing the in-tree extension;
+  the helper is attached by the wheel's nanovdb/__init__.py.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+added a commit
+to swahtz/openvdb
+that referenced
+this pull request
+Sep 16, 2026
+NanoVDB Python: GPU/device bindings (nanovdb.cuda)
+…
+50a4b53
+```
+Relayer PR AcademySoftwareFoundation#2225 onto the AcademySoftwareFoundation#2337 branch (feature/nanovdb_python_develop),
+which reintroduces the AcademySoftwareFoundation#2219 API restructure after its revert on master.
+The change set is the squashed net diff of the previous
+feature/nanovdb_python_gpu tip (240b188) against its master merge base.
+
+Adaptations to the AcademySoftwareFoundation#2337 base and to master's buffer deprecations:
+
+- Bind the CUDA types under their non-deprecated names, DualDeviceBuffer
+  and DualUnifiedBuffer (AcademySoftwareFoundation#2301, AcademySoftwareFoundation#2319). The Python API is unchanged; the
+  single-space redesign tracked in AcademySoftwareFoundation#2232 is a separate decision.
+- Keep the nanovdb.cuda.DeviceBuffer class, which AcademySoftwareFoundation#2337 unbound as a
+  zero-method type: here it carries from_external, recordUse and the
+  CAI / DLPack interop and is the return type of tools.cuda.meshToGrid.
+- Replace the removed tools.createOnIndexGrid with
+  tools.createNanoGridOnIndex in examples, tests and docstrings.
+- Use the callPyBuildT dispatcher from PyBuildTypes.h for deviceGrid(n).
+- Follow AcademySoftwareFoundation#2305 on the device side: nanovdb.cuda.createDeviceNodeManager
+  returns the typed device NodeManager directly and the
+  DeviceNodeManagerHandle class with its mgr() hop is gone. The owning
+  C++ handle lives in an nb::capsule behind reference_internal, and
+  keep_alive<0,1> still ties the manager to the source device grid.
+- Keep the leafValues() camelCase name and AcademySoftwareFoundation#2337's stride static_assert;
+  rename the remaining leaf_values / log2_block_width mentions.
+- Skip the compile_options tests when importing the in-tree extension;
+  the helper is attached by the wheel's nanovdb/__init__.py.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+added a commit
+to swahtz/openvdb
+that referenced
+this pull request
+Sep 16, 2026
+NanoVDB Python: GPU/device bindings (nanovdb.cuda)
+…
+87c1624
+```
+Relayer PR AcademySoftwareFoundation#2225 onto the AcademySoftwareFoundation#2337 branch (feature/nanovdb_python_develop),
+which reintroduces the AcademySoftwareFoundation#2219 API restructure after its revert on master.
+The change set is the squashed net diff of the previous
+feature/nanovdb_python_gpu tip (240b188) against its master merge base.
+
+Adaptations to the AcademySoftwareFoundation#2337 base and to master's buffer deprecations:
+
+- Bind the CUDA types under their non-deprecated names, DualDeviceBuffer
+  and DualUnifiedBuffer (AcademySoftwareFoundation#2301, AcademySoftwareFoundation#2319). The Python API is unchanged; the
+  single-space redesign tracked in AcademySoftwareFoundation#2232 is a separate decision.
+- Keep the nanovdb.cuda.DeviceBuffer class, which AcademySoftwareFoundation#2337 unbound as a
+  zero-method type: here it carries from_external, recordUse and the
+  CAI / DLPack interop and is the return type of tools.cuda.meshToGrid.
+- Replace the removed tools.createOnIndexGrid with
+  tools.createNanoGridOnIndex in examples, tests and docstrings.
+- Use the callPyBuildT dispatcher from PyBuildTypes.h for deviceGrid(n).
+- Follow AcademySoftwareFoundation#2305 on the device side: nanovdb.cuda.createDeviceNodeManager
+  returns the typed device NodeManager directly and the
+  DeviceNodeManagerHandle class with its mgr() hop is gone. The owning
+  C++ handle lives in an nb::capsule behind reference_internal, and
+  keep_alive<0,1> still ties the manager to the source device grid.
+- Keep the leafValues() camelCase name and AcademySoftwareFoundation#2337's stride static_assert;
+  rename the remaining leaf_values / log2_block_width mentions.
+- Skip the compile_options tests when importing the in-tree extension;
+  the helper is attached by the wheel's nanovdb/__init__.py.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+added a commit
+to swahtz/openvdb
+that referenced
+this pull request
+Sep 16, 2026
+NanoVDB Python: GPU/device bindings (nanovdb.cuda)
+…
+80e0676
+```
+Relayer PR AcademySoftwareFoundation#2225 onto the AcademySoftwareFoundation#2337 branch (feature/nanovdb_python_develop),
+which reintroduces the AcademySoftwareFoundation#2219 API restructure after its revert on master.
+The change set is the squashed net diff of the previous
+feature/nanovdb_python_gpu tip (240b188) against its master merge base.
+
+Adaptations to the AcademySoftwareFoundation#2337 base and to master's buffer deprecations:
+
+- Bind the CUDA types under their non-deprecated names, DualDeviceBuffer
+  and DualUnifiedBuffer (AcademySoftwareFoundation#2301, AcademySoftwareFoundation#2319). The Python API is unchanged; the
+  single-space redesign tracked in AcademySoftwareFoundation#2232 is a separate decision.
+- Keep the nanovdb.cuda.DeviceBuffer class, which AcademySoftwareFoundation#2337 unbound as a
+  zero-method type: here it carries from_external, recordUse and the
+  CAI / DLPack interop and is the return type of tools.cuda.meshToGrid.
+- Replace the removed tools.createOnIndexGrid with
+  tools.createNanoGridOnIndex in examples, tests and docstrings.
+- Use the callPyBuildT dispatcher from PyBuildTypes.h for deviceGrid(n).
+- Follow AcademySoftwareFoundation#2305 on the device side: nanovdb.cuda.createDeviceNodeManager
+  returns the typed device NodeManager directly and the
+  DeviceNodeManagerHandle class with its mgr() hop is gone. The owning
+  C++ handle lives in an nb::capsule behind reference_internal, and
+  keep_alive<0,1> still ties the manager to the source device grid.
+- Keep the leafValues() camelCase name and AcademySoftwareFoundation#2337's stride static_assert;
+  rename the remaining leaf_values / log2_block_width mentions.
+- Skip the compile_options tests when importing the in-tree extension;
+  the helper is attached by the wheel's nanovdb/__init__.py.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+added a commit
+to swahtz/openvdb
+that referenced
+this pull request
+Sep 16, 2026
+NanoVDB Python: GPU/device bindings (nanovdb.cuda)
+…
+a6df000
+```
+Relayer PR AcademySoftwareFoundation#2225 onto the AcademySoftwareFoundation#2337 branch (feature/nanovdb_python_develop),
+which reintroduces the AcademySoftwareFoundation#2219 API restructure after its revert on master.
+The change set is the squashed net diff of the previous
+feature/nanovdb_python_gpu tip (240b188) against its master merge base.
+
+Adaptations to the AcademySoftwareFoundation#2337 base and to master's buffer deprecations:
+
+- Bind the CUDA types under their non-deprecated names, DualDeviceBuffer
+  and DualUnifiedBuffer (AcademySoftwareFoundation#2301, AcademySoftwareFoundation#2319). The Python API is unchanged; the
+  single-space redesign tracked in AcademySoftwareFoundation#2232 is a separate decision.
+- Keep the nanovdb.cuda.DeviceBuffer class, which AcademySoftwareFoundation#2337 unbound as a
+  zero-method type: here it carries from_external, recordUse and the
+  CAI / DLPack interop and is the return type of tools.cuda.meshToGrid.
+- Replace the removed tools.createOnIndexGrid with
+  tools.createNanoGridOnIndex in examples, tests and docstrings.
+- Use the callPyBuildT dispatcher from PyBuildTypes.h for deviceGrid(n).
+- Follow AcademySoftwareFoundation#2305 on the device side: nanovdb.cuda.createDeviceNodeManager
+  returns the typed device NodeManager directly and the
+  DeviceNodeManagerHandle class with its mgr() hop is gone. The owning
+  C++ handle lives in an nb::capsule behind reference_internal, and
+  keep_alive<0,1> still ties the manager to the source device grid.
+- Keep the leafValues() camelCase name and AcademySoftwareFoundation#2337's stride static_assert;
+  rename the remaining leaf_values / log2_block_width mentions.
+- Skip the compile_options tests when importing the in-tree extension;
+  the helper is attached by the wheel's nanovdb/__init__.py.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+added a commit
+to swahtz/openvdb
+that referenced
+this pull request
+Sep 16, 2026
+NanoVDB Python: GPU/device bindings (nanovdb.cuda)
+…
+b3cfba1
+```
+Relayer PR AcademySoftwareFoundation#2225 onto the AcademySoftwareFoundation#2337 branch (feature/nanovdb_python_develop),
+which reintroduces the AcademySoftwareFoundation#2219 API restructure after its revert on master.
+The change set is the squashed net diff of the previous
+feature/nanovdb_python_gpu tip (240b188) against its master merge base.
+
+Adaptations to the AcademySoftwareFoundation#2337 base and to master's buffer deprecations:
+
+- Bind the CUDA types under their non-deprecated names, DualDeviceBuffer
+  and DualUnifiedBuffer (AcademySoftwareFoundation#2301, AcademySoftwareFoundation#2319). The Python API is unchanged; the
+  single-space redesign tracked in AcademySoftwareFoundation#2232 is a separate decision.
+- Keep the nanovdb.cuda.DeviceBuffer class, which AcademySoftwareFoundation#2337 unbound as a
+  zero-method type: here it carries from_external, recordUse and the
+  CAI / DLPack interop and is the return type of tools.cuda.meshToGrid.
+- Replace the removed tools.createOnIndexGrid with
+  tools.createNanoGridOnIndex in examples, tests and docstrings.
+- Use the callPyBuildT dispatcher from PyBuildTypes.h for deviceGrid(n).
+- Follow AcademySoftwareFoundation#2305 on the device side: nanovdb.cuda.createDeviceNodeManager
+  returns the typed device NodeManager directly and the
+  DeviceNodeManagerHandle class with its mgr() hop is gone. The owning
+  C++ handle lives in an nb::capsule behind reference_internal, and
+  keep_alive<0,1> still ties the manager to the source device grid.
+- Keep the leafValues() camelCase name and AcademySoftwareFoundation#2337's stride static_assert;
+  rename the remaining leaf_values / log2_block_width mentions.
+- Skip the compile_options tests when importing the in-tree extension;
+  the helper is attached by the wheel's nanovdb/__init__.py.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+added a commit
+to swahtz/openvdb
+that referenced
+this pull request
+Sep 17, 2026
+NanoVDB Python: GPU/device bindings (nanovdb.cuda)
+…
+c157510
+```
+Relayer PR AcademySoftwareFoundation#2225 onto the AcademySoftwareFoundation#2337 branch (feature/nanovdb_python_develop),
+which reintroduces the AcademySoftwareFoundation#2219 API restructure after its revert on master.
+The change set is the squashed net diff of the previous
+feature/nanovdb_python_gpu tip (240b188) against its master merge base.
+
+Adaptations to the AcademySoftwareFoundation#2337 base and to master's buffer deprecations:
+
+- Bind the CUDA types under their non-deprecated names, DualDeviceBuffer
+  and DualUnifiedBuffer (AcademySoftwareFoundation#2301, AcademySoftwareFoundation#2319). The Python API is unchanged; the
+  single-space redesign tracked in AcademySoftwareFoundation#2232 is a separate decision.
+- Keep the nanovdb.cuda.DeviceBuffer class, which AcademySoftwareFoundation#2337 unbound as a
+  zero-method type: here it carries from_external, recordUse and the
+  CAI / DLPack interop and is the return type of tools.cuda.meshToGrid.
+- Replace the removed tools.createOnIndexGrid with
+  tools.createNanoGridOnIndex in examples, tests and docstrings.
+- Use the callPyBuildT dispatcher from PyBuildTypes.h for deviceGrid(n).
+- Follow AcademySoftwareFoundation#2305 on the device side: nanovdb.cuda.createDeviceNodeManager
+  returns the typed device NodeManager directly and the
+  DeviceNodeManagerHandle class with its mgr() hop is gone. The owning
+  C++ handle lives in an nb::capsule behind reference_internal, and
+  keep_alive<0,1> still ties the manager to the source device grid.
+- Keep the leafValues() camelCase name and AcademySoftwareFoundation#2337's stride static_assert;
+  rename the remaining leaf_values / log2_block_width mentions.
+- Skip the compile_options tests when importing the in-tree extension;
+  the helper is attached by the wheel's nanovdb/__init__.py.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+added a commit
+to swahtz/openvdb
+that referenced
+this pull request
+Sep 17, 2026
+NanoVDB Python: GPU/device bindings (nanovdb.cuda)
+…
+12364c8
+```
+Relayer PR AcademySoftwareFoundation#2225 onto the AcademySoftwareFoundation#2337 branch (feature/nanovdb_python_develop),
+which reintroduces the AcademySoftwareFoundation#2219 API restructure after its revert on master.
+The change set is the squashed net diff of the previous
+feature/nanovdb_python_gpu tip (240b188) against its master merge base.
+
+Adaptations to the AcademySoftwareFoundation#2337 base and to master's buffer deprecations:
+
+- Bind the CUDA types under their non-deprecated names, DualDeviceBuffer
+  and DualUnifiedBuffer (AcademySoftwareFoundation#2301, AcademySoftwareFoundation#2319). The Python API is unchanged; the
+  single-space redesign tracked in AcademySoftwareFoundation#2232 is a separate decision.
+- Keep the nanovdb.cuda.DeviceBuffer class, which AcademySoftwareFoundation#2337 unbound as a
+  zero-method type: here it carries from_external, recordUse and the
+  CAI / DLPack interop and is the return type of tools.cuda.meshToGrid.
+- Replace the removed tools.createOnIndexGrid with
+  tools.createNanoGridOnIndex in examples, tests and docstrings.
+- Use the callPyBuildT dispatcher from PyBuildTypes.h for deviceGrid(n).
+- Follow AcademySoftwareFoundation#2305 on the device side: nanovdb.cuda.createDeviceNodeManager
+  returns the typed device NodeManager directly and the
+  DeviceNodeManagerHandle class with its mgr() hop is gone. The owning
+  C++ handle lives in an nb::capsule behind reference_internal, and
+  keep_alive<0,1> still ties the manager to the source device grid.
+- Keep the leafValues() camelCase name and AcademySoftwareFoundation#2337's stride static_assert;
+  rename the remaining leaf_values / log2_block_width mentions.
+- Skip the compile_options tests when importing the in-tree extension;
+  the helper is attached by the wheel's nanovdb/__init__.py.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+JaeHyunLee94
+pushed a commit
+to sifakis/openvdb
+that referenced
+this pull request
+Sep 27, 2026
+NanoVDB: migrate off the dual-space buffers and deprecate the DeviceB…
+…
+bb679fa
+```
+…uffer name (CUDA) (AcademySoftwareFoundation#2301)
+
+* NanoVDB: let every tool entry point allocate single-space handle storage (CUDA)
+
+The GPU tools build their result handle through the duck-typed static
+BufferT::create(size, pool, device, stream), so a single-space buffer type
+(cuda::Buffer over a memory resource) did not compile at any entry point.
+The new cuda/HandleStorage.h provides the bridge: createDeviceStorage
+allocates through create() for buffers that provide it and through the
+pool buffer's resource otherwise, and deviceStorageData returns the device
+address either way (data() for single-space, deviceData() for dual). The
+PointsToGrid family, TopologyBuilder (serving the topology ops and
+MeshToGrid), IndexToGrid, addBlindData and VoxelBlockManager entry points
+now allocate through the bridge; addBlindData also drops its
+dual-space-only static_assert and orders its allocation on the stream it
+already runs on.
+
+The no-argument GridHandle::copy() now names its default-construction
+requirement in a static_assert instead of failing inside the pool
+construction, backed by a BufferIsDefaultConstructible detector beside the
+other trait companions.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: add cuda::ManagedResource with both-space handle support (CUDA)
+
+ManagedResource is a synchronous memory resource over cudaMallocManaged,
+the migration target for UnifiedBuffer users: its allocations are valid on
+the host and the device, so a handle over cuda::Buffer<std::byte,
+ManagedResource> parses its metadata on the host and exposes both accessor
+families over the same allocation. The classification comes from a new
+DEVICE_ACCESSIBLE resource marker (detected by
+is_device_accessible_resource and forwarded by ResourceRef and
+AsyncFromSync, like HOST_ACCESSIBLE): a buffer whose resource is
+host-accessible AND device-accessible sets both hasHostSingle and
+hasDeviceSingle, and the handle gates now distinguish device-only
+single-space buffers (device metadata parse, host accessors are
+compile-time errors) from both-space ones (host parse, everything
+available). GridHandle's write/read and NodeManagerHandle follow the same
+rule.
+
+Also adds the four buffer/resource headers missing from
+NANOVDB_INCLUDE_CUDA_FILES, so installed trees ship cuda/Buffer.h and
+cuda/PinnedResource.h alongside the new ManagedResource.h and
+HandleStorage.h.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: split TopologyBuilder's dual-space staging into explicit host and device buffers (CUDA)
+
+The builder's two remaining dual-space members carried a host side and a
+device side inside one DeviceBuffer: mProcessedRoot (the consumer tools
+build the new root topology on the host, then upload) and mData (the
+builder parameters, written on the host and uploaded once). They are now
+explicit: pinned host staging (so the uploads stay asynchronous, matching
+the DeviceBuffer behavior) plus a device buffer allocated through the
+builder's injected resource, with allocateProcessedRoot /
+uploadProcessedRoot / uploadData carrying the mechanics once instead of
+per tool. The six consumers (the five topology ops and MeshToGrid) each
+lose their DeviceBuffer::create + deviceUpload pair, and the early release
+in the empty-grid path frees both sides through the new members.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: move MeshToGrid's device scratch onto resource-backed buffers (CUDA)
+
+MeshToGrid predated the builder scratch conversions, so its three device
+members and twelve local scratch buffers still allocated through the
+dual-space DeviceBuffer, paying for host mirrors nothing read and
+bypassing the injected resource. They are now
+cuda::Buffer<std::byte, ResourceRef<ResourceT>> like the other builders,
+allocated through the resource the class already takes (TopologyBuilder
+gains a public ref() accessor for consumers sharing its instance), with
+early releases through destroy() on the retained stream.
+
+The UDF sidecar buffer was hard-coded to DeviceBuffer, so the
+SidecarBufferT template parameter never compiled with any other type; it
+now allocates through the entry-point bridge, honoring the caller's
+sidecar prototype buffer.
+
+Two ride-alongs from review: PointsToGrid's storage null-check message now
+names the reachable failure (a buffer type producing no device memory)
+instead of allocation failure, and IndexToGrid's commented-out
+synchronization line is deleted.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: SignedFloodFill's root pass onto managed-resource buffers (CUDA)
+
+The root-tile scanline pass interleaves host access with device reads of
+the same bytes, which is what UnifiedBuffer provided; it now uses
+cuda::Buffer over ManagedResource. One behavioral difference: the old
+buffer reserved virtual address space and grew in place, so pointers
+survived resize; the new buffer reallocates on growth past the 64 reserved
+tiles, and the tree pointer is re-derived after the resize.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: migrate the CUDA examples onto explicit host-device grid transfers (CUDA)
+
+The examples taught the dual-space workflow: build or read into a
+DeviceBuffer handle, deviceUpload, use both sides, deviceDownload. All 15
+CUDA examples now hold the grid in a host handle and move it with
+cuda::copyTo -- the migration story external code will follow. Device-side
+image and particle scratch becomes cuda::Buffer with explicit copies for
+results, and voxels_to_grid demonstrates the full single-space flow: the
+builder allocates its result directly in a cuda::Buffer, kernels use the
+device handle, and copyTo brings the grid back for validation. Streams are
+scoped to outlive the device handles whose buffers free on them.
+
+Three pre-existing example defects fixed along the way: index_grid passed
+its host grid where its kernel launcher expects the device grid, so the
+example's GPU output was never produced on the GPU; nodemanager used the
+deprecated cudaCreateNodeManager shim through an output parameter, now the
+resource-taking overload; and a dead #if 0 alternative is deleted.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: deprecate the dual-space DeviceBuffer name (CUDA)
+
+The class is renamed to DualDeviceBuffer -- a transitional implementation
+name -- and the public DeviceBuffer spelling becomes a deprecated alias
+whose message carries the migration recipe. The GPU tools' buffer-type
+defaults name the implementation directly, so code that relies on the
+defaults compiles without any warning until the defaults change at
+removal; only code that names DeviceBuffer is warned, and it is the code
+that has an action available. The legacy CudaDeviceBuffer alias retargets
+to the implementation so a use fires one warning, not two. The python
+bindings keep their surface by naming the implementation internally, and
+the NanoVDB tests keep exercising the dual-space paths -- which still
+ship and need the coverage -- under translation-unit-local suppression
+with a comment stating the policy.
+
+cuda::Buffer's stream contract now documents the four-line event recipe
+for handing buffer contents to another stream, which replaces the
+event tracking DeviceBuffer carried. Also migrates the last device-only
+DeviceBuffer scratch in the dilate example onto cuda::Buffer, and fixes a
+pre-existing signature mismatch in the raytrace_level_set OpenVDB
+comparison path that only an OpenVDB-enabled build would have hit.
+
+UnifiedBuffer intentionally keeps its name for now: its replacement story
+(ManagedResource plus the DistributedPointsToGrid re-plumb) lands in the
+multi-GPU follow-up in the same release, and the alias treatment applies
+there identically.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: keep CUDA headers out of the examples' host files (CUDA)
+
+The topology example drivers are plain .cpp translation units, and
+including cuda/GridHandle.cuh there fails on every host compiler; they
+route transfers through helpers in their _kernels.cu companions and hold
+the returned handles through host-safe headers. Also fixes a pre-existing
+signature mismatch in raytrace_level_set's OpenVDB comparison path, owns
+the voxel example's input arrays as cuda::Buffer, and moves the multi-GPU
+example onto the implementation name it migrates away from with
+UnifiedBuffer.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: cuda::copyTo adopts the source handle's metadata and becomes host-callable (CUDA)
+
+A handle-to-handle copy re-validated bytes it had just copied from an
+already-validated handle: copyTo ended by constructing the destination
+handle, whose single-space constructor runs the chain-validation kernel.
+The metadata was validated once, when the source handle was constructed
+from raw bytes -- so copyTo now adopts it, through a HandleFactory that is
+the one gateway to building a handle from trusted metadata. With no kernel
+in the transfer path, copyTo (and the storage helpers) move to the
+host-includable cuda/HandleStorage.h: a plain C++ translation unit linked
+against the CUDA runtime can transfer grid handles directly.
+
+That deletes the transfer-helper pattern from every example -- the eight
+host-main programs call copyTo themselves and their .cu companions lose
+their uploadGrid shims -- and removes the metadata scratch allocation and
+two synchronizing round trips from every device-destination transfer. The
+validation kernel keeps guarding the real trust boundary: constructing a
+handle from raw bytes.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: review-round polish (CUDA)
+
+From the pre-publication review: trailing comments this work added get a
+space before the slashes (closing-brace labels keep the surrounding
+files' form); a comment narrating the language rather than the library is
+deleted; the DualDeviceBuffer class doc states why the type is renamed
+while its header is not; and the openvdb-to-nanovdb example's host-side
+print function, deleted one line too eagerly by the helper-removal pass,
+is restored.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: correct DeviceBuffer.h's doxygen file tag
+
+The \file tag named DualDeviceBuffer.h, a file that does not exist:
+the header deliberately keeps its long-standing name and include path,
+as its own class note explains. A \file tag that does not match the
+actual file name detaches doxygen's file page from the header.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: synchronize copyTo for host-readable managed destinations (CUDA)
+
+cuda::copyTo documents that a host-readable destination synchronizes
+before returning, but the sync condition tested hasDeviceSingle alone,
+so a ManagedResource destination - host-readable and device-accessible
+from the same allocation - returned with the copy still in flight and
+host reads through the handle raced it. The condition now keys on
+host readability, so pinned and managed destinations synchronize and
+device-only destinations stay stream-ordered.
+
+The copy direction is now cudaMemcpyDefault: every pointer involved is
+a UVA address, so the runtime infers the direction, as the distributed
+builder's cross-device copies already rely on.
+
+The stream-safety warning now states the source-lifetime contract for
+sources without a retained stream: a synchronous-resource (pinned)
+source frees immediately on destruction, unordered against the still-
+asynchronous copy, so the caller synchronizes the stream before
+destroying it.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: name the device-only buffer predicate and refresh transfer docs
+
+BufferIsDeviceOnly names the hasDeviceSingle-and-not-hasHostSingle
+predicate that gates the handles' host accessors, replacing its 19
+hand-spelled repetitions across the handle headers.
+
+The DeviceBuffer deprecation text predated the metadata-adopting
+copyTo: it claimed transfers run a validation kernel and belong in CUDA
+translation units. copyTo is kernel-free and host-callable, and lives
+in cuda/HandleStorage.h - the doc, the alias message, and
+GridHandle::copy(pool)'s error message now say so (the latter pointed
+at copy(), whose error then pointed at copyTo; it now names the
+destination directly). Also drops a duplicated include.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: point copy()'s cross-space error at copyTo's actual header
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: drop a comment restating cudaMemcpyDefault's contract
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: exempt nanobind's headers from the CUDA warnings-as-errors gate
+
+nanobind 3.0 (now in vcpkg, so on the Windows CI runners) has headers
+that trip compiler diagnostics in the python bindings' CUDA translation
+units - nvcc front-end unused-variable diagnostics on Windows, host-pass
+attribute warnings elsewhere - and --Werror=all-warnings turns them into
+build failures. Third-party code isn't ours to fix: the binding target
+hands nvcc the nanobind include as a system directory, which both the
+nvcc front end and the forwarded host compilation exempt from
+diagnostics. Passed as a raw option because the Visual Studio generator
+flattens CMake-level SYSTEM include directories to ordinary ones for
+CUDA sources. The bindings' own code stays under the warnings gate.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: suppress nanobind's header diagnostics for Windows CUDA binding builds
+
+The -isystem exemption holds for nvcc with a GCC/Clang host, but with an
+MSVC host nvcc confers no system-header status (nanobind's headers also
+arrive via its own -I, which wins there), so the Windows CI still failed
+on nanobind's AcademySoftwareFoundation#177/AcademySoftwareFoundation#550 diagnostics under --Werror=all-warnings. Those
+two diagnostics are now suppressed by number for the binding TUs on
+Windows only; everywhere else the system-include exemption carries it.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* Revert "NanoVDB: suppress nanobind's header diagnostics for Windows CUDA binding builds"
+
+This reverts commit 2064cd9.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: refresh the DeviceBuffer deprecation release note
+
+The note still described transfers as running a validation kernel and
+belonging in CUDA translation units, which the metadata-adopting copyTo
+made false; it now matches the header documentation.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: validate the whole grid chain when a handle is built from host bytes
+
+The host-buffer constructor only checked the first header's magic before
+copying metadata out of the chain, so a header claiming a grid larger
+than its allocation, a wrong grid index, or more grids than the buffer
+holds produced a handle whose metadata was trusted downstream - and,
+since cuda::copyTo adopts a source handle's metadata instead of
+re-parsing on the device, such a handle could now cross to the device
+without the rejection the device parse used to provide.
+
+Host construction now runs the same chain validation the device parse
+performs: every header must be valid, carry its expected index and the
+chain's total count, and fit inside the buffer. This covers the
+host-buffer constructor and the host side of the dual-buffer
+constructor, which shared the unvalidated copy. Regression test forges
+each header field on a valid grid and expects construction to throw.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+* NanoVDB: correct the ManagedResource release note on metadata validation
+
+A handle over a managed cuda::Buffer validates its metadata through the
+device, since a host parse could race the kernels producing the grid;
+the note said it parsed on the host.
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+
+---------
+
+Signed-off-by: Mark Harris <mharris@nvidia.com>
+Co-authored-by: Claude Fable 5 <noreply@anthropic.com>
+```
+JaeHyunLee94
+pushed a commit
+to sifakis/openvdb
+that referenced
+this pull request
+Sep 27, 2026
+ex_connected_components_cuda: name the dual-space buffer DualDeviceBu…
+…
+000a754
+```
+…ffer
+
+AcademySoftwareFoundation#2301 deprecated the cuda::DeviceBuffer alias, renaming the implementation to
+cuda::DualDeviceBuffer so the attribute reaches only external code. The example
+still spelled the old name for its grid handle and its retain-mask scratch,
+which is now a deprecation warning and, with NANOVDB_CUDA_WERROR, an error.
+
+Use the new name, matching what every tool's getHandle default was changed to.
+The per-translation-unit suppression pragma that TestNanoVDB.cu and
+TestMemoryResource.cu carry is deliberately not used here: that is for tests
+that keep exercising the deprecated surface on purpose, which this is not.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+This was referenced Oct 16, 2026
+NanoVDB: merge and split single-space device grid handles, and deprecate the dual overloads (CUDA)
+#2370
+Merged
+NanoVDB: deprecate the dual-space handle transfers (CUDA)
+#2378
+Merged
+sifakis
+added a commit
+to sifakis/openvdb
+that referenced
+this pull request
+Oct 23, 2026
+ex_connected_components_cuda: name the dual-space buffer DualDeviceBu…
+…
+a215745
+```
+…ffer
+
+AcademySoftwareFoundation#2301 deprecated the cuda::DeviceBuffer alias, renaming the implementation to
+cuda::DualDeviceBuffer so the attribute reaches only external code. The example
+still spelled the old name for its grid handle and its retain-mask scratch,
+which is now a deprecation warning and, with NANOVDB_CUDA_WERROR, an error.
+
+Use the new name, matching what every tool's getHandle default was changed to.
+The per-translation-unit suppression pragma that TestNanoVDB.cu and
+TestMemoryResource.cu carry is deliberately not used here: that is for tests
+that keep exercising the deprecated surface on purpose, which this is not.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+kmuseth
+pushed a commit
+that referenced
+this pull request
+Oct 26, 2026
+NanoVDB: CUDA connected-components labeling for ValueOnIndex grids (#…
+…
+7d2d36b
+```
+…2261)
+
+* nanovdb: add CUDA ConnectedComponents labeling for ValueOnIndex grids
+
+Add nanovdb::tools::cuda::ConnectedComponents, which labels the active voxels
+of a NanoVDB ValueOnIndex grid by 6-connectivity: two active voxels share a
+label iff they are connected through a path of adjacent active voxels. The
+public getVoxelLabelsAndCount() returns a per-active-voxel dense component id
+in [0,N) plus the component count N.
+
+The implementation is hierarchical:
+  - per-leaf Shiloach-Vishkin union-find in shared memory (one block per leaf),
+    yielding each leaf-local component's voxel Mask<3> and six face bitmasks;
+  - cross-leaf edge detection by intersecting touching face masks over +X/+Y/+Z
+    neighbours;
+  - a global lock-free union-find over the resulting component graph.
+
+Also add the ex_connected_components_cuda example (rasterize an .obj to a
+narrow band via MeshToGrid, drop the sqrt(3)/2-voxel surface shell via
+PruneGrid, then label; a CPU union-find oracle verifies the result) and a
+ConnectedComponentsMultiSphere unit test.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ex_connected_components_cuda: merge multiple OBJs + --discard-surface-voxels
+
+Accept one or more .obj files (concatenated into a single mesh) and add a
+--discard-surface-voxels switch: by default label the full narrow band (one
+component per closed surface), or prune the sqrt(3)/2-voxel barrier shell first
+when the switch is given. --voxel-size / --band-width replace the old positional args.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: JaeHyun Lee <jaehlee@nvidia.com>
+
+* nanovdb: match the shared CALL_CUBS macro idiom in ConnectedComponents
+
+Use the same #ifndef-define / #ifdef-#undef pattern as TopologyBuilder.cuh
+and PointsToGrid.cuh so the helper macro neither leaks nor collides.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* nanovdb: replace unicode characters with ASCII in ConnectedComponents
+
+Comment-only: +/-, x, ->, - in place of the plus-minus, times, arrow, and
+em-dash glyphs.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* nanovdb: group the leaf-local SV primitives into a LeafUnionFind class
+
+Scope neighborMin/hook/compress and the INACTIVE sentinel under
+LeafUnionFind, dropping the redundant cc prefixes, and add solve() so the
+warm-up plus convergence loop lives in one place instead of being copied
+into both leaf functors.
+
+Also drop the single-use ParentsT alias and LEAF_DIM constant, and the
+redundant `current` argument of neighborMin (it was always parents[n]).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ConnectedComponents: bound the leaf union-find's worst case
+
+The per-leaf loop runs Liu & Tarjan's algorithm P, which has no proven
+step bound, so its 64-round cap rested on a heuristic. Restrict the hook
+to root parents after SwitchToRootAfter rounds, which turns the tail into
+their algorithm R and its O(lg n) bound. Leaves are observed to converge
+in far fewer rounds than the switch, so it normally never runs. The
+warm-up gains a fourth compress: leaving the forest flat rather than
+merely shallow is what keeps the root-restricted hook free.
+
+A leaf that did exhaust the cap was abandoned mid-solve and reported too
+many components, which nothing downstream could tell from genuine
+fragmentation. solve() now reports whether it converged, and leaves that
+did not are counted and warned about on stderr. The counter is read back
+alongside the component offsets, so it costs no extra synchronization.
+
+Also from review: spell out the L/N suffixes in the cross-leaf enumerator
+as Leaf/Neighbor, document the two cross-leaf edge functors and the
+unnamed callback parameters, and note that the primitives' `changed` flag
+lives in shared memory.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Signed-off-by: JaeHyun Lee <jaehlee@nvidia.com>
+
+* nanovdb: clarify the LeafUnionFind primitive comments
+
+Name each primitive by its union-find operation and state the Liu &
+Tarjan correspondence separately: hook is parent-connect, or
+parent-root-connect when rootsOnly is set, and compress is shortcut.
+Previously the summary lines said "SV" while the detail below them used
+the paper's vocabulary. The rootsOnly @PARAM no longer carries the
+naming and now only explains why the restriction buys monotonicity.
+
+Note in compress that parent[v] <- parent[parent[v]] is pointer jumping
+applied to every node at once, so it is not mistaken for the sequential
+path halving it resembles.
+
+Also drop a forward pointer to the cross-leaf stage from the class
+comment, drop an orphan "Phase A" label in hook (there is no phase B),
+and split an overloaded comment in compress so the branch condition and
+the grandparent read are documented separately.
+
+Comment-only; no functional change.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ConnectedComponents: allocate device scratch from an injected resource
+
+Give ConnectedComponents a ResourceT template parameter, defaulted to
+cuda::DeviceResource, and move its device buffers from the dual
+cuda::DeviceBuffer onto the single-space cuda::Buffer, borrowing the injected
+resource through a ResourceRef so all traffic reaches the caller's instance
+rather than a copy.
+
+None of the buffers is read on the host, so none needs DeviceBuffer's host
+pointer or per-device array. Typing each by its element removes fifteen casts,
+and sizes are now counts of elements rather than hand-computed byte products.
+
+Two defects go away with the representation rather than by hand:
+
+  - DeviceBuffer::create(bytes, nullptr, false) bound the (int device) overload,
+    because the (bool host) overload has no default for its stream argument. The
+    false was therefore a device id, pinning every buffer to device 0 and the
+    null stream instead of the current device and mStream. cuda::Buffer takes no
+    device argument at all and its stream is a mandatory constructor parameter.
+
+  - The rank buffer in processVoxelLabels was freed at scope exit on the null
+    stream while the voxel-label scatter was still reading it on mStream, which
+    is safe only for a blocking stream. cuda::Buffer retains its allocation
+    stream and frees on that, so the free is ordered behind the scatter.
+
+getVoxelLabelsAndCount now returns the label buffer by value instead of a raw
+pointer into a member. Ownership passes to the caller, so the labels no longer
+require the operator to outlive them -- only the caller's own resource -- and
+the buffer carries its element count and frees itself on its retained stream.
+The stream is synchronized before returning, so the contents are complete.
+
+Add three tests: the injected resource observes every allocation with no leak,
+the labels stay valid after the operator is destroyed, and the pipeline runs on
+a non-blocking stream, a path the suite did not exercise before.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ConnectedComponents: name the component-label type and bound its range
+
+The per-voxel labels, the dense count N, and the global slots stored in
+CrossLeafEdge were each spelled uint32_t independently. Give them one
+namespace-scope alias, ComponentLabelT, since their capacities provably
+coincide: when every active voxel is isolated no fragments merge, so N equals
+the leaf-local component count K, and neither use can be narrowed relative to
+the other. The two label functors take the type by deduction, so nothing
+outside the class has to name it.
+
+The three cub scans took their item counts as int, which halved the addressable
+range and pinned the scans to 32-bit offsets for no reason: cub deduces its
+offset type from the argument's size, so passing leafCount and K in their
+natural types is a deletion rather than an addition. Measured on a 1M-voxel
+checkerboard, the now 64-bit rank scan costs 0.025 ms of a 4.35 ms pipeline.
+
+That leaves ComponentLabelT as the only thing bounding the addressable range,
+which MaxLeafComponents now states directly. K is carried as uint64_t precisely
+so a value that fails the bound survives to be tested, and it is tested once the
+leaf-local components have been counted -- before any global slot is stored, and
+before N exists. Past that point every narrower type is known to fit, which is
+what lets N share the label type.
+
+Also add the missing timer around the rank scan, the largest of the three, and
+an alignment assert for the word-sized scratch.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* nanovdb: tighten ConnectedComponents types, scoping and docs
+
+Complete the ComponentLabelT unification. The enumerator that produces the
+global slots still spelled them uint32_t, so widening the alias would have
+raised MaxComponentCount past 2^32 while the cast kept truncating, leaving
+the bound and the cast to disagree silently. Name the alias at the cast and
+in both consuming callbacks, and record at the cast itself why narrowing
+from the uint64_t offsets is safe, since the check that licenses it lives in
+another function.
+
+Move LeafNeighborTap into cc_detail. Every use of it in code is already
+there, and at namespace scope it placed six very generic names -- minusX,
+plusX, minusY, plusY, minusZ, plusZ -- into the namespace shared by every
+CUDA tool.
+
+Rename MaxLeafComponents to MaxComponentCount: "leaf-local" reads as a
+per-leaf ceiling, which is 256, rather than the grid-wide aggregate the
+constant actually bounds. Its comment also leaned on K and N, neither of
+which is defined at that point, so cut it to one line; the reasoning it
+carried is already stated at the check.
+
+Describe the returned labels as a per-voxel sidecar instead of spelling out
+its length and leaf.getValue(n) indexing, both of which the term implies.
+Say that the resource is needed only to free the buffer, not to read it, and
+that the default one has program lifetime; as written it read as a standing
+obligation on the caller.
+
+Finally, note that no scratch buffer is released before the operator is
+destroyed, though the face masks and the cross-leaf edges each die a stage
+early.
+
+Comment and naming only; no functional change.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ConnectedComponents: put each stage's device helpers above the method that drives them
+
+The cc_detail helpers were grouped partly by pipeline stage and partly by
+mechanism: a "small element-wise functors driven by lambdaKernel" block cut
+across three stages, which left UpcastCountsFunctor -- a stage 1 helper, feeding
+the per-leaf offset scan -- among the stage 3 label functors, some 400 lines
+from its only caller. All four stages' helpers also preceded all four drivers,
+so reading one stage meant jumping between two distant parts of the file.
+
+Group strictly by stage and reopen cc_detail once per stage, so each stage's
+device code sits directly above the member function that launches it. LEAF_SIZE
+and LeafNeighborTap stay in a shared preamble, being used by more than one
+stage. The rationale for named structs over extended __device__ lambdas moves to
+the top of the namespace, where it applies to every functor rather than to one
+arbitrary subset, and the Stage 1 and Stage 4 headers the file was missing are
+added.
+
+Reordering and comments only: normalizing both revisions (comments and
+whitespace stripped, sorted) leaves no difference beyond the three extra
+namespace open/close pairs the interleaving needs.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ConnectedComponents: give the shared vocabulary a scope of its own
+
+ComponentLabelT and CrossLeafEdge sat at tools::cuda scope, the namespace every
+NanoVDB CUDA tool shares, though only the first is something a caller ever names
+and neither belongs to that namespace's vocabulary. 507b8b1 moved
+LeafNeighborTap into cc_detail for the same reason, but a detail namespace is
+the wrong home for a type callers legitimately need.
+
+Collect all four -- ComponentLabelT, CrossLeafEdge, LeafNeighborTap and
+MaxComponentCount -- into a ConnectedComponentsBase that the operator derives
+from, so this header adds only the operator and that base to tools::cuda.
+
+The base is deliberately not a template, though it sits under one. None of its
+members depends on BuildT or ResourceT, and a type nested in the class template
+would instead be a distinct type per instantiation: the device functors, which
+are templated on BuildT alone, would have had to name a ResourceT they have no
+other use for, duplicating the stage 2 and 3 kernels once per injected resource.
+That is the hazard #2268 and #2269 hoisted Data and BoxTrianglePair to avoid.
+Being a plain base also means ordinary lookup reaches it from inside the derived
+class, so the operator's own uses are untouched; only cc_detail, which does not
+inherit, names the vocabulary explicitly, through a using declared in each
+functor that reads it.
+
+Comment and scoping only; no functional change.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ex_connected_components_cuda: name the dual-space buffer DualDeviceBuffer
+
+#2301 deprecated the cuda::DeviceBuffer alias, renaming the implementation to
+cuda::DualDeviceBuffer so the attribute reaches only external code. The example
+still spelled the old name for its grid handle and its retain-mask scratch,
+which is now a deprecation warning and, with NANOVDB_CUDA_WERROR, an error.
+
+Use the new name, matching what every tool's getHandle default was changed to.
+The per-translation-unit suppression pragma that TestNanoVDB.cu and
+TestMemoryResource.cu carry is deliberately not used here: that is for tests
+that keep exercising the deprecated surface on purpose, which this is not.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ConnectedComponents: use the library's leaf size, and name the detail namespace
+after its domain
+
+Two naming cleanups, no functional change.
+
+Drop the local LEAF_SIZE constants, one in the operator and one in the example.
+NanoLeaf<BuildT>::SIZE already names this and derives it as 1u << 3*LOG2DIM,
+where the local copies hard-coded 512 and so silently assumed LOG2DIM == 3.
+IndexToGrid and GridStats already spell it that way and SignedFloodFill uses
+LeafT::SIZE; ours were the only local definitions of it in the library. Every
+use site sits in a functor templated on BuildT, so nothing else had to move.
+
+Rename cc_detail to components::detail. The prefix existed because a bare
+detail in tools::cuda would be shared with every other tool, but the library
+already solves that by interposing a domain name -- TopologyBuilder and
+MeshToGrid share topology::detail, and PointsToGrid, DistributedPointsToGrid
+and SignedFloodFill share kernels. No header uses a bare tools::cuda::detail.
+
+With the domain in the namespace, the cc prefixes that disambiguated the
+helpers are redundant: ccFind, ccUnite, ccNeighborLeafIndex and
+ccForEachCrossLeafEdge become find, unite, neighborLeafIndex and
+forEachCrossLeafEdge, which is what they read as at the call sites anyway.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ConnectedComponents: attribute the leaf union-find correctly, and trim its comments
+
+The leaf primitives were attributed to Shiloach-Vishkin in three places, including
+the release note. They are not: 8b5a526 established that the per-leaf loop runs
+Liu & Tarjan's algorithm P, switching to their algorithm R for the tail so the
+O(lg n) bound applies, and 0473b69 moved the primitive comments onto that
+paper's vocabulary -- parent-connect, parent-root-connect, shortcut. The summary
+lines above them were never updated to match. Name the right algorithms, and give
+the full reference where they are first mentioned rather than partway down the
+class, leaving the later use as a back-reference.
+
+Also drop the paragraph announcing that the helpers are named structs grouped by
+stage. The surrounding operators do the same without saying so, and the stage
+headers already show the grouping. Condense what is left of the LeafUnionFind
+summary to what is not evident from the declarations: the lockstep pointer swap,
+the all-threads-must-call constraint, and why the changed flag needs no atomic.
+
+Comments only; no functional change.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ConnectedComponents: assert the leaf union-find's backstop instead of reporting it
+
+The convergence cap carried a whole reporting path: a device counter, its scratch
+buffer and memset, an extra kernel parameter, an atomicAdd, a readback, a member,
+and a five-line warning on stderr -- plus a bool return from solve() that the mask
+functor already ignored. All of it existed to count an event that cannot happen
+without a bug, since 8b5a526 made the loop's tail algorithm R and so gave it a
+proven O(lg n) step bound.
+
+Replace it with NANOVDB_ASSERT on the loop's fallthrough, which SignedFloodFill
+and IndexToGrid already use inside kernels. The bound itself stays -- without it a
+violated assumption would hang the kernel rather than produce a wrong answer, and
+that is the worse failure -- but it moves into solve() beside the loop it guards,
+since nothing outside referred to it once the warning stopped quoting it.
+
+This also drops the last use of <cstdio>.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ConnectedComponents: document the leaf functors, and put doc comments above template<>
+
+LeafComponentCountFunctor and LeafComponentMaskFunctor had no summary of what they
+produce. Give each a brief that names its output and how it pairs with the other: the
+count pass sizes the per-leaf component slices, and the mask pass re-solves the leaf
+and fills them, in ascending root order, with each component's voxel mask and the six
+face masks the cross-leaf edge stage intersects.
+
+The two CrossLeafEdge*Functor briefs sat between template<> and the struct. NanoVDB
+and OpenVDB otherwise always place the doc comment above template<>, so move them
+there.
+
+Also realign LeafComponentMaskFunctor::operator()'s parameters: the continuation
+lines started one column right of the opening parenthesis.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* ConnectedComponents: size lambdaKernel grids with util::cuda::blocksPerGrid
+
+The five lambdaKernel launches computed their block counts three different ways --
+an inline (n + 255) / 256, a local blocks lambda, and the same with a cast -- and
+each repeated 256 as both the grid divisor and the block size, with nothing tying
+the two together. Use the shared util::cuda::blocksPerGrid instead, as GridChecksum
+does, with one threadsPerBlock constant per stage feeding both launch arguments.
+
+Block size stays a per-stage choice rather than a class-wide constant: half of this
+operator's launches already take theirs from the functor's MaxThreadsPerBlock. The
+helper also takes size_t, so the uint64_t component and edge counts cannot overflow
+the rounding, and it asserts a non-empty launch, which every call site already
+guarantees by returning or skipping early. The value stays 256.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* ConnectedComponents: rename the cross-leaf stages, and document their contracts
+
+- Rename processCrossLeafEdges -> collectCrossLeafEdges (it only gathers the edges;
+  no unioning happens there) and processComponentLabels ->
+  processGlobalConnectedComponents (the cross-leaf union-find, pairing with
+  processLeafConnectedComponents). Timer labels follow.
+- Document on getVoxelLabelsAndCount() that the source grid must be complete on the
+  device when called, since its tree header is read synchronously on the host.
+- Document the cross-leaf edge layout: each edge belongs to the leaf on its -side,
+  the per-leaf slices are only a write partition, and (min,max) storage hides the owner.
+- Document why Stage 3 uses an asynchronous CAS union-find rather than Stage 1's
+  synchronous hook/compress rounds, and that find() does no path compression.
+- neighborLeafIndex: clearer variable names, and fix the signature's indentation.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* ConnectedComponents: name the unit test ConnectedComponents_MultiSphere
+
+Match the Tool_Case naming of the neighboring tool tests in TestNanoVDB.cu
+(MergeGrids_ValueOnIndex, MeshToGrid_UnitTetrahedron, ...), and the pending
+changes entry that cites it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: JaeHyun Lee <jaehlee@nvidia.com>
+
+* ConnectedComponents: release each scratch buffer after its last use
+
+getVoxelLabelsAndCount() now destroys every scratch buffer as soon as the
+pipeline no longer reads it, instead of holding all of them until the
+operator is destroyed:
+
+  - mLeafComponentCounts after Stage 1,
+  - mLeafComponentFaceMasks and mCrossLeafEdgeOffsets after Stage 2,
+  - mCrossLeafEdges after Stage 3,
+  - mLeafComponentOffsets, mLeafComponentMasks and mComponentParent after
+    the voxel labels are built.
+
+Each free is ordered on mStream behind the kernels that read the buffer, so
+there is no host synchronization. The releases sit between the stage calls
+rather than inside the stages, so early returns cannot skip them. This
+resolves the TODO on the scratch members.
+
+Peak scratch memory drops by roughly 48 B per leaf-local component plus
+8 B per cross-leaf edge, and a live operator no longer holds any scratch
+after returning its labels. The labels and component count are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: JaeHyun Lee <jaehlee@nvidia.com>
+
+* TestMemoryResource: give the ConnectedComponents tests their own section
+
+The ConnectedComponents tests sat at the end of the small-builders section,
+whose banner lists other tools and says their counts are exact. Give them a
+banner of their own that says what they route through the injected resource
+and why their counts are checked for balance, and add ConnectedComponents to
+the file's @brief.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: JaeHyun Lee <jaehlee@nvidia.com>
+
+* ConnectedComponents: check the per-voxel labels in the unit tests
+
+The unit tests asserted only the component count N, so a regression in the
+leaf masks, the flatten, the rank computation or the label scatter that kept
+N right would have gone unnoticed.
+
+checkConnectedComponentLabels() compares a result against a CPU union-find
+over the 6-connected active voxels of a host copy of the grid: every active
+voxel's label is in [0, N), no component is split across labels, no label
+spans two components, all N labels are used, and every other entry of the
+label buffer, including slot 0, holds the all-ones sentinel.
+
+ConnectedComponents_MultiSphere now runs this check on each of its inputs,
+and the new ConnectedComponents_VoxelLabels test adds inputs that the sphere
+shells do not produce: a few hand-placed components with a known count, and
+a seeded random fill near the percolation threshold, whose leaves each hold
+many components and merge with their neighbors across all six faces. The
+pending changes entry now cites the unit tests in general.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ConnectedComponents: require a ValueOnIndex grid
+
+The operator labels the active voxels of a ValueOnIndex grid: its label
+sidecar is indexed by value index and sized for the active voxels alone.
+Other index grids compiled regardless, among them ValueIndex, whose value
+indices also cover inactive voxels, and the brief and the constructor
+documentation even named an "indexGrid". Restrict BuildT with a
+static_assert, as TopologyBuilder does for the other topology operators,
+and name the grid type in the documentation.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ConnectedComponents: read the tree header once, in order on the stream
+
+Each stage read the source's tree header, or its active-voxel count, with
+its own DeviceGridTraits call on the legacy default stream, which is not
+ordered after work on a non-blocking stream or on a per-thread default
+stream. A grid still being uploaded or built on the operator's stream could
+be read before it arrived, so the documentation told callers to synchronize
+first.
+
+getVoxelLabelsAndCount() now reads the tree header once, on mStream, and
+every stage sizes its work from that copy. The warning becomes a note that
+the grid may still be in flight on the operator's stream.
+
+The new ConnectedComponents_InFlightGrid test queues the grid's upload
+behind a busy-wait on a non-blocking stream, into a zeroed device buffer,
+and runs the operator on that stream right away. A header read that is not
+ordered on the stream sees an empty tree there, and the test fails.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ConnectedComponents: reject grids with active tiles
+
+Only leaf voxels are labeled, so active tiles were silently ignored: the
+voxels of a tile got no label, and two components joined only through a
+tile were counted as two. Reject such grids up front, with the exception
+that the other topology operators throw, and document the restriction.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ConnectedComponents: size the label buffer by the grid's value count
+
+The label sidecar is indexed by leaf.getValue(n) but was sized by the
+active-voxel count plus one. The two agree only when the grid indexes
+exactly its active voxels. A grid that also indexes per-node statistics,
+as createNanoGrid's default options produce, has larger value indices, and
+the scatter wrote past the end of the buffer.
+
+Size the buffer by the grid's value count, so that every value index has an
+entry; the entries that are not active voxels keep the all-ones sentinel,
+as slot 0 already did. Grids with statistics stay outside the supported
+inputs, pending a decision on which index layouts to support: the
+documentation says so, and debug builds assert that the value count is the
+active-voxel count plus one. The example's oracle reads the whole buffer.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ConnectedComponents: make the cross-leaf union-find race-free
+
+find() walked the parent array with plain loads while other threads linked
+roots with atomicCAS, and the flatten pass stored to entries that other
+threads were still walking. Both are data races under the CUDA C++ memory
+model. Beyond that model, PTX does not guarantee that a plain load racing
+with the CAS returns a whole value rather than a mix of the old and new
+parents.
+
+Every access that can overlap a write in the same pass is now a relaxed,
+device-scope cuda::atomic_ref access: the loads in find(), the link in
+unite() and the store in flatten. Relaxed ordering suffices, since each
+entry only ever decreases and publishes nothing else.
+
+This costs some performance, mostly in unite: about 5-9% end to end on
+dense 384^3 grids, and up to ~2x on a pathological straight line of 2M
+voxels. find()'s comment no longer suggests path halving, which was tried
+here and measured slower.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ConnectedComponents: detect leaf convergence with __syncthreads_or
+
+The leaf solver's threads raised a block-shared `changed` flag with
+concurrent plain stores: a formal data race, even though every store wrote
+the same value and barriers ordered the reset and the reads. Each thread
+now keeps its own flag, and solve() combines them with __syncthreads_or().
+That removes the shared flag, its reset by thread 0, and two of the six
+barriers in each round; the leaf kernels got 1-11% faster on 384^3 dense
+and random grids.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+* ConnectedComponents: use the NANOVDB_ prefix for the include guard
+
+The include guard carried the NVIDIA_ prefix of the topology operators this
+header was modeled on, while the rest of NanoVDB uses NANOVDB_. Rename it to
+NANOVDB_TOOLS_CUDA_CONNECTEDCOMPONENTS_CUH_HAS_BEEN_INCLUDED, following the
+rest of the library; nothing else refers to the macro.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+
+---------
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+Signed-off-by: JaeHyun Lee <jaehlee@nvidia.com>
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+Co-authored-by: JaeHyun Lee <jaehlee@nvidia.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+nanovdb
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

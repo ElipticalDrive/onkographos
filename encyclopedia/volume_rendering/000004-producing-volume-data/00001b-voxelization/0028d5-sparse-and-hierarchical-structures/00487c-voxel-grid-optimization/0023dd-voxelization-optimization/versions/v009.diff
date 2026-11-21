@@ -1,0 +1,223 @@
+--- v008.md
++++ v009.md
+@@ -3,83 +3,116 @@
+ 
+ ## Overview
+-Voxelization Optimization encompasses techniques to reduce the computational and memory costs of converting geometric primitives into a discrete 3D voxel grid, addressing the high draw call count and vertex transformation overhead inherent in GPU-based voxelization. It distinguishes itself from downstream processing optimizations (such as [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md) or [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md)) by focusing on the input pipeline: minimizing redundant vertex transformations, reducing the number of draw calls via instancing, and optimizing the geometry used for the voxelization pass itself.
++Voxelization Optimization encompasses techniques to reduce the computational and memory costs of converting geometric primitives into voxel grids, addressing the bottleneck of high draw call counts and redundant vertex transformations [S1, unofficial][S2, unofficial]. It distinguishes itself from general grid construction by focusing on pipeline efficiency (stream output, instancing) and data structure pruning (heightmaps, LOD) rather than just the final storage format [S1, unofficial][S3, unofficial].
+ 
+ ## How it works
+-The method operates on the geometric primitives (meshes) before they are rasterized into the voxel grid. It assumes a valid, populated 3D array or structured representation of voxel data as input [G].
++**Inputs:**
++*   Geometric primitives (meshes, obstacles).
++*   Voxel grid parameters (resolution, chunk size).
++*   Camera/view state (for rendering order optimization).
+ 
+-### Inputs and Outputs
+-*   **Input**: Source geometry (static or deforming meshes), camera/view parameters, voxel grid resolution.
+-*   **Output**: A populated voxel grid (occupancy, density, or attributes) with reduced generation latency.
++**Outputs:**
++*   Optimized voxel data structures (3D textures, sparse lists, or heightmaps).
++*   Reduced number of draw calls and vertex computations.
+ 
+-### Data Structures
+-*   **Transformed Vertex Buffer**: A GPU buffer storing the final world-space positions of vertices, used to cache results of skinning or transformation operations [S1, unofficial].
+-*   **Instance Data**: Per-slice transformation matrices or offsets, allowing a single draw call to render multiple slices [S1, unofficial].
+-*   **Min/Max Altitude Heightmaps**: Two byte arrays (`minAltitude`, `maxAltitude`) of size $N^2$ (where $N$ is the chunk dimension, e.g., 32), storing the lowest and highest occupied Y-index for each XZ column in a chunk [S3, unofficial].
++**Data Structures:**
++*   **Stream Output Buffer:** A GPU buffer storing transformed vertex positions and velocities, indexed by instance ID [S1, unofficial].
++*   **Min/Max Altitude Heightmaps:** Two byte arrays, `minAltitude` and `maxAltitude`, of size $N_x \times N_z$ (e.g., $32 \times 32 = 1024$ bytes for a chunk), storing the lowest and highest occupied Y indices per XZ column [S3, unofficial].
++*   **Instance ID:** Used to specify the target slice in instanced rendering [S1, unofficial].
+ 
+-### Steps
+-1.  **Geometry Simplification**: Replace high-poly obstacle meshes with low-level-of-detail (LOD) meshes for the voxelization pass. This reduces the number of vertices processed per slice, allowing for per-frame voxelization of dynamic obstacles with minimal performance cost [S1, unofficial].
+-2.  **Vertex Transformation Caching (Stream Output)**: For deforming meshes (e.g., skinned characters), use GPU stream output to cache the transformed vertices in a buffer. This avoids recomputing skinning transformations for every slice of the voxel grid [S1, unofficial].
+-3.  **Instanced Slicing**: Instead of issuing a separate draw call for each voxel slice (plane), use instanced rendering. Pass the slice index or transformation matrix as instance data. The vertex shader uses the instance ID to compute the correct slice position, drawing all slices in a single draw call [S1, unofficial].
+-4.  **Static Object Culling**: Do not re-voxelize static objects unless necessary. Static geometry can be voxelized once and stored. However, if dynamic lights or other dynamic entities intersect the static object's bounding volume, the static object must be re-voxelized to account for the interaction [S2, unofficial].
+-5.  **Analytic Transformation Inversion**: If an obstacle undergoes a simple analytic transformation (e.g., rigid translation/rotation), precompute the voxelization and apply the inverse transformation during texture access, rather than re-voxelizing the geometry [S1, unofficial].
+-6.  **Heightmap Maintenance (Chunk-Level)**: For chunk-based voxel grids, maintain `minAltitude` and `maxAltitude` arrays to quickly identify empty or fully occupied columns during subsequent meshing or culling phases [S3, unofficial].
+-    *   **Initialization**: Set `minAltitude[i] = ChunkSize` and `maxAltitude[i] = -1` (or 0) for all columns $i$ in the chunk [S3, unofficial].
+-    *   **On Voxel Addition**: When a voxel at $(x, y, z)$ is added (index > 0), update `minAltitude[xz]` and `maxAltitude[xz]` if $y$ is outside the current range [S3, unofficial].
+-    *   **On Voxel Removal**: When a voxel at $(x, y, z)$ is removed (index == 0), update `minAltitude[xz]` and `maxAltitude[xz]` by scanning the column to find the new bounds [S3, unofficial].
++**Steps:**
+ 
+-### Pseudocode
++1.  **Preprocessing Geometry:**
++    *   For static obstacles, precompute voxelization if the transformation is analytic (e.g., rigid translation/rotation) and apply the inverse transformation during access [S1, unofficial].
++    *   For dynamic obstacles, use a low-level-of-detail (LOD) mesh to approximate the geometry, reducing the vertex count processed per frame [S1, unofficial].
++
++2.  **Stream Output Caching (Deforming Meshes):**
++    *   When voxelizing deforming meshes (e.g., skinned characters), use GPU stream output to cache the entire buffer of transformed vertices [S1, unofficial].
++    *   This avoids recomputing skinning transformations for each voxel slice [S1, unofficial].
++
++3.  **Instanced Rendering:**
++    *   Draw all voxel slices in a single draw call using instancing [S1, unofficial].
++    *   Use the instance ID to specify the target slice (Z-coordinate or depth layer) [S1, unofficial].
++
++4.  **Heightmap Maintenance (Dynamic Voxel Updates):**
++    *   Initialize `minAltitude` array to `Constants.ChunkSize` (e.g., 32) for all columns, indicating initially empty columns [S3, unofficial].
++    *   Initialize `maxAltitude` array to -1 or 0 (depending on convention) for all columns [S3, unofficial].
++    *   On voxel addition at index $(i, j, k)$ where $k > 0$:
++        *   Update `minAltitude[i][j]` if $k < minAltitude[i][j]$.
++        *   Update `maxAltitude[i][j]` if $k > maxAltitude[i][j]$.
++    *   On voxel removal at index $(i, j, k)$ where $k == 0$:
++        *   Recalculate `minAltitude[i][j]` by scanning the column for the new lowest occupied voxel.
++        *   Recalculate `maxAltitude[i][j]` by scanning the column for the new highest occupied voxel.
++    *   *Note:* The sources describe the update logic but do not provide the full scanning algorithm for removal [S3, unofficial].
++
++5.  **Rendering Order Optimization:**
++    *   Determine chunk rendering order based on camera pitch and yaw to achieve front-to-back rendering [S3, unofficial].
++    *   Calculate start/end indices and steps for X and Z axes based on view direction [S3, unofficial].
++    *   Pre-calculate access strides to avoid excessive multiplications in the inner loop [S3, unofficial].
++
++**Parameters:**
++*   **Chunk Size:** Typically 32 voxels per dimension (e.g., $32^3$) [S3, unofficial].
++*   **LOD Level:** Low detail mesh for obstacles [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Dynamic Lights:** Dynamic lights intersecting static objects may force re-voxelization of those static objects, complicating the "static vs. dynamic" optimization strategy [S2, unofficial].
++*   **Precision:** Stream output caching requires careful management of vertex buffer sizes to avoid overflow for large deforming meshes [S1, unofficial].
++*   **Heightmap Consistency:** Removing voxels requires a full column scan to update heightmaps, which can be costly if done frequently [S3, unofficial].
++
++**Pseudocode:**
++
+ ```python
+-def voxelize_deforming_mesh(mesh, slices, stream_output_buffer):
++# Pseudocode for Stream Output and Instanced Voxelization
++def voxelize_deforming_mesh(mesh, grid_resolution, stream_output_buffer):
+     """
+-    Optimized voxelization for deforming meshes using stream output and instancing.
++    Voxelizes a deforming mesh using stream output caching and instancing.
+     """
+-    # Step 1: Cache transformed vertices using stream output
+-    # If the buffer is empty or invalid, compute skinning once
+-    if not stream_output_buffer.is_valid():
+-        transformed_vertices = compute_skinning(mesh)
+-        stream_output_buffer.write(transformed_vertices)
++    # Step 1: Transform vertices once using stream output
++    # This caches transformed vertices, avoiding per-slice skinning
++    transformed_vertices = stream_output_cache(mesh.vertices, mesh.skin_weights)
+     
+-    # Step 2: Use instanced rendering to draw all slices
+-    # Pass slice index as instance ID
+-    draw_call_count = 1
+-    for slice_idx in range(len(slices)):
+-        # The vertex shader uses instance ID to determine slice position
+-        render_slice(stream_output_buffer, slice_idx)
+-        
+-    return draw_call_count
++    # Step 2: Instanced draw call for all slices
++    # Instance ID specifies the target slice (e.g., Z layer)
++    for slice_id in range(grid_resolution.z):
++        draw_instanced(
++            geometry_shader=voxel_geometry_shader,
++            vertex_buffer=transformed_vertices,
++            instance_count=1,
++            instance_id=slice_id,
++            slice_z=slice_id
++        )
+ 
+-def update_heightmaps(chunk, x, y, z, action):
+-    """
+-    Maintains min/max altitude heightmaps for a chunk.
+-    """
+-    col_idx = x * chunk.size + z
+-    
+-    if action == "ADD":
+-        if y < chunk.min_altitude[col_idx]:
+-            chunk.min_altitude[col_idx] = y
+-        if y > chunk.max_altitude[col_idx]:
+-            chunk.max_altitude[col_idx] = y
+-            
+-    elif action == "REMOVE":
+-        # Re-scan column to find new bounds
+-        new_min = chunk.size
++# Pseudocode for Heightmap Maintenance
++class HeightmapOptimizer:
++    def __init__(self, chunk_size_x, chunk_size_z):
++        self.chunk_size = 32 # Example constant
++        self.min_altitude = [self.chunk_size] * (chunk_size_x * chunk_size_z)
++        self.max_altitude = [-1] * (chunk_size_x * chunk_size_z)
++
++    def on_voxel_added(self, x, y, z):
++        """Update heightmaps when a voxel is added."""
++        idx = x * self.chunk_size + z
++        if y < self.min_altitude[idx]:
++            self.min_altitude[idx] = y
++        if y > self.max_altitude[idx]:
++            self.max_altitude[idx] = y
++
++    def on_voxel_removed(self, x, y, z):
++        """Update heightmaps when a voxel is removed.
++        Requires scanning the column to find new bounds."""
++        idx = x * self.chunk_size + z
++        # [G] Implementation detail: Scan column z from y+1 to max to find new min
++        # and from y-1 down to 0 to find new max.
++        # This is computationally expensive if done frequently.
++        new_min = self.chunk_size
+         new_max = -1
+-        for yy in range(chunk.size):
+-            if chunk.get_voxel(x, yy, z) is not None:
+-                if yy < new_min: new_min = yy
+-                if yy > new_max: new_max = yy
+-        
+-        chunk.min_altitude[col_idx] = new_min
+-        chunk.max_altitude[col_idx] = new_max
++        for k in range(self.chunk_size):
++            if is_voxel_occupied(x, k, z):
++                if k < new_min:
++                    new_min = k
++                if k > new_max:
++                    new_max = k
++        self.min_altitude[idx] = new_min
++        self.max_altitude[idx] = new_max
+ ```
+-
+-### Parameters
+-*   **LOD Level**: The simplification factor for obstacle meshes. Not given in the sources.
+-*   **Chunk Size**: Typically 32x32x32 for heightmap arrays, resulting in 1024 bytes per heightmap array [S3, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Dynamic Lights**: Dynamic lights intersecting static objects force re-voxelization of the static object. Failing to detect this intersection leads to incorrect lighting in the voxel grid [S2, unofficial].
+-*   **Stream Output Latency**: Caching transformed vertices requires synchronization between the CPU and GPU. If the stream output buffer is not properly managed, it may stall the pipeline [S1, unofficial].
+-*   **Heightmap Updates**: Removing a voxel may require a full column scan to update the heightmaps, which can be costly if done frequently. This is acceptable for sparse updates but may bottleneck dense voxel changes [S3, unofficial].
+ 
+ ## Subtopics
+@@ -89,5 +122,5 @@
+ 
+ ### [Sparse Voxelization with Oracle and Parallel Scan](3687-sparse-voxelization-with-oracle-and-parallel-scan.md)
+-Sparse Voxelization with Oracle and Parallel Scan is a real-time, high-resolution technique for reconstructing 3D surface models from image-based inputs (calibrated RGB camera streams) using a coarse-to-fine voxel hierarchy. It solves the problem of on-the-fly surface reconstruction by iteratively refining a sparse list of voxels, using an oracle kernel to cull empty space and a parallel prefix sum scan to compact the list, ensuring that only relevant voxels are subdivided. Unlike bottom-up approaches or methods designed for static models, this method is top-down and optimized for interactive rates (e.g., >30 fps at 1024^3 resolution) by leveraging GPU parallelism for both computation and rendering.
++Sparse Voxelization with Oracle and Parallel Scan is a real-time, high-resolution technique for reconstructing 3D surface models from image-based inputs (calibrated RGB camera streams) using a coarse-to-fine voxel hierarchy. It solves the problem of on-the-fly surface reconstruction by iteratively refining a sparse list of voxels, using an oracle kernel to cull empty space and a parallel prefix sum scan to compact the list, ensuring that only relevant voxels are subdivided. Unlike bottom-up approaches or methods designed for static models, this method is top-down and optimized for interactive rates (e.g., >30 fps at $1024^3$ resolution) by leveraging GPU parallelism for both computation and rendering.
+ 
+ ### [Greedy Voxel Mesh Optimization](3979-greedy-voxel-mesh-optimization.md)
+@@ -98,20 +131,20 @@
+ 
+ ### Min/Max Altitude Heightmap Optimization
+-Stores per-column minimum and maximum occupied voxel heights to skip empty or fully occupied columns during meshing [S3, unofficial]. On voxel addition (index > 0), `OnVoxelAdded(i, j, k)` updates the heightmaps to reflect the new occupied column. On voxel removal (index == 0), `OnVoxelRemoved(i, j, k)` updates the heightmaps to reflect the cleared column. The `minAltitude` array is initialized to `Constants.ChunkSize` (32) for all columns, indicating initially empty columns. The `minAltitude` and `maxAltitude` are byte arrays of size `ChunkSizeSquared` (1024 bytes), storing the lowest and highest occupied Y index per XZ column, respectively [S3, unofficial].
++Stores per-column minimum and maximum occupied voxel heights to skip empty or fully occupied columns during meshing [S3, unofficial]. On voxel addition (index > 0), `OnVoxelAdded(i, j, k)` updates the heightmaps to reflect the new occupied column. On voxel removal (index == 0), `OnVoxelRemoved(i, j, k)` updates the heightmaps to reflect the cleared column. It initializes `minAltitude` array to `Constants.ChunkSize` (32) for all columns, indicating initially empty columns. Parameters include `minAltitude` (byte array of size `ChunkSizeSquared` (1024 bytes), stores the lowest occupied Y index per XZ column) and `maxAltitude` (byte array of size `ChunkSizeSquared` (1024 bytes), stores the highest occupied Y index per XZ column) [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Reduces the number of draw calls from $O(S)$ (where $S$ is the number of slices) to $O(1)$ per mesh using instancing [S1, unofficial]. Vertex transformation cost is reduced from $O(S \cdot V)$ to $O(V)$ per frame for deforming meshes, where $V$ is the number of vertices [S1, unofficial].
+-*   **Memory Complexity**: Stream output buffers require additional GPU memory to store transformed vertices [S1, unofficial]. Heightmap arrays add $2 \cdot N^2$ bytes per chunk [S3, unofficial].
+-*   **Measured Performance**: Techniques are used in commercial titles such as *Rise of Tomb Raider* (voxel AO) and *The Tomorrow Children* (on consoles), demonstrating viability on high-end GPUs and consoles [S2, unofficial].
+-*   **Strengths**: Significant reduction in CPU-GPU overhead for dynamic scenes; enables real-time voxelization of complex deforming meshes.
+-*   **Limitations**: Requires GPU support for stream output and instancing; static object re-voxelization logic can be complex to implement correctly [S2, unofficial].
+-*   **When to Use**: Real-time applications with deforming geometry or high-frequency updates.
+-*   **When Not to Use**: Static scenes with no dynamic lights or interactions, where pre-computed voxelization is sufficient.
++*   **Time Complexity:** Stream output reduces vertex transformation cost from $O(N \cdot S)$ to $O(N)$ per frame, where $N$ is vertices and $S$ is slices [S1, unofficial]. Heightmap updates are $O(1)$ for additions but $O(H)$ for removals, where $H$ is chunk height [S3, unofficial].
++*   **Memory Complexity:** Stream output buffers require memory proportional to the number of vertices [S1, unofficial]. Heightmaps add $O(N_x \cdot N_z)$ memory per chunk [S3, unofficial].
++*   **Measured Performance:** Techniques are used in games like *Rise of Tomb Raider* (voxel AO) and *The Tomorrow Children* (on consoles) [S2, unofficial].
++*   **Strengths:** Significant reduction in draw calls and vertex processing for dynamic scenes [S1, unofficial]. Efficient culling for meshing via heightmaps [S3, unofficial].
++*   **Limitations:** Complex to implement stream output caching [S1, unofficial]. Heightmap updates can be costly for frequent voxel removals [S3, unofficial]. Dynamic lights complicate static object optimization [S2, unofficial].
++*   **When to Use:** Real-time fluid simulation, dynamic character voxelization, and meshing of large voxel chunks [S1, unofficial][S3, unofficial].
++*   **When Not to Use:** Static scenes with no dynamic lights or simple transformations, where precomputation is sufficient [S1, unofficial].
+ 
+ ## Background
+-Voxelization optimization techniques have been developed to address the performance bottlenecks of GPU-based voxelization, particularly in real-time rendering applications. The use of stream output for caching transformed vertices and instancing for slice rendering was detailed in *GPU Gems 3* [S1, unofficial]. Further optimizations, such as sparse voxel octrees and voxel cascades, were discussed in the context of voxel-based global illumination in the *Wicked Engine* project [S2, unofficial]. Heightmap-based optimizations for chunked voxel grids are documented in the *vercidium-patreon/meshing* repository [S3, unofficial].
++Voxelization optimization techniques have been developed for real-time simulation and rendering of 3D fluids and global illumination [S1, unofficial][S2, unofficial]. The use of stream output for voxelization was highlighted in GPU Gems 3 [S1, unofficial]. Heightmap-based optimizations are used in voxel meshing engines like vercidium-patreon/meshing [S3, unofficial]. The techniques are applied in commercial games such as *Rise of Tomb Raider* and *The Tomorrow Children* [S2, unofficial].
+ 
+ ## Sources
+-[S1] Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
++[S1] PDF Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
+ [S2] Voxel-based Global Illumination – Wicked Engine, https://turanszkij.wordpress.com/2017/08/30/voxel-based-global-illumination/, fetched 2026-10-28 (unofficial)
+ [S3] vercidium-patreon/meshing, https://github.com/vercidium-patreon/meshing, fetched 2026-10-26 (unofficial)

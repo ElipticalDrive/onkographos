@@ -1,0 +1,182 @@
+:sparkles:  An advanced 3D Gaussian Splatting renderer for THREE.js - Draft: Expand splat represention to 32 bytes using two array texture targets by mrxz · Pull Request #128 · sparkjsdev/spark
+
+Draft: Expand splat represention to 32 bytes using two array texture targets by mrxz · Pull Request #128 · sparkjsdev/spark · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+mrxz
+commented
+Jul 21, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+This PR is to explore the possibilities when extending the splat representation from 16 bytes to 32 bytes (2x16) using MRT. Vanilla three.js does not support MRT with 2d texture arrays out-of-the-box, but requires surprisingly few changes (see mrdoob/three.js#30151 and mrxz/three.js@e63a1af). Hopefully we can get this implemented in Three.js upstream. In this PR I point to a three.js build with the needed changes, so anyone can try it out.
+For simplicity the newly available space has only been used to increase the resolution of the center (X, Y, Z) and the colour values, resulting in the following layout:
+Channel
+Contents
+R1
+center.x (32f)
+G1
+center.y (32f)
+B1
+center.z (32f)
+A1
+scale.xyz (3 x 8bit), unchanged from current representation, 8 bit unused
+R2
+rgba.r (16 bit) + rgba.g (16 bit)
+G2
+rgba.b (16 bit) + rgba.a (16 bit)
+B2
+encodeQuatOctXy88R8 (24bit), 8 bit unused
+A2
+unused
+The main motivation behind was to address the following two prominent issues:
+float16 quantization issues with splats away from origin (either in source file or moved in scenegraph): Rasterization when using sh3 #104, Quality is low in comparison to other viewers #36 (comment)
+"dimmer" results due to clamping of colour channels: Discrepancy of text brightness/sharpness Supersplat viewer and Sparkjs #81, Quality is low in comparison to other viewers #36 (comment)
+Of course, there's plenty of unused bits, so the scales and rotation can be encoded with higher precision as well. For the colour channels I've opted for encoding them as 0-65535 converted to 0.0-257.0 in the shader. This is overkill, but can at least represent the values > 1.0, which with pre-multiplied alpha (also in this PR) brings back the brighter highlights. Ideally we pick a better representation that closely matches the possible input values, which might even be negative. (Though it's unclear to me if negative colour channel values contribute meaningfully to a splat model)
+The biggest drawback is of course that memory consumption is doubled. And the impact on performance will have to be assessed properly. Since I only have a reliable profiling setup for the Quest 3 at the moment, I've measured the app time (CPU + GPU) for the webxr example in the repo. It increased slightly from 15.534ms (before) to 15.614ms (after).
+Not surprising as the GPU metrics never indicated texture fetching to be the bottleneck on the Quest 3. So having to perform more texture fetches per vertex shader execution doesn't seem to be a problem. Though no idea if this generalizes to other TBDR GPUs.
+To make the texture uploading easier, I've opted for representing the packedArray as two arrays, one for each texture. This is somewhat awkward representation (especially for the loaders). The alternative would be to tightly pack the splats in one array (as is currently the case) and split them into two when uploading to the GPU, which isn't ideal either...
+Expand splat represention to 32 bytes using two array texture targets
+738d7c3
+mrxz
+marked this pull request as draft
+July 21, 2025 16:41
+asundqui
+commented
+Jul 21, 2025
+Copy link
+Copy Markdown
+Contributor
+Wow, I was literally thinking of a similar thing myself! I have something else in mind for those 32 bytes though: I think we can get HDR emissive splats, PBR materials, and a continuous level-of-detail representation all in there at the same time. Let me follow up later with more on this, great thinking!
+asundqui
+commented
+Jul 21, 2025
+Copy link
+Copy Markdown
+Contributor
+I actually also think we can do straight 2D textures instead of arrayed textures, if we're willing to accept a maximum # "active splats". For example, using 6x 4096^2 textures (which would be broadly supported across devices) can get us up to 96M active splats, which I think would be sufficient for anything that could conceivably render fast enough on a user device anyway.
+asundqui
+commented
+Jul 21, 2025
+Copy link
+Copy Markdown
+Contributor
+@mrxz I have some previous experiencing implementing this for LoD: https://repo-sam.inria.fr/fungraph/hierarchical-3d-gaussians/
+I think it's overkill however and I'm thinking of a simpler approach that will cover what we need for LoD and beyond. Here are the quantities and bit depths I'm thinking of storing that will enable us to do proper LoD but also PBR materials:
+Center x,y,z: float32 (12 bytes)
+Opacity float16 or Opacity8 + Shape8 to allow reshaping the splat profile up the LoD hierarchy (2 bytes)
+PR Metalness8, Roughness8 (2 bytes)
+RGBE8 (emissive color) / RGB8 (albedo) encoded together (4 bytes)
+Rotation OctXY101010 (expanded resolution from 888 in PackedSplats) (4 bytes)
+Scale X/Y/Z/min0/min/max/max0 in 9-bit log (8 bytes / 63 bits). XYZ scales for the splats. min0/min/max/max0 are four quantities that define the LoD scale levels: below min0 => opacity =0, min0..min => opacity fades to 1, min..max => opacity=1, max..max0 => opacity fades to 0
+This adds up to 32 bytes nicely, gives us more resolution where it matters, and I think will pave the way for both HDR splats at the same time as PBR albedo/metal/rough properties, and a very general approach to being able to handle continuous LoD levels gracefully.
+I think moving to 32-bytes per splat, even without texture array, would make sense as an option. It will impact performance slightly from being more memory intensive, but I think it can be a no-compromises solution for everything else we want.
+asundqui
+commented
+Jul 21, 2025
+Copy link
+Copy Markdown
+Contributor
+@mrxz went through your changes, they look great, however I'd like to do something more along what I'm describing above: instead of changing PackedSplats, I was thinking of introducing a second class "ExtSplats" or similar, explicitly differentiating PackedSplats from ExtSplats. This will allow the user to decide which representation they want depending on their case. Your draft here going through all the code spots that need to be changed to accommodate this is very helpful though! Are you okay if I follow up and build on your work here in a separate branch? I also am planning on introducing extended encoding ranges as part of PackedSplats as well.
+mrxz
+commented
+Jul 22, 2025
+Copy link
+Copy Markdown
+Collaborator
+Author
+I actually also think we can do straight 2D textures instead of arrayed textures, if we're willing to accept a maximum # "active splats". For example, using 6x 4096^2 textures (which would be broadly supported across devices) can get us up to 96M active splats, which I think would be sufficient for anything that could conceivably render fast enough on a user device anyway.
+The drawback with straight 2D textures is that WebGL2 requires "constant-index-expressions" if we were to present these textures as an array of samplers. So you'd either have multiple draw calls or not-so-nice conditionals in the shader. Though the argument can be made that devices struggling with this would probably not fare well with > 16M splats either way.
+If we do stick with TEXTURE_2D_ARRAY, support for it has been merged into Three.js and should be available from r179 onwards: mrdoob/three.js#31476
+This adds up to 32 bytes nicely, gives us more resolution where it matters, and I think will pave the way for both HDR splats at the same time as PBR albedo/metal/rough properties, and a very general approach to being able to handle continuous LoD levels gracefully.
+Looks good. The additional resolution is most needed for the center IMHO, as users can easily run into issues when loading an off center splat file or positing things away from the origin.
+As for the PBR and HDR properties, I find it hard to say how this will end up working. Conceptually the PBR properties make sense for surfaces, which 2D gaussians could approximate. But with the blending taking place, I don't see how the result would be energy conserving.
+But it's clear that 32 bytes per splat gives us ample space to both increase the resolution for the properties that need it and have room to spare for future features.
+Your draft here going through all the code spots that need to be changed to accommodate this is very helpful though! Are you okay if I follow up and build on your work here in a separate branch? I also am planning on introducing extended encoding ranges as part of PackedSplats as well.
+Sure, no problem. Note that in this draft PR I hadn't updated the raycasting yet, which obviously will have to be able to unpack the relevant splat properties as well.
+Looking forward to see how things turn out. Given the user the option between PackedSplat and ExtSplats is nice, though I'm slightly concerned about the additional complexity this might bring. Though at the very least the loading of splats abstracts the packing away quite nicely, which should making alternate representations relatively easy to support.
+asundqui
+commented
+Jul 22, 2025
+Copy link
+Copy Markdown
+Contributor
+The drawback with straight 2D textures is that WebGL2 requires "constant-index-expressions" if we were to present these textures as an array of samplers. So you'd either have multiple draw calls or not-so-nice conditionals in the shader. Though the argument can be made that devices struggling with this would probably not fare well with > 16M splats either way.
+If we do stick with TEXTURE_2D_ARRAY, support for it has been merged into Three.js and should be available from r179 onwards: mrdoob/three.js#31476
+That's frickin AWESOME! I can't believe you got it into Three.js so fast, that unlocks so much potential for Spark!! It's been killing me to not be able to render more than one uvec4 array target at a time. Any concerns about forcing users to upgrade to r179? I guess we just have to communicate it, maybe I throw a warning/error if the version is older?
+Looks good. The additional resolution is most needed for the center IMHO, as users can easily run into issues when loading an off center splat file or positing things away from the origin.
+Agreed, float32 there makes everything so much simpler and better.
+As for the PBR and HDR properties, I find it hard to say how this will end up working. Conceptually the PBR properties make sense for surfaces, which 2D gaussians could approximate. But with the blending taking place, I don't see how the result would be energy conserving.
+But it's clear that 32 bytes per splat gives us ample space to both increase the resolution for the properties that need it and have room to spare for future features.
+Yeah, it may not be energy conserving, but my gut tells me it will actually look pretty good and correct! I need to experiment with migrating splatVertex/splatFragment.glsl to TSL, which I think could allow us to just "slot in" with Three.js's standard material shader and lighting/shadowing etc. That's my hope, I haven't had time to experiment with it yet.
+In any case, as you said the 32 bytes gives us plenty of room to experiment with features like this, and we can change the implementation details over time as we see fit.
+Your draft here going through all the code spots that need to be changed to accommodate this is very helpful though! Are you okay if I follow up and build on your work here in a separate branch? I also am planning on introducing extended encoding ranges as part of PackedSplats as well.
+Sure, no problem. Note that in this draft PR I hadn't updated the raycasting yet, which obviously will have to be able to unpack the relevant splat properties as well.
+Looking forward to see how things turn out. Given the user the option between PackedSplat and ExtSplats is nice, though I'm slightly concerned about the additional complexity this might bring. Though at the very least the loading of splats abstracts the packing away quite nicely, which should making alternate representations relatively easy to support.
+Yes, I share a little concern there as well, but my hope is that these two will be sufficient for 99.9% of use cases? PackedSplats is arguably sufficient for more use cases I'd argue... I guess if one day there is a 3rd type we want to introduce, we could factor out some base thing with an interface...
+Okay let me fiddle with this thing, maybe I'll put out a PR with a smaller set of encoded values first.
+mrxz
+commented
+Jul 24, 2025
+Copy link
+Copy Markdown
+Collaborator
+Author
+That's frickin AWESOME! I can't believe you got it into Three.js so fast, that unlocks so much potential for Spark!! It's been killing me to not be able to render more than one uvec4 array target at a time. Any concerns about forcing users to upgrade to r179? I guess we just have to communicate it, maybe I throw a warning/error if the version is older?
+The main concern would be that it might limit who can use Spark. For new projects it shouldn't be a problem to use the latest Three.js version. For existing projects or projects indirectly using Three.js through a framework or engine, they might be "stuck" on an older version.
+Either way, it would be a good idea to set the minimum required Three.js version as peerDependency in the package.json. That way the package manager of the user should warn them when the requirement can't be met.
+Yeah, it may not be energy conserving, but my gut tells me it will actually look pretty good and correct! I need to experiment with migrating splatVertex/splatFragment.glsl to TSL, which I think could allow us to just "slot in" with Three.js's standard material shader and lighting/shadowing etc. That's my hope, I haven't had time to experiment with it yet.
+TSL only works with the WebGPURenderer and not WebGLRenderer (see mrdoob/three.js#30185). Ultimately Three.js intends to deprecate the WebGLRenderer so we'd have to use TSL or otherwise ensure it works with both the WebGL2 and WebGPU backends. Contrary to its name WebGPURenderer has both a WebGL2 and WebGPU backend.
+Haven't experimented a lot with WebGPURenderer yet, as it didn't support WebXR for the longest time. Now there is some support when using the WebGL2 backend. I'm concerned the transition will put a lot of Three.js libraries at a predicament: focus entirely on WebGPU or effectively maintain two versions. Unlike forcing users to a specific Three.js version, forcing them into a specific renderer is probably more limiting.
+mrxz
+closed this
+Jun 16, 2026
+jo-chemla
+commented
+Jun 16, 2026
+Copy link
+Copy Markdown
+Has this work been replaced by another tweak to handle 32 bytes splats properties representation within sparkjs? Or is this no more required given how you encode and pack position, rotation etc using other underlying format or container spec?
+mrxz
+commented
+Jun 16, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Has this work been replaced by another tweak to handle 32 bytes splats properties representation within sparkjs? Or is this no more required given how you encode and pack position, rotation etc using other underlying format or container spec?
+Spark 2.0 has introduced support for ExtSplat, see: https://sparkjs.dev/2.0.0-preview/docs/ext-splats/#32-byte-layout
+This representation can be enabled per SplatMesh and on the SplatAccumulator and SplatPager using the extSplats, accumExtSplats and pagedExtSplats properties respectively. For most use cases this should give enough precision.
+jo-chemla
+commented
+Jun 16, 2026
+Copy link
+Copy Markdown
+Thanks for getting back so fast I had missed that, nice!
+jo-chemla
+commented
+Jun 16, 2026
+Copy link
+Copy Markdown
+Edit: just submitted a feature request for exposing a pure js api RAD hlod tree walker, which could help convert the sparkjs tiled rad/tadc hierarchy into OGC 3Dtiles with KHR_gaussian_splatting extension glb.
+#372
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

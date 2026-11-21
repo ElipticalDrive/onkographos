@@ -1,0 +1,337 @@
+# Gaussian Splat View Data Calculation
+
+Also called: FGaussianSplatCalcViewDataCS
+
+## Overview
+A GPU compute shader that transforms 3D Gaussian splats into screen space, evaluates view-dependent spherical harmonics (SH), and computes per-splat visibility and lighting data. It serves as the final preparation step before sorting and rasterization, handling complex 4D temporal variations (keyframe interpolation, temporal marginalization, or native 4D primitives) and advanced culling mechanisms (cluster-based, LOD, and distance-based). It differs from its parent [Gaussian Splat Projection and Sorting](3369-gaussian-splat-projection-and-sorting.md) by focusing specifically on the evaluation of appearance (SH), 4D state resolution, and the population of the `ViewDataBuffer` with screen-space attributes required for the subsequent tiled rasterization pass.
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- **Splat Data:**
+  - `PackedSplatBuffer`: `ByteAddressBuffer`, 16 bytes/splat. Contains position, rotation (quaternion), scale, and opacity.
+  - `SHBuffer`: `ByteAddressBuffer`. Stores spherical harmonic coefficients.
+  - `TemporalBuffer`: `ByteAddressBuffer`, 16 bytes/splat. Used for temporal marginalization (velocity/motion).
+  - `KeyframeBuffer`: `ByteAddressBuffer`, 64 bytes/splat/frame. Stores baked splat data for keyframe-based 4D rendering.
+  - `Native4DBuffer`: `ByteAddressBuffer`, 80 bytes/splat. Stores dual-quaternion rotations and spherindrical harmonic coefficients for native 4D primitives.
+- **Culling/Visibility Data:**
+  - `SplatClusterIndexBuffer`: `StructuredBuffer<uint>`. Maps splat indices to clusters.
+  - `ClusterVisibilityBitmap`: `StructuredBuffer<uint>`. Bitmask of visible clusters.
+  - `LODClusterSelectedBitmap`: `StructuredBuffer<uint>`. Bitmask for LOD cluster visibility.
+  - `SelectedClusterBuffer`: `StructuredBuffer<uint>`. List of selected cluster indices.
+  - `CompactedSplatIndices`: `StructuredBuffer<uint>`. List of visible splat indices (used if compaction is enabled).
+- **Transform Matrices:**
+  - `LocalToWorld`: `FMatrix44f`.
+  - `WorldToPLY`: `FMatrix44f`. Transforms world directions to PLY/SH space for SH evaluation.
+  - `WorldToClip`: `FMatrix44f`.
+  - `WorldToView`: `FMatrix44f`.
+- **Camera/Scene Parameters:**
+  - `CameraPosition`: `FVector3f`.
+  - `ScreenSize`: `FVector2f`.
+  - `FocalLength`: `FVector2f`.
+  - `PreViewTranslation`: `FVector3f`. Used for velocity calculation; `TranslatedWorld = World + PreViewTranslation`.
+- **Control Flags & Counts:**
+  - `SplatCount`: Total splats to process.
+  - `UseKeyframes`, `UseTemporal`, `UseNative4D`: Boolean flags (uint32) enabling specific 4D modes.
+  - `KeyframeSplatCount` (M), `KeyframeFrameCount` (N), `KeyframeFrameTime`.
+  - `Native4DSplatCount`.
+  - `TimeDuration` (l).
+  - `SHOrder`, `NumSHCoeffs`, `SHBufferCoeffs`.
+  - `UseSHRendering`, `OpacityScale`, `SplatScale`.
+  - `MaxDrawDistance`, `FadeOutStartDistance`.
+  - `UseClusterCulling`, `UseLODRendering`, `UseCompaction`, `UseGlobalCompactionPath`.
+  - `VisibleSplatCount`, `OriginalSplatCount`, `MaxRenderBudget`.
+  - `GlobalBaseOffset`, `ProxyIndex`.
+  - `TimeWeightMinAlpha`.
+
+**Outputs:**
+- `ViewDataBuffer`: `RWStructuredBuffer<FGaussianSplatViewData>`. Contains screen-space position, covariance, color (evaluated SH), opacity, and depth/visibility flags for each active splat.
+
+### Data Structures
+The output structure `FGaussianSplatViewData` is not explicitly defined in the source notes, but based on the inputs and standard Gaussian Splatting rasterization requirements, it must contain at least:
+- `float3` or `float4` screen-space position (x, y, z/w).
+- `float3x3` or `float4x4` 2D covariance matrix (or its Cholesky decomposition/affine parameters).
+- `float3` or `float4` color (RGB/RGBA).
+- `float` opacity.
+- `uint` or `float` depth/z-value.
+- `uint` cluster index or visibility flags.
+
+### Parameters and Typical Values
+- `THREADGROUP_SIZE`: 256 (defined during shader compilation).
+- `SHOrder`: Typically 0, 1, 2, or 3.
+- `NumSHCoeffs`: Derived from `SHOrder`. For order $L$, the number of coefficients is $(L+1)^2$. Common values: 4 (order 1), 9 (order 2), 16 (order 3).
+- `MaxDrawDistance`: 0 means unlimited.
+- `MaxRenderBudget`: 0 means no cap.
+
+### Method Steps
+1. **Dispatch Setup:**
+   - The shader is dispatched with a thread group size of 256.
+   - The number of thread groups is determined by `SplatCount` (or `VisibleSplatCount` if compaction is used).
+
+2. **Splat Index Resolution:**
+   - If `UseCompaction` is true, the thread ID maps to an index in `CompactedSplatIndices` to retrieve the original splat index.
+   - If `UseGlobalCompactionPath` is true, the base offset for the view data buffer is read from `GlobalBaseOffsetsBuffer[ProxyIndex]`. Otherwise, `GlobalBaseOffset` is used directly.
+
+3. **4D State Evaluation (Position and Rotation):**
+   - Determine the active 4D mode based on flags: `UseNative4D` > `UseKeyframes` > `UseTemporal`.
+   - **Native 4D (`UseNative4D`):**
+     - Read dual-quaternion rotation and spherindrical SH from `Native4DBuffer`.
+     - Interpolate rotation and scale based on `CurrentTime` and `TimeDuration` (l).
+     - Apply temporal conditioning to the covariance.
+   - **Keyframe (`UseKeyframes`):**
+     - Calculate interpolation factor between `KeyframeFrameTime` and adjacent keyframes.
+     - Retrieve splat data from `KeyframeBuffer` for the two surrounding frames.
+     - Interpolate position, rotation (slerp), scale, and opacity.
+   - **Temporal Marginalization (`UseTemporal`):**
+     - Read velocity/motion from `TemporalBuffer`.
+     - Extrapolate position based on `CurrentTime` and `PreViewTranslation`.
+     - Adjust covariance to account for motion blur/temporal variance.
+   - **Static:**
+     - Read position, rotation, scale, opacity directly from `PackedSplatBuffer`.
+
+4. **Visibility Culling:**
+   - **Distance Culling:**
+     - Compute distance from `CameraPosition` to splat center.
+     - If distance > `MaxDrawDistance`, mark as invisible.
+     - If distance > `FadeOutStartDistance`, apply fade-out factor to opacity.
+   - **Cluster Culling (`UseClusterCulling`):**
+     - Retrieve cluster index from `SplatClusterIndexBuffer`.
+     - Check bit in `ClusterVisibilityBitmap` (and `LODClusterSelectedBitmap` if `UseLODRendering`).
+     - If cluster is not visible, mark splat as invisible.
+   - **LOD Rendering (`UseLODRendering`):**
+     - If enabled, determine if the splat is an LOD splat (index >= `OriginalSplatCount`).
+     - Use `LODClusterSelectedBitmap` to filter LOD splats.
+
+5. **Projection to Screen Space:**
+   - Transform splat center from world to clip space using `WorldToClip`.
+   - Project to screen coordinates using `ScreenSize` and `FocalLength`.
+   - Compute the 2D covariance matrix in screen space. This involves:
+     - Transforming the 3D covariance matrix using the Jacobian of the projection transformation.
+     - Approximating the 3D covariance with a 2D covariance for rasterization.
+
+6. **Spherical Harmonics Evaluation:**
+   - If `UseSHRendering` is true:
+     - Determine the view direction from the camera to the splat center.
+     - Transform the view direction to PLY/SH space using `WorldToPLY`.
+     - Evaluate the spherical harmonics using the coefficients from `SHBuffer` (or `Native4DBuffer` for native 4D).
+     - Apply `OpacityScale` and `SplatScale` to the final color and opacity.
+   - If `UseSHRendering` is false, use a base color (if available) or white.
+
+7. **Write View Data:**
+   - Write the computed screen-space position, covariance, color, opacity, and depth to `ViewDataBuffer` at the appropriate index (accounting for `GlobalBaseOffset` and compaction).
+   - If `MaxRenderBudget` is set and the current write index >= `MaxRenderBudget`, skip writing to prevent buffer overflows.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+THREADGROUP_SIZE = 256
+
+# Helper: Spherical Harmonics Evaluation
+def evaluate_sh(view_dir_ply, sh_coeffs, sh_order, num_coeffs):
+    """
+    Evaluates SH coefficients for a given view direction.
+    view_dir_ply: float3, direction in PLY/SH space.
+    sh_coeffs: array of floats, SH coefficients.
+    sh_order: uint, SH order.
+    num_coeffs: uint, number of coefficients.
+    Returns: float3 color.
+    """
+    # Implementation depends on SH order.
+    # For SHOrder 0: constant color.
+    # For SHOrder 1: linear terms.
+    # For SHOrder 2: quadratic terms.
+    # For SHOrder 3: cubic terms.
+    # This is a placeholder for the actual SH evaluation logic.
+    # The source notes do not provide the explicit SH polynomial formulas.
+    # [G] Standard SH evaluation: Y_l^m(theta, phi) * c_l^m, summed over l, m.
+    color = float3(0.0, 0.0, 0.0)
+    # ... actual SH evaluation code ...
+    return color
+
+# Helper: Dual Quaternion Interpolation
+def interpolate_dual_quaternion(dq1, dq2, t):
+    """
+    Interpolates dual quaternions.
+    dq1, dq2: float8 (quat + dual part).
+    t: float, interpolation factor.
+    Returns: float8 interpolated dual quaternion.
+    """
+    # [G] Standard dual quaternion interpolation: slerp for rotation, lerp for translation.
+    # This is a placeholder.
+    return dq1
+
+# Helper: Spherical Linear Interpolation (Slerp)
+def slerp(q1, q2, t):
+    """
+    Spherical linear interpolation of quaternions.
+    q1, q2: float4.
+    t: float.
+    Returns: float4 interpolated quaternion.
+    """
+    # [G] Standard slerp formula.
+    return q1
+
+# Main Compute Shader Entry Point
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void main(uint3 thread_id : SV_DispatchThreadID, uint3 group_id : SV_GroupID) {
+    uint global_idx = thread_id.x;
+    
+    // 1. Resolve Splat Index
+    uint splat_idx;
+    if (UseCompaction) {
+        splat_idx = CompactedSplatIndices[global_idx];
+    } else {
+        splat_idx = global_idx;
+    }
+    
+    // Check if splat_idx is within valid range
+    if (splat_idx >= SplatCount) {
+        return;
+    }
+    
+    // 2. Determine Base Offset for ViewDataBuffer
+    uint base_offset;
+    if (UseGlobalCompactionPath) {
+        base_offset = GlobalBaseOffsetsBuffer[ProxyIndex];
+    } else {
+        base_offset = GlobalBaseOffset;
+    }
+    
+    // 3. 4D State Evaluation
+    float3 pos;
+    float4 rot;
+    float3 scale;
+    float opacity;
+    float3 color;
+    
+    if (UseNative4D) {
+        // Native 4D: Dual Quaternion + Spherindrical SH
+        // Read from Native4DBuffer
+        // Interpolate based on CurrentTime and TimeDuration
+        // [G] Specific interpolation logic for native 4D is not detailed in sources.
+        // Assume interpolation of position, rotation (dual quat), scale, opacity.
+        pos = ...; 
+        rot = ...;
+        scale = ...;
+        opacity = ...;
+        // SH evaluation uses spherindrical harmonics
+        float3 view_dir = normalize(CameraPosition - pos);
+        float3 view_dir_ply = mul(WorldToPLY, float4(view_dir, 0.0)).xyz;
+        color = evaluate_sh(view_dir_ply, Native4DBuffer[splat_idx].sh_coeffs, SHOrder, NumSHCoeffs);
+    } else if (UseKeyframes) {
+        // Keyframe-based 4D
+        // Interpolate between KeyframeFrameTime and adjacent frames
+        // Read from KeyframeBuffer
+        // [G] Specific interpolation logic for keyframes is not detailed in sources.
+        pos = ...;
+        rot = slerp(...);
+        scale = ...;
+        opacity = ...;
+        // Standard SH evaluation
+        float3 view_dir = normalize(CameraPosition - pos);
+        float3 view_dir_ply = mul(WorldToPLY, float4(view_dir, 0.0)).xyz;
+        color = evaluate_sh(view_dir_ply, SHBuffer[splat_idx].sh_coeffs, SHOrder, NumSHCoeffs);
+    } else if (UseTemporal) {
+        // Temporal Marginalization
+        // Read from TemporalBuffer
+        // Extrapolate position based on CurrentTime and PreViewTranslation
+        // [G] Specific temporal marginalization logic is not detailed in sources.
+        pos = ...;
+        rot = ...;
+        scale = ...;
+        opacity = ...;
+        // Standard SH evaluation
+        float3 view_dir = normalize(CameraPosition - pos);
+        float3 view_dir_ply = mul(WorldToPLY, float4(view_dir, 0.0)).xyz;
+        color = evaluate_sh(view_dir_ply, SHBuffer[splat_idx].sh_coeffs, SHOrder, NumSHCoeffs);
+    } else {
+        // Static
+        // Read from PackedSplatBuffer
+        pos = PackedSplatBuffer[splat_idx].pos;
+        rot = PackedSplatBuffer[splat_idx].rot;
+        scale = PackedSplatBuffer[splat_idx].scale;
+        opacity = PackedSplatBuffer[splat_idx].opacity;
+        // Standard SH evaluation
+        float3 view_dir = normalize(CameraPosition - pos);
+        float3 view_dir_ply = mul(WorldToPLY, float4(view_dir, 0.0)).xyz;
+        color = evaluate_sh(view_dir_ply, SHBuffer[splat_idx].sh_coeffs, SHOrder, NumSHCoeffs);
+    }
+    
+    // Apply SplatScale and OpacityScale
+    scale *= SplatScale;
+    opacity *= OpacityScale;
+    
+    // 4. Visibility Culling
+    float dist = distance(pos, CameraPosition);
+    if (dist > MaxDrawDistance && MaxDrawDistance > 0.0) {
+        return; // Invisible
+    }
+    
+    if (dist > FadeOutStartDistance) {
+        opacity *= 1.0 - clamp((dist - FadeOutStartDistance) / (MaxDrawDistance - FadeOutStartDistance), 0.0, 1.0);
+    }
+    
+    if (UseClusterCulling) {
+        uint cluster_idx = SplatClusterIndexBuffer[splat_idx];
+        if (!(ClusterVisibilityBitmap[cluster_idx / 32] & (1 << (cluster_idx % 32)))) {
+            return; // Cluster not visible
+        }
+        if (UseLODRendering && splat_idx >= OriginalSplatCount) {
+            if (!(LODClusterSelectedBitmap[cluster_idx / 32] & (1 << (cluster_idx % 32)))) {
+                return; // LOD cluster not selected
+            }
+        }
+    }
+    
+    // 5. Projection
+    float4 clip_pos = mul(WorldToClip, float4(pos, 1.0));
+    float2 screen_pos = (clip_pos.xy / clip_pos.w) * ScreenSize;
+    
+    // Compute 2D Covariance
+    // [G] Standard Gaussian Splatting covariance projection:
+    // J = Jacobian of projection.
+    // Sigma_2D = J * Sigma_3D * J^T.
+    // Approximation for rasterization.
+    float3x3 cov_3d = ...; // From scale and rot
+    float3x3 cov_2d = ...; // Projected
+    float depth = clip_pos.z / clip_pos.w;
+    
+    // 6. Write View Data
+    uint write_idx = base_offset + global_idx;
+    
+    if (MaxRenderBudget == 0 || write_idx < MaxRenderBudget) {
+        ViewDataBuffer[write_idx] = FGaussianSplatViewData(
+            screen_pos,
+            cov_2d,
+            color,
+            opacity,
+            depth,
+            splat_idx
+        );
+    }
+}
+```
+
+### Edge Cases and Pitfalls
+- **Precision:** Floating-point precision issues may arise during 4D interpolation, especially for large time durations or extreme scales.
+- **Boundaries:** Ensure `SplatCount` and `VisibleSplatCount` are correctly synchronized with the input buffers.
+- **Degenerate Input:** If `MaxDrawDistance` is 0, distance culling is disabled. If `SHOrder` is 0, SH evaluation simplifies to a constant color.
+- **Buffer Overflows:** `MaxRenderBudget` is critical to prevent writing beyond the allocated `ViewDataBuffer` size.
+
+## Operating characteristics
+- **Time Complexity:** O(N), where N is the number of splats. Each splat is processed independently in parallel.
+- **Memory Complexity:** O(N) for the `ViewDataBuffer`. Input buffers are read-only.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales linearly with the number of splats and the complexity of 4D evaluation (native 4D is more expensive than keyframe or temporal).
+- **Strengths:** Handles complex 4D variations efficiently on the GPU. Supports advanced culling mechanisms.
+- **Limitations:** Requires DirectX 12 / Shader Model 6. Non-ASCII paths cause crashes. Limited support for proprietary 4D formats.
+- **When to Use:** Real-time rendering of 3D and 4D Gaussian Splatting scenes in Unreal Engine 5.
+- **When Not to Use:** Offline rendering, non-UE5 environments, or scenes with proprietary 4D formats not supported by the plugin.
+
+## Background
+The method is part of the OpenSplat4D plugin for Unreal Engine 5, developed by YuanBaoSMadLab. It supports various 4D Gaussian Splatting techniques, including Spacetime Gaussians (STG), Fudan 4DGS, and keyframe-based 4DGS. The plugin aims to provide real-time rendering capabilities for 4D Gaussian Splatting in game engines.
+
+## Sources
+[S1] YuanBaoSMadLab/OpenSplat4D, https://github.com/YuanBaoSMadLab/OpenSplat4D, fetched 2026-10-27 (unofficial)

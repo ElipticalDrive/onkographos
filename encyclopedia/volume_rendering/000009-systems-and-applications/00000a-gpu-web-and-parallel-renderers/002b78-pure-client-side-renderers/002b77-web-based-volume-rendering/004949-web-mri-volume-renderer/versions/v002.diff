@@ -1,0 +1,151 @@
+--- v001.md
++++ v002.md
+@@ -38,6 +38,54 @@
+ **Pseudocode:**
+ ```python
+-# Note: The source does not provide explicit pseudocode for the ray marching algorithm or occupancy grid construction.
+-# The following represents the high-level flow described in the source [S1, unofficial].
++def identity_quaternion():
++    return [1.0, 0.0, 0.0, 0.0]  # w, x, y, z
++
++def load_hdf5(url):
++    # Open network connection, read binary stream, parse HDF5 dataset structure [G]
++    return parse_hdf5_dataset(download_bytes(url))
++
++def build_occupancy_grid(volume, grid_res):
++    # Downsample volume to grid_res^3; mark cell occupied if any voxel > 0 [G]
++    stride = volume.shape[0] // grid_res
++    grid = zeros(grid_res, grid_res, grid_res)
++    for i in range(grid_res):
++        for j in range(grid_res):
++            for k in range(grid_res):
++                if max(volume[i*stride:(i+1)*stride, j*stride:(j+1)*stride, k*stride:(k+1)*stride]) > 0:
++                    grid[i, j, k] = 1
++    return grid
++
++def quaternion_multiply(q1, q2):
++    # Hamilton product for composing rotations [G]
++    w1, x1, y1, z1 = q1
++    w2, x2, y2, z2 = q2
++    return [w1*w2 - x1*x2 - y1*y2 - z1*z2,
++            w1*x2 + x1*w2 + y1*z2 - z1*y2,
++            w1*y2 - x1*z2 + y1*w2 + z1*x2,
++            w1*z2 + x1*y2 - y1*x2 + z1*w2]
++
++def map_quality_to_step_size(quality):
++    # Linear mapping: quality 0.0 -> 2.0, 1.0 -> 0.1 [G]
++    return 0.1 + 1.9 * (1.0 - quality)
++
++def unproject_screen_to_ray(sx, sy, view_proj_inv):
++    # Multiply inverse projection-view matrix by screen coordinates to get ray [G]
++    return transform_matrix_vector(view_proj_inv, [sx, sy, 0.0, 1.0])
++
++def ray_march(ray_origin, ray_dir, step_size, occupancy_grid, volume):
++    # March along ray, skip empty grid cells, sample volume until hit or exit [G]
++    t = 0.0
++    while t < 1000.0:
++        pos = ray_origin + ray_dir * t
++        grid_idx = world_to_grid_indices(pos, occupancy_grid)
++        if occupancy_grid[grid_idx] == 0:
++            t += step_size * 10.0
++            continue
++        val = trilinear_interpolate(volume, pos)
++        if val == 0:
++            t += step_size
++            continue
++        return pos, val
++    return None, 0.0
+ 
+ class WebMRIRenderer:
+@@ -47,43 +95,29 @@
+         self.data = None
+         self.occupancy_grid = None
+-        self.quaternion = IdentityQuaternion()
++        self.quaternion = identity_quaternion()
+         self.step_size = 1.0
+         self.opacity = 0.5
+ 
+     def load_volume(self):
+-        # Connect to server and load HDF5 file
+-        # The naive implementation loads the entire volume at once
+         self.data = load_hdf5(self.server_url + self.volume_path)
+-        # Construct occupancy grid to skip empty regions
+-        # Specific construction algorithm is not given
+-        self.occupancy_grid = build_occupancy_grid(self.data)
++        self.occupancy_grid = build_occupancy_grid(self.data, grid_res=64)
+ 
+-    def render_frame(self, camera_position, camera_direction):
+-        # Initialize WebGL context
+-        gl_init()
+-        
+-        # Set uniforms for shader
+-        gl_set_uniform("step_size", self.step_size)
+-        gl_set_uniform("opacity", self.opacity)
+-        gl_set_uniform("volume_data", self.data)
+-        gl_set_uniform("occupancy_grid", self.occupancy_grid)
+-        gl_set_uniform("camera_pos", camera_position)
+-        gl_set_uniform("camera_dir", camera_direction)
+-        
+-        # Execute ray marching shader
+-        gl_draw_fullscreen_quad()
+-        
+-        # Draw XYZ axes
+-        gl_draw_axes()
++    def render_frame(self, camera_pos, camera_dir, view_proj_inv):
++        # Create WebGL context, compile vertex/fragment shaders, bind attributes [G]
++        create_webgl_context()
++        compile_shaders()
++        bind_shader_uniforms(step_size=self.step_size, opacity=self.opacity,
++                             volume_data=self.data, occupancy_grid=self.occupancy_grid,
++                             camera_pos=camera_pos, camera_dir=camera_dir)
++        # Draw full-screen triangle strip to trigger fragment shader ray marching [G]
++        draw_fullscreen_triangle_strip()
++        # Draw 3D lines for X, Y, Z axes [G]
++        draw_3d_axes()
+ 
+     def update_rotation(self, delta_x, delta_y):
+-        # Update camera orientation using quaternion-based trackball rotation
+-        # to avoid gimbal lock
+-        self.quaternion = update_quaternion(self.quaternion, delta_x, delta_y)
++        delta_q = compute_trackball_rotation_delta(delta_x, delta_y)
++        self.quaternion = quaternion_multiply(self.quaternion, delta_q)
+ 
+     def update_quality(self, quality_value):
+-        # Map quality slider to step size
+-        # Lower quality value -> larger step size (faster)
+-        # Higher quality value -> smaller step size (slower)
+         self.step_size = map_quality_to_step_size(quality_value)
+ 
+@@ -92,13 +126,11 @@
+ 
+     def get_hover_info(self, screen_x, screen_y):
+-        # Cast ray from camera through screen coordinates
+-        # Find intersection with volume
+-        # Return voxel coordinates, value, and intensity
+-        # Note: Specific ray-casting math is not provided in source
+-        return get_voxel_info(screen_x, screen_y)
++        ray = unproject_screen_to_ray(screen_x, screen_y, self.view_proj_inv)
++        pos, val = ray_march(ray.origin, ray.direction, self.step_size, self.occupancy_grid, self.data)
++        return pos, val, compute_display_intensity(val, self.opacity)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory:** Raw MRI samples can be ~8GB. Loading the entire volume at once (naive server implementation) may cause memory issues on the client or server [S1, unofficial].
++*   **Memory:** Raw MRI samples can be ~8GB. The naive server implementation serves the entire HDF5 volume at once [S1, unofficial].
+ *   **Compatibility:** Initial attempts using WebGPU failed due to compatibility issues; OpenGL/WebGL was chosen as a fallback [S1, unofficial].
+ *   **Precision:** The source does not specify floating-point precision (e.g., float32 vs float16) for the volume data or calculations [S1, unofficial].
+@@ -107,11 +139,11 @@
+ 
+ ### Web-Based Volume Rendering
+-The parent category focusing on solutions to network latency and web performance for volumetric data [5039-web-based-volume-rendering.md].
++Focuses on solutions to network latency and web performance for volumetric data [5039-web-based-volume-rendering.md]. Choose when minimizing data transfer and optimizing browser rendering pipelines is required [G].
+ 
+ ### GPU-Accelerated Volume Rendering
+-General techniques for offloading ray marching to the GPU [5040-gpu-accelerated-volume-rendering.md].
++General techniques for offloading ray marching to the GPU [5040-gpu-accelerated-volume-rendering.md]. Choose when hardware acceleration is available and CPU-only rendering is too slow [G].
+ 
+ ### WebAssembly Graphics
+-Techniques for running high-performance graphics code in the browser via WASM [5041-webassembly-graphics.md].
++Techniques for running high-performance graphics code in the browser via WASM [5041-webassembly-graphics.md]. Choose when native-speed execution is needed in web environments without plugins [G].
+ 
+ ## Operating characteristics

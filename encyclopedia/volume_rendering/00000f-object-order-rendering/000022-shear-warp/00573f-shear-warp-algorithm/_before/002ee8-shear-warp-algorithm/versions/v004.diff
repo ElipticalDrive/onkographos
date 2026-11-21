@@ -1,0 +1,315 @@
+--- v003.md
++++ v004.md
+@@ -4,197 +4,169 @@
+ 
+ ## Overview
+-The Shear-Warp Algorithm is a fast, software-based volume rendering technique that reduces the computational complexity of arbitrary viewing angles by factorizing the viewing transformation into a 3D shear and a 2D warp [S1, S2, S6, unofficial]. It solves the problem of efficient memory access and interpolation for oblique views by transforming the volume into a sheared object space where viewing rays are perpendicular to the volume slices, allowing the use of fixed bilinear interpolation and scanline-based optimizations [S3, S9, unofficial]. Unlike standard ray-casting which performs trilinear interpolation per pixel, Shear-Warp substitutes this with two 2D resampling steps (shear and warp), making it significantly faster for pure software implementations, though it trades off some image quality due to the fixed sampling grid [S6, S10, unofficial].
++The Shear-Warp Algorithm is a fast, software-based volume rendering technique that reduces the number of resampling passes from three to two by factorizing the viewing transformation matrix into a 3D shear and a 2D warp [S1, S2, S12, unofficial]. It solves the problem of efficient rendering from arbitrary viewing angles by transforming the volume into a sheared object space where viewing rays are perpendicular to the data slices, allowing for fixed-weight bilinear interpolation and efficient run-length encoding (RLE) optimizations [S3, S9, unofficial]. Unlike pure ray-casting which performs trilinear interpolation per pixel, or splatting which distributes kernels, Shear-Warp exploits spatial coherence by processing slices in object order and warping the result in image order, making it historically the fastest purely software-based volume rendering algorithm for moderate datasets [S6, S12, unofficial].
+ 
+ ## How it works
+ The algorithm factorizes the general viewing transformation matrix $M_{view}$ into three components: a permutation matrix $P$, a shear matrix $S$, and a 2D warp matrix $M_{warp2D}$ [S2, S12, unofficial]:
+ $$ M_{view} = M_{warp2D} \cdot S \cdot P $$
+-The process consists of three phases: Permutation/Shear, Composite, and Warp [S2, S5, unofficial].
++The process consists of three phases: Permutation/Shear, Composite, and Warp [S2, unofficial][S5, unofficial].
+ 
+-### Inputs and Outputs
+-*   **Input:** 3D volume data $V$ (density/opacity values), viewing transformation matrix $M_{view}$, transfer function $TF$ (mapping density to color/opacity), and image resolution $(W, H)$.
+-*   **Output:** 2D image buffer $I_{final}$ of size $W \times H$.
++**Inputs and Outputs:**
++*   **Input:** 3D volume data $V(x,y,z)$, viewing transformation matrix $M_{view}$, transfer function (mapping density to color/opacity), and image dimensions $(W, H)$.
++*   **Output:** 2D image buffer $I(u,v)$ with color and opacity values.
+ 
+-### Data Structures
+-1.  **Volume Data:** Stored as a 3D array or 3D texture. For optimization, three Run-Length Encoded (RLE) structures are precomputed, one for each principal axis (X, Y, Z) [S3, S17, unofficial]. Each RLE entry stores a run of voxels with the same opacity status (transparent/non-transparent) and pre-computed shading index [S17, unofficial].
+-2.  **Intermediate Image:** A 2D buffer $I_{int}$ of size $W \times H$ (or adaptive size) storing accumulated color and opacity. To optimize compositing, opaque pixels store an offset to the next non-opaque pixel in the scanline, enabling early ray termination [S2, S11, unofficial].
++**Data Structures:**
++*   **Volume Data:** Stored as a 3D array or 3D texture. For optimization, three Run-Length Encoded (RLE) structures are pre-computed, one for each principal axis (X, Y, Z) [S3, S12, unofficial]. Each RLE entry contains a start index, length, and pre-classified opacity/density [S17, unofficial].
++*   **Intermediate Image:** A 2D buffer of size $(W, H)$ storing accumulated color and opacity. To support early ray termination, opaque pixels store an offset (pointer) to the next non-opaque pixel in the scanline [S2, S11, unofficial].
+ 
+-### Step 1: Permutation and Shear
+-1.  **Select Principal Axis:** Determine the principal viewing axis (the axis most aligned with the view direction) to minimize shear. This is done by finding the axis with the largest dot product with the view direction vector $v_o$ [S9, S12, unofficial]. Let this axis be $z'$ (mapped to standard Z via permutation $P$) [S12, unofficial].
+-2.  **Compute Shear Matrix:** Calculate shear coefficients $s_x, s_y$ based on the view direction $v_o = [v_{o,x}, v_{o,y}, v_{o,z}]^T$ in the permuted space [S5, S21, unofficial]:
+-    $$ s_x = -\frac{v_{o,x}}{v_{o,z}}, \quad s_y = -\frac{v_{o,y}}{v_{o,z}} $$
+-    The shear matrix $S$ for parallel projection is:
+-    $$ S = \begin{pmatrix} 1 & 0 & s_x & 0 \\ 0 & 1 & s_y & 0 \\ 0 & 0 & 1 & 0 \\ 0 & 0 & 0 & 1 \end{pmatrix} $$
+-    For perspective projection, an additional scaling factor $s_w$ is included to account for diverging rays [S2, S24, unofficial]:
+-    $$ S_{persp} = \begin{pmatrix} 1 & 0 & s'_x & 0 \\ 0 & 1 & s'_y & 0 \\ 0 & 0 & 1 & 0 \\ 0 & 0 & s'_w & 1 \end{pmatrix} $$
+-3.  **Shear and Resample:** Transform the volume slices into sheared object space. Each slice (perpendicular to the principal axis) is translated and resampled using bilinear interpolation to align with the intermediate image grid [S2, S12, unofficial]. For perspective projection, each slice is also scaled individually [S2, S11, unofficial].
++**Numbered Steps:**
+ 
+-### Step 2: Composite
+-1.  **Traverse Slices:** Iterate through the sheared volume slices in front-to-back order [S2, S12, unofficial].
+-2.  **Sample and Shade:** For each pixel in the intermediate image, sample the current sheared slice. If using pre-shading, retrieve the color/opacity from a lookup table based on the voxel's density and gradient [S17, unofficial].
+-3.  **Accumulate:** Use the Porter-Duff "over" operator to composite the sample into the intermediate image [S2, S8, unofficial]:
+-    $$ I_{int}[y, x] = I_{int}[y, x] + C \cdot \alpha \cdot (1 - A_{int}[y, x]) $$
+-    $$ A_{int}[y, x] = A_{int}[y, x] + \alpha \cdot (1 - A_{int}[y, x]) $$
+-    where $C$ is color, $\alpha$ is opacity, and $A_{int}$ is accumulated opacity [S2, unofficial].
+-4.  **Optimize:** Skip transparent voxel runs using the RLE structure. Skip opaque pixel runs in the intermediate image using the stored offsets [S2, S11, unofficial]. Terminate the ray early if $A_{int}[y, x]$ exceeds a threshold (e.g., 1.0) [S2, S11, unofficial].
++1.  **Permutation (Axis Selection):** Determine the principal viewing axis by finding the coordinate axis (X, Y, or Z) most aligned with the view direction vector $v_o$ [S12, unofficial]. Construct the permutation matrix $P$ to align this axis with the Z-axis of the intermediate coordinate system [S2, S12, unofficial].
++    *   If $v_o$ is closest to Z, $P = I$ (identity).
++    *   If $v_o$ is closest to X, swap X and Z axes.
++    *   If $v_o$ is closest to Y, swap Y and Z axes.
++    *   *Pitfall:* If the angle is near 45 degrees to any axis, artifacts increase; the choice is arbitrary but affects artifact direction [S9, unofficial][S15, book].
+ 
+-### Step 3: Warp
+-1.  **Compute Warp Matrix:** Calculate $M_{warp2D}$ to correct the distortion introduced by the shear [S3, S12, unofficial]:
+-    $$ M_{warp2D} = M_{view} \cdot S^{-1} \cdot P^{-1} $$
+-    (Note: Some sources define $M_{warp2D} = M_{view} \cdot M_{shear}^{-1}$ assuming $P$ is handled in the permutation step [S7, S21, unofficial]).
+-2.  **Resample:** Transform the intermediate image $I_{int}$ to the final image space $I_{final}$ using $M_{warp2D}$. This is a 2D resampling step, typically using bilinear interpolation [S2, S12, unofficial].
+-    *   **Software Warp:** Compute pixel coordinates directly [S24, unofficial].
+-    *   **Texture-Based Warp:** Render $I_{int}$ as a 2D texture onto a quad using the warp matrix as the model/view matrix, leveraging hardware interpolation [S24, unofficial].
++2.  **Shear and Resampling:** Transform the volume slices (perpendicular to the principal axis) into an intermediate 2D image space [S2, S12, unofficial].
++    *   Calculate shear coefficients $s_x, s_y$ from the view direction $v_o = [v_{o,x}, v_{o,y}, v_{o,z}]^T$ in the permuted space:
++        $$ s_x = -\frac{v_{o,x}}{v_{o,z}}, \quad s_y = -\frac{v_{o,y}}{v_{o,z}} $$
++    *   For parallel projection, the shear matrix is:
++        $$ S = \begin{pmatrix} 1 & 0 & s_x & 0 \\ 0 & 1 & s_y & 0 \\ 0 & 0 & 1 & 0 \\ 0 & 0 & 0 & 1 \end{pmatrix} $$
++    *   For perspective projection, an additional scaling factor is applied to each slice to account for foreshortening, and the shear matrix includes a perspective component $s'_w$ [S2, unofficial][S15, book]:
++        $$ S_{persp} = \begin{pmatrix} 1 & 0 & s'_x & 0 \\ 0 & 1 & s'_y & 0 \\ 0 & 0 & 1 & 0 \\ 0 & 0 & s'_w & 1 \end{pmatrix} $$
++    *   Resample each volume slice using bilinear interpolation into the intermediate image. The shear ensures that sampling rays are perpendicular to the slices, allowing fixed interpolation weights computed once per frame [S3, S9, unofficial].
++    *   *Optimization:* Use RLE to skip transparent voxel runs. Use the intermediate image's opaque-pixel offsets to skip occluded pixels [S2, S11, unofficial].
+ 
+-### Pseudocode
++3.  **Composite:** Composite the sheared slices in front-to-back order into the intermediate image using the Porter-Duff "over" operator [S2, S12, unofficial].
++    *   For each pixel $(u,v)$ in the intermediate image, accumulate color $C$ and opacity $\alpha$:
++        $$ C_{new} = C_{slice} \cdot \alpha_{slice} + C_{accum} \cdot (1 - \alpha_{slice}) $$
++        $$ \alpha_{new} = \alpha_{slice} + \alpha_{accum} \cdot (1 - \alpha_{slice}) $$
++    *   *Early Ray Termination:* If $\alpha_{accum}$ exceeds a user-defined threshold (e.g., 0.95), stop processing further slices for that pixel [S2, S11, unofficial].
++
++4.  **Warp:** Transform the intermediate image to the final image space using the 2D warp matrix $M_{warp2D}$ [S2, S12, unofficial].
++    *   Compute $M_{warp2D}$ as:
++        $$ M_{warp2D} = M_{view} \cdot S^{-1} \cdot P^{-1} $$
++        (Note: Some sources define $M_{warp2D} = M_{view} \cdot M_{shear}^{-1}$ assuming $P$ is handled in the permutation step [S7, S21, unofficial]).
++    *   Resample the intermediate image using bilinear interpolation to produce the final image [S2, S12, unofficial]. This step corrects the distortion introduced by the shear and applies the correct perspective/parallel projection [S22, unofficial].
++
++**Pseudocode:**
++
+ ```python
+ def shear_warp_render(volume, M_view, transfer_function, width, height):
+-    # 1. Permutation and Shear Setup
+-    # Determine principal axis (z) based on M_view
+-    P = compute_permutation_matrix(M_view)
+-    M_view_permuted = M_view * P
++    # 1. Permutation
++    # Determine principal axis (z, x, or y) based on view direction
++    view_dir = get_view_direction(M_view)
++    principal_axis = argmax(abs(view_dir)) # 0:x, 1:y, 2:z
+     
+-    # Extract view direction from permuted view matrix
+-    v_o = get_view_direction(M_view_permuted)
++    # Construct permutation matrix P to align principal axis with Z
++    P = get_permutation_matrix(principal_axis)
+     
+-    # Compute shear coefficients
+-    s_x = -v_o.x / v_o.z
+-    s_y = -v_o.y / v_o.z
++    # 2. Shear
++    # Calculate shear coefficients
++    # Transform view direction to permuted space if necessary, 
++    # but typically derived from M_view components directly
++    # vo = [m12*m23 - m22*m13, m21*m13 - m11*m23, m11*m22 - m21*m12]
++    vo = compute_view_direction_from_matrix(M_view)
+     
+-    # Construct shear matrix S
+-    S = Matrix4x4([
+-        [1, 0, s_x, 0],
+-        [0, 1, s_y, 0],
++    sx = -vo[0] / vo[2]
++    sy = -vo[1] / vo[2]
++    
++    # For perspective, additional scaling factors are needed per slice
++    # S_par for parallel projection
++    S = [
++        [1, 0, sx, 0],
++        [0, 1, sy, 0],
+         [0, 0, 1, 0],
+         [0, 0, 0, 1]
+-    ])
++    ]
+     
+-    # Precompute RLE for volume if not already done
+-    if not volume.rle_computed:
+-        volume.compute_rle(transfer_function)
++    # Pre-compute RLE structures for the volume along the principal axis
++    # This requires three copies of RLE data for X, Y, Z directions
++    rle_data = build_rle(volume, transfer_function, principal_axis)
++    
++    # Initialize intermediate image with opaque pixel offsets
++    intermediate_image = init_intermediate_image(width, height)
++    
++    # 3. Composite
++    # Iterate through slices in front-to-back order
++    for slice_idx in range(num_slices):
++        # Get slice data from RLE or volume
++        slice_data = get_slice_data(rle_data, slice_idx)
+         
+-    # Initialize intermediate image
+-    I_int = Image(width, height)
+-    I_int.clear()
++        # Resample slice into intermediate image using bilinear interpolation
++        # The shear transforms the slice coordinates
++        resample_slice_to_intermediate(slice_data, S, intermediate_image, slice_idx)
++        
++        # Early ray termination check can be integrated here
++        if check_early_termination(intermediate_image):
++            break
++            
++    # 4. Warp
++    # Compute warp matrix
++    S_inv = invert_matrix(S)
++    P_inv = invert_matrix(P)
++    M_warp2D = multiply_matrices(M_view, S_inv, P_inv)
+     
+-    # 2. Composite Phase
+-    # Iterate through slices along the principal axis (z)
+-    for z_slice in range(volume.depth):
+-        # Get slice data
+-        slice_data = volume.get_slice(z_slice)
+-        
+-        # Apply shear translation to slice coordinates
+-        # In sheared space, the slice is translated by (s_x * z, s_y * z)
+-        trans_x = s_x * z_slice
+-        trans_y = s_y * z_slice
+-        
+-        # Traverse the slice and intermediate image in sync
+-        # Use RLE to skip transparent voxels
+-        for run in slice_data.rle_runs:
+-            if run.is_transparent:
+-                continue
+-                
+-            # Map voxel coordinates to intermediate image coordinates
+-            # Due to shear, a voxel at (x, y, z) maps to (x + trans_x, y + trans_y)
+-            # We iterate over the bounding box of the run in image space
+-            
+-            for pixel_x, pixel_y in run.image_pixel_bounds:
+-                # Check if pixel is already opaque (early termination)
+-                if I_int.is_opaque(pixel_x, pixel_y):
+-                    # Skip to next non-opaque pixel using offset
+-                    pixel_x = I_int.get_next_non_opaque(pixel_x, pixel_y)
+-                    if pixel_x is None:
+-                        break
+-                        
+-                # Sample voxel value
+-                # Since rays are perpendicular to slices, we sample the center
+-                # or use bilinear interpolation if sub-pixel alignment is needed
+-                voxel_val = slice_data.sample(pixel_x - trans_x, pixel_y - trans_y)
+-                
+-                # Classify
+-                color, alpha = transfer_function(voxel_val)
+-                
+-                # Composite
+-                if alpha > 0:
+-                    I_int.composite(pixel_x, pixel_y, color, alpha)
+-                    
+-    # 3. Warp Phase
+-    # Compute warp matrix
+-    # M_warp2D = M_view * S^-1 * P^-1
+-    # Simplified: Warp corrects the shear distortion
+-    M_warp = compute_warp_matrix(M_view, S, P)
++    # Warp intermediate image to final screen
++    final_image = warp_image(intermediate_image, M_warp2D, width, height)
+     
+-    # Resample intermediate image to final image
+-    I_final = Image(width, height)
++    return final_image
++
++def resample_slice_to_intermediate(slice_data, S, intermediate_image, slice_idx):
++    # For each pixel in the intermediate image, map back to sheared volume coordinates
++    # and sample using bilinear interpolation
+     for y in range(height):
+         for x in range(width):
+-            # Map final image pixel to intermediate image coordinates
+-            src_x, src_y = M_warp.transform_point(x, y)
+-            
+-            # Bilinear interpolation from I_int
+-            color = I_int.bilinear_sample(src_x, src_y)
+-            I_final.set_pixel(x, y, color)
+-            
+-    return I_final
++            # Map pixel (x,y) to sheared volume coordinates
++            # This involves inverse warping or forward shearing depending on implementation
++            # Forward shearing is typically used: project slice vertices to intermediate space
++            pass
+ ```
+-
+-### Parameters and Edge Cases
+-*   **Interpolation:** Bilinear interpolation is used for resampling in both shear and warp steps [S2, S12, unofficial].
+-*   **Opacity Threshold:** A user-defined threshold determines when a voxel is considered transparent (for RLE skipping) and when a pixel is opaque (for early termination) [S2, S19, unofficial].
+-*   **Perspective Projection:** Requires scaling of slices. The scale factor for the closest slice is usually 1.0, and subsequent slices are scaled down [S12, unofficial]. This results in a many-to-one mapping from voxels to pixels, increasing computational cost [S2, S11, unofficial].
+-*   **45-Degree Artifacts:** Stair-casing artifacts appear when the viewing angle approaches 45 degrees relative to the principal axes [S1, S4, unofficial][S15, book]. This can be mitigated by inserting intermediate slices (virtual slices) between actual volume slices [S1, S22, unofficial].
+-*   **Memory:** Requires storing three RLE structures (one for each axis) if the view direction changes frequently, increasing memory overhead [S3, S9, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Parallel Perspective Shear-Warp Rendering](802-parallel-perspective-shear-warp-rendering.md)
+-Distributed rendering using MPI, partitioning intermediate image scanlines across nodes, requiring full volume copies on each node.
++A distributed technique that parallelizes the compositing step across multiple nodes using MPI, partitioning intermediate image scanlines rather than volume data. It is chosen when rendering high-resolution perspective volumes on clusters without dedicated graphics cards, avoiding OpenGL extension dependencies.
+ 
+ ### [CPU-based Shear-Warp](1161-cpu-based-shear-warp.md)
+-Sequential CPU implementation using 1D RLE for acceleration, avoiding complex 3D data structures.
++Implements the algorithm on a CPU using 1D RLE compression along principal axes. It distinguishes itself from GPU variants by its sequential execution model and from the original proposal by relying on 1D rather than 3D data structures.
+ 
+ ### [Permutation Proof for Projection and Warp](1702-permutation-proof-for-projection-and-warp.md)
+-Mathematical proof allowing permutation of projection and warp matrices ($W \cdot P \cdot S$) for optimization.
+-
+-### [Warped Isosurface Extraction (WISE)](1906-warped-isosurface-extraction-wise.md)
+-Uses shear-warp factorization to replace expensive perspective projections with cheaper orthographic-like projections for visibility culling.
+-
+-### [Fast volume rotation using binary shear-warp factorization](2006-fast-volume-rotation-using-binary-shear-warp-factorization.md)
+-Uses super cells to skip transparent regions for interactive rotation without specialized hardware.
++A mathematical proof showing that the projection matrix $P$ and warp matrix $W$ can be permuted ($W \cdot P \cdot S$), enabling specific optimization paths in the compositing step by allowing the projection to precede the warp.
+ 
+ ### [Spatially Partitioned Shear-Warp Method](3481-spatially-partitioned-shear-warp-method.md)
+-Parallel method partitioning volume into sub-volumes, rendering into baseplanes, and compositing via a binary tree.
++A parallel technique that partitions the volume into axis-aligned sub-volumes, renders each into intermediate baseplanes, and composites them via a binary tree. It allows view-independent partitioning and handles large datasets on distributed clusters with specific network optimizations.
+ 
+ ### [Shear-warp Factorization for Combined Surface/Volume Rendering](7392-shear-warp-factorization-for-combined-surface-volume-renderi.md)
+-Combines volume rendering for organs with surface rendering for instruments in surgical simulators.
++Combines volume rendering for complex organs with surface rendering for instruments (e.g., needles) in surgical simulators. It uses a shared intermediate sheared space and Z-buffer depth comparison to efficiently composite the two.
+ 
+ ### [GPU-based Shear-Warp](7425-gpu-based-shear-warp.md)
+-Maps the shear and warp steps to vertex/fragment shaders for real-time rendering.
++Maps the slice-based compositing and warping steps onto programmable graphics hardware pipelines using vertex and fragment shaders. It leverages parallel shader execution for shading and compositing, differing from CPU-based variants.
++
++### [Optimization Technique](7922-optimization-technique.md)
++Introduces hardware-aware shortcuts like binary masks or dynamic scaling to reduce computational complexity, distinct from the base algorithm's transformation factorization.
+ 
+ ### Texture-Based Warp
+-Uses 2D texturing hardware (OpenGL) to perform the final warp step by rendering the intermediate image as a textured quad with the warp matrix as the model/view matrix [S24, unofficial]. Faster for large images but constrained by power-of-two texture sizes [S24, unofficial].
++Uses 2D texturing hardware (OpenGL) to perform the final warp step by drawing the intermediate image as a textured quad. It is faster for large images but constrained by power-of-two texture size requirements [S24, unofficial].
+ 
+ ### Software Warp
+-Computes the final 2D image using pure software arithmetic (8-14 FLOPs per pixel) and pastes it to the viewport [S24, unofficial]. Faster for small images but lacks automatic object ordering for intersecting polygons [S24, unofficial].
+-
+-### Intermediate Image Size Adaptation
+-Dynamically adjusts the resolution of the intermediate image to maintain target frame rates (5-10 fps), using footprint-based interpolation for downsizing and bilinear for upsizing [S24, unofficial].
++Computes the final 2D image using a pure software algorithm. It is faster for small images but lacks automatic object ordering for intersecting polygons [S24, unofficial].
+ 
+ ### GPU-Accelerated On-the-Fly Deskewing
+-Real-time transformation of Oblique Plane Microscopy (OPM) data using GPU acceleration to produce extended depth of field projections [S18, abstract only, unofficial].
++An open-source package for real-time transformation of Oblique Plane Microscopy (OPM) data, producing extended depth of field projections using GPU acceleration [S18, abstract only, unofficial].
+ 
+ ### Resampling from Sheared Space
+-Optimized traversal using binary volume masks to skip empty regions, calculating sample locations via exact translation values and bilinear interpolation [S8, unofficial].
++A specific optimization where the first non-transparent cell is found using a depth routine on a sheared mask, and bilinear interpolation is used for sampling, with binary volume skipping for empty regions [S8, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot W \cdot H)$ where $N$ is the number of slices, $W, H$ are image dimensions. The RLE optimization reduces the effective number of samples by skipping transparent voxels and opaque pixels [S2, S11, unofficial].
+-*   **Memory Complexity:** $O(V + W \cdot H)$ where $V$ is volume size. Requires storage for the volume, three RLE structures (optional but recommended for speed), and the intermediate image [S3, S9, unofficial].
+-*   **Performance:** Historically one of the fastest software-based volume rendering methods, achieving sub-second frame rates for 256^3 datasets on 1990s workstations (e.g., SGI Indigo) [S6, S24, unofficial]. Modern GPU implementations are significantly faster [S7, unofficial].
+-*   **Strengths:** High performance for software rendering; efficient memory access patterns (scanline-based); supports early ray termination; simple implementation [S2, S3, unofficial].
+-*   **Limitations:** Reduced image quality compared to ray-casting due to fixed bilinear interpolation and lack of adaptive sampling; artifacts near 45-degree viewing angles; perspective projection is slower due to slice scaling [S1, S6, S11, unofficial].
+-*   **When to use:** Real-time visualization on CPUs without GPU support; interactive rotation of moderate-sized volumes; scenarios where speed is prioritized over high-fidelity shading [S6, S24, unofficial].
+-*   **When not to use:** High-quality medical imaging requiring accurate shading and anti-aliasing; very large datasets where memory overhead of RLE is prohibitive; perspective views requiring high fidelity [S6, S10, unofficial].
++*   **Time Complexity:** $O(N \cdot W \cdot H)$ where $N$ is the number of slices, and $W, H$ are image dimensions. The RLE optimization reduces the effective number of samples by skipping transparent voxels and opaque pixels [S2, S11, unofficial].
++*   **Memory Complexity:** $O(V + W \cdot H)$ where $V$ is the volume size. Requires storing the volume and three RLE structures (one per axis), leading to high memory overhead (up to 4x the volume size) [S9, S12, unofficial].
++*   **Measured Performance:** Renders a $256^3$ voxel dataset in ~1 second for parallel projection and ~3 seconds for perspective projection on an SGI Indigo R4000 [S1, S24, unofficial]. On modern hardware, it achieves sub-second frame rates for moderate datasets [S6, unofficial].
++*   **Strengths:** Extremely fast software implementation; exploits spatial coherence; supports early ray termination; simple to implement on CPUs [S2, S6, unofficial].
++*   **Limitations:** Reduced image quality compared to ray-casting due to bilinear interpolation and fixed sampling rate; stair-casing artifacts near 45-degree viewing angles; perspective projection is slower due to diverging rays and many-to-one voxel-to-pixel mapping [S1, S4, S11, unofficial].
++*   **When to Use:** Real-time or interactive software rendering on CPUs where hardware acceleration is unavailable or insufficient; moderate dataset sizes [S6, S12, unofficial].
++*   **When Not to Use:** High-quality medical imaging requiring trilinear interpolation; very large datasets exceeding memory limits; scenarios requiring dynamic transfer functions without recomputing RLE structures [S9, S12, unofficial].
+ 
+ ## Background
+-The Shear-Warp algorithm was proposed by Pierre Lacroute and Marc Levoy in 1994 [S1, S3, S6, unofficial]. It was designed to provide a fast, purely software-based volume rendering solution that could run on standard workstations without specialized hardware [S6, S23, unofficial]. The method builds on the observation that viewing transformations can be decomposed into shear and warp components, allowing the use of efficient 2D image processing techniques for 3D volume rendering [S2, S8, unofficial]. It has been widely used in early interactive volume visualization systems and influenced subsequent hardware implementations like VolumePro [S6, unofficial][S15, book].
++The Shear-Warp algorithm was proposed by Lacroute and Levoy in 1994 [S1, S3, S6, unofficial]. It was developed to address the computational cost of volume rendering on standard workstations, aiming to be the fastest purely software-based method [S6, unofficial]. The algorithm factorizes the viewing transformation to exploit memory alignment and fixed scaling factors, reducing the need for expensive trilinear interpolation [S3, S9, unofficial]. It has been used in systems like Volpack and influenced hardware implementations such as VolumePro [S6, unofficial][S15, book].
+ 
+ ## Sources

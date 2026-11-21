@@ -1,0 +1,75 @@
+# Wavelet-to-Gaussian Transition Bank
+
+Also called: Wavelet-to-Gaussian Transition, W2G Bank
+
+## Overview
+The Wavelet-to-Gaussian Transition Bank is a method for constructing Gaussian surrogates for wavelet kernels by fitting a single canonical Gaussian per subband and obtaining others via spatial translation, avoiding redundant fitting for every wavelet kernel [S1, unofficial]. It solves the computational bottleneck of independently fitting Gaussians to every wavelet coefficient in a multi-scale decomposition, enabling efficient analytical conversion from wavelet bases to Gaussian primitives for real-time volumetric visualization [S1, unofficial]. It differs from sibling methods like [GSGEN](8985-gsgen.md) or [Feed-forward and Generalizable Prediction](15832-feed-forward-and-generalizable-prediction.md) by relying on precomputed analytical mappings derived from the translation properties of the discrete wavelet transform (DWT) rather than learned neural networks or random sampling [S1, unofficial].
+
+## How it works
+**Inputs:** A 3D radiance field decomposed into a multi-scale wavelet representation $\Phi$ using a $J$-level 3D Discrete Wavelet Transform (DWT) [S1, unofficial]. The DWT uses biorthogonal 4.4 wavelets with symmetric or periodic boundary extensions [S1, unofficial].
+
+**Outputs:** A Wavelet-to-Gaussian Transition Bank containing canonical Gaussian parameters $(w_{j,o}, g_{j,o})$ for each decomposition level $j \in \{0, \dots, J-1\}$ and orientation $o \in \{L, H\}^3$, where $L$ denotes low-pass and $H$ denotes high-pass filtering [S1, unofficial].
+
+**Data Structures:**
+The transition bank is a lookup table indexed by $(j, o)$. Each entry stores:
+- $w_{j,o} \in \mathbb{R}^4$: A scalar weight vector (broadcast to 4 channels: R, G, B, $\alpha$) [S1, unofficial].
+- $g_{j,o}(x)$: A canonical Gaussian primitive defined by centroid $u_{j,o} \in \mathbb{R}^3$ and covariance $\Sigma_{j,o} \in \mathbb{R}^{3 \times 3}$ [S1, unofficial].
+
+**Steps:**
+
+1.  **Define Canonical Wavelet Kernel:**
+    Define the canonical wavelet kernel $\hat{\psi}_{j,o}(x)$ as the spatial footprint of a unit impulse in the wavelet domain [S1, unofficial]. Let $W^{-1}$ be the inverse DWT. For a decomposition level $j$ and orientation $o$, define a one-hot impulse $e_{j,o,k}(\kappa)$ at index $k$ in the wavelet domain [S1, unofficial]. The canonical kernel corresponds to the impulse at the origin ($k=(0,0,0)$):
+    $$ \hat{\psi}_{j,o}(x) = W^{-1} e_{j,o,(0,0,0)}(\kappa) $$
+    [S1, unofficial]
+
+2.  **Compute Normalized Magnitude Distribution:**
+    Calculate the normalized magnitude distribution $W(x)$ of the canonical kernel to identify the dominant lobe [S1, unofficial]:
+    $$ W(x) = \frac{|\hat{\psi}_{j,o}(x)|}{\sum_{u \in D} |\hat{\psi}_{j,o}(u)|} $$
+    where $D$ is the spatial domain [S1, unofficial].
+
+3.  **Define Region of Interest (ROI):**
+    Select a subset of spatial points $R$ corresponding to the dominant lobe using a relative threshold $\tau \in (0, 1)$ [S1, unofficial]:
+    $$ R = \{ x \in D : W(x) > \tau \max_{u \in D} W(u) \} $$
+    [S1, unofficial]
+
+4.  **Estimate Centroid and Covariance:**
+    Within the ROI $R$, estimate the centroid $u_{j,o}$ and covariance $\Sigma_{j,o}$ of the canonical Gaussian using weighted moments of $W(x)$ [S1, unofficial]:
+    $$ u_{j,o} = \frac{\sum_{x \in R} W(x) x}{\sum_{x \in R} W(x)} $$
+    $$ \Sigma_{j,o} = \frac{\sum_{x \in R} W(x) (x - u_{j,o})(x - u_{j,o})^\top}{\sum_{x \in R} W(x)} $$
+    [S1, unofficial]
+
+5.  **Fit Canonical Gaussian:**
+    Define the canonical Gaussian $g_{j,o}(x)$ using the estimated parameters:
+    $$ g_{j,o}(x) = \mathcal{N}(x; u_{j,o}, \Sigma_{j,o}) $$
+    [S1, unofficial]
+
+6.  **Compute Scalar Weight:**
+    Determine the weight $w_{j,o}$ by minimizing the L2 discrepancy between the wavelet magnitude and the scaled Gaussian, using ridge regression to preserve energy [S1, unofficial]. Let $Y, G \in \mathbb{R}^N$ be sampled magnitudes of $\hat{\psi}_{j,o}$ and $g_{j,o}$ within the ROI [S1, unofficial]:
+    $$ w_{j,o} = \arg \min_w ||Y| - w G||_2^2 + \lambda w^2 $$
+    where $\lambda$ is a small regularization term [S1, unofficial]. The resulting scalar is broadcast to four channels [S1, unofficial].
+
+7.  **Construct Transition Bank:**
+    Store the pair $(w_{j,o}, g_{j,o}(x))$ for each $(j, o)$ [S1, unofficial].
+
+8.  **Translate for Arbitrary Positions:**
+    For any wavelet coefficient at spatial index $k$ in subband $(j, o)$, the Gaussian approximation is obtained by translating the canonical Gaussian [S1, unofficial]:
+    $$ g_{j,o,k}(x) = T_{2^j k + \delta_{j,o}} g_{j,o}(x) $$
+    where $T_\Delta f(x) = f(x - \Delta)$ is the translation operator [S1, unofficial].
+
+**Parameters:**
+-   $\tau$: Relative threshold for ROI selection. Not given in the sources.
+-   $\lambda$: Regularization term for ridge regression. Not given in the sources.
+-   $\delta_{j,o}$: Subpixel offset determined by the phase delay and half-sample shift of the analysis-synthesis filter pair. For biorthogonal 4.4 wavelets, $\delta_{j,o} \approx (1/2, 1/2, 1/2)$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+-   The method assumes approximately linear-phase filter banks (e.g., biorthogonal wavelets) to guarantee that wavelets sharing the same scale and orientation are spatially consistent translations of the canonical response [S1, unofficial].
+-   The ROI threshold $\tau$ must be chosen to capture the dominant lobe without including noise or secondary lobes, which would distort the covariance estimate [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The method was introduced in "Variable Basis Mapping for Real-Time Volumetric Visualization" [S1, unofficial]. It addresses the need for efficient real-time rendering by replacing expensive per-coefficient fitting with a precomputed bank of canonical Gaussians derived from wavelet properties [S1, unofficial].
+
+## Sources
+[S1] Variable Basis Mapping for Real-Time Volumetric Visualization, https://doi.org/10.48550/arxiv.2601.09417, fetched 2026-10-26 (unofficial)

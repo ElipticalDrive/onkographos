@@ -1,0 +1,115 @@
+--- v002.md
++++ v003.md
+@@ -4,18 +4,18 @@
+ 
+ ## Overview
+-Simulation Grid Cell Skipping is an optimization technique for surface extraction that accelerates iteration over voxel columns by skipping over empty and fully occupied simulation grid cells, processing only partially filled cells [S1]. It differs from standard voxel traversal by leveraging coarse-grained cell status to bypass uniform regions, building on the THREAD System's ray-marching framework [3743-thread-system.md].
++Simulation Grid Cell Skipping is an optimization technique for surface extraction that accelerates iteration over voxel columns by skipping over empty and fully occupied simulation grid cells, processing only partially filled cells [S1]. It builds on the THREAD System's ray-marching framework [3743-thread-system.md] to bypass uniform regions during extraction.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A simulation grid with cell status (empty, full, or partial); view rays for each voxel column [S1].
+-- Output: A list of voxels within partially filled cells for surface extraction [S1].
++- Input: A regular simulation grid where each cell is classified as empty, full, or partial; view rays for each voxel column [S1].
++- Output: A sequence of voxels located within partially filled cells, ready for surface extraction [S1].
+ 
+ **Data Structures:**
+-- Simulation Grid: A regular 3D grid where each cell stores a status flag: `EMPTY`, `FULL`, or `PARTIAL` [S1].
+-- Voxel Column: A sequence of voxels along a view ray [S1].
+-- Packed Machine Words: Bits representing voxel occupancy or cell status, processed in chunks for efficiency [S1].
++- Simulation Grid: A regular 3D grid storing a status flag per cell (`EMPTY`, `FULL`, or `PARTIAL`) [S1].
++- Voxel Column: A linear sequence of voxels aligned with a view ray [S1].
++- Packed Machine Words: Bitmasks representing voxel occupancy or cell status, processed in chunks to leverage hardware bit-counting intrinsics [S1].
+ 
+ **Numbered Steps:**
+-1. For each voxel column, initialize a ray marcher along the view ray corresponding to that column [S1].
++1. For each voxel column, initialize a ray marcher along the corresponding view ray [S1].
+ 2. Iterate over packed machine words rather than single bits, using bit counting intrinsics to quickly determine the next relevant bits to be considered [S1].
+ 3. March along the view ray through the simulation grid [S1].
+@@ -25,17 +25,18 @@
+ 
+ **Formulas:**
+-- Cell Status Determination: During simulation, determine if a cell is empty, full, or partial based on particle presence [S1].
+-- Ray Marching Step: Advance ray by cell extent ratio, keeping $\alpha$ constant throughout the perspective grid using logarithmic depth partitioning [S1].
++- Logarithmic Depth Partitioning: Cell extent ratios are kept constant so that $\alpha$ remains uniform throughout the perspective grid, allowing all but one logarithm to be precomputed [S1].
++- Cell Status Classification: A cell is marked `PARTIAL` if it contains particles overlapping its boundaries; `FULL` if entirely filled with incompressible fluid particles; `EMPTY` otherwise [S1].
+ 
+ **Parameters:**
+-- Cell Status Thresholds: Not given in the sources.
+-- Bit Counting Intrinsics: Hardware-dependent (e.g., `__builtin_popcount` on GCC/Clang) [S1].
++- Bit Counting Intrinsics: Hardware-dependent operations (e.g., `__builtin_popcount` on GCC/Clang) used to count set bits in packed words [S1].
+ 
+ **Edge Cases and Pitfalls:**
+ - Do not skip cells that have partially filled neighbors to avoid cutting off detailed boundary surfaces potentially formed by particles overlapping cell boundaries; only inner full and empty cells may be skipped [S1].
+-- Precision issues in ray marching may cause missed intersections if cell boundaries are not handled correctly [G].
++- Ray marching precision must be sufficient to correctly identify cell boundaries when resuming iteration after skipping uniform regions [G].
+ 
+ **Pseudocode:**
+ ```python
++EMPTY, FULL, PARTIAL = 0, 1, 2
++
+ def simulate_grid_cell_skipping(simulation_grid, voxel_columns):
+     voxels_to_process = []
+@@ -43,12 +44,17 @@
+         current_cell = ray.start_cell
+         while current_cell is not None:
++            # Check if any neighbor is partial; if so, do not skip this cell
+             has_partial_neighbor = any(
+-                simulation_grid[n].status == PARTIAL for n in get_26_neighbors(current_cell)
++                simulation_grid[n].status == PARTIAL
++                for n in get_26_neighbors(current_cell)
+             )
+             if current_cell.status in (EMPTY, FULL) and not has_partial_neighbor:
++                # Skip uniform region by advancing ray to next cell
+                 current_cell = advance_ray_to_next_cell(current_cell, ray.direction, simulation_grid)
+                 continue
++            # Process voxels in the current cell
+             voxels = iterate_voxels_in_cell(current_cell, ray)
+             voxels_to_process.extend(voxels)
++            # Move to next cell
+             current_cell = advance_ray_to_next_cell(current_cell, ray.direction, simulation_grid)
+     return voxels_to_process
+@@ -60,7 +66,9 @@
+ 
+ def advance_ray_to_next_cell(current_cell, direction, simulation_grid):
+-    next_pos = (current_cell.x + direction.x * current_cell.extent,
+-                current_cell.y + direction.y * current_cell.extent,
+-                current_cell.z + direction.z * current_cell.extent)
++    # Step along the ray direction in grid coordinates
++    step_x = 1 if direction.x > 0 else (-1 if direction.x < 0 else 0)
++    step_y = 1 if direction.y > 0 else (-1 if direction.y < 0 else 0)
++    step_z = 1 if direction.z > 0 else (-1 if direction.z < 0 else 0)
++    next_pos = (current_cell.x + step_x, current_cell.y + step_y, current_cell.z + step_z)
+     if not (0 <= next_pos[0] < simulation_grid.width and
+             0 <= next_pos[1] < simulation_grid.height and
+@@ -73,6 +81,12 @@
+     # using bit counting intrinsics to quickly determine the next relevant bits
+     voxels = []
+-    # Implementation depends on specific hardware bit-packing layout
+-    # Not given in the sources.
++    packed_words = cell.packed_occupancy_words
++    for word in packed_words:
++        while word != 0:
++            # Find index of least significant set bit (hardware intrinsic equivalent)
++            bit_index = (word & -word).bit_length() - 1
++            voxels.append(ray.get_voxel(bit_index))
++            # Clear the processed bit
++            word &= word - 1
+     return voxels
+ ```
+@@ -84,15 +98,6 @@
+ 
+ ## Operating characteristics
+-- Time Complexity: Not given in the sources.
+-- Memory Complexity: Not given in the sources.
+-- Measured Performance: Not given in the sources.
+-- Scaling: Not given in the sources.
+-- Strengths: Not given in the sources.
+-- Limitations: Not given in the sources.
+-- When to Use: SPH simulations with regular grids and distinct empty/full/partial regions [S1].
+-- When Not to Use: Not given in the sources.
+ 
+ ## Background
+-Not given in the sources.
+ 
+ ## Sources

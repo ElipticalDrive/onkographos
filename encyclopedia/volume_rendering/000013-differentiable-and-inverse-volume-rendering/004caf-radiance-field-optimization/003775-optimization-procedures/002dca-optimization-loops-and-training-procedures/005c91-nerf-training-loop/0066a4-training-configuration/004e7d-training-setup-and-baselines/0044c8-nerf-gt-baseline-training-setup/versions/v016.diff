@@ -1,0 +1,92 @@
+--- v015.md
++++ v016.md
+@@ -1,42 +1,63 @@
+ # NeRF-GT Baseline Training Setup
+-Also called: NeRF-GT, HDR-NeRF Baseline, Vanilla NeRF with HDR
++
++Also called: NeRF-GT
++
+ ## Overview
+-The NeRF-GT baseline establishes a reference for training Neural Radiance Fields (NeRF) using High Dynamic Range (HDR) input views. It solves the problem of establishing a performance upper bound for novel view synthesis by training directly on HDR data, where predicted HDR pixel values are tone-mapped to Low Dynamic Range (LDR) for loss computation against tone-mapped ground truth [S1]. It differs from standard LDR training by attempting to encode the full dynamic range of the scene, though this approach is noted to be difficult due to the high dynamic range causing poor encoding of scene areas [S1].
++The NeRF-GT baseline establishes a standard reference for training Neural Radiance Fields (NeRF) by optimizing a neural representation to minimize the photometric difference between rendered images and ground truth data. It serves as the foundational training configuration for comparing advanced methods, such as HDR-NeRF, by strictly adhering to the original NeRF protocol: uniform ray sampling, multi-resolution hierarchical sampling, and standard MSE loss on LDR views. It differs from HDR-specific variants by not explicitly modeling high dynamic range exposure fusion during the optimization loop, instead treating the input as standard low dynamic range imagery.
++
+ ## How it works
+-### Inputs and outputs
+-- **Inputs**: HDR views of the scene (or consistently exposed LDR views considered as HDR proxies), camera poses, and intrinsics.
+-- **Outputs**: A trained NeRF model capable of rendering HDR views, and the associated training metrics.
++The method implements the standard NeRF training pipeline as described in the original NeRF paper [S2, unofficial].
+ 
+-### Data structures
+-The method relies on the standard NeRF data structures defined in [52-volume-rendering.md], specifically the volume representation (MLP mapping $(x, y, z, \theta, \phi) \to (\sigma, c)$) and the ray sampling strategy.
++**Inputs and Outputs:**
++- **Input:** A set of $N$ calibrated images with known camera poses and intrinsics. Resolution is fixed at $800 \times 600$ pixels [S2, unofficial].
++- **Output:** A trained MLP representing the volumetric scene function $\mathbf{F}_\Theta$, mapping 3D coordinates and viewing directions to density $\sigma$ and color $\mathbf{c}$.
+ 
+-### Steps
+-1. **Train the NeRF model** using HDR views as input [S1].
+-2. **Render and Tone-map**: During training, render the predicted HDR pixel values for each ray. Apply a tone-mapping operator to convert these HDR predictions into LDR pixel values [S1].
+-3. **Compute Loss**: Apply the same tone-mapping operator to the ground truth LDR views. Compute the photometric loss (typically Mean Squared Error) between the tone-mapped predicted LDR values and the tone-mapped ground truth LDR values [S1].
++**Data Structures:**
++- **Ray Batch:** A tensor of shape $(B, 3)$ containing the origin $\mathbf{o}$ and direction $\mathbf{d}$ for $B$ rays.
++- **Sample Points:** A tensor of shape $(B, N_{samples}, 3)$ containing 3D points along the rays.
++- **Network Input:** Concatenation of position $\mathbf{x}$ and viewing direction $\mathbf{d}$, processed through positional encoding (implied by standard NeRF implementation [S2, unofficial]).
+ 
+-### Parameters
+-- **Sampling**: 64 samples along each ray in the coarse phase and 128 samples in the fine phase [S2, unofficial].
+-- **Batch Size**: 2,048 rays processed in each batch [S2, unofficial].
+-- **Resolution**: 800 × 600 pixels [S2, unofficial].
+-- **Iterations**: Training stopped after 200,000 solver steps [S2, unofficial].
++**Parameters:**
++- **Coarse Samples ($N_c$):** 64 samples per ray [S2, unofficial].
++- **Fine Samples ($N_f$):** 128 samples per ray [S2, unofficial].
++- **Batch Size ($B$):** 2,048 rays per batch [S2, unofficial].
++- **Total Steps:** 200,000 solver steps [S2, unofficial].
++- **Resolution:** $800 \times 600$ pixels [S2, unofficial].
+ 
+-### Pitfalls
+-- **HDR Training Failure**: Training directly on HDR views can fail to encode all areas of a scene well, even when using tone-mapped colors for loss calculation. This is attributed to the high dynamic range of the scenes [S1].
++**Algorithm:**
++1. **Ray Generation:** For each training iteration, generate a batch of $B$ rays by randomly selecting pixels from the training images and computing their camera rays using intrinsic and extrinsic parameters.
++2. **Coarse Sampling:** Sample $N_c = 64$ points uniformly along each ray within the scene bounds (typically $[-1, 1]$ or scene-specific bounds).
++3. **Coarse Network Query:** Query the coarse MLP $\mathbf{F}_{\Theta_c}$ at each sampled point to obtain density $\sigma_i$ and color $\mathbf{c}_i$.
++4. **Importance Sampling:** Use the coarse densities to compute transmittance $T_i$ and weights $w_i$. Resample $N_f = 128$ points along each ray, concentrating samples near high-density regions (edges of objects) [S2, unofficial].
++5. **Fine Network Query:** Query the fine MLP $\mathbf{F}_{\Theta_f}$ at the resampled points to obtain $\sigma_i$ and $\mathbf{c}_i$.
++6. **Volume Rendering:** Compute the predicted pixel color $\hat{\mathbf{C}}$ using the discretized volume rendering equation:
++   $$ \hat{\mathbf{C}}(\mathbf{r}) = \sum_{i=1}^{N_f} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
++   where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ and $\delta_i$ is the distance between adjacent samples.
++7. **Loss Computation:** Compute the Mean Squared Error (MSE) between the rendered color $\hat{\mathbf{C}}$ and the ground truth pixel color $\mathbf{C}_{gt}$:
++   $$ \mathcal{L} = \frac{1}{B} \sum_{k=1}^{B} \| \hat{\mathbf{C}}_k - \mathbf{C}_{gt, k} \|^2 $$
++8. **Optimization:** Update network weights $\Theta$ using the Adam optimizer with gradients computed via backpropagation through the rendering equation.
++9. **Iteration:** Repeat steps 1-8 for 200,000 steps [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **High Dynamic Range Scenes:** Training directly on HDR views can fail to encode all scene areas well due to the high dynamic range, even when using tone-mapped colors for loss calculation [S1]. The NeRF-GT baseline typically assumes consistent LDR exposure or HDR views treated as the upper bound, but standard LDR training may struggle with extreme contrast if not tone-mapped appropriately [S1].
++- **Convergence:** The method requires a fixed number of iterations (200,000) to converge, as recommended by the original authors [S2, unofficial].
+ 
+ ## Subtopics
+ 
+-### NeRF Baseline
+-The standard NeRF baseline typically refers to training on LDR data. In the context of the NeRF-GT comparison, the "NeRF Baseline" serves as the standard LDR training configuration, whereas NeRF-GT specifically utilizes HDR inputs to test the limits of dynamic range encoding [S1][S2, unofficial].
++### DBARF
++DBARF jointly optimizes Generalizable Neural Radiance Fields (GeNeRFs) and relative camera poses in a self-supervised manner without requiring accurate initial poses [S1]. It differs from BARF, which relies on coarse-to-fine training with positional encodings absent in GeNeRFs, by using a RAFT-like recurrent network to implicitly minimize feature consistency errors, bypassing direct gradient descent on the cost function [S1].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: The training time is approximately 0.40 seconds per iteration [S2, unofficial].
+-- **Rendering Time**: Rendering time is approximately 32 seconds per frame [S2, unofficial].
+-- **Scaling**: The method scales with the number of solver steps (200,000 steps recommended for convergence) [S2, unofficial].
+-- **Strengths**: Provides an upper bound for performance when HDR data is available [S1].
+-- **Limitations**: Difficult to ensure all areas of a scene are encoded well due to high dynamic range issues [S1].
++- **Time Complexity:** Training time is approximately 0.40 seconds per iteration [S2, unofficial].
++- **Memory Complexity:** Not given in the sources.
++- **Performance:** Rendering time is approximately 32 seconds per frame [S2, unofficial].
++- **Scaling:** The method processes 2,048 rays per batch at 800x600 resolution [S2, unofficial].
++- **Strengths:** Provides a consistent baseline for comparing novel NeRF variants; simple to implement using standard differentiable rendering pipelines.
++- **Limitations:** Training time per iteration is higher than some meta-learning baselines (e.g., IDR at 0.2 sec/iteration) [S2, unofficial]. Rendering time is significantly slower than real-time requirements.
++- **When to use:** As a reference point for evaluating new NeRF training strategies or architectures.
++- **When not to use:** When real-time rendering is required or when dealing with HDR scenes without explicit tone-mapping adjustments [S1].
+ 
+ ## Background
+-The NeRF-GT baseline originates from the work on HDR-NeRF, which introduced the concept of training NeRF models directly from HDR views to evaluate the potential of high dynamic range in neural radiance fields [S1]. The specific training parameters (64/128 samples, 2048 rays, 200k steps) are derived from the original NeRF implementation's configuration (config_fern.txt) as used in comparative studies [S2, unofficial].
++The NeRF-GT baseline is derived from the original Neural Radiance Fields paper by Mildenhall et al. [S2, unofficial]. It represents the standard training configuration used in the literature for fitting NeRF models to synthetic and real-world scenes. The baseline is often used in comparative studies to establish performance metrics for novel methods such as IBRNet, NLR, and HDR-NeRF [S2, unofficial]. The specific parameters (64 coarse, 128 fine samples, 200,000 steps) are taken from the official NeRF implementation and configuration files (e.g., `config_fern.txt`) [S2, unofficial].
+ 
+ ## Sources

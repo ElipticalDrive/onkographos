@@ -1,0 +1,151 @@
+--- v003.md
++++ v004.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-Computes the inverse of a rigid body transformation (Special Euclidean group SE3) defined by a rotation and a translation. It solves the problem of mapping coordinates from a transformed frame back to the original frame, which is essential for coordinate system conversions in ray generation and camera models. It sets itself apart by providing explicit implementations for both matrix and quaternion representations, ensuring numerical stability through the use of quaternion conjugates for rotation inversion [S1, unofficial].
++Computes the inverse of an SE3 transformation given either a $4 \times 4$ homogeneous matrix or a quaternion-translation pair, returning the corresponding inverse transform [S1, unofficial]. It differs from generic matrix inversion by exploiting the orthogonal structure of the rotation submatrix, using a transpose or quaternion conjugate instead of a full $4 \times 4$ inversion [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+ 1.  **Matrix Form:** A $4 \times 4$ homogeneous transformation matrix $T$.
+-2.  **Quaternion Form:** A unit quaternion $q$ representing rotation and a 3D vector $t$ representing translation.
++2.  **Quaternion Form:** A quaternion $q$ representing rotation and a 3D vector $t$ representing translation.
+ 
+ **Outputs:**
+@@ -25,6 +25,6 @@
+     \end{bmatrix}
+     $$
+-    Where $R$ is the $3 \times 3$ rotation submatrix and $t$ is the $3 \times 1$ translation vector.
+-*   **Quaternion:** $q = [w, x, y, z]$ (scalar-first) or $[x, y, z, w]$ (scalar-last). The implementation assumes standard conjugate definition.
++    Where $R$ is the $3 \times 3$ rotation submatrix and $t$ is the $3 \times 1$ translation vector [S1, unofficial].
++*   **Quaternion:** $q = [w, x, y, z]$ (scalar-first) [G].
+ *   **Vector:** $t = [t_x, t_y, t_z]$.
+ 
+@@ -44,17 +44,17 @@
+     For quaternion input, the inverse rotation is the conjugate quaternion $q^*$.
+     $$
+-    q_{inv} = q^* = [w, -x, -y, -z] \quad (\text{if } q=[w,x,y,z])
++    q_{inv} = q^* = [w, -x, -y, -z]
+     $$
+ 
+ 3.  **Compute Inverse Translation:**
+-    The inverse translation is the negative of the original translation vector rotated by the inverse rotation.
++    The inverse translation is the negative of the original translation vector multiplied by the inverse rotation matrix.
+     $$
+     t_{inv} = -R_{inv} t = -R^T t
+     $$
+-    For quaternion input, apply the inverse quaternion rotation to $t$:
++    For quaternion input, apply the inverse quaternion rotation to $t$ and negate the result.
+     $$
+     t_{inv} = -\text{rotate}(q_{inv}, t)
+     $$
+-    Where $\text{rotate}(q, v)$ transforms vector $v$ by quaternion $q$.
++    Where $\text{rotate}(q, v)$ transforms vector $v$ by quaternion $q$ [S1, unofficial].
+ 
+ 4.  **Construct Output (Matrix Input):**
+@@ -70,21 +70,28 @@
+ ```python
+ def inverse_se3_matrix(T):
+-    # T is a 4x4 matrix
+-    # Extract R (3x3) and t (3x1)
+-    R = T[0:3, 0:3]
+-    t = T[0:3, 3]
+-    
+-    # Compute inverse rotation (transpose)
+-    R_inv = R.T
+-    
+-    # Compute inverse translation: -R_inv @ t
+-    t_inv = -R_inv @ t
+-    
+-    # Construct inverse matrix
+-    T_inv = zeros_like(T)
+-    T_inv[0:3, 0:3] = R_inv
+-    T_inv[0:3, 3] = t_inv
+-    T_inv[3, 3] = 1.0
+-    
++    # T is a 4x4 matrix of floats
++    R = [[T[0][0], T[0][1], T[0][2]],
++         [T[1][0], T[1][1], T[1][2]],
++         [T[2][0], T[2][1], T[2][2]]]
++    t = [T[0][3], T[1][3], T[2][3]]
++
++    # Inverse rotation: transpose
++    R_inv = [[R[0][0], R[1][0], R[2][0]],
++             [R[0][1], R[1][1], R[2][1]],
++             [R[0][2], R[1][2], R[2][2]]]
++
++    # Inverse translation: -R_inv @ t
++    t_inv = [-sum(R_inv[i][j] * t[j] for j in range(3)) for i in range(3)]
++
++    # Assemble output
++    T_inv = [[0.0, 0.0, 0.0, 0.0],
++             [0.0, 0.0, 0.0, 0.0],
++             [0.0, 0.0, 0.0, 0.0],
++             [0.0, 0.0, 0.0, 0.0]]
++    for i in range(3):
++        for j in range(3):
++            T_inv[i][j] = R_inv[i][j]
++        T_inv[i][3] = t_inv[i]
++    T_inv[3][3] = 1.0
+     return T_inv
+ ```
+@@ -93,13 +100,19 @@
+ ```python
+ def inverse_se3_quaternion(q, t):
+-    # q is a quaternion [w, x, y, z]
+-    # t is a vector [x, y, z]
+-    
+-    # Compute inverse quaternion (conjugate)
+-    q_inv = quaternion_conjugate(q)
+-    
+-    # Compute inverse translation: -rotate(q_inv, t)
+-    t_inv = -quaternion_rotate(q_inv, t)
+-    
++    # q = [w, x, y, z], t = [x, y, z]
++    q_inv = [q[0], -q[1], -q[2], -q[3]]
++
++    # rotate q_inv by t: v' = v + 2*q_w*(q_v x v) + 2*q_v x (q_v x v)
++    qw, qx, qy, qz = q_inv
++    vx, vy, vz = t
++    ix = qw*vx + qy*vz - qz*vy
++    iy = qw*vy + qz*vx - qx*vz
++    iz = qw*vz + qx*vy - qy*vx
++    wx = -qx*vx - qy*vy - qz*vz
++    t_rot = [vx + 2*(iy*qz - iz*qy),
++             vy + 2*(iz*qx - ix*qz),
++             vz + 2*(ix*qy - iy*qx)]
++
++    t_inv = [-t_rot[0], -t_rot[1], -t_rot[2]]
+     return q_inv, t_inv
+ ```
+@@ -110,21 +123,19 @@
+ **Edge Cases and Pitfalls:**
+ *   **Non-unit Quaternion:** If $q$ is not normalized, $q^*$ is not the true inverse rotation. The input quaternion must be normalized before conjugation [G].
+-*   **Precision:** Floating-point errors in $R^T$ may cause slight non-orthogonality. Re-orthonormalization is not performed in the basic inverse but may be required in iterative applications [G].
+-*   **Homogeneous Coordinate:** The bottom row $[0, 0, 0, 1]$ must be preserved in the matrix output.
+-
+-## Subtopics
++*   **Homogeneous Coordinate:** The bottom row $[0, 0, 0, 1]$ must be preserved in the matrix output to maintain valid homogeneous coordinates [G].
+ 
+ ### Quaternion Rotation
+-Applies a quaternion to a vector. Used to compute $t_{inv}$ in the quaternion form. [Quaternion Rotation](3473-quaternion-rotation.md)
++Applies a quaternion to a 3D vector. Sets itself apart from matrix rotation by using four parameters instead of nine. Choose it when memory or computational cost of a $3 \times 3$ matrix is prohibitive. [Quaternion Rotation](3473-quaternion-rotation.md)
+ 
+ ### Quaternion Conjugate
+-Computes the conjugate of a quaternion. Used to compute $q_{inv}$. [Quaternion Operations](3474-quaternion-operations.md)
++Computes the conjugate of a quaternion. Sets itself apart from inversion by only negating vector components while preserving the scalar part. Choose it when computing inverse rotations for unit quaternions. [Quaternion Operations](3474-quaternion-operations.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$. Matrix transpose and vector multiplication are constant time for fixed-size $3 \times 3$ and $3 \times 1$ structures.
++*   **Time Complexity:** $O(1)$. Fixed number of arithmetic operations for $3 \times 3$ transpose and $3 \times 1$ matrix-vector multiplication.
+ *   **Memory Complexity:** $O(1)$. Requires storage for one $4 \times 4$ matrix or one quaternion and one vector.
+-*   **Strengths:** Numerically stable for rotations (using conjugate avoids matrix inversion). Efficient for GPU parallel execution (Taichi implementation).
+-*   **Limitations:** Assumes valid SE3 input (orthogonal rotation matrix or unit quaternion). Does not handle scaling or shearing.
+-*   **When to use:** When converting points from world/camera space to local/object space or vice versa in ray marching or rasterization pipelines.
++*   **Strengths:** Avoids expensive $4 \times 4$ matrix inversion; numerically stable for orthogonal rotations.
++*   **Limitations:** Assumes valid SE3 input (orthogonal rotation matrix or unit quaternion); does not handle scaling or shearing.
++*   **Measured Performance:** Not given in the sources.
++*   **When to use:** Converting coordinates between camera/world and local/object frames in ray generation or rasterization pipelines.
+ 
+ ## Background

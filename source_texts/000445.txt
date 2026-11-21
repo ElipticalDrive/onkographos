@@ -1,0 +1,335 @@
+rendering - Dealing with block corners in a grid-based raycaster - Game Development Stack Exchange
+The 2026 Annual Developer Survey Results Site is live—
+view the results here!.
+Dealing with block corners in a grid-based raycaster
+Ask Question
+Asked
+3 years, 9 months ago
+Modified
+3 years, 9 months ago
+Viewed
+434 times
+Report this ad
+This question shows research effort; it is useful and clear
+2
+This question does not show any research effort; it is unclear or not useful
+Save this question.
+Show activity on this post.
+I'm trying to build a simple grid-based raycaster, but I'm having trouble with rendering block corners.
+First of all, I want to change the color of all the y-axis walls. But a block's corner belongs to both the y and x axis, so it's never clear whether it should be recolored or not. Because of this, when I place several blocks in a row, I end up with a wall with a bunch of vertical stripes on it.
+The second issue is that when two blocks are placed in such a way that only their corners "touch", a ray can pass between them and hit something behind them, allowing the camera to see things it should not be able to.
+Here is my current implementation of a raycaster that showcases these issues, written in Rust with Raylib:
+```
+use raylib::prelude::*;
+
+
+struct Map {
+    scale: i32,
+    data: Vec<Vec<i32>>,
+}
+
+
+impl Map {
+    fn get_tile(&self, mut x: i32, mut y: i32) -> i32 {
+        (x, y) = (x / self.scale, y / self.scale);
+        let (max_y, max_x) = (self.data.len(), self.data[0].len());
+        if y >= 0 && x >= 0 && y < max_y as i32 && x < max_x as i32 {
+            return self.data[y as usize][x as usize];
+        }
+
+        return 0;
+    }
+}
+
+
+struct Camera {
+    fov: i32,
+    range: i32,
+    h: i32,
+    w: i32,
+}
+
+
+impl Camera {
+    fn draw(&self, player: &Player, map: &Map, display: &mut RaylibDrawHandle) {
+        display.draw_rectangle(0, 0, self.w, self.h / 2, Color::BLACK);
+        display.draw_rectangle(0, self.h / 2, self.w, self.h / 2, Color::GRAY);
+
+        for i in (-self.fov / 2)..(self.fov / 2) {
+            let (mut rx, mut ry);
+            let ra = player.direction + (i as f32).to_radians();
+
+            // slow but simple
+            for step in 1..self.range {
+                rx = (player.x.round() + step as f32 * ra.cos()).round() as i32;
+                ry = (player.y.round() + step as f32 * ra.sin()).round() as i32;
+
+                // only recolors one side, but showcases issue well
+                let mut color = Color::WHITE;
+                if rx % map.scale == 0 {
+                    color = Color::LIGHTGRAY;
+                }
+
+                if map.get_tile(rx, ry) > 0 {
+                    let dist = (
+                        step as f32 * (player.direction - ra).cos()
+                    ).round() as i32;
+                    let line_height = (map.scale * self.h / dist).clamp(0, self.h);
+                    let line_width = self.w / self.fov;
+                    display.draw_rectangle(
+                        self.w / 2 + i * line_width,
+                        self.h / 2 - line_height / 2,
+                        line_width,
+                        line_height,
+                        color
+                    );
+                    break;
+                }
+            }
+        }
+    }
+}
+
+
+struct Player {
+    speed: f32,
+    rotation_speed: f32,
+    direction: f32,
+    x: f32,
+    y: f32,
+}
+
+
+impl Player {
+    fn move_relative(&mut self, side: f32, fwd: f32, delta: f32, map: &Map) {
+        let normalized = Vector2::new(side, fwd).normalized();
+
+        let speed = self.speed * delta;
+        let mut nx = self.x + speed * normalized.y * self.direction.cos();
+        let mut ny = self.y + speed * normalized.y * self.direction.sin();
+
+        let side_direction = self.direction + 90_f32.to_radians();
+        nx = nx + speed * normalized.x * side_direction.cos();
+        ny = ny + speed * normalized.x * side_direction.sin();
+
+        if map.get_tile(nx.round() as i32, ny.round() as i32) == 0 {
+            (self.x, self.y) = (nx, ny);
+        } else if map.get_tile(nx.round() as i32, self.y.round() as i32) == 0 {
+            self.x = nx;
+        } else if map.get_tile(self.x.round() as i32, ny.round() as i32) == 0 {
+            self.y = ny;
+        }
+    }
+
+    fn rotate(&mut self, r: f32, d: f32) {
+        self.direction += r * self.rotation_speed * d;
+    }
+}
+
+
+fn main() {
+    let (mut rl, thread) = raylib::init()
+        .size(800, 450)
+        .resizable()
+        .title("rustcast")
+        .build();
+
+    rl.set_window_min_size(64, 64);
+    //rl.set_target_fps(60);
+
+    let map = Map {
+        scale: 40,
+        data: vec![
+            vec![1,1,1,1,1,1,1,1,1],
+            vec![1,0,0,0,0,0,0,0,1],
+            vec![1,0,0,0,0,0,0,0,1],
+            vec![1,0,0,0,0,0,0,0,1],
+            vec![1,0,0,0,0,0,0,0,1],
+            vec![1,0,0,0,0,0,0,0,1],
+            vec![1,0,0,0,1,0,0,0,1],
+            vec![1,0,0,0,0,1,0,0,1],
+            vec![1,0,0,0,0,0,0,0,1],
+            vec![1,1,1,1,1,1,1,1,1],
+        ]
+    };
+    let camera = Camera {
+        fov: 80,
+        range: 600,
+        w: 800,
+        h: 450
+    };
+    let mut player = Player {
+        speed: 50.0,
+        rotation_speed: 10.0,
+        direction: 0.0,
+        x: 100.0,
+        y: 100.0,
+    };
+
+    while !rl.window_should_close() {
+        let delta_time = rl.get_frame_time();
+
+        let (mut move_h, mut move_v, mut rotate) = (0, 0, 0);
+        if rl.is_key_down(KeyboardKey::KEY_A) { move_h -= 1 };
+        if rl.is_key_down(KeyboardKey::KEY_D) { move_h += 1 };
+        if rl.is_key_down(KeyboardKey::KEY_W) { move_v += 1 };
+        if rl.is_key_down(KeyboardKey::KEY_S) { move_v -= 1 };
+        if rl.is_key_down(KeyboardKey::KEY_Q) { rotate -= 1 };
+        if rl.is_key_down(KeyboardKey::KEY_E) { rotate += 1 };
+        player.rotate(rotate as f32, delta_time);
+        player.move_relative(move_h as f32, move_v as f32, delta_time, &map);
+
+        let mut dis = rl.begin_drawing(&thread);
+
+        dis.clear_background(Color::BLACK);
+        camera.draw(&player, &map, &mut dis);
+        dis.draw_fps(0, 0);
+    }
+}
+```
+What can I do to fix these issues? And is it possible to do that without adding a lot of complexity?
+rendering
+raycasting
+Share
+Share a link to this question
+Copy linkCC BY-SA 4.0
+Short permalink to this question
+Follow
+Follow this question to receive notifications
+asked Jan 13, 2023 at 14:11
+user169549
+Add a comment
+|
+1 Answer 1
+Sorted by:
+Reset to default
+Highest score (default)
+Date modified (newest first)
+Date created (oldest first)
+This answer is useful
+1
+This answer is not useful
+Save this answer.
+Loading when this answer was accepted…
+Show activity on this post.
+Since you have a grid, you know something important: the ray is passing through a series of adjacent grid cells. You can fix both of your problem cases by making your code obey this rule.
+Right now you're sampling along a fixed step size, which can skip over corners. A way to patch this algorithm to succeed would be to notice whenever the previous grid cell and the current grid cell are diagonally adjacent, and pretend the ray hit the one of the two diagonal cells in the mean time, thus making each individual step cross a specific, single face of a grid cell.
+```
+bad       patched
+\ ##      \ ##
+ \##  ->   `\#
+##\       ##|
+## \      ## \
+```
+Then, while you're doing this adjacency analysis, you can also determine which face of a grid cell is being entered (= which coordinate is changing and whether it is incrementing or decrementing). Then, you can choose colors according to that face and the cell coordinates, rather than only using the cell coordinates. If you do this, you will never see vertical stripes.
+However, there is a better algorithm which not only inherently doesn't have this problem, but is also more efficient and precise because it takes exactly one step per grid cell examined (rather than taking steps smaller than cells). It is the algorithm presented in "A Fast Voxel Traversal Algorithm for Ray Tracing" by John Amanatides and Andrew Woo, 1987, and which I wrote up a practical example of in this answer, and later wrote a Rust version (though that is complicated with additional requirements, so it may not be the clearest sample).
+While this algorithm as described is for 3D, you can make it 2D by just deleting the “Z” branch from the comparisons.
+Share
+Share a link to this answer
+Copy linkCC BY-SA 4.0
+Short permalink to this answer
+Follow
+Follow this answer to receive notifications
+edited Jan 13, 2023 at 21:28
+answered Jan 13, 2023 at 15:46
+Kevin Reid
+5,6712323 silver badges3030 bronze badges
+1
+I took the first, simpler approach of patching my current algorithm. That fixed both my issues.
+user169549
+–
+user169549
+2023-01-13 19:45:21 +00:00
+Commented
+Jan 13, 2023 at 19:45
+Add a comment
+|
+You must log in to answer this question.
+The Overflow Blog
+Survey Says: You'll swap the model, but everything you build around it is...
+Rumors of the SaaS demise are greatly exaggerated
+Featured on Meta
+We’ve reworked automatic question deletion. Let’s talk about why
+How can we improve duplicate handling?
+Report this ad
+Report this ad
+Linked
+25
+Cast ray to select block in voxel game
+Related
+8
+Skewed: a rotating camera in a simple CPU-based voxel raycaster/raytracer
+10
+More efficient way to implement Line of sight on a 2d grid with ray casting?
+10
+Diagonal line of sight with two corners
+11
+How do I implement occluded lighting in a block-based 2D game?
+4
+Displaying smooth borders given a coarse grid-based map
+0
+In 2D, how can I improve character rotation using raycasts when dealing with sharp/convex edges?
+4
+Intersection of thick line with a grid
+0
+Issue with converting Sprite's world cords into screen cords in my custom raycaster
+Hot Network Questions
+How was the eMudhra private key vulnerability discovered
+LTspice simulation too slow for a phase converter using thyristors
+How to find and construct a square circumscribed about a given convex quadrilateral?
+ExtractArchive can't handle ZIP file containing non-ASCII file name
+Why when measuring the photovoltaics panel's positive and negative poles vs the ground both shows zero volts?
+The government has just injected massive amounts of cash into the economy via infrastructure spending. Why is the economy not inflating?
+How to write a function `RealPartitionJoin` in wolfram?
+Resplendency vs recursive saturation in models of PA
+I love my PhD, but I am tired
+Transit at Incheon with no checked in baggage and multiple booking
+Is there any PIE ghost word / fake word?
+The corporate retreat - closing address
+Wheel well noise & Wheel Speed Sensor
+Who wrote this note on triangular numbers in Sophie Germain's correspondence (BnF NAF 4073)?
+Could centrifugal force from a fast-spinning playground merry-go-round crack my watch glass?
+Real Estate Investment Trust
+Has AI made any progress as a mathematical theory-builder, rather than just a problem-solver?
+Planet with cycle: Day — Night — Dusk — Night
+What is the difference between a "Standard Class" and a "Base/Basic Class" in D&D 3.5?
+Until when were the lost texts of the Epic Cycle available in their full form?
+What makes "system" programming languages different from "regular" programming languages?
+What exactly constitutes an "Oven Safe" skillet or pan?
+Is it unethical to tell my Master's supervisor that I wish to do my PhD elsewhere? Originally I had said that I wanted to do my PhD with her
+Why does the Malach tell Hagar to return to an abusive situation?
+Question feed
+default
+Report this ad
+By continuing to use this website, you agree Stack Exchange can store cookies on your device and disclose information in accordance with our Cookie Policy. By exiting this window, default cookies will be accepted. To reject cookies, select an option from below.
+Necessary cookies only
+Customize settings
+Cookie consent preference center
+When you visit any of our websites, it may store or retrieve information on your browser, mostly in the form of cookies. This information might be about you, your preferences, or your device and is mostly used to make the site work as you expect it to. The information does not usually directly identify you, but it can give you a more personalized experience. Because we respect your right to privacy, you can choose not to allow some types of cookies. Click on the different category headings to find out more and manage your preferences. Please note, blocking some types of cookies may impact your experience of the site and the services we are able to offer.
+Cookie policy
+Accept all cookies
+Manage consent preferences
+Strictly Necessary Cookies
+Always Active
+These cookies are necessary for the website to function and cannot be switched off in our systems. They are usually only set in response to actions made by you which amount to a request for services, such as setting your privacy preferences, logging in or filling in forms. You can set your browser to block or alert you about these cookies, but some parts of the site will not then work. These cookies do not store any personally identifiable information.
+Targeting Cookies
+Targeting Cookies
+These cookies are used to make advertising messages more relevant to you and may be set through our site by us or by our advertising partners. They may be used to build a profile of your interests and show you relevant advertising on our site or on other sites. They do not store directly personal information, but are based on uniquely identifying your browser and internet device.
+Performance Cookies
+Performance Cookies
+These cookies allow us to count visits and traffic sources so we can measure and improve the performance of our site. They help us to know which pages are the most and least popular and see how visitors move around the site. All information these cookies collect is aggregated and therefore anonymous. If you do not allow these cookies we will not know when you have visited our site, and will not be able to monitor its performance.
+Functional Cookies
+Functional Cookies
+These cookies enable the website to provide enhanced functionality and personalisation. They may be set by us or by third party providers whose services we have added to our pages. If you do not allow these cookies then some or all of these services may not function properly.
+Back Button
+Cookie List
+Search Icon
+Filter Icon
+Clear
+checkbox label label
+Apply Cancel
+Consent Leg.Interest
+checkbox label label
+checkbox label label
+checkbox label label
+Necessary cookies only Confirm my choices

@@ -1,0 +1,1302 @@
+CPAFT: A Consistent Parallel Advancing Front Technique for
+Unstructured Triangular/Tetrahedral Mesh Generation
+Chengdi Maa , Jizu Huangb , Hao Luoa , Chao Yanga,c,∗
+a School of Mathematical Sciences, Peking University, Beijing, 100871, P.R. China
+arXiv:2405.20618v2 [math.NA] 18 Sep 2024
+b Institute of Computational Mathematics and Scientific/Engineering Computing, Academy of Mathematics and Systems
+Science, Chinese Academy of Sciences, Beijing, 100190, P.R. China
+c PKU-Changsha Institute for Computing and Digital Economy, Peking University, Hunan, 410006, P.R. China
+Abstract
+Compared with the remarkable progress made in parallel numerical solvers of partial differential equations,
+the development of algorithms for generating unstructured triangular/tetrahedral meshes has been relatively sluggish. In this paper, we propose a novel, consistent parallel advancing front technique (CPAFT) by
+combining the advancing front technique, the domain decomposition method based on space-filling curves,
+the distributed forest-of-overlapping-trees approach, and the consistent parallel maximal independent set
+algorithm. The newly proposed CPAFT algorithm can mathematically ensure that the generated unstructured triangular/tetrahedral meshes are independent of the number of processors and the implementation
+of domain decomposition. Several numerical tests are conducted to validate the parallel consistency and
+outstanding parallel efficiency of the proposed algorithm, which scales effectively up to two thousand processors. This is, as far as we know, the first parallel unstructured triangular/tetrahedral mesh generator with
+scalability to O(1,000) CPU processors.
+Keywords: unstructured triangular/tetrahedral mesh generation, advancing front technique, domain
+decomposition, maximal independent set, parallel computing
+2020 MSC: 65M50, 65M55, 68W10
+1. Introduction
+Unstructured meshes have been playing an indispensable role in the processing of complex geometrical
+models, and are frequently employed in a large variety of applications including solid mechanics [1, 2, 3],
+fluid dynamics [4, 5, 6], and electromagnetics [7, 8]. In scientific and engineering computing, unstructured
+meshes are extensively utilized as the input for numerical simulations, particularly for solving partial differential equations (PDEs). To accurately capture the complex geometry and physical phenomena, it is
+often imperative to efficiently generate a large unstructured mesh with a substantial number of triangular/tetrahedral elements, while adhering to stringent quality standards. The computational complexity of
+state-of-the-art mesh generation algorithms often poses severe challenges in the generation of a large-scale,
+high-quality mesh on a single computing machine, rendering the mesh generation process inefficient and
+arduous. Despite that the computational simulations (i.e., PDEs solver) can be performed efficiently and
+in high parallelism [9, 10, 11, 12] with high-performance computing (HPC) hardware becoming increasingly
+powerful, the generation of unstructured meshes remains a significant bottleneck [13, 14].
+During the past few decades, various algorithms for efficient unstructured triangular/tetrahedral mesh
+generation have been proposed, of which the most popular ones are the Delaunay meshing method [15, 16,
+∗ Corresponding author
+Email addresses: mcd2020@stu.pku.edu.cn (Chengdi Ma), huangjz@lsec.cc.ac.cn (Jizu Huang), lhsms@pku.edu.cn
+(Hao Luo), chao_yang@pku.edu.cn (Chao Yang)
+Preprint submitted to Elsevier
+September 19, 2024
+17, 18], particle-based method [19, 20], and advancing front technique (AFT) [21, 22, 23, 24]. The Delaunay
+meshing method involves constructing a Delaunay tessellation by inserting vertices and edges into a coarse
+geometric representation, and then obtains unstructured triangular/tetrahedral meshes with high quality,
+which is mathematically guaranteed to avoid sliver elements [16, 25]. However, this method usually exhibits
+a main limitation on preserving the boundary integrity for non-convex domains, and the incorporation of
+non-local operations could inherently introduce round-off errors [26]. In the particle-based method, pair-wise
+forces are introduced to define the total energy or interpolation error, and the mesh generation process relies
+on the minimization of the aforementioned total energy or interpolation error to obtain the desired meshes,
+which could introduce a substantial computational overhead [27]. When the AFT is used, the unstructured
+mesh is gradually generated from geometric boundaries through inward advancement, which is able to ensure
+the integrity of boundaries. The intersection judgments in AFT are only performed with neighboring faces
+(edges), thereby reducing the chances of failure induced by round-off errors [26]. Additionally, AFT does
+not require solving a minimization problem, thus it incurs a lower computational cost as compared to the
+particle-based method [19, 20]. Notably, all these algorithms are sequential ones that can only be performed
+on a single machine. Therefore the generation of large-scale unstructured meshes using them could be
+substantially impeded by the memory and efficiency limitations of the hardware.
+In recent years, a series of efforts have been made in designing parallel unstructured triangular/tetrahedral
+mesh generation algorithms for large-scale unstructured meshes generation. Typical works include parallel
+Delaunay meshing methods [28, 29, 30, 31, 32], parallel particle-based methods [27, 33], and the parallel
+AFTs [34, 35, 36, 37]. However, it is still a key challenge to enable high degree of parallelism while retaining
+the mesh quality and the parallel consistency in the design of parallel mesh generation algorithms [38].
+For example, the well-known parallel Delaunay meshing methods, such as the parallel Delaunay domain
+decoupling method [29] and the parallel projective Delaunay meshing method [31], are able to overcome the
+memory and efficiency limitations and can scale to O(10) to O(100) processors by decomposing the geometry
+into continuous subdomains and meshing each subdomain separately. However, in order to construct a global
+Delaunay tessellation consistent with the sequential one, the subsequent merge of isolated patches into one
+coherent piece may lead to a large number of non-local operations, which could seriously hamper the level of
+parallelism [27, 32, 33]. The parallel particle-based mesh generation method can achieve parallelism utilizing
+hundreds of processors in large-scale scenarios by introducing an approximate pair-wise force that only relies
+on the local information [27, 33]. Despite the fact that the parallel particle-based method ensures stringent
+mesh quality and parallel consistency without significantly deteriorating scalability, employing traditional
+particle sampling as the initial condition for complex geometries could result in substantial communication
+overhead [27, 33].
+In comparison, the AFT framework enjoys two major advantages. One is that AFT can have higher
+degree of parallelism as compared to the Delaunay meshing methods due to its ability of iterative mesh
+generation based solely on neighboring faces (edges) [26, 36, 38]. And the other advantage is that AFT
+does not require solving expensive physics-motivated governing equations for initial particle sampling as the
+parallel particle-based methods require, therefore the communication overhead is relatively low [27]. However,
+in contrast to the sequential AFT, it is required for parallel AFTs to deal with mesh intersections during
+parallel advancement, which is the major difficulty in the design of parallel AFTs [26]. To address this issue,
+the shotgun AFT method utilizes fine-grained fragments that are sufficiently spaced apart to accommodate
+growth, with a side-effect that randomness is introduced into the framework [37], thereby leading to the
+lack of parallel consistency. Another strategy is the parallel AFT method based on the decomposition by
+coarse geometry [34, 36] or coarse octree [35], which can restrict advancements to predetermined subdomains.
+While this strategy helps mitigate the mesh intersection problem, the generated meshes are influenced by
+the number of subdomains and different decomposition [34, 35, 36]. In essence, a major drawback of stateof-the-art parallel AFTs is that the meshes generated could exhibit variations depending on the number of
+processors utilized or the prior decompositions applied, i.e., they lack the parallel consistency [34, 35, 36, 37].
+In this work, we propose a new algorithm called consistent parallel advancing front technique (CPAFT)
+for parallel unstructured triangular/tetrahedral mesh generation, which can address the mesh intersection
+problem with parallel consistency, thus can obtain the same unstructured mesh as the sequential AFT does.
+We first introduce a non-overlapping domain decomposition method based on space-filling curves (SFC)
+2
+[39, 40, 41, 42] into the AFT framework, which can distribute the task of mesh generation to multiple
+processors and construct geometric invariant global index. Then, we extend each subdomain with δ layers of
+background meshes to a larger subdomain and obtain an overlapping domain decomposition. We combine
+the overlapping domain decomposition and the forest-of-octrees (or quadtree) approach [43] to propose a
+distributed forest-of-overlapping-trees approach, which can efficiently address the intersection judgments
+between newly generated elements and existing elements, especially for cases involving elements belonging
+to different subdomains. To avoid mutual mesh intersections between newly generated elements, we design
+a consistent parallel maximal independent set (MIS) algorithm by extending the original MIS algorithm [44]
+with the overlapping trees. With the SFC-based geometric invariant global index and the consistent parallel
+MIS algorithm, we demonstrate that the newly proposed CPAFT algorithm can obtain the same meshes
+as the meshes generated by the sequential AFT. Numerical experiments validate the parallel consistency
+and demonstrate that the CPAFT algorithm can scale well to over 2,000 processors. To the best of our
+knowledge, this is the first parallel unstructured triangular/tetrahedral mesh generator that can handle 3D
+complex geometries and scales to over O(1,000) processors.
+The remainder of the paper is organized as follows. In Section 2, the unstructured triangular/tetrahedral
+meshes generation problem and the sequential AFT with mesh quality enhancement are introduced. Section 3
+presents the SFC-based domain decomposition, the distributed forest-of-overlapping-trees approach, the
+consistent parallel MIS algorithm, and the workflow of the CPAFT algorithm. Results of a series of numerical
+experiments are presented in Section 4. And the paper is concluded in Section 5.
+2. The advancing front technique (AFT)
+In this paper, we consider the unstructured mesh generation problem for triangular/tetrahedral meshes.
+Let us assume that Ω ⊂ Rd is a single connected domain with boundary ∂Ω ⊂ Rd−1 . For multiple connected
+domains, the unstructured mesh can be generated separately. Initially, the boundary ∂Ω is divided into
+reasonably small face (edge) meshes, which provides an approximation of the geometric boundary. Let F0
+denote the set of the face (edge) meshes. Let Ωh denote the polyhedral domain formed by the boundary set
+F0 , which serves as an approximation to Ω. The problem of generating unstructured triangular/tetrahedral
+meshes for domain Ωh is defined as follows.
+Prob. 1. For a given boundary set F0 , find a partition Eh of domain Ωh such that Ωh = ∪ek ∈Eh ek ,
+ek1 ∩ ek2 = ∅ for k1 ̸= k2 , and F0 = ∪ek ∈Eh ek ∩ ∂Ωh .
+As a popular sequential algorithm for solving Prob. 1, the AFT [21, 22, 23, 24] can be viewed as an
+iterative method. At each iteration, the it generates elements from the current front set F, which is initially
+set as F0 and updated at each iteration. The AFT terminates until the entire domain is completely covered
+by elements. A notable advantage of the AFT is that points and elements are generated simultaneously,
+allowing for easy control of the shape and size of the elements during the mesh generation process.
+F0
+Ωh
+1st its
+Figure 1: Example of advancing front. Blue points on the right-hand side are the advancing points generated in the first
+iteration of the AFT.
+3
+In what follows, we assume the normal direction of each front points towards the interior of the domain
+Ωh , which servers as the direction of an advancement during one iteration. As shown in Figure 1, during
+each iteration of the AFT, the front set F is updated and traversed by searching for potential advancing
+points, which can be categorized into two cases: new potential points on the perpendicular and existing
+vertices of nearby fronts. To control the quality of elements generated by the AFT, two criteria [37, 45] are
+adopted to determine whether a potential point is a legal advancement. Assuming that the maximum scale
+is hM , the minimum scale is hm , and the local scale near front f ∈ F is denoted as h, the widely used two
+criteria can be described as follows.
+Criterion A (for the new advancing points).
+• The newly generated front should not intersect with other nearby fronts, and the newly generated
+elements should not contain any other fronts.
+• The distance between nearby vertices and the newly generated fronts should be no less than β1 h, and
+the distance between the advancing point p and the nearby fronts should be no less than β1 h.
+• If the triangular/tetrahedral element composed of the advancing point p and a nearby front f does not
+intersect with any other fronts, and the distance between p and the center of front f is no less than
+R(hM , hm , h), then it is required that the perpendicular distance from p to f should be no less than
+ηh.
+Criterion B (for the existing advancing points).
+• The newly generated fronts should not intersect with other nearby fronts, and the newly generated
+elements should not contain any other fronts.
+• The distance between nearby vertices and the newly generated fronts should be no less than β2 h.
+• The distance between the advancing point p and the center of front f should be no less than R(hM , hm , h),
+while the perpendicular distance from p to f is no less than ηh.
+• (Optional) The newly generated fronts should not cause mutual obstruction with nearby fronts.
+In the above two criteria, the parameters β1 and β2 , which are both in the range of (0, 1), are used to control
+the mesh quality. Meanwhile, the parameter η ∈ (0, 1) ensures a lower bound on the measurement of the
+newly generated face, denoted as ϵhd−1 . R(hM , hm , h) is a user-defined function to control the size of the
+element, such as R(hM , hm , h) = min(3h, 1.5hM ). The Minkowski difference and Gilbert–Johnson–Keerthi
+(GJK) algorithm [46] are utilized to determine whether two polyhedrons intersect with each other.
+After the AFT terminating, a set of triangles/tetrahedra is generated. According to ref. [47], the mesh
+quality of triangles/tetrahedra can be quantified by
+α=d
+Ri
+,
+Rc
+(1)
+where Ri and Rc denote the radii of the inscribed and circumscribed spheres of triangles/tetrahedra in
+Rd (d = 2, 3), respectively. The range of α is (0, 1], and its optimal value is 1.0 when the triangle/tetrahedron
+is regular. In this work, we require that the mesh quality indicator α should be greater than 0.3. To achieve
+this goal, a mesh quality optimization technique, such as surface preserving Laplacian smoothing approach
+[45, 47, 48], should be employed to enhance the mesh quality. In the (k + 1)th iteration of the surface
+preserving Laplacian smoothing approach, the mesh quality is optimized by re-positioning the internal node
+(k)
+pi to
+N −1
+1 X (k)
+(k+1)
+pi
+=
+p
+,
+(2)
+N j=0 n(j)
+4
+(k)
+where pn(j) with j = 0, . . . , N − 1, represent the positions of the N neighboring nodes of the internal node
+(k)
+pi at the kth iteration step. As stated in refs. [45, 47, 48], significant improvements in mesh quality can
+be achieved with only a few iterations.
+The two criteria and the mesh quality enhancement approach play a crucial role in ensuring the quality
+of the newly generated mesh. Among these criteria, the intersection judgments are particularly important.
+The intersection judgments are divided into two categories: intersections between newly generated elements
+and existing elements, and mutual intersections between newly generated elements. Notably, the intersection
+judgment introduces irregular communication, which poses challenges in designing parallel AFT algorithms.
+Currently, only a few parallel AFT algorithms exist, such as those proposed in refs. [34, 35, 36, 37]. The
+unstructured triangular/tetrahedral meshes generated by these parallel AFT algorithms are usually not
+consistent with those obtained by sequential AFT, i.e., the parallel consistency is not guaranteed. In the
+next section, we propose the CPAFT algorithm, which can generate unstructured triangular/tetrahedral
+meshes consistent with the sequentially generated ones.
+3. The consistent parallel advancing front technique (CPAFT)
+In this section, we present a novel consistent parallel AFT (CPAFT) for generating unstructured triangular/tetrahedral meshes. To address the mesh intersection issue with parallel consistency, we combine three
+key techniques: the SFC-based domain decomposition, the distributed forest-of-overlapping-trees approach,
+and the consistent parallel MIS approach.
+3.1. Domain decomposition based on the space-filling curve (SFC)
+We first employ the non-overlapping domain decomposition method to divide the domain Ωh into multiple
+subdomains, with each subdomain being handled by a processor. The non-overlapping domain decomposition enables distributed storage of the mesh information during the generation process, thus can overcome
+the memory limitations in large-scale mesh generation. The partitioning of the domain Ωh is performed on
+top of the Cartesian background meshes, as depicted in Figure 2. The Cartesian background meshes are
+geometrically sequenced small boxes generated by the SFC approach, which is a popular method for mesh
+partitioning, i.e., domain decomposition of pre-generated meshes [39, 40, 41, 42]. To the best of our knowledge, this is the first attempt to integrate the SFC approach into the mesh generation process to achieve
+parallelism, instead of performing partitioning after the mesh is generated.
+Consider a Lth level SFC with B = {bk , k = 0, . . . , (2L )d − 1} representing the set of all small boxes.
+Let Ωih with i = 1, . . . , n correspond to a non-overlapping domain decomposition of Ωh . As the level of SFC
+influences the balance of domain decomposition, it is necessary for the level of SFC to be matched with the
+mesh scale h. Each subdomain Ωih is covered by a union of multiple small boxes from B, denoted as Bi (called
+background subdomain). Additionally, the domain decomposition must satisfy the constraint that for any
+two small boxes bk(i) ∈ Bi and bk(j) ∈ Bj with i < j, it holds that k(i) < k(j). According to the domain
+decomposition, the front set F at each iteration is divided into n disjoint subsets, denoted as F1 , . . . , Fn .
+The n subsets satisfy that
+F1 ∪ F2 ∪ · · · ∪ Fn = F,
+(3)
+Fi ∩ Fj = ∅,
+∀i ̸= j.
+Analogous to Ωih , the subset Fi is also assigned to the ith processor. Let |Fi | represent the number
+of fronts in Fi and Nei denote the number of generated elements stored in processor i. We introduce an
+indicator Wi = kf |Fi | + ke Nei for Ωih , where kf and ke are typically set to (3, 1). To achieve good parallel
+efficiency, we divide the domain Ωh based on the following three criteria.
+Criteria for domain decomposition
+• C1. Each subdomain Ωih is an intersection between Ωh and a union of some background meshes
+connected by an SFC.
+5
+• C2. For the requirement of parallel efficiency, the indicators must satisfy the constraint min Wi >
+1≤i≤n
+0.5 max Wi . The threshold parameter 0.5 can be adjusted based on the specific geometry of the
+1≤i≤n
+domain Ωh .
+• C3. Furthermore, the area of the interface between subdomains should be minimized.
+Since the front set F is updated dynamically at each iteration, the indicator Wi will also change accordingly.
+In this study, we repartition the domain decomposition based on criterion C2 every few iteration steps, to
+maintain load balance.
+(a) Decomposition for Ωh and current front
+(b) SFC-based Decomposition for background
+Figure 2: (a) Domain decomposition for a 2D domain with 4 processors: Ωh = ∪4i=1 Ωih . The blue lines in the plots are the
+boundaries of background subdomains. The current fronts are simultaneously assigned to four processors. The fronts with the
+same color are handled by the same processor. (b) Domain decomposition on top of the Cartesian background meshes based
+on a Hilbert-SFC. The boxes filled with different colors correspond to the current fronts.
+For a given set of subsets Fi with i = 1, . . . , n, we define the local index of front f ∈ Fk as Id(f, k; n). The
+local index Id(f, k; n) sorts from 0 to |Fk | − 1 in ascending order of small box index, where f is embedded,
+as shown in Figure 2. The global index of f is then set as:
+GI(f ) := Id(f, k; n) +
+k−1
+X
+|Fi |.
+i=1
+According to the following Property 1 of SFC approach [40, 42], we can conclude that the global index GI(f )
+remains invariant even when the domain decomposition of Ωh changes. This global invariant index GI(f )
+plays a crucial role in the process of identifying a set of non-intersecting advancements.
+Property 1. Consider two decompositions of current fronts set F, denoted as F = ∪ni=1 Fi and F = ∪m
+i=1 F̃i .
+Assume that a front f is in subset Fk and also in subset F̃l , respectively. Then we have
+Id(f, k; n) +
+k−1
+X
+|Fi | = Id(f, l; m) +
+i=1
+l−1
+X
+i=1
+6
+|F̃i |.
+(4)
+3.2. Distributed forest-of-overlapping-trees approach
+On parallel computers, the intersection judgements between newly generated elements and existing elements could involve the interaction of fronts belonging to different processors. To address the interaction
+without imposing constraints on subdomain boundaries, we introduce an overlapping domain decomposition
+on top of the background meshes based on the non-overlapping domain decomposition. As shown in Figure 3, we extend each background subdomain with δ layers background meshes to create a larger background
+subdomain. Similarly, the sub-front set Fi is also extended to Fiδ . Then, we define the neighboring set of
+a front f as N eighbor(f ) = {fˆ ∈ Fiδ | dist(fˆ, f ) < γ(h)} for searching potential advancing points and the
+intersection judgements using Criterion A and Criterion B. Typically, γ(h) is set to 1.5h. To ensure that
+the neighborhoods of any front f in Fi are included in Fiδ , it is important to have a sufficiently large overlap
+δ for each processor. The value of δ is determined by the ratio of the background mesh scale (associated with
+the level of SFC) to the mesh scale h. In conclusion, the overlapping domain decomposition ensures that
+the interaction is not limited by the boundaries of subdomains, so that the attainment of a set of potential
+advancements is consistent with the sequential AFT.
+(a) overlapping quadtree 1
+(b) overlapping quadtree 4
+(c) overlapping quadtree 2
+(d) overlapping quadtree 3
+Figure 3: Forest of overlapping trees for a 2D problem with 4 processors. The red-colored, green-colored, and yellow-colored faces
+represent the fronts belonging to the current fronts subset, the extended neighboring fronts set, and the others, respectively. The
+solid blue lines and the dotted blue lines respectively represent the boundaries of the non-overlapping background subdomains
+and overlapping background subdomains with δ = 1. The blue boxes denote the quadtree owned by the current subdomain,
+and the boxes transitioning from blue to yellow illustrate the expansion of the owned quadtree.
+7
+In order to efficiently represent the overlapping subsets Fiδ with i = 1, . . . , n, we introduce a new distributed forest-of-overlapping-trees approach by extending the origin distributed forest-of-trees approach [43].
+As illustrated in Figure 3, in the case of a 2D domain, a leaf node in the quadtree data is divided into several
+leaf nodes until each leaf node stores at most one front. This process establishes an injection mapping from
+the front set F to the quadtree data. The injection mapping described earlier facilitates efficient search and
+insertion at a computational cost of O(log |Fi |). Meanwhile, the construction of overlapping fronts Fiδ \Fi
+involves searching in the data of neighboring processors and inserting into the data of the current processor,
+which correspond to the packing and unpacking processes, respectively, in the communication procedure. As
+a consequence, the overlapping octree (quadtree) data structure significantly enhances the parallel efficiency
+of the newly proposed parallel algorithm.
+3.3. Consistent parallel maximal independent set (MIS) approach
+In each iteration step of AFT, after identifying the potential advancements satisfying Criterion A and
+Criterion B, searching for mutually non-intersecting advancements within the potential advancements becomes a new challenge, which is essentially equivalent to finding the largest possible subset. The sequential
+AFT typically achieves this through greedy search, which is computationally expensive and results in significant communication overhead in distributed scenarios. Additionally, the results are influenced by the
+order of the search. In this work, to improve the efficiency and parallel performance of the AFT algorithm,
+we propose the consistent parallel MIS approach to replace the greedy search, which can produce more
+consistent and reliable results by removing the dependence on the search order.
+Figure 4: The newly generated elements set V (left) and a maximal independent set Vs (right).
+To begin, let us define a graph F̂ := (V, E) for the current fronts set F, where V and E are the sets
+of vertices and edges, respectively. For a front fi ∈ F, if there exists a corresponding optimal potential
+advancing point pi ∈ P , we denote vertex (fi , pi ) as a newly generated element in V. Here, P is the set
+of all optimal potential advancing points. Two vertices vi = (fi , pi ) and vj = (fj , pj ) in F̂ are connected
+by an edge ei,j ∈ E if and only if dist(pi , pj ) > hi + hj , where hi and hj are the local scales near front
+fi and fj , respectively. According to refs. [25, 37], the fact that two vertices vi and vj are not connected
+by an edge ei,j is a sufficient but unnecessary condition to efficiently ensure that the two newly generated
+element (fi , pi ) and (fj , pj ) do not intersect. Moreover, this condition prevent a single advancement from
+causing two fronts to be too close, thereby facilitating the achievement of high-quality mesh. If there exists
+a sub-graph F̂s := (Vs , ∅) ⊂ F̂ such that for every pair of vertices vi , vj ∈ Vs , there is no edge connecting
+them, then the set Vs is defined as an independent set. An independent set is considered as a maximal
+independent set if every vertex vj ∈ V \ Vs is connected to at least one vertex vi ∈ Vs . Therefore, finding the
+8
+largest possible mutually non-intersecting advancements is equivalent to finding a maximal independent set
+of graph F̂, which is a well-known NP-hard problem [49]. In the implementation process, it is common to
+find an independent set that is as large as possible to improve efficiency. In fact, any non-empty independent
+subset can be used in the AFT approach. Meanwhile, for any non-empty graph F̂, there exists at least one
+non-empty independent subset Vs := {v} for any v ∈ V. An illustrative example of the independent set for
+a given graph F̂ is shown in Figure 4.
+The MIS algorithm [44, 50, 51] is a well-known method in graph theory, which can find a maximal
+independent set or as large as possible independent set for a given graph. Inspired by ref. [52], we introduce
+the heuristic MIS algorithm [44] into solving parallel mesh generation problems, which can help resolve the
+issue of mesh intersections by finding an independent set that is as large as possible. The origin heuristic
+MIS algorithm [44] has two variants, including a parallel Monte Carlo version with random selection and a
+deterministic version without randomness. In this work, we introduce a new parallel MIS algorithm that is
+based on the aforementioned deterministic heuristic MIS algorithm and the domain decomposition method
+proposed in Subsection 3.1. In the deterministic heuristic MIS algorithm, the vertex set V is divided into
+three disjoint subsets: A, U, and P, where V = A ∪ U ∪ P. These subsets represent the legal advancements,
+the advancements that need to be discarded (discarded set), and the pending set, respectively. The algorithm
+begins with A = ∅, U = ∅, P = V and iteratively moves the vertices in P into A or U until P = ∅. For
+more detailed information about the deterministic heuristic MIS algorithm, we recommend referring to the
+reference [44].
+Figure 5: In the parallel algorithm with 4 subdomains, we take the fronts in the first subdomain as an example. The newly
+generated elements set V1δ (left) and an independent set V1,s (right).
+Next, let us introduce a new parallel MIS algorithm based on the domain decomposition method mentioned in the above subsection. According to the non-overlapping domain decomposition, the front set
+F = F1 ∪ F2 ∪ · · · ∪ Fn . Similarly, the vertex set V is divided into n disjoint subsets, denoted as V1 , . . . , Vn .
+Each subset Vi is assigned to and processed by one processor. In a graph F̂, the neighbor of a vertex v ∈ Vi
+is defined as
+N (v) = {v̂ ∈ V|v and v̂ are connected by an edge e ∈ E}.
+(5)
+The extension of Vi is then defined as Viδ = Vi ∪v∈Vi N (v) based on the overlapping domain decomposition.
+Similar to the deterministic heuristic MIS algorithm, the vertex set Vi and its extension Viδ are divided as
+Vi = Ai ∪ Ui ∪ Pi ,
+i = 1, . . . , n,
+Viδ = Aδi ∪ Uiδ ∪ Piδ ,
+i = 1, . . . , n.
+9
+(6)
+With these notations, the newly proposed parallel MIS algorithm can be summarized in Algorithm 1.
+This algorithm continues until all pending sets Pi are empty, at which point it obtains a maximal independent
+set for the given graph F̂. To meet efficient requirements, the Algorithm 1 terminates after a few iterations
+to achieve an independent set with a satisfactory amount of advancements. Therefore, the computational
+complexity of Algorithm 1 is reduced to the order of O(M |Vi |) for the ith processor, where M is the predefined
+number of maximum iteration.
+Algorithm 1 The consistent parallel MIS algorithm.
+Initialization: For each subset Vi , let Ai = Aδi = ∅, Ui = Uiδ = ∅, Pi = Vi , Piδ = Viδ , i = 1, . . . , n. For
+a vertex v = (f, p), set ID(v) = GI(f ).
+while its < M do
+1. For a vertex v ∈ Pi , if ID(v) ≤ ID(v̂) for all v̂ ∈ N (v) ∩ Piδ , then move it into a temporary set Ti .
+2. For each entry vt ∈ Ti , move vt into Ai and move vertices belonging in N (vt ) ∩ (Aδi ∪ Piδ ) into Uiδ .
+The discarded set Ui should be updated correspondingly.
+3. For each vertex in Uiδ \Ui , adjust it into Uj on the corresponding processor via communication. The
+other subsets should be updated by communication in a similar manner.
+4. If |P1 ∪ · · · ∪ Pn | > 0 we return to step 1 and its := its + 1; Otherwise, break.
+end while
+return Ai , Ui , Pi , i = 1, . . . , n, and the independent set Vs = A1 ∪ · · · ∪ An .
+The following lemma will show that Algorithm 1 can lead to a non-empty independent set Vs .
+Lemma 1. For the vertex set V = V1 ∪ · · · ∪ Vn with |V| > 0, Algorithm 1 can obtain an independent set Vs
+with |Vs | > 0.
+Proof. Let v be the vertex with the minimum ID. In the first iteration of the algorithm, v is added to the
+set A1 ∪ · · · ∪ An and its neighbors are added to the set U1 ∪ · · · ∪ Un . In the subsequent iterations, the
+vertex v always stays in the set A1 ∪ · · · ∪ An . This implies that |Vs | ≥ 1.
+Based on the overlapping domain decomposition and global indicator GI, we can prove that Algorithm 1
+is parallel consistent, as shown in Theorem 1.
+Theorem 1 (Parallel consistency). The independent set Vs obtained by Algorithm 1 is independent with
+respect to the decomposition V = V1 ∪ · · · ∪ Vn and the number of processors.
+Proof. We prove this theorem by shown that the independent sets Vs obtained by n processors and 1 processor
+are the same. Initially, P1 ∪ · · · ∪ Pn = P = V. At the first iteration, for any vertex v ∈ Pi ⊂ P, we have
+N (v) ∩ Piδ = N (v) ∩ P.
+(7)
+According to Property 1, the ID of each vertex remains the same regardless of whether the algorithm is
+executed using n processors or just 1 processor. In other words, for any vertex v, we have
+ID(v, n) = ID(v, 1).
+(8)
+T1 ∪ · · · ∪ Tn = T ,
+(9)
+Then, the temporary set in step 1 satisfies
+where the temporary set T is obtained by using 1 processor. In step 2, before updating discarded set Ui and
+U, we have A = A1 ∪ · · · ∪ An . Here A and U are obtained by using 1 processor. For a vertex vt ∈ Ti ⊂ T ,
+similar to equation (7), we obtain that
+N (vt ) ∩ (Aδi ∪ Piδ ) = N (vt ) ∩ (A ∪ P),
+10
+(10)
+which implies U = U1δ ∪ · · · ∪ Unδ . After completing communication in step 3, we get that
+A1 ∪ · · · ∪ An = A,
+(11)
+U1 ∪ · · · ∪ Un = U.
+(12)
+and
+Assume that equation (11) and equation (12) remain constant after its iterations. Now, we will show that
+these equations hold at the (its + 1)th iteration. According to equation (11) and equation (12), we have
+P1 ∪ · · · ∪ Pn = P. By repeating the proof of the first iteration, one can prove equation (11) and equation
+(12) remain constant after its + 1 iterations. By induction, we have that the independent sets Vs obtained
+by n processors and 1 processor are the same, which completes the proof of this theorem.
+3.4. Algorithm workflow and parallel mesh quality enhancement
+In this subsection, we summarize the workflow of the newly proposed CPAFT algorithm in Algorithm 2
+and analyze its convergence. A parallel mesh quality enhancement approach is also introduced to improve
+the quality of the newly generated mesh.
+Algorithm 2 The consistent parallel advancing front technique (CPAFT).
+Initialization: A maximum scale hM and minimum scale hm and a reasonable initial front set F which
+is consistent with scale hM and hm .
+while true do
+δ
+1. According to criteria C1-3, construct subdomains Ωih , Ωi,δ
+h and subsets Fi , Fi by using the domain
+decomposition method proposed in Subsection 3.1 for the current front set F.
+for ∀f in Fi do
+2. Find the optimal point p (if exists) from the potential advancing points on the perpendicular line
+of front f and the fronts in N eighbor(f ) according to criterion A and criterion B. Generate a new
+element (f, p) and add it into vertex set V.
+end for
+3. Build the graph F̂ := (V, E) and apply Algorithm 1 to obtain Ai , Ui , Pi .
+4. Add elements in Ai into Eih and update front sets F and F1 , . . . , Fn correspondingly.
+5. If |F1 ∪ · · · ∪ Fn | > 0 and |Vs | > 0, return step 1; otherwise, break.
+end while
+return All generated elements which are represent in n subsets Eih , i = 1, . . . , n.
+According to Theorem 1, the CPAFT algorithm is parallel consistent. The following Theorem 2 shows
+that CPAFT can terminate after a finite number of iterations.
+Theorem 2. Algorithm 2 terminates after a finite number of iterations, which is less than ⌈V0 /(ϵηhdm )⌉.
+Proof. After the kth iteration, let Vk be the volume of the polyhedron enclosed by current F. Then {Vk } is
+a monotone sequence, i.e.,
+|Ωh | = V0 ≥ · · · ≥ Vk−1 ≥ Vk · · · .
+(13)
+We denote ⌈V0 /(ϵηhdm )⌉ as M , in which (ϵ, η, hm ) are constants mentioned in Section 2. If Algorithm 2 does
+not terminate after M iterations, then we have |F1 ∪ · · · ∪ Fn | > 0 and |Vs | > 0 at the kth iteration with
+k = 0, . . . , M . Based on Lemma 1 and the criteria mentioned in Section 2, at the kth iteration, there exists at
+least one element in Vs , whose volume is not less than ϵηhdm . Then the Vk is a strictly monotone decreasing
+sequence with
+Vk − Vk+1 ≥ ϵηhdm > 0, k = 0, . . . , M.
+(14)
+By summing up equation (14) with k = 0, . . . , M , we get that
+V0 − VM +1 ≥ (M + 1)(ϵηhdm ) > V0 .
+(15)
+Then, equation (15) indicates that VM +1 < 0, which is contradictive with the non-negativity of volume.
+Therefore, Algorithm 2 should stop after a finite number of iterations, which is less than ⌈V0 /(ϵηhdm )⌉.
+11
+The mesh generation process is completed by Algorithm 2 if it terminates with |F1 ∪ · · · ∪ Fn | = 0 and
+|Vs | = 0. However, in some cases, Algorithm 2 may terminate with |F1 ∪ · · · ∪ Fn | > 0 and |Vs | = 0. In this
+situation, the mesh generation process is not completed because the polyhedron enclosed by remaining front
+set F is not empty. This usually occurs for 3D complex models. In particular, the polyhedron enclosed by
+remaining front set F may be too small, making it impossible to find an optimal advancing point p for any
+f that satisfies criterion A and criterion B. As a result, the vertex set V is empty, and consequently, the
+independent set Vs is also empty. To complete the mesh generation process, the remaining fronts in F can
+be handled by merging close points. We start by selecting the remaining front fm with minimum ID and
+merge all of the vertices in N eighbor(fm ). Then, we return to step 1 of Algorithm 2. This procedure is
+repeated alternately until |F1 ∪ · · · ∪ Fn | = 0.
+After generating the unstructured meshes by CPAFT, it is necessary to further enhance the mesh quality.
+In this work, we employ the surface preserving Laplacian smoothing approach introduced in Section 2 with
+the domain decomposition method proposed in Subsection 3.1 to conduct parallel mesh quality enhancement.
+For each elements subset Eih , with i = 1, . . . , n, we extend it to a large subsets Ei,δ
+h based on the overlapping
+i,δ
+domain decomposition Ωh . According to equation (2), the position of a point pi is updated by using the
+positions of all its neighboring nodes. Therefore, with this extension, we can run the surface preserving
+Laplacian smoothing approach in parallel. An example is given in Figure 6 to show the parallel Laplacian
+smoothing for a point on the boundary of two subdomains.
+P
+P
+P
+P
+Figure 6: The parallel Laplacian smoothing for a point on the boundary of two subdomains: (a) the initial mesh, and (d) the
+final smoothed mesh. The red and the blue parts represent the meshes of two different subdomains, respectively. The yellow
+lines represent the interface between the two subdomains. In (b) and (c), the elements with dashed lines are added to the
+extension subset via communication.
+Laplacian smoothing usually produces meshes with acceptable quality for 2D models and 3D models
+with simple structures. However, its effectiveness diminishes for complex 3D models, where mesh quality
+improvements are often insufficient. To achieve better results, it is crucial to optimize the adjacency relationships through operations such as edge splits, edge collapses, and edge flips. In this work, we implement
+a parallel local remeshing algorithm, based on the computational geometry algorithms library (CGAL) [53].
+Our implementation allows each processor to independently identify and remove elements with a mesh quality indicator α < 0.3 within its respective set Eih , along with a small set of surrounding elements. The
+“remeshing” function in CGAL is then used to re-generate the meshes, which are subsequently reintegrated
+into the subset Eih . Repeating this process 1-3 times significantly enhances mesh quality.
+After generating the unstructured mesh using Algorithm 2 and applying parallel mesh quality enhancement approach, we obtain n disjoint subsets Eih , where i = 1, . . . , n. These subsets solve the problem stated
+in Prob. 1 in parallel. Simultaneously, all elements are partitioned into n disjoint subsets, which can be
+considered as the result of mesh partitioning. As a result, the newly proposed Algorithm 2 can be executed
+concurrently with a parallel numerical PDE solver, making it more convenient for computer aided engineering
+or computational fluid dynamics simulations.
+12
+4. Experiment results
+To examine the performance of the newly proposed CPAFT algorithm, we carry out numerical experiments on a series of 2D and 3D problems. All simulations are carried out on a supercomputer with
+multi-nodes, each equipped with two AMD EPYC 7452 32-Core CPUs and 256GB of local memory. The
+nodes are interconnected via an Infiniband high-performance network. In all tests, the surface meshes of all
+geometry models are segmented with Gmsh [54]. We mainly focus on: (1) the parallel consistency, (2) the
+mesh quality, (3) the parallel scalability, and (4) comparisons with three open-source software tools: Gmsh
+[54], NETGEN [24], and TetGen [17].
+4.1. Triangular mesh generation in 2D
+Firstly, we demonstrate the iteration of the proposed algorithm using a 2D gear with an inner radius of
+0.8, an outer radius of 1.8, 12 teeth with radius r = 2.0, and angle θ = π/20. We show the geometry of the
+gear and display the mesh generation procedure of the CPAFT algorithm with 4 processors in Figure 7. From
+the figure we can see that CPAFT can efficiently obtain a high quality triangular mesh after 27 iterations for
+this problem. Without mesh quality enhancement, all mesh quality indicators α for this problem are above
+0.8.
+(a) Geometry
+(b) Step 5
+(c) Step 10
+(d) Step 15
+(e) Step 20
+(f) Step 27
+Figure 7: A 2D gear model. The CPAFT algorithm convergences in 27 iterations. Element counts per processor are 158, 153,
+153, and 152, respectively.
+The second test case is the NACA0012 airfoil [55], a benchmark model commonly used to validate mesh
+generation algorithms. The primary challenge with this model lies in the potential non-uniformity of mesh
+scale from the inner to the outer boundary. We employ the CPAFT algorithm combined with Laplacian
+13
+smoothing to generate meshes for this model, using both a uniform local scale h and varying local scales which
+decrease from outer to inner boundary. All tests in this experiment are conducted using np = 1 processor
+and 4 processors. The output meshes and their mesh quality for a uniform local scale h are displayed in
+Figure 8, which indicates the parallel consistency of the CPAFT algorithm with Laplacian smoothing and
+the high quality of the generated meshes. Similarly, as illustrated in Figure 9, the CPAFT algorithm with
+Laplacian smoothing also achieves the parallel consistency and produces high quality meshes when varying
+local scales are applied.
+(a) np = 1
+(b) np = 4
+(c) mesh quality
+Figure 8: The CPAFT algorithm with Laplacian smoothing and a uniform local scale being h = 0.04. All simulations start
+with 209 initial fronts and result in a total of 4,177 elements. The generated mesh with quality α ≥ 0.56.
+(a) np = 1
+(b) np = 4
+(c) mesh quality
+Figure 9: The CPAFT algorithm with Laplacian smoothing. The local scales are 0.02 at the inner boundary and 0.06 at the
+outer boundary. All simulations start with 206 initial fronts and result in a total of 5,452 elements. The generated mesh with
+quality α ≥ 0.32.
+The final 2D test case we present is a concave facial model [56], which serves as a benchmark for evaluating
+the robustness of mesh generation algorithms in concave domains. We employ the CPAFT algorithm,
+incorporating Laplacian smoothing, to generate meshes for this model using varying local scales, which
+increase from left to right boundary. Figure 10 shows the meshes generated by the CPAFT algorithm using
+both a single processor (np = 1) and 4 processors, illustrating the parallel consistency of the algorithm. As
+shown in Figure 10-(c), the generated mesh is of high quality, with α ≥ 0.45.
+14
+(a) np = 1
+(b) np = 4
+(c) mesh quality
+Figure 10: The CPAFT algorithm with Laplacian smoothing. The local scales are 0.03 at the left boundary and 0.05 at the
+right boundary. All simulations start with 295 initial fronts and result in a total of 6,593 elements. The generated mesh with
+quality α ≥ 0.45.
+4.2. Effects of parameters on the CPAFT algorithm
+We then focus on analyzing the effects of key parameters in the CPAFT algorithm: (1) the parameter
+β1 in Criterion A, which controls distance between newly inserted vertices and the nearby existing fronts;
+(2) the parameter β2 in Criterion B, which governs the distance between nearby vertices and the newly
+generated fronts; and (3) the SFC level L managing the domain decomposition. The demo t13 (Figure 12(a)) of Gmsh [54] is used as the benchmark model. Several simulations with parameter L = 6 and varying
+parameters (β1 , β2 ) are produced. The effects of parameters (β1 , β2 ) on mesh quality and total computing
+time are summarized in Table 1. From these results, we observe that the mesh quality is almost insensitive
+to the parameters (β1 , β2 ). As β1 increases and β2 decreases, the algorithm becomes more inclined to select
+existing points as advancing points rather than inserting new ones, resulting in a slight decrease in total
+computing time. After a comprehensive comparison of mesh quality and computing time, the parameters
+(β1 , β2 ) = (0.40, 0.15) are selected as the optimal configuration.
+Table 1: Effects of parameters (β1 , β2 ) on mesh quality and total computing time. Here, L = 6 and the values in this table
+represent the percentage of elements within the specified range of α. “Time(s)” indicates the total computing time utilizing 8
+processors.
+α
+(β1 , β2 )
+(0.30, 0.25)
+(0.30, 0.15)
+(0.30, 0.05)
+(0.40, 0.25)
+(0.40, 0.15)
+(0.40, 0.05)
+(0.50, 0.25)
+(0.50, 0.15)
+(0.50, 0.05)
+(0, 0.3)
+[0.3, 0.5)
+[0.5, 0.7)
+[0.7, 1.0]
+Time
+3.33%
+2.88%
+2.81%
+2.78%
+2.81%
+2.99%
+3.15%
+2.98%
+4.04%
+10.20%
+8.66%
+8.57%
+8.48%
+8.80%
+9.23%
+10.04%
+9.79%
+10.66%
+45.39%
+45.43%
+46.57%
+46.44%
+48.16%
+46.67%
+46.98%
+47.48%
+47.30%
+41.08%
+43.03%
+42.05%
+42.30%
+40.24%
+41.10%
+39.83%
+39.74%
+38.00%
+2.675
+2.709
+2.628
+2.335
+2.329
+2.285
+2.151
+2.148
+2.134
+15
+(a) (0.30, 0.25)
+(b) (0.30, 0.15)
+(c) (0.30, 0.05)
+(d) (0.40, 0.25)
+(e) (0.40, 0.15)
+(f) (0.40, 0.05)
+(g) (0.50, 0.25)
+(h) (0.50, 0.15)
+(i) (0.50, 0.05)
+Figure 11: (a)-(i) Mesh qualities of demo t13 meshes after Laplacian smoothing and local remeshing with different parameters
+(β1 , β2 ). To show the narrow features in the model, we decompose the mesh into two parts.
+Next, we set (β1 , β2 ) = (0.40, 0.15) to study the effect of parameter L. Three simulations with L = 5, 6, 7
+are conducted. Table 2 shows the quality of the resulting meshes for each L, illustrating that the mesh
+quality is largely insensitive to changes in L. For each L, we run simulations with number of processors
+varying from 1, 2, 4, to 8. The computing time and parallel efficiency for all simulations are presented in
+Table 3. The results indicate a slight increase in computing time as the level L of SFC increases. On the
+other hand, increasing L enhances parallel efficiency, which could offer performance benefits when using a
+larger number of processors.
+Table 2: Effects of parameter L on mesh quality. Here, (β1 , β2 ) = (0.40, 0.15) and the values in this table represent the
+percentage of elements within the specified range of α.
+α
+L
+L=5
+L=6
+L=7
+(0, 0.3)
+[0.3, 0.5)
+[0.5, 0.7)
+[0.7, 1.0]
+2.86%
+2.81%
+2.88%
+9.74%
+8.80%
+9.34%
+46.81%
+48.16%
+49.05%
+40.58%
+40.24%
+38.73%
+16
+Table 3: Effects of parameter L on total computing time (“Time(s)”) and parallel efficiency (“Eff(%)”). Here (β1 , β2 ) =
+(0.40, 0.15) and “Eff (%)= T1 /(nTn )” denotes the parallel efficiency using n processors.
+L=5
+L=6
+L=7
+np
+Time
+Eff(%)
+Time
+Eff(%)
+Time
+Eff(%)
+1
+13.524
+100%
+14.380
+100%
+18.204
+100%
+2
+7.138
+94.73%
+7.477
+96.16%
+9.117
+99.84%
+4
+3.965
+85.27%
+4.166
+86.29%
+5.217
+87.23%
+8
+2.357
+71.72%
+2.329
+77.18%
+2.936
+77.50%
+4.3. Mesh quality of the CPAFT algorithm
+We demonstrate the mesh quality of the meshes generated by the CPAFT algorithm for several 3D models
+and compare it with three open-source software tools including Gmsh [54], NETGEN [24], and TetGen [17].
+First, we carry out experiments on two multiply-connected domains for tetrahedral mesh generation, which
+are demo t13 and demo t20 from Gmsh [54]. For each demo, we run three simulations using 1, 2, and 4
+processors, respectively. The geometries of the two demos, along with the corresponding unstructured meshes
+generated by the CPAFT algorithm with Laplacian smoothing, are displayed in Figure 12, indicating both
+the parallel consistency of the CPAFT algorithm and the high quality of the generated meshes. For these two
+demos, the mesh quality indicators α for the output meshes produced by the original CPAFT algorithm, the
+CPAFT algorithm with Laplacian smoothing, and the CPAFT algorithm with both Laplacian smoothing and
+local remeshing are presented in Figure 13-(a). The results clearly demonstrate that the Laplacian smoothing
+and local remeshing approaches can significantly improve mesh quality. Given the favorable geometry of both
+demos, all three versions of the CPAFT algorithm are able to generate tetrahedral meshes with satisfactory
+quality, comparable to that of the reference open-source software tools, as shown in Figure 13-(b).
+(a) Geometry (.stl)
+(b) np = 1
+(c) np = 2
+(d) np = 4
+Figure 12: (a) The geometries for two demos t13 and t20. The meshes generated by the CPAFT with Laplacian smoothing
+using (b) np = 1, (c) np = 2, and (d) np = 4 processors, respectively. All simulations lead to 6,035 elements for t13 and 1,443
+elements for t20, respectively.
+17
+Optimized
+< 0.3
+0.3-0.5
+0.5-0.7
+0.7-1.0
+t13
+Smoothed
+< 0.3
+0.3-0.5
+0.5-0.7
+0.7-1.0
+52.63%
+52.81%
+Original
+< 0.3
+0.3-0.5
+0.5-0.7
+0.7-1.0
+t20
+48.16%
+15.45%
+10.49%
+8.80%
+10.62%
+7.29%
+7.56%
+2.81%
+29.01%
+29.59%
+16.42%
+16.08%
+8.11%
+5.43%
+8.45%
+10.26%8.59% 3.44%
+64.86%
+Gmsh
+< 0.3
+0.3-0.5
+0.5-0.7
+0.7-1.0
+NETGEN
+< 0.3
+0.3-0.5
+0.5-0.7
+0.7-1.0
+TetGen
+< 0.3
+0.3-0.5
+0.5-0.7
+0.7-1.0
+67.84%
+75.05%
+40.24%
+(a) The three versions of CPAFT algorithm
+t13
+t20 31.29%
+26.64%
+53.79%
+44.97%
+16.89%10.29%
+15.71%
+46.32%
+18.66%
+29.94%
+5.44% 2.12%2.94%
+32.54%
+36.02%
+32.98%
+13.76%
+9.04%
+6.78% 1.15%1.93%
+44.62%
+63.16%
+53.02%
+(b) Reference software tools
+Figure 13: Breakdown of mesh quality indicators α for demos t13 and t20: (a) the original CPAFT algorithm (denoted as
+‘Original’), the CPAFT algorithm with Laplacian smoothing (denoted as ‘Smoothed’), and the CPAFT algorithm with both
+Laplacian smoothing and local remeshing (denoted as ‘Optimized’), respectively; (b) TetGen, NETGEN, and Gmsh, respectively.
+We then consider two challenging models with more complex geometries: a space shuttle model and a
+real artery vessel model. For each model, we run two simulations using 1 and 8 processors, respectively. The
+geometries of the two models, along with the corresponding unstructured meshes generated by the CPAFT
+algorithm with Laplacian smoothing, are displayed in Figure 14 and 15. These results demonstrate the
+parallel consistency of the CPAFT algorithm and the high quality of the generated meshes, even for these
+challenging models with relatively flat and narrow features. The mesh quality indicators α for the output
+meshes produced by the three versions of the CPAFT algorithm are presented in Figure 16. Due to the
+complex geometry of these challenging models, meshes generated by the original CPAFT algorithm include
+more than 20% elements with an indicator α < 0.3. While the mesh quality of the original CPAFT algorithm
+surpasses that of TetGen, it falls short when compared to Gmsh and NETGEN. Although the Laplacian
+smoothing approach improves mesh quality, the meshes generated by the CPAFT algorithm with Laplacian
+smoothing still contain more than than 15% elements with an indicator α < 0.3. To further enhance mesh
+quality, we combine CPAFT with Laplacian smoothing and a parallel local remeshing approach, resulting
+in an optimized version of the CPAFT algorithm. The mesh quality indicators α for the optimized version
+are shown in Figure 16-(a), which indicates that the optimized version outperforms all baselines in terms of
+mesh quality.
+(a) Geometry (.stl)
+(b) np = 1
+(c) np = 8
+Figure 14: The space shuttle model: (a) geometry, (b) mesh generated by the CPAFT with Laplacian smoothing using (b)
+np = 1, and (c) np = 8. Both simulations lead to a same mesh with 19,973 elements.
+18
+(a) Geometry (.stl)
+(b) np = 1
+(c) np = 8
+Figure 15: The real artery vessel model: (a) geometry, (b) mesh generated by the CPAFT with Laplacian smoothing using (b)
+np = 1, and (c) np = 8. Both simulations lead to a same mesh with 9,846 elements.
+Optimized
+< 0.3
+0.3-0.5
+0.5-0.7
+0.7-1.0
+space shuttle
+19.57%
+Smoothed
+< 0.3
+0.3-0.5
+0.5-0.7
+0.7-1.0
+Original
+< 0.3
+0.3-0.5
+0.5-0.7
+0.7-1.0
+artery vessel
+10.57%
+10.18%
+17.98%
+15.04%
+10.03%
+20.70%
+17.71%
+21.62%
+4.30%
+10.63%
+20.82%
+79.01%
+50.21%
+52.15%
+82.78%
+14.00%
+15.76%
+20.02%
+1.65%
+Gmsh
+< 0.3
+0.3-0.5
+0.5-0.7
+0.7-1.0
+2.63%
+0.59%
+48.53%
+NETGEN
+< 0.3
+0.3-0.5
+0.5-0.7
+0.7-1.0
+TetGen
+< 0.3
+0.3-0.5
+0.5-0.7
+0.7-1.0
+53.50%
+(a) The three versions of CPAFT algorithm
+space shuttle
+artery vessel
+23.92%
+46.31%
+22.00%
+25.77%
+38.83% 15.57%
+4.74%
+3.23%
+3.82%
+0.79%1.23%
+13.50%
+14.42%
+73.39%
+36.07%
+8.72%
+30.43%
+38.36%
+30.84%
+66.13%
+11.33%
+19.00%
+45.14%
+26.47%
+(b) Reference software tools
+Figure 16: Breakdown of mesh quality indicators α for the space shuttle and real artery vessel model: (a) the original CPAFT
+algorithm (denoted as ‘Original’), the CPAFT algorithm with Laplacian smoothing (denoted as ‘Smoothed’), and the CPAFT
+algorithm with both Laplacian smoothing and local remeshing (denoted as ‘Optimized’), respectively; (b) TetGen, NETGEN,
+and Gmsh, respectively.
+4.4. Parallel scalability
+To study the parallel efficiency of the CPAFT algorithm, we use the artery vessel model and the space
+shuttle model as the benchmark test cases. In the first test case, the surface of the artery vessel model initially
+contains 9,982 triangles. Table 4 presents the computing time, generation rate, and parallel efficiency for the
+CPAFT algorithm with both Laplacian smoothing and local remeshing, as well as for Gmsh and NETGEN.
+The CPAFT algorithm achieves a parallel efficiency of 47.50% (i.e. 15.2x speedup), while the reference
+software tools demonstrate less than 10% parallel efficiency with 32 processors, highlighting the superior
+parallel efficiency of the CPAFT algorithm. Furthermore, the CPAFT algorithm exhibits a significant
+advantage in term of generation rate at 32 processors.
+19
+Table 4: The computing time, generation rate, and parallel efficiency for the CPAFT algorithm with both Laplacian smoothing
+and local remeshing, as well as for Gmsh and NETGEN. “Time S (s)” and “Time R (s)” represent the computing time for
+Laplacian smoothing and local remeshing in CPAFT algorithm, respectively. Here “Eff (%)= T1 /(nTn )” denotes the parallel
+efficiency using n processors. “Time (s)” and “Rate (k/s)” represent the total computing time in seconds and the elements
+generated per second, respectively.
+np
+Time S
+Time R
+Time
+Rate
+Eff(%)
+Time
+Rate
+Eff(%)
+Time
+Rate
+Eff(%)
+CPAFT
+Gmsh
+NETGEN
+1
+0.0839
+1.2892
+28.013
+0.808
+100%
+2.445
+8.629
+100%
+7.563
+2.809
+100%
+2
+0.0495
+0.7690
+14.697
+1.539
+95.30%
+2.203
+9.577
+55.49%
+7.433
+2.858
+50.87%
+4
+0.0363
+0.5777
+8.198
+2.760
+85.43%
+1.999
+10.555
+30.58%
+6.127
+3.467
+30.86%
+8
+0.0224
+0.2281
+4.764
+4.749
+73.50%
+2.030
+10.394
+15.06%
+5.439
+3.905
+17.38%
+16
+0.0135
+0.1307
+2.849
+7.942
+61.45%
+2.158
+9.777
+7.08%
+5.087
+4.176
+9.29%
+32
+0.0071
+0.1250
+1.843
+12.277
+47.50%
+2.660
+7.932
+2.87%
+5.084
+4.178
+4.65%
+We then take the space shuttle model as the second benchmark test case and employ up to 2,048 processors
+to evaluate the parallel scalability. The CPAFT algorithm, with the default settings (β1 , β2 ) = (0.40, 0.15), is
+used to generate tetrahedral mesh. Five initial front sets, denoted as FLi with i = 1, · · · , 5, are constructed.
+The front set FL1 corresponds to the surface mesh of the space shuttle model used in subsection 4.3. By
+dividing each triangular element of this surface mesh into four smaller triangles, we obtain a refined surface
+mesh, denoted as FL2 . The other front sets are constructed in a similar manner. The total numbers of initial
+fronts in FL1 , · · · , FL5 are 0.222, 0.888, 3.551, 14.205, and 56.820 million, respectively.
+64.0
+16.0 183.02
+4.0
+1.0
+182.53
+99.46%
+6.59
+4,654.277
+97.75%
+25.92
+179.54
+14,807.607
+40,989.564 400
+51.58% 350
+218.89
+76.29%
+80.93
+300
+250
+Time (s)
+Generation efficiency (k/s)
+NE (k) 303.366
+1,203.711
+512.0
+Ideal
+Rate (k/s)
+256.0
+187.26 200
+182.96
+150
+100%
+1.66
+8 ( 1)
+Time (s)
+32 ( 2)
+128 ( 3)
+512 ( 4)
+2048 ( 5)
+Number of processors
+100
+50
+Figure 17: Weak scaling results np
+with np = 8, 8
+32, 128, 512, 32
+and 2,048 128
+processors,
+respectively. Here
+512
+2048“N E(k)” in the top of
+the figure denotes the total number
+“Rate (k/s)” represent the total
+Scale of elements1 generated in 210 iterations. 3 “Time (s)” and
+4
+5
+computing time in seconds and the elements generated per second, respectively.
+Settings
+Level of SFC
+4
+5
+6
+7
+8
+To investigate the weak scalability, we apply the CPAFT algorithm to generate tetrahedral meshes using
+the initial front sets FL1 , · · · , and FL5 . The corresponding numbers of processors used are 8, 32, 128,
+512, and 2,048, respectively. To match each initial front set, the level of SFC varies from 4 to 8. In all
+simulations, the number of elements per processor is around 37k. The total computing time increases from
+20
+183.02 to 187.26, as the number of processors changes from 8 to 2,048, which shows the good weak scaling
+performance of the CPAFT algorithm. The mesh generation rate, as shown in Figure 17, indicates that the
+CPAFT algorithm achieves a generation efficiency of 51.58% as the number of processors increases from 8
+to 2,048.
+We then use the initial front set FL4 to test the strong scalability of the newly proposed CPAFT algorithm. The numbers of processors used are 64, 128, 256, 512, and 1,024 processors. The numerical results,
+presented in Figure 18, demonstrate that the CPAFT algorithm obtains stable and robust performance with
+an appropriately large level of SFC. In particular, the algorithm scales efficiently from 64 to 1,024 processors,
+attaining a parallel efficiency of 60.33% when the level of SFC is set to 7. The parallel efficiency further
+increases to 64.39% when the level of SFC is raised to 8.
+Speedup
+1126.80
+8 1118.88
+Speedup, 7th level SFC
+Speedup, 8th level SFC
+79.12%
+76.44%
+592.06
+588.18
+4
+300
+182.96
+178.02
+Time (s), 7th level SFC
+Time (s), 8th level SFC
+1
+64
+128
+256
+1200
+600
+88.05%
+86.89%
+319.94321.92
+95.16%
+95.11%
+2
+64.39%
+60.33%
+Number of processors
+512
+115.90
+109.37
+1024
+Time (s)
+12
+150
+75
+Figure 18: Computing time and speedup for the CPAFT with the initial front set FL4 are evaluated using np = 64, 128, 256,
+512, and 1,024 processors. Two simulations are performed with 7th and 8th level of SFC. “Time (s)” represents the computing
+time in seconds, while “Speedup” indicates the strong scaling speedup achieved.
+5. Conclusions
+The CPAFT algorithm was designed to efficiently generate large-scale unstructured triangular/tetrahedral
+meshes on multi-core CPU supercomputers, addressing the mesh intersection problem with parallel consistency and constructing the same unstructured mesh as the sequential AFT. To distribute the task of mesh
+generation to multiple processors, a non-overlapping domain decomposition was constructed based on the
+SFC Cartesian background meshes, resulting in a geometrically invariant global index for each front. By
+extending each subdomain with δ layers of background, an overlapping domain decomposition was generated
+to facilitate communication. To prevent newly generated elements from intersecting with existing ones, a
+distributed forest-of-overlapping-octrees (or quadtrees) was employed. Mutual mesh intersection judgment
+between newly generated elements was handled by a new consistent parallel MIS algorithm. Theoretical
+analysis substantiated the termination of the CPAFT algorithm after a finite number of iterations and verified its consistency with the sequential version mathematically. Several numerical simulations demonstrated
+that the CPAFT algorithm exhibits excellent performance in concave and non-uniform scenarios, enabling
+the generation of high-quality meshes and scaling effectively up to two thousand processors. In the future,
+we plan to further improve the performance of CPAFT and extend it on heterogeneous architectures, such
+as multi-GPU systems. Additionally, we will consider integrating rational coordinates into the algorithm to
+enhance its robustness, as mentioned in refs. [57, 58].
+21
+Acknowledgments
+This work was supported in part by the National Natural Science Foundation of China (No. 12131002)
+and the Changsha Science and Technology Bureau (No. KH2301001).
+References
+[1] C. Bailey, M. Cross, A finite volume procedure to solve elastic solid mechanics problems in three
+dimensions on an unstructured mesh, International Journal for Numerical Methods in Engineering 38
+(1995) 1757–1776.
+[2] W. Boscheri, S. Chiocchetti, I. Peshkov, A cell-centered implicit-explicit lagrangian scheme for a unified
+model of nonlinear continuum mechanics on unstructured meshes, Journal of Computational Physics
+451 (2022) 110852.
+[3] I. Demirdžić, S. Muzaferija, Numerical method for coupled fluid flow, heat transfer and stress analysis
+using unstructured moving meshes with cells of arbitrary topology, Computer Methods in Applied
+Mechanics and Engineering 125 (1995) 235–255.
+[4] A. Bermúdez, A. Dervieux, J.-A. Desideri, M. E. Vázquez, Upwind schemes for the two-dimensional
+shallow water equations with variable depth using unstructured meshes, Computer Methods in Applied
+Mechanics and Engineering 155 (1998) 49–72.
+[5] M. C. Dı, E. D. Fernández-Nieto, A. Ferreiro, C. Parés, et al., Two-dimensional sediment transport
+models in shallow water equations. a second order finite volume approach on unstructured meshes,
+Computer Methods in Applied Mechanics and Engineering 198 (2009) 2520–2538.
+[6] P. K. Smolarkiewicz, J. Szmelter, F. Xiao, Simulation of all-scale atmospheric dynamics on unstructured
+meshes, Journal of Computational Physics 322 (2016) 267–287.
+[7] F. Assous, P. Degond, J. Segre, A particle-tracking method for 3D electromagnetic PIC codes on
+unstructured meshes, Computer Physics Communications 72 (1992) 105–114.
+[8] T. Z. Ismagilov, Second order finite volume scheme for Maxwell’s equations with discontinuous electromagnetic properties on unstructured meshes, Journal of Computational Physics 282 (2015) 33–42.
+[9] A. Gorobets, P. Bakhvalov, Heterogeneous CPU+ GPU parallelization for high-accuracy scale-resolving
+simulations of compressible turbulent flows on hybrid supercomputers, Computer Physics Communications 271 (2022) 108231.
+[10] P. Mullowney, R. Li, S. Thomas, S. Ananthan, A. Sharma, J. S. Rood, A. B. Williams, M. A. Sprague,
+Preparing an incompressible-flow fluid dynamics code for exascale-class wind energy simulations, in:
+Proceedings of the International Conference for High Performance Computing, Networking, Storage and
+Analysis, 2021, pp. 1–16.
+[11] M. Rasquin, P. Marion, V. Vishwanath, B. Matthews, M. Hereld, K. Jansen, R. Loy, A. Bauer, M. Zhou,
+O. Sahni, et al., Covisualization of full data and in situ data extracts from unstructured grid CFD at
+160k cores, in: Proceedings of the 2011 companion on High Performance Computing Networking,
+Storage and Analysis Companion, 2011, pp. 103–104.
+[12] O. Sahni, M. Zhou, M. S. Shephard, K. E. Jansen, Scalable implicit finite element solver for massively
+parallel processing with demonstration to 160k cores, in: Proceedings of the Conference on High
+Performance Computing Networking, Storage and Analysis, 2009, pp. 1–12.
+[13] A. Lintermann, S. Schlimpert, J. H. Grimmen, C. Günther, M. Meinke, W. Schröder, Massively parallel
+grid generation on HPC systems, Computer Methods in Applied Mechanics and Engineering 277 (2014)
+131–153.
+22
+[14] J. P. Slotnick, A. Khodadoust, J. Alonso, D. Darmofal, W. Gropp, E. Lurie, D. J. Mavriplis, CFD vision
+2030 study: a path to revolutionary computational aerosciences, Technical Report, 2014.
+[15] A. N. Chernikov, N. P. Chrisochoides, Generalized two-dimensional Delaunay mesh refinement, SIAM
+Journal on Scientific Computing 31 (2009) 3387–3403.
+[16] L. P. Chew, Guaranteed-quality delaunay meshing in 3d (short version), in: Proceedings of the
+thirteenth annual symposium on Computational Geometry, 1997, pp. 391–393.
+[17] S. Hang, TetGen, a Delaunay-based quality tetrahedral mesh generator, ACM Trans. Math. Softw 41
+(2015) 11.
+[18] J. R. Shewchuk, Delaunay refinement algorithms for triangular mesh generation, Computational Geometry 22 (2002) 21–74.
+[19] L. Fu, L. Han, X. Y. Hu, N. A. Adams, An isotropic unstructured mesh generation method based on a
+fluid relaxation analogy, Computer Methods in Applied Mechanics and Engineering 350 (2019) 396–431.
+[20] A. Zheleznyakova, S. T. Surzhikov, Molecular dynamics-based unstructured grid generation method for
+aerodynamic applications, Computer Physics Communications 184 (2013) 2711–2727.
+[21] H. Jin, R. Tanner, Generation of unstructured tetrahedral meshes by advancing front technique, International Journal for Numerical Methods in Engineering 36 (1993) 1805–1823.
+[22] R. Löhner, Progress in grid generation via the advancing front technique, Engineering with Computers
+12 (1996) 186–210.
+[23] R. Löhner, P. Parikh, Generation of three-dimensional unstructured grids by the advancing-front
+method, International Journal for Numerical Methods in Fluids 8 (1988) 1135–1149.
+[24] J. Schöberl, NETGEN an advancing front 2d/3d-mesh generator based on abstract rules, Computing
+and visualization in science 1 (1997) 41–52.
+[25] A. N. Chernikov, N. P. Chrisochoides, Parallel guaranteed quality Delaunay uniform mesh refinement,
+SIAM Journal on Scientific Computing 28 (2006) 1907–1926.
+[26] D. J. Mavriplis, An advancing front Delaunay triangulation algorithm designed for robustness, Journal
+of Computational Physics 117 (1995) 90–101.
+[27] Z. Ji, L. Fu, X. Hu, N. Adams, A consistent parallel isotropic unstructured mesh generation method
+based on multi-phase SPH, Computer Methods in Applied Mechanics and Engineering 363 (2020)
+112881.
+[28] N. Chrisochoides, D. Nave, Parallel Delaunay mesh generation kernel, International Journal for Numerical Methods in Engineering 58 (2003) 161–176.
+[29] L. Linardakis, N. Chrisochoides, Delaunay decoupling method for parallel guaranteed quality planar
+mesh refinement, SIAM Journal on Scientific Computing 27 (2006) 1394–1423.
+[30] R. Said, N. Weatherill, K. Morgan, N. Verhoeven, Distributed parallel Delaunay mesh generation,
+Computer Methods in Applied Mechanics and Engineering 177 (1999) 109–125.
+[31] J. Galtier, P.-L. George, Prepartitioning as a way to mesh subdomains in parallel, in: Special Symposium
+on Trends in Unstructured Mesh Generation, 1996, pp. 107–122.
+[32] S. Lo, Parallel Delaunay triangulation in three dimensions, Computer Methods in Applied Mechanics
+and Engineering 237 (2012) 88–106.
+23
+[33] Z. Ji, L. Fu, X. Hu, N. Adams, A feature-aware SPH for isotropic unstructured mesh generation,
+Computer Methods in Applied Mechanics and Engineering 375 (2021) 113634.
+[34] Y. Ito, A. M. Shih, A. K. Erukala, B. K. Soni, A. Chernikov, N. P. Chrisochoides, K. Nakahashi,
+Parallel unstructured mesh generation by an advancing front method, Mathematics and Computers in
+Simulation 75 (2007) 200–209.
+[35] R. Löhner, A parallel advancing front grid generation scheme, International Journal for Numerical
+Methods in Engineering 51 (2001) 663–678.
+[36] R. Löhner, Recent advances in parallel advancing front grid generation, Archives of Computational
+Methods in Engineering 21 (2014) 127–140.
+[37] Q. Zhou, Q. Wang, Z. Yu, SAFT: Shotgun advancing front technique for massively parallel mesh
+generation on graphics processing unit, International Journal for Numerical Methods in Engineering
+123 (2022) 4391–4406.
+[38] C. Tsolakis, N. Chrisochoides, M. A. Park, A. Loseille, T. Michal, Parallel anisotropic unstructured
+grid adaptation, AIAA Journal 59 (2021) 4764–4776.
+[39] S. Aluru, F. E. Sevilgen, Parallel domain decomposition and load balancing using space-filling curves, in:
+Proceedings fourth international conference on high-performance computing, IEEE, 1997, pp. 230–235.
+[40] M. Bader, Space-filling curves: an introduction with applications in scientific computing, volume 9,
+Springer Science & Business Media, 2012.
+[41] R. Borrell, J. C. Cajas, D. Mira, A. Taha, S. Koric, M. Vázquez, G. Houzeaux, Parallel mesh partitioning
+based on space filling curves, Computers & Fluids 173 (2018) 264–272.
+[42] H. Sagan, Space-filling curves, Springer Science & Business Media, 2012.
+[43] T. Isaac, C. Burstedde, L. C. Wilcox, O. Ghattas, Recursive algorithms for distributed forests of octrees,
+SIAM Journal on Scientific Computing 37 (2015) C497–C531.
+[44] M. Luby, A simple parallel algorithm for the maximal independent set problem, in: Proceedings of the
+seventeenth annual ACM symposium on Theory of computing, 1985, pp. 1–10.
+[45] O. C. Zienkiewicz, R. L. Taylor, J. Z. Zhu, The finite element method: its basis and fundamentals,
+Elsevier, 2005.
+[46] E. G. Gilbert, D. W. Johnson, S. S. Keerthi, A fast procedure for computing the distance between
+complex objects in three-dimensional space, IEEE Journal on Robotics and Automation 4 (1988) 193–
+203.
+[47] J. Cavalcante Neto, P. A. Wawrzynek, M. T. Carvalho, L. F. Martha, A. R. Ingraffea, An algorithm
+for three-dimensional mesh generation for arbitrary regions with cracks, Engineering with Computers
+17 (2001) 75–91.
+[48] J. C. Cavendish, Automatic triangulation of arbitrary planar domains for the finite element method,
+International Journal for Numerical Methods in Engineering 8 (1974) 679–696.
+[49] E. L. Lawler, J. K. Lenstra, A. Rinnooy Kan, Generating all maximal independent sets: NP-hardness
+and polynomial-time algorithms, SIAM Journal on Computing 9 (1980) 558–565.
+[50] B. Gfeller, E. Vicari, A randomized distributed algorithm for the maximal independent set problem in
+growth-bounded graphs, in: Proceedings of the twenty-sixth annual ACM symposium on Principles of
+distributed computing, 2007, pp. 53–60.
+24
+[51] A. Panconesi, A. Srinivasan, Randomized distributed edge coloring via an extension of the Chernoff–
+Hoeffding bounds, SIAM Journal on Computing 26 (1997) 350–368.
+[52] T. F. Chan, J. Xu, L. Zikatanov, An agglomeration multigrid method for unstructured grids, Contemporary Mathematics 218 (1998) 67–81.
+[53] A. Fabri, S. Pion, CGAL: The computational geometry algorithms library, in: Proceedings of the 17th
+ACM SIGSPATIAL international conference on advances in geographic information systems, 2009, pp.
+538–539.
+[54] C. Geuzaine, J.-F. Remacle, Gmsh: A 3-d finite element mesh generator with built-in pre-and postprocessing facilities, International Journal for Numerical Methods in Engineering 79 (2009) 1309–1331.
+[55] E. N. Jacobs, A. Sherman, Airfoil section characteristics as affected by variations of the Reynolds
+number, NACA Technical Report 586 (1937) 227–267.
+[56] G. Anjos, 2d Gmsh files for finite element solver, https://github.com/gustavorabello/gmsh-2d, 2022.
+[57] J. R. Shewchuk, Adaptive precision floating-point arithmetic and fast robust geometric predicates,
+Discrete & Computational Geometry 18 (1997) 305–363.
+[58] J. R. Shewchuk, Triangle: Engineering a 2D quality mesh generator and Delaunay triangulator, in:
+Workshop on applied computational geometry, Springer, 1996, pp. 203–222.
+25

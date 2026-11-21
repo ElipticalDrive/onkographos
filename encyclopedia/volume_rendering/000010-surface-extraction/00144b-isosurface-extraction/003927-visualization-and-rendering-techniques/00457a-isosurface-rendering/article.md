@@ -1,0 +1,234 @@
+# Isosurface Rendering
+
+Also called: 3D Contour Rendering, Level Surface Rendering, PBNJ Isosurface, Polygonal Surface Mesh Rendering from Volume, Volumetric Isosurface Rendering
+
+## Overview
+Isosurface rendering extracts and visualizes a specific scalar value (the isovalue) from a 3D volume dataset, representing it as a continuous surface [S1, unofficial]. Unlike direct volume rendering which accumulates light along rays, this method renders only the extracted boundary, requiring explicit lighting calculations to convey shape and depth [S6, unofficial]. It is distinguished from sibling methods like [Optimized Mesh Reference](1888-optimized-mesh-reference.md) by its procedural generation of smooth surfaces at render time, avoiding the jagged artifacts of discrete voxel or coarse polygonal approximations [S4].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar volume grid, a threshold value (isovalue), and camera/lighting parameters [G].
+*   **Output:** A rendered image of the isosurface with shading and material properties [S6, unofficial].
+
+**Data Structures:**
+*   **Volume Data:** A 3D array of scalar values [G]. In shader implementations, gradients are pre-computed and stored in the RGB channels of a texture, while the scalar density value is stored in the Alpha channel [S6, unofficial].
+*   **Geometry:** In API-based approaches (e.g., OSPRay), an `isosurfaces` geometry object is created, which internally references the volume data and a list of isovalues [S3, unofficial].
+
+**Steps:**
+1.  **Ray Initialization:** For each pixel, cast a ray from the eye into the scene, ideally starting at the point where the ray intersects the front face of the volume bounding box [S6, unofficial].
+2.  **Ray Marching:** Advance the ray through the volume in discrete steps [S6, unofficial]. The step size is controlled by a `Step %` parameter, which defines the step length as a percentage of the cell size [S4].
+3.  **Threshold Check:** At each step, sample the voxel density at the current ray position [S6, unofficial].
+4.  **Surface Detection:** If the sampled density exceeds the specified isovalue, the ray has hit the isosurface and marching stops [S6, unofficial].
+5.  **Normal Calculation:** Compute the surface normal at the hit point by calculating the gradient of the scalar field [S6, unofficial]. Compare the data values of the current voxel with its neighbors along the X, Y, and Z axes [S6, unofficial]. The gradient vector points in the direction of the greatest rate of increase; if data values decrease towards the positive X-axis, the normal component points in the positive X direction [S6, unofficial]. Calculating this gradient in the shader is expensive, so a common optimization is to pre-calculate gradients and store them in the texture's RGB channels, storing the scalar value in the Alpha channel [S6, unofficial].
+6.  **Lighting and Shading:** Calculate the color of the hit point using lighting models [S6, unofficial]. Diffuse lighting uses $I_d = K_d \cdot \text{dot}(n, l)$, where $K_d$ is the diffuse constant, $n$ is the normalized surface normal, and $l$ is the normalized direction to the light source [S6, unofficial]. Specular lighting is controlled by specular intensity ($K_s$) and shininess ($N_s$), with $N_s$ typically set to 10 in OSPRay [S3, unofficial]. Ambient lighting is added as a base illumination, controlled by an ambient coefficient (default 0.3) [S5, unofficial].
+7.  **Color Mapping:** Apply a transfer function to map the density value to color and opacity, allowing specific features to be highlighted [S6, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_isosurface(volume, isovalue, camera, lights, step_pct, sampler):
+    """
+    Renders an isosurface from a volume using ray marching.
+    
+    Args:
+        volume: dict with 'data' (3D array), 'origin' (vec3), 'voxel_size' (float), 'bounds' (min/max depth).
+        isovalue: Threshold for surface extraction.
+        camera: dict with 'origin' (vec3), 'width', 'height', 'get_ray(x, y) -> (origin, direction).
+        lights: list of dicts with 'position' (vec3), 'color' (vec3).
+        step_pct: Percentage of cell size for ray marching step.
+        sampler: 'box', 'linear', or 'spherical'.
+    Returns:
+        2D list of RGB colors.
+    """
+    h, w = camera['height'], camera['width']
+    step_size = volume['voxel_size'] * (step_pct / 100.0)
+    image = [[[0.0, 0.0, 0.0] for _ in range(w)] for _ in range(h)]
+
+    for y in range(h):
+        for x in range(w):
+            ray_orig, ray_dir = camera['get_ray'](x, y)
+            ray_dir = normalize(ray_dir)
+            
+            # Start from front face of bounding box
+            t = get_front_face_intersection(ray_orig, ray_dir, volume['bounds'])
+            hit = False
+            hit_normal = None
+            hit_density = 0.0
+            
+            while t < volume['bounds']['max_depth'] and not hit:
+                pos = ray_orig + ray_dir * t
+                density = sample_volume(volume, pos, sampler)
+                
+                if density > isovalue:
+                    hit = True
+                    hit_density = density
+                    hit_normal = compute_gradient(volume, pos)
+                    hit_normal = normalize(hit_normal)
+                    break
+                t += step_size
+
+            if hit:
+                color = [0.0, 0.0, 0.0]
+                # Ambient
+                color[0] += volume.get('ambient', 0.3)
+                color[1] += volume.get('ambient', 0.3)
+                color[2] += volume.get('ambient', 0.3)
+                
+                for light in lights:
+                    light_dir = normalize(light['position'] - pos)
+                    # Diffuse
+                    diff = dot(hit_normal, light_dir)
+                    kd = volume.get('diffuse', 0.6)
+                    color[0] += kd * diff * light['color'][0]
+                    color[1] += kd * diff * light['color'][1]
+                    color[2] += kd * diff * light['color'][2]
+                    
+                    # Specular (Blinn-Phong)
+                    view_dir = normalize(camera['origin'] - pos)
+                    half_dir = normalize(light_dir + view_dir)
+                    ns = volume.get('specular_power', 1.0)
+                    ks = volume.get('specular', 0.05)
+                    spec = pow(max(dot(hit_normal, half_dir), 0.0), ns)
+                    color[0] += ks * spec * light['color'][0]
+                    color[1] += ks * spec * light['color'][1]
+                    color[2] += ks * spec * light['color'][2]
+                
+                # Apply Transfer Function
+                final_color = apply_transfer_function(color, hit_density)
+                image[y][x] = final_color
+
+    return image
+
+def sample_volume(volume, pos, sampler):
+    """Samples volume data at pos using nearest-neighbor or trilinear interpolation."""
+    # Convert world pos to voxel coords
+    voxel_pos = (pos - volume['origin']) / volume['voxel_size']
+    ix, iy, iz = int(voxel_pos[0]), int(voxel_pos[1]), int(voxel_pos[2])
+    data = volume['data']
+    
+    if sampler == 'box':
+        return data[ix][iy][iz]
+    elif sampler == 'linear':
+        # Trilinear interpolation
+        fx, fy, fz = voxel_pos[0] - ix, voxel_pos[1] - iy, voxel_pos[2] - iz
+        c000 = data[ix][iy][iz]
+        c100 = data[ix+1][iy][iz]
+        c010 = data[ix][iy+1][iz]
+        c110 = data[ix+1][iy+1][iz]
+        c001 = data[ix][iy][iz+1]
+        c101 = data[ix+1][iy][iz+1]
+        c011 = data[ix][iy+1][iz+1]
+        c111 = data[ix+1][iy+1][iz+1]
+        c00 = c000 * (1-fx) + c100 * fx
+        c10 = c010 * (1-fx) + c110 * fx
+        c01 = c001 * (1-fx) + c101 * fx
+        c11 = c011 * (1-fx) + c111 * fx
+        c0 = c00 * (1-fy) + c10 * fy
+        c1 = c01 * (1-fy) + c11 * fy
+        return c0 * (1-fz) + c1 * fz
+    else: # spherical
+        return sample_volume(volume, pos, 'linear') # Fallback to linear for simplicity
+
+def get_front_face_intersection(ray_orig, ray_dir, bounds):
+    """Returns t where ray enters the bounding box along its direction."""
+    t_min = (bounds['min'][0] - ray_orig[0]) / ray_dir[0]
+    t_max = (bounds['max'][0] - ray_orig[0]) / ray_dir[0]
+    if t_min > t_max: t_min, t_max = t_max, t_min
+    t_y_min = (bounds['min'][1] - ray_orig[1]) / ray_dir[1]
+    t_y_max = (bounds['max'][1] - ray_orig[1]) / ray_dir[1]
+    if t_y_min > t_y_max: t_y_min, t_y_max = t_y_max, t_y_min
+    if (t_min > t_y_max) or (t_y_min > t_max): return float('inf')
+    t_min = max(t_min, t_y_min)
+    t_max = min(t_max, t_y_max)
+    t_z_min = (bounds['min'][2] - ray_orig[2]) / ray_dir[2]
+    t_z_max = (bounds['max'][2] - ray_orig[2]) / ray_dir[2]
+    if t_z_min > t_z_max: t_z_min, t_z_max = t_z_max, t_z_min
+    if (t_min > t_z_max) or (t_z_min > t_max): return float('inf')
+    t_min = max(t_min, t_z_min)
+    return max(t_min, 0.0)
+
+def compute_gradient(volume, pos):
+    """Computes the gradient (normal) by comparing neighbor values."""
+    voxel_pos = (pos - volume['origin']) / volume['voxel_size']
+    ix, iy, iz = int(voxel_pos[0]), int(voxel_pos[1]), int(voxel_pos[2])
+    data = volume['data']
+    vs = volume['voxel_size']
+    
+    # Central difference approximation
+    val_x_plus = data[min(ix+1, volume['data'].shape[0]-1)][iy][iz]
+    val_x_minus = data[max(ix-1, 0)][iy][iz]
+    val_y_plus = data[ix][min(iy+1, volume['data'].shape[1]-1)][iz]
+    val_y_minus = data[ix][max(iy-1, 0)][iz]
+    val_z_plus = data[ix][iy][min(iz+1, volume['data'].shape[2]-1)]
+    val_z_minus = data[ix][iy][max(iz-1, 0)]
+    
+    grad_x = val_x_plus - val_x_minus
+    grad_y = val_y_plus - val_y_minus
+    grad_z = val_z_plus - val_z_minus
+    return [grad_x, grad_y, grad_z]
+
+def apply_transfer_function(color, density):
+    """Applies a simple transfer function mapping density to final color."""
+    # Placeholder for complex transfer functions; scales color by density
+    return [c * density for c in color]
+
+def normalize(v):
+    mag = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+    return [v[0]/mag, v[1]/mag, v[2]/mag]
+
+def dot(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+```
+
+**Parameters:**
+*   **Isovalue:** The scalar threshold for extraction. In OSPRay, this is an array of floats `isoValues` [S3, unofficial].
+*   **Step % (`rendstep`):** Percentage of cell size for ray marching step. Lower values capture smaller details but increase render time [S4].
+*   **Sampler Type:** Blending method between voxels (Box, Linear, Spherical). Affects smoothness and speed [S4].
+*   **Lighting Coefficients:**
+    *   `ambient`: Default 0.3 [S5, unofficial].
+    *   `diffuse`: Default 0.6 [S5, unofficial].
+    *   `specular`: Default 0.05 (coefficient) or 0.1 (intensity parameter in OSPRay) [S3, unofficial][S5, unofficial].
+    *   `specular_power`: Default 1 [S5, unofficial].
+*   **Interpolation:** Shading type ('phong', 'flat', 'gouraud') [S5, unofficial].
+*   **Shading Flag:** Boolean to enable/disable shading, default True [S5, unofficial].
+*   **Surface Color:** RGB floats, default [0.0, 0.0, 1.0] [S5, unofficial].
+*   **Normal Direction:** Toggle to reverse the direction of normals generated for isosurface triangles [S7, unofficial].
+*   **Shading Mode:** Options include wire frame, flat shading, or smooth (Gouraud) shading [S7, unofficial].
+*   **Display Lists:** Use of display lists to increase rendering speed [S7, unofficial].
+*   **Triangle Strips:** Use of triangle strips instead of individual triangles for more compact representation and faster rendering, at the cost of extra computation time during creation [S7, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Gradient Calculation Cost:** Computing gradients in the shader is expensive. Pre-computing and storing them in texture channels trades memory for performance [S6, unofficial].
+*   **Jagged Artifacts:** If the mesh mode produces jagged results, isosurface mode provides a smoother result but is slower [S4].
+*   **Boundary Artifacts:** Sharp edges at the volume boundary can be mitigated using a "Border Fade" parameter to make boundary voxels transparent [S4].
+*   **Detail Capture:** Decreasing the step size captures details smaller than a voxel, otherwise they will be skipped or render noisy, but increases render time [S4].
+
+## Subtopics
+
+### [Isosurface Transparency via Alpha Blending](15614-isosurface-transparency-via-alpha-blending.md)
+Renders polygonal isosurface meshes with configurable transparency by applying a global alpha value to the renderer's triangles, allowing see-through effects for volume-like features. It differs from on-GPU volume rendering, which handles transparency inherently via ray marching or texture splatting, by relying on standard triangle mesh rendering with alpha blending, which requires manual adjustment of render order and geometry splitting for complex intersections.
+
+### Isosurface Rendering Options
+Provides user-specified tradeoffs between speed and accuracy during runtime rendering [S7, unofficial]. Includes toggles for normal direction reversal, shading modes (wire frame, flat, smooth/Gouraud), display list optimization, and triangle strip generation for compact representation and faster rendering at the cost of creation time [S7, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of pixels and the average ray length within the volume [G]. The step size (`Step %`) directly impacts performance; smaller steps increase cost [S4].
+*   **Memory Complexity:** Depends on the volume storage. If gradients are pre-computed, memory usage increases by a factor of 3 (RGB for gradient, A for density) [S6, unofficial].
+*   **Performance:** Slower than Mesh mode rendering because it computes the surface procedurally at render time rather than using a pre-existing polygonal mesh [S4].
+*   **Strengths:** Produces smooth surfaces without the jagged edges of discrete voxel rendering; allows for dynamic threshold adjustment [S4].
+*   **Limitations:** Requires lighting calculations for visual quality [S6, unofficial]. Sensitive to step size for detail capture [S4].
+*   **When to Use:** Virtual endoscopy [S1, unofficial], medical visualization where smooth surfaces are critical, or when mesh smoothing is too slow/impossible [S4].
+*   **When Not to Use:** When real-time performance is critical and pre-computed meshes are available; when internal volume structure (not just surface) needs to be visualized [G].
+
+## Background
+Isosurface rendering is a fundamental technique in volume visualization, formally defined as rendering surfaces where $f(x, y, z) = \text{const}$ [S1, unofficial]. It is widely used in scientific visualization and medical imaging [S1, unofficial][S2]. The technique has been adapted for interactive rendering on GPUs, moving from CPU-based ray tracing to hardware-accelerated shaders [S1, unofficial]. Implementations exist in various frameworks, including OSPRay (using `ospNewGeometry` with type "isosurfaces") [S3, unofficial], Unity3D (using custom shaders) [S6, unofficial], VTK [S5, unofficial], Smokeview (visualizing `.iso` files generated by FDS) [S2], and Phoenix FD for 3ds Max [S4].
+
+## Sources
+[S1] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)
+[S2] Smokeview (Version 6) A Tool for Visualizing Fire Dynamics Simulation Data Volume I : User’s Guide, https://doi.org/10.6028/nist.sp.1017-1, fetched 2026-10-26
+[S3] seelabutk/pbnj, https://github.com/seelabutk/pbnj, fetched 2026-10-27 (unofficial)
+[S4] FireSmoke Rendering - Phoenix for 3ds Max, https://documentation.chaos.com/space/PHX4MAX/124396558, fetched 2026-10-27
+[S5] Volume Renderer with VTK - yuta-hi, https://github.com/yuta-hi/volume-renderer, fetched 2026-10-29 (unofficial)
+[S6] Volume Rendering in Unity3D - Speaker Deck, https://speakerdeck.com/mlavik1/volume-rendering-in-unity3d, fetched 2026-10-30 (unofficial)
+[S7] Dynamic Isosurface Extraction and Level-of-Detail in Voxel Space, https://digital.library.unt.edu/ark:/67531/metadc694729/?q=marching cubes, fetched 2026-10-28 (unofficial)

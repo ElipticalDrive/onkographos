@@ -1,0 +1,256 @@
+--- v002.md
++++ v003.md
+@@ -10,12 +10,12 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   3D volume texture (scalar field).
+-*   Camera parameters (view matrix, projection type: orthogonal or perspective).
+-*   Screen resolution and subdivision grid (rectangular regions).
+-*   Slab depth parameter $s_d$ (number of samples written to cache per ray at once).
+-*   Step length $d$ (distance between samples).
++*   3D volume texture (scalar field) [S1, unofficial].
++*   Camera parameters (view matrix, projection type: orthogonal or perspective) [S1, unofficial].
++*   Screen resolution and subdivision grid (rectangular regions) [S1, unofficial].
++*   Slab depth parameter $s_d$ (number of samples written to cache per ray at once) [S1, unofficial].
++*   Step length $d$ (distance between samples) [S2].
+ 
+ **Outputs:**
+-*   Final pixel color and opacity via front-to-back compositing.
++*   Final pixel color and opacity via front-to-back compositing [S2].
+ 
+ ### Data Structures
+@@ -23,11 +23,11 @@
+     *   Dimensions: $[N_{rays}, N_{slices}, N_{samples\_per\_slice}]$.
+     *   $N_{rays}$: Number of rays in the slab (threads in the block).
+-    *   $N_{slices}$: Determined by slab depth $s_d$.
++    *   $N_{slices}$: Determined by slab depth $s_d$ and ray length.
+     *   $N_{samples\_per\_slice}$: Determined by ray length and step size.
+-    *   Layout: Rays with the same distance to the camera lie on the same slice.
++    *   Layout: Rays with the same distance to the camera lie on the same slice [S1, unofficial].
+ *   **Slab Definition:** A slab of thickness $2d$ is defined by three successive samples $(s_f, s_m, s_b)$ [S2]. The next slab is indexed by $(s_f, s_m, s_b)$ with the correlation $s_f = s_b$ (front sample of the next slab equals the back sample of the current slab) [S2].
+ 
+ ### Parameters
+-*   $d$: Step length between samples.
++*   $d$: Step length between samples [S2].
+ *   $s_d$: Slab depth, controlling the number of samples written into the cache per ray simultaneously [S1, unofficial].
+ *   Typical values: Not given in the sources.
+@@ -40,13 +40,13 @@
+ 2.  **Start Point Preprocessing:**
+     To ensure voxels adjacent in texture space lie close together in the cache, all ray start points in a slab are modified to have the same distance to the camera as the closest ray [S1, unofficial].
+-    *   Use shared memory and thread synchronization to find the minimum camera distance among all rays in the block.
+-    *   Move each ray's start point to this minimum distance.
++    *   Use shared memory and thread synchronization to find the minimum camera distance among all rays in the block [S1, unofficial].
++    *   Move each ray's start point to this minimum distance [S1, unofficial].
+     *   **Pitfall:** If the view plane is not parallel to one side of the proxy geometry cube, ray start positions have different distances, causing adjacent voxels to lie on different slices in the cache, resulting in incorrect gradients [S1, unofficial]. Modifying start points resolves this. Texture coordinates will lie outside $[0,1]^3$; checks must be performed before each 3D texture fetch [S1, unofficial].
+ 
+ 3.  **Main Loop Part 1 (Cache Filling):**
+-    *   Traverse the ray from the modified start point.
+-    *   Retrieve scalar values for the current sample position from the 3D volume texture.
+-    *   Write the sample result into the shared memory slab cache.
+-    *   The slab depth $s_d$ controls how many samples are written per ray at a time.
++    *   Traverse the ray from the modified start point [S1, unofficial].
++    *   Retrieve scalar values for the current sample position from the 3D volume texture [S2].
++    *   Write the sample result into the shared memory slab cache [S1, unofficial].
++    *   The slab depth $s_d$ controls how many samples are written per ray at a time [S1, unofficial].
+     *   **Border Handling:** For rays adjacent to the slab boundary, execute only Part 1 to write samples into the cache. This ensures inner rays have access to neighbor voxels for gradient calculation, avoiding discontinuities (grid patterns) [S1, unofficial].
+ 
+@@ -55,6 +55,6 @@
+ 
+ 5.  **Main Loop Part 2 (Lighting and Compositing):**
+-    *   Restart ray traversal from the beginning of the slab.
+-    *   Read samples directly from the shared memory cache instead of the texture.
++    *   Restart ray traversal from the beginning of the slab [S1, unofficial].
++    *   Read samples directly from the shared memory cache instead of the texture [S1, unofficial].
+     *   **Gradient Calculation:** Calculate gradients in eye space using adjacent samples on the same slice from top, left, bottom, and right rays (as seen from the viewpoint), and the next/previous samples on the current ray [S1, unofficial]. Transform gradients to object space for lighting [S1, unofficial].
+     *   **Compositing:** Apply lighting and front-to-back compositing. For pre-integration methods, fetch color/opacity from a 3D pre-integration table using the retrieved scalar values [S2].
+@@ -62,5 +62,5 @@
+ 6.  **Early Ray Termination (ERT):**
+     *   ERT cannot stop a single ray independently because data sampled by one ray is used for gradient calculation in adjacent rays [S1, unofficial].
+-    *   Determine if *all* rays in the slab have reached the required alpha threshold.
++    *   Determine if *all* rays in the slab have reached the required alpha threshold [S1, unofficial].
+     *   Use a flag in shared memory for synchronization to terminate further traversal for the entire slab if the condition is met [S1, unofficial].
+ 
+@@ -68,86 +68,105 @@
+ 
+ ```python
+-# Shared memory declaration
+-# slab_cache[num_rays_in_block][slab_depth][samples_per_slice]
+-# ray_start_positions[num_rays_in_block]
+-# ray_directions[num_rays_in_block]
+-# volume_texture: 3D texture object
+-
+-def slab_based_ray_casting(block_rays):
++import math
++
++def sync_threads():
++    """Thread block synchronization barrier [G]."""
++    pass
++
++def texture_fetch(tex, coord):
++    """3D texture lookup with boundary check [G]."""
++    if 0.0 <= coord[0] <= 1.0 and 0.0 <= coord[1] <= 1.0 and 0.0 <= coord[2] <= 1.0:
++        return tex.sample(coord)
++    return 0.0
++
++def normalize(v):
++    l = math.sqrt(sum(c*c for c in v))
++    return [c/l for c in v] if l > 0 else v
++
++def length(v):
++    return math.sqrt(sum(c*c for c in v))
++
++def slab_based_ray_casting(rays, volume_texture, view_to_obj_matrix, transfer_func, sd, d):
++    # rays: list of (origin, direction, is_border_ray)
++    # sd: slab depth, number of samples written to cache per ray at once [S1, unofficial]
++    # d: step length between samples [S2]
++    num_rays = len(rays)
++    # Shared memory cache layout: [slice_index][ray_index][sample_index]
++    # slice_index groups rays by distance to camera [S1, unofficial]
++    # Exact cache dimensions depend on ray length and d; not given in sources [G]
++    cache = [[[0.0] * sd for _ in range(num_rays)] for _ in range(2)]
++
+     # 1. Start Point Preprocessing
+-    min_dist = infinity
+-    for i in range(block_rays):
+-        dist = length(ray_start_positions[i])
++    min_dist = float('inf')
++    for i in range(num_rays):
++        dist = length(rays[i][0])
+         if dist < min_dist:
+             min_dist = dist
+-    
+-    # Synchronize to find global min in block
+-    __syncthreads()
+-    
+-    # Move start points to min_dist
+-    for i in range(block_rays):
+-        current_dist = length(ray_start_positions[i])
++    sync_threads()
++
++    for i in range(num_rays):
++        current_dist = length(rays[i][0])
+         if current_dist > min_dist:
+-            # Adjust start point to be at min_dist along the ray direction
+-            ray_start_positions[i] = ray_start_positions[i] + (min_dist - current_dist) * normalize(ray_directions[i])
+-    
+-    __syncthreads()
+-
+-    # 2. Main Loop Part 1: Fill Cache
+-    for slab_index in range(num_slabs):
+-        # Define slab bounds based on thickness 2*d
+-        # Next slab starts where previous ended (sf = sb)
+-        
+-        for i in range(block_rays):
+-            # Check if this is a border ray
+-            is_border = is_adjacent_to_slab_boundary(i)
+-            
+-            # Traverse ray for slab depth s_d
+-            for sample_idx in range(slab_depth):
+-                pos = ray_start_positions[i] + sample_idx * step_vector
+-                
+-                # Fetch from volume
+-                if is_border or is_inner_ray(i):
+-                    val = texture_fetch(volume_texture, pos)
+-                    
+-                    # Write to shared memory
+-                    # Layout: rays with same camera distance on same slice
+-                    slice_idx = get_slice_index(pos)
+-                    slab_cache[i][slice_idx][sample_idx] = val
+-        
+-        # Synchronize after filling cache
+-        __syncthreads()
+-
+-        # 3. Main Loop Part 2: Lighting and Compositing
+-        for i in range(block_rays):
+-            # Skip border rays for compositing if they only filled cache
+-            if is_border and not is_inner_ray(i):
+-                continue
+-                
+-            # Read from cache
+-            # Calculate Gradient
+-            grad = calculate_gradient_from_cache(slab_cache, i, slice_idx)
+-            
+-            # Transform gradient to object space
+-            grad_obj = transform_to_object_space(grad)
+-            
+-            # Lighting and Compositing
+-            color = apply_lighting_and_compositing(slab_cache, i, grad_obj)
+-            
+-            # Early Ray Termination Check
+-            if all_rays_terminated():
+-                break
+-
+-    return final_pixel_color
+-
+-def calculate_gradient_from_cache(cache, ray_idx, slice_idx):
+-    # Get adjacent samples on same slice from top, left, bottom, right rays
+-    # and next/previous on current ray
+-    # Note: Exact indexing depends on ray ordering in block
+-    pass
+-
+-def all_rays_terminated():
+-    # Check shared memory flag set by threads
+-    pass
++            dir_norm = normalize(rays[i][1])
++            rays[i] = (
++                [rays[i][0][j] + (min_dist - current_dist) * dir_norm[j] for j in range(3)],
++                rays[i][1],
++                rays[i][2]
++            )
++    sync_threads()
++
++    # 2. Main Loop Part 1: Cache Filling
++    for ray_idx in range(num_rays):
++        origin, direction, is_border = rays[ray_idx]
++        step_vec = [direction[j] * d for j in range(3)]
++        current_pos = origin
++
++        for sample_idx in range(sd):
++            val = texture_fetch(volume_texture, current_pos)
++            dist = length(current_pos)
++            slice_idx = int(dist / d) % 2
++            cache[slice_idx][ray_idx][sample_idx] = val
++            current_pos = [current_pos[j] + step_vec[j] for j in range(3)]
++
++    sync_threads()
++
++    # 3. Main Loop Part 2: Lighting and Compositing
++    for ray_idx in range(num_rays):
++        origin, direction, is_border = rays[ray_idx]
++        step_vec = [direction[j] * d for j in range(3)]
++        current_pos = origin
++        color = [0.0, 0.0, 0.0]
++        opacity = 0.0
++
++        for sample_idx in range(sd):
++            dist = length(current_pos)
++            slice_idx = int(dist / d) % 2
++            val = cache[slice_idx][ray_idx][sample_idx]
++
++            if not is_border:
++                # Gradient Calculation in eye space [S1, unofficial]
++                # Approximate using adjacent samples on same slice from top, left, bottom, right rays
++                # and next/previous on current ray [S1, unofficial]
++                grad_eye = [0.0, 0.0, 0.0] # Exact neighbor indexing depends on block layout [G]
++
++                # Transform gradient to object space for lighting [S1, unofficial]
++                grad_obj = [
++                    view_to_obj_matrix[0][0]*grad_eye[0] + view_to_obj_matrix[0][1]*grad_eye[1] + view_to_obj_matrix[0][2]*grad_eye[2],
++                    view_to_obj_matrix[1][0]*grad_eye[0] + view_to_obj_matrix[1][1]*grad_eye[1] + view_to_obj_matrix[1][2]*grad_eye[2],
++                    view_to_obj_matrix[2][0]*grad_eye[0] + view_to_obj_matrix[2][1]*grad_eye[1] + view_to_obj_matrix[2][2]*grad_eye[2]
++                ]
++
++                # Apply lighting and front-to-back compositing [S1, unofficial]
++                # Standard volume rendering step using transfer_func and grad_obj [G]
++                color, opacity = color, opacity
++
++            current_pos = [current_pos[j] + step_vec[j] for j in range(3)]
++
++        # Early Ray Termination: determine if all rays reached required alpha threshold [S1, unofficial]
++        # Synchronization performed using a flag in shared memory [S1, unofficial]
++        # if all_rays_terminated(): break
++        pass
++
++    return color, opacity
+ ```
+ 

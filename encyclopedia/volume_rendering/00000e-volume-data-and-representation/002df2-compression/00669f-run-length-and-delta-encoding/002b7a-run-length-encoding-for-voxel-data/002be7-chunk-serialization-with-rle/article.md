@@ -1,0 +1,123 @@
+# Chunk Serialization with RLE
+Also called: Run-Length Encoded chunk serialization
+
+## Overview
+Chunk Serialization with RLE is a memory management and compression strategy for voxel chunks that stores voxel data in a Run-Length Encoded (RLE) format when idle, decompressing it only upon first write access [S2, unofficial]. It distinguishes itself from static RLE storage by integrating lazy loading and automatic memory reclamation: if a decompressed chunk becomes empty, it reverts to a null state to free memory [S2, unofficial]. This method solves the problem of high memory consumption in large voxel worlds by keeping inactive or empty chunks in a compact representation [S1, unofficial].
+
+## How it works
+The method operates on a per-chunk basis, managing the transition between raw voxel arrays and RLE-compressed buffers based on access patterns.
+
+### Inputs and Outputs
+*   **Input:** A chunk structure containing voxel data, an RLE buffer, and metadata (count, access time, dirty flags).
+*   **Output:** A chunk in one of three states: `null` (empty, no memory), `voxels` (raw uncompressed data), or `rle` (compressed data).
+
+### Data Structures
+The implementation relies on a `ChunkMD` structure to track the state of each chunk [S2, unofficial].
+
+**ChunkMD Layout:**
+*   `voxels`: Pointer to `Voxel*` (raw voxel array).
+*   `rle`: Pointer to `void*` (RLE compressed data).
+*   `count`: `uint32_t` (number of voxels, typically $root^3$).
+*   `last_access`: `uint32_t` (timestamp for potential eviction).
+*   `dirty`: `uint8_t` (modification flag).
+*   `remesh`: `uint8_t` (mesh update flag).
+*   `mesh_dirty`: `uint8_t` (mesh geometry flag).
+*   `mesh_vbo`: `void*` (Vertex Buffer Object).
+*   `mesh_ibo`: `void*` (Index Buffer Object).
+
+**RLE Format:**
+While the specific bit-packing of the RLE format is not detailed in the source, it is implied to be a sequence of (count, value) pairs compatible with the `Uint16Array` structure described in the parent article [5051-run-length-encoding-for-voxel-data.md].
+
+### Steps
+The lifecycle of a chunk involves three primary operations:
+
+1.  **Read Access (`chunk_open_ro`):**
+    *   If `voxels` is null and `rle` matches the null chunk signature, point `voxels` to `null_chunk->voxels` (shared empty state) [S2, unofficial].
+    *   Otherwise, if `rle` exists, decompress `rle` into the `voxels` array [S2, unofficial].
+
+2.  **Write Access (`chunk_open_rw`):**
+    *   If the chunk is null, allocate a new voxel array and copy null data [S2, unofficial].
+    *   If both `rle` and `voxels` exist, free the `rle` buffer [S2, unofficial].
+    *   If only `rle` exists, decompress `rle` into `voxels` and free the `rle` buffer [S2, unofficial].
+
+3.  **Idle/Compression (`chunk_compress`):**
+    *   If `voxels` exist and are not null, compress `voxels` into `rle` and free the `voxels` memory [S2, unofficial].
+    *   If the resulting `rle` matches the null chunk's RLE representation, free the `rle` buffer and point the chunk to `null_chunk->rle` [S2, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def chunk_open_ro(chunk):
+    """Handle read access to a chunk."""
+    if chunk.voxels is None and chunk.rle is null_chunk_rle:
+        # Point to shared null chunk voxels
+        chunk.voxels = null_chunk.voxels
+    elif chunk.rle is not None:
+        # Decompress RLE into voxels
+        chunk.voxels = decompress_rle(chunk.rle)
+        # Note: rle is kept in memory until write or compress
+
+def chunk_open_rw(chunk):
+    """Handle write access to a chunk."""
+    if chunk is null_chunk:
+        # Allocate new voxel array and copy null data
+        chunk.voxels = allocate_voxel_array(chunk.count)
+        copy_null_data(chunk.voxels)
+    elif chunk.rle is not None and chunk.voxels is not None:
+        # Both exist, free rle
+        free(chunk.rle)
+        chunk.rle = None
+    elif chunk.rle is not None and chunk.voxels is None:
+        # Only rle exists, decompress and free rle
+        chunk.voxels = decompress_rle(chunk.rle)
+        free(chunk.rle)
+        chunk.rle = None
+
+def chunk_compress(chunk):
+    """Compress voxels to RLE if idle."""
+    if chunk.voxels is not None and chunk.voxels is not null_voxels:
+        # Compress voxels to rle
+        new_rle = compress_rle(chunk.voxels)
+        free(chunk.voxels)
+        chunk.voxels = None
+        
+        # Check if it matches null chunk rle
+        if new_rle is null_chunk_rle:
+            free(new_rle)
+            chunk.rle = null_chunk_rle
+        else:
+            chunk.rle = new_rle
+```
+
+### Parameters
+*   **Chunk Size:** The number of voxels per chunk is defined by $root^3$. A typical example is $8^3 = 512$ voxels [S2, unofficial].
+*   **Default Chunk Size:** In some implementations, the default chunk size is 64 (likely referring to a dimension or bit width, e.g., $2^6$) [S2, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Null Chunk Handling:** The system must correctly identify and handle the "null chunk" state to avoid allocating memory for empty space [S2, unofficial].
+*   **Memory Leaks:** Failure to free `rle` when decompressing or `voxels` when compressing can lead to memory leaks [S2, unofficial].
+*   **Concurrency:** The access patterns (`ro` vs `rw`) imply a need for thread safety or careful locking to prevent race conditions during decompression/compression [S2, unofficial].
+
+## Subtopics
+
+### Chunk RLE Compression & Lazy Loading
+This variant explicitly manages chunk voxel memory by storing data in RLE format when idle and decompressing on first write access [S2, unofficial]. It is chosen when memory conservation is critical and access patterns are sparse. It differs from static RLE by actively freeing memory if the chunk becomes empty [S2, unofficial].
+
+### Bit-serial Chunk Serialization
+This variant serializes voxel chunk data to byte arrays for network transmission or storage using bit-level serialization [S3, unofficial]. It is chosen for network-bound scenarios. It differs from memory-based RLE by producing a 4D byte array `bytes[x][y][z][bit_data]` for transmission [S3, unofficial].
+
+## Operating characteristics
+*   **Compression Ratio:** RLE compression reduces chunk data from 39.06 MB to 0.67 MB, achieving a 58x reduction compared to raw storage [S1, unofficial].
+*   **Memory Usage:** Significantly lower memory footprint for large worlds with many empty or homogeneous chunks due to lazy loading and null chunk optimization [S2, unofficial].
+*   **Performance:** Decompression overhead is incurred only on first write access, minimizing CPU usage for read-only operations [S2, unofficial].
+*   **Scalability:** Effective for large worlds (e.g., 276,889,600 voxels across 4,225 chunks) as tested on an Apple M4 [S1, unofficial].
+*   **Limitations:** Not suitable for highly dynamic scenes with frequent random writes to all chunks, as the overhead of decompression/compression may negate benefits [S2, unofficial].
+
+## Background
+The method originates from implementations in voxel engines such as `voxplat` and `cubes`, where efficient memory management is crucial for rendering large voxel worlds [S2, unofficial][S3, unofficial]. The performance metrics (58x reduction) were benchmarked in the `voxel-engine` project [S1, unofficial].
+
+## Sources
+[S1] DanielWLiu07/voxel-engine, https://github.com/DanielWLiu07/voxel-engine, fetched 2026-10-26 (unofficial)
+[S2] kosshi-net/voxplat, https://github.com/kosshi-net/voxplat, fetched 2026-10-27 (unofficial)
+[S3] destroflyer/cubes, https://github.com/destroflyer/cubes, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,347 @@
+Building NanoVDBs on the GPU
+Greg Klar, Ken Museth
+Use case: Particle Rasterization
+Top: NanoVDB rasterizer; Bottom: OpenVDB rasterizer
+by Andre Pradhana
+2
+Building a NanoVDB from points
+Snapshot of the source under QR code
+Supports building of regular grids, point grids, index grids
+Related use cases:
+Point rasterization
+Point-to-grid transfers
+3
+NanoVDB Principles
+Pointerless: uses relative offsets in memory
+Very versatile across architectures
+Not well suited for incremental building
+Consequence: Need to know the memory footprint of the grid first!
+4
+NanoVDB Building Steps
+Allocate memory
+Build tree and populate values
+5
+Root tiles and upper node
+Seed points
+Lower node
+Leaf node
+*nodes not to scale
+Default configuration: 8^3 voxels per leaf,
+16^3 leaves per lower node,
+6
+32^3 lower nodes per upper node.
+NanoVDB Nodes
+Root tiles
+1-to-1 mapping between root tiles and upper nodes
+Upper
+node
+Lower
+node
+Voxels, your data lives here!
+Leaf
+node
+*nodes not to scale
+8
+How Much Memory to Allocate?
+NanoVDB footprint
+total_bytes =
+sizeof(Grid) +
+sizeof(Tree) +
+sizeof(Tree::RootType) +
+sizeof(Tree::RootType::Tile) * upper_node_count +
+sizeof(Tree::Node2) * upper_node_count +
+sizeof(Tree::Node1) * lower_node_count +
+sizeof(Tree::Node0) * leaf_node_count +
+blind_data;
+Same in this use case
+This is what we need to know!
+9
+NanoVDB Building Steps
+Corrected
+Count nodes
+Allocate memory
+Build tree and populate values
+10
+COUNTING NODES
+11
+- INTERMISSION Binning points on the GPU
+Sort + RLE + PrefixSum = binning
+RadixSort:
+Sort based on a key the defines the binning
+→ elements in the same bin will be consecutive
+Run Length Encode
+→ number of elements per bin and the number of bins
+Exclusive Sum (aka PrefixSum aka Scan)
+→ indices to the start of each bin in the sorted array
+All these are available in CUB!
+12
+COUNTING ROOT TILES
+Binning the particle IDs by their Root Key
+Root keys are available from nanovdb::RootData::CoordToKey
+Steps:
+Generate (root key, point ID) pairs for each point based on their index-space location
+Radix Sort pairs base on root key
+Run Length Encode, outputs:
+d_tile_keys
+points_per_tile
+upper node
+count
+13
+Root tiles
+1-to-1 mapping between root tiles and upper nodes
+Upper
+node
+Lower
+node
+Leaf
+node
+*nodes not to scale
+14
+INDEXING WITHIN A TILE
+New 64 bits voxel key for each point:
+28b
+15b
+12b
+9b
+9 bits for voxel offset
+Upper
+node
+“lower offset”
+index of the lower node within its parent
+12 bits for leaf offset
+“leaf offset”
+index of the leaf node within its parent
+15 bits for lower offset
+28 bits for tile ID
+Not the same as tile key!
+This is the running index from 0..tile_count-1
+Lower
+node
+Leaf
+node
+15
+COUNTING ACTIVE VOXELS
+Plan: bin points to voxels → number of unique bins == number of active voxels
+For each root tile i
+== i
+Compute voxel key for each point in the tile
+28b
+Sort voxel keys within the tile to get
+d_indx
+Run Length Encode
+d_keys
+d_keys
+15b
+12b
+9b
+, outputs:
+pointsPerVoxel
+voxelCount
+Exclusive Sum: offset to look up points based on voxel
+pointsPerLeafPrefix
+16
+Root tiles
+Upper
+node
+Lower
+node
+Leaf
+node
+*nodes not to scale
+17
+COUNTING LEAF NODES
+Note
+d_keys
+Voxel keys are already sorted in
+Recall voxel keys are tile ID, lower offset, leaf offset, voxel offset
+Shift them right by 9 bits → leaf keys
+28b
+Run Length Encode
+d_keys
+28b
+15b
+15b 12b
+12b
+9b
+with a Right Shift 9 Bits Iterator, outputs:
+d_leaf_keys
+Exclusive Sum on
+pointsPerLeaf
+pointsPerLeaf
+leaf node
+count
+: offset to look up points based on leaf node,
+pointsPerLeafPrefix
+18
+Root tiles
+Upper
+node
+Lower
+node
+Leaf
+node
+*nodes not to scale
+19
+COUNTING LOWER NODES
+Note
+Leaf keys are already sorted in
+d_leaf_keys
+Recall leaf keys are tile ID, lower offset, leaf offset
+Shift them right by 12 bits → lower node keys
+28b
+28b
+15b
+15b
+12b
+We don’t need binning at this point, just the number and values of each lower node!
+Unique on
+d_leaf_keys
+with a Right Shift 12 Bits Iterator, outputs:
+d_lower_keys
+lower node
+count
+20
+Done counting the nodes!
+Root tiles
+Upper
+node
+Lower
+node
+Leaf
+node
+*nodes not to scale
+21
+ALLOCATING BUFFER
+22
+READY TO ALLOCATE MEMORY
+Now that we have the number of nodes, we can allocate the buffer for the grid
+We are including the seed points as well in the blind data
+At this point we know the place in memory of all the nodes by ordinal indexing, eg. the nth lower node, but not by
+spatial coordinates
+grid
+tree
+root
+root nodes
+upper nodes
+lower nodes
+leaf nodes
+23
+grid
+tree
+root
+root nodes
+upper nodes
+lower nodes
+leaf nodes
+NanoUpper<BuildT>& getUpper(int i) const {return *(PtrAdd<NanoUpper<BuildT>>(d_bufferPtr, upper)+i);}
+NanoLower<BuildT>& getLower(int i) const {return *(PtrAdd<NanoLower<BuildT>>(d_bufferPtr, lower)+i);}
+NanoLeaf<BuildT>& getLeaf(int i) const {return *(PtrAdd<NanoLeaf<BuildT>>(d_bufferPtr, leaf)+i);}
+E.g. access to getLower(i) is valid, if 0<= i < lower_node_count!
+But we don’t know their spatial positions!
+E.g. given ijk coordinates, we don’t know how to get to that leaf, even though it is allocated.
+24
+BUILDING THE TREE
+25
+BUILDING THE TREE
+Grid
+Top-down sweep:
+Grid, Tree, and Root
+Tree
+Root
+Root tiles
+Upper nodes
+Lower nodes
+Leaf nodes
+Upper
+node
+Points
+Bottom-up sweep:
+Lower
+node
+Computing the Bounding Boxes
+Leaf
+node
+26
+GRID, TREE, AND ROOT
+Grid
+Tree
+CudaPointsToGrid::processGridTreeRoot
+Root
+Root tiles
+Single-thread kernel
+Straightforward housekeeping
+Upper
+node
+Lower
+node
+Leaf
+node
+27
+UPPER NODES
+CudaPointsToGrid::processUpperNodes
+Running on # of upper nodes threads:
+tid is upper node id. Get the nodes with getUpper
+Ijk cords of the upper node: NanoRoot<uint32_t>::KeyToCoord(
+d_tile_keys
+[tid]);
+Records the upper node to the root tile
+Running on (# of upper nodes * 2^15) threads:
+Zeroing the tables of every upper nodes
+28
+LOWER NODES
+CudaPointsToGrid::processLowerNodes
+Very similar as before, but
+const uint64_t lowerKey =
+d_lower_keys
+[tid];
+auto &upper = d_data->getUpper(lowerKey >> 15);
+28b
+15b
+const uint32_t upperOffset = lowerKey & 32767u;
+28b
+15b
+Needs to use atomic operations to set child mask in parent!
+New kernel launch for resetting the table
+29
+LEAF NODES
+CudaPointsToGrid::processLeafNodes
+For each leaf node
+leafKey =
+d_leaf_keys
+[tid];
+tile_id = leafKey >> 27;
+28b
+15b
+12b
+const uint32_t lowerOffset = leafKey & 4095u
+28b
+15b
+12b
+upperOffset = (leafKey >> 12) & 32767u;
+28b
+15b
+12b
+auto &upper = d_data->getUpper(tile_id);
+Record offset and point count in leaf, if building a point grid
+New kernel launch each active voxel: Record either point ID, or just 1 as a placeholder value
+30
+POINTS
+Only for point grids!
+CudaPointsToGrid<Points>::processPoints
+Copy point IDs or values, based on grid type, into blind data
+Uses
+d_indx
+for voxel to point ID lookup
+31
+COMPUTING THE BOUNDING BOXES
+Lower to upper nodes
+Upper to root nodes
+World space bounding box on grid
+All on the GPU
+Uses expandAtomic
+32
+ENJOY YOUR BRAND NEW
+NANOVDB!
+33
+THANK YOU!
+34

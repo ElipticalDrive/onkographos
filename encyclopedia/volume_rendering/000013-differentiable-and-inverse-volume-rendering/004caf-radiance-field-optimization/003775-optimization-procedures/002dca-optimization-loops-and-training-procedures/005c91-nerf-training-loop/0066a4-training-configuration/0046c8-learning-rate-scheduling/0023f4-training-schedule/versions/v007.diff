@@ -1,0 +1,406 @@
+--- v006.md
++++ v007.md
+@@ -4,159 +4,220 @@
+ 
+ ## Overview
+-A training schedule defines the temporal progression of hyperparameters, loss functions, and structural updates during the optimization of a radiance field or implicit surface [G]. It solves the problem of slow convergence and instability by decoupling coarse geometric alignment from fine detail refinement [G]. Unlike [Learning Rate Scheduling](2701-learning-rate-scheduling.md), which adjusts only the optimizer's step size, or [Regularization and Priors](6281-regularization-and-priors.md), which adds static penalty terms, a training schedule actively changes the *active set* of losses and the *structural state* of the representation (e.g., enabling densification or freezing updates) over specific iteration intervals [G].
++Training schedules define the temporal progression of optimization hyperparameters, loss functions, and structural updates during the training of differentiable volume rendering models. They solve the problem of unstable convergence, geometric artifacts, and slow training times by decoupling coarse geometry acquisition from fine detail refinement. Unlike static learning rate policies, these schedules actively manage the complexity of the scene representation (e.g., density, resolution, or frequency bands) and the sensitivity of the optimization landscape over time.
+ 
+ ## How it works
+-The implementation of a training schedule depends on the specific method variant [G]. Below are the canonical schedules for static/dynamic neural implicit surfaces, 3D Gaussian Splatting variants, and photon field networks [G].
+-
+-### Static and Dynamic Neural Implicit Surfaces (NeuS2)
+-This schedule optimizes a signed distance field (SDF) and neural radiance field [S1].
+-
+-**Inputs:**
+-- Training images and camera poses.
+-- Target iteration counts: $I_{static} = 15,000$ [S1].
+-- Dynamic frame counts: $I_{first} = 2,000$ (or 4,000 for complex geometry like Lego) [S1], $I_{subsequent} = 1,100$ [S1].
+-
+-**Steps:**
+-1. **Static Reconstruction:**
+-   - Train for $I_{static}$ iterations.
+-   - Sample 90% of rays on foreground pixels and 10% on background pixels [S1].
+-2. **Dynamic Reconstruction (First Frame):**
+-   - Train the first frame from scratch for $I_{first}$ iterations [S1].
+-3. **Dynamic Reconstruction (Subsequent Frames):**
+-   - For each subsequent frame:
+-     - **Global Transform Phase:** Optimize the global transformation matrix independently for the first 100 iterations [S1].
+-     - **Joint Fine-tuning:** Optimize network parameters and global deformation together for the remaining $I_{subsequent} - 100$ iterations [S1].
+-
+-**Parameters:**
+-- Static iterations: 15,000 [S1].
+-- Dynamic first frame iterations: 2,000 (4,000 for Lego) [S1].
++The implementation of a training schedule depends on the specific radiance field representation (Neural Implicit, 3D Gaussians, Surfel-based, etc.). Below are the canonical schedules derived from the primary sources.
++
++### NeuS2 Training Schedule (Neural Implicit Surfaces)
++This schedule optimizes a signed distance function (SDF) and color field for static and dynamic scenes [S1].
++
++**Inputs:**
++- Static scene: Multi-view images.
++- Dynamic scene: Multi-view image sequences.
++- Camera poses (known or optimized).
++
++**Outputs:**
++- Optimized SDF field, color field, and deformation field (for dynamic).
++
++**Parameters:**
++- Static training iterations: 15,000 [S1].
++- Dynamic first frame iterations: 2,000 (4,000 for complex geometry like Lego) [S1].
+ - Dynamic subsequent frame iterations: 1,100 [S1].
+-- Global transform optimization iterations: 100 [S1].
+-
+-### 3D Surface Splatting (3DSS)
+-This schedule manages a set of surfels (surface elements) through three distinct phases [S4, unofficial].
+-
+-**Inputs:**
+-- Initial point cloud (e.g., 50k surfels) [S4, unofficial].
+-- Ground-truth masks (optional) [S4, unofficial].
++- Global transformation optimization: First 100 iterations of subsequent frames [S1].
++
++**Steps:**
++1. **Static Scene:** Train for 15,000 iterations [S1].
++2. **Dynamic Scene - First Frame:**
++   - Train from scratch for 2,000 iterations (4,000 for Lego) [S1].
++3. **Dynamic Scene - Subsequent Frames:**
++   - For each subsequent frame $t$:
++     - Optimize global transformation independently for the first 100 iterations [S1].
++     - Fine-tune network parameters and global deformation together for the remaining 1,000 iterations [S1].
++
++### 3DSS Training Schedule (Surfel-based Inverse Rendering)
++This schedule optimizes a set of surfels (surface elements) for inverse rendering, managing density and loss activation [S4, unofficial].
++
++**Inputs:**
++- Multi-view images.
++- Optional ground-truth foreground masks.
++- Initial point cloud (e.g., 50k surfels from depth estimation) [S4, unofficial].
++
++**Outputs:**
++- Optimized surfel positions, sizes, features, and camera parameters.
++
++**Parameters:**
++- Total epochs: Scaled with volume size. 2,800 for small-medium, 1,600 for large, 800 for extremely large volumes [S2, unofficial].
++- Densification interval: Every 4 epochs [S2, unofficial].
++- Densification duration: Until 14–25% of the training process [S2, unofficial].
++- Pruning interval: Structure-aware importance score pruning at 42–50% of the training process [S2, unofficial].
++- BigBrain specific: Multi-stage pruning (epochs 200, 300, 800) with ratios 0.8, 0.8, 0.85 [S2, unofficial].
+ 
+ **Steps:**
+ 1. **Warm-up Phase:**
+    - Activate only photometric and silhouette losses [S4, unofficial].
+-   - Allow the surfel set to deform toward observed images under sparse initial coverage [S4, unofficial].
++   - Allow surfel set deformation under initial sparse coverage [S4, unofficial].
+ 2. **Densification Phase:**
+-   - Enable adaptive density control (splitting and pruning) [S4, unofficial].
++   - Enable adaptive density control (splitting/pruning) [S4, unofficial].
+    - Disable silhouette loss [S4, unofficial].
+    - Activate geometric regularizers ($L_{cons}$, $L_{nc}$) [S4, unofficial].
+-   - **Periodic Pruning:** If ground-truth masks are available, periodically remove floater surfels that consistently project outside the foreground mask across a majority of training views [S4, unofficial].
+-   - **Densification Frequency:** Perform densification every 4 epochs [S2, unofficial].
+-   - **Duration:** Continue until 14–25% of the training process is complete [S2, unofficial].
++   - Perform densification every 4 epochs [S2, unofficial].
++   - If ground-truth masks are available, periodically remove floater surfels that project outside the foreground mask across a majority of views [S4, unofficial].
+ 3. **Refinement Phase:**
+-   - Freeze densification operations [S4, unofficial].
++   - Freeze densification [S4, unofficial].
+    - Fine-tune with all remaining losses until convergence [S4, unofficial].
+ 
+-**Parameters:**
+-- Densification interval: Every 4 epochs [S2, unofficial].
+-- Densification end: 14–25% of total training [S2, unofficial].
+-- BigBrain Cerebellar Exception: Pruning performed three times: twice during densification at epochs 200 and 300 (ratio 0.8), and once after densification at epoch 800 (ratio 0.85) [S2, unofficial].
+-
+-### Staggered KNN Training Schedule (Photon Fields)
+-Used to improve convergence time for KNN-based photon field estimation [S5].
+-
+-**Inputs:**
+-- Sequence of increasing KNN query radii $r_i$ approaching a target radius $r$ [S5].
+-- Total training steps $T$ (typically 2,000–3,000) [S5].
+-
+-**Steps:**
+-1. Initialize training step $t = 0$.
+-2. Determine current sampling radius $r_t$ from the predefined sequence based on $t/T$ [S5].
+-3. Query KNN with radius $r_t$.
+-   - If $r_t$ is small, return $k < K$ samples [S5].
+-   - As $r_t$ increases, $k$ approaches $K$ [S5].
+-4. Update model parameters using the Relative Mean Square Error (rMSE) loss applied to each set of outputs individually [S5].
+-5. Increment $t$. Repeat until $t = T$.
+-
+-**Parameters:**
+-- Typical duration: 2,000–3,000 steps [S5].
+-- Optimizer: Adam ($\beta_1 = 0.9, \beta_2 = 0.99$, no L2 regularization) [S5].
+-- Learning Rate: $9 \times 10^{-4}$ with exponential decay of 0.92 starting at 70% of total steps, triggering every 25 steps [S5].
+-- Example Schedule (1M Photons) [S5]:
+-  - 0–36% steps: Radius 25
+-  - 37–63% steps: Radius 50
+-  - 64–90% steps: Radius 50
+-  - 91–100% steps: Radius 0 (target)
++### TRIPS Training Schedule (Trilinear Point Splatting)
++This schedule optimizes point positions, sizes, features, camera poses, and tone mapper parameters using a trilinear renderer [S3].
++
++**Inputs:**
++- Multi-view images.
++
++**Outputs:**
++- Optimized point cloud, camera poses, and network weights.
++
++**Parameters:**
++- Total epochs: 600 [S3].
++- Warm-up epochs: 20 [S3].
++- Warm-up resolution: Half image resolution [S3].
++- Loss function: VGG-loss [JAF16] as primary criterion [S3].
++- Initial loss (first 50 epochs): Combination of MSE and SSIM [KKLD23] to speed up training by ~5% [S3].
++- Point size initialization: Average distance to the four nearest neighbors [S3].
++
++**Steps:**
++1. **Warm-up:**
++   - Train for 20 epochs at half image resolution [S3].
++2. **Main Training:**
++   - For epochs 51–600:
++     - Randomly zoom in and out each epoch to train all convolution weights (which are not shared) to contribute to the final result [S3].
++     - Use VGG-loss for epochs > 50 [S3].
++     - Use MSE+SSIM for epochs ≤ 50 [S3].
++
++### Staggered KNN Training Schedule (Photon Field Networks)
++This schedule improves convergence time for photon mapping by gradually increasing the KNN query radius [S5].
++
++**Inputs:**
++- Photon field parameters.
++- Target KNN radius $r$.
++- Sequence of radii $r_i$.
++
++**Outputs:**
++- Optimized photon field.
++
++**Parameters:**
++- Training duration: 2,000–3,000 steps [S5].
++- Optimizer: Adam ($\beta_1=0.9, \beta_2=0.99$, no L2) [S5].
++- Learning rate: $9 \times 10^{-4}$ with exponential decay of 0.92 starting at 70% of total steps, triggering every 25 steps [S5].
++- Loss: Relative Mean Square Error (rMSE) applied to each set of outputs individually [S5].
++
++**Steps:**
++1. Define a sequence of increasing KNN query radii $r_i$ approaching the target radius $r$.
++2. For each training step $s$:
++   - Determine current radius $r_s$ from the sequence.
++   - Query KNN with radius $r_s$.
++   - If $r_s$ is small, $k < K$ samples are returned; as $r_s$ increases, $k \to K$ [S5].
++3. Update parameters using rMSE loss [S5].
++
++**Example Schedule (1M Photons) [S5]:**
++| Step Range | Radius |
++|------------|--------|
++| 0–36%      | 25     |
++| 37–63%     | 50     |
++| 64–90%     | 50     |
++| 91–100%    | 0 (Target) |
+ 
+ ### Temporal Sensitivity Sampling (SpeeDe3DGS)
+-Used to suppress floaters (unstable Gaussians) in dynamic 3D Gaussian Splatting [S6, unofficial].
+-
+-**Inputs:**
+-- Deformation network $\mathcal{D}$
+-- Current timestep $t$
+-- Noise scaling factor $\beta$
+-- Timestep interval $\Delta t$
+-- Current iteration $i$
+-- Total iterations $\tau$
+-
+-**Steps:**
+-1. During sensitivity estimation, perturb the input timestamp to the deformation field [S6, unofficial].
+-2. Calculate noise magnitude: $\sigma_{noise} = \beta \Delta t (1 - i/\tau)$ [S6, unofficial].
+-3. Sample noise $\epsilon \sim \mathcal{N}(0,1)$ [S6, unofficial].
+-4. Compute perturbed timestamp: $t' = t + \epsilon \sigma_{noise}$ [S6, unofficial].
+-5. Pass $(\mu, r, s, t')$ to $\mathcal{D}$ to obtain deformed Gaussian parameters [S6, unofficial].
++This schedule perturbs timestamps during sensitivity estimation to suppress floaters (unstable Gaussians) [S6, unofficial].
++
++**Inputs:**
++- Deformation field $\mathcal{D}$.
++- Current timestep $t$.
++- Current iteration $i$.
++- Total iterations $\tau$.
++- Noise scaling factor $\beta$.
++- Timestep interval $\Delta t$.
++
++**Outputs:**
++- Perturbed Gaussian parameters for sensitivity estimation.
+ 
+ **Formula:**
+-$$ (\mu + \Delta\mu, r + \Delta r, s + \Delta s) = \mathcal{D}(\mu, r, s, t + \mathcal{N}(0,1)\beta\Delta t(1 - i/\tau)) $$
+-
+-**Pitfall:** Floaters are unstable Gaussians that appear static in observed views but drift at unseen timestamps [S6, unofficial].
++$$
++(\mu + \Delta\mu, r + \Delta r, s + \Delta s) = \mathcal{D}(\mu, r, s, t + \mathcal{N}(0,1)\beta\Delta t(1 - i/\tau))
++$$
++Where $\mathcal{N}(0,1)$ is standard normal noise [S6, unofficial].
++
++**Steps:**
++1. During sensitivity estimation, compute the perturbed timestamp $t' = t + \mathcal{N}(0,1)\beta\Delta t(1 - i/\tau)$ [S6, unofficial].
++2. Query deformation field $\mathcal{D}$ with $t'$ to get perturbed parameters [S6, unofficial].
++3. Use these parameters to identify and prune unstable Gaussians [S6, unofficial].
+ 
+ ### Update Schedule for Proposal Networks (Ganerf)
+-Clips the update frequency of proposal networks to ensure stability during warmup [S8, unofficial].
+-
+-**Inputs:**
+-- Current step `step`
+-- Warmup steps `proposal_warmup`
+-- Max update frequency `proposal_update_every` [S8, unofficial]
+-
+-**Steps:**
+-1. Interpolate update frequency linearly from 0 to `proposal_update_every` over the range `[0, proposal_warmup]` [S8, unofficial].
+-2. Clip the result to `[1, proposal_update_every]` [S8, unofficial].
++This schedule controls the update frequency of proposal networks to ensure stability during warmup [S8, unofficial].
++
++**Inputs:**
++- Current training step `step`.
++- `proposal_warmup`: Number of initial steps with no updates.
++- `proposal_update_every`: Maximum update frequency (min steps between updates).
+ 
+ **Formula:**
+-```python
+-def get_update_freq(step, proposal_warmup, proposal_update_every):
+-    if step <= proposal_warmup:
+-        freq = (step / proposal_warmup) * proposal_update_every
+-    else:
+-        freq = proposal_update_every
+-    return int(max(1, freq))
+-```
+-*Note: The source formula `clip(interpolate(...), 1, max_freq)` implies a minimum frequency of 1 even during warmup, which contradicts the text "not updated" [S8, unofficial]. The implementation follows the explicit formula [S8, unofficial].*
+-
+-### Coarse-to-Fine 3D Schedule
+-Controls the kernel parameter $\sigma$ of the Gaussian kernel applied to the 3D radiance field [S9, unofficial].
+-
+-**Steps:**
+-1. Exponentially reduce $\sigma$ to 0 over 10,000 iterations [S9, unofficial].
+-2. Keep $\sigma = 0$ for all subsequent iterations [S9, unofficial].
++$$
++\text{update\_freq} = \text{clip}\left(\text{interpolate}(\text{step}, [0, \text{warmup}], [0, \text{max\_freq}]), 1, \text{max\_freq}\right)
++$$
++Where `max_freq` is `proposal_update_every` [S8, unofficial].
++
++**Steps:**
++1. If `step` < `proposal_warmup`, do not update proposal networks.
++2. Otherwise, interpolate the update frequency linearly from 0 to `proposal_update_every` over the warmup range.
++3. Clip the frequency to be at least 1 (update every step) and at most `proposal_update_every` [S8, unofficial].
++
++### Coarse-to-Fine 3D Schedule (Decomposed Low-Rank Tensor)
++This schedule stabilizes optimization by controlling the kernel parameter $\sigma$ of the Gaussian kernel applied to the 3D radiance field [S9, unofficial].
++
++**Inputs:**
++- 3D radiance field $F_\sigma$.
++- Current iteration.
++
++**Parameters:**
++- Total iterations for schedule: 10,000 [S9, unofficial].
++
++**Steps:**
++1. Exponentially reduce the kernel parameter $\sigma$ to 0 over 10,000 iterations [S9, unofficial].
++2. Keep $\sigma = 0$ after 10,000 iterations [S9, unofficial].
+ 
+ ### Progressive Image Acquisition Schedule (LiTe-GS)
+-Dynamically increases the number of training views [S10, unofficial].
+-
+-**Inputs:**
+-- Initial image count $N_{init}$
+-- Increment $K$
+-- Target image count $N_{target}$
+-- Iterations per stage $I_{stage}$
+-
+-**Steps:**
+-1. Initialize training with $N_{init}$ images [S10, unofficial].
++This schedule incrementally adds training images to improve oracle efficiency [S10, unofficial].
++
++**Inputs:**
++- Candidate image pool.
++- Target number of images.
++
++**Parameters:**
++- Standard: Initialize with 3 images, add $K \in \{3, 4, 6\}$ images per step until 15 total. 300 iterations per stage. Total 15,000 iterations [S10, unofficial].
++- MipNeRF 360 (Garden): Initialize with 2 images, add 3 images per step until 11 total. 300 iterations per stage. Total 78,000 iterations [S10, unofficial].
++
++**Steps:**
++1. Start with initial set of images.
+ 2. For each acquisition step:
+-   - Add $K$ images to the training set.
+-   - Train for $I_{stage}$ iterations.
+-3. Repeat until $N_{target}$ images are reached [S10, unofficial].
+-
+-**Parameters:**
+-- Standard: $N_{init}=3$, $K \in \{3,4,6\}$, $N_{target}=15$, $I_{stage}=300$, Total $I=15,000$ [S10, unofficial].
+-- MipNeRF 360 (Garden): $N_{init}=2$, $K=3$, $N_{target}=11$, $I_{stage}=300$, Total $I=78,000$ [S10, unofficial].
++   - Train for 300 iterations.
++   - Add $K$ new images to the training set.
++   - Repeat until target image count is reached [S10, unofficial].
++
++### TexGS-VolVis Training Configuration
++This schedule optimizes textured Gaussian splats for volume visualization [S11].
++
++**Inputs:**
++- 162 multi-view images rendered using icosphere sampling.
++- Text prompts (for text-driven NPSE).
++
++**Parameters:**
++- Learning rate for additional shading attributes and `cpal`: 0.01 [S11].
++- Learning rate for texture attribute: 0.025 [S11].
++- Learning rate for other attributes: Same as 2DGS [S11].
++- Optimizer: Adam [S11].
++- Multi-view image resolution for text-driven NPSE: 512x512 [S11].
++- Hardware: NVIDIA RTX4090 GPU [S11].
++
++**Steps:**
++1. Render 162 multi-view images using icosphere sampling [S11].
++2. Optimize TexGS-VolVis using the specified per-attribute learning rates [S11].
+ 
+ ## Subtopics
+@@ -166,35 +227,24 @@
+ 
+ ### [Coarse-to-Fine Model Initialization](6793-coarse-to-fine-model-initialization.md)
+-Coarse-to-Fine Model Initialization is a training strategy for radiance field optimization that initializes a high-resolution "fine" model using the learned parameters from a lower-resolution "coarse" model. It solves the problem of optimization instability and local minima in complex scenes by providing a geometrically coherent starting point for high-frequency detail recovery. It sets itself apart from single-resolution training by preventing the model from committing to high-frequency noise before establishing global structure, and differs from the NeRF Restarting Approach by using a continuous schedule of complexity rather than discrete restarts [12980-nerf-restarting-approach.md].
+-
+-### Staggered KNN Training Schedule
+-A training schedule that uses a sequence of increasing KNN query radii $r_i$ approaching a target radius $r$ to improve convergence time [S5]. Early stages use small radii for quick adaptation; later stages use larger radii for detail refinement [S5]. It provides approximately 2–3× improvement in training speed compared to naïve training using the target radius directly [S5].
+-
+-### Temporal Sensitivity Sampling
+-TSS is a technique to suppress floaters (unstable Gaussians) and improve temporal coherence by perturbing timestamps during sensitivity estimation [S6, unofficial]. It reveals unstable primitives early in training via timestamp jittering, with noise magnitude annealing as training progresses [S6, unofficial].
+-
+-### Evaluation Setup & Metrics
+-A standardized benchmark protocol for testing differentiable rendering optimization across geometric and non-geometric parameters [S7]. It involves collecting 8 scenes with varying parameters (translation, rotation, vertex position, camera pose, material, environment light, textures) and optimizing for 1,000 iterations per run using 128×128 resolution [S7].
+-
+-### Update Schedule for Proposal Networks
+-A schedule function that clips the update frequency of proposal networks based on the training step, ensuring updates happen at least once every `proposal_update_every` steps after a warmup period [S8, unofficial]. It interpolates the update frequency linearly from 0 to `proposal_update_every` over the warmup range [S8, unofficial].
+-
+-### Coarse-to-Fine 3D Schedule
+-A training schedule that controls the kernel parameter ($\sigma$) of the Gaussian kernel applied to the 3D radiance field, exponentially reducing it to 0 to stabilize optimization [S9, unofficial]. It is applied over 10,000 iterations [S9, unofficial].
+-
+-### Progressive Image Acquisition Schedule
+-A schedule that initializes training with a small number of images and adds $K$ images at each acquisition step until reaching a target count [S10, unofficial]. Each stage uses a fixed number of training iterations (e.g., 300), totaling 15,000 iterations for standard setups [S10, unofficial].
+-
+-### TexGS-VolVis Training Configuration
+-A configuration schedule for optimizing textured Gaussian splatting attributes [S11]. It renders 162 multi-view images using icosphere sampling and applies different learning rates per attribute: 0.01 for shading attributes and `cpal`, 0.025 for texture attributes, and the standard 2DGS rate for others [S11]. Optimized using Adam on an NVIDIA RTX4090 [S11].
++Coarse-to-Fine Model Initialization is a training strategy for differentiable volume rendering that initializes a high-resolution (fine) radiance field model using the optimized parameters of a lower-resolution (coarse) model. It solves the problem of geometric artifacts and slow convergence that occur when training directly at high resolution by establishing a coherent global structure before fitting high-frequency features. It differs from standard full-resolution training by deferring the fitting of fine features until the global geometry is established, and differs from simple two-stage pipelines by potentially using continuous or multi-stage resolution scaling rather than a single abrupt switch.
+ 
+ ## Operating characteristics
+-- **Convergence Speed:** Staggered KNN schedules provide 2–3× faster convergence than naïve approaches [S5].
+-- **Stability:** The three-phase schedule (Warm-up, Densification, Refinement) in 3DSS prevents instability from adaptive density control during early, sparse coverage [S4, unofficial]. Temporal Sensitivity Sampling suppresses floaters that cause temporal incoherence [S6, unofficial].
+-- **Complexity:** Progressive Image Acquisition increases oracle evaluation complexity if not managed, but LiTe-GS maintains nearly constant oracle complexity regardless of subset size $K$ [S10, unofficial].
+-- **Hardware/Resolution:** Static training takes ~5 minutes for 15k iterations [S1]. Dynamic first frame takes ~40 seconds for 2k iterations [S1]. Evaluation typically uses 128×128 resolution [S7].
++- **Convergence Speed:** Staggered KNN schedules provide 2–3× improvement in training speed compared to naïve training using the target radius directly [S5].
++- **Stability:** Warm-up phases (e.g., 20 epochs at half resolution in TRIPS [S3] or photometric-only losses in 3DSS [S4, unofficial]) prevent early divergence.
++- **Memory:** Progressive image acquisition (LiTe-GS) reduces oracle evaluations by 23.64% to 62.11% compared to static subsets, improving memory efficiency during view selection [S10, unofficial].
++- **Quality:** Temporal Sensitivity Sampling (TSS) in SpeeDe3DGS allows for up to 11× fewer Gaussians with comparable image quality by suppressing floaters [S6, unofficial].
++- **Complexity:** Hierarchical SH optimization decouples frequency optimization, reducing the risk of getting stuck in local minima for high-frequency details [S1].
+ 
+ ## Background
+-Training schedules for radiance fields have evolved from simple fixed-step optimization to complex, multi-phase strategies that manage structural changes (densification, pruning) and loss weighting [G]. NeuS2 introduced specific iteration counts for static and dynamic scenes [S1]. 3DSS formalized the warm-up/densification/refinement phases for surface splatting [S4, unofficial]. Staggered KNN schedules were developed to mitigate the computational cost of large KNN queries in photon mapping [S5]. Temporal Sensitivity Sampling was introduced in SpeeDe3DGS to address floater artifacts in dynamic Gaussian Splatting [S6, unofficial].
++- **NeuS2:** Introduced by [S1] for fast learning of neural implicit surfaces, optimizing static and dynamic scenes with specific iteration counts.
++- **3DSS:** Introduced by [S4, unofficial] for 3D surface splatting, introducing a three-phase training schedule (warm-up, densification, refinement) for inverse rendering.
++- **TRIPS:** Introduced by [S3] for trilinear point splatting, using a warm-up period and random zooming to train convolution weights.
++- **Photon Field Networks:** Introduced by [S5] for dynamic real-time volumetric global illumination, proposing staggered KNN schedules to accelerate photon field training.
++- **SpeeDe3DGS:** Introduced by [S6, unofficial] for speedy deformable 3D Gaussian Splatting, using Temporal Sensitivity Sampling to handle dynamic scenes.
++- **Differentiable Rendering with RGBXY:** Introduced by [S7] for evaluating robustness across geometric and non-geometric parameters.
++- **Ganerf:** Introduced by [S8, unofficial] for neural radiance fields, using update schedules for proposal networks.
++- **Decomposed Low-Rank Tensor:** Introduced by [S9, unofficial] for joint camera pose optimization, using coarse-to-fine 3D schedules.
++- **LiTe-GS:** Introduced by [S10, unofficial] for oracle-efficient next best view selection, using progressive image acquisition.
++- **TexGS-VolVis:** Introduced by [S11] for expressive scene editing, using specific learning rates for texture attributes.
+ 
+ ## Sources

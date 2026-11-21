@@ -1,0 +1,530 @@
+arXiv:2605.16158v1 [cs.GR] 15 May 2026
+S MART TARGET P OINT C ONTROL FOR G AUSSIAN S PLATTING
+M ETHODS
+Pratik Bisht
+Computer Graphics
+University of Siegen
+pratik.bisht@uni-siegen.de
+Andreas Kolb
+Computer Graphics
+University of Siegen
+andreas.kolb@uni-siegen.de
+May 18, 2026
+A BSTRACT
+Standard Gaussian splatting methods rely on heuristic densification and pruning to adaptively allocate
+primitives during training, and the resulting Gaussian count strongly influences both reconstruction
+quality and runtime. This makes comparisons across methods fragile: improvements can stem from
+higher representational capacity rather than algorithmic design. A common and naive workaround for
+this is hard-stopping or budgeting densification/pruning once a target count is reached, which biases
+training because different methods hit the cap at different times, yielding non-uniform densify/prune
+exposure across views and uneven point distributions. We propose a target point control scheme that
+preserves the standard densification window and cadence, but adjusts only the existing densification
+and opacity-culling hyper-parameters to track a quadratic target count trajectory. This quota-governor
+reaches the desired count by 15k iterations without abrupt cutoffs, ensuring that all methods and
+views receive equal densification and pruning cycles, enabling fairer, capacity-matched evaluation.
+Keywords Gaussian Splatting · Novel View Synthesis · Differentiable Rendering · Densification and Pruning ·
+Benchmarking Protocol
+1
+Introduction
+Gaussian Splatting [1] has emerged as a strong baseline for real-time novel view synthesis and neural scene reconstruction, offering significantly faster optimization and rendering than NeRF-style [2] [3] volumetric methods while
+maintaining high visual fidelity. Modern splatting pipelines represent a scene as a collection of learnable primitives and
+rely on training-time densification and pruning heuristics to adaptively allocate these primitives where reconstruction
+error is high and remove redundant or low-contributing splats. Variants such as 2D Gaussian Splatting [4] and surfelinspired formulations [5] further refine the primitive structure, but still share a similar point-churn mechanism driven by
+heuristic thresholds and periodic scheduling.
+A key challenge for benchmarking such methods is that the final number of primitives is not fixed: it emerges from the
+interaction between scene content, view sampling, and the chosen densify/prune hyper-parameters. Since primitive
+count directly impacts both quality and efficiency, comparisons between methods can become ambiguous: an approach
+may report improved PSNR or SSIM simply because it ends training with substantially more Gaussians, while another
+may appear faster because it converges with fewer primitives but at degraded fidelity. Consequently, attributing gains to
+algorithmic improvements rather than differences in representational capacity is difficult.
+Many works try to control model capacity by limiting the number of Gaussians, but they do so in two distinct ways.
+Some impose a hard cap, e.g., explicitly capping the maximum number of primitives and effectively preventing further
+growth once the limit is reached [6] [7]. Other approaches enforce a budgeted densification policy [8]: densification
+continues, but when the budget is exceeded, only the top-ranked candidates are kept and the rest are discarded [9].
+However, often these strategies are motivated primarily by better primitive placement or memory constraints rather
+than evaluation and comparison fairness. Although both strategies bound capacity, they can still bias training dynamics.
+A PREPRINT - M AY 18, 2026
+Different methods (and runs) reach or saturate the budget at different times and under different intermediate point
+distributions. This can freeze under-reconstructed regions that would normally receive densification later, while already
+over-reconstructed regions may have consumed the available budget. Because densification and pruning operate on a
+fixed cadence (e.g., every 100 iterations), budget saturation also yields unequal effective exposure to point-churn across
+views and time, increasing variance and producing non-uniform point distributions that affect quality comparisons.
+In this paper, we propose a minimal, training-compatible alternative: target point control for Gaussian splatting. Instead
+of modifying the underlying heuristics or changing the densification/pruning cadence, we keep the standard schedule
+intact and adjust only the existing densification gradient threshold and opacity-culling threshold so that the duration of
+densification-pruning cycles stay the same and all cameras/view-points get the same preference. We define a target
+primitive-count trajectory N ∗ (t) over the canonical densification window (up to 15k iterations in common settings) and
+use a lightweight quota-governor that updates these thresholds smoothly in log-space under bounded step sizes. We
+adopt a quadratic fast-start trajectory, which allocates capacity early and improves robustness to late-stage disturbances
+such as opacity resets, enabling the method to reach the approximate desired budget at the end of the densification
+window without abrupt cutoffs.
+Our goal is not to improve reconstruction quality directly, but to provide a fairer evaluation protocol: methods can be
+compared under matched capacity while preserving the original point-churn behavior of classical splatting pipelines.
+We recommend reporting both unconstrained results and controlled-budget results using the proposed schedule to
+separate algorithmic improvements from capacity effects.
+Contributions.
+• We identify and analyze why hard budget cutoffs in Gaussian splatting bias training dynamics, leading to
+non-optimal point distributions, making cross-method comparisons unreliable.
+• We introduce a target point control scheme that preserves the standard densification/pruning cadence and
+modifies only pre-existing thresholds to track a quadratic target count trajectory.
+2
+Related Work
+2.1
+Gaussian Splatting and Adaptive Density Control
+3D Gaussian Splatting (3DGS) represents scenes as a set of anisotropic Gaussian primitives optimized from multiview images and rendered via fast differentiable rasterization [1]. A core component of 3DGS training is Adaptive
+Density Control (ADC), which grows the set of primitives through densification (e.g., splitting/cloning based on
+position gradient-driven criteria) and removes redundant/unused primitives via opacity-based pruning. This point-churn
+mechanism is critical for reconstruction quality and efficiency, but is also heuristic and sensitive to hyperparameters
+such as densification thresholds, pruning thresholds, cadence, and opacity resets.
+Recent work has revisited ADC to improve the stability and effectiveness of densification and pruning. For example, several methods propose improved candidate selection signals (e.g., using additional cues beyond 2D position
+gradients) [10], refine when-to-densify logic, or introduce significance-aware pruning to mitigate redundancy and
+background artifacts while keeping the overall training framework intact [7]. These approaches primarily target better
+reconstruction quality per primitive or better allocation of primitives in textured versus low-frequency regions, but they
+typically do not address the benchmarking question of enforcing a comparable primitive budget across methods.
+2.2
+Compact and Budgeted Gaussian Splatting
+A parallel line of work focuses on compact 3DGS representations through pruning strategies, compression, or structured
+training schedules. More recent methods explicitly incorporate primitive budgeting or memory constraints into training,
+in order to control maximum memory growth from densification and avoid uncontrolled early expansion [8] [9].
+These methods demonstrate that controlling primitive growth is practically important, but their objectives are typically
+deployment-oriented (e.g., memory-bounded training or compression) rather than providing a general fair comparison
+protocol that preserves a fixed densification/pruning window and cadence across diverse GS variants.
+2.3
+Evaluation Protocols and Capacity-Matched Comparisons
+Reproducible evaluation protocols have been a recurring issue in novel view synthesis. Community efforts such as
+standardized NeRF evaluation frameworks highlight how inconsistent settings (e.g., different training-time budgets,
+hyperparameter sweeps, or data processing) can obscure scientific conclusions [11]. For Gaussian Splatting, comparisons
+2
+A PREPRINT - M AY 18, 2026
+are often additionally confounded by the final number of primitives: higher capacity can yield better metrics, while
+smaller models may appear faster but underfit. Some papers attempt to control capacity by fixing a maximum number
+of primitives or reporting results at a chosen budget, but in practice, this strategy can unintentionally bias the spatial
+allocation of primitives because methods reach the cap at different times and therefore undergo different effective
+numbers of densify/prune cycles.
+2.4
+Our Position
+In contrast to approaches that redesign ADC, introduce new candidate scoring signals, or enforce budgets via abrupt
+stopping or memory-centric schedules, our goal is purely evaluation fairness. We preserve the canonical densification/pruning window and cadence used in standard GS pipelines and adjust only existing densification and pruning
+thresholds to track a prescribed target primitive trajectory. This yields capacity-matched comparisons without changing
+the underlying point-churn heuristics, thereby reducing confounding factors when comparing the quality of different
+splatting methods.
+3
+Methodology
+Our goal is to enable capacity-matched comparisons between Gaussian splatting methods without altering the underlying
+densification/pruning heuristics or the training schedule. We therefore treat the standard splatting pipeline (rendering,
+photometric loss, densification, pruning, opacity reset) as a black box and only modulate the existing densification
+and pruning thresholds such that the total number of primitives reaches a desired target at the end of the canonical
+densification window (typically 15k iterations). Importantly, we do not change (i) the densification/pruning cadence,
+(ii) the start/stop iterations of densification, or (iii) the opacity reset schedule. This preserves the original point churn
+dynamics and avoids spatial biases that arise from prematurely disabling point churn.
+Let the scene be represented by a set of N (t) Gaussian primitives at training iteration t,
+N (t)
+G(t) = {(µi , Σi , ci , αi )}i=1 .
+(1)
+In standard 3DGS-style pipelines, the point population changes through a scheduled densify-and-prune operator
+invoked every c iterations (densification cadence, usually 100 iterations). At each invocation, the method (i) selects
+candidate primitives based on a signal that correlates with reconstruction deficiency, commonly a running statistic of
+view-space position gradient magnitude, and (ii) creates new primitives by cloning/splitting selected candidates. In
+parallel, it removes primitives with persistently low opacity via an opacity cull threshold. We denote the two primary
+hyperparameters as:
+• Densification threshold τden : controls which candidates are densified (lower τden increases the number of
+candidates passing the criterion, hence increasing point growth).
+• Pruning threshold τprune : controls which primitives are removed (higher τprune prunes more aggressively, as
+more primitives fall below the opacity cutoff).
+We denote the method’s default thresholds by τden,0 and τprune,0 . To prevent degenerate regimes, we constrain controllerupdated thresholds to remain within fixed multiples of these defaults:
+τden ∈ [τden,min , τden,max ],
+τprune ∈ [τprune,min , τprune,max ],
+(2)
+In addition, most pipelines periodically reset opacities (e.g., every treset iterations) to escape local minima and encourage
+rediscovery of structure. This reset is known to transiently disrupt pruning signals and can cause sudden drops if pruning
+is not handled carefully.
+3.1
+Target Point Control: Overview
+We propose Target Point Control (TPC), a lightweight controller that guides the primitive population size to meet
+N (tstop ) ≈ K at the end of the densification window, while preserving the original training cadence and heuristics. Let
+the densification window be t ∈ [tstart , tstop ], where tstart corresponds to densify_from_iter and tstop corresponds to
+densify_until_iter. The densify/prune operator is invoked every c iterations (densification_interval). We
+define a target schedule N ∗ (t) that specifies the desired number of primitives at every iteration t, and update τden and
+τprune only at the same cadence as densify/prune, so that the controller aligns with the discrete actuation structure of the
+pipeline.
+3
+A PREPRINT - M AY 18, 2026
+(b) TPC (ours). Point count tracks the target trajectory N ∗ (t)
+during the densification window while reporting the same
+cadence-1 test PSNR curve.
+(a) Hard cutoff. Point count is capped once the maximum is
+reached. The right axis shows the test PSNR trajectory evaluated
+at cadence-1.
+Figure 1: Point growth and test PSNR over training. Left: hard cutoff. Right: Target Point Control (TPC), which
+additionally visualizes the target schedule N ∗ (t). Both plots show point count on the left axis and test PSNR on the
+right axis for the Lego scene of NeRF Synthetic dataset.
+3.2
+Quadratic Target Trajectory
+We define a fast-start quadratic schedule to allocate capacity early and reduce late-stage catch-up pressure, especially
+important when opacity resets. Let N0 be the initial population size at the beginning of training (or at tstart ), and let K
+be the final desired population at tstop . For t ∈ [tstart , tstop ], we define
+t − tstart
+N ∗ (t) = N0 + s(x) (K − N0 ),
+x=
+∈ [0, 1],
+(3)
+tstop − tstart
+with quadratic fast-start easing
+s(x) = 1 − (1 − x)2 = 2x − x2 .
+(4)
+We define the target count piecewise as
+
+N0 ,
+N ∗ (t) = N0 + s(x) (K − N0 ),
+
+K,
+t ≤ tstart ,
+tstart < t < tstop ,
+t ≥ tstop .
+(5)
+Compared to linear or slow-start schedules (e.g., x2 ), Eq. (4) allocates a larger fraction of the total budget earlier (e.g.,
+s(0.5) = 0.75), which empirically stabilizes target tracking under opacity resets and reduces the risk of being far below
+target near the end of the window.
+3.3
+Quota-Governor: Discrete Target Tracking
+At iteration t, let N (t) be the current number of primitives and define the gap
+g(t) = N ∗ (t) − N (t).
+(6)
+Since densify/prune is only applied every c iterations, the controller computes how many actuation opportunities remain
+until tstop :
+
+
+tstop − t
+A(t) = 1 +
+, for t ≤ tstop aligned to cadence.
+(7)
+c
+We then convert the remaining global gap into a per-actuation quota:
+
+
+g(t)
+q(t) = round
+.
+(8)
+A(t)
+Intuitively, q(t) specifies how many primitives we should add (if q(t) > 0) or remove (if q(t) < 0) per remaining
+densify/prune call, assuming future calls behave similarly. To avoid chattering when close to the target, we apply:
+• Deadband: if |g(t)| < δ(t), set q(t) = 0, where δ(t) is proportional to N ∗ (t) (e.g., 1%) and lower bounded
+by a constant.
+• Quota floor: if |q(t)| < qmin , set q(t) = 0, where qmin is set proportional to K (e.g., K/100) and optionally
+increased near the end of the window to enforce decisive corrections.
+4
+A PREPRINT - M AY 18, 2026
+Observed actuation effect.
+We measure the realized population change over the last interval as
+∆N (t) = N (t) − N (t − 1),
+(9)
+and compare it to the quota. This provides a simple feedback signal that captures the net effect of densification and
+pruning under current thresholds.
+3.4
+Threshold Updates (Bounded Multiplicative Control)
+We update the densification and pruning thresholds via small multiplicative steps, which are scale-invariant and preserve
+positivity:
+τ ← τ exp(∆),
+|∆| ≤ ∆max .
+(10)
+After each update, we clamp the thresholds to fixed multiples of their default values τden,0 and τprune,0 , as defined in (2).
+The bound ∆max limits the maximum relative change per update (e.g., ∆max = 0.12 corresponds to at most ≈ 12.7%
+change).
+Controller gains and rate limits. ∆max > 0 is the maximum magnitude of the log-step applied in one update, limiting
+the per-update multiplicative change to at most exp(∆max ). βden > 0 and βpru > 0 are scalar gains that map the quota
+tracking errors eu (t) and eo (t) to the proposed log-steps ∆den (t) and ∆pru (t), respectively.
+Under-target case (g(t) > δ(t)). When the current count is below the target, we minimize pruning by setting the
+eff
+eff
+effective pruning threshold τprune
+← τprune,min . We then adapt the effective densification threshold τden
+to achieve the
+required per-step quota. With eu (t) = q(t) − ∆N (t), we apply
+
+eff
+∆den (t) = −βden eu (t),
+τden
+← τden exp clamp(∆den (t), −∆max , ∆max ) ,
+(11)
+eff
+followed by clamping τden
+to the allowable range in (2). If we added fewer points than desired (∆N (t) < q(t)), then
+eu (t) > 0 and ∆den < 0, which decreases τden and increases densification.
+Over-target case (g(t) < −δ(t)). When the current count is above the target, we prevent further growth by setting
+eff
+the effective densification threshold τden
+← τden,max . We then adapt pruning to meet the required removal quota. With
+eo (t) = (−q(t)) − (−∆N (t)), we apply
+
+eff
+∆pru (t) = +βpru eo (t),
+τprune
+← τprune exp clamp(∆pru (t), −∆max , ∆max ) ,
+(12)
+eff
+followed by clamping τprune
+to the allowable range in (2). If we remove fewer points than required, then eo (t) > 0 and
+∆pru > 0, increasing τprune and making pruning more aggressive.
+eff
+Deadband case (|g(t)| ≤ δ(t)). Within the deadband, we keep the thresholds unchanged, i.e., τden
+← τden and
+eff
+τprune ← τprune . This avoids oscillations when N (t) is already close to the target schedule.
+3.5
+Opacity Reset Handling (Prune Lockout)
+The classic pipeline uses the Opacity reset step multiple times during training to bring the system out of local minima.
+This works well for re-distribution of the primitives to more efficient spatial locations. However, opacity resets can
+temporarily reduce many αi values and cause a transient pruning shock, which is required to avoid local minima, but
+can have an adverse effect on the target point control strategy. Hence we include a prune lockout stage in our approach,
+which skips the pruning threshold re-tuning based on our controllers and lets the system get back to usual point density
+naturally before turning on the control knobs. Let treset denote an iteration at which opacity resets, and let Tlock be the
+lockout duration in iterations. To avoid catastrophic drops near the target, we enforce a short pruning lockout after each
+scheduled opacity reset for Tlock iterations:
+eff
+τprune
+← τprune,min ,
+for t ∈ [treset , treset + Tlock ).
+(13)
+During lockout, densification continues under the standard cadence and the controller can still modulate τden when
+under-target, enabling recovery without changing the pipeline schedule.
+5
+A PREPRINT - M AY 18, 2026
+Table 1: Unconstrained results for two Gaussian splatting baselines (We report average metrics across scenes for each
+dataset.)
+Mip-NeRF 360 (Test, Avg.)
+NeRF-Synthetic (Test, Avg.)
+Method
+MS-SSIM ↑
+LPIPS ↓
+L1 ↓
+PSNR ↑
+Pts (M) ↓
+MS-SSIM ↑
+LPIPS ↓
+L1 ↓
+PSNR ↑
+Pts (M) ↓
+2DGS
+0.894
+0.074
+0.021
+30.01
+0.833
+0.965
+0.030
+0.006
+32.92
+0.096
+3DGS
+0.903
+0.062
+0.020
+30.47
+1.582
+0.969
+0.023
+0.006
+33.88
+0.288
+Table 2: Mip-NeRF 360 capacity-matched results for hard cutoff vs. TPC. Each subtable compares 2DGS and 3DGS
+at the same target point average budget of 0.785M points.
+(a) Hard cutoff
+(b) TPC (ours)
+Method
+MS-SSIM ↑
+LPIPS ↓
+L1 ↓
+PSNR ↑
+Method
+MS-SSIM ↑
+LPIPS ↓
+L1 ↓
+PSNR ↑
+2DGS
+3DGS
+0.892
+0.897
+0.077
+0.073
+0.022
+0.021
+29.96
+30.33
+2DGS
+3DGS
+0.893
+0.901
+0.076
+0.068
+0.0215
+0.0205
+30.054
+30.447
+4
+Experiments and Results
+4.1
+Experimental Setup
+We evaluate Target Point Control (TPC) as a capacity-matching mechanism for fair comparisons between Gaussian
+splatting pipelines. The key constraint is that we preserve the original training schedule and heuristics: the densifyand-prune operator remains active only within the canonical densification window (ending at densify_until_iter,
+typically 15k iterations) and is invoked at the original cadence densification_interval (typically 100 iterations).
+We also keep the opacity reset schedule unchanged. TPC modifies only the rate of point churn through the existing
+densification and pruning thresholds, so all views/cameras experience the same number of densify/prune opportunities.
+We consider two representative pipelines: (i) 3DGS, and (ii) 2DGS. We report results on two datasets: Mip-NeRF 360
+(seven scenes: Bicycle, Bonsai, Counter, Garden, Kitchen, Room, Stump) and NeRF-Synthetic (eight scenes: Chair,
+Drums, Ficus, Hotdog, Lego, Materials, Mic, Ship). All the experiments are run on a single RTX 3090 (24GB) with a
+24-core CPU and 64GB RAM.
+For each pipeline and dataset, we compare three regimes:
+1. No point control (default). Each method runs with its original densify/prune hyperparameters. This reflects
+common practice but yields method-dependent final primitive counts.
+2. Hard cutoff (abrupt cap). Densification/pruning is disabled once the point count reaches a fixed target budget.
+This enforces capacity matching but can terminate point churn early and unevenly across methods and views.
+3. TPC (ours). We preserve the densification window and cadence and only modulate the existing densification
+and opacity-culling thresholds to track a target point trajectory, reaching the same target budget at the end of
+the densification window.
+4.2
+Capacity-matched Comparison (Mip-NeRF 360 and NeRF-Synthetic)
+A key motivation for this work is that Gaussian splatting pipelines can differ substantially in their emergent primitive
+counts under default densification/pruning, which directly affects both runtime and reconstruction quality. This makes
+cross-method comparisons fragile: apparent improvements may reflect increased representational capacity rather than
+algorithmic merit.
+Unconstrained training is capacity-confounded. Table 1 shows that, without any point control, 3DGS consistently
+converges to a much larger primitive set than 2DGS across both datasets (e.g., on Mip-NeRF 360: 1.582M vs. 0.833M
+on average; on NeRF-Synthetic: 0.288M vs. 0.096M). Consequently, direct comparisons of PSNR/LPIPS/MS-SSIM
+in this regime are not capacity-matched and can over-attribute gains to a method when they are partly due to a larger
+primitive budget.
+Hard cutoff matches the final budget but changes the optimization trajectory. A common capacity-matching
+strategy is to impose a hard cap by disabling densification (and often pruning) once the primitive count reaches a
+6
+A PREPRINT - M AY 18, 2026
+Table 3: NeRF-Synthetic capacity-matched results for hard cutoff vs. TPC. Each subtable compares 2DGS and 3DGS
+at the same target point average budget of 0.0912M points.
+(b) TPC (ours)
+(a) Hard cutoff
+Method
+MS-SSIM ↑
+LPIPS ↓
+L1 ↓
+PSNR ↑
+Method
+MS-SSIM ↑
+LPIPS ↓
+L1 ↓
+PSNR ↑
+2DGS
+3DGS
+0.949
+0.952
+0.056
+0.054
+0.008
+0.008
+30.84
+31.32
+2DGS
+3DGS
+0.966
+0.967
+0.030
+0.027
+0.006
+0.006
+32.94
+33.50
+specified target. While this produces similar final point counts, the time at which each method hits the cap differs, which
+changes the number of effective densify/prune cycles each method experiences. Because densification and pruning
+operate on a fixed cadence, hitting the cap early can freeze the primitive distribution before under-reconstructed regions
+have received their intended share of point churn, whereas over-reconstructed regions may already have consumed the
+available budget. This makes the final allocation (and thus quality) dependent on when the cap is reached, not only on
+the underlying method.
+TPC preserves canonical point churn while matching the target budget. In contrast, Target Point Control (TPC)
+preserves the canonical densification window, cadence, and opacity reset schedule, and adjusts only the existing
+densification and pruning thresholds to reach the same target budget at the end of the window. This retains the original
+“exposure” to densify/prune cycles for all methods and avoids the discontinuity introduced by an early cutoff. Under
+this controlled setting, we compare hard cutoff vs. TPC at matched target budgets on both datasets (Mip-NeRF 360 in
+Table 2, NeRF-Synthetic in Table 3). Overall, TPC yields better capacity-matched test performance than hard cutoff,
+with particularly consistent improvements in perceptual quality (LPIPS) and small but repeatable gains in PSNR/SSIM,
+indicating that preserving the point-churn dynamics while steering the final count is a more faithful and stable way to
+enforce fairness.
+Qualitative interpretation via point-growth and PSNR curves. The figure 1 shows the comparison of pointgrowth/PSNR between the regimes: hard cutoff typically produces an early plateau in point count (and a corresponding
+change in the PSNR slope), whereas TPC continues controlled point churn until the end of the densification window,
+leading to smoother capacity allocation over time and better quality. This helps explain why, at the same final primitive
+budget, TPC can achieve better test fidelity: it avoids prematurely freezing the distribution and thus reduces the chance
+that capacity is locked into suboptimal regions or viewpoints. Further visual comparisons are shown in figure 2 for
+both Mip-NeRF 360 and Blender datasets.
+4.3
+Summary and Discussion
+Across both datasets, the default regime demonstrates that 3DGS and 2DGS naturally converge to very different
+primitive counts, which makes unconstrained comparisons capacity-confounded. The hard cutoff regime enforces
+capacity matching but can degrade performance due to altered training dynamics: early termination of point churn
+changes how many densify/prune opportunities each method and view receives, and it can freeze suboptimal intermediate
+allocations. TPC achieves the same capacity target while preserving the canonical densification window and cadence,
+leading to improved test-set metrics compared to hard cutoff in our experiments. The accompanying point-growth
+and PSNR plots further illustrate the mechanism: cutoff produces an early plateau in point count that can hinder
+late-stage refinement, whereas TPC continues scheduled churn and converges smoothly to the target, enabling fairer
+capacity-matched evaluation.
+5
+Conclusions
+We studied the problem of capacity matching in Gaussian splatting: different pipelines (e.g., 2DGS vs. 3DGS)
+naturally converge to very different primitive counts under default densification/pruning settings, making direct quality
+comparisons ambiguous. A common workaround is an abrupt hard cutoff that disables point churn once a target
+budget is reached. While this matches capacity, it also changes the training dynamics in a method-dependent way by
+prematurely terminating densify/prune cycles, which can bias the spatial allocation of primitives and affect final quality.
+To address this, we proposed Target Point Control (TPC), a lightweight controller that preserves the canonical
+densification window, cadence, and opacity reset schedule, while adjusting only the existing densification and opacityculling thresholds to track a target primitive-count trajectory and reach the desired budget at the end of the window.
+7
+A PREPRINT - M AY 18, 2026
+Scene
+Method
+Bicycle
+3DGS
+Stump
+3DGS
+Garden
+2DGS
+Kitchen
+2DGS
+Room
+2DGS
+Hotdog
+3DGS
+GT
+Cutoff
+TPC
+Figure 2: Qualitative comparison under equal point budgets. Each row shows a scene/method pair and comparison
+of Ground truth against cutoff method vs Target Point Control (TPC) method.
+Across both Mip-NeRF 360 and NeRF-Synthetic, TPC enables capacity-matched evaluation without abrupt termination
+and yields improved test-set performance compared to hard cutoff at the same target budgets.
+These results suggest that fair benchmarking for Gaussian splatting should treat the primitive budget as a controlled
+variable rather than an emergent outcome or a late-stage cap. In future work, we plan to explore alternative target
+trajectories and controller designs that further reduce run-to-run variance while keeping the underlying point-churn
+heuristics intact.
+8
+A PREPRINT - M AY 18, 2026
+References
+[1] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3d gaussian splatting for real-time
+radiance field rendering. ACM Transactions on Graphics, 42(4), July 2023.
+[2] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106,
+2021.
+[3] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a
+multiresolution hash encoding. ACM transactions on graphics (TOG), 41(4):1–15, 2022.
+[4] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and Shenghua Gao. 2d gaussian splatting for geometrically
+accurate radiance fields. In ACM SIGGRAPH 2024 conference papers, pages 1–11, 2024.
+[5] Pinxuan Dai, Jiamin Xu, Wenxiang Xie, Xinguo Liu, Huamin Wang, and Weiwei Xu. High-quality surface
+reconstruction using gaussian surfels. In ACM SIGGRAPH 2024 conference papers, pages 1–11, 2024.
+[6] Hongyun Yu, Zhan Qu, Qihang Yu, Jianchuan Chen, Zhonghua Jiang, Zhiwen Chen, Shengyu Zhang, Jimin Xu,
+Fei Wu, Chengfei Lv, et al. Gaussiantalker: Speaker-specific talking head synthesis via 3d gaussian splatting. In
+Proceedings of the 32nd ACM International Conference on Multimedia, pages 3548–3557, 2024.
+[7] Xiaobin Deng, Changyu Diao, Min Li, Ruohan Yu, and Duanqing Xu. Improving densification in 3d gaussian
+splatting for high-fidelity rendering. arXiv preprint arXiv:2508.12313, 2025.
+[8] Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl, Markus Steinberger, Francisco Vicente Carrasco, and
+Fernando De La Torre. Taming 3dgs: High-quality radiance fields with limited resources. In SIGGRAPH Asia
+2024 Conference Papers, pages 1–11, 2024.
+[9] Samuel Rota Bulò, Lorenzo Porzi, and Peter Kontschieder. Revising densification in gaussian splatting. In
+European Conference on Computer Vision, pages 347–362. Springer, 2024.
+[10] Sieun Kim, Kyungjin Lee, and Youngki Lee. Color-cued efficient densification method for 3d gaussian splatting.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 775–783, 2024.
+[11] Jonas Kulhanek and Torsten Sattler. Nerfbaselines: Consistent and reproducible evaluation of novel view synthesis
+methods. arXiv preprint arXiv:2406.17345, 2024.
+9

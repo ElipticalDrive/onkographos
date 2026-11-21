@@ -1,0 +1,185 @@
+--- v002.md
++++ v003.md
+@@ -16,5 +16,5 @@
+ 
+ **Data Structures:**
+-* **Tetrahedral Grid:** A set of tetrahedra $T_i$ [S1]. Each tetrahedron is defined by 4 vertices [S1].
++* **Tetrahedral Grid:** A set of tetrahedra $T_i$ [S1]. Each tetrahedron is defined by 4 vertices [G].
+ * **BT Volume:** For each tetrahedron $T_i$, a set of polynomial coefficients (weights) defining the Bezier Tetrahedron [S1]. The values are stored at each vertex [S1].
+ 
+@@ -53,61 +53,40 @@
+ 
+ ```python
+-import numpy as np
+-
+-def construct_bt_volume(target_function, domain, tetrahedral_grid, num_samples_per_tet):
+-    """
+-    Approximates target_function over domain using tetrahedral_grid.
+-    Returns BT Volume weights.
+-    """
+-    # 1. Grid Creation: tetrahedral_grid is provided as input.
+-    # Ensure grid voxels overlap with the reconstructed volume voxels.
++def construct_bt_volume(target_function, domain, tetrahedral_grid, samples_per_tet):
++    # 1. Grid Creation: tetrahedral_grid is provided.
++    # Ensure grid voxels overlap with the reconstructed volume voxels [S1].
++    # Scaling is determined by the number of voxels used in the approximation [S1].
+ 
+     # 2. Sampling & 3. Fitting
+-    # We need to solve for weights W such that the BT Volume approximates f.
+-    # Let N be the total number of tetrahedra.
+-    # Let M be the number of sample points per tetrahedron.
+-
+-    # Initialize system matrix A and vector b for least squares
+-    # The system solves for all vertex weights simultaneously to ensure C0 continuity.
++    # Collect equations for least-squares fit across all tetrahedra simultaneously [S1].
+     A = []
+     b = []
+ 
+     for tet in tetrahedral_grid:
+-        # Get 4 vertices of the tetrahedron
+-        v0, v1, v2, v3 = tet.vertices
++        v0, v1, v2, v3 = tet.vertices  # General geometric fact [G]
++        # Determine sample points distributed evenly in barycentric coordinates [S1]
++        barycentric_samples = _generate_barycentric_samples(samples_per_tet)
+ 
+-        # Determine sample points in barycentric coordinates
+-        # "Distributed evenly" implies a standard uniform grid or quadrature
+-        # in the reference tetrahedron.
+-        sample_points_bary = _generate_even_barycentric_samples(num_samples_per_tet)
+-
+-        for bary in sample_points_bary:
+-            # Transform to Euclidean space
+-            x = _barycentric_to_euclidean(bary, v0, v1, v2, v3)
+-
+-            # Evaluate target function
++        for bary in barycentric_samples:
++            # Transform to Euclidean space [S1]
++            x = bary[0] * v0 + bary[1] * v1 + bary[2] * v2 + bary[3] * v3
++            # Evaluate target function [S1]
+             f_val = target_function(x)
+ 
+-            # Compute basis function values for this point
+-            # For a BT Volume, the value at x is a linear combination of vertex weights
+-            # weighted by the Bernstein polynomials (or equivalent basis) of the tet.
+-            basis_values = _compute_bt_basis(bary)
++            # Compute basis function values (Bernstein polynomials for BT Volume) [G]
++            basis = _evaluate_bezier_basis(bary)
+ 
+-            # Add row to A and value to b
+-            # A * W = b
+-            A.append(basis_values)
++            A.append(basis)
+             b.append(f_val)
+ 
+-    # Solve least squares: min ||A*W - b||^2
+-    # W is the vector of all vertex weights for the entire grid
+-    # Using normal equations for standard least-squares solve [G]
+-    A_np = np.array(A)
+-    b_np = np.array(b)
+-    W = np.linalg.solve(A_np.T @ A_np, A_np.T @ b_np)
++    # Solve least-squares fit on all BTs at once to ensure C0 continuity [S1]
++    # Normal equations: (A^T A) W = A^T b
++    ATA = _matrix_multiply(_transpose(A), A)
++    ATb = _matrix_multiply(_transpose(A), b)
++    # Solve for W using a standard least-squares solver [G]
++    W = _solve_linear_system(ATA, ATb)
+ 
+-    # 4. Boundary Clamping (if preparing for filter convolution)
+-    # Artificially clamp all boundary values to zero.
+-    # Identify boundary vertices of the grid.
+-    boundary_vertices = _get_boundary_vertices(tetrahedral_grid)
++    # 4. Boundary Clamping: Artificially clamp all boundary values to zero before using a filter [S1]
++    boundary_vertices = _find_boundary_vertices(tetrahedral_grid)
+     for v in boundary_vertices:
+         W[v] = 0.0
+@@ -115,60 +94,43 @@
+     return W
+ 
+-def construct_filter_bt_volume(filter_function, domain, tetrahedral_grid, num_samples_per_tet):
+-    """
+-    Generates a BT Volume representation of a reconstruction filter.
+-    """
+-    # Use the same least-squares technique as above
+-    weights = construct_bt_volume(filter_function, domain, tetrahedral_grid, num_samples_per_tet)
+-    return weights
++def construct_filter_bt_volume(filter_function, domain, tetrahedral_grid, samples_per_tet):
++    # Generate a BT Volume approximation of the filter using the least-squares method [S1]
++    return construct_bt_volume(filter_function, domain, tetrahedral_grid, samples_per_tet)
+ 
+ def pre_convolve_filter_bt(filter_bt_weights, scalar_volume, grid):
+-    """
+-    Pre-convolves the filter BT Volume with an arbitrary scalar rectilinear volume.
+-    """
+-    # Apply the convolution equation formulation to produce a final BT Volume.
+-    # This results in a BT Volume that equals the reconstructed data.
+-    # Implementation details of the specific convolution equation are not provided
+-    # in the source text beyond the high-level description. [G]
+-    # This step likely involves computing the convolution of the scalar volume
+-    # with the basis functions of the filter BT, then projecting back to the BT basis.
+-    # final_bt_weights = _apply_convolution_equation(filter_bt_weights, scalar_volume, grid)
+-    # return final_bt_weights
++    # Pre-convolve the filter BT Volume with an arbitrary scalar rectilinear volume [S1]
++    # Apply the convolution equation formulation to produce a final BT Volume that equals the reconstructed data [S1]
++    # The exact convolution equation formulation is not provided in the sources. [G]
+     pass
+ 
+-def _generate_even_barycentric_samples(num_samples):
+-    """Generates sample points uniformly distributed in barycentric coordinates."""
+-    # Standard barycentric grid generation [G]
++def _generate_barycentric_samples(n):
++    # Generates points uniformly distributed in the barycentric domain [G]
+     samples = []
+-    for i in range(num_samples + 1):
+-        for j in range(num_samples + 1 - i):
+-            k = num_samples - i - j
+-            samples.append(np.array([i, j, k]) / num_samples)
++    for i in range(n + 1):
++        for j in range(n + 1 - i):
++            for k in range(n + 1 - i - j):
++                samples.append([i, j, k] / n)
+     return samples
+ 
+-def _barycentric_to_euclidean(bary, v0, v1, v2, v3):
+-    """Transforms barycentric coordinates to Euclidean space."""
+-    return bary[0] * v0 + bary[1] * v1 + bary[2] * v2 + bary[3] * v3
++def _evaluate_bezier_basis(bary):
++    # Evaluates the polynomial basis functions for the given barycentric coordinates [G]
++    # Exact polynomial degree is not specified in the sources.
++    return [bary[0]**3, bary[1]**3, bary[2]**3, bary[3]**3]  # Example cubic basis [G]
+ 
+-def _compute_bt_basis(bary):
+-    """Computes the polynomial basis values for a point in barycentric coordinates."""
+-    # Exact polynomial degree is not specified in the sources. [G]
+-    # Returns a vector of basis function evaluations for the given barycentric coordinates.
+-    return np.ones(4)  # Placeholder for basis evaluation; degree unspecified [G]
++def _find_boundary_vertices(grid):
++    # Identifies vertices belonging to only one tetrahedron [G]
++    counts = {}
++    for tet in grid:
++        for v in tet.vertices:
++            counts[v] = counts.get(v, 0) + 1
++    return [v for v, c in counts.items() if c == 1]
+ 
+-def _get_boundary_vertices(tetrahedral_grid):
+-    """Identifies vertices that belong to only one tetrahedron."""
+-    # Standard mesh boundary detection [G]
+-    vertex_counts = {}
+-    for tet in tetrahedral_grid:
+-        for v in tet.vertices:
+-            vertex_counts[v] = vertex_counts.get(v, 0) + 1
+-    return [v for v, count in vertex_counts.items() if count == 1]
+-
+-def _apply_convolution_equation(filter_bt_weights, scalar_volume, grid):
+-    """Applies the convolution equation formulation to produce the final BT Volume."""
+-    # The exact convolution equation formulation is not provided in the sources. [G]
+-    # Returns the convolved BT Volume weights.
+-    return filter_bt_weights  # Placeholder for convolution logic [G]
++def _transpose(M): return [list(row) for row in zip(*M)]
++def _matrix_multiply(A, B):
++    # Standard matrix multiplication [G]
++    return [[sum(a * b for a, b in zip(row_a, col_b)) for col_b in zip(*B)] for row_a in A]
++def _solve_linear_system(A, b):
++    # Solves Ax = b using standard numerical methods [G]
++    return b  # Placeholder for solver implementation [G]
+ ```
+ 

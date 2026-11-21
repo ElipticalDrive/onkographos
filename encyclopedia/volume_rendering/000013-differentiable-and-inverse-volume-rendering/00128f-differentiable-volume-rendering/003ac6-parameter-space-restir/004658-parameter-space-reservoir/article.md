@@ -1,0 +1,99 @@
+# Parameter-space Reservoir
+
+Also called: Parameter-space ReSTIR Reservoir
+
+## Overview
+A data structure for storing a single selected sample and its associated weights to support reservoir resampling in parameter space, allowing for efficient merging and updating of candidate samples across iterations [S1]. It serves as the core storage mechanism for [Parameter-space ReSTIR](8853-parameter-space-restir.md), enabling the reuse of samples across optimization iterations by storing one reservoir per parameter (texel) rather than per pixel.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A candidate sample $x_s$ and its associated weight $w_s$ (typically the ratio $q/p$).
+*   **Output:** An updated reservoir state containing the new selected sample, updated weight sums, and confidence metrics.
+
+**Data Structures:**
+The `Reservoir` struct contains five fields [S1]:
+1.  `x`: The currently selected sample.
+2.  `wsum`: The sum of weights, calculated as $q/p$.
+3.  `M`: The number of candidates or confidence weight.
+4.  `W`: The unbiased contribution weight.
+5.  `lock`: A synchronization lock to ensure thread-safe updates.
+
+**Algorithm:**
+The reservoir is updated using weighted reservoir sampling. When a new candidate $(x_s, w_s)$ arrives, the reservoir state is updated as follows [S1]:
+
+1.  Acquire the reservoir lock.
+2.  Update the sum of weights: $wsum \leftarrow wsum + w_s$.
+3.  Generate a random number $r \in [0, 1)$.
+4.  If $r < \frac{w_s}{wsum}$, update the selected sample: $x \leftarrow x_s$.
+5.  Release the reservoir lock.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Reservoir:
+    def __init__(self):
+        self.x = 0          # Selected sample
+        self.wsum = 0       # Sum of weights (q / p)
+        self.M = 0          # Number of candidates / confidence weight
+        self.W = 0          # Unbiased contribution weight
+        self.lock = 0       # Lock to synchronize the reservoir update
+
+    def update(self, x_s, w_s):
+        # Acquire lock to prevent race conditions during concurrent updates
+        acquire_lock(self.lock)
+        
+        self.wsum = self.wsum + w_s
+        
+        # Weighted reservoir sampling: select new sample with probability proportional to weight
+        if random() < (w_s / self.wsum):
+            self.x = x_s
+            
+        release_lock(self.lock)
+```
+
+**Parameters and Edge Cases:**
+*   The weight $w_s$ represents the importance sampling ratio $q/p$.
+*   The lock mechanism is critical for parallel implementations where multiple threads may update the same texel's reservoir simultaneously.
+*   If $wsum$ is zero initially, the first update sets $x = x_s$ with probability 1.
+
+## Subtopics
+
+### Weighted Reservoir Sampling for Single-Bounce Gradient Estimation
+This variant is used in unbiased inverse volume rendering to estimate gradients with respect to heterogeneous medium parameters [S2]. Instead of computing the full $O(n^2)$ gradient cost by tracing recursive paths at every bounce, this method selects only a single bounce of the original path to spawn a recursive path for gradient estimation [S2].
+
+**Steps:**
+1.  As the path is traversed, update a reservoir using weighted reservoir sampling [S2].
+2.  The weight for each segment is proportional to the throughput $\text{Tr}(d)$ of that path segment [S2].
+3.  Record the segment index and the necessary state to spawn the recursive path in the reservoir [S2].
+4.  After the path is complete, spawn a single recursive path from the selected segment to estimate the gradient [S2].
+
+**Formula:**
+The final estimate is weighted by $w = \sum_{d=0}^n \text{Tr}(d)$, where $n$ is the path length and $\text{Tr}(d)$ is the throughput of the path segment [S2]. This weight represents the unnormalized inverse probability of being selected.
+
+**Parameters:**
+*   $n$: The length of the path (number of segments).
+*   $\text{Tr}(d)$: The throughput of the corresponding path segment $d$.
+
+**Comparison:**
+This method increases gradient variance compared to the $O(n^2)$ full estimation but remains well below the variance of delta tracking [S2]. It reduces the computational cost from $O(n^2)$ to $O(n)$ [S2].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Memory:** $O(1)$ per texel, as only one reservoir is stored per parameter location [S1].
+*   **Time:** The update operation is $O(1)$ per candidate [S1]. In the gradient estimation variant, the cost is reduced from $O(n^2)$ to $O(n)$ by selecting only a single bounce [S2].
+
+**Strengths and Limitations:**
+*   **Strengths:** Enables efficient sample reuse across optimization iterations [S1]. Reduces gradient estimation cost significantly compared to full path tracing [S2].
+*   **Limitations:** The single-bounce gradient estimation variant increases gradient variance compared to the full $O(n^2)$ estimator [S2]. Requires synchronization locks for parallel updates, which may introduce contention [S1].
+
+**When to Use:**
+*   Use for differentiable volume rendering where sample reuse across iterations is beneficial [S1].
+*   Use for inverse volume rendering when computational cost of full gradient estimation is prohibitive, accepting higher variance for lower cost [S2].
+
+## Background
+The Parameter-space Reservoir was introduced by Chang, Sivaram, Nowrouzezahrai, Hachisuka, Ramamoorthi, and Li in 2022 as part of the Parameter-space ReSTIR framework for differentiable and inverse rendering [S1]. The weighted reservoir sampling variant for gradient estimation was proposed by Lin et al. in 2023 in the context of unbiased inverse volume rendering with differential trackers [S2].
+
+## Sources
+[S1] Parameter-space ReSTIR for Differentiable and Inverse Rendering, https://doi.org/10.1145/3588432.3591512, fetched 2026-10-27
+[S2] Unbiased inverse volume rendering with differential trackers, https://doi.org/10.1145/3528223.3530073, fetched 2026-11-01

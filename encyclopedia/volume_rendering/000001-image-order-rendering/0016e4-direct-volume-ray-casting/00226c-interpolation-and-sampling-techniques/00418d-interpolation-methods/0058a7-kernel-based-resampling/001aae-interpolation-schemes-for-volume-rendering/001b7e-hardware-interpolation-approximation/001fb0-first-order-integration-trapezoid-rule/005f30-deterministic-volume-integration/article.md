@@ -1,0 +1,143 @@
+# Deterministic Volume Integration
+
+Also called: Interval Integration, Trilinear Integration
+
+## Overview
+Deterministic Volume Integration is a ray-marching technique that improves upon standard point-sampling by integrating the trilinearly interpolated feature fields over the entire length of a ray segment within a voxel, rather than evaluating them at a single point. This method addresses the error introduced by assuming density and color fields are constant between samples, providing a more accurate estimation of the volume integral compared to Monte Carlo approaches [S1, S2]. It is distinct from [Second Order Pre-Integrated Volume Rendering](3388-second-order-pre-integrated-volume-rendering.md) which handles quadratic variations, and [Analytic Integration for Linear Variation](5146-analytic-integration-for-linear-variation.md) which may use different basis functions or constraints.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a voxel grid containing learned feature fields (density $\sigma$ and intermediate features $\mathbf{h}$); a color decoder function $\theta_{color}$; and a positional encoding function $\gamma$ for the viewing direction.
+*   **Output:** The accumulated color $C$ and opacity $\alpha$ for the pixel, derived from the integrated density and features.
+
+**Data Structures:**
+The method operates on a voxel grid where each voxel stores feature vectors. In the specific implementation described in the sources, the scene is divided into $N=8$ symmetric regions (cubes) sharing a single feature grid to reduce memory usage by a factor of $N$ [S1]. Each voxel's features are accessed via trilinear interpolation.
+
+**Steps:**
+1.  **Ray-Voxel Intersection:** Determine the entry point $t_j^{in}$ and exit point $t_j^{out}$ for each voxel $j$ intersected by the ray [S2].
+2.  **Feature Integration:** For each interval $[t_j^{in}, t_j^{out}]$, compute the integrated density $\sigma_j$ and integrated intermediate features $\mathbf{h}_j$ by integrating the trilinearly interpolated fields over the interval [S1, S2].
+    The integration is defined as:
+    $$
+    (\sigma_j, \mathbf{h}_j) = \int_{t_j^{in}}^{t_j^{out}} \hat{f}_i(\mathbf{x}(t), \mathbf{d}) \, dt, \quad i \in [1, 8]
+    $$
+    where $\hat{f}_i$ represents the trilinearly interpolated feature field for region $i$, and $\mathbf{x}(t)$ is the position on the ray at distance $t$ [S1].
+3.  **Color Decoding:** Decode the color $\mathbf{c}_j$ for the voxel interval using the integrated intermediate features $\mathbf{h}_j$, the viewing direction $\mathbf{d}_j$, and the color decoder $\theta_{color}$ [S1, S2]:
+    $$
+    \mathbf{c}_j = \theta_{color}(\mathbf{h}_j, \gamma(\mathbf{d}_j))
+    $$
+    where $\gamma(\mathbf{d}_j)$ is the positional encoding of the viewing direction [S1].
+4.  **Compositing:** Composite the results $(\sigma_j, \mathbf{h}_j, \mathbf{c}_j)$ along the ray using standard volume rendering accumulation equations (not explicitly detailed in the provided notes, but implied by the context of volume rendering) [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def deterministic_volume_integration(ray_origin, ray_direction, voxel_grid, color_decoder, positional_encoding):
+    """
+    ray_origin: 3D vector
+    ray_direction: 3D vector (normalized)
+    voxel_grid: Structure containing trilinearly interpolatable feature fields for 8 regions
+    color_decoder: Function taking (features, direction_encoding) -> color
+    positional_encoding: Function taking direction -> encoded vector
+    """
+    # 1. Compute ray-voxel intervals
+    # Determine t_min and t_max for each voxel intersected by the ray
+    intervals = compute_ray_voxel_intervals(ray_origin, ray_direction, voxel_grid.bounds)
+    
+    accumulated_color = [0.0, 0.0, 0.0]
+    accumulated_alpha = 0.0
+    transmittance = 1.0
+    
+    for interval in intervals:
+        t_in = interval.t_in
+        t_out = interval.t_out
+        voxel_id = interval.voxel_id
+        region_id = interval.region_id # i in [1, 8]
+        
+        # 2. Integrate features over the interval
+        # The source defines the integral of the interpolated field f_hat
+        # sigma_j and h_j are the integrated density and features
+        sigma_j, h_j = integrate_trilinear_field(
+            voxel_grid, 
+            ray_origin, 
+            ray_direction, 
+            t_in, 
+            t_out, 
+            region_id
+        )
+        
+        # 3. Decode color
+        d_j = ray_direction
+        direction_enc = positional_encoding(d_j)
+        c_j = color_decoder(h_j, direction_enc)
+        
+        # 4. Accumulate (Standard Volume Rendering Equation)
+        # Note: The exact accumulation formula is not in the source notes, 
+        # but standard volume rendering uses:
+        # alpha = 1 - exp(-sigma * dt)
+        # color += alpha * transmittance * c
+        # transmittance *= (1 - alpha)
+        
+        # Placeholder for standard accumulation logic not explicitly detailed in notes
+        dt = t_out - t_in
+        alpha = 1.0 - math.exp(-sigma_j * dt)
+        
+        accumulated_color += alpha * transmittance * c_j
+        accumulated_alpha += alpha * transmittance
+        transmittance *= (1.0 - alpha)
+        
+        if transmittance < 1e-4:
+            break
+            
+    return accumulated_color
+
+def integrate_trilinear_field(grid, origin, direction, t_in, t_out, region_id):
+    """
+    Computes the integral of the trilinearly interpolated field over [t_in, t_out].
+    This requires evaluating the trilinear interpolation function at points along the ray
+    and integrating. Analytic integration of trilinear functions is complex;
+    numerical quadrature (e.g., Gaussian) is typically used if analytic form is not provided.
+    The source notes define the integral symbolically but do not provide the closed-form 
+    expansion for trilinear interpolation.
+    """
+    # The source [S1] defines: integral(f_hat(x(t), d) dt)
+    # Implementation detail: Since f_hat is trilinear, it is a polynomial of degree 3.
+    # The integral can be computed analytically or via high-order quadrature.
+    # As the exact analytic expansion is not in the notes, we assume a numerical approximation
+    # or a pre-computed analytic kernel if available.
+    # [G] Standard practice for this specific NeRFLight method involves integrating the 
+    # trilinear basis functions over the interval.
+    
+    # Simplified representation of the integral operation described in [S1, S2]
+    # sigma_j, h_j = integral from t_in to t_out of trilinear_interpolation(grid, origin + t*direction) dt
+    pass
+```
+
+**Parameters:**
+*   $N=8$: Number of symmetric regions in the voxel grid configuration [S1].
+*   Region size: Cube with side length equal to half the bounding box side [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The integration of trilinear fields is more computationally expensive than point sampling. Numerical integration errors may occur if the interval is large relative to the voxel size and low-order quadrature is used [G].
+*   **Boundaries:** The symmetric configuration is designed to ensure continuity between regions at boundaries, reducing artifacts [S1].
+
+## Subtopics
+
+### Symmetric Voxel Grid Configuration
+A data layout strategy where features are placed symmetrically to the scene center. This favors continuity between density fields and feature pruning, reducing the number of unique features needed by a factor of $N$ [S1]. Choose this when memory efficiency and inter-region continuity are priorities. Link: [NeRFLight](https://doi.org/10.1109/cvpr52729.2023.01195).
+
+## Operating characteristics
+*   **Time Complexity:** Higher than standard point-sampling trilinear interpolation because it requires integrating the feature field over the voxel interval rather than evaluating it at a single point. The cost depends on the integration method (analytic vs. numerical quadrature).
+*   **Memory Complexity:** Reduced by a factor of $N$ (where $N=8$ in the cited implementation) due to the shared feature grid across symmetric regions [S1].
+*   **Performance:** Produces better estimation than Monte Carlo sampling because it accounts for the variation of density and color fields within the voxel interval [S2].
+*   **Strengths:** Improved visual quality over point-sampling; memory efficient via shared grids.
+*   **Limitations:** Increased computational cost per voxel compared to point sampling.
+*   **When to use:** When high-quality volume rendering is required and memory is constrained, particularly in neural radiance field contexts like NeRFLight.
+*   **When not to use:** When real-time performance is critical and point-sampling quality is sufficient.
+
+## Background
+The method was introduced in the context of **NeRFLight**, a fast and light Neural Radiance Fields approach using a shared feature grid. The paper was published in **CVPR 2023** by Rivas-Manzaneque et al. [S1, S2]. The technique was developed to improve the quality of the model by replacing random sampling with deterministic integration of trilinearly interpolated features.
+
+## Sources
+[S1] NeRFLight: Fast and Light Neural Radiance Fields using a Shared Feature Grid, https://doi.org/10.1109/cvpr52729.2023.01195, fetched 2026-10-26
+[S2] NeRFLight: Fast and Light Neural Radiance Fields using a Shared Feature Grid, https://openaccess.thecvf.com/content/CV

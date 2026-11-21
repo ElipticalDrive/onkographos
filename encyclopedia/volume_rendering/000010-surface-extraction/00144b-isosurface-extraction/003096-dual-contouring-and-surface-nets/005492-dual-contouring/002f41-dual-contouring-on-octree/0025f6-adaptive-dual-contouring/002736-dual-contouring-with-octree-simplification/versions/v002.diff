@@ -1,0 +1,357 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Dual Contouring with Octree Simplification is a surface extraction method that combines adaptive octree traversal with topological simplification to generate a manifold mesh from a scalar field. It solves a Quadratic Error Function (QEF) at each node to determine vertex positions, then recursively collapses internal octree nodes into 'pseudo-leaf' nodes if the resulting QEF error is below a threshold, preserving sharp features defined by the sign configuration of child nodes [S1, S4, unofficial]. Unlike standard Dual Contouring which places one vertex per leaf voxel, this method reduces vertex count by merging internal nodes, producing a coarser but topologically consistent mesh suitable for real-time rendering or further processing [S2, unofficial].
++Dual Contouring with Octree Simplification is a surface extraction method that combines adaptive octree traversal with topological simplification to generate a manifold mesh from a scalar field [S2, unofficial]. It solves a Quadratic Error Function (QEF) at each node to determine vertex positions, then recursively collapses internal octree nodes into 'pseudo-leaf' nodes if the resulting QEF error is below a threshold, preserving sharp features defined by the sign configuration of child nodes [S1, S4, unofficial]. Unlike standard Dual Contouring which places one vertex per leaf voxel, this method reduces vertex count by merging internal nodes, producing a coarser but topologically consistent mesh suitable for real-time rendering or further processing [S2, unofficial].
+ 
+ ## How it works
+@@ -21,11 +21,10 @@
+ 
+ ### Data Structures
+-
+ **OctreeNode**
+ *   `type`: Enum (`Node_None`, `Node_Internal`, `Node_Pseudo`, `Node_Leaf`) [S2, unofficial].
+ *   `min`: Vector3, world-space minimum corner of the cell [S2, unofficial].
+ *   `size`: int, side length of the cell [S2, unofficial].
+-*   `children`: Array of 8 `OctreeNode*` pointers, ordered by `CHILD_MIN_OFFSETS` [S2, unofficial].
+-*   `drawInfo`: Pointer to `OctreeDrawInfo` (null for internal nodes) [S2, unofficial].
++*   `children`: Array of 8 `OctreeNode` references, ordered by `CHILD_MIN_OFFSETS` [S2, unofficial].
++*   `drawInfo`: `OctreeDrawInfo` instance containing position, normals, QEF coefficients, and corner bitmask [S2, unofficial].
+ 
+ **OctreeDrawInfo**
+@@ -44,8 +43,5 @@
+ **Lookup Tables**
+ *   `CHILD_MIN_OFFSETS[8][3]`: Integer offsets for children relative to parent min. Index 0: $(0,0,0)$, Index 1: $(0,0,1)$, ..., Index 7: $(1,1,1)$ [S2, S4, unofficial].
+-*   `edgevmap[12][2]`: Maps edge index to two corner indices.
+-    *   X-axis (0-3): $\{(0,4), (1,5), (2,6), (3,7)\}$
+-    *   Y-axis (4-7): $\{(0,2), (1,3), (4,6), (5,7)\}$
+-    *   Z-axis (8-11): $\{(0,1), (2,3), (4,5), (6,7)\}$ [S2, S4, unofficial].
++*   `edgevmap[12][2]`: Maps edge index to two corner indices. X-axis (0-3): `{2,4},{1,5},{2,6},{3,7}`. Y-axis (4-7): `{0,2},{1,3},{4,6},{5,7}`. Z-axis (8-11): `{0,1},{2,3},{4,5},{6,7}` [S2, S4, unofficial].
+ *   `vertMap[8][3]`: Binary coordinates for corners 0-7 [S2, unofficial].
+ *   `faceMap[6][4]`: Maps face index to 4 corner indices [S2, unofficial].
+@@ -63,127 +59,194 @@
+ Build the octree recursively. If node size is 1, construct a leaf; otherwise, create 8 children with half the size and offset by `CHILD_MIN_OFFSETS`. Return null if no children are non-null [S4, unofficial].
+ 
+-**ConstructLeaf(node, min, size, threshold):**
+-1.  Sample density at 8 corners using `CHILD_MIN_OFFSETS`.
+-2.  Determine material for each corner: `MATERIAL_SOLID` if $f(\mathbf{p}) < \text{threshold}$, else `MATERIAL_AIR` [S4, unofficial].
+-3.  Pack materials into `corners` bitmask: `corners |= (material << i)` [S2, unofficial].
+-4.  If `corners == 0` (all air) or `corners == 255` (all solid), return `null` [S4, unofficial].
+-5.  Initialize `QefSolver` and `averageNormal = (0,0,0)`.
+-6.  Iterate 12 edges. For edge $i$:
+-    a.  Get corner indices $c_1, c_2$ from `edgevmap[i]`.
+-    b.  Check if materials differ: `(material[c1] != material[c2])`.
+-    c.  If different:
+-        i.  Compute zero-crossing position $\mathbf{p}$ using `ApproximateZeroCrossingPosition`.
+-        ii. Compute normal $\mathbf{n}$ using `CalculateSurfaceNormal`.
+-        iii. Add constraint to QEF: $A \leftarrow A + \mathbf{n}\mathbf{n}^T$, $\mathbf{b} \leftarrow \mathbf{b} + (\mathbf{p} \cdot \mathbf{n})\mathbf{n}$, $c \leftarrow c + (\mathbf{p} \cdot \mathbf{n})^2$.
+-        iv. Accumulate normal: `averageNormal += n`.
+-7.  Solve QEF to get `qefPosition` and `error` [S2, unofficial].
+-8.  **Boundary Check:** If `qefPosition` is outside `[min, min + size]`, set `position = qef.getMassPoint()` [S2, S4, unofficial].
+-9.  Normalize `averageNormal` by dividing by edge count [S2, unofficial].
+-10. Create `OctreeDrawInfo` with `position`, `qef`, `averageNormal`, `corners`. Set `node.type = Node_Leaf` [S2, unofficial].
+-
+-**ApproximateZeroCrossingPosition(p0, p1):**
+-1.  Initialize `minValue = infinity`, `t = 0`.
+-2.  Iterate $k$ from 0 to `steps` (8):
+-    a.  $t_k = k / \text{steps}$.
+-    b.  $\mathbf{p} = \mathbf{p}_0 + (\mathbf{p}_1 - \mathbf{p}_0) t_k$.
+-    c.  $d = |f(\mathbf{p})|$.
+-    d.  If $d < \text{minValue}$, `minValue = d`, `t = t_k`.
+-3.  Return $\mathbf{p}_0 + (\mathbf{p}_1 - \mathbf{p}_0) t$ [S2, unofficial].
+-
+-**CalculateSurfaceNormal(p):**
+-1.  Compute gradient using central differences with step $H=0.001$:
+-    *   $dx = f(\mathbf{p} + (H,0,0)) - f(\mathbf{p} - (H,0,0))$
+-    *   $dy = f(\mathbf{p} + (0,H,0)) - f(\mathbf{p} - (0,H,0))$
+-    *   $dz = f(\mathbf{p} + (0,0,H)) - f(\mathbf{p} - (0,0,H))$
+-2.  Return normalized $(dx, dy, dz)$ [S2, unofficial].
++```python
++def construct_octree(min_pos, size, threshold):
++    if size == 1:
++        return construct_leaf(min_pos, threshold)
++    children = []
++    for i in range(8):
++        child_min = min_pos + CHILD_MIN_OFFSETS[i] * (size / 2)
++        child = construct_octree(child_min, size / 2, threshold)
++        if child is not None:
++            children.append(child)
++        else:
++            children.append(None)
++    if all(c is None for c in children):
++        return None
++    return OctreeNode(type=Node_Internal, min=min_pos, size=size, children=children)
++
++def construct_leaf(min_pos, threshold):
++    corners = 0
++    qef = QefSolver()
++    avg_normal = Vector3(0, 0, 0)
++    edge_count = 0
++    for i in range(8):
++        p = min_pos + CHILD_MIN_OFFSETS[i]
++        density = f(p)
++        material = MATERIAL_SOLID if density < 0 else MATERIAL_AIR
++        corners |= (material << i)
++    if corners == 0 or corners == 255:
++        return None
++    for i in range(12):
++        c1, c2 = edgevmap[i]
++        p1 = min_pos + CHILD_MIN_OFFSETS[c1]
++        p2 = min_pos + CHILD_MIN_OFFSETS[c2]
++        m1 = (corners >> c1) & 1
++        m2 = (corners >> c2) & 1
++        if m1 != m2:
++            p_cross = approximate_zero_crossing(p1, p2)
++            n = calculate_surface_normal(p_cross)
++            qef.add_constraint(p_cross, n)
++            avg_normal += n
++            edge_count += 1
++    qef_position, error = qef.solve(QEF_ERROR, QEF_SWEEPS)
++    if is_out_of_bounds(qef_position, min_pos, size):
++        qef_position = qef.get_mass_point()
++    if edge_count > 0:
++        avg_normal = avg_normal / edge_count
++    avg_normal = normalize(avg_normal)
++    draw_info = OctreeDrawInfo(index=-1, corners=corners, position=qef_position, averageNormal=avg_normal, qef=qef.get_data())
++    return OctreeNode(type=Node_Leaf, min=min_pos, size=size, children=None, drawInfo=draw_info)
++```
+ 
+ #### 2. Octree Simplification
+ Recursively simplify the octree. An internal node can be collapsed into a pseudo-leaf if all its children are leaves or pseudo-leaves (not internal) and the aggregated QEF error is below the threshold [S4, unofficial].
+ 
+-**SimplifyOctree(node, threshold):**
+-1.  If `node` is null or `node.type != Node_Internal`, return `node` [S1, S2, unofficial].
+-2.  Recursively simplify all 8 children: `node.children[i] = SimplifyOctree(node.children[i], threshold)` [S1, unofficial].
+-3.  Check collapsibility:
+-    a.  If any child is `null`, skip it.
+-    b.  If any child is `Node_Internal`, set `isCollapsible = false` and return `node` unchanged [S1, S4, unofficial].
+-4.  If not collapsible, return `node` [S4, unofficial].
+-5.  Initialize `QefSolver` and `signs[8] = -1`.
+-6.  Iterate 8 children. For each non-null child:
+-    a.  Add child's QEF data to solver: $A \leftarrow A + A_{child}$, $\mathbf{b} \leftarrow \mathbf{b} + \mathbf{b}_{child}$, $c \leftarrow c + c_{child}$ [S1, unofficial].
+-    b.  Extract corner signs from `child.drawInfo.corners`. For corner $i$, extract bit $i$. For corner $7-i$, extract bit $7-i$ into `midsign` (used for filling gaps) [S1, S4, unofficial].
+-    c.  Update `signs` array based on child's corner bitmask [S4, unofficial].
+-7.  Solve QEF to get `position` and `error` [S2, unofficial].
+-8.  **Boundary Check:** If `position` is outside `[node.min, node.min + node.size]`, set `position = qef.getMassPoint()` [S1, S2, unofficial].
+-9.  If `error > threshold`, return `node` (do not collapse) [S4, unofficial].
+-10. Create new `OctreeDrawInfo`:
+-    a.  `corners = 0`. For $i=0$ to 7: if `signs[i] == -1`, use `midsign` (from first valid child's corner $7-i$), else use `signs[i]`. `corners |= (sign << i)` [S4, unofficial].
+-    b.  `averageNormal = (0,0,0)`. Sum `child.drawInfo.averageNormal` for all valid leaf/pseudo children. Normalize result [S1, S2, unofficial].
+-    c.  `position` = solved position.
+-    d.  `qef` = aggregated QEF data.
+-11. Destroy old children. Set `node.type = Node_Pseudo`. Store `drawInfo` [S2, S4, unofficial].
+-12. Return `node` [S4, unofficial].
++```python
++def simplify_octree(node, threshold):
++    if node is None or node.type != Node_Internal:
++        return node
++    for i in range(8):
++        node.children[i] = simplify_octree(node.children[i], threshold)
++    is_collapsible = True
++    for child in node.children:
++        if child is None:
++            continue
++        if child.type == Node_Internal:
++            is_collapsible = False
++            break
++    if not is_collapsible:
++        return node
++    qef = QefSolver()
++    signs = [-1] * 8
++    midsign = 0
++    for i in range(8):
++        child = node.children[i]
++        if child is None:
++            continue
++        qef.add(child.drawInfo.qef)
++        midsign = (child.drawInfo.corners >> 7) & 1
++        for j in range(8):
++            if signs[j] == -1:
++                signs[j] = (child.drawInfo.corners >> j) & 1
++    qef_position, error = qef.solve(QEF_ERROR, QEF_SWEEPS)
++    if is_out_of_bounds(qef_position, node.min, node.size):
++        qef_position = qef.get_mass_point()
++    if error > threshold:
++        return node
++    new_corners = 0
++    for i in range(8):
++        sign = midsign if signs[i] == -1 else signs[i]
++        new_corners |= (sign << i)
++    avg_normal = Vector3(0, 0, 0)
++    for child in node.children:
++        if child is not None and child.type in (Node_Leaf, Node_Pseudo):
++            avg_normal += child.drawInfo.averageNormal
++    avg_normal = normalize(avg_normal)
++    draw_info = OctreeDrawInfo(index=-1, corners=new_corners, position=qef_position, averageNormal=avg_normal, qef=qef.get_data())
++    node.children = None
++    node.type = Node_Pseudo
++    node.drawInfo = draw_info
++    return node
++```
+ 
+ #### 3. Mesh Generation
+ Generate vertices and indices from the simplified octree.
+ 
+-**GenerateVertexIndices(node, vertexBuffer):**
+-1.  If `node` is null, return.
+-2.  If `node.type == Node_Internal`, recurse into all 8 children [S2, unofficial].
+-3.  If `node.type != Node_Internal` (Leaf or Pseudo):
+-    a.  Set `node.drawInfo.index = vertexBuffer.size()` [S2, unofficial].
+-    b.  Add `MeshVertex(node.drawInfo.position, node.drawInfo.averageNormal)` to `vertexBuffer` [S2, unofficial].
+-
+-**GenerateMeshFromOctree(root, vertexBuffer, indexBuffer):**
+-1.  Clear buffers.
+-2.  Call `GenerateVertexIndices(root, vertexBuffer)` [S2, unofficial].
+-3.  Call `ContourCellProc(root, indexBuffer)` [S2, unofficial].
++```python
++def generate_vertex_indices(node, vertex_buffer):
++    if node is None:
++        return
++    if node.type == Node_Internal:
++        for child in node.children:
++            generate_vertex_indices(child, vertex_buffer)
++    else:
++        node.drawInfo.index = len(vertex_buffer)
++        vertex_buffer.append(MeshVertex(position=node.drawInfo.position, normal=node.drawInfo.averageNormal))
++
++def generate_mesh_from_octree(root, vertex_buffer, index_buffer):
++    vertex_buffer.clear()
++    index_buffer.clear()
++    generate_vertex_indices(root, vertex_buffer)
++    contour_cell_proc(root, index_buffer)
++```
+ 
+ #### 4. Contouring
+ Traverse the simplified octree to generate triangle indices. This step assumes the octree has been simplified and only Leaf/Pseudo nodes contain geometry.
+ 
+-**ContourCellProc(node, indexBuffer):**
+-1.  If `node` is null, return.
+-2.  If `node.type == Node_Internal`:
+-    a.  Recurse into 8 children.
+-    b.  Iterate 12 faces. For each face $i$:
+-        i.  Get two child nodes via `cellProcFaceMask[i]`.
+-        ii. Call `ContourFaceProc(faceNodes, cellProcFaceMask[i][2], indexBuffer)`.
+-    c.  Iterate 6 edges. For each edge $i$:
+-        i.  Get four child nodes via `cellProcEdgeMask[i]`.
+-        ii. Call `ContourEdgeProc(edgeNodes, cellProcEdgeMask[i][4], indexBuffer)`.
+-
+-**ContourFaceProc(node[2], dir, indexBuffer):**
+-1.  If both nodes are not internal:
+-    a.  Iterate 4 edges on the face. For each edge, get nodes via `faceProcEdgeMask` and order array.
+-    b.  Call `ContourEdgeProc(edgeNodes, faceProcEdgeMask[...][5], indexBuffer)`.
+-2.  If either node is internal:
+-    a.  Recurse into children defined by `faceProcFaceMask`.
+-    b.  Iterate 4 edges. For each edge, retrieve nodes using `faceProcEdgeMask` and order array, then recurse `ContourEdgeProc` [S2, unofficial].
+-
+-**ContourEdgeProc(node[4], dir, indexBuffer):**
+-1.  If all 4 nodes are not internal:
+-    a.  Call `ContourProcessEdge(node, dir, indexBuffer)` [S2, unofficial].
+-2.  Otherwise:
+-    a.  Iterate 2 sub-edges defined by `edgeProcEdgeMask`.
+-    b.  For each sub-edge, retrieve appropriate child nodes.
+-    c.  Recurse `ContourEdgeProc` [S2, unofficial].
+-
+-**ContourProcessEdge(node[4], dir, indexBuffer):**
+-1.  Initialize `minSize = infinity`, `minIndex = 0`, `indices[4] = -1`, `flip = false`, `signChange[4] = false`.
+-2.  Iterate $i$ from 0 to 3:
+-    a.  Get edge index `edge = processEdgeMask[dir][i]`.
+-    b.  Get corner indices $c_1, c_2$ from `edgevmap[edge]`.
+-    c.  Extract materials $m_1, m_2$ from `node[i].drawInfo.corners` using bit shifts: `m1 = (corners >> c1) & 1`, `m2 = (corners >> c2) & 1`.
+-    d.  If `node[i].size < minSize`:
+-        i.  `minSize = node[i].size`.
+-        ii. `minIndex = i`.
+-        iii. `flip = (m1 != MATERIAL_AIR)` [S2, unofficial].
+-    e.  `indices[i] = node[i].drawInfo.index`.
+-    f.  `signChange[i] = (m1 == MATERIAL_AIR && m2 != MATERIAL_AIR) || (m1 != MATERIAL_AIR && m2 == MATERIAL_AIR)` [S2, unofficial].
+-3.  If `signChange[minIndex]`:
+-    a.  If `!flip`:
+-        i.  Add indices: $(0,1,3), (0,3,2)$ [S2, unofficial].
+-    b.  Else:
+-        i.  Add indices: $(0,3,1), (0,2,3)$ [S2, unofficial].
++```python
++def contour_cell_proc(node, index_buffer):
++    if node is None:
++        return
++    if node.type == Node_Internal:
++        for child in node.children:
++            contour_cell_proc(child, index_buffer)
++        for i in range(12):
++            c0, c1, dir = cellProcFaceMask[i]
++            contour_face_proc([node.children[c0], node.children[c1]], dir, index_buffer)
++        for i in range(6):
++            c0, c1, c2, c3, dir = cellProcEdgeMask[i]
++            contour_edge_proc([node.children[c0], node.children[c1], node.children[c2], node.children[c3]], dir, index_buffer)
++
++def contour_face_proc(nodes, dir, index_buffer):
++    if nodes[0].type != Node_Internal and nodes[1].type != Node_Internal:
++        for i in range(4):
++            c0, c1, c2, c3, c4, c5 = faceProcEdgeMask[dir][i]
++            order = [0, 0, 1, 1] if i < 2 else [0, 1, 0, 1]
++            edge_nodes = [nodes[order[j]] if nodes[order[j]].type != Node_Internal else nodes[order[j]].children[c] for j, c in enumerate([c0, c1, c2, c3])]
++            contour_edge_proc(edge_nodes, c5, index_buffer)
++    else:
++        for i in range(4):
++            c0, c1, new_dir = faceProcFaceMask[dir][i]
++            face_nodes = [nodes[0].children[c0] if nodes[0].type == Node_Internal else nodes[0],
++                          nodes[1].children[c1] if nodes[1].type == Node_Internal else nodes[1]]
++            contour_face_proc(face_nodes, new_dir, index_buffer)
++        for i in range(4):
++            c0, c1, c2, c3, c4, c5 = faceProcEdgeMask[dir][i]
++            order = [0, 0, 1, 1] if i < 2 else [0, 1, 0, 1]
++            edge_nodes = [nodes[order[j]] if nodes[order[j]].type != Node_Internal else nodes[order[j]].children[c] for j, c in enumerate([c0, c1, c2, c3])]
++            contour_edge_proc(edge_nodes, c5, index_buffer)
++
++def contour_edge_proc(nodes, dir, index_buffer):
++    if all(n.type != Node_Internal for n in nodes):
++        contour_process_edge(nodes, dir, index_buffer)
++    else:
++        for i in range(2):
++            c0, c1, c2, c3, new_dir = edgeProcEdgeMask[dir][i]
++            edge_nodes = [nodes[j] if nodes[j].type != Node_Internal else nodes[j].children[c] for j, c in enumerate([c0, c1, c2, c3])]
++            contour_edge_proc(edge_nodes, new_dir, index_buffer)
++
++def contour_process_edge(nodes, dir, index_buffer):
++    min_size = float('inf')
++    min_index = 0
++    indices = [-1] * 4
++    flip = False
++    sign_change = [False] * 4
++    for i in range(4):
++        edge_idx = processEdgeMask[dir][i]
++        c1, c2 = edgevmap[edge_idx]
++        m1 = (nodes[i].drawInfo.corners >> c1) & 1
++        m2 = (nodes[i].drawInfo.corners >> c2) & 1
++        if nodes[i].size < min_size:
++            min_size = nodes[i].size
++            min_index = i
++            flip = (m1 != MATERIAL_AIR)
++        indices[i] = nodes[i].drawInfo.index
++        sign_change[i] = (m1 == MATERIAL_AIR and m2 != MATERIAL_AIR) or (m1 != MATERIAL_AIR and m2 == MATERIAL_AIR)
++    if sign_change[min_index]:
++        if not flip:
++            index_buffer.extend([indices[0], indices[1], indices[3], indices[0], indices[3], indices[2]])
++        else:
++            index_buffer.extend([indices[0], indices[3], indices[1], indices[0], indices[2], indices[3]])
++```
+ 
+ ### Edge Cases and Pitfalls
+@@ -196,11 +259,11 @@
+ ## Operating characteristics
+ 
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of octree nodes, assuming constant-time QEF solve (fixed sweeps). The simplification step is linear in the number of nodes. Contouring is linear in the number of leaf/pseudo nodes.
+-*   **Memory Complexity:** $O(N)$ for octree storage. Vertex and index buffers are proportional to the number of leaf/pseudo nodes.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of octree nodes, assuming constant-time QEF solve (fixed sweeps). The simplification step is linear in the number of nodes. Contouring is linear in the number of leaf/pseudo nodes [S2, unofficial].
++*   **Memory Complexity:** $O(N)$ for octree storage. Vertex and index buffers are proportional to the number of leaf/pseudo nodes [S2, unofficial].
+ *   **Performance:** Depends heavily on the simplification threshold. A higher threshold reduces vertex count but may lose detail. Typical performance on modern hardware is real-time for moderate resolutions (e.g., 64^3 root) [S2, unofficial].
+-*   **Strengths:** Produces manifold meshes, preserves sharp features via QEF, reduces vertex count via simplification, adaptive resolution.
+-*   **Limitations:** QEF solve can be expensive if not optimized (Givens rotations). Simplification may introduce artifacts if threshold is too high. Boundary handling requires care.
+-*   **When to use:** Real-time rendering, level-of-detail generation, mesh simplification from signed distance fields.
+-*   **When not to use:** When exact geometric fidelity is required without simplification, or when the scalar field is not available for normal calculation.
++*   **Strengths:** Produces manifold meshes, preserves sharp features via QEF, reduces vertex count via simplification, adaptive resolution [S2, unofficial].
++*   **Limitations:** QEF solve can be expensive if not optimized (Givens rotations). Simplification may introduce artifacts if threshold is too high. Boundary handling requires care [S2, unofficial].
++*   **When to use:** Real-time rendering, level-of-detail generation, mesh simplification from signed distance fields [S2, unofficial].
++*   **When not to use:** When exact geometric fidelity is required without simplification, or when the scalar field is not available for normal calculation [S2, unofficial].
+ 
+ ## Background

@@ -1,0 +1,322 @@
+A game engine based on Hazel. Contribute to drsnuggles8/OloEngineBase development by creating an account on GitHub.
+
+feat(renderer): distance-impostor reflection probes — raymarched probe reflections with real depth (#705) by drsnuggles8 · Pull Request #767 · drsnuggles8/OloEngineBase · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+drsnuggles8
+commented
+Aug 9, 2026
+•
+edited by coderabbitai
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Closes #705 (already closed with the acceptance evidence; this lands the implementation).
+What
+Reflection probes bake a linear radial-distance cubemap alongside colour, and the lit passes raymarch reflection rays against it per pixel (Szirmay-Kalos et al., Approximate Ray-Tracing on the GPU with Distance Impostors, Eurographics 2005 — re-derived from the paper, no GPL reference code used). A wall two metres away and the sky no longer reflect identically, and the reflection ladder is now SSR (on-screen) → distance-impostor probes → global sky prefilter — emerging from existing pass order with zero SSR changes (SSR composites later by confidence lerp; the ambient term it lerps over IS the probe/sky fallback).
+How
+Bake — ReflectionProbeBaker::CaptureDistanceField rasterizes the scene's opaque casters (borrowed from the DDGI caster enumeration via a new Renderer3D::SetAuxCasterSink, collected during the existing warm-up render) into an RG32F cube-face target with the new ReflectionProbe_Distance.glsl; readback builds a CPU ReflectionProbeDistanceField — R32F @ 128², far-plane miss sentinel, hand-built MAX-mip chain (the cheap reject needs an upper bound), per-probe dMax — stored on the probe's EnvironmentMap. Encoding contract documented in ReflectionProbeDistanceField.h and regex-pinned against the GLSL twin.
+GPU arrays — new TextureCubemapArray (engine interface + GL impl with glCopyImageSubData layer copies); ReflectionProbeArray (a TiledForwardPlus-shaped manager) owns the radiance/distance arrays, the probe UBO (binding 58), the per-cluster probe bitmask SSBO (53) and ReflectionProbeCull.comp on the existing 32×18×24 froxel grid — with its own copy of the slice params so probes keep working when Forward+ is off.
+Shading — include/ReflectionProbes.glsl: cheap max-mip visibility reject → 32-step coarse march + 6 bisections (the paper's reflection budget) → parallax-corrected prefilter lookup, blended across covering probes (m_BlendDistance is finally consumed). Consumed by both deferred variants and both forward PBR shaders through new calculateIBLPrefiltered / calculateCombinedAmbientPrefiltered seams — the BRDF split is untouched, so probe and sky pixels stay photometrically consistent. The cube-array slots (TEX 14/15) stay slot-based in every variant via PublishTextureOffsetAndBind (the DDGI-atlas pattern; allowlisted in BindlessShaderPipelineTest).
+Selection — Scene::ApplyReflectionProbeOverride becomes diffuse-only when a global environment exists (Renderer3D::OverrideGlobalIrradiance), keeping the specular miss fallback the live sky; the full-trio override is kept for no-sky scenes so indoor-only setups still get a BRDF LUT + prefilter source. Stated per the issue: the two mechanisms now split by domain (per-camera diffuse, per-pixel specular) rather than silently disagreeing.
+Three raymarch traps, found by the tests/evidence and pinned
+Far-sentinel crossing reported as a hit — an all-sky probe "hit" the far sphere and shaded from stale captured sky; the refined hit's stored distance is now re-checked against the miss threshold (AllSkyEnvironmentIsAMissNotAFarPlaneHit).
+March bound one inside-bias short — the triangle-inequality bound ends a bias before the crossing test can fire, so head-on rays silently missed; kProbeMarchSlackRel/Abs (ConvergesToTheAnalyticHitAcrossASphereRoom failed on exactly this first).
+Occluded starts bogus-hit the occluder shell — surfaces the probe cannot see start the march outside the impostor surface and instantly "hit" the captured occluder (dark crescents across the evidence sphere's probe-hidden lower half). The march now skips leading outside samples until the ray re-enters the visible region (OccludedStartSkipsTheOccluderAndHitsTheRealSurface).
+Verification (rendering rule: all three layers)
+CPU contracts (ReflectionProbeDistanceFieldTest.cpp, L1): raymarch convergence vs closed-form sphere/box intersections, miss cases, occluded starts, MAX-mip conservatism, GL cube addressing, std140 layout, GLSL↔C++ constant parity.
+Visual evidence (ReflectionProbeParallaxVisualEvidenceTest, L8): corridor with colour-coded walls (RED −X / GREEN +X / BLUE −Z / YELLOW +Z) + roughness-0.08 mirror floor, 4 poses × 3 probe states, PNGs committed under OloEditor/assets/tests/visual/ReflectionProbeParallax_*.png. Reflections land under their walls (left strip RGB 176/63/62, right strip 63/176/63); the off-screen yellow wall reflects at (178,178,61) vs (51,51,51) probe-off — the SSR-failure case; positional split 224.7 vs 7.6 with the distance field stripped (the pre-Renderer: distance-impostor reflection probes — raymarched probe reflections with real depth #705 path), asserted golden-free. The pre-existing ReflectionProbeVisualEvidenceTest stays green; both evidence tests now disable the editor's gizmo/grid/axis chrome so the PNGs show reflections, not authoring overlays.
+Live editor: olo_shader_errors = 0 after all shader edits; new sandbox scene Scenes/ReflectionProbeCorridor.olo loads (11 entities) and renders with a clean unbaked-probe fallback.
+Full suite: 5586 / 5587 — the only failure is the known-red AtmosphereVisualEvidenceTest (AtmosphereVisualEvidenceTest: NightClear/NightOvercast goldens drift (RMSE 13.08 / 9.40 vs threshold 8) — permanently red #754) baseline. The 71 regenerated evidence PNGs were pixel-diffed against HEAD per the photometric-parity rule: same-binary reruns are bit-stable (0-pixel diff), diffs vs HEAD are FP-level drift from the hoisted specular fetch (max RMSE 2.8 outside the two intentionally-changed probe images; signed means ≤0.22/255; no structured shifts).
+Known limitations (documented in docs/agent-rules/distance-impostor-reflection-probes.md)
+Distance impostors assume the environment is piecewise-representable from the probe centre — rooms/corridors/open terrain work; densely self-occluding scenes (forests) alias at silhouettes; probe placement matters. Diffuse still uses the per-camera dominant-probe override; terrain/water keep the global reflection source.
+Follow-up logged on #607: an olo_reflection_probe_bake MCP tool (the bake is inspector-button-only, so live agents can't exercise the raymarched path end-to-end).
+🤖 Generated with Claude Code
+Summary by CodeRabbit
+New Features
+Added distance-impostor reflection probes with parallax-aware reflections.
+Probes support baked distance fields, clustered selection, and efficient cubemap storage.
+Added a corridor scene demonstrating colored reflections and fallback behavior.
+Bug Fixes
+Preserved global specular environment resources when applying probe irradiance overrides.
+Documentation
+Added guidance on reflection-probe setup, integration, limitations, and troubleshooting.
+Tests
+Added visual and mathematical validation for probe parallax, distance fields, bindings, and raymarching.
+feat(renderer): distance-impostor reflection probes — raymarched prob…
+…
+cc2cf63
+```
+…e reflections with real depth (#705)
+
+Reflection probes now bake a linear radial-distance cubemap alongside
+colour and the lit passes raymarch reflection rays against it per pixel
+(Szirmay-Kalos et al., Eurographics 2005 — re-derived), so a wall two
+metres away and the sky no longer reflect identically. Hybrid ladder:
+SSR (on-screen) -> distance-impostor probes -> global sky prefilter,
+emerging from existing pass order with zero SSR changes.
+
+- Bake: ReflectionProbe_Distance.glsl rasterizes the scene's opaque
+  casters (borrowed from the DDGI enumeration via a new aux caster sink)
+  into an RG32F cube-face target around the probe; readback builds a CPU
+  ReflectionProbeDistanceField (R32F @128^2, far-plane miss sentinel,
+  hand-built MAX-mip chain, dMax) stored on the probe's EnvironmentMap.
+- GPU: new TextureCubemapArray (engine + GL, glCopyImageSubData layer
+  copies); ReflectionProbeArray manager owns the radiance/distance
+  arrays, probe UBO (58), per-cluster probe bitmask SSBO (53) and the
+  ReflectionProbeCull.comp cull on the existing 32x18x24 froxel grid
+  (self-contained slice params, works with Forward+ off).
+- Shading: include/ReflectionProbes.glsl — cheap max-mip visibility
+  reject, 32-step coarse march + 6 bisections, blended multi-probe
+  result — consumed by both deferred variants and both forward PBR
+  shaders via new calculateIBLPrefiltered/calculateCombinedAmbient-
+  Prefiltered seams (BRDF split untouched). Cube-array slots stay
+  slot-based under bindless via PublishTextureOffsetAndBind (the
+  DDGI-atlas pattern). m_BlendDistance is finally consumed.
+- Scene::ApplyReflectionProbeOverride becomes diffuse-only when a global
+  environment exists (full-trio override kept for no-sky scenes), so a
+  probe miss falls back to the live sky rather than the dominant probe's
+  own radiance.
+- Three raymarch traps found by the contract tests / evidence PNGs, all
+  fixed and pinned: far-sentinel crossings reported as hits (all-sky
+  probes), the march bound landing one inside-bias short (silent misses
+  on head-on rays), and occluded starts bogus-hitting a captured
+  occluder's shell (dark crescents on probe-hidden surfaces) — the march
+  now skips leading outside samples until the ray re-enters the visible
+  region.
+- Evidence: ReflectionProbeParallaxVisualEvidenceTest (corridor with
+  colour-coded walls + mirror floor, 4 poses x 3 probe states, PNGs
+  committed): positional reflection split 224.7 vs 7.6 on the legacy
+  direction-only path; off-screen yellow wall reflected at (178,178,61)
+  vs (51,51,51) probe-off. Both evidence tests now render without editor
+  gizmo/grid/axis chrome. 19 CPU contracts incl. analytic-room
+  convergence and a GLSL<->C++ constant parity pin. Full suite 5586/5587
+  (the known-red Atmosphere #754 only). New sandbox scene
+  ReflectionProbeCorridor.olo; guide
+  docs/agent-rules/distance-impostor-reflection-probes.md.
+
+Closes #705.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+coderabbitai
+Bot
+commented
+Aug 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+No actionable comments were generated in the recent review. 🎉
+ℹ️ Recent review info
+⚙️ Run configuration
+Configuration used: Repository UI
+Review profile: ASSERTIVE
+Plan: Pro Plus
+Run ID: 7e0ed365-a026-4336-b707-39928bc43849
+📥 Commits
+Reviewing files that changed from the base of the PR and between f10321e and 362453b.
+📒 Files selected for processing (2)
+OloEngine/src/OloEngine/Renderer/ReflectionProbeArray.cpp
+OloEngine/tests/Rendering/PropertyTests/ReflectionProbeParallaxVisualEvidenceTest.cpp
+📝 Walkthrough
+Walkthrough
+Added distance-impostor reflection probes with CPU distance fields, probe baking, GPU cubemap arrays, clustered culling, renderer integration, corridor visual evidence, and contract tests.
+Changes
+Distance-impostor reflection probes
+Layer / File(s)
+Summary
+Distance-field contract and raymarching
+OloEngine/src/OloEngine/Renderer/ReflectionProbeDistanceField.*, OloEngine/tests/Rendering/ReflectionProbeDistanceFieldTest.cpp, docs/agent-rules/distance-impostor-reflection-probes.md
+Added distance-field encoding, max-mip generation, cube-map sampling, raymarching, validation tests, and integration documentation.
+Probe baking and caster collection
+OloEngine/src/OloEngine/Renderer/ReflectionProbeBaker.*, OloEngine/src/OloEngine/Renderer/EnvironmentMap.h, OloEngine/src/OloEngine/Renderer/Renderer3D.*
+Probe baking now collects casters, captures distance fields, attaches successful fields to environment maps, and supports auxiliary caster sinks and irradiance overrides.
+Cubemap-array storage
+OloEngine/src/OloEngine/Renderer/TextureCubemapArray.*, OloEngine/src/Platform/OpenGL/OpenGLTextureCubemapArray.*, OloEngine/src/CMakeLists.txt
+Added cubemap-array resources with OpenGL allocation, mip uploads, cubemap copying, readback, binding, and memory reporting.
+Probe arrays and clustered runtime
+OloEngine/src/OloEngine/Renderer/ReflectionProbeArray.*, OloEditor/assets/shaders/compute/ReflectionProbeCull.comp, OloEngine/src/OloEngine/Renderer/ShaderBindingLayout.h, OloEngine/src/OloEngine/Scene/Scene.cpp, OloEngine/src/OloEngine/Renderer/Passes/*
+Added per-frame probe submission, resource uploads, UBO and SSBO bindings, clustered culling, lifecycle management, and deferred and scene-pass resource binding.
+Visual evidence and binding validation
+OloEditor/SandboxProject/Assets/Scenes/ReflectionProbeCorridor.olo, OloEngine/tests/Rendering/PropertyTests/*, OloEngine/tests/Rendering/Shader*Test.cpp
+Added a corridor scene, GPU parallax evidence captures, shader binding allowlists, and binding uniqueness checks.
+Sequence Diagram(s)
+```
+sequenceDiagram
+  participant Scene
+  participant ReflectionProbeBaker
+  participant ReflectionProbeArray
+  participant ReflectionProbeCull
+  participant DeferredLightingPass
+  Scene->>ReflectionProbeBaker: Bake probe cubemap and collect casters
+  ReflectionProbeBaker->>ReflectionProbeBaker: Capture six-face distance field
+  Scene->>ReflectionProbeArray: Submit probe render data
+  ReflectionProbeArray->>ReflectionProbeCull: Dispatch clustered probe culling
+  ReflectionProbeArray->>DeferredLightingPass: Bind radiance, distance, UBO, and grid resources
+  DeferredLightingPass->>ReflectionProbeArray: Republish resources before lighting draw
+```
+Loading
+🚥 Pre-merge checks | ✅ 4
+✅ Passed checks (4 passed)
+Check name
+Status
+Explanation
+Description Check
+✅ Passed
+Check skipped - CodeRabbit’s high-level summary is enabled.
+Title check
+✅ Passed
+The title clearly identifies the renderer feature: distance-impostor reflection probes with raymarched reflections and real depth.
+Linked Issues check
+✅ Passed
+The changes address issue #705 through distance baking, raymarching, clustered culling, fallbacks, visual evidence, tests, and documentation.
+Out of Scope Changes check
+✅ Passed
+The scene, tests, documentation, shader bindings, and renderer changes directly support the distance-impostor reflection-probe objectives.
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands.
+This comment was marked as resolved.
+Sign in to view
+Sorry, something went wrong.
+Uh oh!
+There was an error while loading. Please reload this page.
+fix(renderer): review hardening for distance-impostor probes (#705)
+…
+f10321e
+```
+Review pass on PR #767 — all findings verified valid and fixed:
+
+- ReflectionProbeArray: EnsureArrays rejects >MAX_PROBES loudly instead
+  of silently clamping (a clamp would corrupt UBO layer indices); growth
+  re-upload bounded by both old and new capacity; UploadLayer requires
+  exact distance-mip agreement (a partial chain would leave a previous
+  occupant's texels where the cheap reject samples); profiling scopes.
+- ReflectionProbeBaker: the distance-capture restore is a scope guard
+  (also runs on throw) and restores the pre-capture viewport instead of
+  leaving the 128^2 capture viewport active.
+- ReflectionProbeDistanceField: SampleNearest fails safe to the sky
+  sentinel on an empty field; dropped the unused radiusOut lambda param.
+- OpenGLTextureCubemapArray: layer count validated against
+  GL_MAX_ARRAY_TEXTURE_LAYERS; storage allocation error-checked so a
+  failed create reports IsLoaded()==false; upload/copy/readback drain-
+  then-check GL errors and fail the layer; destructor no-ops on failed
+  construction (no bogus tracker untrack); GL_PACK_ALIGNMENT handled on
+  readback + GLsizei bound checked; RGBA16F memory accounting counts the
+  8 B/texel resident size, not the 16 B/texel client upload.
+- TextureCubemapArray::GetStaticType is AssetType::None (constexpr
+  noexcept) — reusing TextureCube could let AssetType-keyed dispatch
+  mistake an array for a TextureCubemap.
+- Renderer3D: ReflectionProbeArray registered in
+  DebugLiveGpuOwningStatics() for RendererShutdownTest coverage.
+- Tests: the NearRedWall / ObliqueFromBlueEnd acceptance angles now
+  carry luma + positional colour-band contracts (bands placed from the
+  rendered frames); PNG reload verification memcmps every pixel; IWYU
+  includes added.
+
+Validated: 60/60 across ReflectionProbe*, RendererMemoryTracker*,
+ShaderBindingLayout*, RendererShutdown*.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+This comment was marked as resolved.
+Sign in to view
+Sorry, something went wrong.
+Uh oh!
+There was an error while loading. Please reload this page.
+fix(renderer): second review pass — radiance mip validation + legacy-…
+…
+362453b
+```
+…baseline test guard (#705)
+
+- ReflectionProbeArray::UploadLayer validates the prefilter's mip count
+  against the radiance array before copying, mirroring the distance-
+  chain rule: CopyLayerFromCubemap copies min(mips), so a shorter source
+  would leave a previous occupant's radiance in the upper array mips.
+- ReflectionProbeParallaxVisualEvidenceTest asserts the legacy baseline
+  floor bands are non-black before the improvement comparison — a black
+  legacy floor would make splitLeg ~0 and pass the "measurably better"
+  contract vacuously, and the whole-frame luma check cannot see it (the
+  emissive walls dominate the mean).
+
+Skipped (with rationale in review): exact FBO/cull snapshot-restore in
+the baker's CaptureStateGuard — the deliberate-restore contract
+(render-pass-published-state.md §1, the DDGI pass idiom this mirrors)
+prescribes restore-to-scene-defaults, and querying the current FBO
+binding has no boundary-legal facade without touching RendererAPI
+(owned by in-flight #691 Phase 6).
+
+Validated: 22/22 ReflectionProbe* tests.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Repository owner
+deleted a comment from
+coderabbitai Bot
+Aug 9, 2026
+sonarqubecloud
+Bot
+commented
+Aug 9, 2026
+Copy link
+Copy Markdown
+Quality Gate passed
+Issues
+67 New issues
+0 Accepted issues
+Measures
+0 Security Hotspots
+0.0% Coverage on New Code
+0.8% Duplication on New Code
+See analysis details on SonarQube Cloud
+Hide details
+View details
+drsnuggles8
+merged commit eba6173
+into
+master
+Aug 10, 2026
+10 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+drsnuggles8
+deleted the
+feature/renderer-distance-impostor-reflection-probes-705
+branch
+August 10, 2026 05:41
+coderabbitai
+Bot
+mentioned this pull request
+Aug 15, 2026
+Renderer: DDGI's infinite-bounce term is silently dead when the probe volume excludes the walls
+#751
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

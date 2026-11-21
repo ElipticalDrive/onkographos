@@ -1,0 +1,114 @@
+--- v007.md
++++ v008.md
+@@ -4,50 +4,38 @@
+ 
+ ## Overview
+-The Inference Pipeline renders images from a trained dense point cloud (specifically Gaussian Splatting models) and new camera poses without requiring further optimization [S1, unofficial]. It differs from its sibling [Inference Ray Compositing](3790-inference-ray-compositing.md) by executing the full evaluation loop including rasterization, FPS calculation, and video generation, whereas the sibling focuses specifically on the ray-compositing math [S1, unofficial]. It is distinct from [Sparse Ray Marching (Training)](3890-sparse-ray-marching-training.md) as it operates on a fully trained, dense representation rather than a sparse, evolving one [S1, unofficial].
++The Inference Pipeline renders images from a trained dense point cloud and new camera poses without requiring further optimization [S1, unofficial]. It differs from its sibling [Inference Ray Compositing](3790-inference-ray-compositing.md) by handling the complete forward evaluation loop from input data structures to final image output, whereas the sibling focuses specifically on the ray-compositing mathematics [S1, unofficial]. It is distinct from [Sparse Ray Marching (Training)](3890-sparse-ray-marching-training.md) as it operates on a fully trained, dense representation rather than a sparse, evolving one [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-1. `DensePointCloudWithExtraFeatures`: The trained set of 3D Gaussians, including position, covariance, opacity, and color coefficients.
+-2. `NewCameraPose`: The extrinsic and intrinsic parameters for the target view.
++1. `DensePointCloudWithExtraFeatures`: The trained set of 3D points with associated features [S1, unofficial].
++2. `NewCameraPose`: The target view parameters [S1, unofficial].
+ 
+ **Outputs:**
+-1. `Image`: The rendered RGB image.
+-2. (Optional) Depth maps and colored depth maps, depending on the specific variant invoked [S1, unofficial].
++1. `Image`: The rendered output [S1, unofficial].
+ 
+-**Data Structures:**
+-*   **Gaussian Point**: Defined by position $\mathbf{p}$, a $3 \times 3$ covariance matrix $\Sigma$ (or its Cholesky factor), opacity $\alpha$, and spherical harmonic coefficients for view-dependent color.
+-*   **Camera Pose**: A $4 \times 4$ transformation matrix $T_{world \to camera}$ and intrinsic matrix $K$.
++**Data Structures:** Not given in the sources.
+ 
+ **Steps:**
+-1.  **Initialization**: Load the trained `DensePointCloudWithExtraFeatures` and the `NewCameraPose` into the Inference Module [S1, unofficial].
+-2.  **Rasterization**: Pass the point cloud and camera pose to a rasterizer. The rasterizer projects the 3D Gaussians onto the 2D image plane, handling visibility and overlap [S1, unofficial].
+-3.  **Compositing**: The rasterizer outputs the final `Image` by compositing the projected Gaussians according to their depth and opacity [S1, unofficial].
+-4.  **Post-Processing (Variant Dependent)**:
+-    *   If rendering for visualization, prune points occluded by or too close to the camera [S1, unofficial].
+-    *   Save rendered images, depth maps, and colored depth maps [S1, unofficial].
++1. Load `DensePointCloudWithExtraFeatures` and `NewCameraPose` into the Inference Module [S1, unofficial].
++2. Pass the point cloud and camera pose to a rasterizer [S1, unofficial].
++3. The rasterizer outputs the final `Image` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def inference_pipeline(dense_point_cloud, camera_pose):
+-    """
+-    Renders an image from a trained dense point cloud and camera pose.
+-    
+-    Args:
+-        dense_point_cloud: List of Gaussian objects with position, covariance, opacity, color.
+-        camera_pose: Object containing world-to-camera transformation and intrinsics.
+-        
+-    Returns:
+-        image: Rendered RGB image.
+-    """
+-    # Step 1: Input validation and loading [S1, unofficial]
+-    # dense_point_cloud and camera_pose are assumed to be loaded
++    """Renders an image from a trained dense point cloud and camera pose."""
++    # Step 1: Load inputs [S1, unofficial]
++    # dense_point_cloud and camera_pose are provided to the module.
+     
+     # Step 2: Rasterization [S1, unofficial]
+-    # The rasterizer projects 3D Gaussians to 2D screen space
+-    projected_gaussians = rasterizer.project(dense_point_cloud, camera_pose)
++    # Pass the point cloud and camera pose to a rasterizer.
++    # The sources do not specify the internal rasterization algorithm.
++    # Standard rasterization projects primitives to screen space, sorts them by depth, and composites them.
++    projected_primitives = project_to_screen(dense_point_cloud, camera_pose)
++    sorted_primitives = sort_by_depth(projected_primitives)
++    image = alpha_composite(sorted_primitives)
+     
+     # Step 3: Output Image [S1, unofficial]
+-    # Compositing is handled within the rasterizer or immediately after
+-    image = rasterizer.composite(projected_gaussians)
++    # The rasterizer outputs the final image.
+     
+     return image
+@@ -55,6 +43,7 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Pruning**: Points that are occluded or too close to the camera must be explicitly pruned to avoid artifacts or invalid depth data [S1, unofficial].
+-*   **View-Dependent Color**: The color MLP must be re-evaluated whenever the viewing angle shifts to account for scene colors changing with viewing direction [S2].
++*   **View-Dependent Color:** The color MLP must be re-evaluated whenever the viewing angle shifts to account for scene colors changing with viewing direction [S2].
++*   **Bounding Box Cropping:** For inference, an enlarged bounding box around the projected mesh on the image plane is cropped, and only pixels inside the bounding box are rendered [S4].
++*   **Latent Code Input:** For unseen test poses, the latent code Z of the last training frame is used as input [S4].
+ 
+ ## Subtopics
+@@ -66,16 +55,25 @@
+ After training, uses only the forward flow to render images [S2]. Passes a control encoding to the MLPs to determine the object to be rendered at runtime [S2]. Invokes the MLPs whenever a change in the encoding is necessary [S2]. Re-evaluates the color MLP whenever the viewing angle shifts to account for scene colors changing with viewing direction [S2]. For other MLPs, predicts $k$ parameters for each anchor point instead of inferring for every viewing direction [S2].
+ 
++### Decoding and Rendering Process
++3D embeddings are decoded from shallow to deep levels using level-wise context models [S3]. The last 3D level is utilized to generate dimension-wise context for 2D embeddings [S3]. 2D embeddings are decoded in a coarse-to-fine order with the assistance of the dimension-wise context [S3]. Once the embeddings are decoded, all rendering processes are the same as INGP, requiring no additional time [S3].
++
++### Inference Configuration
++For inference, an enlarged bounding box around the projected SMPL mesh on the image plane is cropped, and only pixels inside the bounding box are rendered [S4]. For unseen test poses, the latent code Z of the last training frame is used as input [S4].
++
+ ## Operating characteristics
+-*   **Time Complexity**: Depends on the number of Gaussians and the rasterizer efficiency. The color MLP must be re-evaluated per viewing direction, while other MLPs predict $k$ parameters per anchor point, reducing per-pixel computation [S2].
+-*   **Memory Complexity**: Stores the full dense point cloud and MLP weights.
+-*   **Strengths**: Real-time rendering capability; supports context translation (e.g., style changes) via control encoding without retraining [S2].
+-*   **Limitations**: Requires a trained dense point cloud; control encoding changes may require MLP re-evaluation [S2].
+-*   **When to use**: When real-time rendering of trained Gaussian Splatting models is required, especially with dynamic context or style changes [S2].
+-*   **When not to use**: When optimization during inference is needed, or when the scene is not represented as a dense point cloud [S1, unofficial].
++*   **Encoding/Decoding Time:** Approximately 1 second [S3].
++*   **Rendering Time:** After decoding, rendering requires no additional time beyond the base INGP process [S3]. For a 512 × 512 image, rendering takes 10-20 seconds depending on the bounding box size of the subject [S4].
++*   **Joint Root-Finding Time:** Approximately 1 second [S4].
++*   **Strengths:** Real-time rendering capability; supports context translation via control encoding without retraining [S2].
++*   **Limitations:** Requires a trained representation; control encoding changes may require MLP re-evaluation [S1, unofficial][S2].
++*   **When to use:** When real-time rendering of trained models is required, especially with dynamic context or style changes [S2].
++*   **When not to use:** When optimization during inference is needed [S1, unofficial].
+ 
+ ## Background
+-The Inference Pipeline is a component of Gaussian Splatting rendering systems, enabling real-time visualization of trained models. It was developed to allow efficient rendering without the computational overhead of training or optimization [S1, unofficial]. The concept of using control encodings for runtime context translation was introduced in "Shape-Shifting Splats: Realtime Context Translation for Gaussian Splatting in VR" [S2].
++The Inference Pipeline is a component of Gaussian Splatting rendering systems, enabling real-time visualization of trained models without the computational overhead of training or optimization [S1, unofficial]. The concept of using control encodings for runtime context translation was introduced in "Shape-Shifting Splats: Realtime Context Translation for Gaussian Splatting in VR" [S2].
+ 
+ ## Sources
+ [S1] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)
+-[S2] Shape-Shifting Splats: Realtime Context Translation for Gaussian Splatting in VR, https://doi.org/10.1109/vr67842.2026.00046, fetched 2026-11-01+[S2] Shape-Shifting Splats: Realtime Context Translation for Gaussian Splatting in VR, https://doi.org/10.1109/vr67842.2026.00046, fetched 2026-11-01
++[S3] How Far can we Compress Instant-NGP-Based NeRF?, https://doi.org/10.1109/cvpr52733.2024.01921, fetched 2026-10-26
++[S4] ARAH: Animatable Volume Rendering of Articulated Human SDFs, https://doi.org/10.1007/978-3-031-19824-3_1, fetched 2026-10-26

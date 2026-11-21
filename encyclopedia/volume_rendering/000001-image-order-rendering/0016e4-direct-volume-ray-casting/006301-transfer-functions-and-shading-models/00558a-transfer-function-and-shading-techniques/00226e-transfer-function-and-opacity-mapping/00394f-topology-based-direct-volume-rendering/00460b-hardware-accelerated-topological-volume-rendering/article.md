@@ -1,0 +1,180 @@
+# Hardware-Accelerated Topological Volume Rendering
+
+Also called: Topological Zone Look-up Rendering, Topology-Controlled Volume Rendering
+
+## Overview
+Hardware-Accelerated Topological Volume Rendering is a method that applies topological segmentation to scalar fields to guide direct volume rendering attributes, rather than relying solely on indirect mesh visualization [S1, unofficial]. It solves the problem of visualizing simplified topological structures (such as contour tree branches) in real-time by dynamically rendering "tubes" between saddles and extrema within the fragment shader, avoiding the need to modify the scalar field data beforehand [S1, unofficial]. It sets itself apart from its siblings by performing gradient reversal and tube blending directly on the GPU using texture lookups, enabling interactive manipulation of topological simplifications like branch pruning [S1, unofficial].
+
+## How it works
+The method operates by storing topological data in textures accessible by the fragment shader, allowing for dynamic modification of function values based on proximity to topological features (tubes) and topological constraints (scaling).
+
+### Inputs and Outputs
+*   **Input:** A 3D scalar field (volume data), a precomputed contour tree branch decomposition, and user-defined transfer functions.
+*   **Output:** A 2D image with modified opacity and color based on topological zone membership and tube proximity.
+
+### Data Structures and Layout
+The method relies on several texture-based data structures:
+
+1.  **Image Data:** Stored as a 3D texture with trilinear interpolation [S1, unofficial].
+2.  **Vertex-to-Branch Map:** Stored as a 3D texture with nearest-neighbor interpolation. The output of this texture lookup is a reference (texture coordinate) to an array of branches [S1, unofficial].
+3.  **Branch Records:** Logically a 1D array, but physically wrapped as a 2D texture due to 3D texture dimension limits. Each branch record contains:
+    *   Reference to its parent branch.
+    *   Value at its saddle point.
+    *   Depth in the rooted branch decomposition.
+    *   Reference to its transfer function [S1, unofficial].
+4.  **Transfer Functions:** Stored in a logically 1D, physically 2D array. References are texture coordinates; a function value is added to offset the coordinate to select the proper color [S1, unofficial].
+5.  **Tube Lookup Table:** Stores position $p_t(v)$, tube radius $r_t(v)$, and replacement function value $f_t(v)$ for each function value $v$. Accessed via texture lookup indexed by function value [S1, unofficial].
+6.  **Closest Tube Reference:** Stored in a 3D texture. For each voxel, the closest tube in its topological zone is stored. This is determined in preprocessing by checking the parent and child tubes of that zone [S1, unofficial].
+7.  **Scale-and-Bias Pair:** Stored in branch textures. Parameters for a uniform 1D scaling transformation about the saddle value, composed for zones with multiple parents [S1, unofficial].
+
+### Numbered Steps
+1.  **Sample Input Value:** For each fragment, sample the original function value $v_{in}$ from the image data 3D texture using trilinear interpolation [S1, unofficial].
+2.  **Identify Topological Zone:** Look up the branch reference for the current voxel from the vertex-to-branch map 3D texture using nearest-neighbor interpolation [S1, unofficial].
+3.  **Apply Scaling Transformation:** Retrieve the scale-and-bias pair for the identified branch. If the branch has been pruned or simplified, apply the scaling transformation to $v_{in}$ about the saddle value. This ensures monotonic paths when parent/child extrema constraints are violated. If a branch is pruned, the scaling transformation $s$ is applied to all children by multiplying each child's scale-bias pair by $s$; if pruning is reversed, the inverse $s^{-1}$ is applied [S1, unofficial].
+4.  **Look Up Tube Data:** Using the (potentially scaled) function value, look up the tube position $p_t(v)$, tube radius $r_t(v)$, and replacement function value $f_t(v)$ from the tube lookup table [S1, unofficial].
+5.  **Compute Blending Function:** Calculate the blending function $b$ based on the distance from the tube axis. The parameter $k$ controls the width of the tube [S1, unofficial].
+6.  **Compute Output Value:** Compute the final function value $v_{out}$ using linear interpolation between the original value $v_{in}$ and the replacement value $f_t(v_{in})$, weighted by the blending function $b$ [S1, unofficial].
+7.  **Render:** Use $v_{out}$ to index into the transfer function texture to determine the final color and opacity [S1, unofficial].
+
+### Formulas
+**Blending Function:**
+The blending function $b$ controls the transition between the original field and the tube's modified field. It is defined as:
+
+$$
+b = \frac{r_t(v) - k \| s - p_t(v) \|}{r_t(v)}
+$$
+
+Where:
+*   $r_t(v)$ is the tube radius at function value $v$.
+*   $k$ is a width control parameter.
+*   $s$ is the current sample position (fragment position).
+*   $p_t(v)$ is the position on the tube axis corresponding to function value $v$.
+*   $\| \cdot \|$ denotes the Euclidean distance.
+
+The value of $b$ is restricted to the interval $[0, 1]$ [S1, unofficial].
+
+**Output Function Value:**
+The final function value $v_{out}$ is computed as:
+
+$$
+v_{out} = \text{clamp}(1 - b)v_{in} + \text{clamp}(b)f_t(v_{in})
+$$
+
+Where:
+*   $v_{in}$ is the original (and scaled) function value.
+*   $f_t(v_{in})$ is the replacement function value from the tube lookup table.
+*   $\text{clamp}(x)$ is defined as:
+    $$
+    \text{clamp}(x) = \begin{cases} 
+    0 & \text{if } x \le 0 \\
+    x & \text{if } 0 < x < 1 \\
+    1 & \text{if } x \ge 1 
+    \end{cases}
+    $$
+
+**Scaling Transformation:**
+The scaling transformation is a uniform 1D scaling about the saddle value $S$. If the scale-and-bias pair is $(s, b)$, the transformed value $v'$ is:
+$$
+v' = s \cdot (v - S) + S + b
+$$
+(Note: The exact composition of scale-and-bias for multiple parents is handled by storing the composed pair in the branch texture [S1, unofficial].)
+
+### Parameters
+*   **$k$ (Width Control):** Defines the width of the tube by controlling how quickly $b$ falls off from the axis. It must be larger than one (e.g., $k=2$) to ensure the interior volume with $b=1$ is visible. If $k \le 1$, $b$ attains its maximum value only along the axis, making the tube interior invisible [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Tube Width Visibility:** As noted, if $k \le 1$, the tube interior is invisible. A value of $k=2$ is recommended [S1, unofficial].
+*   **Texture Dimension Limits:** 3D texture dimensions are limited, requiring branch arrays (logically 1D) to be wrapped as 2D textures. Implementers must handle the coordinate mapping correctly [S1, unofficial].
+*   **Pruning Propagation:** When a branch is pruned, the scaling transformation must be correctly propagated to all children. When pruning is reversed, the inverse transformation must be applied. Failure to compose these transformations correctly for zones with multiple parents will result in incorrect monotonic paths [S1, unofficial].
+*   **Closest Tube Selection:** The closest tube reference is determined in preprocessing. If the preprocessing step is incorrect, the wrong tube may be used for blending, leading to visual artifacts [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Fragment Shader Pseudocode
+# Inputs:
+#   volume_tex: 3D texture, trilinear interpolation, stores scalar field
+#   branch_map_tex: 3D texture, nearest-neighbor interpolation, stores branch references
+#   tube_table_tex: 1D/2D texture, stores (pt, rt, ft) indexed by function value
+#   branch_tex: 2D texture, stores branch records (parent, saddle, depth, tf_ref, scale_bias)
+#   closest_tube_tex: 3D texture, stores closest tube reference
+#   k: float, width control parameter (e.g., 2.0)
+
+def fragment_shader(position, function_value):
+    # Step 1: Sample input value (already interpolated by texture unit)
+    vin = function_value
+    
+    # Step 2: Identify Topological Zone
+    branch_ref = branch_map_tex.sample_nearest(position)
+    
+    # Step 3: Apply Scaling Transformation
+    branch_record = branch_tex.sample(branch_ref)
+    scale, bias, saddle = branch_record.scale_bias, branch_record.bias, branch_record.saddle
+    
+    # Apply scaling about saddle value
+    # v_scaled = scale * (vin - saddle) + saddle + bias
+    # Note: The bias might be part of the scale-bias pair or separate. 
+    # Based on [S1, unofficial], it's a uniform 1D scaling transformation about the saddle.
+    # Assuming scale_bias is a tuple (s, b) where v' = s*(v-saddle) + saddle + b
+    vin_scaled = scale * (vin - saddle) + saddle + bias
+    
+    # Step 4: Look Up Tube Data
+    # Use the scaled value to index the tube table
+    tube_data = tube_table_tex.sample(vin_scaled)
+    pt = tube_data.position
+    rt = tube_data.radius
+    ft = tube_data.replacement_value
+    
+    # Step 5: Compute Blending Function
+    # Distance from current position to tube axis point
+    dist = length(position - pt)
+    
+    # b = (rt - k * dist) / rt
+    # Clamp b to [0, 1]
+    b_raw = (rt - k * dist) / rt
+    b = clamp(b_raw)
+    
+    # Step 6: Compute Output Value
+    # vout = clamp(1 - b) * vin + clamp(b) * ft(vin)
+    # Note: The formula uses vin (original) and ft(vin). 
+    # However, the scaling is applied before tube blending. 
+    # The text says: "This is done before the fragment is modified by the tube blending function, 
+    # so the tube replacement function value should reflect the scale and bias transformation."
+    # This implies ft is already scaled or the blending is done on the scaled value.
+    # Re-reading [S1, unofficial]: "vout = clamp(1-b)vin + clamp(b)ft(vin)"
+    # And "scaling is performed on the interpolated fragments during rendering... before the fragment is modified by the tube blending function"
+    # This suggests vin in the formula is the SCALED value.
+    
+    vout = clamp(1 - b) * vin_scaled + clamp(b) * ft
+    
+    # Step 7: Render
+    # Use vout to index transfer function
+    tf_ref = branch_record.tf_ref
+    color = transfer_function_tex.sample(tf_ref, vout)
+    
+    return color
+```
+
+## Subtopics
+
+### Topology-Based Direct Volume Rendering
+The parent method that applies topological segmentation to scalar fields to guide direct volume rendering attributes. Hardware-Accelerated Topological Volume Rendering is a specific implementation of this concept using GPU textures and shaders. [Link](8480-topology-based-direct-volume-rendering.md)
+
+### Contour Tree Simplification
+A preprocessing step often used in conjunction with this method to reduce the number of branches. Simplification methods like hypervolume or manual pruning determine which branches are retained and which are scaled/pruned. [Link](8480-topology-based-direct-volume-rendering.md)
+
+## Operating characteristics
+*   **Time Complexity:** The rendering step is $O(1)$ per fragment, as it involves a fixed number of texture lookups and arithmetic operations. The preprocessing step (contour tree construction, simplification, tube generation) is more complex but done offline.
+*   **Memory Complexity:** Memory usage is dominated by the textures. For the Chest CT dataset (384x384x240), 32 bits per voxel are used for the voxel-to-branch map, and 8 bits per voxel for the data itself [S1, unofficial].
+*   **Measured Performance:** On an NVIDIA 7800 GPU, rendering the Chest CT dataset (384x384x240 voxels, simplified to 28 branches) at 512x512 resolution with approximately 1 sample per voxel per ray achieved interactive frame rates [S1, unofficial]. The Fuel dataset (64x64x64) and Nucleon dataset (41x41x41) were also rendered successfully [S1, unofficial].
+*   **Strengths:** Enables real-time interaction with topological simplifications (pruning, scaling). Leverages GPU hardware for efficient texture lookups and blending.
+*   **Limitations:** Requires significant preprocessing. Limited by 3D texture dimensions, requiring workarounds for large branch arrays. Tube width visibility depends on careful parameter tuning ($k > 1$) [S1, unofficial].
+*   **When to Use:** When interactive exploration of topological features in large scalar fields is required, and the hardware supports 3D textures with sufficient resolution.
+*   **When Not to Use:** When the scalar field is too large to fit in texture memory, or when the preprocessing time is prohibitive.
+
+## Background
+The method was introduced by J. Weber, P. Peine, M. Rost, and M. E. Papka in their paper "Topology-Controlled Volume Rendering" [S1, unofficial]. It builds upon earlier work in topological simplification and contour tree analysis. The method was demonstrated on datasets such as Fuel, Nucleon, and Chest CT, showing its applicability to various scientific visualization domains [S1, unofficial].
+
+## Sources
+[S1] Topology-Controlled Volume Rendering, https://www.computer.org/csdl/journal/tg/2007/02/04069241/13rRUytF41s, fetched 2026-10-31 (unofficial)

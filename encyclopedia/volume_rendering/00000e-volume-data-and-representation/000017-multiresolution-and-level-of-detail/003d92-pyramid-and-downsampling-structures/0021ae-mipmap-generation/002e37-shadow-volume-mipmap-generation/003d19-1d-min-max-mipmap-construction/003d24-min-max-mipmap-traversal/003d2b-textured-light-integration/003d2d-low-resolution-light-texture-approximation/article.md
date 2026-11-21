@@ -1,0 +1,60 @@
+# Low-Resolution Light Texture Approximation
+
+Also called: Low-Resolution Rectified Light Texture
+
+## Overview
+This method approximates the light transport contribution by performing rectification and prefix sum computations at a resolution lower than the shadow map, accessing the result via hardware linear interpolation during integration. It is primarily used for colored textured light sources to reduce memory bandwidth and computational cost, as accessing high-resolution light textures requires significantly more data (e.g., 24 floats for three color channels and four singular vectors) [S1]. The technique introduces quantization error, but this is visually negligible in the final image [S1].
+
+## How it works
+**Inputs:**
+*   Shadow map resolution (typically higher, e.g., 1024x1024 or more).
+*   Light texture resolution (lower, e.g., 512x512) [S1].
+*   Light source geometry and texture data.
+
+**Outputs:**
+*   Rectified light texture map accessible via linear interpolation.
+
+**Data Structures:**
+*   **Light Texture:** A 2D texture array or image buffer. For colored textured lights, this stores three color channels. The rectification process maps the light texture coordinates $(\alpha, \gamma)$ to the integration space.
+*   **Prefix Sum Buffer:** A 1D or 2D buffer storing the cumulative sum of light contributions along the epipolar slices. The size matches the light texture resolution [S1].
+
+**Steps:**
+1.  **Rectification:** Transform the light texture $T(\alpha, \gamma)$ into the epipolar coordinate system. This involves mapping the light source's angular coordinates to the integration domain. For textured lights, this step accounts for the spatial variation of light intensity and color [S1].
+2.  **Prefix Sum Computation:** Compute the prefix sum of the rectified light values along the integration direction. This allows for $O(1)$ retrieval of the light contribution over any interval during ray marching. The computation is performed at the lower light texture resolution (e.g., 512x512) rather than the shadow map resolution [S1].
+3.  **Storage:** Store the resulting prefix sum values in a texture format compatible with hardware linear interpolation.
+4.  **Integration Access:** During volume rendering, sample the light texture using hardware linear interpolation. This smooths the discrete steps of the low-resolution prefix sum, providing a continuous approximation of the light transport [S1].
+
+**Parameters:**
+*   **Light Texture Resolution:** Typically 512x512 in examples, significantly lower than the shadow map [S1].
+*   **Color Channels:** 3 (RGB) for colored textured lights [S1].
+
+**Pitfalls:**
+*   **Resolution Mismatch:** Using a resolution that is too low may introduce visible artifacts, though the sources state the error is not noticeable at 512x512 [S1].
+*   **Interpolation Artifacts:** Hardware linear interpolation may blur sharp light boundaries, but this is generally acceptable for volumetric scattering [S1].
+
+## Subtopics
+
+### Multi-Gaussian Light Map Generation
+This variant generates light maps using a multi-Gaussian filter to handle varying media thicknesses. It computes a 0-LightMap (L0) in high dynamic-range (HDR) format to ensure sufficient precision for convolution. Subsequent light maps (Ln) are computed iteratively using the recurrence relation:
+$$ L_n = \frac{L_{n-1} + L_{n-1} * G(\sigma_{base}^n)}{2}, \quad n > 0 $$
+where $G$ is a Gaussian function with standard variance $\sigma_{base}^n$ convolved with the previous result $L_{n-1}$ [S2].
+
+**Parameters:**
+*   **n (Iterations):** The number of iterations in the multi-Gaussian filter. Typical values are 4–8 for moderately thin media, increasing up to 20 for thicker media [S2].
+*   **σbase (Base Standard Variance):** The base standard variance for the Gaussian kernels. Typical values are up to 4 for thin media, increasing up to 10 as the medium thickens [S2].
+
+**Pitfalls:**
+*   Using a single Gaussian function with a wider kernel for thicker media results in low values around light sources, causing poor sampling of scattering artifacts [S2].
+
+## Operating characteristics
+*   **Time Complexity:** The rectification and prefix sum computation are performed once per light source at a lower resolution, reducing the computational cost compared to full-resolution shadow map generation. The integration step remains $O(1)$ per sample due to the prefix sum [S1].
+*   **Memory Complexity:** Memory usage is proportional to the lower light texture resolution (e.g., 512x512) rather than the shadow map resolution, reducing memory bandwidth requirements [S1].
+*   **Performance:** This optimization is especially useful for colored textured light sources, where the data volume is larger (24 floats per sample vs. 8 for uncolored) [S1].
+*   **Accuracy:** The error introduced by low-resolution approximation and linear interpolation is not noticeable in the final image [S1].
+
+## Background
+The method was introduced in the context of real-time volumetric shadows using 1D min-max mipmaps, specifically to handle textured light sources efficiently [S1]. It builds on the principles of textured light integration, extending them to handle lower-resolution approximations without significant visual degradation [S1]. The multi-Gaussian variant was proposed to handle varying media thicknesses more effectively than single Gaussian approaches [S2].
+
+## Sources
+[S1] Real-Time Volumetric Shadows using 1D Min-Max Mipmaps, https://groups.csail.mit.edu/graphics/mmvs/mmvs.pdf, fetched 2026-10-28
+[S2] Perceptual rendering of participating media, https://doi.org/10.1145/1278387.1278389, fetched 2026-10-30

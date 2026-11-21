@@ -1,0 +1,110 @@
+--- v003.md
++++ v004.md
+@@ -4,61 +4,73 @@
+ 
+ ## Overview
+-Brick-based Volume Rendering with Overlap and LRU Swapping manages volumetric data exceeding GPU memory by partitioning the volume into small 3D texture bricks, rendering them individually, and composing the final image [S1, unofficial]. It distinguishes itself from traditional bricking [Bricking](914-bricking.md) by using significantly smaller bricks to exploit void detection and an LRU swapping policy, thereby reducing bus transfer overhead and alleviating the bottleneck caused by reloading void bricks [S1, unofficial].
++Brick-based volume rendering with overlap and LRU swapping manages volumetric data exceeding GPU memory by partitioning the volume into small 3D texture bricks, rendering them individually, and composing the final image. It distinguishes itself from traditional bricking [S1, unofficial] by using significantly smaller bricks to exploit void detection and Least Recently Used (LRU) swapping, thereby reducing bus transfer overhead and alleviating the bottleneck of reloading the entire volume per frame.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A volumetric dataset (scalar or vector field), a transfer function, and GPU texture memory constraints.
+-*   **Output:** A rendered 2D image.
++*   **Input:** A volumetric dataset (potentially larger than GPU memory), a transfer function, and a rendering camera.
++*   **Output:** A 2D rendered image.
+ 
+ **Data Structures:**
+-*   **Bricks:** Cubic sub-volumes of size $b \times b \times b$ voxels.
+-*   **Overlap:** A border of $n$ voxels duplicated around each brick to support interpolation.
+-*   **Memory State:** A set of resident bricks in GPU texture memory and a set of non-resident bricks in main memory.
++*   **Bricks:** Sub-volumes of size $b \times b \times b$ voxels.
++*   **Texture Memory:** GPU memory holding active 3D textures.
++*   **Main Memory:** Host memory holding the full volume data.
++*   **LRU Cache:** A mechanism to track the usage order of resident bricks for swapping decisions.
+ 
+ **Parameters:**
+-*   **Brick dimension ($b$):** The side length of a brick in voxels. Sources recommend choosing $b$ considerably smaller than the maximum possible size to increase the probability of bricks being completely void [S1, unofficial].
+-*   **Overlap size ($n$):** The number of voxels shared between adjacent bricks.
+-    *   Nearest neighbor: $n=0$ [S1, unofficial].
+-    *   Trilinear interpolation: $n=1$ [S1, unofficial].
+-    *   Pre-integrated rendering or on-the-fly gradient calculation: $n=2$ (trilinear + 1) [S1, unofficial].
+-*   **Texture Size Constraints:** Many graphics cards require 3D texture dimensions to be powers of 2. Non-power-of-2 dimensions require padding or rest-bricks [S1, unofficial].
++*   **Brick Dimension ($b$):** The side length of a cubic brick in voxels. Sources recommend choosing $b$ considerably smaller than the maximum possible size to increase the probability of bricks being completely void after transfer function application [S1, unofficial].
++*   **Overlap Size ($n$):** The number of voxels adjacent bricks must overlap to ensure correct interpolation [S1, unofficial].
++    *   Nearest neighbor: $n = 0$.
++    *   Trilinear interpolation: $n = 1$.
++    *   Pre-integrated rendering or on-the-fly gradient calculation: $n = 2$ (trilinear + 1) [S1, unofficial].
++*   **Power-of-2 Constraint:** Many graphics cards require 3D texture dimensions to be powers of 2. Non-power-of-2 dimensions require padding or rest-bricks [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Partitioning:** Divide the volume into $b \times b \times b$ bricks. If the volume dimensions do not divide evenly by $b$, add an additional layer of partially empty bricks in each direction or use smaller "rest-bricks" to fill the remaining space [S1, unofficial].
+-2.  **Overlap Application:** Duplicate a plane of $n$ voxels at each brick boundary. This ensures correct interpolation results across shared planes [S1, unofficial]. The memory overhead percentage is approximately:
+-    $$ \text{Overhead} \approx \frac{3 \cdot n}{b} \cdot 100\% $$
+-    where $b$ is the brick dimension and $n$ is the overlap size [S1, unofficial].
+-3.  **Loading:** Load bricks into video memory as 3D textures.
+-4.  **Swapping:** When the amount of data exceeds available texture memory, swap textures between main memory and texture memory using a Least Recently Used (LRU) policy [S1, unofficial].
+-    *   If a requested brick is not resident, load it from main memory.
+-    *   Replace a resident texture (the least recently used one) to make space [S1, unofficial].
+-5.  **Rendering:** Render each resident brick. If a brick is completely void after applying the transfer function, skip drawing it. Once a void brick is swapped out, it is never reloaded, reducing bus traffic [S1, unofficial].
++1.  **Partitioning:** Divide the volume into $b \times b \times b$ bricks. If the volume dimensions do not divide evenly by $b$, add an additional layer of partially empty bricks in each direction or use smaller "rest-bricks" to cover the remaining volume [S1, unofficial].
++2.  **Initialization:** Load the initial set of bricks into video memory as 3D textures. Initialize the LRU tracking structure to mark these bricks as resident [S1, unofficial].
++3.  **Rendering Loop (per frame):**
++    a.  Determine the set of bricks intersecting the current view frustum or required for the current ray casting path.
++    b.  For each required brick:
++        i.  Check if the brick is resident in texture memory.
++        ii. If not resident, trigger a swap:
++            1.  Identify the least recently used resident brick (LRU policy) [S1, unofficial].
++            2.  Unbind and remove the LRU brick from texture memory.
++            3.  Load the requested brick from main memory into texture memory.
++            4.  Update the LRU structure to mark the new brick as most recently used.
++    c.  Render the scene using the resident bricks.
++    d.  Compose the final image from the rendered bricks.
++4.  **Void Optimization:** If a brick is determined to be completely void (transparent) after applying the transfer function, it is not drawn. Once swapped out, void bricks are never reloaded, reducing bus traffic [S1, unofficial].
++
++**Formulas:**
++*   **Memory Overhead:** The percentage of memory overhead due to overlap for cubic bricks is approximately:
++    $$ \text{Overhead} \approx \left( \frac{3 \cdot n}{b} \right) \cdot 100\% $$
++    where $b$ is the brick dimension in voxels and $n$ is the overlap size in voxels [S1, unofficial].
+ 
+ **Pitfalls:**
+-*   **Power of 2 Requirement:** Graphics cards often require 3D texture sizes to be powers of 2. Handling non-power-of-2 dimensions via padding increases memory usage and overlap overhead [S1, unofficial].
+-*   **Overlap Overhead:** Smaller bricks reduce bus traffic but increase the relative overhead of the overlap region. The optimal brick size depends on available memory and the specific interpolation kernel [S1, unofficial].
++*   **Interpolation Artifacts:** Insufficient overlap leads to incorrect interpolation at brick boundaries. The overlap must match the kernel size minus one (e.g., $n=1$ for trilinear) [S1, unofficial].
++*   **Texture Size Constraints:** Graphics cards often require power-of-2 dimensions. Failure to pad or use rest-bricks results in errors or incorrect rendering [S1, unofficial].
++*   **Bus Bottleneck:** Using bricks that are too large negates the benefits of LRU swapping and void detection, causing the entire volume to be transferred over the bus per frame [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Bricking with Boundary Voxel Duplication](4198-bricking-with-boundary-voxel-duplication.md)
+-Specifically addresses the geometric continuity of trilinear interpolation at brick interfaces by duplicating boundary voxels. Choose this when interpolation artifacts at brick edges are critical.
++Addresses geometric continuity of trilinear interpolation at brick interfaces by explicitly duplicating boundary voxels. Choose when strict interpolation continuity is required without merging texture maps.
+ 
+ ### [Level-wise Texture Merging](5274-level-wise-texture-merging.md)
+-Merges adjacent bricks into larger texture maps to reduce state-switching overhead. Choose this when GPU state-switching costs dominate rendering time.
++Minimizes texture memory overhead by merging adjacent bricks into larger texture maps in an octree-like hierarchy. Choose to reduce state-switching overhead and improve memory utilization for coarse levels of detail.
+ 
+ ### [Wang Cubes for Volume Rendering](6980-wang-cubes-for-volume-rendering.md)
+-Uses non-periodic 3D Wang Cubes to store volume data and segmentation masks, reducing texture memory usage. Choose this when memory usage is the primary constraint and segmentation masks are involved.
++A texture synthesis method using cubes with colored faces to generate non-periodic 3D textures. Choose when memory limits prevent storing high-resolution volumetric data directly.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering time depends on the number of non-void bricks rendered per frame. LRU swapping overhead depends on the cache miss rate of bricks.
+-*   **Memory Complexity:** Memory usage is proportional to the number of resident bricks plus the overlap overhead. The overhead is $\approx (3 \cdot n / b) \cdot 100\%$ [S1, unofficial].
+-*   **Performance:** Using smaller bricks and LRU swapping alleviates the bus bottleneck compared to traditional bricking, which transfers the entire volume over the bus per frame [S1, unofficial]. Void bricks are not drawn and, once swapped out, are never reloaded, further reducing bus traffic [S1, unofficial].
+-*   **Strengths:** Reduces bus transfer overhead, improves data locality, and reduces cache trashing on the graphics card [S1, unofficial].
+-*   **Limitations:** Smaller bricks introduce larger overhead due to the overlap needed for interpolation [S1, unofficial]. Power-of-2 texture size requirements may lead to inefficient memory usage [S1, unofficial].
+-*   **When to use:** When the volume exceeds GPU memory, or when improving data locality and reducing bus traffic is beneficial even if the volume fits in memory [S1, unofficial].
+-*   **When not to use:** When the overhead of overlap and LRU swapping outweighs the benefits of reduced bus traffic, or when the volume is small enough to fit entirely in texture memory without swapping.
++*   **Time Complexity:** Rendering time depends on the number of non-void bricks intersecting the view. LRU swapping adds overhead for cache misses, but void detection can significantly reduce the number of bricks processed.
++*   **Memory Complexity:** Memory usage is bounded by the GPU texture memory capacity, storing only a subset of bricks. Overhead is introduced by the overlap region ($\approx 3n/b$) [S1, unofficial].
++*   **Performance:** Measured performance improves with smaller brick sizes due to better void detection and reduced bus traffic, provided the overhead of managing more bricks does not outweigh the benefits [S1, unofficial].
++*   **Strengths:** Handles volumes larger than GPU memory; reduces bus transfer overhead; improves data locality; leverages void detection.
++*   **Limitations:** Requires careful tuning of brick size and overlap; power-of-2 constraints may increase memory usage; LRU swapping can cause stuttering if not managed well.
++*   **When to Use:** When the volume exceeds GPU memory and bus bandwidth is a bottleneck.
++*   **When Not to Use:** When the volume fits entirely in GPU memory and data locality is not an issue, or when the overhead of managing many small bricks outweighs the benefits.
+ 
+ ## Background
+-The method was described by Danny Ruijters in "Optimizing GPU Volume Rendering" [S1, unofficial]. It builds on the concept of bricking [Bricking](914-bricking.md) but introduces smaller brick sizes and LRU swapping to optimize for bus bandwidth and void detection. The approach references earlier work on texture-based rendering [SWND03] and data locality [HG97, CBS98, IEP98].
++Originating from the need to render volumetric datasets larger than available GPU texture memory, this method builds on traditional bricking techniques [S1, unofficial]. It was notably optimized by Danny Ruijters to address the bus bottleneck inherent in sequential loading of large bricks [S1, unofficial]. The approach leverages LRU swapping policies common in OpenGL implementations to manage texture memory efficiently [S1, unofficial].
+ 
+ ## Sources

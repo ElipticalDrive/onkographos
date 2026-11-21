@@ -1,0 +1,284 @@
+c o n s p i r e. Contribute to mrbuche/conspire development by creating an account on GitHub.
+
+bvh: intersect_excluding, and skip the origin face in shape diameter rays by hovey · Pull Request #221 · mrbuche/conspire · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+hovey
+commented
+Oct 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Summary
+The shape diameter function loses its rays at facets that stand nearly perpendicular to a coordinate axis. A facet that loses all of its rays gets a thickness of 0. The octree then reads a false thin feature and refines around it.
+This PR adds BoundingVolumeHierarchy::intersect_excluding, a nearest-hit query that skips one triangle, and uses it in the shape diameter function. intersect does not change.
+On an Octa-Loop level 7 sphere (131,072 facets), the octree goes from 5 levels to 3, and the mesh from 1,415 elements to 111. The octree refined the six poles of the sphere unequally before, and it refines them alike now. The Octa-Loop level 3 mesh and a 964,568-triangle marching cubes mesh come out exactly as before.
+v0.7.8 has the same defect. I checked the released crate, and it gives the same numbers.
+The problem
+At origin/main, each ray starts at the face centroid, and the code discards any hit on the face itself:
+```
+bvh.intersect(&ray, coordinates, elements)
+    .filter(|hit| hit.index() != face)
+    .map(|hit| (hit.distance(), weight))
+```
+intersect returns only the nearest hit. So the filter can only discard the ray. It cannot move on to the next hit.
+The watertight ray test in intersects_triangle accepts a hit only if t > reach * REL_TOL. Here reach is the largest distance of the triangle's vertices from the ray origin along the ray's dominant axis. When a facet stands nearly perpendicular to that axis, reach is tiny, and so is the threshold. The origin is the centroid, which sits on the facet's own plane up to rounding. The test then accepts the facet's own plane at t of about 4e-17. That self-hit is the nearest hit. The filter discards it, and the real hit, 2.0 away, is never reported.
+I cast the 31 rays of the default cone (3 rings, 10 azimuthal, half angle pi/4) from the four facets at each pole of the Octa-Loop level 7 surface:
+pole
+facets
+rays with a usable far-side hit
+rays shadowed by the facet itself
++x
+4
+0 of 31
+31
+-x
+4
+0 of 31
+31
++y, -y, +z, -z
+4 each
+1 of 31
+30
+The six poles are equivalent. The STL is invariant under every swap of the axes to within 1e-7. The four facets at each pole have the same area, 2.771e-6, at the four poles I checked (+x, -x, +y, and +z). I did not trace why +x and -x lose 31 rays and the others lose 30. It looks like a rounding effect. Only the 31 case gives a zero.
+weighted_diameter returns 0 for a face with no samples. The nodal value is the average of the adjacent faces, so the effects spread:
+quantity
+before
+shape diameter at the +x and -x pole vertices
+0.0000
+shape diameter on the next ring of vertices
+0.4713 and 0.6318
+smallest value in a 10 degree cap around +y, -y, +z, -z
+1.4136
+median over all 65,538 vertices
+1.8953
+largest difference between a vertex and its axis-swapped partner
+1.4136
+Sizing::new takes the octree depth from the smallest positive nodal value, 0.4713 here, divided by the scale. The true thickness is about 1.9. So the octree gets 5 levels where 3 suffice. The facets near the +x and -x poles carry the small targets, so the octree also refines most around them. With conspire 0.7.7, the mesh has 231 elements within 25 degrees of +x and of -x, and 39 to 40 within 25 degrees of each of the other four poles.
+The defect needs small facets. A midpoint-subdivided octahedron of 32,768 facets is fine. One of 131,072 facets shows it. The facets at the poles are about 2e-3 across.
+The change
+BoundingVolumeHierarchy::intersect_excluding(ray, coordinates, elements, excluded) returns the nearest hit on any triangle but excluded. It shares its traversal with intersect through a small private Nearest struct, so intersect_node does not gain an argument. intersect calls the same code with nothing excluded.
+shape_diameter_function calls intersect_excluding(..., face). The origin face is never a candidate, so no ray can be lost to it.
+Alternatives I tried
+Move the ray origin slightly inside the surface (1e-6 of an edge length). This also fixes the poles. It shifts every ray, though, and it changed the octree of a marching cubes surface, which the exclusion does not. I could not tell a correction from a perturbation, so I dropped it.
+intersect_all, then skip the origin face. This works. It allocates a vector per ray and walks the whole ray, not just to the first hit.
+Change the tolerance in intersects_triangle. This reaches every caller of the ray test. I did not want to change that in a PR about the shape diameter function.
+Results
+Standalone, on this branch (origin/main plus this commit), against the released 0.7.8. The mesh comes from Octree::from_features, equilibrate, dualize, trim, and buffer, with the defaults of automesh mesh hex.
+input
+released 0.7.8: elements
+MSJ min
+MSJ mean
+inverted
+mirror mismatch
+this PR: elements
+MSJ min
+MSJ mean
+inverted
+mirror mismatch
+octa_loop03
+111
+0.384
+0.749
+0
+2.73e-01
+111
+0.384
+0.749
+0
+2.73e-01
+octa_loop07
+1,415
+0.437
+0.816
+0
+1.43e-02
+111
+0.547
+0.773
+0
+1.92e-02
+The mirror mismatch is the largest distance from a mirrored node to the nearest node. This PR does not target it, and the fit asymmetry stays. #222 and #223 deal with it.
+The Octa-Loop level 3 mesh does not change. The level 7 mesh changes because the shape diameter, and with it the octree, changes. It is now as coarse as the level 3 mesh, because the two surfaces ask for the same cell size. That costs some accuracy in volume. In a build that combines the three PRs, the level 7 mesh encloses 4.3067, which is 2.8% above the exact sphere. It enclosed 4.2036 before, which is 0.36% above. The extra refinement had improved the volume by accident.
+The defect does not touch the marching cubes surfaces. The shape diameter fix leaves them identical to the released build:
+marching cubes surface
+released 0.7.8: elements
+MSJ min
+MSJ mean
+inverted
+seconds
+this PR: elements
+MSJ min
+MSJ mean
+inverted
+seconds
+n010
+8,243
+0.078
+0.694
+0
+13.1
+8,243
+0.078
+0.694
+0
+13.3
+n020
+9,983
+0.093
+0.710
+0
+17.6
+9,983
+0.093
+0.710
+0
+17.6
+n040
+14,767
+0.047
+0.743
+0
+25.9
+14,767
+0.047
+0.743
+0
+25.1
+n080
+15,223
+0.005
+0.752
+0
+27.6
+15,223
+0.005
+0.752
+0
+26.0
+n160
+25,815
+-0.470
+0.756
+12
+48.7
+25,815
+-0.470
+0.756
+12
+46.7
+(Single runs. The seconds are indicative only.)
+The shape diameter function itself, on the Octa-Loop level 7 surface, before and after: median of 7 runs, including reading the STL and building the BVH: 0.80 s with the released crate and 0.80 s with this PR (+1%).
+Tests
+intersect_excluding_finds_the_far_side_from_a_perpendicular_facet puts a small facet perpendicular to each axis, in both directions, with a far triangle behind it. At facet size 0.01 the plain intersect returns the facet itself, at t of 1.1e-16, in all six orientations. intersect_excluding returns the far triangle at distance 2 in all of them. This test fails without the change. I checked by disabling the exclusion.
+intersect_excluding_matches_intersect_when_nothing_is_excluded checks that excluding another triangle changes nothing, and that excluding the nearest one returns the next. It fails with the exclusion disabled too.
+rays_from_a_perpendicular_facet_are_not_lost_to_the_facet_itself runs the shape diameter function on the same scene. It guards the result. It also passes on the old code for this scene, because one ray out of 31 survives and gives a plausible thickness. I could not build a small scene that loses all 31 rays. The real case needs 131,072 facets, which is too slow for a debug build.
+cargo test --features geometry: 1,458 passed, 0 failed. cargo clippy --features geometry [--tests] -- -D warnings and cargo fmt --check are clean.
+Reproducibility
+The surface is the Octa-Loop level 7 STL from the Subdivision page of the automesh book. The investigation is written up in the Unit Sphere page, Update 4: https://github.com/autotwin/automesh/blob/dev-isosurface/book/examples/gallery/academic/unit_sphere.md
+The check is short. Load the STL with Tessellation::try_from, call shape_diameter_function(FRAC_PI_4, 3, 10), and look at the values near the six poles.
+Notes for review
+The change adds a public method. intersect and intersect_all keep their signatures and behavior.
+Any caller that relied on the old thickness near axis-aligned facets sees different sizing. The octree is the only caller I know of.
+Only the origin face is excluded. A neighbor of the origin face could, in principle, show the same near-zero hit on a concave surface. The marching cubes surface has concave corners and meshes identically, so I saw no sign of it.
+Related: #222 fixes ties in the fit targets, and #223 keeps the fit on mirror symmetry. #223 is stacked on #222. Both are independent of this PR.
+🤖 Generated with Claude Code
+bvh: intersect_excluding, and skip the origin face in shape diameter …
+…
+10e8763
+```
+…rays
+
+The shape diameter function casts rays from each face centroid and
+drops any hit on that face.  `BoundingVolumeHierarchy::intersect`
+returns only the nearest hit.  When a face stands nearly perpendicular
+to a coordinate axis, the ray test accepts the face's own plane at
+t of about 1e-16.  Its tolerance scales with the face's extent along
+that axis, which is tiny.  That hit is the nearest, so the filter
+discards the ray, and the far-side hit is never reported.  A face that
+loses all its rays gets thickness 0.
+
+On an Octa-Loop level 7 sphere of 131,072 facets, each of the four
+facets at the +x and -x poles loses all 31 rays, and each at the +y,
+-y, +z, and -z poles keeps 1 of 31.  The shape diameter is 0 at the
++x and -x pole vertices and 0.4713 on the next ring, against 1.8953
+elsewhere.  The octree takes its depth from the smallest positive
+value, so it gets 5 levels where 3 suffice, and it refines only around
++x and -x.  The mesh of this surface has 1,415 elements.
+
+Add `BoundingVolumeHierarchy::intersect_excluding`.  It returns the
+nearest hit on any triangle but one, sharing the traversal of
+`intersect` through a small `Nearest` struct.  The shape diameter
+function now uses it, so the origin face is never a candidate.
+
+The shape diameter is now 1.8953 to 1.8954 at all six poles.  It is the
+same under every swap of the axes, with a largest difference of 0.0000,
+against 1.4136 before.  The octree of the Octa-Loop level 7 surface has
+3 levels, and the mesh has 111 elements.  Its minimum scaled Jacobian
+changes from 0.4374 to 0.5467, and its mean from 0.8164 to 0.7733.
+The Octa-Loop level 3 mesh and a marching cubes surface of 964,568
+triangles mesh exactly as before.
+
+Add tests for `intersect_excluding`.  They place a small facet
+perpendicular to each axis, in both directions, with a far triangle
+behind it.  At facet size 0.01 the plain `intersect` returns the facet
+itself, and `intersect_excluding` returns the far triangle at distance
+2.  These tests fail without the change.  Add a shape diameter test
+on the same scene.  It guards the result, but it also passes on the
+old code for this scene, because one ray of 31 survives.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+hovey
+requested a review
+from mrbuche
+October 1, 2026 15:02
+This was referenced Oct 1, 2026
+buffer: keep the fit on mirror symmetry when the mesh and target share it
+#223
+Closed
+buffer: average tied closest points and normals in the fit targets
+#222
+Merged
+mrbuche
+approved these changes
+Oct 1, 2026
+View reviewed changes
+mrbuche
+marked this pull request as ready for review
+October 1, 2026 16:56
+Hide details
+View details
+mrbuche
+merged commit 1b628dd
+into
+main
+Oct 1, 2026
+75 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+mrbuche
+deleted the
+sdf-self-hit
+branch
+October 1, 2026 16:59
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

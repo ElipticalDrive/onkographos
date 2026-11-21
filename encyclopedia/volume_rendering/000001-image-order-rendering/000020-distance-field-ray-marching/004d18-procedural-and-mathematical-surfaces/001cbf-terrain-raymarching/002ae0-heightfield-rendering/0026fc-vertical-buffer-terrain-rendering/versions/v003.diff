@@ -1,0 +1,172 @@
+--- v002.md
++++ v003.md
+@@ -42,10 +42,8 @@
+      - $dz = \frac{dist}{600.0}$ [S1, unofficial].
+    - Precompute `shift` = $\lfloor \log_2(W_{map}) \rfloor$ for bitwise wrapping [S2, unofficial].
+-
+ 2. **Depth Loop**:
+-   - Iterate depth $z$ from $1.0$ to $dist$ with step $dz$.
++   - Iterate depth $z$ from $1.0$ to $dist$ with step $dz$ [S1, S2, unofficial].
+    - **Adaptive Stepping**: If optimization is enabled and $z > optdist$, increase $dz$ by $cam.zstep \times (z / 2.0)$ to reduce fill rate at distance [S2, unofficial].
+    - Increment $dz$ by $0.01$ each iteration [S1, unofficial].
+-
+ 3. **Screen-Space Coordinate Setup**:
+    - Compute camera direction vector $\vec{dir} = (\cos(\theta), \sin(\theta))$ [S1, unofficial].
+@@ -57,7 +55,6 @@
+      - $pDelta.y = \frac{p_{right}.y - p_{left}.y}{pitch}$ [S2, unofficial].
+    - Offset $p_{left}$ by $pDelta \times start$ and add camera position to align with column range [S2, unofficial].
+-
+ 4. **Column Loop**:
+-   - Loop screen column $i$ from $0$ to $1399$.
++   - Loop screen column $i$ from $0$ to $1399$ [S1, unofficial].
+    - **Heightmap Indexing**:
+      - Compute offset using bitwise wrapping:
+@@ -84,5 +81,4 @@
+      - $p_{left}.x += dx$, $p_{left}.y += dy$, where $dx = \frac{p_{right}.x - p_{left}.x}{1400}$, $dy = \frac{p_{right}.y - p_{left}.y}{1400}$ [S1, unofficial].
+      - Advance $p_{left}$ by $pDelta$ for next column [S2, unofficial].
+-
+ 5. **Final Output**:
+    - Copy render target to screen with tilt rotation around center $(550, 550)$ and offset $(-300, -300)$ [S1, unofficial].
+@@ -91,8 +87,8 @@
+ ```python
+ def render_terrain(heightmap, colormap, camera, screen_width=1400, screen_height=1400):
+-    # Initialize vertical buffer
++    # 1. Initialize vertical occlusion buffer
+     ybuf = [screen_height] * screen_width
+-    
+-    # Projection constants
++
++    # 2. Projection constants
+     maxhorizon = camera.maxhorizon
+     scale = maxhorizon / 2.5
+@@ -101,62 +97,85 @@
+     dist = 600.0 / cos(camera.pitch)
+     dz = dist / 600.0
+-    
+-    # Precompute shift for bitwise wrapping (assuming power-of-two width)
++
++    # Precompute shift for bitwise wrapping (power-of-two width)
+     shift = floor(log2(heightmap.width))
+     width_mask = heightmap.width - 1
+-    
+-    # Depth loop
++
++    # Initialize render target buffer
++    render_target = [[None for _ in range(screen_width)] for _ in range(screen_height)]
++
++    # 3. Depth loop
+     z = 1.0
+     while z < dist:
+-        # Adaptive stepping
++        # Adaptive stepping threshold [G]
++        optdist = 200.0
+         if z > optdist:
+             dz += camera.zstep * (z / 2.0)
+-        
+-        # Compute left and right points at current depth
++
++        # Compute left and right world-space points at current z (±45° from camera direction)
+         p_left_x = -cosang * z - sinang * z
+         p_left_y = sinang * z - cosang * z
+         p_right_x = cosang * z - sinang * z
+         p_right_y = -sinang * z - cosang * z
+-        
+-        # Screen-space deltas
+-        p_delta_x = (p_right_x - p_left_x) / screen_width
+-        p_delta_y = (p_right_y - p_left_y) / screen_width
+-        
+-        # Column loop
++
++        # Screen-space deltas per column
++        dx = (p_right_x - p_left_x) / screen_width
++        dy = (p_right_y - p_left_y) / screen_width
++
++        # 4. Column loop
+         for i in range(screen_width):
+-            # Bitwise wrapping for heightmap index
++            # Heightmap indexing with bitwise wrapping
+             offset = ((int(p_left_y) & width_mask) << shift) + (int(p_left_x) & width_mask)
+-            
++
+             # Get altitude
+             h_map = heightmap.get_value(offset)
+-            
+-            # Calculate screen Y
+-            # Note: Source uses sin(pitch) in code, tan(pitch) in formula description
++
++            # Calculate screen Y coordinate
+             height_val = (camera.height + (255 - h_map) - z * sin(camera.pitch)) / z
+             y_screen = (height_val + 0.5) * 800.0
+-            
+-            # Clipping
++
++            # Clipping to viewport
+             if y_screen < 0:
+-                y_screen = 0
+-            
++                y_screen = 0.0
++
++            # Occlusion test and drawing
+             if y_screen < ybuf[i]:
+                 bottom = ybuf[i]
+                 ybuf[i] = y_screen
+-                
++
+                 # Sample color
+                 color = colormap.get_color(p_left_x, p_left_y)
+-                
+-                # Draw vertical line
+-                draw_line(i, y_screen, i, bottom, color)
+-            
+-            # Advance left point
+-            p_left_x += (p_right_x - p_left_x) / screen_width
+-            p_left_y += (p_right_y - p_left_y) / screen_width
+-        
++
++                # Draw vertical line to render target
++                for draw_y in range(int(y_screen), int(bottom) + 1):
++                    if 0 <= draw_y < screen_height:
++                        render_target[draw_y][i] = color
++
++                # Advance left point for next column
++                p_left_x += dx
++                p_left_y += dy
++
+         z += dz
+-        dz += 0.01  # Increment step size
+-    
+-    # Final tilt rotation and display
+-    render_target_to_screen(tilt=camera.tilt, center=(550, 550), offset=(-300, -300))
++        dz += 0.01
++
++    # 5. Final output: apply tilt rotation and offset to render target
++    # Standard affine transformation copy
++    final_image = apply_rotation_and_offset(render_target, angle=camera.tilt, center=(550, 550), offset=(-300, -300))
++    return final_image
++
++def apply_rotation_and_offset(buffer, angle, center, offset):
++    # Standard 2D rotation and translation copy
++    h, w = len(buffer), len(buffer[0])
++    cx, cy = center
++    ox, oy = offset
++    result = [[None for _ in range(w)] for _ in range(h)]
++    cos_a, sin_a = cos(angle), sin(angle)
++    for y in range(h):
++        for x in range(w):
++            rx = (x - cx) * cos_a - (y - cy) * sin_a + cx + ox
++            ry = (x - cx) * sin_a + (y - cy) * cos_a + cy + oy
++            if 0 <= rx < w and 0 <= ry < h:
++                result[int(ry)][int(rx)] = buffer[y][x]
++    return result
+ ```
+ 
+@@ -180,7 +199,7 @@
+ - **Performance**: Efficient for real-time 2D terrain visualization due to fixed-resolution screen-space stepping and bitwise indexing [S1, unofficial]. Adaptive depth stepping reduces fill rate at distance [S2, unofficial].
+ - **Strengths**: Simple implementation, low memory footprint, fast rendering for 2D heightmaps [S1, S2, unofficial].
+-- **Limitations**: Limited to 2D heightmaps, requires square power-of-two maps, occlusion handling is column-based (no sub-pixel accuracy) [S1, S2, unofficial].
++- **Limitations**: Limited to 2D heightmaps, requires square power-of-two maps due to a bitwise wrapping bug, occlusion handling is column-based (no sub-pixel accuracy) [S1, S2, unofficial].
+ - **When to Use**: Real-time 2D terrain visualization, retro-style graphics, constrained hardware [S1, unofficial].
+-- **When Not to Use**: 3D terrain with complex geometry, non-square maps, high-precision occlusion requirements [S1, S2, unofficial].
++- **When Not to Use**: 3D terrain with complex geometry, high-precision occlusion requirements [S1, S2, unofficial]. The provided implementations require square power-of-two maps due to a bitwise wrapping bug that uses width for both X and Y modulo [S1, unofficial]. The technique itself can render non-square maps if the wrapping is corrected.
+ 
+ ## Background

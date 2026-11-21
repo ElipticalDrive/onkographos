@@ -1,0 +1,255 @@
+Proposal: replace each layer's dense box with a sparse map of fixed-size chunks. enum Chunk { Solid(u8), // one palette index, whole chunk Dense(Box<[u8; 4096]>), // 16³ of them } // absent from the map = Empty struct VoxelGrid { chunks:...
+
+Sparse chunk (brick) storage: decouple resolution from memory · Issue #18 · fpt/rs-voxeler · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Sparse chunk (brick) storage: decouple resolution from memory #18
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Sparse chunk (brick) storage: decouple resolution from memory#18
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+fpt
+opened on Sep 7, 2026
+Issue body actions
+Proposal: replace each layer's dense box with a sparse map of fixed-size chunks.
+```
+enum Chunk {
+    Solid(u8),                  // one palette index, whole chunk
+    Dense(Box<[u8; 4096]>),     // 16³ of them
+}
+// absent from the map = Empty
+
+struct VoxelGrid { chunks: HashMap<IVec3, Chunk> }
+```
+with the invariants
+```
+an all-empty Dense chunk        → removed
+an all-one-colour Dense chunk   → Solid(colour)
+```
+One level of adaptivity rather than an octree. Addressing stays arithmetic —
+chunk = p >> 4, local = p & 15 — so nothing has to traverse a tree to read a
+voxel, and brush / flood / plane / mirror / set_voxel keep the shape they have.
+Why this and not an octree
+An octree splits and merges on every brush stroke that crosses a node boundary,
+and every read is a traversal. A chunk map keeps the dense-array code that
+already exists and confines the cleverness to one type. Most of the compression
+an octree would give on voxel models comes from large uniform interiors, and
+Solid captures exactly that.
+What it buys, in this codebase specifically
+Two of these are present-day problems, not projections.
+Sparsity inside a layer. Bounds made layers cost their bounding box
+rather than the scene, which was the big win. But a hollow shell still
+allocates its whole box: a 128³ shell layer is 2 MB of mostly air. Chunks would
+hold the shell and nothing else — and this is the property the roadmap's own
+observation depends on, that detail concentrates on surfaces.
+Meshing. mesh::extract walks every filled cell of every visible layer and
+asks owner_at per cell, which is O(layers) each. That is the cost that grows
+with resolution, and chunk-level dirty tracking is the actual fix: rebuild the
+edited chunk and its six neighbours, skip Empty, and drop a Solid chunk's
+interior faces outright. Greedy meshing then becomes per-chunk, which is where
+it wanted to be anyway.
+Bulk fills. tools::box_cells materialises Vec<[i32; 3]> of every cell in
+the box — no cap. At today's 256³ ceiling that is 16.7 M entries, 200 MB, and
+survivable. On a larger canvas it is fatal. A chunk-aware fill_box writes
+Solid for interior chunks and only materialises the boundary ones, which is
+most of the octree's benefit for none of its complexity. (apply_edits already
+caps at 2 097 152 candidate cells for the same reason; that cap could relax.)
+Resolution stops being a number you pick up front. --size and the scene
+range become a work area rather than an allocation.
+It composes with objects (Objects and a scene graph: separate spatial structure from compositing #14). Object { grid: SparseChunkGrid, transform }
+is a clean end state, and a chunk-aligned translation is a rekey of the map
+rather than a copy. Worth being honest that a non-aligned translation still
+touches every chunk — object moves get cheap only on multiples of 16.
+What it costs, honestly
+It touches the hot path everywhere. get/set are what the raycaster, the
+region flood, the mesh extractor and every tool are written against. This is a
+bigger change than layer bounds was.
+It makes the common case slower. A hash lookup plus a branch, against a
+bounds test plus an array index. The default scene is 32³ and a character is
+16³ — at that size the current design is strictly better, and this pays off at
+a scale voxeler does not reach yet.
+The Solid invariant is a second representation of one fact, which is the
+class of thing this codebase has been deliberate about removing (the composite
+cache was deleted for being scene-sized; in_ball exists so one radius rule is
+not written twice). A stale Solid reads as the wrong colour everywhere at
+once. It needs to live in exactly one place, with the promotion and
+demotion tested in both directions.
+.vxm would want a version. VXM3 stores filled voxels at four bytes each,
+so a Solid chunk costs 16 KB on disk to say "red". A chunk-aware VXM4 would
+encode runs — with VXM3/2/1 still loading, as they do now.
+.vox caps at 256 anyway. An unbounded canvas diverges from the interop
+ceiling, and export would have to say so.
+The scene range is load-bearing in the UI. raycast clips to it, the work
+plane spans it, frame_volume frames it, Bounds clamps to it. Making it
+optional is a UX change as much as a storage one.
+Details worth keeping from the proposal
+16³, agreed. 8³ multiplies map overhead; 32³ means one voxel edit
+materialises 32 KB. 16³ is 4 KB per dense chunk, which is cache-friendly and
+cheap to promote.
+Index 0 = empty first; occupancy bitset only if needed. It is simpler, and
+index 0 is already reserved as air by the .vox convention this project
+follows — so the 256th colour may never be wanted, and the bitset may never be
+needed.
+Suggested staging
+Not one change. In this order, each landing on its own:
+Chunk-aware bulk writes, behind the existing API. fill_box and friends
+stop materialising a cell list. Fixes a real limit today, no storage change.
+Chunk-level dirty tracking for meshing, still over dense layers. Fixes the
+cost that actually grows.
+The storage swap itself, layer by layer, with get/set/iter_filled
+unchanged at the boundary so the raycaster and region code do not move.
+Unbounded canvas, once storage no longer depends on the scene range.
+Sequencing against the other issues
+#13 (selection and transform) does not depend on storage and is the biggest
+user-facing gap — worth doing first regardless.
+Between this and #14 (objects), this should come first if both are wanted:
+objects built on dense layers would be rebuilt underneath when chunks land,
+whereas objects on a chunk grid get cheap aligned transforms for free.
+From the roadmap discussion. Related: #14, #17.
+Reactions are currently unavailable
+Activity
+fpt
+added
+enhancementNew feature or requestNew feature or request
+on Sep 7, 2026
+fpt commented on Sep 7, 2026
+fpt
+on Sep 7, 2026
+OwnerAuthor
+More actions
+Measured before starting, on the real binary at 256³ — and it changed what the first slice should be. PR #23.
+```
+put_rect whole scene   3798 ms   rss 1284 MB
+one voxel edit           43 ms
+screenshot (extract)    348 ms
+```
+Two of the three costs I attributed to storage in this issue were algorithmic.
+filled_count counted iter_filled, which asks owner_at (O(layers)) per filled cell — so a single voxel edit cost a full model walk, because every tool call reports that number and the status line reads it on every redraw. The per-layer one is read per row per redraw by the layer panel. Both are now maintained fields: 43 ms → 0 ms.
+box_cells materialised ~200 MB of coordinates for a 256³ fill that existed only to be walked once. Now an iterator: 1284 → 1099 MB.
+Neither needed chunks.
+What is actually left, and what it needs
+Face extraction, ~310 ms per rebuild. This one is genuinely Sparse chunk (brick) storage: decouple resolution from memory #18's — chunk-level dirty tracking, rebuilding the edited chunk and its six neighbours instead of the whole model. It is now the largest remaining cost by a wide margin, so it should be the next slice rather than bulk writes.
+The undo history, ~170 MB for a full-scene fill. An Edit per changed cell. Also not a storage-layout problem — the fix is a history that stores a layer snapshot when the per-cell diff would be larger than the layer itself (16 MB against 170 MB at 256³, a 10× saving). Change::Layers is already most of that machinery. Worth its own issue rather than being folded in here.
+Idle memory for a sparse model — a hollow shell still allocates its bounding box. Unmeasured here because the benchmark filled scenes solid; this is the case chunks are actually for, and worth measuring before the storage swap.
+So the staging in the description should be reordered: dirty-chunk meshing first, then the storage swap. Bulk writes are done, and by a simpler route than chunk-awareness.
+fpt commented on Sep 7, 2026
+fpt
+on Sep 7, 2026
+Last edited by fpt
+OwnerAuthor
+More actions
+Measured the remaining question — what a sparse model actually costs — and the answer argues against doing the storage swap now. PR #27 has the one fix that came out of it.
+Idle memory, at 256³, after a trim
+shape
+voxels
+allocated
+ratio
+rss
+terrain slab 256×5×256
+327,680
+327,680
+1.0×
+35 MB
+a character, 32³ scene
+1,088
+1,088
+1.0×
+29 MB
+256 specks scattered across the scene
+256
+16,777,216
+65536×
+456 MB
+Compact content is already optimal. The layer-box work took care of it: a slab, a character, a tree each cost exactly their contents. Chunked storage would give those nothing at all.
+The one catastrophic case is content spread thinly through one layer — and that is largely a shape the design already asks you to avoid, because separate things go in separate layers and each layer's box is tight around its own contents. A ground plane, a tree and a character in three layers cost their three shapes; the same three in one layer cost the whole scene between them.
+What that means
+I do not think the storage swap earns its cost yet. It is the largest change proposed in this project, it makes get slower for the 32³ default that most work happens at, and it touches every hot path — and the measured benefit is confined to one usage pattern that layers already answer.
+What would change that:
+An unbounded canvas. If the scene stops being a bounded range, boxes stop being a workable representation and chunks become the only option. That is a product decision rather than a performance one, and it is the honest reason to do this.
+A workflow that genuinely needs scattered content in one layer — scatter tools, particles, procedural detail across a terrain. None exists yet.
+A measured case where layers are not a reasonable answer. Worth re-measuring if one appears.
+What came out of it instead
+new_model seeds a voxel at the scene's centre. Erasing it and building near the floor — the flow the modeling skill prescribes — left a box spanning both: 8.4 M cells for 327 K voxels, 487 MB against 35 MB. An emptied layer now gives its box back at once (#27).
+Where the remaining cost is
+Not storage:
+Bulk fills — dominated by the box growing one cell at a time. A layer's box grows one cell at a time, and bulk fills pay for it #26, measured at 17×, and by far the best remaining win per line changed.
+The undo history — an Edit per changed cell, ~170 MB for a full-scene fill. A history-encoding problem: store a layer snapshot when the diff would be larger than the layer (16 MB against 170 MB at 256³). Worth its own issue.
+Suggest this stays open as the design record for the unbounded-canvas direction, with the storage swap gated on one of the three conditions above.
+fpt commented on Sep 8, 2026
+fpt
+on Sep 8, 2026
+OwnerAuthor
+More actions
+Re-measured on main after objects (#30), palette ops (#33), inspection (#34) and instances (#37). The conclusion from the comment above holds, and the evidence for it is stronger. Still gated; still worth keeping open as the design record.
+The staging in the description is 2/4 done
+step
+state
+1. Chunk-aware bulk writes
+done, by the simpler route — box_cells is an iterator, no cell list is materialised
+2. Chunk-level dirty meshing
+done — CHUNK = 16, a bitset over the chunk grid, set_in marking the chunk and the neighbour across a shared face
+3. The storage swap
+not done, gated
+4. Unbounded canvas
+not done, a product decision
+What step 2 bought, at 256³
+```
+fill 256³ (16.7M cells)              486 ms
+screenshot, everything dirty         236 ms   <- full extraction
+screenshot, one chunk dirty           13 ms   <- the incremental path
+one voxel edit                         0 ms
+```
+18× on the cost this issue called "the largest remaining by a wide margin". The full extraction is now only paid when something dirties the whole scene, which is a bulk fill and not an edit.
+The gating conditions have not moved
+Compact content is still exactly optimal. The terrain slab measures 327,680 allocated for 327,680 voxels — 1.00×. Chunks would give it nothing, same as before.
+The one pathology is unchanged. 256 specks scattered through one layer still cost 16,777,216 cells for 256 voxels — 65536×. trim_layer cannot help, and should not be expected to: that is the tight box. It remains a shape the layer design already asks you to avoid.
+Two corrections to my own first pass, recorded because both nearly went in as findings: a slab measured at 25.8× until I noticed the run had left new_model's centre seed in place, stretching the box to y=128; and a "solid 256³" case that never filled, because apply_edits refused 16.7M cells against its 2,097,152 candidate cap. Neither was a regression.
+One argument in the description is now moot
+The Sequencing section said this should land before #14, because "objects built on dense layers would be rebuilt underneath when chunks land, whereas objects on a chunk grid get cheap aligned transforms for free", with Object { grid, transform } as the end state.
+Objects shipped the other way, deliberately. From CLAUDE.md:
+There is no transform on an object. move_object applies a translation to its layers' Bounds::origin at the moment it is asked, rather than storing one to compose on every read.
+So there is no per-object transform for chunk alignment to make cheap, and nothing was rebuilt underneath. That half of the case for doing this sooner can be struck.
+Instances (#37) sit on the same rule — an instance bakes into one ordinary layer rather than resolving a transform in get — for the same reason: keeping get free of objects is worth more than the memory a virtual reference would save. That is the same trade this issue is being asked to make, decided the same way, on measured numbers.
+Still the honest triggers for revisiting
+Unchanged from the comment above:
+An unbounded canvas. If the scene stops being a bounded range, boxes stop being a workable representation. This is the real reason to do it, and it is a product decision.
+A workflow that genuinely needs scattered content in one layer — scatter tools, particles, procedural detail across terrain. Still none.
+A measured case where layers are not a reasonable answer. Still none.
+One loose end from the previous comment
+It said the undo history — an Edit per changed cell, ~170 MB for a full-scene fill — is not a storage-layout problem and is "worth its own issue rather than being folded in here". That issue was never filed. It is now the largest remaining memory cost here, and Change::Layers is already most of the machinery for the fix (snapshot the layer when the per-cell diff would be larger than the layer itself: 16 MB against 170 MB at 256³). Filing it separately so it stops being tracked in the margin of this one.
+fpt commented on Sep 8, 2026
+fpt
+on Sep 8, 2026
+OwnerAuthor
+More actions
+Follow-up filed as #40 — the undo-history cost, split out as this comment promised.
+Measured exactly rather than estimated: Edit is 10 bytes (size_of), so a full 256³ fill stores 160 MB of history against 16 MB for a snapshot of the same layer. The earlier ~170 MB figure was close.
+Nothing left tracked in this issue's margin. #18 stays open as the design record for the storage swap, gated on the three conditions above.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

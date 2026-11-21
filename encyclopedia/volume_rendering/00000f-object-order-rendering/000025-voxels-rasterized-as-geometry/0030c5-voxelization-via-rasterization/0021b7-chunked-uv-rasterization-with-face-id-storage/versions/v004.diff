@@ -1,0 +1,279 @@
+--- v003.md
++++ v004.md
+@@ -4,96 +4,205 @@
+ 
+ ## Overview
+-This method rasterizes a triangular mesh in 2D UV space to generate voxel data, storing the source face ID in the alpha channel of the rasterization buffer. This allows for per-texel face identification and subsequent interpolation of 3D vertex attributes (such as position or normals) from the rasterized face. It differs from [3-axis rasterization voxelization](2480-3-axis-rasterization-voxelization.md) by using a single 2D projection pass per chunk rather than three orthogonal passes, and from [Triangle Projection Voxelization](5432-triangle-projection-voxelization.md) by explicitly managing VRAM usage through face chunking and storing face IDs for attribute reconstruction.
++This method rasterizes a triangle mesh directly into a 2D UV texture space in memory-friendly chunks, storing the triangle (face) ID in the alpha channel of the resulting texture. This allows for per-texel face identification and subsequent interpolation of 3D vertex positions, effectively converting geometric mesh data into a volumetric representation without explicit ray marching or signed distance field computation. It differs from sibling methods like [3-axis rasterization](2480-3-axis-rasterization-voxelization.md) by processing faces in arbitrary batches rather than axis-aligned slices, and from [Triangle Projection Voxelization](5432-triangle-projection-voxelization.md) by explicitly managing VRAM constraints through chunked execution loops.
+ 
+ ## How it works
+ **Inputs:**
+-- `out_vertices`: Tensor of vertex positions, shape $(N, 3)$.
+-- `out_faces`: Tensor of face indices, shape $(M, 3)$.
+-- `out_uvs`: Tensor of UV coordinates, shape $(N, 2)$.
+-- `texture_size`: Integer resolution of the 2D rasterization buffer (e.g., 1024).
+-- `chunk_size`: Integer number of faces to process per rasterization call (default 100,000).
++- `out_vertices`: Tensor of shape $(N_v, 3)$ containing vertex positions.
++- `out_faces`: Tensor of shape $(N_f, 3)$ containing face indices.
++- `out_uvs`: Tensor of shape $(N_v, 2)$ containing UV coordinates for vertices.
++- `texture_size`: Integer resolution of the target UV texture (e.g., 1024).
+ 
+ **Outputs:**
+-- `rast`: Tensor of shape $(1, \text{texture\_size}, \text{texture\_size}, 4)$ containing rasterization data. The alpha channel stores the face ID offset.
+-- `pos`: Tensor of interpolated 3D positions for valid pixels.
++- `rast`: Tensor of shape $(1, H, W, 4)$ where $H=W=$ `texture_size`. The RGB channels store interpolated 3D positions, and the Alpha channel stores the face ID.
++- `mask`: Boolean tensor indicating valid texels.
+ 
+ **Data Structures:**
+-- `rast`: A 4-channel float32 tensor. Channels 0-2 store interpolated attributes (initially undefined or zero), Channel 3 stores the face ID (or 0 if empty).
+-- `uvs_rast`: A 3D tensor of shape $(1, N, 3)$ containing homogeneous UV coordinates.
++- `rast`: A 4-channel float32 texture. Channel 0-2: Interpolated 3D position $(x,y,z)$. Channel 3: Face ID (integer stored as float).
++- `uvs_rast`: A 3D tensor of shape $(1, N_v, 3)$ representing homogeneous UV coordinates.
+ 
+ **Steps:**
+-1. **Prepare UV Coordinates:** Convert 2D UVs to 3D homogeneous coordinates for rasterization. The UVs are scaled to $[-1, 1]$ range, a zero Z-component is added, and a one W-component is added.
+-   $$ \text{uvs\_rast} = \text{cat}([\text{out\_uvs} \times 2 - 1, \mathbf{0}, \mathbf{1}], \text{dim}=-1). \text{unsqueeze}(0) $$
+-   Where $\text{cat}$ is concatenation along the last dimension, and $\mathbf{0}, \mathbf{1}$ are tensors of zeros and ones matching the height of `out_uvs`.
+-
+-2. **Initialize Raster Buffer:** Create a zero-initialized tensor for the raster output.
+-   $$ \text{rast} = \text{zeros}((1, \text{texture\_size}, \text{texture\_size}, 4), \text{device}=\text{'cuda'}, \text{dtype}=\text{float32}) $$
+-
+-3. **Chunked Rasterization Loop:** Iterate over faces in chunks of size `chunk_size`.
+-   For each chunk index $i$ from $0$ to $M$ with step `chunk_size`:
+-   a. Extract the current chunk of faces: $F_{\text{chunk}} = \text{out\_faces}[i : i + \text{chunk\_size}]$.
+-   b. Rasterize the chunk into a temporary buffer `rast_chunk`.
+-      $$ (\text{rast\_chunk}, \_) = \text{dr.rasterize}(\text{ctx}, \text{uvs\_rast}, F_{\text{chunk}}, \text{resolution}=[\text{texture\_size}, \text{texture\_size}]) $$
+-   c. Compute a validity mask where the alpha channel (face ID) is greater than 0.
+-      $$ \text{mask\_chunk} = \text{rast\_chunk}[:, :, :, 3:4] > 0 $$
+-   d. Update the alpha channel of `rast_chunk` by adding the global face index $i$. This encodes the absolute face ID.
+-      $$ \text{rast\_chunk}[:, :, :, 3:4] \leftarrow \text{rast\_chunk}[:, :, :, 3:4] + i $$
+-   e. Merge `rast_chunk` into the global `rast` tensor. Pixels already filled by previous chunks (where `mask_chunk` is false) retain their values.
+-      $$ \text{rast} = \text{where}(\text{mask\_chunk}, \text{rast\_chunk}, \text{rast}) $$
+-
+-4. **Extract Valid Mask:** Identify all pixels covered by any face.
+-   $$ \text{mask} = \text{rast}[0, :, :, 3] > 0 $$
+-
+-5. **Interpolate Attributes:** Use the final `rast` buffer (specifically the face IDs stored in the alpha channel) to interpolate 3D positions from the original vertices.
+-   $$ \text{pos} = \text{dr.interpolate}(\text{out\_vertices}.\text{unsqueeze}(0), \text{rast}, \text{out\_faces})[0][0] $$
++
++1.  **Prepare UV Coordinates**: Convert 2D UVs to 3D homogeneous coordinates for rasterization. The UVs are scaled to the range $[-1, 1]$ for the x and y components, with $z=0$ and $w=1$.
++    $$
++    \text{uvs\_rast} = \text{cat}([\text{out\_uvs} \times 2 - 1, \mathbf{0}, \mathbf{1}], \text{dim}=-1)
++    $$
++    Reshape to $(1, N_v, 3)$.
++
++2.  **Initialize Rasterization Buffer**: Create a zero-initialized tensor for the texture.
++    $$
++    \text{rast} = \text{zeros}((1, \text{texture\_size}, \text{texture\_size}, 4), \text{dtype}=\text{float32})
++    $$
++
++3.  **Chunked Rasterization Loop**: Iterate over faces in chunks of size $C$ (typically 100,000) to limit VRAM usage [S1, unofficial].
++    For each chunk index $i$ from 0 to $N_f$ with step $C$:
++    a.  Extract face indices for the current chunk: $F_{chunk} = \text{out\_faces}[i : i+C]$.
++    b.  Rasterize the chunk into a temporary buffer `rast_chunk`.
++        $$
++        (\text{rast\_chunk}, \_) = \text{rasterize}(\text{uvs\_rast}, F_{chunk}, \text{resolution}=[\text{texture\_size}, \text{texture\_size}])
++        $$
++    c.  Compute a validity mask for the chunk based on the original alpha channel (which indicates coverage).
++        $$
++        \text{mask\_chunk} = \text{rast\_chunk}[:, :, :, 3:4] > 0
++        $$
++    d.  Store the global face ID in the alpha channel. The global ID is the loop index $i$. This overwrites the original alpha value, so the mask must be computed *before* merging [S1, unofficial].
++        $$
++        \text{rast\_chunk}[:, :, :, 3:4] += i
++        $$
++    e.  Merge the chunk result into the global `rast` tensor. Only update texels where the chunk is valid.
++        $$
++        \text{rast} = \text{where}(\text{mask\_chunk}, \text{rast\_chunk}, \text{rast})
++        $$
++
++4.  **Extract Valid Mask**: Identify all texels that were covered by any face.
++    $$
++    \text{mask} = \text{rast}[0, :, :, 3] > 0
++    $$
++
++5.  **Interpolate 3D Positions**: Use the rasterization output (specifically the face IDs and barycentric weights implicitly handled by the rasterizer) to interpolate the 3D vertex positions for each valid texel.
++    $$
++    \text{pos} = \text{interpolate}(\text{out\_vertices}, \text{rast}, \text{out\_faces})
++    $$
++    The result `pos` contains the 3D world position for each texel in the UV space.
++
++**Pseudocode:**
++
++```python
++import torch
++import dr  # Assume a differentiable rasterizer library like diff-gaussian-rasterization or similar
++
++def chunked_uv_rasterization(out_vertices, out_faces, out_uvs, texture_size, chunk_size=100000):
++    """
++    Rasterize mesh into UV space, storing face ID in alpha.
++    
++    Args:
++        out_vertices: (N_v, 3) Tensor of vertex positions.
++        out_faces: (N_f, 3) Tensor of face indices.
++        out_uvs: (N_v, 2) Tensor of UV coordinates.
++        texture_size: int, resolution of the output texture.
++        chunk_size: int, number of faces per rasterization call.
++        
++    Returns:
++        rast: (1, H, W, 4) Tensor. RGB=3D pos, A=Face ID.
++        mask: (H, W) Boolean Tensor.
++    """
++    N_v, _ = out_uvs.shape
++    N_f = out_faces.shape[0]
++    
++    # 1. Prepare UV coordinates: scale to [-1, 1], add z=0, w=1
++    # out_uvs is (N_v, 2). We want (1, N_v, 3)
++    uvs_scaled = out_uvs * 2 - 1
++    zeros_z = torch.zeros_like(out_uvs[:, :1])
++    ones_w = torch.ones_like(out_uvs[:, :1])
++    uvs_rast = torch.cat([uvs_scaled, zeros_z, ones_w], dim=-1).unsqueeze(0) # (1, N_v, 3)
++    
++    # 2. Initialize rast tensor: (1, H, W, 4)
++    rast = torch.zeros((1, texture_size, texture_size, 4), device=out_vertices.device, dtype=torch.float32)
++    
++    # 3. Loop over faces in chunks
++    for i in range(0, N_f, chunk_size):
++        end_idx = min(i + chunk_size, N_f)
++        faces_chunk = out_faces[i:end_idx]
++        
++        # Rasterize chunk
++        # dr.rasterize returns (rast_out, bary_coords) or similar depending on lib
++        # Assuming it returns (rast_tensor, info) where rast_tensor has 4 channels
++        rast_chunk, _ = dr.rasterize(
++            ctx=None, # Context if required by specific lib
++            uvs=uvs_rast,
++            faces=faces_chunk,
++            resolution=[texture_size, texture_size]
++        )
++        
++        # rast_chunk shape: (1, H, W, 4)
++        
++        # 4. Compute mask BEFORE modifying alpha, as alpha stores coverage info initially
++        # The alpha channel of rast_chunk indicates if a pixel is covered (>0)
++        mask_chunk = rast_chunk[:, :, :, 3:4] > 0
++        
++        # 5. Store face ID in alpha channel
++        # Add the global face index i to the alpha channel
++        rast_chunk[:, :, :, 3:4] += i
++        
++        # 6. Merge into global rast
++        # Use torch.where to only update valid pixels
++        rast = torch.where(mask_chunk, rast_chunk, rast)
++        
++    # 7. Extract valid pixel mask from the final alpha channel
++    # Alpha channel now contains face IDs. Valid pixels have ID >= 0.
++    mask = rast[0, :, :, 3] > 0
++    
++    # 8. Interpolate 3D positions
++    # dr.interpolate uses the rast output (face IDs and barycentrics) to fetch vertex positions
++    pos = dr.interpolate(
++        out_vertices.unsqueeze(0), # (1, N_v, 3)
++        rast,
++        out_faces
++    )[0][0] # Extract (H, W, 3)
++    
++    return rast, mask, pos
++```
+ 
+ **Parameters:**
+-- `chunk_size`: 100,000 faces. This limits VRAM usage during the rasterization step [S1, unofficial].
+-
+-**Pitfalls:**
+-- **Face ID Overwrite:** The alpha channel is used to store the face ID by adding the loop index $i$. This overwrites any original alpha value from the rasterizer. The mask must be recomputed or stored separately before merging if the original alpha is needed for other purposes [S1, unofficial].
+-- **Precision:** Ensure the face ID fits within the precision of the alpha channel. For float32, this is generally safe for $M < 2^{24}$, but integer types may be preferred if available in the rasterizer backend.
++- `chunk_size`: Number of faces processed per rasterization call. Typical value: 100,000 [S1, unofficial]. This limits VRAM usage.
++
++**Edge Cases and Pitfalls:**
++- **Alpha Channel Overwrite**: The face ID is stored in the alpha channel by adding the loop index $i$. This overwrites the original alpha value used for coverage masking. The mask must be computed from the rasterizer's output *before* the face ID is added or merged [S1, unofficial].
++- **Precision**: Face IDs are stored as floats. For very large meshes, ensure that the float precision is sufficient to distinguish between adjacent face IDs if needed, though typically integer representation in the alpha channel is sufficient for identification.
++- **Boundary Conditions**: Ensure UV coordinates are within $[0, 1]$ before scaling to $[-1, 1]$. Out-of-bounds UVs may cause rasterization artifacts or undefined behavior.
+ 
+ ## Subtopics
+ 
+ ### Face Token Layout
+-A compact encoding for voxel face data within a chunk.
+-- **Parameters:**
+-  - `kChunkSize`: 62. The logical size of the voxel chunk [S2, unofficial].
+-  - `kPaddedSize`: 64. The padded size of the voxel chunk for memory alignment [S2, unofficial].
+-  - `kPaddedArea`: 4096 ($64 \times 64$). The area of a padded slice [S2, unofficial].
+-- **Layout:** A `uint64_t` face token encodes a unit face with the following bit fields:
+-  - Bits 0-5: u coordinate (6 bits).
+-  - Bits 6-11: v coordinate (6 bits).
+-  - Bits 12-17: depth (6 bits).
+-  - Bits 18-20: axis (3 bits).
+-  - Bit 21: positive direction flag (1 bit).
+-  - Bits 22-31: material (10 bits).
+-  *(Note: Source [S2, unofficial] lists bit 20 as positive direction and bits 21-31 as material, totaling 12 bits for material. The sum of bits 0-21 is 22 bits. Bits 22-31 are 10 bits. Total 32 bits used? No, `uint64_t` is 64 bits. The source specifies bits 0-31. The remaining bits 32-63 are not specified.)* [S2, unofficial].
++A compact representation of a face within a voxel chunk, encoding geometric and material properties into a single 64-bit integer.
++- **Bit Layout**:
++    - Bits 0-5: U coordinate (6 bits).
++    - Bits 6-11: V coordinate (6 bits).
++    - Bits 12-17: Depth (6 bits).
++    - Bits 18-20: Axis (3 bits).
++    - Bit 21: Positive direction flag (1 bit).
++    - Bits 22-31: Material ID (10 bits).
++- **Parameters**:
++    - `kChunkSize`: 62. Logical size of the voxel chunk.
++    - `kPaddedSize`: 64. Padded size for memory alignment.
++    - `kPaddedArea`: 4096 ($64 \times 64$). Area of a padded slice.
++- **Usage**: Used in streaming binary greedy meshing to efficiently encode and decode face information within a chunked voxel grid [S2, unofficial].
+ 
+ ### Face Specification for Padded Coordinates
+-A struct encoding the orientation of a face within the chunk and its matching padded boundary index.
+-- **Definition:** A struct containing `fixed_axis`, `fixed_value`, `iter_axes`, and `padded_boundary_index` [S3, unofficial].
+-- **Formula:** Padded coordinates for a face point $(u, v)$ are calculated as:
+-  $$ \text{coords}[\text{iter\_axes}[0]] = u + 1 $$
+-  $$ \text{coords}[\text{iter\_axes}[1]] = v + 1 $$
+-  $$ \text{coords}[\text{fixed\_axis}] = \text{padded\_boundary\_index} $$
+-  [S3, unofficial].
+-- **Layout:**
+-  - `fixed_axis`: `usize`
+-  - `fixed_value`: `u8`
+-  - `iter_axes`: `[usize; 2]`
+-  - `padded_boundary_index`: `u32`
+-  [S3, unofficial].
++A structure defining the orientation and boundary mapping of a face within a padded chunk.
++- **Definition**: A struct encoding the orientation of a face within the chunk and its matching padded boundary index.
++- **Fields**:
++    - `fixed_axis`: The axis along which the face is fixed (e.g., X, Y, or Z).
++    - `fixed_value`: The integer value of the fixed axis.
++    - `iter_axes`: An array of two axes along which the face varies.
++    - `padded_boundary_index`: The index in the padded grid corresponding to the fixed axis.
++- **Formula**: Padded coordinates for a face point $(u, v)$ are calculated as:
++    $$
++    \text{coords}[\text{iter\_axes}[0]] = u + 1
++    $$
++    $$
++    \text{coords}[\text{iter\_axes}[1]] = v + 1
++    $$
++    $$
++    \text{coords}[\text{fixed\_axis}] = \text{padded\_boundary\_index}
++    $$
++- **Usage**: Used to map 2D face coordinates to 3D padded voxel grid indices in infinite terrain generation [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(M \cdot T)$, where $M$ is the number of faces and $T$ is the texture resolution squared. The chunking adds overhead per chunk but keeps memory bounded.
+-- **Memory Complexity:** $O(T^2)$ for the raster buffer, independent of $M$, due to chunking.
+-- **Performance:** Limited by VRAM availability for the raster buffer and the cost of multiple rasterization calls. Suitable for large meshes that do not fit in VRAM for a single pass.
+-- **Strengths:** Memory efficient for large meshes; enables attribute interpolation.
+-- **Limitations:** Requires a rasterizer that supports face ID output; UV mapping must be well-defined.
++- **Time Complexity**: $O(N_f \cdot \frac{1}{C} \cdot R)$, where $N_f$ is the number of faces, $C$ is the chunk size, and $R$ is the rasterization cost per chunk (proportional to texture resolution). The overhead of chunking is minimal if $C$ is large enough to amortize API calls.
++- **Memory Complexity**: $O(H \cdot W \cdot 4 + C \cdot \text{rasterizer\_overhead})$. The dominant memory consumer is the output texture $(H, W, 4)$. Chunking limits the peak memory usage of the rasterizer's internal buffers.
++- **Performance**: Depends heavily on the rasterizer implementation. Using GPU-accelerated rasterizers (e.g., PyTorch3D, Kaolin) allows for parallel processing of chunks.
++- **Strengths**:
++    - Memory efficient for large meshes due to chunking.
++    - Directly produces 3D positions from UV space, useful for neural rendering or voxelization.
++    - Simple to implement using existing differentiable rasterizers.
++- **Limitations**:
++    - Requires UV coordinates for the mesh.
++    - Face ID storage in alpha channel requires careful handling of masks.
++    - Not suitable for real-time rendering of dynamic meshes due to the overhead of re-rasterization and interpolation.
++- **When to Use**: When converting a static mesh to a voxel-like representation for neural rendering, volume rendering, or spatial hashing, especially when UV coordinates are available.
++- **When Not to Use**: For real-time rendering of dynamic scenes, or when UV coordinates are not available and must be computed (which adds complexity).
+ 
+ ## Background
+-This method is used in the o-voxel-gpu project for GPU-accelerated voxelization of textured meshes [S1, unofficial]. It leverages standard rasterization pipelines to handle complex geometry and attribute interpolation.
++This method is derived from techniques used in neural rendering and voxelization pipelines, specifically in the context of differentiable rendering and GPU-accelerated mesh processing. The chunked approach is necessary to handle large meshes that exceed GPU memory limits for single-pass rasterization. The storage of face IDs in the alpha channel is a common trick to enable post-rasterization processing, such as interpolation of vertex attributes or material properties.
+ 
+ ## Sources

@@ -1,0 +1,191 @@
+--- v002.md
++++ v003.md
+@@ -1,126 +1,107 @@
+ # Test-Time Photometric Optimization
+ 
+-Also called: Gradient-driven camera pose refinement at test time, Test-time pose alignment via photometric error
++Also called: Evaluation pose optimization, Gradient-driven camera pose refinement at test time, Test-time pose alignment via photometric error
+ 
+ ## Overview
+-Test-Time Photometric Optimization (TTPO) is a post-processing step applied to trained Neural Radiance Field (NeRF) models to refine camera poses or factor out pose errors during novel view synthesis [S1]. It solves the problem where initial camera poses (e.g., from COLMAP or sparse reconstruction) are noisy or misaligned, causing artifacts in rendered images [S1]. Unlike standard training which updates both scene and pose parameters, TTPO keeps the NeRF model fixed and optimizes only the camera parameters to minimize the photometric difference between rendered and target images [S1]. It is distinguished from [Gradient-Based SE(3) Optimization](7526-gradient-based-se-3-optimization.md) by its specific application as a fine-grained refinement step *after* model training, often used to evaluate view synthesis quality independently of pose accuracy [S1].
++Test-Time Photometric Optimization is a post-processing refinement step applied to trained NeRF models to isolate view synthesis quality from camera pose estimation errors [S1]. It compensates for pose inaccuracies (e.g., from drifting geometry or noisy initialization) by optimizing the evaluation camera poses during the validation phase, ensuring that quality metrics like PSNR and SSIM reflect rendering fidelity rather than alignment artifacts [S2, S1]. Unlike its siblings, which may optimize scene parameters or use specific geometric constraints, this method focuses exclusively on fine-grained pose alignment using photometric gradients while keeping the NeRF weights fixed [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A pre-trained NeRF model $\hat{F}_\theta$ with fixed weights $\theta$; a set of target images $\hat{C}(r)$ for specific camera poses; initial camera poses $v$ (rotation $R$, translation $t$); learning rate $\eta$.
+-*   **Outputs:** Refined camera poses $v^*$ that minimize photometric error.
++- **Input:** A pre-trained NeRF model $\theta_{fixed}$, a set of test views with initial noisy camera poses $v_{init}$, and the corresponding target images $\hat{C}$.
++- **Output:** Refined camera poses $v_{opt}$ and the rendered images using these poses.
+ 
+ **Data Structures:**
+-*   **NeRF Model:** A function $I(r; \theta)$ mapping ray $r$ (defined by camera pose $v$ and direction) to color. The parameters $\theta$ are frozen.
+-*   **Camera Pose:** Represented as a transformation matrix or SE(3) parameters. In [S1], poses are transformed to a coordinate system aligned with optimized poses before optimization [S1].
++- Camera pose $v$: Typically represented as a $4 \times 4$ transformation matrix or a vector of 6 degrees of freedom (rotation and translation) [S1].
++- NeRF Model $\theta_{fixed}$: The trained radiance field parameters, frozen during this phase.
+ 
+ **Steps:**
+-1.  **Coordinate Alignment:** Transform test views to the coordinate system of the optimized poses by applying scale, rotation, and translation derived from prior alignment analysis [S1].
+-2.  **Ray Generation:** For each target image, generate rays $R$ passing through the camera center defined by the current pose $v_t$ and image pixel coordinates.
+-3.  **Rendering:** Compute the rendered color $I(r; \hat{\theta})$ for each ray $r \in R$ using the fixed NeRF model [S1].
+-4.  **Loss Calculation:** Compute the photometric loss $\mathcal{L}_{photo}$ between the rendered image and the target image $\hat{C}$ [S1]:
+-    $$
+-    \mathcal{L}_{photo} = \frac{1}{|R|} \sum_{r \in R} \| I(r; \hat{\theta}) - \hat{C}(r) \|^2
+-    $$
+-5.  **Gradient Computation:** Compute the gradient of the loss with respect to the camera pose parameters $v$ via backpropagation through the differentiable renderer [S1]:
+-    $$
+-    \nabla_v \mathcal{L}_{photo}
+-    $$
+-6.  **Pose Update:** Update the camera pose using gradient descent [S1]:
+-    $$
+-    v_{t+1} = v_t - \eta \nabla_v \mathcal{L}_{photo}
+-    $$
+-7.  **Iteration:** Repeat steps 3-6 until convergence or a fixed number of iterations.
++1. **Initialization:** Start with the initial noisy test poses $v_0 = v_{init}$ [S1].
++2. **Ray Generation:** For each pixel in the target test image, generate a ray $r$ using the current camera pose $v_t$ [S1].
++3. **Differentiable Rendering:** Render the color $I(r; \theta_{fixed})$ for each ray using the fixed NeRF model [S1].
++4. **Loss Computation:** Compute the photometric loss $\mathcal{L}_{photo}$ between the rendered color and the target color $\hat{C}(r)$ [S1]. The sources specify using only the RGB loss ($L_{rgb}$) for this optimization [S2].
++   $$
++   \mathcal{L}_{photo} = \frac{1}{|R|} \sum_{r \in R} \| I(r; \theta_{fixed}) - \hat{C}(r) \|^2
++   $$
++5. **Gradient Computation:** Compute the gradient of the loss with respect to the camera pose parameters $\nabla_{v} \mathcal{L}_{photo}$ via backpropagation through the differentiable renderer [S1].
++6. **Pose Update:** Update the camera pose using gradient descent:
++   $$
++   v_{t+1} = v_t - \eta \nabla_{v} \mathcal{L}_{photo}
++   $$
++   where $\eta$ is the learning rate [S1].
++7. **Iteration:** Repeat steps 3-6 until convergence or a maximum number of iterations is reached [S1].
++8. **Transformation:** Transform the test views to the coordinate system of the optimized poses by applying the scale/rotation/translation from the alignment analysis if necessary [S1].
+ 
+ **Parameters:**
+-*   **Learning Rate ($\eta$):** Not given in the sources.
+-*   **Iterations:** Not given in the sources.
++- Learning rate $\eta$: Not given in the sources.
++- Number of iterations: Not given in the sources.
++- Loss type: $L_{rgb}$ only [S2].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Local Minima:** Photometric optimization can converge to local minima if the initial pose error is large. [S1] suggests using it in conjunction with coarser alignment methods.
+-*   **Occlusions/Inaccuracies:** High-confidence regions should be used to avoid artifacts from NeRF inaccuracies or occlusions, often utilizing masks or viewshed fields [S1].
+-*   **Metric Space:** In datasets where pose positions are not in metric space, translation error has no units, which may affect optimization stability [S1].
++- **Local Minima:** Gradient descent may converge to local minima if the initial pose error is large [S1].
++- **Occlusions:** High-confidence regions should be used to avoid artifacts from NeRF inaccuracies or occlusions, often utilizing masks or viewshed fields [Parent].
++- **Dynamic Objects:** When using LiDAR for depth supervision in related contexts, only take depth measurements at the time of the camera sensor recording to ensure dynamic objects receive valid depth supervision [S2].
+ 
+ **Pseudocode:**
+ ```python
+-def test_time_photometric_optimization(nerf_model, target_images, initial_poses, learning_rate, num_iterations):
++def test_time_photometric_optimization(nerf_model, test_views, target_images, learning_rate, num_iterations):
+     """
+-    Refines camera poses for a fixed NeRF model to minimize photometric error.
++    Optimizes camera poses for test views using photometric loss.
+     
+     Args:
+-        nerf_model: Pre-trained NeRF model with fixed weights.
+-        target_images: List of target images corresponding to initial_poses.
+-        initial_poses: List of initial camera poses (SE(3) or similar).
++        nerf_model: Pre-trained NeRF model (frozen).
++        test_views: List of initial camera poses (v_init).
++        target_images: List of target images for each test view.
+         learning_rate: Step size for gradient descent.
+-        num_iterations: Number of optimization steps.
++        num_iterations: Maximum number of optimization steps.
+         
+     Returns:
+-        refined_poses: List of optimized camera poses.
++        optimized_poses: List of refined camera poses.
+     """
+-    # Copy initial poses to allow in-place updates
+-    current_poses = [pose.copy() for pose in initial_poses]
++    optimized_poses = [v.clone() for v in test_views]
+     
+     for i in range(num_iterations):
+-        total_loss = 0.0
+-        # Accumulate gradients for all poses (or optimize one by one)
+-        # Here we assume batch optimization over rays for a single pose for clarity
+-        # In practice, this might be done per-image or per-batch
++        total_loss = 0
++        gradients = []
+         
+-        for pose, target_img in zip(current_poses, target_images):
+-            # 1. Generate rays for the current pose
+-            rays = generate_rays(pose, target_img.shape)
++        for v, target_img in zip(optimized_poses, target_images):
++            # Generate rays from current pose
++            rays = generate_rays(v)
+             
+-            # 2. Render image using fixed NeRF model
+-            rendered_img = render_image(nerf_model, rays)
++            # Render image using fixed NeRF
++            rendered_img = nerf_model.render(rays)
+             
+-            # 3. Compute photometric loss (MSE)
+-            loss = mean_squared_error(rendered_img, target_img)
++            # Compute L_rgb loss
++            loss = mse_loss(rendered_img, target_img)
++            
++            # Compute gradients w.r.t. pose
++            grad_v = compute_gradient(loss, v)
++            
+             total_loss += loss
++            gradients.append(grad_v)
+             
+-            # 4. Compute gradients w.r.t. pose parameters
+-            # Note: nerf_model weights are frozen
+-            pose_gradients = compute_gradients(loss, pose, nerf_model, rays)
++        # Update poses
++        for j, v in enumerate(optimized_poses):
++            optimized_poses[j] = v - learning_rate * gradients[j]
+             
+-            # 5. Update pose
+-            current_pose = pose - learning_rate * pose_gradients
+-            
+-        # Optional: Check convergence
+-        if total_loss < threshold:
+-            break
+-            
+-    return current_poses
++    return optimized_poses
+ ```
+ 
+ ## Subtopics
+ 
+-### Inverse Manipulation (Inversion)
+-An iterative method to optimize generation conditions (shape code $z_s$, appearance code $z_a$, camera $v$) to inversely project an input image $I_r$ to the generation manifold, following the EM algorithm [S2]. It alternates between optimizing the camera pose, shape code, and appearance code [S2].
+-*   **Camera Step:** Optimizes $v$ while keeping $z_s$ and $z_a$ fixed using loss $L_v$:
+-    $$
+-    L_v = \| \hat{F}_\theta(v, \hat{z}_s, \hat{z}_a) - I_r \|^2 + \lambda_v D_{CLIP}(\hat{F}_\theta(v, \hat{z}_s, \hat{z}_a), I_r)
+-    $$
+-*   **Shape Step:** Updates $z_s$ by minimizing $L_s$:
+-    $$
+-    L_s = \| \hat{F}_\theta(\hat{v}, z_s + \lambda_n z_n, \hat{z}_a) - I_r \|^2 + \lambda_s D_{CLIP}(\hat{F}_\theta(\hat{v}, z_s + \lambda_n z_n, \hat{z}_a), I_r)
+-    $$
+-*   **Appearance Step:** Updates $z_a$ by minimizing $L_a$:
+-    $$
+-    L_a = \| \hat{F}_\theta(\hat{v}, \hat{z}_s, z_a + \lambda_n z_n) - I_r \|^2 + \lambda_a D_{CLIP}(\hat{F}_\theta(\hat{v}, \hat{z}_s, z_a + \lambda_n z_n), I_r)
+-    $$
+-*   **Parameters:** $z_n$ is a random standard Gaussian noise vector sampled in each step to improve robustness. $\lambda_n$ is a noise scaling factor that linearly decays from 1 to 0 through the optimization iterations [S2]. $\lambda_v, \lambda_s, \lambda_a$ are loss weights [S2].
++### [Inverse Manipulation (Inversion)](16780-inverse-manipulation-inversion.md)
++Inverse Manipulation is an iterative optimization method that inversely projects an input image $I_r$ onto the generation manifold of a pre-trained neural radiance field (NeRF) generator by optimizing the generation conditions: shape code $z_s$, appearance code $z_a$, and camera pose $v$. It distinguishes itself from direct latent code retrieval by using an Expectation-Maximization (EM) style alternating optimization to find the specific latent codes and camera parameters that best reconstruct the input image, enabling subsequent text-driven or attribute-based manipulations. Unlike [Test-Time Photometric Optimization](12699-test-time-photometric-optimization.md) which may optimize for general fidelity, this method specifically targets the disentangled latent space of a conditional NeRF to enable precise editing.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear in the number of rays and iterations. Each iteration requires a forward pass through the NeRF for all rays and a backward pass for the pose gradients.
+-*   **Memory Complexity:** Depends on the NeRF model size and the number of rays processed per batch. The NeRF weights are loaded once and kept in memory.
+-*   **Performance:** Improves view synthesis quality by correcting pose errors [S1]. It is effective when initial poses are noisy but not severely misaligned [S1].
+-*   **Strengths:** Decouples pose error from view synthesis quality evaluation [S1]. Simple to implement as it reuses the differentiable renderer.
+-*   **Limitations:** Computationally expensive if many iterations are needed. Sensitive to local minima if initial poses are poor [S1]. Requires high-confidence regions to avoid artifacts [S1].
+-*   **When to Use:** When evaluating novel view synthesis quality independently of pose accuracy, or when refining poses after a coarse alignment step [S1].
+-*   **When Not to Use:** When the initial pose error is too large for gradient-based methods to converge, or when the NeRF model itself is inaccurate and needs retraining.
++- **Time Complexity:** Depends on the number of iterations and the cost of differentiable rendering per iteration. Rendering a $1920 \times 1080$ image takes $\sim 16.4$ seconds in one reported implementation [S2].
++- **Memory Complexity:** Requires storing the NeRF model and intermediate gradients for the camera poses.
++- **Strengths:** Factors out pose error from view synthesis quality measurement, providing a fairer evaluation of rendering fidelity [S1].
++- **Limitations:** Computationally expensive due to iterative optimization at test time [S2]. May converge to local minima if initial poses are poor [S1].
++- **When to Use:** When evaluating novel-view synthesis quality in the presence of noisy or drifting camera poses [S1, S2].
++- **When Not to Use:** When real-time performance is required or when pose accuracy is already high [S1].
+ 
+ ## Background
+-Test-Time Photometric Optimization was introduced in the context of evaluating novel view synthesis in the presence of sparse and noisy poses [S1]. It is used in works like SPARF to factor out pose error from view synthesis quality metrics (PSNR, SSIM, LPIPs) [S1]. The method builds on the principle of differentiable rendering and photometric loss optimization [S1].
++Test-Time Photometric Optimization was introduced to address the issue of pose errors contaminating view synthesis quality measurements in NeRFs trained on sparse or noisy poses [S1]. It builds on the idea that optimizing evaluation poses can compensate for drifting geometry introduced by optimized training poses [S2]. The method is commonly used in experiments where poses are refined, and also in experiments with fixed initial noisy poses for fairness [S1]. It is often used in conjunction with metrics like PSNR, SSIM, and LPIPs to evaluate view-synthesis performance [S1].
+ 
+ ## Sources
+ [S1] SPARF: Neural Radiance Fields from Sparse and Noisy Poses, https://doi.org/10.1109/cvpr52729.2023.00408, fetched 2026-10-26
+-[S2] CLIP-NeRF: Text-and-Image Driven Manipulation of Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00381, fetched 2026-10-29+[S2] Multi-Level Neural Scene Graphs for Dynamic Urban Environments, https://doi.org/10.1109/cvpr52733.2024.01996, fetched 2026-10-29

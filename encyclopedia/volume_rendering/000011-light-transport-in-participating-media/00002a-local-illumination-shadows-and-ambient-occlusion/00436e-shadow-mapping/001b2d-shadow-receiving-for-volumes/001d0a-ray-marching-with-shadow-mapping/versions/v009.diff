@@ -1,0 +1,280 @@
+--- v008.md
++++ v009.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Ray Marching with Shadow Mapping is a technique for computing self-shadowing in participating media by precomputing transmittance values from the light's perspective into a 3D texture, which is then sampled during the view-dependent ray march [S2, unofficial][S3, unofficial]. It solves the problem of efficiently determining how much light reaches a sample point through a volume without performing a secondary ray march toward the light for every sample [S3, unofficial]. It differs from [Shadow Volume Rendering](1556-shadow-volume-rendering.md) by storing discrete transmittance layers in a 3D texture rather than a full 3D geometric volume, and from [Deep Shadow Maps](2166-deep-shadow-maps.md) by storing discrete transmittance layers rather than hierarchical density curves [S2, unofficial].
++Ray Marching with Shadow Mapping is a technique for computing self-shadowing in participating media by precomputing transmittance values from the light's perspective into a 3D texture, which is then sampled during the view-dependent ray march [S2, unofficial][S3, unofficial]. It solves the problem of efficiently determining how much light reaches a sample point through a volume without performing a secondary ray march toward the light for every sample [S3, unofficial]. It differs from [Shadow Volume Rendering](1556-shadow-volume-rendering.md) by using a 3D texture stack indexed by light-space depth rather than a full 3D geometric volume, and from [Deep Shadow Maps](2166-deep-shadow-maps.md) by storing discrete transmittance layers rather than hierarchical density curves [S2, unofficial].
+ 
+ ## How it works
+@@ -15,5 +15,5 @@
+     *   Dimensions: $W \times H \times L$, where $W, H$ are the shadow map resolution and $L$ is the number of layers (samples along the light ray) [S2, unofficial].
+     *   Format: Single channel (R) or multiple channels if MRT is not used for layer separation [S2, unofficial].
+-    *   Note: Storing different layer values in different color channels (e.g., Layer 1 in Red, Layer 2 in Green) prevents correct bilinear/trilinear interpolation during sampling [S2, unofficial].
++    *   Note: Storing different layers in different color channels (e.g., Layer 1 in Red, Layer 2 in Green) prevents correct bilinear/trilinear interpolation during sampling [S2, unofficial].
+ 2.  **Light Camera:** Orthographic for directional lights, perspective for point lights [S2, unofficial].
+ 
+@@ -46,11 +46,83 @@
+ 4.  Return $(I, T_{vol})$ [S2, unofficial].
+ 
+-**Formulas:**
+-*   Transmittance update: $T_{vol}^{(i+1)} = T_{vol}^{(i)} \cdot \exp(-\sigma_t \cdot D(x_i) \cdot \Delta x)$ [S2, unofficial].
+-*   In-scattering: $L_{in} = L_{ambient} + L_{direct} \cdot \Phi(v, -l) \cdot T_{shadow}$ [S2, unofficial].
+-*   Out-scattering: $L_{out} = \sigma_s \cdot D(x)$ [S2, unofficial].
+-*   Illumination accumulation: $I^{(i+1)} = I^{(i)} + T_{vol}^{(i)} \cdot L_{in} \cdot L_{out} \cdot \Delta x$ [S2, unofficial].
+-*   Shadow map depth normalization: $z = \frac{-z_{light} - z_{min}}{z_{max} - z_{min}}$ [S2, unofficial].
+-*   Shadow map UV normalization: $uv = \frac{x_{light}}{W} \cdot 0.5 + 0.5, \quad v = \frac{y_{light}}{H} \cdot 0.5 + 0.5$ [S2, unofficial].
++**Pseudocode:**
++
++```python
++import math
++
++def generate_opacity_shadow_map(light_cam_matrix, shadow_volume_range, slice_count, density_func, extinction_coef, light_cam_size):
++    """Generates a 3D texture storing transmittance layers from the light's perspective."""
++    z_min, z_max = shadow_volume_range
++    step_size = (z_max - z_min) / slice_count
++    # Initialize 3D texture as a list of lists of lists (depth, height, width)
++    shadow_map = [[[0.0 for _ in range(light_cam_size)] for _ in range(light_cam_size)] for _ in range(slice_count)]
++
++    for layer in range(slice_count):
++        cumulative_density = 0.0
++        for k in range(slice_count):
++            # March along light direction (Z-axis in light space)
++            pos_z = z_min + k * step_size
++            # Assume density_func takes a 3D position in light space
++            pos = (0.0, 0.0, pos_z)
++            d = density_func(pos)
++            cumulative_density += d
++            # Beer's Law: T = exp(-sigma_t * integral(D dx))
++            transmittance = math.exp(-cumulative_density * step_size * extinction_coef)
++            shadow_map[layer][0][0] = transmittance # Uniform layer value for demonstration
++    return shadow_map
++
++def raymarch_with_shadow_map(view_ray_origin, view_ray_dir, step_count, step_size,
++                             light_cam_matrix, shadow_map, shadow_volume_range,
++                             ambient_light, direct_light, scattering_coef, extinction_coef,
++                             phase_func, light_direction):
++    """Renders the volume using precomputed shadow map."""
++    z_min, z_max = shadow_volume_range
++    light_cam_size = 512 # Typical resolution from sources [S2, S3, unofficial]
++
++    transmittance = 1.0
++    illumination = [0.0, 0.0, 0.0]
++    current_pos = list(view_ray_origin)
++
++    for i in range(step_count):
++        # Advance sample position
++        current_pos = [current_pos[j] + view_ray_dir[j] * step_size for j in range(3)]
++
++        # 1. Shadow Lookup
++        # Transform to light space
++        light_pos = light_cam_matrix * [current_pos[0], current_pos[1], current_pos[2], 1.0]
++
++        # Normalize Z to [0, 1]
++        z = (-light_pos[2] - z_min) / (z_max - z_min)
++        z = max(0.0, min(1.0, z))
++
++        # Normalize UV
++        uv_x = light_pos[0] / light_cam_size / 2.0 + 0.5
++        uv_y = light_pos[1] / light_cam_size / 2.0 + 0.5
++
++        # Sample transmittance from 3D texture
++        layer_idx = int(z * (len(shadow_map) - 1))
++        uv_x_idx = int(uv_x * light_cam_size)
++        uv_y_idx = int(uv_y * light_cam_size)
++        shadow_factor = shadow_map[layer_idx][uv_y_idx][uv_x_idx]
++
++        # 2. Volume Integration
++        current_density = density_func(tuple(current_pos))
++
++        # Update volume transmittance (Beer's Law)
++        transmittance *= math.exp(-current_density * extinction_coef * step_size)
++
++        # Compute In-Scattering
++        phase = phase_func(view_ray_dir, [-d for d in light_direction])
++        in_scattering = ambient_light + direct_light * phase * shadow_factor
++
++        # Compute Out-Scattering
++        out_scattering = scattering_coef * current_density
++
++        # Accumulate Illumination
++        current_light = [in_scattering * out_scattering, in_scattering * out_scattering, in_scattering * out_scattering]
++        illumination = [illumination[j] + transmittance * current_light[j] * step_size for j in range(3)]
++
++    return illumination + [transmittance]
++```
+ 
+ **Parameters:**
+@@ -60,165 +132,8 @@
+ *   Step Size: Can be jittered with a small random offset to hide visible banding caused by low layer counts, at the cost of adding noise [S2, unofficial].
+ 
+-**Pseudocode:**
+-```python
+-import math
+-
+-class Texture3D:
+-    """Simple 3D texture supporting trilinear interpolation."""
+-    def __init__(self, width, height, depth):
+-        self.width = width
+-        self.height = height
+-        self.depth = depth
+-        # Initialize with zeros
+-        self.data = [[[0.0 for _ in range(width)] for _ in range(height)] for _ in range(depth)]
+-        
+-    def set(self, z, y, x, value):
+-        if 0 <= z < self.depth and 0 <= y < self.height and 0 <= x < self.width:
+-            self.data[z][y][x] = value
+-            
+-    def sample(self, u, v, z):
+-        # Clamp coordinates
+-        u = max(0.0, min(1.0, u))
+-        v = max(0.0, min(1.0, v))
+-        z = max(0.0, min(float(self.depth - 1), z))
+-        
+-        # Trilinear interpolation
+-        x0, x1 = int(u * self.width), min(int(u * self.width) + 1, self.width - 1)
+-        y0, y1 = int(v * self.height), min(int(v * self.height) + 1, self.height - 1)
+-        z0, z1 = int(z), min(int(z) + 1, self.depth - 1)
+-        
+-        dx, dy, dz = u * self.width - x0, v * self.height - y0, z - z0
+-        
+-        v000 = self.data[z0][y0][x0]
+-        v100 = self.data[z0][y0][x1]
+-        v010 = self.data[z0][y1][x0]
+-        v110 = self.data[z0][y1][x1]
+-        v001 = self.data[z1][y0][x0]
+-        v101 = self.data[z1][y0][x1]
+-        v011 = self.data[z1][y1][x0]
+-        v111 = self.data[z1][y1][x1]
+-        
+-        def lerp(a, b, t): return a + t * (b - a)
+-        
+-        c00 = lerp(v000, v100, dx)
+-        c01 = lerp(v010, v110, dx)
+-        c10 = lerp(v001, v101, dx)
+-        c11 = lerp(v011, v111, dx)
+-        
+-        d0 = lerp(c00, c01, dy)
+-        d1 = lerp(c10, c11, dy)
+-        
+-        return lerp(d0, d1, dz)
+-
+-def generate_opacity_shadow_map(light_cam_matrix, shadow_volume_range, slice_count, density_func, extinction_coef, light_cam_size):
+-    """
+-    Generates a 3D texture storing transmittance layers.
+-    shadow_volume_range: (z_min, z_max)
+-    slice_count: Number of layers (L)
+-    light_cam_size: (width, height) of the shadow map viewport
+-    """
+-    z_min, z_max = shadow_volume_range
+-    step_size = (z_max - z_min) / slice_count
+-    
+-    # Initialize 3D texture of size (width, height, slice_count)
+-    shadow_map = Texture3D(width=light_cam_size[0], height=light_cam_size[1], depth=slice_count)
+-    
+-    # March along the light ray (Z-axis in light space)
+-    for i in range(slice_count):
+-        # Position along the light ray
+-        pos_z = z_min + i * step_size
+-        # Assume density function takes world/light space coordinates.
+-        # For a uniform grid march, we sample at (0, 0, pos_z) in light space.
+-        pos = (0.0, 0.0, pos_z)
+-        current_density = density_func(pos)
+-        
+-        # Accumulate optical depth and compute transmittance using Beer's Law
+-        # Note: extinction_coef and step_size must share consistent units (e.g., both in meters or both in km)
+-        # If density is per km and step_size is in meters, apply conversion: step_size_m = step_size * 1000.0
+-        total_optical_depth = 0.0
+-        for k in range(i + 1):
+-            k_pos_z = z_min + k * step_size
+-            k_pos = (0.0, 0.0, k_pos_z)
+-            total_optical_depth += density_func(k_pos) * step_size
+-        
+-        transmittance = math.exp(-extinction_coef * total_optical_depth)
+-        
+-        # Store transmittance in the 3D texture at coordinate (u, v, i/L)
+-        # Using center of pixel for sampling
+-        u, v = 0.5 / light_cam_size[0], 0.5 / light_cam_size[1]
+-        shadow_map.set(i, int(v * light_cam_size[1]), int(u * light_cam_size[0]), transmittance)
+-        
+-    return shadow_map
+-
+-def raymarch_with_shadow_map(view_ray_origin, view_ray_dir, step_count, step_size, 
+-                             light_cam_matrix, shadow_map, shadow_volume_range,
+-                             ambient_light, direct_light, scattering_coef, extinction_coef,
+-                             phase_func, light_cam_size):
+-    """
+-    Renders the volume using precomputed shadow map.
+-    """
+-    z_min, z_max = shadow_volume_range
+-    
+-    transmittance = 1.0
+-    illumination = (0.0, 0.0, 0.0)
+-    
+-    current_pos = list(view_ray_origin)
+-    
+-    for i in range(step_count):
+-        # Advance sample position
+-        current_pos[0] += view_ray_dir[0] * step_size
+-        current_pos[1] += view_ray_dir[1] * step_size
+-        current_pos[2] += view_ray_dir[2] * step_size
+-        
+-        # 1. Shadow Lookup
+-        # Transform to light space (assuming light_cam_matrix is a 4x4 matrix)
+-        # Homogeneous division handled conceptually; here we assume light_cam_matrix outputs normalized coordinates
+-        light_pos = light_cam_matrix.transform(current_pos)
+-        
+-        # Normalize Z to [0, 1]
+-        z = (-light_pos[2] - z_min) / (z_max - z_min)
+-        z = max(0.0, min(1.0, z))
+-        
+-        # Normalize UV
+-        uv = (light_pos[0] / light_cam_size[0] / 2.0 + 0.5, 
+-              light_pos[1] / light_cam_size[1] / 2.0 + 0.5)
+-        
+-        # Sample transmittance from 3D texture
+-        shadow_factor = shadow_map.sample(uv[0], uv[1], z)
+-        
+-        # 2. Volume Integration
+-        current_density = density_func(current_pos)
+-        
+-        # Update volume transmittance (Beer's Law)
+-        transmittance *= math.exp(-current_density * extinction_coef * step_size)
+-        
+-        # Compute In-Scattering
+-        # L_in = Ambient + Direct * Phase * Shadow
+-        phase = phase_func(view_ray_dir, (-view_ray_dir[0], -view_ray_dir[1], -view_ray_dir[2]))
+-        in_scattering = (ambient_light[0] + direct_light[0] * phase * shadow_factor,
+-                         ambient_light[1] + direct_light[1] * phase * shadow_factor,
+-                         ambient_light[2] + direct_light[2] * phase * shadow_factor)
+-        
+-        # Compute Out-Scattering
+-        out_scattering = (scattering_coef * current_density,
+-                          scattering_coef * current_density,
+-                          scattering_coef * current_density)
+-        
+-        # Accumulate Illumination
+-        current_light = (in_scattering[0] * out_scattering[0],
+-                         in_scattering[1] * out_scattering[1],
+-                         in_scattering[2] * out_scattering[2])
+-        illumination = (illumination[0] + transmittance * current_light[0] * step_size,
+-                        illumination[1] + transmittance * current_light[1] * step_size,
+-                        illumination[2] + transmittance * current_light[2] * step_size)
+-        
+-    return (illumination[0], illumination[1], illumination[2], transmittance)
+-```
+-
+ **Edge Cases and Pitfalls:**
+ *   **Banding:** Visible bands may occur due to a low number of layers in the opacity shadow map. Solution: Add a small random offset in each step of the ray marcher to create visual noise, which can be blurred if too noticeable [S2, unofficial].
+ *   **Channel Storage:** Storing different layer values in different color channels (e.g., Layer 1 in Red, Layer 2 in Green) prevents correct bilinear/trilinear interpolation during sampling. Store all layers in a single channel or use separate passes [S2, unofficial].
+ *   **Depth Range:** Incorrect $z_{min}$ causes incorrect shading [S2, unofficial].
+-*   **Unit Consistency:** The extinction coefficient $\sigma_t$ and step size $\Delta x$ must share units. If $\sigma_t$ is given per kilometer but $\Delta x$ is in meters, apply a conversion factor (e.g., $\Delta x_{km} = \Delta x_m / 1000$) before computing Beer's Law [S2, unofficial].
+ 
+ ## Subtopics
+@@ -237,5 +152,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Preprocessing is $O(W \cdot H \cdot L)$ where $L$ is the number of layers. Rendering is $O(N)$ per pixel for $N$ steps, with $O(1)$ shadow lookup cost [S2, unofficial].
++*   **Time Complexity:** Preprocessing is $O(W \cdot H \cdot L)$ where $L$ is the number of layers [S2, unofficial]. Rendering is $O(N)$ per pixel for $N$ steps, with $O(1)$ shadow lookup cost [S2, unofficial].
+ *   **Memory Complexity:** $O(W \cdot H \cdot L)$ for the 3D opacity shadow map [S2, unofficial].
+ *   **Performance:** On an AMD Ryzen 7 4700U with 640x480 resolution, 3 deep opacity maps (512x512 offset, 7x512x512 transmittance array) achieved 28.5 FPS [S3, unofficial].

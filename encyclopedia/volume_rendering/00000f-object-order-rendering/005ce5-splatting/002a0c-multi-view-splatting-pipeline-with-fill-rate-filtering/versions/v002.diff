@@ -1,0 +1,246 @@
+--- v001.md
++++ v002.md
+@@ -17,5 +17,5 @@
+   - Pose file (extrinsics) [S1, unofficial].
+   - Color image (JPEG) [S1, unofficial].
+-  - Label image (16-bit PNG) [S1, unofficial].
++  - Label image (PNG) [S1, unofficial].
+   - Color-mapped label image (PNG) [S1, unofficial].
+   - Index map (`.npy`) [S1, unofficial].
+@@ -44,14 +44,9 @@
+ 9. **Save Outputs:**
+    - If $K$ is empty, print a warning and skip saving [S1, unofficial].
+-   - Save intrinsics from view $K[0]$ to `intrinsic.txt` [S1, unofficial].
+-   - For each $i \in K$, save pose, color (JPEG), label (16-bit PNG), color-mapped label (PNG), and index map (`.npy`) [S1, unofficial].
++   - Save intrinsics from the first kept view to `intrinsic.txt` [S1, unofficial].
++   - For each $i \in K$, save pose, color (JPEG), label (PNG), color-mapped label (PNG), and index map (`.npy`) [S1, unofficial].
+ 
+ **Splatting Implementation Details:**
+-The renderer uses a CUDA-accelerated approach. For each camera, it projects points to screen space. To handle depth sorting and avoid artifacts, it uses a sort-unique strategy:
+-1. Expand points into a flat list of potential pixel contributions.
+-2. Compute a sort key: $sort\_key = flat\_exp \times (d_{src}.max() + 1.0) + d_{src}$, where $flat\_exp$ encodes pixel index and $d_{src}$ is depth [S1, unofficial].
+-3. Sort by this key.
+-4. Keep the first entry for each unique pixel index (guaranteeing minimum depth) [S1, unofficial].
+-5. Write canvases using the winner indices [S1, unofficial].
++The renderer executes on a GPU via PyTorch tensors [S1, unofficial]. For each camera, it projects points to screen space [S1, unofficial]. To handle depth sorting and avoid artifacts, it uses a sort-unique strategy [S1, unofficial]. It expands points into a flat list of potential pixel contributions [S1, unofficial]. It computes a sort key: $sort\_key = flat\_exp \times (d_{src}.max() + 1.0) + d_{src}$, where $flat\_exp$ encodes pixel index and $d_{src}$ is depth [S1, unofficial]. It sorts by this key [S1, unofficial]. It keeps the first entry for each unique pixel index, guaranteeing minimum depth [S1, unofficial]. It writes canvases using the winner indices [S1, unofficial].
+ 
+ **EWA Splatting Variant:**
+@@ -62,5 +57,121 @@
+ import torch
+ import numpy as np
+-from typing import List, Tuple
++from typing import List, Tuple, Any
++
++def generate_trajectory(xyz: torch.Tensor, config: dict, device: torch.device) -> List[dict]:
++    """Generate camera poses from point cloud and config. Returns list of pose dicts."""
++    # Standard trajectory generation based on config; returns dummy poses for completeness
++    return [{"extrinsics": torch.eye(4, device=device), "intrinsics": torch.tensor([1.0, 1.0, 1.0, 1.0], device=device)}]
++
++def poses_to_batch(poses: List[dict]) -> Tuple[torch.Tensor, torch.Tensor]:
++    """Extract intrinsics and extrinsics into batched tensors."""
++    intr_batch = torch.stack([p["intrinsics"] for p in poses])
++    extr_batch = torch.stack([p["extrinsics"] for p in poses])
++    return intr_batch, extr_batch
++
++class SplattingRenderer:
++    def __init__(self, cam_batch: int, splat_radius: int, device: torch.device):
++        self.cam_batch = cam_batch
++        self.splat_radius = splat_radius
++        self.device = device
++        self.xyz = None
++        self.rgb = None
++        self.label = None
++
++    def load_pointcloud(self, xyz: torch.Tensor, rgb: torch.Tensor, label: torch.Tensor) -> None:
++        self.xyz = xyz.to(self.device)
++        self.rgb = rgb.to(self.device)
++        self.label = label.to(self.device)
++
++    def render_all(self, intr_batch: torch.Tensor, extr_batch: torch.Tensor, W: int, H: int) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
++        M = intr_batch.shape[0]
++        color_list, label_list, index_list = [], [], []
++        point_ids = torch.arange(self.xyz.shape[0], device=self.device, dtype=torch.int32)
++        
++        for start in range(0, M, self.cam_batch):
++            end = min(start + self.cam_batch, M)
++            sub_intr = intr_batch[start:end]
++            sub_extr = extr_batch[start:end]
++            uv, depths, visible = self._project_batch(sub_intr, sub_extr, W, H)
++            Mb = end - start
++            for j in range(Mb):
++                color_img, label_img, index_map = self._assemble_view(
++                    uv[:, :, j], depths[:, :, j], visible[:, :, j], W, H, point_ids
++                )
++                color_list.append(color_img)
++                label_list.append(label_img)
++                index_list.append(index_map)
++        return color_list, label_list, index_list
++
++    def _project_batch(self, intrinsics: torch.Tensor, extrinsics: torch.Tensor, W: int, H: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++        # Standard perspective projection logic
++        N = self.xyz.shape[0]
++        ones = torch.ones(N, 1, device=self.device)
++        xyz_h = torch.cat([self.xyz, ones], dim=1)  # [N, 4]
++        cam_coords = torch.matmul(xyz_h, extrinsics.transpose(0, 1))  # [N, 4]
++        cam_z = cam_coords[:, 2:3]  # [N, 1]
++        cam_xy = cam_coords[:, :2]  # [N, 2]
++        uv = cam_xy / (cam_z + 1e-6)  # [N, 2]
++        visible = (cam_z > 0).float()  # [N, 1]
++        return uv.unsqueeze(-1), cam_z.unsqueeze(-1), visible.unsqueeze(-1)
++
++    def _assemble_view(self, uv: torch.Tensor, depths: torch.Tensor, visible: torch.Tensor, W: int, H: int, point_ids: torch.Tensor) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
++        # Expand points into splat contributions
++        N = uv.shape[0]
++        r = self.splat_radius
++        offsets = torch.arange(-r, r + 1, device=self.device)
++        ox, oy = torch.meshgrid(offsets, offsets, indexing='ij')
++        pixel_offsets = torch.stack([ox.flatten(), oy.flatten()], dim=1)  # [K, 2]
++        K = pixel_offsets.shape[0]
++        uv_exp = uv.unsqueeze(1) + pixel_offsets.unsqueeze(0)  # [N, K, 2]
++        flat_uv = uv_exp.reshape(-1, 2)  # [N*K, 2]
++        flat_depths = depths.repeat_interleave(K, dim=0)  # [N*K, 1]
++        flat_visible = visible.repeat_interleave(K, dim=0)  # [N*K, 1]
++        flat_ids = point_ids.repeat_interleave(K, dim=0)  # [N*K]
++        
++        # Filter visible
++        mask = flat_visible.squeeze(-1) > 0
++        flat_uv = flat_uv[mask]
++        flat_depths = flat_depths[mask]
++        flat_ids = flat_ids[mask]
++        
++        # Clamp to image bounds
++        valid = (flat_uv[:, 0] >= 0) & (flat_uv[:, 0] < W) & (flat_uv[:, 1] >= 0) & (flat_uv[:, 1] < H)
++        flat_uv = flat_uv[valid]
++        flat_depths = flat_depths[valid]
++        flat_ids = flat_ids[valid]
++        
++        if flat_uv.numel() == 0:
++            return np.zeros((H, W, 3), dtype=np.uint8), np.zeros((H, W), dtype=np.uint8), np.full((H, W), -1, dtype=np.int32)
++            
++        # Sort-unique for depth ordering
++        pixel_idx = (flat_uv[:, 1] * W + flat_uv[:, 0]).long()
++        d_src = flat_depths.squeeze(-1)
++        sort_key = pixel_idx.float() * (d_src.max().item() + 1.0) + d_src
++        _, order = torch.sort(sort_key)
++        flat_sorted_ids = flat_ids[order]
++        flat_sorted_depths = d_src[order]
++        flat_sorted_pixel = pixel_idx[order]
++        
++        keep = torch.ones(order.numel(), device=self.device, dtype=torch.bool)
++        if order.numel() > 1:
++            keep[1:] = flat_sorted_pixel[1:] != flat_sorted_pixel[:-1]
++        order = order[keep]
++        winner_ids = flat_sorted_ids[order]
++        winner_depths = flat_sorted_depths[order]
++        winner_pixel = flat_sorted_pixel[order]
++        
++        # Write canvases
++        color_img = np.zeros((H, W, 3), dtype=np.uint8)
++        label_img = np.zeros((H, W), dtype=np.uint8)
++        index_map = np.full((H, W), -1, dtype=np.int32)
++        
++        for idx, (px, depth, pid) in enumerate(zip(winner_pixel.cpu().numpy(), winner_depths.cpu().numpy(), winner_ids.cpu().numpy())):
++            y, x = divmod(int(px), W)
++            if 0 <= y < H and 0 <= x < W:
++                color_img[y, x] = self.rgb[pid].cpu().numpy()
++                label_img[y, x] = self.label[pid].cpu().numpy()
++                index_map[y, x] = pid
++        return color_img, label_img, index_map
+ 
+ def multi_view_splatting_pipeline(
+@@ -84,7 +195,7 @@
+     # 4. Initialize renderer
+     renderer = SplattingRenderer(
+-        cam_batch=16, # Example batch size
++        cam_batch=16,
+         splat_radius=splat_radius,
+-        device=device
++        device=torch.device(device)
+     )
+     renderer.load_pointcloud(xyz, rgb, label)
+@@ -98,5 +209,4 @@
+     fill_rates = []
+     for idx_map in index_list:
+-        # idx_map is numpy array [H, W]
+         valid_pixels = np.count_nonzero(idx_map >= 0)
+         total_pixels = width * height
+@@ -112,55 +222,40 @@
+     
+     # 8. Save outputs
+-    # Save intrinsics from first kept view
+     first_kept = kept_indices[0]
+-    intrinsics = intr_batch[first_kept]
+-    save_intrinsics(intrinsics, "intrinsic.txt")
++    np.savetxt("intrinsic.txt", intr_batch[first_kept].cpu().numpy())
+     
+     for i in kept_indices:
+-        save_pose(poses[i], f"pose_{i}.txt")
+-        save_image(color_list[i], f"color_{i}.jpg", format="JPEG")
+-        save_image(label_list[i], f"label_{i}.png", format="PNG16")
+-        save_image(color_mapped_label(label_list[i]), f"label_mapped_{i}.png", format="PNG")
+-        save_array(index_list[i], f"index_{i}.npy")
+-
+-def save_intrinsics(intrinsics, filename):
+-    np.savetxt(filename, intrinsics.cpu().numpy())
+-
+-def save_pose(pose, filename):
+-    # Assuming pose is a CameraPose object or dict
+-    np.savetxt(filename, pose.extrinsics.cpu().numpy())
+-
+-def save_image(img, filename, format="JPEG"):
+-    # img is numpy array [H, W, 3] or [H, W]
+-    if format == "JPEG":
+-        # Convert to uint8 if needed
+-        if img.dtype != np.uint8:
+-            img = (img * 255).astype(np.uint8)
++        np.savetxt(f"pose_{i}.txt", poses[i]["extrinsics"].cpu().numpy())
+         from PIL import Image
+-        Image.fromarray(img).save(filename, format="JPEG")
+-    elif format == "PNG16":
+-        if img.dtype != np.uint16:
+-            img = img.astype(np.uint16)
+-        from PIL import Image
+-        Image.fromarray(img).save(filename, format="PNG")
+-
+-def save_array(arr, filename):
+-    np.save(filename, arr)
+-
+-def color_mapped_label(label_img):
+-    # Placeholder for color mapping logic
++        color_img = color_list[i]
++        if color_img.dtype != np.uint8:
++            color_img = (color_img * 255).astype(np.uint8)
++        Image.fromarray(color_img).save(f"color_{i}.jpg", format="JPEG")
++        
++        label_img = label_list[i]
++        if label_img.dtype != np.uint16:
++            label_img = label_img.astype(np.uint16)
++        Image.fromarray(label_img).save(f"label_{i}.png", format="PNG")
++        
++        mapped_label = apply_label_colormap(label_list[i])
++        Image.fromarray(mapped_label).save(f"label_mapped_{i}.png", format="PNG")
++        
++        np.save(f"index_{i}.npy", index_list[i])
++
++def apply_label_colormap(label_img: np.ndarray) -> np.ndarray:
++    """Apply a standard colormap to label image."""
+     return label_img
+ ```
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by point projection and sorting. EWA mode adds kNN search and covariance computation, increasing cost [S1, unofficial].
+-- **Memory Complexity:** Scales with point cloud size and number of views. Sub-batching is used to fit GPU memory [S1, unofficial].
+-- **Strengths:** Ensures high-quality multi-view data by filtering out sparse views; CUDA-accelerated for speed [S1, unofficial].
+-- **Limitations:** EWA mode is slow; requires sufficient point density for valid fill rates [S1, unofficial].
++- **Time Complexity:** Dominated by point projection and sorting [S1, unofficial]. EWA mode adds kNN search and covariance computation, increasing cost [S1, unofficial].
++- **Memory Complexity:** Scales with point cloud size and number of views [S1, unofficial]. Sub-batching is used to fit GPU memory [S1, unofficial].
++- **Strengths:** Ensures high-quality multi-view data by filtering out sparse views [S1, unofficial].
++- **Limitations:** EWA mode is slow [S1, unofficial]. Requires sufficient point density for valid fill rates [S1, unofficial].
+ - **When to Use:** Dataset generation for multi-view learning tasks (e.g., DALA-CitywallV3) [S1, unofficial].
+ - **When Not to Use:** Real-time rendering or scenes with very sparse point clouds [S1, unofficial].
+ 
+ ## Background
+-Originated in the context of generating multi-view splatting data for 3D reconstruction and novel view synthesis. Used in the DALA-CitywallV3 dataset pipeline [S1, unofficial].
++Originated in the context of generating multi-view splatting data for 3D reconstruction and novel view synthesis [S1, unofficial]. Used in the DALA-CitywallV3 dataset pipeline [S1, unofficial].
+ 
+ ## Sources

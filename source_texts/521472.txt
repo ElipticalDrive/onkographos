@@ -1,0 +1,142 @@
+The Irreden Engine. Contribute to jakildev/IrredenEngine development by creating an account on GitHub.
+
+engine/voxel: bound sdf bake working memory by jakildev · Pull Request #4456 · jakildev/IrredenEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jakildev
+commented
+Oct 16, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+bakeSdfGrid previously accepted any positive grid below the integer indexing limit, allowing huge author-time allocations. Add a caller-controlled working-payload budget (256 MiB by default) that counts both dense voxel records and temporary distance samples before either allocation. Replace the enum-number cutoff with an explicit built-in allowlist.
+Accepted grids retain the same occupancy, materials, anchors and shared voxel lighting path. Grids beyond 64 cubed remain supported within the chosen budget. The budget excludes allocator overhead, existing caller assets and later pool/GPU uploads; it is not an RSS limit. Actual allocation failures still propagate normally.
+Test plan
+Native macOS Debug build: fleet-build --detach --target IrredenEngineTest -j4; terminal job 20261016T020120Z-build-aa7761 succeeded exit=0.
+fleet-run IrredenEngineTest '--gtest_filter=SdfBake.*:SdfBakePool.*' --gtest_brief=1: all nine tests passed on final code, including exact/insufficient/zero budgets, oversized grid rejection, all supported primitives, 65-cubed grid, existing occupancy/serialization and six-face pool attachment checks.
+Positive control: temporarily exclude distance scratch from bytes-per-cell; the new budget test fails. Restore accounting, rebuild and rerun all nine tests: pass.
+Header convention checks, changed-source formatting, comment-reference lint and git diff --check passed. Five simplify scans found no reuse or placement issues; open-PR overlap check reports clean.
+No shader or accepted-asset geometry changes; no new screenshot or throughput claim. Native Windows validation remains pending. Based on current master 741d3f0ab.
+Authored with Codex.
+engine/voxel: bound sdf bake working memory
+…
+0ab6880
+```
+Reject over-budget grids before allocating records or distance scratch. Let callers choose a byte budget, with a 256 MiB default and the existing integer indexing bound. Enumerate supported primitives explicitly so unknown types cannot inherit evaluator fallback geometry.
+
+Cover exact and insufficient budgets, scratch accounting, all built-in shapes, overflow rejection and grids beyond 64 cubed. Existing occupancy and pool attachment controls remain unchanged.
+```
+jakildev
+added
+fleet:author-codex
+Implementation last authored by Codex; route review to Claude
+fleet:claim-mac-codex-shadow-render
+Interactive Codex rendering worktree claim
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+labels
+Oct 16, 2026
+jakildev
+added this pull request to stack #4458
+October 16, 2026 02:21
+evin-mac-claude-app
+Bot
+added
+the
+fleet:reviewing-mac-pool-1
+label
+Oct 16, 2026
+jakildev
+mentioned this pull request
+Oct 16, 2026
+render: cover baked shape rotation and parenting
+#4457
+Merged
+6 tasks done
+jakildev
+commented
+Oct 16, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — bakeSdfGrid working-payload budget and explicit primitive allowlist
+Verdict: approve
+Head 0ab68809, base master, MERGEABLE/CLEAN. All 8 checks on the head are green (comment-refs, linux-build, format-check, header-checks, instruction-size, no-plan-files, closes-lint, whitespace). Header-only change in engine/prefabs/irreden/voxel/, so it does not hit the scout's opus-class core paths, and no render/shader code is involved (cross-host smoke does not apply).
+What I verified
+Budget arithmetic. maxCells = min(maxWorkingBytes / bytesPerCell, INT_MAX) with the per-axis test size[axis] > maxCells / count is the same overflow-safe form as the old INT_MAX / count check. It gives an inclusive byte boundary (count * bytesPerCell <= budget), and a zero budget makes maxCells == 0, so every positive extent is rejected. The size_t max budget case is clamped back to the integer cell-index limit, so the ivec3(INT_MAX) rejection holds on the second axis (INT_MAX > INT_MAX / INT_MAX).
+Accounting matches the real allocations. forEachSdfGridCell (sdf_fill.hpp:37) allocates exactly one std::vector<float> of total cells, and bakeSdfGrid allocates count VoxelRecords. bytesPerCell = sizeof(VoxelRecord) + sizeof(float) covers both, and evaluateGrid writes into the caller's span. The budget check runs before either allocation.
+Allowlist. The switch lists all nine built-in ShapeType values and sends CUSTOM_SDF and default to return {}. Out-of-range casts such as 10 and UINT32_MAX are rejected, and a new enum value now fails closed instead of using the evaluator's fallback box. The old numeric cutoff is gone.
+Existing callers. shape_debug/main.cpp:4360 and sdf_voxel_scene.hpp:43 take the new default parameter. Both bake small grids (about 11 cubed), far below 16.7M cells, so behavior is unchanged.
+Tests. BudgetIncludesOutputAndScratchWithInclusiveByteBoundary pins zero, output-only, and one-byte-short as rejected and the exact boundary as accepted, which would catch dropping the scratch term. DefaultBudgetRejectsLargeValidGridAndAllowsBeyondLegacy64Cube covers the large-grid, INT_MAX, and 65-cubed cases. ExplicitBuiltinSupportRejectsUnknownTypes covers every primitive plus the rejected values. The PR body reports a positive control and all nine SdfBake.* / SdfBakePool.* tests passing on macOS.
+Docs. The voxel-and-sdf-rendering.md paragraph matches the code: default 256 MiB, zero budget, empty-asset returns, and allocation failure propagating. The audit-todo update matches too. Neither adds a comment ref (comment-refs is green).
+Nits (follow-up)
+engine/prefabs/irreden/voxel/sdf_bake.hpp:47 — bytesPerCell hard-codes the assumption that forEachSdfGridCell holds exactly one float per cell. The comment names that coupling, and the boundary test would catch a change to the scratch size. If forEachSdfGridCell ever gains a second scratch buffer, the budget silently under-counts, so a shared constant or a pointer from the iterator's own doc comment would keep the two in step. Optional.
+Native Windows validation is listed as pending in the PR body. Nothing in the change is platform-specific (std::size_t arithmetic and IRMath::min), so I do not expect a difference.
+Test plan the author should run before merge
+None beyond the green CI; the Windows run, when convenient, is fleet-run IrredenEngineTest '--gtest_filter=SdfBake.*:SdfBakePool.*'.
+Opus recheck not required.
+Escalation: none. Safe for merge.
+🤖 Reviewed by Claude Sonnet 5.5 (review-pr skill)
+jakildev
+added
+fleet:approved
+Fleet reviewer approved — ready for human merge
+and removed
+fleet:reviewing-mac-pool-1
+labels
+Oct 16, 2026
+Hide details
+View details
+jakildev
+merged commit 19e87b5
+into
+master
+Oct 16, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+jakildev
+added
+the
+fleet:verified-windows
+Cross-host smoke passed on windows-debug
+label
+Oct 18, 2026
+jakildev
+mentioned this pull request
+Oct 18, 2026
+test(macos): nine macos-debug render-verify rows red on master (canvas_stress, fog_demo, lighting)
+#4570
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+fleet:approved
+Fleet reviewer approved — ready for human merge
+fleet:author-codex
+Implementation last authored by Codex; route review to Claude
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+fleet:claim-mac-codex-shadow-render
+Interactive Codex rendering worktree claim
+fleet:verified-windows
+Cross-host smoke passed on windows-debug
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

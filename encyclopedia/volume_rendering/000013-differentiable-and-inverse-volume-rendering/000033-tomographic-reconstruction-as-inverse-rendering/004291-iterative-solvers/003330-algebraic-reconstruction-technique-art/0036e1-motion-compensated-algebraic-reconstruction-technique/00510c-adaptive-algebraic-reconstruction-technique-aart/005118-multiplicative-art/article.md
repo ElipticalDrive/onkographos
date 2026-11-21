@@ -1,0 +1,146 @@
+# Multiplicative ART
+
+Also called: MART (Multiplicative ART)
+
+## Overview
+Multiplicative ART (MART) is an optimization of the Algebraic Reconstruction Technique (ART) that uses multiplicative updates to solve the linear system $P = Af$ [S1, unofficial]. It addresses the non-negativity constraint inherent in many volume rendering and tomographic problems by ensuring reconstructed voxel values remain positive through multiplicative correction factors rather than additive adjustments [S1, unofficial]. Unlike its parent [Adaptive Algebraic Reconstruction Technique (AART)](14387-adaptive-algebraic-reconstruction-technique-aart.md), which uses adaptive step sizes, MART relies on a fixed multiplicative model derived from maximum likelihood estimation principles [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Measured projection data $P_{p,l}$ for each projection $p$ and line $l$; system matrix coefficients $\alpha_{p,l,v}$ representing the intersection length of line $l$ in projection $p$ with voxel $v$; initial field distribution $f^{(0)}$; relaxation parameter $\beta$; convergence tolerance $\epsilon$.
+- Output: Reconstructed field distribution $f$.
+
+**Data Structures:**
+- $f$: Array of size $N^3$ (or $N^2$ for 2D) storing voxel values. Initialized to arbitrary positive values $f_v^{(0)} > 0$.
+- $P_{p,l}$: Scalar measured projection value.
+- $\alpha_{p,l,v}$: Scalar geometric coefficient.
+
+**Numbered Steps:**
+1. Initialize the field distribution $f_v = f_v^{(0)}$ for all voxels $v$.
+2. For each projection $p$:
+   a. For each line $l$ in projection $p$:
+      i. Calculate the approximate projection data $\hat{P}_{p,l}$ using the current field values:
+         $$ \hat{P}_{p,l} = \sum_{v} \alpha_{p,l,v} f_v $$
+      ii. Calculate the discrepancy $\Delta P_{p,l}$ between the measured data $P_{p,l}$ and the calculated data $\hat{P}_{p,l}$:
+         $$ \Delta P_{p,l} = \frac{P_{p,l}}{\hat{P}_{p,l}} $$
+         *(Note: Source [S2] defines the update using $(1 - \Delta P_{p,l})$ where $\Delta P_{p,l}$ represents the ratio $P_{p,l}/\hat{P}_{p,l}$ in the context of the multiplicative factor, or potentially the relative error. The formula $f_v^{new} = f_v^{old} (1 - \beta (1 - \Delta P_{p,l}))$ implies $\Delta P_{p,l}$ acts as the ratio $P/\hat{P}$ to drive the update towards the correct value when the ratio is 1. If $\Delta P_{p,l}$ were the difference $P-\hat{P}$, the multiplicative structure would be inconsistent with standard MART derivations. We follow the source's explicit formula structure.)*
+      iii. Update the field values for all voxels $v$ intersected by line $l$:
+         $$ f_v^{new} = f_v^{old} \times (1 - \beta \times (1 - \Delta P_{p,l})) $$
+3. Repeat step 2 for all projections until the convergence criteria is met.
+
+**Formulas:**
+- Projection calculation: $P_{p,l} = \sum_{v} \alpha_{p,l,v} f_v$ [S2].
+- Update rule: $f_v^{new} = f_v^{old} (1 - \beta (1 - \Delta P_{p,l}))$ [S2].
+- Convergence criteria: $\left| \frac{f_v^{new} - f_v^{old}}{f_v^{old}} \right| \le \epsilon$ [S2].
+
+**Parameters:**
+- $\beta$: Relaxation parameter. Range: $[0, 2]$ [S2].
+- $\epsilon$: Tolerance factor for convergence. Fixed value [S2].
+
+**Edge Cases and Pitfalls:**
+- If $\hat{P}_{p,l} = 0$, division by zero occurs in calculating $\Delta P_{p,l}$. This happens if the initial guess is zero and no line passes through non-zero voxels, or if the geometry is degenerate. Guard against this by ensuring $f_v^{(0)} > 0$ and checking for zero denominators [G].
+- If $\beta$ is outside $[0, 2]$, the update may diverge or produce negative voxel values, violating the physical assumption of non-negative density [S2].
+- The order of projections can influence the result, as the method is sequential [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multiplicative_art(projections, system_matrix, initial_f, beta, epsilon):
+    """
+    projections: list of lists, projections[p][l] is the measured value P_p,l
+    system_matrix: dict or sparse structure, system_matrix[p][l][v] is alpha_p,l,v
+    initial_f: list of floats, initial field distribution f_v
+    beta: float, relaxation parameter in [0, 2]
+    epsilon: float, convergence tolerance
+    """
+    f = list(initial_f) # Copy initial field
+    num_voxels = len(f)
+    
+    while True:
+        max_relative_change = 0.0
+        
+        for p in range(len(projections)):
+            for l in range(len(projections[p])):
+                # Calculate current projection estimate
+                current_projection = 0.0
+                active_voxels = []
+                
+                # Get coefficients for this line
+                # Assuming system_matrix provides access to alpha_p,l,v
+                # In practice, this is often a precomputed list of (v, alpha) pairs
+                line_data = system_matrix[p][l] 
+                
+                for v, alpha in line_data:
+                    current_projection += alpha * f[v]
+                    active_voxels.append((v, alpha))
+                
+                # Avoid division by zero
+                if current_projection == 0:
+                    continue
+                
+                # Calculate discrepancy ratio
+                measured = projections[p][l]
+                delta_P = measured / current_projection
+                
+                # Update voxels
+                for v, alpha in active_voxels:
+                    old_f = f[v]
+                    # Update rule: f_new = f_old * (1 - beta * (1 - delta_P))
+                    new_f = old_f * (1 - beta * (1 - delta_P))
+                    
+                    # Guard against negative values if beta causes overshoot
+                    if new_f < 0:
+                        new_f = 0.0
+                        
+                    f[v] = new_f
+                    
+                    # Track convergence
+                    if old_f != 0:
+                        rel_change = abs((new_f - old_f) / old_f)
+                        if rel_change > max_relative_change:
+                            max_relative_change = rel_change
+                    else:
+                        if new_f > 0:
+                            max_relative_change = float('inf')
+                            
+        if max_relative_change <= epsilon:
+            break
+            
+    return f
+```
+
+## Subtopics
+
+### Sparse MART (Sp-MART)
+Sparse MART (Sp-MART) is an iterative algorithm designed to solve linear equations $P_{p,l} = \sum_v \alpha_{p,l,v} f_v$ for image reconstruction, specifically optimizing for sparse data structures or computational efficiency by focusing on active grids [S2]. It differs from standard MART by explicitly managing the sparsity of the system matrix or the field distribution during updates, reducing computational overhead [S2]. It is chosen when the number of non-zero coefficients $\alpha_{p,l,v}$ is small relative to the total grid size, or when memory constraints require sparse storage [S2]. The method uses a relaxation parameter $\beta \in [0, 2]$ and updates field values based on the discrepancy $\Delta P_{p,l}$ between measured and calculated projections, iterating until the relative change in field values falls below a fixed tolerance $\epsilon$ [S2].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time: $O(I \cdot N_p \cdot N_l \cdot N_v)$ per iteration, where $I$ is iterations, $N_p$ is projections, $N_l$ is lines per projection, and $N_v$ is active voxels per line. Sparse variants reduce $N_v$ to active voxels only.
+- Memory: $O(N^3)$ for the field $f$ and $O(N_{nonzero})$ for the system matrix if stored sparsely.
+
+**Measured Performance:**
+- Performance depends heavily on the geometry and the sparsity of the system matrix. In cylindrical geometries, precomputing intersection points and sorting them by distance to the source improves cache locality and speed [S2].
+
+**Scaling:**
+- Scales linearly with the number of voxels and projections. Parallelization is possible across projections or lines [S2].
+
+**Strengths and Limitations:**
+- Strengths: Enforces non-negativity naturally; robust to noise compared to additive methods; converges to a physically meaningful solution [S1, unofficial][S2].
+- Limitations: Convergence can be slow; sensitive to the choice of $\beta$; sequential nature limits parallelism compared to simultaneous methods like SIRT [S1, unofficial].
+
+**When to Use:**
+- Use when non-negativity is critical and the problem is ill-posed or noisy.
+- Use when additive methods produce negative artifacts.
+
+**When Not to Use:**
+- Use when speed is paramount and non-negativity is not required (use SIRT or FBP).
+- Use when the system matrix is dense and memory is limited (use sparse variants or compressed sensing).
+
+## Background
+MART was developed as an optimization of the Algebraic Reconstruction Technique (ART) to address the non-negativity constraint in tomographic reconstruction [S1, unofficial]. It is based on maximum likelihood estimation principles, assuming Poisson statistics for projection data [S1, unofficial]. The method was introduced in the context of improving reconstruction quality by using multiplicative updates instead of additive corrections [S1, unofficial]. It is widely used in medical imaging, industrial CT, and electron microscopy where non-negative density values are physically required [S1, unofficial][S2].
+
+## Sources
+[S1] Précision et qualité en reconstruction tomographique : algorithmes et applications, https://doi.org/10.70675/d2bc4875z6a5az46afz9289z2fe16b3a43f3, fetched 2026-10-30 (unofficial)
+[S2] Uniformly Sampled Polar and Cylindrical Grid Approach for 2D, 3D Image Reconstruction using Algebraic Algorithm, https://arxiv.org/abs/2208.12964v1, fetched 2026-10-27

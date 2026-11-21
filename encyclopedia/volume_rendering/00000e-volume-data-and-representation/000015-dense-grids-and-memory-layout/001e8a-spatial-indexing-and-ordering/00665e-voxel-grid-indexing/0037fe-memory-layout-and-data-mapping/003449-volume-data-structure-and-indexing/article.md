@@ -1,0 +1,158 @@
+# Volume Data Structure and Indexing
+
+Also called: IJK to RAS coordinate mapping, Volume class
+
+## Overview
+The Volume data structure stores 3D scalar data in a contiguous TypedArray and manages bidirectional mapping between voxel indices (IJK) and physical coordinates (RAS) [S1, unofficial]. It allocates memory for a fixed dense grid, making it suitable for regular volumetric datasets [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A buffer of scalar values (e.g., `ArrayBuffer`), dimensions $N_x, N_y, N_z$ (denoted `xLength`, `yLength`, `zLength`), and optional physical transformation parameters (`spacing`, `offset`, `matrix`) [S1, unofficial].
+*   **Output:** A `Volume` object providing methods to access voxel data by IJK or linear index, and to transform coordinates between voxel space and physical space [S1, unofficial].
+
+**Data Structures:**
+The `Volume` object contains the following fields [S1, unofficial]:
+*   `this.data`: A `TypedArray` (e.g., `Float32Array`, `Uint8Array`) storing the voxel values.
+*   `this.xLength`, `this.yLength`, `this.zLength`: Integer dimensions of the grid.
+*   `this.spacing`: An array of 3 numbers $[s_x, s_y, s_z]$, default $[1, 1, 1]$.
+*   `this.offset`: An array of 3 numbers $[o_x, o_y, o_z]$, default $[0, 0, 0]$.
+*   `this.matrix`: A $3 \times 3$ rotation matrix $M$, default identity.
+*   `this.inverseMatrix`: The inverse of `this.matrix`.
+*   `this.segmentation`: Boolean flag, default `false`.
+*   `this.sliceList`: Array of `VolumeSlice` objects associated with this volume.
+*   `this.min`, `this.max`: Scalar values representing the minimum and maximum data values in the volume.
+*   `lowerThreshold`, `upperThreshold`: Values defining the range of voxels included in slices. Default `lowerThreshold` is $-\infty$, `upperThreshold` is $+\infty$. Changing these triggers a geometry update on all associated slices [S1, unofficial].
+
+**Indexing Formulas:**
+The storage layout is row-major, where the I dimension (x-axis) varies fastest, followed by J (y-axis), then K (z-axis) [S1, unofficial].
+
+1.  **Forward Indexing (IJK to Linear):**
+    Given voxel coordinates $(i, j, k)$, the linear index $idx$ in `this.data` is:
+    $$
+    idx = k \cdot N_x \cdot N_y + j \cdot N_x + i
+    $$
+    [S1, unofficial].
+
+2.  **Reverse Indexing (Linear to IJK):**
+    Given a linear index $idx$, the coordinates are:
+    $$
+    k = \lfloor idx / (N_y \cdot N_x) \rfloor
+    $$
+    $$
+    j = \lfloor (idx - k \cdot N_y \cdot N_x) / N_x \rfloor
+    $$
+    $$
+    i = idx - k \cdot N_y \cdot N_x - j \cdot N_x
+    $$
+    [S1, unofficial].
+
+**Physical Coordinate Transformation:**
+To map a voxel index to physical space (RAS), the implementation scales indices by `spacing`, applies the rotation `matrix`, and adds `offset` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def IdentityMatrix3():
+    return [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+
+class Volume:
+    def __init__(self, data_buffer, x_length, y_length, z_length, 
+                 spacing=None, offset=None, matrix=None):
+        expected_size = x_length * y_length * z_length
+        if len(data_buffer) != expected_size:
+            raise ValueError("Error in Volume constructor, lengths are not matching arrayBuffer size")
+        
+        # JavaScript TypedArrays do not support 64-bit integers
+        if data_buffer.dtype in ('int64', 'uint64'):
+            raise ValueError("Error in Volume constructor : this type is not supported in JavaScript")
+
+        self.data = data_buffer
+        self.xLength = x_length
+        self.yLength = y_length
+        self.zLength = z_length
+        
+        self.spacing = spacing if spacing is not None else [1, 1, 1]
+        self.offset = offset if offset is not None else [0, 0, 0]
+        self.matrix = matrix if matrix is not None else IdentityMatrix3()
+        self.inverseMatrix = self._matrix_inverse(self.matrix) # [G]
+        self.segmentation = False
+        self.sliceList = []
+        self.lowerThreshold = -math.inf
+        self.upperThreshold = math.inf
+        
+        self.min, self.max = self._compute_min_max()
+
+    def _compute_min_max(self):
+        min_val = math.inf
+        max_val = -math.inf
+        for val in self.data:
+            if not math.isnan(val):
+                if val < min_val: min_val = val
+                if val > max_val: max_val = val
+        return min_val, max_val
+
+    def _matrix_inverse(self, m):
+        # Standard 3x3 matrix inverse calculation [G]
+        a, b, c = m[0]
+        d, e, f = m[1]
+        g, h, i = m[2]
+        det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g)
+        inv_det = 1.0 / det
+        return [
+            [ (e*i - f*h)*inv_det, (c*h - b*i)*inv_det, (b*f - c*e)*inv_det],
+            [ (f*g - d*i)*inv_det, (a*i - c*g)*inv_det, (c*d - a*f)*inv_det],
+            [ (d*h - e*g)*inv_det, (b*g - a*h)*inv_det, (a*e - b*d)*inv_det]
+        ]
+
+    def index_from_ijk(self, i, j, k):
+        return k * self.xLength * self.yLength + j * self.xLength + i
+
+    def ijk_from_index(self, idx):
+        k = math.floor(idx / (self.yLength * self.xLength))
+        remainder = idx - k * self.yLength * self.xLength
+        j = math.floor(remainder / self.xLength)
+        i = remainder - j * self.xLength
+        return (i, j, k)
+
+    def get_voxel(self, i, j, k):
+        return self.data[self.index_from_ijk(i, j, k)]
+
+    def set_voxel(self, i, j, k, value):
+        self.data[self.index_from_ijk(i, j, k)] = value
+
+    def ijk_to_ras(self, i, j, k):
+        vx = i * self.spacing[0]
+        vy = j * self.spacing[1]
+        vz = k * self.spacing[2]
+        
+        m = self.matrix
+        x_prime = m[0][0]*vx + m[0][1]*vy + m[0][2]*vz
+        y_prime = m[1][0]*vx + m[1][1]*vy + m[1][2]*vz
+        z_prime = m[2][0]*vx + m[2][1]*vy + m[2][2]*vz
+        
+        return [x_prime + self.offset[0], 
+                y_prime + self.offset[1], 
+                z_prime + self.offset[2]]
+
+    def map(self, callback):
+        """Applies a callback function to every voxel in place."""
+        for idx in range(len(self.data)):
+            self.data[idx] = callback(self.data[idx], idx)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Buffer Size Mismatch:** If the input `arrayBuffer` size does not equal $N_x \cdot N_y \cdot N_z$, an error is thrown [S1, unofficial].
+*   **Data Type Limitations:** JavaScript TypedArrays do not support 64-bit integers. Attempting to construct a Volume with `int64` or `uint64` data throws an error [S1, unofficial].
+*   **NaN Handling:** Min/Max calculations must explicitly ignore NaN values [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The implementation originates from the `webgl_volume_demo` repository [S1, unofficial]. It follows a standard dense grid layout with IJK-to-RAS coordinate transformation [S1, unofficial].
+
+## Sources
+[S1] PeterC-DLS/webgl_volume_demo, https://github.com/PeterC-DLS/webgl_volume_demo, fetched 2026-10-27 (unofficial)

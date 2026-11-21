@@ -1,0 +1,105 @@
+# Sparse VDB SDF Generation
+
+Also called: OpenVDB SDF, meshToDistanceVdbVolume
+
+## Overview
+A method that converts a triangle mesh into a sparse, tree-structured signed or unsigned distance grid using OpenVDB, storing only active voxels near the surface for memory efficiency [S1]. It differs from dense voxelization approaches by allocating memory only for the narrow-band region around the mesh, making it suitable for large or complex models where ray-marched rendering or fast implicit queries are required [S1].
+
+## How it works
+**Inputs:** A triangle mesh (vertices and faces), target voxel count (default $10^7$), surface offset width (default 3 layers), and mesh topology (closed or open).
+**Outputs:** A `VdbVolume` (OpenVDB grid) containing the signed/unsigned distance field, and optionally a reconstructed mesh.
+
+**Data Structures:**
+*   `MeshToVolumeParams`: Configuration object.
+    *   `surfaceOffset`: Integer, number of voxel layers around the surface to mark as active.
+    *   `type`: Enum, `Signed` or `Unsigned`.
+    *   `voxelSize`: `Vector3f`, size of each voxel.
+    *   `outXf`: `AffineXf3f`, transformation matrix shifting output voxels relative to the original mesh.
+*   `GridToMeshSettings`: Reconstruction configuration.
+    *   `voxelSize`: `Vector3f`, matches generation voxel size.
+    *   `isoValue`: Float, typically 0.5 (in voxels).
+
+**Steps:**
+1.  Load the input mesh from file (e.g., STL).
+2.  Initialize `MeshToVolumeParams`.
+3.  Set `surfaceOffset` to 3.
+4.  Determine distance type: If `mesh.topology.isClosed()` is true, set `type` to `Signed`; otherwise, set to `Unsigned` [S1].
+5.  Calculate voxel size: Use `suggestVoxelSize(mesh, 1e7)` to determine dimensions for approximately 10 million voxels. Set `params.voxelSize` to `mm.Vector3f.diagonal(result)` [S1].
+6.  Initialize `voxelsShift` as an identity `AffineXf3f` and assign to `params.outXf` [S1].
+7.  Call `mm.meshToDistanceVdbVolume(mesh, params)` to generate the sparse VDB volume [S1].
+8.  (Optional Reconstruction) Initialize `GridToMeshSettings` with `voxelSize` and `isoValue` = 0.5.
+9.  Call `mm.gridToMesh(vdbVolume.data, gSettings)` to extract the mesh from the VDB data.
+10. Apply the inverse shift to the output mesh using `offMesh.transform(voxelsShift)` to restore original coordinates [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+from meshlib import mrmeshpy as mm
+
+# 1. Load mesh
+mesh = mm.loadMesh("mesh.stl")
+
+# 2. Configure parameters
+params = mm.MeshToVolumeParams()
+params.surfaceOffset = 3  # 3 voxel layers around surface will be active
+
+# 3. Set distance type based on topology
+if mesh.topology.isClosed():
+    params.type = mm.MeshToVolumeParams.Type.Signed
+else:
+    params.type = mm.MeshToVolumeParams.Type.Unsigned
+
+# 4. Calculate voxel size for ~10 million voxels
+# suggestVoxelSize returns dimensions; diagonal creates a uniform vector
+voxel_dims = mm.suggestVoxelSize(mesh, 1e7)
+params.voxelSize = mm.Vector3f.diagonal(voxel_dims)
+
+# 5. Set transformation (identity shift)
+voxelsShift = mm.AffineXf3f()
+params.outXf = voxelsShift
+
+# 6. Generate sparse VDB volume
+vdbVolume = mm.meshToDistanceVdbVolume(mesh, params)
+
+# 7. (Optional) Reconstruct mesh from VDB
+gSettings = mm.GridToMeshSettings()
+gSettings.voxelSize = params.voxelSize
+gSettings.isoValue = 0.5  # in voxels measure
+
+offMesh = mm.gridToMesh(vdbVolume.data, gSettings)
+
+# 8. Restore original position
+offMesh.transform(voxelsShift)
+
+# 9. Save result
+mm.saveMesh(offMesh, "out_mesh.stl")
+```
+
+**Parameters:**
+*   `surfaceOffset`: Integer. Typical value: 3. Specifies the number of voxel layers around the surface that will be marked as active [S1].
+*   `type`: Enum. `Signed` if mesh is closed, `Unsigned` otherwise [S1].
+*   `voxelSize`: `Vector3f`. Calculated to target approximately $10^7$ voxels using `mm.Vector3f.diagonal(mm.suggestVoxelSize(mesh, 1e7))` [S1].
+*   `outXf`: `AffineXf3f`. Transformation matrix applied to shift the output voxels relative to the original mesh [S1].
+
+**Edge Cases:**
+*   **Open Meshes:** If the mesh is not closed, `Signed` distance is undefined. The method requires setting `type` to `Unsigned` [S1].
+*   **Precision:** The `isoValue` for reconstruction is specified in voxels (0.5), not world units [S1].
+
+## Subtopics
+
+### Mesh to Signed Distance Field (SDF) Volume Creation
+Converts a triangle mesh into a voxelized signed distance field stored in an OpenVDB grid using the `mesh2volume` library [S2, unofficial]. It differs from the primary method by using a dense grid approach via `to_dense()` or sparse via `sample()`, and relies on OpenVDB's C++ API directly rather than the `meshlib` wrapper [S2, unofficial]. Choose this when using the `mesh2volume` Python package or needing direct OpenVDB C++ integration. It calculates voxel size as $\delta = \text{length} / (\text{dim} - 1)$ and uses `openvdb::tools::meshToSignedDistanceField` [S2, unofficial].
+
+## Operating characteristics
+*   **Memory:** Sparse storage ensures memory efficiency by storing only active voxels near the surface [S1].
+*   **Performance:** Suitable for large or complex models where dense voxelization would be prohibitive [S1].
+*   **Use Cases:** Ray-marched rendering, workflows requiring fast implicit queries without storing every voxel [S1].
+*   **Limitations:** Requires a closed mesh for signed distance generation; open meshes must use unsigned distance [S1].
+
+## Background
+Originated from the `meshlib` library (MRMesh/MRVoxels) for Python and C++, providing a production-grade solution for scalable SDF generation [S1]. The underlying technology leverages OpenVDB for sparse data structures [S1].
+
+## Sources
+[S1] Mesh to SDF (Signed Distance Field) Library for Python & C++, https://meshlib.io/feature/mesh-to-sdf/, fetched 2026-10-30
+[S2] zzilch/Mesh2Volume, https://github.com/zzilch/Mesh2Volume, fetched 2026-10-26 (unofficial)

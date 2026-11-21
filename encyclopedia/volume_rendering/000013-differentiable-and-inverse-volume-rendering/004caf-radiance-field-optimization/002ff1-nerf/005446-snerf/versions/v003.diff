@@ -1,0 +1,140 @@
+--- v002.md
++++ v003.md
+@@ -33,13 +33,20 @@
+ 
+ ```python
++import random
++import math
++
++def confidence_net(completed_depth, rendered_depth):
++    """External confidence estimator per [S2, unofficial]."""
++    return 1.0  # [G] Placeholder for external network
++
++def depth_completion_network(lidar_depths):
++    """External depth completion network per [S2, unofficial]."""
++    return lidar_depths  # [G] Placeholder for external network
++
+ def snerf_render(ray_origin, ray_direction, nerf_mlp, pose_refinement_net, 
+-                 initial_pose, lidar_depths, confidence_net):
+-    """
+-    Renders a single ray using SNeRF components.
+-    """
++                 initial_pose, lidar_depths, confidence_net_fn):
++    """Renders a single ray using SNeRF components."""
+     # 1. Refine Camera Pose
+-    # Learn offsets delta_R and delta_T to correct SLAM errors
+     delta_R, delta_T = pose_refinement_net(initial_pose)
+-    # [G] Standard rigid body transformation to camera frame
+     R_refined = initial_pose.R @ delta_R
+     T_refined = initial_pose.T + delta_T
+@@ -48,62 +55,45 @@
+ 
+     # 2. Sample Points along Ray
+-    # [G] Standard stratified sampling between near and far bounds
+-    near, far = 0.0, 100.0 # Not given in sources
+-    t_vals = [near + (far - near) * (random() + i) / N for i in range(N)]
+-    points_3d = [ray_origin_cam + t * ray_direction_cam for t in t_vals]
++    near, far = 0.0, 100.0  # Not given in the sources. [S2, unofficial]
++    t_vals = [near + (far - near) * (i + random.uniform(0, 1)) / N for i in range(N)]
+     
+     # 3. Query NeRF MLP
+-    # Input: 3D position and viewing direction
+-    # Output: Color c and density sigma
+-    colors, densities = nerf_mlp(points_3d, ray_direction_cam)
++    colors, densities = nerf_mlp(t_vals, ray_direction_cam)
+     
+     # 4. Volume Rendering
+-    # Compute transmittance T_i
+-    deltas = [t_vals[i+1] - t_vals[i] for i in range(N-1)]
+-    # [G] Handle first element: T_1 = 1.0
+-    transmittance = [1.0] + [exp(-sum(densities[j] * deltas[j] for j in range(i))) for i in range(1, N)]
+-    alphas = [1.0 - exp(-densities[i] * deltas[i]) for i in range(N-1)]
+-    # [G] Last sample alpha is 1.0 for full occlusion handling
++    deltas = [t_vals[i] - t_vals[i-1] for i in range(1, N)]
++    transmittances = [1.0]
++    for i in range(1, N):
++        transmittances.append(transmittances[-1] * math.exp(-densities[i-1] * deltas[i-1]))
++    
++    alphas = [1.0 - math.exp(-densities[i] * deltas[i]) for i in range(N-1)]
+     alphas.append(1.0)
+-    weights = [alphas[i] * transmittance[i] for i in range(N)]
++    
++    weights = [alphas[i] * transmittances[i] for i in range(N)]
+     rendered_color = sum(weights[i] * colors[i] for i in range(N))
++    rendered_depth = sum(weights[i] * t_vals[i] for i in range(N))
+     
+-    # 5. Depth and Confidence (for training supervision)
+-    # Use depth completion network to propagate sparse LiDAR
+-    completed_depth = depth_completion_network(lidar_depths) # [G] External network per [S2, unofficial]
+-    
+-    # Compute confidence based on geometry and reprojection consistency
+-    rendered_depth = sum(weights[i] * t_vals[i] for i in range(N))
+-    confidence = confidence_net(completed_depth, rendered_depth)
++    # 5. Depth and Confidence
++    completed_depth = depth_completion_network(lidar_depths)
++    confidence = confidence_net_fn(completed_depth, rendered_depth)
+     
+     return rendered_color, rendered_depth, confidence
+ 
+-def train_snerf(dataset, nerf_mlp, pose_net, confidence_net, optimizer):
+-    """
+-    Alternating training loop for SNeRF.
+-    """
+-    # [G] Standard training loop structure
++def train_snerf(dataset, nerf_mlp, pose_net, confidence_net_fn, optimizer):
++    """Alternating training loop for SNeRF."""
+     for epoch in range(num_epochs):
+-        # Step A: Render images from different views
+         rendered_images = []
+         for view in dataset.views:
+             ray = generate_ray(view.camera, view.pixel_coords)
+             color, depth, conf = snerf_render(ray, nerf_mlp, pose_net, 
+-                                       view.initial_pose, view.lidar, confidence_net)
++                                       view.initial_pose, view.lidar, confidence_net_fn)
+             rendered_images.append(color)
+-            
+-        # Step B: Stylize rendered images (if stylization module is active)
+-        # [S1] SNeRF proposes alternating training to manage memory.
+-        # Stylize the rendered images using an external image stylization module.
++        
++        # Stylization extension per [S1]
+         stylized_images = image_stylization_module(rendered_images)
+         
+-        # Step C: Train NeRF to match stylized images and depth
+-        # Compute RGB loss between stylized and ground truth (or original if not stylizing)
+         rgb_loss = compute_rgb_loss(stylized_images, dataset.gt_images)
+-        
+-        # Compute depth loss weighted by confidence
+         depth_loss = compute_depth_loss(rendered_depths, dataset.lidar_depths, confidence)
+         
+-        # Backpropagate and update parameters
+         total_loss = rgb_loss + depth_loss
+         optimizer.zero_grad()
+@@ -113,7 +103,7 @@
+ 
+ **Parameters:**
+-*   **Number of samples ($N$):** Not given in the sources.
+-*   **Learning Rate:** Not given in the sources.
+-*   **Near/Far Bounds:** Determined by the scene scale and camera frustum; specific values not given.
++*   **Number of samples ($N$):** Not given in the sources. [S2, unofficial]
++*   **Learning Rate:** Not given in the sources. [S2, unofficial]
++*   **Near/Far Bounds:** Determined by the scene scale and camera frustum; specific values not given. [S2, unofficial]
+ 
+ **Edge Cases and Pitfalls:**
+@@ -128,12 +118,12 @@
+ 
+ ### Virtual Camera Transformation
+-Handles dynamic foregrounds by computing relative positions [S2, unofficial]. Choose for scenes with moving objects. Link: [Virtual Camera Transform](52-virtual-camera-transform.md).
++Handles dynamic foregrounds by computing relative positions. Choose for scenes with moving objects. Link: [Virtual Camera Transform](52-virtual-camera-transform.md).
+ 
+ ### Confidence-Based Depth Loss
+-Uses reprojection and geometry consistency to weight depth errors [S2, unofficial]. Choose when LiDAR is sparse/noisy. Link: [Confidence Metric](52-confidence-metric.md).
++Uses reprojection and geometry consistency to weight depth errors. Choose when LiDAR is sparse or noisy. Link: [Confidence Metric](52-confidence-metric.md).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources. [S2, unofficial]
++*   **Memory Complexity:** Not given in the sources. [S2, unofficial]
+ *   **Measured Performance:** On large-scale driving datasets (nuScenes and Waymo), SNeRF reduces mean-squared error by 7–40% compared to state-of-the-art rivals [S2, unofficial]. It achieves a 45% PSNR gain for moving vehicles rendering compared to conventional NeRFs or mesh-based methods [S2, unofficial].
+ *   **Strengths:** Works with panoramic settings where rays barely intersect and overlaps are small; handles noisy/sparse LiDAR; reconstructs moving vehicles [S2, unofficial].

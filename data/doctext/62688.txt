@@ -1,0 +1,2587 @@
+KoalaGS: Complexity-Aware Continuous
+Level of Detail for Gaussian Splatting
+arXiv:2610.28615v1 [cs.CV] 20 Oct 2026
+Radu Beche∗
+TUCN
+Raoul de Charette
+Inria
+https://rdbch.github.io/koalags
+Abstract
+Deploying a trained 3D Gaussian Splatting scene under shrinking compute budgets
+requires one primitive set to remain effective when rendered at smaller prefixes.
+In this continuous level of detail (LoD) setting, the challenge is to decide which
+Gaussians should retain capacity as the budget decreases. A pilot study on 3DGSMCMC reconstructions shows that image complexity, computed from the input
+views before optimization, predicts where reconstruction error concentrates in
+image and 3D space. It also reveals that simple regions contain too many Gaussians
+and degrade as much as complex ones at lower budgets, despite being inherently
+cheaper to represent. Subsequently, in KoalaGS, during training we use this complexity prior to bias relocation toward poorly reconstructed areas while ensuring
+smooth degradation across LoDs. A primitive importance score then enables inference at low-capacity, while preserving the scene structure. Tested across three
+datasets, KoalaGS maintains competitive full-capacity quality while significantly
+improving quality across the budget spectrum, yielding smoother transitions across
+LoDs, and enabling faster progressive streaming.
+1
+Introduction
+3D Gaussian Splatting [1] (3DGS) has made neural scene representations practical for novel view
+synthesis in real time. As the representation has matured, deployment under heterogeneous bandwidth
+and compute budgets has motivated a growing line of work on continuous level of detail (LoD) for
+3DGS, where a single Gaussian set must remain useful when only a leading prefix of its primitives
+is retained [2, 3, 4]. The central problem in this setting is determining which primitives should
+retain capacity as the budget shrinks. Existing methods answer it implicitly, ranking primitives by
+opacity [2] or by learned importance scores [5]. A structural property of the representation suggests
+a complementary signal. A Gaussian does not contribute equally throughout a scene, as a single
+primitive may account for a broad region of nearly uniform appearance yet resolve only a fraction
+of a visually intricate one. We contend that this spatial variation in the value of capacity is what a
+continuous LoD policy should exploit, and we show that it can be anticipated from the input views
+alone.
+We investigate this claim through a pilot study. Prior work already showed that global image
+complexity predicts reconstruction error in neural scene representations [6]; however, continuous
+LoD requires a localized signal that identifies not only which views are difficult, but where that
+difficulty lies within the scene. We therefore measure the correlation between local image complexity
+and reconstruction quality in the 2D image plane and, after multiview projection, on the Gaussian
+primitives. The correlation persists across DL3DV [7] and multiple complexity functionals in both
+domains, supporting complexity as a spatial prior for reconstruction difficulty that is available
+before optimization. We then examine how 3DGS-MCMC allocates capacity with respect to this
+structure. Gaussian density increases with complexity, approximately exponentially in regions of high
+∗ Work done while visiting the Astra-Vision group at Inria, Paris.
+Preprint.
+complexity, yet even visually simple regions are represented by many low-opacity Gaussians. Under
+truncation according to opacity, quality degrades at comparable rates in simple and complex regions,
+showing that opacity alone does not expose the spatial redundancy required for robust continuous
+LoD. Together, these observations expose a mismatch between how 3DGS-MCMC allocates capacity
+at full budget and how effectively that allocation is preserved under truncation.
+Our continuous LoD method for Gaussian Splatting addresses this mismatch. The key insight is that
+image complexity, which is predictive of reconstruction error, provides an inexpensive spatial prior for
+allocating capacity and selecting primitives as the budget shrinks. During optimization, a relocation
+rule biased by complexity steers primitives toward difficult regions, while at inference an importance
+score modulated by complexity preserves broad primitives in simple regions and relies primarily on
+opacity in complex ones. A residual variance objective further discourages an abrupt degradation as
+the budget shrinks. We evaluate the resulting representation along three complementary axes. Our
+method matches the best baselines at full capacity, while outperforming all continuous LoD baselines
+across the budget spectrum, even in extremely low budget (< 1%). We show that this has great
+practical implication in streaming context, where our method improves drastically the time-to-quality
+performance.
+We summarize our contributions as follows:
+• A pilot study on 140 DL3DV scenes showing image complexity predicts where reconstruction
+error concentrates, while capacity is allocated in a form that truncation cannot preserve.
+• A continuous LoD method combining relocation biased by complexity during training, importance scoring modulated by complexity at inference, and a residual variance objective that
+discourages localized degradation across budgets.
+• An evaluation of fixed budget quality, integrated spectrum quality, and transition variance,
+together with a streaming study showing a better time-to-quality tradeoff.
+2
+Related Work
+Gaussian Splatting. 3D Gaussian Splatting transformed neural rendering by using an explicit
+set of anisotropic Gaussian primitives optimized for visibility-aware rasterization, enabling highfidelity novel view synthesis at real-time frame rates [1]. A large body of literature focuses on
+making this representation more stable, efficient, and deployable. On the optimization side, [8]
+reformulates densification as probabilistic sampling over primitives, [9] introduces structured viewadaptive anchors, [10] incorporates radiance-field-informed optimization for robust high-speed
+rendering, while [11, 12, 13] reduce training cost or remove expensive densification mechanisms
+under constrained budgets. A complementary [14, 15] line compresses the trained representation
+itself, reducing memory footprint and rendering cost to make Gaussian scenes practical on resourceconstrained devices. In parallel, other works [16, 17, 18] revisit the primitive parameterization,
+replacing or constraining 3DGS with 2D variants to improve geometric fidelity and compatibility
+with classical graphics pipelines. The flexibility of this representation also enables applications
+beyond static novel view synthesis, including dynamic scene modeling [19, 20], progressive and
+adaptive streaming [21, 22], mesh reconstruction [23], or higher-level scene understanding through
+language grounding, segmentation, and editing [24, 25]. Altogether, these works establish 3DGS as a
+general explicit scene representation. Our work employs 3DGS for deployment under heterogeneous
+primitive budgets, exposing image complexity as a spatial prior over both densification and ranking.
+Level of Detail in Gaussian Splatting. A growing body of work ports classical Level of Detail [26]
+into the splatting pipeline. A first category imposes explicit hierarchies over the primitive set and
+exposes a small number of discrete operating points [27, 28, 29], with spatial divide and conquer
+variants scaling to kilometer sized captures [30, 31, 32]. A second category approximates multi
+budget behavior through compression and importance pruning at varying targets [12, 15], where each
+operating point is optimized independently and a new model must be retrained for every budget. A
+third category pursues continuous LoD over a single primitive set: [3, 4] learn per Gaussian distance
+dependent opacity decay, while FlexGS [5] learns a differentiable budget conditioned selector that
+achieves strong quality at targeted budgets but requires a fresh forward pass at every LoD change,
+precluding progressive streaming. Closer to our setting, Matryoshka-GS [2] introduces a nested
+prefix renderable ordering trained via stochastic budget sampling, so that any leading slice yields a
+coherent reconstruction. Our work belongs to this last category but departs from prior approaches in
+how the ordering is determined: we introduce image complexity as a scene side spatial prior over
+2
+I1
+2D
+2D
+I1
+Q1
+I2
+Q2
+In
+Qn
+3D
+Î1
+2D
+C1
+Pro
+I2
+jec
+2D
+t
+Î2
+2D
+C2
+...
+...
+In
+...
+2D
+3D
+Qj
+În
+2D
+Cn
+Complexity
+Map
+Trained
+3DGS
+Quality field
+Render
+(PSNR, SSIM)
+Quality map
+(PSNR, SSIM)
+(Laplacian, Delentropy, etc.)
+(a) Analysis methodology
+Complexity
+Reference
+Image
+Delentropy
+Map
+Quality
+3D
+Complexity
+Reference
+RGB
+Delentropy
+Field
+Quality
+Indoor
+Outdoor
+2D
+PSNR
+Map
+SSIM
+Map
+PSNR
+Field
+SSIM
+Field
+(b) Qualitative examples
+Figure 1: Analysis methodology. (a) We measure the spatial correlation between the complexity map
+of the input image (left), and the quality map (center), obtained after 3DGS-MCMC optimization. We
+then project and aggregate these 2D fields onto the Gaussian particles to obtain complexity/quality
+fields in 3D (right). (b) Complexity and quality inversely correlate both in the 2D image plane and in
+the 3D object space. Note that for easier visualization, we inverted colors of all complexity maps.
+both densification and ranking, and train for spatial uniformity of the residual between full capacity
+and prefix renders.
+3
+Pilot Study
+This section studies image complexity as a predictor of 3DGS reconstruction quality, computed from
+the input views before any optimization. The outcomes will shape our method, which must decide
+where to spend capacity at the moment when reconstruction error, the signal that would otherwise
+guide it, is not yet available. The intuition is that deploying under a primitive budget is a spatial
+decision. As primitives are withdrawn, some regions tolerate the loss while others do not, so the
+capacity that remains should sit where reconstruction error concentrates. Image complexity addresses
+this, since prior work [6] shows that it predicts reconstruction error and is read from the input images
+before optimization rather than recovered after training. What that work leaves open is whether the
+signal is spatial, since an image level score ranks views by difficulty but not where the error lies
+within them. We therefore investigate two questions: (i) Does complexity localize reconstruction
+error in space, across the image plane and the 3D world? (ii) Are trained models already allocating
+capacity where complexity predicts it should? For experimental details we refer to Sec. B.1.
+Does complexity spatially correlate with reconstruction error? To address this, we first analyze
+the spatial distribution of complexity with respect to the reconstruction quality metrics, seeking to
+study how the two correlate both in the 2D image space and 3D space. The overall methodology
+is shown in Fig. 1a. Specifically, we define two spatially indexed fields over image patches. Let
+Iˆi = Rθ (Πi ) denotes the rendering of a trained 3DGS-MCMC model under camera Πi , and let
+R(u) ⊂ Ω be a receptive field centered at pixel u. For 2D, we define the quality map and complexity
+map as:
+
+
+
+X 
+1
+Q2D
+q Ii (v), Iˆi (v) , Ci2D (u) = H Ii R(u) ,
+(1)
+i (u) =
+|R(u)|
+v∈R(u)
+where H is a local complexity functional and q is a local quality measure, with higher values
+indicating better reconstruction. To obtain their 3D counterparts, we project all quality maps Q2D
+i and
+complexity maps Ci2D onto the Gaussian particles under multiview aggregation, obtaining a single
+quality field Q3D and complexity field C 3D per scene. To do so, we define the contributing view set
+3
+Pearson ρ
+Domain
+2D
+3D
+Spearman rs
+Complexity
+PSNR
+SSIM
+PSNR
+Shannon
+Laplacian
+Delentropy
+−0.605 −0.259
+−0.546 −0.207
+−0.647 −0.379
+−0.590 −0.346
+−0.649 −0.365
+−0.638 −0.498
+Average
+−0.599
+−0.282
+−0.626
+−0.403
+–
+Shannon
+Laplacian
+Delentropy
+−0.588
+−0.655
+−0.678
+−0.557 −0.170 −0.165
+−0.688 −0.224 −0.267
+−0.646 −0.384 −0.388
+3
+2
+1
+Average
+−0.640
+−0.630
+–
+−0.259
+SSIM
+Avg. Rank
+−0.273
+3
+2
+1
+Table 1: Correlation between local complexity and reconstruction quality. On DL3DV, across
+140 scenes, complexity is negatively correlated with PSNR and SSIM in both the image plane and
+object space, indicating that more complex regions tend to reconstruct worse. Delentropy gives the
+strongest average rank. Best correlations are shown in bold.
+as I(x) = { i : πi (x) ∈ Ω and x visible in view i }, the views in which x projects inside the image
+domain and is not occluded, so that each point aggregates evidence only from views that observe it.
+Considering all 3D Gaussian positions x, we then define the 3D fields via direct projection such that:
+1 X 2D
+1 X 2D
+Q3D (x) =
+Qi (πi (x)) and C 3D (x) =
+Ci (πi (x)) .
+(2)
+|I|
+|I|
+i∈I
+i∈I
+In Fig. 1b we report qualitative visuals on bounded and unbounded scenes. They highlight that
+regardless of the scene type, the complexity and quality fields generally correlate visually. This is
+very much noticeable on the outdoor pathway which are low complexity regions that also exhibit a
+low reconstruction error (high quality score).
+We further measure quantitatively the statistical correlations of quality and complexity using the
+Pearson correlation ρ which denotes the linear association, and the Spearman rank correlation rs .
+For 2D, correlation is observed on paired observations {(Ci2D (u), Q2D
+i (u))} over all patches and
+views, while for 3D metrics we evaluate {C 3D (x), Q3D (x)} over all Gaussian locations. Regardless
+of the measure used, results in Tab. 1 show consistently high correlation, with large negative values
+indicating that highly complex regions consistently lead to low reconstruction quality. In the 2D image
+plane, all three measures exhibit a consistent negative association with patch level quality across
+scenes and views. The effect is stronger under PSNR (|ρ|, |rs | in the range 0.55–0.65) than SSIM
+(0.21–0.50). Among the functionals, delentropy exhibits the strongest correlation, and we adopt it in
+our method. In the 3D object space, the picture refines rather than uniformly attenuates. Compared to
+the 2D metrics, aggregation reduces view dependent appearance noise and recovers a clearer linear
+relationship (i.e., stronger Pearson correlation), whereas the rank correlations lower substantially
+(|rs | ≈ 0.17–0.39). The interpretation is that multi view averaging preserves the gross magnitude
+relationship between complexity and quality but compresses the tails of both fields, degrading the
+fine ordering even where the linear association strengthens. This empirical evidence supports that
+image complexity provides a spatial cue about where reconstruction errors emerge, both within a
+view and within a scene. To further establish complexity as a usable spatial prior over reconstruction
+difficulty, we study how Gaussians are allocated with respect to complexity.
+Does complexity correlate with Gaussian density? Since complexity correlates with the reconstruction error, it is reasonable to expect that the optimal ‘per region number of Gaussians’ is already
+achieved. Indeed, density control mechanism (pruning, cloning, relocation) for 3DGS are designed to
+increase Gaussian density where reconstruction error is higher. To relate density to complexity at the
+scene level, we voxelize each scene at a fixed edge length of 0.1 in normalized scene coordinates and,
+within every voxel, record the mean complexity, the mean reconstruction quality, and the number of
+Gaussians whose centers fall inside. The fixed scale is well defined because DL3DV test scenes are
+released in a comparable spatial scale across scenes.
+Reporting the resulting Gaussian counts across complexity intervals in Fig. 2a, we observe that more
+complex voxels hold more Gaussians, generally following an exponential trend. At the 90th percentile,
+the ratio between the least and most complex voxels (13 vs. 119 Gaussians per voxel) is surprising,
+since the simplest voxels typically depict uniform color and are expected to be reconstructed with
+only a few Gaussians. We therefore question whether the Gaussian budget is correctly utilized across
+regions of varying complexity.
+4
+103
+40
+99%
+90%
+75%
+50%
+221
+259
+308
+318
+369
+372
+61
+2.5%
+1%
+0.25%
+0.1%
+65
+56
+78
+71
+90
+94
+33
+34
+44
+36
+29
+26
+18
+13
+13
+10
+10
+8
+18
+8
+8
+27
+25
+10
+9
+30
+29
+25
+38
+21
+20
+15
+13
+11
+30
+119
+75
+22
+7
+10%
+156
+53
+101
+25%
+35
+116
+102
+25
+LOD [%]
+100%
+391
+PSNR
+# Gaussians [Log]
+Percentile
+12
+11
+13
+12
+13
+13
+13
+13
+15
+Cost increase
+0
+(0.
+,0
+.35
+]
+7
+(0.
+,1
+.05
+← Uniform
+]
+1
+4,
+(1.
+.75
+]
+2
+1,
+(2.
+.45
+]
+8
+(2.
+Complexity
+,3
+.15
+]
+5
+(3.
+,3
+.85
+]
+4
+2,
+(4.
+.55
+]
+10
+1
+← Uniform
+Detailed →
+2
+3
+Complexity
+4
+Detailed →
+(b) Quality (PSNR ↑) for varying LOD
+(a) Number of Gaussians (log-scale) per complexity
+Figure 2: Relation between complexity and Gaussian density. (a) Each bin counts the Gaussians
+inside a voxel of that complexity aggregated across DL3DV scenes. On the y-axis, the straight rise
+of the percentiles indicates an exponential growth (note y-axis is log-scaled). (b) Considering an
+indoor scene reconstructed with 3DGS-MCMC, we lower capacity by dropping primitives in order of
+opacity, plotting the average PSNR reached at each complexity for every budget. We observe that
+the simplest regions lose almost as much quality as the most complex ones, so even flat surfaces are
+broken into multiple low opacity Gaussians.
+To verify this, we implement a naive LoD strategy which preserves only the top X% of Gaussians by
+opacity. Varying LoD from 100% (i.e., full capacity) to 0.1%, in Fig. 2b we report the PSNR across
+complexity for a representative scene. While overall PSNR decreases expectedly with complexity and
+LoD, the study reveals another intriguing characteristic. Decreasing LoD from 100% to 0.1% lowers
+quality nearly equally in complex regions (≈ −62% PSNR) and in simple regions (≈ −58% PSNR).
+This indicates that, even in the simplest regions, 3DGS-MCMC favors decomposing visual signals
+into multiple lower-opacity Gaussians. Moreover, PSNR fluctuations across complexity reveal uneven
+Gaussian opacities. Altogether, these observations show that while 3DGS-MCMC reconstructions
+are denser in complex regions, Gaussians remain suboptimally distributed across complexities. We
+further analyze how Gaussians are allocated and retained across complexity levels in Sec. D.4.
+4
+Method
+We consider the continuous level of detail setting for 3DGS. Given a posed training set D =
+N
+{(Ii , Πi )}M
+i=1 , the goal is to learn a single Gaussian representation G = {gj }j=1 that can be rendered
+under a variable primitive budget τ ∈ (0, 1], such that
+Gτ ⊆ G with |Gτ | = ⌈τ N ⌉. At every budgeted representation, our aim is that Gτ remains spatially coherent and degrades gracefully as τ decreases. Following our pilot study (Sec. 3) which demonstrates
+that image complexity is a surrogate of the reconstruction error, our aim is to benefit from the image
+complexity signal, readily accessible at training time. Specifically, we apply two simple modifications
+to the optimization process of state-of-the-art 3DGS-MCMC [8]. First, we utilize complexity to foster
+(re)allocation of the Gaussians in regions with higher complexity (Sec. 4.1). Second, we introduce a
+content-aware importance score that retains simple regions at low budgets (Sec. 4.2). We complement
+them with a residual variance objective that encourages stable reconstruction error across space
+and LoDs. Experiments show that our simple modification boost performance and efficiency. The
+proposed LoD is global and view independent, rather than conditioned on camera distance or screen
+resolution. The implications are further discussed in Sec. B.2.
+Preliminaries. A 3DGS representation encodes a scene as a set of Gaussian primitives, where
+each Gaussian gj = (µj , αj , Σj , cj ) is parameterized by its position µj , opacity αj , covariance
+Σj , and color coefficients cj . To expose complexity to the optimization process, we augment each
+primitive with a scalar variable Cj , which stores the local image complexity associated with the
+current Gaussian. This relates to the complexity field in Eq. 2, but differs from the post-hoc analysis
+in our pilot study since, during training, Gaussian positions and supports change, and therefore their
+complexity values must be updated online.
+5
+To address this, after each full-capacity training render of a view Πi , we project the means of the
+contributing Gaussians into the image plane, and update each particle’s complexity via an exponential
+moving average, using the complexity map Ci2D (u) from Eq. 1, computed with delentropy. So that:
+
+Cj ← (1 − η) Cj + η Ci2D πi (µj ) ,
+η ∈ (0, 1].
+(3)
+Only particles whose centers project in the current view’s frustum are updated. Over the course of
+training each particle’s Cj converges to the multi-view average similar to those in Eq. (2). At last, Sj
+is the importance score of a particle used for prefix sorting computed using the scoring function S(·).
+4.1
+Complexity-aware Adaptive density control
+In practice, 3DGS variants rely on opacity as a proxy for this error signal: during optimization new
+primitives are concentrated where opacity has accumulated, and regions the optimizer has not yet
+resolved remain under-served precisely because they have not been resolved. In 3DGS-MCMC [8],
+the probability p to relocate at the coordinate of µj writes: p(gj ) = αj . Given that complexity is a
+surrogate of reconstruction errors (cf., Tab. 1), we simply bias this sampling weight towards more
+complex regions. We therefore sample relocation destinations with:
+
+p(gj ) = αj · exp C̃j ,
+(4)
+where C̃j ∈ [0, 1] is the min-max normalized Cj . Note that we utilize exp(·) to mimic the exponential
+growing behavior of particles count with complexity, as in the 90th percentile in Fig. 2a. Importantly,
+the multiplicative form keeps opacity in the loop since a primitive that has earned its keep should
+not be evicted for exploring other regions. To prevent collapse onto fixed complex regions, we apply
+complexity dropout, setting C̃j = 0 with probability δ = 0.2 (ablated in Sec. D.2) and thus scoring
+that fraction of relocation candidates by opacity alone (δ=0: none; δ=1: all).
+4.2
+Complexity-aware Level of Details
+As mentioned in Sec. 3, under a limited budget (i.e., τ < 1), only Gaussians with the highest
+importance score S(·) are preserved. In the literature, this typically resolves to using opacity [2],
+i.e., S(gj ) = αj . As shown in Fig. 2b, this degrades low-complexity regions as much as complex
+ones, although they should be the cheapest to retain, because opacity captures learned contribution
+but not the total spatial footprint over which a primitive contributes. We therefore rank primitives by
+combining three complementary signals: opacity, scale, and complexity:
+S(gj ) = αj + λ ·
+s(gj )
+,
+exp C̃j (µj )
+(5)
+where s(gj ) is the max-normalized scale of gj and λ = 2 is a fixed scalar weight. The three
+components play distinct, complementary roles. Opacity captures the importance learned through the
+photometric objective, allowing a small high-opacity Gaussian to outrank a moderate-opacity one
+that covers a broader region. Scale supplies this missing spatial footprint, while complexity controls
+where it should influence the score. In high-complexity regions, exp(C) attenuates the scale term,
+avoiding preference for large, potentially blurring primitives and reducing the score toward opacity,
+which is most reliable where optimization pressure is concentrated. In low-complexity regions, where
+preserving broad spatial support matters more, the second term reduces to λ · s as exp(C) → 1,
+restoring weight to large primitives that efficiently cover simple areas despite their moderate opacity.
+We note that LoD-awareness requires the optimizer to vary LoD (i.e., τ ) during training. However, the
+scoring alone does not guarantee that the resulting render degrades uniformly since the optimization
+support varies with τ . Namely, at full-capacity (τ = 1) the optimizer has access to all primitives
+to fit the image, while at lower LODs (τ < 1) the optimizer only accesses the surviving primitives
+(according to Eq. 5) and may push the latter away from their full-capacity solution. To keep the
+resulting deviation spatially uniform, we consider the residual of the reconstruction error between
+full-capacity render and lower LODs render, and minimize it’s variance.
+Formally, at each step we compute the residual of the reconstruction error E(·) at τ and at full-capacity:
+∆i = E(Iifull ) − E(Iiτ ), and minimize its spatial variance:
+
+Lvar = Varu∈Ω ∆i (u) .
+(6)
+6
+TandT
+MipNerf
+DB
+100% Capacity
+10% Capacity
+1% Capacity
+0.1% Capacity
+Method
+#GS [k] PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓
+OctreeGS [27]
+FlexGS [5]
+1,457
+2,547
+30.23
+29.29
+0.908
+0.898
+0.254
+0.320
+29.27
+0.897
+0.349
+24.68
+0.824
+0.472
+-
+-
+-
+3DGS MCMC [8]
+LightGaussian [15]
+MGS [2]
+Ours
+2,950
+2,950
+2,950
+2,950
+29.70
+29.73
+29.29
+29.92
+0.907
+0.907
+0.905
+0.911
+0.236
+0.240
+0.247
+0.240
+24.36
+26.21
+28.61
+29.05
+0.792
+0.849
+0.888
+0.890
+0.362
+0.333
+0.282
+0.282
+16.81
+19.59
+23.28
+23.40
+0.656
+0.742
+0.800
+0.798
+0.520
+0.482
+0.416
+0.419
+12.67
+15.26
+16.58
+17.81
+0.601
+0.675
+0.692
+0.720
+0.599
+0.546
+0.531
+0.522
+OctreeGS [27]
+FlexGS [5]
+2,991
+3,012
+29.16
+29.06
+0.876
+0.872
+0.174
+0.217
+27.58
+0.835
+0.293
+23.39
+0.663
+0.494
+-
+-
+-
+3DGS MCMC [8]
+LightGaussian [15]
+MGS [2]
+Ours
+3,092
+3,092
+3,092
+3,092
+29.80
+29.89
+29.55
+29.80
+0.893
+0.897
+0.890
+0.893
+0.146
+0.147
+0.151
+0.150
+20.58
+21.06
+26.97
+27.82
+0.647
+0.669
+0.797
+0.822
+0.352
+0.359
+0.280
+0.258
+14.14
+15.81
+20.17
+21.14
+0.383
+0.475
+0.544
+0.566
+0.586
+0.558
+0.521
+0.510
+11.06
+13.01
+14.49
+16.04
+0.267
+0.377
+0.393
+0.459
+0.667
+0.636
+0.620
+0.611
+OctreeGS [27]
+FlexGS [5]
+2,080
+1,979
+24.45
+23.78
+0.860
+0.847
+0.158
+0.204
+23.06
+0.807
+0.278
+19.49
+0.642
+0.478
+-
+-
+-
+3DGS MCMC [8]
+LightGaussian [15]
+MGS [2]
+Ours
+1,850
+1,850
+1,850
+1,850
+24.43
+24.46
+24.40
+24.65
+0.866
+0.863
+0.864
+0.868
+0.143
+0.146
+0.150
+0.150
+18.52
+19.17
+22.16
+22.97
+0.670
+0.680
+0.755
+0.785
+0.356
+0.347
+0.309
+0.277
+11.96
+13.21
+16.66
+17.38
+0.404
+0.453
+0.536
+0.551
+0.589
+0.596
+0.526
+0.519
+8.92
+9.52
+12.10
+11.56
+0.306
+0.351
+0.410
+0.413
+0.680
+0.686
+0.639
+0.660
+Table 2: Performance at log-spaced LoD targets. Metrics at 100%, 10%, 1%, and 0.1% budgets
+across three datasets. Among full-LoD methods, ours performs on par at full capacity and generally
+better at lower budgets. For partial-LoD methods, dashes (-) denote unreachable operating points.
+Training objectives. We use the L1+D-SSIM loss of 3DGS-MCMC on the full (τ = 1) and
+budgeted (τ < 1) renders, add λvar Lvar , and average them. Training details are given in Sec. B.2.
+5
+Experimental Results
+We evaluate our method on three datasets [33, 34, 35] and compare its performance against five
+baselines [2, 5, 15, 27, 8]. Since performance of LoD-aware 3DGS may vary across LoD, it is
+not possible to characterize its performance by a single metric. We therefore assess our method
+along three complementary axes: quality at predefined LoD targets (Sec. 5.1), spectrum quality as
+the per-metric area under the curve over the full LoD sweep (Sec. 5.2), and intra- and inter-LOD
+transition variance (Sec. 5.3), which together capture whether quality is high, whether it is sustained
+across the spectrum, and whether it degrades gracefully rather than abruptly. We further conduct an
+ablation in Sec. 5.4 to isolate the contribution of each component of our method. We refer the reader
+to Sec. C for the experimental setup description and Sec. D for additional experiments. In all tables,
+best results are in bold and second best are underlined.
+5.1
+Quality at Predefined LOD Targets
+We first ask whether our method delivers high quality at the operating points a user is most likely to
+deploy, therefore evaluating at four log-spaced budgets chosen to probe each decade of the spectrum:
+100% reflects full-capacity quality, 10% a moderate compression regime relevant to deployment,
+1% an aggressive reduction where ranking quality dominates and an extreme 0.1%, [typically used
+when initialising a streaming]. Quantitative results are reported in Tab. 2, while separating partialLoD methods (OctreeGS, FlexGS) as they can only be evaluated at some intervals. Qualitatives
+are presented in Fig. 3, and curves are visualized in Fig. 4. A consistent picture emerges across
+datasets. At full capacity, all methods are competitive (Fig. 3, top row), with our method performing
+generally on par with the strongest baseline on every dataset and confirming that content-aware
+modifications introduce no penalty at peak fidelity. As the budget shrinks, the field separates sharply.
+3DGS MCMC degrades rapidly and has already collapsed by the 1% threshold, confirming that
+opacity-based ranking alone cannot sustain quality under reduction. LightGaussian retains more
+quality than opacity-based pruning in most cases, but falls behind both MGS and ours at every
+reduced budget across all three datasets. OctreeGS cannot operate below its native discrete levels
+and it remains competitive only on the indoor Deep Blending scenes and falls behind on outdoor
+scenes. FlexGS, which is not prefix renderable, trades this property for higher quality near the
+specific operating points it was optimised for, but degrades unpredictably between them. MGS, our
+closest competitor, follows the same trend as our method but consistently lags behind it. Altogether,
+content-aware ranking yields a more robust quality versus quantity trade-off than any single-family
+representative, both quantitatively and visually. We report the rendering speeds in Sec. D.3 and
+further investigate how our importance score and densification behave jointly in Sec. D.4.
+7
+3DGS MCMC
+LightGS
+Ours
+Ours
+MGS
+FlexGS **
+FPS 336
+FPS
+336 || 24.41
+24.41 dB
+dB
+FPS 398
+FPS
+398 || 24.56
+24.56 dB
+dB
+FPS 568
+FPS
+568 || 23.06
+23.06 dB
+dB
+FPS 564
+FPS
+564 || 23.55
+23.55 dB
+dB
+FPS 604
+FPS
+604 || 25.35
+25.35 dB
+dB
+FPS 702
+FPS
+702 || 12.99
+12.99 dB
+dB
+FPS 673
+FPS
+673 || 18.66
+18.66 dB
+dB
+FPS 623
+FPS
+623 || 20.13
+20.13 dB
+dB
+FPS 741
+FPS
+741 || 21.56
+21.56 dB
+dB
+FPS 999
+FPS
+999 || 10.36
+10.36 dB
+dB
+FPS 771
+FPS
+771 || 12.44
+12.44 dB
+dB
+FPS 687
+FPS
+687 || 13.90
+13.90 dB
+dB ** Not prefix renderable
+FPS 308
+FPS
+308 || 24.80
+24.80 dB
+dB
+FPS 308
+FPS
+308 || 24.30
+24.30 dB
+dB
+FPS 300
+FPS
+300 || 24.30
+24.30 dB
+dB
+FPS 574
+FPS
+574 || 20.10
+20.10 dB
+dB
+FPS 445
+FPS
+445 || 14.85
+14.85 dB
+dB
+FPS 689
+FPS
+689 || 16.03
+16.03 dB
+dB
+FPS 706
+FPS
+706 || 11.96
+11.96 dB
+dB
+0.1%
+1%
+10%
+100%
+LoD
+Figure 3: Qualitative comparison across the LoD spectrum. Methods perform similarly at full
+capacity but diverge sharply at lower budgets. Ours better preserves scene coverage at low budgets
+and remains competitive with FlexGS while enabling prefix rendering.
+PSNR
+30
+SSIM
+LPIPS
+0.6
+20
+LPIPS
+SSIM
+PSNR
+0.8
+0.6
+0.4
+100
+10
+1
+LOD (%)
+3DGS MCMC
+0.1
+0.4
+0.2
+100
+MGS
+10
+1
+LOD (%)
+FlexGS
+Ours
+0.1
+100
+LightGaussian
+10
+1
+LOD (%)
+OctreeGS
+0.1
+Figure 4: Quality metrics across the LoD spectrum. Our method matches full-capacity baselines
+and degrades more gracefully as budgets shrink. Below 10%, 3DGS MCMC collapses and LightGaussian improves little. OctreeGS has limited discrete LoDs, FlexGS fluctuates between trained
+budgets, and MGS follows ours but with lower quality throughout. Results are on MipNerf.
+5.2
+Quality Across the LoD Spectrum
+The previous section leaves open how quality evolves across the full LoD spectrum. To address
+this, we sample 28 operating points in [0.1%, 100%], ten linearly spaced per interval ([0.1%, 1%],
+[1%, 10%], [10%, 100%]) with shared endpoints, and integrate per-metric curves with the trapezoidal
+rule to compute interval-wise area-under-the-curve (AUC) score, rescaled per interval for direct
+comparison. Since discrete methods cannot operate across the full spectrum, we focus on prefixrenderable continuous LoD methods. From results in Tab. 3, our method consistently achieves the
+highest AUC. Since the total AUC is dominated by high budgets where all methods cluster, the subinterval breakdown is more informative. 3DGS MCMC collapses below 10% capacity, yielding the
+lowest sub-interval AUC across datasets and confirming that opacity-based ranking alone fails as the
+budget shrinks. LightGaussian improves PSNR and generally SSIM over opacity-based pruning, but
+remains behind MGS and ours across all metrics in the two lower-budget intervals. Our largest gain
+over MGS occurs precisely in the low-budget [0.1%, 1%] regime where ranking quality dominates.
+FlexGS performs better at [1%, 10%], but it does not allow full LoD coverage. Besides, FlexGS is
+outperformed by ours in other intervals, which directly results from its design as it trained for specific
+operating points at the cost of global consistency, producing the irregular degradation curves visible
+in Fig. 4. Overall, these results indicate that our method offers the most balanced quality versus
+quantity trade-off across the LoD spectrum.
+5.3
+LoD Transition Variance
+We further assess whether our method enables fine-grained reconstruction control with smooth quality
+degradation. Indeed, the above mentioned metrics do not capture spatial or LoD consistency: a
+8
+TandT
+MipNerf
+DB
+Total [0.1%, 100%]
+[0.1%, 1%] (×100)
+[1%, 10%] (×10)
+[10%, 100%]
+Method
+AUC
+AUC
+AUC
+AUC
+AUC
+AUC
+AUC
+AUC
+AUC
+AUC
+AUC
+AUC
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓
+FlexGS [5]
+27.47
+0.867
+0.363
+-
+-
+-
+25.28
+0.788
+0.350
+24.94
+0.788
+0.328
+3DGS MCMC [8]
+LightGaussian [15]
+MGS [2]
+Ours
+27.96
+28.61
+28.95
+29.51
+0.870
+0.888
+0.897
+0.902
+0.274
+0.268
+0.259
+0.254
+13.69
+16.29
+18.81
+19.19
+0.573
+0.650
+0.685
+0.690
+0.497
+0.457
+0.414
+0.413
+19.49
+21.44
+24.62
+24.86
+0.664
+0.730
+0.778
+0.778
+0.378
+0.347
+0.289
+0.288
+25.87
+26.31
+26.30
+26.83
+0.798
+0.809
+0.813
+0.817
+0.231
+0.229
+0.226
+0.221
+FlexGS [5]
+24.77
+0.792
+0.293
+-
+-
+-
+23.36
+0.698
+0.328
+22.43
+0.722
+0.260
+3DGS MCMC [8]
+LightGaussian [15]
+MGS [2]
+Ours
+26.58
+26.78
+28.65
+29.09
+0.814
+0.820
+0.858
+0.867
+0.213
+0.218
+0.192
+0.184
+11.69
+14.75
+16.45
+17.55
+0.307
+0.438
+0.445
+0.471
+0.559
+0.592
+0.503
+0.496
+16.39
+19.03
+22.27
+23.20
+0.493
+0.596
+0.636
+0.665
+0.395
+0.430
+0.334
+0.311
+24.83
+24.93
+26.25
+26.59
+0.762
+0.762
+0.790
+0.795
+0.168
+0.174
+0.153
+0.147
+FlexGS [5]
+21.89
+0.788
+0.262
+-
+-
+-
+19.82
+0.679
+0.308
+19.91
+0.720
+0.231
+3DGS MCMC [8]
+LightGaussian [15]
+MGS [2]
+Ours
+22.50
+22.74
+23.59
+24.02
+0.801
+0.802
+0.827
+0.839
+0.212
+0.211
+0.201
+0.189
+9.74
+10.66
+13.67
+13.83
+0.331
+0.376
+0.442
+0.447
+0.561
+0.570
+0.519
+0.517
+14.42
+15.30
+18.28
+19.05
+0.510
+0.534
+0.609
+0.637
+0.406
+0.394
+0.353
+0.327
+20.96
+21.11
+21.62
+21.98
+0.747
+0.745
+0.762
+0.771
+0.166
+0.166
+0.160
+0.151
+Table 3: Area Under the Curve (AUC) across Capacity Intervals. For all intervals, our method
+outperforms all other prefix-renderable continuous LoD methods, exhibiting large gaps in smaller
+intervals [0.1%, 1%]. Intervals are scaled for direct comparison.
+(b) Intra-LoD variance analysis.
+(a) Inter-LOD variance analysis.
+PSNR
+×10−3
+SSIM
+×10−4
+4
+2 1.86
+2
+3.18
+3.05
+2.11
+2
+1.25
+1
+]
+,1
+1
+1,
+[
+0]
+0]
+0
+,1
+[
+10
+[
+1
+0.
+]
+,1
+Interval [%]
+[
+1
+1,
+0]
+0]
+0
+,1
+[
+10
+MGS
+[
+1
+0.
+SSIM
+×10−3
+×10−4
+3
+σ2
+σ2
+2.26
+[
+PSNR
+4
+3
+1
+0.
+LPIPS
+1.00
+2 1.93
+]
+0]
+[
+1
+1,
+0
+,1
+0]
+[
+[
+Ours
+0.75 0.75
+1.55
+1.02
+]
+,1
+1
+0.
+10
+0.84
+2 1.73
+1
+,1
+LPIPS
+0]
+[
+1
+1,
+[
+10
+0
+,1
+0
+0]
+[
+]
+,1
+1
+0.
+0]
+1
+1,
+[
+[
+10
+0
+,1
+0]
+0.50
+]
+,1
+.1
+[0
+0]
+,1
+[1
+,
+10
+10
+0]
+[
+Average [0.1, 100]%
+Figure 5: Variance analysis across LoD. For both MGS and ours, we report the inter and intra LoD
+variances on MipNerf(lower is better). Our method consistently outperforms MGS.
+method that concentrates errors in localized regions may rank highly while exhibiting abrupt changes
+across LoDs. To analyze this, we compute per-pixel error maps following Sec. 3 and derive two
+complementary variance measures. Inter-LoD variance captures transitions across levels: for each
+patch, we take differences between error maps at consecutive LoDs, compute the variance of these
+residuals, and average over all patches. Low values indicate smooth rather than abrupt degradation.
+Intra-LoD variance measures spatial uniformity within a level: we compute the variance of each error
+map across patches and average over LoDs. Low values indicate that errors are evenly distributed
+rather than concentrated in localized regions. Neither measure is meaningful in isolation, as uniformly
+poor renderings can also yield low variance. We therefore use them as a complement to the absolute
+quality metrics reported above. Further details are provided in Sec. E. Results on MipNerf against
+MGS are reported in Fig. 5. Across all intervals and metrics, our method exhibits lower inter-LoD
+variance than MGS, with the gap being most pronounced in the [0.1%, 1%] regime where budget
+pressure is highest and abrupt transitions are most likely to occur. A consistent reduction is also
+observed in intra-LoD variance, indicating that our content-aware ranking not only smooths transitions
+across levels but also distributes error more uniformly within each level. Taken together with the
+absolute and AUC results, these findings confirm that complexity-aware importance scoring yields a
+representation that degrades both more gracefully and more uniformly across the full LoD spectrum.
+5.4
+Ablation Study
+To isolate the individual and combined contributions of our three additions, we evaluate all combinations of content-aware densification (Dens.), content-aware importance scoring (Score), and
+the spatial variance loss (Var.). We report both full-capacity quality (100%) and the per-metric
+AUC over the LoD spectrum [0.1%, 100%] in Tab. 4. Each component alone improves upon the
+baseline across all AUC metrics, except Var., which matches the baseline in AUC SSIM. Densification
+provides the largest standalone improvement at full capacity, while importance scoring yields the
+largest standalone AUC gains. Among the two-component configurations, Dens.+Score performs best
+9
+Components
+AUC [0.1%, 100%]
+100% Capacity
+Dens.
+Score
+Var.
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+None
+✗
+✗
+✗
+28.74
+0.855
+0.196
+29.55
+0.863
+LPIPS ↓
+0.164
+Single
+✓
+✗
+✗
+✗
+✓
+✗
+✗
+✗
+✓
+28.81
+28.94
+28.79
+0.859
+0.861
+0.855
+0.190
+0.188
+0.190
+29.79
+29.62
+29.59
+0.889
+0.882
+0.870
+0.151
+0.159
+0.160
+Pair
+✓
+✓
+✗
+✓
+✗
+✓
+✗
+✓
+✓
+28.99
+28.75
+28.95
+0.862
+0.850
+0.860
+0.187
+0.197
+0.189
+29.75
+29.70
+29.71
+0.885
+0.877
+0.880
+0.154
+0.159
+0.155
+All
+✓
+✓
+✓
+29.09
+0.867
+0.184
+29.80
+0.893
+0.150
+Table 4: Full ablation. All combinations of complexity-aware densification (Dens.), importance
+scoring (Score), and the spatial variance loss (Var.) on MipNerf.
+PSNR
+SSIM
+LPIPS
+0.6
+20
+0.8
+LPIPS
+SSIM
+PSNR
+30
+0.4
+0.6
+0.2
+0.1
+1
+10
+Time [s]
+100
+0.1
+3DGS MCMC
+1
+10
+Time [s]
+MGS
+100
+FlexGS
+0.1
+1
+10
+Time [s]
+100
+Ours
+Figure 6: Time to quality in streaming. Rendering quality of Bonsai [34], over a 50 Mbps link.
+Prefix methods send each primitive once, so every arrival refines the model, and ours reaches every
+quality level first. FlexGS resends the full set for each budget, so time is delayed and quality oscillates.
+across both full-capacity and AUC metrics. However, adding Var. to either component alone does not
+consistently improve performance, suggesting that its benefit depends on the accompanying allocation
+and ranking mechanisms. The complete configuration achieves the best full-capacity quality and
+integrated quality across all three metrics, supporting the combined use of the three components. A
+more detailed breakdown of the ablation results at individual LoD budgets is provided in Sec. D.5.
+5.5
+Application: time-to-quality in streaming
+Our ranking naturally enables progressive streaming, where remote clients render the primitives as
+they arrive. Prior 3DGS streaming systems use a few discrete quality layers [21] without characterizing how quality evolves throughout streaming. We therefore measure time to quality: the time to
+reach a target rendering fidelity at fixed bandwidth. We simulate 50 Mbps bandwidth (representative
+of 5G network), and send each primitive as raw fp32 attributes (236 bytes). We compare against
+MGS [2] and 3DGS MCMC [8], which stream incrementally like ours, and FlexGS [5], which must
+restream the full set at every budget. On the Bonsai scene of MipNerf [34] (Fig. 6), the prefix methods
+receive the full model in 49.1 s, while FlexGS needs 344 s, a 7.0× overhead caused by restreaming.
+Our method reaches 25 dB after 1.47 s, compared to 1.96 s for MGS and 9.82 s for 3DGS MCMC,
+and 28 dB after 2.95 s, compared to 3.93 s and 14.73 s, respectively. FlexGS is also non monotone
+in time, dropping to about 22 dB in the mid budgets before recovering at full capacity. Because our
+importance score (Eq. 5) sends large primitives in simple regions first, the client sees a complete,
+coarse scene within the first timestamps.
+6
+Conclusion
+We studied how to allocate Gaussian primitives as rendering budgets shrink in continuous LoD
+splatting. Our pilot study showed that image complexity, accessible before any optimization, predicts
+spatial reconstruction error in 2D and 3D, yet trained models fail to allocate capacity accordingly
+in a form that a shrinking budget preserves. Building on these observations, we design a method
+allocating primitives based on complexity which determines their survival at inference, using a
+variance objective to maintain uniform error across scales. Evaluated on three datasets, our approach
+matches the strongest baselines at full capacity, while achieving the highest integrated quality across
+budgets, and degrades more gracefully, with the largest gains below 1% capacity and faster time-toquality in streaming.
+10
+Acknowledgments and Disclosure of Funding
+This work was supported by the "Romanian Hub for Artificial Intelligence-HRIA", Smart Growth, Digitization
+and Financial Instruments Program, MySMIS no. 351416 and by the Astra Team, Inria. This work was granted
+access to the HPC resources of IDRIS under the allocation 2025-AD011017283 made by GENCI on the Jean-Zay
+Cluster. The authors would like to thank Sergiu Nedevschi and Fawzi Nashashibi for making this collaboration
+possible.
+References
+[1] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3d gaussian splatting for
+real-time radiance field rendering. ACM Transactions on Graphics, July 2023.
+[2] Zhilin Guo, Boqiao Zhang, Hakan Aktas, Kyle Fogarty, Jeffrey Hu, Nursena Koprucu Aslan, Wenzhao
+Li, Canberk Baykal, Albert Miao, Josef Bengtson, et al. Matryoshka gaussian splatting. arXiv preprint
+arXiv:2603.19234, 2026.
+[3] Zhigang Cheng, Mingchao Sun, Yu Liu, Zengye Ge, Luyang Tang, Mu Xu, Yangyan Li, and Peng Pan.
+CLod-GS: Continuous level-of-detail via 3d gaussian splatting. In The Fourteenth International Conference
+on Learning Representations, 2026.
+[4] A Božič. Learning fast 3d gaussian splatting rendering using continuous level of detail. In Computer
+Graphics Forum, 2025.
+[5] Hengyu Liu, Yuehao Wang, Chenxin Li, Ruisi Cai, Kevin Wang, Wuyang Li, Pavlo Molchanov, Peihao
+Wang, and Zhangyang Wang. Flexgs: Train once, deploy everywhere with many-in-one flexible 3d gaussian
+splatting. In Proceedings of the Computer Vision and Pattern Recognition Conference, 2025.
+[6] Radu Beche and Sergiu Nedevschi. Claravid: A holistic scene reconstruction benchmark from aerial
+perspective with delentropy-based complexity profiling. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, 2025.
+[7] Lu Ling, Yichen Sheng, Zhi Tu, Wentian Zhao, Cheng Xin, Kun Wan, Lantao Yu, Qianyu Guo, Zixun Yu,
+Yawen Lu, et al. Dl3dv-10k: A large-scale scene dataset for deep learning-based 3d vision. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2024.
+[8] Shakiba Kheradmand, Daniel Rebain, Gopal Sharma, Weiwei Sun, Yang-Che Tseng, Hossam Isack,
+Abhishek Kar, Andrea Tagliasacchi, and Kwang Moo Yi. 3d gaussian splatting as markov chain monte
+carlo. Advances in Neural Information Processing Systems, 2024.
+[9] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai. Scaffold-gs:
+Structured 3d gaussians for view-adaptive rendering. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, 2024.
+[10] Michael Niemeyer, Fabian Manhardt, Marie-Julie Rakotosaona, Michael Oechsle, Daniel Duckworth,
+Rama Gosula, Keisuke Tateno, John Bates, Dominik Kaeser, and Federico Tombari. Radsplat: Radiance
+field-informed gaussian splatting for robust real-time rendering with 900+ fps. In 2025 International
+Conference on 3D Vision (3DV), 2025.
+[11] Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl, Markus Steinberger, Francisco Vicente Carrasco,
+and Fernando De La Torre. Taming 3dgs: High-quality radiance fields with limited resources. In
+SIGGRAPH Asia 2024 Conference Papers, 2024.
+[12] Guangchi Fang and Bing Wang. Mini-splatting: Representing scenes with a constrained number of
+gaussians. In European conference on computer vision, 2024.
+[13] Dmytro Kotovenko, Olga Grebenkova, and Björn Ommer. Edgs: Eliminating densification for efficient
+convergence of 3dgs. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, 2025.
+[14] Panagiotis Papantonakis, Georgios Kopanas, Bernhard Kerbl, Alexandre Lanvin, and George Drettakis.
+Reducing the memory footprint of 3d gaussian splatting. Proceedings of the ACM on Computer Graphics
+and Interactive Techniques, 2024.
+[15] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, and Zhangyang Wang. Lightgaussian:
+Unbounded 3d gaussian compression with 15x reduction and 200+ fps. Advances in neural information
+processing systems, 2024.
+11
+[16] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and Shenghua Gao. 2d gaussian splatting for
+geometrically accurate radiance fields. In ACM SIGGRAPH 2024 conference papers, 2024.
+[17] Jan Held, Renaud Vandeghen, Adrien Deliege, Abdullah Hamdi, Daniel Rebain, Silvio Giancola, Anthony
+Cioppa, Andrea Vedaldi, Bernard Ghanem, Andrea Tagliasacchi, et al. Triangle splatting for real-time
+radiance field rendering. In Thirteenth International Conference on 3D Vision, 2025.
+[18] Jan Held, Renaud Vandeghen, Sanghyun Son, Daniel Rebain, Matheus Gadelha, Yi Zhou, Ming C Lin,
+Marc Van Droogenbroeck, and Andrea Tagliasacchi. Triangle splatting+: Differentiable rendering with
+opaque triangles. arXiv preprint arXiv:2509.25122, 2025.
+[19] Jonathon Luiten, Georgios Kopanas, Bastian Leibe, and Deva Ramanan. Dynamic 3d gaussians: Tracking
+by persistent dynamic view synthesis. In 3DV, 2024.
+[20] Guanjun Wu, Taoran Yi, Jiemin Fang, Lingxi Xie, Xiaopeng Zhang, Wei Wei, Wenyu Liu, Qi Tian, and
+Xinggang Wang. 4d gaussian splatting for real-time dynamic scene rendering. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), June 2024.
+[21] Yuang Shi, Géraldine Morin, Simone Gasparini, and Wei Tsang Ooi. LapisGS: Layered progressive 3D
+Gaussian splatting for adaptive streaming. In Proceedings of the 2025 International Conference on 3D
+Vision (3DV), 2025.
+[22] Yuan-Chun Sun, Yuang Shi, Cheng-Tse Lee, Mufeng Zhu, Wei Tsang Ooi, Yao Liu, Chun-Ying Huang,
+and Cheng-Hsin Hsu. LTS: A DASH streaming system for dynamic multi-layer 3D Gaussian splatting
+scenes. In Proceedings of the 16th ACM Multimedia Systems Conference, MMSys 2025, Stellenbosch,
+South Africa, 31 March 2025 - 4 April 2025. ACM, 2025.
+[23] Antoine Guédon and Vincent Lepetit. Sugar: Surface-aligned gaussian splatting for efficient 3d mesh
+reconstruction and high-quality mesh rendering. In Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, 2024.
+[24] Minghan Qin, Wanhua Li, Jiawei Zhou, Haoqian Wang, and Hanspeter Pfister. Langsplat: 3d language gaussian splatting. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2024.
+[25] Mingqiao Ye, Martin Danelljan, Fisher Yu, and Lei Ke. Gaussian grouping: Segment and edit anything in
+3d scenes. In European conference on computer vision, 2024.
+[26] Hugues Hoppe. Progressive meshes. In Proceedings of the 23rd annual conference on Computer graphics
+and interactive techniques. ACM, 1996.
+[27] Kerui Ren, Lihan Jiang, Tao Lu, Mulin Yu, Linning Xu, Zhangkai Ni, and Bo Dai. Octree-gs: Towards
+consistent real-time rendering with lod-structured 3d gaussians. IEEE Transactions on Pattern Analysis
+and Machine Intelligence, 2025.
+[28] Bernhard Kerbl, Andreas Meuleman, Georgios Kopanas, Michael Wimmer, Alexandre Lanvin, and George
+Drettakis. A hierarchical 3d gaussian representation for real-time rendering of very large datasets. ACM
+Transactions On Graphics (TOG), 2024.
+[29] Yunji Seo, Young Sun Choi, Hyun Seung Son, and Youngjung Uh. Flod: Integrating flexible level of detail
+into 3d gaussian splatting for customizable rendering. ACM Transactions on Graphics (Proceedings of
+SIGGRAPH), 2025.
+[30] Yang Liu, Chuanchen Luo, Lue Fan, Naiyan Wang, Junran Peng, and Zhaoxiang Zhang. Citygaussian:
+Real-time high-quality large-scale scene rendering with gaussians. In European Conference on Computer
+Vision, 2024.
+[31] Jiaqi Lin, Zhihao Li, Xiao Tang, Jianzhuang Liu, Shiyong Liu, Jiayue Liu, Yangdi Lu, Xiaofei Wu, Songcen
+Xu, Youliang Yan, et al. Vastgaussian: Vast 3d gaussians for large scene reconstruction. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2024.
+[32] Jonas Kulhanek, Marie-Julie Rakotosaona, Fabian Manhardt, Christina Tsalicoglou, Michael Niemeyer,
+Torsten Sattler, Songyou Peng, and Federico Tombari. LODGE: Level-of-detail large-scale Gaussian splatting with efficient rendering. In Proceedings of the 39th International Conference on Neural Information
+Processing Systems, 2025.
+[33] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel Brostow. Deep
+blending for free-viewpoint image-based rendering. ACM Transactions on Graphics (ToG), 2018.
+12
+[34] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Mip-nerf 360:
+Unbounded anti-aliased neural radiance fields. In Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, 2022.
+[35] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking
+large-scale scene reconstruction. ACM Transactions on Graphics (ToG), 2017.
+[36] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger. Mip-splatting: Alias-free
+3d gaussian splatting. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), June 2024.
+[37] Barry G Haskell and Arun N Netravali. Digital pictures: representation, compression, and standards.
+Perseus Publishing, 1997.
+[38] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment: from error
+visibility to structural similarity. IEEE transactions on image processing, 2004.
+[39] Claude Elwood Shannon. A mathematical theory of communication. The Bell system technical journal,
+1948.
+[40] Kieran G Larkin. Reflections on shannon information: In search of a natural information-entropy for
+images. arXiv preprint arXiv:1609.01117, 2016.
+[41] Vickie Ye, Ruilong Li, Justin Kerr, Matias Turkulainen, Brent Yi, Zhuoyang Pan, Otto Seiskari, Jianbo Ye,
+Jeffrey Hu, Matthew Tancik, and Angjoo Kanazawa. gsplat: An open-source library for gaussian splatting.
+Journal of Machine Learning Research, 2025.
+[42] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable
+effectiveness of deep features as a perceptual metric. In Proceedings of the IEEE conference on computer
+vision and pattern recognition, 2018.
+13
+A
+Limitations
+We identify three limitations that needs discussing of our approach, namely the optimization stability,
+the nature of our complexity prior, and view conditioning.
+(i) Our method inherits the stochastic relocation dynamics of 3DGS-MCMC, so results can slightly
+vary across runs. This variation does not alter our standing relative to prior work, as our method
+maintains its relative position at every capacity level and on every dataset we evaluate. The instability
+is moreover present to the same degree in 3DGS-MCMC and MGS, since all three build on the same
+relocation mechanism.
+(ii) The complexity prior we introduce is computed from the input images alone, and therefore
+captures spatial difficulty but neither view-dependent appearance nor semantic saliency. A specular
+highlight that shifts with viewpoint, or a small object that is salient despite low pixel complexity,
+receives no special treatment under our prior, and the correlations of Tab. 1 should accordingly be
+read as holding under standard capture conditions.
+(iii) Primitive selection is likewise unconditioned on the viewpoint: the formulation is neither distancenor resolution-dependent, and is thus not designed to suppress aliasing when rendering from distant
+viewpoints or at reduced resolution. However, its preference for large-support primitives in simple
+regions may reduce the retention of subpixel primitives relative to opacity-only ranking, but this
+provides no antialiasing guarantee. Because we modify primitive allocation and ordering without
+prescribing a competing filtering mechanism, our representation remains compatible in principle with
+dedicated approaches such as the smoothing filter of Mip-Splatting [36], a combination we do not
+evaluate here.
+B
+Implementation details
+B.1
+Pilot Study
+Experimental setup. We run the study on the DL3DV [7] test set of 140 scenes, reconstructed
+with 3DGS-MCMC [8], a robust 3DGS approach. Each scene is labeled bounded or unbounded
+from the DL3DV metadata and receives 1.0M primitives when bounded and 1.5M when unbounded,
+reflecting the larger extent of unbounded captures. All scenes are trained at 960p for 30k steps under
+the default 3DGS-MCMC hyperparameters, holding out every 8th frame as the test split. We measure
+reconstruction quality with PSNR [37] and SSIM [38], and image complexity with three functionals:
+Shannon pixel entropy [39, 37], Laplacian response [37], and delentropy [40]. Throughout our study,
+we exclude the particles that do not contribute to the final reconstruction.
+3D aggregation of quality and complexity. The 3D fields Q3D and C 3D defined in Eq. 2 of
+the main paper are constructed by projecting the per-view 2D maps onto the trained Gaussian set
+under multi-view aggregation. To analyse the joint distribution of complexity, quality, and Gaussian
+density at the scene level (Fig. 2a), we voxelize each scene using a fixed voxel size of 0.1 in the
+Colmap normalised scene coordinates. This fixed scale is well defined because DL3DV test scenes
+are released in a roughly similar normalized frame, so a single voxel size yields comparable spatial
+granularity across scenes without per-scene tuning. Within each voxel we record (i) the mean local
+complexity, (ii) the mean reconstruction quality (PSNR or SSIM), and (iii) the number of Gaussians
+whose means fall inside.
+B.2
+Method
+Scope of the LoD Formulation. Our formulation provides global, view-independent LoD through a
+single primitive ordering whose prefixes define successive approximations. Unlike camera-dependent
+selection over a spatial hierarchy, this ordering is fixed across viewpoints and budgets, enabling
+progressive streaming by transmitting additional primitives as the budget increases.
+Complexity maps computation. The complexity maps are computed once per scene, before training,
+and cached to disk. The computation is implemented in PyTorch and runs on the GPU. Its cost
+depends on the complexity functional, the patch size, and the image resolution, and ranges from 20 s
+to 60 s per scene on the evaluated datasets. As this is a one time preprocessing step, its overhead is
+negligible relative to training. We use a fixed receptive field of 32 pixels in all experiments, with
+14
+a stride of 4 to 8 depending on the image resolution. This setting yielded consistent complexity
+statistics across input resolutions ranging from 960p (DL3DV) to approx. 1.6K (MipNerf360).
+Implementation. We implement our method on top of the 3DGS-MCMC version from the
+gsplat [41] framework. We adopt delentropy as the complexity functional since it attained the
+highest average rank in the pilot study (Tab. 1), although our method is agnostic to this choice and
+admits any complexity functional. On a single NVIDIA H100, reconstructing a typical scene with
+∼2M primitives completes in 15 minutes. All hyperparameters are listed in Tab. 5.
+Training details. We train every scene for 30k steps. Each step renders the training view twice,
+once at full capacity and once at a budget τ ∼ U(0, 1) sampled anew at every step, so that a single
+optimization covers the whole LoD spectrum. During the first 500 steps we render at full capacity
+only, so that the full-capacity solution forms before any prefix is optimized. The total objective
+averages the two reconstruction terms with the variance term of Eq. 6, and adds the regularizers of
+3DGS-MCMC:
+
+L = 12 Lrec (Iˆifull , Ii ) + Lrec (Iˆiτ , Ii ) + λvar Lvar + λα ᾱ + λσ σ̄ ,
+(7)
+|{z} |{z}
+|
+{z
+}
+|
+{z
+} | {z }
+full capacity
+budget τ
+uniform error
+opacity
+scale
+where Lrec is the L1+D-SSIM loss of 3DGS, and ᾱ and σ̄ are the mean opacity and mean scale
+of the primitives, weighted by λα and λσ (Tab. 5). A newly added or relocated Gaussian has no
+complexity estimate until a training view observes it. We therefore set its complexity to the minimum,
+so relocation ranks it by opacity alone until the update of Eq. 3 assigns it a value.
+Hyperparameter
+Value
+Spatial-variance loss weight λvar
+Importance-score weight λ
+Complexity EMA rate η
+Training LoD sampling distribution
+Dropout rate on normalized complexity C̃
+Training steps
+2.0
+2.0
+0.8
+τ ∼ U(0, 100%)
+0.2
+30000
+Table 5: Hyperparameters used in our method.
+C
+Experimental evaluation.
+C.1
+Setup
+We follow the evaluation protocol of 3DGS-MCMC [8] and report results on MipNerf360 [34]
+with 7 scenes, Tanks and Temples [35] with 2 scenes, and Deep Blending (DB) [33] with 2 scenes,
+together covering a wide range of indoor and outdoor capture conditions. We compare against five
+baselines spanning the design space of LoD for Gaussian Splatting. Two of them yield a prefix
+renderable ordering directly comparable to ours: Matryoshka Gaussian Splatting (MGS) [2], our
+closest competitor, and 3DGS-MCMC [8], which we extend with an opacity based ranking. Other two
+operate only at restricted points of the LoD spectrum: FlexGS [5], a budget conditioned continuous
+LoD method, and Octree-GS [27], a discrete LoD method. The last, LightGaussian [15], is a pruning
+method, included to compare our ordering against post hoc decimation at equal capacity. A detailed
+description of each baseline and its adaptation to our protocol is provided in Sec. C.2. All models
+are trained under identical conditions on NVIDIA H100 GPUs. For fair comparison we fix the total
+primitive budget across 3DGS-MCMC, MGS, and our method, while FlexGS and Octree-GS are
+reported at their native counts. We report PSNR [37], SSIM [38], and LPIPS [42], which capture the
+complementary axes of pixel fidelity, structural preservation, and perceptual similarity.
+C.2
+Baselines
+3DGS-MCMC [8]. We use the gsplat reimplementation with default hyperparameters. Since
+3DGS-MCMC is neither LOD-aware at training time nor designed to support budget-conditioned
+inference, we evaluate it under LOD by applying the simplest possible reduction strategy: at each
+target budget we retain the top-k primitives ranked by opacity and discard the rest. This naive
+15
+trimming establishes the baseline behaviour of an opacity-only ranking signal absent any LOD-aware
+training.
+Matryoshka-GS [2]. We use the authors original implementation. One important difference from
+their reported setup affects direct comparability: the original paper trains all scenes with a flat
+5M-primitive budget for 50k steps. To align with our protocol and with the 3DGS-MCMC budget
+convention, we instead train MGS for 30k steps and adapt the primitive budget per scene to match the
+3DGS allocation. All other hyperparameters follow the original implementation. Notably by doing,
+we observed that the stability has improved over the DB dataset over the official results.
+FlexGS [5]. We use the authors’ original implementation and training hyperparameters without
+modification. FlexGS is a budget-conditioned continuous-LOD method that learns a differentiable
+selector mapping each primitive to a retention score for a target budget, trained in two stages: a first
+stage optimises the 3DGS representation, and a second stage trains the selector on top of the frozen
+primitives. This design trades global consistency for pointwise quality: FlexGS can outperform
+prefix-ranked methods at the specific budgets it is optimised for, but at the cost of (i) roughly doubled
+end-to-end training time, and (ii) the absence of a prefix-renderable ordering, since changing the
+operating LOD requires a fresh forward pass through the selector to recompute per-primitive scores
+rather than truncating a precomputed ranking.
+Octree-GS [27]. We use the authors’ original implementation and training hyperparameters without
+modification. Octree-GS is a discrete-LOD method that organises primitives into a fixed octree
+hierarchy, exposing a small number of predefined operating points corresponding to traversal depths.
+This design yields stable quality at its native levels but cannot interpolate between them: budgets
+falling between two depths are unreachable, and the coarsest level is bounded below by the structure
+of the hierarchy itself.
+LightGaussian [15]. We use the authors’ original implementation. LightGaussian is a compression
+method rather than an LoD one, pruning primitives by a global volumetric importance measure,
+fine tuning the survivors, then compacting them through spherical harmonic distillation and vector
+quantisation. We retain only the pruning stage, as the others reduce storage without changing the
+primitive count that defines our budget axis. For fairness we initialise from the same 30k step
+3DGS-MCMC checkpoints as the other baselines so every method starts from an identical primitive
+set. We omit the recovery fine tuning, since fine tuning at each budget yields a separate optimisation
+run and a stored model per operating point, which is what separates pruning from a single prefix
+renderable ordering.
+D
+Additional experiments
+In all tables, best results are in bold and second best are underlined.
+D.1
+Additional qualitative results
+We complement Fig. 3 with two more MipNerf360 dataset [34] scenes, the outdoor Garden (Fig. 7)
+and the indoor Room (Fig. 8). Each row shows one budget and each column one method. Insets
+report the FPS measured over the entire scene and the PSNR of the presented image.
+D.2
+Dropout ablation
+In this section, we investigate how the complexity dropout rate δ used during relocation (Eq. 4) affects
+reconstruction quality. With this dropout, the complexity term C̃j of a candidate gj is set to zero with
+probability δ, in which case gj is not removed from the candidate set but competes for relocation
+based only on its opacity. The rate δ therefore interpolates between two extremes: at δ = 0, the
+complexity term is always applied and the relocation weights are fully determined by the complexity
+field, while at δ = 1, the complexity term is always dropped and the rule reduces to the original
+opacity sampling p(gj ) = αj . We perform a value sweep δ ∈ {0, 0.2, 0.4, 0.6, 0.8, 1} on the outdoor
+Tanks and Temples [35] and the indoor Deep Blending [33] datasets, and report the metrics at full
+capacity and the AUC over [0.1%, 100%] (Tab. 6). Our default value δ = 0.2 attains the best result
+on all twelve entries, tied with δ = 0.4 only for SSIM at full capacity on Deep Blending. Compared
+to the original opacity sampling (δ = 1), it improves the AUC PSNR by 0.14 dB on TandT (24.02
+vs. 23.88) and by 0.23 dB on Deep Blending (29.51 vs. 29.28). Applying the complexity term at
+16
+3DGS MCMC
+LightGS
+MGS
+FPS 234
+FPS
+234 || 25.27
+25.27 dB
+dB
+FPS 234
+FPS
+234 || 25.27
+25.27 dB
+dB
+FPS 240
+FPS
+240 || 25.24
+25.24 dB
+dB
+FPS 800
+FPS
+800 || 16.24
+16.24 dB
+dB
+FPS 469
+FPS
+469 || 16.10
+16.10 dB
+dB
+FPS 1010
+FPS
+1010 || 1
+10.18
+0.18 dB
+dB
+FPS 1140
+FPS
+1140 || 7.77
+7.77 dB
+dB
+Ours
+Ours
+FlexGS **
+FPS 241
+FPS
+241 || 25.26
+25.26 dB
+dB
+FPS 339
+FPS
+339 || 23.71
+23.71 dB
+dB
+FPS 756
+FPS
+756 || 23.34
+23.34 dB
+dB
+FPS 664
+FPS
+664 || 23.54
+23.54 dB
+dB
+FPS 665
+FPS
+665 || 22.53
+22.53 dB
+dB
+FPS 878
+FPS
+878 || 11
+11.53
+.53 dB
+dB
+FPS 963
+FPS
+963 || 17
+17.29
+.29 dB
+dB
+FPS 789
+FPS
+789 || 18
+18.88
+.88 dB
+dB
+FPS 1037
+FPS
+1037 || 20
+20.46
+.46 dB
+dB
+FPS 1483
+FPS
+1483 || 10.25
+10.25 dB
+dB
+FPS 1102
+FPS
+1102 || 12.69
+12.69 dB
+dB
+1%
+10%
+100%
+LoD
+0.1%
+FPS 867
+FPS
+867 || 16.30
+16.30 dB
+dB ** Not prefix renderable
+Figure 7: Qualitative comparison on Garden. Renders of the outdoor Garden scene from MipNerf360 [34] at four budgets.
+3DGS MCMC
+LightGS
+MGS
+FPS 335
+FPS
+335 || 34.06
+34.06 dB
+dB
+FPS 335
+FPS
+335 || 34.06
+34.06 dB
+dB
+FPS 335
+FPS
+335 || 33.87
+33.87 dB
+dB
+FPS 542
+FPS
+542 || 27.41
+27.41 dB
+dB
+FPS 376
+FPS
+376 || 26.31
+26.31 dB
+dB
+FPS 653
+FPS
+653 || 17
+17.51
+.51 dB
+dB
+FPS 665
+FPS
+665 || 12.50
+12.50 dB
+dB
+Ours
+Ours
+FlexGS **
+FPS 317
+FPS
+317 || 34.07
+34.07 dB
+dB
+FPS 326
+FPS
+326 || 33.75
+33.75 dB
+dB
+FPS 583
+FPS
+583 || 32.10
+32.10 dB
+dB
+FPS 520
+FPS
+520 || 32.90
+32.90 dB
+dB
+FPS 537
+FPS
+537 || 31.65
+31.65 dB
+dB
+FPS 789
+FPS
+789 || 18
+18.56
+.56 dB
+dB
+FPS 715
+FPS
+715 || 20.97
+20.97 dB
+dB
+FPS 582
+FPS
+582 || 23.05
+23.05 dB
+dB
+FPS 810
+FPS
+810 || 24.65
+24.65 dB
+dB
+FPS 1442
+FPS
+1442 || 13.24
+13.24 dB
+dB
+FPS 765
+FPS
+765 || 15.36
+15.36 dB
+dB
+FPS 555
+FPS
+555 || 17.46
+17.46 dB
+dB ** Not prefix renderable
+0.1%
+1%
+10%
+100%
+LoD
+Figure 8: Qualitative comparison on Room. Renders of the indoor Room scene from MipNerf360 [34] at four budgets.
+every step (δ = 0) is not beneficial either, as it falls below opacity sampling on Deep Blending
+(29.00 vs. 29.28 AUC PSNR). We hypothesize that without dropout, relocation repeatedly targets
+the same high complexity regions, whereas occasionally dropping the complexity term lets opacity
+sampling reach the remaining regions. Large intermediate rates (δ ∈ {0.6, 0.8}) perform worst on
+both datasets. Although the differences are small relative to the noise of the metrics, the consistency
+of δ = 0.2 across both datasets supports it as a robust default. We also observe more stable training
+with complexity dropout, especially on the indoor scenes of Deep Blending.
+17
+100% Capacity
+AUC [0.1%, 100%]
+Dataset
+δ
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+TandT [35]
+0
+0.2
+0.4
+0.6
+0.8
+1
+24.52
+24.65
+24.46
+24.44
+24.39
+24.45
+0.856
+0.868
+0.852
+0.847
+0.841
+0.865
+0.153
+0.150
+0.152
+0.163
+0.171
+0.151
+23.91
+24.02
+23.86
+23.85
+23.80
+23.88
+0.829
+0.839
+0.828
+0.818
+0.811
+0.837
+0.193
+0.189
+0.192
+0.195
+0.199
+0.190
+DB [33]
+0
+0.2
+0.4
+0.6
+0.8
+1
+29.39
+29.92
+29.63
+29.21
+29.19
+29.75
+0.905
+0.911
+0.911
+0.909
+0.899
+0.903
+0.246
+0.240
+0.241
+0.252
+0.253
+0.247
+29.00
+29.51
+29.23
+28.94
+28.90
+29.28
+0.896
+0.902
+0.900
+0.882
+0.885
+0.899
+0.263
+0.254
+0.264
+0.269
+0.271
+0.263
+Table 6: Complexity dropout rate. Sweep of the dropout rate δ on TandT and DB. δ = 0 always
+applies the complexity term and δ = 1 reduces to opacity sampling. Our default is shaded.
+Indoor
+Outdoor
+Method
+100% 10%
+1%
+0.1%
+100% 10%
+1%
+FlexGS∗ [5]
+339
+578
+833
+–
+351
+609
+1021
+0.1%
+–
+LightGaussian [15]
+3DGS MCMC [8]
+MGS [2]
+Ours
+300
+300
+302
+302
+379
+568
+595
+450
+697
+688
+731
+475
+1101
+732
+829
+463
+189
+189
+193
+198
+435
+805
+769
+649
+855
+1093
+1050
+833
+1364
+1177
+1151
+874
+∗ FlexGS operates with a smaller primitive budget, hence the faster rendering speed.
+Table 7: Rendering speed. Average frame rate (FPS ↑) on MipNerf360 at four levels of detail. Indoor
+scenes are rendered at half resolution and outdoor scenes at quarter resolution. FlexGS is excluded
+from the ranking.
+D.3
+Rendering Speed
+We investigate the rendering speed of our method against the baselines at four levels of detail (100%,
+10%, 1%, 0.1%). We split MipNeRF360 [34] into indoor scenes (Bonsai, Counter, Kitchen, Room)
+and outdoor scenes (Bicycle, Garden, Stump) and report the average frame rate on a single NVIDIA
+H100 (Tab. 7). All prefix methods share an identical budget, so their primitive counts match at every
+level of detail and speed differences stem only from the size of the retained primitives, whereas
+FlexGS [5] operates with a smaller budget and is not directly comparable. At full capacity, our
+method is the fastest prefix method, tied with MGS indoors (302 FPS) and ahead outdoors (198 vs.
+193 FPS). As the budget shrinks, every method accelerates, but ours does so less and saturates below
+1%, reaching 463 FPS indoors and 874 FPS outdoors at 0.1%, against 829 and 1,151 FPS for MGS.
+We attribute this to our importance score (Eq. 5), which retains large primitives so that simple regions
+remain covered. A large primitive spans more tiles and thus costs more per frame, whereas MGS
+favors compact, high opacity primitives that render faster but cover less of the scene, at lower quality
+(Fig. 4). Our method is thus slower than MGS at low budgets, a cost we accept in exchange for
+coverage and better quality, while at equal quality it requires fewer primitives (Fig. 6). Reducing
+the per frame cost of large primitives at the lowest budgets, for instance by bounding their screen
+footprint, is a natural direction for future work.
+D.4
+Degradation Across Complexity Levels
+In this section, we investigate whether the importance score (Eq. 5) undoes the capacity that complexity guided densification (Eq. 4) adds to complex regions. Since the score reduces to opacity in
+complex regions, primitives there are ranked with less spatial support and are therefore discarded
+earlier as the budget shrinks. To quantify this effect, we project the image complexity maps onto the
+Gaussians with the same aggregation as in our pilot study (Sec. 3), group the Gaussians into five
+complexity bins, and compare our method with MGS [2] through three statistics per bin as follows.
+(i) Allocation: the number of Gaussians in each bin at full capacity, which shows where densification
+places the primitives (Tab. 8). (ii) Survival rate: for each bin, the percentage of its full capacity
+18
+10
+35
+PSNR [dB]
+Survival rate [%]
+40
+1
+0.1
+30
+25
+20
+15
+[0,1)
+[1,2)
+[2,3)
+[3,4)
+Complexity bin
+Ours
+[4,5]
+MGS
+Figure 9: Survival rate. Percentage of the
+Gaussians of each complexity bin at full capacity that are still retained at a given budget
+(log scale). Our method keeps more Gaussians in simple bins and fewer in complex
+bins than MGS.
+[0,1)
+[1,2)
+[2,3)
+[3,4)
+Complexity bin
+100%
+25%
+10%
+1%
+[4,5]
+0.1%
+Figure 10: Quality. Average PSNR of the
+Gaussians in each complexity bin, computed
+from the per pixel error maps projected onto
+the Gaussians. Our method has the largest
+gains at the lowest capacity.
+Method
+Statistic
+[0, 1)
+[1, 2)
+[2, 3)
+[3, 4)
+[4, 5]
+MGS [2]
+Count
+Share
+22.9k
+1.8%
+110.0k
+8.5%
+240.1k
+18.5%
+466.5k
+35.8%
+460.5k
+35.4%
+Ours
+Count
+Share
+21.1k
+1.6%
+100.7k
+7.7%
+233.8k
+18.0%
+471.5k
+36.3%
+472.9k
+36.4%
+Table 8: Full capacity allocation. Number and share of Gaussians per complexity bin at a budget of
+1300k. Our densification shifts Gaussians towards the most complex bins.
+Gaussians that are still present at a given budget, i.e., a survival rate of 10% means that one in ten
+Gaussians of that bin is kept (Fig. 9). (iii) Quality: we project the per pixel error maps onto the
+Gaussians with the same aggregation and report the average error of each bin as PSNR (Fig. 10). At
+full capacity, densification shifts the population towards complex regions, with 472.9k Gaussians
+in the most complex bin [4, 5] against 460.5k for MGS, and 21.1k against 22.9k in the simplest bin
+[0, 1). As the budget shrinks, survival drops with complexity, as intended by the score: at 25% budget,
+our method retains 33.08% of the Gaussians in [0, 1) against 23.47% in [4, 5], and at 0.1% the ratio
+grows to 2.02% against 0.02%. In complex bins, our method thus keeps fewer Gaussians than MGS at
+low budgets (0.02% vs. 0.08% in [4, 5] at 0.1%). This reduced survival does not translate into lower
+quality, as our method attains a higher PSNR than MGS in every bin and at every budget, including
+the most complex bin, where the gap grows from +0.02 dB at 100% to +2.25 dB at 0.1% (16.40 vs.
+14.15). These results suggest that the Gaussians retained in complex regions are better placed by
+densification, so that the capacity removed by the score is compensated rather than reintroduced as a
+failure mode.
+D.5
+Extended ablation
+We complement the aggregate results of Sec. 5.4 with a breakdown at individual LoD budgets
+on MipNeRF360. Table 9 reports all component combinations at 100%, 10%, 1%, and 0.1%
+capacity, alongside the AUC values reported in the main paper. Among the individual components,
+importance scoring produces the strongest improvements across all three metrics at every reduced
+budget, increasing PSNR at 0.1% from 14.59 to 15.94 dB. Densification also improves low-budget
+quality, reaching 15.68 dB at 0.1%, while the variance loss alone provides smaller gains. Combining
+densification and scoring further raises PSNR to 16.08 dB at this budget, and adding the variance loss
+brings it to 16.18 dB. The complete method achieves the best results across all metrics and evaluated
+budgets. Its PSNR gain over the baseline increases from 0.25 dB at full capacity to 0.80, 0.93, and
+1.59 dB at 10%, 1%, and 0.1%, respectively, showing that the improvements are most pronounced
+under aggressive budget reduction.
+19
+Components
+AUC [0.1%, 100%]
+100% Capacity
+10% Capacity
+1% Capacity
+0.1% Capacity
+Dens.
+Score
+Var.
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+None
+✗
+✗
+✗
+28.74
+0.855
+0.196
+29.55
+0.863
+0.164
+27.02
+0.794
+0.275
+20.12
+0.543
+0.540
+14.59
+0.393
+LPIPS ↓
+0.623
+Single
+✓
+✗
+✗
+✗
+✓
+✗
+✗
+✗
+✓
+28.81
+28.94
+28.79
+0.859
+0.861
+0.855
+0.190
+0.188
+0.190
+29.79
+29.62
+29.59
+0.889
+0.882
+0.870
+0.151
+0.159
+0.160
+27.53
+27.69
+27.44
+0.805
+0.818
+0.804
+0.263
+0.259
+0.268
+20.76
+20.95
+20.39
+0.560
+0.564
+0.553
+0.511
+0.511
+0.520
+15.68
+15.94
+15.10
+0.424
+0.457
+0.412
+0.616
+0.615
+0.621
+Pair
+✓
+✓
+✗
+✓
+✗
+✓
+✗
+✓
+✓
+28.99
+28.75
+28.95
+0.862
+0.850
+0.860
+0.187
+0.197
+0.189
+29.75
+29.70
+29.71
+0.885
+0.877
+0.880
+0.154
+0.159
+0.155
+27.75
+27.61
+27.74
+0.819
+0.812
+0.816
+0.259
+0.262
+0.260
+20.99
+20.70
+20.77
+0.565
+0.556
+0.559
+0.510
+0.514
+0.512
+16.08
+15.22
+15.96
+0.457
+0.415
+0.456
+0.615
+0.620
+0.615
+All
+✓
+✓
+✓
+29.09
+0.867
+0.184
+29.80
+0.893
+0.150
+27.82
+0.822
+0.257
+21.05
+0.566
+0.508
+16.18
+0.458
+0.612
+Table 9: Full ablation. All combinations of complexity aware densification (Dens.), importance
+scoring (Score), and the spatial variance loss (Var.) on MipNeRF360.
+LoD
+MGS[2] # holes ↓
+Ours # holes ↓
+LoD
+MGS[2] # holes ↓
+Ours # holes ↓
+100%
+10%
+1%
+0.1%
+0
+0
+2,615
+83,341
+0
+0
+2,420
+20,765
+100%
+10%
+1%
+0.1%
+0
+0
+11,884
+116,920
+0
+0
+2,204
+36,009
+(a) Bonsai
+(b) Bicycle
+Table 10: Coverage across LoDs. Number of "hole" pixels, i.e., pixels whose accumulated opacity is
+below 0.05, on the test set of the indoor Bonsai and outdoor Bicycle scenes[34]. Lower is better.
+D.6
+Coverage Across LoDs
+In this experiment, we investigate whether the primitives retained at low budgets still cover the whole
+scene. A reduced budget can degrade a rendering in two ways: the scene may be represented at a
+coarser resolution, or parts of it may no longer be covered by any primitive, leaving "holes". We
+further define such holes as a pixel whose accumulated opacity is α < 0.05 and count such pixels over
+all test views at 4 LoDs (100, 10, 1, 0.1). We compare against MGS [2], our closest prefix renderable
+competitor, on two MipNerf360 scenes [34]: the indoor Bonsai and the outdoor Bicycle. Tab. 10
+shows that coverage is preserved by both methods at high budgets and that the differences emerge as
+the budget shrinks. At 100% and 10% capacity, neither method leaves any hole. At 1% capacity, the
+two methods are close on Bonsai (2,420 vs. 2,615 hole pixels), whereas on Bicycle MGS already
+leaves 5.4× more holes than ours (11,884 vs. 2,204). At 0.1% capacity, our method leaves fewer
+holes on both scenes, with MGS producing 4.0× more on Bonsai (83,341 vs. 20,765) and 3.2× more
+on Bicycle (116,920 vs. 36,009). We attribute this difference to our importance score (Eq. 5), which
+retains large primitives in simple regions, so that areas such as the background remain covered by a
+few large Gaussians as the budget shrinks. The same mechanism explains why the gap appears earlier
+on Bicycle, whose large and simple outdoor background is the first to be removed by an ordering that
+does not account for coverage.
+E
+Inter and Intra LOD Variance Measure
+We formally define here the inter and intra LoD variance measurement. Let ∆m
+t (p) denote the
+direction-corrected quality degradation of patch p between two consecutive LoDs τt → τt+1 , the
+inter LoD variance writes:
+m
+Vinter
+=
+1 X
+Vart [∆m
+t (p)] ,
+|P|
+(8)
+p∈P
+which measures whether the same patch degrades smoothly across consecutive LoD transitions.
+Similarly, the intra LoD variance measurement writes:
+m
+Vintra
+=
+T −1
+1 X
+Varp∈P [∆m
+t (p)] ,
+T − 1 t=1
+and measures whether one LoD transition degrades the image uniformly across patches.
+20
+(9)

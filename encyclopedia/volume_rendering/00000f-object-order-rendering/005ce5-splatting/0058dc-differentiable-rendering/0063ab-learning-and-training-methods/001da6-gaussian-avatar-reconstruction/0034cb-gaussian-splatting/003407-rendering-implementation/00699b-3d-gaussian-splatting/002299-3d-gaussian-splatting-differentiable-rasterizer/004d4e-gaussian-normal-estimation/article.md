@@ -1,0 +1,182 @@
+# Gaussian Normal Estimation
+
+Also called: Alpha-composited Gaussian normals, Per-pixel Normal Map Estimation from Depth, Per-pixel normal estimation from Gaussians
+
+## Overview
+Gaussian Normal Estimation derives per-pixel surface normal maps directly from the geometry of 3D Gaussians during the differentiable rasterization process, providing geometric supervision without requiring additional learnable parameters [S1][S2, unofficial]. It sets itself apart from sibling methods by treating the shortest axis of the Gaussian covariance matrix as the local surface normal, allowing gradients from normal consistency losses to flow back to the Gaussian rotation and scale parameters [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of 3D Gaussians, each defined by position, covariance (scale and rotation), opacity $\alpha$, and color. For each pixel, the list of contributing Gaussians $N$ sorted by depth (front-to-back).
+*   **Outputs:** A per-pixel estimated normal vector $\hat{\boldsymbol{N}} \in \mathbb{R}^3$ in camera space.
+
+**Data Structures:**
+*   **Gaussian Attributes:** Each Gaussian $i$ stores a normalized normal vector $\hat{\boldsymbol{n}}_i \in \mathbb{R}^3$. This vector represents the direction of the shortest axis of the Gaussian's covariance matrix [S2, unofficial]. In practice, this is derived from the rotation matrix $\mathbf{R}_i$ of the Gaussian, typically corresponding to the third column (or the axis associated with the smallest scale eigenvalue) [S2, unofficial].
+*   **Accumulation State:** For each pixel, a running transmittance $T$ (initialized to 1.0) and a running accumulated normal $\hat{\boldsymbol{N}}$ (initialized to $\mathbf{0}$) are maintained during the rasterization pass [S1][S2, unofficial].
+
+**Steps:**
+1.  **Normal Extraction:** For each Gaussian $i$, extract the normalized vector $\hat{\boldsymbol{n}}_i$ corresponding to the direction of the shortest scaling axis of its covariance matrix [S2, unofficial].
+2.  **Orientation Correction:** At the beginning of training (or per-frame), check the orientation. If the dot product between the current camera viewing direction $\boldsymbol{v}$ and the Gaussian normal $\hat{\boldsymbol{n}}_i$ is negative ($\boldsymbol{v} \cdot \hat{\boldsymbol{n}}_i < 0$), flip the direction of the normal ($\hat{\boldsymbol{n}}_i \leftarrow -\hat{\boldsymbol{n}}_i$) to ensure consistent outward-facing orientation [S1].
+3.  **Camera Space Transformation:** Transform the extracted normal $\hat{\boldsymbol{n}}_i$ from world space to camera space using the current camera rotation matrix $\mathbf{R}_{cam}$ [S1]. Let the transformed normal be $\boldsymbol{n}_i$.
+4.  **Alpha Compositing:** Iterate through the sorted list of Gaussians $i \in N$ contributing to the pixel. For each Gaussian, update the accumulated normal and transmittance:
+    *   Compute the weight contribution: $w_i = \alpha_i T_i$, where $\alpha_i$ is the Gaussian's opacity and $T_i$ is the transmittance accumulated from previous (closer) Gaussians.
+    *   Update the accumulated normal: $\hat{\boldsymbol{N}} \leftarrow \hat{\boldsymbol{N}} + \boldsymbol{n}_i w_i$.
+    *   Update the transmittance: $T_{i+1} = T_i (1 - \alpha_i)$.
+5.  **Normalization:** After iterating through all contributing Gaussians, normalize the resulting vector: $\hat{\boldsymbol{N}} \leftarrow \frac{\hat{\boldsymbol{N}}}{\|\hat{\boldsymbol{N}}\| + \epsilon}$, where $\epsilon$ is a small constant to prevent division by zero [G].
+
+**Formulas:**
+The per-pixel normal estimate $\hat{\boldsymbol{N}}$ is computed by alpha-compositing individual Gaussian normals $\hat{\boldsymbol{n}}_i$ [S1][S2, unofficial]:
+
+$$
+\hat{\boldsymbol{N}} = \sum_{i \in N} \boldsymbol{n}_i \alpha_i T_i
+$$
+
+Where:
+*   $N$ is the set of Gaussians sorted by depth contributing to the pixel.
+*   $\boldsymbol{n}_i \in \mathbb{R}^3$ is the normalized vector representing the direction of the shortest axis of the $i$-th Gaussian, transformed into camera space [S2, unofficial].
+*   $\alpha_i$ is the opacity of the $i$-th Gaussian.
+*   $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ is the transmittance from previous Gaussians [S2, unofficial].
+
+**Parameters:**
+*   **Orientation Flip Threshold:** The dot product threshold is 0. If $\boldsymbol{v} \cdot \hat{\boldsymbol{n}}_i < 0$, flip [S1].
+*   **Normalization Epsilon:** Not given in the sources. [G] A value of $10^{-6}$ is typical.
+
+**Pitfalls:**
+*   **Incorrect Normal Orientation:** If normals are not consistently oriented relative to the camera, the alpha-composited result will be noisy or incorrect. This is handled by flipping normals based on the dot product with the viewing direction [S1].
+*   **Degenerate Gaussians:** If a Gaussian becomes extremely flat or its scale collapses, the "shortest axis" direction may become unstable. The method assumes Gaussians gradually become flatter and approach a planar shape, making the shortest axis a good normal estimate [S2, unofficial].
+*   **Depth Sorting:** The accuracy of the normal estimation depends on the correct front-to-back sorting of Gaussians, as in standard 3D Gaussian Splatting [Parent].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_gaussian_normals(gaussians, camera_transform, image_width, image_height):
+    """
+    Computes per-pixel normal maps from 3D Gaussians.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes:
+            - pos: (3,) world position
+            - cov: (3,3) covariance matrix or (scale, rotation)
+            - alpha: scalar opacity
+            - color: (3,) color
+        camera_transform: (4,4) or (3,3) rotation matrix to transform world to camera space.
+        image_width, image_height: int
+        
+    Returns:
+        normals: (H, W, 3) array of estimated normals in camera space.
+    """
+    # Initialize output
+    normals = np.zeros((image_height, image_width, 3))
+    
+    # Precompute camera rotation matrix for normal transformation
+    R_cam = camera_transform[:3, :3]
+    
+    # For each pixel, we need the list of contributing Gaussians sorted by depth
+    # This is typically handled by the rasterizer's depth sorting step.
+    # Here we assume a function `get_contributing_gaussians` returns sorted list.
+    
+    for y in range(image_height):
+        for x in range(image_width):
+            contributing_gaussians = get_contributing_gaussians(x, y, gaussians, camera_transform)
+            
+            if not contributing_gaussians:
+                continue
+                
+            accumulated_normal = np.zeros(3)
+            transmittance = 1.0
+            
+            for g in contributing_gaussians:
+                # Step 1: Extract normal from Gaussian geometry
+                # The normal is the direction of the shortest axis of the covariance matrix.
+                # If cov is stored as scale and rotation:
+                # scale = g.scale (3,)
+                # rotation = g.rotation (4,) quaternion or (3,3) matrix
+                # The shortest axis corresponds to the minimum scale.
+                # Let's assume we have a function to get the normal vector in world space.
+                n_world = get_shortest_axis_normal(g)
+                
+                # Step 2: Orientation Correction
+                # Get camera viewing direction for this pixel (approximate)
+                # In practice, this might be done per-Gaussian or per-pixel.
+                # S1 says "dot product between the current camera viewing direction and the Gaussian normal"
+                # We assume viewing direction is roughly the negative Z axis in camera space,
+                # or we transform the normal to camera space first.
+                
+                # Transform normal to camera space
+                n_cam = R_cam @ n_world
+                
+                # Check orientation relative to camera view (assuming camera looks down -Z)
+                # Viewing direction in camera space is (0, 0, -1)
+                # If dot(n_cam, (0,0,-1)) < 0, it points away from camera?
+                # S1 says: "flip ... if dot product between current camera viewing direction and Gaussian normal is negative"
+                # Let's assume viewing direction v is (0,0,1) in camera space (looking into scene)
+                # or (0,0,-1) depending on convention. Standard OpenGL: camera looks down -Z.
+                # If normal points towards camera, dot(n_cam, (0,0,1)) > 0.
+                # Let's follow S1 literally: if dot(v, n) < 0, flip.
+                v_cam = np.array([0, 0, 1]) # Assuming camera looks along +Z in some conventions, or adjust.
+                # Actually, standard is camera at origin looking down -Z.
+                # Let's use the dot product with the camera's forward vector.
+                # If the source doesn't specify the exact vector, we assume a consistent convention.
+                # We'll assume v_cam is the direction the camera is looking.
+                # If n_cam points opposite to v_cam, dot < 0.
+                
+                # To be safe and generic, we check if the normal is facing the camera.
+                # If the dot product with the view vector is negative, it's facing away.
+                # We flip it to face the camera.
+                if np.dot(v_cam, n_cam) < 0:
+                    n_cam = -n_cam
+                    
+                # Step 3: Alpha Compositing
+                alpha = g.alpha
+                weight = alpha * transmittance
+                accumulated_normal += n_cam * weight
+                transmittance *= (1 - alpha)
+                
+            # Normalize
+            norm_val = np.linalg.norm(accumulated_normal)
+            if norm_val > 1e-6:
+                normals[y, x] = accumulated_normal / norm_val
+            else:
+                normals[y, x] = np.array([0, 0, 1]) # Default normal
+                
+    return normals
+
+def get_shortest_axis_normal(gaussian):
+    """
+    Extracts the normalized vector of the shortest axis of the Gaussian's covariance.
+    """
+    # If covariance is given as scale (s) and rotation (R):
+    # Cov = R * diag(s^2) * R^T
+    # The axes are the columns of R.
+    # The shortest axis corresponds to the minimum scale.
+    s = gaussian.scale
+    R = gaussian.rotation # (3,3) matrix
+    
+    min_idx = np.argmin(s)
+    # The column of R corresponding to the minimum scale
+    n_world = R[:, min_idx]
+    return n_world / np.linalg.norm(n_world)
+```
+
+## Subtopics
+
+### Normal Consistency Loss
+Uses the estimated normals $\hat{\boldsymbol{N}}$ to supervise against pseudo-ground truth normals $\tilde{\boldsymbol{N}}$ derived from depth gradients, enforcing local planarity [S2, unofficial].
+
+### Monocular Normal Regularization
+Uses off-the-shelf monocular depth/normal estimation networks (e.g., ZoeDepth) to provide dense per-pixel normal priors for scenes without ground truth normals [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of contributing Gaussians. This is added to the standard rasterization cost.
+*   **Memory Complexity:** $O(H \times W \times 3)$ for the output normal map. No additional learnable parameters are needed [S1].
+*   **Strengths:** Provides geometric supervision without extra parameters; gradients flow directly to Gaussian rotation and scale, improving geometry alignment [S1].
+*   **Limitations:** Relies on the assumption that Gaussians become planar; noise in depth maps can affect pseudo-normal quality [S2, unofficial].
+
+## Background
+Originated in the context of 3D Gaussian Splatting optimization, where geometric consistency is crucial. DN-Splatter [S1] introduced the method to regularize depth and normal estimates. Gaussian Splatting in Mirrors [S2, unofficial] adapted it for reflection-aware rendering, leveraging the planar nature of Gaussians to estimate normals for mirror plane supervision.
+
+## Sources
+[S1] DN-Splatter: Depth and Normal Priors for Gaussian Splatting and Meshing, https://doi.org/10.1109/wacv61041.2025.00241, fetched 2026-10-26
+[S2] Gaussian Splatting in Mirrors: Reflection-Aware Rendering via Virtual Camera Optimization, https://doi.org/10.48550/arxiv.2410.01614, fetched 2026-10-26 (unofficial)

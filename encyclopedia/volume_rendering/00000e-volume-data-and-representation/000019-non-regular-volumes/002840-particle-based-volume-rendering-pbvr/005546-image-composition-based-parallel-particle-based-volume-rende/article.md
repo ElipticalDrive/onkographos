@@ -1,0 +1,249 @@
+# Image Composition-based Parallel Particle Based Volume Rendering
+
+Also called: Memory efficient parallel PBVR, Parallel Particle-Based Volume Rendering (PBVR) with Sort-Last Image Composition, Proposed parallel PBVR, Sort-last parallel PBVR
+
+## Overview
+This method is a parallel Particle-Based Volume Rendering (PBVR) technique that reduces memory consumption by gathering and processing image data (color and depth) instead of particle data [S1]. It employs a sort-last parallel image composition approach where each rendering node generates a partial image from an assigned sub-volume, which are then gathered, merged, and ensemble averaged [S1]. Unlike traditional parallel PBVR methods that require storing the entire particle dataset before projection, this approach eliminates particles immediately after projection, allowing memory usage to remain constant regardless of the number of ensemble repetitions [S1].
+
+## How it works
+The method consists of four main stages repeated until a pre-defined number of repetitions (ensembles) is reached: Particle Generation, Particle Projection, Image Composition, and Ensemble Averaging [S1].
+
+### Inputs and Outputs
+*   **Inputs**: Unstructured volume data (e.g., prism/tetrahedral cells), user-specified transfer function (opacity $\alpha$), image resolution (width, height), number of MPI processes, number of ensembles, particle radius $r$, integration interval $\Delta t$.
+*   **Outputs**: Final rendered image (RGB + Depth).
+
+### Data Structures
+
+**Particle Data Structure**
+Each particle requires 28 bytes [S1]. The layout is:
+1.  **Coordinate Position**: 12 bytes (3 components $\times$ 4 bytes/float32).
+2.  **Normal Vector**: 12 bytes (3 components $\times$ 4 bytes/float32).
+3.  **RGBA Color**: 4 bytes (32-bit scalar) [S1].
+
+**Pixel Data Structure**
+Each pixel requires 7 bytes [S1]. The layout is:
+1.  **RGB Color**: 3 bytes (3 components $\times$ 1 byte/uint8).
+2.  **Depth Value**: 4 bytes (32-bit float) [S1].
+
+### Particle Density Formula
+The number of particles generated per cell is determined by the particle density $\rho$, calculated as [S1]:
+
+$$
+\rho = \frac{\alpha}{r^2 \Delta t}
+$$
+
+Where:
+*   $\alpha$: Opacity value from the user-specified transfer function.
+*   $r$: Radius of the particle.
+*   $\Delta t$: Specified integration interval length during the calculation of Sabella’s brightness equation [S1].
+
+### Algorithm Steps
+
+1.  **Initialization**:
+    *   Divide the unstructured volume data into sub-volumes, one for each MPI process [S1].
+    *   Initialize the progressive ensemble average image $P_{avg}$ to zero [S1].
+    *   Set the current ensemble counter $k = 1$ [S1].
+
+2.  **Particle Generation Stage** (Parallel per MPI Process):
+    *   Each MPI process loads its assigned sub-volume [S1].
+    *   Iterate through each cell in the sub-volume [S1].
+    *   Calculate $\rho$ for the cell using the formula above [S1].
+    *   Generate $\rho$ particles within the cell boundaries [S1].
+    *   Assign properties to each particle: position, normal vector, and color derived from the transfer function [S1].
+    *   *Optimization*: Intra-node parallelization using OpenMP multi-threading can be applied here as there is no dependency between cells [S1].
+
+3.  **Particle Projection Stage** (Parallel per MPI Process):
+    *   Each MPI process projects its locally generated particles onto the 2D image plane [S1].
+    *   For each particle, determine the pixel coordinates it covers.
+    *   Calculate the depth (distance from viewing point) for each particle.
+    *   Perform per-pixel depth comparison: if the particle is closer than the currently stored depth for that pixel, update the pixel's RGB color and depth value [S1].
+    *   Result: A partial rendered image (sub-image) containing 7 bytes per pixel [S1].
+    *   *Note*: Particles are discarded immediately after this stage to release memory [S1].
+
+4.  **Image Composition Stage** (Parallel Reduction):
+    *   Gather all sub-images from all MPI processes [S1].
+    *   Use a parallel image composition library (e.g., 234Compositor) to merge sub-images [S1].
+    *   The library performs per-pixel depth comparison across all sub-images [S1].
+    *   Only the color information corresponding to the closest depth remains in the merged image [S1].
+    *   *Constraint*: The composition library requires the presence of the entire set of sub-images to start the process [S1].
+
+5.  **Ensemble Averaging Stage** (Master Node):
+    *   Let $P_{k,i,j} = (R_{k,i,j}, G_{k,i,j}, B_{k,i,j})$ be the pixel value at position $(i, j)$ in the $k$-th ensemble image [S1].
+    *   Update the progressive average $P_{avg,i,j}$ using the following recurrence relations [S1]:
+        $$
+        R_{avg,i,j}^{(k)} = \frac{R_{avg,i,j}^{(k-1)} \times (k-1) + R_{k,i,j}}{k}
+        $$
+        $$
+        G_{avg,i,j}^{(k)} = \frac{G_{avg,i,j}^{(k-1)} \times (k-1) + G_{k,i,j}}{k}
+        $$
+        $$
+        B_{avg,i,j}^{(k)} = \frac{B_{avg,i,j}^{(k-1)} \times (k-1) + B_{k,i,j}}{k}
+        $$
+    *   This progressive averaging avoids storing all ensemble images in memory [S1].
+
+6.  **Iteration**:
+    *   Increment $k$.
+    *   If $k \le$ Number of Ensembles, return to Step 2.
+    *   Otherwise, output the final $P_{avg}$ image [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Global Constants
+NUM_ENSEMBLES = 100
+IMAGE_WIDTH = 512
+IMAGE_HEIGHT = 512
+PARTICLE_RADIUS = 1.0
+DELTA_T = 1.0
+
+# Data Structures
+class Particle:
+    x, y, z: float  # 4 bytes each
+    nx, ny, nz: float  # 4 bytes each
+    r, g, b, a: uint8  # 1 byte each (packed as 32-bit scalar)
+
+class Pixel:
+    r, g, b: uint8  # 1 byte each
+    depth: float  # 4 bytes
+
+# Progressive Average Storage
+avg_r = [[0.0 for _ in range(IMAGE_WIDTH)] for _ in range(IMAGE_HEIGHT)]
+avg_g = [[0.0 for _ in range(IMAGE_WIDTH)] for _ in range(IMAGE_HEIGHT)]
+avg_b = [[0.0 for _ in range(IMAGE_WIDTH)] for _ in range(IMAGE_HEIGHT)]
+
+def generate_particles(sub_volume):
+    """
+    Generates particles for a sub-volume.
+    Returns a list of Particle objects.
+    """
+    particles = []
+    for cell in sub_volume:
+        # Calculate density based on transfer function opacity alpha
+        alpha = get_opacity_from_transfer_function(cell)
+        rho = alpha / (PARTICLE_RADIUS ** 2 * DELTA_T)
+        
+        # Generate rho particles in the cell
+        for _ in range(rho):
+            p = Particle()
+            p.x, p.y, p.z = random_point_in_cell(cell)
+            p.nx, p.ny, p.nz = compute_normal(cell)
+            p.r, p.g, p.b, p.a = get_color_from_transfer_function(cell)
+            particles.append(p)
+    return particles
+
+def project_particles(particles, image_width, image_height):
+    """
+    Projects particles to a 2D image plane.
+    Returns a 2D array of Pixel objects (sub-image).
+    """
+    # Initialize sub-image with max depth
+    sub_image = [[Pixel(r=0, g=0, b=0, depth=float('inf')) for _ in range(image_width)] for _ in range(image_height)]
+    
+    for p in particles:
+        # Project 3D point to 2D pixel coordinates
+        u, v, depth = project_to_screen(p.x, p.y, p.z)
+        
+        # Check bounds
+        if 0 <= u < image_width and 0 <= v < image_height:
+            # Depth comparison: keep closest particle
+            if depth < sub_image[v][u].depth:
+                sub_image[v][u].r = p.r
+                sub_image[v][u].g = p.g
+                sub_image[v][u].b = p.b
+                sub_image[v][u].depth = depth
+                
+    return sub_image
+
+def compose_images(sub_images):
+    """
+    Merges sub-images using parallel image composition (e.g., 234Compositor).
+    Performs per-pixel depth comparison across all sub-images.
+    Returns the merged image.
+    """
+    # Initialize merged image with max depth
+    merged_image = [[Pixel(r=0, g=0, b=0, depth=float('inf')) for _ in range(IMAGE_WIDTH)] for _ in range(IMAGE_HEIGHT)]
+    
+    for sub_image in sub_images:
+        for y in range(IMAGE_HEIGHT):
+            for x in range(IMAGE_WIDTH):
+                pixel = sub_image[y][x]
+                if pixel.depth < merged_image[y][x].depth:
+                    merged_image[y][x].r = pixel.r
+                    merged_image[y][x].g = pixel.g
+                    merged_image[y][x].b = pixel.b
+                    merged_image[y][x].depth = pixel.depth
+                    
+    return merged_image
+
+def update_ensemble_average(ensemble_image, k):
+    """
+    Progressively updates the average image.
+    """
+    for y in range(IMAGE_HEIGHT):
+        for x in range(IMAGE_WIDTH):
+            pixel = ensemble_image[y][x]
+            # Update running average
+            avg_r[y][x] = (avg_r[y][x] * (k - 1) + pixel.r) / k
+            avg_g[y][x] = (avg_g[y][x] * (k - 1) + pixel.g) / k
+            avg_b[y][x] = (avg_b[y][x] * (k - 1) + pixel.b) / k
+
+def main():
+    # 1. Partition data among MPI ranks
+    sub_volumes = partition_volume(get_total_volume_data(), num_mpi_ranks)
+    my_sub_volume = sub_volumes[my_rank]
+    
+    # 2. Loop for ensembles
+    for k in range(1, NUM_ENSEMBLES + 1):
+        # Stage 1: Particle Generation
+        particles = generate_particles(my_sub_volume)
+        
+        # Stage 2: Particle Projection
+        my_sub_image = project_particles(particles, IMAGE_WIDTH, IMAGE_HEIGHT)
+        
+        # Particles are discarded here to save memory [G]
+        del particles
+        
+        # Stage 3: Image Composition
+        # Gather all sub-images from all ranks
+        all_sub_images = gather_images(my_sub_image)
+        
+        # Merge using depth comparison
+        merged_image = compose_images(all_sub_images)
+        
+        # Stage 4: Ensemble Averaging
+        update_ensemble_average(merged_image, k)
+        
+    # Final output
+    final_image = [[Pixel(r=int(avg_r[y][x]), g=int(avg_g[y][x]), b=int(avg_b[y][x]), depth=0) 
+                    for x in range(IMAGE_WIDTH)] for y in range(IMAGE_HEIGHT)]
+    return final_image
+```
+
+### Parameters and Typical Values
+*   **Particle Radius ($r$)**: Not given in the sources.
+*   **Integration Interval ($\Delta t$)**: Not given in the sources.
+*   **Number of Ensembles**: A pre-defined parameter. In experiments, 1, 10, and 100 were used [S1].
+*   **Image Resolution**: 512x512 pixels in experiments [S1].
+*   **MPI Processes**: 4 to 256 in experiments [S1].
+
+### Edge Cases and Pitfalls
+*   **Memory Overflow in Baseline**: Traditional PBVR methods store all particles before projection. With 100 ensembles, this required 330-334 MB regardless of MPI process count [S1]. The proposed method avoids this by discarding particles after projection [S1].
+*   **Performance Penalty**: The method uses a standard parallel image composition library (234Compositor) not optimized for order-independency. As the number of ensembles increases, the time spent on image composition can outweigh the gains from parallel projection, leading to performance penalties [S1].
+*   **Library Constraints**: 234Compositor requires the entire set of sub-images to be present before starting composition, which may impact asynchronous execution strategies [S1].
+*   **Load Balancing**: Memory cost variations between ensemble runs are attributed to stochastic particle generation causing variations in particle count per sub-volume [S1].
+
+## Operating characteristics
+*   **Memory Complexity**: The memory cost is constant with respect to the number of ensembles. For 100 ensembles, memory usage was 3.57-4.42 MB (decreasing as MPI processes increased from 4 to 256), compared to 330-334 MB for the baseline method [S1].
+*   **Time Complexity**: The projection stage scales with the number of MPI processes. On the K computer with 100 ensembles, projection time decreased from 18.16s (4 MPI) to 3.46s (256 MPI) [S1].
+*   **Strengths**: Significantly reduced memory footprint compared to particle-gathering methods; enables high-quality rendering (via many ensembles) on memory-constrained systems; suitable for in-situ visualization [S1].
+*   **Limitations**: Overall performance may be limited by the image composition stage if the library is not optimized for PBVR's order-independency; requires sufficient bandwidth for gathering sub-images [S1].
+*   **When to Use**: Large-scale unstructured volume data where memory is a bottleneck and high-quality rendering (many samples) is required [S1].
+*   **When Not to Use**: When the overhead of image composition dominates projection time, or when real-time rendering with very few ensembles is needed and particle gathering is faster than image gathering [S1].
+
+## Background
+The method was proposed to address the high memory consumption of existing parallel PBVR approaches, which gather particle data to a master node [S1]. It was implemented and evaluated on the K computer (SPARC64 fx CPU) using the 234Compositor library [S1]. The work builds on previous parallel PBVR methods [4] and utilizes the 234Compositor library [5] for parallel image composition. The research was carried out under the auspices of the Ministry of Education, Culture, Sports, Science and Technology [S1].
+
+## Sources
+[S1] A Memory Efficient Image Composition-based Parallel Particle Based Volume Rendering, https://doi.org/10.15748/jasse.6.1, fetched 2026-10-28

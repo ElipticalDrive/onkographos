@@ -1,0 +1,649 @@
+--- v013.md
++++ v014.md
+@@ -4,54 +4,49 @@
+ 
+ ## Overview
+-Panoptic Lifting learns a panoptic 3D volumetric representation from posed RGB images and machine-generated 2D panoptic segmentation masks, lifting noisy 2D labels into a consistent 3D representation comprising color, density, semantics, and instances [S1]. It differs from siblings like [Panoptic NeRF](11916-panoptic-nerf.md) and [DM-NeRF](11916-depth-guided-nerf-training-configuration.md) by requiring no manual ground truth (such as coarse meshes or per-image 2D panoptic segmentations), relying instead on pre-trained 2D segmentation networks [S1]. It outperforms these methods in scene-level Panoptic Quality (PQ) while maintaining comparable novel view synthesis PSNR [S1].
++Panoptic Lifting learns a panoptic 3D volumetric representation from posed RGB images and machine-generated 2D panoptic segmentation masks, lifting noisy 2D labels into a consistent 3D representation of color, density, semantics, and instances [S1]. Unlike [Panoptic NeRF](11916-panoptic-nerf.md) and [DM-NeRF](11916-dm-nerf.md) which require manual ground truth or coarse meshes, this method requires only pre-trained 2D segmentation outputs, making it robust to in-the-wild noise [S1]. It sets itself apart by using a linear assignment to resolve 2D instance inconsistencies and specific gradient-blocking techniques to prevent noisy labels from corrupting geometry [S1].
+ 
+ ## How it works
+-**Inputs:** Posed RGB images $\{I\}$ and corresponding machine-generated 2D panoptic segmentation masks. The 2D masks provide an RGB color $\hat{c}_r \in \mathbb{R}^3$, a semantic class $\hat{k}_r \in K$, and a 2D instance ID $\hat{h}_r \in H_I$ for each ray $r$ belonging to a training image. The instance ID $\hat{h}_r$ is defined only for "thing" classes $\hat{k}_r \in K_T$ [S1].
+-
+-**Outputs:** A panoptic radiance field $\Phi(\mathbf{x}, \mathbf{d})$ that, for any 3D point $\mathbf{x} \in \mathbb{R}^3$ and viewing direction $\mathbf{d} \in S^2$, outputs:
+-1.  Density $\sigma \in \mathbb{R}_{\ge 0}$.
+-2.  Semantic class distribution $\kappa$ over classes $K$.
+-3.  Distribution $\pi$ over surrogate identifiers $J$.
+-4.  RGB color $\mathbf{c} \in \mathbb{R}^3$ [S1].
+-
+-**Data Structures:**
+-The representation leverages a TensoRF [4] architecture for color and density. Two separate small Multi-Layer Perceptrons (MLPs) are used for the semantic field and the instance field [S1].
+-*   **Semantic MLP:** Outputs the semantic class distribution $\kappa$.
+-*   **Instance MLP:** Outputs the distribution $\pi$ over a fixed number of class-agnostic, 3D-consistent surrogate identifiers $J$ [S1].
+-*   **Surrogate Identifiers:** The set $J$ is fixed in size. The set of all possible 3D instances is $H_{3D} := K_T \times J$ [S1].
+-
+-**Preprocessing (Test-Time Augmentation):**
+-To handle noise in machine-generated labels, test-time augmentations (horizontal flip, scale, brightness, contrast) are applied to input images. The resulting segmentations are fused by segment clustering to obtain a semantic class distribution $\hat{\kappa}_r$ and a confidence estimate $w_r$ for each pixel (ray $r$) [S1].
+-
+-**Linear Assignment:**
+-To resolve inconsistencies in 2D instance identifiers across views, a linear assignment problem is solved. The cost is based on the model’s current 3D predictions and the machine-generated 2D masks. This maps each 2D instance $\hat{h}_r$ to a unique 3D surrogate identifier via an injective mapping $\Pi^*_R$ [S1].
+-
+-**Rendering:**
+-Given a ray $r$ parameterized as $r = p_0 + t\mathbf{d}_r$, the transmittance is $\alpha_t(r) := \exp \left(-\int_0^t \sigma(r_s)ds\right)$. The rendered value for any vector field $f$ is:
+-$$ R[f |r, \sigma] := \int_0^\infty \alpha_t (r)\sigma(r_t)f (r_t, \mathbf{d}_{r_t})dt $$
+-Color $\mathbf{c}_r$, semantic distribution $\kappa_r$, and instance distribution $\pi_r$ are rendered using this equation [S1].
+-
+-**Novel View Panoptic Segmentation:**
+-For a ray $r$ from a novel view:
+-1.  Compute the most probable semantic class: $k^*_r := \arg \max_{k \in K} \kappa_r(k)$.
+-2.  If $k^*_r$ is a thing class, compute the most probable surrogate identifier: $j^*_r := \arg \max_{j \in J} \pi_r(j)$.
+-3.  Form the unique 3D instance identifier: $(k^*_r, j^*_r) \in H_{3D}$ [S1].
+-
+-**Training Objective:**
+-The total loss is:
+-$$ L_{tot}(R) := \lambda_{ins} L_{ins}(R_I) + \lambda_{con} L_{con}(R_I) + \lambda_{RGB} L_{RGB}(R_S) + \lambda_{sem} L_{sem}(R_S) $$
+-where $R_S$ are rays randomly sampled across the scene and $R_I$ are rays sampled from a single image [S1].
+-
+-1.  **Semantic Loss ($L_{sem}$):** Cross-entropy between the rendered distribution $\kappa_r$ and the augmented label distribution $\hat{\kappa}_r$, weighted by confidence $w_r$:
+-    $$ L_{sem}(R) := -\frac{1}{|R|} \sum_{r \in R} w_r \sum_{k \in K} \hat{\kappa}_r(k) \log \kappa_r(k) $$
+-    The semantic field outputs bounded probability distributions directly, not logits, to prevent semantic inconsistencies in low-density areas [S1].
+-
+-2.  **Instance Loss ($L_{ins}$):** Log-loss of the rendered instance distribution $\pi_r$ relative to the mapped 2D instance. For a batch of rays $R$, let $R_h$ be the subset of rays belonging to 2D instance $h \in H_I$, and $H_R \subseteq H_I$ be the subset of 2D instances in the batch. Each ray $r$ is assigned the most compatible 3D surrogate identifier $\Pi^*_R(\hat{h}_r)$ [S1].
+-
+-3.  **Segment Consistency Loss ($L_{con}$):** Guides semantic supervision to avoid optima that fragment objects in the presence of label inconsistencies [S1].
+-
+-4.  **Photometric Loss ($L_{RGB}$):** L2 loss on the rendered color $\mathbf{c}_r$ against the ground truth $\hat{c}_r$ [S1].
+-
+-**Pseudocode:**
++**Inputs and Outputs**
++*   **Inputs:** Posed RGB images $\{I\}$ and corresponding machine-generated 2D panoptic segmentation masks. Each training ray $r$ has an associated RGB color $\hat{c}_r \in \mathbb{R}^3$, a semantic class $\hat{k}_r \in K$, and a 2D instance ID $\hat{h}_r \in H_I$ (defined only for thing classes $\hat{k}_r \in K_T$) [S1].
++*   **Outputs:** A panoptic radiance field $\Phi(\mathbf{x}, \mathbf{d})$ that renders RGB color $c$, density $\sigma$, semantic class distribution $\kappa$, and instance distribution $\pi$ along any ray $r$ [S1]. From novel views, it produces 3D-consistent panoptic segmentations where a 3D instance is defined as a pair $(k, j) \in H_{3D}$ [S1].
++
++**Data Structures**
++The representation $\Phi(\mathbf{x}, \mathbf{d})$ assigns to each 3D point $\mathbf{x} \in \mathbb{R}^3$ and viewing direction $\mathbf{d} \in S^2$:
++1.  **Density:** $\sigma \in \mathbb{R}_{\ge 0}$ [S1].
++2.  **Semantic Distribution:** $\kappa$ over the set of semantic classes $K$ [S1].
++3.  **Instance Distribution:** $\pi$ over a fixed set of surrogate identifiers $J$ [S1].
++4.  **Color:** $c \in \mathbb{R}^3$ [S1].
++
++The architecture leverages **TensoRF** [4] for color and density, and two separate small Multi-Layer Perceptrons (MLPs) for the semantic field ($\kappa$) and the instance field ($\pi$) [S1].
++*   $K$: Set of semantic classes, partitioned into thing classes $K_T$ and stuff classes $K_S$ [S1].
++*   $J$: Fixed number of class-agnostic, 3D-consistent surrogate object identifiers held by the instance MLP [S1].
++*   $H_{3D}$: Set of all possible 3D instances, defined as $H_{3D} := K_T \times J$ [S1].
++
++**Rendering Equation**
++Given a density field $\sigma$ and a vector field $f$ (e.g., color, semantics, instances), the rendered value $R[f|r, \sigma]$ along a ray $r$ is:
++$$
++R[f |r, \sigma] := \int_0^\infty \alpha_t (r)\sigma(r_t)f (r_t, d_{r_t})dt
++$$
++where $\alpha_t (r) := \exp \left(-\int_0^t \sigma(r_s)ds\right)$ is the transmittance probability at $t$ [S1].
++
++**Training Procedure**
++The model is optimized using the total loss $\mathcal{L}_{tot}$:
++$$
++\mathcal{L}_{tot}(\mathcal{R}) := \lambda_{ins} \mathcal{L}_{ins}(\mathcal{R}_I) + \lambda_{con} \mathcal{L}_{con}(\mathcal{R}_I) + \lambda_{RGB} \mathcal{L}_{RGB}(\mathcal{R}_S) + \lambda_{sem} \mathcal{L}_{sem}(\mathcal{R}_S)
++$$
++where $\mathcal{R}_S$ are rays randomly sampled across the scene and $\mathcal{R}_I$ are rays sampled from a single image [S1].
++
++1.  **Confidence Estimation:** Run test-time augmentations (horizontal flip, scale, brightness, contrast) on input images. Fuse resulting segmentations by segment clustering to obtain a semantic class distribution $\hat{\kappa}_r$ and a confidence estimate $w_r$ for each pixel (ray $r$) [S1].
++2.  **Linear Assignment:** To handle inconsistent 2D instance IDs across views, solve a linear assignment problem. The cost is based on the model’s current predictions and the machine-generated segmentation masks. This maps each 2D instance $\hat{h}_r$ to a unique 3D surrogate identifier via an injective mapping $\Pi^*_\mathcal{R}$ [S1].
++3.  **Semantic Loss:** Supervise the semantic MLP directly. The loss is the cross-entropy between the rendered distribution $\kappa_r$ and the augmented 2D label distribution $\hat{\kappa}_r$, weighted by confidence $w_r$:
++    $$
++    \mathcal{L}_{sem}(\mathcal{R}) := -\frac{1}{|\mathcal{R}|} \sum_{r \in \mathcal{R}} w_r \sum_{k \in K} \hat{\kappa}_r (k) \log \kappa_r (k)
++    $$
++    [S1].
++4.  **Instance Loss:** Supervise the instance MLP using the mapped 2D instances. Minimize the log-loss of the co-occurrence of the rendered instance distribution $\pi_r$ and the mapped surrogate identifier [S1].
++5.  **Segment Consistency Loss:** Apply an additional loss $\mathcal{L}_{con}$ to guide semantic supervision, avoiding optima that fragment objects in the presence of label inconsistencies [S1].
++6.  **Photometric Loss:** Standard L2 loss on rendered color $c_r$ vs ground truth $\hat{c}_r$ [S1].
++
++**Pseudocode**
+ 
+ ```python
+@@ -66,14 +61,14 @@
+         
+         Args:
+-            num_surrogates (int): Fixed number of class-agnostic surrogate identifiers (|J|).
+-            num_classes (int): Number of semantic classes (|K|).
++            num_surrogates (int): Size of the fixed set J of surrogate identifiers.
++            num_classes (int): Size of the semantic class set K.
+             tensorf_config (dict): Configuration for the TensoRF density/color backbone.
+         """
+-        super().__init__()
+         # TensoRF backbone for density and color
+         self.tensorf = TensoRFBackbone(tensorf_config)
+         
+-        # Semantic MLP: outputs bounded probability distribution over K
+-        # Uses Softmax to ensure bounded probabilities [S1]
++        # Semantic MLP: outputs raw logits for classes K
++        # Note: The method requires bounded probability distributions, 
++        # so we apply softmax or sigmoid to ensure outputs are probabilities.
+         self.semantic_mlp = nn.Sequential(
+             nn.Linear(tensorf_config.feature_dim, 128),
+@@ -82,6 +77,5 @@
+         )
+         
+-        # Instance MLP: outputs distribution over J surrogate identifiers
+-        # Uses Softmax to ensure bounded probabilities [S1]
++        # Instance MLP: outputs raw logits for surrogates J
+         self.instance_mlp = nn.Sequential(
+             nn.Linear(tensorf_config.feature_dim, 128),
+@@ -90,226 +84,324 @@
+         )
+         
+-        # Loss weights [S1]
++        # Hyperparameters
+         self.lambda_ins = 1.0
+         self.lambda_con = 1.35
++        self.lambda_rgb = 1.0
+         self.lambda_sem = 1.0
+-        self.lambda_rgb = 1.0
+-
+-    def forward(self, x, d):
+-        """
+-        Query the radiance field at point x with direction d.
++        
++        # Optimizer setup (Adam)
++        # LR: 5e-4 for MLPs, 1e-2 for TensoRF lines/planes
++        self.optimizer = torch.optim.Adam(
++            list(self.tensorf.parameters()) + 
++            list(self.semantic_mlp.parameters()) + 
++            list(self.instance_mlp.parameters()),
++            lr=5e-4
++        )
++
++    def get_features(self, x, d):
++        """
++        Query the TensoRF backbone to get features for a point x and direction d.
++        Returns feature vector and density sigma.
++        """
++        # Implementation details of TensoRF query are abstracted here.
++        # In practice, this involves grid lookups and MLP processing.
++        features, sigma = self.tensorf.query(x, d)
++        return features, sigma
++
++    def render_ray(self, ray_origins, ray_directions, sigma_fn, semantic_fn, instance_fn, color_fn, 
++                   num_samples, near, far, noise_std=0.0):
++        """
++        Standard volume rendering along a ray.
+         
+         Args:
+-            x (Tensor): 3D points, shape (N, 3).
+-            d (Tensor): Viewing directions, shape (N, 3).
++            ray_origins: (N, 3)
++            ray_directions: (N, 3)
++            sigma_fn: function returning sigma for sampled points
++            semantic_fn: function returning semantic logits/probs
++            instance_fn: function returning instance logits/probs
++            color_fn: function returning color
++            num_samples: int
++            near, far: float
+             
+         Returns:
+-            sigma (Tensor): Density, shape (N,).
+-            c (Tensor): RGB color, shape (N, 3).
+-            kappa (Tensor): Semantic class distribution, shape (N, K).
+-            pi (Tensor): Surrogate identifier distribution, shape (N, J).
+-        """
+-        # Encode and decode density and color using TensoRF [S1]
+-        sigma, c = self.tensorf(x, d)
+-        
+-        # Get features for semantic and instance heads [S1]
+-        # Note: TensoRF typically provides features at x; d is used for view-dependent color
+-        features = self.tensorf.get_features(x)
+-        
+-        # Semantic head: outputs logits, then softmax for bounded probabilities [S1]
+-        semantic_logits = self.semantic_mlp(features)
+-        kappa = F.softmax(semantic_logits, dim=-1)
+-        
+-        # Instance head: outputs logits, then softmax for bounded probabilities [S1]
+-        instance_logits = self.instance_mlp(features)
+-        pi = F.softmax(instance_logits, dim=-1)
+-        
+-        return sigma, c, kappa, pi
+-
+-    def render_ray(self, ray_origins, ray_directions, sigma_fn, kappa_fn, pi_fn, c_fn, t_near, t_far, num_samples):
+-        """
+-        Render a ray using volumetric rendering.
++            rendered_color, rendered_semantics, rendered_instances, weights
++        """
++        # Sample points along ray
++        t_vals = torch.linspace(0., 1., num_samples)
++        z_vals = near * (1. - t_vals) + far * t_vals
++        
++        # Perturb samples
++        if noise_std > 0:
++            noise = torch.randn_like(z_vals) * noise_std
++            z_vals = z_vals + noise
++            
++        pts = ray_origins.unsqueeze(1) + ray_directions.unsqueeze(1) * z_vals.unsqueeze(2)
++        
++        # Query network for sigma, semantic, instance, color
++        # Note: In Panoptic Lifting, semantic and instance fields are separate MLPs
++        # taking features from the TensoRF backbone.
++        # For simplicity, we assume helper functions encapsulate the MLP forward passes.
++        
++        # 1. Get density
++        sigma = sigma_fn(pts)
++        
++        # 2. Get semantic distribution (bounded probabilities)
++        # The method specifies rendering bounded probability distributions, not logits.
++        # We assume semantic_fn returns probabilities directly or we apply softmax.
++        semantic_probs = semantic_fn(pts) # Shape: (N, num_classes)
++        
++        # 3. Get instance distribution (bounded probabilities)
++        instance_probs = instance_fn(pts) # Shape: (N, num_surrogates)
++        
++        # 4. Get color
++        color = color_fn(pts) # Shape: (N, 3)
++        
++        # Compute transmittance and weights
++        # alpha_t(r) = exp(-int_0^t sigma(r_s) ds)
++        # Discrete approximation:
++        dists = z_vals[:, 1:] - z_vals[:, :-1]
++        alpha = 1.0 - torch.exp(-sigma * dists)
++        transmittance = torch.cumprod(torch.cat([torch.ones_like(alpha[:, :1]), 1.0 - alpha + 1e-10], dim=1), dim=1)[:, :-1]
++        weights = alpha * transmittance
++        
++        # Render fields
++        rendered_color = torch.sum(weights.unsqueeze(-1) * color, dim=1)
++        rendered_semantics = torch.sum(weights.unsqueeze(-1) * semantic_probs, dim=1)
++        rendered_instances = torch.sum(weights.unsqueeze(-1) * instance_probs, dim=1)
++        
++        return rendered_color, rendered_semantics, rendered_instances, weights
++
++    def compute_losses(self, rendered_color, rendered_semantics, rendered_instances, 
++                       gt_color, gt_semantic_dist, gt_instance_ids, confidence_weights, 
++                       mapped_surrogates, semantic_gt_dist):
++        """
++        Compute the total loss components.
+         
+         Args:
+-            ray_origins (Tensor): Ray origins, shape (R, 3).
+-            ray_directions (Tensor): Ray directions, shape (R, 3).
+-            sigma_fn (callable): Function returning density sigma(x, d).
+-            kappa_fn (callable): Function returning semantic distribution kappa(x, d).
+-            pi_fn (callable): Function returning instance distribution pi(x, d).
+-            c_fn (callable): Function returning color c(x, d).
+-            t_near (float): Near plane distance.
+-            t_far (float): Far plane distance.
+-            num_samples (int): Number of samples per ray.
++            rendered_color: (N, 3)
++            rendered_semantics: (N, K) - Bounded probabilities
++            rendered_instances: (N, J) - Bounded probabilities
++            gt_color: (N, 3)
++            gt_semantic_dist: (N, K) - Augmented 2D label distribution
++            gt_instance_ids: (N,) - 2D instance IDs from input
++            confidence_weights: (N,) - Confidence w_r from TTA
++            mapped_surrogates: (N,) - 3D surrogate IDs mapped via linear assignment
++            semantic_gt_dist: (N, K) - Ground truth semantic distribution for consistency loss
+             
+         Returns:
+-            color (Tensor): Rendered RGB, shape (R, 3).
+-            kappa_r (Tensor): Rendered semantic distribution, shape (R, K).
+-            pi_r (Tensor): Rendered instance distribution, shape (R, J).
+-            depth (Tensor): Rendered depth, shape (R,).
+-        """
+-        # Sample points along the ray [S1]
+-        t_vals = torch.linspace(t_near, t_far, num_samples)
+-        dists = t_vals[1:] - t_vals[:-1]
+-        z_vals = t_vals + dists * torch.rand_like(t_vals)
+-        
+-        # Query fields at sampled points
+-        # x = ray_origins + ray_directions * z_vals[..., None]
+-        # This requires broadcasting x and d to match sampled points
+-        # For brevity, assuming a helper `sample_and_query` exists that handles this
+-        # and returns sigma, c, kappa, pi for all samples
+-        sigma, c, kappa, pi = sample_and_query(
+-            ray_origins, ray_directions, z_vals, 
+-            sigma_fn, c_fn, kappa_fn, pi_fn
+-        )
+-        
+-        # Compute transmittance alpha_t(r) [S1]
+-        # alpha_t(r) = exp(-int_0^t sigma(r_s) ds)
+-        # Discrete approximation:
+-        alpha = 1.0 - torch.exp(-sigma * dists)
+-        transmittance = torch.cumprod(1.0 - alpha + 1e-10, dim=-1) # Cumulative product of (1-alpha)
+-        # Adjust transmittance to be at the start of each segment
+-        transmittance = torch.cat([torch.ones_like(transmittance[:, :1]), transmittance[:, :-1]], dim=-1)
+-        
+-        # Rendered values: R[f|r, sigma] = int alpha_t * sigma * f dt [S1]
+-        weights = alpha * transmittance
+-        weights_sum = weights.sum(dim=-1, keepdim=True)
+-        
+-        color = (weights[..., None] * c).sum(dim=-2)
+-        kappa_r = (weights[..., None] * kappa).sum(dim=-2)
+-        pi_r = (weights[..., None] * pi).sum(dim=-2)
+-        depth = (weights * z_vals).sum(dim=-1)
+-        
+-        return color, kappa_r, pi_r, depth
+-
+-    def compute_loss(self, rays, gt_color, gt_kappa_dist, gt_confidence, gt_2d_instances, mapping):
+-        """
+-        Compute the total training loss.
++            total_loss, rgb_loss, sem_loss, ins_loss, con_loss
++        """
++        # 1. RGB Loss (L2)
++        rgb_loss = F.mse_loss(rendered_color, gt_color)
++        
++        # 2. Semantic Loss (Cross-Entropy weighted by confidence)
++        # L_sem = - sum(w_r * sum(k) k_hat_r(k) log k_r(k))
++        # Note: rendered_semantics are probabilities, so we use log directly.
++        # Add small epsilon to log for numerical stability
++        log_sem = torch.log(rendered_semantics + 1e-10)
++        sem_loss = -torch.mean(confidence_weights * torch.sum(gt_semantic_dist * log_sem, dim=1))
++        
++        # 3. Instance Loss (Log-loss / Cross-Entropy on mapped surrogates)
++        # The method minimizes the log-loss of the co-occurrence of rendered instance 
++        # distribution and the mapped 2D instances.
++        # We assume mapped_surrogates contains the index of the surrogate ID for each ray.
++        # One-hot encode the mapped surrogates
++        one_hot_surrogates = F.one_hot(mapped_surrogates, num_classes=rendered_instances.shape[1]).float()
++        log_inst = torch.log(rendered_instances + 1e-10)
++        ins_loss = -torch.mean(torch.sum(one_hot_surrogates * log_inst, dim=1))
++        
++        # 4. Segment Consistency Loss (L_con)
++        # Specific formulation not fully detailed in text, but described as guiding 
++        # semantic supervision to avoid fragmenting objects.
++        # Typically involves a consistency term between neighboring pixels or rays.
++        # Placeholder for specific consistency metric implementation.
++        con_loss = self.compute_segment_consistency_loss(rendered_semantics, semantic_gt_dist)
++        
++        # Total Loss
++        total_loss = (self.lambda_ins * ins_loss + 
++                      self.lambda_con * con_loss + 
++                      self.lambda_rgb * rgb_loss + 
++                      self.lambda_sem * sem_loss)
++        
++        return total_loss, rgb_loss, sem_loss, ins_loss, con_loss
++
++    def compute_segment_consistency_loss(self, rendered_semantics, semantic_gt_dist):
++        """
++        Placeholder for Segment Consistency Loss.
++        The source mentions this loss guides semantic supervision to avoid optima 
++        that fragment objects in the presence of label inconsistencies.
++        """
++        # Implementation detail not explicitly provided in the source text.
++        # Common approaches involve smoothing or pairwise consistency terms.
++        # [G] Returning 0 as a placeholder; implementer should add specific consistency logic.
++        return torch.tensor(0.0, requires_grad=True)
++
++    def forward(self, rays, gt_data, confidence_weights, mapped_surrogates, semantic_gt_dist):
++        """
++        Forward pass and training step.
+         
+         Args:
+-            rays (dict): Dictionary containing ray origins, directions, and sampled points.
+-            gt_color (Tensor): Ground truth RGB, shape (R, 3).
+-            gt_kappa_dist (Tensor): Ground truth semantic distribution from TTA, shape (R, K).
+-            gt_confidence (Tensor): Confidence weights from TTA, shape (R,).
+-            gt_2d_instances (Tensor): Ground truth 2D instance IDs, shape (R,).
+-            mapping (dict): Mapping from 2D instance IDs to 3D surrogate IDs.
++            rays: Tuple of (origins, directions, near, far)
++            gt_data: Tuple of (gt_color, gt_semantic_dist, gt_instance_ids)
++            confidence_weights: Tensor of weights w_r
++            mapped_surrogates: Tensor of mapped 3D surrogate IDs
++            semantic_gt_dist: Tensor of ground truth semantic distributions
+             
+         Returns:
+-            total_loss (Tensor): Scalar loss value.
+-        """
+-        # Forward pass
+-        sigma, c, kappa, pi = self.forward(rays['x'], rays['d'])
+-        
+-        # Render color, semantic, and instance distributions [S1]
+-        c_r, kappa_r, pi_r, _ = self.render_ray(
+-            rays['origins'], rays['directions'],
+-            lambda x, d: self.forward(x, d)[0],
+-            lambda x, d: self.forward(x, d)[2],
+-            lambda x, d: self.forward(x, d)[3],
+-            lambda x, d: self.forward(x, d)[1],
+-            t_near=0.0, t_far=10.0, num_samples=128
+-        )
+-        
+-        # Photometric Loss (L_RGB) [S1]
+-        l_rgb = F.mse_loss(c_r, gt_color)
+-        
+-        # Semantic Loss (L_sem) [S1]
+-        # Cross-entropy weighted by confidence
+-        # L_sem = -1/|R| sum w_r sum_k kappa_hat_r(k) log kappa_r(k)
+-        l_sem = -torch.mean(gt_confidence * torch.sum(gt_kappa_dist * torch.log(kappa_r + 1e-10), dim=-1))
+-        
+-        # Instance Loss (L_ins) and Segment Consistency Loss (L_con) [S1]
+-        # Map 2D instances to 3D surrogates using linear assignment result 'mapping'
+-        # For each ray, get the target surrogate ID
+-        target_surrogates = torch.zeros_like(gt_2d_instances)
+-        for r_idx, inst_id in enumerate(gt_2d_instances):
+-            if inst_id in mapping:
+-                target_surrogates[r_idx] = mapping[inst_id]
+-            else:
+-                target_surrogates[r_idx] = -1 # Ignore if not mapped
+-        
+-        # Instance Loss: Log-loss of rendered pi_r relative to target surrogates
+-        # Only for thing classes (assumed handled by gt_2d_instances being valid only for things)
+-        valid_mask = target_surrogates >= 0
+-        if valid_mask.sum() > 0:
+-            target_one_hot = F.one_hot(target_surrogates[valid_mask].long(), num_classes=pi.shape[1])
+-            l_ins = -torch.mean(torch.sum(pi_r[valid_mask] * torch.log(pi_r[valid_mask] + 1e-10) * target_one_hot.float(), dim=-1))
+-            l_con = 0.0 # Placeholder for segment consistency loss logic [S1]
+-        else:
+-            l_ins = torch.tensor(0.0)
+-            l_con = torch.tensor(0.0)
+-            
+-        # Gradient Blocking: Stop gradients from semantic and instance branches to geometry [S1]
+-        # This is implemented by detaching sigma or the features used for sigma from the semantic/instance heads
+-        # In the forward pass, ensure sigma is not in the computation graph of kappa/pi
+-        # (Handled by architecture design: TensoRF outputs sigma separately)
+-        
+-        total_loss = (self.lambda_ins * l_ins + 
+-                      self.lambda_con * l_con + 
+-                      self.lambda_rgb * l_rgb + 
+-                      self.lambda_sem * l_sem)
++            total_loss
++        """
++        origins, directions, near, far = rays
++        gt_color, gt_semantic_dist, gt_instance_ids = gt_data
++        
++        # Get features and sigma from TensoRF
++        # Note: The semantic and instance MLPs take features from the TensoRF backbone.
++        # We need to query the backbone to get features for the sampled points.
++        # This is handled internally by the render_ray function if we pass the backbone.
++        
++        # Render
++        rendered_color, rendered_semantics, rendered_instances, _ = self.render_ray(
++            origins, directions,
++            sigma_fn=lambda x: self.tensorf.get_sigma(x),
++            semantic_fn=lambda x: F.softmax(self.semantic_mlp(self.tensorf.get_features(x)), dim=-1),
++            instance_fn=lambda x: F.softmax(self.instance_mlp(self.tensorf.get_features(x)), dim=-1),
++            color_fn=lambda x: self.tensorf.get_color(x),
++            num_samples=128, # Typical value
++            near=near,
++            far=far
++        )
++        
++        # Compute Losses
++        # Note: Gradient blocking from segmentation branches to geometry is required.
++        # This is done by detaching the sigma/density gradients or the backbone features 
++        # used for semantic/instance branches if they share the backbone.
++        # In Panoptic Lifting, the semantic and instance MLPs take features from the TensoRF backbone.
++        # To block gradients to geometry (density), we must ensure the semantic/instance 
++        # branches do not update the TensoRF parameters that control density.
++        
++        # Detach features for semantic and instance branches to block gradients to TensoRF (geometry)
++        features = self.tensorf.get_features(origins) # Example: get features at ray origins or sampled points
++        # In practice, sampling happens inside render_ray. We need to block gradients 
++        # from the semantic/instance losses back to the TensoRF backbone.
++        
++        # Re-render with gradient blocking
++        # 1. Get features
++        # 2. Compute sigma for density (used for transmittance)
++        # 3. Compute semantic/instance probs from features (detached from sigma path if necessary)
++        
++        # Simplified gradient blocking:
++        # The source states: "stop gradients from the segmentation branches back to the densities."
++        # This implies the semantic and instance MLPs should not update the parameters 
++        # that produce sigma. If they share the backbone, we detach the backbone output 
++        # for the semantic/instance heads.
++        
++        # Let's assume the render_ray function handles the forward pass.
++        # We need to manually handle the gradient blocking in the loss computation or forward pass.
++        
++        # Forward pass for RGB and Density (TensoRF only)
++        rendered_color_rgb, _, _, _ = self.render_ray(
++            origins, directions,
++            sigma_fn=lambda x: self.tensorf.get_sigma(x),
++            semantic_fn=lambda x: torch.zeros_like(x), # Dummy
++            instance_fn=lambda x: torch.zeros_like(x), # Dummy
++            color_fn=lambda x: self.tensorf.get_color(x),
++            num_samples=128,
++            near=near,
++            far=far
++        )
++        
++        # Forward pass for Semantic and Instance (MLPs only, features detached from TensoRF if shared)
++        # Get features
++        # Note: The exact feature extraction mechanism for TensoRF is complex.
++        # We assume get_features returns a tensor that can be passed to MLPs.
++        # To block gradients to geometry, we detach the features used for semantic/instance.
++        features = self.tensorf.get_features(origins) # This might be at ray origins, not sampled points.
++        # Correct approach: Sample points, get features, then split.
++        
++        # Re-implementing render_ray logic with gradient blocking
++        t_vals = torch.linspace(0., 1., 128)
++        z_vals = near * (1. - t_vals) + far * t_vals
++        pts = origins.unsqueeze(1) + directions.unsqueeze(1) * z_vals.unsqueeze(2)
++        
++        # Get features and sigma
++        features_all, sigma = self.tensorf.query(pts) # Shape: (N, 128, feature_dim), (N, 128)
++        
++        # Block gradients from semantic/instance to TensoRF
++        features_detached = features_all.detach()
++        
++        # Semantic probs
++        semantic_logits = self.semantic_mlp(features_detached)
++        semantic_probs = F.softmax(semantic_logits, dim=-1)
++        
++        # Instance probs
++        instance_logits = self.instance_mlp(features_detached)
++        instance_probs = F.softmax(instance_logits, dim=-1)
++        
++        # Color
++        color = self.tensorf.get_color(pts) # Assuming get_color uses features or pts
++        
++        # Compute weights using sigma (which is part of TensoRF)
++        dists = z_vals[:, 1:] - z_vals[:, :-1]
++        alpha = 1.0 - torch.exp(-sigma * dists)
++        transmittance = torch.cumprod(torch.cat([torch.ones_like(alpha[:, :1]), 1.0 - alpha + 1e-10], dim=1), dim=1)[:, :-1]
++        weights = alpha * transmittance
++        
++        # Render
++        rendered_color = torch.sum(weights.unsqueeze(-1) * color, dim=1)
++        rendered_semantics = torch.sum(weights.unsqueeze(-1) * semantic_probs, dim=1)
++        rendered_instances = torch.sum(weights.unsqueeze(-1) * instance_probs, dim=1)
++        
++        # Compute Losses
++        total_loss, _, _, _, _ = self.compute_losses(
++            rendered_color, rendered_semantics, rendered_instances,
++            gt_color, gt_semantic_dist, gt_instance_ids, 
++            confidence_weights, mapped_surrogates, semantic_gt_dist
++        )
+         
+         return total_loss
+ 
+-    def optimize(self, dataloader, optimizer, num_iterations):
+-        """
+-        Training loop.
++    def edit_scene(self, instance_label, operation, new_position=None, new_rotation=None):
++        """
++        Scene editing operations.
+         
+         Args:
+-            dataloader: Iterator yielding batches of (rays, gt_color, gt_kappa_dist, gt_confidence, gt_2d_instances).
+-            optimizer: Adam optimizer with lr=5e-4 for MLPs, 1e-2 for TensoRF [S1].
+-            num_iterations: Total training iterations (450k) [S1].
+-        """
+-        for i in range(num_iterations):
+-            batch = next(dataloader)
+-            rays, gt_color, gt_kappa_dist, gt_confidence, gt_2d_instances = batch
+-            
+-            # Linear assignment step to update mapping based on current predictions [S1]
+-            # This is done periodically or per batch to map 2D instances to 3D surrogates
+-            mapping = solve_linear_assignment(self, gt_2d_instances, rays)
+-            
+-            optimizer.zero_grad()
+-            loss = self.compute_loss(rays, gt_color, gt_kappa_dist, gt_confidence, gt_2d_instances, mapping)
+-            loss.backward()
+-            optimizer.step()
+-            
+-            if i % 1000 == 0:
+-                print(f"Iteration {i}, Loss: {loss.item()}")
+-
+-def solve_linear_assignment(model, gt_2d_instances, rays):
+-    """
+-    Solve linear assignment to map 2D instances to 3D surrogates.
+-    Cost is based on model's current predictions and 2D masks [S1].
+-    """
+-    # Placeholder for the specific linear assignment algorithm details
+-    # which depend on the cost matrix construction not fully detailed in the text
+-    # but described as "based on the model's current predictions and the machine-generated segmentation masks"
+-    return {}
++            instance_label: The 3D instance label (k, j) to edit.
++            operation: 'delete', 'duplicate', or 'manipulate'.
++            new_position: (3,) for duplicate/manipulate.
++            new_rotation: (3,3) for duplicate/manipulate.
++        """
++        if operation == 'delete':
++            # Set density of points where predicted instance equals instance_label to zero.
++            # This is done during rendering by masking the density sigma.
++            pass
++        elif operation == 'duplicate':
++            # Manipulate rays passing through new position/rotation region to query 
++            # the original instance region instead.
++            pass
++        elif operation == 'manipulate':
++            # Combine deletion and duplication.
++            pass
+ ```
+ 
+-**Parameters:**
+-*   $K$: Set of semantic classes, partitioned into thing classes $K_T$ and stuff classes $K_S$ [S1].
+-*   $J$: Set of surrogate identifiers. Fixed number held by the instance field MLP [S1].
+-*   $H_{3D}$: Set of all possible 3D instances, $H_{3D} := K_T \times J$ [S1].
+-*   Loss weights: $\lambda_{con} = 1.35$, $\lambda_{ins} = 1$, $\lambda_{sem} = 1$, $\lambda_{RGB} = 1$ [S1].
+-*   Optimizer: Adam. Learning rates: $5 \times 10^{-4}$ for MLPs, $1 \times 10^{-2}$ for TensoRF lines and planes [S1].
+-*   Training hardware: 1 NVIDIA A6000. Duration: 450k iterations (~10 hours) [S1].
+-*   Pre-trained 2D panoptic segmentation model: Mask2Former with Swin-L backbone [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Logits vs. Probabilities:** Rendering class logits instead of probabilities can introduce semantic inconsistencies across viewpoints because unbounded logits can generate significant signals in low-density areas, violating geometric constraints. This is resolved by rendering bounded probability distributions (using Softmax) [S1].
+-*   **Geometry Corruption:** Supervision from noisy 2D labels can influence geometry, causing "cloudy" geometry to satisfy conflicting labels. This is avoided by stopping gradients from the semantic and instance branches back to the density field [S1].
+-*   **Class Limitations:** The method is limited to classes supported by the pre-trained 2D segmentation model (e.g., COCO Panoptic classes) [S1].
+-*   **Offline Processing:** The method runs offline due to lengthy pre-processing for pose estimation, 2D segmentation inference, and neural field optimization [S1].
++**Parameters**
++*   **Learning Rates:** $5 \times 10^{-4}$ for MLPs, $1 \times 10^{-2}$ for TensoRF lines and planes [S1].
++*   **Optimizer:** Adam [S1].
++*   **Loss Weights:** $\lambda_{con} = 1.35$, $\lambda_{ins} = 1$, $\lambda_{sem} = 1$, $\lambda_{RGB} = 1$ [S1].
++*   **Training Duration:** 450k iterations (~10 hours) on 1 NVIDIA A6000 [S1].
++*   **2D Segmenter:** Mask2Former with Swin-L backbone [S1].
++
++**Edge Cases and Pitfalls**
++*   **Semantic Inconsistencies:** Rendering class logits instead of probabilities can introduce semantic inconsistencies across viewpoints because unbounded logits can generate significant signals in low-density areas, violating geometric constraints. This is resolved by rendering bounded probability distributions [S1].
++*   **Cloudy Geometry:** Supervision from noisy 2D labels can influence geometry, causing cloudy geometry to satisfy conflicting labels. This is avoided by stopping gradients from segmentation branches back to densities [S1].
++*   **Label Noise:** 2D machine-generated labels are noisy and inconsistent across views. The method uses test-time augmentations and linear assignment to mitigate this [S1].
++*   **Class Limitations:** The method is limited to classes supported by the pre-trained 2D panoptic segmentation model [S1].
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** Training requires 450k iterations (~10 hours) on a single NVIDIA A6000 [S1]. The use of TensoRF for density/color and small MLPs for semantics/instances keeps the model size manageable compared to full MLP NeRFs, but the linear assignment and TTA add preprocessing overhead.
+-*   **Measured Performance:** Improves scene-level PQ by 8.4% on Hypersim, 13.8% on Replica, and 10.6% on ScanNet over state-of-the-art methods [S1]. Maintains comparable PSNR for novel view synthesis [S1].
+-*   **Strengths:** Robust to inherent noise in machine-generated labels; enables in-the-wild scene processing without manual ground truth; supports scene editing (deletion, duplication, manipulation) [S1].
+-*   **Limitations:** Limited to classes in the pre-trained 2D model; offline processing; requires posed images [S1].
+-*   **When to use:** When 3D panoptic segmentation is needed from unstructured image collections without manual annotation, and novel view synthesis with semantic consistency is required.
+-*   **When not to use:** When real-time processing is required, or when classes outside the pre-trained 2D model's vocabulary are needed.
++*   **Time and Memory Complexity:** Training is offline and lengthy (450k iterations, ~10 hours on A6000) due to pose estimation, 2D segmentation inference, and neural field optimization [S1].
++*   **Measured Performance:** Improves scene-level Panoptic Quality (PQ) by 8.4% on Hypersim, 13.8% on Replica, and 10.6% on ScanNet over state-of-the-art methods [S1]. Maintains comparable PSNR for novel view synthesis [S1].
++*   **Strengths:** Robust to inherent noise in machine-generated labels; enables in-the-wild scene processing; supports novel view synthesis, novel view panoptic segmentation, and scene editing (deletion, duplication, manipulation) [S1].
++*   **Limitations:** Offline processing; limited to classes in the pre-trained 2D model; requires posed images [S1].
+ 
+ ## Background
+-Panoptic Lifting was introduced in "Panoptic Lifting for 3D Scene Understanding with Neural Fields" (CVPR 2023) [S1]. It addresses the limitation of previous panoptic NeRF methods (Panoptic NeRF, DM-NeRF) which required manual ground truth (coarse meshes or per-image 2D panoptic segmentations) [S1]. It builds on the TensoRF architecture [4] and leverages advances in 2D panoptic segmentation (e.g., Mask2Former) [S1].
++Panoptic Lifting was introduced in the paper "Panoptic Lifting for 3D Scene Understanding with Neural Fields" (CVPR 2023) [S1]. It addresses the need for robust panoptic 3D scene understanding from in-the-wild images, where manual 3D annotations are unavailable. It builds on [TensoRF](13550-model-architecture-and-encoding.md) for efficient radiance field representation and leverages advances in 2D panoptic segmentation (e.g., Mask2Former) to provide supervision [S1].
+ 
+ ## Sources

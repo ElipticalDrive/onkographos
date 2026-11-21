@@ -1,0 +1,1412 @@
+Flash Cache: Reducing Bias in Radiance Cache
+Based Inverse Rendering
+Benjamin Attal1 , Dor Verbin2 , Ben Mildenhall2 , Peter Hedman2 ,
+Jonathan T. Barron2 , Matthew O’Toole1 , and Pratul P. Srinivasan2
+arXiv:2409.05867v1 [cs.CV] 9 Sep 2024
+1
+Carnegie Mellon University 2 Google Research
+https://benattal.github.io/flash-cache/
+Abstract. State-of-the-art techniques for 3D reconstruction are largely
+based on volumetric scene representations, which require sampling multiple points to compute the color arriving along a ray. Using these representations for more general inverse rendering — reconstructing geometry,
+materials, and lighting from observed images — is challenging because
+recursively path-tracing such volumetric representations is expensive. Recent works alleviate this issue through the use of radiance caches: data
+structures that store the steady-state, infinite-bounce radiance arriving
+at any point from any direction. However, these solutions rely on approximations that introduce bias into the renderings and, more importantly, into the gradients used for optimization. We present a method
+that avoids these approximations while remaining computationally efficient. In particular, we leverage two techniques to reduce variance for
+unbiased estimators of the rendering equation: (1) an occlusion-aware
+importance sampler for incoming illumination and (2) a fast cache architecture that can be used as a control variate for the radiance from
+a high-quality, but more expensive, volumetric cache. We show that by
+removing these biases our approach improves the generality of radiance
+cache based inverse rendering, as well as increasing quality in the presence of challenging light transport effects such as specular reflections.
+1
+Introduction
+Volume rendering has been remarkably effective for novel view synthesis and 3D
+reconstruction, as demonstrated by approaches such as Neural Radiance Fields
+(NeRFs) [29] and Gaussian Splatting [18]. However, it is difficult to use volume
+rendering for the more general inverse rendering problem of recovering materials
+and lighting in addition to geometry. The issue is largely computational: volume
+rendering techniques generally query the appearance and density of the volume
+at many sample points to compute the light arriving along each ray. Combining
+this with physically-accurate rendering models that simulate global illumination
+(instead of simple shading models that only consider direct lighting) dramatically
+increases computational complexity, because evaluating the rendering integral
+requires recursively casting additional scattered rays from each sample location.
+2
+B. Attal et al.
+Predicted Image
+Predicted Roughness/Albedo
+cactus
+pitcher
+Ground-Truth Image
+Fig. 1: Results on two captured scenes from the Stanford ORB dataset [21]. Our model
+synthesizes realistic novel views of real-world objects that exhibit complicated specular materials, and recovers accurate material roughnesses (black represents a perfect
+mirror, white is perfectly rough) and albedo maps.
+Recent methods [15, 49] have leveraged radiance caches to simulate global illumination tractably within an inverse rendering optimization pipeline. Instead
+of integrating over the domain of n-bounce light paths, radiance caches store a
+representation of the steady-state light arriving at any point in the volume from
+any direction. This is a powerful paradigm that removes the need for recursively
+evaluating the rendering integral by considering a single reflection of the incoming steady-state (as opposed to direct) light at any point on the scene geometry
+towards the direction of the viewer.
+Existing works that combine radiance caches with volumetric inverse rendering fall into two categories. The first uses trained NeRF models as radiance
+caches, and volume renders the NeRF along rays from points within the scene to
+estimate incoming light. This type of radiance cache has high quality but tends
+to be computationally expensive to evaluate; methods that use NeRF as a radiance cache, such as TensoIR [15], only compute the reflection integral at a single
+point (the expected ray termination) along each camera ray. The second category relies on cheap radiance caches such as a small MLPs, as in InvRender [49]
+and NeRO [25], to evaluate incoming lighting with a single ray query. Though
+fast, these caches fail to capture high-frequency and near-field illumination. We
+observe that both of these existing approaches introduce bias into the pipeline:
+the first category renders a NeRF model at only a single evaluation along each
+camera ray, which results in a biased estimation of the volume rendering integral,
+and the second category approximates incoming light with a low-capacity model,
+which results in an inaccurate and biased estimation of the reflection integral.
+Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering
+3
+We present a system for volumetric inverse rendering based on the basic
+goal of avoiding introducing bias into the rendering procedure as much as possible, while leveraging variance reduction techniques to keep the rendering model
+computationally tractable. This is made possible by the following key technical
+contributions:
+– A strategy for efficiently estimating the light reflected by volumetric geometry along each camera ray by using a neural field to parameterize a
+spatially-varying mixture of von-Mises Fisher distributions for light importance sampling. This captures spatially-varying illumination effects such as
+light occlusion and interreflections and lets our system efficiently estimate
+the rendering equation with fewer queries of the radiance cache.
+– An architecture for a lightweight high-capacity radiance cache that can query
+the incoming illumination from any direction at any point within the volume, along with a strategy for using this cache as a control variate to avoid
+introducing rendering bias. This lets us efficiently model high-frequency and
+near-field illumination without requiring the full volume rendering necessary
+when using NeRF as a radiance cache.
+We demonstrate that our system recovers improved geometry and materials
+over prior work, and in particular enables more accurate recovery of material
+parameters in regions affected by near-field lighting effects such as specular interreflections. Furthermore, since our system does not use a simplified model of
+volumetric geometry, it preserves the advantages of NeRF-like volumetric representations for capturing thin structures. We validate the benefits of our system
+with evaluation on existing benchmarks and rendered scenes that exhibit challenging lighting effects.
+2
+Related Work
+Inverse rendering. Inverse rendering aims to recover scene attributes like materials, lighting, and geometry, from a set of images [1,8,36,46]. A common approach
+is to use a physically-based model of light transport [16,35,41] and differentiable
+rendering so that it is possible to leverage gradient-based optimization for decomposing the scene’s appearance into its constituent parts [7,14,22]. Recent advances in view synthesis demonstrate the benefit of volume rendering neural field
+representations for the task of reproducing realistic images of a captured scene
+from unseen views [2, 29, 42]. Neural field representations also improve inverse
+rendering methods, combining ideas from volume rendering to represent geometry and physically-based rendering to represent appearance [3, 12, 26, 32, 40].
+Variance-reduction for inverse rendering. Among the different paradigms for
+inverse rendering using neural fields, cache-based inverse rendering is the most
+closely related to ours. These methods rely on using a radiance cache for storing
+the incoming radiance at every point and along every direction. These radiance
+caches capture global illumination effects, replacing a prohibitively expensive
+recursive path tracing procedure with a much cheaper cache look-up. This technique has been used extensively in the past for computing indirect illumination
+4
+B. Attal et al.
+and global illumination effects [20, 43], and consequently used for real-time rendering applications [31, 38, 39].
+In the context of inverse rendering, radiance caches are used for storing the
+hemisphere of incoming radiance at every point. This hemisphere is then integrated against the local BRDF to yield outgoing radiance, which is optimized to
+match the observed image pixels. NeRFactor [48] only considers direct illumination effects for decomposing lights and materials, but caches the visibility of each
+secondary ray into an MLP to model self occlusions. Neural Incident Light Field
+(NeILF) [44] and Neural Reflective Objects (NeRO) [25] and InvRender [49] parameterize the radiance cache using an MLP modeling the incident light field.
+However, they only supervise the outgoing radiance, which does not enforce consistency between the radiance cache and incoming radiance. An improved version
+of NeILF [47] solves this by penalizing differences between the radiance cache
+and the corresponding outgoing radiance. These methods all use inexpensive
+caches which tend to fail to capture high-frequency and near-field illumination.
+Most recently, concurrent work to ours from Ling et al . [23] uses a NeRF-based
+cache, along with an optimizable mixture of Gaussians model for importance
+sampling the 3D distribution of light sources in the scene. Our work also uses
+importance sampling to reduce Monte Carlo noise, but our distributions account
+for occlusions — a key part of variance reduction [41]. Along with importance
+sampling, we further reduce noise using control variates, two techniques that
+have been extensively explored in the context of forward rendering [4, 30, 34].
+3
+Preliminaries
+In this work, we consider the problem of inverse rendering of geometry, materials, and lighting from a set of input images. We leverage a combination of
+volumetric rendering and physically-based Monte Carlo rendering in order to
+accomplish this task. In particular, we optimize the parameters Φ of a scene representation using a regularization term Lreg and a loss term such that the color
+value Li (o, ω o ; Φ) incident at a pixel corresponding to a camera ray (o, ω o ) —
+where o is its origin and ω o its direction — matches with the corresponding
+measured image pixel I(o, ω o ):
+\min _{\mathrm \Phi } \sum _{\xorigin , \dirout } \lVert I(\xorigin , \dirout ) - L_\mathrm {i}(\xorigin , \dirout ; \mathrm \Phi ) \rVert ^ 2 + \mathcal {L}_{\textit {reg}}(\mathrm \Phi ) \label {eqn:diff-ren}
+3.1
+(1)
+Volume Rendering and Neural Radiance Fields
+In the volume rendering setting, the incident radiance Li of a ray (o, ω o ) passing
+through a neural volume, is computed by integrating the differential outgoing
+radiance Lo at every point along that ray:
+L_\mathrm {i}(\xorigin , \dirout ) = \int _{0}^{\infty } L_\mathrm {o}(\xposof {t}, \dirout ) T\lft (\xorigin , \xposof {t}\rgt ) \sigma (\xposof {t}) dt, \label {eqn:volume-rendering}
+(2)
+Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering
+5
+Rt
+where T (o, x(t)) = exp(− 0 σ(x(s)) ds) denotes the transmittance from o to
+x(t), and x(t) = o−tω o is a point along the ray parameterized by t. This integral
+is generally intractable to evaluate analytically, but it can be approximated via
+quadrature [27], by sampling density and radiance at a set of points {x(tk )}N
+k=1 :
+\hat {L}_\mathrm {i}(\xorigin , \dirout ) &= \sum _{k = 1}^{\ncount } w_k \, L_\mathrm {o}\lft (\xposof {t_k}, \dirout \rgt ), \label {eqn:quadrature} \\ w_k &= \lft (1 - e^{-\sigma (\xposof {t_k}) (t_{k+1} - t_k)} \rgt )\exp \lft ( - \sum _{j=1}^{k - 1} \sigma (\xposof {t_j})(t_{j+1} - t_j)\rgt )\,. \nonumber
+In NeRF [29], the volume density σ and outgoing radiance Lo are parameterized using a multi-layer perceptron (MLP). Follow-up work [6, 9, 33] relies
+on optimizable grids or hash tables along with smaller neural networks. In both
+cases, a function maps every position x and direction ω o into the volume density
+σ(x) at that location and the outgoing radiance from it in the specified direction
+Lo (x, ω o ). Together these give the radiance along the ray using Equation 3.
+3.2
+Physics-Based Monte Carlo Light Transport
+We use ideas from physically-based rendering for combining incoming radiance
+Li with a BRDF f to produce outgoing radiance Lo using the rendering equation:
+L_\mathrm {o}(\xposof {t}, \dirout ) = \int _{\mathrm {\Omega }} f\lft (\xposof {t}, \dirin , \dirout \rgt ) L_\mathrm {i}\lft (\xpos , \dirin \rgt ) \lft (\mathbf {n} \cdot \dirin \rgt )\, d \dirin \,, \label {eqn:rendering-equation}
+(4)
+where Ω = {ω i : n · ω i > 0} is the positive hemisphere with respect to normal n.
+Like the volume rendering integral in Equation 2, evaluating the rendering
+equation analytically is, in general, intractable. Most approaches therefore use
+Monte Carlo integration in order to approximate Equation 4. In particular, if we
+randomly sample M incoming directions from some distribution p over incoming
+(1)
+(M)
+directions, ω i , . . . , ω i ∼ p(ω \!\!\!\resizebox {0.94\linewidth }{!}{$\displaystyle \hat {L}_\mathrm {i}(\xorigin , \dirout ) = \sum _{k = 1}^{\ncount } \frac {w_k}{\mcount } \sum _{j=1}^{\mcount } f\lft (\xposof {t_k}, \superjk {\dirin }, \dirout \rgt ) \hat {L}_\mathrm {i}\lft (\xposof {t_k}, \superjk {\dirin }\rgt ) \lft (\mathbf {n} \cdot \superjk {\dirin }\rgt ) \lft / p\lft (\superjk {\dirin }\rgt ) \rgt . $} \label {eqn:general-model}
+i ), then we can construct an unbiased estimator:
+\hat {L}_\mathrm {o}(\xposof {t}, \dirout ) = \frac {1}{\mcount } \sum _{j=1}^{\mcount } f\lft (\xposof {t}, \superj {\dirin }, \dirout \rgt ) L_\mathrm {i}\lft (\xposof {t}, \superj {\dirin }\rgt ) \lft (\mathbf {n} \cdot \superj {\dirin } \rgt ) \lft / p\lft (\superj {\dirin }\rgt ) \rgt ., \label {eqn:rendering-estimator} (5)
+where performing optimization using the estimator in Equation 5 is, in expectation, equivalent to optimizing using Equation 4 [19].
+We can now plug the Monte Carlo-based estimator in Equation 5 into the
+volume rendering estimator of Equation 3 to arrive at the combined estimator:
+(6)
+6
+B. Attal et al.
+L̂fast
+i
+L̂fast
+i
+<latexit sha1_base64="NYFC50NgvwsRC2VG6wba2p6bh/w=">AAAEH3icdVPJbhMxGHYbljIsbeHIZdRpJC6NMpOwHEdw4cChSKStNB4ix/F0rHgZ2R6ayPKd1+AFuMIbcENc+wC8B55JkJIuv2TpX/z9/pfPk4pRbfr9y63tzp279+7vPAgePnr8ZHdv/+mJlrXCZIQlk+psgjRhVJCRoYaRs0oRxCeMnE5m75r46ReiNJXik1lUJOfoXNCCYmS8a7x3AEtk7Ac3hhyZUnFL3Wfb6tTYAmnj3Hgv6vf6rYTXlXilRGAlx+P97b9wKnHNiTCYIa2zuF+Z3CJlKGbEBbDWpEJ4hs5J5lWBONG5bZtxYdd7pmEhlT/ChK13HWER13rBJ/5mU6a+GmucN8YwEpiwjdftBdILn2zT2UCNlExvuueFQvhK8aZ4k1sqqtoQgZe1FzULjQybYYdTqgg2bOEVhBX17Ye4RD6N8SsJAj/nGUF+Z8bbARTkAkvOkZhaqOuKKMorqYnLBnnWrkSqaW6jeLmfCrW49ZuptVHibDRwXm7Nl7osyTc9qc/qPPR2TNpUYbtBGEIpEaPnojW8WRaUHUKemjKKo+SwtSFWNwQH60HXDdz/AUhT+v43H/ekXWjfsUFKyQuXxXk2aEi05Clhy+dhOZFzC1XNSAanlJN5pWDDm0YXSQINmZvGTo56SWWgB6J5M0Nne8PKk3uZhc+IEkdDXq/yNWv0IDty1vN34Sx3VjjY0E4yO4zb+Qb+Y8RXv8F15STpxa96Lz8Oo/Tt6ovsgOfgALwAMXgNUvAeHIMRwOAr+A5+gJ+db51fnd+dP8ur21srzDOwIZ3Lf+ehY1Y=</latexit>
+<latexit sha1_base64="Lb3f4/pdH1Puc7q6WSOe2w7KfQY=">AAAEH3icdVPLbhMxFHUbHmV4tbBkM+q0EptGmUl4LEcgIRYIFUTaSuMhchwnY8WPke2hiSzv+Q1+gC38ATvEth/Af+CZBClJ2ytZOvden+v78rBkVJtO52Jru3Xj5q3bO3eCu/fuP3i4u/foRMtKYdLHkkl1NkSaMCpI31DDyFmpCOJDRk6H09e1//QLUZpK8cnMS5JzNBF0TDEy3jTY3YcFMvadG0COTKG4pe6zbTA19j35+Ma5wW7UaXcaCS+DeAkisJTjwd72XziSuOJEGMyQ1lncKU1ukTIUM+ICWGlSIjxFE5J5KBAnOrdNMS489JZROJbKH2HCxrrKsIhrPedDf7NOU2/6auOVPowEJmztdXuO9NwHWzfWVCMl0+vm2VghvJG8Gb/MLRVlZYjAi9zHFQuNDOtmhyOqCDZs7gHCivryQ1wgH8b4kQSB7/OUID8z4/UACnKOJedIjCzUVUkU5aXUxGXdPGtGItUot1G8mE+JGt7qzdTaKHE26jov18ZLXZbk65bUR3Weej0nrbOwh0EYQikRoxPRKF4txpQdQJ6aIoqj5KDRIVZXOLurTncYuP8NkKbw9a8/7pd2rn3FBiklz10W51m3XqLFnhK2eB4WQzmzUFWMZHBEOZmVCtZ7U2ORJNCQman15KidlAZ6IprVPXS23SuNc4sofEqUOOrxahmvHqMn2b6zfn/nznJnhYP12klme3HT38B/jHjzG1wGJ0k7ft5+9qEXpa+WX2QHPAH74CmIwQuQgrfgGPQBBl/Bd/AD/Gx9a/1q/W79WVzd3lpyHoM1aV38A4KjYvM=</latexit>
+L̂NeRF
+i
+Expensive
+vMF lighting
+sampling distribution
+BRDF Model
+Z
+NeRF, Eq. (3)
+!
+(§4.3) Ef cient
+Volume Rendering
+<latexit sha1_base64="+WVmREGzoBpwmWnjQ6FWL/qA5M8=">AAAB8nicbVBNS8NAEJ3Ur1q/qh69BIvgqSQi1WPRi8cK9gPaUDbbTbt0sxt2J0oJ/RlePCji1V/jzX/jts1BWx8MPN6bYWZemAhu0PO+ncLa+sbmVnG7tLO7t39QPjxqGZVqyppUCaU7ITFMcMmayFGwTqIZiUPB2uH4dua3H5k2XMkHnCQsiMlQ8ohTglbq9jQfjpBorZ765YpX9eZwV4mfkwrkaPTLX72BomnMJFJBjOn6XoJBRjRyKti01EsNSwgdkyHrWipJzEyQzU+eumdWGbiR0rYkunP190RGYmMmcWg7Y4Ijs+zNxP+8borRdZBxmaTIJF0silLhonJn/7sDrhlFMbGEUM3trS4dEU0o2pRKNgR/+eVV0rqo+rVq7f6yUr/J4yjCCZzCOfhwBXW4gwY0gYKCZ3iFNwedF+fd+Vi0Fpx85hj+wPn8AcZNkZg=</latexit>
+(§4.2) Material
+Representation
+(§4.4) Importance
+Sampling
+Fast Cache, Eq. (9)
+<latexit sha1_base64="C7ce/RyZrqMmsP7nBiQhgOE5KJI=">AAACFXicbVDLSgMxFM3UV62vqks3wSJUKGVGfC2LblxWsA/oDCWTZtrQZDIkGbEM8xNu/BU3LhRxK7jzb8y0s9DWCyGHc+7lnnv8iFGlbfvbKiwtr6yuFddLG5tb2zvl3b22ErHEpIUFE7LrI0UYDUlLU81IN5IEcZ+Rjj++zvTOPZGKivBOTyLicTQMaUAx0obql2tVlyM98oPkIa1B1xdsoCbcfIkrOBmitD/VJU9oetwvV+y6PS24CJwcVEBezX75yx0IHHMSasyQUj3HjrSXIKkpZiQtubEiEcJjNCQ9A0PEifKS6VUpPDLMAAZCmhdqOGV/TySIq8yr6cwsqnktI//TerEOLr2EhlGsSYhni4KYQS1gFhEcUEmwZhMDEJbUeIV4hCTC2gRZMiE48ycvgvZJ3Tmvn92eVhpXeRxFcAAOQRU44AI0wA1oghbA4BE8g1fwZj1ZL9a79TFrLVj5zD74U9bnD8cLn90=</latexit>
+<latexit sha1_base64="Fvtgq+iARdb4TvAbvshUpIUiNfA=">AAAB63icbVBNS8NAEJ3Ur1q/qh69BIvgqSQi1WPRi8cK9gPaUDbbTbt0dxN2J0IJ/QtePCji1T/kzX/jps1Bqw8GHu/NMDMvTAQ36HlfTmltfWNzq7xd2dnd2z+oHh51TJxqyto0FrHuhcQwwRVrI0fBeolmRIaCdcPpbe53H5k2PFYPOEtYIMlY8YhTgrk04AqH1ZpX9xZw/xK/IDUo0BpWPwejmKaSKaSCGNP3vQSDjGjkVLB5ZZAalhA6JWPWt1QRyUyQLW6du2dWGblRrG0pdBfqz4mMSGNmMrSdkuDErHq5+J/XTzG6DjKukhSZostFUSpcjN38cXfENaMoZpYQqrm91aUToglFG0/FhuCvvvyXdC7qfqPeuL+sNW+KOMpwAqdwDj5cQRPuoAVtoDCBJ3iBV0c6z86b875sLTnFzDH8gvPxDSY6jlQ=</latexit>
+<latexit sha1_base64="2g0hPn9V/uyW58/cAed57Ca7cFQ=">AAAB6HicbVDLTgJBEOzFF+IL9ehlIjHhRHaNryPRi0dI5JHAhswOvTAyO7uZmTUhhC/w4kFjvPpJ3vwbB9iDgpV0UqnqTndXkAiujet+O7m19Y3Nrfx2YWd3b/+geHjU1HGqGDZYLGLVDqhGwSU2DDcC24lCGgUCW8Hobua3nlBpHssHM07Qj+hA8pAzaqxUL/eKJbfizkFWiZeREmSo9Ypf3X7M0gilYYJq3fHcxPgTqgxnAqeFbqoxoWxEB9ixVNIItT+ZHzolZ1bpkzBWtqQhc/X3xIRGWo+jwHZG1Az1sjcT//M6qQlv/AmXSWpQssWiMBXExGT2NelzhcyIsSWUKW5vJWxIFWXGZlOwIXjLL6+S5nnFu6pc1i9K1dssjjycwCmUwYNrqMI91KABDBCe4RXenEfnxXl3PhatOSebOYY/cD5/AHA5jLY=</latexit>
+<latexit sha1_base64="C7ce/RyZrqMmsP7nBiQhgOE5KJI=">AAACFXicbVDLSgMxFM3UV62vqks3wSJUKGVGfC2LblxWsA/oDCWTZtrQZDIkGbEM8xNu/BU3LhRxK7jzb8y0s9DWCyGHc+7lnnv8iFGlbfvbKiwtr6yuFddLG5tb2zvl3b22ErHEpIUFE7LrI0UYDUlLU81IN5IEcZ+Rjj++zvTOPZGKivBOTyLicTQMaUAx0obql2tVlyM98oPkIa1B1xdsoCbcfIkrOBmitD/VJU9oetwvV+y6PS24CJwcVEBezX75yx0IHHMSasyQUj3HjrSXIKkpZiQtubEiEcJjNCQ9A0PEifKS6VUpPDLMAAZCmhdqOGV/TySIq8yr6cwsqnktI//TerEOLr2EhlGsSYhni4KYQS1gFhEcUEmwZhMDEJbUeIV4hCTC2gRZMiE48ycvgvZJ3Tmvn92eVhpXeRxFcAAOQRU44AI0wA1oghbA4BE8g1fwZj1ZL9a79TFrLVj5zD74U9bnD8cLn90=</latexit>
+(x, ! i )
+(
+<latexit sha1_base64="NYFC50NgvwsRC2VG6wba2p6bh/w=">AAAEH3icdVPJbhMxGHYbljIsbeHIZdRpJC6NMpOwHEdw4cChSKStNB4ix/F0rHgZ2R6ayPKd1+AFuMIbcENc+wC8B55JkJIuv2TpX/z9/pfPk4pRbfr9y63tzp279+7vPAgePnr8ZHdv/+mJlrXCZIQlk+psgjRhVJCRoYaRs0oRxCeMnE5m75r46ReiNJXik1lUJOfoXNCCYmS8a7x3AEtk7Ac3hhyZUnFL3Wfb6tTYAmnj3Hgv6vf6rYTXlXilRGAlx+P97b9wKnHNiTCYIa2zuF+Z3CJlKGbEBbDWpEJ4hs5J5lWBONG5bZtxYdd7pmEhlT/ChK13HWER13rBJ/5mU6a+GmucN8YwEpiwjdftBdILn2zT2UCNlExvuueFQvhK8aZ4k1sqqtoQgZe1FzULjQybYYdTqgg2bOEVhBX17Ye4RD6N8SsJAj/nGUF+Z8bbARTkAkvOkZhaqOuKKMorqYnLBnnWrkSqaW6jeLmfCrW49ZuptVHibDRwXm7Nl7osyTc9qc/qPPR2TNpUYbtBGEIpEaPnojW8WRaUHUKemjKKo+SwtSFWNwQH60HXDdz/AUhT+v43H/ekXWjfsUFKyQuXxXk2aEi05Clhy+dhOZFzC1XNSAanlJN5pWDDm0YXSQINmZvGTo56SWWgB6J5M0Nne8PKk3uZhc+IEkdDXq/yNWv0IDty1vN34Sx3VjjY0E4yO4zb+Qb+Y8RXv8F15STpxa96Lz8Oo/Tt6ovsgOfgALwAMXgNUvAeHIMRwOAr+A5+gJ+db51fnd+dP8ur21srzDOwIZ3Lf+ehY1Y=</latexit>
+Cheap
+(x, ! i )
+−
+Z (x, ! )
+<latexit sha1_base64="C7ce/RyZrqMmsP7nBiQhgOE5KJI=">AAACFXicbVDLSgMxFM3UV62vqks3wSJUKGVGfC2LblxWsA/oDCWTZtrQZDIkGbEM8xNu/BU3LhRxK7jzb8y0s9DWCyGHc+7lnnv8iFGlbfvbKiwtr6yuFddLG5tb2zvl3b22ErHEpIUFE7LrI0UYDUlLU81IN5IEcZ+Rjj++zvTOPZGKivBOTyLicTQMaUAx0obql2tVlyM98oPkIa1B1xdsoCbcfIkrOBmitD/VJU9oetwvV+y6PS24CJwcVEBezX75yx0IHHMSasyQUj3HjrSXIKkpZiQtubEiEcJjNCQ9A0PEifKS6VUpPDLMAAZCmhdqOGV/TySIq8yr6cwsqnktI//TerEOLr2EhlGsSYhni4KYQS1gFhEcUEmwZhMDEJbUeIV4hCTC2gRZMiE48ycvgvZJ3Tmvn92eVhpXeRxFcAAOQRU44AI0wA1oghbA4BE8g1fwZj1ZL9a79TFrLVj5zD74U9bnD8cLn90=</latexit>
+<latexit sha1_base64="Fvtgq+iARdb4TvAbvshUpIUiNfA=">AAAB63icbVBNS8NAEJ3Ur1q/qh69BIvgqSQi1WPRi8cK9gPaUDbbTbt0dxN2J0IJ/QtePCji1T/kzX/jps1Bqw8GHu/NMDMvTAQ36HlfTmltfWNzq7xd2dnd2z+oHh51TJxqyto0FrHuhcQwwRVrI0fBeolmRIaCdcPpbe53H5k2PFYPOEtYIMlY8YhTgrk04AqH1ZpX9xZw/xK/IDUo0BpWPwejmKaSKaSCGNP3vQSDjGjkVLB5ZZAalhA6JWPWt1QRyUyQLW6du2dWGblRrG0pdBfqz4mMSGNmMrSdkuDErHq5+J/XTzG6DjKukhSZostFUSpcjN38cXfENaMoZpYQqrm91aUToglFG0/FhuCvvvyXdC7qfqPeuL+sNW+KOMpwAqdwDj5cQRPuoAVtoDCBJ3iBV0c6z86b875sLTnFzDH8gvPxDSY6jlQ=</latexit>
+>tixetal/<=YLj5AHA/5Dc/YYObeSOtahP3lXxnfEneXR4eCBDBAK19IMqrNYwUmCwcyjjssd1K9i1cp6uFnn5S+6LLjXIwOlZGXWFIxWJv5WKUWSsIychzleN2TGxEXBMiWssQpWSXmA/vlQq6M//Tcjs1zA1GZHwj+oWGRIx3X/chQqtWBzkpb1ZlozHZ+TtIINVxi9BExWoxoqbFeqAnxgqTgPxcHf3qJYYlig0M7X3fpY9oSmEReZiWFkzifbJKe/LUxqazAp8Ah+jQ70MHssHpBln3auboH8WCUgGCl42CcDD2USwGhqDVLGLYZDGqGH1UjHeg+/b3dWY2xfrN3Y91m7O+tejuiAkXdnTqnqU0VpgDi9Bbwv3JpPvjFk4w/ChhUTmZu7OyATvOwshAHJ5Id0iRPyrNaHRhHjIlhe9LI+FFzOEBJgTLDVbciH6BAAA>"=QFc7aC75deAc/85Wyu/V9nPh0g2"=46esab_1ahs tixetal<
+(
+i
++
+(§4.1) Monte Carlo Integration with
+Fast Cache as Control Variate
+Fig. 2: Our pipeline for physically-based inverse rendering combines volume rendering with physically-based Monte Carlo rendering to recover geometry, materials, and
+lighting. We first use an estimator (Equation 11) to approximate the volume rendering
+integral (Equation 2) with only a single sample point per ray. Given this sample point,
+we use a spatially-varying mixture-of-vMFs (Section 4.4) to importance-sample directions based on the distribution of incoming radiance. We then produce a low-variance
+estimate of the rendering equation (Equation 4) using a NeRF as a radiance cache,
+and a fast cache approximation of the NeRF (Equation 9) that is far less expensive to
+evaluate.
+fi
+Unfortunately, Equation 6 requires recursive evaluation of both the volume
+rendering integral and the rendering equation, since L̂i is now defined with respect to itself. If one is not careful, the recursive nature of the rendering equation
+can quickly lead to a rapid increase in computational cost.
+To deal with this issue, we return to the discussion in Section 3.1. It is possible to define a neural volume that directly predicts outgoing radiance, without
+requiring recursive evaluation. In other words, we can replace the incoming radiance L̂i with the output of a neural radiance field L̂cache
+, which relates the
+i
+incoming and outgoing radiance according to Equation 3. It is worth remarking
+that for this to be useful, evaluating the radiance cache L̂cache
+for a given ray
+i
+should be cheaper than performing recursive path tracing.
+4
+Method
+Our inverse rendering method is based on a volumetric rendering approach to
+physically-based rendering, as described by Equation 6. However, naïvely using
+the rendering model of Equation 6 is extremely expensive for two main reasons.
+First, it requires volumetrically rendering the incoming radiance at every point
+along the ray. Second, for every such point we need to use Monte Carlo integration, which typically requires many samples of incoming radiance. Our work
+aims to resolve both issues without introducing bias in the process, which may
+adversely affect the recovery of materials and lighting.
+In this section, we present the design of our system. We begin by describing
+the incoming radiance cache in Section 4.1, along with a novel “fast cache” architecture that is cheap to evaluate. Designing this cache as a control variate for
+incoming illumination allows us to use many incoming rays, which increases the
+accuracy of our method without requiring significant compute. In Section 4.2, we
+Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering
+<latexit sha1_base64="cC/DgjtMtQVdMjyH+Nq8bXXeCsE=">AAAEB3icdVPNbhMxEHYbfsry0xaOXFZsK3FplN2En+MKLhyLRNpK61XldbyNFf+sbC9JZPkBeAGu8AbcEFcegwfgPbA3QWr6M5KlmW/8jWfGM1XDqDaDwZ+t7d6du/fu7zyIHj56/GR3b//piZatwmSMJZPqrEKaMCrI2FDDyFmjCOIVI6fV7H3wn34mSlMpPpllQ0qOLgStKUbGQxByZKZVbWt3PjrfSwb9QSfxdSVdKwlYy/H5/vZfOJG45UQYzJDWRTpoTGmRMhQz4iLYatIgPEMXpPCqQJzo0nZJu/jQI5O4lsofYeIOvcywiGu95JW/GZLUV30BvNGHkcCEbbxu50gvfbBNMFCNlExvwotaIXwleVO/LS0VTWuIwKvc65bFRsahqfGEKoINW3oFYUV9+TGeIh/G+NZHke/yjCD/N8bbERRkjiXnSEws1G1DFOWN1MQVw7LoPkSqSWmT1HZGgzre5Zu5tUnmbDJ0Xm6Nl7siKzeR3Ed1nno7Jw9Z2MMojqGUiNEL0RnenNaUHUCem2mSJtlBZ0OsbnAOLzvdYeT+N0Caqa9/83E/nEvtKzZIKTl3RVoWwzBEXe2KsNXzcFrJhYWqZaSAE8rJolEwzE3QRZZBQxYm2NlRP2sM9ES0CD10tj9qjHOrKHxGlDga8XYdL3yjJ9mxs35+l85yZ4WDYewks6O062/kFyO9ugbXlZOsn77uv/o4SvJ36xXZAc/BC/ASpOANyMEHcAzGAIMGfAXfwPfel96P3s/er9XV7a015xnYkN7vf2J7WKc=</latexit>
+t4
+t3
+t2
+t1
+Resample
+4
+<latexit sha1_base64="p/sZC/FkpJpqRLCDHcy3MWOHvkE=">AAAB73icbVBNSwMxEJ34WetX1aOXYBE8lV2V6rHoxWMF+wHtUrJptg1NsmuSFcrSP+HFgyJe/Tve/Dem7R609cHA470ZZuaFieDGet43WlldW9/YLGwVt3d29/ZLB4dNE6easgaNRazbITFMcMUallvB2olmRIaCtcLR7dRvPTFteKwe7DhhgSQDxSNOiXVSu2v4QJLeRa9U9ireDHiZ+DkpQ456r/TV7cc0lUxZKogxHd9LbJARbTkVbFLspoYlhI7IgHUcVUQyE2Szeyf41Cl9HMXalbJ4pv6eyIg0ZixD1ymJHZpFbyr+53VSG10HGVdJapmi80VRKrCN8fR53OeaUSvGjhCqubsV0yHRhFoXUdGF4C++vEya5xW/WqneX5ZrN3kcBTiGEzgDH66gBndQhwZQEPAMr/CGHtELekcf89YVlM8cwR+gzx/MX4/U</latexit>
+3
+<latexit sha1_base64="7J1Kr/sSiiIQobNGqQJ38quCdAo=">AAAEB3icdVPNbhMxEHYbfsry0xaOXFZsK3FplN2En+MKLhyLRNpK61XldbyNFf/J9pJElh+AF+AKb8ANceUxeADeA+8mSE1/RrI0842/8cx4plKMGjsY/Nna7t25e+/+zoPo4aPHT3b39p+eGNloTMZYMqnPKmQIo4KMLbWMnClNEK8YOa1m71v/6WeiDZXik10qUnJ0IWhNMbIBgpAjO61qV/vz7HwvGfQHncTXlXStJGAtx+f723/hROKGE2ExQ8YU6UDZ0iFtKWbER7AxRCE8QxekCKpAnJjSdUn7+DAgk7iWOhxh4w69zHCIG7PkVbjZJmmu+lrwRh9GAhO28bqbI7MMwTbBlmqlZGYTXtQa4SvJ2/pt6ahQjSUCr3KvGxZbGbdNjSdUE2zZMigIaxrKj/EUhTA2tD6KQpdnBIW/scGOoCBzLDlHYuKgaRTRlCtpiC+GZdF9iNST0iWp6wyFOt7lm7lzSeZdMvRBbo2X+yIrN5E8RPWBejsnb7Nwh1EcQykRoxeiM4I5rSk7gDy30yRNsoPOhljf4BxedvrDyP9vgLTTUP/m42E4lyZUbJHWcu6LtCyG7RB1tWvCVs/DaSUXDuqGkQJOKCcLpWE7N60usgxasrCtnR31M2VhIKJF20Pv+iNlvV9F4TOixdGIN+t47TcGkht7F+Z36R33TnjYjp1kbpR2/Y3CYqRX1+C6cpL109f9Vx9HSf5uvSI74Dl4AV6CFLwBOfgAjsEYYKDAV/ANfO996f3o/ez9Wl3d3lpznoEN6f3+B1tLWKU=</latexit>
+<latexit sha1_base64="cC/DgjtMtQVdMjyH+Nq8bXXeCsE=">AAAEB3icdVPNbhMxEHYbfsry0xaOXFZsK3FplN2En+MKLhyLRNpK61XldbyNFf+sbC9JZPkBeAGu8AbcEFcegwfgPbA3QWr6M5KlmW/8jWfGM1XDqDaDwZ+t7d6du/fu7zyIHj56/GR3b//piZatwmSMJZPqrEKaMCrI2FDDyFmjCOIVI6fV7H3wn34mSlMpPpllQ0qOLgStKUbGQxByZKZVbWt3PjrfSwb9QSfxdSVdKwlYy/H5/vZfOJG45UQYzJDWRTpoTGmRMhQz4iLYatIgPEMXpPCqQJzo0nZJu/jQI5O4lsofYeIOvcywiGu95JW/GZLUV30BvNGHkcCEbbxu50gvfbBNMFCNlExvwotaIXwleVO/LS0VTWuIwKvc65bFRsahqfGEKoINW3oFYUV9+TGeIh/G+NZHke/yjCD/N8bbERRkjiXnSEws1G1DFOWN1MQVw7LoPkSqSWmT1HZGgzre5Zu5tUnmbDJ0Xm6Nl7siKzeR3Ed1nno7Jw9Z2MMojqGUiNEL0RnenNaUHUCem2mSJtlBZ0OsbnAOLzvdYeT+N0Caqa9/83E/nEvtKzZIKTl3RVoWwzBEXe2KsNXzcFrJhYWqZaSAE8rJolEwzE3QRZZBQxYm2NlRP2sM9ES0CD10tj9qjHOrKHxGlDga8XYdL3yjJ9mxs35+l85yZ4WDYewks6O062/kFyO9ugbXlZOsn77uv/o4SvJ36xXZAc/BC/ASpOANyMEHcAzGAIMGfAXfwPfel96P3s/er9XV7a015xnYkN7vf2J7WKc=</latexit>
+<latexit sha1_base64="BCCCcmnX/zWkIYMfm+jjwrFlVno=">AAAB73icbVBNSwMxEJ34WetX1aOXYBE8ld0i1WPRi8cK9gPapWTTbBuaZNckK5Slf8KLB0W8+ne8+W9M2z1o64OBx3szzMwLE8GN9bxvtLa+sbm1Xdgp7u7tHxyWjo5bJk41ZU0ai1h3QmKY4Io1LbeCdRLNiAwFa4fj25nffmLa8Fg92EnCAkmGikecEuukTs/woST9ar9U9ireHHiV+DkpQ45Gv/TVG8Q0lUxZKogxXd9LbJARbTkVbFrspYYlhI7JkHUdVUQyE2Tze6f43CkDHMXalbJ4rv6eyIg0ZiJD1ymJHZllbyb+53VTG10HGVdJapmii0VRKrCN8ex5POCaUSsmjhCqubsV0xHRhFoXUdGF4C+/vEpa1Ypfq9TuL8v1mzyOApzCGVyAD1dQhztoQBMoCHiGV3hDj+gFvaOPResaymdO4A/Q5w/K24/T</latexit>
+2
+<latexit sha1_base64="Me7nkmbb3Mbxbp6YH0t1/+pCWZA=">AAAD/nicdVPJjhMxEPVMWIZmm4EjlxY9kbhMlO6E5diCC8dBkJmR2q3IcZzEipeW7SaJLEv8AFf4A26IK7/CB/Af2J0gJbOUZKnqlV+5qlw1qhjVptv9s7ffunX7zt2De9H9Bw8fPT48enKmZa0wGWDJpLoYIU0YFWRgqGHkolIE8REj56P5u+A//0yUplJ8MquKlBxNBZ1QjIyHPpphNjxMup1uI/FVJd0oCdjI6fBo/y8cS1xzIgxmSOsi7VamtEgZihlxEaw1qRCeoykpvCoQJ7q0Ta4ubntkHE+k8keYuEG3GRZxrVd85G9yZGb6si+A1/owEpiwndftAumVD7YLBqqRkuldeDlRCF9K3kzelJaKqjZE4HXuk5rFRsahl/GYKoINW3kFYUV9+TGeIR/G+I5HEeRoTpD/EuPtCAqywJJzJMYW6roiivJKauKKXlnAkJRU49ImqW2MCjW87Zu5tUnmbNJzXm6Ml7siK3eR3Ed1nnozJw9Z2HYUx1BKxOhUNIY3ZxPKjiHPzSxJk+y4sSFW1zh7207Xjtz/Bkgz8/XvPu5ncqV9xQYpJReuSMuiF4aoqV0Rtn4ezkZyaaGqGSngmHKyrBQMcxN0kWXQkKUJdnbSySoDPREtQw+d7fQr49w6Cp8TJU76vN7EC9/oSXbgrJ/flbPcWeFgGDvJbD9t+hv5xUgvr8FV5SzrpK86Lz/0k/ztZkUOwDPwHLwAKXgNcvAenIIBwGAKvoJv4HvrS+tH62fr1/rq/t6G8xTsSOv3P4R1VJM=</latexit>
+<latexit sha1_base64="27bsxGuALlYXJyIzePhuREjbrvU=">AAAD/nicdVPJjhMxEPVMWIZmm4EjlxY9kbhMlO6E5diCC8dBkJmR2q3IcZzEipeW7SaJLEv8AFf4A26IK7/CB/Af2J0gJbOUZKnqlV+5qlw1qhjVptv9s7ffunX7zt2De9H9Bw8fPT48enKmZa0wGWDJpLoYIU0YFWRgqGHkolIE8REj56P5u+A//0yUplJ8MquKlBxNBZ1QjIyHPpphOjxMup1uI/FVJd0oCdjI6fBo/y8cS1xzIgxmSOsi7VamtEgZihlxEaw1qRCeoykpvCoQJ7q0Ta4ubntkHE+k8keYuEG3GRZxrVd85G9yZGb6si+A1/owEpiwndftAumVD7YLBqqRkuldeDlRCF9K3kzelJaKqjZE4HXuk5rFRsahl/GYKoINW3kFYUV9+TGeIR/G+I5HEeRoTpD/EuPtCAqywJJzJMYW6roiivJKauKKXlnAkJRU49ImqW2MCjW87Zu5tUnmbNJzXm6Ml7siK3eR3Ed1nnozJw9Z2HYUx1BKxOhUNIY3ZxPKjiHPzSxJk+y4sSFW1zh7207Xjtz/Bkgz8/XvPu5ncqV9xQYpJReuSMuiF4aoqV0Rtn4ezkZyaaGqGSngmHKyrBQMcxN0kWXQkKUJdnbSySoDPREtQw+d7fQr49w6Cp8TJU76vN7EC9/oSXbgrJ/flbPcWeFgGDvJbD9t+hv5xUgvr8FV5SzrpK86Lz/0k/ztZkUOwDPwHLwAKXgNcvAenIIBwGAKvoJv4HvrS+tH62fr1/rq/t6G8xTsSOv3P4DdVJI=</latexit>
+<latexit sha1_base64="ImaF3xCWon7KE3QtckYZ/qvrgXY=">AAAB73icbVDLSgNBEOyNrxhfUY9eBoPgKeyKRI9BLx4jmAckS5idzCZD5rHOzAphyU948aCIV3/Hm3/jJNmDJhY0FFXddHdFCWfG+v63V1hb39jcKm6Xdnb39g/Kh0cto1JNaJMornQnwoZyJmnTMstpJ9EUi4jTdjS+nfntJ6oNU/LBThIaCjyULGYEWyd1eoYNBe4H/XLFr/pzoFUS5KQCORr98ldvoEgqqLSEY2O6gZ/YMMPaMsLptNRLDU0wGeMh7ToqsaAmzOb3TtGZUwYoVtqVtGiu/p7IsDBmIiLXKbAdmWVvJv7ndVMbX4cZk0lqqSSLRXHKkVVo9jwaME2J5RNHMNHM3YrICGtMrIuo5EIIll9eJa2LalCr1u4vK/WbPI4inMApnEMAV1CHO2hAEwhweIZXePMevRfv3ftYtBa8fOYY/sD7/AHJV4/S</latexit>
+1
+<latexit sha1_base64="Jrf2bcTUwa365NDh4d3/FewyBx4=">AAAEEXicdVPLbhMxFHUbHmV4pcCOzYhpJBY0ykzCYzmCDcsikbbSeBR5HE9jxY+R7aEJlr+CH2ALf8AOseUL+AD+A88kSE3aXsnSvef6XN+Xi4pRbQaDPzu7nRs3b93euxPcvXf/wcPu/qNjLWuFyRhLJtVpgTRhVJCxoYaR00oRxAtGTor5u8Z/8okoTaX4aJYVyTk6E7SkGBkPTbpPoEH1ZPQihByZWVFa7CajSTca9AethJeVeK1EYC1Hk/3dv3Aqcc2JMJghrbN4UJncImUoZsQFsNakQniOzkjmVYE40blt03dhzyPTsJTKH2HCFr3IsIhrveSFv9kkqbd9DXilDyOBCdt43Z4jvfTBNsGGaqRkehNelArhreRN+Sa3VFS1IQKvci9rFhoZNu0Np1QRbNjSKwgr6ssP8Qz5MMYPIQh8l+cE+SkZbwdQkHMsOUdiaqGuK6Ior6QmLhvmWTsQqaa5jWLbGhVqeRdvptZGibPR0Hm5Nl7qsiTfRFIf1Xnq9Zy0ycL2gjCEUiJGz0RreHNWUnYAeWpmURwlB60NsbrCObzodL3A/W+ANDNf/+bjfk2X2ldskFLy3GVxng2bJWprV4StnoezQi4sVDUjGZxSThaVgs3eNLpIEmjIwjR2cthPKgM9ES2aHjrbH1XGuVUUPidKHI54vY7XjNGT7NhZv79LZ7mzwsFm7SSzo7jtb+A/Rrz9DS4rx0k/ftV/+WEUpW/XX2QPPAXPwHMQg9cgBe/BERgDDD6Dr+Ab+N750vnR+dn5tbq6u7PmPAYb0vn9D4CNW6o=</latexit>
+<latexit sha1_base64="yxwp9SuFBXA/uXLBsz6CG5SobWU=">AAAB73icbVBNSwMxEJ3Ur1q/qh69BIvgqeyKVI9FLx4r2A9ol5JNs21okl2TrFCW/gkvHhTx6t/x5r8xbfegrQ8GHu/NMDMvTAQ31vO+UWFtfWNzq7hd2tnd2z8oHx61TJxqypo0FrHuhMQwwRVrWm4F6ySaERkK1g7HtzO//cS04bF6sJOEBZIMFY84JdZJnZ7hQ0n6l/1yxat6c+BV4uekAjka/fJXbxDTVDJlqSDGdH0vsUFGtOVUsGmplxqWEDomQ9Z1VBHJTJDN753iM6cMcBRrV8riufp7IiPSmIkMXackdmSWvZn4n9dNbXQdZFwlqWWKLhZFqcA2xrPn8YBrRq2YOEKo5u5WTEdEE2pdRCUXgr/88ippXVT9WrV2f1mp3+RxFOEETuEcfLiCOtxBA5pAQcAzvMIbekQv6B19LFoLKJ85hj9Anz/N44/V</latexit>
+<latexit sha1_base64="Lc4LQPssJjUCfTSHKLiOiJ1764Q=">AAAEB3icdVPNbhMxEHYbfsry0xaOXFZsK3FplN2En+MKLhyLRNpK61XldbyNFf+sbC9JZPkBeAGu8AbcEFcegwfgPbA3QWr6M5KlmW/8jWfGM1XDqDaDwZ+t7d6du/fu7zyIHj56/GR3b//piZatwmSMJZPqrEKaMCrI2FDDyFmjCOIVI6fV7H3wn34mSlMpPpllQ0qOLgStKUbGQxByZKZVbWt3PjzfSwb9QSfxdSVdKwlYy/H5/vZfOJG45UQYzJDWRTpoTGmRMhQz4iLYatIgPEMXpPCqQJzo0nZJu/jQI5O4lsofYeIOvcywiGu95JW/GZLUV30BvNGHkcCEbbxu50gvfbBNMFCNlExvwotaIXwleVO/LS0VTWuIwKvc65bFRsahqfGEKoINW3oFYUV9+TGeIh/G+NZHke/yjCD/N8bbERRkjiXnSEws1G1DFOWN1MQVw7LoPkSqSWmT1HZGgzre5Zu5tUnmbDJ0Xm6Nl7siKzeR3Ed1nno7Jw9Z2MMojqGUiNEL0RnenNaUHUCem2mSJtlBZ0OsbnAOLzvdYeT+N0Caqa9/83E/nEvtKzZIKTl3RVoWwzBEXe2KsNXzcFrJhYWqZaSAE8rJolEwzE3QRZZBQxYm2NlRP2sM9ES0CD10tj9qjHOrKHxGlDga8XYdL3yjJ9mxs35+l85yZ4WDYewks6O062/kFyO9ugbXlZOsn77uv/o4SvJ36xXZAc/BC/ASpOANyMEHcAzGAIMGfAXfwPfel96P3s/er9XV7a015xnYkN7vf17jWKY=</latexit>
+<latexit sha1_base64="aJrsgwI+11qXs77B6eYSDd2BfCE=">AAAD/nicdVPJjhMxEPVMWIZmm4EjlxY9kbhMlO6E5diCC8dBkJmR2q3IcZzEipeW7SaJLEv8AFf4A26IK7/CB/Af2J0gJbOUZKnqlV+5qlw1qhjVptv9s7ffunX7zt2De9H9Bw8fPT48enKmZa0wGWDJpLoYIU0YFWRgqGHkolIE8REj56P5u+A//0yUplJ8MquKlBxNBZ1QjIyHPpphb3iYdDvdRuKrSrpRErCR0+HR/l84lrjmRBjMkNZF2q1MaZEyFDPiIlhrUiE8R1NSeFUgTnRpm1xd3PbIOJ5I5Y8wcYNuMyziWq/4yN/kyMz0ZV8Ar/VhJDBhO6/bBdIrH2wXDFQjJdO78HKiEL6UvJm8KS0VVW2IwOvcJzWLjYxDL+MxVQQbtvIKwor68mM8Qz6M8R2PIsjRnCD/JcbbERRkgSXnSIwt1HVFFOWV1MQVvbKAISmpxqVNUtsYFWp42zdza5PM2aTnvNwYL3dFVu4iuY/qPPVmTh6ysO0ojqGUiNGpaAxvziaUHUOem1mSJtlxY0OsrnH2tp2uHbn/DZBm5uvffdzP5Er7ig1SSi5ckZZFLwxRU7sibP08nI3k0kJVM1LAMeVkWSkY5iboIsugIUsT7Oykk1UGeiJahh462+lXxrl1FD4nSpz0eb2JF77Rk+zAWT+/K2e5s8LBMHaS2X7a9Dfyi5FeXoOrylnWSV91Xn7oJ/nbzYocgGfgOXgBUvAa5OA9OAUDgMEUfAXfwPfWl9aP1s/Wr/XV/b0N5ynYkdbvf4gNVJQ=</latexit>
+<latexit sha1_base64="TWdyy4YfkaJsQO1OlSa8ibXzAE4=">AAAEB3icdVPNbhMxEHYbfsry0xaOXFZsK3FplN2En+MKLhyLRNpK61XldbyNFf/J9pJElh+AF+AKb8ANceUxeADeA+8mSE1/RrI0842/8cx4plKMGjsY/Nna7t25e+/+zoPo4aPHT3b39p+eGNloTMZYMqnPKmQIo4KMLbWMnClNEK8YOa1m71v/6WeiDZXik10qUnJ0IWhNMbIBgpAjO61qV/vz9HwvGfQHncTXlXStJGAtx+f723/hROKGE2ExQ8YU6UDZ0iFtKWbER7AxRCE8QxekCKpAnJjSdUn7+DAgk7iWOhxh4w69zHCIG7PkVbjZJmmu+lrwRh9GAhO28bqbI7MMwTbBlmqlZGYTXtQa4SvJ2/pt6ahQjSUCr3KvGxZbGbdNjSdUE2zZMigIaxrKj/EUhTA2tD6KQpdnBIW/scGOoCBzLDlHYuKgaRTRlCtpiC+GZdF9iNST0iWp6wyFOt7lm7lzSeZdMvRBbo2X+yIrN5E8RPWBejsnb7Nwh1EcQykRoxeiM4I5rSk7gDy30yRNsoPOhljf4BxedvrDyP9vgLTTUP/m42E4lyZUbJHWcu6LtCyG7RB1tWvCVs/DaSUXDuqGkQJOKCcLpWE7N60usgxasrCtnR31M2VhIKJF20Pv+iNlvV9F4TOixdGIN+t47TcGkht7F+Z36R33TnjYjp1kbpR2/Y3CYqRX1+C6cpL109f9Vx9HSf5uvSI74Dl4AV6CFLwBOfgAjsEYYKDAV/ANfO996f3o/ez9Wl3d3lpznoEN6f3+B1ezWKQ=</latexit>
+⌧ 4 , c4
+⌧33, c3
+⌧22, c2
+⌧11, c1
+f4
+f3
+f2
+f1
+<latexit sha1_base64="WKg08heA7+Q/gRytbPzW2KV+kKo=">AAAD/nicdVPJjhMxEPVMWIZmm4EjlxY9kbhMlO6E5diCC8dBkJmR2q3IcZzEipeW7SaJLEv8AFf4A26IK7/CB/Af2J0gJbOUZKnqlV+5qlw1qhjVptv9s7ffunX7zt2De9H9Bw8fPT48enKmZa0wGWDJpLoYIU0YFWRgqGHkolIE8REj56P5u+A//0yUplJ8MquKlBxNBZ1QjIyHPpphf3iYdDvdRuKrSrpRErCR0+HR/l84lrjmRBjMkNZF2q1MaZEyFDPiIlhrUiE8R1NSeFUgTnRpm1xd3PbIOJ5I5Y8wcYNuMyziWq/4yN/kyMz0ZV8Ar/VhJDBhO6/bBdIrH2wXDFQjJdO78HKiEL6UvJm8KS0VVW2IwOvcJzWLjYxDL+MxVQQbtvIKwor68mM8Qz6M8R2PIsjRnCD/JcbbERRkgSXnSIwt1HVFFOWV1MQVvbKAISmpxqVNUtsYFWp42zdza5PM2aTnvNwYL3dFVu4iuY/qPPVmTh6ysO0ojqGUiNGpaAxvziaUHUOem1mSJtlxY0OsrnH2tp2uHbn/DZBm5uvffdzP5Er7ig1SSi5ckZZFLwxRU7sibP08nI3k0kJVM1LAMeVkWSkY5iboIsugIUsT7Oykk1UGeiJahh462+lXxrl1FD4nSpz0eb2JF77Rk+zAWT+/K2e5s8LBMHaS2X7a9Dfyi5FeXoOrylnWSV91Xn7oJ/nbzYocgGfgOXgBUvAa5OA9OAUDgMEUfAXfwPfWl9aP1s/Wr/XV/b0N5ynYkdbvf4ulVJU=</latexit>
+<latexit sha1_base64="yxwp9SuFBXA/uXLBsz6CG5SobWU=">AAAB73icbVBNSwMxEJ3Ur1q/qh69BIvgqeyKVI9FLx4r2A9ol5JNs21okl2TrFCW/gkvHhTx6t/x5r8xbfegrQ8GHu/NMDMvTAQ31vO+UWFtfWNzq7hd2tnd2z8oHx61TJxqypo0FrHuhMQwwRVrWm4F6ySaERkK1g7HtzO//cS04bF6sJOEBZIMFY84JdZJnZ7hQ0n6l/1yxat6c+BV4uekAjka/fJXbxDTVDJlqSDGdH0vsUFGtOVUsGmplxqWEDomQ9Z1VBHJTJDN753iM6cMcBRrV8riufp7IiPSmIkMXackdmSWvZn4n9dNbXQdZFwlqWWKLhZFqcA2xrPn8YBrRq2YOEKo5u5WTEdEE2pdRCUXgr/88ippXVT9WrV2f1mp3+RxFOEETuEcfLiCOtxBA5pAQcAzvMIbekQv6B19LFoLKJ85hj9Anz/N44/V</latexit>
+<latexit sha1_base64="Lc4LQPssJjUCfTSHKLiOiJ1764Q=">AAAEB3icdVPNbhMxEHYbfsry0xaOXFZsK3FplN2En+MKLhyLRNpK61XldbyNFf+sbC9JZPkBeAGu8AbcEFcegwfgPbA3QWr6M5KlmW/8jWfGM1XDqDaDwZ+t7d6du/fu7zyIHj56/GR3b//piZatwmSMJZPqrEKaMCrI2FDDyFmjCOIVI6fV7H3wn34mSlMpPpllQ0qOLgStKUbGQxByZKZVbWt3PjzfSwb9QSfxdSVdKwlYy/H5/vZfOJG45UQYzJDWRTpoTGmRMhQz4iLYatIgPEMXpPCqQJzo0nZJu/jQI5O4lsofYeIOvcywiGu95JW/GZLUV30BvNGHkcCEbbxu50gvfbBNMFCNlExvwotaIXwleVO/LS0VTWuIwKvc65bFRsahqfGEKoINW3oFYUV9+TGeIh/G+NZHke/yjCD/N8bbERRkjiXnSEws1G1DFOWN1MQVw7LoPkSqSWmT1HZGgzre5Zu5tUnmbDJ0Xm6Nl7siKzeR3Ed1nno7Jw9Z2MMojqGUiNEL0RnenNaUHUCem2mSJtlBZ0OsbnAOLzvdYeT+N0Caqa9/83E/nEvtKzZIKTl3RVoWwzBEXe2KsNXzcFrJhYWqZaSAE8rJolEwzE3QRZZBQxYm2NlRP2sM9ES0CD10tj9qjHOrKHxGlDga8XYdL3yjJ9mxs35+l85yZ4WDYewks6O062/kFyO9ugbXlZOsn77uv/o4SvJ36xXZAc/BC/ASpOANyMEHcAzGAIMGfAXfwPfel96P3s/er9XV7a015xnYkN7vf17jWKY=</latexit>
+t
+<latexit sha1_base64="UlGD0kXeq1X+7Cu3Wkgy37R/SnQ=">AAAD/HicdVNLbxMxEHYbHmV5tXDksmJbiUuj7CY8jiu4cGwl0lZaryrHmTRW/FjZXprIMn+AK/wDbogr/4UfwP/AuwlS0sdIlma+8TeeGc+MKs6M7fX+bG137ty9d3/nQfTw0eMnT3f3np0YVWsKQ6q40mcjYoAzCUPLLIezSgMRIw6no9mHxn/6GbRhSn6yiwpKQS4kmzBKbICO7flu0uv2WomvK+lKSdBKjs73tv/isaK1AGkpJ8YUaa+ypSPaMsrBR7g2UBE6IxdQBFUSAaZ0baY+PgjIOJ4oHY60cYuuMxwRxizEKNwUxE7NVV8D3uijRFLgG6+7S2IWIdgm2FCtUtxswvOJJvRK8nbyrnRMVrUFSZe5T2oeWxU3nYzHTAO1fBEUQjUL5cd0SkIYG/odRViQGZDwITbYEZZwSZUQRI4dNnUFmolKGfBFvyxwk5TS49IlqWuNirS89Zu5c0nmXdL3QW6Nl/siKzeRPET1gXo7J2+ycAdRHGOlCGcXsjWCOZ0wvo9FbqdJmmT7rY2pvsHZX3f6g8j/b4Cy01D/5uNhIhcmVGyJ1urSF2lZ9JshamvXwJfP4+lIzR3WNYcCj5mAeaVxMzeNLrMMW5jbxs4Ou1llcSCSedND77qDynq/jCJmoOXhQNSreM03BpIbehfmd+Gd8E563Iyd4m6Qtv2NwmKkV9fgunKSddM33dfHgyR/v1qRHfQCvUSvUIreohx9REdoiCgC9BV9Q987Xzo/Oj87v5ZXt7dWnOdoQzq//wEsBlPu</latexit>
+<latexit sha1_base64="cbIDNlWHD7+KCfrQlt9WjILD9CU=">AAAEEXicdVPLbhMxFHUbHmV4pcCOzYhpJBY0ykzCYzmCDcsikbbSeBR5HE9jxY+R7aEJlr+CH2ALf8AOseUL+AD+A88kSE3aXsnSvef6XN+Xi4pRbQaDPzu7nRs3b93euxPcvXf/wcPu/qNjLWuFyRhLJtVpgTRhVJCxoYaR00oRxAtGTor5u8Z/8okoTaX4aJYVyTk6E7SkGBkPTbpPoEH1ZPgihByZWVFa7CbDSTca9AethJeVeK1EYC1Hk/3dv3Aqcc2JMJghrbN4UJncImUoZsQFsNakQniOzkjmVYE40blt03dhzyPTsJTKH2HCFr3IsIhrveSFv9kkqbd9DXilDyOBCdt43Z4jvfTBNsGGaqRkehNelArhreRN+Sa3VFS1IQKvci9rFhoZNu0Np1QRbNjSKwgr6ssP8Qz5MMYPIQh8l+cE+SkZbwdQkHMsOUdiaqGuK6Ior6QmLhvmWTsQqaa5jWLbGhVqeRdvptZGibPR0Hm5Nl7qsiTfRFIf1Xnq9Zy0ycL2gjCEUiJGz0RreHNWUnYAeWpmURwlB60NsbrCObzodL3A/W+ANDNf/+bjfk2X2ldskFLy3GVxng2bJWprV4StnoezQi4sVDUjGZxSThaVgs3eNLpIEmjIwjR2cthPKgM9ES2aHjrbH1XGuVUUPidKHI54vY7XjNGT7NhZv79LZ7mzwsFm7SSzo7jtb+A/Rrz9DS4rx0k/ftV/+WEUpW/XX2QPPAXPwHMQg9cgBe/BERgDDD6Dr+Ab+N750vnR+dn5tbq6u7PmPAYb0vn9D3lPW6g=</latexit>
+<latexit sha1_base64="p/sZC/FkpJpqRLCDHcy3MWOHvkE=">AAAB73icbVBNSwMxEJ34WetX1aOXYBE8lV2V6rHoxWMF+wHtUrJptg1NsmuSFcrSP+HFgyJe/Tve/Dem7R609cHA470ZZuaFieDGet43WlldW9/YLGwVt3d29/ZLB4dNE6easgaNRazbITFMcMUallvB2olmRIaCtcLR7dRvPTFteKwe7DhhgSQDxSNOiXVSu2v4QJLeRa9U9ireDHiZ+DkpQ456r/TV7cc0lUxZKogxHd9LbJARbTkVbFLspoYlhI7IgHUcVUQyE2Szeyf41Cl9HMXalbJ4pv6eyIg0ZixD1ymJHZpFbyr+53VSG10HGVdJapmi80VRKrCN8fR53OeaUSvGjhCqubsV0yHRhFoXUdGF4C++vEya5xW/WqneX5ZrN3kcBTiGEzgDH66gBndQhwZQEPAMr/CGHtELekcf89YVlM8cwR+gzx/MX4/U</latexit>
+<latexit sha1_base64="7J1Kr/sSiiIQobNGqQJ38quCdAo=">AAAEB3icdVPNbhMxEHYbfsry0xaOXFZsK3FplN2En+MKLhyLRNpK61XldbyNFf/J9pJElh+AF+AKb8ANceUxeADeA+8mSE1/RrI0842/8cx4plKMGjsY/Nna7t25e+/+zoPo4aPHT3b39p+eGNloTMZYMqnPKmQIo4KMLbWMnClNEK8YOa1m71v/6WeiDZXik10qUnJ0IWhNMbIBgpAjO61qV/vz7HwvGfQHncTXlXStJGAtx+f723/hROKGE2ExQ8YU6UDZ0iFtKWbER7AxRCE8QxekCKpAnJjSdUn7+DAgk7iWOhxh4w69zHCIG7PkVbjZJmmu+lrwRh9GAhO28bqbI7MMwTbBlmqlZGYTXtQa4SvJ2/pt6ahQjSUCr3KvGxZbGbdNjSdUE2zZMigIaxrKj/EUhTA2tD6KQpdnBIW/scGOoCBzLDlHYuKgaRTRlCtpiC+GZdF9iNST0iWp6wyFOt7lm7lzSeZdMvRBbo2X+yIrN5E8RPWBejsnb7Nwh1EcQykRoxeiM4I5rSk7gDy30yRNsoPOhljf4BxedvrDyP9vgLTTUP/m42E4lyZUbJHWcu6LtCyG7RB1tWvCVs/DaSUXDuqGkQJOKCcLpWE7N60usgxasrCtnR31M2VhIKJF20Pv+iNlvV9F4TOixdGIN+t47TcGkht7F+Z36R33TnjYjp1kbpR2/Y3CYqRX1+C6cpL109f9Vx9HSf5uvSI74Dl4AV6CFLwBOfgAjsEYYKDAV/ANfO996f3o/ez9Wl3d3lpznoEN6f3+B1tLWKU=</latexit>
+<latexit sha1_base64="yoJ+Sz1BrhqQ2AgPKSXt/qw99Qk=">AAAEEXicdVPLbhMxFHUbHmV4pcCOzYhpJBY0ykzCYzmCDcsikbbSeBR5HE9jxY+R7aEJlr+CH2ALf8AOseUL+AD+A88kSE3aXsnSvef6XN+Xi4pRbQaDPzu7nRs3b93euxPcvXf/wcPu/qNjLWuFyRhLJtVpgTRhVJCxoYaR00oRxAtGTor5u8Z/8okoTaX4aJYVyTk6E7SkGBkPTbpPoEH1JHkRQo7MrCgtdpNk0o0G/UEr4WUlXisRWMvRZH/3L5xKXHMiDGZI6yweVCa3SBmKGXEBrDWpEJ6jM5J5VSBOdG7b9F3Y88g0LKXyR5iwRS8yLOJaL3nhbzZJ6m1fA17pw0hgwjZet+dIL32wTbChGimZ3oQXpUJ4K3lTvsktFVVtiMCr3MuahUaGTXvDKVUEG7b0CsKK+vJDPEM+jPFDCALf5TlBfkrG2wEU5BxLzpGYWqjriijKK6mJy4Z51g5Eqmluo9i2RoVa3sWbqbVR4mw0dF6ujZe6LMk3kdRHdZ56PSdtsrC9IAyhlIjRM9Ea3pyVlB1AnppZFEfJQWtDrK5wDi86XS9w/xsgzczXv/m4X9Ol9hUbpJQ8d1mcZ8NmidraFWGr5+GskAsLVc1IBqeUk0WlYLM3jS6SBBqyMI2dHPaTykBPRIumh872R5VxbhWFz4kShyNer+M1Y/QkO3bW7+/SWe6scLBZO8nsKG77G/iPEW9/g8vKcdKPX/VffhhF6dv1F9kDT8Ez8BzE4DVIwXtwBMYAg8/gK/gGvne+dH50fnZ+ra7u7qw5j8GGdH7/A3IRW6Y=</latexit>
+<latexit sha1_base64="BCCCcmnX/zWkIYMfm+jjwrFlVno=">AAAB73icbVBNSwMxEJ34WetX1aOXYBE8ld0i1WPRi8cK9gPapWTTbBuaZNckK5Slf8KLB0W8+ne8+W9M2z1o64OBx3szzMwLE8GN9bxvtLa+sbm1Xdgp7u7tHxyWjo5bJk41ZU0ai1h3QmKY4Io1LbeCdRLNiAwFa4fj25nffmLa8Fg92EnCAkmGikecEuukTs/woST9ar9U9ireHHiV+DkpQ45Gv/TVG8Q0lUxZKogxXd9LbJARbTkVbFrspYYlhI7JkHUdVUQyE2Tze6f43CkDHMXalbJ4rv6eyIg0ZiJD1ymJHZllbyb+53VTG10HGVdJapmii0VRKrCN8ex5POCaUSsmjhCqubsV0xHRhFoXUdGF4C+/vEpa1Ypfq9TuL8v1mzyOApzCGVyAD1dQhztoQBMoCHiGV3hDj+gFvaOPResaymdO4A/Q5w/K24/T</latexit>
+<latexit sha1_base64="TWdyy4YfkaJsQO1OlSa8ibXzAE4=">AAAEB3icdVPNbhMxEHYbfsry0xaOXFZsK3FplN2En+MKLhyLRNpK61XldbyNFf/J9pJElh+AF+AKb8ANceUxeADeA+8mSE1/RrI0842/8cx4plKMGjsY/Nna7t25e+/+zoPo4aPHT3b39p+eGNloTMZYMqnPKmQIo4KMLbWMnClNEK8YOa1m71v/6WeiDZXik10qUnJ0IWhNMbIBgpAjO61qV/vz9HwvGfQHncTXlXStJGAtx+f723/hROKGE2ExQ8YU6UDZ0iFtKWbER7AxRCE8QxekCKpAnJjSdUn7+DAgk7iWOhxh4w69zHCIG7PkVbjZJmmu+lrwRh9GAhO28bqbI7MMwTbBlmqlZGYTXtQa4SvJ2/pt6ahQjSUCr3KvGxZbGbdNjSdUE2zZMigIaxrKj/EUhTA2tD6KQpdnBIW/scGOoCBzLDlHYuKgaRTRlCtpiC+GZdF9iNST0iWp6wyFOt7lm7lzSeZdMvRBbo2X+yIrN5E8RPWBejsnb7Nwh1EcQykRoxeiM4I5rSk7gDy30yRNsoPOhljf4BxedvrDyP9vgLTTUP/m42E4lyZUbJHWcu6LtCyG7RB1tWvCVs/DaSUXDuqGkQJOKCcLpWE7N60usgxasrCtnR31M2VhIKJF20Pv+iNlvV9F4TOixdGIN+t47TcGkht7F+Z36R33TnjYjp1kbpR2/Y3CYqRX1+C6cpL109f9Vx9HSf5uvSI74Dl4AV6CFLwBOfgAjsEYYKDAV/ANfO996f3o/ez9Wl3d3lpznoEN6f3+B1ezWKQ=</latexit>
+<latexit sha1_base64="q73NGZ+dFVLFTYG5jkIjs1wD5/w=">AAAEEXicdVPLbhMxFHUbHmV4pcCOzYhpJBY0ykzCYzmCDcsikbbSeBR5HE9jxY+R7aEJlr+CH2ALf8AOseUL+AD+A88kSE3aXsnSvef6XN+Xi4pRbQaDPzu7nRs3b93euxPcvXf/wcPu/qNjLWuFyRhLJtVpgTRhVJCxoYaR00oRxAtGTor5u8Z/8okoTaX4aJYVyTk6E7SkGBkPTbpPoEH1JH4RQo7MrCgtdpN40o0G/UEr4WUlXisRWMvRZH/3L5xKXHMiDGZI6yweVCa3SBmKGXEBrDWpEJ6jM5J5VSBOdG7b9F3Y88g0LKXyR5iwRS8yLOJaL3nhbzZJ6m1fA17pw0hgwjZet+dIL32wTbChGimZ3oQXpUJ4K3lTvsktFVVtiMCr3MuahUaGTXvDKVUEG7b0CsKK+vJDPEM+jPFDCALf5TlBfkrG2wEU5BxLzpGYWqjriijKK6mJy4Z51g5Eqmluo9i2RoVa3sWbqbVR4mw0dF6ujZe6LMk3kdRHdZ56PSdtsrC9IAyhlIjRM9Ea3pyVlB1AnppZFEfJQWtDrK5wDi86XS9w/xsgzczXv/m4X9Ol9hUbpJQ8d1mcZ8NmidraFWGr5+GskAsLVc1IBqeUk0WlYLM3jS6SBBqyMI2dHPaTykBPRIumh872R5VxbhWFz4kShyNer+M1Y/QkO3bW7+/SWe6scLBZO8nsKG77G/iPEW9/g8vKcdKPX/VffhhF6dv1F9kDT8Ez8BzE4DVIwXtwBMYAg8/gK/gGvne+dH50fnZ+ra7u7qw5j8GGdH7/A2rTW6Q=</latexit>
+<latexit sha1_base64="ImaF3xCWon7KE3QtckYZ/qvrgXY=">AAAB73icbVDLSgNBEOyNrxhfUY9eBoPgKeyKRI9BLx4jmAckS5idzCZD5rHOzAphyU948aCIV3/Hm3/jJNmDJhY0FFXddHdFCWfG+v63V1hb39jcKm6Xdnb39g/Kh0cto1JNaJMornQnwoZyJmnTMstpJ9EUi4jTdjS+nfntJ6oNU/LBThIaCjyULGYEWyd1eoYNBe4H/XLFr/pzoFUS5KQCORr98ldvoEgqqLSEY2O6gZ/YMMPaMsLptNRLDU0wGeMh7ToqsaAmzOb3TtGZUwYoVtqVtGiu/p7IsDBmIiLXKbAdmWVvJv7ndVMbX4cZk0lqqSSLRXHKkVVo9jwaME2J5RNHMNHM3YrICGtMrIuo5EIIll9eJa2LalCr1u4vK/WbPI4inMApnEMAV1CHO2hAEwhweIZXePMevRfv3ftYtBa8fOYY/sD7/AHJV4/S</latexit>
+Alpha Comp.
+f4
+f3
+f2
+f1
+7
+L
+<latexit sha1_base64="izDp8ybgKZ3xzVXoCdaSQOIfPAE=">AAAD/HicdVNLbxMxEHYbHmV5tIUjlxXbSlwaZTfhcVzBhQOHViJtpfWqcpxJY8WPle2liSzzB7jCP+CGuPJf+AH8D7ybIDV9jGRp5ht/45nxzKjizNhe78/GZufO3Xv3tx5EDx89frK9s/v02KhaUxhSxZU+HREDnEkYWmY5nFYaiBhxOBnN3jf+k8+gDVPyk11UUApyLtmEUWIDdPTxbCfpdXutxNeVdKUkaCWHZ7ubf/FY0VqAtJQTY4q0V9nSEW0Z5eAjXBuoCJ2RcyiCKokAU7o2Ux/vB2QcT5QOR9q4RS8zHBHGLMQo3BTETs1VXwPe6KNEUuBrr7sLYhYh2DrYUK1S3KzD84km9ErydvK2dExWtQVJl7lPah5bFTedjMdMA7V8ERRCNQvlx3RKQhgb+h1FWJAZkPAhNtgRlnBBlRBEjh02dQWaiUoZ8EW/LHCTlNLj0iWpa42KtLzLN3Pnksy7pO+D3Bov90VWriN5iOoD9XZO3mTh9qM4xkoRzs5lawRzOmF8D4vcTpM0yfZaG1N9g7N/2en3I/+/AcpOQ/3rj4eJXJhQsSVaqwtfpGXRb4aorV0DXz6PpyM1d1jXHAo8ZgLmlcbN3DS6zDJsYW4bOzvoZpXFgUjmTQ+96w4q6/0yipiBlgcDUa/iNd8YSG7oXZjfhXfCO+lxM3aKu0Ha9jcKi5FeXYPrynHWTV93Xx0NkvzdakW20HP0Ar1EKXqDcvQBHaIhogjQV/QNfe986fzo/Oz8Wl7d3FhxnqE16fz+B5w3U8Y=</latexit>
+NeRF
+MLP
+Proposal
+MLP
+Proposal Round
+(a) NeRF Cache
+Softmax
+t04
+t03
+t02
+t01
+<latexit sha1_base64="ch/NgwJv/c/SeIemKOFlG8O92vE=">AAAB63icbVBNS8NAEJ3Ur1q/qh69LBbRU0lEqseiF48V7Ae0oWy2m3bp7ibsboQS+he8eFDEq3/Im//GTZqDtj4YeLw3w8y8IOZMG9f9dkpr6xubW+Xtys7u3v5B9fCoo6NEEdomEY9UL8CaciZp2zDDaS9WFIuA024wvcv87hNVmkXy0cxi6gs8lixkBJtcOh96w2rNrbs50CrxClKDAq1h9WswikgiqDSEY637nhsbP8XKMMLpvDJINI0xmeIx7VsqsaDaT/Nb5+jMKiMURsqWNChXf0+kWGg9E4HtFNhM9LKXif95/cSEN37KZJwYKsliUZhwZCKUPY5GTFFi+MwSTBSztyIywQoTY+Op2BC85ZdXSeey7jXqjYerWvO2iKMMJ3AKF+DBNTThHlrQBgITeIZXeHOE8+K8Ox+L1pJTzBzDHzifP2nwjdg=</latexit>
+Sample
+MLP
+f4
+f3
+f2
+f1
+<latexit sha1_base64="cC/DgjtMtQVdMjyH+Nq8bXXeCsE=">AAAEB3icdVPNbhMxEHYbfsry0xaOXFZsK3FplN2En+MKLhyLRNpK61XldbyNFf+sbC9JZPkBeAGu8AbcEFcegwfgPbA3QWr6M5KlmW/8jWfGM1XDqDaDwZ+t7d6du/fu7zyIHj56/GR3b//piZatwmSMJZPqrEKaMCrI2FDDyFmjCOIVI6fV7H3wn34mSlMpPpllQ0qOLgStKUbGQxByZKZVbWt3PjrfSwb9QSfxdSVdKwlYy/H5/vZfOJG45UQYzJDWRTpoTGmRMhQz4iLYatIgPEMXpPCqQJzo0nZJu/jQI5O4lsofYeIOvcywiGu95JW/GZLUV30BvNGHkcCEbbxu50gvfbBNMFCNlExvwotaIXwleVO/LS0VTWuIwKvc65bFRsahqfGEKoINW3oFYUV9+TGeIh/G+NZHke/yjCD/N8bbERRkjiXnSEws1G1DFOWN1MQVw7LoPkSqSWmT1HZGgzre5Zu5tUnmbDJ0Xm6Nl7siKzeR3Ed1nno7Jw9Z2MMojqGUiNEL0RnenNaUHUCem2mSJtlBZ0OsbnAOLzvdYeT+N0Caqa9/83E/nEvtKzZIKTl3RVoWwzBEXe2KsNXzcFrJhYWqZaSAE8rJolEwzE3QRZZBQxYm2NlRP2sM9ES0CD10tj9qjHOrKHxGlDga8XYdL3yjJ9mxs35+l85yZ4WDYewks6O062/kFyO9ugbXlZOsn77uv/o4SvJ36xXZAc/BC/ASpOANyMEHcAzGAIMGfAXfwPfel96P3s/er9XV7a015xnYkN7vf2J7WKc=</latexit>
+<latexit sha1_base64="9xURS6odfkek00GBnRBe6yrpRZk=">AAAB63icbVBNSwMxEJ2tX7V+VT16CRbRU9m1Uj0WvXisYD+gXUo2zbahSXZJskJZ+he8eFDEq3/Im//GdLsHbX0w8Hhvhpl5QcyZNq777RTW1jc2t4rbpZ3dvf2D8uFRW0eJIrRFIh6pboA15UzSlmGG026sKBYBp51gcjf3O09UaRbJRzONqS/wSLKQEWwy6XxQG5QrbtXNgFaJl5MK5GgOyl/9YUQSQaUhHGvd89zY+ClWhhFOZ6V+ommMyQSPaM9SiQXVfprdOkNnVhmiMFK2pEGZ+nsixULrqQhsp8BmrJe9ufif10tMeOOnTMaJoZIsFoUJRyZC88fRkClKDJ9agoli9lZExlhhYmw8JRuCt/zyKmlfVr16tf5wVWnc5nEU4QRO4QI8uIYG3EMTWkBgDM/wCm+OcF6cd+dj0Vpw8plj+APn8wds+I3a</latexit>
+<latexit sha1_base64="BSrtoUs/Fr3dqoTknTpZV/XKC68=">AAAB63icbVBNSwMxEJ2tX7V+VT16CRbRU9ktpXosevFYwX5Au5Rsmm1Dk+ySZIWy9C948aCIV/+QN/+N6XYP2vpg4PHeDDPzgpgzbVz32ylsbG5t7xR3S3v7B4dH5eOTjo4SRWibRDxSvQBrypmkbcMMp71YUSwCTrvB9G7hd5+o0iySj2YWU1/gsWQhI9hk0uWwNixX3KqbAa0TLycVyNEalr8Go4gkgkpDONa677mx8VOsDCOczkuDRNMYkyke076lEguq/TS7dY4urDJCYaRsSYMy9fdEioXWMxHYToHNRK96C/E/r5+Y8MZPmYwTQyVZLgoTjkyEFo+jEVOUGD6zBBPF7K2ITLDCxNh4SjYEb/XlddKpVb1GtfFQrzRv8ziKcAbncAUeXEMT7qEFbSAwgWd4hTdHOC/Ou/OxbC04+cwp/IHz+QNrdI3Z</latexit>
+⇥ w10
+⇥ w20
+⇥ w30
+⇥ w40
+<latexit sha1_base64="zuplhwtqjEMeGHH/cQAS9irX6to=">AAAB63icbVBNSwMxEJ2tX7V+VT16CRbRU9mVUj0WvXisYD+gXUo2zbahSXZJskpZ+he8eFDEq3/Im//GbLsHbX0w8Hhvhpl5QcyZNq777RTW1jc2t4rbpZ3dvf2D8uFRW0eJIrRFIh6pboA15UzSlmGG026sKBYBp51gcpv5nUeqNIvkg5nG1Bd4JFnICDaZ9HQ+8Ablilt150CrxMtJBXI0B+Wv/jAiiaDSEI617nlubPwUK8MIp7NSP9E0xmSCR7RnqcSCaj+d3zpDZ1YZojBStqRBc/X3RIqF1lMR2E6BzVgve5n4n9dLTHjtp0zGiaGSLBaFCUcmQtnjaMgUJYZPLcFEMXsrImOsMDE2npINwVt+eZW0L6tevVq/r1UaN3kcRTiBU7gAD66gAXfQhBYQGMMzvMKbI5wX5935WLQWnHzmGP7A+fwBboWN2w==</latexit>
+<latexit sha1_base64="gCZ90rPnAJbG8T9Xc9SH6ApDBc4=">AAAB63icbVBNSwMxEJ2tX7V+tOrRS7CInsqulOqx6MVjBfsB7VKyabYNTbJLkhXK0r/gxYMiXv1D3vw3pts9aOuDgcd7M8zMC2LOtHHdb6ewsbm1vVPcLe3tHxyWK0fHHR0litA2iXikegHWlDNJ24YZTnuxolgEnHaD6d3C7z5RpVkkH80spr7AY8lCRrDJpIthfVipujU3A1onXk6qkKM1rHwNRhFJBJWGcKx133Nj46dYGUY4nZcGiaYxJlM8pn1LJRZU+2l26xydW2WEwkjZkgZl6u+JFAutZyKwnQKbiV71FuJ/Xj8x4Y2fMhknhkqyXBQmHJkILR5HI6YoMXxmCSaK2VsRmWCFibHxlGwI3urL66RzVfMatcZDvdq8zeMowimcwSV4cA1NuIcWtIHABJ7hFd4c4bw4787HsrXg5DMn8AfO5w9ufI3b</latexit>
+<latexit sha1_base64="Lc4LQPssJjUCfTSHKLiOiJ1764Q=">AAAEB3icdVPNbhMxEHYbfsry0xaOXFZsK3FplN2En+MKLhyLRNpK61XldbyNFf+sbC9JZPkBeAGu8AbcEFcegwfgPbA3QWr6M5KlmW/8jWfGM1XDqDaDwZ+t7d6du/fu7zyIHj56/GR3b//piZatwmSMJZPqrEKaMCrI2FDDyFmjCOIVI6fV7H3wn34mSlMpPpllQ0qOLgStKUbGQxByZKZVbWt3PjzfSwb9QSfxdSVdKwlYy/H5/vZfOJG45UQYzJDWRTpoTGmRMhQz4iLYatIgPEMXpPCqQJzo0nZJu/jQI5O4lsofYeIOvcywiGu95JW/GZLUV30BvNGHkcCEbbxu50gvfbBNMFCNlExvwotaIXwleVO/LS0VTWuIwKvc65bFRsahqfGEKoINW3oFYUV9+TGeIh/G+NZHke/yjCD/N8bbERRkjiXnSEws1G1DFOWN1MQVw7LoPkSqSWmT1HZGgzre5Zu5tUnmbDJ0Xm6Nl7siKzeR3Ed1nno7Jw9Z2MMojqGUiNEL0RnenNaUHUCem2mSJtlBZ0OsbnAOLzvdYeT+N0Caqa9/83E/nEvtKzZIKTl3RVoWwzBEXe2KsNXzcFrJhYWqZaSAE8rJolEwzE3QRZZBQxYm2NlRP2sM9ES0CD10tj9qjHOrKHxGlDga8XYdL3yjJ9mxs35+l85yZ4WDYewks6O062/kFyO9ugbXlZOsn77uv/o4SvJ36xXZAc/BC/ASpOANyMEHcAzGAIMGfAXfwPfel96P3s/er9XV7a015xnYkN7vf17jWKY=</latexit>
+t
+<latexit sha1_base64="UlGD0kXeq1X+7Cu3Wkgy37R/SnQ=">AAAD/HicdVNLbxMxEHYbHmV5tXDksmJbiUuj7CY8jiu4cGwl0lZaryrHmTRW/FjZXprIMn+AK/wDbogr/4UfwP/AuwlS0sdIlma+8TeeGc+MKs6M7fX+bG137ty9d3/nQfTw0eMnT3f3np0YVWsKQ6q40mcjYoAzCUPLLIezSgMRIw6no9mHxn/6GbRhSn6yiwpKQS4kmzBKbICO7flu0uv2WomvK+lKSdBKjs73tv/isaK1AGkpJ8YUaa+ypSPaMsrBR7g2UBE6IxdQBFUSAaZ0baY+PgjIOJ4oHY60cYuuMxwRxizEKNwUxE7NVV8D3uijRFLgG6+7S2IWIdgm2FCtUtxswvOJJvRK8nbyrnRMVrUFSZe5T2oeWxU3nYzHTAO1fBEUQjUL5cd0SkIYG/odRViQGZDwITbYEZZwSZUQRI4dNnUFmolKGfBFvyxwk5TS49IlqWuNirS89Zu5c0nmXdL3QW6Nl/siKzeRPET1gXo7J2+ycAdRHGOlCGcXsjWCOZ0wvo9FbqdJmmT7rY2pvsHZX3f6g8j/b4Cy01D/5uNhIhcmVGyJ1urSF2lZ9JshamvXwJfP4+lIzR3WNYcCj5mAeaVxMzeNLrMMW5jbxs4Ou1llcSCSedND77qDynq/jCJmoOXhQNSreM03BpIbehfmd+Gd8E563Iyd4m6Qtv2NwmKkV9fgunKSddM33dfHgyR/v1qRHfQCvUSvUIreohx9REdoiCgC9BV9Q987Xzo/Oj87v5ZXt7dWnOdoQzq//wEsBlPu</latexit>
+<latexit sha1_base64="7J1Kr/sSiiIQobNGqQJ38quCdAo=">AAAEB3icdVPNbhMxEHYbfsry0xaOXFZsK3FplN2En+MKLhyLRNpK61XldbyNFf/J9pJElh+AF+AKb8ANceUxeADeA+8mSE1/RrI0842/8cx4plKMGjsY/Nna7t25e+/+zoPo4aPHT3b39p+eGNloTMZYMqnPKmQIo4KMLbWMnClNEK8YOa1m71v/6WeiDZXik10qUnJ0IWhNMbIBgpAjO61qV/vz7HwvGfQHncTXlXStJGAtx+f723/hROKGE2ExQ8YU6UDZ0iFtKWbER7AxRCE8QxekCKpAnJjSdUn7+DAgk7iWOhxh4w69zHCIG7PkVbjZJmmu+lrwRh9GAhO28bqbI7MMwTbBlmqlZGYTXtQa4SvJ2/pt6ahQjSUCr3KvGxZbGbdNjSdUE2zZMigIaxrKj/EUhTA2tD6KQpdnBIW/scGOoCBzLDlHYuKgaRTRlCtpiC+GZdF9iNST0iWp6wyFOt7lm7lzSeZdMvRBbo2X+yIrN5E8RPWBejsnb7Nwh1EcQykRoxeiM4I5rSk7gDy30yRNsoPOhljf4BxedvrDyP9vgLTTUP/m42E4lyZUbJHWcu6LtCyG7RB1tWvCVs/DaSUXDuqGkQJOKCcLpWE7N60usgxasrCtnR31M2VhIKJF20Pv+iNlvV9F4TOixdGIN+t47TcGkht7F+Z36R33TnjYjp1kbpR2/Y3CYqRX1+C6cpL109f9Vx9HSf5uvSI74Dl4AV6CFLwBOfgAjsEYYKDAV/ANfO996f3o/ez9Wl3d3lpznoEN6f3+B1tLWKU=</latexit>
+<latexit sha1_base64="TWdyy4YfkaJsQO1OlSa8ibXzAE4=">AAAEB3icdVPNbhMxEHYbfsry0xaOXFZsK3FplN2En+MKLhyLRNpK61XldbyNFf/J9pJElh+AF+AKb8ANceUxeADeA+8mSE1/RrI0842/8cx4plKMGjsY/Nna7t25e+/+zoPo4aPHT3b39p+eGNloTMZYMqnPKmQIo4KMLbWMnClNEK8YOa1m71v/6WeiDZXik10qUnJ0IWhNMbIBgpAjO61qV/vz9HwvGfQHncTXlXStJGAtx+f723/hROKGE2ExQ8YU6UDZ0iFtKWbER7AxRCE8QxekCKpAnJjSdUn7+DAgk7iWOhxh4w69zHCIG7PkVbjZJmmu+lrwRh9GAhO28bqbI7MMwTbBlmqlZGYTXtQa4SvJ2/pt6ahQjSUCr3KvGxZbGbdNjSdUE2zZMigIaxrKj/EUhTA2tD6KQpdnBIW/scGOoCBzLDlHYuKgaRTRlCtpiC+GZdF9iNST0iWp6wyFOt7lm7lzSeZdMvRBbo2X+yIrN5E8RPWBejsnb7Nwh1EcQykRoxeiM4I5rSk7gDy30yRNsoPOhljf4BxedvrDyP9vgLTTUP/m42E4lyZUbJHWcu6LtCyG7RB1tWvCVs/DaSUXDuqGkQJOKCcLpWE7N60usgxasrCtnR31M2VhIKJF20Pv+iNlvV9F4TOixdGIN+t47TcGkht7F+Z36R33TnjYjp1kbpR2/Y3CYqRX1+C6cpL109f9Vx9HSf5uvSI74Dl4AV6CFLwBOfgAjsEYYKDAV/ANfO996f3o/ez9Wl3d3lpznoEN6f3+B1ezWKQ=</latexit>
+<latexit sha1_base64="9HBLYulDT/OGB3NCWVaSV/OMaKk=">AAAEAXicdVPLbhMxFHUbHmV4tbBkM2IaiU2jzCQ8liPYsCwSSSuNR5XjOI2JHyPbQxJZXvEDbOEP2CG2fAkfwH9gT4KUpO2VLN17rs99+XpUMapNt/tnb7916/aduwf3ovsPHj56fHj0ZKhlrTAZYMmkOh8hTRgVZGCoYeS8UgTxESNno9m74D/7TJSmUnw0y4qUHF0KOqEYGQ8NoaGc6IvDpNvpNhJfVdK1koC1nF4c7f+FY4lrToTBDGldpN3KlBYpQzEjLoK1JhXCM3RJCq8K5LOUtinXxW2PjOOJVP4IEzfoJsMirvWSj/xNjsxU7/oCeK0PI4EJ28pu50gvfbBtMFCNlExvw4uJQnineDN5U1oqqtoQgVe1T2oWGxmHccZjqgg2bOkVhBX17cd4inwY44ceRZCjGUH+VYy3IyjIHEvOkRhbqOuKKMorqYkremUBQ1FSjUubpLYxKtTwNm/m1iaZs0nPebkxXu6KrNxGch/VeerNnDxUYdtRHEMpEaOXojG8OZ1Qdgx5bqZJmmTHjQ2xusbZ23S6duT+D0Caqe9/O7lfy6X2HRuklJy7Ii2LXliipndF2Co9nI7kwkJVM1LAsd/WRaVg2JugiyyDhixMsLOTTlYZ6IloEWbobKdfGedWUfiMKHHS5/U6XnhGT7IDZ/3+Lp3lzgoHw9pJZvtpM9/If4x09xtcVYZZJ33Vefmhn+Rv11/kADwDz8ELkILXIAfvwSkYAAw+ga/gG/je+tL60frZ+rW6ur+35jwFW9L6/Q9JcFYq</latexit>
+<latexit sha1_base64="cyJgtH/i+qX38jIEV3PfFqu1ZFU=">AAAB63icbVBNSwMxEJ2tX7V+VT16CRbRU9ktUj0WvXisYD+gXUo2zbahSXZJskpZ+he8eFDEq3/Im//GbLsHbX0w8Hhvhpl5QcyZNq777RTW1jc2t4rbpZ3dvf2D8uFRW0eJIrRFIh6pboA15UzSlmGG026sKBYBp51gcpv5nUeqNIvkg5nG1Bd4JFnICDaZ9HQ+qA3KFbfqzoFWiZeTCuRoDspf/WFEEkGlIRxr3fPc2PgpVoYRTmelfqJpjMkEj2jPUokF1X46v3WGzqwyRGGkbEmD5urviRQLracisJ0Cm7Fe9jLxP6+XmPDaT5mME0MlWSwKE45MhLLH0ZApSgyfWoKJYvZWRMZYYWJsPCUbgrf88ipp16pevVq/v6w0bvI4inACp3ABHlxBA+6gCS0gMIZneIU3RzgvzrvzsWgtOPnMMfyB8/kDcAmN3A==</latexit>
+<latexit sha1_base64="9HBLYulDT/OGB3NCWVaSV/OMaKk=">AAAEAXicdVPLbhMxFHUbHmV4tbBkM2IaiU2jzCQ8liPYsCwSSSuNR5XjOI2JHyPbQxJZXvEDbOEP2CG2fAkfwH9gT4KUpO2VLN17rs99+XpUMapNt/tnb7916/aduwf3ovsPHj56fHj0ZKhlrTAZYMmkOh8hTRgVZGCoYeS8UgTxESNno9m74D/7TJSmUnw0y4qUHF0KOqEYGQ8NoaGc6IvDpNvpNhJfVdK1koC1nF4c7f+FY4lrToTBDGldpN3KlBYpQzEjLoK1JhXCM3RJCq8K5LOUtinXxW2PjOOJVP4IEzfoJsMirvWSj/xNjsxU7/oCeK0PI4EJ28pu50gvfbBtMFCNlExvw4uJQnineDN5U1oqqtoQgVe1T2oWGxmHccZjqgg2bOkVhBX17cd4inwY44ceRZCjGUH+VYy3IyjIHEvOkRhbqOuKKMorqYkremUBQ1FSjUubpLYxKtTwNm/m1iaZs0nPebkxXu6KrNxGch/VeerNnDxUYdtRHEMpEaOXojG8OZ1Qdgx5bqZJmmTHjQ2xusbZ23S6duT+D0Caqe9/O7lfy6X2HRuklJy7Ii2LXliipndF2Co9nI7kwkJVM1LAsd/WRaVg2JugiyyDhixMsLOTTlYZ6IloEWbobKdfGedWUfiMKHHS5/U6XnhGT7IDZ/3+Lp3lzgoHw9pJZvtpM9/If4x09xtcVYZZJ33Vefmhn+Rv11/kADwDz8ELkILXIAfvwSkYAAw+ga/gG/je+tL60frZ+rW6ur+35jwFW9L6/Q9JcFYq</latexit>
+<latexit sha1_base64="pcb6zpcqme4FLnul4m0PcxVH6xA=">AAAB63icbVBNSwMxEJ2tX7V+VT16CRbRU9lVqR6LXjxWsB/QLiWbZtvQJLskWaUs/QtePCji1T/kzX9jtt2Dtj4YeLw3w8y8IOZMG9f9dgorq2vrG8XN0tb2zu5eef+gpaNEEdokEY9UJ8CaciZp0zDDaSdWFIuA03Ywvs389iNVmkXywUxi6gs8lCxkBJtMejrtX/TLFbfqzoCWiZeTCuRo9MtfvUFEEkGlIRxr3fXc2PgpVoYRTqelXqJpjMkYD2nXUokF1X46u3WKTqwyQGGkbEmDZurviRQLrScisJ0Cm5Fe9DLxP6+bmPDaT5mME0MlmS8KE45MhLLH0YApSgyfWIKJYvZWREZYYWJsPCUbgrf48jJpnVe9WrV2f1mp3+RxFOEIjuEMPLiCOtxBA5pAYATP8ApvjnBenHfnY95acPKZQ/gD5/MHcY2N3Q==</latexit>
+<latexit sha1_base64="9HBLYulDT/OGB3NCWVaSV/OMaKk=">AAAEAXicdVPLbhMxFHUbHmV4tbBkM2IaiU2jzCQ8liPYsCwSSSuNR5XjOI2JHyPbQxJZXvEDbOEP2CG2fAkfwH9gT4KUpO2VLN17rs99+XpUMapNt/tnb7916/aduwf3ovsPHj56fHj0ZKhlrTAZYMmkOh8hTRgVZGCoYeS8UgTxESNno9m74D/7TJSmUnw0y4qUHF0KOqEYGQ8NoaGc6IvDpNvpNhJfVdK1koC1nF4c7f+FY4lrToTBDGldpN3KlBYpQzEjLoK1JhXCM3RJCq8K5LOUtinXxW2PjOOJVP4IEzfoJsMirvWSj/xNjsxU7/oCeK0PI4EJ28pu50gvfbBtMFCNlExvw4uJQnineDN5U1oqqtoQgVe1T2oWGxmHccZjqgg2bOkVhBX17cd4inwY44ceRZCjGUH+VYy3IyjIHEvOkRhbqOuKKMorqYkremUBQ1FSjUubpLYxKtTwNm/m1iaZs0nPebkxXu6KrNxGch/VeerNnDxUYdtRHEMpEaOXojG8OZ1Qdgx5bqZJmmTHjQ2xusbZ23S6duT+D0Caqe9/O7lfy6X2HRuklJy7Ii2LXliipndF2Co9nI7kwkJVM1LAsd/WRaVg2JugiyyDhixMsLOTTlYZ6IloEWbobKdfGedWUfiMKHHS5/U6XnhGT7IDZ/3+Lp3lzgoHw9pJZvtpM9/If4x09xtcVYZZJ33Vefmhn+Rv11/kADwDz8ELkILXIAfvwSkYAAw+ga/gG/je+tL60frZ+rW6ur+35jwFW9L6/Q9JcFYq</latexit>
+<latexit sha1_base64="6VJWbfs4PZtuaEClT2J0/N2bk2c=">AAAB63icbVBNSwMxEJ2tX7V+VT16CRbRU9mVUj0WvXisYD+gXUo2zbahSXZJskpZ+he8eFDEq3/Im//GbLsHbX0w8Hhvhpl5QcyZNq777RTW1jc2t4rbpZ3dvf2D8uFRW0eJIrRFIh6pboA15UzSlmGG026sKBYBp51gcpv5nUeqNIvkg5nG1Bd4JFnICDaZ9HQ+qA3KFbfqzoFWiZeTCuRoDspf/WFEEkGlIRxr3fPc2PgpVoYRTmelfqJpjMkEj2jPUokF1X46v3WGzqwyRGGkbEmD5urviRQLracisJ0Cm7Fe9jLxP6+XmPDaT5mME0MlWSwKE45MhLLH0ZApSgyfWoKJYvZWRMZYYWJsPCUbgrf88ippX1a9erV+X6s0bvI4inACp3ABHlxBA+6gCS0gMIZneIU3RzgvzrvzsWgtOPnMMfyB8/kDcxGN3g==</latexit>
+<latexit sha1_base64="9HBLYulDT/OGB3NCWVaSV/OMaKk=">AAAEAXicdVPLbhMxFHUbHmV4tbBkM2IaiU2jzCQ8liPYsCwSSSuNR5XjOI2JHyPbQxJZXvEDbOEP2CG2fAkfwH9gT4KUpO2VLN17rs99+XpUMapNt/tnb7916/aduwf3ovsPHj56fHj0ZKhlrTAZYMmkOh8hTRgVZGCoYeS8UgTxESNno9m74D/7TJSmUnw0y4qUHF0KOqEYGQ8NoaGc6IvDpNvpNhJfVdK1koC1nF4c7f+FY4lrToTBDGldpN3KlBYpQzEjLoK1JhXCM3RJCq8K5LOUtinXxW2PjOOJVP4IEzfoJsMirvWSj/xNjsxU7/oCeK0PI4EJ28pu50gvfbBtMFCNlExvw4uJQnineDN5U1oqqtoQgVe1T2oWGxmHccZjqgg2bOkVhBX17cd4inwY44ceRZCjGUH+VYy3IyjIHEvOkRhbqOuKKMorqYkremUBQ1FSjUubpLYxKtTwNm/m1iaZs0nPebkxXu6KrNxGch/VeerNnDxUYdtRHEMpEaOXojG8OZ1Qdgx5bqZJmmTHjQ2xusbZ23S6duT+D0Caqe9/O7lfy6X2HRuklJy7Ii2LXliipndF2Co9nI7kwkJVM1LAsd/WRaVg2JugiyyDhixMsLOTTlYZ6IloEWbobKdfGedWUfiMKHHS5/U6XnhGT7IDZ/3+Lp3lzgoHw9pJZvtpM9/If4x09xtcVYZZJ33Vefmhn+Rv11/kADwDz8ELkILXIAfvwSkYAAw+ga/gG/je+tL60frZ+rW6ur+35jwFW9L6/Q9JcFYq</latexit>
+⌃
+<latexit sha1_base64="XaNEBX+vM4uwx8547Yil/8LNkPU=">AAAEAXicdVNLbxMxEHYbHmV5tXDksmJbiUuj7CY8jiu4cCyCpJXWq8pxnMSNHyvbSxJZPvEHuMI/4Ia48kv4AfwP7E2Qkj5GsjTzjb/xzHhmWDGqTafzZ2e3dev2nbt796L7Dx4+erx/8GSgZa0w6WPJpDobIk0YFaRvqGHkrFIE8SEjp8PZu+A//UyUplJ8MsuKlBxNBB1TjIyHBvAjnXB0vp902p1G4qtKulYSsJaT84Pdv3Akcc2JMJghrYu0U5nSImUoZsRFsNakQniGJqTwqkCc6NI26br4yCOjeCyVP8LEDbrJsIhrveRDf5MjM9WXfQG81oeRwIRtvW7nSC99sG0wUI2UTG/Di7FC+FLyZvymtFRUtSECr3If1yw2Mg7tjEdUEWzY0isIK+rLj/EU+TDGNz2KIEczgvyvGG9HUJA5lpwjMbJQ1xVRlFdSE1d0ywKGpKQalTZJbWNUqOFt3sytTTJnk67zcmO83BVZuY3kPqrz1Js5ecjCHkVxDKVEjE5EY3hzOqbsEPLcTJM0yQ4bG2J1jbO76XRHkfvfAGmmvv7tx/1YLrWv2CCl5NwVaVl0wxA1tSvCVs/D6VAuLFQ1IwUcUU4WlYJhboIusgwasjDBzo7bWWWgJ6JF6KGz7V5lnFtF4TOixHGP1+t44Rs9yfad9fO7dJY7KxwMYyeZ7aVNfyO/GOnlNbiqDLJ2+qr98kMvyd+uV2QPPAPPwQuQgtcgB+/BCegDDC7AV/ANfG99af1o/Wz9Wl3d3VlznoItaf3+B5jBVfk=</latexit>
+L
+<latexit sha1_base64="izDp8ybgKZ3xzVXoCdaSQOIfPAE=">AAAD/HicdVNLbxMxEHYbHmV5tIUjlxXbSlwaZTfhcVzBhQOHViJtpfWqcpxJY8WPle2liSzzB7jCP+CGuPJf+AH8D7ybIDV9jGRp5ht/45nxzKjizNhe78/GZufO3Xv3tx5EDx89frK9s/v02KhaUxhSxZU+HREDnEkYWmY5nFYaiBhxOBnN3jf+k8+gDVPyk11UUApyLtmEUWIDdPTxbCfpdXutxNeVdKUkaCWHZ7ubf/FY0VqAtJQTY4q0V9nSEW0Z5eAjXBuoCJ2RcyiCKokAU7o2Ux/vB2QcT5QOR9q4RS8zHBHGLMQo3BTETs1VXwPe6KNEUuBrr7sLYhYh2DrYUK1S3KzD84km9ErydvK2dExWtQVJl7lPah5bFTedjMdMA7V8ERRCNQvlx3RKQhgb+h1FWJAZkPAhNtgRlnBBlRBEjh02dQWaiUoZ8EW/LHCTlNLj0iWpa42KtLzLN3Pnksy7pO+D3Bov90VWriN5iOoD9XZO3mTh9qM4xkoRzs5lawRzOmF8D4vcTpM0yfZaG1N9g7N/2en3I/+/AcpOQ/3rj4eJXJhQsSVaqwtfpGXRb4aorV0DXz6PpyM1d1jXHAo8ZgLmlcbN3DS6zDJsYW4bOzvoZpXFgUjmTQ+96w4q6/0yipiBlgcDUa/iNd8YSG7oXZjfhXfCO+lxM3aKu0Ha9jcKi5FeXYPrynHWTV93Xx0NkvzdakW20HP0Ar1EKXqDcvQBHaIhogjQV/QNfe986fzo/Oz8Wl7d3FhxnqE16fz+B5w3U8Y=</latexit>
+<latexit sha1_base64="qxEzyS7lUG+JHDWvjdpMawCWcH0=">AAAEDXicdVPLbhMxFHUbHmV4pbBkM2JaiU2jzCQ8liPYsCwSaSuNR5XH8TRW/BjZnjaR5W/gB9jCH7BDbPkGPoD/wJ4EqenjSpbuPdfn+r5cNYxqMxz+2dru3bl77/7Og+jho8dPnvZ3nx1p2SpMJlgyqU4qpAmjgkwMNYycNIogXjFyXM0/BP/xOVGaSvHZLBtScnQmaE0xMh467fdhhZSFHJlZVdvaudN+MhwMO4mvK+laScBaDk93t//CqcQtJ8JghrQu0mFjSouUoZgRF8FWkwbhOTojhVcF4kSXtkvdxfsemca1VP4IE3foZYZFXOslr/zNkKO+6gvgjT6MBCZs43V7gfTSB9sEA9VIyfQmvKgVwleSN/W70lLRtIYIvMq9bllsZBxaG0+pItiwpVcQVtSXH+MZ8mGMH0AU+SbPCfITMt6OoCAXWHKOxNRC3TZEUd5ITVwxKotuHlJNS5ukq+E0qONdvplbm2TOJiPn5dZ4uSuychPJfVTnqbdz8pCF3Y/iGEqJGD0TneHNWU3ZHuS5mSVpku11NsTqBufostPtR+5/A6SZ+fo3H/crutS+YoOUkheuSMtiFJaoq10Rtnoeziq5sFC1jBRwSjlZNAqGvQm6yDJoyMIEOzsYZI2BnogWoYfODsaNcW4Vhc+JEgdj3q7jhTF6kp046/d36Sx3VjgY1k4yO067/kb+Y6RXv8F15SgbpG8Grz+Nk/z9+ovsgBfgJXgFUvAW5OAjOAQTgME5+Aq+ge+9L70fvZ+9X6ur21trznOwIb3f/wDZSlr2</latexit>
+f̄ Deferred
+Shading
+MLP
+(b) Fast Cache (control variate)
+Fig. 3: An illustration of our two radiance cache architectures. (a) The NeRF-based
+cache, which is accurate yet expensive to evaluate, uses proposal MLPs to predict sample point distances {tk } through an iterative resampling procedure. These distances
+are then used to generate sample points at which we query density and outgoing radiance. These quantities are combined to approximate the volume rendering integral via
+quadrature 3. (b) Rather than predict sample point distances via proposal sampling,
+our fast cache directly outputs distances {t′k } as well as weights {wk′ } given incoming
+ray parameters (x, ω i ). The distances are used to generate sample points at which we
+query features from an NGP grid. The resulting features are averaged together, and
+then fed through a deferred shading MLP which predicts the final color for the incoming ray. Though our illustration depicts four samples in both cases, the NeRF-based
+cache (a) uses 64 samples for the first two resampling rounds and 32 samples for the
+final one, while our fast cache only uses 8 samples overall.
+discuss our physically-based material representation. Finally, in Sections 4.3 and
+4.4, we present our efficient sampling schemes based on a simple unbiased estimator for the volumetric rendering integral, and a novel optimizable occlusion-aware
+spatially-varying importance sampling scheme.
+4.1
+Incoming Radiance Cache
+Our incoming radiance cache is based on the architecture of Zip-NeRF [2], and
+our appearance model is based on Ref-NeRF [42]. In particular, we borrow ZipNeRF’s usage of a multi-resolution hash grid as a neural graphics primitive
+(NGP) [33]. See Figure 3(a) for an illustration of the NeRF-based radiance cache,
+and see a complete description of it in the supplement.
+In order to increase the efficiency of our method, we wish to use an accelerated cache for querying incoming radiance instead of relying on an expensive
+NeRF-based cache which requires evaluating many samples per incoming ray.
+We therefore design a “fast cache” and supervise it to match the incoming radi-
+8
+B. Attal et al.
+ance of the expensive, NeRF-based cache. See Figure 3 for a diagram comparing
+the two caches.
+Our fast cache works by first passing the incident ray’s origin and direction (x
+and ω i ) through an optimizable function gsample , implemented as a low-resolution
+hash-encoding followed by a small sample MLP. This sampling function returns
+a set of sample point distances along the ray and their corresponding weights:
+\{t'_k, w'_k \}_{k=1}^\scount \ = g_{\operatorname {sample}} (\xpos , \dirin ).
+(7)
+Each distance t′k corresponds to a new sample point x′k = x + t′k ω i along the
+incident ray. Each of these samples is passed through a separate low-resolution
+NGP to yield a set of corresponding features {fk }Sk=1 , which are combined with
+their corresponding normalized (via a softmax) weights wk′ to yield a ray feature
+vector which encodes the appearance of that ray. This feature is then decoded
+into the incident radiance by using a small MLP, similar to the “deferred shading”
+approach of Hedman et al . [13]:
+\hat {L}_{\mathrm {i}}^{\mathit {fast}} = \operatorname {MLP}_{\operatorname {color}}\lft ( \sum _{k=1}^{\scount } w'_k \mathbf {f}_k \rgt )\,. \label {eqn:deferred-color}
+(8)
+Even for a small number of samples (we use S = 8 for all experiments), we find
+that this design serves as an effective cache for incoming radiance that captures
+high-frequency near-field illumination. See Figure 3 for an overview of the NeRFbased and fast caches, as well as figure 5 for an example of the output of the
+fast cache. Our supplement contains more details about both models.
+Instead of simply replacing the NeRF-based cache with our fast cache, we
+combine the accuracy of the NeRF-based cache with the efficiency of the fast
+cache by treating the fast cache as a control variate [17,34] for incoming radiance.
+In order to do this, we sample two sets of incident directions using an importance
+′
+′(j)
+sampling distribution p (to be introduced in Section 4.4): M′ samples {ω i }M
+j=1 ,
+(j)
+′
+and M ≪ M′ additional independent samples {ω i }M
+j=1 . We then use the M first
+fast
+samples to evaluate the fast cache L̂i (x, ω i ) via Equation 8, and the other M
+samples to evaluate the error between the NeRF-based cache L̂NeRF
+(x, ω i ) and
+i
+the fast cache. We then add the two estimates to arrive at an unbiased estimator
+for the outgoing radiance:
+\hat {L}_\mathrm {o}^{\mathit {fast}} &= \frac {1}{\mcount '} \sum _{j=1}^{\mcount '} f\lft (\xpos , \superj {\dirin '}, \dirout \rgt ) \hat {L}_\mathrm {i}^{\mathit {fast}}\lft (\xpos , \superj {\dirin '}\rgt ) \lft (\mathbf {n} \cdot \superj {\dirin '}\rgt ) \lft / p\lft (\superj {\dirin '}\rgt ) \rgt ., \nonumber \\ \mathrm {\Delta }\hat {L}_\mathrm {o} &= \frac {1}{\mcount } \sum _{j=1}^{\mcount } f\lft (\!\xpos , \superj {\dirin }\!, \dirout \!\rgt ) \lft (\!\hat {L}_\mathrm {i}^{\mathit {NeRF}}\!\lft (\!\xpos , \superj {\dirin }\!\rgt ) \!-\! \hat {L}_\mathrm {i}^{\mathit {fast}}\!\lft (\!\xpos , \superj {\dirin }\!\rgt )\!\rgt )\! \lft (\mathbf {n} \cdot \superj {\dirin }\rgt ) \!\lft / \!p\lft (\!\superj {\dirin }\rgt )\rgt ., \nonumber \\ \hat {L}_\mathrm {o} &= \hat {L}_\mathrm {o}^{\mathit {fast}} + \mathrm {\Delta }\hat {L}_\mathrm {o} \,. \label {eqn:fast-cache}
+(9)
+Note that this requires M evaluations of the NeRF-based cache and M + M′
+evaluations of the fast cache. Given sufficiently accurate cache (see Section 5 for
+Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering
+9
+an example) that is indeed cheap to evaluate, this process results in the quality of
+using M′ incoming rays from the accurate NeRF-based cache, by only requiring
+a fraction of the computation.
+On top of the two caches, we also have an explicit model for far-field illumination based on an MLP, L̂env
+iP (ω i ) = MLPenv (ω i ), which is multiplied by the
+N
+transparency of the ray 1 − k=1 wk and added to the radiance of the cache.
+4.2
+Material Representation
+Like Ref-NeRF [42], we extract analytic normals using the negative gradient of
+the density field, and leverage “predicted normals” output by the NGP, which
+are tied to the analytic normals using an L2 loss. Our material model is based
+on the Disney-GGX BRDF [5], which is combined with the predicted normals
+to obtain the radiance value as in Equation 4. The spatially-varying parameters
+of the BRDF model are output by a separate NGP, gmaterial :
+\Big (m(\xpos ), r(\xpos ), \mathbf {a}(\xpos )\Big ) = g_{\operatorname {material}}\lft (\xpos \rgt )\,,
+(10)
+where m is metalness, r is roughness, and a is albedo.
+4.3
+Efficient Gradients for Volume Rendering
+Evaluating the volume rendering integral using the quadrature technique in
+Equation 3 means querying the appearance and geometry of the volume at N
+sample point locations per ray, each of which requires Monte Carlo integration.
+However, this can be accelerated considerably by replacing the sum with a Monte
+Carlo estimate along the ray using K ≪ N samples [11]. We draw K indices from
+a categorical distribution j1 , . . . , jK ∼ Cat(w1 , . . . , wN ), and replace Equation 3
+with:
+\hat {L}_\mathrm {i}(\xorigin , \dirout ) = \frac {1}{\kcount } \sum _{k=1}^{\kcount } L_\mathrm {o}\lft (\xposof {t_{j_k}}, \dirout \rgt ) \,. \label {eqn:fast-volume-render}
+(11)
+The estimator of Equation 11 is unbiased, i.e., its expected value equals the
+quadrature value of Equation 3. While this still requires querying volume density
+for N points, we only need to evaluate the costly physically-based appearance at
+K points. Furthermore, if the render weight distribution has a single peak (often
+the case in practice), then this estimator has low variance, even for K = 1.
+4.4
+Low-Variance Gradients for Monte Carlo Rendering
+The unbiased estimator in Equation 11 reduces the number of secondary ray
+samples from N · M to K · M. However, a large number of secondary rays K · M
+may be necessary for convergence, but may be prohibitively expensive. We reduce
+the number of samples by leveraging occlusion-aware importance sampler.
+10
+B. Attal et al.
+Fig. 4: An illustration of our occlusion-aware importance sampler. We use an NGP to predict the parameters of a mixture of vMFs distribution for each point
+in space (Equation 12), which can produce different
+lobes for different light sources. Because the parameters of these distributions are spatially-varying, if a
+light source is occluded from the perspective of one
+surface point, then the model can “turn off” the lobe
+for that light source.
+Importance sampling for incoming radiance is common technique in physicallybased forward rendering and inverse rendering. Here, we aim to build a lightweight
+importance sampler that is capable of approximating the true distribution of
+incoming radiance, including occlusions, from both direct and indirect light
+sources. For this purpose, we use an NGP to map a point x into a set of 5L
+scalars representing the parameters {µ′ℓ , κℓ , λℓ }Lℓ=1 which parameterize a mixture of von Mises-Fisher (vMF) distributions as:
+\mixture (\direction ; \xpos ) = \frac {1}{Z}\sum _{\light =1}^\lcount \lambda _\ell (\xpos ) \operatorname {vMF}\lft (\direction ; \boldsymbol {\mu }_\light (\xpos ), \kappa _\light (\xpos )\rgt ), \; \text {with}\; \boldsymbol {\mu }_\light (\xpos ) = \frac {\boldsymbol {\mu }_\light '(\xpos ) - \xpos }{\| \boldsymbol {\mu }_\light '(\xpos ) - \xpos \|}\,, \label {eqn:vmfs-ngp} (12)
+PL
+where Z =
+ℓ=1 λℓ (x) is the partition function used for normalizing q, and
+the coefficients {λℓ }Lℓ=1 and {κℓ }Lℓ=1 are nonnegative numbers representing the
+mixture weights and vMF concentration parameters respectively.
+The parameterization of the means {µ′ℓ }Lℓ=1 in Equation 12 is designed so that
+a single vMF lobe can be assigned to the location of single (direct or indirect)
+light source in 3D, which is then projected onto the sphere.
+We optimize the parameters describing the distribution q at every location to
+match the true distribution of incoming radiance, taking occlusions into account.
+Concretely, we use the same importance sampling scheme used for evaluating the
+rendering integral in Equation 5, to minimize the loss:
+\mathcal {L}_{\operatorname {vMF}} = \frac {1}{\mcount }\sum _{j=1}^\mcount \lft \| Z\cdot \mixture \lft (\superj {\dirin }; \xpos \rgt ) - \bar {L}\lft (\xpos , \superj {\dirin }\rgt ) \rgt \|^2 \lft / p\lft (\superj {\dirin }\rgt )\rgt .,
+(13)
+(j)
+where p is a distribution used to generate the samples {ω i }M
+j=1 (as well as
+the M′ cheap cache samples used in Section 4.1), which is based the mixture
+distribution q and a standard material-based importance sampling distribution
+(see supplement for more details), and L̄(x, ω i ) = ∥L̂NeRF
+(x, ω i )∥2 is the L2
+i
+norm of the incident radiance, taken across channels.
+5
+Experiments
+Below, we provide implementation details of our approach, and describe how we
+validate it on both synthetic and real inverse rendering benchmarks.
+Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering
+Camera View
+NeRF Cache
+Fast Cache
+11
+vMFs
+Fig. 5: (left) We choose two points on the hotdog for which to visualize distributions
+of incoming radiance. (right) We show (a) incoming radiance from the NeRF cache,
+which is high quality but slow to evaluate, (b) incoming radiance from the fast cache,
+which is slightly lower quality but fast to evaluate, and (c) the probability density
+of the spatially-varying mixture of vMFs, which is able to capture occlusions in the
+incoming radiance distribution.
+Fast Cache & vMFs
+vMFs
+Neither
+Fig. 6: We demonstrate the impact of both of our variance reduction strategies by
+showcasing a rendering using 16spp from the Hotdog scene in the TensoIR-synthetic
+dataset. (Left) We use both the fast cache and vMF importance sampler, (Middle) we
+use only vMF importance sampler, (Right) we use neither strategy.
+5.1
+Implementation Details
+Model Parameters. Our NGP parameters for volumetric density closely follow
+those of Zip-NeRF [2]. We do proposal resampling with two additional NGPs
+with maximum resolutions of 1024 and 512, both of which, as well as the final
+density NGP, use of 2-layer 64-hidden-unit MLPs before emitting density. The
+material NGP as well as another NGP used for diffuse appearance in the cache
+(see supplement for more details) each has a maximum grid resolution of 2048
+and a 2-layer 64-hidden-unit MLP. For the fast cache discussed in Section 4.1, we
+use an NGP of maximum resolution 256 with a 4-layer 128-hidden-unit MLP to
+predict S = 8 sample-point distances, and a maximum NGP of resolution 256 to
+predict features. For the incoming radiance importance sampler in Section 4.4,
+we use 128 vMF lobes, NGP with a maximum resolution of 2048, and a 2-layer
+64-hidden-unit MLP. The hash maps of all NGPs have size 219 .
+Regularization. We implement a smoothness regularizer LBRDF for BRDF
+parameters. In particular, we use a variant of TensoIR’s smoothness regularizer,
+with an L1 rather than an L2 loss (see the supplement for more details). We also
+enforce a loss Lconsistency that encourages the specular color and diffuse color
+from the NeRF cache to match the specular and diffuse lobes from physically-
+12
+B. Attal et al.
+Ours
+TensoIR
+GT
+Ours
+TensoIR
+Relit
+Albedo
+GT
+Fig. 7: A visualization of ground-truth albedo and relighting for the hotdog (left) and
+ficus (right, cropped) scenes in the Blender dataset [29], alongside our and TensoIR’s
+results. Our method better decouples strong indirect illumination from the albedo (see
+the lip of the plate) while also reproducing more accurate highlights.
+based rendering. This indirectly provides gradients through the physically-based
+model for volume rendering. We further apply the anti-aliased inter-level loss
+Linterlevel from Zip-NeRF to the proposal grids, and L1 regularization to the
+parameters of all density grids with a loss Ldensity .
+Additional Details. We perform two-stage optimization by (1) first optimizing
+the NeRF cache and an initial estimate of geometry to match a scene’s input
+color images, and (2) optimizing geometry, materials, fast cache, and importance
+sampler through Equation 1. For the second stage, we use an L2 loss with the
+gradient trick [10], in order to ensure that our gradients for inverse rendering
+are unbiased. We leverage the same secondary rays that are used in rendering
+the physically-based model to supervise the fast cache and importance sampler.
+We do not apply full stop-gradients to any part of the pipeline, so that in the
+second stage geometry optimization can benefit from reflection and shading cues
+using the more accurate physically-based model of appearance. Altogether, we
+have the following:
+\mathcal {L}_{\textit {reg}} = \mathcal {L}_{\textit {normals}} + \mathcal {L}_{\textit {BRDF}} + \mathcal {L}_{\textit {consistency}} + \mathcal {L}_{\textit {interlevel}} + \mathcal {L}_{\textit {density}}
+(14)
+All training and evaluation is carried out using a single NVIDIA A100 GPU.
+5.2
+Results on Synthetic Data
+We first evaluate our approach on the TensoIR-synthetic dataset, which contains
+four scenes: armadillo, ficus, hotdog, and lego. Each scene consists of a set of 100
+training views and 200 test views containing ground truth normals and albedo, as
+well as ground truth color under several different lighting conditions. We evaluate
+(a) the quality of our recovered normals, (b) the quality of our recovered albedo
+maps, (c) novel view synthesis quality for the physically-based model, and (d)
+relighting quality. Our method outperforms baselines in terms of albedo quality
+and relighting, while performing comparably to the best method for novel view
+synthesis. See Table 5, Figure 7, and the supplement for visualizations.
+Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering
+13
+Fig. 8: Real results from Open Illumination [24]. Our normals are
+more accurate than those from TensoIR [15], and our albedo correctly
+removes specularities. Because of
+scale and color ambiguities, albedo
+maps are all visualized after using Photoshop’s auto-tone, autocontrast, and auto-color features.
+Normal
+Albedo
+Novel View Synthesis
+Relighting
+MAE ↓ PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓
+NeRFactor 6.314 25.125 0.940 0.109 24.679 0.922 0.120 23.383 0.908 0.131
+InvRender 5.074 27.341 0.933 0.100 27.367 0.934 0.089 23.973 0.901 0.101
+TensoIR 4.100 29.275 0.950 0.085 35.088 0.976 0.040 28.580 0.944 0.081
+Ours
+3.355 30.274 0.955 0.085 34.908 0.965 0.064 29.724 0.944 0.080
+Method
+Table 1: TensoIR-Synthetic Dataset [15] Results. Above, we present results of
+our method and 3 baselines on the TensoIR-synthetic dataset. We outperform all methods in terms of normal MAE, albedo quality, and relighting quality, while performing
+comparably to TensoIR in terms of novel view synthesis quality.
+5.3
+Results on Real Data
+We further evaluate on 10 real scenes from the Open Illumination dataset. Each
+scene has 38 training views and 10 test views under 13 different lighting conditions. We split this dataset into two parts: (a) one that contains mostly diffuse
+objects, and (b) one that contains mostly glossy/specular objects. We evaluate
+novel view synthesis quality for our physically-based model, as well as relighting quality. We tend to outperform TensoIR on scenes with specular materials
+(visualized in Figure 8), while TensoIR performs better for diffuse materials.
+5.4
+Ablations
+We ablate various design decisions and parts of our pipeline on the TensoIR
+synthetic dataset. In particular, we show that all of the following improve result
+quality: (a) volume rendering vs. median depth sampling, (b) vMF-importance
+sampling, and (c) our fast cache as a control variate for incoming illumination.
+6
+Conclusion
+In this paper, we have outlined a system for volumetric inverse rendering of
+geometry, materials, and lighting, where we reduce bias in two ways: (a) by approximating the volume rendering integral (Equation 2), and (b) by using Monte
+Carlo sampling to evaluate the rendering integral (Equation 5). In particular,
+14
+B. Attal et al.
+Table 2: A comparison to TensoIR [15] on the Open Illumination dataset [24] split into diffuse and specular scenes.
+PSNR↑ (diffuse)
+NVS
+Relighting
+TensoIR 32.043
+30.932
+Ours
+31.781
+29.679
+Method
+PSNR↑ (specular )
+NVS
+Relighting
+27.115
+26.955
+27.180
+27.810
+Table 3: Ablations We progressively ablate (a) our control variate scheme (Equation 9), (b) our vMF importance sampler (Section 4.4), and (c) our estimator (Section
+11), replacing it with median depth sampling.
+Method
+NVS PSNR↑ Albedo PSNR↑ MAE↓
+Ours
+34.915
+30.345
+3.355
+(a) Ours, no variate
+34.629
+30.329
+3.352
+(b) Ours, no variate, no sample
+34.653
+30.237
+3.352
+(c) Ours, no variate, no sample, no estimator
+34.249
+29.838
+3.491
+we accelerate volume rendering while providing correct expected gradients for
+optimization, and we accelerate the evaluation of the rendering equation by
+combining the high-quality NeRF-based radiance cache with an occlusion-aware
+importance sampler and a fast-cache-based control variate. This is in contrast
+to existing approaches which either use a single fixed intersected surface per ray,
+or use low-capacity and blurry representations of incoming radiance; both of
+which introduce bias. We show that our system achieves better quality material
+reconstruction and relighting than baselines on standard benchmarks containing
+both real and synthetic data, and justify our design decisions with ablations.
+Limitations & Future Work: Despite our method’s reduced bias, the quadrature
+approximation to the volume rendering integral (Equation 3) is still a source of
+bias. Our proposed approach can potentially be combined with unbiased volume
+rendering methods such as differential ratio tracking [Nimier-David et al. 2022].
+Our fast cache sometimes struggles to capture particularly thin structural
+details in near-field incoming illumination. While our control variate scheme
+prevents this from introducing bias into the optimization process, it does increase
+gradient variance. In principle, any implementation of a fast cache may be used,
+such as a high-quality baked representation of a neural radiance field [13,37,45].
+We leave investigation of alternative fast cache architectures up to future work.
+Note that we do not claim that our method is more efficient than existing
+approaches; rather, that we provide efficient tools to accelerate radiance cache
+queries and reduce rendering variance, allowing our less-biased & more physically
+accurate system to run tractably on commodity GPUs. Our method could potentially be combined with other tools (e.g. denoisers) to further reduce secondary
+ray sample counts, accelerate inference, and increase convergence speed.
+Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering
+15
+Acknowledgements This work was carried out while Benjamin was an intern at
+Google Research. Authors thank Rick Szeliski, Aleksander Holynski, and Janne
+Kontkanen for fruitful discussions, as well as Isabella Liu for help with TensoIR
+comparisons. Benjamin Attal is supported by a Meta Research PhD Fellowship.
+Matthew O’Toole acknowledges support from NSF CAREER 2238485 and a
+Google gift.
+References
+1. Barron, J.T., Malik, J.: Intrinsic Scene Properties from a Single RGB-D Image.
+CVPR (2013)
+2. Barron, J.T., Mildenhall, B., Verbin, D., Srinivasan, P.P., Hedman, P.: Zip-NeRF:
+Anti-Aliased Grid-Based Neural Radiance Fields. ICCV (2023)
+3. Bi, S., Xu, Z., Srinivasan, P., Mildenhall, B., Sunkavalli, K., Hašan, M., HoldGeoffroy, Y., Kriegman, D., Ramamoorthi, R.: Neural reflectance fields for appearance acquisition (2020), arXiv:2008.03824
+4. Bitterli, B., Wyman, C., Pharr, M., Shirley, P., Lefohn, A., Jarosz, W.: Spatiotemporal reservoir resampling for real-time ray tracing with dynamic direct lighting.
+ACM Trans. Graph. (2020)
+5. Burley, B., Studios, W.D.A.: Physically-Based Shading at Disney. ACM Trans.
+Graph. (2012)
+6. Chen, A., Xu, Z., Geiger, A., Yu, J., Su, H.: TensoRF: Tensorial radiance fields.
+ECCV (2022)
+7. Chen, W., Ling, H., Gao, J., Smith, E., Lehtinen, J., Jacobson, A., Fidler, S.:
+Learning to Predict 3D Objects with an Interpolation-based Differentiable Renderer. NeurIPS (2019)
+8. Debevec, P.: Rendering synthetic objects into real scenes: Bridging traditional and
+image-based graphics with global illumination and high dynamic range photography. ACM Trans. Graph. (1998)
+9. Fridovich-Keil, S., Yu, A., Tancik, M., Chen, Q., Recht, B., Kanazawa, A.: Plenoxels: Radiance fields without neural networks. CVPR (2022)
+10. Gkioulekas, I., Zhao, S., Bala, K., Zickler, T., Levin, A.: Inverse volume rendering
+with material dictionaries. ACM Trans. Graph. (2013)
+11. Gupta, K., Hasan, M., Xu, Z., Luan, F., Sunkavalli, K., Sun, X., Chandraker, M.,
+Bi, S.: MCNeRF: Monte Carlo rendering and denoising for real-time NeRFs. ACM
+Trans. Graph. (2023)
+12. Hasselgren, J., Hofmann, N., Munkberg, J.: Shape, Light, and Material Decomposition from Images using Monte Carlo Rendering and Denoising. NeurIPS (2022)
+13. Hedman, P., Srinivasan, P.P., Mildenhall, B., Barron, J.T., Debevec, P.: Baking
+neural radiance fields for real-time view synthesis. ICCV (2021)
+14. Jakob, W., Speierer, S., Roussel, N., Vicini, D.: Dr.Jit: A Just-In-Time Compiler
+for Differentiable Rendering. ACM Trans. Graph. (2022)
+15. Jin, H., Liu, I., Xu, P., Zhang, X., Han, S., Bi, S., Zhou, X., Xu, Z., Su, H.: TensoIR:
+Tensorial Inverse Rendering. CVPR (2023)
+16. Kajiya, J.T.: The rendering equation. ACM Trans. Graph. (1986)
+17. Kalos, M.H., Whitlock, P.A.: Monte Carlo Methods. John Wiley & Sons (2009)
+18. Kerbl, B., Kopanas, G., Leimkühler, T., Drettakis, G.: 3D Gaussian Splatting for
+Real-Time Radiance Field Rendering. ACM Transactions on Graphics (2023)
+16
+B. Attal et al.
+19. Kloek, T., Van Dijk, H.K.: Bayesian estimates of equation system parameters: an
+application of integration by Monte Carlo. Econometrica: Journal of the Econometric Society (1978)
+20. Krivánek, J., Gautron, P.: Practical global illumination with irradiance caching.
+Springer Nature (2022)
+21. Kuang, Z., Zhang, Y., Yu, H.X., Agarwala, S., Wu, E., Wu, J., et al.: StanfordORB: A Real-World 3D Object Inverse Rendering Benchmark. NeurIPS Datasets
+& Benchmarks Track (2023)
+22. Li, T.M., Aittala, M., Durand, F., Lehtinen, J.: Differentiable Monte Carlo Ray
+Tracing through Edge Sampling. ACM Trans. Graph. (2018)
+23. Ling, J., Yu, R., Xu, F., Du, C., Zhao, S.: NeRF as Non-Distant Environment
+Emitter in Physics-based Inverse Rendering. arXiv:2402.04829 (2024)
+24. Liu, I., Chen, L., Fu, Z., Wu, L., Jin, H., Li, Z., Wong, C.M.R., Xu, Y., Ramamoorthi, R., Xu, Z., et al.: OpenIllumination: A Multi-Illumination Dataset for Inverse
+Rendering Evaluation on Real Objects. NeurIPS (2024)
+25. Liu, Y., Wang, P., Lin, C., Long, X., Wang, J., Liu, L., Komura, T., Wang, W.:
+NeRO: Neural Geometry and BRDF Reconstruction of Reflective Objects from
+Multiview Images. ACM Trans. Graph. (2023)
+26. Mai, A., Verbin, D., Kuester, F., Fridovich-Keil, S.: Neural microfacet fields for
+inverse rendering. ICCV (2023)
+27. Max, N.: Optical models for direct volume rendering. IEEE Transactions on Visualization and Computer Graphics (1995)
+28. Mildenhall, B., Hedman, P., Martin-Brualla, R., Srinivasan, P.P., Barron, J.T.:
+NeRF in the Dark: High Dynamic Range View Synthesis from Noisy Raw Images.
+CVPR (2022)
+29. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: NeRF: Representing scenes as neural radiance fields for view synthesis. ECCV
+(2020)
+30. Müller, T., McWilliams, B., Rousselle, F., Gross, M., Novák, J.: Neural importance
+sampling. ACM Trans. Graph. (2019)
+31. Müller, T., Rousselle, F., Novák, J., Keller, A.: Real-time neural radiance caching
+for path tracing. ACM Trans. Graph. (2021)
+32. Munkberg, J., Hasselgren, J., Shen, T., Gao, J., Chen, W., Evans, A., Müller, T.,
+Fidler, S.: Extracting Triangular 3D Models, Materials, and Lighting From Images.
+CVPR (2022)
+33. Müller, T., Evans, A., Schied, C., Keller, A.: Instant neural graphics primitives
+with a multiresolution hash encoding. ACM Trans. Graph. (2022)
+34. Nicolet, B., Rousselle, F., Novak, J., Keller, A., Jakob, W., Müller, T.: Recursive
+control variates for inverse rendering. ACM Trans. Graph. (2023)
+35. Pharr, M., Jakob, W., Humphreys, G.: Physically based rendering: From theory
+to implementation. MIT Press (2023)
+36. Ramamoorthi, R., Hanrahan, P.: A signal-processing framework for inverse rendering. ACM Trans. Graph. (2001)
+37. Reiser, C., Szeliski, R., Verbin, D., Srinivasan, P., Mildenhall, B., Geiger, A., Barron, J., Hedman, P.: MERF: Memory-Efficient Radiance Fields for Real-time View
+Synthesis in Unbounded Scenes. ACM Trans. Graph. (2023)
+38. Scherzer, D., Nguyen, C.H., Ritschel, T., Seidel, H.P.: Pre-convolved radiance
+caching. Computer Graphics Forum (2012)
+39. Silvennoinen, A., Lehtinen, J.: Real-time global illumination by precomputed local
+reconstruction from sparse radiance probes. ACM Transactions on Graphics (TOG)
+(2017)
+Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering
+17
+40. Srinivasan, P.P., Deng, B., Zhang, X., Tancik, M., Mildenhall, B., Barron, J.T.:
+NeRV: Neural reflectance and visibility fields for relighting and view synthesis.
+CVPR (2021)
+41. Veach, E.: Robust Monte Carlo methods for light transport simulation. Stanford
+University (1998)
+42. Verbin, D., Hedman, P., Mildenhall, B., Zickler, T., Barron, J.T., Srinivasan,
+P.P.: Ref-NeRF: Structured view-dependent appearance for neural radiance fields.
+CVPR (2022)
+43. Ward, G.J., Rubinstein, F.M., Clear, R.D.: A ray tracing solution for diffuse interreflection. ACM Trans. Graph. (1988)
+44. Yao, Y., Zhang, J., Liu, J., Qu, Y., Fang, T., McKinnon, D., Tsin, Y., Quan, L.:
+NeiLF: Neural incident light field for physically-based material estimation. European Conference on Computer Vision (2022)
+45. Yariv, L., Hedman, P., Reiser, C., Verbin, D., Srinivasan, P.P., Szeliski, R., Barron, J.T., Mildenhall, B.: BakedSDF: Meshing Neural SDFs for Real-Time View
+Synthesis. SIGGRAPH (2023)
+46. Yu, Y., Debevec, P., Malik, J., Hawkins, T.: Inverse global illumination: Recovering
+reflectance models of real scenes from photographs. SIGGRAPH (1999)
+47. Zhang, J., Yao, Y., Li, S., Liu, J., Fang, T., McKinnon, D., Tsin, Y., Quan, L.:
+NeILF++: Inter-reflectable light fields for geometry and material estimation. ICCV
+(2023)
+48. Zhang, X., Srinivasan, P.P., Deng, B., Debevec, P., Freeman, W.T., Barron, J.T.:
+NeRFactor: Neural factorization of shape and reflectance under an unknown illumination. ACM Trans. Graph. (2021)
+49. Zhang, Y., Sun, J., He, X., Fu, H., Jia, R., Zhou, X.: Modeling indirect illumination
+for inverse rendering. CVPR (2022)
+18
+A
+B. Attal et al.
+Overview
+In Section B, we provide additional implementation details regarding the cost of
+the fast cache, the cost of the NeRF radiance cache, and the cost and implementation of the physically-based model. We also provide additional details about
+training, evaluation, and the losses that we use. In Section C we prove the unbiasedness of our control variate scheme and our estimator for volume rendering
+quadrature. In Section D we clarify some details regarding our ablations, and
+provide additional ablations for different values of K for our volume rendering
+quadrature estimator. Finally, in Section E, we provide additional result figures
+and per-scene quantitative metrics. Please see our supplemental website for more
+results and videos.
+B
+Additional Implementation Details
+B.1
+Fast Cache
+Rendering a single ray with our fast cache requires:
+1. Querying the distance NGP grid once.
+2. Querying the feature NGP grid 8 times.
+3. Querying the deferred shading MLP once.
+4. Querying the environment color once.
+We additionally predict the sum of rendering weights for an incoming ray, which
+is supervised to match the sum of the rendering weights from the NeRF cache.
+This prevents us from having to query the NeRF cache before blending the fast
+cache color with the environment color. The full cost of casting a secondary ray
+(steps 1-4 above) is 0.128 sec for the fast cache (per million rays).
+B.2
+NeRF Radiance Cache
+The cost of rendering a ray from the NeRF radiance cache requires:
+1. Querying the first proposal NGP 64 times.
+2. Querying the second proposal NGP 64 times.
+3. Querying the density NGP 32 times.
+4. Querying diffuse color cd and specular color cs at each of the final 32 sample
+points, where the specular color is produced using the same architecture as
+the fast cache.
+5. Querying environment color once.
+The full cost of casting a secondary ray (steps 1-5 above) is 1.574 sec for the
+NeRF cache (per million rays).
+Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering
+B.3
+19
+Physically-Based Model
+For ablations that do not use the fast cache, we use 16 samples from the NeRF
+cache. For models and ablations that use the fast cache, when rendering from the
+physically-based model, we use 64 samples to estimate incoming L̂fast
+from the
+o
+fast cache, and 16 samples for both the fast cache and NeRF cache to estimate
+∆L̂o .
+B.4
+Training Details
+Cache training: In the first stage of training, we optimize the Zip-NeRF-based
+radiance cache with a batch size of 16384 rays for 100,000 iterations using the
+Charbonnier loss as in [2]. We use a learning rate schedule that warms up from
+0 to 0.01 over the first 10,000 iterations, and then decreases linearly to 0.001 for
+the remaining 90,000 iterations. Training for 100,000 iterations takes 5.5 hours
+on a single A100.
+Joint training: In the second stage of training, we optimize the physicallybased model, environment map, fast cache, NeRF-cache, and occlusion-aware
+importance sampler. We use a batch size of 1024 rays for 40,000 iterations for
+the TensoIR-synthetic dataset and 100,000 iterations for the Open Illumination dataset, with 64 secondary rays for the fast cache, and 16 rays for the
+NeRF-cache. We use a learning rate of 1.5625 × 10−4 for the fast cache and
+occlusion aware importance sampler. For everything else, we use a learning rate
+of 3.125 × 10−5 . Training for 100,000 iterations takes 6.5 hours on a single A100.
+Photometric loss: For the physically-based model, instead of the Charbonnier
+loss we use a variant of the RawNeRF [28] loss. For a given ray (o, ω o ), predicted
+color Li (o, ω o ; Φ) and ground truth I(o, ω o ), we would like to minimize:
+\mathcal {L}_{\textit {photometric}} = \frac {\lft \lVert I(\xorigin , \dirout ) - \mathbb {E}\lft [\hat {L}_\mathrm {i}(\xorigin , \dirout ; \mathrm \Phi )\rgt ] \rgt \rVert ^ 2}{\operatorname {stopgrad}\lft (L_\mathrm {i}^{\textit {cache}}(\xorigin , \dirout ; \mathrm \Phi )\rgt )}
+(15)
+h
+i
+where E L̂i (o, ω o ; Φ) is the expected value of the estimator for radiance L̂i .
+However, we cannot minimize this loss directly, since we do not have access to
+an analytic expression for the expected value. Instead, we apply the gradient
+trick [10], which gives correct gradients through this loss in expectation for the
+physically-based model. More concretely, we minimize:
+\mathcal {L}_{\textit {photometric}} = \frac {2 \lft ( I(\xorigin , \dirout ) - \hat {L}_\mathrm {i}(\xorigin , \dirout ; \mathrm \Phi ) \rgt ) \operatorname {stopgrad}\lft ( I(\xorigin , \dirout ) - \hat {L}_\mathrm {i}(\xorigin , \dirout ; \mathrm \Phi )\rgt )}{ \operatorname {stopgrad}(\hat {L}_\mathrm {i}^{\textit {cache}}(\xorigin , \dirout ; \mathrm \Phi ))} \label {eqn:rawnerf}
+(16)
+where the stopgrad(·) operator treats its argument as a constant in the compute
+graph, and the first and second differences in the numerator are estimated using
+independent secondary samples.
+20
+B. Attal et al.
+B.5
+Evaluation Details
+During evaluation we use 64 secondary rays, but render the predicted color
+image 32 times and average the results in order to reduce Monte Carlo noise.
+We noticed that TensoIR renderings still contain some noise, and acknowledge
+that different sample counts and different importance sampling schemes could
+impact relative PSNR, but note that we outperform TensoIR in terms of albedo
+metrics, which is not affected by noise, and relighting by a fairly large margin.
+B.6
+BRDF Model
+As we discuss in the main text, we use the Disney-GGX BRDF [5], which is
+comprised of three terms: albedo a(x), metalness m(x), and roughness r(x).
+This BRDF can be written as:
+f(\dirin , \dirout , \xpos ) = f_{\textit {diffuse}}(\xpos ) + f_{\textit {specular}}(\dirin , \dirout , \xpos ) \\ f_{\textit {diffuse}}(\xpos ) = \frac {(1 - m(\xpos )) \mathbf {a}(\xpos )}{\pi } \\ f_{\textit {specular}}(\dirin , \dirout , \xpos ) = \frac {DFG}{4 (\normal \cdot \dirin ) (\normal \cdot \dirout )}
+(19)
+We refer readers to Burley [5] and Liu et al . [25] for definitions of (D, F, G) —
+the normal distribution function (NDF), Fresnel, and geometry terms. We use
+the Trowbridge-Reitz distribution function [35] for the NDF D.
+B.7
+Importance Sampling
+For both the fast and NeRF caches, we split secondary samples evenly between
+the diffuse color (due to the diffuse BRDF component fdiffuse ) and the specular
+color (due to the specular BRDF component fspecular ). For the diffuse color, we
+leverage multiple importance sampling [35] with half of the samples coming from
+the occlusion-aware importance sampler and half of the samples coming from
+cosine-weighted hemisphere sampling. For the specular color, we importance
+sample according to the distribution function D [35].
+B.8
+Normal Loss
+As discussed in the paper, we emit predicted normals from the density NGP.
+Similar to Ref-NeRF [42] and TensoIR [15], we constrain our predicted normals
+to match the negative gradient of the density field with an L2 loss:
+\mathcal {L}_{\textit {normals}} = C_{\textit {normals}} \sum _{k} w_k \lft \lVert \normal _k^{\textit {pred}} - \normal _k^{\textit {derived}} \rgt \rVert ^ 2
+(20)
+where wk are the render weights for a given ray, and
+\normal _k^{\textit {derived}} = -\frac {\nabla \sigma (\xpos _k)}{\lVert \nabla \sigma (\xpos _k)\rVert }
+(21)
+Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering
+21
+The loss weight Cnormals varies per-dataset. For the Open Illumination dataset,
+we use Cnormals = 1.0. For the TensoIR-synthetic dataset, we linearly interpolate
+Cnormals from 0.0001 to 1.0 from iteration 20,000 to iteration 40,000.
+B.9
+Cache Consistency Loss
+To allow the physically-based model to constrain the appearance of the NeRFcache, we supervise the diffuse and specular colors from the cache ccache
+(x) and
+d
+ccache
+(x, ω i ) to match the diffuse and specular colors from the physically-based
+s
+model cphys
+(x) and cphys
+(x, ω i ). We further predict an additional output from
+s
+d
+the cache cirradiance (x, ω o ), which is supervised to match the irradiance from
+the physically-based model (computed by setting the BRDF to be perfectly
+Lambertian with a(x) = 1). For all of the above, we use the same Raw-NeRF
+loss as in Equation 16.
+B.10
+Smoothness Loss
+To enforce BRDF smoothness we use a variant of TensoIR’s smoothness loss:
+\mathcal {L}_{\textit {BRDF}} = C_{\textit {BRDF}} \sum _{k} w_k \lft | \frac {\mathbf {\beta }(\xpos _k) - \mathbf {\beta }(\xpos _k + \xi )}{\operatorname {max}\lft (\mathbf {\beta }(\xpos _k), \mathbf {\beta }(\xpos _k + \xi )\rgt )} \rgt | \lambda (\xpos , \xpos + \xi ) \\ \lambda (\xpos , \xpos + \xi ) = \lft | \mathbf {a}_{\textit {pseudo}}(\xpos _k) - \mathbf {a}_{\textit {pseudo}}(\xpos _k + \xi ) \rgt | \quad \quad \quad \xi \sim \mathcal {N}(\mathbf {0}, \epsilon \mathrm {I})
+(23)
+Where apseudo (xk ) is the “pseudo-albedo” at point xk :
+\mathbf {a}_{\textit {pseudo}}(\xpos _k) = \frac {\mathbf {c}(\xpos , \dirout )}{\mathbf {c}_{\textit {irradiance}}(\xpos , \dirout )}
+(24)
+For the TensoIR dataset, we set ϵ = 0.01 with CBRDF = 0.05, and for other
+datasets we set ϵ = 0.005 with CBRDF = 0.001.
+C
+Proofs
+C.1
+Control Variates
+Here we show that Equation 9 is an unbiased estimator of the rendering equation
+(provided that incoming illumination from the NeRF cache is correct):
+\mathbb {E}\lft [\hat {L}_\mathrm {o}\rgt ] =& \,\,\mathbb {E}\lft [\hat {L}_\mathrm {o}^{\mathit {fast}}\rgt ] + \mathbb {E}\lft [\mathrm {\Delta }\hat {L}_\mathrm {o}\rgt ] &\text {(Eq. 9)} \\ =& \int _{\mathrm {\Omega }} f\lft (\xposof {t}, \dirin , \dirout \rgt ) \hat {L}_\mathrm {i}^{\textit {NeRF}}\lft (\xpos , \dirin \rgt ) \lft (\mathbf {n} \cdot \dirin \rgt )\, d \dirin & \text {(unbiasedness of Eq. 5)}\\ & + \int _{\mathrm {\Omega }} f\lft (\xposof {t}, \dirin , \dirout \rgt ) \lft (\hat {L}_\mathrm {i}^{\textit {NeRF}} - \hat {L}_\mathrm {i}^{\textit {fast}}\rgt )\lft (\xpos , \dirin \rgt ) \lft (\mathbf {n} \cdot \dirin \rgt )\, d \dirin \span \\ =& \int _{\mathrm {\Omega }} f\lft (\xposof {t}, \dirin , \dirout \rgt ) \hat {L}_\mathrm {i}^{\textit {NeRF}}\lft (\xpos , \dirin \rgt ) \lft (\mathbf {n} \cdot \dirin \rgt )\, d \dirin & \square
+22
+B. Attal et al.
+C.2
+Volume Rendering
+Here we show that 11 is an unbiased estimator for volume rendering quadrature
+(e.g. its expected value is equal to Equation 3):
+\mathbb {E}\lft [\hat {L}_\mathrm {i}(\xorigin , \dirout )\rgt ] &= \mathbb {E}\lft [\frac {1}{\kcount } \sum _{k=1}^{\kcount } L_\mathrm {o}\lft (\xposof {t_{j_k}}, \dirout \rgt ) \rgt ] & \text {(Eq. 11)} \\ &= \frac {1}{\kcount } \sum _{k=1}^{\kcount } \mathbb {E}[L_\mathrm {o}\lft (\xposof {t_{j_k}}, \dirout \rgt )] & ({j_k} \sim \operatorname {Cat}(w_1, \ldots , w_\ncount ) ) \\ &= \frac {1}{\kcount } \sum _{k=1}^{\kcount } \sum _{j=1}^{\ncount } w_j L_\mathrm {o}\lft (\xposof {t_j}, \dirout \rgt ) & \\ &= \sum _{j=1}^{\ncount } w_j L_\mathrm {o}\lft (\xposof {t_j}, \dirout \rgt ) & \square
+where (w1 , . . . , wN ) are render weights for the ray (o, ω o ).
+D
+Additional Ablations
+All ablations are evaluated in the single-light setting of the TensoIR-synthetic
+dataset.
+D.1
+Secondary Sample Ablations
+We report aggregate novel view synthesis PSNR, albedo PSNR, and normal
+MAE for three additional ablations in Table 4 as we vary the value of K in
+Equation 11. In practice, we find that K = 1 provides the best results.
+Table 4: Sample Number Ablations
+Method
+(a) K = 1 (Ours)
+(b) K = 2
+(c) K = 4
+(d) K = 8
+NVS PSNR↑ Albedo PSNR↑ MAE↓
+34.915
+34.913
+34.850
+34.778
+30.345
+30.208
+30.275
+30.059
+3.355
+3.354
+3.356
+3.355
+We expect that K = 1 will do worse on complex datasets with “more volumetric” geometry or partial transparencies, although we note that for any K,
+Equation 11 is still an unbiased estimator for volume rendering quadrature.
+Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering
+E
+Additional Results
+E.1
+Per-Scene Results for TensoIR
+23
+We provide per-scene results for both the TensoIR-Synthetic dataset in Table 5.
+We additionally provide results for the multi-light TensoIR setting.
+Table 5: Per-Scene TensoIR-Synthetic Dataset [15] Results.
+Armadillo
+NeRFactor
+InvRender
+TensoIR
+Ours
+TensoIR multi-light
+Ours multi-light
+3.467
+1.723
+1.950
+1.564
+1.550
+1.427
+28.001
+35.573
+34.360
+34.832
+34.270
+35.921
+0.946
+0.959
+0.989
+0.960
+0.989
+0.961
+0.096
+0.076
+0.059
+0.082
+0.057
+0.079
+26.479
+31.116
+39.050
+39.313
+38.230
+39.097
+0.947
+0.968
+0.986
+0.977
+0.984
+0.978
+0.095
+0.057
+0.039
+0.043
+0.043
+0.042
+26.887
+27.814
+34.504
+34.809
+34.941
+35.937
+0.944
+0.949
+0.975
+0.959
+0.977
+0.965
+0.102
+0.069
+0.045
+0.058
+0.043
+0.052
+Ficus
+NeRFactor
+InvRender
+TensoIR
+Ours
+TensoIR multi-light
+Ours multi-light
+6.442
+4.884
+4.420
+2.709
+4.060
+2.689
+22.402
+25.335
+27.130
+28.337
+26.220
+28.137
+0.928
+0.942
+0.964
+0.972
+0.952
+0.971
+0.085
+0.072
+0.044
+0.048
+0.054
+0.046
+21.664
+22.131
+29.780
+30.380
+28.640
+30.175
+0.919
+0.934
+0.973
+0.976
+0.967
+0.976
+0.095
+0.057
+0.041
+0.036
+0.050
+0.037
+20.684
+20.330
+24.296
+26.286
+24.622
+26.730
+0.907
+0.895
+0.947
+0.960
+0.949
+0.964
+0.107
+0.073
+0.068
+0.052
+0.068
+0.049
+Hotdog
+Normal
+Albedo
+Novel View Synthesis
+Relighting
+MAE↓ PSNR↑ SSIM↑LPIPS↓ PSNR↑ SSIM↑LPIPS↓ PSNR↑ SSIM↑LPIPS↓
+NeRFactor
+InvRender
+TensoIR
+Ours
+TensoIR multi-light
+Ours multi-light
+5.579
+3.708
+4.050
+2.882
+3.220
+2.741
+24.654
+27.028
+30.370
+30.832
+31.240
+31.180
+0.950
+0.950
+0.947
+0.966
+0.958
+0.968
+0.142
+0.094
+0.093
+0.073
+0.080
+0.077
+24.498
+31.832
+36.820
+36.966
+35.670
+36.036
+0.940
+0.952
+0.976
+0.961
+0.973
+0.958
+0.141
+0.089
+0.045
+0.095
+0.048
+0.097
+22.713
+27.630
+27.927
+29.241
+28.952
+29.050
+0.914
+0.928
+0.933
+0.941
+0.939
+0.942
+0.159
+0.089
+0.115
+0.104
+0.110
+0.103
+Lego
+Method
+NeRFactor
+InvRender
+TensoIR
+Ours
+TensoIR multi-light
+Ours multi-light
+9.767
+9.980
+5.980
+6.265
+5.370
+5.713
+25.444
+21.435
+25.240
+27.097
+25.560
+27.735
+0.937
+0.882
+0.900
+0.922
+0.905
+0.917
+0.112
+0.160
+0.145
+0.137
+0.146
+0.143
+26.076
+24.391
+34.700
+32.973
+34.350
+31.942
+0.881
+0.883
+0.968
+0.945
+0.967
+0.942
+0.151
+0.151
+0.037
+0.081
+0.038
+0.083
+23.246
+20.117
+27.596
+28.560
+27.517
+28.286
+0.865
+0.832
+0.922
+0.917
+0.922
+0.918
+0.156
+0.171
+0.095
+0.105
+0.091
+0.102
+E.2
+Per-Scene Results for Open Illumination
+We provide per-scene results for both the Open Illumination dataset in Table 6.
+We label each scene as diffuse or specular. The dataset provides both single-light
+data (with the object illuminated under a single lighting condition) and multilight data (with the object illuminated under many different lighting conditions).
+We perform evaluation in the single-light setting for novel view synthesis, and
+in the multi-light setting for relighting, as no relighting metrics are provided in
+the original Open Illumination paper for the single-light setting.
+E.3
+Qualitative Results
+Find additional qualitative results in Figures 9, 11, an 12as well as our videos
+on our supplemental website.
+B. Attal et al.
+Diffuse
+Table 6: Per-Scene Open Illumination dataset [24] Results.
+Specular
+24
+Scene
+Method
+PSNR ↑
+NVS Relit.
+Egg
+TensoIR
+Ours
+34.88
+34.48
+31.99
+30.76
+Stone
+TensoIR
+Ours
+29.96
+30.52
+31.07
+30.55
+Pumpkin
+TensoIR
+Ours
+28.20
+27.64
+27.16
+26.58
+Hat
+TensoIR
+Ours
+31.96
+31.02
+32.38
+30.41
+Sponge
+TensoIR
+Ours
+32.49
+32.14
+30.86
+28.87
+Banana
+TensoIR
+Ours
+34.77
+34.89
+32.13
+30.90
+Bird
+TensoIR
+Ours
+30.21
+29.92
+30.16
+30.19
+Box
+TensoIR
+Ours
+26.80
+26.40
+27.57
+28.93
+Cup
+TensoIR
+Ours
+22.13
+21.84
+22.96
+23.35
+Bucket
+TensoIR
+Ours
+29.32
+30.55
+27.13
+28.77
+Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering
+Albedo
+Roughness
+Relighting 1
+Relighting 2
+GT
+Multi Light
+Single Light
+GT
+Multi Light
+Single Light
+Normal
+25
+Fig. 9: Additional TensoIR-Synthetic Results [15] Results.
+26
+B. Attal et al.
+Albedo
+Roughness
+Relighting 1
+Relighting 2
+GT
+Multi Light
+Single Light
+GT
+Multi Light
+Single Light
+Normal
+Fig. 10: Additional TensoIR-Synthetic Results [15] Results.
+Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering
+Albedo
+Roughness
+Relighting 1
+Relighting 2
+Banana
+Bucket
+Box
+Bird
+Normal
+Fig. 11: Additional Open Illumination [24] Results.
+27
+28
+B. Attal et al.
+NDRMC
+NeILF
+NeRO
+Ours
+Luyu
+Potion
+Cat
+TBell
+GT
+Fig. 12: Glossy Synthetic [25] Results. Note that our results are relit with direct
+light only (our codebase only supports direct relighting), while the other methods are
+relit using blender with exported meshes.

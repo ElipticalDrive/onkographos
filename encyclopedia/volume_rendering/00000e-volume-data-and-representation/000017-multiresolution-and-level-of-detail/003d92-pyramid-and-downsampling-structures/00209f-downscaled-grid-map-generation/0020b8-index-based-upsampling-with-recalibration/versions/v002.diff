@@ -1,0 +1,114 @@
+--- v001.md
++++ v002.md
+@@ -1,34 +1,27 @@
+ # Index-Based Upsampling with Recalibration
+ 
+-Also called: Index-based upsampling, recalibration upsampling
+ 
+ ## Overview
+-Index-Based Upsampling with Recalibration is a technique to upsample low-resolution tensors to high resolution using an index map and a recalibration map, specifically for depth values [S1, unofficial]. It sets itself apart from standard bilinear upsampling by using explicit integer indices to gather low-resolution samples and a separate scaling map to adjust for resolution changes, ensuring that samples from similar depth planes contribute correctly to the final color [S1, unofficial].
++Index-Based Upsampling with Recalibration is a technique to upsample low-resolution tensors to high resolution using an index map and a recalibration map, specifically for depth values [S1, unofficial]. It gathers values from the low-resolution tensor using the index map [S1, unofficial]. It multiplies the gathered values by the recalibration map to adjust for resolution changes [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Low-resolution tensor $T_{low}$, `index_map`, `recalib_map`.
+-*   **Output:** High-resolution tensor $T_{high}$.
++The method takes a low-resolution tensor $T_{\text{low}}$, an `index_map`, and a `recalib_map` as inputs [S1, unofficial], and produces a high-resolution tensor $T_{\text{high}}$ as output [S1, unofficial].
+ 
+ **Data Structures:**
+-*   `index_map`: A tensor of shape $(H \times W, 2)$ containing integer indices mapping high-resolution pixels to low-resolution pixels [S1, unofficial].
+-*   `recalib_map`: A tensor of shape $(H \times W)$ containing scaling factors for recalibration [S1, unofficial].
+-*   $H, W$: Height and width of the high-resolution output.
++The `index_map` is a tensor of shape $(H \times W, 2)$ containing integer indices mapping high-resolution pixels to low-resolution pixels [S1, unofficial]. The `recalib_map` is a tensor of shape $(H \times W)$ containing scaling factors for recalibration [S1, unofficial]. $H$ and $W$ denote the height and width of the high-resolution output [G].
+ 
+ **Steps:**
+-1.  **Gather:** For each pixel $(i, j)$ in the high-resolution grid, retrieve the corresponding low-resolution coordinates from `index_map`. Let these be $(u, v)$. Gather the value from $T_{low}$ at $(u, v)$.
+-2.  **Recalibrate:** Retrieve the scaling factor $s_{i,j}$ from `recalib_map` at $(i, j)$.
+-3.  **Scale:** Multiply the gathered value by $s_{i,j}$ to produce the high-resolution value.
++1. **Gather:** For each pixel $(y, x)$ in the high-resolution grid, retrieve the corresponding low-resolution coordinates from `index_map` [S1, unofficial].
++2. **Recalibrate:** Multiply the gathered value by the scaling factor from `recalib_map` at the same pixel index [S1, unofficial].
+ 
+ **Formula:**
+-$$ T_{high}[i, j] = T_{low}[\text{index\_map}[i, j, 0], \text{index\_map}[i, j, 1]] \times \text{recalib\_map}[i, j] $$
++$$T_{\text{high}}[y, x] = T_{\text{low}}[\text{index\_map}[y \times W + x, 0], \text{index\_map}[y \times W + x, 1]] \times \text{recalib\_map}[y \times W + x]$$ [S1, unofficial].
+ 
+ **Parameters:**
+-*   Typical values for `ratio` (resolution scaling) are around 1.5 [S1, unofficial].
+-*   Thresholds for rendering steps may be set to $5 \times 10^{-5}$ [S1, unofficial].
++Typical values for `ratio` (resolution scaling) are around 1.5 [S1, unofficial]. Thresholds for rendering steps may be set to $5 \times 10^{-5}$ [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   Precision issues may arise if index mapping is not integer-accurate.
+-*   Boundary conditions for `index_map` must be handled to avoid out-of-bounds access [G].
++Boundary conditions for `index_map` must be handled to avoid out-of-bounds access [G]. Precision issues may arise if index mapping is not integer-accurate [G].
+ 
+ **Pseudocode:**
+@@ -40,6 +33,6 @@
+     Args:
+         T_low: Low-resolution tensor of shape (H_low, W_low, C).
+-        index_map: Tensor of shape (H_high, W_high, 2) with integer indices.
+-        recalib_map: Tensor of shape (H_high, W_high) with scaling factors.
++        index_map: Tensor of shape (H_high * W_high, 2) with integer indices.
++        recalib_map: Tensor of shape (H_high * W_high) with scaling factors.
+         
+     Returns:
+@@ -48,28 +41,18 @@
+     H_high, W_high = recalib_map.shape
+     C = T_low.shape[2] if len(T_low.shape) > 2 else 1
++    T_high = [[0.0] * C for _ in range(H_high)]
+     
+-    # Initialize high-resolution tensor
+-    T_high = torch.zeros((H_high, W_high, C), dtype=T_low.dtype, device=T_low.device)
+-    
+-    # Extract indices
+-    u_indices = index_map[:, :, 0].long()
+-    v_indices = index_map[:, :, 1].long()
+-    
+-    # Gather values from low-resolution tensor
+-    # Assuming T_low is 2D or 3D; handling 2D case for simplicity if C=1
+-    if len(T_low.shape) == 2:
+-        gathered = T_low[u_indices, v_indices]
+-    else:
+-        gathered = T_low[u_indices, v_indices, :]
+-        
+-    # Apply recalibration scaling
+-    # recalib_map needs to be broadcasted to match gathered shape
+-    recalib_expanded = recalib_map.unsqueeze(-1) if len(T_low.shape) > 2 else recalib_map
+-    T_high = gathered * recalib_expanded
+-    
++    for y in range(H_high):
++        for x in range(W_high):
++            idx = y * W_high + x
++            u, v = index_map[idx]
++            s = recalib_map[idx]
++            for c in range(C):
++                T_high[y][x][c] = T_low[u][v][c] * s
++                
+     return T_high
+ ```
+ 
+-## Subtopics
++## Subtopics          
+ 
+ ### [Depth-Aware Upsampling](2777-depth-aware-upsampling.md)
+@@ -77,13 +60,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(H \times W)$, where $H$ and $W$ are the high-resolution dimensions, due to the linear scan of the index and recalibration maps.
+-*   **Memory Complexity:** $O(H \times W)$ for storing the index and recalibration maps.
+-*   **Strengths:** Explicit control over sampling locations via indices; recalibration allows for correction of resolution-induced artifacts.
+-*   **Limitations:** Requires pre-computation of index and recalibration maps; may introduce aliasing if indices are not carefully chosen [G].
+-*   **When to use:** When explicit control over upsampling is needed, particularly for depth values or when bilinear interpolation is insufficient [S1, unofficial].
+-*   **When not to use:** When real-time performance is critical and pre-computation is not feasible, or when smooth interpolation is preferred over explicit indexing [G].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Not given in the sources.
++*   **Limitations:** Not given in the sources.
++*   **When to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-Originating from the DIST-Renderer project, this technique is part of a broader effort to optimize volumetric rendering through multiresolution representations [S1, unofficial]. It builds on the concept of downscaled grid maps and index maps to efficiently upsample data [S1, unofficial].
++The implementation referenced in the sources is derived from the DeepSDF repository, which was directly copied into the DIST-Renderer project [S1, unofficial]. The technique is used within a multiresolution rendering pipeline [S1, unofficial].
+ 
+ ## Sources

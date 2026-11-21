@@ -1,0 +1,232 @@
+# Point Cloud Normalization
+
+
+## Overview
+Point Cloud Normalization standardizes the spatial distribution of 3D points to ensure consistent scale and centering for downstream processing, such as voxelization or rendering [S1, unofficial]. It differs from geometric alignment methods like Principal Axes Alignment by focusing on statistical centering and bounding-box scaling rather than rotational covariance [S2, unofficial]. The method supports multiple normalization modes ('avg', 'dis', 'log1p', 'warp-log1p') to handle varying point density and distribution characteristics [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `pts1`: Tensor of shape $(N, 3)$ containing point coordinates.
+- `pts2`: Optional tensor of shape $(M, 3)$ for joint normalization.
+- `valid_mask`: Boolean mask of shape $(N,)$ indicating valid points in `pts1`.
+- `norm_mode`: String specifying the normalization strategy. Options: `'avg'`, `'dis'`, `'log1p'`, `'warp-log1p'` [S1, unofficial].
+
+**Outputs:**
+- Normalized `pts1` and `pts2` (if provided) with coordinates scaled to a canonical range.
+
+**Data Structures:**
+- Points are stored as floating-point arrays. No specific bit-packing is defined in the sources.
+
+**Steps:**
+
+1. **Handle Invalid Points:** If `norm_mode` is `'avg'`, replace invalid points in `pts1` with zeros using `valid_mask` [S1, unofficial].
+
+2. **Compute Mean:** Calculate the mean coordinates for each point cloud independently:
+   $$
+   x_{mean} = \frac{1}{N} \sum_{i=1}^{N} x_i, \quad y_{mean} = \frac{1}{N} \sum_{i=1}^{N} y_i, \quad z_{mean} = \frac{1}{N} \sum_{i=1}^{N} z_i
+   $$
+   where $N$ is the number of points in the cloud [S2, unofficial].
+
+3. **Centering:** Subtract the mean from each coordinate:
+   $$
+   x'_i = x_i - x_{mean}, \quad y'_i = y_i - y_{mean}, \quad z'_i = z_i - z_{mean}
+   $$
+   [S2, unofficial].
+
+4. **Compute Distances (for 'avg' mode):** If `norm_mode` is `'avg'`, concatenate `pts1` and `pts2` (if present) into `all_pts`. Compute the Euclidean distance to the origin for each point:
+   $$
+   all\_dis_i = \sqrt{x'^2_i + y'^2_i + z'^2_i}
+   $$
+   [S1, unofficial].
+
+5. **Find Max Value:** Determine the maximum absolute value across all normalized coordinates:
+   $$
+   max\_value = \max_{i} (|x'_i|, |y'_i|, |z'_i|)
+   $$
+   [S2, unofficial].
+
+6. **Scaling:** Scale the coordinates by dividing by `max_value * 2`:
+   $$
+   x''_i = \frac{x'_i}{max\_value \times 2}, \quad y''_i = \frac{y'_i}{max\_value \times 2}, \quad z''_i = \frac{z'_i}{max\_value \times 2}
+   $$
+   [S2, unofficial].
+
+7. **Distance Transformation (if applicable):**
+   - If `dis_mode` is `'log1p'` (part of `'log1p'` or `'warp-log1p'` modes), transform distances:
+     $$
+     all\_dis_i = \log(1 + all\_dis_i)
+     $$
+     [S1, unofficial].
+   - If `dis_mode` is `'warp-log1p'`, compute a warp factor:
+     $$
+     warp\_factor_i = \frac{\log(1 + all\_dis_i)}{\max(10^{-8}, all\_dis_i)}
+     $$
+     Apply this warp to `pts1` and `pts2` [S1, unofficial].
+
+8. **Translation:** Translate the coordinates by adding 0.5 to center the object in the $[0.5, 1.5]$ range:
+   $$
+   x'''_i = x''_i + 0.5, \quad y'''_i = y''_i + 0.5, \quad z'''_i = z''_i + 0.5
+   $$
+   This effectively maps the bounding box to $[0, 1]$ and shifts it [S2, unofficial].
+
+9. **Norm Factor (for 'avg' mode):** If `norm_mode` is `'avg'`, compute the norm factor:
+   $$
+   norm\_factor = \frac{\sum all\_dis}{nnz1 + nnz2 + 10^{-8}}
+   $$
+   where $nnz1$ and $nnz2$ are the number of non-zero (valid) points in `pts1` and `pts2` respectively [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def normalize_pointcloud(pts1, pts2=None, valid_mask=None, norm_mode='avg'):
+    """
+    Normalize point clouds based on norm_mode.
+    
+    Args:
+        pts1: np.ndarray of shape (N, 3)
+        pts2: np.ndarray of shape (M, 3) or None
+        valid_mask: np.ndarray of shape (N,) boolean, or None
+        norm_mode: str, one of 'avg', 'dis', 'log1p', 'warp-log1p'
+        
+    Returns:
+        normalized_pts1, normalized_pts2 (or None)
+    """
+    # Step 1: Handle invalid points for 'avg' mode
+    if norm_mode == 'avg':
+        if valid_mask is not None:
+            pts1 = pts1.copy()
+            pts1[~valid_mask] = 0.0
+        if pts2 is not None:
+            # Assuming pts2 is always valid or handled similarly if mask provided
+            pass
+
+    # Step 2 & 3: Compute mean and center for each cloud independently
+    def center_cloud(pts):
+        mean = np.mean(pts, axis=0)
+        return pts - mean
+
+    pts1_centered = center_cloud(pts1)
+    if pts2 is not None:
+        pts2_centered = center_cloud(pts2)
+    else:
+        pts2_centered = None
+
+    # Step 4: Compute distances for 'avg' mode
+    all_dis = None
+    if norm_mode == 'avg':
+        if pts2_centered is not None:
+            all_pts = np.concatenate([pts1_centered, pts2_centered], axis=0)
+        else:
+            all_pts = pts1_centered
+        all_dis = np.linalg.norm(all_pts, axis=1)
+
+    # Step 5: Find max value
+    # Compute max absolute value across all centered coordinates
+    max_val1 = np.max(np.abs(pts1_centered))
+    if pts2_centered is not None:
+        max_val2 = np.max(np.abs(pts2_centered))
+        max_value = max(max_val1, max_val2)
+    else:
+        max_value = max_val1
+
+    # Step 6: Scale
+    pts1_scaled = pts1_centered / (max_value * 2.0)
+    if pts2_centered is not None:
+        pts2_scaled = pts2_centered / (max_value * 2.0)
+    else:
+        pts2_scaled = None
+
+    # Step 7: Distance transformation
+    if norm_mode in ['log1p', 'warp-log1p']:
+        if all_dis is None:
+            # If not 'avg', compute distances from scaled points for transformation
+            if pts2_scaled is not None:
+                all_pts_scaled = np.concatenate([pts1_scaled, pts2_scaled], axis=0)
+            else:
+                all_pts_scaled = pts1_scaled
+            all_dis = np.linalg.norm(all_pts_scaled, axis=1)
+        
+        if norm_mode == 'log1p':
+            all_dis = np.log(1.0 + all_dis)
+            # Apply log1p scaling? The source says "Transform distances", 
+            # but doesn't explicitly say how to apply back to coordinates.
+            # Assuming the scaling step (Step 6) already happened.
+            # The source notes are ambiguous here. We assume the transformation 
+            # affects the distance metric used for norm_factor or further scaling.
+            # However, Step 6 already scaled. Let's assume the 'log1p' mode 
+            # implies using log distances for the norm factor or scaling.
+            # Given the ambiguity, we follow the literal steps:
+            # "Transform distances: all_dis = log(1 + all_dis)"
+            # It does not say to re-scale coordinates by this.
+            pass
+        
+        elif norm_mode == 'warp-log1p':
+            warp_factor = np.log(1.0 + all_dis) / np.maximum(1e-8, all_dis)
+            # Apply warp to pts1 and pts2. 
+            # Ambiguity: How to apply warp_factor (1D) to pts (2D)?
+            # Likely scaling each point by its warp factor.
+            # pts1_scaled = pts1_scaled * warp_factor[:, np.newaxis]
+            # pts2_scaled = pts2_scaled * warp_factor[pts2_indices, np.newaxis]
+            # This is a guess [G] due to ambiguity in source.
+            # For implementation safety, we might skip complex warp application 
+            # if not clearly defined, but the source says "Apply warp".
+            # Let's assume point-wise scaling.
+            if pts2_scaled is not None:
+                n1 = pts1_scaled.shape[0]
+                n2 = pts2_scaled.shape[0]
+                warp1 = warp_factor[:n1]
+                warp2 = warp_factor[n1:]
+                pts1_scaled = pts1_scaled * warp1[:, np.newaxis]
+                pts2_scaled = pts2_scaled * warp2[:, np.newaxis]
+            else:
+                pts1_scaled = pts1_scaled * warp_factor[:, np.newaxis]
+
+    # Step 8: Translation
+    pts1_final = pts1_scaled + 0.5
+    if pts2_scaled is not None:
+        pts2_final = pts2_scaled + 0.5
+    else:
+        pts2_final = None
+
+    # Step 9: Norm Factor (for 'avg' mode)
+    norm_factor = None
+    if norm_mode == 'avg':
+        if all_dis is not None:
+            nnz1 = np.sum(valid_mask) if valid_mask is not None else pts1.shape[0]
+            nnz2 = pts2.shape[0] if pts2 is not None else 0
+            norm_factor = np.sum(all_dis) / (nnz1 + nnz2 + 1e-8)
+
+    return pts1_final, pts2_final, norm_factor
+```
+
+**Parameters:**
+- `norm_mode`: String. Options: `'avg'`, `'dis'`, `'log1p'`, `'warp-log1p'` [S1, unofficial].
+
+**Edge Cases:**
+- **Empty Point Clouds:** Division by zero in mean calculation or scaling. Guard against $N=0$ [G].
+- **Invalid Points:** Handled by `valid_mask` in `'avg'` mode. Other modes assume all points are valid [S1, unofficial].
+- **Zero Distance:** Warp factor calculation uses $\max(10^{-8}, all\_dis)$ to avoid division by zero [S1, unofficial].
+
+## Subtopics
+
+### [Principal Axes Alignment](11372-principal-axes-alignment.md)
+Computes an SE(3) transform aligning the cloud to its principal axes. Use when rotational consistency is required. Deterministic and closed-form.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ for mean, distance, and scaling calculations, where $N$ is the number of points [S2, unofficial].
+- **Memory Complexity:** $O(N)$ to store intermediate arrays [S2, unofficial].
+- **Strengths:** Simple, fast, and effective for standardizing scale and center [S1, unofficial].
+- **Limitations:** Does not account for rotational orientation [S2, unofficial]. Sensitive to outliers if not masked [G].
+- **When to Use:** Preprocessing for voxelization or rendering where consistent scale is critical [S1, unofficial].
+- **When Not to Use:** When rotational alignment is needed; use Principal Axes Alignment instead [S2, unofficial].
+
+## Background
+Originated in the context of point cloud processing for 3D reconstruction and rendering, specifically within the InstantSplat pipeline [S1, unofficial]. Used to prepare ground truth point clouds for KD-tree guided sampling and subsequent voxelization [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
+[S2] MasonAndrewHarrison/Point-Cloud-Voxelizer, https://github.com/MasonAndrewHarrison/Point-Cloud-Voxelizer, fetched 2026-10-27 (unofficial)

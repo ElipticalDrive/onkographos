@@ -1,0 +1,112 @@
+--- v008.md
++++ v009.md
+@@ -1,5 +1,5 @@
+ # NerfAcc Rendering Pipeline
+ 
+-Also called: Efficient Sampling for Volumetric Rendering, NeRF Volume Rendering (CPU/PyTorch), NerfAcc, Neural Radiance Fields (NeRF) with Coarse/Fine Sampling and NDC, Neural Volume Rendering (Coarse/Fine Sampling), Volume Rendering with Neural Fields
++Also called: Efficient Sampling for Volumetric Rendering, NeRF Volume Rendering (CPU/PyTorch), NerfAcc, Neural Radiance Fields (NeRF) with Coarse/Fine Sampling and NDC, Neural Volume Rendering (Coarse/Fine Sampling), Volume Rendering with Neural Fields[S3, unofficial]
+ 
+ ## Overview
+@@ -7,6 +7,6 @@
+ 
+ ## How it works
+-**Inputs:** Ray origins $\mathbf{r}_o$ (shape $N_{rays}, 3$), normalized ray directions $\mathbf{r}_d$ (shape $N_{rays}, 3$), near/far bounds, and a neural radiance field model (NeRF) providing density $\sigma$ and RGB color.
+-**Outputs:** Rendered color, opacity, depth, and auxiliary data for estimator updates.
++**Inputs:** Ray origins $\mathbf{r}_o$ (shape $N_{rays}, 3$), normalized ray directions $\mathbf{r}_d$ (shape $N_{rays}, 3$), near/far bounds, and a neural radiance field model providing density $\sigma$ and RGB color [S3, unofficial].
++**Outputs:** Rendered color, opacity, depth, and auxiliary data for estimator updates [S3, unofficial].
+ 
+ **Data Structures:**
+@@ -16,34 +16,39 @@
+ **Steps:**
+ 1.  **Initialize Estimator:** Create a transmittance estimator (e.g., Proposal Network or Occupancy Grid) [S1].
+-    ```python
+-    estimator = nerfacc.TransmittanceEstimator()
+-    ```
+-2.  **Define Query Functions:**
+-    *   Density function: Queries NeRF for $\sigma$ given intervals [S1].
+-        ```python
+-        def density_fn(t0, t1, r_id):
+-            return nerf.density(r_o[r_id], r_d[r_id], t0, t1)
+-        ```
+-    *   RGB/Density function: Queries NeRF for $\sigma$ and RGB [S1].
+-        ```python
+-        def rgb_density_fn(t0, t1, r_id):
+-            return nerf.forward(r_o[r_id], r_d[r_id], t0, t1)
+-        ```
++2.  **Define Query Functions:** Density function queries the radiance field for $\sigma$ given intervals [S1]. RGB/Density function queries the radiance field for $\sigma$ and RGB [S1].
+ 3.  **Efficient Sampling:** Sample intervals along rays using the estimator and density function [S1].
+-    ```python
+-    t0, t1, r_id = nerfacc.sampling(r_o, r_d, estimator, density_fn=density_fn)
+-    ```
+ 4.  **Differentiable Rendering:** Integrate RGB and density over the sampled intervals [S1].
+-    ```python
+-    color, opacity, depth, aux = nerfacc.rendering(t0, t1, r_id, rgb_density_fn=rgb_density_fn)
+-    ```
+ 5.  **Update Estimator:** Update the transmittance estimator with the sampled intervals and auxiliary data every $n$ steps [S1].
+-    ```python
+-    estimator.update_every_n_steps(t0, t1, r_id, aux)
+-    ```
+ 6.  **Loss and Backprop:** Compute loss (e.g., MSE) and backpropagate [S1].
+-    ```python
+-    F.mse_loss(color, color_gt).backward()
+-    ```
++
++**Pseudocode:**
++```python
++# Inputs: r_o (N_rays, 3), r_d (N_rays, 3), nerf (radiance field model), color_gt (N_rays, 3)
++# External: nerfacc (acceleration library), torch.nn.functional as F
++
++# 1. Initialize transmittance estimator
++estimator = nerfacc.TransmittanceEstimator()
++
++# 2. Define density query function
++def density_fn(t0, t1, r_id):
++    return nerf.density(r_o[r_id], r_d[r_id], t0, t1)
++
++# 3. Define RGB/density query function
++def rgb_density_fn(t0, t1, r_id):
++    return nerf.forward(r_o[r_id], r_d[r_id], t0, t1)
++
++# 4. Efficient sampling: get packed interval samples
++t0, t1, r_id = nerfacc.sampling(r_o, r_d, estimator, density_fn=density_fn)
++
++# 5. Differentiable volumetric rendering: integrate RGB and density
++color, opacity, depth, aux = nerfacc.rendering(t0, t1, r_id, rgb_density_fn=rgb_density_fn)
++
++# 6. Update transmittance estimator with sampled intervals and auxiliary data
++estimator.update_every_n_steps(t0, t1, r_id, aux)
++
++# 7. Compute loss and backpropagate
++loss = F.mse_loss(color, color_gt)
++loss.backward()
++```
+ 
+ **Formulas:**
+@@ -56,6 +61,11 @@
+ *   `near`: Near plane depth. Typical: 0.5 [S3, unofficial].
+ *   `far`: Far plane depth. Typical: 3.0 [S3, unofficial].
+-*   `chunk`: Batch size for inference. Default: 1024*32 [S3, unofficial].
+-*   `white_back`: Boolean. If True, adds background weight to RGB [S3, unofficial].
++*   `N_samples`: Number of coarse samples per ray. Default: 64 [S3, unofficial].
++*   `N_importance`: Number of fine samples per ray. Default: 0 [S3, unofficial].
++*   `use_disp`: Boolean for linear sampling in depth (False) or disparity (True) [S3, unofficial].
++*   `perturb`: Float factor for random jitter on coarse samples. Default: 0 [S3, unofficial].
++*   `noise_std`: Float factor for Gaussian noise on $\sigma$. Default: 1 [S3, unofficial].
++*   `chunk`: Integer chunk size for batched inference. Default: 1024*32 [S3, unofficial].
++*   `white_back`: Boolean. If True, adds unrendered background weight to RGB [S3, unofficial].
+ 
+ **Edge Cases:**
+@@ -63,4 +73,6 @@
+ *   **NaN in Hash Grid:** Clamp points to $[-bound, bound]$ [S2, unofficial].
+ *   **Gradient Leakage:** Detach fine samples from coarse weights to prevent backpropagation [S3, unofficial].
++*   **Zero Weight in PDF:** Add epsilon ($10^{-5}$) to weights before computing PDF in `sample_pdf` [S3, unofficial].
++*   **Zero Denominator in Interpolation:** Set denominator to 1 if it falls below epsilon during `sample_pdf` linear interpolation [S3, unofficial].
+ 
+ ## Subtopics
+@@ -83,5 +95,5 @@
+ *   **Interactivity:** Achieves 30-400 fps with progressive rendering [S4].
+ *   **Strengths:** Decoupled from radiance field, supports multiple acceleration structures (Occupancy Grid, Proposal Network) [S1].
+-*   **Limitations:** Requires integration of custom CUDA kernels for maximum speed [S1].
++*   **Limitations:** Not given in the sources.
+ 
+ ## Background

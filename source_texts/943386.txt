@@ -1,0 +1,215 @@
+Good Afternoon, 
+I am using OptiX 7.2 and would like to create a shadow ray. 
+In older OptiX (e.g. 5/6) it looks as if __anyhit__ programs were used for this kind of operation such that a value within the __anyhit__ was …
+
+Anyhit program as shadow ray with optix 7.2 - OptiX - NVIDIA Developer Forums
+Anyhit program as shadow ray with optix 7.2
+Gaming and Visualization Technologies
+Visualization
+OptiX
+peterSteele123
+June 19, 2021, 5:06pm
+1
+Good Afternoon,
+I am using OptiX 7.2 and would like to create a shadow ray.
+In older OptiX (e.g. 5/6) it looks as if __anyhit__ programs were used for this kind of operation such that a value within the __anyhit__ was stored (e.g. an attenuation floating point value set to 0), then rtTerminateRay was called. With OptiX 7.2 I take it this is not optimal?
+Can anyone tell me how the OptiX 7.2 system would handle a shadow ray in this sort of manner? Perhaps within the __closesthit__ program ?
+Thanks in advance for any help.
+Ray tracing by Optix help and guide
+Shadow Ray from Closest Hit
+Opacity accumulation along the ray
+Optix 9.1 illegal memory access
+droettger
+June 21, 2021, 8:55am
+2
+There is basically only one case where anyhit programs need to be used when doing visibility (shadow) rays in OptiX 7 and that is when the surface can have cutout opacity, means holes inside the surface of thin-walled geometry which need to be determined per ray if they are texture based or procedural.
+In that case your shadow ray hit record only needs the anyhit program and that calls optixIgnoreIntersection when it determines the ray went through a hole inside the hit primitive and optixTerminateRay when not.
+You can find examples for that inside the OptiX SDK example optixCutouts or in my OptiX 7 examples:
+https://github.com/NVIDIA/OptiX_Apps/blob/master/apps/rtigo3/shaders/anyhit.cu#L94
+This will slow down the hardware BVH traversal on RTX boards because it’s calling back into the streaming multiprocessor to handle the user defined anyhit program.
+Now, if your scene never uses cutout opacity, a visibility ray can be implemented with just a miss program!
+Means no callback into closesthit or anyhit programs is required at all because all you want to know is if anything is inside the ray’s [t_min, t_max] interval.
+This should be the fastest method in OptiX 7 to implement visibility rays, when there is no cutout opacity inside the scene.
+For that you shoot rays with the flags
+OPTIX_RAY_FLAG_DISABLE_ANYHIT | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT | OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT
+That means the ray will neither call into closesthit, nor anyhit programs and will stop traversal on the very first hit, which isn’t necessarily the closest hit but rather, like the usual anyhit behavior, the first hit which is inside the [t_min, t_max] interval, means something is blocking the visibility.
+For built-in triangles not even a hit record program group would be required for that ray type, so you wouldn’t even need SBT hit records for such visibility ray types at all, only its miss record.
+Or if that is for custom primitives with an intersection program, the program group for that hit record has nullptr for closesthit and anyhit entries and the usual SBT layout with hit record entries per ray type.
+```
+  // The shadow ray is only a single payload to indicate the visibility test result.
+  // Default to visibilty being blocked by geometry. If the miss shader is reached this gets set to 1.
+  unsigned int isVisible = 0; 
+
+  // Note that the sysData.sceneEpsilon is applied on both sides of the shadow ray [t_min, t_max] interval 
+  // to prevent self-intersections with the actual light geometry in the scene.
+  optixTrace(sysData.topObject,
+              thePrd->pos, lightSample.direction, // origin, direction
+              sysData.sceneEpsilon, lightSample.distance - sysData.sceneEpsilon, 0.0f, // tmin, tmax, time
+              OptixVisibilityMask(0xFF), 
+              OPTIX_RAY_FLAG_DISABLE_ANYHIT | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT | OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+              0, 0, TYPE_RAY_SHADOW, // The shadow ray type only uses the miss program.
+              isVisible);
+
+  if (!isVisible)
+  {
+    return;
+  }
+```
+The visibility ray’s miss shader just need to set the single payload register to flag that nothing was hit in the interval.
+To say the obvious, that means if the ray reaches the miss shader nothing blocked the visibility.
+```
+extern "C" __global__ void __miss__shadow()
+{
+  optixSetPayload_0(1); // isVisible != 0
+}
+```
+The OptixProgramGroup setup then look like this for such a visibility ray:
+```
+  ...
+  pgd = &programGroupDescriptions[PGID_MISS_SHADOW];
+  pgd->kind  = OPTIX_PROGRAM_GROUP_KIND_MISS;
+  pgd->flags = OPTIX_PROGRAM_GROUP_FLAGS_NONE;
+  pgd->miss.module            = moduleMiss;
+  pgd->miss.entryFunctionName = "__miss__shadow"; // The shadow ray only needs this miss shader if all materials are opaque. No hit shaders for shadow rays!
+  ...
+```
+If you actually need to implement “shadow rays” which adjust the attenuation when passing through transparent objects then you would need to enhance the anyhit program to change your attenuation depending on the “amount of opacity”.
+That’s incorrect inside an unbiased global illumination light transport algorithm. There visibility is a binary decision and caustics are handled by the light transport.
+It’s normally used in Whitted-like renderers to enhance shadows, and in some cases for optimization purposes if direct lighting should pass through thin-glass geometry, resp. when not considering refractions.
+Doing something like cutout opacity or shadow attenuation inside the closesthit program will not be cheaper because reaching the closesthit program means the ray has ended and you’d need to shoot continuation rays to capture the remaining effects.
+Visual representation of ray propagation using ray tracing
+How to properly use visibility masks?
+Best practice when creating shaders for mutliple object types, materials, rays
+I would like to know why "miss" is occurring
+I would like to know why "miss" is occurring
+Occasionally missing triangles at certain view direction and object coordinates
+COMPILE ERROR: failed to create pipeline OptiX with no further information in logs
+Alternative algorithms for accelerating occlusion traces
+Optix payload value incorrect
+Simple shadow ray
+Opacity accumulation along the ray
+Face access for ray generation
+Shadow casting efficiency
+Porting APP from Optix 3.8 (32 bit) to Optix 6.5 (64 bit) : Need some help, please
+Electromagnetic wave simulation using OptiX
+Trimesh.ray equivalent in Optix
+peterSteele123
+June 21, 2021, 1:54pm
+3
+Thanks @droettger - great information.
+I think I need to implement “shadow rays” which adjust attenuation by enhancing the anyhit program to change attenuation. Is there an example of this in OptiX 7.2 anywhere?
+Thanks again for the help
+droettger
+June 21, 2021, 2:50pm
+4
+All you need to do for that, is to manipulate some per ray payload inside the anyhit program’s conditional code path before that calls optixIgnoreIntersection.
+A short search through the OptiX SDK 7.3.0 sources for optixIgnoreIntersection reveals that the __anyhit__glass_occlusion() function inside the optixWhitted example does exactly that.
+That’s used for the shadows of the hollow glass sphere by attenuating the direct light with a Fresnel factor to get darker edges from more reflected light.
+Last time I looked at that example it was using two spheres inside each other to produce a hollow thick glass sphere which matches the original scene, but the rendered shadow is wrong for that because it’s handling the glass sphere as single thin-walled surface, so don’t let that confuse you.
+Well, I think the original Whitted rendering didn’t do that either and had a uniform attenuation instead.
+peterSteele123
+June 21, 2021, 5:05pm
+5
+Cool. So I have the following snippets of code, do this look logical from the viewpoint of OptiX 7.2 - where mergePtr and splitPtr merge and split the PRDShade struct (for pointer addressing) ?
+struct PRDShade { float atten; }
+```
+extern "C" __global__ void __anyhit__sh() {
+    PRDShade *prd = mergePtr(optixGetPayload_0(), optixGetPayload_1());
+    pro->atten = 0;
+    optixTerminateRay();
+}
+```
+```
+extern "C" __global__ void __closesthit__ch() {
+    // Do some stuff
+    //
+    uint2 pay;
+    PRDShade shade;
+    pay = splitPtr(&shade);
+    optixTrace(param.handle, posOrig, rayDirection, 0.0f, 1e16, 0.0f, OptixVisibilityMask(255), RAY_TYPE_SHADOW, 0, 0, 0, pay.x, pay.y);
+    if(shade.atten > 0) {
+        // Do some rendering stuff
+    }
+}
+```
+Thanks again for any help.
+droettger
+June 22, 2021, 7:41am
+6
+Not really.
+The optixTrace() call arguments are incorrect.
+You used the RAY_TYPE_SHADOW for the flags argument and hardcoded the SBToffset, SBTstride, and missSBTIndex to zero.
+If RAY_TYPE_SHADOW is not zero, then this is not going to reach your anyhit and closesthit shaders for the shadow ray at all.
+If your shadow attenuation is only a single float, then it’s faster to implement that as a single payload register as in the code I posted above.
+In my examples that is using the per ray payload because that code is a stripped down versions of an MDL-capable renderer which could evaluate procedural coutout opacity materials inside the anyhit program and that evaluation needed a lot more state than a single boolean.
+You would only need to change the single payload register to be interpreted as float by using the necessary __uint_to_float() and __float_to_uint() device reinterpret cast functions.
+Otherwise the code structure is OK, but that anyhit program would only result in fully opaque materials so far.
+Again, the link to my example code above contains the necessary calls and programs which show exactly the structure you just described. Here’s my shadow ray optixTrace call.
+You would need to use the structure of the __anyhit__shadow_cutout() example and change the Monte Carlo binary decision for cutout or not to your desired attenuation float value, and how that is done for some glass material is shown inside the __anyhit__glass_occlusion() program inside the OptiX SDK optixWhitted example.
+I forgot to mention an important detail related to the BVH structure which will break this attenuation or any counting method via anyhit programs: Since the BVH builds are splitting primitives per default for performance reasons, anyhit programs can be invoked from the same primitive multiple times. In this case that will result in broken shadows.
+To prevent that, you must set the OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL.
+Please read the OptiX Programming Guide chapter on Acceleration Structures for the different build flags, explained below Listing 5.5 which says exactly that.
+Related link: https://forums.developer.nvidia.com/t/mesh-artifacts-when-using-anyhit-for-transparency-optix-7/156600/2
+Does Optix 7.X still support to specify accelerating data structure?
+peterSteele123
+June 22, 2021, 6:26pm
+7
+Thank you @droettger - especially for the OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL (good to know this).
+To get something going, I modified my __closesthit__ch function such that the optixTrace follows:
+optixTrace(param.handle, posOrig, rayDirection, 0.0f, 1e16, 0.0f, OptixVisibilityMask(255), OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT, RAY_TYPE_SHADOW, RAY_NUM_TYPE, RAY_TYPE_SHADOW, pay.x, pay.y); Which appears to yield opaque areas (as expected) when I call optixTerminateRay() in my __anyhit__sh() function.
+Thanks again for all the help.
+Related topics
+Topic
+Replies
+Views
+Activity
+Simple shadow ray
+OptiX
+4
+1125
+June 1, 2022
+Global payload
+OptiX
+8
+2044
+November 23, 2020
+Mesh artifacts when using anyhit for transparency Optix 7
+OptiX
+9
+2285
+October 13, 2020
+Optix 6: Ray-generation program with only anyhit rays. All hits ignored?
+OptiX
+2
+691
+September 24, 2020
+Shadow Ray from Closest Hit
+OptiX
+21
+2825
+August 10, 2021
+Anyhit.cu in OptiX_Apps
+OptiX
+2
+844
+February 24, 2020
+Any hit program
+OptiX
+1
+1495
+November 9, 2018
+Some confusion on AnyHit shader in OptiX
+OptiX
+4
+1806
+August 22, 2022
+Performance hit whenever 'any hit' is used
+OptiX
+1
+980
+April 6, 2016
+Relationship of NVIDIA OptiX 7 programs
+OptiX
+4
+1417
+May 2, 2023

@@ -1,0 +1,169 @@
+Native and Compact Structured Latents for 3D Generation - Low-VRAM sequential block offload for 4 GB GPUs by sepetovski · Pull Request #1 · sepetovski/TRELLIS.2
+
+Low-VRAM sequential block offload for 4 GB GPUs by sepetovski · Pull Request #1 · sepetovski/TRELLIS.2 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+sepetovski
+commented
+Sep 18, 2026
+•
+edited by cursor
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+1536 cascade reached decode
+example_1536.py dragon.png sampled and decoded at 1536³. CUDA died in o_voxel.to_glb → remove_small_connected_components because the mesh was tiny (1885 verts / 1042 faces) after integer-scaled occupancy. That is a cuMesh kernel launch (error 9), not the DiT.
+This revision:
+Snapshots vertices/faces on CPU before cuMesh, then writes a plain sample_1536.glb if PBR export crashes
+Cheap 2× occupancy fill (not the VAE C2S that TDRs) so the next 1536 mesh is denser
+Skips remove_small_connected_components on tiny meshes in the local o-voxel copy
+After the last crash, CUDA may be dead. PowerShell: wsl --shutdown, then:
+```
+conda activate trellis2
+cd ~/TRELLIS.2
+git fetch fork cursor/low-vram-block-offload-3548
+git pull fork cursor/low-vram-block-offload-3548
+TRELLIS_MAX_TOKENS=8192 python example_1536.py dragon.png
+```
+You should get sample_1536.glb even if PBR baking fails (untextured fallback). example_low_vram.py remains the proven 512 path.
+cursoragent
+and others
+added 11 commits
+September 18, 2026 18:19
+Add sequential block CPU offload so TRELLIS.2 can run on 4 GB GPUs
+…
+1e55544
+```
+The 1024 cascade crash on RTX 3050 4 GB is a hard VRAM limit, not TDR:
+low_vram already swaps whole modules, but one 1.3B bf16 DiT plus MLP
+activations still fills ~3640/4096 MiB. Stream transformer blocks
+CPU↔GPU one layer at a time, default to the 512 pipeline under 8 GB,
+and skip loading unused 1024 checkpoints.
+
+Co-authored-by: Damajn <sepetovskidamjan@gmail.com>
+```
+Free finished DiTs from RAM before VAE decode
+…
+b7dbf09
+```
+A bare Killed after texture sampling is the WSL OOM killer, not CUDA.
+Three 1.3B models plus rembg/DINOv3 were still resident when the shape
+VAE started. Drop each unused module after its stage and do not pin
+weights by default so WSL can reclaim host memory.
+
+Co-authored-by: Damajn <sepetovskidamjan@gmail.com>
+```
+Load checkpoints one stage at a time instead of all at once
+…
+f62b592
+```
+WSL only had 11.7 GiB RAM. from_pretrained still unpacked every 1.3B
+DiT plus rembg and DINOv3 before sampling, so decode started with
+0.3 GiB free and CUDA reported device not ready. Load each module on
+first use so peak host memory is one DiT, not six.
+
+Co-authored-by: Damajn <sepetovskidamjan@gmail.com>
+```
+Fix IndentationError in example_low_vram.py
+…
+db70b71
+```
+Co-authored-by: Damajn <sepetovskidamjan@gmail.com>
+```
+Offload the shape VAE one resolution level at a time
+…
+99c5e7c
+```
+Lazy loading left 5 GB host RAM free, so the last crash was VRAM inside
+FlexiDualGridVaeDecoder. Streaming 36 tiny convs through WDDM faults the
+3050. Keep VAE stages on CPU and run one upsample level on the GPU.
+
+Co-authored-by: Damajn <sepetovskidamjan@gmail.com>
+```
+Run background removal on CPU for 4 GB GPUs and accept an image path
+…
+104ceb3
+```
+Co-authored-by: Damajn <sepetovskidamjan@gmail.com>
+```
+Add a separate 1536³ cascade example without touching the 512 path
+…
+b3b54b1
+```
+example_low_vram.py stays on the proven 512³ pipeline. example_1536.py
+requests 1536_cascade with a 12k token budget so 4 GB cards can try
+1024–1536 instead of silently falling back. Cascade now loads the 1024
+DiT only after the 512 DiT is dropped, and unloads the shape VAE between
+upsample and high-res sampling so both are not resident in WSL RAM.
+
+Co-authored-by: Damajn <sepetovskidamjan@gmail.com>
+```
+Cap occupancy tokens so dense photos do not TDR 4 GB cards
+…
+d004c2e
+```
+house.png fills far more 32³ voxels than T.png, so the 512 shape-SLat
+pass dies on the second CFG forward with device not ready even after a
+reboot. Cap occupied voxels on small GPUs, park the CFG positive
+prediction on CPU before the negative pass, and fail fast if CUDA is
+already dead.
+
+Co-authored-by: Damajn <sepetovskidamjan@gmail.com>
+```
+Restore 512 sampling speed and harden VAE decode on 4 GB
+…
+bf086f3
+```
+Sequential CFG was syncing CUDA on every sampler step, which made
+sparse-structure 7–19 s/it. Token capping is enough for house.png;
+leave sequential CFG off unless TRELLIS_SEQ_CFG=1.
+
+Dragon died at VAE level 4/5 in flex_gemm neighbor maps. Run one VAE
+block at a time, drop spatial caches after each level, and write
+house.glb / dragon.glb so a later run does not overwrite the previous
+mesh.
+
+Co-authored-by: Damajn <sepetovskidamjan@gmail.com>
+```
+Skip VAE cascade upsample on 4 GB so 1536 can reach the 1024 DiT
+…
+8ca7606
+```
+dragon.png finished the 512 shape-SLat pass then died in
+decoder.upsample C2S (layer_norm / flex_gemm). That 4-level subdivision
+is what fills VRAM, not the 1024 DiT. On GPUs under 8 GB integer-scale
+the LR occupancy instead and still run the 1024 sampler.
+
+Co-authored-by: Damajn <sepetovskidamjan@gmail.com>
+```
+Export a GLB even when cuMesh cleanup dies on a tiny 1536 mesh
+…
+9e62216
+```
+The 1024 DiT and VAE decode already finished at 1536³. Integer-scaled
+occupancy produced ~1k faces, and remove_small_connected_components
+launched with an invalid CUDA grid. Snapshot vertices on CPU first,
+fall back to a plain trimesh GLB, and cheaply 2×-fill occupancy so the
+next 1536 run is denser.
+
+Co-authored-by: Damajn <sepetovskidamjan@gmail.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

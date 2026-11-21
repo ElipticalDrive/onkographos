@@ -1,0 +1,287 @@
+# View-dependent color with Spherical Harmonics
+
+Also called: Rendering with Spherical Harmonics, SH Color Representation, SH Render, SH to RGB, Spherical Harmonic Colour Model, Spherical Harmonic Evaluation, Spherical Harmonics Color Evaluation, Spherical Harmonics for View-Dependent Color
+
+## Overview
+This method represents the view-dependent color (radiance) of a 3D Gaussian primitive as a function of the viewing direction using spherical harmonics (SH) coefficients [S1, unofficial][S3]. It solves the problem of storing directional color variation (such as highlights and reflections) compactly without requiring per-ray neural network queries [S1, unofficial]. Unlike simple point colors or view-independent RGB values, this model captures specular effects and directional shading [S1, unofficial][S8]. It is distinct from its siblings in the tree: [Ray-marching on 3D Gaussians](1036-ray-marching-on-3d-gaussians.md) uses this representation for color evaluation during rasterization, whereas [OTS Marching Ray Marching Algorithm](1073-ots-marching-ray-marching-algorithm.md) and [Physics-based Gaussian Simulation](1457-physics-based-gaussian-simulation.md) do not inherently rely on this specific view-dependent color encoding [S1, unofficial].
+
+## How it works
+**Inputs:**
+- A set of $N$ 3D Gaussians.
+- For each Gaussian $i$:
+    - Position $\mathbf{p}_i$.
+    - Camera parameters (position $\mathbf{c}$, orientation).
+    - SH coefficients $\mathbf{k}_i$ (see Data structures).
+- Maximum SH degree $L=3$ [S1, unofficial].
+
+**Outputs:**
+- For each Gaussian projected onto the image plane, an RGB color value $\mathbf{C}_i$ corresponding to the viewing direction.
+
+**Data structures:**
+Each Gaussian stores 48 SH coefficients in a contiguous array of 32-bit floats [S1, S5, unofficial]. The layout is organized by color channel, with 16 coefficients per channel (Red, Green, Blue) [S1, unofficial].
+- Indices 0–2: Degree 0 (DC) coefficients for R, G, B.
+- Indices 3–47: Higher-order coefficients for R, G, B.
+Specifically, the coefficients are stored in increasing order of degree and order [S4, unofficial]. The first 3 elements are the DC color ($f_{dc\_0..2}$), and the next 45 elements are the rest coefficients ($f_{rest\_0..f_{rest\_44}$) [S5, unofficial].
+
+**Constants:**
+The following normalization constants are used [S5, unofficial]:
+- $SH\_C0 = 0.28209479177387814$
+- $SH\_C1 = 0.4886025119029199$
+- $SH\_C2\_0 = 1.0925484305920792$
+- $SH\_C2\_1 = -0.3153915652525201$
+- $SH\_C2\_2 = 0.5462742152960396$
+- $SH\_C2\_3 = -0.3153915652525201$
+- $SH\_C2\_4 = 0.1084622861184793$
+- $SH\_C3\_0 = -0.5900435899266435$
+- $SH\_C3\_1 = 2.890611442640554$
+- $SH\_C3\_2 = -0.4576460222995229$
+- $SH\_C3\_3 = 0.3731763325901154$
+- $SH\_C3\_4 = -0.4576460222995229$
+- $SH\_C3\_5 = 1.445305721320277$
+- $SH\_C3\_6 = -0.5900435899266435$
+
+**Numbered Steps:**
+
+1. **Compute Viewing Direction:** For a given Gaussian with mean position $\mathbf{p}$ and camera center $\mathbf{c}$, compute the normalized viewing direction vector $\mathbf{d} = \frac{\mathbf{p} - \mathbf{c}}{\|\mathbf{p} - \mathbf{c}\|}$ [S1, unofficial]. Let $\mathbf{d} = (x, y, z)$ [S5, unofficial].
+
+2. **Evaluate Spherical Harmonics:** Compute the color $C_c(\mathbf{d})$ for each color channel $c \in \{R, G, B\}$ using the stored coefficients $\mathbf{k}_c$ and the direction $\mathbf{d}$ [S1, unofficial]. The basis functions $Y_l^m(\mathbf{d})$ are fixed polynomials of $x, y, z$ [S1, unofficial]. The evaluation follows the formula [S4, S5, unofficial]:
+
+   $$
+   \begin{aligned}
+   C_c(\mathbf{d}) = \max\Big(0, \quad & SH\_C0 \cdot k_{0,c} \\
+   & - SH\_C1 \cdot y \cdot k_{1,c} + SH\_C1 \cdot z \cdot k_{2,c} - SH\_C1 \cdot x \cdot k_{3,c} \\
+   & + SH\_C2\_0 \cdot xy \cdot k_{4,c} - SH\_C2\_1 \cdot yz \cdot k_{5,c} + SH\_C2\_2 \cdot (2z^2 - x^2 - y^2) \cdot k_{6,c} \\
+   & - SH\_C2\_3 \cdot xz \cdot k_{7,c} + SH\_C2\_4 \cdot (x^2 - y^2) \cdot k_{8,c} \\
+   & - SH\_C3\_0 \cdot y(3x^2 - y^2) \cdot k_{9,c} + SH\_C3\_1 \cdot xyz \cdot k_{10,c} \\
+   & - SH\_C3\_2 \cdot y(4z^2 - x^2 - y^2) \cdot k_{11,c} + SH\_C3\_3 \cdot z(2z^2 - 3x^2 - 3y^2) \cdot k_{12,c} \\
+   & - SH\_C3\_4 \cdot x(4z^2 - x^2 - y^2) \cdot k_{13,c} + SH\_C3\_5 \cdot z(x^2 - y^2) \cdot k_{14,c} \\
+   & - SH\_C3\_6 \cdot x(x^2 - 3y^2) \cdot k_{15,c} \quad + 0.5 \Big)
+   \end{aligned}
+   $$
+
+   Where $k_{i,c}$ are the coefficients for channel $c$ at index $i$ in the coefficient array [S4, S5, unofficial]. Note: The source [S4, unofficial] provides the explicit polynomial expansion. The term $+0.5$ is a bias added before the ReLU activation to handle negative SH values, as colors must be non-negative [S7, unofficial]. The $\max(0, \dots)$ operation acts as a ReLU [S4, S7, unofficial].
+
+3. **Composite:** Use the computed RGB color $\mathbf{C}_i$ in the front-to-back compositing rule for the Gaussian splat [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+# Constants from [S5, unofficial]
+SH_C0 = 0.28209479177387814
+SH_C1 = 0.4886025119029199
+SH_C2_0 = 1.0925484305920792
+SH_C2_1 = -0.3153915652525201
+SH_C2_2 = 0.5462742152960396
+SH_C2_3 = -0.3153915652525201
+SH_C2_4 = 0.1084622861184793
+SH_C3_0 = -0.5900435899266435
+SH_C3_1 = 2.890611442640554
+SH_C3_2 = -0.4576460222995229
+SH_C3_3 = 0.3731763325901154
+SH_C3_4 = -0.4576460222995229
+SH_C3_5 = 1.445305721320277
+SH_C3_6 = -0.5900435899266435
+
+def eval_sh_degree_0(k0):
+    """Evaluate degree 0 (DC) component."""
+    return SH_C0 * k0
+
+def eval_sh_degree_1(k1, k2, k3, x, y, z):
+    """Evaluate degree 1 components."""
+    return -SH_C1 * y * k1 + SH_C1 * z * k2 - SH_C1 * x * k3
+
+def eval_sh_degree_2(k4, k5, k6, k7, k8, x, y, z):
+    """Evaluate degree 2 components."""
+    xx = x * x
+    yy = y * y
+    zz = z * z
+    return (SH_C2_0 * x * y * k4 
+            - SH_C2_1 * y * z * k5 
+            + SH_C2_2 * (2 * zz - xx - yy) * k6 
+            - SH_C2_3 * x * z * k7 
+            + SH_C2_4 * (xx - yy) * k8)
+
+def eval_sh_degree_3(k9, k10, k11, k12, k13, k14, k15, x, y, z):
+    """Evaluate degree 3 components."""
+    xx = x * x
+    yy = y * y
+    zz = z * z
+    return (-SH_C3_0 * y * (3 * xx - yy) * k9 
+            + SH_C3_1 * x * y * z * k10 
+            - SH_C3_2 * y * (4 * zz - xx - yy) * k11 
+            + SH_C3_3 * z * (2 * zz - 3 * xx - 3 * yy) * k12 
+            - SH_C3_4 * x * (4 * zz - xx - yy) * k13 
+            + SH_C3_5 * z * (xx - yy) * k14 
+            - SH_C3_6 * x * (xx - 3 * yy) * k15)
+
+def sh_to_rgb(sh_coeffs, view_dir):
+    """
+    Convert SH coefficients to RGB color for a given view direction.
+    
+    Args:
+        sh_coeffs: List or array of 48 floats. 
+                   Layout: [R0..R15, G0..G15, B0..B15] or interleaved?
+                   Sources [S1, unofficial] and [S5, unofficial] imply 16 coeffs per channel.
+                   Source [S5, unofficial] layout: first 3 are DC (R,G,B), next 45 are rest.
+                   This implies interleaved by channel for DC, but contiguous for rest?
+                   Actually, [S1, unofficial] says "16 coefficients for Red, 16 for Green, 16 for Blue".
+                   [S5, unofficial] says "first 3 elements are DC color... next 45 elements are rest".
+                   This suggests: [R0, G0, B0, R1..R15, G1..G15, B1..B15] is NOT the case.
+                   Let's look at [S5, unofficial] code:
+                   c0 = sh.fixed_rows::<3>(0) -> R0, G0, B0
+                   c1 = sh.fixed_view::<3,1>(3,0) -> R1, G1, B1? 
+                   If c1 is indices 3, 4, 5, then the layout is interleaved by degree/order, not channel.
+                   Let's re-read [S5, unofficial] code carefully.
+                   c0 is indices 0,1,2.
+                   c1 is indices 3,4,5? No, fixed_view::<3,1>(3,0) usually means stride 1, starting at 3, taking 3 elements.
+                   So indices 3,4,5.
+                   c2 is indices 6,7,8.
+                   c3 is indices 9,10,11.
+                   This implies the layout is: [R0, G0, B0, R1, G1, B1, R2, G2, B2, ...]
+                   Wait, [S1, unofficial] says "16 coefficients for Red, 16 for Green, 16 for Blue".
+                   This is a contradiction.
+                   Let's check [S4, unofficial]: "SH coefficients are stored in an array of 16*3 floats, in increasing order of degree and order."
+                   This usually means [R0, R1, ..., R15, G0, ..., G15, B0, ..., B15].
+                   However, the code in [S5, unofficial] accesses R1, G1, B1 together.
+                   Let's assume the code in [S5, unofficial] is the implementation truth for the "splat" repo.
+                   The code:
+                   c0 = sh[0:3] -> R0, G0, B0
+                   c1 = sh[3:6] -> R1, G1, B1
+                   c2 = sh[6:9] -> R2, G2, B2
+                   c3 = sh[9:12] -> R3, G3, B3
+                   This means the array is interleaved by coefficient index across channels.
+                   Index 0: R0, G0, B0
+                   Index 1: R1, G1, B1
+                   ...
+                   Index 15: R15, G15, B15
+                   
+                   Let's verify with [S1, unofficial] "16 coefficients for Red...". This might describe the logical set, not memory layout.
+                   Or [S1, unofficial] might be wrong about layout.
+                   Given [S5, unofficial] is a direct implementation reference, we follow its layout: Interleaved by coefficient index.
+                   
+        view_dir: Tuple (x, y, z) normalized direction.
+        
+    Returns:
+        Tuple (r, g, b)
+    """
+    x, y, z = view_dir
+    
+    # Extract coefficients for all channels at once for efficiency
+    # Layout: [R0, G0, B0, R1, G1, B1, ..., R15, G15, B15]
+    
+    # Degree 0
+    r0, g0, b0 = sh_coeffs[0], sh_coeffs[1], sh_coeffs[2]
+    
+    # Degree 1
+    r1, g1, b1 = sh_coeffs[3], sh_coeffs[4], sh_coeffs[5]
+    r2, g2, b2 = sh_coeffs[6], sh_coeffs[7], sh_coeffs[8]
+    r3, g3, b3 = sh_coeffs[9], sh_coeffs[10], sh_coeffs[11]
+    
+    # Degree 2
+    r4, g4, b4 = sh_coeffs[12], sh_coeffs[13], sh_coeffs[14]
+    r5, g5, b5 = sh_coeffs[15], sh_coeffs[16], sh_coeffs[17]
+    r6, g6, b6 = sh_coeffs[18], sh_coeffs[19], sh_coeffs[20]
+    r7, g7, b7 = sh_coeffs[21], sh_coeffs[22], sh_coeffs[23]
+    r8, g8, b8 = sh_coeffs[24], sh_coeffs[25], sh_coeffs[26]
+    
+    # Degree 3
+    r9, g9, b9 = sh_coeffs[27], sh_coeffs[28], sh_coeffs[29]
+    r10, g10, b10 = sh_coeffs[30], sh_coeffs[31], sh_coeffs[32]
+    r11, g11, b11 = sh_coeffs[33], sh_coeffs[34], sh_coeffs[35]
+    r12, g12, b12 = sh_coeffs[36], sh_coeffs[37], sh_coeffs[38]
+    r13, g13, b13 = sh_coeffs[39], sh_coeffs[40], sh_coeffs[41]
+    r14, g14, b14 = sh_coeffs[42], sh_coeffs[43], sh_coeffs[44]
+    r15, g15, b15 = sh_coeffs[45], sh_coeffs[46], sh_coeffs[47]
+
+    # Compute contributions
+    # Base
+    r = SH_C0 * r0
+    g = SH_C0 * g0
+    b = SH_C0 * b0
+    
+    # Degree 1
+    r += eval_sh_degree_1(r1, r2, r3, x, y, z)
+    g += eval_sh_degree_1(g1, g2, g3, x, y, z)
+    b += eval_sh_degree_1(b1, b2, b3, x, y, z)
+    
+    # Degree 2
+    r += eval_sh_degree_2(r4, r5, r6, r7, r8, x, y, z)
+    g += eval_sh_degree_2(g4, g5, g6, g7, g8, x, y, z)
+    b += eval_sh_degree_2(b4, b5, b6, b7, b8, x, y, z)
+    
+    # Degree 3
+    r += eval_sh_degree_3(r9, r10, r11, r12, r13, r14, r15, x, y, z)
+    g += eval_sh_degree_3(g9, g10, g11, g12, g13, g14, g15, x, y, z)
+    b += eval_sh_degree_3(b9, b10, b11, b12, b13, b14, b15, x, y, z)
+    
+    # Apply bias and ReLU
+    r = max(0.0, r + 0.5)
+    g = max(0.0, g + 0.5)
+    b = max(0.0, b + 0.5)
+    
+    return (r, g, b)
+```
+
+**Training Schedule:**
+Optimization begins with only the degree-0 band (base color) active [S1, unofficial]. One further band is unlocked every 1,000 iterations until all four bands (degrees 0-3) are active [S1, unofficial]. This ensures the diffuse base color is correct before fitting higher-order components [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- The basis functions $Y_l^m(\mathbf{d})$ are fixed polynomials and are never updated during training; only the coefficients $k$ are learned [S1, unofficial].
+- If the viewing direction is not normalized, the polynomial evaluation will be incorrect [S1, unofficial].
+- High-degree SH coefficients can cause memory bandwidth pressure during rendering [S1, unofficial].
+
+## Subtopics
+
+### [Progressive View-Dependent Color Baking](2834-progressive-view-dependent-color-baking.md)
+Progressive View-Dependent Color Baking is an optimization for 3D Gaussian Splatting that reduces memory bandwidth pressure caused by high-degree spherical harmonics (SH) by evaluating view-dependent colors over multiple frames rather than every frame. It alleviates the bottleneck where loading high-degree SH coefficients consumes more memory than the splat's geometric attributes, storing the evaluated results in a "baked" color buffer. Unlike standard per-frame SH evaluation, this method trades immediate visual fidelity for rendering performance, converging to the correct view-dependent color within a short, fixed number of frames.
+
+### [Spherical Beta View-Dependent Color](3823-spherical-beta-view-dependent-color.md)
+Spherical Beta (SB) is a specular appearance model that adds explicit specular lobes on top of a diffuse base color, used for view-dependent color in 3D Gaussian Splatting. It is distinct from Spherical Harmonics (SH) by using a parametric lobe function rather than a global basis expansion, allowing for sharper highlights with fewer parameters. It is orthogonal to SH, where SH (typically degree 0) supplies the diffuse base and SB adds the specular component.
+
+### [Spherical Beta Function](12574-spherical-beta-function.md)
+The Spherical Beta (SB) function is a directional appearance representation used to model view-dependent effects, such as specular reflections, in 3D Gaussian splatting. It replaces spherical harmonics (SH) to capture higher-frequency directional variations by using asymmetric, bounded-support lobes. Unlike SH, which uses global basis functions, SB uses localized kernels that can model skewed and sharper directional variation, offering greater flexibility at the cost of increased optimization difficulty.
+
+### Spherical Harmonics Per Point
+A representation where each point in the point cloud carries spherical harmonics parameters to model directional appearance, as opposed to directionally invariant RGB values [S8]. Using spherical harmonics yields better rendering quality than using learnable directionally invariant RGB values [S8]. On the Blender dataset, removing spherical harmonics ('w/o sh') reduces PSNR from 30.3 dB to 27.1 dB, SSIM from 0.945 to 0.932, and increases LPIPS from 0.078 to 0.155 [S8].
+
+### RayGauss
+A ray-traced variant of 3D Gaussians that treats Gaussians as volumetric primitives and ray marches them in a NeRF-like manner to achieve high quality at the cost of performance [S9]. It introduces a slab-by-slab integration scheme and augments spherical harmonics with a spherical Gaussian encoding to better capture view-dependent color [S9]. While this yields higher PSNR than 3DGS, it comes with a 6× training slowdown and approximately 25× lower frame rates [S9].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Memory: Each Gaussian stores 48 coefficients (16 per channel × 3 channels) [S1, unofficial]. This is significantly more than a single RGB triplet (3 floats) [S1, unofficial].
+- Time: Evaluation is a fixed number of polynomial operations per Gaussian, described as costing "almost nothing at display time" [S1, unofficial]. However, loading 48 floats per Gaussian can cause memory bandwidth bottlenecks [S1, unofficial].
+
+**Measured Performance:**
+- On the Average-30K dataset, using full SH (degree 3) achieves a PSNR of 26.05, whereas removing SH (No-SH) reduces PSNR to 25.35 [S6, unofficial].
+- On the Blender dataset, using SH yields a PSNR of 30.3 dB, SSIM of 0.945, and LPIPS of 0.078, compared to 27.1 dB, 0.932, and 0.155 without SH [S8].
+
+**Strengths and Limitations:**
+- Strengths: Captures view-dependent effects like highlights and reflections [S1, unofficial]. Compact representation compared to neural networks [S1, unofficial].
+- Limitations: High memory usage for high degrees [S1, unofficial]. Can introduce artifacts if not trained properly (e.g., weird colors on poorly observed sides) [S2, unofficial].
+
+**When to use:**
+- When view-dependent appearance (specularities, reflections) is important for photorealism [S1, unofficial].
+- When rendering speed is critical and neural network queries are too slow [S1, unofficial].
+
+**When not to use:**
+- When memory bandwidth is the primary bottleneck and view-dependent effects are negligible [S1, unofficial].
+- When only diffuse, view-independent color is required [S3].
+
+## Background
+Spherical harmonics were repurposed from irradiance environment maps to represent the view-dependent color of 3D Gaussians in the 3D Gaussian Splatting method [S1, unofficial]. The method was introduced by Kerbl et al. in 2023 [S1, unofficial]. The SH expansion is analogous to a Fourier series on the sphere, where low-degree harmonics capture smooth diffuse shading and higher degrees capture sharper directional variations [S1, unofficial].
+
+## Sources
+[S1] An Architectural Review of the 3D Gaussian Splatting Rendering Pipeline, https://doi.org/10.5281/zenodo.21739653, fetched 2026-10-26 (unofficial)
+[S2] 3D Gaussian Splatting | Guest Lecture for "Computer Graphics in the AI Era", https://www.youtube.com/watch?v=MBVmQSA24Yk, fetched 2026-10-27 (unofficial)
+[S3] learning3d/assignment3, https://github.com/learning3d/assignment3, fetched 2026-10-26
+[S4] ReconWorldLab/godot-gaussian-splatting, https://github.com/ReconWorldLab/godot-gaussian-splatting, fetched 2026-10-27 (unofficial)
+[S5] thomasantony/splat, https://github.com/thomasantony/splat, fetched 2026-10-27 (unofficial)
+[S6] GaussianSplatting論文のAblationについての解説・考察, https://qiita.com/kotauchisunsun/items/f1e89f28aa770b8d3b19, fetched 2026-10-29 (unofficial)
+[S7] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
+[S8] Differentiable Point-Based Radiance Fields for Efficient View Synthesis, https://doi.org/10.1145/3550469.3555413, fetched 2026-10-26
+[S9] GRay: Ray Tracing 3D Gaussians Near the Speed of Splats, https://doi.org/10.1145/3804496, fetched 2026-10-29

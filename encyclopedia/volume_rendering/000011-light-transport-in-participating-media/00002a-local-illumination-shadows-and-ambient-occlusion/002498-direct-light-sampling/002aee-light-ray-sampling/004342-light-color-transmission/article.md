@@ -1,0 +1,105 @@
+# Light Color Transmission
+
+Also called: Light Ray Sampling Color Transmission, Material-Light Color Multiplication
+
+## Overview
+Light Color Transmission is a technique for computing direct illumination in participating media by attenuating the light source's color as it travels through the volume to the shading point, and then modulating the material's appearance with that transmitted light color [S1, unofficial]. It differs from standard surface shading by accounting for volumetric absorption along the light path, and from [Light Ray Sampling](4885-light-ray-sampling.md) by explicitly separating the color transmission component to allow for material-specific colorization effects [S1, S2, unofficial].
+
+## How it works
+**Inputs:**
+*   $C_{light}$: Light color triplet $(L_r, L_g, L_b)$ [S1, S2, unofficial].
+*   $C_{mat}$: Material color triplet $(M_r, M_g, M_b)$ [S1, S2, unofficial].
+*   $T$: Transmittance from the light source to the shading point, calculated via ray marching through the volume density [S1, unofficial].
+*   $F$: Phase function value (optional, depending on implementation context) [S1, unofficial].
+
+**Outputs:**
+*   $C_{out}$: Final illuminated color triplet [S1, S2, unofficial].
+
+**Data Structures:**
+*   Color Triplet: A vector of three floating-point values representing Red, Green, and Blue channels.
+*   Transmittance $T$: A scalar or triplet value representing the fraction of light surviving the path.
+
+**Steps:**
+1.  **Calculate Transmittance:** Determine the transmittance $T$ from the light source to the current shading point $x_i$ by integrating the extinction coefficient $\kappa$ along the light direction. This is typically done via ray marching [S1, unofficial].
+    $$ T = e^{-\int_{0}^{d} \kappa(s) ds} $$
+    Where $d$ is the distance to the light source [S1, unofficial].
+
+2.  **Attenuate Light Color:** Multiply the light color by the transmittance to account for volumetric absorption.
+    $$ C_{transmitted} = C_{light} \odot T $$
+    Where $\odot$ denotes component-wise multiplication [S1, unofficial].
+
+3.  **Apply Phase Function (if applicable):** If the method includes scattering directionality, multiply by the phase function value $F$ [S1, unofficial].
+    $$ C_{scattered} = C_{transmitted} \odot F $$
+    Where $F = (F_r, F_g, F_b)$ [S1, unofficial].
+
+4.  **Modulate Material Color:** Multiply the material color by the transmitted (and optionally scattered) light color.
+    $$ C_{final} = C_{mat} \odot C_{scattered} $$
+    Where $\odot$ is component-wise multiplication [S1, unofficial].
+
+**Parameters:**
+*   $\kappa$: Extinction coefficient. Not given in the sources.
+*   $F$: Phase function value. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Black Materials:** Standard multiplication can result in black pixels if a material reflects no light at a specific wavelength (e.g., a blue object under red light) [S2, unofficial].
+*   **Precision:** Component-wise multiplication requires careful handling of floating-point precision to avoid underflow in deep volumes [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def light_color_transmission(C_light, C_mat, T, F=None):
+    """
+    Computes the final color by transmitting light through volume and modulating material.
+    
+    Args:
+        C_light (tuple): Light color (r, g, b)
+        C_mat (tuple): Material color (r, g, b)
+        T (float or tuple): Transmittance from light to point
+        F (tuple, optional): Phase function value (r, g, b). Defaults to None.
+        
+    Returns:
+        tuple: Final color (r, g, b)
+    """
+    # Step 2: Attenuate light color by transmittance
+    # If T is scalar, broadcast to triplet; if triplet, component-wise multiply
+    if isinstance(T, (int, float)):
+        C_transmitted = (C_light[0] * T, C_light[1] * T, C_light[2] * T)
+    else:
+        C_transmitted = (C_light[0] * T[0], C_light[1] * T[1], C_light[2] * T[2])
+        
+    # Step 3: Apply phase function if provided
+    if F is not None:
+        C_scattered = (C_transmitted[0] * F[0], 
+                       C_transmitted[1] * F[1], 
+                       C_transmitted[2] * F[2])
+    else:
+        C_scattered = C_transmitted
+        
+    # Step 4: Modulate material color
+    C_out = (C_mat[0] * C_scattered[0], 
+             C_mat[1] * C_scattered[1], 
+             C_mat[2] * C_scattered[2])
+             
+    return C_out
+```
+
+## Subtopics
+
+### Deferred Lighting with Colorization
+A variant used in deferred rendering pipelines that enhances standard light color transmission with artistic control and screen-space effects [S2, unofficial]. It differs from the basic method by allowing additive light transforms and post-processing saturation passes to prevent "black" results and enhance vibrancy [S2, unofficial]. Choose this when artistic control over colorization and performance via dynamic light culling are priorities [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of light samples and volume steps per light ray [S1, unofficial]. Deferred variants add cost for SSAO and saturation passes [S2, unofficial].
+*   **Memory Complexity:** Low, requiring only color buffers and transmittance calculations [S1, S2, unofficial].
+*   **Strengths:** Physically plausible attenuation of light color through volume; allows for artistic colorization effects not possible with simple multiplication [S1, S2, unofficial].
+*   **Limitations:** Can produce black pixels for non-matching material/light colors without additional techniques; computationally expensive if many light rays are marched [S1, S2, unofficial].
+*   **When to use:** When volumetric absorption of light color is desired and artistic control over material appearance is needed [S1, S2, unofficial].
+*   **When not to use:** When performance is critical and volumetric effects are minimal, or when physically accurate color absorption (resulting in black) is required without artistic modification [S2, unofficial].
+
+## Background
+The concept of modifying ray marching to account for lights by multiplying material color by light color and attenuating light by volume material was described in production volume rendering contexts [S1, unofficial]. The deferred lighting variant with colorization was implemented in the VoxelQuest engine, which utilized point lights, SSAO, and ray-marched shadows to achieve specific visual styles [S2, unofficial].
+
+## Sources
+[S1] PDF Production Volume Rendering - Clemson University, https://jtessen.people.clemson.edu/reports/papers_files/ProdVolRender.pdf, fetched 2026-10-27 (unofficial)
+[S2] How Does It Work?, https://www.voxelquest.com/news/how-does-it-work, fetched 2026-10-29 (unofficial)

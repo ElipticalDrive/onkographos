@@ -1,0 +1,92 @@
+# Z-Order and Hilbert Encoding/Decoding
+
+
+## Overview
+Z-Order (Morton) and Hilbert encoding are methods for converting $N$-dimensional spatial coordinates into a 1D linear index using space-filling curves (SFCs) to preserve spatial locality [S1, unofficial]. They solve the problem of scattered memory access in dense grids by ensuring that points close in Euclidean distance have close linear indices, optimizing cache performance compared to arithmetic strides [G]. Z-order uses bit-interleaving for $O(1)$ computation, while Hilbert uses recursive traversal to minimize the maximum distance between adjacent indices [G].
+
+## How it works
+### Inputs and Outputs
+- **Inputs**: $N$-dimensional integer coordinates $\mathbf{c} = (c_0, c_1, \dots, c_{N-1})$ and the bit-width $B$ of each coordinate dimension.
+- **Outputs**: A 1D linear index $I$ (encoded) or the original coordinates $\mathbf{c}$ (decoded).
+
+### Data Structures
+- **Encoded Index**: A single integer of size $N \times B$ bits.
+- **Decoded Coordinates**: An array of $N$ integers, each $B$ bits wide.
+
+### Algorithm: Z-Order (Morton) Encoding
+Z-order encoding interleaves the bits of the input coordinates. For 3D coordinates $(x, y, z)$ with $B$ bits each:
+
+1. Initialize $I = 0$.
+2. For bit position $b$ from $0$ to $B-1$:
+   - Extract the $b$-th bit of $x$: $x_b = (x \gg b) \& 1$.
+   - Extract the $b$-th bit of $y$: $y_b = (y \gg b) \& 1$.
+   - Extract the $b$-th bit of $z$: $z_b = (z \gg b) \& 1$.
+   - Set bits in $I$ at positions $3b, 3b+1, 3b+2$:
+     $$ I = I \ | \ (x_b \ll 3b) \ | \ (y_b \ll (3b+1)) \ | \ (z_b \ll (3b+2)) $$
+3. Return $I$.
+
+### Algorithm: Z-Order Decoding
+1. Initialize $x=0, y=0, z=0$.
+2. For bit position $b$ from $0$ to $B-1$:
+   - Extract bits from $I$:
+     $$ x_b = (I \gg 3b) \& 1 $$
+     $$ y_b = (I \gg (3b+1)) \& 1 $$
+     $$ z_b = (I \gg (3b+2)) \& 1 $$
+   - Set the $b$-th bit of each coordinate:
+     $$ x = x \ | \ (x_b \ll b) $$
+     $$ y = y \ | \ (y_b \ll b) $$
+     $$ z = z \ | \ (z_b \ll b) $$
+3. Return $(x, y, z)$.
+
+### Algorithm: Hilbert Encoding/Decoding
+Hilbert encoding requires a recursive approach or lookup tables for small bit widths due to the curve's rotational symmetry. For a dimension $D$ and bit width $B$:
+
+1. **Encode**:
+   - Start with the center of the hypercube.
+   - Iterate from the most significant bit to the least significant bit.
+   - Determine the quadrant (or sub-hypercube) containing the point.
+   - Apply the specific rotation/reflection transformation for that quadrant to align the local coordinate system with the standard Hilbert curve orientation.
+   - Accumulate the index based on the quadrant index and the transformed local coordinates.
+   - [G] The transformation matrix depends on the quadrant index and the current recursion depth. For 2D, the 4 quadrants have specific rotations. For 3D, there are 8 octants with corresponding rotations.
+
+2. **Decode**:
+   - Reverse the encoding process.
+   - Iterate from the most significant bit.
+   - Determine the quadrant from the current index bits.
+   - Apply the inverse rotation/reflection to the local coordinates.
+   - Accumulate the global coordinates.
+
+### Parameters
+- **Bit Width ($B$)**: Typically 8, 16, or 32 bits per dimension, depending on grid resolution.
+- **Dimensions ($N$)**: Typically 2 or 3 for volume rendering.
+
+### Edge Cases and Pitfalls
+- **Precision**: For large $B$, bit manipulation must use integer types wide enough to hold $N \times B$ bits (e.g., 64-bit or 128-bit integers for 3D with $B=32$).
+- **Boundaries**: Coordinates must be within $[0, 2^B - 1]$. Out-of-bounds coordinates result in undefined behavior or incorrect indices.
+- **Hilbert Complexity**: Hilbert encoding/decoding is more complex than Z-order due to rotations. Lookup tables are often used for small $B$ to avoid branching.
+
+## Subtopics
+
+### [Morton Code Sorting for Brick Layout](9894-morton-code-sorting-for-brick-layout.md)
+Morton Code Sorting for Brick Layout is a method for organizing sub-bricks into a global buffer to maximize spatial coherence and cache efficiency during volume rendering. It solves the problem of scattered memory access patterns by sorting sub-bricks according to their Z-order (Morton) codes within hierarchical groups. It sets itself apart from its siblings by operating iteratively at each level of the brick hierarchy, using enumeration sort to guarantee that the global buffer remains compact and spatially coherent as construction proceeds.
+
+### Serialized-Morton/ASTC
+Serialized-Morton/ASTC is a variant that rearranges voxel attributes into correlations to enable ASTC codec reuse, but requires mapping voxel locations to serialized attributes for random access [S2, unofficial]. Beyond removing 2D layouts, rearranging voxel attributes can weaken the spatial correlations available to the UV mapping alone [S2, unofficial].
+
+### Morton Order Storage Layout
+Morton Order Storage Layout uses Morton order (recursive Z curve) extended to 3D for better cache usage [S3]. Volume storage is implemented as a naive three-dimensional BigInteger array [S3]. For a 512x512x512 voxel grid with a 2048-bit key, the storage size is 64GB, compared to 256MB for a 16-bit plaintext equivalent [S3]. This requires two NVIDIA Quadro RTX 8000 GPUs (48GB memory each) [S3]. A 4D encoding for a simplified transfer function approach results in 256GB storage, requiring at least six 48GB GPUs [S3]. The approach is highly parallelizable: encryption processes voxels independently, and rendering/decryption processes pixels independently, scaling linearly with processing power [S3]. It has been proposed as a mapper for MapReduce implementation using GPU-accelerated distributed memory systems [S3].
+
+## Operating characteristics
+- **Time Complexity**: Z-order encoding/decoding is $O(B)$ where $B$ is the bit width per dimension. Hilbert encoding/decoding is also $O(B)$ but with a higher constant factor due to rotations.
+- **Memory Complexity**: $O(1)$ for the index itself. Storage layout depends on the application (e.g., 64GB for encrypted 512^3 volume with 2048-bit keys [S3]).
+- **Performance**: Z-order is faster to compute than Hilbert. Hilbert provides better spatial locality for adjacent indices, which can improve cache performance in rendering [G].
+- **Strengths**: Preserves spatial locality, enabling efficient cache usage and parallel processing [G, S3].
+- **Limitations**: Hilbert is more complex to implement. Z-order can have larger jumps between adjacent indices compared to Hilbert [G].
+
+## Background
+Z-order (Morton code) was introduced by G. M. Morton in 1966 [G]. Hilbert curves were introduced by David Hilbert in 1891 [G]. These methods are widely used in spatial indexing, database storage, and volume rendering to optimize memory access patterns [G].
+
+## Sources
+[S1] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)
+[S2] Beyond UV Mapping: Mesh Texture Compression via Surface-Aligned Texture Fields, https://doi.org/10.48550/arxiv.2609.23606, fetched 2026-10-26 (unofficial)
+[S3] Homomorphic-Encrypted Volume Rendering, https://arxiv.org/abs/2009.02122v2, fetched 2026-10-26

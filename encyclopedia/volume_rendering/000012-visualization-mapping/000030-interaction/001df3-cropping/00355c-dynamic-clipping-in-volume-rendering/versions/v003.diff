@@ -1,0 +1,275 @@
+--- v002.md
++++ v003.md
+@@ -1,162 +1,155 @@
+ # Dynamic Clipping in Volume Rendering
+ 
+-Also called: Clipping in Volume Rendering, Dynamic Clipping Planes Setup, Volume Rendering with Dynamic Clipping, vtk.js Volume Rendering Pipeline
++Also called: Clipping in Volume Rendering, Dynamic Clipping Planes Setup, Interactive Volume Cropping, VTK Volume Clipping, Volume Cropping with Clipping Planes, Volume Rendering with Dynamic Clipping, vtk.js Volume Rendering Pipeline
+ 
+ ## Overview
+-Dynamic clipping in volume rendering allows users to interactively define a region of interest (ROI) within a volumetric dataset by applying six axis-aligned clipping planes that form a bounding box. Unlike static cropping which cuts along the volume's native axes, dynamic clipping transforms these planes into world space to respect the volume's orientation, enabling interactive exploration of internal structures. It differs from [Clipping plane for volume suppression](887-clipping-plane-for-volume-suppression.md) by actively discarding samples outside the box rather than suppressing contribution via transfer functions, and from [Pre-integrated Clipping Boundary Handling](7867-pre-integrated-clipping-boundary-handling.md) by typically performing clipping at the sample level without specific boundary integration corrections.
++Dynamic clipping restricts volume rendering to a specific region of interest (ROI) using six user-defined clipping planes, typically derived from an interactive cropping widget [S1, S2, unofficial]. Unlike static cropping masks that cut along axes parallel to the volume faces, this method constructs a dynamic, convex polyhedral volume (up to 6 planes) that can be combined via intersection logic, functioning as a simple Constructive Solid Geometry (CSG) expression [S1, unofficial]. It is distinct from simple view-frustum culling as it allows arbitrary plane orientations and offsets independent of the camera, and from surface-level clipping as it operates on the volumetric data itself [S1, unofficial].
+ 
+ ## How it works
+-The method involves configuring a volume rendering pipeline with transfer functions and then dynamically updating six clipping planes based on user interaction or programmatic bounds. The planes are defined in index space, transformed to world space using the volume's geometry, and applied to the mapper.
++**Inputs and Outputs:**
++*   **Input:** Volumetric data (e.g., `vtkImageData`), user interaction state defining six clipping bounds (min/max for X, Y, Z axes in index space), and the image's index-to-world transformation matrix.
++*   **Output:** A volume mapper configured with six world-space clipping planes, resulting in a rendered view where geometry outside the defined convex hull is discarded.
+ 
+-### Inputs and Outputs
+-*   **Input:** Volumetric data (e.g., `vtkImageData`), user-defined index-space bounds $[i_{min}, i_{max}, j_{min}, j_{max}, k_{min}, k_{max}]$, and the volume's index-to-world transformation matrix.
+-*   **Output:** A rendered image where voxels outside the defined bounding box are excluded from the ray casting integration.
++**Data Structures:**
++*   **Clipping Planes:** Defined by a normal vector $\mathbf{n}$ and an origin point $\mathbf{o}$. In VTK, this is represented as `vtkPlane`.
++*   **Index-to-World Transform:** A $4 \times 4$ matrix mapping voxel indices $(i, j, k)$ to world coordinates $(x, y, z)$.
++*   **Rotation Matrix:** A $3 \times 3$ matrix extracted from the index-to-world transform, used to rotate axis-aligned normals into world space.
+ 
+-### Data Structures
+-1.  **Clipping Plane:** Defined by a normal vector $\mathbf{n}$ and an origin point $\mathbf{o}$. The plane equation is $\mathbf{n} \cdot (\mathbf{x} - \mathbf{o}) = 0$.
+-2.  **Index-to-World Transform:** A $4 \times 4$ matrix $M_{idx \to world}$ mapping voxel indices to world coordinates.
+-3.  **Rotation Matrix:** Extracted from $M_{idx \to world}$ to transform axis-aligned normals.
++**Steps:**
++1.  **Initialize Rendering Pipeline:** Create a `vtkVolumeMapper` and `vtkVolume`. Set the sample distance (e.g., `1.0`) and configure transfer functions (color and opacity) [S1, unofficial].
++2.  **Setup Interaction Widget:** Instantiate an `vtkImageCroppingWidget` and register it with a `vtkWidgetManager`. Attach a display callback to update UI overlays based on widget coordinates [S2, unofficial].
++3.  **Monitor State Changes:** Register a listener on the widget's cropping state (`cropState.onModified`). When the user adjusts the cropping box, retrieve the current index-space bounds $[i_{min}, i_{max}, j_{min}, j_{max}, k_{min}, k_{max}]$ [S1, S2, unofficial].
++4.  **Compute World-Space Planes:**
++    *   Extract the rotation matrix $R$ from the image's index-to-world transformation matrix $M$ [S1, S2, unofficial]:
++        $$ R = \text{getRotation}(M) $$
++    *   Define the six axis-aligned normals in index space:
++        $$ \mathbf{n}_x^+ = [1, 0, 0], \quad \mathbf{n}_x^- = [-1, 0, 0] $$
++        $$ \mathbf{n}_y^+ = [0, 1, 0], \quad \mathbf{n}_y^- = [0, -1, 0] $$
++        $$ \mathbf{n}_z^+ = [0, 0, 1], \quad \mathbf{n}_z^- = [0, 0, -1] $$
++    *   Transform normals to world space using $R$:
++        $$ \mathbf{n}_{world} = R \cdot \mathbf{n}_{index} $$
++    *   Determine origins for the planes. The "min" planes (positive normals) use the world coordinate of the minimum index corner:
++        $$ \mathbf{o}_{min} = M \cdot [i_{min}, j_{min}, k_{min}, 1]^T $$
++        The "max" planes (negative normals) use the world coordinate of the maximum index corner:
++        $$ \mathbf{o}_{max} = M \cdot [i_{max}, j_{max}, k_{max}, 1]^T $$
++    *   Construct the six `vtkPlane` objects with their respective world-space normals and origins [S1, S2, unofficial].
++5.  **Apply Clipping Planes:**
++    *   Remove any existing clipping planes from the mapper: `mapper.removeAllClippingPlanes()` [S2, unofficial].
++    *   Add the six new world-space planes: `mapper.addClippingPlane(plane)` for each plane [S2, unofficial].
++    *   Mark the mapper as modified to trigger a pipeline update: `mapper.modified()` [S2, unofficial].
+ 
+-### Parameters
+-*   **Sample Distance:** Controls ray step size. Typical value: `1.0` [S1, unofficial].
+-*   **Color Transfer Function (CTF):** Maps scalar values to RGBA. Example points:
+-    *   $(0, 85/255, 0, 0)$
+-    *   $(95, 0.9765, 0.9647, 0.9333)$
+-    *   $(225, 0, 0.6, 0.2)$
+-    *   $(255, 1, 0, 0)$ [S1, unofficial]
+-*   **Scalar Opacity Function (SOF):** Maps scalar values to opacity. Example points:
+-    *   $(0.0, 0.0)$
+-    *   $(255.0, 1.0)$ [S1, unofficial]
+-*   **Gradient Opacity:** Enables opacity based on gradient magnitude.
+-    *   Minimum Value: $2$, Minimum Opacity: $0.0$
+-    *   Maximum Value: $30$, Maximum Opacity: $1.0$ [S1, unofficial]
+-*   **Lighting:** Shade enabled, Ambient $0.2$, Diffuse $0.7$, Specular $0.3$, Specular Power $8.0$ [S1, unofficial].
+-*   **Clipping Bounds (Alternative Definition):** In some implementations, bounds are defined by minimum and maximum corners in normalized or world space, e.g., `clip_min = [0.0, 0.0, 0.0]` and `clip_max = [1.0, 1.0, 1.0]` [S2, unofficial].
+-
+-### Algorithm Steps
+-1.  **Initialize Rendering Pipeline:**
+-    *   Create `vtkVolumeMapper` and `vtkVolume`.
+-    *   Set sample distance (e.g., $1.0$) [S1, unofficial].
+-    *   Configure CTF and SOF as described in Parameters [S1, unofficial].
+-    *   Configure lighting and gradient opacity properties [S1, unofficial].
+-
+-2.  **Define Clipping Bounds:**
+-    *   Obtain index-space bounds $[i_{min}, i_{max}, j_{min}, j_{max}, k_{min}, k_{max}]$ from the interaction widget state [S1, unofficial].
+-    *   Alternatively, use `clip_min` and `clip_max` arrays [S2, unofficial].
+-
+-3.  **Compute World-Space Geometry:**
+-    *   Extract the rotation component $R$ from the volume's index-to-world transformation matrix $M_{idx \to world}$ [S1, unofficial].
+-    *   Define the six axis-aligned normals in index space:
+-        *   $\mathbf{n}_1 = [1, 0, 0]$, $\mathbf{n}_2 = [-1, 0, 0]$
+-        *   $\mathbf{n}_3 = [0, 1, 0]$, $\mathbf{n}_4 = [0, -1, 0]$
+-        *   $\mathbf{n}_5 = [0, 0, 1]$, $\mathbf{n}_6 = [0, 0, -1]$
+-    *   Transform normals to world space: $\mathbf{n}'_i = R \cdot \mathbf{n}_i$ for $i=1..6$ [S1, unofficial].
+-    *   Compute origins for the planes:
+-        *   $\mathbf{o}_{min} = M_{idx \to world} \cdot [i_{min}, j_{min}, k_{min}, 1]^T$
+-        *   $\mathbf{o}_{max} = M_{idx \to world} \cdot [i_{max}, j_{max}, k_{max}, 1]^T$ [S1, unofficial].
+-
+-4.  **Construct Clipping Planes:**
+-    *   Plane 1 (X-min): Normal $\mathbf{n}'_1$, Origin $\mathbf{o}_{min}$
+-    *   Plane 2 (X-max): Normal $\mathbf{n}'_2$, Origin $\mathbf{o}_{max}$
+-    *   Plane 3 (Y-min): Normal $\mathbf{n}'_3$, Origin $\mathbf{o}_{min}$
+-    *   Plane 4 (Y-max): Normal $\mathbf{n}'_4$, Origin $\mathbf{o}_{max}$
+-    *   Plane 5 (Z-min): Normal $\mathbf{n}'_5$, Origin $\mathbf{o}_{min}$
+-    *   Plane 6 (Z-max): Normal $\mathbf{n}'_6$, Origin $\mathbf{o}_{max}$ [S1, unofficial].
+-
+-5.  **Apply to Mapper:**
+-    *   Clear existing clipping planes from the mapper.
+-    *   Add the six new planes to the mapper.
+-    *   Trigger a pipeline update (e.g., `modified()`) to re-render [S1, unofficial].
+-
+-### Pseudocode
++**Pseudocode:**
+ ```python
+-def apply_dynamic_clipping(mapper, image_data, ijk_bounds):
++def update_clipping_planes(mapper, image_data, crop_state):
+     """
+-    Applies dynamic clipping planes to a volume mapper.
++    Updates the volume mapper's clipping planes based on the current widget state.
+     
+     Args:
+         mapper: The volume mapper object with addClippingPlane and removeAllClippingPlanes methods.
+-        image_data: Object containing indexToWorld transformation.
+-        ijk_bounds: Tuple (iMin, iMax, jMin, jMax, kMin, kMax).
++        image_data: Object providing indexToWorld() and getIndexToWorld() methods.
++        crop_state: Object providing getPlanes() which returns [iMin, iMax, jMin, jMax, kMin, kMax].
+     """
+-    iMin, iMax, jMin, jMax, kMin, kMax = ijk_bounds
++    # 1. Get index-space bounds from widget
++    i_min, i_max, j_min, j_max, k_min, k_max = crop_state.getPlanes()
+     
+-    # 1. Get index-to-world matrix and extract rotation
++    # 2. Extract rotation matrix from index-to-world transform
+     # Assuming image_data.getIndexToWorld() returns a 4x4 matrix
+-    idx_to_world = image_data.getIndexToWorld()
+-    rotation = extract_rotation_matrix(idx_to_world)
++    transform_matrix = image_data.getIndexToWorld()
++    rotation_matrix = get_rotation_matrix(transform_matrix)
+     
+-    # 2. Helper to rotate a vector
+-    def rotate_vec(vec):
++    # 3. Helper to rotate a 3D vector
++    def rotate_vector(vec):
+         # vec is [x, y, z]
+-        # rotation is 4x4, but we only need the upper 3x3 for vector rotation
+-        r = rotation[:3, :3]
+-        return np.dot(r, vec)
++        # rotation_matrix is 4x4, but we only need the upper-left 3x3
++        r = rotation_matrix
++        x, y, z = vec
++        return [
++            r[0][0]*x + r[0][1]*y + r[0][2]*z,
++            r[1][0]*x + r[1][1]*y + r[1][2]*z,
++            r[2][0]*x + r[2][1]*y + r[2][2]*z
++        ]
++
++    # 4. Compute world-space origins
++    # Origin for min planes (normal points in positive direction)
++    origin_min = image_data.indexToWorld([i_min, j_min, k_min])
++    # Origin for max planes (normal points in negative direction)
++    origin_max = image_data.indexToWorld([i_max, j_max, k_max])
+     
+-    # 3. Compute origins in world space
+-    origin_min = image_data.indexToWorld([iMin, jMin, kMin])
+-    origin_max = image_data.indexToWorld([iMax, jMax, kMax])
+-    
+-    # 4. Define axis-aligned normals in index space
+-    normals_idx = [
+-        [1, 0, 0], [-1, 0, 0],
+-        [0, 1, 0], [0, -1, 0],
+-        [0, 0, 1], [0, 0, -1]
++    # 5. Define axis-aligned normals in index space
++    normals_index = [
++        [1, 0, 0], [-1, 0, 0],  # X
++        [0, 1, 0], [0, -1, 0],  # Y
++        [0, 0, 1], [0, 0, -1]   # Z
+     ]
+     
+-    # 5. Transform normals to world space
+-    normals_world = [rotate_vec(n) for n in normals_idx]
++    # 6. Transform normals to world space
++    normals_world = [rotate_vector(n) for n in normals_index]
+     
+-    # 6. Construct planes
+-    # Planes 0, 2, 4 use origin_min; Planes 1, 3, 5 use origin_max
+-    origins = [origin_min, origin_max, origin_min, origin_max, origin_min, origin_max]
++    # 7. Construct planes
++    # Note: The order in sources [S1, S2, unofficial] maps indices 0,1 to X; 2,3 to Y; 4,5 to Z.
++    # Min planes use origin_min, Max planes use origin_max.
++    planes = []
++    planes.append(vtkPlane(normal=normals_world[0], origin=origin_min)) # X min
++    planes.append(vtkPlane(normal=normals_world[1], origin=origin_max)) # X max
++    planes.append(vtkPlane(normal=normals_world[2], origin=origin_min)) # Y min
++    planes.append(vtkPlane(normal=normals_world[3], origin=origin_max)) # Y max
++    planes.append(vtkPlane(normal=normals_world[4], origin=origin_min)) # Z min
++    planes.append(vtkPlane(normal=normals_world[5], origin=origin_max)) # Z max
+     
+-    planes = []
+-    for i in range(6):
+-        plane = create_plane(normal=normals_world[i], origin=origins[i])
+-        planes.append(plane)
+-        
+-    # 7. Apply to mapper
++    # 8. Apply to mapper
+     mapper.removeAllClippingPlanes()
+     for plane in planes:
+         mapper.addClippingPlane(plane)
+-    mapper.modified() # Trigger update
++    mapper.modified()
+ 
+-def extract_rotation_matrix(matrix_4x4):
++def get_rotation_matrix(matrix_4x4):
+     """Extracts the 3x3 rotation component from a 4x4 affine transformation matrix."""
+-    return matrix_4x4[:3, :3]
+-
+-def create_plane(normal, origin):
+-    """Creates a plane object defined by normal and origin."""
+-    # Implementation depends on the specific graphics library (e.g., vtkPlane)
+-    return {"normal": normal, "origin": origin}
++    return [
++        [matrix_4x4[0][0], matrix_4x4[0][1], matrix_4x4[0][2]],
++        [matrix_4x4[1][0], matrix_4x4[1][1], matrix_4x4[1][2]],
++        [matrix_4x4[2][0], matrix_4x4[2][1], matrix_4x4[2][2]]
++    ]
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Precision:** Ensure the index-to-world transformation is accurate to avoid misalignment between the clipping box and the volume data [S1, unofficial].
+-*   **Degenerate Input:** If $i_{min} > i_{max}$ or similar, the bounding box is invalid. The algorithm should handle or prevent this [G].
+-*   **Hardware Clipping Artifacts:** When using hardware clip planes in fragment shaders for particle-based volumes, clipping can result in no sharp cuts because the kernel is evaluated for the complete particle footprints, leading to wrong density results if not handled in the shader [S3, unofficial].
++**Parameters:**
++*   `sampleDistance`: Controls the step size along the ray. Typical value: `1.0` [S1, unofficial].
++*   `clip_min`: Minimum corner of the clipping box in normalized or index space. Default: `[0.0, 0.0, 0.0]` [S3, unofficial].
++*   `clip_max`: Maximum corner of the clipping box. Default: `[1.0, 1.0, 1.0]` [S3, unofficial].
++*   `gradientOpacityMinimumValue`: Minimum gradient magnitude for opacity. Default: `2` [S1, unofficial].
++*   `gradientOpacityMaximumValue`: Maximum gradient magnitude for opacity. Default: `30` [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Precision:** Ensure the index-to-world transformation is correctly applied to avoid misalignment between the widget and the rendered volume [S1, S2, unofficial].
++*   **Degenerate Input:** If `i_min == i_max`, the clipping plane normal becomes zero or the volume thickness is zero, potentially causing rendering artifacts or division by zero in subsequent calculations [G].
+ 
+ ## Subtopics
+ 
++### [Clipping Volumes](13345-clipping-volumes.md)
++Clipping volumes restrict rendering to a specific region of space defined by a set of planar half-spaces, allowing internal structures to be revealed by discarding geometry outside the defined volume. Unlike static cropping masks, this method constructs a dynamic, convex polyhedral volume (up to 6 planes) that can be combined via intersection or union logic, functioning as a simple Constructive Solid Geometry (CSG) expression. It is distinct from simple view-frustum culling as it allows arbitrary plane orientations and offsets independent of the camera, and from surface-level clipping as it operates on the volumetric data itself.
++
+ ### Hardware-Accelerated Volumetric Clipping in Image-Space Ray Casting
+-This variant uses OpenGL hardware clip planes to discard non-contributing particles early. However, it suffers from artifacts: clipping at the rasterizer level does not account for the particle kernel footprint, resulting in no sharp cuts and incorrect density values due to missing contributions [S3, unofficial]. To achieve correct volumetric clipping, the clipping check must be performed in the fragment program during density computation, setting density to zero if the sampling position is outside the cut planes [S3, unofficial].
++This variant uses hardware clip planes to discard non-contributing particles early in the rasterization pipeline. In the fragment program, during density computation, the sampling position $p$ is checked against the cut planes. If $p$ is outside the cut planes, the computed density is set to zero [S4, unofficial].
++*   **Pitfall:** Using hardware clip planes alone results in no sharp cuts because the kernel is evaluated for the complete particle footprints. The missing contribution of clipped particles leads to wrong density results [S4, unofficial]. To achieve correct volumetric clipping, the clipping check must also be performed in the fragment program to zero out density for particles whose centers are outside but whose kernels extend inside the clip volume [S4, unofficial].
+ 
+ ### Axis Threshold Clipping
+-Used primarily in Gaussian Splatting rendering on mobile hardware, this method discards Gaussians based on the size of their screenspace quad. A Gaussian is discarded if its maximum axis exceeds a clipping threshold $\tau_\lambda$. This optimizes performance by skipping Gaussians with means outside but large splats inside the view frustum. On mobile VR (Quest3), using $\tau_\lambda = 40$ increased FPS from 6 to 19 for a scene with 790k splats [S4].
++This method is used for Gaussian Splatting rendering on mobile hardware to speed up processing. It discards a Gaussian if the maximum axis of its screenspace quad exceeds a clipping threshold $\tau_\lambda$ [S5].
++*   **Parameters:** $\tau_\lambda$ is the clipping threshold for the maximum axis of the screenspace quad [S5].
++*   **Performance:** On mobile VR (Quest3), using $\tau_\lambda = 40$ results in 19 FPS, compared to 6 FPS without the threshold, for the Bike scene with 790k splats [S5].
++*   **Use Case:** Helps skip processing Gaussians with a mean outside but large splats inside the view frustum [S5].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of voxels/samples within the clipping box. The transformation of planes is constant time $O(1)$ per frame update.
+-*   **Memory Complexity:** Constant additional memory for storing the six plane definitions [S1, unofficial].
+-*   **Performance:** Hardware-accelerated clipping (if implemented correctly in shaders) can significantly reduce the number of samples processed, improving frame rates [S3, unofficial]. However, naive hardware clipping in particle rendering can lead to visual artifacts [S3, unofficial].
+-*   **Strengths:** Interactive exploration, efficient culling of irrelevant data, supports arbitrary volume orientations via world-space transformation [S1, unofficial].
+-*   **Limitations:** Sharpness of the cut depends on the implementation (hardware vs. shader); hardware clipping may cause artifacts in particle-based rendering [S3, unofficial].
++*   **Time Complexity:** The cost of computing the clipping planes is $O(1)$ per frame (constant number of planes). The rendering cost depends on the volume rendering algorithm (e.g., ray casting) and the reduction in visible volume.
++*   **Memory Complexity:** $O(1)$ additional memory for the six plane definitions.
++*   **Strengths:** Allows interactive exploration of internal structures; supports arbitrary plane orientations; integrates well with existing VTK pipelines [S1, S2, unofficial].
++*   **Limitations:** Hardware clipping alone may produce incorrect density results for particle-based volumes due to kernel footprint issues [S4, unofficial]. Axis threshold clipping may introduce visual artifacts if the threshold is set too aggressively [S5].
++*   **When to Use:** When interactive exploration of specific regions within a large volume is required, and the volume supports plane-based clipping (e.g., ray casting with plane tests) [S1, S2, unofficial].
+ 
+ ## Background
+-Dynamic clipping is a standard feature in visualization toolkits like VTK, allowing users to interactively crop volumes. The specific implementation described in [S1, unofficial] is part of the vtk.js ecosystem, demonstrating how to integrate clipping widgets with volume rendering pipelines. Variants like hardware-accelerated clipping [S3, unofficial] and axis threshold clipping [S4] address specific performance and visual fidelity challenges in particle and Gaussian splatting rendering.
++Dynamic clipping in volume rendering has been implemented in various visualization toolkits, notably VTK (Visualization Toolkit) and its JavaScript port, VTK.js [S1, S2, unofficial]. The technique is widely used in medical imaging applications, such as viewing human chest and skull volumes, where users need to crop the volume to inspect internal structures [S2, unofficial]. The method evolved from static cropping to interactive, widget-driven clipping, allowing real-time adjustment of the region of interest [S1, S2, unofficial].
+ 
+ ## Sources
+ [S1] SuhailaAhmed/Volume-Rendering, https://github.com/SuhailaAhmed/Volume-Rendering, fetched 2026-10-26 (unofficial)
+-[S2] GitHub - priscilla100/medical_volume_renderer, https://github.com/priscilla100/medical_volume_renderer/, fetched 2026-10-29 (unofficial)
+-[S3] Interactive Image-Space Volume Visualization for Dynamic Particle Simulations, https://openalex.org/W2284871597, fetched 2026-10-30 (unofficial)
+-[S4] Shape-Shifting Splats: Realtime Context Translation for Gaussian Splatting in VR, https://doi.org/10.1109/vr67842.2026.00046, fetched 2026-11-01+[S2] osama51/VTK-Volume-Rendering, https://github.com/osama51/VTK-Volume-Rendering, fetched 2026-10-27 (unofficial)
++[S3] GitHub - priscilla100/medical_volume_renderer, https://github.com/priscilla100/medical_volume_renderer/, fetched 2026-10-29 (unofficial)
++[S4] Interactive Image-Space Volume Visualization for Dynamic Particle Simulations, https://openalex.org/W2284871597, fetched 2026-10-30 (unofficial)
++[S5] Shape-Shifting Splats: Realtime Context Translation for Gaussian Splatting in VR, https://doi.org/10.1109/vr67842.2026.00046, fetched 2026-11-01

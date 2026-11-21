@@ -1,0 +1,230 @@
+# Hard Gaussian Splatting
+
+Also called: REHGS (Rendering Error guided HGS), Rendering Error guided HGS, Rendering Error guided Hard Gaussian Splatting
+
+## Overview
+Hard Gaussian Splatting (HGS) is a training-phase densification strategy that addresses artifacts in 3D Gaussian Splatting (3DGS) by growing "hard Gaussians" identified via multi-view significant positional gradients and rendering errors, rather than relying on averaged gradients [S1]. It solves the problem where standard 3DGS averaging smooths out individual large gradients and local rendering errors, hindering the growth of defective Gaussians that cause blurring or needle-like artifacts [S1]. Unlike its siblings, HGS explicitly decouples the identification of hard Gaussians into two distinct mechanisms: Positional Gradient Driven HGS (PGHGS), which targets cross-view inconsistencies by analyzing the maximum individual view-space gradients, and Rendering Error Guided HGS (REHGS), which targets blurring artifacts by correlating potentially over-large Gaussians with local SSIM errors [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** The current set of 3D Gaussians $\{G_i\}$, the current training iteration, the set of training viewpoints $\mathcal{V}$, and the growth interval $M$.
+*   **Outputs:** A subset of "hard Gaussians" identified for densification (growth) in the next optimization step.
+
+**Data Structures:**
+*   **Gaussian $G_i$:** Parameterized by mean vector $\mu_i \in \mathbb{R}^3$, covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$, color $c_i \in \mathbb{R}^3$, and opacity $\alpha_i \in \mathbb{R}$ [S1].
+*   **View-space Positional Gradient $g_{i,j}$:** The gradient of the rendering loss with respect to the mean $\mu_i$ of Gaussian $G_i$ under viewpoint $j$ [S1].
+*   **Contribution Set $S_i$:** The set of pixels $u$ in the current image where Gaussian $G_i$ has the maximum contribution [S1].
+
+**Rendering Model:**
+A 3D Gaussian $G_i$ is splatted to a 2D Gaussian $G_{i,2D}$. The pixel color $c(u)$ is computed via alpha-blending [S1]:
+$$
+c(u) = \sum_{i=1}^{N} w_i c_i, \quad w_i = \alpha_i G_{i,2D}(u) \prod_{k=1}^{i-1} (1 - \alpha_k G_{k,2D}(u))
+$$
+where $w_i$ is the blending weight [S1].
+
+**Parameters:**
+*   $\tau_{grad}$: Gradient threshold for Gaussian growing (maintained same as in Scaffold-GS) [S1].
+*   $M$: Growing interval for Gaussian growing (maintained same as in Scaffold-GS) [S1].
+*   $k$: Index of the largest positional gradient used in PGHGS (set to 3) [S1].
+*   $\lambda$: Constant controlling the extent of excavation in PGHGS (set to 1.0) [S1].
+*   $\tau_{large}$: Threshold to control the extent of potentially large areas for identifying potentially over-large Gaussians (set to $2 \times 10^{-4}$) [S1].
+*   $\tau_{SSIM}$: Threshold to judge rendering quality for identifying hard Gaussians via SSIM (set to 0.7) [S1].
+
+**Algorithm Steps:**
+The method operates during the training phase. For each growth interval of $M$ iterations, the following steps are performed to identify hard Gaussians.
+
+1.  **Compute View-space Positional Gradients:**
+    For each Gaussian $G_i$ and each viewpoint $j$ that observes $G_i$ during the current growth interval $M$, compute the view-space positional gradient $g_{i,j} = \nabla_{\mu_i} L$ [S1].
+
+2.  **Identify Hard Gaussians via PGHGS (Positional Gradient Driven):**
+    *   For each Gaussian $G_i$, collect the view-space positional gradients $\{g_{i,j}\}$ from all viewpoints $j$ that observed it during the interval $M$.
+    *   Sort these gradients by magnitude and select the $k$ largest gradients. Let the set of the $k$ largest magnitudes be $\mathcal{G}_{i, top-k}$ [S1].
+    *   Find the minimum magnitude among these $k$ largest gradients: $min\_grad_i = \min(\mathcal{G}_{i, top-k})$ [S1].
+    *   If $min\_grad_i \ge \tau_{grad}$, classify $G_i$ as a hard Gaussian candidate for PGHGS [S1].
+    *   *Note:* This strategy exploits cross-view significant positional gradients to uncover hard Gaussians, alleviating rendering inconsistency across views [S1].
+
+3.  **Identify Hard Gaussians via REHGS (Rendering Error Guided):**
+    *   **Step 3.1: Identify Potentially Over-Large Gaussians.**
+        For each pixel $u$ in the current rendered image, compute its rendered index $idx(u)$, identifying the Gaussian with maximum contribution:
+        $$
+        idx(u) = \arg \max_i w_i
+        $$
+        Construct the contribution set $S_i$ for each Gaussian $G_i$:
+        $$
+        S_i = \{ u \mid idx(u) = i, u \in P \}
+        $$
+        where $P$ is the set of all pixels in the image [S1].
+        Identify $G_i$ as a "potentially over-large" Gaussian if:
+        $$
+        \|S_i\| > \tau_{large} \|P\|
+        $$
+        where $\|S_i\|$ is the number of pixels in the set and $\|P\|$ is the total number of pixels [S1].
+        *Pitfall:* Using only this condition results in false positives because low-textured areas and repetitive textures may also be described by large Gaussians [S1].
+
+    *   **Step 3.2: Validate with Rendering Errors.**
+        For each potentially over-large Gaussian $G_i$:
+        *   Project $G_i$ into the current training viewpoint $j$ to obtain the corresponding pixel $u_{i,j}$ [S1].
+        *   Compute the local Structural Similarity Index Measure (SSIM) between the ground truth image $I_j$ and the rendered image $\hat{I}_j$ at $u_{i,j}$: $SSIM(I_j, \hat{I}_j)(u_{i,j})$ [S1].
+        *   If $SSIM(I_j, \hat{I}_j)(u_{i,j}) < \tau_{SSIM}$, classify $G_i$ as a hard Gaussian candidate for REHGS [S1].
+        *   *Constraint:* Ensure hard Gaussians are seen by at least two views during the $M$ iterations to avoid unstable growth from single-view determination [S1].
+
+4.  **Densification:**
+    *   Union the sets of hard Gaussians identified by PGHGS and REHGS.
+    *   Apply the standard 3DGS densification operation (splitting and cloning) to these hard Gaussians [S1].
+    *   Reset the optimizer states (momentum and variance) for the newly created or modified Gaussians [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def identify_hard_gaussians(gaussians, viewpoints, current_iteration, M, k, tau_grad, tau_large, tau_ssim):
+    """
+    Identifies hard Gaussians for densification based on PGHGS and REHGS criteria.
+    
+    Args:
+        gaussians: List of Gaussian objects, each with attributes:
+                   - mean: R^3
+                   - cov: R^3x3
+                   - color: R^3
+                   - opacity: R
+                   - grad_history: List of view-space positional gradients over last M iterations
+                   - view_history: List of viewpoints that observed this Gaussian over last M iterations
+        viewpoints: List of training viewpoints available in current batch/interval
+        current_iteration: Current training iteration
+        M: Growth interval
+        k: Number of largest gradients to consider (default 3)
+        tau_grad: Gradient threshold
+        tau_large: Threshold for potentially over-large Gaussians (default 2e-4)
+        tau_ssim: SSIM threshold (default 0.7)
+        
+    Returns:
+        set_of_hard_gaussians: Set of Gaussian objects identified as hard
+    """
+    hard_gaussians = set()
+    
+    # --- PGHGS: Positional Gradient Driven ---
+    for G in gaussians:
+        # Collect view-space positional gradients from the last M iterations
+        # Note: In practice, gradients are accumulated or stored per view per iteration
+        view_gradients = []
+        for v in G.view_history:
+            # Retrieve the gradient magnitude for view v during the interval
+            # Assuming grad_history stores magnitudes or vectors for each view in the interval
+            if v in G.grad_history:
+                grad_mag = norm(G.grad_history[v])
+                view_gradients.append(grad_mag)
+        
+        if len(view_gradients) == 0:
+            continue
+            
+        # Sort gradients by magnitude and take the k largest
+        sorted_grads = sorted(view_gradients, reverse=True)
+        top_k_grads = sorted_grads[:k]
+        
+        # Check if the minimum of the top k gradients exceeds threshold
+        min_top_k_grad = min(top_k_grads)
+        if min_top_k_grad >= tau_grad:
+            hard_gaussians.add(G)
+            
+    # --- REHGS: Rendering Error Guided ---
+    # Step 1: Render current image and compute contributions
+    rendered_image = render_scene(gaussians, viewpoints) # Returns image and per-pixel max contribution index
+    ground_truth_image = get_ground_truth(viewpoints) # Returns ground truth for current viewpoints
+    
+    # Compute contribution sets for all Gaussians
+    # This requires iterating over all pixels and tracking which Gaussian has max weight
+    contribution_counts = {G: 0 for G in gaussians}
+    pixel_to_max_gaussian = {} # Map pixel u to Gaussian G with max w_i
+    
+    for u in rendered_image.pixels:
+        # Compute weights w_i for all Gaussians covering pixel u
+        # This is typically done during rasterization
+        max_w = -1
+        max_G = None
+        for G in gaussians_covering_pixel(u):
+            w = compute_weight(G, u)
+            if w > max_w:
+                max_w = w
+                max_G = G
+        pixel_to_max_gaussian[u] = max_G
+        if max_G is not None:
+            contribution_counts[max_G] += 1
+            
+    total_pixels = len(rendered_image.pixels)
+    
+    # Identify potentially over-large Gaussians
+    potentially_over_large = []
+    for G, count in contribution_counts.items():
+        if count > tau_large * total_pixels:
+            potentially_over_large.append(G)
+            
+    # Step 2: Validate with SSIM
+    for G in potentially_over_large:
+        # Project G to current viewpoints to find corresponding pixels
+        # We need to check if G causes errors in at least 2 views
+        error_views_count = 0
+        
+        for v in G.view_history:
+            # Get the pixel u_ij where G is projected in view v
+            u_ij = project_gaussian_to_pixel(G, v)
+            
+            if u_ij is not None and u_ij in rendered_image.pixels:
+                # Compute local SSIM
+                # Note: Local SSIM usually requires a window around u_ij
+                ssim_val = compute_local_ssim(ground_truth_image[v], rendered_image[v], u_ij)
+                
+                if ssim_val < tau_ssim:
+                    error_views_count += 1
+                    
+        # Ensure seen by at least two views to avoid unstable growth
+        if error_views_count >= 2:
+            hard_gaussians.add(G)
+            
+    return hard_gaussians
+
+def densify_hard_gaussians(hard_gaussians, gaussians, optimizer):
+    """
+    Applies densification to hard Gaussians and resets optimizer states.
+    """
+    new_gaussians = []
+    for G in hard_gaussians:
+        # Standard 3DGS split/clone operation
+        # This involves creating child Gaussians with perturbed means and scaled covariances
+        children = split_and_clone(G)
+        new_gaussians.extend(children)
+        
+        # Remove original G from the active set (or mark for removal)
+        # In 3DGS, splitting replaces the parent with children
+        
+    # Add new Gaussians to the scene
+    gaussians.extend(new_gaussians)
+    
+    # Reset optimizer states for new Gaussians
+    for G in new_gaussians:
+        optimizer.reset_state(G)
+        
+    return gaussians
+```
+
+## Subtopics
+
+### [PGHGS](10618-pghgs.md)
+PGHGS (Positional Gradient driven Hard Gaussian Splatting) is a densification strategy that identifies "hard Gaussians" by analyzing multi-view positional gradients to alleviate cross-view rendering inconsistencies. Unlike standard methods that rely on averaged gradients which may obscure local errors, PGHGS selects Gaussians based on the magnitude of their largest individual view-space gradients, ensuring that regions with significant reconstruction errors are prioritized for growth.
+
+### [PGHGS](10618-pghgs.md)
+REHGS (Rendering Error guided HGS) is a densification strategy that identifies potentially over-large Gaussians causing blurring artifacts, projects them to the image to calculate pixel rendering errors, and considers the Gaussian a hard Gaussian if noticeable errors are detected from multiple viewpoints within the growth interval. It links hard Gaussians with local rendering errors by leveraging Gaussians with maximum contribution to correlate pixel rendering errors.
+
+## Operating characteristics
+*   **Time Complexity:** The identification step requires computing view-space positional gradients for all Gaussians over $M$ iterations, which is $O(N \cdot V \cdot M)$ where $N$ is the number of Gaussians and $V$ is the number of views [S1]. The REHGS step requires rendering and computing SSIM for potentially over-large Gaussians, which adds overhead proportional to the number of such Gaussians and the number of views they are observed in [S1].
+*   **Memory Complexity:** Requires storing gradient history for each Gaussian over the growth interval $M$, increasing memory usage by $O(N \cdot V)$ compared to standard 3DGS [S1].
+*   **Measured Performance:** On the Tanks&Temples dataset, HGS achieves superior NVS results compared to standard 3DGS and other baselines [S1]. Specifically, for REHGS, varying $\tau_{SSIM}$ yields: $\tau_{SSIM}=0.6$ gives PSNR 26.34, SSIM 0.880, LPIPS 0.127; $\tau_{SSIM}=0.7$ gives PSNR 26.36, SSIM 0.880, LPIPS 0.126; $\tau_{SSIM}=0.8$ gives PSNR 26.39, SSIM 0.880, LPIPS 0.126 [S1].
+*   **Strengths:** Effectively resolves blurring and needle-like artifacts by targeting hard Gaussians that standard averaging misses [S1]. It can boost both explicit and neural Gaussian methods, showing generalization ability [S1].
+*   **Limitations:** REHGS tends to find noticeable rendering errors but cannot detect some inconspicuous artifacts, which PGHGS probes better [S1]. Using only the potentially over-large condition results in false positives in low-textured or repetitive texture areas [S1].
+*   **When to use:** Use when standard 3DGS exhibits strong spurious artifacts, blurring, or needle-like structures in challenging areas due to insufficient Gaussian growth [S1].
+
+## Background
+Hard Gaussian Splatting (HGS) was proposed to address the limitations of 3D Gaussian Splatting (3DGS) in handling challenging areas where the average magnitude of view-space positional gradients fails to drive Gaussian growth [S1]. The method was introduced in the paper "Pushing Rendering Boundaries: Hard Gaussian Splatting" [S1]. It builds upon the adaptive density control mechanism of 3DGS and the anchor-based distribution of Scaffold-GS [S1]. The code is available at https://github.com/GhiXu/HGS [S1].
+
+## Sources
+[S1] Pushing Rendering Boundaries: Hard Gaussian Splatting, https://arxiv.org/abs/2412.04826v1, fetched 2026-10-26

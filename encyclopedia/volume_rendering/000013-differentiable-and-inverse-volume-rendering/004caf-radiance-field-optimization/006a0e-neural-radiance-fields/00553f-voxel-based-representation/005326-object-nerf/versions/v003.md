@@ -1,0 +1,70 @@
+# Object-NeRF
+
+Also called: ObjectNeRF
+
+## Overview
+Object-NeRF is a composition model that separates and edits objects within a scene using a hybrid voxel-based approach with jointly optimized voxel grid features and MLP parameters [S1]. It differs from standard volume rendering by explicitly partitioning the radiance field into distinct scene and object branches, enabling the shifting or addition of objects within the scene without requiring explicit objectness priors during training [S1, S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view RGB images, corresponding camera poses, and instance segmentation labels for each in-scene object [S1].
+*   **Outputs:** A decomposed radiance field consisting of separate scene and object components, allowing for per-object editing and re-rendering [S1].
+
+**Data Structures:**
+1.  **Voxel Grid:** A 3D grid of features that is jointly optimized with MLP parameters [S1]. The grid stores latent features used to condition the neural networks.
+2.  **Scene Branch:** A neural network (MLP) conditioned on interpolated voxel features to encode scene geometry and appearance [S2].
+3.  **Object Branch:** A neural network (MLP) conditioned on interpolated voxel features and object activation latent codes to encode object geometry and appearance [S1, S2].
+4.  **Object Activation Latent Codes:** A set of latent codes specific to each object instance, conditioning the object branch [S1].
+
+**Method Steps:**
+1.  **Voxel Feature Optimization:** Create a voxel grid of features and jointly optimize these features with the MLP parameters [S1].
+2.  **Branch Definition:** Introduce two separate neural network branches:
+    *   A **scene branch** for encoding the global scene geometry and appearance [S2].
+    *   An **object branch** for encoding individual object geometry and appearance [S2].
+3.  **Conditioning:**
+    *   Both the scene and object branches are conditioned on features interpolated from the voxel grid [S1].
+    *   The object branch is further conditioned on a set of object activation latent codes [S1].
+4.  **Rendering:** Use the two different NeRFs (one for objects, one for the scene) to compute radiance values [S1].
+5.  **Training Loss:** Incorporate segmentation labels with a mask loss term to identify each in-scene object [S1]. Use photometric losses for both foreground (objects) and background (scene) [S1].
+
+**Formulas:**
+The rendering process involves two separate radiance fields. Let $\mathbf{r}$ be a ray.
+The final pixel value is a composition of the scene and object contributions. While the exact compositional formula is not explicitly detailed in the provided notes, the method relies on separating the radiance field into components [S1, S2]. The object NeRF is conditioned on latent codes $\mathbf{z}_o$:
+$$
+\text{Object Branch} = f_{\text{obj}}(\text{VoxelFeatures}(\mathbf{x}), \mathbf{z}_o)
+$$
+The scene branch is conditioned only on voxel features:
+$$
+\text{Scene Branch} = f_{\text{scene}}(\text{VoxelFeatures}(\mathbf{x}))
+$$
+The training objective includes a mask loss $\mathcal{L}_{mask}$ derived from segmentation labels and photometric losses $\mathcal{L}_{photo}$ for foreground and background [S1].
+
+**Parameters:**
+*   **Voxel Grid Resolution:** Not given in the sources.
+*   **MLP Architecture:** Not given in the sources.
+*   **Latent Code Dimension:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Segmentation Dependency:** The method requires instance segmentation labels for training [S1].
+*   **Object Identification:** The mask loss term is critical for identifying each in-scene object [S1].
+
+## Subtopics
+
+### [Scene Editing and Decomposition](16868-scene-editing-and-decomposition.md)
+This method decomposes a composite radiance field into individual object layers and distinct background layers (near and far) to enable per-object editing and re-rendering. It differs from standard volume rendering by explicitly partitioning the ray integration domain based on 3D bounding boxes, allowing objects to be isolated from the background without requiring explicit objectness priors during training.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Trained and evaluated on ScanNet [31] and an in-house ToyDesk dataset [S1].
+*   **Strengths:** Enables shifting or addition of objects within the scene [S2]. Achieves good results for amodal segmentation and object interpolation [S1].
+*   **Limitations:** Requires instance segmentation labels [S1].
+*   **When to use:** When object-based modeling and editing are required [S2].
+*   **When not to use:** When segmentation labels are unavailable [S1].
+
+## Background
+Object-NeRF was created by Yang et al. in September 2021 [S1]. It is a composition model that can separate and edit objects within the scene [S1]. The method utilizes a hybrid voxel-based approach [39] and was trained and evaluated on ScanNet [31] as well as an in-house ToyDesk dataset with instance segmentation labels [S1]. It incorporates segmentation labels with a mask loss term, identifying each in-scene object [S1].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28

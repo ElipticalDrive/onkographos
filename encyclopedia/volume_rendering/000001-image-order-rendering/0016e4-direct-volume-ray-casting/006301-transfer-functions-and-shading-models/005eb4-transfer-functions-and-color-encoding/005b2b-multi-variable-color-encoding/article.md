@@ -1,0 +1,157 @@
+# Multi-Variable Color Encoding
+
+Also called: Four data channel rendering, Multi-channel Volume Rendering, RGB Channel Mapping
+
+## Overview
+Multi-Variable Color Encoding is a visualization technique that displays up to four independent scalar variables in a single image by mapping each variable to a specific color channel (Red, Green, Blue, and a separate fourth channel) [S1, S2, unofficial]. It solves the problem of visualizing multi-modal or multi-component volumetric data without requiring complex transfer function blending, allowing users to isolate and inspect individual variables via intensity controls [S1, S2, unofficial]. Unlike [Color-Based Transfer Function](6581-color-based-transfer-function.md) which typically blends variables into a unified color space, this method keeps variables spectrally distinct, trading perceptual clarity for the ability to independently control the visibility of each component [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A multi-channel volume dataset containing up to four independent scalar variables per voxel. The data must be merged into a single file structure where each channel is stored separately but accessible as a distinct component [S1, S2, unofficial].
+*   **Output:** A single RGB (or RGBA) image where the Red channel encodes Variable 1, Green encodes Variable 2, Blue encodes Variable 3, and the fourth variable is mapped to a separate color specification (often handled via a fourth channel or specific color assignment logic) [S1, S2, unofficial].
+
+**Data Structures:**
+The source data is a merged volume file. The specific internal layout is not detailed in the sources, but it is created using a tool that merges several channels into one data file [S1, S2, unofficial]. The rendering system treats these as distinct components accessible by index [S1, S2, unofficial].
+
+**Steps:**
+1.  **Data Preparation:** Merge independent variable datasets into a single multi-channel data file using a dedicated tool (e.g., `VConv`) [S1, S2, unofficial].
+2.  **Channel Mapping:** Assign the first scalar variable to the Red color channel, the second to the Green channel, and the third to the Blue channel [S1, S2, unofficial].
+3.  **Fourth Variable Handling:** If a fourth variable is present, its color is set separately using three dials on the user interface, distinct from the RGB gamma controls [S1, S2, unofficial].
+4.  **Intensity Adjustment:** Apply interactive gamma correction to each color channel independently. This allows the user to fade variables in and out by adjusting the intensity of specific components [S1, S2, unofficial].
+5.  **Rendering:** Render the volume using either Alpha Blending or Maximum Intensity Projection (MIP), selectable via a user interface toggle [S1, S2, unofficial].
+
+**Formulas:**
+The sources do not provide explicit mathematical formulas for the mapping. The mapping is described as a direct assignment:
+$$ C_{red} = V_1 $$
+$$ C_{green} = V_2 $$
+$$ C_{blue} = V_3 $$
+Where $V_i$ is the value of the $i$-th variable [S1, S2, unofficial]. The intensity adjustment is described as "gamma correction" applied via dials [S1, S2, unofficial]. The exact gamma function (e.g., $C' = C^{1/\gamma}$) is not specified [S1, S2, unofficial].
+
+**Parameters:**
+*   **Number of variables:** Up to three variables are mapped directly to RGB channels [S2, unofficial]. A fourth variable can be rendered, but its color is set separately [S1, unofficial].
+*   **Gamma Dials:** Interactive controls for adjusting the intensity of each color component [S1, S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Overlap:** If values from different modalities overlap significantly in the same voxels, it becomes difficult to distinguish which intensity corresponds to which variable [S1, S2, unofficial]. This requires the user to have considerable experience with combined colors [S1, S2, unofficial].
+*   **Data Merging:** The data must be pre-merged; the method does not describe on-the-fly merging of disparate datasets [S1, S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Multi-Variable Color Encoding Implementation
+# Based on [S1, S2, unofficial]
+
+def render_multi_variable_volume(volume_data, gamma_r, gamma_g, gamma_b, fourth_var_color):
+    """
+    Renders a multi-channel volume using direct RGB channel mapping.
+    
+    Args:
+        volume_data: A 3D array or structure containing up to 4 channels.
+                     Assumed to be merged via VConv [S1, S2, unofficial].
+                     volume_data[x, y, z, 0] -> Variable 1 (Red)
+                     volume_data[x, y, z, 1] -> Variable 2 (Green)
+                     volume_data[x, y, z, 2] -> Variable 3 (Blue)
+                     volume_data[x, y, z, 3] -> Variable 4 (Fourth Channel)
+        gamma_r: Gamma value for Red channel intensity [S1, S2, unofficial].
+        gamma_g: Gamma value for Green channel intensity [S1, S2, unofficial].
+        gamma_b: Gamma value for Blue channel intensity [S1, S2, unofficial].
+        fourth_var_color: Color specification for the fourth variable [S1, S2, unofficial].
+        
+    Returns:
+        rendered_image: An RGB image.
+    """
+    
+    # Get dimensions
+    height, width, depth, channels = volume_data.shape
+    
+    # Initialize output image
+    # Note: The fourth variable's color handling is described as "set with three dials"
+    # but the exact blending with RGB is not specified in the sources [S1, S2, unofficial].
+    # We assume a standard alpha blend or overlay for the fourth channel if present.
+    rendered_image = np.zeros((height, width, 3))
+    
+    # Determine rendering mode (Alpha Blending or MIP)
+    # This is a user-selectable toggle [S1, S2, unofficial]
+    use_mip = False # Placeholder for UI state
+    
+    for z in range(depth):
+        for y in range(height):
+            for x in range(width):
+                # Extract variables
+                var1 = volume_data[x, y, z, 0]
+                var2 = volume_data[x, y, z, 1]
+                var3 = volume_data[x, y, z, 2]
+                var4 = volume_data[x, y, z, 3] if channels > 3 else 0
+                
+                # Apply Gamma Correction to RGB channels [S1, S2, unofficial]
+                # Note: Exact gamma formula is not provided [S1, S2, unofficial]
+                # Assuming standard power law gamma correction
+                red_channel = var1 ** (1.0 / gamma_r)
+                green_channel = var2 ** (1.0 / gamma_g)
+                blue_channel = var3 ** (1.0 / gamma_b)
+                
+                # Handle Fourth Variable
+                # The sources state the color is "set with three dials" [S1, S2, unofficial]
+                # It does not specify how this color is composited with RGB.
+                # [G] Assuming the fourth variable is rendered as an overlay or 
+                # replaces the background if not blended. 
+                # Since no blending formula is given, we cannot implement the 
+                # exact fourth channel behavior. 
+                # We will assume for this implementation that the fourth variable
+                # is not composited into the RGB channels directly but perhaps
+                # affects opacity or is a separate layer not detailed here.
+                # To keep the code valid and self-contained, we ignore var4 
+                # in the RGB calculation as per the strict "RGB for up to three" 
+                # definition [S2, unofficial], noting the limitation.
+                
+                if use_mip:
+                    # MIP takes the maximum intensity across the ray
+                    # [G] Standard MIP implementation
+                    # This requires ray casting, which is not detailed in the 
+                    # specific "Multi-Variable Color Encoding" notes, but 
+                    # mentioned as a reconstruction mode [S1, S2, unofficial].
+                    # We assume the variables are processed independently for MIP.
+                    pass 
+                else:
+                    # Alpha Blending
+                    # [G] Standard alpha blending requires opacity.
+                    # The sources mention "mapping from scalar values to opacity" 
+                    # can be changed [S1, S2, unofficial], but do not provide the formula.
+                    # We cannot implement the exact blending without this.
+                    pass
+                
+                # For the purpose of this specific encoding method's core definition:
+                # The output color is simply the mapped and gamma-corrected values.
+                rendered_image[x, y, 0] = red_channel
+                rendered_image[x, y, 1] = green_channel
+                rendered_image[x, y, 2] = blue_channel
+                
+    return rendered_image
+```
+
+## Subtopics
+
+### Data Fusion
+The process of merging multiple datasets into a single file using tools like `VConv` [S1, S2, unofficial]. This is a prerequisite step, not the encoding itself.
+
+### Interactive Gamma Control
+The use of dials to adjust the intensity of individual color channels, allowing variables to be faded in and out [S1, S2, unofficial].
+
+### Reconstruction Modes
+The choice between Alpha Blending and Maximum Intensity Projection (MIP) to view the encoded data [S1, S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Real-time interaction is supported via pixel shaders [S1, S2, unofficial]. The sources do not provide specific frame rates or complexity formulas [S1, S2, unofficial].
+*   **Memory Complexity:** The method does not address out-of-core rendering or parallelization for large datasets [S1, unofficial]. It relies on the data fitting in memory (e.g., 128x128x100 voxels per time step) [S1, unofficial].
+*   **Strengths:** Allows independent control of up to three variables via gamma dials; real-time interaction; simple conceptual mapping [S1, S2, unofficial].
+*   **Limitations:** Difficult to interpret when modalities overlap significantly; requires user experience to distinguish combined colors; limited to four variables [S1, S2, unofficial].
+*   **When to use:** When variables are distinct and do not heavily overlap, and independent visibility control is needed [S1, S2, unofficial].
+*   **When not to use:** When variables overlap significantly, or when precise quantitative comparison of intensities across variables is required [S1, S2, unofficial].
+
+## Background
+This technique was developed for the IEEE Visualization 2004 Contest, specifically for exploring hurricane data sets in a CAVE-like immersive virtual environment at Brown University [S1, S2, unofficial]. It was part of a system designed for user-friendly volume data set exploration, leveraging pixel shaders for real-time interaction [S1, S2, unofficial]. The data sets used included ICEf48, RAINf48, and SNOWf48 [S1, S2, unofficial].
+
+## Sources
+[S1] IEEE Visualization 2004 Contest: User Friendly Volume Data Set Exploration in the Cave, http://vis.computer.org/vis2004contest/brown/, fetched 2026-10-28 (unofficial)
+[S2] IEEE Visualization 2004 Contest: User Friendly Volume Data Set Exploration in the Cave, http://web.eng.ucsd.edu/~jschulze/projects/vis04-contest/, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,295 @@
+--- v001.md
++++ v002.md
+@@ -4,180 +4,162 @@
+ 
+ ## Overview
+-This method computes the discrete Laplacian of a scalar field defined on a 2D grid by applying finite difference operators. It constructs the Laplacian matrix implicitly by composing forward and transpose first-derivative operators, allowing for weighted (gamma) regularization. It differs from standard central-difference Laplacians by using a specific boundary-aware forward-difference formulation that preserves matrix symmetry properties in the resulting operator application, often used in inverse problems and regularization [S1, unofficial].
++Computes the discrete Laplacian of a scalar field on a 2D grid using finite difference operators. It differs from standard central difference implementations by constructing the Laplacian matrix as the sum of the transpose of the forward difference operator applied to the forward difference operator ($D^T D$), which implicitly enforces specific boundary conditions (zero-padding with reflected signs for the transpose). This method is primarily used in inverse problems and regularization contexts where the adjoint structure is required for optimization solvers like GMRES.
+ 
+ ## How it works
+ **Inputs:**
+-- $f$: A 2D numpy array of shape $(H, W)$ representing the scalar field values.
+-- $\gamma$: (Optional) A weighting matrix or scalar. If scalar, it is treated as a uniform weight. If not provided or scalar, the unweighted Laplacian is computed. If an ndarray, it must match the row dimension of $f$ for the weighted variant [S1, unofficial].
++- `f`: A 2D numpy array of shape $(H, W)$ representing the scalar field values.
++- `gamma` (optional): A weighting matrix or scalar. If provided, it is used to weight the derivatives. If not an ndarray, it defaults to an identity matrix of size $H \times H$ [S1, unofficial].
+ 
+ **Outputs:**
+-- $L_f$: A 1D numpy array of shape $(H \times W,)$ containing the flattened Laplacian values.
++- `laplace_f`: A 1D numpy array of shape $(H \times W,)$ containing the flattened Laplacian values.
+ 
+ **Data Structures:**
+-- The method operates directly on NumPy arrays. No explicit sparse matrix storage is used; the operator is applied via dense array operations.
++- The method operates directly on the input array `f`. No auxiliary grid structures are built; the operators are applied via array slicing and summation.
+ 
+ **Steps:**
++1. **Compute Forward X-Derivative ($D_x$):**
++   Apply the forward difference along axis 0 (rows).
++   $$ D_x = \text{diff}(f, \text{axis}=0) $$
++   Append a zero row at the bottom to maintain shape $(H, W)$:
++   $$ D_x = \text{vstack}(D_x, \text{zeros}((1, W))) $$
++   [S1, unofficial]
+ 
+-1. **Define Forward Derivative along Rows ($x$-axis):**
+-   Compute the forward difference along axis 0 (rows). For a grid $u$ of shape $(H, W)$:
+-   $$ D_x u = \begin{bmatrix} u_{1,0}-u_{0,0} & \dots & u_{1,W-1}-u_{0,W-1} \\ \vdots & \ddots & \vdots \\ u_{H-1,W-1}-u_{H-2,W-1} \end{bmatrix} $$
+-   Append a zero row at the bottom to maintain shape $(H, W)$ [S1, unofficial]:
+-   $$ \text{applyDx}(u) = \text{vstack}(D_x u, \mathbf{0}_{1 \times W}) $$
++2. **Compute Forward Y-Derivative ($D_y$):**
++   Apply the forward difference along axis 1 (columns).
++   $$ D_y = \text{diff}(f, \text{axis}=1) $$
++   Append a zero column at the right to maintain shape $(H, W)$:
++   $$ D_y = \text{hstack}(D_y, \text{zeros}((H, 1))) $$
++   [S1, unofficial]
+ 
+-2. **Define Forward Derivative along Columns ($y$-axis):**
+-   Compute the forward difference along axis 1 (columns).
+-   $$ D_y u = \begin{bmatrix} u_{0,1}-u_{0,0} & \dots & u_{0,W-1}-u_{0,W-2} \\ \vdots & \ddots & \vdots \\ u_{H-1,1}-u_{H-1,0} & \dots & u_{H-1,W-1}-u_{H-1,W-2} \end{bmatrix} $$
+-   Append a zero column at the right to maintain shape $(H, W)$ [S1, unofficial]:
+-   $$ \text{applyDy}(u) = \text{hstack}(D_y u, \mathbf{0}_{H \times 1}) $$
++3. **Compute Transpose X-Derivative ($D_x^T$):**
++   The transpose operator is constructed explicitly to satisfy the adjoint property of the forward difference with zero-boundary conditions.
++   $$ D_x^T = \text{vstack}(-f[0:1, :], -\text{diff}(f[:-1, :], \text{axis}=0), f[-2:-1, :]) $$
++   [S1, unofficial]
++   *Note:* The first row is the negative of the first row of `f`. The middle rows are the negative forward differences of `f` excluding the last row. The last row is the second-to-last row of `f`.
+ 
+-3. **Define Transpose Derivative along Rows ($x$-axis):**
+-   The transpose operator $\text{applyDx}^T$ is computed as [S1, unofficial]:
+-   $$ \text{applyDx}^T(u) = \text{vstack}\left( -u_{0,:}, -\text{diff}(u_{1:H-1,:}, \text{axis}=0), u_{H-2,:} \right) $$
+-   Specifically:
+-   - First row: $-u_{0, :}$
+-   - Middle rows ($i=1 \dots H-2$): $-(u_{i+1, :} - u_{i-1, :})$? No, the code uses `np.diff(u[:-1, :], axis=0)`. Let's trace carefully.
+-     `u[:-1, :]` is rows $0$ to $H-2$. `np.diff(..., axis=0)` computes $u_{i+1} - u_i$ for $i=0 \dots H-3$.
+-     The result is stacked with $-u_{0,:}$ at top and $u_{H-2,:}$ at bottom.
+-     Wait, the code is: `np.vstack([-u[0:1, :], -np.diff(u[:-1, :], axis=0), u[-2:-1, :]])`.
+-     Let $v = \text{applyDx}^T(u)$.
+-     $v_{0,:} = -u_{0,:}$
+-     $v_{i,:} = -(u_{i,:} - u_{i-1,:})$ for $i=1 \dots H-2$?
+-     `np.diff(u[:-1], axis=0)` produces a matrix of size $(H-2, W)$ where entry $(i, j)$ is $u_{i+1, j} - u_{i, j}$.
+-     So $- \text{diff}$ is $u_{i, j} - u_{i+1, j}$.
+-     This is stacked between $-u_{0,:}$ and $u_{H-2,:}$.
+-     This formulation corresponds to the negative adjoint of the forward difference with zero-padding boundary conditions [S1, unofficial].
++4. **Compute Transpose Y-Derivative ($D_y^T$):**
++   Similarly, the transpose for the Y-direction is:
++   $$ D_y^T = \text{hstack}(-f[:, 0:1], -\text{diff}(f[:, :-1], \text{axis}=1), f[:, -2:-1]) $$
++   [S1, unofficial]
++   *Note:* The first column is the negative of the first column of `f`. The middle columns are the negative forward differences of `f` excluding the last column. The last column is the second-to-last column of `f`.
+ 
+-4. **Define Transpose Derivative along Columns ($y$-axis):**
+-   Similarly, $\text{applyDy}^T$ is computed as [S1, unofficial]:
+-   $$ \text{applyDy}^T(u) = \text{hstack}\left( -u_{:, 0}, -\text{diff}(u_{:, :-1}, \text{axis}=1), u_{:, W-2} \right) $$
++5. **Compute Laplacian Components:**
++   - **Unweighted:**
++     $$ d_{xx} = D_x^T (D_x f) $$
++     $$ d_{yy} = D_y^T (D_y f) $$
++     $$ \Delta f = d_{xx} + d_{yy} $$
++     [S1, unofficial]
++   - **Weighted (with $\gamma$):**
++     If $\gamma$ is provided:
++     $$ d_{xx} = \sqrt{\gamma} D_x^T (\sqrt{\gamma} D_x f) $$
++     $$ d_{yy} = \sqrt{\gamma} D_y^T (\sqrt{\gamma} D_y f) $$
++     $$ \Delta f = d_{xx} + d_{yy} $$
++     [S1, unofficial]
++     Here, $\sqrt{\gamma}$ denotes element-wise square root if $\gamma$ is a matrix, or scalar square root. The multiplication `@` denotes matrix multiplication.
+ 
+-5. **Compute Laplacian:**
+-   - **Unweighted:**
+-     $$ L_f = \text{flatten}(\text{applyDx}^T(\text{applyDx}(f)) + \text{applyDy}^T(\text{applyDy}(f))) $$
+-   - **Weighted (with $\gamma$):**
+-     If $\gamma$ is not an ndarray, set $\gamma = I_H$ (identity matrix of size $H \times H$) [S1, unofficial].
+-     $$ L_f = \text{flatten}\left( \sqrt{\gamma} \cdot \text{applyDx}^T(\sqrt{\gamma} \cdot \text{applyDx}(f)) + \sqrt{\gamma} \cdot \text{applyDy}^T(\sqrt{\gamma} \cdot \text{applyDy}(f)) \right) $$
+-     Note: The multiplication $\sqrt{\gamma} @ \dots$ implies matrix-vector multiplication if the inner result is flattened, or element-wise if shapes align. Given `applyDx` returns $(H, W)$, and $\gamma$ is $(H, H)$, the operation `np.sqrt(gamma) @ applyDx(f)` is invalid if `applyDx(f)` is 2D. However, the source code shows `np.sqrt(gamma)@ applyDxTrans(np.sqrt(gamma)@applyDx(f))`.
+-     Let's re-read the source snippet:
+-     `dxx = np.sqrt(gamma)@ applyDxTrans(np.sqrt(gamma)@applyDx(f))`
+-     `applyDx(f)` is $(H, W)$.
+-     `np.sqrt(gamma)` is $(H, H)$.
+-     Matrix multiplication `(H,H) @ (H,W)` results in $(H, W)$. This is valid.
+-     Then `applyDxTrans` takes $(H, W)$ and returns $(H, W)$.
+-     Then `np.sqrt(gamma) @ ...` results in $(H, W)$.
+-     Finally, sum and flatten [S1, unofficial].
++6. **Flatten:**
++   Return $\Delta f$ flattened to 1D.
+ 
+ **Pseudocode:**
+-
+ ```python
+ import numpy as np
+ 
+ def applyDx(u):
+-    """Applies the forward derivative along the first dimension (rows)."""
+-    # u shape: (H, W)
+-    Dx = np.diff(u, axis=0)  # Shape: (H-1, W)
++    """Applies the first derivative along the first dimension (rows)"""
++    Dx = np.diff(u, axis=0)
+     # Append a zero row at the bottom
+-    zero_row = np.zeros((1, u.shape[1]), dtype=u.dtype)
+-    return np.vstack([Dx, zero_row])
++    Dx = np.vstack([Dx, np.zeros((1, u.shape[1]))])
++    return Dx
+ 
+ def applyDy(u):
+-    """Applies the forward derivative along the second dimension (columns)."""
+-    # u shape: (H, W)
+-    Dy = np.diff(u, axis=1)  # Shape: (H, W-1)
++    """Applies the first derivative along the second dimension (columns)"""
++    Dy = np.diff(u, axis=1)
+     # Append a zero column at the right
+-    zero_col = np.zeros((u.shape[0], 1), dtype=u.dtype)
+-    return np.hstack([Dy, zero_col])
++    Dy = np.hstack([Dy, np.zeros((u.shape[0], 1))])
++    return Dy
+ 
+ def applyDxTrans(u):
+-    """Applies the transpose of the first derivative along the first dimension (rows)."""
+-    # u shape: (H, W)
+-    # Top row: -u[0, :]
+-    top = -u[0:1, :]  # Shape: (1, W)
+-    
+-    # Middle rows: -diff(u[:-1, :], axis=0)
+-    # u[:-1, :] is rows 0 to H-2. diff computes u[i+1] - u[i].
+-    # Result shape: (H-2, W)
+-    mid = -np.diff(u[:-1, :], axis=0)
+-    
+-    # Bottom row: u[-2, :]
+-    bottom = u[-2:-1, :]  # Shape: (1, W)
+-    
+-    return np.vstack([top, mid, bottom])
++    """Applies the transpose of the first derivative along the first dimension (rows)"""
++    # First row: negative of the first row of u
++    # Middle rows: negative forward diff of u excluding last row
++    # Last row: second-to-last row of u
++    DxT = np.vstack([-u[0:1, :], -np.diff(u[:-1, :], axis=0), u[-2:-1, :]])
++    return DxT
+ 
+ def applyDyTrans(u):
+-    """Applies the transpose of the first derivative along the second dimension (columns)."""
+-    # u shape: (H, W)
+-    # Left col: -u[:, 0]
+-    left = -u[:, 0:1]  # Shape: (H, 1)
+-    
+-    # Middle cols: -diff(u[:, :-1], axis=1)
+-    # u[:, :-1] is cols 0 to W-2. diff computes u[:, j+1] - u[:, j].
+-    # Result shape: (H, W-2)
+-    mid = -np.diff(u[:, :-1], axis=1)
+-    
+-    # Right col: u[:, -2]
+-    right = u[:, -2:-1]  # Shape: (H, 1)
+-    
+-    return np.hstack([left, mid, right])
++    """Applies the transpose of the first derivative along the second dimension (columns)"""
++    # First col: negative of the first col of u
++    # Middle cols: negative forward diff of u excluding last col
++    # Last col: second-to-last col of u
++    DyT = np.hstack([-u[:, 0:1], -np.diff(u[:, :-1], axis=1), u[:, -2:-1]])
++    return DyT
+ 
+-def laplacian(f, gamma=None):
++def laplacian(f, gamma=0):
+     """
+     Computes the Laplacian of f.
+-    If gamma is provided and is an ndarray, computes weighted Laplacian.
++    If gamma is not 0, computes the weighted Laplacian.
+     """
+-    if gamma is not None and not isinstance(gamma, np.ndarray):
+-        # If gamma is a scalar, treat as uniform weight (identity matrix for weighting)
+-        # However, the source sets gamma = np.eye(f.shape[0]) if not ndarray.
+-        # If it is a scalar, we might need to broadcast or treat as identity.
+-        # The source logic: "If gamma is not an ndarray, set gamma = np.eye(f.shape[0])"
++    if not isinstance(gamma, np.ndarray):
+         gamma = np.eye(f.shape[0])
+     
+-    if gamma is None or (isinstance(gamma, np.ndarray) and gamma.shape[0] == f.shape[0] and np.allclose(gamma, np.eye(f.shape[0]))):
+-        # Unweighted case
+-        dxx = applyDxTrans(applyDx(f))
+-        dyy = applyDyTrans(applyDy(f))
+-        laplace_f = dxx + dyy
+-        return laplace_f.flatten()
+-    else:
+-        # Weighted case
+-        sqrt_gamma = np.sqrt(gamma)
+-        
+-        # dxx = sqrt_gamma @ applyDxTrans(sqrt_gamma @ applyDx(f))
+-        # Note: applyDx(f) is (H, W). sqrt_gamma is (H, H).
+-        # sqrt_gamma @ applyDx(f) is (H, W).
+-        temp_x = applyDx(f)
+-        weighted_x = sqrt_gamma @ temp_x
+-        dxx = sqrt_gamma @ applyDxTrans(weighted_x)
+-        
+-        # dyy = sqrt_gamma @ applyDyTrans(sqrt_gamma @ applyDy(f))
+-        temp_y = applyDy(f)
+-        weighted_y = sqrt_gamma @ temp_y
+-        dyy = sqrt_gamma @ applyDyTrans(weighted_y)
+-        
+-        laplace_f = dxx + dyy
+-        return laplace_f.flatten()
++    sqrt_gamma = np.sqrt(gamma)
++    
++    # Weighted forward derivatives
++    Dx_f = applyDx(f)
++    Dy_f = applyDy(f)
++    
++    # Apply sqrt(gamma) to the derivatives
++    # Note: In the source, sqrt(gamma) @ applyDx(f) implies matrix multiplication.
++    # If gamma is diagonal, this scales rows. If gamma is identity, it's unchanged.
++    Dx_f_weighted = sqrt_gamma @ Dx_f
++    Dy_f_weighted = sqrt_gamma @ Dy_f
++    
++    # Apply transpose derivatives
++    DxT = applyDxTrans(f)
++    DyT = applyDyTrans(f)
++    
++    # Apply sqrt(gamma) to the transpose derivatives
++    DxT_weighted = sqrt_gamma @ DxT
++    DyT_weighted = sqrt_gamma @ DyT
++    
++    # Compute components
++    dxx = DxT_weighted @ Dx_f_weighted
++    dyy = DyT_weighted @ Dy_f_weighted
++    
++    laplace_f = dxx + dyy
++    
++    return laplace_f.flatten()
++
++def laplacian_unweighted(f):
++    """Computes the unweighted Laplacian"""
++    dxx = applyDxTrans(applyDx(f))
++    dyy = applyDyTrans(applyDy(f))
++    laplace_f = dxx + dyy
++    return laplace_f.flatten()
+ ```
+ 
++**Parameters:**
++- `gamma`: Default 0 (unweighted). If provided, must be compatible with matrix multiplication with the derivative outputs. [S1, unofficial]
++
+ **Edge Cases and Pitfalls:**
+-- **Grid Dimensions:** If $H=1$ or $W=1$, `np.diff` returns empty arrays. The slicing `u[-2:-1]` may behave unexpectedly if dimensions are too small. The source assumes standard image-like dimensions $H, W \ge 2$ [S1, unofficial].
+-- **Gamma Shape:** The weighted Laplacian requires $\gamma$ to be a square matrix of size $H \times H$. Broadcasting rules in NumPy apply to the matrix multiplication `@` [S1, unofficial].
+-- **Boundary Conditions:** The zero-padding in `applyDx` and `applyDy` and the specific boundary handling in `applyDxTrans` and `applyDyTrans` define the implicit boundary conditions. These are not standard Neumann or Dirichlet but specific to the adjoint formulation [S1, unofficial].
++- **Boundary Conditions:** The explicit construction of $D^T$ implies specific boundary handling. The first row/col of the output depends on the first row/col of the input, and the last row/col depends on the second-to-last. This is not a standard Neumann or Dirichlet zero-boundary Laplacian but rather the adjoint of the forward difference with zero-padding. [S1, unofficial]
++- **Gamma Type:** If `gamma` is a scalar, it is converted to an identity matrix. If it is a matrix, it must be square and compatible with the height of `f`. [S1, unofficial]
++- **Shape Mismatch:** The transpose operators assume `f` is 2D. Applying to higher dimensions requires adaptation not present in the source. [S1, unofficial]
+ 
+ ## Subtopics
+ 
+ ### Time Smoothness Regularization via Second Derivative
+-A regularizer that enforces smoothness over the time dimension of spatiotemporal grids by penalizing the second derivative. It identifies "time grids" based on the grid length (if length is 3, no time grids; otherwise indices [2, 4, 5] are time grids). For each time grid, it computes plane smoothness using the formula $\frac{1}{N} \sum (t_{i+2} - 2t_{i+1} + t_i)^2$, where the second difference is computed along the time dimension [S2, unofficial].
++A regularizer that enforces smoothness over the time dimension of spatiotemporal grids by penalizing the second derivative. It identifies "time grids" (indices [2, 4, 5] if grid length is not 3, otherwise empty) and computes plane smoothness. The smoothness for a time grid $t$ is calculated as $\frac{1}{N} \sum (t_{i+2} - 2t_{i+1} + t_i)^2$, where the second difference is computed along the time dimension. [S2, unofficial]
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(H \times W)$ for the unweighted case. The weighted case involves matrix-vector multiplications with $\gamma$, which is $O(H^2 \times W)$ if $\gamma$ is dense, or $O(H \times W)$ if $\gamma$ is diagonal.
+-- **Memory Complexity:** $O(H \times W)$ for the input and output arrays. Intermediate arrays also require $O(H \times W)$ space.
+-- **Strengths:** Simple implementation using standard NumPy operations. Handles weighted regularization naturally.
+-- **Limitations:** The boundary conditions are implicit and may not match all physical boundary conditions. The weighted version can be computationally expensive if $\gamma$ is dense.
+-- **When to use:** When implementing inverse problems or regularization in 2D image/volume processing where the specific adjoint boundary conditions are desired [S1, unofficial].
++- **Time Complexity:** $O(H \times W)$ for the unweighted case, as it involves a constant number of passes over the grid. The weighted case adds matrix multiplication cost $O(H^2 W)$ if $\gamma$ is dense, or $O(H W)$ if $\gamma$ is diagonal. [S1, unofficial]
++- **Memory Complexity:** $O(H \times W)$ for storing intermediate derivative arrays. [S1, unofficial]
++- **Strengths:** Provides the exact adjoint of the forward difference operator, which is crucial for gradient-based optimization in inverse problems (e.g., CT reconstruction) where the forward operator is $D_x$. [S1, unofficial]
++- **Limitations:** The boundary conditions are implicit and non-standard compared to central differences. It is specific to 2D grids in the provided implementation. [S1, unofficial]
+ 
+ ## Background
+-This method is derived from implementations in inverse problems for CT scans, specifically using finite difference operators to construct Laplacian matrices for regularization [S1, unofficial]. It is also referenced in the context of 4D Gaussian Splatting for time-smoothness regularization [S2, unofficial].
++This method originates from implementations in inverse problems for CT scans, specifically in the context of regularization using total variation or similar norms where the Laplacian matrix is constructed via finite differences. The specific `applyDx`/`applyDxTrans` pattern is documented in the `inverse-problems-CT-scans` repository. [S1, unofficial]
+ 
+ ## Sources
+-[S1] imanfs/inverse-problems-CT-scans - GitHub, https://github.com/imanfs/inverse-problems-CT-scans, fetched 2026-10-27 (unofficial)
++[S1] imanfs/inverse-problems-CT-scans, https://github.com/imanfs/inverse-problems-CT-scans, fetched 2026-10-27 (unofficial)
+ [S2] ElenaViewSynthesis/4dgs, https://github.com/ElenaViewSynthesis/4dgs, fetched 2026-10-28 (unofficial)

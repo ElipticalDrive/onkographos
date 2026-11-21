@@ -1,0 +1,108 @@
+# Lipschitz Proxy Nodes
+
+Also called: Continuous Proxy, Proxy C
+
+## Overview
+Lipschitz Proxy Nodes (Proxy C) replace a computationally intensive sub-tree of a Signed Distance Field (SDF) with a simpler proxy volume $V$ and a proxy field $v$, ensuring the resulting field $f_e$ is globally 1-Lipschitz continuous [S1]. Unlike Conservative Proxy Nodes (Proxy P), which yield discontinuous fields and cannot be used below smooth Boolean operators, Proxy C nodes maintain continuity, making them compatible with smooth unions and other operators requiring Lipschitz continuity [S1].
+
+## How it works
+**Inputs:**
+*   Original SDF sub-tree function $f(p)$, assumed to be 1-Lipschitz.
+*   Proxy volume $V$ (a geometric region).
+*   Proxy field $v(p) = d(p, V)$, the distance to $V$.
+*   Interpolation radius $\delta r > 0$.
+*   Lipschitz scaling constant $\lambda \ge 1$.
+*   Interpolation function $s: [0, 1] \to [0, 1]$, monotonically non-decreasing (e.g., identity or smoothstep) [S1].
+
+**Outputs:**
+*   The 1-Lipschitz field $f_e(p)$ [S1].
+
+**Data Structures:**
+*   The proxy node stores the geometry of $V$, the parameters $\delta r$ and $\lambda$, and the function $s$.
+*   The interpolation region $\Omega$ is defined implicitly as $\Omega = (V \oplus B(\delta r)) \setminus V$, where $\oplus$ is the Minkowski sum and $B(\delta r)$ is a sphere of radius $\delta r$ [S1].
+
+**Steps:**
+1.  **Define the Interpolation Region:** Compute the region $\Omega$ as the set of points within distance $\delta r$ of $V$ but outside $V$ [S1].
+2.  **Compute Weight Function:** For any point $p$, calculate the weight $\alpha(p)$ based on the distance to $V$:
+    $$ \alpha(p) = s\left(\frac{v(p)}{\delta r}\right) $$
+    By definition, $\alpha(p) = 0$ on $\partial V$ and $\alpha(p) = 1$ on $\partial(V \oplus B(\delta r))$ [S1].
+3.  **Evaluate Field:** Compute $f_e(p)$ using the piecewise definition:
+    $$
+    f_e(p) =
+    \begin{cases}
+    f(p)/\lambda & \text{if } p \in V \\
+    \frac{1}{\lambda} \left[ (1 - \alpha(p)) f(p) + \alpha(p) v(p) \right] & \text{if } p \in \Omega \\
+    (v(p) - \delta r) + \delta r/\lambda & \text{otherwise}
+    \end{cases}
+    $$
+    [S1]
+
+**Parameters:**
+*   $\lambda$: A constant $\ge 1$ used to guarantee that $f_e$ is 1-Lipschitz. It scales the function values and gradients [S1].
+*   $\delta r$: The radius of the sphere $B(\delta r)$ defining the width of the interpolation region $\Omega$ [S1].
+
+**Pitfalls:**
+*   **Discontinuity Artifacts:** Using discontinuous proxy nodes (Proxy P) with smooth Boolean operators produces artifacts because the field function is no longer continuous in the neighborhood of the surface $\partial O$ [S1]. Proxy C avoids this but is more computationally demanding [S1].
+*   **Gradient Norm:** The norm of the gradient $\|\nabla \alpha\|$ is equal to the Lipschitz constant of the interpolating function $s$. Care must be taken to ensure the combined gradient does not exceed 1 after scaling by $\lambda$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lipschitz_proxy_node(p, f_original, v_proxy, V_geometry, delta_r, lambda_val, s_func):
+    """
+    Evaluates the 1-Lipschitz proxy field f_e at point p.
+    
+    Args:
+        p: Point in 3D space.
+        f_original: Function evaluating the original sub-tree SDF f(p).
+        v_proxy: Function evaluating the proxy distance field v(p) = d(p, V).
+        V_geometry: Geometry object representing the proxy volume V.
+        delta_r: Interpolation radius.
+        lambda_val: Lipschitz scaling constant (>= 1).
+        s_func: Monotonically non-decreasing function s: [0, 1] -> [0, 1].
+        
+    Returns:
+        The value of the 1-Lipschitz field f_e(p).
+    """
+    # Calculate distance to proxy volume V
+    v_p = v_proxy(p)
+    
+    # Determine region membership
+    # Check if p is inside V
+    inside_V = V_geometry.contains(p)
+    
+    # Check if p is inside the expanded region V + B(delta_r)
+    # This is equivalent to checking if distance to V <= delta_r
+    inside_expanded = v_p <= delta_r
+    
+    if inside_V:
+        # Region V: f(p) / lambda
+        return f_original(p) / lambda_val
+    
+    elif inside_expanded:
+        # Region Omega: Interpolation region
+        # alpha(p) = s(v(p) / delta_r)
+        alpha = s_func(v_p / delta_r)
+        
+        # f_e(p) = (1/lambda) * [ (1 - alpha) * f(p) + alpha * v(p) ]
+        f_p = f_original(p)
+        return (1.0 / lambda_val) * ((1.0 - alpha) * f_p + alpha * v_p)
+    
+    else:
+        # Outside Omega: (v(p) - delta_r) + delta_r / lambda
+        return (v_p - delta_r) + (delta_r / lambda_val)
+```
+
+## Operating characteristics
+*   **Complexity:** More computationally demanding than Conservative Proxy Nodes (Proxy P) due to the need for continuous interpolation and gradient management [S1].
+*   **Performance:** In tests on the Temple model, proxy nodes achieved an average speedup of $\times 7$ with Sphere Tracing [S1]. Specific configurations (capsule, half-sphere, cylinder proxies) achieved a speedup factor of $\approx \times 6.86$ [S1].
+*   **Strengths:** Enables acceleration of complex SDF sub-trees while maintaining compatibility with smooth Boolean operators (e.g., smooth union) [S1]. Effective for rendering complex transparent objects or computing differences between complex objects [S1].
+*   **Limitations:** Cannot be used if the sub-tree is already below a node requiring Lipschitz continuity unless the proxy itself is 1-Lipschitz (which Proxy C is) [S1]. Conservative proxies (Proxy P) fail in these contexts [S1].
+
+## Background
+Lipschitz Proxy Nodes were introduced by P. Hubert-Brierre, E. Guérin, A. Peytavie, and E. Galin in the paper "Accelerating Signed Distance Functions" [S1]. The method is part of a broader strategy to optimize SDF evaluation trees by inserting levels of detail or proxy nodes to replace computationally intensive sub-trees [S1].
+
+## Sources
+[S1] Accelerating Signed Distance Functions, https://doi.org/10.1111/cgf.70258, fetched 2026-10-26

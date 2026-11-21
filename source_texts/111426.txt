@@ -1,0 +1,157 @@
+Fast and simple fluid simulator in Julia. Contribute to WaterLily-jl/WaterLily.jl development by creating an account on GitHub.
+
+viz!: add isomesh keyword for solid 3D isosurfaces by b-fg · Pull Request #334 · WaterLily-jl/WaterLily.jl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+b-fg
+commented
+Sep 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Summary
+viz! gets an isomesh=level keyword for 3D plots: the level set of the plotted field is triangulated with marching cubes and drawn as a shaded, depth-tested mesh instead of a Makie.volume. The volume algorithm=:iso ray-marches the shell isovalue ± isorange, so its surfaces look striped, and the other volume algorithms are drawn without depth (viz! sets enable_depth=false), so the body is always drawn over the flow. The mesh has neither problem, and with a translucent colour and transparency=true the body stays visible through it.
+```
+using WaterLily, GLMakie, Meshing
+viz!(sim; f=ω!, isomesh=12, color=RGBAf(0.35, 0.55, 0.8, 0.5), transparency=true, body2mesh=true)
+```
+Developed sphere flow (WaterLily-Benchmarks sphere_5_Float32.jld2: D=32, 512×192×192 cells, Re=3700, tU/D=50), vorticity magnitude |ω|D/U with body2mesh=true. Level 12 includes the boundary layer, so the plots also show how each mode handles a field that wraps the body. Top: side view, bottom: downstream view. :mip and :iso use the viz! defaults (enable_depth=false for :mip, depth on for :iso).
+Changes
+isosurface_mesh(a, level) in WaterLilyMeshingExt (declared in core next to get_body): marching cubes to a GeometryBasics.Mesh, empty if the field does not cross level. get_body(sdf, Val(true)) now calls it with level 0, so the body and the field share the triangulation.
+viz!(...; isomesh=nothing): when set, the field Observable is lifted to isosurface_mesh(σ, isomesh) and plotted by a new plot_σ_obs! method for meshes, and kwargs go to Makie.mesh! (eg. color, transparency, backlight). The forced enable_depth=false is skipped, d=3 is asserted, and Meshing must be loaded, as for body2mesh.
+The field mesh uses backlight=1 by default. Marching cubes orients the normals towards increasing values, so they point into the region of interest for vorticity or -λ₂ and out of it for low pressure. Lighting both sides removes the dependence on the sign: with backlight=0 a vorticity surface is lit from behind and renders dark (see the gallery).
+Docstring: isomesh, plus the existing enable_depth=false default for non-iso volumes and how to depth-test (enable_depth=true) and blend (transparency=true with a translucent colormap) the volume with the body.
+assets/waterlily_watermark.png (706×299) and assets/waterlily_watermark_2x.png (1228×520): a WaterLily card to overlay on videos, eg. ffmpeg -i in.mp4 -i waterlily_watermark.png -filter_complex "overlay=W-w-40:H-h-40" out.mp4.
+Cost
+Per-frame cost without the simulation step, as medians over 5 snapshots 0.5 D/U apart (after a warm-up), on the full 512×192×192 domain with body2mesh=true and about 2400×2166 px frames (RTX 4060 8 GB, 8 threads). update is viz_step! without a time step (field function, body update and field-to-plot conversion), and render is the draw plus readback.
+method
+update (s)
+render (s)
+total (s)
+:mip
+0.92
+0.10
+1.02
+:mip, enable_depth + transparency
+0.92
+0.09
+1.01
+:iso
+0.90
+0.10
+1.00
+:absorption
+0.87
+0.05
+0.92
+isomesh
+1.48
+0.016
+1.50
+isomesh, α=0.5 + transparency
+1.47
+0.025
+1.49
+Common to all methods: the field function (|ω| on the GPU plus the copy to the CPU) takes 0.03 s and the body mesh 0.68 s. isomesh adds the marching cubes of the field, 0.65 s for about 52k triangles, so about 0.5 s more per frame than the volumes (2.5 time steps of this case at 0.2 s each), while its draw is the cheapest. Both marching cubes run single-threaded on the CPU over the plotted region, so cropping with CIs reduces them, and remeasure=false skips the body mesh for static bodies.
+Gallery
+Every combination of the options in viz! for 3D fields, on the same snapshot. Only :mip, :iso and :absorption apply to viz!: its field function fills a float array, while :absorptionrgba and :additive expect RGBA volumes and :indexedabsorption expects integers (:additive renders the red channel in an opaque box).
+Volume algorithms × body volume/mesh × enable_depth × transparency, side view
+Volume algorithms × body volume/mesh × enable_depth × transparency, downstream view
+isomesh × opacity × transparency × backlight × body volume/mesh, side view
+isomesh × opacity × transparency × backlight × body volume/mesh, downstream view
+:mip with enable_depth=true and transparency=true, opaque vs translucent colormap
+Top: -λ₂(D/U)² zeroed within 4 cells of the body, bottom: |ω|D/U.
+What the gallery shows:
+enable_depth=false, the default for :mip and :absorption: the body is always drawn over the field, also where the boundary layer wraps it.
+enable_depth=true: :mip and :absorption hide the body under the boundary layer. It shows through only with a translucent colormap and transparency=true, and lowclip=:transparent then punches holes in the body where the field is below the colour range.
+:iso: correct depth, but the surfaces are striped.
+isomesh: correct depth and smooth surfaces in all cases. The boundary-layer shell opens at the front stagnation region, where the body shows through.
+body2mesh=false: the body itself is a ray-marched iso volume and shows the same rings.
+Passing enable_depth with isomesh errors in Makie ("Invalid attribute enable_depth for plot type Mesh"): mesh plots are always depth-tested.
+Tests
+Checked by hand on a small sphere and on the developed benchmark sphere: opaque and translucent isomesh with a meshed and a volume body over several frames, a level with no surface (empty mesh), a low-pressure surface (region of interest below the level), the default MIP and body2mesh alone after the get_body refactor, the d=2 assertion, and a user plot_σ_obs! override (as in the propeller example) not being reached. There are no automated tests: Makie is not in the test targets, as for the rest of viz!.
+Not in this PR
+viz! keeps every figure in _fig_steppers for viz_step!, so repeated calls in one session keep all figures and their buffers alive. Rendering this gallery in one session ran out of RAM until the entries were deleted and GLMakie.closeall() was called after each render.
+The marching cubes could be restricted to the bounding box of the cells above the level, or threaded.
+🤖 Generated with Claude Code
+b-fg
+added 2 commits
+September 27, 2026 01:31
+viz!: add isomesh keyword for solid 3D isosurfaces
+…
+5485e40
+```
+Triangulates the level set of the plotted field with marching cubes
+(Meshing extension, shared with body2mesh) and draws it as a shaded,
+depth-tested mesh instead of a volume.
+
+Assisted-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Add WaterLily watermark assets for videos
+…
+dc6e5f2
+```
+Assisted-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+codecov
+Bot
+commented
+Sep 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 0% with 10 lines in your changes missing coverage. Please review.
+Files with missing lines
+Patch %
+Lines
+ext/WaterLilyMakieExt.jl
+0.00%
+5 Missing ⚠️
+ext/WaterLilyMeshingExt.jl
+0.00%
+5 Missing ⚠️
+Files with missing lines
+Coverage Δ
+src/WaterLily.jl
+95.55% <ø> (ø)
+ext/WaterLilyMakieExt.jl
+0.00% <0.00%> (ø)
+ext/WaterLilyMeshingExt.jl
+0.00% <0.00%> (ø)
+🚀 New features to boost your workflow:
+❄️ Test Analytics: Detect flaky tests, report on failures, and find test suite problems.
+Hide details
+View details
+b-fg
+merged commit 678b269
+into
+master
+Sep 27, 2026
+9 of 10 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

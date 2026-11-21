@@ -1,0 +1,159 @@
+# Step Function Resampling
+
+Also called: Inner/Outer Measures
+
+## Overview
+Step Function Resampling constructs inner and outer measures on a step function to resample values defined by endpoints into new intervals [S1, unofficial]. It solves the problem of aggregating piecewise-constant data (such as transfer function weights or probability mass) over arbitrary query ranges, providing both the exact sum (outer measure) and the guaranteed contained mass (inner measure) [S1, unofficial]. It preserves the discontinuous nature of the source data rather than interpolating between control points, unlike [Piecewise Linear Interpolation (Lookup Table)](2643-piecewise-linear-interpolation-lookup-table.md), and provides exact bounds rather than smoothed approximations, unlike [Blurring a Step Function](4383-blurring-a-step-function.md) [S1, unofficial][S2].
+
+## How it works
+**Inputs:**
+- Source step function defined by endpoints $t_p$ (sorted, length $N$) and values $v_p$ (length $N$) [S1, unofficial].
+- Query points $t_0$ (length $M$) defining new intervals [S1, unofficial].
+- Boolean flag `use_avg`: if `True`, computes weighted average; if `False`, computes sum [S1, unofficial].
+- Optional parameters: `minval`, `maxval` for interval sampling bounds; `eps` for numerical stability [S1, unofficial].
+
+**Outputs:**
+- Resampled values $y_0$ (length $M-1$) corresponding to intervals defined by $t_0$ [S1, unofficial].
+- If `use_avg` is `True`, returns the average value over each interval [S1, unofficial].
+- If `use_avg` is `False`, returns the sum of the step function over each interval [S1, unofficial].
+
+**Data Structures:**
+- Arrays $t_p, v_p, t_0$ are 1D tensors of floating-point numbers.
+- Cumulative sum arrays are padded with a leading zero to align indices with interval boundaries [S1, unofficial].
+
+**Steps:**
+
+1. **Compute Cumulative Sum:**
+   Compute the cumulative sum of the source values $v_p$ with a leading zero: $c_v = [0, v_{p,0}, v_{p,0} + v_{p,1}, \dots, \sum_{i=0}^{N-1} v_{p,i}]$. Let $c_v$ have length $N+1$ [S1, unofficial].
+
+2. **Find Insertion Indices:**
+   Determine the indices of the query points $t_0$ within the source endpoints $t_p$: $\text{idx\_lo}, \text{idx\_hi} = \text{searchsorted}(t_p, t_0)$ [S1, unofficial].
+
+3. **Gather Cumulative Values:**
+   Gather cumulative values at indices: $c_{v,\text{lo}} = c_v[\text{idx\_lo}]$ and $c_{v,\text{hi}} = c_v[\text{idx\_hi}]$ [S1, unofficial].
+
+4. **Compute Outer Measure (Sum):**
+   The outer measure for the interval $[t_{0,i}, t_{0,i+1}]$ is the total mass of the source step function that overlaps with this interval: $y_{0,i}^{\text{outer}} = c_{v,\text{hi}}[i+1] - c_{v,\text{lo}}[i]$ for $i = 0, \dots, M-2$ [S1, unofficial].
+
+5. **Compute Inner Measure:**
+   The inner measure sums only the source bins fully contained within the query interval: $y_{0,i}^{\text{inner}} = c_{v,\text{lo}}[i+1] - c_{v,\text{hi}}[i]$ if $\text{idx\_hi}[i] \le \text{idx\_lo}[i+1]$, else $0$ [S1, unofficial].
+
+6. **Average Mode (if `use_avg` is `True`):**
+   To compute the weighted average, resample the weighted values $v_p \cdot w_p$ and the widths $w_p$ separately using the sum mode (steps 1–5), then divide. Compute $w_p = t_p[1:] - t_p[:-1]$. Compute $v_{\text{numer}} = \text{Resample}(t_p, v_p \cdot w_p, t_0)$ and $v_{\text{denom}} = \text{Resample}(t_p, w_p, t_0)$. Result: $y_0 = \frac{v_{\text{numer}}}{\max(\epsilon, v_{\text{denom}})}$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def step_function_resampling(t_p, v_p, t_0, use_avg=False, eps=1e-8):
+    """
+    Resample a step function defined by endpoints t_p and values v_p
+    into intervals defined by query points t_0.
+    
+    Args:
+        t_p: Tensor of shape (N,), sorted source endpoints.
+        v_p: Tensor of shape (N,), source values.
+        t_0: Tensor of shape (M,), query points defining intervals [t_0[i], t_0[i+1]].
+        use_avg: If True, return weighted average. If False, return sum.
+        eps: Small value to prevent division by zero.
+        
+    Returns:
+        y_0: Tensor of shape (M-1,), resampled values.
+    """
+    # Step 1: Compute cumulative sum with leading zero
+    cy1 = torch.cat([torch.zeros_like(t_p[..., :1]), torch.cumsum(v_p, dim=-1)], dim=-1)
+    
+    # Step 2: Find insertion indices
+    idx_lo = torch.searchsorted(t_p, t_0, side='left')
+    idx_hi = torch.searchsorted(t_p, t_0, side='right')
+    
+    # Step 3: Gather cumulative values
+    cy1_lo = torch.take_along_dim(cy1, idx_lo.unsqueeze(-1), dim=-1).squeeze(-1)
+    cy1_hi = torch.take_along_dim(cy1, idx_hi.unsqueeze(-1), dim=-1).squeeze(-1)
+    
+    # Step 4: Compute outer measure (sum)
+    y0_outer = cy1_hi[..., 1:] - cy1_lo[..., :-1]
+    
+    # Step 5: Compute inner measure
+    condition = idx_hi[..., :-1] <= idx_lo[..., 1:]
+    y0_inner = torch.where(condition, cy1_lo[..., 1:] - cy1_hi[..., :-1], torch.zeros_like(idx_lo[..., 1:]))
+    
+    if use_avg:
+        # Compute widths of source intervals
+        w_p = t_p[1:] - t_p[:-1]
+        
+        # Resample weighted values and widths using sum mode
+        def resample_sum(tp, vp, t0):
+            cy1_w = torch.cat([torch.zeros_like(tp[..., :1]), torch.cumsum(vp, dim=-1)], dim=-1)
+            idx_lo_w = torch.searchsorted(tp, t0, side='left')
+            idx_hi_w = torch.searchsorted(tp, t0, side='right')
+            cy1_lo_w = torch.take_along_dim(cy1_w, idx_lo_w.unsqueeze(-1), dim=-1).squeeze(-1)
+            cy1_hi_w = torch.take_along_dim(cy1_w, idx_hi_w.unsqueeze(-1), dim=-1).squeeze(-1)
+            return cy1_hi_w[..., 1:] - cy1_lo_w[..., :-1]
+
+        v_numer = resample_sum(t_p, v_p * w_p, t_0)
+        v_denom = resample_sum(t_p, w_p, t_0)
+        y0 = v_numer / torch.clamp(v_denom, min=eps)
+    else:
+        y0 = y0_outer
+        
+    return y0
+```
+
+**Parameters:**
+- `eps`: Small value to prevent division by zero when `use_avg=True`. Default is `torch.finfo(t.dtype).eps` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If `num_samples` (length of $t_0$) is less than 2, no intervals can be formed [G].
+- If source endpoints $t_p$ are not sorted, `searchsorted` behavior is undefined [G].
+- If query points $t_0$ are not sorted, the interval logic breaks [G].
+- Division by zero in average mode if the denominator (total width of source bins covering the query interval) is zero. Handled by `eps` [S1, unofficial].
+
+## Subtopics
+
+### [Max Dilation](8984-max-dilation.md)
+Max Dilation is a resampling technique that expands the support of a non-negative step function or weight distribution via max-pooling, effectively smoothing or widening the distribution. It sets itself apart from [CDF Integration from Weights](12191-cdf-integration-from-weights.md) by preserving the peak values of the original distribution rather than integrating mass, which makes it suitable for maintaining sharp features while adapting sample density.
+
+### [CDF Integration from Weights](12191-cdf-integration-from-weights.md)
+Computes the cumulative distribution function (CDF) from a set of discrete weights that sum to 1, treating them as a step function. It preserves the integral mass of the distribution rather than finding local extrema, and serves as the inverse operation to [Weight-PDF Conversion](12194-weight-pdf-conversion.md) [G].
+
+### Interval Sampling
+Samples intervals (rather than points) from a step function by reflecting midpoints around sampled centers [S1, unofficial].
+**Steps:**
+1. Sample centers using `sample(..., deterministic_center=True)` [S1, unofficial].
+2. Compute midpoints between adjacent centers: $mid = (centers[..., 1:] + centers[..., :-1]) / 2$ [S1, unofficial].
+3. Compute first fencepost by reflecting first midpoint around first center, clamped to `minval`: $first = (2 \cdot centers[..., :1] - mid[..., :1]).clamp\_min(minval)$ [S1, unofficial].
+4. Compute last fencepost by reflecting last midpoint around last center, clamped to `maxval`: $last = (2 \cdot centers[..., -1:] - mid[..., -1:]).clamp\_max(maxval)$ [S1, unofficial].
+5. Concatenate first, mid, and last: $t_{samples} = \text{torch.cat}([first, mid, last], dim=-1)$ [S1, unofficial].
+**Pitfall:** Raises `ValueError` if `num_samples <= 1` [S1, unofficial].
+
+### Soft Heaviside Approximations
+Approximates the step function using smooth sigmoid functions for differentiable rendering [S2].
+**Formulas:**
+- Gaussian approximation: $x \mapsto \frac{1}{2} \left( 1 + \text{erf} \frac{x}{\sqrt{2}} \right)$ [S2].
+- Laplace approximation: $x \mapsto \begin{cases} \frac{1}{2} \exp(x) & \text{if } x \le 0 \\ 1 - \frac{1}{2} \exp(-x) & \text{if } x \ge 0 \end{cases}$ [S2].
+- Logistic approximation: $x \mapsto \frac{1}{1 + \exp(-x)}$ [S2].
+**Parameters:**
+- Training batch size: 64 [S2].
+- Total training steps: 250,000 [S2].
+- Learning rate schedule: $10^{-4}$ for steps 0–150,000; $3 \cdot 10^{-5}$ for steps 150,001–250,000 [S2].
+- Temperature parameter $\tau$: decreased by a factor of 0.3 after step 150,000 [S2].
+
+## Operating characteristics
+**Time Complexity:** $O(N \log M)$ for `searchsorted` operations, where $N$ is the number of source intervals and $M$ is the number of query points. The cumulative sum is $O(N)$. The final aggregation is $O(M)$.
+**Memory Complexity:** $O(N + M)$ for storing cumulative sums and indices.
+**Performance:** The method is efficient for GPU implementation using PyTorch tensor operations [S1, unofficial].
+**Strengths:** Provides exact bounds (inner/outer measures) for step functions, which is useful for conservative rasterization or anti-aliasing. Supports both sum and weighted average modes.
+**Limitations:** Does not handle partial overlaps within source bins linearly; it includes/excludes entire bins based on index alignment. This can lead to aliasing if the query resolution is not aligned with the source resolution.
+**When to use:** When resampling discrete, piecewise-constant data (like transfer functions or probability masses) and exact bounds or conservative aggregation are required.
+**When not to use:** When smooth interpolation between source values is desired (use [Piecewise Linear Interpolation](2643-piecewise-linear-interpolation-lookup-table.md)) or when partial overlap integration is critical for accuracy.
+
+## Background
+Step Function Resampling, specifically the inner/outer measure approach, is implemented in the NVlabs InstantSplat project [S1, unofficial]. It is used in the context of differentiable rendering and 3D reconstruction to handle transfer functions and weight distributions efficiently. The soft Heaviside approximations are discussed in the context of GenDR (Generalized Differentiable Renderer) for training neural rendering models [S2].
+
+## Sources
+[S1] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
+[S2] GenDR: A Generalized Differentiable Renderer, https://doi.org/10.1109/cvpr52688.2022.00397, fetched 2026-10-26

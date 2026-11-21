@@ -1,0 +1,132 @@
+# Masked Metrics Evaluation
+Also called: Loss-masked Metric Reporting, Masked PSNR/SSIM/LPIPS, Object-crop image quality metrics
+## Overview
+Masked Metrics Evaluation is a protocol for computing quantitative image quality metrics (PSNR, SSIM, LPIPS, FLIP) restricted to a specific region of interest defined by a ground-truth mask [S2, unofficial]. It isolates visible reconstruction quality by excluding background or irrelevant pixels from the error calculation, enabling fair comparison between object-centric and scene-level renders [S1, S2, unofficial]. Unlike standard metric computation which averages over the entire image, this method reports two values: the global metric and the masked metric (typically in parentheses) [S1, unofficial].
+## How it works
+**Inputs and Outputs**
+- **Inputs**:
+  - $I_{pred}$: Rendered image of size $H \times W \times C$.
+  - $I_{gt}$: Ground truth image of size $H \times W \times C$.
+  - $M$: Binary loss mask of size $H \times W$, where $M_{i,j} = 1$ if pixel $(i,j)$ is inside the region of interest, and $0$ otherwise.
+- **Outputs**:
+  - $Metric_{global}$: Metric value computed over all pixels.
+  - $Metric_{masked}$: Metric value computed only over pixels where $M_{i,j} = 1$.
+
+**Data Structures**
+- The mask $M$ is a binary tensor. In implementation, it is often derived from segmentation or depth-based cropping.
+- Images are normalized to $[0, 1]$ or $[-1, 1]$ depending on the metric implementation, consistent with the parent [Quantitative Evaluation Metrics](9928-quantitative-evaluation-metrics.md).
+
+**Steps**
+1. **Compute Global Metrics**: Calculate PSNR, SSIM, and LPIPS using all pixels in $I_{pred}$ and $I_{gt}$.
+2. **Apply Mask**: Create masked images $I_{pred}^{mask}$ and $I_{gt}^{mask}$ by zeroing out pixels where $M_{i,j} = 0$. Alternatively, filter pixel coordinates to indices where $M_{i,j} = 1$.
+3. **Compute Masked Metrics**: Recalculate PSNR and LPIPS (and optionally SSIM/FLIP) using only the pixels in the masked region [S1, S2, unofficial].
+4. **Report**: Report the global metric as the primary value and the masked metric in parentheses [S1, unofficial].
+
+**Formulas**
+- **PSNR (Masked)**:
+  $$ PSNR_{mask} = 10 \cdot \log_{10} \left( \frac{MAX_I^2}{MSE_{mask}} \right) $$
+  Where $MAX_I$ is the maximum possible pixel value (e.g., 1.0), and $MSE_{mask}$ is the mean squared error computed only over pixels where $M_{i,j} = 1$:
+  $$ MSE_{mask} = \frac{1}{N_{mask}} \sum_{i,j: M_{i,j}=1} (I_{pred}(i,j) - I_{gt}(i,j))^2 $$
+  And $N_{mask}$ is the count of pixels where $M_{i,j} = 1$.
+
+- **SSIM (Masked)**:
+  $$ SSIM_{mask} = \frac{1}{N_{mask}} \sum_{i,j: M_{i,j}=1} SSIM(I_{pred}(i,j), I_{gt}(i,j)) $$
+  Where $SSIM(\cdot)$ is the local structural similarity index for a window centered at $(i,j)$.
+
+- **LPIPS (Masked)**:
+  $$ LPIPS_{mask} = \frac{1}{N_{mask}} \sum_{i,j: M_{i,j}=1} LPIPS(I_{pred}(i,j), I_{gt}(i,j)) $$
+  Where $LPIPS(\cdot)$ is the learned perceptual image patch similarity.
+
+**Parameters**
+- **Mask Generation**: Not specified in the method definition itself, but typically derived from ground truth depth or semantic segmentation [S2, unofficial].
+- **Window Size**: For SSIM, standard window sizes (e.g., $11 \times 11$) apply [G].
+
+**Edge Cases and Pitfalls**
+- **Empty Mask**: If $N_{mask} = 0$, metrics are undefined. Implementation should handle this by returning NaN or skipping the masked report [G].
+- **Boundary Effects**: For SSIM, pixels near the mask boundary may have incomplete windows. Standard SSIM implementations handle this by padding or reducing window size [G].
+- **Precision**: Ensure mask alignment with image resolution. Misalignment leads to incorrect pixel sampling [G].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def masked_metrics_evaluation(I_pred, I_gt, M):
+    """
+    I_pred: Tensor (H, W, C)
+    I_gt: Tensor (H, W, C)
+    M: Tensor (H, W) binary mask (1 for valid, 0 for invalid)
+    """
+    # 1. Global Metrics
+    psnr_global = compute_psnr(I_pred, I_gt)
+    ssim_global = compute_ssim(I_pred, I_gt)
+    lpips_global = compute_lpips(I_pred, I_gt)
+
+    # 2. Masked Pixels
+    mask_indices = torch.where(M > 0.5)
+    I_pred_masked = I_pred[mask_indices]
+    I_gt_masked = I_gt[mask_indices]
+
+    # 3. Masked Metrics
+    # Handle case where no pixels are in mask
+    if I_pred_masked.numel() == 0:
+        return {
+            'psnr_global': psnr_global,
+            'ssim_global': ssim_global,
+            'lpips_global': lpips_global,
+            'psnr_masked': float('nan'),
+            'ssim_masked': float('nan'),
+            'lpips_masked': float('nan')
+        }
+
+    psnr_masked = compute_psnr(I_pred_masked, I_gt_masked)
+    ssim_masked = compute_ssim(I_pred_masked, I_gt_masked)
+    lpips_masked = compute_lpips(I_pred_masked, I_gt_masked)
+
+    return {
+        'psnr_global': psnr_global,
+        'ssim_global': ssim_global,
+        'lpips_global': lpips_global,
+        'psnr_masked': psnr_masked,
+        'ssim_masked': ssim_masked,
+        'lpips_masked': lpips_masked
+    }
+
+def compute_psnr(I1, I2):
+    mse = torch.mean((I1 - I2) ** 2)
+    if mse == 0:
+        return float('inf')
+    return 10 * torch.log10(1.0 / mse)
+
+def compute_ssim(I1, I2):
+    # Placeholder for standard SSIM implementation
+    # Returns mean SSIM over provided pixels
+    return 0.9 # [G] Placeholder for actual SSIM logic
+
+def compute_lpips(I1, I2):
+    # Placeholder for standard LPIPS implementation
+    # Returns mean LPIPS over provided pixels
+    return 0.1 # [G] Placeholder for actual LPIPS logic
+```
+
+## Subtopics
+
+### Object-Crop Image Quality
+A specific application of masked metrics where the mask corresponds to an object crop, allowing comparison of object-level renders against scene-level renders [S2, unofficial].
+
+### Loss-Masked Reporting
+The practice of reporting masked metrics in parentheses alongside global metrics to highlight reconstruction quality in the presence of occlusions or background variations [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(H \cdot W)$ for global metrics; $O(N_{mask})$ for masked metrics, where $N_{mask}$ is the number of pixels in the mask. Since $N_{mask} \le H \cdot W$, masked computation is faster or equal to global.
+- **Memory Complexity**: $O(H \cdot W)$ to store the mask and intermediate masked images.
+- **Strengths**: Isolates reconstruction quality from background artifacts; enables fair comparison between methods with different background handling (e.g., randomized backgrounds vs. ground truth) [S2, unofficial].
+- **Limitations**: Requires a reliable ground-truth mask; does not penalize errors in the background, which may be visually significant [S2, unofficial].
+- **When to Use**: When evaluating object-centric reconstruction or when background variations are irrelevant or randomized [S2, unofficial].
+- **When Not to Use**: When background fidelity is a key evaluation criterion.
+
+## Background
+The protocol originates from NeRS [38] and is used to evaluate object-level renders against scene-level renders by restricting pixel comparison to the ground-truth mask region [S2, unofficial]. It is employed in works like Splatt3R and CADSplat to report metrics on masked regions, particularly in datasets with object-centric focus [S1, S2, unofficial].
+
+## Sources
+[S1] Splatt3R: Zero-Shot Gaussian Splatting from Uncalibrated Image Pairs, https://splatt3r.active.vision/, fetched 2026-10-30 (unofficial)
+[S2] CADSplat: Sparse-View 3D Gaussian Splatting Aided by CAD Models for Robust, Photorealistic Digital-Twin Reconstruction, https://arxiv.org/abs/2609.18473, fetched 2026-10-30 (unofficial)

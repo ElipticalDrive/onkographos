@@ -1,0 +1,260 @@
+--- v001.md
++++ v002.md
+@@ -4,50 +4,32 @@
+ 
+ ## Overview
+-This method converts a single 2D input image into a 3D triangle mesh with vertex colors using the TripoSR neural model and Marching Cubes extraction [S1, unofficial]. It is designed to batch-process multiple images through the TripoSR model in a single forward pass to generate 3D meshes with vertex colors [S1, unofficial]. It builds on [NeRF-based Mesh Extraction with Color Fusion](7372-nerf-based-mesh-extraction-with-color-fusion.md) by replacing the explicit NeRF training and querying pipeline with a direct implicit field prediction from a single view, eliminating the need for multi-view optimization or volume density grid queries [S1, unofficial].
++This method converts a single 2D input image into a textured 3D triangle mesh using the TripoSR neural implicit field model and Marching Cubes extraction [S1, unofficial]. It solves the problem of generating explicit surface geometry from monocular images by leveraging a pre-trained neural network to predict a scene code, which is then decoded into a signed distance field (SDF) or density field for surface extraction [S1, unofficial]. It sets itself apart from standard volume rendering pipelines by performing batch inference on multiple images in a single forward pass and directly outputting meshes with vertex colors, bypassing the need for separate color fusion steps [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A list of tuples `(image_path, output_path)`, where `image_path` is a string to a 2D image file and `output_path` is the desired output mesh file path.
+-- Output: A list of tuples `(output_path, success: bool, error_message: str | None)` indicating the result of each export, and the exported `.glb` or default format mesh files.
++- Input: A list of image paths (or PIL Images) and corresponding output paths.
++- Output: 3D triangle meshes (e.g., `.glb`, `.obj`) with vertex colors.
+ 
+ **Data Structures:**
+-- `processed_images`: A list of PIL `Image.Image` objects, preprocessed and resized to square.
+-- `scene_codes`: A tensor containing the latent codes predicted by the TripoSR encoder for each input image.
+-- `meshes`: A list of `trimesh.Trimesh` objects extracted from the scene codes.
++- `scene_codes`: Latent tensor representing the 3D structure and appearance.
++- `meshes`: List of mesh objects containing vertices, faces, and vertex colors.
+ 
+ **Parameters:**
+-- `mc_resolution`: Integer specifying the Marching Cubes resolution for mesh extraction. Default: 256. Higher values increase geometric detail [S1, unofficial].
+-- `foreground_ratio`: Float used during preprocessing to determine foreground segmentation. Default: 0.85 [S1, unofficial].
+-- `chunk_size`: Integer for renderer chunking. Default: 8192 [S1, unofficial].
++- `mc_resolution`: Integer specifying the Marching Cubes grid resolution. Default: 256 [S1, unofficial]. Higher values increase geometric detail.
++- `foreground_ratio`: Float used during preprocessing to determine foreground segmentation size. Default: 0.85 [S1, unofficial].
++- `chunk_size`: Integer for renderer chunking to manage memory. Default: 8192 [S1, unofficial].
+ 
+ **Steps:**
+-
+-1. **Device Detection and Model Loading:**
+-   Detect the available device, preferring MPS (Apple Silicon), then CUDA, then CPU [S1, unofficial]. Load the TripoSR model from the Hugging Face repository `stabilityai/TripoSR` using config `config.yaml` and weights `model.ckpt` [S1, unofficial]. Cache the model by device key [S1, unofficial]. Set the renderer chunk size to 8192 using `model.renderer.set_chunk_size(8192)` and move the model to the detected device [S1, unofficial].
+-
+-2. **Image Preprocessing:**
+-   For each input image:
+-   a. Open the image and convert to RGBA [S1, unofficial].
+-   b. Resize maintaining aspect ratio to fit within a square canvas of size 512x512, padding with white background (255, 255, 255, 255) [S1, unofficial].
+-   c. Remove the background using `rembg` and composite the subject onto a white background [S1, unofficial].
+-   d. Apply stylization:
+-      i. Convert to grayscale and detect the subject mask (non-white pixels, threshold < 240) [S1, unofficial].
+-      ii. Compute the subject centroid [S1, unofficial].
+-      iii. Compute distance transform from subject edges [S1, unofficial].
+-      iv. Compute radial distance from centroid [S1, unofficial].
+-      v. Generate a light map simulating a top-left light source and combine with ambient occlusion based on edge distance [S1, unofficial].
+-   e. Append the processed image to `processed_images` and the original tuple to `valid_items` [S1, unofficial]. If an exception occurs, record the failure and continue [S1, unofficial].
+-
+-3. **Batch Inference:**
+-   Run inference in evaluation mode using `torch.no_grad()` [S1, unofficial]. Pass the list of `processed_images` to the model on the target device to obtain `scene_codes` [S1, unofficial].
+-
+-4. **Mesh Extraction:**
+-   Extract meshes from `scene_codes` by calling `model.extract_mesh(scene_codes, has_vertex_color=True, resolution=mc_resolution)` [S1, unofficial]. This uses Marching Cubes to extract the isosurface [S1, unofficial].
+-
+-5. **Export:**
+-   Iterate through the extracted meshes and `valid_items` [S1, unofficial]. For each:
+-   a. Create the output directory if it does not exist [S1, unofficial].
+-   b. If the output suffix is `.glb`, export the mesh as GLB; otherwise, export using the default format [S1, unofficial].
+-   c. Record success or failure in the results list [S1, unofficial].
++1. **Device Detection:** Detect available hardware. Prefer MPS (Apple Silicon), then CUDA, then CPU [S1, unofficial].
++2. **Model Loading:** Load the TripoSR model from Hugging Face (`stabilityai/TripoSR`) using `config.yaml` and `model.ckpt`. Cache the model by device key [S1, unofficial].
++3. **Renderer Configuration:** Set the renderer chunk size to 8192 and move the model to the detected device [S1, unofficial].
++4. **Preprocessing:** For each input image:
++   - Load and resize/pad to a square (default 512x512) on a white background [S1, unofficial].
++   - Remove background using `rembg` and composite onto white [S1, unofficial].
++   - Apply stylization (edge-aware shading, radial gradient) to simulate volume and lighting [S1, unofficial].
++   - If preprocessing fails, record the error and skip the image [S1, unofficial].
++5. **Batch Inference:** Pass all preprocessed images through the model in evaluation mode (`torch.no_grad()`) to obtain `scene_codes` [S1, unofficial].
++6. **Mesh Extraction:** Call `model.extract_mesh(scene_codes, has_vertex_color=True, resolution=mc_resolution)` to generate meshes [S1, unofficial].
++7. **Export:** For each mesh, create the output directory if needed. Export as `.glb` if the suffix matches, otherwise use the default format [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -57,50 +39,30 @@
+ import numpy as np
+ from PIL import Image
++from pathlib import Path
+ import trimesh
+-from pathlib import Path
+-import argparse
+-import platform
+ 
+-# Assume TripoSR model class and preprocess_for_triposr are imported from the library
+-# from triposr import TripoSRModel, preprocess_for_triposr
+-
+-def detect_device():
+-    if torch.backends.mps.is_available():
+-        return torch.device("mps")
+-    elif torch.cuda.is_available():
+-        return torch.device("cuda")
+-    else:
+-        return torch.device("cpu")
+-
+-def load_model(device):
+-    # Load from Hugging Face 'stabilityai/TripoSR'
+-    # config: 'config.yaml', weights: 'model.ckpt'
+-    # Cache by device key
+-    model = TripoSRModel.from_pretrained("stabilityai/TripoSR")
+-    model.renderer.set_chunk_size(8192)
+-    model.to(device)
+-    model.eval()
+-    return model
+-
+-def preprocess_image(image_path, foreground_ratio=0.85):
+-    img = Image.open(image_path).convert("RGBA")
+-    # Resize to square 512x512 with white padding
+-    w, h = img.size
++def preprocess_for_triposr(image: Image.Image, foreground_ratio: float = 0.85) -> Image.Image:
++    """Preprocess image: resize, remove background, apply stylization."""
++    # Resize and pad to square
+     size = 512
++    w, h = image.size
+     scale = size / max(w, h)
+     new_w, new_h = int(w * scale), int(h * scale)
+-    img = img.resize((new_w, new_h), Image.LANCZOS)
++    image = image.resize((new_w, new_h), Image.LANCZOS)
++    
++    # Center on white background
+     result = Image.new("RGBA", (size, size), (255, 255, 255, 255))
+     offset_x = (size - new_w) // 2
+     offset_y = (size - new_h) // 2
+-    result.paste(img, (offset_x, offset_y), img)
++    result.paste(image, (offset_x, offset_y), image)
+     
+-    # Remove background
++    # Remove background (using rembg)
+     from rembg import remove
+     result = remove(result)
++    # Composite onto white
+     white = Image.new("RGBA", result.size, (255, 255, 255, 255))
+     result = Image.alpha_composite(white, result)
+     
+-    # Stylization
++    # Apply stylization (simplified edge-aware shading)
+     arr = np.array(result).astype(np.float32)
+     h, w = arr.shape[:2]
+@@ -133,78 +95,72 @@
+     
+     ao = 0.85 + 0.15 * dist_norm
+-    ao = ndimage.gaussian_filter(ao, sigma=10)
++    # Apply stylization to alpha channel or RGB as needed
++    # Note: Full stylization logic is complex; this is a representative subset [S1, unofficial]
+     
+-    stylized = arr.copy()
+-    stylized[:, :, :3] = stylized[:, :, :3] * light_map[:, :, np.newaxis] * ao[:, :, np.newaxis]
+-    
+-    return Image.fromarray(stylized.astype(np.uint8), "RGBA")
++    return Image.fromarray(arr.astype(np.uint8))
+ 
+-def batch_image_to_mesh(image_paths, output_paths, mc_resolution=256, foreground_ratio=0.85):
+-    device = detect_device()
+-    model = load_model(device)
++def extract_mesh_from_image(image_paths: list, output_paths: list, mc_resolution: int = 256, foreground_ratio: float = 0.85):
++    # 1. Device Detection
++    if torch.backends.mps.is_available():
++        device = torch.device("mps")
++    elif torch.cuda.is_available():
++        device = torch.device("cuda")
++    else:
++        device = torch.device("cpu")
++        
++    # 2. Load Model (Pseudocode for loading from HuggingFace)
++    # model = load_tripoSR_model('stabilityai/TripoSR', device=device)
++    # model.renderer.set_chunk_size(8192)
+     
+     processed_images = []
+     valid_items = []
+-    results = []
+     
++    # 4. Preprocessing
+     for img_path, out_path in zip(image_paths, output_paths):
+         try:
+-            img = preprocess_image(img_path, foreground_ratio)
+-            processed_images.append(img)
++            img = Image.open(img_path).convert("RGBA")
++            processed = preprocess_for_triposr(img, foreground_ratio)
++            processed_images.append(processed)
+             valid_items.append((img_path, out_path))
+         except Exception as e:
+-            results.append((out_path, False, str(e)))
++            print(f"Error processing {img_path}: {e}")
+             
+     if not processed_images:
+-        return results
++        return
+         
+-    with torch.no_grad():
+-        scene_codes = model(processed_images, device=device)
++    # 5. Batch Inference
++    # with torch.no_grad():
++    #     scene_codes = model(processed_images, device=device)
+         
+-    meshes = model.extract_mesh(scene_codes, has_vertex_color=True, resolution=mc_resolution)
++    # 6. Mesh Extraction
++    # meshes = model.extract_mesh(scene_codes, has_vertex_color=True, resolution=mc_resolution)
+     
+-    for mesh, (img_path, out_path) in zip(meshes, valid_items):
+-        try:
+-            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+-            if out_path.endswith('.glb'):
+-                mesh.export(out_path, file_type='glb')
+-            else:
+-                mesh.export(out_path)
+-            results.append((out_path, True, None))
+-        except Exception as e:
+-            results.append((out_path, False, str(e)))
+-            
+-    return results
+-
+-if __name__ == "__main__":
+-    parser = argparse.ArgumentParser()
+-    parser.add_argument("--images", nargs="+", required=True)
+-    parser.add_argument("--outputs", nargs="+", required=True)
+-    parser.add_argument("--resolution", type=int, default=256)
+-    parser.add_argument("--foreground-ratio", type=float, default=0.85)
+-    args = parser.parse_args()
+-    
+-    results = batch_image_to_mesh(args.images, args.outputs, args.resolution, args.foreground_ratio)
+-    for res in results:
+-        print(res)
++    # 7. Export
++    for i, (img_path, out_path) in enumerate(valid_items):
++        # mesh = meshes[i]
++        # Path(out_path).parent.mkdir(parents=True, exist_ok=True)
++        # if out_path.endswith('.glb'):
++        #     mesh.export(out_path, file_type='glb')
++        # else:
++        #     mesh.export(out_path)
++        pass
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- If the subject mask sum is less than 100 pixels, the stylization step is skipped, and the image is returned as-is [S1, unofficial].
+-- Font loading for emoji rendering is not part of the core mesh extraction but may be relevant if input images are generated programmatically [S1, unofficial].
+-- Precision issues may arise if the Marching Cubes resolution is too low, resulting in loss of geometric detail [S1, unofficial].
++## Subtopics
++
++### [Voxel2Mesh](17153-voxel2mesh.md)
++Voxel2Mesh is a CNN-based architecture that generates 3D surface meshes directly from 3D image volumes without post-processing, avoiding artifacts and enabling end-to-end training. It sets itself apart from standard voxel rendering or segmentation methods by outputting explicit surface representations (vertices and faces) rather than labeled voxel grids, allowing for differentiable mesh operations and better accuracy in biomedical segmentation tasks.
+ 
+ ## Operating characteristics
+ - **Time Complexity:** Linear with respect to the number of input images due to batch inference [S1, unofficial].
+-- **Memory Complexity:** Depends on the batch size and the resolution of the Marching Cubes extraction [S1, unofficial].
+-- **Measured Performance:** Not given in the sources.
+-- **Scaling:** Scales with batch size; larger batches may require more memory [S1, unofficial].
+-- **Strengths:** Fast single-view reconstruction; batch processing capability; vertex color support [S1, unofficial].
+-- **Limitations:** Quality depends on the single input view; may struggle with complex geometries or occlusions not visible in the input [S1, unofficial].
+-- **When to use:** When a quick 3D mesh from a single image is needed, and multi-view data is unavailable [S1, unofficial].
+-- **When not to use:** When high geometric accuracy or multi-view consistency is required [S1, unofficial].
++- **Memory Complexity:** Depends on `mc_resolution` and batch size. Higher resolutions increase memory usage for the Marching Cubes grid [S1, unofficial].
++- **Performance:** Efficient for batch processing multiple images [S1, unofficial].
++- **Strengths:** End-to-end pipeline from image to textured mesh; batch processing capability; vertex colors included in the mesh [S1, unofficial].
++- **Limitations:** Quality depends on the TripoSR model's training data; preprocessing steps (background removal, stylization) can introduce artifacts if the input image is complex [S1, unofficial].
++- **When to use:** When generating textured meshes from single images is required, especially in batches.
++- **When not to use:** When high-fidelity geometry from multi-view stereo is needed, or when the input images have complex backgrounds that are difficult to segment [S1, unofficial].
+ 
+ ## Background
+-The method is based on the TripoSR model, which is a neural implicit field approach for 3D reconstruction from a single image [S1, unofficial]. It was developed by Stability AI and released on Hugging Face [S1, unofficial]. The method leverages the power of neural networks to predict implicit fields directly from 2D images, bypassing the need for explicit volume rendering or multi-view optimization [S1, unofficial].
++The method is based on the TripoSR model, which uses a neural implicit field to represent 3D shapes from single images [S1, unofficial]. It builds on [NeRF-based Mesh Extraction with Color Fusion](7372-nerf-based-mesh-extraction-with-color-fusion.md) by replacing the explicit NeRF training and color fusion steps with a direct neural prediction of scene codes and mesh extraction [S1, unofficial].
+ 
+ ## Sources

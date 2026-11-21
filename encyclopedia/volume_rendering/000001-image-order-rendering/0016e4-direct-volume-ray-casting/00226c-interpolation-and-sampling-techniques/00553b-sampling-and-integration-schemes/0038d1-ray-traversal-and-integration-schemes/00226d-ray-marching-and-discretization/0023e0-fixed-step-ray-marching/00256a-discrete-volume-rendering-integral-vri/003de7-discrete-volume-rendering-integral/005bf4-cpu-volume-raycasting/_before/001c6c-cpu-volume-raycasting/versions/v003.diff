@@ -1,0 +1,184 @@
+--- v002.md
++++ v003.md
+@@ -120,12 +120,18 @@
+ ### Pseudocode
+ ```python
+-def cpu_volume_ray_casting(volume, transfer_func, camera, light, width, height, use_lighting):
+-    # Initialize output buffer
++import math
++
++class Vector3:
++    def __init__(self, x, y, z):
++        self.x, self.y, self.z = x, y, z
++    def __add__(self, other): return Vector3(self.x + other.x, self.y + other.y, self.z + other.z)
++    def __sub__(self, other): return Vector3(self.x - other.x, self.y - other.y, self.z - other.z)
++    def __mul__(self, scalar): return Vector3(self.x * scalar, self.y * scalar, self.z * scalar)
++    def __rmul__(self, scalar): return self.__mul__(scalar)
++
++def cpu_volume_ray_casting(volume, transfer_func, camera, light, settings, width, height, use_lighting):
+     pixels = [0] * (width * height * 3)
+-    
+-    # Precompute rotation matrix from camera orientation (Euler to Quaternion to Matrix)
+     rot_matrix = euler_to_rotation_matrix(camera.roll, camera.pitch, camera.yaw)
+     
+-    # Multithreading setup: split image into 4x4 tiles
+     tile_size_x = width // 4
+     tile_size_y = height // 4
+@@ -138,25 +144,17 @@
+             start_y = b * tile_size_y
+             end_y = start_y + tile_size_y
++            threads.append(lambda sx=start_x, ex=end_x, sy=start_y, ey=end_y: render_tile(
++                volume, transfer_func, camera, light, settings, 
++                sx, ex, sy, ey, width, height, pixels, rot_matrix, use_lighting
++            ))
+             
+-            # Create worker task
+-            task = lambda sx, ex, sy, ey: render_tile(
+-                volume, transfer_func, camera, light, 
+-                sx, ex, sy, ey, width, height, pixels, rot_matrix, use_lighting
+-            )
+-            threads.append(task(start_x, end_x, start_y, end_y))
+-            
+-    # Execute threads (conceptually parallel)
+     for t in threads:
+         t()
+-        
+     return pixels
+ 
+-def render_tile(volume, transfer_func, camera, light, start_x, end_x, start_y, end_y, width, height, pixels, rot_matrix, use_lighting):
++def render_tile(volume, transfer_func, camera, light, settings, start_x, end_x, start_y, end_y, width, height, pixels, rot_matrix, use_lighting):
+     for j in range(start_y, end_y):
+         for i in range(start_x, end_x):
+-            # 1. Initialize Ray
+             ray_origin, ray_direction = get_ray_for_pixel(i, j, camera, width, height)
+-            
+-            # 2. Intersect with Bounding Sphere
+             t0, t1 = intersect_sphere(ray_origin, ray_direction, volume.bounding_sphere)
+             if t0 is None:
+@@ -167,25 +165,17 @@
+             acc_alpha = 0.0
+             
+-            # 3. Ray Marching
+             while t < t1 and acc_alpha < 0.99:
+-                # Sample point
+                 p = ray_origin + ray_direction * t
+-                
+-                # 4. Trilinear Interpolation
+-                val = volume.sample_trilinear(p)
+-                
+-                # 5. Transfer Function Lookup
++                val = volume_sample_trilinear(volume, p)
+                 sample = transfer_func.lookup(val)
+                 sample_color = sample.rgb
+-                sample_alpha = sample.a * camera.opacity_multiplier
++                sample_alpha = sample.a * settings.opacity
+                 
+-                # 6. Lighting (Optional, based on S1)
+                 if use_lighting:
+-                    normal = volume.compute_gradient(p)
++                    normal = volume_compute_gradient(volume, p)
+                     normal = normalize(normal)
+                     diffuse = max(dot(normal, light.direction), 0.0)
+                     sample_color = sample_color * (light.ambient + light.diffuse * diffuse)
+                 
+-                # 7. Front-to-Back Compositing
+                 weight = (1.0 - acc_alpha) * sample_alpha
+                 acc_color[0] += weight * sample_color[0]
+@@ -193,9 +183,6 @@
+                 acc_color[2] += weight * sample_color[2]
+                 acc_alpha += weight
++                t += settings.step_size
+                 
+-                # 8. Advance Step
+-                t += camera.step_size
+-                
+-            # 9. Write Pixel
+             idx = (j * width + i) * 3
+             pixels[idx] = int(min(acc_color[0], 1.0) * 255)
+@@ -204,15 +191,11 @@
+ 
+ def volume_sample_trilinear(volume, p):
+-    # Get voxel coordinates
+-    x, y, z = p
+-    ix, iy, iz = floor(x), floor(y), floor(z)
++    x, y, z = p.x, p.y, p.z
++    ix, iy, iz = math.floor(x), math.floor(y), math.floor(z)
+     dx, dy, dz = x - ix, y - iy, z - iz
+     
+-    # Handle boundaries: return 0 if out of bounds
+     if not volume.is_inside(ix, iy, iz):
+         return 0.0
+         
+-    # Fetch 8 corners
+-    # Note: volume.data is row-major: x + y*w + z*w*h
+     def get_val(x, y, z):
+         if not volume.is_inside(x, y, z):
+@@ -229,5 +212,4 @@
+     h = get_val(ix+1, iy+1, iz+1)
+     
+-    # Interpolate
+     ab = a * (1-dx) + b * dx
+     cd = c * (1-dx) + d * dx
+@@ -238,11 +220,10 @@
+     def_val = ef * (1-dy) + gh * dy
+     
+-    result = abc * (1-dz) + def_val * dz
+-    return result
++    return abc * (1-dz) + def_val * dz
+ 
+ def euler_to_rotation_matrix(roll, pitch, yaw):
+-    c1, s1 = cos(yaw/2), sin(yaw/2)
+-    c2, s2 = cos(pitch/2), sin(pitch/2)
+-    c3, s3 = cos(roll/2), sin(roll/2)
++    c1, s1 = math.cos(yaw/2), math.sin(yaw/2)
++    c2, s2 = math.cos(pitch/2), math.sin(pitch/2)
++    c3, s3 = math.cos(roll/2), math.sin(roll/2)
+     q0 = c1*c2*c3 - s1*s2*s3
+     q1 = c1*c2*s3 + s1*s2*c3
+@@ -256,16 +237,13 @@
+ 
+ def get_ray_for_pixel(i, j, camera, width, height):
+-    # Standard pinhole camera ray generation [G]
+-    # Assuming camera at origin looking down -Z, with FOV and aspect ratio
+     aspect = width / height
+     fov = camera.fov
+     ndc_x = (2.0 * (i + 0.5) / width) - 1.0
+     ndc_y = 1.0 - (2.0 * (j + 0.5) / height)
+-    ray_dir = Vector3(ndc_x * aspect * tan(fov/2), ndc_y * tan(fov/2), -1.0)
++    ray_dir = Vector3(ndc_x * aspect * math.tan(fov/2), ndc_y * math.tan(fov/2), -1.0)
+     ray_dir = normalize(ray_dir)
+     return camera.position, ray_dir
+ 
+ def intersect_sphere(origin, direction, sphere):
+-    # Ray-sphere intersection [G]
+     oc = origin - sphere.center
+     a = dot(direction, direction)
+@@ -275,5 +253,5 @@
+     if disc < 0:
+         return None, None
+-    sqrt_disc = sqrt(disc)
++    sqrt_disc = math.sqrt(disc)
+     t0 = (-b - sqrt_disc) / (2*a)
+     t1 = (-b + sqrt_disc) / (2*a)
+@@ -283,5 +261,5 @@
+ 
+ def normalize(v):
+-    l = sqrt(v.x*v.x + v.y*v.y + v.z*v.z)
++    l = math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z)
+     if l == 0: return Vector3(0,0,0)
+     return Vector3(v.x/l, v.y/l, v.z/l)
+@@ -289,7 +267,4 @@
+ def dot(v1, v2):
+     return v1.x*v2.x + v1.y*v2.y + v1.z*v2.z
+-
+-def tan(x):
+-    return sin(x)/cos(x)
+ ```
+ 
+@@ -309,5 +284,5 @@
+ *   **Time Complexity:** $O(N \cdot M \cdot S)$, where $N$ is the number of pixels, $M$ is the number of samples per ray (determined by volume depth and step size), and $S$ is the cost of sampling/compositing per sample [G].
+ *   **Memory Complexity:** $O(V)$ for the volume data, where $V$ is the number of voxels [G].
+-*   **Measured Performance:** Not given in the sources.
++*   **Measured Performance:** Not given in the sources. [S2, unofficial]
+ *   **Scaling:** Not given in the sources.
+ *   **Strengths:** Full control over rendering pipeline on CPU; supports complex transfer functions and Phong lighting without GPU shader constraints; suitable for interactive systems where GPU resources are unavailable or insufficient [S1, S2, unofficial].

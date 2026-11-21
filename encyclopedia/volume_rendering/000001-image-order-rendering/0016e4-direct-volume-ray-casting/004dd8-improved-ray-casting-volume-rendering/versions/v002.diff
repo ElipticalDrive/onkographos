@@ -1,0 +1,233 @@
+--- v001.md
++++ v002.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A regular 3D scalar data field $V$ (e.g., seismic data in SEGY format), camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), and a transfer function $T$ mapping scalar values to color $\mathbf{c}$ and opacity $\alpha$.
+-*   **Output:** A 2D image where each pixel contains a synthesized RGB color value.
++*   **Input:** A regular 3D scalar data field $V$ (e.g., seismic data in SEGY format), camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), a transfer function $T$ mapping scalar values to color $\mathbf{c}$ and opacity $\alpha$, and an empty voxel marker value [S1].
++*   **Output:** A 2D image where each pixel contains a synthesized RGBA color value [S1].
+ 
+ **Data Structures:**
+-*   **Volume Data:** A 3D array of scalar values. The source specifies using **fixed-point number representation** for interpolation calculations to avoid time-consuming floating-point operations [S1].
++*   **Volume Data:** A 3D array of scalar values stored using fixed-point number representation for interpolation calculations to avoid time-consuming floating-point operations [S1].
+ *   **Sampling Points:** $K$ equal-interval points along the ray [S1].
+ 
+@@ -21,9 +21,9 @@
+ 1.  **Ray Definition:** For each pixel, define a ray $r(t) = \mathbf{o} + t\mathbf{d}$ intersecting the volume bounding box [S1].
+ 2.  **Sampling:** Select $K$ equal-interval sampling points along the ray segment within the volume [S1].
+-3.  **Interpolation (First):** For each sampling point $\mathbf{p}_i$, perform **trilinear interpolation** on the **original discrete 3D scalar data field** $V$ using the eight closest grid points [S1]. This yields an interpolated scalar value $V_{interp}$ [S1].
++3.  **Interpolation (First):** For each sampling point $\mathbf{p}_i$, perform trilinear interpolation on the original discrete 3D scalar data field $V$ using the eight closest grid points [S1]. This yields an interpolated scalar value $V_{interp}$ [S1].
+     *   *Note:* This step avoids the high-frequency component loss associated with classifying discrete data before interpolation [S1].
+     *   *Implementation Detail:* Use fixed-point arithmetic for the interpolation weights and value accumulation to improve performance [S1].
+ 4.  **Classification (Second):** Apply the transfer function $T$ to the interpolated scalar value $V_{interp}$ to obtain the color $\mathbf{c}_i$ and opacity $\alpha_i$ for the sample [S1].
+-    *   $\mathbf{c}_i, \alpha_i = T(V_{interp})$
++    *   $\mathbf{c}_i, \alpha_i = T(V_{interp})$ [S1].
+ 5.  **Shading (Ignored):** Explicitly ignore lighting effects and gradient calculations. The source states that for seismic data, gradient values change disorderly and lighting effects are weak, so this step is skipped to minimize computation [S1].
+ 6.  **Compositing:** Synthesize the color and opacity values from front to rear using the front-to-back compositing equation [S1].
+@@ -37,91 +37,117 @@
+ **Pseudocode:**
+ ```python
+-def improved_ray_casting(volume_data, camera, transfer_function, K):
++def improved_ray_casting(volume_data, volume_bounds, camera, transfer_function, K, empty_value):
+     """
+-    volume_data: 3D array of scalar values (fixed-point representation preferred for interpolation)
+-    camera: object with origin o and direction d
+-    transfer_function: function mapping scalar value to (color, opacity)
+-    K: number of sampling points per ray
++    volume_data: 3D list/array of scalar values (fixed-point representation preferred)
++    volume_bounds: tuple (min_x, max_x, min_y, max_y, min_z, max_z)
++    camera: object with origin o, direction d, resolution, and get_ray(x, y) method [G]
++    transfer_function: callable scalar -> (color_tuple, opacity_float)
++    K: int, number of sampling points per ray
++    empty_value: scalar value representing empty space in volume_data
+     """
+-    image_width, image_height = camera.resolution
+-    output_image = zeros((image_height, image_width, 3))
+-    
+-    # Pre-calculate ray step size based on volume bounds
+-    # Note: Exact bounding box intersection logic is inherited from parent [Direct volume ray casting]
+-    t_near, t_far = intersect_volume(camera.o, camera.d, volume_bounds)
+-    dt = (t_far - t_near) / K
+-    
+-    for y in range(image_height):
+-        for x in range(image_width):
+-            # Define ray for pixel (x, y)
++    height, width = camera.resolution
++    # Initialize output image with RGBA tuples
++    output = [[(0.0, 0.0, 0.0, 0.0) for _ in range(width)] for _ in range(height)]
++
++    def intersect_volume(ray_o, ray_d, bounds):
++        # Slab method to find entry (t_near) and exit (t_far) parameters
++        t_min, t_max = 0.0, float('inf')
++        for i in range(3):
++            if ray_d[i] == 0.0:
++                if ray_o[i] < bounds[2*i] or ray_o[i] > bounds[2*i+1]:
++                    return None, None
++            else:
++                t1 = (bounds[2*i] - ray_o[i]) / ray_d[i]
++                t2 = (bounds[2*i+1] - ray_o[i]) / ray_d[i]
++                t_min = max(t_min, min(t1, t2))
++                t_max = min(t_max, max(t1, t2))
++        if t_min > t_max:
++            return None, None
++        return t_min, t_max
++
++    def is_empty_voxel(p, bounds, data, empty_val):
++        # Check if point is within volume bounds
++        if not (bounds[0] <= p[0] <= bounds[1] and bounds[2] <= p[1] <= bounds[3] and bounds[4] <= p[2] <= bounds[5]):
++            return False
++        # Map continuous coordinate to integer grid indices
++        ix, iy, iz = int(p[0]), int(p[1]), int(p[2])
++        # Clamp to valid array bounds
++        ix = max(0, min(ix, len(data)-1))
++        iy = max(0, min(iy, len(data[0])-1))
++        iz = max(0, min(iz, len(data[0][0])-1))
++        return data[ix][iy][iz] == empty_val
++
++    for y in range(height):
++        for x in range(width):
+             ray_o, ray_d = camera.get_ray(x, y)
+-            
+-            # Intersect ray with volume
+-            t_start, t_end = intersect_volume(ray_o, ray_d, volume_bounds)
+-            if t_start is None:
++            t_near, t_far = intersect_volume(ray_o, ray_d, volume_bounds)
++            if t_near is None:
+                 continue
+-                
+-            dt = (t_end - t_start) / K
++
++            dt = (t_far - t_near) / K
+             acc_color = (0.0, 0.0, 0.0)
+             acc_opacity = 0.0
+-            
++
+             for k in range(K):
+-                t = t_start + k * dt
+-                p = ray_o + t * ray_d
+-                
+-                # Check if point is within volume bounds (safety)
+-                if not is_inside_volume(p, volume_bounds):
++                t = t_near + k * dt
++                p = (ray_o[0] + t * ray_d[0], ray_o[1] + t * ray_d[1], ray_o[2] + t * ray_d[2])
++
++                # Safety bounds check
++                if not (volume_bounds[0] <= p[0] <= volume_bounds[1] and
++                        volume_bounds[2] <= p[1] <= volume_bounds[3] and
++                        volume_bounds[4] <= p[2] <= volume_bounds[5]):
+                     continue
+-                
+-                # Skip empty voxels if data structure supports it
+-                if is_empty_voxel(p, volume_data):
++
++                # Skip empty voxels
++                if is_empty_voxel(p, volume_bounds, volume_data, empty_value):
+                     continue
+-                
+-                # Step 3: Interpolate original data first
+-                # Use fixed-point arithmetic for trilinear interpolation
++
++                # Step 3: Interpolate original data first (fixed-point arithmetic)
+                 v_interp = trilinear_interpolate_fixed_point(p, volume_data)
+-                
++
+                 # Step 4: Classify after interpolation
+                 color, opacity = transfer_function(v_interp)
+-                
++
++                # Step 7: Early termination check
++                if acc_opacity >= 0.99:
++                    break
++
+                 # Step 6: Front-to-back compositing
+-                # Step 7: Early termination check
+-                if acc_opacity >= 0.99: # Threshold for "close to completely opaque"
+-                    break
+-                    
+                 weight = (1.0 - acc_opacity) * opacity
+-                acc_color = acc_color + weight * color
++                acc_color = (acc_color[0] + weight * color[0],
++                             acc_color[1] + weight * color[1],
++                             acc_color[2] + weight * color[2])
+                 acc_opacity = acc_opacity + weight
+-                
+-            output_image[y, x] = acc_color
+-            
+-    return output_image
++
++            output[y][x] = (acc_color[0], acc_color[1], acc_color[2], acc_opacity)
++
++    return output
+ 
+ def trilinear_interpolate_fixed_point(p, volume_data):
+     """
+-    Performs trilinear interpolation using fixed-point arithmetic.
++    Performs trilinear interpolation using fixed-point arithmetic logic.
+     p: 3D coordinate (x, y, z)
+     volume_data: 3D array of scalars
+     """
+-    # Get fractional coordinates
+-    x, y, z = p
+-    ix, iy, iz = floor(x), floor(y), floor(z)
+-    fx, fy, fz = x - ix, y - iy, z - iz
+-    
+-    # Retrieve 8 surrounding voxels
+-    # Note: Boundary checks required [G]
+-    v000 = volume_data[ix, iy, iz]
+-    v100 = volume_data[ix+1, iy, iz]
+-    v010 = volume_data[ix, iy+1, iz]
+-    v110 = volume_data[ix+1, iy+1, iz]
+-    v001 = volume_data[ix, iy, iz+1]
+-    v101 = volume_data[ix+1, iy, iz+1]
+-    v011 = volume_data[ix, iy+1, iz+1]
+-    v111 = volume_data[ix+1, iy+1, iz+1]
+-    
+-    # Interpolation using fixed-point math
+-    # This replaces floating-point multiplication/addition
+-    # Implementation detail: Use integer arithmetic with scaling factor [S1]
+-    # For clarity, we show the logical structure; actual fixed-point ops depend on bit-width
++    ix, iy, iz = int(p[0]), int(p[1]), int(p[2])
++    fx, fy, fz = p[0] - ix, p[1] - iy, p[2] - iz
++
++    # Boundary clamping for indices
++    ix = max(0, min(ix, len(volume_data)-1))
++    iy = max(0, min(iy, len(volume_data[0])-1))
++    iz = max(0, min(iz, len(volume_data[0][0])-1))
++
++    # Fetch 8 surrounding voxels
++    v000 = volume_data[ix][iy][iz]
++    v100 = volume_data[min(ix+1, len(volume_data)-1)][iy][iz]
++    v010 = volume_data[ix][min(iy+1, len(volume_data[0])-1)][iz]
++    v110 = volume_data[min(ix+1, len(volume_data)-1)][min(iy+1, len(volume_data[0])-1)][iz]
++    v001 = volume_data[ix][iy][min(iz+1, len(volume_data[0][0])-1)]
++    v101 = volume_data[min(ix+1, len(volume_data)-1)][iy][min(iz+1, len(volume_data[0][0])-1)]
++    v011 = volume_data[ix][min(iy+1, len(volume_data[0])-1)][min(iz+1, len(volume_data[0][0])-1)]
++    v111 = volume_data[min(ix+1, len(volume_data)-1)][min(iy+1, len(volume_data[0])-1)][min(iz+1, len(volume_data[0][0])-1)]
++
++    # Interpolation using fixed-point math (logical structure)
++    # In practice, weights and values are scaled integers to avoid floating-point arithmetic [S1]
+     w000 = (1-fx)*(1-fy)*(1-fz)
+     w100 = fx*(1-fy)*(1-fz)
+@@ -132,16 +158,14 @@
+     w011 = (1-fx)*fy*fz
+     w111 = fx*fy*fz
+-    
+-    result = (w000*v000 + w100*v100 + w010*v010 + w110*v110 + 
+-              w001*v001 + w101*v101 + w011*v011 + w111*v111)
+-              
+-    return result
++
++    return (w000*v000 + w100*v100 + w010*v010 + w110*v110 + 
++            w001*v001 + w101*v101 + w011*v011 + w111*v111)
+ ```
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** $O(N \cdot K)$ per pixel, where $N$ is the number of pixels and $K$ is the number of samples. The use of fixed-point arithmetic reduces the constant factor for interpolation compared to floating-point [S1].
+-*   **Memory Complexity:** $O(V)$ for the volume data, where $V$ is the number of voxels. No additional large structures are mentioned beyond standard ray casting buffers [S1].
++*   **Memory Complexity:** $O(V)$ for the volume data, where $V$ is the number of voxels [S1].
+ *   **Strengths:** Significantly faster rendering speed for large-scale seismic data due to skipped lighting calculations, fixed-point interpolation, and early termination [S1]. Preserves high-frequency color components better than standard ray casting by interpolating before classification [S1].
+-*   **Limitations:** Not physically accurate due to ignored lighting/shading [S1]. The quality of the result depends heavily on the choice of $K$ and the transfer function, as interpolation artifacts may still occur if $K$ is too low [S1].
++*   **Limitations:** Not physically accurate due to ignored lighting/shading [S1].
+ *   **When to use:** Ideal for real-time or near-real-time visualization of large-scale, regular 3D scalar fields (like seismic data) where interpretive clarity and speed are prioritized over photorealistic lighting [S1].
+ *   **When not to use:** Not suitable for scenes requiring accurate surface shading, specular highlights, or where gradient-based normal estimation is critical for visual understanding [S1].

@@ -1,0 +1,115 @@
+# Colormap Conversion
+
+Also called: Ci Calculation, Data to Color Conversion, Linear Color Scaling, Matplotlib Colormap Indexing
+
+## Overview
+Colormap Conversion maps scalar data values to RGB colors by linearly scaling the input to a normalized index and indexing into a pre-defined color table [S1, S2, unofficial]. It solves the problem of visualizing scalar magnitude (e.g., temperature) through color [S1, unofficial]. It differs from general transfer functions by using a fixed, global linear normalization over the entire dataset bounds rather than per-voxel or piecewise mappings [S1, S2, unofficial].
+
+## How it works
+**Inputs:**
+- Scalar tensor $V$ of shape $(H, W)$ or $(D, H, W)$ containing data values.
+- Data bounds $V_{min}$ and $V_{max}$ (minimum and maximum values in $V$) [S1, unofficial].
+- Colormap name string `cmap` (default: 'turbo') [S2, unofficial].
+
+**Outputs:**
+- RGB tensor of shape $(3, H, W)$ or $(3, D, H, W)$ with values in $[0, 255]$ (or $[0, 1]$ depending on implementation, but indexing uses 0-255 range) [S1, S2, unofficial].
+
+**Data Structures:**
+- `colors`: A tensor of shape $(256, 3)$ containing the RGB values for the colormap, loaded from the library (e.g., matplotlib) [S2, unofficial].
+
+**Steps:**
+1. Load the colormap colors into a tensor `colors` of shape $(256, 3)$ on the target device [S2, unofficial].
+2. Normalize the input data $V_i$ to the range $[0, 1]$ using the global bounds:
+   $$ V_{norm} = \frac{V_i - V_{min}}{V_{max} - V_{min}} $$
+   [S1, unofficial].
+3. Scale the normalized value to the integer index range $[0, 255]$:
+   $$ C_i = V_{norm} \times 255 $$
+   [S1, unofficial].
+4. Round $C_i$ to the nearest integer and convert to a long integer type [S2, unofficial].
+5. Clamp indices to $[0, 255]$ to handle boundary cases where $V_i$ might be slightly outside $[V_{min}, V_{max}]$ due to precision [G].
+6. Index into the `colors` tensor using the integer indices. If $V$ is multi-dimensional, flatten or broadcast appropriately to match the color lookup [S2, unofficial].
+7. Permute the resulting tensor dimensions to $(3, H, W)$ (RGB, Height, Width) [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import matplotlib.cm as cm
+
+def colormap_conversion(V: torch.Tensor, cmap_name: str = 'turbo') -> torch.Tensor:
+    """
+    Convert scalar tensor V to RGB colors using linear scaling.
+    
+    Args:
+        V: Input scalar tensor of shape (H, W) or (D, H, W).
+        cmap_name: Name of the matplotlib colormap.
+        
+    Returns:
+        RGB tensor of shape (3, H, W) or (3, D, H, W).
+    """
+    # 1. Load colormap
+    cmap = cm.get_cmap(cmap_name)
+    # Generate 256 colors, shape (256, 3)
+    colors = torch.tensor(cmap(range(256)), dtype=torch.float32)
+    # Normalize colors to [0, 255] if they are in [0, 1]
+    colors = colors * 255
+    colors = colors.to(V.device)
+    
+    # 2. Normalize input
+    V_min = V.min()
+    V_max = V.max()
+    
+    # Handle degenerate case where min == max
+    if V_max == V_min:
+        V_norm = torch.zeros_like(V)
+    else:
+        V_norm = (V - V_min) / (V_max - V_min)
+        
+    # 3. Scale to 0-255
+    C_i = V_norm * 255
+    
+    # 4. Round and convert to long integers
+    indices = torch.round(C_i).long()
+    
+    # 5. Clamp indices to [0, 255]
+    indices = torch.clamp(indices, 0, 255)
+    
+    # 6. Index into colors
+    # If V is 2D (H, W), indices is (H, W). We need to gather colors.
+    # colors is (256, 3). We want output (H, W, 3) then permute.
+    
+    # Expand indices to (H, W, 1) to index the first dimension of colors
+    # Using advanced indexing: colors[indices] works if indices is (H, W)
+    # and colors is (256, 3), resulting in (H, W, 3)
+    rgb = colors[indices]
+    
+    # 7. Permute to (3, H, W)
+    rgb = rgb.permute(2, 0, 1)
+    
+    return rgb
+```
+
+**Parameters:**
+- `cmap`: Colormap name string. Default: 'turbo' [S2, unofficial].
+- $V_{min}, V_{max}$: Data bounds used for normalization [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If $V_{min} == V_{max}$, division by zero occurs. The implementation must handle this by setting all normalized values to 0 or a constant [G].
+- Precision errors may cause $V_i$ to fall slightly outside $[V_{min}, V_{max}]$, leading to indices $<0$ or $>255$. Clamping is required [G].
+- The method assumes a linear relationship between data magnitude and color index [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels/pixels, due to element-wise operations and indexing [S1, S2, unofficial].
+- **Memory Complexity:** $O(N)$ for the output RGB tensor. The colormap lookup table is constant size ($256 \times 3$) [S2, unofficial].
+- **Strengths:** Simple, fast, and deterministic. Easy to implement on GPU using tensor operations [S2, unofficial].
+- **Limitations:** Linear scaling may not highlight subtle variations in data if the distribution is non-uniform. Global bounds are sensitive to outliers [S1, unofficial].
+- **When to use:** When a quick, global visualization of scalar magnitude is needed, such as in fire dynamics simulation data [S1, unofficial].
+- **When not to use:** When per-voxel or piecewise transfer functions are required for better contrast or feature isolation [S1, unofficial].
+
+## Background
+The method was described in the Smokeview Verification Guide, part of the Fire Dynamics Simulation (FDS) toolset [S1, unofficial]. It uses linear scaling to convert temperature data (e.g., 20°C to 100°C) into colors (blue to red) for visualization [S1, unofficial]. The implementation details using matplotlib colormaps were also observed in the 2D Gaussian Splatting repository [S2, unofficial].
+
+## Sources
+[S1] Smokeview (Version 6) A Tool for Visualizing Fire Dynamics Simulation Data Volume III : Veriﬁcation Guide, https://doi.org/10.6028/nist.sp.1017-3, fetched 2026-10-26 (unofficial)
+[S2] hbb1/2d-gaussian-splatting, https://github.com/hbb1/2d-gaussian-splatting, fetched 2026-10-27 (unofficial)

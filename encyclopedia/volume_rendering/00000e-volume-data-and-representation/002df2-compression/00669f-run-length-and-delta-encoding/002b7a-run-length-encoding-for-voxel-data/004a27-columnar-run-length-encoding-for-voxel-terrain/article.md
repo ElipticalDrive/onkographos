@@ -1,0 +1,198 @@
+# Columnar Run-Length Encoding for Voxel Terrain
+
+Also called: Columnar RLE, Columnar RLE for Voxel Terrain, RLE (Run-Length Encoding) for Voxel Columns, RLE compression, Run-Length Encoding (RLE) for Voxel Terrain, VOXLAP RLE Voxel Storage, VxlCompiledRLE, VxlMap
+
+## Overview
+Columnar Run-Length Encoding (RLE) is a compression technique for voxel terrain where voxels are stored as vertical columns, compressing homogeneous runs of voxels along the y-axis (vertical) into single entries [S1, unofficial]. It solves the problem of excessive memory usage and geometry overhead by storing compressed column data on the CPU and uploading individual mesh runs to the GPU, avoiding the need to store a byte or vertex for every individual voxel [S1, unofficial]. Unlike full 3D spatial subdivision methods (e.g., KD-trees or octrees) that compress in all three axes, this method performs 1D compression along the y-axis only, treating the problem as a 2D planar issue [S1, unofficial].
+
+## How it works
+**Inputs:** A voxel grid defined by dimensions $VSID \times VSID \times MAXZDIM$ (where $VSID$ is the x/y size and $MAXZDIM$ is the height) [S3, unofficial].
+**Outputs:** A compressed in-memory representation (VxlArena) and a set of GPU-uploaded meshes/uniforms for rendering [S3, unofficial].
+
+**Data Structures:**
+1. **VxlColor:** A packed 4-byte struct with fields `b: u8`, `g: u8`, `r: u8`, `shade: u8`. The `shade` field acts as a brightness multiplier: `0x00` $\rightarrow$ 0.0, `0x80` $\rightarrow$ 1.0, `0xFF` $\rightarrow$ 2.0 [S3, unofficial].
+2. **VxlState:** An enum with variants `Air`, `Unexposed`, and `Color(VxlColor)` [S3, unofficial].
+3. **VxlSlab:** A struct representing an inclusive z-range $[start, end]$, internally stored as a half-open interval $[start, end + 1)$. Fields: `start: u8`, `end: u8` [S3, unofficial].
+4. **VxlArena:** A memory arena for column storage using a bit array to track used words and a data array for storage [S3, unofficial].
+   - `VXL_ARENA_WORDS_PER_COLUMN`: 16 (32-bit words per column) [S3, unofficial].
+   - `VXL_ARENA_WORDS`: $VSID \times VSID \times 16$ (Total capacity, e.g., 4,194,304 words for $VSID=512$) [S3, unofficial].
+5. **VxlArenaSpanRangePacked:** A 32-bit packed struct containing `start` (22 bits) and `len` (10 bits) to represent a range of words in the arena [S3, unofficial].
+
+**Parameters:**
+* $VSID = 512$: Maximum dimensions in x and y [S3, unofficial].
+* $MAXZDIM = 64$: Maximum dimension in z (height) [S3, unofficial].
+* $MAX\_VERTICAL\_STACK = MAXZDIM / 2 = 32$ [S3, unofficial].
+
+**Algorithm Steps:**
+1. **Column Initialization:** For each column $(x, z)$, initialize a `VxlSlab` context with `start = z_start` and `end = z_end + 1` [S3, unofficial].
+2. **Iteration:**
+   * Outer loop iterates $y$ from $y_{start}$ to $y_{end}$ inclusive [S3, unofficial].
+   * Inner loop iterates $x$ from $x_{start}$ to $x_{end}$ [S3, unofficial].
+3. **Edit Application:**
+   * Call `ctx.edit_column(x)` to get a mutable reference to the column [S3, unofficial].
+   * Determine if the operation is a solid block:
+     * If `solid` is true, call `column.insert(slab)` [S3, unofficial].
+     * If `solid` is false, call `column.remove(slab)` [S3, unofficial].
+   * After each $y$ iteration, call `ctx.advance_and_flush()` [S3, unofficial].
+4. **Finalization:** After loops complete, call `ctx.finish()` [S3, unofficial].
+5. **Mesh Generation (CPU Side):**
+   * Evaluate the RLE columns to fragment them into individual homogeneous runs [S1, unofficial].
+   * A run is defined by a sequence such as `6E1G9A` (6 earth, 1 grass, 9 air) from top to bottom [S1, unofficial].
+   * For each run, create a mesh with 8 vertices [S1, unofficial].
+   * Set up uniform variables for additional data required for that specific run [S1, unofficial].
+6. **GPU Upload:** Upload the individual runs and their uniform variables to the GPU [S1, unofficial].
+7. **CPU State Maintenance:** Keep the full RLE columns ("from fundament to heaven") on the CPU side to handle breaks in columns (e.g., caves or air pockets) where meshes must end and restart at different y-levels [S1, unofficial].
+
+**Pitfalls:**
+* Storing lighting, cellular automata, or other non-material data in the same RLE container causes fragmentation because the data is no longer homogeneous, increasing the ratio of breaks [S1, unofficial].
+* Columns may have breaks due to caves or air pockets, requiring the mesh to end at the floor and restart at the roof for the same $(x, z)$ location [S1, unofficial].
+* Storing lighting or cellular automata data alongside materials increases fragmentation because the data is less homogeneous, potentially requiring separate runs for lighting [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+VSID = 512
+MAXZDIM = 64
+VXL_ARENA_WORDS_PER_COLUMN = 16
+VXL_ARENA_WORDS = VSID * VSID * VXL_ARENA_WORDS_PER_COLUMN
+
+class VxlSlab:
+    def __init__(self, start: int, end: int):
+        # Internally stored as half-open [start, end + 1)
+        self.start = start
+        self.end = end + 1
+
+class VxlColor:
+    def __init__(self, b: int, g: int, r: int, shade: int):
+        self.b = b
+        self.g = g
+        self.r = r
+        self.shade = shade
+
+class VxlArena:
+    def __init__(self):
+        self.data = [None] * VXL_ARENA_WORDS
+        self.used = [False] * VXL_ARENA_WORDS
+
+    def alloc(self, span_data: list) -> tuple:
+        # Finds an open spot in the arena, copies the span to that spot and returns (start, length)
+        span_len = len(span_data)
+        for start in range(VXL_ARENA_WORDS - span_len + 1):
+            if not any(self.used[start + i] for i in range(span_len)):
+                for i in range(span_len):
+                    self.data[start + i] = span_data[i]
+                    self.used[start + i] = True
+                return (start, span_len)
+        raise RuntimeError("Arena full")
+
+def set_rect(ctx, x_start, x_end, y_start, y_end, z_start, z_end, solid, slab_data):
+    """
+    Initializes a slab cache context and applies edits to columns.
+    """
+    slab = VxlSlab(start=z_start, end=z_end)
+    
+    # Outer loop iterates y from y_start to y_end inclusive
+    for y in range(y_start, y_end + 1):
+        # Inner loop iterates x from x_start to x_end
+        for x in range(x_start, x_end + 1):
+            column = ctx.edit_column(x)
+            if solid:
+                column.insert(slab)
+            else:
+                column.remove(slab)
+        ctx.advance_and_flush()
+    ctx.finish()
+
+def fragment_column(column_data):
+    """
+    Fragments a column into individual homogeneous runs.
+    Returns a list of tuples: (material_type, count, start_y, end_y)
+    """
+    runs = []
+    if not column_data:
+        return runs
+    
+    current_material = column_data[0].material
+    current_count = 1
+    current_start_y = column_data[0].y
+    
+    for i in range(1, len(column_data)):
+        voxel = column_data[i]
+        if voxel.material == current_material:
+            current_count += 1
+        else:
+            runs.append((current_material, current_count, current_start_y, current_start_y + current_count - 1))
+            current_material = voxel.material
+            current_count = 1
+            current_start_y = voxel.y
+    
+    runs.append((current_material, current_count, current_start_y, current_start_y + current_count - 1))
+    return runs
+
+def create_mesh_8_vertices(run):
+    """
+    Creates a mesh with 8 vertices for a columnar run.
+    Assumes run is (material, count, start_y, end_y) and voxel size is 1.0.
+    """
+    x, z = run.x, run.z
+    y_min = run.start_y
+    y_max = run.end_y
+    # Vertices for a vertical prism at (x, z) from y_min to y_max
+    return [
+        (x, y_min, z), (x+1, y_min, z), (x+1, y_min, z+1), (x, y_min, z+1),
+        (x, y_max, z), (x+1, y_max, z), (x+1, y_max, z+1), (x, y_max, z+1)
+    ]
+
+def setup_uniforms(run):
+    """
+    Sets up uniform variables for additional data needed for that specific run.
+    """
+    return {
+        "material": run.material,
+        "count": run.count,
+        "start_y": run.start_y
+    }
+
+def generate_meshes(columns):
+    """
+    Evaluates RLE columns and generates GPU-ready meshes.
+    """
+    meshes = []
+    uniforms = []
+    
+    for x, z in columns:
+        # Fragment column into individual runs
+        runs = fragment_column(columns[x][z])
+        
+        for run in runs:
+            # Create mesh with 8 vertices per run
+            mesh = create_mesh_8_vertices(run)
+            # Set up uniform variables for the run
+            uniform = setup_uniforms(run)
+            
+            meshes.append(mesh)
+            uniforms.append(uniform)
+            
+    return meshes, uniforms
+```
+
+## Subtopics
+
+### [GPU Renderer for RL-compressed data](10812-gpu-renderer-for-rl-compressed-data.md)
+A GPU-based volume rendering technique designed for data compressed via RLE, specifically targeting voxelized models with sharp or small details. It distinguishes between uncompressed surface voxels and compressed interior/exterior regions on-the-fly during ray casting, avoiding the overhead of reconstructing the full volume in memory.
+
+## Operating characteristics
+* **Compression:** Compresses only in the y-axis (1D compression) [S1, unofficial].
+* **Performance Bias:** By biasing detail axially, maintaining steady framerates when viewing in different directions can become problematic [S1, unofficial].
+* **Fragmentation:** Storing lighting, cellular automata, or other non-material data in the same RLE container causes fragmentation because the data is no longer homogeneous, increasing the ratio of breaks [S1, unofficial]. It is recommended to upload separate runs for elements like lighting [S1, unofficial].
+* **Memory:** Uses a fixed-size arena. For $VSID=512$, the arena holds 4,194,304 words (16 MB) [S3, unofficial].
+* **Complexity:** The problem is reduced to a 2D planar problem, making it easier to consider than full 3D subdivision, but less efficient in spatial compression than KD-trees or octrees [S1, unofficial].
+
+## Background
+Columnar RLE is a reimplementation of VOXLAP's voxel storage format (.vxl map files) for CPU rendering [S3, unofficial]. VOXLAP was created by Ken Silverman [S3, unofficial]. The method was discussed in the context of rendering different materials in voxel terrain on GameDev Stack Exchange [S1, unofficial].
+
+## Sources
+[S1] Rendering different materials in a voxel terrain, https://gamedev.stackexchange.com/questions/45022/rendering-different-materials-in-a-voxel-terrain, fetched 2026-10-26 (unofficial)
+[S3] MuffinTastic/rust-voxlap-vxl, https://github.com/MuffinTastic/rust-voxlap-vxl, fetched 2026-10-28 (unofficial)

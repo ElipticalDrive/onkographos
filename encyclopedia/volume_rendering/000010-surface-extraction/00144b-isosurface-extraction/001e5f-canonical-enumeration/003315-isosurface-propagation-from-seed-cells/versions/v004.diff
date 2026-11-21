@@ -1,0 +1,195 @@
+--- v003.md
++++ v004.md
+@@ -1,89 +1,129 @@
+ # Isosurface Propagation from Seed Cells
+ 
+-Also called: Seed Set / Surface Propagation, Surface Propagation, seed-based extraction
++Also called: Seed Set / Surface Propagation, Seed Set Propagation for Contour Extraction, Seed-based extraction, Surface Propagation
+ 
+ ## Overview
+-Isosurface Propagation from Seed Cells is a geometric decomposition technique that extracts isosurfaces by identifying a sparse set of seed cells containing the surface and propagating the extraction to neighboring cells [S1]. It combines the spatial coherence exploitation of span space algorithms with the structural awareness of geometric decomposition [S1]. Unlike [Canonical Enumeration](1779-canonical-enumeration.md), which visits every cell, this method skips empty regions by traversing a hierarchical search structure of seeds, theoretically offering near-optimal worst-case time complexity [S1].
++Isosurface Propagation from Seed Cells is a geometric decomposition technique that extracts isosurfaces by starting from a pre-computed set of "seed" cells and propagating to neighbors, rather than visiting every cell in the volume. It solves the problem of output sensitivity in isosurface extraction by avoiding unnecessary cell visits, making it efficient for sparse isosurfaces or specific contour tracking. Unlike [Canonical Enumeration](1779-canonical-enumeration.md), which sequentially visits all cells, this method relies on a seed set $S$ defined such that any isosurface component intersects at least one cell in $S$. It differs from span space techniques like [NOISE](1780-noise.md) by establishing volume structure explicitly via adjacency, whereas span space methods map cells to 2D parameter spaces.
+ 
+ ## How it works
+-**Inputs:** A scalar volume dataset $V$ defined on a structured or unstructured mesh, and an isovalue $v$ [G].
+-**Outputs:** A polygonal mesh representing the isosurface $V(x) = v$ [G].
++The method consists of two phases: seed set construction and surface propagation. The propagation phase is deterministic and uniform across variants, while the seed construction varies by author (Itoh, van Kreveld, Bajaj).
+ 
+-**Data Structures:**
+-1. **Seed Set ($S$):** A collection of cells known to intersect the isosurface [S1].
+-2. **Hierarchical Search Structure:** A tree or graph organizing the seed set to allow efficient traversal and neighbor lookup [S1].
+-3. **Adjacency Map:** Precomputed or on-the-fly mapping of cell neighbors to enable propagation [S1].
+-4. **Edge Hash Table (Optional):** Used to exploit spatial coherence by caching edge interpolation results, preventing recomputation for cells sharing an edge [S1].
++### Inputs and Outputs
++*   **Input:** A volume defined on a simplicial mesh (typically tetrahedra) with a piecewise linear (PL) scalar function $f$. A seed set $S$ (subset of cells) and an isovalue $v$.
++*   **Output:** The set of triangles forming the isosurface, or the set of active cells $S_e$ intersecting the isosurface.
+ 
+-**Algorithm Steps:**
+-1. **Seed Identification:** Locate cells that intersect the isosurface [S1]. Common strategies include:
+-   * **Itoh et al.:** Find local extremum points in the data, connect them with a graph in the spatial domain, and include cells containing extremum points, cells intersected by graph arcs, and boundary cells if the volume has holes [S1]. Apply a thinning algorithm to generate a skeleton of the seed set that connects all extremum points with fewer cells [S1].
+-   * **van Kreveld et al.:** Construct a graph of local extremum points and add saddle points to create a contour tree [S1].
+-   * **Bajaj et al.:** Use set theory to identify seed cells and organize them in a segment tree for traversal [S1].
+-2. **Validation:** Ensure the seed set contains at least one cell per connected component of each isosurface [S1].
+-3. **Propagation:** Initialize extraction at the identified seed cells and traverse the hierarchical search structure to find all seeds intersecting the current isovalue [S1]. For each active seed cell, extract the polygonal geometry, propagate to neighboring cells using adjacency information, and use the edge hash table to cache edge interpolations [S1].
++### Data Structures
++*   **Cell Adjacency:** A graph or array mapping each cell to its neighbors. For tetrahedra, each cell has 4 faces, each shared with exactly one neighbor.
++*   **Visited Set:** A boolean flag or hash set associated with cells to prevent re-processing.
++*   **Queue:** A FIFO structure for BFS propagation.
++
++### Seed Set Construction (Variants)
++The difficulty lies in locating $S$. Sources cite three primary approaches [S1]:
++1.  **Itoh et al.:** Find local extremum points. Connect them with a graph in the spatial domain. The seed set includes cells containing extremum points, cells intersected by graph arcs, and boundary cells if holes exist. A thinning algorithm may be applied to generate a skeleton with fewer cells.
++2.  **van Kreveld et al.:** Use a graph of local extremum points and add saddle points to create a contour tree.
++3.  **Bajaj et al.:** Use set theory to find seed cells and a segment tree to organize and traverse them.
++
++*Note: Noisy data (MRI/CT) can cause these algorithms to produce large numbers of seed cells, increasing preprocessing time [S1].*
++
++### Propagation Algorithm
++The propagation extracts a single connected component or a specific contour defined by an edge in a Contour Tree (CT).
++
++**Parameters:**
++*   $v_1, v_2$: Endpoints of an edge $e$ in the Contour Tree, with $f(v_1) \le f(v_2)$.
++*   $S_e$: The set of simplices (cells) to be extracted.
++
++**Steps:**
++1.  Initialize $S_e = \emptyset$.
++2.  Select a seed cell $c$ that intersects the edge $e$ of the CT.
++3.  Enqueue $c$ and mark as visited.
++4.  While the queue is not empty:
++    a. Dequeue cell $s$.
++    b. Add $s$ to $S_e$.
++    c. For each face $t_i$ of $s$ ($i=1 \dots 4$):
++        i. Compute $min(t_i)$ and $max(t_i)$, the minimum and maximum function values on the face.
++        ii. Check if the face overlaps the contour class of edge $e$:
++            $$ min(t_i) < f(v_2) \quad \text{and} \quad max(t_i) > f(v_1) $$
++        iii. If true, identify the tetrahedron $c'$ sharing face $t_i$ with $s$.
++        iv. If $c'$ is not visited:
++            - Mark $c'$ as visited.
++            - Enqueue $c'$.
+ 
+ **Pseudocode:**
+ ```python
+-def extract_isosurface_seed_propagation(volume, isovalue, seed_cells):
+-    # Sources do not specify the exact seed identification algorithm [S1]
+-    processed_cells = set()
+-    queue = list(seed_cells)
+-    mesh = []
+-    edge_cache = {}
++def propagate_contour(seed_cell, contour_edge, volume):
++    """
++    Extracts cells intersecting a contour defined by contour_edge in the Contour Tree.
++    
++    Args:
++        seed_cell: The initial tetrahedron cell.
++        contour_edge: A tuple (v1, v2) representing nodes in the Contour Tree.
++        volume: Object providing cell adjacency and scalar values.
++        
++    Returns:
++        List of tetrahedra intersecting the contour.
++    """
++    # Extract scalar values at the contour edge endpoints
++    f_v1 = volume.scalar_value(contour_edge[0])
++    f_v2 = volume.scalar_value(contour_edge[1])
++    
++    # Ensure f_v1 <= f_v2 as per definition
++    if f_v1 > f_v2:
++        f_v1, f_v2 = f_v2, f_v1
++
++    queue = [seed_cell]
++    visited = {seed_cell}
++    extracted_cells = []
+ 
+     while queue:
+-        cell = queue.pop()
+-        if cell in processed_cells:
+-            continue
+-        processed_cells.add(cell)
+-
+-        # [G] Standard local extraction (e.g., Marching Cubes) using cached edge interpolations
+-        # Sources do not specify the exact local extraction routine [S1]
+-        cell_mesh = []
+-        mesh.extend(cell_mesh)
+-
+-        # [G] Standard neighbor lookup within volume bounds
+-        # Sources do not specify neighbor lookup implementation [S1]
+-        neighbors = []
+-        for neighbor in neighbors:
+-            if neighbor not in processed_cells and cell.min_value <= isovalue <= cell.max_value:
+-                queue.append(neighbor)
+-
+-    return mesh
++        s = queue.pop(0)
++        extracted_cells.append(s)
++        
++        # Get the 4 faces of the tetrahedron s
++        faces = volume.get_faces(s)
++        
++        for t in faces:
++            # Compute min and max scalar values on the triangle face t
++            min_val = volume.min_on_face(t)
++            max_val = volume.max_on_face(t)
++            
++            # Check if the face intersects the contour range [f_v1, f_v2]
++            # Condition: min < f(v2) AND max > f(v1)
++            if min_val < f_v2 and max_val > f_v1:
++                # Find the neighbor tetrahedron sharing this face
++                neighbor = volume.get_neighbor_across_face(s, t)
++                
++                if neighbor is not None and neighbor not in visited:
++                    visited.add(neighbor)
++                    queue.append(neighbor)
++                    
++    return extracted_cells
+ ```
+ 
+-**Parameters:**
+-* **Thinning Algorithm:** Used in Itoh's method to reduce seed count [S1]. Not given in the sources.
+-* **Hash Table Size:** Not given in the sources [S1].
+-
+ **Edge Cases and Pitfalls:**
+-* **Noisy Data:** Measurement data (MRI/CT) can cause the seed set construction to produce a large number of seed cells, significantly slowing preprocessing time [S1].
+-* **Branch Prediction:** The surface propagation code contains a large number of branches [S1]. Processors cannot readily predict the outcome, leading to poor performance on some hardware [S1].
+-* **Holes:** If the volume has holes, boundary cells must be explicitly included in the seed set to ensure connectivity [S1].
++*   **Simplicial Mesh Assumption:** The algorithm assumes a simplicial mesh and PL function, ensuring at most one piece of an isosurface exists in a cell [S2].
++*   **Branch Prediction:** The propagation code contains a large number of branches. Since the processor cannot readily predict the outcome, this can lead to poor performance on modern CPUs [S1].
++*   **Noise:** In noisy data, the seed set construction may fail or become inefficient, leading to many seed cells and slower preprocessing [S1].
+ 
+ ## Subtopics
+ 
+-### Itoh's Seed Set Method
+-Uses local extrema and graph connectivity with thinning [S1]. It sets itself apart by generating a sparse skeleton of the seed set, making it best for smooth data where extrema are well-defined [S1]. Builds on [Canonical Enumeration](1779-canonical-enumeration.md).
+-
+-### Contour Tree Based Propagation
+-Uses van Kreveld's contour tree approach [S1]. It sets itself apart by incorporating saddle points to handle complex topologies, though implementation details are sparse [S1]. Builds on [Canonical Enumeration](1779-canonical-enumeration.md).
+-
+-### Segment Tree Based Propagation
+-Uses Bajaj's set theory and segment tree [S1]. It sets itself apart by organizing seeds for efficient traversal, making it best when complex data structure management is acceptable [S1]. Builds on [Canonical Enumeration](1779-canonical-enumeration.md).
++### Spatio-Temporal Coherency Seeding
++A strategy to find contour seed points for a new frame in animation by examining cells that contained contours in the previously drawn frame. It exploits the fact that contours usually intersect contours of that surface from other viewpoints.
++*   **When to choose:** Interactive visualization of time-varying volume data with continuous viewpoint or isovalue changes.
++*   **Performance:** Adds $O(m)$ time to the extraction algorithm (where $m$ is the number of contour cells), leaving overall running time as $O(m)$ [S3].
++*   **Accuracy:** In animations with continuous change, it extracts an average of 85% of contours (minimum 70%) [S3].
++*   **Pitfalls:** Short segments are more likely to be missed than long ones, but this is not objectionable as short segments are less perceptually important. Missing segments are more likely during quick motion, which is also less perceptually critical [S3].
+ 
+ ## Operating characteristics
+-* **Time Complexity:** Theoretically near-optimal worst-case time complexity [S1]. However, practical performance is heavily influenced by the efficiency of seed identification and the branch prediction penalty during propagation [S1].
+-* **Memory Complexity:** Memory overhead is nearly as much as the NOISE algorithm due to the extrema data structure used [S1]. This is significantly higher than Branch-on-Need Octree (BONO), which retains the original representation with minimal overhead [S1].
+-* **Performance:** On the Rage256 dataset, the surface propagation algorithm performed poorly compared to BONO, ISSUE, and NOISE due to branch misprediction [S1]. On the Head 128 dataset, performance was evaluated [S1].
+-* **Strengths:** Exploits spatial coherence, handles structured and unstructured meshes, and offers theoretically optimal complexity [S1].
+-* **Limitations:** High preprocessing time for noisy data, poor branch prediction performance, and high memory overhead compared to octree methods [S1].
+-* **When to Use:** When the data is smooth and has few connected components, and when memory is not the primary constraint [S1].
+-* **When Not to Use:** For noisy medical data (MRI/CT) where seed identification becomes expensive, or on hardware with poor branch prediction capabilities [S1].
++*   **Time Complexity:** The propagation step for a set of simplices $S_e$ is $O(|S_e|)$, where $|S_e|$ is the number of simplices in the set [S2]. The total time depends heavily on the seed set construction.
++*   **Memory Complexity:** The seed set method has nearly as much memory overhead as the NOISE algorithm because an extrema data structure is used [S1].
++*   **Performance:** On the Rage256 data set, the surface propagation algorithm performed poorly compared to Branch-on-Need Octree (BONO) and span space methods like NOISE and ISSUE. This is attributed to the large number of unpredictable branches in the propagation code [S1].
++*   **Strengths:** Efficient for sparse isosurfaces; avoids visiting unnecessary cells; capable of segmenting single connected components [S2].
++*   **Limitations:** Poor branch prediction performance on CPUs; sensitive to noise in seed generation; requires explicit adjacency information.
+ 
+ ## Background
+-The method was introduced as a geometric decomposition technique that combines aspects of span space algorithms and geometric decomposition [S1]. Key contributors include Itoh et al. [6,7], van Kreveld et al. [16], and Bajaj et al. [1] [S1]. It was evaluated in a case study comparing various 3D isosurface extraction techniques, including Marching Cubes, BONO, NOISE, ISSUE, and Interval Tree [S1]. The method is applicable to both structured and unstructured meshes [S1].
++The method combines aspects of geometric decomposition and span space algorithms. It was notably implemented by Itoh et al., who used local extrema and graph connections; van Kreveld et al., who used contour trees; and Bajaj et al., who used segment trees [S1]. The propagation logic described in [S2] is used for interactive contour tracking in time-varying data, leveraging the Contour Tree to isolate specific topological features.
+ 
+ ## Sources
+-[S1] A Case Study of Isosurface Extraction Algorithm Performance, https://doi.org/10.1007/978-3-7091-6783-0_26, fetched 2026-10-26+[S1] A Case Study of Isosurface Extraction Algorithm Performance, https://doi.org/10.1007/978-3-7091-6783-0_26, fetched 2026-10-26
++[S2] Time-varying contour topology, https://doi.org/10.1109/tvcg.2006.16, fetched 2026-11-08
++[S3] Line drawings from volume data, https://doi.org/10.1145/1073204.1073222, fetched 2026-10-28

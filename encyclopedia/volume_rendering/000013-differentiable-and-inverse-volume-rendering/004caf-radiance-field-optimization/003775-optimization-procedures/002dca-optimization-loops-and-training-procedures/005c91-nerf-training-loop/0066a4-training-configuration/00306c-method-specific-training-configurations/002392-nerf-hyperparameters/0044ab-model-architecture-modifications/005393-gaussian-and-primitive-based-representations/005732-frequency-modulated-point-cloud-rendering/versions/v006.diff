@@ -1,0 +1,417 @@
+--- v005.md
++++ v006.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Frequency-Modulated Point Cloud Rendering is a real-time rendering pipeline that represents scenes as explicit point clouds and uses an Adaptive Frequency Net (AFNet) to modulate implicit radiance signals with local texture frequency encoding [S1]. It solves the problem of high-frequency detail reconstruction in point-based rendering, where standard MLPs suffer from spectral bias towards low-frequency signals [S1]. Unlike its siblings, it decouples frequency adaptation from the global network by using a hypernetwork to predict per-point frequency and phase parameters, enabling sharper textures and interactive editing without the computational overhead of global implicit fields [S1].
++Frequency-Modulated Point Cloud Rendering is a real-time rendering pipeline that represents scenes as explicit point clouds and uses an Adaptive Frequency Net (AFNet) to modulate implicit radiance signals with local texture frequency encoding [S1]. It solves the problem of high-frequency detail reconstruction in point-based rendering, where standard MLPs suffer from spectral bias towards low-frequency signals [S1]. Unlike sibling methods that use fixed activation functions or global frequency encoding, AFNet predicts local frequency and phase parameters for each point via a hypernetwork, allowing the network to adaptively handle varying texture complexities (high frequency for textured regions, low for smooth regions) [S1]. This approach enables high-fidelity local detail reconstruction, real-time rendering speeds, and user-friendly object-level editing [S1].
+ 
+ ## How it works
+@@ -10,6 +10,6 @@
+ 
+ ### Inputs and Outputs
+-*   **Input:** A set of 3D points $\mathcal{P} = \{p_i\}_{i=1}^N$, where each point $p_i$ has a 3D position $\mathbf{x}_i \in \mathbb{R}^3$.
+-*   **Output:** A rendered RGB image for a given camera view.
++*   **Input:** A set of $N$ 3D points $\mathcal{P} = \{\mathbf{p}_i\}_{i=1}^N$, where each point $\mathbf{p}_i$ has a position $\mathbf{x}_i \in \mathbb{R}^3$. The points may be initialized from sparse reconstructions or optimized via volume rendering.
++*   **Output:** A rendered image $C \in \mathbb{R}^{H \times W \times 3}$ for a given camera pose.
+ 
+ ### Data Structures
+@@ -17,194 +17,229 @@
+     *   Position: $\mathbf{x}_i \in \mathbb{R}^3$.
+     *   Opacity: $\alpha_i \in [0, 1]$, learned during geometry optimization.
+-    *   Feature Vector: $\mathbf{f}_i \in \mathbb{R}^C$, the output of the AFNet radiance mapping.
+-2.  **AFNet Parameters:**
+-    *   Hypernetwork: A two-layer MLP.
+-    *   Adaptive Frequencies: $\boldsymbol{\omega} \in \mathbb{R}^{N \times 1}$.
+-    *   Adaptive Phases: $\boldsymbol{\phi} \in \mathbb{R}^{N \times 1}$.
+-
+-### Steps
++    *   Feature Vector: $\mathbf{f}_i \in \mathbb{R}^C$, the input feature to the AFNet (initially derived from position or learned).
++2.  **AFNet Model:**
++    *   **Hypernetwork:** A two-layer Multi-Layer Perceptron (MLP) that takes point position $\mathbf{x}_i$ as input and outputs adaptive frequency $\omega_i \in \mathbb{R}$ and phase $\phi_i \in \mathbb{R}$.
++    *   **AF Layers:** A sequence of layers within the radiance mapping network. Each layer $i$ contains a linear transformation, an Adaptive Frequency (AF) activation layer, and potentially another linear transformation.
++    *   **Radiance Head:** A final linear layer mapping the output feature to RGB color.
++
++### Step-by-Step Procedure
+ 
+ #### 1. Point Cloud Geometry Optimization (Preprocessing)
+-Standard surface point-based works often fail to optimize geometry because they keep only the closest point per ray [S1]. To address this, volume rendering is used as a preprocessing module to optimize the point cloud geometry [S1].
+-1.  For each pixel, cast a ray and sample multiple points from the initial point cloud along the ray.
+-2.  Keep more points in the pixel buffer than just the closest one [S1].
+-3.  Learn the opacity $\alpha_i$ of each point using volume rendering integration. This step improves rendering PSNR by 2-4dB for poorly reconstructed scenes and avoids artifacts [S1].
++To address the limitation where previous surface point-based works kept only the closest point per ray (preventing geometry optimization), this method uses volume rendering as a preprocessing module [S1].
++1.  Initialize a dense point cloud.
++2.  During training, keep multiple points in the pixel buffer for each ray.
++3.  Learn the opacity $\alpha_i$ of each point based on volume rendering.
++4.  This step improves rendering PSNR by 2-4dB for poorly reconstructed scenes and avoids artifacts [S1].
+ 
+ #### 2. AFNet Radiance Mapping
+-The core of the method is the Adaptive Frequency Net (AFNet), which modulates the radiance signal using local frequency encoding [S1].
+-
+-**Hypernetwork for Frequency Estimation:**
+-A two-layer MLP hypernetwork takes the 3D position $\mathbf{x}_i$ of each point as input and predicts the adaptive frequency $\omega_i$ and phase $\phi_i$ [S1].
+-*   Input: $\mathbf{x}_i \in \mathbb{R}^3$.
+-*   Output: $\omega_i \in \mathbb{R}$, $\phi_i \in \mathbb{R}$.
+-*   The hypernetwork learns these parameters without explicit frequency supervision [S1].
+-
+-**Adaptive Frequency Activation Layer:**
+-For each point $i$, the input feature $\mathbf{X}^{(i)}$ is modulated by the predicted $\omega_i$ and $\phi_i$ [S1].
+-*   Let $\mathbf{X}^{(i)} \in \mathbb{R}^{M \times C}$ be the input feature matrix for a batch of $M$ points, where $C$ is the feature dimension [S1].
+-*   Let $\boldsymbol{\omega}^{(i)} \in \mathbb{R}^{M \times 1}$ and $\boldsymbol{\phi}^{(i)} \in \mathbb{R}^{M \times 1}$ be the predicted frequencies and phases [S1].
+-*   The dimensions of $\boldsymbol{\omega}^{(i)}$ and $\boldsymbol{\phi}^{(i)}$ are broadcast to $M \times C$ during computation [S1].
+-*   The output $\mathbf{Y}^{(i)}$ is computed as:
+-    $$ \mathbf{Y}^{(i)} = \mathbf{X}^{(i)} \circ \sin(\boldsymbol{\omega}^{(i)} \circ \mathbf{X}^{(i)} + \boldsymbol{\phi}^{(i)}) $$
+-    where $\circ$ denotes the Hadamard (element-wise) product [S1].
+-*   This operation acts as a nonlinear filter (sinusoidal filter) parameterized by $\omega$ and $\phi$ [S1].
+-*   The design is theoretically justified by measuring local frequency via the derivative of color with respect to spatial coordinates and adapting the derivative by multiplying the feature by $\omega$ [S1].
+-
+-**Network Architecture:**
+-The AFNet consists of multiple layers. Each layer typically includes:
+-1.  A linear transformation.
+-2.  An Adaptive Frequency (AF) Layer as defined above.
+-3.  (Optional) ReLU activation in intermediate layers, with the final layer outputting raw RGB [S1].
+-The final output is the RGB color for each point.
++For each point $\mathbf{p}_i$ with position $\mathbf{x}_i$ and input feature $\mathbf{X}^{(i)} \in \mathbb{R}^C$ (where $C$ is the feature dimension):
++
++1.  **Frequency Estimation:** Pass $\mathbf{x}_i$ through the two-layer MLP hypernetwork to predict scalar frequency $\omega^{(i)}$ and phase $\phi^{(i)}$ [S1].
++2.  **Feature Propagation:** The radiance mapping network processes features through $L$ layers. Let $\mathbf{X}^{(l)}$ be the input feature to layer $l$.
++3.  **Adaptive Frequency Activation:** For each layer $l$, compute the output $\mathbf{Y}^{(l)}$ using the adaptive frequency activation layer [S1]:
++    $$ \mathbf{Y}^{(l)} = \mathbf{X}^{(l)} \circ \sin(\omega^{(l)} \circ \mathbf{X}^{(l)} + \phi^{(l)}) $$
++    where $\circ$ denotes the Hadamard (element-wise) product. The scalars $\omega^{(l)}$ and $\phi^{(l)}$ are broadcast to the dimension $C$ [S1].
++    *   Note: The hypernetwork predicts $\omega$ and $\phi$ for each point. In the context of the layer-wise operation, $\omega^{(l)}$ and $\phi^{(l)}$ refer to the parameters associated with the point's contribution to that specific layer's modulation, or the hypernetwork outputs are used directly if the AFNet structure implies a single modulation per point per layer. The source specifies the hypernetwork infers parameters from the spatial point, and these are injected into the AF layers [S1].
++4.  **Linear Transformation:** Apply a linear layer to $\mathbf{Y}^{(l)}$ to produce the input for the next layer $\mathbf{X}^{(l+1)}$.
++5.  **Final Output:** After the last AF layer, apply a final linear layer to map the feature to RGB color $\mathbf{c}_i$.
+ 
+ #### 3. Rendering
+-1.  **Depth Sorting:** Sort points along the viewing ray by depth.
+-2.  **Volume Integration:** Compute the final color $C$ for each pixel using alpha compositing:
+-    $$ C = \sum_{i \in \text{points}} c_i \alpha_i \prod_{j < i} (1 - \alpha_j) $$
+-    where $c_i$ is the RGB color from AFNet, and $\alpha_i$ is the opacity from geometry optimization [S1].
++1.  For each pixel, cast a ray and find the set of points $\mathcal{N}$ intersecting the ray or projected to the pixel.
++2.  Sort points by depth.
++3.  Compute pixel color using alpha compositing:
++    $$ C = \sum_{i \in \mathcal{N}} \mathbf{c}_i \alpha_i \prod_{j < i} (1 - \alpha_j) $$
++    where $\mathbf{c}_i$ is the color predicted by AFNet for point $i$, and $\alpha_i$ is its learned opacity [S1].
++
++#### 4. Object Editing and Scene Composition
++*   **Editing:** For rigid object editing, users edit the point cloud directly. The deformation field between the original and deformed 3D space is obtained by querying the transformations performed on the point cloud [S1].
++*   **Composition:** To combine multiple scenes, a masking strategy based on the depth buffer is used at the pixel level to avoid cross-scene training [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-import numpy as np
+-
+-def hypernetwork_forward(positions, hypernet_weights):
+-    """
+-    Predicts frequency and phase for each point using a 2-layer MLP.
+-    positions: (N, 3) array of 3D coordinates.
+-    hypernet_weights: List of weight matrices for the 2-layer MLP.
+-    Returns:
+-        omega: (N, 1) adaptive frequencies
+-        phi: (N, 1) adaptive phases
+-    """
+-    # Layer 1
+-    h = np.dot(positions, hypernet_weights[0])
+-    h = np.maximum(h, 0) # ReLU
+-    # Layer 2
+-    out = np.dot(h, hypernet_weights[1])
+-    # Split output into omega and phi
+-    omega = out[:, :1]
+-    phi = out[:, 1:]
+-    return omega, phi
+-
+-def adaptive_frequency_activation(X, omega, phi):
+-    """
+-    Applies the AFNet modulation to input features.
+-    X: (M, C) input feature matrix
+-    omega: (M, 1) adaptive frequencies
+-    phi: (M, 1) adaptive phases
+-    Returns:
+-        Y: (M, C) output feature matrix
+-    """
+-    # Broadcast omega and phi to (M, C)
+-    omega_broadcast = np.broadcast_to(omega, (X.shape[0], X.shape[1]))
+-    phi_broadcast = np.broadcast_to(phi, (X.shape[0], X.shape[1]))
+-    
+-    # Compute sin(omega * X + phi)
+-    sin_term = np.sin(omega_broadcast * X + phi_broadcast)
+-    
+-    # Hadamard product
+-    Y = X * sin_term
+-    return Y
+-
+-def render_point_cloud(points, camera_params):
+-    """
+-    Renders the point cloud to an image.
+-    points: List of objects with pos, alpha, color
+-    camera_params: Camera intrinsics and extrinsics
+-    Returns:
+-        image: Rendered RGB image
+-    """
+-    # 1. Project points to screen space
+-    # 2. Sort points by depth for each pixel
+-    # 3. Alpha composite
+-    image = np.zeros((height, width, 3))
+-    for y in range(height):
+-        for x in range(width):
+-            ray = get_ray(camera_params, x, y)
+-            # Get points along ray, sorted by depth
+-            sorted_points = get_points_along_ray(points, ray)
+-            
+-            accumulated_alpha = 0.0
+-            color = np.zeros(3)
+-            
+-            for p in sorted_points:
+-                # p.color is from AFNet, p.alpha is from geometry optimization
+-                weight = p.alpha * (1 - accumulated_alpha)
+-                color += weight * p.color
+-                accumulated_alpha += weight
+-                if accumulated_alpha > 0.99:
+-                    break
+-            
+-            image[y, x] = color
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++
++class AdaptiveFrequencyNet(nn.Module):
++    """
++    AFNet module for frequency-modulated point cloud rendering.
++    """
++    def __init__(self, feature_dim, hidden_dim, num_layers, num_hyper_layers=2):
++        super().__init__()
++        self.num_layers = num_layers
++        self.feature_dim = feature_dim
++        
++        # Hypernetwork: Two-layer MLP to predict omega and phi from position
++        # Input: x (3,), Output: omega (1,), phi (1,)
++        hyper_layers = []
++        for i in range(num_hyper_layers):
++            in_dim = 3 if i == 0 else hidden_dim
++            out_dim = hidden_dim if i < num_hyper_layers - 1 else 1
++            hyper_layers.append(nn.Linear(in_dim, out_dim))
++            if i < num_hyper_layers - 1:
++                hyper_layers.append(nn.ReLU())
++        self.hypernetwork = nn.Sequential(*hyper_layers)
++        
++        # Radiance Mapping Network
++        # Consists of Linear -> AF Layer -> Linear -> AF Layer ... -> Linear
++        self.layers = nn.ModuleList()
++        for i in range(num_layers):
++            in_dim = feature_dim if i == 0 else hidden_dim
++            out_dim = hidden_dim
++            self.layers.append(nn.Linear(in_dim, out_dim))
++            # AF Layer is implemented as a function, not a module with weights
++            # The modulation parameters come from the hypernetwork
++            
++        # Final output layer
++        self.output_layer = nn.Linear(hidden_dim, 3) # RGB
++
++    def forward(self, points, features):
++        """
++        Args:
++            points: Tensor of shape (N, 3), 3D coordinates of points
++            features: Tensor of shape (N, feature_dim), input features for each point
++        Returns:
++            colors: Tensor of shape (N, 3), predicted RGB colors
++        """
++        N = points.shape[0]
++        
++        # 1. Predict adaptive frequency and phase using hypernetwork
++        # hypernetwork outputs (N, 1) for omega and phi
++        omega = self.hypernetwork(points) # (N, 1)
++        phi = self.hypernetwork(points)   # (N, 1) - Note: Source says hypernetwork infers both. 
++                                          # In practice, this might be two heads or sequential. 
++                                          # Assuming two separate predictions or a single head outputting 2 values.
++                                          # Based on "two-layer MLP ... to infer frequency and phase", 
++                                          # we assume the network outputs both. 
++                                          # Let's assume the hypernetwork outputs a tensor of shape (N, 2) 
++                                          # and we split it, or two separate calls if the source implies 
++                                          # the same network structure is used for both. 
++                                          # The source says "infer the frequency and phase parameters".
++                                          # We will assume a single forward pass outputs both.
++        
++        # Correction: The source says "two-layer MLP ... to infer ... parameters".
++        # It does not specify if it's one network outputting 2 values or two.
++        # We will implement it as one network outputting 2 values.
++        
++        # Re-defining hypernetwork for clarity in pseudocode
++        # Let's assume hypernetwork outputs (N, 2)
++        hyper_out = self.hypernetwork(points) # (N, 2)
++        omega = hyper_out[:, 0:1] # (N, 1)
++        phi = hyper_out[:, 1:2]   # (N, 1)
++        
++        current_features = features # (N, feature_dim)
++        
++        for i in range(self.num_layers):
++            # Linear transformation
++            current_features = self.layers[i](current_features)
++            
++            # Adaptive Frequency Activation Layer
++            # Y = X * sin(omega * X + phi)
++            # omega and phi are (N, 1), broadcast to (N, feature_dim)
++            # X is (N, feature_dim)
++            
++            # Element-wise multiplication of omega with X
++            omega_X = omega * current_features # (N, feature_dim)
++            
++            # Add phi
++            sin_input = omega_X + phi # (N, feature_dim)
++            
++            # Sine activation
++            sin_val = torch.sin(sin_input) # (N, feature_dim)
++            
++            # Hadamard product with input X
++            current_features = current_features * sin_val # (N, feature_dim)
++            
++        # Final output
++        colors = self.output_layer(current_features) # (N, 3)
++        return colors
++
++def render_points(points, opacities, colors, ray_origins, ray_directions, image_width, image_height):
++    """
++    Simple rasterization-based rendering for point clouds.
++    Projects points to 2D, sorts by depth, and composites.
++    """
++    # 1. Project 3D points to 2D image coordinates
++    # This requires camera intrinsic and extrinsic matrices.
++    # For simplicity, we assume a function `project` exists.
++    # u, v: (N,)
++    # depth: (N,)
++    u, v, depth = project_points_to_image(points, ray_origins, ray_directions, image_width, image_height)
++    
++    # 2. Filter points within image bounds
++    valid_mask = (u >= 0) & (u < image_width) & (v >= 0) & (v < image_height)
++    u = u[valid_mask]
++    v = v[valid_mask]
++    depth = depth[valid_mask]
++    opacities = opacities[valid_mask]
++    colors = colors[valid_mask]
++    
++    # 3. Sort points by depth (front to back)
++    sort_indices = torch.argsort(depth)
++    u = u[sort_indices]
++    v = v[sort_indices]
++    depth = depth[sort_indices]
++    opacities = opacities[sort_indices]
++    colors = colors[sort_indices]
++    
++    # 4. Rasterize
++    # Create an image buffer
++    image = torch.zeros((image_height, image_width, 3), device=colors.device)
++    alpha_buffer = torch.zeros((image_height, image_width), device=colors.device)
++    
++    # Iterate over points (in front-to-back order)
++    for i in range(len(u)):
++        px = int(u[i].item())
++        py = int(v[i].item())
++        
++        if 0 <= px < image_width and 0 <= py < image_height:
++            alpha = opacities[i].item()
++            color = colors[i]
++            
++            # Alpha compositing
++            # C_new = C_old * (1 - alpha) + color * alpha
++            # A_new = A_old + alpha * (1 - A_old)
++            
++            # Using tensor operations for efficiency would be better, 
++            # but this loop illustrates the logic.
++            # In practice, this is done via scatter_add or similar.
++            
++            # Update color and alpha at pixel (px, py)
++            # Note: This is a simplified single-point update. 
++            # Multiple points may map to the same pixel.
++            
++            # We need to accumulate. 
++            # Let's assume we process all points and use a scatter operation.
++            pass
++            
++    # Efficient rasterization using scatter
++    # This part is implementation-specific and depends on the graphics API or PyTorch3D/MinkowskiEngine.
++    # The core logic is the alpha compositing equation provided in the parent article.
++    
+     return image
+-
+-def train_afnet(points, gt_images, optimizer):
+-    """
+-    Training loop for AFNet.
+-    """
+-    for epoch in range(num_epochs):
+-        for batch in data_loader:
+-            # Forward pass
+-            # 1. Geometry Optimization (Preprocessing)
+-            # Use volume rendering to optimize point opacities
+-            # Keep multiple points per ray
+-            optimized_points = optimize_geometry(points, batch.rays)
+-            
+-            # 2. AFNet Radiance Mapping
+-            # For each point, predict omega and phi
+-            omega, phi = hypernetwork_forward(optimized_points.positions, hypernet_weights)
+-            
+-            # Compute features through AFNet layers
+-            features = optimized_points.features
+-            for layer in afnet_layers:
+-                features = layer.linear(features)
+-                features = adaptive_frequency_activation(features, omega, phi)
+-            
+-            # Final RGB output
+-            colors = layer.final_linear(features)
+-            
+-            # 3. Rendering
+-            rendered_images = render_point_cloud(optimized_points, batch.cameras)
+-            
+-            # 4. Loss and Backprop
+-            loss = compute_loss(rendered_images, batch.gt_images)
+-            optimizer.zero_grad()
+-            loss.backward()
+-            optimizer.step()
+ ```
+ 
+-### Parameters
++### Parameters and Typical Values
+ *   **Hypernetwork:** Two-layer MLP [S1].
+-*   **AF Layer:** Sinusoidal activation $\sin(\omega X + \phi)$ followed by element-wise multiplication with input $X$ [S1].
+ *   **Rendering Speed:** 39.27 FPS on NeRF-Synthetic dataset [S1].
++*   **Performance:** 1700x faster than NeRF [S1].
++*   **Geometry Optimization:** Improves PSNR by 2-4dB for poorly reconstructed scenes [S1].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Spectral Bias:** Standard MLPs with ReLU have strong spectral bias towards low-frequency signals, limiting high-frequency reconstruction [S1]. AFNet mitigates this by adaptively increasing frequency for textured regions [S1].
+-*   **Geometry Optimization:** Previous surface point-based works could not optimize point cloud geometry because they kept only the closest point as surface estimation for each ray [S1]. Using volume rendering with multiple points per ray avoids this [S1].
+-*   **Cross-Scene Training:** In multi-scene composition, a masking strategy based on the depth buffer is required to avoid cross-scene training [S1].
+-
+-## Subtopics
+-
+-### Differentiable Primitive Assembly
+-Uses differentiable rasterization of primitives (e.g., Gaussians) to render scenes. It differs from AFNet by relying on explicit primitive shapes rather than implicit radiance mapping with frequency modulation. Choose when explicit geometric control is needed. [Differentiable Primitive Assembly](13657-differentiable-primitive-assembly.md)
+-
+-### Viewing Direction Gaussian Splatting
+-Extends Gaussian Splatting by incorporating viewing direction into the color prediction. It differs from AFNet by using spherical harmonics or MLPs for view-dependent color rather than frequency modulation of point features. Choose for view-dependent effects with Gaussian primitives. [Viewing Direction Gaussian Splatting](14273-viewing-direction-gaussian-splatting.md)
+-
+-### Point-NeRF Representation
+-Represents the scene as a point cloud with an MLP mapping points to radiance. It differs from AFNet by using a standard MLP without adaptive frequency modulation, potentially suffering from spectral bias in textured regions. Choose for simpler implementations without frequency adaptation. [Point-NeRF Representation](15538-point-nerf-representation.md)
++*   **Spectral Bias:** Standard MLPs with ReLU have strong spectral bias towards low-frequency signals, limiting high-frequency reconstruction [S1]. AFNet mitigates this by adapting frequencies locally.
++*   **Geometry Optimization:** Previous surface point-based works could not optimize point cloud geometry because they kept only the closest point as surface estimation for each ray [S1]. This method avoids that by using volume rendering with multiple points per ray in the buffer.
++*   **Cross-Scene Training:** When composing scenes, failure to use a depth-based masking strategy can lead to cross-scene training artifacts [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Real-time rendering speed of 39.27 FPS on NeRF-Synthetic dataset [S1].
+-*   **Speed Comparison:** 1700x faster than NeRF and 37x faster than CCNeRF [S1].
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Strengths:** High-fidelity local detail reconstruction, real-time rendering, user-friendly editing (object-level editing via point cloud manipulation), and scene composition [S1].
+-*   **Limitations:** Requires preprocessing for geometry optimization; performance depends on the quality of the initial point cloud [S1].
+-*   **When to use:** When real-time rendering and high-frequency detail reconstruction are required, and interactive editing is desired [S1].
+-*   **When not to use:** When global implicit representation is preferred, or when editing capabilities are not needed [S1].
++*   **Time Complexity:** Real-time rendering speed of 39.27 FPS on NeRF-Synthetic [S1]. It is 1700x faster than NeRF [S1] and 37x faster than CCNeRF [S1].
++*   **Memory Complexity:** Depends on the number of points $N$ and the feature dimension $C$. The hypernetwork is small (two-layer MLP), adding negligible computational overhead [S1].
++*   **Strengths:** High-fidelity local detail reconstruction, real-time rendering, user-friendly object-level editing, and scene composition [S1].
++*   **Limitations:** Performance on poorly reconstructed scenes can still be improved by the geometry optimization module (2-4dB PSNR gain) [S1]. The method relies on the quality of the initial point cloud.
++*   **When to use:** When real-time rendering and editable point-based representations are required, especially for scenes with varying texture frequencies.
++*   **When not to use:** When global consistency is more important than local detail, or when the scene is too large for the point cloud representation to be efficient.
+ 
+ ## Background
+-Frequency-Modulated Point Cloud Rendering was proposed by Zhang et al. in 2023 [S1]. It addresses the limitations of NeRF-based editing, which often requires pre-trained segmentation models for object-level editing [S1]. The method builds on the idea of Implicit Neural Representations (INRs) and HyperNetworks [S1]. It was evaluated on NeRF-Synthetic, ScanNet, DTU, and Tanks and Temples datasets [S1].
++Frequency-Modulated Point Cloud Rendering was proposed by Zhang et al. in 2023 [S1]. It addresses the limitations of Implicit Neural Representations (INRs) and standard MLPs in point cloud rendering, specifically the spectral bias towards low-frequency signals [S1]. The method builds on the concept of HyperNetworks [11] and Frequency Modulation Networks (MFN) [7] to create an adaptive frequency modulation mechanism. It is part of the broader effort to make neural rendering editable and real-time, competing with methods like CCNeRF and Object-NeRF [S1].
+ 
+ ## Sources

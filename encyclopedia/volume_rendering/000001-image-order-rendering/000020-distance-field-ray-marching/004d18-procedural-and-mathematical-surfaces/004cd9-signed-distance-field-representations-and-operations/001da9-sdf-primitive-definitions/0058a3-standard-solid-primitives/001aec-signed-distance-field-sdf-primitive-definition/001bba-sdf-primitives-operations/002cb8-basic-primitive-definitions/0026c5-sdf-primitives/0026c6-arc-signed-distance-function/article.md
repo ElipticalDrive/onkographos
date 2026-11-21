@@ -1,0 +1,97 @@
+# Arc Signed Distance Function
+
+Also called: SDF Arc, sdArc
+
+## Overview
+Computes the signed distance from a 3D point to a tube of radius `arc_tube_radius` running along a circular arc defined by a center, orientation, aperture, and radii `ra` and `rb` [S1, unofficial]. It differs from the [Sphere Signed Distance Function](1237-sphere-signed-distance-function.md) by modeling a partial circular path rather than a closed surface, and from the [Capsule Signed Distance Function](2439-capsule-signed-distance-function.md) by using a curved (circular) axis instead of a linear segment [S1, unofficial].
+
+## How it works
+**Inputs:** Point $p = (p_x, p_y, p_z)$; Arc parameters: `arc_center` ($C$), `arc_tube_radius` ($r_t$), `orientation_angle` ($\theta$), `aperture_angle` ($\alpha$), `ra` ($R_a$), `rb` ($R_b$). Precomputed constants: `sca_cos` ($\cos \theta$), `sca_sin` ($\sin \theta$), `scb_cos` ($\cos(\alpha/2)$), `scb_sin` ($\sin(\alpha/2)$). A global `depth` value is used for the z-coordinate of the arc plane.
+
+**Outputs:** Signed distance $d$.
+
+**Data Structures:**
+The `Arc` struct contains:
+- `vec3 arc_center`: Center of the arc in 3D space.
+- `float arc_tube_radius`: Radius of the tube.
+- `float orientation_angle`: Rotation of the arc plane around the Z-axis (degrees).
+- `float aperture_angle`: Total angular span of the arc (degrees).
+- `float sca_cos`, `float sca_sin`: Precomputed $\cos(\theta)$ and $\sin(\theta)$.
+- `float scb_cos`, `float scb_sin`: Precomputed $\cos(\alpha/2)$ and $\sin(\alpha/2)$.
+- `float ra`: Radius of the circle defining the arc path.
+- `float rb`: Radius of an inner circle (default 0.0f).
+
+**Steps:**
+1. Construct position vector in the arc's local XY plane: $pos = (p_x, p_y, \text{depth})$.
+2. Translate by arc center: $pos \leftarrow pos - C$.
+3. Rotate by orientation angle $\theta$:
+   $$x = pos_x \cos \theta - pos_y \sin \theta$$
+   $$y = pos_x \sin \theta + pos_y \cos \theta$$
+   $$pos_x = x, \quad pos_y = y$$
+4. Symmetrize X: $pos_x \leftarrow |pos_x|$.
+5. Compute intermediate value $k$:
+   $$k = \begin{cases} pos_x \sin(\alpha/2) + pos_y \cos(\alpha/2) & \text{if } \cos(\alpha/2) pos_x > \sin(\alpha/2) pos_y \\ \sqrt{pos_x^2 + pos_y^2} & \text{otherwise} \end{cases}$$
+6. Compute project distance:
+   $$d_{proj} = \sqrt{pos_x^2 + pos_y^2 + R_a^2 - 2 R_a k} - R_b$$
+7. Compute final distance:
+   $$d = \sqrt{d_{proj}^2 + p_z^2} - r_t$$
+
+**Pitfalls:**
+- Angles must be converted from degrees to radians ($\times \pi/180$) before computing sine/cosine [S1, unofficial].
+- The `depth` parameter is a global constant for the arc's Z-plane, not derived from $p_z$ [S1, unofficial].
+- Precision issues may arise if $R_a \approx 0$ or if the point is far from the arc [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sd_arc(p: Vec3, arc: Arc, depth: float) -> float:
+    # 1. Construct position vector
+    pos = Vec3(p.x, p.y, depth)
+    
+    # 2. Translate by arc center
+    pos = pos - arc.arc_center
+    
+    # 3. Rotate by orientation angle
+    x = pos.x * arc.sca_cos - pos.y * arc.sca_sin
+    y = pos.x * arc.sca_sin + pos.y * arc.sca_cos
+    pos.x = x
+    pos.y = y
+    
+    # 4. Take absolute value of x
+    pos.x = abs(pos.x)
+    
+    # 5. Compute intermediate value k
+    if arc.scb_cos * pos.x > arc.scb_sin * pos.y:
+        k = pos.x * arc.scb_sin + pos.y * arc.scb_cos
+    else:
+        k = length(pos.x, pos.y)
+        
+    # 6. Compute project distance
+    # Note: pos.length() in 2D is sqrt(pos.x^2 + pos.y^2)
+    dist_sq = pos.x * pos.x + pos.y * pos.y
+    project_distance = sqrt(dist_sq + arc.ra * arc.ra - 2.0 * arc.ra * k) - arc.rb
+    
+    # 7. Compute final distance
+    return sqrt(project_distance * project_distance + p.z * p.z) - arc.arc_tube_radius
+```
+
+## Subtopics
+
+### Geodesic Arc Length Calculation
+Computes the exact arc length $l(a, \rho_0)$ for a quadratic Gaussian Splatting primitive using the integral $l(a, \rho_0) = \int \sqrt{1 + (2at)^2} dt$ [S2]. The solution is $l(a, \rho_0) = \frac{u\sqrt{1+u^2} + \ln(u + \sqrt{1+u^2})}{4a}$ where $u = 2at$ [S2]. This is used for high-quality surface reconstruction but is not part of the standard SDF distance calculation [S2].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per point. Requires several trigonometric precomputations and basic arithmetic operations [S1, unofficial].
+- **Memory Complexity:** $O(1)$ for the `Arc` struct [S1, unofficial].
+- **Strengths:** Efficiently models curved tubular structures without voxelization [S1, unofficial].
+- **Limitations:** Limited to specific circular arc geometries; requires precomputed trigonometric values [S1, unofficial].
+- **When to use:** When rendering curved tubes or rings defined by a center, orientation, and aperture [S1, unofficial].
+- **When not:** For linear tubes (use [Capsule Signed Distance Function](2439-capsule-signed-distance-function.md)) or closed spheres (use [Sphere Signed Distance Function](1237-sphere-signed-distance-function.md)) [S1, unofficial].
+
+## Background
+The Arc SDF is defined in the `SDF-Sphere-Tracing` repository by AlerianEmperor [S1, unofficial]. It utilizes fast trigonometric approximations and SSE optimizations for performance [S1, unofficial]. The geodesic arc length formula is derived in "Quadratic Gaussian Splatting" for second-order geometric primitives [S2].
+
+## Sources
+[S1] AlerianEmperor/SDF-Sphere-Tracing, https://github.com/AlerianEmperor/SDF-Sphere-Tracing, fetched 2026-10-26 (unofficial)
+[S2] Quadratic Gaussian Splatting: High Quality Surface Reconstruction with Second-Order Geometric Primitives, https://doi.org/10.1109/ICCV51701.2025.02624, fetched 2026-10-30

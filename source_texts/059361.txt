@@ -1,0 +1,2128 @@
+Amortizing Samples in Physics-Based Inverse Rendering using ReSTIR
+YU-CHEN WANG, University of California, Irvine, USA
+CHRIS WYMAN, NVIDIA, USA
+LIFAN WU, NVIDIA, USA
+SHUANG ZHAO, University of California, Irvine, USA
+Config
+Initial texture
+Rendering loss
+Albedo error
+·104
+Oxalis
+2
+0
+(a) Target
+PT
+RIS
+Ours
+4
+(b) Opt. (ours)
+PT
+RIS
+Ours
+0.60
+0.40
+0.20
+0
+1,000
+2,000
+(c) Opt. (PT)
+0.00
+0
+1,000
+2,000
+(d) Opt. (RIS)
+Forward
+Texture vis.
+Fig. 1. Our new technique reuses temporal data in the context of physics-based inverse direct illumination. During inverse-rendering, when optimizing a
+scene iteratively using gradient-based methods such as stochastic gradient descent or Adam [Kingma and Ba 2014], we reuse light samples spatially and
+temporally (across iterations), offering significantly cleaner forward rendering and gradient estimates than baseline methods without reuse. This example uses
+the “Oxalis” painting lit by several bright spot lights and a dim fill light. We optimize the spatially varying albedo (initialized using the gray texture shown) of
+the painting. (c, d) The baseline methods PT (B.1) and RIS (B.2) produce high variance—especially in dark areas only lit by the fill light, causing highly biased
+results. (b) Our method, on the other hand, enjoys significantly more accurate reconstructions.
+Recently, great progress has been made in physics-based differentiable rendering. Existing differentiable rendering techniques typically focus on static
+scenes, but during inverse rendering—a key application for differentiable
+rendering—the scene is updated dynamically by each gradient step. In this
+Authors’ addresses: Yu-Chen Wang, yuchew23@uci.edu, University of California, Irvine,
+USA; Chris Wyman, chris.wyman@acm.org, NVIDIA, USA; Lifan Wu, lifanw@nvidia.
+com, NVIDIA, USA; Shuang Zhao, shz@ics.uci.edu, University of California, Irvine,
+USA.
+paper, we take a first step to leverage temporal data in the context of inverse
+direct illumination. By adopting reservoir-based spatiotemporal resampled
+importance resampling (ReSTIR), we introduce new Monte Carlo estimators
+for both interior and boundary components of differential direct illumination integrals. We also integrate ReSTIR with antithetic sampling to further
+improve its effectiveness. At equal frame time, our methods produce gradient estimates with up to 100× lower relative error than baseline methods.
+Additionally, we propose an inverse-rendering pipeline that incorporates
+these estimators and provides reconstructions with up to 20× lower error.
+CCS Concepts: • Computing methodologies → Rendering.
+This work is licensed under a Creative Commons Attribution International 4.0 License.
+© 2023 Copyright held by the owner/author(s).
+0730-0301/2023/12-ART214
+https://doi.org/10.1145/3618331
+Additional Key Words and Phrases: Differentiable rendering, inverse rendering, importance sampling, sample reuse, ReSTIR
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.
+214:2 •
+Wang, Wyman, Wu, and Zhao
+ACM Reference Format:
+Yu-Chen Wang, Chris Wyman, Lifan Wu, and Shuang Zhao. 2023. Amortizing
+Samples in Physics-Based Inverse Rendering using ReSTIR. ACM Trans.
+Graph. 42, 6, Article 214 (December 2023), 17 pages. https://doi.org/10.1145/
+3618331
+To validate our technique, we compare our gradient estimates with
+those from prior unbiased methods (Figure 6). Lastly, we demonstrate our effectiveness using several differentiable-rendering (Figures 7–9) and inverse-rendering (Figures 1, 10–14) examples.
+2
+1
+INTRODUCTION
+Physics-based forward rendering synthesizes photorealistic images
+of fully described 3D scenes. Given its importance, decades of forward rendering research have led to numerous techniques capable
+of accurately reproducing complex lighting, including soft shadows,
+environmental illumination, and interreflection.
+Inverse rendering instead infers parameters such as object shapes
+and reflectance from images of the scene. Due to the complexity
+of forward rendering, analytical inversions are generally infeasible.
+Typically, inverse rendering relies on numerical optimizations to
+find scene parameters that minimize differences (according to some
+rendering loss) between target and forward-rendered images.
+Efficient inverse-rendering optimizations using gradient-based
+methods (e.g., stochastic gradient descent or Adam [Kingma and
+Ba 2014]) require differentiating physics-based forward rendering
+with respect to arbitrary scene parameters—a process known as
+physics-based differentiable rendering.
+Recently, great progress has been made in differentiable rendering.
+Derivations for differentiating the rendering equation [Li et al. 2018],
+radiative transfer [Zhang et al. 2019], and path integrals [Zhang et al.
+2020, 2021b] have demonstrated that physics-based light transport is
+generally differentiable. Building on these formulations, new Monte
+Carlo methods (e.g., [Zeltner et al. 2021; Zhang et al. 2021a]) and
+differentiable computations (e.g., [Nimier-David et al. 2020; Vicini
+et al. 2021]) further improved efficiency.
+Unfortunately, most differentiable rendering techniques focus on
+static scenes. However, during inverse-rendering optimizations, the
+scene is updated dynamically by each gradient step. Exploiting temporal consistency between steps to improve efficiency has remained
+largely unexplored.
+In this paper, we take a first step to leverage temporal data in the
+context of physics-based inverse direct illumination. Specifically, we
+adopt reservoir-based spatiotemporal importance resampling (ReSTIR)
+[Bitterli et al. 2020]—a powerful technique for real-time direct lighting in dynamic scenes—to significantly improve the efficiency of
+differentiable direct illumination under complex lighting conditions.
+Concretely, we make the following contributions:
+• We introduce new ReSTIR-based Monte Carlo estimators for
+both interior and boundary components of differential directillumination integrals (§4 and §5).
+• We discuss the interplay between ReSTIR and pixel-level antithetic sampling [Yu et al. 2022] and introduce a simple technique
+to improve the effectiveness of antithetic sampling (§6).
+• We propose an efficient inverse-rendering pipeline that utilizes
+our ReSTIR estimators (§7). Additionally, we discuss how multiview configurations can be supported efficiently by: (i) preserving
+reservoirs across multiple iterations; (ii) using slightly biased
+gradient estimates with respect to object shapes.
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.
+RELATED WORKS
+We review works in forward and differentiable rendering of surfaces.
+Forward rendering of dynamic scenes. Forward rendering played a
+major role in graphics for the past 50 years, with significant bodies
+of work on predictive and film rendering (e.g., Pharr et al. [2016])
+and interactive techniques targeting gaming and visualization (e.g.,
+Akenine-Moller et al. [2018]). There are common simplifications
+that reduce cost by assuming scenes remain static or have fixed
+animations.
+Until recently, forward rendering for truly dynamic scenes was
+often quite biased, with image appeal trumping predictive convergence properties as rasterization efficiency pushed renderers to
+use approximations like ambient occlusion [Bavoil and Sainz 2009],
+image-space ray tracing [McGuire and Mara 2014], probe-based
+global light [McGuire et al. 2017], and precomputed lightmaps [Seyb
+et al. 2020] rather than more accurate light transport.
+While researchers [Laine et al. 2020; Liu et al. 2019] have demonstrated differentiable rasterization, it remains limited to fairly simple
+scenes involving primary visibility.
+Recent ray tracing hardware [Burgess 2020] offers an opportunity
+to use unbiased, physics-based light transport while dynamically
+changing a scene each frame, but current per-pixel ray budgets
+have limited use in many renderers to improve shadows [Heitz et al.
+2018], reflections [Deligiannis and Schmid 2019], and diffuse global
+illumination [Majercik et al. 2019].
+Resampling and ReSTIR. Recent work builds on importance resampling [Talbot et al. 2005] to amortize ray costs, aiming to minimize
+rendering overhead in dynamic scenes by spatiotemporally reusing
+sampled rays [Bitterli et al. 2020]. This reservoir-based spatiotemporal importance sampling, aka ReSTIR, observes that spatially- and
+temporally-neighboring integrals have similar forms. With careful
+reweighting, samples can be reused despite being pulled from different integration domains [Lin et al. 2022]. This is a form of filtering,
+similar to post-process denoisers [Schied et al. 2017], but applied to
+the sampling pdfs. While it assumes signals change smoothly, edgestopping functions and similar image-processing tricks [Durand and
+Dorsey 2002] can be applied to better handle sharper discontinuities.
+While we build on Bitterli et al.’s [2020] early formulation to efficiently sample complex many-light dynamic scenes, ReSTIR can also
+reuse complex paths including diffuse global illumination [Ouyang
+et al. 2021], volumetric media [Lin et al. 2021], and more complex
+multi-bounce light transport [Lin et al. 2022].
+Physics-based differentiable rendering. A main challenge in developing general-purpose differentiable renderers has been differentiating with respect to scene geometry, which generally requires calculating additional boundary integrals. To address this, Li et al. [2018]
+introduced a Monte Carlo edge-sampling method giving unbiased
+estimates of boundary integrals, but it requires detecting object silhouettes, which can be expensive. Later, reparameterization-based
+Amortizing Samples in Physics-Based Inverse Rendering using ReSTIR
+ALGORITHM 1: Streaming resampled importance sampling (RIS)
+[Bitterli et al. 2020]
+UpdateReservoir(r, 𝑥, w)
+Input: A reservoir r, a new candidate 𝑥 with the weight w
+2 begin
+3
+r.wsum ← r.wsum + w;
+4
+if rand( ) < w/r.wsum then
+5
+r.𝒚 ← 𝑥;
+6
+end
+7
+r.𝑀 ← r.𝑀 + 1;
+8 end
+9 StreamingRIS(𝑀)
+Input: Number of candidates 𝑀 ≥ 1
+10 begin
+11
+r.wsum ← 0;
+12
+r.𝑀 ← 0;
+13
+for 𝑚 = 1, 2, . . . , 𝑀 do
+14
+Draw 𝑥𝑚 ∼ 𝑝 c ;
+15
+UpdateReservoir(r, 𝑥, 𝑝ˆ (𝑥𝑚 )/𝑝 c (𝑥𝑚 )) ; // Updating r
+16
+end
+17
+r.𝑊 ← r.wsum /(𝑝ˆ (r.𝒚 ) r.𝑀 );
+18
+return r;
+19 end
+1
+methods [Loubet et al. 2019; Bangaru et al. 2020] were introduced
+to avoid computing boundary integrals. Further, by differentiating
+Veach’s path integrals [1997], Zhang et al. [2020] formulated differential path integrals, extending Monte Carlo differentiable rendering
+beyond unidirectional path tracing.
+Additionally, several Monte Carlo sampling methods [Zeltner et al.
+2021; Zhang et al. 2021a; Yan et al. 2022; Yu et al. 2022] and efficient
+differentiation techniques [Nimier-David et al. 2020; Vicini et al.
+2021] have improved the performance of differentiable rendering.
+All these methods, unfortunately, focus on static scenes.
+Below, based on Zhang et al.’s formulation, we introduce new
+methods for efficient differentiable rendering of dynamic scenes.
+Concurrent works. The idea of adopting animation-rendering techniques for inverse rendering has recently been explored by two
+concurrent works. Specifically, Chang et al. [2023] introduced a
+parameter-space ReSTIR method that focuses on material reconstruction and is closely related to our approach for interior integrals
+(§4). On the other hand, by neglecting boundary integrals (§5), this
+technique does not offer variance reduction for shape optimizations.
+Another concurrent work applies recursive control variate for
+inverse rendering [Nicolet et al. 2023]. This technique applies variance reduction for forward rendering only and is largely orthogonal
+to our technique.
+3 PRELIMINARIES
+3.1 Direct Illumination
+Under a path-integral formulation [Veach 1997; Pauly et al. 2000]
+of the rendering equation for surface-only direct illumination, the
+•
+intensity 𝐼 of a pixel is given by
+∫
+𝐼=
+𝑓 (𝒙¯ ) d𝜇 (𝒙¯ ),
+214:3
+(1)
+𝛀
+where 𝛀 = M 3 (with M the union of all surfaces) is the one-bounce
+path space containing light paths 𝒙¯ = (𝒙 0, 𝒙 1, 𝒙 2 ) with 𝒙 0 on the
+light and 𝒙 2 on the detector; 𝜇 is the area-product measure given by
+Î2
+d𝜇 ( 𝒙¯ ) = 𝑛=0
+d𝐴(𝒙 𝑛 ); and 𝑓 is the measurement contribution
+function defined as
+𝑓 ( 𝒙¯ ) = 𝐿e (𝒙 0  𝒙 1 ) 𝐺 (𝒙 0 ↔ 𝒙 1 ) 𝑓s (𝒙 0  𝒙 1  𝒙 2 )
+𝐺 (𝒙 1 ↔ 𝒙 2 ) 𝑊e (𝒙 1  𝒙 2 ).
+(2)
+Here 𝐿e and 𝑊e are the source emission and detector response
+functions, respectively; 𝑓s is the bidirectional scattering distribution function (BSDF); and 𝐺 denotes the (visibility-aware) geometric term.
+The pixel intensity 𝐼 in Eq. (1) is often estimated by (i) tracing
+a camera ray from 𝒙 2 that intersects the scene at surface 𝒙 1 ∈ M,
+and (ii) sampling point 𝒙 0 —which we term a light vertex—on the
+surface of a light source. This gives a Monte Carlo estimator:
+⟨𝐼 ⟩ =
+𝑊e (𝒙 1  𝒙 2 ) 𝐺 (𝒙 1 ↔ 𝒙 2 )
+𝑝 (𝒙 1, 𝒙 2 )
+𝐿e (𝒙 0  𝒙 1 ) 𝑓s (𝒙 0  𝒙 1  𝒙 2 ) 𝐺 (𝒙 0 ↔ 𝒙 1 )
+,
+𝑝 (𝒙 0 | 𝒙 1, 𝒙 2 )
+(3)
+for 𝑝 (𝒙 1, 𝒙 2 ) the joint probability density of sampling 𝒙 1, 𝒙 2 and
+𝑝 (𝒙 0 | 𝒙 1, 𝒙 2 ) the conditional probability density of drawing 𝒙 0 .
+In practice, the camera ray from 𝒙 2 to 𝒙 1 can be sampled using
+standard ray tracing. In the rest of this paper, we assume the perspective pinhole camera model. In this case, 𝒙 2 becomes fixed at
+the center of projection and 𝒙 1 is obtained by tracing a ray from 𝒙 2
+through a randomly selected point on the image plane.
+With 𝒙 1 and 𝒙 2 obtained, importance sampling the light vertex 𝒙 0
+remains challenging—especially under complex illumination and
+visibility. Bitterli et al. [2020] recently introduced a technique that
+efficiently samples 𝒙 0 . We briefly revisit this work in §3.2 and build
+on it later.
+3.2
+Reservoir-based SpatioTemporal Importance
+Resampling (ReSTIR) for Direct Illumination
+Resampled importance sampling. Monte Carlo estimation of
+∫
+𝐼=
+ℎ(𝒙) d𝒙,
+(4)
+requires generating samples 𝒙 with probability density proportional
+to some function 𝑝ˆ (e.g., 𝑝ˆ = ℎ when ℎ is nonnegative). But for
+ˆ analytically sampling from this probability density
+complicated 𝑝,
+can be difficult.
+Instead, resampled importance sampling (RIS) [Talbot et al. 2005]
+samples from a simple randomized distribution approximating ˆ
+𝑝.
+First, RIS draws 𝑀 independent candidates {𝒙 1, . . . , 𝒙 𝑀 } from some
+other distribution 𝑝 c . Then, one sample 𝒚 is selected from the 𝑀
+candidates with (discrete) probability P[𝒚 = 𝒙𝑚 ] proportional to
+w(𝒙𝑚 ) :=
+𝑝ˆ (𝒙𝑚 )
+,
+𝑝 c (𝒙𝑚 )
+(5)
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.
+214:4 •
+Wang, Wyman, Wu, and Zhao
+for 𝑚 = 1, 2, . . . , 𝑀. This gives a one-sample RIS estimator of Eq. (4):
+!
+𝑀
+ℎ(𝒚) 1 ∑︁
+𝑀
+⟨𝐼 ⟩ris =
+w(𝒙𝑚 ) .
+(6)
+𝑝ˆ (𝒚) 𝑀 𝑚=1
+Naïve implementations of Eq. (6) generate and store all 𝑀 candidates 𝒙 1, . . . , 𝒙 𝑀 before selecting final sample 𝒚. This can be inefficient. Bitterli et al. [2020] proposed a streaming version using
+weighted reservoir sampling (WRS) [Chao 1982] offering significantly
+better efficiency.
+Algorithm 1 summarizes this method, which processes a candidate stream and maintains a reservoir structure r. After handling
+candidate 𝒙𝑚 inside UpdateReservoir(), reservoir r stores the folÍ
+lowing data: (i) a sum of weights r.wsum = 𝑚
+𝑖=1 w(𝑥𝑖 ); (ii) a count
+of candidates processed r.𝑀 = 𝑚; and (iii) a sample r.𝒚 randomly
+drawn from prior candidates {𝒙 1, . . . , 𝒙𝑚 } with selection probability P[r.𝒚 = 𝒙 𝑖 ] = w(𝒙 𝑖 )/r.wsum for all 𝑖 = 1, 2, . . . , 𝑚. One can easily
+evaluate the RIS estimator in Eq. (6) using the reservoir r output
+𝑀 = ℎ(r.𝒚) r.𝑊 .
+from StreamingRIS() using ⟨𝐼 ⟩ris
+Reservoir-based spatiotemporal importance resampling. To estimate direct illumination using Eq. (3), after generating the camera
+ray 𝒙 2  𝒙 1 , RIS (Algorithm 1) can be used to select the light vertex
+𝒙 0 by setting the target function 𝑝ˆ to the measurement contribution
+of the path (𝒙 0, 𝒙 1, 𝒙 2 ). However, under complex illumination conditions, RIS needs to use many candidates (i.e., large 𝑀) to achieve
+high efficiency, which is typically impractical.
+To address this problem, Bitterli et al. [2020] introduced reservoirbased spatiotemporal importance resampling (ReSTIR) that amortizes
+sampling costs by reusing spatial and temporal candidates via iterative applications of RIS.
+Specifically, when rendering a pixel, ReSTIR first generates a
+reservoir using RIS (Algorithm 1). Then, the reservoir is merged
+with reservoirs from various neighboring pixels (i.e., spatial reuse)
+as well as prior frames (i.e., temporal reuse). To ensure unbiasedness,
+Bitterli et al. [2020] proposed recomputing r.𝑊 after determining
+the sample r.𝒚, as expressed in Algorithm 2.1 This is because the
+target function 𝑝ˆ (𝑞) for a pixel 𝑞 generally differs from those 𝑝ˆ (𝑞𝑖 )
+for its spatial/temporal neighbors 𝑞𝑖 . Further, precautions must be
+taken when evaluating 𝑝ˆ (𝑞𝑖 ) (r.𝒚) (Line 9 of Algorithm 2) when
+𝑞𝑖 is from the previous frame (i.e., via temporal reuse) and the
+scene geometry varies between the previous and the current frames.
+Specifically, the evaluation should use the scene geometry of the
+previous frame with the light sample r.𝒚 moved accordingly (by,
+for example, using motion vectors).
+Algorithm 2 has recently been generalized by Lin et al. [2022] to
+allow reusing samples from a wider range of domains (including
+full path samples from varying domains).
+3.3
+Differential Direct Illumination
+In physics-based differentiable rendering, Zhang et al. [2020; 2021b]
+recently introduced a formulation of differential path integrals as
+well as several associated Monte Carlo estimators. Below, we briefly
+describe how these apply to direct illumination.
+1 Our Algorithm 2 is identical to Algorithm 6 in Bitterli et al.’s [2020] work. Please refer
+to their paper for a proof of unbiasedness.
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.
+ALGORITHM 2: Combining reservoirs from spatial and temporal
+neighbors [Bitterli et al. 2020]
+SpatiotemporalReuse(r, 𝑞, 𝑄 ′ , 𝑃 ′ )
+Input: Reservoir r for pixel 𝑞; reservoirs 𝑄 ′ = {r1 , . . . , r𝑘 } from
+pixels 𝑃 ′ = {𝑞 1 , . . . , 𝑞𝑘 } to combine
+Output: One combined reservoir
+2 begin
+3
+for 𝑖 = 1, . . . , 𝑘 do
+4
+UpdateReservoir(r, r𝑖 .𝒚, 𝑝ˆ (𝑞) (r.𝒚 ) r.𝑊 r.𝑀)
+5
+end
+Í
+6
+r.𝑀 ← 𝑘𝑖=1 r𝑖 .𝑀;
+7
+𝑍 ← 0;
+8
+for 𝑖 = 1, . . . , 𝑘 do
+9
+if 𝑝ˆ (𝑞𝑖 ) (r.𝒚 ) > 0 then
+10
+𝑍 ← 𝑍 + r𝑖 .𝑀;
+11
+end
+12
+end
+13
+r.𝑊 ← r.wsum /(𝑝ˆ (𝑞) (r.𝒚 ) 𝑍 );
+14
+return r;
+15 end
+1
+When scene geometry M evolves with parameters 𝜽 ∈ R𝑚𝜽
+(for integer 𝑚𝜽 ≥ 1), Zhang et al. proposed a material-form reparameterization to facilitate differentiating Eq. (1) with respect to 𝜽 .
+This parameterization introduces a motion X such that for any 𝜽 ,
+X(·, 𝜽 ) is a differentiable one-to-one mapping from some predetermined reference configuration B (independent of parameters 𝜽 )
+to the scene geometry M (𝜽 ). To distinguish points in the ordinary
+geometry from those in the reference configuration, we term any
+𝒙 ∈ M (𝜽 ) as spatial points and 𝒑 ∈ B as material points.
+The mapping X(·, 𝜽 ) induces a path-level map X̄(·, 𝜽 ) that takes a
+one-bounce material path 𝒑¯ = (𝒑 0, 𝒑 1, 𝒑 2 ) to an ordinary path 𝒙¯ =
+(𝒙 0, 𝒙 1, 𝒙 2 ) where 𝒙 𝑛 = X(𝒑𝑛 , 𝜽 ) for 𝑛 = 0, 1, 2.
+Applying the change of variable of 𝒙¯ = X̄( ¯
+𝒑, 𝜽 ) to Eq. (1) yields
+its material-form variant:
+∫
+𝐼=
+𝑓ˆ( ¯
+𝒑) d𝜇 ( ¯
+𝒑),
+(7)
+ˆ
+𝛀
+ˆ := B 3 is termed the material path space, and
+where 𝛀
+d𝜇 ( 𝒙¯ )
+𝑓ˆ( ¯
+𝒑) := 𝑓 (𝒙¯ )
+,
+(8)
+d𝜇 ( ¯
+𝒑)
+Î2
+with ∥ d𝜇 ( 𝒙¯ )/d𝜇 ( ¯𝒑) ∥ = 𝑛=0
+∥ d𝐴(𝒙 𝑛 )/d𝐴(𝒑𝑛 ) ∥ being the Jacobian determinant capturing this change of variable.
+Zhang et al. showed differentiating Eq. (7) with respect to 𝜽 equals
+interior
+d𝐼
+=
+d𝜽
+d ˆ
+𝑓 (¯
+𝒑) d𝜇 ( ¯
+𝒑) +
+ˆ d𝜽
+𝛀
+∫
+(9)
+boundary
+∫
+ˆ
+𝜕𝛀
+
+Δ 𝑓ˆ𝐾 ( ¯
+𝒑) 𝒏 𝜕 (𝒑 𝐾 ) ⊤
+d𝒑 𝐾
+d𝜇¤ ( ¯
+𝒑) ,
+d𝜽
+
+where the interior component comes from differentiating the integrand 𝑓ˆ of Eq. (7).
+Amortizing Samples in Physics-Based Inverse Rendering using ReSTIR
+The boundary integral instead covers material boundary path
+ˆ is unique to differentiable rendering, and usually depends
+space 𝜕 𝛀,
+ˆ comprises material
+on scene parameters 𝜽 . For direct lighting, 𝜕 𝛀
+boundary paths 𝒑¯ = (𝒑 0, 𝒑 1, 𝒑 2 ) with exactly one boundary
+segment 𝒑 𝐾 𝒑 𝐾+1 (𝐾 ∈ {0, 1}) such that corresponding spatial
+point 𝒙 𝐾 = X(𝒑 𝐾 , 𝜽 ) is a jump discontinuity of the mutual visibility
+function V(𝒙 𝐾 ↔ 𝒙 𝐾+1 ) when fixing 𝒙 𝐾+1 = X(𝒑 𝐾+1, 𝜽 ). Further,
+𝒏 𝜕 (𝒑 𝐾 ) ⊤ ∈ R1×3 is the unit normal of the visibility boundary at
+𝒑 𝐾 , and d𝒑𝐾/d𝜽 ∈ R3×𝑚𝜽 is the boundary gradient. The differential
+Î
+ˆ is given by d𝜇¤ ( ¯
+measure 𝜇¤ over 𝜕 𝛀
+𝒑) = dℓ (𝒑 𝐾 ) 𝑛≠𝐾 d𝐴(𝒑𝑛 ) with
+ℓ being the curve-length measure.
+Choice of reference configuration. In practice, to estimate gradients
+at 𝜽 = 𝜽 0 we use B = M (𝜽 0 ) as the reference configuration for
+ˆ coincides with
+convenience. In this case, the material path space 𝛀
+ordinary path space 𝛀, and mapping X(·, 𝜽 ) reduces to the identity.
+In other words, a material point 𝒑 is essentially the detached copy
+of its spatial representation 𝒙 = X(𝒑, 𝜽 ) at 𝜽 = 𝜽 0 .
+We note that while the Jacobian ∥ d𝜇 ( 𝒙¯ )/d𝜇 ( ¯𝒑) ∥ in Eq. (8) is one at
+𝜽 = 𝜽 0 , its gradient with respect to 𝜽 generally remains nonzero.
+3.4
+Inverse Rendering and Radiative Backpropagation
+Inverse-rendering optimizations. Optimization-based inverse rendering, or analysis by synthesis, infers scene parameters 𝜽 ∈ R𝑚𝜽
+by minimizing a predetermined rendering loss L (e.g., 𝐿 1 or 𝐿 2 ) between rendered images2 I ∈ R𝑚 I with 𝑚 I pixels and user-specified
+targets I 0 ∈ R𝑚 I :
+arg min L ( I (𝜽 ); I 0 ).
+𝜽
+(10)
+In practice, additional regularization improves robustness. We omit
+such details as they are largely orthogonal to our work.
+Minimizing Eq. (10) with gradient-based methods such as stochastic gradient descent (SGD) or Adam [Kingma and Ba 2014] requires
+differentiating the rendering loss L with respect to parameters 𝜽 .
+According to the chain rule, the gradient d𝜽 L := dL/d𝜽 satisfies
+d𝜽 L = (𝜕 I L) (d𝜽 I),
+(11)
+where 𝜕 I L := 𝜕 L/𝜕I on the right comes from differentiable evaluation of the loss L, and d𝜽 I := dI/d𝜽 is given by Eq. (9).
+Radiative backpropagation. When the number of parameters 𝑚𝜽
+and pixels 𝑚 I are large, storing the rendered image I and full
+computational graph (for reverse-mode automatic differentiation
+[Griewank and Walther 2008]) can lead to performance and storage
+problems. To this end, previous methods [Nimier-David et al. 2020;
+Vicini et al. 2021] apply the chain rule in Eq. (11) at the path-integral
+level. We do this by left-multiplying the gradient 𝜕 I L on both sides
+•
+214:5
+of Eq. (9), yielding:
+interior
+d𝜽 L =
+
+∫
+ˆ
+𝛀
+(𝜕 I L) [𝑞]
+
+d ˆ(𝑞)
+𝑓
+(¯
+𝒑) d𝜇 ( ¯
+𝒑) +
+d𝜽
+(12)
+boundary
+∫
+ˆ
+𝜕𝛀
+
+(𝜕 I L) [𝑞] Δ 𝑓ˆ𝐾 ( ¯
+𝒑) 𝒏 𝜕 (𝒑 𝐾 ) ⊤
+(𝑞)
+d𝒑 𝐾
+d𝜇¤ ( ¯
+𝒑) ,
+d𝜽
+
+where 𝑞 denotes the pixel index where the path 𝒑¯ contributes, and
+(𝜕 I L) [𝑞] ∈ R indicates the value in 𝜕 I L at pixel 𝑞 (where I and
+𝜕 I L have the same shape). Also, 𝑓ˆ(𝑞) denotes the material mea(𝑞)
+surement contribution of the path 𝒑¯ to pixel 𝑞, and Δ 𝑓ˆ𝐾 indicates
+the difference in 𝑓ˆ(𝑞) across visibility boundaries (as per §3.3).
+In §4 and §5, we derive our ReSTIR algorithms that efficiently
+estimate the interior and boundary integrals on the right-hand side
+of Eq. (12) for optimization-based inverse rendering.
+4
+RESTIR FOR INTERIOR INTEGRALS
+We now describe our ReSTIR-based method to efficiently estimate
+the (vector-valued) interior component of Eq. (12):
+
+
+∫
+d ˆ(𝑞)
+(d𝜽 L)int :=
+(𝜕 I L) [𝑞]
+𝑓
+(¯
+𝒑) d𝜇 ( ¯
+𝒑).
+(13)
+ˆ
+d𝜽
+𝛀
+When computing gradients at a fixed 𝜽 = 𝜽 0 , as discussed in §3.3,
+we set the reference configuration to B = M (𝜽 0 ). Note that during
+inverse-rendering optimization, 𝜽 0 varies at each gradient step.
+Overview. We introduce our differentiable RIS estimator in §4.1
+followed by the full ReSTIR version—our main contribution of this
+section—in §4.2. Lastly, we discuss the relation between our method
+and forward-rendering ReSTIR as well as several other technical
+aspects in §4.3.
+4.1
+Differentiable Streaming RIS
+Estimating Eq. (13) via Monte Carlo integration requires sampling
+ˆ
+material light paths 𝒑¯ = (𝒑 0, 𝒑 1, 𝒑 2 ). Since the material path space 𝛀
+coincides with the ordinary one 𝛀(𝜽 0 ), we can sample 𝒑¯ by repurposing methods developed for forward rendering.
+We first construct a camera ray from 𝒑 2 and compute the closest
+intersection 𝒑 1 between this ray and the scene (specifically, the
+reference configuration B). With 𝒑 1 and 𝒑 2 determined, we apply
+streaming RIS (Algorithm 1) to sample 𝒑 0 on a light source by
+letting3
+𝑝ˆ (𝒑 0 ; 𝒑 1 ) = 𝐿e (𝒑 0  𝒑 1 ) 𝑓s (𝒑 0  𝒑 1  𝒑 2 ) 𝐺 (𝒑 0 ↔ 𝒑 1 ),
+(14)
+and 𝑝 c (𝒑 0 ) provided by standard light sampling (i.e., being proportional to emitted radiance 𝐿e (𝒑 0  𝒑 1 )). Using the resulting
+reservoir r from 𝑀 candidate light samples, we obtain a one-sample
+differential RIS estimator:
+
+
+(𝜕 L) [𝑞] r.𝑊 d ˆ(𝑞)
+𝑀
+⟨(d𝜽 L)int ⟩ris
+= I
+𝑓
+(¯
+𝒑) ,
+(15)
+𝑝 (𝒑 1 )
+d𝜽
+where 𝒑¯ = (r.𝒚, 𝒑 1, 𝒑 2 ) and r.𝒚 is the reservoir’s stored sample.
+2We assume all images are gray-scale (with scalar pixel values) for notational simplicity.
+3 On the left hand side of Eq. (14), we omit the dependency of 𝑝ˆ on 𝒑
+2 because, for
+perspective pinhole cameras—which is the case we focus on, 𝒑 2 is constant.
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.
+214:6 •
+Wang, Wyman, Wu, and Zhao
+ALGORITHM 3: Combining reservoirs from spatial and temporal
+neighbors
+ALGORITHM 4: Our streaming RIS with spatiotemporal reuse for
+the interior integral in Eq. (13)
+SpatiotemporalReuse(r, 𝑄)
+Input: Reservoir r; reservoirs 𝑄 = {r1 , . . . , r𝑘 } to combine
+Output: One combined reservoir
+2 begin
+3
+for 𝑖 = 1, . . . , 𝑘 do
+4
+UpdateReservoir(r, r𝑖 .𝒚, 𝑝ˆ (r.𝒚; r.𝒑) r.𝑊 r.𝑀)
+5
+end
+Í
+6
+r.𝑀 ← 𝑘𝑖=1 r𝑖 .𝑀;
+7
+𝑍 ← 0;
+8
+for 𝑖 = 1, . . . , 𝑘 do
+9
+if 𝑝ˆ (r.𝒚; r𝑖 .𝒑) > 0 then
+10
+𝑍 ← 𝑍 + r𝑖 .𝑀;
+11
+end
+12
+end
+13
+r.𝑊 ← r.wsum /(𝑝ˆ (r.𝒚; r.𝒑) 𝑍 );
+14
+return r;
+15 end
+1
+1
+EstInterior(prevReservoirs)
+begin
+/* Sampling light paths (non-differentiable)
+*/
+3
+updateInteriorReservoirs(prevReservoirs) ;
+// §4.2
+4
+paths ← { }; reservoirs ← { };
+5
+foreach pixel 𝑞 do
+/* Sample camera ray through pixel 𝑞
+*/
+6
+Sample 𝒑 1 with the pdf 𝑝 (𝒑 1 );
+2
+/* Generate initial candidates
+*/
+Generate reservoir r using streaming RIS ;
+// §4.1
+r.𝒑 ← 𝒑 1 ;
+// Record shading point
+7
+8
+/* Spatiotemporal reuse
+𝑄 ← PickNeighbors(prevReservoirs, r) ;
+r ← SpatiotemporalReuse(r, 𝑄 ) ;
+9
+10
+/* Store sampled path
+paths[𝑞 ].vtx ← (r.𝒚, 𝒑 1 , 𝒑 2 );
+paths[𝑞 ].pdf ← 𝑝 (𝒑 1 )/r.𝑊 ;
+*/
+/* Store reservoir
+reservoirs[𝑞 ] ← r;
+*/
+13
+/* Forward rendering
+I [𝑞 ] ← 𝑓ˆ(𝑞) (paths[𝑞 ].vtx)/paths[𝑞 ].pdf;
+*/
+14
+11
+12
+In practice, we efficiently compute Eq. (15) by applying reversemode automatic differentiation (AD) to
+
+
+(𝜕 I L) [𝑞] r.𝑊 ˆ(𝑞)
+detach
+𝑓
+(¯
+𝒑),
+(16)
+𝑝 (𝒑 1 )
+where quantities surrounded by the detach() function are treated
+as constants (i.e., independent of 𝜽 ) by AD.
+end
+/* Gradient computation (differentiable)
+*/
+Compute rendering loss L using rendered image I;
+𝜕 I L ← backward( L ) ;
+// Compute 𝜕 I L := 𝜕L/𝜕 I
+(d𝜽 L ) int ← 0;
+foreach pixel 𝑞 do
+¯ pdf ← paths[𝑞 ].vtx, paths[𝑞 ].pdf;
+𝒑,
+𝐼 ← detach(𝜕 I L [𝑞 ]/pdf ) 𝑓ˆ(𝑞) ( ¯
+𝒑) ;
+// Eq. (16)
+15
+16
+17
+18
+19
+4.2
+Spatiotemporal Reuse
+Building on our differential streaming RIS estimator in Eq. (15),
+we introduce a ReSTIR algorithm to reuse spatial and temporal
+candidates. Note that unlike forward rendering, where temporal
+reuse applies to neighboring frames, our technique reuses temporal
+candidates on consecutive inverse-rendering gradient steps.
+As outlined in Algorithm 4, our method consists of path sampling and gradient computation stages with only the latter needing
+differentiable computation. We detail both stages below.
+Path sampling. This stage samples a set of material light paths 𝒑¯ =
+(𝒑 0, 𝒑 1, 𝒑 2 ) that are later used to compute gradients. As discussed in
+§4.1, we sample the path by: (i) constructing a camera ray from 𝒑 2 on
+the detector and intersecting the scene at 𝒑 1 (Line 6 of Algorithm 4);
+and (ii) drawing 𝒑 0 on a light source using streaming RIS (Line 7).
+To improve RIS effectiveness, we reuse reservoirs from the previous gradient step (Line 24). To this end, we record the shading
+point 𝒑 1 (where RIS occurs) in each reservoir as r.𝒑 (Line 8). After
+obtaining a reservoir r using RIS, we find neighbor reservoirs 𝑄 such
+that each r′ ∈ 𝑄 has its shading point r′ .𝒑 near r.𝒑 (Line 9). We
+accelerate this nearest neighbor search using point Kd-trees [Wald
+2022]. After finding neighbors 𝑄, we combine them with r using
+Algorithm 3 (Line 10), which is equivalent to Algorithm 2 except
+for having the target function 𝑝ˆ (·; 𝒑 ′ ) defined with respect to a
+shading point 𝒑 ′ (as opposed to a pixel). The light sample r.𝒚 after
+combining reservoirs completes the path sample 𝒑¯ = (r.𝒚, 𝒑 1, 𝒑 2 ).
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.
+*/
+// §4.2
+// Alg. 3
+20
+21
+/* Back-propagate gradients
+(d𝜽 L ) int ← (d𝜽 L ) int + backward(𝐼 );
+22
+end
+return (d𝜽 L ) int , 𝜕 I L, reservoirs;
+23
+24
+25
+*/
+end
+Updating reservoirs. We note that as previous parameters 𝜽 prev
+generally differ from current step values 𝜽 cur , reservoirs must be
+updated (Line 3) before reuse. Specifically, any prior step reservoir r
+stores light sample r.𝒚 and shading point r.𝒑 from prior reference
+configuration Bprev = M (𝜽 prev ). The current step must instead use
+reference configuration Bcur = M (𝜽 cur ).
+To keep r.𝒚 and r.𝒑 updated, we focus on the common inverserendering setting that represents scene geometries M (𝜽 prev ) and
+M (𝜽 cur ) with triangle meshes of identical topology (but possibly
+differing vertex positions). We record indices of triangles containing r.𝒚 and r.𝒑 and corresponding barycentric coordinates. Then,
+during the updateInteriorReservoirs() on Line 3, we recompute r.𝒚 and r.𝒑 for each reservoir from the stored triangle indices,
+barycentrics, and now-current vertex positions (see Figure 2). Lastly,
+after updating all reservoirs, we rebuild the acceleration structure
+used for efficient nearest-neighbor search (Line 9).
+Amortizing Samples in Physics-Based Inverse Rendering using ReSTIR
+(a) Primary
+Fig. 2. Updating a reservoir’s light sample 𝒚 cur from 𝒚 prev in the previous
+gradient step uses stored triangle ID and barycentric coordinates along with
+new vertex positions from Bcur .
+Gradient computation. After path sampling, our gradient computation evaluates path contributions using Eq. (15) with gradient d 𝑓ˆ(𝑞)/d𝜽 obtained using reverse-mode automatic differentiation.
+As differentiation of 𝑓ˆ(𝑞) is local (i.e., occurs per path), no global
+computation graph is needed—similar to previous radiative backpropagation methods [Nimier-David et al. 2020; Vicini et al. 2021].
+4.3
+Discussion
+Relation to forward-rendering ReSTIR. Although our ReSTIR-based
+technique expressed in §4.2 is closely related to forward-rendering
+ReSTIR [Bitterli et al. 2020; Lin et al. 2022], there are several technical
+differences. Notably, previous ReSTIR methods store reservoirs in
+the screen space. Our method, on the other hand, stores reservoirs
+at shading points r.𝒑 over the reference surface B. Doing so not
+only allows our stored reservoirs to evolve with the scene geometry
+naturally, but also enables efficient multi-view rendering with minibatching—which we will discuss in §7.
+Visibility awareness. The original ReSTIR by Bitterli et al. [2020]
+proposed an option that neglects visibility from light vertex 𝒑 0 to
+the shading point 𝒑 1 for faster forward rendering:
+𝑝ˆ (𝒑 0 ) = 𝐿e (𝒑 0  𝒑 1 ) 𝑓s (𝒑 0  𝒑 1  𝒑 2 ) 𝐺 0 (𝒑 0 ↔ 𝒑 1 ),
+(17)
+with 𝐺 0 the geometric term 𝐺 with visibility V(𝒑 0 ↔ 𝒑 1 ) omitted.
+Instead, we consider the full visibility in Eq. (14)—which has been
+demonstrated necessary for ensuring unbiasedness [Bitterli et al.
+2020; Lin et al. 2022]. Further, this allows the sampling of 𝒑 0 to be
+more occlusion-aware, improving result quality.
+Rejecting reservoirs. Occasionally, a prior reservoir r′ (returned
+by the PickNeighbors() function) near the current one r can have
+a very different surface normal. In other words, 𝒏(r′ .𝒑) ·𝒏(r.𝒑) ≪ 1
+with 𝒏(𝒑) the surface normal at 𝒑. In this case, we follow Bitterli
+et al. and exclude any reservoirs r′ with 𝒏(r′ .𝒑) · 𝒏(r.𝒑) below
+some user-specified threshold from the SpatiotemporalReuse ()
+call.
+5
+RESTIR FOR BOUNDARY INTEGRALS
+We now show how to apply ReSTIR to estimate the boundary component of Eq. (12) from §3.3:
+
+
+∫
+d𝒑
+(𝑞)
+(d𝜽 L)bnd :=
+(𝜕 I L) [𝑞] Δ 𝑓ˆ𝐾 ( ¯
+𝒑) 𝒏 𝜕 (𝒑 𝐾 ) ⊤ 𝐾 d𝜇¤ ( ¯
+𝒑).
+d𝜽
+𝜕ˆ
+𝛀
+(18)
+•
+214:7
+(b) Secondary
+Fig. 3. Primary and secondary boundary paths with boundary segments in
+red. We estimate contributions of these paths separately (§5.1 and §5.2).
+Since this boundary integral is unique to differentiable rendering,
+our technique, to our knowledge, is the first to utilize ReSTIR for
+efficient estimation of these integrals.
+Two types of boundary paths. Recall that a material boundary
+path 𝒑¯ is identical to an ordinary path except it has exactly one
+boundary segment. For direct illumination, shown in Figure 3, there
+are two boundary paths types depending on the location of boundary
+segment 𝒑 𝐾 𝒑 𝐾+1 . Any path with 𝐾 = 1 has endpoint 𝒑 2 on the
+detector and is called a primary boundary path; any with 𝐾 = 0
+has endpoint 𝒑 0 on a light and is called a secondary boundary
+path (see Figure 3).
+Previously, contributions from primary paths could be estimated
+relatively easily, but the secondary ones remained more challenging.
+In §5.1 and §5.2, we design new ReSTIR-based estimators specifically
+to sample both types of boundary paths.
+5.1
+Sampling Primary Boundary Paths
+A primary boundary path has its boundary segment on the camera
+ray (see Figure 3-a). Similar to sampling ordinary paths (in §4.1),
+we generate a primary boundary path by: (i) constructing a camera
+ray defining 𝒑 1 and 𝒑 2 ; and (ii) drawing 𝒑 0 on a light source. In
+the first step, we efficiently pick the camera ray using Monte Carlo
+edge sampling [Li et al. 2018] with object silhouettes projected onto
+the image plane during preprocessing.
+With 𝒑 1 and 𝒑 2 determined, we sample the light vertex 𝒑 0 using
+streaming RIS (Algorithm 1) with the same 𝑝ˆ and 𝑝 c functions as the
+interior integral (§4). This gives the following RIS-based estimator:
+
+
+(𝑞)
+D
+E
+(𝜕 I L) [𝑞] Δ 𝑓ˆ1 ( ¯
+𝒑) r.𝑊
+d𝒑
+pri 𝑀
+(d𝜽 L)bnd
+=
+𝒏 𝜕 (𝒑 1 ) ⊤ 1 , (19)
+𝑝 (𝒑 1 )
+d𝜽
+ris
+where 𝒑¯ = (r.𝒚, 𝒑 1, 𝒑 2 ).
+In practice, we efficiently compute Eq. (19) by applying reversemode automatic differentiation to
+ˆ(𝑞) 𝒑) r.𝑊
+© (𝜕 I L) [𝑞] Δ 𝑓1 ( ¯
+ª
+detach ­
+𝒏 𝜕 (𝒑 1 ) ® · 𝒑 1,
+(20)
+𝑝 (𝒑 1 )
+«
+¬
+where “·” denotes a dot product, and 𝒑 1 outside the detach() function is determined by differentiable ray intersection between the
+camera ray and the scene.
+Spatiotemporal reuse. The similarity in sampling 𝒑 0 for ordinary
+and primary boundary paths allows us to improve the effectiveness
+of our boundary estimator in Eq. (19) by reusing reservoirs generated
+to estimate the interior component (discussed in §4).
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.
+214:8 •
+Wang, Wyman, Wu, and Zhao
+S.2 If 𝒑 0 and 𝒑 B are mutually visible, trace a ray from 𝒑 B in direc−−−−→
+tion 𝒑 0 𝒑 B to find intersection 𝒑 1 . This guarantees 𝒑 0 𝒑 1 is a
+boundary segment.
+ALGORITHM 5: Our streaming RIS with spatiotemporal reuse for
+primary boundary paths
+EstPrimaryBound(𝜕 I L, prevReservoirs)
+begin
+pri
+3
+(d𝜽 L ) bnd ← 0;
+1
+2
+/* Sampling boundary paths (non-differentiable) */
+paths ← { };
+for 𝑖 = 1 to 𝑁 pri do
+// MC edge sampling
+Sample 𝒑 1 with pdf 𝑝 (𝒑 1 ) ;
+Let 𝑞 be the index of the pixel intersecting 𝒑 1 𝒑 2 ;
+4
+5
+6
+7
+8
+9
+10
+/* Generate initial candidates
+Generate reservoir r using stream RIS ;
+*/
+// §4.1
+/* Spatiotemporal reuse
+𝑄 ← PickNeighbors(prevReservoirs, r) ;
+r ← SpatiotemporalReuse(r, 𝑄 ) ;
+*/
+// §4.2
+// Alg. 3
+/* Store sampled path
+paths[𝑖 ].pid ← 𝑞 ;
+paths[𝑖 ].vtx ← (r.𝒚, 𝒑 1 , 𝒑 2 );
+11
+12
+*/
+// Record pixel index
+/* Record the detached factor of Eq. (20)
+pdf ← 𝑝 (𝒑 1 ) 𝑁 pri /r.𝑊 ;
+¯ 𝒏 𝜕 (𝒑 1 )/pdf
+paths[𝑖 ].vec ← 𝜕 I L [𝑞 ] Δ 𝑓ˆ(𝑞) ( 𝒑)
+13
+14
+end
+/* Gradient computation (differentiable)
+*/
+for 𝑖 = 1 to 𝑁 pri do
+𝑞, ¯
+𝒑, 𝒗 ← paths[𝑖 ].pid, paths[𝑖 ].vtx, paths[𝑖 ].vec;
+Re-compute 𝒑 1 using differentiable ray intersection;
+𝐼 ← detach(𝒗 ) · 𝒑 1 ;
+// Eq. (20)
+15
+16
+17
+18
+19
+/* Back-propagate gradients
+pri
+*/
+pri
+(d𝜽 L ) bnd ← (d𝜽 L ) bnd + backward(𝐼 );
+20
+21
+end
+22
+return (d𝜽 L )bnd ;
+23
+*/
+pri
+end
+Specifically, Algorithm 5 outlines how we reuse these reservoirs
+from the prior gradient step (and updated via updateReservoirs()
+in Algorithm 4). Normally it requires only a few samples to estimate
+the primary boundary, so we opt not to store new reservoirs (obtained after Line 10) in Algorithm 5 to simplify the overall pipeline.
+5.2
+Sampling Secondary Boundary Paths
+Unlike primary boundary paths, secondary paths (as illustrated in
+Figure 3b) are more challenging as they need knowledge of object
+silhouettes with respect to arbitrary shading locations 𝒑 1 .
+Multi-directional sampling. Previously, Li et al. [2018] leveraged a
+high-dimensional bounding volume hierarchy to accelerate silhouette detection, but this remains prohibitively expensive for complex
+geometry. Zhang et al. [2020] introduced a multi-directional sampling technique to avoid explicit detection of object silhouettes.
+Specifically, they build a secondary boundary path in three steps:
+S.1 Sample point 𝒑 B from a triangle edge with probability 𝑝 (𝒑 B );
+sample light vertex 𝒑 0 with conditional probability 𝑝 (𝒑 0 | 𝒑 B ).
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.
+S.3 Complete path 𝒑¯ = (𝒑 0, 𝒑 1, 𝒑 2 ) with 𝒑 2 being the perspective
+camera’s center of projection.
+This sampling process gives an ordinary Monte Carlo estimator:
+
+D
+E 𝐹 snd (𝒑 B, 𝒑 0, 𝒑 2 ) 
+⊤ d𝒑 0
+snd
+𝒏
+(𝒑
+)
+(d𝜽 L)bnd
+= bndB
+,
+(21)
+𝜕 0
+d𝜽
+𝑝 (𝒑 ) 𝑝 (𝒑 0 | 𝒑 B )
+where
+snd B
+𝐹 bnd
+(𝒑 , 𝒑 0, 𝒑 2 ) := (𝜕 I L) [𝑞] Δ 𝑓ˆ0
+(𝑞)
+(¯
+𝒑) 𝐽 B (𝒑 B, 𝒑 0 ),
+(22)
+with
+d𝐴(𝒑 1 ) dℓ (𝒑 0 )
+,
+(23)
+dℓ (𝒑 B ) d𝐴(𝒑 0 )
+the Jacobian determinant for changing from joint probability density
+𝑝 (𝒑 0, 𝒑 1 ) to 𝑝 (𝒑 B, 𝒑 0 ). Refer to Zhang et al. [2020] for more details,
+including the derivation of 𝐽 B .
+𝐽 B (𝒑 B, 𝒑 0 ) :=
+Streaming RIS. The first step (S.1) in multi-directional sampling
+draws light vertex 𝒑 0 given 𝒑 B on a triangle edge. For scenes with
+complex illumination and visibility, sampling 𝒑 0 via streaming RIS
+(Algorithm 1) improves efficiency. To this end, given 𝒑 B we set 𝑝ˆ as
+snd B
+𝑝ˆ (𝒑 0 ; 𝒑 B ) = 𝐹 bnd
+(𝒑 , 𝒑 0, 𝒑 2 ),
+(24)
+snd defined in Eq. (22), and standard light sampling with pdf
+with 𝐹 bnd
+
+
+d𝒑
+𝑝 c . Here we neglect gradient term 𝒏 𝜕 (𝒑 0 ) ⊤ d𝜽0 as it is difficult to
+obtain in the path sampling stage. This leads to our RIS estimator:
+
+D
+E 𝑀 𝐹 snd (𝒑 B, 𝒑 0, 𝒑 2 ) r.𝑊 
+⊤ d𝒑 0
+snd
+𝒏
+(𝒑
+)
+, (25)
+(d𝜽 L)bnd
+= bnd
+𝜕 0
+d𝜽
+ris
+𝑝 (𝒑 B )
+which essentially replaces 𝑝 (𝒑 0 | 𝒑 B ) in the ordinary Monte Carlo
+estimator of Eq. (21) with 1/r.𝑊 as 𝒑 0 is now drawn with RIS.
+With automatic differentiation, Eq. (25) can be computed as:
+!
+𝐹 snd (𝒑 B, 𝒑 0, 𝒑 2 ) r.𝑊
+detach bnd
+𝒏
+(𝒑
+)
+(26)
+𝜕 0 · 𝒑0 .
+𝑝 (𝒑 B )
+Spatiotemporal reuse. To improve our estimator’s efficiency, we introduce a new spatiotemporal reuse scheme for secondary boundary
+paths. As described in Algorithm 6, we record 𝒑 B in each reservoir
+r (Line 9) and use this point for nearest neighbor searches (Line 10),
+rather than using shading point 𝒑 1 as in our other computations.
+After merging r with nearby reservoirs from the previous gradient
+step, we trace a ray to obtain 𝒑 1 (S.2) to complete the path sample
+𝒑¯ = (r.𝒚, 𝒑 1, 𝒑 2 ).
+As in Algorithms 4 and 5, the sampled paths are then evaluated
+using automatic differentiation (Line 24 of Algorithm 6) via Eq. (26).
+Importance sampling of 𝒑 B . Before drawing 𝒑 0 on a light, Zhang
+et al.’s [2020] multi-directional sampling picks 𝒑 B from a triangle
+edge (Line 7). A naïve implementation could (i) select an edge 𝒆𝑘
+with probability 𝑝𝑘 proportional to edge length ∥𝒆𝑘 ∥; and (ii) draw
+𝒑 B uniformly from 𝒆𝑘 . But this loses efficiency in complex scenes if
+it frequently returns samples 𝒑 B not visible to any light.
+Amortizing Samples in Physics-Based Inverse Rendering using ReSTIR
+p?
+1
+p?
+p?
+3
+p?
+2
+<latexit sha1_base64="4xC7PziXkYltzdbT+NkLyDml2AQ=">AAACDXicbVDLSgMxFM34rPU1Kq7cBIvgqsxIfSwLblxWsA9ox5LJZNrQPIYkI5Sh3+A3uNW1O3HrN7j0T8y0s7CtF0LOPede7uGECaPaeN63s7K6tr6xWdoqb+/s7u27B4ctLVOFSRNLJlUnRJowKkjTUMNIJ1EE8ZCRdji6zfX2E1GaSvFgxgkJOBoIGlOMjKX67nEvlCzSY26/LJk8ZrY3k75b8aretOAy8AtQAUU1+u5PL5I45UQYzJDWXd9LTJAhZShmZFLupZokCI/QgHQtFIgTHWRT+xN4ZpkIxlLZJwycsn83MsR17tBOcmSGelHLyf+0bmrimyCjIkkNEXh2KE4ZNBLmWcCIKoING1uAsKLWK8RDpBA2NrG5KyHPM/EXE1gGrYuqf1W9vK9V6rUinRI4AafgHPjgGtTBHWiAJsAgAy/gFbw5z8678+F8zkZXnGLnCMyV8/ULmgKdAQ==</latexit>
+<latexit sha1_base64="4xC7PziXkYltzdbT+NkLyDml2AQ=">AAACDXicbVDLSgMxFM34rPU1Kq7cBIvgqsxIfSwLblxWsA9ox5LJZNrQPIYkI5Sh3+A3uNW1O3HrN7j0T8y0s7CtF0LOPede7uGECaPaeN63s7K6tr6xWdoqb+/s7u27B4ctLVOFSRNLJlUnRJowKkjTUMNIJ1EE8ZCRdji6zfX2E1GaSvFgxgkJOBoIGlOMjKX67nEvlCzSY26/LJk8ZrY3k75b8aretOAy8AtQAUU1+u5PL5I45UQYzJDWXd9LTJAhZShmZFLupZokCI/QgHQtFIgTHWRT+xN4ZpkIxlLZJwycsn83MsR17tBOcmSGelHLyf+0bmrimyCjIkkNEXh2KE4ZNBLmWcCIKoING1uAsKLWK8RDpBA2NrG5KyHPM/EXE1gGrYuqf1W9vK9V6rUinRI4AafgHPjgGtTBHWiAJsAgAy/gFbw5z8678+F8zkZXnGLnCMyV8/ULmgKdAQ==</latexit>
+ALGORITHM 6: Our streaming RIS with spatiotemporal reuse for
+secondary boundary paths
+EstSecondaryBound(𝜕 I L, prevEdgeReservoirs)
+begin
+snd ← 0;
+3
+(d𝜽 L ) bnd
+1
+4
+5
+6
+7
+<latexit sha1_base64="E2cJds1YjFQZf8qdZfE5fosGk7k=">AAACD3icbVC7TsMwFHXKq5RXgIGBxaJCYqqSqjzGSiyMRaIPqQ2R47itVduJbAepivIRfAMrzGyIlU9g5E9w2gy05UiWj865V/feE8SMKu0431ZpbX1jc6u8XdnZ3ds/sA+POipKJCZtHLFI9gKkCKOCtDXVjPRiSRAPGOkGk9vc7z4RqWgkHvQ0Jh5HI0GHFCNtJN8+GQQRC9WUmy+NM7/+mBpFZ75ddWrODHCVuAWpggIt3/4ZhBFOOBEaM6RU33Vi7aVIaooZySqDRJEY4Qkakb6hAnGivHR2QAbPjRLCYSTNExrO1L8dKeIq39FUcqTHatnLxf+8fqKHN15KRZxoIvB80DBhUEcwTwOGVBKs2dQQhCU1u0I8RhJhbTJbmBLwPBN3OYFV0qnX3Kva5X2j2mwU6ZTBKTgDF8AF16AJ7kALtAEGGXgBr+DNerberQ/rc15asoqeY7AA6+sX2Radpg==</latexit>
+9
+11
+<latexit sha1_base64="Jdg39xrU42nzWgRe/RC/n5vDOWk=">AAACD3icbVC7TsMwFHXKq5RXgIGBxaJCYqoSKI+xEgtjkehDakPkOE5r1Y4j20GqonwE38AKMxti5RMY+ROctgNtOZLlo3Pu1b33BAmjSjvOt1VaWV1b3yhvVra2d3b37P2DthKpxKSFBROyGyBFGI1JS1PNSDeRBPGAkU4wui38zhORior4QY8T4nE0iGlEMdJG8u2jfiBYqMbcfFmS+xePmVF07ttVp+ZMAJeJOyNVMEPTt3/6ocApJ7HGDCnVc51EexmSmmJG8ko/VSRBeIQGpGdojDhRXjY5IIenRglhJKR5sYYT9W9HhrgqdjSVHOmhWvQK8T+vl+roxstonKSaxHg6KEoZ1AIWacCQSoI1GxuCsKRmV4iHSCKsTWZzUwJeZOIuJrBM2uc196p2eV+vNuqzdMrgGJyAM+CCa9AAd6AJWgCDHLyAV/BmPVvv1of1OS0tWbOeQzAH6+sX2rCdpw==</latexit>
+<latexit sha1_base64="E2cJds1YjFQZf8qdZfE5fosGk7k=">AAACD3icbVC7TsMwFHXKq5RXgIGBxaJCYqqSqjzGSiyMRaIPqQ2R47itVduJbAepivIRfAMrzGyIlU9g5E9w2gy05UiWj865V/feE8SMKu0431ZpbX1jc6u8XdnZ3ds/sA+POipKJCZtHLFI9gKkCKOCtDXVjPRiSRAPGOkGk9vc7z4RqWgkHvQ0Jh5HI0GHFCNtJN8+GQQRC9WUmy+NM7/+mBpFZ75ddWrODHCVuAWpggIt3/4ZhBFOOBEaM6RU33Vi7aVIaooZySqDRJEY4Qkakb6hAnGivHR2QAbPjRLCYSTNExrO1L8dKeIq39FUcqTHatnLxf+8fqKHN15KRZxoIvB80DBhUEcwTwOGVBKs2dQQhCU1u0I8RhJhbTJbmBLwPBN3OYFV0qnX3Kva5X2j2mwU6ZTBKTgDF8AF16AJ7kALtAEGGXgBr+DNerberQ/rc15asoqeY7AA6+sX2Radpg==</latexit>
+A pixel (within
+<latexit sha1_base64="JGAGhKIZ7dbvXN80EkR9Tf1PiUQ=">AAACD3icbVC7TsMwFHV4lvIKMDCwWFRITFWCymOsxMJYJPqQ2hA5jtNadezIdpCqKB/BN7DCzIZY+QRG/gSnzUBbjmT56Jx7de89QcKo0o7zba2srq1vbFa2qts7u3v79sFhR4lUYtLGggnZC5AijHLS1lQz0kskQXHASDcY3xZ+94lIRQV/0JOEeDEachpRjLSRfPt4EAgWqklsvizJffcxM4rOfbvm1J0p4DJxS1IDJVq+/TMIBU5jwjVmSKm+6yTay5DUFDOSVwepIgnCYzQkfUM5ionysukBOTwzSggjIc3jGk7Vvx0ZilWxo6mMkR6pRa8Q//P6qY5uvIzyJNWE49mgKGVQC1ikAUMqCdZsYgjCkppdIR4hibA2mc1NCeIiE3cxgWXSuai7V/XL+0at2SjTqYATcArOgQuuQRPcgRZoAwxy8AJewZv1bL1bH9bnrHTFKnuOwBysr1/XfJ2l</latexit>
+Pixel
+center
+<latexit sha1_base64="Jdg39xrU42nzWgRe/RC/n5vDOWk=">AAACD3icbVC7TsMwFHXKq5RXgIGBxaJCYqoSKI+xEgtjkehDakPkOE5r1Y4j20GqonwE38AKMxti5RMY+ROctgNtOZLlo3Pu1b33BAmjSjvOt1VaWV1b3yhvVra2d3b37P2DthKpxKSFBROyGyBFGI1JS1PNSDeRBPGAkU4wui38zhORior4QY8T4nE0iGlEMdJG8u2jfiBYqMbcfFmS+xePmVF07ttVp+ZMAJeJOyNVMEPTt3/6ocApJ7HGDCnVc51EexmSmmJG8ko/VSRBeIQGpGdojDhRXjY5IIenRglhJKR5sYYT9W9HhrgqdjSVHOmhWvQK8T+vl+roxstonKSaxHg6KEoZ1AIWacCQSoI1GxuCsKRmV4iHSCKsTWZzUwJeZOIuJrBM2uc196p2eV+vNuqzdMrgGJyAM+CCa9AAd6AJWgCDHLyAV/BmPVvv1of1OS0tWbOeQzAH6+sX2rCdpw==</latexit>
+p?
+3
+the image plane)
+(b) Boundary sampling
+Fig. 4. Pixel-level antithetic sampling: To differentiate pixel reconstruction filters using the PSDR formulation [Zhang et al. 2020], Yu et al. [2022]
+showed pixel-level antithetic sampling is crucial to efficiently estimate derivatives relative to object shape. (a) When computing interior integrals (§4),
+for each camera ray intersection at 𝒑 ⊥ , Yu et al. [2022] proposed generating
+⊥
+⊥
+three correlated rays through 𝒑 ⊥
+1 , 𝒑 2 , and 𝒑 3 symmetrically around the
+pixel center. (b) When handling pixel boundaries (§6), which emerges from
+pixel filter discontinuities and can be handled identically to primary boundaries (§5.1), these correlated rays are sampled on the pixel boundary.
+/* Complete the path sample
+/* Back-propagate gradients
+snd ← (d L ) snd + backward(𝐼 );
+(d𝜽 L ) bnd
+𝜽
+bnd
+25
+*/
+end
+snd , edgeReservoirs;
+return (d𝜽 L )bnd
+26
+27
+end
+To address this problem, we leverage our reservoirs to guide edge
+sampling as follows. For an edge 𝒆𝑘 containing 𝑛𝑘 reservoirs (i.e.,
+𝑛𝑘 reservoirs r with r.𝒑 lying on 𝒆𝑘 ), we set its (discrete) sampling
+probability 𝑝𝑘 to be proportional to the average weight of the 𝑛𝑘
+reservoirs modulated by the edge length ∥𝒆𝑘 ∥:
+Í
+
+r∈𝒆𝑘 ( r.wsum/r.𝑀 )
+𝑝𝑘 ∝
++ 𝜖 ∥𝒆𝑘 ∥.
+(27)
+𝑛𝑘
+Importance sampling for edges using Eq. (27) significantly improves
+performance, as we demonstrate in §8.1.
+Various guiding methods in primary-sample space [Zhang et al.
+2020; Yan et al. 2022] have been proposed. They importance sample
+both 𝒑 B and 𝒑 0 but require nontrivial precomputation. Instead, our
+Camera
+Pixel
+center
+<latexit sha1_base64="4xC7PziXkYltzdbT+NkLyDml2AQ=">AAACDXicbVDLSgMxFM34rPU1Kq7cBIvgqsxIfSwLblxWsA9ox5LJZNrQPIYkI5Sh3+A3uNW1O3HrN7j0T8y0s7CtF0LOPede7uGECaPaeN63s7K6tr6xWdoqb+/s7u27B4ctLVOFSRNLJlUnRJowKkjTUMNIJ1EE8ZCRdji6zfX2E1GaSvFgxgkJOBoIGlOMjKX67nEvlCzSY26/LJk8ZrY3k75b8aretOAy8AtQAUU1+u5PL5I45UQYzJDWXd9LTJAhZShmZFLupZokCI/QgHQtFIgTHWRT+xN4ZpkIxlLZJwycsn83MsR17tBOcmSGelHLyf+0bmrimyCjIkkNEXh2KE4ZNBLmWcCIKoING1uAsKLWK8RDpBA2NrG5KyHPM/EXE1gGrYuqf1W9vK9V6rUinRI4AafgHPjgGtTBHWiAJsAgAy/gFbw5z8678+F8zkZXnGLnCMyV8/ULmgKdAQ==</latexit>
+<latexit sha1_base64="E2cJds1YjFQZf8qdZfE5fosGk7k=">AAACD3icbVC7TsMwFHXKq5RXgIGBxaJCYqqSqjzGSiyMRaIPqQ2R47itVduJbAepivIRfAMrzGyIlU9g5E9w2gy05UiWj865V/feE8SMKu0431ZpbX1jc6u8XdnZ3ds/sA+POipKJCZtHLFI9gKkCKOCtDXVjPRiSRAPGOkGk9vc7z4RqWgkHvQ0Jh5HI0GHFCNtJN8+GQQRC9WUmy+NM7/+mBpFZ75ddWrODHCVuAWpggIt3/4ZhBFOOBEaM6RU33Vi7aVIaooZySqDRJEY4Qkakb6hAnGivHR2QAbPjRLCYSTNExrO1L8dKeIq39FUcqTHatnLxf+8fqKHN15KRZxoIvB80DBhUEcwTwOGVBKs2dQQhCU1u0I8RhJhbTJbmBLwPBN3OYFV0qnX3Kva5X2j2mwU6ZTBKTgDF8AF16AJ7kALtAEGGXgBr+DNerberQ/rc15asoqeY7AA6+sX2Radpg==</latexit>
+p?
+2
+p?
+(a)
+p
+r2
+p⇤
+<latexit sha1_base64="Wu2q4AYOky0ytuZnsO+i8w5Gc8s=">AAACAnicdVDLSsNAFJ34rPVVdelmsAiuQlJqdVlw47KCfUATymQ6aYdOJmHmRighO7/Bra7diVt/xKV/4qStYH1cGOZwzr3cc0+QCK7Bcd6tldW19Y3N0lZ5e2d3b79ycNjRcaooa9NYxKoXEM0El6wNHATrJYqRKBCsG0yuCr17x5TmsbyFacL8iIwkDzklYCjPiwiMATKVD2qDStWxG05R+Ddw7dnvVNGiWoPKhzeMaRoxCVQQrfuuk4CfEQWcCpaXvVSzhNAJGbG+gZJETPvZzHOOTw0zxGGszJOAZ+z3iYxEWk+jwHQWHvVPrSD/0vophJd+xmWSApN0vihMBYYYFwHgIVeMgpgaQKjixiumY6IIBRPT0pYgyk0mX4fj/0GnZrsN+/ymXm3WF+mU0DE6QWfIRReoia5RC7URRQl6QI/oybq3nq0X63XeumItZo7QUllvn1aSmH8=</latexit>
+r3
+<latexit sha1_base64="aQu7bzXHCIN7bSsRRyuUlgU693A=">AAACAnicdVDLSsNAFJ34rPVVdelmsAiuQqK1uiy4cVnBPqAJZTKdtENnkjBzI5SQnd/gVtfuxK0/4tI/cdJWsD4uDHM4517uuSdIBNfgOO/W0vLK6tp6aaO8ubW9s1vZ22/rOFWUtWgsYtUNiGaCR6wFHATrJooRGQjWCcZXhd65Y0rzOLqFScJ8SYYRDzklYCjPkwRGAJnK+2f9StWx605R+Ddw7envVNG8mv3KhzeIaSpZBFQQrXuuk4CfEQWcCpaXvVSzhNAxGbKegRGRTPvZ1HOOjw0zwGGszIsAT9nvExmRWk9kYDoLj/qnVpB/ab0Uwks/41GSAovobFGYCgwxLgLAA64YBTExgFDFjVdMR0QRCiamhS2BzE0mX4fj/0H71Hbr9vlNrdqozdMpoUN0hE6Qiy5QA12jJmohihL0gB7Rk3VvPVsv1uusdcmazxyghbLePgFYJZiA</latexit>
+Camera
+<latexit sha1_base64="4xC7PziXkYltzdbT+NkLyDml2AQ=">AAACDXicbVDLSgMxFM34rPU1Kq7cBIvgqsxIfSwLblxWsA9ox5LJZNrQPIYkI5Sh3+A3uNW1O3HrN7j0T8y0s7CtF0LOPede7uGECaPaeN63s7K6tr6xWdoqb+/s7u27B4ctLVOFSRNLJlUnRJowKkjTUMNIJ1EE8ZCRdji6zfX2E1GaSvFgxgkJOBoIGlOMjKX67nEvlCzSY26/LJk8ZrY3k75b8aretOAy8AtQAUU1+u5PL5I45UQYzJDWXd9LTJAhZShmZFLupZokCI/QgHQtFIgTHWRT+xN4ZpkIxlLZJwycsn83MsR17tBOcmSGelHLyf+0bmrimyCjIkkNEXh2KE4ZNBLmWcCIKoING1uAsKLWK8RDpBA2NrG5KyHPM/EXE1gGrYuqf1W9vK9V6rUinRI4AafgHPjgGtTBHWiAJsAgAy/gFbw5z8678+F8zkZXnGLnCMyV8/ULmgKdAQ==</latexit>
+<latexit sha1_base64="SP9KzFiXShQYiNns6oQKtiQCoKk=">AAACAnicdVDLSsNAFJ3UV62vqks3g0VwFRKp1WXBjcsK9gFNKJPppB06mYSZG6GE7PwGt7p2J279EZf+iZO2gvVxYZjDOfdyzz1BIrgGx3m3Siura+sb5c3K1vbO7l51/6Cj41RR1qaxiFUvIJoJLlkbOAjWSxQjUSBYN5hcFXr3jinNY3kL04T5ERlJHnJKwFCeFxEYA2QqH7iDas2xG05R+Ddw7dnv1NCiWoPqhzeMaRoxCVQQrfuuk4CfEQWcCpZXvFSzhNAJGbG+gZJETPvZzHOOTwwzxGGszJOAZ+z3iYxEWk+jwHQWHvVPrSD/0vophJd+xmWSApN0vihMBYYYFwHgIVeMgpgaQKjixiumY6IIBRPT0pYgyk0mX4fj/0HnzHYb9vlNvdasL9IpoyN0jE6Riy5QE12jFmojihL0gB7Rk3VvPVsv1uu8tWQtZg7RUllvn1T/mH4=</latexit>
+<latexit sha1_base64="pKMNmSrN4pjciFOmLA7Lteb3cDI=">AAACBHicbVDLSgMxFL1TX7W+qi7dBIvgqsxIfSwLblxWsA9ox5LJpG1oMhmSjFCGbv0Gt7p2J279D5f+iZl2Frb1QMjhnHu5hxPEnGnjut9OYW19Y3OruF3a2d3bPygfHrW0TBShTSK5VJ0Aa8pZRJuGGU47saJYBJy2g/Ft5refqNJMRg9mElNf4GHEBoxgY6XHXiB5qCfCfmk87ZcrbtWdAa0SLycVyNHol396oSSJoJEhHGvd9dzY+ClWhhFOp6VeommMyRgPadfSCAuq/XSWeorOrBKigVT2RQbN1L8bKRY6i2YnBTYjvexl4n9eNzGDGz9lUZwYGpH5oUHCkZEoqwCFTFFi+MQSTBSzWREZYYWJsUUtXAlE1om33MAqaV1Uvavq5X2tUq/l7RThBE7hHDy4hjrcQQOaQEDBC7zCm/PsvDsfzud8tODkO8ewAOfrFz6umZM=</latexit>
+<latexit sha1_base64="KW6erAlPI4uMuKwCJeGNT9cV3Og=">AAACCHicbVC7TsMwFHXKq5RXgJHFokJCDFWCymOsxMJYJPqQ2lA5jtNadezIdipVUX6Ab2CFmQ2x8heM/AlOm4G2HMny0Tn36h4dP2ZUacf5tkpr6xubW+Xtys7u3v6BfXjUViKRmLSwYEJ2faQIo5y0NNWMdGNJUOQz0vHHd7nfmRCpqOCPehoTL0JDTkOKkTbSwLb7vmCBmkbmS+Ps6WJgV52aMwNcJW5BqqBAc2D/9AOBk4hwjRlSquc6sfZSJDXFjGSVfqJIjPAYDUnPUI4iorx0ljyDZ0YJYCikeVzDmfp3I0WRysOZyQjpkVr2cvE/r5fo8NZLKY8TTTieHwoTBrWAeQ0woJJgzaaGICypyQrxCEmEtSlr4YofZaYTd7mBVdK+rLnXtauHerVRL9opgxNwCs6BC25AA9yDJmgBDCbgBbyCN+vZerc+rM/5aMkqdo7BAqyvX+TqmmA=</latexit>
+r1
+Pixel
+center
+<latexit sha1_base64="E2cJds1YjFQZf8qdZfE5fosGk7k=">AAACD3icbVC7TsMwFHXKq5RXgIGBxaJCYqqSqjzGSiyMRaIPqQ2R47itVduJbAepivIRfAMrzGyIlU9g5E9w2gy05UiWj865V/feE8SMKu0431ZpbX1jc6u8XdnZ3ds/sA+POipKJCZtHLFI9gKkCKOCtDXVjPRiSRAPGOkGk9vc7z4RqWgkHvQ0Jh5HI0GHFCNtJN8+GQQRC9WUmy+NM7/+mBpFZ75ddWrODHCVuAWpggIt3/4ZhBFOOBEaM6RU33Vi7aVIaooZySqDRJEY4Qkakb6hAnGivHR2QAbPjRLCYSTNExrO1L8dKeIq39FUcqTHatnLxf+8fqKHN15KRZxoIvB80DBhUEcwTwOGVBKs2dQQhCU1u0I8RhJhbTJbmBLwPBN3OYFV0qnX3Kva5X2j2mwU6ZTBKTgDF8AF16AJ7kALtAEGGXgBr+DNerberQ/rc15asoqeY7AA6+sX2Radpg==</latexit>
+p?
+2
+p?
+sha1_base64="7D+Dg2NKhdEkZejbBRHo0dQ9EWU=">AAACBHicbVDLSsNAFJ3UV62vqks3wSK4Cklpre4KblxWsA9oY5lMJu3QeYSZiVBCt36DW127E7f+h0v/xEkb0FYPDHM4517u4QQxJUq77qdVWFvf2Nwqbpd2dvf2D8qHRx0lEolwGwkqZC+AClPCcVsTTXEvlhiygOJuMLnO/O4DlooIfqenMfYZHHESEQS1ke4HgaChmjLzpfFsWK64TqNevap5tuu4c/wQLycVkKM1LH8NQoEShrlGFCrV99xY+ymUmiCKZ6VBonAM0QSOcN9QDhlWfjpPPbPPjBLakZDmcW3P1d8bKWQqi2YmGdRjtepl4n9eP9HRpZ8SHicac7Q4FCXU1sLOKrBDIjHSdGoIRJKYrDYaQwmRNkUtXQlY1om32sBf0qk63oVTv61Vmm7eThGcgFNwDjzQAE1wA1qgDRCQ4Ak8gxfr0Xq13qz3xWjByneOwRKsj29orZmr</latexit>
+24
+<latexit
+22
+23
+ar p
+21
+Ne
+*/
+end
+/* Gradient computation (differentiable)
+*/
+for 𝑖 = 1 to 𝑁 snd do
+𝑞, ¯
+𝒑, 𝒗 ← paths[𝑖 ].pid, paths[𝑖 ].vtx, paths[𝑖 ].vec;
+Re-compute 𝒑 0 using differentiable ray intersection;
+𝐼 ← detach(𝒗 ) · 𝒑 0 ;
+// Eq. (26)
+20
+28
+/* Store reservoir
+edgeReservoirs[𝑖 ] ← r;
+r1
+p
+r2
+p⇤
+<latexit sha1_base64="SP9KzFiXShQYiNns6oQKtiQCoKk=">AAACAnicdVDLSsNAFJ3UV62vqks3g0VwFRKp1WXBjcsK9gFNKJPppB06mYSZG6GE7PwGt7p2J279EZf+iZO2gvVxYZjDOfdyzz1BIrgGx3m3Siura+sb5c3K1vbO7l51/6Cj41RR1qaxiFUvIJoJLlkbOAjWSxQjUSBYN5hcFXr3jinNY3kL04T5ERlJHnJKwFCeFxEYA2QqH7iDas2xG05R+Ddw7dnv1NCiWoPqhzeMaRoxCVQQrfuuk4CfEQWcCpZXvFSzhNAJGbG+gZJETPvZzHOOTwwzxGGszJOAZ+z3iYxEWk+jwHQWHvVPrSD/0vophJd+xmWSApN0vihMBYYYFwHgIVeMgpgaQKjixiumY6IIBRPT0pYgyk0mX4fj/0HnzHYb9vlNvdasL9IpoyN0jE6Riy5QE12jFmojihL0gB7Rk3VvPVsv1uu8tWQtZg7RUllvn1T/mH4=</latexit>
+<latexit sha1_base64="pKMNmSrN4pjciFOmLA7Lteb3cDI=">AAACBHicbVDLSgMxFL1TX7W+qi7dBIvgqsxIfSwLblxWsA9ox5LJpG1oMhmSjFCGbv0Gt7p2J279D5f+iZl2Frb1QMjhnHu5hxPEnGnjut9OYW19Y3OruF3a2d3bPygfHrW0TBShTSK5VJ0Aa8pZRJuGGU47saJYBJy2g/Ft5refqNJMRg9mElNf4GHEBoxgY6XHXiB5qCfCfmk87ZcrbtWdAa0SLycVyNHol396oSSJoJEhHGvd9dzY+ClWhhFOp6VeommMyRgPadfSCAuq/XSWeorOrBKigVT2RQbN1L8bKRY6i2YnBTYjvexl4n9eNzGDGz9lUZwYGpH5oUHCkZEoqwCFTFFi+MQSTBSzWREZYYWJsUUtXAlE1om33MAqaV1Uvavq5X2tUq/l7RThBE7hHDy4hjrcQQOaQEDBC7zCm/PsvDsfzud8tODkO8ewAOfrFz6umZM=</latexit>
+<latexit sha1_base64="Wu2q4AYOky0ytuZnsO+i8w5Gc8s=">AAACAnicdVDLSsNAFJ34rPVVdelmsAiuQlJqdVlw47KCfUATymQ6aYdOJmHmRighO7/Bra7diVt/xKV/4qStYH1cGOZwzr3cc0+QCK7Bcd6tldW19Y3N0lZ5e2d3b79ycNjRcaooa9NYxKoXEM0El6wNHATrJYqRKBCsG0yuCr17x5TmsbyFacL8iIwkDzklYCjPiwiMATKVD2qDStWxG05R+Ddw7dnvVNGiWoPKhzeMaRoxCVQQrfuuk4CfEQWcCpaXvVSzhNAJGbG+gZJETPvZzHOOTw0zxGGszJOAZ+z3iYxEWk+jwHQWHvVPrSD/0vophJd+xmWSApN0vihMBYYYFwHgIVeMgpgaQKjixiumY6IIBRPT0pYgyk0mX4fj/0GnZrsN+/ymXm3WF+mU0DE6QWfIRReoia5RC7URRQl6QI/oybq3nq0X63XeumItZo7QUllvn1aSmH8=</latexit>
+<latexit sha1_base64="KW6erAlPI4uMuKwCJeGNT9cV3Og=">AAACCHicbVC7TsMwFHXKq5RXgJHFokJCDFWCymOsxMJYJPqQ2lA5jtNadezIdipVUX6Ab2CFmQ2x8heM/AlOm4G2HMny0Tn36h4dP2ZUacf5tkpr6xubW+Xtys7u3v6BfXjUViKRmLSwYEJ2faQIo5y0NNWMdGNJUOQz0vHHd7nfmRCpqOCPehoTL0JDTkOKkTbSwLb7vmCBmkbmS+Ps6WJgV52aMwNcJW5BqqBAc2D/9AOBk4hwjRlSquc6sfZSJDXFjGSVfqJIjPAYDUnPUI4iorx0ljyDZ0YJYCikeVzDmfp3I0WRysOZyQjpkVr2cvE/r5fo8NZLKY8TTTieHwoTBrWAeQ0woJJgzaaGICypyQrxCEmEtSlr4YofZaYTd7mBVdK+rLnXtauHerVRL9opgxNwCs6BC25AA9yDJmgBDCbgBbyCN+vZerc+rM/5aMkqdo7BAqyvX+TqmmA=</latexit>
+Im
+pl age
+an
+e
+19
+*/
+sha1_base64="7D+Dg2NKhdEkZejbBRHo0dQ9EWU=">AAACBHicbVDLSsNAFJ3UV62vqks3wSK4Cklpre4KblxWsA9oY5lMJu3QeYSZiVBCt36DW127E7f+h0v/xEkb0FYPDHM4517u4QQxJUq77qdVWFvf2Nwqbpd2dvf2D8qHRx0lEolwGwkqZC+AClPCcVsTTXEvlhiygOJuMLnO/O4DlooIfqenMfYZHHESEQS1ke4HgaChmjLzpfFsWK64TqNevap5tuu4c/wQLycVkKM1LH8NQoEShrlGFCrV99xY+ymUmiCKZ6VBonAM0QSOcN9QDhlWfjpPPbPPjBLakZDmcW3P1d8bKWQqi2YmGdRjtepl4n9eP9HRpZ8SHicac7Q4FCXU1sLOKrBDIjHSdGoIRJKYrDYaQwmRNkUtXQlY1om32sBf0qk63oVTv61Vmm7eThGcgFNwDjzQAE1wA1qgDRCQ4Ak8gxfr0Xq13qz3xWjByneOwRKsj29orZmr</latexit>
+18
+/* Record the detached factor of Eq. (26)
+pdf ← 𝑝 (𝒑 𝐵 ) 𝑁 snd /r.𝑊 ;
+snd (𝒑 B , r.𝒚, 𝒑 ) 𝒏 (𝒑 )/pdf;
+paths[𝑖 ].vec ← 𝐹 bnd
+𝜕 0
+2
+When differentiating pixel reconstruction filters with respect to
+object geometries using PSDR [Zhang et al. 2020], Yu et al. [2022]
+demonstrated that pixel-level antithetic sampling is crucial for ensuring fast convergence.
+As illustrated in Figure 4, antithetic sampling shoots two or four
+camera rays whose image plane intersections exhibit point symmetry with respect to the pixel center. Additionally, these camera rays
+must be correlated so the derivatives of their contributions cancel.
+Previously, multi-path correlation was normally handled by forcing paths to use identical pseudo-random sequences by reusing the
+random seeds when sampling each path.
+Unfortunately, this is insufficient when using ReSTIR. As shown
+in Figure 5-a, even with identical random numbers, the nearest
+(0)
+(1)
+neighbor search at two antithetic shading points 𝒑 1 and 𝒑 1 may
+return different reservoirs 𝑄 (0) and 𝑄 (1) (Line 9, Algorithm 4). This
+causes the merged reservoirs returned by SpatiotemporalReuse ()
+(Line 10) to become less correlated.
+<latexit
+17
+RESTIR AND ANTITHETIC SAMPLING
+ar p
+16
+6
+sha1_base64="sTwnVqxczGzIOVOlMSKXwuSB/qo=">AAACCHicdVDLSsNAFJ3UV62vqEs3g0UQFyFpa1t3BTcuK9gHtLFMJtN26EwSZiaFEvIDfoNbXbsTt/6FS//ESVvBil4Y5nDOvdxzjxcxKpVtfxi5tfWNza38dmFnd2//wDw8asswFpi0cMhC0fWQJIwGpKWoYqQbCYK4x0jHm1xnemdKhKRhcKdmEXE5GgV0SDFSmhqYZt8LmS9nXH9JlN5fDMyibVXKVyWnCm2rWqtXyo4GpQVwLHteRbCs5sD87PshjjkJFGZIyp5jR8pNkFAUM5IW+rEkEcITNCI9DQPEiXSTufMUnmnGh8NQ6BcoOGd/TiSIy8yc7uRIjeVvLSP/0nqxGtbdhAZRrEiAF4uGMYMqhFkM0KeCYMVmGiAsqPYK8RgJhJUOa2WLx1Odyffh8H/QLllO1bq8rRQb9jKdPDgBp+AcOKAGGuAGNEELYDAFj+AJPBsPxovxarwtWnPGcuYYrJTx/gVa3Jqr</latexit>
+15
+<latexit
+/* Store sampled path
+*/
+Let 𝑞 be the index of pixel intersecting 𝒑 1 𝒑 2 ;
+paths[𝑖 ].pid ← 𝑞 ;
+// Record pixel index
+paths[𝑖 ].vtx ← (𝒑 0 , 𝒑 1 , 𝒑 2 );
+14
+edge importance sampling is a by-product of ReSTIR sample reuse
+and is orthogonal to these methods.
+ar p ⇤
+Ne
+13
+Ne
+12
+Im
+pl age
+an
+e
+*/
+−−−→
+𝒑 0 ← r.𝒚; 𝒑 1 ← rayIntersect(𝒑 B , 𝒑 0 𝒑 B );
+r.𝒑 1 ← 𝒑 1 ;
+// Used by Alg. 8
+214:9
+p?
+1
+A pixel (within
+the image plane)
+(a) Interior sampling
+/* Spatiotemporal reuse
+*/
+𝑄 ← PickNeighbors(prevEdgeReservoirs, r) ; // §5.2
+r ← SpatiotemporalReuse(r, 𝑄 ) ;
+// Alg. 3
+10
+p?
+2
+*/
+/* Generate initial candidates
+*/
+Generate reservoir r using stream RIS ;
+// §5.2
+r.𝒑 ← 𝒑 B ;
+// Record edge point
+8
+<latexit sha1_base64="JGAGhKIZ7dbvXN80EkR9Tf1PiUQ=">AAACD3icbVC7TsMwFHV4lvIKMDCwWFRITFWCymOsxMJYJPqQ2hA5jtNadezIdpCqKB/BN7DCzIZY+QRG/gSnzUBbjmT56Jx7de89QcKo0o7zba2srq1vbFa2qts7u3v79sFhR4lUYtLGggnZC5AijHLS1lQz0kskQXHASDcY3xZ+94lIRQV/0JOEeDEachpRjLSRfPt4EAgWqklsvizJffcxM4rOfbvm1J0p4DJxS1IDJVq+/TMIBU5jwjVmSKm+6yTay5DUFDOSVwepIgnCYzQkfUM5ionysukBOTwzSggjIc3jGk7Vvx0ZilWxo6mMkR6pRa8Q//P6qY5uvIzyJNWE49mgKGVQC1ikAUMqCdZsYgjCkppdIR4hibA2mc1NCeIiE3cxgWXSuai7V/XL+0at2SjTqYATcArOgQuuQRPcgRZoAwxy8AJewZv1bL1bH9bnrHTFKnuOwBysr1/XfJ2l</latexit>
+Pixel
+center
+2
+/* Sampling boundary paths (non-differentiable)
+updateEdgeReservoirs(prevEdgeReservoirs);
+paths ← { }; edgeReservoirs ← { };
+for 𝑖 = 1 to 𝑁 snd do
+Sample 𝒑 B from an edge with pdf 𝑝 (𝒑 B );
+p?
+•
+(b)
+Fig. 5. Correlating reservoirs: (a) Independent spatiotemporal reuse at
+antithetic shading points 𝒑 and 𝒑 ∗ may reuse different reservoirs. Here,
+𝑄 = {r1 , r2 } will be used at 𝒑 and 𝑄 ∗ = {r2 , r3 } at 𝒑 ∗ . This weakens
+antithetic path correlation, reducing antithetic sampling’s effectiveness. (b)
+We randomly select one antithetic shading point and force others to use the
+same reservoir set. Here 𝒑 is chosen, so both 𝒑 and 𝒑 ∗ reuse 𝑄 = {r1 , r2 }.
+This better correlates antithetic paths, improving sampling efficiency.
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.
+214:10 •
+Wang, Wyman, Wu, and Zhao
+ALGORITHM 7: ReSTIR-based inverse rendering
+7
+EstimateGradient(I 0 , resvrin , edgeResvrin )
+Input: Target image I 0 ; reservoirs resvrin and edgeResvrin for
+spatiotemporal reuse
+Output: Gradient d𝜽 L; reservoirs resvrout and edgeResvrout for
+later reuse
+2 begin
+/* Estimate the interior (Alg. 4)
+*/
+3
+(d𝜽 L ) int , 𝜕 I L, resvrout ← EstInterior(resvrin );
+Leveraging spatiotemporal reuse (Algorithms 4, 5, and 6) from §4 and
+§5, we introduce a novel gradient-based inverse rendering pipeline.
+As outlined in Algorithm 7, we maintain two sets of reservoirs “resvr”
+and “edgeResvr” through gradient steps 𝑡 = 1, 2, . . .. We use “resvr”
+to estimate interior and primary boundary components (Lines 3–4),
+and “edgeResvr” for the secondary boundary component (Line 5).
+After each gradient step, we compute the full gradient d𝜽 L (Line 6)
+and update scene parameters (Line 15) via simple gradient descent
+(i.e., 𝜽 ← 𝜽 −𝜆𝑡 d𝜽 L for step size 𝜆𝑡 > 0) or more advanced methods
+like Adam [Kingma and Ba 2014].
+1
+/* Estimate the primary boundary (Alg. 5)
+*/
+pri
+4
+(d𝜽 L ) bnd ← EstPrimaryBound(𝜕 I L, resvrin );
+/* Estimate the secondary boundary (Alg. 6)
+snd , edgeResvr
+(d𝜽 L ) bnd
+out ←
+EstSecondaryBound(𝜕 I L, edgeResvrin );
+*/
+5
+/* Compute the full gradient
+*/
+pri
+snd ;
+d𝜽 L ← (d𝜽 L ) int + (d𝜽 L ) bnd + (d𝜽 L ) bnd
+6
+return d𝜽 L, resvrout , edgeResvrout ;
+7
+8
+end
+InverseRendering(I 0 )
+Input: Target image I 0
+Output: Optimized scene parameters 𝜽
+10 begin
+11
+Initialize 𝜽 0 ;
+12
+resvr (0) ← { }; edgeResvr (0) ← { };
+9
+/* Gradient-based optimization
+*/
+for 𝑡 = 1, 2, . . . , 𝑁 epoch do
+/* Estimate the gradient d𝜽 L := dL/d𝜽
+*/
+d𝜽 L, resvr (𝑡 ) , edgeResvr (𝑡 ) ←
+EstimateGradient( I 0 , resvr (𝑡 −1) , edgeResvr (𝑡 −1) );
+/* Update the parameters 𝜽
+*/
+UpdatedParameters(𝜽, d𝜽 L );
+end
+return 𝜽 ;
+13
+14
+15
+16
+17
+18
+end
+As we show in §8, weakened correlation among antithetic paths
+increases variance. To address this, we force all antithetic paths to
+reuse one reservoir set 𝑄. Precisely, let r (𝑡 ) be a reservoir generated
+using streaming RIS (Line 9) for the 𝑡-th correlated path, and
+
+
+𝑄 (𝑡 ) = PickNeighbors prevReservoirs, r (𝑡 ) ,
+(28)
+be the corresponding nearest neighbor reservoirs. We randomly
+select one set of reservoirs 𝑄 ∗ ∈ {𝑄 (𝑡 ) : 𝑡 = 0, 1, . . .} for spatiotemporal reuse (Line 10) across all correlated paths:
+
+
+r (𝑡 ) ← SpatiotemporalReuse r (𝑡 ) , 𝑄 ∗ ,
+(29)
+for all 𝑡. We illustrate this process in Figure 5-b.
+This works for both interior and pixel-boundary paths—which
+emerge when the pixel reconstruction filter is discontinuous (e.g.,
+box) and behave identically to primary boundaries.
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.
+RESTIR-BASED INVERSE RENDERING
+Burn-in stage. To reduce variance even when starting an inverserendering optimization we add an optional “burn-in” stage. During
+this stage, we perform ReSTIR based sampling without backpropagating gradients to obtain temporal information for our method.
+This makes selecting learning rates easier. In this stage, we repeatedly render the initial configuration (without calculating d𝜽 L or
+applying gradient descent), allowing ReSTIR to establish reservoirs
+throughout the scene. We note that, as differentiable evaluation
+(which takes most of the time) is not needed during burn-in, iterations are typically much faster than those during optimization.
+In practice, we perform about 32 burn-in iterations for our inverserendering experiments.
+Supporting multi-view configurations. Thus far, our derivations
+assume only one target image I 0 and one rendered image I for
+inverse-rendering optimizations. In practice, such single-image configurations are insufficient to solve many real-world inverse rendering problems. Instead, multi-view configurations observing the
+same scene under multiple viewing conditions are common.
+Since these configurations keep scene (and lighting) fixed across
+multiple views, light samples stored in reservoirs (i.e., r.𝒚 for each
+reservoir r) remain valid. This allows us to use one set of “resvr”
+and “edgeResvr” buffers to store reservoirs from all views, largely
+reusing our single-image pipeline for multi-view optimizations.
+But when mini-batching over camera views (i.e., using random
+subsets of views for each gradient step), reservoirs from the prior
+step may offer little help if not visible in the current views.
+To address this problem we observe that, at each iteration, regions
+of the scene invisible to all randomly selected camera views will
+not be updated by gradient-descent because there is generally no
+gradient. Based on this observation, after each iteration, we only
+replace previous reservoirs visible to at least one randomly selected
+view with newly generated reservoirs; we preserve all occluded
+reservoirs for the next iteration.
+We detail this process in Algorithm 8. For each camera view 𝑘,
+our method applies the same process (Lines 10–13) to estimate the
+gradient as the single-view variant expressed in Algorithm 7. Then,
+we preserve all previous reservoirs contained in resvr (𝑡 −1) and
+edgeResvr (𝑡 −1) whose shading points are occluded to all camera
+views in the current mini-batch by “forwarding” them to resvr (𝑡 )
+and edgeResvr (𝑡 ) (Lines 15–24) for future reuse.
+Amortizing Samples in Physics-Based Inverse Rendering using ReSTIR
+(a) Ordinary (last)
+0.15
+0.10
+0.05
+0.00
+(b) Reference
+Knot
+Key
+PT
+RIS
+Ours
+0
+(c) Ours
+100
+RelMSE (Key)
+RelMSE (Knot)
+Config.
+Ordinary (first)
+Key
+2.00
+0.00
+200
+PT
+RIS
+Ours
+4.00
+0
+100
+200
+(d) PT
+(e) RIS
+RelMSE: 0.024
+RelMSE: 0.109
+RelMSE: 0.095
+RelMSE: 0.006
+RelMSE: 0.032
+Positive
+RelMSE: 0.026
+Negative
+214:11
+·10−2
+0.20
+Knot
+•
+Fig. 6. Differentiable-rendering comparisons with PT (B.1) and RIS (B.2). Both examples use dynamic scenes (including 250 frames) where the Knot
+translates horizontally (top) and the Key rotates around the vertical axis (bottom). The derivatives are computed with respect to the translation for Knot
+and rotation angle for Key. The derivative renderings shown are for the last frame. At equal per-frame time, our method (c) produces significantly cleaner
+derivative estimates than the baselines (d, e).
+Additionally, when solving for object shapes using multi-view
+images, combining reservoirs using Algorithm 2 would require storing multiple additional copies (e.g., one per view) of scene geometries (and corresponding acceleration structures)—which can be
+expensive. In practice, for better performance, we introduce a small
+amount of bias by checking visibilities (required by Line 9 of Algorithm 2) using only scene geometry from the current iteration.
+To minimize the amount of bias introduced, we use small learning
+rates for these optimizations.
+Computational overhead. Overall, when applied for inverse rendering, our technique introduces the following computational overhead (compared with streaming RIS): (i) the burn-in stage mentioned
+above; (ii) nearest-neighbor searches (e.g., Line 9 of Algorithm 4);
+and (iii) combining reservoirs (e.g., Line 10 of Algorithm 4).
+In our experiments, using equal sample, the overheads combined
+take no more than 20% of the total optimization time. When comparing inverse-rendering results, we allow baseline methods to use
+higher sample counts so that all methods use approximately identical total optimization times.
+8
+RESULTS
+Experiment setup. We employ ReSTIR [Bitterli et al. 2020] to the
+PSDR [Zhang et al. 2020] formulation to improve the Monte-Carlo
+sampling efficiency of PSDR in differentiable and inverse rendering.
+To show our technique’s practical use, we compare differentiableand inverse-rendering performance against two baseline methods:
+B.1 PT: The first baseline is a standard Monte Carlo method generating one light sample per camera ray. This is widely adopted
+by physics-based differentiable renderers including Mitsuba 3
+[Jakob et al. 2022] and PSDR [Zhang et al. 2020].
+B.2 RIS: Our second baseline uses streaming RIS (Algorithm 1).
+This is the most relevant baseline as it outperforms PT (B.1)
+for complex lighting and differs from our technique only by
+performing no spatiotemporal reuse.
+We implement our method and the two baselines using the PSDR
+formulation on a GPU-based wavefront differentiable renderer. All
+results are generated on a workstation with an AMD Rayzen 9 5900X
+12-core CPU, 32GB of RAM, and an NVIDIA RTX 3090 GPU.
+All our inverse rendering results use unbiased gradient estimates
+expect those using multi-view input images to optimize object geometries (as discussed at the end of §7).
+8.1
+Evaluation and Ablation
+Differentiable-rendering comparisons. We validate our technique
+and compare it to the two baselines (B.1 and B.2) via differentiable
+rendering in Figure 6.
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.
+214:12 •
+Wang, Wyman, Wu, and Zhao
+ALGORITHM 8: ReSTIR-based inverse rendering with multi-view
+target images
+(b1) Ours
+(int. only)
+(a) RIS
+InverseRendering(I 0 , I 1 , . . .)
+Input: Multi-view target images I 0 , I 1 , . . .
+Output: Optimized scene parameters 𝜽
+2 begin
+3
+Initialize 𝜽 0 ;
+4
+resvr (0) ← { }; edgeResvr (0) ← { };
+5
+for 𝑡 = 1, 2, . . . , 𝑁 epoch do
+6
+Select a mini-batch of camera views K ⊆ {0, 1, . . .};
+(b2) Ours
+(int. + pri. bound.)
+1
+RelMSE: 0.024
+7
+8
+9
+10
+11
+/* Store new reservoirs
+resvr (𝑡 ) ← resvr (𝑡 ) ∪ resvr′ ;
+edgeResvr (𝑡 ) ← edgeResvr (𝑡 ) ∪ edgeResvr′ ;
+12
+13
+*/
+end
+14
+24
+/* Preserve reservoirs not visible to any views
+from current the mini-batch K
+*/
+foreach r ∈ resvr (𝑡 −1) do
+if r.𝒑 is not visible to any camera from K then
+resvr (𝑡 ) ← resvr (𝑡 ) ∪ {r};
+end
+end
+foreach r ∈ edgeResvr (𝑡 −1) do
+if r.𝒑 1 is not visible to any camera from K then
+edgeResvr (𝑡 ) ← edgeResvr (𝑡 ) ∪ {r};
+end
+end
+25
+/* Update the parameters 𝜽
+UpdatedParameters(𝜽, d𝜽 L );
+15
+16
+17
+18
+19
+20
+21
+22
+23
+RelMSE: 0.011
+(b4) Ours
+(int. + bound. + guide)
+(e) Reference
+RelMSE: 0.009
+Fig. 7. Our technique for individual components: Using the same
+“Knot” scene from Figure 6, we demonstrate the effectiveness of our method
+on individual components of the derivative by applying it to: (b1) the interior
+component only; (b2) the interior and the primary boundary components;
+(b3) all components; and (b4) all components with importance sampling
+edge points. The derivative images use the same color map as Figure 6.
+(a) Ordinary
+(b) Reference
+(c) No antithetic
+(d) Basic antithetic
+(e) Ours
+end
+return 𝜽 ;
+26
+27
+28
+*/
+(b3) Ours
+(int. + bound.)
+RelMSE: 0.018
+Pig
+/* Initialization
+*/
+d𝜽 L ← 0;
+resvr (𝑡 ) ← { }; edgeResvr (𝑡 ) ← { };
+foreach camera view 𝑘 ∈ K do
+/* Estimate the gradient
+*/
+(d𝜽 L )𝑘 , resvr′ , edgeResvr′ ←
+EstimateGradient( I𝑘 , resvr (𝑡 −1) , edgeResvr (𝑡 −1) );
+/* Accumulate the gradient
+*/
+d𝜽 L += (d𝜽 L )𝑘 ;
+RelMSE: 0.018
+end
+The first example in this figure uses the “Knot” with translating
+geometry, and we compute derivatives with respect to the knot
+translation. As illustrated on the top, lighting includes one bright
+spotlight and two dim fill lights. The second example shows a rotating “Key” lit by one small and one occluded large area light. We
+compute derivatives with respect to the key rotation angle.
+For both scenes, the baselines often draw samples from bright
+lights that make little contribution, leading to high variance. Our
+method reuses valuable samples from prior frames, quickly adapting
+to this setting and providing significantly cleaner gradient estimates
+that closely match the reference.
+Per-component ablation. We recall that, under the PSDR formulation [Zhang et al. 2020], a full derivative generally equals the sum
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.
+RelMSE: 272.84
+RelMSE: 6.59
+RelMSE: 0.119
+Fig. 8. Antithetic sampling: When differentiating with respect to object
+geometries using PSDR [Zhang et al. 2020], it is crucial to apply antithetic
+sampling at the pixel level [Yu et al. 2022], as shown in (c) and (d). Further,
+when ReSTIR is used, our method—which forces all antithetic shading points
+to reuse the same set of reservoirs—offers further variance reduction, as
+shown in (e). The derivative images use the same color map as Figure 6.
+of an interior (§4), a primary boundary (§5.1),4 and a secondary
+boundary (§5.2) components.
+4We treat the pixel-boundary component discussed in §6 as part of the primary bound-
+ary as the two behave mostly identically.
+Amortizing Samples in Physics-Based Inverse Rendering using ReSTIR
+Table 1. Inverse-rendering configurations and performance statistics. In
+this table, “Trg.” indicates the number of target images; “Bat.” is the size of
+mini-batches (i.e., the number of images rendered per iteration); “Param.”
+denotes the number of scene parameters being optimized; “Iter.” is the
+number of iterations; and “DR” indicates the time spent per iteration on
+differentiable rendering using our method.
+Scene
+Oxalis
+Tree
+Painting
+Kitty
+Octagon
+World map
+(Fig. 1)
+(Fig. 10)
+(Fig. 11)
+(Fig. 12)
+(Fig. 13)
+(Fig. 14)
+Trg.
+Bat.
+Param.
+Iter.
+DR
+1
+1
+1
+32
+17
+6
+1
+1
+1
+16
+17
+2
+183K
+1
+153K
+65K
+30K
+52K
+2304
+1024
+2048
+128
+512
+1024
+0.45s
+0.9s
+0.37s
+14.1s
+12.2s
+5.2s
+(a) Config.
+Initial
+214:13
+Image loss
+40
+RIS + RIS
+Ours + RIS
+Ours + Ours
+30
+20
+10
+0
+RIS
+Ours (Fwd Only)
+0
+500
+1,000
+Ours
+(b) d𝜽 I reference
+Tree
+Param. err.: 1.1310
+(c) RIS
+Target
+•
+(d) Ours (Fwd Only)
+(e) Ours
+I
+𝜕I L
+d𝜽 I
+Fig. 9. Forward-only vs. full ReSTIR: This example contains a “Tree” lit
+by one small and one occluded large area lights. Using a predefined loss
+L ( I ) := ∥ I − I 0 ∥ 22 with some fixed I 0 , we compare estimates of gradients
+𝜕 I L and d𝜽 I—whose product gives the gradient d𝜽 L of the loss L. Without applying ReSTIR (c), both estimates are noisy. When applying ReSTIR
+only for forward rendering (d), one gets better estimates of I, improving the
+gradient 𝜕 I L. Applying ReSTIR fully (e) produces low-variance estimates
+for both gradients.
+To evaluate our technique’s effectiveness across these components, we conduct an ablation in Figure 7 using the same Knot
+Param. err.: 0.4757
+Param. err.: 0.0007
+Fig. 10. Forward-only vs. full ReSTIR: Using the same “Tree” scene
+as Figure 9, we compare inverse-rendering results where we optimize the
+rotation angle of the tree-like object by only looking at its cast shadow. Our
+full method (“Ours”) allows the optimization to smoothly converge to the
+groundtruth while the other methods fail due to high-variance estimates of
+the gradient d𝜽 L.
+as Figure 6. Without spatiotemporal reuse, RIS (B.2) suffers from
+high variance (see Figure 7-a). Using our method only on the interior component, derivative estimates on the knot surface become
+significantly better (see Figure 7-b1). By also applying our technique to primary-boundaries, derivatives along the silhouette of
+the knots improve (see Figure 7-b2). Also using our method for
+secondary-boundaries reduces variance around shadow boundaries
+(see Figure 7-b3). Lastly, by importance sampling edge vertices,
+further variance reduction can be achieved (see Figure 7-b4).
+Antithetic sampling. As discussed in §6, standard antithetic sampling of reconstruction filters, which is crucial to estimate derivatives relative to object geometry, can be insufficient when using
+ReSTIR.
+We demonstrate this in Figure 8 for a “Pig” scene using a standard
+box filter and containing a diffuse pig lit by an area light. We estimate
+derivatives with respect to the vertical displacement of the pig. At
+equal time, without pixel-level antithetic sampling, the derivative
+estimates are extremely noisy (Figure 8-c). The antithetic sampling
+proposed by Yu et al. [2022] greatly reduces variance but still suffers
+from high variance where gradients are smooth (Figure 8-d). By
+forcing antithetic shading points to reuse identical sets of reservoirs,
+our method offers estimates with significantly improved quality
+(Figure 8-e).
+Forward-only vs. full ReSTIR. According to the chain rule in Eq. (11),
+the gradient d𝜽 L of rendering loss L is the product of 𝜕 I L (gradient of L with respect to forward render I) and d𝜽 I (derivative of
+forward render I with respect to scene parameters 𝜽 ).
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.
+214:14 •
+Wang, Wyman, Wu, and Zhao
+Config
+Initial texture
+Rendering loss
+2
+PT
+RIS
+Ours
+1.5
+Painting
+Albedo error
+·104
+1
+(a) Target
+(b) Opt. (ours)
+PT
+RIS
+Ours
+0.40
+0.20
+0.5
+0
+0.60
+0
+1,000
+2,000
+0.00
+0
+(c) Opt. (PT)
+1,000
+2,000
+(d) Opt. (RIS)
+Forward
+Texture vis.
+Fig. 11. Inverse-rendering comparison using the “Painting” setup modeled after the Veach Ajar scene with an added fill light in the room. We optimize the
+painting’s spatially varying albedo (initialized using a gray texture). (c, d) The baseline methods (B.1 and B.2) suffer from extremely high variance, thus failing
+to reconstruct the albedo map. (b) Our method, on the other hand, offers the robustness to reconstruct the target albedo map (a) nicely. The albedo error on
+the top-right is used for evaluation only.
+For inverse rendering, one can apply forward-rendering ReSTIR
+only to improve I (and its gradient 𝜕 I L) while leaving d𝜽 I handled with methods like RIS (B.2). We compare with this baseline in
+Figures 9 and 10 as follows.
+Figure 9 shows a “Tree” lit by one small area light and one occluded large light. We compare forward- and differentiable-rendering
+(relative to the tree’s rotation around its vertical axis) of the cast
+shadow using three configurations:
+• RIS uses RIS for estimating both I and d𝜽 I;
+• Ours (Fwd Only) uses ReSTIR for estimating I and RIS for d𝜽 I;
+• Ours is our full method, using ReSTIR for I and d𝜽 I.
+Further, we use L ( I) := ∥ I − I 0 ∥ 22 with some fixed I 0 for gradient
+𝜕 I L (computed via automatic differentiation). As shown in Figures 9, both “Ours (Fwd Only)” and “Ours” use ReSTIR for forward
+rendering, so they enjoy low-variance estimates of I and gradient
+𝜕 I L.5 But “Ours (Fwd Only)” does not apply ReSTIR for derivative
+d𝜽 I, producing much the same noise as the “RIS” baseline. Thus
+this approach’s final gradient d𝜽 L, given by the chain rule, also
+5 Another major benefit for having low-variance forward rendering I is to lower the
+bias of the gradient 𝜕 I L when 𝜕 I L is nonlinear with respect to I .
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.
+suffers from high variance. We note that, while d𝜽 I is not explicitly
+computed for radiative backpropagation methods [Nimier-David
+et al. 2020; Vicini et al. 2021], the variance in this term’s estimates
+still affect the final gradient d𝜽 L.
+To further show d𝜽 L’s impact, we compare inverse-rendering
+performance on the Tree in Figure 10, where we optimize tree rotation angle by only looking at its shadow. We reuse the optimization
+setup (e.g., optimizer and learning rates) and adjust light candidate
+counts (i.e., 𝑀) so all methods take roughly equal iteration time.
+As demonstrated in Figure 10, both “RIS” and “Ours (Fwd Only)”
+fail to converge to ground truth due to high variance in the gradient
+d𝜽 L. Our full method “Ours”, however, allows the optimization to
+converge smoothly.
+8.2
+Inverse-Rendering Comparisons
+We now show further inverse-rendering comparisons with our baselines (B.1 and B.2). We adjust sample counts so all methods take
+roughly equal optimization time (including our burn-in from §7).
+Please see Table 1 for performance statistics and the supplemental
+material for animated versions of these results.
+Amortizing Samples in Physics-Based Inverse Rendering using ReSTIR
+Env. lighting
+(a) Target
+(b) Opt. (ours)
+(c) Opt. (RIS)
+(d) Opt. (PT)
+Rendering Loss
+Albedo Error
+RelMAE: 0.024
+PT
+RIS
+Ours
+0.6
+0.4
+0.2
+6.00
+RelMAE: 0.034
+·104
+0.8
+0
+Forward
+RelMAE: 0.008
+214:15
+Errors
+1
+Re-render
+•
+0
+50
+100
+·10−2
+PT
+RIS
+Ours
+4.00
+2.00
+0
+50
+100
+Fig. 12. Inverse-rendering comparison using the diffuse “Kitty” under environmental illumination. We optimize the spatially varying albedo (initialized
+with a constant texture) of the Kitty. (c, d) The baseline methods (B.1 and B.2) produce high variance on the front of the Kitty, causing over-blurring and color
+shifts in the reconstructions. (b) Our method, on the other hand, provides significantly more accurate results.
+Texture optimization. We show texture reconstruction in Figures 1,
+11, and 12. As there is no differentiation with geometry, we apply
+ReSTIR only for forward rendering and the interior component (§4).
+Figure 1 contains an “Oxalis” scene with a painting is lit by two
+bright spotlights and a dim fill light. Initialized with a constant
+gray image, we optimize the spatially varying painting albedo. The
+baselines perform okay where directly lit by bright spotlights and
+very poorly in darker regions lit only by the fill light. Baseline
+reconstruction results severely overestimate albedos inside the spotlights and underestimate those outside. With spatiotemporal reuse,
+our method performs significantly better than baselines in darker
+regions, yielding a far less biased reconstruction.
+Figure 11 uses a “Painting” scene modeled after the Veach Ajar
+scene, with a new fill light in the room. Initialized with a constant
+gray image, we optimize the spatially varying albedo of the painting.
+The bright emitter outside the room introduces extreme noise in
+both PT (B.1) and RIS (B.2) (row marked “forward”), causing reconstruction failures. But our method quickly adapts, mainly sampling
+the fill light, and nicely reconstructs the target texture (see row
+labeled “Texture vis.”).
+Figure 12 shows a “Kitty” under environmental illumination. It
+is backlit (i.e., most light from behind), causing the baselines to
+produce high variance on the front. Our method produces much
+cleaner estimates on the front, giving a less biased and more detailed
+reconstruction (demonstrated by the bottom row re-renderings).
+Shape optimization. Lastly, we show shape reconstruction in Figures 13 and 14. In both, we use one or multiple images of an object
+under complex illumination and optimize object shape (expressed as
+triangle meshes). As geometric derivatives are computed, we apply
+our method interior (§4) and boundary (§5) components.
+Figure 13 uses an “Octagon” lit by 17 spotlights, casting shadows on the walls (shown in “Config.”). Using 17 images of casting
+shadows on the walls, we reconstruct the geometry from a sphere.
+Figure 14 use a “World Map” where a relief is on a wall lit by
+a large area light partially occluded through a window (shown in
+“Config.”). Initialized with a flat rectangle, we optimize the relief
+shape using six input images (with only one shown).
+For both examples, because of the complex lighting, both PT (B.1)
+and RIS (B.2) produce noisy forward renderings and gradient estimates. This causes inaccurate reconstructions with visible artifacts
+(e.g., along the left map edge). Our method, on the contrary, offers
+the robustness to produce clean reconstructions.
+9
+DISCUSSION AND CONCLUSION
+Limitations and future work. Our technique builds on Bitterli
+et al.’s [2020] early formulation that supports only direct lighting.
+Extending our technique to handle more advanced reuse [Lin et al.
+2021, 2022] to support multi-bounce light transport is an important
+topic for future research.
+Also, when using multiple input images, our technique focuses
+only on multi-view configurations observing a static scene under
+different viewing conditions. Extending our work to support settings
+that allow, for example, illumination conditions and object poses
+to change across images would benefit many inverse-rendering
+applications.
+Lastly, other forms of amortized sampling beyond ReSTIR’s spatiotemporal reuse are worth exploring.
+Conclusion. In this paper, we introduced a technique that exploits
+temporal consistency in the context of physics-based inverse direct
+illumination. Specifically, by adopting the reservoir-based spatiotemporal important resampling (ReSTIR) framework, we developed new
+Monte Carlo methods to efficiently estimate both interior and boundary components of differential illumination integrals under complex
+illumination conditions. Incorporating these ReSTIR-based estimators, we further proposed a new pipeline for physics-based inverse
+direct illumination.
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.
+214:16 •
+Wang, Wyman, Wu, and Zhao
+We validated our technique by comparing derivatives estimated
+with unbiased baselines and our methods. Additionally, we demonstrated the effectiveness of our method using several differentiablerendering and inverse-rendering experiments.
+ACKNOWLEDGMENTS
+We thank the anonymous reviewers for their helpful suggestions.
+We are also grateful to Aaron Lefohn for his support. This work
+started when Yu-Chen Wang was an intern at NVIDIA and was
+partially funded by NSF grant 1900927 and an NVIDIA gift.
+REFERENCES
+Tomas Akenine-Moller, Eric Haines, and Naty Hoffman. 2018. Real-Time Rendering,
+Fourth Edition (4th ed.). A. K. Peters, Ltd., USA.
+Sai Praveen Bangaru, Tzu-Mao Li, and Frédo Durand. 2020. Unbiased Warped-Area
+Sampling for Differentiable Rendering. ACM Trans. Graph. 39, 6 (2020), 245:1–245:18.
+Louis Bavoil and Miguel Sainz. 2009. Multi-Layer Dual-Resolution Screen-Space Ambient Occlusion. In SIGGRAPH 2009: Talks (New Orleans, Louisiana) (SIGGRAPH
+’09). Association for Computing Machinery, New York, NY, USA, Article 45, 1 pages.
+https://doi.org/10.1145/1597990.1598035
+Benedikt Bitterli, Chris Wyman, Matt Pharr, Peter Shirley, Aaron Lefohn, and Wojciech
+Jarosz. 2020. Spatiotemporal Reservoir Resampling for Real-Time Ray Tracing with
+Dynamic Direct Lighting. 39, 4 (2020), 148:1–148:17.
+John Burgess. 2020. RTX on—The NVIDIA Turing GPU. IEEE Micro 40, 2 (2020), 36–44.
+https://doi.org/10.1109/MM.2020.2971677
+Wesley Chang, Venkataram Sivaram, Derek Nowrouzezahrai, Toshiya Hachisuka, Ravi
+Ramamoorthi, and Tzu-Mao Li. 2023. Parameter-space ReSTIR for Differentiable
+and Inverse Rendering. In ACM SIGGRAPH 2023 Conference Proceedings (SIGGRAPH
+’23). 10 pages.
+Min-Te Chao. 1982. A general purpose unequal probability sampling plan. Biometrika
+69, 3 (1982), 653–656.
+Johannes Deligiannis and Jan Schmid. 2019. ‘It Just Works’: Ray-traced Reflections
+in ‘Battlefield V’. Game Developers Conference. https://www.gdcvault.com/play/
+1026282/It-Just-Works-Ray-Traced
+Frédo Durand and Julie Dorsey. 2002. Fast Bilateral Filtering for the Display of HighDynamic-Range Images. ACM Trans. Graph. 21, 3 (jul 2002), 257–266. https:
+//doi.org/10.1145/566654.566574
+Andreas Griewank and Andrea Walther. 2008. Evaluating Derivatives (second ed.).
+Society for Industrial and Applied Mathematics.
+Eric Heitz, Stephen Hill, and Morgan McGuire. 2018. Combining Analytic Direct
+Illumination and Stochastic Shadows. In Proceedings of the ACM SIGGRAPH Symposium on Interactive 3D Graphics and Games (Montreal, Quebec, Canada) (I3D ’18).
+Association for Computing Machinery, New York, NY, USA, Article 2, 11 pages.
+https://doi.org/10.1145/3190834.3190852
+Wenzel Jakob, Sébastien Speierer, Nicolas Roussel, and Delio Vicini. 2022. Dr.Jit: A
+Just-In-Time Compiler for Differentiable Rendering. ACM Trans. Graph. 41, 4 (2022),
+124:1–124:19.
+Diederik P Kingma and Jimmy Ba. 2014. Adam: A method for stochastic optimization.
+arXiv preprint arXiv:1412.6980 (2014).
+Samuli Laine, Janne Hellsten, Tero Karras, Yeongho Seol, Jaakko Lehtinen, and Timo
+Aila. 2020. Modular Primitives for High-Performance Differentiable Rendering.
+ACM Trans. Graph. 39, 6, Article 194 (nov 2020), 14 pages. https://doi.org/10.1145/
+3414685.3417861
+Tzu-Mao Li, Miika Aittala, Frédo Durand, and Jaakko Lehtinen. 2018. Differentiable
+Monte Carlo ray tracing through edge sampling. ACM Trans. Graph. 37, 6 (2018),
+222:1–222:11.
+Daqi Lin, Markus Kettunen, Benedikt Bitterli, Jacopo Pantaleoni, Cem Yuksel, and
+Chris Wyman. 2022. Generalized Resampled Importance Sampling: Foundations of
+ReSTIR. ACM Trans. Graph. 41, 4 (2022), 75:1–75:23.
+Daqi Lin, Chris Wyman, and Cem Yuksel. 2021. Fast Volume Rendering with Spatiotemporal Reservoir Resampling. ACM Trans. Graph. 40, 6 (2021), 279:1–279:18.
+Shichen Liu, Tianye Li, Weikai Chen, and Hao Li. 2019. Soft Rasterizer: A Differentiable
+Renderer for Image-based 3D Reasoning. The IEEE International Conference on
+Computer Vision (ICCV) (Oct 2019).
+Guillaume Loubet, Nicolas Holzschuch, and Wenzel Jakob. 2019. Reparameterizing
+discontinuous integrands for differentiable rendering. ACM Trans. Graph. 38, 6
+(2019), 228:1–228:14.
+Zander Majercik, Jean-Philippe Guertin, Derek Nowrouzezahrai, and Morgan McGuire.
+2019. Dynamic Diffuse Global Illumination with Ray-Traced Irradiance Fields.
+Journal of Computer Graphics Techniques (JCGT) 8, 2 (5 June 2019), 1–30. http:
+//jcgt.org/published/0008/02/01/
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.
+Morgan McGuire and Michael Mara. 2014. Efficient GPU Screen-Space Ray Tracing.
+Journal of Computer Graphics Techniques (JCGT) 3, 4 (9 December 2014), 73–85.
+http://jcgt.org/published/0003/04/04/
+Morgan McGuire, Michael Mara, Derek Nowrouzezahrai, and David Luebke. 2017. RealTime Global Illumination using Precomputed Light Field Probes. In ACM SIGGRAPH
+Symposium on Interactive 3D Graphics and Games. 11. https://www.casual-effects.
+com/research/McGuire2017LightField/index.html I3D 2017.
+Baptiste Nicolet, Fabrice Rousselle, Jan Novák, Alexander Keller, Wenzel Jakob, and
+Thomas Müller. 2023. Recursive Control Variates for Inverse Rendering. ACM Trans.
+Graph. 42, 4 (2023).
+Merlin Nimier-David, Sébastien Speierer, Benoît Ruiz, and Wenzel Jakob. 2020. Radiative
+backpropagation: an adjoint method for lightning-fast differentiable rendering. ACM
+Trans. Graph. 39, 4 (2020), 146:1–146:15.
+Yaobin Ouyang, Shiqiu Liu, Markus Kettunen, Matt Pharr, and Jacopo Pantaleoni. 2021.
+ReSTIR GI: Path Resampling for Real-Time Path Tracing. Computer Graphics Forum
+40, 8 (2021), 17–29. https://doi.org/10.1111/cgf.14378
+Mark Pauly, Thomas Kollig, and Alexander Keller. 2000. Metropolis light transport for
+participating media. In Rendering Techniques 2000. Springer, 11–22.
+Matt Pharr, Wenzel Jakob, and Greg Humphreys. 2016. Physically Based Rendering:
+From Theory to Implementation (3rd ed.). Morgan Kaufmann Publishers Inc., San
+Francisco, CA, USA. 1266 pages.
+Christoph Schied, Anton Kaplanyan, Chris Wyman, Anjul Patney, Chakravarty R Alla
+Chaitanya, John Burgess, Shiqiu Liu, Carsten Dachsbacher, Aaron Lefohn, and Marco
+Salvi. 2017. Spatiotemporal variance-guided filtering: real-time reconstruction for
+path-traced global illumination. In Proceedings of High Performance Graphics. 1–12.
+https://doi.org/10.1145/3105762.3105770
+Dario Seyb, Peter-Pike Sloan, Ari Silvennoinen, Michał Iwanicki, and Wojciech Jarosz.
+2020. The design and evolution of the UberBake light baking system. ACM Transactions on Graphics (Proceedings of SIGGRAPH) 39, 4 (July 2020).
+Justin F. Talbot, David Cline, and Parris Egbert. 2005. Importance Resampling for Global
+Illumination. In Proceedings of the Sixteenth Eurographics Conference on Rendering
+Techniques (EGSR ’05). 139–146.
+Eric Veach. 1997. Robust Monte Carlo methods for light transport simulation. Vol. 1610.
+Stanford University PhD thesis.
+Delio Vicini, Sébastien Speierer, and Wenzel Jakob. 2021. Path Replay Backpropagation:
+Differentiating Light Paths Using Constant Memory and Linear Time. ACM Trans.
+Graph. 40, 4, Article 108 (2021), 108:1–108:14 pages.
+Ingo Wald. 2022. A Stack-Free Traversal Algorithm for Left-Balanced k-d Trees. https:
+//doi.org/10.48550/ARXIV.2210.12859
+Kai Yan, Christoph Lassner, Brian Budge, Zhao Dong, and Shuang Zhao. 2022. Efficient
+estimation of boundary integrals for path-space differentiable rendering. ACM
+Trans. Graph. 41, 4 (2022), 123:1–123:13.
+Zihan Yu, Cheng Zhang, Derek Nowrouzezahrai, Zhao Dong, and Shuang Zhao. 2022.
+Efficient Differentiation of Pixel Reconstruction Filters for Path-Space Differentiable
+Rendering. ACM Trans. Graph. 41, 6 (2022), 191:1–191:16.
+Tizian Zeltner, Sébastien Speierer, Iliyan Georgiev, and Wenzel Jakob. 2021. Monte
+Carlo estimators for differential light transport. ACM Trans. Graph. 40, 4 (2021),
+78:1–78:16.
+Cheng Zhang, Zhao Dong, Michael Doggett, and Shuang Zhao. 2021a. Antithetic
+sampling for Monte Carlo differentiable rendering. ACM Trans. Graph. 40, 4 (2021),
+77:1–77:12.
+Cheng Zhang, Bailey Miller, Kai Yan, Ioannis Gkioulekas, and Shuang Zhao. 2020.
+Path-space differentiable rendering. ACM Trans. Graph. 39, 4 (2020), 143:1–143:19.
+Cheng Zhang, Lifan Wu, Changxi Zheng, Ioannis Gkioulekas, Ravi Ramamoorthi, and
+Shuang Zhao. 2019. A differential theory of radiative transfer. ACM Trans. Graph.
+38, 6 (2019), 227:1–227:16.
+Cheng Zhang, Zihan Yu, and Shuang Zhao. 2021b. Path-space differentiable rendering
+of participating media. ACM Trans. Graph. 40, 4 (2021), 76:1–76:15.
+Amortizing Samples in Physics-Based Inverse Rendering using ReSTIR
+Config.
+Initial shape
+Rendering loss
+Octagon
+1.5
+·105
+PT
+RIS
+Ours
+1
+0.5
+0
+(a) Target
+(b) Opt. (ours)
+0
+200
+400
+•
+214:17
+Mesh error
+0.10
+0.08
+0.06
+0.04
+0.02
+0.00
+PT
+RIS
+Ours
+200
+(c) Opt. (PT)
+400
+(d) Opt. (RIS)
+Forward
+Mesh error: 0.015
+Shape vis.
+Mesh error: 0.047
+Mesh error: 0.034
+Fig. 13. Inverse-rendering comparison using an “Octagon” lit by 17 spotlights, casting several shadows on the walls. We optimize the shape (initialized
+as a sphere) by merely looking at shadows on the walls. (c, d) The baseline methods (B.1 and B.2) suffer from high variance, leading to artifacts on the
+reconstructed meshes. (b) Thanks to low-variance forward rendering and gradient estimates, our result closely matches ground truth.
+Config.
+Initial shape
+Rendering loss
+World map
+2
+1.5
+1
+0.5
+0
+(a) Target
+(b) Opt. (ours)
+·104
+PT
+RIS
+Ours
+0
+500
+(c) Opt. (PT)
+1,000
+Mesh error
+2.00
+1.50
+1.00
+0.50
+0.00
+·10 −2
+PT
+RIS
+Ours
+0
+500
+1,000
+(d) Opt. (RIS)
+Forward
+Shape vis.
+Mesh error: 0.0011
+Mesh error: 0.0089
+Mesh error: 0.0083
+Fig. 14. Inverse-rendering comparison using a “World map” relief lit by a large area light partially occluded by a window. We optimize the shape
+(initialized as a rectangle) of the relief. (c, d) The baseline methods (B.1 and B.2) suffer from high variance, giving artifacts on the left edge (c) and less detailed
+reconstructions (d). (b) Our method, on the other hand, is capable of producing more accurate and artifact-free results.
+ACM Trans. Graph., Vol. 42, No. 6, Article 214. Publication date: December 2023.

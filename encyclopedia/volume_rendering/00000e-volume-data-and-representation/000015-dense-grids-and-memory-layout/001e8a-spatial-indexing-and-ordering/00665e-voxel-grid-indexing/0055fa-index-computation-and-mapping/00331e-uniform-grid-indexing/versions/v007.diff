@@ -1,0 +1,212 @@
+--- v006.md
++++ v007.md
+@@ -4,104 +4,105 @@
+ 
+ ## Overview
+-Uniform Grid Indexing maps a continuous 3D world position $\mathbf{p}$ to a discrete 1D linear array index $I$ within a fixed-resolution volumetric grid. It solves the problem of spatial lookup in dense voxel representations by converting geometric coordinates into memory offsets. It sets itself apart from [Voxel Index Computation](13870-voxel-index-computation.md) by assuming a strictly uniform, axis-aligned bounding box (AABB) with constant voxel dimensions, whereas [Voxel Index Computation] may handle irregular or sparse structures. It differs from [Uniform Grid Adjacent Cell Indexing](2992-uniform-grid-adjacent-cell-indexing.md) by computing the primary cell index rather than neighbor offsets.
++Uniform Grid Indexing maps a continuous 3D world position $\mathbf{p}$ to a discrete 1D linear index $I$ within a fixed-size, axis-aligned voxel grid. It solves the problem of spatial lookup in dense volumetric data by converting geometric coordinates into array offsets using affine transformation and row-major linearization. It sets itself apart from its siblings by relying on a strictly uniform grid structure with fixed cell dimensions, unlike [Voxel Index Computation](13870-voxel-index-computation.md) which may handle variable or sparse structures, and [Uniform Grid Adjacent Cell Indexing](2992-uniform-grid-adjacent-cell-indexing.md) which focuses on neighbor traversal rather than primary position mapping.
+ 
+ ## How it works
+ **Inputs:**
+-- $\mathbf{p} = (p_x, p_y, p_z)$: Continuous world position.
+-- $\mathbf{b}_{min} = (b_{min,x}, b_{min,y}, b_{min,z})$: Minimum corner of the grid's AABB.
+-- $\mathbf{b}_{max} = (b_{max,x}, b_{max,y}, b_{max,z})$: Maximum corner of the grid's AABB.
+-- $N_x, N_y, N_z$: Integer number of divisions (voxels) along each axis.
++- $\mathbf{p} = (p_x, p_y, p_z)$: The 3D world position to map.
++- $\mathbf{b}_{min} = (b_{min,x}, b_{min,y}, b_{min,z})$: The minimum corner of the grid's bounding box (AABB).
++- $\mathbf{b}_{max} = (b_{max,x}, b_{max,y}, b_{max,z})$: The maximum corner of the grid's bounding box.
++- $N_x, N_y, N_z$: The number of divisions (cells) along the X, Y, and Z axes. Alternatively, a single scalar $N$ if the grid is cubic ($N_x=N_y=N_z=N$).
++- $\epsilon$: A small constant to prevent division by zero (e.g., `KINDA_SMALL_NUMBER` or machine epsilon) [S3, unofficial].
+ 
+ **Outputs:**
+-- $I$: Linear 1D index into the voxel array.
++- $I$: A single integer representing the linear index in the 1D array.
+ 
+ **Data Structures:**
+-The grid is stored as a 1D array of size $N_x \cdot N_y \cdot N_z$. The memory layout is row-major (Z-major in some contexts, but consistent with the formula $I = i \cdot S_y S_z + j \cdot S_z + k$ where $i,j,k$ correspond to X,Y,Z).
++- The grid is stored as a 1D array of size $N_x \cdot N_y \cdot N_z$.
++- Memory layout is row-major (Z-major in some contexts, see formula below).
+ 
+ **Steps:**
+-1.  **Validate Bounds**: Check if the position is within the grid bounds. If $p_x < b_{min,x}$ or $p_x \ge b_{max,x}$ (and similarly for $y, z$), the position is outside. Handle via clamping or error return [S2, S3, unofficial].
+-2.  **Handle Single Cell**: If $N_x = N_y = N_z = 1$, return $0$ immediately [S3, unofficial].
+-3.  **Translate**: Compute relative position $\mathbf{r} = \mathbf{p} - \mathbf{b}_{min}$ [S3, unofficial].
+-4.  **Normalize**: Normalize $\mathbf{r}$ to the range $[0, 1]$ per axis. To avoid division by zero, use a small epsilon $\epsilon$ if $\mathbf{b}_{max} - \mathbf{b}_{min}$ is near zero [S3, unofficial].
+-    $$ \hat{r}_x = \frac{r_x}{b_{max,x} - b_{min,x}}, \quad \hat{r}_y = \frac{r_y}{b_{max,y} - b_{min,y}}, \quad \hat{r}_z = \frac{r_z}{b_{max,z} - b_{min,z}} $$
+-5.  **Scale**: Multiply normalized coordinates by the number of divisions to get floating-point cell coordinates [S3, unofficial]:
+-    $$ c_x = \hat{r}_x \cdot N_x, \quad c_y = \hat{r}_y \cdot N_y, \quad c_z = \hat{r}_z \cdot N_z $$
+-6.  **Discretize**: Apply floor operation to get integer grid coordinates $(i, j, k)$ [S3, unofficial]:
++1.  **Handle Degenerate Grid:** If any dimension has size 1 (e.g., $N_x=1, N_y=1, N_z=1$), return index 0 immediately [S3, unofficial].
++2.  **Calculate Bounding Box Size:** Compute the physical size of the grid along each axis:
++    $$ \mathbf{S} = \mathbf{b}_{max} - \mathbf{b}_{min} $$
++    $$ S_x = b_{max,x} - b_{min,x}, \quad S_y = b_{max,y} - b_{min,y}, \quad S_z = b_{max,z} - b_{min,z} $$
++3.  **Translate Position:** Compute the relative position of $\mathbf{p}$ with respect to the minimum bound:
++    $$ \mathbf{p}_{rel} = \mathbf{p} - \mathbf{b}_{min} $$
++    $$ p_{rel,x} = p_x - b_{min,x}, \quad \text{etc.} $$
++4.  **Normalize:** Convert relative position to a $[0, 1]$ range. Guard against division by zero using $\epsilon$:
++    $$ n_x = \frac{p_{rel,x}}{S_x + \epsilon}, \quad n_y = \frac{p_{rel,y}}{S_y + \epsilon}, \quad n_z = \frac{p_{rel,z}}{S_z + \epsilon} $$
++    *Note: Some implementations clamp $n$ to $[0, 1]$ before scaling, or clamp the final integer index [S1, unofficial].*
++5.  **Scale to Grid Coordinates:** Multiply normalized coordinates by the number of divisions to get floating-point cell coordinates:
++    $$ c_x = n_x \cdot N_x, \quad c_y = n_y \cdot N_y, \quad c_z = n_z \cdot N_z $$
++6.  **Discretize (Floor):** Convert to integer grid coordinates $(i, j, k)$ by flooring:
+     $$ i = \lfloor c_x \rfloor, \quad j = \lfloor c_y \rfloor, \quad k = \lfloor c_z \rfloor $$
+-7.  **Clamp**: Clamp indices to valid range $[0, N-1]$ to handle boundary cases where $\mathbf{p}$ is exactly at $\mathbf{b}_{max}$ or slightly outside due to precision [S1, S3, unofficial]:
++7.  **Clamp:** Ensure indices are within valid bounds $[0, N-1]$ to handle points outside the AABB:
+     $$ i = \text{clamp}(i, 0, N_x - 1) $$
+     $$ j = \text{clamp}(j, 0, N_y - 1) $$
+     $$ k = \text{clamp}(k, 0, N_z - 1) $$
+-8.  **Linearize**: Compute the 1D index using row-major ordering (X varies fastest, Z slowest, or as defined by the stride formula) [S1, S2, S3, unofficial]:
+-    $$ I = i \cdot (N_y \cdot N_z) + j \cdot N_z + k $$
+-
+-**Formula:**
+-Combining the steps, the direct formula for the index $I$ given position $\mathbf{p}$ is [S1, S3, unofficial]:
+-$$ I = \text{clamp}\left(\left\lfloor \frac{\mathbf{p} - \mathbf{b}_{min}}{\mathbf{b}_{max} - \mathbf{b}_{min}} \cdot \mathbf{N} \right\rfloor, 0, \mathbf{N} - 1\right) \cdot \text{Strides} $$
+-Explicitly for each axis $x,y,z$ with $N_x, N_y, N_z$:
+-$$ i = \text{clamp}\left(\left\lfloor \frac{p_x - b_{min,x}}{b_{max,x} - b_{min,x}} \cdot N_x \right\rfloor, 0, N_x - 1\right) $$
+-$$ j = \text{clamp}\left(\left\lfloor \frac{p_y - b_{min,y}}{b_{max,y} - b_{min,y}} \cdot N_y \right\rfloor, 0, N_y - 1\right) $$
+-$$ k = \text{clamp}\left(\left\lfloor \frac{p_z - b_{min,z}}{b_{max,z} - b_{min,z}} \cdot N_z \right\rfloor, 0, N_z - 1\right) $$
+-$$ I = i \cdot N_y \cdot N_z + j \cdot N_z + k $$
++8.  **Linearize:** Compute the 1D index using row-major ordering. The specific stride order depends on the implementation's memory layout convention. Two common variants found in sources are:
++    -   **Variant A (X-fastest, Z-slowest):** $I = i \cdot N_y \cdot N_z + j \cdot N_z + k$ [S1, unofficial].
++    -   **Variant B (Z-fastest, X-slowest):** $I = k \cdot N_x \cdot N_y + j \cdot N_x + i$ [S2, unofficial].
++    *Implementers must verify the stride order of their target grid storage. Variant A is explicitly cited in [S1, unofficial], Variant B in [S2, unofficial].*
+ 
+ **Pseudocode:**
+ ```python
+-def uniform_grid_index(p_x, p_y, p_z, b_min_x, b_min_y, b_min_z, 
+-                       b_max_x, b_max_y, b_max_z, N_x, N_y, N_z):
+-    # Handle single cell case
+-    if N_x == 1 and N_y == 1 and N_z == 1:
++def uniform_grid_index(p, b_min, b_max, n_dims, epsilon=1e-9):
++    """
++    Maps a 3D position to a linear index in a uniform grid.
++    
++    Args:
++        p: tuple (x, y, z) world position
++        b_min: tuple (x, y, z) minimum bound
++        b_max: tuple (x, y, z) maximum bound
++        n_dims: tuple (Nx, Ny, Nz) number of cells per axis
++        epsilon: float to prevent division by zero
++        
++    Returns:
++        int: linear index
++    """
++    Nx, Ny, Nz = n_dims
++    
++    # Step 1: Handle single cell case
++    if Nx == 1 and Ny == 1 and Nz == 1:
+         return 0
+-
+-    # Calculate box sizes
+-    size_x = b_max_x - b_min_x
+-    size_y = b_max_y - b_min_y
+-    size_z = b_max_z - b_min_z
+-
+-    # Handle division by zero with epsilon
+-    EPSILON = 1e-9
+-    if size_x < EPSILON: size_x = EPSILON
+-    if size_y < EPSILON: size_y = EPSILON
+-    if size_z < EPSILON: size_z = EPSILON
+-
+-    # Translate and normalize
+-    rel_x = (p_x - b_min_x) / size_x
+-    rel_y = (p_y - b_min_y) / size_y
+-    rel_z = (p_z - b_min_z) / size_z
+-
+-    # Scale to grid coordinates
+-    c_x = rel_x * N_x
+-    c_y = rel_y * N_y
+-    c_z = rel_z * N_z
+-
+-    # Floor to integer indices
+-    i = int(c_x)
+-    j = int(c_y)
+-    k = int(c_z)
+-
+-    # Clamp to valid range [0, N-1]
+-    if i < 0: i = 0
+-    elif i >= N_x: i = N_x - 1
++        
++    # Step 2: Calculate bounding box size
++    Sx = b_max[0] - b_min[0]
++    Sy = b_max[1] - b_min[1]
++    Sz = b_max[2] - b_min[2]
+     
+-    if j < 0: j = 0
+-    elif j >= N_y: j = N_y - 1
++    # Step 3 & 4: Translate and Normalize
++    # Guard against zero size dimensions
++    rx = (p[0] - b_min[0]) / (Sx + epsilon)
++    ry = (p[1] - b_min[1]) / (Sy + epsilon)
++    rz = (p[2] - b_min[2]) / (Sz + epsilon)
+     
+-    if k < 0: k = 0
+-    elif k >= N_z: k = N_z - 1
+-
+-    # Linearize (Row-major: X varies fastest, then Y, then Z)
+-    # Formula: I = i * (Ny * Nz) + j * Nz + k
+-    linear_index = i * (N_y * N_z) + j * N_z + k
++    # Step 5: Scale
++    cx = rx * Nx
++    cy = ry * Ny
++    cz = rz * Nz
+     
+-    return linear_index
++    # Step 6: Floor
++    ix = int(cx) # floor
++    iy = int(cy)
++    iz = int(cz)
++    
++    # Step 7: Clamp
++    ix = max(0, min(ix, Nx - 1))
++    iy = max(0, min(iy, Ny - 1))
++    iz = max(0, min(iz, Nz - 1))
++    
++    # Step 8: Linearize (Variant A from [S1, unofficial])
++    # I = i * Ny * Nz + j * Nz + k
++    index = ix * Ny * Nz + iy * Nz + iz
++    
++    return index
+ ```
+ 
+-**Parameters:**
+-- $N_x, N_y, N_z$: Grid resolution. Typical values depend on scene scale and required detail (e.g., $64^3$ to $256^3$).
+-- $\epsilon$: Small constant for numerical stability (e.g., $10^{-9}$) [S3, unofficial].
+-
+-**Edge Cases:**
+-- **Position at $\mathbf{b}_{max}$**: Without clamping, the normalized coordinate becomes $1.0$, scaling to $N$, and flooring to $N$, which is out of bounds. Clamping fixes this [S1, S3, unofficial].
+-- **Zero-sized Box**: Division by zero if $\mathbf{b}_{min} = \mathbf{b}_{max}$. Handled by epsilon check [S3, unofficial].
+-- **Outside Bounds**: Positions outside the AABB are clamped to the nearest valid cell [S1, S3, unofficial].
++**Edge Cases and Pitfalls:**
++-   **Division by Zero:** If the bounding box has zero extent in any dimension, division by $S_x, S_y, S_z$ will fail. The $\epsilon$ guard or explicit check is required [S3, unofficial].
++-   **Out-of-Bounds:** Points outside the AABB must be clamped to the nearest valid cell index to avoid array out-of-bounds errors [S1, unofficial].
++-   **Precision:** Floating-point inaccuracies near cell boundaries can cause jitter. Using `floor` is standard, but `round` may be used for center-based sampling.
++-   **Stride Order:** The linearization formula is not universal. [S1, unofficial] uses $x \cdot N_y N_z + y \cdot N_z + z$, while [S2, unofficial] uses $z \cdot N_x N_y + y \cdot N_x + x$. The implementer must match the memory layout of the underlying array.
+ 
+ ## Subtopics
+@@ -113,15 +114,17 @@
+ The Compact Grid Method is a static data structure for representing a uniform grid acceleration structure with minimal memory requirements: exactly one index per grid cell and exactly one index per object reference, built in linear time. It solves the problem of efficiently mapping objects to grid cells for ray tracing without the memory overhead of linked lists or dynamic arrays. It sets itself apart from its siblings by using a two-pass counting-sort-like algorithm to pack object indices into a single contiguous array, managed by a cell offset array that defines list boundaries implicitly, avoiding null pointers or extra tracking arrays.
+ 
++### [MAP Grid Sampling and Filtering](15864-map-grid-sampling-and-filtering.md)
++MAP is a program that constructs a rectangular grid from irregular input data and samples it using either Z-Buffer or A-Buffer techniques, applying optional filtering. It differs from its siblings by explicitly supporting variable plane spacing and specific filtering modes (Gaussian or density weighting) within the A-Buffer framework, whereas Z-Buffer sampling does not specify filtering in this context.
++
+ ## Operating characteristics
+-- **Time Complexity**: $O(1)$ for index calculation. It involves a constant number of arithmetic operations (subtractions, divisions, multiplications, floor, clamp).
+-- **Memory Complexity**: $O(1)$ auxiliary space. The grid itself requires $O(N_x N_y N_z)$ memory, but the indexing method does not add overhead.
+-- **Performance**: Extremely fast, suitable for real-time ray marching or voxel traversal. The primary cost is the floating-point division and clamp operations.
+-- **Strengths**: Simple implementation, cache-friendly linear access pattern (row-major), no pointer chasing.
+-- **Limitations**: Memory usage grows cubically with resolution. Not suitable for highly sparse data where most cells are empty. Boundary handling requires explicit clamping.
+-- **When to use**: Dense volumetric data, uniform voxel grids, real-time rendering.
+-- **When not to use**: Sparse data (use [Voxel Index Computation](13870-voxel-index-computation.md) or sparse structures), non-uniform voxel sizes.
++-   **Time Complexity:** $O(1)$ arithmetic operations. The mapping involves a constant number of subtractions, divisions, multiplications, and comparisons.
++-   **Memory Complexity:** $O(1)$ auxiliary memory. No additional data structures are required for the indexing calculation itself.
++-   **Strengths:** Extremely fast lookup; cache-friendly if the grid is accessed sequentially; simple implementation.
++-   **Limitations:** Memory usage scales with $N_x N_y N_z$, leading to high memory consumption for high-resolution grids even if the scene is sparse. Not suitable for highly anisotropic or non-uniform data distributions without significant waste.
++-   **When to Use:** Dense volumetric data with uniform distribution; real-time rendering where latency is critical; scenes with uniform resolution requirements.
++-   **When Not to Use:** Sparse data (use sparse grids or octrees); highly anisotropic features (use adaptive grids).
+ 
+ ## Background
+-Uniform Grid Indexing is a fundamental technique in volume rendering and spatial data structures. It originates from the need to efficiently access voxel data in computer graphics, medical imaging, and scientific visualization. The method is widely used in ray marching algorithms, where a ray's position is continuously mapped to voxel indices to sample density or color. The specific implementation details, such as clamping and epsilon handling, are common in game engine implementations (e.g., Unreal Engine's Froxel system) and voxel-based ML frameworks [S1, S2, S3, unofficial].
++Uniform grid indexing is a fundamental technique in computer graphics, originating from the need to accelerate ray tracing and volume rendering. The concept of mapping 3D coordinates to 1D arrays via row-major ordering is standard in linear algebra and memory management. Specific implementations like the "Froxel" indexing method are used in modern real-time rendering engines (e.g., Unreal Engine) for light propagation volumes and voxel-based lighting [S2, unofficial]. The method is closely related to the "Voxel Fragment" techniques used in neural rendering pipelines [S1, unofficial].
+ 
+ ## Sources

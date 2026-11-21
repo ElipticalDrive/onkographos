@@ -1,0 +1,411 @@
+Kalix - a hydrological modelling platform for the people - Add bilinear interpolation to 2D lookup tables by teda-GHD · Pull Request #438 · chasegan/Kalix
+
+Add bilinear interpolation to 2D lookup tables by teda-GHD · Pull Request #438 · chasegan/Kalix · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+teda-GHD
+commented
+Sep 23, 2026
+•
+edited by chasegan
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Overview
+Adds bilinear interpolation to 2D lookup tables, as one property: bilinear = true (default false).
+With it, table.name(col_key, row_key) interpolates between column keys as well as between row keys, and clamps at the table's edges on both axes. Without it, 2D tables behave exactly as before: the column key must match exactly.
+Refs #412. This delivers the bilinear part of that issue. Per-axis interpolation methods and extrapolation policies, proposed in the first version of this PR, are not included; see the review thread above and ADR-0009.
+What this is faster or clearer than (ADR-0009 §6)
+A bilinear lookup can already be composed from one 1D table per column and an expression that interpolates between them. The dedicated form is clearer, since the grid is written once as a grid, and faster, since it is one lookup that finds each bracket once.
+Cost to models that do not use it
+None measured. The choice is resolved at expression lowering into its own AST variant (Lookup2DBilinear); bilinear is never read by a lookup. The existing lookup functions (clamped_lerp, LookupTable1D::lookup, LookupTable2D::lookup, find_column) are not edited.
+Against the merge base, 30 interleaved reps, median of paired differences, one machine (Apple M5): -0.1%, -0.3%, +0.8%, -0.3%, +0.8% on speed tests 1 to 5, and +0.2%, 0.0%, 0.0% on three synthetic models using existing 1D and 2D tables. Output is byte-identical on all eight. An identical rebuild of the merge base measures within about 0.5% of itself. Tests 3 and 5 sit at the edge of that and are worth a re-run on a quiet machine.
+Behaviour
+Interpolates down the two columns either side of the column key, then between those two results.
+A column key that equals one of the table's column keys returns bit for bit what the exact-match lookup returns.
+Both axes clamp. There is no exact-match error on a bilinear table.
+NaN in either argument gives NaN, as for 1D tables.
+bilinear takes true or false. bilinear = true on a 1D table is an error at model load, and in the IDE linter.
+Implementation notes
+LookupTable2D::lookup_bilinear finds the column bracket and the row bracket once each. For key sets of 32 or fewer the bracket is found by counting keys below the argument without branching; longer sets use a binary search.
+The engine reaches it through lookup_bilinear_with, an out-of-line function that takes the evaluation of the two arguments as a closure. Inlined into evaluate, the lookup cost models with no bilinear table 3-4%; this arrangement costs them nothing and is as fast for models that use it. The commit messages carry the measurements.
+Loader, canonical saver, IDE validator, autocomplete and tooltip, user docs and engine docs are updated.
+Testing
+Engine: 936 tests pass. The bilinear tests were checked by putting eight faults into the code one at a time (wrong and reversed column weight, fixed bracket, no exact-key return, lowering always bilinear, saver line deleted, stateful argument not advanced, 1D accepted) and confirming a test fails on each.
+IDE: ./gradlew build passes, with new validator tests.
+Regression suite: all models verify.
+Website: mkdocs build --strict passes.
+Not covered yet
+No test has a table with more than 32 keys, so the binary-search fallback is not exercised in the repo.
+No model in regression_tests/speed/ uses a table, so the suite does not guard these timings.
+Both are planned with the follow-up that applies the same bracket count to the existing 1D and exact-match lookups.
+teda-GHD
+marked this pull request as ready for review
+September 23, 2026 11:28
+chasegan
+commented
+Sep 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Agentic review results:
+Three independent review passes (performance, behaviour, scope) primed with the Manifesto and ADRs on cbdb960:
+The bilinear 2D implementation is correct.
+Existing lookups are slower: up to 3.8x per lookup, and +32% on a table-heavy model run (ADR-0004 §3.1, §3.5).
+Existing results change at a table's last breakpoint (1 ulp, from the <=/>= guards becoming </>).
+next_lower, exact rows, per-axis methods and on_extrapolation are additional to scope with implications for UX and performance (Manifesto §2.7, §3); new warn error level prints to stderr, which the IDE and Python cannot see, has implications for UX.
+The eight-argument lookup_axis spills to the stack on every call; main's clamped_lerp fits in registers. Smaller is faster.
+The new tests check property round-tripping only; no new lookup semantics are tested.
+The test file was committed as CRLF, so the diff shows 923 lines for 65 real ones.
+What the minimal version looks like:
+A bilinear = true property on 2D tables, default false. One new method on the existing 2D type that runs the current clamped_lerp down the two bracketing columns and lerps between them, about fifteen lines. A second AST variant in dynamic_input.rs chosen at lowering, so the existing Lookup2D arm is untouched. Loader, saver, one validator case, one autocomplete entry, a short docs subsection, and numeric tests. Roughly 100 lines, zero edits to the current lookup functions, so existing performance and behaviour is safe.
+chasegan
+commented
+Sep 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Thanks for this PR Tom. I have spent a couple of hours looking at it, and I have also ordered an agentic review. For transparency, I shared some of that review above. The upshot is that this PR is correct but it has implications for performance and UX changes that would need some consideration. The extrapolation part is similar in some ways to the question about units -- people may want the convenience of in-built extrapolation but a clearer and faster solution is to force them to put another row in their table to make it explicit. I can see good use cases for the stepping interpolation, but performance of that and the other methods would benefit from moving the method match logic up out of the lookup function.
+I feel bad pushing back on this one, because the feature is nice. So if you're motivated to do so, you could re-work the PR towards the "minimal version" described above. Or, since I'm the one being picky :) I am happy to have a go in the coming days, and in that case I would ask you to look at the result for me. Would be nice to find a time to have a call in the near future anyway.
+teda-GHD
+commented
+Sep 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+No drama, happy to take that on. And yes a catchup soon would be good, I caught up with Dave Rowlings recently and we were talking about this project as well - so there's some broader support at GHD that would be good to talk about. I'm also hoping to get a bit of support from work to set a bit of time aside on this and help out where I can.
+EDIT: And I need to fix my CRLF vs LF.. I thought I had done that, but I had to reinstall VSCode.. clearly I've lost my settings
+chasegan
+commented
+Sep 24, 2026
+Copy link
+Copy Markdown
+Owner
+Awesome. Next week I'll reach out to find time for a chat.
+teda-GHD
+force-pushed
+the
+feature/table_lookup
+branch
+from
+cbdb960 to
+0000993
+Compare
+September 24, 2026 10:38
+Implement minimal bilinear lookup design from PR review
+9d88c01
+teda-GHD
+force-pushed
+the
+feature/table_lookup
+branch
+from
+0000993 to
+9d88c01
+Compare
+September 24, 2026 12:31
+teda-GHD
+commented
+Sep 24, 2026
+View reviewed changes
+Comment thread
+website/docs/docs/tables.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+teda-GHD
+and others
+added 13 commits
+September 24, 2026 22:38
+Update website/docs/docs/tables.md
+0c1b9d6
+Keep lookup_bilinear out of line
+…
+d51d0b3
+```
+Marked #[inline], lookup_bilinear was inlined into
+OptimizedExpressionNode::evaluate. That grew evaluate from 664 to 801
+instructions and added two callee-saved register pairs to the prologue
+of every recursive call, so models with no bilinear table paid for it:
++4.1%, +3.0% and +3.3% on speed tests 3, 4 and 5 against the merge base
+(85 interleaved reps, noise floor about 0.5% from an A/A build). With
+the function out of line the same models measure at the noise floor.
+
+Per ADR-0004 §3.4 (2026-09-15 amendment) and ADR-0009 §4.
+```
+lookup_bilinear: find each bracket once, by counting short key sets
+…
+04e6ff6
+```
+The function called clamped_lerp once per bracketing column, so the row
+bracket was searched twice over the same row_keys, and both brackets
+were found by binary search. It now finds the column bracket and the
+row bracket once each and does the interpolation itself, with the
+arithmetic of clamped_lerp in the same order on each axis.
+
+count_below finds a bracket in a key set of 32 or fewer by counting the
+keys below the argument without branching, and falls back to
+partition_point for longer sets. The compares of a count do not depend
+on one another, where each step of a binary search waits on the one
+before. The threshold of 32 is not tuned.
+
+Results are unchanged: byte-identical output on four bilinear models,
+and a reviewer's 60 million randomised comparisons against the previous
+function found no value that differs. A NaN row key now gives the
+canonical NaN where the previous arithmetic carried the argument's NaN
+payload through.
+
+Measured against the PR head on speed test 3's network with each pump
+replaced by bilinear lookups on 12 by 8 tables, 20 interleaved reps,
+median of paired differences: -14.6% and -14.7% with one lookup per
+node, -19.9% and -22.8% with four. Models with no bilinear table stay
+at the noise floor against the merge base (30 reps, eight models,
+-0.9% to +0.6%), with the function still out of line.
+
+clamped_lerp and the exact-match lookup are not touched. The same count
+would likely help them; that is a separate change, to be measured on
+its own.
+
+Per ADR-0004 §1 and §6.
+```
+lookup_bilinear: a column key that matches takes that column alone
+…
+61ed93c
+```
+When the column key equalled an interior column key, the lookup
+interpolated from the column before it with a weight of one, and
+lv + d * (uv - lv) / d is not always uv in floating point. So a
+bilinear table could return 0.8999999999999999 for a 0.9 cell, or about
+-1.4e-17 for a zero cell beside larger neighbours, and turning bilinear
+on changed results at calls such as table.t(sim.month, x). A reviewer's
+random tables showed a difference at 4% to 14% of exact interior keys,
+usually of one ulp.
+
+One compare after the column search now sends an exact key down the
+single-column path, which returns bit for bit what the exact-match
+lookup returns (Manifesto §2.3). The first and last column keys were
+already exact.
+
+It is also less work for integer-like keys: against the previous
+commit, -11.4% and -17.3% on the two sim.month models, and no change
+on the two with a fractional column key (20 interleaved reps).
+
+The row axis keeps clamped_lerp's arithmetic, which has the same
+inexactness at interior row breakpoints in every table, 1D included.
+That is left alone here, to be taken up for all lookups together.
+```
+tables.md: close the code fence before the lookup steps
+…
+6ef87a5
+```
+The closing fence after the pump_rating call was lost when a review
+suggestion was applied, so the two-step list, the exact-match warning
+and the whole bilinear subsection rendered as one ini code block.
+mkdocs build --strict does not catch an unclosed fence. Restores the
+fence and the blank line before the list, and says that the two steps
+describe the default.
+```
+Reject bilinear = true on a 1D table
+…
+c259e86
+```
+bilinear = true on a table with n_cols = 2 was accepted, did nothing,
+and was dropped by a canonical save. The same loader stops on an
+unknown table property, so a property that is known but cannot apply
+should stop it too: the file must not say something that does not run
+(Manifesto §2.2).
+
+The engine now returns a load error naming the table. The linter
+reports the same thing, after its property loop so that it does not
+depend on whether bilinear or n_cols is written first. The validator
+had no tests for bilinear at all; this adds them for the accepted
+values, the rejected values, and the 1D case in both property orders.
+```
+IDE: table tooltip states the table's own lookup mode
+…
+ffd99f2
+```
+The hover text for a 2D table read 'exact-match column by default;
+bilinear when enabled clamped at ends', which is ungrammatical and
+leaves the reader to go and find out which applies. The provider
+already holds the parsed section, so the tooltip now reads its bilinear
+property and says which mode this table uses (Manifesto §2.2, §2.6).
+
+The help for the bilinear completion now says what the default means
+and that the property is for 2D tables only.
+```
+tables.md: a bilinear example with a continuous column key
+…
+b22e804
+```
+The example reused the month-keyed pump_rating table. Called with
+sim.month, a bilinear table returns what the exact-match table returns
+for months 1 to 3 and clamps months 4 to 12 to March without a word,
+where the default stops the run. That is the case the warning box on
+the same page says exact matching is for.
+
+The subsection now uses a gate rating keyed by level and opening, with
+one worked number, and states what changes when bilinear is on: no
+exact-match error, clamping on both axes, NaN propagation, exact column
+keys giving the exact-match result, the accepted values, and the load
+error on a 1D table. The errors table and the intro bullet follow, and
+the text is wrapped like the rest of the page (Manifesto §2.6).
+```
+Engine docs: bilinear lookup is implemented
+…
+6a8b073
+```
+docs/table_references.md still said a 2D column is always selected by
+exact match and that a miss always stops the run. It now describes
+bilinear tables alongside the default. FUNCTIONS_DOCUMENTATION.md
+listed 'Bilinear 2D lookup' under future directions, not yet
+implemented; that entry is removed.
+```
+Bring comments and the load error up to date with bilinear tables
+…
+3d2c9f7
+```
+The LookupTable2D doc and its col_keys comment still said columns are
+always matched exactly. The Lookup2DBilinear doc opened with 'Variant',
+which says nothing. The load error read 'must be a true or false'.
+```
+Tests that pin the bilinear lookup's numbers
+…
+8c7e29e
+```
+The bilinear tests passed with the column weight replaced by 0.5, with
+the weight reversed, with the bracket fixed to the first two columns,
+with lowering choosing the bilinear node for every 2D table, with the
+saver's bilinear line deleted, and with the advance_state arm emptied.
+The only point off a column key was the midpoint of a two-column grid,
+and the round-trip test read back source text the standard save had
+re-emitted verbatim.
+
+Now covered, each checked by putting the fault in and seeing a test
+fail:
+- unequal weights on both axes, and a four-column table with uneven
+  keys so the bracket is not always the first pair;
+- an exact column key returns bit for bit what the exact-match lookup
+  returns, including the 0.9 and zero cells that interpolation with a
+  weight of one gets wrong;
+- NaN in either key gives NaN, stated as a decision, where the
+  exact-match lookup panics on a NaN column key;
+- a table without bilinear still stops on a missed column key when
+  reached through an expression;
+- a stateful function inside a bilinear lookup's argument is advanced;
+- the canonical save writes bilinear for the bilinear table only;
+- load errors for a bad bilinear value and for bilinear on a 1D table.
+
+The expression test now uses cache_with_tables(), which gains a
+bilinear copy of its grid.
+```
+lower_table_call: build the 2D node's fields once
+…
+25c63b7
+```
+The two arms repeated the same three-field struct literal and differed
+only in the variant name.
+```
+Bilinear lookup: evaluate the keys and look up in one out-of-line fun…
+…
+9c020e9
+```
+…ction
+
+Out of line as a function of two keys, lookup_bilinear cost models
+without a bilinear table nothing, but the models that use it ran slower
+than with the same code inlined into evaluate, where it costs everyone
+else 3-4%. That looked like a choice between the two.
+
+It is not. lookup_bilinear_with takes the evaluation of the two
+arguments as a closure, and has lookup_bilinear inlined into it. The
+arm in evaluate is a call to it. evaluate stays the size it was, and
+the lookup runs as fast as it did inlined.
+
+Against the previous commit, 15 interleaved reps, median of paired
+differences, on speed test 3's network with each pump replaced by
+bilinear lookups on 12 by 8 tables: -18.6% and -32.7% with a sim.month
+column key (one and four lookups per node), -3.3% and -4.6% with a
+fractional one. Against the PR head that is about -39% and -57%, and
+-18% and -24%.
+
+Against the merge base on eight models with no bilinear table, 30 reps:
++0.7%, +0.4%, +0.4%, -0.3%, -1.5% on speed tests 1 to 5 and +0.1%,
+-0.2%, -0.2% on three table models, with byte-identical output. Test 1
+again at 100 reps: +0.1%, the same as an identical rebuild of the merge
+base.
+
+Three other arrangements were built and timed. The helper as an
+associated function of OptimizedExpressionNode, or as a free function
+in the same file, was as fast for bilinear models but moved speed test
+1, which has no expression in it, by about +1% in five runs of 100
+reps. A helper that called the out-of-line lookup was 10% slower than
+the previous commit. Why the function of two keys is slower is not
+established: its instructions are those of the inlined copy, and
+placing it next to evaluate changed nothing.
+
+Per ADR-0004 §3.4, §4 and §6, and ADR-0009 §4.
+```
+chasegan
+changed the title
+Add 2D lookup tables and additional interpolation options
+Add bilinear interpolation to 2D lookup tables
+Oct 2, 2026
+Hide details
+View details
+chasegan
+merged commit af190c6
+into
+chasegan:main
+Oct 2, 2026
+19 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+chasegan
+commented
+Oct 3, 2026
+Copy link
+Copy Markdown
+Owner
+Great stuff Tom. Sorry I had a heckers week. Your bilinear is in!
+I fiddled a little bit to eek out a bit of performance in the 1D case.
+Also an agent found an interesting result from the interpolation (the existing approach; nothing you introduced). Tiny floating point numerical errors sometimes lead to answers that land outside the segment in the PWL table. We're talking about errors in the last 2bits of the f64. The following 1D table returned −1.4e−17 for x = 0.1
+0, 0.1,
+0.1, 0,
+1.1, 7
+Numerical noise is inevitable, but this example that caught my attention because it goes negative and (slightly!) and that may lead to havoc depending on how the modeller is using the value.
+So I checked the cost of a clamp across the board (it's about 1%) and applied that in commit d86d8e3 for correctness.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

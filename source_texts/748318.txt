@@ -1,0 +1,207 @@
+Contribute to bauerdavid/napari-nD-annotator development by creating an account on GitHub.
+
+Minimal contour: lazy per-plane gradients instead of full-volume memmaps by bauerdavid · Pull Request #91 · bauerdavid/napari-nD-annotator · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+bauerdavid
+commented
+Oct 21, 2026
+Copy link
+Copy Markdown
+Owner
+What
+PR 4 of the Minimal Contour (MC) memory/freeze plan (after #87 bench harness, #88 gate on MC mode, #89 no image copy). FeatureManager/FeatureExtractor precomputed two float64 memmaps of the full image shape for every slice on activation (8x the image on disk, ~11x RSS, a GUI busy-wait, a new pair of files per display order). A gradient pair costs only a few ms per plane, so it is now computed lazily for the displayed plane and kept in a small LRU cache.
+Three commits:
+minimal_contour/plane_features.py (no Qt/napari imports) + unit tests: compute_gradients (cv2 Sobel float32, bit-identical to skimage sobel_v/sobel_h on integer data; RGB uses the existing gaussian code, moved unchanged), to_float64_pair for the Cython calculator, and a thread-safe byte-bounded PlaneFeatureCache (default 64 MB, NAPARI_ND_ANNOTATOR_FEATURE_CACHE_MB overrides; an oversize entry is returned but not cached).
+MinimalContourWidget._set_image uses it (_get_gradients); cache key = (layer id, displayed dims, slice indices, data version); invalidated on layer.events.data and on layer removal. No threads, no temp files, no busy-wait.
+feature_manager.py/feature_extractor.py and their exports are deleted. A small guarded clean_legacy_tmp() (minimal_contour/_legacy_tmp.py, the PID-tagged sweep of Fix persisting the Annotation Toolbox state with a Points layer #86) still removes *_nd_annotator folders left behind by older versions once at _initialize; it never raises.
+Feature-mode semantics are unchanged (SYM = magnitude alone, ASSYM/intensity = image + gradients as before, CUSTOM script untouched, blur applied once to the gradient maps). ndisplay 3 and out-of-range slices still give no features; a layer that is no longer in the viewer now gives none either.
+Behaviour change: transposed display orders
+Gradients are computed from the plane as displayed (image_layer._data_view, raw dtype), so grad_x == sobel_v(displayed plane) and grad_y == sobel_h(displayed plane) in every dims.order. The legacy code computed them from the stored volume and then transposed, so in transposed orders grad_x was sobel_h of the displayed plane (roles swapped relative to the display). Contours in transposed orders can therefore differ slightly from before (they are now consistent with the display). Tests cover all 6 orders of a 3D array and 6 orders of a 4D array.
+Numbers (tools/bench_minimal_contour.py, MC mode enabled, napari 0.9.2 / py3.13, 16 cores; before = origin/main @ 3345130)
+60x512² before → after
+150x1024² before → after
+300x1024² before → after
+150x1024², 2 cores before → after
+activation (GUI blocked)
+0.30 → 0.10 s
+0.44 → 0.18 s
+0.55 → 0.42 s
+1.13 → 0.20 s
+RSS delta at activation
+371 → 117 MB
+1380 → 571 MB
+1656 → 887 MB
+1468 → 569 MB
+RSS delta after settle
+369 → 119 MB
+3080 → 582 MB
+5910 → 897 MB
+3080 → 578 MB
+peak RSS delta
+379 → 139 MB
+3214 → 765 MB
+6225 → 1258 MB
+3238 → 769 MB
+temp files
+252 MB → 0
+2517 MB → 0
+5033 MB → 0
+2517 MB → 0
+background feature jobs
+0.34 s wall / 2.0 CPU-s → none
+1.7 s / 9.7 CPU-s → none
+5.0 s / 16.1 CPU-s → none
+3.1 s / 6.0 CPU-s → none
+time to first contour
+0.31 → 0.11 s
+0.54 → 0.22 s
+0.67 → 0.46 s
+2.17 → 0.25 s
+jump to far slice
+0.02 → 0.02 s
+1.13 → 0.06 s
+4.30 → 0.05 s
+0.96 → 0.09 s
+warm slice step (median)
+0.020 → 0.021 s
+0.043 → 0.051 s
+0.054 → 0.050 s
+0.069 → 0.074 s
+order switch, GUI blocked (1,0,2 / 0,1,2 / 2,1,0)
+0.23/0.04/0.23 → 0.03/0.03/0.03 s
+0.37/0.17/1.68 → 0.06/0.08/0.09 s
+0.66/0.73/3.58 → 0.10/0.12/0.17 s
+0.89/0.21/1.87 → 0.07/0.11/0.10 s
+temp growth per new order
+252 MB each
+2517 MB each (7.5 GB total)
+5033 MB each (15 GB total)
+2517 MB each
+Disk: 0 bytes (was 8x the image per displayed-dims pair); far jump and order switch cost the same as a normal step; no CPU burst on activation; the cache is a constant 8 MB at 1024² (64 MB limit).
+Warm step is +0-8 ms (features are now computed instead of read from a hot memmap), still well under 80 ms.
+The remaining RSS delta is not MC feature work: selecting a labels layer touches the pages of the whole (zero) labels array (+320 MB for 150x1024², +640 MB for 300x1024², measured with MC off; the interpolation/bbox code, outside this PR), plus roughly 230 MB of plane-size working memory (float64 image, gradients and the calculator's copies; independent of Z). That is why the activation RSS delta stays above the 150 MB target on the large volumes.
+Tests
+test_plane_features.py (no viewer): gray gradients equal skimage sobel_v/sobel_h on uint8/uint16/float, non-square and transposed planes; RGB equals the reference math (incl. empty channels/all-zero); LRU hit/miss/eviction/byte bound/oversize/invalidate/clear/env var/read-only entries; thread-safety smoke.
+test_mc_plane_features.py (headless viewer): no *_<pid>_nd_annotator temp folder; cache bounded while scrolling 100 slices; cache hits when scrolling back; feature modes reach the calculator (SYM/ASSYM/HIGH/LOW/CUSTOM script); gradients follow the display order (all 6 orders 3D, 6 orders 4D); RGB; dask and np.memmap; blur on/off (gradients blurred once); replaced image data; layer removal; ndisplay 3/out-of-range; MC contour identical for float32-derived vs float64 gradients.
+test_legacy_tmp.py: dead-PID and old PID-less folders are swept, live ones kept, never raises.
+test_mc_gating.py/test_mc_no_copy.py adapted (spy on PlaneFeatureCache.get, no FeatureManager).
+Full suite on napari 0.9.2/py3.13: 215 passed, 2 failed in the run before the last fix-up: the pre-existing test_shortcuts.py::test_every_dialog_entry_is_actually_bound (also fails on main) and a removal test that I then fixed (a removed layer could be cached again through the labels layer's source_image_layer). On napari 0.5.6/py3.12 the full run had 142 passed, 5 skipped and only the 4D tests failing (the Minimal Surface widget is None there; fixed in the test). After the fixes I re-ran the MC test files (test_mc_plane_features, test_mc_gating, test_mc_no_copy): 49 passed on both versions. I did not re-run the whole suite after the fix-ups, and napari 0.5.0 is only covered by the CI matrix.
+tools/bench_minimal_contour.py now reports a 0-file temp folder for versions without feature files.
+🤖 Generated with Claude Code
+bauerdavid
+and others
+added 4 commits
+October 21, 2026 12:12
+Add lazy per-plane gradients with a byte-bounded LRU cache
+…
+eb127fe
+```
+compute_gradients() gives the x/y derivative of one plane (cv2 Sobel for
+gray, bit-identical to skimage sobel_v/sobel_h on integer data; the
+existing gaussian code for RGB). PlaneFeatureCache keeps the most recent
+planes within 64 MB. Nothing uses it yet.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+Minimal contour: compute the gradients of the displayed plane on demand
+…
+8a4c83d
+```
+_set_image takes the x/y gradients from a cached per-plane computation
+instead of the memmaps of FeatureManager, which is no longer created.
+The gradients are computed from the plane as displayed, so grad_x is
+sobel_v and grad_y is sobel_h of what is on screen in every display
+order (before, transposed orders had the roles swapped).
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+Remove FeatureManager and FeatureExtractor
+…
+99afa7c
+```
+The memmap feature files and the busy-wait are gone: the gradients are
+computed lazily per plane. Only a guarded sweep stays that removes the
+feature folders older versions left in the temp directory.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+Minimal contour: compute plane features in a worker thread while scro…
+…
+9453b03
+```
+…lling
+
+Dragging the napari slice slider ran the ~1 s feature update on the GUI
+thread for every step: delay_function stamped its last call before running
+a function slower than the delay, so each event looked idle and ran it again.
+
+- delay_function stamps the call time when the function is done and gets a
+  leading=False option; _delayed_set_image only runs once scrolling settles
+- the debounced update normalizes, blurs and takes gradients in a worker
+  thread (only the newest request is applied); only handing the result to
+  the calculator stays on the GUI thread
+- gray planes stay 2D until the end instead of being blurred as 3 channels
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+bauerdavid
+merged commit 74a5713
+into
+main
+Oct 22, 2026
+9 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+bauerdavid
+mentioned this pull request
+Oct 26, 2026
+Minimal contour: ROI window for the calculator (selected object / huge planes)
+#92
+Merged
+bauerdavid
+added a commit
+that referenced
+this pull request
+Oct 30, 2026
+Merge main into claude/mc-intensity-prior
+…
+9573038
+```
+Main now computes the plane features in a worker thread (#91) and can hand the
+calculator a window (ROI) of the plane instead of the whole plane (#92). The
+intensity prior follows both:
+
+- _compute_features also returns the intensity image (normalised, inverted and
+  blurred like the features, cropped to the same window), and _apply_features
+  gives it to the prior before the calculator gets the features. For the
+  symmetric gradient the intensity image was thrown away before.
+- The overlay shifts the anchors and the accepted contour from plane
+  coordinates into the window and drops the points outside of it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+bauerdavid
+mentioned this pull request
+Oct 30, 2026
+Experimental intensity prior for the minimal contour
+#90
+Draft
+3 of 4 tasks
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

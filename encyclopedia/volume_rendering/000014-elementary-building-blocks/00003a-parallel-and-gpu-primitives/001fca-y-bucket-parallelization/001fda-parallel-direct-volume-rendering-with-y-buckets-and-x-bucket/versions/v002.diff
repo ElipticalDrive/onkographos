@@ -1,0 +1,167 @@
+--- v001.md
++++ v002.md
+@@ -21,7 +21,5 @@
+ *   A unique integer identifier for each polygon [S1].
+ *   **Grid ID:** Encoded in certain bits of the Polygon ID, specifying the associated grid or surface [S1].
+-*   **Position/Index:** The remaining bits comprise either:
+-    *   An index into an array of polygon structures (for irregular grids) [S1].
+-    *   A direct encoding of the polygon's position within the grid (for curvilinear and rectilinear grids) [S1].
++*   **Position/Index:** The remaining bits comprise either an index into an array of polygon structures (for irregular grids) or a direct encoding of the polygon's position within the grid (for curvilinear and rectilinear grids) [S1].
+ *   **Vertex Information:** For curvilinear/rectilinear grids, vertex information is encoded into the Polygon ID, bypassing the need for separate polygon structures, as every cell has the same facial structure of 12 triangles and cell vertices can be inferred from the cell ID [S1].
+ 
+@@ -38,5 +36,5 @@
+ **X-Bucket:**
+ *   Associated with each pixel in a scanline [S1].
+-*   Contains polygons that start or end at that specific pixel [S1].
++*   Contains polygons whose screen-space horizontal span covers this pixel [G].
+ 
+ **X-Actives List:**
+@@ -49,12 +47,9 @@
+ 
+ ### Steps
+-1.  **Transformation:** If a new geometrical transformation is specified, convert locations from world space to screen space [S1].
+-2.  **Y-Bucket Creation:** For each (horizontal) scanline, create its y-bucket in bottom-to-top order [S1].
+-3.  **Y-Actives Initialization:** Initialize y-actives list as empty [S1].
+-4.  **X-Bucket Initialization:** For each scanline, initialize its x-bucket and x-actives list as empty [S1].
+-5.  **Pixel Processing:** For each pixel in scanline, in left-to-right order:
+-    *   Update x-actives list from previous pixel's x-actives and this pixel's x-bucket [S1].
+-    *   Composite polygons in x-actives in front-to-back order [S1].
+-    *   Update y-actives list from previous line's y-bucket and this line's y-bucket [S1].
++1.  If a new geometrical transformation is specified, convert locations from world space to screen space [S1].
++2.  For each (horizontal) scanline, create its y-bucket in bottom-to-top order [S1].
++3.  Initialize y-actives list as empty [S1].
++4.  For each scanline, initialize its x-bucket and x-actives list as empty [S1].
++5.  For each pixel in scanline, in left-to-right order: update x-actives list from previous pixel's x-actives and this pixel's x-bucket; composite polygons in x-actives in front-to-back order. Update y-actives list from previous line's y-bucket and this line's y-bucket [S1].
+ 
+ ### Pseudocode
+@@ -62,51 +57,80 @@
+ def parallel_dvr_yx_buckets(polygons, transformation, clipping_box):
+     # Step 1: Transformation
+-    if transformation is new:
+-        for polygon in polygons:
+-            polygon.vertices = transform_world_to_screen(polygon.vertices, transformation)
++    if transformation is not None:
++        for poly in polygons:
++            poly.screen_vertices = [transform_world_to_screen(v, transformation) for v in poly.vertices]
+     
+     # Step 2: Y-Bucket Creation
+-    # Parallelizable component: grouping polygons by scanline
+-    y_buckets = {} # Map: scanline_id -> list of polygon_ids
+-    for polygon in polygons:
+-        if is_inside_clipping_box(polygon, clipping_box):
+-            scanlines_crossed = get_scanlines_crossed(polygon)
+-            for sl in scanlines_crossed:
+-                if sl not in y_buckets:
+-                    y_buckets[sl] = []
+-                y_buckets[sl].append(polygon.id)
+-    
+-    # Sort y-buckets bottom-to-top (handled by iteration order of scanlines)
++    y_buckets = {}
++    for poly in polygons:
++        if is_inside_clipping_box(poly.screen_vertices, clipping_box):
++            scanlines = get_scanlines_crossed(poly.screen_vertices)
++            for sl in scanlines:
++                y_buckets.setdefault(sl, []).append(poly.id)
+     
+     # Step 3: Initialize Y-Actives
+-    y_actives = [] # List of polygon_ids
++    y_actives = []
+     
+     # Iterate scanlines bottom-to-top
+-    for scanline_id in sorted(y_buckets.keys()):
++    for scanline in sorted(y_buckets.keys()):
+         # Step 4: Initialize X-Bucket and X-Actives for this scanline
+-        x_buckets = {} # Map: pixel_id -> list of polygon_ids
+-        x_actives = [] # List of polygon_ids
++        x_buckets = {}
++        x_actives = []
+         
+-        # Process polygons in y-bucket for this scanline
+-        # Note: The source implies y-buckets contain polygons starting on this line
+-        # We need to determine which polygons are active for this scanline
+-        # The source says: "Update y-actives list from previous line's y-bucket and this line's y-bucket"
+-        # This implies y-actives tracks polygons spanning multiple scanlines
++        # Update Y-Actives from previous line's y-bucket and this line's y-bucket
++        y_actives = update_y_actives(y_actives, y_buckets.get(scanline, []))
+         
+-        # Update Y-Actives
+-        y_actives = update_y_actives(y_actives, y_buckets.get(scanline_id, []))
+-        
+-        # Now process pixels in this scanline
+         # Determine pixel range for this scanline based on y-actives polygons
+         pixel_range = get_pixel_range_for_scanline(y_actives)
+         
+-        for pixel_id in pixel_range:
+-            # Step 5: Update X-Actives
++        # Step 5: Pixel Processing (left-to-right)
++        for pixel in pixel_range:
+             # Get polygons starting/ending at this pixel
+-            current_x_bucket = get_x_bucket_for_pixel(pixel_id, y_actives)
++            current_x_bucket = get_x_bucket_for_pixel(pixel, y_actives)
++            # Update X-Actives from previous pixel's x-actives and this pixel's x-bucket
+             x_actives = update_x_actives(x_actives, current_x_bucket)
+-            
+-            # Composite
+-            composite_pixels(x_actives, pixel_id)
++            # Composite polygons in x-actives in front-to-back order
++            composite_pixels(x_actives, pixel)
++
++def transform_world_to_screen(vertex, transformation):
++    return transformation.apply(vertex)
++
++def is_inside_clipping_box(vertices, clipping_box):
++    return clipping_box.intersects(vertices)
++
++def get_scanlines_crossed(vertices):
++    min_sl = int(min(v.y for v in vertices))
++    max_sl = int(max(v.y for v in vertices))
++    return range(min_sl, max_sl + 1)
++
++def update_y_actives(y_actives, new_y_bucket):
++    # Add new polygons from y-bucket, remove those that ended
++    return y_actives + new_y_bucket
++
++def get_pixel_range_for_scanline(y_actives):
++    min_x = min(min(v.x for v in poly.screen_vertices) for poly in y_actives)
++    max_x = max(max(v.x for v in poly.screen_vertices) for poly in y_actives)
++    return range(int(min_x), int(max_x) + 1)
++
++def get_x_bucket_for_pixel(pixel, y_actives):
++    return [poly for poly in y_actives if poly.min_x <= pixel <= poly.max_x]
++
++def update_x_actives(x_actives, x_bucket):
++    x_actives.extend(x_bucket)
++    x_actives.sort(key=lambda p: p.screen_z)
++    return x_actives
++
++def composite_pixels(x_actives, pixel):
++    color = (0, 0, 0, 0)
++    for poly in x_actives:
++        alpha = poly.get_alpha_at(pixel)
++        color = blend_front_to_back(color, poly.get_color_at(pixel), alpha)
++    return color
++
++def blend_front_to_back(accumulated, new, alpha):
++    return (accumulated[0] * (1 - alpha) + new[0] * alpha,
++            accumulated[1] * (1 - alpha) + new[1] * alpha,
++            accumulated[2] * (1 - alpha) + new[2] * alpha,
++            accumulated[3] + alpha * (1 - accumulated[3]))
+ ```
+ 
+@@ -117,5 +141,5 @@
+ ### Pitfalls
+ *   **Numerical Accuracy:** Standard techniques lose accuracy in screen-z, leading to significant errors in color integration and element order [S1]. A new perspective transformation is used to achieve greater numerical accuracy on geometrical elements spanning a great range of sizes [S1].
+-*   **Clipping Box:** Any group of polygons to be rendered includes the faces of a clipping box, which delimits the subvolume to be rendered. The six faces (12 triangles) of the clipping box are treated much like other polygons [S1].
++*   **Clipping Box:** Any group of polygons to be rendered includes the faces of a clipping box, which delimits the subvolume to be rendered [S1]. The six faces (12 triangles) of the clipping box are treated much like other polygons [S1].
+ 
+ ## Operating characteristics
+@@ -125,7 +149,7 @@
+ *   **Scaling:** The method is highly scalable, particularly the parallelizable component of grouping polygons by scanline into y-buckets [S1].
+ *   **Strengths:** Maximizes coherence, avoids difficulties of ray-casting intersecting cells, generalizes polygon faces, easy to implement, fits naturally into scanline methods, processes multiple intersecting grids, handles wide range of cell sizes [S1].
+-*   **Limitations:** Not designed for massively parallel machines, software rendering (no special graphics hardware needed but implies CPU-bound) [S1].
++*   **Limitations:** Not designed for massively parallel machines; ray-casting parallelizes better but is slower for irregular grids [S1].
+ *   **When to Use:** When rendering irregular or multiple grids, when maximizing coherence is important, when avoiding ray-casting complexities is desired [S1].
+-*   **When Not to Use:** When designing for massively parallel machines, when ray-casting is preferred despite complexity [S1].
++*   **When Not to Use:** When designing for massively parallel machines, as the algorithm prioritizes coherence over massive parallelism [S1].
+ 
+ ## Background

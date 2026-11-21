@@ -1,0 +1,157 @@
+--- v003.md
++++ v004.md
+@@ -1,19 +1,19 @@
+ # NeRF Training Configuration
+ 
+-Also called: NeRF Training Loop Configuration, NeRF Training Setup, Sparsity Prior, Sparsity Regularization, Sparsity Loss
++Also called: NeRF Training Loop Configuration, NeRF Training Setup, Sparsity Prior, Sparsity Regularization
+ 
+ ## Overview
+-NeRF Training Configuration refers to the specific hyperparameters, optimization routines, and regularization terms used to train a Neural Radiance Field (NeRF) model. It solves the problem of converging to a physically plausible volumetric representation by preventing the network from generating arbitrary, non-photorealistic geometry in unobserved regions. It distinguishes itself from sibling methods like [Mip-NeRF](3381-mip-nerf.md) or [Instant Neural Graphics Primitives (Instant NGP)](8637-instant-neural-graphics-primitives-instant-ngp.md) by explicitly incorporating a **sparsity prior** (or sparsity loss) to condense volume density, ensuring the resulting field is suitable for downstream sparse representations like octrees [S1, unofficial][S2].
++NeRF Training Configuration specifies the hyperparameters, optimization routines, and regularization terms applied during NeRF training [S2]. It solves the problem of converging to a physically plausible volumetric representation by preventing the network from generating arbitrary, non-photorealistic geometry in unobserved regions [S1, unofficial]. It distinguishes itself from sibling methods like [Mip-NeRF](3381-mip-nerf.md) or [Instant Neural Graphics Primitives (Instant NGP)](8637-instant-neural-graphics-primitives-instant-ngp.md) by explicitly incorporating a sparsity prior (or sparsity loss) to condense volume density, ensuring the resulting field is suitable for downstream sparse representations like octrees [S1, unofficial][S2].
+ 
+ ## How it works
+-The training configuration defines the data pipeline, the composite loss function (including the sparsity term), and the optimizer settings required to minimize the difference between rendered and ground-truth images while enforcing geometric sparsity.
++The training configuration defines the data pipeline, the composite loss function (including the sparsity term), and the optimizer settings required to minimize the difference between rendered and ground-truth images while enforcing geometric sparsity [S3, unofficial][S1, unofficial][S2].
+ 
+ ### Inputs and Outputs
+-*   **Inputs**: Training images (RGB), camera poses (extrinsics), camera intrinsics (focal length, image dimensions), and a bounding box defining the scene volume.
+-*   **Outputs**: A trained NeRF model (typically two MLPs for coarse and fine sampling) and associated optimizer state.
++*   **Inputs**: Training images (RGB), camera poses (extrinsics), camera intrinsics (focal length, image dimensions), and a bounding box defining the scene volume [S3, unofficial].
++*   **Outputs**: A trained NeRF model (typically two MLPs for coarse and fine sampling) and associated optimizer state [S3, unofficial].
+ 
+ ### Data Structures
+ The training loop manages the following data structures:
+-1.  **Dataset**: A collection of rays generated from training images. Each ray is defined by origin $\mathbf{o}$, direction $\mathbf{d}$, and target color $\mathbf{C}^*$.
++1.  **Dataset**: A collection of rays generated from training images [S3, unofficial]. Each ray is defined by origin $\mathbf{o}$, direction $\mathbf{d}$, and target color $\mathbf{C}^*$ [S3, unofficial].
+ 2.  **Model State**:
+     *   `coarse_model_state_dict`: Parameters for the coarse sampling MLP.
+@@ -29,5 +29,5 @@
+     $$
+     [S3, unofficial].
+-3.  **Model Initialization**: Initialize two NeRF models: a coarse model and a fine model [S3, unofficial]. Combine their parameters.
++3.  **Model Initialization**: Initialize two NeRF models: a coarse model and a fine model [S3, unofficial]. Combine their parameters [S3, unofficial].
+ 4.  **Optimizer Setup**: Create an Adam optimizer with learning rate $\eta = 5 \times 10^{-4}$ and betas $(\beta_1, \beta_2) = (0.9, 0.999)$ [S3, unofficial].
+ 5.  **Loss Definition**: Define the composite loss function $\mathcal{L}$:
+@@ -40,5 +40,5 @@
+     *   Perform volume rendering to predict color $\hat{\mathbf{C}}(\mathbf{r})$ using the coarse and fine sampling strategies [S1, unofficial].
+     *   Sample $K$ uniformly random points within the bounding box to compute $\mathcal{L}_{\text{sparsity}}$ [S1, unofficial].
+-    *   Compute gradients and update model parameters.
++    *   Compute gradients and update model parameters [S3, unofficial].
+ 7.  **Checkpointing**: Save the model state, optimizer state, and epoch number to a `.pt` file [S3, unofficial].
+ 
+@@ -55,5 +55,5 @@
+ \mathcal{L}_{\text{RGB}} = \sum_{\mathbf{r} \in \mathcal{R}} \| \mathbf{C}(\mathbf{r}) - \hat{C}(\mathbf{r}) \|_2^2
+ $$
+-where $\mathcal{R}$ is the set of rays in the batch [S1, unofficial].
++where $\mathcal{R}$ is the batch of rays corresponding to pixels in the training images [S1, unofficial].
+ 
+ **Sparsity Loss**:
+@@ -61,5 +61,5 @@
+ \mathcal{L}_{\text{sparsity}} = \frac{1}{K} \sum_{k=1}^K | 1 - \exp(-\delta \sigma_k) |
+ $$
+-where $\sigma_k$ are density values at $K$ uniformly random points within the bounding box, and $\delta$ is an exponential scaling factor [S1, unofficial][S2].
++where $\sigma_k$ are density values at $K$ uniformly random points within the bounding box, and $\delta$ is an exponential scaling factor [S1, unofficial][S2]. (Source [S1, unofficial] denotes this scaling factor as $\lambda$, while [S2] uses $\delta$.)
+ 
+ ### Parameters
+@@ -86,11 +86,9 @@
+     Computes the sparsity loss by sampling K random points in the bounding box.
+     """
+-    # Sample K random points within the bounding box
+-    # Assuming bounding_box is defined by min and max coordinates
++    # Sample K uniformly random points within the bounding box
+     random_points = torch.rand(K, 3) * (bounding_box.max - bounding_box.min) + bounding_box.min
+     
+-    # Query density from the model (assuming model.forward returns density)
+-    # Note: In practice, positional encoding is applied to random_points
+-    densities = model.query_density(random_points)
++    # Apply positional encoding and pass through the MLP to get density [G]
++    densities = model(random_points)
+     
+     # L_sparsity = (1/K) * sum |1 - exp(-delta * sigma_k)|
+@@ -105,19 +103,17 @@
+     optimizer.zero_grad()
+     
+-    # 1. Volume Rendering
+-    # ray_batch contains origin, direction, and other ray info
+-    # model.forward_coarse and model.forward_fine perform the volume rendering
+-    predicted_color = model.volume_render(ray_batch)
++    # Volume rendering to predict color [S1, unofficial]
++    predicted_color = model(ray_batch)
+     
+-    # 2. RGB Loss (MSE)
++    # RGB Loss (MSE) [S3, unofficial]
+     rgb_loss = nn.functional.mse_loss(predicted_color, target_color)
+     
+-    # 3. Sparsity Loss
++    # Sparsity Loss [S1, unofficial][S2]
+     sparsity_loss = compute_sparsity_loss(model, bounding_box, K=1000, delta=delta)
+     
+-    # 4. Total Loss
++    # Total Loss
+     total_loss = rgb_loss + beta_s * sparsity_loss
+     
+-    # 5. Backpropagation
++    # Backpropagation
+     total_loss.backward()
+     optimizer.step()
+@@ -129,31 +125,20 @@
+     Main training loop.
+     """
+-    # Combine parameters
++    # Combine parameters from both models [S3, unofficial]
+     all_params = list(coarse_model.parameters()) + list(fine_model.parameters())
+     
+-    # Optimizer
++    # Optimizer [S3, unofficial]
+     optimizer = optim.Adam(all_params, lr=lr, betas=(0.9, 0.999))
+-    
+-    # Loss function
+-    mse_loss = nn.MSELoss()
+     
+     for epoch in range(epochs):
+         for batch in dataset:
+-            # Extract ray batch and target color
++            # Extract ray batch and target color [S3, unofficial]
+             ray_batch = batch['rays']
+             target_color = batch['colors']
+             
+             # Forward pass and loss computation
+-            loss, rgb_l, spar_l = train_step(
+-                model=fine_model, # Or combined model wrapper
+-                optimizer=optimizer,
+-                ray_batch=ray_batch,
+-                target_color=target_color,
+-                bounding_box=dataset.bounding_box,
+-                beta_s=beta_s,
+-                delta=delta
+-            )
++            train_step(fine_model, optimizer, ray_batch, target_color, dataset.bounding_box, beta_s, delta)
+         
+-        # Checkpointing
++        # Checkpointing [S3, unofficial]
+         if epoch % 10 == 0:
+             checkpoint = {
+@@ -172,14 +157,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Training time is dominated by the volume rendering step, which requires querying the MLP for $N$ samples per ray. The sparsity loss adds $K$ additional MLP queries per step. With batch size 1, this is computationally expensive compared to rasterization-based methods.
+-*   **Memory Complexity**: The model stores the weights of the MLPs. The sparsity loss does not require storing intermediate gradients for all $K$ points if computed on the fly, but the checkpoint size grows with the number of layers.
+-*   **Performance**: The sparsity prior improves the robustness of octree conversion (e.g., PlenOctree) by preventing solid background artifacts [S1, unofficial]. However, it does not directly improve PSNR/SSIM on the training images compared to a model without it, as the primary driver is the RGB loss.
+-*   **Strengths**: Prevents "ghosting" or solid background artifacts in novel views; facilitates efficient sparse representation conversion.
+-*   **Limitations**: Requires careful tuning of $\beta_s$ and $\delta$; adds computational overhead per step due to random sampling for sparsity loss.
+-*   **When to use**: When the downstream application involves converting the NeRF to a sparse representation (like an octree) or when the scene has large unobserved background regions.
+-*   **When not to use**: If real-time training speed is critical and sparse conversion is not planned, or if the scene is fully enclosed with no background.
++*   **Time Complexity**: Not given in the sources.
++*   **Memory Complexity**: Not given in the sources.
++*   **Performance**: The sparsity prior improves the robustness of octree conversion (e.g., PlenOctree) by preventing solid background artifacts [S1, unofficial].
++*   **Strengths**: Prevents "ghosting" or solid background artifacts in novel views; facilitates efficient sparse representation conversion [S1, unofficial].
++*   **Limitations**: Requires careful tuning of $\beta_s$ and $\delta$ [S2]; adds computational overhead per step due to random sampling for sparsity loss [S1, unofficial].
++*   **When to use**: When the downstream application involves converting the NeRF to a sparse representation (like an octree) or when the scene has large unobserved background regions [S1, unofficial].
++*   **When not to use**: Not given in the sources.
+ 
+ ## Background
+-The sparsity prior was introduced in the context of PlenOctrees for real-time rendering of NeRFs [S1, unofficial]. The authors observed that without regularization, NeRFs tend to fill unobserved space with arbitrary geometry, which negatively impacts the efficiency of octree-based compression. The configuration described here, including the specific Adam optimizer settings and batch size, is derived from common PyTorch implementations of NeRF [S3, unofficial]. The sparsity loss formula is also discussed in the context of L0-Sampler, which contrasts its density condensation approach with other sampling refinements [S2].
++The sparsity prior was introduced in the context of PlenOctrees for real-time rendering of NeRFs [S1, unofficial]. The authors observed that without regularization, NeRFs tend to fill unobserved space with arbitrary geometry, which negatively impacts the efficiency of octree-based compression [S1, unofficial]. The configuration described here, including the specific Adam optimizer settings and batch size, is derived from common PyTorch implementations of NeRF [S3, unofficial]. The sparsity loss formula is also discussed in the context of L0-Sampler, which contrasts its density condensation approach with other sampling refinements [S2].
+ 
+ ## Sources

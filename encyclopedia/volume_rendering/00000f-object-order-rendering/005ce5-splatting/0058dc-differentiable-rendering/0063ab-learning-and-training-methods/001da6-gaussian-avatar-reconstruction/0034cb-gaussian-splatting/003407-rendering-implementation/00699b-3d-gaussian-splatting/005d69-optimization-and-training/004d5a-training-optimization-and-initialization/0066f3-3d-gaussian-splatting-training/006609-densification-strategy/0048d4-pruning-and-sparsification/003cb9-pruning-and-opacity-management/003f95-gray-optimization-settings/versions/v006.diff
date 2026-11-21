@@ -1,0 +1,161 @@
+--- v005.md
++++ v006.md
+@@ -4,67 +4,114 @@
+ 
+ ## Overview
+-GRay Optimization Settings define the specific hyperparameter configurations used to train 3D Gaussian Splatting primitives using the GRay ray-tracing renderer [S1]. These settings manage the trade-off between training speed, final visual quality, and Gaussian count by tuning opacity thresholds, pruning criteria, and optimization duration [S1]. Unlike standard 3DGS, GRay does not use opacity resets or size-based pruning, relying instead on opacity magnitude and generalized exponents to control primitive survival [S1].
++GRay Optimization Settings define the hyperparameter configurations for training 3D Gaussian Splatting using the GRay ray-tracing renderer [S1]. They solve the problem of balancing training speed, final rendering frame rate, and visual fidelity by tuning opacity thresholds, pruning criteria, and spherical harmonic (SH) update strategies. Unlike standard 3DGS and 3DGRT, GRay does not use opacity resets and does not prune Gaussians based on size, relying instead on opacity and contribution thresholds [S1].
+ 
+ ## How it works
+-The optimization process adjusts the parameters of the Gaussian primitives ($\alpha$, $\mu$, $\Sigma$, $\mathbf{c}$) via gradient descent while periodically applying pruning and densification logic [S1]. The specific "Settings" refer to the static configuration of thresholds and decay rates that govern this lifecycle [S1].
++The optimization process manages the population of 3D Gaussians through specific parameter presets that control pruning aggressiveness, opacity decay, and SH coefficient updates.
+ 
+ **Inputs and Outputs:**
+-*   **Input:** Scene data, initial Gaussian cloud, learning rate schedule, and the specific preset configuration (LQ or HQ).
+-*   **Output:** Optimized Gaussian parameters and final primitive count.
++*   **Input:** Initial set of Gaussians, camera poses, reference images, and a chosen preset (LQ or HQ).
++*   **Output:** Optimized Gaussian attributes (position, covariance, opacity, SH coefficients) and final scene representation.
+ 
+ **Data Structures:**
+-*   **Gaussian Attributes:** Position $\mu_k$, Covariance $\Sigma_k$ (or scale/rotation), Opacity $\alpha_k$, Spherical Harmonics coefficients $\mathbf{c}_k$ [S1].
+-*   **Optimization State:** Current iteration count, accumulated gradients [S1].
++The Gaussian attributes are stored in standard 3DGS structures. GRay modifies the optimization loop by:
++1.  Disabling opacity resets [S1].
++2.  Disabling size-based pruning [S1].
++3.  Applying specific opacity and contribution thresholds for removal.
+ 
+-**Key Parameters and Formulas:**
+-1.  **Opacity Pruning:** A Gaussian is pruned if its opacity $\alpha_k$ falls below a threshold $\alpha_{\min}$ [S1].
+-2.  **Generalized Exponent:** The opacity contribution to the loss or rendering is modulated by a generalized exponent $\alpha_{\text{expo}}$ [S1].
+-3.  **Pruning Threshold ($\mu_{\text{prune}}$):** A threshold used in conjunction with opacity or gradient magnitude to determine removal, distinct from size-based pruning [S1].
+-4.  **Scale Decay ($\eta_{\text{decay}}$):** A multiplicative factor applied to Gaussian scales to prevent excessive expansion [S1].
+-5.  **SH Stepping Laziness:** Spherical Harmonics updates are skipped for Gaussians with opacity $\alpha_k > \alpha_{\text{lazy}}$ to save computation [S1].
++**Parameters and Steps:**
++The core logic involves periodic evaluation of Gaussian significance. A Gaussian $g_k$ is pruned if its opacity $\alpha_k$ falls below a minimum threshold $\alpha_{\min}$ or its contribution falls below $\mu_{\text{prune}}$.
+ 
+-**Algorithm Steps:**
+-1.  **Initialization:** Generate initial Gaussians. If binning is enabled, remove Gaussians with density below $\alpha_{\text{bin}}$ (e.g., 0.04) to reduce initial count [S1].
+-2.  **Training Loop:**
+-    a. Render image using GRay ray tracer [S1].
+-    b. Compute loss against ground truth [S1].
+-    c. Backpropagate gradients [S1].
+-    d. Update parameters using optimizer [S1].
+-    e. **SH Laziness:** If $\alpha_k > \alpha_{\text{lazy}}$, skip SH gradient updates [S1].
+-    f. **Scale Decay:** Apply $\eta_{\text{decay}}$ to scales if enabled [S1].
+-3.  **Periodic Pruning:**
+-    a. Check opacity $\alpha_k < \alpha_{\min}$ [S1].
+-    b. Check pruning threshold $\mu_{\text{prune}}$ [S1].
+-    c. Remove primitives meeting criteria [S1].
+-    d. *Note:* Do not prune based on Gaussian size (scale) [S1]. Do not reset opacity [S1].
+-4.  **Termination:** Stop after specified iterations (e.g., 7500 for LQ, full schedule for HQ) [S1].
++1.  **Initialization:** Generate initial Gaussians. Apply binning if enabled (default in GRay, disabled in GRayHQ) to remove initial floaters. The binning threshold $\alpha_{\text{bin}}$ is typically 0.04, removing over 15% of initial Gaussians with minimal quality loss [S1].
++2.  **Optimization Loop:**
++    *   Render image using GRay ray tracer.
++    *   Compute loss against reference image.
++    *   Backpropagate gradients.
++    *   **Opacity Decay:** Apply scale decay factor $\eta_{\text{decay}}$ to opacity if enabled [S1].
++    *   **SH Stepping:** Update SH coefficients lazily. If the number of iterations since the last SH update exceeds $\alpha_{\text{lazy}}$, perform the update [S1].
++    *   **Pruning:** Every $N$ iterations (standard 3DGS schedule), evaluate Gaussians.
++        *   If $\alpha_k < \alpha_{\min}$, mark for removal.
++        *   If contribution $< \mu_{\text{prune}}$, mark for removal.
++        *   Remove marked Gaussians from the active set.
++3.  **Termination:** Stop after the specified number of iterations.
+ 
+-**Pitfalls:**
+-*   **DHT Truncation:** Disabling the Differentiable Hash Table (DHT) or using high $\tau_{\min}$ thresholds causes rapid quality deterioration and potential divergence (e.g., PSNR dropping to 24.54 at $\tau_{\min}=0.03$) [S1].
+-*   **Convergence Failure:** High pruning thresholds can cause rapid Gaussian expansion and failure to converge [S1].
++**Formulas:**
++*   Pruning Condition: Remove $g_k$ if $\alpha_k < \alpha_{\min}$ OR $\text{contribution}(g_k) < \mu_{\text{prune}}$ [S1].
++*   SH Update Frequency: Update SH if $\text{current\_iter} - \text{last\_sh\_iter} > \alpha_{\text{lazy}}$ [S1].
++
++**Pseudocode:**
++```python
++# GRay Optimization Loop
++def optimize_gaussians(gaussians, images, preset):
++    # Extract preset parameters
++    alpha_min = preset.alpha_min
++    mu_prune = preset.mu_prune
++    eta_decay = preset.eta_decay
++    alpha_lazy = preset.alpha_lazy
++    max_iters = preset.max_iters
++    
++    # Initialize SH update counter
++    last_sh_iter = 0
++    
++    for iter in range(max_iters):
++        # 1. Render and Compute Loss
++        image = render_gray(gaussians, camera)
++        loss = compute_loss(image, reference_image)
++        
++        # 2. Backpropagate
++        gradients = compute_gradients(loss, gaussians)
++        apply_gradients(gaussians, gradients)
++        
++        # 3. Opacity Decay (if enabled)
++        if eta_decay is not None:
++            gaussians.opacity *= eta_decay
++            
++        # 4. SH Stepping (Lazy Update)
++        if iter - last_sh_iter > alpha_lazy:
++            update_sh_coefficients(gaussians)
++            last_sh_iter = iter
++            
++        # 5. Periodic Pruning (e.g., every 100-300 iterations)
++        if iter % pruning_interval == 0:
++            to_remove = []
++            for g in gaussians:
++                # Check opacity threshold
++                if g.opacity < alpha_min:
++                    to_remove.append(g.id)
++                    continue
++                # Check contribution threshold
++                if g.contribution < mu_prune:
++                    to_remove.append(g.id)
++            remove_gaussians(gaussians, to_remove)
++            
++    return gaussians
++```
++
++**Edge Cases:**
++*   **High Pruning Thresholds:** Setting $\tau_{\min}$ (opacity threshold for ray tracing stability) too high (e.g., 0.03) can cause catastrophic quality drops (PSNR 24.54) and failure to converge due to rapid Gaussian expansion [S1].
++*   **DHT Disabling:** Disabling the Differentiable Hash Table (DHT) leads to rapid quality deterioration as truncation levels increase [S1].
+ 
+ ## Subtopics
+ 
+ ### GRayLQ Preset
+-A low-quality, high-speed configuration designed for rapid training and high frame rates [S1].
+-*   **Configuration:** $\alpha_{\min}=0.02$, $\alpha_{\text{expo}}=3$, $\mu_{\text{prune}}=5\times10^{-7}$, $\eta_{\text{decay}}=0.9998$, SH stepping laziness at $\alpha_{\text{lazy}}=12$, iterations=7500 [S1].
+-*   **Performance:** At half resolution: PSNR 26.23, SSIM 0.839, LPIPS 0.191, Init Time 01:58, Opt Time 00:46, FPS 1051, Init #G 3.27M, Final #G 0.48M [S1].
+-*   **Use Case:** When training speed and inference FPS are prioritized over maximum fidelity [S1].
++A low-quality, high-speed configuration designed for rapid training and high frame rates. It uses aggressive pruning and decay settings.
++*   **Parameters:** $\alpha_{\min}=0.02$, $\alpha_{\text{expo}}=3$, $\mu_{\text{prune}}=5\times10^{-7}$, $\eta_{\text{decay}}=0.9998$, SH stepping laziness at $\alpha_{\text{lazy}}=12$, iterations=7500 [S1].
++*   **Performance:** At half resolution, achieves PSNR 26.23, SSIM 0.839, LPIPS 0.191. Init Time 01:58, Opt Time 00:46, FPS 1051. Initial Gaussians: 3.27M, Final: 0.48M [S1].
++*   **Use Case:** When training speed and final rendering FPS are prioritized over maximum visual fidelity.
+ 
+ ### GRayHQ Preset
+-A high-quality configuration matching 3DGS opacity exponent and 3DGRT density thresholds for superior visual results [S1].
+-*   **Configuration:** $\alpha_{\min}=0.001$, $\alpha_{\text{expo}}=1$ (matching 3DGS), $\tau_{\min}=0.001$ (matching 3DGRT), initialization binning disabled, pruning threshold $\mu_{\text{prune}}=10^{-9}$, scale decay disabled entirely [S1].
+-*   **Performance:** At half resolution: PSNR 27.41, SSIM 0.847, LPIPS 0.154, Init Time 01:58, Opt Time 36:11, FPS 55, Init #G 3.97M, Final #G 3.79M [S1].
+-*   **Use Case:** When maximum visual quality is required, accepting significantly longer training times [S1].
++A high-quality configuration that matches 3DGS opacity exponent and 3DGRT minimum opacity, with disabled scale decay and binning.
++*   **Parameters:** $\alpha_{\min}=0.001$, $\alpha_{\text{expo}}=1$, $\tau_{\min}=0.001$, initialization binning disabled, pruning threshold $\mu_{\text{prune}}=10^{-9}$, scale decay disabled [S1].
++*   **Performance:** At half resolution, achieves PSNR 27.41, SSIM 0.847, LPIPS 0.154. Init Time 01:58, Opt Time 36:11, FPS 55. Initial Gaussians: 3.97M, Final: 3.79M [S1].
++*   **Use Case:** When visual quality is prioritized, approaching 3DGS-DI quality but with slower training.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** GRayLQ trains in under a minute, more than doubling 3DGS's frame rate [S1]. GRayHQ takes significantly longer (36+ minutes) but improves quality over standard GRay [S1].
+-*   **Memory Complexity:** GRayLQ reduces final Gaussian count to 0.48M (from 3.27M init), while GRayHQ retains 3.79M (from 3.97M init) [S1].
+-*   **Strengths:** GRayLQ offers exceptional speed; GRayHQ approaches 3DGS-DI quality [S1].
+-*   **Limitations:** GRayHQ is slow; disabling DHT or using high thresholds causes catastrophic quality loss [S1].
+-*   **When to use:** Use GRayLQ for real-time applications or rapid prototyping; use GRayHQ for offline rendering where quality is paramount [S1].
++*   **Time Complexity:** Training time varies significantly by preset. GRayLQ trains in under a minute, while GRayHQ takes ~36 minutes [S1].
++*   **Memory Complexity:** GRayLQ reduces Gaussian count from 3.27M to 0.48M, significantly lowering memory usage. GRayHQ retains nearly all initial Gaussians (3.97M to 3.79M) [S1].
++*   **Performance:** GRayLQ achieves >1000 FPS at half resolution, more than doubling 3DGS's frame rate [S1]. GRayHQ achieves 55 FPS [S1].
++*   **Strengths:** High rendering speed (LQ), reduced initial Gaussian count via binning, no opacity resets required.
++*   **Limitations:** Quality drops significantly if pruning thresholds are too high or DHT is disabled [S1]. HQ preset is slower than standard 3DGS.
+ 
+ ## Background
+-GRay Optimization Settings originate from the GRay paper, which introduces a ray-tracing approach to 3D Gaussian Splatting [S1]. The settings were developed to balance the speed of splatting with the quality of ray tracing, specifically avoiding opacity resets and size-based pruning used in prior methods like 3DGS and 3DGRT [S1].
++GRay is a ray-tracing based renderer for 3D Gaussian Splatting that aims to match the speed of splatting while offering higher quality [S1]. The optimization settings were developed to balance the trade-off between training time, final frame rate, and visual metrics (PSNR, SSIM, LPIPS) [S1]. The method distinguishes itself from 3DGS and 3DGRT by omitting opacity resets and size-based pruning [S1].
+ 
+ ## Sources

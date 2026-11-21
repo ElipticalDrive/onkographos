@@ -1,0 +1,178 @@
+# 3D Gaussian Splatting Backward Pass
+
+Also called: 3DGS backward pass, DiffRasterizer backward pass
+
+## Overview
+The 3D Gaussian Splatting (3DGS) backward pass computes the gradients of a rendering loss with respect to the learnable parameters of the 3D Gaussian primitives (position, covariance, opacity, color, and spherical harmonic coefficients) [S1, unofficial]. It differs from standard rasterization by propagating gradients through the differentiable alpha-compositing equation and the 2D projection approximation, enabling end-to-end training of the scene representation [S1, unofficial].
+
+## How it works
+The backward pass is implemented as a CUDA kernel (often encapsulated in a `DiffRasterizer` class) that takes the forward pass buffers and the upstream loss gradient to compute per-primitive gradients [S1, unofficial].
+
+### Inputs and Outputs
+**Inputs:**
+*   `model_attributes`: Current state of the Gaussian primitives (3D positions, covariances, opacities, SH coefficients, etc.).
+*   `camera_matrices`: View and projection matrices for the current camera.
+*   `fov_tangents`: Tangent of the half-field-of-view values, identical to those computed in the forward pass [S1, unofficial].
+*   `forward_buffers`: Results from the forward pass, specifically:
+    *   `radii`: 2D radii of rendered Gaussians [S1, unofficial].
+    *   `framebuffer`: The rendered image and accumulation buffers.
+    *   `geometry_buffer`: Intermediate geometric data (e.g., 2D means, conic matrices) [S1, unofficial].
+    *   `binning_buffer`: Tile-based binning information.
+    *   `image_buffer`: Pixel-based sorting and accumulation data.
+*   `loss_gradient`: The gradient of the loss function with respect to the rendered image, shape $(H, W, 3)$ [S1, unofficial].
+
+**Outputs:**
+*   `d_xyz`: Gradient w.r.t. 3D positions, shape $(N, 3)$ [S1, unofficial].
+*   `d_mean2D`: Gradient w.r.t. 2D mean positions, shape $(N, 3)$ [S1, unofficial].
+*   `d_conic`: Gradient w.r.t. the 2D conic matrix (inverse covariance), shape $(N, 2, 2)$ [S1, unofficial].
+*   `d_color`: Gradient w.r.t. SH features, shape $(N, N_{SH}, 3)$ [S1, unofficial].
+*   `d_opacity`: Gradient w.r.t. opacity, shape $(N, 1)$ [S1, unofficial].
+*   `d_cov3D`: Gradient w.r.t. 3D covariance parameters, shape $(N, 6)$ [S1, unofficial].
+*   `d_scale`: Gradient w.r.t. scaling factors, shape $(N, 3)$ [S1, unofficial].
+*   `d_rotation`: Gradient w.r.t. rotation quaternions, shape $(N, 4)$ [S1, unofficial].
+
+### Data Structures
+The implementation uses PyTorch tensors on the GPU. Key structures include:
+*   `DiffRasterizerForwardResult`: Contains `n_rendered` (count of visible primitives), `framebuffer`, `radii`, `geometry_buffer`, `binning_buffer`, and `image_buffer` [S1, unofficial].
+*   `DiffRasterizerBackwardResult`: Contains the gradient tensors listed above, plus a copy of `radii` [S1, unofficial].
+
+### Algorithm Steps
+1.  **Initialize Gradient Tensors**: Allocate zero-initialized CUDA tensors for all output gradients (`d_xyz`, `d_mean2D`, `d_conic`, `d_color`, `d_opacity`, `d_cov3D`, `d_sh`, `d_scale`, `d_rotation`) with shapes matching the number of primitives $N$ [S1, unofficial].
+2.  **Copy Forward Data**: Copy the `radii` from the forward pass result to the backward result structure to ensure consistency [S1, unofficial].
+3.  **Compute FOV Tangents**: Calculate the tangent of the half-field-of-view values, ensuring they match the forward pass exactly [S1, unofficial].
+4.  **Invoke CUDA Kernel**: Call the `DiffRasterizer` backward function. This kernel iterates over pixels and visible Gaussians, applying the chain rule to compute gradients.
+
+### Formulas and Gradients
+The core gradient computation relies on the differentiable alpha-compositing equation provided in the parent article. For a pixel $\mathbf{x}$, the rendered color is:
+$$
+\mathbf{C}(\mathbf{x}) = \sum_{k=1}^{N} \mathbf{c}_k \alpha_k(\mathbf{x}) T_k(\mathbf{x})
+$$
+where $T_k(\mathbf{x}) = \prod_{j=1}^{k-1} (1 - \alpha_j(\mathbf{x}))$.
+
+The gradient of the loss $L$ with respect to the parameters of the $k$-th Gaussian is:
+$$
+\frac{\partial L}{\partial \theta_k} = \frac{\partial L}{\partial \mathbf{C}(\mathbf{x})} \frac{\partial \mathbf{C}(\mathbf{x})}{\partial \alpha_k(\mathbf{x})} \frac{\partial \alpha_k(\mathbf{x})}{\partial \theta_k}
+$$
+
+The term $\frac{\partial \mathbf{C}(\mathbf{x})}{\partial \alpha_k(\mathbf{x})}$ is computed efficiently using recursive accumulators (often `accumulated_alpha` and `accumulated_color` traversed in reverse depth order) to avoid $O(N^2)$ complexity. Specifically, the contribution of Gaussian $k$ to the pixel color gradient involves:
+$$
+\frac{\partial \mathbf{C}(\mathbf{x})}{\partial \alpha_k(\mathbf{x})} = T_k(\mathbf{x}) \mathbf{c}_k - \alpha_k(\mathbf{x}) \sum_{j=k+1}^{N} \mathbf{c}_j \alpha_j(\mathbf{x}) T_j(\mathbf{x}) \frac{1}{1-\alpha_k(\mathbf{x})}
+$$
+In practice, this is implemented by maintaining a running transmittance $T$ and a running accumulated color $C_{acc}$ as the kernel processes Gaussians from back to front (or front to back with appropriate accumulation logic) [S1, unofficial].
+
+The term $\frac{\partial \alpha_k(\mathbf{x})}{\partial \theta_k}$ depends on the parameterization:
+*   **Opacity**: $\alpha_k$ is typically sigmoid of a learnable scalar. $\frac{\partial \alpha_k}{\partial \text{opacity}_{raw}} = \alpha_k (1 - \alpha_k)$.
+*   **2D Projection**: The 2D covariance $\Sigma_{2D}$ is derived from the 3D covariance $\Sigma_{3D}$ and the view matrix. The conic matrix $C = \Sigma_{2D}^{-1}$ is used for efficient evaluation. Gradients $\frac{\partial \alpha_k}{\partial C}$ are computed based on the Gaussian PDF derivative.
+*   **3D Covariance**: $\Sigma_{3D}$ is parameterized by scale and rotation. $\Sigma_{3D} = R S S^T R^T$. Gradients flow to scale and rotation via the chain rule through $\Sigma_{3D}$ and then to $\Sigma_{2D}$.
+*   **Color/SH**: $\mathbf{c}_k$ is computed from SH coefficients. Gradients flow directly to SH coefficients based on the basis function evaluation at the viewing direction.
+
+### Pseudocode
+The following pseudocode represents the high-level logic of the backward pass invocation and tensor management, based on the `gscache` implementation [S1, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def backward_pass(
+    gaussian_model,
+    camera_matrix,
+    fov_tangents,
+    forward_result,
+    loss_gradient
+):
+    """
+    Computes gradients for 3D Gaussian Splatting primitives.
+    
+    Args:
+        gaussian_model: Object containing current primitive parameters (xyz, cov3D, opacity, sh, etc.)
+        camera_matrix: View and projection matrices
+        fov_tangents: Tangent of half-FOV
+        forward_result: DiffRasterizerForwardResult from the forward pass
+        loss_gradient: Tensor of shape (H, W, 3), gradient of loss w.r.t. rendered image
+        
+    Returns:
+        DiffRasterizerBackwardResult containing gradient tensors
+    """
+    # 1. Allocate zero-initialized gradient tensors
+    n_points = gaussian_model.num_primitives
+    n_sh_features = gaussian_model.sh_degree + 1
+    n_sh_features = n_sh_features * n_sh_features # Assuming 2D SH indexing
+    
+    d_xyz = torch.zeros((n_points, 3), device='cuda')
+    d_mean2D = torch.zeros((n_points, 3), device='cuda')
+    d_conic = torch.zeros((n_points, 2, 2), device='cuda')
+    d_color = torch.zeros((n_points, n_sh_features, 3), device='cuda')
+    d_opacity = torch.zeros((n_points, 1), device='cuda')
+    d_cov3D = torch.zeros((n_points, 6), device='cuda')
+    d_sh = torch.zeros((n_points, n_sh_features, 3), device='cuda')
+    d_scale = torch.zeros((n_points, 3), device='cuda')
+    d_rotation = torch.zeros((n_points, 4), device='cuda')
+    
+    # 2. Copy radii from forward result
+    radii_backward = forward_result.radii.clone()
+    
+    # 3. Compute FOV tangents (must match forward pass)
+    # Assuming fov_tangents are pre-computed or passed in
+    # tan_fov_x = tan(fov_x / 2)
+    # tan_fov_y = tan(fov_y / 2)
+    
+    # 4. Call CUDA rasterizer backward function
+    # This kernel performs the heavy lifting:
+    # - Iterates over pixels and visible Gaussians
+    # - Computes alpha and transmittance gradients
+    # - Propagates gradients to 2D conic, opacity, color
+    # - Computes Jacobians for 3D -> 2D projection
+    # - Propagates gradients to 3D covariance, scale, rotation, position
+    
+    diff_rasterizer_backward(
+        model_attributes=gaussian_model,
+        camera_matrices=camera_matrix,
+        fov_tangents=fov_tangents,
+        forward_buffers=forward_result,
+        loss_gradient=loss_gradient,
+        grad_outputs={
+            'd_xyz': d_xyz,
+            'd_mean2D': d_mean2D,
+            'd_conic': d_conic,
+            'd_color': d_color,
+            'd_opacity': d_opacity,
+            'd_cov3D': d_cov3D,
+            'd_sh': d_sh,
+            'd_scale': d_scale,
+            'd_rotation': d_rotation
+        }
+    )
+    
+    # 5. Return backward result
+    return DiffRasterizerBackwardResult(
+        radii=radii_backward,
+        d_xyz=d_xyz,
+        d_conic=d_conic,
+        d_opacity=d_opacity,
+        d_color=d_color,
+        d_mean2D=d_mean2D,
+        d_cov3D=d_cov3D,
+        d_sh=d_sh,
+        d_scale=d_scale,
+        d_rotation=d_rotation
+    )
+```
+
+### Edge Cases and Pitfalls
+*   **Empty Scene**: If `n_points` is 0, the model may initialize with a dummy point to avoid empty tensor issues [S1, unofficial].
+*   **Precision**: The use of `float` vs `double` can impact gradient stability, especially for small opacities or large depth ranges. The implementation uses `float` (32-bit) [S1, unofficial].
+*   **Boundary Conditions**: Gaussians outside the frustum are culled in the forward pass. The backward pass only computes gradients for rendered primitives (`n_rendered`), so gradients for culled primitives remain zero [S1, unofficial].
+*   **Normalization**: Rotation quaternions are normalized during the forward pass (`torch.nn.functional.normalize`). The backward pass must account for this normalization when computing gradients w.r.t. raw quaternion parameters [S1, unofficial].
+*   **Scaling**: Scaling factors are exponentiated (`torch.exp`) during the forward pass. The gradient w.r.t. raw scale is scaled by the exponential of the raw scale [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: The backward pass is $O(N \cdot P)$ where $N$ is the number of primitives and $P$ is the number of pixels, but optimized via tile-based binning to be closer to $O(V)$ where $V$ is the number of visible primitive-pixel intersections.
+*   **Memory Complexity**: Requires storing forward buffers (geometry, binning, image) and gradient tensors for all primitives. Memory usage scales linearly with $N$ and the number of SH coefficients.
+*   **Performance**: Highly optimized CUDA implementation allows for real-time gradient computation, enabling interactive training speeds.
+*   **Strengths**: Differentiable, efficient, supports SH color representation.
+*   **Limitations**: Memory intensive for high-resolution scenes with many primitives. Gradient computation can be unstable for very small or very large Gaussians.
+
+## Background
+The 3D Gaussian Splatting backward pass is part of the 3D Gaussian Splatting (3DGS) method introduced by Kerbl et al. in 2023 [S1, unofficial]. It enables the training of 3D Gaussian primitives from 2D images by providing gradients for the rasterization process. The implementation detailed here is from the `gscache` repository, an unofficial implementation [S1, unofficial].
+
+## Sources
+[S1] DBauer15/gscache, https://github.com/DBauer15/gscache, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,119 @@
+# Gaussian Insertion and Pruning
+
+Also called: Monocular Gaussian Initialization
+
+## Overview
+Gaussian Insertion and Pruning is a dynamic management strategy for 3D Gaussian primitives used primarily in monocular and RGB-D SLAM systems [S1, unofficial]. It solves the problem of maintaining a coherent 3D structure in real-time by inserting new Gaussians to capture newly visible scene elements and pruning those that are geometrically unstable or contribute negligibly to the render [S1, unofficial]. Unlike static densification strategies that rely on gradient magnitude thresholds, this method relies on visibility consistency across a sliding window of keyframes and opacity thresholds to manage the primitive set [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Current set of 3D Gaussians $\mathcal{G}$ [G].
+*   Current camera pose and intrinsics [G].
+*   Rendered depth map $D$ for the current frame [S1, unofficial].
+*   Keyframe window $W_k$ containing recent keyframes [S1, unofficial].
+*   Opacity threshold $\alpha_{\text{prune}} = 0.7$ [S1, unofficial].
+*   Keyframe window size $|W_k|$ (e.g., 10 for Replica, 8 for TUM) [S1, unofficial].
+
+**Outputs:**
+*   Updated set of 3D Gaussians $\mathcal{G}'$ with new insertions and pruned elements [G].
+
+**Data Structures:**
+*   **Keyframe Window ($W_k$):** A fixed-size buffer storing recent keyframes [S1, unofficial].
+*   **Visibility Counter:** For each newly inserted Gaussian, a counter tracks how many frames in $W_k$ have observed it [G]. A Gaussian is marked as "visible" from a view if it was used in rasterization and the ray's accumulated $\alpha$ has not yet reached 0.5 [S1, unofficial].
+
+**Steps:**
+1.  **Initialization of New Gaussians:** When a new keyframe is added to $W_k$, new Gaussians are inserted to capture newly visible regions [S1, unofficial]. The mean position $\mu_W$ is initialized based on the rendered depth $D$ [S1, unofficial]. For pixels $p$ with valid depth $D_p$, sample the depth from a normal distribution: $z \sim \mathcal{N}(D_p, 0.2\sigma_D)$ [S1, unofficial]. For pixels without depth estimates (unobserved regions), sample from a normal distribution centered at the median depth $\hat{D}$ of the rendered image: $z \sim \mathcal{N}(\hat{D}, 0.5\sigma_D)$ [S1, unofficial]. This accounts for incorrect depth estimates by introducing higher variance [S1, unofficial]. The 2D position $(u, v)$ is taken directly from the pixel coordinates [G]. The 3D mean $\mu_W$ is computed by back-projecting $(u, v, z)$ using camera intrinsics [S1, unofficial].
+2.  **Visibility-Based Pruning (Geometric Stability):** This step ensures that inserted Gaussians are consistent with the scene geometry across multiple views [G]. Condition: Only perform this pruning once the keyframe window $W_k$ is full [S1, unofficial]. Check: For each Gaussian inserted within the last 3 keyframes, count the number of other frames in $W_k$ where it was observed [S1, unofficial]. Action: If a Gaussian is unobserved by at least 3 other frames in $W_k$, it is considered geometrically unstable and is pruned [S1, unofficial].
+3.  **Opacity-Based Pruning:** Action: Iterate through all Gaussians in $\mathcal{G}$ [G]. Condition: If opacity $\alpha_k < 0.7$, remove the Gaussian [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import random
+
+def gaussian_insertion_and_pruning(G, current_frame, W_k, sigma_D, W_k_threshold):
+    """
+    G: List of active 3D Gaussians (each is a dict/object with keys: mean, opacity, insertion_keyframe_index, visibility_count)
+    current_frame: Object with attributes: is_new_keyframe (bool), rendered_depth (2D array), intrinsics (fx, fy, cx, cy)
+    W_k: List of keyframes
+    sigma_D: Standard deviation of depth noise
+    W_k_threshold: Maximum size of the keyframe window
+    """
+    # Step 1: Insert new Gaussians if a new keyframe is added
+    if current_frame.is_new_keyframe:
+        D = current_frame.rendered_depth
+        # Compute median depth of the rendered image
+        flat_depth = [d for row in D for d in row if d > 0]
+        median_depth = sorted(flat_depth)[len(flat_depth) // 2] if flat_depth else 0.0
+        
+        height, width = D.shape
+        for y in range(height):
+            for x in range(width):
+                D_p = D[y, x]
+                # Initialize mean position based on depth
+                if D_p > 0:  # valid depth
+                    z = random.gauss(D_p, 0.2 * sigma_D)
+                else:
+                    z = random.gauss(median_depth, 0.5 * sigma_D)
+                
+                # Back-project to 3D using pinhole camera model [G]
+                fx, fy, cx, cy = current_frame.intrinsics
+                X = (x - cx) * z / fx
+                Y = (y - cy) * z / fy
+                mu_W = (X, Y, z)
+                
+                # Create new Gaussian with default properties [G]
+                new_g = {
+                    'mean': mu_W,
+                    'opacity': 0.1,
+                    'scale': 0.01,
+                    'rotation': [1, 0, 0, 0],
+                    'insertion_keyframe_index': len(W_k) - 1,
+                    'visibility_count': 0
+                }
+                G.append(new_g)
+
+    # Step 2: Visibility-Based Pruning
+    # Only perform once the window is full
+    if len(W_k) >= W_k_threshold:
+        # Identify Gaussians inserted in the last 3 keyframes
+        recent_gaussians = [g for g in G if len(W_k) - g['insertion_keyframe_index'] <= 3]
+        
+        to_remove = []
+        for g in recent_gaussians:
+            # Count observations in W_k
+            # Note: Visibility is determined during rasterization of each keyframe in W_k
+            # If g was used and accumulated alpha < 0.5, it is "observed"
+            if g['visibility_count'] < 3:
+                to_remove.append(g)
+        G = [g for g in G if g not in to_remove]
+
+    # Step 3: Opacity-Based Pruning
+    G = [g for g in G if g['opacity'] >= 0.7]
+    
+    return G
+```
+
+**Parameters:**
+*   $\alpha_{\text{prune}} = 0.7$: Opacity threshold for pruning [S1, unofficial].
+*   $|W_k|$: Keyframe window size (10 for Replica, 8 for TUM) [S1, unofficial].
+*   Depth variance factors: $0.2\sigma_D$ for observed pixels, $0.5\sigma_D$ for unobserved [S1, unofficial].
+
+**Edge Cases:**
+*   **Incorrect Depth:** In monocular settings, rendered depth may be incorrect [S1, unofficial]. The high variance initialization ($0.5\sigma_D$) for unobserved regions helps mitigate this, but many inserted Gaussians may be geometrically invalid and will be pruned by the visibility check [S1, unofficial].
+*   **Window Not Full:** Visibility-based pruning is skipped until $W_k$ is full, preventing premature removal of valid Gaussians that simply haven't been seen by enough frames yet [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Not given in the sources.
+*   **Limitations:** Not given in the sources.
+*   **When to use:** Not given in the sources.
+
+## Background
+Gaussian Insertion and Pruning was introduced in "Gaussian Splatting SLAM" [S1, unofficial]. It adapts the 3D Gaussian Splatting representation for simultaneous localization and mapping (SLAM) [S1, unofficial]. The method addresses the challenge of maintaining a consistent 3D map in real-time by dynamically managing the Gaussian primitives based on visibility and opacity, rather than relying solely on gradient-based densification used in static reconstruction [S1, unofficial].
+
+## Sources
+[S1] Gaussian Splatting SLAM, https://arxiv.org/abs/2312.06741, fetched 2026-10-27 (unofficial)

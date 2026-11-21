@@ -1,0 +1,116 @@
+# LOD Generation
+Also called: Hierarchical LOD creation
+## Overview
+LOD Generation creates multiple levels of detail from a trained finest-resolution radiance field model to reduce resource usage for distant scene blocks while maintaining high-quality rendering from elevated viewpoints [S1]. It avoids the prohibitive cost and appearance inconsistency of retraining the entire scene from scratch at lower resolutions [S1]. By leveraging the compressibility of rank-residual models, it also enables dynamic LOD adjustment per object to balance rendering quality and storage/performance in composed scenes [S2].
+
+## How it works
+The method operates on a scene decomposed into blocks with an associated deferred MLP [S1]. It generates coarser LODs by merging fine-grained blocks and adapting the query function [S1].
+
+**Inputs:**
+*   Trained finest-resolution model consisting of submodels (query functions $f^k$) and a shared deferred MLP $\Phi$ [S1].
+*   Scene geometry divided into $M \times M$ blocks [S1].
+*   Virtual grid storing rendering attributes, simulated during training [S1].
+
+**Outputs:**
+*   A hierarchy of LOD models, where LOD $l$ consists of merged blocks and adapted parameters [S1].
+*   Baked texture assets for rendering [S1].
+
+**Data Structures:**
+*   **Virtual Grid:** Stores rendering attributes (density, color features) for each block; resolution is downsampled by a factor of 2 for each LOD level [S1].
+*   **Submodels:** Contain the frozen query function $f^k$ for each block or merged block group [S1].
+*   **Deferred MLP ($\Phi^{k,l}$):** A shared MLP retrained for each LOD level $l$ to map the downsampled features to final radiance [S1].
+
+**Steps:**
+1.  **Virtual Grid Simulation:** During the initial training of the finest LOD, simulate a virtual grid to store rendering attributes for each block [S1].
+2.  **Block Merging:** To generate LOD $l$, merge $2^l \times 2^l$ fine blocks into a single coarser block (specifically $2 \times 2$ for LOD 1) [S1].
+3.  **Grid Downsampling:** Downsample the resolution of the virtual grid within each merged block by a factor of 2 relative to the previous LOD level [S1].
+4.  **Freeze Query Function:** Freeze the training of the query function $f^k$ within the submodels corresponding to the merged blocks [S1].
+5.  **Retrain Deferred MLP:** Retrain a new shared deferred MLP $\Phi^{k,l}$ across the merged blocks [S1].
+6.  **Joint Optimization:** Jointly optimize the frozen submodels and the newly trained deferred MLP $\Phi^{k,l}$ to ensure consistency and quality at the lower resolution [S1].
+7.  **Baking:** For LOD $l$, bake the $2^l \times 2^l$ merged blocks into a single texture asset, retaining samples with opacity and weight values above a certain threshold [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class MLP:
+    def __init__(self):
+        self.weights = [0.0]
+    def forward(self, features):
+        return sum(f * w for f, w in zip(features, self.weights))
+    def backward(self, loss):
+        self.weights = [w - 0.01 * (loss - self.forward([])) for w in self.weights]
+
+def generate_lod_hierarchy(fine_model, scene_blocks, max_lod_level):
+    lod_models = {}
+    current_blocks = scene_blocks
+    current_grid = fine_model.virtual_grid
+
+    for l in range(1, max_lod_level + 1):
+        # Step 2: Merge 2^l x 2^l blocks (factor 2 per level)
+        merged_blocks = [current_blocks[i:i+4] for i in range(0, len(current_blocks), 4)]
+        
+        # Step 3: Downsample virtual grid resolution by factor of 2
+        downsampled_grid = downsample_grid(current_grid, factor=2)
+        
+        # Step 4: Freeze query functions f^k in submodels
+        frozen_functions = [block.query_function for block in merged_blocks]
+        
+        # Step 5: Retrain new shared deferred MLP Phi^{k,l}
+        new_deferred_mlp = MLP()
+        
+        # Step 6: Jointly optimize submodels and deferred MLP
+        for step in range(1000):
+            features = [f(downsampled_grid.sample) for f in frozen_functions]
+            radiance = new_deferred_mlp.forward(features)
+            loss = compute_mse(radiance, downsampled_grid.targets)
+            new_deferred_mlp.backward(loss)
+            
+        lod_models[l] = {
+            'blocks': merged_blocks,
+            'frozen_functions': frozen_functions,
+            'deferred_mlp': new_deferred_mlp,
+            'grid': downsampled_grid
+        }
+        
+        current_blocks = merged_blocks
+        current_grid = downsampled_grid
+        
+    return lod_models
+
+def downsample_grid(grid, factor):
+    new_data = [[grid.data[i][j] for j in range(0, len(grid.data[i]), factor)] for i in range(0, len(grid.data), factor)]
+    return {'resolution': grid['resolution'] // factor, 'data': new_data}
+
+def compute_mse(pred, target):
+    return sum((p - t) ** 2 for p, t in zip(pred, target)) / len(pred)
+```
+
+**Parameters:**
+*   **Merge Factor:** Typically $2 \times 2$ for adjacent LOD levels [S1].
+*   **Downsampling Factor:** 2 per LOD level [S1].
+*   **LOD Level ($l$):** Integer indicating the coarseness, where LOD 0 is the finest resolution [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Appearance Consistency:** Retraining from scratch for extrapolated views causes inconsistency; freezing query functions mitigates this [S1].
+*   **Resource Usage:** Distant blocks should use higher LODs to save resources [S1].
+*   **Baking Threshold:** Samples with opacity and weight values above a certain threshold are retained during baking to ensure quality [S1].
+
+## Subtopics
+
+### Dynamic Level of Detail (LOD) Adjustment
+A scene composition technique that dynamically adjusts the model size (LOD) per object to balance rendering quality and storage/performance, leveraging the compressibility of rank-residual models [S2]. It assigns the full model to primary objects requiring high detail and truncates the model to a smaller LOD for secondary/scaled-down objects [S2]. This allows composing objects in a scene using their respective LODs [S2]. For example, a high LOD model size of 68.9 MB can be reduced to 1.5 MB for a low LOD model, demonstrated on bulldozer objects from nerf-synthetic composed into a barn scene from Tanks And Temples [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Generating LODs is significantly faster than retraining from scratch, as it freezes query functions and only retrains the deferred MLP [S1].
+*   **Memory Complexity:** Higher LODs use less memory due to downsampled virtual grids and merged blocks [S1]. Dynamic LOD adjustment can reduce model size from 68.9 MB to 1.5 MB [S2].
+*   **Performance:** Enables efficient rendering of large-scale scenes by reducing resource usage for distant blocks [S1].
+*   **Strengths:** Avoids retraining from scratch; maintains appearance consistency; supports dynamic scene composition [S1, S2].
+*   **Limitations:** Requires simulating a virtual grid during the initial training stage [S1]. Quality depends on proper optimization of the deferred MLP [S1].
+
+## Background
+LOD Generation was introduced to ensure high-quality rendering from elevated viewpoints and reduce resource usage for distant scene blocks [S1]. It addresses the challenge of rendering large scenes captured from aerial or top-down perspectives, where appearance consistency across separately trained models is difficult to ensure [S1]. The method builds on the principles of tensorial and low-rank representations, specifically utilizing the compressibility of rank-residual models [S2].
+
+## Sources
+[S1] City-on-Web: Real-Time Neural Rendering of Large-Scale Scenes on the Web, https://doi.org/10.1007/978-3-031-72970-6_22, fetched 2026-10-26
+[S2] Compressible-Composable NeRF Via Rank-Residual Decomposition, https://doi.org/10.52202/068431-1076, fetched 2026-10-26

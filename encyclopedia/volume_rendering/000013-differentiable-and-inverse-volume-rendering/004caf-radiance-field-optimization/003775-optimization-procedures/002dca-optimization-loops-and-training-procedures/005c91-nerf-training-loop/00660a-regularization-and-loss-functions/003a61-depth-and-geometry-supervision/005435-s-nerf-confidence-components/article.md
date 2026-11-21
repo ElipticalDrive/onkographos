@@ -1,0 +1,107 @@
+# S-NeRF Confidence Components
+
+Also called: S-NeRF Confidence
+
+## Overview
+S-NeRF Confidence Components is a selective confidence weighting mechanism for differentiable volume rendering that adapts the reliability of supervision signals based on scene content, specifically distinguishing between static background environments and dynamic foreground objects like vehicles [S1, unofficial]. It sets itself apart from standard geometric regularization by decoupling confidence metrics per object class: it employs geometry and reprojection measurements for background learning, while restricting foreground vehicle learning to RGB and SSIM confidences, leveraging the higher quality of LiDAR depth maps available for foreground objects [S1, unofficial].
+
+## How it works
+The method operates within the S-NeRF framework [S1, unofficial]. It computes a composite loss where individual components are weighted by confidence scores derived from specific measurements.
+
+**Inputs and Outputs:**
+*   **Inputs:** Rendered color $\hat{\mathbf{C}}$, rendered depth $\hat{\mathbf{D}}$, ground-truth color $\mathbf{C}$, ground-truth depth $\mathbf{D}$, and ground-truth depth maps with varying quality.
+*   **Outputs:** Confidence weights for background (geometry, reprojection) and foreground (RGB, SSIM) which modulate the loss gradients.
+
+**Data Structures:**
+*   **Confidence Flags:** Boolean or categorical indicators for each ray/sample point determining if it belongs to "background" or "foreground vehicle" regions.
+*   **Threshold $\tau$:** A scalar parameter for geometry confidence calculation.
+
+**Steps:**
+1.  **Classify Region:** Determine if the current ray sample or pixel corresponds to a background element or a foreground vehicle.
+2.  **Compute Background Confidence:**
+    *   If background, calculate geometry confidence and reprojection confidence.
+    *   Geometry confidence is derived from the consistency between the rendered depth and the LiDAR depth, modulated by threshold $\tau$.
+    *   Reprojection confidence is derived from multi-view consistency checks.
+3.  **Compute Foreground Confidence:**
+    *   If foreground vehicle, calculate RGB confidence and SSIM confidence.
+    *   Geometry and reprojection confidences are explicitly excluded for foregrounds because the training depth maps for vehicles are of higher quality, making strong geometric constraints redundant or potentially harmful [S1, unofficial].
+4.  **Apply Weights:** Use the computed confidences to weight the respective loss terms in the optimization loop.
+
+**Formulas:**
+*   **Geometry Confidence Threshold:** The geometry confidence module uses a threshold $\tau$. The paper notes that geometry confidence is not sensitive to $\tau$, with a reasonable range of $[10\%, 40\%]$ [S1, unofficial]. The exact formula for geometry confidence is referenced as Eq. (7) in the source paper [S1, unofficial], but the specific mathematical expression is not provided in the extracted notes.
+*   **Loss Balance:** The confidence components interact with loss balance weights $\lambda_1$ and $\lambda_2$. For background views, reasonable ranges are $\lambda_1 \in [0.02]$ and $\lambda_2 \in (0.02)$ [S1, unofficial]. For foreground vehicles, reasonable ranges are $\lambda_1 \in [0.5, 2]$ and $\lambda_2 \in (0.075, 0.015)$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_confidence_weights(rendered_depth, lidar_depth, rendered_color, gt_color, ssim_map, is_vehicle, tau=0.2):
+    """
+    Computes confidence weights for S-NeRF loss components.
+    
+    Args:
+        rendered_depth: Tensor of rendered depth values.
+        lidar_depth: Tensor of ground-truth LiDAR depth values.
+        rendered_color: Tensor of rendered RGB colors.
+        gt_color: Tensor of ground-truth RGB colors.
+        ssim_map: Tensor of SSIM values between rendered and ground truth.
+        is_vehicle: Boolean mask indicating foreground vehicle regions.
+        tau: Threshold for geometry confidence (default 20%).
+        
+    Returns:
+        background_weights: Dict with 'geometry' and 'reprojection' weights.
+        foreground_weights: Dict with 'rgb' and 'ssim' weights.
+    """
+    # Initialize weights
+    background_weights = {'geometry': 1.0, 'reprojection': 1.0}
+    foreground_weights = {'rgb': 1.0, 'ssim': 1.0}
+    
+    # Background Confidence Calculation
+    # Geometry confidence depends on depth consistency and threshold tau
+    # Note: Exact formula for geometry confidence is Eq. (7) in [S1, unofficial]
+    # Assuming a generic consistency check here as placeholder for missing formula
+    depth_error = torch.abs(rendered_depth - lidar_depth)
+    geometry_confidence = (depth_error < tau).float() # Placeholder for Eq. (7)
+    
+    # Reprojection confidence is derived from multi-view consistency
+    # Note: Specific implementation details for reprojection confidence are not provided in the notes
+    reprojection_confidence = 1.0 # Placeholder
+    
+    background_weights['geometry'] = geometry_confidence
+    background_weights['reprojection'] = reprojection_confidence
+    
+    # Foreground Confidence Calculation
+    # For vehicles, only RGB and SSIM confidences are used
+    # RGB confidence is typically based on pixel-wise error
+    rgb_error = torch.abs(rendered_color - gt_color)
+    rgb_confidence = torch.exp(-rgb_error) # Placeholder for standard RGB confidence
+    
+    # SSIM confidence is derived from the SSIM map
+    ssim_confidence = ssim_map
+    
+    foreground_weights['rgb'] = rgb_confidence
+    foreground_weights['ssim'] = ssim_confidence
+    
+    return background_weights, foreground_weights
+```
+
+**Edge Cases and Pitfalls:**
+*   **Threshold Sensitivity:** While the geometry confidence is not highly sensitive to $\tau$, values outside $[10\%, 40\%]$ may degrade performance [S1, unofficial].
+*   **Foreground Depth Quality:** The exclusion of geometry confidence for vehicles relies on the assumption that training depth maps for vehicles are "relatively better" than backgrounds. If this assumption fails, performance may degrade [S1, unofficial].
+*   **Metric Trade-offs:** Using only RGB or SSIM confidence for vehicles yields a 1–2% PSNR increase but a 6.6–11% LPIPS decrease compared to using both [S1, unofficial]. Therefore, using both is recommended for balanced performance.
+
+## Subtopics
+
+### [S-NeRF Loss Balance Weights](15157-s-nerf-loss-balance-weights.md)
+S-NeRF Loss Balance Weights are hyperparameters ($\lambda_1, \lambda_2$) used to scale the depth and smoothness components of the composite loss function in S-NeRF, balancing geometric supervision against the primary RGB reconstruction loss. They are distinct from the learnable confidence weights ($\omega_i$) that adaptively weight individual confidence metrics; these balance weights are fixed user-defined constants. They set S-NeRF apart from standard NeRF by explicitly incorporating depth and edge-aware smoothness constraints, requiring careful tuning of $\lambda_1$ and $\lambda_2$ to handle the disparity between static background scenes and dynamic foreground vehicles.
+
+## Operating characteristics
+*   **Performance Impact:** Removing the reprojection confidence module drops PSNR by 0.4%. Training without geometry confidence drops PSNR and SSIM by about 0.7% [S1, unofficial].
+*   **Foreground Optimization:** For foreground vehicles, using both RGB and SSIM confidences provides better overall performance (considering PSNR, SSIM, and LPIPS) than using either alone, despite a slight PSNR trade-off [S1, unofficial].
+*   **Depth Error Rate:** The method predicts high confidence for accurate depths, encouraging NeRF geometry to be consistent with LiDAR signals [S1, unofficial].
+
+## Background
+S-NeRF (Neural Radiance Fields for Street Views) was published as a conference paper at ICLR 2023 [S1, unofficial]. It addresses the challenges of novel view synthesis in street scenes, which contain both static backgrounds and dynamic foreground objects. The confidence components method was introduced to handle the differing reliability of depth and color supervision signals between these two types of objects.
+
+## Sources
+[S1] S-NeRF: Neural Radiance Fields for Street Views, https://doi.org/10.48550/arxiv.2303.00749, fetched 2026-10-29 (unofficial)

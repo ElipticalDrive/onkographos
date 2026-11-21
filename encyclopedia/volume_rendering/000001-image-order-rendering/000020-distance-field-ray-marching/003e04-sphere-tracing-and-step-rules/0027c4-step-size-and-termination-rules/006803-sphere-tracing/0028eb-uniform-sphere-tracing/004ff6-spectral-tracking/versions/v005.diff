@@ -1,0 +1,210 @@
+--- v004.md
++++ v005.md
+@@ -8,12 +8,12 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A Volume Scene Definition (`vsdf`) containing the density volume, emission volume, and a global scattering ratio (`scatter`); a ray (`ray`) with origin `o` and direction `d`; a maximum travel distance (`max_distance`); and a random number generator state (`rng`).
++- **Input:** A Volume Scene Definition (`vsdf`) containing the density volume, emission volume, and a global scattering ratio (`scatter`); a ray (`ray`) with origin `o` and direction `d`; a maximum travel distance (`max_distance`); and a random number generator state (`rng`) [S2, unofficial].
+ - **Output:** A pair containing the total path length traveled and a spectral throughput vector (`f`) representing the accumulated contribution [S2, unofficial].
+ 
+ **Data Structures:**
+-- `vec3f`: A 3-component vector representing spectral values (Red, Green, Blue).
+-- `sigma_t`, `sigma_s`, `sigma_a`, `sigma_n`: Spectral vectors for total extinction, scattering, absorption, and null (non-interaction) coefficients.
+-- `Pt`, `Ps`, `Pn`, `Pa`: Scalar probabilities for total, scattering, null, and absorption events, derived from the spectral coefficients and the majorant.
+-- `wD` (or `contrib`): A spectral vector used to track the weight correction factor. In the implementation [S2, unofficial], this is updated element-wise.
++- `vec3f`: A 3-component vector representing spectral values (Red, Green, Blue) [S2, unofficial].
++- `sigma_t`, `sigma_s`, `sigma_a`, `sigma_n`: Spectral vectors for total extinction, scattering, absorption, and null (non-interaction) coefficients [S2, unofficial].
++- `Pt`, `Ps`, `Pn`, `Pa`: Scalar probabilities for total, scattering, null, and absorption events, derived from the spectral coefficients and the majorant [S2, unofficial].
++- `wD` (or `contrib`): A spectral vector used to track the weight correction factor [S3]. In the implementation [S2, unofficial], this is updated element-wise.
+ 
+ **Parameters:**
+@@ -23,56 +23,12 @@
+ 
+ **Algorithm Steps:**
+-
+-1.  **Initialization:**
+-    -   Retrieve `max_density` from the volume object (`density_vol->max_voxel * object->density_mult`) [S2, unofficial].
+-    -   Set `majorant_density = max_density` and `imax_density = 1.0f / max_density` [S2, unofficial].
+-    -   Initialize `path_length = 0.0f` [S2, unofficial].
+-    -   Initialize spectral throughput vectors: `tr = vec3f(1)` (transmittance) and `f = vec3f(1)` (final contribution/throughput) [S2, unofficial].
+-    -   Calculate initial scattering coefficient vector: `sigma_s = vsdf.scatter * max_density` [S2, unofficial].
+-    -   Calculate scattering probability: `Ps = sigma_s * imax_density` [S2, unofficial].
+-    -   Initialize spectral weight vector `wD` (or `contrib`) to ones, though in the specific implementation [S2, unofficial], `contrib` is initialized to zero and updated conditionally. Note: The theoretical formulation [S3] initializes $w_D \leftarrow (1, \dots, 1)^{N_\lambda}$. The implementation [S2, unofficial] handles weights via the `contrib` vector logic below.
+-
+-2.  **Loop:**
+-    -   **Sample Path Length:**
+-        -   Generate a uniform random number $\zeta \in [0, 1)$ using `rng` [S3].
+-        -   Compute tentative distance: $t = -\ln(1 - \zeta) / \text{majorant\_density}$ [S3].
+-        -   Update `path_length += t` [S2, unofficial]. (Note: Source [S2, unofficial] uses `path_length -= log(...) * imax_density`, which is mathematically equivalent to adding $-\ln(\dots)/\text{majorant}$).
+-        -   **Termination Check:** If `path_length >= max_distance`, break the loop [S2, unofficial].
+-
+-    -   **Evaluate Coefficients:**
+-        -   Calculate current position: $\mathbf{x} = \text{ray}.o + \text{path\_length} \times \text{ray}.d$ [S2, unofficial].
+-        -   Evaluate total extinction coefficient at $\mathbf{x}$: $\sigma_t(\mathbf{x}) = \text{vec3f}(\text{eval\_vpt\_density}(vsdf, \mathbf{x}))$ [S2, unofficial]. This returns the spectral extinction vector.
+-        -   Calculate null (non-interaction) coefficient: $\sigma_n(\mathbf{x}) = \text{majorant\_density} - \sigma_t(\mathbf{x})$ [S2, unofficial].
+-        -   Calculate absorption coefficient: $\sigma_a(\mathbf{x}) = \sigma_t(\mathbf{x}) - \sigma_s$ [S2, unofficial]. (Assumes $\sigma_s$ is constant or pre-multiplied by majorant as per [S2, unofficial] initialization `sigma_s = vsdf.scatter * max_density`). *Note: In general spectral tracking, $\sigma_s$ and $\sigma_a$ may vary per voxel. The implementation [S2, unofficial] assumes a homogeneous scattering ratio `vsdf.scatter` applied to the local total extinction or uses a pre-computed constant `sigma_s`. Based on [S2, unofficial] code, `sigma_s` is constant, but `sigma_t` varies. This implies the albedo varies spectrally via `sigma_t` while the scattering ratio is fixed, or `sigma_s` is derived differently. The code `sigma_a = sigma_t - sigma_s` implies `sigma_s` is the scattering part of the majorant, which is constant. This is a specific implementation detail [S2, unofficial].*
+-
+-    -   **Calculate Probabilities:**
+-        -   $P_t(\mathbf{x}) = \sigma_t(\mathbf{x}) \times \text{imax\_density}$ [S2, unofficial].
+-        -   $P_n(\mathbf{x}) = \sigma_n(\mathbf{x}) \times \text{imax\_density}$ [S2, unofficial].
+-        -   $P_a(\mathbf{x}) = 1.0 - P_s - P_n(\mathbf{x})$ [S2, unofficial]. (Note: $P_s$ is constant from initialization).
+-
+-    -   **Event Selection:**
+-        -   Generate a random number $\xi \in [0, 1)$ [S3].
+-        -   **Absorption:** If $\xi < P_a(\mathbf{x})$ (specifically `max(Pa) > rand1f(rng)` in [S2, unofficial] to handle vector max, though theoretically it compares against the scalar probability derived from the spectral weight or max component):
+-            -   Calculate contribution weight: $\text{contrib} = \sigma_a(\mathbf{x}) / (\text{majorant\_density} \times P_a(\mathbf{x}))$ [S2, unofficial].
+-            -   Normalize: $\text{contrib} /= \max(\text{contrib})$ [S2, unofficial].
+-            -   Set event type to `EVENT_ABSORB` [S2, unofficial].
+-            -   Return `{ path_length, tr * contrib }` [S2, unofficial].
+-        -   **Scattering:** Else if $\xi < P_a(\mathbf{x}) + P_t(\mathbf{x})$ (implemented as `else if (max(Pt) > rand1f(rng))` in [S2, unofficial], which is a simplification or specific variant where scattering is checked against total probability minus null/absorption logic, or specifically `max(Pt)` implies checking if scattering is the dominant event relative to a threshold. The standard spectral tracking [S3] checks $\xi < P_a + P_t$. The implementation [S2, unofficial] uses `max(Pt) > rand1f(rng)`. This suggests a specific branching logic. We follow [S2, unofficial] for implementation):
+-            -   Calculate contribution weight: $\text{contrib} = \sigma_s / (\text{majorant\_density} \times P_s)$ [S2, unofficial].
+-            -   Normalize: $\text{contrib} /= \max(\text{contrib})$ [S2, unofficial].
+-            -   Set event type to `EVENT_SCATTER` [S2, unofficial].
+-            -   Return `{ path_length, tr * contrib }` [S2, unofficial].
+-        -   **Null (Non-Interaction):** Else:
+-            -   Calculate contribution weight: $\text{contrib} = \sigma_n(\mathbf{x})$ [S2, unofficial].
+-            -   Normalize: $\text{contrib} /= \max(\text{contrib})$ [S2, unofficial].
+-            -   Update throughput: $f \leftarrow f \times \text{contrib}$ [S2, unofficial].
+-            -   (Note: The implementation [S2, unofficial] does not explicitly update `tr` with exponential attenuation in the null branch in the provided snippet, but `tr` is updated at the start of the loop iteration `tr *= exp(-sigma_t*path_length)`? No, the snippet shows `tr *= exp(-sigma_t*path_length)` inside the loop. This formula is suspicious for delta tracking where transmittance is handled by the weight. However, we must transcribe the source [S2, unofficial] faithfully. The source [S2, unofficial] includes `tr *= exp(-sigma_t*path_length)`. This is likely a bug in the referenced implementation or a specific variant, but we record it as written [S2, unofficial].)
+-
+-    -   **Loop Continuation:**
+-        -   If the loop completes without returning (i.e., max distance reached), return `{ max_distance, f }` [S2, unofficial].
++1. **Initialization:** Retrieve `max_density` from the volume object (`density_vol->max_voxel * object->density_mult`) [S2, unofficial]. Set `majorant_density = max_density` and `imax_density = 1.0 / majorant_density` [S2, unofficial]. Initialize `path_length = 0.0` [S2, unofficial]. Initialize spectral throughput vectors: `tr = vec3f(1.0)` (transmittance) and `f = vec3f(1.0)` (final contribution/throughput) [S2, unofficial]. Calculate initial scattering coefficient vector: `sigma_s = vsdf.scatter * max_density` [S2, unofficial]. Calculate scattering probability: `Ps = sigma_s * imax_density` [S2, unofficial]. Initialize spectral weight vector `wD` to ones, though the specific implementation [S2, unofficial] handles weights via the `contrib` vector logic below. The theoretical formulation [S3] initializes $w_D \leftarrow (1, \dots, 1)^{N_\lambda}$.
++2. **Loop:** Generate a uniform random number $\zeta \in [0, 1)$ using `rng` [S3]. Compute tentative distance: $t = -\ln(1 - \zeta) / \text{majorant\_density}$ [S3]. Update `path_length += t` [S2, unofficial]. (Note: Source [S2, unofficial] uses `path_length -= log(1 - rand1f(rng)) * imax_density`, which is mathematically equivalent to adding $-\ln(\dots)/\text{majorant}$). Termination Check: If `path_length >= max_distance`, break the loop [S2, unofficial]. Calculate current position: $\mathbf{x} = \text{ray}.o + \text{path\_length} \times \text{ray}.d$ [S2, unofficial]. Evaluate total extinction coefficient at $\mathbf{x}$: $\sigma_t(\mathbf{x}) = \text{vec3f}(\text{eval\_vpt\_density}(vsdf, \mathbf{x}))$ [S2, unofficial]. Calculate null (non-interaction) coefficient: $\sigma_n(\mathbf{x}) = \text{majorant\_density} - \sigma_t(\mathbf{x})$ [S2, unofficial]. Calculate absorption coefficient: $\sigma_a(\mathbf{x}) = \sigma_t(\mathbf{x}) - \sigma_s$ [S2, unofficial]. (The implementation [S2, unofficial] assumes a homogeneous scattering ratio `vsdf.scatter` applied to the local total extinction or uses a pre-computed constant `sigma_s`. Based on [S2, unofficial] code, `sigma_s` is constant, but `sigma_t` varies. This implies the albedo varies spectrally via `sigma_t` while the scattering ratio is fixed, or `sigma_s` is derived differently. The code `sigma_a = sigma_t - sigma_s` implies `sigma_s` is the scattering part of the majorant, which is constant. This is a specific implementation detail [S2, unofficial].) Calculate $P_t(\mathbf{x}) = \sigma_t(\mathbf{x}) \times \text{imax\_density}$ [S2, unofficial]. Calculate $P_n(\mathbf{x}) = \sigma_n(\mathbf{x}) \times \text{imax\_density}$ [S2, unofficial]. Calculate $P_a(\mathbf{x}) = 1.0 - P_s - P_n(\mathbf{x})$ [S2, unofficial]. (Note: $P_s$ is constant from initialization). Generate a random number $\xi \in [0, 1)$ [S3]. **Absorption:** If $\xi < P_a(\mathbf{x})$ (specifically `max(Pa) > rand1f(rng)` in [S2, unofficial] to handle vector max, though theoretically it compares against the scalar probability derived from the spectral weight or max component): Calculate contribution weight: $\text{contrib} = \sigma_a(\mathbf{x}) / (\text{majorant\_density} \times P_a(\mathbf{x}))$ [S2, unofficial]. Normalize: $\text{contrib} /= \max(\text{contrib})$ [S2, unofficial]. Set event type to `EVENT_ABSORB` [S2, unofficial]. Return `{ path_length, tr * contrib }` [S2, unofficial]. **Scattering:** Else if $\xi < P_a(\mathbf{x}) + P_t(\mathbf{x})$ (implemented as `else if (max(Pt) > rand1f(rng))` in [S2, unofficial], which is a simplification or specific variant where scattering is checked against total probability minus null/absorption logic, or specifically `max(Pt)` implies checking if scattering is the dominant event relative to a threshold. The standard spectral tracking [S3] checks $\xi < P_a + P_t$. The implementation [S2, unofficial] uses `max(Pt) > rand1f(rng)`. This suggests a specific branching logic. We follow [S2, unofficial] for implementation): Calculate contribution weight: $\text{contrib} = \sigma_s / (\text{majorant\_density} \times P_s)$ [S2, unofficial]. Normalize: $\text{contrib} /= \max(\text{contrib})$ [S2, unofficial]. Set event type to `EVENT_SCATTER` [S2, unofficial]. Return `{ path_length, tr * contrib }` [S2, unofficial]. **Null (Non-Interaction):** Else: Calculate contribution weight: $\text{contrib} = \sigma_n(\mathbf{x})$ [S2, unofficial]. Normalize: $\text{contrib} /= \max(\text{contrib})$ [S2, unofficial]. Update throughput: $f \leftarrow f \times \text{contrib}$ [S2, unofficial]. (Note: The implementation [S2, unofficial] does not explicitly update `tr` with exponential attenuation in the null branch in the provided snippet, but `tr` is updated at the start of the loop iteration `tr *= exp(-sigma_t*path_length)`? No, the snippet shows `tr *= exp(-sigma_t*path_length)` inside the loop. This formula is suspicious for delta tracking where transmittance is handled by the weight. However, we must transcribe the source [S2, unofficial] faithfully. The source [S2, unofficial] includes `tr *= exp(-sigma_t*path_length)`. This is likely a bug in the referenced implementation or a specific variant, but we record it as written [S2, unofficial].) If the loop completes without returning (i.e., max distance reached), return `{ max_distance, f }` [S2, unofficial].
+ 
+ **Pseudocode (based on [S2, unofficial]):**
++```python
++import math
++import random
+ 
+-```python
+ def eval_spectral_tracking(vsdf, max_distance, rng, ray):
+     object = vsdf.object
+@@ -80,65 +36,72 @@
+     max_density = density_vol.max_voxel * object.density_mult
+     majorant_density = max_density
+-    imax_density = 1.0f / max_density
++    imax_density = 1.0 / max_density
+     
+-    path_length = 0.0f
+-    tr = vec3f(1.0)
+-    f = vec3f(1.0)
++    path_length = 0.0
++    tr = [1.0, 1.0, 1.0]
++    f = [1.0, 1.0, 1.0]
+     
+     # sigma_s is assumed constant based on vsdf.scatter in this implementation
+-    sigma_s = vsdf.scatter * max_density
+-    Ps = sigma_s * imax_density
++    sigma_s = [vsdf.scatter * max_density, vsdf.scatter * max_density, vsdf.scatter * max_density]
++    Ps = [s * imax_density for s in sigma_s]
+     
+     while True:
+         # Sample path length
+-        rand_val = rand1f(rng)
+-        path_length -= log(1.0 - rand_val) * imax_density
++        rand_val = random.random()
++        path_length -= math.log(1.0 - rand_val) * imax_density
+         
+         if path_length >= max_distance:
+             break
+             
+-        current_pos = ray.o + path_length * ray.d
++        current_pos = (ray.o[0] + path_length * ray.d[0],
++                       ray.o[1] + path_length * ray.d[1],
++                       ray.o[2] + path_length * ray.d[2])
+         
+         # Evaluate spectral extinction
+-        sigma_t = vec3f(eval_vpt_density(vsdf, current_pos))
++        sigma_t = [eval_vpt_density(vsdf, current_pos)[0],
++                   eval_vpt_density(vsdf, current_pos)[1],
++                   eval_vpt_density(vsdf, current_pos)[2]]
+         
+         # Calculate coefficients
+-        sigma_n = majorant_density - sigma_t
+-        sigma_a = sigma_t - sigma_s
++        sigma_n = [majorant_density - s for s in sigma_t]
++        sigma_a = [sigma_t[i] - sigma_s[i] for i in range(3)]
+         
+         # Calculate probabilities
+-        Pt = sigma_t * imax_density
+-        Pn = sigma_n * imax_density
+-        Pa = 1.0 - Ps - Pn
++        Pt = [s * imax_density for s in sigma_t]
++        Pn = [s * imax_density for s in sigma_n]
++        Pa = [1.0 - Ps[i] - Pn[i] for i in range(3)]
+         
+         # Update transmittance (Note: This line appears in source [S2, unofficial], 
+         # though standard DT handles transmittance via weights. 
+         # Included here as per source [S2, unofficial].)
+-        tr *= exp(-sigma_t * path_length)
++        tr = [tr[i] * math.exp(-sigma_t[i] * path_length) for i in range(3)]
+         
+-        contrib = vec3f(0.0)
++        contrib = [0.0, 0.0, 0.0]
+         
+         # Event selection
+         # Note: Source [S2, unofficial] uses max(Pa) and max(Pt) for comparison.
+         # This implies checking against the maximum component of the spectral vector.
+-        if max(Pa) > rand1f(rng):
++        if max(Pa) > random.random():
+             # Absorption
+-            contrib = sigma_a / (majorant_density * Pa)
+-            contrib /= max(contrib)
+-            vsdf.event = EVENT_ABSORB
++            contrib = [sigma_a[i] / (majorant_density * Pa[i]) for i in range(3)]
++            max_c = max(contrib)
++            contrib = [c / max_c for c in contrib]
++            vsdf.event = "EVENT_ABSORB"
+             vsdf.density = sigma_t
+-            return { path_length, tr * contrib }
+-        elif max(Pt) > rand1f(rng):
++            return { path_length, [tr[i] * contrib[i] for i in range(3)] }
++        elif max(Pt) > random.random():
+             # Scattering
+-            contrib = sigma_s / (majorant_density * Ps)
+-            contrib /= max(contrib)
+-            vsdf.event = EVENT_SCATTER
++            contrib = [sigma_s[i] / (majorant_density * Ps[i]) for i in range(3)]
++            max_c = max(contrib)
++            contrib = [c / max_c for c in contrib]
++            vsdf.event = "EVENT_SCATTER"
+             vsdf.density = sigma_t
+-            return { path_length, tr * contrib }
++            return { path_length, [tr[i] * contrib[i] for i in range(3)] }
+         else:
+             # Null event
+             contrib = sigma_n
+-            contrib /= max(contrib)
+-            f *= contrib
++            max_c = max(contrib)
++            contrib = [c / max_c for c in contrib]
++            f = [f[i] * contrib[i] for i in range(3)]
+             
+     return { max_distance, f }
+@@ -146,7 +109,7 @@
+ 
+ **Edge Cases and Pitfalls:**
+--   **Variance Growth:** If the spectral weights $w_D$ deviate significantly from 1 (e.g., when $P_\lambda \ll |\mu_\lambda / \bar{\mu}|$), the throughput can grow geometrically, leading to high variance [S3].
+--   **Implementation Discrepancy:** The implementation in [S2, unofficial] contains a transmittance update `tr *= exp(-sigma_t*path_length)` which is non-standard for Delta Tracking (where transmittance is usually implicit in the weight or handled via the majorant sampling). This may lead to incorrect results if not accounted for, as noted by the issue reporter [S2, unofficial].
+--   **Constant Scattering:** The implementation [S2, unofficial] assumes `sigma_s` is constant (`vsdf.scatter * max_density`), which may not hold for heterogeneous media with varying albedo.
++- **Variance Growth:** If the spectral weights $w_D$ deviate significantly from 1 (e.g., when $P_\lambda \ll |\mu_\lambda / \bar{\mu}|$), the throughput can grow geometrically, leading to high variance [S3].
++- **Implementation Discrepancy:** The implementation in [S2, unofficial] contains a transmittance update `tr *= exp(-sigma_t*path_length)` which is non-standard for Delta Tracking (where transmittance is usually implicit in the weight or handled via the majorant sampling). This may lead to incorrect results if not accounted for, as noted by the issue reporter [S2, unofficial].
++- **Constant Scattering:** The implementation [S2, unofficial] assumes `sigma_s` is constant (`vsdf.scatter * max_density`), which may not hold for heterogeneous media with varying albedo.
+ 
+ ## Subtopics
+@@ -159,9 +122,9 @@
+ 
+ ## Operating characteristics
+--   **Time Complexity:** $O(N)$ where $N$ is the number of steps along the ray. Each step involves evaluating the density volume and performing vector operations.
+--   **Memory Complexity:** $O(1)$ auxiliary space per ray, excluding the storage for the volume data itself.
+--   **Performance:** Spectral tracking reduces the number of tracker invocations compared to naive delta tracking by handling all wavelengths in a single pass [S3]. In the translucent dragon scene, spectral tracking reduced LTUV by 2.70× over delta tracking [S3]. Combined with decomposition tracking, it reduced render time by 22% [S3].
+--   **Strengths:** Efficient handling of spectrally resolved properties; reduced variance compared to naive per-wavelength delta tracking; suitable for heterogeneous volumes.
+--   **Limitations:** Variance can increase if the majorant bound is loose or if spectral weights deviate significantly from 1 [S3]. The implementation in [S2, unofficial] has noted correctness issues regarding transmittance calculation.
++- **Time Complexity:** $O(N)$ where $N$ is the number of steps along the ray. Each step involves evaluating the density volume and performing vector operations [S2, unofficial].
++- **Memory Complexity:** $O(1)$ auxiliary space per ray, excluding the storage for the volume data itself [S2, unofficial].
++- **Performance:** Spectral tracking reduces the number of tracker invocations compared to naive delta tracking by handling all wavelengths in a single pass [S3]. In the translucent dragon scene, spectral tracking reduced LTUV by 2.70× over delta tracking [S3]. Combined with decomposition tracking, it reduced render time by 22% [S3].
++- **Strengths:** Efficient handling of spectrally resolved properties; reduced variance compared to naive per-wavelength delta tracking; suitable for heterogeneous volumes [S3].
++- **Limitations:** Variance can increase if the majorant bound is loose or if spectral weights deviate significantly from 1 [S3]. The implementation in [S2, unofficial] has noted correctness issues regarding transmittance calculation.
+ 
+ ## Background

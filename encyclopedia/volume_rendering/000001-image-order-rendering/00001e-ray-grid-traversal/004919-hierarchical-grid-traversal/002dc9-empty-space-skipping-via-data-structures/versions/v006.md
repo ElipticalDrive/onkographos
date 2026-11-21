@@ -1,0 +1,84 @@
+# Empty Space Skipping via Data Structures
+
+Also called: Acceleration Structures for Volume Rendering, Active Region Culling
+
+## Overview
+Empty Space Skipping via Data Structures is a family of volume rendering optimization techniques that reduce computational cost by identifying and bypassing inactive (transparent or empty) regions of a volume dataset before or during ray sampling [S1, S2, S3]. Unlike methods that rely on hardware occlusion culling or ray coherence, this family uses explicit secondary data structures—such as min-max blocks, occupancy grids, BVHs, or hybrid trees—to store metadata about the spatial distribution of active data [G]. This allows rays to determine entry and exit points of active regions analytically or via coarse traversal, skipping large intervals of empty space that would otherwise require expensive texture lookups and compositing operations.
+
+## Shared principles
+The core mechanism shared by all methods in this family involves three stages: construction of a secondary acceleration structure, definition of activity, and ray-based skipping.
+
+1.  **Acceleration Structure Construction:** A secondary data structure is built to represent the volume. This structure is typically lower resolution than the primary volume texture or has a different topology (e.g., tree vs. grid) to allow for faster traversal [G]. Each element in this structure corresponds to a block, region, or node of volume voxels and stores metadata indicating occupancy or activity [G].
+2.  **Active Region Definition:** A block or region is defined as "active" if it contributes to the final image. This is typically determined by density, opacity, or scalar value thresholds. For example, a block is active if its maximum scalar value exceeds an isovalue threshold $\tau$ ($\max(\text{block}) > \tau$) or if its accumulated opacity exceeds a small epsilon [G]. This status may be static (pre-computed) or dynamic (updated per frame or per transfer function change) [G].
+3.  **Ray Query and Skip:** During rendering, the algorithm queries the acceleration structure to find the entry and exit points of active regions along a ray. Rays advance past inactive blocks without sampling the primary volume texture, performing standard integration only within active segments [G].
+4.  **Coordinate Mapping:** Efficient mapping between ray positions and grid indices is required, typically via integer division by block size: $u_{\text{occ}} = \lfloor u_{\text{vol}} / B \rfloor$ [G].
+
+## Subtopics
+
+### [Object-Order Empty Space Skipping](865-object-order-empty-space-skipping.md)
+Uses min-max block structures and rasterizes bounding geometry of active blocks to determine ray start/end points. Best for isosurface rendering with static transfer functions.
+
+### [Ray Casting with Depth/Alpha Test for Empty Space Skipping](1537-ray-casting-with-depth-alpha-test-for-empty-space-skipping.md)
+Uses hardware depth/alpha tests on texture slabs to find near/far points. Best for legacy OpenGL pipelines and slab-based rendering.
+
+### [Semi-transparent Empty-Space Skipping](1911-semi-transparent-empty-space-skipping.md)
+Uses BVH with density bounds for sphere tracing. Best for semi-transparent volumes with constant or varying density.
+
+### [Dynamic MLP Maps with Empty Space Skipping](3036-dynamic-mlp-maps-with-empty-space-skipping.md)
+Uses occupancy volumes for neural radiance fields (NeRF). Best for volumetric video and neural rendering.
+
+### [Occupancy Grid and Map-Based Empty Space Skipping](3852-occupancy-grid-and-map-based-empty-space-skipping.md)
+Uses flat or multi-resolution occupancy grids. Best for simple, direct indexing acceleration.
+
+### [Space Leaping](5863-space-leaping.md)
+Uses a leap buffer based on ray coherence. Best for close-up views with large empty foregrounds.
+
+### [Hybrid kd-tree/Uniform Grid](6487-hybrid-kd-tree-uniform-grid.md)
+Combines kd-tree root with uniform grid leaves. Best for large datasets requiring balanced construction cost and skipping granularity.
+
+### Empty Space Skipping with HistoPyramid
+Uses HistoPyramid textures for fine-grained active cell location.
+
+### ISSUE Algorithm
+Uses lattice subdivision for isosurface extraction.
+
+### Mixture Graph Mipmap Skipping
+Uses Mixture Graph hierarchy for opacity-based skipping.
+
+### Empty Space Skipping with HistoPyramid
+**Definition:** A technique achieving extremely fine-grained empty space skipping by marching rays only through active volume cells, located efficiently with a HistoPyramid texture and rendered as point primitives [S1].
+**Steps:**
+1.  Locate active volume cells using a HistoPyramid texture [S1].
+2.  Render active cells as point primitives to create rays close to the isosurface [S1].
+3.  Accelerate by exploiting early-depth testing: compare fragment's interpolated z-coordinate with depth buffer value; discard if occluded [S1].
+4.  Rasterize primitives in front-to-back order to increase discarded fragments, achieved via CPU-based sorting of volume slices [S1].
+**Comparison:** Considered a hybrid object-order and image-order approach, meaning it is dependent on rendering resolution [S1].
+
+### ISSUE Algorithm
+**Steps:**
+1.  Divide span space points into one of the $L \times L$ lattice elements [S2].
+2.  Assign each lattice element to a category based on its position relative to the isovalue $v$ (see Figure 3 cases in [S2]) [S2].
+3.  Trivially include cells in region 2 [S2].
+4.  For cells in region 3, require a test against their maximum value [S2].
+5.  For cells in region 4, require a test against their minimum value [S2].
+6.  For cells in region 5, require a full min-max search of its cells [S2].
+7.  Create search structures only at the lattice elements along the diagonal region 5 [S2].
+8.  Coalesce lattice elements at other regions into sorted linear arrays [S2].
+9.  Build a kd-tree for each lattice element along the $y = x$ line, since only these elements may fall into region 5 classification [S2].
+**Parameter:** Lattice resolution $L$: User-defined resolution for dividing span space points [S2].
+
+### Mixture Graph Mipmap Skipping
+**Steps:**
+1.  Propagate current transfer function values to the leafs of the Mixture Graph [S3].
+2.  Use the hierarchy for skipping longer segments [S3].
+3.  If the opacity value in parent voxels falls below a certain threshold, traverse the hierarchy upwards to establish larger blocks that can be skipped [S3].
+**Parameter:** Threshold: A low opacity threshold used to trigger skipping; typical value is $10^{-8}$ [S3].
+**Performance:** Average 3x speedup compared to the same implementation without mipmaps using a threshold of $10^{-8}$ [S3].
+
+## Background
+Empty space skipping is a fundamental optimization in volume rendering, addressing the high cost of sampling large volumes where significant portions are transparent or empty. Early methods relied on ray coherence (Space Leaping) [S7]. The use of explicit data structures for skipping evolved with GPU capabilities. Liu et al. [LCD09] introduced HistoPyramid-based skipping, followed by IsoBAS [LCD15] and Jiang et al. [JRZ*16], which are considered hybrid object-order/image-order approaches [S1]. Shen et al. [14] proposed the ISSUE algorithm for isosurface extraction using lattice subdivision [S2]. More recently, hierarchical structures like Mixture Graphs [S3] and hybrid kd-tree/uniform grids have been developed to balance construction cost and skipping efficiency for large-scale datasets [S1].
+
+## Sources
+[S1] Efficient Direct Isosurface Rasterization of Scalar Volumes, https://www.uni-weimar.de/en/media/chairs/computer-science-department/vr/research/real-time-rendering/efficient-direct-isosurface-rasterization-of-scalar-volumes/, fetched 2026-11-01
+[S2] A Case Study of Isosurface Extraction Algorithm Performance, https://doi.org/10.1007/978-3-7091-6783-0_26, fetched 2026-10-26
+[S3] The Mixture Graph-A Data Structure for Compressing, Rendering, and Querying Segmentation Histograms, https://doi.org/10.1109/tvcg.2020.3030451, fetched 2026-10-26

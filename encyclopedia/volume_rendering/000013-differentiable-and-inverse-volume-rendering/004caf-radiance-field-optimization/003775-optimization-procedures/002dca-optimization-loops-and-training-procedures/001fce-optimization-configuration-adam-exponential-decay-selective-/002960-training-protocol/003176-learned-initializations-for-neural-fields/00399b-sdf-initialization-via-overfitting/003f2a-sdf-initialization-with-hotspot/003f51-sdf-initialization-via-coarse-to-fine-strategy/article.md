@@ -1,0 +1,82 @@
+# SDF Initialization via Coarse-to-Fine Strategy
+
+Also called: Coarse SDF Initialization, SDF State Initialization Pitfall, Unconverged SDF Initialization
+
+## Overview
+This method initializes the Signed Distance Field (SDF) using a coarser, unconverged state rather than a fully converged one to prevent the optimization process from trapping in local minima. While a fully converged SDF provides a precise geometric prior, it can lead to catastrophic failure in complex scenes by restricting the optimization landscape [S1]. This approach builds on [SDF Initialization with Hotspot](9906-sdf-initialization-with-hotspot.md) by explicitly leveraging the regularization benefits of an incomplete initialization.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A neural field model (e.g., MLP) initialized with SDF values derived from a coarse or partially trained state.
+*   **Output:** A refined SDF field that avoids local minima traps associated with over-regularized initial states.
+
+**Data Structures:**
+The SDF field is represented as a continuous function $f(\mathbf{x})$ mapping 3D coordinates to signed distances. The "coarse" state implies that the network weights have not been optimized to minimize the SDF loss to convergence, leaving the field less constrained.
+
+**Steps:**
+1.  **Initialize SDF State:** Instead of training the SDF component until convergence (which yields a "hotspot" or highly refined surface), halt the initial training phase early. This results in an "unconverged" SDF [S1].
+2.  **Begin Optimization Loop:** Start the main differentiable volume rendering optimization loop using this unconverged SDF as the prior [S1].
+3.  **Regularization Effect:** The unconverged state acts as a regularizer. Because the initial surface is not perfectly fitted to the training data, the optimization has more freedom to explore the solution space, avoiding the local minima that a fully converged SDF would enforce [S1].
+
+**Pitfalls:**
+*   **Catastrophic Failure:** Using a fully converged SDF initialization can trap the optimizer in a local minimum, leading to significant reconstruction errors (e.g., Mesh ID 252119 in [S1]).
+*   **Precision:** The "coarseness" must be balanced; if too coarse, the initialization may be too noisy, but if too fine, it risks the aforementioned local minima trap.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def initialize_sdf_coarse_to_fine(model, training_data, early_stop_threshold):
+    """
+    Initializes the SDF model using a coarse, unconverged state.
+    
+    Args:
+        model: Neural network model containing SDF and density components.
+        training_data: Dataset of rays and target images.
+        early_stop_threshold: Loss or epoch count to stop initial SDF training.
+        
+    Returns:
+        model: Model with unconverged SDF weights.
+    """
+    # Step 1: Initial coarse training
+    # Train the SDF component only, but stop early to avoid convergence
+    for epoch in range(early_stop_threshold):
+        loss = compute_sdf_loss(model, training_data)
+        update_weights(model, loss)
+        if loss < early_stop_threshold: # Or check epoch count
+            break
+            
+    # The model now holds an "unconverged" SDF state
+    # This state is less regularized and avoids local minima traps
+    
+    return model
+
+def main_optimization_loop(model, training_data):
+    """
+    Continues optimization from the coarse initialization.
+    """
+    for epoch in range(total_epochs):
+        # Standard differentiable volume rendering loss
+        loss = compute_rendering_loss(model, training_data)
+        update_weights(model, loss)
+```
+
+## Subtopics
+
+### SDF Progressive Initialization
+A training strategy that progressively transitions the scene representation from pure volumetric density to SDF to handle limited image overlap and complex urban scenes, avoiding the need for full scene observability required by bounded sphere initialization [S2]. Unlike StreetSurf, which initializes SDF based on road-surface, this method (used in ViiNeuS) transitions from density to SDF, making it better suited for driving scenes with linear trajectories and reduced overlap [S2]. The process involves three stages:
+1.  **Volumetric Stage:** All samples along the ray express volumetric densities ($\alpha_i = \alpha^{iv}$), leveraging simpler geometric understanding to accelerate density estimator convergence [S2].
+2.  **Hybrid Stage:** Samples are split between volumetric alpha ($\alpha^{iv}$) and SDF-based alpha ($\alpha^{if}$). A probability-based association assigns $\alpha^{if}$ to samples with the highest predicted density, limiting the range of predicted values and facilitating SDF learning by sampling points close to the surface [S2].
+3.  **Surface Stage:** All samples use $\alpha^{if}$ (SDF-based) as the representation fully transitions to surface [S2].
+
+## Operating characteristics
+*   **Strengths:** Prevents catastrophic failure in complex scenes by avoiding local minima traps associated with fully converged SDFs [S1]. Provides better regularization for the optimization loop [S1].
+*   **Limitations:** Requires careful tuning of the "coarseness" or early stopping point. If the initialization is too far from the true surface, convergence may be slower or unstable.
+*   **Performance:** Results in significantly improved surface discretization compared to converged initializations in near-sampling and upsampling settings [S1].
+
+## Background
+This method addresses the "SDF State Initialization Pitfall" identified in differentiable volume rendering research. It was highlighted in the context of DCCVT (Differentiable Clipped Centroidal Voronoi Tessellation), where fully converged SDFs were found to cause catastrophic failures in specific mesh reconstructions (e.g., Mesh ID 252119 and 398259) [S1]. The approach contrasts with progressive initialization methods like ViiNeuS, which handle limited overlap by transitioning from density to SDF, whereas this method focuses on the state of the SDF itself during the initialization phase of a standard optimization loop [S1, S2].
+
+## Sources
+[S1] DCCVT: Differentiable Clipped Centroidal Voronoi Tessellation, https://arxiv.org/abs/2601.13603v1, fetched 2026-10-26
+[S2] ViiNeuS: Volumetric Initialization for Implicit Neural Surface reconstruction of urban scenes with limited image overlap, https://hal.science/hal-05104965v1, fetched 2026-10-26

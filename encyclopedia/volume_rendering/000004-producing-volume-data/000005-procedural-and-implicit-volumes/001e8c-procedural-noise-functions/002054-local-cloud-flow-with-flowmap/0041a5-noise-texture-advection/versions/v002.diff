@@ -1,0 +1,220 @@
+--- v001.md
++++ v002.md
+@@ -4,125 +4,138 @@
+ 
+ ## Overview
+-Noise Texture Advection directly advects a geometry-mapped noise input texture along projected eigenvector fields using simple Euler integration, rather than calculating streamlines at each position as in traditional Line Integral Convolution (LIC) [S1, book][S2, unofficial]. This method leverages the parallel architecture of GPUs to perform the advection for each pixel simultaneously, achieving results equivalent to locally filtering data along precomputed streamlines [S1, book][S2, unofficial]. It is used within the Local Cloud Flow with FlowMap pipeline to simulate local cloud movement and fabric-like textures on arbitrary surfaces [S1, book][S2, unofficial].
++Noise Texture Advection is a GPU-based technique for visualizing tensor fields by iteratively advecting a noise texture along eigenvector directions. It solves the problem of generating coherent flow-like structures from static tensor data by leveraging the depth buffer for edge detection, thereby avoiding the overhead of separate depth textures. Unlike its parent method, [Local Cloud Flow with FlowMap](2258-local-cloud-flow-with-flowmap.md), which uses simple Euler integration, this method specifically handles the lack of orientation in eigenvectors by sampling in both forward and backward directions and averaging the results. It differs from [Global Cloud Flow](2270-global-cloud-flow.md) by operating in image space on projected eigenvector fields rather than simulating global fluid dynamics.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A geometry-mapped noise texture $\beta$, where $\beta_{x,y}$ is the noise value at pixel $(x,y)$. Projected eigenvector fields $v'_\lambda$ for each eigenvector $\lambda \in \{\lambda_1, \lambda_2\}$.
+-*   **Output:** Two advection textures (or channels), one for each eigenvector field, containing the advected noise values.
++*   **Input:** A geometry-mapped noise texture $\beta$, where $\beta_{x,y}$ is the noise value at pixel $(x,y)$. Projected eigenvector fields $v'_{\lambda}$ for each eigenvalue $\lambda \in \{\lambda_1, \lambda_2\}$.
++*   **Output:** Two advection textures, one for each eigenvector field. After $N$ iterations, the red channel typically stores the result for $\lambda_1$ and the green channel for $\lambda_2$ [S1, book].
+ 
+ **Data Structures:**
+-*   **Advection Textures:** Separate input and output fields $P_i^\lambda$ are required for each eigenvector field $\lambda$. The iteration updates these fields in place or using ping-pong buffers.
+-*   **Field Layout:** After $N$ iterations, the resulting texture stores the final advected values. For example, after 10 iterations, the red channel may contain $P_{\lambda_1}^9$ and the green channel $P_{\lambda_2}^9$ [S1, book].
++*   **Advection Textures:** Separate input and output fields $P_i^\lambda$ are required for each eigenvector field to allow ping-pong buffering or double buffering during iteration [S1, book][S2, unofficial].
++*   **Field Definition:** The field $P$ is treated as a continuous function $f_P$ over the 2D domain $[0,1] \times [0,1]$, ensuring continuity via interpolation between discrete pixel values [S1, book][S2, unofficial].
+ 
+ **Parameters:**
+-*   **$k$ (Mixing Factor):** Determines the ratio between the original input noise $\beta$ and the previously advected image. A smaller $k$ results in a smoother, more blurred advection; a larger $k$ results in a coarser, more contrast-rich image [S2, unofficial]. Typical value: $0.05$ [S2, unofficial].
+-*   **Iteration Limit:** The process iterates until a convergence threshold is met or a fixed number of steps is reached [S1, book][S2, unofficial].
++*   **$k$ (Mixing Factor):** Controls the balance between the original input noise and the advected noise. A smaller $k$ results in smoother, more blurred advection; a larger $k$ results in a coarser, more contrast-rich image. Typical value: $0.05$ [S2, unofficial].
++*   **Iteration Limit:** The process can stop when the value change between iterations exceeds a threshold, or after a fixed number of iterations (e.g., 10) [S1, book][S2, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** For each pixel $(x,y)$ and each eigenvector field $\lambda \in \{\lambda_1, \lambda_2\}$, initialize the advection field $P_0^\lambda$ with the input noise:
+-    $$ P_0^\lambda = \beta_{x,y} $$
+-2.  **Iteration:** For iteration $i = 0, 1, \dots$:
+-    a. Calculate the new value $P_{i+1}^\lambda$ using the Euler integration formula:
+-    $$ P_{i+1}^\lambda = k \cdot \beta_{x,y} + (1-k) \cdot \frac{f_{P_i^\lambda}(x + v'_{\lambda_x}, y + v'_{\lambda_y}) + f_{P_i^\lambda}(x - v'_{\lambda_x}, y - v'_{\lambda_y})}{2} $$
+-    where $f_{P_i^\lambda}$ is the continuous mapping function (interpolation) of the field $P_i^\lambda$ [S1, book][S2, unofficial].
+-    b. **Termination Check:** Stop if the change in value $|P_{i+1}^\lambda - P_i^\lambda|$ exceeds a predefined threshold or if the maximum iteration count is reached [S1, book][S2, unofficial].
+-3.  **Completion:** The final values $P_{final}^\lambda$ are stored in the respective output textures.
++1.  Initialize the advection field $P_0^\lambda$ for each eigenvector $\lambda$ with the input noise $\beta_{x,y}$ for all pixels $(x,y)$ [S1, book][S2, unofficial].
++2.  For each iteration $i$:
++    a. For each pixel $(x,y)$ and each eigenvector field $\lambda \in \{\lambda_1, \lambda_2\}$:
++    b. Calculate the new value $P_{i+1}^\lambda$ using the Euler integration formula:
++       $$P_{i+1}^\lambda = k \cdot \beta_{x,y} + (1-k) \cdot \frac{f_{P_i^\lambda}(x+v'_{\lambda_x}, y+v'_{\lambda_y}) + f_{P_i^\lambda}(x-v'_{\lambda_x}, y-v'_{\lambda_y})}{2}$$
++       where $v'_{\lambda} = (v'_{\lambda_x}, v'_{\lambda_y})$ is the projected eigenvector [S1, book][S2, unofficial].
++    c. The term $f_{P_i^\lambda}(x \pm v'_{\lambda_x}, y \pm v'_{\lambda_y})$ retrieves the interpolated value from the current advection texture at positions displaced by the eigenvector components [S2, unofficial].
++    d. Note: Because eigenvectors lack inherent orientation, sampling is performed in both the forward ($+v'$) and backward ($-v'$) directions, and the results are averaged [S1, book][S2, unofficial].
++3.  Update the advection texture with $P_{i+1}^\lambda$.
++4.  Repeat until the convergence threshold is met or the maximum iteration count is reached [S1, book].
+ 
+ **Pseudocode:**
+ ```python
+-def advect_noise_texture(beta, eigenvectors, k, max_iterations, threshold):
++def advect_noise_texture(noise_texture, eigenvector_fields, k=0.05, max_iterations=10, threshold=1e-4):
+     """
+-    Advects a noise texture beta along eigenvector fields using Euler integration.
++    Advects a noise texture along eigenvector fields using Euler integration.
+     
+     Args:
+-        beta: 2D array of input noise values, shape (H, W).
+-        eigenvectors: Dictionary mapping lambda to 2D vector fields (dx, dy), shape (H, W, 2).
+-        k: Mixing factor (float).
+-        max_iterations: Integer limit for iterations.
+-        threshold: Float for convergence check.
++        noise_texture: 2D array of shape (H, W) containing input noise beta.
++        eigenvector_fields: Dictionary mapping lambda to 2D vector fields (vx, vy).
++        k: Mixing factor between input noise and advected noise.
++        max_iterations: Maximum number of advection steps.
++        threshold: Convergence threshold for stopping early.
+         
+     Returns:
+-        advected_fields: Dictionary mapping lambda to 2D array of advected noise.
++        advected_textures: Dictionary mapping lambda to 2D array of advected noise.
+     """
+-    advected_fields = {}
++    H, W = noise_texture.shape
++    advected_textures = {}
+     
+-    for lambda_name, (dvx, dvy) in eigenvectors.items():
+-        # Initialize P with beta
+-        P_prev = beta.copy()
+-        P_next = P_prev.copy()
++    for lambda_name, (vx_field, vy_field) in eigenvector_fields.items():
++        # Initialize P_0 with input noise
++        P_current = noise_texture.copy()
++        P_next = np.zeros_like(P_current)
+         
+-        for i in range(max_iterations):
+-            # Calculate displacements
+-            # Note: v' is the projected eigenvector. 
+-            # We assume dvx, dvy are the components v'_lambda_x, v'_lambda_y
+-            x_disp = dvx
+-            y_disp = dvy
++        for iteration in range(max_iterations):
++            max_change = 0.0
+             
+-            # Sample forward and backward positions
+-            # Using bilinear interpolation for continuity f_P
+-            # Forward: (x + dvx, y + dvy)
+-            # Backward: (x - dvx, y - dvy)
+-            
+-            # To implement interpolation without external libraries:
+-            # We need to sample P_prev at (x + dvx, y + dvy) and (x - dvx, y - dvy)
+-            # This requires handling boundary conditions (e.g., clamp or wrap)
+-            
+-            forward_samples = interpolate_2d(P_prev, x_disp, y_disp)
+-            backward_samples = interpolate_2d(P_prev, -x_disp, -y_disp)
+-            
+-            # Average of forward and backward
+-            advected_part = (forward_samples + backward_samples) / 2.0
+-            
+-            # Mix with original noise
+-            P_next = k * beta + (1 - k) * advected_part
++            # Parallel execution over pixels (simulated here with loops)
++            for y in range(H):
++                for x in range(W):
++                    # Get projected eigenvector components at this pixel
++                    vx = vx_field[y, x]
++                    vy = vy_field[y, x]
++                    
++                    # Sample forward and backward positions
++                    # Note: Interpolation is handled by the texture sampling function
++                    # Positions are in normalized coordinates [0,1] or pixel space depending on implementation
++                    # Assuming vx, vy are in pixel space for direct indexing, or normalized for texture lookup
++                    # Here we assume normalized coordinates for texture lookup f_P
++                    
++                    # Forward sample
++                    pos_fwd_x = x + vx
++                    pos_fwd_y = y + vy
++                    
++                    # Backward sample
++                    pos_bwd_x = x - vx
++                    pos_bwd_y = y - vy
++                    
++                    # Interpolate values from current advection texture
++                    # f_P is the continuous mapping function (bilinear/trilinear interpolation)
++                    val_fwd = interpolate_texture(P_current, pos_fwd_x, pos_fwd_y)
++                    val_bwd = interpolate_texture(P_current, pos_bwd_x, pos_bwd_y)
++                    
++                    # Average forward and backward samples
++                    avg_sample = (val_fwd + val_bwd) / 2.0
++                    
++                    # Apply mixing factor k
++                    input_noise = noise_texture[y, x]
++                    P_next[y, x] = k * input_noise + (1 - k) * avg_sample
++                    
++                    # Track change for convergence
++                    change = abs(P_next[y, x] - P_current[y, x])
++                    if change > max_change:
++                        max_change = change
+             
+             # Check convergence
+-            diff = abs(P_next - P_prev)
+-            if max(diff.flatten()) < threshold:
++            if max_change < threshold:
+                 break
+                 
+-            P_prev = P_next
++            # Swap buffers
++            P_current = P_next.copy()
+             
+-        advected_fields[lambda_name] = P_next
++        advected_textures[lambda_name] = P_current
+         
+-    return advected_fields
++    return advected_textures
+ 
+-def interpolate_2d(field, dx, dy):
++def interpolate_texture(texture, x, y):
+     """
+-    Simple bilinear interpolation for field at offsets dx, dy.
+-    Assumes field is defined on integer grid [0, W-1] x [0, H-1].
+-    Clamps coordinates to boundaries.
++    Bilinear interpolation of texture at normalized coordinates (x, y).
++    Handles boundary conditions by clamping or wrapping as needed.
+     """
+-    # This is a placeholder for the actual interpolation logic.
+-    # In a real GPU implementation, this is done via texture sampling.
+-    # Here we assume a function that returns interpolated values.
+-    # Since we cannot call external libs, we describe the operation:
+-    # 1. Calculate source coordinates: (x + dx, y + dy)
+-    # 2. Clamp to [0, W-1] x [0, H-1]
+-    # 3. Perform bilinear interpolation using the 4 nearest neighbors.
+-    # For the purpose of this article, we assume a valid interpolation function exists.
+-    # [G] Implementation detail: Bilinear interpolation requires fetching 4 texels.
++    # Implementation details for bilinear interpolation
++    # ...
+     pass
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Boundary Conditions:** The interpolation function $f_P$ must handle positions outside the domain $[0,1] \times [0,1]$. Common strategies include clamping, wrapping, or discarding pixels near boundaries [S1, book][S2, unofficial].
+-*   **Eigenvector Orientation:** Eigenvectors $v'_\lambda$ do not have a fixed orientation. Therefore, advection must be performed in both directions ($+v'_\lambda$ and $-v'_\lambda$) and averaged to ensure symmetry [S1, book][S2, unofficial].
+-*   **Precision:** Floating-point precision errors can accumulate over many iterations. Using a threshold for convergence helps prevent infinite loops and controls the level of detail [S1, book].
++*   **Eigenvector Orientation:** Eigenvectors do not have a defined direction. Failing to sample in both $+v'$ and $-v'$ directions will result in incorrect flow visualization [S1, book][S2, unofficial].
++*   **Boundary Conditions:** Pixels near geometry boundaries or outside the domain must be handled. The depth buffer is used to discard pixels not part of the original geometry rendering [S1, book].
++*   **Precision:** Floating-point precision errors can accumulate over many iterations. Using a threshold for early stopping helps mitigate this [S1, book].
+ 
+ ## Subtopics
+ 
+ ### [Advection Iteration](12206-advection-iteration.md)
+-An iterative process that advects a geometry-mapped noise texture along eigenvector fields to visualize tensor fields, using depth buffer for edge detection and avoiding separate depth texture overhead.
++A GPU-based technique that iteratively advects a noise texture along eigenvector directions, specifically handling the lack of orientation in eigenvectors by sampling in both forward and backward directions and averaging the results. It uses the depth buffer for edge detection to avoid separate depth textures.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot I \cdot H \cdot W)$, where $N$ is the number of eigenvector fields (typically 2), $I$ is the number of iterations, and $H \cdot W$ is the image resolution. Each iteration involves two texture lookups and arithmetic operations per pixel.
+-*   **Memory Complexity:** $O(H \cdot W)$ per eigenvector field for storing the input and output advection textures.
+-*   **Performance:** The method is highly parallelizable and can be performed on GPUs at hundreds of iterations per second, making it suitable for real-time or near-real-time visualization [S1, book][S2, unofficial].
+-*   **Strengths:** Simple implementation, efficient on GPUs, avoids the complexity of streamline calculation [S1, book][S2, unofficial].
+-*   **Limitations:** The quality depends on the number of iterations and the mixing factor $k$. Too few iterations may result in insufficient advection, while too many may cause blurring [S2, unofficial]. The method assumes the eigenvector fields are already projected to image space [S2, unofficial].
++*   **Time Complexity:** $O(N \cdot H \cdot W)$, where $N$ is the number of iterations, and $H, W$ are the image dimensions. Each iteration processes every pixel in parallel [S1, book][S2, unofficial].
++*   **Memory Complexity:** $O(H \cdot W)$ for storing the input noise and two advection textures (input and output for ping-pong buffering) [S1, book][S2, unofficial].
++*   **Performance:** The method is highly parallelizable on GPUs, allowing for hundreds of iterations per second [S1, book].
++*   **Strengths:** Simple implementation, efficient on modern GPUs, generates coherent flow-like structures without explicit streamline calculation [S1, book][S2, unofficial].
++*   **Limitations:** Requires separate input/output fields for each eigenvector field. The quality depends on the mixing factor $k$ and the number of iterations [S2, unofficial].
++*   **When to Use:** When visualizing tensor fields on arbitrary surfaces in image space with limited computational resources for complex streamline calculations [S1, book].
++*   **When Not to Use:** When high-fidelity, physically accurate fluid simulation is required, or when the tensor field has strong orientation information that should be preserved without averaging [S1, book][S2, unofficial].
+ 
+ ## Background
+-Noise Texture Advection was introduced in the context of fabric-like visualization of tensor field data on arbitrary surfaces in image space [S1, book][S2, unofficial]. It was developed to leverage the parallel processing capabilities of modern GPUs for visualizing tensor fields without the overhead of traditional LIC methods [S1, book][S2, unofficial]. The method is part of a broader pipeline for image-space tensor field visualization [S1, book][S2, unofficial].
++The method was introduced in the context of fabric-like visualization of tensor field data on arbitrary surfaces in image space. It was proposed as an alternative to traditional Line Integral Convolution (LIC) methods, which calculate streamlines at each position. The key insight was that directly advecting a noise texture with vector fields is computationally equivalent to locally filtering data along precomputed streamlines but is more suitable for massively parallel architectures like GPUs [S1, book][S2, unofficial]. The technique was developed to handle the visualization of tensor fields by projecting them to image space and using eigenvector fields for advection [S1, book][S2, unofficial].
+ 
+ ## Sources

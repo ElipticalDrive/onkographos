@@ -1,0 +1,452 @@
+--- v003.md
++++ v004.md
+@@ -1,322 +1,167 @@
+ # Back-Face Culling for Ray Casting
+ 
+-Also called: Back-face culling for entry/exit determination, Back-face depth culling raycasting, Backface Raycasting, Raycasting with depth pre-pass, Two-Pass Raycasting with Back-Face Depth Buffering, Two-Pass Raycasting with Backface Entry/Exit Points
++Also called: Backface Raycasting, Raycasting with depth buffers, Raycasting with depth pre-pass, Front/Backface Buffer Raycasting, Two-pass depth buffer raycasting, Back-face depth culling raycasting, Back-face culling for entry/exit determination, Two-Pass Raycasting with Back-Face Depth Buffering, Two-Pass Raycasting with Backface Entry/Exit Points
+ 
+ ## Overview
+-Back-face culling for ray casting is an optimization technique that determines the entry and exit points of a ray into a volume by rendering the back faces of the bounding cube to a texture, avoiding the need to compute ray-cube intersections analytically [S1, unofficial]. It is a two-pass rendering technique: the first pass renders the backface of the bounding box to a framebuffer to record entry depths, and the second pass performs raycasting using those points to drive ray marching, ensuring sampling begins inside the volume and terminates at the exit point [S2, S3, unofficial]. This method sets itself apart from analytical intersection methods by leveraging the graphics pipeline's rasterization and depth testing to implicitly solve for ray bounds, and from 3D texture-based entry/exit lookups by using a 2D texture derived from the backface projection [S2, unofficial].
++Back-face culling for ray casting is an optimization technique that determines the entry and exit points of rays into a volume by rendering the back faces of the volume's bounding box to a texture, thereby avoiding the need to compute ray-cube intersections analytically in the raycasting shader [S1, S2, S3, S4, unofficial]. It builds on [Coarse Mesh Traversal with Dual-Ray Culling](987-coarse-mesh-traversal-with-dual-ray-culling.md) by applying the principle of using front/back face distinction to a simple bounding box primitive, offloading geometry processing to the GPU rasterizer [S1, S2, unofficial]. Unlike single-pass methods that compute intersections in the fragment shader, this approach uses a two-pass rendering pipeline: the first pass captures the back-face depth/position, and the second pass uses this data to initialize the ray march, skipping empty space outside the volume [S2, S4, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A volume bounding box (typically a cube defined by 8 vertices and 36 triangle indices), a 3D texture containing volume data (`uVolData`), a 2D texture for back-face coordinates (`uBackCoord` or `ExitPoints`), and camera matrices (Model-View `uMVMatrix`, Projection `uPMatrix`) [S1, S3, unofficial].
+-*   **Outputs:** A final color buffer with the composited volume rendering.
++*   **Inputs:** Volume density data (3D texture), transfer function (1D or 2D texture), camera view/projection matrices, bounding box geometry (cube).
++*   **Outputs:** Final composited image (color buffer).
+ 
+ **Data Structures:**
+-1.  **Frame Buffer (`frameBuffer`):**
+-    *   **Depth Buffer:** A renderbuffer of type `DEPTH_COMPONENT16` with dimensions `width x height` [S3, unofficial].
+-    *   **Color Texture (`texture`):** A 2D texture of type `RGBA`, `UNSIGNED_BYTE`, dimensions `width x height`, initialized with zeros (`Uint8Array(4 * width * height)`) [S3, unofficial]. Filters: `LINEAR` for `MIN`/`MAG`, `CLAMP_TO_EDGE` for `S`/`T` [S3, unofficial].
+-2.  **Volume Data Texture (`uVolData`):** 3D texture containing scalar field data [S3, unofficial]. Requires floating-point support (e.g., `OES_texture_float` in WebGL) [S3, unofficial].
+-3.  **Back-Face Texture (`uBackCoord`):** 2D texture storing the 3D entry points derived from the back-face render [S2, S3, unofficial].
+-
+-**Parameters:**
+-*   `StepSize`: Controls the step length in ray marching. Used in direction scaling and alpha modulation [S2, unofficial].
+-*   `ScreenSize`: Resolution of the screen (`width`, `height`), used to normalize fragment coordinates for texture lookup [S2, unofficial].
+-*   `uBackCoord`: Sampler uniform for the back-face depth/coordinate texture [S3, unofficial].
+-*   `uVolData`: Sampler uniform for the volume data texture [S3, unofficial].
++1.  **Bounding Box Geometry:** A cube defined by 8 vertices and 12 triangles (36 vertices if unindexed). Each vertex has:
++    *   `VerPos` (vec3): Position in object space.
++    *   `VerClr` (vec3): Color, used to pass the 3D position of the vertex to the fragment shader [S2, unofficial].
++2.  **Back-Face Texture (`g_bfTexObj` / `texBackFaces`):** A 2D texture (RGBA, UNSIGNED_BYTE or FLOAT depending on extension support) storing the 3D entry point coordinates for each pixel [S2, S4, unofficial].
++    *   Dimensions: Width x Height (screen resolution) [S4, unofficial].
++    *   Initialization: Zeros [S4, unofficial].
++    *   Filters: LINEAR for MIN/MAG, CLAMP_TO_EDGE for S/T [S4, unofficial].
++3.  **Volume Texture (`g_volTexObj` / `uVolData`):** A 3D texture (sampler3D) storing density values [S2, S3, S4, unofficial]. Requires `OES_texture_float` extension in WebGL for floating-point data [S4, unofficial].
++4.  **Transfer Function Texture (`trfunc_texture`):** A 2D texture (sampler2D) mapping density to color [S3, unofficial].
++5.  **Frame Buffer:** A framebuffer object containing:
++    *   Depth Buffer: Renderbuffer of type `DEPTH_COMPONENT16` [S4, unofficial].
++    *   Color Texture: 2D texture attached as color attachment [S4, unofficial].
+ 
+ **Numbered Steps:**
+ 
+-1.  **Initialization:**
+-    *   Create the frame buffer, depth renderbuffer, and color texture as described above [S3, unofficial].
+-    *   Load volume data into `uVolData` [S3, unofficial].
+-    *   Ensure the vertex winding order is Counterclockwise (CCW) so that front faces have outward normals and back faces have inward normals, allowing standard back-face culling logic to identify back faces when front faces are culled [S1, unofficial].
++1.  **Pass 1: Back-Face Depth Capture**
++    1.  Bind the auxiliary framebuffer.
++    2.  Enable depth testing.
++    3.  Set depth function to `GEQUAL` [S4, unofficial].
++    4.  Enable front-face culling (cull front faces, render back faces) [S1, S3, unofficial]. Note: Assumes counter-clockwise (CCW) winding order where normals point out; back faces have negative dot product with view direction [S1, unofficial].
++    5.  Use the "back" shader program.
++    6.  Draw the bounding box cube.
++        *   **Vertex Shader:** Transforms `VerPos` to clip space (`gl_Position`). Passes `VerClr` (vertex position) as `EntryPoint` to the fragment shader [S2, unofficial].
++        *   **Fragment Shader:** Outputs `VerClr` (the 3D entry point) as `FragColor` [S2, unofficial].
++    7.  Store the resulting color buffer into `g_bfTexObj` [S2, unofficial].
+ 
+-2.  **Pass 1: Back-Face Depth/Coordinate Capture:**
+-    *   Bind the custom frame buffer [S3, unofficial].
+-    *   Set the depth function to `GEQUAL` [S3, unofficial]. This ensures that for a given pixel, the depth value written corresponds to the farthest (back-most) surface hit along the view ray, which represents the entry point into the volume from the camera's perspective (assuming the camera is outside) [S3, unofficial].
+-    *   Enable front-face culling (or disable back-face culling and explicitly cull front faces) to render only the back-facing polygons of the bounding box [S1, S2, unofficial].
+-    *   Execute the **Back-Face Vertex Shader**:
+-        *   Input: `VerPos` (vec3, object space), `VerClr` (vec3, object space coordinates).
+-        *   Output: `EntryPoint` (vec3, passed as `VerClr`), `ExitPointCoord` (vec4, `gl_Position`) [S2, unofficial].
+-        *   Transformation: `gl_Position = uPMatrix * uMVMatrix * vec4(VerPos, 1.0)` [S3, unofficial].
+-    *   Execute the **Back-Face Fragment Shader**:
+-        *   Input: `EntryPoint` (interpolated from `VerClr`) [S2, unofficial].
+-        *   Output: `FragColor` = `vec4(EntryPoint, 1.0)` [S2, unofficial].
+-    *   The result is a 2D texture where each pixel contains the 3D object-space coordinates of the back-face intersection (entry point) [S2, unofficial].
+-
+-3.  **Pass 2: Raycasting:**
+-    *   Bind the default framebuffer (screen) [S3, unofficial].
+-    *   Set the depth function to `LEQUAL` [S3, unofficial].
+-    *   Bind `uBackCoord` (the texture from Pass 1) to texture unit 0 [S3, unofficial].
+-    *   Bind `uVolData` to texture unit 1 [S3, unofficial].
+-    *   Execute the **Raycast Vertex Shader**:
+-        *   Input: `VerPos` (vec3), `VerClr` (vec3, object space coordinates).
+-        *   Output: `EntryPoint` (vec3, interpolated from `VerClr`), `ExitPointCoord` (vec4, `gl_Position`) [S2, unofficial].
+-        *   Transformation: `gl_Position = uPMatrix * uMVMatrix * vec4(VerPos, 1.0)` [S3, unofficial].
+-    *   Execute the **Raycast Fragment Shader**:
+-        *   Input: `EntryPoint` (interpolated front-face vertex color/position), `ExitPointCoord` (interpolated clip-space position) [S2, unofficial].
+-        *   **Retrieve Exit Point:** Sample the back-face texture using screen coordinates normalized by `ScreenSize`:
+-            $$ \text{exitPoint} = \text{texture}(uBackCoord, \frac{\text{gl\_FragCoord.st}}{\text{ScreenSize}}).xyz $$
+-            *   *Pitfall:* `ExitPointCoord` is in clip-space. Do not perform perspective division manually. Use `gl_FragCoord` directly as it corresponds to the rasterized position [S2, unofficial].
+-        *   **Check Validity:** If `EntryPoint == exitPoint` (or if the back-face texture lookup returns invalid/no-hit data), discard the fragment and render the background color (e.g., white with alpha 0) [S2, unofficial].
+-        *   **Compute Ray Direction:**
+-            $$ \text{dir} = \text{exitPoint} - \text{EntryPoint} $$
+-            $$ \text{len} = \|\text{dir}\| $$
+-            $$ \text{deltaDir} = \text{normalize}(\text{dir}) \times \text{StepSize} $$
+-        *   **Ray Marching Loop:**
+-            Initialize `voxelCoord = EntryPoint`, `colorAcum = vec4(0.0)`, `alphaAcum = 0.0`, `lengthAcum = 0.0` [S2, unofficial].
+-            For `i` from 0 to `MaxIterations` (e.g., 1600):
+-            1.  Sample volume: `intensity = texture(uVolData, voxelCoord).x` [S2, unofficial].
+-            2.  Apply transfer function to get `colorSample` and `alphaSample` [S2, unofficial].
+-            3.  Composite:
+-                $$ \text{colorAcum} += \text{colorSample} \times (1.0 - \text{alphaAcum}) $$
+-                $$ \text{alphaAcum} += \text{alphaSample} \times (1.0 - \text{alphaAcum}) $$
+-            4.  Update position: `voxelCoord += deltaDir` [S2, unofficial].
+-            5.  Update length: `lengthAcum += length(deltaDir)` [S2, unofficial].
+-            6.  **Termination Conditions:**
+-                *   If `lengthAcum >= len`, break [S2, unofficial].
+-                *   If `alphaAcum >= 1.0`, clamp `alphaAcum` to 1.0 and break [S2, unofficial].
+-        *   Output `FragColor = colorAcum` [S2, unofficial].
++2.  **Pass 2: Raycasting**
++    1.  Bind the default framebuffer.
++    2.  Enable depth testing.
++    3.  Set depth function to `LEQUAL` [S4, unofficial].
++    4.  Enable back-face culling (cull back faces, render front faces) [S3, unofficial].
++    5.  Bind `g_bfTexObj` to texture unit 0 (`uBackCoord`) [S4, unofficial].
++    6.  Bind `uVolData` (volume texture) to texture unit 1 [S4, unofficial].
++    7.  Use the "raycast" shader program.
++    8.  Draw the bounding box cube again.
++        *   **Vertex Shader:** Transforms `VerPos` to clip space. Passes `VerClr` as `EntryPoint` (front face position) [S2, unofficial].
++        *   **Fragment Shader:**
++            1.  Sample `uBackCoord` using screen coordinates (`gl_FragCoord.st / ScreenSize`) to retrieve the 3D exit point (`exitPoint`) [S2, unofficial].
++                *   *Pitfall:* `gl_FragCoord` provides window-space coordinates. The texture was written with clip-space positions transformed by the rasterizer. Direct sampling using `gl_FragCoord` avoids manual perspective division errors [S2, unofficial].
++            2.  If `EntryPoint` equals `exitPoint` (no back-face hit, e.g., background), discard the fragment [S2, unofficial].
++            3.  Calculate ray direction: `dir = exitPoint - EntryPoint` [S3, unofficial].
++            4.  Calculate ray length: `len = length(dir)` [S3, unofficial].
++            5.  Calculate step vector: `deltaDir = normalize(dir) * StepSize` [S3, unofficial].
++            6.  Initialize accumulators: `col_acc = vec4(0,0,0,0)`, `alpha_acc = 0.0`, `length_acc = 0.0`, `ray_pos = EntryPoint` [S3, unofficial].
++            7.  Loop for `NUM_RAY_STEPS` (e.g., 512) iterations:
++                1.  Sample density: `density = texture(uVolData, ray_pos).x` [S3, unofficial].
++                2.  Map to color: `color_sample = texture(trfunc_texture, vec2(density, 0.5))` [S3, unofficial].
++                3.  Calculate sample alpha: `alpha_sample = density * StepSize` [S3, unofficial].
++                4.  Front-to-back blending: `col_acc += (1.0 - alpha_acc) * color_sample * alpha_sample * 40.0` [S3, unofficial].
++                5.  Update alpha: `alpha_acc += alpha_sample` [S3, unofficial].
++                6.  Update length: `length_acc += length(deltaDir)` [S3, unofficial].
++                7.  Advance ray: `ray_pos += deltaDir` [S3, unofficial].
++                8.  Termination Conditions:
++                    *   If `length_acc >= len`, composite background (white, alpha 0) and break [S2, unofficial].
++                    *   If `alpha_acc > 1.0`, clamp to 1.0 and break [S2, unofficial].
++            8.  Output `col_acc` as fragment color [S3, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def pass1_backface_capture(cube, mv_matrix, p_matrix, frame_buffer):
+-    # Bind frame buffer and clear
+-    bind_framebuffer(frame_buffer)
+-    clear_color(0.0, 0.0, 0.0, 0.0)
+-    clear(COLOR_BUFFER_BIT | DEPTH_BUFFER_BIT)
++# Pass 1: Back-Face Capture
++def pass1_backface_capture(framebuffer, cube, back_shader, view_proj_matrix):
++    bind_framebuffer(framebuffer)
++    enable_depth_test()
++    set_depth_func(GEQUAL)
++    enable_cull_face(FRONT) # Cull front faces, render back faces
+     
+-    enable(DEPTH_TEST)
+-    set_depth_function(GEQUAL)  # Capture farthest (back) face
++    use_shader(back_shader)
++    set_uniform("uMVMatrix", view_matrix)
++    set_uniform("uPMatrix", proj_matrix)
+     
+-    use_program(back_face_shader)
+-    set_uniform("uMVMatrix", mv_matrix)
+-    set_uniform("uPMatrix", p_matrix)
++    draw_cube(cube)
+     
+-    # Cull front faces to render only back faces
+-    set_cull_face(FRONT)
+-    enable(CULL_FACE)
++    # The back_shader vertex shader outputs gl_Position and passes VerClr (position)
++    # The fragment shader outputs VerClr as color
++    # Result is stored in framebuffer.texture (g_bfTexObj)
++
++# Pass 2: Raycasting
++def pass2_raycasting(default_framebuffer, cube, raycast_shader, back_texture, volume_texture, transfer_func, step_size, num_steps):
++    bind_framebuffer(default_framebuffer)
++    enable_depth_test()
++    set_depth_func(LEQUAL)
++    enable_cull_face(BACK) # Cull back faces, render front faces
+     
+-    render_triangle_strip(cube.indices, cube.vertices)
++    use_shader(raycast_shader)
++    set_uniform("uMVMatrix", view_matrix)
++    set_uniform("uPMatrix", proj_matrix)
++    set_uniform("StepSize", step_size)
++    set_uniform("NUM_RAY_STEPS", num_steps)
+     
+-    disable(CULL_FACE)
+-    bind_framebuffer(None)
+-
+-def pass2_ray_casting(cube, mv_matrix, p_matrix, back_face_texture, volume_texture, step_size, screen_size):
+-    # Bind screen buffer and clear
+-    bind_framebuffer(screen_buffer)
+-    clear_color(1.0, 1.0, 1.0, 0.0)  # White background
+-    clear(COLOR_BUFFER_BIT | DEPTH_BUFFER_BIT)
++    bind_texture_unit(0, back_texture) # uBackCoord
++    bind_texture_unit(1, volume_texture) # uVolData
++    bind_texture_unit(2, transfer_func) # trfunc_texture
+     
+-    enable(DEPTH_TEST)
+-    set_depth_function(LEQUAL)
++    draw_cube(cube)
+     
+-    use_program(raycast_shader)
+-    set_uniform("uMVMatrix", mv_matrix)
+-    set_uniform("uPMatrix", p_matrix)
+-    set_uniform("StepSize", step_size)
+-    set_uniform("ScreenSize", screen_size)
+-    
+-    # Bind textures
+-    bind_texture_unit(0, back_face_texture)
+-    bind_texture_unit(1, volume_texture)
+-    
+-    # Render front faces (default cull back faces)
+-    set_cull_face(BACK)
+-    enable(CULL_FACE)
+-    
+-    render_triangle_strip(cube.indices, cube.vertices)
+-    
+-    disable(CULL_FACE)
+-
+-def raycast_fragment_shader(entry_point, exit_point_coord, back_face_texture, volume_texture, step_size, screen_size):
+-    # Retrieve exit point from back-face texture
+-    # Note: gl_FragCoord is in window coordinates, normalize by ScreenSize
+-    exit_point = texture(back_face_texture, gl_FragCoord.st / screen_size).xyz
+-    
+-    # If entry and exit are the same, the ray missed the volume or hit an edge
+-    if entry_point == exit_point:
+-        discard
+-    
+-    dir = exit_point - entry_point
+-    length_total = length(dir)
+-    delta_dir = normalize(dir) * step_size
+-    
+-    voxel_coord = entry_point
+-    color_acum = vec4(0.0)
+-    alpha_acum = 0.0
+-    length_acum = 0.0
+-    
+-    # Max iterations to prevent infinite loops
+-    max_iterations = 1600
+-    
+-    for i in range(max_iterations):
+-        intensity = texture(volume_texture, voxel_coord).x
+-        
+-        # Apply transfer function (simplified)
+-        color_sample = vec4(intensity, intensity, intensity, intensity)
+-        alpha_sample = intensity
+-        
+-        # Alpha blending
+-        color_acum += color_sample * (1.0 - alpha_acum)
+-        alpha_acum += alpha_sample * (1.0 - alpha_acum)
+-        
+-        voxel_coord += delta_dir
+-        length_acum += length(delta_dir)
+-        
+-        # Termination conditions
+-        if length_acum >= length_total:
+-            break
+-        if alpha_acum >= 1.0:
+-            alpha_acum = 1.0
+-            break
+-    
+-    return color_acum
++    # Fragment Shader Logic (executed per pixel):
++    # 1. Get screen coords: uv = gl_FragCoord.xy / ScreenSize
++    # 2. Get exit point: exit_point = texture(uBackCoord, uv).xyz
++    # 3. Get entry point: entry_point = EntryPoint (interpolated from vertex shader)
++    # 4. If entry_point == exit_point: discard
++    # 5. dir = exit_point - entry_point
++    # 6. len = length(dir)
++    # 7. delta_dir = normalize(dir) * StepSize
++    # 8. col_acc = vec4(0,0,0,0), alpha_acc = 0.0, length_acc = 0.0, ray_pos = entry_point
++    # 9. for i in 0..NUM_RAY_STEPS:
++    #      density = texture(uVolData, ray_pos).x
++    #      color_sample = texture(trfunc_texture, vec2(density, 0.5))
++    #      alpha_sample = density * StepSize
++    #      col_acc += (1.0 - alpha_acc) * color_sample * alpha_sample * 40.0
++    #      alpha_acc += alpha_sample
++    #      length_acc += length(delta_dir)
++    #      ray_pos += delta_dir
++    #      if length_acc >= len or alpha_acc > 1.0: break
++    # 10. Output col_acc
+ ```
+ 
+-**Vertex Shader (Back-Face Pass):**
+-```glsl
+-#version 400
+-layout(location = 0) in vec3 VerPos;
+-layout(location = 1) in vec3 VerClr; // Object space coordinates
++**Parameters:**
++*   `StepSize`: Controls the step length in ray marching. Typical values depend on volume resolution and view distance [S2, S3, unofficial].
++*   `NUM_RAY_STEPS`: Maximum iterations per ray. Source [S3, unofficial] uses 512. Source [S2, unofficial] uses 1600.
++*   `ScreenSize`: Resolution of the screen (width, height) [S2, unofficial].
++*   `uBackCoord`: Sampler uniform for back-face texture [S4, unofficial].
++*   `uVolData`: Sampler uniform for volume data [S4, unofficial].
+ 
+-uniform mat4 uMVMatrix;
+-uniform mat4 uPMatrix;
+-
+-out vec3 EntryPoint;
+-out vec4 ExitPointCoord;
+-
+-void main() {
+-    EntryPoint = VerClr; // Pass object space position as color
+-    ExitPointCoord = uPMatrix * uMVMatrix * vec4(VerPos, 1.0);
+-    gl_Position = ExitPointCoord;
+-}
+-```
+-
+-**Fragment Shader (Back-Face Pass):**
+-```glsl
+-#version 400
+-in vec3 EntryPoint;
+-out vec4 FragColor;
+-
+-void main() {
+-    FragColor = vec4(EntryPoint, 1.0);
+-}
+-```
+-
+-**Vertex Shader (Raycast Pass):**
+-```glsl
+-#version 400
+-layout(location = 0) in vec3 VerPos;
+-layout(location = 1) in vec3 VerClr; // Object space coordinates
+-
+-uniform mat4 uMVMatrix;
+-uniform mat4 uPMatrix;
+-
+-out vec3 EntryPoint;
+-out vec4 ExitPointCoord;
+-
+-void main() {
+-    EntryPoint = VerClr;
+-    ExitPointCoord = uPMatrix * uMVMatrix * vec4(VerPos, 1.0);
+-    gl_Position = ExitPointCoord;
+-}
+-```
+-
+-**Fragment Shader (Raycast Pass):**
+-```glsl
+-#version 400
+-in vec3 EntryPoint;
+-in vec4 ExitPointCoord;
+-
+-uniform sampler2D uBackCoord;
+-uniform sampler3D uVolData;
+-uniform vec2 ScreenSize;
+-uniform float StepSize;
+-
+-out vec4 FragColor;
+-
+-void main() {
+-    // Retrieve exit point from back-face texture
+-    // Note: gl_FragCoord is in window coordinates, normalize by ScreenSize
+-    vec3 exitPoint = texture(uBackCoord, gl_FragCoord.xy / ScreenSize).xyz;
+-    
+-    // If entry and exit are the same, the ray missed the volume or hit an edge
+-    if (EntryPoint == exitPoint) {
+-        discard;
+-    }
+-    
+-    vec3 dir = exitPoint - EntryPoint;
+-    float len = length(dir);
+-    vec3 deltaDir = normalize(dir) * StepSize;
+-    
+-    vec3 voxelCoord = EntryPoint;
+-    vec4 colorAcum = vec4(0.0);
+-    float alphaAcum = 0.0;
+-    float lengthAcum = 0.0;
+-    
+-    // Max iterations to prevent infinite loops
+-    const int MaxIterations = 1600;
+-    
+-    for (int i = 0; i < MaxIterations; i++) {
+-        float intensity = texture(uVolData, voxelCoord).x;
+-        
+-        // Apply transfer function (simplified)
+-        vec4 colorSample = vec4(intensity, intensity, intensity, intensity);
+-        float alphaSample = intensity;
+-        
+-        // Alpha blending
+-        colorAcum += colorSample * (1.0 - alphaAcum);
+-        alphaAcum += alphaSample * (1.0 - alphaAcum);
+-        
+-        voxelCoord += deltaDir;
+-        lengthAcum += length(deltaDir);
+-        
+-        // Termination conditions
+-        if (lengthAcum >= len) break;
+-        if (alphaAcum >= 1.0) {
+-            alphaAcum = 1.0;
+-            break;
+-        }
+-    }
+-    
+-    FragColor = colorAcum;
+-}
+-```
+-
+-**Pitfalls and Edge Cases:**
+-*   *Coordinate System Mismatch:* `ExitPointCoord` is in clip-space. Do not perform perspective division manually. Use `gl_FragCoord` directly as it corresponds to the rasterized position [S2, unofficial].
+-*   *AMD Debugging Issue:* The `VerClr` input variable must be used in the vertex shader, or it causes debugging difficulties on AMD video cards [S2, unofficial].
+-*   *Floating-Point Texture Support:* The volume data texture requires the `OES_texture_float` extension to support floating-point textures in WebGL. If this extension is not available, the initialization fails [S3, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Coordinate System Mismatch:** `ExitPointCoord` in the vertex shader is in clip-space. Sampling the texture using `gl_FragCoord` (window coordinates) works because the rasterizer maps clip-space to window-space, and the texture was written during rasterization. Manual perspective division is not required and can cause errors [S2, unofficial].
++*   **AMD Debugging Issue:** The `VerClr` input variable must be used in the shader; otherwise, debugging may fail on AMD hardware [S2, unofficial].
++*   **Floating-Point Textures:** WebGL implementations require the `OES_texture_float` extension to support floating-point textures for volume data. Without it, initialization fails [S4, unofficial].
++*   **Winding Order:** The method assumes counter-clockwise (CCW) winding order for front faces. If the winding is clockwise, back-face culling logic must be inverted [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Volume Raycasting with MRT Endpoints](1584-volume-raycasting-with-mrt-endpoints.md)
+-A technique to obtain ray start and stop positions for volume raycasting by rendering a cube into two floating-point RGB surfaces using a fragment shader that writes object-space coordinates. Front faces go into one attachment, back faces into the other [1584-volume-raycasting-with-mrt-endpoints.md]. This variant uses Multiple Render Targets (MRT) to capture both entry and exit points simultaneously in a single pass, whereas the standard back-face culling method uses two passes (or a depth buffer trick) to derive one point from the back-face and the other from the front-face interpolation. Choose this when single-pass initialization is required and MRT support is available.
+-
+-### Raycasting Phase
+-A minor variant where Pass 2 binds two auxiliary buffers to distinct texture units and projects a viewport-filling quadrilateral. For each pixel, the main fragment shader fetches back-facing texture coordinates; if invalid, the fragment is discarded. Otherwise, it retrieves front-facing coordinates to compute the step vector along the ray according to a predefined step length `d` and the total number of iterations [S4]. The raycasting phase then proceeds with each slab of thickness `2*d` defined by three successive samples (sf, sm, sb), with the next slab indexed by (sf, sm, sb) [S4].
++Volume Raycasting with MRT Endpoints is a two-pass GPU technique that determines ray entry and exit points by rendering the volume's bounding box to multiple render targets (MRT), explicitly separating front-face and back-face coordinates into distinct textures to avoid analytical ray-cube intersection calculations. It builds on [Back-Face Culling for Ray Casting](1236-back-face-culling-for-ray-casting.md) by using MRT to store both entry and exit points simultaneously in the first pass, rather than relying on depth buffering and a single pass for back-faces. Unlike single-pass methods that compute intersections in the fragment shader, this approach offloads geometry processing to the rasterizer, simplifying the raycasting shader at the cost of an additional rendering pass and texture lookups. It is chosen when precise entry/exit determination is critical and the GPU supports MRT, avoiding the potential precision issues of depth-buffer-based entry point retrieval.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources. [G]
+-*   **Memory Complexity:** Not given in the sources. [G]
+-*   **Measured Performance:** Not given in the sources. [G]
+-*   **Strengths:**
+-    *   Avoids analytical ray-cube intersection calculations in the fragment shader [S1, unofficial].
+-    *   Naturally handles perspective projection without manual division [S2, unofficial].
+-    *   Simple to implement using standard OpenGL/Direct3D pipelines [S3, unofficial].
+-*   **Limitations:**
+-    *   Requires two passes, doubling the draw call overhead for bounding box rendering [S2, unofficial].
+-    *   Coordinate system mismatches (clip-space vs NDC) can lead to incorrect exit point retrieval if not handled carefully [S2, unofficial].
+-    *   Requires floating-point texture support for volume data in some environments (e.g., WebGL) [S3, unofficial].
+-*   **When to use:** Not given in the sources. [G]
+-*   **When not to use:** Not given in the sources. [G]
++*   **Time Complexity:** O(N) where N is the number of pixels, plus O(M) where M is the number of ray steps per pixel. The two-pass overhead is constant relative to scene complexity.
++*   **Memory Complexity:** O(W*H) for the back-face texture, where W and H are screen dimensions. O(V) for volume data.
++*   **Measured Performance:** Performance depends heavily on `StepSize` and `NUM_RAY_STEPS`. Source [S3, unofficial] uses 512 steps, Source [S2, unofficial] uses 1600. Higher steps increase accuracy but reduce frame rate.
++*   **Scaling:** Scales well with screen resolution due to rasterizer efficiency. Does not scale with volume density complexity, only with ray length and step count.
++*   **Strengths:** Avoids expensive analytical ray-cube intersection tests in the fragment shader. Simple to implement on GPUs with standard rasterization capabilities.
++*   **Limitations:** Requires two rendering passes. Precision of entry/exit points depends on rasterization precision and texture filtering. Not suitable for non-convex volumes without a bounding box approximation.
++*   **When to use:** When rendering convex volumes with a bounding box and the GPU supports efficient framebuffer objects and texture sampling.
++*   **When not to use:** For non-convex volumes where the bounding box is a poor approximation, or when memory bandwidth is a bottleneck due to large screen resolutions and multiple texture lookups.
+ 
+ ## Background
+-The method originated as an optimization in GPU-based volume rendering to replace CPU-side or complex shader-side ray-cube intersection calculations with hardware-accelerated rasterization and depth testing [S1, unofficial]. It leverages the fact that rendering the back faces of a bounding box to a depth buffer (with `GEQUAL` depth function) effectively records the entry depth of rays into the volume [S1, unofficial]. The technique is documented in various unofficial repositories and tutorials focusing on WebGL and GLSL volume rendering [S1, S2, S3, unofficial]. It is a variant of hierarchical traversal methods that use coarse meshes, specifically simplifying the entry/exit determination for a cubic bounding box [G].
++Back-face culling for ray casting originated as a technique to optimize volume rendering by leveraging the GPU's rasterization pipeline to determine ray entry and exit points. It was popularized in early WebGL and OpenGL tutorials for volume rendering, such as those by Khizar Siddiqui [S1, unofficial], toolchainX [S2, unofficial], and others [S3, S4, unofficial]. The method is a practical application of depth buffering and face culling to avoid analytical geometry calculations in shaders. It is commonly used in educational contexts and simple real-time volume renderers where simplicity and GPU compatibility are prioritized over advanced traversal algorithms.
+ 
+ ## Sources
+ [S1] khizarsiddiqui/Volume-Rendering, https://github.com/khizarsiddiqui/Volume-Rendering, fetched 2026-10-26 (unofficial)
+ [S2] Volume_Rendering_Using_GLSL, https://github.com/toolchainX/Volume_Rendering_Using_GLSL, fetched 2026-10-26 (unofficial)
+-[S3] kapadia/volumetric.js, https://github.com/kapadia/volumetric.js, fetched 2026-10-27 (unofficial)
+-[S4] Second Order Pre-Integrated Volume Rendering, https://people.freedesktop.org/~marcheu/pacificvis08.pdf, fetched 2026-10-29+[S3] 1vx-437312114/webgl_volume_renderer, https://github.com/1vx-437312114/webgl_volume_renderer, fetched 2026-10-27 (unofficial)
++[S4] kapadia/volumetric.js, https://github.com/kapadia/volumetric.js, fetched 2026-10-27 (unofficial)
++[S5] Second Order Pre-Integrated Volume Rendering, https://people.freedesktop.org/~marcheu/pacificvis08.pdf, fetched 2026-10-29

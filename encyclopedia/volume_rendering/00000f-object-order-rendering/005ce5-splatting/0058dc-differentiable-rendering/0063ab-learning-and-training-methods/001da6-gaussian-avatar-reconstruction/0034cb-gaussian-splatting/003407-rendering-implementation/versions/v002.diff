@@ -1,0 +1,60 @@
+--- v001.md
++++ v002.md
+@@ -1,40 +1,36 @@
+ # Rendering Implementation
+ 
+-Also called: Gaussian Splatting Rasterization Pipeline, 3DGS Rendering
++Also called: 3DGS Rasterization Pipeline, Gaussian Splatting Forward Pass
+ 
+ ## Overview
+-Rendering Implementation defines the computational pipeline that transforms a learned scene representation of $M$ 3D Gaussians into a 2D image. It solves the problem of efficiently evaluating the volume rendering equation by projecting 3D Gaussians to 2D screen-space ellipses and compositing them via alpha blending [S2, S3, unofficial]. It differs from its siblings by providing the core differentiable kernel that bridges the 3D scene representation and the 2D image plane, whereas methods like [Optimal Gaussian Splatting](3293-optimal-gaussian-splatting.md) focus on training efficiency and [Hybrid Transparency](3294-hybrid-transparency.md) on specific blending artifacts [S2, unofficial].
++Rendering Implementation defines the complete forward pass for 3D Gaussian Splatting (3DGS), transforming a set of 3D Gaussian primitives into a 2D image via projection, sorting, and alpha compositing [S2, S3, unofficial]. It solves the problem of real-time, photorealistic rendering of learned radiance fields by providing a differentiable forward and backward pass that allows gradients to flow back to Gaussian parameters and camera matrices [S4, S5, unofficial]. Unlike [3D Gaussian Splatting MVP](3410-3d-gaussian-splatting-mvp.md) which skips tile-based rasterization for education, or [3D Gaussian Splatting Rasterization](2812-3d-gaussian-splatting-rasterization.md) which focuses on low-level kernel details, this article describes the standard pipeline including data loading, projection, sorting, and compositing [S5, unofficial]. It differs from [Analytic-Splatting](8084-analytic-splatting.md) by using point-sampling rather than analytical integration, and from [3D Gaussian Ray Tracing](8101-3d-gaussian-ray-tracing.md) by relying on rasterization [S2, S4].
+ 
+ ## Shared principles
+-All rendering implementations in this family share the following mathematical and procedural core:
+-
+-1.  **3D to 2D Covariance Projection**: The 3D covariance $\Sigma_{3D}$ is transformed to camera space $\Sigma'$ and then projected to 2D screen space $\Sigma_{2D}$ using a local affine approximation of the projective transformation. The Jacobian $J$ of the projection function $\phi(\mathbf{x}') = \mathbf{x}' (\mathbf{x}_0^\top \mathbf{x}')^{-1}$ is evaluated at the camera-space mean $\mu'$ [S2]. The 2D covariance is computed as:
+-    $$ \Sigma_{2D} = J \Sigma' J^T $$
+-    The matrix $J$ has rank 2. The inverse of $\Sigma_{2D}$ is effectively the inverse of the $2 \times 2$ covariance matrix obtained by skipping the third row and column of the full projected covariance [S2].
+-
+-2.  **Conic Representation**: To avoid repeated matrix inversions during rasterization, the inverse 2D covariance $\Sigma_{2D}^{-1}$ is precomputed and stored as a "conic" vector containing the upper triangle elements: $[\Sigma_{2D}^{-1}[0,0], \Sigma_{2D}^{-1}[0,1], \Sigma_{2D}^{-1}[1,1]]$ [S1, unofficial].
+-
+-3.  **Bounding Box Calculation**: The spatial extent of each Gaussian is determined by the 3-sigma rule. The bounding box size in pixels is derived from the diagonal elements of $\Sigma_{2D}$:
+-    $$ \text{bboxsize\_cam} = [3.0 \sqrt{\Sigma_{2D}[0,0]}, 3.0 \sqrt{\Sigma_{2D}[1,1]}] $$
+-    This is converted to screen coordinates to define the rasterization region [S1, unofficial].
+-
+-4.  **Alpha Blending**: Pixels within the bounding box evaluate the 2D Gaussian value $G_{2D}$ and composite it using front-to-back alpha blending. The weight for the $i$-th Gaussian is $w_i = \alpha_i T_i$, where $\alpha_i$ is the Gaussian's opacity modulated by $G_{2D}$ and $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ is the transmittance [S2, unofficial].
++All rendering implementations in this family share the following mechanism:
++1.  **Primitive Representation**: Scenes are represented as $N$ 3D Gaussians defined by mean position $\mu$, covariance $\Sigma$ (derived from scale $S$ and rotation $R$), opacity $\alpha$, and spherical harmonics (SH) coefficients for color [S2, S3, S5, unofficial].
++2.  **Covariance Construction**: The 3D covariance is constructed as $\Sigma_{3D} = R S S^T R^T$ [S2, unofficial].
++3.  **Projection**: Gaussians are transformed to camera space and projected to 2D screen space using the local affine approximation of the projective transformation. The 2D covariance is computed as $\Sigma_{2D} = J \Sigma' J^T$, where $J$ is the Jacobian of the projection function [S2, S3, unofficial].
++4.  **Conic Representation**: The inverse 2D covariance $\Sigma_{2D}^{-1}$ is stored as a conic vector $C = [\Sigma_{2D}^{-1}[0,0], \Sigma_{2D}^{-1}[0,1], \Sigma_{2D}^{-1}[1,1]]$ for efficient evaluation [S2, S3, unofficial].
++5.  **Sorting**: Gaussians are sorted by camera-space depth to ensure correct alpha compositing order [S2, S3, S4, unofficial].
++6.  **Compositing**: Colors are accumulated using alpha compositing: $C_{pixel} = \sum w_i C_i + (1 - \sum w_i) C_{bg}$, where $w_i = \alpha_i T_i$ and $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ [S2, S3, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [3D Gaussian Splatting Rendering (CPU-Sorted, Instanced)](2058-3d-gaussian-splatting-rendering-cpu-sorted-instanced.md)
+-Renders by sorting splats by camera-space depth on the CPU and using hardware instancing with standard alpha blending. Choose this for simpler implementation on standard graphics APIs (OpenGL/WebGL) without custom CUDA kernels. It is less efficient for large scenes than tile-based GPU approaches.
++A display-only pipeline that projects Gaussians to 2D quads, sorts them on the CPU, and renders using hardware instancing. It solves the problem of correct transparency compositing in constrained environments (e.g., WebGL) without GPU compute shaders, trading performance for compatibility.
+ 
+ ### [3D Gaussian Splatting Rendering (Software)](2805-3d-gaussian-splatting-rendering-software.md)
+-A foundational software reference that projects Gaussians using a local affine approximation and rasterizes ellipses directly. Choose this for debugging, educational purposes, or environments lacking GPU acceleration. It lacks the optimizations of production renderers like spherical harmonics evaluation or adaptive density control.
++A complete software-based rasterization method including data loading, projection, sorting, and compositing. It solves the problem of efficient radiance field rendering by projecting Gaussians and rasterizing via tile-based alpha compositing, differing from MVP by including the full pipeline.
+ 
+ ### [3D Gaussian Splatting Rasterization](2812-3d-gaussian-splatting-rasterization.md)
+-Provides the core differentiable kernel for real-time, photorealistic rendering using tile-based rasterization. Choose this for production-grade training and inference where performance and differentiability are critical. It bridges the 3D representation to the 2D image plane efficiently.
++Provides the core differentiable forward and backward passes, often implemented as CUDA or MLX kernels. It differs from siblings by focusing on the low-level kernel implementation for performance and gradient flow.
+ 
+ ## Background
+-The rendering pipeline for 3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S2]. It was developed to overcome the computational cost of evaluating the volume rendering equation via quadrature, which requires querying points outside Gaussian supports. The method uses volume splatting for efficient rasterization, analogous to triangle rasterization but using Gaussians [S3, unofficial]. It is widely used in real-time novel view synthesis and 3D scene reconstruction [S2].
++The rendering implementation is based on the 3D Gaussian Splatting method introduced by Kerbl et al. in 2023 [S2, S3, unofficial]. It enables real-time novel view synthesis by replacing expensive volume rendering quadrature with efficient splatting [S2, S3, unofficial]. The method is widely used in real-time graphics engines and web-based viewers due to its speed and visual quality [S4, S5, unofficial].
+ 
+ ## Sources
+-[S1] 3D Gaussian Splatting Rasterization Implementation Details, https://github.com/ashawkey/3d-gaussian-splatting, 2023
+-[S2] "3D Gaussian Splatting for Real-Time Radiance Field Rendering", Kerbl et al., ACM TOG, 2023
+-[S3] Official 3D Gaussian Splatting GitHub Repository, https://github.com/graphdeco-inria/gaussian-splatting, 2023+[S1] 3D Gaussian Splatting Rendering (CPU-Sorted, Instanced)
++[S2] 3D Gaussian Splatting Rasterization
++[S3] 3D Gaussian Splatting Rendering (Software)
++[S4] 3D Gaussian Splatting Rendering (Software)
++[S5] 3D Gaussian Splatting Rendering (CPU-Sorted, Instanced)

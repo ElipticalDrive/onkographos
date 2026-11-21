@@ -1,0 +1,198 @@
+--- v001.md
++++ v002.md
+@@ -4,115 +4,119 @@
+ 
+ ## Overview
+-Face Coverage Mask Culling solves the visibility problem for partial voxel shapes (such as stairs, slabs, or slopes) where a simple boolean "solid/empty" flag is insufficient because a single face may contain both visible geometry and empty space [S1, unofficial]. It represents face coverage as a bit mask, allowing the mesher to determine if a neighbor completely occludes the visible portions of a current block's face, thereby removing hidden geometry that a binary approach would either incorrectly keep or incorrectly remove [S1, unofficial]. It distinguishes itself from siblings like [Voxel Block Placement with Face Culling](923-voxel-block-placement-with-face-culling.md) by operating on fine-grained coverage bits rather than coarse block-level flags, and from [Block Visibility Culling](5334-block-visibility-culling.md) by optimizing individual face geometry rather than entire blocks.
++Face Coverage Mask Culling is a method for removing hidden faces of partial voxel shapes (such as stairs, slabs, or custom geometry) by representing face coverage as a bit mask rather than a single boolean solid flag [S1, unofficial]. It solves the problem where a binary solid/empty representation is insufficient because partial shapes have mixed visible and hidden areas on a single face, leading to either overdraw (if hidden parts are kept) or visual artifacts (if visible parts are removed) [S1, unofficial]. It sets itself apart from sibling methods like [Voxel Block Placement with Face Culling](923-voxel-block-placement-with-face-culling.md) by operating at the sub-face granularity, allowing precise culling of non-rectangular geometry within a voxel boundary.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** The current block's shape and rotation, the neighbor block's shape and rotation, and the face index being processed.
+-*   **Output:** A boolean indicating if the face should be culled (removed from the mesh), or the visible coverage mask if partial visibility requires geometry generation.
++*   **Input:** A voxel grid $V$ where each cell $(x,y,z)$ contains a block shape definition. Each shape definition includes an occlusion map (a lookup table of bit masks for each rotation and face).
++*   **Output:** A set of visible faces for the mesh, where faces fully occluded by neighbors are excluded.
+ 
+ **Data Structures:**
+-*   `FaceMask`: A struct wrapping a `u16` (unsigned 16-bit integer). It represents a 4x4 grid of cells on a face boundary. Each bit corresponds to one cell in the grid [S1, unofficial].
+-    *   `FULL`: A constant `FaceMask` with value `0xffff` (all 16 bits set), representing a fully opaque face [S1, unofficial].
+-    *   `EMPTY`: A constant `FaceMask` with value `0x0000` (all 16 bits unset), representing a fully empty face [S1, unofficial].
+-*   `shape.occlusion`: A lookup table mapping `rotation` and `face` indices to a `FaceMask`. This precomputed table describes which parts of each boundary face are covered by geometry for a given shape orientation [S1, unofficial].
+-*   `FaceOcclusion` (Optional, for transparency): A struct containing `coverage: FaceMask` and `mode: OcclusionMode`. `OcclusionMode` is an enum expressing behavior such as opaque, cutout, translucent, or never-occluding [S1, unofficial].
++*   **FaceMask:** A struct wrapping a 16-bit unsigned integer (`u16`). It represents a 4x4 grid of cells on a face boundary. Each bit corresponds to a sub-cell; a set bit indicates coverage, an unset bit indicates emptiness [S1, unofficial].
++    *   `FULL`: A constant `FaceMask(0xffff)`, representing a fully opaque face (all 16 bits set).
++    *   `EMPTY`: A constant `FaceMask(0x0000)`, representing a fully empty face (all 16 bits unset) [S1, unofficial].
++*   **Occlusion Map:** A lookup table `shape.occlusion[rotation][face]` storing `FaceMask` values for all valid orientations of a shape [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Retrieve Masks:** Access the occlusion mask for the current block's face and the neighbor's opposite face.
+-    *   `current_mask = shape.occlusion[rotation][face]`
+-    *   `neighbor_mask = neighbor_shape.occlusion[neighbor_rotation][opposite(face)]`
+-    *   Note: `opposite(face)` returns the face index on the neighbor that shares the boundary with the current face [S1, unofficial].
+-2.  **Check Occlusion:** Determine if the current face is fully occluded by the neighbor.
+-    *   Calculate `visible_bits = current_mask.0 & !neighbor_mask.0`.
+-    *   If `visible_bits == 0`, the face is fully occluded and can be removed [S1, unofficial].
+-    *   Conceptually: `visible = current coverage - neighbor coverage`. If visible is empty, the face is removed [S1, unofficial].
+-3.  **Handle Partial Visibility:** If `visible_bits != 0`, the face is partially visible. The implementer must choose between:
+-    *   Keeping the original face geometry (accepting overdraw from hidden parts).
+-    *   Generating or subdividing geometry to only expose the uncovered region (reducing geometry but increasing mesher complexity) [S1, unofficial].
+-4.  **Boundary Classification (Optional):** Ensure culling only applies to geometry on the voxel cell boundary planes. Classify a polygon as a boundary polygon by checking if all its vertices lie on the same cell boundary plane within a small tolerance `eps` [S1, unofficial].
+-5.  **Transparency Handling (Optional):** If materials have transparency, combine geometric coverage with material occlusion behavior. Do not bake all concepts into one solid flag [S1, unofficial].
++1.  **Retrieve Masks:** For a given voxel face at position $P$ with normal $N$, identify the current block's shape and its rotation. Retrieve the current face's coverage mask:
++    $$ M_{curr} = \text{shape.occlusion}[\text{rotation}][\text{face}] $$
++    Identify the neighbor voxel at $P + N$. Retrieve the neighbor's shape and rotation. Retrieve the neighbor's opposite face mask (the face of the neighbor pointing towards the current voxel):
++    $$ M_{neigh} = \text{neighbor\_shape.occlusion}[\text{neighbor\_rotation}][\text{opposite}(\text{face})] $$
++    [S1, unofficial]
++
++2.  **Calculate Visibility:** Determine if the current face is fully occluded by the neighbor. The visible portion of the current face is the set of bits present in $M_{curr}$ but not in $M_{neigh}$:
++    $$ M_{visible} = M_{curr} \ \& \ (\sim M_{neigh}) $$
++    [S1, unofficial]
++
++3.  **Cull Decision:**
++    *   If $M_{visible} == 0$ (i.e., $M_{curr} \ \& \ (\sim M_{neigh}) == 0$), the face is fully occluded and is removed from the mesh [S1, unofficial].
++    *   If $M_{visible} \neq 0$, the face is partially or fully visible. The implementer must choose between:
++        *   Keeping the original full-face geometry, accepting overdraw for the empty bits in $M_{visible}$ [S1, unofficial].
++        *   Generating or subdividing geometry to only expose the regions defined by $M_{visible}$, reducing geometry but increasing mesher complexity [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Data structures
+-struct FaceMask(u16):
+-    pass
++# Constants
++FULL = FaceMask(0xFFFF)
++EMPTY = FaceMask(0x0000)
+ 
+-const FULL: FaceMask = FaceMask(0xffff)
+-const EMPTY: FaceMask = FaceMask(0x0000)
++def get_face_mask(shape, rotation, face_index):
++    """Retrieve the precomputed mask for a specific shape orientation and face."""
++    return shape.occlusion[rotation][face_index]
+ 
+-struct FaceOcclusion:
+-    coverage: FaceMask
+-    mode: OcclusionMode # opaque, cutout, translucent, never-occluding
++def opposite_face(face_index):
++    """Return the index of the face opposite to face_index."""
++    # Implementation depends on face indexing convention (e.g., 0->1, 1->0, 2->3, etc.)
++    # Placeholder for specific axis mapping
++    return (face_index + 3) % 6
+ 
+-# Helper to check if vertices lie on a boundary plane
+-fn lies_on_boundary(vertices: list[Vec3], axis: usize, plane: f32, eps: f32) -> bool:
+-    for v in vertices:
+-        if abs(v[axis] - plane) > eps:
+-            return false
+-    return true
++def is_fully_occluded(current_mask: FaceMask, neighbor_mask: FaceMask) -> bool:
++    """
++    Returns True if the current face is completely hidden by the neighbor.
++    Logic: visible = current & ~neighbor. If visible is 0, it is occluded.
++    """
++    return (current_mask.0 & ~neighbor_mask.0) == 0
+ 
+-# Main culling logic
+-fn cull_face(shape: Shape, rotation: Rotation, face: FaceIndex, 
+-             neighbor: Shape, neighbor_rotation: Rotation, neighbor_face: FaceIndex) -> bool:
++def cull_face(shape, rotation, face_index, neighbor_shape, neighbor_rotation):
++    """
++    Determines if a face should be culled based on neighbor coverage.
++    """
+     # 1. Retrieve masks
+-    current_mask = shape.occlusion[rotation][face]
+-    neighbor_mask = neighbor.occlusion[neighbor_rotation][neighbor_face]
++    current_mask = get_face_mask(shape, rotation, face_index)
++    neighbor_mask = get_face_mask(neighbor_shape, neighbor_rotation, opposite_face(face_index))
+     
+     # 2. Check occlusion
+-    # visible = current coverage - neighbor coverage
+-    # If visible is empty, the face is removed
+-    visible_bits = current_mask.0 & ~neighbor_mask.0
++    if is_fully_occluded(current_mask, neighbor_mask):
++        return False # Face is culled
+     
+-    if visible_bits == 0:
+-        return true # Fully occluded, cull face
+-    
+-    # 3. Handle partial visibility
+-    # If only part remains, choose between keeping original geometry or subdividing
+-    # For this implementation, we assume keeping original geometry (overdraw)
+-    # or returning the visible mask for further processing
+-    return false # Not fully occluded
+-
+-# Boundary classification helper
+-fn is_boundary_polygon(vertices: list[Vec3], axis: usize, plane: f32, eps: f32) -> bool:
+-    return lies_on_boundary(vertices, axis, plane, eps)
++    return True # Face is visible (or partially visible)
+ ```
+ 
+-**Parameters:**
+-*   `FULL`: `0xffff` [S1, unofficial].
+-*   `EMPTY`: `0x0000` [S1, unofficial].
+-*   `eps`: A small tolerance value for boundary classification [S1, unofficial].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Partial Visibility:** If only part of the face remains visible, the implementer must choose between keeping the original face geometry (accepting overdraw) or generating/subdividing geometry to only expose the uncovered region (reducing geometry but increasing mesher complexity) [S1, unofficial].
+-*   **Chunk Borders:** Faces on the edge of a chunk still have a normal voxel neighbor. The only difference is where that neighbor is retrieved from. If a neighbor chunk is not available, the engine must define a policy (e.g., treat as air, delay meshing, or use an unknown state) [S1, unofficial].
+-*   **Transparency:** Geometry coverage and render opacity are related but not identical. Two adjacent glass blocks may geometrically cover each other, but whether their shared face should be removed depends on material/rendering semantics. Do not bake all three concepts (coverage, material occlusion, block/material compatibility) into one vague solid flag [S1, unofficial].
++*   **Partial Visibility:** If $M_{visible}$ is non-zero but not equal to $M_{curr}$, the face is only partially covered. The standard bitmask culling only removes *fully* occluded faces. Handling partial occlusion requires either accepting overdraw or complex geometry subdivision [S1, unofficial].
++*   **Boundary Geometry:** Internal geometry within a complex block (not on the voxel boundary planes) should not be tested against neighbors. Only polygons where all vertices lie on the same cell boundary plane (within tolerance $\epsilon$) participate in neighbor-based culling [S1, unofficial].
++*   **Chunk Borders:** Faces on chunk boundaries must handle missing neighbors. Policies include treating missing data as air, delaying meshing, or using an unknown state [S1, unofficial].
++*   **Transparency:** Boolean culling is insufficient for transparent materials. Coverage must be separated from material occlusion behavior (e.g., cutout, translucent) [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Face-Culling Geometry Shader](3928-face-culling-geometry-shader.md)
+-A geometry shader technique that generates cube faces from point primitives based on a bitmask, culling hidden faces to reduce overdraw and vertex processing [3928-face-culling-geometry-shader.md]. It sets itself apart by performing culling in the GPU pipeline rather than during CPU-side mesh generation, and is chosen when minimizing vertex processing overhead is critical.
++A geometry shader technique that generates cube faces from point primitives based on a bitmask, culling hidden faces to reduce overdraw and vertex processing. It solves the problem of rendering voxel surfaces by emitting only the visible faces of a voxel, leveraging the GPU's geometry shader stage to expand point data into full cube geometry on-demand. It builds on [Face Coverage Mask Culling](3397-face-coverage-mask-culling.md) by using the bitmask to determine face visibility at the primitive generation stage.
+ 
+ ### [Per-face Column-based Face Culling with Opacity Masks](4821-per-face-column-based-face-culling-with-opacity-masks.md)
+-A face culling technique that uses per-face column arrays and opaque column arrays to determine visibility based on solid and transparent block transitions, allowing full per-face control over opacity [4821-per-face-column-based-face-culling-with-opacity-masks.md]. It differs by supporting granular opacity control per column rather than binary face masks, and is chosen when complex transparency effects are required.
++A face culling technique that uses per-face column arrays and opaque column arrays to determine visibility based on solid and transparent block transitions, allowing full per-face control over opacity. It solves the problem where a boolean solid flag is insufficient because partial shapes have mixed visible/hidden areas on a single face, extending [Face Coverage Mask Culling](3397-face-coverage-mask-culling.md) by distinguishing between opaque and transparent surface contributions.
+ 
+ ### Boundary Geometry Classification
+-A method to ensure neighbor-based culling only applies to geometry on the voxel cell boundary planes, allowing internal geometry of complex blocks to remain untouched [S1, unofficial]. It classifies a polygon as a boundary polygon by checking if all its vertices lie on the same cell boundary plane within a small tolerance `eps` [S1, unofficial].
++A method to ensure neighbor-based culling only applies to geometry on the voxel cell boundary planes, allowing internal geometry of complex blocks to remain untouched [S1, unofficial].
++*   **Definition:** Classify a polygon as a boundary polygon by checking if all its vertices lie on the same cell boundary plane within a small tolerance $\epsilon$ [S1, unofficial].
++*   **Code:**
++    ```python
++    def lies_on_boundary(vertices: list, axis: int, plane: float, eps: float) -> bool:
++        return all(abs(v[axis] - plane) <= eps for v in vertices)
++    ```
++*   **Parameter:** $\epsilon$ (eps): A small tolerance value used to determine if a vertex lies on the boundary plane [S1, unofficial].
+ 
+ ### Transparent Material Culling
+-A method to handle culling for transparent or cutout materials by separating geometric coverage from material occlusion behavior [S1, unofficial]. It uses a `FaceOcclusion` struct containing `coverage: FaceMask` and `mode: OcclusionMode` to express behavior such as opaque, cutout, translucent, or never-occluding [S1, unofficial].
++A method to handle culling for transparent or cutout materials by separating geometric coverage from material occlusion behavior [S1, unofficial].
++*   **Definition:** Combine shape coverage, material occlusion behavior, and block/material compatibility to determine culling [S1, unofficial].
++*   **Layout:**
++    ```python
++    struct FaceOcclusion {
++        coverage: FaceMask,
++        mode: OcclusionMode,
++    }
++    ```
++*   **Parameter:** `OcclusionMode`: An enum or type expressing behavior such as opaque, cutout, translucent, or never-occluding [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The core culling operation is O(1) per face, involving a single bitwise AND and NOT operation [S1, unofficial]. Precomputing masks for every allowed orientation makes the hot meshing loop perform only table lookups and bit operations [S1, unofficial].
+-*   **Memory Complexity:** O(1) per face for the mask storage. The `occlusion` table size depends on the number of shapes and orientations, but is typically small [S1, unofficial].
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Scales well with the number of faces due to the cheap bitwise operations. However, a more sophisticated culling scheme can save mesh geometry while simultaneously making mesh generation slower if geometry subdivision is used [S1, unofficial].
+-*   **Strengths:** Handles partial shapes correctly, reduces overdraw for fully occluded faces, integrates well with precomputed masks.
+-*   **Limitations:** Partial visibility requires either overdraw or complex geometry generation. Transparency handling adds complexity.
+-*   **When to use:** When rendering voxel worlds with partial shapes (stairs, slabs) where binary culling is insufficient.
+-*   **When not to use:** When simplicity is paramount and overdraw is acceptable, or when transparency requires more complex per-pixel handling.
++*   **Time Complexity:** The culling decision per face is $O(1)$ bit operations, assuming precomputed masks and $O(1)$ neighbor access [S1, unofficial].
++*   **Memory Complexity:** Requires storing a `FaceMask` (2 bytes) per shape per rotation per face. Precomputing masks for all orientations increases memory usage but speeds up the hot meshing loop [S1, unofficial].
++*   **Performance:** The method is highly efficient for dense volumes with many partial shapes, reducing primitive count significantly compared to boolean culling. However, handling partial visibility (subdivision) can increase mesher complexity and generation time [S1, unofficial].
++*   **Strengths:** Precise culling for non-cubic shapes; reduces overdraw; simple bit operations.
++*   **Limitations:** Does not handle partial visibility without additional geometry generation; requires precomputed masks for performance; transparency handling is non-trivial [S1, unofficial].
++*   **When to use:** When rendering voxel worlds with partial shapes (stairs, slabs) and minimizing overdraw is critical.
++*   **When not to use:** For simple cubic voxel worlds where boolean culling is sufficient, or when hardware supports efficient geometry shaders that can handle per-fragment culling more flexibly.
+ 
+ ## Background
+-Face Coverage Mask Culling was introduced in the context of optimizing voxel meshing for partial shapes. It addresses the limitation of boolean solid flags by using bitmasks to represent face coverage [S1, unofficial]. The method is described in an unofficial blog post by ogyrecdev [S1, unofficial].
++Originating from practical implementations in voxel engines, this method addresses the limitations of binary solid/empty flags for non-cubic geometry [S1, unofficial]. It was developed to allow complex shapes (like stairs) to be rendered efficiently without excessive overdraw or visual artifacts. The approach is documented in unofficial sources discussing face culling for voxel cubes and partial shapes [S1, unofficial].
+ 
+ ## Sources

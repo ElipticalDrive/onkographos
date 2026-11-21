@@ -1,0 +1,35 @@
+# Image Enhancement and Restoration Methods
+
+
+## Overview
+Image Enhancement and Restoration Methods address the degradation of input data in NeRF training by modeling blur, transient occlusions, or missing geometry, enabling the synthesis of sharp, clean novel views from uncontrolled or low-quality inputs. Unlike sibling methods that modify the neural field's internal capacity or density representation, these methods explicitly model the imaging process (e.g., blur kernels) or separate static scene components from transient artifacts using external 2D priors and inpainting networks.
+
+## Shared principles
+The core task of a NeRF network architecture is to learn a continuous volumetric scene representation $F_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$, where $\mathbf{x} \in \mathbb{R}^3$ is the spatial position, $\mathbf{d} \in \mathbb{R}^3$ is the viewing direction, $\sigma$ is the volume density, and $\mathbf{c} \in \mathbb{R}^3$ is the view-dependent color. The rendering process integrates these outputs along rays using standard volume rendering equations.
+
+### Standard NeRF Architecture
+The baseline architecture [S1] employs two MLPs:
+1.  **Position MLP ($\Phi_{pos}$)**: Takes $\mathbf{x}$ and positional encoding $\gamma(\mathbf{x})$ to produce a feature vector $\mathbf{h}$.
+2.  **Shading MLP ($\Phi_{shade}$)**: Takes $\mathbf{h}$ and directional encoding $\gamma(\mathbf{d})$ to predict $\sigma$ and $\mathbf{c}$.
+
+## Subtopics
+
+### [DeblurNeRF](11964-deblurnerf.md)
+Reconstructs a sharp NeRF from blurry images by jointly optimizing a sharp NeRF and a Deformable Sparse Kernel (DSK) module. It physically approximates blur as a sparse mixture of deformed rays, handling camera motion and defocus blur without external clean data.
+
+### [IE-NeRF](13737-ie-nerf.md)
+Enhances novel view synthesis in uncontrolled environments by separating static scene rendering from transient occlusions (e.g., moving people). It predicts a 2D transient mask per image and uses a pre-trained inpainting network (LaMa) to generate a "clean" static supervision signal, avoiding dual NeRF pipelines.
+
+### [Sharp-NeRF](14270-sharp-nerf.md)
+Renders clean, sharp images from blurry inputs by modeling spatially varying blur using discrete learnable kernels and a sharpness prior. It replaces neural network-based kernel generators with a fixed set of discrete kernels indexed by a precomputed sharpness map, significantly reducing training time.
+
+### SPIn-NeRF
+A 3D inpainting method that leverages LaMa for color and depth inpainting, replacing pixel loss with perceptual loss for visual coherence and using depth inpainting to supervise 3D geometry [S1]. It replaces pixel loss with perceptual loss [S1]. It struggles in tasks where 2D inpainting results are perceptually inconsistent [S1].
+
+## Background
+The baseline NeRF architecture [S1] employs two MLPs:
+1.  **Position MLP ($\Phi_{pos}$)**: Takes $\mathbf{x}$ and positional encoding $\gamma(\mathbf{x})$ to produce a feature vector $\mathbf{h}$.
+2.  **Shading MLP ($\Phi_{shade}$)**: Takes $\mathbf{h}$ and directional encoding $\gamma(\mathbf{d})$ to predict $\sigma$ and $\mathbf{c}$.
+
+## Sources
+[S1] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28

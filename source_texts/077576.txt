@@ -1,0 +1,66 @@
+# Splat-Grid — Distributed 3D Gaussian Splatting Engine
+
+Splat-Grid partitions a large 3D Gaussian Splatting (3DGS) scene across multiple consumer machines. Each machine trains only a spatial sub-volume (*voxel*), preventing Out-of-Memory errors while allowing parallel reconstruction.
+
+The system is a **pure TCP, 6-node architecture** — no HTTP servers, no cloud services, no CUDA toolkit required on workers (uses a built-in pure-PyTorch rasterizer).
+
+---
+
+## Table of Contents
+
+1. [How It Works — Big Picture](#how-it-works)
+2. [Node Reference](#node-reference)
+   - [State Manager](#1-state-manager--state_managerserverpy-port-5001)
+   - [Data Engine](#2-data-engine--data_engineserverpy-port-5002)
+   - [Stitcher](#3-stitcher--stitcherserverpy-port-5003)
+   - [Worker](#4-worker--workerclientpy)
+   - [Watchdog](#5-watchdog--watchdogclientpy)
+   - [Master](#6-master--masterclientpy)
+3. [Shared Infrastructure](#shared-infrastructure)
+   - [TCP Protocol](#tcp-protocol-sharedSocket_utilspy)
+   - [Soft Rasterizer](#soft-rasterizer-splat_gridsoft_rasterizerpy)
+   - [COLMAP Utilities](#colmap-utilities-splat_gridcolmap_utilspy)
+   - [PLY Utilities](#ply-utilities-splat_gridply_utilspy)
+4. [Directory Structure](#directory-structure)
+5. [Environment Configuration](#environment-configuration)
+6. [Setup & Installation](#setup--installation)
+7. [Running the Swarm](#running-the-swarm)
+8. [Memory Safety Guarantees](#memory-safety-guarantees)
+9. [Data Flow Diagram](#data-flow-diagram)
+
+---
+
+## How It Works
+
+```
+Input: COLMAP dataset (cameras.bin, images.bin, points3D.bin, images/)
+         │
+         ▼
+  [Master] triggers INITIALIZE on Data Engine
+         │
+         ▼
+  [Data Engine] partitions scene into N³ voxel tasks, pushes them to State Manager
+         │
+         ▼
+  [State Manager] holds all tasks in SQLite (pending → in_progress → completed)
+         │
+  ┌──────┴──────┐
+  │   Workers   │  (run on any machine on the LAN)
+  │  pull tasks │  download chunk ZIP from Data Engine
+  │  train      │  750 iterations of 3DGS per voxel
+  │  upload PLY │  send result to Stitcher
+  └──────┬──────┘
+         │
+  [Stitcher] accumulates chunk PLY files
+         │
+  [Master] detects 100% completion, triggers STITCH_ALL
+         │
+         ▼
+  Output: stitched_output.ply  (3DGS-compatible, opens in SuperSplat / SIBR viewer)
+```
+
+Between each pair of steps, **Watchdog** runs in the background — every 30 s it scans for stale tasks (worker died mid-job) and resets them to `pending` so another worker can pick them up.
+
+---
+
+## Node Reference

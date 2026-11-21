@@ -1,0 +1,91 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method provides an efficient, hardware-accelerated approximation of point reprojection for high-quality free-viewpoint rendering, enabling interactive frame rates by replacing full soft rasterization with a global depth layering system [S1]. It differs from sibling methods like [Slice-by-Slice (Sheet Buffer) Splatting](2110-slice-by-slice-sheet-buffer-splatting.md) by using a fixed number of global depth layers rather than processing slices sequentially, and from [Screen Quad Rendering](2435-screen-quad-rendering.md) by explicitly managing opacity accumulation via logarithmic blending in screen space [S1].
++This method provides an efficient, hardware-accelerated approximation of point reprojection for high-quality free-viewpoint rendering, enabling interactive frame rates by replacing full soft rasterization with a global depth layering system [S1]. It differs from sibling methods by using a fixed number of global depth layers rather than processing slices sequentially, and by explicitly managing opacity accumulation via logarithmic blending in screen space [S1].
+ 
+ ## How it works
+@@ -17,5 +17,5 @@
+ **Parameters:**
+ *   $k_d$: Number of global depth layers. Typical value: 10 [S1].
+-*   Resolution: Target output resolution (e.g., 900x600) [S1].
++*   Resolution: Target output resolution (e.g., 900×600) [S1].
+ 
+ **Steps:**
+@@ -33,44 +33,58 @@
+ def interactive_forward_rendering(input_views, mvs_mesh, neural_net, k_d=10, target_res=(900, 600)):
+     # 1. Camera Selection: Choose relevant input views [S1]
+-    selected_views = input_views  # Selection algorithm not specified in sources [G]
++    # Camera selection algorithm not specified in sources [G]
++    selected_views = input_views
+ 
+     # 2. Determine Depth Interval: Rasterize MVS mesh at 1/16 resolution, build min-max mipmap [S1]
+     low_res = (target_res[0] // 16, target_res[1] // 16)
+-    low_res_depth = rasterize_mesh_to_depth(mvs_mesh, low_res)  # Standard GPU rasterization [G]
+-    depth_min, depth_max = compute_min_max_mipmap(low_res_depth)  # Standard mipmap reduction [G]
++    low_res_depth = rasterize_mesh(mvs_mesh, low_res)  # Standard GPU rasterization [G]
++    depth_min = low_res_depth.min()
++    depth_max = low_res_depth.max()
+ 
+     # 3. Initialize Depth Layers: Stack of k_d texture buffers for log(1-alpha) accumulation [S1]
+-    depth_layers = [create_texture_buffer(target_res, init=0.0) for _ in range(k_d)]
++    depth_layers = [[0.0] * (target_res[0] * target_res[1]) for _ in range(k_d)]
+ 
+     # 4. Splat Points into Depth Layers: Project all pixels of selected views in parallel [S1]
+     for view in selected_views:
+-        for point in extract_points_from_view(view):  # Standard point extraction [G]
+-            screen_pos, depth = project_point_to_screen(point, view.camera)  # Standard MVP transform [G]
+-            layer_idx = map_depth_to_layer(depth, depth_min, depth_max, k_d)  # Standard quantization [G]
+-            alpha = compute_splat_opacity(point)  # Standard kernel evaluation [G]
++        for point in view.points:  # Points extracted from input view [G]
++            # Project to screen space [G]
++            screen_x = int((point.screen_u * target_res[0]) % target_res[0])
++            screen_y = int((point.screen_v * target_res[1]) % target_res[1])
++            depth = point.depth
++
++            # Map depth to layer index [G]
++            layer_idx = int(((depth - depth_min) / (depth_max - depth_min)) * k_d)
++            layer_idx = max(0, min(k_d - 1, layer_idx))
++
++            # Compute opacity and update layer with additive blending of log(1-alpha) [S1]
++            alpha = point.alpha
+             log_val = math.log(1.0 - alpha)
+-            depth_layers[layer_idx].additive_blend(screen_pos, log_val)  # Hardware-accelerated additive blending [S1]
++            depth_layers[layer_idx][screen_y * target_res[0] + screen_x] += log_val
+ 
+     # 5. Composite Depth Layers Back-to-Front in parallel [S1]
+-    accumulated_log_alpha = sum(layer.texture for layer in depth_layers)  # Sum across layers [G]
+-    final_alpha = 1.0 - math.exp(accumulated_log_alpha)  # Inverse of log accumulation [S1]
++    # Sum log values across layers to get total accumulated log opacity [G]
++    total_log_alpha = [0.0] * (target_res[0] * target_res[1])
++    for layer in depth_layers:
++        for i in range(len(total_log_alpha)):
++            total_log_alpha[i] += layer[i]
++    final_alpha = [1.0 - math.exp(val) for val in total_log_alpha]
+ 
+     # 6. Probabilistic Depth Test: Consider at most k_d alpha-weighted depth samples [S1]
+-    refined_depth = apply_probabilistic_depth_test(depth_layers, k_d)  # Standard test logic [G]
++    # Probabilistic depth test logic not specified in sources [G]
++    refined_depth = depth_layers
+ 
+     # 7. Neural Synthesis: Run neural network to synthesize image [S1]
+     final_image = neural_net(refined_depth, final_alpha, selected_views)
+-
+     return final_image
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory Consumption:** High memory usage due to batching all input views and depth layers. For 900x600 resolution, 10 layers, and 9 views, depth layers take ~4 GB [S1].
++*   **Memory Consumption:** High memory usage due to batching all input views and depth layers [S1].
+ *   **Compression:** Memory can be reduced through standard texture compression methods [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method is designed for interactive performance. An unoptimized implementation runs at 4.5 fps [S1].
++*   **Time Complexity:** The method is designed for interactive performance [S1]. An unoptimized implementation runs at 4.5 fps [S1].
+ *   **Breakdown:** Camera selection: 87 ms, point splatting: 36 ms, depth test: 38 ms, network evaluation: 59 ms [S1].
+-*   **Memory Complexity:** High. Depth layers consume ~4 GB for 900x600 resolution, 10 layers, 9 views. PyTorch reports 4.5 GB total memory usage for this configuration [S1].
++*   **Memory Complexity:** High. Depth layers consume ~4 GB for 900×600 resolution, 10 layers, 9 views [S1]. PyTorch reports 4.5 GB total memory usage for this configuration [S1].
+ *   **Strengths:** Enables interactive viewing with marginal quality degradation compared to full soft rasterization [S1].
+ *   **Limitations:** High memory consumption; requires pre-trained neural network [S1].

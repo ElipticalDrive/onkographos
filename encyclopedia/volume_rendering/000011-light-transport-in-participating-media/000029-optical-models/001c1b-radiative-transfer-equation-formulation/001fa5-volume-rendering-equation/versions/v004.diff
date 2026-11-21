@@ -1,0 +1,144 @@
+--- v003.md
++++ v004.md
+@@ -1,5 +1,5 @@
+ # Volume Rendering Equation
+ 
+-Also called: Radiative Transfer Equation Integration, SPH Volumetric Rendering, Transmittance Equation, Volume Rendering Integral, Volumetric Ray-Marching for Gas Rendering, Volumetric Rendering Model
++Also called: Radiative Transfer Equation Integration, SPH Volumetric Rendering, Transmittance Equation, Volumetric Ray-Marching for Gas Rendering, Volumetric Rendering Model
+ 
+ ## Overview
+@@ -12,6 +12,6 @@
+ 
+ **Inputs:**
+-*   **Camera Ray:** A ray $r(t) = p_0 + t \vec{d}$ parameterized by $t \in [0, 1]$, where $p_0$ is the eye position and $\vec{d}$ is the direction vector [S7, unofficial].
+-*   **Medium Properties:** Functions for density $\sigma(x)$, emitted color/intensity $c(x)$, and optionally absorption/scattering coefficients [S6, S7, unofficial].
++*   **Camera Ray:** A ray $r(t) = p_0 + t \vec{d}$ parameterized by $t \in [0, D]$, where $p_0$ is the eye position, $\vec{d}$ is the direction vector, and $D$ is the exit distance [S7, S6, unofficial].
++*   **Medium Properties:** Functions for opacity $\sigma(x)$, emitted intensity $c(x)$, and optionally absorption/scattering coefficients [S6, S7, unofficial].
+ *   **Particle Data (Optional):** If using SPH, inputs include particle masses $m_i$, positions $p_i$, smoothing lengths $h_i$, luminosities $L_i$, and cross-sections $\sigma_i$ [S2, unofficial].
+ 
+@@ -21,7 +21,7 @@
+ ### Data Structures
+ 
+-1.  **3D Density Grid (Texture):** A 3D texture storing pre-computed density $\rho$, emission $j$, and absorption $\kappa$ values.
++1.  **3D Density Grid (Texture):** A 3D texture storing pre-computed density $\rho$, emission $j$, and absorption $\kappa$ values [S2, unofficial].
+     *   **Layout:** Trilinearly interpolated floating-point values.
+-    *   **Size:** Example resolution $128^3$ voxels (approx. 2 million cells) [S2, unofficial].
++    *   **Size:** Example resolution $128^3$ voxels (approx. 2 million cells) used as a pre-baked grid for spatial indexing [S2, unofficial].
+     *   **Fields:**
+         *   `density`: $\rho(x)$
+@@ -61,11 +61,11 @@
+ **5. Discrete Ray Marching Approximation:**
+ For implementation, the integral is approximated by summing contributions over $N$ steps:
+-$$ C_{out} = \sum_{i=0}^{N-1} \sigma_i c_i \Delta t_i \prod_{j=0}^{i-1} e^{-\sigma_j \Delta t_j} $$
+-Where $\Delta t_i$ is the step size, and $\sigma_i, c_i$ are sampled at step $i$ [S2, S6, S7, unofficial].
++$$ C_{out} = \sum_{i=0}^{N-1} \sigma_i c_i \Delta s \prod_{j=0}^{i-1} e^{-\sigma_j \Delta s} $$
++Where $\Delta s$ is the physical step size, $\sigma_i$ is the geometric cross-section (opacity) at step $i$, and $c_i$ corresponds to the particle luminosity $L_i$ or emission coefficient $j$ [S2, S6, unofficial].
+ 
+ ### Parameters
+ 
+ *   **Samples per Ray:** Typically 200 samples for fixed-step marching [S2, unofficial].
+-*   **Grid Resolution:** $128^3$ voxels is a baseline for real-time performance [S2, unofficial].
++*   **Grid Resolution:** $128^3$ voxels is an example of a pre-baked 3D grid used for spatial indexing to solve performance issues [S2, unofficial].
+ *   **Opacity Range:** $\sigma \in [0, 1]$ [S6, unofficial].
+ *   **Scope Limitations (v1):** Single greyscale channel for radiative transfer; color derived from underlying particles [S2, unofficial]. No anisotropic scattering (Mie/Rayleigh) [S2, unofficial]. No self-consistent radiation pressure [S2, unofficial].
+@@ -81,8 +81,8 @@
+     *   For each pixel, cast a ray from the camera into the volume [S3, unofficial].
+     *   Initialize accumulated transmittance $T = 1.0$ and accumulated color $C_{acc} = 0.0$ [S6, unofficial].
+-    *   Iterate along the ray from $t=0$ to $t=D$ with step size $\Delta t$:
++    *   Iterate along the ray from entry $t=0$ to exit $t=D$ with step size $\Delta s$:
+         *   Sample $\sigma(t)$ and $c(t)$ from the 3D texture at current position [S2, unofficial].
+-        *   Compute local transmittance: $T_{local} = e^{-\sigma(t) \Delta t}$ [S6, unofficial].
+-        *   Compute emitted contribution: $C_{emit} = \sigma(t) c(t) \Delta t$ [S6, unofficial].
++        *   Compute local transmittance: $T_{local} = e^{-\sigma(t) \Delta s}$ [S6, unofficial].
++        *   Compute emitted contribution: $C_{emit} = \sigma(t) c(t) \Delta s$ [S6, unofficial].
+         *   Update accumulated color: $C_{acc} += C_{emit} \times T$ [S6, unofficial].
+         *   Update transmittance: $T *= T_{local}$ [S6, unofficial].
+@@ -98,5 +98,5 @@
+ 
+ ```python
+-def volume_render_ray(ray_origin, ray_direction, volume_grid, num_samples):
++def volume_render_ray(ray_origin, ray_direction, volume_bounds, step_size, volume_grid):
+     """
+     Renders a single ray through a volume grid using the transmittance equation.
+@@ -105,48 +105,42 @@
+         ray_origin: vec3, camera position
+         ray_direction: vec3, normalized ray direction
+-        volume_grid: 3D texture object with methods sample_density(pos) and sample_emission(pos)
+-        num_samples: int, number of steps along the ray
++        volume_bounds: tuple of (min_corner, max_corner) defining the volume box
++        step_size: float, physical step length along the ray
++        volume_grid: object with sample_density(pos) and sample_emission(pos)
+         
+     Returns:
+         vec3, final pixel color
+     """
+-    # Assume volume bounds are known or ray is clipped to volume
+-    # For simplicity, assume fixed length D or ray-marching until exit
+-    step_size = 1.0 / num_samples  # Normalized step size
++    # Compute ray entry and exit distances to the volume box
++    min_corner, max_corner = volume_bounds
++    t_min = (min_corner - ray_origin) / ray_direction
++    t_max = (max_corner - ray_origin) / ray_direction
++    # Handle negative direction components by swapping min/max
++    t_entry = max(min(t_min), min(t_max))
++    t_exit = min(max(t_min), max(t_max))
++    
++    # Ray misses volume or points away
++    if t_entry > t_exit or t_exit < 0:
++        return vec3(0.0, 0.0, 0.0)
++        
+     accumulated_color = vec3(0.0, 0.0, 0.0)
+     transmittance = 1.0
++    t = t_entry
+     
+-    for i in range(num_samples):
+-        # Current position along ray
+-        t = i * step_size
++    while t < t_exit:
+         pos = ray_origin + ray_direction * t
+         
+         # Sample medium properties
+-        # Note: In practice, check if pos is inside volume bounds
+         density = volume_grid.sample_density(pos)
+         emission = volume_grid.sample_emission(pos)
+         
+-        # Opacity sigma (density * cross-section, assumed normalized or scaled)
+-        # Using sigma directly from grid if pre-scaled, or density * constant
++        # Opacity sigma (density * cross-section)
+         sigma = density 
+         
+-        # Local transmittance for this step: exp(-sigma * delta_s)
+-        # delta_s is the physical step size, here normalized to 1.0 for simplicity
+-        # In real implementation, delta_s must match the units of sigma
+-        delta_s = 1.0 / num_samples 
+-        local_transmittance = exp(-sigma * delta_s)
++        # Local transmittance for this step: exp(-sigma * step_size)
++        local_transmittance = exp(-sigma * step_size)
+         
+-        # Contribution of emitted light at this point, attenuated by previous transmittance
+-        # Formula: C += sigma * c * T_prev * delta_s
+-        # Note: Some formulations absorb delta_s into sigma or c. 
+-        # Based on [S6, unofficial]: dC/ds = sigma*c - sigma*C. Discrete: C_new = C_old + (sigma*c - sigma*C)*ds
+-        # However, standard front-to-back compositing [S3, S7, unofficial] uses:
+-        # alpha = 1 - exp(-sigma * ds)
+-        # color += alpha * emission * transmittance
+-        # transmittance *= exp(-sigma * ds)
+-        
+-        # Using the standard discrete approximation for front-to-back compositing
++        # Contribution: alpha * emission * transmittance
+         alpha = 1.0 - local_transmittance
+-        
+         accumulated_color += alpha * emission * transmittance
+         transmittance *= local_transmittance
+@@ -156,8 +150,9 @@
+             break
+             
++        t += step_size
++        
+     # Composite with background (assumed black or passed in)
+-    background_color = vec3(0.0, 0.0, 0.0) 
++    background_color = vec3(0.0, 0.0, 0.0)
+     final_color = accumulated_color + transmittance * background_color
+-    
+     return final_color
+ ```

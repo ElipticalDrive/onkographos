@@ -1,0 +1,182 @@
+# Radiance Distribution Approximation for Non-Homogeneous Lights
+
+Also called: AABB Cosine Lobe Distribution
+
+## Overview
+This method approximates the radiance distribution on mesh triangles where emission direction varies across the surface, using clamped cosine lobes distributed over an Axis-Aligned Bounding Box (AABB) of the intersection area projection [S1, unofficial]. It addresses the limitation of homogeneous light assumptions in Light Propagation Volumes (LPV) by capturing directional variation within a voxelized area light [S1, unofficial]. It differs from spherical harmonic approaches by using a discrete set of cosine lobes, which is sufficient for the 2-band spherical harmonics typically used in LPV systems [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   A triangle mesh representing a textured area light.
+*   An LPV grid structure.
+*   The intersection polygon formed by the projection of the triangle onto a specific LPV cell face.
+
+**Outputs:**
+*   A set of clamped cosine lobes injected into the LPV cells intersected by the light source.
+
+**Data Structures:**
+*   **AABB:** Defined by minimum and maximum coordinates $(x_{min}, y_{min}, z_{min})$ and $(x_{max}, y_{max}, z_{max})$ in the local coordinate system of the LPV cell face.
+*   **Cosine Lobe:** Defined by a center direction $\mathbf{d}$ and a spread angle $\theta$. In this method, each lobe has a fixed weight of 1.
+
+**Steps:**
+
+1.  **Compute Projection:** Project the intersection area of the triangle onto the LPV cell face where the triangle is primarily projected [S1, unofficial].
+2.  **Compute AABB:** Calculate the Axis-Aligned Bounding Box of the polygon formed by:
+    *   Projected vertices of the triangle that lie inside the LPV cell face.
+    *   Corners of the LPV cell face that lie inside the triangle's projection.
+    *   Intersection points between the edges of the LPV cell face and the edges of the triangle [S1, unofficial].
+3.  **Compute Corner Directions:** For each of the four corners of the computed AABB:
+    *   Calculate the barycentric coordinates of the corner relative to the original triangle vertices.
+    *   Interpolate the emission direction information from the triangle vertices using these barycentric coordinates to obtain the direction $\mathbf{d}_i$ for corner $i$ [S1, unofficial].
+    *   *Note:* If the triangle has associated radiant flux texture, sample the texture at the interpolated texture coordinates to determine intensity or other properties [S1, unofficial].
+4.  **Distribute Lobes:** Distribute clamped cosine lobes between the emission directions of the AABB corners. The lobes are distributed vertically and horizontally at angular distances equal to the spread of the cosine lobe function [S1, unofficial].
+5.  **Inject into LPV:**
+    *   Create the distribution locally.
+    *   Inject each generated cosine lobe into the LPV cell with a weight of 1.
+    *   The final approximation, with a weight equal to the total number of lobes required for the approximation, is injected into all LPV cells intersected along the z-axis [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def approximate_radiance_distribution(triangle, lpv_cell_face):
+    """
+    Approximates radiance distribution for a non-homogeneous light triangle
+    projected onto an LPV cell face.
+    
+    Args:
+        triangle: Object containing vertices (v0, v1, v2), their directions (d0, d1, d2),
+                  and texture coordinates (uv0, uv1, uv2).
+        lpv_cell_face: Object defining the boundaries of the LPV cell face.
+        
+    Returns:
+        list of Lobe objects to be injected into LPV cells.
+    """
+    # Step 1: Project triangle onto LPV cell face
+    # Assuming projection is along the normal of the LPV cell face
+    projected_triangle = project_triangle_to_face(triangle, lpv_cell_face)
+    
+    # Step 2: Compute AABB of intersection polygon
+    # Find points forming the intersection polygon
+    points = []
+    
+    # Add projected vertices inside the LPV cell face
+    for v_proj in projected_triangle.vertices:
+        if is_inside_face(v_proj, lpv_cell_face):
+            points.append(v_proj)
+            
+    # Add corners of LPV cell face inside the triangle projection
+    for corner in lpv_cell_face.corners:
+        if is_inside_triangle(corner, projected_triangle):
+            points.append(corner)
+            
+    # Add intersection points between edges
+    edge_intersections = compute_edge_intersections(
+        projected_triangle.edges, 
+        lpv_cell_face.edges
+    )
+    points.extend(edge_intersections)
+    
+    # Compute AABB from points
+    aabb = compute_aabb(points)
+    
+    # Step 3: Compute emission directions for AABB corners
+    aabb_corners = get_aabb_corners(aabb)
+    corner_directions = []
+    
+    for corner in aabb_corners:
+        # Compute barycentric coordinates of the corner in the original triangle
+        # Note: The corner is in the projected space, but barycentric coords
+        # are computed relative to the original triangle vertices.
+        # This assumes the projection preserves the barycentric relationship
+        # or that the corner is mapped back to the triangle plane.
+        # [G] Standard barycentric coordinate calculation for a point P in triangle ABC:
+        # Area(ABC) = Area(PAB) + Area(PBC) + Area(PCA)
+        # u = Area(PBC) / Area(ABC)
+        # v = Area(PCA) / Area(ABC)
+        # w = Area(PAB) / Area(ABC)
+        
+        # [G] Assuming 'corner' is a 3D point on the triangle plane or can be projected
+        # back to it. If the corner is strictly on the LPV face, we must project it
+        # back to the triangle plane to compute barycentric coords correctly.
+        corner_on_triangle = project_point_to_triangle(corner, triangle)
+        
+        u, v, w = compute_barycentric_coordinates(corner_on_triangle, triangle)
+        
+        # Interpolate direction
+        direction = u * triangle.d0 + v * triangle.d1 + w * triangle.d2
+        direction = normalize(direction)
+        
+        # [G] If texture is used, sample flux here
+        # flux = sample_flux_texture(triangle.uv0, triangle.uv1, triangle.uv2, u, v, w)
+        
+        corner_directions.append(direction)
+        
+    # Step 4: Distribute cosine lobes
+    lobes = []
+    lobe_spread = get_cosine_lobe_spread() # Typical value depends on implementation
+    
+    # Distribute vertically and horizontally between corner directions
+    # [G] The exact interpolation scheme between corners is not specified in detail.
+    # A common approach is to create a grid of directions interpolated from the 4 corners.
+    
+    # Example: Interpolate between top-left and top-right, then top-right and bottom-right, etc.
+    # Then interpolate vertically between these rows.
+    
+    # For simplicity, assuming a 1x1 grid of lobes centered at each corner direction
+    # or a small grid spanning the AABB.
+    # The text says "distributed between the emission directions from the corners,
+    # vertically and horizontally at angular distances of the same degree as that of the cosine lobe."
+    
+    # [G] Implementation detail: Create a grid of directions.
+    # Let's assume a 2x2 grid for the 4 corners as a minimal approximation.
+    # More lobes may be needed for higher accuracy.
+    
+    for i in range(2): # Rows
+        for j in range(2): # Cols
+            # Interpolate direction based on grid position
+            # [G] Specific interpolation formula not given. Linear interpolation of directions
+            # is a reasonable default.
+            dir_u = interpolate_direction(corner_directions[0], corner_directions[1], j/1.0)
+            dir_v = interpolate_direction(dir_u, interpolate_direction(corner_directions[2], corner_directions[3], j/1.0), i/1.0)
+            
+            lobe = Lobe(center=dir_v, spread=lobe_spread, weight=1)
+            lobes.append(lobe)
+            
+    # Step 5: Inject into LPV
+    # The distribution is created locally and injected into all LPV cells
+    # intersected along the z-axis.
+    
+    # [G] Determine which LPV cells are intersected along the z-axis.
+    # This typically involves checking the z-range of the triangle against the LPV grid.
+    intersected_cells = get_intersected_lpv_cells(triangle, lpv_grid)
+    
+    for cell in intersected_cells:
+        for lobe in lobes:
+            inject_lobe_into_cell(cell, lobe)
+            
+    return lobes
+```
+
+**Parameters:**
+*   **Cosine Lobe Spread:** The angular distance for distribution. Not given in the sources. [S1, unofficial]
+*   **Weight:** Each lobe has a weight of 1. [S1, unofficial]
+
+**Edge Cases and Pitfalls:**
+*   **Visual Errors:** The approach can produce minor visual errors because it generates a single radiance distribution for the AABB of the intersection area projection, which can cover two LPV cells, rather than processing each intersected LPV cell separately. For correct computation, the intersection area for every intersected LPV cell must be processed. [S1, unofficial]
+*   **Precision:** Barycentric coordinate calculation must be robust to avoid artifacts at triangle boundaries. [G]
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of intersection points and the number of lobes generated. The AABB computation is $O(1)$ for a triangle. The number of lobes is determined by the spread angle and the size of the AABB.
+*   **Memory Complexity:** $O(1)$ per triangle, as the distribution is created locally and only the final approximation is injected.
+*   **Strengths:** Efficient approximation of non-homogeneous lights using simple geometric primitives (AABB) and cosine lobes. Compatible with 2-band spherical harmonics.
+*   **Limitations:** Potential visual errors when the intersection area spans multiple LPV cells. The approximation is coarse compared to per-cell processing.
+*   **When to Use:** When real-time performance is critical and the light source triangles are small relative to the LPV cell size, or when the visual error is acceptable.
+*   **When Not to Use:** When high accuracy is required for large area lights that span multiple LPV cells.
+
+## Background
+This method was proposed in the context of Light Propagation Volumes (LPV) to handle textured area lights. It builds on the idea of voxelizing light triangles into the LPV grid to create Virtual Point Lights (VPLs). The specific technique of using clamped cosine lobes over an AABB was introduced to approximate radiance distribution for non-homogeneous lights. The approach is described in a paper by SCITEPRESS (2022), which references earlier work by Belcour et al. (2018) and others on spherical harmonics for radiance approximation. [S1, unofficial]
+
+## Sources
+[S1] SCITEPRESS - SCIENCE AND TECHNOLOGY PUBLICATIONS, https://www.scitepress.org/PublishedPapers/2022/108416/, fetched 2026-10-29 (unofficial)

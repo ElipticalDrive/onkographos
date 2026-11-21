@@ -1,0 +1,409 @@
+c++ - Direct Volume Rendering Texture overlapping artifacts - Stack Overflow
+Collectives™ on Stack Overflow
+Find centralized, trusted content and collaborate around the technologies you use most.
+Learn more about Collectives
+Teams
+Q&A for work
+Connect and share knowledge within a single location that is structured and easy to search.
+Learn more about Teams
+Get early access and see previews of new features.
+Learn more about Labs
+Direct Volume Rendering Texture overlapping artifacts
+Ask Question
+Asked
+9 days ago
+Modified
+3 days ago
+Viewed
+119 times
+0
+I'm trying to use the direct volume rendering in Chai3D, but there is an artifact that makes the edges of the hosting boundary mesh always visible, even when there is another object in front of it. Any cues of what could be causing the issue?
+The whole code can be seen here, the application runs regardless of having a haptic device connected to it:
+Chai3D Direct Volume Rendering example
+Here is the shader code:
+```
+uniform vec3 uMinCorner;
+uniform vec3 uMaxCorner;
+uniform vec3 uTextureScale;
+uniform vec3 uGradientDelta;
+uniform sampler3D uVolume;
+uniform sampler1D uColorLUT;
+uniform float uIsosurface;
+uniform float uOpacityThreshold;
+uniform float uOpticalDensityFactor;
+uniform float uResolution;
+
+varying vec4 vPosition;
+
+vec3 dx = vec3(uGradientDelta.x, 0.0, 0.0);
+vec3 dy = vec3(0.0, uGradientDelta.y, 0.0);
+vec3 dz = vec3(0.0, 0.0, uGradientDelta.z);
+
+float entry(vec3 e1, vec3 d)
+{
+    float t = distance(uMinCorner, uMaxCorner);
+    vec3 a = (uMinCorner - e1) / d;
+    vec3 b = (uMaxCorner - e1) / d;
+    vec3 u = min(a, b);
+    return max(max(-t, u.x), max(u.y, u.z));
+}
+
+vec3 gradient(vec3 tc)
+{
+    vec3 nabla = vec3(
+        texture3D(uVolume, tc + dx).r - texture3D(uVolume, tc - dx).r,
+        texture3D(uVolume, tc + dy).r - texture3D(uVolume, tc - dy).r,
+        texture3D(uVolume, tc + dz).r - texture3D(uVolume, tc - dz).r
+    );
+    return (nabla / uGradientDelta) * uTextureScale;
+}
+
+vec3 shade(vec3 p, vec3 v, vec3 n)
+{
+    vec4 lp = gl_ModelViewMatrixInverse * gl_LightSource[0].position;
+    vec3 l = normalize(lp.xyz - p * lp.w);
+    vec3 h = normalize(l + v);
+    float cos_i = max(dot(n, l), 0.0);
+    float cos_h = max(dot(n, h), 0.0);
+    vec3 Ia = gl_FrontLightProduct[0].ambient.rgb;
+    vec3 Id = gl_FrontLightProduct[0].diffuse.rgb * cos_i;
+    vec3 Is = gl_FrontLightProduct[0].specular.rgb * pow(cos_h, gl_FrontMaterial.shininess);
+    return (Ia + Id + Is);
+}
+
+void main(void)
+{
+    vec4 camera = gl_ModelViewMatrixInverse * vec4(0.0, 0.0, 0.0, 1.0);
+    vec3 raydir = normalize(vPosition.xyz - camera.xyz);
+    float t_entry = entry(vPosition.xyz, raydir);
+    t_entry = max(t_entry, -distance(camera.xyz, vPosition.xyz);
+    float t_step = distance(uMinCorner, uMaxCorner) / uResolution;
+    vec3 tc_step = uTextureScale * (t_step * raydir);
+    vec4 sum = vec4(0.0);
+    vec3 tc = gl_TexCoord[0].stp + t_entry * tc_step / t_step;
+    
+    for (float t = t_entry; t < 0.0; t += t_step, tc += tc_step)
+    {
+        float intensity = texture3D(uVolume, tc).r;
+        vec4 colour = texture1D(uColorLUT, intensity);
+        if (colour.a < 0.001) continue;
+        vec3 nabla = gradient(tc);
+        vec3 position = vPosition.xyz + t * raydir;
+        vec3 normal = -normalize(nabla);
+        vec3 view = -raydir;
+        vec3 shaded = shade(position, view, normal);
+        colour.rgb *= shaded;
+        float Tr = exp(-colour.a * uOpticalDensityFactor);
+        colour.rgb *= 1.0 - Tr;
+        colour.a = 1.0 - Tr;
+        sum += (1.0 - sum.a) * colour;
+        if (sum.a > uOpacityThreshold)
+        {
+            vec4 clip = gl_ModelViewProjectionMatrix * vec4(position, 1.0);
+            gl_FragDepth = (gl_DepthRange.diff * clip.z / clip.w + gl_DepthRange.near + gl_DepthRange.far) * 0.5;
+            break;
+        }
+    }
+    
+    gl_FragColor = sum;
+}
+```
+This is the rendering function, which can be seen inside renderSceneGraph here, I have attempted to use single and multipass:
+```
+    //-----------------------------------------------------------------------
+// Init
+//-----------------------------------------------------------------------
+
+glEnable(GL_LIGHTING);
+glDisable(GL_BLEND);
+glDepthMask(GL_TRUE);
+glEnable(GL_DEPTH_TEST);
+glColorMaterial(GL_FRONT_AND_BACK,GL_AMBIENT_AND_DIFFUSE);
+
+//-----------------------------------------------------------------------
+// Render bounding box, frame, collision detector. (opaque components)
+//-----------------------------------------------------------------------
+if (SECTION_RENDER_OPAQUE_PARTS_ONLY(a_options) && (!a_options.m_rendering_shadow))
+{
+    // disable lighting
+    glDisable(GL_LIGHTING);
+
+    // render boundary box
+    if (m_showBoundaryBox)
+    {
+        // set size on lines
+        glLineWidth(1.0);
+
+        // set color of boundary box
+        glColor4fv(s_boundaryBoxColor.getData());
+
+        // draw box line
+        cDrawWireBox(m_boundaryBoxMin(0) , m_boundaryBoxMax(0) ,
+                     m_boundaryBoxMin(1) , m_boundaryBoxMax(1) ,
+                     m_boundaryBoxMin(2) , m_boundaryBoxMax(2) );
+    }
+
+    // render collision tree
+    if (m_showCollisionDetector && (m_collisionDetector != NULL))
+    {
+        m_collisionDetector->render(a_options);
+    }
+
+    // enable lighting
+    glEnable(GL_LIGHTING);
+}
+
+// render frame
+if (m_showFrame && (a_options.m_single_pass_only || a_options.m_render_opaque_objects_only))
+{
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDisableClientState(GL_INDEX_ARRAY);
+    glDisableClientState(GL_EDGE_FLAG_ARRAY);
+    glDisable(GL_COLOR_MATERIAL);
+
+    glEnable(GL_COLOR_MATERIAL);
+    glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+    glColor4f(1.0,1.0,1.0,1.0);
+
+    // set rendering properties
+    glPolygonMode(GL_FRONT, GL_FILL);
+        
+    // draw frame
+    cDrawFrame(m_frameSize, m_frameThicknessScale);
+}
+
+//-----------------------------------------------------------------------
+// Render graphical representation of object
+//-----------------------------------------------------------------------
+if (m_showEnabled)
+{
+    // set polygon and face mode
+    glPolygonMode(GL_FRONT_AND_BACK, m_triangleMode);
+
+    // initialize line width
+    glLineWidth(1.0f);
+
+    /////////////////////////////////////////////////////////////////////
+    // CREATING SHADOW DEPTH MAP
+    /////////////////////////////////////////////////////////////////////
+    if (a_options.m_creating_shadow_map)
+    {
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_FRONT);
+
+        // render object
+        render(a_options);
+        glDisable(GL_CULL_FACE);
+    }
+
+    /////////////////////////////////////////////////////////////////////
+    // SINGLE PASS RENDERING
+    /////////////////////////////////////////////////////////////////////
+    else if (a_options.m_single_pass_only)
+    {
+        if (m_cullingEnabled)
+        {
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_BACK);
+        }
+        else
+        {
+            glDisable(GL_CULL_FACE);
+        }
+
+        if (m_useTransparency)
+        {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+        }
+        else
+        {
+            glDisable(GL_BLEND);
+            glDepthMask(GL_TRUE);
+        }
+
+        // render object
+        render(a_options);
+
+        // disable blending
+        glDisable(GL_BLEND);
+        glDepthMask(GL_TRUE);
+    }
+
+
+    /////////////////////////////////////////////////////////////////////
+    // MULTI PASS RENDERING
+    /////////////////////////////////////////////////////////////////////
+    else
+    {
+        // opaque objects
+        if (a_options.m_render_opaque_objects_only)
+        {
+            if (m_cullingEnabled)
+            {
+                glEnable(GL_CULL_FACE);
+                glCullFace(GL_BACK);
+            }
+            else
+            {
+                glDisable(GL_CULL_FACE);
+            }
+
+            render(a_options);
+        }
+
+        // render transparent back triangles
+        if (a_options.m_render_transparent_back_faces_only)
+        {
+            if (m_useTransparency)
+            {
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glDepthMask(GL_FALSE);
+            }
+            else
+            {
+                glDisable(GL_BLEND);
+                glDepthMask(GL_TRUE);
+            }
+
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_FRONT);
+            
+            render(a_options);
+
+            // disable blending
+            glDisable(GL_BLEND);
+            glDepthMask(GL_TRUE);
+        }
+
+        // render transparent front triangles
+        if (a_options.m_render_transparent_front_faces_only)
+        {
+            if (m_useTransparency)
+            {
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glDepthMask(GL_FALSE);
+            }
+            else
+            {
+                glDisable(GL_BLEND);
+                glDepthMask(GL_TRUE);
+            }
+
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_BACK);
+
+            render(a_options);
+    
+            // disable blending
+            glDisable(GL_BLEND);
+            glDepthMask(GL_TRUE);
+        }
+    }
+}
+```
+c++
+opengl
+glsl
+glfw
+haptic-feedback
+Share
+Follow
+edited Oct 30 at 19:02
+Lucas Rodrigues
+asked Oct 24 at 17:58
+Lucas RodriguesLucas Rodrigues
+1,19222 gold badges1111 silver badges2323 bronze badges
+2
+You can enable depth testing like glEnable(GL_DEPTH_TEST) and glDepthFunc(GL_LESS) before computing the final color.
+– Cem Polat
+Oct 28 at 12:32
+@CemPolat Thank you for your comment. glEnable(GL_DEPTH_TEST) was already there, and I tried adding glDepthFunc(GL_LESS), but it didn't change it. Adding my "stylus" to the scene after the volume rendering object made the object always visible, even when it is supposed to be behind the volume.
+– Lucas Rodrigues
+Oct 28 at 19:44
+Add a comment
+|
+Related questions
+1
+OpenGL deferred rendering: point light implementation
+0
+OpenGL & GLSL: Greyscale texture not showing
+0
+glBlendFunc and alpha blending
+Related questions
+1
+OpenGL deferred rendering: point light implementation
+0
+OpenGL & GLSL: Greyscale texture not showing
+0
+glBlendFunc and alpha blending
+10
+What would cause OpenGL alpha blending differences between Windows and OS X?
+0
+Self-occlusion-aware multiple geometry blending in C++ OpenGL (rendering)
+1
+OpenGL Texture not rendering
+4
+Rendering Freetype glyph to OpenGL (3.3+) texture results in repeated texture with artifacts
+Load 4 more related questions
+Show fewer related questions
+0
+Sorted by:
+Reset to default
+Highest score (default)
+Trending (recent votes count more)
+Date modified (newest first)
+Date created (oldest first)
+Know someone who can answer? Share a link to this question via email, Twitter, or Facebook.
+Browse other questions tagged
+c++
+opengl
+glsl
+glfw
+haptic-feedback
+or ask your own question.
+The Overflow Blog
+Edge and beyond: How to meet the increasing demand for memory
+sponsored post
+AI is only as good as the data: Q&A with Satish Jayanthi of Coalesce
+Featured on Meta
+Changes to MSE deployment process may cause intermittent issues on November...
+Update: New Colors Launched
+Temporary policy: Generative AI (e.g., ChatGPT) is banned
+Hot Network Questions
+Who is the 'pale Titan-woman' in Swinburne's 'Ave atque Vale'?
+Examples of small categories
+Landlord is trying to charge a $250 "tenant at will fee"
+Is there any fiscal responsibility merit to Congress's plan to use IRS funds to pay for Israeli relief?
+Download mega.nz file from command line
+Why multiply a normal?
+Is it necessary to differentiate between && and & when I support overloads
+Why do strings in musical instruments have helical shape?
+Prove that in an n*(n+1) table filled with integers, we can always cross out some columns and make the sum of the integers in each row, even
+Can we say "the pot is leaking" or "the pot leaks" when the pot is empty?
+Would it be possible to work as part-time staff in a university research lab?
+Can I enter France from outside EU with German Fiktionsbescheinigung and/or Schengen Visa?
+Seat gangs as far as possible
+Cumulative grade-point-average calculator in C++
+Why is the $14 billion aid bill to Israel "bad for Israel", according to the White House?
+Does Cartomancer's Hidden Ace allow you to bypass the casting time of a spell with a long casting time?
+If money were no object, is there an element or alloy that would make for better train tracks than common steel?
+Why notes played on bass strings on the highest frets sound bad?
+how to output the τεχνική symbol
+Intuition for order of operations in compound transformations
+Apply function to all first arguments of a nested list of rules
+Short story about a laser-soccer type sport in which a team defends against shots on goal by reflecting the laser beams
+Can two songs share the same melodic notes but still have distinct melodies?
+Does Dissociative ego disorder challenge Descartes‘ „cogito-argument“?
+more hot questions
+Question feed
+default
+Your privacy
+By clicking “Accept all cookies”, you agree Stack Exchange can store cookies on your device and disclose information in accordance with our Cookie Policy.
+Accept all cookies
+Necessary cookies only
+Customize settings

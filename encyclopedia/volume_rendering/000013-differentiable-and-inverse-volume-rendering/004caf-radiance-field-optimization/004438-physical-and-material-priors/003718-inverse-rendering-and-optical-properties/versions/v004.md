@@ -1,0 +1,45 @@
+# Inverse Rendering and Optical Properties
+
+Also called: Inverse Volume Rendering, Differentiable Volume Rendering, Neural Reflectance Fields
+
+## Overview
+Inverse rendering and optical properties methods reconstruct physical scene parameters—such as volume density, extinction coefficients, albedo, or environmental illumination—from a set of observed images [S1, unofficial][S2, S3]. Unlike forward rendering, which computes images from known geometry and materials, these methods treat the rendering equation as an optimization problem where the scene parameters are the variables [S1, unofficial][S3]. This family is distinguished from standard differentiable volume rendering by its explicit focus on recovering physically meaningful material properties (e.g., via adjoint derivatives or neural field residuals) rather than merely optimizing a black-box radiance field [S1, unofficial][S2, S3].
+
+## Shared principles
+All methods in this family share the core mechanism of differentiating the forward rendering operator to propagate gradients from image space to scene parameter space. The general optimization objective is:
+$$
+\min_{\theta} \mathcal{L}(\theta) = \sum_{i} \| I_{rendered}(\theta) - I_{ref}^{(i)} \|^2
+$$
+where $\theta$ represents the scene parameters (e.g., density grid values, neural network weights, or lighting coefficients) [S1, unofficial][S2, S3]. The gradient $\nabla_\theta \mathcal{L}$ is computed using either backpropagation through a differentiable path tracer [S1, unofficial][S3] or by solving the adjoint of the rendering equation [S1, unofficial]. The forward operator must be differentiable with respect to $\theta$, allowing the use of gradient-based optimizers like Adam [S1, unofficial][S2, S3].
+
+## Subtopics
+
+### [Volumetric Inverse Rendering with Differentiable Path Tracing](1523-volumetric-inverse-rendering-with-differentiable-path-tracin.md)
+This method optimizes a 3D volume density grid to match reference images using differentiable path tracing [1523-volumetric-inverse-rendering-with-differentiable-path-tracin.md]. It accounts for direct and indirect illumination by integrating the adjoint method into the path tracing loop, allowing differentiability through stochastic sampling events [1523-volumetric-inverse-rendering-with-differentiable-path-tracin.md]. Choose this when you need to reconstruct complex volumetric properties (extinction/scattering) from multiple viewpoints while maintaining physical accuracy through path replay backpropagation [1523-volumetric-inverse-rendering-with-differentiable-path-tracin.md].
+
+### [Neural Radiosity](6755-neural-radiosity.md)
+Neural Radiosity represents the outgoing radiance field as a neural network and optimizes its parameters by minimizing the residual of the rendering equation [6755-neural-radiosity.md]. It solves global illumination by treating the rendering equation as a fixed-point problem, making it independent of specific camera viewpoints during training [6755-neural-radiosity.md]. Choose this when you want to compute global illumination without relying on rasterizers or path tracers, and when viewpoint independence is desired [6755-neural-radiosity.md].
+
+### [NeRV (Neural Reflectance and Visibility Fields)](10246-nerv-neural-reflectance-and-visibility-fields.md)
+NeRV reconstructs a 3D scene representation from images under unconstrained, known lighting, enabling view synthesis and relighting with indirect illumination [10246-nerv-neural-reflectance-and-visibility-fields.md]. It extends NeRF by representing the scene as a 3D field of oriented particles that absorb and reflect light, parameterized by neural networks [10246-nerv-neural-reflectance-and-visibility-fields.md]. Choose this when you need to support arbitrary environment lighting and one-bounce global illumination, using a learned neural visibility field to reduce light transport simulation complexity [10246-nerv-neural-reflectance-and-visibility-fields.md].
+
+### Inverse Rendering with Adjoint Derivatives
+- **Definition**: An optimization method that estimates scene optical properties (position, scale, rotation, cross-section, spherical harmonic coefficients) from images using gradient-based optimization with adjoint derivatives of the forward pass [S1, unofficial].
+- **Step**: Start optimization with a small number of primitives and gradually generate new primitives to add detail [S1, unofficial].
+- **Parameter**: Optimizer: Bound Adam (an improved Adam optimizer that respects parameter boundaries) [S1, unofficial]. Loss function: L1 error, D-SSIM, plus regularization terms for anisotropy and density of small primitives [S1, unofficial].
+
+### Reflectance Fields
+- **Definition**: A 3D representation for inverse rendering where the scene is represented as a field of volume density, surface normals, and Bidirectional Reflectance Distribution Functions (BRDFs) [S2].
+- **Step**: Augment NeRF with an additional MLP to model lighting [S2]. Model BRDFs with spherical Gaussians [S2]. Incorporate SDF-based representation in the model [S2]. Introduce regularization to stabilize normals from NeRF's foggy geometry [S2].
+- **Pitfall**: These methods suffer from extremely time-consuming optimization and slow rendering speed [S2].
+
+### Light Reconstruction
+- **Definition**: Optimizes environmental illumination instead of volume properties to match desired volume appearance. Volume properties (emission, albedo, extinction) are assumed spatially varying but fixed during this optimization [S3].
+
+## Background
+The concept of inverse rendering has roots in computer vision and graphics, aiming to recover scene properties from images. Recent advances have leveraged neural fields and differentiable rendering to make this process more tractable. The use of adjoint derivatives for volumetric inverse rendering was highlighted in work on volumetric ray-traced primitives, which allows for noiseless and efficient rendering of scattering media [S1, unofficial]. Reflectance fields, which model BRDFs and lighting via neural networks, have been surveyed as a key approach for inverse rendering, though they face challenges in optimization time and rendering speed [S2]. Light reconstruction, as an alternative to modifying volume properties, has been explored in the context of volume stylization, where environmental illumination is optimized to match desired appearances [S3].
+
+## Sources
+[S1] Don’t Splat your Gaussians: Volumetric Ray-Traced Primitives for Modeling and Rendering Scattering and Emissive Media (2025), https://qiita.com/matumu20/items/67b33681dc97ccbcc849, fetched 2026-10-27 (unofficial)
+[S2] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+[S3] Property and Lighting Manipulations for Static Volume Stylization Using a Painting Metaphor, https://doi.org/10.1109/TVCG.2014.13, fetched 2026-10-26

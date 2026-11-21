@@ -1,0 +1,150 @@
+A GPU-driven game engine written in Rust, with meshlet-based rendering and an editor. - research(render,world): LOD strategy for terraformable planet terrain · Issue #614 · lobinuxsoft/kooch
+
+research(render,world): LOD strategy for terraformable planet terrain · Issue #614 · lobinuxsoft/kooch · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+research(render,world): LOD strategy for terraformable planet terrain #614
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+research(render,world): LOD strategy for terraformable planet terrain#614
+Copy link
+Labels
+area:renderRender pipeline — passes, materials, post-processing, sky, shadowsRender pipeline — passes, materials, post-processing, sky, shadowsneeds-decisionRequiere decisión de diseño antes de implementarRequiere decisión de diseño antes de implementarpriority:mediumPrioridad mediaPrioridad media
+Description
+lobinuxsoft
+opened on Jul 26, 2026
+Issue body actions
+The question
+Planets need editable terrain, which means isosurface extraction with level of detail. The
+engine already has a Nanite-style meshlet renderer with a DAG built by METIS graph
+partitioning. Does that machinery serve the terrain, and does marching cubes or dual
+contouring fit an octree?
+Researched rather than assumed, because both answers turn out to be counter-intuitive.
+Finding 1 — meshlets and an octree are two LOD systems, not one
+They compete for the same job. For editable terrain the octree wins, for two reasons:
+A Nanite DAG is built offline. It is a precomputed hierarchy of simplifications.
+Terrain edited at runtime means rebuilding that DAG whenever the player digs — precisely
+the work Nanite exists to avoid doing in real time.
+Nanite over voxels is documented as poor. The Aokana paper (GPU-driven voxel
+rendering, 2025) reports that with many discontinuous voxels Nanite generates "an
+excessive number of disconnected clusters that are hard to be merged", and that those
+clusters "have poor geometric quality because LOD construction relies on mesh
+simplification algorithms". Its own conclusion is that whether Nanite suits voxel games
+"remains to be further tested".
+But meshlets still belong here, in a different role. The distinction that matters is
+meshlet as a unit of culling and drawing versus meshlet DAG as an LOD hierarchy. Each
+octree node emits its mesh as meshlets, and those go through the GPU-driven pipeline that
+already exists — Hi-Z, compute cull, visibility buffer. The octree decides which level to
+draw; the meshlet decides what is visible within that level. The two coexist, and the
+existing pipeline is reused rather than duplicated.
+Finding 2 — dual contouring, not marching cubes
+Behaviour on an octree
+Marching Cubes
+Produces cracks between adjacent cells at different depths. Needs Transvoxel on top to stitch the seams — and Transvoxel is suited only to smooth terrain
+Dual Contouring
+Produces crack-free surfaces on any octree grid, by construction. Operates directly on leaf nodes of differing size, and preserves features (edges, corners), so it handles arbitrary geometry rather than only smooth terrain
+So with octree LOD, DC gives the LOD for free while MC requires adding Transvoxel to patch
+a problem DC does not have. They are alternatives, not layers — with DC, marching cubes is
+not needed.
+This stays inside the physics ceiling
+Neither crosses the rule fixed in #612. DC and the octree generate geometry, which is
+then handed to Rapier as a collider. Own geometry yes, own dynamics no.
+The open question — how much of the octree lives on the GPU
+The project's own constraint is that the hot loop has no CPU readback per frame. An octree
+edited on the CPU and re-uploaded every frame violates that, so this has to be settled
+before anything is built:
+Where does an edit land — a CPU octree that uploads deltas, or a GPU-resident structure
+edited by a compute pass?
+Does DC run on the GPU per dirty node, or on the CPU for edited nodes only?
+How does a node's meshlet build happen without a stall? Meshlet construction is currently
+a CPU cost paid at load; per-edit it becomes a frame cost.
+Not deciding here
+The chunking scheme, and how terrain interacts with world cells (#566). Cells partition
+entities; terrain is not an entity per chunk. Whether it should be is its own question.
+References
+Aokana: A GPU-Driven Voxel Rendering Framework for Open World Games — https://arxiv.org/abs/2505.02017
+The Transvoxel Algorithm — https://transvoxel.org/
+Dual Contouring: Seams & LOD for Chunked Terrain — http://ngildea.blogspot.com/2014/09/dual-contouring-chunked-terrain.html
+Correction — Finding 1 was overstated
+Asked directly whether anyone has actually done this, the answer is no evidence found,
+and the paper cited above does not support what it was used to support.
+Aokana does not use meshlets or clusters at all. It ray-marches Sparse Voxel DAGs.
+Its LOD is voxel aggregation — each LOD n voxel is eight voxels of LOD n−1 — not a
+cluster hierarchy. And on the question that matters most here, it says outright:
+"Currently, our implementation does not support runtime modification of voxels."
+So it is not an example of meshlets serving editable terrain. It is an example of a team
+solving this problem by choosing a different technique entirely, and still not reaching
+runtime editing.
+What the search did turn up:
+Real destructible-voxel implementations (e.g. GPU dual contouring in Unity) use classic
+octree LOD. No meshlets.
+Meshlets in shipping engines are for static geometry. RE ENGINE (Dragon's Dogma 2,
+Monster Hunter Wilds) reportedly restricts them to static meshes — noted as unverified,
+the source PDF would not parse.
+Simplygon's Clustered Meshlets and meshoptimizer's clusterlod both build cluster LOD
+hierarchies as a preprocessing step.
+What survives, and what does not
+Still true: meshlet as a unit of culling and meshlet DAG as an LOD hierarchy are
+different things, and only the second is inherently offline.
+What was glossed over: building meshlets is not free either. Clusterising and
+optimising a chunk is a cost currently paid at load. Under editing it becomes a per-edit
+frame cost — a smaller version of the same problem the DAG has, not an escape from it.
+Whether it is small enough has not been measured, here or anywhere found.
+The honest position
+Feeding octree nodes through the existing meshlet pipeline is a hypothesis, not a
+proven path. It should be measured — how long clusterising one dirty node takes — before
+any design commits to it. The fallback if it is too slow is what the destructible-voxel
+implementations already do: draw terrain with its own path and leave the meshlet pipeline
+to static meshes.
+Nothing changes about Finding 2: dual contouring versus marching-cubes-plus-Transvoxel is
+independent of how the resulting mesh reaches the GPU.
+Decided: zero-readback holds per frame, discrete events may sync
+The constraint stays no readback per frame in the hot loop. The agreed exception is that
+a discrete event may synchronise.
+Discrete means it happens when it happens: the player digs, a meteor lands, something
+explodes. Not every frame. This is what destructible-voxel implementations already do — the
+cost is paid at the event rather than out of the frame budget.
+What the exception does not cover: terrain streaming, LOD selection, or acceleration
+structure refits doing readback per frame. Those remain forbidden. Worded this way
+deliberately — "terrain is exempt" would be easier to remember and would be the door a
+future hitch walks through unexplained.
+The test before adding any readback: does this run because something happened, or does it
+run always? If the second, the exception does not apply.
+Reactions are currently unavailable
+Activity
+lobinuxsoft
+added
+priority:mediumPrioridad mediaPrioridad media
+needs-decisionRequiere decisión de diseño antes de implementarRequiere decisión de diseño antes de implementar
+area:renderRender pipeline — passes, materials, post-processing, sky, shadowsRender pipeline — passes, materials, post-processing, sky, shadows
+on Jul 26, 2026
+lobinuxsoft
+added a commit that references this issue on Jul 26, 2026
+docs: zero-readback holds per frame; discrete events may sync
+...
+33b0fc6
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:renderRender pipeline — passes, materials, post-processing, sky, shadowsRender pipeline — passes, materials, post-processing, sky, shadowsneeds-decisionRequiere decisión de diseño antes de implementarRequiere decisión de diseño antes de implementarpriority:mediumPrioridad mediaPrioridad media
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,123 @@
+Currently, we send an RGBA buffer from Agg/Cairo up to the interactive backends. This buffer may contain non-opaque pixels. Most backends then composite this buffer onto a white background (macosx currently does not, but this is fixed in...
+
+Always send an opaque buffer to interactive backends · Issue #32258 · matplotlib/matplotlib · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Always send an opaque buffer to interactive backends #32258
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Always send an opaque buffer to interactive backends#32258
+Copy link
+Labels
+Performancestatus: needs comment/discussionneeds consensus on next stepneeds consensus on next steptopic: backends
+Description
+iccir
+opened on Aug 29, 2026
+Issue body actions
+Currently, we send an RGBA buffer from Agg/Cairo up to the interactive backends. This buffer may contain non-opaque pixels. Most backends then composite this buffer onto a white background (macosx currently does not, but this is fixed in the macos rework).
+If we formalize this: "our interactive backends will always render onto a white background" or "our interactive backends will provide an opaque backing color to the renderer", we can instead pass up an RGBX buffer (alpha ignored, completely opaque).
+Depending on the backend, this may avoid a compositing operation and/or allow a less-expensive compositing operation.
+For example, on macOS, we could use kCGImageAlphaNoneSkipLast rather than kCGImageAlphaLast (which has to convert to premultiplied alpha). In Qt, we could use Format_RGBX8888.
+The actual performance impact of this could be hard to measure. At least in the macOS rework: actual compositing may occur at a lower level instead of our own process.
+That said, it seems non-ideal to hand a transparent buffer to a backend and say: "Now make this opaque" when we can instead do a memset(ptr, 0xff, length) at render time.
+Thoughts?
+Activity
+iccir
+added
+status: needs comment/discussionneeds consensus on next stepneeds consensus on next step
+Performance
+topic: backends
+on Aug 29, 2026
+jklymak commented on Aug 29, 2026
+jklymak
+on Aug 29, 2026
+Member
+More actions
+I'm not following how the pixels ended up non opaque? Did the user choose a figure facecolor that wasn't opaque? Doesn't everything get rendered onto the figure and get backed by its facecolor?
+iccir commented on Aug 30, 2026
+iccir
+on Aug 30, 2026
+ContributorAuthor
+More actions
+I'm not following how the pixels ended up non opaque? Did the user choose a figure facecolor that wasn't opaque? Doesn't everything get rendered onto the figure and get backed by its facecolor?
+I think choosing a non-opaque facecolor is the most common, which is what #19410 mentions. One of my test files does:
+```
+fig, ax = plt.subplots()
+ax.plot([1, 2, 3], [4, 5, 6])
+
+fig.patch.set_alpha(0.0)
+ax.patch.set_alpha(0.0)
+```
+There may be other ways.
+Note that if the user chooses the save the figure, I believe that the facecolor or alpha should be respected. We should only force an opaque background at render time if we know the interactive backend is going to composite it on top of said color regardless.
+jklymak commented on Aug 31, 2026
+jklymak
+on Aug 31, 2026
+Member
+More actions
+I think if the user sets the pixels to be non opaque, its simplest just to respect that and use whatever the backend backs the canvas with as the background? But maybe I'm not following the practical problem here.
+iccir commented on Sep 3, 2026
+iccir
+on Sep 3, 2026
+ContributorAuthor
+More actions
+I think if the user sets the pixels to be non opaque, its simplest just to respect that and use whatever the backend backs the canvas with as the background? But maybe I'm not following the practical problem here.
+Compositing an opaque buffer onto an opaque destination can be significantly faster than compositing a buffer with alpha (especially in the case of non-premultiplied alpha).
+Consider this simple example:
+```
+import matplotlib.pyplot as plt
+fig, ax = plt.subplots()
+ax.bar(['moo', 'foo'], [157, 42])
+plt.show()
+```
+If I run this in the old macosx backend and resize the window for a few seconds to redraw the figure, 11.9% of CPU time is spent compositing the buffer:
+```
+11.9% - CA::CG::DrawImage::draw_image(CA::CG::Renderer&, bool) const
+```
+If I tell macOS that the buffer is opaque by changing kCGImageAlphaLast to kCGImageAlphaNoneSkipLast, this drops to 1.0% of CPU time:
+```
+1.0% - CA::CG::DrawImage::draw_image(CA::CG::Renderer&, bool) const
+```
+macOS is able to do a simple memmove() on opaque buffers. Other backends may have similar performance gains.
+We wouldn't change what the user sees - we would have the renderer set the buffer background to white prior to rendering the potentially non-opaque figure. This guarantees an opaque buffer and the backend could completely ignore the alpha channel.
+ayshih commented on Sep 3, 2026
+ayshih
+on Sep 3, 2026
+Contributor
+More actions
+If we formalize this: "our interactive backends will always render onto a white background" or "our interactive backends will provide an opaque backing color to the renderer", we can instead pass up an RGBX buffer (alpha ignored, completely opaque).
+I once had a friend who swore by using a windows manager with transparent windows. I think your suggestion would make people like that sad. =)
+👍React with 👍1Reacted by Antony Lee
+jklymak commented on Sep 3, 2026
+jklymak
+on Sep 3, 2026
+Member
+More actions
+If folks want a transparent image when they save, savefig accepts a facecolor argument. I don't think we should add another layer under the figure facecolor in order to second guess that the user wants
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+Performancestatus: needs comment/discussionneeds consensus on next stepneeds consensus on next steptopic: backends
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

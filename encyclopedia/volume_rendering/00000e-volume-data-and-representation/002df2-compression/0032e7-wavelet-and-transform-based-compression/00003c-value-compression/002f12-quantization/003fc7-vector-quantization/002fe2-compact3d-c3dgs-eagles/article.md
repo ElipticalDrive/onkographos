@@ -1,0 +1,145 @@
+# Compact3D / C3DGS / EAGLES
+Also called: Codebook-based Quantization for SH & Shape Parameters, Compact3D, Compressed3D, Compression via Vector Quantization, VQ for 3DGS, Vector Quantization for 3DGS
+
+## Overview
+Compact3D (also known as C3DGS or EAGLES) is a lossy compression method for 3D Gaussian Splatting that reduces storage requirements by applying vector quantization to spherical harmonic (SH) coefficients and Gaussian shape parameters [S1, unofficial][S3][S4, unofficial][S5]. It clusters similar attribute values into shared codewords, replacing exact floating-point storage with fixed-size indices [S1, unofficial][S2]. Unlike sibling methods that may rely on hierarchical context models or residual coding, Compact3D focuses on direct codebook-based quantization of specific attribute groups to achieve roughly 4× compression with minimal quality loss [S2, S3].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A trained set of $N$ 3D Gaussians, each defined by mean position $\mu$, rotation $q$, scale $s$, opacity $\alpha$, and spherical harmonic coefficients $c_{l,m}$ for view-dependent color.
+*   **Output:** A compressed representation consisting of:
+    *   Exact values for $\mu$ and rotation $q$ (and optionally opacity $\alpha$, though sources vary on whether $\alpha$ is quantized; S2 excludes it from VQ, S4 mentions opacity quantization generally).
+    *   Codebooks for SH coefficients and shape parameters ($s$).
+    *   Indices mapping each Gaussian's attributes to the nearest codeword in the respective codebooks.
+
+**Data Structures:**
+1.  **Codebook:** A fixed-size table of $K$ codewords. For SH coefficients, the codebook stores vectors of dimension equal to the number of SH bands per color channel. For scale $s$, the codebook stores vectors of dimension 3 (x, y, z scales).
+2.  **Indices:** For each Gaussian $i$, an index $idx_{SH}[i]$ points to a codeword in the SH codebook, and $idx_{s}[i]$ points to a codeword in the scale codebook.
+
+**Parameters:**
+*   **Codebook Size ($K$):** Tested sizes are 1024, 2048, 4096, and 8192 [S3].
+*   **Sensitivity Thresholds ($\beta_c, \beta_g$):** Used to decide whether SH coefficients and shape parameters are included in clustering, trading off quality and compression rate [S3].
+
+**Algorithm Steps:**
+1.  **Attribute Selection:** Identify attributes to quantize. Typically, SH coefficients and scale parameters $s$ are quantized. Mean position $\mu$ and rotation $q$ are stored exactly to preserve geometry and orientation [S2, S3].
+2.  **Codebook Generation:** For each attribute group (e.g., all SH coefficients across all Gaussians, or all scale vectors), apply k-means clustering to generate a shared codebook of size $K$ [S2, S3].
+    *   For vector attributes like scale $s$, a shared codebook is used with separate indices for each vector component, or the vector is treated as a single unit depending on implementation [S2].
+3.  **Quantization (Indexing):** For each Gaussian $i$ and each quantized attribute:
+    *   Find the codeword $c^*$ in the codebook that minimizes the distance to the original attribute value $v_i$.
+    *   Store the index of $c^*$ instead of $v_i$.
+    *   Distance metric is typically Euclidean distance [S2].
+4.  **Storage:** Save the codebooks and the index arrays. The exact values of $\mu$ and $q$ are saved separately [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compact3d_compress(gaussians, codebook_size_K):
+    """
+    Compress 3D Gaussians using vector quantization for SH and scale.
+    gaussians: List of Gaussian objects with attributes .mu, .q, .s, .sh, .alpha
+    codebook_size_K: Integer, size of the codebook
+    Returns: compressed_data dict
+    """
+    compressed_data = {}
+    
+    # 1. Store exact values for geometry-critical attributes
+    compressed_data['mu'] = [g.mu for g in gaussians]
+    compressed_data['q'] = [g.q for g in gaussians]
+    # Note: Opacity alpha handling varies; S2 implies it's not VQ'd, S4 mentions quantization.
+    # We follow S2 for consistency with the core Compact3D description.
+    compressed_data['alpha'] = [g.alpha for g in gaussians] 
+    
+    # 2. Prepare data for SH quantization
+    # Flatten SH coefficients for all Gaussians into a list of vectors
+    sh_vectors = [g.sh for g in gaussians]
+    
+    # 3. Generate SH Codebook using K-Means
+    # kmeans is a standard clustering algorithm
+    sh_codebook = kmeans(sh_vectors, K=codebook_size_K)
+    
+    # 4. Quantize SH coefficients
+    sh_indices = []
+    for vec in sh_vectors:
+        # Find index of closest codeword
+        idx = argmin([euclidean_distance(vec, codeword) for codeword in sh_codebook])
+        sh_indices.append(idx)
+    
+    compressed_data['sh_codebook'] = sh_codebook
+    compressed_data['sh_indices'] = sh_indices
+    
+    # 5. Prepare data for Scale quantization
+    scale_vectors = [g.s for g in gaussians]
+    
+    # 6. Generate Scale Codebook
+    scale_codebook = kmeans(scale_vectors, K=codebook_size_K)
+    
+    # 7. Quantize Scale
+    scale_indices = []
+    for vec in scale_vectors:
+        idx = argmin([euclidean_distance(vec, codeword) for codeword in scale_codebook])
+        scale_indices.append(idx)
+        
+    compressed_data['scale_codebook'] = scale_codebook
+    compressed_data['scale_indices'] = scale_indices
+    
+    return compressed_data
+
+def compact3d_render(compressed_data, camera_params):
+    """
+    Render using compressed data.
+    """
+    gaussians = []
+    for i in range(len(compressed_data['mu'])):
+        g = Gaussian()
+        g.mu = compressed_data['mu'][i]
+        g.q = compressed_data['q'][i]
+        g.alpha = compressed_data['alpha'][i]
+        
+        # Retrieve quantized values
+        sh_vec = compressed_data['sh_codebook'][compressed_data['sh_indices'][i]]
+        s_vec = compressed_data['scale_codebook'][compressed_data['scale_indices'][i]]
+        
+        g.sh = sh_vec
+        g.s = s_vec
+        gaussians.append(g)
+        
+    # Standard 3DGS rasterization
+    return rasterize(gaussians, camera_params)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Quantizing $\mu$ and $q$:** Quantizing mean position and rotation significantly decreases reconstruction quality and is generally avoided [S2].
+*   **Codebook Size Selection:** While average reconstruction error is insensitive to codebook size, larger codebooks reduce maximum error with minimal memory overhead [S3].
+*   **Sensitivity Thresholds:** If sensitivity thresholds $\beta_c$ and $\beta_g$ are too low, important details may be lost; if too high, compression ratio suffers [S3].
+
+## Subtopics
+
+### [LightGaussian / CompGS / RDOGS](13540-lightgaussian-compgs-rdogs.md)
+LightGaussian (also known as CompGS) is a compression method for 3D Gaussian Splatting that reduces storage requirements by pruning redundant Gaussians and quantizing parameters using learned codebooks. It distinguishes itself from parent methods like Compact3D by explicitly avoiding redundant Gaussian splitting during training via a sliding window mask, rather than relying solely on post-hoc vector quantization of static parameters. It achieves a $15\times$ size reduction at $<0.5$ dB drop.
+
+### Fast inference pipeline
+This variant, associated with the Compact3D/EAGLES framework [S5], optimizes rendering speed through precomputation.
+*   **Step:** Precompute grid features at the testing phase to minimize the operational time of the neural field [S5].
+*   **Step:** Index the closest codes from multi-stage codebooks before testing to eliminate the time spent searching for suitable geometry during inference [S5].
+*   **Step:** During testing, process a small MLP to generate view-dependent colors, as the precomputed grid features precede the MLP input and are independent of view direction [S5].
+*   **Parameter:** Grid features are 2-channel features across 16 different resolutions (16 to 4096) from hash grids [S5].
+*   **Parameter:** MLP architecture is 2-layer, 64-channel [S5].
+*   **Comparison:** Extends overall training time slightly more than 3DGS due to neural field iteration and R-VQ search, but effectively reduces rendering time through precomputation and indexing [S5].
+*   **Usage:** Applied in the compact 3D Gaussian representation method for novel view synthesis to achieve notably faster rendering speed [S5].
+
+## Operating characteristics
+*   **Compression Ratio:** Provides roughly 4× compression without sacrificing rendering quality [S2].
+*   **Memory Impact:** On the Mip-Nerf360 dataset, total size ranges from 28.14 MB to 29.06 MB across codebook sizes 1024-8192 [S3].
+*   **Quality Impact:** Codebook size has little effect on average reconstruction error, independent of the scene [S3]. Larger codebooks reduce the maximum error with only minimal memory overhead [S3].
+*   **Performance:** The VQ process time cost is negligible [S2]. However, variants using neural fields (like EAGLES) extend training time slightly more than standard 3DGS due to neural field iteration and R-VQ search [S5].
+
+## Background
+Compact3D (C3DGS) and Compressed3D were introduced concurrently as methods to address the large storage requirements of 3D Gaussian Splatting [S1, unofficial]. They utilize vector quantization and codebooks to cluster Gaussian parameters with similar values into shared codewords for more efficient storage [S1, unofficial]. The method is part of a broader trend of compressing 3DGS representations, alongside other approaches like LightGaussian and Context-GS [S1, S4, unofficial].
+
+## Sources
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] iVR-GS: Inverse Volume Rendering for Explorable Visualization via Editable 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2025.3567121, fetched 2026-10-26
+[S3] Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis, https://doi.org/10.1109/cvpr52733.2024.00985, fetched 2026-10-26
+[S4] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S5] Compact 3D Gaussian Representation for Radiance Field, https://doi.org/10.1109/cvpr52733.2024.02052, fetched 2026-10-26

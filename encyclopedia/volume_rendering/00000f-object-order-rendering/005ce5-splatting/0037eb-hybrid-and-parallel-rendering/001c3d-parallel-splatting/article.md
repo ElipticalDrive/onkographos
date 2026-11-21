@@ -1,0 +1,124 @@
+# Parallel Splatting
+
+Also called: Tsplat parallel projection
+
+## Overview
+Parallel Splatting is a distributed volume rendering technique that applies the sort-last parallelization paradigm to the splatting pipeline [S2, unofficial]. It solves the scalability problem of rendering large volumetric datasets by partitioning the workload across multiple processing nodes or cores, which render partial images that are subsequently composited into a final result [S2, unofficial].
+
+## How it works
+The method distributes volumetric data to processing units, renders them in parallel to partial images, and composites these images in depth-sorted order [S2, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** A volumetric dataset (voxels), camera parameters, and a set of processing nodes/threads [S2, unofficial].
+*   **Output:** A final 2D image [S2, unofficial].
+
+**Data Structures:**
+*   **Volume Data:** Partitioned into slices (axis-aligned planes) or blocks [S2, unofficial].
+*   **Partial Images:** Rendered buffers containing the projection of assigned subvolumes [S2, unofficial].
+*   **Hierarchical Structures:** Optional k-d trees used to facilitate compositing and occlusion culling [S2, unofficial].
+
+**Steps:**
+1.  **Data Partitioning:** Distribute the volume data to processing nodes as slices (axis-aligned planes) or blocks [S2, unofficial]. Tasks are defined by specific subvolumes assigned to each processor [S2, unofficial].
+2.  **Parallel Projection:** Each node renders its assigned subvolume in parallel [S2, unofficial]. For each voxel/splat, compute the projection onto the image plane and the bounding box [S1, unofficial]. If the splat is valid (within bounds), return it; otherwise discard it [S1, unofficial]. Standard implementations splat all voxels regardless of emptiness or occlusion [S2, unofficial].
+3.  **Partial Image Generation:** Each node produces a partial image representing the contribution of its assigned subvolume [S2, unofficial].
+4.  **Optimization:** Pass only non-empty parts of the partial images to reduce communication overhead [S2, unofficial].
+5.  **Compositing:** Composite the partial images into the final image using a master node [S2, unofficial]. The compositing is performed in depth-sort order [S2, unofficial].
+6.  **Parallel Compositing (Optional):** The final compositing stage can be parallelized using screen-space partitioning [S2, unofficial]. Hierarchical data structures like k-d trees may be used to accelerate this step and enable occlusion culling [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def parallel_splatting(volume_data, camera, num_nodes):
+    # Step 1: Partition volume data into subvolumes (slices or blocks)
+    subvolumes = partition_volume(volume_data, num_nodes)
+    
+    # Step 2: Render subvolumes in parallel
+    partial_images = []
+    for i in range(num_nodes):
+        subvol = subvolumes[i]
+        img = render_subvolume(subvol, camera)
+        partial_images.append(img)
+        
+    # Step 3: Composite partial images (Sort-Last)
+    final_image = composite_partial_images(partial_images, depth_sorted=True)
+    return final_image
+
+def partition_volume(volume_data, num_nodes):
+    # Distribute volume data as slices (axis-aligned planes) or blocks [S2, unofficial]
+    # Tasks are defined by specific subvolumes assigned to each processor [S2, unofficial]
+    chunk = len(volume_data) // num_nodes
+    return [volume_data[i * chunk:(i + 1) * chunk] for i in range(num_nodes)]
+
+def render_subvolume(subvolume, camera):
+    # Initialize empty partial image buffer
+    buffer = [[0.0] * camera.width for _ in range(camera.height)]
+    
+    # Iterate splats in parallel [S1, unofficial]
+    valid_splats = []
+    for voxel in subvolume:
+        # Compute projection onto the image plane [S1, unofficial]
+        projected = project(voxel, camera)
+        # Compute bounding box and check validity [S1, unofficial]
+        if is_valid(projected, camera.width, camera.height):
+            valid_splats.append(projected)
+            
+    for splat in valid_splats:
+        add_to_buffer(buffer, splat)
+        
+    return buffer
+
+def project(voxel, camera):
+    # Standard perspective/orthographic projection [G]
+    return (voxel.x * camera.scale, voxel.y * camera.scale, voxel.z, voxel.color, voxel.radius)
+
+def is_valid(projected, width, height):
+    x, y, _, _, _ = projected
+    return 0 <= x < width and 0 <= y < height
+
+def add_to_buffer(buffer, projected):
+    x, y, _, color, _ = projected
+    # Standard alpha blending into the buffer [G]
+    buffer[int(y)][int(x)] = blend(buffer[int(y)][int(x)], color)
+
+def composite_partial_images(partial_images, depth_sorted=True):
+    # Composite images in depth-sort order [S2, unofficial]
+    if depth_sorted:
+        partial_images.sort(key=lambda img: img.get_depth())
+    final_image = [[0.0] * partial_images[0].width for _ in range(partial_images[0].height)]
+    for img in partial_images:
+        blend(final_image, img)
+    return final_image
+
+def blend(target, source):
+    # Standard alpha compositing [G]
+    return source
+```
+
+**Parameters:**
+*   **Partitioning Strategy:** Slices (axis-aligned planes) or Blocks [S2, unofficial].
+*   **Compositing Order:** Depth-sorted [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Occlusion Ignorance:** Standard parallel splatting implementations splat all voxels, including empty or occluded ones, which leads to redundant computation [S2, unofficial].
+*   **Load Balancing:** Implementations that account for visibility and occlusion are considerably more challenging for load-balancing [S2, unofficial].
+
+## Subtopics
+
+### Parallel Splatting with Visibility/Occlusion
+A parallel splatting algorithm that accounts for visibility and occlusion during rendering [S2, unofficial]. It is more challenging to implement due to the difficulty of load-balancing when the amount of work depends on dynamic visibility information [S2, unofficial].
+
+## Operating characteristics
+*   **Complexity:** Not given in the sources.
+*   **Performance:** Speed-ups are achieved by parallelizing the rendering stage and optimizing communication by passing only non-empty parts of partial images [S2, unofficial].
+*   **Strengths:** Scalable to large datasets via distributed memory architectures; leverages existing splatting efficiency [S2, unofficial].
+*   **Limitations:** Standard implementations lack occlusion culling, leading to wasted computation on empty/occluded voxels [S2, unofficial]. Load balancing is difficult when visibility-aware optimizations are used [S2, unofficial].
+*   **When to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources.
+
+## Background
+Parallel splatting has been researched as a scalable solution for volume rendering [S2, unofficial]. It utilizes the sort-last paradigm, where nodes render partial images composited by a master node [S2, unofficial]. Machiraju and Yagel reported an early parallel implementation where tasks were defined by subvolumes assigned to processors [S2, unofficial]. Huang presented a variant that accounts for visibility and occlusion, noting the increased complexity for load-balancing [S2, unofficial]. The approach is often compared to parallel shearwarp implementations, which divide data after the shear operation [S2, unofficial].
+
+## Sources
+[S1] Tsplat – Run Gaussian splatting in your terminal, https://github.com/darshanmakwana412/tsplat, fetched 2026-10-26 (unofficial)
+[S2] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)

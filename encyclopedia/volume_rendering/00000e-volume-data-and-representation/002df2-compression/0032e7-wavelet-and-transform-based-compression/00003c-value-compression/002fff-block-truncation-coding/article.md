@@ -1,0 +1,157 @@
+# Block Truncation Coding
+Also called: BTC, ETC2
+
+## Overview
+Block Truncation Coding (BTC) is a lossy image and volume compression technique that approximates a block of pixels or voxels using a small set of representative intensity values (quantization levels) and a bitplane indicating which value is assigned to each element [S1]. It solves the problem of efficient storage and random access for volumetric data by reducing the precision of local data clusters, enabling hardware-accelerated decompression [S1]. Unlike [Transform-based Block Coding](6882-transform-based-block-coding.md) which operates on frequency coefficients, BTC operates directly on spatial domain values, offering a simpler, lower-complexity alternative suitable for real-time rendering where bandwidth is constrained [S1].
+
+## How it works
+**Inputs and Outputs:**
+Input: A block of $N$ voxels (typically $4 \times 4$ or $8 \times 8$ in 2D, or $4 \times 4 \times 4$ in 3D) with original intensity values $v_i$.
+Output: A compressed block consisting of $k$ quantization levels (typically $k=2$ or $k=4$) and a bitplane of length $N$ specifying the index of the level for each voxel.
+
+**Data Structures:**
+1.  **Quantization Levels:** A small array of $k$ floating-point or integer values $\{L_0, L_1, ..., L_{k-1}\}$. For $k=2$, this is often stored as two 8-bit integers.
+2.  **Bitplane:** A bitmask of $N$ bits. If $k=2$, each bit $b_i$ indicates whether voxel $i$ uses $L_0$ (if $b_i=0$) or $L_1$ (if $b_i=1$).
+
+**Steps:**
+1.  **Block Partitioning:** Divide the volume into non-overlapping blocks of size $B$.
+2.  **Statistical Analysis:** For each block, calculate the mean $\mu$ and standard deviation $\sigma$ of the voxel values.
+3.  **Quantization Level Selection:**
+    *   For $k=2$ (most common): Select two levels $L_0$ and $L_1$. A common heuristic is to set $L_0 = \mu - \alpha \sigma$ and $L_1 = \mu + \alpha \sigma$, where $\alpha$ is a scaling factor (e.g., 1.0 or derived from the data range). Alternatively, $L_0$ and $L_1$ can be chosen as the minimum and maximum values in the block, or via k-means clustering with $k=2$ [S1].
+    *   For $k=4$: Select four levels, often using a 2D quantization scheme or extended k-means.
+4.  **Bitplane Generation:** For each voxel $v_i$ in the block, assign the index $j$ of the quantization level $L_j$ that minimizes the absolute error $|v_i - L_j|$. Set the $i$-th bit of the bitplane to $j$ (for $k=2$, this is a single bit).
+5.  **Storage:** Store the $k$ levels and the bitplane.
+
+**Formulas:**
+*   Mean: $\mu = \frac{1}{N} \sum_{i=1}^{N} v_i$
+*   Standard Deviation: $\sigma = \sqrt{\frac{1}{N} \sum_{i=1}^{N} (v_i - \mu)^2}$
+*   Reconstruction: $\hat{v}_i = L_{b_i}$
+
+**Parameters:**
+*   Block size: Typically $4 \times 4$ (16 voxels) or $8 \times 8$ (64 voxels). 3D blocks are often $4 \times 4 \times 4$ (64 voxels) [S1].
+*   Number of levels ($k$): Typically 2 or 4. $k=2$ is standard for BTC.
+
+**Edge Cases and Pitfalls:**
+*   **Uniform Blocks:** If $\sigma \approx 0$, all levels are identical. The bitplane is irrelevant.
+*   **Precision:** Quantization levels should be stored with sufficient precision to avoid reconstruction artifacts.
+*   **Boundary Conditions:** Blocks at the volume boundary must be handled (e.g., padded or smaller blocks).
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def btc_compress(block_values, k=2):
+    """
+    Compress a block of voxel values using Block Truncation Coding.
+    block_values: list of N float/int values
+    k: number of quantization levels (2 or 4)
+    Returns: (levels, bitplane)
+    """
+    N = len(block_values)
+    mean = sum(block_values) / N
+    variance = sum((v - mean) ** 2 for v in block_values) / N
+    std_dev = variance ** 0.5
+    
+    if std_dev < 1e-6:
+        # Uniform block
+        levels = [mean] * k
+        bitplane = [0] * N
+        return levels, bitplane
+
+    if k == 2:
+        # Simple 2-level quantization
+        # Heuristic: levels at mean +/- std_dev
+        L0 = mean - std_dev
+        L1 = mean + std_dev
+        levels = [L0, L1]
+        
+        bitplane = []
+        for v in block_values:
+            # Assign to nearest level
+            if abs(v - L0) < abs(v - L1):
+                bitplane.append(0)
+            else:
+                bitplane.append(1)
+    elif k == 4:
+        # 4-level quantization (simplified: 2D grid or extended heuristic)
+        # For implementation simplicity, we use a basic 4-level split
+        # based on quartiles or fixed offsets. 
+        # Note: More complex schemes exist (e.g., S3TC style).
+        # Here we use a simple 4-level approximation for demonstration.
+        min_val = min(block_values)
+        max_val = max(block_values)
+        range_val = max_val - min_val
+        if range_val < 1e-6:
+            levels = [min_val] * 4
+            bitplane = [0] * N
+            return levels, bitplane
+        
+        # Define 4 levels
+        L0 = min_val
+        L1 = min_val + range_val / 3
+        L2 = min_val + 2 * range_val / 3
+        L3 = max_val
+        levels = [L0, L1, L2, L3]
+        
+        bitplane = []
+        for v in block_values:
+            # Find nearest level index
+            min_dist = float('inf')
+            idx = 0
+            for j, L in enumerate(levels):
+                dist = abs(v - L)
+                if dist < min_dist:
+                    min_dist = dist
+                    idx = j
+            bitplane.append(idx)
+    else:
+        raise ValueError("k must be 2 or 4")
+
+    return levels, bitplane
+
+def btc_decompress(levels, bitplane, k=2):
+    """
+    Decompress a BTC block.
+    levels: list of k quantization levels
+    bitplane: list of N indices
+    Returns: list of N reconstructed values
+    """
+    N = len(bitplane)
+    reconstructed = []
+    for idx in bitplane:
+        reconstructed.append(levels[idx])
+    return reconstructed
+```
+
+## Subtopics
+
+### [Neural Texture Compression (BCF1 Variants)](16542-neural-texture-compression-bcf1-variants.md)
+Neural Texture Compression (BCF1) is a method for compressing physically-based rendering (PBR) texture sets by storing latent features in BC1 format and decoding them using a Multi-Layer Perceptron (MLP) accelerated by hardware cooperative vectors. It solves the storage and memory bandwidth bottleneck of high-resolution PBR assets by leveraging existing block compression hardware for random access while using neural inference to reconstruct high-dimensional material properties. Unlike its sibling [Block Truncation Coding](6187-block-truncation-coding.md) which supports general hardware accelerated random access, BCF1 specifically targets PBR texture sets and uses low dynamic range (LDR) BC1 compression instead of high dynamic range (HDR) BC6, allowing for higher compression ratios or improved quality at the same footprint.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   Compression: $O(N)$ per block, where $N$ is the number of voxels in the block.
+*   Decompression: $O(N)$ per block, involving simple table lookups.
+*   Memory: The compressed size is $k \times \text{bits\_per\_level} + N$ bits. For $k=2$ and 8-bit levels, a $4 \times 4$ block (16 voxels) uses $16 + 16 = 32$ bits, compared to $16 \times 8 = 128$ bits uncompressed, achieving a 4:1 compression ratio.
+
+**Measured Performance:**
+*   BTC is extremely fast to decompress, making it suitable for real-time rendering [S1].
+*   Compression ratio is typically 4:1 to 8:1 depending on block size and $k$.
+
+**Strengths and Limitations:**
+*   **Strengths:** Simple implementation, low computational cost, supports random access, hardware-friendly [S1].
+*   **Limitations:** Lower quality compared to transform-based methods (e.g., wavelets) for smooth gradients, blocky artifacts at boundaries if not handled properly [S1].
+
+**When to Use:**
+*   Real-time volume rendering with limited bandwidth.
+*   Data with high local variance but simple intensity distributions.
+
+**When Not to Use:**
+*   High-fidelity scientific visualization requiring smooth gradients.
+*   Data with complex frequency content better captured by wavelets.
+
+## Background
+Block Truncation Coding was originally developed for image compression. In the context of volume rendering, it has been adapted for hardware-accelerated random access, such as in ETC2 texture compression [S1]. It is a foundational technique for block-based compression schemes like S3TC and its 3D extension VTC [S1].
+
+## Sources
+[S1] A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

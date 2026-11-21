@@ -1,0 +1,149 @@
+# Voxel Generation with Diffusion Models
+Also called: DDPM-based Voxel Generation
+
+## Overview
+This method generates discrete 3D volumetric shapes (binary voxel grids) by training a Denoising Diffusion Probabilistic Model (DDPM) to learn the data distribution of voxelized objects [S1, unofficial]. Unlike geometric voxelization methods that map existing meshes or point clouds into a grid [12-voxelization.md], this approach synthesizes novel, structurally coherent 3D shapes from noise [S1, unofficial]. It is distinguished from implicit surface generation [Implicit Surface Generation](implicit-surface-generation.md) by producing an explicit, discrete volumetric representation suitable for downstream mesh extraction or physical simulation.
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A training dataset of voxelized shapes, where each shape is a binary tensor $V \in \{0, 1\}^{r \times r \times r}$ representing a mesh discretized into a grid [S1, unofficial]. Shapes are normalized to fit within a unit cube [S1, unofficial].
+*   **Output:** A generated binary tensor $\hat{x}_0 \in \{0, 1\}^{r \times r \times r}$ representing a novel 3D shape [S1, unofficial].
+
+**Data Structures**
+*   **Voxel Tensor:** A 3D array of size $r \times r \times r$. Values are binary: $0$ for empty/unfilled, $1$ for filled [S1, unofficial].
+*   **Noise Schedule:** A sequence of variance parameters $\beta_t$ for $t \in [1, T]$, where $\beta_t$ gradually decreases to $0$ as $t \to 0$ [S1, unofficial].
+
+**Parameters**
+*   $r$: Voxel resolution (e.g., $32, 64$). Not given in the sources.
+*   $T$: Total number of diffusion steps. Not given in the sources.
+*   $\beta_t$: Noise schedule parameter. Typically linear or cosine schedule, but specific values are not given in the sources.
+
+**Algorithm Steps**
+
+1.  **Forward Process (Diffusion):**
+    Given a real voxel tensor $x_0$, the data is gradually corrupted by adding Gaussian noise over $T$ steps. The transition probability is defined as:
+    $$ q(x_t | x_{t-1}) = \mathcal{N}(x_t ; \sqrt{1 - \beta_t} x_{t-1}, \beta_t I) $$
+    The marginal distribution $q(x_t | x_0)$ allows direct sampling of $x_t$ at any step $t$:
+    $$ x_t = \sqrt{\bar{\alpha}_t} x_0 + \sqrt{1 - \bar{\alpha}_t} \epsilon, \quad \epsilon \sim \mathcal{N}(0, I) $$
+    where $\alpha_t = 1 - \beta_t$ and $\bar{\alpha}_t = \prod_{i=1}^t \alpha_i$ [S1, unofficial].
+
+2.  **Model Parameterization:**
+    A 3D convolutional neural network $\epsilon_\phi$ (parameterized by $\phi$) is trained to predict the noise $\epsilon$ added to $x_t$ at step $t$ [S1, unofficial]. The network architecture is based on 3D CNNs similar to those used in voxel generation literature (e.g., Zhou et al., 2021), with modifications for this specific task [S1, unofficial].
+
+3.  **Training Objective:**
+    The model is trained by minimizing the mean squared error between the predicted noise and the actual noise $\epsilon$. The loss function $L_{ddpm}$ is:
+    $$ L_{ddpm} = \mathbb{E}_{x_0, t, \epsilon} \left[ \left\| \epsilon - \epsilon_\phi(\sqrt{\bar{\alpha}_t} x_0 + \sqrt{1 - \bar{\alpha}_t} \epsilon, t) \right\|^2 \right] $$
+    where $x_0$ is sampled from the training distribution, $t$ is sampled uniformly from $[1, T]$, and $\epsilon \sim \mathcal{N}(0, I)$ [S1, unofficial].
+
+4.  **Sampling (Reverse Process):**
+    To generate a new shape, start with pure Gaussian noise $\hat{x}_T \sim \mathcal{N}(0, I)$ and iteratively denoise from $t=T$ down to $t=0$. At each step $t$, sample $\hat{x}_{t-1}$ from the reverse conditional distribution:
+    $$ p_\phi(\hat{x}_{t-1} | \hat{x}_t) = \mathcal{N}(\hat{x}_{t-1} ; \mu_\phi(\hat{x}_t, t), \beta_t I) $$
+    The mean $\mu_\phi$ is computed as:
+    $$ \mu_\phi(\hat{x}_t, t) = \frac{1}{\sqrt{\alpha_t}} \left( \hat{x}_t - \sqrt{1 - \bar{\alpha}_t} \epsilon_\phi(\hat{x}_t, t) \right) $$
+    [S1, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# Assume a 3D ConvNet architecture is defined elsewhere, e.g., UNet3D
+# class VoxelDiffusionModel(nn.Module):
+#     def __init__(self, ...): ...
+#     def forward(self, x_t, t): ...
+
+def compute_alpha_bar(alpha_t, t):
+    """Compute product of alpha_i from 1 to t."""
+    # alpha_t is a tensor of shape [T]
+    # Returns alpha_bar_t for specific t
+    return torch.prod(alpha_t[:t+1])
+
+def train_step(model, x_0, alpha_t, alpha_bar_t, beta_t, device):
+    """
+    Computes the training loss for one batch.
+    x_0: Ground truth voxel tensor [B, 1, r, r, r]
+    alpha_t: Tensor of alpha values [T]
+    alpha_bar_t: Tensor of alpha_bar values [T]
+    beta_t: Tensor of beta values [T]
+    """
+    B, C, H, W, D = x_0.shape
+    t = torch.randint(0, len(alpha_t), (B,), device=device).long()
+    
+    # Sample noise epsilon
+    epsilon = torch.randn_like(x_0)
+    
+    # Create noisy sample x_t using reparameterization trick
+    # x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * epsilon
+    sqrt_alpha_bar = torch.sqrt(alpha_bar_t[t]).view(B, 1, 1, 1, 1)
+    sqrt_one_minus_alpha_bar = torch.sqrt(1 - alpha_bar_t[t]).view(B, 1, 1, 1, 1)
+    
+    x_t = sqrt_alpha_bar * x_0 + sqrt_one_minus_alpha_bar * epsilon
+    
+    # Predict noise
+    predicted_epsilon = model(x_t, t)
+    
+    # Loss: MSE between predicted and actual noise
+    loss = F.mse_loss(predicted_epsilon, epsilon)
+    return loss
+
+def generate_sample(model, alpha_t, alpha_bar_t, beta_t, device, resolution=32):
+    """
+    Generates a voxel grid from noise.
+    """
+    # Start with pure Gaussian noise
+    x_t = torch.randn(1, 1, resolution, resolution, resolution, device=device)
+    
+    # Iterate from T-1 down to 0
+    for t in reversed(range(len(alpha_t))):
+        # Predict noise
+        predicted_epsilon = model(x_t, torch.tensor([t], device=device))
+        
+        # Compute mean for reverse process
+        # mu = 1/sqrt(alpha_t) * (x_t - sqrt(1 - alpha_bar_t) * epsilon_pred)
+        alpha = alpha_t[t]
+        alpha_bar = alpha_bar_t[t]
+        
+        sqrt_alpha = torch.sqrt(alpha)
+        sqrt_one_minus_alpha_bar = torch.sqrt(1 - alpha_bar)
+        
+        mu = (1.0 / sqrt_alpha) * (x_t - sqrt_one_minus_alpha_bar * predicted_epsilon)
+        
+        # Add noise if t > 0, otherwise deterministic mean
+        if t > 0:
+            beta = beta_t[t]
+            z = torch.randn_like(x_t)
+            x_t = mu + torch.sqrt(beta) * z
+        else:
+            x_t = mu
+            
+    # Threshold to get binary voxel grid
+    # Note: The source uses binary tensors {0,1}. 
+    # In practice, sigmoid or thresholding is applied to the output.
+    # The source does not specify the exact thresholding function, 
+    # but implies the output is binary.
+    voxel_grid = (x_t > 0.5).float()
+    return voxel_grid
+```
+
+**Edge Cases and Pitfalls**
+*   **Binary Constraint:** The target representation is binary $\{0, 1\}$, but the diffusion process operates on continuous Gaussian space. The final output requires thresholding or rounding, which may introduce artifacts if the model's confidence is low near the boundary [S1, unofficial].
+*   **Resolution:** The method assumes a fixed resolution $r \times r \times r$. Changing resolution requires retraining or interpolation, which is not detailed in the source [S1, unofficial].
+*   **Normalization:** Shapes must be normalized to a unit cube before voxelization. Failure to do so results in incorrect spatial distribution of the generated shapes [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Training time depends on the number of epochs, batch size, and the cost of 3D convolutions. Sampling time is linear in $T$ (number of diffusion steps), with each step requiring a forward pass of the 3D CNN.
+*   **Memory Complexity:** Requires storing the full voxel grid $r^3$ during training and inference. The model parameters depend on the 3D CNN architecture.
+*   **Strengths:** Generates novel, high-quality volumetric shapes with good generalization. The output is a ready-to-use discrete representation suitable for mesh extraction (e.g., via tetrahedral division) [S1, unofficial].
+*   **Limitations:** Computationally expensive due to 3D convolutions and iterative sampling. Resolution is fixed. The binary nature of the output is not naturally enforced during the continuous diffusion process [S1, unofficial].
+*   **When to use:** When the goal is to generate novel 3D shapes in a voxel format for downstream processing (e.g., mesh generation, simulation) rather than rendering or geometric analysis of existing data.
+*   **When not to use:** When high-resolution continuous representations are needed, or when computational resources are limited for 3D CNN inference.
+
+## Background
+This method was proposed by Yan Zheng, Lemeng Wu, Xingchao Liu, Zhen Chen, Qiang Liu, and Qixing Huang from the University of Texas at Austin in the paper "Neural Volumetric Mesh Generator" (2022) [S1, unofficial]. It builds on the Denoising Diffusion Probabilistic Model (DDPM) framework introduced by Ho et al. (2020) [S1, unofficial]. The specific application to voxel generation for volumetric mesh generation distinguishes it from earlier DDPM applications in 2D images or point clouds.
+
+## Sources
+[S1] Neural Volumetric Mesh Generator, https://arxiv.org/abs/2210.03158v1, fetched 2026-10-27 (unofficial)

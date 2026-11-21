@@ -1,0 +1,173 @@
+--- v001.md
++++ v002.md
+@@ -1,48 +1,34 @@
+ # LRU Cache Eviction with Residency Update
+ 
+-Also called: Residency-aware LRU eviction, Bitmask-consistent LRU eviction
+ 
+ ## Overview
+-This method manages the consistency between a Least Recently Used (LRU) brick cache and a hierarchical residency octree. When the cache is full, it evicts the least recently accessed brick and propagates the resulting change in spatial coverage up the octree by resetting bits in leaf and non-leaf node masks. It ensures that the residency structure accurately reflects which resolution levels are partially mapped in memory, preventing rendering artifacts from accessing non-resident data. It differs from standard LRU caches by coupling eviction side-effects with hierarchical metadata updates [S1].
++This method couples LRU brick cache eviction with hierarchical residency octree updates [S1]. When the cache lacks a free slot, it evicts the least recently accessed brick and resets bitmask entries in affected leaf and non-leaf nodes to reflect the loss of resident data [S1]. It differs from standard LRU caches by synchronizing cache state with octree metadata after each eviction [S1].
+ 
+ ## How it works
+ **Inputs:**
+-- A brick cache with a fixed capacity (number of slots).
+-- An LRU tracking structure (e.g., a doubly linked list or timestamp array) mapping bricks to their access recency.
+-- A residency octree where each node (leaf or non-leaf) maintains a bitmask indicating which resolution levels have at least one resident brick in its spatial extent.
+-- The spatial extent (AABB) and resolution level of the evicted brick.
++- A brick cache containing resident bricks [S1].
++- An LRU tracking structure mapping bricks to their access recency [S1].
++- A residency octree where each node maintains a bitmask indicating which resolution levels have at least one resident brick in its spatial extent [S1].
++- The spatial extent and resolution level of the evicted brick [S1].
+ 
+ **Outputs:**
+-- The cache state with one fewer brick (the LRU brick removed).
+-- The residency octree with updated bitmasks reflecting the removal.
++- The cache state with one fewer brick (the LRU brick removed) [S1].
++- The residency octree with updated bitmasks reflecting the removal [S1].
+ 
+ **Data Structures:**
+-- **Cache Slot:** Stores brick ID, spatial AABB, resolution level, and access timestamp/pointer.
+-- **LRU List:** Doubly linked list of cache slots ordered by access time (head = least recent, tail = most recent).
++- **Cache Slot:** Stores brick ID, spatial AABB, resolution level, and access timestamp/pointer [G].
++- **LRU List:** Doubly linked list of cache slots ordered by access time (head = least recent, tail = most recent) [G].
+ - **Octree Node:**
+-  - `bitmask`: Integer or bitset where bit $i$ is 1 if any brick at resolution level $i$ within this node's spatial extent is resident.
+-  - `children`: Array of child nodes (for non-leaf nodes).
+-  - `spatial_extent`: AABB defining the node's 3D volume.
++  - `bitmask`: Integer or bitset where bit $i$ is 1 if any brick at resolution level $i$ within this node's spatial extent is resident [S1].
++  - `children`: Array of child nodes (for non-leaf nodes) [G].
++  - `spatial_extent`: AABB defining the node's 3D volume [G].
++  - `parent`: Pointer to the parent node (for upward propagation) [G].
+ 
+ **Algorithm Steps:**
+-1. **Eviction Trigger:** If a new brick requires a cache slot and no slots are free, identify the brick at the head of the LRU list as the victim [S1].
+-2. **Remove from Cache:**
+-   - Remove the victim brick from the cache storage.
+-   - Remove the victim from the LRU list.
+-3. **Identify Affected Leaf Nodes:**
+-   - Traverse the residency octree to find all leaf nodes whose `spatial_extent` overlaps with the victim brick's `spatial_extent` [S1].
+-4. **Update Leaf Node Bitmasks:**
+-   - For each affected leaf node:
+-     - Determine the resolution level $L$ of the evicted brick.
+-     - Check all other bricks in the cache that belong to the same resolution level $L$ and fall within the leaf node's spatial extent.
+-     - If **no** other brick at resolution level $L$ is resident within this leaf node's extent, reset bit $L$ in the leaf node's `bitmask` to 0 [S1].
+-     - If bit $L$ was already 0, no change is needed for this node.
+-5. **Propagate Updates to Non-Leaf Nodes:**
+-   - For each affected leaf node whose `bitmask` changed in Step 4:
+-     - Move up the tree to the parent node.
+-     - Recalculate the parent's `bitmask` as the bitwise OR of its children's `bitmask`s:
+-       $$ \text{parent.bitmask} = \bigvee_{c \in \text{children}} c.\text{bitmask} $$
+-     - If the parent's `bitmask` has changed, repeat the propagation for the parent's ancestors.
+-     - If the parent's `bitmask` remains unchanged, terminate propagation for this branch [S1].
++1. **Eviction Trigger:** If no cache slot is available, evict the least recently accessed brick using an LRU scheme [S1].
++2. **Remove from Cache:** Remove the victim brick from the cache storage and LRU list [S1].
++3. **Identify Affected Leaf Nodes:** Check all leaf nodes whose spatial extent overlaps the evicted brick's spatial extent [S1].
++4. **Update Leaf Node Bitmasks:** For each such leaf node, check if it is still partially mapped after removal by verifying if any other brick in the same resolution level is resident in the cache [S1]. If no other brick in that resolution level is resident, reset the corresponding bit in the node's bitmask to indicate it is no longer partially mapped [S1].
++5. **Propagate Updates to Non-Leaf Nodes:** Update non-leaf nodes by setting their bitmasks to the bitwise OR of their child nodes' bitmasks [S1]. As soon as a node’s bitmask remains unchanged by this operation, terminate the upwards propagation of the update [S1].
+ 
+ **Pseudocode:**
+@@ -51,30 +37,35 @@
+     # Step 1 & 2: Evict LRU brick
+     if not lru_list.is_empty():
+-        victim = lru_list.pop_head() # Remove least recently used
++        victim = lru_list.pop_head()
+         cache.remove(victim.brick_id)
+     else:
+-        return # No eviction needed
++        return
+ 
+-    # Step 3: Find affected leaf nodes
+-    affected_leaves = octree_root.find_leaves_overlapping(evicted_brick.spatial_extent)
++    # Step 3: Identify affected leaf nodes
++    # Standard octree traversal to find leaves overlapping the evicted brick's extent [G]
++    affected_leaves = []
++    def collect_leaves(node):
++        if node.is_leaf():
++            if node.spatial_extent.overlaps(evicted_brick.spatial_extent):
++                affected_leaves.append(node)
++        else:
++            for child in node.children:
++                collect_leaves(child)
++    collect_leaves(octree_root)
+ 
+-    # Step 4 & 5: Update bitmasks
++    # Step 4: Update leaf node bitmasks
+     for leaf in affected_leaves:
+         resolution_level = evicted_brick.resolution_level
+-        
+         # Check if any other brick at this resolution level is resident in this leaf
+         is_resident = False
+-        for brick in cache.get_bricks_in_extent(leaf.spatial_extent):
+-            if brick.resolution_level == resolution_level:
++        for brick in cache.entries:
++            if brick.resolution_level == resolution_level and leaf.spatial_extent.contains(brick.spatial_extent):
+                 is_resident = True
+                 break
+-        
++
+         # Reset bit if not resident
+         if not is_resident:
+             leaf.bitmask &= ~(1 << resolution_level)
+-            
+-            # Propagate up if bitmask changed
+-            if leaf.bitmask_changed:
+-                propagate_update(leaf)
++            propagate_update(leaf)
+ 
+ def propagate_update(node):
+@@ -82,39 +73,40 @@
+     if parent is None:
+         return
+-    
++
+     # Recalculate parent bitmask
+     new_parent_bitmask = 0
+     for child in parent.children:
+         new_parent_bitmask |= child.bitmask
+-    
++
+     if new_parent_bitmask != parent.bitmask:
+         parent.bitmask = new_parent_bitmask
+         propagate_update(parent)
++    # Termination: if unchanged, stop propagating [S1]
+ ```
+ 
+ **Parameters:**
+ - Cache capacity: Not given in the sources.
+-- Bitmask size: Determined by the maximum number of resolution levels in the octree.
++- Bitmask size: Determined by the maximum number of resolution levels in the octree [S1].
+ 
+ **Edge Cases:**
+-- **Precision:** Bitwise operations assume integer bitmasks. Ensure no overflow if resolution levels exceed standard integer width.
+-- **Boundaries:** Spatial overlap checks must be inclusive of brick boundaries to avoid missing adjacent bricks.
+-- **Degenerate Input:** If the evicted brick was the only resident brick for a resolution level in a leaf, the bit must be reset. If the leaf had no bricks at that level initially, the bit is already 0.
++- **Precision:** Bitwise operations assume integer bitmasks. Ensure no overflow if resolution levels exceed standard integer width [G].
++- **Boundaries:** Spatial overlap checks must be inclusive of brick boundaries to avoid missing adjacent bricks [G].
++- **Degenerate Input:** If the evicted brick was the only resident brick for a resolution level in a leaf, the bit must be reset [S1]. If the leaf had no bricks at that level initially, the bit is already 0 [G].
+ 
+ ## Subtopics
+ 
+ ### GPU Residency Budget Fix
+-A variant addressing memory pile-up in WebGL2 environments. It sets a strict residency budget of 1.25 GB, deliberately below the plan budget, to force LRU eviction during refocus operations. Previous implementations allowed up to 8 GB requests against a 2 GB plan budget, causing bricks to accumulate (e.g., 1.67 GB across 177 bricks on `hoa_heart` L0) without eviction [S2, unofficial]. This fix ensures the LRU scheme effectively manages GPU memory by capping the total resident data size.
++A variant addressing memory pile-up in WebGL2 environments by setting a 1.25 GB residency budget, deliberately below the plan budget, to ensure LRU evicts old bricks during refocus [S2, unofficial]. Previous behavior allowed an 8 GB GPU residency request against a 2 GB plan budget, causing the LRU to never evict and pile bricks on top of old ones (e.g., 1.67 GB across 177 bricks on `hoa_heart` L0) [S2, unofficial]. This fix forces eviction by capping the total resident data size [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Eviction is $O(1)$ with a doubly linked list. Updating the octree depends on the number of affected leaf nodes and the depth of the tree. In the worst case, a single eviction may trigger updates up to the root, but typically only a small subtree is affected.
+-- **Memory Complexity:** $O(N)$ for cache storage and $O(M)$ for the octree, where $N$ is the number of bricks and $M$ is the number of octree nodes.
+-- **Strengths:** Maintains strict consistency between cache state and rendering metadata, preventing access to non-resident data. Efficiently updates only affected parts of the octree.
+-- **Limitations:** Requires traversal of the octree to find affected leaves. Bitmask updates must be propagated carefully to avoid unnecessary work.
+-- **When to use:** When rendering requires accurate residency information for mixed-resolution volumes and cache capacity is limited.
+-- **When not to use:** If the octree is very deep and evictions frequently affect large spatial areas, the update cost may become significant.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Strengths:** Maintains strict consistency between cache state and rendering metadata by resetting bitmask entries only when necessary [S1].
++- **Limitations:** Requires checking leaf nodes for spatial overlap and propagating bitmask updates up the tree after each eviction [S1].
++- **When to use:** Mixed-resolution multi-volume rendering requiring accurate residency tracking for ray-guided traversal [S1].
++- **When not to use:** Not given in the sources.
+ 
+ ## Background
+-Originating from the Residency Octree approach for scalable web volume rendering, this method integrates LRU cache management with hierarchical residency tracking [S1]. It was developed to handle mixed-resolution multi-volume rendering where ray-guided traversal relies on accurate bitmask information to skip empty regions or access resident data. The GPU Residency Budget Fix variant addresses specific implementation issues in WebGL2 environments, as documented in unofficial repository updates [S2, unofficial].
++Developed as part of the Residency Octree approach for scalable web volume rendering, this method integrates LRU cache management with hierarchical residency tracking [S1]. It supports mixed-resolution multi-volume rendering where ray-guided traversal relies on accurate bitmask information to skip empty regions or access resident data [S1]. The GPU Residency Budget Fix variant addresses specific implementation issues in WebGL2 environments, as documented in unofficial repository updates [S2, unofficial].
+ 
+ ## Sources

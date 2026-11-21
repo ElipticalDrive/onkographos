@@ -1,0 +1,109 @@
+# Gaussian Opacity Fields (GOF) Mesh Extraction
+
+Also called: GOF-style 3-D mesh extraction, mesh extraction from standard 3-D Gaussian Splatting
+
+## Overview
+A method to extract a 3-D triangulated mesh from a trained 3-D Gaussian Splatting model without retraining, by building a volumetric density field and extracting an isosurface [S1, unofficial].
+
+## How it works
+**Inputs:** A trained 3-D Gaussian Splatting model $\mathcal{G} = \{G_i\}_{i=1}^M$ where each Gaussian $G_i$ has position $\mathbf{p}_i$, covariance $\mathbf{\Sigma}_i$, and opacity $\alpha_i$ [S1, unofficial].
+**Outputs:** A PLY mesh file containing vertices, faces, and per-vertex colors [S1, unofficial].
+
+**Data Structures:**
+1. **Voxel Grid:** A 3D array of size $R \times R \times R$ storing density values [S1, unofficial].
+2. **KD-Tree:** Built on the positions $\{\mathbf{p}_i\}$ of all Gaussians for nearest-neighbor color lookup [S1, unofficial].
+
+**Numbered Steps:**
+1. Initialize a zero-filled 3D array $D$ of size $R^3$ and determine the bounding box of the scene or the union of all Gaussian extents [S1, unofficial].
+2. Splat each Gaussian with its full anisotropic covariance, truncated at $3\sigma$, into the voxel grid [S1, unofficial].
+3. Extract the isosurface from the density field using the marching cubes algorithm (specifically `skimage.measure.marching_cubes`) [S1, unofficial].
+4. Assign per-vertex colours from the DC spherical-harmonics component of the nearest Gaussian, found via KD-tree lookup [S1, unofficial].
+5. Write the mesh to a PLY file named `<model_path>/mesh_iter{N}_res{R}_thr{T}.ply` [S1, unofficial].
+
+**Formulas:**
+The volumetric density field is computed as $f(\mathbf{x}) = \sum_i \alpha_i \cdot \exp\left(-\frac{1}{2} (\mathbf{x}-\mathbf{\mu}_i)^\top \mathbf{\Sigma}_i^{-1} (\mathbf{x}-\mathbf{\mu}_i)\right)$, where $\mathbf{x}$ is a 3D point, $\mathbf{\mu}_i$ is the Gaussian mean, $\mathbf{\Sigma}_i$ is the covariance matrix, and $\alpha_i$ is the opacity [S1, unofficial].
+
+**Parameters:**
+* `resolution` ($R$): Voxel grid resolution. Default: 256 [S1, unofficial].
+* `density_threshold` ($T$): Marching cubes isosurface level. Default: 1.0 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+* Truncating at $3\sigma$ defines the Gaussian extent for splatting [S1, unofficial].
+* If the density field is entirely below the threshold, no mesh is generated [G].
+* Floating-point accumulation in the density field may cause overflow if many Gaussians overlap significantly [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.spatial import KDTree
+from skimage import measure
+
+def extract_mesh(gaussian_model, resolution=256, density_threshold=1.0):
+    """
+    Extract mesh from Gaussian Opacity Fields.
+    """
+    M = gaussian_model.positions.shape[0]
+    positions = gaussian_model.positions
+    covariances = gaussian_model.covariances
+    opacities = gaussian_model.opacities
+    sh_coeffs = gaussian_model.sh_coeffs  # DC coefficients (M, 3)
+
+    # [G] Compute bounding box from 3σ extents of all Gaussians
+    min_bound = np.full(3, np.inf)
+    max_bound = np.full(3, -np.inf)
+    for i in range(M):
+        eigvals = np.linalg.eigvalsh(covariances[i])
+        extents = 3.0 * np.sqrt(eigvals)
+        min_bound = np.minimum(min_bound, positions[i] - extents)
+        max_bound = np.maximum(max_bound, positions[i] + extents)
+
+    # Create voxel grid and centers
+    density_field = np.zeros((resolution, resolution, resolution), dtype=np.float32)
+    voxel_centers = np.linspace(min_bound, max_bound, resolution)
+    X, Y, Z = np.meshgrid(voxel_centers, voxel_centers, voxel_centers, indexing='ij')
+    voxel_coords = np.stack([X, Y, Z], axis=-1).reshape(-1, 3)
+
+    # Splat Gaussians to voxel grid
+    for i in range(M):
+        mu = positions[i]
+        cov_inv = np.linalg.inv(covariances[i])
+        alpha = opacities[i]
+        diff = voxel_coords - mu
+        dist_sq = np.sum(diff @ cov_inv * diff, axis=1)
+        density = alpha * np.exp(-0.5 * dist_sq)
+        density_field += density.reshape(resolution, resolution, resolution)
+
+    # Extract isosurface
+    verts, faces, _, _ = measure.marching_cubes(density_field, level=density_threshold)
+
+    # Map voxel indices back to world coordinates
+    voxel_to_world = (max_bound - min_bound) / (resolution - 1)
+    verts_world = verts * voxel_to_world + min_bound
+
+    # Build KD-tree for color lookup
+    tree = KDTree(positions)
+    _, indices = tree.query(verts_world)
+    colors = sh_coeffs[indices]
+
+    return verts_world, faces, colors
+```
+
+## Subtopics
+
+### Mesh-3DGS Hybrid Representation
+A representation where one flat Gaussian is allocated to each triangle of an extracted mesh, combining mesh geometry with Gaussian splatting [S2, unofficial]. It differs from standard GOF extraction by adding a second training stage to refine the hybrid representation [S2, unofficial].
+* **Stage 1:** Train vanilla 3DGS (40k steps: 30k vanilla + 10k SDF regularization). Apply opacity culling. Apply SDF-based regularization to flatten Gaussians. Apply masked opacity regularization. Extract level set from trained 3DGS. Apply Poisson reconstruction to obtain surface mesh. Apply mesh cleanup (duplicate removal) [S2, unofficial].
+* **Stage 2:** Allocate one flat Gaussian to each triangle of the extracted mesh. Train non-PBR parameters (mesh geometry/location/shape, opacity, radiance SH coefficients, scale) [S2, unofficial].
+* **Parameters:** Stage 1: 40k steps. Stage 2: 10k steps [S2, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Originated from the Gaussian Opacity Fields (GOF) method by Yu et al., SIGGRAPH Asia 2024 [S1, unofficial]. It was added as an extension to the EOGS framework to provide mesh extraction from standard 3DGS without retraining [S1, unofficial].
+
+## Sources
+[S1] Add GOF-style 3-D mesh extraction to EOGS, https://github.com/Jay2002-whu/EOGS/pull/1, fetched 2026-10-27 (unofficial)
+[S2] Phys3DGS: Physically-based 3D Gaussian Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2409.10335, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,527 @@
+環境 Unity2017.1.0f3 概要 MeshからVoxelを生成します モデルにAddComponentして使用 とりあえずCubeモデルで生成 Taskを使用した非同期処理 プログラム using System.Collections; using ...
+
+MeshからVoxel生成 #Unity - Qiita
+9
+Go to list of users who liked
+8
+Share on X(Twitter)
+Share on Facebook
+Add to Hatena Bookmark
+more_horiz
+Delete article
+close
+Deleted articles cannot be recovered.
+Draft of this article would be also deleted.
+Are you sure you want to delete this article?
+CancelDeletedelete
+info
+More than 5 years have passed since last update.
+@fukaken5050
+MeshからVoxel生成
+Unity
+9
+Last updated at 2017-08-11Posted at 2017-07-30
+環境
+Unity2017.1.0f3
+概要
+MeshからVoxelを生成します
+モデルにAddComponentして使用
+とりあえずCubeモデルで生成
+Taskを使用した非同期処理
+プログラム
+```
+using System.Collections;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using UnityEngine;
+
+[RequireComponent( typeof( MeshFilter) )]
+public class MeshToVoxel : MonoBehaviour
+{
+	public GameObject cubeObjPrefab = null;
+	private Bounds _bounds;
+	private float _unitSize = 0.05f;
+	private int[,,] _voxels = null;
+
+	public class Triangle
+	{
+		public Vector3 p1, p2, p3;
+		public Triangle( Vector3 p1, Vector3 p2, Vector3 p3 )
+		{
+			this.p1 = p1;
+			this.p2 = p2;
+			this.p3 = p3;
+		}
+	}
+
+	private IEnumerator Start()
+	{
+		var meshFilter = GetComponent<MeshFilter>();
+		Build( meshFilter.mesh );
+		yield break;
+	}
+
+	public void Build( Mesh mesh )
+	{
+		mesh.RecalculateBounds();
+		var bounds = mesh.bounds;
+		_bounds = new Bounds();
+
+		var min = new Vector3( float.MaxValue, float.MaxValue, float.MaxValue );
+		var max = new Vector3( float.MinValue, float.MinValue, float.MinValue );
+		var vertices = new Vector3[ mesh.vertices.Length ];
+		for( int i = 0; i < vertices.Length; i++ )
+		{
+			vertices[ i ] = transform.TransformPoint( mesh.vertices[ i ] );
+
+			if( min.x > vertices[ i ].x )
+				min.x = vertices[ i ].x;
+			if( min.y > vertices[ i ].y )
+				min.y = vertices[ i ].y;
+			if( min.z > vertices[ i ].z )
+				min.z = vertices[ i ].z;
+
+			if( max.x < vertices[ i ].x )
+				max.x = vertices[ i ].x;
+			if( max.y < vertices[ i ].y )
+				max.y = vertices[ i ].y;
+			if( max.z < vertices[ i ].z )
+				max.z = vertices[ i ].z;
+		}
+
+		min = RoundDown( min, _unitSize );
+		max = RoundUp( max, _unitSize );
+		if( max.x == min.x )
+			max.x += _unitSize;
+		if( max.y == min.y )
+			max.y += _unitSize;
+		if( max.z == min.z )
+			max.z += _unitSize;
+		
+		_bounds.min = min;
+		_bounds.max = max;
+		_bounds.size = _bounds.max - _bounds.min;
+
+
+		var indices = mesh.triangles;
+		var triangles = new List<Triangle>();
+		for( int i = 0; i < indices.Length; i += 3 )
+		{
+			var v0 = vertices[ indices[ i + 0 ] ];
+			var v1 = vertices[ indices[ i + 1 ] ];
+			var v2 = vertices[ indices[ i + 2 ] ];
+
+			var triangle = new Triangle( v0, v1, v2 );
+			triangles.Add( triangle );
+		}
+
+		var counts = new Vector3();
+		counts = _bounds.size / _unitSize; //_unitSizeで揃えてあっても、必ず割り切れるわけじゃない　Mathf.RoundToIntでintにする
+		Debug.Log( "cx:" + counts.x + "cy:" + counts.y + "cz:" + counts.z );
+		Debug.Log( "icx:" + (int)counts.x + "icy:" + (int)counts.y + "icz:" + (int)counts.z );
+		try
+		{
+			_voxels = new int[ Mathf.RoundToInt( counts.y ), Mathf.RoundToInt( counts.z ), Mathf.RoundToInt( counts.x ) ];
+		}
+		catch
+		{
+			throw;
+		}
+		var task = TaskBuildVoxels( triangles );
+	}
+
+	private async Task TaskBuildVoxels( List<Triangle> triangles )
+	{
+		var tasks = new List<Task>();
+		var unitSizeHalf = _unitSize * 0.5f;
+
+		for( var y = 0; y < _voxels.GetLength( 0 ); y++ )
+		{
+			tasks.Clear(); 
+			for( var z = 0; z < _voxels.GetLength( 1 ); z++ )
+			{
+				for( var x = 0; x < _voxels.GetLength( 2 ); x++ )
+				{
+					var ix = x;
+					var iy = y;
+					var iz = z;
+					var task = Task.Run(() => 
+					{
+						var center = new Vector3( ix * _unitSize + unitSizeHalf, iy * _unitSize + unitSizeHalf, iz * _unitSize + unitSizeHalf ); 
+						center += _bounds.min;
+						for( var t = 0; t < triangles.Count; t++ )
+						{
+							if( AABBTriangleOverlaped( center, _unitSize, triangles[ t ] ) == true )
+							{
+								_voxels[ iy, iz, ix ] = 1;
+								break;
+							}
+						}
+					});
+					tasks.Add( task );
+				}
+			}
+			//すべてのタスクが完了するまで待つ
+			await Task.WhenAll( tasks );
+		}
+	}
+
+# if true
+	void OnDrawGizmos()
+	{
+		Gizmos.DrawWireCube( _bounds.center, _bounds.size );
+	}
+# endif
+
+	void Update()
+	{
+		if( _voxels == null )
+			return;
+		Gizmos.color = Color.red;
+		var unitSizeHalf = _unitSize * 0.5f;
+		var cubeSize = new Vector3( _unitSize, _unitSize, _unitSize );
+
+		for( var y = 0; y < _voxels.GetLength( 0 ); y++ )
+		{
+			for( var z = 0; z < _voxels.GetLength( 1 ); z++ )
+			{
+				for( var x = 0; x < _voxels.GetLength( 2 ); x++ )
+				{
+					var center = new Vector3( x * _unitSize + unitSizeHalf, y * _unitSize + unitSizeHalf, z * _unitSize + unitSizeHalf );
+					center += _bounds.min;
+
+					if( _voxels[ y, z, x ] == 1 )
+					{
+						_voxels[ y, z, x ] = 2;
+						var obj = Instantiate<GameObject>( cubeObjPrefab );
+						obj.transform.SetParent( transform, false );
+						obj.transform.position = center;
+						var localScale = ( _unitSize * Vector3.one );
+						localScale.x /= obj.transform.lossyScale.x;
+						localScale.y /= obj.transform.lossyScale.y;
+						localScale.z /= obj.transform.lossyScale.z;
+						obj.transform.localScale = localScale;
+						obj.transform.rotation = Quaternion.identity;
+					}
+				}
+			}
+		}
+	}
+
+	private float RoundUp( float value, float length )
+	{
+		var frac = Mathf.Repeat( value, length );
+		var nv = ( frac > 0.0f ) ? value + ( length - frac ) : value;
+		Debug.Log( "ru nv:" + nv + "v:" + value + "r:" + length );
+		return nv;
+	}
+
+	private Vector3 RoundUp( Vector3 value, float length )
+	{
+		value.x = RoundUp( value.x, length );
+		value.y = RoundUp( value.y, length );
+		value.z = RoundUp( value.z, length );
+		return value;
+	}
+
+	private float RoundDown( float value, float length )
+	{
+		var frac = Mathf.Repeat( value, length );
+		var nv = value - frac;
+		Debug.Log( "rd nv:" + nv + "v:" + value + "l:" + length );
+		return nv;
+	}
+
+	private Vector3 RoundDown( Vector3 value, float length )
+	{
+		value.x = RoundDown( value.x, length );
+		value.y = RoundDown( value.y, length );
+		value.z = RoundDown( value.z, length );
+		return value;
+	}
+
+	private bool AABBTriangleOverlaped( Vector3 voxelCenter, float voxelSize, Triangle triangle )
+	{
+		Vector3 boxcenter = voxelCenter;
+		Vector3 halfboxsize = new Vector3( voxelSize * 0.5f, voxelSize * 0.5f, voxelSize * 0.5f );
+		Vector3 v1, v2, v3, normal, e1, e2, e3;
+		float min, max, d, p1, p2, p3, rad, fex, fey, fez;
+
+		v1 = triangle.p1;
+		v2 = triangle.p2;
+		v3 = triangle.p3;
+
+		v1 -= boxcenter;
+		v2 -= boxcenter;
+		v3 -= boxcenter;
+
+		e1 = v2;
+		e2 = v3;
+		e3 = v1;
+
+		e1 -= v1;
+		e2 -= v2;
+		e3 -= v3;
+
+		fex = Mathf.Abs( e1.x );
+		fey = Mathf.Abs( e1.y );
+		fez = Mathf.Abs( e1.z );
+
+		if( AXISTEST_X01(e1.z, e1.y, fez, fey, out p1, ref v1, out p3, ref v3, out min, out max, out rad, ref halfboxsize ) == false )
+			return false;
+		if( AXISTEST_Y02(e1.z, e1.x, fez, fex, out p1, ref v1, out p3, ref v3, out min, out max, out rad, ref halfboxsize ) == false )
+			return false;
+		if( AXISTEST_Z12(e1.y, e1.x, fey, fex, out p2, ref v2, out p3, ref v3, out min, out max, out rad, ref halfboxsize ) == false )
+			return false;
+
+		fex = Mathf.Abs( e2.x );
+		fey = Mathf.Abs( e2.y );
+		fez = Mathf.Abs( e2.z );
+
+		if( AXISTEST_X01(e2.z, e2.y, fez, fey, out p1, ref v1, out p3, ref v3, out min, out max, out rad, ref halfboxsize ) == false )
+			return false;
+		if( AXISTEST_Y02(e2.z, e2.x, fez, fex, out p1, ref v1, out p3, ref v3, out min, out max, out rad, ref halfboxsize ) == false )
+			return false;
+		if( AXISTEST_Z0(e2.y, e2.x, fey, fex, out p1, ref v1, out p2, ref v2, out min, out max, out rad, ref halfboxsize ) == false )
+			return false;
+
+		fex = Mathf.Abs( e3.x );
+		fey = Mathf.Abs( e3.y );
+		fez = Mathf.Abs( e3.z );
+
+		if( AXISTEST_X2(e3.z, e3.y, fez, fey, out p1, ref v1, out p2, ref v2, out min, out max, out rad, ref halfboxsize ) == false )
+			return false;
+		if( AXISTEST_Y1(e3.z, e3.x, fez, fex, out p1, ref v1, out p2, ref v2, out min, out max, out rad, ref halfboxsize ) == false )
+			return false;
+		if( AXISTEST_Z12(e3.y, e3.x, fey, fex, out p2, ref v2, out p3, ref v3, out min, out max, out rad, ref halfboxsize ) == false )
+			return false;
+
+		VX_FINDMINMAX(v1.x, v2.x, v3.x, out min, out max);
+		if ( min > halfboxsize.x || max < -halfboxsize.x )
+		{
+			return false;
+		}
+
+		VX_FINDMINMAX(v1.y, v2.y, v3.y, out min, out max);
+		if ( min > halfboxsize.y || max < -halfboxsize.y )
+		{
+			return false;
+		}
+
+		VX_FINDMINMAX(v1.z, v2.z, v3.z, out min, out max);
+		if ( min > halfboxsize.z || max < -halfboxsize.z )
+		{
+			return false;
+		}
+
+		normal = Vector3.Cross( e1, e2 );
+		d = - Vector3.Dot( normal, v1 );
+
+		if ( !vx__plane_box_overlap( normal, d, halfboxsize ) )
+		{
+			return false;
+		}
+
+		return true;
+	}
+	private bool AXISTEST_X01( float a, float b, float fa, float fb, out float p1, ref Vector3 v1, out float p3, ref Vector3 v3, out float min, out float max, out float rad, ref Vector3 halfboxsize )
+	{
+		p1 = a * v1.y - b * v1.z;
+		p3 = a * v3.y - b * v3.z;
+		if ( p1 < p3 )
+		{
+			min = p1;
+			max = p3;
+		}
+		else
+		{
+			min = p3;
+			max = p1;
+		}
+		rad = fa * halfboxsize.y + fb * halfboxsize.z;
+		if ( min > rad || max < -rad) {
+			return false;
+		}
+		return true;
+	}
+	private bool AXISTEST_X2( float a, float b, float fa, float fb, out float p1, ref Vector3 v1, out float p2, ref Vector3 v2, out float min, out float max, out float rad, ref Vector3 halfboxsize )
+	{
+		p1 = a * v1.y - b * v1.z;
+		p2 = a * v2.y - b * v2.z;
+		if ( p1 < p2 )
+		{
+			min = p1;
+			max = p2;
+		}
+		else
+		{
+			min = p2;
+			max = p1;
+		}
+		rad = fa * halfboxsize.y + fb * halfboxsize.z;
+		if (min > rad || max < -rad)
+		{
+			return false;
+		}
+		return true;
+	}
+	private bool AXISTEST_Y02( float a, float b, float fa, float fb, out float p1, ref Vector3 v1, out float p3, ref Vector3 v3, out float min, out float max, out float rad, ref Vector3 halfboxsize )
+	{
+		p1 = -a * v1.x + b * v1.z;
+		p3 = -a * v3.x + b * v3.z;
+		if (p1 < p3) {
+			min = p1;
+			max = p3;
+		}
+		else
+		{
+			min = p3;
+			max = p1;
+		}
+		rad = fa * halfboxsize.x + fb * halfboxsize.z;
+		if (min > rad || max < -rad)
+		{
+			return false;
+		}
+		return true;
+	}
+	private bool AXISTEST_Y1( float a, float b, float fa, float fb, out float p1, ref Vector3 v1, out float p2, ref Vector3 v2, out float min, out float max, out float rad, ref Vector3 halfboxsize )
+	{
+		p1 = -a * v1.x + b * v1.z;
+		p2 = -a * v2.x + b * v2.z;
+		if ( p1 < p2 )
+		{
+			min = p1; max = p2;
+		}
+		else
+		{
+			min = p2; max = p1;
+		}
+		rad = fa * halfboxsize.x + fb * halfboxsize.z;
+		if ( min > rad || max < -rad )
+		{
+			return false;
+		}
+		return true;
+	}
+	private bool AXISTEST_Z12( float a, float b, float fa, float fb, out float p2, ref Vector3 v2, out float p3, ref Vector3 v3, out float min, out float max, out float rad, ref Vector3 halfboxsize )
+	{
+		p2 = a * v2.x - b * v2.y;
+		p3 = a * v3.x - b * v3.y;
+		if (p3 < p2)
+		{
+			min = p3; max = p2;
+		}
+		else
+		{
+			min = p2; max = p3;
+		}
+		rad = fa * halfboxsize.x + fb * halfboxsize.y;
+		if (min > rad || max < -rad)
+		{
+			return false;
+		}
+		return true;
+	}
+	private bool AXISTEST_Z0( float a, float b, float fa, float fb, out float p1, ref Vector3 v1, out float p2, ref Vector3 v2, out float min, out float max, out float rad, ref Vector3 halfboxsize )
+	{
+		p1 = a * v1.x - b * v1.y;
+		p2 = a * v2.x - b * v2.y;
+		if (p1 < p2)
+		{
+			min = p1;
+			max = p2;
+		}
+		else
+		{
+			min = p2;
+			max = p1;
+		}
+		rad = fa * halfboxsize.x + fb * halfboxsize.y;
+		if (min > rad || max < -rad)
+		{
+			return false;
+		}
+		return true;
+	}
+	private void VX_FINDMINMAX( float x0, float x1, float x2, out float min, out float max )
+	{
+		min = max = x0;
+		if (x1 < min) min = x1;
+		if (x1 > max) max = x1;
+		if (x2 < min) min = x2;
+		if (x2 > max) max = x2;
+	}
+	private bool vx__plane_box_overlap( Vector3 normal, float d, Vector3 halfboxsize )
+	{
+		Vector3 vmin, vmax;
+
+		if ( normal.x > 0.0f )
+		{
+			vmin.x = -halfboxsize.x;
+			vmax.x = halfboxsize.x;
+		}
+		else
+		{
+			vmin.x = halfboxsize.x;
+			vmax.x = -halfboxsize.x;
+		}
+		if ( normal.y > 0.0f )
+		{
+			vmin.y = -halfboxsize.y;
+			vmax.y = halfboxsize.y;
+		}
+		else
+		{
+			vmin.y = halfboxsize.y;
+			vmax.y = -halfboxsize.y;
+		}
+		if ( normal.z > 0.0f )
+		{
+			vmin.z = -halfboxsize.z;
+			vmax.z = halfboxsize.z;
+		}
+		else
+		{
+			vmin.z = halfboxsize.z;
+			vmax.z = -halfboxsize.z;
+		}
+
+		if ( Vector3.Dot( normal, vmin ) + d > 0.0f )
+		{
+			return false;
+		}
+
+		if ( Vector3.Dot( normal, vmax ) + d >= 0.0f )
+		{
+			return true;
+		}
+
+		return false;
+	} 
+}
+```
+参考
+https://github.com/karimnaaji/voxelizer/blob/master/voxelizer.h
+https://mgerhardy.gitlab.io/engine/voxelizer_8h_source.html
+9
+Go to list of users who liked
+8
+comment0
+Go to list of comments
+Register as a new user and use Qiita more conveniently
+You get articles that match your needs
+You can efficiently read back useful information
+You can use dark theme
+What you can do with signing up
+Sign upLogin
+9
+Go to list of users who liked
+8
+more_horiz
+Delete article
+close
+Deleted articles cannot be recovered.
+Draft of this article would be also deleted.
+Are you sure you want to delete this article?
+CancelDeletedelete

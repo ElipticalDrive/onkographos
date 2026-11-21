@@ -1,0 +1,160 @@
+--- v003.md
++++ v004.md
+@@ -4,52 +4,125 @@
+ 
+ ## Overview
+-Hybrid rendering combines volume rendering (ray marching) and surface rendering (rasterization) to optimize computational cost and representation fidelity [S1, unofficial][S2]. It restricts ray marching to the region between the viewpoint and a pre-existing mesh surface, using the mesh intersection to terminate volume integration and fill remaining color throughput [S1, unofficial][S2]. This approach is distinct from pure volume or pure surface methods by leveraging the mesh for high-fidelity geometry where available and the volume for complex, occluded, or semi-transparent regions [S1, unofficial][S2].
++Hybrid rendering combines volume ray marching with surface rasterization to optimize performance and fidelity. It solves the problem of redundant computation in regions where high-fidelity surface geometry is available by restricting volume integration to the space between the camera and the nearest surface intersection [S1, unofficial][S2]. Unlike pure volume rendering, it leverages mesh depth to terminate ray marching early, and unlike pure surface rendering, it retains volumetric effects (such as subsurface scattering or semi-transparency) in the foreground [S1, unofficial][S2].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A voxel grid (or neural volume representation), a mesh representation (vertices, faces, textures), and a ray origin/direction.
+-*   **Outputs:** Final color $C_{vosh}$, diffuse color $C_{vosh,d}$, and view-dependent features $F_{vosh}$ [S1, unofficial].
++**Inputs:**
++*   Camera ray $r(t) = o + td$.
++*   Voxel grid or neural volume representation (providing density $\sigma$ and color $c$).
++*   Surface mesh (providing intersection geometry).
++*   Surface shading model (providing diffuse color $c_{d,m}$ and view-dependent features $f_m$).
++
++**Outputs:**
++*   Final hybrid color $C_{vosh}$.
++*   Diffuse color $C_{vosh,d}$.
++*   View-dependent features $F_{vosh}$.
+ 
+ **Data Structures:**
+-*   **Voxel Grid:** Stores per-voxel weights $w_i$ and colors $c_{d,i}$ [S1, unofficial].
+-*   **Mesh:** Stores surface geometry and intersection properties (color $c_{d,m}$, features $f_m$) [S1, unofficial][S2].
++*   **Voxel Weights:** Cumulative transmittance weights $w_i$ accumulated during ray marching.
++*   **Mesh Weight:** $w_m$, representing the remaining transmittance reaching the surface.
++*   **Surface Attributes:** Diffuse color $c_{d,m}$ and view-dependent features $f_m$ at the intersection point.
+ 
+ **Steps:**
+-1.  **Ray-Mesh Intersection:** For each ray, determine if it intersects the mesh. If it does, record the intersection distance $t_{max}$ [S2].
+-2.  **Volume Rendering (Ray Marching):** Perform standard volume rendering (ray marching) along the ray.
+-    *   If the ray intersects the mesh, limit the marching range to $t_{max}$ [S2].
+-    *   Accumulate voxel weights $w_i$ and colors $c_{d,i}$ for all voxels traversed up to $t_{max}$ [S1, unofficial].
+-    *   If the ray does not intersect the mesh, perform full volume rendering to the far plane [S1, unofficial].
+-3.  **Mesh Weight Calculation:** Calculate the mesh weight $w_m$ as the remaining transmittance after volume integration [S1, unofficial]:
+-    $$ w_m = 1 - \sum_i w_i $$
+-    where $\sum_i w_i$ is the sum of weights of all voxels rendered along the ray [S1, unofficial].
+-4.  **Color and Feature Composition:** Combine the volume contribution and the mesh contribution [S1, unofficial]:
+-    *   Diffuse color:
++1.  **Ray-Mesh Intersection:** For each pixel, cast a ray and determine the nearest intersection with the surface mesh. Let $t_{max}$ be the distance to this intersection. If no intersection is found, $t_{max}$ is set to the far clipping plane or volume boundary [S2].
++2.  **Volume Ray Marching:** Perform volume rendering (ray marching) along the ray from $t_{min}$ (near clip) to $t_{max}$. Accumulate color and weights using standard volume integration [S1, unofficial][S2].
++    *   Let $C_{vol}$ be the accumulated volume color.
++    *   Let $W_{vol} = \sum_i w_i$ be the sum of voxel weights (opacity) accumulated up to $t_{max}$.
++3.  **Calculate Mesh Weight:** Compute the weight of the surface contribution as the remaining transmittance:
++    $$ w_m = 1 - W_{vol} $$
++    This represents the portion of light that passed through the volume without being absorbed or scattered [S1, unofficial].
++4.  **Surface Contribution:** Retrieve the surface color and features at the intersection point $(t_{max})$.
++    *   Diffuse color: $c_{d,m}$
++    *   View-dependent features: $f_m$
++5.  **Hybrid Compositing:** Combine the volume and surface contributions.
++    *   The hybrid diffuse color $C_{vosh,d}$ is a weighted sum of the volume diffuse color and the surface diffuse color:
+         $$ C_{vosh,d} = \sum_i w_i c_{d,i} + w_m c_{d,m} $$
+-    *   View-dependent features:
++        where $c_{d,i}$ is the diffuse color contribution of the $i$-th voxel step [S1, unofficial].
++    *   The hybrid view-dependent features $F_{vosh}$ are similarly blended:
+         $$ F_{vosh} = \sum_i w_i f_i + w_m f_m $$
+-    *   Final color (with optional MLP refinement):
++        where $f_i$ are the view-dependent features from the volume steps [S1, unofficial].
++    *   The final color $C_{vosh}$ is derived from $C_{vosh,d}$ and $F_{vosh}$ using a Multi-Layer Perceptron (MLP) that models view-dependent effects (e.g., specular highlights):
+         $$ C_{vosh} = C_{vosh,d} + \text{MLP}(C_{vosh,d}, F_{vosh}, d) $$
+-    where $c_{d,m}$ and $f_m$ are the diffuse color and view-dependent features at the mesh intersection point, and $d$ is the depth or other positional data [S1, unofficial].
++        where $d$ is the view direction [S1, unofficial].
++
++**Pseudocode:**
++```python
++def hybrid_render(ray_origin, ray_direction, mesh, volume, mlp):
++    # Step 1: Find surface intersection
++    t_max = mesh.intersect(ray_origin, ray_direction)
++    if t_max is None:
++        t_max = far_clipping_plane
++
++    # Step 2: Volume Ray Marching from t_min to t_max
++    vol_color_diffuse = 0.0
++    vol_features = 0.0
++    vol_opacity = 0.0
++    t = t_min
++    dt = step_size
++    
++    while t < t_max:
++        # Sample volume at current position
++        density, color_diffuse, features = volume.sample(ray_origin + t * ray_direction)
++        
++        # Accumulate
++        weight = 1.0 - exp(-density * dt)
++        vol_opacity += weight * (1.0 - vol_opacity) # Standard alpha compositing weight accumulation
++        
++        # Additive contribution to color/features
++        vol_color_diffuse += weight * (1.0 - vol_opacity) * color_diffuse # Approximation of standard DVR
++        vol_features += weight * (1.0 - vol_opacity) * features
++        
++        t += dt
++
++    # Step 3: Calculate Mesh Weight
++    # w_m is the transmittance reaching the surface
++    w_m = 1.0 - vol_opacity
++    
++    # Step 4: Get Surface Attributes
++    surface_pos = ray_origin + t_max * ray_direction
++    mesh_color_diffuse, mesh_features = mesh.get_attributes(surface_pos)
++    
++    # Step 5: Hybrid Compositing
++    # Blend volume and surface contributions
++    final_diffuse = vol_color_diffuse + w_m * mesh_color_diffuse
++    final_features = vol_features + w_m * mesh_features
++    
++    # Apply view-dependent shading via MLP
++    final_color = final_diffuse + mlp(final_diffuse, final_features, ray_direction)
++    
++    return final_color
++```
+ 
+ **Parameters:**
+-*   $t_{max}$: Set to the mesh depth for intersecting rays [S2].
+-*   MLP: A multi-layer perceptron used to refine the final color based on diffuse color, features, and depth [S1, unofficial].
++*   $t_{min}$: Near clipping plane distance.
++*   $t_{max}$: Distance to nearest surface intersection.
++*   $dt$: Step size for volume ray marching.
++*   MLP: A neural network mapping diffuse color, view-dependent features, and view direction to final color.
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Ensure accurate ray-mesh intersection to correctly define $t_{max}$ [S2].
+-*   **Occlusion:** The volume representation should naturally avoid occluding the mesh in areas where the mesh provides higher fidelity [S2].
+-*   **Degenerate Input:** If the mesh is incomplete, rays may not intersect, falling back to pure volume rendering [S1, unofficial].
++**Edge Cases:**
++*   **No Intersection:** If the ray does not hit the mesh, $t_{max}$ defaults to the volume boundary, resulting in pure volume rendering [S2].
++*   **Precision:** Floating-point precision errors at $t_{max}$ may cause gaps or overlaps between volume and surface. [G] Ensure consistent depth bias or epsilon checks when sampling the surface.
++
++## Subtopics
++
++### [Multi-Mode Rendering with Iso-surfaces and Meshes](2165-multi-mode-rendering-with-iso-surfaces-and-meshes.md)
++Uses explicit isosurfaces for integration bounds. Choose when geometry is complex but not explicitly meshed.
++
++### [Hybrid Isosurface/DVR Rendering](8367-hybrid-isosurface-dvr-rendering.md)
++Combines DVR with isosurface rasterization. Choose when isosurface extraction is feasible and preferred over mesh fitting.
++
++### [Hybrid Volume-Surface Rendering](11497-hybrid-volume-surface-rendering.md)
++General category of combining volume and surface techniques. Choose when specific hybrid strategies (like Vosh) are not required.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reduced compared to full volume rendering because ray marching is truncated at the mesh surface [S1, unofficial].
+-*   **Memory Complexity:** Requires storage for both voxel grid and mesh [S1, unofficial][S2].
+-*   **Strengths:** High fidelity for geometrically simple regions (handled by mesh) and complex/semi-transparent regions (handled by volume) [S1, unofficial][S2].
+-*   **Limitations:** Requires a pre-existing or simultaneously trained mesh [S1, unofficial][S2].
+-*   **When to Use:** Real-time view synthesis where both geometry and texture detail are critical [S1, unofficial].
+-*   **When Not to Use:** Scenes with no clear surface structure or where mesh acquisition is prohibitive [S2].
++*   **Time Complexity:** $O(N_v + N_s)$, where $N_v$ is the number of volume samples (reduced by early termination at $t_{max}$) and $N_s$ is the cost of mesh intersection and shading [S1, unofficial][S2].
++*   **Memory Complexity:** Depends on the volume representation (voxel grid or neural network weights) and mesh storage.
++*   **Performance:** Significantly reduces ray marching cost in regions with high-fidelity meshes [S1, unofficial].
++*   **Strengths:** High fidelity in surface regions, efficient rendering of complex scenes with both detailed surfaces and volumetric details [S1, unofficial][S2].
++*   **Limitations:** Requires a valid mesh representation; discontinuities may occur at the boundary between volume and surface if not blended carefully [S1, unofficial].
++*   **When to use:** Scenes with mixed geometry (e.g., characters with detailed clothing meshes and volumetric hair/fur) [S1, unofficial][S2].
++*   **When not to use:** Purely volumetric scenes without surface geometry [S2].
+ 
+ ## Background
+-Hybrid rendering was introduced in the context of Voxel-Mesh Hybrid Representation for Real-Time View Synthesis [S1, unofficial] and Neural Volumes [S2]. It addresses the limitations of pure volume rendering (high computational cost) and pure mesh rendering (lack of semi-transparency) by combining both [S1, unofficial][S2].
++Hybrid rendering was introduced to leverage the strengths of both volume and surface representations. The specific "Vosh" (Voxel-Mesh Hybrid) formulation was proposed in 2024 for real-time view synthesis, aiming to reduce time costs associated with ray marching by confining it to the space before the surface [S1, unofficial]. The concept of using mesh depth to limit volume integration was also explored in the context of Neural Volumes (2019) to avoid expending representational power on areas already covered by high-fidelity meshes [S2].
+ 
+ ## Sources

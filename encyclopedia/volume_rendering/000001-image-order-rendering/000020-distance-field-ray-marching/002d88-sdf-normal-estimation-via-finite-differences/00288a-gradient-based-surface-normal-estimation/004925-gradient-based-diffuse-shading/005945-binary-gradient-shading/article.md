@@ -1,0 +1,155 @@
+# Binary Gradient Shading
+
+
+## Overview
+Binary Gradient Shading is a technique for computing diffuse or specular lighting on binary voxel models by approximating surface normals using 6-connected (face-adjacent) neighbors. It sets itself apart from general gradient shading by restricting normal estimation to binary data, allowing for a compact 5-bit encoding of the 26 possible normal directions and enabling hardware-accelerated lookup table (LUT) based lighting calculations.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A binary voxel dataset (pre-image) where surface voxels are marked (value 1) and background voxels are 0.
+*   **Output:** A rendered image with lighting intensity, where surface normals are encoded in a secondary framebuffer.
+
+**Data Structures:**
+*   **Surface Normal Encoding:** Each surface voxel's normal is stored in a single byte (8 bits).
+    *   **Bits 0-4 (5 bits):** Encode the surface normal vector. There are exactly 26 possible normal directions derived from the 6-connected neighborhood.
+    *   **Bits 5-7 (3 bits):** Store an approximation of the surface depth coordinate. This allows the lighting model to include depth cueing alongside reflection.
+*   **Lookup Table (LUT):** A hardware output lookup table mapping the 26 encoded normal values (plus potentially depth variations) to final light intensity values.
+
+**Algorithm Steps:**
+1.  **Identify Surface Voxels:** Determine which voxels in the binary dataset are surface voxels (value 1) and have at least one background neighbor (value 0).
+2.  **Estimate Normal Vector:** For each surface voxel, examine its 6-connected (face-adjacent) neighbors.
+    *   Initialize a normal vector $\mathbf{n} = (0, 0, 0)$.
+    *   For each of the 6 neighbors:
+        *   If the neighbor has value 0 (background), add a component to $\mathbf{n}$ in the direction *opposite* to the neighbor's position relative to the center voxel.
+        *   Specifically, if the neighbor is at offset $(dx, dy, dz)$ where $dx, dy, dz \in \{-1, 0, 1\}$ and only one is non-zero, add $(-dx, -dy, -dz)$ to $\mathbf{n}$.
+    *   The resulting vector $\mathbf{n}$ points outward from the surface. Note that the magnitude is not normalized; the direction is determined by the sum of contributions from background neighbors.
+3.  **Encode Normal:** Map the resulting direction to one of the 26 possible discrete normal values. Assign the corresponding 5-bit code to the normal field of the output byte.
+4.  **Encode Depth:** Calculate or retrieve the depth coordinate (e.g., distance along the ray or z-coordinate) for the surface voxel. Pack the 3 most significant bits of this depth approximation into the remaining 3 bits of the output byte.
+5.  **Store Normal:** Write the 8-bit encoded value (5-bit normal + 3-bit depth) to the second framebuffer.
+6.  **Compute Lighting:**
+    *   Define a lighting function $L(\mathbf{n}, \mathbf{l})$ that computes light intensity based on the surface normal $\mathbf{n}$ and the incident light direction $\mathbf{l}$, including diffuse/specular terms and depth cueing.
+    *   Pre-compute $L$ for all 26 possible normal values (and potentially depth variations) for the current light direction and lighting model.
+    *   Load these computed intensity values into a hardware output lookup table.
+7.  **Render:** For each pixel, retrieve the encoded normal/depth byte from the second framebuffer and use it as an index into the LUT to fetch the final light intensity.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_binary_gradient_normal(voxel, neighbors_6):
+    """
+    Computes the unnormalized normal vector for a surface voxel
+    by examining its 6-connected neighbors.
+    
+    Args:
+        voxel: The center voxel (assumed to be 1).
+        neighbors_6: List of 6 neighbor values and their offsets.
+                     Each element is (value, offset_x, offset_y, offset_z).
+    
+    Returns:
+        A tuple (nx, ny, nz) representing the unnormalized normal vector.
+    """
+    nx, ny, nz = 0, 0, 0
+    for val, dx, dy, dz in neighbors_6:
+        if val == 0:  # Background neighbor
+            # Add component in the opposite direction
+            nx -= dx
+            ny -= dy
+            nz -= dz
+    return (nx, ny, nz)
+
+def encode_normal_and_depth(normal_vec, depth_approx):
+    """
+    Encodes the normal vector and depth into a single byte.
+    
+    Args:
+        normal_vec: Tuple (nx, ny, nz) from compute_binary_gradient_normal.
+        depth_approx: Approximate depth coordinate (e.g., 8-bit value).
+    
+    Returns:
+        An 8-bit integer: [3 bits depth][5 bits normal index].
+    """
+    # Map normal vector to one of 26 discrete indices
+    # This requires a predefined mapping or hashing of the 26 possible
+    # (nx, ny, nz) directions to indices 0-25.
+    normal_index = map_normal_to_index(normal_vec)
+    
+    # Extract top 3 bits of depth
+    depth_bits = (depth_approx >> 5) & 0x07
+    
+    # Pack: bits 7-5 are depth, bits 4-0 are normal
+    encoded_byte = (depth_bits << 5) | normal_index
+    return encoded_byte
+
+def setup_lighting_lut(light_direction, lighting_model):
+    """
+    Pre-computes light intensity for all 26 normal directions.
+    
+    Args:
+        light_direction: Unit vector (lx, ly, lz).
+        lighting_model: Function or parameters for diffuse/specular reflection.
+    
+    Returns:
+        A list of 26 float values representing intensity for each normal index.
+    """
+    lut = []
+    for i in range(26):
+        normal_vec = index_to_normal_vector(i)
+        # Compute intensity based on normal and light direction
+        intensity = lighting_model.compute_intensity(normal_vec, light_direction)
+        lut.append(intensity)
+    return lut
+
+def render_binary_gradient_shading(voxel_data, light_direction, lighting_model):
+    """
+    Main rendering pipeline for Binary Gradient Shading.
+    """
+    # Step 1-5: Compute normals and encode them
+    second_framebuffer = []
+    for voxel in voxel_data:
+        if is_surface_voxel(voxel):
+            neighbors = get_6_connected_neighbors(voxel)
+            normal_vec = compute_binary_gradient_normal(voxel, neighbors)
+            depth = get_depth(voxel)
+            encoded = encode_normal_and_depth(normal_vec, depth)
+            second_framebuffer.append(encoded)
+        else:
+            second_framebuffer.append(0) # Background
+            
+    # Step 6: Setup LUT
+    lut = setup_lighting_lut(light_direction, lighting_model)
+    
+    # Step 7: Render using LUT
+    final_image = []
+    for encoded in second_framebuffer:
+        normal_index = encoded & 0x1F # Extract 5-bit normal
+        intensity = lut[normal_index]
+        final_image.append(intensity)
+        
+    return final_image
+```
+
+**Parameters:**
+*   **Normal Encoding:** 5 bits.
+*   **Depth Encoding:** 3 bits.
+*   **Total Bits per Normal:** 8 bits (1 byte).
+
+**Edge Cases and Pitfalls:**
+*   **Light Direction Changes:** Changing the light direction or lighting model (e.g., surface reflection coefficients) requires regenerating the lookup table entries. It does not allow for per-pixel recalculation of the dot product, which is a limitation compared to general gradient shading [S1].
+*   **Normal Ambiguity:** The method relies on 6-connected neighbors. Corner or edge cases where multiple neighbors are background may result in unnormalized vectors that still map to one of the 26 discrete directions. The mapping must be consistent.
+*   **Depth Precision:** Only 3 bits are available for depth, which may lead to coarse depth cueing.
+
+## Operating characteristics
+*   **Time Complexity:** Normal computation is $O(1)$ per surface voxel (constant number of neighbors). Lighting lookup is $O(1)$ per pixel. Total time is linear in the number of surface voxels/pixels.
+*   **Memory Complexity:** Requires a secondary framebuffer of size equal to the image resolution, storing 1 byte per pixel. The LUT is small (26 entries).
+*   **Performance:** Fast due to hardware LUT usage. Avoids per-pixel floating-point dot products.
+*   **Strengths:** Efficient for binary data; simple hardware implementation; supports depth cueing.
+*   **Limitations:** Limited to 26 normal directions; lighting changes require LUT regeneration; coarse depth precision.
+*   **When to Use:** Binary voxel models where performance is critical and lighting changes are infrequent.
+*   **When Not to Use:** Continuous scalar fields, dynamic lighting, or when high-quality smooth shading is required.
+
+## Background
+Binary Gradient Shading was introduced in the context of hardware support for binary voxel models. It is described in the paper "Hardware Support for the Display and Manipulation of Binary Voxel Models" [S1]. The method leverages the discrete nature of binary data to simplify normal estimation and lighting calculation, making it suitable for early hardware implementations with limited floating-point capabilities.
+
+## Sources
+[S1] Hardware Support for the Display and Manipulation of Binary Voxel Models, https://doi.org/10.2312/eggh/eggh88/103-117, fetched 2026-10-26

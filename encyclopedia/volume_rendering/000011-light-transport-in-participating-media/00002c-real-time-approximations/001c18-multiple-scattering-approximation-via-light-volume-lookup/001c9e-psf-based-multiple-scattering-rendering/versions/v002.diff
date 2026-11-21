@@ -1,0 +1,166 @@
+--- v001.md
++++ v002.md
+@@ -11,14 +11,14 @@
+ ### Inputs and Outputs
+ *   **Inputs**:
+-    *   Incident illumination field (light volume).
++    *   Incident illumination field (light volume) [G].
+     *   Medium optical properties: scattering coefficients and phase function [S1].
+-    *   Medium geometry and spatial variation data.
++    *   Medium geometry and spatial variation data [G].
+ *   **Outputs**:
+-    *   Rendered image or volume radiance field including multiple scattering contributions.
++    *   Rendered image or volume radiance field including multiple scattering contributions [G].
+ 
+ ### Data Structures
+-The method utilizes a multi-level light volume representation.
+-*   **Light Volume**: A 3D grid or texture storing incident radiance.
+-*   **Blurred Levels**: A set of pre-computed blurred versions of the light volume, each corresponding to a different kernel size (level of detail) representing different degrees of scattering spreading [S1].
++The method utilizes a multi-level light volume representation [S1].
++*   **Light Volume**: A 3D grid or texture storing incident radiance [G].
++*   **Blurred Levels**: A set of pre-computed blurred versions of the light volume, each corresponding to a different kernel size representing different degrees of scattering spreading [S1].
+ 
+ ### Parameters
+@@ -34,47 +34,92 @@
+ ### Pseudocode
+ ```python
+-# Pre-computation Phase
++import math
++
++def gaussian_kernel_3d(size, sigma):
++    """Generates a normalized 3D Gaussian kernel for blurring [G]."""
++    k = size * 2 + 1
++    kernel = [[[0.0] * k for _ in range(k)] for _ in range(k)]
++    center = size
++    total = 0.0
++    for x in range(k):
++        for y in range(k):
++            for z in range(k):
++                w = math.exp(-((x - center)**2 + (y - center)**2 + (z - center)**2) / (2 * sigma**2))
++                kernel[x][y][z] = w
++                total += w
++    return [[[[w / total for w in row_z] for row_z in col_y] for col_y in plane_x] for plane_x in kernel]
++
++def convolve_3d(volume, kernel):
++    """Performs 3D convolution for precomputation [G]."""
++    v_size = len(volume)
++    k_size = len(kernel) // 2
++    result = [[[0.0] * v_size for _ in range(v_size)] for _ in range(v_size)]
++    for i in range(v_size):
++        for j in range(v_size):
++            for k in range(v_size):
++                acc = 0.0
++                for ki in range(-k_size, k_size + 1):
++                    for kj in range(-k_size, k_size + 1):
++                        for kk in range(-k_size, k_size + 1):
++                            ni, nj, nk = i + ki, j + kj, k + kk
++                            if 0 <= ni < v_size and 0 <= nj < v_size and 0 <= nk < v_size:
++                                acc += volume[ni][nj][nk] * kernel[ki + k_size][kj + k_size][kk + k_size]
++                result[i][j][k] = acc
++    return result
++
+ def precompute_light_volume(incident_light_volume, scattering_coefficients, phase_function):
+-    """
+-    Step 1: Compute reduced intensity.
+-    Step 2: Apply PSF by blurring with different kernel sizes.
+-    """
+-    # Compute reduced intensity due to simple attenuation
+-    # Note: Exact attenuation formula depends on specific optical properties
+-    # [G] Assuming standard Beer-Lambert law for attenuation
+-    reduced_intensity = incident_light_volume * exp(-scattering_coefficients * distance)
++    """Step 1 & 2: Compute reduced intensity and apply PSF via multi-level blurring [S1]."""
++    # Step 1: Compute reduced intensity due to simple attenuation
++    # [G] Using Beer-Lambert law; distance is normalized or in world units
++    reduced_intensity = [[[incident_light_volume[i][j][k] * math.exp(-scattering_coefficients * d) 
++                          for k in range(len(incident_light_volume[0][0]))] 
++                          for j in range(len(incident_light_volume[0]))] 
++                          for i in range(len(incident_light_volume))]
+     
+-    # Generate blurred levels of detail
++    # Step 2: Apply PSF by blurring with different kernel sizes
+     blurred_levels = []
+-    kernel_sizes = [size1, size2, size3] # Defined by scattering properties
+-    
++    kernel_sizes = [1, 3, 5] # [G] Typical sizes representing different scattering spreads
+     for size in kernel_sizes:
+-        # Blur the reduced intensity with a kernel of specific size
+-        # [G] Convolution operation
+-        blurred = convolve(reduced_intensity, get_kernel(size, phase_function))
++        kernel = gaussian_kernel_3d(size, sigma=size)
++        blurred = convolve_3d(reduced_intensity, kernel)
+         blurred_levels.append(blurred)
+-        
+     return blurred_levels
+ 
+-def render_volume(viewpoint, camera_ray, blurred_levels, scattering_coefficients, phase_function):
+-    """
+-    Step 3: Look up result from pre-computed blurred representation.
+-    """
+-    # For each sample point along the ray in the volume:
+-    for point in volume_samples:
+-        # Compute the amount of spreading (blurring) occurring due to multiple scattering
+-        # at this specific point based on local optical properties
+-        spreading_width = compute_spreading_width(point, scattering_coefficients, phase_function)
++def render_volume(origin, direction, step_size, max_dist, blurred_levels, scattering_coefficients):
++    """Step 3: Ray march, compute spreading, lookup blurred volume, accumulate [S1]."""
++    accumulated_radiance = [0.0, 0.0, 0.0, 0.0] # RGBA
++    transmittance = 1.0
++    t = 0.0
++    while t < max_dist:
++        pos = [origin[i] + direction[i] * t for i in range(3)]
++        # [G] Check volume bounds; assume 0..1 normalized coordinates
++        if not (0 <= pos[0] < 1 and 0 <= pos[1] < 1 and 0 <= pos[2] < 1):
++            break
+         
+-        # Select the appropriate blurred level based on spreading_width
+-        # [G] Interpolation between levels if necessary
+-        blurred_level = select_blurred_level(blurred_levels, spreading_width)
++        # Compute spreading width based on distance traveled and optical properties
++        # [G] Approximate spatial spreading width as proportional to distance and scattering coefficient
++        spreading_width = math.sqrt(2.0 * scattering_coefficients * t)
+         
+-        # Look up the radiance from the blurred light volume
+-        # [G] Trilinear or higher-order interpolation in the blurred volume
+-        multiple_scattering_radiance = sample_volume(blurred_level, point)
++        # Select appropriate blurred level based on spreading width
++        level_idx = min(int(spreading_width), len(blurred_levels) - 1)
++        blurred_vol = blurred_levels[level_idx]
+         
+-        # Accumulate radiance
+-        accumulate_radiance(multiple_scattering_radiance)
++        # Sample radiance from the blurred light volume
++        # [G] Trilinear interpolation for smooth lookup
++        sample_idx = [int(p * 99) for p in pos] # Assuming 100x100x100 grid
++        radiance = blurred_vol[sample_idx[0]][sample_idx[1]][sample_idx[2]]
++        
++        # Accumulate with standard volume rendering equation
++        # [G] Assuming constant extinction for simplicity
++        step_transmittance = math.exp(-scattering_coefficients * step_size)
++        accumulated_radiance[0] += radiance[0] * transmittance * (1.0 - step_transmittance)
++        accumulated_radiance[1] += radiance[1] * transmittance * (1.0 - step_transmittance)
++        accumulated_radiance[2] += radiance[2] * transmittance * (1.0 - step_transmittance)
++        transmittance *= step_transmittance
++        
++        t += step_size
++    
++    accumulated_radiance[3] = 1.0 # Opaque alpha for demonstration
++    return accumulated_radiance
+ ```
+ 
+@@ -85,10 +130,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The pre-computation phase involves blurring the light volume with multiple kernels, which is generally faster than full radiative transfer simulation. The rendering phase involves lookups and interpolations, which are efficient.
+-*   **Memory Complexity**: Requires storing multiple levels of blurred light volumes, increasing memory usage compared to a single light volume.
+-*   **Strengths**: Handles spatially varying participating media, anisotropic sources, and visibility effects. More practical than Monte Carlo methods for real-time or near-real-time applications.
+-*   **Limitations**: Relies on the accuracy of the PSF approximation. May not capture all complex scattering phenomena as accurately as full simulation.
+-*   **When to Use**: When realistic multiple scattering effects are needed in spatially varying volumes, and full simulation is too slow.
+-*   **When Not to Use**: When extreme accuracy is required and computational resources are sufficient for Monte Carlo methods, or when the medium is optically dense and homogeneous (diffusion approximation might be simpler).
++*   **Time Complexity**: The pre-computation phase involves blurring the light volume with multiple kernels, which is generally faster than full radiative transfer simulation [S1]. The rendering phase involves lookups and interpolations, which are efficient [G].
++*   **Memory Complexity**: Requires storing multiple levels of blurred light volumes, increasing memory usage compared to a single light volume [S1].
++*   **Strengths**: Handles spatially varying participating media, anisotropic sources, and visibility effects [S1]. More practical than Monte Carlo methods for real-time or near-real-time applications [G].
++*   **Limitations**: Relies on the accuracy of the PSF approximation. May not capture all complex scattering phenomena as accurately as full simulation [G].
++*   **When to Use**: When realistic multiple scattering effects are needed in spatially varying volumes, and full simulation is too slow [S1].
++*   **When Not to Use**: When extreme accuracy is required and computational resources are sufficient for Monte Carlo methods, or when the medium is optically dense and homogeneous (diffusion approximation might be simpler) [S1].
+ 
+ ## Background

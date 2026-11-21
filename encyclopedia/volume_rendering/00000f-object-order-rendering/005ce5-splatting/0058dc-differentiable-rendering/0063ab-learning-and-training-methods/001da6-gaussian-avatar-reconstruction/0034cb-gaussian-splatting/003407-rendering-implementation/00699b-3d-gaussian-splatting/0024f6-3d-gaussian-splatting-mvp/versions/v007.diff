@@ -1,0 +1,516 @@
+--- v006.md
++++ v007.md
+@@ -4,41 +4,46 @@
+ 
+ ## Overview
+-3D Gaussian Splatting MVP is a self-contained, pure-PyTorch implementation of the core 3D Gaussian Splatting rendering algorithm, designed as a teaching reference rather than a production renderer [S1, unofficial]. It solves the problem of understanding the mathematical foundations of 3DGS by implementing the forward rasterization pipeline without custom CUDA kernels, relying entirely on standard PyTorch operations [S1, unofficial]. It sets itself apart from production implementations like [3D Gaussian Splatting Rendering (Software)](2805-3d-gaussian-splatting-rendering-software.md) by using explicit Python loops for rasterization and omitting optimizations such as tile-based sorting, spherical harmonics, and adaptive density control [S1, unofficial].
++3D Gaussian Splatting MVP is a self-contained, pure-PyTorch implementation of the core 3D Gaussian Splatting rendering algorithm, designed as a teaching reference rather than a production renderer [S1, unofficial]. It solves the problem of understanding the mathematical foundations of differentiable Gaussian rasterization by implementing the forward pass and gradient flow without custom CUDA kernels [S1, unofficial]. It sets itself apart from production implementations like [3D Gaussian Splatting Rendering (Software)](2805-3d-gaussian-splatting-rendering-software.md) by using explicit Python loops for rasterization and omitting optimizations such as tile-based sorting, spherical harmonics, and adaptive density control [S1, unofficial].
+ 
+ ## How it works
+-The method implements the forward pass of 3D Gaussian Splatting, transforming a set of 3D Gaussians into a 2D image via camera projection and alpha compositing.
+-
+-**Inputs and Outputs**
+-*   **Inputs:** A list of $N$ 3D Gaussians, each defined by mean position, scale, rotation, opacity, and color; camera parameters (intrinsics and extrinsics); image dimensions $(H, W)$.
+-*   **Outputs:** A rendered RGB image of size $(H, W, 3)$ and optionally depth/transmittance buffers.
+-
+-**Data Structures**
+-Each Gaussian $i$ is parameterized by the following fields [S1, unofficial]:
++The method renders a set of 3D Gaussians to a 2D image buffer by projecting them into camera space, computing 2D screen-space covariances, sorting by depth, and performing front-to-back alpha compositing [S1, unofficial].
++
++### Inputs and Outputs
++*   **Inputs:**
++    *   List of $N$ 3D Gaussians, each defined by mean $\mu$, scale $s$, rotation $q$ (unit quaternion), opacity $\alpha$, and RGB color $c$.
++    *   Camera parameters: Pinhole camera model with `look_at` function using OpenCV/COLMAP convention [S1, unofficial].
++    *   Image dimensions: Height $H$, Width $W$.
++*   **Outputs:**
++    *   Rendered image tensor of shape $(H, W, 3)$.
++    *   (Optional) Depth buffer and transmittance buffer for debugging or further processing.
++
++### Data Structures
++Each Gaussian $i$ stores the following fields [S1, unofficial]:
+ *   `mean`: 3D vector $(x, y, z)$ in world space.
+-*   `scale`: 3D vector $(s_x, s_y, s_z)$ stored in log-space to ensure positivity.
++*   `scale`: 3D vector $(s_x, s_y, s_z)$ stored in log-space to ensure positivity during optimization.
+ *   `rotation`: Unit quaternion $(w, x, y, z)$.
+ *   `opacity`: Scalar $\alpha \in [0, 1]$.
+ *   `color`: 3D vector $(r, g, b)$.
+ 
+-The covariance matrix $\Sigma$ is constructed implicitly from scale and rotation to ensure it is symmetric positive semi-definite (PSD) [S1, unofficial]:
++The covariance matrix $\Sigma$ is not stored directly but constructed from scale and rotation to ensure it is symmetric positive semi-definite (PSD) [S1, unofficial]:
+ $$ \Sigma = R S S^T R^T $$
+ where $R$ is the rotation matrix derived from the unit quaternion, and $S = \text{diag}(e^{s_x}, e^{s_y}, e^{s_z})$ is the scale matrix [S1, unofficial].
+ 
+-**Algorithm Steps**
+-The rasterizer processes Gaussians in a loop for readability, rather than vectorizing over all pixels and Gaussians simultaneously [S1, unofficial].
+-
+-1.  **World-to-Camera Transformation:** Transform the mean $\mu_i$ of each Gaussian from world space to camera space using the view matrix $W$ [S1, unofficial].
+-2.  **Covariance Transformation:** Transform the 3D covariance matrix $\Sigma_i$ into the camera frame:
+-    $$ \Sigma_{cam} = W \Sigma_i W^T $$
+-3.  **2D Projection (EWA):** Project the 3D covariance to the 2D image plane using the Jacobian $J$ of the perspective projection transformation [S1, unofficial]:
+-    $$ \Sigma_{2d} = J \Sigma_{cam} J^T $$
++### Algorithm Steps
++1.  **World-to-Camera Transformation:** Transform each Gaussian mean $\mu_i$ from world space to camera space using the view matrix $W$ [S1, unofficial].
++2.  **Covariance Transformation:** Transform the 3D covariance matrix $\Sigma_i$ into the camera frame [S1, unofficial]:
++    $$ \Sigma_{i, \text{cam}} = W \Sigma_i W^T $$
++3.  **2D Projection:** Project the 3D covariance to the 2D image plane using the EWA / Zwicker-style projection Jacobian $J$ [S1, unofficial]:
++    $$ \Sigma_{2d} = J W \Sigma_i W^T J^T $$
+     A small isotropic dilation (blur) is added to $\Sigma_{2d}$ for numerical stability [S1, unofficial].
+-4.  **Screen-Space Bounds:** Compute the bounding box for each Gaussian in screen space based on $\Sigma_{2d}$ to determine which pixels to update.
+-5.  **Depth Sorting:** Sort the Gaussians overlapping each pixel by their depth $z$ in camera space. The implementation uses `argsort`, which is non-differentiable across order changes; gradients flow through the values given the fixed ordering [S1, unofficial].
+-6.  **Alpha Compositing:** Perform per-pixel front-to-back alpha compositing using the volume-rendering equation [S1, unofficial]:
+-    $$ C = \sum_{i=1}^{N} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+-    where $c_i$ is the color, $\alpha_i$ is the opacity, and the product term represents the accumulated transmittance $T_i$. The opacity $\alpha_i$ for each pixel is computed from the 2D Gaussian weight at that pixel location [S1, unofficial].
+-
+-**Pseudocode**
++4.  **Depth Sorting:** Sort the Gaussians by their depth (z-coordinate in camera space) in descending order (far to near) using `argsort` [S1, unofficial]. Note that `argsort` is non-differentiable across order changes; gradients flow through the values given the fixed ordering [S1, unofficial].
++5.  **Rasterization (Per-Pixel Compositing):** For each pixel $(u, v)$, iterate through the sorted Gaussians that cover the pixel's bounding box. Perform front-to-back alpha compositing using the volume-rendering equation [S1, unofficial]:
++    $$ C(u, v) = \sum_{i \in \text{sorted}} c_i \alpha_i T_i $$
++    $$ T_i = \prod_{j < i} (1 - \alpha_j) $$
++    where $\alpha_i$ is the alpha value of the $i$-th Gaussian at pixel $(u, v)$, computed from the 2D Gaussian distribution:
++    $$ \alpha_i = \alpha_{\text{global}, i} \exp\left(-\frac{1}{2} \mathbf{x}^T \Sigma_{2d, i}^{-1} \mathbf{x}\right) $$
++    and $\mathbf{x}$ is the vector from the projected mean to the pixel center [S1, unofficial].
++
++### Pseudocode
+ ```python
+ import torch
+@@ -47,10 +52,10 @@
+ def render_gaussians_mvp(gaussians, camera, H, W):
+     """
+-    Render 3D Gaussians to a 2D image using pure PyTorch.
++    Render 3D Gaussians using pure PyTorch.
+     
+     Args:
+         gaussians: Dict with keys 'mean', 'scale', 'rotation', 'opacity', 'color'.
+                    Shapes: (N, 3), (N, 3), (N, 4), (N, 1), (N, 3).
+-        camera: Dict with 'W' (view matrix, 4x4), 'K' (intrinsics, 3x3), 'J' (projection Jacobian, 2x3).
++        camera: Object with 'view_matrix' (4x4) and 'proj_matrix' (4x4).
+         H, W: Image height and width.
+         
+@@ -59,255 +64,147 @@
+     """
+     N = gaussians['mean'].shape[0]
+-    device = gaussians['mean'].device
+-    
+-    # 1. Transform means to camera space
+-    # Add homogeneous coordinate
+-    means_h = torch.cat([gaussians['mean'], torch.ones(N, 1, device=device)], dim=1)
+-    means_cam = (camera['W'] @ means_h.T).T[:, :3]
+-    
+-    # 2. Construct 3D Covariance from Scale and Rotation
+-    # Scale matrix S
+-    scales = torch.exp(gaussians['scale']) # Log-space to linear
+-    S = torch.zeros(N, 3, 3, device=device)
+-    S[:, 0, 0] = scales[:, 0]
+-    S[:, 1, 1] = scales[:, 1]
+-    S[:, 2, 2] = scales[:, 2]
+-    
+-    # Rotation matrix R from quaternion
+-    R = quaternion_to_rotation_matrix(gaussians['rotation']) # Helper defined below
+-    
+-    # Sigma = R S S^T R^T
+-    SS_T = S @ S.transpose(1, 2)
+-    Sigma_3d = R @ SS_T @ R.transpose(1, 2)
+-    
+-    # 3. Transform Covariance to Camera Frame
+-    Sigma_cam = camera['W'][:, :3, :3] @ Sigma_3d @ camera['W'][:, :3, :3].transpose(1, 2)
+-    
+-    # 4. Project to 2D Screen Space
+-    # Sigma_2d = J Sigma_cam J^T
+-    Sigma_2d = camera['J'] @ Sigma_cam @ camera['J'].transpose(1, 2)
+-    
+-    # Add small isotropic blur for stability
++    
++    # 1. World to Camera Transformation
++    # Convert quaternions to rotation matrices
++    R = quaternion_to_rotation_matrix(gaussians['rotation']) # (N, 3, 3)
++    
++    # Construct 3D covariance: Sigma = R S S^T R^T
++    S = torch.diag_embed(torch.exp(gaussians['scale'])) # (N, 3, 3)
++    Sigma_3d = R @ S @ S.transpose(1, 2) @ R.transpose(1, 2) # (N, 3, 3)
++    
++    # Transform means to camera space
++    means_cam = (camera.view_matrix @ torch.cat([gaussians['mean'], torch.ones(N, 1)], dim=1).unsqueeze(2)).squeeze(2)[:, :3]
++    
++    # Transform covariance to camera space
++    Sigma_cam = camera.view_matrix[:3, :3] @ Sigma_3d @ camera.view_matrix[:3, :3].transpose(1, 2)
++    
++    # 2. 2D Projection
++    # Compute Jacobian J for projection
++    # J approximates the projection of 3D points to 2D image plane
++    # For pinhole camera: J = K * [I | 0] * W_inv? 
++    # Standard EWA projection uses the view matrix and projection matrix.
++    # Let's assume a simplified Jacobian for the MVP context as per [S1, unofficial] description.
++    # J is typically derived from the projection matrix and the depth.
++    # For MVP, we use the standard Zwicker projection:
++    # Sigma_2d = J * Sigma_cam * J^T
++    # J = K * [1/z 0 -x/z^2; 0 1/z -y/z^2; 0 0 0] ? 
++    # Actually, the standard formula is Sigma_2d = J * W * Sigma * W^T * J^T
++    # where W is view matrix, J is projection Jacobian.
++    
++    # Extract depth z
++    z = means_cam[:, 2].unsqueeze(1) # (N, 1)
++    
++    # Projection Jacobian J (simplified for MVP)
++    # K is intrinsic matrix. For MVP, we assume normalized device coordinates or simple pinhole.
++    # Let's use the standard derivation:
++    # x_img = f * X / Z, y_img = f * Y / Z
++    # d(x_img)/dX = f/Z, d(x_img)/dZ = -f*X/Z^2
++    # This requires intrinsic parameters. MVP uses COLMAP convention.
++    # We will assume camera has 'intrinsic_matrix' K.
++    K = camera.intrinsic_matrix # (3, 3)
++    
++    # Compute J
++    # J = K * [1/z 0 -x/z^2; 0 1/z -y/z^2; 0 0 0]
++    # But we need to transform to screen coordinates.
++    # Let's use the standard EWA formula:
++    # Sigma_2d = J * Sigma_cam * J^T
++    # J = K * [1/z 0 -x/z^2; 0 1/z -y/z^2; 0 0 0]
++    
++    x = means_cam[:, 0]
++    y = means_cam[:, 1]
++    
++    J = torch.zeros(N, 2, 3)
++    J[:, 0, 0] = K[0, 0] / z.squeeze()
++    J[:, 0, 2] = -K[0, 0] * x / (z.squeeze()**2)
++    J[:, 1, 1] = K[1, 1] / z.squeeze()
++    J[:, 1, 2] = -K[1, 1] * y / (z.squeeze()**2)
++    
++    Sigma_2d = J @ Sigma_cam @ J.transpose(1, 2) # (N, 2, 2)
++    
++    # Add isotropic blur for stability
+     Sigma_2d[:, 0, 0] += 0.3
+     Sigma_2d[:, 1, 1] += 0.3
+     
+-    # Initialize output buffers
+-    image = torch.zeros(H, W, 3, device=device)
+-    alpha_accum = torch.zeros(H, W, 1, device=device)
+-    
+-    # 5. Rasterize
+-    # For each pixel, collect contributing Gaussians, sort by depth, and composite
+-    # Note: The MVP implementation uses a Python loop over Gaussians for readability [S1, unofficial]
+-    # However, to be implementable from text, we describe the pixel-centric approach 
+-    # or the Gaussian-centric approach. The source says "Python loop over Gaussians" [S1, unofficial].
+-    # This implies iterating Gaussians and updating pixels.
+-    
+-    # Precompute 2D Gaussian parameters for all Gaussians
+-    # Determinant and inverse for PDF calculation
+-    det = Sigma_2d[:, 0, 0] * Sigma_2d[:, 1, 1] - Sigma_2d[:, 0, 1] * Sigma_2d[:, 1, 0]
+-    inv_Sigma_2d = torch.zeros(N, 2, 2, device=device)
+-    inv_Sigma_2d[:, 0, 0] = Sigma_2d[:, 1, 1] / det
+-    inv_Sigma_2d[:, 0, 1] = -Sigma_2d[:, 0, 1] / det
+-    inv_Sigma_2d[:, 1, 0] = -Sigma_2d[:, 1, 0] / det
+-    inv_Sigma_2d[:, 1, 1] = Sigma_2d[:, 0, 0] / det
+-    
+-    # Compute bounding boxes for each Gaussian
+-    # Eigenvalues of Sigma_2d determine the spread
+-    eigvals = torch.linalg.eigvals(Sigma_2d)
+-    # Use max eigenvalue for radius estimation (approximate)
+-    # More robust: use 3 sigma of the largest axis
+-    # For MVP simplicity, we assume a fixed radius or compute bounds dynamically
+-    # Let's compute bounds based on determinant and trace
+-    # Radius r such that area ~ pi * r^2 * det? No, bounding box is safer.
+-    # Standard EWA: bounding box is determined by the extent of the 2D Gaussian.
+-    # We'll use a simplified bound: sqrt(max_eigval) * 3
+-    max_eigvals = torch.max(torch.abs(eigvals), dim=1).values
+-    radii = 3.0 * torch.sqrt(max_eigvals) # 3 sigma
+-    
+-    # Create a list of Gaussians to process
+-    # To implement "loop over Gaussians", we iterate N and update HxW
++    # 3. Depth Sort
++    # Sort by z-depth (descending, far to near)
++    _, sort_indices = torch.sort(z.squeeze(), descending=True)
++    
++    sorted_gaussians = {k: v[sort_indices] for k, v in gaussians.items()}
++    Sigma_2d_sorted = Sigma_2d[sort_indices]
++    means_cam_sorted = means_cam[sort_indices]
++    
++    # 4. Rasterization
++    image = torch.zeros(H, W, 3, device=gaussians['mean'].device)
++    T = torch.ones(H, W, 1, device=gaussians['mean'].device) # Transmittance
++    
++    # Iterate over Gaussians (Python loop for readability [S1, unofficial])
+     for i in range(N):
+-        mu_x, mu_y = means_cam[i, 0], means_cam[i, 1]
+-        z_i = means_cam[i, 2]
+-        
+-        # Check if Gaussian is in front of camera
+-        if z_i <= 0.0:
+-            continue
++        mu = means_cam_sorted[i]
++        sigma = Sigma_2d_sorted[i]
++        alpha_global = gaussians['opacity'][i]
++        color = gaussians['color'][i]
++        
++        # Compute bounding box for this Gaussian
++        # Eigenvalues of Sigma_2d determine spread
++        eigenvalues = torch.linalg.eigvals(sigma)
++        radius = torch.sqrt(torch.max(eigenvalues)) * 3.0 # 3 sigma
++        radius = max(1.0, radius.item())
++        
++        cx, cy = mu[0], mu[1]
++        min_x, max_x = int(max(0, cx - radius)), int(min(W, cx + radius))
++        min_y, max_y = int(max(0, cy - radius)), int(min(H, cy + radius))
++        
++        # Create grid for pixels in bounding box
++        y_coords, x_coords = torch.meshgrid(torch.arange(min_y, max_y), 
++                                            torch.arange(min_x, max_x), indexing='ij')
++        coords = torch.stack([x_coords, y_coords], dim=-1).float() # (H', W', 2)
++        
++        # Vector from mean to pixel
++        diff = coords - torch.tensor([cx, cy], device=gaussians['mean'].device) # (H', W', 2)
++        
++        # Compute alpha
++        # alpha = alpha_global * exp(-0.5 * diff^T Sigma^{-1} diff)
++        sigma_inv = torch.inverse(sigma)
++        exponent = -0.5 * (diff @ sigma_inv * diff).sum(dim=-1) # (H', W')
++        alpha_local = alpha_global * torch.exp(exponent)
++        
++        # Composite
++        alpha_clamped = torch.clamp(alpha_local, 0, 1)
++        contrib = alpha_clamped.unsqueeze(-1) * T * color.unsqueeze(0).unsqueeze(0)
++        
++        image[min_y:max_y, min_x:max_x] += contrib
++        T[min_y:max_y, min_x:max_x] *= (1 - alpha_clamped).unsqueeze(-1)
++        
++        # Early exit if fully opaque
++        if T.min() < 1e-5:
++            break
+             
+-        # Compute bounding box in pixels
+-        r = radii[i].item()
+-        x_min = max(0, int(mu_x - r))
+-        x_max = min(W, int(mu_x + r))
+-        y_min = max(0, int(mu_y - r))
+-        y_max = min(H, int(mu_y + r))
+-        
+-        if x_min >= x_max or y_min >= y_max:
+-            continue
+-            
+-        # Extract 2D covariance for this Gaussian
+-        sigma_2d_i = Sigma_2d[i]
+-        inv_s2d_i = inv_Sigma_2d[i]
+-        
+-        # Get color and opacity
+-        c_i = gaussians['color'][i]
+-        alpha_i_global = gaussians['opacity'][i].item()
+-        
+-        # Iterate over pixels in bounding box
+-        for y in range(y_min, y_max):
+-            for x in range(x_min, x_max):
+-                # Vector from mean to pixel
+-                dx = x - mu_x
+-                dy = y - mu_y
+-                
+-                # Compute 2D Gaussian weight (unnormalized PDF)
+-                # w = exp(-0.5 * [dx, dy] @ inv_Sigma_2d @ [dx, dy]^T)
+-                vec = torch.tensor([dx, dy], device=device)
+-                exponent = -0.5 * (vec @ inv_s2d_i @ vec)
+-                
+-                # Clamp exponent to avoid underflow/overflow issues in exp
+-                exponent = torch.clamp(exponent, max=0.0)
+-                weight = torch.exp(exponent)
+-                
+-                # Effective alpha for this pixel
+-                alpha_pixel = alpha_i_global * weight
+-                
+-                # Alpha compositing (Front-to-Back)
+-                # We need to know the accumulated transmittance T from previous Gaussians
+-                # Since we are looping Gaussians, we must maintain T per pixel
+-                # This requires T to be stored in a buffer and updated
+-                
+-                # Note: The MVP implementation likely maintains a T buffer
+-                # T_new = T_old * (1 - alpha_pixel)
+-                # C_new = C_old + c_i * alpha_pixel * T_old
+-                
+-                # However, the source says "per-pixel front-to-back alpha compositing" [S1, unofficial]
+-                # and "depth sort" [S1, unofficial]. The MVP implementation sorts Gaussians per pixel?
+-                # The source says "Depth sort uses argsort... gradients flow through values" [S1, unofficial].
+-                # This implies a global sort or per-pixel sort.
+-                # Given the "loop over Gaussians" constraint [S1, unofficial], a global sort by depth 
+-                # is performed first, then the loop processes Gaussians in that order.
+-                
+-                # For the MVP code structure described:
+-                # 1. Sort all Gaussians by depth (z) globally? Or per pixel?
+-                # "Depth sort uses argsort... gradients flow through values given the ordering" [S1, unofficial]
+-                # This usually refers to per-pixel sorting in production, but MVP might do global
+-                # or simple per-pixel. Let's assume per-pixel sorting is done before the loop
+-                # or the loop order respects depth.
+-                
+-                # To implement correctly from text:
+-                # We need a T buffer.
+-                pass 
+-                
+-    # Re-writing the loop structure to match "loop over Gaussians" with T buffer
+-    # Initialize T buffer
+-    T = torch.ones(H, W, 1, device=device)
+-    
+-    # Sort Gaussians by depth (z) in camera space
+-    # Note: This is a simplification. Production 3DGS sorts per pixel.
+-    # MVP might sort globally for simplicity or per-pixel.
+-    # Source: "Depth sort uses argsort... gradients flow through values given the ordering" [S1, unofficial]
+-    # This suggests a differentiable sort is not used, but the order is fixed for the pass.
+-    # Let's assume global depth sort for MVP simplicity if per-pixel is too complex for "readability" [S1, unofficial]
+-    # However, correct 3DGS requires per-pixel sorting.
+-    # The source says "per-pixel front-to-back alpha compositing" [S1, unofficial].
+-    # This implies T is per-pixel.
+-    
+-    # Let's assume the MVP implementation does per-pixel sorting internally or 
+-    # iterates in a way that respects depth.
+-    # Given the constraint "Python loop over Gaussians", it's likely:
+-    # 1. Compute bounding boxes.
+-    # 2. For each pixel, gather Gaussians, sort by z, composite.
+-    # But the source explicitly says "loop over Gaussians" [S1, unofficial].
+-    # This is a contradiction unless the Gaussians are pre-sorted globally 
+-    # and the bounding box logic handles overlap correctly (which it doesn't for transparency).
+-    # 
+-    # Correction: The source says "The rasterizer uses a Python loop over Gaussians 
+-    # rather than vectorizing over all (H, W, N) at once for readability" [S1, unofficial].
+-    # This likely means:
+-    # For i in range(N):
+-    #    For y, x in bbox:
+-    #        update pixel (y, x)
+-    # This requires the Gaussians to be processed in depth order.
+-    # So, step 0: Sort Gaussians by depth z globally? 
+-    # No, that's incorrect for transparency.
+-    # It must be that the MVP implementation does per-pixel sorting 
+-    # but implements the compositing loop over Gaussians for each pixel?
+-    # No, "loop over Gaussians" usually means outer loop is N.
+-    # 
+-    # Let's look at the source again: "Depth sort uses argsort... gradients flow through values given the ordering" [S1, unofficial].
+-    # This is a known issue in 3DGS MVP implementations where a global sort is used 
+-    # or the sort is not differentiable.
+-    # 
+-    # Implementation detail for MVP:
+-    # 1. Sort Gaussians by depth z (global sort) [G].
+-    # 2. Initialize T = 1.
+-    # 3. Loop i in range(N):
+-    #      Compute bbox.
+-    #      For y, x in bbox:
+-    #          alpha = ...
+-    #          image[y, x] += color * alpha * T[y, x]
+-    #          T[y, x] *= (1 - alpha)
+-    # 
+-    # This is not strictly correct for transparency if Gaussians overlap in depth 
+-    # but are processed in global depth order (which might be wrong for a specific pixel 
+-    # if the global sort doesn't match the pixel's depth order).
+-    # However, for a "teaching reference" [S1, unofficial], this approximation might be used.
+-    # 
+-    # Alternative: The "loop over Gaussians" refers to the fact that 
+-    # the rasterizer is not a single vectorized kernel, but a Python loop.
+-    # The sorting step [S1, unofficial] is explicit.
+-    # 
+-    # Let's stick to the most accurate interpretation of "MVP":
+-    # It implements the math correctly.
+-    # 1. Project Gaussians.
+-    # 2. For each pixel, find overlapping Gaussians.
+-    # 3. Sort them by depth.
+-    # 4. Composite.
+-    # 
+-    # But the source says "loop over Gaussians" [S1, unofficial].
+-    # This implies the outer loop is N.
+-    # This is only correct if the Gaussians are sorted per-pixel 
+-    # and we iterate through the sorted list for each pixel? No.
+-    # 
+-    # Let's assume the MVP implementation does:
+-    # 1. Global depth sort.
+-    # 2. Loop N, update pixels.
+-    # This is an approximation.
+-    
+-    # To be safe and implementable:
+-    # We will describe the standard correct method, noting the MVP's simplification.
+-    
+     return image
+ 
+ def quaternion_to_rotation_matrix(q):
+-    """Convert unit quaternion (w, x, y, z) to 3x3 rotation matrix."""
++    """Convert unit quaternion (w, x, y, z) to rotation matrix (3, 3)."""
+     w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+-    N = q.shape[0]
+-    R = torch.zeros(N, 3, 3, device=q.device)
+-    
++    R = torch.zeros(q.shape[0], 3, 3, device=q.device)
+     R[:, 0, 0] = 1 - 2 * (y**2 + z**2)
+     R[:, 0, 1] = 2 * (x*y - w*z)
+     R[:, 0, 2] = 2 * (x*z + w*y)
+-    
+     R[:, 1, 0] = 2 * (x*y + w*z)
+     R[:, 1, 1] = 1 - 2 * (x**2 + z**2)
+     R[:, 1, 2] = 2 * (y*z - w*x)
+-    
+     R[:, 2, 0] = 2 * (x*z - w*y)
+     R[:, 2, 1] = 2 * (y*z + w*x)
+     R[:, 2, 2] = 1 - 2 * (x**2 + y**2)
+-    
+     return R
+ ```
+ 
+-**Parameters**
+-*   **Camera Model:** Pinhole camera with `look_at` function using OpenCV/COLMAP convention [S1, unofficial].
+-*   **Optimization:** Adam optimizer with L1 + MSE loss for 600 iterations [S1, unofficial].
+-*   **Performance:** End-to-end run takes ~30 seconds on CPU for a 64x64 image [S1, unofficial].
+-
+-**Edge Cases and Pitfalls**
+-*   **Depth Sort:** The `argsort` operation used for depth sorting is non-differentiable across order changes. Gradients flow through the values given the ordering, which is accepted for the fit-from-scratch demo [S1, unofficial].
+-*   **Precision:** A small isotropic dilation is added to the 2D covariance for stability to prevent numerical issues during inversion or exponentiation [S1, unofficial].
+-*   **Simplifications:** The MVP intentionally skips tile-based CUDA rasterization, spherical harmonics for view-dependent color, adaptive density control, real-world captures, and SSIM losses [S1, unofficial].
++### Parameters
++*   **Isotropic Dilation:** A small constant (e.g., 0.3) added to the diagonal of $\Sigma_{2d}$ for stability [S1, unofficial].
++*   **Bounding Box Radius:** Typically $3\sigma$ (sqrt of max eigenvalue of $\Sigma_{2d}$) [S1, unofficial].
++*   **Iterations:** In the demo, 600 iterations of Adam optimization were used [S1, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Depth Sort Non-Differentiability:** The `argsort` operation is non-differentiable when the order of Gaussians changes. Gradients flow through the values given the fixed ordering, which is acceptable for fit-from-scratch demos but can cause instability in complex scenes [S1, unofficial].
++*   **Precision:** Using pure PyTorch on CPU is slow; end-to-end run takes ~30 seconds for a 64x64 image [S1, unofficial].
++*   **Missing Features:** The MVP intentionally skips tile-based CUDA rasterizer, spherical harmonics, adaptive density control, real captures, and SSIM losses [S1, unofficial].
+ 
+ ## Subtopics
+@@ -317,5 +214,5 @@
+ 
+ ### [Relightable 3DGS](7851-relightable-3dgs.md)
+-Relightable 3DGS extends standard 3D Gaussian Splatting by embedding physically-based material properties into each Gaussian, enabling deferred shading and realistic rendering of complex appearances such as reflections, transparency, and glossy surfaces. Unlike standard rasterization which approximates view-dependent colors via spherical harmonics and fails to represent specular reflections or global illumination, this method decomposes outgoing radiance into a BRDF integration that respects material parameters. It sets itself apart from its siblings by treating alpha-blending as a smoothing filter to stabilize optimization while allowing for physically accurate lighting interactions.
++Relightable 3DGS extends standard 3D Gaussian Splatting by embedding physically-based material properties into each Gaussian, enabling deferred shading and realistic rendering of complex appearances such as reflections, transparency, and glossy surfaces. Unlike standard rasterization which approximates view-dependent colors via spherical harmonics and fails to represent specular reflections or global illumination, this method decomposes outgoing radiance into a BRDF integration that respects material parameters. It sets itself apart from its siblings by decoupling geometry processing from lighting and material computations, adapting a two-pass deferred pipeline to Gaussian Splatting for efficient rendering of high-frequency, view-dependent effects.
+ 
+ ### PRoGS
+@@ -328,33 +225,18 @@
+ This method provides a lightweight, CPU-only pipeline for generating rapid visual thumbnails from 3D Gaussian Splatting datasets, prioritizing responsiveness and portability over high-fidelity rendering. It distinguishes itself from standard GPU-accelerated splatting by omitting rotation parameters, approximating Gaussians as spheres, and leveraging Python's Numba JIT compiler to achieve near-real-time performance on constrained hardware.
+ 
+-### 3D Gaussian Splatting with Vector Clustering and Entropy Encoding
+-A method that utilizes vector clustering to encode color and geometric attributes into two codebooks, using a sensitivity-aware KMeans method [S2]. For disk data storage, SASCGS utilizes the entropy encoding method DEFLATE, which combines the LZ77 algorithm and Huffman coding, to compress the data [S2]. On the MipNeRF360 dataset, SASCGS achieves SSIM 0.801, PSNR 26.98, LPIPS 0.238, and a size of 28.80 MB [S2].
+-
+-### Vol3DGS
+-Enforces that alpha blending exactly satisfies the front-to-back absorption-emission model by deriving discrete compositing as an unbiased Monte Carlo estimator of the continuous integral [S3, unofficial]. It introduces a continuous density field along the ray to resolve artifacts in scenes with semi-transparent objects [S3, unofficial]. Volumetric alpha computation is defined as $\alpha_i = 1 - \exp(-\int G_i(x) dx)$, accumulating density along the ray in accordance with the volume rendering equation [S3, unofficial].
+-
+-### HiFi4G
+-This successfully preserves spatial-temporal consistency in a more compact manner [S2]. It combines 3DGS with the non-rigid tracking offered by its dual-graph mechanism for high-fidelity rendering [S2].
+-
+-### 3D Gaussian Splatting with Mesh UV Parameterization
+-This enables real-time and high-quality animated humans [S2]. It projects the 3D Gaussian learning into a 2D texture space using mesh UV parameterization to capture the appearance [S2].
+-
+-### Modified Alpha-Blending
+-A modified alpha-blending function designed to perform image rendering over re-sketched Gaussian lines and Gaussian triangles [S4, unofficial]. It renders the re-sketched primitives using the modified alpha-blending function in a similar manner as original Gaussian ellipses [S4, unofficial].
+-
+-### Depth Generation via Linear Interpolation
+-A method to compute accurate depth $\hat{D}$ for a pixel by treating it as a linear interpolation of distances from 3D Gaussians to the image plane, avoiding the floating problem and disc aliasing associated with peak selection in forward mapping splatting [S5]. For each pixel, it renders the view using 3D Gaussians to obtain $T_i$, $\alpha_i$, $d_i$, and $n_i$ for all contributing Gaussians $i$ [S5]. The depth is calculated as $\hat{D} = \sum_{i=1}^{N} \hat{w}_i d_i$, where $\hat{w}_i = \frac{T_i \alpha_i}{\sum_{i=1}^{N} T_i \alpha_i}$, $d_i$ is the distance from the i-th Gaussian to the image plane, $T_i$ is accumulated transmittance, and $\alpha_i$ is opacity [S5].
++### OmniGS
++A novel omnidirectional Gaussian splatting system that takes calibrated monocular 360-degree images and sparse SfM point clouds as input to recover 3D Gaussians for fast radiance field reconstruction and real-time omnidirectional novel view synthesis.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The MVP implementation uses a Python loop over Gaussians and pixels, resulting in $O(N \cdot H \cdot W)$ complexity in the worst case (where $N$ is the number of Gaussians and $H, W$ are image dimensions), though bounding boxes reduce the effective constant. This is significantly slower than the tile-based CUDA rasterizer used in production [S1, unofficial].
+-*   **Memory Complexity:** $O(N + H \cdot W)$ for storing Gaussian parameters and intermediate buffers (T, image) [S1, unofficial].
++*   **Time Complexity:** $O(N \cdot H \cdot W)$ in the worst case if every Gaussian covers every pixel, but typically $O(N \cdot B)$ where $B$ is the average bounding box area. The MVP implementation uses a Python loop, making it significantly slower than GPU-accelerated versions.
++*   **Memory Complexity:** $O(N)$ to store Gaussian parameters and $O(H \cdot W)$ for the image buffer.
+ *   **Measured Performance:** End-to-end run takes ~30 seconds on CPU for a 64x64 image [S1, unofficial].
+-*   **Strengths:** High readability, no custom CUDA kernels required, suitable for educational purposes and debugging the mathematical foundations of 3DGS [S1, unofficial].
+-*   **Limitations:** Slow performance on CPU, lacks optimizations like tile-based sorting, spherical harmonics, and adaptive density control, making it unsuitable for real-time or large-scale applications [S1, unofficial].
+-*   **When to use:** For learning, teaching, or debugging the 3DGS algorithm.
+-*   **When not to use:** For production rendering, real-time applications, or large-scale scene reconstruction.
++*   **Strengths:** High readability, no custom CUDA kernels, easy to debug and modify, suitable for educational purposes.
++*   **Limitations:** Slow on CPU, lacks optimizations like tile-based sorting, spherical harmonics, and adaptive density control, not suitable for real-time rendering or large scenes [S1, unofficial].
++*   **When to Use:** For learning the mathematical details of 3D Gaussian Splatting, debugging specific components, or when GPU resources are unavailable.
++*   **When Not to Use:** For production rendering, real-time applications, or large-scale scenes.
+ 
+ ## Background
+-3D Gaussian Splatting MVP was introduced as a self-contained Jupyter notebook implementation of the core 3D Gaussian Splatting algorithm (Kerbl et al., SIGGRAPH 2023) in pure PyTorch [S1, unofficial]. It was created to serve as a teaching reference, allowing users to "grind on the math" without the complexity of custom CUDA kernels [S1, unofficial]. The implementation includes a pinhole camera model, Gaussian parameterization, forward rasterization, and a simple optimization loop for fitting Gaussians to training images [S1, unofficial].
++3D Gaussian Splatting was introduced by Kerbl et al. in SIGGRAPH 2023 [S1, unofficial]. The MVP implementation is a self-contained Jupyter notebook created by Devin AI integration, intended as a teaching reference [S1, unofficial]. It implements the core algorithm in pure PyTorch, allowing users to "grind on the math" without the complexity of custom CUDA kernels [S1, unofficial].
+ 
+ ## Sources

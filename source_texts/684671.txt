@@ -1,0 +1,794 @@
+Making it easier to work with shaders. Contribute to shader-slang/slang development by creating an account on GitHub.
+
+Metal, WGSL: accept NonUniformResourceIndex as the identity by albertrodriguezclo · Pull Request #13694 · shader-slang/slang · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+albertrodriguezclo
+commented
+Oct 16, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+NonUniformResourceIndex(i) was declared [require(cpp_cuda_glsl_hlsl_spirv, nonuniformqualifier)], so bindless code that marks its indices failed on Metal and WGSL:
+```
+Texture2D tex[8]; SamplerState s; RWStructuredBuffer<float4> o; StructuredBuffer<uint> idx;
+[numthreads(64,1,1)]
+void main(uint3 t : SV_DispatchThreadID)
+{
+    o[t.x] = tex[NonUniformResourceIndex(idx[t.x])].SampleLevel(s, float2(0.5), 0);
+}
+```
+```
+slangc repro.slang -target metal -entry main -stage compute   -> error[E36107] at NonUniformResourceIndex
+slangc repro.slang -target wgsl  -entry main -stage compute   -> error[E36107] at NonUniformResourceIndex
+```
+Without the call, the same code compiles, so the only way to keep one source for all targets was a #if around every index.
+Why the identity is the right lowering on these targets
+Metal has no non-uniform qualifier. A resource array is assumed to be indexed non-uniformly unless the index is declared metal::uniform<T> (MSL spec 4.1, section 2.14.1 "The Need for a Uniform Type"), so the marked index needs nothing.
+WGSL has no qualifier either. The WebGPU proposals for binding arrays allow non-uniform indexing without an annotation: sized binding arrays proposes it for every binding type and notes that implementations can derive the annotations from the uniformity analysis. Rejecting the call would only force portable code to #if it out. A diagnostic would not help either: WGSL gives the user no annotation to write in its place.
+Change
+The declaration gains [require(metal)] and [require(wgsl)], with a doc comment that explains the two targets. The C-like emitters already lower kIROp_NonUniformResourceIndex to its operand, so the emitted code is the index itself. This is also what the header of slang-ir-float-non-uniform-resource-index.cpp already describes for Metal and WGSL ("the wrapper is dropped at emit time"); only the declaration's capability requirement kept those targets from getting there.
+This does not touch how resource arrays themselves are emitted for WGSL. array<texture_2d<f32>, N> is still rejected by Tint; that is #9528.
+Related: #12161 (non-uniform DescriptorHandle on non-SPIR-V targets).
+Test
+tests/cross-compile/non-uniform-resource-index-metal-wgsl.slang compiles the repro for Metal, for WGSL, and for WGSL with an unbounded array. It checks that the sample uses the index directly and that no NonUniformResourceIndex call is left. Before the change, all three runs failed with E36107.
+Verification
+slang-test -api none: tests/metal, tests/wgsl, tests/cross-compile, tests/spirv, tests/hlsl, tests/hlsl-intrinsic, tests/bugs, tests/compute, tests/language-feature and tests/gpu-feature all pass.
+With and without the call, the WGSL output is byte-identical. The Metal output differs in one respect: with the call, the entry-point resources are read through the kernelContext struct rather than through the entry-point parameters directly. The two are equivalent, and the indexing expression is the same. The difference comes from the IR side-effect classification, not from anything Metal-specific: IRInst::mightHaveSideEffects does not list kIROp_NonUniformResourceIndex as side-effect free, so the loads from kernelContext placed after the wrapper are not forwarded to the parameters. Marking the op side-effect free removes the difference, but it also changes the HLSL and CUDA output of existing tests (tests/compute/nonuniformres-nested-rwstructuredbuf.slang), so I left it for a separate change.
+Metal: verified through the emitted MSL only (no Mac here).
+albertrodriguezclo
+requested a review
+from a team
+as a code owner
+October 16, 2026 08:06
+albertrodriguezclo
+requested review from
+dshreiner-nv
+and removed request for
+a team
+October 16, 2026 08:06
+github-actions
+Bot
+assigned
+kaizhangNV and
+albertrodriguezclo
+Oct 16, 2026
+This comment has been minimized.
+Sign in to view
+coderabbitai
+Bot
+commented
+Oct 16, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Note
+Reviews paused
+It looks like this branch is under active development. To avoid overwhelming you with review comments due to an influx of new commits, CodeRabbit has automatically paused this review. You can configure this behavior by changing the reviews.auto_review.auto_pause_after_reviewed_commits setting.
+Last reviewed commit: 529b58c
+Latest commit, not reviewed: d55d0b4
+Use the following commands to manage reviews:
+@coderabbitai resume to resume automatic reviews.
+@coderabbitai review to trigger a single review.
+Use the checkboxes below for quick actions:
+▶️ Resume reviews
+🔍 Trigger review
+No actionable comments were generated in the recent review.
+ℹ️ Recent review info
+⚙️ Run configuration
+Configuration used: Repository: shader-slang/slang/.coderabbit.yaml
+Review profile: ASSERTIVE
+Plan: Advanced
+Run ID: 723fae39-40b8-4a43-920d-25eb3ee07be9
+📥 Commits
+Reviewing files that changed from the base of the PR and between daabe82 and 529b58c.
+📒 Files selected for processing: 1
+tests/cross-compile/non-uniform-resource-index-metal-wgsl.slang
+Included review availability: This review used your included allowance. Your plan provides up to 8 included reviews per hour; 0 remain after this review.
+Walkthrough
+The NonUniformResourceIndex declaration and implementation comments document target behavior for Metal, WGSL, CUDA, and CPU. A cross-compilation test checks generated Metal and WGSL output for sized texture arrays and WGSL runtime-sized arrays.
+Changes: Non-uniform resource indexing
+Layer / File(s)
+Summary
+Target behavior documentation
+source/slang/hlsl.meta.slang, source/slang/slang-ir-float-non-uniform-resource-index.cpp
+The declaration adds Metal and WGSL target requirements and documents no-annotation behavior. Implementation comments describe Metal resource-array indexing and WebGPU optional-feature handling.
+Cross-compilation test
+tests/cross-compile/non-uniform-resource-index-metal-wgsl.slang
+The test checks indexed texture sampling for several wrapped-index expressions and verifies that generated Metal and WGSL output omits NonUniformResourceIndex. It covers sized arrays and WGSL runtime-sized arrays.
+Priority: Low
+Merge Risk: Minimal · previous review 529b5
+The documentation and test clarify that WGSL resource-array output may still be rejected downstream. No unresolved concrete merge risk remains.
+Pre-merge checks: 5
+Check name
+Status
+Explanation
+Title check
+The title clearly and concisely describes the main change: Metal and WGSL now accept NonUniformResourceIndex as an identity operation.
+Description check
+The description is directly related to the changeset. It explains the E36107 issue, the Metal and WGSL lowering behavior, the added tests, and verification results.
+Docstring Coverage
+No functions found in the changed files to evaluate docstring coverage. Skipping docstring coverage check. Docstring coverage is scoped to functions touched by this diff. Analyzed 0 functions across 1…
+Linked Issues check
+Check skipped because no linked issues were found for this pull request.
+Out of Scope Changes check
+Check skipped because no linked issues were found for this pull request.
+Full details: Docstring Coverage
+Explanation
+No functions found in the changed files to evaluate docstring coverage. Skipping docstring coverage check. Docstring coverage is scoped to functions touched by this diff. Analyzed 0 functions across 1 files. (1 skipped: 1 unsupported.)
+Autofix · Keep fixing CodeRabbit findings and required CI, and resolving merge conflicts
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands.
+This comment was marked as outdated.
+Sign in to view
+Sorry, something went wrong.
+Uh oh!
+There was an error while loading. Please reload this page.
+This comment was marked as outdated.
+Sign in to view
+Sorry, something went wrong.
+Uh oh!
+There was an error while loading. Please reload this page.
+This comment was marked as outdated.
+Sign in to view
+Sorry, something went wrong.
+Uh oh!
+There was an error while loading. Please reload this page.
+coderabbitai
+Bot
+reviewed
+Oct 16, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Repository: shader-slang/slang/.coderabbit.yaml
+Review profile: ASSERTIVE
+Plan: Advanced
+Run ID: 784fd3ea-1ca8-4d00-9692-cdceabc76347
+📥 Commits
+Reviewing files that changed from the base of the PR and between 825c0a1 and 4fb9ad1.
+📒 Files selected for processing: 3
+source/slang/hlsl.meta.slang
+source/slang/slang-ir-float-non-uniform-resource-index.cpp
+tests/cross-compile/non-uniform-resource-index-metal-wgsl.slang
+Included review availability: This review used your included allowance. Your plan provides up to 8 included reviews per hour; 4 remain after this review.
+Comment thread
+source/slang/hlsl.meta.slang
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+albertrodriguezclo
+mentioned this pull request
+Oct 16, 2026
+WGSL: emit arrays of textures and samplers as binding_array
+#13708
+Merged
+coderabbitai
+Bot
+reviewed
+Oct 18, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Caution
+Some comments are outside the diff and can’t be posted inline due to GitHub limitations.
+⚠️ Outside diff range comments (1)
+🟡 Minor · Split the Metal resource check around the… · non-uniform-resource-index-metal-wgsl.slang:50-70
+tests/cross-compile/non-uniform-resource-index-metal-wgsl.slang:50-70
+🎯 Functional Correctness | 🟡 Minor | ⚡ Quick win
+Split the Metal resource check around the forbidden wrapper.
+The METAL-NOT directives do not inspect text consumed by a positive check. The fourth pattern allows this output:
+```
+sampleTexture_0(textures_0[NonUniformResourceIndex(materialIndices_0[...])])
+```
+Its {{.*}} matches NonUniformResourceIndex(, so the test can pass while the wrapped-resource expression still emits the call. Split this check and place METAL-NOT between the anchors. Add equivalent *-NOT checks between adjacent positive checks.
+Suggested fix
+```
+-// METAL: sampleTexture_{{[0-9]+}}({{.*}}textures_{{[0-9]+}}[{{.*}}materialIndices_{{[0-9]+}}[
++// METAL: sampleTexture_{{[0-9]+}}(
++// METAL-NOT: NonUniformResourceIndex
++// METAL: textures_{{[0-9]+}}[
++// METAL-NOT: NonUniformResourceIndex
++// METAL: materialIndices_{{[0-9]+}}[
+```
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Repository: shader-slang/slang/.coderabbit.yaml
+Review profile: ASSERTIVE
+Plan: Advanced
+Run ID: b7d9a118-e72c-4175-97cd-c097951245a8
+📥 Commits
+Reviewing files that changed from the base of the PR and between 4fb9ad1 and daabe82.
+⛔ Files ignored due to path filters: 1
+docs/generated/tests/_meta/expected-failures.txt is excluded by !**/generated/**
+📒 Files selected for processing: 1
+source/slang/hlsl.meta.slang
+Included review availability: This review used your included allowance. Your plan provides up to 8 included reviews per hour; 0 remain after this review.
+albertrodriguezclo
+commented
+Oct 19, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+@coderabbitai Re the outside-diff note on the METAL checks: agreed, {{.*}} could swallow the call. Each run now also has a twin run with its own prefix that checks there is no NonUniformResourceIndex anywhere in the output (529b58c). Heads-up for reviewers: the WGSL checks here pin array<texture_2d<f32>, i32(8)>, and #13708 (also mine) changes that spelling to binding_array, so whichever of the two merges second needs its test updated.
+albertrodriguezclo
+mentioned this pull request
+Oct 19, 2026
+WGSL: do not emit enable subgroups_f16;
+#13644
+Merged
+coderabbitai
+Bot
+commented
+Oct 19, 2026
+Copy link
+Copy Markdown
+Contributor
+Tip
+For best results, initiate chat on the files or code changes.
+🧩 Analysis chain
+🏁 Script executed:
+```
+#!/bin/bash
+set -euo pipefail
+fd -t f '^non-uniform-resource-index-metal-wgsl\.slang$'
+ast-grep outline tests/cross-compile/non-uniform-resource-index-metal-wgsl.slang
+sed -n '1,180p' tests/cross-compile/non-uniform-resource-index-metal-wgsl.slang
+```
+Length of output: 4782
+@albertrodriguezclo Thanks for the fix and the merge-order guidance. I verified that all three configurations have separate NOCALL runs. The NOCALL-NOT checks before and after computeMain cover the full output, so {{.*}} cannot hide a remaining call in those runs. This addresses the METAL check concern.
+Whichever PR merges second must update the affected WGSL expectations in tests/cross-compile/non-uniform-resource-index-metal-wgsl.slang to match the emitter.
+✏️ Learnings added
+```
+Learnt from: albertrodriguezclo
+URL: https://github.com/shader-slang/slang/pull/13694
+
+Timestamp: 2026-10-19T21:35:34.561Z
+Learning: In shader-slang/slang, PR #13694 adds tests/cross-compile/non-uniform-resource-index-metal-wgsl.slang with WGSL expectations using `array<texture_2d<f32>, i32(8)>` and `array<texture_2d<f32>>`. The author states that PR #13708 changes WGSL resource-array emission to `binding_array`. Whichever PR merges second must update the affected test expectations to match the emitter.
+```
+Note: Learnings are effective only in the context of similar code segments. To apply general coding guidelines, please configure review instructions. You can manage existing learnings in the app.
+If you found this review helpful, would you consider giving us a shout-out on X?
+Thank you for using CodeRabbit!
+You are interacting with an AI system.
+This comment was marked as outdated.
+Sign in to view
+Sorry, something went wrong.
+Uh oh!
+There was an error while loading. Please reload this page.
+jkwak-work
+pushed a commit
+to jkwak-work/slang
+that referenced
+this pull request
+Oct 23, 2026
+WGSL: emit arrays of textures and samplers as binding_array (shader-s…
+…
+6f18dc6
+```
+…lang#13708)
+
+Fixes shader-slang#9528
+
+WGSL cannot use a texture or a sampler as an `array` element. An array
+of them is a `binding_array`. Slang emitted `array<...>` for every array
+type, so a plain `Texture2D textures[8]` gave WGSL that every WGSL
+compiler rejects:
+
+```slang
+Texture2D<float4> textures[8];
+Texture2D<float4> unboundedTextures[];
+SamplerState samplers[4];
+```
+
+```wgsl
+// before
+@binding(0) @group(0) var textures_0 : array<texture_2d<f32>, i32(8)>;
+@binding(1) @group(0) var unboundedTextures_0 : array<texture_2d<f32>>;
+@binding(2) @group(0) var samplers_0 : array<sampler, i32(4)>;
+```
+Tint: `error: texture_2d<f32> cannot be used as an element type of an
+array`; naga rejects it as well.
+
+```wgsl
+// after
+@binding(0) @group(0) var textures_0 : binding_array<texture_2d<f32>, i32(8)>;
+@binding(1) @group(0) var unboundedTextures_0 : binding_array<texture_2d<f32>>;
+@binding(2) @group(0) var samplers_0 : binding_array<sampler, i32(4)>;
+```
+
+### Change
+`WGSLSourceEmitter::emitSimpleTypeImpl` prints `binding_array<` instead
+of `array<` for a sized or unsized array whose element type is a texture
+(`IRTextureTypeBase`) or a sampler (`IRSamplerStateTypeBase`). Indexing
+is unchanged (`textures_0[i]`), and so are layout and reflection. The
+global arrays that the default `DescriptorHandle` lookup declares on
+WGSL become `binding_array` too.
+
+### Who accepts what
+| | Tint (Dawn c943ea32) | naga 25 (wgpu) |
+|---|---|---|
+| sized array of sampled textures | yes (`sized_binding_array` language
+feature; unsafe APIs in Chrome for now) | yes (`TEXTURE_BINDING_ARRAY`)
+|
+| unsized array of textures | no ("requires 2 template arguments") | yes
+|
+| array of samplers | no ("element type must be a sampled texture type")
+| yes |
+| `array<texture_2d<f32>, N>` (before) | no | no |
+
+So the output is valid wherever the implementation supports the array at
+all. For Dawn's unbounded case, see the resource-table PR (shader-slang#13641).
+
+`NonUniformResourceIndex` on these arrays is handled by shader-slang#13694 (identity
+on WGSL). The two branches merge cleanly. With both,
+`textures[NonUniformResourceIndex(i)]` should compile to valid WGSL; I
+have not built them together.
+
+### Tests
+`tests/wgsl/binding-array.slang` (FileCheck) covers:
+- a sized texture array;
+- an unsized texture array;
+- a sampler array;
+- the default `DescriptorHandle` heap.
+
+The Tint bundled with slang-test (`slang-tint-0`) does not know
+`binding_array`, so the test can't validate through `wgsl-spirv-asm`. I
+checked the outputs by hand with Tint c943ea32 and naga 25:
+- Tint accepts the sized texture array and translates it to SPIR-V and
+HLSL, and rejects the other forms as the table above says.
+- naga accepts the first three.
+
+No runtime test: as far as I can see, slang-rhi's WebGPU backend
+(`wgpu-shader-object-layout.cpp`) creates one bind-group-layout entry
+per binding, with no array size (Dawn's
+`BindGroupLayoutEntryArraySize`), so a `-wgpu` compute test cannot bind
+the array yet.
+
+### Verification
+- `slang-test -api none tests/` (5523 tests): the same 13 tests fail
+with and without this change: `tests/functional/*`,
+`tests/dispatcher/smoke`, and one C++-target diagnostic. My build has no
+slang-llvm or CUDA. Three nvrtc/OptiX tests and one diagnostics test
+failed once on a PCH-file race and passed on rerun.
+- I compiled every `-target wgsl` SIMPLE test in the tree with master
+and with this branch. Only `desc-heap-direct-index.slang` changes (its
+heap declarations become `binding_array`), and it still passes.
+- `slang-test -api wgpu -api-only tests/wgsl
+tests/language-feature/descriptor-handle` (WebGPU runtime tests): 12/12
+pass, built together with the resource-table branch.
+
+### Notes
+- The default `DescriptorHandle` path on WGSL is still not valid WebGPU
+after this change. Every heap is declared at `@binding(0)` of the
+bindless group, and naga rejects the texture and sampler heaps as
+conflicting bindings. Fixing that needs a decision about how descriptor
+handles should work on WGSL (see the open questions in the
+resource-table PR), so it is not part of this PR.
+- `binding_array` of storage textures, and of buffers (`var<storage> a :
+binding_array<...>`) for wgpu, are not covered: Slang declares those
+differently, and arrays of buffers already fail with E56105
+(`array-of-resource-type-not-supported-in-wgsl`).
+```
+jkwak-work
+assigned
+jkwak-work and
+albertrodriguezclo and unassigned
+albertrodriguezclo and
+kaizhangNV
+Oct 23, 2026
+albertrodriguezclo
+mentioned this pull request
+Oct 26, 2026
+WGSL: emit [WaveSize(N)] as @subgroup_size(N); warn on Metal and on CUDA for N != 32
+#13693
+Closed
+albertrodriguezclo
+had a problem deploying
+to
+falcor-ci
+October 27, 2026 16:44 — with
+GitHub Actions
+Error
+albertrodriguezclo
+added 6 commits
+October 27, 2026 12:59
+Metal, WGSL: accept NonUniformResourceIndex as the identity
+…
+5c8e335
+```
+Neither target has a non-uniform qualifier: Metal handles non-uniform
+indices into resource arrays itself (MSL spec section 2.14.1), and the
+WebGPU binding-array proposals allow non-uniform indexing without an
+annotation. The C-like emitters already emit the operand directly, so only
+the capability requirement changes. Portable bindless code no longer fails
+with E36107 on these targets.
+```
+Keep the NonUniformResourceIndex doc comment user-facing; tighten the…
+…
+90a8121
+```
+… test checks
+
+The Metal/WGSL rationale moves to a // note pointing at the emitter note in
+slang-ir-float-non-uniform-resource-index.cpp. The test says what each run
+covers, and repeats the -NOT checks after the last positive match so the
+whole output is checked.
+```
+NonUniformResourceIndex: state once when dropping it is correct; chec…
+…
+ce04311
+```
+…k each run
+
+- The doc comment now says what differs on Metal, WGSL, CUDA and CPU: no
+  non-uniform annotation is emitted. The conditions under which that is
+  correct, including the WebGPU optional-feature case, are stated once in
+  the note in slang-ir-float-non-uniform-resource-index.cpp; the core
+  module comment and the test point there.
+- The unbounded WGSL run has its own prefix and checks the runtime-sized
+  array declaration; the sized run checks the sized one.
+- The two generated negative tests that expect E36107 on Metal and WGSL
+  are listed in the generated suite's expected-failures.txt until those
+  bundles are regenerated.
+```
+NonUniformResourceIndex: user-facing contract; cover the rewritten sh…
+…
+140daeb
+```
+…apes on Metal and WGSL
+
+- The doc comment states what a shader author gets on Metal and WGSL,
+  including the WebGPU optional-feature obligation.
+- The implementation note says which Metal binding forms the argument
+  covers: MSL indices are non-uniform unless declared uniform<T>, and the
+  spec's example indexes a direct texture-array kernel argument, the form
+  Slang emits for an ordinary resource array.
+- The test adds the shapes floatNonUniformResourceIndex rewrites (a wrapper
+  floated out of casts, nested wrappers, a wrapped resource passed to a
+  function), and says the runs check emitted text only.
+```
+NonUniformResourceIndex test: check the whole output for a left-over …
+…
+8c81468
+```
+…call
+
+In the METAL and WGSL patterns a {{.*}} could match across a call that was
+not dropped, and the NOT lines only covered the ends. Three more runs (one
+per existing run) check that no NonUniformResourceIndex is left anywhere in
+the output.
+```
+NonUniformResourceIndex on Metal/WGSL: one rationale, a buffer case T…
+…
+280176e
+```
+…int compiles
+
+Fold the Metal and WGSL notes in the pass header into one statement per
+target, say that WGSL resource arrays are not yet valid for WebGPU
+(shader-slang#9528), move the meta note next to the new requirements, and make the
+user doc say what each target does. The test comment now says what the
+runs show, and a buffer-indexing entry point is also compiled by Tint.
+Drop the stale NonUniformResourceIndex example from the generator prompt.
+```
+jkwak-work
+force-pushed
+the
+fix/nonuniformresourceindex-metal-wgsl
+branch
+from
+5d96fb6 to
+280176e
+Compare
+October 27, 2026 19:59
+jkwak-work
+added
+the
+pr: non-breaking
+PRs without breaking changes
+label
+Oct 27, 2026
+jkwak-work
+deployed
+to
+falcor-ci
+October 27, 2026 20:25 — with
+GitHub Actions
+Active
+NonUniformResourceIndex test: expect WGSL texture arrays as binding_a…
+…
+d55d0b4
+```
+…rray
+
+shader-slang#13708 emits WGSL arrays of textures as binding_array, so the sized and
+unsized declaration checks now spell binding_array<texture_2d<f32>, ...>.
+```
+albertrodriguezclo
+requested a deployment
+to
+falcor-ci
+October 28, 2026 14:33 — with
+GitHub Actions
+Waiting
+jhelferty-nv
+requested review from
+jkwak-work
+and removed request for
+dshreiner-nv
+October 28, 2026 15:43
+jkwak-work
+mentioned this pull request
+Oct 30, 2026
+NonUniformResourceIndex: accept it on CPU, CUDA, Metal and WGSL
+#14104
+Merged
+jkwak-work
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Collaborator
+I will close this in favor of the following PR:
+NonUniformResourceIndex: accept it on CPU, CUDA, Metal and WGSL #14104
+jkwak-work
+commented
+Oct 31, 2026
+Copy link
+Copy Markdown
+Collaborator
+Closing because the following PR is merged:
+NonUniformResourceIndex: accept it on CPU, CUDA, Metal and WGSL #14104
+jkwak-work
+closed this
+Oct 31, 2026
+fknfilewalker
+pushed a commit
+to fknfilewalker/slang
+that referenced
+this pull request
+Oct 31, 2026
+NonUniformResourceIndex: accept it on CPU, CUDA, Metal and WGSL (shad…
+…
+7d679e6
+```
+…er-slang#14104)
+
+This continues shader-slang#13694 and includes its commits. On top of them it
+declares the capability with one new alias, removes the long comments
+the earlier commits added to `hlsl.meta.slang` and
+`slang-ir-float-non-uniform-resource-index.cpp`, and keeps the
+documentation corrections.
+
+## Motivation
+
+Before shader-slang#13694, `NonUniformResourceIndex` was declared for CPU, CUDA,
+GLSL, HLSL and SPIR-V only. A shared HLSL-style shader like this was
+rejected on Metal and WGSL:
+
+```slang
+Texture2D tex[4];
+SamplerState samp;
+RWStructuredBuffer<float4> outBuf;
+
+[shader("compute")]
+[numthreads(4, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID)
+{
+    outBuf[tid.x] = tex[NonUniformResourceIndex(tid.x)].SampleLevel(samp, float2(0.5, 0.5), 0);
+}
+```
+
+`slangc -target metal` reported `E36107: entrypoint 'main' uses features
+that are not available`, pointing at `NonUniformResourceIndex`. Some of
+our documentation also assumed this was intended, saying that Metal and
+WGSL cannot take the call. Neither target needs a non-uniform
+annotation, so the rejection was only a gap in the capability
+declaration.
+
+## Proposed solution
+
+Declare the intrinsic for every target that has no non-uniform
+annotation, and let the emitter write just the index there. The
+declaration becomes two requirements, one for the targets that carry the
+annotation and one for the targets that do not:
+
+```slang
+[require(glsl_hlsl_spirv, nonuniformqualifier)]
+[require(cpp_cuda_metal_wgsl)]
+T NonUniformResourceIndex(T index);
+```
+
+This is the principled place for the change because the shape of the IR
+is already correct: the `floatNonUniformResourceIndex` pass in textual
+mode leaves a `kIROp_NonUniformResourceIndex` wrapper around the index,
+and the C-like emitter already knows how to print it as its operand.
+Only the capability declaration was wrong.
+
+## Change summary
+
+| Area | Change |
+| --- | --- |
+| `source/slang/hlsl.meta.slang` | `NonUniformResourceIndex` is
+`[require(glsl_hlsl_spirv, nonuniformqualifier)]` plus
+`[require(cpp_cuda_metal_wgsl)]`. The comments added by the earlier
+commits are removed. |
+| `source/slang/slang-capabilities.capdef` | New compound alias
+`cpp_cuda_metal_wgsl = cpp \| cuda \| metal \| wgsl`. |
+| `docs/user-guide/a4-02-reference-capability-atoms.md`,
+`docs/command-line-slangc-reference.md` | Regenerated for the new alias
+(generator and `slangc -help-style markdown -h`). |
+| `source/slang/slang-ir-float-non-uniform-resource-index.cpp` | Back to
+its state on `master`. The earlier commits only changed comments here. |
+| `docs/generated/tests/_meta/prompts/_common.md` | From shader-slang#13694: remove
+the claim that the core module excludes Metal from this intrinsic. |
+|
+`docs/generated/tests/design/target-pipelines/metal/nonuniform-resource-index-rejected-metal.slang`,
+`docs/generated/tests/design/target-pipelines/wgsl/non-uniform-resource-index-rejected.slang`
+| Deleted. They assert that Metal and WGSL reject the call with
+`E36107`, which is no longer true. Their rows are removed from the two
+bundle `README.md` coverage tables. |
+| `tests/cross-compile/non-uniform-resource-index-metal-wgsl.slang` |
+From shader-slang#13694: checks the emitted Metal and WGSL text for several shapes
+of wrapped index. |
+
+## Concepts and vocabulary
+
+- **Compound capability alias**: a name for a set of targets in
+`slang-capabilities.capdef`, such as `cpp_cuda_metal_wgsl`. A
+`[require(...)]` attribute accepts a target when it is in the set.
+- **Several `[require]` attributes on one declaration** are
+alternatives: a target is accepted if any one of them accepts it. Inside
+one attribute, a comma combines the entries with AND, so
+`[require(glsl_hlsl_spirv, nonuniformqualifier)]` means "one of those
+three targets, and also `nonuniformqualifier`".
+- **`nonuniformqualifier`**: an alias for `sm_5_1`. It is only needed
+for targets that really emit an annotation.
+- **Textual mode** of `floatNonUniformResourceIndex`: the variant of the
+pass that runs for every non-SPIR-V target. It moves the wrapper onto
+the index expression and adds no decoration.
+
+## Process report
+
+**Why Metal and WGSL were rejected.** The old declaration was
+`[require(cpp_cuda_glsl_hlsl_spirv, nonuniformqualifier)]`. Capability
+checking found no match for `metal` or `wgsl`, so the entry point got
+`E36107`. The code generation stage was never reached.
+
+**Why dropping the call is correct there.** For the example above,
+`floatNonUniformResourceIndex` (`slang-emit.cpp:2457`, called for every
+non-SPIR-V target) leaves `NonUniformResourceIndex(tid.x)` wrapped
+around the index. The wrapper has no target-specific emitter on CPU,
+CUDA, Metal and WGSL. `CLikeSourceEmitter::emitInstExpr`
+(`slang-emit-c-like.cpp:2454`) first asks the target emitter, then falls
+back to `defaultEmitInstExpr`, whose `kIROp_NonUniformResourceIndex`
+case (`slang-emit-c-like.cpp:2869`) emits only `inst->getOperand(0)`.
+`CUDASourceEmitter::tryEmitInstExprImpl` and
+`CPPSourceEmitter::tryEmitInstExprImpl` both have no case for this op.
+The op is also `FoldPolicy::Always` (`slang-emit-c-like.cpp:1556`), so
+it never gets its own temporary. The output for the example is
+therefore:
+
+- Metal: the index expression is used directly to index the
+`array<texture2d<float, access::sample>, 4>`.
+- WGSL: `textureSampleLevel((tex_0[i_0]), ...)` on a
+`binding_array<texture_2d<f32>, 4>`.
+- CUDA: `tex2DLod<float4>(globalParams_0->tex_0[i_0], ...)`, where the
+texture is a `CUtexObject` handle.
+
+HLSL and GLSL keep their own cases in `slang-emit-hlsl.cpp:1550` and
+`slang-emit-glsl.cpp:2795` and still print the wrapper.
+
+**Why one alias with CPU and CUDA.** CPU and CUDA already accepted the
+call, through the first `[require]`. CUDA has no non-uniform annotation:
+a `cudaTextureObject_t` is an opaque 64-bit handle and a thread can load
+any element of an array of them. Putting CPU and CUDA in the same alias
+as Metal and WGSL expresses the single rule "these targets have no
+annotation, so the call is the identity", and the first attribute now
+lists only targets that emit an annotation. One side effect: CUDA used
+to get `nonuniformqualifier` (`sm_5_1`), whose CUDA entry requires
+compute capability 6.0. It is now accepted without that condition. This
+is harmless, since nothing is emitted for it.
+
+**Input-shape check.** This change adds no guard or special case for an
+IR shape. The wrapper-around-index form comes from
+`floatNonUniformResourceIndex`, is the intended canonical form, and the
+existing emitter already handles it. The producer needs no change. The
+only thing that was wrong was a capability declaration.
+
+**Not covered.** `llvm` is still rejected (`E36107` pointing at
+`NonUniformResourceIndex`), and its emitter has no handling for this op.
+The `c` target cannot take part either, because it fails earlier on
+buffer indexing. This PR leaves both as they are.
+
+**Documentation.** `docs/generated/tests/_meta/prompts/_common.md` said
+the core module excludes Metal from `NonUniformResourceIndex`'s
+capability set. That assumption is no longer true, so the sentence is
+rewritten as a generic example and the Metal-specific bullet is removed.
+
+**Deleted tests.** The two generated negative tests expect `E36107` for
+Metal and WGSL, which this PR removes on purpose, so they can never pass
+again. shader-slang#13694 listed them in `expected-failures.txt`, but that file is
+for tests that should pass and do not, such as compiler bugs or bundles
+waiting for a fix. The suite's own remediation notes
+(`prompts/_remediate.md`) say to delete a test whose claim is wrong, so
+this PR deletes the two tests, removes their rows from the Functional
+coverage tables in the Metal and WGSL bundle READMEs, and removes the
+expected-failures entries. `regenerate.py lint` reports the same result
+as before the change (0 errors, 81 warnings).
+
+**Not changed here.** The design pages
+`docs/generated/design/target-pipelines/metal.md` (pass table row 7) and
+`wgsl.md` (`floatNonUniformResourceIndex`) still describe the rejection.
+They are generated and say not to edit them by hand, so they need to be
+regenerated with the documentation workflow. Until then, regenerating
+the Metal or WGSL test bundle from those pages could recreate the
+negative tests.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+---------
+
+Co-authored-by: Albert Rodriguez (최 간둘) <albert@clo3d.com>
+```
+Hide environments
+Show environments
+This branch is waiting to be deployed
+1 waiting
+deployment
+falcor-ci
+—
+d55d0b45
+Waiting
+Oct 28, 2026 by
+albertrodriguezclo
+via falcor-build-approval-gate #35568
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+pr: non-breaking
+PRs without breaking changes
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

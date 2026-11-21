@@ -1,0 +1,1833 @@
+# RAY-MARCHED VOLUMETRIC RENDERING ENGINE
+This project is a real-time OpenGL rendering engine focused on ray marching–based volumetric rendering and analytic geometry tracing.
+
+It was developed as part of a computer graphics course project.
+
+## FEATURES IMPLEMENTED
+
+## 1. Volumetric Ray Marching
+
+- Real-time volume rendering of clouds using 3D procedural noise
+
+- Density accumulation along view rays
+
+- Adjustable extinction and scattering parameters
+
+## 2. Soft Shadows
+
+- Ray-marched shadow rays through volumes
+
+- Distance-weighted penumbra estimation for smooth contact shadows
+
+- Integrated for both volumetric media and analytic geometry
+
+## 3. Sphere Tracing (SDF Ray Marching)
+
+- Signed Distance Function–based ray marching
+
+- Efficient intersection with analytic primitives (e.g. spheres, ground)
+
+## 4. Lighting System
+
+- Support for directional, point, and spot lights
+
+- Unified shading pipeline with soft shadow evaluation
+
+- Ambient, diffuse, and specular components
+
+## PROJECT STRUCTURE
+
+
+```
+├── build/                  # Build output
+├── scenefiles/             # Scene description files
+├── shaders/
+│   ├── lighting/
+│   │   └── sky.glsl
+│   ├── raymarch/
+│   │   ├── raymarch.glsl   # Core ray marching logic
+│   │   └── sdf.glsl        # SDF definitions and tracing
+│   ├── volume/
+│   │   ├── cloud.glsl      # Volumetric cloud rendering
+│   │   └── noise.glsl      # 3D procedural noise
+│   ├── frag.frag           # Fragment shader entry point
+│   └── vertex.vert         # Vertex shader
+├── src/
+│   ├── camera/
+│   │   ├── Camera.cpp
+│   │   └── Camera.h
+│   ├── shader/
+│   │   ├── shader.cpp
+│   │   └── shader.h
+│   ├── utils/
+│   │   ├── scenedata.h
+│   │   ├── scenefilereader.cpp
+│   │   ├── scenefilereader.h
+│   │   ├── sceneparser.cpp
+│   │   └── sceneparser.h
+│   ├── GLWidget_Init.cpp
+│   ├── GLWidget_Paint.cpp
+│   ├── GLWidget_Scene.cpp
+│   ├── glwidget.h
+│   ├── main.cpp
+│   ├── mainwindow.cpp
+│   └── mainwindow.h
+└── README.md
+```
+
+## RENDERING TECHNIQUES USED
+
+1. Ray marching
+
+2. Sphere tracing (SDFs)
+
+3. Volumetric light attenuation
+
+4. Soft shadow approximation
+
+5. Procedural noise (FBM-style)
+
+## SCENES GENERATED
+
+<img width="1066" height="831" alt="image" src="https://github.com/user-attachments/assets/96041ab9-03cd-4bbc-a4c6-fc7201fe1236" />
+<img width="1058" height="827" alt="image" src="https://github.com/user-attachments/assets/df5fe3a2-f41f-4b02-9a2a-0728507726a7" />
+
+<img width="1068" height="831" alt="image" src="https://github.com/user-attachments/assets/c5c80427-0aef-4594-b54d-b05a3ece2c9a" />
+
+### shaders/frag.frag
+```
+#version 330 core
+
+in vec2 v_uv;
+out vec4 fragColor;
+
+uniform vec3 camPos;
+uniform mat3 camRot;
+
+uniform vec3 lightDir;
+
+// 0 = directional, 1 = point, 2 = spot
+uniform int   lightType;
+uniform vec3  lightPos;    
+uniform vec3  spotDir;     
+uniform float spotAngle;  
+
+uniform int   numSpheres;
+uniform vec3  sphereCenters[10];
+uniform float sphereRadii[10];
+
+uniform vec3  cloudCenter;
+uniform float cloudRadius;
+uniform float cloudDensity;
+uniform float noiseScale;
+
+uniform float uCloudExtinction;
+uniform float uCloudScatterMin;
+uniform float uCloudScatterMax;
+uniform float uCloudLightStep;
+uniform float uCloudLightAtt;
+uniform float uCloudBrightness;
+uniform float uCloudStepMult;
+uniform float uCloudNoiseFreq;
+uniform float cloudBaseHeight;
+uniform float cloudTopHeight;
+
+uniform float u_time;
+
+#include "volume/noise.glsl"
+#include "volume/cloud.glsl"
+
+#include "raymarch/sdf.glsl"
+#include "lighting/sky.glsl"
+#include "lighting/softshadow.glsl"
+
+void main() {
+    vec2 uv = v_uv * 2.0 - 1.0;
+
+    vec3 ro = camPos;
+    vec3 rd = normalize(camRot * vec3(uv, -1.0));
+
+    vec3 sky = getSky(rd);
+
+    float t = 0.0;
+    bool hit = false;
+
+    for (int i = 0; i < 120; i++) {
+        float d = sceneSDF(ro + rd * t);
+        if (d < 0.001) {
+            hit = true;
+            break;
+        }
+        t += d;
+        if (t > 30.0) break;
+    }
+
+    // no geometry: just sky + clouds
+    if (!hit) {
+        vec4 cloud = marchCloud(ro, rd, 50.0);
+        fragColor = vec4(mix(sky, cloud.rgb, cloud.a), 1.0);
+        return;
+    }
+
+    vec3 p = ro + rd * t;
+    vec3 n = estimateNormal(p);
+
+vec3 L;
+if (lightType == 0) {
+    L = normalize(-lightDir);
+} else {
+    L = normalize(lightPos - p);
+}
+
+float spotFactor = 1.0;
+if (lightType == 2) {
+    vec3 sd = normalize(spotDir);
+    vec3 lightToPoint = -L;  
+    float angle = dot(lightToPoint, sd);
+    float cutoff = cos(spotAngle);
+    
+    if (angle < cutoff) {
+        spotFactor = 0.0;
+    } else {
+        spotFactor = clamp((angle - cutoff) / (1.0 - cutoff), 0.0, 1.0);
+    }
+}
+
+    float shadow = 0.0;
+    if (spotFactor > 0.0) {
+        shadow = softShadow(p + n * 0.02, L);
+    }
+    float lightTerm = shadow * spotFactor;
+
+    bool isGround = abs(planeSDF(p)) < 0.01;
+
+    vec3 finalColor;
+
+    if (isGround) {
+        vec3 groundColor = vec3(0.9);
+        float diff = max(dot(n, L), 0.0) * lightTerm;
+
+        vec3 litGround = groundColor * (0.4 + diff * 0.6);
+        float fog = smoothstep(40.0, 80.0, t);
+        finalColor = mix(litGround, sky, fog * 0.5);
+    } else {
+        float diff = max(dot(n, L), 0.0) * lightTerm;
+
+        vec3 base = vec3(0.85);
+        vec3 rDir = reflect(-L, n);
+
+        float spec = pow(max(dot(rDir, normalize(ro - p)), 0.0), 32.0) * lightTerm;
+        finalColor = base * (0.3 + diff * 0.7) + spec;
+    }
+
+    vec4 cloud = marchCloud(p + n * 0.02, rd, 50.0 - t);
+    finalColor = mix(finalColor, cloud.rgb, cloud.a * 0.8);
+
+    fragColor = vec4(finalColor, 1.0);
+}
+```
+
+### shaders/vertex.vert
+```
+#version 330 core
+
+layout(location = 0) in vec2 aPos;
+out vec2 v_uv;
+
+void main() {
+    v_uv = aPos * 0.5 + 0.5;   
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+```
+
+### src/GLWidget_Init.cpp
+```
+#include "glwidget.h"
+#include <QCoreApplication>
+
+GLWidget::GLWidget(QWidget *parent)
+    : QOpenGLWidget(parent),
+      vao(0),
+      shader(nullptr),
+      sceneLoaded(false),
+      isAnimating(false),
+      animationTime(0.0f)
+{
+    animationTimer = new QTimer(this);
+    connect(animationTimer, &QTimer::timeout, this, &GLWidget::updateAnimation);
+    animationTimer->setInterval(16);
+    setFocusPolicy(Qt::StrongFocus);
+}
+
+GLWidget::~GLWidget()
+{
+    delete shader;
+    delete animationTimer;
+}
+
+
+void GLWidget::initializeGL()
+{
+    initializeOpenGLFunctions();
+
+    QString base = QCoreApplication::applicationDirPath() + "/";
+
+    QString shaderPath = base + "shaders/";
+    QString scenePath  = base + "scenefiles/";
+
+    shader = new Shader(
+        (shaderPath + "vertex.vert").toStdString().c_str(),
+        (shaderPath + "frag.frag").toStdString().c_str()
+    );
+    shader->use();
+
+    sceneFiles = {
+        scenePath + "soft_shadow_basic.json",
+        scenePath + "soft_shadow_dark_clouds.json",
+        scenePath + "soft_shadow_multiple.json",
+        scenePath + "soft_shadow_point_light.json",
+        scenePath + "soft_shadow_spot_light.json",
+        scenePath + "soft_shadow_directional_light.json",
+    };
+
+    loadScene(sceneFiles[currentScene].toStdString());
+
+    float quadVertices[] = {
+        -1, -1,   1, -1,   1,  1,
+        -1, -1,   1,  1,  -1,  1
+    };
+
+    GLuint vbo;
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+}
+
+void GLWidget::resizeGL(int w, int h)
+{
+    glViewport(0, 0, w, h);
+}
+```
+
+### src/GLWidget_Paint.cpp
+```
+#include "glwidget.h"
+#include <glm/gtc/type_ptr.hpp>
+#include <QDebug>
+
+void GLWidget::paintGL()
+{
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (!shader) return;
+
+    shader->use();
+    glm::vec3 pos = camera.getPosition();
+    glUniform3f(glGetUniformLocation(shader->ID, "camPos"), pos.x, pos.y, pos.z);
+
+    glm::vec3 w = -glm::normalize(camera.getLook());
+    glm::vec3 u = glm::normalize(glm::cross(camera.getUp(), w));
+    glm::vec3 v = glm::cross(w, u);
+    glm::mat3 camRot(u, v, w);
+
+    glUniformMatrix3fv(glGetUniformLocation(shader->ID, "camRot"),
+                       1, GL_FALSE, glm::value_ptr(camRot));
+
+
+    int lightType = 0;
+    glm::vec3 dirLight(0);
+    glm::vec3 lightPos(0);
+    glm::vec3 spotDir(0);
+    float spotAngle = 0.0f;
+
+    if (sceneLoaded && !renderData.lights.empty())
+    {
+        const auto &L = renderData.lights[0];
+
+        if (L.type == LightType::LIGHT_DIRECTIONAL)
+        {
+            lightType = 0;
+            dirLight = glm::normalize(glm::vec3(L.dir));   
+        }
+        else if (L.type == LightType::LIGHT_POINT)
+        {
+            lightType = 1;
+            lightPos = glm::vec3(L.pos);                   
+        }
+        else if (L.type == LightType::LIGHT_SPOT)
+        {
+            lightType = 2;
+            lightPos  = glm::vec3(L.pos);                  
+            spotDir   = glm::normalize(glm::vec3(L.dir));  
+            spotAngle = L.angle;                           
+        }
+    }
+
+    glUniform1i(glGetUniformLocation(shader->ID, "lightType"), lightType);
+    glUniform3fv(glGetUniformLocation(shader->ID, "lightDir"), 1, glm::value_ptr(dirLight));
+    glUniform3fv(glGetUniformLocation(shader->ID, "lightPos"), 1, glm::value_ptr(lightPos));
+    glUniform3fv(glGetUniformLocation(shader->ID, "spotDir"), 1, glm::value_ptr(spotDir));
+    glUniform1f(glGetUniformLocation(shader->ID, "spotAngle"), spotAngle);
+
+
+    int n = 0;
+    if (sceneLoaded && !renderData.spheres.empty())
+    {
+        n = std::min<int>(renderData.spheres.size(), 10);
+        glUniform1i(glGetUniformLocation(shader->ID, "numSpheres"), n);
+
+        std::vector<glm::vec3> centers(n);
+        std::vector<float> radii(n);
+
+        for (int i = 0; i < n; ++i)
+        {
+            glm::vec3 center = renderData.spheres[i].center;
+            float radius = renderData.spheres[i].radius;
+
+            float groundY = -2.5f + radius;
+
+            if (i == 0)
+            {
+                if (isAnimating)
+                {
+                    float bounce = std::fabs(std::sin(animationTime * 2.5f)) * 1.5f;
+                    center.y = groundY + bounce;
+                }
+                else center.y = groundY;
+            }
+
+            centers[i] = center;
+            radii[i] = radius;
+        }
+
+        glUniform3fv(glGetUniformLocation(shader->ID, "sphereCenters"),
+                     n, glm::value_ptr(centers[0]));
+        glUniform1fv(glGetUniformLocation(shader->ID, "sphereRadii"),
+                     n, radii.data());
+    }
+    else {
+        glUniform1i(glGetUniformLocation(shader->ID, "numSpheres"), 0);
+    }
+
+    glm::vec3 cloudCenter = renderData.cloud.offset;
+
+    glUniform3fv(glGetUniformLocation(shader->ID, "cloudCenter"),
+                 1, glm::value_ptr(cloudCenter));
+
+    glUniform1f(glGetUniformLocation(shader->ID, "cloudRadius"),     renderData.cloud.radius);
+    glUniform1f(glGetUniformLocation(shader->ID, "cloudDensity"),    renderData.cloud.density);
+    glUniform1f(glGetUniformLocation(shader->ID, "noiseScale"),      renderData.cloud.noiseScale);
+
+    glUniform1f(glGetUniformLocation(shader->ID, "uCloudExtinction"), renderData.cloud.extinction);
+    glUniform1f(glGetUniformLocation(shader->ID, "uCloudScatterMin"), renderData.cloud.scatterMin);
+    glUniform1f(glGetUniformLocation(shader->ID, "uCloudScatterMax"), renderData.cloud.scatterMax);
+    glUniform1f(glGetUniformLocation(shader->ID, "uCloudLightStep"),  renderData.cloud.lightStep);
+    glUniform1f(glGetUniformLocation(shader->ID, "uCloudLightAtt"),   renderData.cloud.lightAtt);
+    glUniform1f(glGetUniformLocation(shader->ID, "uCloudBrightness"), renderData.cloud.brightness);
+    glUniform1f(glGetUniformLocation(shader->ID, "uCloudStepMult"),   renderData.cloud.stepMult);
+    glUniform1f(glGetUniformLocation(shader->ID, "uCloudNoiseFreq"),  renderData.cloud.noiseFreq);
+
+    glUniform1f(glGetUniformLocation(shader->ID, "cloudBaseHeight"), renderData.cloud.baseHeight);
+    glUniform1f(glGetUniformLocation(shader->ID, "cloudTopHeight"),  renderData.cloud.topHeight);
+
+    glUniform1f(glGetUniformLocation(shader->ID, "u_time"), animationTime);
+
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+}
+```
+
+### src/GLWidget_Scene.cpp
+```
+#include "glwidget.h"
+#include "utils/sceneparser.h"
+#include <QKeyEvent>
+
+bool GLWidget::loadScene(const std::string &filepath)
+{
+    renderData = RenderData();
+    if (!SceneParser::parse(filepath, renderData)) {
+        qDebug() << "Failed to load scene";
+        return false;
+    }
+
+    camera.setFromScene(
+        renderData.cameraData.pos,
+        renderData.cameraData.look,
+        renderData.cameraData.up,
+        renderData.cameraData.heightAngle
+    );
+
+    sceneLoaded = true;
+    update();
+    return true;
+}
+
+void GLWidget::keyPressEvent(QKeyEvent *event)
+{
+    if (event->key() == Qt::Key_Space) {
+        isAnimating = !isAnimating;
+        isAnimating ? animationTimer->start() : animationTimer->stop();
+    }
+
+    if (event->key() == Qt::Key_Right) {
+        currentScene = (currentScene + 1) % sceneFiles.size();
+        loadScene(sceneFiles[currentScene].toStdString());
+        update();
+    }
+
+    if (event->key() == Qt::Key_Left) {
+        currentScene = (currentScene - 1 + sceneFiles.size()) % sceneFiles.size();
+        loadScene(sceneFiles[currentScene].toStdString());
+        update();
+    }
+}
+
+void GLWidget::updateAnimation()
+{
+    animationTime += 0.016f;
+    update();
+}
+```
+
+### src/glwidget.h
+```
+#pragma once
+#include <QOpenGLWidget>
+#include <QOpenGLFunctions_3_3_Core>
+#include <QTimer>
+#include "shader/shader.h"
+#include "camera/Camera.h"
+#include "utils/scenedata.h"
+
+class GLWidget : public QOpenGLWidget, protected QOpenGLFunctions_3_3_Core
+{
+    Q_OBJECT
+public:
+    GLWidget(QWidget *parent = nullptr);
+    ~GLWidget();
+
+    bool loadScene(const std::string &filepath);
+
+protected:
+    void initializeGL() override;
+    void resizeGL(int w, int h) override;
+    void paintGL() override;
+    void keyPressEvent(QKeyEvent *event) override;
+
+private slots:
+    void updateAnimation();
+
+private:
+    GLuint vao;
+    Shader *shader;
+    Camera camera;
+    RenderData renderData;
+    bool sceneLoaded;
+
+    std::vector<QString> sceneFiles;
+    int currentScene = 0;
+
+    QTimer *animationTimer;
+    bool isAnimating;
+    float animationTime;
+};
+```
+
+### src/main.cpp
+```
+#include <QApplication>
+#include <QSurfaceFormat>
+#include "mainwindow.h"
+
+int main(int argc, char *argv[]) {
+    QSurfaceFormat fmt;
+    fmt.setVersion(3, 3);
+    fmt.setProfile(QSurfaceFormat::CoreProfile);
+    fmt.setDepthBufferSize(24);
+    QSurfaceFormat::setDefaultFormat(fmt);
+    
+    QApplication app(argc, argv);
+    
+    MainWindow w;
+    w.show();
+    
+    return app.exec();
+}
+```
+
+### src/mainwindow.cpp
+```
+#include "mainwindow.h"
+
+MainWindow::MainWindow(QWidget* parent) 
+    : QMainWindow(parent), 
+      rayMarchWidget(nullptr)
+{
+    centralWidget = new QWidget(this);
+    layout = new QVBoxLayout(centralWidget);
+
+    rayMarchWidget = new GLWidget(this);
+    rayMarchWidget->setMinimumSize(800, 600);
+    layout->addWidget(rayMarchWidget);
+
+    setCentralWidget(centralWidget);
+    resize(800, 650);
+    setWindowTitle("Graphics Final Project - Ray Marching with Soft Shadows");
+}
+```
+
+### src/mainwindow.h
+```
+#pragma once
+#include "glwidget.h"
+#include <QMainWindow>
+#include <QVBoxLayout>
+
+class MainWindow : public QMainWindow {
+    Q_OBJECT
+public:
+    explicit MainWindow(QWidget* parent = nullptr);
+
+private:
+    QWidget* centralWidget;
+    QVBoxLayout* layout;
+    GLWidget* rayMarchWidget;
+};
+```
+
+### shaders/lighting/sky.glsl
+```
+vec3 getSky(vec3 d) {
+    d = normalize(d);
+    vec3 horizon = vec3(0.80, 0.90, 1.0);
+    vec3 zenith  = vec3(0.35, 0.60, 0.95);
+    float t = smoothstep(0.0, 0.7, d.y);
+    return mix(horizon, zenith, t);
+}
+```
+
+### shaders/raymarch/raymarch.glsl
+```
+vec3 estimateNormal(vec3 p) {
+    float e = 0.0005;
+    return normalize(vec3(
+        sceneSDF(p + vec3(e,0,0)) - sceneSDF(p - vec3(e,0,0)),
+        sceneSDF(p + vec3(0,e,0)) - sceneSDF(p - vec3(0,e,0)),
+        sceneSDF(p + vec3(0,0,e)) - sceneSDF(p - vec3(0,0,e))
+    ));
+}
+```
+
+### shaders/raymarch/sdf.glsl
+```
+const float FLOOR_HEIGHT = -4.0;
+
+float planeSDF(vec3 p) {
+    float base = p.y - FLOOR_HEIGHT;
+    float curve = p.z * 0.003;   // wide horizon
+    return base + curve;
+}
+
+float sphereSDF(vec3 p, vec3 c, float r) {
+    return length(p - c) - r;
+}
+
+float sceneSDF(vec3 p) {
+    float d = planeSDF(p);
+    for (int i = 0; i < numSpheres; i++) {
+        d = min(d, sphereSDF(p, sphereCenters[i], sphereRadii[i]));
+    }
+    return d;
+}
+
+vec3 estimateNormal(vec3 p) {
+    float e = 0.0007;
+    return normalize(vec3(
+        sceneSDF(p + vec3(e,0,0)) - sceneSDF(p - vec3(e,0,0)),
+        sceneSDF(p + vec3(0,e,0)) - sceneSDF(p - vec3(0,e,0)),
+        sceneSDF(p + vec3(0,0,e)) - sceneSDF(p - vec3(0,0,e))
+    ));
+}
+
+float softShadow(vec3 ro, vec3 rd) {
+    float t = 0.05;
+    float res = 1.0;
+
+    for (int i = 0; i < 60; i++)
+    {
+        vec3 p = ro + rd * t;
+        float h = sceneSDF(p);
+
+        if (h < 0.0001)
+            return 0.0;
+
+        res = min(res, 12.0 * h / t);
+        t += h;
+
+        if (t > 60.0)
+            break;
+    }
+
+    return clamp(res, 0.0, 1.0);
+}
+```
+
+### shaders/volume/cloud.glsl
+```
+float fbm(vec3 p);
+
+
+float cumulusBase(vec3 p)
+{
+    vec3 q = (p - cloudCenter) / cloudRadius;
+
+    // Round dome shape
+    float sphere = length(vec3(q.x, q.y * 0.55, q.z));
+
+    // Flat bottom
+    float flatBottom = smoothstep(-0.2, 0.0, q.y);
+
+    // Combined macro shape
+    float shape = smoothstep(1.2, 0.6, sphere) * flatBottom;
+
+    return shape;
+}
+
+
+float cumulusDetail(vec3 p)
+{
+    vec3 n = (p - cloudCenter) * noiseScale;
+
+    float n1 = fbm(n * 0.8);
+    float n2 = fbm(n * 1.6);
+    float n3 = fbm(n * 3.2);
+
+    float bumps =
+          0.55 * n1 +
+          0.35 * n2 +
+          0.10 * n3;
+
+    return clamp(bumps, 0.0, 1.0);
+}
+
+
+float cloudDensityField(vec3 p)
+{
+    float base = cumulusBase(p);
+    if (base < 0.01)
+        return 0.0;
+
+    float detail = cumulusDetail(p);
+    float d = base * detail * cloudDensity;
+
+    return clamp(d, 0.0, 3.0);
+}
+
+vec4 marchCloud(vec3 ro, vec3 rd, float maxDist)
+{
+    vec3 oc = ro - cloudCenter;
+    float b = dot(oc, rd);
+    float c = dot(oc, oc) - cloudRadius * cloudRadius;
+    float disc = b*b - c;
+    if (disc < 0.0) return vec4(0.0);
+
+    float t0 = max(0.0, -b - sqrt(disc));
+    float t1 = min(maxDist, -b + sqrt(disc));
+    if (t0 >= t1) return vec4(0.0);
+
+    float t = t0;
+    float step = (t1 - t0) / (96.0 * uCloudStepMult);
+
+    vec3 col = vec3(0.0);
+    float trans = 1.0;
+    vec3 L = normalize(lightDir);
+
+    for (int i = 0; i < 96; i++)
+    {
+        vec3 p = ro + rd * t;
+        float d = cloudDensityField(p);
+
+        if (d > 0.001)
+        {
+            // Soft shadows
+            float lightSample = 0.0;
+            vec3 lp = p;
+
+            for (int j = 0; j < 6; j++) {
+                lp += L * uCloudLightStep;
+                lightSample += cloudDensityField(lp);
+            }
+
+            float lightAtt = exp(-lightSample * uCloudLightAtt);
+            float scatter = mix(uCloudScatterMin, uCloudScatterMax, lightAtt);
+
+            vec3 cloudColor = vec3(uCloudBrightness) * scatter;
+
+            col += trans * cloudColor * d * 0.5;
+            trans *= exp(-d * uCloudExtinction);
+
+            if (trans < 0.01) break;
+        }
+
+        t += step;
+    }
+
+    return vec4(col, 1.0 - trans);
+}
+```
+
+### shaders/volume/noise.glsl
+```
+vec3 hash3(vec3 p) {
+    p = vec3(
+        dot(p, vec3(127.1, 311.7, 74.7)),
+        dot(p, vec3(269.5, 183.3, 246.1)),
+        dot(p, vec3(113.5, 271.9, 124.6))
+    );
+    return -1.0 + 2.0 * fract(sin(p) * 43758.5453123);
+}
+
+float noise3D(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    vec3 u = f*f*(3.0 - 2.0*f);
+
+    return mix(
+        mix(
+            mix(dot(hash3(i+vec3(0,0,0)), f-vec3(0,0,0)),
+                dot(hash3(i+vec3(1,0,0)), f-vec3(1,0,0)), u.x),
+            mix(dot(hash3(i+vec3(0,1,0)), f-vec3(0,1,0)),
+                dot(hash3(i+vec3(1,1,0)), f-vec3(1,1,0)), u.x), u.y),
+        mix(
+            mix(dot(hash3(i+vec3(0,0,1)), f-vec3(0,0,1)),
+                dot(hash3(i+vec3(1,0,1)), f-vec3(1,0,1)), u.x),
+            mix(dot(hash3(i+vec3(0,1,1)), f-vec3(0,1,1)),
+                dot(hash3(i+vec3(1,1,1)), f-vec3(1,1,1)), u.x), u.y),
+        u.z
+    );
+}
+
+float fbm(vec3 p) {
+    float v = 0.0;
+    float a = 0.5;
+
+    for (int i = 0; i < 4; i++) {
+        v += a * noise3D(p);
+        p *= uCloudNoiseFreq;
+        a *= 0.5;
+    }
+    return v;
+}
+```
+
+### src/camera/Camera.cpp
+```
+#include "Camera.h"
+
+Camera::Camera()
+    : m_pos(0.0f, 0.0f, 3.0f),
+      m_look(0.0f, 0.0f, -1.0f),
+      m_up(0.0f, 1.0f, 0.0f),
+      m_heightAngle(glm::radians(45.0f)) {}
+
+void Camera::setFromScene(glm::vec3 pos, glm::vec3 look, glm::vec3 up, float heightAngle) {
+    m_pos = pos;
+    m_look = glm::normalize(look);
+    m_up = glm::normalize(up);
+    m_heightAngle = heightAngle;
+}
+
+glm::mat4 Camera::getViewMatrix() const {
+    return glm::lookAt(m_pos, m_pos + m_look, m_up);
+}
+
+glm::mat4 Camera::getProjMatrix(float aspectRatio) const {
+    return glm::perspective(m_heightAngle, aspectRatio, 0.1f, 100.0f);
+}
+```
+
+### src/camera/Camera.h
+```
+#pragma once
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
+class Camera
+{
+public:
+    Camera();
+
+    void setFromScene(glm::vec3 pos, glm::vec3 look, glm::vec3 up, float heightAngle);
+
+    glm::mat4 getViewMatrix() const;
+    glm::mat4 getProjMatrix(float aspectRatio) const;
+
+    glm::vec3 getPosition() const { return m_pos; }
+    glm::vec3 getLook() const { return m_look; }
+    glm::vec3 getUp() const { return m_up; }
+
+private:
+    glm::vec3 m_pos;
+    glm::vec3 m_look;
+    glm::vec3 m_up;
+    float m_heightAngle;
+};
+```
+
+### src/shader/Shader.cpp
+```
+#include "shader.h"
+#include <fstream>
+#include <sstream>
+#include <iostream>
+#include <glm/glm.hpp>
+
+std::string loadShaderWithIncludes(const std::string& path)
+{
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        std::cerr << "[Shader] ERROR: Cannot open file: " << path << std::endl;
+        return "";
+    }
+
+    std::stringstream out;
+    std::string line;
+
+    std::string baseDir = path.substr(0, path.find_last_of("/"));
+
+    while (std::getline(file, line)) {
+
+        if (line.rfind("#include", 0) == 0) {
+            size_t a = line.find("\"");
+            size_t b = line.find_last_of("\"");
+
+            if (a != std::string::npos && b > a) {
+                std::string includeName = line.substr(a+1, b-a-1);
+                std::string includePath = baseDir + "/" + includeName;
+
+                out << loadShaderWithIncludes(includePath) << "\n";
+            }
+        }
+        else {
+            out << line << "\n";
+        }
+    }
+
+    return out.str();
+}
+
+Shader::Shader(const char* vertexPath, const char* fragmentPath)
+{
+    initializeOpenGLFunctions();
+
+    std::string vStr = loadShaderWithIncludes(vertexPath);
+    std::string fStr = loadShaderWithIncludes(fragmentPath);
+
+    const char* vSrc = vStr.c_str();
+    const char* fSrc = fStr.c_str();
+
+    GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vs, 1, &vSrc, nullptr);
+    glCompileShader(vs);
+
+    GLint ok;
+    char log[512];
+
+    glGetShaderiv(vs, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        glGetShaderInfoLog(vs, 512, nullptr, log);
+        std::cerr << "\nVERTEX ERR (" << vertexPath << "):\n" << log << std::endl;
+    }
+
+    GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fs, 1, &fSrc, nullptr);
+    glCompileShader(fs);
+
+    glGetShaderiv(fs, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        glGetShaderInfoLog(fs, 512, nullptr, log);
+        std::cerr << "\nFRAG ERR (" << fragmentPath << "):\n" << log << std::endl;
+    }
+
+    ID = glCreateProgram();
+    glAttachShader(ID, vs);
+    glAttachShader(ID, fs);
+    glLinkProgram(ID);
+
+    glGetProgramiv(ID, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        glGetProgramInfoLog(ID, 512, nullptr, log);
+        std::cerr << "\nPROGRAM LINK ERROR:\n" << log << std::endl;
+    }
+
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+}
+
+void Shader::use() {
+    glUseProgram(ID);
+}
+
+
+void Shader::setFloat(const std::string& name, float value) {
+    glUniform1f(glGetUniformLocation(ID, name.c_str()), value);
+}
+
+void Shader::setInt(const std::string& name, int value) {
+    glUniform1i(glGetUniformLocation(ID, name.c_str()), value);
+}
+
+void Shader::setVec3(const std::string& name, float x, float y, float z) {
+    glUniform3f(glGetUniformLocation(ID, name.c_str()), x, y, z);
+}
+
+void Shader::setVec3(const std::string& name, const glm::vec3& v) {
+    glUniform3f(glGetUniformLocation(ID, name.c_str()), v.x, v.y, v.z);
+}
+
+void Shader::setMat3(const std::string& name, const float* value) {
+    glUniformMatrix3fv(glGetUniformLocation(ID, name.c_str()), 1, GL_FALSE, value);
+}
+```
+
+### src/shader/Shader.h
+```
+#pragma once
+
+#include <string>
+#include <QOpenGLFunctions_3_3_Core>
+#include <glm/glm.hpp>
+
+class Shader : protected QOpenGLFunctions_3_3_Core {
+public:
+    unsigned int ID;
+
+    Shader(const char* vertexPath, const char* fragmentPath);
+
+    void use();
+
+    void setFloat(const std::string& name, float value);
+    void setInt(const std::string& name, int value);
+    void setVec3(const std::string& name, float x, float y, float z);
+    void setVec3(const std::string& name, const glm::vec3& v);
+    void setMat3(const std::string& name, const float* value);
+};
+```
+
+### src/utils/scenedata.h
+```
+#pragma once
+
+#include <vector>
+#include <string>
+#include <glm/glm.hpp>
+
+// Light types
+enum class LightType {
+    LIGHT_DIRECTIONAL,
+    LIGHT_POINT,
+    LIGHT_SPOT
+};
+
+enum class PrimitiveType {
+    PRIMITIVE_SPHERE,
+};
+
+// Transformation types
+enum class TransformationType {
+    TRANSFORMATION_TRANSLATE,
+    TRANSFORMATION_SCALE,
+    TRANSFORMATION_ROTATE,
+    TRANSFORMATION_MATRIX
+};
+
+using SceneColor = glm::vec4;
+
+
+struct SceneGlobalData {
+    float ka;
+    float kd;
+    float ks;
+    float kt;
+};
+
+
+struct SceneLight {
+    int id;
+    LightType type;
+    SceneColor color;
+
+    glm::vec4 dir;     
+    glm::vec4 pos;     
+    float angle;     
+};
+
+struct SceneLightData {
+    int id;
+    LightType type;
+    SceneColor color;
+
+    glm::vec4 dir;
+    glm::vec4 pos;
+    float angle;
+};
+
+
+
+
+struct SceneCameraData {
+    glm::vec4 pos;
+    glm::vec4 look;
+    glm::vec4 up;
+    float heightAngle;
+};
+
+
+struct SceneMaterial {
+    SceneColor cAmbient;
+    SceneColor cDiffuse;
+    SceneColor cSpecular;
+    float shininess;
+
+    void clear() {
+        cAmbient  = glm::vec4(0);
+        cDiffuse  = glm::vec4(0);
+        cSpecular = glm::vec4(0);
+        shininess = 0.0f;
+    }
+};
+
+
+struct ScenePrimitive {
+    PrimitiveType type;
+    SceneMaterial material;
+};
+
+struct SceneTransformation {
+    TransformationType type;
+    glm::vec3 translate;
+    glm::vec3 scale;
+    glm::vec3 rotate;
+    float      angle;
+    glm::mat4  matrix;
+};
+
+struct SceneNode {
+    std::vector<SceneTransformation*> transformations;
+    std::vector<ScenePrimitive*>      primitives;
+    std::vector<SceneLight*>          lights;
+    std::vector<SceneNode*>           children;
+};
+
+
+struct CloudData {
+    glm::vec3 offset    = glm::vec3(0.0f);
+    float     radius    = 3.0f;
+    float     density   = 1.2f;
+    float     noiseScale = 1.0f;
+
+    float extinction  = 1.8f;
+    float scatterMin  = 0.25f;
+    float scatterMax  = 1.0f;
+    float lightStep   = 0.45f;
+    float lightAtt    = 0.40f;
+    float brightness  = 0.9f;
+    float stepMult    = 1.0f;
+float baseHeight = 2.0f;
+float topHeight  = 6.0f;
+
+    float noiseFreq   = 2.0f;   
+};
+
+
+
+struct RayMarchSphere {
+    glm::vec3    center;
+    float        radius;
+    SceneMaterial material;
+};
+
+struct RayMarchPlane {
+    float        y;
+    SceneMaterial material;
+};
+
+struct RenderData {
+    SceneGlobalData        globalData;
+    SceneCameraData        cameraData;
+    std::vector<SceneLightData> lights;
+
+    std::vector<RayMarchSphere> spheres;
+    RayMarchPlane               ground;
+
+    CloudData cloud;
+
+    struct RayMarchSettings {
+        float shadowSoftness     = 10.0f;
+        float maxShadowDistance  = 8.0f;
+        int   shadowSamples      = 40;
+    } rayMarchSettings;
+};
+```
+
+### src/utils/scenefilereader.cpp
+```
+#include "scenefilereader.h"
+#include "scenedata.h"
+
+#include <glm/gtc/type_ptr.hpp>
+#include <cstring>
+#include <iostream>
+
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+
+ScenefileReader::ScenefileReader(const std::string &name) {
+    file_name = name;
+    memset(&m_cameraData, 0, sizeof(SceneCameraData));
+    memset(&m_globalData, 0, sizeof(SceneGlobalData));
+    memset(&m_cloud,      0, sizeof(CloudData));
+    m_root = new SceneNode;
+    m_nodes.clear();
+    m_nodes.push_back(m_root);
+}
+
+ScenefileReader::~ScenefileReader() {
+    for (unsigned int node = 0; node < m_nodes.size(); node++) {
+        for (size_t i = 0; i < (m_nodes[node])->transformations.size(); i++) {
+            delete (m_nodes[node])->transformations[i];
+        }
+        for (size_t i = 0; i < (m_nodes[node])->primitives.size(); i++) {
+            delete (m_nodes[node])->primitives[i];
+        }
+        for (size_t i = 0; i < (m_nodes[node])->lights.size(); i++) {
+            delete (m_nodes[node])->lights[i];
+        }
+        (m_nodes[node])->transformations.clear();
+        (m_nodes[node])->primitives.clear();
+        (m_nodes[node])->lights.clear();
+        (m_nodes[node])->children.clear();
+        delete m_nodes[node];
+    }
+    m_nodes.clear();
+}
+
+SceneGlobalData ScenefileReader::getGlobalData() const {
+    return m_globalData;
+}
+
+SceneCameraData ScenefileReader::getCameraData() const {
+    return m_cameraData;
+}
+
+CloudData ScenefileReader::getCloudData() const {
+    return m_cloud;
+}
+
+
+SceneNode *ScenefileReader::getRootNode() const {
+    return m_root;
+}
+
+bool ScenefileReader::readJSON() {
+    QFile file(file_name.c_str());
+    if (!file.open(QFile::ReadOnly)) {
+        std::cout << "could not open " << file_name << std::endl;
+        return false;
+    }
+
+    QByteArray fileContents = file.readAll();
+    QJsonParseError jsonError;
+    QJsonDocument doc = QJsonDocument::fromJson(fileContents, &jsonError);
+    if (doc.isNull()) {
+        std::cout << "could not parse " << file_name << std::endl;
+        return false;
+    }
+    file.close();
+
+    if (!doc.isObject()) {
+        std::cout << "document is not an object" << std::endl;
+        return false;
+    }
+
+    QJsonObject scenefile = doc.object();
+
+    if (!scenefile.contains("globalData")) {
+        std::cout << "missing required field \"globalData\"" << std::endl;
+        return false;
+    }
+    if (!scenefile.contains("cameraData")) {
+        std::cout << "missing required field \"cameraData\"" << std::endl;
+        return false;
+    }
+
+    if (!parseGlobalData(scenefile["globalData"].toObject())) {
+        std::cout << "could not parse \"globalData\"" << std::endl;
+        return false;
+    }
+
+    if (!parseCameraData(scenefile["cameraData"].toObject())) {
+        std::cout << "could not parse \"cameraData\"" << std::endl;
+        return false;
+    }
+
+    if (scenefile.contains("clouds")) {  
+        QJsonArray arr = scenefile["clouds"].toArray();
+        for (auto c : arr) {
+            CloudData cd;
+            QJsonObject obj = c.toObject();
+
+            if (obj.contains("offset")) {
+                QJsonArray o = obj["offset"].toArray();
+                cd.offset = glm::vec3(o[0].toDouble(), o[1].toDouble(), o[2].toDouble());
+            }
+            cd.radius     = obj["radius"].toDouble(cd.radius);
+            cd.density    = obj["density"].toDouble(cd.density);
+            cd.noiseScale = obj["noiseScale"].toDouble(cd.noiseScale);
+            cd.baseHeight = obj["baseHeight"].toDouble(cd.baseHeight);
+            cd.topHeight  = obj["topHeight"].toDouble(cd.topHeight);
+
+            // m_clouds.push_back(cd);
+        }
+    }
+    else if (scenefile.contains("cloudData")) {
+        parseCloudData(scenefile["cloudData"].toObject());
+    }
+
+    if (scenefile.contains("cloudParams")) {
+        parseCloudParams(scenefile["cloudParams"].toObject());
+    }
+
+    if (scenefile.contains("groups")) {
+        if (!parseGroups(scenefile["groups"], m_root)) {
+            return false;
+        }
+    }
+
+    std::cout << "Finished reading " << file_name << std::endl;
+    return true;
+}
+
+bool ScenefileReader::parseGlobalData(const QJsonObject &globalData) {
+    if (!globalData.contains("ambientCoeff") ||
+        !globalData.contains("diffuseCoeff") ||
+        !globalData.contains("specularCoeff")) {
+        std::cout << "missing required globalData fields" << std::endl;
+        return false;
+    }
+
+    m_globalData.ka = globalData["ambientCoeff"].toDouble();
+    m_globalData.kd = globalData["diffuseCoeff"].toDouble();
+    m_globalData.ks = globalData["specularCoeff"].toDouble();
+    m_globalData.kt = globalData.contains("transparentCoeff")
+                    ? globalData["transparentCoeff"].toDouble()
+                    : 0.0;
+    return true;
+}
+
+bool ScenefileReader::parseCameraData(const QJsonObject &cameradata) {
+    if (!cameradata.contains("position") ||
+        !cameradata.contains("up") ||
+        !cameradata.contains("heightAngle")) {
+        std::cout << "missing required cameraData fields" << std::endl;
+        return false;
+    }
+
+    QJsonArray position = cameradata["position"].toArray();
+    if (position.size() != 3) return false;
+
+    m_cameraData.pos = glm::vec4(
+        position[0].toDouble(),
+        position[1].toDouble(),
+        position[2].toDouble(),
+        1.f
+    );
+
+    QJsonArray up = cameradata["up"].toArray();
+    if (up.size() != 3) return false;
+
+    m_cameraData.up = glm::vec4(
+        up[0].toDouble(),
+        up[1].toDouble(),
+        up[2].toDouble(),
+        0.f
+    );
+
+    m_cameraData.heightAngle =
+        cameradata["heightAngle"].toDouble() * M_PI / 180.f;
+
+    if (cameradata.contains("look")) {
+        QJsonArray look = cameradata["look"].toArray();
+        if (look.size() != 3) return false;
+
+        m_cameraData.look = glm::vec4(
+            look[0].toDouble(),
+            look[1].toDouble(),
+            look[2].toDouble(),
+            0.f
+        );
+    }
+    else if (cameradata.contains("focus")) {
+        QJsonArray focus = cameradata["focus"].toArray();
+        if (focus.size() != 3) return false;
+
+        glm::vec4 target(
+            focus[0].toDouble(),
+            focus[1].toDouble(),
+            focus[2].toDouble(),
+            1.f
+        );
+
+        m_cameraData.look = target - m_cameraData.pos;
+    }
+    else {
+        std::cout << "cameraData must contain either \"look\" or \"focus\"" << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
+bool ScenefileReader::parseLightData(const QJsonObject &lightData, SceneNode *node)
+{
+    if (!lightData.contains("type") || !lightData.contains("color"))
+        return false;
+
+    SceneLight *light = new SceneLight();
+    memset(light, 0, sizeof(SceneLight));
+    node->lights.push_back(light);
+
+    QJsonArray color = lightData["color"].toArray();
+    if (color.size() != 3) return false;
+    light->color = glm::vec4(color[0].toDouble(),
+                             color[1].toDouble(),
+                             color[2].toDouble(),
+                             1.f);
+
+    QString type = lightData["type"].toString();
+
+    if (type == "directional") {
+        light->type = LightType::LIGHT_DIRECTIONAL;
+
+        QJsonArray d = lightData["direction"].toArray();
+        light->dir = glm::vec4(d[0].toDouble(), d[1].toDouble(), d[2].toDouble(), 0.f);
+    }
+
+    else if (type == "point") {
+        light->type = LightType::LIGHT_POINT;
+
+        QJsonArray p = lightData["position"].toArray();
+        light->pos = glm::vec4(p[0].toDouble(), p[1].toDouble(), p[2].toDouble(), 1.f);
+    }
+
+    else if (type == "spot") {
+        light->type = LightType::LIGHT_SPOT;
+
+        QJsonArray p = lightData["position"].toArray();
+        QJsonArray d = lightData["direction"].toArray();
+
+        light->pos = glm::vec4(p[0].toDouble(), p[1].toDouble(), p[2].toDouble(), 1.f);
+        light->dir = glm::vec4(d[0].toDouble(), d[1].toDouble(), d[2].toDouble(), 0.f);
+
+        light->angle = glm::radians((float)lightData["angle"].toDouble());
+    }
+
+    else {
+        std::cout << "unsupported light type\n";
+        return false;
+    }
+
+    return true;
+}
+
+bool ScenefileReader::parseCloudData(const QJsonObject &cloudData) {
+    if (cloudData.contains("offset")) {
+        QJsonArray arr = cloudData["offset"].toArray();
+        if (arr.size() == 3) {
+            m_cloud.offset = glm::vec3(
+                arr[0].toDouble(),
+                arr[1].toDouble(),
+                arr[2].toDouble()
+            );
+        }
+    }
+
+    if (cloudData.contains("radius"))
+        m_cloud.radius = cloudData["radius"].toDouble();
+
+    if (cloudData.contains("density"))
+        m_cloud.density = cloudData["density"].toDouble();
+
+    if (cloudData.contains("noiseScale"))
+        m_cloud.noiseScale = cloudData["noiseScale"].toDouble();
+
+    return true;
+}
+
+bool ScenefileReader::parseCloudParams(const QJsonObject &params) {
+    if (params.contains("extinction"))
+        m_cloud.extinction = params["extinction"].toDouble();
+
+    if (params.contains("scatterMin"))
+        m_cloud.scatterMin = params["scatterMin"].toDouble();
+
+    if (params.contains("scatterMax"))
+        m_cloud.scatterMax = params["scatterMax"].toDouble();
+
+    if (params.contains("lightStep"))
+        m_cloud.lightStep = params["lightStep"].toDouble();
+
+    if (params.contains("lightAtt"))
+        m_cloud.lightAtt = params["lightAtt"].toDouble();
+
+    if (params.contains("brightness"))
+        m_cloud.brightness = params["brightness"].toDouble();
+
+    if (params.contains("stepMult"))
+        m_cloud.stepMult = params["stepMult"].toDouble();
+
+    if (params.contains("noiseFreq"))
+        m_cloud.noiseFreq = params["noiseFreq"].toDouble();
+
+    if (params.contains("baseHeight"))
+        m_cloud.baseHeight = params["baseHeight"].toDouble();
+
+    if (params.contains("topHeight"))
+        m_cloud.topHeight = params["topHeight"].toDouble();
+
+    return true;
+}
+
+bool ScenefileReader::parseGroupData(const QJsonObject &object, SceneNode *node) {
+    if (object.contains("translate")) {
+        QJsonArray translateArray = object["translate"].toArray();
+        if (translateArray.size() != 3) return false;
+
+        SceneTransformation *translation = new SceneTransformation();
+        translation->type = TransformationType::TRANSFORMATION_TRANSLATE;
+        translation->translate = glm::vec3(
+            translateArray[0].toDouble(),
+            translateArray[1].toDouble(),
+            translateArray[2].toDouble()
+        );
+        node->transformations.push_back(translation);
+    }
+
+    if (object.contains("scale")) {
+        QJsonArray scaleArray = object["scale"].toArray();
+        if (scaleArray.size() != 3) return false;
+
+        SceneTransformation *scale = new SceneTransformation();
+        scale->type = TransformationType::TRANSFORMATION_SCALE;
+        scale->scale = glm::vec3(
+            scaleArray[0].toDouble(),
+            scaleArray[1].toDouble(),
+            scaleArray[2].toDouble()
+        );
+        node->transformations.push_back(scale);
+    }
+
+    if (object.contains("rotate")) {
+        QJsonArray rotateArray = object["rotate"].toArray();
+        if (rotateArray.size() != 4) return false;
+
+        SceneTransformation *rotation = new SceneTransformation();
+        rotation->type = TransformationType::TRANSFORMATION_ROTATE;
+        rotation->rotate = glm::vec3(
+            rotateArray[0].toDouble(),
+            rotateArray[1].toDouble(),
+            rotateArray[2].toDouble()
+        );
+        rotation->angle = rotateArray[3].toDouble() * M_PI / 180.f;
+        node->transformations.push_back(rotation);
+    }
+
+    if (object.contains("lights")) {
+        QJsonArray lightsArray = object["lights"].toArray();
+        for (auto light : lightsArray) {
+            if (!parseLightData(light.toObject(), node)) {
+                return false;
+            }
+        }
+    }
+
+    if (object.contains("primitives")) {
+        QJsonArray primitivesArray = object["primitives"].toArray();
+        for (auto primitive : primitivesArray) {
+            if (!parsePrimitive(primitive.toObject(), node)) {
+                return false;
+            }
+        }
+    }
+
+    if (object.contains("groups")) {
+        if (!parseGroups(object["groups"], node)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool ScenefileReader::parseGroups(const QJsonValue &groups, SceneNode *parent) {
+    if (!groups.isArray()) return false;
+
+    QJsonArray groupsArray = groups.toArray();
+    for (auto group : groupsArray) {
+        if (!group.isObject()) return false;
+
+        SceneNode *node = new SceneNode;
+        m_nodes.push_back(node);
+        parent->children.push_back(node);
+
+        if (!parseGroupData(group.toObject(), node)) return false;
+    }
+
+    return true;
+}
+
+bool ScenefileReader::parsePrimitive(const QJsonObject &prim, SceneNode *node) {
+    if (!prim.contains("type")) return false;
+
+    std::string primType = prim["type"].toString().toStdString();
+
+    ScenePrimitive *primitive = new ScenePrimitive();
+    SceneMaterial  &mat = primitive->material;
+    mat.clear();
+    node->primitives.push_back(primitive);
+
+    if (primType == "sphere") {
+        primitive->type = PrimitiveType::PRIMITIVE_SPHERE;
+    }
+    else {
+        delete primitive;
+        node->primitives.pop_back();
+        return true;
+    }
+
+    if (prim.contains("ambient")) {
+        QJsonArray ambientArray = prim["ambient"].toArray();
+        if (ambientArray.size() == 3) {
+            mat.cAmbient = glm::vec4(
+                ambientArray[0].toDouble(),
+                ambientArray[1].toDouble(),
+                ambientArray[2].toDouble(),
+                1.f
+            );
+        }
+    }
+
+    if (prim.contains("diffuse")) {
+        QJsonArray diffuseArray = prim["diffuse"].toArray();
+        if (diffuseArray.size() == 3) {
+            mat.cDiffuse = glm::vec4(
+                diffuseArray[0].toDouble(),
+                diffuseArray[1].toDouble(),
+                diffuseArray[2].toDouble(),
+                1.f
+            );
+        }
+    }
+
+    if (prim.contains("specular")) {
+        QJsonArray specularArray = prim["specular"].toArray();
+        if (specularArray.size() == 3) {
+            mat.cSpecular = glm::vec4(
+                specularArray[0].toDouble(),
+                specularArray[1].toDouble(),
+                specularArray[2].toDouble(),
+                1.f
+            );
+        }
+    }
+
+    if (prim.contains("shininess")) {
+        mat.shininess = prim["shininess"].toDouble();
+    }
+
+    return true;
+}
+```
+
+### src/utils/scenefilereader.h
+```
+#pragma once
+
+#include <map>
+#include <string>
+#include <vector>
+#include "scenedata.h"
+
+class QJsonObject;
+class QJsonValue;
+
+class ScenefileReader {
+public:
+    ScenefileReader(const std::string &name);
+    ~ScenefileReader();
+
+    bool readJSON();
+
+    SceneGlobalData getGlobalData() const;
+    SceneCameraData getCameraData() const;
+    SceneNode      *getRootNode()   const;
+
+    CloudData getCloudData() const;
+
+private:
+    std::string            file_name;
+    std::vector<SceneNode*> m_nodes;
+
+    SceneGlobalData m_globalData;
+    SceneCameraData m_cameraData;
+    SceneNode      *m_root;
+
+    CloudData       m_cloud;
+
+    bool parseGlobalData(const QJsonObject &globalData);
+    bool parseCameraData(const QJsonObject &cameraData);
+    bool parseLightData (const QJsonObject &lightData, SceneNode *node);
+    bool parseGroupData (const QJsonObject &object, SceneNode *node);
+    bool parseGroups    (const QJsonValue  &groups, SceneNode *parent);
+    bool parsePrimitive (const QJsonObject &prim, SceneNode *node);
+
+    bool parseCloudData   (const QJsonObject &cloudData);
+    bool parseCloudParams (const QJsonObject &params);
+};
+```
+
+### src/utils/sceneparser.cpp
+```
+#define GLM_ENABLE_EXPERIMENTAL
+#include "sceneparser.h"
+#include "scenefilereader.h"
+#include <glm/gtx/transform.hpp>
+#include <iostream>
+
+bool SceneParser::parse(std::string filepath, RenderData &renderData) {
+    ScenefileReader fileReader(filepath);
+    bool success = fileReader.readJSON();
+    if (!success) {
+        return false;
+    }
+    renderData.cameraData = fileReader.getCameraData();
+    renderData.globalData = fileReader.getGlobalData();
+    renderData.cloud      = fileReader.getCloudData();
+    renderData.ground.y = -2.5f;
+    SceneNode *root = fileReader.getRootNode();
+    if (root) {
+        traverseGraph(root, glm::mat4(1.0f), renderData);
+    }
+    return true;
+}
+
+void SceneParser::traverseGraph(SceneNode *node,
+                                glm::mat4 parentCTM,
+                                RenderData &renderData) {
+    glm::mat4 currentCTM = parentCTM;
+    
+    for (SceneTransformation *t : node->transformations) {
+        switch (t->type) {
+            case TransformationType::TRANSFORMATION_TRANSLATE:
+                currentCTM *= glm::translate(t->translate);
+                break;
+            case TransformationType::TRANSFORMATION_SCALE:
+                currentCTM *= glm::scale(t->scale);
+                break;
+            case TransformationType::TRANSFORMATION_ROTATE:
+                currentCTM *= glm::rotate(t->angle, t->rotate);
+                break;
+            case TransformationType::TRANSFORMATION_MATRIX:
+                currentCTM *= t->matrix;
+                break;
+        }
+    }
+    
+    for (ScenePrimitive *prim : node->primitives) {
+        extractRayMarchData(*prim, currentCTM, renderData);
+    }
+    
+    for (SceneLight *light : node->lights) {
+        SceneLightData L;
+        L.id    = light->id;
+        L.type  = light->type;
+        L.color = light->color;
+        
+        if (L.type == LightType::LIGHT_DIRECTIONAL) {
+            glm::vec4 worldDir = currentCTM * glm::vec4(glm::vec3(light->dir), 0.0f);
+            L.dir = glm::normalize(worldDir);
+        }
+        else if (L.type == LightType::LIGHT_POINT) {
+            glm::vec4 worldPos = currentCTM * light->pos;
+            L.pos = worldPos;
+        }
+        else if (L.type == LightType::LIGHT_SPOT) {
+            glm::vec4 worldPos = currentCTM * light->pos;
+            glm::vec4 worldDir = currentCTM * glm::vec4(glm::vec3(light->dir), 0.0f);
+            
+            L.pos = worldPos;
+            L.dir = glm::normalize(worldDir);
+            L.angle = light->angle;  
+        }
+        
+        renderData.lights.push_back(L);
+    }
+    
+    // recurse
+    for (SceneNode *child : node->children) {
+        traverseGraph(child, currentCTM, renderData);
+    }
+}
+
+void SceneParser::extractRayMarchData(const ScenePrimitive &primitive,
+                                      const glm::mat4      &ctm,
+                                      RenderData           &renderData) {
+    if (primitive.type == PrimitiveType::PRIMITIVE_SPHERE) {
+        RayMarchSphere sphere;
+        sphere.center = glm::vec3(ctm[3]);
+        glm::vec3 scale = glm::vec3(
+            glm::length(glm::vec3(ctm[0])),
+            glm::length(glm::vec3(ctm[1])),
+            glm::length(glm::vec3(ctm[2]))
+        );
+        sphere.radius   = scale.x;
+        sphere.material = primitive.material;
+        renderData.spheres.push_back(sphere);
+        std::cout << "Added sphere at ("
+                  << sphere.center.x << ", "
+                  << sphere.center.y << ", "
+                  << sphere.center.z
+                  << ") with radius " << sphere.radius << std::endl;
+    }
+}
+```
+
+### src/utils/sceneparser.h
+```
+#pragma once
+
+#include "scenedata.h"
+#include <string>
+
+class SceneParser {
+public:
+    static bool parse(std::string filepath, RenderData &renderData);
+
+private:
+    static void traverseGraph(SceneNode *node,
+                              glm::mat4 parentCTM,
+                              RenderData &renderData);
+
+    static void extractRayMarchData(const ScenePrimitive &primitive,
+                                    const glm::mat4      &ctm,
+                                    RenderData           &renderData);
+};
+```

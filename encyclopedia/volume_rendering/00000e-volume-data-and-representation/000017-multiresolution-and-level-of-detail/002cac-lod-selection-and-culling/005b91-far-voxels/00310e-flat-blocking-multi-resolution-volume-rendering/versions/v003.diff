@@ -1,0 +1,204 @@
+--- v002.md
++++ v003.md
+@@ -1,156 +1,69 @@
+ # Flat blocking multi-resolution volume rendering
+ 
+-Also called: min|max octree
++Also called: Flat Blocking, min|max octree
+ 
+ ## Overview
+-Flat blocking multi-resolution volume rendering is a strategy for loading and rendering large volume datasets by dividing the volume into sub-blocks of equal physical size but assigning each block a different resolution (Level of Detail, LOD) based on its internal data variation [S1, S3, unofficial]. Unlike hierarchical structures that change spatial extent, this method keeps block dimensions constant while varying the voxel count within them [S2, unofficial]. It is distinguished from its siblings by its explicit use of a "flat" blocking structure where LOD is determined per block via a variation heuristic, often implemented using min|max octrees [S1, S3, unofficial].
++Flat blocking multi-resolution volume rendering is a strategy for loading and rendering large volume datasets by partitioning the volume into sub-blocks of constant spatial size but varying resolution (Level of Detail, LOD) based on the data's importance [S1, S3, unofficial]. Unlike hierarchical blocking (e.g., standard octrees) where lower-resolution blocks cover larger spatial areas, flat blocking maintains a uniform spatial footprint for all blocks, reducing the number of samples per block as the LOD increases [S2, unofficial]. This approach achieves higher data reduction ratios (e.g., 3.8:1) compared to hierarchical methods (2.2:1) [S2, unofficial]. It is distinguished from its siblings by its fixed spatial block dimensions and its reliance on internal data variation heuristics to determine LOD, rather than purely geometric distance or projected width [S1, S3, unofficial].
+ 
+ ## How it works
+-### Inputs and outputs
+-**Inputs:**
+-- A 3D volume dataset [S1, S3, unofficial].
+-- A block dimension parameter $n$, where the block size is $2^n \times 2^n \times 2^n$ [S1, S3, unofficial].
+-- A heuristic function to determine block importance (default: standard deviation) [S1, S3, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A high-resolution volume dataset (scalar field) and a block dimension parameter $n$.
++*   **Output:** A set of sub-blocks, each assigned an LOD index $l \in [0, n]$, where higher $l$ implies lower resolution (fewer samples) but the same spatial extent.
+ 
+-**Outputs:**
+-- A set of blocks, each tagged with an LOD index $l \in [0, n]$ [S1, S3, unofficial].
+-- The corresponding lower-resolution data for each block at its assigned LOD [G].
++**Data Structures:**
++The volume is divided into non-overlapping cubic blocks of size $2^n \times 2^n \times 2^n$ [S1, S3, unofficial].
++*   **Block Header/Metadata:** Stores the assigned LOD level $l$ for the block.
++*   **Block Data:** Stores the voxel values. For a block at LOD $l$, the number of stored voxels is $2^{3 \cdot (max_l - l)}$ [S1, S3, unofficial]. Note: $max_l$ corresponds to the maximum LOD index $n$ for a block of size $2^n$ [S1, S3, unofficial].
++*   **Packed Texture (Variant):** In GPU implementations, data for high, middle, and low resolution levels can be stored in a single packed texture, with markers for empty blocks [S2, unofficial].
+ 
+-### Data structures
+-Each block in the volume is represented by:
+-1.  **Block ID:** Spatial coordinates identifying the block's position in the global volume grid [G].
+-2.  **LOD Index ($l$):** An integer from $0$ to $n$, where $0$ is the highest resolution (full $2^n \times 2^n \times 2^n$ voxels) and $n$ is the lowest resolution [S1, S3, unofficial].
+-3.  **Data Pointer/Handle:** Reference to the stored voxel data for the specific LOD level [G].
++**Steps:**
+ 
+-The number of voxels in a sub-volume at level $l$ is given by $2^{3 \cdot (max_l - l)}$, where $max_l$ is the highest level of detail (typically $n$) of the father block (the full-resolution block) [S1, S3, unofficial]. The total number of voxels in the entire volume (at level $0$) is $2^{3 \cdot max_l}$ [S1, S3, unofficial].
++1.  **Partitioning:** Divide the entire volume domain into cubic blocks of size $B = 2^n \times 2^n \times 2^n$ [S1, S3, unofficial]. The total number of voxels in the original volume is $2^{3 \cdot max_l}$, where $max_l = n$ [S1, S3, unofficial].
+ 
+-### Steps
+-1.  **Partition:** Divide the volume into non-overlapping cubic blocks of size $2^n \times 2^n \times 2^n$ [S1, S3, unofficial].
+-2.  **Calculate Importance:** For each block, compute a variation metric $V_i$ to determine its importance [S1, S3, unofficial].
+-    -   Let $S_j$ be the scalar values of the voxels in the block [S1, S3, unofficial].
+-    -   Let $avg_i$ be the average of these scalar values [S1, S3, unofficial].
+-    -   Let $max_l$ be the highest level of detail (index $n$) [S1, S3, unofficial].
+-    -   Compute the variance-based metric [S1, S3, unofficial].
+-    -   The formula for variation $V_i$ is constrained to the range $[0, 1]$ [S1, S3, unofficial]. One cited formulation is:
++2.  **LOD Selection (Heuristic Analysis):** For each block, calculate an "importance" metric based on the variation of scalar values within the block. The standard heuristic uses the standard deviation (or variance) of the scalar values [S1, S3, unofficial].
++    *   Let $S_j$ be the scalar value of the $j$-th voxel in the block.
++    *   Let $avg_i$ be the average of the scalar values in the $i$-th block.
++    *   The variation $V_i$ is calculated as:
+         $$ V_i = \frac{\sum (S_j - avg_i)^2}{2^{3 \cdot max_l}} $$
+-        (Note: Source [S1, unofficial] presents this formula, while Source [S2, unofficial] describes it as standard deviation $\sigma_i$ constrained to $[0,1]$ [S1, S2, unofficial].)
+-3.  **Assign LOD:** Map the variation $V_i$ to an LOD index $l$. Higher variation implies higher importance, leading to a lower $l$ (higher resolution) [S1, S3, unofficial].
+-    -   If $V_i$ is high, assign $l=0$ (full resolution) [S1, S3, unofficial].
+-    -   If $V_i$ is low, assign a higher $l$ (lower resolution) [S1, S3, unofficial].
+-    -   The exact mapping function is not specified in the sources, but the range of $l$ is $[0, n]$ [S1, S3, unofficial].
+-4.  **Generate/Store Data:** For each block, store or generate the voxel data at the assigned resolution $2^{(n-l)} \times 2^{(n-l)} \times 2^{(n-l)}$ [S1, S3, unofficial]. This can be done by downsampling the original high-resolution data [G].
+-5.  **Render:** During ray casting, access the block's data at its assigned LOD [S1, S3, unofficial].
++        [S1, S3, unofficial]
++        *Note: The denominator $2^{3 \cdot max_l}$ represents the total voxel count of the full-resolution block (level 0) [S1, S3, unofficial]. The resulting variation is constrained to the range [0, 1] [S1, S3, unofficial].*
++    *   **Alternative Heuristics:** Other measures for block importance can be used, such as:
++        *   $(max - min) \gg (max_l - l)$
++        *   $((max - avg) \cdot (avg - min)) \gg (max_l - l)$
++        [S1, S3, unofficial]
++    *   **Selection:** Assign the LOD level $l$ to the block based on the calculated variation. Blocks with high variation (high importance) retain higher resolution (lower $l$), while blocks with low variation are downsampled to lower resolutions (higher $l$) [S3, unofficial].
+ 
+-### Pseudocode
+-```python
+-def flat_blocking_multiresolution(volume_data, n):
+-    """
+-    volume_data: 3D array of shape (N, N, N) where N is a multiple of 2^n
+-    n: integer, block dimension exponent (block size is 2^n)
+-    """
+-    block_size = 2 ** n
+-    max_l = n
+-    blocks = []
+-    
+-    # Iterate over all blocks
+-    for x in range(0, volume_data.shape[0], block_size):
+-        for y in range(0, volume_data.shape[1], block_size):
+-            for z in range(0, volume_data.shape[2], block_size):
+-                # Extract block data
+-                block_data = volume_data[x:x+block_size, y:y+block_size, z:z+block_size]
+-                
+-                # Calculate variation metric
+-                # Explicitly compute mean to avoid undefined helper
+-                total_elements = block_data.size
+-                avg_i = sum(block_data.flatten()) / total_elements
+-                
+-                # Formula from [S1, unofficial]: sum of squared differences divided by total voxels
+-                variance_sum = sum((v - avg_i)**2 for v in block_data.flatten())
+-                total_voxels = 2 ** (3 * max_l)
+-                variation = variance_sum / total_voxels
+-                
+-                # Normalize variation to [0, 1]
+-                # [G] The sources state the variation is constrained to [0,1] with a constraint,
+-                # but do not specify the exact normalization function. We apply a standard
+-                # range-based normalization for implementation completeness.
+-                min_val = min(block_data.flatten())
+-                max_val = max(block_data.flatten())
+-                if max_val == min_val:
+-                    normalized_variation = 0.0
+-                else:
+-                    # Heuristic: map variance to [0,1] based on data range
+-                    normalized_variation = min(1.0, variation / ((max_val - min_val)**2))
+-                
+-                # Assign LOD based on variation
+-                # Higher variation -> lower LOD index (higher resolution)
+-                # [G] Linear mapping from [0,1] to [0,n] as a default implementation
+-                lod_index = int(normalized_variation * n)
+-                lod_index = max(0, min(n, lod_index)) # Clamp to [0, n]
+-                
+-                # Generate lower resolution data if needed
+-                # [G] The source does not specify how the lower-res data is generated.
+-                # We assume it is pre-computed or computed on the fly.
+-                # For this pseudocode, we just store the LOD index and position.
+-                
+-                blocks.append({
+-                    'position': (x, y, z),
+-                    'lod': lod_index,
+-                    'variation': normalized_variation
+-                })
+-    
+-    return blocks
+-```
++3.  **Data Reduction:** For a block assigned to LOD $l$, the number of voxels stored is reduced to:
++    $$ N_{voxels} = 2^{3 \cdot (max_l - l)} $$
++    [S1, S3, unofficial]
++    This means the spatial resolution of the block is effectively reduced by a factor of $2^{(max_l - l)}$ in each dimension, but the physical size of the block remains $2^n \times 2^n \times 2^n$ [S2, unofficial].
+ 
+-### Parameters
+--   **Block dimension ($n$):** The dimension of the block must be a power of 2, specifically $2^n \times 2^n \times 2^n$ [S1, S3, unofficial].
+--   **LOD levels:** For each block of size $2^n$, there are $n+1$ levels of detail, indexed from $0$ to $n$ [S1, S3, unofficial].
+--   **Heuristic:** The choice of heuristic for block importance is arbitrary. Standard deviation is one option [S1, S3, unofficial]. Other heuristics include $(max - min) \gg (max_l - l)$ or $((max - avg) \cdot (avg - min)) \gg (max_l - l)$ for each sub-volume [S1, S3, unofficial].
++4.  **Rendering:** During ray casting, access the block data corresponding to the assigned LOD. Interpolation (e.g., trilinear) is performed on the reduced-resolution grid [G].
+ 
+-### Edge cases and pitfalls
+--   **Heuristic Arbitrariness:** The choice of using standard deviation (variation) as the measure of block importance is arbitrary [S1, S3, unofficial]. Other heuristics can be applied [S1, S3, unofficial].
+--   **Normalization:** The sources mention constraining the variation to $[0,1]$ but do not specify the exact normalization method [S1, S3, unofficial].
+--   **Downsampling:** The method of generating lower-resolution data from the high-resolution block is not specified in the sources [G].
++**Parameters:**
++*   $n$: The exponent defining the block size $2^n \times 2^n \times 2^n$. Typical values depend on memory constraints and cache sizes.
++*   $max_l$: The maximum level of detail, equal to $n$ [S1, S3, unofficial].
++*   $l$: The current level of detail for a specific block, $0 \le l \le n$ [S1, S3, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Heuristic Arbitrariness:** The choice of standard deviation as the importance metric is arbitrary. It may not always correlate with visual error or occlusion contribution [S1, S3, unofficial].
++*   **Superfluous Sampling:** If LOD selection is not managed carefully, low-resolution blocks may still be sampled in areas with low occlusion contribution, leading to wasted computation [S2, unofficial].
++*   **Boundary Precision:** When accessing voxels in lower-resolution blocks, ensure interpolation coordinates are correctly mapped to the reduced grid to avoid artifacts [G].
+ 
+ ## Subtopics
+ 
+ ### Multiresolution Volume with TF-based LOD
+-Organizes voxels into a multiresolution representation where higher resolution blocks (e.g., $16^3$) are subdivided into lower resolution blocks (e.g., $8^3$, $4^3$) [S2, unofficial]. Uses Transfer Function (TF) based LOD selection to optimize image quality by mapping block significance to visual error (e.g., CIE L*u*v* $\Delta E$) [S2, unofficial]. Stores data in a packed texture with high, middle, and low resolution levels, marking empty blocks [S2, unofficial]. Pitfall: Superfluous sampling occurs in areas of low occlusion contribution if resolution is not managed [S2, unofficial].
+-
+-### Hierarchical Culling & Multi-resolution Approximation
+-Uses hierarchical structures to cull and approximate. Choose when spatial coherence allows for aggressive culling. [Hierarchical Culling & Multi-resolution Approximation](2010-hierarchical-culling-multi-resolution-approximation.md)
+-
+-### Streaming and Level-of-Detail (LOD) selection
+-Focuses on streaming data based on LOD. Choose when memory bandwidth is the primary bottleneck. [Streaming and Level-of-Detail (LOD) selection](3087-streaming-and-level-of-detail-lod-selection.md)
+-
+-### Focus Point Based Brick LOD Selection
+-Uses focus point to determine LOD. Choose when view-dependent rendering is critical. [Focus Point Based Brick LOD Selection](5282-focus-point-based-brick-lod-selection.md)
+-
+-### Choosing Alternative Resolutions
+-Discusses choosing resolutions. Choose when flexible resolution schemes are needed. [Choosing Alternative Resolutions](5314-choosing-alternative-resolutions.md)
+-
+-### Finding Higher Resolution Levels
+-Discusses finding higher resolutions. Choose when dynamic refinement is needed. [Finding Higher Resolution Levels](5315-finding-higher-resolution-levels.md)
+-
+-### Multi-resolution LOD Volume Rendering with Temporal Coherence
+-Uses temporal coherence. Choose for video sequences. [Multi-resolution LOD Volume Rendering with Temporal Coherence](5717-multi-resolution-lod-volume-rendering-with-temporal-coherenc.md)
+-
+-### Face Subsampling
+-Uses face subsampling. Choose for surface rendering. [Face Subsampling](6025-face-subsampling.md)
+-
+-### Level of Detail (LoD) for Large-Scale Scenes
+-General LoD for large scenes. Choose for very large scenes. [Level of Detail (LoD) for Large-Scale Scenes](7325-level-of-detail-lod-for-large-scale-scenes.md)
++This variant uses Transfer Function (TF) content to determine LOD rather than scalar data variation. Voxels are organized into a multiresolution representation (e.g., $16^3$ subdivided into $8^3$, $4^3$). LOD selection is optimized to minimize visual error (e.g., using CIE L*u*v* color difference $\Delta E$) for a given memory limit. Blocks are classified as Empty (transparent), Homogeneous (similar color), or Varying (varying transparency/color). This approach reduces superfluous sampling in areas of low occlusion contribution by adapting resolution to the visual significance defined by the TF [S2, unofficial].
+ 
+ ## Operating characteristics
+--   **Time Complexity:** Determining LOD requires computing the variation metric for each block, which is $O(N)$ where $N$ is the total number of voxels [S1, S3, unofficial]. Rendering time depends on the number of high-LOD blocks [G].
+--   **Memory Complexity:** Memory usage is reduced compared to full resolution, depending on the distribution of variations [G]. Flat blocking achieves a data reduction of 3.8:1, whereas hierarchical blocking achieves 2.2:1 [S2, unofficial].
+--   **Measured Performance:** Not given in the sources [S1, S2, S3, unofficial].
+--   **Scaling:** Scales with the number of blocks and the complexity of the variation heuristic [G].
+--   **Strengths:** Simple to implement, reduces memory footprint, adapts to data complexity [S1, S2, S3, unofficial].
+--   **Limitations:** Heuristic choice is arbitrary, may not capture all visual artifacts, requires pre-computation or on-the-fly downsampling [S1, S2, S3, unofficial].
+--   **When to use:** When rendering large volumes with varying complexity and memory footprint is a constraint [S2, unofficial].
+--   **When not to use:** When uniform resolution is required or when the variation heuristic fails to capture visual importance [S1, S3, unofficial].
++*   **Time Complexity:** LOD selection requires a preprocessing pass over the volume data to calculate variation metrics, taking $O(N)$ time where $N$ is the total number of voxels [S1, S3, unofficial]. Rendering time depends on the number of samples per ray, which is reduced for high-LOD blocks.
++*   **Memory Complexity:** The method achieves a data reduction ratio of 3.8:1 compared to the original volume, which is better than hierarchical blocking's 2.2:1 [S2, unofficial]. Memory usage is proportional to the sum of voxels in all blocks at their assigned LODs.
++*   **Strengths:** High data reduction; uniform spatial block size simplifies memory management and culling logic compared to variable-sized octree nodes [S2, unofficial].
++*   **Limitations:** The heuristic for importance is arbitrary and may not always yield optimal visual quality [S1, S3, unofficial]. Lower-resolution blocks still occupy the same spatial footprint, potentially leading to unnecessary sampling in empty space if not combined with empty-space skipping [S2, unofficial].
++*   **When to Use:** Suitable for large volume datasets where memory bandwidth is a bottleneck and the data has regions of varying complexity that can be characterized by scalar variance [S1, S3, unofficial].
++*   **When Not to Use:** When the visual importance of regions is better predicted by geometric distance or transfer function properties rather than scalar variance [S2, unofficial].
+ 
+ ## Background
+-The term "flat blocking multi-resolution strategy" is described as less traditional than "octree subdivision" [S1, S3, unofficial]. The concept of min|max octree has been used for decades to speed up volume ray-casting [S1, S3, unofficial]. The specific formulation with the variation formula is attributed to a Stack Overflow question and answer from 2012 [S1, S3, unofficial].
++The term "flat blocking" is less traditional than "octree subdivision," but the concept is related to min|max octrees used for decades to speed up volume ray-casting [S1, S3, unofficial]. The specific flat blocking multi-resolution strategy was described in the context of loading large volume data for ray casting systems [S1, S3, unofficial]. The variant using TF-based LOD selection was presented by Patric Ljung and Markus Hadwiger in the context of advanced illumination techniques for GPU-based volume raycasting [S2, unofficial].
+ 
+ ## Sources

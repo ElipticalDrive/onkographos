@@ -1,0 +1,136 @@
+--- v001.md
++++ v002.md
+@@ -3,9 +3,9 @@
+ 
+ ## Overview
+-The Ray Tracing Kernel is a CUDA kernel implementation for forward and backward ray tracing through a sparse grid volume, handling spherical harmonic (SH) evaluation and ray bounds [S1, unofficial]. It serves as the core computational unit for the IDDR-NGP backend, enabling differentiable rendering by computing gradients alongside radiance accumulation [S1, unofficial]. It distinguishes itself by organizing computation per-warp for SH evaluation and using shared memory for ray specification caching to minimize global memory traffic [S1, unofficial].
++The Ray Tracing Kernel is a CUDA kernel implementation for forward and backward ray tracing through a sparse grid volume, handling spherical harmonic (SH) evaluation and ray bounds [S1, unofficial]. It distinguishes itself by organizing computation per-warp for SH evaluation and using shared memory for ray specification caching to minimize global memory traffic [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Forward:** Grid data, ray specifications (origin, direction), SH coefficients, temporary storage, and an output pointer for color/transmittance.
++*   **Forward:** Grid data, ray specifications (origin, direction), SH coefficients, temporary storage, and an output pointer for color/transmittance [S1, unofficial].
+ *   **Backward:** Gradients of the output (`grad_output`), cached color values, log transmittance, and loss terms (`beta_loss`, `sparsity_loss`) to compute gradients for the grid and SH coefficients [S1, unofficial].
+ 
+@@ -31,47 +31,86 @@
+ **Pseudocode:**
+ ```python
+-# Pseudocode for Ray Tracing Kernel
+-# Note: This is a simplified representation based on source snippets.
+-# Actual implementation involves CUDA-specific intrinsics and memory management.
++import math
++
++def evaluate_sh(coeffs, direction):
++    # Standard 2nd-order spherical harmonic evaluation [G]
++    x, y, z = direction
++    sh = [0.0] * 9
++    sh[0] = 0.282095
++    sh[1] = 0.488603 * y
++    sh[2] = 0.488603 * z
++    sh[3] = 0.488603 * x
++    sh[4] = 1.092548 * x * y
++    sh[5] = 0.315392 * (3 * z * z - 1)
++    sh[6] = 0.546274 * y * z
++    sh[7] = 0.546274 * x * z
++    sh[8] = 0.546274 * (x * x - y * y)
++    return sum(c * s for c, s in zip(coeffs, sh))
++
++def ray_find_bounds(origin, direction, grid, opt):
++    # Standard ray-AABB intersection [G]
++    t_min, t_max = 0.0, 1000.0
++    for i in range(3):
++        if abs(direction[i]) > 1e-6:
++            t1 = (-1.0 - origin[i]) / direction[i]
++            t2 = (1.0 - origin[i]) / direction[i]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++        else:
++            if origin[i] < -1.0 or origin[i] > 1.0:
++                return 1000.0, 0.0
++    return t_min, t_max
+ 
+ def render_ray_kernel(grid, ray_spec, opt, lane_id, ray_id, output_ptr, log_transmit_out=None):
+-    # Shared memory declarations (conceptual)
+-    # shared ray_spec[TRACE_RAY_CUDA_RAYS_PER_BLOCK]
+-    # shared sphfunc_val[TRACE_RAY_CUDA_RAYS_PER_BLOCK][9]
+-    # shared temp_storage[TRACE_RAY_CUDA_RAYS_PER_BLOCK]
++    # Shared memory declarations (conceptual CUDA shared memory)
++    shared_ray_spec = [None] * TRACE_RAY_CUDA_RAYS_PER_BLOCK
++    shared_sphfunc_val = [[0.0] * 9 for _ in range(TRACE_RAY_CUDA_RAYS_PER_BLOCK)]
++    shared_temp = [0.0] * TRACE_RAY_CUDA_RAYS_PER_BLOCK
+ 
+     # Step 1: Load ray specs into shared memory
+-    # (Implementation detail: threads cooperate to load ray_spec)
+-    
++    shared_ray_spec[ray_id] = ray_spec[ray_id]
++
+     # Step 2: SH Evaluation
+     if lane_id < grid.sh_data_dim:
+-        # Calculate spherical harmonic values
+-        # calc_sphfunc(grid, lane_id, ray_id, ray_spec[ray_blk_id].dir, sphfunc_val[ray_blk_id])
+-        pass # Placeholder for SH calculation logic
+-    
++        shared_sphfunc_val[ray_id][lane_id] = evaluate_sh(grid.sh_coeffs[ray_id], shared_ray_spec[ray_id].dir)
++
+     # Step 3: Synchronize warps
+     # __syncwarp((1U << grid.sh_data_dim) - 1)
+-    pass # Placeholder for warp sync
++    # (In Python simulation, execution proceeds sequentially)
+ 
+     # Step 4: Find ray bounds
+-    # ray_find_bounds(ray_spec[ray_blk_id], grid, opt, ray_id)
+-    pass # Placeholder for bound finding logic
++    t_min, t_max = ray_find_bounds(shared_ray_spec[ray_id].origin, shared_ray_spec[ray_id].dir, grid, opt)
+ 
+-    # Step 5: Trace ray
+-    # trace_ray_cuvol(grid, ray_spec, opt, lane_id, sphfunc_val, temp_storage, output_ptr, log_transmit_out)
+-    pass # Placeholder for core tracing logic
++    # Step 5: Ray Marching & Integration (Standard volumetric rendering [G])
++    t = t_min
++    transmittance = 1.0
++    color = [0.0, 0.0, 0.0]
++    log_transmit = 0.0
++
++    while t < t_max:
++        pos = [shared_ray_spec[ray_id].origin[i] + t * shared_ray_spec[ray_id].dir[i] for i in range(3)]
++        density = grid.sample_density(pos)
++        if density > 0.0:
++            sh_vals = shared_sphfunc_val[ray_id]
++            radiance = evaluate_sh(sh_vals, shared_ray_spec[ray_id].dir)
++            alpha = 1.0 - math.exp(-density * opt.step_size)
++            color = [color[i] + radiance * alpha * transmittance for i in range(3)]
++            transmittance *= (1.0 - alpha)
++            log_transmit += math.log(1.0 - alpha)
++        t += opt.step_size
++
++    output_ptr[ray_id] = color
++    if log_transmit_out is not None:
++        log_transmit_out[ray_id] = log_transmit
+ 
+ def render_ray_backward_kernel(grid, ray_spec, opt, grad_output, color_cache, log_transmit_in, beta_loss, sparsity_loss, grads):
+-    # Step 1: Setup ray spec
+-    # (Implementation detail: load ray specs)
+-    
+-    # Step 2: Call trace_ray_cuvol for backward pass
+-    # The source implies trace_ray_cuvol handles backward logic or calls a backward variant
+-    # trace_ray_cuvol(..., backward=True, grad_output=..., color_cache=..., ...)
+-    pass # Placeholder for backward tracing logic
++    # The sources do not give the exact gradient propagation steps for the backward kernel [S1, unofficial].
++    # Standard adjoint equations would iterate backwards from t_max to t_min,
++    # accumulating gradients for density, SH coefficients, and ray parameters.
++    pass
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **SH Dimension Mismatch:** If `lane_id >= grid.sh_data_dim`, the thread returns early. This requires careful handling of warp divergence if `sh_data_dim` is not a multiple of 32 or if it varies significantly across blocks [S1, unofficial].
++*   **SH Dimension Mismatch:** If `lane_id >= grid.sh_data_dim`, the thread returns early [S1, unofficial].
+ *   **Precision:** Floating-point precision in SH evaluation and ray marching can accumulate errors, especially for long rays or high-order SH [G].
+ *   **Boundary Conditions:** `ray_find_bounds` must correctly handle rays that do not intersect the grid or are entirely outside [G].
+@@ -92,6 +131,6 @@
+ 
+ ## Background
+-The Ray Tracing Kernel is part of the svox2 project, an unofficial implementation related to neural radiance fields (NeRF) and 3D Gaussian splatting techniques [S1, unofficial]. It was developed to support efficient training and rendering of 3D scenes using sparse voxel grids and spherical harmonics [S1, unofficial].
++The kernel is part of the svox2 repository, which implements CUDA kernels for ray tracing and SH evaluation [S1, unofficial].
+ 
+ ## Sources
+-[S1] svox2/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)+[S1] sxyu/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,261 @@
+--- v008.md
++++ v009.md
+@@ -4,39 +4,48 @@
+ 
+ ## Overview
+-Frequency-Modulated Position Encoding is a coordinate encoding scheme used within point-based radiance field optimization to map 3D spatial coordinates and viewing directions to high-dimensional feature vectors. It solves the problem of representing high-frequency geometric and appearance details in sparse point clouds by applying sinusoidal basis functions with exponentially increasing frequencies. It sets itself apart from standard NeRF positional encoding by narrowing the encoding interval and using specific frequency bands for spatial versus directional inputs, and differs from hash-based encodings by relying on explicit sinusoidal modulation rather than learned lookup tables.
++Frequency-Modulated Position Encoding (FMPE) is a coordinate encoding scheme used in point-based radiance field optimization to map 3D spatial coordinates and viewing directions into a high-dimensional feature space. It solves the problem of representing high-frequency details in sparse point clouds by applying frequency modulation via sine and cosine functions with exponentially spaced frequencies. Unlike standard NeRF positional encoding which uses integer powers of 2, FMPE uses fractional powers (specifically $2^{k/2}$), providing finer-grained basis function support for frequency modulation [S1]. It is distinct from hash-based or grid-based encodings by relying on explicit sinusoidal transformations of raw coordinates, and from other NeRF configurations by its specific application to point cloud rasterization and iterative denoising/completion pipelines [S1].
+ 
+ ## How it works
++**Inputs and Outputs:**
++*   **Input:** A 3D position vector $\mathbf{p} \in \mathbb{R}^3$ (for spatial coordinates) or a viewing direction vector $\mathbf{d} \in S^2$ (for view directions).
++*   **Output:** An encoded feature vector $\gamma(\mathbf{p})$ or $\gamma(\mathbf{d})$ of dimension $2 \times L \times D$, where $L$ is the number of frequency bands and $D$ is the dimensionality of the input (3 for position, 3 for direction).
+ 
+-### Inputs and Outputs
+-*   **Inputs:**
+-    *   Spatial coordinate $\mathbf{p} \in \mathbb{R}^3$ (or $\mathbb{R}^2$ for 2D projections).
+-    *   Viewing direction $\mathbf{d} \in S^2$ (normalized 3D vector).
+-    *   Number of frequency bands $L$.
+-*   **Outputs:**
+-    *   Encoded feature vector $\gamma(\mathbf{p})$ or $\gamma(\mathbf{d})$ of dimension $2 \times L \times \text{dim}(\mathbf{p})$.
++**Data Structures:**
++The encoding is a static transformation applied to input vectors. No persistent data structure is required beyond the input vector and the scalar parameter $L$. The output is a concatenated tuple of sine and cosine values.
+ 
+-### Data Structures
+-The encoding is a static mathematical transformation; no persistent data structure is required beyond the input vector and the integer parameter $L$.
++**Parameters:**
++*   $L$: Number of frequency bands.
++    *   For spatial coordinates: $L = 10$ [S1].
++    *   For view directions: $L = 2$ [S1].
++*   $\lambda_{sparse}$: Weight for sparse regularization loss. Default value: $5 \times 10^{-4}$ [S1].
+ 
+-### Parameters
+-*   $L_{\text{space}}$: Number of frequency bands for spatial coordinates. Default: 10 [S1].
+-*   $L_{\text{view}}$: Number of frequency bands for viewing directions. Default: 2 [S1].
+-*   $\lambda_{\text{sparse}}$: Weight for sparse regularization loss. Default: $5 \times 10^{-4}$ [S1].
+-
+-### Formulas
+-The frequency-modulated positional encoding $\gamma(\mathbf{p})$ for an input $\mathbf{p}$ is defined as:
++**Formulas:**
++The frequency-modulated positional encoding $\gamma(\mathbf{p})$ is defined as [S1]:
+ 
+ $$
+-\gamma (\mathbf {p}) = \left (\sin \left (2^0 \pi \mathbf {p}\right ), \cos \left (2^0 \pi \mathbf {p}\right ), \sin \left (2^{0.5} \pi \mathbf {p}\right ), \cos \left (2^{0.5} \pi \mathbf {p}\right ), \dots , \sin \left (2^{L-1} \pi \mathbf {p}\right ), \cos \left (2^{L-1} \pi \mathbf {p}\right )\right )
++\gamma (\mathbf {p}) = \left (\sin \left (2^0 \pi \mathbf {p}\right ), \cos \left (2^0 \pi \mathbf {p}\right ), \sin \left (2^{0.5} \pi \mathbf {p}\right ), \cos \left (2^{0.5} \pi \mathbf {p}\right ), \dots, \sin \left (2^{L-1} \pi \mathbf {p}\right ), \cos \left (2^{L-1} \pi \mathbf {p}\right ) \right )
+ $$
+ 
+ Where:
+ *   $\mathbf{p}$ is the input coordinate or direction vector.
+-*   $L$ is the number of frequency bands.
+-*   The exponent of 2 increases by 0.5 for each subsequent pair of sine/cosine terms (i.e., $2^0, 2^{0.5}, 2^1, \dots, 2^{L-1}$). Note: The source notation $2^{L-1}$ in the final term implies the exponent sequence is $0, 0.5, 1.0, \dots$. Specifically, the $k$-th pair (0-indexed) uses frequency $2^{k/2}$.
++*   The exponent for the $k$-th band (0-indexed) is $k/2$.
++*   The output vector has length $2 \times L \times \text{dim}(\mathbf{p})$.
+ 
+-### Pseudocode
++**Numbered Steps:**
++1.  **Preprocessing:** Perform 4-20 loops of point cloud denoising and completion. For every denoising step, train for 300 epochs. When training converges, remove low-opacity points [S1].
++2.  **Encoding:** For each point in the cloud, compute the frequency-modulated encoding for its spatial position $\mathbf{p}$ using $L=10$ bands. Compute the encoding for the viewing direction $\mathbf{d}$ using $L=2$ bands [S1].
++3.  **Concatenation:** Concatenate the spatial encoding and view direction encoding to form the input feature vector for the neural network [S1].
++4.  **Decoding:** Pass the concatenated features through the AFNet MLP (5 layers, input dim 120, hidden dims 256, 256, 256, 128, output dim 11) to predict raw color and features [S1].
++5.  **Rasterization:** Expand each point to a disk. Select the radius based on two rules: (1) cover gaps between points to prevent bleeding (seeing occluded surfaces/background), and (2) keep radius as small as possible to avoid inaccurate depth estimation and edge expansion [S1].
++6.  **Loss Calculation:** Minimize the total loss $\mathcal{L} = \mathcal{L}_{RGB} + \lambda_{sparse} \mathcal{L}_{sparse}$. For scenes without background, add transparency loss (L2 distance of predicted vs ground truth transparency) [S1].
++    *   $\mathcal{L}_{RGB} = ||\hat{C} - C_{gt}||_2^2$
++    *   $\mathcal{L}_{sparse} = \frac{1}{N} \sum_{i=1}^N [\log(\alpha_i) + \log(1-\alpha_i)]$
++    *   Where $\hat{C}$ is predicted color, $C_{gt}$ is ground truth color, $N$ is number of points, and $\alpha_i$ is opacity of point $i$ [S1].
++7.  **Optimization:** Update MLP weights with learning rate $5 \times 10^{-4}$ and opacity parameters $\alpha$ with learning rate $0.01$ [S1].
++
++**Pseudocode:**
+ 
+ ```python
++import math
+ import numpy as np
+ 
+@@ -46,130 +55,100 @@
+     
+     Args:
+-        p: numpy array of shape (D,) representing the input coordinate/direction.
+-        L: int, number of frequency bands.
++        p (np.ndarray): Input vector of shape (D,) where D is 3.
++        L (int): Number of frequency bands.
+         
+     Returns:
+-        numpy array of shape (2 * L * D,) representing the encoded features.
++        np.ndarray: Encoded vector of shape (2 * L * D,).
+     """
+-    # Initialize output array
+-    # Each band produces 2 (sin/cos) * D features
+-    encoded_features = []
+-    
++    encoded_parts = []
+     for k in range(L):
+-        # Frequency exponent: 0, 0.5, 1.0, ..., L-1
+-        # The source formula shows exponents 0, 0.5, ..., L-1. 
+-        # If L=10, exponents are 0, 0.5, ..., 9.0.
++        # Exponent is k / 2.0
+         exponent = k / 2.0
++        freq = 2.0 ** exponent * math.pi
+         
+-        # Calculate frequency multiplier
+-        freq = np.power(2, exponent) * np.pi
++        # Apply to each dimension of p
++        sin_vals = np.sin(freq * p)
++        cos_vals = np.cos(freq * p)
+         
+-        # Apply sine and cosine
+-        sin_val = np.sin(freq * p)
+-        cos_val = np.cos(freq * p)
++        encoded_parts.append(sin_vals)
++        encoded_parts.append(cos_vals)
+         
+-        # Append to list
+-        encoded_features.append(sin_val)
+-        encoded_features.append(cos_val)
+-        
+-    # Concatenate all features
+-    return np.concatenate(encoded_features)
++    return np.concatenate(encoded_parts)
+ 
+ def compute_loss(predicted_color, gt_color, opacities, lambda_sparse):
+     """
+-    Computes the total training loss.
++    Computes the total loss for FMPE training.
+     
+     Args:
+-        predicted_color: numpy array of predicted RGB values.
+-        gt_color: numpy array of ground truth RGB values.
+-        opacities: numpy array of point opacities alpha_i.
+-        lambda_sparse: float, weight for sparse loss.
++        predicted_color (np.ndarray): Predicted color vector.
++        gt_color (np.ndarray): Ground truth color vector.
++        opacities (np.ndarray): Array of opacity values alpha_i.
++        lambda_sparse (float): Weight for sparse loss.
+         
+     Returns:
+-        float, total loss value.
++        float: Total loss value.
+     """
+-    # L_RGB: L2 distance between predicted and ground truth color
++    # L2 loss for RGB
+     l_rgb = np.sum((predicted_color - gt_color) ** 2)
+     
+-    # L_sparse: Sparse regularization
+-    # Sum over N points: log(alpha_i) + log(1 - alpha_i)
+-    # Note: This term encourages opacities to be either 0 or 1.
+-    # We must handle numerical stability for log(0).
+-    # [G] Add small epsilon to avoid log(0)
+-    eps = 1e-7
+-    alpha = np.clip(opacities, eps, 1 - eps)
+-    l_sparse = np.mean(np.log(alpha) + np.log(1 - alpha))
++    # Sparse loss
++    # log(alpha_i) + log(1 - alpha_i)
++    # Note: In practice, clamp opacities to avoid log(0)
++    safe_opacities = np.clip(opacities, 1e-7, 1 - 1e-7)
++    sparse_term = np.mean(np.log(safe_opacities) + np.log(1 - safe_opacities))
++    l_sparse = sparse_term
+     
+     total_loss = l_rgb + lambda_sparse * l_sparse
+     return total_loss
++
++def rasterization_radius_selection(point_cloud_density):
++    """
++    Heuristic selection for rasterization radius.
++    
++    Args:
++        point_cloud_density (float): Measure of point cloud density.
++        
++    Returns:
++        float: Selected radius.
++        
++    Note: The exact formula is not given. The rule is to cover gaps
++    to prevent bleeding but keep radius small to avoid edge expansion.
++    The effect of radius is noted as not significant in ablation studies.
++    """
++    # Implementation detail: Adjust radius by observing depth map.
++    # Not given in the sources. [G]
++    return 0.0
+ ```
+ 
+-### Steps
+-1.  **Preprocessing:** Perform 4-20 loops of point cloud denoising and completion. For each denoising step, train for 300 epochs. Remove low-opacity points when training converges [S1].
+-2.  **Encoding:** For each point in the cloud, compute the spatial encoding $\gamma(\mathbf{p})$ using $L=10$ bands. For the viewing direction $\mathbf{d}$, compute $\gamma(\mathbf{d})$ using $L=2$ bands [S1].
+-3.  **Feature Concatenation:** Concatenate the spatial and directional encodings. The input feature dimension to the MLP is 120 (derived from $10 \times 3 \times 2$ for space + $2 \times 3 \times 2$ for view? No, the source states input dimension is 120. $10 \times 3 \times 2 = 60$. $2 \times 3 \times 2 = 12$. Total 72. The source says 120. This implies either different dimensions or additional features. The source explicitly states: "input feature dimension is 120". We follow the source's explicit dimension [S1]).
+-4.  **Decoding:** Pass the concatenated features through the AFNet MLP (5 layers: 120 -> 256 -> 256 -> 256 -> 128 -> 11) to predict raw image (3 channels) and feature map (8 channels) [S1].
+-5.  **Rasterization:** Expand each point to a disk. Select radius to cover gaps between points (prevent bleeding) while keeping it small (prevent edge expansion) [S1].
+-6.  **Loss Calculation:** Minimize $\mathcal{L} = \mathcal{L}_{RGB} + \lambda_{sparse} \mathcal{L}_{sparse}$. For scenes without background, add transparency loss (L2 distance of predicted vs ground truth transparency) [S1].
+-7.  **Optimization:** Update MLP weights and opacity parameters $\alpha$ with learning rates $5 \times 10^{-4}$ and $0.01$ respectively [S1].
+-
+-### Edge Cases and Pitfalls
++**Edge Cases and Pitfalls:**
+ *   **Bleeding Problem:** If the rasterization radius is too small, points from occluded surfaces and the background can be seen through the front surface [S1].
+ *   **Edge Expansion:** If the rasterization radius is too large, it leads to inaccurate depth estimation and object edges expand [S1].
+-*   **Numerical Stability:** The sparse loss involves $\log(\alpha_i)$ and $\log(1-\alpha_i)$. Opacities must be clamped away from 0 and 1 to prevent NaN gradients [G].
++*   **Low Opacity Points:** Low-opacity points should be removed when training converges to clean up the point cloud [S1].
++*   **Completion Noise:** The completion step in preprocessing introduces additional noise, but this is removed in the denoising stage of the next iteration [S1].
+ 
+ ## Subtopics
+ 
+-### Depth-Guided NeRF Training Configuration
+-Uses depth information to guide training. Choose when depth priors are available and reliable. [Depth-Guided NeRF Training Configuration](11916-depth-guided-nerf-training-configuration.md)
++### AFNet MLP
++A 5-layer MLP used for decoding the encoded features. Input feature dimension is 120, hidden dimensions are 256, 256, 256, 128, and output dimension is 11 (3-channel raw image + 8-channel feature map) [S1].
+ 
+-### CLIPNeRF Training Configuration
+-Integrates CLIP embeddings for semantic consistency. Choose when semantic understanding is required. [CLIPNeRF Training Configuration](12073-clipnerf-training-configuration.md)
++### Point Cloud Denoising and Completion
++A preprocessing loop (4-20 loops) alternating between denoising and completion, with 300 epochs of training per denoising step [S1].
+ 
+-### Binary Radiance Fields
+-Uses binary occupancy instead of continuous density. Choose for memory efficiency and sharp boundaries. [Binary Radiance Fields](13622-binary-radiance-fields.md)
+-
+-### Mip-NeRF 360 MLP Architecture
+-Uses cone tracing and positional encoding for anti-aliasing. Choose for high-quality novel view synthesis with large baselines. [Mip-NeRF 360 MLP Architecture](14098-mip-nerf-360-mlp-architecture.md)
+-
+-### SUDS
+-Uses spherical harmonics for view-dependent appearance. Choose for efficient view-dependent rendering. [SUDS](14964-suds.md)
+-
+-### CCNeRF
+-Uses color constancy for consistent appearance. Choose when lighting consistency across views is critical. [CCNeRF](15008-ccnerf.md)
+-
+-### Rip-NeRF
+-Uses ray intersection points for encoding. Choose for point-based rendering with ray-centric features. [Rip-NeRF](15532-rip-nerf.md)
+-
+-### UE4-NeRF
+-Integrates NeRF into Unreal Engine 4. Choose for real-time rendering in game engines. [UE4-NeRF](15539-ue4-nerf.md)
+-
+-### Generative Occupancy Fields (GOF)
+-Uses generative models for occupancy prediction. Choose for scene completion and generation. [Generative Occupancy Fields (GOF)](15773-generative-occupancy-fields-gof.md)
+-
+-### Panoptic Radiance Field
+-Extends NeRF with panoptic segmentation. Choose for semantic scene understanding. [Panoptic Radiance Field](15849-panoptic-radiance-field.md)
+-
+-### MoCo-NeRF
+-Uses momentum contrast for self-supervised learning. Choose when labeled data is scarce. [MoCo-NeRF](16197-moco-nerf.md)
+-
+-### UrbanIR
+-Optimized for urban-scale scenes. Choose for large-scale outdoor environments. [UrbanIR](16200-urbanir.md)
++### Rasterization Radius Selection
++A heuristic method for selecting the disk radius for point expansion to balance bleeding and edge expansion [S1].
+ 
+ ## Operating characteristics
+-
+ *   **Time Complexity:** One epoch consumes approximately 12.8 seconds on the NeRF-Synthetic dataset [S1]. Realistic rendering is achieved in 10 minutes, but almost convergence takes about 10 hours [S1].
+ *   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:** Achieves higher PSNR/SSIM on NeRF-Synthetic and Tanks and Temples datasets compared to NeRF, CCNeRF, NPBG, NPBG++, and Huang et al. Comparable or better results on ScanNet and DTU datasets [S1].
+-*   **Strengths:** Fast convergence to realistic rendering; effective handling of sparse point clouds via frequency modulation; easy editing capabilities via point cloud masking [S1].
+-*   **Limitations:** Sensitive to rasterization radius selection (bleeding vs. edge expansion); requires initial point cloud from MVSNet or similar; performance depends on point cloud quality [S1].
+-*   **When to use:** When working with sparse point clouds and requiring fast training times with good visual quality, especially for editing tasks.
+-*   **When not to use:** When dense volumetric representation is required, or when high-frequency details cannot be captured by the limited frequency bands (L=10 for space, L=2 for view).
++*   **Scaling:** Training size is typically 800x800 with random scaling augmentation [0.5, 1.5] of side length. Test resolution is 800x800 for NeRF-Synthetic, 1920x1056 for Tanks and Temples, 1200x1600 for ScanNet, and 960x1200 for DTU [S1].
++*   **Strengths:** Fast convergence to realistic rendering (10 minutes), high quality on synthetic and real-world datasets, easy editing capabilities [S1].
++*   **Limitations:** Requires iterative preprocessing (denoising/completion), sensitive to rasterization radius selection (though ablation shows it is not significant), relies on initial point clouds from MVSNet or depth maps [S1].
++*   **When to Use:** Suitable for point-based radiance field optimization where high-frequency details are needed and initial point clouds are available. Particularly effective for scenes with sparse point clouds where frequency modulation helps capture fine details.
++*   **When Not to Use:** Not suitable for scenes without initial point clouds or depth maps. May not be optimal for real-time applications requiring sub-second training times beyond the initial 10 minutes.
+ 
+ ## Background
+-
+-Frequency-Modulated Position Encoding was introduced in the paper "Frequency-Modulated Point Cloud Rendering with Easy Editing" [S1]. It builds on the positional encoding form of NeRF [21] but narrows the encoding interval to provide more fine-grained basis function support for frequency modulation. The method is designed for point-based rendering, addressing the sparsity of point clouds by expanding points to disks during rasterization. It has been evaluated on datasets including NeRF-Synthetic, Tanks and Temples, ScanNet, and DTU [S1].
++Frequency-Modulated Position Encoding was introduced in the paper "Frequency-Modulated Point Cloud Rendering with Easy Editing" [S1]. It builds on the positional encoding form of NeRF [21] but narrows the encoding interval to provide more fine-grained basis function support for frequency modulation. The method is part of a pipeline that includes point cloud denoising, completion, and rasterization, aiming to improve rendering quality and editing capabilities for point-based radiance fields. It has been evaluated on datasets such as NeRF-Synthetic, Tanks and Temples, ScanNet, and DTU [S1].
+ 
+ ## Sources
+-
+ [S1] Frequency-Modulated Point Cloud Rendering with Easy Editing, https://doi.org/10.1109/cvpr52729.2023.00020, fetched 2026-10-29

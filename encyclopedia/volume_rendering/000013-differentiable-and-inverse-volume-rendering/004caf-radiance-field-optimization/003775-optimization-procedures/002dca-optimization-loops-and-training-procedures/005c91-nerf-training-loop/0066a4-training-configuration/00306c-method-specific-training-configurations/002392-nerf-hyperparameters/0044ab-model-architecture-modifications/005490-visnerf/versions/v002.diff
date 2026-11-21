@@ -1,0 +1,599 @@
+--- v001.md
++++ v002.md
+@@ -1,74 +1,75 @@
+ # ViSNeRF
+ 
+-Also called: ViSNeRF (ViSualization Synthesis NeRF)
++Also called: ViSNeRF: Efficient Multidimensional Neural Radiance Field Representation for Visualization Synthesis of Dynamic Volumetric Scenes
+ 
+ ## Overview
+-ViSNeRF is a hybrid neural radiance field method designed for the efficient synthesis of visualizations from dynamic volumetric scenes with arbitrary adjustable parameters (e.g., time, isovalue, transfer function coefficients) [S1]. It solves the scalability problem of representing high-dimensional $(3+K)$-D radiance fields by combining explicit feature grids with implicit MLP decoders and applying generalized tensor factorization [S1]. Unlike standard NeRF which uses a single MLP, ViSNeRF factorizes the static 3D spatial volume into vector-matrix components and the $K$-D parameter space into CP components, reducing memory complexity from $O(N^3 M^K)$ to $O(N^2 M)$ [S1]. It is distinguished from siblings like [K-Planes](11770-nerf-vpt.md) and [HexPlane](11770-nerf-vpt.md) by its specific use of separate small MLPs for density and color decoding and its tailored regularization strategies for explicit grid features [S1].
++ViSNeRF is a hybrid neural radiance field method that combines explicit feature grids with implicit MLP decoders to synthesize visualizations of dynamic volumetric scenes [S1]. It solves the problem of efficiently representing and rendering scenes with arbitrary adjustable parameters (e.g., time, isovalue, transfer functions) by factorizing the scene into a 3D spatial tensor and a K-dimensional parameter tensor [S1]. Unlike sibling methods that use spherical harmonics for view-dependent color or fully implicit networks, ViSNeRF uses vector-matrix decomposition for spatial features and CP decomposition for parameters, decoded by small MLPs [S1]. This approach reduces memory complexity from $O(N^3 M^K)$ to $O(N^2 M)$ while maintaining high visualization quality [S1].
+ 
+ ## How it works
+-**Inputs:**
+-*   Training dataset: A set of 2D images (DVR or IR) of volumetric scenes, each associated with a camera pose (origin, direction) and scene parameters $\mathbf{p} = (p_0, p_1, \dots, p_{K-1})$ [S1].
+-*   Scene bounding box: Defines the spatial extent of the volume [S1].
+-
+-**Outputs:**
+-*   Rendered image $\hat{C}(r)$ for a given ray $r$ and scene parameters [S1].
+-*   Optimized model parameters (feature grids and MLP weights) [S1].
++**Inputs and Outputs:**
++*   **Inputs:** Training images (DVR or IR) with camera poses, volume resolution, and parameter values defining scene frames.
++*   **Outputs:** Rendered color images $\hat{C}(r)$ for arbitrary viewpoints and parameter combinations.
+ 
+ **Data Structures:**
+-1.  **Spatial Feature Grid ($T^3$):** A 3D tensor of size $N \times N \times N$ (initially $128^3$, up to $300^3$) [S1]. It is not stored as a dense tensor but factorized into:
+-    *   Three spatial matrices: $M^X_{XY}, M^Y_{XZ}, M^Z_{YZ}$ representing XY, XZ, and YZ planes [S1].
+-    *   Three spatial vectors: $v^X, v^Y, v^Z$ representing axes X, Y, Z [S1].
+-    *   The feature depth for density is $R_\sigma=16$ and for color is $R_c=48$, totaling $R_s=64$ low-rank components [S1].
+-2.  **Parameter Feature Grid ($T^K$):** A $K$-D tensor where dimensions correspond to the number of distinct values for each parameter in the training set (e.g., $M^1=11$ for 11 timesteps) [S1]. Factorized into $R_p=4$ one-rank components, each being the outer product of $K$ vectors $v^1_r \circ v^2_r \circ \dots \circ v^K_r$ [S1].
+-3.  **MLP Decoders:** Two small Multi-Layer Perceptrons, $g_\sigma$ (density) and $g_c$ (color), each with one hidden layer of 128 channels [S1].
++1.  **Spatial Feature Grid:** A 3D tensor $T^3$ of size $N \times N \times N$ (initially $128^3$, up to $300^3$). It is not stored as a dense volume but factorized into:
++    *   Three spatial matrices: $M^X_{XY}, M^Y_{XZ}, M^Z_{YZ}$ representing XY, XZ, and YZ planes.
++    *   Three spatial vectors: $v^X, v^Y, v^Z$ representing axes X, Y, Z.
++    *   Density features use $R_\sigma=16$ components; appearance features use $R_c=48$ components [S1].
++2.  **Parameter Feature Grid:** A K-D tensor $T^K$ of size $M^K$, where $M$ is the number of distinct values for each parameter. Factorized via CP decomposition into $R_p$ sets of K vectors $\{v^1_r, \dots, v^K_r\}$ [S1].
++3.  **MLP Decoders:** Two small MLPs ($g_\sigma$ for density, $g_c$ for color), each with one hidden layer of 128 channels [S1].
+ 
+ **Numbered Steps:**
+-
+-1.  **Ray Casting and Sampling:**
+-    Cast rays from screen pixels toward the scene from camera locations. For each ray, estimate the integral using stratified sampling with $n$ samples along the ray segment $[t_n, t_f]$ [S1]. The step size is $\delta_i = t_{i+1} - t_i$ [S1].
+-
+-2.  **Feature Retrieval:**
+-    For each sample point $x$ at location $(x,y,z)$ and scene parameters $\mathbf{p}$:
+-    *   Retrieve features from the spatial factorization. The spatial feature $f(x)$ is computed by combining the vector-matrix pairs via element-wise multiplication:
+-        $$ f(x) = \sum_{r=1}^{R_s} \left( (M^X_{XY,r} \circ v^Z_r) + (M^Y_{XZ,r} \circ v^Y_r) + (M^Z_{YZ,r} \circ v^X_r) \right) $$
+-        *Note: The source describes combining features from spatial matrices and vectors through element-wise multiplications between each vector-matrix pair, then concatenating outcomes [S1]. The formula in Eq. 4 shows the sum of outer products. The implementation note clarifies element-wise multiplication is used to combine the sampled vector and matrix values for a specific coordinate [S1].*
+-    *   Retrieve features from the parameter factorization. The parameter feature $f_p(\mathbf{p})$ is computed by combining parameter vectors via element-wise multiplication:
+-        $$ f_p(\mathbf{p}) = \sum_{r=1}^{R_p} (v^1_r \circ v^2_r \circ \dots \circ v^K_r) $$
+-    *   Concatenate the spatial and parameter features to construct the final feature vector $f(x, \mathbf{p})$ [S1].
+-
+-3.  **Decoding:**
+-    *   Encode the view direction $d$ using Spherical Harmonics (SH) encoding $E_{SH}(d)$ [S1].
+-    *   Encode the position $x$ using Positional Encoding (PE) $E_P(x)$ [S1].
+-    *   Compute density $\sigma(x)$ using the density MLP:
+-        $$ \sigma(x) = g_\sigma(f_\sigma(x), E_P(x)) $$
+-        where $f_\sigma$ is the density component of the concatenated feature [S1].
+-    *   Compute color $c(x)$ using the color MLP:
+-        $$ c(x) = g_c(f_c(x), E_{SH}(d)) $$
+-        where $f_c$ is the color component of the concatenated feature [S1].
+-
+-4.  **Volume Rendering:**
+-    Compose the visualization by collecting sampled points. The estimated color $\hat{C}(r)$ is:
++1.  **Ray Casting:** Cast rays from screen pixels through camera locations into the scene [S1].
++2.  **Sampling:** For each ray, sample $n$ points along the ray. For each point, obtain spatial coordinates $(x,y,z)$ and scene parameters $(p_0, p_1, \dots)$ [S1].
++3.  **Feature Retrieval:**
++    *   Query the spatial feature grid at $(x,y,z)$ to retrieve spatial features.
++    *   Query the parameter feature grid at $(p_0, p_1, \dots)$ to retrieve parameter features [S1].
++4.  **Feature Combination:**
++    *   Compute element-wise products between each spatial matrix-vector pair ($M^X_{XY} \circ v^Z$, etc.) [S1].
++    *   Compute element-wise product of the parameter vectors [S1].
++    *   Concatenate these products to form the final feature vector $f(x)$ [S1].
++5.  **Decoding:**
++    *   Encode view direction $d$ using Spherical Harmonics ($E_{SH}$) and position $x$ using Positional Encoding ($E_P$) [S1].
++    *   Decode density: $\sigma(x) = g_\sigma(f_\sigma(x), E_P(x))$ [S1].
++    *   Decode color: $c(x) = g_c(f_c(x), E_{SH}(d))$ [S1].
++6.  **Volume Rendering:** Estimate the ray color $\hat{C}(r)$ using stratified sampling [S1]:
+     $$ \hat{C}(r) = \sum_{i=1}^{n} T_i (1 - \exp(-\sigma_i \delta_i)) c_i $$
+-    where transmittance $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ [S1].
+-
+-5.  **Loss Computation and Optimization:**
+-    Compute the total loss $L$:
+-    $$ L = L_{REC} + \lambda_1 L_{L1} + \lambda_2 L_{TV} $$
+-    *   $L_{REC}$: Mean Squared Error (MSE) between predicted color $\hat{C}(r)$ and ground truth [S1].
+-    *   $L_{L1}$: L1 norm regularization on grid weights. For parameter vectors $v_p$, weights are regularized to 1: $L_{L1} = \sum_{W \in v_p} ||1 - w||$. For other vectors/matrices $W$: $L_{L1} = \sum_{w \in W} ||w||_1 / |W|$ [S1].
+-    *   $L_{TV}$: Total Variation loss on density and appearance features.
+-        $$ L_{TV} = L_{TV1} + L_{TV2} $$
+-        $$ L_{TV1} = \frac{1}{|V||Q|l} \sum_{v,q,i} ||v_{i,q} - v_{i-1,q}||_2 $$
+-        $$ L_{TV2} = \frac{1}{|M||Q|hw} \sum_{M,q,i,j} (||M_{q,i,j} - M_{q,i-1,j}||_2^2 + ||M_{q,i,j} - M_{q,i,j-1}||_2^2) $$
+-        where $v$ are vectors, $M$ are matrices, $Q$ is channels, $l$ is vector length, $h,w$ are matrix dimensions [S1].
+-
+-6.  **Training Schedule:**
+-    *   Initialize spatial grid $N=128$. For complex scenes, increase resolution at iterations 2,000, 4,000, 6,000, 8,000 to final $300^3$ [S1].
+-    *   At iteration 2,000, create a mask volume for empty voxels and shrink the bounding box [S1].
+-    *   At iteration 4,000, update mask and enable voxel skipping [S1].
+-    *   Train for 30,000 iterations for static scenes; 90,000 for dynamic scenes [S1].
++    where $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ and $\delta_i = t_{i+1} - t_i$ [S1].
++7.  **Loss Computation:** Calculate total loss $L = L_{REC} + \lambda_1 L_{L1} + \lambda_2 L_{TV}$ [S1].
++8.  **Optimization:** Update parameters using Adam optimizer [S1].
++
++**Formulas:**
++*   **Spatial Factorization (Block-Term):**
++    $$ V = \sum_{r=1}^{R_1} M^X_{XY,r} \circ v^Z_r + \sum_{r=1}^{R_2} M^Y_{XZ,r} \circ v^Y_r + \sum_{r=1}^{R_3} M^Z_{YZ,r} \circ v^X_r $$
++    where $R_1=R_2=R_3=R$ for simplicity [S1].
++*   **Parameter Factorization (CP):**
++    $$ T^K = \sum_{r=1}^{R_p} v^1_r \circ v^2_r \circ \dots \circ v^K_r $$
++    where $R_p$ is the number of one-rank components [S1].
++*   **L1 Norm Loss:**
++    $$ L_{L1} = \begin{cases} \sum ||1 - w|| & \text{if } W \in v_p \text{ (parameter vectors)} \\ \sum_{w \in W} ||w||_1 / |W| & \text{otherwise} \end{cases} $$
++    where $W$ are weights in vectors/matrices [S1].
++*   **Total Variation Loss:**
++    $$ L_{TV} = L_{TV1} + L_{TV2} $$
++    $$ L_{TV1} = \frac{1}{|V||Q|l} \sum_{v,q,i} ||v_{i,q} - v_{i-1,q}||_2 $$
++    $$ L_{TV2} = \frac{1}{|M||Q|hw} \sum_{M,q,i,j} (||M_{q,i,j} - M_{q,i-1,j}||_2^2 + ||M_{q,i,j} - M_{q,i,j-1}||_2^2) $$
++    where $v \in V$ (vectors), $M \in M$ (matrices), $q \in Q$ (channels), $l$ is vector length, $h,w$ are matrix dimensions [S1].
++
++**Parameters:**
++*   **Grid Resolution:** Initial $N=128$; increases to $300^3$ for complex scenes [S1].
++*   **Feature Depths:** Density $R_\sigma=16$, Appearance $R_c=48$, Parameter $R_p=4$ [S1].
++*   **Samples per Ray:** 192 (standard), 512 (if grid is $300^3$) [S1].
++*   **Batch Size:** 4096 [S1].
++*   **Optimizer:** Adam ($\beta_1=0.9, \beta_2=0.99$) [S1].
++*   **Learning Rates:** Matrices/Vectors: 0.02; MLPs: 0.001 [S1].
++*   **Loss Weights:** $\lambda_1$ (L1): $10^{-4}$ initially, $10^{-5}$ after 2,000 iterations; $\lambda_2$ (TV): 1.0 [S1].
++*   **Training Iterations:** 30,000 for static; 90,000 for dynamic [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Noise:** Without L1 and TV regularization, excessive noise and film grains appear in spatial matrices and images [S1].
++*   **Memory:** High-resolution datasets (e.g., 1024x1024) require significant RAM (~29 GB for ray storage initially). ViSNeRF filters rays not intersecting the bounding box to reduce runtime RAM [S1].
++*   **Hardware:** Minimum 32 GB RAM / 10 GB VRAM; 64 GB RAM / 16 GB VRAM recommended for high-res [S1].
++*   **Bounding Box:** Empty voxels must be handled. A mask volume is created at iteration 2,000 to shrink the bounding box and enable voxel skipping [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+ import torch
+@@ -77,188 +78,300 @@
+ 
+ class ViSNeRF:
+-    def __init__(self, N=128, R_sigma=16, R_color=48, R_p=4, K=1, M_dims=None):
+-        """
+-        Initialize ViSNeRF model.
+-        N: Spatial grid resolution (N x N x N).
+-        R_sigma: Depth of density features (low-rank components for density).
+-        R_color: Depth of color features (low-rank components for color).
+-        R_p: Number of one-rank components for parameter space.
+-        K: Number of scene parameters.
+-        M_dims: List of dimensions for each parameter in the parameter grid.
+-        """
+-        self.N = N
++    def __init__(self, spatial_dims=(128, 128, 128), param_dims=(11,), 
++                 R_sigma=16, R_color=48, R_param=4, hidden_dim=128):
++        # Spatial Feature Grid: Block-Term Decomposition
++        # Matrices: M_XY, M_XZ, M_YZ
++        # Vectors: v_X, v_Y, v_Z
++        self.spatial_dims = spatial_dims
+         self.R_sigma = R_sigma
+         self.R_color = R_color
+-        self.R_p = R_p
+-        self.K = K
+-        self.M_dims = M_dims if M_dims else [N] * K
+-        
+-        # Spatial Feature Grid Factorization (Block-Term)
+-        # Matrices: M_XY, M_XZ, M_YZ. Vectors: v_X, v_Y, v_Z.
+-        # Dimensions: (N, N, R) for matrices, (N, R) for vectors.
+-        # We store separate sets for density and color features.
+-        self.M_XY_sigma = nn.Parameter(torch.randn(N, N, R_sigma))
+-        self.M_XZ_sigma = nn.Parameter(torch.randn(N, N, R_sigma))
+-        self.M_YZ_sigma = nn.Parameter(torch.randn(N, N, R_sigma))
+-        self.v_X_sigma = nn.Parameter(torch.randn(N, R_sigma))
+-        self.v_Y_sigma = nn.Parameter(torch.randn(N, R_sigma))
+-        self.v_Z_sigma = nn.Parameter(torch.randn(N, R_sigma))
+-        
+-        self.M_XY_color = nn.Parameter(torch.randn(N, N, R_color))
+-        self.M_XZ_color = nn.Parameter(torch.randn(N, N, R_color))
+-        self.M_YZ_color = nn.Parameter(torch.randn(N, N, R_color))
+-        self.v_X_color = nn.Parameter(torch.randn(N, R_color))
+-        self.v_Y_color = nn.Parameter(torch.randn(N, R_color))
+-        self.v_Z_color = nn.Parameter(torch.randn(N, R_color))
+-        
+-        # Parameter Feature Grid Factorization (CP)
+-        # K vectors of size (M_dim, R_p)
++        
++        # Initialize spatial matrices and vectors
++        # Dimensions: (R, dim1, dim2) for matrices, (R, dim) for vectors
++        self.M_XY = nn.Parameter(torch.randn(R_sigma, spatial_dims[0], spatial_dims[1]))
++        self.M_XZ = nn.Parameter(torch.randn(R_sigma, spatial_dims[0], spatial_dims[2]))
++        self.M_YZ = nn.Parameter(torch.randn(R_sigma, spatial_dims[1], spatial_dims[2]))
++        self.v_X = nn.Parameter(torch.randn(R_sigma, spatial_dims[0]))
++        self.v_Y = nn.Parameter(torch.randn(R_sigma, spatial_dims[1]))
++        self.v_Z = nn.Parameter(torch.randn(R_sigma, spatial_dims[2]))
++        
++        # Parameter Feature Grid: CP Decomposition
++        # Vectors for each parameter dimension
++        self.param_dims = param_dims
++        self.R_param = R_param
+         self.param_vectors = nn.ParameterList([
+-            nn.Parameter(torch.randn(M_dims[k], R_p)) for k in range(K)
++            nn.Parameter(torch.randn(R_param, dim)) for dim in param_dims
+         ])
+         
+         # MLP Decoders
+-        # Density MLP: Input (R_sigma + PE_dim), Output 1
+-        # Color MLP: Input (R_color + SH_dim), Output 3
+-        self.pe_dim = 10 # Standard NeRF PE frequency
+-        self.sh_dim = 12 # SH encoding dim (3*(L+1)^2 - 3 for L=1? Source says SH encoding, standard is often 12 or 27. We assume standard SH basis dim)
+-        # Note: Source says SH encodes view direction. Standard SH for L=1 is 12 coeffs.
+-        
+-        self.mlp_sigma = nn.Sequential(
+-            nn.Linear(R_sigma + self.pe_dim, 128),
++        self.g_sigma = nn.Sequential(
++            nn.Linear(hidden_dim, hidden_dim),
+             nn.ReLU(),
+-            nn.Linear(128, 1)
++            nn.Linear(hidden_dim, 1) # Output density
+         )
+-        
+-        self.mlp_color = nn.Sequential(
+-            nn.Linear(R_color + self.sh_dim, 128),
++        self.g_c = nn.Sequential(
++            nn.Linear(hidden_dim, hidden_dim),
+             nn.ReLU(),
+-            nn.Linear(128, 3)
++            nn.Linear(hidden_dim, 3) # Output color RGB
+         )
+         
+-        # Mask for voxel skipping
+-        self.mask = None
+-
+-    def get_sh_encoding(self, directions):
+-        """
+-        Compute Spherical Harmonics encoding for view directions.
+-        Assumes L=1 (12 coefficients).
+-        """
+-        # Standard SH basis for L=1
+-        # x, y, z, xy, xz, yz, x^2-y^2, 3z^2-r^2
+-        # Simplified implementation for L=1
+-        x, y, z = directions[..., 0:1], directions[..., 1:2], directions[..., 2:3]
+-        # Normalize directions
+-        norm = torch.sqrt(x**2 + y**2 + z**2)
+-        x, y, z = x/norm, y/norm, z/norm
+-        
+-        sh = torch.cat([
+-            x, y, z,
+-            x*y, x*z, y*z,
+-            x**2 - y**2, 2*x*y,
+-            2*x*z, 2*y*z,
+-            3*z**2 - 1
+-        ], dim=-1)
+-        return sh
+-
+-    def get_pe_encoding(self, positions):
+-        """
+-        Compute Positional Encoding for positions.
+-        """
+-        # Standard NeRF PE: sin(2^d * pi * x)
+-        freq_bands = 10
+-        pe = []
+-        for i in range(freq_bands):
+-            scale = 2**i * np.pi
+-            pe.append(torch.sin(scale * positions))
+-            pe.append(torch.cos(scale * positions))
+-        return torch.cat(pe, dim=-1)
+-
+-    def forward(self, positions, parameters, directions):
+-        """
+-        Forward pass for a batch of sample points.
+-        positions: (B, 3)
+-        parameters: (B, K)
+-        directions: (B, 3)
+-        """
+-        # 1. Spatial Feature Retrieval
+-        # Interpolate grid values at positions
+-        # positions are in [0, N-1] or normalized? Assume normalized [0,1] mapped to grid indices
+-        # For simplicity, assume positions are scaled to grid indices [0, N-1]
+-        # Using trilinear interpolation for matrices/vectors
+-        
+-        # Helper to interpolate
+-        def interpolate_grid(pos, grid_3d):
+-            # pos: (B, 3), grid_3d: (N, N, N, C)
+-            # This is a placeholder for actual trilinear interpolation logic
+-            # In practice, use torch.nn.functional.grid_sample
+-            pass
+-            
+-        # Since explicit interpolation code is complex, we describe the operation:
+-        # Sample M_XY, M_XZ, M_YZ and v_X, v_Y, v_Z at (x,y,z)
+-        
+-        # Spatial Density Features
+-        # M_XY[r] is XY plane, v_Z[r] is Z vector.
+-        # Element-wise multiply sampled M_XY and v_Z
+-        # This requires interpolating M_XY at (x,y) and v_Z at z
+-        # Result shape: (B, R_sigma)
+-        
+-        # Spatial Color Features
+-        # Similar process for Color matrices/vectors
+-        
+-        # Parameter Features
+-        # For each param k, interpolate param_vectors[k] at parameter value p_k
+-        # Element-wise multiply all K vectors
+-        # Result shape: (B, R_p)
+-        
+-        # Concatenate Spatial and Parameter features
+-        # f_final = concat(f_spatial, f_param)
+-        
+-        # 2. Decoding
+-        # PE for position
+-        pe_pos = self.get_pe_encoding(positions)
+-        # SH for direction
+-        sh_dir = self.get_sh_encoding(directions)
+-        
+-        # Density
+-        sigma = self.mlp_sigma(torch.cat([f_spatial_sigma, pe_pos], dim=-1))
+-        # Color
+-        color = self.mlp_color(torch.cat([f_spatial_color, sh_dir], dim=-1))
++        # Loss weights
++        self.lambda1 = 1e-4
++        self.lambda2 = 1.0
++        
++    def get_spatial_features(self, x, y, z):
++        # x, y, z are normalized coordinates in [0, 1]
++        # Map to grid indices
++        nx, ny, nz = [int(coord * dim) for coord, dim in zip((x, y, z), self.spatial_dims)]
++        
++        # Retrieve features using block-term decomposition
++        # Sum of outer products of matrices and vectors
++        # M_XY(r, :, :) o v_Z(r, :) -> shape (R, dim_X, dim_Y)
++        # We need to interpolate or gather. For simplicity, assume discrete grid lookup or trilinear interpolation
++        # Here we assume direct indexing for pseudocode clarity, though interpolation is standard
++        
++        # Feature extraction logic:
++        # f = sum_r ( M_XY[r] * v_Z[r] + M_XZ[r] * v_Y[r] + M_YZ[r] * v_X[r] )
++        # This results in a feature vector of size R
++        
++        # Note: In implementation, this involves gathering values from matrices/vectors
++        # based on coordinates (x,y,z) and summing the rank-1 components.
++        # For pseudocode, we represent the retrieval as a function call.
++        spatial_feat = self._retrieve_spatial(x, y, z)
++        return spatial_feat
++
++    def _retrieve_spatial(self, x, y, z):
++        # Simplified retrieval: assume x,y,z are indices
++        # Real implementation uses trilinear interpolation
++        # Returns tensor of shape (R,)
++        pass # Implementation detail omitted for brevity, see source [S1]
++
++    def get_param_features(self, params):
++        # params: list of parameter values
++        # Retrieve from CP decomposed parameter grid
++        # f_p = sum_r ( v_1[r] * v_2[r] * ... * v_K[r] )
++        param_feat = self._retrieve_params(params)
++        return param_feat
++
++    def _retrieve_params(self, params):
++        # Simplified retrieval
++        pass
++
++    def forward(self, x, y, z, params, view_dir):
++        # 1. Retrieve features
++        spatial_feat = self.get_spatial_features(x, y, z)
++        param_feat = self.get_param_features(params)
++        
++        # 2. Combine features
++        # Concatenate spatial and param features
++        combined_feat = torch.cat([spatial_feat, param_feat], dim=-1)
++        
++        # 3. Encode inputs
++        # Positional Encoding for x,y,z
++        pos_enc = positional_encoding(x, y, z) # Standard NeRF PE
++        # Spherical Harmonics for view_dir
++        sh_enc = spherical_harmonics_encoding(view_dir)
++        
++        # 4. Decode Density
++        sigma_input = torch.cat([combined_feat, pos_enc], dim=-1)
++        sigma = self.g_sigma(sigma_input).squeeze(-1)
++        
++        # 5. Decode Color
++        color_input = torch.cat([combined_feat, sh_enc], dim=-1)
++        color = self.g_c(color_input)
+         
+         return sigma, color
+ 
+-    def compute_loss(self, pred_color, gt_color, grid_params):
+-        """
+-        Compute total loss.
+-        """
++    def compute_loss(self, pred_color, gt_color, pred_sigma, gt_sigma=None):
+         # Reconstruction Loss (MSE)
+         l_rec = torch.mean((pred_color - gt_color) ** 2)
+         
+-        # L1 Loss
+-        l_l1 = 0.0
+-        # For parameter vectors, regularize to 1
+-        for vec in self.param_vectors:
+-            l_l1 += torch.mean(torch.abs(1.0 - vec))
+-        # For spatial matrices/vectors, standard L1
+-        for param in grid_params: # M_XY, v_X, etc.
+-            l_l1 += torch.mean(torch.abs(param)) / param.numel()
+-            
++        # L1 Loss on parameters/matrices
++        l_l1 = self._compute_l1_loss()
++        
+         # TV Loss
+-        l_tv = 0.0
+-        # Compute TV on M_XY, M_XZ, M_YZ, v_X, v_Y, v_Z
+-        # (See formula in text)
+-        
+-        return l_rec + 1e-4 * l_l1 + 1.0 * l_tv
++        l_tv = self._compute_tv_loss()
++        
++        total_loss = l_rec + self.lambda1 * l_l1 + self.lambda2 * l_tv
++        return total_loss
++
++    def _compute_l1_loss(self):
++        # L1 on parameter vectors (target 1)
++        l1_param = sum(torch.mean(torch.abs(v - 1)) for v in self.param_vectors)
++        # L1 on spatial matrices/vectors
++        l1_spatial = torch.mean(torch.abs(self.M_XY)) + torch.mean(torch.abs(self.M_XZ)) + \
++                     torch.mean(torch.abs(self.M_YZ)) + torch.mean(torch.abs(self.v_X)) + \
++                     torch.mean(torch.abs(self.v_Y)) + torch.mean(torch.abs(self.v_Z))
++        return l1_param + l1_spatial
++
++    def _compute_tv_loss(self):
++        # Total Variation Loss on spatial matrices/vectors
++        # Simplified placeholder for complex TV calculation defined in [S1]
++        pass
++
++    def render_ray(self, ray_origin, ray_dir, t_near, t_far, num_samples):
++        # Stratified sampling
++        t_vals = torch.linspace(t_near, t_far, num_samples)
++        # Add jitter for stratified sampling
++        t_vals = t_vals + torch.rand_like(t_vals) * (t_far - t_near) / num_samples
++        
++        pts = ray_origin.unsqueeze(0) + t_vals.unsqueeze(1) * ray_dir.unsqueeze(0)
++        
++        # Query network for sigma and color at each point
++        # Note: params are fixed for a specific scene frame
++        sigma, color = self.forward(pts[..., 0], pts[..., 1], pts[..., 2], params, ray_dir)
++        
++        # Volume Rendering Integral
++        # T_i = exp(-sum_{j<i} sigma_j * delta_j)
++        # delta_i = t_{i+1} - t_i
++        deltas = t_vals[1:] - t_vals[:-1]
++        deltas = torch.cat([deltas, torch.tensor([1e-10])]) # Last delta
++        
++        exp_neg_sigma_delta = torch.exp(-sigma * deltas)
++        transmittance = torch.cumprod(exp_neg_sigma_delta, dim=0)
++        transmittance = torch.cat([torch.ones_like(transmittance[:1]), transmittance[:-1]])
++        
++        weights = (1 - exp_neg_sigma_delta) * transmittance
++        final_color = torch.sum(weights.unsqueeze(-1) * color, dim=0)
++        
++        return final_color
+ ```
+ 
++## Subtopics
++
++### [DoF-NeRF](9432-dof-nerf.md)
++Uses depth of field for blur effects.
++
++### [NeRF-VPT](11770-nerf-vpt.md)
++Uses view-dependent positional encoding.
++
++### [Activation Feature Density Approximation](12492-activation-feature-density-approximation.md)
++Approximates density via activation functions.
++
++### [Signed Distance Function (SDF) Representations](12495-signed-distance-function-sdf-representations.md)
++Uses SDFs for geometry.
++
++### [Volume-Augmented NeRF](12973-volume-augmented-nerf.md)
++Augments NeRF with volume data.
++
++### [Neural-PIL Decomposition Architecture](12975-neural-pil-decomposition-architecture.md)
++Decomposes appearance and geometry.
++
++### [MINE](13661-mine.md)
++Mutual Information Neural Estimation for NeRF.
++
++### [Voxel and Sparse Grid Representations](13738-voxel-and-sparse-grid-representations.md)
++Uses sparse voxels for efficiency.
++
++### [Aleth-NeRF](13764-aleth-nerf.md)
++Adversarial learning for NeRF.
++
++### [Transformer and Vision Model Integration](13911-transformer-and-vision-model-integration.md)
++Integrates transformers.
++
++### [Human and Specific Subject Modeling](13997-human-and-specific-subject-modeling.md)
++Specialized for humans.
++
++### [OPONeRF](14014-oponerf.md)
++Online progressive NeRF.
++
++### [Mixer-NeRF](14073-mixer-nerf.md)
++Uses mixer networks.
++
++### [Sparse View and Few-Shot Optimization](14428-sparse-view-and-few-shot-optimization.md)
++Optimizes with few views.
++
++### [Mixture-of-Experts and Modular Architectures](14429-mixture-of-experts-and-modular-architectures.md)
++Uses MoE.
++
++### [Uncertainty and Reliability](14487-uncertainty-and-reliability.md)
++Estimates uncertainty.
++
++### [Object Decomposition and Composition](14518-object-decomposition-and-composition.md)
++Decomposes objects.
++
++### [Lighting and Appearance Models](14522-lighting-and-appearance-models.md)
++Models lighting explicitly.
++
++### [Optimization and Training Procedures](14565-optimization-and-training-procedures.md)
++General training tips.
++
++### [Image Enhancement and Restoration Methods](14566-image-enhancement-and-restoration-methods.md)
++Post-processing.
++
++### [Modular, Hierarchical, and Latent Architectures](14567-modular-hierarchical-and-latent-architectures.md)
++Hierarchical structures.
++
++### [MuRF (Multi-Baseline Radiance Fields)](15007-murf-multi-baseline-radiance-fields.md)
++Multi-baseline.
++
++### [Gaussian and Primitive-Based Representations](15011-gaussian-and-primitive-based-representations.md)
++Uses Gaussians.
++
++### [Decentralized Federated NeRF](15032-decentralized-federated-nerf.md)
++Federated learning.
++
++### [Neural Proxy](15220-neural-proxy.md)
++Proxy models.
++
++### [EBAD-NeRF](15441-ebad-nerf.md)
++Error-based adaptive density.
++
++### [Network Architectures](15530-network-architectures.md)
++General architectures.
++
++### [NeurMiPs](15543-neurmips.md)
++Neural MIPs.
++
++### [CodeNeRF](15544-codenerf.md)
++Code-based NeRF.
++
++### [Dynamic Scene and Temporal Modeling](15546-dynamic-scene-and-temporal-modeling.md)
++Dynamic scenes.
++
++### [NeRF-Casting](15547-nerf-casting.md)
++Casting techniques.
++
++### [RoseNeRF](15548-rosenerf.md)
++Rose NeRF.
++
++### [Semantic and Feature Field Extensions](15556-semantic-and-feature-field-extensions.md)
++Semantic fields.
++
++### [Neural Density-Distance Fields](15665-neural-density-distance-fields.md)
++Neural DDF.
++
++### [LAENeRF](15738-laenerf.md)
++Latent Autoencoder NeRF.
++
++### [ExtremeNeRF](15739-extremenerf.md)
++Extreme scale NeRF.
++
++### [Conditional and Latent Representations](15989-conditional-and-latent-representations.md)
++Conditional NeRF.
++
++### [ActiveNeRF Model Architecture](16203-activenerf-model-architecture.md)
++Active NeRF.
++
++### [SCARF](16591-scarf.md)
++SCARF.
++
++### [Multi-input MLP (mi-MLP)](16599-multi-input-mlp-mi-mlp.md)
++Multi-input MLP.
++
++### [PL-NeRF](18117-pl-nerf.md)
++PL-NeRF.
++
+ ## Operating characteristics
+-*   **Time Complexity:** Training is faster than baselines like InSituNet and CoordNet. For the five jets dataset, training time is 1.43 hours vs 39.22 hours for InSituNet [S1]. Inference time is slower than GAN-based methods (InSituNet, StyleGAN2) but acceptable (1.86 FPS for 256x256) [S1].
+-*   **Memory Complexity:** Reduces spatial memory from $O(N^3)$ to $O(N^2)$ and parameter space from $O(M^K)$ to $O(M)$ [S1]. Model size is small: 15.43 MB for five jets, 69.91 MB for Tangaroa [S1].
+-*   **Hardware Requirements:** Minimum 32 GB RAM and 10 GB VRAM; 64 GB RAM and 16 GB VRAM recommended for high-resolution datasets [S1].
+-*   **Strengths:** Handles arbitrary number of parameters; super-resolution synthesis (256x256 to 1024x1024); robust with sparse training data (95% less data than InSituNet) [S1].
+-*   **Limitations:** Inference is slower than traditional DVR/IR and GANs; high initial memory usage for loading high-res datasets (e.g., 29 GB for Tangaroa rays) before filtering [S1].
++*   **Time Complexity:** Training is faster than baselines like InSituNet and CoordNet [S1]. Inference is slower than InSituNet and StyleGAN2, but faster than traditional DVR/IR for low-resolution (256x256) datasets [S1]. Frame rate is at least 1.86 FPS for 256x256 images, dropping for 1024x1024 [S1].
++*   **Memory Complexity:** Reduces spatial memory from $O(N^3)$ to $O(N^2)$ and parameter space from $O(M^K)$ to $O(M)$ [S1]. Overall complexity $O(N^2 M)$ [S1].
++*   **Measured Performance:** On the five jets dataset, ViSNeRF achieves PSNR 27.51, SSIM 0.945, LPIPS 0.050, outperforming EG3D, CoordNet, InSituNet, and StyleGAN2 [S1]. Model size is 15.43 MB for five jets, 69.91 MB for Tangaroa [S1].
++*   **Strengths:** High quality with minimal training data (95% less than InSituNet), efficient parameter-space exploration, super-resolution capability [S1].
++*   **Limitations:** Slow inference for high resolutions, high VRAM/RAM requirements for large datasets [S1].
++*   **When to use:** When synthesizing visualizations for dynamic volumetric scenes with adjustable parameters, especially when training data is limited [S1].
++*   **When not to use:** When real-time inference at high resolutions is critical and VRAM is limited [S1].
+ 
+ ## Background
+-ViSNeRF was introduced in 2025 by researchers investigating efficient multidimensional neural radiance field representations for visualization synthesis of dynamic volumetric scenes [S1]. It builds on the NeRF architecture  and TensoRF [S1], adapting tensor factorization techniques (Block-Term and CP) to handle dynamic scenes with multiple control parameters (time, isovalue, transfer functions) [S1]. It is used in scientific visualization for super-resolution synthesis and parameter-space exploration of simulation data (e.g., Nyx, Tangaroa, five jets) [S1].
++ViSNeRF was introduced in the paper "ViSNeRF: Efficient Multidimensional Neural Radiance Field Representation for Visualization Synthesis of Dynamic Volumetric Scenes" [S1]. It builds on the NeRF framework [S1] and TensoRF [S1], adapting tensor factorization techniques (block-term and CP decomposition) to handle dynamic scenes with arbitrary parameters [S1]. It is used in scientific visualization for datasets like Nyx, Tangaroa, and five jets [S1].
+ 
+ ## Sources

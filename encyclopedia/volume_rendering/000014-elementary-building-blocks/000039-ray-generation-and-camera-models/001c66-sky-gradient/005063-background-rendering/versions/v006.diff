@@ -1,0 +1,196 @@
+--- v005.md
++++ v006.md
+@@ -1,4 +1,3 @@
+ # Background Rendering
+-
+ 
+ ## Overview
+@@ -7,5 +6,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Ray origin `ray.origin`, ray direction `ray.dir`, background grid resolution `grid.background_reso`, number of background layers `grid.background_nlayers`, background data grid `grid.background_data` (density and color), log-transmittance `log_transmit` from the volume pass, and optimization options `opt` (including `step_size`, `stop_thresh`, `background_brightness`) [S4, unofficial].
++*   **Inputs:** Ray origin `ray.origin`, ray direction `ray.dir`, background grid resolution `grid.background_reso`, number of background layers `grid.background_nlayers`, background data grid `grid.background_data` (density and color), log-transmittance `log_transmit` from the volume pass, optimization options `opt` (including `step_size`, `stop_thresh`, `background_brightness`), and ray world step size `ray.world_step` [S4, unofficial].
+ *   **Outputs:** Background color `out` (RGB) and updated log-transmittance [S4, unofficial].
+ 
+@@ -18,29 +17,30 @@
+ *   `inner_radius`: Minimum sampling radius, calculated as $\max(\text{dist}(\text{ray.origin}, \text{ray.dir}) + 10^{-3}, 1.0)$ [S4, unofficial].
+ *   `n_steps`: Number of sampling steps, calculated as $\lfloor \text{grid.background\_nlayers} / \text{opt.step\_size} \rfloor + 2$ [S4, unofficial].
+-*   `C0`: Spherical Harmonic DC factor (typically $\frac{1}{\sqrt{4\pi}}$ or similar normalization constant depending on SH basis) [S4, unofficial].
++*   `C0`: Spherical Harmonic DC factor, typically $\frac{1}{\sqrt{4\pi}}$ [S4, unofficial].
+ 
+ **Steps:**
+-1.  **Early Termination Check:** If `log_transmit[ray_id] < -25.0`, return early to avoid numerical instability for fully opaque rays [S4, unofficial].
+-2.  **Ray Bounds Setup:** Determine background ray bounds using `ray_find_bounds_bg` [S4, unofficial]. For image rendering, generate the ray using `cam2world_ray` and calculate pixel indices `ix`, `iy` [S4, unofficial].
+-3.  **Initialization:** Initialize output color `outv[3]` to zeros [S4, unofficial]. Set `invr_last` and `invr_mid` for radius tracking [S4, unofficial].
+-4.  **Sampling Loop:** Iterate `i` from `0` to `n_steps - 1`:
++1.  **Early Termination Check:** If `log_transmit < -25.0`, return early to avoid numerical instability for fully opaque rays [S4, unofficial].
++2.  **Initialization:** Compute `inner_radius` and `n_steps` [S4, unofficial]. Initialize output color `outv[3]` to zeros [S4, unofficial]. Set `invr_last` and `invr_mid` to track inverse radii across steps [S4, unofficial].
++3.  **Sampling Loop:** Iterate `i` from `0` to `n_steps - 1`:
+     a.  **Radius Calculation:** Compute sampling radius $r = \frac{n\_steps}{n\_steps - i - 0.5}$ [S4, unofficial]. This creates non-linear spacing, denser near the origin and sparser at infinity [S4, unofficial].
+-    b.  **Intersection:** Intersect the ray with a sphere of radius `r` using `ConcentricSpheresIntersector` [S4, unofficial]. If intersection fails or $r < \text{inner\_radius}$, skip to next step [S4, unofficial].
+-    c.  **Position Calculation:** Calculate ray position `ray.pos` at intersection $t$: `ray.pos[j] = fmaf(t, ray.dir[j], ray.origin[j])` [S4, unofficial].
+-    d.  **Coordinate Conversion:** Convert unit vector `ray.pos` to equirectangular coordinates using `_unitvec2equirect(ray.pos, grid.background_reso, ray.pos)` [S4, unofficial].
+-    e.  **Depth Coordinate:** Set the z-coordinate (layer index) based on inverse radius: `ray.pos[2] = fminf(fmaxf((1.0 - invr_mid) * grid.background_nlayers - 0.5, 0.0), grid.background_nlayers - 1)` [S4, unofficial].
+-    f.  **Grid Indices:** Compute integer grid indices `ray.l` from `ray.pos` and clamp them to valid bounds: `ray.l[0]` to `2 * background_reso - 1`, `ray.l[1]` to `background_reso - 1`, `ray.l[2]` to `background_nlayers - 2` [S4, unofficial].
++    b.  **Intersection:** Intersect the ray with a sphere of radius `r` centered at the origin [S4, unofficial]. If intersection fails or $r < \text{inner\_radius}$, skip to next step [S4, unofficial].
++    c.  **Position Calculation:** Calculate ray position `ray.pos` at intersection $t$: `ray.pos[j] = ray.origin[j] + t * ray.dir[j]` [S4, unofficial].
++    d.  **Normalization:** Normalize `ray.pos` and compute `invr_mid = 1.0 / \|ray.pos\|` [S4, unofficial].
++    e.  **Depth Coordinate:** Set the z-coordinate (layer index) based on inverse radius: `ray.pos[2] = \text{clamp}((1.0 - \text{invr\_mid}) \times \text{grid.background\_nlayers} - 0.5, 0.0, \text{grid.background\_nlayers} - 1)` [S4, unofficial].
++    f.  **Grid Indices:** Compute integer grid indices `ray.l` from `ray.pos` and clamp them to valid bounds: `ray.l[0]` to `2 \times \text{background\_reso} - 1`, `ray.l[1]` to `background\_reso - 1`, `ray.l[2]` to `background\_nlayers - 2` [S4, unofficial].
+     g.  **Fractional Offsets:** Compute fractional offsets `ray.pos` by subtracting integer indices: `ray.pos[j] -= ray.l[j]` [S4, unofficial].
+-    h.  **Trilinear Interpolation:** Sample density $\sigma$ and color from `grid.background_data` using `trilerp_bg_one` with `ray.l` and `ray.pos` [S4, unofficial].
++    h.  **Trilinear Interpolation:** Sample density $\sigma$ and color from `grid.background_data` using trilinear interpolation with `ray.l` and `ray.pos` [S4, unofficial].
+     i.  **Optical Depth:** If $\sigma > 0$, calculate optical depth $pcnt = (\text{invr\_last} - \text{invr\_mid}) \times \text{ray.world\_step} \times \sigma$ [S4, unofficial].
+     j.  **Weight Calculation:** Calculate weight $weight = e^{\text{log\_transmit}} \times (1 - e^{-pcnt})$ [S4, unofficial]. Update `log_transmit -= pcnt` [S4, unofficial].
+-    k.  **Color Accumulation:** For each color channel $i$ (0-2), interpolate color, scale by $C0$, add 0.5, clamp to $[0, \infty)$, and accumulate: `outv[i] += weight * fmaxf(color + 0.5, 0.0)` [S4, unofficial].
++    k.  **Color Accumulation:** For each color channel $i$ (0-2), interpolate color, scale by $C0$, add 0.5, clamp to $[0, \infty)$, and accumulate: `outv[i] += weight \times \max(\text{color} \times C0 + 0.5, 0.0)` [S4, unofficial].
+     l.  **Update Inverse Radius:** Set `invr_last = invr_mid` [S4, unofficial].
+     m.  **Termination Check:** If $e^{\text{log\_transmit}} < \text{opt.stop\_thresh}$, break loop [S4, unofficial].
+-5.  **Final Output:** For each channel $i$, add ambient term: `out[i] += outv[i] + e^{\text{log\_transmit}} * opt.background_brightness` [S4, unofficial].
++4.  **Final Output:** For each channel $i$, add ambient term: `out[i] = outv[i] + e^{\text{log\_transmit}} \times \text{opt.background\_brightness}` [S4, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
++import math
++
+ def render_background_forward(grid, ray_spec, opt, log_transmit, out):
+     """
+@@ -61,19 +61,13 @@
+         return log_transmit
+ 
+-    # Initialize output
+     outv = [0.0, 0.0, 0.0]
+-    
+-    # Calculate inner radius
+-    dist_to_origin = sqrt(sum(ray_spec.origin[j]**2 for j in range(3)))
++    dist_to_origin = math.sqrt(sum(ray_spec.origin[j]**2 for j in range(3)))
+     inner_radius = max(dist_to_origin + 1e-3, 1.0)
+-    
+-    # Calculate number of steps
+     n_steps = int(grid.background_nlayers / opt.step_size) + 2
+-    
+-    # Initialize inverse radius tracking
++    C0 = 1.0 / math.sqrt(4.0 * math.pi)
++
+     invr_last = 0.0
+     invr_mid = 0.0
+-    
+-    # Sampling loop
++
+     for i in range(n_steps):
+         # Calculate sampling radius
+@@ -84,20 +78,29 @@
+             continue
+             
+-        # Intersect ray with sphere of radius r
+-        # This is a placeholder for the actual intersection logic
+-        # Assuming it returns a valid t if intersection exists
+-        t = concentric_spheres_intersect(ray_spec.origin, ray_spec.dir, r)
+-        if t is None:
++        # Ray-sphere intersection for sphere centered at origin with radius r
++        ox, oy, oz = ray_spec.origin
++        dx, dy, dz = ray_spec.dir
++        a = dx*dx + dy*dy + dz*dz
++        b = 2.0 * (ox*dx + oy*dy + oz*dz)
++        c = ox*ox + oy*oy + oz*oz - r*r
++        disc = b*b - 4.0*a*c
++        if disc < 0.0:
+             continue
++        sqrt_disc = math.sqrt(disc)
++        t = (-b - sqrt_disc) / (2.0 * a)
++        if t < 0.0:
++            t = (-b + sqrt_disc) / (2.0 * a)
++        if t < 0.0:
++            continue
+             
+         # Calculate ray position at intersection
+-        ray_pos = [ray_spec.origin[j] + t * ray_spec.dir[j] for j in range(3)]
+-        
+-        # Convert to equirectangular coordinates
+-        # This updates ray_pos in place or returns new coordinates
+-        ray_pos = unitvec2equirect(ray_pos, grid.background_reso)
++        ray_pos = [ox + t*dx, oy + t*dy, oz + t*dz]
++        
++        # Normalize position and compute inverse radius
++        norm = math.sqrt(sum(v**2 for v in ray_pos))
++        invr_mid = 1.0 / norm
++        ray_pos = [v * invr_mid for v in ray_pos]
+         
+         # Calculate depth coordinate (layer index)
+-        invr_mid = 1.0 / r if r > 0 else 0.0
+         depth_coord = (1.0 - invr_mid) * grid.background_nlayers - 0.5
+         ray_pos[2] = max(min(depth_coord, grid.background_nlayers - 1), 0.0)
+@@ -114,6 +117,6 @@
+         ray_frac = [ray_pos[j] - ray_l[j] for j in range(3)]
+         
+-        # Sample density and color from grid
+-        sigma = trilerp_bg_one(grid.background_data, ray_l, ray_frac, channel=3)
++        # Sample density
++        sigma = trilinear_interpolate(grid.background_data, ray_l, ray_frac, channel=3)
+         
+         if sigma > 0.0:
+@@ -122,5 +125,5 @@
+             
+             # Calculate weight
+-            weight = exp(log_transmit) * (1.0 - exp(-pcnt))
++            weight = math.exp(log_transmit) * (1.0 - math.exp(-pcnt))
+             
+             # Update log-transmittance
+@@ -129,5 +132,5 @@
+             # Accumulate color
+             for i_ch in range(3):
+-                color = trilerp_bg_one(grid.background_data, ray_l, ray_frac, channel=i_ch)
++                color = trilinear_interpolate(grid.background_data, ray_l, ray_frac, channel=i_ch)
+                 # Scale by SH DC factor and add bias
+                 color_val = color * C0 + 0.5
+@@ -139,12 +142,41 @@
+         
+         # Termination check
+-        if exp(log_transmit) < opt.stop_thresh:
++        if math.exp(log_transmit) < opt.stop_thresh:
+             break
+             
+     # Final output with ambient term
+     for i_ch in range(3):
+-        out[i_ch] = outv[i_ch] + exp(log_transmit) * opt.background_brightness
++        out[i_ch] = outv[i_ch] + math.exp(log_transmit) * opt.background_brightness
+         
+     return log_transmit
++
++def trilinear_interpolate(grid, l, frac, channel):
++    """Standard 3D trilinear interpolation over a 4D grid (depth, height, width, channels)."""
++    x0, y0, z0 = l
++    x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
++    fx, fy, fz = frac
++
++    def fetch(x, y, z):
++        x = max(0, min(x, grid.width - 1))
++        y = max(0, min(y, grid.height - 1))
++        z = max(0, min(z, grid.depth - 1))
++        return grid.data[z, y, x, channel]
++
++    c00 = fetch(x0, y0, z0)
++    c10 = fetch(x1, y0, z0)
++    c01 = fetch(x0, y1, z0)
++    c11 = fetch(x1, y1, z0)
++    c00z = fetch(x0, y0, z1)
++    c10z = fetch(x1, y0, z1)
++    c01z = fetch(x0, y1, z1)
++    c11z = fetch(x1, y1, z1)
++
++    ix = c00 * (1 - fx) + c10 * fx
++    iy = c01 * (1 - fx) + c11 * fx
++    iz0 = ix * (1 - fy) + iy * fy
++    ix = c00z * (1 - fx) + c10z * fx
++    iy = c01z * (1 - fx) + c11z * fx
++    iz1 = ix * (1 - fy) + iy * fy
++    return iz0 * (1 - fz) + iz1 * fz
+ ```
+ 
+@@ -162,5 +194,4 @@
+ *   **Performance:** The method is efficient for infinite backgrounds as it avoids explicit skybox geometry intersection [S4, unofficial]. The concentric sphere sampling reduces aliasing compared to uniform angular sampling [S1, unofficial].
+ *   **Strengths:** Handles infinite distance backgrounds naturally; mitigates aliasing; integrates seamlessly with volume rendering pipelines [S1, unofficial].
+-*   **Limitations:** Requires pre-computed background grid; may be less flexible than procedural skyboxes for dynamic environments [S1, unofficial].
+ *   **When to use:** When rendering scenes with infinite or skybox-like backgrounds that need to be integrated with volumetric effects [S4, unofficial].
+ *   **When not to use:** For simple static skyboxes where procedural shading is sufficient and more efficient [S1, unofficial].

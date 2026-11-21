@@ -1,0 +1,2747 @@
+INPC: Implicit Neural Point Clouds for Radiance Field Rendering
+Florian Hahlbohm1
+Linus Franke2
+Moritz Kappel1
+Susana Castillo1
+Martin Eisemann1
+Marc Stamminger2
+Marcus Magnor1
+1
+arXiv:2403.16862v2 [cs.CV] 11 Mar 2025
+2
+Computer Graphics Lab, TU Braunschweig, Germany {lastname}@cg.tu-bs.de
+Visual Computing Erlangen, FAU Erlangen-Nürnberg, Germany {firstname.lastname}@fau.de
+Figure 1. Novel views synthesized by our model and three state-of-the-art baselines. Our implicit point cloud optimization excels at capturing
+fine detail leading to a higher visual fidelity compared to baselines. While outperformed by explicit point-based methods [19, 31] in terms of
+inference frame rates, our model renders 17× faster than Zip-NeRF [5]. Per-patch PSNR and per-scene fps values are inset.
+Abstract
+is an inherently difficult problem. Recent methods commonly address this by reconstructing the scene either volumetrically as dense implicit radiance fields [46] or use
+explicit geometric representations [59] such as point clouds
+or meshes. Leveraging advances in optimization-based neural rendering techniques, volumetric approaches achieve an
+impressive increase in quality by optimizing geometric information (i.e., density and appearance) into Multi-Layer Perceptrons (MLPs) [41], voxel grids [20], or hash maps [43]. In
+contrast, explicit point-based methods optimize appearance
+at discrete 3D scene points, where color is being represented
+via 3D Gaussians [31] or per-point features [1]. While both
+directions provide unique advantages, they also entail severe
+drawbacks such as volumetric methods relying on computationally intensive ray-marching or explicit methods requiring
+a-priori point proxies.
+We introduce a new approach for reconstruction and
+novel view synthesis of unbounded real-world scenes. In
+contrast to previous methods using either volumetric fields,
+grid-based models, or discrete point cloud proxies, we propose a hybrid scene representation, which implicitly encodes
+the geometry in a continuous octree-based probability field
+and view-dependent appearance in a multi-resolution hash
+grid. This allows for extraction of arbitrary explicit point
+clouds, which can be rendered using rasterization. In doing
+so, we combine the benefits of both worlds and retain favorable behavior during optimization: Our novel implicit point
+cloud representation and differentiable bilinear rasterizer
+enable fast rendering while preserving the fine geometric detail captured by volumetric neural fields. Furthermore, this
+representation does not depend on priors like structure-frommotion point clouds. Our method achieves state-of-the-art
+image quality on common benchmarks. Furthermore, we
+achieve fast inference at interactive frame rates, and can
+convert our trained model into a large, explicit point cloud
+to further enhance performance.
+In this work, we aim at creating a novel, efficient, and
+robust scene representation which combines the benefits of
+both worlds while bypassing the need for expensive raycasting or explicit priors. To this end, we introduce Implicit
+Neural Point Cloud (INPC), an implicit scene representation that enables accurate scene reconstruction by sampling
+and subsequent rendering of explicit point clouds using fast
+differentiable rasterization. More specifically, we take inspiration from current state-of-the-art approaches 3D Gaussian
+Splatting [31] and Zip-NeRF [5]: We decompose and optimize a scene into two parts, which constitutes a concept that
+1. Introduction
+Novel view synthesis describes the task of rendering novel
+inter- or extrapolated views from a set of input images, which
+1
+Neural Radiance Fields. Recently, implicitly representing
+3D scenes within volumetric fields became popular, enabling
+novel view synthesis via volume rendering and without the
+need for proxy geometry. Mildenhall et al. [41] showed
+exceptional results by compressing a complete 3D scene
+into a large coordinate-based MLP, a concept called Neural
+Radiance Field (NeRF). To render images, pixel-wise raymarching is used with the volume rendering formulation for
+each pixel color C:
+we dub implicit point clouds. Here, the geometric structure is
+represented as an octree-based point probability field, while
+appearance features are embedded in an implicit coordinatebased multi-resolution hash grid. The octree is progressively
+subdivided to ensure similar probability distribution across
+all leaf nodes, which enables the reconstruction of fine articulated geometry while maximizing the capacity of our
+appearance hash grid. During rendering, we use the probability octree as an estimator for point positions and use either
+random positions in each leaf or fixed sampling patterns,
+while per-point appearance features are queried from the
+hash grid. The resulting explicit point cloud is then rendered
+via fast bilinear splatting, where gradients are backpropagated through our differentiable end-to-end pipeline to the
+implicit representation.
+Notably, our formulation makes use of the favorable optimization properties of volumetric methods by implicitly
+modeling geometry and appearance. Simultaneously, it elegantly replaces interval-based sampling of per-pixel rays
+with a unified sampling step for the whole frustum of a given
+viewpoint. This subsequently allows for forward rendering
+with a rasterizer, i.e., the driving factor for real-time frame
+rates of point-based methods. By combining the benefits
+of both families of approaches, our method achieves robust
+radiance field reconstruction alongside rendering with stateof-the-art quality on benchmark datasets. In summary, our
+contributions are:
+• The introduction of implicit neural point clouds as a data
+structure to effectively reconstruct unbounded 3D scenes.
+• An algorithm for extracting view-specific point clouds as
+well as global point clouds from this model.
+• A fast and differentiable rendering formulation for this
+data structure using bilinearly splatted points.
+C=
+N
+X
+i=1
+Ti αi ci
+and
+Ti =
+i−1
+Y
+(1 − αj ),
+(1)
+j=1
+with αi = 1 − e−σi δi . Here, density σi and color ci are
+the outputs of the MLP at each ray interval δi . Several successive works aim to resolve challenges bound to this concept by addressing input view distributions [12, 36, 69, 77]
+and computation times [3, 8, 12, 43, 44, 61, 64]. For the
+latter, discretizing the scene space using voxel grids [20], octrees [53, 76], tensor decomposition [9, 16, 49], or even distilling a faster model for inference with neurally textured triangle meshes [10] or mesh baking [50, 74] proved effective.
+In terms of training and rendering speed, Instant-NGP [43]
+presented exceptional results with a hash grid-based space
+partitioning scheme, allowing training within minutes and
+frame rates of up to 10 fps. Furthermore, close to our approach are hybrids of conventional and optimized ideas:
+Point-NeRF [72] uses an explicit point cloud with neural features, however, images are rendered with slow ray-marching
+and are restricted to reconstruct bounded scenes. Regarding
+quality, Barron et al. [3] propose anti-aliasing through conical frustum sampling and enable extension to unbounded
+scenes via space contraction [4]. The current state of the
+art in this field, Zip-NeRF [5], combines ideas from both
+quality and efficiency directions. It augments the underlying
+grid-based data structure with anti-aliasing through conical
+sampling, addition of scaling information, and refined empty
+space skipping. While Zip-NeRF is comparably fast in training (taking about 5 hours), the rendering speed for novel
+views is limited to ∼0.2 fps on consumer-grade hardware.
+This approach is close to our method, as we also recombine
+grid-based appearance information with implicit density formulation for scene reconstruction. In contrast to Zip-NeRF,
+however, our method enables rasterization-based rendering,
+making it faster in inference.
+2. Related Work
+Traditionally, novel view synthesis was based on light
+fields [21], however image-based rendering became a popular alternative [59]. It commonly works by warping source
+views onto geometric proxies [7, 14]. This proxy may contain artifacts, especially near object edges, either due to
+limited input coverage or misaligned cameras. With imagebased rendering, these artifacts result in blurred and inaccurate images, with subsequent methods lessening these
+artifacts [7, 17]. The geometric proxy can also be a full
+3D reconstruction, which with the introduction of Structurefrom-Motion (SfM) [54] and Multi-View Stereo (MVS) [58]
+gained popularity. Furthermore, the advent of deep learningbased techniques in this field further improved results [62]
+through learned blending operators [26] and textures [63],
+lessening failure cases introduced by artifacts in the reconstruction. In the following, we discuss related works in
+volume- and point-based novel view synthesis, the two directions we combine in our work.
+Point Rendering. Orthogonal to NeRFs, neurally rendering radiance fields via explicit points is an established and
+efficient methodology for novel view synthesis. Early work
+builds on established techniques [27] and associates point
+clouds obtained through MVS with optimizable colors or
+features [1]. Points are rendered as splats of varying sizes
+and a convolutional neural network (CNN) is used to in2
+Figure 2. Overview of our method: We introduce the implicit point cloud, a combination of a point probability field stored in an octree and
+implicitly stored appearance features. To render an image for a given viewpoint, we sample the representation by estimating point positions
+and querying the multi-resolution hash grid for per-point features. This explicit point cloud – together with a small background MLP – is
+then rendered with a bilinear point splatting module and post-processed by a CNN. During optimization, the neural networks as well as the
+implicit point cloud are optimized, efficiently reconstructing the scene.
+terpret features. Due to the unstructured and disconnected
+nature of point clouds, holes in image space where no point
+was projected to can appear, which the neural network can
+also resolve. Several follow-up works have been proposed
+eliminating training time [25, 48], adding per-view feature
+optimization [37], reflection warp-fields [38], or differentiable tone mapping [52]. Furthermore, differentiability with
+respect to point positions and camera parameters – via approximate [52] or linear gradients [19] – has been introduced,
+retaining rendering performance for large point clouds compared to other point representations [39, 68, 75]. Recent
+point-based radiance field renderers [18, 19, 31, 37, 38, 75]
+also adapt NeRFs rendering technique to α-blending of
+points. Instead of taking N samples along a ray as in Eq. (1),
+they blend together N sorted points with associated colors c
+and opacities α instead of computing α based on density. For
+approaches keeping true to MVS reconstructions, Trilinear
+Point Splatting (TRIPS) [19] is closest to our point rendering,
+as it also uses bilinear point splatting followed by a neural
+network for feature decoding. However its reconstruction
+quality is limited by the quality of the MVS reconstruction,
+as no point cloud augmentations are performed.
+Overcoming the reliance on point cloud priors has
+been proposed in several ways. Recent improvements to
+MVS algorithms via CNNs [65, 73] as well as leveraging
+NeRFs [67] or transformers [15, 66] lessened the problem,
+while recent approaches also included the point cloud optimization process directly into the radiance field rendering pipeline. This is done either with additional points
+via error propagation [81], 3D error volumes [18], point
+growing via density estimation [72], or gradient-based densification [31]. Especially important here is 3D Gaussian
+Splatting (3DGS) [31], which extends point rendering with
+anisotropic 3D Gaussians as a radiance field rendering
+paradigm. Since its publication, it has become the basis for a
+multitude of follow-up works [22, 28, 32, 47, 70, 78]. Apart
+from removing the need for a CNN to fill holes, the 3DGS
+formulation allows starting with a sparser point cloud that is
+densified by repeatedly splitting large Gaussians during the
+optimization. In contrast, our approach captures more fine
+details, as we are able to optimize and render more detailed
+geometric and appearance information in our implicit point
+cloud. Furthermore, we are independent from an initial point
+cloud, thus increasing robustness.
+3. Method
+A minimal point cloud capable of novel view synthesis, is
+described by multiple data points consisting of a 3D position
+vector as well as color information, either though explicit
+RGB colors or decodable neural features. In our method,
+instead of storing these spatial and photometric properties
+in the same data structure, we split them and optimize both
+implicitly: Positions as an octree-based probability field P
+and appearance, i.e., colors/features and opacity, as a neural
+field A. These two parts combined constitute what we call
+an implicit neural point cloud.
+Input to our method is a collection of RGB images with
+poses and an estimated bounding box. From this, we initialize P as a voxel-based structure, which our algorithm
+iteratively refines into an octree to store probabilities for geometry (Sec. 3.1). This structure is then used as an estimator
+for point positions (Sec. 3.2). These positions are fed into
+A, for which we use a multi-resolution hash grid [43], to
+retrieve opacity and spherical harmonics (SH) appearance
+features (Sec. 3.3). These parts are core to our proposed
+implicit point cloud structure, allowing us to optimize a radiance field efficiently, with fine geometric granularity, and
+great detail.
+An overview of our method is depicted in Fig. 2. For a
+given viewpoint, we first obtain a set of point positions using
+P and query A to retrieve per-point appearance features.
+The resulting explicit point cloud is then rendered by first
+rasterizing with bilinear point splatting (Sec. 3.4) into a
+2D feature image, then α-composited with the output of
+a background model, and post-processed by a rendering
+3
+network with a U-Net architecture [51] (Sec. 3.5). During
+training, our model is optimized end-to-end with losses and
+regularizers carefully selected for our method (Sec. 3.6). We
+proceed by describing all components in detail.
+optimization, we update the probabilities of all leaf nodes
+(pi ) after each optimization step using the following formula:
+3.1. Sparse Point Probability Octree
+where {b0 , ..., bn } is the set of α-blending weights of all
+n points extracted from the i-th leaf node. Note that we
+use the transmitted blending weight bj = αj Tj (Eq. (1))
+computed by our rasterizer for the updates. This imposes
+a visibility prior on the probabilities, as occluded points
+receive less transmittance. For the exponential decay, we
+found λu = 0.9968 to work well in practice and use it in
+all experiments. We also skip updates during the first 100
+iterations for increased robustness, as A does not contain
+reliable information yet.
+pi = max (λu · pi , max ({b0 , ..., bn })),
+Existing NeRF methods do not require explicit geometry as
+they place point samples along per-pixel camera rays [41].
+While prior work demonstrated that this sampling scheme
+leads to aliasing artifacts [3], NeRF-based methods can leverage the favorable optimization properties of implicit volumetric models to achieve state-of-the-art image quality [5].
+In contrast, point-based methods require a persistent set of
+explicit point positions during the optimization. Through
+optimization of point positions with approximated gradients [52] as well as handcrafted splitting, merging, and pruning operations [18, 31], these methods aim to refine an initial
+point cloud that is provided, e.g., as a byproduct of SfM algorithms. Importantly, the approximated position gradients
+as well as heuristics used for refining the point cloud, lead
+to a less robust optimization compared to that of implicit
+models.
+One goal of this work is removing the need for a persistent set of point positions within a typical point-based
+neural rendering pipeline. In prior work, regular occupancy
+grids have proven to be a useful tool for skipping empty
+space [20, 43]. Notably, the tracked occupancy is closely
+related to the volume density used to represent scene geometry in volumetric NeRF-based models. Our key observation
+is that this value can be normalized across the whole scene
+and interpret as a probability for geometry. However, as the
+fixed voxel size of regular occupancy grids makes it difficult
+to accurately model complex geometry, we propose using
+a sparse octree to store a point probability pi for each leaf
+node. During the optimization, nodes are updated, subdivided, or pruned, which allows for accurate reconstruction
+of fine geometric structures. By sampling the multinomial
+distribution represented by this octree, we can extract point
+clouds on demand (Sec. 3.2).
+(2)
+Subdivision. To refine the represented geometry, we want
+to iteratively subdivide and prune empty space in leaf nodes.
+Intuitively, we achieve this by identifying partially unoccupied voxels, which we locate by tracking the difference
+between the largest and smallest blending weight of all n
+points extracted from the i-th leaf node in each iteration:
+qi = max (λu · qi , max ({b0 , ..., bn }) − min ({b0 , ..., bn })),
+(3)
+where λu and {b0 , ..., bn } are the same as in Eq. (2). In all
+experiments, we subdivide leaves every 500 iterations during
+the optimization if qi is above a threshold τs = 0.5. Created
+leaves inherit their parents’ probability and the initial value
+of qi is set to 0. Note that, due to limitations of efficient
+multinomial sampling (see Sec. 3.2) with respect to numerical precision, we only subdivide if the resulting number of
+leaves is less than 2563 .
+Pruning. By repeatedly applying Eq. (2), the probability
+of leaf nodes whose volume is empty will exponentially
+decay towards zero. As such we remove leaf nodes whose
+probability is less than τp = 0.01 every 100 iterations. For
+stability, we only start pruning after the first 500 iterations.
+3.2. Point Sampling Strategies
+Initialization. We initialize the probability field with a
+uniform 3D voxel grid as the initial leaf nodes of the sparse
+octree with probabilities set to a uniform value to achieve
+equal sampling probability. Optionally, we incorporate a
+point cloud as a prior, which slightly improves initial convergence of the optimization (see Appendix A.4 for details).
+Fundamental to this work is the idea of sampling high-quality
+point clouds using the implicit octree-based point position
+estimator introduced in Sec. 3.1. Especially during optimization, we face the common issue of being limited in terms of
+GPU memory and are therefore restricted to a fixed budget
+for the number of sampled points.
+This leads us to design two sampling strategies: A
+viewpoint-specific and a viewpoint-independent sampling
+scheme. For training, we want to generate a point cloud to
+render a specific viewpoint with which we can then compute the loss function in each iteration. In contrast, a global,
+viewpoint-independent point cloud increases temporal stability as well as rendering performance during inference, as no
+Probability Updates. Theoretically, the probability of
+each leaf node should represent how much of its volume
+is occupied by geometry relative to other leaf nodes. To this
+end, we employ an updating strategy inspired by occupancy
+grid updates in Instant-NGP [43] that combines exponential
+decay and knowledge from the current 3D model. During
+4
+per-frame sampling of the implicit point cloud is required.
+In the following, we detail the considerations that went into
+designing both sampling strategies.
+querying with each point’s position, we apply the spherical contraction by Barron et al. [4] to increase the relative capacity of our model near the center of the scene, i.e.,
+the best-observed region during optimization. Of the retrieved per-point features, the first one is converted to a valid
+opacity value αh ∈ [0, 1] using a Sigmoid-like activation:
+x
+αh = 1 − e−e [43]. The remaining M features are used as
+coefficients for SH evaluations to produce a view-dependent
+feature for each point. In practice, we use SH of degree 2 and
+4D view-dependent output features, resulting in M = 36 SH
+coefficients per point. As our background model, we employ
+a small MLP that computes a 4D feature for each pixel using
+the corresponding SH-encoded viewing direction as input.
+Viewpoint-Specific Sampling. We identify three key properties of an effective re-weighting scheme for a specific viewpoint: (1) No samples should be placed outside of the view
+frustum, (2) regions further away from the camera require
+less samples, and (3) leaves with a higher subdivision level
+l, i.e., those representing a smaller volume, should be sampled less. Specifically, we compute the viewpoint-specific
+probability p̂i as follows:
+p̂i = 1visible ·
+pi
+,
+di · 2li ·λl
+(4)
+3.4. Differentiable Bilinear Point Splatting
+Prior work on point rasterization demonstrated that point
+rendering for radiance fields can be very fast and yield great
+results [19, 31, 52]. However, using one-pixel point rendering (projecting and discretizing points to one pixel) leads to
+aliasing as well as the need for approximate gradients [52].
+To avoid this, we opt to use a bilinear formulation, that is we
+splat each point to the closest 2 × 2 pixels after projection.
+Thus, for a point pw = (x, y, z)T , we project it to the image
+coordinates p = (u, v, d)T with
+where 1visible is an indicator function returning one for visible leaves and zero otherwise, λl controls how much less
+a smaller voxel should be sampled, and di represents the
+distance between leaf center and the image plane. Empirically, we found λl = 0.5, i.e., a small bias towards sampling
+smaller voxels more often, to work well as it allows the
+model to more accurately reconstruct regions that are wellcaptured in training images.
+Using multinomial sampling with replacement, we convert the re-scaled probabilities to a list of leaf indices. For
+each element in this list, we uniformly sample the selected
+leaf’s spatial extent to obtain the final 3D position. This
+improves quality, as appearance features (see Sec. 3.3) are
+regularized across a larger volume and not overwritten by
+hash-collisions.
+For inference, we extend this scheme by sampling multiple point clouds, rasterizing them into 2D feature images
+(see Sec. 3.4), and averaging the features for each pixel. Empirically, we find this to be superior to simply increasing the
+number of points for inference, which can be explained by
+the transmittance-based rendering formulation used by our
+rasterizer.
+p = P · V · pw ,
+(5)
+where P and V are the intrinsic and extrinsic camera matrices respectively. For the 2 × 2 closest pixels’ center points
+pi∈{0..3} = (ui , vi )T we then compute the respective opacities with
+α = αh · (1 − |u − ui |) · (1 − |v − vi |).
+(6)
+This causes the point’s contributions to be weighted correctly
+based on its projected position. We then use this while
+blending (see Eq. (1)) all points N in depth order to render
+the image.
+This bilinear splatting approach has three advantages:
+(1) We obtain more robust gradients, (2) improve temporal
+stability of the rendering pipeline, and (3) the rasterized
+images contain less holes which simplifies the task of the
+hole-filling CNN. In TRIPS, Franke et al. [19] use a similar
+splatting approach but instead interpolate trilinearly into an
+image pyramid based on a learned per-point radius. Our
+implicit point cloud enables us to render high-quality feature
+images without the need for interpolation with respect to a
+third dimension.
+Viewpoint-Independent Sampling. Motivated by the observation that sampling an implicit point cloud takes up a
+large chunk of the rendering time during inference, we preextract a global point cloud for all viewpoints. For this, we
+use Eq. (4) but omit the factors 1visible and di . Again, using
+multinomial sampling with replacement, we extract the number of samples for each leaf. To increase stability, we then
+use the 3D Halton sequence [24] for determining the final
+position of each sample. We consider this as an advantage of
+our method: Our implicit formulation can be used to extract
+large point clouds without having to store them on disk.
+3.5. Post-Processing
+For decoding, we use a standard three-layer U-Net architecture with a single residual block based on Fast Fourier
+Convolution (FFC) [11]. We find that this enhances reconstruction regarding high-frequency details. For challenging,
+3.3. Appearance Representation
+After sampling, we retrieve M + 1 appearance features from
+a multi-resolution hash grid [43] for each point. Before
+5
+Method
+LPIPS↓
+Mip-NeRF360
+SSIM↑
+PSNR↑
+LPIPS↓
+Tanks&Temples
+SSIM↑
+PSNR↑
+Train
+hrs↓
+Render
+fps↑
+Size
+GB↓
+Instant-NGP [43]
+ADOP [52]
+TRIPS [19]
+3DGS [31]
+Zip-NeRF [5]
+Ours
+0.380
+0.259
+0.213
+0.254
+0.219
+0.164
+0.698
+0.723
+0.778
+0.814
+0.828
+0.847
+25.61
+23.54
+25.94
+27.20
+28.56
+28.56
+0.438
+0.236
+0.229
+0.276
+0.233
+0.189
+0.737
+0.802
+0.831
+0.866
+0.878
+0.878
+21.82
+21.69
+22.62
+25.27
+26.75
+25.93
+0.08
+7.00
+4.00
+0.50
+5.00
+9.58
+5.7
+67.6
+90.0
+194.2
+0.2
+2.9
+0.1
+0.53
+0.76
+0.58
+0.9
+1.1
+Ours (16M)
+Ours (8M)
+Ours (pre-ex.)
+0.173
+0.188
+0.207
+0.841
+0.830
+0.802
+28.36
+27.83
+26.85
+0.220
+0.252
+0.261
+0.862
+0.846
+0.833
+25.12
+24.54
+23.71
+6.15
+4.25
+4.25
+5.5
+9.4
+27.7
+1.1
+1.1
+1.1
+Table 1. Quantitative comparisons on the Mip-NeRF360 [4] and Tanks and Temples [35] datasets. The three best results are highlighted in
+green in descending order of saturation. Alongside our default configuration that uses 33M samples (Ours) we also provide metrics for
+our method when trained with less samples (16M and 8M). Furthermore, we report inference results using 67M points extracted with our
+view-independent sampling algorithm (pre-ex.).
+e.g., auto-exposed outdoor scenes, we append the differentiable tone mapping module proposed by Rückert et al. [52]
+to our pipeline.
+of the respective publications when available – otherwise we
+use the official implementation to generate the images – and
+compute all image quality metrics under identical conditions.
+All methods use a RTX 4090 when memory was sufficient,
+otherwise an A100 was used.
+3.6. Optimization Loss
+Inspired by prior works [23, 31], we combine a per-pixel
+loss and two established image-space loss functions:
+L = LR + LD-SSIM + λvgg · LVGG + λdecay · LReg .
+4.2. Results
+(7)
+We show quantitative results for the scenes from MipNeRF360 and Tanks and Temples in Tab. 1, as well as qualitative comparisons in Fig. 1. For per-scene metrics and
+additional visual comparisons see Appendix C. In terms of
+image quality metrics, our method clearly outperforms previous point-based techniques (TRIPS and 3DGS) and achieves
+similar quality as Zip-NeRF on both datasets. Visually, we
+observe that our method outperforms all baselines with respect to representing fine details, which is also represented
+in its excellent LPIPS scores. We complement our evaluation
+by conducting a perceptual experiment in which we compare INPC against Zip-NeRF, as the latter achieves the best
+quality metrics among the compared-against methods (see
+Tab. 1). We followed a fully randomized, within-participants
+experimental design with a 2AFC task. Our 17 participants
+saw the results of both methods side-by-side (one pair at a
+time, in random order and screen side, with a different order
+per participant) and were instructed to select the image they
+preferred. The 55 stimuli covered all 17 evaluated scenes and
+consisted of a minimum of 3 frames per scene. Our method
+was favored by the participants on an average of 69.41% of
+the cases, with all participants preferring our results with a
+ratio above the chance line. See Appendix D for full details
+on the experimental setup, stimuli selection, and evaluation.
+We further show approximates for the training time, inference frame rate, and resulting model size in Tab. 1. Our
+method requires slightly longer training than the recent ZipNeRF and TRIPS. Like other NeRF-based methods such as
+Zip-NeRF, our model always has the same size (1.1 GB),
+whereas point-based methods such as 3DGS require up to 2
+GB of storage depending on the scene. Regarding inference
+Specifically, we use the robust loss LR [2] with α = 0
+and c = 0.2 as our per-pixel loss as well as D-SSIM and
+VGG [29] losses which are commonly attributed with a
+closer resemblance of human perception. For regularization
+we follow Barron et al. [5] and impose a normalized weight
+decay on the parameters of the multi-resolution hash grid.
+We use λvgg = 0.075 and λdecay = 0.1.
+4. Experiments
+We conduct multiple experiments to evaluate our method.
+4.1. Datasets and Baselines
+For evaluation, we use a total of 17 real scenes featuring a
+broad spectrum of challenges regarding both geometric and
+photometric aspects. The Mip-NeRF360 dataset [4] contains
+five outdoor and four indoor scenes captured with fixed
+exposure and white balance settings. We further use all eight
+scenes from the intermediate set of the Tanks and Temples
+dataset [35]. It was captured without fixed camera settings
+and presents challenges regarding photometric variation that
+complicate reconstruction, providing relevant insights for inthe-wild performance. We use the established 7:1 train/test
+split [4] for all scenes. We optimize for 50, 000 iterations and
+render an image for a single viewpoint in each of those. See
+Appendix A for further details regarding our implementation.
+We compare our method against Instant-NGP [43],
+ADOP [52], TRIPS [19], 3D Gaussian Splatting [31], and
+the current state of the art in terms of image quality ZipNeRF [5]. We use the images kindly provided by the authors
+6
+Method
+Ours (8M)
+Ours (8M)†
+Ours (pre-ex.)
+Sampling
+Rendering
+Post-Proc.
+Total
+#Points
+51ms
+16ms
+N/a
+37ms
+10ms
+28ms
+26ms
+26ms
+26ms
+114ms
+52ms
+54ms
+4×8M
+8M
+67M
+As this leaves our point-based method with no hole-filling
+technique, we double the number of samples during training
+to 16M and also disable λvgg due to the absence of the CNN.
+Somewhat surprisingly, we observe both quantitatively and
+qualitatively (see Fig. 3) that this configuration still provides
+good results, which confirms the potential of our implicit
+point cloud formulation.
+Table 2. Inference speed breakdown for the Playground
+scene [35] rendered on an RTX 4090 GPU (2000×1085 pixels).
+The configuration marked with † is the same as in ablation F) shown
+in Tab. 3. The bottleneck of our rendering is the sorting step which
+requires 27 / 7 / 17 milliseconds (ms) respectively.
+5. Discussion
+The experiments confirm our approach’s effectiveness on
+common benchmarks, outperforming current state of the
+art regarding perceived image quality, while rendering at
+interactive frame rates. This is also reflected in the per-scene
+image quality metrics (see Appendix C).
+All our models use 4× multisampling for inference,
+which results in up to 528 million blended splats (4×33M
+points) per rendered feature image for our default configuration that uses 33M samples in each training iteration. We
+would like to highlight the results of our 8M configuration.
+It provides excellent quality, while training in just over 4
+hours and blending 128 million splats (4×8M points) into
+each feature image at interactive frame rates of ∼9 fps – all
+on a single RTX 4090 GPU. Albeit at the cost of image
+quality, it allows for easy modification towards faster rendering by either disabling multisampling or by pre-extracting
+a global point cloud. Moreover, our view-independent sampling algorithm causes only a small drop in visual quality
+for the Mip-NeRF360 dataset, as evident by the LPIPS metric, where it still outperforms 3DGS. However, we observe
+frame rate, our method is roughly an order of magnitude
+faster than Zip-NeRF but currently outperformed by the explicit point-based approaches 3DGS, TRIPS, and ADOP.
+In Tab. 2, we break down inference performance for different versions of our model that uses 8M samples during
+training. While this work focuses on image quality, the
+numbers confirm that even at FHD resolution, our model
+maintains its interactivity.
+Ablations. In Tab. 3 and Fig. 3, we show ablations of our
+8M model computed on the five outdoor scenes from the MipNeRF360 dataset. A) – C) dissect our loss function showing
+that each term has a meaningful contribution. For D), we
+omit octree subdivision during optimization, which greatly
+hinders reconstruction of the scene’s foreground while having no visible impact on far away objects. E) and F) validate
+the effectiveness of our bilinear splatting approach as well
+as the point cloud multisampling during inference. Next, G)
+shows that our method does not depend on initial SfM points
+for sampling probability initialization to achieve its high
+visual fidelity. For H), we observe that leaving out the background model barely impacts metrics but results in sampling
+points in the sky (see alpha images in Fig. 3) which results in
+”floaters” upon visual inspection. Furthermore, I) indicates
+the residual FFC block in the U-Net enhances performance
+for high-frequency details, which is only partly captured
+by metrics. Lastly, we omit our post-processing, i.e., the
+U-Net and tone mapping module described in Sec. 3.5, in J).
+Configuration
+LPIPS↓
+SSIM↑
+PSNR↑
+A) No D-SSIM Loss
+B) No VGG Loss
+C) No Weight Decay
+D) No Subdivision
+E) No Bilinear Splatting
+F) No Multisampling
+G) No SfM Prior
+H) No Background Model
+I) No FFC Block
+J) No Post-Processing
+0.204
+0.238
+0.210
+0.508
+0.243
+0.201
+0.197
+0.197
+0.207
+0.277
+0.729
+0.754
+0.744
+0.406
+0.708
+0.740
+0.753
+0.752
+0.749
+0.718
+25.27
+25.29
+25.22
+19.15
+24.36
+25.02
+25.29
+25.28
+25.32
+24.32
+Ours (8M)
+0.192
+0.761
+25.53
+Figure 3. Visual comparisons for ablations H, D, and J in Tab. 3.
+Our background model prevents the sampling of points in the sky.
+Disabling octree subdivision causes foreground reconstruction to
+fail. Omitting post-processing (Sec. 3.5) leads to holes and highfrequency noise in renderings.
+Table 3. Model ablations with respect to image quality metrics
+computed on the outdoor scenes from the Mip-NeRF360 dataset.
+7
+Figure 4. Visual comparison of INPC configurations. Our global pre-extraction slightly reduces visual quality in terms of fine detail,
+especially in FHD renderings of Tanks and Temples scenes. Without multisampling images are slightly sharper but our sampling sometimes
+misses thin structures. For Mip-NeRF360 scenes, the difference between our 8M and default (33M) configuration is barely visible.
+that due to the higher image resolution (roughly 2× more
+pixels) of the Tanks and Temples scenes, the budget of 67M
+pre-extracted global points is not always sufficient. We show
+visual comparisons for our default, 8M, and pre-extracted
+configuration in Fig. 4.
+limitation of 2563 active leaf nodes in the octree, in combination with improved routines for subdivision, updating, and
+pruning, is likely to boost reconstruction quality.
+Limitations. Regarding limitations of our method, we observe that it is sometimes unable to reconstruct fine geometric detail close to the camera, a property shared with existing
+methods such as 3DGS and Zip-NeRF (see Fig. 5). Similar
+to previous works that used a CNN for post-processing rasterizer outputs [18, 52], we identify temporal stability as a
+minor issue during inference (see our supplemental video).
+While this work is mostly focused on image quality, we
+observe that the global sorting used in our implementation
+impacts its real-time rendering capability. This is a disadvantage compared to the recent 3DGS and TRIPS. However,
+we are confident that an optimized implementation can overcome some of the gap, as specialized rendering methods for
+explicit point clouds showed promising results [56].
+As extracting a global point cloud greatly boosts frame
+rate during inference, the optimization pipeline could be
+adjusted to facilitate viewpoint-independent sampling, e.g.,
+by encouraging binary opacity values as done by Reiser et al.
+[50]. We also believe the underlying octree-based data structure could further be improved. Lifting our implementation’s
+In this work, we have introduced Implicit Neural Point
+Clouds, a concept fusing NeRF- and point-based radiance
+fields, utilizing the advantages of both. Our INPC retains
+favorable optimization properties of NeRF by representing
+a point cloud inside an octree-based probability field for
+point positions and an implicit appearance model. The evaluation shows that our method improves upon the previous
+state-of-the-art method in terms of perceptual image quality,
+while also enabling rendering at interactive frame rates on
+consumer-grade hardware. We believe that the implicit point
+cloud representation as well as other ideas presented here can
+enable future work towards further closing the gap between
+best-quality and real-time radiance field approaches.
+3DGS [31]
+Zip-NeRF [5]
+Ours
+6. Conclusion
+https://fhahlbohm.github.io/inpc/
+Acknowledgments. We would like to thank Peter Kramer
+for his help with the video, Timon Scholz for his help with
+the implementation of our viewer, and Fabian Friederichs
+and Leon Overkämping for their valuable suggestions. This
+work was partially funded by the DFG (“Real-Action VR”,
+ID 523421583) and the L3S Research Center, Hanover, Germany. We thank the Erlangen National High Performance
+Computing Center (NHR@FAU) for the provided scientific
+support and HPC resources under the NHR project b162dc.
+NHR funding is provided by federal and Bavarian state authorities. NHR@FAU hardware is partially funded by the
+DFG (ID 440719683). Linus Franke was supported by the
+Bavarian Research Foundation (AZ-1422-20) and the 5G innovation program of the German Federal Ministry for Digital
+and Transport under the funding code 165GU103B.
+Ground Truth
+Figure 5. Limitations. Our method and state-of-the-art baselines
+sometimes fail to recover fine geometric detail near the camera.
+8
+References
+formers. In IEEE/CVF Conf. Comput. Vis. Pattern Recog.,
+pages 8575–8584, 2022. 3
+[16] Daniel Duckworth, Peter Hedman, Christian Reiser, Peter Zhizhin, Jean-François Thibert, Mario Lučić, Richard
+Szeliski, and Jonathan T. Barron. SMERF: Streamable memory efficient radiance fields for real-time large-scene exploration. ACM Trans. Graph., 43(4), 2024. 2
+[17] Martin Eisemann, Bert De Decker, Marcus Magnor, Philippe
+Bekaert, Edilson De Aguiar, Naveed Ahmed, Christian
+Theobalt, and Anita Sellent. Floating textures. Comput.
+Graph. Forum, 27(2):409–418, 2008. 2
+[18] Linus Franke, Darius Rückert, Laura Fink, Matthias Innmann,
+and Marc Stamminger. VET: Visual error tomography for
+point cloud completion and high-quality neural rendering. In
+SIGGRAPH Asia Conference Papers. Association for Computing Machinery, 2023. 3, 4, 8
+[19] Linus Franke, Darius Rückert, Laura Fink, and Marc Stamminger. TRIPS: Trilinear point splatting for real-time radiance
+field rendering. Comput. Graph. Forum, 43(2), 2024. 1, 3, 5,
+6, 13, 15, 17, 19
+[20] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance fields without neural networks. In IEEE/CVF Conf.
+Comput. Vis. Pattern Recog., pages 5491–5500, 2022. 1, 2, 4
+[21] Steven J. Gortler, Radek Grzeszczuk, Richard Szeliski, and
+Michael F. Cohen. The Lumigraph. In SIGGRAPH, pages
+43–54. Association for Computing Machinery, 1996. 2
+[22] Antoine Guédon and Vincent Lepetit. SuGaR: Surfacealigned gaussian splatting for efficient 3d mesh reconstruction
+and high-quality mesh rendering. In IEEE/CVF Conf. Comput.
+Vis. Pattern Recog., pages 5354–5363, 2024. 3
+[23] Florian Hahlbohm, Moritz Kappel, Jan-Philipp Tauscher, Martin Eisemann, and Marcus Magnor. PlenopticPoints: Rasterizing neural feature points for high-quality novel view synthesis.
+In Vision, Modeling, and Visualization, pages 53–61. The Eurographics Association, 2023. 6
+[24] John H. Halton. Algorithm 247: Radical-inverse quasirandom point sequence. Commun. ACM, 7(12):701–702,
+1964. 5
+[25] Mathias Harrer, Linus Franke, Laura Fink, Marc Stamminger,
+and Tim Weyrich. Inovis: Instant novel-view synthesis. In
+SIGGRAPH Asia Conference Papers. Association for Computing Machinery, 2023. 3
+[26] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm,
+George Drettakis, and Gabriel Brostow. Deep blending for
+free-viewpoint image-based rendering. ACM Trans. Graph.,
+37(6), 2018. 2
+[27] Alexander Hornung and Leif Kobbelt. Interactive pixelaccurate free viewpoint rendering from images with silhouette
+aware sampling. Comput. Graph. Forum, 28(8):2090–2103,
+2009. 2
+[28] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and
+Shenghua Gao. 2D Gaussian splatting for geometrically accurate radiance fields. In SIGGRAPH. Association for Computing Machinery, 2024. 3
+[29] Justin Johnson, Alexandre Alahi, and Li Fei-Fei. Perceptual
+losses for real-time style transfer and super-resolution. In Eur.
+[1] Kara-Ali Aliev, Artem Sevastopolsky, Maria Kolos, Dmitry
+Ulyanov, and Victor Lempitsky. Neural point-based graphics.
+In Eur. Conf. Comput. Vis., pages 696–712. Springer-Verlag,
+2020. 1, 2
+[2] Jonathan T. Barron. A general and adaptive robust loss function. In IEEE/CVF Conf. Comput. Vis. Pattern Recog., pages
+4326–4334, 2019. 6
+[3] Jonathan T. Barron, Ben Mildenhall, Matthew Tancik, Peter
+Hedman, Ricardo Martin-Brualla, and Pratul P. Srinivasan.
+Mip-NeRF: A multiscale representation for anti-aliasing neural radiance fields. In Int. Conf. Comput. Vis., pages 5835–
+5844, 2021. 2, 4, 12
+[4] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P.
+Srinivasan, and Peter Hedman. Mip-NeRF 360: Unbounded
+anti-aliased neural radiance fields. In IEEE/CVF Conf. Comput. Vis. Pattern Recog., pages 5460–5469, 2022. 2, 5, 6, 12,
+14, 15, 16, 17, 18, 24
+[5] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P.
+Srinivasan, and Peter Hedman. Zip-NeRF: Anti-aliased gridbased neural radiance fields. In Int. Conf. Comput. Vis., pages
+19640–19648, 2023. 1, 2, 4, 6, 8, 12, 15, 16, 17, 19, 24
+[6] David H. Brainard. The psychophysics toolbox. Spat. Vis.,
+10(4):433–436, 1997. 16
+[7] Gaurav Chaurasia, Sylvain Duchene, Olga Sorkine-Hornung,
+and George Drettakis. Depth synthesis and local warps for
+plausible image-based navigation. ACM Trans. Graph., 32
+(3), 2013. 2
+[8] Anpei Chen, Zexiang Xu, Fuqiang Zhao, Xiaoshuai Zhang,
+Fanbo Xiang, Jingyi Yu, and Hao Su. MVSNeRF: Fast generalizable radiance field reconstruction from multi-view stereo.
+In Int. Conf. Comput. Vis., pages 14104–14113, 2021. 2
+[9] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and
+Hao Su. TensoRF: Tensorial radiance fields. In Eur. Conf.
+Comput. Vis., pages 333–350. Springer-Verlag, 2022. 2
+[10] Zhiqin Chen, Thomas Funkhouser, Peter Hedman, and Andrea Tagliasacchi. MobileNeRF: Exploiting the polygon rasterization pipeline for efficient neural field rendering on mobile architectures. In IEEE/CVF Conf. Comput. Vis. Pattern
+Recog., pages 16569–16578, 2023. 2
+[11] Lu Chi, Borui Jiang, and Yadong Mu. Fast Fourier convolution. In Adv. Neural Inform. Process. Syst., pages 4479–4488.
+Curran Associates, Inc., 2020. 5, 13
+[12] Julian Chibane, Aayush Bansal, Verica Lazova, and Gerard
+Pons-Moll. Stereo Radiance Fields (SRF): Learning view
+synthesis for sparse views of novel scenes. In IEEE/CVF
+Conf. Comput. Vis. Pattern Recog., pages 7907–7916, 2021.
+2
+[13] Herbert Aron David. The method of paired comparisons.
+Charles Griffin, London, 1963. 16
+[14] Paul Debevec, Yizhou Yu, and George Boshokov. Efficient
+view-dependent IBR with projective texture-mapping. In EG
+Rendering Workshop, 1998. 2
+[15] Yikang Ding, Wentao Yuan, Qingtian Zhu, Haotian Zhang,
+Xiangyue Liu, Yuanjiang Wang, and Xiao Liu. TransMVSNet:
+Global context-aware multi-view stereo network with trans-
+9
+Conf. Comput. Vis., pages 694–711. Springer International
+Publishing, 2016. 6, 15
+[30] M. G. Kendall and B. Babington Smith. On the method of
+paired comparisons. Biometrika, 31(3-4):324–345, 1940. 15
+[31] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuehler,
+and George Drettakis. 3D Gaussian splatting for real-time
+radiance field rendering. ACM Trans. Graph., 42(4), 2023. 1,
+3, 4, 5, 6, 8, 12, 13, 17, 19
+[32] Bernhard Kerbl, Andreas Meuleman, Georgios Kopanas,
+Michael Wimmer, Alexandre Lanvin, and George Drettakis.
+A hierarchical 3D Gaussian representation for real-time rendering of very large datasets. ACM Trans. Graph., 43(4),
+2024. 3
+[33] Diederik P Kingma and Jimmy Ba. Adam: A method for
+stochastic optimization. In Int. Conf. Learn. Represent., 2015.
+11
+[34] Mario Kleiner, David Brainard, Denis Pelli, Allen Ingling,
+Richard Murray, Christopher Broussard, and Frans Cornelissen. What’s new in psychtoolbox-3? Perception, 36(14):
+1–16, 2007. 16
+[35] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen
+Koltun. Tanks and Temples: Benchmarking large-scale scene
+reconstruction. ACM Trans. Graph., 36(4), 2017. 6, 7, 12, 15,
+16, 19, 20, 24
+[36] Georgios Kopanas and George Drettakis. Improving NeRF
+quality by progressive camera placement for free-viewpoint
+navigation. In Vision, Modeling, and Visualization, pages
+11–20. The Eurographics Association, 2023. 2
+[37] Georgios Kopanas, Julien Philip, Thomas Leimkühler, and
+George Drettakis. Point-based neural rendering with per-view
+optimization. Comput. Graph. Forum, 40(4):29–43, 2021. 3
+[38] Georgios Kopanas, Thomas Leimkühler, Gilles Rainer,
+Clément Jambon, and George Drettakis. Neural point catacaustics for novel-view synthesis of reflections. ACM Trans.
+Graph., 41(6), 2022. 3
+[39] Christoph Lassner and Michael Zollhöfer. Pulsar: Efficient
+sphere-based neural rendering. In IEEE/CVF Conf. Comput.
+Vis. Pattern Recog., pages 1440–1449, 2021. 3, 13
+[40] Christian Ledig, Lucas Theis, Ferenc Huszár, Jose Caballero,
+Andrew Cunningham, Alejandro Acosta, Andrew Aitken,
+Alykhan Tejani, Johannes Totz, Zehan Wang, et al. Photorealistic single image super-resolution using a generative adversarial network. In IEEE/CVF Conf. Comput. Vis. Pattern
+Recog., pages 105–114, 2017. 15
+[41] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. NeRF:
+Representing scenes as neural radiance fields for view synthesis. In Eur. Conf. Comput. Vis., pages 405–421. Springer
+International Publishing, 2020. 1, 2, 4
+[42] Thomas Müller. tiny-cuda-nn, 2021. 11, 12, 13
+[43] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph., 41(4), 2022. 1,
+2, 3, 4, 5, 6, 12, 14, 17, 19
+[44] Thomas Neff, Pascal Stadlbauer, Mathias Parger, Andreas
+Kurz, Joerg H. Mueller, Chakravarty R. Alla Chaitanya, Anton S. Kaplanyan, and Markus Steinberger. DONeRF: Towards real-time rendering of compact neural radiance fields
+using depth oracle networks. Comput. Graph. Forum, 40(4):
+45–59, 2021. 2
+[45] E. S. Pearson and H.O. Hartley. Biometrika Tables for Statisticians. Cambridge University Press, 3 edition, 1966. 16
+[46] Eric Penner and Li Zhang. Soft 3d reconstruction for view
+synthesis. ACM Trans. Graph., 36(6), 2017. 1
+[47] Lukas Radl, Michael Steiner, Mathias Parger, Alexander Weinrauch, Bernhard Kerbl, and Markus Steinberger.
+StopThePop: Sorted Gaussian splatting for view-consistent
+real-time rendering. ACM Trans. Graph., 43(4), 2024. 3
+[48] Ruslan Rakhimov, Andrei-Timotei Ardelean, Victor Lempitsky, and Evgeny Burnaev. NPBG++: Accelerating neural
+point-based graphics. In IEEE/CVF Conf. Comput. Vis. Pattern Recog., pages 15948–15958, 2022. 3
+[49] Christian Reiser, Rick Szeliski, Dor Verbin, Pratul Srinivasan,
+Ben Mildenhall, Andreas Geiger, Jon Barron, and Peter Hedman. MERF: Memory-efficient radiance fields for real-time
+view synthesis in unbounded scenes. ACM Trans. Graph., 42
+(4), 2023. 2
+[50] Christian Reiser, Stephan Garbin, Pratul Srinivasan, Dor
+Verbin, Richard Szeliski, Ben Mildenhall, Jonathan Barron,
+Peter Hedman, and Andreas Geiger. Binary Opacity Grids:
+Capturing fine geometric detail for mesh-based view synthesis. ACM Trans. Graph., 43(4), 2024. 2, 8
+[51] Olaf Ronneberger, Philipp Fischer, and Thomas Brox. U-Net:
+Convolutional networks for biomedical image segmentation.
+In Med. Image Comput. Comput.-Assist. Interv., pages 234–
+241. Springer International Publishing, 2015. 4
+[52] Darius Rückert, Linus Franke, and Marc Stamminger. ADOP:
+Approximate differentiable one-pixel point rendering. ACM
+Trans. Graph., 41(4), 2022. 3, 4, 5, 6, 8, 12, 13, 15, 17, 19
+[53] Darius Rückert, Yuanhao Wang, Rui Li, Ramzi Idoughi, and
+Wolfgang Heidrich. NeAT: Neural adaptive tomography.
+ACM Trans. Graph., 41(4), 2022. 2
+[54] Johannes L. Schönberger and Jan-Michael Frahm. Structurefrom-motion revisited. In IEEE/CVF Conf. Comput. Vis. Pattern Recog., pages 4104–4113, 2016. 2, 12, 15
+[55] Johannes L. Schönberger, Enliang Zheng, Marc Pollefeys, and
+Jan-Michael Frahm. Pixelwise view selection for unstructured
+multi-view stereo. In Eur. Conf. Comput. Vis., pages 501–518.
+Springer International Publishing, 2016. 12, 15
+[56] Markus Schütz, Bernhard Kerbl, and Michael Wimmer. Software rasterization of 2 billion points in real time. Proc. ACM
+Comput. Graph. Interact. Tech., 5(3), 2022. 8, 13
+[57] Markus Schütz, Bernhard Kerbl, and Michael Wimmer. Rendering point clouds with compute shaders and vertex order
+optimization. Comput. Graph. Forum, 40(4):115–126, 2021.
+13
+[58] Steven M Seitz, Brian Curless, James Diebel, Daniel
+Scharstein, and Richard Szeliski. A comparison and evaluation of multi-view stereo reconstruction algorithms. In
+IEEE/CVF Conf. Comput. Vis. Pattern Recog., pages 519–
+528, 2006. 2
+[59] Harry Shum and Sing Bing Kang. Review of image-based
+rendering techniques. In Vis. Commun. Image Process., pages
+2–13. International Society for Optics and Photonics, SPIE,
+2000. 1, 2
+10
+[60] Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale image recognition. In Int.
+Conf. Learn. Represent., 2015. 15
+[61] Matthew Tancik, Ben Mildenhall, Terrance Wang, Divi
+Schmidt, Pratul P. Srinivasan, Jonathan T. Barron, and Ren
+Ng. Learned initializations for optimizing coordinate-based
+neural representations. In IEEE/CVF Conf. Comput. Vis. Pattern Recog., pages 2845–2854, 2021. 2
+[62] Ayush Tewari, Justus Thies, Ben Mildenhall, Pratul Srinivasan, Edith Tretschk, Wang Yifan, Christoph Lassner,
+Vincent Sitzmann, Ricardo Martin-Brualla, Stephen Lombardi, Tomas Simon, Christian Theobalt, Matthias Nießner,
+Jonathan T. Barron, Gordon Wetzstein, Michael Zollhöfer,
+and Vladislav Golyanik. Advances in neural rendering. Comput. Graph. Forum, 41(2):703–735, 2022. 2
+[63] Justus Thies, Michael Zollhöfer, and Matthias Nießner. Deferred neural rendering: Image synthesis using neural textures.
+ACM Trans. Graph., 38(4), 2019. 2
+[64] Haithem Turki, Deva Ramanan, and Mahadev Satyanarayanan. Mega-NeRF: Scalable construction of large-scale
+NeRFs for virtual fly-throughs. In IEEE/CVF Conf. Comput.
+Vis. Pattern Recog., pages 12912–12921, 2022. 2
+[65] Vibhas K. Vats, Sripad Joshi, David J. Crandall, Md. Alimoor Reza, and Soon-Heung Jung. GC-MVSNet: Multiview, multi-scale, geometrically-consistent multi-view stereo.
+In IEEE/CVF Winter Conf. Appl. Comput. Vis., pages 3230–
+3240, 2024. 3
+[66] Xiaofeng Wang, Zheng Zhu, Guan Huang, Fangbo Qin, Yun
+Ye, Yijia He, Xu Chi, and Xingang Wang. MVSTER: Epipolar
+transformer for efficient multi-view stereo. In Eur. Conf.
+Comput. Vis. Springer-Verlag, 2022. 3
+[67] Yi Wei, Shaohui Liu, Yongming Rao, Wang Zhao, Jiwen Lu,
+and Jie Zhou. NerfingMVS: Guided optimization of neural
+radiance fields for indoor multi-view stereo. In Int. Conf.
+Comput. Vis., pages 5590–5599, 2021. 3
+[68] Olivia Wiles, Georgia Gkioxari, Richard Szeliski, and Justin
+Johnson. SynSin: End-to-end view synthesis from a single
+image. In IEEE/CVF Conf. Comput. Vis. Pattern Recog.,
+pages 7465–7475, 2020. 3
+[69] Rundi Wu, Ben Mildenhall, Philipp Henzler, Keunhong Park,
+Ruiqi Gao, Daniel Watson, Pratul P. Srinivasan, Dor Verbin,
+Jonathan T. Barron, Ben Poole, and Aleksander Hołyński.
+ReconFusion: 3D reconstruction with diffusion priors. In
+IEEE/CVF Conf. Comput. Vis. Pattern Recog., pages 21551–
+21561, 2024. 2
+[70] Tong Wu, Yu-Jie Yuan, Ling-Xiao Zhang, Jie Yang, YanPei Cao, Ling-Qi Yan, and Lin Gao. Recent advances in
+3D Gaussian splatting. Computational Visual Media, 10(4):
+613–642, 2024. 3
+[71] Kun Xu, Wei-Lun Sun, Zhao Dong, Dan-Yong Zhao, RunDong Wu, and Shi-Min Hu. Anisotropic spherical gaussians.
+ACM Trans. Graph., 32(6), 2013. 14
+[72] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu,
+Kalyan Sunkavalli, and Ulrich Neumann. Point-NeRF: Pointbased neural radiance fields. In IEEE/CVF Conf. Comput. Vis.
+Pattern Recog., pages 5428–5438, 2022. 2, 3
+[73] Yao Yao, Zixin Luo, Shiwei Li, Tian Fang, and Long Quan.
+MVSNet: Depth inference for unstructured multi-view stereo.
+In Eur. Conf. Comput. Vis., pages 785–801. Springer International Publishing, 2018. 3
+[74] Lior Yariv, Peter Hedman, Christian Reiser, Dor Verbin,
+Pratul P. Srinivasan, Richard Szeliski, Jonathan T. Barron,
+and Ben Mildenhall. BakedSDF: Meshing neural SDFs for
+real-time view synthesis. In ACM SIGGRAPH Conference
+Papers. Association for Computing Machinery, 2023. 2, 12,
+14
+[75] Wang Yifan, Felice Serena, Shihao Wu, Cengiz Öztireli, and
+Olga Sorkine-Hornung. Differentiable surface splatting for
+point-based geometry processing. ACM Trans. Graph., 38(6),
+2019. 3
+[76] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and
+Angjoo Kanazawa. PlenOctrees for real-time rendering of
+neural radiance fields. In Int. Conf. Comput. Vis., pages 5732–
+5741, 2021. 2, 14
+[77] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa.
+pixelNeRF: Neural radiance fields from one or few images.
+In IEEE/CVF Conf. Comput. Vis. Pattern Recog., pages 4576–
+4585, 2021. 2
+[78] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and
+Andreas Geiger. Mip-Splatting: Alias-free 3D Gaussian splatting. In IEEE/CVF Conf. Comput. Vis. Pattern Recog., pages
+19447–19456, 2024. 3
+[79] Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman,
+and Oliver Wang. The unreasonable effectiveness of deep
+features as a perceptual metric. In IEEE/CVF Conf. Comput.
+Vis. Pattern Recog., pages 586–595, 2018. 15
+[80] Yi Zhou, Connelly Barnes, Jingwan Lu, Jimei Yang, and Hao
+Li. On the continuity of rotation representations in neural
+networks. In IEEE/CVF Conf. Comput. Vis. Pattern Recog.,
+pages 5738–5746, 2019. 14
+[81] Yiming Zuo and Jia Deng. View synthesis with sculpted
+neural points. In Int. Conf. Learn. Represent., 2023. 3
+A. Implementation
+We believe that the flexibility of our implicit point cloud
+could prove to be useful for future work. Here, we try to
+support such work by providing all details of our implementation.
+A.1. Overview
+We implement our method using PyTorch and create reusable PyTorch extensions using C++/CUDA for our differentiable rasterization module and multiple – otherwise
+slightly slower – stages of our sampling process. Furthermore, we use multiple libraries that provide efficient implementations for parts of our pipeline. For the multi-resolution
+hash grid as well as the background MLP, we use the implementation provided with the tiny-cuda-nn (TCNN) framework [42]. As our optimizer, we use the fused ADAM [33]
+implementation provided by the NVIDIA Apex library. To
+reduce computation time of the CNN, we also make use
+of PyTorch’s automatic mixed precision package and scale
+11
+To incorporate a point cloud I as a prior, we modify initial sampling probability: Assuming |Ii | is the number of
+points inside the volume of the i-th leaf node and Q is the
+0.95-quantile of these point counts, we compute the initial
+probability as |IQi | , clipping values with 0.1 and 1.0 for increased robustness.
+FP16 gradients by a fixed factor of 128 during the backward
+pass.
+A.2. Pre-Processing Details
+Lens Distortion. For the Tanks and Temples dataset [35],
+the original images are subject to slight lens distortions.
+While our rendering supports radial and tangential distortion,
+we use COLMAP [54, 55] to extract undistorted images
+after camera calibration to ensure fair comparison against
+the selected baselines. Specifically, 3DGS [31] only works
+with a pinhole camera model. Note that the undistorted
+images are used by all of the compared methods, including
+INPC.
+Scene Normalization. We follow Barron et al. [4] and apply
+a world-space transformation to all camera poses so that they
+fit inside a cube [−1, 1]3 . We apply the same transformation
+to the SfM point cloud if it is used. For all scenes, we set the
+values for near and far plane to 0.01 and 100 respectively.
+Ensuring Sample Count. For our viewpoint-specific sampling, a major difficulty comes from dealing with those
+leaves whose volume intersects the faces of the viewing
+frustum. For these, it is possible that positions generated by
+our sampling scheme lie outside the frustum. To this end,
+we re-sample until the desired number of samples is reached.
+Note that our re-weighting scheme for sampling probabilities
+does not account for partial visibility of voxels. This means
+simply placing points inside the visible volume of each leaf
+would slightly bias sampling towards partially visible leaves.
+We avoid this by re-sampling the viewpoint-specific probability distribution for affected samples repeatedly until all
+generated samples are visible. Notably, our multisampling
+approach allows us to omit this step during inference, which
+speeds up sampling.
+A.3. Optimization Details
+For ADAM, we use β1 = 0.9, β2 = 0.99, ϵ = 10−15 , and
+disable weight decay. The learning rates for all parameters
+are exponentially decayed during the optimization. For the
+hash grid and MLP parameters, we decay the learning rate
+from 1e−2 to 3e−4, while CNN parameter learning rates
+are decayed from 3e−4 to 5e−5.
+When using differentiable tone mapping as proposed by
+Rückert et al. [52], we follow the authors and only activate
+the sub-modules for exposure and camera response. Similar
+to Rückert et al. [52], these parameters are updated with a
+fixed learning rate of 5e−4 and 1e−3 respectively. However,
+we use a warm-up strategy [3] where the learning rate cosinedelayed by multiplying with a factor between 0.01 and 1
+during the first 5, 000 iterations. This is slightly different
+from the original version that simply disabled optimization
+of tone mapping parameters during the first few iterations.
+Depth Calculation. For our view-specific re-weighting
+scheme, we look to obtain a view-specific depth value di ∈
+[0, 1] for each leaf node. To this end, we adjust the distance
+of each leaf center to the image plane, i.e., the view-space
+depth value zview :
+di = max (
+|zview − near|
+, τd ).
+far
+(8)
+Note that |zview − near| accounts for the fact that zview may
+be smaller than ”near” for partially visible leaves (see the
+previous paragraph). To prevent extreme cases of oversampling close to the camera, we use a threshold τd = 10−8 in
+all experiments.
+A.4. Point Probability Octree Details
+A.5. TCNN Details
+Initialization. For each scene, we define bmin , bmax ∈ R3
+as the axis-aligned bounding box of the SfM point cloud
+and enlarge the result by 10% for increased robustness. If
+no SfM point cloud is available, we instead use the smallest
+axis-aligned box enclosing the viewing frustra of all training cameras. Given a desired initial resolution R and the
+aforementioned bounding box of the scene, we initialize our
+octree-based data structure as a regular grid of cube-shaped
+voxels. These 3D voxels are the initial leaf nodes of P.
+For each leaf node, we store its center ci ∈ R3 in world
+space, current subdivision level li ∈ N0 , sampling probability pi ∈ [0, 1], and subdivision ”probability” qi ∈ [0, 1].
+We limit values of R to powers of 2 and can thus initialize
+the initial subdivision level as log2 (N ) for all leaf nodes.
+For the multi-resolution hash grid and the accompanying
+MLP, we use the implementation from the TCNN framework [42]. We tested different configurations using those
+employed by prior works [5, 43, 74] as a starting point. Our
+resulting configuration is shown in Listing 1. It is similar to
+the one used by Zip-NeRF [5], but we increase the hashmap
+size from 221 to 223 (see Appendix B for ablations). For
+the background MLP we also use the fully-fused implementation from the TCNN framework [42]. It has four hidden
+layers with 128 neurons each and uses ReLU activations. For
+each pixel, we encode its normalized viewing direction using
+spherical harmonics of degree three before inputting into the
+MLP. Note that in TCNN this means using 'degree': 4
+and converting input directions to [0, 1]3 .
+12
+falls below 10−4 . The full algorithm, which we implement in
+CUDA to achieve accelerated rendering times, can be written
+as shown in Algorithm 1. We use the NVIDIA CUB library
+for the exclusive sum as well as the global radix sorting of
+key/value pairs. As we identify global memory accesses to
+be the main performance bottleneck for our blending kernel, we implement it using CUDA’s warp-level primitives
+distributing the workload for each pixel over a full warp of
+32 threads. The blending weight computation required for
+updating P as well as the spherical harmonics computations
+are fused into this pipeline. During optimization, we store
+the bilinear interpolation weights, per-pixel point counts, and
+sorted key/index buffers for the backward pass. To compute
+per-splat gradients we process them in the same order as in
+the forward pass. We obtain a per-point gradient by combining its four splat gradients in a weighted sum according
+to the respective bilinear interpolation weights, i.e., the analytical derivative of the bilinear splatting process. For the
+probability field updates, we also need to combine per-splat
+blending weights of each point. Interestingly, we observe
+that the use of a weighted sum according to the respective
+bilinear interpolation weights outperforms the theoretically
+correct approach of a simple sum in all our experiments. We
+believe this is because the weighted sum causes the resulting
+per-point blending weight to more closely resemble the expected visibility of future samples from the leaf from which
+the point was sampled.
+A.6. Bilinear Splatting Details
+Prior work on point rasterization has demonstrated that software implementations are a) very fast [56, 57] compared to
+hardware implementations, e.g., GL_POINTS, and b) allow
+for backward pass implementations suited for gradient-based
+optimization [39, 52]. Motivated by these insights, we set
+out to design our own rasterization module in an effort to
+adapt it to the needs of our rendering pipeline.
+Part of why MLP-based radiance fields works so well
+is the fully differentiable color accumulation of multiple
+samples for a given pixel. While NeRF uses a volume
+rendering-based formulation, recent successful point-based
+methods [19, 31] use conventional α-blending, which is similarly favorable for gradient-based optimization. We deem
+the extra cost of sorting points worthy with respect to to the
+superior optimization properties.
+The second consideration is the selection of points
+blended into each pixel. Typically, each point is projected
+onto a single pixel using the extrinsic and intrinsic camera
+matrices. Using this approach, the unstructured and disconnected nature of point clouds may cause large holes in the
+resulting image. To this end, we follow the common practice
+of optimizing a hole-filling CNN alongside the rest of our
+model, which helps a great deal but causes other downstream
+problems such as temporal instabilities. However, other approaches for addressing the issue exist. Among these, splatting is a well-established technique in rasterization-based
+rendering where the same point may influence multiple pixels at once. Furthermore, splatting ameliorates the problems
+arising from the need of discrete pixel coordinates for drawing each point. While, mathematically speaking, a point is
+always projected onto a single pixel, giving the same weight
+to points projected near pixel boundaries and those projected
+into the center of a pixel can be problematic for gradientbased optimization. We therefore splat each point into the
+four closest pixels and achieve this by downweighting its
+opacity using bilinear interpolation before blending it into
+each pixel (see main paper). During α-blending, we stop
+accumulation for a pixel once the remaining transmittance
+A.7. CNN Details
+For the rendering network, we use a standard three-layer
+U-Net architecture with 64 initial filters, GELU activations,
+average pooling for downsampling, and bilinear interpolation
+followed by a point-wise convolution for upsampling. One
+important change is the introduction of a single residual
+block based on Fast Fourier Convolution (FFC) [11]. We use
+the authors’ implementation with αin , αout = 0.75 and no
+further modifications. To avoid having to crop or pad when
+concatenating tensors for the employed skip-connections in
+the expansive path of the U-Net, we pad the target width
+and height to a multiple of 2L−1 , where L is the number of
+layers in the U-Net, before initiating our rendering pipeline.
+Listing 1 Hash grid configuration for the tiny-cuda-nn
+implementation [42].
+Algorithm 1 GPU rasterization with bilinear splatting and
+α-blending
+encoding_config = {
+'otype': 'Grid',
+'type': 'Hash',
+'n_levels': 10,
+'n_features_per_level': 4,
+'log2_hashmap_size': 23,
+'base_resolution': 16,
+'per_level_scale': 2.0,
+'interpolation': 'Linear'
+}
+network_config = {
+'otype': 'FullyFusedMLP',
+'activation': 'ReLU',
+'output_activation': 'None',
+'n_neurons': 64,
+'n_hidden_layers': 1
+}
+Input: C: Camera model
+Input: P, A, F : Point positions, opacities, and features
+Output: I: Image
+1: function R ASTERIZE(C, P, A, F )
+2:
+P ′ ← P ROJECTA ND C ULL(P, C)
+3:
+A′ , K, N ← B ILINEAR S PLATTING(P ′ , A)
+4:
+L ← E XCLUSIVE S UM(N )
+5:
+R ADIX S ORT PAIRS(K, L)
+6:
+I ← B LEND S ORTED S PLATS(A′ , F, L, N )
+7:
+return I
+8: end function
+13
+▷ Splat α, keys, counts
+▷ Splat indices
+▷ Global sort
+▷ Per-pixel α-blending
+Viewpoint-Specific Sampling. We show the impact of
+omitting/changing parts of our view-specific re-weighting
+scheme used when sampling our point probability octree P.
+Without any re-weighting, i.e., sampling the whole scene for
+every viewpoint, we observe a significant drop in quality of
+the reconstruction. We further observe that the depth term
+1/di is more important than the size term 1/2li ·λl . While intuition may suggest that the depth term should be squared
+for a perspective camera model to not overemphasize on the
+background, we show that this leads to worse results. This is
+caused by the use of a CNN for hole-filling, as it can easily
+fill slightly larger holes close to the camera but may not
+correctly produce clean background with less samples. As a
+result, placing more samples in the background is beneficial
+for our method. Along the same lines, we expected λl = 2
+to work best, as it most closely resembles the relative size
+of leaves when projected onto the 2D image plane. However, this performs much worse than using λl = 0.5, which
+we think is due to the fact that for better observed regions
+leaves are more likely to get subdivided. Thus, overemphasizing smaller leaves leads to more samples being placed
+into well-reconstructed areas, which improves results.
+Appearance Field. Our appearance field A requires querying with positions in [0, 1]3 , for which a employ spherical
+contraction [4]. If we instead use the bounding box of P for
+the normalization, we observe a less detailed reconstruction
+of the well-observed foreground. We further show that using
+smaller hashmaps for the multi-resolution hash grid has a
+modest impact on speed and quality but a major impact on
+model size. Note that the impact on speed mostly depends
+on the amount of available L2 cache on the used GPU, which
+was extensively discussed by Müller et al. [43]
+View-Dependence. We also analyze different representations for capturing view-dependent effects. Not modeling
+view-dependence at all produces the worst results and using
+one spherical harmonics (SH) degree less impacts quality
+only on a few scenes. Alternatives to SH such as spherical
+Gaussians (SG) [74, 76] and anisotropic spherical Gaussians
+(ASG) [71] perform worse in our tests. For SG, we encode
+the lobe width inside the length of the mean vector, which
+results in 25 and 32 parameters per point with three and four
+lobes respectively. For ASG, we use a 6D feature vector
+representing a rotation matrix [80] for each lobe and use the
+basis vectors of this matrix to model the anisotropic extent.
+This results in 15 parameters per point for a configuration
+with a single ASG lobe. We would like to emphasize that we
+find the ASG representation in particular much more elegant
+and compact as it uses more than 2× less features per point
+and is theoretically less likely to overfit to the training views.
+However, we observe that it is much harder to optimize using
+gradient descent compared to SH.
+U-Net. Lastly, we analyze the impact of using smaller UNet configurations w.r.t. speed and image quality. Using less
+Note that this requires adjusting the principal point to allow
+for renderings that – after removing the padded pixels – can
+properly be compared to ground truth images for loss or
+quality metric computation.
+Configuration
+LPIPS↓ SSIM↑ PSNR↑
+Train Render Size
+(hrs)↓ (fps)↑ (GB)↓
+A) No D-SSIM Loss
+B) No VGG Loss
+C) No Weight Decay
+D) No Subdivision
+E) No Bilinear Splatting
+F) No Multisampling
+G) No SfM Prior
+H) No Background Model
+I) No FFC Block
+J) No Post-Processing
+0.204
+0.238
+0.210
+0.508
+0.243
+0.201
+0.197
+0.197
+0.207
+0.277
+0.729
+0.754
+0.744
+0.406
+0.708
+0.740
+0.753
+0.752
+0.749
+0.718
+25.27
+25.29
+25.22
+19.15
+24.36
+25.02
+25.29
+25.28
+25.32
+24.32
+4.24
+3.43
+3.69
+4.07
+4.14
+4.25
+4.25
+4.24
+4.15
+4.05
+9.8
+9.8
+9.8
+9.9
+11.7
+26.3
+9.8
+9.9
+10.0
+5.6
+1.1
+1.1
+1.1
+0.88
+1.1
+1.1
+1.1
+1.1
+1.1
+1.1
+P: No Viewpoint Bias
+P: No Depth Re-weighting
+P: di → d2i
+P: No Size Re-weighting
+P: λl = 2
+A: No Space Contraction
+A: Hashmap Size 221
+A: Hashmap Size 222
+A: No View-Dependence
+A: SH Degree 1
+A: 3 SG Lobes
+A: 4 SG Lobes
+A: 1 ASG Lobe
+U-Net: 32 Initial Filters
+U-Net: 2 Layers
+Ours (4M)
+0.328
+0.226
+0.210
+0.198
+0.363
+0.242
+0.203
+0.201
+0.205
+0.196
+0.197
+0.197
+0.200
+0.206
+0.207
+0.228
+0.618
+0.721
+0.740
+0.753
+0.557
+0.702
+0.750
+0.751
+0.743
+0.753
+0.753
+0.755
+0.751
+0.750
+0.745
+0.733
+23.23
+24.72
+25.04
+25.27
+22.01
+24.59
+25.23
+25.34
+24.80
+25.32
+25.26
+25.26
+25.16
+25.23
+24.88
+24.93
+3.83
+4.25
+4.25
+4.25
+4.25
+4.45
+3.57
+3.76
+4.13
+4.16
+4.58
+4.85
+4.69
+3.84
+4.23
+3.61
+10.1
+9.8
+9.8
+9.8
+9.8
+10.2
+10.6
+10.4
+11.6
+10.4
+8.2
+7.8
+8.4
+10.6
+9.8
+17.5
+1.0
+1.1
+1.1
+1.1
+1.1
+1.1
+0.52
+0.73
+1.1
+1.1
+1.1
+1.1
+1.1
+1.1
+1.1
+1.1
+Ours (8M)
+0.192
+0.761
+25.53
+4.25
+9.8
+1.1
+Table 4. Model ablations computed on the five Mip-NeRF360
+outdoor scenes.
+B. Additional Ablations
+In Tab. 4, we show additional model ablations computed
+by running various versions of our 8M configuration on the
+five outdoor scenes from the Mip-NeRF360 dataset [4]. For
+all configurations, we also include model size as well as
+optimization time and inference frame rate measured on the
+Bicycle scene (1237 × 822 pixels). To avoid any confusion,
+we want to mention that we re-computed the results of the
+baseline configuration Ours (8M) for the ablation studies.
+As our method produces marginally different results in every
+run, the results are not exactly the same as in Tab. 6. This
+also applies to the corresponding tables from the main paper. The reason for these slightly different results lies in
+the fact that the PyTorch modules we use for the CNN use
+fast implementations provided by the CUDA Deep Neural
+Network (cuDNN) API. For floating point numbers, applying associative operations in different order might slightly
+change the result. Many cuDNN kernels do not ensure identical ordering of operations for every kernel launch to obtain
+faster computation times. Therefore, the slight differences
+in results can not be prevented by, e.g., using a fixed random
+seed – which we are doing anyways.
+14
+initial filters considerably speeds up training and rendering at
+the cost of image quality. In contrast, using only two layers
+barely has any impact on speed but reduces image quality
+significantly.
+Other. We show effect of using even less samples (4M)
+and observe much faster training and rendering with only
+slightly reduced image quality. Here, we also want to highlight that for ablation J, which uses no post-processing but
+16M samples instead, the rendering speed is lower than with
+8M samples and post-processing enabled. Reducing the
+number of samples to 8M results in 2.51 hours training time
+and 10.9 fps. In combination, these two observations suggest finding a method for hole-filling that works with fewer
+samples without requiring a CNN could lead to a remarkably
+powerful point-based representation in the future.
+tion in combination with our quantitative evaluation, it is
+easy to assume that our LPIPS results are so good specifically because we use a VGG-based loss term (LVGG ). We
+highlight that – similar to prior works [19, 40, 52] – our
+VGG loss uses the VGG-19 [60] architecture. This is a key
+difference compared to both the original version of the loss
+by Johnson et al. [29] and the used LPIPS metric. Our ablation study (see Tab. 4) clearly shows that using the VGG
+loss improves results w.r.t. all three reported quality metrics. To further validate that exploitation of similarities in
+the VGG-16 and VGG-19 architectures is not a deciding
+factor for our improved results, we include all three available
+versions of LPIPS (LPIPSvgg /LPIPSalex /LPIPSsqueeze ) in the
+per-scene result tables (Tab. 6 and 7). Our method achieves
+the best average performance for all versions of LPIPS on
+both datasets.
+C. Per-Scene Results
+D. Perceptual Experiment
+Mip-NeRF360. [4] We show per-scene image quality metrics and visual comparisons in Tab. 6 and Fig. 6 respectively.
+We follow the common practice of using 4× downsampling
+for the five outdoor scenes and 2× downsampling for the four
+indoor scenes. Consequently, reconstructions and evaluation
+use images with roughly one megapixel (MP) resolution for
+outdoor and 1.5 MP resolution for indoor scenes. Importantly, we directly use the downsampled images provided
+with the dataset as we observe that these are of considerably higher quality compared to the output of commonly
+used downsampling implementations, e.g., those provided
+by OpenCV, PIL, and PyTorch/Torchvision. In our tests, the
+used downsampling algorithm had a non-negligible influence
+on results. When using the downsampled images Barron et al.
+[4] obtained using ImageMagick, we notice more accurate
+recovery of fine details but up to 0.5 db lower PSNR values.
+Intuitively this makes sense: A better downsampling algorithm leads to more details that can be recovered but also
+more details that must be recovered to achieve good metrics.
+However, we suggest that a detailed study on the influence
+of using different downsampling algorithms in the context
+of novel view synthesis could be interesting.
+Tanks and Temples. [35] We show per-scene image quality
+metrics and visual comparisons in Tab. 7 and Fig. 7 respectively. We evaluate on all eight scenes of the intermediate
+set and use no downsampling, which results in images that
+have a resolution of roughly two MP. As the Tanks and
+Temples dataset does not include camera parameters, we
+estimate them using COLMAP [54, 55] and use the resulting
+calibration for all methods/experiments.
+About LPIPS and the VGG Loss. The most commonly
+used version of the Learned Perceptual Image Patch Similarity (LPIPS) [79] metric uses a VGG-16 [60] architecture,
+where 16 quantifies the number of convolution layers in the
+employed neural network. When inspecting our loss func-
+The objective of our perceptual experiment is to compare,
+from an observer’s perspective, the novel view results of
+our method and Zip-NeRF [5] (the method achieving the
+best quality metrics’ scores among the compared-against
+methods). This necessitates the presentation of a multitude
+of stimuli, the distinctions between which are frequently
+nuanced. It is also crucial to acknowledge that the quality of the results we seek to quantify cannot be accurately
+represented on a linear scale [30]. This underscores the limitations of ranking methods in this context. Accordingly, the
+paired comparisons technique was selected for use in this
+experiment. This technique requires participants to view two
+images simultaneously and then select the one that more
+closely aligns with the task question. This resulted in a
+two-alternatives forced-choice (2AFC) preference task, in
+which each result was compared to the corresponding other
+method’s results for the same image.
+D.1. Experimental Design
+Stimuli. Consistently with the analysis of the main paper,
+the stimuli were selected from the well established datasets
+Mip-NeRF360 [4] and Tanks and Temples [35]. In order
+to maintain the number of trials of the experiment under a
+reasonable number that allows for a single participant to perform a complete test while maintaining the necessary level of
+attention, we selected a set of three novel views per scene, for
+all scenes in both considered datasets. The criteria for selection aimed to cover the maximum possible diversity in image
+attributes (i.e., background/foreground objects, recurring
+texture, scene composition, lighting, faces/people, lines/
+clear edges, view angle/focus depth, textual elements) for a
+given scene. For those scenes were the attributes were not
+sufficiently sampled, we extended the number of considered
+novel views (i.e., Room: 4, Lighthouse: 4, M60: 5). We then
+15
+P [R ≥ R′ ] ≤ α, where the confidence level, set at 0.01,
+is represented by α. Subsequently, in accordance with the
+methodology proposed by Herbert A. David [13], we can
+derive R′ from the following equation:
+gathered the corresponding results of both Zip-NeRF [5] and
+our method, for a total of 55 paired comparisons (see Fig. 8).
+Participants. A total of 17 participants were included in
+the study, with an age range of 22 to 55 years and a gender
+distribution of 4 females, 1 non-available, and 12 males. All
+participants reported normal or corrected-to-normal vision.
+Additionally, the majority of participants indicated an intermediate level of proficiency in computer graphics and image
+processing, as measured on a scale of 1 to 4, with 1 indicating no experience and 4 indicating advanced proficiency.
+Procedure. The participants performed the experiment insitu one at a time. Before starting the experiment, each participant signed an informed consent form. They were then
+given an explanation on the experimental task and provided
+with the options of asking any questions. However, they
+were neither informed of the research question behind the
+experiment, nor of the nature (e.g., captured vs. generated)
+of the images they were presented with. The participant was
+asked to sit roughly 50 cm in front of a 27” UHD monitor (at
+a resolution of 3840 × 2160) in a semi-dark room. After the
+experimenter gathered the participant’s demographic data,
+the partaker was presented with a screen describing once
+again the instructions. Before the experimenter left the room,
+the participants were given another chance to ask any further questions. Each trial started by presenting two images
+side by side over a black background. Participants were not
+explicitly instructed to focus their attention on anything in
+particular, but to just select which of the two images they
+found more appealing. The participants were able to enter
+their answers by clicking on the desired image without having any restriction regarding the time to make their choice;
+once a response was entered, the next trial started. Both the
+order of the pairs of stimuli, and their position on the screen
+(left vs. right) was fully randomized, with each participant
+receiving a different random order. The experiment was controlled by Psychophysics Toolbox Version 3.0.15 (PTB-3)
+[6, 34], and the mean time to complete it was of 21 minutes.
+P (Wt,α ≥
+2R′ − 0.5
+√
+),
+mt
+(9)
+where m is the number of participants, t is the number
+of methods to be compared, and Wt,α has been previously tabulated by Pearson and Hartley [45]. In our case,
+′
+W2,0.01 = 3.645, which leads to RExp
+= 10.87691 for our
+experiment.
+Since the score differences between all ranked groups
+exceed the aforementioned R′ , we can conclude that they
+are all statistically significant. Thus, the ranking creates two
+distinguishable groups within our experimental context.
+Dataset
+Method
+#Votes
+Ranking
+Mip-NeRF360 [4]
+Ours
+Zip-NeRF [5]
+331
+145
+1st
+2nd
+Tanks & Temples [35]
+Ours
+Zip-NeRF [5]
+318
+141
+1st
+2nd
+All Stimuli
+Ours
+Zip-NeRF [5]
+649
+286
+1st
+2nd
+Table 5. Perceptual ranking of the compared methods in our experiment with 17 participants. All rankings are statistically significant.
+D.2. Analysis
+To assess not only the efficacy of each method, but also
+the consistency of participant responses, we employed the
+linked-paired comparison design [13]. Accordingly, the
+methods are ranked according to the number of times they
+are preferred over the other method. The total number of
+votes a pair of stimuli received is displayed in Fig. 8, while
+the votes over datasets and over all stimuli are displayed
+in Tab. 5. These results favorably rank our method over ZipNeRF in all scenarios. In order to ascertain the true meaning
+of this ranking, a significance test of the score differences is
+performed. In order to achieve this objective, it is necessary
+to identify a value, designated as R′ , which represents the
+minimum variance-normalized range of scores within each
+group. This necessitates the computation of R′ such that
+16
+Method
+Bicycle
+Flowers
+Garden
+LPIPSvgg ↓ on Mip-NeRF360 [4]
+Stump
+Treehill
+Bonsai
+Counter
+Kitchen
+Room
+Average
+Instant-NGP [43]
+ADOP [52]
+TRIPS [19]
+3DGS [31]
+Zip-NeRF [5]
+Ours
+0.478
+0.250
+0.223
+0.229
+0.228
+0.161
+0.466
+0.361
+0.318
+0.366
+0.309
+0.212
+0.289
+0.203
+0.183
+0.118
+0.127
+0.086
+0.474
+0.305
+0.309
+0.244
+0.236
+0.173
+0.496
+0.354
+0.308
+0.367
+0.281
+0.215
+0.258
+0.223
+0.153
+0.253
+0.196
+0.137
+0.368
+0.264
+0.206
+0.262
+0.223
+0.184
+0.249
+0.221
+0.154
+0.158
+0.134
+0.123
+0.340
+0.241
+0.197
+0.289
+0.238
+0.187
+0.380
+0.259
+0.213
+0.254
+0.219
+0.164
+Ours (16M)
+Ours (8M)
+Ours (pre-ex.)
+0.171
+0.183
+0.220
+0.220
+0.246
+0.254
+0.090
+0.098
+0.113
+0.190
+0.210
+0.278
+0.226
+0.242
+0.276
+0.149
+0.163
+0.156
+0.187
+0.212
+0.224
+0.126
+0.134
+0.137
+0.195
+0.202
+0.200
+0.173
+0.188
+0.207
+Method
+Bicycle
+Flowers
+Garden
+SSIM↑ on Mip-NeRF360 [4]
+Stump
+Treehill
+Bonsai
+Counter
+Kitchen
+Room
+Average
+Instant-NGP [43]
+ADOP [52]
+TRIPS [19]
+3DGS [31]
+Zip-NeRF [5]
+Ours
+0.513
+0.665
+0.704
+0.770
+0.772
+0.805
+0.485
+0.494
+0.502
+0.602
+0.637
+0.668
+0.706
+0.741
+0.773
+0.869
+0.863
+0.886
+0.591
+0.666
+0.681
+0.774
+0.788
+0.826
+0.544
+0.556
+0.591
+0.637
+0.674
+0.702
+0.904
+0.818
+0.899
+0.938
+0.952
+0.954
+0.816
+0.769
+0.845
+0.905
+0.905
+0.912
+0.856
+0.737
+0.850
+0.921
+0.929
+0.932
+0.870
+0.839
+0.883
+0.913
+0.929
+0.932
+0.698
+0.723
+0.778
+0.814
+0.828
+0.847
+Ours (16M)
+Ours (8M)
+Ours (pre-ex.)
+0.796
+0.783
+0.731
+0.655
+0.645
+0.617
+0.884
+0.876
+0.852
+0.811
+0.790
+0.711
+0.695
+0.688
+0.645
+0.950
+0.942
+0.941
+0.912
+0.896
+0.880
+0.933
+0.927
+0.923
+0.930
+0.926
+0.920
+0.841
+0.830
+0.802
+Method
+Bicycle
+Flowers
+Garden
+PSNR↑ on Mip-NeRF360 [4]
+Stump
+Treehill
+Bonsai
+Counter
+Kitchen
+Room
+Average
+Instant-NGP [43]
+ADOP [52]
+TRIPS [19]
+3DGS [31]
+Zip-NeRF [5]
+Ours
+22.21
+22.60
+23.47
+25.25
+25.85
+26.26
+20.68
+19.68
+19.44
+21.52
+22.33
+22.41
+25.14
+24.85
+25.38
+27.41
+28.22
+28.52
+23.47
+24.18
+24.17
+26.55
+27.35
+27.71
+22.42
+20.99
+22.04
+22.49
+23.95
+24.16
+30.69
+24.33
+28.71
+31.98
+34.79
+33.89
+26.69
+23.09
+27.00
+28.69
+29.12
+29.38
+29.48
+23.61
+27.66
+30.32
+32.36
+31.81
+29.71
+25.97
+29.07
+30.63
+33.04
+32.89
+25.61
+23.54
+25.94
+27.20
+28.56
+28.56
+Ours (16M)
+Ours (8M)
+Ours (pre-ex.)
+26.09
+25.77
+24.45
+22.19
+22.12
+21.60
+28.34
+28.09
+26.78
+27.44
+26.85
+25.35
+24.20
+24.05
+23.41
+33.29
+31.90
+31.72
+29.20
+28.39
+26.69
+31.61
+30.92
+30.47
+32.91
+32.36
+31.22
+28.36
+27.83
+26.85
+Method
+Bicycle
+Flowers
+Garden
+LPIPSalex ↓ on Mip-NeRF360 [4]
+Stump
+Treehill
+Bonsai
+Counter
+Kitchen
+Room
+Average
+Instant-NGP [43]
+ADOP [52]
+TRIPS [19]
+3DGS [31]
+Zip-NeRF [5]
+Ours
+0.389
+0.166
+0.138
+0.165
+0.161
+0.124
+0.385
+0.280
+0.218
+0.340
+0.213
+0.169
+0.221
+0.132
+0.103
+0.074
+0.085
+0.057
+0.342
+0.208
+0.205
+0.151
+0.129
+0.112
+0.468
+0.278
+0.218
+0.318
+0.223
+0.163
+0.123
+0.129
+0.073
+0.132
+0.092
+0.070
+0.244
+0.177
+0.124
+0.161
+0.129
+0.123
+0.137
+0.151
+0.102
+0.099
+0.082
+0.083
+0.206
+0.164
+0.123
+0.170
+0.133
+0.116
+0.279
+0.177
+0.133
+0.179
+0.139
+0.113
+Ours (16M)
+Ours (8M)
+Ours (pre-ex.)
+0.137
+0.152
+0.170
+0.183
+0.213
+0.207
+0.060
+0.067
+0.078
+0.131
+0.161
+0.192
+0.173
+0.214
+0.232
+0.080
+0.098
+0.090
+0.125
+0.153
+0.156
+0.087
+0.096
+0.095
+0.120
+0.129
+0.128
+0.122
+0.143
+0.150
+Method
+Bicycle
+Flowers
+Garden
+LPIPSsqueeze ↓ on Mip-NeRF360 [4]
+Stump
+Treehill
+Bonsai
+Counter
+Kitchen
+Room
+Average
+Instant-NGP [43]
+ADOP [52]
+TRIPS [19]
+3DGS [31]
+Zip-NeRF [5]
+Ours
+0.260
+0.104
+0.089
+0.108
+0.095
+0.073
+0.269
+0.179
+0.131
+0.246
+0.136
+0.094
+0.137
+0.091
+0.072
+0.051
+0.053
+0.037
+0.254
+0.139
+0.141
+0.112
+0.102
+0.079
+0.285
+0.155
+0.123
+0.213
+0.117
+0.090
+0.105
+0.084
+0.049
+0.127
+0.085
+0.050
+0.185
+0.111
+0.080
+0.134
+0.093
+0.082
+0.112
+0.096
+0.065
+0.078
+0.061
+0.057
+0.155
+0.103
+0.078
+0.148
+0.103
+0.076
+0.196
+0.112
+0.084
+0.135
+0.094
+0.071
+Ours (16M)
+Ours (8M)
+Ours (pre-ex.)
+0.081
+0.091
+0.102
+0.104
+0.122
+0.119
+0.040
+0.045
+0.049
+0.093
+0.111
+0.133
+0.096
+0.113
+0.120
+0.058
+0.069
+0.061
+0.084
+0.104
+0.103
+0.059
+0.064
+0.063
+0.079
+0.086
+0.082
+0.077
+0.089
+0.092
+Table 6. Per-scene image quality metrics for the Mip-NeRF360 dataset [4] separated into outdoor and indoor scenes. The three best results
+are highlighted in green in descending order of saturation.
+17
+TRIPS
+3DGS
+Zip-NeRF
+Ours
+Figure 6. Visual comparisons for multiple scenes of the Mip-NeRF360 dataset [4].
+18
+Ground Truth
+LPIPSvgg ↓ on Tanks and Temples [35]
+Lighthouse
+M60
+Method
+Family
+Francis
+Horse
+Instant-NGP [43]
+ADOP [52]
+TRIPS [19]
+3DGS [31]
+Zip-NeRF [5]
+Ours
+0.413
+0.203
+0.176
+0.236
+0.172
+0.115
+0.439
+0.233
+0.266
+0.344
+0.270
+0.227
+0.458
+0.201
+0.182
+0.239
+0.181
+0.134
+0.439
+0.242
+0.277
+0.291
+0.281
+0.217
+Ours (16M)
+Ours (8M)
+Ours (pre-ex.)
+0.125
+0.141
+0.174
+0.241
+0.253
+0.292
+0.146
+0.159
+0.207
+0.236
+0.275
+0.265
+Method
+Family
+Francis
+Horse
+Instant-NGP [43]
+ADOP [52]
+TRIPS [19]
+3DGS [31]
+Zip-NeRF [5]
+Ours
+0.729
+0.807
+0.849
+0.871
+0.893
+0.905
+0.812
+0.860
+0.879
+0.901
+0.918
+0.915
+0.733
+0.842
+0.871
+0.889
+0.909
+0.914
+0.759
+0.782
+0.792
+0.834
+0.835
+0.833
+0.810
+0.835
+0.862
+0.901
+0.905
+0.903
+Ours (16M)
+Ours (8M)
+Ours (pre-ex.)
+0.902
+0.895
+0.864
+0.906
+0.906
+0.879
+0.909
+0.905
+0.877
+0.822
+0.804
+0.808
+0.884
+0.848
+0.864
+Method
+Family
+Francis
+Horse
+Instant-NGP [43]
+ADOP [52]
+TRIPS [19]
+3DGS [31]
+Zip-NeRF [5]
+Ours
+21.47
+24.29
+24.03
+25.05
+28.05
+28.52
+23.96
+21.92
+20.06
+27.64
+29.55
+26.85
+18.45
+23.87
+23.45
+24.18
+27.67
+27.73
+21.17
+18.28
+18.09
+21.76
+22.31
+21.83
+24.87
+23.66
+25.52
+27.82
+28.86
+27.77
+Ours (16M)
+Ours (8M)
+Ours (pre-ex.)
+28.05
+27.92
+26.20
+26.61
+26.09
+24.23
+27.10
+26.86
+24.53
+21.40
+21.08
+20.96
+26.55
+24.56
+25.22
+Method
+Family
+Francis
+Horse
+Instant-NGP [43]
+ADOP [52]
+TRIPS [19]
+3DGS [31]
+Zip-NeRF [5]
+Ours
+0.337
+0.142
+0.114
+0.152
+0.105
+0.073
+0.295
+0.122
+0.138
+0.187
+0.125
+0.113
+0.387
+0.138
+0.115
+0.144
+0.099
+0.072
+0.313
+0.180
+0.187
+0.197
+0.174
+0.152
+Ours (16M)
+Ours (8M)
+Ours (pre-ex.)
+0.087
+0.105
+0.128
+0.126
+0.139
+0.182
+0.085
+0.099
+0.148
+0.176
+0.222
+0.200
+Method
+Family
+Francis
+Horse
+Instant-NGP [43]
+ADOP [52]
+TRIPS [19]
+3DGS [31]
+Zip-NeRF [5]
+Ours
+0.251
+0.090
+0.076
+0.120
+0.074
+0.050
+0.224
+0.085
+0.134
+0.180
+0.104
+0.093
+0.302
+0.091
+0.080
+0.122
+0.073
+0.052
+0.245
+0.118
+0.144
+0.164
+0.131
+0.112
+0.207
+0.100
+0.086
+0.137
+0.094
+0.091
+0.194
+0.088
+0.071
+0.127
+0.091
+0.080
+Ours (16M)
+Ours (8M)
+Ours (pre-ex.)
+0.058
+0.071
+0.083
+0.102
+0.111
+0.132
+0.060
+0.071
+0.102
+0.126
+0.159
+0.139
+0.133
+0.183
+0.141
+0.113
+0.148
+0.110
+Panther
+Playground
+Train
+Average
+0.367
+0.225
+0.204
+0.244
+0.212
+0.182
+0.355
+0.219
+0.191
+0.241
+0.217
+0.178
+0.547
+0.231
+0.222
+0.291
+0.251
+0.172
+0.487
+0.302
+0.267
+0.320
+0.279
+0.287
+0.438
+0.236
+0.229
+0.276
+0.233
+0.189
+0.239
+0.304
+0.263
+0.220
+0.267
+0.232
+0.195
+0.215
+0.237
+0.356
+0.398
+0.421
+0.220
+0.252
+0.261
+Panther
+Playground
+Train
+Average
+0.840
+0.859
+0.884
+0.910
+0.908
+0.912
+0.550
+0.785
+0.771
+0.834
+0.846
+0.878
+0.666
+0.667
+0.768
+0.791
+0.813
+0.769
+0.737
+0.802
+0.831
+0.866
+0.878
+0.878
+0.896
+0.870
+0.884
+0.860
+0.852
+0.826
+0.718
+0.687
+0.664
+0.862
+0.846
+0.833
+Panther
+Playground
+Train
+Average
+26.45
+25.47
+27.73
+28.35
+28.84
+28.82
+18.52
+22.58
+24.10
+25.65
+26.62
+26.81
+19.72
+15.66
+18.79
+21.69
+22.10
+19.12
+21.82
+21.69
+22.62
+25.27
+26.75
+25.93
+27.55
+25.99
+26.43
+25.61
+26.04
+25.15
+18.11
+17.81
+16.98
+25.12
+24.54
+23.71
+Panther
+Playground
+Train
+Average
+0.259
+0.148
+0.124
+0.165
+0.125
+0.136
+0.245
+0.128
+0.101
+0.146
+0.118
+0.114
+0.475
+0.157
+0.133
+0.231
+0.175
+0.145
+0.393
+0.236
+0.181
+0.237
+0.171
+0.241
+0.338
+0.158
+0.140
+0.182
+0.136
+0.131
+0.192
+0.266
+0.205
+0.160
+0.213
+0.151
+0.174
+0.196
+0.200
+0.323
+0.371
+0.385
+0.165
+0.201
+0.200
+Playground
+Train
+Average
+0.351
+0.099
+0.086
+0.175
+0.117
+0.083
+0.310
+0.162
+0.136
+0.196
+0.126
+0.166
+0.261
+0.106
+0.105
+0.153
+0.101
+0.091
+0.101
+0.116
+0.114
+0.222
+0.263
+0.273
+0.114
+0.140
+0.137
+SSIM↑ on Tanks and Temples [35]
+Lighthouse
+M60
+PSNR↑ on Tanks and Temples [35]
+Lighthouse
+M60
+LPIPSalex ↓ on Tanks and Temples [35]
+Lighthouse
+M60
+LPIPSsqueeze ↓ on Tanks and Temples [35]
+Lighthouse
+M60
+Panther
+Table 7. Per-scene image quality metrics for the Tanks and Temples dataset [35]. The three best results are highlighted in green in
+descending order of saturation.
+19
+TRIPS
+3DGS
+Zip-NeRF
+Ours
+Figure 7. Visual comparisons for multiple scenes of the Tanks and Temples dataset [35].
+20
+Ground Truth
+21
+22
+23
+Figure 8. Experimental Stimuli. All images generated with Zip-NeRF [5] and our method used as stimuli for our perceptual experiment.
+The two columns of the left belong to the results on the Mip-NeRF360 dataset [4], while the two on the right are from the Tanks and Temples
+dataset [35]. Under each pair of stimuli, we report the scene name, frame number, and total votes gathered per method (max=17).
+24

@@ -1,0 +1,58 @@
+# Redundant coarse data bridging
+
+Also called: redundant coarse data gap filling
+
+## Overview
+Redundant coarse data bridging is a method for eliminating geometric cracks and holes that appear between different refinement levels in Adaptive Mesh Refinement (AMR) data structures. It solves the problem of discontinuous topology by utilizing data points stored at coarser levels that are typically unused during post-analysis to bridge the gap between adjacent levels [S1]. Unlike the stitching cells algorithm, which constructs unstructured geometry across levels, this method capitalizes on the existing overlap inherent in patch-based AMR structures [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** An AMR dataset with multiple refinement levels, specifically patch-based AMR where coarse-level data overlaps with fine-level domains.
+*   **Output:** A continuous, gap-free representation of the data where the transition between coarse and fine levels is seamless.
+
+**Data Structures:**
+The method relies on the standard AMR hierarchy where each level contains a set of patches or cells. The key structural feature is the existence of "redundant" data points at coarser levels. These are data points (e.g., 0D data points) that lie within the spatial extent of finer-level patches but are not actively used for high-resolution queries [S1].
+
+**Steps:**
+1.  **Identify Overlap:** Detect regions where coarser-level patches overlap with finer-level patches. In patch-based AMR, this overlap is often explicit or implicit in the grid structure [S1].
+2.  **Locate Redundant Data:** Identify data points at the coarser level that fall within the boundaries of the finer-level patches. These points are considered "redundant" because the finer level provides higher-resolution data for the same spatial location [S1].
+3.  **Bridge the Gap:** Use these redundant coarse data points to fill the geometric or topological gaps between the coarse and fine levels. This effectively eliminates the cracks that would otherwise appear if the data were simply re-sampled or if the levels were treated as disjoint [S1].
+4.  **Ensure Continuity:** By incorporating these redundant points into the rendering or visualization pipeline, the method ensures that the iso-surfaces or scalar fields are continuous across level boundaries, fixing the cracks seen in naive re-sampling approaches [S1].
+
+**Formulas:**
+Not given in the sources. The method is described conceptually as utilizing existing overlap and redundant data points rather than through a specific mathematical formula.
+
+**Parameters:**
+Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Patch-based AMR Specificity:** The method is particularly effective in patch-based AMR where overlap is a structural characteristic [S1]. It may not apply directly to non-patch-based AMR structures without modification.
+*   **Data Redundancy Management:** Care must be taken to ensure that the redundant coarse data does not interfere with the higher-resolution fine data during query operations. The method assumes that the redundant data is available and accessible [S1].
+
+## Subtopics
+## Operating characteristics
+**Time and Memory Complexity:**
+Not given in the sources. The method leverages existing data structures and overlap, suggesting low additional computational overhead compared to constructing new stitching cells.
+
+**Measured Performance:**
+Not given in the sources.
+
+**Strengths and Limitations:**
+*   **Strengths:** Eliminates cracks and holes between AMR levels without the complexity of constructing new unstructured geometry (as in stitching cells) [S1]. Fixes visualization artifacts that appear with re-sampling [S1].
+*   **Limitations:** Relies on the presence of redundant coarse data, which may not be available in all AMR configurations. The sources do not specify performance metrics or scalability details [S1].
+
+**When to Use:**
+Use this method when visualizing patch-based AMR data and encountering cracks between refinement levels, especially when a simpler alternative to stitching cells is desired [S1].
+
+## Background
+**Origin:**
+The method is described in the context of analyzing data reduction techniques for AMR applications using the AMReX framework [S1]. It is presented as an alternative to the stitching cells algorithm [S1].
+
+**History and Development:**
+The concept is illustrated in 2D examples showing the elimination of cracks between coarse and fine levels [S1]. It is part of the broader effort to improve the visualization fidelity of AMR data [S1].
+
+**Where it is Used:**
+Used in AMR visualization pipelines, particularly those utilizing the AMReX framework [S1].
+
+## Sources
+[S1] Analyzing Impact of Data Reduction Techniques on Visualization for AMR Applications Using AMReX Framework, https://doi.org/10.1145/3624062.3625123, fetched 2026-10-27

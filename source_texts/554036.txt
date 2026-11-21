@@ -1,0 +1,182 @@
+LinPrim paper note — replaces Gaussian kernels with **linear primitives** (octahedra, tetrahedra): homogeneous volumes bounded by triangular faces, rendered by a differentiable GPU rasterizer using Möller-Trumbore ray/triangle intersection; matches 3DGS-class quality on ScanNet++ with ~1/3 the primitives (NeurIPS 2025)
+
+LinPrim: Linear Primitives for Differentiable Volumetric Rendering — Yu Zhang
+Description: LinPrim paper note — replaces Gaussian kernels with linear primitives (octahedra, tetrahedra): homogeneous volumes bounded by triangular faces, rendered by a differentiable GPU rasterizer using Möller-Trumbore ray/triangle intersection; matches 3DGS-class quality on ScanNet++ with ~1/3 the primitives (NeurIPS 2025)
+My Notion Note ID: K2E-B-G6-8
+Created: 2026-07-20
+Updated: 2026-07-20
+License: Free to share: please credit Yu Zhang and link back to yuzhang.io
+Table of Contents
+1. Summary
+2. Key Contributions
+3. Method
+3.1 The Primitives
+3.2 Rendering Pipeline
+3.3 Anti-Aliasing
+3.4 Optimization
+3.5 Population Control
+4. Experiments & Results
+5. Strengths / Limitations / Future Work
+References
+1. Summary
+Title: LinPrim: Linear Primitives for Differentiable Volumetric Rendering
+Authors: N. von Lützow, M. Nießner (Technical University of Munich)
+Paper: arXiv:2501.16312 (NeurIPS 2025)
+Github: nicolasvonluetzow/linear-splatting · project page
+LinPrim — novel view synthesis (NVS) built on polyhedral rather than Gaussian primitives. The scene is a set of octahedra (or tetrahedra): homogeneous volumes — constant density inside — bounded by flat triangular faces.
+Core question: nearly all recent volumetric NVS builds on NeRF or 3D Gaussian Splatting (3DGS), where each primitive is an unbounded Gaussian blob whose density decays smoothly to infinity. Is the Gaussian actually necessary? LinPrim explores the design space by swapping in a primitive with the opposite character: bounded, with hard faces and constant interior density.
+Why this is not trivial: a Gaussian splat is cheap because its screen-space projection is again a Gaussian, so alpha follows a closed-form 2D falloff. A polyhedron has no such shortcut — you must actually intersect the pixel ray with the solid and integrate through it, differentiably, fast enough for real-time.
+Key ideas:
+Convexity buys a cheap intersection test — a ray meets a convex primitive exactly twice or not at all, so alpha follows directly from the distance between the two hits, computed with the differentiable Möller-Trumbore ray/triangle algorithm.
+Symmetry buys stability — octahedra are heavily constrained (vertices on the coordinate axes, opposite vertices sharing one distance, orientation carried by a quaternion), which keeps the center at the true geometric center and holds the parameter count to 11 floats — exactly a Gaussian's budget.
+Everything around the primitive (tiling, global sort, SfM init, clone/split densification, L1+SSIM loss) is deliberately kept identical to 3DGS, so the comparison isolates the primitive itself.
+Main results: on ScanNet++ v2, LinPrim reaches 24.04 dB mean PSNR vs 3DGS's 24.09 while using 255k vs 738k primitives (~⅓); paired with MCMC densification it edges ahead (24.55 at 738k). On Mip-NeRF 360 it is more compact than 3DGS (1.79M vs 3.32M) but ~0.8 dB behind. Bounded primitives make sharper, more "binary" decisions — better depth and crisper glass/distant regions, but visible hard edges where views are sparse.
+2. Key Contributions
+Two new volumetric scene representations based on linear primitives — octahedra and tetrahedra — as homogeneous volumes bounded by triangular faces.
+A differentiable GPU rasterizer for polyhedra that supports end-to-end gradient-based optimization while staying real-time capable for novel-view rendering.
+Empirical characterization of transparent polyhedra: comparable fidelity to state-of-the-art volumetric methods with fewer primitives, showing that the primitive itself is a live design axis rather than a settled choice.
+3. Method
+3.1 The Primitives
+Octahedra. Only a constrained subset of octahedra is modeled: cases with non-triangular faces are excluded (they are awkward to handle and give unpredictable vertex/edge counts). To avoid degenerate shapes, vertex positions are restricted to the coordinate axes relative to the center; expressiveness is recovered by optimizing a rotation quaternion per primitive so the shape can still be oriented arbitrarily. Symmetry is enforced by using a single distance per opposing vertex pair, which:
+halves the shape parameters,
+improves optimization stability,
+guarantees the stored center is the true geometric center, simplifying bounding-volume computation and the ray-space approximation.
+Tetrahedra. The same recipe generalizes to other homogeneous volumes. Tetrahedra are not symmetric along all axes even when regular, so instead four equally spaced basis vectors define the corner directions (allowing regular tetrahedra), with one optimized distance per corner. Consequence: the optimized position need not be the geometric center.
+Memory. Omitting color, a primitive is fully described by center, rotation, corner distances, and opacity:
+Primitive
+Geometry floats
+Note
+Octahedron
+11
+exactly matches a standard Gaussian kernel's budget
+Tetrahedron
+12
+one more, since symmetry is absent
+View-dependent color uses 48 spherical-harmonic (SH) coefficients per primitive, exactly as in 3DGS. SH therefore dominates per-primitive memory by a wide margin — so shrinking a scene means lowering SH degree or reducing primitive count, not tweaking geometry parameters.
+3.2 Rendering Pipeline
+Two stages: per-primitive preprocessing, then per-pixel rasterization — so many primitives are processed in parallel before compositing.
+Preprocessing. Build the primitive from its features (position, distances, rotation); transform into camera coordinates; evaluate view-dependent color; project into the 3D affine ray-space approximation from EWA Splatting (a classical volume-splatting formulation that locally linearizes the perspective projection so primitives can be treated affinely). Because high fidelity needs small primitives, and the approximation error grows with distance from the center, the residual error stays negligible. Finally compute each primitive's projected screen-space bounding box.
+Tiling & global sort. Reused from 3DGS: split the screen into tiles and sort primitives per tile in approximate front-to-back order.
+Rasterization. Since the primitives are convex, a pixel ray either misses or intersects exactly twice. Intersections come from the Möller-Trumbore intersection algorithm (MTIA) — a standard ray/triangle test that is fully differentiable, hence usable inside gradient-based optimization. Opacity then depends on the distance between the two intersection points (the chord length through the solid).
+Reconstruction is scale ambiguous, so intersection distances are normalized by the smallest primitive distance ddd — similar to EVER — giving consistent appearance across scene sizes. For an octahedron with opacity α\alphaα, density is
+σ(α)=−log⁡(1−0.99 α)2⋅min⁡(dx,dy,dz)\sigma(\alpha) = -\frac{\log(1 - 0.99\,\alpha)}{2 \cdot \min(d_x, d_y, d_z)}σ(α)=−2⋅min(dx​,dy​,dz​)log(1−0.99α)​
+α\alphaα = optimized opacity, dx,dy,dzd_x, d_y, d_zdx​,dy​,dz​ = the three corner distances (half-extents along the primitive's axes), σ\sigmaσ = the resulting volume density. The 0.990.990.99 factor keeps the logarithm finite as α→1\alpha \to 1α→1. Optimizing unnormalized density directly was tried and gave no gain while making feature values less interpretable.
+Compositing. Front-to-back alpha blending over the sorted per-tile list, terminating early once cumulative opacity reaches 0.999.
+3.3 Anti-Aliasing
+Mip-Splatting contributed two antialiasing filters for Gaussians: a 3D smoothing filter and a 2D Mip filter, which together bound a primitive's maximum frequency and suppress aliasing/dilation artifacts.
+3D smoothing is adopted directly: it limits how small a primitive may shrink based on visibility from training views, so every primitive stays visible from at least one training pixel.
+2D Mip filter cannot be reused — it works by modifying the screen-space Gaussian distribution, which polyhedra do not have. Instead, LinPrim finds the vertices lying on the tiling bounding box and shifts them outward, parallel to the screen. This enlarges the footprint and raises the primitive's minimum apparent size; because the falloff inside a primitive stays linear, extending the extent also raises opacity across it. The paper is explicit that this is a coarse approximation — not mathematically equivalent to a 2D Mip filter, but it band-limits the same high frequencies and empirically mirrors the behaviour.
+3.4 Optimization
+Loss and optimizer follow 3DGS exactly: L1 + SSIM (structural similarity), optimized with ADAM, backpropagated through the whole rendering pipeline.
+Through rasterization. Backprop through blending yields gradients w.r.t. each primitive's alpha and color. The alpha gradient says whether the primitive should be more or less transparent — which, geometrically, means whether its two ray intersections should move closer together or farther apart. Following those intersection gradients adjusts the center and vertices: this is backprop through the MTIA, where intersection depth depends on the triangle corner positions, which in turn depend on the ray-space center and its offsets. Aggregating over corners and both intersections propagates gradients from alpha down to the geometric features.
+Through preprocessing. Gradients at this point live in ray space, so propagation first reverses the projection and view transforms to reach world space. The final center gradient combines the ray-space center gradient with the position's influence on both the ray-space approximation and the view-dependent color. Undoing the rotation splits the corner gradient into quaternion and distance components. Since scenes are scale ambiguous, the maximum distance between two training cameras approximates scene size and rescales the learning rates for position and distances.
+3.5 Population Control
+Adapted from 3DGS, with adjustments for the new primitives.
+Initialization. One primitive per Structure-from-Motion (SfM) point, taking its position and color; all corner distances start equal, set from the distance between that SfM point and its nearest neighbor. Unlike Gaussians — circular at init and hence rotation-invariant — these primitives are not, so each gets a uniformly random rotation quaternion for more homogeneous spatial coverage.
+Pruning. Remove primitives that are too transparent, too large relative to scene extent, or occupy too much screen space in a known view. This requires a size definition: for octahedra, size = longest axis = twice the longest distance; for tetrahedra, maximum depth is harder, approximated as 2\sqrt{2}2​ × the distance to the furthest corner.
+Densification — clone or split primitives with large view-space positional gradients (smaller ones cloned, larger ones split):
+Clone copies all features but not the gradient momentum.
+Split normally samples new positions from the original Gaussian as a PDF. For octahedra, positions are sampled from a PDF whose standard deviations are the corresponding corner distances, then rotated — so children spread along the octahedron's longer dimensions. Tetrahedra lack this structure, so all standard deviations are set to half the largest distance.
+LinPrim-MCMC. To show the representation composes with Gaussian-side advances, the population control of GS-MCMC (which reframes densification as sampling from the scene distribution, giving exact control over final primitive count) is also implemented, treating the primitives as if they were Gaussians with the same features. Octahedron distances and Gaussian standard deviations differ in magnitude, so distances are scaled down by a factor of 2.6 to align them — a trick related to the "Distribution Alignment" idea in Beyond Gaussians.
+4. Experiments & Results
+Setup: Mip-NeRF 360 (all 9 scenes) and ScanNet++ v2 (first 5 NVS scenes with test views). All methods trained 30k iterations on official splits with parameters held constant across scenes. Mip-NeRF 360 outdoor scenes at quarter resolution, indoor at half; ScanNet++ undistorted with the official toolkit at full resolution. Metrics: PSNR / SSIM / LPIPS.
+Baselines are deliberately close relatives: 3DGS, Mip-Splatting, 3DCS (3D Convex Splatting), and GS-MCMC. Caveat noted by the authors: each 3DCS convex is defined by six points, so its per-primitive parameter count is higher and parameter-budget comparisons are less direct.
+ScanNet++ v2 (mean PSNR over 5 scenes, plus primitive count):
+Method
+Mean PSNR
+Primitives
+3DGS
+24.09
+738k
+Mip-Splatting
+24.12
+977k
+3DCS
+24.26
+440k
+LinPrim
+24.04
+255k
+GS-MCMC
+24.50 / 24.12
+255k / 738k
+LinPrim + MCMC
+24.41 / 24.55
+255k / 738k
+LinPrim lands within 0.05 dB of 3DGS using about a third of the primitives. Under matched population counts with MCMC densification it slightly leads (24.55 vs 24.12 at 738k).
+Mip-NeRF 360:
+Method
+PSNR
+SSIM
+LPIPS
+Primitives
+3DGS
+27.43
+0.813
+0.217
+3.32M
+Mip-Splatting
+27.79
+0.827
+0.203
+4.17M
+3DCS
+27.22
+0.801
+0.208
+1.02M
+LinPrim
+26.63
+0.803
+0.221
+1.79M
+GS-MCMC
+28.09
+0.836
+0.187
+3.32M
+LinPrim + MCMC
+27.04
+0.812
+0.211
+3.32M
+Here the representation is clearly more compact than 3DGS (1.79M vs 3.32M) but trails on fidelity — 0.80 dB behind 3DGS and 1.46 dB behind GS-MCMC.
+Octahedra vs tetrahedra:
+Primitive
+ScanNet++ PSNR / SSIM / LPIPS
+Mip-NeRF 360 PSNR / SSIM / LPIPS
+Octahedron
+24.04 / 0.849 / 0.281
+26.63 / 0.803 / 0.221
+Tetrahedron
+24.05 / 0.848 / 0.302
+25.96 / 0.790 / 0.247
+Tetrahedra match octahedra on ScanNet++ but struggle on Mip-NeRF 360 — evidence that the extra symmetry and stability of octahedra matter. Both converge to similar counts (tetrahedra averaged 259k on ScanNet++ and 2.20M on Mip-NeRF 360), so swapping primitive type costs little in memory or compute. The pipeline was designed around octahedra, so tetrahedra would likely benefit from splitting/projection heuristics that respect their asymmetry.
+Qualitative character: the bounded primitives force sharper, more "binary" decisions in underconstrained regions. That helps — better depth estimates, crisper reconstruction of reflective/transparent regions like glass and distant background — and hurts: more conspicuous edges on rarely observed surfaces such as ceilings. The method works best in smaller, densely captured scenes, retaining geometric clarity without over-densifying frequently observed regions.
+5. Strengths / Limitations / Future Work
+Strengths
+Genuinely questions an assumption the field had settled on, and does the controlled experiment properly: tiling, sorting, init, loss, densification are all held at 3DGS defaults so the primitive is the only variable.
+Real efficiency claim with a fair basis — the octahedron's 11 floats exactly matches a Gaussian's budget, so "fewer primitives" is a like-for-like statement rather than a reparameterization trick.
+Convexity is exploited elegantly: exactly two intersections makes chord-length opacity and differentiable MTIA backprop natural rather than bolted on.
+Honest about where bounded primitives lose (hard edges under sparse views) instead of only reporting the wins.
+Limitations
+Fidelity gap on Mip-NeRF 360 (~0.8 dB vs 3DGS, ~1.5 dB vs GS-MCMC) — the compactness win does not yet come free on large unbounded outdoor scenes.
+Hard edges and "segment-like" artifacts in poorly observed regions; Gaussians blend into each other more gracefully there, which can look better even when not measurably more accurate.
+Population control is inherited from Gaussian methods and is not tuned for polyhedra — splitting/cloning/sampling heuristics don't exploit the geometry.
+Rendering is slower than the heavily optimized Gaussian rasterizer.
+The 2D antialiasing filter is an acknowledged coarse approximation, not a principled equivalent.
+Future work (stated by the paper)
+Bridge to meshes — triangular faces already resemble mesh geometry; binarizing primitive opacity could enable direct mesh optimization from images.
+Exact blending without ray tracing — polyhedra natively support intersection tests with homogeneous volumes, so EVER-style improvements that require heavy modification for Gaussians come almost for free here.
+Reuse optimized triangle-mesh rendering pipelines to close the speed gap and drop the ray-space approximation entirely.
+Extend to dynamic / deformable scene representations.
+References
+von Lützow, N., & Nießner, M. (2025). LinPrim: Linear Primitives for Differentiable Volumetric Rendering. NeurIPS. arXiv:2501.16312, code. — source paper (Fig. 2 overview above)
+3D Gaussian Splatting: the baseline whose loss, tiling, sorting and densification LinPrim deliberately reuses
+NeRF: the other lineage of volumetric NVS the paper positions against
+Yu, Z., Chen, A., Huang, B., Sattler, T., & Geiger, A. (2024). Mip-Splatting: Alias-free 3D Gaussian Splatting. CVPR. — source of the 3D smoothing filter LinPrim adopts and the 2D Mip filter it approximates
+Held, J., et al. (2024). 3D Convex Splatting (3DCS). arXiv:2411.14974 (later CVPR 2025); LinPrim's bibliography cites the preprint. — convex-primitive baseline; each convex uses six points
+Kheradmand, S., et al. (2024). 3D Gaussian Splatting as Markov Chain Monte Carlo (GS-MCMC). NeurIPS. — population control adopted for LinPrim-MCMC
+Mai, A., et al. (2024). EVER: Exact Volumetric Ellipsoid Rendering. — source of the distance-normalization idea and of exact-blending motivation
+Zwicker, M., Pfister, H., van Baar, J., & Gross, M. (2001/2002). EWA Splatting. — the affine ray-space approximation used in preprocessing
+Möller, T., & Trumbore, B. (1997). Fast, Minimum Storage Ray-Triangle Intersection. — the differentiable intersection test at the core of rasterization

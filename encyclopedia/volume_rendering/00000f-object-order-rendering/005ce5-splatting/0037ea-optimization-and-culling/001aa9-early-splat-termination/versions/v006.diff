@@ -1,0 +1,128 @@
+--- v005.md
++++ v006.md
+@@ -4,62 +4,60 @@
+ 
+ ## Overview
+-Early Splat Termination is an optimization for object-order volume splatting that skips the rasterization of voxels when the accumulated opacity at the target screen pixels is already full, analogous to early ray termination in ray casting [S2, unofficial][S3]. It sets itself apart from sibling methods like [Splat Size Culling](2849-splat-size-culling.md) by operating on accumulated opacity rather than geometric footprint size, making it effective for opaque regions but costly for low-opacity scenes [S3].
++Early Splat Termination is an optimization for volume splatting that skips the processing of voxels when the accumulated opacity at the target screen pixels is already full, analogous to early ray termination in ray casting [S2, unofficial][S3]. It sets itself apart from sibling methods like [Splat Size Culling](2849-splat-size-culling.md) by operating on accumulated screen-space opacity rather than geometric footprint size, effectively culling distant or occluded voxels that would otherwise contribute negligible color changes [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A volume dataset (density/extinction coefficient $\rho$ and opacity $\alpha$), camera parameters (Model-View-Projection matrix), and the current frame buffer containing accumulated opacity.
+-- Output: The final composited image with reduced computational cost for occluded voxels.
++*   **Input:** A volume dataset (density and opacity fields), a camera projection matrix, and a screen-space opacity buffer initialized to zero.
++*   **Output:** A rendered image where voxels contributing to fully opaque regions are skipped.
+ 
+ **Data Structures:**
+-- **Opacity Volume:** A secondary volume data structure storing the opacity $\alpha$ for each voxel, used alongside the density volume [S2, unofficial].
+-- **Frame Buffer:** Standard 2D image buffer storing the accumulated opacity value $A(x,y)$ for each pixel $(x,y)$ [S2, unofficial].
++*   **Opacity Buffer:** A 2D array matching the screen resolution, storing the accumulated opacity $\alpha_{acc}$ for each pixel. Values range from $0.0$ to $1.0$.
++*   **Bounding Box:** A 2D integer rectangle $(x_{min}, y_{min}, x_{max}, y_{max})$ defining the pixel coverage of a projected voxel.
+ 
+ **Steps:**
+-1. **Dual Volume Projection:** Project both the density volume and the opacity volume onto the screen space [S2, unofficial].
+-2. **Bounding Box Calculation:** For each voxel $k$ being processed, compute its 2D screen-space projection (splat) and determine the axis-aligned bounding box (AABB) that covers all pixels affected by this splat [S2, unofficial].
+-3. **Opacity Check:** Iterate through all pixels $(x,y)$ within the computed bounding box. Check if the accumulated opacity $A(x,y)$ in the frame buffer is equal to or near 1.0 [S2, unofficial].
+-4. **Termination Decision:** If *all* pixels inside the bounding box have full opacity (threshold $\approx 1.0$), skip the processing of the current voxel's density contribution and move to the next voxel [S2, unofficial]. Otherwise, proceed with standard splatting (rasterization and compositing) for this voxel [S2, unofficial].
++1.  **Project Volumes:** Project the density volume and a separate opacity volume onto the screen [S2, unofficial].
++2.  **Compute Bounding Box:** For each voxel, calculate the 2D bounding box of the pixels covered by its splat footprint [S2, unofficial].
++3.  **Check Opacity:** Iterate through all pixels within the bounding box. Check if the accumulated opacity $\alpha_{acc}$ at each pixel is equal to or near $1.0$ [S2, unofficial].
++4.  **Terminate or Process:** If all pixels in the bounding box have full opacity, skip processing the current voxel entirely [S2, unofficial]. Otherwise, proceed with standard splatting (accumulating color and opacity) [S2, unofficial].
++
++**Formulas:**
++Let $B$ be the set of pixel coordinates in the bounding box. Let $\alpha_{acc}(p)$ be the accumulated opacity at pixel $p$.
++The termination condition is:
++$$ \forall p \in B, \quad \alpha_{acc}(p) \geq \tau $$
++Where $\tau$ is the opacity threshold.
+ 
+ **Parameters:**
+-- **Opacity Threshold:** The threshold for termination is typically 1.0 or "near 1.0" [S2, unofficial].
++*   **Opacity Threshold ($\tau$):** Typically $1.0$ or "near $1.0$" [S2, unofficial]. The exact value depends on floating-point precision and desired visual fidelity.
+ 
+ **Pitfalls:**
+-- **High Overhead:** The cost of checking the opacity for every pixel in the bounding box can be high, making this method less effective than early ray termination for datasets with low opacity or large empty spaces [S3].
+-- **Low Opacity Scenes:** In scenes where voxels have low opacity (e.g., shockwave datasets), early splat elimination is ineffective because few pixels reach full opacity, leading to significant rendering times compared to ray casting [S3].
++*   **High Overhead:** The cost of checking the bounding box and iterating through pixels can be high, making this optimization less effective than early ray termination for datasets with low opacity or high empty space [S3].
++*   **Precision:** "Near 1.0" requires careful handling of floating-point comparisons to avoid premature termination or missed optimizations [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def early_splat_termination(voxel, opacity_volume, frame_buffer, threshold=1.0):
++def early_splat_termination(voxel, opacity_buffer, threshold=1.0):
+     """
+-    Determines if a voxel's splat should be skipped based on accumulated opacity.
++    Determines if a voxel should be skipped based on accumulated screen opacity.
+     
+     Args:
+-        voxel: The current voxel object containing position and density.
+-        opacity_volume: 3D array storing opacity alpha for each voxel.
+-        frame_buffer: 2D array storing accumulated opacity A(x,y).
+-        threshold: Opacity value considered "full" (default 1.0).
++        voxel: Object containing projection data, including bounding box coordinates.
++        opacity_buffer: 2D array of accumulated opacity values.
++        threshold: Opacity threshold for termination (default 1.0).
+         
+     Returns:
+-        bool: True if the voxel should be skipped, False if it must be processed.
++        bool: True if voxel should be skipped, False otherwise.
+     """
+-    # 1. Project voxel to screen space to get 2D bounding box
+-    # [G] Implementation detail: Transform voxel center and compute 
+-    # footprint radius based on kernel width and distance.
+-    bbox = compute_screen_bbox(voxel)
++    # Get bounding box of the projected splat
++    x_min, y_min, x_max, y_max = voxel.bounding_box
+     
+-    # 2. Check accumulated opacity for all pixels in the bounding box
+-    for y in range(bbox.min_y, bbox.max_y + 1):
+-        for x in range(bbox.min_x, bbox.max_x + 1):
+-            # Check if pixel is within image bounds
+-            if not is_in_image_bounds(x, y, frame_buffer):
+-                continue
+-                
+-            # Get current accumulated opacity
+-            current_opacity = frame_buffer[y, x]
+-            
+-            # If any pixel is not fully opaque, we cannot skip this voxel
+-            if current_opacity < threshold:
+-                return False
+-                
++    # Check all pixels in the bounding box
++    for y in range(y_min, y_max + 1):
++        for x in range(x_min, x_max + 1):
++            # Check bounds to ensure pixel exists in buffer
++            if 0 <= y < opacity_buffer.height and 0 <= x < opacity_buffer.width:
++                # If any pixel is not fully opaque, we must process this voxel
++                if opacity_buffer[x, y] < threshold:
++                    return False
++                    
+     # All pixels in the bounding box are fully opaque
+     return True
+@@ -68,16 +66,19 @@
+ ## Subtopics
+ 
+-### Comparison with Early Ray Termination
+-Early Splat Termination is the splatting equivalent of Early Ray Termination. While Early Ray Termination skips ray samples when opacity is full, Early Splat Termination skips entire voxels. However, Early Splat Termination has higher associated costs per check than Early Ray Termination, making it less suitable for sparse or low-opacity volumes [S3].
++### Early Ray Termination
++A ray-casting optimization that stops ray traversal when accumulated opacity reaches a threshold. It is generally more efficient for empty-space-heavy datasets because the cost per step is lower than splatting's footprint mapping [S3].
++
++### Splat Size Culling
++A sibling optimization that skips splats based on their projected footprint size. It differs from Early Splat Termination by using geometric bounds rather than accumulated opacity [2849-splat-size-culling.md].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The check step is $O(N_{pixels})$ per voxel, where $N_{pixels}$ is the number of pixels in the splat's bounding box. This adds overhead to every voxel, unlike Early Ray Termination which has minimal overhead [S3].
+-- **Memory Complexity:** Requires storing an additional opacity volume alongside the density volume [S2, unofficial].
+-- **Performance:** Effective for dense, opaque regions where splats are occluded. Ineffective for low-opacity datasets (e.g., shockwave) where few pixels reach full opacity, resulting in rendering times significantly higher than ray casting (up to 7x slower in tested cases) [S3].
+-- **Strengths:** Reduces redundant blending operations in opaque areas.
+-- **Limitations:** High overhead for opacity checks; poor performance on low-opacity or sparse data [S3].
++*   **Time Complexity:** The check is $O(A)$ where $A$ is the area of the bounding box in pixels. In the worst case (no termination), it adds overhead to every voxel. In the best case (full opacity), it saves the cost of splatting.
++*   **Memory Complexity:** Requires an additional screen-space opacity buffer, $O(W \times H)$ where $W, H$ are screen dimensions.
++*   **Measured Performance:** The associated costs for early splat elimination are high, making it less effective than early ray termination for datasets with low opacity or high empty space (e.g., skull datasets) [S3]. It is more beneficial for dense, high-opacity regions [S3].
++*   **Strengths:** Reduces redundant calculations in opaque regions.
++*   **Limitations:** High overhead for sparse or low-opacity data; less effective than ray-casting optimizations in such cases [S3].
+ 
+ ## Background
+-The concept was introduced as a speed optimization for interactive volume rendering, drawing direct analogy to early ray termination techniques [S1, S2, unofficial]. It is part of the broader effort to accelerate splatting methods, such as those using shear-warp factorization or EWA resampling, to achieve real-time performance [S1, unofficial]. The method highlights the trade-offs between splatting and ray casting, particularly regarding the cost of footprint mapping versus trilinear interpolation [S3].
++Early Splat Termination was introduced as a speed optimization for volume splatting, drawing direct analogy to early ray termination in ray casting [S2, unofficial]. It is associated with Krüger's work on speed-optimized splatting [S1, unofficial]. The technique addresses the inefficiency of distant voxels affecting the same number of pixels as near voxels, by skipping those that do not contribute to the final image due to occlusion [S2, unofficial].
+ 
+ ## Sources

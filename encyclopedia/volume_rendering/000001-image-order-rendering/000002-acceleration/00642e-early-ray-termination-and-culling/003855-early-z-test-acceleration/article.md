@@ -1,0 +1,75 @@
+# Early Z-Test Acceleration
+
+Also called: Early z-test
+
+## Overview
+Early Z-Test Acceleration is a hardware optimization applied before the fragment shader executes for a particular fragment to avoid shader execution, enabling the fragment processor to immediately process the next incoming fragment [S1, unofficial]. It is used to integrate early ray termination and empty-space skipping into the rendering pipeline [S1, unofficial]. Unlike software-based checks that still invoke the shader, this method discards occluded fragments at the hardware level, yielding performance gains of up to a factor of 3 for typical volumetric datasets on hardware such as the ATI 9700 [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A depth buffer containing depth values from prior rendering passes; a fragment with an associated depth value [S1, unofficial][G].
+*   **Output:** The fragment is discarded if it fails the depth test, or passed to the fragment shader if it passes [G].
+
+**Data Structures:**
+*   **Depth Buffer:** A 2D array of depth values per screen coordinate, storing the closest surface depth encountered so far [G].
+
+**Prerequisites and Constraints:**
+1. The depth test must be enabled in the graphics state [S1, unofficial].
+2. Depth values must have been written to the depth buffer in prior rendering passes [S1, unofficial].
+3. All other per-fragment tests (e.g., stencil, alpha) must be disabled [S1, unofficial].
+4. The fragment's depth value must not be modified in the fragment shader [S1, unofficial].
+
+**Algorithm Steps:**
+1. The rasterizer assigns a depth value $z_{\text{frag}}$ to each fragment based on its view-space position [G].
+2. The hardware compares $z_{\text{frag}}$ against the stored depth value $z_{\text{buffer}}$ at the corresponding screen coordinate [G].
+3. If $z_{\text{frag}}$ fails the depth test, the fragment is discarded immediately without shader execution [S1, unofficial][G].
+4. If $z_{\text{frag}}$ passes, the fragment shader executes to compute color and opacity [G].
+5. If the fragment passes and the depth buffer is writable, $z_{\text{buffer}}$ is updated to $z_{\text{frag}}$ [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def early_z_test(z_frag, z_buffer):
+    # Hardware depth comparison performed before shader execution.
+    # Returns True if fragment passes, False if discarded.
+    return z_frag <= z_buffer
+
+def fragment_shader():
+    # Shader executes only if early_z_test returns True.
+    # Must not modify output depth; hardware relies on implicit z_frag.
+    # Standard front-to-back compositing loop would run here.
+    return (0.0, 0.0, 0.0)
+```
+
+**Edge Cases and Pitfalls:**
+*   Depth modification in the shader disables the early z-test, forcing fallback to standard execution order [S1, unofficial].
+*   Enabling other per-fragment tests (stencil, alpha) disables the optimization [S1, unofficial].
+
+## Subtopics
+
+### Hardware Z-Buffer Slicing
+A hardware acceleration technique used to speed up parity counting by using a z-buffer [S2]. Based on an idea originally by Emil Praun [S2].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Time:** Reduces shader execution time proportionally to the area of occluded fragments [S1, unofficial].
+*   **Memory:** Requires a depth buffer. Not given in the sources.
+
+**Measured Performance:**
+*   Demonstrated performance gains of up to a factor of 3 for typical renditions of volumetric data sets on the ATI 9700 graphics card [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Significant reduction in shader invocations for occluded regions; leverages existing hardware depth testing logic [G].
+*   **Limitations:** Only effective when there is opaque occlusion in front of the volume. Strict constraints on shader behavior (no depth modification, no other per-fragment tests) limit its applicability in complex rendering pipelines [S1, unofficial].
+
+**When to Use:**
+*   Use when rendering volumes behind opaque geometry or when a previous pass has established a depth buffer [G].
+*   Do not use if the volume is the first object rendered or if the shader requires depth modification [S1, unofficial].
+
+## Background
+The technique was described in the context of GPU-based volume rendering acceleration, specifically leveraging DirectX9-level hardware capabilities [S1, unofficial]. It exploits the programmable graphics hardware's ability to perform per-fragment operations, using the early z-test to terminate fragment processing once sufficient opacity has been accumulated or to skip empty space along rays of sight [S1, unofficial]. The work was published in 2003/2004 by researchers including R. Westermann, focusing on real-time methods for large volumetric scalar fields [S1, unofficial].
+
+## Sources
+[S1] Acceleration Techniques for GPU-based Volume Rendering, https://www.cs.cit.tum.de/fileadmin/w00cfj/cg/Research/Publications/2003/Acceleration_Techniques_for_GPU-based_Volume_Rendering/vis03-rc.pdf, fetched 2026-10-26 (unofficial)
+[S2] binvox 3D mesh voxelizer, keywords: voxelization, voxelisation, 3D model, https://www.patrickmin.com/binvox/, fetched 2026-10-29

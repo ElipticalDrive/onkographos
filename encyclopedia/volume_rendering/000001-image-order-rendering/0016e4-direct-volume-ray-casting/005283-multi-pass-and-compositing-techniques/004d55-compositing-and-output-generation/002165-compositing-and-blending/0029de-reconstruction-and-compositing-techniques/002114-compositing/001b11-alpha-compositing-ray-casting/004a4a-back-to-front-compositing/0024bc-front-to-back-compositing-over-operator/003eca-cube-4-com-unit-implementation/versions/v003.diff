@@ -1,0 +1,79 @@
+--- v002.md
++++ v003.md
+@@ -14,6 +14,6 @@
+ 
+ **Data Structures:**
+-*   **Base-Plane Buffer:** Stores intermediate compositing results. The layout is $125 \times 25$ entries per pipeline [S1]. Implemented using Teramac memory [S1].
+-*   **Classification Tables:** Used by the SHA unit to generate shaded samples. The tables are 32-bit wide and 256 entries deep, corresponding to the 8-bit representation of voxel values [S1].
++*   **Base-Plane Buffer:** Stores intermediate compositing results [S1]. The layout is $125 \times 25$ entries per pipeline [S1]. Implemented using Teramac memory [S1].
++*   **Classification Tables:** Used by the SHA unit to generate shaded samples [S1]. The tables are 32-bit wide and 256 entries deep, corresponding to the 8-bit representation of voxel values [S1].
+ 
+ **Components:**
+@@ -35,9 +35,9 @@
+ $$C_{out} = C_{in} + C_{prev} \times (1 - A_{in})$$
+ $$A_{out} = A_{in} + A_{prev} \times (1 - A_{in})$$
+-where $C_{in}$ and $A_{in}$ are the RGB color and opacity of the incoming shaded sample, and $C_{prev}$ and $A_{prev}$ are the RGB color and opacity of the intermediate result retrieved from the base-plane buffer. All color values are assumed to be pre-multiplied by opacity.
++where $C_{in}$ and $A_{in}$ are the RGB color and opacity of the incoming shaded sample, and $C_{prev}$ and $A_{prev}$ are the RGB color and opacity of the intermediate result retrieved from the base-plane buffer [S1]. All color values are assumed to be pre-multiplied by opacity [G].
+ 
+ **Pseudocode:**
+ ```python
+-def com_posing_unit_cycle(pipeline_id, shaded_sample, traversal_unit, addressing_unit, base_plane_buffer, final_memory):
++def com_posing_unit_cycle(pipeline_id, shaded_sample, buffer_x, buffer_y, base_plane_buffer, final_memory, is_ray_finished):
+     """
+     Composes a shaded sample with the intermediate result from the base-plane buffer.
+@@ -45,38 +45,29 @@
+         pipeline_id: Pipeline index (0-7).
+         shaded_sample: Tuple (R, G, B, A) from SHA unit.
+-        traversal_unit: Tracks current slice, beam, and partial beam indices.
+-        addressing_unit: Calculates memory addresses for base-plane buffer.
+-        base_plane_buffer: 3D array [pipeline][y][x] of (R, G, B, A) tuples, zero-initialized per frame.
++        buffer_x, buffer_y: Coordinates in the base-plane buffer.
++        base_plane_buffer: 3D array [pipeline][y][x] of (R, G, B, A) tuples, zero-initialized per frame [G].
+         final_memory: Output storage for completed rays.
++        is_ray_finished: Boolean flag indicating ray completion.
+     """
+-    # 1. Get current indices from traversal unit
+-    current_slice = traversal_unit.get_slice_index()
+-    current_beam = traversal_unit.get_beam_index()
+-    current_partial_beam = traversal_unit.get_partial_beam_index()
+-
+-    # 2. Address the intermediate result
+-    buffer_x, buffer_y = addressing_unit.calculate_address(current_slice, current_beam, current_partial_beam)
+-
+-    # 3. Retrieve intermediate result
++    # 1. Retrieve intermediate result from base-plane buffer
+     # Teramac limits memory access to one read and one write per cycle [S1]
+     prev_r, prev_g, prev_b, prev_a = base_plane_buffer[pipeline_id][buffer_y][buffer_x]
+ 
+-    # 4. Handle skewing and adjacent partial beams
+-    # Special handling required when values do not come from the same partial-beam range (cases 0, 2, 3, 4) [S1].
+-    # Intermediate results from adjacent partial beams are forwarded to pipelines 0, 1, 2, and 4 [S1].
+-    # (Hardware routing logic for skewing is handled by the addressing/forwarding unit, not shown here)
++    # 2. Composite using front-to-back over operator
++    new_r = shaded_sample[0] + prev_r * (1.0 - shaded_sample[3])
++    new_g = shaded_sample[1] + prev_g * (1.0 - shaded_sample[3])
++    new_b = shaded_sample[2] + prev_b * (1.0 - shaded_sample[3])
++    new_a = shaded_sample[3] + prev_a * (1.0 - shaded_sample[3])
+ 
+-    # 5. Composite using front-to-back over operator
+-    new_r = shaded_sample.R + prev_r * (1.0 - shaded_sample.A)
+-    new_g = shaded_sample.G + prev_g * (1.0 - shaded_sample.A)
+-    new_b = shaded_sample.B + prev_b * (1.0 - shaded_sample.A)
+-    new_a = shaded_sample.A + prev_a * (1.0 - shaded_sample.A)
++    # 3. Handle skewing and adjacent partial beams
++    # Hardware routing logic for skewing (forwarding adjacent partial beam results to pipelines 0, 1, 2, 4)
++    # and special handling for cases 0, 2, 3, 4 is implemented in the addressing/forwarding unit [S1].
+ 
+-    # 6. Check if ray is finished
+-    if traversal_unit.is_ray_finished():
+-        # 7. Output final value to Teramac memory with X/Y address
+-        final_memory.write(current_slice, current_beam, new_r, new_g, new_b, new_a)
++    # 4. Check if ray is finished
++    if is_ray_finished:
++        # 5. Output final value to Teramac memory with X/Y address
++        final_memory.write(buffer_x, buffer_y, new_r, new_g, new_b, new_a)
+     else:
+-        # 8. Store intermediate result back to base-plane buffer
++        # 6. Store intermediate result back to base-plane buffer
+         base_plane_buffer[pipeline_id][buffer_y][buffer_x] = (new_r, new_g, new_b, new_a)
+ ```

@@ -1,0 +1,151 @@
+# AMR Volume Ray-Casting
+Also called: native AMR marching, ray-marching the AMR octree
+
+## Overview
+AMR Volume Ray-Casting is a volume rendering technique that ray-marches Adaptive Mesh Refinement (AMR) octrees directly without resampling to a uniform grid, avoiding the $(2^{l_{max}})^3$ memory blow-up [S1, unofficial]. It solves the problem of efficiently visualizing sparse, multi-resolution simulation data by storing each leaf once in a per-level hash and stepping by the local cell size, ensuring computational cost scales with the actual simulation data rather than the bounding box [S1, unofficial]. Unlike uniform grid resampling, which incurs memory, time, and quality costs, this method maintains native resolution [S2, unofficial].
+
+## How it works
+**Inputs:** Simulation data (e.g., gas density, number density) structured as an AMR octree; camera parameters (position, direction, field of view); rendering mode (e.g., emission, max intensity); compositing rules (e.g., front-to-back alpha blending).
+**Outputs:** A 2D image (pixel colors and opacities).
+
+**Data Structures:**
+*   `amr_volume`: An object containing the AMR hierarchy.
+*   `per_level_hash`: A hash map for each refinement level, mapping leaf coordinates to leaf nodes. Each leaf is stored exactly once [S1, unofficial].
+*   `leaf_node`: Contains the local cell size, active planes (defining which of the 8 corner values are active), and a reference to the brick (data storage) [S2, unofficial].
+
+**Steps:**
+1.  **Construct Volume:** Create an `amr_volume` object from the simulation data. This builds the per-level hash of leaves [S1, unofficial].
+2.  **Ray Casting:** For each pixel in the image, cast a ray from the camera through the scene.
+3.  **Traversal:** Traverse the AMR octree. The ray is advanced by the **local cell size** of the current leaf node it intersects [S1, unofficial].
+4.  **Sampling:** Sample field values at the ray position.
+    *   *De-blocking:* To avoid piecewise-constant artifacts (blockiness) from nearest-leaf sampling, use cross-level trilinear reconstruction [S1, unofficial]. This interpolates the 8 surrounding leaf values at the local cell spacing, looking up values from finest to coarsest [S1, unofficial].
+    *   *Active Corners:* Determine which of the 8 corner values are active based on the 6 active planes of the leaf, filling them from the brick stored in the leaf [S2, unofficial].
+5.  **Accumulation:** Accumulate color and opacity using the selected mode and compositing rules [S1, unofficial].
+6.  **Anti-Aliasing:** Apply supersampling (aa) if enabled [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_amr_volume(amr_volume, camera, image_width, image_height, smooth=True, aa=True):
+    """
+    Renders an AMR volume by ray-marching the octree.
+    """
+    image = empty_image(image_width, image_height)
+    
+    # Pre-compute ray directions for all pixels
+    rays = generate_rays(camera, image_width, image_height)
+    
+    for y in range(image_height):
+        for x in range(image_width):
+            ray = rays[y, x]
+            color = vec3(0.0)
+            opacity = 0.0
+            
+            # Ray marching loop
+            t = 0.0
+            while t < ray.max_distance:
+                # Find the leaf node containing the current ray position
+                # The ray position is ray.origin + ray.direction * t
+                leaf = amr_volume.find_leaf(ray.position(t))
+                
+                if leaf is None:
+                    # Ray is outside the AMR data
+                    break
+                
+                # Step size is the local cell size of the current leaf
+                step_size = leaf.local_cell_size
+                
+                # Sample the field value at the current ray position
+                # If smooth=True, use cross-level trilinear interpolation
+                # If smooth=False, use nearest-leaf (piecewise-constant)
+                if smooth:
+                    value = sample_trilinear_cross_level(amr_volume, ray.position(t), leaf)
+                else:
+                    value = sample_nearest_leaf(leaf, ray.position(t))
+                
+                # Compute contribution based on rendering mode (e.g., emission)
+                # This is a placeholder for specific compositing logic
+                contribution = compute_contribution(value, step_size)
+                
+                # Front-to-back compositing
+                alpha = contribution.alpha
+                color = color * (1.0 - alpha) + contribution.color * alpha
+                opacity += alpha * (1.0 - opacity)
+                
+                # Advance ray
+                t += step_size
+                
+                # Early exit if fully opaque
+                if opacity >= 1.0:
+                    break
+            
+            # Apply anti-aliasing if enabled
+            if aa:
+                # Supersampling logic would go here
+                pass
+                
+            image[y, x] = color
+            
+    return image
+
+def sample_trilinear_cross_level(amr_volume, position, current_leaf):
+    """
+    Interpolates values from 8 surrounding leaves at the local cell spacing.
+    Looks up values from finest to coarsest.
+    """
+    # Determine the 8 surrounding leaf coordinates relative to the current leaf's grid
+    # This requires mapping the continuous position to the discrete leaf grid
+    surrounding_leaves = get_surrounding_leaves(amr_volume, position, current_leaf)
+    
+    # Retrieve values from bricks, respecting active planes
+    values = []
+    for leaf in surrounding_leaves:
+        # Check active planes to determine which corners are valid
+        # Fill from the brick stored in the leaf
+        val = leaf.get_value_at_position(position)
+        values.append(val)
+        
+    # Perform trilinear interpolation on the 8 values
+    return trilinear_interpolate(values, position, surrounding_leaves)
+```
+
+**Parameters:**
+*   `smooth`: Boolean. Default `true`. Enables cross-level trilinear reconstruction to reduce blockiness [S1, unofficial].
+*   `aa`: Boolean. Enables anti-aliasing via supersampling [S1, unofficial].
+*   `subregion`: Optional. A subset of the AMR volume to render, used for zooming large simulations [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Blockiness:** Nearest-leaf sampling results in piecewise-constant fields, causing coarse cells to look blocky. Use `smooth=true` [S1, unofficial].
+*   **Memory Blow-up:** Resampling to a uniform grid causes $(2^{l_{max}})^3$ memory blow-up. This method avoids it by storing leaves once [S1, unofficial].
+*   **Active Planes:** Incorrect handling of active planes can lead to sampling invalid data. Ensure only active corners are filled from the brick [S2, unofficial].
+
+## Subtopics
+
+### vtkAMRVolumeMapper
+A mapper that directly maps the `vtkAMR` structure to OSPRay's internal AMR representation without resampling, using zero-copy memory sharing where possible [S2, unofficial]. Unlike previous ParaView handling which loaded data into `vtkAMR` and resampled it into a structured volume (incurring memory, time, and quality costs), this mapper avoids resampling [S2, unofficial]. It is integrated into VTK 7.1 and ParaView 5.0 [S2, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   Memory scales with the actual simulation data (number of leaves), not the bounding box [S1, unofficial].
+*   Computational cost scales with the simulation data, as each ray steps by the local cell size [S1, unofficial].
+*   Avoids the $(2^{l_{max}})^3$ memory blow-up associated with uniform grid resampling [S1, unofficial].
+
+**Measured Performance:**
+*   Evaluated on HPC resources including dual-socket workstations and Intel Xeon Phi "Knights Landing" nodes [S2, unofficial].
+*   Results in little memory overhead compared to resampling methods [S2, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Efficient memory usage for sparse data; native resolution; direct mapping to OSPRay [S2, unofficial].
+*   **Limitations:** Potential for blockiness if smoothing is disabled [S1, unofficial]. Requires careful handling of active planes and cross-level interpolation [S1, unofficial][S2, unofficial].
+
+**When to Use:**
+*   Use for visualizing sparse, multi-resolution simulation data where memory efficiency and native resolution are critical [S1, unofficial][S2, unofficial].
+*   Avoid if uniform grid resampling is acceptable and simplicity of implementation is prioritized over performance [S1, unofficial].
+
+## Background
+AMR Volume Ray-Casting originated from the need to visualize large-scale scientific simulations without the prohibitive memory costs of uniform grid resampling [S1, unofficial]. The technique was implemented in the Mera.jl library, with a 3-D volume ray-caster added to the core in 2026 [S1, unofficial]. It was also integrated into the VTK/ParaView ecosystem via OSPRay, with `vtkAMRVolumeMapper` introduced in VTK 7.1 and ParaView 5.0 [S2, unofficial].
+
+## Sources
+[S1] feat(immersive): 3-D volume ray-caster in core Mera (public + tested) ( feat(immersive): 3-D volume ray-caster in core Mera (public + tested) (#260), https://github.com/ManuelBehrendt/Mera.jl/commit/46c844a80e044dbde2a0042ae8311fc407fa9517, fetched 2026-10-28 (unofficial)
+[S2] CPU volume rendering of adaptive mesh refinement data, https://www.researchgate.net/publication/321321949_CPU_volume_rendering_of_adaptive_mesh_refinement_data, fetched 2026-10-26 (unofficial)

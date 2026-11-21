@@ -1,0 +1,104 @@
+# EfficientGS
+
+Also called: EfficientGS
+
+## Overview
+EfficientGS is an optimized adaptation of 3D Gaussian Splatting (3DGS) designed for efficient large-scale, high-resolution scene representation [S1]. It reduces redundancy in 3DGS to alleviate computational and storage demands without sacrificing quality [S1]. Unlike vanilla 3DGS, which suffers from redundancy and low FPS/high storage in large-scale high-resolution scenes, EfficientGS allows for more efficient scene representation with fewer Gaussians [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Sparse point cloud obtained via Structure-From-Motion (SFM) [S1].
+*   **Output:** A set of 3D Gaussians representing the scene, optimized for size and rendering speed [S1].
+
+**Data Structures:**
+Each 3D Gaussian $g$ is defined by:
+*   Mean position $\mu$ [S1].
+*   Covariance matrix $\Sigma$ [S1].
+*   Opacity [S1].
+*   View-dependent color represented by Spherical Harmonics (SH) coefficients [S1].
+
+The covariance matrix $\Sigma$ is decomposed into rotation and scaling components to ensure positive semi-definiteness during optimization:
+$$ \Sigma = R S S^T R^T $$
+where $R$ is the rotation matrix and $S$ is the scaling matrix [S1].
+
+The Gaussian function is defined as:
+$$ G(x) = e^{-\frac{1}{2} (x-\mu)^T \Sigma^{-1} (x-\mu)} $$
+where $x$ is an arbitrary position in the scene [S1].
+
+**Numbered Steps:**
+1.  **Initialization:** Initialize Gaussians from sparse SFM points [S1].
+2.  **Iterative Optimization:** Perform differentiable rasterization and optimize Gaussian parameters using color loss [S1].
+3.  **Selective Densification:** Every few iterations, determine if a Gaussian has reached a steady state. If not (non-steady state), densify it. This focuses on non-steady state Gaussians based on their gradient modulus sum to minimize unnecessary cloning and splitting [S1].
+4.  **Pruning:** After several densifications, remove auxiliary Gaussians that have minimal contribution to sight rays. This eliminates representational redundancy and optimizes the Spherical Harmonics (SH) of remaining Gaussians [S1].
+5.  **Sparse SH Order Increment:** Do not start increasing SH order until after pruning. Every few iterations, assess the need for higher-order SH for each Gaussian based on color disparity from different viewing angles. Gradually increase the SH order only where needed [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def efficient_gs_training(sfm_points, images, camera_poses, num_iterations):
+    # 1. Initialization
+    gaussians = initialize_from_sfm(sfm_points)
+    
+    # 2. Iterative Optimization Loop
+    for iteration in range(num_iterations):
+        # Render current view
+        rendered_image = render(gaussians, camera_poses)
+        
+        # Compute loss
+        loss = compute_color_loss(rendered_image, images)
+        
+        # Backpropagate and update parameters
+        update_parameters(gaussians, loss)
+        
+        # 3. Selective Densification (Every few iterations)
+        if iteration % densification_interval == 0:
+            # Calculate gradient modulus sum for each Gaussian
+            grad_sum = compute_gradient_modulus_sum(gaussians)
+            
+            # Identify non-steady state Gaussians
+            non_steady = select_non_steady_gaussians(grad_sum, threshold)
+            
+            # Densify only non-steady Gaussians
+            gaussians = densify(gaussians, non_steady)
+            
+        # 4. Pruning (After several densifications)
+        if iteration % pruning_interval == 0:
+            # Remove auxiliary Gaussians with minimal contribution
+            gaussians = prune_gaussians(gaussians, ray_contribution_threshold)
+            
+            # Optimize SH of remaining Gaussians
+            optimize_sh(gaussians)
+            
+        # 5. Sparse SH Order Increment (After pruning)
+        if iteration > pruning_start_iteration:
+            if iteration % sh_increment_interval == 0:
+                # Assess need for higher-order SH based on color disparity
+                color_disparity = compute_color_disparity(gaussians, images)
+                
+                # Increase SH order only where needed
+                gaussians = increment_sh_order(gaussians, color_disparity, threshold)
+                
+    return gaussians
+```
+
+**Parameters:**
+*   **Densification Trigger:** Based on gradient modulus sum to identify non-steady state Gaussians [S1].
+*   **SH Order Increment Trigger:** Based on color disparity from different viewing angles [S1].
+
+**Edge Cases and Pitfalls:**
+*   **GPU Memory Pressure:** Starting SH order increment too early increases GPU memory pressure. EfficientGS delays this until after pruning to mitigate this [S1].
+*   **Redundancy:** Vanilla 3DGS suffers from redundancy in large-scale high-resolution scenes. EfficientGS addresses this through selective densification and pruning [S1].
+
+## Operating characteristics
+*   **Model Size:** Approximately tenfold smaller than conventional 3DGS [S1].
+*   **Performance:** Expedites training and rendering times for large-scale, high-resolution scenes (e.g., 4K+ aerial images) [S1].
+*   **Quality:** Maintains high rendering fidelity despite the reduction in Gaussian count [S1].
+*   **Strengths:** Reduces computational and storage demands; improves rendering quality by focusing on non-steady state Gaussians; streamlines scene representation by eliminating non-dominant Gaussians [S1].
+*   **Limitations:** Not given in the sources.
+
+## Background
+EfficientGS was introduced to address the challenges posed by the proliferation of high-resolution aerial photography (often exceeding 4K) in 3DGS training and rendering for large-scale scenes [S1]. Traditional mesh-based methods struggle with non-Lambertian surfaces, while vanilla 3DGS suffers from redundancy and high storage requirements in such contexts [S1]. EfficientGS leverages the representational capacity of individual Gaussians to significantly reduce redundancy [S1].
+
+## Sources
+[S1] EfficientGS: Streamlining Gaussian Splatting for Large-Scale High-Resolution Scene Representation, https://doi.org/10.1109/mmul.2025.3543224, fetched 2026-10-30

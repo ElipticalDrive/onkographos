@@ -1,0 +1,71 @@
+# Index Sorting
+
+Also called: Key-index pair sorting
+
+## Overview
+Index sorting is a sorting variant that produces a permutation of indices rather than reordering data values, allowing related information to be traced back to the original array [S1, unofficial]. It solves the problem of determining related information from the sorted index, which is required because sorting values alone is insufficient for real applications [S1, unofficial]. Unlike methods that pack keys and indices into a single register to save memory, index sorting keeps key counting independent from index values, preserving full precision and index range (up to 4 billion pairs on 32-bit hardware) [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: An array of keys $K$ of size $n$, and an initial index array $I$ of size $n$ [S1, unofficial].
+- Output: A sorted permutation array $P$ (indices) [S1, unofficial].
+
+**Data Structures:**
+- $K$: Array of keys, typically 32-bit integers or floats [S1, unofficial].
+- $I$: Array of indices, initialized as $I[i] = i$ for $0 \le i < n$ [S1, unofficial].
+- $P$: Permutation array, same size as $K$, storing the sorted indices [S1, unofficial].
+
+**Steps:**
+1. **Initialize Index Array:** Generate a companion index array $I$ where $I[i] = i$ [S1, unofficial]. This indicates the original position of each value in $K$ [S1, unofficial].
+2. **Perform Key Sorting:** Execute a radix sort algorithm on the key array $K$ to generate a permutation array $P$ [S1, unofficial]. The sorting logic operates independently on the keys; the indices in $I$ are not involved in the comparison or counting phases [S1, unofficial].
+3. **Shuffle Indices:** Apply the permutation $P$ to the index array $I$ to produce the final sorted index array [S1, unofficial]. This step rearranges the indices according to the sorted order of the keys [S1, unofficial].
+   - Formula: $I_{sorted}[j] = I[P[j]]$ for $0 \le j < n$ [S1, unofficial].
+4. **Access Data:** To retrieve the original data associated with the $j$-th sorted element, use the value $I_{sorted}[j]$ as an offset into the original data arrays [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def index_sort(keys, n):
+    # Step 1: Initialize index array
+    indices = [i for i in range(n)]
+    
+    # Step 2: Sort keys to get permutation
+    # [G] Standard radix sort permutation generation.
+    # The sources do not provide the internal kernel, so this step is marked as a standard operation.
+    # In a full implementation, this would use counting sort passes to compute
+    # prefix sums and place indices into the permutation array based on key digits.
+    permutation = [0] * n
+    # ... radix sort logic to fill permutation ...
+    
+    # Step 3: Shuffle indices with the permutation
+    sorted_indices = [0] * n
+    for j in range(n):
+        sorted_indices[j] = indices[permutation[j]]
+        
+    return sorted_indices
+```
+
+**Edge Cases and Pitfalls:**
+- **Cache Misses:** Index sorting exacerbates cache misses compared to value sorting because the shuffling step involves non-coalesced memory access patterns when applying the permutation to the indices [S1, unofficial].
+- **Memory Bandwidth:** The additional shuffle step increases memory bandwidth requirements [S1, unofficial].
+- **Precision:** Combining keys and indices into a single register reduces precision and index range. Index sorting avoids this by keeping them separate, allowing full 32-bit index ranges [S1, unofficial].
+
+## Subtopics
+
+### Distance-Aware Index Sorting
+Distance-aware index sorting optimizes sorting by computing distance data once and using an auxiliary structure to avoid redundant calculations during comparison [S2, unofficial]. It computes the distance squared from the origin and the index for all blocks, sorts the auxiliary structure, and maps the sorted indices back to the original blocks [S2, unofficial]. The auxiliary structure is a `DistanceIndexPair` containing a `float m_distanceSquaredFromOrigin` and an `int m_index` [S2, unofficial]. Radix sort is asymptotically faster and not comparison-based, potentially replacing a custom `BlockDistanceComparator` [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Typically 1.5 to 1.8 times slower than value sorting due to non-coalesced shuffling [S1, unofficial].
+- **Optimization:** Using a coalesced radix index sorting scheme reduces the performance penalty to a negligible factor of about 1.1 [S1, unofficial].
+- **Memory:** Requires storage for both the key array and the index array, doubling the memory footprint compared to sorting keys alone if the original data is not needed in place [G].
+- **Strengths:** Preserves full precision and index range; simple to implement on top of existing radix sort kernels [S1, unofficial].
+- **Limitations:** Higher memory bandwidth usage; potential for cache thrashing during the shuffle phase if not optimized [S1, unofficial].
+
+## Background
+Index sorting was discussed in the context of GPU-based parallel sorting, specifically highlighting its application in scenarios where data association is crucial [S1, unofficial]. The method was analyzed on NVIDIA GTX 280 hardware, demonstrating that while naive index sorting suffers from performance penalties, optimized coalesced approaches mitigate these issues [S1, unofficial].
+
+## Sources
+[S1] Fast 4-way parallel radix sorting on GPUs, https://www.sci.utah.edu/~csilva/papers/cgf.pdf, fetched 2026-10-29 (unofficial)
+[S2] How can I improve rendering speeds of a Voxel/Minecraft type game?, https://gamedev.stackexchange.com/questions/22664/how-can-i-improve-rendering-speeds-of-a-voxel-minecraft-type-game, fetched 2026-10-27 (unofficial)

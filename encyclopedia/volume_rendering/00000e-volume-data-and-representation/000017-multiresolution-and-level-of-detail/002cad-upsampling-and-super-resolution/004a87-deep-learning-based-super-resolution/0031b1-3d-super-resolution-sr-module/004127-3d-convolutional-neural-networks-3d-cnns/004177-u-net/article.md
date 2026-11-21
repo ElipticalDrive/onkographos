@@ -1,0 +1,29 @@
+# U-Net
+Also called: U-Net Architecture, U-Net variant
+## Overview
+The U-Net is a convolutional encoder-decoder architecture that adds skip connections between corresponding encoder and decoder stages to preserve spatial detail during upsampling [S1, unofficial]. It solves the problem of information loss in deep volumetric networks by enabling the decoder to access high-resolution features from the encoder, making it dominant for volume super-resolution and segmentation where local receptive fields match volumetric spatial locality [S1, unofficial]. It builds on [3D Convolutional Neural Networks (3D CNNs)](10439-3d-convolutional-neural-networks-3d-cnns.md) and differs from [Voxel Super-Resolution Decoder](11760-voxel-super-resolution-decoder.md).
+## How it works
+**Inputs and Outputs:** Not given in the sources.
+**Data Structures:** The network consists of an encoder path and a decoder path, with skip connections added between corresponding encoder and decoder stages [S1, unofficial].
+**Steps:** Not given in the sources.
+**Formulas:** Not given in the sources.
+**Parameters:** Not given in the sources.
+**Edge Cases and Pitfalls:** Not given in the sources.
+## Subtopics
+
+### [Multi-Plane Network](15520-multi-plane-network.md)
+The Multi-Plane Network (MPN) is a 3D U-Net variant designed to process neural point features and output multi-plane representations for volume rendering. It solves the problem of learning spatially coherent volumetric properties from sparse, unstructured point clouds by projecting features onto 2D planes and aggregating them through a deep convolutional encoder-decoder structure. Unlike standard 3D CNNs that operate on dense voxel grids, MPN operates on the projected multi-plane feature maps, allowing for efficient handling of large-scale scenes while preserving high-frequency details through skip connections.
+
+### VC-Net
+VC-Net is a network for microvascular segmentation in cerebrovascular micro-MRI that combines 3D U-Net on raw volumes with 2D U-Net on Maximum Intensity Projections (MIPs), fusing them via a volume-composition module [S1, unofficial]. It processes raw volume with 3D U-Net, processes MIPs with 2D U-Net, and fuses streams by projecting 2D contextual predictions back into 3D space using a volume-composition module [S1, unofficial]. On three cerebrovascular segmentation tasks, it achieved Dice scores of 82.98% (major arteries), 76.46% (major veins), and 74.40% (microvasculature) [S1, unofficial].
+
+### Reconstruction Unet
+Reconstruction Unet trains a U-Net neural network $G_\mu(\cdot)$ to perform volume reconstruction from projections, serving as the differentiable forward model in the uncalibrated imaging framework [S2, unofficial]. It minimizes mean-squared error loss between network output and ground truth using the Adam optimizer, iterating for exactly 100 epochs where one epoch equals one full pass through the training dataset [S2, unofficial].
+
+## Operating characteristics
+It is dominant for volume super-resolution and segmentation where local receptive fields naturally match the spatial locality of volumetric features [S1, unofficial]. Not given in the sources for other performance metrics, scaling, or hardware constraints.
+## Background
+Not given in the sources.
+## Sources
+[S1] Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
+[S2] Differentiable Uncalibrated Imaging, https://doi.org/10.48550/arXiv.2211.10525, fetched 2026-10-26 (unofficial)

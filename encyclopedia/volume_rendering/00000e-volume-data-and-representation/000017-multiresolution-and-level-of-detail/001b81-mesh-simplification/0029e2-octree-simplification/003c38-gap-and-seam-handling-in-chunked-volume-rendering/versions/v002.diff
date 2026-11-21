@@ -1,0 +1,148 @@
+--- v001.md
++++ v002.md
+@@ -4,22 +4,17 @@
+ 
+ ## Overview
+-Chunked volume rendering splits data into independent octants to enable culling, but this isolation causes disconnected isosurface meshes at cell boundaries, creating visual gaps [S1]. This method addresses the problem of connecting these disjointed meshes, with a specific focus on maintaining connectivity across different Levels of Detail (LOD) [S1]. It is distinguished from sibling methods like [Static Level of Detail Generation via Vertex Clustering](9052-static-level-of-detail-generation-via-vertex-clustering.md) by explicitly managing the topology at the boundaries of spatial partitions rather than relying on vertex merging or clustering to resolve discontinuities [S1].
++Chunked volume rendering splits volume data into independent octants to enable culling, but this isolation causes disconnected isosurface meshes at cell boundaries, creating visual gaps [S1]. This method addresses the problem of connecting these disjointed meshes, with a specific focus on maintaining connectivity across different Levels of Detail (LOD) [S1]. It is distinguished from sibling methods like [Static Level of Detail Generation via Vertex Clustering](9052-static-level-of-detail-generation-via-vertex-clustering.md) by explicitly managing the topology at the boundaries of spatial partitions rather than relying on vertex merging or clustering to resolve discontinuities [S1].
+ 
+ ## How it works
+-The method consists of two primary approaches: Overlapping Cells and Seam Mesh Generation. The choice depends on whether the rendering system uses uniform LOD or mixed LODs across adjacent cells.
++The method consists of two primary approaches: Overlapping Cells and Seam Mesh Generation. The choice depends on whether the rendering system uses uniform LOD or mixed LODs across adjacent cells [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:**
+-    *   Volume data partitioned into spatial cells (octants).
+-    *   A defined Level of Detail (LOD) for each cell.
+-    *   Adjacency information between cells.
+-*   **Outputs:**
+-    *   A continuous isosurface mesh without gaps.
+-    *   Seam meshes for mixed-LOD boundaries.
++*   **Inputs:** Volume data partitioned into spatial cells (octants) [S1]. A defined Level of Detail (LOD) for each cell [S1]. Adjacency information between cells [S1].
++*   **Outputs:** A continuous isosurface mesh without gaps [S1]. Seam meshes for mixed-LOD boundaries [S1].
+ 
+ ### Data Structures
+-*   **Cell Data:** Standard voxel grid for each cell.
+-*   **Seam Mesh:** A separate mesh structure storing vertices and indices that bridge gaps between cells of different LODs.
+-*   **Border Voxels:** A subset of voxels exported from contouring tasks at LOD boundaries.
++*   **Cell Data:** Standard voxel grid for each cell [S1].
++*   **Seam Mesh:** A separate mesh structure storing vertices and indices that bridge gaps between cells of different LODs [S1].
++*   **Border Voxels:** A subset of voxels exported from contouring tasks at LOD boundaries [S1].
+ 
+ ### Steps
+@@ -29,6 +24,6 @@
+ 
+ 1.  **Extend Data Domain:** For each cell, extend its data domain by one voxel in the positive directions (e.g., +x, +y, +z) to include overlapping boundary voxels [S1].
+-2.  **Contouring:** Perform contouring on the extended cell data.
+-3.  **Duplicate Prevention:** During contouring, ensure that additional voxels within the extended boundary are not connected among each other if they are shared with a neighbor. Specifically, if Cell A extends into Cell B, the edge connecting vertices $b$ and $d$ with $a_0$ and $c_0$ (to close the gap) must only be created by one cell to prevent duplicate polygons [S1].
++2.  **Contouring:** Perform contouring on the extended cell data [S1].
++3.  **Duplicate Prevention:** During contouring, ensure that additional voxels within the extended boundary are not connected among each other if they are shared with a neighbor [S1]. Specifically, if Cell A extends into Cell B, the edge connecting vertices $b$ and $d$ with $a_0$ and $c_0$ (to close the gap) must only be created by one cell to prevent duplicate polygons [S1].
+     *   *Note:* The exact algorithm for determining which cell owns the shared edge is not fully specified in the sources, but the constraint is that shared edges must not be generated twice [S1].
+ 
+@@ -46,53 +41,49 @@
+ 
+ ```python
+-def contour_cell(cell_data, cell_id, is_border_cell, seam_mesh_manager):
++def process_chunked_volume(cells, lod_levels, seam_manager):
+     """
+-    Contour a single cell, handling gaps based on the approach.
+-    
+-    Args:
+-        cell_data: The voxel data for the cell.
+-        cell_id: Identifier for the cell.
+-        is_border_cell: Boolean indicating if the cell is at a LOD boundary.
+-        seam_mesh_manager: Object managing seam mesh creation and updates.
++    Processes chunked volume data to generate meshes and seam meshes.
++    cells: list of cell objects, each with .data (voxel grid) and .id
++    lod_levels: dict mapping cell.id to LOD level
++    seam_manager: object with .update_seam(cell_id, border_voxels) method
++    Returns: list of mesh objects (vertices, indices)
+     """
+-    if is_border_cell:
+-        # Export bordering voxels for seam mesh generation
+-        border_voxels = export_border_voxels(cell_data)
+-        seam_mesh_manager.update_seam(cell_id, border_voxels)
++    meshes = []
++    for cell in cells:
++        cell_id = cell.id
++        # Not given in the sources: exact logic to determine if a cell is at a LOD shell border.
++        is_border = lod_levels[cell_id] != lod_levels.get(cell_id + 1, lod_levels[cell_id])
+         
+-        # Contour the cell, ensuring no extension into seam mesh area
+-        mesh = contour(cell_data, exclude_seam_area=True)
+-    else:
+-        # Standard contouring for non-border cells
+-        # If using overlapping cells, extend data domain by 1 voxel in positive directions
+-        # and handle duplicate edge prevention for shared boundaries
+-        extended_data = extend_data_domain_positive(cell_data, overlap=1)
+-        mesh = contour(extended_data, prevent_duplicate_edges=True)
+-        
+-    return mesh
++        if is_border:
++            # Export bordering voxels for seam mesh generation
++            border_voxels = [v for v in cell.data if v in cell.data[:3] or v in cell.data[-3:]]
++            seam_manager.update_seam(cell_id, border_voxels)
++            
++            # Contour the cell, ensuring no extension into seam mesh area
++            mesh = contour_cell(cell.data, exclude_seam_area=True)
++        else:
++            # Extend data domain by 1 voxel in positive directions
++            extended_data = extend_data_positive(cell.data, overlap=1)
++            # Contour the cell, preventing duplicate edges in overlapping regions
++            mesh = contour_cell(extended_data, prevent_duplicate_edges=True)
++            
++        meshes.append(mesh)
++    return meshes
+ 
+-def prevent_duplicate_edges(mesh, neighbor_mesh):
++def extend_data_positive(data, overlap=1):
++    """Extends the data domain by 'overlap' voxels in positive directions."""
++    # Not given in the sources: exact implementation details.
++    return data
++
++def contour_cell(data, exclude_seam_area=False, prevent_duplicate_edges=False):
+     """
+-    Prevents duplicate polygon generation at overlapping boundaries.
+-    Specifically, ensures that edges like the one connecting vertices b and d 
+-    with a_0 and c_0 are not created twice by adjacent cells.
++    Generates an isosurface mesh from voxel data.
++    Returns a tuple (vertices, indices) to prevent NoneType unpacking errors.
+     """
+-    # Logic to identify shared edges between overlapping cells
+-    # and remove duplicates based on cell ownership rules
+-    pass
+-
+-def extend_data_domain_positive(data, overlap=1):
+-    """
+-    Extends the data domain by 'overlap' voxels in positive directions.
+-    """
+-    # Implementation details for extending voxel grid
+-    pass
+-
+-def export_border_voxels(cell_data):
+-    """
+-    Extracts voxels located at the border of the cell.
+-    """
+-    # Implementation details for extracting border voxels
+-    pass
++    # Not given in the sources: exact contouring algorithm.
++    # Standard Marching Cubes or similar would be implemented here.
++    vertices = []
++    indices = []
++    return (vertices, indices)
+ ```
+ 
+@@ -102,5 +93,5 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Mixed-LOD Gaps:** Overlapping cells fail to connect meshes of different LODs because extra vertices from higher LOD meshes create cracks or holes when merged with lower LOD meshes [S1]. Seam meshes are required in this case [S1].
++*   **Mixed-LOD Gaps:** Overlapping cells fail to connect meshes of different LODs because extra vertices from higher LOD meshes create cracks or holes when merged with lower LOD meshes [S1]. Seam meshes are required for mixed-LOD boundaries [S1].
+ *   **Duplicate Polygons:** In the overlapping cells approach, additional voxels must not be connected among each other within the same cell's extended boundary, as neighboring cells will also generate these polygons, causing duplicates [S1].
+ *   **Geometry Overlap:** Meshes generated from cells at LOD borders must not extend into the seam mesh area to prevent geometry overlap [S1].
+@@ -118,5 +109,5 @@
+ 
+ ## Background
+-The problem of gaps in chunked volume rendering arises when splitting surface meshes into patches for culling, which increases draw calls and reduces performance if not managed correctly [S1]. The issue is particularly challenging when a LOD system is involved [S1]. Two known approaches to solving this problem are letting cells overlap by one voxel in each positive direction and gathering bordering voxels from neighboring cells to create a seam mesh [S1]. The overlapping cells approach is attributed to reference [6], while the seam mesh approach is attributed to references [8] and [6] [S1]. The source notes that the developed system did not include a complete gap closing solution due to a lack of information on the duplicate edge issue [S1].
++The problem of gaps in chunked volume rendering arises when splitting volume data into separate octants (cells), which results in disconnected isosurface meshes at cell boundaries [S1]. This problem becomes even more complicated when a LOD system is involved [S1]. Two known approaches to solving this problem are letting cells overlap by one voxel in each positive direction and gathering bordering voxels from neighboring cells to create a seam mesh [S1]. The overlapping cells approach is attributed to reference [6], while the seam mesh approach is attributed to references [8] and [6] [S1]. The source notes that the developed system did not include a complete gap closing solution due to a lack of information on the duplicate edge issue [S1].
+ 
+ ## Sources

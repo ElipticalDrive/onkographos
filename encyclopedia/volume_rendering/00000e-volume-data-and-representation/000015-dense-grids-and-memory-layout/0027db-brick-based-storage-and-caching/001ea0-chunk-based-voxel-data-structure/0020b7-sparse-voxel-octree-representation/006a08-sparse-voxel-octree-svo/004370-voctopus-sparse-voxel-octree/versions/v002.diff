@@ -1,0 +1,509 @@
+--- v001.md
++++ v002.md
+@@ -1,184 +1,348 @@
+ # Voctopus Sparse Voxel Octree
+ 
+-Also called: Voctopus
++Also called: Voctopus, Voctopus Kernel, VoctopusKernel32, asm.js octree kernel
+ 
+ ## Overview
+-Voctopus is a sparse voxel octree (SVO) implementation designed for direct shader rendering in WebGL via ray tracing, eliminating the need for meshification [S1, unofficial]. It distinguishes itself by using a flat, contiguous memory buffer managed by a low-level `asm.js` kernel to achieve high throughput (up to 8 million read/write operations per second) while maintaining a small memory footprint [S1, unofficial].
++Voctopus is a sparse voxel octree (SVO) implementation designed for direct shader rendering in WebGL without meshification, utilizing ray tracing techniques [S1, unofficial]. It distinguishes itself by using a compact, flat memory layout with pointer encoding to minimize memory footprint and enable high-performance traversal in JavaScript/asm.js environments [S1, unofficial]. Unlike general-purpose SVOs, it is optimized for small, fast kernels that handle pointer encoding, tree traversal, and ray-AABB intersection testing directly within a constrained buffer [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-The primary input is the `depth` parameter, defining the maximum resolution of the octree ($2^{depth}$). The output is a `Voctopus` instance containing a memory buffer, a kernel object for low-level operations, and high-level API methods for voxel access.
++- **Input:** Maximum tree depth $D_{MAX}$, initial buffer size (optional), ray origin $(r_x, r_y, r_z)$ and direction $(d_x, d_y, d_z)$ for traversal.
++- **Output:** Voxel data (RGBA), traversal pointers, or boolean hit status for ray casting.
+ 
+ **Data Structures:**
+-1.  **Buffer:** A contiguous `ArrayBuffer` storing voxel data. The size is determined dynamically, starting at `startSize` and expanding up to `MAX_BUFFER` (512 GB) [S1, unofficial].
+-2.  **Voxel (32-bit):** Each voxel is a single 32-bit integer with the following bit layout [S1, unofficial]:
+-    *   Bits 0–23: RGB color (24 bits).
+-    *   Bits 24–27: Alpha channel (4 bits).
+-    *   Bits 28–30: Reserved for rendering instructions (3 bits).
+-    *   Bit 31: Type flag. If set, the entry is a pointer to a child octant; if clear, it is voxel data.
+-3.  **Octant:** A single voxel node at a specific depth.
+-4.  **Octet:** An array of 8 voxels (children of a parent node). In the kernel's internal representation, an octet occupies 8 bytes (one 32-bit word per voxel) [S1, unofficial].
+-5.  **Kernel:** An `asm.js` module handling memory management, traversal, and bit-packing. It exposes methods like `getOctant`, `setOctant`, `prepareLookup`, and `initOctet` [S1, unofficial].
++The kernel manages a flat `Uint32Array` buffer (heap) acting as the octree storage. The layout is fixed at specific indices:
++
++| Index | Variable | Description |
++| :--- | :--- | :--- |
++| 0 | $D_{MAX}$ | Maximum depth of the tree |
++| 1 | $P_{FO}$ | First offset (root octet offset) |
++| 2 | $P_{NO}$ | Next octet pointer (allocation cursor) |
++| 3 | $P_{CUR}$ | Current pointer (traversal state) |
++| 4 | $P_{TMP}$ | Temporary pointer |
++| 5 | $D_{CUR}$ | Current depth in traversal |
++| 6 | $LOC_X$ | Current X coordinate |
++| 7 | $LOC_Y$ | Current Y coordinate |
++| 8 | $LOC_Z$ | Current Z coordinate |
++| 9 | $D_{TGT}$ | Target depth for traversal |
++| 10 | $D_{INV}$ | Depth inverse ($D_{MAX} - D_{CUR}$) |
++| 11 | $V_{TMP}$ | Temporary value |
++| 12 | $STEPA$ | Step accumulator |
++| 13 | $STEPB$ | Step buffer |
++| 14 | $TRAVA$ | Traversal accumulator |
++| 15 | $INITA$ | Initialization accumulator |
++
++*Note: Indices are multiplied by 4 (shifted right by 2) for 32-bit access in the heap [S1, unofficial].*
++
++**Voxel Value Layout:**
++Each octant is a 32-bit value:
++- Bits 0–23: RGB color (8 bits each).
++- Bits 24–27: Alpha channel (4 bits).
++- Bits 28–30: Reserved for rendering instructions.
++- Bit 31: Flag indicating if the entry is a pointer or voxel data [S1, unofficial].
++
++**Pointer Encoding:**
++- **Encode:** $makeP(n) = (n \ll 1) \mid 1$. The least significant bit (LSB) is set to 1 to flag a value as a pointer [S1, unofficial].
++- **Decode:** $pFrom(n) = ((\sim(0x7FFFFFFF + (n \& 1)) \& n) \gg 1)$. Returns 0 if $n$ is not a pointer (LSB is 0) [S1, unofficial].
++
++**Voxel Packing:**
++- **Pack:** $valFromRGBA(r, g, b, a) = (r \ll 24) + (g \ll 16) + (b \ll 8) + ((a \& 63) \ll 4)$. R, G, B are 8-bit; A is 4-bit (masked by 63) [S1, unofficial].
++- **Unpack:**
++  - $r = (n \gg 8) \& 0xFF$
++  - $g = n \& 0xFF$
++  - $b = (n \& 0xFF00) \gg 8$
++  - $a = (n \& 0xF0) \gg 4$ [S1, unofficial]
++
++**Octant Identity:**
++To determine which of the 8 children an octet occupies at a given depth:
++$octantIdentity(v, dc, dm) = (((v[2] \gg (dm - 1 - dc)) \& 1) \ll 2) \mid (((v[1] \gg (dm - 1 - dc)) \& 1) \ll 1) \mid ((v[0] \gg (dm - 1 - dc)) \& 1)$ [S1, unofficial].
+ 
+ **Parameters:**
+-*   `depth`: Maximum tree depth. Minimum useful depth is 2 [S1, unofficial].
+-*   `MAX_BUFFER`: Constant, $1024 \times 1024 \times 1024 \times 512$ bytes (512 GB) [S1, unofficial].
++- $MAX\_BUFFER$: $1024 \times 1024 \times 1024 \times 512$ bytes (512 GB) [S1, unofficial].
++- $VK\_FO$: 100 (First Offset) [S1, unofficial].
++- $VK\_OS$: 8 bytes (Octet Size) [S1, unofficial].
++- $depth$: Required constructor parameter, minimum useful depth is 2 [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Initialization:**
+-    *   Validate `depth`.
+-    *   Calculate `octantSize` = 8 bytes.
+-    *   Calculate `octetSize` = `octantSize` * 8.
+-    *   Calculate `firstOffset` from `VK_FO` (kernel-specific constant) [S1, unofficial].
+-    *   Calculate `maxSize` using `npot(firstOffset + sump8(depth))` [S1, unofficial].
+-    *   Calculate `dimensions` = $2^{depth}$.
+-    *   Calculate `startSize` = `npot(max(0x10000, min(maxSize/8, MAX_BUFFER)))` [S1, unofficial].
+-    *   Allocate `buffer` of size `startSize`.
+-    *   Initialize `kernel` with `buffer` and `depth-1` [S1, unofficial].
+-
+-2.  **Buffer Expansion (Triggered when memory is exhausted):**
+-    *   Calculate `maxAllowedSize` = `min(MAX_BUFFER, this.maxSize)`.
+-    *   Calculate `newSize` = `buffer.byteLength` * 2.
+-    *   If `newSize` > `maxAllowedSize`, return `false` [S1, unofficial].
+-    *   Create `tmp` buffer of size `newSize`.
+-    *   Transfer contents from `buffer` to `tmp`.
+-    *   Re-initialize `kernel` with `tmp`.
+-    *   Update `buffer` and view references.
+-    *   Return `true` [S1, unofficial].
+-    *   *Note:* Buffer expansion is a very expensive operation and should be avoided until necessary [S1, unofficial].
+-
+-3.  **Traversal and Access:**
+-    *   **Prepare Lookup:** `kernel.prepareLookup(x, y, z, depth)` calculates the path from the root to the target coordinate [S1, unofficial].
+-    *   **Walk Tree:** Initialize a stack with the start pointer (`kernel.getFirstOffset()`). Loop `i` from 0 to `depth-1`: call `step()` to get the next child pointer. If a child exists, push to stack and update pointer; else return stack [S1, unofficial].
+-    *   **Get Voxel:** Call `kernel.getOctant(p)` to get raw data. Extract R, G, B, A using `kernel.rFrom()`, `gFrom()`, `bFrom()`, `aFrom()` [S1, unofficial].
+-    *   **Set Voxel:** Pack RGBA into a 32-bit value using `kernel.valFromRGBA(r, g, b, a)`. Write to `kernel.setOctant(p, rgba)` [S1, unofficial].
+-    *   **Initialize Voxel:** Call `kernel.prepareLookup()` then `kernel.initOctet()` to ensure the path exists and return the index [S1, unofficial].
++1. **Initialization:**
++   - Validate depth.
++   - Calculate $octantSize = 8$ bytes.
++   - Calculate $octetSize = octantSize \times 8 = 64$ bytes? *Correction: Source says octetSize is 8 bytes in kernel context, but standard octet is 8 voxels. The source notes "Octet size: 8 bytes for a single octet (in the kernel's internal representation context)". This likely refers to the stride or a specific internal metric. We follow the source's explicit "octetSize (octantSize * 8)" calculation in the constructor step, but note the conflict. The source explicitly states `octetSize = octantSize * 8` in the constructor step, but later says "Octet size: 8 bytes". Given `octantSize` is 8, `octetSize` would be 64. However, the heap layout uses `P_NO` increment by 8. We will use the explicit constructor logic: `octetSize = octantSize * 8` [S1, unofficial].*
++   - Calculate $firstOffset = VK\_FO$.
++   - Calculate $maxSize$ using `npot(firstOffset + sump8(depth))`.
++   - Calculate $dimensions = 2^{depth}$.
++   - Calculate $startSize = npot(\max(0x10000, \min(maxSize/8, MAX\_BUFFER)))$.
++   - Allocate buffer of $startSize$.
++   - Initialize kernel with buffer and $depth-1$ [S1, unofficial].
++
++2. **Buffer Expansion:**
++   - If memory is needed, calculate $maxAllowed = \min(MAX\_BUFFER, this.maxSize)$.
++   - Calculate $newSize = buffer.byteLength \times 2$.
++   - If $newSize > maxAllowed$, return false.
++   - Create new `ArrayBuffer` of size $newSize$.
++   - Transfer contents.
++   - Re-initialize kernel with new buffer.
++   - Update references. Return true [S1, unofficial].
++
++3. **Traversal (`seek`):**
++   - Initialize $TRAVA = 0$.
++   - Loop while $D_{CUR} < \min(D_{TGT}, D_{MAX})$:
++     - Increment $D_{CUR}$.
++     - Calculate $octantPointer$ using current coordinates and depth inverse.
++     - Read octant value into $TRAVA$.
++     - If $isP(TRAVA)$ is false, return $TRAVA$ (leaf voxel).
++     - If $isP(TRAVA)$ is true, update $P_{CUR} = pFrom(TRAVA)$.
++   - Return $P_{CUR}$ if loop finishes [S1, unofficial].
++
++4. **Initialization (`initOctet`):**
++   - Initialize $INITA = 0$.
++   - Loop while $D_{CUR} < \min(D_{TGT}, D_{MAX})$:
++     - Increment $D_{CUR}$.
++     - Calculate $octantPointer$.
++     - Read octant value into $INITA$.
++     - If $isP(INITA)$ is false:
++       - Allocate new octet (increment $P_{NO}$).
++       - Create pointer from allocation.
++       - Set octant at $octantPointer$ to this new pointer.
++     - Update $P_{CUR} = pFrom(INITA)$.
++   - Return $P_{CUR}$ [S1, unofficial].
++
++5. **Step (`step`):**
++   - Increment $D_{CUR}$.
++   - Calculate $octantPointer$.
++   - Read octant value into $STEPA$.
++   - Update $P_{CUR} = pFrom(STEPA)$.
++   - Return $octantPointer$ [S1, unofficial].
++
++6. **Ray-AABB Intersection (`rayAABB`):**
++   - Calculate slabs:
++     - $DBLA = (bs_x - ro_x) \times rdx$
++     - $DBLB = (be_x - ro_x) \times rdx$
++     - $DBLC = (bs_y - ro_y) \times rdy$
++     - $DBLD = (be_y - ro_y) \times rdy$
++     - $DBLE = (bs_z - ro_z) \times rdz$
++     - $DBLF = (be_z - ro_z) \times rdz$ *Note: Source lists DBLD twice for Z, implying a typo in source. Standard slab method uses distinct variables for Z. We assume standard logic: $DBL_Z1 = (bs_z - ro_z) \times rdz$, $DBL_Z2 = (be_z - ro_z) \times rdz$.*
++   - Return $1$ if $\max(\min(DBLA, DBLB), \min(DBLC, DBLD), \min(DBL_Z1, DBL_Z2)) \le \min(\max(DBLA, DBLB), \max(DBLC, DBLD), \max(DBL_Z1, DBL_Z2))$, else $0$ [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-class Voctopus:
+-    def __init__(self, depth):
+-        # 1. Validate depth
+-        if depth < 2:
+-            raise ValueError("Minimum useful tree depth is 2")
+-        
+-        self.depth = depth
+-        self.octantSize = 8
+-        self.octetSize = self.octantSize * 8
+-        
+-        # 2. Calculate sizes (npot = next power of two)
+-        # VK_FO and sump8 are kernel-specific constants/functions
+-        firstOffset = get_vk_fo() 
+-        maxSize = npot(firstOffset + sump8(depth))
+-        self.dimensions = 2 ** depth
+-        
+-        startSize = npot(max(0x10000, min(maxSize // 8, MAX_BUFFER)))
+-        
+-        # 3. Allocate buffer
+-        self.buffer = ArrayBuffer(startSize)
+-        
+-        # 4. Initialize kernel
+-        self.kernel = Kernel(self.buffer, depth - 1)
+-        
+-    def expand(self):
+-        maxAllowedSize = min(MAX_BUFFER, self.maxSize)
+-        newSize = self.buffer.byteLength * 2
+-        
+-        if newSize > maxAllowedSize:
+-            return False
++def voctopus_init(depth, buffer_size=None):
++    """Initialize the Voctopus kernel."""
++    VK_FO = 100
++    VK_OS = 8
++    MAX_BUFFER = 1024 * 1024 * 1024 * 512
++    
++    octant_size = 8
++    octet_size = octant_size * 8
++    
++    # Calculate max size needed for a full octree
++    # sump8(n) = (8^(n+1) - 1) / 7
++    sum_p8 = (8**(depth + 1) - 1) // 7
++    first_offset = VK_FO
++    max_size = next_power_of_two(first_offset + sum_p8)
++    
++    dimensions = 2 ** depth
++    
++    # Calculate start size
++    min_start = 0x10000
++    max_start = max_size // 8
++    start_size = next_power_of_two(max(min_start, min(max_start, MAX_BUFFER)))
++    
++    if buffer_size is None:
++        buffer_size = start_size
++        
++    buffer = allocate_buffer(buffer_size)
++    
++    # Initialize heap indices
++    heap = Uint32Array(buffer)
++    heap[0] = depth  # D_MAX
++    heap[1] = VK_FO  # P_FO
++    heap[2] = VK_FO + VK_OS  # P_NO
++    
++    return Kernel(heap, depth)
++
++def voctopus_seek(kernel, target_coords, target_depth):
++    """Traverse to the deepest voxel at target_coords."""
++    heap = kernel.heap
++    depth = kernel.depth
++    
++    # Set target depth
++    heap[9] = target_depth
++    
++    # Prepare lookup (set coordinates and depth inverse)
++    prepare_lookup(kernel, target_coords, depth)
++    
++    # Initialize traversal state
++    heap[5] = 0  # D_CUR = 0
++    heap[3] = heap[1]  # P_CUR = P_FO
++    
++    # Seek loop
++    while heap[5] < min(heap[9], heap[0]):
++        increment_current_depth(kernel)
++        octant_ptr = octant_pointer(kernel)
++        trava = get_octant(heap, octant_ptr)
++        
++        if not is_pointer(trava):
++            return trava  # Leaf voxel data
++        
++        # Update current pointer
++        heap[3] = p_from(trava)
++        
++    return heap[3]  # Return pointer if target depth reached
++
++def voctopus_init_octet(kernel, target_coords, target_depth):
++    """Initialize path to target, creating nodes if necessary."""
++    heap = kernel.heap
++    depth = kernel.depth
++    
++    heap[9] = target_depth
++    prepare_lookup(kernel, target_coords, depth)
++    heap[5] = 0
++    heap[3] = heap[1]
++    
++    while heap[5] < min(heap[9], heap[0]):
++        increment_current_depth(kernel)
++        octant_ptr = octant_pointer(kernel)
++        inita = get_octant(heap, octant_ptr)
++        
++        if not is_pointer(inita):
++            # Allocate new octet
++            new_ptr = allocate_octet(kernel)
++            new_ptr_encoded = make_pointer(new_ptr)
++            set_octant(heap, octant_ptr, new_ptr_encoded)
++            inita = new_ptr_encoded
+             
+-        tmp = ArrayBuffer(newSize)
+-        # Transfer buffer contents to tmp
+-        copy_buffer_contents(self.buffer, tmp)
+-        
+-        # Re-initialize kernel with tmp
+-        self.kernel.reinit(tmp)
+-        
+-        # Update buffer reference
+-        self.buffer = tmp
+-        return True
+-
+-    def get_voxel(self, index, out):
+-        raw = self.kernel.get_octant(index)
+-        out.r = self.kernel.r_from(raw)
+-        out.g = self.kernel.g_from(raw)
+-        out.b = self.kernel.b_from(raw)
+-        out.a = self.kernel.a_from(raw)
+-        return out
+-
+-    def set_voxel(self, index, r, g, b, a):
+-        rgba = self.kernel.val_from_rgba(r, g, b, a)
+-        self.kernel.set_octant(index, rgba)
+-        return index
+-
+-    def init_voxel(self, v):
+-        # v is [x, y, z]
+-        self.kernel.prepare_lookup(v[0], v[1], v[2], self.depth)
+-        index = self.kernel.init_octet()
+-        return index
+-
+-    def walk_tree(self, v):
+-        stack = [self.kernel.get_first_offset()]
+-        self.kernel.prepare_lookup(v[0], v[1], v[2], self.depth)
+-        
+-        for i in range(self.depth - 1):
+-            c = self.kernel.step()
+-            if c:
+-                stack.append(c)
+-                # Update current pointer logic handled by kernel state or explicit p=c
+-                # Note: The source implies p is updated internally or via return
+-        return stack
+-
+-    def get_voxel_at_coord(self, v, out):
+-        self.kernel.prepare_lookup(v[0], v[1], v[2], self.depth)
+-        ptr = self.kernel.seek()
+-        return self.get_voxel(ptr, out)
+-
+-    def set_voxel_at_coord(self, v, props):
+-        self.kernel.prepare_lookup(v[0], v[1], v[2], self.depth)
+-        index = self.kernel.init_octet()
+-        return self.set_voxel(index, props.r, props.g, props.b, props.a)
+-
+-    def set_octet(self, v, data):
+-        # data is array of 8 voxel objects
+-        p = self.init_voxel(v)
+-        for i in range(8):
+-            self.set_voxel(p + i, data[i].r, data[i].g, data[i].b, data[i].a)
+-
+-    def get_octet(self, v, out):
+-        # out is array of 8 voxel objects
+-        p = self.seek(v)
+-        for i in range(8):
+-            self.get_voxel(p + i, out[i])
+-        return out
+-
+-    def ray_cast_accumulator(self, ray):
+-        # f(t, p) => bool
+-        # t: distance traveled, p: pointer to voxel hit
+-        # Returns true if at least one voxel was hit
+-        hit = False
+-        # Implementation depends on shader/ray marching logic
+-        # This is a conceptual accumulator function
+-        return hit
++        heap[3] = p_from(inita)
++        
++    return heap[3]
++
++def voctopus_set_voxel(kernel, coords, r, g, b, a):
++    """Set a voxel at specific coordinates."""
++    depth = kernel.depth
++    # Initialize path
++    ptr = voctopus_init_octet(kernel, coords, depth)
++    # Set value
++    val = val_from_rgba(r, g, b, a)
++    set_octant(kernel.heap, ptr, val)
++    return ptr
++
++def voctopus_get_voxel(kernel, coords, out):
++    """Get voxel at specific coordinates."""
++    depth = kernel.depth
++    # Seek to leaf
++    ptr = voctopus_seek(kernel, coords, depth)
++    raw = get_octant(kernel.heap, ptr)
++    
++    out.r = r_from(raw)
++    out.g = g_from(raw)
++    out.b = b_from(raw)
++    out.a = a_from(raw)
++    return out
++
++def voctopus_ray_cast(kernel, ray_origin, ray_direction, max_dist):
++    """Cast a ray through the octree."""
++    # Simplified ray-AABB check for current voxel
++    # In a real shader, this would be iterative
++    pass
++
++def is_pointer(n):
++    return (n & 1) != 0
++
++def p_from(n):
++    if not is_pointer(n):
++        return 0
++    return ((~(0x7FFFFFFF + (n & 1)) & n) >> 1)
++
++def make_pointer(n):
++    return (n << 1) | 1
++
++def val_from_rgba(r, g, b, a):
++    return (r << 24) + (g << 16) + (b << 8) + ((a & 63) << 4)
++
++def r_from(n):
++    return ((n >> 8) & 0xFF)
++
++def g_from(n):
++    return (n & 0xFF)
++
++def b_from(n):
++    return ((n & 0xFF00) >> 8)
++
++def a_from(n):
++    return ((n & 0xF0) >> 4)
++
++def octant_identity(v, dc, dm):
++    d = dm - 1 - dc
++    return (((v[2] >> d) & 1) << 2) | (((v[1] >> d) & 1) << 1) | ((v[0] >> d) & 1)
++
++def prepare_lookup(kernel, coords, depth):
++    heap = kernel.heap
++    heap[6] = coords[0]
++    heap[7] = coords[1]
++    heap[8] = coords[2]
++    # D_INV is calculated dynamically based on D_CUR
++
++def octant_pointer(kernel):
++    heap = kernel.heap
++    dc = heap[5]
++    dm = heap[0]
++    d_inv = dm - dc
++    
++    x = heap[6]
++    y = heap[7]
++    z = heap[8]
++    
++    # Calculate octant identity
++    id = (((z >> d_inv) & 1) << 2) | (((y >> d_inv) & 1) << 1) | ((x >> d_inv) & 1)
++    
++    # Current pointer is the base for this octet
++    p_cur = heap[3]
++    
++    # Offset within the octet (8 voxels)
++    # Note: Source implies octantPointer is an index into the heap relative to P_CUR
++    # The exact calculation of octantPointer from P_CUR and ID is not fully detailed
++    # but typically involves adding ID * octant_size to the current pointer
++    return p_cur + (id * 4)  # Assuming 4-byte indices in heap, or 8-byte voxels?
++
++def increment_current_depth(kernel):
++    kernel.heap[5] += 1
++    # D_INV is recalculated in octant_pointer
++
++def allocate_octet(kernel):
++    heap = kernel.heap
++    p_no = heap[2]
++    heap[2] = p_no + 8  # Increment by 8 bytes? Or 4 indices?
++    return p_no - 8  # Return previous value
++
++def get_octant(heap, index):
++    return heap[index >> 2]  # Shift right by 2 for 32-bit access
++
++def set_octant(heap, index, value):
++    heap[index >> 2] = value
++
++def next_power_of_two(n):
++    n -= 1
++    n |= n >> 1
++    n |= n >> 2
++    n |= n >> 4
++    n |= n >> 8
++    n |= n >> 16
++    n |= n >> 32
++    return n + 1
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Buffer Expansion:** Expanding the buffer is extremely expensive. It should only be triggered when necessary [S1, unofficial].
+-*   **Invalid Index:** Calling `get()` with an invalid index returns garbage data [S1, unofficial].
+-*   **Corruption:** Calling `set()` with an incorrect index will corrupt the octree structure [S1, unofficial].
+-*   **Precision:** The voxel format uses 24-bit RGB and 4-bit alpha. Precision is limited by this fixed-point representation [S1, unofficial].
+-
+ ## Operating characteristics
+-*   **Performance:** Over one million read/write operations per second on commodity hardware, with benchmarks showing up to 8 million operations per second [S1, unofficial].
+-*   **Memory:** Small memory footprint due to sparse representation and contiguous buffer layout. Maximum buffer size is capped at 512 GB [S1, unofficial].
+-*   **Strengths:** High throughput for direct shader rendering; no meshification required; efficient memory usage for sparse data.
+-*   **Limitations:** Buffer expansion is costly; fixed 32-bit voxel format limits color/alpha precision; still considered a work in progress with unstable API [S1, unofficial].
+-*   **When to use:** WebGL applications requiring real-time ray-traced volume rendering without preprocessing to meshes.
+-*   **When not to use:** Applications requiring high-precision floating-point voxel data or dynamic frequent buffer resizing.
++- **Time Complexity:** Traversal is $O(D)$ where $D$ is the depth of the tree, as it visits one node per level [S1, unofficial].
++- **Memory Complexity:** $O(8^D)$ in the worst case (dense), but sparse in practice. The buffer size is determined by `npot(firstOffset + sump8(depth))` [S1, unofficial].
++- **Performance:** Over one million read/write operations per second on commodity hardware, up to 8 million r/w operations per second [S1, unofficial].
++- **Strengths:** Small memory footprint, fast traversal in JavaScript/asm.js, direct shader rendering capability [S1, unofficial].
++- **Limitations:** Buffer expansion is very expensive and should be avoided [S1, unofficial]. Using `get()` with an invalid index returns garbage data [S1, unofficial]. Using `set()` with an incorrect index will corrupt the octree [S1, unofficial].
++- **When to use:** WebGL environments requiring direct voxel rendering without meshing [S1, unofficial].
++- **When not to use:** When frequent buffer expansion is expected, or when high-precision floating-point voxel data is required (limited to 32-bit packed values) [S1, unofficial].
+ 
+ ## Background
+-Voctopus is a JavaScript implementation of a sparse voxel octree created by nphyx [S1, unofficial]. It was designed to enable direct shader rendering in WebGL using ray tracing techniques, including cone tracing, path tracing, and depth marching [S1, unofficial]. The project consists of a low-level `asm.js` kernel for performance and a high-level JavaScript API [S1, unofficial]. As of the source date, it was a work in progress with an unstable API and data structure [S1, unofficial].
++Voctopus was developed by nphyx as a JavaScript implementation of a sparse voxel octree [S1, unofficial]. The goal was to create a data structure small and fast enough to be rendered directly by a shader in WebGL without meshification, using ray tracing techniques [S1, unofficial]. It consists of a low-level kernel written in asm.js and a high-level JavaScript API [S1, unofficial]. The project is still a work in progress, with features like pruning and defragmentation incomplete [S1, unofficial].
+ 
+ ## Sources

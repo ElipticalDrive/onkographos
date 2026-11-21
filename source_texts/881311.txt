@@ -1,0 +1,114 @@
+Wherein choosing the right coordinate system for ray intersection calculations is shown to be important and where the obvious fix has surprising performance ...
+
+Rendering in Camera Space(ish)
+In which coordinate system should we perform geometric and lighting
+calculations in our renderer? Object space? World space? Camera space? On
+the face of it, it seems that it doesn’t matter: it’s a simple matter of a
+transformation matrix to get from one coordinate system to another, so why
+not use whichever one is most convenient?
+In a ray tracer, “most convenient” generally means world space: with that
+approach, the camera generates world-space rays and shapes in the scene are
+either transformed to world space for intersection tests (the typical
+approach for triangle meshes), or rays are transformed to shapes’ object
+space and intersection points are transformed back to world space.
+There is a problem with transforming geometry to world space, however:
+floating-point numbers have less precision the farther one moves from the
+origin. Around the value 1, the spacing between adjacent representable
+float32s is roughly \(6 \times 10^{-8}\). Around 1,000,000, it’s about
+\(6 \times 10^{-2} = 0.06\). Thus, if the scene is modeled in meters and
+the camera is 1,000km from the origin, no details smaller than 6cm can be
+represented. In general, we’d like more precision for things close to the
+camera since, well, the camera can see them better.
+A few images show the problem. First, we have a sports car model from the
+pbrt-v3-scenes distribution. Both the
+camera and the scene are near the origin and everything looks good.
+(Cool sports car model courtesy Yasutoshi Mori.)
+Next,
+we’ve translated both the camera and the scene 200,000 units from the
+origin in \(x\), \(y\), and \(z\). We can see that the car model is
+getting fairly chunky; this is entirely due to insufficient floating-point
+precision.
+(Thanks again to Yasutoshi Mori.)
+If we move \(5 \times\) farther away, to 1 million units from the
+origin, things really fall apart; the car has become an extremely coarse
+voxelized approximation of itself—both cool and horrifying at the same
+time. (Keanu wonders: is Minecraft chunky purely because everything’s
+rendered really far from the origin?)
+(Apologies to Yasutoshi Mori for what has
+been done to his nice model.)
+As an aside, I’m happy that the shading is reasonable given the massive
+geometric imprecision: pbrt-v3 introduces some new techniques for bounding
+floating-point error in ray intersection
+calculations that give robust
+offsets for shadow rays that ensure that they never incorrectly
+self-intersect geometry. It seems to be working well even in this extreme
+case of having very little precision available.
+Rasterizers generally sidestep this problem completely: typical practice is
+to maintain a single model-view matrix that both encodes the object to
+world and world to camera transformations together. Thus, if the camera is
+translated far from the origin, and the scene is also moved along with it,
+those two translations will cancel out right there in the matrix; in the
+end, vertices are transformed directly to camera space and then
+rasterization and shading proceed from there.
+Sounds great; it’s easy enough to do that in a ray tracer, so let’s fix
+this annoying little problem—a few lines of code to write, some testing,
+and then time to feel good about having cleaned up a little annoyance.
+I went ahead and hacked pbrt to do just this, passing the camera an
+identity transform for the world to camera transform and then prepending
+the world to camera transformation before object to world transformations.
+Thus, for example, triangle meshes transform their vertices all the way out
+to camera space and the camera views them from the origin. With this
+change, we get essentially the same image regardless of how far away we
+move from the origin and the most floating point precision is available
+where we want it most.
+Success? Not quite. For this scene, rendering time increased by nearly
+20% with the switch to using camera space, all of it increased time in BVH
+traversal and ray-triangle intersection calculations; \(2.37 \times\)
+more ray-triangle intersection tests were performed. What’s up with that?
+After a little digging and a little bit of thinking, the answer became
+clear. Here’s a hint:
+Ceci n’est pas a tight bounding box.
+The full camera viewing transform for this scene also includes some
+rotation and it so happens that many of the triangles in the scene are
+perpendicular to a coordinate axis or close to it. (So it goes with humans
+creating scenes in modeling systems.) Thus, we get nice tight bounding
+boxes around those triangles in world space but fairly bad ones in camera
+space. From there, it’s inevitable that the BVH we build will be sloppy
+and we’ll end up doing many more intersection tests than before.
+This is a general problem with acceleration structures like BVHs: rotating
+the scene can cause a significant reduction in their effectiveness. The
+issue was first identified by Dammertz and Keller, The edge volume
+heuristic—robust triangle subdivision for improved BVH
+performance; see followup
+work by Stich et al., Spatial splits in bounding volume
+hierarchies,
+Popov et al., Object partitioning considered harmful: space subdivision
+for
+BVHs,
+and Karras and Aila’s Fast parallel construction of high-quality bounding
+volume
+hierarchies
+if you’re interested in the details.
+For this particular case, we can make an expedient choice to restore
+performance without needing to implement a more sophisticated BVH
+construction algorithm: decompose the world to camera transform into a
+translation and a rotation and leave the rotation in the camera’s
+transformation.
+We first transform the point \((0,0,0)\) from camera space to world space
+to find the position of the camera in the scene. Then, when adding
+geometry to the scene, we prepend the translation that moves the camera to
+the origin to the geometry’s object to world transformation, giving us an
+object to camera-save-for-the-rotation transformation. The camera, then,
+is only given the remaining rotation component for its
+not-actually-the-world to camera transformation: it happily sits at the
+origin and rotates to face the scene, which has been brought to it but not
+rotated further.
+With this adjustment, performance is back to where it was when we started
+but we’ve reaped the benefits of rendering in camera space: we have the
+most floating-point precision for things that are close to the camera,
+which is where it’s most useful. It was all slightly more complicated than
+originally envisioned, but happily pretty straightforward in the end.
+While this adjustment doesn’t noticeably improve image quality for most
+scenes, which tend to be well behaved with respect to where the camera is
+located and what it’s looking at, it’s good to know that even for
+challenging viewing configurations, the renderer will still do well.

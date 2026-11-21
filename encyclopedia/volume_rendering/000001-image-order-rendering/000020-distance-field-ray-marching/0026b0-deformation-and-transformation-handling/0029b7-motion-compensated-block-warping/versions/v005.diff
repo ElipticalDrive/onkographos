@@ -1,0 +1,231 @@
+--- v004.md
++++ v005.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The method operates on a block-based sparse TSDF representation. The scene is decomposed into voxel blocks. For each block in the target frame $t$, the algorithm estimates a rigid transform that best aligns the reconstructed TSDF from the previous frame $t-1$ to the current target block.
++The method operates on a block-based sparse TSDF representation [S1]. The scene is decomposed into voxel blocks [S1]. For each block in the target frame $t$, the algorithm estimates a rigid transform that best aligns the reconstructed TSDF from the previous frame $t-1$ to the current target block [S1].
+ 
+ ### Inputs and Outputs
+@@ -56,5 +56,8 @@
+ ### Pseudocode
+ ```python
+-def motion_compensated_block_warping(target_block_b, prev_frame_reconstructed_tsdf, block_size):
++import math
++import numpy as np
++
++def motion_compensated_block_warping(target_block_b, prev_frame_reconstructed_tsdf, block_index, block_size):
+     """
+     Performs motion-compensated block warping for a single block.
+@@ -63,5 +66,6 @@
+         target_block_b: The TSDF values for block b at current frame t.
+         prev_frame_reconstructed_tsdf: The reconstructed TSDF from frame t-1.
+-        block_size: The dimensions of the voxel block (e.g., 16x16x16).
++        block_index: Tuple (x, y, z) identifying the block in the spatial grid.
++        block_size: The dimensions of the voxel block (e.g., 16).
+         
+     Returns:
+@@ -69,31 +73,23 @@
+         residual_coeffs: Encoded residual coefficients
+     """
+-    
+     # 1. Assemble 3x3x3 neighborhood from previous frame
+-    # This provides support for trilinear interpolation across block boundaries
+-    neighborhood = assemble_3x3x3_neighborhood(
+-        prev_frame_reconstructed_tsdf, 
+-        block_b_index, 
+-        block_size
+-    )
++    neighborhood = assemble_3x3x3_neighborhood(prev_frame_reconstructed_tsdf, block_index, block_size)
+     
+     # 2. Estimate motion using damped Gauss-Newton
+-    # Initialize with zero motion
+-    r = [0.0, 0.0, 0.0] # Euler angles
+-    t = [0.0, 0.0, 0.0] # Translation
+-    
+-    damping_lambda = 1e-4 # Small damping for stability
++    r = [0.0, 0.0, 0.0] # Euler angles (rad)
++    t = [0.0, 0.0, 0.0] # Translation (voxels)
++    
++    damping_lambda = 1e-4
+     max_iterations = 10
+     convergence_threshold = 1e-6
++    prev_error = float('inf')
+     
+     for iteration in range(max_iterations):
+-        # Compute residuals for all sample positions in the block
+         residuals = []
+         jacobian_rows = []
+         
+         for p_i in get_voxel_centers(block_size):
+-            # Apply rigid transform T(p; r, t) to map current position to previous frame
+-            # Note: The optimization minimizes error in the current frame space
+-            # by warping the previous frame's data.
++            # Apply forward transform T to map previous coords to current coords
++            # The optimization minimizes error by warping previous frame data to current frame space
+             warped_pos = apply_rigid_transform(p_i, r, t)
+             
+@@ -107,6 +103,5 @@
+             residuals.append(residual)
+             
+-            # Compute Jacobian row via finite difference
+-            # J_ij = d(residual_i) / d(param_j)
++            # Compute Jacobian row via finite difference [S1]
+             jacobian_row = compute_jacobian_row(p_i, r, t, neighborhood, block_size)
+             jacobian_rows.append(jacobian_row)
+@@ -115,28 +110,22 @@
+         J = np.array(jacobian_rows)
+         
+-        # Solve for update step: delta_p = -(J^T J + lambda I)^-1 J^T epsilon
++        # Solve for update step: delta_p = -(J^T J + lambda I)^-1 J^T epsilon [S1]
+         JTJ = J.T @ J
+-        JTJ_damped = JTJ + damping_lambda * np.eye(6) # 6 DoF
++        JTJ_damped = JTJ + damping_lambda * np.eye(6)
+         try:
+             delta_p = np.linalg.solve(JTJ_damped, -J.T @ residuals)
+         except np.linalg.LinAlgError:
+-            # Fallback if matrix is singular
+             break
+             
+-        # Clamp updates
++        # Clamp updates [S1]
+         translation_update = delta_p[3:6]
+         rotation_update = delta_p[0:3]
+         
+-        # Clamp translation to 1 voxel
+         translation_update = np.clip(translation_update, -1.0, 1.0)
+-        
+-        # Clamp rotation to 5 degrees (approx 0.087 radians)
+-        rotation_update = np.clip(rotation_update, -0.087, 0.087)
+-        
+-        # Update parameters
+-        t = t + translation_update
+-        r = r + rotation_update
+-        
+-        # Check convergence
++        rotation_update = np.clip(rotation_update, -math.radians(5), math.radians(5))
++        
++        t = [t[i] + translation_update[i] for i in range(3)]
++        r = [r[i] + rotation_update[i] for i in range(3)]
++        
+         current_error = np.sum(residuals**2)
+         if iteration > 0 and abs(prev_error - current_error) < convergence_threshold:
+@@ -147,5 +136,6 @@
+     predictor = np.zeros_like(target_block_b)
+     for p_i in get_voxel_centers(block_size):
+-        warped_pos = apply_rigid_transform(p_i, r, t)
++        # Inverse warp current position to previous frame space
++        warped_pos = inverse_rigid_transform(p_i, r, t)
+         pred_val = trilinear_interpolate(neighborhood, warped_pos)
+         predictor[get_index(p_i, block_size)] = pred_val
+@@ -153,42 +143,62 @@
+     residual = target_block_b - predictor
+     
+-    # 4. Encode Residual and Motion
+-    residual_coeffs = encode_transform_domain(residual) # e.g., DCT
++    # 4. Encode Residual and Motion [S1]
++    residual_coeffs = encode_transform_domain(residual)
+     
+     return (r, t), residual_coeffs
+ 
+ def assemble_3x3x3_neighborhood(tsdf, block_index, block_size):
+-    """
+-    Retrieves a 3x3x3 grid of blocks centered on block_index.
+-    Handles boundary conditions by padding or clamping.
+-    """
+-    # Implementation detail: Access spatial hash table
+-    # Return a concatenated 3D array of size (3*block_size, 3*block_size, 3*block_size)
+-    pass
++    """Retrieves a 3x3x3 grid of blocks centered on block_index [G]."""
++    # Implementation accesses the spatial hash table and concatenates blocks.
++    # Boundary blocks are padded with zeros or clamped.
++    # Returns a 3D array of shape (3*block_size, 3*block_size, 3*block_size).
++    pass
++
++def get_voxel_centers(block_size):
++    """Returns list of (x, y, z) coordinates for voxel centers in a block [G]."""
++    centers = []
++    for x in range(block_size):
++        for y in range(block_size):
++            for z in range(block_size):
++                centers.append((x + 0.5, y + 0.5, z + 0.5))
++    return centers
++
++def get_index(p, block_size):
++    """Maps 3D coordinate to flat array index [G]."""
++    x, y, z = p
++    return int(x) + int(y) * block_size + int(z) * block_size * block_size
+ 
+ def apply_rigid_transform(p, r, t):
+-    """
+-    Applies rigid transform T(p; r, t).
+-    Assumes r is Euler angles and t is translation.
+-    Returns the transformed point.
+-    """
+-    # Convert Euler angles to rotation matrix R
++    """Applies forward rigid transform T(p) = R*p + t [G]."""
+     R = euler_to_rotation_matrix(r)
+-    # T(p) = R * p + t
+-    return R @ p + t
++    return np.dot(R, p) + t
++
++def inverse_rigid_transform(p, r, t):
++    """Applies inverse rigid transform T^-1(p) = R^T*(p - t) [G]."""
++    R = euler_to_rotation_matrix(r)
++    R_inv = R.T
++    return np.dot(R_inv, np.array(p) - t)
++
++def euler_to_rotation_matrix(r):
++    """Converts Euler angles (rad) to 3x3 rotation matrix [G]."""
++    rx, ry, rz = r
++    Rx = np.array([[1, 0, 0], [0, math.cos(rx), -math.sin(rx)], [0, math.sin(rx), math.cos(rx)]])
++    Ry = np.array([[math.cos(ry), 0, math.sin(ry)], [0, 1, 0], [-math.sin(ry), 0, math.cos(ry)]])
++    Rz = np.array([[math.cos(rz), -math.sin(rz), 0], [math.sin(rz), math.cos(rz), 0], [0, 0, 1]])
++    return Rz @ Ry @ Rx
+ 
+ def trilinear_interpolate(volume, point):
+-    """
+-    Performs trilinear interpolation on a 3D volume at a fractional point.
+-    """
++    """Performs trilinear interpolation on a 3D volume at a fractional point [G]."""
+     # Standard trilinear interpolation logic
+     pass
+ 
+ def compute_jacobian_row(p, r, t, neighborhood, block_size):
+-    """
+-    Computes the Jacobian row for sample p using finite differences.
+-    """
++    """Computes Jacobian row for sample p using finite difference [S1]."""
+     # Numerical differentiation of the residual with respect to 6 parameters
+     pass
++
++def encode_transform_domain(residual):
++    """Applies standard 3D transform (e.g., DCT) to residual coefficients [G]."""
++    pass
+ ```
+ 
+@@ -196,12 +206,15 @@
+ 
+ ### Per-Block Motion Estimation
+-This is the core optimization subroutine used within Motion-Compensated Block Warping. It estimates the 6-DoF rigid transform for a specific block by aligning TSDF samples using a damped Gauss-Newton procedure [S1]. It is chosen when precise local motion estimation is required to minimize residual energy. It differs from global motion estimation by operating on a per-block basis, allowing for independent motion of different parts of the scene [S1]. Key implementation details include clamping translation updates to 1 voxel and rotation updates to 5 degrees per step to prevent divergence, and falling back to zero-motion if the neighborhood is incomplete or samples are unreliable [S1].
++This is the core optimization subroutine used within Motion-Compensated Block Warping [S1]. It estimates the 6-DoF rigid transform for a specific block by aligning TSDF samples using a damped Gauss-Newton procedure [S1]. It is chosen when precise local motion estimation is required to minimize residual energy [G]. It differs from global motion estimation by operating on a per-block basis, allowing for independent motion of different parts of the scene [S1]. Key implementation details include clamping translation updates to 1 voxel and rotation updates to 5 degrees per step to prevent divergence, and falling back to zero-motion if the neighborhood is incomplete or samples are unreliable [S1].
++
++### Hierarchical Motion Prediction
++A motion modeling approach that decouples coarse and fine-grained motion to mitigate inaccuracies in deformation networks, preventing the querying of wrong grid cells [S2]. It predicts coarse motion $m_c$ corresponding to motion between grid cells, and fine-grained motion $m_f$ that operates only within grid cells [S2]. The step size $\alpha$ controls the magnitude of motion and is set to 0.0001 for synthetic scenes, close to the size of a single grid cell [S2]. The deformation network $\Phi_d$ is implemented as a 3-layer MLP with a width of 64 [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The motion estimation step involves an iterative Gauss-Newton optimization. The cost depends on the number of samples in the block, the number of iterations, and the cost of trilinear interpolation and Jacobian computation. The source does not provide a closed-form complexity but notes the use of a damped Gauss-Newton procedure [S1].
+-*   **Memory Complexity:** Requires storing the current block, the previous frame's reconstructed TSDF, and the $3 \times 3 \times 3$ neighborhood for interpolation. The source uses a sparse representation with a GPU-side spatial hash table, reducing memory usage for empty space [S1].
++*   **Time Complexity:** The motion estimation step involves an iterative Gauss-Newton optimization [S1]. The cost depends on the number of samples in the block, the number of iterations, and the cost of trilinear interpolation and Jacobian computation [G].
++*   **Memory Complexity:** Requires storing the current block, the previous frame's reconstructed TSDF, and the $3 \times 3 \times 3$ neighborhood for interpolation [S1]. The source uses a sparse representation with a GPU-side spatial hash table, reducing memory usage for empty space [S1].
+ *   **Performance:** The method is implemented in C++ with CUDA acceleration [S1]. Specific performance metrics (compression ratio, encoding time) are not provided in the source text, only the implementation details [S1].
+ *   **Strengths:** Effectively reduces residual energy for rigidly moving objects, leading to better compression ratios for dynamic TSDF volumes [S1].
+-*   **Limitations:** Relies on the assumption of rigid motion within each block. Non-rigid deformations within a block will not be well-compensated. Requires accurate motion estimation, which can be computationally expensive [S1].
++*   **Limitations:** Relies on the assumption of rigid motion within each block [S1]. Non-rigid deformations within a block will not be well-compensated [G]. Requires accurate motion estimation, which can be computationally expensive [S1].
+ *   **When to use:** Suitable for compressing dynamic scenes with significant rigid body motion, such as in 3D reconstruction from video sequences [S1].
+ *   **When not to use:** Not suitable for scenes with significant non-rigid deformation or where motion estimation is unreliable (e.g., textureless regions, occlusions) [S1].
+@@ -211,3 +224,4 @@
+ 
+ ## Sources
+-[S1] Implicit Surface Compression -- with Good Old Discrete Cosine Transform and Motion Compensation, https://doi.org/10.1145/3811298, fetched 2026-10-30+[S1] Implicit Surface Compression -- with Good Old Discrete Cosine Transform and Motion Compensation, https://doi.org/10.1145/3811298, fetched 2026-10-30
++[S2] Ced-NeRF: A Compact and Efficient Method for Dynamic Neural Radiance Fields, https://doi.org/10.1609/aaai.v38i4.28138, fetched 2026-10-26

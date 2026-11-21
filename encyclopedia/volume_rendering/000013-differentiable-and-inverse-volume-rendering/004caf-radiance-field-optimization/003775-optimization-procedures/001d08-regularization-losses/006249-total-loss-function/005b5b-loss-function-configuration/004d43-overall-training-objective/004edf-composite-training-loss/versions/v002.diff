@@ -1,0 +1,260 @@
+--- v001.md
++++ v002.md
+@@ -4,134 +4,157 @@
+ 
+ ## Overview
+-Composite Training Loss combines multiple perceptual and pixel-wise metrics to supervise the optimization of radiance fields. It addresses the problem of generating high-fidelity, visually consistent rendered images by penalizing errors in color accuracy, structural similarity, and high-level perceptual features. It differs from single-metric approaches (like pure L1 or MSE) by balancing local pixel fidelity with global structural integrity and perceptual quality, and from complex inverse rendering objectives by excluding explicit physical priors like visibility or normal consistency unless specified by a variant.
++Composite training loss functions aggregate multiple error metrics to optimize the parameters of a radiance field or inverse rendering model. They address the ill-posed nature of inverse problems by combining pixel-wise accuracy, structural similarity, and perceptual fidelity. This method differs from single-metric approaches by balancing reconstruction error with high-frequency detail preservation, often incorporating specific priors (such as normals or semantics) depending on the variant.
+ 
+ ## How it works
+-The method computes a weighted sum of three distinct loss components between the rendered image and the ground truth image.
++The general approach involves computing individual loss terms between the rendered image and the ground truth (or estimated priors), then summing them with learned or fixed weights. The specific composition varies significantly by variant, ranging from simple photometric/perceptual combinations to complex inverse rendering objectives involving geometry and lighting constraints.
+ 
+-**Inputs and Outputs:**
+-- Input: Rendered image $I_{render}$ and Ground Truth image $I_{gt}$. Both are typically normalized to $[0, 1]$ or $[-1, 1]$.
+-- Output: Scalar loss value $\mathcal{L}_{composite}$.
++### Inputs and Outputs
++- **Inputs**: Rendered image $I_{render}$, ground truth image $I_{gt}$, and optionally auxiliary data such as estimated normals, semantic maps, or shadow masks.
++- **Outputs**: A scalar loss value $\mathcal{L}$ used for gradient-based optimization.
+ 
+-**Data Structures:**
+-- Images are represented as tensors of shape $(H, W, C)$, where $H$ and $W$ are height and width, and $C$ is the number of channels (typically 3 for RGB).
+-- Patches for SSIM and LPIPS are extracted from these tensors.
++### Data Structures
++No specific complex data structures are required beyond standard image tensors and scalar weights. Some variants require pre-computed auxiliary maps (e.g., normals from Omnidata [S2], semantic maps from MMSegmentation [S2]).
+ 
+-**Steps:**
+-1. **L1 Loss Calculation:** Compute the mean absolute error between the rendered and ground truth pixels.
+-   $$ \mathcal{L}_{L1} = \frac{1}{N} \sum_{i=1}^{N} |I_{render}^{(i)} - I_{gt}^{(i)}| $$
+-   where $N = H \times W \times C$.
++### Steps
++1. **Render**: Generate the image $I_{render}$ from the current model parameters.
++2. **Compute Auxiliary Priors (Variant-dependent)**: If required, estimate normals, semantics, or shadow masks using pretrained networks [S2].
++3. **Compute Individual Loss Terms**: Calculate each component loss (L1, SSIM, LPIPS, etc.) between $I_{render}$ and $I_{gt}$ (or priors).
++4. **Aggregate**: Sum the weighted loss terms to produce the total loss.
+ 
+-2. **SSIM Loss Calculation:** Compute the Structural Similarity Index Measure (SSIM) between the images. SSIM is typically calculated over local windows. The loss is often defined as $1 - \text{SSIM}$ to maximize similarity.
+-   $$ \mathcal{L}_{SSIM} = 1 - \text{SSIM}(I_{render}, I_{gt}) $$
+-   Standard SSIM parameters include a window size (e.g., $3 \times 3$ or $11 \times 11$), and constants $C_1, C_2$ for stability.
++### Formulas
++The specific formula depends on the variant:
+ 
+-3. **LPIPS Loss Calculation:** Compute the Learned Perceptual Image Patch Similarity (LPIPS) distance. This involves passing image patches through a pretrained network (e.g., VGG or AlexNet) and comparing the activations.
+-   $$ \mathcal{L}_{LPIPS} = \text{LPIPS}(I_{render}, I_{gt}) $$
++**General Composite (L1+SSIM+LPIPS):**
++$$ \mathcal{L} = \mathcal{L}_{L1} + \mathcal{L}_{SSIM} + \mathcal{L}_{LPIPS} $$
++Where $\mathcal{L}_{L1}$ is the mean absolute error, $\mathcal{L}_{SSIM}$ is the structural similarity index loss, and $\mathcal{L}_{LPIPS}$ is the learned perceptual image patch similarity loss [S1].
+ 
+-4. **Composite Loss Aggregation:** Sum the losses. In the standard configuration described in [S1], equal weighting is implied or the terms are summed directly without explicit $\lambda$ coefficients in the base definition, though implementations may use weights.
+-   $$ \mathcal{L}_{composite} = \mathcal{L}_{L1} + \mathcal{L}_{SSIM} + \mathcal{L}_{LPIPS} $$
++**UrbanIR:**
++$$ \min _{\theta , \mathbf{L}} \mathcal {L}_{\text {render}} + \lambda _1\mathcal {L}_{\text {visibility}} + \lambda _2\mathcal {L}_{\text {normal}} + \lambda _3\mathcal {L}_{\text {semantics}} + \lambda _4\mathcal {L}_{\text {reg}} $$
++Where $\mathcal{L}_{\text{render}}$ is the base rendering loss, $\mathcal{L}_{\text{visibility}}$ enforces visibility consistency, $\mathcal{L}_{\text{normal}}$ aligns with estimated normals, $\mathcal{L}_{\text{semantics}}$ aligns with semantic maps, and $\mathcal{L}_{\text{reg}}$ is a regularization term [S2].
+ 
+-**Parameters:**
+-- **Training Strategy:** Random crops are used from the full image for training [S1]. This reduces memory usage and focuses optimization on local details.
+-- **Weights:** The base method [S1] sums the three losses. Specific weights are not detailed in [S1] beyond the addition. Variants may adjust these.
++**SVG-IR:**
++$$ \mathcal{L} = \lambda_1 \mathcal{L}_{L1} + \lambda_{ssim} \mathcal{L}_{ssim} + \lambda_{rc} \mathcal{L}_{rc} + \lambda_n \mathcal{L}_n + \lambda_{s,a} \mathcal{L}_{s,a} + \lambda_{s,r} \mathcal{L}_{s,r} + \lambda_{reg,n} \mathcal{L}_{reg,n} $$
++Where $\mathcal{L}_{rc}$ is radiance consistency loss, $\mathcal{L}_n$ is $1 - \text{cosine similarity}$ between normal and pseudo normal, $\mathcal{L}_{s,a}$ and $\mathcal{L}_{s,r}$ are TV losses on albedo and roughness, and $\mathcal{L}_{reg,n}$ is the L2 regular term of normal offsets $\Delta N_M$ [S3].
+ 
+-**Edge Cases and Pitfalls:**
+-- **Normalization:** Ensure $I_{render}$ and $I_{gt}$ are in the same range expected by the LPIPS network (often $[-1, 1]$ or $[0, 1]$). Mismatched ranges cause incorrect gradient magnitudes.
+-- **Crop Size:** The crop size must be sufficient for the SSIM window and LPIPS patch size. If crops are too small, SSIM calculation may be unstable or invalid.
+-- **LPIPS Pretrained Model:** The choice of backbone (VGG vs AlexNet) affects the perceptual penalty. VGG is more common for high-quality results.
++**INPC:**
++$$ \mathcal{L} = \mathcal{L}_R + \mathcal{L}_{D-SSIM} + \lambda_{vgg} \cdot \mathcal{L}_{VGG} + \lambda_{decay} \cdot \mathcal{L}_{Reg} $$
++Where $\mathcal{L}_R$ is a robust per-pixel loss, $\mathcal{L}_{D-SSIM}$ is differentiable SSIM, $\mathcal{L}_{VGG}$ is VGG perceptual loss, and $\mathcal{L}_{Reg}$ is normalized weight decay on hash grid parameters [S4].
+ 
+-**Pseudocode:**
++### Parameters
++- **UrbanIR**: $\lambda_1 = 0.001$, $\lambda_2 = 0.01$, $\lambda_3 = 0.04$, $\lambda_4 = 0.1$ [S2].
++- **SVG-IR**: Weights $\lambda_1, \lambda_{ssim}, \lambda_{rc}, \lambda_n, \lambda_{s,a}, \lambda_{s,r}, \lambda_{reg,n}$ are used but specific values are not provided in the source text [S3].
++- **INPC**: $\lambda_{vgg} = 0.075$, $\lambda_{decay} = 0.1$, robust loss parameters $\alpha = 0$, $c = 0.2$ [S4].
++- **General (L1+SSIM+LPIPS)**: Weights are not explicitly specified as distinct scalars in the source, implying equal weighting or default implementations [S1].
++
++### Pseudocode
+ ```python
+-def composite_training_loss(rendered_img, gt_img, use_random_crops=False, crop_size=256):
++def compute_composite_loss(rendered_image, ground_truth, variant="standard", aux_data=None):
+     """
+-    Computes the composite loss (L1 + SSIM + LPIPS).
++    Computes the composite training loss based on the specified variant.
+     
+     Args:
+-        rendered_img: Tensor of shape (H, W, C) or (B, H, W, C), values in [0, 1] or [-1, 1].
+-        gt_img: Tensor of same shape as rendered_img.
+-        use_random_crops: Boolean, if True, sample random crops.
+-        crop_size: Integer, size of the square crop if using random crops.
++        rendered_image (Tensor): Rendered RGB image.
++        ground_truth (Tensor): Ground truth RGB image.
++        variant (str): One of "standard", "urbanir", "svgir", "inpc".
++        aux_data (dict): Optional auxiliary data (normals, semantics, etc.).
+         
+     Returns:
+-        Scalar tensor representing the total loss.
++        Tensor: Scalar loss value.
+     """
+-    # 1. Handle Random Crops
+-    if use_random_crops:
+-        H, W, C = rendered_img.shape[-3], rendered_img.shape[-2], rendered_img.shape[-1]
+-        # Generate random top-left corner
+-        y = random.randint(0, H - crop_size)
+-        x = random.randint(0, W - crop_size)
+-        rendered_crop = rendered_img[..., y:y+crop_size, x:x+crop_size]
+-        gt_crop = gt_img[..., y:y+crop_size, x:x+crop_size]
++    if variant == "standard":
++        # L1 + SSIM + LPIPS
++        # Note: Specific weights for L1, SSIM, LPIPS are not given in [S1], 
++        # assuming equal contribution or standard implementation defaults.
++        loss_l1 = l1_loss(rendered_image, ground_truth)
++        loss_ssim = ssim_loss(rendered_image, ground_truth)
++        loss_lpips = lpips_loss(rendered_image, ground_truth)
++        return loss_l1 + loss_ssim + loss_lpips
++
++    elif variant == "urbanir":
++        # Minimize: L_render + lambda1*L_visibility + lambda2*L_normal + lambda3*L_semantics + lambda4*L_reg
++        lambda1 = 0.001
++        lambda2 = 0.01
++        lambda3 = 0.04
++        lambda4 = 0.1
++        
++        loss_render = l1_loss(rendered_image, ground_truth) # Assumed base rendering loss
++        loss_visibility = compute_visibility_loss(rendered_image, ground_truth) # Implementation detail [G]
++        loss_normal = normal_loss(rendered_image, aux_data['normals']) # Implementation detail [G]
++        loss_semantics = semantic_loss(rendered_image, aux_data['semantics']) # Implementation detail [G]
++        loss_reg = regularization_loss(rendered_image) # Implementation detail [G]
++        
++        return loss_render + lambda1 * loss_visibility + lambda2 * loss_normal + lambda3 * loss_semantics + lambda4 * loss_reg
++
++    elif variant == "svgir":
++        # L = lambda1*L1 + lambda_ssim*Lssim + lambda_rc*Lrc + lambda_n*Ln + lambda_s,a*Ls,a + lambda_s,r*Ls,r + lambda_reg,n*Lreg,n
++        # Weights are not provided in [S3]
++        lambda1 = 1.0 # Placeholder [G]
++        lambda_ssim = 1.0 # Placeholder [G]
++        lambda_rc = 1.0 # Placeholder [G]
++        lambda_n = 1.0 # Placeholder [G]
++        lambda_s_a = 1.0 # Placeholder [G]
++        lambda_s_r = 1.0 # Placeholder [G]
++        lambda_reg_n = 1.0 # Placeholder [G]
++        
++        loss_l1 = l1_loss(rendered_image, ground_truth)
++        loss_ssim = ssim_loss(rendered_image, ground_truth)
++        loss_rc = radiance_consistency_loss(rendered_image, aux_data['radiance']) # Implementation detail [G]
++        loss_n = 1.0 - cosine_similarity(rendered_image['normal'], aux_data['pseudo_normal']) # Implementation detail [G]
++        loss_s_a = tv_loss(rendered_image['albedo']) # Implementation detail [G]
++        loss_s_r = tv_loss(rendered_image['roughness']) # Implementation detail [G]
++        loss_reg_n = l2_loss(rendered_image['normal_offsets']) # Implementation detail [G]
++        
++        return (lambda1 * loss_l1 + lambda_ssim * loss_ssim + lambda_rc * loss_rc + 
++                lambda_n * loss_n + lambda_s_a * loss_s_a + lambda_s_r * loss_s_r + 
++                lambda_reg_n * loss_reg_n)
++
++    elif variant == "inpc":
++        # L = LR + LD-SSIM + lambda_vgg * LVGG + lambda_decay * LReg
++        lambda_vgg = 0.075
++        lambda_decay = 0.1
++        alpha = 0
++        c = 0.2
++        
++        loss_r = robust_loss(rendered_image, ground_truth, alpha=alpha, c=c)
++        loss_d_ssim = d_ssim_loss(rendered_image, ground_truth)
++        loss_vgg = vgg_loss(rendered_image, ground_truth)
++        loss_reg = normalized_weight_decay_loss(rendered_image['hash_grid_params'])
++        
++        return loss_r + loss_d_ssim + lambda_vgg * loss_vgg + lambda_decay * loss_reg
++
+     else:
+-        rendered_crop = rendered_img
+-        gt_crop = gt_img
++        raise ValueError("Unknown variant")
++```
+ 
+-    # 2. L1 Loss
+-    # Mean Absolute Error
+-    l1_loss = torch.mean(torch.abs(rendered_crop - gt_crop))
+-
+-    # 3. SSIM Loss
+-    # Compute SSIM. Note: SSIM function usually expects channels first (C, H, W) or handles it.
+-    # Assuming a standard SSIM implementation that returns a value in [0, 1].
+-    # We convert to loss by subtracting from 1.
+-    # Constants for SSIM (typical values)
+-    K1 = 0.01
+-    K2 = 0.03
+-    window_size = 11 # Typical default
+-    ssim_val = compute_ssim(rendered_crop, gt_crop, window_size=window_size, K1=K1, K2=K2)
+-    ssim_loss = 1.0 - ssim_val
+-
+-    # 4. LPIPS Loss
+-    # LPIPS requires normalized inputs (typically [-1, 1]) and a pretrained network.
+-    # Assuming rendered_crop and gt_crop are in [0, 1], we might need to scale.
+-    # Standard LPIPS implementation handles normalization internally or expects specific range.
+-    # Here we assume a helper `compute_lpips` that takes tensors and returns distance.
+-    lpips_loss = compute_lpips(rendered_crop, gt_crop)
+-
+-    # 5. Aggregate
+-    # Base method [S1] sums them.
+-    total_loss = l1_loss + ssim_loss + lpips_loss
+-
+-    return total_loss
+-
+-def compute_ssim(img1, img2, window_size=11, K1=0.01, K2=0.03):
+-    """
+-    Simplified SSIM calculation for pseudocode completeness.
+-    In practice, use a library like `torchmetrics` or `skimage`.
+-    """
+-    # This is a placeholder for the actual complex SSIM math involving local means,
+-    # variances, and covariances.
+-    # For implementation, one would typically use:
+-    # from torchmetrics.functional import structural_similarity_index_measure
+-    # return structural_similarity_index_measure(img1, img2, data_range=1.0)
+-    raise NotImplementedError("Use standard SSIM library implementation")
+-
+-def compute_lpips(img1, img2):
+-    """
+-    Simplified LPIPS calculation.
+-    In practice, use `lpips` library with a pretrained model (e.g., vgg).
+-    """
+-    raise NotImplementedError("Use standard LPIPS library implementation")
+-```
++### Edge Cases and Pitfalls
++- **Auxiliary Data Availability**: UrbanIR and SVG-IR require pretrained networks (MTMT, Omnidata, MMSegmentation) which may fail on out-of-distribution data [S2, S3].
++- **Weight Tuning**: Incorrect weighting of perceptual vs. pixel-wise losses can lead to blurry or artifact-ridden results. INPC uses specific weights for VGG and decay [S4].
++- **Robust Loss Parameters**: INPC uses a robust loss with specific parameters ($\alpha=0, c=0.2$) to handle outliers [S4].
+ 
+ ## Subtopics
+ 
+ ### UrbanIR Training Objective
+-An extension of the composite loss framework used in UrbanIR [S2]. It addresses the ill-posed inverse rendering problem by incorporating 2D priors. It adds visibility, normal, and semantic losses to the rendering loss. The total loss is $\min _{\theta , \mathbf{L}} \mathcal {L}_{\text {render}} + \lambda _1\mathcal {L}_{\text {visibility}} + \lambda _2\mathcal {L}_{\text {normal}} + \lambda _3\mathcal {L}_{\text {semantics}} + \lambda _4\mathcal {L}_{\text {reg}}$ [S2]. It uses pretrained networks for shadow mask estimation (MTMT), normal estimation (Omnidata), and semantic segmentation (MMSegmentation) [S2]. It is chosen for large-scale urban scene inverse rendering where geometry and material decomposition are critical [S2]. Parameters: $\lambda_1=0.001, \lambda_2=0.01, \lambda_3=0.04, \lambda_4=0.1$ [S2]. Optimizer: Adam, lr=0.002, 100 epochs [S2].
++An optimization objective combining rendering loss, visibility, normal, semantic, and regularization losses, using pretrained 2D priors to address the ill-posed inverse problem. It estimates shadow masks using MTMT, refines geometry using Omnidata, and uses semantic maps from Kitti360 or MMSegmentation. It is chosen for large-scale urban scene inverse rendering from single videos [S2].
++
++### SVG-IR Training Loss
++A composite loss including L1, SSIM, radiance consistency, normal cosine similarity, TV losses on albedo/roughness, and normal offset regularization. It is designed for spatially-varying Gaussian splatting for inverse rendering, handling albedo-lighting ambiguity. It is chosen when detailed material and lighting decomposition is required [S3].
++
++### INPC Optimization Loss
++A composite loss combining a robust per-pixel loss, D-SSIM, VGG perceptual loss, and normalized weight decay on multi-resolution hash grid parameters. It is used for Implicit Neural Point Clouds, balancing perceptual quality with regularization of the hash grid. It is chosen for high-quality radiance field rendering with fixed model size [S4].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by the forward pass of the radiance field decoder and the LPIPS network. LPIPS is computationally expensive due to the deep network evaluation. SSIM is moderate. L1 is negligible.
+-- **Memory Complexity:** Depends on image resolution and batch size. Using random crops [S1] significantly reduces memory footprint compared to full-image processing, allowing higher resolutions or larger batches.
+-- **Performance:** Provides superior perceptual quality compared to L1-only or MSE-only losses, particularly in texture detail and structural coherence [S1].
+-- **Strengths:** Robust to high-frequency details; balances pixel accuracy with perceptual fidelity.
+-- **Limitations:** LPIPS requires a pretrained model and is slower. SSIM can be sensitive to small shifts. The combination may require careful tuning of weights if not summed equally.
+-- **When to use:** When visual quality is paramount and computational resources allow for the overhead of SSIM and LPIPS.
+-- **When not to use:** In real-time applications where latency is critical, or when memory is severely constrained and full-image processing is unavoidable without cropping.
++- **Time Complexity**: Depends on the number of loss terms and the complexity of auxiliary networks (e.g., VGG, Omnidata). UrbanIR and SVG-IR are computationally heavier due to auxiliary priors [S2, S3].
++- **Memory Complexity**: INPC uses a fixed-size hash grid (1.1 GB) [S4]. UrbanIR uses Instant-NGP style hash tables [S2].
++- **Performance**: INPC achieves high PSNR and LPIPS scores on MipNeRF360 and Tanks and Temples datasets [S4]. SVG-IR achieves SOTA relighting results on synthetic data [S3].
++- **Hardware**: INPC and SVG-IR tested on RTX 4090 [S3, S4].
++- **Strengths**: Combines multiple metrics for robust optimization. Handles ill-posed problems via priors (UrbanIR).
++- **Limitations**: Requires careful tuning of weights. Auxiliary networks add complexity and potential failure modes.
+ 
+ ## Background
+-The composite loss combining L1, SSIM, and LPIPS is a standard practice in differentiable rendering and neural radiance field optimization. It was notably employed in MuRF (Multi-Baseline Radiance Fields) [S1] to handle multi-baseline scenarios, demonstrating effectiveness on both small and large baseline datasets. The UrbanIR variant [S2] extends this to inverse rendering tasks in urban environments, integrating additional physical and semantic priors to solve the ill-posed nature of the problem.
++Composite training losses are standard in differentiable rendering and inverse rendering to balance photometric accuracy with perceptual quality. The L1+SSIM+LPIPS combination is a common baseline [S1]. UrbanIR extends this with semantic and normal priors for urban scenes [S2]. SVG-IR adds radiance consistency and material-specific losses for Gaussian splatting [S3]. INPC uses robust losses and hash grid regularization for neural point clouds [S4].
+ 
+ ## Sources
+ [S1] MuRF: Multi-Baseline Radiance Fields, https://doi.org/10.1109/cvpr52733.2024.01894, fetched 2026-10-27
+-[S2] UrbanIR: Large-Scale Urban Scene Inverse Rendering from a Single Video, https://doi.org/10.1109/3dv66043.2025.00052, fetched 2026-10-30+[S2] UrbanIR: Large-Scale Urban Scene Inverse Rendering from a Single Video, https://doi.org/10.1109/3dv66043.2025.00052, fetched 2026-10-30
++[S3] SVG-IR: Spatially-Varying Gaussian Splatting for Inverse Rendering, https://doi.org/10.1109/cvpr52734.2025.01505, fetched 2026-10-29
++[S4] INPC: Implicit Neural Point Clouds for Radiance Field Rendering, https://doi.org/10.1109/3dv66043.2025.00021, fetched 2026-10-26

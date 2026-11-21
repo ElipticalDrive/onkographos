@@ -1,0 +1,161 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Budgeted-GS is a post-hoc method that converts any trained 3D Gaussian Splatting (3DGS) model into a multi-resolution hierarchy of moment-matched aggregates, enabling real-time rendering of city-scale scenes on consumer GPUs by selecting the level of detail that fits the target device's memory [S1, unofficial]. It solves the problem of excessive memory consumption in large-scale 3DGS by introducing a "capacity floor" derived from optimal transport, which determines the minimum number of primitives required for a given error budget, allowing the same model to serve GPUs with widely different memory capacities [S1, unofficial]. Unlike standard 3DGS which optimizes a fixed set of primitives, Budgeted-GS separates the representation into a hierarchy where a single quality parameter selects the appropriate level of detail per view, ensuring that redundant primitives are merged or dropped based on a pixel-footprint scheduler [S1, unofficial].
++Budgeted-GS is a post-hoc method that converts any trained 3D Gaussian Splatting (3DGS) model into a multi-resolution hierarchy of moment-matched aggregates, enabling real-time rendering of city-scale scenes on consumer GPUs by selecting the level of detail that fits the target device's memory [S1, unofficial]. It solves the problem of excessive memory consumption in large-scale 3DGS by introducing a "capacity floor" derived from optimal transport in phase space, which determines the minimum number of primitives required for a given error budget, allowing the same model to serve GPUs with widely different memory capacities [S1, unofficial]. Unlike standard 3DGS which optimizes a fixed set of primitives, Budgeted-GS separates the representation into a hierarchy where a single quality parameter selects the appropriate level of detail per view, ensuring that redundant primitives are merged or dropped based on a pixel-footprint scheduler [S1, unofficial].
+ 
+ ## How it works
+@@ -13,10 +13,10 @@
+ **Data Structures:**
+ The core data structure is the **Factoring Tree**, an octree of scale bands [S1, unofficial].
+-*   **Nodes:** Each node in the tree corresponds to a leaf in the spatial octree and a specific scale band.
+-*   **Content:** Nodes contain "moment-matched equivalent planks." These are aggregates of raw planks that preserve the first and second moments (mean and covariance) of the original primitives within that spatial and scale region [S1, unofficial].
++*   **Nodes:** Each node corresponds to a leaf in the spatial octree and a specific scale band [S1, unofficial].
++*   **Content:** Nodes contain "moment-matched equivalent planks," which are pre-computed aggregates of raw planks that preserve the first and second moments (mean and covariance) of the original primitives within that spatial and scale region [S1, unofficial].
+ *   **Layout:** The tree is structured as `leaf × scale-band`. Raw planks are stored at the finest scale bands, while coarser bands store aggregated planks [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Construction:** Convert the trained model (flat set of raw planks) into the factoring tree. This involves a construction pass that groups raw planks into scale bands and computes moment-matched equivalent planks for each node [S1, unofficial]. This pass takes a few seconds [S1, unofficial].
++1.  **Construction:** Convert the trained model (flat set of raw planks) into the factoring tree of leaf × scale-band nodes containing moment-matched equivalent planks [S1, unofficial]. This construction pass takes a few seconds [S1, unofficial].
+ 2.  **Scheduling:** For each view, determine the level of detail using a one-parameter pixel-footprint scheduler [S1, unofficial].
+ 3.  **Selection:** Select raw, fine, or aggregate content based on the threshold $t$. If the pixel footprint of a primitive is smaller than $t$, use aggregated content; otherwise, use raw or fine content [S1, unofficial].
+@@ -45,60 +45,65 @@
+ **Edge Cases and Pitfalls:**
+ *   **Precision:** The method relies on moment-matching, which may introduce approximation errors when aggregating primitives. The sources mention "bounded volumetric loss" but do not specify the error bounds [S1, unofficial].
+-*   **Boundaries:** The octree structure handles spatial boundaries, but the scale bands must be carefully defined to ensure smooth transitions between LOD levels.
+-*   **Degenerate Input:** The method assumes a trained 3DGS model. If the initial model is poorly trained or has insufficient primitives, the factoring tree may not provide significant compression or quality benefits.
++*   **Boundaries:** The octree structure handles spatial boundaries, but the scale bands must be carefully defined to ensure smooth transitions between LOD levels. Not given in the sources.
++*   **Degenerate Input:** The method assumes a trained 3DGS model [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def budgeted_gs_render(camera, scene_model, constant_c):
++import math
++
++def distance(p1, p2):
++    """Euclidean distance between two 3D points."""
++    return math.sqrt(sum((a - b) ** 2 for a, b in zip(p1, p2)))
++
++def compute_footprint(plank, camera_position, camera_focal_length):
++    """Compute pixel footprint by projecting Gaussian covariance to screen space [G]."""
++    # Standard implementation: transform covariance to camera space, 
++    # project to 2D Jacobian, compute bounding box area in pixels.
++    # For this article, we assume the primitive provides its projected radius.
++    return plank.get_screen_radius() * 2.0
++
++def budgeted_gs_select_primitives(camera_position, camera_focal_length, tree, constant_c):
+     """
+-    Renders a scene using the Budgeted-GS factoring tree.
+-    
++    Selects primitives from the factoring tree based on the pixel-footprint threshold.
+     Args:
+-        camera: Object containing focal_length (f) and position.
+-        scene_model: The Factoring Tree (octree of scale bands).
+-        constant_c: The constant c for the pixel-footprint threshold.
++        camera_position: 3D coordinates of the camera.
++        camera_focal_length: Focal length f.
++        tree: List of nodes, each containing 'center', 'scale_band', 'raw_planks', 'aggregate_planks'.
++        constant_c: Constant c for threshold calculation.
++    Returns:
++        List of selected primitive objects to be passed to a rasterizer.
++    """
++    selected = []
++    for node in tree:
++        d = distance(camera_position, node.center)
++        t = constant_c * (d / camera_focal_length)
+         
+-    Returns:
+-        Rendered image.
+-    """
+-    # Initialize rasterizer
+-    rasterizer = SplattingRasterizer()
+-    
+-    # Get camera distance to scene center or relevant bounding box
+-    # Note: Distance d is typically per-primitive or per-tile. 
+-    # For simplicity, we assume d is computed per primitive in the selection step.
+-    
+-    selected_primitives = []
+-    
+-    # Traverse the factoring tree
+-    for node in scene_model.traverse():
+-        # Calculate distance d from camera to node's center
+-        d = distance(camera.position, node.center)
+-        
+-        # Calculate threshold t
+-        t = constant_c * (d / camera.focal_length)
+-        
+-        # Determine LOD level based on primitive footprint
+-        # Footprint is approximated by the primitive's size in pixels
+-        # If primitive size < t, use aggregated (coarser) version
+-        # Else, use raw/fine version
+-        
+-        if node.is_aggregate():
+-            # Check if aggregation is sufficient
+-            # This depends on the specific implementation of moment-matched planks
+-            # For this pseudocode, we assume the node provides both raw and aggregate data
+-            if node.primitive_footprint < t:
+-                selected_primitives.extend(node.aggregate_planks)
++        # Select raw/fine or aggregate based on footprint threshold
++        for plank in node.raw_planks:
++            footprint = compute_footprint(plank, camera_position, camera_focal_length)
++            if footprint < t:
++                # Use aggregate if available, else raw
++                if node.aggregate_planks:
++                    selected.extend(node.aggregate_planks)
++                else:
++                    selected.append(plank)
+             else:
+-                selected_primitives.extend(node.raw_planks)
+-        else:
+-            # Leaf nodes or fine nodes
+-            selected_primitives.extend(node.raw_planks)
+-            
+-    # Render the selected primitives
+-    image = rasterizer.render(selected_primitives)
+-    return image
++                selected.append(plank)
++                
++        # Add aggregate planks for regions where they are selected
++        if node.aggregate_planks:
++            for agg_plank in node.aggregate_planks:
++                footprint = compute_footprint(agg_plank, camera_position, camera_focal_length)
++                if footprint < t:
++                    selected.append(agg_plank)
++                    
++    return selected
++
++def render_splats(primitives, camera):
++    """Standard splatting rasterization step [G]."""
++    # Implementation details for rasterizing Gaussian splats are standard and external to this method.
++    # This function accumulates screen-space contributions per pixel.
++    return []
+ ```
+-*Note: The pseudocode above is a high-level representation. The actual implementation requires traversing the octree and computing the pixel footprint of each primitive, which involves projecting the Gaussian covariance to screen space. The "moment-matched equivalent planks" are pre-computed during the construction phase.*
+ 
+ ## Subtopics
+@@ -108,15 +113,15 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The construction pass takes a few seconds [S1, unofficial]. Rendering time depends on the number of selected primitives, which is dynamically adjusted by the scheduler.
+-*   **Memory Complexity:** The method reduces memory usage by aggregating primitives, allowing city-scale scenes to fit on consumer GPUs [S1, unofficial]. The exact memory savings depend on the scene and the chosen quality parameter.
++*   **Time Complexity:** The construction pass takes a few seconds [S1, unofficial]. Rendering time depends on the number of selected primitives, which is dynamically adjusted by the scheduler [S1, unofficial].
++*   **Memory Complexity:** The method reduces memory usage by aggregating primitives, allowing city-scale scenes to fit on consumer GPUs [S1, unofficial]. The exact memory savings depend on the scene and the chosen quality parameter [S1, unofficial].
+ *   **Measured Performance:** Validated on 13 public scenes under a preregistered protocol, demonstrating real-time rendering of city-scale scenes [S1, unofficial].
+-*   **Scaling:** The method scales to large scenes by using a multi-resolution hierarchy. The capacity floor provides a theoretical limit on the number of primitives needed.
+-*   **Strengths:** Enables real-time rendering of large-scale scenes on consumer hardware; flexible quality adjustment via a single parameter; avoids wasted optimization effort in training.
+-*   **Limitations:** Requires a post-hoc construction pass; relies on the accuracy of the moment-matching approximation; performance depends on the scene's complexity and the chosen quality parameter.
+-*   **When to use:** When rendering large-scale, city-scale scenes on hardware with limited memory.
+-*   **When not to use:** For small-scale scenes where standard 3DGS fits in memory; when training time is a critical constraint and budget-centered training is not used.
++*   **Scaling:** The method scales to large scenes by using a multi-resolution hierarchy [S1, unofficial]. The capacity floor provides a theoretical limit on the number of primitives needed [S1, unofficial].
++*   **Strengths:** Enables real-time rendering of large-scale scenes on consumer hardware; flexible quality adjustment via a single parameter; avoids wasted optimization effort in training [S1, unofficial].
++*   **Limitations:** Requires a post-hoc construction pass; relies on the accuracy of the moment-matching approximation; performance depends on the scene's complexity and the chosen quality parameter [S1, unofficial].
++*   **When to use:** When rendering large-scale, city-scale scenes on hardware with limited memory [S1, unofficial].
++*   **When not to use:** For small-scale scenes where standard 3DGS fits in memory; when training time is a critical constraint and budget-centered training is not used [S1, unofficial].
+ 
+ ## Background
+-Budgeted-GS was introduced in the paper "Budgeted-GS: Real-Time Large-Scale Gaussian Splatting via Factoring LOD" [S1, unofficial]. It is grounded in a measurable capacity floor derived from optimal transport in phase space, which answers how many primitives a scene actually needs and how many can safely be given up [S1, unofficial]. The method builds on the principles of 3D Gaussian Splatting [Parent](7342-hierarchical-3d-gaussian-representations.md) but extends it to handle large-scale scenes by introducing a multi-resolution hierarchy and a budget-centered training approach.
++Budgeted-GS was introduced in the paper "Budgeted-GS: Real-Time Large-Scale Gaussian Splatting via Factoring LOD" [S1, unofficial]. It is grounded in a measurable capacity floor derived from optimal transport in phase space, which answers how many primitives a scene actually needs and how many can safely be given up [S1, unofficial]. The method builds on the principles of 3D Gaussian Splatting [Parent](7342-hierarchical-3d-gaussian-representations.md) but extends it to handle large-scale scenes by introducing a multi-resolution hierarchy and a budget-centered training approach [S1, unofficial].
+ 
+ ## Sources

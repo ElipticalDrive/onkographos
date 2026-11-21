@@ -1,0 +1,122 @@
+# Brick Classification and Empty Space Skipping
+
+Also called: Brick-based Empty Space Skipping, Empty space leaping, Shared Array Brick Classification
+
+## Overview
+Brick Classification and Empty Space Skipping is an acceleration technique that categorizes volume bricks into three states—skipped (empty), early-terminated (saturated), or sampled—to bypass unnecessary computation for transparent or fully opaque regions [S2]. It distinguishes itself from sibling methods by maintaining a shared, per-brick classification table on both host and GPU memory, enabling ray-guided feedback where the renderer directly updates brick states during traversal [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Volume dataset partitioned into bricks; current transfer function; ray-caster traversal state.
+*   **Output:** Classification metadata array; optimized ray traversal that skips or terminates early.
+
+**Data Structures:**
+The core data structure is a classification array shared between host and GPU memory [S2].
+*   **Layout:** An array of 32-bit integers, one per brick in the dataset [S2].
+*   **Values:** Each integer encodes the brick's state:
+    1.  **Skipped:** The brick is empty (no valid data or zero opacity) [S2].
+    2.  **Early Termination:** The brick is saturated (ray opacity is 1.0) [S2].
+    3.  **Sampled:** The brick requires dense sampling [S2].
+
+**Algorithm Steps:**
+1.  **Initialization:** Determine which bricks are completely empty. A brick is defined as empty if it contains no valid data or is mapped to zero opacity by the current transfer function [S1, S2].
+2.  **Classification:** Classify each brick into one of the three categories based on the transfer function and data content [S2].
+3.  **Storage:** Store the classification state in the shared 32-bit integer array [S2].
+4.  **Ray Casting:**
+    a.  For each ray, check the classification state of the current brick [S2].
+    b.  If the state is **Skipped**, leap over the brick's spatial extent without sampling [S2].
+    c.  If the state is **Early Termination**, terminate the ray immediately [S2].
+    d.  If the state is **Sampled**, perform dense volume integration within the brick [S2].
+5.  **Feedback (Ray-Guided):** The ray-caster writes accurate usage information back to the classification table, updating states for subsequent frames [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Shared array: brick_states[brick_id] : int32
+# Values: 0=Sampled, 1=Skipped, 2=EarlyTermination
+
+def classify_bricks(volume_data, transfer_function):
+    """
+    Classifies bricks based on data content and transfer function.
+    Returns an array of 32-bit integers.
+    """
+    num_bricks = volume_data.num_bricks
+    states = [0] * num_bricks
+    
+    for i in range(num_bricks):
+        brick = volume_data.get_brick(i)
+        if is_empty(brick, transfer_function):
+            states[i] = 1 # Skipped
+        elif is_saturated(brick, transfer_function):
+            states[i] = 2 # Early Termination
+        else:
+            states[i] = 0 # Sampled
+    return states
+
+def is_empty(brick, transfer_function):
+    """
+    Returns True if brick has no valid data or maps to zero opacity.
+    """
+    # Implementation detail: Check if all voxels map to opacity 0
+    # or if the brick is marked as missing/invalid in the page table.
+    pass
+
+def is_saturated(brick, transfer_function):
+    """
+    Returns True if the brick causes ray saturation (opacity 1.0).
+    """
+    # Implementation detail: Check if integration through brick reaches 1.0
+    pass
+
+def render_ray(ray, brick_states, volume_data):
+    """
+    Renders a single ray using brick classification.
+    """
+    opacity = 0.0
+    color = (0.0, 0.0, 0.0)
+    
+    # Traverse bricks along the ray
+    for brick_id in ray.get_brick_sequence():
+        state = brick_states[brick_id]
+        
+        if state == 1: # Skipped
+            continue # Leap over this brick
+        elif state == 2: # Early Termination
+            break # Ray is fully opaque, stop processing
+        else: # Sampled
+            # Perform dense sampling and compositing
+            opacity, color = sample_and_composite(ray, brick_id, opacity, color)
+            
+            if opacity >= 1.0:
+                break # Saturated during sampling
+                
+    return color
+```
+
+**Parameters:**
+*   **Brick Size:** Not given in the sources.
+*   **Update Frequency:** Continuous or per-frame, depending on transfer function changes [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Transfer Function Changes:** Changing the transfer function invalidates existing metadata [S2]. Recomputing the classification for large datasets causes noticeable delays [S2].
+*   **Concurrent Updates:** To maintain responsiveness, updates are offloaded to a background thread [S2]. Unprocessed bricks are treated as 'missing' during the update period, causing the renderer to request and filter them via empty checks [S2].
+*   **Precision:** The method relies on accurate determination of "empty" and "saturated" states, which depends on the transfer function's opacity mapping [S1, S2].
+
+## Operating characteristics
+*   **Time Complexity:** Classification is $O(N)$ where $N$ is the number of bricks [S2]. Ray traversal is accelerated by skipping empty bricks, reducing effective sampling count [S2].
+*   **Memory Complexity:** $O(N)$ for the classification array, using 32 bits per brick [S2].
+*   **Performance:** On a test platform (Dual Quad-Core Xeon 2.2 GHz, NVIDIA GeForce GTX 680, 24 GB RAM), the system processes approximately 7.5 million bricks per second for metadata updates [S2].
+*   **Strengths:** Effective for large datasets where most bricks are either empty or saturated, significantly reducing computation [S2]. Ray-guided feedback ensures accuracy [S1].
+*   **Limitations:** Transfer function changes require expensive recomputation [S2]. Background updates can lead to temporary performance drops or incorrect culling if not managed carefully [S2].
+*   **When to Use:** Large-scale volume rendering with static or slowly changing transfer functions [S2].
+*   **When Not to Use:** When transfer functions change frequently and low latency is critical, or when the dataset has a high proportion of non-saturated, non-empty bricks [S2].
+
+## Background
+*   **Origin:** The technique is part of the broader development of ray-guided volume rendering, which incorporates feedback loops between the ray-caster and culling mechanisms [S1].
+*   **History:** It builds on earlier empty space skipping techniques that used BSP trees or octrees [S1, S2]. The specific brick-based classification with shared arrays was analyzed in the context of scalable GPU-based rendering [S2].
+*   **Usage:** Used in large-scale volume visualization systems to achieve real-time performance on commodity hardware [S1, S2].
+
+## Sources
+[S1] State-of-the-Art in GPU-Based Large-Scale Volume Visualization, https://vcg.seas.harvard.edu/publications/20150513-stateof-the-art-in-gpu-based-large-scale-volume-visualization/paper, fetched 2026-10-24
+[S2] An Analysis of Scalable GPU-Based Ray-Guided Volume Rendering, https://pmc.ncbi.nlm.nih.gov/articles/PMC4260263/, fetched 2026-10-26

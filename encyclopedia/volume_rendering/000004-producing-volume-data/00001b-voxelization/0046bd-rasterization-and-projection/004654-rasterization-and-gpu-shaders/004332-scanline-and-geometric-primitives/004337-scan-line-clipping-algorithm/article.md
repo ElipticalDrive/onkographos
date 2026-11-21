@@ -1,0 +1,130 @@
+# Scan-line Clipping Algorithm
+
+Also called: 3D Scan-line Clipping, CFB Clipping
+
+## Overview
+The Scan-line Clipping Algorithm is a 3D generalization of the classic scan-line algorithm, designed for low-level processor implementation to determine which portions of a volumetric primitive (such as a room or figurine) are visible and should be written to the Compositing Frame Buffer (CFB) [S1]. It solves the problem of priority-based occlusion culling during voxelization by processing a primitive scan-by-scan, ensuring that higher-priority existing data in the CFB is never overwritten [S1]. Unlike window-manager level algorithms that recursively subdivide space, this method explicitly identifies and writes only the visible segments, leaving invisible sections to be handled by the application [S1].
+
+## How it works
+The algorithm processes a source primitive $r$ against a set of higher-priority primitives already present in the CFB. It operates in a hierarchical scan-line order (Z, then Y, then X) to efficiently cull occluded regions.
+
+### Inputs and Outputs
+*   **Input**: The source primitive $r$ (defined by its bounding box and voxel value), the current CFB state, and a priority list of existing primitives.
+*   **Output**: Updated CFB entries for the visible voxels of $r$.
+
+### Data Structures
+*   **InterTable**: A temporary table storing identifiers of all rooms/primitives that intersect with $r$ and have higher priority. It is sorted by $Z_{min}$, then $Y_{min}$, then $X_{min}$ [S1].
+*   **Active Table**: A subset of InterTable containing primitives intersecting with the current scan-line [S1].
+*   **Registers**:
+    *   `ZoomX`, `ZoomY`, `ZoomZ`: Scaling factors for voxel replication (default 1) [S1].
+    *   `Orient`: Rotation angle (default 0 degrees) [S1].
+    *   `Colour Mode`, `Texture Mask`, `Voxel_Ops`: Control final pixel blending and masking [S1].
+
+### Steps
+1.  **Initialize InterTable**: Create `InterTable` containing identifiers of all primitives intersecting $r$ with higher priority. Sort by $Z_{min}$, $Y_{min}$, $X_{min}$ [S1].
+2.  **Z-Scan Loop**: Iterate $Z_{scan}$ from $Z_{min}$ to $Z_{max}$ of primitive $r$ [S1].
+    *   Remove primitives from `InterTable` where $Z_{min} > Z_{scan}$ (optimization based on sorted order) [S1].
+    *   Update `Active Table` with primitives from `InterTable` that intersect the current $Z_{scan}$ plane [S1].
+    *   Sort `Active Table` primitives by $Y$ then $X$ [S1].
+3.  **Y-Scan Loop**: Iterate $Y_{scan}$ from $Y_{min}$ to $Y_{max}$ of primitive $r$ [S1].
+    *   Initialize `LeftBound` and `RightBound` based on the leftmost primitive in `Active Table` [S1].
+    *   **X-Scan Clipping Loop**: While `LeftBound` < `RightBound` and `Active Table` is not empty:
+        *   Get the next "right" primitive from `Active Table` and update `LeftBound` to its left X-coordinate [S1].
+        *   If the current "left" and "right" primitives are adjacent in the sorted list:
+            *   Write the voxel value of $r$ to the CFB for the run from `RightBound` to `LeftBound` along the $Y_{scan}$ line [S1].
+            *   Get the next "left" and "right" primitives from `Active Table` [S1].
+        *   Else:
+            *   Get the next "left" primitive.
+            *   Update `RightBound` if the right edge of the new "left" primitive is to the right of the current `RightBound` [S1].
+4.  **Voxel Replication**: Before writing, replicate voxels or intervals according to `ZoomX`, `ZoomY`, `ZoomZ` [S1].
+5.  **Write to CFB**: Apply `Colour Mode`, `Texture Mask`, and `Voxel_Ops` (boolean operations) to determine the final value written to the CFB [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def scan_line_clip(primitive_r, cfb, inter_table):
+    # inter_table is sorted by Zmin, Ymin, Xmin
+    # primitive_r has bounds: Zmin, Zmax, Ymin, Ymax, Xmin, Xmax
+    
+    # Save processor state (jacks) [S1]
+    save_state()
+    
+    # Z-Scan Loop
+    for z_scan in range(primitive_r.Zmin, primitive_r.Zmax + 1):
+        # Remove primitives from InterTable that are below the current Zscan
+        # i.e., those with Zmin > z_scan
+        inter_table = [p for p in inter_table if p.Zmin <= z_scan]
+        
+        # Create Active Table: primitives intersecting z_scan
+        active_table = [p for p in inter_table if p.intersects_plane(z_scan)]
+        
+        # Sort primitives in Active Table by Y then X
+        active_table.sort(key=lambda p: (p.Ymin, p.Xmin))
+        
+        # Y-Scan Loop
+        for y_scan in range(primitive_r.Ymin, primitive_r.Ymax + 1):
+            if not active_table:
+                break
+                
+            # Initialize bounds with the leftmost primitive
+            left_prim = active_table[0]
+            right_bound = left_prim.right_x_at(y_scan, z_scan)
+            left_bound = left_prim.left_x_at(y_scan, z_scan)
+            
+            # X-Scan Clipping Loop
+            while left_bound < right_bound and active_table:
+                # Get next "right" primitive
+                right_prim = active_table.pop(0)
+                left_bound = right_prim.left_x_at(y_scan, z_scan)
+                
+                # Check adjacency in the original sorted list logic
+                # Note: The source logic implies checking if the previous 'left' 
+                # and current 'right' were adjacent in the sorted sequence.
+                # Since we pop, we need to track the previous left primitive.
+                # Re-interpreting source: "If 'left' and 'right' are adjacent in sorted list"
+                # This implies we compare the current right_prim with the one 
+                # that defined the previous left_bound.
+                
+                # If they are adjacent (no gaps/overlaps from other higher priority items between them)
+                if are_adjacent_in_sorted_list(left_prim, right_prim):
+                    # Set run from RightBound to LeftBound
+                    write_voxel_run(cfb, y_scan, z_scan, right_bound, left_bound, primitive_r.value)
+                    
+                    # Get next left and right
+                    if active_table:
+                        left_prim = active_table[0]
+                        right_bound = left_prim.right_x_at(y_scan, z_scan)
+                        left_bound = left_prim.left_x_at(y_scan, z_scan)
+                    else:
+                        break
+                else:
+                    # Get next left primitive and update RightBound
+                    if active_table:
+                        left_prim = active_table[0]
+                        new_right_edge = left_prim.right_x_at(y_scan, z_scan)
+                        if new_right_edge > right_bound:
+                            right_bound = new_right_edge
+                    else:
+                        break
+            
+    # Restore processor state [S1]
+    restore_state()
+```
+
+### Parameters and Edge Cases
+*   **Zoom/Orient**: The sequence of clipping is affected by `ZoomX`, `ZoomY`, `ZoomZ`, and `Orient` registers [S1]. Voxels must be replicated according to Zoom registers before writing [S1].
+*   **Priority**: Higher priority primitives in the CFB are never overwritten [S1].
+*   **Reading**: When reading a room, overlapping is ignored and priorities play no role [S1].
+
+## Operating characteristics
+*   **Time Complexity**: The algorithm is efficient for low-level hardware implementation. Sorting `InterTable` by $Z_{min}$ allows early termination of searches [S1]. The nested loops (Z, Y, X) process only visible segments, reducing unnecessary writes compared to full rasterization [S1].
+*   **Memory**: Requires temporary storage for `InterTable` and `Active Table` [S1].
+*   **Strengths**: Explicitly handles visible segments, leaving invisible sections to the application (e.g., room manager), which can reduce overhead in complex scenes [S1].
+*   **Limitations**: The clipping sequence is not the order of the input stream, which can be drastically affected by transformation registers [S1].
+
+## Background
+The algorithm is a 3D generalization of the scan-line algorithm, adjusted for low-level processor implementation in the context of the Voxblt Engine [S1]. It was designed to handle room and figurine occlusion in a voxel frame buffer processor [S1]. It contrasts with Pike's algorithm, which operates at the window manager level and recursively subdivides windows into subrectangles [S1].
+
+## Sources
+[S1] The voxblt Engine: A Voxel Frame Buffer Processor, https://doi.org/10.2312/eggh/eggh88/085-102, fetched 2026-10-26

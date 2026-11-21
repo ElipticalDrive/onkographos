@@ -1,0 +1,102 @@
+# Cosine Decay Learning Rate Schedule
+
+Also called: Cosine Annealing, Cosine Decay, Eikonal loss weighting, Training schedule and loss weighting
+
+## Overview
+The Cosine Decay Learning Rate Schedule is a training configuration strategy that gradually reduces the learning rate from a peak value to a minimum value following a cosine curve, often preceded by a linear warmup phase. It is used in differentiable volume rendering and radiance field optimization to stabilize convergence and refine high-frequency details in the final stages of training. It sets itself apart from [Exponential Decay Learning Rate Schedule](9145-exponential-decay-learning-rate-schedule.md) by providing a smoother, symmetric decay profile that avoids the sharp initial drop of exponential schedules, and from [Linear Learning Rate Schedule](11850-linear-learning-rate-schedule.md) by offering a non-linear transition that better matches the loss landscape's curvature in neural implicit representations.
+
+## How it works
+The method combines a linear warmup phase with a cosine annealing phase to compute the learning rate for each optimization step.
+
+**Inputs and Outputs:**
+- **Inputs:**
+  - $t$: Current iteration number (integer, $t \ge 0$).
+  - $t_{warmup}$: Number of warmup iterations (integer).
+  - $t_{total}$: Total number of training iterations (integer).
+  - $\eta_{max}$: Peak learning rate (float).
+  - $\eta_{min}$: Minimum learning rate (float).
+- **Outputs:**
+  - $\eta_t$: Learning rate for iteration $t$ (float).
+
+**Data Structures:**
+No persistent data structures are required. The learning rate is computed statelessly from the iteration counter.
+
+**Parameters:**
+- Typical values from [S2]: $t_{warmup} = 5,000$, $\eta_{max} = 10^{-3}$, $\eta_{min} = 5 \times 10^{-5}$.
+- Typical values from [S1]: $\eta_{max} = 2 \times 10^{-4}$ for non-backbone layers, $\eta_{max} = 2 \times 10^{-6}$ for pre-trained backbones.
+- $t_{total}$ varies by dataset and model size (e.g., 150,000 iterations for RealEstate10K [S1]).
+
+**Steps:**
+1. If $t < t_{warmup}$, compute the learning rate using linear interpolation from 0 to $\eta_{max}$.
+2. If $t \ge t_{warmup}$, compute the learning rate using the cosine decay formula relative to the remaining iterations.
+
+**Formulas:**
+For $t < t_{warmup}$:
+$$ \eta_t = \eta_{max} \times \frac{t}{t_{warmup}} $$
+
+For $t \ge t_{warmup}$:
+$$ \eta_t = \eta_{min} + \frac{1}{2}(\eta_{max} - \eta_{min}) \left( 1 + \cos\left( \pi \frac{t - t_{warmup}}{t_{total} - t_{warmup}} \right) \right) $$
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** If $t_{total} = t_{warmup}$, the denominator in the cosine phase is zero. This is a degenerate case where warmup consumes the entire training budget; the schedule should default to $\eta_{max}$ or handle the division explicitly [G].
+- **Precision:** Ensure floating-point precision is maintained for small learning rates near $\eta_{min}$ to prevent gradient stagnation [G].
+- **Boundary Conditions:** At $t = t_{warmup}$, both formulas yield $\eta_{max}$, ensuring continuity. At $t = t_{total}$, the cosine term becomes $\cos(\pi) = -1$, yielding $\eta_{min}$ [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_cosine_decay_lr(t, t_warmup, t_total, eta_max, eta_min):
+    """
+    Compute learning rate using cosine decay with linear warmup.
+    
+    Args:
+        t: Current iteration.
+        t_warmup: Warmup iterations.
+        t_total: Total iterations.
+        eta_max: Peak learning rate.
+        eta_min: Minimum learning rate.
+        
+    Returns:
+        Learning rate for iteration t.
+    """
+    if t < t_warmup:
+        # Linear warmup from 0 to eta_max
+        return eta_max * (t / t_warmup)
+    else:
+        # Cosine decay from eta_max to eta_min
+        # Ensure denominator is not zero
+        if t_total == t_warmup:
+            return eta_max
+        
+        progress = (t - t_warmup) / (t_total - t_warmup)
+        # Clamp progress to [0, 1] to handle floating point errors
+        progress = max(0.0, min(1.0, progress))
+        
+        cosine_term = 1.0 + math.cos(math.pi * progress)
+        return eta_min + 0.5 * (eta_max - eta_min) * cosine_term
+```
+
+## Subtopics
+
+### Per-Parameter Cosine Decay
+Applies different $\eta_{max}$ and $\eta_{min}$ values to different network components (e.g., lower rates for pre-trained backbones). [S1] uses $2 \times 10^{-6}$ for Depth Anything V2 backbone and $2 \times 10^{-4}$ for other layers. See [Per-Parameter Learning Rate Scheduling](11832-per-parameter-learning-rate-scheduling.md).
+
+### Coarse-to-Fine Cosine Decay
+Combines cosine LR scheduling with resolution scaling. [S2] uses cosine decay while upscaling images from 100x100 to 800x800. See [Training Loop with Adaptive Regularization & LR Decay](2408-training-loop-with-adaptive-regularization-lr-decay.md).
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per iteration for LR computation.
+- **Memory Complexity:** $O(1)$ as no history is stored.
+- **Performance:** Provides stable convergence in neural implicit representations. [S2] reports successful reconstruction of thin structures with Eikonal loss weight 0.01, noting that lower weights lead to thinner structures, implying the LR schedule interacts with regularization strength. [S1] reports training times of 1 day (small model) and 2 days (large model) on 4x GH200 GPUs for 150K iterations at 256x256 resolution.
+- **Strengths:** Smooth transition prevents oscillations in late training; warmup stabilizes early training.
+- **Limitations:** Requires setting $t_{total}$ in advance; less flexible than adaptive schedulers like [XYZ Learning Rate Scheduling](11823-xyz-learning-rate-scheduling.md) if validation metrics are used to adjust.
+- **When to use:** Standard choice for NeRF and radiance field optimization when a fixed training budget is known.
+- **When not to use:** When training duration is uncertain or dynamic adjustment based on loss landscape is required.
+
+## Background
+The cosine decay schedule is a widely used technique in deep learning, originating from general optimization practices. In the context of volume rendering and neural implicit representations, it has been adopted in methods like ShadowNeuS [S2] and DepthSplat [S1] to optimize neural networks for 3D reconstruction. The specific combination with linear warmup and coarse-to-fine rendering strategies has become a standard configuration for stabilizing training in differentiable rendering pipelines.
+
+## Sources
+[S1] DepthSplat: Connecting Gaussian Splatting and Depth, https://doi.org/10.1109/cvpr52734.2025.01534, fetched 2026-10-26
+[S2] ShadowNeuS: Neural SDF Reconstruction by Shadow Ray Supervision, https://doi.org/10.1109/cvpr52729.2023.00025, fetched 2026-10-26

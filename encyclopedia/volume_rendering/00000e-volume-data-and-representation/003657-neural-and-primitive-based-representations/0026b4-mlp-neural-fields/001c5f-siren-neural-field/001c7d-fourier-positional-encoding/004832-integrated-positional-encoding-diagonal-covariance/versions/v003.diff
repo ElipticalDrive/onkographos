@@ -1,0 +1,131 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Integrated Positional Encoding (Diagonal Covariance) computes the expected value of sinusoidal positional encodings when input coordinates are modeled as Gaussian random variables with diagonal covariance [S1, S2, unofficial]. It solves the aliasing problem in neural fields by integrating over the spatial uncertainty (ray thickness or voxel size) represented by the variance [S2, unofficial]. Unlike standard Fourier Positional Encoding which treats inputs as point samples, this method accounts for the query's spatial extent, naturally suppressing high-frequency components when variance is large [S1, S2, unofficial].
++Integrated Positional Encoding (Diagonal Covariance) computes the expected value of sinusoidal positional encodings when input coordinates are modeled as Gaussian random variables with diagonal covariance [S1, S2, unofficial]. It solves the aliasing problem in neural fields by integrating over the spatial uncertainty (ray thickness) represented by the variance [S2, unofficial]. Unlike standard Fourier Positional Encoding, which treats inputs as point samples, this method accounts for the query's spatial extent and naturally suppresses high-frequency components when variance is large [S1, unofficial].
+ 
+ ## How it works
+@@ -20,11 +20,9 @@
+ 1. Extract mean $x$ and covariance ($x_{var}$ or $x_{cov}$) from `x_coord` [S1, S2, unofficial].
+ 2. Compute frequency scales: $s_i = 2^i$ for $i$ from `min_deg` to `max_deg - 1` [S1, S2, unofficial].
+-3. Construct basis matrix $B$ by concatenating $s_i \cdot I_D$ for each scale $i$ [S1, S2, unofficial].
+-4. Compute transformed mean $y = x \cdot B$ [S1, S2, unofficial].
+-5. Compute transformed variance $y_{var}$:
+-   - If diagonal: $y_{var} = x_{var} \cdot B^2$ (element-wise square of scales applied to variances) [S1, S2, unofficial].
+-   - If full: $y_{var} = \sum_{j} (x_{cov} \cdot B)_{ij} \cdot B_{kj}$ (matrix multiplication followed by contraction) [S1, S2, unofficial].
+-6. Compute expected sine using the formula: $E[\sin(z)] = e^{-0.5 \sigma^2} \sin(\mu)$, where $\mu$ is the mean and $\sigma^2$ is the variance [S1, unofficial].
+-7. Concatenate results for sine and cosine components [S1, S2, unofficial].
++3. Compute transformed mean $y$ and transformed variance $y_{var}$:
++   - If diagonal: $y = x \cdot B_{diag}$ and $y_{var} = x_{var} \cdot B_{diag}^2$, implemented via broadcasting multiplication of $x$ and $x_{var}$ with `scales` and `scales^2` [S1, S2, unofficial].
++   - If full: Construct basis matrix $B$ by concatenating $s_i \cdot I_D$ for each scale $i$. Compute $y = x \cdot B$ and $y_{var} = \sum_{j} (x_{cov} \cdot B)_{ij} \cdot B_{kj}$ via matrix multiplication and contraction [S1, S2, unofficial].
++4. Concatenate results for sine and cosine components: `[y, y + 0.5 * pi]` and `[y_var, y_var]` [S1, S2, unofficial].
++5. Apply the expected sine formula to compute the final encoded values [S1, unofficial].
+ 
+ **Formula:**
+@@ -42,7 +40,8 @@
+     
+     Args:
+-        x_coord: Dict containing 'mean' (x) and 'var' (x_var).
++        x_coord: Dict containing 'mean' (x) and 'var' (x_var) or 'cov' (x_cov).
+                  x shape: (N, D)
+                  x_var shape: (N, D)
++                 x_cov shape: (N, D, D)
+         min_deg: int, minimum exponent for scales.
+         max_deg: int, maximum exponent for scales (exclusive).
+@@ -52,7 +51,10 @@
+         encoded: Tensor of shape (N, 2 * D * (max_deg - min_deg))
+     """
+-    # 1. Extract mean and variance from x_coord
++    # 1. Extract mean and covariance from x_coord
+     x = x_coord['mean']  # (N, D)
+-    x_var = x_coord['var']  # (N, D)
++    if diagonal:
++        x_var = x_coord['var']  # (N, D)
++    else:
++        x_cov = x_coord['cov']  # (N, D, D)
+ 
+     # 2. Compute scales as 2^i for i in [min_deg, max_deg)
+@@ -60,20 +62,27 @@
+     scales = np.power(2.0, exponents)  # (K,)
+ 
+-    # 3. Reshape x and scales to create y
+-    # y shape: (N, D, K)
+-    y = x[:, :, np.newaxis] * scales[np.newaxis, np.newaxis, :]
+-    y = y.reshape(x.shape[0], -1)  # (N, D*K)
++    # 3. Compute transformed mean y and variance y_var
++    if diagonal:
++        # y = x @ basis_diag, where basis_diag is diag(scales)
++        # Equivalent to broadcasting multiplication
++        y = x[:, :, np.newaxis] * scales[np.newaxis, np.newaxis, :]  # (N, D, K)
++        y = y.reshape(x.shape[0], -1)  # (N, D*K)
++        # y_var = x_var @ basis_diag^2
++        scales_sq = np.square(scales)
++        y_var = x_var[:, :, np.newaxis] * scales_sq[np.newaxis, np.newaxis, :]  # (N, D, K)
++        y_var = y_var.reshape(x.shape[0], -1)  # (N, D*K)
++    else:
++        # Construct basis matrix by concatenating 2^i * Identity(D)
++        basis = np.concatenate([scales[i] * np.eye(x.shape[1]) for i in range(len(scales))], axis=1)  # (D, D*K)
++        y = x @ basis  # (N, D*K)
++        # y_var = sum((x_cov @ basis) * basis, dim=-2)
++        y_var = np.sum((x_cov @ basis) * basis, axis=-2)  # (N, D*K)
+ 
+-    # 4. Reshape x_var and scales squared to create y_var
+-    scales_sq = np.square(scales)
+-    y_var = x_var[:, :, np.newaxis] * scales_sq[np.newaxis, np.newaxis, :]
+-    y_var = y_var.reshape(x.shape[0], -1)  # (N, D*K)
+-
+-    # 5. Concatenate for sine and cosine components
+-    # Notes specify: expected_sin of concatenated [y, y + 0.5*pi] and [y_var, y_var]
++    # 4. Concatenate for sine and cosine components
++    # Concatenate y and y + 0.5*pi, and y_var twice
+     y_concat = np.concatenate([y, y + 0.5 * np.pi], axis=-1)
+     y_var_concat = np.concatenate([y_var, y_var], axis=-1)
+ 
+-    # 6. Compute expected sine: E[sin(z)] = exp(-0.5 * var) * sin(mean)
++    # 5. Compute expected sine: E[sin(z)] = exp(-0.5 * var) * sin(mean)
+     decay = np.exp(-0.5 * y_var_concat)
+     encoded = decay * np.sin(y_concat)
+@@ -85,35 +94,12 @@
+ When the variance is wide, the sine function shrinks towards zero, which is handled by the exponential decay term $\exp(-0.5 \cdot x_{var})$ [S1, unofficial].
+ 
+-## Subtopics
+-
+-### [Fourier Feature Networks](2765-fourier-feature-networks.md)
+-Uses random Gaussian frequencies instead of deterministic powers of two.
+-
+-### [Off-Axis Positional Encoding](3503-off-axis-positional-encoding.md)
+-Adjusts frequencies based on viewing direction to reduce aliasing.
+-
+-### [Coordinate-Time Encoding](5105-coordinate-time-encoding.md)
+-Extends positional encoding to temporal dimensions for dynamic scenes.
+-
+-### [Integrated Positional Encoding](5255-integrated-positional-encoding.md)
+-The general family of integrating over uncertainty, of which this is a specific diagonal covariance implementation.
+-
+-### [2D Positional Embedding](12829-2d-positional-embedding.md)
+-Standard sinusoidal embeddings for 2D data, lacking the integration aspect.
+-
+-### [Frequency Annealing](13443-frequency-annealing.md)
+-Gradually increases frequencies during training, a different approach to handling high frequencies.
+-
+-### [Truncated Dynamic Low-pass Filter](14016-truncated-dynamic-low-pass-filter.md)
+-Dynamically filters frequencies based on scene content, distinct from the fixed Gaussian integration.
+-
+ ## Operating characteristics
+-- Time complexity: Not given in the sources.
+-- Memory complexity: Not given in the sources.
+-- Performance: Not given in the sources.
++- Time complexity: Not given in the sources [S1, S2, unofficial].
++- Memory complexity: Not given in the sources [S1, S2, unofficial].
++- Performance: Not given in the sources [S1, S2, unofficial].
+ - Strengths: Handles ray thickness and voxel size naturally by integrating over covariance uncertainty [S2, unofficial].
+-- Limitations: Not given in the sources.
+-- When to use: Not given in the sources.
+-- When not to use: Not given in the sources.
++- Limitations: Not given in the sources [S1, S2, unofficial].
++- When to use: Not given in the sources [S1, S2, unofficial].
++- When not to use: Not given in the sources [S1, S2, unofficial].
+ 
+ ## Background

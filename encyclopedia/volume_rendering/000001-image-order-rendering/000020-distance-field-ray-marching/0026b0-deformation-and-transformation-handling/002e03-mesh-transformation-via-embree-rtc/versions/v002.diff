@@ -1,0 +1,170 @@
+--- v001.md
++++ v002.md
+@@ -1,84 +1,79 @@
+ # Mesh Transformation via Embree RTC
++
+ Also called: xformRtcMeshOnly
++
+ ## Overview
+-This method applies a 4x4 transformation matrix to mesh vertices within an Embree ray tracing scene, updating the geometry buffer in place while preserving the original source mesh data [S1, unofficial]. It differs from its sibling [Inverse Model Matrix Transformation for Distance Fields](1962-inverse-model-matrix-transformation-for-distance-fields.md) by modifying the actual vertex positions in the Embree buffer rather than applying inverse transformations to the ray origin or direction, and from [Motion-Compensated Block Warping](4613-motion-compensated-block-warping.md) by operating on explicit mesh geometry rather than warping pre-computed blocks or fields. It is used when the scene geometry needs to be physically updated for subsequent ray tracing operations.
++This method updates the geometry of a mesh within an Embree ray tracing context by applying a 4x4 transformation matrix to the vertex buffer while preserving the original source data. It solves the problem of dynamic mesh animation in Embree by allowing the scene graph to reflect current vertex positions without reallocating geometry buffers. It differs from [Inverse Model Matrix Transformation for Distance Fields](1962-inverse-model-matrix-transformation-for-distance-fields.md) by operating on explicit mesh primitives rather than implicit distance fields, and from [Motion-Compensated Block Warping](4613-motion-compensated-block-warping.md) by updating vertex positions directly rather than warping compressed voxel blocks.
++
+ ## How it works
+ **Inputs:**
+-- `mesh`: The original source mesh data (vertices and normals).
+-- `mat`: A 4x4 transformation matrix (column-major or row-major, consistent with Embree's expectation).
+-- `embree_geometry`: The Embree geometry object containing the vertex buffer.
++- `rtcGeometry`: The Embree geometry object handle.
++- `mat`: A 4x4 transformation matrix ($M$) in column-major or row-major format consistent with Embree's expectations.
+ - `vertex_count`: The number of vertices in the mesh.
++- `original_positions`: An array of 3D vectors storing the initial, undeformed vertex positions.
+ 
+ **Outputs:**
+-- Updated `embree_geometry` buffer with transformed vertices.
+-- Updated `embree_scene` (committed).
++- Updated vertex buffer in `rtcGeometry` reflecting the transformed positions.
++- Commitment of the geometry and scene to make changes visible to the ray tracer.
+ 
+ **Data Structures:**
+-- `vert`: Pointer to the vertex buffer retrieved from `embree_geometry`. Layout: contiguous array of 3 floats (x, y, z) per vertex.
+-- `original_positions`: Array of 4-component vectors (x, y, z, 1) storing the initial mesh positions.
++- Vertex buffer: A contiguous array of 3D floats (x, y, z) accessed via `rtcGetGeometryBufferData`.
++- Temporary accumulator: `averagePt` (vec4, initialized to 0,0,0,1) and `maxlen` (float, initialized to 0).
+ 
+ **Steps:**
+-1. Retrieve the vertex buffer pointer from the Embree geometry using `rtcGetGeometryBufferData`.
+-2. Initialize `averagePt` as a 4D vector $(0, 0, 0, 1)$ and `maxlen` as $0$.
+-3. Loop through each vertex index $i$ from $0$ to `vertex_count` - 1:
+-   a. Reset the current vertex `vert[i]` to its original position from the source mesh.
+-   b. Transform the vertex: $v = mat \times vert[i]$.
+-   c. Update `vert[i].x`, `vert[i].y`, `vert[i].z` with $v.x$, $v.y$, $v.z$.
+-   d. Accumulate the transformed position: $averagePt += v$.
+-   e. Compute the distance $d$ from $v$ to the running average centroid. The centroid at step $i$ is $C_i = averagePt / (i + 1)$.
+-      $$ d = \| v - C_i \| $$
+-   f. If $d > maxlen$, set $maxlen = d$.
+-4. After the loop, compute the final centroid $cp = averagePt / vertex\_count$.
+-5. Commit the geometry and the scene to apply changes.
++1. Retrieve the mutable vertex buffer pointer from `rtcGeometry` using `rtcGetGeometryBufferData`.
++2. Initialize `averagePt = (0.0, 0.0, 0.0, 1.0)` and `maxlen = 0.0`.
++3. Iterate through each vertex index $i$ from $0$ to `vertex_count` - 1:
++   a. Reset the current vertex `vert[i]` to its original position from `original_positions`.
++   b. Transform the vertex: $v = M \times \text{vert}[i]$.
++   c. Update `vert[i].x`, `vert[i].y`, `vert[i].z` with $v.x, v.y, v.z$.
++   d. Accumulate the transformed position: `averagePt` += $v$.
++   e. Compute the running centroid $C_i = \text{averagePt} / \max(1, i+1)$.
++   f. Compute the distance $d$ from $v$ to $C_i$.
++   g. If $d > \text{maxlen}$, set `maxlen` = $d$.
++4. Compute the final centroid $C_{final} = \text{averagePt} / \text{vertex\_count}$.
++5. Commit the geometry using `rtcCommitGeometry(rtcGeometry)`.
++6. Commit the scene using `rtcCommitScene(scene)` to update acceleration structures.
+ 
+ **Pitfalls:**
+-- The incremental computation of `maxlen` based on the distance to the running average centroid may be incorrect or misleading for bounding volume calculations, as the running average does not represent the true geometric center until the end [S1, unofficial].
++- The incremental computation of `maxlen` based on the distance to the running centroid is mathematically incorrect for determining the bounding radius or spread of the mesh [S1, unofficial]. It does not represent the true maximum distance from the final centroid or the bounding sphere radius.
+ 
+ **Pseudocode:**
+ ```python
+-def transform_mesh_via_embree_rtc(mesh, mat, embree_geometry, vertex_count):
+-    # Get vertex buffer pointer
+-    vert_ptr = rtcGetGeometryBufferData(embree_geometry, RTC_BUFFER_TYPE_VERTEX)
++def transform_mesh_embree(rtc_geometry, mat, original_positions, vertex_count):
++    # Get mutable vertex buffer
++    vertices = rtcGetGeometryBufferData(rtc_geometry, RTC_BUFFER_TYPE_VERTEX)
+     
+-    # Initialize accumulators
+     average_pt = [0.0, 0.0, 0.0, 1.0]
+     maxlen = 0.0
+     
+-    # Loop through vertices
+     for i in range(vertex_count):
+-        # Reset to original position
+-        orig = mesh.vertices[i] # Assuming mesh.vertices stores original positions
+-        vert_ptr[i] = orig
++        # Reset to original
++        orig = original_positions[i]
++        vert = [orig.x, orig.y, orig.z, 1.0]
+         
+         # Transform
+-        v = mat * orig # 4x4 matrix multiplication
++        v = mat_multiply_vec4(mat, vert)
+         
+         # Update buffer
+-        vert_ptr[i].x = v.x
+-        vert_ptr[i].y = v.y
+-        vert_ptr[i].z = v.z
++        vertices[i].x = v[0]
++        vertices[i].y = v[1]
++        vertices[i].z = v[2]
+         
+-        # Accumulate
+-        average_pt[0] += v.x
+-        average_pt[1] += v.y
+-        average_pt[2] += v.z
+-        # average_pt[3] remains 1.0 if we treat it as a counter, but note: 
+-        # The source says averagePt = (0,0,0,1) initially and accumulates v. 
+-        # If v is (x,y,z,1), then average_pt[3] will increment. 
+-        # However, the centroid calculation uses averagePt / vertex_count.
+-        # Let's assume averagePt accumulates the 4D homogeneous coordinates.
+-        average_pt[3] += 1.0 
++        # Accumulate for centroid
++        average_pt[0] += v[0]
++        average_pt[1] += v[1]
++        average_pt[2] += v[2]
+         
+-        # Compute distance to running average
++        # Incremental centroid
+         count = i + 1
+-        centroid = [
+-            average_pt[0] / count,
+-            average_pt[1] / count,
+-            average_pt[2] / count
+-        ]
++        cx = average_pt[0] / count
++        cy = average_pt[1] / count
++        cz = average_pt[2] / count
+         
+-        dx = v.x - centroid[0]
+-        dy = v.y - centroid[1]
+-        dz = v.z - centroid[2]
++        # Distance to running centroid
++        dx = v[0] - cx
++        dy = v[1] - cy
++        dz = v[2] - cz
+         d = sqrt(dx*dx + dy*dy + dz*dz)
+         
+@@ -86,15 +81,11 @@
+             maxlen = d
+             
+-    # Final centroid (not strictly used in the update step but computed in source)
+-    cp = [
+-        average_pt[0] / vertex_count,
+-        average_pt[1] / vertex_count,
+-        average_pt[2] / vertex_count
+-    ]
++    # Final centroid calculation (unused in the source logic but noted)
++    # centroid = average_pt / vertex_count
+     
+-    # Commit changes
+-    rtcCommitGeometry(embree_geometry)
+-    rtcCommitScene(embree_geometry.scene)
++    rtcCommitGeometry(rtc_geometry)
++    rtcCommitScene(rtc_geometry.scene)
+ ```
++
+ ## Subtopics
+ 
+@@ -103,7 +94,12 @@
+ 
+ ## Operating characteristics
+-Time complexity is $O(N)$ where $N$ is the number of vertices, as each vertex is transformed and accumulated once. Memory complexity is $O(1)$ auxiliary space beyond the vertex buffer. The method is limited by the precision of the floating-point transformation and the correctness of the incremental bounding box calculation. It is suitable for static or slowly deforming meshes where explicit vertex updates are required for ray tracing accuracy.
++- **Time Complexity:** $O(N)$ where $N$ is the number of vertices, due to the single pass loop over vertices.
++- **Memory Complexity:** $O(1)$ auxiliary space, excluding the vertex buffer itself.
++- **Performance:** Fast for dynamic meshes as it avoids reallocation. However, the incremental `maxlen` calculation is redundant and potentially misleading if used for bounding volume updates.
++- **Limitations:** The method does not automatically update normals; normal transformation must be handled separately if required for lighting. The incorrect `maxlen` metric suggests that bounding box updates should be computed explicitly using `rtcSetGeometryUserBoundsFunction` or by manually computing the AABB of the transformed vertices.
++
+ ## Background
+-This method originates from the FLOD project, an unofficial implementation for rendering Gaussian splats and meshes using Embree [S1, unofficial]. It was developed to handle mesh transformations within the Embree ray tracing pipeline by directly modifying the geometry buffer.
++This method is derived from implementation details in the FLod project, which uses Embree for high-performance rendering [S1, unofficial]. It represents a specific approach to handling dynamic geometry in Embree by directly modifying the vertex buffer rather than relying on Embree's built-in transformation matrices for static updates.
++
+ ## Sources
+ [S1] whu-lyh/flod, https://github.com/whu-lyh/flod, fetched 2026-10-27 (unofficial)

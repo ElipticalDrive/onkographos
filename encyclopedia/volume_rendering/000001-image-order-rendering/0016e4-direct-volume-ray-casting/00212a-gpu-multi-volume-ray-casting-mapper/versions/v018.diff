@@ -1,0 +1,501 @@
+--- v017.md
++++ v018.md
+@@ -4,192 +4,330 @@
+ 
+ ## Overview
+-The GPU Multi-Volume Ray Casting Mapper is a volume rendering technique that renders multiple volume datasets simultaneously by extending the single-volume `vtkGPUVolumeRayCastMapper` to accept multiple `vtkImageData` datasets and `vtkVolumeProperty` objects, using GPU shaders for ray traversal and compositing [S1, S2, unofficial]. It sets itself apart from its siblings by compositing multiple 3D scalar fields along a single ray using coordinate transformation matrices to align samples from different volumes to a common ray space [S1, unofficial]. Unlike the standard single-volume mapper, it supports up to 4 additional volumes (5 total) and handles mask-based blending for specific regions [S1, S2, unofficial].
++The GPU Multi-Volume Ray Casting Mapper is a volume rendering technique that renders multiple volume datasets simultaneously by extending the single-volume `vtkGPUVolumeRayCastMapper` to accept multiple `vtkImageData` datasets and `vtkVolumeProperty` objects, using GPU shaders for ray traversal and compositing [S1, S2, unofficial]. It sets itself apart from its siblings by compositing multiple 3D scalar fields along a single ray, using coordinate transformation matrices to align samples from different volumes to a common ray space [S1, unofficial]. Unlike the standard `vtkGPUVolumeRayCastMapper` which handles one volume, this mapper supports up to 4 or 5 volumes (depending on the platform) and manages the synchronization of ray positions across disparate coordinate systems [S1, S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- **Inputs:** Two or more `vtkImageData` datasets (scalar fields) and corresponding `vtkVolumeProperty` objects (transfer functions). The primary input is at port 0; additional inputs are at ports 1 to $N$. A mask input (`vtkImageData`) is optional for label-map or binary masking [S1, S2, unofficial].
+-- **Outputs:** A 2D color buffer (framebuffer) with accumulated color and opacity per pixel [S1, S2, unofficial].
+-
+-**Data Structures:**
+-- **Transforms:** `TextureCoord_1toN[]` is an array of `vtkTransform` objects. For each additional volume $N$, it stores the matrix $M_{1 \to N}$ that converts texture coordinates from the first volume to volume $N$. This matrix is computed as $M_{1 \to N} = T_{world \to tex_N} \cdot T_{world \to tex_1}^{-1} \cdot T_{user}$, where $T_{user}$ is an optional user-defined transform [S1, unofficial].
+-- **Uniforms (Shader):**
+-  - `sampler3D dataSetTexture[MAX_NUMBER_OF_VOLUMES]`: 3D textures for scalar data.
+-  - `sampler1D opacityTexture[MAX_NUMBER_OF_VOLUMES]`: 1D textures for opacity transfer functions.
+-  - `mat4 P1toPN[MAX_NUMBER_OF_VOLUMES-1]`: Pre-computed transformation matrices $M_{1 \to N}$ passed to the shader.
+-  - `vec3 lowBounds[MAX_NUMBER_OF_VOLUMES]`, `vec3 highBounds[MAX_NUMBER_OF_VOLUMES]`: Bounding box limits for each volume in texture space.
+-  - `vec3 ClippingplanesNormal[MAX_NUMBER_OF_VOLUMES]`, `vec3 ClippingplanesOrigins[MAX_NUMBER_OF_VOLUMES]`: Clipping plane definitions in texture space.
+-  - `int clipped[MAX_NUMBER_OF_VOLUMES]`: Flags indicating if clipping is active for each volume.
+-  - `int Number_Of_Volumes`: Total number of volumes being rendered [S1, S3, unofficial].
+-- **Memory Management:** `MaxMemoryInBytes` limits GPU memory usage. It is probed from GPU info (dedicated video memory, then dedicated system memory); if 0, defaults to 128 MB [S2, unofficial]. `MaxMemoryFraction` (default 0.75) determines the fraction of this limit used for textures [S1, S2, unofficial].
+-
+-**Numbered Steps:**
+-
+-1. **Initialization:**
+-   - Probe GPU memory to set `MaxMemoryInBytes`. If unavailable, use 128 MB [S2, unofficial].
+-   - Initialize `TransformedInput` and `TransformedInput2` (shallow copies of inputs) if inputs change or MTime updates [S2, unofficial].
+-   - For inputs with non-zero extents, adjust origin and shift extents to start from zero to work around GPU texture coordinate limitations [S2, unofficial].
+-
+-2. **Transform Setup:**
+-   - For each additional volume $N$ (from 1 to $MAX\_NUMBER\_OF\_ADDITIONAL\_VOLUMES$), compute $P1toPN[N-1]$ using the world-to-texture transforms and any user-defined transform [S1, unofficial].
+-
+-3. **Clipping/Cropping Initialization:**
+-   - Convert clipping and cropping planes from world coordinates to texture coordinates for each volume.
+-   - Compute `ClippedCroppingRegionPlanes` by intersecting cropping planes with volume bounds. If cropping planes define a region with zero or negative volume, fail silently (`goodSoFar = 0`) [S1, S2, unofficial].
+-
+-4. **Render Pipeline:**
+-   - If `GeneratingCanonicalView` is true, call `CanonicalViewRender` (skips timing/events). Otherwise, invoke `VolumeMapperRenderStartEvent`, start timer, call `GPURender`, stop timer, and invoke `VolumeMapperRenderEndEvent` [S2, unofficial].
+-
+-5. **Shader Execution (Fragment Shader `trace()`):**
+-   - **Input:** `pos` (ray origin in volume 1 texture space), `rayDir` (ray direction in texture space), `tMax` (max ray length).
+-   - **Initialization:** Calculate initial `posX[]` for additional volumes: `posX[iii] = vec3(P1toPN[iii] * vec4(pos, 1.0))`. Initialize `destColor` (via `initialColor()`) and `remainOpacity = 1.0 - destColor.a` [S1, unofficial].
+-   - **Loop:** While `inside` is true:
+-     - `inside` is true if `t < tMax`, `remainOpacity >= 0.0039` (1/255), and `pos` is within `lowBounds[0]` and `highBounds[0]` [S1, unofficial].
+-     - For each additional volume `iii` (0 to `Number_Of_Volumes-2`), update `posX[iii] = posX[iii] + rayDir` (transformed appropriately if needed, though typically `rayDir` is in volume 1 space, so `posX` updates are derived from `pos` update) [S1, unofficial]. *Note: Sources indicate `pos` and `posX[]` are updated using `rayDir` and transforms.*
+-     - **Volume 0:** If `pos` is within bounds and not clipped, sample `value[0] = texture3D(dataSetTexture[0], pos)`. Compute `scalar[0] = scalarFromValue(value[0])`. Sample `opacity[0] = texture1D(opacityTexture[0], scalar[0])`.
+-     - **Volumes 1 to N-1:** If `posX[xx-1]` is within bounds and not clipped, sample `value[xx] = texture3D(dataSetTexture[xx], posX[xx-1])`. Compute `scalar[xx] = scalarFromValue(value[xx])`. Sample `opacity[xx] = texture1D(opacityTexture[xx], scalar[xx])` [S1, unofficial].
+-     - **Compositing:** For each volume `vol` with `opacity[vol].a > 0.0`:
+-       - Compute `color[vol] = shade(vol, value[vol]) * opacity[vol].a` [S1, unofficial].
+-       - Update `destColor = destColor + color[vol] * remainOpacity`.
+-       - Update `remainOpacity = remainOpacity * (1.0 - opacity[vol].a)` [S1, unofficial].
+-     - **Advance:** `pos = pos + rayDir`, `t += 1.0` [S1, unofficial].
+-   - **Output:** `gl_FragColor = destColor`, `gl_FragColor.a = 1.0 - remainOpacity` [S1, unofficial].
+-
+-6. **Masking (Optional):**
+-   - If a mask input is provided, blend between standard and mask-specific color transfer functions based on `MaskBlendFactor` and `MaskType` (Binary or LabelMap) [S2, unofficial].
+-
+-**Pseudocode:**
++The method implements the emission-absorption optical model, computing the light intensity reaching the eye by integrating radiative energy along a ray through the scalar volume [S1, S5, S9, unofficial]. The process follows a strict pipeline for each pixel: ray generation, sampling, classification (transfer function application), shading, and compositing [S4, S34, unofficial].
++
++### Inputs and Outputs
++**Inputs:**
++*   Primary volume: `vtkImageData` (Input 0).
++*   Additional volumes: Up to `MAX_NUMBER_OF_ADDITIONAL_VOLUMES` `vtkImageData` datasets (Input 1 to N).
++*   Properties: `vtkVolumeProperty` objects for each volume, accessed via `GetAdditionalProperty(volNumber)` [S1, unofficial].
++*   Transforms: User-defined `vtkTransform` objects for each additional volume to align them with the primary volume's texture coordinate space [S1, unofficial].
++*   Masking (Optional): A `vtkImageData` mask input and `MaskType` (Binary or LabelMap) [S2, unofficial].
++
++**Outputs:**
++*   Final pixel color and opacity (`gl_FragColor`) rendered to the framebuffer [S1, unofficial].
++
++### Data Structures
++**Class Members (`vtkGPUMultiVolumeRayCastMapper`):**
++*   `NUMBER_OF_ADDITIONAL_VOLUMES`: Integer count of extra volumes.
++*   `Property[MAX_NUMBER_OF_ADDITIONAL_VOLUMES]`: Array of `vtkVolumeProperty*` pointers storing transfer functions for additional volumes [S1, unofficial].
++*   `TransformedInput`, `AdditionalTransformedInput[MAX_NUMBER_OF_ADDITIONAL_VOLUMES]`: `vtkImageData*` pointers storing transformed input data for primary and additional volumes [S1, unofficial].
++*   `LastInput`, `AdditionalLastInput[MAX_NUMBER_OF_ADDITIONAL_VOLUMES]`: `vtkImageData*` pointers used to check if input data has changed since the last `Render()` call [S1, unofficial].
++*   `ClippedCroppingRegionPlanes[6]`: Array of 6 doubles defining clipping planes (min/max for x, y, z). Indices 0-1: X min/max, 2-3: Y min/max, 4-5: Z min/max [S2, unofficial].
++*   `MaskInput`: `vtkImageData*` pointer for the mask [S2, unofficial].
++*   `MaskBlendFactor`: Float, default 1.0. Blending weight for mask color transfer function [S2, unofficial].
++*   `MaskType`: Enum, default `LabelMapMaskType` [S2, unofficial].
++
++**Shader Uniforms:**
++*   `sampler3D dataSetTexture[MAX_NUMBER_OF_VOLUMES]`: 3D textures for scalar data [S1, unofficial].
++*   `sampler1D opacityTexture[MAX_NUMBER_OF_VOLUMES]`: 1D textures for opacity values [S1, unofficial].
++*   `mat4 P1toPN[MAX_NUMBER_OF_VOLUMES-1]`: Transformation matrices from the first volume's texture coordinates to the Nth volume's texture coordinates [S1, unofficial].
++*   `vec3 lowBounds[MAX_NUMBER_OF_VOLUMES]`, `vec3 highBounds[MAX_NUMBER_OF_VOLUMES]`: Bounding box info for each volume, modified by cropping [S1, unofficial].
++*   `int Number_Of_Volumes`: Total number of volumes being rendered [S1, unofficial].
++*   `vec3 ClippingplanesNormal[MAX_NUMBER_OF_VOLUMES]`, `vec3 ClippingplanesOrigins[MAX_NUMBER_OF_VOLUMES]`: Clipping plane definitions [S1, unofficial].
++*   `int clipped[MAX_NUMBER_OF_VOLUMES]`: Flags indicating if clipping is active for each volume [S1, unofficial].
++
++### Parameters
++*   `MAX_NUMBER_OF_ADDITIONAL_VOLUMES`: Compile-time constant. Value is 3 on Apple platforms, 4 on others [S1, unofficial].
++*   `MAX_NUMBER_OF_VOLUMES`: Total max volumes. 4 on Apple platforms, 5 otherwise [S1, unofficial].
++*   `AutoAdjustSampleDistances`: Boolean flag (int 0/1). Enables automatic adjustment of sample distances. Default: 1 (true) [S2, unofficial].
++*   `ImageSampleDistance`: Base sample distance for image space. Default: 1.0. Clamped to [0.1, 100.0] [S2, unofficial].
++*   `MinimumImageSampleDistance`: Lower bound for adaptive sample distance. Default: 1.0. Clamped to [0.1, 100.0] [S2, unofficial].
++*   `MaximumImageSampleDistance`: Upper bound for adaptive sample distance. Default: 10.0. Clamped to [0.1, 100.0] [S2, unofficial].
++*   `SampleDistance`: Current sample distance along the ray. Default: 1.0 [S2, unofficial].
++*   `MaxMemoryInBytes`: Maximum GPU memory allocation limit. Determined by probing GPU info; defaults to 128MB if unavailable [S2, unofficial].
++*   `MaxMemoryFraction`: Fraction of `MaxMemoryInBytes` used. Default: 0.75. Range [0.1, 1.0] [S2, unofficial].
++*   `ReportProgress`: Boolean flag. Uses `glFinish()` to report progress. Default: true. Should be false for small datasets to avoid slowdown [S2, unofficial].
++*   `FinalColorWindow`: Window value for final color scaling. Default: 1.0 [S2, unofficial].
++*   `FinalColorLevel`: Level value for final color scaling. Default: 0.5 [S2, unofficial].
++*   `Clipping`: Enables or disables clipping [S3, unofficial].
++*   `Technique` / `TechniqueFg`: Selects rendering technique for background/foreground [S3, unofficial].
++*   `ColorOpacityFusion`: Sets multi-volume color/opacity fusion method [S3, unofficial].
++*   `AMRMode`: Adaptive Mesh Refinement mode. Default: 0 [S2, unofficial].
++*   `CellFlag`: Scalar data location. 0 for point data, 1 for cell data [S1, unofficial].
++
++### Steps
++
++1.  **Initialization and Memory Setup**:
++    *   Probe the GPU list to get dedicated video memory. If dedicated memory is 0, use dedicated system memory. If both are 0, set `MaxMemoryInBytes` to 128MB. Ignore shared system memory [S2, unofficial].
++    *   Initialize `TransformedInput` and `AdditionalTransformedInput` arrays to NULL [S1, unofficial].
++    *   Initialize `ClippedCroppingRegionPlanes` with `VTK_DOUBLE_MAX` for mins and `VTK_DOUBLE_MIN` for maxs [S2, unofficial].
++
++2.  **Input Validation and Update**:
++    *   Check for null renderer or volume.
++    *   Check that color channels are 3 (currently commented out in some versions) [S2, unofficial].
++    *   Check cropping planes: if `Cropping` is true and any min plane >= max plane, set `goodSoFar` to 0 silently [S2, unofficial].
++    *   Get `Input(0)` and `Input(1)`. If either is NULL, set `goodSoFar` to 0 and log error [S2, unofficial].
++    *   If valid, call `Update()` on both inputs [S2, unofficial].
++
++3.  **Transform and Clone Logic**:
++    *   If `LastInput != input` OR `input MTime > TransformedInput MTime` OR `LastInput2 != input2` OR `input2 MTime > TransformedInput2 MTime`, then update `LastInput`/`LastInput2` and create shallow copies into `TransformedInput`/`TransformedInput2` [S2, unofficial].
++    *   **Extent Adjustment Workaround**: The GPU mapper cannot handle extents starting from non-zero values. For the cloned input:
++        *   Get extents and origin/spacing.
++        *   Adjust origin by adding `extents[2*cc]*spacing[cc]`.
++        *   Adjust extents by subtracting `extents[2*cc]` from both min and max (`extents[2*cc] -= extents[2*cc]; extents[2*cc+1] -= extents[2*cc];`).
++        *   Set new origin and extent. Repeat for input2 [S2, unofficial].
++
++4.  **Transform Setup**:
++    *   For each additional volume (N), compute a transformation matrix from the first volume's texture coordinates to the Nth volume's texture coordinates. This matrix combines the world-to-texture-N transform, the inverse world-to-texture-1 transform, and a user-defined transform (`SetAdditionalInputUserTransform`) [S1, unofficial].
++    *   Store these in `P1toPN[]` array (uniforms) [S1, unofficial].
++
++5.  **Clipping/Cropping Init**:
++    *   Initialize clipping planes (up to 6 cropping planes, 1 clipping plane) per volume.
++    *   Convert these planes from world coordinates to texture coordinates just before rendering and pass them to shaders via uniform variables [S1, unofficial].
++    *   Compute `ClippedCroppingRegionPlanes` by clipping cropping planes by volume bounds [S1, unofficial].
++
++6.  **Render Entry**:
++    *   If `GeneratingCanonicalView` is true, call `CanonicalViewRender` and return (skips start/end events and timing) [S2, unofficial].
++    *   Otherwise, invoke `VolumeMapperRenderStartEvent`, start timer, validate render, call `GPURender`, stop timer, record time, and invoke `VolumeMapperRenderEndEvent` [S2, unofficial].
++
++7.  **Shader Execution (Ray Traversal and Compositing)**:
++    *   The `trace()` function in `vtkGPUVolumeRayCastMapper_CompositeFS` executes the ray traversal [S1, unofficial].
++    *   Initialize `pos` (entry position for volume 0), `rayDir` (incremental vector in texture space), `tMax` (max ray length), and `destColor` (initial color via `initialColor()`) [S1, unofficial].
++    *   Set `remainOpacity = 1.0 - destColor.a` [S1, unofficial].
++    *   **Loop** while `inside` is true:
++        *   `inside` is true if `t < tMax`, `remainOpacity >= 0.0039` (1/255), and `pos` is within `lowBounds[0]` and `highBounds[0]` [S1, unofficial].
++        *   For each additional volume `iii` from 0 to `Number_Of_Volumes-2`, compute transformed position: `posX[iii] = vec3(P1toPN[iii]*vec4(pos,1))` [S1, unofficial].
++        *   **Volume 0**: If `pos` is within bounds and not clipped (or clipping check passes), sample `value[0] = texture3D(dataSetTexture[0], pos)`, compute `scalar[0] = scalarFromValue(value[0])`, sample `opacity[0] = texture1D(opacityTexture[0], scalar[0])` [S1, unofficial].
++        *   **Volumes 1 to N**: If `posX[xx-1]` is within bounds and not clipped, sample `value[xx] = texture3D(dataSetTexture[xx], posX[xx-1])`, compute `scalar[xx] = scalarFromValue(value[xx])`, sample `opacity[xx] = texture1D(opacityTexture[xx], scalar[xx])` [S1, unofficial].
++        *   **Compositing**: For each volume `vol` with `opacity[vol].a > 0.0`:
++            *   Compute `color[vol] = shade(vol, value[vol]) * opacity[vol].a` [S1, unofficial].
++            *   Update `destColor = destColor + color[vol] * remainOpacity` [S1, unofficial].
++            *   Update `remainOpacity = remainOpacity * (1.0 - opacity[vol].a)` [S1, unofficial].
++        *   Advance ray: `pos = pos + rayDir`, `t += 1.0` [S1, unofficial].
++    *   Final output: `gl_FragColor = destColor`, `gl_FragColor.a = 1.0 - remainOpacity` [S1, unofficial].
++
++### Pseudocode
+ 
+ ```python
+-# Shader: vtkGPUVolumeRayCastMapper_CompositeFS
+-
+-uniform sampler3D dataSetTexture[MAX_NUMBER_OF_VOLUMES];
+-uniform sampler1D opacityTexture[MAX_NUMBER_OF_VOLUMES];
+-uniform mat4 P1toPN[MAX_NUMBER_OF_VOLUMES-1];
+-uniform vec3 lowBounds[MAX_NUMBER_OF_VOLUMES];
+-uniform vec3 highBounds[MAX_NUMBER_OF_VOLUMES];
+-uniform int Number_Of_Volumes;
+-uniform int clipped[MAX_NUMBER_OF_VOLUMES];
+-uniform vec3 ClippingplanesNormal[MAX_NUMBER_OF_VOLUMES];
+-uniform vec3 ClippingplanesOrigins[MAX_NUMBER_OF_VOLUMES];
+-
+-in vec3 pos; // Ray origin in volume 1 texture space
+-in vec3 rayDir; // Ray direction in volume 1 texture space
+-in float tMax;
+-
+-out vec4 gl_FragColor;
+-
+-void main() {
+-    // Initialize
+-    vec3 posX[MAX_NUMBER_OF_VOLUMES-1];
+-    for (int iii = 0; iii < Number_Of_Volumes - 1; iii++) {
+-        posX[iii] = (P1toPN[iii] * vec4(pos, 1.0)).xyz;
+-    }
+-    
+-    vec4 destColor = initialColor();
+-    float remainOpacity = 1.0 - destColor.a;
+-    float t = 0.0;
+-    
+-    // Check initial bounds for volume 0
+-    bool inside = (t < tMax) && (remainOpacity >= 0.0039) && 
+-                  (all(pos >= lowBounds[0]) && all(pos <= highBounds[0]));
+-    
+-    while (inside) {
+-        // Volume 0 sampling
+-        if (all(pos >= lowBounds[0]) && all(pos <= highBounds[0]) && 
+-            (!clipped[0] || isInsideClip(pos, ClippingplanesNormal[0], ClippingplanesOrigins[0]))) {
+-            float value0 = texture3D(dataSetTexture[0], pos).r;
+-            float scalar0 = scalarFromValue(value0);
+-            float opacity0 = texture1D(opacityTexture[0], scalar0).a;
+-            
+-            if (opacity0 > 0.0) {
+-                vec4 color0 = shade(0, value0) * opacity0;
+-                destColor = destColor + color0 * remainOpacity;
+-                remainOpacity = remainOpacity * (1.0 - opacity0);
+-            }
+-        }
+-        
+-        // Additional volumes sampling
+-        for (int xx = 1; xx < Number_Of_Volumes; xx++) {
+-            vec3 currentPos = posX[xx-1];
+-            if (all(currentPos >= lowBounds[xx]) && all(currentPos <= highBounds[xx]) && 
+-                (!clipped[xx] || isInsideClip(currentPos, ClippingplanesNormal[xx], ClippingplanesOrigins[xx]))) {
+-                float value = texture3D(dataSetTexture[xx], currentPos).r;
+-                float scalar = scalarFromValue(value);
+-                float opacity = texture1D(opacityTexture[xx], scalar).a;
+-                
+-                if (opacity > 0.0) {
+-                    vec4 color = shade(xx, value) * opacity;
+-                    destColor = destColor + color * remainOpacity;
+-                    remainOpacity = remainOpacity * (1.0 - opacity);
+-                }
+-            }
+-        }
+-        
+-        // Advance ray
+-        t += 1.0;
+-        pos = pos + rayDir;
+-        for (int iii = 0; iii < Number_Of_Volumes - 1; iii++) {
+-            posX[iii] = posX[iii] + rayDir; // Simplified; actual transform may vary
+-        }
+-        
+-        // Check bounds for next step
+-        inside = (t < tMax) && (remainOpacity >= 0.0039) && 
+-                 (all(pos >= lowBounds[0]) && all(pos <= highBounds[0]));
+-    }
+-    
+-    gl_FragColor = destColor;
+-    gl_FragColor.a = 1.0 - remainOpacity;
+-}
++def render_gpu_multi_volume(renderer, volume):
++    """
++    Main render entry point for vtkGPUMultiVolumeRayCastMapper.
++    """
++    if generating_canonical_view:
++        canonical_view_render(renderer, volume)
++        return
++
++    invoke_event(VolumeMapperRenderStartEvent)
++    timer.start()
++
++    if not validate_render(renderer, volume):
++        timer.stop()
++        invoke_event(VolumeMapperRenderEndEvent)
++        return
++
++    gpu_render(renderer, volume)
++
++    timer.stop()
++    record_time(timer.elapsed())
++    invoke_event(VolumeMapperRenderEndEvent)
++
++def validate_render(renderer, volume):
++    """
++    Validates inputs and configuration before rendering.
++    """
++    good_so_far = 1
++
++    if renderer is None or volume is None:
++        good_so_far = 0
++        log_error("Renderer or Volume is null")
++
++    # Color channel check (currently commented out in source)
++    # if good_so_far and volume.property.color_channels != 3:
++    #     good_so_far = 0
++    #     log_error("Must have a color transfer function")
++
++    # Check cropping planes
++    if good_so_far and cropping_enabled:
++        if (cropping_planes[0] >= cropping_planes[1] or
++            cropping_planes[2] >= cropping_planes[3] or
++            cropping_planes[4] >= cropping_planes[5]):
++            good_so_far = 0
++            # Silent fail
++
++    input0 = get_input(0)
++    input1 = get_input(1)
++
++    if good_so_far and (input0 is None or input1 is None):
++        good_so_far = 0
++        log_error("Input is NULL or Input2 is NULL")
++
++    if good_so_far:
++        input0.update()
++        input1.update()
++
++    # Transform/Clone Logic
++    if (last_input != input0 or input0.mtime > transformed_input.mtime or
++        last_input2 != input1 or input1.mtime > transformed_input2.mtime):
++        last_input = input0
++        last_input2 = input1
++        transformed_input = shallow_copy(input0)
++        transformed_input2 = shallow_copy(input1)
++        adjust_extents(transformed_input)
++        adjust_extents(transformed_input2)
++
++    return good_so_far
++
++def adjust_extents(image_data):
++    """
++    Workaround for GPU mapper not handling non-zero extents.
++    """
++    extents = image_data.extents
++    origin = image_data.origin
++    spacing = image_data.spacing
++
++    for cc in range(3):
++        # Adjust origin
++        origin[cc] += extents[2*cc] * spacing[cc]
++        # Adjust extents to start from 0
++        extents[2*cc] -= extents[2*cc]
++        extents[2*cc+1] -= extents[2*cc]
++
++    image_data.origin = origin
++    image_data.extents = extents
++
++def gpu_render(renderer, volume):
++    """
++    Sets up shaders and uniforms, then triggers fragment shader execution.
++    """
++    setup_transforms()
++    setup_clipping_planes()
++    setup_textures()
++    setup_uniforms()
++    execute_fragment_shader()
++
++def setup_transforms():
++    """
++    Compute P1toPN matrices for additional volumes.
++    """
++    for vol_num in range(1, number_of_volumes):
++        # Transform from world to texture of volume 1
++        t1 = world_to_texture_transform(0)
++        # Transform from world to texture of volume N
++        tn = world_to_texture_transform(vol_num)
++        # User defined transform
++        user_t = get_additional_input_user_transform(vol_num - 1)
++
++        # P1toPN = tn * user_t * inverse(t1)
++        # Note: Source says "world-to-texture-N transform, the inverse world-to-texture-1 transform, and a user-defined transform"
++        # Order depends on matrix multiplication convention (row/column major).
++        # Assuming standard GLSL column-major: P1toPN = T_N * T_User * T_1_inv
++        p1to_pn[vol_num - 1] = tn * user_t * inverse(t1)
++
++def execute_fragment_shader():
++    """
++    Simulates the GLSL trace() function logic.
++    """
++    # Initialize ray
++    pos = calculate_initial_pos_volume_0()
++    ray_dir = calculate_ray_dir_texture_space()
++    t_max = calculate_max_ray_length()
++    dest_color = initial_color()
++    remain_opacity = 1.0 - dest_color.a
++
++    t = 0.0
++
++    # Hardware loop limits require nested structure or careful bounds checking
++    while t < t_max and remain_opacity >= 0.0039:
++        inside_vol0 = (pos.x >= low_bounds[0].x and pos.x <= high_bounds[0].x and
++                       pos.y >= low_bounds[0].y and pos.y <= high_bounds[0].y and
++                       pos.z >= low_bounds[0].z and pos.z <= high_bounds[0].z)
++
++        if inside_vol0:
++            # Check clipping for vol 0
++            if not is_clipped(pos, 0):
++                value_0 = texture3d(data_set_texture[0], pos)
++                scalar_0 = scalar_from_value(value_0)
++                opacity_0 = texture1d(opacity_texture[0], scalar_0)
++
++                if opacity_0.a > 0.0:
++                    color_0 = shade(0, value_0) * opacity_0.a
++                    dest_color = dest_color + color_0 * remain_opacity
++                    remain_opacity = remain_opacity * (1.0 - opacity_0.a)
++
++        # Process additional volumes
++        for iii in range(number_of_volumes - 1):
++            pos_x = vec3(p1to_pn[iii] * vec4(pos, 1.0))
++            vol_idx = iii + 1
++
++            inside_vol = (pos_x.x >= low_bounds[vol_idx].x and pos_x.x <= high_bounds[vol_idx].x and
++                          pos_x.y >= low_bounds[vol_idx].y and pos_x.y <= high_bounds[vol_idx].y and
++                          pos_x.z >= low_bounds[vol_idx].z and pos_x.z <= high_bounds[vol_idx].z)
++
++            if inside_vol:
++                if not is_clipped(pos_x, vol_idx):
++                    value_v = texture3d(data_set_texture[vol_idx], pos_x)
++                    scalar_v = scalar_from_value(value_v)
++                    opacity_v = texture1d(opacity_texture[vol_idx], scalar_v)
++
++                    if opacity_v.a > 0.0:
++                        color_v = shade(vol_idx, value_v) * opacity_v.a
++                        dest_color = dest_color + color_v * remain_opacity
++                        remain_opacity = remain_opacity * (1.0 - opacity_v.a)
++
++        pos = pos + ray_dir
++        t += 1.0
++
++    gl_frag_color = dest_color
++    gl_frag_color.a = 1.0 - remain_opacity
++
++def shade(vol_num, value):
++    """
++    Applies shading (e.g., Phong) using gradient estimation.
++    """
++    # Gradient estimation using central differences on interpolated scalar field
++    gradient = estimate_gradient(vol_num, value)
++    normal = normalize(gradient)
++    # Lighting calculation (Blinn-Phong or similar)
++    light_color = compute_lighting(normal, vol_num)
++    return light_color
+ ```
+ 
+-**Parameters:**
+-- `MAX_NUMBER_OF_ADDITIONAL_VOLUMES`: 3 on Apple, 4 otherwise [S1, unofficial].
+-- `AutoAdjustSampleDistances`: Boolean (default 1). Enables adaptive sampling [S2, unofficial].
+-- `ImageSampleDistance`: Base sample distance in XY (default 1.0). Clamped [0.1, 100.0] [S2, unofficial].
+-- `MinimumImageSampleDistance`: Lower bound for adaptive sampling (default 1.0) [S2, unofficial].
+-- `MaximumImageSampleDistance`: Upper bound for adaptive sampling (default 10.0) [S2, unofficial].
+-- `SampleDistance`: Distance between samples along ray (default 1.0) [S2, unofficial].
+-- `MaxMemoryInBytes`: Max GPU memory for textures. Defaults to 128 MB if not probed [S2, unofficial].
+-- `MaxMemoryFraction`: Fraction of `MaxMemoryInBytes` used (default 0.75) [S1, S2, unofficial].
+-- `ReportProgress`: Boolean (default true). Uses `glFinish()` to report progress. Disable for small datasets to avoid slowdown [S1, S2, unofficial].
+-- `MaskBlendFactor`: Blending weight for mask CTF (default 1.0) [S2, unofficial].
+-- `MaskType`: Enum (Binary or LabelMap, default LabelMap) [S2, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- **Hardware Loop Limits:** Requires nested while loop structure due to GPU shader loop constraints [S1, unofficial].
+-- **Non-Zero Extents:** GPU textures require extents starting from zero. Workaround adjusts origin and shifts extents [S2, unofficial].
+-- **Invalid Cropping:** If cropping planes define zero/negative volume, render fails silently [S2, unofficial].
+-- **ReportProgress:** `glFinish()` blocks GPU, slowing small datasets. Should be disabled [S2, unofficial].
+-- **FinalColorWindow:** Negative values reverse color application [S2, unofficial].
++### Edge Cases and Pitfalls
++*   **Hardware Loop Limits**: GPU hardware may have limits on loop iterations. The implementation uses a `while` loop with a termination condition based on opacity and bounds, but nested structures or careful bounds checking are required to avoid hardware limits [S1, unofficial].
++*   **Non-Zero Extents**: The GPU mapper cannot handle extents starting from non-zero values. A workaround adjusts the origin and shifts extents to start from zero [S2, unofficial].
++*   **Invalid Cropping**: If cropping planes define a region with zero or negative volume, the render fails silently (`goodSoFar=0`) without an error message [S2, unofficial].
++*   **ReportProgress**: Uses `glFinish()`, which blocks the GPU and can significantly slow down rendering of small datasets; it should be disabled for small datasets [S2, unofficial].
++*   **FinalColorWindow**: Cannot be null, but setting it to a negative value reverses the applied color values [S2, unofficial].
++*   **Hardware Rendering Unsupported**: If input data has more than one independent component or if the hardware lacks required extensions, hardware rendering is unsupported [S3, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [OpenGL GPU Multi Volume Ray Cast Mapper](2919-opengl-gpu-multi-volume-ray-cast-mapper.md)
+-The OpenGL GPU Multi Volume Ray Cast Mapper is an OpenGL-specific subclass of the GPU Multi-Volume Ray Casting Mapper that handles hardware extension checks, OpenGL object lifecycle management, and clipping/cropping plane setup for GPU-accelerated volume rendering. It serves as the concrete implementation responsible for drawing the volume ray cast image to the screen by managing fragment shader programs, framebuffer objects, and texture uploads required for rendering multiple volumes simultaneously. It builds on [GPU Multi-Volume Ray Casting Mapper](2461-gpu-multi-volume-ray-casting-mapper.md) by providing the specific OpenGL API bindings and state management necessary for hardware-accelerated ray casting.
++The OpenGL GPU Multi Volume Ray Cast Mapper is an OpenGL-specific subclass of the GPU Multi-Volume Ray Casting Mapper that handles hardware extension checks, OpenGL object lifecycle management, and clipping/cropping plane setup for GPU-accelerated volume rendering [2919-opengl-gpu-multi-volume-ray-cast-mapper]. It serves as the concrete implementation responsible for drawing the volume ray cast image to the screen by managing fragment shader programs, framebuffer objects, and texture uploads required for rendering multiple volumes simultaneously [2919-opengl-gpu-multi-volume-ray-cast-mapper]. It builds on [GPU Multi-Volume Ray Casting Mapper](2461-gpu-multi-volume-ray-casting-mapper.md) by providing the specific OpenGL API bindings and state management necessary for hardware-accelerated ray casting [2919-opengl-gpu-multi-volume-ray-cast-mapper].
+ 
+ ### [Label Map Masking for Volume Rendering](4788-label-map-masking-for-volume-rendering.md)
+-Label Map Masking is a technique that confines volume rendering to specific regions using either a binary mask or a multi-label map, supporting blending between standard and mask-specific color transfer functions. It sets itself apart from sibling mappers by explicitly defining how mask values (binary or labeled) dictate the selection of color transfer functions (CTFs) and their blending weights, rather than simply acting as a visibility gate.
++Label Map Masking is a technique that confines volume rendering to specific regions using either a binary mask or a multi-label map, supporting blending between standard and mask-specific color transfer functions [4788-label-map-masking-for-volume-rendering]. It sets itself apart from sibling mappers by explicitly defining how mask values (binary or labeled) dictate the selection of color transfer functions (CTFs) and their blending weights, rather than simply acting as a visibility gate [4788-label-map-masking-for-volume-rendering].
+ 
+ ### [GPU Volume Ray Casting (VTK Composite Blend)](6912-gpu-volume-ray-casting-vtk-composite-blend.md)
+-GPU Volume Ray Casting (VTK Composite Blend) is a hardware-accelerated direct volume rendering technique implemented in VTK via `vtkGPUVolumeRayCastMapper` that performs ray casting on the GPU to visualize 3D scalar fields. It transforms raw volumetric data into a 3D environment by accumulating color and opacity along rays using composite blending. It sets itself apart from its siblings by explicitly utilizing the **Composite** blend mode for standard alpha blending during the ray casting process, distinguishing it from the OpenGL-specific multi-volume mapper [2919-opengl-gpu-multi-volume-ray-cast-mapper.md] and the Slicer-specific mapper [7450-vtkslicergpuraycastvolumemapper.md].
++GPU Volume Ray Casting (VTK Composite Blend) is a hardware-accelerated direct volume rendering technique implemented in VTK via `vtkGPUVolumeRayCastMapper` that performs ray casting on the GPU to visualize 3D scalar fields [6912-gpu-volume-ray-casting-vtk-composite-blend]. It transforms raw volumetric data into a 3D environment by accumulating color and opacity along rays using composite blending [6912-gpu-volume-ray-casting-vtk-composite-blend]. It sets itself apart from its siblings by explicitly utilizing the **Composite** blend mode for standard alpha blending during the ray casting process, distinguishing it from the OpenGL-specific multi-volume mapper [2919-opengl-gpu-multi-volume-ray-cast-mapper] and the Slicer-specific mapper [7450-vtkslicergpuraycastvolumemapper].
+ 
+ ### [vtkSlicerGPURayCastVolumeMapper](7450-vtkslicergpuraycastvolumemapper.md)
+-Renders a volume using ray casting on a 3D texture. It builds on [GPU Multi-Volume Ray Casting Mapper](2461-gpu-multi-volume-ray-casting-mapper.md) to provide a specific implementation for the 3D Slicer environment, supporting adaptive sampling, masking, and AMR modes via the parent's pipeline hooks. It is distinguished from its siblings by its specific integration with CTK transfer functions and its handling of specific OpenGL uniform layouts for ray casting parameters.
+-
+-### Mask Type Configuration
+-Methods to set the mask type for volume rendering, either Binary or LabelMap [S2, unofficial]. To set binary mask: assign `this->MaskType = vtkGPUMultiVolumeRayCastMapper::BinaryMaskType`. To set label map mask: assign `this->MaskType = vtkGPUMultiVolumeRayCastMapper::LabelMapMaskType` [S2, unofficial].
++Renders a volume using ray casting on a 3D texture [7450-vtkslicergpuraycastvolumemapper]. It builds on [GPU Multi-Volume Ray Casting Mapper](2461-gpu-multi-volume-ray-casting-mapper.md) to provide a specific implementation for the 3D Slicer environment, supporting adaptive sampling, masking, and AMR modes via the parent's pipeline hooks. It is distinguished from its siblings by its specific integration with CTK transfer functions and its handling of specific OpenGL uniform layouts for ray casting parameters [7450-vtkslicergpuraycastvolumemapper].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of samples per ray and the number of volumes. Adaptive sampling (`AutoAdjustSampleDistances`) can reduce samples based on allocated render time [S2, unofficial].
+-- **Memory Complexity:** Proportional to the total size of the 3D textures for all volumes, limited by `MaxMemoryInBytes` [S1, S2, unofficial].
+-- **Measured Performance:** Performance depends on GPU hardware, resolution, and scene complexity. `ReportProgress` can significantly slow down rendering of small datasets due to `glFinish()` blocking [S2, unofficial].
+-- **Scaling:** Supports up to 5 volumes (1 primary + 4 additional). Scaling to more volumes is limited by `MAX_NUMBER_OF_ADDITIONAL_VOLUMES` [S1, unofficial].
+-- **Strengths:** Simultaneous rendering of multiple volumes, hardware acceleration via shaders, adaptive sampling, masking support [S1, S2, unofficial].
+-- **Limitations:** Limited to 5 volumes, requires GPU with shader support, non-zero extents require workaround, silent failure on invalid cropping [S1, S2, unofficial].
+-- **When to Use:** When multiple volumes need to be rendered simultaneously with accurate compositing and shading [S1, unofficial].
+-- **When Not to Use:** When more than 5 volumes are needed, or when GPU hardware lacks required extensions [S3, unofficial].
++*   **Time Complexity**: Linear with respect to the number of samples per ray and the number of volumes. Each sample requires texture lookups and compositing for each volume [S1, unofficial].
++*   **Memory Complexity**: Proportional to the total size of the 3D textures for all volumes, plus overhead for transform matrices and clipping planes. Limited by `MaxMemoryInBytes` [S2, unofficial].
++*   **Measured Performance**: Performance depends on GPU hardware, resolution, and scene complexity. Adaptive sampling (`AutoAdjustSampleDistances`) can improve performance by reducing sample count in empty or uniform regions [S2, unofficial].
++*   **Scaling**: Scales with the number of volumes, but each additional volume adds texture lookups and compositing steps per sample [S1, unofficial].
++*   **Strengths**: Hardware-accelerated, supports multiple volumes with different coordinate systems, adaptive sampling, masking [S1, S2, unofficial].
++*   **Limitations**: Limited by GPU memory and loop iteration limits, requires OpenGL support, complex setup for multiple volumes [S1, S3, unofficial].
++*   **When to Use**: When multiple volumes need to be rendered simultaneously with different transfer functions and coordinate systems, and hardware acceleration is available [S1, unofficial].
++*   **When Not to Use**: When only a single volume is rendered (use `vtkGPUVolumeRayCastMapper`), or when GPU memory is insufficient for the combined volume data [S2, unofficial].
+ 
+ ## Background
+-The GPU Multi-Volume Ray Casting Mapper was developed by Carlos Falcón and Karl Krissian as an extension to the Visualization Toolkit (VTK) to enable multi-volume rendering on the GPU [S1, unofficial]. It builds on the single-volume `vtkGPUVolumeRayCastMapper` and uses GLSL shaders for ray traversal and compositing, chosen for their speed and broad device support compared to OpenCL [S1, unofficial]. The project includes a demo for testing purposes and modifies several VTK classes to handle multiple inputs and transforms [S1, unofficial].
++The GPU Multi-Volume Ray Casting Mapper was developed as an extension to the Visualization Toolkit (VTK) to support multi-volume rendering on the GPU. It was modified by Carlos Falcón and Karl Krissian to add support for multiple input datasets and properties [S1, unofficial]. The implementation uses GLSL shaders instead of OpenCL for general GPU programming because shaders are faster and supported by more devices [S1, unofficial]. It builds on the single-volume `vtkGPUVolumeRayCastMapper` and integrates with VTK's volume rendering pipeline [S1, S2, unofficial].
+ 
+ ## Sources

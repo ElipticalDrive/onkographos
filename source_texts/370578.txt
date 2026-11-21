@@ -1,0 +1,166 @@
+The simplest way to animate. Contribute to algorithmicsimplicity/algan development by creating an account on GitHub.
+
+Add opt-in shadow caustics to the path tracer (manifold NEE) by algorithmicsimplicity · Pull Request #228 · algorithmicsimplicity/algan · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+algorithmicsimplicity
+commented
+Oct 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Requested by Algorithmic Simplicity · project thread
+What and why
+The path tracer's shadow rays go straight through glass. So a point, spot or directional light never focused through a glass ball or a water surface, and the caustics of an area light or the sky showed up only as rare BSDF-path fireflies that the firefly clamp then flattened. This is roadmap section 1: manifold next-event estimation (Hanika et al. 2015, what Cycles calls shadow caustics), behind SETTINGS.raytracing.experimental.pt_caustics / ALGAN_PT_CAUSTICS, off by default. Off, pt_shade compiles to master's kernel apart from the medium-vertex fix below, and the per-path state and tile sizing are master's too: all caustic state lives in its own pt_cau record, a one-cell stand-in when caustics are off. Every render does carry two small additions: the opt-out flag, in slot 40 of the per-triangle material block beside the other geometry flags, and one more nee_meta word.
+With it on, each light sample's straight segment is probed for smooth refracting triangles. A Newton walk then moves the crossing points until the chain obeys Snell's law at each and still reaches the sampled light end, and that light arrives with the chain's geometry term instead of the inverse square. It works for every light kind, through one interface (a water surface, a subsurface solid's boundary) or one pair (into and out of a solid). Every smooth refracting lit triangle of a shadow-casting mob is a caster by default, and Mob.casts_caustics = False opts a mob or a whole group out (the roadmap planned closed shells only; that would have left out open water surfaces and lens sheets). The walk is deterministic given the path, so it draws no sampler dimensions. Its ceilings are counted through truncation.py (caustic_chain, caustic_solver).
+Where it departs from Cycles:
+Area lights and the environment are shared by MIS, not culled. A BSDF path that scatters at a receiver and then only crosses casters to an emitter carries the same light a chain does. Cycles drops all of those paths, which loses whatever the walk cannot find. Here that made the floor under a glass ball resting on it 36% too dark under a uniform sky. Dropping only the paths the walk does find conserved energy but left fireflies, with the brightest pixel 18x the reference. So pt_shade holds those emitter hits back, and a small kernel, pt_caustic_cover, runs after each pt_shade launch and re-walks from each held path's receiver. A path the walk reaches is shared by the power heuristic; any other keeps its full weight. The light sample and the re-walk decide which chains exist through one shared function (_pt_mnee_admissible), so they cannot drift apart.
+Convergence allows for f32 rounding. From a scatter point a hundredth of a unit under a subsurface solid's face, the first leg's direction can't be resolved in f32 to MNEE_THRESHOLD, so the walk never converged and the least-attenuated light was lost. The convergence test now accepts the chain's own rounding floor, which only matters when legs are that short.
+A medium vertex is a receiver too. So with caustics on, a point, spot or directional light reaches the inside of a subsurface object through its smooth boundary, which it never could before.
+A pre-existing bug, fixed here (it applies with caustics off too): a scatter point inside a medium was "put back on its plane" through the circuit branch (_bezier_plane_point), with its medium triangle index read as a circuit index. Depending on the scene, that moved the point onto another circuit's plane or onto whatever the arena held past circuit_meta. Now only triangle and circuit hits are re-projected. In the subsurface test scene this alone cost about 2% of the light.
+Merged with heterogeneous volumes (#227). Both branches claimed material slot 39 and pt_stats column 4. #227 keeps them; the opt-out flag moved to slot 40 (MAT_W 41) and the caustic tallies to columns 5 and 6. A caustic leg through a medium now passes the density-grid tables to _pt_medium_transmittance, ratio-tracks a grid from its own random stream, and leaves a grid-varied absorbing interior to the medium walk instead of also applying the homogeneous Beer-Lambert chord.
+Known gaps are listed in the roadmap (section 1, "What it does not do"): one solution per light sample, refraction only, two interfaces, no nested dielectrics, and two small corner cases in the MIS bookkeeping (non-caster glass near the bounce limit, a second emitter behind a held semi-transparent one).
+Rendered output
+pt_caustics off (the default): unchanged for every scene without scattering media, since the caustic code is behind a static kernel gate. Subsurface and fog scenes can move slightly because of the medium-vertex fix above; no baseline scene, CPU or CUDA, has a scattering medium. The pre-PR group's expected-output tests pass and no baseline needed regenerating.
+pt_caustics on: new output, checked against references that do not use the renderer (below).
+Verification
+On CPU (x64) in this container, except where a bullet says otherwise:
+pytest -q --group pre-pr: 2410 passed, 4 skipped, in one 19-minute run on the final tree before the merge with Path tracer: heterogeneous volumes (DensityGrid), and scatter points that stay put #227.
+On the merged head (e34c004): pytest -q --group pre-pr 2421 passed, 3 skipped; both caustic test files pass on CPU and on the T4 (34 tests each); the reference comparisons below come out within 0.001 of the numbers given. A first pre-PR run there crashed once inside test_orthographic_render.py (a raster kernel launch this PR does not touch); that file passes on its own and the full re-run passed.
+New tests (not in either group yet, since the caustics kernel variant takes about 2.5 min to compile on CPU):
+tests/unit_tests/test_pt_caustics.py (27 tests): the constraint blocks and vertex-normal derivatives against finite differences; flat interfaces and a two-vertex slab against closed-form Snell and geometry terms; total internal reflection; a receiver 1e-2 and 1e-3 under its interface; the shared admissibility check (a receiver facing away, a light at infinity on the material side, a second caster on a leg); and the caster section's merge (material rules, the opt-out, shadowless glass, collapsed time rows).
+tests/unit_tests/test_pt_caustics_render.py (7 tests): a glass slab under a uniform sky and inside an emitter box leaves the furnace unchanged; so does a glass ball resting on the floor (the MIS case); a point light through a glass plate brightens the floor by the paraxial-optics factor (1.146x) within 2%; a point light inside a subsurface block matches analytic single scattering within 2% (caustics off it gets under 2% of that, as before).
+Both files pass on the final tree.
+Against a renderer-free reference (a stratified Fresnel photon tree through the exact sphere, binned into each pixel's floor footprint), direct lighting only, 128x96 at 16 spp. These and the sky and panel numbers below were re-run on the final tree. Glass ball under a point light: caustic region 1.011, shadow 1.006, lit floor 0.999, power through the ball 0.984. Spot: 1.011 / 1.013 / 0.999. Directional: 0.983 / 0.997 / 1.000, power through the ball 0.953. A single focus pixel reads 0.62 (point) and 1.32 (directional), because the reference focus is the exact sphere's singularity and the tessellated ball spreads it over facets.
+Uniform sky over the resting ball, 64 spp, against a 256-spp unclamped BSDF-only reference: frame mean equal to four digits, radial ratios 0.998 to 1.001, 99.9th-percentile pixel 1.034 of the reference (1.033 with caustics off). A panel light over the ball, against a BSDF-only reference: 0.97 to 1.01 radially out to 6 units from the ball (caustics off reads up to 1.75x in the ball's shadow, where its shadow rays pass straight through the glass).
+Found while checking that panel scene, and not fixed here: beyond 6 units the floor reads too dark, 0.92 of the reference at 6 to 7 units falling to 0.39 at 9 to 10. Caustics off reads the same, and so does master with no ball at all, with either shadow query. The reference matches an analytic integral over the panel there to 1%, and so does a render with shadows off, so next-event shadow rays toward an emissive panel are being blocked at grazing angles. That predates this change.
+Water: flat water under a directional light renders identically with caustics on and off. A wavy surface is about 4% darker than a BSDF-path reference, all in its brightest folds, where a light end has several solutions and the walk finds one (documented).
+An independent review of the diff found three things that are fixed here: shadowless glass was still counted as a caster (its BSDF paths were held for chains that never form, double counting under area lights), the coverage re-walk skipped some of the light sample's rejections (now the shared check above), and the caustics-off kernel and tile sizing had drifted from master's (both restored).
+Existing media, glass, truncation and arena tests pass. One exception, test_pt_media.py::test_dense_conservative_cube_recovers_constant_environment[1.35] (not in either group), fails with the identical value (0.1413 against 0.25) on master at fcbd6a2 in this environment, so it is not this change.
+CUDA, on a Kaggle Tesla T4 at 6f47d97 (before the merge with Path tracer: heterogeneous volumes (DensityGrid), and scatter points that stay put #227): both new test files pass (34 tests). pt_baseline.py --scene glass at 1280x720, 5 frames, warm: 1.61 s with caustics off and 2.98 s on (1.85x). Nearly all of the difference is pt_shade, whose device time goes from 272 ms to 1754 ms (6.4x); pt_caustic_cover adds about 12 ms, both arms take the same 5.3 adaptive samples per pixel, and peak GPU memory is the same 6.1 GB. The first pass, which compiles the caustics kernels, took 163 s against 75 s off.
+On CPU, the glass-ball scene renders about 1.4x to 2x slower with caustics on. Metal is not checked.
+Docs
+renderer_limitations.rst: what shadow caustics do and where they stop (one solution per light sample, two interfaces, refraction only, failed walks, casters, cost), the truncation table rows, and the subsurface and capability entries.
+lighting_and_shadows.rst and performance_and_quality.rst: the switch, the capability-table row, the cost, and the opt-out.
+Mob.casts_caustics docstring; the pt_caustics settings comment; truncation.py's ceiling list.
+DESIGN_path_tracer_roadmap.md section 1 rewritten as landed (design, divergences, verification, limits, what would extend it), plus the section 4 notes it changes; agent_guidance/rendering.md gets a section on the invariants; TODO.md updated.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01P7RcAJRmsgjUdGdHR8dFnB
+Add opt-in shadow caustics to the path tracer (manifold NEE)
+…
+6f47d97
+```
+Roadmap section 1. With SETTINGS.raytracing.experimental.pt_caustics (or
+ALGAN_PT_CAUSTICS=1), a light sample whose straight shadow segment crosses
+smooth refracting triangles is also connected through them: a damped
+Newton walk on the specular manifold (pt_caustics_taichi.py) moves the
+crossing points until the chain obeys Snell's law at each and reaches the
+same light end, and its light arrives with the generalized geometry term,
+outside the firefly clamp while the path is still direct. Point, spot and
+directional lights now focus through glass and water, and light reaches a
+subsurface interior through its smooth boundary. Off, pt_shade compiles to
+the kernel it was, and the per-path state and tile sizing are unchanged:
+the caustic state lives in its own pt_cau record.
+
+Casters are every smooth refracting lit triangle of a shadow-casting mob
+unless it opts out with Mob.casts_caustics = False. Chains hold one
+interface or one pair; longer segments keep the tinted straight connection
+(caustic_chain) and a walk out of steps contributes nothing
+(caustic_solver), both counted.
+
+Area lights and the environment are shared between the chain and the BSDF
+path that makes the same journey by the power heuristic: pt_shade holds
+such paths back and pt_caustic_cover re-runs the walk from their receiver
+to tell which ones a chain delivers, through the same admissibility test
+the light sample uses. Culling them all, as Cycles does, darkened the
+floor under a resting glass ball by 36% under a uniform sky.
+
+The walk's convergence test and the coverage tolerance rise to the chain's
+own f32 noise floor where its legs are very short, so a scatter point just
+under a subsurface solid's face still converges.
+
+Also fixes a medium vertex's scatter point being projected onto a circuit's
+plane (its medium triangle read as a circuit index); it now stays where the
+free flight put it, caustics on or off.
+
+Adds benchmarks/performance/pt_baseline.py --scene glass for the cost.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01P7RcAJRmsgjUdGdHR8dFnB
+```
+algorithmicsimplicity
+self-assigned this
+Oct 23, 2026
+claude
+added 3 commits
+October 23, 2026 21:37
+Merge the heterogeneous volumes branch (#227) into the caustics branch
+…
+1be5baa
+```
+Both branches claimed material slot 39 and pt_stats column 4. The density
+volume key keeps slot 39 and the volume tracker column 4, as on #227;
+no_caustic_cast moves to slot 40 (MAT_W 41) and the caustic tallies to
+columns 5-6 (PT_STATS_WIDTH 7). Docs and truncation lists keep both.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0121svPYzLo6fi553CZfPoqS
+```
+Pass the density-grid tables through caustic chains
+…
+96b74cd
+```
+#227 gave _pt_medium_transmittance the density-grid tables and a
+ratio-tracking seed, and a fourth return (tracking overflow). The caustic
+chain's legs still called it the old way, so every caustic kernel failed
+to compile once both landed. Each leg now tracks a grid from its own
+stream, counts its overflow under medium_tracking, and leaves a
+grid-varied absorbing interior to the medium walk instead of applying the
+homogeneous Beer-Lambert chord on top of it.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0121svPYzLo6fi553CZfPoqS
+```
+Merge remote-tracking branch 'origin/master' into pr228
+e34c004
+Hide details
+View details
+algorithmicsimplicity
+merged commit dc392f2
+into
+master
+Oct 23, 2026
+9 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+algorithmicsimplicity
+deleted the
+claude/project-thread-98e1aq
+branch
+October 23, 2026 22:47
+algorithmicsimplicity
+mentioned this pull request
+Oct 24, 2026
+Let point, spot and directional lights reach inside subsurface objects
+#229
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,110 @@
+--- v007.md
++++ v008.md
+@@ -4,69 +4,69 @@
+ 
+ ## Overview
+-Concatenation Conditioning is a method for injecting instance-specific information into a Neural Field by appending a latent code vector to the input feature tensor before the first layer of the decoder [S1][S2, unofficial]. It solves the problem of how to condition a single neural network on variable data (such as a specific volume instance or transfer function) without altering the network's weights [S2, unofficial]. It is distinguished from [HyperNetwork Conditioning](12585-hypernetwork-conditioning.md) by using fixed weights and simply expanding the input dimension, and from [Autoencoder/Autodecoder Conditioning](12588-autoencoder-autodecoder-conditioning.md) by explicitly separating the encoding of the global context from the local decoding process [S1].
++Concatenation Conditioning is a method for injecting instance-specific latent codes into a Neural Field decoder by appending the latent vector to the input feature tensor. It solves the problem of conditioning a shared neural field on distinct data instances (e.g., different volumes or transfer functions) by providing global context directly at the network's entry point. It is distinguished from [HyperNetwork Conditioning](12585-hypernetwork-conditioning.md) by avoiding weight prediction, and from [Autoencoder/Autodecoder Conditioning](12588-autoencoder-autodecoder-conditioning.md) by not using adaptive normalization layers to modulate intermediate features.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A query coordinate $x$ (and potentially direction $d$ or time $t$), and a latent code $z \in \mathbb{R}^D$ encoding instance-specific information [S1][S2, unofficial].
+-*   **Output:** Volumetric properties $y$ (e.g., density, color, ambient occlusion) [S1][S2, unofficial].
++- Input: A query point $x \in \mathbb{R}^3$ (and potentially other features like normal or material properties), and a latent code $z_i \in \mathbb{R}^D$ associated with instance $i$.
++- Output: The predicted value (e.g., density, color, ambient occlusion) $y_i \in \mathbb{R}^k$.
+ 
+ **Data Structures:**
+-*   **Latent Code ($z$):** A vector of length $D$. Typical values are $D=512$, though $D=64$ or $D=256$ are used in specific applications [S1][S2, unofficial].
+-*   **Input Tensor ($x$):** The local features or coordinates passed to the decoder.
+-*   **Concatenated Tensor ($x_{cat}$):** The result of appending $z$ to $x$.
++- Latent Code $z_i$: A fixed-size vector of dimension $D$. Typical values are $D=512$, though $D=64$ or $D=256$ are used [S1][S2, unofficial].
++- Input Features $x$: The spatial coordinates and any explicit descriptors (e.g., Transfer Function descriptors).
+ 
+ **Steps:**
+-1.  **Encode:** Process the input volume or data instance with an encoder network to extract the latent vector $z$ [S1]. This vector contains highly compressed global information about the input [S1].
+-2.  **Concatenate:** Append the latent code $z$ to the input feature vector $x$ along the feature dimension. The resulting tensor is $x_{cat} = [x; z]$ [S1][S2, unofficial].
+-3.  **Decode:** Feed $x_{cat}$ into the first layer of the Neural Field decoder [S2, unofficial]. The decoder $f$ computes the output $y = f(x_{cat})$ [S2, unofficial].
++1.  **Encode (Optional):** If the latent code is derived from data, process the input volume or data with an encoder network to extract $z_i$. For example, a convolutional feature extractor may process a volume to produce a 512-dimensional vector containing compressed global information [S1].
++2.  **Concatenate:** Append the latent code $z_i$ to the input feature vector $x$. The new input vector $x'$ is defined as:
++    $$ x' = [x; z_i] $$
++    where $[;]$ denotes concatenation along the feature dimension.
++3.  **Decode:** Feed $x'$ into the first layer of the Neural Field decoder $f_\theta$. The decoder computes the output $y_i$:
++    $$ y_i = f_\theta(x') $$
++    The weights $\theta$ are shared across all instances [S1][S2, unofficial].
++
++**Pitfalls:**
++- **Limited Condition Propagation:** Only the first layer directly incorporates the condition $z_i$. Subsequent layers operate only on internal feature representations derived from the first layer's output. The network must therefore distinguish between samples based on the transformed input alone, which can be challenging for complex conditions [S2, unofficial].
++- **Re-computation Cost:** In scenarios where the condition changes (e.g., updating a Transfer Function), the encoder and decoder must be re-executed. However, if the latent code represents the volume itself, the compressed volume representation remains constant, offering an inference advantage over methods requiring full re-evaluation of the raw volume [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def concatenate_conditioning_decoder(x, z, decoder_network):
++def concatenate_conditioning_decoder(x, z, weights):
+     """
+-    x: Tensor of local features/coordinates, shape (..., F_x)
+-    z: Latent code vector, shape (..., D)
+-    decoder_network: A neural network (e.g., MLP) where the first layer
+-                     expects input dimension F_x + D.
++    x: Input features (e.g., coordinates, TF descriptors), shape [B, F_x]
++    z: Latent code for the instance, shape [B, D]
++    weights: Weights for the first layer of the decoder
+     """
+-    # Step 2: Concatenate latent code with input features
+-    # Assuming batch dimensions are compatible or broadcastable
+-    x_cat = torch.cat([x, z], dim=-1)
++    # Concatenate input features with latent code
++    # x: [B, F_x], z: [B, D] -> x_prime: [B, F_x + D]
++    x_prime = torch.cat([x, z], dim=1)
+     
+-    # Step 3: Feed concatenated tensor into the decoder
+-    y = decoder_network(x_cat)
++    # First layer: Linear transformation + Activation
++    # weights[0]: [F_x + D, H], weights[1]: [H]
++    h = torch.relu(torch.matmul(x_prime, weights[0].T) + weights[1])
+     
+-    return y
++    # Subsequent layers operate on h, which implicitly contains the condition
++    # ... (remaining decoder layers)
++    return h
+ ```
+-
+-**Parameters:**
+-*   **Latent Dimension ($D$):** Typically 512 [S1][S2, unofficial].
+-*   **Decoder Architecture:** The first layer must be sized to accept $F_x + D$ inputs. Subsequent layers operate on internal feature representations derived from this concatenation [S2, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Layer Limitation:** Only the first layer of the decoder directly incorporates the condition $z$. Remaining layers operate only on internal feature representations, requiring the network to distinguish samples based on the input alone [S2, unofficial].
+-*   **Inference Cost:** While the compressed volume representation from the encoder stays constant, any update to the transfer function or instance data requires re-execution of the TF extractor and the decoder [S1].
+-*   **Precision:** Standard floating-point concatenation is used; no specific bit-packing is mentioned [S1][S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### HyperNetwork Conditioning
+-Uses a secondary network to predict the weights of the main decoder based on $z$, allowing every layer to use the condition. Choose when dynamic weight adaptation is needed. [HyperNetwork Conditioning](12585-hypernetwork-conditioning.md)
++Generates decoder weights from the latent code. Choose when the condition requires complex, non-linear modulation of the network's internal structure. [Link](12585-hypernetwork-conditioning.md)
+ 
+ ### Autoencoder/Autodecoder Conditioning
+-The latent code $z$ is often the output of an encoder trained jointly with the decoder, or the decoder is trained to reconstruct the input from $z$. Choose when end-to-end learning of the representation is preferred. [Autoencoder/Autodecoder Conditioning](12588-autoencoder-autodecoder-conditioning.md)
++Uses AdaIN to modulate intermediate feature tensors. Choose when the condition needs to influence the network at multiple depths, not just the input. [Link](12588-autoencoder-autodecoder-conditioning.md)
+ 
+ ### Global Conditioning
+-Uses global pooling or attention mechanisms to inject $z$ into intermediate layers. Choose when deeper integration of global context is required. [Global Conditioning](12589-global-conditioning.md)
++Uses a separate global network or pooling to inject context. Choose when the condition is not a single vector but a more complex global representation. [Link](12589-global-conditioning.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot (F_x + D))$ for the concatenation and first layer, where $N$ is the number of query points. The encoder is run once per instance, not per query [S1].
+-*   **Memory Complexity:** Requires storing the latent code $z$ ($D$ floats) per instance. The decoder weights are shared [S1][S2, unofficial].
+-*   **Strengths:** Simple to implement; efficient inference as the encoder output is cached [S1].
+-*   **Limitations:** The condition is only directly visible to the first layer, which may limit the network's ability to use global information in deeper features [S2, unofficial].
+-*   **When to Use:** When a simple, lightweight conditioning mechanism is sufficient and the first layer can adequately propagate the condition [S1][S2, unofficial].
++- **Time Complexity:** $O(D \cdot F_{in})$ for the concatenation step, where $D$ is latent dimension and $F_{in}$ is input feature size. The decoding complexity is unchanged from the base neural field.
++- **Memory Complexity:** $O(D)$ per instance to store the latent code. No additional memory for weight generation or modulation parameters.
++- **Strengths:** Simple to implement; computationally efficient at inference; allows pre-computation of the latent code if it is derived from static data [S1].
++- **Limitations:** The condition is only explicitly visible to the first layer, potentially limiting the network's ability to use complex conditional information [S2, unofficial].
++- **When to use:** When the condition is a low-dimensional vector and the decoder is shallow or the condition is simple. When computational efficiency is prioritized over expressive power.
+ 
+ ## Background
+-Concatenation Conditioning is a standard technique in conditional generative modeling, adapted for volumetric neural fields [S1]. It was explicitly proposed for volumetric ambient occlusion prediction to combine global volume information with local transfer function descriptors [S1]. The approach relies on the principle that a latent vector $z$ can encode instance-specific information, which is then injected into the neural field $f(x; z)$ [S1][S2, unofficial].
++Concatenation Conditioning is a standard technique in conditional generative modeling, adapted for neural fields in volume rendering. It was explicitly proposed for volumetric ambient occlusion prediction, where a latent vector encoding the volume is concatenated with Transfer Function descriptors to condition a generative decoder [S1]. It is also described as the "straightforward option" for implementing conditioning in neural fields, serving as a baseline for more sophisticated methods like HyperNetworks [S2, unofficial].
+ 
+ ## Sources

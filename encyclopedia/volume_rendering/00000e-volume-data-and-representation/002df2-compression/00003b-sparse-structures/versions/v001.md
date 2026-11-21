@@ -1,0 +1,65 @@
+# Sparse structures
+
+Also called: Sparse volume data structures, Sparse voxel representations
+
+## Overview
+Sparse structures are data structures designed to store volumetric data where a significant portion of the domain is empty or homogeneous, thereby reducing memory usage and computational overhead compared to dense grids [S1, S4, unofficial]. They solve the problem of storing large 3D domains by omitting empty space or merging identical values, often at the cost of increased traversal complexity or construction time [S1, S4, unofficial]. What sets them apart from sibling methods like [Value compression](6-value-compression.md) (which compresses values in dense grids) or [Run-Length Encoding for Voxel Data](5051-run-length-encoding-for-voxel-data.md) (which exploits 1D coherence) is their explicit representation of spatial sparsity, either through hierarchical subdivision, hashing, or specialized geometric layouts [S1, S2, S4, unofficial].
+
+## Shared principles
+All sparse structures in this family share the following mechanism:
+
+1.  **Sparsity Exploitation:** The core principle is to avoid storing data for empty or redundant regions. This is achieved by either not allocating memory for empty voxels (e.g., Hash Grids, SparseGrid) or by merging adjacent voxels with identical values into larger logical units (e.g., Tree-based structures, Stack-Based Representation) [S1, S4, unofficial].
+2.  **Implicit or Explicit Domain Mapping:** The structures map continuous 3D coordinates or logical grid indices to stored data. This mapping can be explicit (via tree nodes or linear indices) or implicit (via hash functions) [S1, S2, S4, unofficial].
+3.  **Default Values:** Unset or empty regions are typically represented by a default value (e.g., zero density, `FLT_MAX`, or null pointers), allowing the renderer to skip these regions during traversal or ray marching [S1, S4, unofficial].
+4.  **Traversal Overhead:** Accessing data in sparse structures generally requires more computation per voxel than in dense grids, as the structure must be traversed (e.g., tree descent, hash lookup, or stack iteration) to locate the relevant data [S1, S4, unofficial].
+
+## Subtopics
+
+### [SparseGrid](904-sparsegrid.md)
+A flat, index-based sparse grid that allocates memory only for explicitly added cells, suitable for large domains with small active regions. It differs from tree-based structures by using a linear index layout rather than hierarchical pointers, and from Hash Grids by not using spatial hashing for coordinate mapping. Choose it when you need random access to specific cells in a large, mostly empty domain without the overhead of tree traversal.
+
+### [Hash Grids](936-hash-grids.md)
+Maps continuous 3D coordinates to discrete bucket indices in a hash table using a multiplicative hash with prime constants. It differs from SparseGrid by using spatial hashing for coordinate mapping, allowing it to handle arbitrary continuous positions rather than just integer grid indices. Choose it for neural rendering or applications requiring fast lookup of arbitrary 3D points in a sparse field.
+
+### [Stack-Based Representation (SBR)](1081-stack-based-representation-sbr.md)
+Decomposes a voxel grid into vertical columns, compressing each column via run-length encoding of attribute values along the depth axis. It differs from siblings like SparseGrid or Hash Grids by being specialized for datasets with strong vertical anisotropy (e.g., terrain or layered scenes), achieving linear construction complexity. Choose it for layered volumetric data where vertical coherence is high.
+
+### [Pointer Compression](1770-pointer-compression.md)
+A compression technique for child pointers using entropy encoding and a lookup table of common pointers to reduce memory usage, applied similarly to offset compression. It is a sub-component of tree-based structures rather than a standalone storage format. Choose it when implementing tree-based structures to minimize the memory footprint of internal node pointers.
+
+### [Brick-based Hierarchical Storage](2793-brick-based-hierarchical-storage.md)
+Not given in the sources.
+
+### [Brickmap SDF Volume Rendering](3310-brickmap-sdf-volume-rendering.md)
+A volume rendering technique that represents 3D scenes as CSG trees of SDF primitives, evaluates distances on the CPU, compresses the resulting 3D distance field into a Brickmap structure, and raymarches through it on the GPU. It differs from general sparse structures by being specifically designed for Signed Distance Fields (SDFs) derived from CSG operations. Choose it for rendering complex hard-surface geometry defined by SDFs.
+
+### [Compaction of Update Information](3364-compaction-of-update-information.md)
+A process to reduce the bandwidth of node information sent to the CPU by removing duplicate node references using spatial coherence and HistoPyramids. It is a data reduction technique for update streams rather than a static storage structure. Choose it for dynamic scenes where frequent updates need to be transmitted efficiently.
+
+### [Tree-based structures (Octree, Pointer Tree, Sparse Voxel DAG)](4139-tree-based-structures-octree-pointer-tree-sparse-voxel-dag.md)
+Organize sparse volumetric data into a hierarchical graph where internal nodes define spatial subdivisions and leaf nodes store voxel values. They differ from sibling structures like Hash Grids by providing explicit spatial hierarchy for culling, and from Brick-based Hierarchical Storage by operating on individual voxel granularity rather than fixed-size blocks. Choose them for general-purpose sparse volume rendering where adaptive resolution and efficient empty-space culling are required.
+
+### [Out-of-Core Rendering with Virtual Page Tables](5359-out-of-core-rendering-with-virtual-page-tables.md)
+A strategy for managing large-scale data uploads using virtual page tables and on-demand brick transfers, where volumes are preprocessed, mipmapped, and bricked to be uploaded to GPU with dynamic requests. It is a memory management strategy for sparse structures rather than a storage format itself. Choose it for rendering extremely large volumes that exceed GPU memory capacity.
+
+### SILO Data Structure
+- **Definition:** A data structure for representing curvilinear grids with nonplanar faces, supporting view-dependent subdivision [S3, unofficial].
+- **Step:** If a cell is subdivided (`subdivided` is true) and was not previously subdivided (`oldsubdivided` is false), it takes a block from pre-allocated arrays (pyramids, prisms, hexahedra requiring 5 or 6 tetrahedra) and revises shared pointers. If `subdivided` is false and `oldsubdivided` is true, it uses the parent pointer to restore pointers and places the block on a free list. Exterior quadrilateral faces are divided into triangles for XMPVO/BSP-XMPVO sorting. For BSP-MPVO, each exterior triangle points to a subface structure [S3, unofficial].
+- **Layout:** `NewCell` struct contains flags (`subdivided`, `oldsubdivided`, `numbInbound`, `type`, `actual`, `cycleTestBit`, `notVisited`, `nverts`), `UsedTIndex`, `parent` pointer, `face` pointer array, and `vertex` array. `NewFace` struct contains `concave` flag, `nsubfaces`, and `Subface` array. `Subface` struct contains `shared` pointers to two cells, plane equation coefficients ($A, B, C, D$), and an `arrow` flag. `BlockOfCells` struct contains `type`, `used`, `kind`, `next` pointer, and `tets` array [S3, unofficial].
+- **Usage:** Used in the SILO visualization toolkit for rendering complex curvilinear grids [S3, unofficial].
+
+### Block-based Sparse Buffer
+- **Definition:** A two-level-deep hierarchical data structure that allocates memory more intelligently than dense buffers by subdividing the domain into coarse blocks, addressing the problem of unused voxels occupying memory [S4, unofficial].
+- **Step:** A block remains unallocated (storing just a single value) until the first write-access to one of its voxels. Once the first write happens, all of the block's voxels are allocated [S4, unofficial].
+- **Layout:** Two-level-deep hierarchical data structure. Domain subdivided into coarse blocks. Each block contains either: 1) A single value (usually zero, or a different value for level sets), OR 2) An $N^3$ array of voxels representing actual voxel data in the block. Common block size is between $8^3$ and $32^3$ [S4, unofficial].
+- **Complexity:** Voxel read and write access is $O(k)$, or constant time, though with a larger $k$ than an ordinary dense buffer. Allocation on first write is amortized over all subsequent accesses [S4, unofficial].
+- **Usage:** Implemented in Field3D's SparseField class [S4, unofficial].
+
+## Background
+Sparse volume representations were developed to address the memory inefficiency of dense voxel grids, particularly in fluid simulations and cloud rendering where large portions of the domain are empty or homogeneous [S1, unofficial]. The concept of merging identical voxels into larger blocks dates back to early adaptive octree implementations, where 2x2x2 blocks were recursively merged if they shared the same density value [S1, unofficial]. Modern implementations include OpenVDB, which uses octrees for upper levels and 32x32x32 blocks for lower levels to balance cache coherency and sparsity [S1, unofficial]. The Block-based Sparse Buffer was introduced as a simpler alternative for applications like Field3D, offering constant-time access with amortized allocation costs [S4, unofficial]. Hash Grids have gained popularity in neural rendering (e.g., Instant NGP) for their ability to map continuous coordinates to sparse feature grids efficiently [S2, unofficial]. Stack-Based Representation was developed to exploit vertical coherence in layered scenes, such as terrain or architectural volumes [S1, unofficial].
+
+## Sources
+[S1] Volume Rendering Based On 3D Voxel Grids, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/volume-rendering-voxel-grids.html, fetched 2026-10-24 (unofficial)
+[S2] narnia-ai-mason/isomesh, https://github.com/narnia-ai-mason/isomesh, fetched 2026-10-27 (unofficial)
+[S3] Cell projection of meshes with nonplanar faces, https://www.sciweavers.org/publications/cell-projection-meshes-non-planar-faces, fetched 2026-10-29 (unofficial)
+[S4] Production Volume Rendering, https://cg.informatik.uni-freiburg.de/intern/seminar/volumeRenderingProductionFundamentals2011.pdf, fetched 2026-10-27 (unofficial)

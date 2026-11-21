@@ -1,0 +1,193 @@
+# SLF Representation via B-Spline Wavelets
+
+Also called: B-Spline wavelet SLF, SLF approximation, SLF representation, Surface Light Field (SLF) Representation using B-Spline Wavelets, View map approximation
+
+## Overview
+This method represents the Surface Light Field (SLF) of a scene by mapping multi-view images onto a 3D geometric point cloud, where each surface point $p$ has a view map $f(\omega|p)$ approximated as a linear combination of B-Spline wavelet basis functions [S1]. It solves the problem of efficiently compressing and rendering complex surface radiance patterns with arbitrary viewpoints (6DOF) by transforming view map observations into a compact, spatially coherent coefficient space [S1]. Unlike grid-based light field methods that suffer from discretization errors, this approach uses continuous B-Spline wavelets to handle complicated materials and lighting without inherent discretization artifacts [S1].
+
+## How it works
+**Inputs:**
+*   A 3D geometric point cloud defining surface points $p$.
+*   Multi-view images of the scene.
+*   Camera positions and orientations for each view.
+*   Parameters: Number of basis functions $N$, regularization factor $\lambda > 0$, spatial smoothing factor $\beta > 0$, and maximum iterations $T$.
+
+**Outputs:**
+*   SLF representation coefficients $\alpha(p)$ for each point $p$.
+
+**Data Structures:**
+*   **Point Cloud:** A set of points $p$, each associated with a list of valid camera observations.
+*   **Observation Vector $c$:** For point $p$, a vector of pixel values $c = \{c_0, c_1, \dots, c_{M-1}\}$ from $M$ valid camera observations. Invalid observations (occluded or outside the camera field of view) are excluded [S1].
+*   **Direction Vector $\omega$:** For each observation $m$, the viewing direction $\omega_m$ parameterized by spherical coordinates.
+*   **Basis Matrix $G$:** A matrix of size $M \times N$, where element $G_{j,i} = g_i(\omega_j)$ is the value of the $i$-th basis function evaluated at the $j$-th observation direction [S1].
+*   **Coefficient Vector $\alpha$:** A vector of size $N$, where $\alpha_i(p)$ is the coefficient for the $i$-th basis function at point $p$ [S1].
+
+**Basis Functions:**
+The basis functions $g_i(\omega)$ are 2D separable B-Spline wavelets defined on the reparameterized spherical coordinates $(\theta, \gamma)$ [S1]:
+$$ g_i(\theta, \gamma) = w_{i_0}\left(\frac{\theta}{2\pi}\right) w_{i_1}\left(\frac{\gamma}{2}\right) $$
+where:
+*   $\theta \in [-\pi, \pi]$ is the azimuth angle.
+*   $\phi \in [-\pi/2, \pi/2]$ is the elevation angle, reparameterized as $\gamma = \sin(\phi) \in [-1, 1]$ to ensure equal areas in the $(\theta, \gamma)$ plane correspond to equal areas on the sphere, preserving orthogonality [S1].
+*   $w_i$ is the $i$-th offset of the periodicized 1D B-Spline wavelet function:
+    $$ w_i(x) = \sum_{m \in \mathbb{Z}} \psi_o(2^s x - i + m 2^s) $$
+*   $\psi_o(x)$ is the 1D B-Spline wavelet function:
+    $$ \psi_o(x) = \sum_{n=0}^q q_n N_o(2x - n) $$
+    where $N_o$ is the cardinal B-Spline function and $q_n = (-1)^n \sum_{j=0}^{o-1} \binom{o}{j} N_{2o}(n - j + 1/2)$ [S1].
+*   The scales $s_0$ (for $\theta$) and $s_1$ (for $\gamma$) satisfy $s_0 = s_1 + 1$ to ensure roughly equal resolution in both directions [S1].
+*   The index $i$ is mapped from $(i_0, i_1)$ as $i = i_0 2^{s_1} + i_1$, where $i_0 \in [0, 2^{s_0}-1]$ and $i_1 \in [0, 2^{s_1}-1]$. The total number of basis functions is $N = 2^{s_0+s_1}$ [S1].
+
+**Algorithm Steps:**
+1.  **Map Images to Point Cloud:** Project multi-view images onto the 3D point cloud to define surface points $p$ and identify valid observations [S1].
+2.  **Determine Valid Observations:** For each point $p$, identify the set of cameras within a defined cone area that provide valid, non-occluded views. Construct the observation vector $c$ and direction matrix $G$ [S1].
+3.  **Initialize Coefficients:** Calculate the initial coefficients $\alpha_0(p)$ using the under-determined solution with only Tikhonov regularization (Equation 2 below) [S1].
+4.  **Iterative Spatial Smoothing:** For $k = 1$ to $T$:
+    a. Calculate the average coefficient $\bar{\alpha}$ of $p$'s neighboring points in the point cloud [S1].
+    b. Update $\alpha_k(p)$ using the spatially regularized optimization (Equation 3 below) [S1].
+5.  **Compress Coefficients:** Compress the resulting coefficients $\alpha(p)$ spatially using Point Cloud Compression (PCC) methods [S1].
+
+**Formulas:**
+The view map is approximated as:
+$$ f(\omega|p) \approx \sum_{i=0}^{N-1} \alpha_i(p) \cdot g_i(\omega) $$
+[S1]
+
+The initial coefficient vector $\alpha(p)$ is found by minimizing:
+$$ \alpha(p) = \arg \min_\alpha \|c - G\alpha\|_2^2 + \lambda\|\alpha\|_2^2 $$
+The closed-form solution is:
+$$ \alpha(p) = (G^T G + \lambda I)^{-1} G^T c $$
+where $\lambda > 0$ prevents over-fitting when $M < N$ and provides robustness to noise [S1].
+
+The iterative coefficient vector $\alpha_k(p)$ is found by minimizing:
+$$ \alpha(p) = \arg \min_\alpha \|c - G\alpha\|_2^2 + \lambda\|\alpha\|_2^2 + \beta\|\alpha - \bar{\alpha}\|_2^2 $$
+The closed-form solution is:
+$$ \alpha(p) = (G^T G + \lambda I + \beta I)^{-1} (G^T c + \beta \bar{\alpha}) $$
+where $\bar{\alpha}$ is the average coefficient of neighboring points and $\beta > 0$ increases spatial coherence [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_slf_coefficients(points, observations, directions, lambda_reg, beta_smooth, max_iter):
+    """
+    Calculate SLF representation coefficients for a point cloud.
+    
+    Args:
+        points: List of surface points p.
+        observations: Dict mapping p -> list of valid pixel values c.
+        directions: Dict mapping p -> list of viewing directions omega.
+        lambda_reg: Regularization factor lambda > 0.
+        beta_smooth: Spatial smoothing factor beta > 0.
+        max_iter: Maximum iteration number T.
+        
+    Returns:
+        coefficients: Dict mapping p -> vector alpha.
+    """
+    coefficients = {}
+    
+    # Precompute basis functions and matrices for each point
+    # Note: In practice, G is computed per point based on its specific observation directions
+    point_data = {}
+    for p in points:
+        c = observations[p]
+        omegas = directions[p]
+        M = len(c)
+        N = get_num_basis_functions() # Derived from scales s0, s1
+        
+        # Construct G matrix: G[j, i] = g_i(omega_j)
+        G = construct_basis_matrix(omegas, N)
+        
+        point_data[p] = {
+            'c': c,
+            'G': G,
+            'M': M,
+            'N': N
+        }
+
+    # Initialization step
+    for p in points:
+        data = point_data[p]
+        G = data['G']
+        c = data['c']
+        N = data['N']
+        
+        # Solve alpha_0 = (G^T G + lambda * I)^-1 * G^T * c
+        # Using a linear solver for stability
+        GTG = G.T @ G
+        A = GTG + lambda_reg * np.eye(N)
+        b = G.T @ c
+        alpha_0 = solve_linear_system(A, b)
+        coefficients[p] = alpha_0
+
+    # Iterative smoothing step
+    for k in range(1, max_iter + 1):
+        for p in points:
+            data = point_data[p]
+            G = data['G']
+            c = data['c']
+            N = data['N']
+            
+            # Calculate average coefficient of neighbors
+            neighbors = get_neighbors(p)
+            if neighbors:
+                avg_alpha = np.mean([coefficients[n] for n in neighbors], axis=0)
+            else:
+                avg_alpha = coefficients[p] # Fallback if no neighbors
+            
+            # Solve alpha_k = (G^T G + (lambda + beta) * I)^-1 * (G^T c + beta * avg_alpha)
+            GTG = G.T @ G
+            A = GTG + (lambda_reg + beta_smooth) * np.eye(N)
+            b = G.T @ c + beta_smooth * avg_alpha
+            coefficients[p] = solve_linear_system(A, b)
+            
+    return coefficients
+
+def construct_basis_matrix(omegas, N):
+    """
+    Constructs the basis matrix G for a set of directions.
+    omegas: List of (theta, gamma) tuples.
+    N: Number of basis functions.
+    """
+    M = len(omegas)
+    G = np.zeros((M, N))
+    for j, (theta, gamma) in enumerate(omegas):
+        for i in range(N):
+            i0 = i // (2**(s1))
+            i1 = i % (2**(s1))
+            # Evaluate 1D B-Spline wavelets
+            w_i0 = evaluate_bspline_wavelet_1d(theta / (2 * np.pi), i0, s0)
+            w_i1 = evaluate_bspline_wavelet_1d(gamma / 2, i1, s1)
+            G[j, i] = w_i0 * w_i1
+    return G
+```
+
+**Edge Cases and Pitfalls:**
+*   **Under-determined System:** If the number of valid observations $M$ is less than the number of basis functions $N$, the system is under-determined. The regularization parameter $\lambda$ must be strictly positive ($\lambda > 0$) to avoid over-fitting and ensure a unique, compressible solution [S1].
+*   **Invalid Observations:** Observations that are occluded or outside the camera field of view must be eliminated before constructing $c$ and $G$ [S1].
+*   **Coordinate Reparameterization:** Failure to reparameterize elevation $\phi$ as $\gamma = \sin(\phi)$ will break the orthogonality of the basis functions on the sphere, leading to inaccurate representation [S1].
+*   **Neighbor Availability:** If a point $p$ has no neighbors, the spatial smoothing term cannot be applied. The algorithm should fall back to the initial solution or use the point's own previous iteration value [S1].
+
+## Subtopics
+
+### [Image-Plus-Geometry Compression (IGC)](18717-image-plus-geometry-compression-igc.md)
+A reference compression scheme for Surface Light Fields (SLF) where the source images are compressed using a standard video codec and the geometry is transmitted separately, with the SLF representation reconstructed at the decoder. It serves as a baseline to evaluate the efficiency of direct SLF coefficient compression methods, such as those using RAHT or TMC, by shifting the computationally expensive SLF construction step from the encoder to the decoder. Unlike direct SLF compression, which transmits compressed coefficients, IGC transmits raw visual data (images) and structural data (geometry), resulting in significantly higher decoder complexity.
+
+## Operating characteristics
+*   **Complexity:** The method involves solving a linear system for each point, which is $O(N^3)$ per point if using direct inversion, or $O(N^2)$ with iterative solvers, where $N$ is the number of basis functions. The spatial smoothing adds a neighbor averaging step. The overall complexity is dominated by the basis function evaluation and linear system solving for all points in the point cloud [S1].
+*   **Performance:** Experimental results show superior rate-distortion performance compared to the Image-Plus-Geometry (IGC) reference scheme [S1].
+*   **Strengths:**
+    *   Supports true free-viewpoint rendering (6DOF) [S1].
+    *   Robust to camera noise and imprecisions due to regularization [S1].
+    *   Scalable: Can approximate simple view maps (Lambertian) to complex ones (reflective) with commensurate bitrate [S1].
+    *   Avoids discretization errors inherent in grid-based light field methods [S1].
+    *   Lighter decoder complexity compared to IGC [S1].
+*   **Limitations:**
+    *   Requires explicit 3D geometry (point cloud) as input [S1].
+    *   Computationally expensive on the encoder side due to the iterative coefficient calculation [S1].
+    *   Performance depends on the quality of the point cloud and the validity of the observations [S1].
+*   **When to use:** When high-quality, arbitrary viewpoint rendering is required for complex scenes with varied materials and lighting, and explicit geometry is available or can be reconstructed.
+*   **When not to use:** When computational resources on the encoder are severely limited, or when explicit geometry is not available and cannot be reliably reconstructed.
+
+## Background
+The method was proposed in the paper "Surface Light Field Compression Using a Point Cloud Codec" [S1]. It addresses the limitations of multi-view image-based light field approaches by incorporating explicit geometry. The use of B-Spline wavelets for representing view maps is motivated by their ability to compact energy and handle local variations efficiently. The introduction of spatial smoothing for coefficient compression is a key contribution to improve coding efficiency by leveraging spatial correlation in the point cloud [S1].
+
+## Sources
+[S1] Surface Light Field Compression Using a Point Cloud Codec, https://doi.org/10.1109/jetcas.2018.2883479, fetched 2026-10-28

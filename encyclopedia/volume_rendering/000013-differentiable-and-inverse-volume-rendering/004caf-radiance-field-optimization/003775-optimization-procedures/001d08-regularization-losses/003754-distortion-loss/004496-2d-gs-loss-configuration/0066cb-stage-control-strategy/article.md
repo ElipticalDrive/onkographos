@@ -1,0 +1,127 @@
+# Stage Control Strategy
+
+Also called: Activation criteria, Explicit Stage-Control Mechanism, Quality-Constrained Stage Control, Stage Control
+
+## Overview
+The Stage Control Strategy is a mechanism that activates new Gaussian primitives only in spatial regions where the current reconstruction quality falls below a prescribed fidelity target, avoiding redundancy and promoting compactness [S1, unofficial]. It solves the problem of unnecessary primitive allocation by restricting new Gaussian introduction to under-reconstructed areas, thereby reducing the total number of Gaussians while maintaining controlled distortion levels [S1, unofficial]. It sets itself apart from sibling methods like [Composite Loss](15617-composite-loss.md) by using explicit quality metrics (PSNR and SSIM) to gate primitive activation rather than relying on non-differentiable pseudo-labels or density-based heuristics [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Ground-truth image $I_{gt}$, reconstructed image from the previous stage $I_{i-1}$, candidate Gaussian set predicted by the current stage $\Delta \hat{G}_i$, and fidelity thresholds $\tau_{psnr}$ and $\tau_{ssim}$.
+*   **Outputs:** Effective Gaussian subset $\Delta G_i$ to be added to the scene.
+
+**Data Structures:**
+*   **Quality Maps:** Two 2D maps, $Q_{i-1}^{psnr}$ and $Q_{i-1}^{ssim}$, with dimensions matching the spatial resolution of the image patches.
+*   **Activation Mask:** A binary 2D map $M_i$ with the same spatial dimensions as the patches, where each element is 0 or 1.
+*   **Candidate Gaussians:** A dense set of predicted Gaussian parameters $\Delta \hat{G}_i$, one per spatial token/patch.
+
+**Numbered Steps:**
+1.  **Compute Quality Maps:** Calculate the PSNR and SSIM between the ground-truth image $I_{gt}$ and the previous stage's reconstruction $I_{i-1}$ for each spatial location $u$.
+    $$Q_{i-1}^{psnr} = Q_{psnr}(I_{gt}, I_{i-1})$$
+    $$Q_{i-1}^{ssim} = Q_{ssim}(I_{gt}, I_{i-1})$$
+    [S1, unofficial]
+2.  **Generate Activation Mask:** Create a binary mask $M_i(u)$ for each spatial location $u$. A location is marked for activation (1) if either the PSNR is below $\tau_{psnr}$ OR the SSIM is below $\tau_{ssim}$. Otherwise, it is masked out (0).
+    $$M_i(u) = \mathbb{I}(Q_{i-1}^{psnr}(u) < \tau_{psnr} \lor Q_{i-1}^{ssim}(u) < \tau_{ssim})$$
+    [S1, unofficial]
+3.  **Apply Mask to Candidates:** Perform patch-wise masking on the dense candidate Gaussian set $\Delta \hat{G}_i$ using $M_i$ to obtain the effective subset $\Delta G_i$.
+    $$\Delta G_i = M_i \odot \Delta \hat{G}_i$$
+    where $\odot$ denotes element-wise multiplication or masking, effectively zeroing out or discarding candidates where $M_i(u) = 0$.
+    [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def stage_control_strategy(I_gt, I_prev, candidate_gaussians, tau_psnr, tau_ssim):
+    """
+    Activates new Gaussians only where reconstruction quality is insufficient.
+    
+    Args:
+        I_gt: Ground truth image tensor (H, W, C).
+        I_prev: Reconstructed image from previous stage (H, W, C).
+        candidate_gaussians: Dense set of predicted Gaussian parameters, 
+                             one per spatial token/patch. Shape depends on patching.
+        tau_psnr: PSNR threshold (float, e.g., 35.0).
+        tau_ssim: SSIM threshold (float, e.g., 0.95).
+        
+    Returns:
+        effective_gaussians: Subset of candidate_gaussians activated by the mask.
+    """
+    # Step 1: Compute Quality Maps
+    # Q_psnr and Q_ssim are 2D maps corresponding to spatial locations (patches)
+    # Note: Implementation details for Q_psnr and Q_ssim depend on the specific 
+    # metric library used, but they return values per pixel or per patch.
+    # Assuming patch-based evaluation for consistency with candidate_gaussians.
+    Q_psnr = compute_psnr_map(I_gt, I_prev) 
+    Q_ssim = compute_ssim_map(I_gt, I_prev)
+    
+    # Step 2: Generate Activation Mask
+    # M_i is a boolean mask with the same spatial dimensions as the patches
+    # Activation occurs if PSNR is low OR SSIM is low
+    mask = (Q_psnr < tau_psnr) | (Q_ssim < tau_ssim)
+    
+    # Step 3: Apply Mask to Candidates
+    # candidate_gaussians is assumed to be indexed by spatial location/patch
+    # We filter out candidates where mask is False
+    effective_gaussians = candidate_gaussians[mask]
+    
+    return effective_gaussians
+
+def compute_psnr_map(I_gt, I_pred):
+    """
+    Computes PSNR map. Returns a 2D array of PSNR values per pixel or patch.
+    For patch-wise consistency with Gaussian tokens, this should aggregate 
+    pixel values within each patch.
+    """
+    # Example: Mean Squared Error per patch
+    # Assuming I_gt and I_pred are normalized to [0, 1]
+    mse_map = (I_gt - I_pred) ** 2
+    # Aggregate MSE over channels and spatial dimensions within each patch
+    # This is a placeholder for the specific aggregation logic required 
+    # to match the "patch-wise" definition in the source.
+    # The source implies Q_psnr is a map, so we return per-patch PSNR.
+    # PSNR = 10 * log10(1 / MSE) assuming max pixel value is 1.
+    # Handle division by zero if MSE is 0.
+    psnr_map = 10 * np.log10(1.0 / (mse_map + 1e-8))
+    return psnr_map
+
+def compute_ssim_map(I_gt, I_pred):
+    """
+    Computes SSIM map. Returns a 2D array of SSIM values per pixel or patch.
+    """
+    # Example: SSIM per patch
+    # Using a standard SSIM calculation windowed over patches
+    ssim_map = calculate_ssim_windowed(I_gt, I_pred)
+    return ssim_map
+```
+[G] The pseudocode assumes `candidate_gaussians` is structured such that it can be indexed by the same spatial mask derived from the image patches. The source defines $\Delta \hat{G}_i$ as the "dense candidate Gaussian set predicted by stage $i$" where "each spatial token produces one Gaussian". Thus, the mask $M_i$ operates on these tokens. The `compute_psnr_map` and `compute_ssim_map` functions are simplified placeholders; in practice, they must aggregate pixel-level metrics into patch-level metrics to align with the Gaussian token structure.
+
+**Parameters:**
+*   $\tau_{psnr}$: PSNR threshold. Default value: 35 dB [S1, unofficial].
+*   $\tau_{ssim}$: SSIM threshold. Default value: 0.95 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Threshold Sensitivity:** Increasing thresholds imposes a stricter fidelity target, activating more primitives. Decreasing them yields a more compact representation but may degrade quality [S1, unofficial].
+*   **No Masking:** If no mask is applied (all Gaussians activated), the method uses the maximum number of primitives (e.g., 58,114 in the cited experiment) [S1, unofficial].
+*   **Metric Complementarity:** Using only PSNR or only SSIM provides an incomplete quality criterion. PSNR detects large local reconstruction errors, while SSIM captures structural distortions not fully reflected by pixel-wise error. Combining them covers both pixel-level errors and structural degradation [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The method requires computing PSNR and SSIM maps for the previous stage's reconstruction, which is $O(H \times W)$ per stage, where $H$ and $W$ are image dimensions. The masking operation is also $O(N)$, where $N$ is the number of candidate Gaussians (proportional to $H \times W / ps^2$).
+*   **Memory Complexity:** Requires storing two quality maps ($Q_{psnr}$ and $Q_{ssim}$) and the activation mask $M_i$, each of size proportional to the number of spatial tokens.
+*   **Measured Performance:**
+    *   No mask: PSNR 30.89 dB, Utilization 1.00, #Gaussians 58,114 [S1, unofficial].
+    *   PSNR target 35 dB only: PSNR 30.60 dB, Utilization 0.69, #Gaussians 40,163 [S1, unofficial].
+    *   SSIM target 0.95 only: PSNR 30.29 dB, Utilization 0.75, #Gaussians 43,750 [S1, unofficial].
+    *   Joint PSNR 35 dB and SSIM 0.95: PSNR 30.76 dB, Utilization 0.79, #Gaussians 46,001 [S1, unofficial].
+    *   Joint PSNR 35 dB and SSIM 0.98: PSNR 30.87 dB, Utilization 0.90, #Gaussians 52,318 [S1, unofficial].
+*   **Utilization Ratio:** Defined as the proportion of activated Gaussians among all candidate Gaussians, calculated as $4 \times (H/ps) \times (W/ps)$ where $H, W$ are image dimensions and $ps$ is patch size [S1, unofficial].
+*   **Strengths:** Reduces unnecessary primitives under a controlled distortion level. Improves over MSE-only and SSIM-only variants by combining complementary quality cues [S1, unofficial].
+*   **Limitations:** Requires access to ground-truth images for quality map computation during training (self-supervised context). Performance is sensitive to threshold selection.
+*   **When to use:** When computational efficiency and model compactness are prioritized, and a high-fidelity operating regime is desired.
+*   **When not to use:** When maximum possible reconstruction quality is required regardless of primitive count, or when ground-truth images are unavailable for quality assessment.
+
+## Background
+The Stage Control Strategy was proposed in the context of the AIR (Amortized Image Reconstruction Framework) for self-supervised feed-forward 2D Gaussian Splatting [S1, unofficial]. It addresses the drawbacks of scaling pipelines that inject inductive bias and are expensive to train [S1, unofficial]. The method follows a constrained reconstruction objective: using as few Gaussians as possible while satisfying a prescribed fidelity target [S1, unofficial]. It replaces non-differentiable pseudo-labels (like those used in Instant-GI) with an explicit quality-constrained mechanism [S1, unofficial]. The default thresholds of 35 dB PSNR and 0.95 SSIM were chosen to keep utilization at a moderate level while maintaining competitive perceptual quality [S1, unofficial].
+
+## Sources
+[S1] AIR: Amortized Image Reconstruction Framework for Self-Supervised Feed-Forward 2D Gaussian Splatting, https://doi.org/10.48550/arXiv.2605.20820, fetched 2026-10-29 (unofficial)

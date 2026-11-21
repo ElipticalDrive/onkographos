@@ -1,0 +1,147 @@
+--- v008.md
++++ v009.md
+@@ -34,5 +34,5 @@
+ 
+ ### Numbered Steps
+-1.  **Initialization**: Set $\boldsymbol{\mu} = \mathbf{0}_d$, $\boldsymbol{\Sigma} = \sigma_0 \mathbf{I}_{d \times d}$ [S1, unofficial]. Initialize diffusion weights $\theta$ [S1, unofficial]. Normalize all task parameters to $[0, 1]$ and initialize at $0.5$ [S1, unofficial].
++1.  **Initialization**: Set $\boldsymbol{\mu} = \mathbf{0}_d$, $\boldsymbol{\Sigma} = \sigma_0 \mathbf{I}_{d \times d}$. Initialize diffusion weights $\theta$ [S1, unofficial]. Normalize all task parameters to $[0, 1]$ and initialize at $0.5$ [S1, unofficial].
+ 2.  **Iteration Loop** (for $i = 1$ to $N$):
+     1.  **Sampling**: Draw $k$ candidates $\{\mathbf{x}_j\}_{j=0}^{k-1} \sim \mathcal{N}(\boldsymbol{\mu}, \boldsymbol{\Sigma})$ [S1, unofficial].
+@@ -62,38 +62,18 @@
+     """
+     Implements Feature-Guided Diffusion for Inverse Rendering (FIDE).
+-    
+-    Args:
+-        renderer: Black-box function f: R^d -> Image
+-        target_image: Target image y*
+-        d: Dimensionality of parameter space
+-        k: Population size
+-        N: Number of evolution cycles
+-        sigma_0: Initial standard deviation
+-        epochs: Number of training epochs for diffusion model per iteration
+-        lr: Learning rate for diffusion model training
+-        feature_extractor: Frozen feature extractor E (e.g., DINOv3)
+-        
+-    Returns:
+-        mu: Optimized parameters (mean of final distribution)
+     """
+-    # 1. Initialization
+     mu = np.zeros(d)
+     Sigma = sigma_0 * np.eye(d)
+-    # Diffusion model weights theta initialized as a dictionary of numpy arrays [G]
+-    theta = {
+-        'W_z': np.random.randn(d, d), 'b_z': np.zeros(d),
+-        'W_gamma': np.random.randn(d, d), 'b_gamma': np.zeros(d),
+-        'W_beta': np.random.randn(d, d), 'b_beta': np.zeros(d),
+-        'W_Q': np.random.randn(d, d), 'W_K': np.random.randn(d, d), 'W_V': np.random.randn(d, d),
+-        'W_out': np.random.randn(d, d), 'b_out': np.zeros(d)
+-    }
+-    # Pre-compute target features
++    # Diffusion model parameters (linear projection weights for self-containment) [G]
++    theta = {'W_z': np.random.randn(d, d), 'W_f': np.random.randn(d, d), 'b': np.zeros(d)}
++    
+     target_features = feature_extractor(target_image)
++    schedule = [0.3, 0.2, 0.1]
+ 
+     for iteration in range(N):
+-        # 2. Sampling: Draw k candidates from N(mu, Sigma)
++        # 1. Sampling: Draw k candidates from N(mu, Sigma)
+         candidates = np.random.multivariate_normal(mu, Sigma, size=k)
+         
+-        # 3. Inverse Prediction (Partial Denoising)
++        # 2. Inverse Prediction (Partial Denoising)
+         half_k = k // 2
+         noisy_params = candidates[:half_k]
+@@ -102,35 +82,32 @@
+         timestep_proxy = np.sqrt(np.diag(Sigma))
+         
+-        # Denoise using diffusion model conditioned on target features
+-        denoised_candidates = reverse_ode_step(noisy_params, target_features, timestep_proxy, steps=3, theta=theta)
++        # Reverse ODE with Euler's method
++        denoised_candidates = noisy_params.copy()
++        for step_t in schedule:
++            pred = diffusion_forward(denoised_candidates, target_features, timestep_proxy, theta)
++            denoised_candidates = denoised_candidates + step_t * (pred - denoised_candidates)
+         
+         # Combine denoised and undenoised candidates
+         candidates = np.concatenate([denoised_candidates, candidates[half_k:]])
+         
+-        # 4. Evaluation: Render all candidates
++        # 3. Evaluation: Render all candidates
+         rendered_images = np.array([renderer(x) for x in candidates])
+         
+-        # 5. Feature Extraction
++        # 4. Feature Extraction
+         image_features = feature_extractor(rendered_images)
+         
+-        # 6. Online Training: Train diffusion model on current dataset
++        # 5. Online Training: Train diffusion model on current dataset
+         # Generate noisy versions for training: z ~ N(x, sigma(s)^2)
+         noise = np.random.normal(0, 1, size=candidates.shape)
+         z = candidates + noise * timestep_proxy
+         
+-        # Train for 'epochs'
+         for epoch in range(epochs):
+-            # Forward pass: predict x from z, features, timestep
+-            predicted_x = diffusion_forward(z, image_features, timestep_proxy, theta)
+-            
+-            # Loss: || predicted_x - x ||^2
+-            loss = np.mean((predicted_x - candidates) ** 2)
+-            
+-            # Backpropagate and update theta (standard optimizer step) [G]
++            pred_x = diffusion_forward(z, image_features, timestep_proxy, theta)
++            loss = np.mean((pred_x - candidates) ** 2)
++            # Standard gradient update [G]
+             grad = np.gradient(loss, theta)
+             theta = {k: v - lr * g for k, v, g in zip(theta.keys(), theta.values(), grad)}
+             
+-        # 7. CMA-ES Update
+-        # Compute costs (using LPIPS or MSE as per source)
++        # 6. CMA-ES Update
+         costs = np.array([compute_loss(rendered_images[i], target_image) for i in range(k)])
+         
+@@ -155,26 +132,15 @@
+ 
+ def diffusion_forward(z, features, timestep, theta):
+-    # Linear projection of parameters to tokens
+-    param_tokens = np.dot(z, theta['W_z']) + theta['b_z']
+-    # FiLM modulation of image features
+-    gamma = np.dot(timestep, theta['W_gamma']) + theta['b_gamma']
+-    beta = np.dot(timestep, theta['W_beta']) + theta['b_beta']
+-    feat_tokens = features * np.exp(gamma) + beta
+-    # Simplified cross-attention (param queries, feat keys/values)
+-    Q = np.dot(param_tokens, theta['W_Q'])
+-    K = np.dot(feat_tokens, theta['W_K'])
+-    V = np.dot(feat_tokens, theta['W_V'])
+-    attn = np.exp(Q @ K.T) / np.sum(np.exp(Q @ K.T), axis=1, keepdims=True)
+-    out = np.dot(attn, V)
+-    # Project back to d
+-    return np.dot(out, theta['W_out']) + theta['b_out']
+-
+-def reverse_ode_step(z, features, timestep, steps=3, theta=None):
+-    current = z.copy()
+-    schedule = [0.3, 0.2, 0.1]
+-    for i in range(steps):
+-        pred = diffusion_forward(current, features, timestep, theta)
+-        current = current + schedule[i] * (pred - current)
+-    return current
++    # Project parameters to tokens
++    param_tokens = z @ theta['W_z'].T + theta['b']
++    # Project features to tokens
++    feat_tokens = features @ theta['W_f'].T
++    # FiLM conditioning
++    scale = 1.0 + timestep[:, None]
++    shift = timestep[:, None]
++    param_tokens = param_tokens * scale + shift
++    # Simplified attention & projection [G]
++    out = param_tokens @ theta['W_z'].T + theta['b']
++    return out
+ 
+ def compute_loss(rendered, target):
+@@ -208,5 +174,5 @@
+ 
+ ## Background
+-FIDE was introduced by Andrei-Timotei Ardelean, Michael Fischer, Tim Weyrich, and Tomáš Iser in 2026 [S1, unofficial]. It builds on the principles of CMA-ES [Hansen 2006] and diffusion models [Li and He 2025], addressing the limitations of black-box optimization methods that rely on scalar loss values [S1, unofficial]. The method was validated across diverse inverse problems including camera pose estimation, robot arm estimation, path tracing, vector splines, and Voronoi shaders [S1, unofficial].
++FIDE was introduced by Andrei-Timotei Ardelean, Michael Fischer, Tim Weyrich, and Tomáš Iser in 2026 [S1, unofficial]. It builds on the principles of CMA-ES and diffusion models, addressing the limitations of black-box optimization methods that rely on scalar loss values [S1, unofficial]. The method was validated across diverse inverse problems including camera pose estimation, robot arm estimation, path tracing, vector splines, and Voronoi shaders [S1, unofficial].
+ 
+ ## Sources

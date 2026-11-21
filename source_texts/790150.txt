@@ -1,0 +1,218 @@
+Game Engine with Claude Code support. Contribute to MatthewLacerda2/rusty development by creating an account on GitHub.
+
+Volumetric fog: froxels lit by the clustered lights, shadows and Baked lamps (#1703) by MatthewLacerda2 · Pull Request #1836 · MatthewLacerda2/rusty · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+MatthewLacerda2
+commented
+Nov 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+What changed
+Volumetric fog (HDRP's Fog with volumetrics; Frostbite's froxel scattering as UE, HDRP and Godot 4 run it), a new post-processing volume effect, off by default.
+Review round (1c9c05f → 96ed17d)
+Additive and Multiply surfaces take no in-scatter (forward::transparent::blended_air): Additive is only dimmed (as fs_additive already was), a Multiply tint fades toward white; Alpha/Premultiply unchanged. Unlit surfaces go through the same function (fogged). Tested: a black Additive card adds only its own faint highlight in fog (0.21 in fog vs 0.37 clear, against 2.58 of air behind it), a white emissive Multiply sheet changes nothing (0 and 0).
+The probes are in the froxels (volumetric_fog::probes::AirProbes): a 16×8×16 grid of the probe field's L0 (average radiance, what an isotropic medium scatters) around the camera, cells 2 × depth_extent / 16 wide, snapped to whole cells; filled on the CPU (2048 ProbeVolume::sample calls, a 16 KB upload) only when the probe set's Revision, the scene, the camera's cell or the extent changes; cs_scatter reads it through the history sampler (linear, clamp-to-edge). No probes: the scene ambient as before. Tested: a sealed room baked dark under a bright ambient has dark air (0.60 vs 36.4 with the scene ambient), bright probes light it again, and the grid is filled once over four frames and again when the probes change. The issue asks for exactly this, so this PR still closes it.
+Tests and renders for the sky, glass, sprite particles and SSR: gpu::readers (black fog dims the procedural sky and a glass pane, lit fog brightens both), gpu::blends (item 1), gpu::downstream's new SSR case (a glowing wall reflected in a mirror floor: 10.4 clear, 0.82 in black fog with 0.50 of the floor's own light through), gpu::bounds, gpu::probes. Looked at below.
+sky::air (engine/shaders/sky/air.wgsl): the group-0 volume bindings and through_air, imported by both sky passes; no copy left.
+The Baked list ignores live lights: BakedLamps::changed accepts only an id that is listed or is a Baked lamp now. Tested: a live light moved and re-intensified every frame rebuilds nothing.
+Bounds and edges: current.rgb and the integrated scattered are clamped to 60000 (MAX_FROXEL) before Rgba16Float (tested: intensity 200, 1 m mean free path, anisotropy 0.9: every texel finite, every slice in front of the lamp adds light); the jitter uses Halton index index + 1; sun_lit fades over the shadow distance's last 10% as calculate_shadow does; volumetric_sky takes the sky fragment's interpolated clip position (a new clip varying), so an orthographic sky reads each column.
+Area lights are left out (clusters::baked::is_baked_lamp); Graphics.md says a panel gives no halo yet. Tested in gpu::kept.
+common::apply_fog is deleted with shader.wgsl's imports of it and fog_factor; Graphics.md and SharedVolume::fit say a render-texture camera with a different Custom grid reallocates the volume twice a frame (a per-grid slot would need a group 0 per grid, not a line or two).
+What changed
+Settings (components::VolumetricFog, HDRP's names and defaults): mean_free_path (Fog Attenuation Distance, 400 m), albedo (white), anisotropy (0), base_height / maximum_height (0 / 50 m), depth_extent (Volumetric Fog Distance, 64 m), global_light_probe_dimmer (1), quality + Custom resolution / slices. Through every registry: ops, Graphics.* (Get/SetVolumetricFog… and six tween paths), Inspector section, GraphicsOption::VolumetricFog, a QualityValues.volumetric_fog row (seeded levels below), docs (Graphics.md section, rows, option row; Debug.md rows).
+Render (render::postfx::effects::volumetric_fog): a new camera stage volumetric_fog, after clusters and before solids, on the base camera of a view running it. Two compute passes (engine/shaders/volumetric_fog.wgsl): cs_scatter lights a jittered point in each froxel with the ambient × dimmer (the probes' L0 where the scene has probes), the live suns (sun 0 through its cascades), the clustered point/spot lights through their shadow-atlas tiles and the Baked lamps unshadowed, each through Henyey-Greenstein, its inverse square floored at half the froxel's depth; blends 85% of last frame's froxel reprojected. cs_integrate integrates front to back (Frostbite's energy-conserving step) into one renderer-wide integrated volume (SharedVolume), bound in group 0 at 17/18.
+Readers (fog::volumetric, one module): forward opaque + transparent (decals fold in) through forward::transparent::{fogged, surface_fog}, the skybox and procedural sky (whole volume), sprite particles (per vertex). Colour becomes colour × T + in-scatter, after the distance/height fog, which still draws.
+Baked lamps (render::clusters::BakedLamps): kept by ecs::changes cursors on LightComponent, WorldPose and Activity plus the scene id; rebuilt only when one of those touches a light (a test counts rebuilds); binned per camera with the lights' budget (64 per camera, 32 per cluster).
+LazyPipeline<P> is now generic; LazyCompute is the compute one, warmed through Renderer::lazy_computes.
+Device limit: render::setup::limits asks for 17 sampled textures per stage (default 16).
+CameraUniform.volumetric ([on, slices, far, near]), GpuPass::VolumetricFog, RenderCounters::volumetric_froxels. ShadowCascades moved into lighting::cascades so the compute shader and forward::bindings share it.
+Why
+The north star's moods (F.E.A.R.'s smoky corridors, the issue's Kolvik: lamps, spots, rotating beacons in a cold, steamy station) need light in the air, which per-surface fog can't give: no halo around a lamp, no shaft from a shadowed light. Unity HDRP, UE and Godot all have it; rusty didn't.
+Effect
+A volume with volumetric_fog.active draws halos around lamps (live and Baked), shafts with dark sides from shadowed spots, and haze lit by the ambient. Off, the frame is byte-identical to main (rendered on both, below).
+Decisions (the brief's, answered)
+Shape: as the issue says. Local density volumes (box/sphere) are left out: they are a new first-class component (four axes) plus a per-froxel volume list, which would double the branch. A follow-up issue when a level needs them.
+Sampled-texture slot: raised the device's limit to 17 rather than a fullscreen pass. A fullscreen pass after the opaque pass would have added light after SSIL took its realtime share and SSR its fog value, so both would have read a fog the surface didn't get. Reading in the forward pass keeps one fog value. The limit is a validation number, not an allocation: Metal reports ≥ 31 per stage on every Apple GPU, desktop Vulkan and lavapipe far more (the macOS CI leg ran green with it, below). Asking for exactly 17 fails the device loudly on an adapter that couldn't draw the forward pass anyway. Compute: the renderer already had compute (exposure, the grade bake, prefilters); a 3D grid written per froxel is compute's job, so compute, lazy. Group 0: the sky passes and lit particles already bind it, so one binding reaches them all; the volume is one per renderer (each base camera writes it before its own work, in submit order, as it does its camera uniform), and falls back to a never-read 1-texel stand-in after 4 renders with no camera using it.
+Baked lamps: a compact list built when lights change (above). At 137 lamps the rebuild walks the light entities once on a change; per frame each camera bins them like its live lights (the same binner; ≤ 64 kept, ≤ 32 per froxel). Unshadowed; shadowmask can bound them later (Shadowmask mixed lighting: Baked lamps give no specular and dynamic objects cast no shadow from them #1695 step 2).
+Temporal: Halton (2,3,5) jitter per frame, 85% history at the reprojected world point, no history on a cut (HistoryKey), resize or grid change; a non-finite history or froxel is dropped (numeric::finite4). A moved light keeps under 5% after 19 frames (GHOST_FRAMES, held by a test; measured 3.5%). With TAA: the froxels use the jittered camera (a froxel is many pixels wide) and TAA smooths the surfaces as it does any light. Camera stack: the base camera's volume; an overlay viewmodel reads none (its own projection would need its own grid, and the air at arm's length is no fog). Bake captures and the shader preview don't run it; a render-texture camera runs its own when its post_fx is on.
+Downstream: SSR's record and SSIL's realtime share both take transparent::surface_fog: 1 − (1 − fog) × T, exactly fog_factor where the camera reads no volume. Tested for SSIL (below). Exposure and bloom see the fogged image as they see fog today.
+Gaps, said plainly: world-space canvases and trails (ribbons) take only the distance fog; additive particles and Additive surfaces are dimmed but get no in-scatter added, by design (what is behind them carries it); a Baked lamp's light is in the probes too, so near probes it lights it also reaches the air as a soft, probe-cell-wide glow under its halo (counted twice there; separating a lamp's direct share from the probe bake is a bake change); an Area light gives no halo; the sun's froxel shadow is one comparison tap (the froxel and the history average it); a local light's per-light shadow fade distance isn't applied in the air.
+Quality levels (froxels across × slices; up is 9/16 of across): Low preset 64×32 / 80×48 / 120×64; Medium preset 80×48 / 120×64 / 160×64; High preset 120×64 / 160×64 / 160×128. Memory: 8 bytes a froxel per grid; 160×90×64 is 921 600 froxels, 7.4 MB per grid; a view running it holds two (frame + history) plus the renderer's one integrated grid. The issue's M4 figure (0.5–1 ms at 160×90×64) stays in the docs as an inferred target; lavapipe has no GPU timer, so nothing was measured here.
+Tests
+volumetric_fog::tests (no GPU): off by default / by option / by view; NaN, 0, ±1e30, ∞ settings all land in range; grid 9/16 and clamps; the camera slot; the ghost-frame bound.
+volumetric_fog::gpu (lavapipe, RUSTY_REQUIRE_GPU=1): a lamp in a dark room gets a halo (glow 18.8 vs 0.36 off); a Baked lamp too; off is the same bytes whatever the volume held, holds no target, and the volume is let go after the idle renders; a shadowed spot's shaft (7.9 lit side vs 0.11 under a plank); a moved light leaves 3.5% after 19 frames; a cut leaves nothing the first frame; a resize holds; out-of-range settings draw exactly their clamped values; the Baked list rebuilds only on a change; SSIL's bounce under black fog is 4.4 vs a 7.25 ceiling (clear bounce 14.6 × transmittance 0.497).
+render::setup::limits, camera::tests (stage order), the uniform layout, the quality seed rows, the effect completeness test.
+Gates
+make quick-gates, make clippy, make doc deny, make test (4427 + 5009 passed, 12 + 15 skipped) green on 96ed17d in a cloud container (lavapipe), RUSTY_REQUIRE_GPU=1 for the volumetric fog GPU tests (21 passed). Not re-run on macOS this round: no new test asserts bytes or rests on driver behaviour (the bounds test compares half floats read back, never exact bits). The branch merges cleanly into main (no update this round). The earlier macOS proof (run 41929810542 on 1c9c05f) covers the 17-texture limit, unchanged.
+Looked at
+Round 1: a primitive hangar (see the previous description's history): halos, shafts, anisotropy and the knobs' extremes. This round, a primitive set under an open procedural sky (bright ambient): a glass pane (Alpha, 0.35), a black Additive card, a grey pillar, a lamp behind them and 30 alpha-blended smoke sprites, 480×270, no tonemap, rendered in the container (lavapipe). Off on main and on the branch: byte-identical (cmp). On (mean free path 25 m): the sky and the pane are hazed alike, the smoke sits in the same haze, a soft glow around the lamp. Thick (4 m): everything fades into grey haze, the lamp a bright patch, no black holes. Anisotropy 0.8: a strong forward-scattered halo at the lamp. Black albedo: the sky and everything far go black, the pane and pillar darkened, nothing glows. The black Additive card shows only its own faint sky reflection in every frame (the same rectangle it shows with fog off), never a glowing panel. Not checked: motion, Metal, cost, taste, an orthographic camera's sky (reasoned, untested), a baked level's probe air (tested in numbers only).
+Seam
+fog::volumetric (engine/shaders/fog/volumetric.wgsl): volumetric_fog(t, s, camera.volumetric, view_proj, view_z, world) -> vec4 (rgb in-scatter, a transmittance), volumetric_sky, through_volume(colour, fog). A new fogging pass binds group 0's 17/18 (or, outside group 0, the renderer's fog_volume view and sampler) and calls these; it costs nothing where camera.volumetric.x is 0.
+forward::transparent::{fogged, surface_fog}: the one place a forward surface's fog is applied and measured.
+LazyCompute: a compute pipeline built on first dispatch; list it in Renderer::lazy_computes (through Passes::lazy_computes).
+sky::air::through_air(color, camera.volumetric, clip): how a sky pass fogs itself.
+forward::transparent::blended_air(color, air, coverage): the volumetric fog as the material's blend takes it.
+volumetric_fog::probes::AirProbes: the probe field's L0 around the camera, refresh(scene, (eye, extent), queue); its fills counts uploads.
+clusters::BakedLamps: the kept Baked light list and its per-camera bins; a later shadowmask can bound them in cs_scatter.
+For a human
+Kolvik on an M4: the look (halos on the 137 Baked lamps, the beacons' shafts) and the cost at 160×90×64 (Debug.Stats().gpu_passes.volumetric_fog) against the 0.5–1 ms target.
+A real window in motion: walk and turn through fog and watch for crawl or flicker from the jitter.
+The mutation run (mutants-on-request.yml, scope diff) was dispatched again on this branch when readying this round; its report lands here as a comment.
+Closes #1703
+Generated by Claude Code
+claude
+added 2 commits
+November 4, 2026 22:27
+Volumetric fog: froxels lit by the clustered lights, shadows and Bake…
+…
+0dad8e7
+```
+…d lamps (#1703)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FHUCpYk7c3PrN3wSziNYkN
+```
+Volumetric fog: gates, the scene format's fingerprint, docs that rest…
+…
+1c9c05f
+```
+…ated the old limits
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FHUCpYk7c3PrN3wSziNYkN
+```
+MatthewLacerda2
+marked this pull request as ready for review
+November 4, 2026 23:21
+MatthewLacerda2
+commented
+Nov 4, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Independent review (high, from make review-level). Each finding was checked against the code at 1c9c05f; nothing was built by the reviewer.
+Sent back to the coder
+Additive and Multiply surfaces get the air's in-scatter, so a black additive card glows in fog.
+Froxels read the one scene ambient, not the probes the issue asks for: a sealed room's air glows with the sky.
+Looked at and the tests skip the skies, particles and transparent surfaces; no SSR case.
+through_air is pasted into both sky shaders.
+A moving live light rebuilds the Baked lamps' list every frame.
+No clamp before Rgba16Float; a zero jitter index every 64 frames; no shadow-distance fade in the air; the sky's uv under an orthographic camera.
+Area lights enter as bright stand-ins against the docs (decided: left out).
+apply_fog is dead; SharedVolume::fit reallocates with two grids.
+Dropped: none.
+Held in review: render order, Play and Stop, parented lamps, fog off being byte-identical, empty lists, the phase direction, the stored format, the device limit.
+MatthewLacerda2
+marked this pull request as draft
+November 4, 2026 23:34
+This was referenced Nov 4, 2026
+Volumetric fog (froxels lit by the clustered lights and shadows): no light in the air, halos or shafts
+#1703
+Closed
+Anti-aliasing: no geometric specular AA and no TAA/TAAU, so highlights shimmer and a render scale below 1 just blurs
+#1702
+Closed
+claude
+added 3 commits
+November 4, 2026 23:49
+Volumetric fog review: blend-aware air, probe ambient, sky module, bo…
+…
+086da8c
+```
+…unds, kept Baked list
+
+Additive and Multiply surfaces take no in-scatter; the froxels' ambient comes
+from a coarse L0 grid of the light probes around the camera; both skies read the
+volume through one sky::air module at the fragment's screen position; froxels
+clamp below half-float's range; the jitter starts at Halton index 1; the sun's
+froxel shadow fades as surfaces' does; the Baked lamp list ignores live lights
+and Area panels; apply_fog is gone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FHUCpVrmsoSnLfeNsRzuLd
+```
+Volumetric fog review: tests for the readers, blends, SSR, bounds and…
+…
+0a64af4
+```
+… probes
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FHUCpVrmsoSnLfeNsRzuLd
+```
+Volumetric fog review: the SSR case reads a glowing wall; the bounds …
+…
+96ed17d
+```
+…test in helpers
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FHUCpVrmsoSnLfeNsRzuLd
+```
+MatthewLacerda2
+marked this pull request as ready for review
+November 5, 2026 00:22
+MatthewLacerda2
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Independent review, follow-up: answered at 96ed17d. Additive and Multiply surfaces take no in-scatter, with tests; the froxels read a 16×8×16 grid of the probes' L0 around the camera, filled on a change, with a sealed room's air dark under a bright sky; the skies share a module; a moving live light no longer rebuilds the Baked list; clamps before Rgba16Float, the jitter's index, the sun's fade and the sky's uv are fixed; Area lights stay out and Graphics.md says so; the sky, glass, smoke and SSR have tests and a look. Read the summary and the description; no second reviewer on its size, as what changed is contained in the readers and one grid.
+MatthewLacerda2
+added
+the
+queue
+Go-ahead: the merge queue may take this PR
+label
+Nov 5, 2026
+Hide details
+View details
+MatthewLacerda2
+merged commit 8cfbb36
+into
+main
+Nov 5, 2026
+18 of 19 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+MatthewLacerda2
+deleted the
+1703-volumetric-fog
+branch
+November 5, 2026 00:39
+This was referenced Nov 5, 2026
+Baked occlusion culling: a cell PVS from Generate Lighting (#1714, part 2)
+#1835
+Merged
+TAA upscaling (TAAU) from the render scale (#1702, part 3)
+#1834
+Merged
+Shadowmask mixed lighting: Baked lamps give no specular and dynamic objects cast no shadow from them
+#1695
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+queue
+Go-ahead: the merge queue may take this PR
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

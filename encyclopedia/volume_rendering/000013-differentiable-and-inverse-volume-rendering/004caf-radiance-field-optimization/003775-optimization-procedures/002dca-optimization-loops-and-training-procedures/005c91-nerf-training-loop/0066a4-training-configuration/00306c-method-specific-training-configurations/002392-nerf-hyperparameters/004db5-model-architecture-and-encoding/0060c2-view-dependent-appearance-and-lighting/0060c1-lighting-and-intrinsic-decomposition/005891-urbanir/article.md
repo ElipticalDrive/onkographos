@@ -1,0 +1,130 @@
+# UrbanIR
+
+Also called: Urban Scene Inverse Rendering
+
+## Overview
+UrbanIR is a method for inverse rendering of large-scale urban scenes from a single monocular video under single illumination, inferring shape, albedo, visibility, and sun/sky illumination to enable relighting and night simulation [S1]. It differs from standard NeRFs by learning intrinsic attributes (albedo, normal) independent of lighting, solving the problem that standard NeRFs bake shading and shadows into observed color, making them non-relightable [S1]. Unlike methods requiring multiple lighting sources (e.g., NeRF-OSR) or LiDAR/multi-camera setups (e.g., FEGR, LightSim), UrbanIR uses only single illumination RGB video [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A multi-frame video of a scene under single illumination with known camera motion. Defined as $\{I_i, E_i, K_i\}$, where $I_i \in \mathbb{R}^{H \times W \times 3}$ is the RGB image, $E_i \in SE(3)$ is the camera pose, and $K_i$ is the camera intrinsic matrix [S1].
+*   **Output:** A neural scene model encoding albedo, normal, semantics, and density, along with inferred lighting parameters (sun, ambient, sky), enabling rendering of novel views under novel lighting conditions [S1].
+
+**Data Structures:**
+The scene representation is built on Instant-NGP, a spatial hash-based voxel NeRF representation [S1].
+*   **Dense Feature Hash Table:** Represents the scene geometry and attributes. It maps 3D coordinates to dense feature vectors [S1].
+*   **MLP Headers:** Individual Multi-Layer Perceptrons are used to decode each attribute (albedo $\mathbf{a}$, normal $\mathbf{n}$, semantics $\mathbf{s}$, density $\sigma$) given a queried feature at point $\mathbf{x}$ [S1].
+*   **Lighting Model $\mathcal{L}$:** Encodes outdoor illumination as $\mathcal{L} = \{ (\mathbf{L}_{\text{sun}}, \psi_{\text{sun}}, \phi_{\text{sun}}), \mathbf{L}_{\text{amb}}, \mathbf{L}_{\text{sky}} \}$ [S1].
+    *   Sun: 5-DoF representation encoding sun color $\mathbf{L}_{\text{sun}}$ and azimuth/zenith angles $\psi_{\text{sun}}, \phi_{\text{sun}}$ [S1].
+    *   Ambient: 3-DoF Lambert model $\mathbf{L}_{\text{amb}}$ [S1].
+    *   Sky: Sky dome model inferring sky texture from viewing direction $\mathbf{L}_{\text{sky}}$ [S1].
+
+**Numbered Steps:**
+
+1.  **Scene Query:** For a query point $\mathbf{x}$ and direction $\mathbf{d}$, retrieve the dense feature vector from the hash table. Pass this feature through individual MLP headers to predict intrinsic attributes $\mathbf{F}_\theta(\mathbf{x}) = (\mathbf{a}, \mathbf{n}, \mathbf{s}, \sigma)$ [S1].
+2.  **Volume Rendering of Intrinsics:** Sample $N$ points along a ray $\mathbf{r}$. Compute alpha-composition weights $w_i$ and accumulate intrinsic values [S1]:
+    $$ w_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) (1 - \exp(-\sigma_i \delta_i)) $$
+    where $\delta_i = t_i - t_{i-1}$ [S1].
+    The rendered intrinsic values are:
+    $$ \mathbf{A}(\mathbf{r}) = \sum_{i=1}^{N} w_i \mathbf{a}_i, \quad \mathbf{N}(\mathbf{r}) = \sum_{i=1}^{N} w_i \mathbf{n}_i, \quad \mathbf{S}(\mathbf{r}) = \sum_{i=1}^{N} w_i \mathbf{s}_i $$
+    [S1]
+3.  **Visibility Estimation:** To model shadows without per-scene optimized MLP heads (which are impractical for changing sun positions), compute an estimate $\hat{\mathbf{x}}(\mathbf{r})$ of the 3D point being shaded by volume rendering depth (substituting $\hat{t} = \sum w_i t_i$) [S1]. Compute visibility $V(\hat{\mathbf{x}}, \text{sun})$ by calculating the transmittance along the ray segment between $\hat{\mathbf{x}}$ and the light source using volume rendering [S1].
+4.  **Final Color Computation:** Combine rendered intrinsics with the lighting model $\mathcal{L}$ and shadow visibility $V$ using a shading function $\texttt{Shade}$ [S1]:
+    $$ \mathbf{C} = \texttt{Shade}(\texttt{Intrinsic}(\mathbf{F}_\theta, \mathbf{r}), \texttt{Shadow}(\mathbf{F}_\theta, \mathbf{r}, \mathcal{L}), \mathcal{L}) $$
+    [S1]
+5.  **Joint Optimization:** Optimize scene parameters $\theta$ and lighting parameters $\mathcal{L}$ jointly using a loss function $\mathcal{L}_{\text{render}}$ and additional constraints $\lambda_1 \mathcal{L}_1 + \dots$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def urbanir_render(ray_origin, ray_direction, scene_hash_table, lighting_params, num_samples):
+    """
+    Renders a single ray using UrbanIR's inverse rendering pipeline.
+    
+    Args:
+        ray_origin: 3D vector, origin of the camera ray.
+        ray_direction: 3D vector, direction of the camera ray.
+        scene_hash_table: Data structure mapping 3D coords to feature vectors.
+        lighting_params: Dict containing sun_color, sun_angles, ambient_color, sky_model.
+        num_samples: Integer, number of points to sample along the ray.
+        
+    Returns:
+        final_color: 3D vector, RGB color.
+        albedo_map: 3D vector, rendered albedo.
+        normal_map: 3D vector, rendered normal.
+        depth: Float, rendered depth.
+    """
+    
+    # 1. Sample points along the ray
+    t_min, t_max = get_ray_bounds(ray_origin, ray_direction)
+    t_vals = linspace(t_min, t_max, num_samples)
+    points = ray_origin + outer_product(t_vals, ray_direction)
+    
+    # 2. Query scene attributes for each point
+    # Retrieve features from hash table and decode via MLP headers
+    # Returns: albedos (N,3), normals (N,3), semantics (N,C), densities (N,1)
+    features = query_hash_table(scene_hash_table, points)
+    albedos, normals, semantics, densities = decode_attributes(features)
+    
+    # 3. Compute alpha-composition weights
+    # delta_i = t_i - t_{i-1}
+    deltas = diff(t_vals)
+    # Transmittance T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
+    # Weights w_i = T_i * (1 - exp(-sigma_i * delta_i))
+    # Note: Standard NeRF alpha composition assumes sigma is density.
+    # UrbanIR uses Instant-NGP density.
+    sigma = densities
+    transmittance = exp(-cumsum(sigma * deltas[:-1]))
+    weights = transmittance * (1 - exp(-sigma * deltas))
+    
+    # 4. Volume render intrinsics
+    albedo_map = sum(weights * albedos, axis=0)
+    normal_map = sum(weights * normals, axis=0)
+    semantic_map = sum(weights * semantics, axis=0)
+    
+    # 5. Estimate depth for shadow visibility
+    # t_hat = sum(w_i * t_i)
+    depth = sum(weights * t_vals)
+    shaded_point = ray_origin + ray_direction * depth
+    
+    # 6. Compute shadow visibility
+    # Trace ray from shaded_point to sun
+    sun_direction = get_sun_direction(lighting_params)
+    # Compute transmittance along shadow ray
+    # This approximates visibility V(shaded_point, sun)
+    shadow_ray_points = sample_shadow_ray(shaded_point, sun_direction)
+    shadow_features = query_hash_table(scene_hash_table, shadow_ray_points)
+    shadow_sigma = decode_density(shadow_features)
+    shadow_transmittance = compute_transmittance(shadow_sigma)
+    visibility = shadow_transmittance
+    
+    # 7. Compute final color using shading model
+    # C = Shade(Intrinsic, Shadow, Lighting)
+    final_color = shade_model(albedo_map, normal_map, visibility, lighting_params)
+    
+    return final_color, albedo_map, normal_map, depth
+```
+
+**Parameters:**
+*   **Hash Table Resolution:** Not given in the sources.
+*   **Number of Samples:** Not given in the sources.
+*   **Loss Weights:** $\lambda_1$ and others are used in joint optimization but specific values are not given in the sources [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Visibility Estimation:** Modeling visibility with a per-scene optimized MLP head is impractical because the sun position changes during relighting, but training data only has one sun position [S1]. UrbanIR avoids this by estimating visibility via transmittance from the shaded point to the light source [S1].
+*   **Large-Scale Scenes:** Standard NeRFs are not suitable for large-scale urban scenes due to memory and consistency issues. Instant-NGP is used to provide compactness and consistency [S1].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Instant-NGP offers low memory consumption and high efficiency in training and rendering compared to standard MLP-based NeRFs [S1].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Designed for expansive outdoor scenes [S1].
+*   **Strengths:** Works with single monocular video; does not require LiDAR or multiple cameras; enables relighting and night simulation [S1].
+*   **Limitations:** Assumes single illumination during training; relies on monocular cues (shadows, normals) which can be ambiguous [S1].
+
+## Background
+UrbanIR was introduced by Chih-Hao Lin, Bohan Liu, Yi-Ting Chen, Kuan-Sheng Chen, David Forsyth, Jia-Bin Huang, Anand Bhattad, and Shenlong Wang from the University of Illinois Urbana-Champaign and University of Maryland, College Park [S1]. The paper "UrbanIR: Large-Scale Urban Scene Inverse Rendering from a Single Video" was published in 3DV 2025 (arXiv:2306.09349v4, 14 Jan 2025) [S1]. It addresses the limitation of existing relightable NeRF methods that focus on small bounded indoor environments or require multiple lighting sources/LiDAR [S1].
+
+## Sources
+[S1] UrbanIR: Large-Scale Urban Scene Inverse Rendering from a Single Video, https://doi.org/10.1109/3dv66043.2025.00052, fetched 2026-10-30

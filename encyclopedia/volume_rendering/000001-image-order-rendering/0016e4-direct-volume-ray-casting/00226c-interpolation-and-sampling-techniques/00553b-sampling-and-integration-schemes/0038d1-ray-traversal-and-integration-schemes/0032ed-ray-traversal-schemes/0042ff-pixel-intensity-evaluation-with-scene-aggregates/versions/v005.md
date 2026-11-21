@@ -1,0 +1,69 @@
+# Pixel Intensity Evaluation with Scene Aggregates
+
+Also called: AIV/ABV Integration, Aggregated Boundary Visibility, Aggregated Visibility Functions Integration
+
+## Overview
+Pixel Intensity Evaluation with Scene Aggregates is a method for rendering volumetric data by integrating radiance over a pixel footprint using aggregated visibility functions to handle inter-voxel correlation and background blending without order-dependent ray marching [S1, unofficial]. It differs from standard ray casting by precomputing visibility terms (Aggregated Interior Visibility and Aggregated Boundary Visibility) to approximate the complex integration of scene primitives, allowing for efficient level-of-detail rendering [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Discretized scene represented as voxels.
+- Camera parameters (pinhole assumption, box pixel reconstruction filter).
+- Background radiance $L_b$ (far-field assumption, independent of position).
+- Scene primitives (e.g., truncated ellipsoids) associated with voxels.
+
+**Outputs:**
+- Pixel intensity $I$.
+
+**Data Structures:**
+- **Boundary Faces:** A list of 2D faces enclosing the 3D scene aggregate, determined via flood fill on the discretized scene.
+- **ABV Map:** A 2D visibility map stored as Haar wavelet coefficients.
+  - **Resolution:** Angular resolution of $64^2$ for accurate reconstruction of high-frequency silhouette signals [S1, unofficial].
+  - **Parameterization:** The hemispherical domain is parameterized using concentric mapping [S1, unofficial].
+
+**Steps:**
+
+1.  **Precompute Aggregated Boundary Visibility (ABV):**
+    1.  Determine the list of boundary faces of the voxels using a flood fill iteration on the discretized scene [S1, unofficial].
+    2.  For each boundary face, consider all directions in its inward-facing hemisphere [S1, unofficial].
+    3.  For each direction, cast visibility rays with origins uniformly sampled on the face to estimate average visibility [S1, unofficial].
+    4.  Use concentric mapping to parameterize the hemispherical domain and obtain a 2D visibility map [S1, unofficial].
+    5.  Project the map to the Haar wavelet basis to store the ABV term [S1, unofficial].
+
+2.  **Evaluate Pixel Intensity:**
+    1.  Define the pixel footprint $P$ in world space.
+    2.  Identify the subset $P^+ \subseteq P$ such that rays originated from points in $P^+$ intersect the scene aggregate primitives. Points in $P \setminus P^+$ (denoted $P^-$) do not intersect the geometry [S1, unofficial].
+    3.  Compute the Aggregated Boundary Visibility $\hat{V}_b(\boldsymbol{\nu}; P^+)$ for the subset $P^+$:
+        $$
+        \hat{V}_b(\boldsymbol{\nu}; P^+) = \frac{1}{|P|} \int_{P^+} V(\boldsymbol{x}, \boldsymbol{\nu}) d\boldsymbol{x}
+        $$
+        where $|P|$ is the area of $P$, $\boldsymbol{\nu}$ is the viewing direction, and $V(\boldsymbol{x}, \boldsymbol{\nu})$ is the visibility at point $\boldsymbol{x}$ in direction $\boldsymbol{\nu}$ [S1, unofficial].
+    4.  Calculate the pixel intensity $I$ by integrating incoming radiance $L_i$ over the footprint $P$:
+        $$
+        I = \frac{1}{|P|} \int_P L_i(\boldsymbol{x}_p, \boldsymbol{\nu}_p) d\boldsymbol{x}_p
+        $$
+        where $\boldsymbol{\nu}_p$ is the pixel direction [S1, unofficial].
+    5.  Evaluate $L_i(\boldsymbol{x}_p, \boldsymbol{\nu}_p)$ based on the location of $\boldsymbol{x}_p$:
+        - If $\boldsymbol{x}_p \in P^-$, $L_i(\boldsymbol{x}_p, \boldsymbol{\nu}_p) = L_b(-\boldsymbol{\nu}_p)$ (background radiance) [S1, unofficial].
+        - If $\boldsymbol{x}_p \in P^+$, $L_i$ is evaluated using the aggregated visibility terms (ABV and AIV) to account for the primitive coverage and inter-voxel correlation [S1, unofficial].
+
+**Parameters:**
+- Angular resolution for ABV precomputation: $64^2$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The ABV term contains high-frequency signals responsible for reconstructing the silhouette of the scene; insufficient angular resolution may lead to inaccurate coverage reconstruction [S1, unofficial].
+- **Boundaries:** The ABV term is only defined on the 2D boundary enclosing the 3D scene aggregate. The boundary must be reasonably tight such that no primitives lie outside it [S1, unofficial].
+- **Coverage Ambiguity:** For points inside $P^+$, it may or may not be covered by the underlying geometry. The method preserves this notion of semi-transparency via primitive coverage $c(\boldsymbol{\omega}_p)$ [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Precomputation involves flood fill and ray casting for all boundary faces and directions, which is offline. Rendering time depends on the evaluation of the integral over $P$, utilizing precomputed wavelet coefficients.
+- **Memory Complexity:** Storage of ABV and AIV terms as Haar wavelet coefficients. Nonlinear approximation and truncation can be applied to compress the visibility data [S1, unofficial].
+- **Strengths:** Handles inter-voxel correlation correctly, which traditional volumetric models fail to distinguish. Enables level-of-detail rendering by aggregating scene appearance.
+- **Limitations:** Requires precomputation of visibility terms. Relies on far-field assumption for background radiance.
+- **When to use:** Efficient scene appearance aggregation for level-of-detail rendering where inter-voxel correlation is significant.
+
+## Background
+The method was introduced in the paper "Efficient Scene Appearance Aggregation for Level-of-Detail Rendering" [S1, unofficial]. It addresses the limitation of traditional volumetric models that cannot distinguish between different types of inter-voxel correlation, leading to incorrect accumulation results. The approach uses aggregated visibility functions (AIV and ABV) to preserve high-frequency information and accurately reconstruct scene silhouettes.
+
+## Sources
+[S1] Efficient Scene Appearance Aggregation for Level-of-Detail Rendering, https://core.ac.uk/works/391729893, fetched 2026-11-01 (unofficial)

@@ -1,0 +1,87 @@
+# Parallel Volume Rendering via k-d Tree Subdivision and Binary-Swap Compositing
+
+Also called: Binary-Swap Parallel Rendering, Cluster-based volume rendering, Distributed volume rendering, PC Cluster Parallel Volume Rendering, Parallel volume rendering via k-d tree subdivision
+
+## Overview
+This method enables the interactive rendering of volumetric datasets that exceed the texture memory capacity of a single graphics card by distributing the volume across a cluster of commodity PCs [S1, S2]. It solves the video memory bottleneck inherent in consumer hardware (e.g., 64 MB VRAM) by subdividing the volume spatially and aggregating the memory of multiple nodes [S2]. It differs from [MPI Volume Rendering (3D Decomposition)](2254-mpi-volume-rendering-3d-decomposition.md) by using a k-d tree for spatial subdivision and binary-swap compositing for image assembly, rather than strict 3D grid decomposition with MPI-based pixel accumulation [S1, S2].
+
+## How it works
+**Inputs:**
+*   Volumetric dataset $V$ of arbitrary dimensions.
+*   Cluster configuration: $N$ compute nodes and 1 host node.
+
+**Outputs:**
+*   Final rendered image $I$ displayed on the host.
+
+**Data Structures:**
+*   **Subvolume:** A resampled 3D texture of fixed dimensions $256 \times 256 \times 256$ voxels [S1, S2].
+*   **Subimage:** The 2D image fragment rendered by a single node.
+
+**Steps:**
+
+1.  **Spatial Subdivision:** Subdivide the input volume $V$ spatially using a k-d tree algorithm to generate $N$ subvolumes [S1, S2]. The subdivision ensures that each resulting subvolume fits within the texture memory of a single node [S2].
+2.  **Resampling:** For each subvolume, perform higher-order resampling in software to a fixed resolution of $256 \times 256 \times 256$ voxels [S1, S2]. This fixed size allows the use of hardware tri-linear interpolation during rendering while maintaining quality for smaller source volumes [S1, S2].
+3.  **Distribution:** Transfer each resampled subvolume to the texture memory of a distinct compute node [S2].
+4.  **Parallel Rendering:** For each frame, every compute node renders its assigned subvolume to produce a subimage [S1, S2].
+5.  **Binary-Swap Compositing:** Composite the subimages from all nodes using binary-swap compositing [S1, S2]. This method avoids the bandwidth bottleneck of sending full images to a single host for accumulation [S2].
+6.  **Display:** Send the final composite image to the host node for display and user interface control [S1, S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def parallel_volume_rendering(volume_data, cluster_nodes, host_node):
+    """
+    volume_data: 3D array of voxel values
+    cluster_nodes: list of compute node objects
+    host_node: host object for display
+    """
+    # Step 1 & 2: Subdivide and Resample
+    # Note: The specific k-d tree splitting criteria (e.g., centroid, mean) 
+    # are not detailed in the sources [S1, S2]. [G]
+    subvolumes = k_d_tree_subdivide(volume_data, num_partitions=len(cluster_nodes))
+    
+    resampled_subvolumes = []
+    for subvol in subvolumes:
+        # Resample to fixed 256x256x256 using higher-order software resampling
+        # prior to hardware tri-linear interpolation [S1, S2]
+        fixed_size = 256
+        resampled = software_resample(subvol, target_size=(fixed_size, fixed_size, fixed_size))
+        resampled_subvolumes.append(resampled)
+    
+    # Step 3: Distribute to texture memory
+    # Note: Specific memory management API calls are not provided [S1, S2]. [G]
+    for i, node in enumerate(cluster_nodes):
+        node.upload_texture(resampled_subvolumes[i])
+    
+    # Step 4 & 5: Render and Composite
+    # Binary-swap compositing is used to combine subimages [S1, S2]
+    # Note: The exact binary-swap algorithm implementation is not detailed in the sources. [G]
+    final_image = binary_swap_composite([node.render_subimage() for node in cluster_nodes])
+    
+    # Step 6: Display
+    host_node.display(final_image)
+```
+
+**Parameters:**
+*   **Subvolume Resolution:** Fixed at $256 \times 256 \times 256$ voxels per node [S1, S2].
+*   **Cluster Size:** 9 computers (8 compute nodes, 1 host) in the cited implementation [S2].
+*   **Network:** Compute nodes use 100-Base-T Fast Ethernet; Host uses Gigabit Ethernet [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Video Memory Limits:** Consumer graphics cards (e.g., Nvidia GeForce 3 with 64 MB) share memory between frame buffer and texture memory [S2]. Failing to fit the volume in texture memory causes swapping over the slow graphics bus, degrading performance [S1, S2].
+*   **Quality vs. Performance:** Rendering the full $512 \times 512 \times 512$ volume yields 1-2 fps, while rendering a scaled-down $256 \times 256 \times 256$ volume achieves over 10 fps [S1].
+
+## Operating characteristics
+*   **Performance:** On a 9-node cluster (8 compute nodes), rendering a $512 \times 512 \times 512$ volume to a $512 \times 512$ window achieves 1-2 frames per second [S1, S2]. Rendering a $256 \times 256 \times 256$ volume achieves over 10 fps [S1].
+*   **Hardware:** Tested on PCs with AMD Athlon 1.3 GHz processors, 1 GB PC133 SDRAM, and Nvidia GeForce 3 graphics cards [S1, S2].
+*   **Strengths:** Enables interactive frame rates suitable for parameter tuning, which software-based methods cannot achieve [S2]. Aggregates video memory across the cluster to render volumes larger than any single card's capacity [S1, S2].
+*   **Limitations:** Performance is constrained by the combined fill-rate of the graphics cards and the network bandwidth for compositing [S1, S2]. The fixed subvolume size may introduce resampling artifacts if the original volume is significantly smaller than $256^3$ [S1, S2].
+
+## Background
+This technique was developed for PC clusters equipped with consumer-grade graphics hardware to address the limited video memory of cards like the Nvidia GeForce 3 [S1, S2]. It builds on [MPI Volume Rendering (3D Decomposition)](2254-mpi-volume-rendering-3d-decomposition.md) by replacing MPI-based pixel accumulation with binary-swap compositing and using k-d tree subdivision for load balancing and memory distribution [S1, S2]. The approach allows for the interactive visualization of large datasets, facilitating the fine-tuning of rendering parameters [S2].
+
+## Sources
+[S1] Interactive Multi-volume Visualization, https://doi.org/10.1007/3-540-46080-2_11, fetched 2026-10-26
+[S2] PDF Hardware-Accelerated Parallel Non-Photorealistic Volume Rendering, https://www3.cs.stonybrook.edu/~mueller/teaching/cse616/maNPR.pdf, fetched 2026-10-27

@@ -1,0 +1,125 @@
+# Multiresolution Rendering with Data Reduction
+
+Also called: Adaptive Decompression Rendering, Super-linear Multiresolution Speed-up
+
+## Overview
+Multiresolution Rendering with Data Reduction is a technique that exploits hierarchical data compression to achieve super-linear performance increases in volume ray casting by computing fewer voxels and increasing step lengths for low-resolution blocks [S1, unofficial]. It solves the computational bottleneck of large volumetric datasets by adaptively selecting resolution levels based on ray traversal, allowing for interactive frame rates on data that would otherwise be too large for real-time rendering [S1, unofficial]. Unlike standard multiresolution methods that primarily use lower resolutions for distant objects or early termination, this method explicitly applies a data reduction ratio to volume blocks, trading visual fidelity for significant speedups in global illumination calculations [S1, unofficial].
+
+## How it works
+The method operates by traversing a multiresolution hierarchy of the volume data. For each ray segment, the algorithm determines the appropriate resolution level based on the current step length and the desired data reduction ratio. Lower resolution blocks are sampled with larger steps, reducing the total number of texture lookups and shading computations.
+
+**Inputs:**
+*   Multiresolution volume data (e.g., wavelet or Laplacian pyramid coefficients).
+*   Ray origin and direction.
+*   Data Reduction Ratio ($R$).
+*   Segment Length ($L$).
+
+**Outputs:**
+*   Final color and opacity for each pixel.
+
+**Data Structures:**
+The volume is stored as a hierarchy of grids. The source notes do not specify the exact bit-packing or field layout of the multiresolution coefficients, only that the data is reduced by a specific ratio [S1, unofficial]. The hierarchy typically consists of levels $l=0$ (full resolution) to $l=k$ (lowest resolution).
+
+**Parameters:**
+*   **Data Reduction Ratio ($R$):** The compression factor applied to volume blocks. Typical values cited are 8.5:1, 15.7:1, 31.4:1, and 92.8:1 [S1, unofficial].
+*   **Segment Length ($L$):** The number of voxels traversed at a given resolution level. A typical value cited is 16 voxels [S1, unofficial].
+*   **Number of LAO Rays:** The number of rays used for Local Ambient Occlusion (LAO) calculations. Typical values are 128, 64, or 16 [S1, unofficial].
+
+**Steps:**
+1.  **Initialize Ray:** Start at the ray origin. Set current resolution level $l$ to the highest available (full resolution).
+2.  **Traverse:** For the current segment of length $L$, determine the appropriate resolution level $l$ such that the physical distance covered matches the reduced voxel size.
+3.  **Sample:** Sample the volume data at level $l$. If using data reduction, the effective voxel size is scaled by $\sqrt[3]{R}$ (assuming isotropic reduction) or derived from the specific reduction scheme [S1, unofficial].
+4.  **Shade:** Compute the color and opacity for the segment. If advanced illumination (e.g., LAO) is enabled, sample additional rays (e.g., 128 rays) to compute ambient occlusion [S1, unofficial].
+5.  **Composite:** Accumulate the color and opacity into the frame buffer using front-to-back or back-to-front compositing.
+6.  **Advance:** Move the ray forward by the segment length. If the ray exits the volume or reaches a threshold of opacity, terminate. Otherwise, repeat from Step 2, potentially adjusting $l$ based on the distance to the next feature or boundary.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_multiresolution_ray(ray_origin, ray_direction, volume_hierarchy, reduction_ratio, segment_length, num_lao_rays):
+    """
+    Renders a single ray using multiresolution data reduction.
+    
+    Args:
+        ray_origin: (x, y, z) start position.
+        ray_direction: (dx, dy, dz) normalized direction vector.
+        volume_hierarchy: List of volume grids from highest to lowest resolution.
+        reduction_ratio: Float, the data reduction factor (e.g., 8.5).
+        segment_length: Int, number of steps per segment at current resolution.
+        num_lao_rays: Int, number of rays for LAO calculation.
+        
+    Returns:
+        (color, opacity) tuple.
+    """
+    color = (0.0, 0.0, 0.0)
+    opacity = 0.0
+    t = 0.0  # Distance along ray
+    
+    # Determine initial resolution level based on segment length and reduction ratio
+    # Note: Exact mapping from reduction_ratio to resolution level is not specified in sources [S1, unofficial]
+    # Assume a function get_resolution_level(t, reduction_ratio) exists or is derived from hierarchy
+    current_level = 0 
+    
+    while t < max_distance and opacity < 1.0:
+        # Get voxel size for current level
+        voxel_size = get_voxel_size(volume_hierarchy[current_level])
+        
+        # Calculate step size based on segment length and reduction
+        # The source mentions "increased step length for low resolution blocks" [S1, unofficial]
+        step_size = voxel_size * segment_length
+        
+        # Sample the volume at the current position and level
+        # If data reduction is applied, the sampling might involve averaging or interpolation
+        # from the reduced block [S1, unofficial]
+        sample = sample_volume(volume_hierarchy[current_level], ray_origin + ray_direction * t)
+        
+        # Compute shading
+        # If LAO is enabled, compute ambient occlusion using num_lao_rays [S1, unofficial]
+        if num_lao_rays > 0:
+            ao = compute_lao(ray_origin + ray_direction * t, ray_direction, volume_hierarchy, num_lao_rays)
+        else:
+            ao = 1.0
+            
+        # Composite
+        alpha = sample.opacity * ao
+        color = color + (1.0 - opacity) * sample.color * alpha
+        opacity = opacity + (1.0 - opacity) * alpha
+        
+        # Advance ray
+        t += step_size
+        
+        # Adjust resolution level if necessary
+        # This logic is not fully detailed in sources [S1, unofficial]
+        # Typically, as t increases or features become smaller, level might change
+        current_level = adjust_resolution_level(t, current_level, reduction_ratio)
+        
+    return color, opacity
+```
+
+**Edge Cases and Pitfalls:**
+*   **Shadow Volume Sensitivity:** Sensitivity to shadow volume errors increases at lower resolutions (e.g., $32^3$, $64^3$, $128^3$, $256^3$). Careful selection of segment length and reduction ratio is required to maintain accuracy [S1, unofficial].
+*   **Mean Error:** Mean error increases with higher data reduction ratios. Reported mean errors are 0.6 at 8.5:1, 1.2 at 15.7:1, and 1.6 at 31.4:1 [S1, unofficial].
+*   **LAO Ray Count Sensitivity:** The number of rays used for LAO significantly impacts error. 128 rays yield a mean error of 0.3, 64 rays yield 0.7, and 16 rays yield 0.9 [S1, unofficial].
+
+## Subtopics
+
+### [Reduced Volume Texture with Box Average](16537-reduced-volume-texture-with-box-average.md)
+Reduced Volume Texture with Box Average is a technique for handling volumetric datasets that exceed the maximum texture dimensions supported by the GPU (e.g., 2048 voxels per axis). It solves the problem of rendering failure and main-thread stalling by maintaining multiple representations of the data: a full-resolution grid for high-quality rendering and a coarser grid created by box averaging for preview or low-resolution display. This approach allows the viewport to select the representation that fits the device's texture limits, ensuring continuous rendering even when the full volume cannot be loaded into GPU memory.
+
+### ROI-based High-Resolution Rendering
+ROI-based High-Resolution Rendering is a strategy to handle prohibitively large datasets by first rendering the entire volume at reduced resolution, then refining a user-selected region of interest (ROI) at full resolution [S2]. The process involves: 1. Rendering the entire volume at reduced resolution. 2. User indicates a smaller ROI. 3. Producing a high-resolution volume rendering for the selected ROI [S2]. This reduces initial memory and compute requirements by deferring high-resolution sampling to a smaller sub-volume, addressing datasets exceeding 60 GB [S2]. It is designed specifically for tiled cryo-imaging datasets (e.g., 4×5 tiling, 40μm section thickness) where full-resolution rendering exceeds practical GPU memory limits [S2].
+
+## Operating characteristics
+*   **Performance:** The method achieves super-linear performance increases [S1, unofficial]. By computing fewer voxels and increasing step lengths for low-resolution blocks, it significantly reduces the computational load.
+*   **Accuracy:** There is a trade-off between speed and accuracy. Mean error increases with higher data reduction ratios (0.6 at 8.5:1, 1.2 at 15.7:1, 1.6 at 31.4:1) [S1, unofficial]. Shadow volume sensitivity is higher at lower resolutions [S1, unofficial].
+*   **Memory:** The method requires storing multiple resolution levels of the volume data. However, by using reduced textures, it can fit larger datasets into GPU memory than would otherwise be possible [S1, unofficial].
+*   **Use Cases:** It is used in interactive medical visualization and virtual autopsy applications to maintain real-time performance on large datasets [S1, unofficial]. It is particularly useful for global illumination techniques like LAO, which are computationally demanding [S1, unofficial].
+*   **Limitations:** The method introduces visual artifacts and errors, especially at high reduction ratios. It requires careful tuning of parameters (segment length, reduction ratio, LAO ray count) to balance performance and accuracy [S1, unofficial].
+
+## Background
+The method was presented by Patric Ljung from Siemens Corporate Research, Princeton, USA, in the paper "Advanced Illumination Techniques for GPU-Based Volume Raycasting" [S1, unofficial]. The work was part of research into efficient global illumination techniques for volume rendering, specifically focusing on Local Ambient Occlusion (LAO) and Diffuse Shading. The research aimed to improve medical diagnosis by enhancing the perception of shapes, densities, and depth in volumetric data [S1, unofficial]. The super-linear speed-up was demonstrated on a volume of $512^3$ voxels [S1, unofficial].
+
+## Sources
+[S1] GPU-Based Volume Ray-Casting with Advanced Illumination, https://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/viscom/2008/advanced_illumination.pdf, fetched 2026-10-29 (unofficial)
+[S2] Enhanced volume rendering techniques for high-resolution color cryo-imaging data, https://doi.org/10.1117/12.813756, fetched 2026-11-08

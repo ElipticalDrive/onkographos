@@ -1,0 +1,215 @@
+--- v004.md
++++ v005.md
+@@ -7,151 +7,58 @@
+ 
+ ## How it works
+-The method establishes a bridge between the CUDA and OpenGL contexts using the `cudaGraphicsRegister` API family. It supports two primary resource types: Pixel Buffer Objects (PBOs) for image output and OpenGL Textures (2D/3D) for data input or output via surface objects.
++The method establishes a bridge between the CUDA and OpenGL contexts using the `cudaGraphicsRegister` API family [S7, unofficial]. It supports two primary resource types: Pixel Buffer Objects (PBOs) for image output and OpenGL Textures (2D/3D) for data input or output via surface objects [S4, unofficial].
+ 
+ ### Inputs and Outputs
+ - **Inputs:** OpenGL resource IDs (texture IDs, buffer IDs), OpenGL context handle, CUDA device ID.
+-- **Outputs:** CUDA graphics resource handles (`cudaGraphicsResource_t`), CUDA array views (`cudaArray_t`), CUDA surface objects (`cudaSurfaceObject_t`), or device pointers (`void*`).
++- **Outputs:** CUDA graphics resource handles (`cudaGraphicsResource_t`), CUDA array views (`cudaArray_t`), CUDA surface objects (`cudaSurfaceObject_t`), or device pointers (`void*`) [S3, S6, S7, S9, unofficial].
+ 
+ ### Data Structures and Layouts
+-
+-**1. CUDA Graphics Resource Handle**
+-A opaque handle returned by registration functions, used to map/unmap the resource.
+-- Type: `cudaGraphicsResource_t`
+-
+-**2. CUDA Array View**
+-A linear memory structure representing the OpenGL texture data, accessible via texture/surface references.
+-- Type: `cudaArray_t`
+-
+-**3. CUDA Surface Object**
+-A writable view of a CUDA array, allowing direct per-voxel/pixel writes from kernels.
+-- Type: `cudaSurfaceObject_t`
+-
+-**4. CudaGlTexture3D Class Layout (Example Implementation)**
+-```cpp
+-struct CudaGlTexture3D {
+-    cudaGraphicsResource* m_resource; // Handle to the registered OpenGL resource
+-    int m_width;                      // Texture width
+-    int m_height;                     // Texture height
+-    int m_depth;                      // Texture depth (for 3D textures)
+-};
+-```
+-[S3, unofficial]
++- **CUDA Graphics Resource Handle:** An opaque handle returned by registration functions, used to map/unmap the resource [S3, unofficial]. Type: `cudaGraphicsResource_t`.
++- **CUDA Array View:** A linear memory structure representing the OpenGL texture data, accessible via texture/surface references [S1]. Type: `cudaArray_t`.
++- **CUDA Surface Object:** A writable view of a CUDA array, allowing direct per-voxel/pixel writes from kernels [S6, unofficial]. Type: `cudaSurfaceObject_t`.
++- **CudaGlTexture3D Class Layout (Example Implementation):** `m_resource` (`cudaGraphicsResource_t*`), `m_width` (`int`), `m_height` (`int`), `m_depth` (`int`) [S3, unofficial].
+ 
+ ### Numbered Steps
+-
+-The general workflow involves registration, mapping, computation, unmapping, and rendering.
+-
+-#### Phase 1: Registration (Initialization)
+-1. **Create OpenGL Resource:**
+-   - For PBO: Generate a buffer using `glGenBuffers`, bind to `GL_PIXEL_UNPACK_BUFFER`, and allocate storage with `glBufferData`.
+-   - For Texture: Generate a texture using `glGenTextures`, bind to `GL_TEXTURE_3D` (or `GL_TEXTURE_2D`), and set parameters.
+-   - For VBO: Generate a buffer using `glGenBuffers`, bind to `GL_ARRAY_BUFFER`, and allocate storage.
+-   [S2, S5][S9, unofficial]
+-
+-2. **Register with CUDA:**
+-   - Call `cudaGraphicsGLRegisterImage` for textures or `cudaGraphicsGLRegisterBuffer` for PBOs/VBOs.
+-   - Specify the target (e.g., `GL_TEXTURE_3D`, `GL_PIXEL_UNPACK_BUFFER`).
+-   - Set flags:
+-     - `cudaGraphicsRegisterFlagsSurfaceLoadStore`: Allows CUDA kernels to write to the resource (e.g., for output textures).
+-     - `cudaGraphicsMapFlagsReadOnly`: If the resource is only read by CUDA (e.g., transfer function textures).
+-     - `cudaGraphicsMapFlagsNone`: Default for buffers.
+-   [S3, S6, S7, S9, unofficial]
+-
+-   *Example Code:*
+-   ```cpp
+-   cudaGraphicsResource_t cudaResource;
+-   // For a 3D texture
+-   cudaGraphicsGLRegisterImage(&cudaResource, textureId, GL_TEXTURE_3D, cudaGraphicsRegisterFlagsSurfaceLoadStore);
+-   // For a PBO
+-   cudaGraphicsGLRegisterBuffer(&cudaResource, pboId, cudaGraphicsMapFlagsNone);
+-   ```
+-   [S3, S6, S7, S9, unofficial]
+-
+-#### Phase 2: Mapping (Per-Frame)
+-1. **Map Resource:**
+-   - Call `cudaGraphicsMapResources(count, &resource, stream)` to gain CUDA access.
+-   - This synchronizes the resource between OpenGL and CUDA contexts.
+-   [S3, S6, S7, S9, unofficial]
+-
+-2. **Get Mapped View:**
+-   - **For Textures:** Call `cudaGraphicsSubResourceGetMappedArray(&array, resource, 0, 0)` to retrieve the `cudaArray_t`.
+-     - Bind to CUDA Texture Object: `cudaBindTextureToArray(texRef, array, channelDesc)`.
+-     - Bind to CUDA Surface Object: `cudaBindSurfaceToArray(surf, array)`.
+-   [S3, S6, S7, unofficial]
+-   - **For Buffers (PBO/VBO):** Call `cudaGraphicsResourceGetMappedPointer(&ptr, &bytes, resource)` to retrieve the raw device pointer.
+-   [S9, unofficial]
+-
+-#### Phase 3: Computation
+-1. **Launch CUDA Kernel:**
+-   - The kernel reads from mapped textures (if input) or writes to mapped arrays/pointers (if output).
+-   - **PBO Write:** Kernel writes pixel data directly to the PBO memory.
+-   - **Texture Surface Write:** Kernel writes voxel data directly to the 3D texture via surface object.
+-   - **VBO Write:** Kernel writes vertex/attribute data directly to the VBO memory.
+-   [S2, S5][S7, S9, unofficial]
+-
+-2. **Synchronize:**
+-   - Call `cudaDeviceSynchronize()` or `cudaStreamSynchronize(stream)` to ensure kernel completion before OpenGL access.
+-   [S3, S7, unofficial]
+-
+-#### Phase 4: Unmapping and Rendering
+-1. **Unmap Resource:**
+-   - Call `cudaGraphicsUnmapResources(count, &resource, stream)` to release CUDA access.
+-   - This allows OpenGL to use the resource again.
+-   [S3, S6, S7, S9, unofficial]
+-
+-2. **Display/Render:**
+-   - **PBO Method:**
+-     - Option A: Bind PBO to `GL_PIXEL_UNPACK_BUFFER` and draw a fullscreen quad using a trivial shader.
+-     - Option B: Use an explicit Frame Buffer Object (FBO) where the PBO is attached or used to build the frame buffer, avoiding rasterization hardware for display.
+-   [S2, S5]
+-   - **Texture Method:**
+-     - Bind the OpenGL texture to a texture unit.
+-     - Draw a textured quad (or use the texture in a subsequent render pass).
+-   [S6, S10, unofficial]
+-   - **VBO Method:**
+-     - Bind VBOs, set vertex pointers, and call `glDrawArrays` or `glDrawElements`.
+-   [S9, unofficial]
++1. **Registration:** Create the OpenGL resource (PBO, 3D/2D Texture, or VBO) [S2, S5][S9, unofficial]. Register it with CUDA using `cudaGraphicsGLRegisterImage` for textures or `cudaGraphicsGLRegisterBuffer` for buffers [S3, S9, unofficial]. Specify flags: `cudaGraphicsRegisterFlagsSurfaceLoadStore` for writable textures, `cudaGraphicsMapFlagsReadOnly` for read-only textures, or `cudaGraphicsMapFlagsNone` for buffers [S3, S6, S9, unofficial].
++2. **Mapping:** Call `cudaGraphicsMapResources` to gain CUDA access and synchronize contexts [S3, S6, S7, S9, unofficial]. For textures, call `cudaGraphicsSubResourceGetMappedArray` to retrieve the `cudaArray_t` [S3, S6, S7, unofficial]. Bind it to a CUDA texture object via `cudaBindTextureToArray` or to a surface object via `cudaBindSurfaceToArray` [S6, unofficial]. For buffers, call `cudaGraphicsResourceGetMappedPointer` to retrieve the raw device pointer [S9, unofficial].
++3. **Computation:** Launch the CUDA kernel to read from mapped textures or write to mapped arrays/pointers [S2, S5][S7, S9, unofficial]. Synchronize with `cudaDeviceSynchronize()` to ensure completion before OpenGL access [S3, S7, unofficial].
++4. **Unmapping & Rendering:** Call `cudaGraphicsUnmapResources` to release CUDA access [S3, S6, S7, S9, unofficial]. Display via PBO (bind to `GL_PIXEL_UNPACK_BUFFER` and draw a quad, or use an explicit FBO) [S2, S5], or bind the texture and draw a quad [S6, S10, unofficial]. For VBOs, bind buffers and call `glDrawArrays` [S9, unofficial].
+ 
+ ### Pseudocode: PBO-Based Rendering Loop
+-
+ ```python
+-# Initialization (once)
+ def init_cuda_gl_interop(pbo_id):
+-    # 1. Register PBO with CUDA
+-    cuda_resource = cudaGraphicsGLRegisterBuffer(pbo_id, cudaGraphicsMapFlagsNone)
++    # Register the OpenGL PBO with the CUDA runtime to enable zero-copy sharing
++    cuda_resource = register_opengl_buffer_with_cuda(pbo_id, flags=MAP_FLAGS_NONE)
+     return cuda_resource
+ 
+-def render_frame(cuda_resource, width, height, kernel_func):
+-    # 1. Map the PBO into CUDA address space
+-    cudaGraphicsMapResources(1, cuda_resource, 0)
++def render_frame(cuda_resource, width, height, compute_kernel):
++    # Gain CUDA access to the mapped OpenGL resource
++    map_resources(1, cuda_resource, stream=0)
+     
+-    # 2. Get device pointer to the PBO memory
+-    device_ptr, bytes_count = cudaGraphicsResourceGetMappedPointer(cuda_resource)
++    # Retrieve the device pointer to the PBO memory
++    device_ptr, bytes_count = get_mapped_pointer(cuda_resource)
+     
+-    # 3. Launch CUDA kernel to write image data to PBO
+-    # Kernel signature: __global__ void render_kernel(unsigned char* output, int width, int height)
+-    block_dim = dim3(16, 16, 1)
+-    grid_dim = dim3((width + 15) // 16, (height + 15) // 16, 1)
+-    kernel_func<<<grid_dim, block_dim>>>(device_ptr, width, height)
++    # Launch the volume rendering kernel
++    block_dim = (16, 16, 1)
++    grid_dim = ((width + 15) // 16, (height + 15) // 16, 1)
++    compute_kernel(grid_dim, block_dim, device_ptr, width, height)
+     
+-    # 4. Synchronize CUDA execution
+-    cudaDeviceSynchronize()
++    # Ensure kernel completion before OpenGL access
++    synchronize_device()
+     
+-    # 5. Unmap the PBO to release CUDA access
+-    cudaGraphicsUnmapResources(1, cuda_resource, 0)
++    # Release CUDA access to the resource
++    unmap_resources(1, cuda_resource, stream=0)
+     
+-    # 6. OpenGL Rendering (Display)
+-    # Option: Bind PBO and draw quad, or use FBO approach
+-    glActiveTexture(GL_TEXTURE0)
+-    glBindTexture(GL_TEXTURE_2D, display_texture_id)
+-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, device_ptr)
+-    draw_textured_quad()
+-    swap_buffers()
++    # Transfer PBO data to a display texture and render
++    bind_texture_unit(GL_TEXTURE0)
++    bind_texture(GL_TEXTURE_2D, display_texture_id)
++    copy_pbo_to_texture(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, device_ptr)
++    draw_screen_quad()
++    swap_framebuffers()
+ ```
+-[G] *Note: The `cudaGraphicsGLRegisterBuffer` and related functions are CUDA Runtime API calls. The OpenGL calls (`glTexSubImage2D`, `draw_textured_quad`) are standard OpenGL. The kernel launch syntax is CUDA C++.*
+ 
+ ### Parameters and Typical Values
+ - **Block Dimension:** Typically `dim3(16, 16, 1)` for 2D image rendering [S6, unofficial].
+-- **Grid Dimension:** Calculated as `(Width + block_dim.x) / block_dim.x` for x, `(Height + block_dim.y) / block_dim.y` for y [S6, unofficial].
++- **Grid Dimension:** Calculated as `(Width + block_dim.x) / block_dim.x` for x, `(Height + block_dim.y) / block_dim.y` for y, and `1` for z [S6, unofficial].
+ - **Interpolation Filter:** Hamming windowed-sinc filter with width 5 is used to minimize artifacts in resampling operations [S4, unofficial].
+ - **Zero-Padding:** 100% zero-padding increases memory requirements by a factor of 8 but suppresses overlapping artifacts in Fourier-based methods [S4, unofficial].
+@@ -167,5 +74,5 @@
+ 
+ ### [Bindless Textures in CUDA](1980-bindless-textures-in-cuda.md)
+-Bindless Textures in CUDA is a method for managing and accessing texture data directly from CUDA kernels without the overhead of OpenGL-CUDA interoperability binding and mapping cycles. It solves the performance bottlenecks and resource limitations inherent in traditional OpenGL-CUDA texture sharing, where textures must be bound, mapped to CUDA resources, and unmapped every frame. Unlike [CUDA-OpenGL Interop Surface Write](2228-cuda-opengl-interop-surface-write.md) which focuses on surface buffers, this method specifically addresses texture sampling, allowing a dynamic number of textures to be exposed simultaneously to the kernel at runtime.
++Bindless Textures in CUDA is a method for managing and accessing texture data directly from CUDA kernels without the per-frame binding and mapping overhead of OpenGL-CUDA interoperability. It solves the performance bottlenecks and resource limits of traditional OpenGL-CUDA texture sharing, where textures must be bound, mapped to CUDA resources, and unmapped every frame. Unlike [CUDA-OpenGL Interop Surface Write](2228-cuda-opengl-interop-surface-write.md), which focuses on surface buffers, this method addresses texture sampling by allowing a dynamic number of textures to be exposed simultaneously to the kernel at runtime.
+ 
+ ### [CUDA-OpenGL Interop Surface Write](2228-cuda-opengl-interop-surface-write.md)
+@@ -176,15 +83,15 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The core interop operations (register, map, unmap) are constant time relative to data size but involve API overhead. The rendering loop performance is dominated by the CUDA kernel execution time.
+-- **Memory Complexity:** Zero-copy sharing eliminates the need for double-buffering in system memory, reducing memory footprint by avoiding host-side copies [S2, S5]. However, zero-padding in Fourier methods can increase VRAM usage by a factor of 8 [S4, unofficial].
++- **Time Complexity:** The core interop operations (register, map, unmap) are constant time relative to data size but involve API overhead. The rendering loop performance is dominated by the CUDA kernel execution time [S2, S5].
++- **Memory Complexity:** Zero-copy sharing eliminates four serial copies and four redundant texture objects compared to high-level libraries like SFML, reducing memory footprint [S2, S5]. However, zero-padding in Fourier methods can increase VRAM usage by a factor of 8 [S4, unofficial].
+ - **Measured Performance:** On a 512^3 dataset, the pure GPU implementation using CUDA-OpenGL interop outperformed the hybrid (CPU-GPU) one by a factor of 117x for the entire pipeline and 29x for the rendering loop [S4, unofficial]. On NVIDIA GeForce GT 640, the entire pipeline took 693.365 ms; on NVIDIA QUADRO K5000, it took 164.4 ms [S4, unofficial].
+-- **Scaling:** The method scales with GPU compute power. Trilinear interpolation has almost the same performance as nearest-neighbour for slice sizes <= 512^2, but incurs higher performance cost for larger volumes [S4, unofficial].
++- **Scaling:** The method scales with GPU compute power. Trilinear interpolation has almost the same performance as nearest-neighbour for slice sizes ≤ 512^2, but incurs higher performance cost for larger volumes [S4, unofficial].
+ - **Strengths:** Eliminates CPU bottlenecks from draw calls and API overhead [S2, S5]. Eliminates four serial copies and four redundant texture objects compared to high-level libraries like SFML [S2, S5][S8, unofficial]. Allows greater control over buffer bit depth [S2].
+ - **Limitations:** Requires manual management of OpenGL and CUDA contexts [S2]. Context switching can be complex [S1][S4, unofficial]. Using SFML for display results in frame latencies >20 ms for 1080p textures, limiting framerate to under 60 fps, whereas PBO/FBO approach reduces this significantly [S2, S5][S8, unofficial].
+-- **When to Use:** Real-time volume rendering where CPU overhead is a bottleneck, and direct GPU-side computation and display are required.
+-- **When Not to Use:** Simple applications where CPU-GPU transfer overhead is negligible, or when using higher-level frameworks that abstract away these details and performance is not critical.
++- **When to Use:** Real-time volume rendering where CPU overhead is a bottleneck, and direct GPU-side computation and display are required [S2, S5].
++- **When Not to Use:** Simple applications where CPU-GPU transfer overhead is negligible, or when using higher-level frameworks that abstract away these details and performance is not critical [S2, S5].
+ 
+ ## Background
+-The method originated from the need to overcome CPU bottlenecks in traditional raster engines, where the host issues draw calls faster than the device can complete work [S2]. Early implementations used libraries like SFML, which introduced significant copy overhead [S2, S5]. The shift to CUDA-OpenGL Interoperability allowed for direct GPU-side rendering pipelines, as demonstrated in frameworks like VRCUDA [S6, unofficial] and Fourier Volume Rendering [S1][S4, unofficial]. It is widely used in scientific visualization, medical imaging, and real-time volume rendering engines where performance is critical [S1][S4, S6, unofficial].
++The method originated from the need to overcome CPU bottlenecks in traditional raster engines, where the host issues draw calls faster than the device can complete work [S2]. Early implementations used libraries like SFML, which introduced significant copy overhead [S2, S5]. The shift to CUDA-OpenGL Interoperability allowed for direct GPU-side rendering pipelines, as demonstrated in frameworks like VRCUDA [S6, unofficial] and Fourier Volume Rendering [S1][S4, unofficial].
+ 
+ ## Sources

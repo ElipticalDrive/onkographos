@@ -1,0 +1,119 @@
+# Discrete Volume Transmittance Integration > Discrete Radiance Step Integration
+
+Also called: CPU Volume Transport (Single Ray), Discrete RTE Step, Discrete Radiance Step Integration, Small Step Radiance Update, Transport Step, Transport Step Function
+
+## Overview
+Discrete Radiance Step Integration computes the outgoing radiance after traversing a small step of length $ds$ through a participating medium with extinction coefficient $\sigma$ and emission coefficient $q$, given incoming radiance $I$ [S1, unofficial]. It serves as the core update kernel for the discrete radiative transfer equation, iteratively applying the transport equation along a single ray to compute final intensity from initial intensity, absorption coefficient, and source term [S1, unofficial]. It is distinct from sibling methods like [Heterogeneous Medium Transmittance](4909-heterogeneous-medium-transmittance.md) and [Analytic Transmittance Integration](5116-analytic-transmittance-integration.md) by focusing on the per-step radiance update rather than just transmittance calculation, often employing a linear approximation for small optical depths to maintain precision [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   $I$: Incoming radiance (scalar or vector).
+    *   $\sigma$: Extinction coefficient (scalar).
+    *   $q$: Source term (emission coefficient, scalar or vector).
+    *   $ds$: Step size along the ray (scalar).
+*   **Output:**
+    *   $I_{out}$: Outgoing radiance after the step.
+
+**Data Structures:**
+No complex data structures are required; the method operates on scalar or vector values representing radiance, density, and source terms at a single sample point.
+
+**Numbered Steps:**
+1.  Calculate the optical depth $\tau$ for the step:
+    $$ \tau = \sigma \cdot ds $$
+2.  Check for small optical depth. If $|\tau| < 10^{-5}$, use the linear approximation:
+    $$ I_{out} = I + q \cdot ds - I \cdot \tau $$
+3.  If $|\tau| \ge 10^{-5}$, calculate the transmittance loss factor $T_{loss}$:
+    $$ T_{loss} = -\exp(-\tau) $$
+    *Note: The source code uses `expm1f` logic, specifically `-expm1f(-tau)`, which mathematically equals $1 - e^{-\tau}$. However, the variable name `one_minus_T` and the subsequent usage in the formula $I \cdot (1 - T_{loss})$ suggests that in the specific implementation context, $T_{loss}$ might represent the transmittance loss factor $1 - e^{-\tau}$ or similar. Strictly following the provided code logic where `one_minus_T = -expm1f(-tau)` and the return statement is `I * (1 - one_minus_T) + (q / sigma) * one_minus_T`, we must reconcile the formula. Let's re-read the source note carefully: "return $I \cdot (1 - T_{loss}) + \frac{q}{\sigma} \cdot T_{loss}$" and "$T_{loss} = -\exp(-\tau)$". This is contradictory if $T_{loss}$ is defined as $-\exp(-\tau)$ because $-\exp(-\tau)$ is negative. The note also says "code uses `-expm1f(-tau)` which equals $1 - e^{-\tau}$". Let's assume the variable $T_{loss}$ in the final formula actually represents the quantity $1 - e^{-\tau}$ (the fraction of light absorbed/scattered out, or the contribution factor). Let's look at the standard discrete transport equation: $I_{out} = I e^{-\tau} + \frac{q}{\sigma}(1 - e^{-\tau})$. This can be rewritten as $I_{out} = I (1 - (1 - e^{-\tau})) + \frac{q}{\sigma}(1 - e^{-\tau})$. If we let $A = 1 - e^{-\tau}$, then $I_{out} = I(1-A) + \frac{q}{\sigma}A$. The source note says $T_{loss} = -\exp(-\tau)$ but then uses it in a way that implies it's $1-e^{-\tau}$. The note explicitly states: "strictly following code: `one_minus_T = -expm1f(-tau)`". `expm1f(x)` is $e^x - 1$. So `expm1f(-tau)` is $e^{-\tau} - 1$. Then `-expm1f(-tau)` is $1 - e^{-\tau}$. So the variable `one_minus_T` (which the note calls $T_{loss}$ in the formula description) is indeed $1 - e^{-\tau}$. The formula description "$T_{loss} = -\exp(-\tau)$" in the note is likely a typo or misinterpretation of the variable name vs value. The code uses `expm1f`. We will use the mathematically correct interpretation derived from `expm1f` and the standard RTE solution.*
+    $$ T_{loss} = 1 - e^{-\tau} $$
+    Calculate the outgoing radiance:
+    $$ I_{out} = I \cdot (1 - T_{loss}) + \frac{q}{\sigma} \cdot T_{loss} $$
+    *Note: Division by $\sigma$ occurs here. If $\sigma$ is zero, this branch is not taken because $\tau$ would be 0, falling into the small optical depth case.*
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def transport_step(I, sigma, source, ds):
+    """
+    Computes the outgoing radiance after traversing a small step ds.
+    
+    Args:
+        I: Incoming radiance (float or vector)
+        sigma: Extinction coefficient (float)
+        source: Source term/emission coefficient (float or vector)
+        ds: Step size (float)
+        
+    Returns:
+        Outgoing radiance
+    """
+    # Calculate optical depth
+    tau = sigma * ds
+    
+    # Check for small optical depth to avoid precision loss
+    if abs(tau) < 1e-5:
+        # Linear approximation: I_out = I + q*ds - I*tau
+        # Note: I*tau = I*sigma*ds
+        return I + source * ds - I * tau
+    else:
+        # Calculate transmittance loss factor: 1 - exp(-tau)
+        # Using expm1 for better precision: expm1(-tau) = exp(-tau) - 1
+        # So 1 - exp(-tau) = -expm1(-tau)
+        one_minus_T = -expm1(-tau)
+        
+        # Avoid division by zero if sigma is 0, though tau >= 1e-5 implies sigma > 0
+        # if ds > 0. If ds is 0, tau is 0, handled above.
+        if sigma == 0:
+            # This case should theoretically be caught by the small tau check
+            # if ds is non-zero. If ds is also 0, return I.
+            return I
+            
+        # Standard discrete transport update
+        # I_out = I * exp(-tau) + (q/sigma) * (1 - exp(-tau))
+        # Since one_minus_T = 1 - exp(-tau), then exp(-tau) = 1 - one_minus_T
+        # I_out = I * (1 - one_minus_T) + (q/sigma) * one_minus_T
+        return I * (1 - one_minus_T) + (source / sigma) * one_minus_T
+
+def discrete_radiance_integration(I0, sigma_samples, source_samples, ds, num_samples):
+    """
+    Iteratively applies the discrete transport equation along a single ray.
+    
+    Args:
+        I0: Initial incoming radiance
+        sigma_samples: Array of extinction coefficients for each sample
+        source_samples: Array of source terms for each sample
+        ds: Step size (assumed constant for simplicity, or could be array)
+        num_samples: Number of samples to integrate over
+        
+    Returns:
+        Final outgoing radiance
+    """
+    I = I0
+    for i in range(num_samples):
+        I = transport_step(I, sigma_samples[i], source_samples[i], ds)
+    return I
+```
+
+**Parameters:**
+*   $ds$: Step size along the ray. Typical value in benchmarks is $0.01$ [S1, unofficial].
+*   Threshold for small optical depth: $10^{-5}$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision Loss:** When $\tau$ is very small, direct exponentiation may lose precision or be inefficient. The linear approximation branch for $|\tau| < 10^{-5}$ handles this [S1, unofficial].
+*   **Division by Zero:** Division by $\sigma$ occurs in the non-small $\tau$ branch. If $\sigma$ is zero, this results in infinity or NaN unless handled. However, if $\sigma=0$, then $\tau=0$ (assuming $ds \neq 0$), which falls into the small $\tau$ branch, avoiding the division [S1, unofficial]. If $ds=0$ and $\sigma=0$, the small $\tau$ branch returns $I$, which is correct.
+*   **Degenerate Input:** If $ds=0$, $\tau=0$, handled by small $\tau$ branch.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per step. The integration over $N$ samples is $O(N)$.
+*   **Memory Complexity:** $O(1)$ auxiliary space per step.
+*   **Strengths:** Simple to implement, numerically stable for small optical depths using the linear approximation, efficient for single-ray transport.
+*   **Limitations:** Requires careful handling of small optical depths. Not directly applicable to heterogeneous media without sampling the coefficients at each step.
+*   **When to use:** When performing discrete integration of the radiative transfer equation along a ray, particularly when high precision is needed for small steps or when the medium properties are known at discrete sample points.
+*   **When not to use:** For large-scale volume rendering where transmittance is the primary concern and radiance update is separate, or when analytic solutions are available and preferred.
+
+## Background
+This method is derived from the discrete solution of the Radiative Transfer Equation (RTE) for participating media. It is commonly used in CPU-based volume rendering implementations and as a foundational step in more complex transport algorithms. The specific implementation details, including the use of `expm1f` for precision and the threshold for linear approximation, are observed in open-source HPC demonstrations [S1, unofficial].
+
+## Sources
+[S1] wyh1309/hpc_foundational_demos, https://github.com/wyh1309/hpc_foundational_demos, fetched 2026-10-26 (unofficial)

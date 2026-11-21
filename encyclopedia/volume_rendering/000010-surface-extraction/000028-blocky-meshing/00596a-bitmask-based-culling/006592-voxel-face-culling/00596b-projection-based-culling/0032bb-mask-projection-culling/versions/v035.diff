@@ -1,0 +1,326 @@
+--- v034.md
++++ v035.md
+@@ -4,64 +4,66 @@
+ 
+ ## Overview
+-Mask Projection Culling is a visibility-based mesh filtering technique that removes vertices and faces not consistently observed across multiple camera poses by projecting 3D points into camera space and comparing their depth against rendered depth maps or binary occupancy masks [S1, S2, unofficial]. It differs from neighbor-based culling methods (like [Face Culling and Visibility Optimization](3861-face-culling-and-visibility-optimization.md)) by relying on explicit camera projections and depth testing rather than voxel adjacency, making it suitable for reconstructing clean meshes from sparse or noisy multi-view data [S1, S2, unofficial].
++Mask Projection Culling is a visibility-based mesh filtering technique that removes faces and vertices not consistently observed across multiple camera poses by projecting points into camera space and comparing their depth against rendered depth maps or binary masks [S1, S2, unofficial]. It differs from [Voxel Backface Culling and Internal Face Masking](4569-voxel-backface-culling-and-internal-face-masking.md) by operating on explicit mesh geometry in screen space rather than voxel occupancy, and from [Mesh Culling via 3D Projection and Connected Components](6963-mesh-culling-via-3d-projection-and-connected-components.md) by relying on per-pixel depth/mask sampling rather than global connected component analysis [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- A mesh (vertices $V$, faces $F$).
++- A triangular mesh (vertices $V$, faces $F$).
+ - A set of $V$ camera poses (world-to-camera matrices $W_i$) and intrinsic matrices $K_i$.
+-- Optional: Binary masks $M_i$ for each view (e.g., from segmentation) [S1, unofficial].
+-- Optional: Rendered depth maps $D_i$ for each view [S2, unofficial].
++- Optional: Binary masks $M_i$ for each view (e.g., from segmentation or background removal).
++- Optional: Rendered depth maps $D_i$ for each view.
+ 
+ **Outputs:**
+-- A filtered mesh containing only vertices and faces visible in a minimum number of views.
++- A filtered mesh containing only vertices and faces visible in a sufficient number of views.
+ 
+ **Data Structures:**
+-- `valid_counts`: Array of size $N$ (number of vertices), initialized to 0. Stores the number of views in which each vertex is visible.
+-- `face_mask`: Boolean array of size $|F|$.
++- `vertices`: Tensor of shape $(N, 3)$, where $N$ is the number of vertices.
++- `faces`: Tensor of shape $(M, 3)$, where $M$ is the number of faces, storing vertex indices.
++- `valid_counts`: Tensor of shape $(N,)$, initialized to zero, counting valid observations per vertex.
++- `depth_maps`: Tensor of shape $(V, H, W)$, storing depth values for each view.
++- `masks`: Tensor of shape $(V, H, W)$, storing binary mask values for each view.
+ 
+ **Parameters:**
+-- `eps`: Depth comparison tolerance. Typical value: 0.005 [S2, unofficial].
+-- `points_batch_size`: Max points per batch to limit GPU memory. Typical value: $5 \times 10^5$ [S2, unofficial].
+-- `min_views`: Minimum number of views a vertex must be visible in to be retained. Typical value: 20 (if $V=20$) [S2, unofficial].
+-- `mask_dilation_radius`: Radius for morphological dilation of binary masks. Typical value: 24 [S1, unofficial].
++- `eps`: Depth comparison tolerance. Typical value: $0.005$ [S2, unofficial].
++- `points_batch_size`: Maximum number of points processed per batch to limit GPU memory. Typical value: $5 \times 10^5$ [S2, unofficial].
++- `min_visible_frames`: Minimum number of frames a vertex must be visible in. Typical value: $20$ [S2, unofficial].
++- `mask_dilation_radius`: Radius for morphological dilation of binary masks. Typical value: $24$ [S1, unofficial].
++- `image_dimensions`: Width $W=1600$, Height $H=1200$ [S1, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Preprocess Cameras:**
+-    - Load camera parameters. Compute projection matrix $P = W \cdot S$ (where $S$ is scale) [S1, unofficial].
+-    - Extract intrinsics $K$ and pose $W$ (world-to-camera) [S1, unofficial].
+-    - Handle coordinate system mismatches (e.g., OpenCV vs OpenGL) by flipping Y and Z axes of the camera pose if necessary: $W[:3, 1:3] *= -1$ [S2, unofficial].
++1. **Load Camera Parameters:**
++   - Extract world-to-camera matrices $W_i$ and intrinsic matrices $K_i$ for each view $i \in [0, V-1]$.
++   - If using OpenCV/OpenGL coordinate mismatch, flip Y and Z axes of the camera pose: $W_i[:3, 1:3] *= -1$ [S2, unofficial].
+ 
+-2.  **Render Reference Data (Optional but recommended for robustness):**
+-    - Render forward depth maps $D_i$ from the mesh for each camera pose using an offscreen renderer with flags `DEPTH_ONLY` [S2, unofficial].
+-    - Load binary masks $M_i$ from image files [S1, unofficial].
++2. **Render Depth Maps (if not provided):**
++   - For each view $i$, render the mesh to a depth map $D_i$ using an offscreen renderer with flags `DEPTH_ONLY` and `SKIP_CULL_FACES` [S2, unofficial].
+ 
+-3.  **Project and Test Vertices:**
+-    - For each vertex $v \in V$:
+-        - Transform $v$ to camera space: $v_{cam} = W_i \cdot v_{homogeneous}$.
+-        - Project to 2D: $p_{uv} = K_i \cdot v_{cam}$.
+-        - Perform homogeneous division: $u = p_{uv}.x / p_{uv}.z$, $v_{coord} = p_{uv}.y / p_{uv}.z$ [S2, unofficial].
+-        - Check frustum bounds: $0 \le u < W$, $0 \le v_{coord} < H$, $z > 0$ [S2, unofficial].
+-        - Normalize to NDC $[-1, 1]$: $u_{ndc} = \frac{2u}{W-1} - 1$, $v_{ndc} = \frac{2v_{coord}}{H-1} - 1$ [S1, S2, unofficial].
++3. **Load Masks (if provided):**
++   - Load binary masks $M_i$ from image files. Convert to float tensors [S1, unofficial].
+ 
+-4.  **Visibility Check:**
+-    - **Method A (Mask Projection) [S1, unofficial]:**
+-        - Dilate binary mask $M_i$ with a disk of radius `mask_dilation_radius`.
+-        - Sample the dilated mask at $(u_{ndc}, v_{ndc})$ using nearest-neighbor interpolation.
+-        - If sampled value $> 0$, the vertex is "in mask".
+-    - **Method B (Depth Comparison) [S2, unofficial]:**
+-        - Sample depth $d_{sample}$ at $(u_{ndc}, v_{ndc})$ from rendered depth map $D_i$ using bilinear interpolation with border padding.
+-        - Compare vertex depth $z$ with $d_{sample}$:
+-          $$ \text{is\_front} = (z < d_{sample} + \text{eps}) \land (d_{sample} > 0) $$
+-        - If `is_front` is true, the vertex is "visible".
++4. **Project and Sample Visibility:**
++   - For each vertex $v$ with world coordinates $p_v$:
++     - Transform to camera space: $p_{cam} = W_i \cdot p_v$.
++     - Project to 2D: $p_{uv} = K_i \cdot p_{cam}$.
++     - Perform homogeneous division: $u = p_{uv}[0] / p_{uv}[2]$, $v = p_{uv}[1] / p_{uv}[2]$, $z = p_{uv}[2]$ [S1, S2, unofficial].
++     - Check frustum bounds: $in\_frustum = (0 \le u < W) \land (0 \le v < H) \land (z > 0)$ [S2, unofficial].
++     - If $in\_frustum$ is true:
++       - **Mask-based Culling:**
++         - Normalize UV to NDC $[-1, 1]$: $u_{ndc} = \frac{u}{W-1} \cdot 2 - 1$, $v_{ndc} = \frac{v}{H-1} \cdot 2 - 1$ [S1, S2, unofficial].
++         - If using binary masks: Dilate $M_i$ with a disk of radius `mask_dilation_radius`. Sample $M_i$ at $(u_{ndc}, v_{ndc})$ using nearest-neighbor interpolation. If sampled value $> 0$, the vertex is visible in this view [S1, unofficial].
++       - **Depth-based Culling:**
++         - Sample depth $d_{sample}$ from $D_i$ at $(u_{ndc}, v_{ndc})$ using bilinear interpolation with border padding [S2, unofficial].
++         - Check if vertex is in front of surface: $is\_front = (z < d_{sample} + eps)$ [S2, unofficial].
++         - If $is\_front$ is true, the vertex is visible in this view.
++     - If visible, increment `valid_counts[v]` [S2, unofficial].
+ 
+-5.  **Accumulate and Filter:**
+-    - Increment `valid_counts[v]` if the vertex is visible in view $i$.
+-    - After all views, filter vertices: keep $v$ if `valid_counts[v] >= min_views`.
+-    - Filter faces: keep face $f$ if all its vertices are kept.
++5. **Filter Mesh:**
++   - Identify valid vertices: $V_{valid} = \{v \mid valid\_counts[v] \ge min\_visible\_frames\}$ [S2, unofficial].
++   - Identify valid faces: $F_{valid} = \{f \in F \mid \text{all vertices in } f \in V_{valid}\}$ [S1, unofficial].
++   - Construct new mesh with $V_{valid}$ and $F_{valid}$ [S1, unofficial].
+ 
+-6.  **Post-Processing:**
+-    - Transform remaining vertices back to world space using inverse scale/pose matrices [S1, unofficial].
+-    - (Optional) Remove small disconnected components based on area ratio threshold (e.g., 0.2) [S2, unofficial].
++6. **Post-processing:**
++   - Transform vertices back to world space if necessary (e.g., applying scale factors) [S1, unofficial].
++   - Export the filtered mesh.
+ 
+ **Pseudocode:**
+@@ -69,117 +71,97 @@
+ ```python
+ import torch
+-import numpy as np
++import torch.nn.functional as F
+ 
+-def mask_projection_culling(mesh, cameras, masks=None, depth_maps=None, 
+-                            eps=0.005, min_views=20, mask_dilation_radius=24):
++def mask_projection_culling(mesh, cameras, depth_maps=None, masks=None, eps=0.005, min_visible_frames=20, mask_dilation_radius=24):
+     """
+-    mesh: dict with 'vertices' (N, 3) and 'faces' (F, 3)
+-    cameras: list of dicts with 'K' (3,3), 'W' (4,4) [world-to-camera]
+-    masks: list of binary masks (H, W) or None
+-    depth_maps: list of depth maps (H, W) or None
++    mesh: dict with 'vertices' (N, 3) and 'faces' (M, 3)
++    cameras: list of dicts with 'w2c' (4, 4) and 'K' (3, 3)
++    depth_maps: list of tensors (H, W)
++    masks: list of tensors (H, W)
+     """
+-    N = mesh['vertices'].shape[0]
+-    valid_counts = np.zeros(N, dtype=np.int32)
++    vertices = mesh['vertices'].cuda()
++    faces = mesh['faces']
++    num_vertices = vertices.shape[0]
++    num_views = len(cameras)
+     
+-    # Batch processing for memory efficiency
++    # Initialize visibility counts
++    valid_counts = torch.zeros(num_vertices, dtype=torch.int32, device=vertices.device)
++    
++    # Process in batches to limit memory
+     batch_size = 500000
+-    vertices = mesh['vertices']
+-    
+-    for i, cam in enumerate(cameras):
+-        K = cam['K']
+-        W = cam['W']
++    for start in range(0, num_vertices, batch_size):
++        end = min(start + batch_size, num_vertices)
++        batch_vertices = vertices[start:end]
+         
+-        # Handle coordinate system flip if needed (e.g., OpenGL to OpenCV)
+-        # W_copy = W.copy()
+-        # W_copy[:3, 1:3] *= -1
+-        
+-        # Process vertices in batches
+-        for start in range(0, N, batch_size):
+-            end = min(start + batch_size, N)
+-            batch_verts = vertices[start:end]
++        for i in range(num_views):
++            w2c = cameras[i]['w2c'].cuda()
++            K = cameras[i]['K'].cuda()
+             
+-            # 1. Transform to camera space
+-            # Homogeneous coordinates
+-            verts_hom = np.hstack([batch_verts, np.ones((end-start, 1))])
+-            cam_verts = (W @ verts_hom.T).T[:, :3] # (B, 3)
++            # Transform to camera space
++            # Add homogeneous coordinate
++            batch_vertices_homo = torch.cat([batch_vertices, torch.ones(batch_vertices.shape[0], 1, device=vertices.device)], dim=1)
++            cam_coords = torch.matmul(w2c, batch_vertices_homo.t()) # (4, batch_size)
++            cam_coords = cam_coords.t() # (batch_size, 4)
+             
+-            # 2. Project to 2D
+-            proj = (K @ cam_verts.T).T # (B, 3)
+-            z = proj[:, 2]
++            # Project to 2D
++            uv = torch.matmul(K, cam_coords[:, :3].t()).t() # (batch_size, 3)
++            z = uv[:, 2:3] + 1e-8
++            uv_xy = uv[:, :2] / z
+             
+-            # Avoid division by zero
+-            z_safe = z + 1e-8
++            # Normalize to NDC [-1, 1]
++            W, H = 1600, 1200
++            u_ndc = (uv_xy[:, 0] / (W - 1)) * 2.0 - 1.0
++            v_ndc = (uv_xy[:, 1] / (H - 1)) * 2.0 - 1.0
+             
+-            u = proj[:, 0] / z_safe
+-            v = proj[:, 1] / z_safe
+-            
+-            # 3. Frustum check
+-            W_img, H_img = 1600, 1200 # Hardcoded or from config
+-            in_frustum = (u >= 0) & (u < W_img) & (v >= 0) & (v < H_img) & (z > 0)
+-            
+-            # 4. Visibility check
+-            visible_in_view = np.zeros(end - start, dtype=bool)
++            # Check frustum bounds
++            in_frustum = (u_ndc > -1.0) & (u_ndc < 1.0) & (v_ndc > -1.0) & (v_ndc < 1.0) & (z.squeeze() > 0)
+             
+             if masks is not None:
+-                # Method A: Mask Projection
+-                # Dilate mask (simplified: assume pre-dilated mask passed or dilate here)
+-                # For implementation, use morphology.binary_dilation on mask[i]
+-                mask_img = masks[i]
+-                # Sample mask at (u, v)
+-                # Normalize to NDC [-1, 1] for grid_sample compatibility
+-                u_ndc = (2 * u / (W_img - 1)) - 1
+-                v_ndc = (2 * v / (H_img - 1)) - 1
+-                
+-                # Check if points are within valid sampling range
+-                valid_ndc = (u_ndc >= -1) & (u_ndc <= 1) & (v_ndc >= -1) & (v_ndc <= 1)
+-                
+-                # Sample mask (pseudo-code for grid sampling)
+-                # sampled = grid_sample(mask_img, vgrid, mode='nearest', padding_mode='zeros')
+-                # For numpy, use advanced indexing or scipy
+-                # Here we assume a helper function `sample_mask`
+-                sampled = sample_mask_at_coords(mask_img, u, v, W_img, H_img)
+-                in_mask = sampled > 0
+-                
+-                visible_in_view = in_frustum & valid_ndc & in_mask
+-                
+-            elif depth_maps is not None:
+-                # Method B: Depth Comparison
+-                depth_img = depth_maps[i]
+-                u_ndc = (2 * u / (W_img - 1)) - 1
+-                v_ndc = (2 * v / (H_img - 1)) - 1
+-                
+-                valid_ndc = (u_ndc >= -1) & (u_ndc <= 1) & (v_ndc >= -1) & (v_ndc <= 1)
+-                
+-                # Sample depth
+-                sampled_depth = sample_depth_at_coords(depth_img, u, v, W_img, H_img)
+-                
+-                # Check if vertex is in front of surface
+-                # is_front = (z < sampled_depth + eps) & (sampled_depth > 0)
+-                is_front = (z < sampled_depth + eps) & (sampled_depth > 0)
+-                
+-                visible_in_view = in_frustum & valid_ndc & is_front
++                # Mask-based culling
++                mask = masks[i].cuda()
++                # Dilate mask (simplified, assuming pre-dilated or using a library)
++                # In practice, use morphology.binary_dilation with radius 24
++                # For pseudocode, assume mask is already dilated
++                vgrid = torch.stack([u_ndc, v_ndc], dim=-1).unsqueeze(0).unsqueeze(0) # (1, 1, batch_size, 2)
++                # Sample mask
++                # Note: grid_sample expects (N, C, H, W) or (N, C, W, H) depending on version
++                # Here we assume standard PyTorch grid_sample with align_corners=True
++                sampled_mask = F.grid_sample(mask.unsqueeze(0).unsqueeze(0), vgrid, mode='nearest', padding_mode='zeros', align_corners=True)
++                sampled_mask = sampled_mask.squeeze()
++                visible = sampled_mask > 0.0
++            else:
++                # Depth-based culling
++                depth_map = depth_maps[i].cuda()
++                vgrid = torch.stack([u_ndc, v_ndc], dim=-1).unsqueeze(0).unsqueeze(0)
++                sampled_depth = F.grid_sample(depth_map.unsqueeze(0).unsqueeze(0), vgrid, mode='bilinear', padding_mode='border', align_corners=True)
++                sampled_depth = sampled_depth.squeeze()
++                visible = (z.squeeze() < sampled_depth + eps)
+             
+-            # Update counts
+-            valid_counts[start:end] += visible_in_view.astype(np.int32)
++            # Update valid counts for visible vertices in this view
++            visible_indices = torch.where(in_frustum)[0]
++            visible_vertices = visible[visible_indices]
++            global_indices = start + visible_indices[visible_vertices]
++            valid_counts[global_indices] += 1
+             
+     # Filter vertices
+-    final_vertices_mask = valid_counts >= min_views
+-    final_vertices = vertices[final_vertices_mask]
+-    
+-    # Map old indices to new indices
+-    old_to_new = np.full(N, -1, dtype=np.int32)
+-    new_indices = np.where(final_vertices_mask)[0]
+-    old_to_new[new_indices] = np.arange(len(new_indices))
++    valid_vertices_mask = valid_counts >= min_visible_frames
++    valid_vertex_indices = torch.where(valid_vertices_mask)[0]
+     
+     # Filter faces
+-    faces = mesh['faces']
+-    # Check if all vertices of a face are kept
+-    face_valid = np.all(old_to_new[faces] != -1, axis=1)
+-    final_faces = faces[face_valid]
++    # Create a mapping from old vertex indices to new ones
++    # For simplicity, we just filter faces where all vertices are valid
++    face_vertices = faces[valid_vertex_indices] # This is incorrect logic, need to check all faces
++    # Correct logic:
++    valid_faces_mask = valid_vertices_mask[faces].all(dim=1)
++    valid_faces = faces[valid_faces_mask]
+     
+-    # Remap face indices
+-    final_faces = old_to_new[final_faces]
++    # Re-index vertices
++    vertex_map = torch.full((num_vertices,), -1, dtype=torch.long, device=vertices.device)
++    vertex_map[valid_vertex_indices] = torch.arange(len(valid_vertex_indices), device=vertices.device)
++    new_faces = vertex_map[valid_faces]
+     
+-    return {'vertices': final_vertices, 'faces': final_faces}
++    new_vertices = vertices[valid_vertex_indices]
++    
++    return {'vertices': new_vertices.cpu(), 'faces': new_faces.cpu()}
+ ```
+ 
+@@ -187,16 +169,16 @@
+ 
+ ### True Back-Face Culling via Group Masking
+-A back-face culling technique that splits chunk meshes into 6 vertex pool buckets based on face orientation (groups 0-5) [S3, unofficial]. Draw calls are masked based on the camera position relative to the chunk, preventing the draw call from being issued entirely rather than culling in the fragment shader [S3, unofficial]. Unlike regular chunk meshing which would require splitting a chunk into 6 sub-meshes (increasing driver overhead 6-fold), this method uses existing vertex pool bucketing [S3, unofficial].
++A back-face culling technique that splits chunk meshes into 6 vertex pool buckets based on face orientation (groups 0-5). Draw calls are masked based on camera position relative to the chunk, preventing the draw call from being issued entirely rather than culling in the fragment shader [S3, unofficial]. It is chosen when driver overhead must be minimized compared to splitting chunks into 6 sub-meshes [S3, unofficial].
+ 
+ ## Operating characteristics
+ - **Time Complexity:** $O(N \cdot V \cdot B)$, where $N$ is the number of points, $V$ is the number of validation frames, and $B$ is the batch size [S2, unofficial].
+ - **Memory Complexity:** $O(N \cdot V)$ for intermediate masks and valid counts [S2, unofficial].
+-- **Strengths:** Effective at removing noise and artifacts from multi-view reconstructions; robust to occlusions by requiring consistency across views [S1, S2, unofficial].
+-- **Limitations:** Requires multiple camera views; sensitive to camera pose accuracy; coordinate system mismatches can cause errors [S2, unofficial].
+-- **When to use:** When cleaning up meshes from NeRF or multi-view stereo outputs; when neighbor-based culling is insufficient due to sparse or non-uniform voxelization.
+-- **When not to use:** For single-view rendering; when real-time culling is required without pre-computation (this is typically a preprocessing step).
++- **Strengths:** Effective at removing invisible geometry, reducing rendering load. Works well with multiple views.
++- **Limitations:** Requires pre-computed depth maps or masks. Sensitive to coordinate system mismatches. Performance degrades with large numbers of views or high-resolution depth maps.
++- **When to use:** When a set of camera poses is available and visibility filtering is needed for optimization or rendering.
++- **When not to use:** When real-time culling is required without pre-computation, or when camera poses are unknown.
+ 
+ ## Background
+-Mask Projection Culling is commonly used in 3D Gaussian Splatting and NeRF-based mesh extraction pipelines to clean up noisy geometry [S1, S2, unofficial]. It leverages the availability of multiple training views to verify surface visibility, ensuring that only geometry consistently observed across views is retained [S1, S2, unofficial]. The technique is particularly relevant in differentiable rendering frameworks where depth maps can be rendered from the mesh itself for self-consistency checks [S2, unofficial].
++Mask Projection Culling is used in 3D reconstruction and rendering pipelines, particularly in Gaussian Splatting and NeRF-based methods, to filter out noisy or invisible geometry [S1, S2, unofficial]. It was popularized in the context of 2D Gaussian Splatting for efficient mesh extraction [S1, unofficial].
+ 
+ ## Sources

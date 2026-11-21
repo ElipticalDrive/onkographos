@@ -1,0 +1,1211 @@
+ICON: Incremental CONfidence for Joint Pose and
+Radiance Field Optimization
+arXiv:2401.08937v1 [cs.CV] 17 Jan 2024
+Weiyao Wang1 , Pierre Gleize1,† , Hao Tang1,† , Xingyu Chen1 , Kevin J Liang1 , Matt Feiszli1
+1
+FAIR at Meta
+†
+Equal contribution.
+Neural Radiance Fields (NeRF) exhibit remarkable performance for Novel View Synthesis (NVS)
+given a set of 2D images. However, NeRF training requires accurate camera pose for each input view,
+typically obtained by Structure-from-Motion (SfM) pipelines. Recent works have attempted to relax
+this constraint, but they still often rely on decent initial poses which they can refine. Here we aim
+at removing the requirement for pose initialization. We present Incremental CONfidence (ICON),
+an optimization procedure for training NeRFs from 2D video frames. ICON only assumes smooth
+camera motion to estimate initial guess for poses. Further, ICON introduces “confidence": an adaptive
+measure of model quality used to dynamically reweight gradients. ICON relies on high-confidence
+poses to learn NeRF, and high-confidence 3D structure (as encoded by NeRF) to learn poses. We
+show that ICON, without prior pose initialization, achieves superior performance in both CO3D and
+HO3D versus methods which use SfM pose.
+Date: January 18, 2024
+Correspondence: Weiyao Wang at weiyaowang@meta.com; Matt Feiszli at mdf@meta.com
+1
+Introduction
+Robustly lifting objects into 3D from 2D videos is a challenging problem with wide-ranging applications.
+For example, advances in virtual, mixed, and augmented reality Marchand et al. (2016) are unlocking
+new interactions with virtual 3D objects; 3D object understanding is important for robotics as well (e.g.,
+manipulation Kappler et al. (2018); Wen et al. (2022a); Qi et al. (2023) and learning-by-doing Wen et al.
+(2022b); Cheng et al. (2023)).
+Bringing objects to 3D requires both extracting 3D structure and tracking 6DoF pose, but existing approaches
+have limitations. Many Wen and Bekris (2021); Azinović et al. (2022); Wen et al. (2023) rely on depth,
+which is a powerful signal for 3D reasoning. However, accurate depth typically requires additional sensors
+(e.g., stereo, LiDAR), which add cost, weight, and power consumption to a device, and is thus often not
+widely available. Without this depth signal, these methods often fail. Solving only half the problem is also
+common: 3D object reconstruction methods often assume pose Mildenhall et al. (2020); Reizenstein et al.
+(c) BARF Lin et al. (2021) (d) ICON novel-view synthe(a) BARF pose predictions
+(b) ICON pose predictions
+novel-view synthesis
+sis
+Figure 1 Novel view and pose visualizations of ICON and BARF when no initial pose is available. We
+train on a flyaround video of book from CO3D Reizenstein et al. (2021). BARF trajectories exhibit fragmentation:
+camera poses split into two forward-facing clusters and create two books. ICON provides high-quality view synthesis
+and recovers poses very precisely. The colored triangle meshes represent ICON predicted poses and grey ones represent
+groundtruth.
+1
+Neural Confidence Field:
+(𝑥, 𝑦, 𝑧) → 𝜁
+Aggregate along ray 𝑟
+Learn Pose from higher
+confidence rays
+Ray Confidence: 𝜁!
+Aggregate rays shot from Pose 𝑃
+Learn NeRF from higher
+confidence poses
+Pose Confidence: 𝜁"
+Figure 2 ICON overview. ICON constructs a Neural Confidence field on top of NeRF to encode confidence ζ for
+each 3D location. The confidence is then used to guide the optimization process.
+(2021); Munkberg et al. (2022); Oechsle et al. (2021); Sun et al. (2021); Wang et al. (2021a); Yariv et al.
+(2021), and object pose estimation methods often assume a 3D model (e.g., CAD) Pauwels and Kragic (2015);
+Xiang et al. (2018); Labbé et al. (2020). This chicken-and-egg problem often limits the applicability of these
+approaches.
+Here we aim to tackle both problems jointly, learning both an implicit 3D representation and per-frame
+camera poses from a single monocular RGB video. We supervise both 6DoF poses and reconstruction with a
+dense photometric loss, projecting the 3D representation onto the 2D input frames. Specifically, we represent
+objects/scenes as a Neural Radiance Field (NeRF) Mildenhall et al. (2020) to obtain 2D rendering.
+While recent works Yen-Chen et al. (2021); Lin et al. (2021); Wang et al. (2021b); Jeong et al. (2021); Lin
+et al. (2023); Truong et al. (2023) have shown that poses can to some extent be (jointly) learned in this
+setting, they are most effective when used to refine initial poses with moderate noise. For example, Wang
+et al. (2021b) shows they begin to fail when pose noise exceeds approximately 20 degrees of rotation error;
+more complex trajectories are unrecoverable. Indeed, these methods also fail on even moderately-complex
+trajectories, for example a full 360-degree flyaround of an object (Sec. 4). This means SfM preprocessing
+remains a prerequisite for constructing a radiance field.
+One way forward would be to focus on the large-noise case, working to resolve larger pose changes. This
+is promising Meng et al. (2021), but here we go the other way, and focus on the incremental case. This
+arises naturally in real-world settings where video is input, e.g., embodied AI. We take inspiration from
+incremental SfM Schonberger and Frahm (2016) and SLAM Davison (2003), training pose and NeRF jointly
+in an incremental setting. In this setup, the model takes a stream of video frames, one at a time. Leveraging
+a motion-smoothness prior, we initialize an incoming frame with the previous frame’s pose. Information
+between frames is exchanged through view synthesis from NeRF.
+A major challenge comes from the interdependence between 3D structure and pose: high photometric error
+may be attributable to a poor 3D model despite good pose, or a large error in pose despite a good model.
+We observe and analyze several interesting failure modes, including fragmentation, a generalization of the
+classical Bas-Relief ambiguity Belhumeur et al. (1999), and overlapping registration (see Fig. 3).
+To address the difficulties, we propose ICON (Incremental CONfidence). The intuition is simple (Fig. 2):
+“When pose is good, learn the NeRF; when the NeRF is good, learn pose." ICON interpolates between these two
+regimes, using a measure of confidence obtained from photometric error, and maintaining a NeRF-style “Neural
+Confidence Field" to store confidence in 3-space. Confidence is also used as a signal to guide optimization; in
+particular it can help identify (and escape from) local minima.
+We perform quantitative evaluation of ICON on CO3D Reizenstein et al. (2021), HO3D Hampali et al. (2020),
+and LLFF Mildenhall et al. (2019). While joint pose-and-3D baselines often fail catastrophically, ICON
+achieves strong performance on CO3D, comparable to NeRFs trained on COLMAP Schonberger and Frahm
+(2016) pose and surpassing a wide selection of baselines, such as DROID-SLAM Teed and Deng (2021) and
+PoseDiffusion Wang et al. (2023). In addition, we evaluate on CO3D videos with background removed; this
+2
+significantly increases the difficulty since background texture makes camera pose extraction easier. We note
+that this case (a single masked object in isolation) is quite valuable: success here means a method will
+work whether the camera is moving, the object is moving, or both. ICON achieves superior performance to
+NeRF+COLMAP pose and a wide selection of baselines Finally, ICON outperforms RGB baselines and is
+comparable to SOTA RGB-D method BundleSDF Wen et al. (2023) on dynamic hand-held objects in HO3D.
+To summarize, we make the following contributions:
+1. We propose an incremental registration for joint pose and NeRF optimization. This setup removes the
+requirement for pose initialization in common video settings.
+2. We systematically study this incremental setup and discover several challenges. Based on the observations,
+we propose ICON, an optimization protocol based on confidence in spatial locations and poses.
+3. We evaluate ICON with a focus on object-centric datasets. ICON is SOTA among RGB-only methods,
+and is even competitive with SOTA RGB-D methods.
+2
+Related Work
+Neural Radiance Field (NeRF) Mildenhall et al. (2020) is a powerful technique to represent 3D from posed
+2D images for novel view synthesis. One major limitation of NeRF resides in its requirement for accurate
+camera poses. Recent works, including Nerf– Wang et al. (2021b), BARF Lin et al. (2021), SCNeRF Jeong
+et al. (2021), SiNeRF Xia et al. (2022), NeuROIC Kuang et al. (2022), IDR Yariv et al. (2020), GARF Chng
+et al. (2022) and SPARF Truong et al. (2023) have attempted to relax this requirement by jointly optimizing
+poses and NeRF. Despite the promising direction, they work the best when refining noisy initial poses and are
+limited by the robustness of initial pose estimation methods. One direction the community takes to further
+reduce the dependency on pose is by adding additional components or signals for initial pose estimations,
+such as GANs Meng et al. (2021), SLAM Rosinol et al. (2022), shape priors Zhang et al. (2021), depth Bian
+et al. (2023) and coarse annotations Boss et al. (2022). We tackle this problem from a different angle, where
+we propose an incremental setup of joint NeRF and pose optimization. Our proposed method ICON does
+not use additional signals and achieve strong performance on challenging scenarios when camera poses are
+difficult to obtain.
+Pose estimation (Object) aims to infer the 6 Degrees-of-Freedom (DoF) pose of an object from image frames.
+The line of work can be classified into two main categories: image pose estimation Xiang et al. (2018); Labbé
+et al. (2020) and video pose tracking Muller et al. (2021); Stoiber et al. (2022); Teed and Deng (2020), where
+the former mostly focuses on inferring pose from sparse frames and the latter takes the temporal information
+into consideration. However, many methods in video or image pose estimation assume known instance- or
+category-level object representations, including object CAD models Xiang et al. (2018); Labbé et al. (2020,
+2022); Sundermeyer et al. (2018); Wang et al. (2019); Stoiber et al. (2022); Muller et al. (2021) or pre-captured
+reference views with known poses Liu et al. (2022); Park et al. (2020). Recently, BundleTracks Wen and
+Bekris (2021) removes the need for such object priors, thus generalizing to pose tracking for unseen novel
+objects, and BundleSDF Wen et al. (2023) improves pose tracking by constructing a neural representation for
+the object. However, both require depth information, limiting their applications.
+SLAM (Simultaneous Localization and Mapping) builds a map of its environment while simultaneously determining
+its own location within that map Mur-Artal et al. (2015); Mur-Artal and Tardós (2017); Davison et al. (2007);
+Engel et al. (2014, 2017); Klein and Murray (2007); Zubizarreta et al. (2020). While most SLAM methods
+focus on understanding camera pose movement in a static environment, object-centric SLAM McCormac et al.
+(2018); Merrill et al. (2022); Runz et al. (2018); Salas-Moreno et al. (2013); Sharma et al. (2021) focus on
+learning object pose in a dynamic environment. However, most of those methods require depth signal Runz
+et al. (2018); McCormac et al. (2018); Merrill et al. (2022) and struggle with large occlusion or abrupt motion
+Wen et al. (2023).
+3
+3
+Method
+ICON takes streaming RGB video frames as input and produces 3D reconstructions and camera pose estimates.
+ICON incrementally registers each input frame to optimize 3D reconstruction guided by confidence: the 3D
+reconstruction is learned more from frames with high confidence pose, and pose relies on 3D-2D reprojection
+from higher confidence areas of the 3D reconstruction.
+3.1
+Preliminaries: Neural Radiance Fields
+ICON relies on Neural Radiance Fields (NeRF) to represent a 3D reconstruction: NeRF encodes a 3D scene
+as a continuous 3D function through a multilayer perceptron (MLP) f parameterized by Θ: 3D point x and
+viewing direction d form the input (x, d) ∈ R5 → (c, σ) ∈ R4 , where c ∈ R3 is the color and σ is the opacity.
+To generate a 2D rendering of a scene at each pixel p = (u, v) in image Iˆi from camera pose Pi , NeRF uses
+a rendering function R to aggregate the radiance along a ray shooting from the camera center oi position
+through the pixel p into the volume:
+Z zfar
+ˆ
+Ii (p) = R(p, Pi |Θ) =
+T (z)σ(r(z))c(r(z), d)dz
+(1)
+znear
+Rz
+where T (z) = exp(− znear σ(r(z))dz) is the accumulated transmittance along the ray, and r(z) = oi + zd
+is the camera ray from origin oi through p, as determined by camera pose Pi . NeRF implements R by
+approximating the integral via sampled points along the ray, and is trained through a photometric loss between
+the groundtruth views Ii and the rendered view Iˆi for all images i = 1, ..., N :
+X
+ˆ P ), where Lp (I, I)
+ˆ =
+Θ∗ = arg minΘ Lp (I|I,
+∥Ii − Iˆi ∥2
+(2)
+3.2
+Incremental frame registrations
+A major limitation for these joint pose and NeRF optimization methods is a requirement for good initial
+poses. If {Pi } contain a diverse set of viewpoints and are initialized all from identity, these methods often
+collapse. For example, a simple but common collapsing solution is fragmentation: each frame creates its
+own fragmented 3D representation, all mutually invisible to the other views (Fragmentation fig. 3). Indeed,
+BARF Lin et al. (2021) collapses on all sequences of the CO3D dataset when the poses {Pi } consist of a
+closed-loop flyaround (see Tab. 1). As discussed in Wang et al. (2021b), when no pose prior is provided, a
+breaking point of 20 degree rotation difference for the whole trajectory is observed.
+To tackle this problem, we rely on a simple yet effective intuition: camera motions in videos are smooth.
+Therefore, given a frame Ii in a video, its camera pose Pi is likely to be close to Pi−1 . We leverage this
+observation and propose to register frames incrementally following the temporal order.
+Implementation. At the start of training, we jointly optimize NeRF parameters Θ and poses {P1 , P2 } from the
+first two frames {I1 , I2 }. After every k iterations, we add a new frame Ii and initialize its pose Pi by Pi−1 .
+We freeze the learning rate on poses {Pi }N
+i=1 and NeRF Θ until all frames are registered. A learning rate
+decay schedule may be applied after all N images are added.
+3.3
+Confidence-Based Optimization
+The incremental registration process aims at providing good initialization for the camera poses. However,
+optimizing poses and NeRF using photometric losses is highly non-convex and contains many local minima YenChen et al. (2021); Lin et al. (2023). In addition, an incorrectly optimized pose may provide misleading learning
+signals towards NeRF, increasing the possibility for poses to re-register incorrectly on already registered
+viewpoints (Overlapping Registration fig. 3).
+To tackle these, we propose a confidence-guided optimization schema. The intuition is simple: when a pose
+Pi is confident, it should be trusted more to improve the learned NeRF f (Θ); when a ray sampled from Pi
+contains locations that are confident, it should be weighted more to adjust the poses. When pose confidence
+4
+Pose Est. vs. GT
+Original View
+Reconstruction
+Fragmentation
+A tube of stacked toytrucks
+that the camera flies through
+like a flipbook
+Bas Relief
+A concave apple inside the table
+Overlapping
+Registration
+Blurry rendering Vacant voxels from
+on overlapped
+missing parts of true
+trajectory
+camera trajectory
+Figure 3 Three major failure modes of joint pose and NeRF optimization: fragmentation, Bas Relief,
+and overlapping registration. The colored poses are predictions; grey poses are groundtruth. Fragmentation: Pose
+and NeRF break apart, producing separate, mutually invisible radiance fields. Here a tube of toytrucks is created, each
+occluding the next. Poses fly through this tube flipbook-style, each seeing a single toytruck. See also Fig. 1, where
+completely independent reconstructions occur in different regions of 3-space. Bas Relief: Due to an inherent ambiguity
+in RGB reconstruction, the model constructs a “relief" by creating a concave apple inside the table, which results in
+camera trajectories inverted by 180 degrees. Overlapping Registration: Two subsets of the pose trajectory are trapped
+in a local minimum, incorrectly observing the same part of the radiance field, leading to blurry rendering and empty
+voxels. Here, one side of the toaster is blurry due to overlapping views, while the other has no views and is vacant.
+5
+drops dramatically for a new frame, it is likely that the pose got stuck in a local minima, so we perform
+a restart to re-register this pose. This is similar to the trial and error strategy of COLMAP Schonberger
+and Frahm (2016). We next describe how we measure confidence for each pose Pi and each point/viewing
+direction (x, d) in 3D.
+Encoding confidence in 3D. We construct a Neural Confidence Field on top of NeRF: given an input 3D location
+and direction (x, d), NeRF f also predicts confidence ζ(x,d) . We add one fully-connected layer on top of the
+features, followed by a sigmoid, similar to the color prediction head.
+The confidence for a ray r, is then aggregated through volumetric aggregation similar to opacity rendering:
+Z zfar
+Z zfar
+ζr = (
+P(z)dz)(
+P(z)ζ(r(z), d)dz)
+znear
+znear
+Z zfar
+Z zfar
++ (1 −
+P(z)dz)(
+ζ(r(z), d)dz)
+(3)
+znear
+znear
+where P(z) = T (z)σ(r(z)). We note that the first term is more prominent when the pixel is opaque whereas
+the latter is more prominent for transparent pixels.
+Measuring confidence. We measure confidence by how well a pixel reprojects in 2D through photometric error.
+Given a ray and its confidence ζr , we minimize Lconf = ∥e−E/τ − ζr ∥2 , where E is the photometric error used
+to train NeRF and τ is a temperature parameter. Lconf is only used to train the confidence head; gradient is
+stopped before NeRF parameters Θ or poses.
+Pose confidence. We compute pose confidence ζPi for pose Pi by aggregating confidence over rays sampled
+from Pi . At the start, P1 has confidence 1 and others have confidence 0. During training, we use a momentum
+schedule to update pose confidence: at training iteration t, we sample B rays {rji }B
+j=1 from pose Pi , and
+update confidence ζPt i as
+B
+1 X
+ζ i
+(4)
+ζPt i = βζPt−1
++
+(1
+−
+β)
+i
+B j=1 rj
+The momentum β is 0.9 in our experiments.
+Calibrating loss by confidence. We use confidence to calibrate L. Intuitively:
+• When we compute gradients for NeRF parameters Θ, the loss is weighted by {ζPi }, the pose confidence.
+• When we compute gradients for pose {Pi }, the per-ray loss is weighted by {ζr }, the ray confidence.
+At each step, we sample ray {rij }B
+j=1 from Pi . The loss is:
+XX
+X
+LNeRF (Θ|P̂ , I) =
+(
+L(rji ))ζPi )/(
+ζPi )
+i
+j
+LPose (P̂ |Θ, I) =
+X
+(5)
+i,j
+X
+ζrji )
+(6)
+Lall (Θ, P̂ |I) = LNeRF + LPose + Lconf
+(7)
+i,j
+L(rji )ζrji /(
+i,j
+Pose re-init. Inspired by trial-and-error registration mechanisms in incremental SfM Schonberger and Frahm
+(2016), we do a re-initialization from the previous pose if a new image fails to register. We declare failure
+if we see an abrupt drop in confidence for a newly registered image: after we register (Ii , Pi ), we restart if
+new pose confidence ζPi is less than λ standard deviations of the mean of the K previous pose confidences:
+i−1
+ζPi ≤ mean({ζPj }i−1
+j=i−K ) − λ · std({ζPj }j=i−K ). We use λ = 2 and K = 10 throughout our experiments.
+3.4
+Bas-Relief Ambiguity and Confidence-based Restart
+Bas-relief ambiguity Belhumeur et al. (1999), and the related "hollow-face" optical illusion, are examples
+of fundamental ambiguity in recovering an object’s 3D structure when objects that differ in shape produce
+identical images, perhaps under differing photometric conditions like lighting or shadow. For example, a
+6
+surface with a round convex bump lit from the left may appear identical to the same surface with an concavity
+lit from the right. We refer generically to such situations as "Bas-Relief" solutions. Human visual systems
+are known to employ strong priors (e.g. favoring convexity) to select a particular solution among multiple
+possibilities.
+We observe this phenomenon when jointly optimizing camera poses and NeRF, especially early in optimization
+when total camera motion is small. The model becomes stuck in a local minimum and cannot escape. For
+example, a concave version of the scene may be reconstructed when the groundtruth is a convex scene (see Bas
+Relief in Fig. 3). In this example, the camera movement is off by 180 degrees and moves in opposite directions
+compared to the groundtruth trajectory. We believe that simple priors, using cues like coarse depth, could
+help produce more human-like interpretations of natural scenes. However, for this study we avoid crafting
+priors, and remark that our confidence-based calibration of losses helps reduce this issue (16% to 9%).
+We also observe that incorrect Bas Relief solutions generally have higher error and lower confidence; Relief
+solutions tend to be valid for a limited set of viewpoints and wider viewpoints become inconsistent. Hence we
+to propose a generic solution by adopting the restart strategy from incremental SfM. For example, COLMAP
+restarts to identify different initial pairs if the final reconstruction does not meet certain criteria (e.g. ratio of
+registered images). For us, we launch K runs independently and measure the confidence after a fixed number
+of iterations. We pick the one with the highest confidence. In practice, we launch 3 runs and measure the
+confidence at 10% of the training.
+3.5
+Confidence-based geometric constraint
+Following recent works Jeong et al. (2021); Truong et al. (2023), we add a geometric constraint to the
+optimization. Different from the ray-distance loss Jeong et al. (2021) and depth consistency loss Truong et al.
+(2023), we adopt sampson distance Hartley and Zisserman (2003), similar to Wang et al. (2023). We extract
+correspondence between a frame and its neighbors. We use SIFT Lowe (1999) features, primarily for fair
+comparison with COLMAP. At training time, for each pose Pi , we sample a pose Pj in its neighbor, then
+compute Sampson distance:
+LSampson =
+|xi F xj |
+1
+|(xi F ) + (xi F )2 + (F xj )1 + (F xj )2 |
+(8)
+where F is the fundamental matrix between Pi and Pj and (xi F )k indicates the kth element.
+Loss calibration by confidence. Although geometric cues help constrain the early optimization landscape, the
+correspondence pairs can be incorrect and/or not pixel-accurate, especially for objects with little texture. This
+causes the geometric constraint to be detrimental to ICON for obtaining precise poses and reconstructions.
+We rely on pose confidence ζPi to weight the Sampson distance: for a pair of pose Pi and Pz , weight by
+1 − min(ζPi , ζPj ).
+4
+Experiments
+Datasets. We focus our study on Common Objects in 3D v2 (CO3D) dataset Reizenstein et al. (2021), a
+large-scale dataset consisting of turn-table style videos of objects. Ground truth poses are obtained through
+COLMAP. We train on two versions of the dataset: full-scene, which uses the unmodified image frames
+(both object and background visible), and object-only, which removes the background leaving only foreground
+object pixels. We believe the object-only version is a more challenging yet meaningful evaluation set; in
+full-scene, objects are often placed on textured backgrounds where COLMAP can successfully extract poses.
+This implicitly equates object pose and camera pose, and this assumption breaks in dynamic scenes where
+both object and camera are moving. We use 18 categories specified by the dev set, with “vase” and “donut”
+removed due to symmetry (indistinguishable in the object-only setting). We select scenes with high COLMAP
+pose confidence for camera pose evaluation. We clean the masks using TrackAnything Yang et al. (2023);
+results on original masks are present in the supplementary. To demonstrate performance on dynamic objects,
+we additionally re-purpose HO3D Hampali et al. (2020) v2 to evaluate the camera pose tracking and view
+synthesis quality. HO3D consists of static camera RGBD videos capturing dynamic objects manipulated by
+7
+GT
+NeRF
+ICON
+Figure 4 Novel view synthesis visualization of ICON without poses and NeRF trained with GT poses.
+Despite having no pose priors, ICON renders novel views at comparable or higher quality. Results are taken from
+LLFF and CO3D.
+human hands. We only use the RGB frames for ICON and select 8 clips (each around 200 frames) from 8
+videos, each covering a different object. Finally, we show results on LLFF Mildenhall et al. (2019), a dataset
+with 8 forward-facing scenes commonly used for scene-level novel view synthesis, especially for NeRFs.
+Architectures and Losses Our architecture follows NeRF Mildenhall et al. (2020) (no hierarchical sampling) and
+set the image’s longer edge to 640. We use the standard MSE loss of NeRF. When using Sampson distance, it
+is weighted by 10−4 . For the object-only settings in CO3D and HO3D, where object masks are available, we
+use MSE loss to supervise the opacity. For HO3D, we use hand masks when provided (7 out of 8 clips) to
+avoid sampling rays from occluded regions.
+Training. We use BARF Lin et al. (2021) settings and train for 200k iterations. For CO3D and HO3D, we skip
+every other frame to reduce training time, producing sequences around 100 frames. For ICON and its variants,
+we add a new frame every 1k iterations (CO3D/HO3D) / 500 iterations (LLFF) and freeze the learning rate
+(100k iterations for HO3D and CO3D, 30k for LLFF). Following BARF, we do not use positional encodings
+during registration and apply coarse-to-fine positional encoding after registration.
+Evaluation. Following Lin et al. (2021), we evaluate on the last part (typically 10%) of each sequence. We
+measure camera pose quality with Absolute Trajectory Error (ATE) Zhang and Scaramuzza (2018), performing
+Umeyama alignment Umeyama (1991) of predicted camera centers with ground truth. ATE consists of a
+translation (ATE) and rotation (ATErot ) component, evaluating l2-distance between camera centers and
+angular distance between aligned cameras, respectively. For novel view synthesis, we run an additional
+test-time pose refinement, following standard practices in previous works Lin et al. (2021); Wang et al. (2021b);
+Yen-Chen et al. (2021); Truong et al. (2023). We use PSNR, LPIPS Zhang et al. (2018), and SSIM as metrics.
+Baselines. We build ICON on top of BARF Lin et al. (2021), and compare against BARF for joint pose and
+NeRF optimization. For novel-view synthesis, we train NeRF with ground truth poses. For pose, we compare
+against a wide selection of baselines: PoseDiff Wang et al. (2023) models SfM within a probabilistic pose
+diffusion framework; concurrent work FlowCam FlowCAM Smith et al. (2023) solves pose from estimated 3D
+scene flow; DROID-SLAM Teed and Deng (2021) is a SOTA end-to-end learning-based SLAM system. We also
+use their predicted poses to initialize and train NeRF. In addition, on object-only CO3D evaluation, we evaluate
+poses from state-of-the-art SfM pipeline COLMAP Schonberger and Frahm (2016) and an augment version of
+COLMAP Sarlin et al. (2019) using learning-based features SuperPoint DeTone et al. (2017)+SuperGlue Sarlin
+et al. (2020) (COLMAP+SPSG). Though ICON only uses RGB, we include popular RGB-D methods on HO3D,
+including DROID with ground truth depth input, BundleTrack Wen and Bekris (2021) and state-of-the-art
+BundleSDF Wen et al. (2023).
+4.1
+Full scene from CO3D
+ICON is strong on full-scene CO3D. We compare ICON and baselines on full CO3D scenes in Table 1. Without
+prior knowledge, BARF must initialize all camera poses as identity. CO3D’s flyaround captures of objects result
+8
+ATE ATErot
+Pose Source + NeRF
+DROID
+0.431
+8.92
+2.681
+91.28
+FLOW-CAM
+PoseDiff
+1.973
+27.25
+Groundtruth
+Joint Pose + NeRF optimization
+6.215 114.63
+BARF
+GT-Pose+BARF 0.417
+3.77
+ICON (Ours)
+0.138
+1.16
+PSNR
+SSIM
+LPIPS
+17.19
+14.40
+18.82
+21.03
+0.526
+0.441
+0.563
+0.575
+0.541
+0.689
+0.520
+0.629
+12.77
+19.33
+0.401
+0.558
+0.871
+0.647
+22.24
+0.654
+0.428
+Table 1 Comparison on CO3D Reizenstein et al. (2021) full image scenes. While baseline BARF may fail on CO3D due to
+larger camera motion overall, ICON can estimate poses very precisely and render novel views at quality similar or
+better than NeRF trained with GT poses.
+in camera pose variation that significantly exceeds the threshold after which BARF’s performance collapses,
+with an ATErot exceeding 100 degrees. In contrast, ICON’s incremental approach recovers significantly
+more precise camera poses (ATE of 0.137 and ATErot of 1.20), while also achieving better visual fidelity,
+both qualitatively and quantitatively, as measured by PSNR, SSIM, and LPIPS. Interestingly, ICON still
+outperforms BARF even if BARF is provided with the ground truth poses at initialization. We originally
+proposed this setting as an upper bound, but we believe this result reflects instability in early iterations of
+BARF training: CO3D sequences are challenging compared to BARF benchmark scenes (e.g. synthetic dataset
+from Mildenhall et al. (2020)/forward facing LLFF). Camera coverage is sparser, with more drastic lighting
+changes, and motion blur. Among the 18 scenes, BARF suffers from ≥ 10 degree ATErot in 4, dragging down
+the overall performance.
+We also make several comparisons with NeRF Mildenhall et al. (2020) and pose prediction methods. We
+provide NeRF with poses predicted by DROID-SLAM, FLOW-CAM, and PoseDiff, which rely on annotated
+poses to train or additional signals such as optical flow Teed and Deng (2020). However, our joint NeRF and
+pose training produces better pose estimates (as measured by ATE and ATErot ), and as a result, NeRF’s
+novel view synthesis suffers in comparison. Even given CO3D’s ground truth poses, ICON can outperform
+NeRF. While this may at first seem surprising, we point out that even the “ground truth” poses in CO3D are
+not true ground truth; they are generated with COLMAP, which is not perfect. Additionally, in contrast to
+COLMAP, ICON’s joint learning of NeRF and poses means that the estimated poses are specifically optimized
+to also maximize NeRF quality. We hypothesize that this leads to poses more compatible for learning a NeRF,
+as reflected by the better performance we observe. Similar observations were presented in prior works Jeong
+et al. (2021); Meng et al. (2021).
+4.2
+Object-only on CO3D
+6DoF pose is inherently tricky to annotate, so past datasets often restrict motion to either the object or the
+camera; in the latter case, visually distinct backgrounds (e.g., specially designed patterns, such as QR codes
+around the object) are often used to make pose trajectory reconstruction easier. These strategies however do
+not generalize to more in-the-wild video, especially when both an object and the background (or camera) are
+moving. For this reason, we also perform evaluations on CO3D with the background masked out; in such a
+setting, algorithms are forced to only rely on object-based visual signal for estimating pose (Table 4.2).
+In this challenging setting, we again observe that BARF fails to estimate accurate poses, as the camera
+trajectory changes beyond what BARF can correct. Additionally, the difficulty of this setting produces further
+deterioration of BARF’s novel view synthesis. However, we observe that ICON can still handle such videos,
+even without signal from the background. This implies ICON is viable for joint pose estimation and 3D object
+reconstruction on more general videos, when the background cannot be relied on.
+As with our full-scene CO3D experiments, we compare with methods for estimating pose, and how well those
+poses work when fed to a NeRF. We observe that without being able to leverage the background, these
+methods struggle mightily. Pose prediction ATE and ATErot from DROID-SLAM in particular shoot up from
+0.431 to 5.903 and 8.92 to 90.25, respectively. With poorer pose, the quality of the learned NeRFs are also
+correspondingly worse.
+9
+ATE ATErot
+Pose Source + NeRF
+DROID
+5.903
+90.25
+6.700 120.52
+FLOW-CAM
+PoseDiff
+4.601
+64.24
+Groundtruth
+COLMAP variants
+COLMAP(11)
+1.177
+13.62
+38.37
+COLMAP-SPSG(11) 2.815
+COLMAP-SPSG
+3.616
+43.74
+Joint Pose + NeRF optimization
+GT-Pose+BARF
+2.055
+17.00
+BARF
+6.522 114.97
+ICON (Ours)
+0.215
+1.80
+PSNR
+SSIM
+LPIPS
+14.54
+13.08
+15.42
+20.77
+0.181
+0.127
+0.508
+0.718
+0.818
+0.886
+0.492
+0.301
+15.65
+8.22
+22.45
+0.802
+0.772
+0.277
+0.370
+0.893
+0.132
+Table 2 Comparison on CO3D Reizenstein et al. (2021) object-only scenes without background. Despite the challenges with
+background removal and failure from other methods, ICON can obtain poses at high precision and render novel views
+at high-quality. Since COLMAP only successfully registered more than 50% of frames on 11 objects, we marked it
+with “(11)" for comparison. The SPSG version of COLMAP registers for all scenes, and we include a datapoint on the
+11 scenes subset that vanilla COLMAP succeeds.
+BARF
+ICON
+Baselines
+DROID
+DROID
+BundleTrack
+BundleSDF
+Input
+RGB
+RGB
+RGB-D
+ATE
+0.135
+0.033
+ATErot
+122.38
+8.07
+Trans
+0.580
+0.049
+0.187
+0.105
+0.046
+114.71
+51.93
+29.45
+0.548
+0.262
+0.158
+0.021
+6.82
+PSNR
+5.72
+16.24
+-
+0.030
+Table 3 Comparison on HO3D Hampali et al. (2020). ICON works robustly against faster motion (vs CO3D), hand
+occlusion and lack of background information. In fact, despite only using RGB inputs, ICON can track poses at similar
+precision as SOTA RGB-D BundleSDF.
+For pose in particular, we additionally evaluate COLMAP and its variant COLMAP-SPSG, which replaces
+SIFT Lowe (1999) with SuperPoint-SuperGlue DeTone et al. (2017); Sarlin et al. (2020), on how they predict
+pose from just the foreground objects of CO3D. We observe that COLMAP performs significantly worse when
+it cannot rely on background cues, far worse than ICON. We believe this finding to be especially significant,
+as COLMAP is often considered the gold standard for camera pose alignment, and is often treated as “ground
+truth" (as in CO3D). This suggests our incrementally learned joint pose and NeRF optimization represents a
+promising new alternative for posing moving foreground objects, even if the background or camera is also
+moving.
+4.3
+Hand-held dynamic objects on HO3D
+Understanding handheld objects is of particular importance to many applications, as the very nature of
+interaction often implies importance, and hands are often the source of object motion. Pose and 3D
+reconstructions are key components of understanding objects, so the ability to generate them from videos of
+handheld interactions is of high utility. We show results on HO3D Hampali et al. (2020) in Table 3.
+CO3D-FullImg
+CO3D-No Background
+HO3D
+Incre Geo. Calib. Restart ATE ATErot PSNR SSIM LPIPS ATE ATErot PSNR SSIM LPIPS ATE ATErot PSNR SSIM LPIPS
+✓
+✓
+✓
+✓
+0.138 1.16 22.24 0.654 0.428 0.215 1.80 22.45 0.893 0.132 0.033 8.07 16.24 0.863 0.164
+✓
+✓
+✓
+0.714 25.40 20.48 0.632 0.486 0.224 1.86 22.47 0.892 0.132 0.035 27.32 15.02 0.873 0.670
+✓
+✓
+✓
+1.691 28.95 18.66 0.565 0.556 0.340 3.91 21.92 0.887 0.140 0.032 19.19 14.51 0.866 0.184
+✓
+✓
+1.283 36.82 19.05 0.567 0.562 0.972 15.94 21.03 0.875 0.163 0.046 30.50 12.86 0.863 0.290
+✓
+3.075 78.49 14.38 0.454 0.816 0.890 8.05 20.67 0.850 0.187 0.076 32.26 12.51 0.870 0.189
+6.215 114.63 12.77 0.401 0.871 6.522 114.97 8.22 0.772 0.370 0.307 131.16 7.45 0.82 0.29
+Table 4 Ablation study by removing components when possible. We remark that all designed component are critical for
+ICON. In addition, we didn’t observe Bas Relief on the CO3D Object-Only (No Background) scenes, so the effect of
+Restart is minimal.
+10
+GT
+ICON Novel View
+Figure 5 Visualization of ICON novel view synthesis on HO3D. ICON can recover shapes and textures
+accurately.
+Again, we primarily compare against BARF for joint object pose estimation and NeRF learning. Similar
+to CO3D object-only version, background is masked out since it moves differently than object. In addition,
+HO3D presents challenges with hand-occlusion and faster pose changes than CO3D. As with CO3D, we
+observe that BARF struggles to properly learn pose, especially with more drastic camera motion across nearby
+frames. On the other hand, ICON can perform well with these challenges: poses are predicted accurately
+(Tab 3) and textures are rendered properly in novel views (Fig. 5)
+Several existing works Wen and Bekris (2021); Wen et al. (2023) addressing this problem additionally use
+depth, which provides a powerful signal for 3D object reconstruction and pose. On the other hand, depth
+requires additional sensors and is not always available, and most visual media on the internet is RGB-only.
+Interestingly, we find that our results with ICON are competitive with state-of-the-art methods like BundleSDF
+which do require depth. In addition, although we don’t design or optimize ICON for mesh generation, we
+include a comparison on mesh by running an off-the-shelf MarchingCube Lorensen and Cline (1987) algorithm.
+We follow the evaluation protocol in Wen et al. (2023), use ICP for alignment Besl and McKay (1992) and
+report Chamfer distnace. Despite not using depth signals, we found ICON provides competitive mesh quality
+(0.7cm) compared to BundleSDF (0.77cm). We remark that BundleSDF’s reconstruction performed poorly
+on one scene (2.39 cm); removing one worst scene for both method, BundleSDF and ICON achieved 0.54cm
+and 0.56cm. We believe that this represents the potential of monocular RGB-only methods for object pose
+estimation and 3D reconstruction.
+4.4
+Ablation studies
+What are the key components in ICON? We perform ablation studies to gain deeper insight why our proposed
+methodology leads to such significant improvements in Table 4, examining the impact of incremental frame
+registration (“Incre.”), as well as confidence-based geometric constraint (“Geo.”), loss calibration through
+confidence (“Calib.”), and restarts (“Restart”). Note that the top row, with all options enabled, corresponds
+to our proposed ICON, while the bottom row (with none) is equivalent to BARF. We find all the proposed
+techniques to be essential
+ICON works on forward-facing scenes with minor camera motion. While much of our motivation and experiments
+center on the challenging setting of object-centric pose estimation and NeRF representations, we do not
+enforce any object-specific priors in our method. Our approach thus also generalizes to the scene images of
+LLFF Mildenhall et al. (2019), a common benchmark used by the wider NeRF community. Compared to
+the type of videos in CO3D or HO3D, the images in LLFF tend to be forward-facing: the camera poses for
+each image have only mild differences. Though easier, being able to recover camera poses in such settings is
+still important for wider applicability. We find that because the camera poses of LLFF only have limited
+variation, BARF initialized at identity is able to recover good poses and achieve good PSNR, SSIM, and
+LPIPS (Table 5). ICON, however, outperforms both BARF and a standard NeRF provided with ground truth
+poses.
+11
+GT-Pose+NeRF
+BARF
+ICON
+ATE
+0.498
+0.459
+ATErot
+0.896
+0.806
+PSNR
+22.06
+23.89
+24.23
+SSIM
+0.648
+0.721
+0.731
+LPIPS
+0.294
+0.240
+0.221
+Table 5 Comparison on LLFF Mildenhall et al. (2019) dataset. When camera poses have minor or mild motion, BARF
+works well with identity pose initialization and ICON performs slightly better. ATE is scaled by 100.
+5
+Conclusion
+We proposed to study joint pose and NeRF optimization in an incremental setup and highlighted interesting
+and important challenges in this setting. To tackle them, we have designed ICON, a novel confidence-based
+optimization procedure. The strong empirical performance across multiple datasets suggests that ICON
+essentially removes the requirement for pose initialization in common videos. Although our focus is on
+object-centric scenarios, there are no priors or heuristics that rule out other settings. ICON’s LLFF and
+full-scene CO3D results are strong and show promise for more general types of video input, such as scene
+reconstruction from moving cameras (e.g., egocentric Grauman et al. (2022)).
+12
+References
+Dejan Azinović, Ricardo Martin-Brualla, Dan B Goldman, Matthias Nießner, and Justus Thies. Neural rgb-d surface
+reconstruction. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR),
+pages 6290–6301, June 2022.
+Peter N Belhumeur, David J Kriegman, and Alan L Yuille. The bas-relief ambiguity. International journal of computer
+vision, 1999.
+Paul J. Besl and Neil D. McKay. A method for registration of 3-d shapes. IEEE Transactions on Pattern Analysis and
+Machine Intelligence, 14(2):239–256, 1992. doi: 10.1109/34.121791. https://doi.org/10.1109/34.121791.
+Wenjing Bian, Zirui Wang, Kejie Li, Jiawang Bian, and Victor Adrian Prisacariu. Nope-nerf: Optimising neural
+radiance field with no pose prior. 2023.
+Mark Boss, Andreas Engelhardt, Abhishek Kar, Yuanzhen Li, Deqing Sun, Jonathan T. Barron, Hendrik P.A. Lensch,
+and Varun Jampani. SAMURAI: Shape And Material from Unconstrained Real-world Arbitrary Image collections.
+In Advances in Neural Information Processing Systems (NeurIPS), 2022.
+Mathilde Caron, Hugo Touvron, Ishan Misra, Hervé Jégou, Julien Mairal, Piotr Bojanowski, and Armand Joulin.
+Emerging properties in self-supervised vision transformers. In Proceedings of the International Conference on
+Computer Vision (ICCV), 2021.
+Shuo Cheng, Caelan Garrett, Ajay Mandlekar, and Danfei Xu. NOD-TAMP: Multi-step manipulation planning with
+neural object descriptors. In Towards Generalist Robots: Learning Paradigms for Scalable Skill Acquisition @
+CoRL2023, 2023. https://openreview.net/forum?id=43MSbj5mSS.
+Shin-Fang Chng, Sameera Ramasinghe, Jamie Sherrah, and Simon Lucey. Gaussian activated neural radiance fields for
+high fidelity reconstruction and pose estimation. In The European Conference on Computer Vision: ECCV, 2022.
+Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, and Matthias Nießner. Scannet:
+Richly-annotated 3d reconstructions of indoor scenes. Computer Vision and Pattern Recognition (CVPR), pages
+5828–5839, 2017. doi: 10.1109/CVPR.2017.618. http://www.scan-net.org/.
+Davison. Real-time simultaneous localisation and mapping with a single camera. In Proceedings Ninth IEEE
+International Conference on Computer Vision, pages 1403–1410. IEEE, 2003.
+Andrew J Davison, Ian D Reid, Nicholas D Molton, and Olivier Stasse. Monoslam: Real-time single camera slam.
+IEEE transactions on pattern analysis and machine intelligence, 29(6):1052–1067, 2007.
+Daniel DeTone, Tomasz Malisiewicz, and Andrew Rabinovich. Superpoint: Self-supervised interest point detection
+and description. 2018 IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops (CVPRW),
+pages 337–33712, 2017. https://api.semanticscholar.org/CorpusID:4918026.
+Jakob Engel, Thomas Schöps, and Daniel Cremers. Lsd-slam: Large-scale direct monocular slam. In Computer
+Vision–ECCV 2014: 13th European Conference, Zurich, Switzerland, September 6-12, 2014, Proceedings, Part II 13,
+pages 834–849. Springer, 2014.
+Jakob Engel, Vladlen Koltun, and Daniel Cremers. Direct sparse odometry. IEEE transactions on pattern analysis
+and machine intelligence, 40(3):611–625, 2017.
+Kristen Grauman, Andrew Westbury, Eugene Byrne, Zachary Chavis, Antonino Furnari, Rohit Girdhar, Jackson
+Hamburger, Hao Jiang, Miao Liu, Xingyu Liu, Miguel Martin, Tushar Nagarajan, Ilija Radosavovic, Santhosh Kumar
+Ramakrishnan, Fiona Ryan, Jayant Sharma, Michael Wray, Mengmeng Xu, Eric Zhongcong Xu, Chen Zhao,
+Siddhant Bansal, Dhruv Batra, Vincent Cartillier, Sean Crane, Tien Do, Morrie Doulaty, Akshay Erapalli, Christoph
+Feichtenhofer, Adriano Fragomeni, Qichen Fu, Abrham Gebreselasie, Cristina González, James Hillis, Xuhua Huang,
+Yifei Huang, Wenqi Jia, Weslie Khoo, Jáchym Kolář, Satwik Kottur, Anurag Kumar, Federico Landini, Chao Li,
+Yanghao Li, Zhenqiang Li, Karttikeya Mangalam, Raghava Modhugu, Jonathan Munro, Tullie Murrell, Takumi
+Nishiyasu, Will Price, Paola Ruiz, Merey Ramazanova, Leda Sari, Kiran Somasundaram, Audrey Southerland,
+Yusuke Sugano, Ruijie Tao, Minh Vo, Yuchen Wang, Xindi Wu, Takuma Yagi, Ziwei Zhao, Yunyi Zhu, Pablo Arbeláez,
+David Crandall, Dima Damen, Giovanni Maria Farinella, Christian Fuegen, Bernard Ghanem, Vamsi Krishna Ithapu,
+C. V. Jawahar, Hanbyul Joo, Kris Kitani, Haizhou Li, Richard Newcombe, Aude Oliva, Hyun Soo Park, James M.
+Rehg, Yoichi Sato, Jianbo Shi, Mike Zheng Shou, Antonio Torralba, Lorenzo Torresani, Mingfei Yan, and Jitendra
+Malik. Ego4d: Around the world in 3,000 hours of egocentric video. In Computer Vision and Pattern Recognition,
+2022.
+13
+Shreyas Hampali, Mahdi Rad, Markus Oberweger, and Vincent Lepetit. Honnotate: A method for 3d annotation of
+hand and object poses. In Computer Vision and Pattern Recognition, 2020.
+Richard Hartley and Andrew Zisserman. Multiple View Geometry in Computer Vision. Cambridge University Press,
+USA, 2 edition, 2003. ISBN 0521540518.
+Yoonwoo Jeong, Seokjun Ahn, Christopher Choy, Anima Anandkumar, Minsu Cho, and Jaesik Park. Self-calibrating
+neural radiance fields. In International Conference on Computer Vision, 2021.
+Daniel Kappler, Franziska Meier, Jan Issac, Jim Mainprice, Cristina Garcia Cifuentes, Manuel Wüthrich, Vincent
+Berenz, Stefan Schaal, Nathan Ratliff, and Jeannette Bohg. Real-time perception meets reactive motion generation.
+IEEE Robotics and Automation Letters, 3(3):1864–1871, 2018. doi: 10.1109/LRA.2018.2795645.
+Georg Klein and David Murray. Parallel tracking and mapping for small ar workspaces. In 2007 6th IEEE and ACM
+international symposium on mixed and augmented reality, pages 225–234. IEEE, 2007.
+Zhengfei Kuang, Kyle Olszewski, Menglei Chai, Zeng Huang, Panos Achlioptas, and Sergey Tulyakov. Neroic: Neural
+rendering of objects from online image collections. ACM Trans. Graph., 41(4), jul 2022. ISSN 0730-0301. doi:
+10.1145/3528223.3530177. https://doi.org/10.1145/3528223.3530177.
+Yann Labbé, Justin Carpentier, Mathieu Aubry, and Josef Sivic. Cosypose: Consistent multi-view multi-object 6d
+pose estimation. In European Conference on Computer Vision, 2020.
+Yann Labbé, Lucas Manuelli, Arsalan Mousavian, Stephen Tyree, Stan Birchfield, Jonathan Tremblay, Justin Carpentier,
+Mathieu Aubry, Dieter Fox, and Josef Sivic. Megapose: 6d pose estimation of novel objects via render & compare.
+arXiv preprint arXiv:2212.06870, 2022.
+Chen-Hsuan Lin, Wei-Chiu Ma, Antonio Torralba, and Simon Lucey. Barf: Bundle-adjusting neural radiance fields. In
+IEEE International Conference on Computer Vision (ICCV), 2021.
+Yunzhi Lin, Thomas Müller, Jonathan Tremblay, Bowen Wen, Stephen Tyree, Alex Evans, Patricio A. Vela, and Stan
+Birchfield. Parallel inversion of neural radiance fields for robust pose estimation. In ICRA, 2023.
+Yuan Liu, Yilin Wen, Sida Peng, Cheng Lin, Xiaoxiao Long, Taku Komura, and Wenping Wang. Gen6d: Generalizable
+model-free 6-dof object pose estimation from rgb images. In European Conference on Computer Vision, pages
+298–315. Springer, 2022.
+William E. Lorensen and Harvey E. Cline. Marching cubes: A high-resolution 3d surface construction algorithm.
+Computer Graphics, 21(4):163–169, 1987. doi: 10.1145/37402.37422. https://doi.org/10.1145/37402.37422.
+David G. Lowe. Object recognition from local scale-invariant features. International Conference on Computer Vision
+(ICCV), pages 1150–1157, 1999. doi: 10.1109/ICCV.1999.790410. https://www.cs.ubc.ca/~lowe/papers/iccv99.pdf.
+Eric Marchand, Hideaki Uchiyama, and Fabien Spindler. Pose estimation for augmented reality: A hands-on survey.
+IEEE Transactions on Visualization and Computer Graphics, 22(12):2633–2651, 2016. doi: 10.1109/TVCG.2015.
+2513408.
+John McCormac, Ronald Clark, Michael Bloesch, Andrew Davison, and Stefan Leutenegger. Fusion++: Volumetric
+object-level slam. In 2018 international conference on 3D vision (3DV), pages 32–41. IEEE, 2018.
+Quan Meng, Anpei Chen, Haimin Luo, Minye Wu, Hao Su, Lan Xu, Xuming He, and Jingyi Yu. GNeRF: GAN-based
+Neural Radiance Field without Posed Camera. In Proceedings of the IEEE/CVF International Conference on
+Computer Vision (ICCV), 2021.
+Nathaniel Merrill, Yuliang Guo, Xingxing Zuo, Xinyu Huang, Stefan Leutenegger, Xi Peng, Liu Ren, and Guoquan
+Huang. Symmetry and uncertainty-aware object slam for 6dof object pose estimation. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 14901–14910, 2022.
+Ben Mildenhall, Pratul P Srinivasan, Rodrigo Ortiz-Cayon, Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng,
+and Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM
+Transactions on Graphics (TOG), 38(4):1–14, 2019.
+Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. In European Conference on Computer Vision, 2020.
+Norman Muller, Yu-Shiang Wong, Niloy J Mitra, Angela Dai, and Matthias Nießner. Seeing behind objects for 3d
+multi-object tracking in rgb-d sequences. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 6071–6080, 2021.
+14
+Jacob Munkberg, Jon Hasselgren, Tianchang Shen, Jun Gao, Wenzheng Chen, Alex Evans, Thomas Müller, and Sanja
+Fidler. Extracting Triangular 3D Models, Materials, and Lighting From Images. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), pages 8280–8290, June 2022.
+Raul Mur-Artal and Juan D Tardós. Orb-slam2: An open-source slam system for monocular, stereo, and rgb-d cameras.
+IEEE transactions on robotics, 33(5):1255–1262, 2017.
+Raul Mur-Artal, Jose Maria Martinez Montiel, and Juan D Tardos. Orb-slam: a versatile and accurate monocular
+slam system. IEEE transactions on robotics, 31(5):1147–1163, 2015.
+Michael Oechsle, Songyou Peng, and Andreas Geiger. Unisurf: Unifying neural implicit surfaces and radiance fields for
+multi-view reconstruction. In International Conference on Computer Vision (ICCV), 2021.
+Keunhong Park, Arsalan Mousavian, Yu Xiang, and Dieter Fox. Latentfusion: End-to-end differentiable reconstruction
+and rendering for unseen object pose estimation. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 10710–10719, 2020.
+Karl Pauwels and Danica Kragic. Simtrack: A simulation-based framework for scalable real-time object pose detection
+and tracking. In International Conference on Intelligent Robots and Systems, 2015.
+Haozhi Qi, Brent Yi, Sudharshan Suresh, Mike Lambeta, Yi Ma, Roberto Calandra, and Jitendra Malik. General
+in-hand object rotation with vision and touch. In 7th Annual Conference on Robot Learning, 2023. https:
+//openreview.net/forum?id=RN00jfIV-X.
+Jeremy Reizenstein, Roman Shapovalov, Philipp Henzler, Luca Sbordone, Patrick Labatut, and David Novotny.
+Common objects in 3d: Large-scale learning and evaluation of real-life 3d category reconstruction. In International
+Conference on Computer Vision, 2021.
+Antoni Rosinol, John J Leonard, and Luca Carlone. Nerf-slam: Real-time dense monocular slam with neural radiance
+fields. arXiv preprint arXiv:2210.13641, 2022.
+Martin Runz, Maud Buffier, and Lourdes Agapito. Maskfusion: Real-time recognition, tracking and reconstruction of
+multiple moving objects. In 2018 IEEE International Symposium on Mixed and Augmented Reality (ISMAR), pages
+10–20. IEEE, 2018.
+Renato F Salas-Moreno, Richard A Newcombe, Hauke Strasdat, Paul HJ Kelly, and Andrew J Davison. Slam++:
+Simultaneous localisation and mapping at the level of objects. In Proceedings of the IEEE conference on computer
+vision and pattern recognition, pages 1352–1359, 2013.
+Paul-Edouard Sarlin, Cesar Cadena, Roland Siegwart, and Marcin Dymczyk. From coarse to fine: Robust hierarchical
+localization at large scale. In CVPR, 2019.
+Paul-Edouard Sarlin, Daniel DeTone, Tomasz Malisiewicz, and Andrew Rabinovich. Superglue: Learning feature
+matching with graph neural networks. In Proceedings of the IEEE/CVF conference on computer vision and pattern
+recognition, pages 4938–4947, 2020.
+Johannes L Schonberger and Jan-Michael Frahm. Structure-from-motion revisited. In Proceedings of the IEEE
+conference on computer vision and pattern recognition, pages 4104–4113, 2016.
+Akash Sharma, Wei Dong, and Michael Kaess. Compositional and scalable object slam. In 2021 IEEE International
+Conference on Robotics and Automation (ICRA), pages 11626–11632. IEEE, 2021.
+Cameron Smith, Yilun Du, Ayush Tewari, and Vincent Sitzmann. Flowcam: Training generalizable 3d radiance fields
+without camera poses via pixel-aligned scene flow, 2023.
+Manuel Stoiber, Martin Sundermeyer, and Rudolph Triebel. Iterative corresponding geometry: Fusing region and depth
+for highly efficient 3d tracking of textureless objects. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 6855–6865, 2022.
+Jiaming Sun, Yiming Xie, Linghao Chen, Xiaowei Zhou, and Hujun Bao. NeuralRecon: Real-time coherent 3D
+reconstruction from monocular video. CVPR, 2021.
+Martin Sundermeyer, Zoltan-Csaba Marton, Maximilian Durner, Manuel Brucker, and Rudolph Triebel. Implicit 3d
+orientation learning for 6d object detection from rgb images. In Proceedings of the european conference on computer
+vision (ECCV), pages 699–715, 2018.
+Zachary Teed and Jia Deng. Raft: Recurrent all-pairs field transforms for optical flow. In Computer Vision –
+ECCV 2020: 16th European Conference, Glasgow, UK, August 23–28, 2020, Proceedings, Part II, page 402–419,
+15
+Berlin, Heidelberg, 2020. Springer-Verlag. ISBN 978-3-030-58535-8. doi: 10.1007/978-3-030-58536-5_24. https:
+//doi.org/10.1007/978-3-030-58536-5_24.
+Zachary Teed and Jia Deng. DROID-SLAM: Deep Visual SLAM for Monocular, Stereo, and RGB-D Cameras. Advances
+in neural information processing systems, 2021.
+Prune Truong, Marie-Julie Rakotosaona, Fabian Manhardt, and Federico Tombari. Sparf: Neural radiance fields from
+sparse and noisy poses. In Computer Vision and Pattern Recognition, 2023.
+Vadim Tschernezki, Diane Larlus, and Andrea Vedaldi. NeuralDiff: Segmenting 3D objects that move in egocentric
+videos. In Proceedings of the International Conference on 3D Vision (3DV), 2021.
+Shinji Umeyama. Least-squares estimation of transformation parameters between two point patterns. IEEE Transactions
+on Pattern Analysis & Machine Intelligence, 13(04):376–380, 1991.
+He Wang, Srinath Sridhar, Jingwei Huang, Julien Valentin, Shuran Song, and Leonidas J Guibas. Normalized object
+coordinate space for category-level 6d object pose and size estimation. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 2642–2651, 2019.
+Jianyuan Wang, Christian Rupprecht, and David Novotny. Posediffusion: Solving pose estimation via diffusion-aided
+bundle adjustment. In International Conference on Computer Vision, 2023.
+Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku Komura, and Wenping Wang. Neus: Learning neural
+implicit surfaces by volume rendering for multi-view reconstruction. arXiv preprint arXiv:2106.10689, 2021a.
+Wenshan Wang, Yaoyu Hu, and Sebastian Scherer. Tartanvo: A generalizable learning-based vo. 2020.
+Zirui Wang, Shangzhe Wu, Weidi Xie, Min Chen, and Victor Adrian Prisacariu. NeRF−−: Neural radiance fields
+without known camera parameters. arXiv preprint arXiv:2102.07064, 2021b.
+Bowen Wen and Kostas Bekris. Bundletrack: 6d pose tracking for novel objects without instance or category-level 3d
+models. In 2021 IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS), page 8067–8074.
+IEEE Press, 2021. doi: 10.1109/IROS51168.2021.9635991. https://doi.org/10.1109/IROS51168.2021.9635991.
+Bowen Wen, Wenzhao Lian, Kostas Bekris, and Stefan Schaal. Catgrasp: Learning category-level task-relevant grasping
+in clutter from simulation. ICRA 2022, 2022a.
+Bowen Wen, Wenzhao Lian, Kostas E. Bekris, and Stefan Schaal. You only demonstrate once: Category-level
+manipulation from single visual demonstration. ArXiv, abs/2201.12716, 2022b. https://api.semanticscholar.org/
+CorpusID:246430152.
+Bowen Wen, Jonathan Tremblay, Valts Blukis, Stephen Tyree, Thomas Muller, Alex Evans, Dieter Fox, Jan Kautz,
+and Stan Birchfield. Bundlesdf: Neural 6-dof tracking and 3d reconstruction of unknown objects. Computer Vision
+and Pattern Recognition, 2023.
+Yitong Xia, Hao Tang, Radu Timofte, and Luc Van Gool. Sinerf: Sinusoidal neural radiance fields for joint pose
+estimation and scene reconstruction. In 33rd British Machine Vision Conference 2022, BMVC 2022, London, UK,
+November 21-24, 2022. BMVA Press, 2022. https://bmvc2022.mpi-inf.mpg.de/0131.pdf.
+Yu Xiang, Tanner Schmidt, Venkatraman Narayanan, and Dieter Fox. Posecnn: A convolutional neural network for 6d
+object pose estimation in cluttered scenes. In Robotics: Science and Systems (RSS), 2018.
+Jinyu Yang, Mingqi Gao, Zhe Li, Shang Gao, Fangjing Wang, and Feng Zheng. Track anything: Segment anything
+meets videos, 2023.
+Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan Atzmon, Basri Ronen, and Yaron Lipman. Multiview
+neural surface reconstruction by disentangling geometry and appearance. Advances in Neural Information Processing
+Systems, 33, 2020.
+Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit surfaces. In Thirty-Fifth
+Conference on Neural Information Processing Systems, 2021.
+Lin Yen-Chen, Pete Florence, Jonathan T. Barron, Alberto Rodriguez, Phillip Isola, and Tsung-Yi Lin. iNeRF:
+Inverting neural radiance fields for pose estimation. In IEEE/RSJ International Conference on Intelligent Robots
+and Systems (IROS), 2021.
+Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa. pixelNeRF: Neural radiance fields from one or few
+images. In CVPR, 2021.
+16
+Jason Y. Zhang, Gengshan Yang, Shubham Tulsiani, and Deva Ramanan. NeRS: Neural reflectance surfaces for
+sparse-view 3d reconstruction in the wild. In Conference on Neural Information Processing Systems, 2021.
+Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of
+deep features as a perceptual metric. In 2018 IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+pages 586–595, 2018. doi: 10.1109/CVPR.2018.00068.
+Zichao Zhang and Davide Scaramuzza. A tutorial on quantitative trajectory evaluation for visual (-inertial) odometry.
+In 2018 IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS), pages 7244–7251. IEEE,
+2018.
+Wang Zhao, Shaohui Liu, Hengkai Guo, Wenping Wang, and Yong-Jin Liu. Particlesfm: Exploiting dense point
+trajectories for localizing moving cameras in the wild. In European conference on computer vision (ECCV), 2022.
+Jon Zubizarreta, Iker Aguinaga, and Jose Maria Martinez Montiel. Direct sparse mapping. IEEE Transactions on
+Robotics, 36(4):1363–1370, 2020.
+17
+Appendix
+A
+Per-scene performance breakdown
+We expand ICON results presented in main paper in section3 on CO3D full scene, CO3D object-only and
+HO3D Hampali et al. (2020) to document per-scene performance. Results are summarized in Tab. 6, Tab. 7
+and Tab. 8.
+Category Scene
+ATE ATErot PSNR SSIM LPIPS
+apple
+189_20393_38136 0.027 0.09 24.83 0.74 0.32
+ball
+123_14363_28981 0.454 2.31 16.43 0.43 0.74
+bench
+415_57121_110109 0.002 0.12 26.03 0.69 0.33
+book
+247_26469_51778 0.219 1.41 26.79 0.76 0.30
+bowl
+69_5376_12833
+0.338 2.02 15.33 0.35 0.68
+broccoli
+372_41112_81867 0.022 0.14 26.40 0.79 0.35
+cake
+374_42274_84517 0.040 0.31 23.85 0.76 0.26
+hydrant
+167_18184_34441 0.092 0.69 19.05 0.54 0.49
+mouse
+377_43416_86289 0.240 1.33 22.33 0.71 0.36
+orange
+374_42196_84367 0.200 3.86 24.71 0.80 0.35
+plant
+247_26441_50907 0.190 1.95 16.30 0.43 0.59
+remote
+350_36761_68623 0.043 0.28 27.08 0.66 0.42
+skateboard 245_26182_52130 0.061 0.34 21.37 0.67 0.58
+suitcase
+109_12965_23647 0.110 1.37 17.77 0.61 0.48
+teddybear 34_1479_4753
+0.050 0.55 24.08 0.76 0.32
+toaster
+372_41229_82130 0.240 2.57 20.11 0.53 0.50
+toytrain
+240_25394_51994 0.170 1.92 19.08 0.66 0.49
+toytruck 190_20494_39385 0.010 0.17 27.39 0.87 0.15
+Avg
+0.138 1.16 22.24 0.65 0.43
+Table 6 Per-scene performance of ICON on CO3D full scene evaluation.
+Category Scene
+ATE ATErot PSNR SSIM LPIPS
+apple
+189_20393_38136 0.255 1.70 26.59 0.95 0.06
+ball
+123_14363_28981 0.450 2.54 20.27 0.93 0.09
+bench
+415_57121_110109 0.183 1.22 24.26 0.80 0.19
+book
+247_26469_51778 0.174 1.36 24.24 0.89 0.13
+bowl
+69_5376_12833
+0.637 4.66 16.91 0.94 0.09
+broccoli
+372_41112_81867 0.201 1.65 24.63 0.93 0.09
+cake
+374_42274_84517 0.058 0.46 21.53 0.91 0.12
+hydrant
+167_18184_34441 0.150 1.05 23.86 0.92 0.12
+mouse
+377_43416_86289 0.420 7.09 15.93 0.80 0.31
+orange
+374_42196_84367 0.387 3.84 29.34 0.98 0.02
+plant
+247_26441_50907 0.075 0.62 18.28 0.75 0.27
+remote
+350_36761_68623 0.109 0.71 25.38 0.94 0.09
+skateboard 245_26182_52130 0.194 1.50 19.51 0.81 0.18
+suitcase
+109_12965_23647 0.082 0.78 21.17 0.89 0.18
+teddybear 34_1479_4753
+0.053 0.42 24.56 0.91 0.10
+toaster
+372_41229_82130 0.225 1.01 20.79 0.94 0.10
+toytrain
+240_25394_51994 0.159 1.19 20.35 0.83 0.18
+toytruck 190_20494_39385 0.066 0.68 26.46 0.95 0.05
+Avg
+0.215 1.80 22.45 0.89 0.13
+Table 7 Per-scene performance of ICON on CO3D object-only evaluation.
+18
+SiS1
+MC1
+ABF13
+GPMF12
+ND2
+SM2
+SMu1
+AP13
+Avg
+ATE
+0.028
+0.019
+0.064
+0.029
+0.027
+0.026
+0.017
+0.058
+0.033
+ATErot
+3.80
+5.90
+10.67
+11.23
+7.18
+5.56
+13.19
+7.06
+8.07
+Trans
+0.017
+0.049
+0.094
+0.056
+0.015
+0.032
+0.081
+0.046
+0.049
+PSNR
+19.13
+14.24
+11.79
+16.27
+20.06
+13.51
+14.46
+20.42
+16.24
+CD(cm)
+0.23
+0.41
+1.72
+0.38
+0.50
+0.85
+1.02
+0.50
+0.70
+Table 8 Per-scene performance of ICON on HO3D evaluation. CD stands for Chamfer Distance, measuring mesh
+quality.
+B
+Evaluating ICON on other CO3D categories
+In this section, we supplement the results reported in the main paper on CO3D Reizenstein et al. (2021). We
+add a study using all the remaining 33 categories from CO3D and evaluate on the full scene. This makes it
+possible for us to include symmetric objects such as vase whose poses are indistinguishable in the object-only
+evaluation. Since no official subset is specified for these categories, we take top-4 instances from each category
+with highest camera pose confidence and randomly sample one instance for each category. It is worth noting
+that the “ground-truth" camera poses are estimated by COLMAP, and may not be 100% accurate, especially
+these categories are not part of the official benchmarking sets. We use the same (hyper-)parameters as the
+main paper benchmarking on the 18 categories.
+We report the results in Tab 9. We observe that most objects achieve similar results as Tab 6. However, there
+are a few objects where ICON yields imprecise poses, dragging down the average metrics. We believe there
+are two causes. First, ICON relies on photometric loss and may suffer from changes in the scenes. Many of
+the scenes where ICON has ≥ 3 degree rotation error have moving shadows (either object or human), strong
+lighting change (from the builtin flash of the camera) or reflective surfaces. We show a few examples here in
+Fig. 6. Second, the groundtruth poses used to evaluate the trajectory are generated by COLMAP, which may
+not be accurate, especially the categories not included in the official benchmarking sets.
+C
+Evaluation on ScanNet
+ICON focuses our study on object-centric videos such as CO3D and HO3D. However, ICON does not apply
+specific design tailored towards object that prevents it to work on other types of videos. Here, we include a
+preliminary study by benchmarking ICON on ScanNet Dai et al. (2017). We randomly sample 10 out of 20
+scenes in ScanNet test set and use a clip of 200 frames with a stride of 2. Scenes with NaN value in camera
+poses are removed when we sample scenes.
+We report camera pose quality following prior works Zhao et al. (2022) using Relative Pose Error (RPE) on
+rotation and Absolute Trajectory Error (ATE (m)) for translation. We follow Zhao et al. (2022) to not use
+ATErot because some trajectories in ScanNet has very small translation and aligning the trajectory then
+evaluate rotation may not be reliable.
+We do not change any (hyper-)parameters used in CO3D full scene training for ICON to stress test the system
+on the significantly different scenarios in ScanNet. We include four methods designed to work well on ScanNet
+for comparison: TartanVO Wang et al. (2020), COLMAP Schonberger and Frahm (2016), DROID-SLAM Teed
+and Deng (2021) and current state-of-the-art method ParticleSfM Zhao et al. (2022). We note that COLMAP
+and ParticleSfM may fail to perform well when running only on the short clip, so we run them on the entire
+video and report the results on the clip. In addition, as noted in Zhao et al. (2022), since COLMAP often fail
+on many ScanNet scenes, we use a tuned version following Tschernezki et al. (2021).
+We report results in Tab 10. Despite having no tuning or change when transferring from CO3D, ICON
+achieves strong performance on ScanNet compared to the state-of-the-art methods designed to work well on
+19
+Figure 6 Scenes where ICON produces larger errors. ICON mainly suffer from scenes where photometric loss produces
+inconsistent supervisions. The car example consists of moving human shadow and reflective surface on the car. The
+wineglass example contains transparent surface and light reflections. The donut example contains inconsistent lighting,
+where the flash from the camera generates brighter color in the front and darken the back part. These inconsistencies
+in different viewpoints cause ICON to produce imprecise camera poses.
+20
+Category
+Scene
+ATE ATErot PSNR SSIM LPIPS
+backpack
+506_72977_141839 0.060 0.42 20.74 0.59 0.42
+banana
+612_97867_196978 1.691 11.23 13.04 0.15 0.81
+baseballbat 375_42661_85494 0.791 7.83 13.92 0.61 0.68
+baseballglove 350_36909_69272 0.054 0.72 20.52 0.43 0.62
+bicycle
+62_4324_10701
+0.700 5.94 15.22 0.19 0.69
+bottle
+589_88280_175252 0.098 1.18 29.59 0.76 0.38
+car
+439_62880_124254 0.765 4.43 11.40 0.32 0.87
+carrot
+372_40937_81628 0.873 2.17 20.86 0.63 0.44
+cellphone
+76_7569_15872
+4.725 19.55 13.26 0.30 0.85
+chair
+455_64283_126636 0.009 0.28 22.77 0.73 0.27
+couch
+427_59830_115190 0.140 1.64 25.67 0.84 0.29
+cup
+44_2241_6750
+0.453 2.47 23.50 0.60 0.49
+donut
+403_52964_103416 2.248 11.89 17.60 0.74 0.57
+frisbee
+339_35238_64092 0.738 3.75 22.34 0.43 0.66
+hairdryer
+378_44249_88180 0.022 0.16 25.84 0.82 0.33
+handbag
+406_54390_105616 0.273 2.32 26.51 0.89 0.26
+hotdog
+618_100797_202003 2.600 7.23 19.78 0.45 0.78
+keyboard
+375_42606_85350 1.596 7.04 18.54 0.46 0.60
+kite
+428_60143_116852 0.029 0.36 18.01 0.30 0.74
+laptop
+378_44295_88252 1.128 7.92 15.04 0.36 0.59
+microwave
+504_72519_140728 0.023 0.45 21.17 0.61 0.42
+motorcycle 367_39692_77422 0.006 0.14 26.52 0.78 0.30
+parkingmeter 483_69196_135585 0.136 2.48 17.24 0.56 0.56
+pizza
+372_41288_82251 0.036 0.26 27.70 0.69 0.42
+sandwich
+366_39376_76719 0.411 1.67 19.74 0.53 0.51
+stopsign
+617_99969_199015 3.229 13.81 13.99 0.40 0.72
+toilet
+605_94579_188112 0.252 5.48 18.53 0.69 0.41
+toybus
+273_29204_56363 0.057 0.40 23.34 0.65 0.60
+toyplane
+405_53880_105088 0.020 0.12 22.20 0.53 0.53
+tv
+48_2742_8095
+0.097 0.81 26.32 0.81 0.39
+umbrella
+191_20630_39388 1.115 5.73 17.35 0.44 0.60
+vase
+374_41862_83720 0.100 1.27 29.25 0.85 0.28
+wineglass
+401_51903_101703 1.191 7.80 21.43 0.58 0.53
+Avg
+0.778 4.21 20.57 0.57 0.53
+Table 9 Per-scene performance of ICON on other 33 categories in CO3D full-scene evaluation.
+ScanNet style videos. We believe this is a proof-of-concept that ICON can be generalized and adapted to
+other types of videos.
+D
+Limitations and future directions
+While ICON achieves strong performance to jointly optimize poses and NeRF, it has a few limitations.
+First, ICON strongly relies on photometric loss as supervision for both NeRF and poses. This relies on the
+assumption that the color is moderately consistent across different viewpoints. However, this assumption may
+break in real-world. Although ICON uses confidence to down-weight volumes with inconsistent photometric
+loss, it will produce imprecise poses (5 to 10 degree rotation error) due to the ambiguity. As shown in Tab 9
+and Fig 6, ICON suffers from motion, reflective surfaces, transparency and strong lighting change. We believe
+leveraging features robust to these changes, such as DINO Caron et al. (2021), may help alleviate this issue.
+In addition, ICON depends on gradient-based optimization through NeRF Mildenhall et al. (2020), which
+takes hours to train. We believe that combining ICON with more efficient modeling of 3-space will be a
+promising direction, such as PixelNeRF Yu et al. (2021) and FLOW-CAM Smith et al. (2023).
+21
+RPE(degree)
+ATE(m)
+TartanVO DROID COLMAP ParticleSfM ICON
+1.41
+0.56
+0.67
+0.34
+0.47
+0.198
+0.066
+0.091
+0.053
+0.092
+Table 10 Camera pose evaluation on ScanNet. Despite not optimized for ScanNet scenarios, ICON achieves competitive
+performance, ranking the second on RPE and third on ATE. The difference between ICON and state-of-the-art method
+is very small (0.13 degree on rotation and 0.039m on translation)
+22

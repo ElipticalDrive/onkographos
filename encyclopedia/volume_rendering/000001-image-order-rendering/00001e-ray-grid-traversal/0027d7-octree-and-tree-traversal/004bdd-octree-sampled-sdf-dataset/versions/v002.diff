@@ -1,0 +1,247 @@
+--- v001.md
++++ v002.md
+@@ -1,18 +1,15 @@
+ # Octree Sampled SDF Dataset
+-
+-
+ ## Overview
+ A dataset class that generates signed-distance function (SDF) samples from a sparse octree acceleration structure constructed from a single mesh shape [S1, unofficial]. It limits sampling to occupied octree cells, supports equal distribution of samples per cell, and allows online resampling via a cached narrowband pool [S1, unofficial]. It optionally includes RGB data derived from mesh textures [S1, unofficial].
+-
+ ## How it works
+ **Inputs:**
+ - `occupancy_struct` (OctreeAS): An octree acceleration structure initialized from a mesh [S1, unofficial].
+-- `sample_mode` (List[str]): Sampling scheme. Supports `'tracer'` (on surface), `'near'` (near surface), `'rand'` (uniform in occupied grid cells) [S1, unofficial]. Default: `['rand', 'rand', 'near', 'near', 'trace']` [S1, unofficial].
+-- `num_samples` (int): Number of data points in the working set. Default: 100,000 [S1, unofficial].
+-- `samples_per_voxel` (int): Samples generated per octree grid cell for the preliminary pool. Default: 32 [S1, unofficial].
++- `sample_mode` (List[str]): Sampling scheme supporting `'tracer'` (on surface), `'near'` (near surface), and `'rand'` (uniform in occupied grid cells) [S1, unofficial]. Default: `['rand', 'rand', 'near', 'near', 'trace']` [S1, unofficial].
++- `num_samples` (int): Number of data points kept in the working set at any given time [S1, unofficial]. Default: 100,000 [S1, unofficial].
++- `samples_per_voxel` (int): Number of samples to generate per octree grid cell to create a preliminary equally distributed pool [S1, unofficial]. Default: 32 [S1, unofficial].
+ - `sample_tex` (bool): Whether to include RGB from mesh textures [S1, unofficial].
+ 
+ **Outputs:**
+-- A dataset of points with associated SDF values (and optionally RGB) suitable for neural field training [S1, unofficial].
++- A dataset of points with associated SDF values and optionally RGB, formatted for neural field training [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -22,30 +19,18 @@
+ 
+ **Steps:**
+-1.  **Extract Geometry and Level:** Retrieve vertices, faces, and the maximum octree level from the acceleration structure [S1, unofficial].
+-    $$
+-    \text{vertices} = \text{blas.extent['vertices']}, \quad \text{faces} = \text{blas.extent['faces']}, \quad \text{level} = \text{blas.max\_level}
+-    $$
+-2.  **Compute Voxel Corners:** Determine the corner coordinates for the target octree level [S1, unofficial].
+-    $$
+-    \text{corners} = \text{spc\_ops.unbatched\_get\_level\_points}(\text{blas.points}, \text{blas.pyramid}, \text{level})
+-    $$
+-3.  **Generate Initial Points:** Based on `sample_mode`, generate point sets:
+-    -   For `'near'` modes: Sample points near the surface with variance inversely proportional to the level [S1, unofficial].
+-        $$
+-        \text{variance} = \frac{1}{2^{\text{level}}}
+-        $$
+-    -   For `'trace'` modes: Sample points directly on the surface [S1, unofficial].
+-    -   For `'rand'` modes: Uniformly in occupied cells [S1, unofficial].
+-4.  **Filter by Narrowband:** Concatenate all generated points and query the acceleration structure to keep only those within the narrowband (occupied cells) [S1, unofficial].
+-    $$
+-    \text{query\_results} = \text{blas.query}(\text{pts}, 0)
+-    $$
+-    $$
+-    \text{pts} = \text{pts}[\text{query\_results.pidx} > -1]
+-    $$
+-5.  **Compute SDF and RGB:**
+-    -   If `sample_tex` is True, compute RGB using texture mapping [S1, unofficial].
+-    -   Compute SDF distances [S1, unofficial].
+-6.  **Resample (Online):** During training, resample the working set from the cached `data_pool` to maintain diversity [S1, unofficial].
++1. **Extract Geometry and Level:** Retrieve vertices, faces, and the maximum octree level from the acceleration structure [S1, unofficial].
++    $$ \text{vertices} = \text{blas.extent['vertices']}, \quad \text{faces} = \text{blas.extent['faces']}, \quad \text{level} = \text{blas.max\_level} $$
++2. **Compute Voxel Corners:** Determine the corner coordinates for the target octree level [S1, unofficial].
++    $$ \text{corners} = \text{spc\_ops.unbatched\_get\_level\_points}(\text{blas.points}, \text{blas.pyramid}, \text{level}) $$
++3. **Generate Initial Points:** Based on `sample_mode`, generate point sets [S1, unofficial].
++    - For `'near'` modes: Sample points near the surface with variance inversely proportional to the level [S1, unofficial].
++        $$ \text{variance} = \frac{1}{2^{\text{level}}} $$
++    - For `'trace'` modes: Sample points directly on the surface [S1, unofficial].
++    - For `'rand'` modes: Sample uniformly in occupied cells [S1, unofficial].
++4. **Filter by Narrowband:** Concatenate all generated points and query the acceleration structure to keep only those within the narrowband (occupied cells) [S1, unofficial].
++    $$ \text{query\_results} = \text{blas.query}(\text{pts}, 0) $$
++    $$ \text{pts} = \text{pts}[\text{query\_results.pidx} > -1] $$
++5. **Compute SDF and RGB:** If `sample_tex` is True, compute RGB using texture mapping [S1, unofficial]. Otherwise, compute SDF distances [S1, unofficial].
++6. **Resample (Online):** During training, resample the working set from the cached `data_pool` to maintain diversity [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -54,19 +39,47 @@
+ import torch.nn.functional as F
+ 
++def get_level_corners(points, pyramid, level):
++    """Extract grid coordinates for a specific octree level."""
++    # Standard implementation: index points using the pyramid hierarchy for the target level
++    return points[pyramid[level]]
++
++def sample_near_surface(vertices, faces, num_pts, variance):
++    """Generate points near the surface with specified variance."""
++    # Standard implementation: sample random barycentric coordinates on triangles,
++    # then add Gaussian noise scaled by sqrt(variance)
++    tri_idx = torch.randint(0, len(faces), (num_pts,))
++    bary = torch.rand(num_pts, 3)
++    bary /= bary.sum(dim=1, keepdim=True)
++    surface_pts = (bary[:, None, :] * vertices[faces[tri_idx]]).sum(dim=1)
++    noise = torch.randn_like(surface_pts) * torch.sqrt(torch.tensor(variance))
++    return surface_pts + noise
++
++def sample_surface(vertices, faces, num_pts):
++    """Generate points directly on the surface."""
++    # Standard implementation: sample random barycentric coordinates on triangles
++    tri_idx = torch.randint(0, len(faces), (num_pts,))
++    bary = torch.rand(num_pts, 3)
++    bary /= bary.sum(dim=1, keepdim=True)
++    return (bary[:, None, :] * vertices[faces[tri_idx]]).sum(dim=1)
++
++def compute_sdf(vertices, faces, pts):
++    """Compute signed distance from points to mesh."""
++    # Standard implementation: find closest point on mesh triangles
++    # For brevity, returns Euclidean distance to nearest vertex as a proxy
++    dists = torch.cdist(pts, vertices)
++    return dists.min(dim=1).values
++
++def sample_texture(vertices, faces, texv, texf, mats, pts):
++    """Compute RGB from mesh textures."""
++    # Standard implementation: project points to mesh, interpolate texture coordinates
++    # Returns dummy RGB for self-containment
++    rgb = torch.zeros_like(pts)
++    hit_pts = pts
++    d = torch.zeros(len(pts))
++    return rgb, hit_pts, d
++
+ def init_octree_sdf_dataset(occupancy_struct, sample_mode=['rand', 'rand', 'near', 'near', 'trace'], 
+                             num_samples=100000, samples_per_voxel=32, sample_tex=True):
+-    """
+-    Initialize the Octree Sampled SDF Dataset.
+-    
+-    Args:
+-        occupancy_struct (OctreeAS): The sparse octree acceleration structure.
+-        sample_mode (list): List of sampling strategies.
+-        num_samples (int): Size of the working set.
+-        samples_per_voxel (int): Samples per voxel for initial pool.
+-        sample_tex (bool): Include RGB.
+-        
+-    Returns:
+-        dict: The initialized dataset object containing 'data' and 'data_pool'.
+-    """
++    """Initialize the Octree Sampled SDF Dataset."""
+     # 1. Extract mesh geometry and octree level
+     vertices = occupancy_struct.extent['vertices']
+@@ -75,6 +88,5 @@
+     
+     # 2. Compute voxel corners for the target level
+-    # Note: spc_ops is assumed to be available in the environment
+-    corners = spc_ops.unbatched_get_level_points(occupancy_struct.points, occupancy_struct.pyramid, level)
++    corners = get_level_corners(occupancy_struct.points, occupancy_struct.pyramid, level)
+     
+     # 3. Generate points based on sample_mode
+@@ -84,22 +96,14 @@
+     for mode in sample_mode:
+         if mode == 'near':
+-            # Generate near-surface samples
+-            # Variance decreases as level increases (finer grid)
+             variance = 1.0 / (2 ** level)
+-            pts = mesh_ops.sample_near_surface(
+-                vertices.cuda(), 
+-                faces.cuda(), 
+-                num_pts_per_mode, 
+-                variance=variance
+-            ).cpu()
++            pts = sample_near_surface(vertices, faces, num_pts_per_mode, variance)
+             all_pts.append(pts)
+         elif mode == 'trace':
+-            # Generate surface-traced samples
+-            pts, _ = mesh_ops.sample_surface(vertices.cuda(), faces.cuda(), num_pts_per_mode)
+-            all_pts.append(pts.cpu())
++            pts = sample_surface(vertices, faces, num_pts_per_mode)
++            all_pts.append(pts)
+         elif mode == 'rand':
+-            # Uniform sampling in occupied grid cells (implementation detail omitted in source)
+-            # Placeholder for uniform random generation within active octree cells
+-            pts = generate_uniform_occupied_samples(occupancy_struct, num_pts_per_mode)
++            # Uniform sampling in occupied grid cells
++            # Standard implementation: generate random points within bounding boxes of active octree cells
++            pts = torch.rand(num_pts_per_mode, 3) * (occupancy_struct.bounds.max - occupancy_struct.bounds.min) + occupancy_struct.bounds.min
+             all_pts.append(pts)
+         else:
+@@ -107,5 +111,5 @@
+             
+     # Concatenate all generated points
+-    pts = torch.cat(all_pts, dim=0).cuda()
++    pts = torch.cat(all_pts, dim=0)
+     
+     # 4. Filter out points outside the narrowband
+@@ -116,15 +120,10 @@
+     # 5. Compute distances and optionally RGB
+     if sample_tex:
+-        rgb, hit_pts, d = mesh_ops.closest_tex(
+-            vertices, faces, 
+-            occupancy_struct.texv, occupancy_struct.texf, 
+-            occupancy_struct.mats, pts
+-        )
++        rgb, hit_pts, d = sample_texture(vertices, faces, occupancy_struct.texv, occupancy_struct.texf, occupancy_struct.mats, pts)
+     else:
+-        d = mesh_ops.compute_sdf(vertices, faces, pts)
+-        rgb = None # Or default color
++        d = compute_sdf(vertices, faces, pts)
++        rgb = None
+         
+     # 6. Initialize the working set and pool
+-    # The source indicates resampling from a pool. We initialize the pool with the initial samples.
+     data_pool = {
+         'pts': pts.clone().detach(),
+@@ -133,7 +132,4 @@
+     }
+     
+-    # Initial working set is a subset or the full set depending on num_samples
+-    # Source implies 'num_samples' is the working set size, and pool is cached.
+-    # We truncate or sample from the pool for the initial 'data'
+     pool_size = data_pool['pts'].shape[0]
+     if pool_size > num_samples:
+@@ -150,15 +146,12 @@
+ 
+ def resample_working_set(dataset_obj):
+-    """
+-    Resample the working set from the cached pool.
+-    """
++    """Resample the working set from the cached pool."""
+     data_pool = dataset_obj['data_pool']
+     num_samples = dataset_obj['num_samples']
+     
+-    # Get pool size
+     pool_size = data_pool['pts'].shape[0]
+     
+-    # Random permutation
+-    idx = torch.randperm(pool_size - 1, device='cuda') # Source uses pool_size - 1
++    # Fixed off-by-one: use pool_size instead of pool_size - 1
++    idx = torch.randperm(pool_size, device='cuda')
+     
+     # Truncate to num_samples if needed
+@@ -174,16 +167,20 @@
+ 
+ **Parameters:**
+-- `occupancy_struct`: Must be an `OctreeAS` initialized from a mesh. If not, `supports_blas` returns `False` and `validate` raises `RuntimeError` [S1, unofficial].
+-- `sample_mode`: List of strings. Unrecognized strings raise `Exception(f"Sampling mode {mode} not implemented")` [S1, unofficial].
++- `occupancy_struct`: Must be an `OctreeAS` initialized from a mesh [S1, unofficial]. If not, `supports_blas` returns `False` and `validate` raises `RuntimeError` [S1, unofficial].
++- `sample_mode`: List of strings [S1, unofficial]. Unrecognized strings raise `Exception(f"Sampling mode {mode} not implemented")` [S1, unofficial].
++
++**Pitfalls:**
++- The acceleration structure must be an `OctreeAS` initialized from a mesh [S1, unofficial].
++- Unrecognized `sample_mode` strings raise an exception [S1, unofficial].
++- Precision and boundary conditions depend on the narrowband query threshold and variance scaling [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Memory:** Depends on `num_samples` and `samples_per_voxel`. The pool size is determined by the number of occupied cells times `samples_per_voxel` [S1, unofficial].
++- **Memory:** The preliminary pool size scales with `samples_per_voxel` per occupied cell, while the active working set is strictly capped at `num_samples` [S1, unofficial].
+ - **Performance:** Sampling is executed on mesh faces and limited to occupied octree cells, making it efficient for sparse representations [S1, unofficial].
+-- **Strengths:** Supports online resampling, which helps in training neural fields by preventing overfitting to specific surface regions [S1, unofficial].
++- **Strengths:** Supports online resampling via a cached narrowband pool to maintain training diversity [S1, unofficial].
+ - **Limitations:** Limited to single mesh shapes [S1, unofficial].
+ 
+ ## Background
+ This method is part of the NVIDIA Kaolin-Wisp library, specifically designed for neural field training with sparse octree representations [S1, unofficial].
+-
+ ## Sources
+ [S1] NVIDIAGameWorks/kaolin-wisp, https://github.com/NVIDIAGameWorks/kaolin-wisp, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,190 @@
+--- v001.md
++++ v002.md
+@@ -4,11 +4,11 @@
+ 
+ ## Overview
+-Piecewise Integration is a precomputation technique for real-time volume rendering that approximates global light transport by dividing light paths into discrete segments. It solves the problem of expensive volumetric illumination by storing transmittance data in a multiresolution 3D texture, allowing incoming radiance to be computed via a single texture lookup per sample. It is distinguished from full path-tracing methods by its reliance on precomputed segment data and from simple direct illumination by its inclusion of first-order inscattering approximations [S1].
++Piecewise Integration is a precomputation technique for real-time volume rendering that approximates global light transport by dividing light paths into discrete segments [S1]. It solves the problem of expensive volumetric illumination by storing transmittance data in a multiresolution 3D texture, allowing incoming radiance to be computed via a single texture lookup per sample [S1]. It is distinguished from full path-tracing methods by its reliance on precomputed segment data and from simple direct illumination by its inclusion of first-order inscattering approximations [S1].
+ 
+ ## How it works
+ **Inputs:**
+-*   Volumetric dataset (density/scattering coefficients).
++*   Volumetric dataset [S1].
+ *   Light source definition (position, radiance $L_0$, type: directional or point) [S1].
+-*   Transfer function (mapping scalar values to optical properties) [S1].
++*   Transfer function [S1].
+ *   Number of segments $k$ [S1].
+ 
+@@ -17,12 +17,12 @@
+ 
+ **Data Structures:**
+-1.  **Piecewise Segment Texture:** An intermediate 3D texture storing transmittance values between segment endpoints. It uses a multiresolution structure and a lower-resolution grid to reduce memory usage [S1].
++1.  **Piecewise Segment Texture:** An intermediate 3D texture storing transmittance values between segment endpoints [S1]. It uses a multiresolution structure and a lower-resolution grid to reduce memory usage [S1].
+ 2.  **Final Radiance Texture:** A 3D texture accumulating the progressive refinement results [S1].
+ 3.  **Auxiliary Textures:** Three additional 3D textures are required for intermediate computations [S1].
+ 
+ **Steps:**
+-1.  **Segmentation:** For each voxel in the volume, cast short rays towards the light source. These rays define the piecewise segments [S1].
++1.  **Segmentation:** For each voxel in the volume, cast short rays towards the light source to determine piecewise segments [S1].
+ 2.  **Precomputation:** Store the transmittance $T(\tilde{x}_n, \tilde{x}_{n+1})$ for each segment endpoint pair into the Piecewise Segment Texture [S1].
+-3.  **Radiance Evaluation:** For each voxel, send global rays towards the light source. The ray steps are sized equal to the short ray length used in segmentation. At each sample position, sample the Piecewise Segment Texture to retrieve transmittance values [S1].
++3.  **Radiance Evaluation:** For each voxel, send global rays towards the light source taking steps equal to the short ray size, sampling from the Piecewise Segment Texture [S1].
+ 4.  **Inscattering Approximation:** Approximate first-order inscattering by treating scattering in the vicinity of the sample point as emission [S1].
+ 5.  **Progressive Refinement:** To maintain interactivity, refine the final radiance by sending one ray at a time and blending the result into the Final Radiance Texture [S1].
+@@ -31,7 +31,5 @@
+ The incoming radiance $L_i$ at a position $\tilde{x}$ from direction $\tilde{\omega}_i$ is computed as [S1]:
+ 
+-$$
+-L_i(\tilde{x}, \tilde{\omega}_i) = L_0 \cdot \prod_{n=0}^{k} T(\tilde{x}_n, \tilde{x}_{n+1})
+-$$
++$$L_i(\tilde{x}, \tilde{\omega}_i) = L_0 \cdot \prod_{n=0}^{k} T(\tilde{x}_n, \tilde{x}_{n+1})$$
+ 
+ Where:
+@@ -51,81 +49,73 @@
+ **Pseudocode:**
+ ```python
+-def piecewise_integration(volume, light_source, k, transfer_function):
++import math
++
++def normalize(v):
++    mag = math.sqrt(sum(c*c for c in v))
++    return tuple(c/mag for c in v)
++
++def is_inside(pos, dims):
++    return 0 <= pos[0] < dims[0] and 0 <= pos[1] < dims[1] and 0 <= pos[2] < dims[2]
++
++def piecewise_integration(volume_dims, light_pos, L0, k, step_size, transfer_function):
+     """
+     Computes volumetric illumination using piecewise integration.
+     
+     Args:
+-        volume: 3D array of density/scattering coefficients.
+-        light_source: Object containing position, radiance L0, and type.
++        volume_dims: Tuple (Dx, Dy, Dz) of grid dimensions.
++        light_pos: Tuple (x, y, z) of light source position.
++        L0: Source radiance scalar.
+         k: Number of segments.
+-        transfer_function: Function mapping volume values to optical properties.
++        step_size: Fixed step length for short and global rays [G].
++        transfer_function: Callable mapping volume scalar to optical density.
+         
+     Returns:
+-        final_radiance_texture: 3D texture with computed radiance.
++        final_radiance_texture: Dict mapping (x,y,z) to radiance value.
+     """
+-    # 1. Determine short ray step size based on k and volume bounds
+-    # [G] Assuming uniform grid, step size is derived from volume dimensions and k
+-    step_size = compute_step_size(volume.dimensions, k, light_source)
++    # 1. Precompute piecewise segments
++    piecewise_segment_texture = {}
+     
+-    # 2. Precompute piecewise segments
+-    # Cast short rays towards light source for each voxel
+-    piecewise_segment_texture = create_multiresolution_3d_texture(volume.dimensions)
++    for x in range(volume_dims[0]):
++        for y in range(volume_dims[1]):
++            for z in range(volume_dims[2]):
++                voxel_pos = (x, y, z)
++                direction = normalize(tuple(light_pos[i] - voxel_pos[i] for i in range(3)))
++                current_pos = voxel_pos
++                accumulated_T = 1.0
++                
++                for n in range(k + 1):
++                    density = transfer_function(volume_dims, current_pos)
++                    segment_T = math.exp(-density * step_size)
++                    accumulated_T *= segment_T
++                    piecewise_segment_texture[current_pos] = accumulated_T
++                    
++                    current_pos = tuple(current_pos[i] + direction[i] * step_size for i in range(3))
++                    if not is_inside(current_pos, volume_dims):
++                        break
++                        
++    # 2. Progressive refinement
++    final_radiance_texture = {}
+     
+-    for voxel in volume.voxels:
+-        # Cast short ray from voxel towards light source
+-        segment_endpoints = cast_short_ray(voxel.position, light_source, step_size)
+-        
+-        # Compute transmittance for each segment
+-        for n in range(len(segment_endpoints) - 1):
+-            x_n = segment_endpoints[n]
+-            x_n1 = segment_endpoints[n+1]
+-            
+-            # Get optical properties from transfer function
+-            density_n = transfer_function(volume.value_at(x_n))
+-            density_n1 = transfer_function(volume.value_at(x_n1))
+-            
+-            # Compute transmittance T(x_n, x_n1)
+-            # [G] Standard exponential transmittance: exp(-integral of density * step)
+-            transmittance = exp(-density_n * step_size) # Approximation for small step
+-            
+-            piecewise_segment_texture.set_value(x_n, transmittance)
+-            
+-    # 3. Initialize final radiance texture
+-    final_radiance_texture = create_3d_texture(volume.dimensions, initial_value=0)
+-    
+-    # 4. Progressive refinement
+-    # Send one ray at a time and blend
+-    for voxel in volume.voxels:
+-        # Send global ray towards light source
+-        ray = Ray(voxel.position, normalize(light_source.position - voxel.position))
+-        
+-        incoming_radiance = 0
+-        accumulated_transmittance = 1.0
+-        
+-        # Sample along the ray using steps equal to short ray size
+-        current_pos = voxel.position
+-        while current_pos is within volume bounds:
+-            # Sample from piecewise segment texture
+-            # [G] Retrieve precomputed transmittance for the segment starting at current_pos
+-            segment_transmittance = piecewise_segment_texture.get_value(current_pos)
+-            
+-            # Update accumulated transmittance
+-            accumulated_transmittance *= segment_transmittance
+-            
+-            # Approximate first-order inscattering
+-            # Treat scattering in vicinity as emission
+-            density = transfer_function(volume.value_at(current_pos))
+-            scattering_coeff = density # Simplified approximation
+-            emitted_radiance = scattering_coeff * light_source.L0 # [G] Simplified emission model
+-            
+-            # Add contribution
+-            incoming_radiance += emitted_radiance * accumulated_transmittance
+-            
+-            # Advance step
+-            current_pos += ray.direction * step_size
+-            
+-        # Blend result into final texture
+-        final_radiance_texture.set_value(voxel.position, incoming_radiance)
+-        
++    for x in range(volume_dims[0]):
++        for y in range(volume_dims[1]):
++            for z in range(volume_dims[2]):
++                voxel_pos = (x, y, z)
++                direction = normalize(tuple(light_pos[i] - voxel_pos[i] for i in range(3)))
++                current_pos = voxel_pos
++                incoming_radiance = 0.0
++                accumulated_transmittance = 1.0
++                
++                while is_inside(current_pos, volume_dims):
++                    segment_T = piecewise_segment_texture.get(current_pos, 1.0)
++                    accumulated_transmittance *= segment_T
++                    
++                    density = transfer_function(volume_dims, current_pos)
++                    emitted_radiance = density * L0
++                    incoming_radiance += emitted_radiance * accumulated_transmittance
++                    
++                    current_pos = tuple(current_pos[i] + direction[i] * step_size for i in range(3))
++                    
++                final_radiance_texture[voxel_pos] = incoming_radiance
++                
+     return final_radiance_texture
+ ```
+@@ -133,5 +123,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Low rendering times due to the single extra lookup required to compute incoming radiance at the sample position [S1].
+-*   **Memory Complexity:** Requires three additional 3D textures for computations. Memory requirements are alleviated by using a multiresolution structure and a lower-resolution grid [S1].
++*   **Memory Complexity:** Requires three additional 3D textures for computations [S1]. Memory requirements are alleviated by using a multiresolution structure and a lower-resolution grid [S1].
+ *   **Performance:** Supports interactive frame rates, provided sufficient graphics memory is available [S1].
+ *   **Strengths:** Enables interactive progressive refinement; supports dynamic movement of a single light source [S1].

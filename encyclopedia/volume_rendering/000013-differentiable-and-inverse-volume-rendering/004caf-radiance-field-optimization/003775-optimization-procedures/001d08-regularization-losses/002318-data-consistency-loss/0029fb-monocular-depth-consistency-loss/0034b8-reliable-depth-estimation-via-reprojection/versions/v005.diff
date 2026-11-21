@@ -1,0 +1,243 @@
+--- v004.md
++++ v005.md
+@@ -1,134 +1,134 @@
+ # Reliable Depth Estimation via Reprojection
+-
+-Also called: Reprojection-based Depth Reliability Masking, Depth Consistency Check
++Also called: Reprojection-based Depth Reliability Masking
+ 
+ ## Overview
+-This method identifies reliable depth estimates for radiance field optimization by verifying geometric consistency through reprojection. It solves the problem of noisy or incorrect monocular depth predictions in sparse-view settings by comparing reprojected depth maps against ground-truth training views. It distinguishes itself from simple depth consistency checks by incorporating a dual-model comparison (main vs. augmented) and intensity-based MSE thresholds to generate reliability masks, rather than relying solely on geometric error thresholds.
++This method identifies reliable depth estimates for differentiable volume rendering by comparing the photometric consistency of depth maps reprojected into a reference view. It solves the problem of noisy monocular depth priors by selecting the depth estimate (from a main model or an augmented model) that yields the lowest reprojection error, filtered by a strict intensity similarity threshold. It differs from its sibling [Pseudo-depth Supervised Loss](7487-pseudo-depth-supervised-loss.md) by using explicit geometric reprojection and photometric verification rather than direct pseudo-depth regression.
+ 
+ ## How it works
+-The method operates in two distinct phases: a geometric consistency check for outlier removal and a reliability masking scheme for depth supervision.
++**Inputs:**
++- $z_m$: Depth map predicted by the main model.
++- $z_a$: Depth map predicted by an augmented model (e.g., smoothing or Lambertian augmentation).
++- $I_{ref}$: Intensity image of the nearest training view (reference).
++- $I_{curr}$: Intensity image of the current view.
++- $T$: Threshold for reprojection MSE ($e_\tau$).
+ 
+-### Inputs and Outputs
+-*   **Inputs**: Depth maps $D_i, D_j$ for source frame $i$ and target frame $j$; camera intrinsics and extrinsics for frames $i$ and $j$; rendered depths $z_m$ (main model) and $z_a$ (augmented model); intensity images $I_i, I_j$.
+-*   **Outputs**: Reliability masks $m_m, m_a$ indicating valid pixels for supervision; filtered depth data.
++**Outputs:**
++- $m_m$: Reliability mask for the main model depth.
++- $m_a$: Reliability mask for the augmented model depth.
++- $L_{aug}$: Depth supervision loss using reliable depths.
+ 
+-### Data Structures
+-*   **Depth Map**: 2D array of float values representing distance along the viewing ray.
+-*   **Reliability Mask**: 2D boolean or binary array ($0$ or $1$) of same spatial dimensions as depth map.
+-*   **Pixel Coordinates**: $\mathbf{u}_i = (u, v)$ for frame $i$.
++**Data Structures:**
++- Masks $m_m, m_a$: Binary maps of same spatial dimensions as $z_m, z_a$.
++- MSE values $e_m, e_a$: Scalar or per-pixel mean squared error of intensity differences.
+ 
+-### Steps
++**Steps:**
++1. **Reprojection:** For each pixel $q$ in the current view, reproject the patch around $q$ using depth $z_m$ to the reference view coordinates. Compute the Mean Squared Error (MSE) of intensities between this reprojected patch and the corresponding patch in $I_{ref}$. Let this be $e_m$.
++2. **Augmented Reprojection:** Repeat step 1 using depth $z_a$. Let this be $e_a$.
++3. **Mask Calculation for Augmented Model ($m_a$):**
++   $$
++   m_a = \begin{cases} 
++   1 & \text{if } (e_a \le e_m) \text{ and } (e_a \le e_\tau) \\
++   0 & \text{otherwise}
++   \end{cases}
++   $$
++   This indicates the augmented model is more reliable if its reprojection error is lower than the main model's AND below the absolute threshold.
++4. **Mask Calculation for Main Model ($m_m$):**
++   Compute $m_m$ similarly, checking if $e_m \le e_a$ and $e_m \le e_\tau$.
++5. **Loss Computation:**
++   Compute the loss using stop-gradient ($\nabla$) on the target depth to prevent backpropagation through the unreliable source.
++   $$
++   L_{aug} = \mathbb{1}\{m_a = 1\} \odot \| z_m - \nabla(z_a) \|_2 + \mathbb{1}\{m_m = 1\} \odot \| \nabla(z_m) - z_a \|_2
++   $$
++   Where $\odot$ is element-wise product. The final depth supervision loss is the sum of losses from different augmentations (e.g., smoothing and Lambertian).
+ 
+-#### Phase 1: Depth Outlier Removal (Geometric Consistency Check)
+-This phase filters noisy depth data by unprojecting to 3D and reprojecting to nearby views [S2].
++**Parameters:**
++- $e_\tau$: Threshold for reprojection MSE. Value not given in the sources.
+ 
+-1.  **Unproject**: Convert depth map $D_i$ of frame $i$ into 3D points $\mathbf{X}_i$ using camera intrinsics $\pi_i^{-1}$.
+-2.  **Reproject**: Project $\mathbf{X}_i$ into the coordinate system of a nearby training view $j$ using projection matrix $\pi_j$. This yields the projected pixel coordinates $\mathbf{u}_{i \to j} = \pi_j \pi_i^{-1}(\mathbf{u}_i)$.
+-3.  **Sample Depth**: Retrieve the depth value $D_j$ at $\mathbf{u}_{i \to j}$ from the target depth map $D_j$. This is the projected depth $D_{i \to j}$.
+-4.  **Compare and Filter**: Compute the absolute error $|D_{i \to j} - D_j|$. If this error exceeds the threshold $\sigma$, the depth is considered an outlier and filtered out.
++**Edge Cases:**
++- **Specular Regions:** In specular regions, reprojected intensities may not match, causing both masks to be zero. This results in no supervision for those pixels, avoiding incorrect gradients rather than applying a noisy penalty [S1].
++- **Both Incorrect:** If both models predict incorrect depth, both $e_m$ and $e_a$ may exceed $e_\tau$, resulting in zero supervision [S1].
+ 
+-The geometric consistency mask $M_d$ is defined as [S2]:
+-$$ M_d = |D_{i \to j} - D_j| < \sigma $$
+-where $D_{i \to j} = D_j(\pi_j \pi_i^{-1}(\mathbf{u}_i))$.
++**Pseudocode:**
++```python
++def reliable_depth_estimation(z_m, z_a, I_ref, I_curr, T, reprojection_func):
++    """
++    z_m: Tensor [H, W] depth from main model
++    z_a: Tensor [H, W] depth from augmented model
++    I_ref: Tensor [H, W, 3] reference view intensity
++    I_curr: Tensor [H, W, 3] current view intensity
++    T: float, threshold for MSE
++    reprojection_func: Function that takes (depth, I_curr, camera_params) -> (reprojected_I, coords)
++    """
++    # 1. Reproject using main model depth
++    # Assume reprojection_func returns reprojected intensity patch and valid mask
++    # For simplicity, assume it returns MSE directly or we compute it
++    # Note: Exact reprojection geometry (camera intrinsics/extrinsics) is assumed available
++    e_m = compute_reprojection_mse(z_m, I_curr, I_ref, reprojection_func)
++    
++    # 2. Reproject using augmented model depth
++    e_a = compute_reprojection_mse(z_a, I_curr, I_ref, reprojection_func)
++    
++    # 3. Compute masks
++    # m_a: 1 if augmented is better AND below threshold
++    mask_a = ((e_a <= e_m) & (e_a <= T)).float()
++    
++    # m_m: 1 if main is better AND below threshold
++    mask_m = ((e_m <= e_a) & (e_m <= T)).float()
++    
++    # 4. Compute Loss
++    # Use stop-gradient on the target depth
++    # L_aug = mask_a * ||z_m - stop_grad(z_a)|| + mask_m * ||stop_grad(z_m) - z_a||
++    
++    # Element-wise L2 norm (Euclidean distance between scalars is absolute difference)
++    # Assuming z_m, z_a are scalar depth maps
++    loss_a = mask_a * torch.abs(z_m - z_a.detach())
++    loss_m = mask_m * torch.abs(z_m.detach() - z_a)
++    
++    L_aug = loss_a + loss_m
++    
++    return L_aug, mask_m, mask_a
+ 
+-#### Phase 2: Reliability Masking via Intensity MSE
+-This phase selects reliable depths for supervision by comparing reprojected patches against training views [S1].
+-
+-1.  **Reproject Patches**: For each pixel, reproject the patch around the depth estimate $z_m$ (main model) and $z_a$ (augmented model) to the nearest training view.
+-2.  **Compute MSE**: Calculate the Mean Squared Error (MSE) of intensities between the reprojected patch and the corresponding patch in the nearest training view. Let $e_m$ be the MSE for $z_m$ and $e_a$ be the MSE for $z_a$.
+-3.  **Define Threshold**: Set an intensity error threshold $e_\tau$.
+-4.  **Compute Augmented Mask ($m_a$)**: The augmented model is considered more reliable if its MSE is lower than the main model's AND below the threshold:
+-    $$ m_a = \begin{cases} 1 & \text{if } (e_a \le e_m) \text{ and } (e_a \le e_\tau) \\ 0 & \text{otherwise} \end{cases} $$
+-5.  **Compute Main Mask ($m_m$)**: Similarly, the main model is reliable if:
+-    $$ m_m = \begin{cases} 1 & \text{if } (e_m \le e_a) \text{ and } (e_m \le e_\tau) \\ 0 & \text{otherwise} \end{cases} $$
+-6.  **Apply Stop-Gradient**: Use the stop-gradient operator $\nabla$ to prevent gradient flow into unreliable estimates.
+-
+-### Parameters
+-*   $\sigma = 0.2$ m: Empirical threshold for absolute relative error in depth reprojection [S2].
+-*   $e_\tau$: Threshold for intensity MSE. Value not given in sources.
+-*   Number of neighbors: 20 (used in 3D statistical filter for floaters) [S2].
+-*   Standard deviation ratio: 2.0 (used in 3D statistical filter) [S2].
+-
+-### Pseudocode
+-
+-```python
+-def compute_reprojection_mask(D_i, D_j, cam_i, cam_j, I_i, I_j, patch_size, e_tau):
++def compute_reprojection_mse(depth, I_curr, I_ref, reprojection_func):
+     """
+-    Computes reliability masks m_m and m_a by reprojection and intensity comparison.
++    Computes MSE between reprojected patch and reference patch.
+     """
+-    # 1. Unproject D_i to 3D
+-    X_i = unproject_depth(D_i, cam_i)
++    # Reproject current view to reference view coordinates
++    # This typically involves unprojecting depth to 3D, transforming to reference camera, 
++    # and projecting back to 2D.
++    # For this pseudocode, we assume a helper that returns the reprojected intensity image
++    # and a validity mask.
+     
+-    # 2. Reproject X_i to view j
+-    # Get pixel coordinates in j
+-    u_i_to_j = project_points(X_i, cam_j)
++    # Placeholder for complex geometric reprojection logic
++    # In practice, this uses camera intrinsics and extrinsics
++    I_reproj, valid_mask = reprojection_func(depth, I_curr)
+     
+-    # 3. Sample depth from D_j at projected coordinates
+-    # Note: In practice, bilinear interpolation is used for non-integer coordinates
+-    D_i_to_j = sample_depth(D_j, u_i_to_j)
++    # Compute MSE only on valid pixels
++    # Align I_reproj with I_ref (handling translation/rotation)
++    # Simplified: assume perfect alignment for MSE calculation on valid pixels
++    diff = (I_reproj - I_ref) ** 2
++    mse = torch.mean(diff * valid_mask) / (torch.mean(valid_mask) + 1e-8)
+     
+-    # 4. Geometric Consistency Mask (Optional Pre-filter)
+-    # M_d = abs(D_i_to_j - D_j) < sigma
+-    # This step filters obvious outliers before intensity check
+-    
+-    # 5. Intensity-based Reliability Check
+-    # Reproject patch around z_m (main) and z_a (augmented)
+-    # For simplicity, assume z_m and z_a are passed or derived from D_i
+-    # Here we assume D_i contains the depth estimates to be validated
+-    
+-    # Compute MSE for Main Model (z_m)
+-    # Reproject patch using z_m to view j
+-    patch_m_reprojected = reproject_patch(I_i, D_i, cam_i, cam_j, depth_map=D_i)
+-    patch_j = get_patch(I_j, u_i_to_j)
+-    e_m = mse_intensity(patch_m_reprojected, patch_j)
+-    
+-    # Compute MSE for Augmented Model (z_a)
+-    # If z_a is different from z_m, reproject using z_a
+-    # Assuming z_a is available as a separate depth map or offset
+-    patch_a_reprojected = reproject_patch(I_i, D_i, cam_i, cam_j, depth_map=D_a)
+-    e_a = mse_intensity(patch_a_reprojected, patch_j)
+-    
+-    # 6. Compute Masks
+-    m_a = (e_a <= e_m) & (e_a <= e_tau)
+-    m_m = (e_m <= e_a) & (e_m <= e_tau)
+-    
+-    return m_m, m_a
+-
+-def compute_depth_loss(z_m, z_a, m_m, m_a):
+-    """
+-    Computes the bidirectional depth supervision loss.
+-    """
+-    # Stop-gradient operator prevents gradients from flowing into the target
+-    # L_aug = sum( m_a * ||z_m - stop_grad(z_a)||^2 )
+-    # L_main = sum( m_m * ||stop_grad(z_m) - z_a||^2 )
+-    
+-    loss_aug = sum(m_a * (z_m - stop_gradient(z_a))**2)
+-    loss_main = sum(m_m * (stop_gradient(z_m) - z_a)**2)
+-    
+-    return loss_aug + loss_main
++    return mse
+ ```
+-
+-### Edge Cases and Pitfalls
+-*   **Specular Regions**: In specular regions, intensity mismatches cause both $e_m$ and $e_a$ to be high, resulting in zero masks. This is acceptable as it avoids supervision with incorrect depth estimates, but reduces the number of supervised pixels [S1].
+-*   **Occlusions**: Reprojection across occlusion boundaries may yield invalid comparisons. The geometric consistency check helps filter these, but intensity-based checks may also fail.
+-*   **Precision**: Floating-point errors in reprojection can affect small depth differences. The threshold $\sigma$ must be chosen carefully relative to scene scale [S2].
+ 
+ ## Subtopics
+ 
+-### Depth Consistency Check / Depth Outlier Removal
+-A geometric filtering technique that unprojects depth maps to 3D and reprojects them to nearby views to verify consistency. It filters out depths where the absolute relative error exceeds a threshold $\sigma = 0.2$ m [S2]. It is used as a preprocessing step to remove noisy depth data and floaters before reliability masking [S2].
++### [Depth Supervision Loss (Laug)](8111-depth-supervision-loss-laug.md)
++Uses dynamic masking based on reliability estimates to stabilize training, addressing noise in single-view depth priors.
++
++### [Depth Consistency Check / Depth Outlier Removal](9363-depth-consistency-check-depth-outlier-removal.md)
++Filters noisy depth data by verifying geometric consistency across multiple views, rejecting outliers rather than applying continuous penalties.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N)$ where $N$ is the number of pixels, as it involves per-pixel reprojection and MSE calculation.
+-*   **Memory Complexity**: $O(N)$ to store depth maps, 3D points, and masks.
+-*   **Strengths**: Effectively filters noisy monocular depth estimates in sparse-view scenarios. The dual-model approach (main vs. augmented) provides robustness against individual model failures [S1].
+-*   **Limitations**: Relies on the availability of nearby training views for reprojection. Computationally intensive due to 3D unprojection and reprojection for every pixel.
+-*   **When to use**: When optimizing radiance fields with sparse input views and noisy monocular depth priors.
+-*   **When not to use**: When dense multi-view data is available, as geometric consistency is less critical.
++- **Time Complexity:** Requires reprojection for both main and augmented models, doubling the reprojection cost per step.
++- **Memory Complexity:** Requires storing depth maps for both models and intermediate reprojection buffers.
++- **Strengths:** Robust to noisy monocular depth estimates by selecting the most photometrically consistent source. Avoids supervision in specular regions where depth is ambiguous.
++- **Limitations:** Relies on the quality of the augmented models. If both models are poor, no supervision is provided. Requires access to training views for reprojection.
++- **When to use:** When sparse or noisy monocular depth priors are available and photometric consistency can be leveraged.
++- **When not to use:** In scenes with significant specularities or textureless regions where reprojection error is high for all models.
+ 
+ ## Background
+-The method originates from research on regularizing sparse input radiance fields. The geometric consistency check is detailed in EVolSplat [S2], which uses it to remove depth outliers in urban view synthesis. The reliability masking via intensity MSE is introduced in Simple-RF [S1] to regularize radiance field optimization with simpler solutions, specifically addressing the instability of depth supervision in sparse settings.
++Originated in Simple-RF [S1], which regularizes sparse input radiance fields with simpler solutions. The method leverages the idea that correct depth estimates should yield consistent appearances when reprojected to other views.
+ 
+ ## Sources
+-[S1] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27
+-[S2] EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis, https://doi.org/10.1109/CVPR52734.2025.01054, fetched 2026-11-03+[S1] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27

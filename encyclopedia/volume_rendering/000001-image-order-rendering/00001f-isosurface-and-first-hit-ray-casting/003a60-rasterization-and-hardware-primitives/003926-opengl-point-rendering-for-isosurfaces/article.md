@@ -1,0 +1,135 @@
+# OpenGL Point Rendering for Isosurfaces
+
+Also called: Hardware accelerated point rendering
+
+## Overview
+This method renders isosurfaces by projecting volume elements as point primitives (`GL_POINTS`) onto the screen, where points are rasterized as discs [S1, unofficial]. It solves the problem of surface visualization without explicit mesh generation or ray marching, relying on fixed-function hardware to resolve visibility [S1, unofficial]. It is distinguished from sibling methods by its use of single-vertex primitives, which eliminates backface culling and causes overlap, making it prone to fill-rate limitations but offering lower geometry pipeline requirements [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D volume dataset, an isovalue threshold, and camera parameters (projection matrix, viewport).
+- Output: A 2D image of the isosurface.
+
+**Data Structures:**
+- **Dirty Cell List:** A list of cells marked for regeneration. The number of cells marked dirty per frame is selected so that primitives are recomputed for roughly four cells on average per frame [S1, unofficial].
+- **Point Primitives:** Generated from the active cells. Each point represents a location on the isosurface.
+
+**Steps:**
+1. **Identify Active Cells:** Determine which volume cells intersect the isosurface.
+2. **Generate Points:** For each active cell, compute the point position on the isosurface. If a cell is marked "dirty" (based on the regeneration rate), regenerate its primitive [S1, unofficial].
+3. **Setup Distance Attenuation:** Configure OpenGL to scale point size based on distance to maintain consistent visual coverage [S1, unofficial].
+4. **Render:** Issue `glDrawArrays(GL_POINTS, ...)` to render the points as discs.
+
+**Formulas and Parameters:**
+To set up perspective scaling of points as discs, distance attenuation is configured using the following parameters derived from the projection matrix and viewport [S1, unofficial]:
+
+$$ H = \text{viewport\_width} $$
+$$ h = \frac{2.0}{\text{projection\_matrix}[0]} $$
+$$ D_0 = \sqrt{2.0} \cdot \frac{H}{h} $$
+$$ k = \frac{1.0}{1.0 + 2 \cdot \sqrt{\frac{1}{\text{projection\_matrix}[0]}}} $$
+$$ \text{atten} = \left[ 0, 0, \sqrt{\frac{1}{D_0}} \cdot k \right] $$
+
+The attenuation vector is applied via `glPointParameterfvEXT(GL_DISTANCE_ATTENUATION_EXT, atten)` and point size is set to 1.0 [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Setup distance attenuation for perspective scaling of points as discs
+def setup_point_attenuation(projection_matrix, viewport_width):
+    # Extract projection matrix element m00
+    m00 = projection_matrix[0]
+    
+    # Calculate h from projection matrix
+    h = 2.0 / m00
+    
+    # Calculate D0
+    H = viewport_width
+    D0 = (2.0 ** 0.5) * (H / h)
+    
+    # Calculate k
+    k = 1.0 / (1.0 + 2.0 * (1.0 / m00) ** 0.5)
+    
+    # Calculate attenuation coefficient
+    atten_c = ((1.0 / D0) ** 0.5) * k
+    
+    # Set OpenGL point parameters
+    # atten = [0, 0, atten_c]
+    # glPointParameterfvEXT(GL_DISTANCE_ATTENUATION_EXT, atten)
+    # glPointSize(1.0)
+    # glEnable(GL_POINT_SMOOTH)
+    pass
+
+# Main rendering loop
+def render_isosurface(volume, isovalue, dirty_cells):
+    # 1. Identify active cells and update dirty list
+    # Select cells to regenerate such that ~4 cells are recomputed per frame
+    cells_to_render = []
+    for cell in volume.cells:
+        if cell.is_active(isovalue):
+            if cell in dirty_cells:
+                # Regenerate primitive for this cell
+                point = generate_point_from_cell(cell)
+                cells_to_render.append(point)
+                # Mark as clean after regeneration? 
+                # Note: Logic for dirty flag management is implementation-specific [G]
+            else:
+                # Use existing primitive
+                cells_to_render.append(cell.primitive)
+    
+    # 2. Setup attenuation
+    viewport_width = get_viewport_width()
+    projection_matrix = get_projection_matrix()
+    setup_point_attenuation(projection_matrix, viewport_width)
+    
+    # 3. Render points
+    # glDrawArrays(GL_POINTS, 0, len(cells_to_render))
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+- **Backface Culling:** Not possible for points because a point is a single vertex with no orientation, leading to more filling than polygons [S1, unofficial].
+- **Dilation Artefact:** Points are rendered as discs even if they lie on the silhouette, causing the surface to appear dilated. This is visible in areas of high curvature [S1, unofficial].
+- **Fill-Rate Limitation:** The method is prone to being fill-rate limited because points overlap to cover the surface [S1, unofficial].
+
+## Subtopics
+
+### Software Point Rendering
+Draws points as ellipses whose main axes depend on the normal, alleviating dilation artefacts but lacking hardware acceleration [S1, unofficial].
+
+### Marching Cubes (MC)
+Generates triangle meshes. Offers superior visual quality when zooming in or using small datasets, but has higher geometry generation costs [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Geometry generation is faster than Marching Cubes for any volume size [S1, unofficial].
+- Performance advantage increases with the size and complexity of the volumes [S1, unofficial].
+
+**Measured Performance:**
+- Test hardware: Not specified in sources [S1, unofficial].
+- Scene: Cube (32x32x32).
+- Viewport 800x800: Points render at 76 fps, triangles at 146 fps [S1, unofficial].
+- Viewport 100x100: Points render at 773 fps, triangles at 161 fps [S1, unofficial].
+- Performance threshold: On the test hardware, OpenGL point rendering overtakes triangle strips at around 500k polygons [S1, unofficial].
+
+**Scaling:**
+- The method becomes fill-rate limited when few, large primitives are rendered [S1, unofficial].
+- Performance drops significantly with smaller viewports due to increased fill rate relative to geometry [S1, unofficial].
+
+**Strengths and Limitations:**
+- Strengths: Lower bandwidth and geometry pipeline requirements; faster primitive generation; similar quality to MC for large volumes [S1, unofficial].
+- Limitations: Inferior visual quality when zooming in or using small datasets; dilation artefacts; fill-rate limited [S1, unofficial].
+
+**When to Use:**
+- Large volumes where geometry generation cost is prohibitive.
+- When performance is critical and fill rate is not the bottleneck.
+
+**When Not to Use:**
+- Small datasets or when zooming in, where visual quality of MC is superior.
+- Scenes with high curvature where dilation artefacts are objectionable.
+
+## Background
+This method was presented in the paper "Hardware Accelerated Point Rendering of Isosurfaces" [S1, unofficial]. It compares OpenGL point rendering to software point rendering and triangle rendering using Marching Cubes. The authors note that recent hardware (Radeon 9700, NV30) might enable hardware-based point rendering techniques similar to software methods, such as computing reciprocal values or using point sprites to render ellipses [S1, unofficial].
+
+## Sources
+[S1] Hardware Accelerated Point Rendering of Isosurfaces, http://wscg.zcu.cz/wscg2003/Papers_2003/J61.pdf, fetched 2026-10-26 (unofficial)

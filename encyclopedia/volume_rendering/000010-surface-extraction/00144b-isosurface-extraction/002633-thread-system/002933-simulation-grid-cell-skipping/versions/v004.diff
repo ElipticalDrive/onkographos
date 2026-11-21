@@ -1,0 +1,164 @@
+--- v003.md
++++ v004.md
+@@ -4,18 +4,18 @@
+ 
+ ## Overview
+-Simulation Grid Cell Skipping is an optimization technique for surface extraction that accelerates iteration over voxel columns by skipping over empty and fully occupied simulation grid cells, processing only partially filled cells [S1]. It builds on the THREAD System's ray-marching framework [3743-thread-system.md] to bypass uniform regions during extraction.
++Simulation Grid Cell Skipping is an optimization technique for surface extraction that accelerates iteration over voxel columns by skipping over empty and fully occupied simulation grid cells, processing only partially filled cells [S1]. It differs from standard voxel traversal by leveraging the coarse-grained status of simulation grid cells to bypass large volumes of uniform data [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A regular simulation grid where each cell is classified as empty, full, or partial; view rays for each voxel column [S1].
+-- Output: A sequence of voxels located within partially filled cells, ready for surface extraction [S1].
++- Input: A simulation grid with cells classified as empty, full, or partially filled; a view ray for each voxel column [S1].
++- Output: A list of relevant voxels within partially filled cells for surface extraction [S1].
+ 
+ **Data Structures:**
+-- Simulation Grid: A regular 3D grid storing a status flag per cell (`EMPTY`, `FULL`, or `PARTIAL`) [S1].
+-- Voxel Column: A linear sequence of voxels aligned with a view ray [S1].
+-- Packed Machine Words: Bitmasks representing voxel occupancy or cell status, processed in chunks to leverage hardware bit-counting intrinsics [S1].
++- Simulation Grid: A regular 3D grid where each cell stores a status flag: `EMPTY`, `FULL`, or `PARTIAL` [S1].
++- Voxel Column: A sequence of voxels along a view ray [S1].
++- Packed Machine Words: Bits representing voxel occupancy, processed in chunks for efficiency [S1].
+ 
+ **Numbered Steps:**
+-1. For each voxel column, initialize a ray marcher along the corresponding view ray [S1].
++1. For each voxel column, initialize a ray marcher along the view ray corresponding to that column [S1].
+ 2. Iterate over packed machine words rather than single bits, using bit counting intrinsics to quickly determine the next relevant bits to be considered [S1].
+ 3. March along the view ray through the simulation grid [S1].
+@@ -25,69 +25,64 @@
+ 
+ **Formulas:**
+-- Logarithmic Depth Partitioning: Cell extent ratios are kept constant so that $\alpha$ remains uniform throughout the perspective grid, allowing all but one logarithm to be precomputed [S1].
+-- Cell Status Classification: A cell is marked `PARTIAL` if it contains particles overlapping its boundaries; `FULL` if entirely filled with incompressible fluid particles; `EMPTY` otherwise [S1].
++- Not given in the sources.
+ 
+ **Parameters:**
+-- Bit Counting Intrinsics: Hardware-dependent operations (e.g., `__builtin_popcount` on GCC/Clang) used to count set bits in packed words [S1].
++- Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+ - Do not skip cells that have partially filled neighbors to avoid cutting off detailed boundary surfaces potentially formed by particles overlapping cell boundaries; only inner full and empty cells may be skipped [S1].
+-- Ray marching precision must be sufficient to correctly identify cell boundaries when resuming iteration after skipping uniform regions [G].
++- Ray marching precision may cause missed intersections if cell boundaries are not handled correctly [G].
+ 
+ **Pseudocode:**
+ ```python
+-EMPTY, FULL, PARTIAL = 0, 1, 2
++def simulate_grid_cell_skipping(grid_cells, rays):
++    """
++    Accelerates surface extraction by skipping empty/full cells.
++    
++    Args:
++        grid_cells: Grid object with .cell_size, .bounds, .get_cell_at(), .get_neighbor()
++        rays: List of ray objects with .origin, .direction
++    Returns:
++        List of voxels to process for surface extraction
++    """
++    processed_voxels = []
++    for ray in rays:
++        pos = ray.origin
++        dir = ray.direction
++        cell_size = grid_cells.cell_size
++        bounds = grid_cells.bounds
++        while pos[0] >= bounds.min[0] and pos[0] < bounds.max[0] and \
++              pos[1] >= bounds.min[1] and pos[1] < bounds.max[1] and \
++              pos[2] >= bounds.min[2] and pos[2] < bounds.max[2]:
++            cell = grid_cells.get_cell_at(pos)
++            has_partial_neighbor = any(
++                grid_cells.get_neighbor(pos, offset).status == PARTIAL 
++                for offset in get_26_offsets()
++            )
++            if cell.status in (EMPTY, FULL) and not has_partial_neighbor:
++                pos = (pos[0] + dir[0] * cell_size, pos[1] + dir[1] * cell_size, pos[2] + dir[2] * cell_size)
++                continue
++            voxels = []
++            for word in cell.voxel_bits:
++                while word != 0:
++                    bit = word & -word
++                    voxels.append(extract_voxel(bit))
++                    word ^= bit
++            processed_voxels.extend(voxels)
++            pos = (pos[0] + dir[0] * cell_size, pos[1] + dir[1] * cell_size, pos[2] + dir[2] * cell_size)
++    return processed_voxels
+ 
+-def simulate_grid_cell_skipping(simulation_grid, voxel_columns):
+-    voxels_to_process = []
+-    for ray in voxel_columns:
+-        current_cell = ray.start_cell
+-        while current_cell is not None:
+-            # Check if any neighbor is partial; if so, do not skip this cell
+-            has_partial_neighbor = any(
+-                simulation_grid[n].status == PARTIAL
+-                for n in get_26_neighbors(current_cell)
+-            )
+-            if current_cell.status in (EMPTY, FULL) and not has_partial_neighbor:
+-                # Skip uniform region by advancing ray to next cell
+-                current_cell = advance_ray_to_next_cell(current_cell, ray.direction, simulation_grid)
+-                continue
+-            # Process voxels in the current cell
+-            voxels = iterate_voxels_in_cell(current_cell, ray)
+-            voxels_to_process.extend(voxels)
+-            # Move to next cell
+-            current_cell = advance_ray_to_next_cell(current_cell, ray.direction, simulation_grid)
+-    return voxels_to_process
++def get_26_offsets():
++    offsets = []
++    for dx in (-1, 0, 1):
++        for dy in (-1, 0, 1):
++            for dz in (-1, 0, 1):
++                if dx == 0 and dy == 0 and dz == 0:
++                    continue
++                offsets.append((dx, dy, dz))
++    return offsets
+ 
+-def get_26_neighbors(cell):
+-    return [(cell.x + dx, cell.y + dy, cell.z + dz)
+-            for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+-            if not (dx == 0 and dy == 0 and dz == 0)]
+-
+-def advance_ray_to_next_cell(current_cell, direction, simulation_grid):
+-    # Step along the ray direction in grid coordinates
+-    step_x = 1 if direction.x > 0 else (-1 if direction.x < 0 else 0)
+-    step_y = 1 if direction.y > 0 else (-1 if direction.y < 0 else 0)
+-    step_z = 1 if direction.z > 0 else (-1 if direction.z < 0 else 0)
+-    next_pos = (current_cell.x + step_x, current_cell.y + step_y, current_cell.z + step_z)
+-    if not (0 <= next_pos[0] < simulation_grid.width and
+-            0 <= next_pos[1] < simulation_grid.height and
+-            0 <= next_pos[2] < simulation_grid.depth):
+-        return None
+-    return simulation_grid[next_pos[0], next_pos[1], next_pos[2]]
+-
+-def iterate_voxels_in_cell(cell, ray):
+-    # Iterate over packed machine words rather than single bits,
+-    # using bit counting intrinsics to quickly determine the next relevant bits
+-    voxels = []
+-    packed_words = cell.packed_occupancy_words
+-    for word in packed_words:
+-        while word != 0:
+-            # Find index of least significant set bit (hardware intrinsic equivalent)
+-            bit_index = (word & -word).bit_length() - 1
+-            voxels.append(ray.get_voxel(bit_index))
+-            # Clear the processed bit
+-            word &= word - 1
+-    return voxels
++def extract_voxel(bit):
++    return {"bit": bit, "processed": True}
+ ```
+ 
+@@ -98,6 +93,15 @@
+ 
+ ## Operating characteristics
++- Time Complexity: Not given in the sources.
++- Memory Complexity: Not given in the sources.
++- Measured Performance: Not given in the sources.
++- Scaling: Not given in the sources.
++- Strengths: Significant speedup for simulations with large empty or full regions [S1].
++- Limitations: Overhead of checking neighbor status; less effective for highly fragmented partial regions [G].
++- When to Use: SPH simulations with regular grids and distinct empty/full/partial regions [S1].
++- When Not to Use: Not given in the sources.
+ 
+ ## Background
++Not given in the sources.
+ 
+ ## Sources

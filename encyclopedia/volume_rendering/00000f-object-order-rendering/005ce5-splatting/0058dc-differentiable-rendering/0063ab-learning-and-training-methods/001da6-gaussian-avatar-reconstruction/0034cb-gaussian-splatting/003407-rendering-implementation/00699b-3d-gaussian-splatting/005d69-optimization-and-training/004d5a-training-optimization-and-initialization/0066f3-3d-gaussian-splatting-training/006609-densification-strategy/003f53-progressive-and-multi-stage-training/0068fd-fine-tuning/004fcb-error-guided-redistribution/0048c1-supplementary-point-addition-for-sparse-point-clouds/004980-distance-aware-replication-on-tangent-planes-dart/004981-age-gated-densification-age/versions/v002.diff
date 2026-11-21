@@ -1,0 +1,133 @@
+--- v001.md
++++ v002.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-Age-Gated Densification (AGE) is a maturity gate for 3D Gaussian Splatting training that prevents densification (splitting and cloning) until a specified training step threshold is reached, thereby pruning unnecessary primitives and controlling memory and time costs [S1]. It is designed to work in conjunction with Distance-Aware Replication on Tangent-planes (DART), where DART augments the initial point cloud to improve coverage in sparse regions, and AGE trims the resulting inflated primitive count without degrading reconstruction quality [S1, S2]. While competitors like FastGS-Big and Taming-3DGS modify densification criteria or schedules *during* training, AGE acts as a static maturity gate, deferring eligibility for densification operations [S1].
++Age-Gated Densification (AGE) is a maturity gate for 3D Gaussian Splatting training that prevents densification (splitting and cloning) until a specified training step threshold is reached, thereby pruning unnecessary primitives and controlling memory and time costs [S1]. It is designed to work in conjunction with Distance-Aware Replication on Tangent-planes (DART), where DART augments the initial point cloud to improve coverage in sparse regions, and AGE trims the resulting inflated primitive count without degrading reconstruction quality [S1]. While competitors like FastGS-Big and Taming-3DGS modify densification criteria or schedules *during* training, AGE acts as a static maturity gate, deferring eligibility for densification operations [S1].
+ 
+ ## How it works
+-AGE functions as a conditional guard on the standard 3D Gaussian Splatting densification loop. It does not alter the geometry of the Gaussians or the rendering process, but restricts when the density-control cascade (splitting small Gaussians or cloning large ones) is permitted to execute [S1].
++AGE functions as a conditional guard on the standard 3D Gaussian Splatting densification loop [S1]. It does not alter the geometry of the Gaussians or the rendering process, but restricts when the density-control cascade (splitting small Gaussians or cloning large ones) is permitted to execute [S1].
+ 
+ ### Inputs and Outputs
+@@ -14,9 +14,10 @@
+ 
+ ### Data Structures
+-AGE relies on the standard 3DGS Gaussian representation but introduces a scalar attribute to track the "age" or creation time of each Gaussian, or simply relies on the global training step counter to gate the operation [S1]. The sources do not specify a per-Gaussian age counter; instead, AGE is described as a global gate applied to the densification process [S1].
++AGE relies on the standard 3DGS Gaussian representation but does not require per-Gaussian age counters; it uses a global training step counter to gate the operation [S1].
+ 
+ ### Parameters
+ *   $T_{mat}$: The maturity threshold, defined as the training step at which densification becomes active. Default value: 200 [S1].
+ *   $m$: The replication multiplier for DART (used in conjunction with AGE). Default value: 10 [S1]. If $m=1$, DART is disabled, but AGE remains active [S1].
++*   $\rho_{min}$ and $\rho_{max}$: The lower and upper bounds of the distance-aware radius schedule for DART. Default values: 0.008 and 0.04, respectively, as fractions of the robust radius $R$ [S1].
+ 
+ ### Algorithm
+@@ -25,17 +26,8 @@
+ 1.  **Initialize:** Set $T_{mat} = 200$ [S1].
+ 2.  **Training Loop:** For each training step $t$:
+-    a. Perform forward pass and compute loss [S1].
+-    b. Compute gradients and update Gaussian parameters (position, covariance, opacity, color) [S1].
+-    c. **AGE Gate Check:**
+-       If $t < T_{mat}$:
+-           Set `can_densify` = False [S1].
+-       Else:
+-           Set `can_densify` = True [S1].
+-    d. **Densification Step:**
+-       If `can_densify` is True:
+-           Identify Gaussians for splitting (based on size/opacity criteria) and cloning (based on gradient magnitude) [S1].
+-           Execute split and clone operations [S1].
+-       Else:
+-           Skip densification operations [S1].
++    a. Perform forward pass and compute loss [G].
++    b. Compute gradients and update Gaussian parameters (position, covariance, opacity, color) [G].
++    c. **AGE Gate Check:** If $t < T_{mat}$, set `can_densify` = False; else True [S1].
++    d. **Densification Step:** If `can_densify` is True, execute standard split/clone/prune operations; else skip [S1].
+ 
+ ### Pseudocode
+@@ -53,10 +45,8 @@
+         Updated list of Gaussian primitives.
+     """
+-    # 1. Standard forward pass and loss computation
+-    # (Assuming standard 3DGS rasterization and loss calculation)
++    # 1. Standard forward pass and loss computation [G]
+     loss = compute_loss(gaussians)
+     
+-    # 2. Backward pass and parameter update
+-    # (Assuming standard Adam optimizer update for position, scale, rotation, opacity, color)
++    # 2. Backward pass and parameter update [G]
+     update_parameters(gaussians, loss)
+     
+@@ -66,20 +56,24 @@
+     # 4. Conditional Densification
+     if can_densify:
+-        # Identify Gaussians to split (e.g., those with scale below threshold)
+-        split_candidates = identify_split_candidates(gaussians)
+-        
+-        # Identify Gaussians to clone (e.g., those with high gradient magnitude)
+-        clone_candidates = identify_clone_candidates(gaussians)
++        # Standard 3DGS densification logic [G]
++        # Split: Gaussians with scale below threshold and opacity above threshold
++        split_mask = (gaussians.scale < SCALE_THRESHOLD) & (gaussians.opacity > OPACITY_THRESHOLD)
++        # Clone: Gaussians with gradient magnitude above threshold
++        clone_mask = (gaussians.gradient_magnitude > GRAD_THRESHOLD)
+         
+         # Execute splits
+-        for g in split_candidates:
+-            split_gaussian(g)
++        for g in gaussians[split_mask]:
++            new_g1, new_g2 = split_gaussian(g)
++            gaussians.append(new_g1)
++            gaussians.append(new_g2)
+             
+         # Execute clones
+-        for g in clone_candidates:
+-            clone_gaussian(g)
++        for g in gaussians[clone_mask]:
++            new_g = clone_gaussian(g)
++            gaussians.append(new_g)
+             
+-        # Prune invisible Gaussians (standard 3DGS step, usually always active)
+-        prune_gaussians(gaussians)
++        # Prune: Remove Gaussians with opacity below threshold
++        prune_mask = gaussians.opacity > OPACITY_PRUNE_THRESHOLD
++        gaussians = gaussians[prune_mask]
+         
+     return gaussians
+@@ -87,25 +81,25 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Constant Radius in DART:** While not an AGE pitfall directly, the interaction with DART is critical. Using a constant upper-bound radius ($\rho = 0.040$) for DART replicas causes quality collapse (6.0 dB drop on 'stump' scene) and excessive memory usage (14.0 GB peak) due to early inflation and subsequent pruning [S1]. AGE cannot fully compensate for poorly placed initial primitives [S1].
+-*   **Isotropic Replication:** Using isotropic balls instead of tangent disks for DART replicas increases primitive count by 11.7% and reduces quality, demonstrating that the geometric placement of initial points matters more than just the count [S1].
+-*   **Threshold Selection:** $T_{mat}$ is fixed by design rather than swept, as it serves to suppress persistently under-supported primitives that would otherwise be retained by unconstrained densification [S1].
++*   **Constant Radius in DART:** Using a constant upper-bound radius ($\rho = 0.040$) for DART replicas causes quality collapse (6.0 dB drop on 'stump' scene) and excessive memory usage (14.0 GB peak) due to early inflation and subsequent pruning [S1]. AGE cannot fully compensate for poorly placed initial primitives [S1].
++*   **Isotropic Replication:** Using isotropic balls instead of tangent disks for DART replicas increases primitive count by 11.7% and reduces quality, demonstrating that geometric placement matters more than count [S1].
++*   **Threshold Selection:** $T_{mat}$ is fixed by design rather than swept, as it suppresses persistently under-supported primitives that would otherwise be retained by unconstrained densification [S1].
+ 
+ ## Subtopics
+ 
+ ### DART (Distance-Aware Replication on Tangent-planes)
+-A geometry-only augmentation that replicates SfM points on local tangent planes with distance-dependent radii to improve coverage in sparse regions. It acts as the fidelity provider for AGE. [Link](12502-distance-aware-replication-on-tangent-planes-dart.md)
++A geometry-only augmentation that replicates SfM points on local tangent planes with distance-dependent radii to improve coverage in sparse regions [S1]. It acts as the fidelity provider for AGE [S1]. [Link](12502-distance-aware-replication-on-tangent-planes-dart.md)
+ 
+ ### 3D Gaussian Splatting Training
+-The base optimization framework that AGE modifies. AGE is a supplementary strategy applied during the training phase. [Link](52-3d-gaussian-splatting.md)
++The base optimization framework that AGE modifies [G]. AGE is a supplementary strategy applied during the training phase [S1]. [Link](52-3d-gaussian-splatting.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** AGE reduces training time by preventing early densification. When applied with DART, it reduces training time from 31.8 to 29.4 minutes (a 2.4 min reduction) compared to using DART without AGE [S1]. The first 500 iterations take at most one minute per scene, indicating the gating overhead is negligible [S1].
++*   **Time Complexity:** AGE reduces training time. When applied with DART, it reduces training time from 31.8 to 29.4 minutes (a 2.4 min reduction) compared to using DART without AGE [S1]. The first 500 iterations take at most one minute per scene, indicating the gating overhead is negligible [S1].
+ *   **Memory Complexity:** AGE reduces peak memory usage. With DART, peak memory drops from 6.04 GB to 5.57 GB (a 0.47 GB reduction) [S1].
+-*   **Primitive Count:** AGE reduces the final Gaussian count. Without DART, it reduces count by 9.6% (2.91M to 2.63M). With DART, it reduces count by 8.7% (3.45M to 3.15M) [S1].
+-*   **Quality Impact:** AGE maintains or slightly improves quality. Without DART, PSNR increases by 0.04 dB. With DART, PSNR increases by 0.05 dB, SSIM by 0.001, and LPIPS by 0.001 (within measurement noise) [S1].
++*   **Primitive Count:** AGE reduces the final Gaussian count. Without DART, it reduces count by 9.6% (2.91M to 2.63M) [S1]. With DART, it reduces count by 8.7% (3.45M to 3.15M) [S1].
++*   **Quality Impact:** AGE maintains or slightly improves quality. Without DART, PSNR increases by 0.04 dB [S1]. With DART, PSNR increases by 0.05 dB, SSIM by 0.001, and LPIPS by 0.001 (within measurement noise) [S1].
+ *   **Strengths:** Effective cost-control gate that trims unnecessary primitives without sacrificing quality. Works independently of the initial cloud formation (effective even without DART) [S1].
+-*   **Limitations:** Does not improve quality on its own; relies on DART for fidelity gains in sparse regions. Not a substitute for better densification criteria but a complement to them [S1].
+-*   **When to Use:** Use when memory or training time is constrained, or when the initial point cloud (e.g., from SfM) is sparse and requires augmentation (via DART) that would otherwise lead to excessive primitive counts [S1].
+-*   **When Not to Use:** If the initial point cloud is dense and well-distributed, the benefits of AGE are minimal, and the overhead of managing the maturity threshold may not be justified [S1].
++*   **Limitations:** Does not improve quality on its own; relies on DART for fidelity gains in sparse regions [S1]. Not a substitute for better densification criteria but a complement to them [S1].
++*   **When to Use:** Use when memory or training time is constrained, or when the initial point cloud requires augmentation (via DART) that would otherwise lead to excessive primitive counts [S1].
++*   **When Not to Use:** AGE is beneficial regardless of initial cloud density, as it reduces primitive count by ~9-10% without quality loss, so the overhead of managing the maturity threshold is justified in all standard training setups [S1].
+ 
+ ## Background

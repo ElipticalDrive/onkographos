@@ -1,0 +1,276 @@
+--- v006.md
++++ v007.md
+@@ -1,129 +1,139 @@
+ # Pre-integrated Volume Rendering
+ 
+-Also called: PIVR
++Also called: PIVR, Pre-integration (Pré-integração), Pré-integração
+ 
+ ## Overview
+-Pre-integrated Volume Rendering (PIVR) is a technique that accelerates direct volume ray casting by pre-computing the integration of transfer functions over a ray interval and storing the results in a lookup table for fast retrieval [S1, S2, unofficial]. It solves the problem of aliasing artifacts caused by high-frequency non-linear transfer functions when sampling volume data at low rates, while simultaneously reducing computational cost compared to standard point-sampling classification [S1, unofficial][S3]. Unlike standard methods that apply the transfer function to individual samples, PIVR separates the numerical integration into a part for the continuous scalar field and a part for the transfer function parameters, rendering the volume segment by segment rather than point by point [S3].
++Pre-integrated Volume Rendering (PIVR) is a technique that accelerates direct volume rendering by pre-computing the integration of transfer functions over a ray interval and storing the results in a lookup table for on-the-fly evaluation [S1, unofficial][S2, unofficial]. It solves the problem of aliasing artifacts caused by high Nyquist frequencies in non-linear transfer functions by decoupling the integration of the transfer function contribution from the sampling process, allowing the sampling to focus solely on volume reconstruction [S6, unofficial]. Unlike standard point-sampling methods, PIVR renders the volume segment by segment rather than point by point, using the scalar values at the endpoints of a segment and the segment length to compute color and opacity contributions [S3][S6, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A scalar volume dataset $V$, a transfer function defined by extinction density $\tau(s)$ and color density $\tilde{c}(s)$, and a constant ray segment length (distance) $d$ [S2, unofficial].
+-*   **Output:** The final pixel color $C_{final}$ and accumulated opacity $\alpha_{acc}$ for each ray [S1, S5, unofficial].
++*   **Inputs:** A scalar volume dataset $V$, a transfer function defining extinction density $\tau(s)$ and color density $\tilde{c}(s)$, and a ray path through the volume.
++*   **Outputs:** A 2D image with accumulated color and opacity.
+ 
+ **Data Structures:**
+-*   **1D Integral Table:** A lookup table of size 256 entries (assuming 8-bit scalar quantization) [S2, unofficial].
+-    *   **Layout:** Each entry contains four 32-bit floating-point numbers: accumulated color components $(\tilde{R}_A, \tilde{G}_A, \tilde{B}_A)$ and accumulated opacity $(T_A)$ [S2, unofficial].
+-    *   **Total Size:** 4 Kbytes [S2, unofficial].
+-    *   **Memory:** Contiguous in memory, designed to fit in CPU L1 cache [S2, unofficial].
++*   **1D Integral Table:** A table of 256 entries (for 8-bit scalar data). Each entry contains four 32-bit floating-point numbers: accumulated color components $(\tilde{R}_A, \tilde{G}_A, \tilde{B}_A)$ and accumulated opacity $T_A$. Total size: 4 Kbytes. The layout is contiguous in memory: $[R, G, B, A]$ per entry [S2, unofficial].
++*   **Scalar Field:** Sampled values along the viewing ray, defining a one-dimensional piecewise linear scalar field [S1, unofficial].
+ 
+ **Pre-computation:**
+-The integral functions $T(s)$ and $K(s)$ are computed from the user-supplied transfer functions $\tau(s)$ and $\tilde{c}(s)$ [S2, unofficial]:
+-$$
+-T(s) = \int_0^s \tau(s) ds \quad \text{and} \quad K(s) = \int_0^s \tilde{c}(s) ds
+-$$
+-These values are stored in the 1D Integral Table [S2, unofficial]. The table must be refreshed whenever the transfer function is modified [S1, unofficial].
++The integral functions $T(s)$ and $K(s)$ are computed from the user-supplied transfer functions $\tau(s)$ and $\tilde{c}(s)$:
++$$ T(s) = \int_0^s \tau(s) ds $$
++$$ K(s) = \int_0^s \tilde{c}(s) ds $$
++These values are stored in the 1D table. The table must be refreshed whenever the transfer function is modified [S2, unofficial][S1, unofficial].
+ 
+-**Raycasting Loop:**
+-For each ray, the algorithm iterates through voxels. For each step (segment), it performs the following:
+-
+-1.  **Sampling:** Obtain the current scalar value $s_{current}$ and the previous scalar value $s_{prev}$ from the volume data [S2, unofficial].
+-2.  **Ordering:** Determine $s_{max} = \max(s_{current}, s_{prev})$ and $s_{min} = \min(s_{current}, s_{prev})$ [S2, unofficial].
+-3.  **Thresholding/Skipping:** If $s_{max}$ is below a user-supplied threshold (and transfer functions are clamped to zero below the threshold), the interval is skipped [S2, unofficial]. Note: A single point below threshold cannot be simply discarded if the previous point was above, as the linear interpolation might exceed the threshold [S2, unofficial].
+-4.  **Denominator Calculation:** Compute $diff = s_{max} - s_{min}$. Convert to floating-point. Compute reciprocal $invDiff = 1/diff$ [S2, unofficial].
+-5.  **Table Lookup:** Perform two sequential table accesses using indices derived from $s_{max}$ and $s_{min}$ (assuming 8-bit quantization, indices are $s_{max}$ and $s_{min}$) [S2, unofficial]. Retrieve $T(s_{max}), K(s_{max})$ and $T(s_{min}), K(s_{min})$ [S2, unofficial].
+-6.  **Color Computation:** Compute $\Delta K = K(s_{max}) - K(s_{min})$. Compute the positive raypoint light emission $\tilde{C}$:
+-    $$
+-    \tilde{C} = d \cdot invDiff \cdot \Delta K
+-    $$
+-    [S2, unofficial].
+-7.  **Opacity Approximation Setup:** Compute $x = invDiff \cdot (T(s_{max}) - T(s_{min}))$. Note that $x \geq 0$ [S2, unofficial].
+-8.  **Exponential Approximation:** Approximate the opacity $\alpha$ using the formula:
+-    $$
+-    \alpha(s_f, s_b, d) \approx 1 - \exp\left(\frac{d}{s_b - s_f} \cdot (T(s_f) - T(s_b))\right)
+-    $$
+-    which simplifies to approximating $1 - \exp(-x)$ [S2, unofficial]. This is done by approximating the function with four linear segments $y_i = m_i \cdot x + b_i$ for $i=0..3$. The final opacity is $\min(y_0, y_1, y_2, y_3)$ [S2, unofficial]. The parameters $m_i$ and $b_i$ are pre-computed once via brute-force method to minimize error for $x \geq 0$ [S2, unofficial].
+-    *   *Note:* A simplified linear approximation $\alpha \approx \frac{d}{s_b - s_f} (T(s_b) - T(s_f))$ can be used but results in visible loss in contrast [S2, unofficial].
+-9.  **Compositing:** Accumulate $\tilde{C}$ and $\alpha$ into the ray's accumulated color and opacity using the front-to-back volume rendering equation [S1, S5, unofficial].
++**Rendering Steps:**
++1.  **Sampling:** Sample the scalar field along the viewing ray. This sampling has its own Nyquist frequency, independent of the transfer function [S1, unofficial].
++2.  **Segment Definition:** Define segments between consecutive ray points. For linear interpolation, a ray defines a 1D portion of the volume consisting of segments where the sampled field value varies linearly [S6, unofficial].
++3.  **Endpoint Retrieval:** For each segment, obtain the current scalar value $s_{current}$ and the previous scalar value $s_{prev}$. Determine $s_{max} = \max(s_{current}, s_{prev})$ and $s_{min} = \min(s_{current}, s_{prev})$ [S2, unofficial].
++4.  **Table Lookup:** Perform two sequential table accesses using indices derived from $s_{max}$ and $s_{min}$ (assuming 8-bit quantization, indices are $s_{max}$ and $s_{min}$). Retrieve $T(s_{max}), K(s_{max})$ and $T(s_{min}), K(s_{min})$ [S2, unofficial].
++5.  **Color Computation:** Compute the emitted light intensity $\tilde{C}$ for the segment:
++    $$ \tilde{C}(s_f, s_b, d) \approx \frac{d}{s_b - s_f} \cdot (K(s_b) - K(s_f)) $$
++    where $s_b = s_{max}$, $s_f = s_{min}$, and $d$ is the distance between ray points [S2, unofficial][S6, unofficial].
++6.  **Opacity Computation:** Compute the opacity $\alpha$ for the segment:
++    $$ \alpha(s_f, s_b, d) \approx 1 - \exp\left(\frac{d}{s_b - s_f} \cdot (T(s_f) - T(s_b))\right) $$
++    This involves computing $x = \frac{T(s_{max}) - T(s_{min})}{s_{max} - s_{min}}$ and approximating $1 - \exp(-x)$ [S2, unofficial].
++7.  **Compositing:** Compose the color and opacity contributions of all segments in order (front-to-back) to generate the final image [S6, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Pre-computation (done once per transfer function change)
+-# T_table[s] = integral of tau(s) from 0 to s
+-# K_table[s] = integral of c(s) from 0 to s
+-# Pre-compute linear approximation parameters m_i, b_i for 1 - exp(-x)
++def preintegrated_volume_rendering(volume, transfer_function, ray_length_d):
++    """
++    volume: 3D array of scalar values
++    transfer_function: function mapping scalar s to (tau(s), c(s))
++    ray_length_d: constant distance between ray points
++    """
++    # Pre-computation
++    # T[s] = integral_0^s tau(u) du
++    # K[s] = integral_0^s c(u) du
++    # Table size 256 entries, each entry is [R, G, B, A] floats
++    table = compute_integral_table(transfer_function)
++    
++    # Approximation parameters for 1 - exp(-x)
++    # Computed once via brute-force method to minimize error for x >= 0
++    # m_i, b_i are linear coefficients for 4 segments
++    m = [m0, m1, m2, m3]
++    b = [b0, b1, b2, b3]
++    
++    def approx_opacity(x):
++        # x >= 0
++        y0 = m[0] * x + b[0]
++        y1 = m[1] * x + b[1]
++        y2 = m[2] * x + b[2]
++        y3 = m[3] * x + b[3]
++        return min(y0, y1, y2, y3)
+ 
+-def preintegrated_volume_rendering(ray, volume, transfer_function, d):
+-    # Initialize accumulation
+-    acc_color = (0.0, 0.0, 0.0)
+-    acc_opacity = 0.0
+-    
+-    # Get previous scalar value (from previous ray segment or initial sample)
+-    s_prev = get_initial_scalar(ray)
+-    
+-    for t in ray_segments:
+-        # 1. Sample current scalar value
+-        s_curr = volume.sample(ray, t)
++    # Raycasting Loop
++    for each ray:
++        accumulated_color = (0, 0, 0)
++        accumulated_opacity = 0.0
++        prev_s = sample_scalar(ray, 0) # First sample
+         
+-        # 2. Ordering
+-        s_max = max(s_curr, s_prev)
+-        s_min = min(s_curr, s_prev)
+-        
+-        # 3. Thresholding
+-        if s_max < threshold:
+-            s_prev = s_curr
+-            continue
++        for step in range(1, num_steps):
++            curr_s = sample_scalar(ray, step)
+             
+-        # 4. Denominator Calculation
+-        diff = s_max - s_min
+-        if diff == 0:
+-            # Degenerate case: no change in scalar value
+-            # Opacity and color contribution are zero for this interval
+-            s_prev = s_curr
+-            continue
++            # Thresholding/Skipping
++            # If max(s_curr, s_prev) < threshold, skip segment
++            if max(curr_s, prev_s) < threshold:
++                prev_s = curr_s
++                continue
++                
++            s_max = max(curr_s, prev_s)
++            s_min = min(curr_s, prev_s)
+             
+-        inv_diff = 1.0 / diff
+-        
+-        # 5. Table Lookup
+-        # Assuming 8-bit quantization, indices are s_max and s_min
+-        # T_max, K_max = T_table[s_max], K_table[s_max]
+-        # T_min, K_min = T_table[s_min], K_table[s_min]
+-        T_max, K_max = lookup_table(s_max)
+-        T_min, K_min = lookup_table(s_min)
+-        
+-        # 6. Color Computation
+-        delta_K = K_max - K_min
+-        # d is the constant ray segment length
+-        color_emission = d * inv_diff * delta_K
+-        
+-        # 7. Opacity Approximation Setup
+-        x = inv_diff * (T_max - T_min)
+-        
+-        # 8. Exponential Approximation
+-        # Approximate 1 - exp(-x) using 4 linear segments
+-        # y_i = m_i * x + b_i
+-        y0 = m0 * x + b0
+-        y1 = m1 * x + b1
+-        y2 = m2 * x + b2
+-        y3 = m3 * x + b3
+-        opacity = min(y0, y1, y2, y3)
+-        
+-        # 9. Compositing
+-        # Front-to-back compositing
+-        # C_acc = C_acc + (1 - alpha_acc) * alpha * C
+-        # alpha_acc = alpha_acc + (1 - alpha_acc) * alpha
+-        transmittance = 1.0 - acc_opacity
+-        acc_color = acc_color + transmittance * opacity * color_emission
+-        acc_opacity = acc_opacity + transmittance * opacity
+-        
+-        # Early ray termination
+-        if acc_opacity > 0.996: # Threshold from [S2, unofficial]
+-            break
++            # Table Lookup
++            # Indices are s_max and s_min (assuming 8-bit quantization)
++            entry_max = table[s_max]
++            entry_min = table[s_min]
+             
+-        s_prev = s_curr
+-        
+-    # Composite over background
+-    final_color = acc_color + (1.0 - acc_opacity) * background_color
+-    return final_color
++            # Extract K and T values
++            # K is color integral, T is opacity integral
++            # Assuming entry is [R, G, B, A] where A is T
++            K_max = entry_max[:3] # RGB
++            T_max = entry_max[3]
++            K_min = entry_min[:3]
++            T_min = entry_min[3]
++            
++            # Color Computation
++            # delta_K = K(s_max) - K(s_min)
++            delta_K = K_max - K_min
++            # C_tilde = d / (s_max - s_min) * delta_K
++            if s_max == s_min:
++                segment_color = (0, 0, 0)
++            else:
++                segment_color = (ray_length_d / (s_max - s_min)) * delta_K
++            
++            # Opacity Computation
++            # x = (T(s_max) - T(s_min)) / (s_max - s_min)
++            if s_max == s_min:
++                x = 0
++            else:
++                x = (T_max - T_min) / (s_max - s_min)
++            
++            segment_opacity = approx_opacity(x)
++            
++            # Front-to-Back Compositing
++            # C_out = C_in + (1 - alpha_in) * C_seg
++            # alpha_out = alpha_in + (1 - alpha_in) * alpha_seg
++            alpha_seg = segment_opacity
++            color_seg = segment_color
++            
++            accumulated_color = accumulated_color + (1 - accumulated_opacity) * color_seg
++            accumulated_opacity = accumulated_opacity + (1 - accumulated_opacity) * alpha_seg
++            
++            prev_s = curr_s
++            
++        write_pixel(accumulated_color, accumulated_opacity)
+ ```
++
++**Parameters:**
++*   **Raypoint distance $d$:** Assumed constant for all rays during a frame. Typical values tested: 0.45 and 0.9 grid units [S2, unofficial].
++*   **Linear Approximation Parameters ($m_i, b_i$):** Computed once via brute-force method to minimize error for $x \geq 0$. Specific numerical values are not provided in the sources [S2, unofficial].
++*   **Threshold:** User-supplied value to discard noise. Raypoints below threshold can be skipped if $s_{max}$ is below threshold [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Precision:** Division by zero if $s_{max} = s_{min}$. Handle by setting color to 0 and opacity calculation to $x=0$ [G].
++*   **Thresholding:** Raypoints below a threshold should not be simply discarded if the previous point was above the threshold, as linear interpolation might exceed the threshold. However, if $s_{max}$ is below the threshold, the entire interval is below the threshold (assuming clamped transfer functions) and can be safely skipped [S2, unofficial].
++*   **Simplified Alpha Loss:** Using a simplified opacity formula (linear approximation instead of exponential) results in a visible loss in contrast [S2, unofficial].
++*   **Discretization Artifacts:** Pre-integration assumes linear progression of scalar values between slices, which can introduce artifacts [S4, unofficial].
++*   **High-Dimensional TFs:** Pre-integration is not applicable without restrictions to transfer functions of dimension greater than one due to large memory and processing time requirements [S6, unofficial].
+ 
+ ## Subtopics
+@@ -136,14 +146,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method reduces the per-raypoint computational cost by replacing complex integration with table lookups and simple arithmetic operations [S2, unofficial]. Memory access is dominated by 3 memory reads per raypoint (1 previous value, 2 table entries), totaling 33 bytes [S2, unofficial]. Computation is dominated by SIMD arithmetic (MULPS, ADDPS, SUBPS, MINPS, RCPPS) with latencies of 4-6 cycles [S2, unofficial].
+-*   **Memory Complexity:** The 1D integral table is small (4 Kbytes for 256 entries), fitting in CPU L1 cache, which avoids the cache misses associated with larger 2D lookup tables (e.g., 512 Kbytes) [S2, unofficial].
+-*   **Measured Performance:** On a Pentium-4 2GHz, standard classification (d=0.45) took 0.295s with Empty-Space Skipping (ESS). Pre-integrated rendering (d=0.45, simplified alpha) took 0.158s without ESS, and pre-integrated (d=0.9, simplified alpha) took 0.158s without ESS [S2, unofficial]. Using a 200 MHz CPU and nVidia GeForce3, 4 fps was achieved for a 256x256 viewport [S1, unofficial].
+-*   **Strengths:** Reduces aliasing artifacts from high-frequency transfer functions [S2, unofficial]. Improves image quality with decreased under-sampling artifacts compared to pre- and post-classification [S3]. High performance on CPUs due to cache efficiency [S2, unofficial].
+-*   **Limitations:** Discretization assumes linear progression of scalar values between samples, which can introduce artifacts [S4, unofficial]. Simplified alpha approximation causes visible loss in contrast [S2, unofficial]. Constructing the color lookup table can be time-consuming [S3].
+-*   **When to use:** Suitable for flexible consumer graphics hardware, low-resolution volume data, and non-linear transfer functions with high frequencies [S5, unofficial]. Useful when interactive frame rates are required and transfer functions are static or change infrequently [S1, unofficial].
+-*   **When not to use:** When high contrast fidelity is critical and the simplified alpha approximation is unacceptable [S2, unofficial]. When the transfer function changes frequently, requiring constant table updates [S1, unofficial].
++*   **Time Complexity:** Dominated by SIMD arithmetic operations (MULPS, ADDPS, SUBPS, MINPS, RCPPS) with latencies of 4-6 cycles per raypoint [S2, unofficial].
++*   **Memory Complexity:** 3 memory reads per raypoint (1 previous value, 2 table entries), totaling 33 bytes. The 4KB 1D table fits in L1 cache, avoiding cache misses associated with larger 2D tables [S2, unofficial].
++*   **Measured Performance:** On a Pentium-4 2GHz, pre-integrated rendering (d=0.45, simplified alpha) took 0.158s for a 256x256 image, compared to 0.295s for standard classification (d=0.45) [S2, unofficial]. Performance of 4 fps for a 256x256 viewport was achieved using a 200 MHz CPU and an nVidia GeForce3 [S1, unofficial].
++*   **Strengths:** Reduces aliasing artifacts from high frequencies in transfer functions. Faster than 2D table lookup on CPUs due to L1 cache efficiency. High image quality for low-resolution data and non-linear transfer functions [S2, unofficial][S5, unofficial].
++*   **Limitations:** Not applicable to high-dimensional transfer functions without restrictions. Discretization assumes linear scalar progression, potentially introducing artifacts. Simplified alpha approximation causes contrast loss [S2, unofficial][S4, unofficial][S6, unofficial].
++*   **When to use:** When rendering regular grid volume data with 1D transfer functions on CPU or GPU, especially when aliasing is a concern and performance is critical.
++*   **When not to use:** When using high-dimensional transfer functions or when exact opacity integration is required without approximation artifacts.
+ 
+ ## Background
+-Pre-integrated volume rendering was introduced by Engel et al. in 2001 [S1, S2, unofficial]. It was developed to overcome the problem of high Nyquist frequencies resulting from non-linear transfer functions in texture-based volume rendering [S1, unofficial]. The approach was later combined with volumetric clipping and advanced lighting effects by Röttger et al. in 2003 [S1, unofficial]. It has been implemented in the UltraVis software system [S2, unofficial].
++Pre-integrated volume rendering was introduced by Engel et al. in 2001 [Engel01]. It improves upon basic texture mapping by overcoming high Nyquist frequencies from non-linear transfer functions. The method separates the DVR integral into two parts: one for the continuous scalar value and one for TF parameters (colors) and extinction coefficient [S3]. It was later combined with volumetric clipping and advanced lighting effects by Röttger et al. [Röttger03]. The technique is implemented in the UltraVis software system [S2, unofficial].
+ 
+ ## Sources
+@@ -152,3 +162,4 @@
+ [S3] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
+ [S4] PDF A Survey of GPU-Based Volume Rendering of Unstructured Grids, https://www.sci.utah.edu/~stevec/papers/gputet_survey.pdf, fetched 2026-10-27 (unofficial)
+-[S5] High-Quality Pre-Integrated Volume Rendering Using ... - ResearchGate, https://www.researchgate.net/publication/2878658_High-Quality_Pre-Integrated_Volume_Rendering_Using_Hardware-Accelerated_Pixel_Shading, fetched 2026-11-03 (unofficial)+[S5] High-Quality Pre-Integrated Volume Rendering Using ... - ResearchGate, https://www.researchgate.net/publication/2878658_High-Quality_Pre-Integrated_Volume_Rendering_Using_Hardware-Accelerated_Pixel_Shading, fetched 2026-11-03 (unofficial)
++[S6] Especificação de funções de transferência unidimensionais e multidimensionais para visualização volumétrica direta, http://hdl.handle.net/10183/12077, fetched 2026-10-30 (unofficial)

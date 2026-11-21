@@ -1,0 +1,104 @@
+# Signed Cuboid Distance Function
+
+Also called: Cuboid SDF Primitive, Cuboid Struct, SDF Cuboid Primitive
+
+## Overview
+The Signed Cuboid Distance Function computes the exact signed Euclidean distance from a query point to an axis-aligned cuboid (box) that may be transformed in world space. It returns a positive value for points outside the cuboid and a negative value for points inside, with zero on the surface. It extends the [Unsigned Box Distance Function](3750-unsigned-box-distance-function.md) by providing interior distance information, which is required for smooth boolean operations (union, intersection, difference) and accurate marching in signed distance field volumes.
+
+## How it works
+**Inputs:**
+- `point`: The query point in world space ($P \in \mathbb{R}^3$).
+- `transform`: A $4 \times 4$ affine transformation matrix ($M$) mapping local cuboid coordinates to world space.
+- `dimensions`: The width, height, and depth of the cuboid in its local space ($D = (w, h, d)$).
+
+**Outputs:**
+- `distance`: A scalar signed distance value.
+
+**Data Structures:**
+The cuboid is typically stored as a struct containing:
+- `transform`: A $4 \times 4$ matrix (64 bytes, aligned to 16 bytes).
+- `dimensions`: A 3D vector (12 bytes).
+- `_padding`: 4 bytes of padding to maintain alignment.
+Total size: 80 bytes [S1, unofficial].
+
+**Algorithm:**
+1. **Transform to Local Space:** Compute the inverse of the cuboid's world transformation matrix ($M^{-1}$). Transform the query point $P$ into the cuboid's local coordinate system:
+   $$ P_{local} = M^{-1} \cdot P $$
+   Let $P_{local} = (x, y, z)$.
+
+2. **Compute Relative Coordinates:** Calculate the distance from the point to the center of the cuboid, adjusted for the cuboid's half-dimensions. Let $H = (w/2, h/2, d/2)$ be the half-dimensions.
+   $$ q = (|x|, |y|, |z|) - H $$
+   *Note: Some implementations use full dimensions and subtract half, or store half-dimensions directly. The logic remains: distance from center minus extent.*
+
+3. **Compute Outside Distance:** The squared distance to the surface if the point is outside is determined by the positive components of $q$.
+   $$ d_{out} = \text{length}(\max(q, \mathbf{0})) $$
+   Where $\max(q, \mathbf{0})$ is a vector where each component is $\max(q_i, 0)$.
+
+4. **Compute Inside Distance:** If the point is inside, all components of $q$ are negative. The signed distance is the negative of the maximum absolute distance to any face (the closest face).
+   $$ d_{in} = \min(\max(q_x, \max(q_y, q_z)), 0) $$
+   This value is non-positive.
+
+5. **Combine:**
+   $$ \text{distance} = d_{out} + d_{in} $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def signed_cuboid_distance(point: Vec3, transform_inv: Mat4, half_dims: Vec3) -> float:
+    """
+    Computes signed distance to an axis-aligned cuboid.
+    point: World space query point.
+    transform_inv: Inverse of the cuboid's world transformation matrix.
+    half_dims: Half-width, half-height, half-depth of the cuboid in local space.
+    """
+    # Step 1: Transform point to local space
+    # Assuming point is a homogeneous vector (x, y, z, 1)
+    local_point = transform_inv * Vec4(point.x, point.y, point.z, 1.0)
+    x, y, z = local_point.x, local_point.y, local_point.z
+    
+    # Step 2: Calculate distance to faces relative to half-dimensions
+    # q represents the vector from the point to the box surface in local space
+    # If point is outside, q has positive components corresponding to the closest face/edge/corner
+    # If point is inside, q is negative in all components
+    q_x = abs(x) - half_dims.x
+    q_y = abs(y) - half_dims.y
+    q_z = abs(z) - half_dims.z
+    
+    # Step 3: Outside distance (Euclidean distance to the closest point on the surface)
+    # max(q, 0) ensures we only consider the "outside" direction
+    outside_x = max(q_x, 0.0)
+    outside_y = max(q_y, 0.0)
+    outside_z = max(q_z, 0.0)
+    
+    dist_out = sqrt(outside_x**2 + outside_y**2 + outside_z**2)
+    
+    # Step 4: Inside distance component
+    # If inside, the distance is negative. It is determined by the closest face.
+    # max(q_x, max(q_y, q_z)) gives the largest (least negative) value, i.e., closest to 0.
+    # min(..., 0) ensures this term is 0 if outside (where dist_out handles it).
+    inside_component = min(max(q_x, max(q_y, q_z)), 0.0)
+    
+    # Step 5: Combine
+    return dist_out + inside_component
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Near the surface, floating-point precision errors can cause jitter. Using `f32` is standard, but `f64` may be needed for high-precision ray marching [S1, unofficial].
+- **Degenerate Cuboids:** If any dimension is zero, the cuboid becomes a plane, line, or point. The formula still holds mathematically but may produce unexpected results in boolean operations if not handled by the SDF engine.
+- **Transformation:** The inverse matrix must be valid. Non-uniform scaling requires careful handling of the inverse transpose for normals, but for distance, the inverse matrix applied to the point is sufficient [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$. The computation involves a fixed number of arithmetic operations and a square root.
+- **Memory Complexity:** $O(1)$. No auxiliary data structures are allocated during the query.
+- **Strengths:** Exact distance calculation; supports arbitrary affine transformations; enables smooth boolean operations.
+- **Limitations:** The square root operation is more expensive than simple comparisons. For unsigned distance, the square root is only needed if the point is outside the axis-aligned bounds of the local box (i.e., in the corner regions).
+- **When to use:** When signed distance is required for blending, boolean operations, or accurate marching in SDF volumes.
+- **When not to use:** If only unsigned distance is needed and performance is critical, the [Unsigned Box Distance Function](3750-unsigned-box-distance-function.md) may be slightly faster by avoiding the inside distance calculation and potentially optimizing the square root.
+
+## Background
+The signed distance function for a box is a fundamental primitive in Signed Distance Field (SDF) rendering. It was popularized in the context of ray marching by Inigo Quilez in his online articles on SDFs [S1, S2, unofficial]. The implementation details provided here are derived from open-source ray marchers and SDF libraries [S1, S2, unofficial].
+
+## Sources
+[S1] unfinishedprogram/ray-marcher, https://github.com/unfinishedprogram/ray-marcher, fetched 2026-10-26 (unofficial)
+[S2] holger-kibur/sdf, https://github.com/holger-kibur/sdf, fetched 2026-10-27 (unofficial)

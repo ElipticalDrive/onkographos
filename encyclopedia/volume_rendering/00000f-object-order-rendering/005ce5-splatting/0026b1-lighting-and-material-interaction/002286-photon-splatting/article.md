@@ -1,0 +1,88 @@
+# Photon Splatting
+
+Also called: Capturing Direct Illumination (Photon Splatting)
+
+## Overview
+Photon Splatting captures direct illumination by projecting photons from light sources onto scene geometry and storing them in a sparse voxel octree [S1]. It solves the problem of efficiently accumulating incoming radiance for subsequent indirect illumination calculations by treating light-view map pixels as photons [S1]. It differs from [Per-Splat Relighting](3371-per-splat-relighting.md) by focusing on the initial capture and storage of direct light energy into the voxel structure rather than per-surface lighting updates [S1].
+
+## How it works
+**Inputs:**
+*   Light-view map: A world position map rendered from the light's perspective, where each pixel represents a photon [S1].
+*   Sparse Voxel Octree: A hierarchical data structure representing the scene, where leaf nodes store photon data [S1].
+
+**Outputs:**
+*   Updated Octree: Leaf nodes contain direction distributions and energy values proportional to the subtended solid angle of the light-view map pixel [S1].
+
+**Data Structures:**
+*   **Light-View Map:** Stores world positions and depth [S1].
+*   **Octree Leaf Node:** Stores photon data [S1].
+*   **Brick Structure:** Voxels are repeated at brick boundaries to enable hardware filtering [S1].
+*   **Atomic Operations:** Hardware atomic adds are limited to integer textures [S1].
+*   **Empty Voxels:** Photons are stored at the surface, and empty voxels are collapsed [S1].
+
+**Steps:**
+1.  **Render Light-View Map:** Render the scene from the light's view using standard rasterization to generate a world position map [S1].
+2.  **Splat Photons:** Launch a fragment shader with one thread per light-view-map pixel [S1]. For each pixel, determine the corresponding leaf node in the octree based on the world position [S1]. Calculate the photon's energy, which is proportional to the subtended solid angle of the pixel as seen from the light [S1]. Store the photon as a direction distribution and energy in the leaf node [S1].
+3.  **Handle Atomic Operations:** Since atomic add operations are only available for integer textures, use a 16-bit normalized texture format for storage [S1]. Denormalize the values when accessing them later [S1].
+4.  **Resolve Brick Boundary Inconsistencies:** Because voxels are repeated for adjacent bricks, direct copying causes thread collisions and bandwidth issues [S1]. Use the "Value Transfer to Neighboring Bricks" method to ensure coherence [S1, S2].
+
+**Formulas:**
+*   $E \propto \Omega$, where $E$ is the stored photon energy and $\Omega$ is the subtended solid angle of the light-view map pixel as seen from the light [S1].
+
+**Parameters:**
+*   **Light-View Map Resolution:** Typically higher than the lowest level of the voxel grid to avoid gaps [S1].
+*   **Texture Format:** 16-bit normalized (e.g., RG16F) to support atomic adds [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Atomic Operations:** Hardware atomic adds are limited to integer textures, requiring 16-bit normalized formats and careful denormalization [S1].
+*   **Thread Collisions:** Copying photons directly to all required locations in adjacent bricks leads to significant performance degradation due to parallel random scattering and bandwidth issues [S1].
+*   **Empty Voxels:** Photons are stored at the surface, and empty voxels are collapsed, ensuring photons are always placed at the finest level of the voxel structure [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def splat_photons(light_view_map, octree_leaves):
+    # One thread per pixel in light_view_map
+    for pixel in light_view_map:
+        world_pos = pixel.world_position
+        solid_angle = pixel.subtended_solid_angle
+        # Find leaf node in octree based on world position
+        leaf = octree_leaves.find_leaf(world_pos)
+        # Photon data: direction and energy proportional to solid angle
+        energy = solid_angle
+        direction = normalize(light_position - world_pos)
+        # Atomic add required for concurrent updates on 16-bit normalized buffer
+        leaf.buffer.atomic_add(energy, direction)
+
+def transfer_to_neighbors(octree_leaves):
+    # Six passes, two for each axis (x, y, z)
+    for axis in ['x', 'y', 'z']:
+        # Pass 1: Add current node's data to the neighbor in positive direction
+        for leaf in octree_leaves:
+            neighbor = leaf.get_neighbor(axis, direction=+1)
+            neighbor.buffer += leaf.buffer
+        # Pass 2: Copy summed data from neighbor back to current node
+        for leaf in octree_leaves:
+            neighbor = leaf.get_neighbor(axis, direction=+1)
+            leaf.buffer = neighbor.buffer
+```
+
+## Subtopics
+
+### Value Transfer to Neighboring Bricks
+This method addresses the inconsistency of duplicated voxels at brick boundaries [S2]. It uses six passes (two per axis: x, y, z) to propagate data [S2]. In the first pass of an axis, each thread adds its voxel data to the neighbor in the positive direction [S2]. In the second pass, it copies the summed data from the neighbor back [S2]. This ensures coherence along each axis without atomic operations or thread collisions, leveraging neighbor pointers for efficient access [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Efficient for scenes with high-resolution light-view maps [S1].
+*   **Strengths:** Avoids atomic operations in the transfer step and prevents thread collisions [S2].
+*   **Limitations:** Requires a complete octree assumption for the simplified explanation of value transfer [S2].
+
+## Background
+Photon Splatting was introduced in Interactive Indirect Illumination Using Voxel Cone Tracing (2011) [S1, S2]. It builds on the idea of using light-view maps to capture direct illumination for subsequent indirect illumination calculations [S1]. The method was developed to address the challenges of storing photons in a sparse voxel octree while maintaining performance and accuracy [S1, S2].
+
+## Sources
+[S1] PDF Interactive Indirect Illumination Using Voxel Cone Tracing, https://research.nvidia.com/sites/default/files/publications/GIVoxels-pg2011-authors.pdf, fetched 2026-10-27
+[S2] Interactive Indirect Illumination Using Voxel Cone Tracing, https://doi.org/10.1111/j.1467-8659.2011.02063.x, fetched 2026-10-26

@@ -1,0 +1,119 @@
+# K-Means++ Initialization
+
+Also called: Spread Initialization
+
+## Overview
+K-means++ is an initialization strategy for k-means clustering that improves theoretical guarantees in both efficiency and quality by ensuring initial cluster centers are relatively spread out [S1]. It addresses the pitfall where standard k-means runtime can be exponential and locally optimal solutions can be far from the global optimum [S1]. It is applied to reduce large volumetric datasets into a manageable set of cluster centers in parameter space for transfer function design [S1].
+
+## How it works
+**Inputs:**
+- $D$: A set of $n$ data points in a metric space.
+- $k$: The number of cluster centers to initialize.
+
+**Outputs:**
+- $C$: A set of $k$ initial cluster centers, $C = \{c_1, c_2, \dots, c_k\}$, where each $c_i \in D$.
+
+**Data Structures:**
+- $D$: List of data points.
+- $C$: List of selected centers.
+- $D(x, C)$: The squared Euclidean distance from point $x$ to the nearest center in $C$. If $C$ is empty, $D(x, C) = 0$.
+
+**Steps:**
+1. Select the first center $c_1$ uniformly at random from $D$.
+2. For $i = 2$ to $k$:
+   a. Compute the squared distance $D(x, C)$ for every $x \in D$, where $C = \{c_1, \dots, c_{i-1}\}$.
+   b. Select the next center $c_i$ from $D$ with probability proportional to $D(x, C)^2$. Specifically, the probability $P(x)$ of selecting $x$ is:
+      $$ P(x) = \frac{D(x, C)^2}{\sum_{y \in D} D(y, C)^2} $$
+   c. Add $c_i$ to $C$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import random
+import math
+
+def kmeans_plus_plus_init(data, k):
+    """
+    Initialize k cluster centers using the k-means++ algorithm.
+    
+    Args:
+        data: List of data points (vectors).
+        k: Number of centers to initialize.
+        
+    Returns:
+        List of k centers.
+    """
+    if k > len(data):
+        raise ValueError("k cannot be greater than the number of data points")
+    
+    centers = []
+    
+    # Step 1: Select first center uniformly at random
+    c1 = random.choice(data)
+    centers.append(c1)
+    
+    # Step 2: Select subsequent centers
+    for _ in range(1, k):
+        # Calculate squared distances from each point to the nearest existing center
+        distances = []
+        for x in data:
+            min_sq_dist = float('inf')
+            for c in centers:
+                # Squared Euclidean distance
+                sq_dist = sum((xi - ci) ** 2 for xi, ci in zip(x, c))
+                if sq_dist < min_sq_dist:
+                    min_sq_dist = sq_dist
+            distances.append(min_sq_dist)
+        
+        # Total sum of squared distances for normalization
+        total_dist = sum(distances)
+        
+        if total_dist == 0:
+            # All points are identical to existing centers; pick randomly
+            next_center = random.choice(data)
+        else:
+            # Select next center with probability proportional to squared distance
+            # Using cumulative sum for weighted random choice
+            cumulative_probs = []
+            current_sum = 0
+            for d in distances:
+                current_sum += d
+                cumulative_probs.append(current_sum)
+            
+            r = random.uniform(0, current_sum)
+            for i, cp in enumerate(cumulative_probs):
+                if r <= cp:
+                    next_center = data[i]
+                    break
+        
+        centers.append(next_center)
+        
+    return centers
+```
+
+**Parameters:**
+- $k$: Number of cluster centers to initialize [S1].
+
+**Edge Cases and Pitfalls:**
+- Standard k-means runtime can be exponential and locally optimal solutions can be far from the global optimum [S1].
+- If all data points are identical to existing centers, the distance sum is zero, requiring a fallback random selection [G].
+
+## Subtopics
+
+### K-means++ Subsampling
+A variant used to handle large volumetric data by maximizing the sampling rate iteratively until the clustering algorithm terminates within a reasonable time limit [S1]. It retains a fraction of raw data points for clustering. Typical sampling rates are 50% for hyperspectral data, 30% for hurricane data, and 25% for ionization data [S1]. The number of clusters is often fixed at 3000 across tested datasets [S1]. The time complexity is $O(nk^2)$ per iteration, where $n$ is the number of data points and $k$ is the number of clusters [S1].
+
+## Operating characteristics
+- **Time Complexity:** $O(nk^2)$ per iteration, where $n$ is the number of data points and $k$ is the number of clusters [S1].
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Applied to reduce large volumetric datasets into a manageable set of cluster centers in parameter space for transfer function design [S1].
+- **Strengths:** Improves theoretical guarantees in efficiency and quality by ensuring initial centers are spread out [S1].
+- **Limitations:** Standard k-means runtime can be exponential and locally optimal solutions can be far from the global optimum [S1].
+- **Usage:** Used in scalable k-means clustering for multivariate transfer function design in volume visualization [S1].
+
+## Background
+K-means++ was introduced to improve the initialization of k-means clustering, addressing the issue that random initialization can lead to poor local optima [S1]. It is based on the work of Arthur and Vassilvitskii [2], which showed that providing a good initialization improves theoretical guarantees in both efficiency and quality [S1]. The method is applied in the context of multivariate volume visualization through dynamic projections to handle large volumetric datasets [S1].
+
+## Sources
+[S1] Multivariate volume visualization through dynamic projections, https://doi.org/10.1109/ldav.2014.7013202, fetched 2026-10-26

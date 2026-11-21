@@ -1,0 +1,101 @@
+audit: sceneview-core math/geometry correctness (2026-06) Read-only adversarial audit of the shared KMP module (sceneview-core/src/commonMain) — math, collision, triangulation, geometry generation, animation, physics. A bug here ships to...
+
+audit: sceneview-core math/geometry correctness (2026-06) · Issue #2464 · sceneview/sceneview · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+audit: sceneview-core math/geometry correctness (2026-06) #2464
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+audit: sceneview-core math/geometry correctness (2026-06)#2464
+Copy link
+Labels
+bugSomething isn't workingSomething isn't workingmodule: coresceneview-core (KMP)sceneview-core (KMP)
+Description
+ThomasGorisse
+opened on Jun 8, 2026
+Issue body actions
+audit: sceneview-core math/geometry correctness (2026-06)
+Read-only adversarial audit of the shared KMP module (sceneview-core/src/commonMain) — math, collision, triangulation, geometry generation, animation, physics. A bug here ships to all platforms (Android/Filament, iOS/RealityKit, Web).
+Method: every candidate was adversarially verified by writing out the math / tracing the algorithm against a concrete input, and cross-checked against the existing unit tests. Candidates that turned out correct-but-odd, or already guarded, were discarded. Only findings with a demonstrable wrong output for a concrete input are filed.
+Scope reviewed (and found correct)
+The large majority of the module is solid and well-tested. Verified correct under adversarial tracing:
+Collision — Ray/Box (OBB slab), Sphere, Capsule (Ericson §5.1.9 closest-segments with the documented r = a - c fix), Intersections (SAT box/box, point-in-box), MeshCollider (Möller–Trumbore), AABB.rayIntersection (parallel-ray epsilon handled). Degenerate rays (zero direction → normalized() returns zero), origin-inside, and parallel-axis SAT all handled.
+Math — Quaternion euler round-trip (getEulerAngles ↔ eulerAngles are a consistent extrinsic-XYZ pair), slerp (short-path + lerp fallback, no acos-domain blow-up), Matrix.multiply (accumulates into locals → aliasing-safe when dest === rhs, as Box.transform/Capsule.transform rely on), decomposeRotation (🧮 sceneview-core math/animation MAJORs — Spring velocity, slerp frame-rate, Matrix thread-safety, segment closest-points #1126 snapshot fix), Splines (uniform + Barry–Goldman centripetal Catmull-Rom both trace correctly), CameraProjection (EV100 formula correct), Noise (Perlin negative-coord index masking + doubled perm table — no OOB).
+Animation/Physics — SpringAnimator (underdamped/critically/overdamped closed forms all verified by hand, incl. the 🧮 sceneview-core math/animation MAJORs — Spring velocity, slerp frame-rate, Matrix thread-safety, segment closest-points #1126 analytical velocity), PropertyAnimation/AnimationTimeUtils zero-duration guards, simulateStep (clamped dt, restitution), Interpolation.slerp (no div-by-zero).
+Geometry — Cube, Sphere, Cylinder, Torus, Plane, Path, Heightmap (gradient-normal signs correct), Icosphere (asin clamped), RoundedCube (single continuous grid — stitches correctly), Extrude (parallel-transport Frenet + Rodrigues verified), Shape (Earcut/Delaunator delegation). Index ranges traced to the last valid vertex in each.
+Verified HIGH finding (sub-issue)
+generateCapsule stitches three differently-ordered vertex grids into one index loop → inverted top-cap funnel + degenerate seam ring — affects the default generateCapsule(). Filed as a sub-issue with the full row-by-row trace and minimal fix.
+Lower-confidence candidates (noted here, not separately filed — not independently demonstrable enough for their own bug issue)
+These are real smells but either untested-and-unproven-to-be-user-visible, or behaviour-deviations rather than wrong-output bugs. Folding them in for the record:
+LatheGeometry — the closed parameter and sliceCount local are dead. sliceCount (line 35) is computed and never read; the vertex/index generation is identical for closed = true and closed = false (always builds segments+1 slices and bridges 0..segments-1, producing a closed seam either way). So closed = false silently still closes the surface. Geometry is valid in both cases — a behavioural surprise, not a malformed mesh. sceneview-core/.../geometries/LatheGeometry.kt:35,28.
+Math.normalToTangent uses exact == 0.0f where its own comment claims almostEqualRelativeAndAbs. tangent = cross((0,1,0), normal); the if (dot(tangent, tangent) == 0.0f) fallback only fires when normal is exactly ±Y. For normal ≈ ±Y (within float noise) the cross is tiny-but-nonzero, so it normalises a near-zero tangent (amplified noise) instead of taking the fallback basis. Same pattern exists on the Android Math.kt; result is still an orthonormal frame except in the catastrophic-cancellation limit. sceneview-core/.../math/Math.kt:191-198.
+worldToLocalScale / localToWorldScale transform a scale as a w=1 point (worldToLocal * worldScale via the Mat4 * Float3 point operator), which folds in the matrix translation/rotation — mathematically wrong for a scale vector under a non-trivial transform. Untested (the scaleConvertsCorrectly test actually exercises position conversion), and call sites live outside this module, so a concrete user-visible wrong output is unconfirmed. sceneview-core/.../math/TransformConversions.kt:183-193.
+Easing EaseInExpo/EaseOutExpo/EaseInElastic/EaseOutElastic use base-e (exp) where the named CSS/Penner curves use base-2 (2^x). Still monotonic 0→1 (endpoints special-cased), so it's a curve-shape deviation from the spec name, not a broken/NaN output. sceneview-core/.../animation/Interpolation.kt:65,70,116,125.
+Dedupe: checked against #2392, #2354, #2457, #2402, #1126, #2187 and a title search for capsule/collision/triangulation/geometry/quaternion/math — none overlap.
+Activity
+ThomasGorisse
+added
+bugSomething isn't workingSomething isn't working
+module: coresceneview-core (KMP)sceneview-core (KMP)
+on Jun 8, 2026
+ThomasGorisse commented on Jun 8, 2026
+ThomasGorisse
+on Jun 8, 2026
+MemberAuthor
+More actions
+Sub-issue for the verified HIGH finding: #2465 — generateCapsule topology stitching bug.
+ThomasGorisse commented on Jun 10, 2026
+ThomasGorisse
+on Jun 10, 2026
+MemberAuthor
+More actions
+Daily triage follow-up: filed #2475 — TorusGeometry (core) winds every triangle inward, the cross-platform mirror of the Android Torus.kt bug #2469. Verified at the code level against the #2472 WindingConsistencyTest proof (identical vertex layout + (a,b,d,a,d,c) pattern). This audit's first pass found the Capsule topology issue (#2465) but missed the shared Torus winding — worth a re-sweep of the core generators with a ported winding-consistency test.
+ThomasGorisse commented on Jun 10, 2026
+ThomasGorisse
+on Jun 10, 2026
+MemberAuthor
+More actions
+Re-verification of the 4 "lower-confidence, not separately filed" candidates
+Focused read-only re-audit of the four candidates noted (but not filed) above. Each was traced against the real source and a concrete input→output computed. Default verdict was "not a bug"; only a demonstrable wrong output is promoted.
+Promoted to filed sub-issues (proven wrong output):
+worldToLocalScale / localToWorldScale transform a scale as a w=1 point → translation leaks → bug(sceneview-core): worldToLocalScale / localToWorldScale transform a scale as a w=1 point → translation leaks into the scale (#2464) #2489. Proof: with a parent Translate(10,0,0)·Scale(2), localToWorldScale((1,1,1)) returns (12,2,2) instead of (2,2,2); worldToLocalScale((2,2,2)) returns (-4,1,1) instead of (1,1,1). Public API, platform-independent, untested, currently no in-tree call sites.
+LatheGeometry ignores the documented closed parameter (sliceCount dead) → bug(sceneview-core): LatheGeometry ignores the documented closed parameter (sliceCount is dead) → closed=false produces an identical CLOSED mesh (#2464) #2490. Proof: closed=false yields byte-for-byte identical geometry to closed=true (e.g. segments=24 → 75 verts / 288 indices in both); the documented contract has zero effect. Public API, contract violation.
+Re-confirmed NOT a bug (kept here for the record, not filed):
+Math.normalToTangent exact == 0.0f vs its stale comment — re-verified safe across the entire float32 range. For a near-pole normal (ε,1,0), the cross product is tiny-but-nonzero and normalize() recovers a correct orthonormal tangent (0,0,-1) (direction preserved, magnitude cancels) down to ε≈1e-20; at ε≈1e-38 and smaller, (ε)² underflows so dot(t,t) rounds to exactly 0.0f and the special branch fires. There is no gap where dot(t,t) is nonzero-yet-too-small-to-normalize — float32 squaring makes the exact check the correct boundary. Output is never wrong; only the comment ("uses almostEqualRelativeAndAbs") is stale.
+Easing EaseIn/OutExpo + EaseIn/OutElastic use base-e instead of spec base-2 — re-verified the [0,1] contract holds. Both Expo curves: f(0)=0, f(1)=1 exactly, monotonic non-decreasing (0 bad steps over 2001 samples), range stays in [0,1]. Elastic: endpoints exact via the if (t==0||t==1) t guard; the base-e overshoot is smaller than spec (InElastic min -0.249 vs -0.373; OutElastic max 1.249 vs 1.373) and Elastic overshoot is already documented in the Easing KDoc. The existing EasingTest only asserts endpoints, which base-e satisfies. Pure curve-shape deviation from the named spec, not a broken/NaN output → cosmetic, not filed.
+(Re-verified against kotlin-math 1.8.0; deduped against #2392 / #2465 — no overlap.)
+ThomasGorisse commented on Jun 30, 2026
+ThomasGorisse
+on Jun 30, 2026
+MemberAuthor
+More actions
+Audit complete — all filed sub-issues resolved: #2465 (Capsule topology), #2489 (scale conversions), #2490 (LatheGeometry closed), #2475/#2494 (core Torus winding) all fixed & merged. Cross-checks (#1126/#2187/#2354/#2392/#2402) were already closed. Closing the tracker.
+ThomasGorisse
+closed this as completedon Jun 30, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bugSomething isn't workingSomething isn't workingmodule: coresceneview-core (KMP)sceneview-core (KMP)
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,113 @@
+--- v002.md
++++ v003.md
+@@ -3,9 +3,9 @@
+ 
+ ## Overview
+-Proxy Geometry and Slicing renders volumetric data by decomposing the 3D volume into a set of 2D planar slices, which are treated as explicit geometric primitives (typically triangles or quads) and rasterized by the GPU [G]. This method solves the problem of interactive volume visualization by leveraging fixed-function rasterization and hardware alpha blending, avoiding the per-pixel ray-marching overhead of direct volume ray casting [G]. It sets itself apart from [Direct Volume Ray Casting](52-direct-volume-ray-casting.md) by using explicit geometry and fixed-function blending, and from [Surface Rendering Pipeline](2614-surface-rendering-pipeline.md) by rendering the entire volume interior rather than just isosurfaces [G]. This method builds on the shared principles of [Slice-based and Proxy Geometry Rendering](6225-slice-based-and-proxy-geometry-rendering.md).
++Proxy Geometry and Slicing renders volumetric data by decomposing the 3D volume into a set of 2D planar slices, which are treated as explicit geometric primitives (typically triangles or quads) and rasterized by the GPU [G]. This method solves the problem of interactive volume visualization by leveraging fixed-function rasterization and hardware alpha blending, avoiding the per-pixel ray-marching overhead of direct volume ray casting [G]. It sets itself apart from [Direct Volume Ray Casting](52-direct-volume-ray-casting.md) by using explicit geometry and fixed-function blending, and from [Surface Rendering Pipeline](2614-surface-rendering-pipeline.md) by rendering the entire volume interior rather than just isosurfaces [G]. See [Slice-based and Proxy Geometry Rendering](6225-slice-based-and-proxy-geometry-rendering.md) for shared principles.
+ 
+ ## How it works
+ **Inputs**: 3D volume data (stored as a 3D texture on the GPU [S2, unofficial][S3]), camera view direction, volume bounding box, slice spacing/distance.
+-**Outputs**: Rasterized 2D slices composited into a 2D image.
++**Outputs**: Rasterized 2D slices composited into a 2D image [G].
+ **Data structures**: An array of `BufferGeometry` objects pre-allocated to `MAX_SLICES_COUNT` [S1, unofficial]. Each geometry holds a position attribute array of 21 floats (7 vertices × 3 components) and an index array of 18 integers (6 triangles × 3 indices) [S1, unofficial].
+ 
+@@ -13,10 +13,10 @@
+ 1. **Bounding Box Setup**: Calculate the minimum and maximum coordinates of the volume bounding box. Store the 8 corners in a `corners` array and create 12 `Line3` edge objects connecting them [S1, unofficial].
+ 2. **Plane Generation**: Create a clipping plane aligned with the camera view direction. Initialize a `plane.constant` value based on the camera position and view distance [S1, unofficial].
+-3. **Slice Intersection Loop**: While `sliceIndex < MAX_SLICES_COUNT`, decrement `plane.constant` by `window.sliceDistance`. For each of the 12 edges, compute the intersection of the plane with the edge line segment. Collect valid intersection points into `intersectionVertices` [S1, unofficial].
+-4. **Polygon Sorting & Triangulation**: If `intersectionVertices` contains points, compute the centroid by summing the vertices and dividing by the count. Calculate the 2D angle of each vertex relative to the centroid using `atan2(y - centroid.y, x - centroid.x)`. Sort the vertices by this angle. Push the centroid to the end of the sorted array to form a fan [S1, unofficial].
+-5. **Geometry Update**: Update the geometry's position attribute with the sorted vertices and centroid. Build the index array for fan triangulation. Set the draw range to the number of vertices. Mark attributes for update and compute the bounding sphere. Increment `sliceIndex` [S1, unofficial].
++3. **Slice Intersection Loop**: While `sliceIndex < MAX_SLICES_COUNT`, decrement `plane.constant` by `window.sliceDistance` [S1, unofficial]. For each of the 12 edges, compute the intersection of the plane with the edge line segment. Collect valid intersection points into `intersectionVertices` [S1, unofficial].
++4. **Polygon Sorting & Triangulation**: If `intersectionVertices` contains points, compute the centroid by summing the vertices and dividing by the count [S1, unofficial]. Calculate the 2D angle of each vertex relative to the centroid using `atan2(y - centroid.y, x - centroid.x)` [S1, unofficial]. Sort the vertices by this angle. Push the centroid to the end of the sorted array to form a fan [S1, unofficial].
++5. **Geometry Update**: Update the geometry's position attribute with the sorted vertices and centroid [S1, unofficial]. Build the index array for fan triangulation [S1, unofficial]. Set the draw range to the number of vertices [S1, unofficial]. Mark attributes for update and compute the bounding sphere [S1, unofficial]. Increment `sliceIndex` [S1, unofficial].
+ 6. **Texture Mapping**: Each slice vertex is assigned 3D texture coordinates that map to the volumetric data [G].
+-7. **Rasterization and Shading**: The polygons are rasterized. In the fragment shader, the 3D texture is sampled at the interpolated texture coordinates to retrieve the scalar value [G].
+-8. **Classification and Blending**: The scalar value is mapped to color and opacity via a transfer function. The fragments are composited using alpha blending (typically `GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA`) [G].
++7. **Rasterization and Shading**: The polygons are rasterized [G]. In the fragment shader, the 3D texture is sampled at the interpolated texture coordinates to retrieve the scalar value [G].
++8. **Classification and Blending**: The scalar value is mapped to color and opacity via a transfer function [G]. The fragments are composited using alpha blending (typically `GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA`) [G].
+ 9. **Sorting**: The slices must be rendered in the correct depth order relative to the camera (back-to-front for standard alpha blending) to ensure correct compositing [G].
+ 
+@@ -25,9 +25,34 @@
+ import math
+ 
++class BufferGeometry:
++    def __init__(self):
++        self.position = [0.0] * 21
++        self.index = [0] * 18
++        self.draw_range = (0, 0)
++
++    def mark_attributes_for_update(self):
++        pass
++
++    def compute_bounding_sphere(self):
++        pass
++
++class Line3:
++    def __init__(self, start, end):
++        self.start = start
++        self.end = end
++
++class Plane:
++    def __init__(self, normal, constant):
++        self.normal = normal
++        self.constant = constant
++
++    def intersect_line(self, line):
++        # Returns intersection point or None
++        return None
++
+ class ProxyGeometrySlicer:
+     def __init__(self, max_slices_count):
+         self.max_slices_count = max_slices_count
+-        # Pre-allocate geometries: 7 vertices (21 floats), 6 indices (18 ints), draw range (0,0)
+-        self.geometries = [BufferGeometry(position=[0.0]*21, index=[0]*18, draw_range=(0,0)) for _ in range(max_slices_count)]
++        self.geometries = [BufferGeometry() for _ in range(max_slices_count)]
+         self.corners = []
+         self.edges = []
+@@ -36,10 +61,8 @@
+ 
+     def set_bounding_box(self, box_min, box_max):
+-        # Store 8 corners
+         self.corners = [
+             box_min, [box_min[0], box_min[1], box_max[2]], [box_min[0], box_max[1], box_min[2]], [box_min[0], box_max[1], box_max[2]],
+             [box_max[0], box_min[1], box_min[2]], [box_max[0], box_min[1], box_max[2]], [box_max[0], box_max[1], box_min[2]], box_max
+         ]
+-        # Create 12 edges using Line3 objects
+         corner_pairs = [(0,1), (0,2), (0,4), (1,3), (1,5), (2,3), (2,6), (3,7), (4,5), (4,6), (5,7), (6,7)]
+         self.edges = [Line3(self.corners[i], self.corners[j]) for i, j in corner_pairs]
+@@ -48,5 +71,4 @@
+         self.slice_index = 0
+         plane = Plane(normal=camera_dir, constant=view_plane_constant)
+-        # Loop while intersectionVertices has points or sliceIndex is 0, and sliceIndex < MAX_SLICES_COUNT
+         while (len(self.intersection_vertices) > 0 or self.slice_index == 0) and self.slice_index < self.max_slices_count:
+             plane.constant -= slice_distance
+@@ -62,19 +84,18 @@
+ 
+     def sort_polygon_edges(self, vertices):
+-        # Calculate centroid
+         centroid = [sum(v[i] for v in vertices) / len(vertices) for i in range(3)]
+-        # Calculate angles using atan2
+         angles = [math.atan2(v[1] - centroid[1], v[0] - centroid[0]) for v in vertices]
+-        # Sort vertices by angle
+-        vertices.sort(key=lambda v: angles[vertices.index(v)])
+-        # Push centroid to end of array
+-        vertices.append(centroid)
++        sorted_vertices = [v for _, v in sorted(zip(angles, vertices))]
++        sorted_vertices.append(centroid)
++        vertices[:] = sorted_vertices
+ 
+     def update_geometry(self, index, vertices):
+-        # Update position array with intersection vertices
+         self.geometries[index].position = [coord for v in vertices for coord in v]
+-        # Build index array for fan triangulation (0,1,2), (0,2,3), ...
+-        self.geometries[index].index = [0] + [i for i in range(1, len(vertices))]
+-        # Set draw range, mark attributes for update, compute bounding sphere
++        # Fan triangulation indices: (0,1,2), (0,2,3), ...
++        n = len(vertices)
++        indices = []
++        for i in range(1, n - 1):
++            indices.extend([0, i, i + 1])
++        self.geometries[index].index = indices + [0] * (18 - len(indices))
+         self.geometries[index].draw_range = (0, len(vertices))
+         self.geometries[index].mark_attributes_for_update()

@@ -1,0 +1,396 @@
+Contribute to SJpark02/GS-ProCams-rev development by creating an account on GitHub.
+
+feat(render): add render_gs_to_surface branch (sphere/hemisphere/curved projection) by SJpark02 · Pull Request #1 · SJpark02/GS-ProCams-rev · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+SJpark02
+commented
+May 31, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+개요 (Summary)
+메일 요청사항에 따라 두 가지 작업을 수행했습니다.
+procams_render.py에 가상 표면(synthetic surface)에 패턴을 투영하는 신규 분기 render_gs_to_surface() 추가
+nepmap(synthetic) 데이터셋용 렌더링 스크립트를 각 표면 형태별로 추가
+기존에는 depth로부터 복원된 실제 형상에만 투영 결과를 시뮬레이션할 수 있었으나, 이제 구(sphere) / 반구(hemisphere) / 곡면(curved) 위에 투영한 결과도 확인할 수 있습니다.
+freeform은 요청에 따라 이번 범위에서 제외했습니다.
+```
+procams_render.py
+├── 기존 render()
+│   └── GaussianRasterizer(...)
+└── 신규 branch
+    └── render_gs_to_surface(...)
+        ├── sphere
+        ├── hemisphere
+        └── curved
+            ├── cylindrical
+            ├── sinusoidal
+            └── parabolic
+```
+1. 렌더링 코드 변경
+utils/point_utils.py
+make_surface_points() 및 헬퍼 추가: 카메라 픽셀 ray를 해석적 표면과 교차시켜 world 좌표의 표면점/법선을 생성
+반환 포맷 (H, W, 3)은 depths_to_points와 동일 → 다운스트림 procams 파이프라인(warp → grid_sample → BRDF) 무수정 재사용
+curved 세부 유형: cylindrical / sinusoidal / parabolic
+gaussian_renderer/procams_render.py
+render_gs_to_surface() 신규 함수: render()와 동일한 GaussianRasterizer 설정 사용, depth 기반 표면만 가상 표면으로 교체, 미적중 픽셀 마스킹
+gaussian_renderer/__init__.py
+render_gs_to_surface export 추가
+render.py
+CLI 인자 5종 추가: --surface_mode, --curve_type, --curve_radius, --curvature, --surface_res
+relighting / test_fps 루프에서 --surface_mode 유무로 분기
+--surface_mode 미지정 시 기존 render() 경로가 100% 동일하게 동작 (완전한 하위 호환)
+2. nepmap(synthetic) 데이터셋용 스크립트 추가
+scripts/synthetic.sh(학습 전용)를 보완하여, 학습된 모델을 가상 표면에 렌더링하는 스크립트를 추가했습니다. 기존 synthetic.sh와 동일한 설정(input_dir, output_dir, setup_names, wo_psf 모델 경로, --white_background)을 유지합니다.
+스크립트
+설명
+scripts/synthetic_surface.sh
+모든 표면 형태를 한 번에 렌더링 (sphere/hemisphere/curved 3종)
+scripts/synthetic_sphere.sh
+구
+scripts/synthetic_hemisphere.sh
+반구
+scripts/synthetic_cylindrical.sh
+곡면(원통)
+scripts/synthetic_sinusoidal.sh
+곡면(사인파)
+scripts/synthetic_parabolic.sh
+곡면(포물면)
+학습 모델이 없는 setup은 자동 skip
+결과는 <model_dir>/render_surface/<tag>/ 에 저장
+표면 파라미터(curve_radius, curvature)는 스크립트 상단에 노출하여 씬 규모에 맞게 튜닝 가능
+사용 절차
+```
+# 1) 먼저 학습 (기존)
+bash scripts/synthetic.sh
+
+# 2) 가상 표면 렌더링 — 모든 형태
+bash scripts/synthetic_surface.sh
+
+# 또는 형태별 개별 실행
+bash scripts/synthetic_hemisphere.sh
+bash scripts/synthetic_parabolic.sh
+```
+검증 (Verification)
+수정 Python 파일 4개 문법 검증 통과
+신규 셸 스크립트 6개 bash -n 문법 검증 통과
+표면 생성 수학 로직을 NumPy로 동치 재현하여 sphere/hemisphere/parabolic 교차·법선·좌표계 일관성 검증
+참고: 본 샌드박스에는 CUDA/torch가 없어 end-to-end GPU 실행 검증은 수행하지 못했습니다. 실제 nepmap 데이터셋·GPU 환경에서 한 번 실행 확인을 권장합니다.
+향후 고려사항
+표면 배치 기준은 카메라 광축 앞 2*curve_radius 거리로 설정 (필요 시 조정 가능)
+freeform은 height-map/SDF 입력 인터페이스가 필요하여 별도 작업으로 분리
+SJpark02
+and others
+added 14 commits
+May 31, 2026 04:32
+feat(render): add render_gs_to_surface branch for projecting onto syn…
+…
+100a093
+```
+…thetic surfaces
+
+Add a new rendering branch that projects the trained ProCams pattern onto
+analytic virtual surfaces (sphere / hemisphere / curved) instead of only the
+real, depth-reconstructed geometry. This lets users preview how a projection
+would look on a hemisphere or curved screen.
+
+Changes:
+- utils/point_utils.py: add make_surface_points() and helpers
+  (_camera_rays, _surface_center, _ray_sphere_intersection, _make_sphere,
+  _make_curved). Generates per-pixel world-space surface points + normals in
+  the same (H,W,3) layout as depths_to_points, so the existing procams
+  pipeline (warp_points -> grid_sample -> BRDF) is reused unchanged.
+  Curved sub-types: cylindrical, sinusoidal, parabolic (solved by ray marching;
+  normals via implicit-field finite differences).
+- gaussian_renderer/procams_render.py: add render_gs_to_surface(); reuses the
+  GaussianRasterizer setup of render() but swaps the depth-based surface for the
+  analytic one, then masks pixels that miss the surface.
+- gaussian_renderer/__init__.py: export render_gs_to_surface.
+- render.py: add CLI args --surface_mode, --curve_type, --curve_radius,
+  --curvature, --surface_res; branch the relighting and test_fps loops on
+  --surface_mode. When --surface_mode is omitted, the original render() path is
+  used unchanged (fully backward compatible).
+
+freeform surface intentionally excluded per request.
+Coordinate-frame consistency with depths_to_points verified numerically.
+```
+feat(scripts): add nepmap synthetic-surface rendering scripts
+…
+295f289
+```
+Add shell scripts to render the trained nepmap (synthetic) models onto virtual
+surfaces using the new render_gs_to_surface branch, complementing
+scripts/synthetic.sh (which only trains).
+
+- scripts/synthetic_surface.sh : renders ALL surface shapes
+  (sphere, hemisphere, curved: cylindrical/sinusoidal/parabolic) for every setup
+- scripts/synthetic_sphere.sh
+- scripts/synthetic_hemisphere.sh
+- scripts/synthetic_cylindrical.sh
+- scripts/synthetic_sinusoidal.sh
+- scripts/synthetic_parabolic.sh
+
+All scripts keep the same configuration as synthetic.sh (input_dir, output_dir,
+setup_names, wo_psf model dir, --white_background), skip setups whose trained
+model is missing, and write results to <model_dir>/render_surface/<tag>/.
+Surface params (curve_radius, curvature) are exposed at the top for tuning.
+```
+fix(scripts): pass -r/-s separately in synthetic.sh train.py call
+…
+86b0f95
+```
+train.py loads the scene from '<root>/setups/<setup>' (scene/__init__.py).
+The original synthetic.sh passed the whole path as -s and omitted -r, so
+args.root defaulted to the cwd and the path was mis-assembled as
+'<cwd>/setups/data/nepmap-dataset/<setup>', triggering
+'Could not recognize scene type!'. Use '-r <input_dir> -s <setup>' instead,
+consistent with render.py and real-world.sh.
+```
+fix(scripts): auto-select python/python3 in surface render scripts
+…
+e122e94
+```
+The 'python: command not found' error occurs when only 'python3' is on PATH
+(or the conda env is not active). Add a PYTHON_BIN selector to all six
+synthetic-surface scripts: prefer 'python', fall back to 'python3', and error
+out with a helpful 'conda activate gs-procams' hint if neither exists.
+PYTHON_BIN can also be overridden via the environment.
+```
+fix(scripts): auto-detect view ids from cameras.json in surface scripts
+…
+3f92261
+```
+render.py defaults --views to a real-world id set [1,6,11,...] that does not
+match the nepmap (synthetic) view_id scheme, causing
+'Can not find the camera with view_id=1' (KeyError) and a misleading COLMAP
+fallback error.
+
+All six synthetic-surface scripts now:
+- expose a 'views' variable (empty => auto-detect)
+- read the actual view_ids from each model's cameras.json when 'views' is empty
+- pass them via --views to render.py
+- skip with a clear warning if no views can be resolved
+
+This makes the scripts robust to whatever training config produced the model
+(num_view 25/20/10/5/...). Set 'views="1 6 11"' to force specific views.
+```
+fix(camera): type-agnostic view_id lookup in loadMicroCameras_JSON
+…
+51741c2
+```
+The nepmap synthetic dataset stores view_id as a string (e.g. "0") in
+cameras.json (dataset_readers.py: view_id = Path(extr.name).stem.split('_')[0]),
+while render.py parses --views as int. The old loadMicroCameras_JSON indexed
+cam_params solely by the raw view_id, so a request for int 0 raised
+'KeyError: 0' / 'Can not find the camera with view_id=0'.
+
+Register both the original key and its str() form, and look up
+type-agnostically via cam_params.get(target, cam_params.get(str(target))).
+Also improve the error message to list available view_ids when no match is
+found. Verified with unit tests covering string-json/int-target,
+int-json/int-target, and the missing-id error case.
+```
+fix(views): handle nepmap zero-padded string view_ids end-to-end
+…
+128c46f
+```
+The nepmap synthetic cameras.json stores view_id as zero-padded 4-digit
+strings (e.g. "0000", "0002", ... "0297"), not "0"/"1". The previous
+type-agnostic fix only matched plain str/int forms, so int 0 (from
+--views type=int) still missed key "0000" -> 'Can not find the camera
+with view_id=0'.
+
+camera_utils.loadMicroCameras_JSON:
+  - Register a numeric-normalized key (int(str(view_id))) per camera in
+    addition to the original and str() forms, so int 0 resolves to the
+    "0000" entry. Lookup now tries raw target -> str(target) -> int(target).
+
+scripts/synthetic_*.sh (all 6 surface scripts):
+  - Rewrite get_views_from_cameras_json to convert numeric view_ids to
+    plain ints (stripping zero-padding so they match --views type=int),
+    sort them, and select up to $max_views evenly-spaced views. nepmap
+    can have hundreds of views; rendering all onto every surface is slow.
+  - Add max_views config (env MAX_VIEWS, default 5; set 0 to render all).
+
+Verified: numeric lookup unit tests (zero-padded/plain-str/int/missing)
+all pass; helper produces '0 5 8 11 297' for a 12-view zero-padded
+cameras.json with max_views=5, and the full list with max_views=0;
+bash -n passes for all 6 scripts; camera_utils.py parses cleanly.
+```
+fix(patterns): auto-detect nepmap pattern dir + add --pattern_path
+…
+92a0076
+```
+render.py hardcoded the real-world (colmap) pattern path
+<root>/patterns/test, which does not exist for the nepmap synthetic
+dataset -> FileNotFoundError: data/nepmap-dataset/patterns/test.
+In nepmap, patterns live at <root>/setups/<setup>/projector.
+
+render.py:
+  - Add --pattern_path CLI arg (a user-supplied directory always wins).
+  - Auto-detect the pattern directory: prefer <root>/patterns/test
+    (real-world), else <root>/setups/<setup>/projector (nepmap).
+  - Filter to image files (png/jpg/jpeg/bmp/tif), skip 'all_white',
+    and raise a clear, actionable error if the dir is missing/empty.
+  - This also enables custom projection mapping: point --pattern_path at
+    your own folder of images.
+
+scripts/synthetic_*.sh (all 6):
+  - Add pattern_path config (env PATTERN_PATH, default empty -> auto).
+  - Pass --pattern_path through to render.py only when set (safe empty
+    bash-array expansion under set -u).
+
+Verified: render.py parses cleanly; pattern-dir resolution unit test
+covers nepmap-auto / explicit-override / missing-dir; empty & non-empty
+bash array expansion tested under set -u; bash -n passes for all 6
+scripts.
+```
+fix(surface): scene-aware auto-scaling so the surface fills the view
+…
+92241bb
+```
+The synthetic surface used a fixed radius (curve_radius=1.0) placed 2.0
+units in front of the camera, ignoring the dataset's coordinate scale.
+On the nepmap synthetic scenes the object sits far from the camera at a
+large scale, so a radius-1 sphere projected to a tiny dot in the center
+of an otherwise blank frame (the reported 'relit' result).
+
+point_utils.make_surface_points:
+  - Add optional scene_points + auto_scale (default on).
+  - New _scene_stats() estimates, from the trained Gaussian centers, the
+    scene depth (median along the optical axis) and a FoV-based frustum
+    half-width at that depth (depth * tan(min(FoVx,FoVy)/2)).
+  - In auto mode the surface is centered at the scene depth and sized to
+    max(scene_extent, 0.8 * frustum_half), so it reliably fills the view
+    at ANY coordinate scale. curve_radius/curvature become relative
+    multipliers (1.0 -> ~60% coverage, 1.5 -> full frame).
+
+procams_render.render_gs_to_surface:
+  - Pass means3D (Gaussian centers) as scene_points + new auto_scale arg.
+
+render.py:
+  - Add --no_auto_scale flag (treat curve_radius/curvature as absolute
+    world units) and thread auto_scale through both call sites.
+
+Verified: scale-invariance simulation shows constant ~60.4% image
+coverage across scene depths 2/5/10/50/100; curve_radius sweep
+0.5/1.0/1.5 -> 13%/60%/100% coverage; all three files parse cleanly.
+```
+fix(surface): anchor surface on object so projector pattern maps (Ip_…
+…
+83031dc
+```
+…out)
+
+After the previous frustum-based sizing, the synthetic surface was placed
+on the optical axis and sized to ~80% of the view frustum. On nepmap that
+made the sphere far larger than the actual object and offset from it, so
+its points fell OUTSIDE the projector's illuminated region. warp_points ->
+grid_sample then sampled out-of-range coords (padding_mode='zeros'),
+producing an all-black Ip_out.
+
+point_utils:
+  - _scene_stats now also returns the true 3D scene centroid.
+  - Auto mode centers the surface on the object centroid (so it lies inside
+    the projector coverage) and sizes the radius to the scene EXTENT (the
+    object's size), capped by the frustum half-width so it still fits the
+    view. If the object is closer than the radius, shrink the radius so the
+    camera stays outside the sphere.
+
+Verified by simulation (camera + offset projector): with object-anchored
+sizing, 100% of the rendered surface points map inside the projector
+frustum (z>0) at scene depths 5 and 50 -> Ip_out receives the pattern
+instead of rendering black. All modified files parse cleanly.
+```
+fix(surface): give analytic surface a uniform virtual screen material
+…
+4e72562
+```
+The relit output showed only a tiny dot because brdf_factor was computed
+from render_base_color/render_roughness produced by the Gaussian rasterizer,
+which only has material where the real object is. Over the rest of the
+analytic surface the material (and thus brdf_factor) was ~0, so
+render = brdf_factor * Ip_out collapsed to a dot even though Ip_out
+correctly filled the screen.
+
+- render_gs_to_surface: add surface_albedo (0.8), surface_roughness (0.6),
+  ambient (0.0) params; override the rasterized material with a uniform
+  virtual projection-screen material so the whole synthetic surface is lit;
+  scale the rasterized scene term render_shs by ambient (0 => pure
+  projection). surface_albedo<0 keeps legacy rasterized-material behaviour.
+- render.py: expose --surface_albedo / --surface_roughness / --ambient CLI
+  args and pass them at both render_gs_to_surface call sites (relight loop
+  and test_fps loop).
+```
+feat(surface): render synthetic.sh result on shapes + object-vs-surfa…
+…
+5cc5662
+```
+…ce compare
+
+Implements goal (A): see the original synthetic.sh-style result (a pattern
+projected onto the scene) re-projected onto analytic shapes (sphere /
+hemisphere / curved) so the user can judge how their input image maps onto
+different geometry, side by side with the real object.
+
+render.py:
+- --render_object_too: for each (view, pattern), also render the SAME pattern
+  on the real depth-reconstructed object via render() (the original
+  synthetic.sh result) and save under <view>/object/, alongside the surface
+  render in <view>/relit/ and the warped pattern in <view>/Ip_out/.
+- --name_by_pattern: name outputs after the source pattern stem (img_0001.png)
+  instead of a running index (01.png), matching synthetic.sh naming. Pattern
+  stems are captured at load time.
+
+scripts (all 6 synthetic_*surface/shape scripts):
+- Add RENDER_OBJECT_TOO (default on) and NAME_BY_PATTERN (default on) env
+  toggles and pass the corresponding flags through to render.py, so the
+  comparison output is produced by default.
+```
+feat(patterns): default projection images to data/my_images with fall…
+…
+3065c11
+```
+…back
+
+Make the custom-image folder the default so users can just drop images in
+and run, without setting PATTERN_PATH every time.
+
+- scripts (all 6): pattern_path defaults to data/my_images; if that folder is
+  missing or empty, fall back to dataset patterns (nepmap projector dir) so
+  the scripts still run out of the box. PATTERN_PATH env still overrides.
+- data/my_images/README.md: explains how to add/remove projected images.
+- .gitignore: track data/my_images/ + its README while ignoring the user's
+  actual image files dropped into it.
+```
+feat(views): render ALL views by default (MAX_VIEWS default 0)
+…
+ed2d2a9
+```
+The user wants results for every view, not a 5-view subset. Change the
+default max_views from 5 to 0 in all 6 synthetic_*surface/shape scripts,
+which makes get_views_from_cameras_json return every detected view_id.
+Set MAX_VIEWS=N to render only an evenly-spaced subset (e.g. MAX_VIEWS=5)
+for a quick preview.
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

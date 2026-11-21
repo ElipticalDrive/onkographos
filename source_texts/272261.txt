@@ -1,0 +1,234 @@
+# はじめに
+ICCV 2021より以下の論文
+[1] S. Peng, et. al. "Animatable Neural Radiance Fields for Modeling Dynamic Human Bodies". ICCV2021
+のまとめ
+
+- projectページ：
+https://zju3dv.github.io/animatable_nerf/
+
+- 公式コード：
+https://github.com/zju3dv/animatable_nerf
+商用利用不可
+
+- arXiv：
+https://arxiv.org/pdf/2105.02872.pdf
+
+# 概要
+- 他視点のRGBカメラから同時に動画を撮影し、それらから人の3Dモデルを再構築するしくみ
+- 人の3D骨格モデルとNeRFを結びつける blend weight fields なるものを新たに導入した
+
+以下の図([1] Figure1)では、
+
+![スクリーンショット 2022-04-02 13.38.05.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/116706/ec94011c-3e38-7bf4-971d-5027a1954fba.png)
+
+# 手法
+
+## 全体像
+
+${\rm x}$: observation-space における３次元座標
+$T\_i({\rm x})$: observation-space から canonical-speceへの座標変換。
+$\gamma\_{\rm x}$: 空間上の positional encoding
+
+![スクリーンショット 2022-04-03 4.19.33.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/116706/bccf1c54-e8ef-c32f-0159-f95ada2577a3.png)
+
+外観する。まず左端はあるフレームにおける人の状態をあるカメラから注目した状態で、図では右手指先付近の x に注目している。
+
+これをその右 neural blend weight field に入力すると、x の重みが出力される。この重みは各関節にどの程度付随するかを示したような値。このとき neural blend weight field にフレーム固有の情報を与えるため、latent code も同時に入力している。
+
+これと x 、さらに人の骨格モデルから、いわゆる T-pose である決められた姿勢の指先位置である x' が出力される。
+
+この x' をNeRFに入力し、密度、カラーを出力する。
+
+##  Representing videos with neural radiance fields
+
+まずこの部分。
+
+![スクリーンショット 2022-05-01 5.26.00.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/116706/e5a54874-0575-e704-5988-67c0edb6ec38.png)
+
+このfieldではNeRF論文[2]ごとく、位置を入力して密度などを出力する。NeRFとの違いは、入力するデータが x でなく、canonical spaceに変換した $T\_i({\rm \bf x})$ である点。
+
+```math
+(\sigma_i({\rm \bf x}), {\rm \bf z}_i({\rm \bf x})) = F_{\sigma}(\gamma_{\rm \bf x}(T_i({\rm \bf x}))), \tag{1}
+```
+
+${\rm \bf z}\_i({\rm \bf x})$ は以下の図の赤い円内の部分だろう。（Fig9に加筆）
+
+![スクリーンショット 2022-05-01 22.34.32.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/116706/5a01eb20-8c9d-7cab-a9c8-2dbbf953c060.png)
+
+このshape feature z と向き $\gamma\_{\rm \bf d}$ などを入力として、カラーを推定する。
+
+ここでNeRF論文[2]とは異なり、frameごとの latent code ${\bf \ell}\_i$ も入力する。
+
+```math
+{\rm \bf c}_i({\rm \bf x}) = F_{\rm \bf c}({\rm \bf z}_i({\rm \bf x}), \gamma_{\rm \bf d}({\rm \bf d}, {\bf \ell}_i))
+```
+
+図にするとこんな感じか。（Fig9に加筆）
+
+![スクリーンショット 2022-05-01 22.36.58.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/116706/b6959d2f-c5a5-004c-da9d-fcec0d5c84bc.png)
+
+
+## neural blend weight field
+
+このあたりの部分。
+
+![スクリーンショット 2022-05-01 11.29.55.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/116706/7303eff7-1eeb-4628-b57e-c243b4cea9cc.png)
+
+今回のモデルでは SMPL などのshapeモデルをベースにobservation space の各点 x を canonical spaceへの変換を行う。その際に shapeモデルの各関節における transform に対して各点 x がどう追随するかが問題となる。
+
+この observation space の各点 x が各関節に対してどれくらい影響を受けるかを重み ${\rm \bf w}\_i ({\rm \bf x})$ とすると、これを以下の様に考える。
+
+
+```math
+{\rm \bf w}_i ({\rm \bf x}) = {\rm norm} \left( F_{\Delta {\rm \bf w}} \left( {\rm \bf x}, {\bf \psi}_i \right) + {\rm \bf w}^{\rm s} \left( {\rm \bf x}, S_i \right) \right) \tag{5}
+```
+
+ここで
+$F\_{\Delta {\rm \bf w}}$: neural blend weight field による変換だが、具体的にはMLP。
+${\bf \psi}\_i$: フレームごとのlatent code
+$S\_i$: 統計的な体のモデル。例えばSMPL。
+${ \rm \bf w}^s$: 統計的な体のモデルに基づいて計算されたblend weightの初期値
+${\rm norm}({\rm \bf w}) = {\rm \bf w} / \sum w\_i$
+
+まず右辺第２項からみると、フレームごとの統計的な体のモデルを用意し、それらから重みの基準値を算出する。その際にまず x から最も近傍となるポリゴンの面を特定する。この面を囲む３点にはshapeモデルにより重みが割り振られている。よって３点から内挿することで重みが求まる。
+
+次に１項目で差分を求めるが、ここで neural blend weight field $F\_{\Delta{\rm \bf w}}$ を用いる。このネットワーク構造は以下。（Fig10より）
+
+![スクリーンショット 2022-05-01 22.42.01.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/116706/e52334f2-3631-4556-d0f6-f2ab44ac76bd.png)
+
+
+最後にそれらを正規化して重みとする。
+
+## 骨格モデルを用いた変形
+このあたりの部分。
+
+![スクリーンショット 2022-05-01 11.36.10.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/116706/77505092-4fa5-39c9-bdbf-4009c92da678.png)
+
+
+まず諸々定義。
+${\rm \bf J} \in \mathbb{R}^{K \times 3}$: 骨格モデルにおけるK個の関節位置。
+${\rm \bf \theta} \in \mathbb{R}^{3(K+1) \times 1} = [{\bf \omega}\_0^T, \cdots , {\bf \omega}\_K^T]$: 各関節における親関節からの相対的な回転角で、Rodrigues表示。
+${\rm \bf \theta}\_c$: canonical poseにおけるθ
+${\rm \bf \theta}\_c$: observation poseにおけるθ
+とすると、Rodriguesベクトルから作成した 3x3 の回転行列は
+
+```math
+R({\rm \bf \omega}_i)
+```
+
+となる。ある関節 k は親関節の軸に対して R 回転させ、かつ親関節の位置の分変位させたものとなるので、その１回のaffine変換は同時座標系で
+
+```math
+\begin{bmatrix}
+R({\rm \bf \omega}_k) & {\rm \bf j}_k \\
+0 & 1 \\
+\end{bmatrix}
+```
+
+となる。これをkinematic treeに従って繰り返せば、k 番目の関節に対する変換行列が求まる。
+
+```math
+A_k ({\rm \bf J}, {\rm \bf \theta}) = \prod_{i \in P(k)}
+\begin{bmatrix}
+R({\rm \bf \omega}_i) & {\rm \bf j}_i \\
+0 & 1 \\
+\end{bmatrix}
+\tag{11}
+```
+
+$P(k)$ は関節 k に対する kinematic tree での親関節群。
+
+まず canonical pose から曲げてないゼロの状態にした後に変換し、そこから observation poseまで変形するという過程を踏むと、canonical pose　から observation poseまでの変換が求まる。
+
+```math
+G_k = A_k ({\rm \bf J}, {\rm \bf \theta}_t) A_k ({\rm \bf J}, {\rm \bf \theta}_c) ^{-1} \tag{10}
+```
+
+k 番目の関節に対しては observation spaceの位置に対して $G\_k^{-1}$ をかければ canonical spaceの位置が求まる。
+
+一方でそれ以外の点に関しては、(5)式で求めた重みを用いれば
+
+```math
+{\rm \bf x}' = \left( \sum^K_{k=1} w^o({\rm \bf x})_k G_k \right)^{-1}{\rm \bf x} \tag{4} 
+```
+
+と求まる。
+
+# loss
+まず学習対象のパラメータは
+1. NeRFのニューラルネット $F\_{\sigma}, F\_c$
+1. neural blend weight fields のニューラルネット $F\_{\Delta {\rm \bf w}}$
+1. appearance code $\ell\_i$
+1. latent code $\psi\_i$
+
+である。それに対して loss は以下の２種類。
+
+## レンダリングしたカラーによる loss
+
+$\tilde{\rm \bf C}\_i ({\rm \bf r})$: NeRFによってレンダリングした画像上の色
+${\rm \bf C}\_i ({\rm \bf r})$: 実際に観測した画像上の色
+として、これらのL2を求める。
+
+```math
+L_{rgb} = \sum_{r \in \mathcal{R}} \| \tilde{\rm \bf C}_i ({\rm \bf r}) - {\rm \bf C}_i ({\rm \bf r}) \|_2
+\tag{6}
+```
+
+$\mathcal{R}$ は画像上の全ピクセルを通過する光。
+
+## neural blend weight に関する loss
+
+observation space における x とそれを canonical space へ変換した x' とは体の同じ部分のはず。よって前者の neural blend weight と後者の neural blend weight ${\rm \bf w}^{\rm can}({\rm \bf x}')$ とは一致するはず。よってこの両者の差を loss とする。
+
+```math
+L_{nsf} = \sum_{{\rm \bf x} \in \mathcal{X}_i} \| {\rm \bf w}_i ({\rm \bf x}) - {\rm \bf w}^{\rm can} \left( T_i \left( {\rm \bf x} \right) \right) \|_1
+\tag{7}
+```
+
+$\mathcal{X}\_i$ はフレーム i における人の体からサンプリングされた 3D座標。
+
+# 新たなポーズにおける画像生成
+新たなポーズにおける画像を生成する際には(5)式のSに新たなポーズを入れて重みを求め、それを(7)式で最適化させる。
+
+# 実験と結果
+## 学習方法
+- 最適化：Adam
+- 用いたvideoは3つのviewからの300frames
+- 新視点におけるパラメータ調整部分を除くと4枚の2080Tiで12時間
+- 新視点におけるパラメータ調整部分は上記スペックで30分
+
+## 使用したデータセット
+- H36M
+- ZJU-MoCap
+zju-MoCapはdeformableなNeRF系のデファクト・スタンダードになりつつある。
+
+## メトリクス
+- PSNR
+- SSIM
+この２つのメトリクスはこの分野のデファクト・スタンダード。
+
+## 定量的評価１　新視点からのレンダリング
+新視点からのレンダリングタスクにおいて、同じくSMPLを用いた1)NT(Neural Textures), 2)NHR, 3)NB(Neural Body)との比較は以下。
+
+![スクリーンショット 2022-05-01 22.52.52.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/116706/5048f8d4-2d82-db3b-4dd5-1b45128139d5.png)
+
+NB(Neural Body)以外には勝っている。
+
+## 定量的評価２　新ポーズのレンダリング
+こちらはNT(Neural Textures)とNHRとの比較。
+
+![スクリーンショット 2022-05-01 22.58.41.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/116706/351d9647-da37-660e-b6f1-0f7b0e60ed7b.png)
+
+安定的に勝っている。
+
+## 定性的評価
+新ポーズのレンダリング・タスクでNT, NHR, NBと比較した結果は以下。
+
+![スクリーンショット 2022-05-01 23.02.20.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/116706/e6c7fb71-b322-3653-6ff4-49b380aba533.png)
+
+左側がH36M, 右側がzju-MoCap。やはり Neural Body の方が若干よい。
+
+## 
+
+# reference
+[2] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as neural radiance fields for view syn- thesis. In ECCV, 2020.

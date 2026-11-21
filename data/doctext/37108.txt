@@ -1,0 +1,734 @@
+InnerGS: Internal Scenes Reconstuction and Segmentation
+via Factorized 3D Gaussian Splatting
+Shuxin Liang
+University of Alberta
+Yihan Xiao
+Sichuan University
+Wenlu Tang∗
+University of Alberta
+arXiv:2508.13287v4 [eess.IV] 28 Jul 2026
+Abstract
+3D Gaussian Splatting (3DGS) has recently gained popularity for efficient scene rendering
+by representing scenes as explicit sets of anisotropic 3D Gaussians. However, most existing
+work focuses primarily on modeling external surfaces. In this work, we target the reconstruction
+of internal scenes, which is crucial for applications that require a deep understanding of an
+object’s interior. By directly modeling a continuous volumetric density through the inner
+3D Gaussian distribution, our model effectively reconstructs smooth and detailed internal
+structures from sparse sliced data. Beyond high-fidelity reconstruction, we further demonstrate
+the framework’s potential for downstream tasks such as segmentation. By integrating language
+features, we extend our approach to enable text-guided segmentation of medical scenes via
+natural language queries. Our approach eliminates the need for camera poses, is plug-and-play,
+and is inherently compatible with any data modalities. We provide cuda implementation at:
+https://github.com/Shuxin-Liang/InnerGS.
+1
+Introduction
+Three-dimensional (3D) reconstruction has become a central focus in computer vision and graphics,
+driven by applications in virtual reality, robotics, and medical imaging. Recent approaches like
+Neural Radiance Fields (NeRF) have revolutionized 3D scene capture, enabling novel-view synthesis
+and detailed scene representations from 2D images. NeRF models represent a scene as a continuous
+volumetric field learned by a neural network, achieving impressive flexibility in view synthesis and
+geometry reconstruction. However, achieving high visual quality with NeRF often requires heavy
+multi-layer perceptrons that are costly to train and slow to render Kerbl et al. (2023). These
+limitations triggers a search for more efficient 3D representation and rendering techniques.
+One emerging solution is 3D Gaussian Splatting (3DGS), which has recently gained popularity
+for fast neural rendering. Instead of relying on a deep network to implicitly encode the scene,
+3DGS represents the scene with a set of explicit anisotropic 3D Gaussians. Critically, this approach
+offers a breakthrough in speed: it achieves real-time 1080p novel-view rendering (≥ 30 fps) and
+slashes training times from hours to minutes. 3DGS combines the merits of neural radiance fields
+in high-quality, continuous reconstruction with the efficiency of point-based rendering and sparse
+computation, yielding a new state-of-the-art in 3D scene reconstruction and view synthesis.
+∗ Corresponding Author
+1
+While 3D Gaussian Splatting (3DGS) has traditionally targeted exterior view synthesis, there
+is a growing focus on the more complex challenge of modeling internal structures. This task
+marks a fundamental shift from surface completion to volumetric inference, which is vital for
+applications requiring a deep understanding of an object’s interior. For example, fine-grained
+internal reconstruction is crucial in medical imaging for diagnostics and surgical planning (Wang
+et al., 2025). It is also essential for robotics and VR, where systems must understand object
+composition for realistic manipulation and interaction (Qiu et al., 2024; Zhu et al., 2024). To address
+this challenge, researchers are developing innovative techniques. In medical imaging, physics-based
+attenuation models, in which the radiance field is modulated by tissue-specific attenuation coefficients,
+have already yielded notable improvements in CT reconstruction quality (Zha et al., 2024). On
+another front, incorporating deep diffusion models and self-augmentation strategies into 3DGS
+pipelines may help overcome limitations of sparse-view data, providing additional pseudo-supervisory
+signals that enhance internal texture synthesis (Wu and Chen, 2024).
+However, significant challenges remain. Most current methods are tailored to X-ray or CT projections
+and struggle to generalize to other data modality such as MRI, fMRI, or other large-scale 3D remote
+sensing data. In addition, they heavily rely on external views and their reconstructions either miss
+fine-grained interior details or require complex regularization that blurs subtle structures. At last,
+many hybrid training approaches rely on deep MLPs or per-view diffusion refinement, leading to
+sub-real-time inference and adding difficulty for building extension on it.
+To address these limitations, we propose a novel method specifically designed for modeling internal
+scenes, which employs 3D Gaussian density instead of traditional projection-based 2D Gaussian
+rendering. Specifically, we first compute conditional 2D Gaussian splats at each depth slice to
+determine the 2D Gaussian center and influence radii in the image plane, and then combine these
+conditional 2D Gaussian with a marginal 1D Gaussian along the depth axis to formulate the complete
+3DGS density. This allows us to perform the same tile-based rasterization process as in 3DGS,
+enabling the reconstruction of smooth and detailed internal structures from sparse sliced data.
+Our contributions are listed as follows:
+• We introduce Inner Gaussian Splatting, the framework to leverage 3D Gaussian Splatting
+for direct volumetric inference. This novel approach enables high-fidelity reconstruction of
+complex internal structures from sparse, pose-free sliced data.
+• We propose an efficient, slice-based rendering pipeline centered on Conditional Splatting.
+This technique dynamically adapts the sampling of Gaussians for each 2D slice, improving
+computational efficiency and reconstruction accuracy compared to heuristic projection methods.
+• We provide a plug-and-play CUDA implementation of our solution. We further demonstrate
+the method’s effectiveness on several medical datasets. The framework reconstructs static
+scenes like brain and cardiac MRIs , as well as 4D dynamic sequences such as wrist motion
+and brain fMRI data.
+2
+2
+Related Works
+Novel View Synthesis from Sparse Views 3D Gaussian splatting (3DGS) has emerged as
+a compelling method for novel view synthesis (Kerbl et al., 2023). However, the reconstruction
+quality of 3DGS strongly depends on the quality of input views, making it vulnerable when views
+are sparse or unposed. To address these challenges, COLMAP-Free (Fu et al., 2024) Moreover,
+end-to-end method directly predicting 3D Gaussian parameters from sparse inputs through implicit
+neural representations, including Gamba (Shen et al., 2024), Splatter Image (Szymanowicz et al.,
+2024), and pixelSplat (Charatan et al., 2024), which combine U-Net backbones, transformer modules,
+and attention mechanisms to regress Gaussian centers, opacities, and spatial parameters. Diffusion
+models have been integrated into the 3DGS pipeline to hallucinate novel views or refine geometry
+under sparse supervision. Frameworks such as Posediffusion (?), DreamGaussian (Tang et al., 2024),
+Deceptive-NeRF/3DGS (Liu et al., 2024) incorporate generated views from the diffusion model into
+the training, contributing to improved visual fidelity in sparse settings.
+Existing work extend it to sparse settings and single view, however, there’s limited work on sparse
+view with sliced data, which pose fundamentally different challenges requiring volumetric inference
+rather than surface completion. Our work addresses this gap by reconstructing dense internal
+structures from slices without relying on multi-view poses.
+Internal Structure Reconstruction with NeRF and 3DGS Internal structure reconstruction
+aims to recover the hidden, volumetric details of objects from external 2D images. In medical
+imaging, MedNeRF (Corona-Figueroa et al., 2022) adapts NeRF for reconstructing 3D-aware CT
+projections from single X-rays, introducing physics-informed priors to capture attenuation properties
+of tissues. Similarly, NAF (Zha et al., 2022) models 3D attenuation as a continuous neural field
+and uses a self-supervised discriminator and data augmentation to generate high-quality 3D-aware
+CT projections from a single X-ray. SAX-NeRF (Cai et al., 2024b) introduces a Line Segmentbased Transformer and specialized ray sampling for sparse-view X-ray reconstruction, improving
+the capture of internal structural details from limited views. The survey by Wang et al. (2025)
+comprehensively review NeRF developments and highlight adaptations for volumetric and internal
+reconstructions.
+Gaussian Pancakes (Bonilla et al., 2024) introduces geometrically-regularized splats for realistic
+endoscopic reconstruction, demonstrating 3DGS’s suitability for internal anatomical modeling.
+Likewise, Multi-Layer Gaussian Splatting (Kleinbeck et al., 2024) explores immersive anatomy
+visualization, revealing how layered Gaussian representations can capture internal structures. Recent
+innovations include FruitNinja (Wu and Chen, 2024), which leverages Gaussian splats to generate
+internal textures of objects when virtually sliced. Focusing on Medical Application, X-Gaussian
+(Cai et al., 2024a) replaces spherical harmonics with radiation intensity response functions (RIRFs)
+to model the isotropic nature of X-ray attenuation, achieving faster inference and superior image
+quality compared to NeRF-based approaches. DDGS (Gao et al., 2024) further refine radiative
+modeling by separating isotropic attenuation from minor anisotropic effects such as scattering and
+beam hardening. With structural prior, X-GRM (Liu et al., 2025) fixes Gaussian centers on a voxel
+grid while learning radiative attributes via transformer networks, achieving stable convergence and
+superior sparse-view CT reconstructions.
+3
+However, existing work focus on X-ray and CT data, hard to generalize and adapt to multiple
+modality, including but not limited to MRI, fMRI, LiDAR and point cloud. In contrast, our work
+is plug-in-and-play with considerable potential of integration with existing 3DGS application.
+3
+Method
+Our method introduces a photorealistic scene representation tailored for scenes rich in interior detail.
+This section proceeds as follows. Section 3.2 introduces our Inner 3D Gaussian Splatting framework,
+which models volumetric density for reconstructing internal structures from sparse slices. Section 3.3
+describes the rendering and optimization process. An overview of the pipeline is shown in Figure 1.
+Figure 1: Illustration of the two sampling method for rasterization: (Top) 3D Ellipsoid Projection
+computes a cube and project identical bounding boxes across slices, while (Bottom) Conditional
+Splatting adapts the bounding box per slice based on conditional Gaussians.
+3.1
+Preliminary: 3D Gaussian Splatting
+In 3D Gaussian Splatting, a scene is represented as a cloud of 3D Gaussians. Each Gaussian has
+a theoretically infinite scope and its influence on a given spatial position x ∈ R3 defined by an
+unnormalized Gaussian function:
+T
+1
+−1
+p(x) = e− 2 (x−µ) Σ
+(x−µ)
+,
+(1)
+Within this setup, the position of each Gaussian is denoted by the vector µ = (µx , µy , µz ). Its
+covariance matrix Σ is decomposed into a scaling component and a rotation component, formulated
+as Σ = RSS ⊤ R⊤ , where S is a diagonal matrix containing scale factors sx , sy , and sz , and R is
+derived from a unit quaternion q that encodes rotation. Additionally, each 3D Gaussian incorporates
+coefficients of spherical harmonics (SH) to model view-dependent color variations, as well as an
+opacity parameter α. These parameters are jointly optimized by minimizing a rendering loss during
+training.
+4
+3.2
+3D Gaussian for Internal Scenes
+Problem formulation In the standard 3DGS framework, each Gaussian is projected onto the 2D
+image plane. This projection yields a 2D elliptical splat, whose mean and covariance are derived
+from the 3D Gaussian transformed by the camera’s view and projection matrices. Let (u, v) denote
+pixel coordinates on the image plane, where u ∈ [0, W − 1] and v ∈ [0, H − 1] for an image of width
+W and height H. The screen-space contribution of the i-th splat at pixel (u, v) is computed as a
+density pi (u, v), multiplied by its opacity αi and color ci . Gaussians are rendered in front-to-back
+order that accumulates color and opacity to produce the final pixel color, as described in Eq. (2),
+where N denotes the total number of Gaussians.
+I(u, v) =
+N
+X
+pi (u, v)αi ci
+i=1
+i−1
+Y
+((1 − pj (u, v))αj ) .
+(2)
+j=1
+However, this projection-based mechanism is fundamentally unsuitable for modeling internal volumetric structures for two primary reasons. First, the learned Gaussians are concentrated on the
+object’s surface, leaving the interior volume largely empty or undefined. Second, the projection-based
+rendering pipeline relies on camera parameters (view and projection matrices) which are absent in
+sliced data. Consequently, applying the original 3DGS to sparse slices fails to capture the continuous
+volumetric information between the slices, leading to incomplete internal representations.
+Representation of Inner 3D Gaussian To overcome these limitations, our goal is to define a
+scene representation that can directly model volumetric density. We consider any pixel (u, v) on a
+2D slice, where the slice is located at a depth t along a given axis. Instead of relying on projection,
+we calculate the contribution of each Gaussian to pixel as pi (u, v, t), thus, the final color of the pixel
+is computed as:
+I(u, v, t) =
+N
+X
+pi (u, v, t)αi ci
+i=1
+i−1
+Y
+(1 − pj (u, v, t)αj ) .
+(3)
+j=1
+Through this formulation, we directly model a continuous volumetric density, enabling the synthesis
+of novel slices at arbitrary depths. This inner 3D representation benefits from both continuous (NeRF) and discrete modeling (Mesh): The continuous nature of Gaussians allows seamless
+volumetric interpolation, enabling the reconstruction of smooth and detailed internal structures.
+Meanwhile, representing the volume as a discrete set of Gaussians provides an explicit and explainable
+representation, making the method efficient and suitable for applications such as medical imaging.
+3.3
+Rendering and Optimization
+During rendering, 3DGS avoids computing all Gaussians at every pixel. Instead, each Gaussian is
+projected onto the image plane as a 2D elliptical splat, and its 3σ extent is computed to define a
+bounding box that identifies overlapping pixels. Consequently, only a subset of candidate Gaussians
+is sampled for each pixel, significantly reducing computational cost. To enable efficient candidate
+sampling here, we propose two methods: 3D Ellipsoid Projection and Conditional Splatting.
+5
+Method 1: 3D Ellipsoid Projection In this method, we approximate the range of a 3D
+Gaussian as a sphere, whose radius is determined by the maximum axis length of the Gaussian
+ellipsoid. For a Gaussian with covariance Σ, the ellipsoid’s principal axes align with the eigenvectors
+of Σ, and their lengths are given by the square roots of the eigenvalues, scaled by a constant:
+rmax = 3 ·
+p
+max(λ1 , λ2 , λ3 ),
+where λ1 , λ2 , λ3 are the eigenvalues of Σ. A cube of edge length 2 rmax is centered at the Gaussian’s
+mean and projected orthogonally onto each image slice. This yields identical 2D bounding boxes
+across all slices, as shown in Fig. 1, which can result in overly large regions being processed and
+redundant computation.
+Method 2: Conditional Splatting In the second approach, we adopt a conditional formulation
+to compute the range of each Gaussian on individual slices, demonstrated on the bottom of Fig 1.
+Specifically, we splat a point pi (u, v, t) on Gaussian onto the 2D plane given depth t by a factorized
+Gaussian structure:
+pi (u, v, t) = pi (u, v|t)pi (t),
+where pi (u, v|t) is a conditional two-dimensional Gaussian describing the lateral spatial distribution
+on the image plane, given the slice location t, and pi (t) is a one-dimensional Gaussian modeling the
+uncertainty or distribution along the depth axis. As shown in Appendix C, the conditional mean
+µu,v|t shifts with the slice depth t, reflecting the 2D splat center moves across slices. Moreover, by
+introducing a distance-dependent scaling factor, the extent of the 2D splat decreases with increasing
+distance between the 3D Gaussian center and the slice. Unlike the first method, which projects the
+same cubic bounding box onto every slice, this approach computes an adapted bounding box for
+each slice, leading to more efficient sampling.
+With a set of candidate Gaussians sampled for each pixel, we sort them according to the distance
+between their centers and the image plane. With the differential rasterization process, the subsequent
+optimization pipeline remains identical to the original 3DGS, leading to the complete training
+algorithm described in Alg. 1
+4
+Experiment
+4.1
+Simulation Analysis
+We conducted a simulation to compare the two Gaussian selection methods, for identifying candidate
+Gaussians in a 3D volume of size 20 × 20 × 20. We randomly generated N = 50 Gaussians with
+means uniformly distributed between [5, 15] in each axis. A density threshold of 0.01 is used to
+decide whether a Gaussian should be considered active at a given pixel.
+The metrics collected include: the average bounding-box area (Avg bbox area) per Gaussian; false
+positives per pixel (FP/pixel), representing the average number of Gaussians with low density that
+are incorrectly included in the pixel’s candidate set; false negatives per pixel (FN/pixel), representing
+the average number of Gaussians with high density that are missed by the pixel’s candidate set; the
+6
+average number of candidate Gaussians per pixel (Cand/pixel); and the rendering time for each.
+Table 1 shows that Method 2 significantly reduces the average bounding box size (63.09 vs. 209.80)
+and false positives per pixel (1.82 vs. 15.78), indicating much tighter and more efficient bounding
+boxes. However, Method 2 introduces some false negatives (0.126 per pixel on average), which
+Method 1 completely avoids. Method 2 also processes fewer candidates per pixel (2.62 vs. 16.70) and
+is faster overall (0.10s vs. 0.69s). Based on the result, we adopt Method 2 for real-data experiments.
+Method
+M1
+M2
+Avg BBox Area
+FP/pixel
+FN/pixel
+Cand/pixel
+Render Time (s)
+209.8038
+63.0913
+15.7871
+1.8237
+0.0000
+0.1259
+16.6999
+2.6166
+0.6859
+0.1029
+Table 1: Comparison between Method 1 and Method 2 on bounding box area, error metrics,
+candidate counts, and timing.
+4.2
+MRI Reconstrution
+We evaluate our Inner 3DGS reconstruction method on real-world MRI data in NIfTI format.
+Specifically, we extract 2D slices along the axial, sagittal, and coronal planes, convert them to
+RGB format, and normalize the pixel values to the [0, 1] range. To ensure fair spatial coverage, we
+uniformly sample 5% of slices from each plane for testing, while the remaining slices for training.
+All experiments are conducted on a single NVIDIA RTX 4070 GPU. Unless otherwise specified, we
+use a uniform 3D grid of 423 points as the initial positions for the Gaussian. The model is trained
+for a maximum of 1,000 iterations or until the absolute loss decrease over 100 iterations falls below
+1 × 10−4 . We report the time required to reach convergence and evaluate the reconstruction quality
+using Peak Signal-to-Noise Ratio (PSNR) and Structural Similarity Index Measure (SSIM).
+Brain MRI We used the BrainWeb Simulated Brain Database (Cocosco et al., 2016), specifically
+the normal brain phantom with T1-weighted contrast. To reduce data size and adjust spatial
+resolution, we downsampled the volume by a factor of 0.8 along all three axes. The final images have
+resolutions of 174 × 145 pixels (axial), 145 × 145 pixels (coronal), and 145 × 174 pixels (sagittal).
+With the experimental setup described above, the reconstruction results are summarized in Table 2,
+and qualitative reconstruction results of axial and sagittal views are shown in Figure 2. A detailed
+comparison between the rendered outputs and ground truth is provided in Appendix 6. Our method
+successfully reconstructs fine anatomical structures, such as cortical folds and deep brain boundaries,
+while preserving smooth transitions in homogeneous areas like white matter or cerebrospinal fluid.
+PSNR (dB)
+SSIM
+Axial
+32.4796
+0.9664
+Coronal
+31.8621
+0.9618
+Sagittal
+33.0792
+0.9746
+Average
+32.4736
+0.9676
+Table 2: SSIM and PSNR metrics for each axis and overall average. The model converged after
+approximately 25.9 minutes of training.
+7
+Figure 2: Brain MR reconstructions in axial (top) and sagittal (bottom) views. The top
+row shows test set renderings with PSNR values overlaid. Red boxes highlight regions for detailed
+reconstruction. In each zoom-in region, the left patch is the ground truth, and the right is the
+prediction, with L1 errors indicating absolute differences within the region.
+Cardiac MRI We employ the HVSMR-2.0 dataset (Pace et al., 2024), Version 2, obtained from
+Figshare 1 and licensed under CC BY 4.0, which provides 3D cardiovascular MR images. Each
+volume captures the whole-heart anatomy in a static phase. After extracting 2D slices along the
+three anatomical planes, the resulting images have typical resolutions of 127 × 207 pixels (axial),
+127 × 141 pixels (coronal), and 207 × 141 pixels (sagittal).
+For Cardiac MRI, the quantitative results are summarized in Table 3. Figure 3 presents detailed
+reconstruction results on the coronal plane, while results for the axial and sagittal plane are reported
+in Appendix 7. The renderings accurately capture details such as the heart chambers and vessels.
+1(doi: 10.6084/m9.figshare.c.7074755.v2)
+8
+Figure 3: Cardiac MR reconstructions (coronal view).
+PSNR (dB)
+SSIM
+Axial
+30.9107*
+0.9433
+Coronal
+34.2207
+0.9539
+Sagittal
+29.3602*
+0.9344
+Average
+31.4972
+0.9439
+Table 3: SSIM and PSNR metrics for each axis and overall average. The model converged after
+approximately 30.4 minutes of training. * Axial and sagittal views include images affected by
+brightness shifts from the training set, resulting in slightly lower PSNR values; detail analysis are
+provided in the Appendix.
+4.3
+Dynamic Reconstruction
+Beyond static anatomical reconstruction, we demonstrate the versatility of our framework by
+extending it to dynamic Magnetic Resonance Imaging data. This task presents unique challenges:
+modeling the temporal variations of anatomical structures and physiological activity from timeresolved MRI sequences. Our goal is to faithfully reconstruct these dynamic variations across full
+3D volumes from sparsely acquired multi-slice observations.
+To address temporal dynamics in diverse dynamic MRI modalities, we adapt the 4D Gaussian
+Splatting framework (Wu et al., 2024). A static set of 3D Gaussians represents the canonical anatomy,
+while a learned deformation field network predicts per-frame changes in position, covariance, color,
+and opacity using a spatiotemporal encoder and a lightweight MLP. We implement a custom data
+loader to synchronously process all slices at each timestamp. The Gaussians are initialized by
+pretraining on slices from the first frame, providing a stable anatomical prior. This initialization is
+9
+then refined by the deformation network to capture temporal variations across frames.
+Wrist Motion MRI We validate our method on the Dynamic MRI of the Wrist dataset, Version 2,
+obtained from Mendeley Data 2 under the CC BY 4.0 license (Sharafi et al., 2025), with 38 temporal
+frames, each containing 12 wrist slice views at a resolution of 64 × 64. We use 33 frames for training
+and hold out every 8th frame for testing. As a strong static baseline, we use the ground-truth image
+from the preceding timestamp (i.e., test time t−1) as the prediction for the current test frame t.
+This setup simulates an oracle model that perfectly memorizes and reuses the prior anatomical
+structure without modeling temporal dynamics. We initialize 353 3D Gaussians in the canonical
+space and train our model to convergence in approximately 45 minutes.
+Table 4 presents comparison between our method and this baseline, it shows that our method
+consistently outperforms the baseline, with particularly large gains at later timestamps with larger
+anatomical motion. Figure 4 shows slice-wise reconstructions at Time = 16, illustrating anatomical
+consistency across the volume. Figure 5 presents predictions over time for two representative slices,
+highlighting our model’s ability to track wrist motion at different depths. These results highlights
+our method’s ability to capture nontrivial anatomical changes that static models fail to handle.
+Metrics
+Method
+Time=0
+Time=8
+Time=16
+Time=24
+Time=32
+Avg.
+SSIM↑
+Baseline
+Ours
+0.9466
+0.9443
+0.9668
+0.9848
+0.9706
+0.9864
+0.9396
+0.9865
+0.8909
+0.9224
+0.9429
+0.9649
+PSNR↑
+Baseline
+Ours
+31.4973
+31.0204
+32.4322
+38.3950
+34.4965
+39.0909
+28.6187
+39.0871
+24.5761
+26.9297
+30.7242
+34.9046
+Table 4: Comparison between Baseline (previous frame GT) and Our Method on testing timestamps.
+Figure 4: Wrist MR reconstructions at Time = 16 across all axial slices with per-slice PSNR values.
+2 doi: 10.17632/9kx5xp7h6d.2
+10
+Figure 5: Wrist motion MR reconstructions across test timestamps for two axial slices: top —
+slice 1, bottom — slice 5. For each slice, predicted reconstructions (pred) are compared with
+ground-truth images (gt). Our method captures temporally coherent anatomical motion across both
+shallow and deep wrist structures.
+5
+Segmentation
+Building upon the potential for downstream clinical tasks, we extended the InnerGS framework to
+facilitate multimodal medical scene understanding by integrating Vision-Language Models (VLMs).
+This proposed approach augments each 3D Gaussian with compact language features distilled from
+a knowledge-enhanced medical VLM (Zhao et al., 2025) via a scene-specific autoencoder (Qin et al.,
+2024), thereby establishing a direct alignment between visual and textual representations.To ensure
+computational efficiency, high-dimensional embeddings are distilled into compact latent attributes fi ,
+P
+Qi−1
+which are then aggregated using the differentiable splatting equation F (v) = i∈N fi αi j=1 (1−αj ).
+The rendered latent map is subsequently projected back to the semantic space by a lightweight
+decoder to enable open-vocabulary alignment. This design significantly circumvents the memory
+explosion of explicit high-dimensional modeling while preserving volumetric consistency. This
+mechanism enables precise 3D segmentation of Regions of Interest through open-vocabulary queries.
+Our proposed method demonstrates superior segmentation performance on the CT-ORG subset in
+SAT-DS (Rister et al., 2019; Zhao et al., 2025), achieving a mean Dice Similarity Coefficient (mDSC)
+of 88.17%, a mean Intersection-over-Union (mIoU) of 83.72%, and an overall Pixel Accuracy (PA)
+of 98.97%. In specific anatomical regions such as the liver, the model exhibits strong robustness,
+yielding a DSC consistently above 84.62%. CT-ORG is licensed under CC BY 3.0.
+11
+Table 5: Performance of Top 5 Slices
+6
+Slice ID
+PA (%)
+mIoU (%)
+mDSC (%)
+Liver DSC
+Others DSC
+Slice 32
+Slice 70
+Slice 29
+Slice 65
+Slice 30
+99.42
+98.81
+99.20
+98.62
+99.16
+95.31
+94.32
+92.72
+92.73
+92.43
+97.56
+97.04
+96.14
+96.14
+96.00
+98.18
+97.13
+96.26
+97.40
+94.67
+94.81
+94.74
+92.60
+91.87
+93.79
+Conclusion
+In this work, we introduced a novel extension of 3D Gaussian Splatting tailored for modeling internal
+scenes, a task critical for applications such as medical imaging, robotics, and volumetric analysis.
+Several exciting avenues for future research remain open. High-fidelity volumetric reconstructions
+enabled by our method may facilitate downstream clinical tasks such as detection or segmentation.
+12
+A
+Additional Results
+Brain MRI Figure 6 presents the reconstruction results of brain MRI images in three anatomical
+planes. From top to bottom, the figure shows the sagittal, axial, and coronal planes, respectively. In
+each set of images, the top row displays the model’s predicted images (pred), while the bottom row
+shows the corresponding ground truth images (gt). The predicted images are annotated with their
+PSNR values to quantify reconstruction quality. It can be observed that the model successfully
+reconstructs the brain anatomy across all planes, with clear details of gyri and sulci, and demonstrates
+high consistency with the ground truth in terms of contrast and structural details, indicating strong
+reconstruction capability.
+Figure 6: Brain MR reconstructions in different anatomical planes. From top to bottom
+are the axial, sagittal, and coronal views, respectively.
+13
+Cardiac MRI Figure 7 shows the reconstruction results of cardiac MRI images in different
+anatomical planes (axial and sagittal). It can be observed that the model successfully reconstructs
+cardiac structures across different planes, accurately depicting anatomical details such as the heart
+chambers, myocardium, and major vessels.
+Figure 7: Cardiac MR reconstructions in axial (top) and sagittal (bottom) planes.
+The 2nd axial slice and the 5th sagittal slice showed abnormally low PSNR (25.117 dB and 25.030
+dB). Applying affine normalization to match the ground truth’s mean and variance raised PSNR to
+35.15 dB and 32.24 dB, respectively. This suggests that the degradation might stems from bias field
+effects and brightness drift in the training data, rather than structural reconstruction errors.
+*
+14
+Brain fMRI We additionally validate our framework on public functional MRI (fMRI) data from
+the OpenfMRI project (Xue and Poldrack, 2018), consisting of 160 temporal frames, each with 33
+axial brain slices at a resolution of 64 × 64. This data was obtained from the OpenfMRI database,
+ds000003.
+Each slice is visualized using grayscale intensity mapped from the normalized BOLD signal, which
+reflects changes in blood oxygenation (BOLD contrast) over time. Unlike dynamic MRI of joints,
+fMRI captures temporal fluctuations in signal intensity rather than anatomical motion. To adapt
+our method accordingly, we freeze all geometry-related parameters (e.g., Gaussian positions and
+covariances) and allow only color and opacity to vary over time. This enables our model to directly
+capture voxel-wise radiance changes induced by neural activity.
+Our training follows a two-stage strategy: we first build a static anatomical structure over 1000
+warm-up iterations using the initial frames, followed by 3000 iterations where only color and opacity
+evolve temporally. We use 140 frames for training and reserve every 8th frame (20 in total) for
+testing. A custom data loader ensures all slices from a given timestamp are processed synchronously
+to preserve inter-slice consistency.
+Figure 8: Qualitative comparison on fMRI slices. For two representative timepoints and slices,
+we compare the static baseline (previous frame), our model prediction, and ground truth. Red boxes
+highlight regions with noticeable signal change. Our method produces sharper and more consistent
+activation patterns, with higher PSNR (bottom-right).
+Figure 9: Improved PSNR across time. Quantitative improvements in PSNR over the static
+baseline, plotted over all 20 test frames. We report both the central slice (slice 16), which corresponds
+to the most active central brain region, and the average over all slices. Our model consistently
+outperforms the baseline, with the most notable gains observed in this central region where BOLD
+signal changes are strongest.
+15
+B
+Training Implementation
+Algorithm 1 describes the inner training loop for 3D Gaussian Splatting. It starts by initializing
+Gaussians on a 3D grid and then iteratively optimizes their parameters using gradient descent. In
+each step, the algorithm projects Gaussians onto different 2D slice views, computes the rendering
+and loss, and performs backpropagation. Additional steps like pruning, densification, and cloning
+are applied to adapt the set of Gaussians dynamically for better scene reconstruction quality.
+Algorithm 1 Inner 3D Gaussian Splatting Training
+Require: Training slices D = {(Iiaxis , πiaxis )}, axis ∈ {x, y, z}, I is 2D slice image, π is slice position
+Require: Grid resolution gres , max iterations Tmax
+Require: Thresholds of opacity, gradient, and scale (τα , τp , τs )
+Ensure: Optimized Gaussians G = {(µ, Σ, c, α)}
+3
+1: Init: Build regular grid P of size gres
+or SfM estimated point, each Gaussian with µ around
+grid points, and default (s, c, α, q)
+2: Optimizer ← Adam(θ, η)
+3: for step = 1 to stepmax do
+4:
+Ltotal ← 0; Zero gradients: ∇θ ← 0
+5:
+for axis ∈ {x, y, z} do
+6:
+for each slice (Iiaxis , πiaxis ) ∈ Daxis do
+7:
+Σn ← Rn Sn Sn Rn⊤
+▷ Compute 3D covariances
+8:
+Ipred ← Rasterize(µn , Σn , αn , cn )
+▷ Rendering
+9:
+L ← Loss(Ipred , Iiaxis )
+▷ Compute loss
+10:
+Ltotal ← Ltotal + L
+11:
+end for
+12:
+end for
+13:
+Ltotal .backward()
+▷ Back-propagation
+14:
+θ ← AdamStep(θ, ∇θ)
+15:
+if IsRefinementIteration(t) then
+16:
+for all Gaussians (µ, Σ, c, α) ∈ G do
+17:
+if α < τα or IsTooLarge(µ, Σ) then
+▷ Pruning
+18:
+RemoveGaussian()
+19:
+else if ∥∇µ L∥2 > τp then
+▷ Densification
+20:
+if ∥Σ∥F > τs then
+▷ Over-reconstruction
+21:
+SplitGaussian(µ, Σ, c, α)
+22:
+else
+▷ Under-reconstruction
+23:
+CloneGaussian(µ, Σ, c, α)
+24:
+end if
+25:
+end if
+26:
+end for
+27:
+end if
+28: end for
+16
+C
+Parameter of 2DGS and 1DGS
+Given a 3D Gaussian with mean vector µ3D = [µx , µy , µz ]⊤ and a covariance matrix Σ3D =
+[(σxx , σxy , σxz ), (σxy , σyy , σyz ), (σxz , σyz , σzz )], we can decompose its probability density into a
+factorized form along the depth axis t. Specifically, we factorize the joint density p(u, v, t) into the
+product of a marginal distribution along the depth direction t, and a conditional distribution over
+the 2D coordinates (u, v) given t.
+The marginal density along the depth axis is given by:
+p(t) ∼ N (µz , σzz ),
+where µz and σzz denote the mean and variance of the Gaussian along the z-axis, respectively.
+Conditioned on a specific depth t, the distribution over the in-plane coordinates (u, v) is Gaussian:
+
+p(u, v | t) ∼ N µuv|t , Σuv|t ,
+where the conditional mean µuv|t is shifted linearly according to the offset t − µz :
+"
+#
+" # " #
+µx
+µu
+t − µz σxz
+µuv|t =
++
+=
+.
+σzz
+µy
+σyz
+µv
+This relation reflects how the mean position of the Gaussian footprint in the image plane moves as
+we slice through different depth levels.
+The corresponding conditional covariance matrix is given by:
+"
+σxx
+Σuv|t =
+σxy
+#
+" #
+σxy
+1 σxz h
+−
+σxz
+σzz σyz
+σyy
+i
+σyz .
+This matrix accounts for how the uncertainty in u and v directions reduces once the depth t is fixed.
+The resulting conditional distribution defines a 2D elliptical Gaussian footprint on the slice at depth
+t, characterizing how the 3D Gaussian projects onto the imaging plane at that slice.
+Hence, the full 3D Gaussian density can be expressed as the product:
+p(u, v, t) = p(t) · p(u, v | t),
+which provides a factorized and computationally efficient way to model volumetric data, particularly
+useful in applications like slice-based rendering or tomographic reconstruction, where one often
+processes individual planes of a 3D volume.
+17
+D
+Simulation on Gaussian Selection via Conditional Splat
+To further analyze the accuracy of conditional splat, we compare the true 3D Gaussian iso-probability
+contours on a slice with the conditional splat approximation. we generate a 3D Gaussian distribution
+and extract its true iso-probability contours by intersecting the Gaussian density with a fixed slice.
+The conditional splat approximation is then computed from the corresponding 2D ellipse splat,
+scaled with the marginal factor.
+As shown in the Figure 10, the red dashed contours (conditional splat) closely overlap with the
+blue solid contours (true iso-probability). This demonstrates that the conditional splat provides an
+accurate and efficient approximation of the original 3D Gaussian’s influence range.
+Figure 10: The conditional splat approximation (dashed red) closely matches the true 3D Gaussian
+iso-probability contours (solid blue).
+References
+Bonilla, S., Zhang, S., Psychogyios, D., Stoyanov, D., Vasconcelos, F., and Bano, S. (2024). Gaussian
+pancakes: Geometrically-regularized 3d gaussian splatting for realistic endoscopic reconstruction.
+Cai, Y., Liang, Y., Wang, J., Wang, A., Zhang, Y., Yang, X., Zhou, Z., and Yuille, A. (2024a).
+Radiative gaussian splatting for efficient x-ray novel view synthesis.
+Cai, Y., Wang, J., Yuille, A., Zhou, Z., and Wang, A. (2024b). Structure-aware sparse-view x-ray
+3d reconstruction.
+Charatan, D., Li, S., Tagliasacchi, A., and Sitzmann, V. (2024). pixelsplat: 3d gaussian splats from
+image pairs for scalable generalizable 3d reconstruction.
+Cocosco, C., Kollokian, V., Kwan, R., and Evans, A. (2016). Brainweb: Simulated mri volumes for
+normal brain.
+Corona-Figueroa, A., Frawley, J., Bond-Taylor, S., Bethapudi, S., Shum, H. P. H., and Willcocks,
+C. G. (2022). Mednerf: Medical neural radiance fields for reconstructing 3d-aware ct-projections
+from a single x-ray.
+Fu, Y., Liu, S., Kulkarni, A., Kautz, J., Efros, A. A., and Wang, X. (2024). Colmap-free 3d gaussian
+splatting.
+Gao, Z., Planche, B., Zheng, M., Chen, X., Chen, T., and Wu, Z. (2024). Ddgs-ct: Directiondisentangled gaussian splatting for realistic volume rendering.
+18
+Kerbl, B., Kopanas, G., Leimkühler, T., and Drettakis, G. (2023). 3d gaussian splatting for real-time
+radiance field rendering.
+Kleinbeck, C., Schieber, H., Engel, K., Gutjahr, R., and Roth, D. (2024). Multi-layer gaussian
+splatting for immersive anatomy visualization.
+Liu, X., Chen, J., hong Kao, S., Tai, Y.-W., and Tang, C.-K. (2024). Deceptive-nerf/3dgs: Diffusiongenerated pseudo-observations for high-quality sparse-view reconstruction.
+Liu, Y., Li, W., Yu, W., Li, C., Alahi, A., Meng, M., and Yuan, Y. (2025). X-grm: Large gaussian
+reconstruction model for sparse-view x-rays to computed tomography.
+Pace, D. F., Contreras, H. T., Romanowicz, J., Ghelani, S., Rahaman, I., Zhang, Y., Gao, P.,
+Jubair, M. I., Yeh, T., Golland, P., et al. (2024). Hvsmr-2.0: A 3d cardiovascular mr dataset for
+whole-heart segmentation in congenital heart disease. Scientific Data, 11(1):721.
+Qin, M., Li, W., Zhou, J., Wang, H., and Pfister, H. (2024). Langsplat: 3d language gaussian
+splatting.
+Qiu, S., Xie, B., Liu, Q., and Heng, P.-A. (2024). Advancing extended reality with 3d gaussian
+splatting: Innovations and prospects.
+Rister, B., Shivakumar, K., Nobashi, T., and Rubin, D. L. (2019). CT-ORG: A dataset of CT
+volumes with multiple organ segmentations. The Cancer Imaging Archive. Version 1, dataset.
+https://doi.org/10.7937/TCIA.2019.TT7F4V7O.
+Sharafi, A., Arpinar, V. E., Nencka, A. S., and Koch, K. M. (2025). Development and stability
+analysis of carpal kinematic metrics from 4d magnetic resonance imaging. Skeletal Radiology,
+54(1):57–65.
+Shen, Q., Wu, Z., Yi, X., Zhou, P., Zhang, H., Yan, S., and Wang, X. (2024). Gamba: Marry
+gaussian splatting with mamba for single view 3d reconstruction.
+Szymanowicz, S., Rupprecht, C., and Vedaldi, A. (2024). Splatter image: Ultra-fast single-view 3d
+reconstruction.
+Tang, J., Ren, J., Zhou, H., Liu, Z., and Zeng, G. (2024). Dreamgaussian: Generative gaussian
+splatting for efficient 3d content creation.
+Wang, X., Chen, Y., Hu, S., Fan, H., Zhu, H., and Li, X. (2025). Neural radiance fields in medical
+imaging: A survey.
+Wu, F. and Chen, Y. (2024). Fruitninja: 3d object interior texture generation with gaussian
+splatting.
+Wu, G., Yi, T., Fang, J., Xie, L., Zhang, X., Wei, W., Liu, W., Tian, Q., and Wang, X. (2024). 4d
+gaussian splatting for real-time dynamic scene rendering.
+Xue, G. and Poldrack, R. (2018). "rhyme judgment".
+Zha, R., Lin, T. J., Cai, Y., Cao, J., Zhang, Y., and Li, H. (2024). R2 -gaussian: Rectifying radiative
+gaussian splatting for tomographic reconstruction.
+19
+Zha, R., Zhang, Y., and Li, H. (2022). NAF: Neural Attenuation Fields for Sparse-View CBCT
+Reconstruction, page 442–452. Springer Nature Switzerland.
+Zhao, Z., Zhang, Y., Wu, C., Zhang, X., Zhou, X., Zhang, Y., Wang, Y., and Xie, W. (2025).
+Large-vocabulary segmentation for medical images with text prompts.
+Zhu, S., Wang, G., Kong, X., Kong, D., and Wang, H. (2024). 3d gaussian splatting in robotics: A
+survey.
+20

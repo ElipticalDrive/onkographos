@@ -1,0 +1,207 @@
+Open MPI main development repository. Contribute to open-mpi/ompi development by creating an account on GitHub.
+
+Fix atomic lifo/fifo where the 128-bit compare-and-swap is lock-based by bosilca · Pull Request #14600 · open-mpi/ompi · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+bosilca
+commented
+Oct 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Fixes #13762.
+The counted-pointer lifo/fifo need a 128-bit compare-and-swap that is lock-free, not merely available. configure never asked, so on 64-bit RISC-V and LoongArch the builtin resolves to libatomic's address-keyed lock table and the lists silently corrupt. The three checks now share one determination of lock-freedom, and the two real bugs in the fallback algorithm those targets then land on -- a write barrier where an acquire was needed when claiming an item or the fifo head, and a tail retired before the new head was published -- are fixed. Details in the commit message; the item_free acquire is the fix from #13969.
+This is complementary to #14495, not an alternative to it. That PR gives RISC-V a native LL/SC implementation, which is the right path on hardware that has it. This one makes sure the builds that don't get LL/SC -- cross-compiled RISC-V, LoongArch, any target without a lock-free 128-bit compare-and-swap -- fall back to a correct algorithm instead of a lock. Either alone leaves a gap; together they close it. The LL/SC pops are deliberately untouched here: the read of item->opal_list_next is address-dependent on the load of the head, which every architecture Open MPI targets orders, so they need no fence -- and none belongs inside the reservation window.
+Testing
+macOS/arm64 and Linux/x86_64, release, --enable-picky: test/class passes on the default build and on a build with the 128-bit CAS suppressed so the changed code is actually compiled. Which variant compiles is not obvious from the defines, so each configuration was checked by preprocessing the test and reading the compiled pop_atomic body. Not tested on RISC-V, LoongArch, or PowerPC hardware.
+github-actions
+Bot
+added
+the
+Target: main
+label
+Oct 9, 2026
+devreal
+commented
+Oct 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Good catch! I asked Claude for a review, here are the points that seem relevant and that I intuitively agree with (left out minor points):
+Configure (opal_config_asm.m4): concerns
+"LIBS unchanged" is a weak stand-in for "emitted inline", and it fails on the very target this PR fixes.
+OPAL_ASM_CHECK_ATOMIC_FUNC tries a plain link first. If libatomic gets linked without configure adding it, LIBS never changes, and the cross-compile guess says "assuming yes, emitted inline". That happens when:
+-latomic is already in the user's LIBS or LDFLAGS. Common in RISC-V Yocto, Buildroot and Spack setups.
+The toolchain links libatomic implicitly. I believe some RISC-V GCC builds add --as-needed -latomic to their link spec.
+In either case, a cross-compiled RISC-V build lands back on the lock-based CAS.
+A more direct test: compile the CAS test to an object (AC_COMPILE_IFELSE, then nm/$NM) and reject it if it has an undefined reference to __atomic_compare_exchange_16, __sync_bool_compare_and_swap_16 or __sync_val_compare_and_swap_16. Grepping the -S output works too. That checks what the guess's comment actually claims.
+Possible performance regression on x86_64 + GCC, the most common configuration.
+The builtin atomics backend is preferred by default, and GCC ≥ 7 routes 16-byte __atomic_compare_exchange_n through libatomic. Before this PR,
+__atomic_always_lock_free(16, 0) returned false for it, so configure fell through to the __sync path with -mcx16, which emits cmpxchg16b inline.
+Now it asks the runtime __atomic_is_lock_free. The commit message says this is intended. The consequences:
+Wherever libatomic reports 16 bytes as lock-free, OPAL_HAVE_GCC_BUILTIN_CSWAP_INT128=1 wins. I believe newer libatomic does this on AVX-capable CPUs; please verify. Every lifo/fifo pop then makes an out-of-line PLT/ifunc call into libatomic instead of an inline cmpxchg16b. That's on the free-list hot path, and -latomic becomes a dependency.
+The __sync path asks the wrong question.
+The probe asks libatomic whether its 16-byte operations are lock-free. That says nothing about an inline cmpxchg16b emitted by __sync under -mcx16.
+With GCC on x86_64, __atomic_is_lock_free(16) usually compiles to a libatomic call, so the probe normally fails to link and the guess says "yes, inline". That's the right answer, but the message reads "cannot run the probe" on a native build, which is misleading.
+If -latomic is already in LIBS, the probe does link and run. Older libatomic (GCC 7–11) answers false for 16 bytes, so x86_64 loses its 128-bit CAS entirely and drops to the item_free / spin-lock algorithms.
+For __sync, the inline-emission test from point 1 is the right check, not __atomic_is_lock_free.
+Smaller point
+--enable-libatomic-cswap-int128 only affects the cross-compile guess. Passing it on a native build does nothing, silently. Either say so in the AC_MSG_RESULT or honor it in both cases. Also, --disable-… and leaving it unset behave the same.
+Fix atomic lifo/fifo where the 128-bit compare-and-swap is lock-based
+…
+aa66a78
+```
+The counted-pointer algorithms in opal_lifo.h and opal_fifo.h require a
+128-bit compare-and-swap that is lock-free, because they pair it with
+narrower lock-free accesses to the same counted pointer: push
+compare-and-swaps the pointer half on its own, and
+opal_read_counted_pointer() reads the two halves with plain loads.  A
+lock-based emulation interlocks with neither, so a push and a pop can
+both complete and one of the two items is lost.
+
+configure accepted the __sync builtin on 128-bit values without ever
+asking whether it was lock-free.  On targets with no hardware
+instruction for it -- 64-bit RISC-V and LoongArch today -- the compiler
+satisfies that builtin out of libatomic, which falls back on an
+address-keyed lock table, and the lists silently corrupt.  That is the
+crash and the hang reported in open-mpi#13762.  The two sibling checks did test
+for lock-freedom, but assumed the answer was yes whenever they could not
+run a test program, which is how cross-compiled builds for those same
+targets reached the same lock.
+
+The three checks now share one determination of lock-freedom, in two
+steps.  __atomic_always_lock_free(16, ptr) is a compile-time constant
+the compiler folds from its own description of the target, so where it
+is true the operation is emitted inline and the answer is yes without
+running anything, cross compilation included.  Where it is false the
+compiler will call out to libatomic, and only libatomic knows whether
+that resolves to an instruction, as cmpxchg16b does through an ifunc on
+x86_64, or to a lock: ask it by running __atomic_is_lock_free(16, ptr).
+A cross-compiled build cannot ask, and nothing visible from the build
+machine substitutes for the answer, so it assumes a lock;
+--enable-libatomic-cswap-int128 overrides that for targets whose
+libatomic is known to use an instruction.  Consulting the run time at
+all is new -- the previous checks stopped at __atomic_always_lock_free()
+-- so an operation that is lock-free only once libatomic has resolved it
+is now accepted where it used to be refused.
+
+That determination is an __atomic one, and one of the three checks is
+about __sync, which cannot be asked the same question.  Both come from
+one target capability in GCC and clang, so the answer carries over,
+but nothing enforces it.  Where configure concludes the compiler emits
+the operation inline, opal/sys/atomic.h now checks that against
+__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16 and fails the build if they
+disagree, rather than quietly handing the counted-pointer algorithms a
+libatomic lock.
+
+Failing the build needs a way past it, and there was none short of
+editing opal_config.h.  Add --disable-cswap-int128, which refuses the
+operation in all four places one can come from: the three builtin
+checks and the x86_64 cmpxchg16b check.
+
+Moving those targets off the counted-pointer path exposes a bug in the
+algorithm they land on.  Claiming an item, or the fifo head, with a
+relaxed swap was followed by a write barrier, which does nothing to stop
+the subsequent read of the item's next pointer from being satisfied
+before the claim is taken; a pop could then follow a next pointer from
+before the item was last pushed.  Make it an acquire barrier, which is
+the half that pairs with the release push already performs before it
+clears item_free.  Nothing on the store side needs ordering, because
+read-modify-writes on item_free are coherent even when relaxed and so
+two threads cannot both win the claim.
+
+The other pop paths are left alone: there the read of
+item->opal_list_next is address-dependent on the load of the head, and
+every architecture Open MPI targets orders that pair.  The two sites
+above break the dependency -- the claim is a read-modify-write on
+another location, and nothing it returns feeds the address of the next
+load -- so there the ordering has to be stated.  This also keeps the
+fence out of the load-linked reservation window.
+
+Separately, opal_fifo_pop_atomic() retired the tail without first
+publishing the new head, letting a concurrent push observe tail == ghost
+while the head still read stale, conclude the fifo was empty, and store
+its item on top of ours.  Give that compare-and-swap release semantics
+rather than placing a barrier beside it.  That one is not specific to
+these targets; it applies to the load-linked/store-conditional paths as
+well.
+
+Two barriers in the same two functions turn out to be dead, and are
+removed.  The write barrier on the retry path of the fifo's spin on the
+head lock has nothing to publish, the only write there being the failed
+swap storing 1 over 1, and a barrier inside a spin loop is actively
+harmful; the loop becomes a plain while.  The write barrier before
+opal_lifo_pop_atomic() clears the popped item's next pointer guards a
+store to an item that is already off the list and still carries our
+item_free claim, so no thread can reach it until the caller pushes it
+again.
+
+Refs open-mpi#13762
+
+Signed-off-by: George Bosilca <gbosilca@nvidia.com>
+```
+bosilca
+force-pushed
+the
+topic/atomic-lifo-lockfree-cswap128
+branch
+from
+02d1914 to
+aa66a78
+Compare
+October 10, 2026 05:16
+bosilca
+commented
+Oct 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Author
+Thanks. Point 1 is right, and the question itself was wrong: whatever is already in LIBS has no bearing on lock-freedom. The old check also ran __atomic_always_lock_free(16, 0) under AC_RUN_IFELSE, executing a compile-time constant, which is the only reason cross compilation needed a guess at all.
+Replaced with two steps, shared by all three callers:
+__atomic_always_lock_free(16, &obj) under AC_COMPILE_IFELSE. True means the compiler emits it inline; no link and no run, so cross compiling is fine. This is your inline-emission test, asked of the compiler instead of reconstructed from nm.
+Otherwise the compiler calls libatomic, and only libatomic knows an instruction from a lock: AC_RUN_IFELSE on __atomic_is_lock_free(16, &obj).
+Only a cross build that gets past step 1 guesses, and it guesses no; --enable-libatomic-cswap-int128 overrides that alone. LIBS is gone.
+2 — not reachable, before or after. OPAL_ASM_CHECK_ATOMIC_FUNC tries plain, -mcx16, -latomic, in that order. On x86_64 the plain link fails, so -mcx16 lands in CFLAGS and step 1 is true: inline cmpxchg16b, libatomic never consulted. Skipping -mcx16 requires libatomic already on the link line, and there the old code was equally out-of-line, via __sync_val_compare_and_swap_16 with no lock-free test at all.
+3 — agreed, and now enforced rather than assumed. Where configure concludes inline, opal/sys/atomic.h checks that against __GCC_HAVE_SYNC_COMPARE_AND_SWAP_16 and fails the build if they disagree. A yes that came from libatomic legitimately has no such macro (the x86_64 ifunc), so the guard is conditioned on which step decided. The misleading message is gone: results now read "yes, emitted inline", "yes, lock-free in libatomic", "no", or "cannot run a test program".
+4 — help text scoped, and configure warns when the option has no bearing. Not honored on native builds: we have libatomic's real answer there, and forcing the opposite reinstates the corruption.
+Also added --disable-cswap-int128, which declines the operation outright and is the way past the build-time check above.
+bosilca
+mentioned this pull request
+Oct 15, 2026
+Add LL/SC support for RISC-V platforms
+#14495
+Open
+bosilca
+added
+backport: v5.0.x
+backport: v6.0.x
+labels
+Oct 22, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+backport: v5.0.x
+backport: v6.0.x
+Target: main
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

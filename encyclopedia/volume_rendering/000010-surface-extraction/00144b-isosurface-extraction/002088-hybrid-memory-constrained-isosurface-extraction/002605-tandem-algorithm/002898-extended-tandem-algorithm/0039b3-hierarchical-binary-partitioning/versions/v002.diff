@@ -1,0 +1,262 @@
+--- v001.md
++++ v002.md
+@@ -7,26 +7,26 @@
+ 
+ ## How it works
+-**Inputs:** A volumetric dataset (scalar field) and an isovalue.
+-**Outputs:** A global simplified isosurface mesh.
++**Inputs:** A volumetric dataset (scalar field) and an isovalue [G].
++**Outputs:** A global simplified isosurface mesh [G].
+ 
+ **Data Structures:**
+-*   **Binary Tree:** Each node represents a sub-block of the dataset.
+-    *   **Internal Nodes:** Represent a split. Tagged by type indicating position regarding the cutting plane [S2].
+-    *   **Leaf Nodes:** Represent sub-blocks small enough to be processed directly.
+-*   **Sub-block:** Defined by its 3D bounding box coordinates within the original dataset.
++*   **Binary Tree:** Each node represents a sub-block of the dataset [S1, S2].
++*   **Internal Nodes:** Represent a split [S2].
++*   **Leaf Nodes:** Represent sub-blocks small enough to be processed directly [S1, S2].
++*   **Sub-block:** Defined by its 3D bounding box coordinates within the original dataset [G].
+ *   **Index File:** An auxiliary file mapping component IDs to offsets in the raw data file, allowing efficient access to subsets of components [S1].
+ 
+ **Parameters:**
+ *   **Threshold:** The minimum sub-block size (in voxels) below which splitting stops. The exact value is not specified in the sources [S1].
+-*   **Leaf Block Size:** Experimental sizes of $128^3$, $256^3$, or $512^3$ were used. Extraction timings do not significantly vary with these sizes [S2].
++*   **Leaf Block Size:** Experimental sizes of $128^3$, $256^3$, or $512^3$ were used [S2]. Extraction timings do not significantly vary with these sizes [S2].
+ 
+ **Steps:**
+ 
+ 1.  **Recursive Splitting:**
+-    *   Start with the root node containing the entire dataset.
++    *   Start with the root node containing the entire dataset [S1, S2].
+     *   If the current sub-block size is greater than the threshold:
+-        *   Identify the longest dimension of the sub-block.
++        *   Identify the longest dimension of the sub-block [S1, S2].
+         *   Split the sub-block into two equal parts perpendicularly to that longest dimension [S1, S2].
+-        *   Create two child nodes in the binary tree.
++        *   Create two child nodes in the binary tree [S1, S2].
+         *   Recursively apply this step to both children [S1, S2].
+     *   If the size is less than or equal to the threshold, mark the node as a leaf [S1, S2].
+@@ -42,5 +42,5 @@
+ 3.  **Recursive Merging:**
+     *   Traverse the binary tree from leaves up to the root [S1, S2].
+-    *   At each internal node, merge the isosurfaces extracted from its two children.
++    *   At each internal node, merge the isosurfaces extracted from its two children [S1, S2].
+     *   Apply simplification to the merged surface to remove seams and reduce triangle count [S2].
+     *   The merging process aggregates semi-simplified blocks as they become available, prioritizing early merging to keep the overall triangle count low [S2].
+@@ -49,131 +49,109 @@
+ 
+ ```python
+-def hierarchical_binary_partitioning(dataset, isovalue, threshold):
+-    """
+-    Main entry point for Hierarchical Binary Partitioning.
+-    """
+-    # 1. Build the binary tree
+-    root = build_tree(dataset, threshold)
+-    
+-    # 2. Extract surfaces at leaves
+-    leaf_surfaces = {}
+-    for leaf in get_leaves(root):
+-        # Extract using Extended Tandem Algorithm with Dumping
+-        # Note: Boundary edge collapses are disabled
+-        surface = extended_tandem_with_dumping(leaf.data, isovalue, boundary_constraint=True)
+-        leaf_surfaces[leaf.id] = surface
+-        
+-    # 3. Merge up the tree
+-    global_surface = merge_up(root, leaf_surfaces)
+-    
+-    return global_surface
++class Node:
++    def __init__(self, x0, y0, z0, x1, y1, z1):
++        self.x0, self.y0, self.z0 = x0, y0, z0
++        self.x1, self.y1, self.z1 = x1, y1, z1
++        self.left = None
++        self.right = None
++        self.is_leaf = False
++        self.surface = []
+ 
+-def build_tree(dataset, threshold):
+-    """
+-    Recursively splits the dataset into a binary tree.
+-    """
+-    node = Node(dataset)
+-    
+-    if dataset.size() > threshold:
+-        # Find longest dimension
+-        dim = find_longest_dimension(dataset)
+-        
+-        # Split perpendicularly to longest dimension
+-        left_data, right_data = split_perpendicular(dataset, dim)
+-        
+-        node.left = build_tree(left_data, threshold)
+-        node.right = build_tree(right_data, threshold)
++def build_tree(x0, y0, z0, x1, y1, z1, threshold):
++    node = Node(x0, y0, z0, x1, y1, z1)
++    size = (x1 - x0) * (y1 - y0) * (z1 - z0)
++    if size > threshold:
++        dx, dy, dz = x1 - x0, y1 - y0, z1 - z0
++        if dx >= dy and dx >= dz:
++            mid = (x0 + x1) // 2
++            node.left = build_tree(x0, y0, z0, mid, y1, z1, threshold)
++            node.right = build_tree(mid, y0, z0, x1, y1, z1, threshold)
++        elif dy >= dx and dy >= dz:
++            mid = (y0 + y1) // 2
++            node.left = build_tree(x0, y0, z0, x1, mid, z1, threshold)
++            node.right = build_tree(x0, mid, z0, x1, y1, z1, threshold)
++        else:
++            mid = (z0 + z1) // 2
++            node.left = build_tree(x0, y0, z0, x1, y1, mid, threshold)
++            node.right = build_tree(x0, y0, mid, x1, y1, z1, threshold)
+     else:
+         node.is_leaf = True
+-        node.data = dataset
+-        
+     return node
+ 
+-def extended_tandem_with_dumping(data, isovalue, boundary_constraint):
+-    """
+-    Performs extraction using the Extended Tandem Algorithm with Dumping.
+-    """
+-    # Initialize tandem state
+-    E0 = initialize_tandem(data, isovalue)
+-    
+-    # Iterate through cross-sections
+-    for k in range(1, number_of_cross_sections):
+-        extract(k)
+-        delay(k)
+-        activate(k)
++def extract_leaf(node, isovalue):
++    # Initialize tandem state E0
++    E0 = {"vertices": [], "edges": [], "surface": []}
++    # Iterate through cross-sections (Algorithm 4 from [S1])
++    num_sections = node.z1 - node.z0
++    for k in range(1, num_sections):
++        # extract(k), delay(k), activate(k) are standard tandem steps [S1]
+         simplify(E0)
+-        dumping()
+-        
+-    # Finalize
++        dumping(E0)
+     activate(float('inf'))
+     simplify(E0)
+-    dumping()
+-    
+-    # Apply boundary constraints if specified
+-    if boundary_constraint:
+-        apply_boundary_edge_collapse_restriction(E0)
+-        
+-    return E0.surface
++    dumping(E0)
+ 
+-def apply_boundary_edge_collapse_restriction(E0):
+-    """
+-    Prevents edge collapses near block boundaries and enforces modified radius constraint.
+-    """
+-    for edge in E0.edges:
+-        if edge.is_near_boundary():
+-            continue # Skip boundary edges
+-            
+-        a, b = edge.vertices
+-        c = midpoint(a, b)
+-        
+-        # Calculate modified radius
+-        rad_a = 1 if a.is_original else a.radius
+-        rad_b = 1 if b.is_original else b.radius
++    # Apply boundary constraint and modified radius [S2]
++    for edge in E0["edges"]:
++        a, b = edge["vertices"]
++        # Check if edge is near block boundary
++        if (a.x in (node.x0, node.x1) or b.x in (node.x0, node.x1) or
++            a.y in (node.y0, node.y1) or b.y in (node.y0, node.y1) or
++            a.z in (node.z0, node.z1) or b.z in (node.z0, node.z1)):
++            continue
++        c = {"x": (a.x + b.x) / 2, "y": (a.y + b.y) / 2, "z": (a.z + b.z) / 2}
++        rad_a = 1 if a.get("is_original", False) else a.get("radius", 0)
++        rad_b = 1 if b.get("is_original", False) else b.get("radius", 0)
+         rad_c = (distance(a, b) + rad_a + rad_b) / 2
+-        
+-        # Check if sphere is fully contained in block
+-        if not sphere_fully_contained(c, rad_c, edge.block):
+-            continue # Prevent collapse
+-            
+-        # Perform collapse if allowed
++        # Check if sphere centered at c with radius rad_c is fully inside node
++        if not (c.x - rad_c >= node.x0 and c.x + rad_c <= node.x1 and
++                c.y - rad_c >= node.y0 and c.y + rad_c <= node.y1 and
++                c.z - rad_c >= node.z0 and c.z + rad_c <= node.z1):
++            continue
+         collapse_edge(edge, c)
++    return E0["surface"]
+ 
+-def merge_up(node, leaf_surfaces):
+-    """
+-    Recursively merges surfaces from children to parent.
+-    """
++def merge_surfaces(left_surf, right_surf):
++    # Merge and simplify to remove seams [S2]
++    merged = left_surf + right_surf
++    return simplify_surface(merged)
++
++def hierarchical_binary_partitioning(dataset_bounds, isovalue, threshold):
++    root = build_tree(*dataset_bounds, threshold)
++    # Extract leaves
++    for leaf in get_leaves(root):
++        leaf.surface = extract_leaf(leaf, isovalue)
++    # Merge up
++    return merge_up(root)
++
++def get_leaves(node):
+     if node.is_leaf:
+-        return leaf_surfaces[node.id]
+-    
+-    left_surface = merge_up(node.left, leaf_surfaces)
+-    right_surface = merge_up(node.right, leaf_surfaces)
+-    
+-    # Merge the two surfaces
+-    merged = merge_surfaces(left_surface, right_surface)
+-    
+-    # Simplify to remove seams
+-    simplified = simplify_surface(merged)
+-    
+-    return simplified
++        yield node
++    else:
++        yield from get_leaves(node.left)
++        yield from get_leaves(node.right)
++
++def merge_up(node):
++    if node.is_leaf:
++        return node.surface
++    left_surf = merge_up(node.left)
++    right_surf = merge_up(node.right)
++    node.surface = merge_surfaces(left_surf, right_surf)
++    return node.surface
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not explicitly given, but the method is designed for parallel execution. The splitting phase is $O(N)$ where $N$ is the number of voxels. The extraction phase depends on the tandem algorithm complexity. The merging phase involves simplification, which is generally sub-linear in the number of triangles but depends on the simplification algorithm used [S2].
+-*   **Memory Complexity:** The hierarchical structure adds overhead for the tree nodes. However, the use of the tandem algorithm with dumping allows for processing large datasets by streaming components, minimizing peak memory usage compared to storing the entire isosurface in memory [S1, S2].
++*   **Time Complexity:** Not explicitly given in the sources. The splitting phase scales linearly with the number of voxels [G]. The extraction phase depends on the tandem algorithm complexity [G]. The merging phase involves simplification, which is generally sub-linear in the number of triangles but depends on the simplification algorithm used [S2].
++*   **Memory Complexity:** Not explicitly given in the sources. The hierarchical structure adds overhead for the tree nodes [G]. However, the use of the tandem algorithm with dumping allows for processing large datasets by streaming components, minimizing peak memory usage compared to storing the entire isosurface in memory [S1, S2].
+ *   **Performance:** Overall extraction timings do not significantly vary with leaf block sizes of $128^3$, $256^3$, or $512^3$ [S2].
+-*   **Strengths:**
+-    *   Enables parallel extraction by dividing the dataset into independent sub-blocks [S2].
+-    *   Reduces memory consumption via block splitting and component dumping [S2].
+-    *   The recursive binary partitioning adapts to the dataset shape, potentially balancing workload better than fixed grids [S2].
+-*   **Limitations:**
+-    *   Requires careful handling of boundary conditions to ensure correct merging [S2].
+-    *   The merging process must be prioritized to keep triangle counts low, which may impact parallel efficiency if not managed correctly [S2].
++*   **Strengths:** Enables parallel extraction by dividing the dataset into independent sub-blocks [S2]. Reduces memory consumption via block splitting and component dumping [S2]. The recursive binary partitioning adapts to the dataset shape, potentially balancing workload better than fixed grids [S2].
++*   **Limitations:** Requires careful handling of boundary conditions to ensure correct merging [S2]. The merging process must be prioritized to keep triangle counts low, which may impact parallel efficiency if not managed correctly [S2].
+ *   **When to use:** Suitable for very large datasets where memory is a constraint and parallel processing is available [S1, S2].
+-*   **When not to use:** If the dataset is small enough to fit in memory and parallelization is not required, simpler methods may be more efficient.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-*   **Origin:** The method was proposed by [S1, S2] for isosurface extraction and interpretation on very large datasets in geophysics.
++*   **Origin:** The method was proposed for isosurface extraction and interpretation on very large datasets in geophysics [S1].
+ *   **History:** It builds upon the work of Müller and Stark (1993) for recursive splitting [S1, S2]. It extends the tandem algorithm by introducing a dumping function and a hierarchical merging strategy [S1, S2].
+-*   **Usage:** Primarily used in geophysics for visualizing large volumetric datasets [S1].
++*   **Usage:** Used in geophysics for visualizing large volumetric datasets [S1].
+ 
+ ## Sources

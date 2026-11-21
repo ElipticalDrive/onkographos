@@ -1,0 +1,120 @@
+# Coordinate System and Axis Swapping
+
+Also called: Axis Swapping, OFF File Coordinate Conversion
+
+## Overview
+This method converts input mesh data from a right-handed Cartesian coordinate system (where $x$ is right, $y$ is up, and $z$ is forward) into a voxel grid layout where the first dimension corresponds to height ($y$), the second to width ($x$), and the third to depth ($z$). It solves the misalignment between standard geometric modeling conventions and the memory layout requirements of swept-volume display or specific voxelization engines. It differs from general coordinate system conversion by performing a specific axis swap ($x \leftrightarrow y$) during the voxelization process rather than a post-hoc metadata adjustment [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A triangular mesh file in OFF format (or a directory of consecutively numbered OFF files). The mesh must be watertight and scaled to fit the target volume dimensions [S1, unofficial].
+*   **Output:** A voxel grid stored in an HDF5 file. The grid dimensions are $(H, W, D)$ corresponding to $(y, x, z)$ [S1, unofficial].
+
+**Data Structures:**
+The output is a 3D array of shape $(H, W, D)$.
+*   $H$: Height (Y-axis).
+*   $W$: Width (X-axis).
+*   $D$: Depth (Z-axis).
+*   Optional: Color channels if the `--color` flag is set.
+
+**Parameters:**
+*   `--height` ($H$): Default 32. Corresponds to the Y-axis (up) [S1, unofficial].
+*   `--width` ($W$): Default 32. Corresponds to the X-axis (right) [S1, unofficial].
+*   `--depth` ($D$): Default 32. Corresponds to the Z-axis (forward) [S1, unofficial].
+*   `--mode`: 'occ' (occupancy) or 'sdf' (signed distance field). Default 'occ' [S1, unofficial].
+*   `--center`: Boolean flag. If set, SDF computation uses voxel centers; otherwise, it uses the top-left-front corner. Default False [S1, unofficial].
+
+**Steps:**
+1.  **Load Mesh:** Read the triangular mesh from the OFF file. Verify it is watertight [S1, unofficial].
+2.  **Scale:** Scale the mesh vertices so they fit within the bounding box defined by $[0, W] \times [0, H] \times [0, D]$ [S1, unofficial].
+3.  **Axis Swap Mapping:** Define the mapping from input mesh coordinates $(x_{in}, y_{in}, z_{in})$ to voxel grid indices $(i, j, k)$:
+    *   $i = y_{in}$ (Height dimension)
+    *   $j = x_{in}$ (Width dimension)
+    *   $k = z_{in}$ (Depth dimension)
+    This effectively swaps the $x$ and $y$ axes during voxelization [S1, unofficial].
+4.  **Voxelization:**
+    *   If `--mode` is 'occ': Mark voxels intersected by the mesh triangles as occupied.
+    *   If `--mode` is 'sdf': Compute the signed distance for each voxel center (if `--center` is set) or corner.
+5.  **Color Assignment (Optional):** If `--color` is set, map face IDs to color files and assign colors to the 12 triangular faces of each voxel [S1, unofficial].
+6.  **Store:** Write the resulting $(H, W, D)$ grid to an HDF5 file [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxelize_off_to_hdf5(mesh_vertices, mesh_faces, H, W, D, mode='occ', use_center=False, color=False):
+    """
+    Voxelize an OFF mesh into an HDF5-compatible grid with axis swapping.
+    Input coords: x=right, y=up, z=forward.
+    Output grid: dim 0 = y (height), dim 1 = x (width), dim 2 = z (depth).
+    """
+    # Initialize grid
+    # grid shape: (H, W, D)
+    grid = np.zeros((H, W, D), dtype=np.float32)
+    
+    # Scale vertices to fit [0, W] x [0, H] x [0, D]
+    # Note: Exact scaling logic depends on mesh bounds, assumed handled by pre-processing [G]
+    scaled_vertices = scale_to_volume(mesh_vertices, W, H, D)
+    
+    # Axis swap mapping: 
+    # Input x -> Output dim 1 (width)
+    # Input y -> Output dim 0 (height)
+    # Input z -> Output dim 2 (depth)
+    
+    if mode == 'occ':
+        for face in mesh_faces:
+            v0, v1, v2 = scaled_vertices[face]
+            # Rasterize triangle onto grid with swapped axes
+            rasterize_triangle(grid, v0, v1, v2, axis_swap=True)
+            
+    elif mode == 'sdf':
+        # Compute SDF for each voxel
+        for i in range(H):
+            for j in range(W):
+                for k in range(D):
+                    # Map grid index to input coordinate space
+                    # i -> y, j -> x, k -> z
+                    if use_center:
+                        # Voxel center coordinates
+                        x_in = j + 0.5
+                        y_in = i + 0.5
+                        z_in = k + 0.5
+                    else:
+                        # Corner coordinates
+                        x_in = j
+                        y_in = i
+                        z_in = k
+                    
+                    # Compute distance to mesh in original space
+                    dist = signed_distance_to_mesh((x_in, y_in, z_in), mesh_vertices, mesh_faces)
+                    grid[i, j, k] = dist
+                    
+    if color:
+        # Assign colors based on face IDs
+        assign_voxel_colors(grid, mesh_faces, color_files)
+        
+    return grid
+```
+
+**Edge Cases and Pitfalls:**
+*   **Non-watertight meshes:** The tool requires watertight meshes. Use simplification algorithms (e.g., semi-convex hull) if necessary [S1, unofficial].
+*   **Scaling:** Meshes must be scaled to fit the volume; incorrect scaling leads to empty or clipped volumes [S1, unofficial].
+*   **SDF Reference:** The choice between voxel centers and corners affects SDF accuracy [S1, unofficial].
+
+## Subtopics
+
+### [Patient Orientation Conversion](18510-patient-orientation-conversion.md)
+Adjusts volumetric datasets to standard medical viewing conventions (HFS, FFP, FFS) by physically reordering voxel memory. Unlike this method, which swaps axes for coordinate system compatibility, it handles anatomical orientation based on metadata.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot V)$ where $N$ is the number of triangles and $V$ is the number of voxels (for SDF) or proportional to triangle rasterization cost (for occupancy) [S1, unofficial].
+*   **Memory Complexity:** $O(H \cdot W \cdot D)$ for the voxel grid [S1, unofficial].
+*   **Performance:** Depends heavily on resolution ($H, W, D$) and mesh complexity. Default 32x32x32 is small; higher resolutions increase memory linearly [S1, unofficial].
+*   **Strengths:** Simple axis swap handles common OFF file coordinate mismatches. Supports both occupancy and SDF.
+*   **Limitations:** Requires watertight meshes. Axis swap is fixed ($x \leftrightarrow y$) and not configurable for other systems [S1, unofficial].
+
+## Background
+This method originates from the `mesh-voxelization` tool by David Stutz, designed to convert OFF format triangular meshes into voxel grids for machine learning and graphics applications [S1, unofficial]. It addresses the specific convention where OFF files use $x$=right, $y$=up, $z$=forward, while the target voxel grid prioritizes height as the first dimension.
+
+## Sources
+[S1] mesh-voxelization/README.md at master, https://github.com/davidstutz/mesh-voxelization/blob/master/README.md, fetched 2026-10-26 (unofficial)

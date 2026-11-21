@@ -1,0 +1,117 @@
+# Connected Component Segmentation
+
+Also called: Largest Connected Component Extraction, Spine Segmentation via Otsu Thresholding and Connected Components
+
+## Overview
+This method isolates a specific anatomical structure (e.g., the spine) from a 3D volume by combining global intensity thresholding with spatial connectivity analysis [S1, unofficial]. It differs from its siblings by strictly selecting the single largest contiguous region after thresholding, rather than exploring graph cuts, valley cells, or restricted growth paths [G]. It serves as a robust post-processing step to remove noise and small artifacts in binary segmentation masks [G].
+
+## How it works
+**Inputs:** A 3D volume $V$ of intensity values [G].
+**Outputs:** A binary mask $M$ of the same dimensions as $V$, where voxels belonging to the largest connected component are 1, and all others are 0 [G].
+
+**Data Structures:**
+1. **Threshold $T$**: A single scalar value [G].
+2. **Binary Mask $B$**: A 3D array of type `uint8`, where $B(x,y,z) = 1$ if $V(x,y,z) > T$, else $0$ [G].
+3. **Label Map $L$**: A 3D array of integers, storing the component ID for each voxel, initialized to 0 [G].
+4. **Component Counts**: An array mapping Label ID $\rightarrow$ Voxel Count [G].
+
+**Steps:**
+1. **Calculate Threshold:** Apply Otsu’s method to $V$ to determine the optimal threshold $T$ [S1, unofficial].
+2. **Binary Segmentation:** Create $B$ by comparing $V$ against $T$:
+   $$ B(x,y,z) = \begin{cases} 1 & \text{if } V(x,y,z) > T \\ 0 & \text{otherwise} \end{cases} $$ [S1, unofficial].
+3. **Label Connected Components:** Perform connected component labeling on $B$ using connectivity=1 [S1, unofficial]. Assign a unique integer label to each connected region of 1s. Store the total count of voxels for each label [S1, unofficial].
+4. **Identify Largest Component:** Find the label $L_{max}$ corresponding to the component with the highest voxel count [S1, unofficial].
+5. **Generate Final Mask:** Create $M$ such that:
+   $$ M(x,y,z) = \begin{cases} 1 & \text{if } L(x,y,z) == L_{max} \\ 0 & \text{otherwise} \end{cases} $$
+   Cast $M$ to `uint8` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from collections import deque
+
+def connected_component_segmentation(volume: np.ndarray) -> np.ndarray:
+    # Step 1: Calculate Otsu threshold
+    hist, bin_edges = np.histogram(volume.flatten(), bins=256, range=(volume.min(), volume.max()))
+    total_pixels = volume.size
+    sum_total = np.sum(hist * np.arange(256))
+    sum_bg = 0.0
+    max_variance = 0.0
+    threshold = 0.0
+    for t in range(256):
+        w_bg = np.sum(hist[:t+1])
+        w_fg = total_pixels - w_bg
+        if w_fg == 0:
+            break
+        sum_bg += np.sum(hist[:t+1] * np.arange(t+1))
+        mean_bg = sum_bg / w_bg
+        mean_fg = (sum_total - sum_bg) / w_fg
+        variance = w_bg * w_fg * (mean_bg - mean_fg) ** 2
+        if variance > max_variance:
+            max_variance = variance
+            threshold = t
+    
+    # Step 2: Create binary mask
+    binary_mask = (volume > threshold).astype(np.uint8)
+    
+    # Step 3: Label connected components (connectivity=1 / face-adjacent)
+    h, w, d = binary_mask.shape
+    label_map = np.zeros((h, w, d), dtype=np.int32)
+    label_id = 0
+    neighbors = [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]
+    
+    for z in range(d):
+        for y in range(w):
+            for x in range(h):
+                if binary_mask[x, y, z] == 1 and label_map[x, y, z] == 0:
+                    label_id += 1
+                    queue = deque([(x, y, z)])
+                    label_map[x, y, z] = label_id
+                    while queue:
+                        cx, cy, cz = queue.popleft()
+                        for dx, dy, dz in neighbors:
+                            nx, ny, nz = cx + dx, cy + dy, cz + dz
+                            if 0 <= nx < h and 0 <= ny < w and 0 <= nz < d:
+                                if binary_mask[nx, ny, nz] == 1 and label_map[nx, ny, nz] == 0:
+                                    label_map[nx, ny, nz] = label_id
+                                    queue.append((nx, ny, nz))
+    num_labels = label_id
+    
+    # Step 4: Identify largest component
+    if num_labels == 0:
+        return np.zeros_like(binary_mask, dtype=np.uint8)
+        
+    component_sizes = np.bincount(label_map.ravel())
+    largest_label = np.argmax(component_sizes[1:]) + 1
+    
+    # Step 5: Generate final mask
+    final_mask = (label_map == largest_label).astype(np.uint8)
+    return final_mask
+```
+
+**Parameters:**
+*   **Connectivity:** connectivity=1 is specified in the source notes [S1, unofficial].
+*   **Thresholding Method:** Otsu’s method [S1, unofficial].
+
+**Edge Cases:**
+*   **Empty Volume:** If no voxels exceed the threshold, `num_labels` is 0. The algorithm returns an empty mask [G].
+*   **Multiple Large Components:** If two components have identical sizes, `np.argmax` returns the first one encountered. This is deterministic but arbitrary [G].
+*   **Noise:** Small noise clusters are discarded because they are not the largest component [G].
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, assuming efficient connected component labeling (e.g., Union-Find or BFS/DFS). Otsu’s method is also $O(N)$ [G].
+*   **Memory Complexity:** $O(N)$ to store the binary mask, label map, and component counts [G].
+*   **Strengths:** Simple to implement; effectively removes small noise artifacts; computationally efficient [G].
+*   **Limitations:** Assumes the target object is the largest connected region in the thresholded volume. Fails if the target is fragmented or if noise forms a larger connected component than the target. Does not handle intensity variations within the object [G].
+*   **When to Use:** Post-processing step for binary masks where the object of interest is expected to be a single large contiguous blob [G].
+*   **When Not to Use:** When the object is fragmented, or when intensity-based thresholding is insufficient to separate the object from background noise of similar intensity [G].
+
+## Background
+This method is described in the context of GPU-based visualization of high-resolution medical images, specifically for spine segmentation [S1, unofficial]. It combines Otsu’s thresholding with connected component analysis to isolate the spine from other anatomical structures in CT volumes. The approach is part of a broader pipeline for medical volume rendering [S1, unofficial].
+
+## Sources
+[S1] GitHub - priscilla100/medical_volume_renderer, https://github.com/priscilla100/medical_volume_renderer/, fetched 2026-10-29 (unofficial)

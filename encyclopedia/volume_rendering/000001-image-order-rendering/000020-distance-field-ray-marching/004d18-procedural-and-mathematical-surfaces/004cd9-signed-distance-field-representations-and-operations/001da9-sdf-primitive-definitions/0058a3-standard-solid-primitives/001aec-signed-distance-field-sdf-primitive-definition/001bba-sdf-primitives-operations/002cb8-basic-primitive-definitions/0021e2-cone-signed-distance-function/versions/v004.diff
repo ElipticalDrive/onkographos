@@ -1,0 +1,249 @@
+--- v003.md
++++ v004.md
+@@ -4,125 +4,120 @@
+ 
+ ## Overview
+-The Cone Signed Distance Function computes the exact Euclidean distance from a query point to the surface of a finite cone, including its lateral mantle and base cap. It solves the problem of efficiently rendering or ray-marching conical primitives in volume rendering and ray tracing without polygonization. It is distinguished from the infinite cone SDF by handling the base boundary and from the cylinder by its tapered geometry. It builds on [Basic Primitive Definitions](5346-basic-primitive-definitions.md).
++The Cone Signed Distance Function computes the exact Euclidean distance from a query point to the surface of a cone, defined by a base radius and height, with a sign indicating whether the point lies inside or outside the volume [S1, S2, S4, unofficial]. It solves the problem of efficiently rendering or querying conical primitives in ray marching and implicit surface modeling without approximation errors associated with polygonal meshes [S5]. It is distinguished from the [Segment Signed Distance Function](2679-segment-signed-distance-function.md) by its continuous lateral surface and from [Polyhedral Primitives](2529-polyhedral-primitives.md) by its smooth, non-polyhedral geometry [S4, unofficial][S5].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Query point $p \in \mathbb{R}^3$ and primitive-specific parameters.
+-*   **Output:** Scalar signed distance $d \in \mathbb{R}$. $d < 0$ indicates the point is inside the primitive, $d > 0$ indicates it is outside, and $d = 0$ lies on the surface [S1, unofficial].
++The method evaluates the distance to a cone aligned with the Y-axis. Two primary implementations exist in the literature: an "exact" geometric projection method that handles the base cap and side slope separately, and a simplified dot-product method often used for infinite or specific capped variants where the base cap is handled implicitly or the cone is defined by a slope vector.
+ 
+-**Assumptions:**
+-All implementations assume the primitive is centered at the origin and axis-aligned where applicable. Transformations (rotation, translation, scaling) are applied to the query point $p$ before evaluation, or the primitive parameters are adjusted accordingly.
++### Inputs and Outputs
++*   **Input:** Query point $p \in \mathbb{R}^3$.
++*   **Parameters:** Base radius $r$, height $h$.
++*   **Output:** Signed distance $d \in \mathbb{R}$.
+ 
+-**Data Structures:**
+-No complex data structures are required. The method operates on scalar values and 2D/3D vectors.
++### Data Structures
++No complex data structures are required. The computation operates on scalar values and 2D/3D vectors.
+ 
+-**Parameters:**
+-*   $r$: Base radius of the cone.
+-*   $h$: Height of the cone.
+-*   $p$: Query point $(p_x, p_y, p_z)$.
++### Steps (Exact Capped Cone)
++This implementation, derived from Inigo Quilez's work and implemented in Rust [S4, unofficial], computes the distance to the side slope and the base cap independently, then combines them.
+ 
+-**Geometric Configuration:**
+-The sources describe two primary orientations for the cone. The "Exact Cone" implementation [S4, unofficial] places the apex at the origin $(0,0,0)$ and the base center at $(0, -h, 0)$, opening downward along the negative Y-axis. The "sdCone" implementation [S3, unofficial] uses a normalized vector $c$ to define the axis and slope, often oriented along the Y-axis with the base at $y=0$ or apex at origin depending on the specific GLSL variant. The most robust and commonly cited "exact" formulation [S4, unofficial] handles the capped cone explicitly.
++1.  **Canonical Projection:** Project the 3D point $p$ into a 2D cross-section $q$ in the plane containing the cone's axis (Y-axis) and the radial distance.
++    $$ q = (\sqrt{p_x^2 + p_z^2}, p_y) $$
++    Let $q_x = \sqrt{p_x^2 + p_z^2}$ and $q_y = p_y$.
+ 
+-**Algorithm (Exact Capped Cone, Apex at Origin, Opening Downward):**
+-This method computes the distance to the closest point on the lateral surface (mantle) or the base cap.
++2.  **Define Geometry:** Define the tip and base vertices in this 2D space.
++    *   Tip: $t = (0, 0)$
++    *   Base: $b = (r, -h)$
++    *   Vector along the side slope: $ba = b - t = (r, -h)$
+ 
+-1.  **Project to 2D:** Compute the radial distance from the Y-axis and form a 2D point $q$ in the $(r, y)$ plane.
+-    $$ q = (\sqrt{p_x^2 + p_z^2}, p_y) $$
+-2.  **Define Geometry in 2D:**
+-    *   Tip (Apex): $t = (0, 0)$
+-    *   Base Center: $b_{center} = (r, -h)$
+-    *   Vector from Tip to Base Center: $k = (r, h)$
+-    *   Squared length of $k$: $m_2 = r^2 + h^2$
+-3.  **Compute Distances:**
+-    *   Vector from Tip to $q$: $d_1 = q - t = q$
+-    *   Vector from Base Center to $q$ (for cap calculation): $d_3 = q - (\text{clamp}(q_x, 0, r), -h)$
+-    *   Vector representing the side slope segment (Tip to Base Edge): $ba = b_{center} - t = (r, -h)$
+-    *   Project $d_1$ onto $ba$ to find the closest point on the infinite line containing the slope:
++3.  **Distance to Side Slope:** Compute the distance from $q$ to the line segment connecting the tip and the base edge.
++    *   Vector from tip to query: $d_1 = q - t = q$
++    *   Squared length of side slope: $m_2 = \|ba\|^2 = r^2 + h^2$
++    *   Projection parameter $u$ (clamped to segment):
+         $$ u = \text{clamp}\left(\frac{d_1 \cdot ba}{m_2}, 0, 1\right) $$
+-    *   Distance to the side slope segment:
+-        $$ \text{side\_dist} = \| d_1 - ba \cdot u \| $$
+-    *   Distance to the base cap:
+-        $$ \text{cap\_dist} = \| d_3 \| $$
+-4.  **Unsigned Distance:**
+-    $$ \text{dist} = \min(\text{side\_dist}, \text{cap\_dist}) $$
+-5.  **Inside Test:**
+-    Determine if the point is inside the cone. A point is inside if it is below the apex ($q_y \le 0$), above the base ($q_y \ge -h$), and within the lateral boundary. The lateral boundary condition for a cone opening downward with apex at origin is $q_x \cdot h + q_y \cdot r \le 0$ [S4, unofficial].
+-    $$ \text{inside} = (q_y \le 0) \land (q_y \ge -h) \land (q_x \cdot h + q_y \cdot r \le 0) $$
+-6.  **Signed Distance:**
+-    $$ d = \begin{cases} -\text{dist} & \text{if inside} \\ \text{dist} & \text{if outside} \end{cases} $$
++    *   Closest point on segment: $c_{side} = t + ba \cdot u$
++    *   Side distance: $dist_{side} = \|q - c_{side}\|$
+ 
+-**Alternative Formulation (Normalized Vector $c$):**
+-Some implementations [S3, unofficial] use a normalized vector $c = (c_x, c_z)$ where $c_x = \sin(\theta)$ and $c_z = \cos(\theta)$ (or similar depending on axis alignment) to define the cone's slope. For a cone aligned with the Y-axis, the function `sdCone` in `sdCappedCone.glsl` [S3, unofficial] computes:
+-$$ q = (\|p_{xz}\|, p_y) $$
+-$$ d_1 = -p_y - c_z $$
+-$$ d_2 = \max(q \cdot c_{xy}, p_y) $$
+-$$ d = \| \max((d_1, d_2), 0) \| + \min(\max(d_1, d_2), 0) $$
+-Note: In this specific GLSL snippet, $c$ must be normalized [S3, unofficial]. The interpretation of $c$ varies; in `sdCone.glsl` [S3, unofficial], it is defined as `vec2` and used in `dot(c, vec2(q, p.z))`, implying a different orientation (Z-axis). The Y-axis version in `sdCappedCone.glsl` uses $c$ to define the slope relative to the Y-axis. Implementers must ensure the vector $c$ is normalized [S3, unofficial].
++4.  **Distance to Base Cap:** Compute the distance from $q$ to the base disk.
++    *   Clamp the radial component of $q$ to the base radius to find the closest point on the infinite plane of the base, then check if it's within the disk.
++    *   Closest point on base plane within radius: $c_{cap} = (\text{clamp}(q_x, 0, r), -h)$
++    *   Vector from $q$ to this point: $d_3 = q - c_{cap}$
++    *   Cap distance: $dist_{cap} = \|d_3\|$
+ 
+-**Pseudocode (Exact Capped Cone, Y-Axis, Apex at Origin):**
++5.  **Combine Distances:** The unsigned distance is the minimum of the side and cap distances.
++    $$ dist = \min(dist_{side}, dist_{cap}) $$
+ 
++6.  **Inside Test:** Determine if the point is inside the cone. A point is inside if it is below the apex ($q_y \le 0$), above the base ($q_y \ge -h$), and radially within the cone's slope. The slope condition is derived from the line equation passing through $(0,0)$ and $(r, -h)$: $x \cdot (-h) - y \cdot r = 0 \Rightarrow x \cdot h + y \cdot r = 0$ (checking sign).
++    $$ inside = (q_y \le 0) \land (q_y \ge -h) \land (q_x \cdot h + q_y \cdot r \le 0) $$
++    *Note: The condition $q_x \cdot h + q_y \cdot r \le 0$ ensures the point is on the "inner" side of the slope line relative to the axis.*
++
++7.  **Return Signed Distance:**
++    $$ d = \begin{cases} -dist & \text{if } inside \\ dist & \text{otherwise} \end{cases} $$
++
++### Steps (Simplified/Dot-Product Variant)
++Some implementations [S3, S1, unofficial] use a normalized vector $c$ to define the cone's orientation and slope, often treating it as an infinite cone or handling caps differently.
++
++1.  **Projection:** $q = (\|p_{xz}\|, p_y)$.
++2.  **Vector Definition:** Let $c$ be a normalized 2D vector $(c_x, c_z)$ representing the cone's axis and slope. For a cone opening along $-Y$, $c$ might be defined relative to the geometry.
++3.  **Distance Calculation:**
++    $$ d_1 = -p_y - c_z $$
++    $$ d_2 = \max(q \cdot c_{xy}, p_y) $$
++    $$ d = \| \max((d_1, d_2), 0) \| + \min(\max(d_1, d_2), 0) $$
++    *Note: Sources [S3, unofficial] and [S1, unofficial] show variations. [S3, unofficial] uses `sdCone` with a normalized vector `c`. [S1, unofficial] uses a different algebraic form involving projections.*
++
++### Pseudocode (Exact Capped Cone)
+ ```python
+ import math
+ 
+-def sd_cone(p_x, p_y, p_z, r, h):
++def sd_cone(p: tuple, r: float, h: float) -> float:
+     """
+     Computes the signed distance to a capped cone.
+-    Cone apex at (0, 0, 0), base center at (0, -h, 0).
+-    Base radius r, height h.
++    Cone apex at (0,0,0), base center at (0, -h, 0), base radius r.
++    Axis aligned with Y.
+     """
+-    # 1. Project to 2D (r, y) plane
+-    q_x = math.sqrt(p_x * p_x + p_z * p_z)
+-    q_y = p_y
++    # 1. Project to 2D cross-section
++    qx = math.sqrt(p[0]**2 + p[2]**2)
++    qy = p[1]
+     
+-    # 2. Define geometry
+-    # Tip at (0, 0)
+-    # Base center at (r, -h)
+-    # Vector k from Tip to Base Center: (r, h)
+-    k_x = r
+-    k_y = h
+-    m2 = k_x * k_x + k_y * k_y
++    # 2. Define 2D points
++    # Tip at (0, 0), Base edge at (r, -h)
++    tip_x, tip_y = 0.0, 0.0
++    base_x, base_y = r, -h
+     
+-    # 3. Compute distances
+-    # d1 is vector from Tip to q
+-    d1_x = q_x
+-    d1_y = q_y
++    # 3. Distance to side slope segment
++    # Vector ba from tip to base
++    ba_x = base_x - tip_x
++    ba_y = base_y - tip_y
++    m2 = ba_x**2 + ba_y**2
+     
+-    # d3 is vector from clamped base projection to q
+-    # Clamp q_x to [0, r] for the base cap projection
+-    q_x_clamped = max(0.0, min(q_x, r))
+-    d3_x = q_x - q_x_clamped
+-    d3_y = q_y - (-h)
++    # Vector d1 from tip to q
++    d1_x = qx - tip_x
++    d1_y = qy - tip_y
+     
+-    # Vector ba from Tip to Base Center (r, -h)
+-    ba_x = r
+-    ba_y = -h
+-    
+-    # Project d1 onto ba
+-    # u = clamp(dot(d1, ba) / m2, 0, 1)
+-    dot_d1_ba = d1_x * ba_x + d1_y * ba_y
+-    u = max(0.0, min(dot_d1_ba / m2, 1.0))
++    # Projection u
++    u = (d1_x * ba_x + d1_y * ba_y) / m2
++    u = max(0.0, min(1.0, u))
+     
+     # Closest point on segment
+-    closest_x = ba_x * u
+-    closest_y = ba_y * u
++    closest_x = tip_x + u * ba_x
++    closest_y = tip_y + u * ba_y
+     
+-    # Distance to side slope
+-    side_dist_x = d1_x - closest_x
+-    side_dist_y = d1_y - closest_y
+-    side_dist = math.sqrt(side_dist_x * side_dist_x + side_dist_y * side_dist_y)
++    dist_side = math.sqrt((qx - closest_x)**2 + (qy - closest_y)**2)
+     
+-    # Distance to base cap
+-    cap_dist = math.sqrt(d3_x * d3_x + d3_y * d3_y)
++    # 4. Distance to base cap
++    # Clamp qx to [0, r] to find closest point on the base disk
++    clamped_qx = max(0.0, min(r, qx))
++    cap_closest_x = clamped_qx
++    cap_closest_y = base_y
+     
+-    # Unsigned distance
+-    dist = min(side_dist, cap_dist)
++    dist_cap = math.sqrt((qx - cap_closest_x)**2 + (qy - cap_closest_y)**2)
+     
+-    # 4. Inside test
+-    # Inside if: y <= 0, y >= -h, and inside lateral boundary
+-    # Lateral boundary: q_x * h + q_y * r <= 0
+-    inside = (q_y <= 0.0) and (q_y >= -h) and ((q_x * h + q_y * r) <= 0.0)
++    # 5. Minimum unsigned distance
++    dist = min(dist_side, dist_cap)
+     
+-    # 5. Signed distance
++    # 6. Inside test
++    # Inside if: below apex (qy <= 0), above base (qy >= -h),
++    # and inside the slope (qx * h + qy * r <= 0)
++    inside = (qy <= 0.0) and (qy >= -h) and ((qx * h + qy * r) <= 0.0)
++    
++    # 7. Return signed distance
+     if inside:
+         return -dist
+@@ -131,19 +126,23 @@
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Degenerate Cone:** If $r=0$ or $h=0$, the cone degenerates to a line or disk. The formula may produce NaNs or incorrect distances if not guarded. [G] Check for $r < \epsilon$ or $h < \epsilon$ and return distance to line segment or disk accordingly.
+-*   **Precision:** The inside test relies on the linear inequality $q_x h + q_y r \le 0$. Floating-point errors near the surface may cause flickering. [G] Use a small epsilon for the inside test if necessary, or rely on the distance being very small.
+-*   **Orientation:** Ensure the query point is transformed into the cone's local space before evaluation. The formula above assumes apex at origin, opening down Y. For other orientations, rotate $p$ accordingly.
+-*   **Normalized Vector Variant:** If using the $c$ vector variant [S3, unofficial], ensure $c$ is normalized. Failure to normalize results in incorrect distances.
++### Parameters
++*   $r$: Base radius. Typical values depend on scene scale.
++*   $h$: Height of the cone.
++
++### Edge Cases and Pitfalls
++*   **Degenerate Cone:** If $r=0$ or $h=0$, the cone degenerates to a line segment or a disk. The formula may produce NaNs or incorrect distances if not guarded. [S4, unofficial] handles $r=0$ implicitly via the clamp, but $h=0$ results in a flat disk where the "side" distance logic might fail if not careful with division by zero in $m_2$ if $r=h=0$.
++*   **Precision:** The inside test relies on floating-point comparisons. Points very close to the surface may oscillate between inside and outside due to precision errors. [G] It is often safer to use a small epsilon for the inside test boundary checks in ray marching to avoid z-fighting or incorrect shading.
++*   **Axis Alignment:** The standard implementation assumes the cone is aligned with the Y-axis. For arbitrary orientations, the point $p$ must be transformed into the cone's local space using the inverse of the cone's transformation matrix before evaluation [Parent].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$. The computation involves a constant number of arithmetic operations, square roots, and comparisons.
++*   **Time Complexity:** $O(1)$. The computation involves a fixed number of arithmetic operations, square roots, and comparisons.
+ *   **Memory Complexity:** $O(1)$. No auxiliary data structures are needed.
+-*   **Performance:** Extremely fast, suitable for real-time ray marching and SDF rendering. The exact formulation avoids iterative approximation.
+-*   **Strengths:** Exact distance, handles both lateral surface and base cap, robust for ray marching.
+-*   **Limitations:** Only applies to right circular cones. Does not handle truncated cones with different top/bottom radii directly (requires combination or different primitive).
++*   **Strengths:** Exact distance calculation allows for large step sizes in ray marching, improving performance. Smooth gradients (except at the base edge and apex) allow for accurate normal computation.
++*   **Limitations:** The function is not differentiable at the base edge (where the side slope meets the base cap) and at the apex. This can cause artifacts in normal-based shading or physics if not handled.
++*   **When to use:** When rendering conical objects with high precision is required, or when using the SDF for collision detection where exact boundaries matter.
++*   **When not to use:** If the cone is part of a complex mesh where polygonal approximation is sufficient and faster, or if the cone is extremely long and thin, where precision issues might arise.
+ 
+ ## Background
+-The Signed Distance Function for a cone is a standard primitive in the field of Signed Distance Fields (SDFs), popularized by Inigo Quilez in his online articles on distance functions [S1, unofficial]. The exact formulation for the capped cone, particularly the one handling the base cap and lateral surface correctly, is derived from geometric projections onto the 2D cross-section plane. Variations exist in different code repositories (e.g., `glsl-sdf-primitives` [S3, unofficial], `sdf-math-rs` [S4, unofficial]), often differing in axis alignment (Y vs Z) and parameterization (radius/height vs normalized vector). The formulation in [S4, unofficial] is widely regarded as the "exact" implementation for a capped cone.
++The exact signed distance function for a cone was popularized by Inigo Quilez in his article on distance functions [S1, S4, unofficial]. It is a fundamental primitive in the family of SDFs used for ray marching [S5]. The geometric derivation relies on projecting the 3D point onto the 2D plane containing the cone's axis and computing the distance to the line segment representing the cone's profile.
+ 
+ ## Sources

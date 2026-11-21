@@ -1,0 +1,124 @@
+Suggestion, not yet designed. Replace scene's per-pass 16-light cap with clustered forward light assignment. To be taken through wayfinder before any build. Where this came from The original question: past 16 lights we keep the most cont...
+
+scene: clustered forward lighting in place of the per-pass 16-light cap · Issue #108 · dvoyni/cog · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+scene: clustered forward lighting in place of the per-pass 16-light cap #108
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+scene: clustered forward lighting in place of the per-pass 16-light cap#108
+Copy link
+Milestone
+Distant future
+Description
+dvoyni
+opened on Sep 6, 2026
+Issue body actions
+Suggestion, not yet designed. Replace scene's per-pass 16-light cap with clustered forward light assignment. To be taken through wayfinder before any build.
+Where this came from
+The original question: past 16 lights we keep the most contributing ones, but is the drop per scene or per model/draw?
+The answer today is per pass. selectLights (bundles/scene/internal/light.go) culls each light's sphere (Position, Range) against the pass frustum. It then keeps the 16 with the highest contributionAt the camera position, and all 16 are shared by every pixel of the pass. Two consequences:
+A light that matters greatly to geometry the camera is looking at can score zero, because it is far from where the camera looks from (scene.md, "Among equal contributions the offer order decides").
+Orthographic and Oblique have no eye point, so the ranking is measured from a place the viewer is not at (see the scene: oblique projection, and the view vector it breaks #187 comment below, and the deferred table row "A view direction for selectLights").
+Scene already finds every light that can affect a pass. What is missing is a finer cull, so each fragment loops only over the lights near it.
+The technique
+Olsson 2012, as used by Doom 2016, Unity URP "Forward+", Godot 4 and Bevy.
+The view volume is cut into a 3D grid of clusters: screen tiles × depth slices, e.g. 16×9×24, with slices spaced exponentially in view depth.
+CPU, once per pass, at flush:
+Cull lights against the pass frustum, as today.
+For each light, find the range of clusters its sphere's bounds cover, and add the light to each one after a sphere-vs-cluster test.
+Upload, per pass:
+lights: every surviving light, as a runtime-sized array;
+cluster table: (offset, count) for each cluster;
+index list: flat u32 light indices.
+Fragment shader:
+```
+let tile  = floor(fragPos.xy / tileSize);
+let slice = floor(log(viewZ / near) * sliceScale);   // linear slices for ortho/oblique
+let c     = clusterTable[index(tile, slice)];
+for (var i = c.offset; i < c.offset + c.count; i++) {
+    color += shade(lights[clusterIndices[i]], surface);
+}
+```
+Pros
+Many local lights. A pass holds hundreds of lights. The per-pixel cost follows the lights near that pixel, not the scene total.
+No depth prepass, no compute. Assignment depends only on light volumes and the camera, so it runs on the CPU and uploads through gfx's existing frame-lifetime TemporaryBuffer. gfx has no compute pipeline and does not need one for this.
+Transparent surfaces work. Lookup uses the fragment's own depth, unlike tiled forward, whose depth-buffer min/max misses anything blended.
+Pass-invariant group 0 survives. All three buffers are per pass, so they sit in group 0 beside sceneFrame. The rule the spec defends against a per-draw light list still holds.
+The cap becomes local. Overflow only happens where many lights pile into one cluster. The spec's "silent, by contribution" drop rule carries over, ranked at the cluster centre instead of the eye. That dissolves the eyeless-projection ranking problem instead of patching it.
+The same loop, just shorter. The shading function and SceneLight packing are unchanged; only where the loop's indices come from changes.
+Cons
+CPU work per pass grows with the clusters each light covers. Large-range lights touch many clusters. Shadow passes and other passes that do no shading must skip it.
+Memory and upload per pass: a cluster table (e.g. 3456 × 8 bytes), an index list and a runtime-sized light array for every shading pass of every camera, every frame.
+Fragment cost gains a cluster lookup (a log and indirect reads) even in scenes with 3 lights, where today's fixed loop is cheaper.
+Tuning knobs appear: grid dimensions, slice distribution, per-cluster or index-buffer caps. The spec deliberately refused a Config knob for 16. Each new constant needs a documented default, or a reason it is not configurable.
+Loses the fixed array<SceneLight, 16>, which the spec chose as "a strictly smaller ask on gfx's reflection work" than a runtime-sized array.
+Spec rewrite: the per-pass light-cap section, the sceneFrame layout table, the pbr demo's reliance on record order and eye ranking, and the deferred table row.
+Threats
+Storage-buffer floor: likely blocker. gfx's default floor is 8 storage buffers, and slots/gfx/internal/limits.go counts them over the whole shader, not per stage. A skinned, morphed PBR draw already declares 8: sceneFrame, sceneInstances, sceneAnim, sceneMeshes, scenePbrMaterial, scenePoses, sceneSkinJoints, sceneMorphDeltas. Clusters add one or two, which exceeds the floor. WebGPU's actual limit is per stage, and the new buffers are fragment-only while most existing ones are vertex-only. Ways out: gfx counts per stage (needs stage visibility from reflection), or cluster table and indices pack into one u32 buffer and lights ride as a runtime-sized tail of sceneFrame. Probably its own blocking gfx ticket.
+Eyeless projections. Exponential slices assume perspective depth; Orthographic and Oblique need linear slices and their own tile frusta. Oblique's sheared volume makes cluster bounds non-axis-aligned in view space.
+Conservative sphere-vs-cluster tests at grazing angles and far slices, where clusters are long and thin, over-assign lights. The cost of a miss is invisible: wrong lighting with no error, in an engine with no pixel readback.
+Per-cluster overflow is silent, like today's cap, but now it is spatial and view-dependent. It needs a debug surface (a cluster heat-map, or an MCP-readable count), or it will be diagnosed by eye.
+System parallelism. Assignment must stay inside the pass's own flush work and never widen a lock set or serialise Systems.
+Scope creep. A spot-cone bound for tighter culling, and per-light shadows, are natural follow-ons. Both are already separately deferred and should stay out.
+Alternatives considered
+Keep 16 per pass, fix the ranking point only (view direction for eyeless projections). Small, but mostly discarded once clustering lands.
+Per-draw light list, ranked against draw bounds. Rejected in the spec: it breaks group-0 pass invariance, costs every draw, and big geometry (floors, terrain) still touches every light.
+Multi-pass additive lights (Unity built-in ForwardBase/ForwardAdd). Redraws touched geometry once per excess light with additive blend and Equal depth. Costs draw calls × lights on large geometry, double-blends transparent surfaces, and doubles material variants (an "add" variant with no emissive, ambient or fog).
+Tiled forward (Harada 2012). Needs a depth prepass and in practice compute for per-tile min/max. Over-assigns across depth discontinuities and gets transparent surfaces wrong.
+Trigger
+The spec's deferred-table trigger still stands: a demo wants more local lights than the 16 cap and fragment cost shows it.
+Activity
+dvoyni commented on Sep 10, 2026
+dvoyni
+on Sep 10, 2026
+OwnerAuthor
+More actions
+Related fact from scene: oblique projection, and the view vector it breaks (24df82f), for whoever picks this up.
+That ticket added Oblique, a projection with no eye point — and Orthographic never had one either. selectLights ranks by contributionAt(light, eye), i.e. falloff evaluated at the camera transform's translation. For both of those kinds that is a point the viewer is not at, so the ranking that decides which 16 lights survive is measured from the wrong place.
+This is orthogonal to the question here — you are asking about the scope of the drop (per scene vs per model/draw), this is about the point the ranking is measured from — but they land in the same function, so whoever rewrites selectLights should settle both at once rather than leave one for a third pass.
+The fix now exists to hand: viewDirection(descr) in scene/projection.go gives the constant view direction for eyeless projections, and SceneFrame.viewDirection is what the shader already reads. Deliberately left alone in #187 — the ticket called it fine to leave — and recorded in the spec's deferred table.
+dvoyni
+added
+to-do
+on Sep 15, 2026
+dvoyni
+self-assigned this
+on Sep 15, 2026
+dvoyni
+removed
+to-do
+on Sep 15, 2026
+dvoyni
+removed their assignment
+on Sep 15, 2026
+dvoyni
+changed the title [-]Revisit how lights get dropped over limit[/-] [+]scene: clustered forward lighting in place of the per-pass 16-light cap[/+] on Sep 15, 2026
+dvoyni
+added this to the Distant future milestone on Sep 23, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+Distant futureNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,365 @@
+c o n s p i r e. Contribute to mrbuche/conspire development by creating an account on GitHub.
+
+marching: all-hexahedral meshing by clipping a uniform lattice by mrbuche · Pull Request #193 · mrbuche/conspire · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+mrbuche
+commented
+Sep 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+A second all-hex mesher alongside buffer. Adds pub mod marching; in cut/mod.rs, and a small extension of the grid marching cubes (below).
+Tessellation::marching_hex
+```
+tessellation.marching_hex(spacing, Marching { placement, finish }) -> Result<Mesh<3>, _>
+```
+Marching, Placement, Finish, Freedom are exported from geometry::mesh.
+Clips every cell of a uniform lattice to the surface (marching-cubes style) and splits what is left about its midpoints — all-hexahedral, no hanging nodes, no optimizer, no element insertion.
+Placement — where a boundary vertex sits on a straddling edge:
+Midpoint (Dhondt / Protais): first-order boundary, no cell can degenerate
+Crossing(guard) (Tong / Zhang): second-order, held guard off each edge end
+Finish — what happens to the boundary after the split:
+Cut — leave it at the clip (provably valid on all 256 sign masks)
+Draw(share) — bisection projection onto the surface, keeping share of each hexahedron's as-cut scaled Jacobian; boundary only, no volume DOF. The default.
+Fit(Freedom::{Whole, Shell}) — hand the split mesh straight to the Protais energy fit; the mesh deforms onto the surface, connectivity fixed, nothing added, no shell layer. Whole frees every node, Shell the boundary and one ring. Beats buffer on smooth/graded inputs (tighter boundary gap); inverts on sharp creases, where buffer stays the robust choice.
+MarchingCubes::hexahedra — a sampled field
+```
+MarchingCubes { level, spacing, gradient, .. }.hexahedra(&volume, placement) -> Result<Mesh<3>, _>
+```
+Meshes the object where a scalar field on a regular grid (Voxels<f64>) reaches its level, with the same clip-and-split, on the same level / spacing / gradient that extract takes and in the same frame as its isosurface. No STL in between.
+The samples are the lattice nodes; a crossing is the field interpolated along the edge, held off the ends by the same Crossing(guard).
+spacing may differ along each axis. (The Tessellation route is still isotropic.)
+Cut only: with no target surface there is nothing to draw onto or fit to. method, step, and degenerate do not apply, and an object reaching the edge of the grid is cut flat there.
+Shared case topology, and Method::Separated
+The clipping of a cell into polyhedra (clip, loops, pieces, cell, Vertex, CORNERS, FACES) moves out of cut/marching/polyhedron to grid::marching_cubes::separated, and the hexahedral pathway imports it from there. That lets the isosurface use it too:
+Method::Separated cuts by the signs at the corners alone, every ambiguous face kept apart, and fans the cut polygons into triangles — so the surface is exactly the boundary of the hexahedra from the same samples. Winding and normals match Lewiner's. It takes every sample (step != 1 is refused).
+Lewiner's switch is deliberately not reused: it decides ambiguous faces from the field values and can join them, which is unsound to subdivide (a pinched solid).
+Method is a public enum, so this adds a variant — exhaustive matches downstream need an arm.
+Supporting pieces
+quality/metrics/hexahedron/bernstein — a provable positive-Jacobian certificate for a trilinear hex via its Bernstein coefficients (certifies, coefficients), stronger than corner-sampled scaled Jacobian. pub(crate).
+cut/marching/{polyhedron, project, split} — the hex-side internals: which cells to visit, the boundary projection, the midpoint split.
+Tessellation::lattice_shifted(spacing, shift) — a jitterable lattice, so marching_hex can retry when a lattice corner lands exactly on the surface.
+Mesh::fit widened pub(super) → pub(crate) so Finish::Fit can drive it directly.
+MarchingCubes::resolve — the level defaulting / range check, factored out of extract so hexahedra shares it.
+Tests
+All 256 sign masks split into positive, certified hexahedra; a sphere and a creased star mesh without inversions.
+The separated surface is closed and consistently oriented on a sphere and on a field of noise, and keeps a diagonal pair of samples apart (mutation-checked against the ambiguity rule).
+The hexahedra hold the volume of a sphere sampled at uneven spacing, conform on a field of noise, and have the separated surface's vertices on their boundary (spacing and interpolation mutation-checked).
+🤖 Generated with Claude Code
+mrbuche
+marked this pull request as ready for review
+September 10, 2026 22:03
+mrbuche
+force-pushed
+the
+marching
+branch
+from
+eac9f1c to
+47bbbfe
+Compare
+September 29, 2026 13:30
+mrbuche
+and others
+added 24 commits
+September 29, 2026 12:34
+Measure the uniform cut on the bone
+…
+a930956
+```
+Both are ignored, and neither belongs here permanently; they are a
+place to watch the uniform path while it is built out.
+
+One walks the bone over four spacings, reporting scaled Jacobians for
+the hexes and signed volumes for the cut cells, which Verdict does not
+cover. The other separates the lattice from what the pipeline does to
+it, since the lattice is cubes and only snapping moves them.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Certify hexahedral Jacobians rather than sample them
+…
+05d4deb
+```
+The Jacobian determinant of a trilinear map is tri-quadratic, so it
+has twenty seven coefficients in the Bernstein basis. Those basis
+functions are non-negative, so coefficients that are all positive
+prove the determinant is positive throughout the element, where the
+corner values the existing metrics take prove only that it is positive
+at the corners. A test fixture reaches elements where those corners
+agree and the element is inverted regardless.
+
+Sufficient rather than necessary: a negative coefficient is not proof
+of an inversion.
+
+Test-only until something consumes it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Probe the uniform cut where it does not hold up
+…
+49da713
+```
+Creased and spiky fixtures, and a count of how many cut cells are
+3-regular, which is what decides whether they can be subdivided into
+hexes.
+
+Creases fail: a box off axis fails as badly as a stellated sphere, and
+an axis aligned one only passes because its creases land on lattice
+planes. The dual path fails on the same fixtures, so this is the cut
+machinery rather than the lattice.
+
+Of the cut cells fewer than half are 3-regular. Agglomeration accounts
+for much of that and snapping for the rest, since a node pulled onto
+the surface meets three cell edges there already. Turning both off,
+along with the sliver collapse that costs nothing either way, reaches
+94%, which is where a midpoint subdivision could take over.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Mesh with hexahedra alone by splitting clipped cells
+…
+8840aca
+```
+Dhondt's cut, as Protais describes it, and Tong and Zhang's marching
+cubes differ only in where a vertex goes on an edge whose ends
+straddle the surface, so the two are one pathway with that as a
+policy. Midpoint keeps every cell as far from degenerate as it can be;
+Crossing follows the surface and is held off the ends instead.
+
+Every cell of the lattice is clipped to what lies inside the surface
+and then split about the middles of its edges, faces and body, which
+leaves one hexahedron per vertex and meets across cells because every
+node is named by the vertices it lies among rather than by position.
+
+The lattice is moved until no corner of it lies on the surface, since
+a corner there has no sign, and a lattice on round numbers meets one
+readily.
+
+Smooth surfaces come out whole: a sphere gives 39928 hexahedra, none
+inverted and every one certified, with no smoothing anywhere. Midpoint
+holds a minimum scaled Jacobian of 0.4386 whatever the surface, which
+is the combinatorial bound rather than a measurement of it. Creased
+and spiky surfaces do not, and want local refinement.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Measure the split on the bone
+…
+5be33b6
+```
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Draw the boundary onto the surface without an optimizer
+…
+99d5214
+```
+Each boundary node is moved toward its closest point on the surface as
+far as leaves every hexahedron it belongs to certified and still
+holding half the scaled Jacobian it was cut with. Nodes are answered
+for one at a time against a check that proves rather than samples, so
+nothing settles an energy and nothing waits on convergence.
+
+The share kept is a dial rather than an outcome: the mesh comes out at
+exactly that share of what it was cut with.
+
+Bone at 64 divisions, average distance from the surface as a fraction
+of a cell: 0.151 to 0.030 for midpoint, 0.033 to 0.005 for crossing.
+
+Quality wants the scaled Jacobian rather than the Bernstein margin,
+which a flattened cell holds onto while losing its shape; the
+certificate is still what rules out an inversion between the corners.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Settle how far the boundary is placed and drawn
+…
+439190d
+```
+The share of quality a cell must keep becomes a parameter beside the
+placement, and the two arrive as a Marching with a default: crossings
+a fifth of an edge off either end, seven tenths of the quality kept.
+
+Swept against each other on a bone, the two are complements rather
+than alternatives. At matched quality a crossing held a fifth off the
+ends leaves the boundary four times closer than one held at the middle
+and drawn harder, so placing the boundary well and drawing it on are
+worth doing both. Quality is better spent through the guard, which
+only moves the boundary, than through the share, which costs every
+cell.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Keep only the comments that reach the docs
+…
+1c34738
+```
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Write the bone out to look at
+…
+5c164b2
+```
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Take the classes from rasterizing rather than finding them again
+…
+5bd0722
+```
+Rasterizing already decides how every cell meets the surface, so the
+uniform cut was paying twice for it, once in overlap tests and once in
+ray casts. A test pins the two against each other.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Keep only the comments that reach the docs
+…
+d347ce1
+```
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+tidy up
+2fcb223
+Separate ambiguous faces and cut cells into their pieces
+…
+47dee46
+```
+Enumerating all 256 sign configurations shows the cells that come out
+inverted are the ones whose faces join across an ambiguity and the ones
+whose inside corners fall into two pieces sharing a body point. Neither
+is the doubly crossed edge the bail in loops watches for, which never
+fires. Separating every ambiguous face is the only resolution both cells
+sharing it can reach alone, and it leaves the face test with nothing to
+decide, so the cast that answered it goes as well.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JxyHmZyepf5jc2633M6td8
+```
+marching: a Finish enum for the boundary, replacing keep: Option
+…
+652dc6d
+```
+`Marching.keep: Option<Scalar>` reads as a magic `None`/`Some(share)`;
+`Finish::{Cut, Draw(share)}` names the two outcomes. No behaviour change.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014VV9P6aD99HjLNS3SADmBE
+```
+move tests to tests
+067c058
+marching: drop the bone STL benchmarks from the tests
+…
+23dee87
+```
+`bone_uniform`, `bone_marching`, `guard_swept`, and `guard_against_keep`
+all read `bone_tri.stl`, which is not in the tree.
+`certification_on_sharp_features` covers the crease behaviour from
+fixtures built in the test.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014VV9P6aD99HjLNS3SADmBE
+```
+no useful to keep ignored tests since will just keep ignoring them
+2b6b35f
+no useful to keep ignored tests since will just keep ignoring them
+676fc80
+remove unused things
+1431b76
+marching: a fit-only finish, no elements added
+…
+4360e04
+```
+`Finish::Fit(Freedom::{Whole, Shell})` hands the split all-hex mesh
+straight to the Protais energy fit — the mesh deforms onto the surface,
+connectivity fixed, nothing added. `Whole` frees every node, `Shell` the
+boundary and one ring. `Mesh::fit` widened `pub(super)` -> `pub(crate)`.
+
+Beats `buffer` on smooth/graded inputs (tighter boundary gap, no shell
+layer); inverts on sharp creases, where `buffer` stays the choice.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014VV9P6aD99HjLNS3SADmBE
+```
+tidy up
+b763452
+tidy up
+2fb6c9d
+marching: mesh a sampled field, and share the case topology with grid
+…
+94a3d6c
+```
+`MarchingCubes::hexahedra` meshes the object where a scalar field on a
+regular grid reaches its level, with hexahedra alone, on the same level,
+spacing and gradient that `extract` takes. The samples are the nodes, a
+crossing is the field interpolated along the edge (held off the ends by the
+same guard), and the spacing may differ along each axis, so a segmentation
+no longer has to become an STL to be meshed. `Signs` carries either the
+rasterized signs or a field, and `polyhedra` takes the cells to visit
+instead of a lattice.
+
+The clipping of a cell into polyhedra, which was private to the hexahedral
+pathway, moves to `grid::marching_cubes::separated`, where the isosurface
+can use it too: `Method::Separated` cuts by the signs at the corners alone
+with every ambiguous face kept apart, so the surface it triangulates is the
+boundary of the hexahedra from the same samples. The Lewiner tests are left
+to decide by the field, which can join, and that is unsound to subdivide.
+
+Tests: the surface is closed and consistently oriented on a sphere and on a
+field of noise, winds and points its normals as Lewiner's do, and keeps a
+diagonal pair of samples apart (mutation-checked); the hexahedra hold the
+volume of a sphere sampled at uneven spacing, conform on noise, and have
+the surface's vertices on their boundary (spacing and interpolation
+mutation-checked).
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+tidy up
+3fcc380
+mrbuche
+force-pushed
+the
+marching
+branch
+from
+47bbbfe to
+3fcc380
+Compare
+September 29, 2026 19:27
+tidy up
+95f2d79
+Hide details
+View details
+mrbuche
+merged commit eb28999
+into
+main
+Sep 30, 2026
+75 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+mrbuche
+deleted the
+marching
+branch
+September 30, 2026 15:48
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

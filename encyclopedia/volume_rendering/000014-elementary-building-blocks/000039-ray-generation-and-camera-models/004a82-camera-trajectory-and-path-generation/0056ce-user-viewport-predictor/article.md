@@ -1,0 +1,190 @@
+# User Viewport Predictor
+
+Also called: Viewport trajectory prediction
+
+## Overview
+The User Viewport Predictor estimates future camera poses (6DoF) from recent interaction history to enable proactive resource allocation in volume rendering and 3D scene delivery [S1]. It differs from synthetic or spline-based trajectory generators by relying on empirical user data rather than predefined geometric paths [S1]. It serves as a lightweight, short-term forecasting module that can be replaced by more complex models like deep learning predictors [S1].
+
+## How it works
+The method uses linear regression to predict the next $N$ frames based on a sliding window of recent observations.
+
+**Inputs and Outputs**
+*   **Input**: A sequence of 6DoF viewport poses $\mathbf{P}_t = [x_t, y_t, z_t, \alpha_t, \beta_t, \gamma_t]$ for $t$ in the history window $hw$.
+*   **Output**: Predicted 6DoF poses for the prediction window $pw$.
+
+**Data Structures**
+*   **History Window ($hw$)**: A buffer storing recent viewport samples.
+*   **Prediction Window ($pw$)**: The temporal range into the future to predict.
+*   **Linear Model**: For each of the 6 degrees of freedom, a separate linear regression model $y = mx + c$ is maintained.
+
+**Parameters**
+*   $hw = 0.5$ seconds [S1].
+*   $pw = 1$ second [S1].
+*   Frame rate: Assumed 36 FPS for synchronization with bandwidth sampling [S1].
+
+**Steps**
+1.  **Re-center Angular Data**: Before fitting, handle the cyclical nature of rotation angles ($\alpha, \beta, \gamma$).
+    *   Set the angle of the first point in $hw$ as $0$.
+    *   Calculate subsequent angles relative to this reference.
+    *   Angles increase clockwise and decrease counter-clockwise.
+    *   Clamp the resulting range to $[-180, 180]$ to ensure continuity [S1].
+2.  **Fit Linear Model**: For each of the 6 features independently:
+    *   Let $x_i$ be the relative time index (order) of the $i$-th sample in $hw$ compared to the first point.
+    *   Let $y_i$ be the value of the feature (position or re-centered angle) at that index.
+    *   Compute the linear regression coefficients (slope $m$ and intercept $c$) for the set $\{(x_i, y_i)\}$ [S1].
+3.  **Forecast**: For each future time step $k$ in the prediction window $pw$:
+    *   Calculate the relative time index $x_{pred}$ from the start of $hw$.
+    *   Predict the feature value $y_{pred} = m \cdot x_{pred} + c$ [S1].
+4.  **Update**: Continuously slide the $hw$ window forward as new viewport data arrives and re-fit the models [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+class UserViewportPredictor:
+    def __init__(self, history_window_sec=0.5, pred_window_sec=1.0, fps=36):
+        self.history_window_sec = history_window_sec
+        self.pred_window_sec = pred_window_sec
+        self.fps = fps
+        self.history_window_len = int(history_window_sec * fps)
+        self.pred_window_len = int(pred_window_sec * fps)
+        
+        # Buffers for 6DoF: [x, y, z, alpha, beta, gamma]
+        self.history_buffer = np.zeros((self.history_window_len, 6))
+        self.model_params = np.zeros((6, 2)) # [slope, intercept] for each DOF
+        self.is_fitted = False
+
+    def _recenter_angles(self, angles):
+        """
+        Re-center angular data to handle cyclical nature.
+        Sets first point to 0, range [-180, 180].
+        """
+        if len(angles) == 0:
+            return angles
+        
+        first_angle = angles[0]
+        # Calculate relative angles
+        rel_angles = angles - first_angle
+        
+        # Normalize to [-180, 180]
+        # This assumes small changes between frames to avoid large jumps
+        # In practice, one might use modulo arithmetic, but the source 
+        # specifies a simple re-centering relative to the first point.
+        # We clamp to ensure the range constraint mentioned.
+        recentered = np.clip(rel_angles, -180, 180)
+        return recentered
+
+    def update(self, new_pose, timestamp):
+        """
+        Add a new viewport pose to the history and re-fit models.
+        new_pose: array-like of shape (6,)
+        """
+        # Shift buffer
+        self.history_buffer = np.roll(self.history_buffer, -1, axis=0)
+        self.history_buffer[-1, :] = new_pose
+        
+        # Check if buffer is full
+        if not self.is_fitted:
+            # Need to fill buffer first? Or fit with available data.
+            # Source implies continuous fitting to recent history.
+            # Assuming we fit once buffer has enough points or always fit.
+            pass
+
+        self._fit_models()
+
+    def _fit_models(self):
+        """
+        Fit linear regression for each of the 6 DOFs.
+        """
+        # Use all available points in history buffer (assuming filled)
+        # If buffer is not full, use available points.
+        valid_points = np.sum(np.any(self.history_buffer != 0, axis=1))
+        if valid_points < 2:
+            return
+
+        # Get valid indices
+        indices = np.arange(self.history_window_len)
+        # Mask for non-zero entries (assuming 0 is invalid/empty)
+        # A more robust check would be a timestamp or valid flag, 
+        # but based on source, we assume the buffer is populated sequentially.
+        
+        # Relative time indices (x)
+        # Source: "relative order in the sequence, compared to the first point in hw"
+        # Let's assume the buffer is always full for the model fitting context
+        # or we use the last N points.
+        
+        # For simplicity, assume buffer is full and valid
+        x = np.arange(self.history_window_len)
+        
+        for dof in range(6):
+            y = self.history_buffer[:, dof]
+            
+            # Handle angles (dofs 3, 4, 5)
+            if dof >= 3:
+                y = self._recenter_angles(y)
+            
+            # Linear Regression: y = mx + c
+            # Using numpy polyfit for simplicity in pseudocode
+            # polyfit returns [m, c] for degree 1
+            if len(x) >= 2:
+                params = np.polyfit(x, y, 1)
+                self.model_params[dof, :] = params
+                self.is_fitted = True
+
+    def predict(self):
+        """
+        Predict future viewports for the prediction window.
+        Returns: array of shape (pred_window_len, 6)
+        """
+        if not self.is_fitted:
+            return None
+            
+        # Relative time indices for prediction
+        # Source: "forecast future positions in the prediction window"
+        # The x values should continue from the history window.
+        # If hw ends at index T, pw starts at T+1, T+2...
+        
+        # Determine the x-range for prediction
+        # Assuming the history window x values were 0 to hw_len-1
+        start_x = self.history_window_len
+        x_pred = np.arange(start_x, start_x + self.pred_window_len)
+        
+        predictions = np.zeros((self.pred_window_len, 6))
+        
+        for dof in range(6):
+            m, c = self.model_params[dof, :]
+            y_pred = m * x_pred + c
+            
+            # For angles, we might need to re-center again if the prediction
+            # extends far, but for short pw=1s, linear extrapolation of 
+            # re-centered angles is used [S1].
+            predictions[:, dof] = y_pred
+            
+        return predictions
+```
+
+**Edge Cases and Pitfalls**
+*   **Angular Discontinuity**: The cyclical nature of angles ($0^\circ \equiv 360^\circ$) can cause large errors in linear regression if not handled. The method requires re-centering relative to the first point in the history window [S1].
+*   **Short History**: If the history window is too short, the linear model may not capture the trajectory trend accurately.
+*   **Non-Linear Motion**: Linear regression assumes constant velocity/rotation. Sudden user movements may lead to prediction errors [S1].
+
+## Subtopics
+
+### Engagement Estimation
+A module that processes interaction information to evaluate the type, parameters, speed, and duration of user engagement, potentially predicting consecutive viewpoints or regions of interest [S2, unofficial]. It incorporates statistics such as the duration of interaction with a particular region during zooming or rotation around an axis [S2, unofficial]. It evaluates interaction speed and predicts consecutive viewpoints [S2, unofficial]. This is a more sophisticated variant that focuses on semantic interaction rather than just geometric trajectory [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(1)$ per frame for fitting, as the number of features (6) and history window size (fixed at 0.5s) are constant.
+*   **Memory Complexity**: $O(hw \cdot 6)$, where $hw$ is the history window size in samples.
+*   **Performance**: Simple and fast, suitable for real-time systems [S1].
+*   **Accuracy**: Reasonable accuracy for short-term forecasting [S1].
+*   **Limitations**: Assumes linear motion; may fail during rapid or non-linear user interactions [S1].
+
+## Background
+The method was introduced in the context of L3GS (Layered 3D Gaussian Splats for Efficient 3D Scene Delivery) [S1]. It was chosen for its simplicity, speed, and reasonable accuracy in short-term forecasting, similar to its use in other viewport-adaptive systems [S1]. The modular design allows for future replacement with more sophisticated models like deep learning predictors [S1].
+
+## Sources
+[S1] L3GS: Layered 3D Gaussian Splats for Efficient 3D Scene Delivery, https://doi.org/10.1145/3680207.3723485, fetched 2026-10-27
+[S2] Dynamic Focus + Context for Volume Rendering, https://doi.org/10.2312/pe/vmv/vmv10/331-338, fetched 2026-10-26 (unofficial)

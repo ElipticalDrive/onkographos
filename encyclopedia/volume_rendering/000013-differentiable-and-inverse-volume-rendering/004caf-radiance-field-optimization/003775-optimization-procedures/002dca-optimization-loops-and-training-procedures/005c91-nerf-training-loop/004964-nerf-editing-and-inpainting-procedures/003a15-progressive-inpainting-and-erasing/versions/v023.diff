@@ -1,0 +1,149 @@
+--- v022.md
++++ v023.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Progressive Inpainting-and-Erasing (PERF) is a method for reconstructing a panoramic Neural Radiance Field (NeRF) from a single input panorama by iteratively expanding the viewpoint coverage. It solves the problem of geometry conflict between visible regions (observed in reference views) and invisible regions (occluded or unseen) by computing a mask of conflicted areas and eliminating them from the NeRF training supervision [S1]. Unlike methods that rely on multiple input views or semantic priors, PERF generates novel views via inpainting and progressively integrates them while erasing geometrically inconsistent pixels to ensure 3D consistency [S1].
++Progressive Inpainting-and-Erasing (PERF) is a method for reconstructing a panoramic Neural Radiance Field (NeRF) from a single input panorama by iteratively expanding the viewpoint coverage [S1]. It solves the problem of geometry conflict between visible regions (observed in reference views) and invisible regions (occluded or unseen) by computing a mask of conflicted areas and eliminating them from the NeRF training supervision [S1]. Unlike methods that rely on multiple input views or semantic priors, PERF generates novel views via inpainting and progressively integrates them while erasing geometrically inconsistent pixels to ensure 3D consistency [S1].
+ 
+ ## How it works
+@@ -19,10 +19,10 @@
+ 1.  **Initial RGBD Estimation:** The input $I_{rgb}$ is processed to estimate a depth map $I_d$, resulting in an RGBD panorama $I_{rgbd}$ [S1]. (Specific equation number referenced as Eq. (2) in source, but formula details for depth estimation are not provided in the text; [G] assumes a standard monocular depth estimator is used here).
+ 2.  **Single-View NeRF Training:** The initial NeRF $f_{nerf}$ is trained using $I_d$ and $I_{rgb}$ [S1]. (Specific equation number referenced as Eq. (3) in source, but formula details are not provided; [G] assumes standard NeRF volume rendering loss minimization).
+-3.  **Invisible Region Mask ($m'$):** For a new view, invisible regions are detected by warping the new view's depth $v'$ to the reference view's coordinate system and comparing it with the reference depth $v$.
++3.  **Invisible Region Mask ($m'$):** For a new view, invisible regions are detected by warping the new view's depth $v'$ to the reference view's coordinate system and comparing it with the reference depth $v$ [S1].
+     $$
+     m'_{ij} = \mathbb{I}(warp(v'_{ij}) - v_{ij} > \epsilon)
+     $$
+     where $m'_{ij}$ is the mask pixel (1 for invisible, 0 for visible), $v_{ij}$ is the reference depth, $v'_{ij}$ is the warped depth from the new view, $warp(\cdot)$ is the warping function, $\mathbb{I}(\cdot)$ is the indicator function, and $\epsilon$ is a small threshold value [S1].
+-4.  **Conflicted Region Mask ($m''$):** For each reference view $I_{ref}$, conflicted regions are detected by warping the reference depth $v$ to the new view's coordinate system and comparing it with the new view's depth $v'$.
++4.  **Conflicted Region Mask ($m''$):** For each reference view $I_{ref}$, conflicted regions are detected by warping the reference depth $v$ to the new view's coordinate system and comparing it with the new view's depth $v'$ [S1].
+     $$
+     m''_{ij} = \mathbb{I}(v_{ij} - warp(v'_{ij}) > \epsilon)
+@@ -65,66 +65,63 @@
+ def progressive_inpainting_and_erasing(I_rgb):
+     # 1. Estimate depth and create RGBD panorama
+-    I_d = estimate_depth(I_rgb) # Eq. (2)
+-    I_rgbd = combine_rgb_depth(I_rgb, I_d)
+-    
++    I_d = estimate_depth(I_rgb)  # [G] Standard monocular depth estimation
++    I_rgbd = stack_channels(I_rgb, I_d)  # Combine RGB and depth into single tensor
++
+     # 2. Train initial single-view NeRF
+-    f_nerf = train_single_view_nerf(I_rgbd, iterations=10000) # Eq. (3)
+-    
++    f_nerf = initialize_neRF()  # Instant-NGP: hash table 2^19, 16 levels, channel size 2
++    train_nerf(f_nerf, I_rgbd, I_rgb, iterations=10000)  # [G] Standard NeRF volume rendering loss minimization with Adam
++
+     # 3. Generate novel view trajectories
+-    p_k = generate_trajectories(I_d, num_views=32)
+-    
++    p_k = generate_trajectories(I_d, num_views=32)  # [G] Sample 32 poses at gradually increasing distances from original
++
+     # 4. Initialize reference views
+-    I_ref = {I_rgbd}
+-    
++    I_ref = [I_rgbd]
++
+     # 5. Progressive loop
+     for n in range(1, len(p_k) + 1):
+         # Sample new view
+-        p = random_sample(p_k)
+-        
++        p = random.choice(p_k)
++
+         # Render initial depth for new view from current NeRF
+-        v_new = render_depth(f_nerf, p)
+-        
++        v_new = render_depth(f_nerf, p)  # [G] Cast rays, accumulate depth using NeRF parameters
++
+         # Compute invisible regions (Eq. 4)
+         # Warp new view depth to reference view coordinates
+-        v_new_warped = warp(v_new, p, I_ref[0].pose)
++        v_new_warped = warp_depth(v_new, p, I_ref[0].pose)  # [G] Project depth using camera extrinsics
+         v_ref = I_ref[0].depth
+-        epsilon = 0.01 # Small value
+-        m_invisible = indicator_function(v_new_warped - v_ref > epsilon)
+-        
++        epsilon = 0.01  # Small threshold value
++        m_invisible = (v_new_warped - v_ref > epsilon).astype(float)  # Indicator function
++
+         # Perform collaborative RGBD inpainting (Eq. 5)
+-        # Use Stable Diffusion for RGB and depth estimator for depth
+-        I_new_rgb = inpaint_rgb(I_rgb, m_invisible, model="StableDiffusion")
+-        I_new_depth = inpaint_depth(I_d, m_invisible, model="DepthEstimator")
+-        I_new_rgbd = combine_rgb_depth(I_new_rgb, I_new_depth)
+-        
++        I_new_rgb = inpaint_region(I_rgb, m_invisible, model="StableDiffusion")  # [G] Stable Diffusion inpainting
++        I_new_depth = inpaint_region(I_d, m_invisible, model="DepthEstimator")  # [G] Depth estimation/stitching
++        I_new_rgbd = stack_channels(I_new_rgb, I_new_depth)
++
+         # Compute conflicted regions and erase (Eq. 6)
+-        # Initialize final conflict mask
+         m_conflict_final = None
+-        
++
+         for I_ref_view in I_ref:
+             # Warp reference view depth to new view coordinates
+-            v_ref_warped = warp(I_ref_view.depth, I_ref_view.pose, p)
+-            m_conflict = indicator_function(I_ref_view.depth - v_ref_warped > epsilon)
+-            
++            v_ref_warped = warp_depth(I_ref_view.depth, I_ref_view.pose, p)
++            m_conflict = (I_ref_view.depth - v_ref_warped > epsilon).astype(float)
++
+             if m_conflict_final is None:
+                 m_conflict_final = m_conflict
+             else:
+-                # Logic AND operation across all reference views
+-                m_conflict_final = logical_and(m_conflict_final, m_conflict)
+-        
++                m_conflict_final = m_conflict_final * m_conflict  # Logic AND operation
++
+         # Erase conflicted regions from supervision
+-        # [G] Implementation detail: The loss calculation for the new view
+-        # should ignore pixels where m_conflict_final is 1.
+-        
++        # [G] Implementation detail: Mask out pixels where m_conflict_final == 1 during loss computation
++
+         # Add new view to reference set
+-        I_ref.add(I_new_rgbd)
+-        
++        I_ref.append(I_new_rgbd)
++
+         # Fine-tune NeRF
+         # First 100 iterations: only new view
+         train_nerf(f_nerf, {I_new_rgbd}, iterations=100, lr=1e-3)
+         # Remaining 1900 iterations: all reference views
+-        train_nerf(f_nerf, I_ref, iterations=1900, lr_schedule="cosine_anneal", 
++        train_nerf(f_nerf, I_ref, iterations=1900, lr_schedule="cosine_anneal",
+                    start_lr=1e-3, end_lr=1e-4, exclude_conflicted=m_conflict_final)
+-        
++
+     return f_nerf
+ ```
+@@ -139,11 +136,11 @@
+ 
+ ### Collaborative RGBD Inpainting
+-A sub-method that uses Stable Diffusion for RGB inpainting and a depth estimator for depth stitching to complete invisible regions [S1]. It is chosen when monocular depth estimation is insufficient and external generative priors are needed.
++A sub-method that uses Stable Diffusion for RGB inpainting and a depth estimator for depth stitching to complete invisible regions [S1]. It is chosen when monocular depth estimation is insufficient and external generative priors are needed [G].
+ 
+ ### Single-View NeRF Training
+-The initial training phase using a single RGBD panorama [S1]. It is chosen as the starting point for the progressive expansion.
++The initial training phase using a single RGBD panorama [S1]. It is chosen as the starting point for the progressive expansion [G].
+ 
+ ### Depth Warping
+-The geometric operation used to detect invisible and conflicted regions by projecting depth maps between camera poses [S1]. It is chosen for its efficiency in identifying visibility changes.
++The geometric operation used to detect invisible and conflicted regions by projecting depth maps between camera poses [S1]. It is chosen for its efficiency in identifying visibility changes [G].
+ 
+ ## Operating characteristics
+@@ -152,7 +149,7 @@
+ *   **Measured Performance:** Evaluated on the Replica dataset (2048x1024 resolution) and in-the-wild data [S1].
+ *   **Strengths:** Can reconstruct panoramic NeRFs from a single input view; handles geometry conflicts effectively; ensures 3D consistency through erasing [S1].
+-*   **Limitations:** Relies on the quality of the initial depth estimation and the inpainting model; may struggle with highly dynamic or textureless scenes [S1].
+-*   **When to use:** When only a single panorama is available and a full 3D reconstruction is required.
+-*   **When not to use:** When multiple input views are available, or when high-fidelity texture is critical and inpainting artifacts are unacceptable.
++*   **Limitations:** Relies on the quality of the initial depth estimation and the inpainting model [S1].
++*   **When to use:** When only a single panorama is available and a full 3D reconstruction is required [S1].
++*   **When not to use:** When multiple input views are available, or when high-fidelity texture is critical and inpainting artifacts are unacceptable [G].
+ 
+ ## Background

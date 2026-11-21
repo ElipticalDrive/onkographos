@@ -1,0 +1,859 @@
+Sphere tracing, rendered in ASCII (well, VT100/ANSI terminal emulation really)
+
+## Example
+![spotify logo preview](http://imgur.com/amEG2Ae.gif)
+
+This is basically the ASCII equivalent of a basic [Shadertoy](https://www.shadertoy.com/) raymarching demo.
+
+## Steps to Compile
+
+```
+cmake .
+make
+```
+
+## Notes
+
+There are a couple demos in here, one which has a bunch of random objects on
+top of a checkerboard with the light positioned at the camera, and another one
+which renders the Square logo (since it was easy to represent with constructive
+solid geometry, and some of my friends work at Square).
+
+It's pretty slow and unoptimized.  I plan on using this technique on a more
+elaborate obfuscated C demo someday but until then, this is a sandbox for
+experiments.
+
+There is also my own webgl/glsl sphere tracing sandbox in webgl.html.
+
+### palette.h
+```
+// default gnome-terminal color scheme Tango:
+// #2E2E34343636:#CCCC00000000:#4E4E9A9A0606:#C4C4A0A00000:
+// #34346565A4A4:#757550507B7B:#060698209A9A:#D3D3D7D7CFCF:
+// #555557575353:#EFEF29292929:#8A8AE2E23434:#FCFCE9E94F4F:
+// #72729F9FCFCF:#ADAD7F7FA8A8:#3434E2E2E2E2:#EEEEEEEEECEC
+int palette_[] = {
+#if 0
+  0,0,0, // 0x2e, 0x34, 0x36, // color 0 used to be dark grey but isn't anymore?
+  0xcc, 0x00, 0x00,
+  0x4e, 0x9a, 0x06,
+  0xc4, 0xa0, 0x00,
+  0x34, 0x65, 0xa4,
+  0x75, 0x50, 0x7b,
+  0x06, 0x98, 0x9a,
+  0xd3, 0xd7, 0xcf,
+  0x55, 0x75, 0x53,
+  0xef, 0x29, 0x29,
+  0x8a, 0xe2, 0x34,
+  0xfc, 0xe9, 0x4f,
+  0x72, 0x9f, 0xcf,
+  0xad, 0x7f, 0xa8,
+  0x34, 0xe2, 0xe2,
+  0xee, 0xee, 0xec
+#else
+  // OS X terminal default colors
+  0, 0, 0,
+  153, 0, 0,
+  0, 166, 0,
+  153, 153, 0,
+  0, 0, 178,
+  178, 0, 178,
+  0, 166, 178,
+  191, 191, 191,
+  102, 102, 102,
+  229, 0, 0,
+  0, 217, 0,
+  229, 229, 0,
+  0, 0, 255,
+  229, 0, 229,
+  0, 229, 229,
+  229, 229, 229
+#endif
+};
+```
+
+### render.cc
+```
+#include <stdio.h>
+#include "palette.h"
+#include "vec3.h"
+
+namespace {
+const int bayer_matrix[] = {
+   1, 9, 3,11,
+  13, 5,15, 7,
+   4,12, 2,10,
+  16, 8,14, 6};
+
+// get gamma-corrected intensity of a pixel value
+float gamma(float x) {
+  return pow(x*(1.0/255.0), 2.2);
+}
+
+void nearestcolor(const vec3& c, int *fg, int *bg) {
+  // brute force
+  float minerr = 1e30;
+  *fg = -1; *bg = -1;
+  for(int i = 0; i < 16; i++) {
+    for(int j = 0; j < 8; j++) {
+      float er = 0.7*gamma(palette_[j*3  ]) + 0.3*gamma(palette_[i*3  ]) - c.x;
+      float eg = 0.7*gamma(palette_[j*3+1]) + 0.3*gamma(palette_[i*3+1]) - c.y;
+      float eb = 0.7*gamma(palette_[j*3+2]) + 0.3*gamma(palette_[i*3+2]) - c.z;
+      float vr = gamma(palette_[j*3  ]) - gamma(palette_[i*3  ]);
+      float vg = gamma(palette_[j*3+1]) - gamma(palette_[i*3+1]);
+      float vb = gamma(palette_[j*3+2]) - gamma(palette_[i*3+2]);
+#if 0
+      float ey =  0.257*er + 0.504*eg + 0.098*eb;
+      float ev =  0.439*er - 0.368*eg - 0.071*eb;
+      float eu = -0.148*er - 0.291*eg + 0.439*eb;
+      float err = ey*ey + ev*ev + eu*eu;
+#if 0
+      float vy =  0.257*vr + 0.504*vg + 0.098*vb;
+      float vv =  0.439*vr - 0.368*vg - 0.071*vb;
+      float vu = -0.148*vr - 0.291*vg + 0.439*vb;
+      err += 0.01*(vu*vu + vb*vb);
+#endif
+#else
+      float err = er*er + eg*eg + eb*eb;
+      err += 0.04*(vr*vr + vg*vg + vb*vb);
+#endif
+      if (err < minerr) { minerr = err; *fg = i; *bg = j; }
+    }
+  }
+  //printf("minerr=%g best=%d,%d c=%g,%g,%g\n", minerr, *fg, *bg, c.x, c.y, c.z);
+}
+
+int color_LUT[16*16*16];
+
+}
+
+void render_init() {
+  const float scale = 1.0/15.0;
+  for (int r = 0; r < 16; r++) {
+    for (int g = 0; g < 16; g++) {
+      for (int b = 0; b < 16; b++) {
+        int fg, bg;
+        nearestcolor(vec3(r*scale, g*scale, b*scale), &fg, &bg);
+        color_LUT[r+g*16+b*256] = bg*32+fg;
+        // printf("%x%x%x=f=%d b=%d\n", r,g,b, fg, bg);
+      }
+    }
+  }
+}
+
+// nearest color fg/bg, dithering offset x,y
+void render_color(const vec3& c, int x, int y, int *cur_fg, int *cur_bg) {
+  float o = bayer_matrix[(x&3) + (y&3)*4]*(1.0/8.0);
+  int r = std::max(0, std::min(15, (int) (c.x*15.0 - o)));
+  int g = std::max(0, std::min(15, (int) (c.y*15.0 - o)));
+  int b = std::max(0, std::min(15, (int) (c.z*15.0 - o)));
+  unsigned int entry = color_LUT[r+g*16+b*256];
+  int fg = entry&31;
+  int bg = entry>>5;
+  // optimal rules:
+  if (bg == fg) {
+    if (bg != *cur_bg) printf("\x1b[%dm ", 40+bg);
+    else
+      putchar(' ');
+    *cur_bg = bg;
+  } else {
+    if (fg == *cur_fg) {
+      if (bg != *cur_bg) printf("\x1b[%dm#", 40+bg);
+      else
+        putchar('#');
+    } else if ((fg&8) == ((*cur_fg)&8)) {
+      // don't need to change bold attribute
+      if (bg != *cur_bg) printf("\x1b[%d;%dm#", 40+bg, 30+(fg&7));
+      else
+        printf("\x1b[%dm#", 30+(fg&7));
+    } else if (fg&8) {
+      // need to set bold attribute
+      if (bg != *cur_bg) printf("\x1b[1;%d;%dm#", 40+bg, 30+(fg&7));
+      else
+        printf("\x1b[1;%dm#", 30+(fg&7));
+    } else {
+      // need to reset both bg and fg
+      if ((*cur_fg)&8) printf("\x1b[0;%d;%dm#", 40+bg, 30+(fg&7));
+      else
+        printf("\x1b[%d;%dm#", 40+bg, 30+(fg&7));
+    }
+    *cur_bg = bg;
+    *cur_fg = fg;
+  }
+}
+```
+
+### render.h
+```
+#include "vec3.h"
+
+void render_init();
+
+// print one dithered pixel for location x,y
+void render_color(const vec3& color, int x, int y, int *cur_fg, int *cur_bg);
+```
+
+### rt.cc
+```
+// this is just a ray tracing demo to start with
+#include <stdio.h>
+#include <math.h>
+#include <unistd.h>
+#include "palette.h"
+
+float frame_ = 0;
+
+struct vector3f { float x,y,z; };
+vector3f v3(float a, float b, float c) { return vector3f{a,b,c}; }
+vector3f operator+(const vector3f &a, const vector3f &b) {
+  return {a.x+b.x,a.y+b.y,a.z+b.z};
+}
+vector3f operator-(const vector3f &a, const vector3f &b) {
+  return {a.x-b.x,a.y-b.y,a.z-b.z};
+}
+vector3f operator*(const vector3f &a, float b) {
+  return {a.x*b,a.y*b,a.z*b};
+}
+float operator*(const vector3f &a, const vector3f &b) {
+  return a.x*b.x+a.y*b.y+a.z*b.z;
+}
+vector3f normalize(const vector3f &v) {
+  return v*(1.0/sqrt(v*v));
+}
+
+// returns distance to scene, material m, and normal n
+float dist(const vector3f &p, int *m, vector3f *n) {
+  *m = -1;
+  float d = 1e30;
+  // checkerboard on the bottom
+  if (p.y < 0) {
+    d = -40/p.y;
+    vector3f k = p*(d*.02) + v3(frame_*0.05, 0, frame_*0.07);
+    //printf("%g,%g,%g, %d,%d\n", k.x, k.y, k.z, lrint(k.x), lrint(k.z));
+    *m = ((lrint(k.x)&1)^(lrint(k.z)&1));
+    *n = v3(0,1,0);
+  }
+  vector3f c = v3(5.0f*cos(frame_*0.03), 0, 30+10.0f*sin(frame_*0.01));
+  float r2 = 15*15;
+  float cp = c*p;
+  float p2 = p*p;
+  float disc = cp*cp - p2*(c*c - r2);
+  if (disc > 0) {
+    float t = (cp - sqrt(disc))/p2;
+    if (t < d) {
+      d = t;
+      *m = 2;
+      *n = normalize(p*t - c);
+    }
+  }
+  return d;
+}
+
+// nearest color, offset o
+int nearest(vector3f c, int o) {
+  // brute force
+  float minerr = 65536*3;
+  int besti = 0;
+  for(int i = 0; i < 17; i++) {
+    float er = palette_[i*3] + o - 255*c.x;
+    float eg = palette_[i*3+1] + o - 255*c.y;
+    float eb = palette_[i*3+2] + o - 255*c.z;
+#if 0
+    float ey = 0.257*er + 0.504*eg + 0.098*eb;
+    float ev = 0.439*er - 0.368*eg - 0.071*eb;
+    float eu = -0.148*er - 0.291*eg + 0.439*eb;
+    int err = ey*ey + 2*ev*ev + 2*eu*eu;
+#else
+    int err = er*er + eg*eg + eb*eb;
+#endif
+    if (err < minerr) { minerr = err; besti = i-1; }
+  }
+  //printf("minerr=%d besti=%d c=%g,%g,%g\n", minerr, besti, c.x, c.y, c.z);
+  return besti;
+}
+
+// ordered dithering Bayer matrix:
+const int bayer[] = {1,9,3,11,13,5,15,7,4,12,2,10,16,8,14,6};
+// use bayer[i&3 + (j&3)*4] / 17
+int main()
+{
+  int x,y;
+  vector3f lcol = {0.7,0.5,0.5};
+  float mshiny[] = {10,10,10};
+  vector3f mcol[] = {
+    {0.0f, 1.6f, 0.0f},
+    {0.0f, 0.0f, 0.0f},
+    {1.0f, 0.0f, 0.0f}};
+  for(;;) {
+    vector3f light = normalize(v3(0.2f*sin(frame_*0.01), 1, -1));
+    for(y=0;y<24;y++) {
+      for(x=0;x<80;x++) {
+        vector3f color = v3(0,0,0);
+        for(float xx = -0.25;xx<=0.25;xx+=0.5) { // 2 x samples
+          for(float yy = -0.75;yy<=0.75;yy+=0.5) { // 4 y samples
+            vector3f p = normalize(v3(x-40.0f+xx,25.0f-2.0f*y+yy,40.0f)), n;
+            int m = -1;
+            float d = dist(p, &m, &n);
+            //printf("%d %d %g %g %g %g %g %g %d\n", x, y, xx, yy, p.x, p.y, p.z, d, m);
+            if (m != -1) {
+              float l = light*n;
+              //printf("m=%d l=%g shiny=%g\n", m, l, pow(l, mshiny[m]));
+              if (l > 0) color = color + mcol[m]*l + lcol*pow(l, mshiny[m]);
+            }
+          }
+        }
+        int fg = nearest(color * 0.125, -48+4*bayer[(x&3) + (y&3)*4]);
+        //printf("%g %g %g -> %d\n", color.x, color.y, color.z, fg);
+        if(fg>=0) printf("\x1b[%d;%dm#", !!(fg&8), 30+(fg&7));
+        else putchar(32);
+      }
+      printf("\x1b[0m\n");
+    }
+    fflush(stdout);
+    usleep(20000);
+    frame_ += 1;
+    printf("\x1b[24A");
+  }
+}
+
+#if 0
+      int bg = 0;
+      if(bg)
+        printf("\x1b[%d;%d;%dm#", !!(fg&8), 40+bg, 30+(fg&7));
+      else
+#endif
+```
+
+### spotify.cc
+```
+// sphere tracing demo with a few random elements
+#include <stdio.h>
+#include <math.h>
+#include <unistd.h>
+#include <algorithm>
+#include "render.h"
+#include "vec3.h"
+
+float frame_ = 0;
+
+vec3 lcol(0.5,0.7,0.5);
+float mshiny[] = {100,10,10,10};
+vec3 mcol[] = {
+  vec3(1.0f, 1.0f, 1.0f),
+  vec3(0.0f, 0.0f, 1.0f),
+  vec3(1.0f, 0.2f, 0.0f),
+  vec3(0.22f, 0.62f, 0.0f)};
+
+float udRoundBox(const vec3& p, const vec3& b, float r)
+{
+  return length(max(abs(p)-b,0.0))-r;
+}
+
+float sdSphere( vec3 p, float s )
+{
+  return length(p)-s;
+}
+
+vec3 rotateY(vec3 p, float a) {
+  float ca = cos(a), sa = sin(a);
+  return vec3(p.x*ca-p.z*sa, p.y, p.x*sa+p.z*ca);
+}
+
+vec3 rotateX(vec3 p, float a) {
+  float ca = cos(a), sa = sin(a);
+  return vec3(p.x, p.y*ca-p.z*sa, p.y*sa+p.z*ca);
+}
+
+float arc1(const vec3 &q, float r1, float r2, float zpos) {
+  //return std::max(
+  //    fabsf(q.z + zpos), std::max(
+  return std::max(
+          std::max(-q.x - q.y, q.x - q.y),
+          fabsf(length(vec3(q.x, q.y, 0)) - r1)) - r2;
+}
+
+// returns minimum distance to scene, material m, and normal n
+float dist(const vec3 &p, int *m) {
+  *m = -1;
+  float d = 1e30;
+  float dplane = p.y + 50;
+  if (dplane < d) {
+    // *m = ((lrint(p.x*0.01)&1)^(lrint(p.z*0.01)&1));
+    *m = 0;
+    d = dplane;
+  }
+  //vec3 q = rotateX(rotateY(p, -frame_*0.07), frame_*0.025);
+  //vec3 q = rotateY(p, frame_*0.07);
+  vec3 q = p;
+
+  float dcyl = std::max(
+      std::max(q.z - 10.0f, -10.0f - q.z),
+      length(vec3(q.x, q.y, 0)) - 50.0f);
+
+  dcyl = std::max(dcyl, -arc1(q - vec3(0, -10, 0), 40, 5, 6));
+  dcyl = std::max(dcyl, -arc1(q - vec3(0, -25, 0), 35, 4, 6));
+  dcyl = std::max(dcyl, -arc1(q - vec3(0, -35, 0), 30, 3, 6));
+  if (dcyl < d) {
+    d = dcyl;
+    *m = 3;
+  }
+
+  return d;
+}
+
+float shadow(const vec3& ro, const vec3& rd, float mint, float maxt) {
+  int m;
+  float res = 1.0;
+  for (float t = mint; t < maxt; ) {
+    float h = dist(ro+rd*t, &m);
+    if (h < 0.001) {
+      return 0;
+    }
+    res = std::min( res, 20.0f*h/t );
+    t += h;
+  }
+  return res;
+}
+
+vec3 lighting(const vec3 &p, int m, const vec3& lightpos) {
+  vec3 lightdir = normalize(lightpos - p);
+  // yet another trick from iq: use the distance field to compute dot(light,
+  // normal) instead of explicitly finding a normal.
+  // http://www.pouet.net/topic.php?which=7535&page=1
+  int _m;
+  float diffuse = std::max(0.0f, 10.0f*dist(p+lightdir*0.1, &_m));
+  float s = std::max(0.3f, shadow(p, lightdir, 0.01, length(p-lightpos)));
+  float l = std::max(0.1f, diffuse * s);
+  return mcol[m]*l + lcol*pow(l, mshiny[m]);
+}
+
+int main()
+{
+  int x,y;
+  render_init();
+  for(;;) {
+    vec3 campos = vec3(130*sin(frame_*0.02), 50 + 40*sin(frame_*0.03), -130*cos(frame_*0.02));
+    vec3 lightpos = vec3(200.0*sin(frame_*0.05),100,campos.z);
+    vec3 camz = normalize(campos*-1);
+    vec3 camx = normalize(cross(camz, vec3(0,1,0)));
+    vec3 camy = normalize(cross(camx, camz));
+    for(y=0;y<24;y++) {
+      int fg=7, bg=0;
+      for(x=0;x<80;x++) {
+        vec3 color = vec3(0,0,0);
+#ifdef AA
+        for(float xx = -0.25;xx<=0.25;xx+=0.5) { // 2 x samples
+          for(float yy = -0.75;yy<=0.75;yy+=0.5) { // 4 y samples
+            vec3 dir = normalize(vec3(x-40.0f+xx,25.0f-2.0f*y+yy,70.0f));
+#else
+            vec3 dir = normalize(vec3(x-40.0f,25.0f-2.0f*y,70.0f));
+#endif
+            dir = camx*dir.x + camy*dir.y + camz*dir.z;
+            float t = 0;
+            int m = -1;
+            for (int iter = 0; iter < 64 && t < 1e6; iter++) {
+              vec3 p = dir*t + campos;
+              float d = dist(p, &m);
+              if (d < 0.001) {
+                color = color + lighting(p, m, lightpos);
+                break;
+              }
+              t += d;
+            }
+#ifdef AA
+          }
+        }
+        render_color(color * 0.125, x, y, &fg, &bg);
+#else
+        render_color(color, x, y, &fg, &bg);
+#endif
+      }
+      printf("\x1b[0m\n");
+    }
+    fflush(stdout);
+    usleep(20000);
+    frame_ += 1;
+    printf("\x1b[24A");
+  }
+}
+```
+
+### squarelogo.cc
+```
+// sphere tracing thing using Square's logo, as it's an easy thing to represent
+// with constructive solid geometry.
+#include <stdio.h>
+#include <math.h>
+#include <unistd.h>
+#include <algorithm>
+#include "render.h"
+#include "vec3.h"
+
+float frame_ = 0;
+
+// light colors, material colors
+vec3 lcol(0.7,0.5,0.5);
+vec3 mcol[] = {
+  vec3(1.5f, 1.5f, 1.5f),  // "floor" plane
+  vec3(0.6f, 0.6f, 0.6f),  // "floor" checkerboard color (not currently used)
+  vec3(0.0f, 0.4f, 1.0f)}; // logo color
+// material shininess
+float mshiny[] = {100,10,10};
+
+// http://www.iquilezles.org/www/articles/distfunctions/distfunctions.htm
+float pow8(float t) { t*=t; t*=t; t*=t; return t; }
+float length8(float x, float y) {
+  return pow(pow8(x) + pow8(y), 1.0/8);
+}
+
+float sdTorus88(const vec3& p, float s, float t)
+{
+  return length8(length8(p.x, p.y) - s, p.z) - t;
+}
+
+float udRoundBox(const vec3& p, const vec3& b, float r)
+{
+  return length(max(abs(p)-b,0.0))-r;
+}
+
+float sdSphere( vec3 p, float s )
+{
+  return length(p)-s;
+}
+
+// returns minimum distance to scene, material m
+float dist(const vec3 &p, int *m) {
+  *m = -1;
+  float d = 1e30;
+  float dplane = p.y + 100;
+  if (dplane < d) {
+    // uncomment the next line for a checkerboard instead of a flat plane
+    //*m = ((lrint(p.x*0.01)&1)^(lrint(p.z*0.01)&1));
+    *m = 0;
+    d = dplane;
+  }
+  // outer torus
+  float douter = sdTorus88(p, 70, 15);
+  if (douter < d) {
+    *m = 2;
+    d = douter;
+  }
+  // inner box
+  float dinner = udRoundBox(p, vec3(20, 20, 5), 10);
+  if (dinner < d) {
+    *m = 2;
+    d = dinner;
+  }
+  return d;
+}
+
+// ambient occlusion hack for soft shadows
+float shadow(const vec3& ro, const vec3& rd, float mint, float maxt) {
+  int m;
+  float res = 1.0;
+  for (float t = mint; t < maxt; ) {
+    float h = dist(ro+rd*t, &m);
+    if (h < 0.001) {
+      return 0;
+    }
+    // the constant (20) tunes the hardness/softness of the shadows
+    res = std::min( res, 20.0f*h/t );
+    t += h;
+  }
+  return res;
+}
+
+vec3 lighting(const vec3 &p, int m, const vec3& lightpos) {
+  vec3 lightdir = normalize(lightpos - p);
+  // yet another trick from iq: use the distance field to compute dot(light,
+  // normal) instead of explicitly finding a normal.
+  // http://www.pouet.net/topic.php?which=7535&page=1
+  int _m;
+  float diffuse = std::max(0.0f, 10.0f*dist(p+lightdir*0.1, &_m));
+  float s = std::max(0.3f, shadow(p, lightdir, 0.01, length(p-lightpos)));
+  float l = std::max(0.1f, diffuse * s);
+  return mcol[m]*l + lcol*pow(l, mshiny[m]);
+}
+
+int main()
+{
+  int x,y;
+  render_init();
+  for(;;) {
+    vec3 campos = vec3(150*sin(frame_*0.02), 50 + 40*sin(frame_*0.03), -150*cos(frame_*0.02));
+    vec3 lightpos = vec3(200.0*sin(frame_*0.05),100,campos.z);
+    vec3 camz = normalize(campos*-1);
+    vec3 camx = normalize(cross(camz, vec3(0,1,0)));
+    vec3 camy = normalize(cross(camx, camz));
+    for(y=0;y<24;y++) {
+      int fg=7, bg=0;
+      for(x=0;x<80;x++) {
+        vec3 color = vec3(0,0,0);
+#ifdef AA
+        for(float xx = -0.25;xx<=0.25;xx+=0.5) { // 2 x samples
+          for(float yy = -0.75;yy<=0.75;yy+=0.5) { // 4 y samples
+            vec3 dir = normalize(vec3(x-40.0f+xx,25.0f-2.0f*y+yy,20.0f));
+#else
+            vec3 dir = normalize(vec3(x-40.0f,25.0f-2.0f*y,40.0f));
+#endif
+            dir = camx*dir.x + camy*dir.y + camz*dir.z;
+            // ray = (0) + dir*t
+            float t = 0;
+            int m = -1;
+            for (int iter = 0; iter < 64 && t < 1e6; iter++) {
+              vec3 p = dir*t + campos;
+              float d = dist(p, &m);
+              if (d < 0.001) {
+                color = color + lighting(p, m, lightpos);
+                break;
+              }
+              t += d;
+              if (t > 6000)
+                break;
+            }
+#ifdef AA
+          }
+        }
+        render_color(color * 0.125, x, y, &fg, &bg);
+#else
+        render_color(color, x, y, &fg, &bg);
+#endif
+        if (y == 23 && x == 65) { printf("\x1b[0;1;30mandy@a1k0n.net"); break; }
+      }
+      printf("\x1b[0m\n");
+    }
+    fflush(stdout);
+    usleep(20000);
+    frame_ += 1;
+    printf("\x1b[24A");
+  }
+}
+```
+
+### st.cc
+```
+// sphere tracing demo with a few random elements
+#include <stdio.h>
+#include <math.h>
+#include <unistd.h>
+#include <algorithm>
+#include "render.h"
+#include "vec3.h"
+
+float frame_ = 0;
+
+vec3 lcol(0.7,0.5,0.5);
+float mshiny[] = {100,10,10,10};
+vec3 mcol[] = {
+  vec3(1.0f, 1.0f, 1.0f),
+  vec3(0.0f, 0.0f, 1.0f),
+  vec3(1.0f, 0.2f, 0.0f),
+  vec3(0.2f, 1.0f, 0.0f)};
+
+float udRoundBox(const vec3& p, const vec3& b, float r)
+{
+  return length(max(abs(p)-b,0.0))-r;
+}
+
+float sdSphere( vec3 p, float s )
+{
+  return length(p)-s;
+}
+
+vec3 rotateY(vec3 p, float a) {
+  float ca = cos(a), sa = sin(a);
+  return vec3(p.x*ca-p.z*sa, p.y, p.x*sa+p.z*ca);
+}
+
+vec3 rotateX(vec3 p, float a) {
+  float ca = cos(a), sa = sin(a);
+  return vec3(p.x, p.y*ca-p.z*sa, p.y*sa+p.z*ca);
+}
+
+// returns minimum distance to scene, material m, and normal n
+float dist(const vec3 &p, int *m) {
+  *m = -1;
+  float d = 1e30;
+  float dplane = p.y + 50;
+  if (dplane < d) {
+    *m = ((lrint(p.x*0.01)&1)^(lrint(p.z*0.01)&1));
+    d = dplane;
+  }
+#if 0
+  //vec3 thingycenter = vec3(0, 40+20*sin(frame_*0.1), 0);
+  vec3 q = vec3(fmod(fabs(p.x), 100) - 50, p.y - 40, p.z);
+  //vec3 thingycenter = vec3(0, 40, 0);
+  float dbox = udRoundBox(q, vec3(10, 20, 30), 8);
+  float dsphere = sdSphere(q, 25);
+  float dthingy = std::max(-dsphere, dbox);
+  if (dthingy < d) {
+    *m = 2;
+    d = dthingy;
+  }
+#endif
+#if 0
+  float dsphere2 = sdSphere(p - vec3(0,40,80), 15);
+  if (dsphere2 < d) {
+    *m = 3;
+    d = dsphere2;
+  }
+#endif
+#if 0
+  {
+    vec3 q(p.x, p.y, 0);
+    float dcyl = std::max(fabsf(p.z) - 20.0f, length(q) - 40.0f);
+    if (dcyl < d) {
+      d = dcyl;
+      *m = 3;
+    }
+  }
+#endif
+
+  vec3 q = rotateX(rotateY(p, -frame_*0.07), frame_*0.025);
+  float dtorus = length(vec3(length(vec3(q.x, q.y, 0)) - 50, q.z, 0)) - 20;
+  if (dtorus < d) {
+    d = dtorus;
+    *m = 2;
+  }
+  return d;
+}
+
+float shadow(const vec3& ro, const vec3& rd, float mint, float maxt) {
+  int m;
+  float res = 1.0;
+  for (float t = mint; t < maxt; ) {
+    float h = dist(ro+rd*t, &m);
+    if (h < 0.001) {
+      return 0;
+    }
+    res = std::min( res, 10.0f*h/t );
+    t += h;
+  }
+  return res;
+}
+
+vec3 lighting(const vec3 &p, int m, const vec3& lightpos) {
+  vec3 lightdir = normalize(lightpos - p);
+  // yet another trick from iq: use the distance field to compute dot(light,
+  // normal) instead of explicitly finding a normal.
+  // http://www.pouet.net/topic.php?which=7535&page=1
+  int _m;
+  float diffuse = std::max(0.0f, 10.0f*dist(p+lightdir*0.1, &_m));
+  float s = std::max(0.3f, shadow(p, lightdir, 0.01, length(p-lightpos)));
+  float l = std::max(0.1f, diffuse * s);
+  return mcol[m]*l + lcol*pow(l, mshiny[m]);
+}
+
+int main()
+{
+  int x,y;
+  render_init();
+  for(;;) {
+    vec3 campos = vec3(120*sin(frame_*0.01), 40 + 30*sin(frame_*0.03), -120*cos(frame_*0.01));
+    vec3 camz = normalize(campos*-1);
+    //vec3 lightpos = vec3(200,400,campos.z);
+    //vec3 lightpos = campos;
+    //vec3 lightpos = vec3(100*sin(frame_*0.08), 50, -100*cos(frame_*0.04));
+    vec3 lightpos = vec3(100*sin(frame_*0.037), 140, campos.z);
+    vec3 lightpos2 = vec3(0, 200, 0);
+    vec3 camx = normalize(cross(camz, vec3(0,1,0)));
+    vec3 camy = normalize(cross(camx, camz));
+    for(y=0;y<24;y++) {
+      int fg=7, bg=0;
+      for(x=0;x<80;x++) {
+        vec3 color = vec3(0,0,0);
+#ifdef AA
+        for(float xx = -0.25;xx<=0.25;xx+=0.5) { // 2 x samples
+          for(float yy = -0.75;yy<=0.75;yy+=0.5) { // 4 y samples
+            vec3 dir = normalize(vec3(x-40.0f+xx,25.0f-2.0f*y+yy,20.0f));
+#else
+            vec3 dir = normalize(vec3(x-40.0f,25.0f-2.0f*y,50.0f));
+#endif
+            dir = camx*dir.x + camy*dir.y + camz*dir.z;
+            float t = 0;
+            int m = -1;
+            for (int iter = 0; iter < 64 && t < 1e6; iter++) {
+              vec3 p = dir*t + campos;
+              float d = dist(p, &m);
+              if (d < 0.001) {
+                color = color + lighting(p, m, lightpos);
+                break;
+              }
+              t += d;
+            }
+#ifdef AA
+          }
+        }
+        render_color(color * 0.125, x, y, &fg, &bg);
+#else
+        render_color(color, x, y, &fg, &bg);
+#endif
+      }
+      printf("\x1b[0m\n");
+    }
+    fflush(stdout);
+    usleep(20000);
+    frame_ += 1;
+    printf("\x1b[24A");
+  }
+}
+```
+
+### vec3.h
+```
+#ifndef __VEC3_H
+#define __VEC3_H
+
+#include <math.h>
+#include <algorithm>  // for std::min/max
+
+// this is a GLSL-like 3-vector implementation
+
+struct vec3 {
+  float x,y,z;
+  vec3() {}
+  vec3(float a, float b, float c) { x=a; y=b; z=c; }
+};
+
+static inline vec3 operator+(const vec3 &a, const vec3 &b) {
+  return vec3(a.x+b.x,a.y+b.y,a.z+b.z);
+}
+
+static inline vec3 operator-(const vec3& a, const vec3& b) {
+  return vec3(a.x-b.x,a.y-b.y,a.z-b.z);
+}
+
+static inline vec3 operator*(const vec3& a, float b) {
+  return vec3(a.x*b,a.y*b,a.z*b);
+}
+
+static inline float dot(const vec3& a, const vec3& b) {
+  return a.x*b.x+a.y*b.y+a.z*b.z;
+}
+
+static inline float length(const vec3& v) { return sqrt(dot(v,v)); }
+
+static inline vec3 normalize(const vec3 &v) {
+  return v*(1.0/length(v));
+}
+
+static inline vec3 abs(const vec3& v) {
+  return vec3(fabs(v.x), fabs(v.y), fabs(v.z));
+}
+
+static inline vec3 max(const vec3& v, float f) {
+  return vec3(std::max(v.x, f), std::max(v.y, f), std::max(v.z, f));
+}
+
+static inline vec3 min(const vec3& v, float f) {
+  return vec3(std::min(v.x, f), std::min(v.y, f), std::min(v.z, f));
+}
+
+static inline vec3 cross(const vec3& a, const vec3& b) {
+  return vec3(a.y*b.z - a.z*b.y,
+              a.z*b.x - a.x*b.z,
+              a.x*b.y - a.y*b.x);
+}
+
+#endif
+```

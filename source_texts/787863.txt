@@ -1,0 +1,203 @@
+A user-space PlayStation 5 to PC compatibility layer for Linux, Windows, and macOS. - gpu: admit non-zero BASE_LEVEL for unlayered 3D volume texture views by ymatrix1 · Pull Request #4831 · mattias800/prosper
+
+gpu: admit non-zero BASE_LEVEL for unlayered 3D volume texture views by ymatrix1 · Pull Request #4831 · mattias800/prosper · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ymatrix1
+commented
+Oct 9, 2026
+Copy link
+Copy Markdown
+Collaborator
+Context
+Compute programs sampling 3D volume textures (e.g. Assassin's Creed Black Flag cs 0x407ed7a300 32x32x32 LUT view) are rejected with [t#] unsupported BASE_LEVEL N (last=N max_mip=5) for type=10, causing sampling instructions (MIMG) to drop as unresolved resource descriptors.
+In image_base_level_view(), the condition (!thin_2d && !thin_2d_layered) previously excluded 3D textures (type == 10), causing any 3D descriptor with BASE_LEVEL > 0 to fail closed under unshifted_view_supported().
+Higher Goal
+Allows compute shaders sampling 3D volume textures with non-zero mip levels / base levels (such as color-grading LUTs or volumetric density textures) to materialize resource descriptors, unblocking compute passes in Black Flag and other titles.
+Acceptance Criteria
+3D volume descriptors (type == 10) with base_array == 0 can derive shifted base-level views via tiled_mip_level_layout().
+Layered 3D UAV views (base_array != 0) remain rejected fail-closed as unmodelled slice stride.
+Architecture ratchet check passes with 0 rows raised.
+Out of Scope
+3D UAV arrayed views with non-zero base_array (which require custom slice/block stride modelling).
+Summary of Changes
+prosper/src/gpu/agc/agc_shader_layout.cpp: Recognized volume_3d (d.type == 10) alongside thin_2d in image_base_level_view(), allowing single-volume 3D descriptors to compute mip offsets while keeping base_array != 0 fail-closed.
+prosper/tests/gpu/agc/test_build_shader_resources.cpp: Added unit test confirming that a 3D texture descriptor (TYPE 10) with non-zero BASE_LEVEL materializes with shifted extents.
+Verification
+Tests added: BuildShaderResources.Contract 3D volume non-zero BASE_LEVEL test.
+Red without the fix: image_base_level_view() returns supported = false on type == 10 whenever base_level != 0.
+Commands run + results:
+build\test_build_shader_resources.exe: Passed (1/1 tests passed, exit 0).
+python prosper/tools/ci/check_arch_ratchet.py --root . --base origin/main: 0 rows raised, exit 0.
+Could not verify (no dump / no GPU): Full live GPU rendering of subsequent post-processing passes.
+Checklist
+Behavior changes have a meaningful regression; nonbehavioral scope and execution limits are stated (test rules)
+New source/test files live under prosper/; repository metadata uses the contribution-shape allowlist; a new prosper/src/**/*.cpp touches prosper/tests/
+No Sony code/keys/firmware, no game data, no *-app0 content, no absolute host paths
+No unconditional "owned" answers to entitlement/add-content queries
+Any falsified hypothesis recorded in the relevant ## Ruled out section
+git diff --check clean; no Claude-Session: trailers on commits
+Screenshots (if progression) are direct frontend captures, with a BLOG.md entry
+gpu: admit non-zero BASE_LEVEL for unlayered 3D volume texture views
+88d5c62
+sonarqubecloud
+Bot
+commented
+Oct 9, 2026
+Copy link
+Copy Markdown
+Quality Gate passed
+Issues
+2 New issues
+0 Accepted issues
+Measures
+0 Security Hotspots
+0.0% Coverage on New Code
+0.0% Duplication on New Code
+See analysis details on SonarQube Cloud
+mattias800
+reviewed
+Oct 10, 2026
+View reviewed changes
+mattias800
+left a comment
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+REJECTED at head 88d5c62. Not merged.
+This admission would bind wrong texels silently. With volume_3d admitted, image_base_level_view() places a 3D level using the thin-2D mip layout: tiled_mip_level_layout(element_width, element_height, ...), which has no depth term. That causes two errors:
+The level offset is wrong. Every level of a 3D chain spans w*h*d bytes, not w*h, so the byte offsets that the 2D helper computes from the per-level sizes do not describe a 3D chain. 3D swizzle modes also use thick blocks, which the helper does not model.
+The depth is not shifted. Level 1 of a 32^3 volume is 16x16x16, but the view keeps depth 32. The new test asserts depth == 32 at BASE_LEVEL 1, so it pins the defect instead of catching it.
+The result is a supported view that reads level-0 texels for any shader selecting a smaller level. That is a silent wrong picture, which is worse than today's visible refusal.
+#4833 pins the correct current behaviour: the nonzero-BASE_LEVEL 3D views stay refused until a 3D mip layout exists. That PR is being merged. Admitting these views needs a real 3D (thick) mip-level layout that takes depth as an input and a halved depth per level, tested against a known placement. That is a larger change than this one.
+mattias800
+mentioned this pull request
+Oct 10, 2026
+tests: pin Black Flag 32^3 R8 3D mip-pyramid T# decode and view refusals
+#4833
+Merged
+9 of 10 tasks
+ymatrix1
+commented
+Oct 10, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+@coderrabbit resume
+ymatrix1
+commented
+Oct 10, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Closing in favor of #4833 as rejected in review. Proper 3D thick mip layout support will be designed separately.
+ymatrix1
+closed this
+Oct 10, 2026
+ymatrix1
+deleted the
+fix/image-view-3d-base-level
+branch
+October 10, 2026 00:53
+ymatrix1
+mentioned this pull request
+Oct 10, 2026
+gpu: implement 3D thick mip-level layout for volume texture views
+#4842
+Open
+mattias800
+added a commit
+to ymatrix1/prosper
+that referenced
+this pull request
+Oct 10, 2026
+gpu: keep 3D tail views off the 2D tail detile and refuse shapes the …
+…
+5798060
+```
+…rule cannot place
+
+Three fail-closed tightenings of the thick-3D tail admission (mattias800#4814):
+
+- A tail level whose extent shrinks to depth 1 (the 1^3 level of the
+  pyramid) missed the `r->depth > 1` volume branch in live_compute and fell
+  through to detile_surface_level: the 2D swizzle at the 3D tail origin,
+  the mattias800#4831 class of silent wrong texels. The volume branch now also takes
+  every in-tail 3D view, for both the backing size and the upload.
+- tiled_volume_tail_layout checked only width and height against the tail.
+  A level zero deeper than one 64 KiB macroblock would alias its upper
+  slices through the in-block z; it now refuses (new VolumeTailLayout arm,
+  red without the guard).
+- Block-compressed volumes keep the base-level-only rule: the tail rule is
+  in elements and no BCn volume-tail reader exists.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+mattias800
+mentioned this pull request
+Oct 10, 2026
+recompiler: place thick-3D tail views and sample them at explicit LOD
+#4843
+Merged
+10 of 12 tasks
+mattias800
+added a commit
+that referenced
+this pull request
+Oct 10, 2026
+recompiler: place thick-3D tail views and sample them at explicit LOD (…
+…
+d95e5fb
+```
+…#4843)
+
+* recompiler: place thick-3D tail views and sample them at explicit LOD (#4814)
+
+* gpu: keep 3D tail views off the 2D tail detile and refuse shapes the rule cannot place
+
+Three fail-closed tightenings of the thick-3D tail admission (#4814):
+
+- A tail level whose extent shrinks to depth 1 (the 1^3 level of the
+  pyramid) missed the `r->depth > 1` volume branch in live_compute and fell
+  through to detile_surface_level: the 2D swizzle at the 3D tail origin,
+  the #4831 class of silent wrong texels. The volume branch now also takes
+  every in-tail 3D view, for both the backing size and the upload.
+- tiled_volume_tail_layout checked only width and height against the tail.
+  A level zero deeper than one 64 KiB macroblock would alias its upper
+  slices through the in-block z; it now refuses (new VolumeTailLayout arm,
+  red without the guard).
+- Block-compressed volumes keep the base-level-only rule: the tail rule is
+  in elements and no BCn volume-tail reader exists.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+---------
+
+Co-authored-by: Mattias Andersson <mattias800@gmail.com>
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

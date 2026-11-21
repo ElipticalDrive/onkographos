@@ -1,0 +1,118 @@
+# One Step Phase Retrieval (OSPR)
+Also called: Temporal averaging
+## Overview
+One Step Phase Retrieval (OSPR) is a technique for generating phase-only holograms that approximates a target complex wavefield by temporally averaging multiple hologram sub-frames with randomized object phases [S1]. It solves the problem of amplitude loss inherent in phase-only spatial light modulators (SLMs) by converting the missing amplitude information into temporal noise that averages out over time [S1]. Unlike iterative phase retrieval methods which optimize phase to minimize error, OSPR discards amplitude entirely and relies on the statistical averaging of pseudo-random noise patterns to reconstruct the target image [S1].
+## How it works
+**Inputs and Outputs:**
+- Input: Target complex object wavefield $O(x,y) = A(x,y)e^{i\phi_o(x,y)}$, where $A$ is amplitude and $\phi_o$ is phase.
+- Output: A sequence of binary or multi-level phase-only hologram sub-frames $H_k(x,y)$ displayed in rapid succession.
+
+**Data Structures:**
+- The object wavefield is represented as a 2D grid of complex values.
+- Each hologram sub-frame is a 2D grid of phase values, typically quantized to binary levels ($0, \pi$) or a small discrete set, suitable for high-speed binary SLMs [S1].
+
+**Steps:**
+1. **Randomize Object Phase:** Instead of optimizing the object phase $\phi_o$ to match the target amplitude, assign $\phi_o(x,y)$ random values uniformly distributed over $[0, 2\pi)$ for each sub-frame generation [S1].
+2. **Generate Hologram Sub-frames:** For each sub-frame $k$, compute the hologram $H_k$ using the randomized phase $\phi_o^{(k)}$. The required amplitude on the hologram plane becomes a pseudo-random uniform noise pattern because the object phase is random [S1].
+3. **Discard Amplitude:** On playback, the amplitude information is discarded (or not encoded), leaving only the phase component of $H_k$ to be displayed by the SLM [S1].
+4. **Temporal Playback:** Display the sequence of hologram sub-frames $H_1, H_2, \dots, H_N$ in random succession on a high-speed display [S1].
+5. **Noise Averaging:** The human eye or a low-pass optical system averages the intensity of these rapidly changing sub-frames. Since the noise patterns are uncorrelated across sub-frames, they average out, revealing the target image [S1].
+
+**Parameters:**
+- Number of sub-frames $N$: Not given in the sources. Several sub-frames must be calculated for each image frame [S1].
+- Display Switching Speed: Must be high enough to prevent flicker and ensure temporal integration [S1].
+
+**Pitfalls:**
+- Low contrast of noisy hologram sub-frames cannot be recovered by temporal averaging [S1].
+- Requires high bandwidth and switching speed from the display (SLM) [S1].
+- Iteratively optimized holograms tend to include undesirable high frequency noise or speckle, which OSPR aims to mitigate through averaging [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_ospr_holograms(target_amplitude, target_phase, num_subframes):
+    """
+    Generates a sequence of phase-only hologram sub-frames using OSPR.
+    
+    Args:
+        target_amplitude: 2D array of target amplitudes A(x,y).
+        target_phase: 2D array of target phases phi_o(x,y).
+        num_subframes: Integer N, number of sub-frames to generate.
+        
+    Returns:
+        list of 2D arrays: Sequence of phase-only hologram sub-frames.
+    """
+    subframes = []
+    
+    for k in range(num_subframes):
+        # Step 1: Randomize object phase
+        # Assign random phase values uniformly distributed over [0, 2pi)
+        random_phase = np.random.uniform(0, 2 * np.pi, size=target_phase.shape)
+        
+        # Step 2: Generate hologram sub-frame
+        # The hologram is generated using the randomized phase.
+        # The specific hologram generation algorithm (e.g., Gerchberg-Saxton, 
+        # or direct encoding) is not detailed in the source, but the key is 
+        # that the amplitude is discarded on playback.
+        # We assume a generic hologram generation function that takes 
+        # the complex object wave and produces a phase-only hologram.
+        # Note: The source implies the amplitude on the hologram plane 
+        # becomes pseudo-random noise when object phase is randomized.
+        
+        # Construct complex object wave with randomized phase
+        # O_k = A * exp(i * phi_random)
+        # However, the source says "the required amplitude on hologram H 
+        # is a pseudo-random uniform noise pattern" if object phase is randomized.
+        # This suggests the hologram generation might involve propagating 
+        # this randomized object wave.
+        
+        # For the purpose of implementation, we assume a function 
+        # `compute_phase_hologram` exists that takes the object wave 
+        # and returns the phase-only hologram.
+        object_wave = target_amplitude * np.exp(1j * random_phase)
+        
+        # Compute phase-only hologram H_k
+        # The exact method of computing H_k from the object wave is not 
+        # specified in the source, but it must be a phase-only encoding.
+        # Common methods include detour phase or double phase encoding, 
+        # but OSPR specifically uses randomized phase to create noise.
+        # We assume the hologram is simply the phase of the propagated 
+        # object wave or a similar transformation.
+        # Since the source does not give the exact hologram computation,
+        # we note this as a gap.
+        hologram_phase = compute_phase_hologram(object_wave) # [G] Placeholder for specific hologram generation
+        
+        # Step 3: Discard amplitude (already done by taking phase only)
+        subframes.append(hologram_phase)
+        
+    return subframes
+
+def display_ospr_sequence(subframes, display_speed):
+    """
+    Displays the sequence of sub-frames on a high-speed SLM.
+    
+    Args:
+        subframes: List of phase-only hologram sub-frames.
+        display_speed: Refresh rate of the SLM in Hz.
+    """
+    for frame in subframes:
+        display.update(frame)
+        time.sleep(1.0 / display_speed)
+```
+## Subtopics
+
+### [Phase Noise Handling in Amplitude-Only SLMs](15053-phase-noise-handling-in-amplitude-only-slms.md)
+This method models and mitigates phase noise inherent to liquid crystal amplitude-only Spatial Light Modulators (SLMs) by analyzing the coupling between amplitude modulation and unwanted phase modulation. It establishes a mathematical framework using Jacobi-Anger expansions to separate signal terms from noise terms in the Fourier domain, allowing for the design of grating frequencies that prevent noise overlap with the reconstructed signal. It sets it apart from sibling methods by providing a rigorous analytical derivation of noise spectra based on the specific physical properties of the liquid crystal, rather than relying solely on empirical averaging or iterative phase retrieval.
+
+## Operating characteristics
+- **Time Complexity:** Requires calculating multiple hologram sub-frames for each image frame, increasing computational load compared to single-frame methods [S1].
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** The primary downside is that the low contrast of the noisy hologram sub-frames cannot be recovered by temporal averaging [S1].
+- **Hardware Requirements:** Requires high bandwidth and switching speed from the display (SLM) [S1]. Binary phase holograms may be produced for playback on a high-speed binary SLM to facilitate these requirements [S1].
+- **Strengths:** Mitigates undesirable high-frequency noise or speckle associated with iteratively optimized holograms [S1].
+- **Limitations:** Cannot recover low contrast from noisy sub-frames; requires multiple sub-frames per image frame; dependent on high-speed display hardware [S1].
+## Background
+One Step Phase Retrieval (OSPR), also known as temporal averaging, was introduced by Cable et al. in 2004 [S1]. It is used in holographic near-eye displays for virtual and augmented reality to generate phase-only holograms that approximate complex wavefields by averaging out noise over time [S1].
+## Sources
+[S1] Holographic near-eye displays for virtual and augmented reality, https://doi.org/10.1145/3072959.3073624, fetched 2026-10-30

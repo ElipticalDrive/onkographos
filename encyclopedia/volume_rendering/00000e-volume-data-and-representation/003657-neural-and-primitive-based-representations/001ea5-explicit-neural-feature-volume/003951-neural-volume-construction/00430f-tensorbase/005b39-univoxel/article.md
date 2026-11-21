@@ -1,0 +1,372 @@
+# UniVoxel
+
+Also called: Unified Voxelization framework
+
+## Overview
+UniVoxel is a unified voxelization framework for inverse rendering that encodes a scene into two learnable voxel fields: a Signed Distance Function (SDF) field for geometry and a semantic field for materials and illumination [S1]. It enables efficient trilinear interpolation and volumetric physics-based rendering, jointly modeling geometry, materials, and incident light radiance using local Spherical Gaussians (SG) [S1]. Unlike environment map-based methods that require expensive visibility simulation for every incident direction, UniVoxel avoids this heavy computational burden by integrating illumination directly into the voxel grid [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view 2D images of a scene.
+*   **Outputs:** Learnable voxel embeddings for geometry ($V_{sdf}$) and semantics ($V_{sem}$), from which albedo, roughness, normals, and incident light parameters are derived. Rendered images via volumetric rendering.
+
+**Data Structures:**
+1.  **SDF Field ($V_{sdf}$):** A 3D grid of learnable embeddings.
+    *   Layout: $\mathbb{R}^{1 \times N_x \times N_y \times N_z}$.
+    *   Dimensions: $N_x, N_y, N_z$ are voxel resolutions.
+    *   Content: One scalar value per voxel representing the SDF.
+2.  **Semantic Field ($V_{sem}$):** A 3D grid of learnable embeddings.
+    *   Layout: $\mathbb{R}^{C \times N_x \times N_y \times N_z}$.
+    *   Dimensions: $C$ is the semantic feature dimension (typically 6).
+    *   Content: $C$-dimensional feature vectors per voxel.
+3.  **Lighting Parameters:** Derived from $V_{sem}$ via MLPs, representing Spherical Gaussian lobes.
+
+**Numbered Steps:**
+
+1.  **Voxelization Initialization:** Initialize $V_{sdf} \in \mathbb{R}^{1 \times N_x \times N_y \times N_z}$ and $V_{sem} \in \mathbb{R}^{C \times N_x \times N_y \times N_z}$ as learnable parameters [S1].
+2.  **Trilinear Interpolation:** For any 3D position $x \in \mathbb{R}^3$, query the SDF value $s(x)$ and semantic features $f(x)$ by trilinear interpolation $\mathcal{F}_{interp}$ over the eight neighboring voxels of $V_{sdf}$ and $V_{sem}$ respectively [S1]:
+    $$ s(x) = \mathcal{F}_{interp}(x, V_{sdf}) $$
+    $$ f(x) = \mathcal{F}_{interp}(x, V_{sem}) $$
+3.  **Geometry Derivation:**
+    *   **Opacity:** For a sampled point $x_i$ along a camera ray, calculate opacity $\alpha_i$ using the NeuS formulation [S1]:
+        $$ \alpha_i = \max\left(\frac{\sigma(s(x_i)) - \sigma(s(x_{i+1}))}{\sigma(s(x_i))}, 0\right) $$
+        where $\sigma(s(x_i)) = (1 + e^{-d_1 s(x_i)})^{-1}$ and $d_1$ is the standard deviation [S1].
+    *   **Normal:** Compute surface normal components using central differences with step size $v$ (voxel size) [S1]:
+        $$ n_x(x) = \frac{s(x + [v, 0, 0]) - s(x - [v, 0, 0])}{2v} $$
+        $n_y(x)$ and $n_z(x)$ are calculated similarly along the y and z axes [S1].
+4.  **Material Prediction:** Predict albedo $\kappa(x)$ and roughness $\zeta(x)$ using lightweight MLPs $\Psi_\kappa$ and $\Psi_\zeta$ taking $f(x)$ and position $x$ as inputs [S1]:
+    $$ \kappa(x) = \Psi_\kappa(f(x), x) $$
+    $$ \zeta(x) = \Psi_\zeta(f(x), x) $$
+5.  **Illumination Modeling:**
+    *   Represent incident light radiance using local Spherical Gaussians (SG).
+    *   Model SG parameters by learning them from the semantic field voxelization via a lightweight MLP $\Psi_h$ [S1]:
+        $$ h(x) = \Psi_h(f(x), x, e_x) $$
+        where $e_x$ is a view embedding (dimension $C_v=6$ for NeRD dataset) [S1].
+    *   Number of SG lobes $k=16$ [S1].
+6.  **Light Visibility:** For incident direction $\omega_i$, compute visibility $v(x, \omega_i)$ via volumetric integration along ray $r_i = x + \omega_i$ [S1]:
+    $$ v(x, \omega_i) = 1 - \sum_{i=1}^{N_l} \alpha_i \prod_{j<i} (1 - \alpha_j) $$
+    where $N_l$ is the number of sampled points along the light ray [S1].
+7.  **Rendering:** Calculate outgoing radiance $C(x, \omega_o)$ using physics-based rendering [S1]:
+    $$ C(x, \omega_o) = \int_{\Omega} L_i(x, \omega_i) f_r(x, \omega_i, \omega_o) (\omega_i \cdot n(x)) d\omega_i $$
+    *   Approximate the integral using Fibonacci sampling over the hemisphere with 128 samples [S1].
+    *   $L_i(x, \omega_i)$ is the incident light radiance derived from SG parameters [S1].
+    *   $f_r$ is the BRDF (e.g., Simplified GGX) using $\kappa(x)$ and $\zeta(x)$ [S1].
+8.  **Relighting:** For new illumination, compute light visibility using the method in Step 6 and consider only direct lighting, as the trained incident light field is specific to the training environment [S1]. Apply a 1.5 power correction to roughness to address optimization bias [S1].
+9.  **Training:**
+    *   **Coarse Stage:** Optimize only the radiance field branch. Voxel resolution $96^3$.
+    *   **Fine Stage:** Optimize the full representation. Voxel resolution $160^3$.
+    *   Use Adam optimizer, batch size 8192 rays, 10k iterations per stage [S1].
+    *   Learning rates: 0.001 for MLPs, 0.1 for $V_{sdf}$ and $V_{sem}$ (reduce $V_{sdf}$ to 0.005 in fine stage) [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class UniVoxel:
+    def __init__(self, Nx, Ny, Nz, C=6, k=16, Cv=6):
+        """
+        Initialize UniVoxel representation.
+        Nx, Ny, Nz: Voxel grid dimensions.
+        C: Semantic feature dimension.
+        k: Number of Spherical Gaussian lobes.
+        Cv: View embedding dimension.
+        """
+        # Learnable voxel grids
+        # V_sdf: [1, Nx, Ny, Nz]
+        self.V_sdf = nn.Parameter(torch.randn(1, Nx, Ny, Nz))
+        # V_sem: [C, Nx, Ny, Nz]
+        self.V_sem = nn.Parameter(torch.randn(C, Nx, Ny, Nz))
+        
+        # Lightweight MLPs for material and lighting
+        # Input: semantic features (C) + position (3) + view embedding (Cv)
+        # Output: Albedo (3), Roughness (1), SG params (k * 3 for direction, k * 3 for color, k for sharpness)
+        # Note: Exact MLP architecture details for Psi_h are not fully specified in sources beyond "lightweight"
+        # Assuming standard MLP structure based on "3 hidden layers, 192 channels"
+        self.Psi_kappa = MLP(input_dim=C+3, output_dim=3, hidden_dim=192, num_layers=3)
+        self.Psi_zeta = MLP(input_dim=C+3, output_dim=1, hidden_dim=192, num_layers=3)
+        self.Psi_h = MLP(input_dim=C+3+Cv, output_dim=k*7, hidden_dim=192, num_layers=3) # k lobes, 7 params each (dir:3, color:3, sharp:1)
+        
+        # View embedding for NeRD dataset
+        self.view_embed = nn.Embedding(1, Cv) # Placeholder for view index, actual usage depends on dataset
+        
+        # Hyperparameters
+        self.d1 = 100.0 # Standard deviation for sigmoid, typical value in NeuS, not explicitly given but standard
+        self.v = 1.0 / max(Nx, Ny, Nz) # Voxel size (assuming unit AABB)
+        self.k = k
+        self.Cv = Cv
+
+    def query_sdf_and_sem(self, x):
+        """
+        Query SDF and semantic features at position x using trilinear interpolation.
+        x: [N, 3] tensor of 3D coordinates.
+        Returns: s (N,), f (N, C)
+        """
+        # Normalize x to [-1, 1] if AABB is [-1, 1], otherwise adjust accordingly
+        # Assuming x is already in grid coordinates or normalized appropriately for F.grid_sample
+        
+        # Trilinear interpolation for SDF
+        # V_sdf shape: [1, 1, Nx, Ny, Nz] for grid_sample
+        s = F.grid_sample(self.V_sdf.unsqueeze(0), x.unsqueeze(0).unsqueeze(0).unsqueeze(0), 
+                          mode='trilinear', align_corners=True).squeeze()
+        
+        # Trilinear interpolation for Semantic
+        # V_sem shape: [C, 1, Nx, Ny, Nz] for grid_sample
+        f = F.grid_sample(self.V_sem.unsqueeze(1), x.unsqueeze(0).unsqueeze(0).unsqueeze(0), 
+                          mode='trilinear', align_corners=True).squeeze()
+        
+        return s, f
+
+    def compute_normal(self, x):
+        """
+        Compute surface normal using central differences on SDF.
+        x: [N, 3] tensor.
+        Returns: n (N, 3) tensor.
+        """
+        eps = self.v
+        x_pos_x = x + torch.tensor([eps, 0, 0], device=x.device)
+        x_neg_x = x - torch.tensor([eps, 0, 0], device=x.device)
+        x_pos_y = x + torch.tensor([0, eps, 0], device=x.device)
+        x_neg_y = x - torch.tensor([0, eps, 0], device=x.device)
+        x_pos_z = x + torch.tensor([0, 0, eps], device=x.device)
+        x_neg_z = x - torch.tensor([0, 0, eps], device=x.device)
+        
+        s_pos_x, _ = self.query_sdf_and_sem(x_pos_x)
+        s_neg_x, _ = self.query_sdf_and_sem(x_neg_x)
+        s_pos_y, _ = self.query_sdf_and_sem(x_pos_y)
+        s_neg_y, _ = self.query_sdf_and_sem(x_neg_y)
+        s_pos_z, _ = self.query_sdf_and_sem(x_pos_z)
+        s_neg_z, _ = self.query_sdf_and_sem(x_neg_z)
+        
+        nx = (s_pos_x - s_neg_x) / (2 * eps)
+        ny = (s_pos_y - s_neg_y) / (2 * eps)
+        nz = (s_pos_z - s_neg_z) / (2 * eps)
+        
+        n = torch.stack([nx, ny, nz], dim=-1)
+        return F.normalize(n, dim=-1)
+
+    def predict_materials(self, x, f):
+        """
+        Predict albedo and roughness.
+        x: [N, 3]
+        f: [N, C]
+        Returns: kappa (N, 3), zeta (N, 1)
+        """
+        input_feat = torch.cat([f, x], dim=-1)
+        kappa = torch.sigmoid(self.Psi_kappa(input_feat)) # Albedo in [0, 1]
+        zeta = torch.sigmoid(self.Psi_zeta(input_feat)) # Roughness in [0, 1]
+        return kappa, zeta
+
+    def predict_lighting(self, x, f, view_dir):
+        """
+        Predict SG parameters for incident light.
+        x: [N, 3]
+        f: [N, C]
+        view_dir: [N, 3] normalized view direction
+        Returns: sg_params (N, k, 7) where 7 = [dir_x, dir_y, dir_z, r, g, b, sharpness]
+        """
+        # View embedding lookup
+        # Assuming view_dir is used to index into a learned view embedding or concatenated
+        # Source mentions view embedding dimension Cv=6 for NeRD. 
+        # Implementation detail: Concatenate view embedding to semantic features.
+        # For simplicity, assuming view_dir is mapped to embedding or used directly if Cv=3 (but Cv=6)
+        # Let's assume we have a view embedding vector e_v for the current view
+        e_v = self.view_embed.weight # [1, Cv]
+        # Broadcast or repeat if needed, but typically one view per batch in training?
+        # Source says "batch size 8192 rays", likely multi-view.
+        # Let's assume e_v is concatenated.
+        
+        # Note: The exact mapping of view_dir to e_v is not detailed, but e_v is part of input to Psi_h
+        # We will assume e_v is provided or derived.
+        input_feat = torch.cat([f, x, e_v.expand_as(f)], dim=-1)
+        sg_flat = self.Psi_h(input_feat) # [N, k*7]
+        sg_params = sg_flat.view(-1, self.k, 7)
+        return sg_params
+
+    def render_ray(self, ray_o, ray_d, num_samples):
+        """
+        Render a single ray.
+        ray_o: [3]
+        ray_d: [3]
+        num_samples: int
+        Returns: color (3), depth, opacity
+        """
+        # Sample points along ray
+        # Step size is half of voxel size
+        step_size = self.v / 2.0
+        t = torch.linspace(0, num_samples * step_size, num_samples, device=ray_o.device)
+        x = ray_o.unsqueeze(0) + t.unsqueeze(1) * ray_d.unsqueeze(0) # [N, 3]
+        
+        # Query SDF and Semantic
+        s, f = self.query_sdf_and_sem(x)
+        
+        # Compute Opacity
+        sigma_s = 1.0 / (1.0 + torch.exp(-self.d1 * s))
+        sigma_s_next = 1.0 / (1.0 + torch.exp(-self.d1 * s[1:]))
+        alpha = torch.clamp((sigma_s[:-1] - sigma_s_next) / sigma_s[:-1], min=0)
+        
+        # Transmittance
+        T = torch.cumprod(1.0 - alpha, dim=0)
+        T = torch.cat([torch.ones_like(T[:1]), T], dim=0)
+        
+        # Compute Normal and Materials
+        n = self.compute_normal(x)
+        kappa, zeta = self.predict_materials(x, f)
+        
+        # Compute Lighting (Simplified for single ray, assuming fixed view)
+        # In practice, lighting is computed per surface point
+        # For volumetric rendering, we might need incident light at each sample point
+        # However, UniVoxel uses SG for incident light.
+        # We need to integrate BRDF * Incident Light * Visibility
+        
+        # For simplicity, assume we are at the surface (or use the first hit)
+        # Or perform full volumetric integration of radiance
+        # The source describes calculating outgoing radiance C(x, wo) for a surface point x.
+        # For volumetric rendering, we sum contributions.
+        
+        # Let's assume we render the final image by accumulating color
+        # Color contribution at each sample:
+        # C_i = alpha_i * T_i * C_surface(x_i)
+        # But C_surface requires integration over hemisphere.
+        
+        # To keep pseudocode implementable from text, we outline the surface point calculation
+        # which is then used in the volume rendering loop.
+        
+        # 1. Find surface point (e.g., first point with alpha > threshold or min SDF)
+        # 2. Compute C_surface at that point
+        
+        # For this pseudocode, we return the intermediate values for a surface point query
+        return x, s, f, alpha, T, n, kappa, zeta
+
+    def compute_surface_radiance(self, x, n, kappa, zeta, view_dir):
+        """
+        Compute outgoing radiance C(x, wo) for a surface point.
+        """
+        # Predict SG parameters
+        _, f = self.query_sdf_and_sem(x)
+        sg_params = self.predict_lighting(x, f, view_dir) # [1, k, 7]
+        
+        # Parse SG params
+        # dir: [k, 3], color: [k, 3], sharp: [k, 1]
+        dirs = sg_params[:, :, :3]
+        colors = sg_params[:, :, 3:6]
+        sharp = sg_params[:, :, 6:7]
+        
+        # Normalize directions
+        dirs = F.normalize(dirs, dim=-1)
+        
+        # Sample incident directions using Fibonacci sampling over hemisphere
+        # 128 samples
+        omega_i = fibonacci_hemisphere_samples(128, n) # [128, 3]
+        
+        # Compute incident radiance L_i(x, omega_i)
+        # L_i = sum_j color_j * exp(sharp_j * (omega_i . dir_j - 1))
+        # Dot product: [128, k]
+        dot = torch.sum(omega_i.unsqueeze(1) * dirs.unsqueeze(0), dim=-1) # [128, k]
+        # SG evaluation
+        L_i = torch.sum(colors.unsqueeze(0) * torch.exp(sharp.unsqueeze(0) * (dot.unsqueeze(-1) - 1)), dim=-1) # [128, 3]
+        
+        # Compute Light Visibility
+        # Ray from x in direction omega_i
+        # For direct lighting, visibility is 1 if no occlusion, else 0
+        # Source says "compute light visibility using Eq. 7" which is volumetric
+        # But for relighting, "consider only direct lighting"
+        # Assuming direct lighting visibility is pre-computed or 1 for now
+        # In training, we might need to trace rays for visibility
+        v = 1.0 # Placeholder for visibility calculation
+        
+        # BRDF (Simplified GGX)
+        # f_r depends on kappa (albedo), zeta (roughness), n, omega_i, view_dir
+        # This requires a BRDF implementation
+        f_r = brdf_ggx(kappa, zeta, n, omega_i, view_dir) # [128, 3]
+        
+        # Integrate
+        # C = sum_i L_i * f_r * (omega_i . n) * (2*pi / N_samples)
+        cos_theta = torch.sum(omega_i * n.unsqueeze(0), dim=-1).unsqueeze(-1) # [128, 1]
+        # Ensure cos_theta > 0
+        cos_theta = torch.clamp(cos_theta, min=0)
+        
+        C = torch.sum(L_i * f_r * cos_theta, dim=0) * (2 * torch.pi / 128)
+        
+        return C
+
+    def loss(self, C_pred, C_gt):
+        """
+        Compute total loss.
+        """
+        L_rec_pbr = torch.mean((C_pred - C_gt)**2)
+        # L_rec_rad would require radiance field prediction
+        L_rec = L_rec_pbr # Simplified
+        
+        # Smoothness and Regularization
+        # L_smo, L_reg as defined in source
+        # Not fully implemented here due to complexity of L_smo and L_reg definitions
+        return L_rec
+
+class MLP(nn.Module):
+    def __init__(self, input_dim, output_dim, hidden_dim, num_layers):
+        super().__init__()
+        layers = []
+        for _ in range(num_layers):
+            layers.append(nn.Linear(input_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            input_dim = hidden_dim
+        layers.append(nn.Linear(hidden_dim, output_dim))
+        self.net = nn.Sequential(*layers)
+    
+    def forward(self, x):
+        return self.net(x)
+
+def fibonacci_hemisphere_samples(N, normal):
+    """
+    Generate N points on hemisphere defined by normal using Fibonacci lattice.
+    """
+    # Standard Fibonacci sphere generation
+    # Then rotate to align with normal
+    # This is a standard graphics utility
+    pass
+
+def brdf_ggx(albedo, roughness, normal, omega_i, view_dir):
+    """
+    Simplified GGX BRDF implementation.
+    """
+    pass
+```
+
+**Parameters:**
+*   **Voxel Resolution:** $96^3$ (coarse stage), $160^3$ (fine stage) [S1].
+*   **Semantic Feature Channels ($C$):** 6 [S1].
+*   **SG Lobes ($k$):** 16 [S1].
+*   **MLP Architecture:** 3 hidden layers, 192 channels [S1].
+*   **Sampling Step Size:** Half of the voxel size [S1].
+*   **Incident Light Samples:** 128 (Fibonacci sampling) [S1].
+*   **Optimizer:** Adam, batch size 8192 rays, 10k iterations per stage [S1].
+*   **Learning Rates:** 0.001 for MLPs, 0.1 for $V_{sdf}$ and $V_{sem}$; $V_{sdf}$ reduced to 0.005 in fine stage [S1].
+*   **Loss Weights:** $\lambda_{pbr} = 1.0$, $\lambda_{rad} = 1.0$, $\lambda_{n} = 0.002$, $\lambda_{\kappa} = 0.0005$, $\lambda_{\zeta} = 0.0005$, $\lambda_{sg} = 0.0005$, $\lambda_{white} = 0.0001$ [S1].
+*   **View Embedding Dimension ($C_v$):** 6 (for NeRD dataset) [S1].
+*   **Roughness Power Correction:** 1.5 (during relighting) [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Lighting Ambiguity:** Neural incident light fields can lead to material-lighting ambiguity. Mitigated by SG smoothness and whiteness regularization [S1].
+*   **Roughness Bias:** Optimization tends towards higher roughness values. Mitigated by 1.5 power correction during relighting [S1].
+*   **Visibility Computation:** Environment map-based methods require heavy visibility simulation. UniVoxel avoids this by using SGs and direct visibility calculation [S1].
+*   **Relighting Limitation:** The incident light field from training is not applicable to new illumination. Relighting requires recomputing visibility and considering only direct lighting [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training time is significantly reduced compared to implicit methods. 18 minutes per scene on MII dataset, compared to 3 hours (TensoIR), 4 hours (Nvdiffrec-mc), and >2 days (NerFactor) [S1].
+*   **Memory Complexity:** Uses explicit voxel grids. Can be optimized with multi-resolution hash encoding (UniVoxel Hash), which increases relighting quality but slightly decreases training speed [S1].
+*   **Performance:** Outperforms NeRFactor, MII, Nvdiffrec-mc, and TensoIR in most metrics on MII dataset [S1]. Produces accurate reconstructions and relighting, avoiding artifacts like holes and specular issues seen in Nvdiffrec-mc and TensoIR [S1].
+*   **Strengths:** Fast optimization, unified modeling of geometry, materials, and illumination, efficient trilinear interpolation, avoids expensive multi-bounce ray tracing [S1].
+*   **Limitations:** Relighting is limited to direct lighting unless the incident light field is retrained. SG representation may struggle with very high-frequency lighting compared to other methods (though better than SH) [S1].
+*   **When to Use:** When fast inverse rendering and relighting are required, and scenes have complex illumination that can be approximated by Spherical Gaussians.
+*   **When Not to Use:** When indirect lighting effects are critical and cannot be approximated by direct lighting visibility, or when extremely high-frequency lighting details are present that SGs cannot capture well.
+
+## Background
+UniVoxel was proposed by S. Wu et al. in 2024 [S1]. It builds on the success of Neural Radiance Fields (NeRF) in novel view synthesis and adapts it to inverse rendering by learning explicit voxelization of scene representations [S1]. The method addresses the limitations of implicit learning methods and environment map-based illumination modeling, which are computationally expensive and struggle with complex real-world illumination [S1]. It is used on synthetic datasets (MII) and real-world datasets (NeRD, Shiny Blender) [S1].
+
+## Sources
+[S1] UniVoxel: Fast Inverse Rendering by Unified Voxelization of Scene Representation, https://doi.org/10.1007/978-3-031-73209-6_21, fetched 2026-10-27

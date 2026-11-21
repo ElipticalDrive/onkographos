@@ -1,0 +1,115 @@
+# Boundary Enhancement
+
+Also called: Edge enhancement, Silhouette technique, Feature enhancement, Boundary enhancement via bump mapping
+
+## Overview
+Boundary enhancement is a compositing technique designed to improve the visibility of object boundaries and material interfaces within volume data [S1][S2, unofficial]. It addresses the problem of indistinct edges in standard volume rendering by emphasizing transitions between different tissues or structures, often used in conjunction with silhouette techniques in medical illustration [S2, unofficial]. Unlike standard direct volume rendering which relies on opacity and color accumulation, this method modifies the shading or opacity contribution based on boundary detection [S1][S2, unofficial]. It sets itself apart from sibling methods like [Incremental Blending for In-scattering](2880-incremental-blending-for-in-scattering.md) by focusing on geometric edge definition rather than light transport simulation, and from [Intermixing](5139-intermixing.md) by specifically targeting boundary visibility rather than material mixing [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A sequence of volume samples $(c_i, \alpha_i)$ along a ray, where $c_i$ is color and $\alpha_i$ is opacity [G]. For bump mapping variants, input also includes classified intensity values $i_{class}$ and a bump strength parameter $v_{bump}$ [S4].
+- Output: Enhanced pixel color $C_{final}$ with emphasized boundaries [S1][S2, unofficial].
+
+**Data Structures:**
+- Sample buffer: Stores $(c_i, \alpha_i, i_{class})$ for each ray step [S4].
+- Gradient vector: Computed on-the-fly from intensity values to determine surface normals [S4].
+
+**Steps:**
+1. **Standard Compositing:** Initialize accumulators $C_{acc} = 0$ and $\alpha_{acc} = 0$ [G]. Iterate through samples front-to-back.
+2. **Boundary Detection:** Identify material boundaries. In histogram-based approaches, boundaries are identified as arcs in a 2D density-gradient magnitude histogram [S2, unofficial]. In gradient-based approaches, boundaries are detected where the gradient magnitude is high or where classified intensity changes significantly [S4].
+3. **Enhancement Application:**
+   - **Opacity Modulation:** Modify opacity $\alpha_i$ based on the dot product of the view vector and gradient vector. Lower opacity if the silhouette term is small to emphasize edges [S2, unofficial].
+   - **Bump Mapping (if applicable):** Perturb surface normals at boundaries to simulate bump mapping, enhancing the perception of underlying structures clipped by cutting planes [S4].
+4. **Accumulation:** Update accumulators using the modified $\alpha_i$ and $c_i$:
+   $$
+   C_{acc} \leftarrow C_{acc} + (1 - \alpha_{acc}) \alpha_i c_i
+   $$
+   $$
+   \alpha_{acc} \leftarrow \alpha_{acc} + (1 - \alpha_{acc}) \alpha_i
+   $$
+5. **Background Composite:** Final color $C_{final} = C_{acc} + (1 - \alpha_{acc}) C_{bg}$ [G].
+
+**Formulas:**
+- Standard compositing: As defined in parent [G].
+- Bump mapping intensity modification [S4]:
+  $$
+  i_{sample\_j} = (i_{class\_j} \cdot v_{bump}) - (v_{bump} - 1)
+  $$
+  Where:
+  - $i_{sample\_j}$: Sample intensity for illumination computation.
+  - $i_{class\_j}$: Classified sample intensity.
+  - $v_{bump}$: Bump value (strength of enhancement).
+
+**Parameters:**
+- $v_{bump}$: Strength of the bump effect. Typical value: 1.5 [S4]. If near zero, no enhancement is visible [S4].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def boundary_enhancement_compositing(samples, background_color, v_bump=1.5):
+    """
+    Boundary enhancement compositing loop.
+    samples: list of (color: vec3, opacity: float, classified_intensity: float, gradient: vec3)
+    background_color: vec3
+    v_bump: float, strength of bump mapping enhancement
+    """
+    C_acc = vec3(0.0)
+    alpha_acc = 0.0
+    
+    for c_i, alpha_i, i_class, grad in samples:
+        # Standard transmittance
+        transmittance = 1.0 - alpha_acc
+        
+        # Boundary Enhancement Logic
+        # 1. Opacity modulation based on silhouette (view vector vs gradient)
+        # Note: View vector is not explicitly in sample, assume it's available or approximated
+        # For bump mapping variant:
+        if v_bump > 0.0:
+            # Perturb intensity for illumination at boundaries
+            i_sample = (i_class * v_bump) - (v_bump - 1.0)
+            # Use i_sample to modulate shading/opacity if needed
+            # Simplified: use i_sample to adjust alpha_i for boundary emphasis
+            # [G] Specific modulation formula not provided in sources; 
+            # assume alpha_i is adjusted based on gradient magnitude or silhouette term
+            pass 
+        
+        # 2. Accumulate
+        C_acc = C_acc + transmittance * alpha_i * c_i
+        alpha_acc = alpha_acc + transmittance * alpha_i
+        
+        # Early ray termination
+        if alpha_acc >= 1.0:
+            break
+            
+    return C_acc + (1.0 - alpha_acc) * background_color
+```
+
+## Subtopics
+
+### [Temporal Gradient Enhancement](8138-temporal-gradient-enhancement.md)
+Temporal Gradient Enhancement is a boundary enhancement technique for time-varying volume data that highlights features varying rapidly over time by computing gradients in the time dimension and modifying shading/opacity based on these gradients. Unlike standard animation which renders individual time steps independently, this method uses data from previous and next time steps for the current rendering to maintain coherence. It sets itself apart from spatial enhancement techniques (such as those using Non-Photorealistic Rendering strokes) by avoiding artifacts introduced into animations, ensuring visual coherence from one time step to the next.
+
+### Feature Enhancement
+Feature Enhancement is a technique that adds texture and contrast to the volume render, furthering the effects of edge enhancement [S3]. It increases the contrast between objects at different depths and adds 3D features to the render, often applied after edge enhancement and volumetric filtering [S3].
+
+### Boundary Enhancement via Bump Mapping
+Boundary Enhancement via Bump Mapping is a technique to enhance anatomical structures clipped by cutting planes by perturbing surface normals (gradients) to simulate bump mapping, improving the perception of underlying structures [S4]. It applies bump mapping to cutting surfaces during volume rendering, computing gradients on-the-fly using intensity values after classification [S4]. It manipulates the gradient direction at the boundary of structures while keeping other gradients unchanged, causing illumination changes at boundaries [S4].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of samples per ray, plus overhead for gradient computation and boundary detection [S4]. On-the-fly gradient computation adds computational cost [S4].
+- **Memory Complexity:** Low, as gradients are computed on-the-fly [S4].
+- **Performance:** Enhances visual clarity of boundaries but may increase rendering time due to additional gradient calculations and shading modifications [S3, S4].
+- **Strengths:** Improves readability of complex anatomical structures, especially in medical visualization [S1][S2, unofficial][S4]. Effective for highlighting tissue boundaries and silhouettes [S2, unofficial].
+- **Limitations:** May introduce artifacts if parameters (like $v_{bump}$) are not tuned correctly [S4]. Requires careful handling of temporal coherence for dynamic data [S1].
+- **When to use:** Medical illustration, anatomical visualization, and scenarios where boundary clarity is critical [S2, unofficial][S4].
+- **When not to use:** When real-time performance is paramount and boundary detail is less important than overall structure [S3].
+
+## Background
+Boundary enhancement originated as a technique to improve the visibility of object boundaries in volume rendering [S1]. It has been widely adopted in medical illustration and visualization, often in conjunction with silhouette techniques [S2, unofficial]. The method has evolved to include variants like temporal gradient enhancement for 4D data [S1] and bump mapping for enhanced surface perception [S4]. It is commonly used in surgical simulation, anatomical illustration, and neuro-visualization [S2, unofficial][S4].
+
+## Sources
+[S1] Towards Advanced Volumetric Display of the Human Musculoskeletal System, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/021-025, fetched 2026-10-26
+[S2] Illustrative Visualization for Medicine and Science, https://doi.org/10.2312/egt.20061068, fetched 2026-10-26 (unofficial)
+[S3] Enhanced volumetric visualization for real time 4D intraoperative ophthalmic swept-source OCT, https://doi.org/10.1364/boe.7.001815, fetched 2026-11-08
+[S4] High-Quality Multimodal Volume Visualization of Intracerebral Pathological Tissue, https://doi.org/10.2312/vcbm/vcbm08/167-176, fetched 2026-10-26

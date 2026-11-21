@@ -1,0 +1,411 @@
+A native SVG editor built on its own SVG2 and CSS3 engine, written from scratch in C++20. - Resample quality image rendering with the Mitchell cubic by jwmcglynn · Pull Request #2097 · jwmcglynn/donner
+
+Resample quality image rendering with the Mitchell cubic by jwmcglynn · Pull Request #2097 · jwmcglynn/donner · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jwmcglynn
+commented
+Oct 27, 2026
+Copy link
+Copy Markdown
+Owner
+Raster <image> content with image-rendering auto, optimizeQuality or high-quality is now resampled with the Mitchell-Netravali cubic (B = C = 1/3) on both backends. This is the kernel resvg applies by default, and the one Donner's feImage already used on TinySkia and Geode. smooth stays bilinear, crisp-edges and optimizeSpeed stay nearest, and pixelated keeps its two-stage path. A single mapping in ImageSampling.h picks the <image> kernel for both backends.
+optimizeQuality is a deliberate choice. CSS Images aliases it to smooth; Donner follows resvg, which renders it with the Mitchell cubic.
+TinySkia: drawn with tiny-skia FilterQuality::Bicubic, which was already linked into the renderer. It samples premultiplied sRGB texels with edge clamping, then clamps each channel to [0, 1] (tiny-skia's Clamp0 and ClampA). Premultiplied color may therefore exceed alpha.
+Geode: the image blit gains a fourth sampling mode, a 16-tap cubic over the source rectangle with the same weights and the same per-channel clamp.
+Translation-only draws: like tiny-skia, Geode samples the nearest texel for any translation-only image draw, fractional translations included. The blit's nearest mode reads the containing texel with textureLoad, as the feImage nearest path does.
+Compositor blits: bitmap blits resolve auto to smooth, so layer, tile and pattern composites keep bilinear sampling.
+The vendored raster-image references came from several historical upscalers:
+a browser rendering whose bilinear filter uses 4-bit subpixel weights;
+an older resvg that first resampled each image to its user-space size;
+the Mitchell cubic that current resvg uses.
+None of the old pixel-art reference sets could be matched without emulating an obsolete pipeline. At resvg v0.49.0 every raster-image reference is drawn with the Mitchell cubic, except optimizeSpeed, which uses nearest. This change replaces 24 structure/image references, painting/image-rendering/optimizeSpeed and masking/mask/with-image with their 300x300 v0.49.0 renderings. no-height.svg and no-width.svg are replaced too, because upstream redrew them. Provenance is recorded in third_party/resvg-test-suite/BUILD.bazel, following the earlier font-family refresh.
+Results:
+The twelve kernel skips and the optimizeSpeed skip are removed.
+The nine raster threshold allowances and the masking/mask/with-image allowance are dropped. Every one of these cases now compares at default settings, with 0 to 12 differing pixels.
+optimizeSpeed stays disabled on Geode only. At 3.75 device pixels per texel, every second texel boundary falls on a pixel center. Geode's interpolated texture coordinate lands just below the boundary, where tiny-skia's float inverse transform lands on it, so Geode picks the previous texel. All 564 differing pixels are inside the image; TinySkia matches.
+The Geode opacity golden documented bilinear sampling of its image, so its fixture now sets image-rendering="smooth". The committed macOS and Linux goldens keep covering the isolated-layer composite they were captured for.
+Outside structure/image, optimizeSpeed and masking/mask/with-image, every row in structure/*, masking/* and painting/* is unchanged on default_text, max and Geode. The renderer Wasm module measures 871,434 gzip bytes against the 872,000 ceiling, and the editor Geode package 3,518,862 against 3,520,000.
+Tests:
+ImageQualityRenderingUsesMitchellCubicSampling renders an upscaled checkerboard <image> and the same placement through feImage, for an unspecified value, auto, optimizeQuality and high-quality.
+Three regressions compare the active backend with tiny-skia drawing the same image directly:
+a translucent checker upscaled with the cubic;
+an image at intrinsic size under a fractional translation (interior pixels);
+a smooth upscale against tiny-skia's bilinear filter.
+TinySkia must match these oracles, and the feImage one above, exactly. Geode is held to the canonical default comparison, because GPU sampling evaluates in float on the device:
+the shader cubic lands at most one 8-bit step away in one channel (28 and 612 pixels on an Intel Vulkan device);
+hardware bilinear filtering differs by low bits on 684 pixels on Metal.
+The translated nearest case stays at identity on both backends.
+Native image-blit cases, opaque and translucent, compare the cubic mode against an independent CPU Mitchell reference on Metal and Vulkan.
+They use the native blur cascade's approved allowance of two pixels at one 8-bit step.
+A Vulkan device differs from the reference by one step in one channel of one pixel.
+All of these were committed failing first.
+Unit tests pin the image-rendering to kernel mapping, the auto-to-smooth bitmap-blit policy, and a scaled TinySkia drawBitmap.
+Follow-up: route feImage sampling through the same image-rendering kernel mapping. Today feImage keeps its own mapping and samples smooth with the cubic on both backends.
+Part of #1168
+chatgpt-codex-connector
+Bot
+commented
+Oct 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codex Review Summary
+This comment shows the latest Codex review activity on this pull request.
+Review
+Status
+Commit
+Review trigger
+📝 Code Review
+✅ Completed 2026-10-27T13:53:50.490412Z
+a425ec0
+New commits
+🔒 Security Review
+✅ Completed 2026-10-27T13:58:05.993531Z
+a425ec0
+New commits
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review" or "@codex security review".
+Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.
+jwmcglynn
+added 8 commits
+October 27, 2026 06:46
+Add failing tests for Mitchell cubic image sampling
+…
+f4223c2
+```
+Raster images with image-rendering auto, optimizeQuality or high-quality
+should be resampled with the Mitchell-Netravali cubic (B = C = 1/3), the
+same kernel feImage already uses on both backends. Today they are drawn
+bilinearly. The renderer regression compares an upscaled checkerboard
+image with the same placement through feImage, and a native image blit
+case compares a new cubic sampling mode against an independent CPU
+Mitchell reference. Both fail before the fix: 2176 differing pixels on
+TinySkia, 2196 on Geode and 32 on the Metal blit.
+```
+Resample quality image rendering with the Mitchell cubic
+…
+a8af3a4
+```
+Raster images with image-rendering auto, optimizeQuality or high-quality
+are now resampled with the Mitchell-Netravali cubic (B = C = 1/3) over
+premultiplied sRGB texels with edge clamping. This is the kernel resvg
+applies by default and the one feImage already used on both backends.
+smooth stays bilinear, crisp-edges and optimizeSpeed stay nearest, and
+pixelated keeps its two stage path. One shared mapping in
+ImageSampling.h selects the kernel for both backends.
+
+TinySkia uses tiny-skia's Bicubic filter quality, which was already
+linked. Geode gains a fourth image-blit sampling mode, a 16-tap cubic
+over the source rectangle, and an unscaled draw keeps the linear
+sampler because the cubic is not interpolating. Compositor bitmap blits
+resolve auto to smooth, so layer, tile and pattern composites keep
+bilinear sampling.
+
+The vendored raster-image references came from several historical
+upscalers, so 24 structure/image references and optimizeSpeed are
+replaced by their 300x300 renderings from resvg v0.49.0, with provenance
+in third_party/resvg-test-suite/BUILD.bazel. no-height.svg and
+no-width.svg are replaced too, because upstream redrew them. The twelve
+kernel skips and the optimizeSpeed skip are removed, the nine raster
+threshold allowances and the masking/mask/with-image allowance are
+dropped, and every one of these cases passes at default settings on
+TinySkia and Geode. optimizeSpeed stays disabled on Geode only, where
+564 pixels differ at texel boundaries that fall on pixel centers.
+```
+Split the CPU image-blit sampling reference into helpers
+…
+7197006
+```
+The native image-blit reference sampled nearest, bilinear and cubic
+cases in one function, which exceeded the complexity limit once the
+cubic case was added. Each kernel now has its own helper over a shared
+edge-clamped source image.
+```
+Refresh the masked image reference and pin the opacity fixture to smooth
+…
+e1c0bd3
+```
+masking/mask/with-image upscales a raster image inside a mask. With its
+allowance removed, the snapshot reference differed by 216 pixels on
+TinySkia and 218 on Geode under the Mitchell cubic; its resvg v0.49.0
+rendering matches on both, so that PNG is replaced from the same
+revision and listed with the other refreshed references.
+
+The Geode opacity golden exercises the isolated-layer composite of an
+image at 50% opacity and documented bilinear sampling. Its fixture now
+asks for image-rendering smooth explicitly, so the committed macOS and
+Linux goldens keep testing the composite they were captured for.
+```
+Add failing parity tests for cubic clamping and translated images
+…
+61b80af
+```
+tiny-skia, whose sampling resvg and the TinySkia backend share, clamps
+each cubic channel to [0, 1] and leaves premultiplied color above alpha;
+Geode also bounded color by alpha. tiny-skia samples nearest for any
+translation-only image transform, fractional ones included, where Geode
+filtered linearly. New renderer regressions compare the active backend
+with tiny-skia drawing the same image directly: a translucent checker
+upscaled with the cubic, an image at its intrinsic size under a
+fractional translation, and a smooth upscale against tiny-skia's
+bilinear filter. The native image-blit reference drops the alpha bound
+and gains a translucent cubic case.
+
+The cubic native checks take the native blur cascade's approved
+allowance of two pixels at one 8-bit step, which a Vulkan device needs
+for one pixel. A TinySkia drawBitmap test pins the bilinear blit of an
+auto bitmap. Before the fix TinySkia passes all three regressions, and
+Geode fails the translucent case by 48 pixels and the translated case
+by 49; the Metal translucent blit differs in 4.
+```
+Match tiny-skia cubic clamping and translated-image sampling on Geode
+…
+29adf18
+```
+Geode's cubic image sampling now clamps each channel to [0, 1] only,
+like tiny-skia's Clamp0 and ClampA stages, instead of also bounding
+premultiplied color by alpha. A translation-only image draw now samples
+the nearest texel for every requested filter, as tiny-skia does,
+including fractional translations. The image blit's nearest mode reads
+the texel containing the interpolated coordinate with textureLoad,
+following the feImage nearest path, and a static_assert ties the
+encoder's filter values to the shader's sampling modes.
+
+optimizeSpeed stays disabled on Geode with its measured cause. At 3.75
+device pixels per texel, every second texel boundary falls on a pixel
+center. Geode's interpolated texture coordinate lands just below that
+boundary where tiny-skia's float inverse transform lands on it, so
+Geode picks the previous texel. All 564 differing pixels are inside the
+image; the frame strokes match.
+
+Comments and docs now say that the shared kernel mapping covers <image>
+draws only, that CSS Images aliases optimizeQuality to smooth while
+Donner follows resvg, and that optimizeSpeed.png is a nearest-neighbor
+rendering. A design-doc citation is dropped from a skip reason, and the
+gap tables in the feature-gap design doc are reformatted.
+```
+Move the image-blit comparison policy into a helper
+…
+e8021e1
+```
+Choosing the cubic allowance inline pushed CheckImageBlit past the
+complexity limit. The policy now lives in its own helper next to the
+CPU reference.
+```
+Hold Geode image-sampling oracles to the default comparison
+…
+a425ec0
+```
+The image-sampling regressions compare the active backend with tiny-skia
+or feImage. TinySkia shares tiny-skia's sampling code and stays at pixel
+identity. Geode evaluates sampling in float on the GPU, and on an Intel
+Vulkan device the shader cubic lands one 8-bit step away in one channel
+on 28 pixels of the opaque case and 612 of the translucent case. Hardware
+bilinear filtering differs the same way on 684 pixels on Metal. One
+helper now holds the three Geode comparisons to the canonical default
+pixelmatch parameters and records the measured cause; the translated
+nearest case stays at identity on both backends.
+```
+jwmcglynn
+force-pushed
+the
+fix/resvg-image-mitchell
+branch
+from
+c75f5f9 to
+a425ec0
+Compare
+October 27, 2026 13:52
+Hide details
+View details
+jwmcglynn
+merged commit 96e28ec
+into
+main
+Oct 27, 2026
+29 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+jwmcglynn
+deleted the
+fix/resvg-image-mitchell
+branch
+October 27, 2026 17:42
+This was referenced Oct 27, 2026
+Sample feImage rasters with the image-rendering kernels
+#2108
+Merged
+Report the masked crown held-drag check on the hosted Perf lane
+#2109
+Merged
+Cut WGSL compile-time validation steps so stock clang builds the image blit shader
+#2113
+Merged
+jwmcglynn
+added a commit
+that referenced
+this pull request
+Oct 27, 2026
+Report the masked crown held-drag check on the hosted Perf lane (#2109)
+…
+26f1e5d
+```
+The nightly Perf workflow has failed every run since 2026-10-24. With
+operator approval, this makes one check report-only on the hosted macOS
+Perf lane as a stopgap until the compositor fix for #2106. It does not
+fix the slow masked drag itself.
+
+Cause: #2053 added the "Geode detailed interactions > masked crown drag"
+cases to `browser_responsiveness_perf_test`. On the hosted macOS Perf
+runner, the document render for a masked-child drag is too slow to
+finish a second held position. Background render time rises from about
+12 ms per frame to 48, 253 and up to 471 ms during the drag, and the
+release frame re-renders 10 cached tiles in 220 to 630 ms. So `held drag
+must complete multiple represented positions` fails in Chromium with
+Received: 1. Firefox completes more than one position but reports input
+p95 of 1.0 to 5.3 s. This is not a regression: the other drag phases on
+the same runner kept their latency or improved (Chromium first-drag
+inputP95 went from 108 to 87 ms). The check had no report path, unlike
+the lane's latency gates and completion checks, which that runner
+already only reports (#1666).
+
+Change:
+- Completion checks in `latency-gates.mjs` can now name the phases they
+are tracked in (`phases`). The shared `completionCheckTracks` decides
+whether a miss is reported.
+- The held-drag position check now goes through the completion check
+helper as `heldDragPositions`, tracked only for Chromium's `geode-crown`
+phase under #2106. A miss is reported only on the run that sets
+`DONNER_BROWSER_COMPLETION_CHECKS=report` (the hosted macOS Perf job).
+Every other browser, phase and lane still enforces it.
+- No other check, gate or budget changes. The entry and comment say to
+remove it, and so re-enforce the check, once #2106 is fixed.
+
+Before: nightly Perf runs at 5405c78, ec8ccd9, cd92542 and
+0d4965b failed in 3 or 4 Chromium masked crown cases each.
+After: a manual Perf dispatch of 03aaad0 (run 40554645471) passed the
+macOS perf job. `browser_responsiveness_perf_test` ran 36 passed and 4
+skipped. All 4 Chromium masked crown misses were recorded as
+`heldDragPositions` "missed (reported)". The same check passed and
+stayed enforced in the 16 other drag measurements. Gate limits and modes
+match the last nightly. The head adds only the matrix test cases and a
+doc comment from review on top of that commit.
+
+Not caused by this change: the Linux perf job in that dispatch failed to
+compile `//donner/gpu/shader:image_blit_native_artifact`. Clang hit its
+constexpr step limit in the WGSL uniformity analysis of the image blit
+shader, which #2097 extended. The nightly Linux job passed at 0d4965b,
+before #2097. This is reported separately and is not addressed here.
+
+Validation:
+- `bazel test //donner/editor/wasm/tests:browser_matrix_tests
+//donner/editor/wasm/tests:js_lint_test` passed (37 of 37 matrix cases,
+including new phase-scoping cases showing that a held-position miss
+stays enforced in Chromium's other drag phases and in Firefox).
+- `DONNER_LINT_BASE_REF=origin/main tools/ci/lint_lane.sh` passed (exit
+0) on the head.
+
+Refs #2106, #2053, #1666
+```
+jwmcglynn
+added a commit
+that referenced
+this pull request
+Oct 28, 2026
+Sample feImage rasters with the image-rendering kernels (#2108)
+…
+f0f755c
+```
+Builds on the shared `<image>` kernel mapping `ImageSamplingKernelFor`
+from #2097.
+
+`feImage` chose its own resampling kernel. `image-rendering: smooth`
+resampled with the Mitchell cubic, while `<image smooth>` is bilinear.
+The software renderer's rotated placement also resampled bilinearly and
+then filtered the result again with the cubic. resvg renders an
+`feImage` raster as an image, so every `feImage` placement now goes
+through `ImageSamplingKernelFor` on both backends.
+
+- A placement-aware `ImageSamplingKernelFor(imageRendering,
+deviceFromImage)` encodes tiny-skia's rule that a pure translation
+samples the containing texel. Geode `<image>` draws use it as well.
+Before this change, Geode `pixelated` draws at their intrinsic size kept
+interpolating while the software renderer sampled the texel.
+- Software filter graph: a bilinear `feImage` kernel, plus a Mitchell
+kernel in the procedural rasterizer. Rotated `feImage` is resampled once
+with the selected kernel and then copied texel for texel.
+- Geode: the `feImage` shader gains a bilinear mode. The Metal and
+Vulkan native shader tests now cover all four modes against their host
+reference.
+- Nested-SVG `feImage` rasters are rendered at their device size, so
+their one-to-one placement now copies texels instead of filtering them
+with the cubic. The two Donner-generated `filters/feImage/svg` goldens
+are refreshed from the new renderings.
+`filters/feImage/with-subregion-5`, previously skipped, now matches its
+reference exactly on every lane and is compared again.
+
+## Tests
+
+- `FeImageSamplesLikeImageForEachRendering`: `feImage` with each
+`image-rendering` value (unspecified, `auto`, `optimizeQuality`,
+`high-quality`, `smooth`, `optimizeSpeed`, `crisp-edges`, `pixelated`)
+against the same raster drawn as `<image>`. The comparison is identity
+on TinySkia and the `ImageSamplingOracleParams` default on Geode.
+- `FeImageTranslatedAtIntrinsicSizeSamplesLikeImage` (identity) and
+`FeImageRotatedSamplesLikeImage` (`ImageSamplingOracleParams`) cover the
+same values for translated and rotated placement.
+- `ImageTranslatedAtIntrinsicSizeSamplesNearest` now covers every value.
+- Red at the test commit, software renderer: `smooth` 2176 pixels;
+translated 49 pixels for the quality values, `smooth` and `pixelated`;
+rotated 920 pixels for the quality values and 80 for `smooth`.
+- Red at the test commit, Geode: `smooth` 378 pixels; translated 49
+pixels for the quality values and `smooth`; rotated `smooth` 138 pixels;
+`<image pixelated>` translated 49 pixels.
+- Green: all seven sampling tests pass on both backends.
+
+## resvg rows
+
+`filters/feImage/*` on the default, text-full and Geode lanes, measured
+before and after:
+
+| Row | Before | After |
+| --- | --- | --- |
+| link-on-an-element-with-complex-transform | 13 | 6 |
+| link-to-an-element-outside-defs-2 | 4 | 0 |
+| link-to-an-element-with-transform | 6 | 0 (Geode 1) |
+| with-x-y-and-protruding-subregion-2 | 2 | 0 |
+| with-subregion-5 | skipped (5969) | 0, compared |
+| svg | 0 against the old goldens | 0 against the refreshed goldens |
+
+Other `filters/*` rows and `painting/image-rendering/*` are unchanged.
+```
+jwmcglynn
+mentioned this pull request
+Nov 1, 2026
+Qualify resvg image sampling references and restore skipped comparisons
+#1168
+Open
+3 tasks
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

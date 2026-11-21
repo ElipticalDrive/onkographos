@@ -1,0 +1,134 @@
+# StegaNeRF
+
+Also called: StegaNeRF: Embedding Invisible Information within Neural Radiance Fields
+
+## Overview
+StegaNeRF is a method for steganographic information embedding in Neural Radiance Fields (NeRF) that allows accurate hidden information extraction from rendered images while preserving original visual quality, solving the problem of copyright/ownership identification in shared 3D content [S1]. Unlike traditional 2D steganography which embeds signals only into specific source images, StegaNeRF allows recovery of the same hidden signal from NeRF renderings at arbitrary viewpoints [S1]. It differs from prior 3D mesh steganography by hiding information in a continuous neural representation (NeRF) rather than discrete mesh geometry, enabling viewpoint-independent recovery [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Training images $\{Y_i\}$ with corresponding camera poses $\{P_i\}$; hidden information $I$ (e.g., an image or message); learning rates $\eta = [\eta_0, \eta_1]$ [S1].
+*   **Outputs:** Steganographic NeRF weights $\theta$ and detector network weights $\psi$ [S1].
+
+**Data Structures:**
+*   **NeRF ($\theta, \theta_0$):** The neural radiance field parameters. $\theta_0$ are the initial weights trained without steganography; $\theta$ are the final weights containing the steganographic information [S1].
+*   **Detector ($F_\psi$):** A U-Net network with learnable weights $\psi$ used to decode the hidden information $I$ from 2D renderings [S1].
+*   **Classifier ($F_{\psi_c}$):** A network used to classify whether a NeRF rendering contains hidden information [S1].
+*   **Mask ($m$):** A gradient-based mask computed from $\theta_0$ to steer steganographic updates toward less important weights [S1]. (Note: The exact formula for $m$ is referenced as Eq. 3 in the source but not provided in the text snippets [S1].)
+
+**Algorithm Steps:**
+1.  **Stage 1: Initial Training.** Train the initial NeRF weights $\theta_0$ using standard photometric loss between rendered and ground truth pixels to guarantee visual quality [S1].
+2.  **Compute Mask.** Compute the importance mask $m$ for $\theta_0$ [S1].
+3.  **Stage 2: Steganographic Optimization.** Initialize final NeRF weights $\theta$ with $\theta_0$ [S1]. For each training iteration $t$:
+    a. Randomly sample a training pose $P_i$ and render the image $\theta(P_i)$ [S1].
+    b. Render the original NeRF image $\theta_0(P_i)$ for negative sampling [S1].
+    c. Compute steganographic losses (defined below) [S1].
+    d. Compute standard rendering loss $L_{rgb}$ [S1].
+    e. Combine total loss $L$ (defined below) [S1].
+    f. Update detector weights $\psi$ using learning rate $\eta_1$: $\psi \leftarrow \psi - \eta_1 \cdot \frac{\partial L}{\partial \psi}$ [S1].
+    g. Update NeRF weights $\theta$ using learning rate $\eta_0$ and mask $m$: $\theta \leftarrow \theta - \eta_0 \cdot (m \odot \frac{\partial L}{\partial \theta})$ [S1].
+
+**Formulas:**
+*   **Contrastive Detection Loss:**
+    $$L^+_{dec} = |F_\psi(\theta(P)) - I|$$
+    $$L^-_{dec} = |F_\psi(\theta_0(P)) - \emptyset|$$
+    Where $F_\psi$ is the detector network, $\theta$ is the steganographic NeRF weights, $\theta_0$ is the original NeRF weights, $P$ is the camera pose, $I$ is the hidden information, and $\emptyset$ is an empty image with all zeros [S1].
+
+*   **Classifier-Guided Recovery Loss:**
+    $$L^c_{dec} = -\log F_{\psi_c}(\theta(P)) - \log(1 - F_{\psi_c}(\theta_0(P)))$$
+    Where $F_{\psi_c}$ is the classifier network outputting the probability of hidden information presence [S1].
+
+*   **Total Loss:**
+    $$L = \lambda_0 L^c_{dec} + \lambda_1 L^+_{dec} + \lambda_2 L^-_{dec} + \lambda_3 L_{rgb}$$
+    Where $\lambda_0, \lambda_1, \lambda_2, \lambda_3$ are weighting coefficients [S1].
+
+**Parameters:**
+*   $\eta_0$: Learning rate for NeRF weight update [S1].
+*   $\eta_1$: Learning rate for detector weight update [S1].
+*   $\theta_0$: Initial NeRF weights trained in Stage 1 without steganography [S1].
+*   $\theta$: Final NeRF weights containing steganographic information, initialized from $\theta_0$ [S1].
+*   $F_\psi$: Detector network with learnable weights $\psi$ [S1].
+*   $F_{\psi_c}$: Classifier network [S1].
+*   $I$: The customizable hidden information (e.g., image, message) to be embedded [S1].
+*   $\emptyset$: An empty image with all zeros [S1].
+
+**Pitfalls:**
+*   Naively applying 2D steganography methods (like LSB or DeepStega) to NeRF training images fails because the embedded information gets smoothed out and lost in the actual NeRF renderings, inhibiting detection [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_steganerf(training_images, training_poses, hidden_info, eta_0, eta_1, lambda_0, lambda_1, lambda_2, lambda_3):
+    # Stage 1: Train initial NeRF
+    theta_0 = initialize_nerf()
+    for iteration in range(stage_1_iterations):
+        pose = random_sample(training_poses)
+        gt_image = get_gt_image(training_images, pose)
+        rendered_image = render_nerf(theta_0, pose)
+        loss_rgb = mean_squared_error(rendered_image, gt_image)
+        theta_0 = update_weights(theta_0, eta_0, loss_rgb)
+    
+    # Compute mask for gradient masking (implementation details not provided in source)
+    mask = compute_importance_mask(theta_0)
+    
+    # Stage 2: Steganographic Optimization
+    theta = copy_weights(theta_0)
+    detector = initialize_unet()
+    classifier = initialize_classifier()
+    
+    for iteration in range(stage_2_iterations):
+        # Sample pose and render
+        pose = random_sample(training_poses)
+        stego_render = render_nerf(theta, pose)
+        original_render = render_nerf(theta_0, pose)
+        
+        # Compute steganographic losses
+        # L+dec: Recover hidden info from stego render
+        l_plus_dec = mean_squared_error(detector(stego_render), hidden_info)
+        
+        # L-dec: Detect empty image from original render
+        empty_image = zeros_like(hidden_info)
+        l_minus_dec = mean_squared_error(detector(original_render), empty_image)
+        
+        # Lcdec: Classifier-guided recovery
+        # Classifier predicts probability of hidden info presence
+        prob_stego = classifier(stego_render)
+        prob_original = classifier(original_render)
+        l_cdec = -log(prob_stego) - log(1 - prob_original)
+        
+        # Compute standard rendering loss
+        gt_image = get_gt_image(training_images, pose)
+        l_rgb = mean_squared_error(stego_render, gt_image)
+        
+        # Combine total loss
+        total_loss = (lambda_0 * l_cdec + 
+                      lambda_1 * l_plus_dec + 
+                      lambda_2 * l_minus_dec + 
+                      lambda_3 * l_rgb)
+        
+        # Update detector
+        detector_grads = compute_gradients(total_loss, detector)
+        detector = update_weights(detector, eta_1, detector_grads)
+        
+        # Update NeRF with gradient masking
+        nerf_grads = compute_gradients(total_loss, theta)
+        masked_grads = elementwise_multiply(mask, nerf_grads)
+        theta = update_weights(theta, eta_0, masked_grads)
+        
+    return theta, detector
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Extensive experimental results validate StegaNeRF balances between the rendering quality of novel views and the high-fidelity transmission of the concealed information [S1].
+*   **Strengths:** Enables reliable extraction of the hidden signal from NeRF renderings at arbitrary viewpoints, unlike 2D steganography [S1]. Uses adaptive gradient masking to steer hidden information towards less important NeRF weights, balancing steganography ability and rendering visual quality [S1].
+*   **Limitations:** Requires joint optimization of the NeRF and detector networks [S1].
+*   **When to use:** Designed for ownership identification, copyright protection, and preserving multiple source identities in collaborative 3D scene reconstruction [S1].
+
+## Background
+StegaNeRF was introduced by Chenxin Li, Brandon Y. Feng, Zhiwen Fan, Panwang Pan, and Zhangyang Wang in arXiv:2212.01602v1 on Dec 3, 2022 [S1]. It represents the first exploration of hiding information in NeRF models for ownership identification [S1].
+
+## Sources
+[S1] StegaNeRF: Embedding Invisible Information within Neural Radiance Fields, https://doi.org/10.1109/iccv51070.2023.00047, fetched 2026-10-26

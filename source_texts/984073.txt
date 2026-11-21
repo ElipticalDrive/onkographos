@@ -1,0 +1,1051 @@
+Experimental fork that adds basic RT effects. Contribute to automata-rtx/godot-rt development by creating an account on GitHub.
+
+Add a ground-truth ambient occlusion estimator and make the raytraced shadow settings live by automata-rtx · Pull Request #2 · automata-rtx/godot-rt · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+automata-rtx
+commented
+Sep 2, 2026
+Copy link
+Copy Markdown
+Owner
+What problem(s) does this PR solve?
+Two independent additions to the Forward+ renderer, plus one round of bringing the fork's comments and documents back in step with its code. 27 commits on top of the previous merge; master is an ancestor, so this is a fast forward.
+A second ambient occlusion estimator. The engine has only ever shipped Intel's ASSAO, a point-obscurance estimator that scores poorly against a traced reference on contact detail and on thin geometry. This adds a slice-based horizon march with a visibility bitmask (GTAO plus Therrien 2023) as an alternative: a depth prefilter that builds a five-level linear-depth pyramid, a gather that marches slices and accumulates occlusion into a 32-bit visibility mask, and a separable denoise-and-upsample pass. Both estimators write the same occlusion buffer, so nothing downstream knows or cares which one ran.
+It is selected per-Environment by the new Environment.ssao_method (Project Default / Screen Space (Legacy) / Ground Truth), which defers by default to the new rendering/environment/ssao/method project setting. Tuning lives under rendering/environment/ssao/ground_truth/: screen_radius, slices, steps_per_slice, thickness, intensity_scale, scale_radius_with_distance and visibility_bitmask. ssao_enabled, ssao_power, half_size and the fade distances carry over; ssao_detail, ssao_horizon, ssao_sharpness, quality and adaptive_target are legacy-only and the inspector hides them when the new estimator is active. Forward+ and single-view only — stereo and XR fall back to legacy, and an orthographic camera is not supported (see below).
+Because tuning ambient occlusion by screenshot is how you end up with an estimator that looks right and measures wrong, docs/rt_shadows/ao_validation/ ships a harness that traces a scene on the CPU two ways — a world-space reference and a screen-visible-geometry reference — and scores a render against both. Several commits here are corrections that harness found and that a screenshot would not have: a self-occlusion floor, uneven step spacing, a half-pixel offset in the half-resolution upsample, and a strength curve that was crushing occlusion to black. Section 9 of the fork guide has the resulting numbers.
+Raytraced shadow settings are now live. Every raytraced_shadows/* setting except the master enabled flag can be changed in the inspector or through ProjectSettings.set_setting() and takes effect on the next frame, instead of requiring a restart. directional/enabled and the two directional/demoted_shadow_* settings are live but snapshotted once per frame, because a sun's cascade count has to be one answer for the whole frame. Alongside that: the traced penumbra now matches the geometry it comes from; the temporal accumulation window shortens when the clamp had to correct it, which cuts ghosting behind moving casters; the caster gather skips the index query for a light whose volume the sun already encloses; and the BLAS cache compares source buffers instead of asking the rendering device to revalidate every structure every frame.
+One documentation and comment audit. About 74 comments and document passages across the fork were wrong, stale, or described the opposite of what the code does — an a-trous pass said to feed its output back when it stores its input, a prefilter falloff described in the wrong direction, an encoding claim off by a factor, volumetric fog listed as a reader of shadow maps it no longer reads. All corrected against the code. Investigation history that had accumulated in comments moved to FINDINGS.md, where the fork's contract says it belongs.
+Additional information
+What is off by default
+Everything new. rendering/environment/ssao/method defaults to 0 (Screen Space (Legacy)) and Environment.ssao_method defaults to SSAO_METHOD_DEFAULT, which follows it — so _use_gtao() returns false and neither the gather nor its buffers are ever reached in a project that does not ask for them. The raytraced shadow work is all behind raytraced_shadows/enabled, still false and still restart-required. A project that opens this build and changes nothing renders what it rendered before.
+Two caveats. The GTAO effect object is constructed unconditionally with the other Forward+ effects, so four compute pipelines are compiled at startup even when the estimator can never run — that is what lets the per-Environment switch work without a restart, and it matches how ss_effects, taa and fsr2_effect are already built. And in the raytraced path, the DirectionalLight3D shadow-mode demotion and the 1024 atlas cap apply to every directional light once raytraced directional shadows are available, not only to raytraced ones; that is unchanged behavior, just now reachable without a restart.
+The one behavioral change
+ssao_radius now scales the whole march rather than half of it. Previously it moved the world-space cutoff and the back-face thickness but not the screen-space span the steps walk, so lowering it truncated the march while still spreading its steps over the full span, and raising it widened a cutoff the steps never reached. Both are now derived from the same product.
+Measured on the interior scene in the CPU model, mean occlusion before and after:
+ssao_radius
+before
+after
+0.5
+0.0236
+0.0318
+1.0
+0.0605
+0.0605
+2.0
+0.0771
+0.1151
+Radius 1.0 — the default — is unchanged, since the change multiplies by exactly 1.0 there. Only the new estimator is affected, and it ships off, so no existing scene moves.
+What caught it: the fork guide, the class reference and GTAO::filter_radius_for() all described the radius as a multiplier on the on-screen reach, and only the shader disagreed. The comment audit found a code defect rather than a documentation one.
+Known not to work: orthographic cameras
+The ground truth estimator is wrong under an orthographic projection, and it neither falls back nor warns. Three places assume perspective: the distance-scaled world radius still grows with depth when an orthographic view's extent does not, inflating both the sample cutoff and the back-face thickness; view_dir is built with the opposite sign to the perspective branch, reversing the term that lets thin surfaces pass light; and gtao_filter.glsl has no orthographic case at all, so its plane-distance weights measure against a warped plane.
+This is documented as unsupported in fork guide section 9.4 rather than fixed. A fix needs an orthographic frame rendered on a GPU to validate, and a partial one would leave it wrong while looking addressed. Use the legacy estimator on an orthographic viewport.
+What to look at hardest
+The occlusion gather and filter shaders, and the raytraced shadow denoiser changes. Those are where a defect shows up as a picture that is subtly wrong rather than as a failure, and they are the parts no test covers.
+What CI does not cover
+CI is green on the head commit, but it is Windows-only now, which means the --doctool class reference check, the GDExtension API compatibility check, and the project export and converter tests no longer run. Unit tests do — --test runs in the Windows job.
+The class reference was therefore checked by hand: every new bound surface — Environment.ssao_method with its three enum constants, RenderingServer.environment_set_ssao_method with its three, and all eight new project settings — matched against the committed XML for type, default, enum name, argument names and doctool's own emission order. It matches, so --doctool should produce no diff. The API change is purely additive — one new method, one new enum, no existing signature touched — so the dropped compatibility job had nothing to reject either. That check is now yours to run, not CI's.
+CI also never compiles GLSL, since Godot builds RD shaders at runtime, so the shaders were validated with glslangValidator including both gtao_filter variants, and their push-constant layouts compared against SPIR-V reflection. The build configurations CI dropped are where a scons disable_3d=yes break was hiding: _rt_report_cpu_cost was defined inside #ifndef _3D_DISABLED and called from an unguarded body. Fixed here.
+Nothing in this branch was verified on real hardware. The engine was not built or run while preparing it; every occlusion number quoted comes from the CPU model in docs/rt_shadows/ao_validation/, not from a rendered frame. Look at an actual frame before trusting the estimator in a shipping scene.
+AI assistance
+This work was done with AI assistance. An AI coding assistant wrote most of the new shader and C++ code in this branch, the CPU validation harness, and the documentation, working from direction and review at each step; the corrections the harness found were diagnosed and applied the same way. The comment-and-document audit was AI-performed end to end, checking each passage against the code it describes, as was a pre-merge review whose findings are the last commit here. Every claim in the documentation was re-derived against the source rather than taken on trust, but the code has not been run on a GPU, so treat the rendering behavior as reviewed rather than demonstrated.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+Generated by Claude Code
+claude
+added 27 commits
+August 31, 2026 04:10
+Let the raytraced shadow settings be tuned without a restart
+…
+adf69dc
+```
+All fifteen were resolved once behind a settings_registered flag and cached
+for the process lifetime. Only two of them are declared restart-required, so
+the other thirteen silently did nothing when changed: turning the denoiser
+off in the inspector left the render byte-identical to leaving it on, with
+no warning and nothing in the log.
+
+They are tuning knobs, and tuning by restarting the editor is miserable, so
+they are now read through GLOBAL_GET_CACHED. That keeps a typed copy and
+re-reads only when ProjectSettings bumps its version, so the steady state
+costs an integer compare rather than a string lookup, and it is the
+mechanism the neighbouring lights_and_shadows settings already use. Each is
+clamped on read rather than on registration, because a live value arrives
+straight from the inspector and several of the hints allow or_greater.
+
+Two settings stay latched. enabled cannot ever be live: mesh_add_surface
+fixes a vertex buffer's creation bits at upload time, before the rendering
+device exists, so a mesh loaded while it was off has nothing an acceleration
+structure could be built from, and re-reading the value would only produce
+build failures against buffers that can never satisfy it.
+directional/enabled is held to the restart-required contract it already
+declares.
+
+Measured, on a lamp with a wide penumbra: setting denoiser/enabled to false
+at frame 40 now produces a frame byte-identical to a project that started
+with it off, and differs from one that left it on by an RMSE of 6.54. Before
+this change the same runtime write produced a frame byte-identical to
+ignoring it. A float setting behaves the same way: min_filter_pixels raised
+to 8.0 at runtime matches a project that started at 8.0. Writing enabled at
+runtime still changes nothing, which is the intent.
+
+The one cost is that a change lands the moment it is made, which can be
+part-way through a frame. Dragging demoted_shadow_mode can leave the culler
+and the light buffer disagreeing about the cascade count for a single frame.
+That is recorded in the guide.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Make the traced penumbra match the geometry it comes from
+…
+8b505db
+```
+Measured against a closed-form ground truth for the test scene -- an omni
+light of known radius over a post of known size, cross-checked against a
+dense visibility quadrature and confirmed by the 50% crossing landing within
+a pixel of the analytic shadow edge at every distance -- the shipped shadow
+was 28% too sharp at stock settings, and got sharper still as the sample
+count was raised. Three independent defects were doing it.
+
+The probe early out could not answer for a disk. Two rays that agree were
+taken to mean the whole emitter agrees, but two points on the rim, opposite
+each other, still both read lit over the whole outer half of a penumbra:
+where a fifth of the emitter is covered they agree a third of the time. The
+binary answer they hand back pulls that pixel to fully lit, and the same
+happens on the umbra side, so the soft edge was squeezed from both ends --
+72% of its true width at sixteen samples per light. Every sample is now
+traced. The default of one sample never reached the early out, so this costs
+nothing at stock settings and costs exactly the rays that were asked for at
+any higher count.
+
+The history clamp collapsed to a window of no width. Its sigma was the
+spread of the current frame's 3x3, and those nine values are counts of
+blocked rays out of a handful: in the shallow ends of a penumbra they agree
+often -- at one ray per light and a true visibility of 0.95, about two frames
+in three -- and the measured spread is then exactly zero, pinning the
+accumulated value to that binary answer. It was removing a third of every
+penumbra. The spread is now floored with the standard error those ray counts
+actually carry, with the usual two pseudo counts so the floor cannot collapse
+along with the spread. It tightens on its own as the sample count rises.
+
+The eight bit accumulator ratcheted. It re-reads its own rounded output every
+frame, so once the step it wants to take is under half a quantization level
+the value stops moving -- and not symmetrically: in the lit end of a penumbra
+the occasional blocked ray is a step down large enough to land while the many
+lit rays each ask for a step up too small to, so the value crept darker and
+the edge spread. That was making a stock penumbra about 15% too wide, hiding
+part of the other two. Rounding is now dithered per pixel and per frame, at
+the cost of one hash and no memory.
+
+Stock settings now measure 17/28/38/47/55/51/52 pixels of 10-90 penumbra
+across the test scene where the geometry calls for 16.3/26.2/36.0/45.9/51.5/
+51.5/51.5, and sixteen samples per light reproduce it exactly. Contact
+hardening is now the curve the scene actually implies rather than a curve of
+the denoiser's own.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Shorten the accumulation window when the clamp had to correct it
+…
+4bf06fd
+```
+The variance clamp already stops a moved blocker leaving its old shadow
+behind, but it only fixes the value, not the weight: history_length carries
+on as though the pixel had been converging all along, so the alpha stays at
+one over the full window and the shadow's NEW position fades in over half a
+second rather than arriving with it. Eight frames after a blocker jumps, the
+difference from the converged reference is entirely the new shadow still
+filling in.
+
+How far the clamp had to move the history is a direct measure of how wrong it
+was, so the window is now shortened in proportion. A history sitting inside
+the window is not moved at all -- which is every pixel in the steady state --
+so this costs nothing where nothing is wrong, and the still-camera penumbra
+measures identically to before. The worst of the four channels drives it,
+because they share one window and arriving late is worse than being brief.
+
+Eight frames after the jump, the mean difference from the converged reference
+falls from 3.45 to 2.35 and the pixels off by more than eight levels from
+9.7% to 5.7%, with no measurable change to noise in either the umbra or the
+penumbra after a camera cut.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Let raytraced directional shadows be switched on without a restart
+…
+7ced189
+```
+The master `enabled` flag has a real reason to need a restart: vertex buffer
+creation bits are fixed at upload time, so a mesh loaded while it was off has
+nothing an acceleration structure could be built from. `directional/enabled`
+never had that reason. It only chooses which of two shadowing paths a sun
+takes, and both are rebuilt every frame; it was restart-required because it
+had been declared so.
+
+What it does need is to hold still for a frame. Whether a sun is raytraced
+decides how many cascades it gets, and that has to be the same answer for the
+culler, for the shadow atlas layout and for the light buffer, which run at
+three different points in a frame; read on demand it could differ between
+them and put cascades in the wrong atlas rects. So it is snapshotted once per
+frame in RaytracingScene::update_frame_settings(), called from
+RendererSceneRenderRD::update() before any viewport draws -- where Godot
+already snapshots its own per-frame rendering settings. The two
+demoted_shadow_* settings answer the same question from the other side and are
+snapshotted with it, which also retires the caveat the fork guide carried
+about dragging that slider costing a bad frame.
+
+Verified the way the other live settings were: a project that writes the
+setting at runtime renders the same frame as one that started with it on
+(mean absolute difference 0.035 of 255, the residue of ten frames of
+accumulation from before the write), and both differ clearly from one where
+it stayed off (0.995, peak 72).
+
+The guides carried three stale claims that this turns up, now corrected: the
+tuning section said its knobs need a restart when every one of them is live,
+the softness advice quoted the class reference's `0.5` for the sun without
+noting that Godot uses the value as an angular radius, and the sample-count
+advice was written when raising it was nearly free.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Stop asking the rendering device to confirm every structure every frame
+…
+045246b
+```
+The BLAS cache re-validated each cached entry on every frame, and the check it
+used was acceleration_structure_is_valid(). That is a _THREAD_SAFE_METHOD_, so
+it took the rendering device's lock once per cached surface per frame -- twice,
+because the caller checked again on the way past. In a scene of a couple of
+thousand casters it was three quarters of the time that loop spent and a
+quarter of the whole raytraced path's CPU cost.
+
+The check was for a real case. A PrimitiveMesh rebuilds its surfaces on the
+same RID whenever a property changes, and ArrayMesh.clear_surfaces() does the
+same on purpose; the vertex buffer goes, and blas_create() registered the
+structure as a dependency of that buffer, so the structure goes with it. A dead
+structure handed to tlas_build() takes the whole build down.
+
+But being freed along with that buffer is the ONLY way one of these structures
+disappears without this cache doing it, so asking whether the buffer is still
+the one the structure was built from answers the same question without the
+lock: RID_Owner bumps a generation counter when it reuses a slot, so a buffer
+RID that still compares equal is the same buffer, and its dependents are
+therefore still alive. A surface that has gone away gives back a null RID,
+which fails the same comparison. Both cases end where they did before, dropping
+the entry to be rebuilt.
+
+The stale-entry sweep also ran every frame to find entries nothing had asked
+for. Entries are not eligible for sixty frames, so it now runs every eighth,
+which costs a stale entry at most seven more frames of life.
+
+In the hostile scene above -- three thousand props, sixteen lamps, a raytraced
+sun, a spotlight on the camera -- the build half falls from 0.48 ms to 0.23 ms
+per frame and the whole path from 1.28 ms to 1.00 ms, with every test scene
+rendering identically and the penumbra measurements unchanged. A test that
+grows a PrimitiveMesh and rebuilds an ArrayMesh at runtime confirms both still
+produce a shadow of the new geometry.
+
+GODOT_RT_DEBUG now also reports what this path costs the CPU, split into
+gathering and building, averaged over 120 frames with peaks: the two halves
+scale with different things, and which one a slow scene is paying for is not
+guessable. The fork guide records what moved the number in testing -- chiefly
+that a raytraced sun is two thirds of the cost and that its shadow distance,
+not caster_distance_scale, is the lever.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Do not query the index for a light the sun's volume already covers
+…
+6560a50
+```
+Casters are gathered by querying the scenario's geometry index once per
+raytraced light, and the pass counter throws away an instance a previous
+light already claimed. It throws it away at the leaf, though, after the
+traversal has descended to it, so overlapping lights pay for the same part of
+the index over and over. In the stress scene sixteen lamps turned 2124 index
+visits into 5164 and found 96 casters the sun had not already found.
+
+A light whose bounds sit entirely inside a volume that is going to be queried
+anyway cannot find anything that volume will not, so its query can be skipped
+outright. That is not a corner case: a raytraced sun's caster volume is the
+camera frustum swept towards the light, and in an interior, a street or a town
+square it swallows the lamps whole.
+
+The enclosed volumes are moved to the back of the list rather than removed
+from it, because the per-element multimesh cull below asks a different
+question of the same list -- whether one element of a multimesh is reached --
+and consults the directional volumes only when scatter_casters lets it. With
+scatter_casters set to Disabled, a list with the enclosed lamps missing would
+lose exactly the elements those lamps were the only reason to include.
+
+Gathering falls from 0.77 ms to 0.60 ms per frame in the stress scene, and the
+whole raytraced path from 1.00 ms to 0.83 ms; with thirty-two lamps, from
+1.05 ms to 0.84 ms. The caster count is identical before and after, as it has
+to be, and every test scene renders to the same pixel.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Add the GTAO passes: depth prefilter, bitmask gather, filter
+…
+d203333
+```
+The first three quarters of a replacement for the screen space occlusion the
+engine ships. Nothing calls these yet; the existing effect is untouched and
+still the only one wired in.
+
+The depth pyramid is new rather than the one the screen space effects already
+build, for three reasons. That one is deinterleaved into four array slices, so
+a shader reading it can only address its own slice -- workable for a disk of
+scattered point samples, useless for a march that walks a straight line and
+must read whatever texel the line lands on. It is based at half resolution, so
+the innermost steps would have no full resolution depth to read. And it filters
+toward the CLOSEST of each group of four, which dilates thin geometry across a
+coarse texel's whole footprint; a march that reads one such texel early keeps
+that horizon for every step after it. This one is full resolution, flat, and
+biased toward the farthest, so thin geometry falls out of the coarse levels
+instead of spreading across them.
+
+The gather marches GTAO's slices but replaces the running horizon angle with a
+32 sector occupancy mask, so two occluders with sky between them stay two
+occluders and a thin wall stops occluding once the march passes behind it.
+Sectors are resolved by their cosine share of the arc rather than by counting
+set bits: equal weighting answers a different question from the one occlusion
+asks, and the near field bounce approximation the forward shader applies on top
+was fitted against the cosine weighted quantity.
+
+Two things follow the reference implementation this is modelled on. The radius
+can be held to a fixed share of the screen at every depth instead of a fixed
+distance in the world -- without that the on-screen span shrinks with distance
+until the steps land on the same texel and most of the sample budget is spent
+re-reading it. And thickness follows the radius rather than staying a fixed
+distance, or a march reaching ten times further at distance would push every
+back face into the same shallow shell.
+
+Reduced resolution changes only how many pixels get their own answer. The march
+reach, its first step and the fade are all derived from the full resolution
+pixel footprint, so halving it thins the far field rather than pulling the near
+field apart, and the filter weights the result back up against the depth each
+texel was actually computed on.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Wire ground truth occlusion in behind a method switch
+…
+920d57a
+```
+Selected by rendering/environment/ssao/method; the default is unchanged, so a
+project that does not set it renders exactly as before. The legacy effect is
+untouched -- not a mode inside it, a sibling that happens to write the same
+buffer.
+
+That last part is what keeps the rest of the renderer out of it. The forward
+pass binds whatever texture is in RB_SCOPE_SSAO/RB_FINAL and never asks who
+filled it, so the occlusion channel, the near field bounce approximation on top
+of it, light affect, specular occlusion and the debug view all keep working
+with no shader change. Radius, intensity, power and the fade come from the same
+Environment properties the legacy effect reads. Detail, horizon and sharpness
+describe the other estimator and are ignored.
+
+Three bugs found by rendering it rather than by reading it.
+
+The view space reconstruction took a normalized device position, but the two
+terms the other screen space effects derive from the projection are expressed
+for a UV in zero to one. Feeding one to the other put every sample in the wrong
+place, which read as heavy occlusion everywhere with a bright hole at the
+camera.
+
+Elevation angles were taken as an unsigned three dimensional angle against the
+view direction. They have to be measured inside the slice plane and carry a
+sign: a sample lying flat on the shaded surface has zero elevation and must
+occlude nothing, and an unsigned angle puts it in the middle of the arc
+instead, which darkened every flat plane uniformly.
+
+The slice basis was not orthonormal. Stepping along the slice at constant depth
+gives a direction lying in the plane but not perpendicular to the view
+direction, and measuring against a skewed axis puts every sample at the wrong
+elevation. Samples at or below the shaded surface's own plane are now rejected
+outright as well, since they cannot occlude the hemisphere above it.
+
+Half resolution now differs from full by a mean of 1.14 of 255 across the test
+scene, with 0.7% of pixels apart by more than 10 -- silhouettes, where the
+weighted upsample has the least to work with. The near field is identical
+because the march reach, its first step and the fade all come from the full
+resolution pixel footprint either way.
+
+Single view only for now; a stereo pair keeps the legacy effect.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Measure the occlusion against a traced reference, and fix what it found
+…
+810416f
+```
+Two references, because one number cannot separate a wrong implementation from
+a method working as designed. Reference A traces the scene's real geometry and
+is the ceiling any screen space technique is measured against. Reference B
+marches the same cosine distributed rays against a depth buffer built from the
+camera's own view, so an occluder the camera cannot see does not occlude; the
+gap between A and B is what screen space costs, and the gap between B and the
+shader is what this code gets wrong. The scene is ambient lit with a flat white
+material, so dividing a render by the same render with occlusion disabled
+recovers the occlusion term itself rather than something shading has mixed.
+
+Against reference B, correlation with the reference by sample count: 0.62 at
+two slices by four steps, 0.66 at three by six, 0.71 at four by eight, 0.79 at
+six by twelve. The legacy effect sits at 0.74. The shipped default was two by
+four -- visibly undersampled, and worse than the effect it was meant to replace.
+It is now four by eight, where the bias vanishes and both the RMSE and the worst
+case beat the legacy effect (0.066 against 0.088, and 0.41 against 0.57).
+
+The depth pyramid moves to 32 bit float. Half float carries an 11 bit mantissa,
+so at a view depth of six the quantum is about five millimetres -- the same
+order as the depth difference between neighbouring pixels on a slanted plane,
+which reconstructs coplanar neighbours to either side of the shaded surface at
+random. A sample must now also clear a small elevation above that surface to
+count as an occluder, since one lying within a few degrees of it is grazing
+rather than occluding.
+
+What is still wrong, measured and not yet fixed: moderately occluded regions
+read about 0.14 too bright even at high sample counts, and fully open surfaces
+about 0.04 too dark. Both are estimator errors rather than sampling noise --
+they do not shrink with more samples.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Fix three defects the traced reference found in the occlusion
+…
+74a178e
+```
+The gather was measurably wrong in ways that did not shrink with more samples,
+so more samples was never going to find them. Two references now bracket the
+problem: one traces the real geometry, which is the ceiling any screen-space
+method could reach, and one marches the same rays against a depth buffer built
+from the camera's own view, which is what a correct implementation could reach.
+The gap to the first is the method; the gap to the second is the code.
+
+A CPU model of the gather sits alongside them and reproduces the shader exactly.
+That is what localized each fault: where the model and the shader disagreed the
+plumbing was wrong, and where they agreed but both missed the reference the
+estimator was wrong.
+
+The three defects:
+
+Sector weighting had no Jacobian. Each of the 32 sectors was worth its share of
+the arc, which is not what it covers. Sweeping a slice about the view direction
+turns each sector into a ring whose circumference goes with the sine of the
+angle from that axis, so a sector pointing back at the camera sweeps almost no
+solid angle and one at the edge of the arc sweeps the most. The two sectors
+either side of the surface normal were being counted about ten times too
+heavily and the grazing ones half as heavily as they should be. The integral of
+cos(t - n) * |sin t| has a closed form, so the weights are now evaluated
+outright, stepping cos(2t - n) around by a rotation rather than calling a trig
+function per sector. Occlusion also resolves as a ratio of two weighted sums
+rather than a mean of per slice fractions, which makes an unoccluded surface
+come out at exactly one whatever its orientation and whatever the dither picked,
+while leaving the weighting between slices the one the integral asks for.
+
+The march read a nearest sampler and reconstructed elsewhere. The depth that
+comes back describes the surface at the middle of whichever texel the step
+landed in, not at the point the step asked for. Pairing that depth with the
+asked for direction put every sample off its own surface by up to half a texel
+of depth slope, and on a plane seen at a glancing angle half of those landed
+above the shaded point. The floor was occluding itself by a flat three percent
+everywhere, steady enough to read as the effect working.
+
+Steps were spaced quadratically. A horizon march can crowd its steps near the
+shaded point because one early hit stands in for everything behind it. A mask
+cannot: an occluder that falls between two steps is not approximated, it is
+absent, and the far half of a quadratic march is where the gaps get wide enough
+for a whole box to fall through one. Spreading the same eight steps evenly
+roughly halves the error.
+
+Also fixed: the non-bitmask path had the horizon inverted, closing the arc
+between the outermost occluders instead of outside the innermost ones, which
+made it darker than the truth by 0.63 and unusable as the toggle it is meant to
+be. And the slice basis was probed with a UV sized step while the march walks in
+pixels, so on any viewport that is not square every elevation was measured
+against an axis the samples did not lie on.
+
+Thickness moves from 0.25 to 0.3, which is the joint optimum across a solid
+scene and a thin one. It is a real tradeoff and now a documented one: a deeper
+shell is more accurate on thick solid shapes, where a shallow one lets light
+leak through the back of an object the camera cannot see behind, and less
+accurate on foliage, railings and slats, where it closes gaps that are open.
+
+Measured against the traced geometry, mean absolute error and correlation:
+
+  thin geometry     bitmask 0.0134 / 0.947   horizon 0.0346 / 0.875   legacy 0.0433 / 0.845
+  solid boxes       bitmask 0.0307 / 0.796   horizon 0.0235 / 0.859   legacy 0.0515 / 0.693
+
+Before these fixes the same gather scored 0.0576 / 0.525 on the solid scene.
+The two estimators now separate the way they should: the mask is worth having
+wherever geometry is thin, which is what it exists for, and the horizon is
+better where geometry is thick and its assumption happens to be true.
+
+Half resolution still tracks full resolution to 0.06 of 255 on average, with
+under a tenth of a percent of pixels differing by more than 10.
+
+What is still off, measured: contact regions on thick solid geometry read about
+0.03 too bright. That is the constant thickness assumption rather than a bug --
+about a third of it is inherent to screen space, since the reference that only
+sees what the camera sees misses the same occlusion.
+```
+Make the occlusion harness pass the repository's own checks
+…
+44a8f9a
+```
+The static checks job went red on the harness added with the last commit: it is
+Python inside the tree, so ruff and mypy apply to it, and it was written in the
+throwaway style of research scaffolding.
+
+The scene selection is the substantive change. Each tracer used to carry the
+default scene as a literal and then conditionally overwrite it from a module
+imported halfway down the file, which is what the import-order rule was
+objecting to and was worth objecting to. Both scenes now live in scenes.py
+behind one call, so a tracer states which scene it uses on the line after its
+imports and nowhere else.
+
+Verified after the move: the model still scores the solid scene at 0.0330 mean
+absolute error and 0.755 correlation against the traced reference, the same
+numbers as before it.
+```
+Let an Environment choose which occlusion estimator runs
+…
+3b884c3
+```
+Until now the choice lived only in a project setting, which is the wrong shape
+for deciding whether the new estimator is actually better: judging that means
+looking at the same scene both ways, and a project wide switch cannot show you
+both at once.
+
+Environment.ssao_method is a three way enum rather than a bool, and the third
+value is what keeps existing projects intact. DEFAULT defers to
+rendering/environment/ssao/method, so every environment saved before this
+property existed keeps the method its project picked and nothing changes for
+anyone who does not touch it. SCREEN_SPACE and GROUND_TRUTH override it, so two
+environments in one project can be set against each other and swapped between
+in the inspector.
+
+It is a separate RenderingServer entry point rather than another parameter on
+environment_set_ssao, which keeps the existing call's signature and its binding
+hash alone.
+
+Two smaller things follow from the switch existing at all. The inspector now
+hides ssao_detail, ssao_horizon and ssao_sharpness once the ground truth
+estimator is the one that will run, since all three describe the other
+estimator; it reads the project setting to decide when the environment defers to
+it, so what is shown matches what is reachable. And returning to the legacy
+estimator now drops the ground truth depth pyramid, which is a full resolution
+float target with mips and is worth more than the cost of releasing it.
+```
+Document the occlusion estimator in the three fork documents
+…
+3c37cf2
+```
+The guide was written when the fork was only shadows, and the occlusion work has
+been landing against a document that does not mention it. Section 9 covers what
+it is, when the visibility bitmask pays and when it costs, which settings matter,
+and the five things that surprise people -- Forward+ single view only, half
+resolution being genuinely free of consequence here, why even step spacing rather
+than quadratic, the contact error that is partly inherent to screen space, and
+what switching estimators releases.
+
+The porting document gets stage 18. It is independent of everything above it and
+can be ported alone: four new files, one shared texture, a five link server chain
+whose missing middle link fails far from the change, and the two shader details
+that were both wrong until they were measured -- reconstructing a sample where
+its depth actually came from, and the Jacobian in the sector weights. Neither of
+those reads as an error while you are looking at it, which is the reason to write
+them down.
+
+CLAUDE.md gets the short version, including the instruction not to tune this by
+screenshot when there is a harness that scores it.
+```
+Stop the strength curve crushing the occlusion it is given
+…
+8452fc9
+```
+Screenshots of a real interior showed the occlusion as harsh black wedges with
+speckled edges, nothing like the soft field the synthetic scenes scored well on.
+The estimator was not the problem. Modelled on a closed room with the camera
+inside it, the gather scores 0.0112 mean absolute error and 0.927 correlation
+against a ray trace of the real geometry -- better than either scene it was
+validated on. Putting a FLAWLESS traced occlusion through the shipped output
+curve reproduces the artifact exactly, and sends 3.7 percent of the frame to
+pure black.
+
+That is the whole finding. Scaling occlusion by subtracting a multiple of its
+distance from white has a hard floor: at the stock intensity of two, every
+visibility at or below 0.63 lands on exactly zero. An ordinary concave corner IS
+about 0.63. So a third of the tonal range collapsed onto one flat value inside
+the gather, before anything downstream saw it -- which is also why the filter
+looked broken. It was averaging zeros with zeros. The curve's slope at the white
+end is three, so it amplified the dither on the way in and then clipped it, and a
+smooth field came out looking like a coin flip per pixel.
+
+The curve is now a ratio. Same slope at the white end, so a lightly occluded
+surface looks the way it did and existing tuning still means what it meant; it
+approaches zero without arriving, so a corner stays a gradient. At intensity one
+it is exactly the identity, which is what the harness measures. On the room:
+mean absolute error 0.0480 to 0.0156, and the black fraction to zero.
+
+Three other things came out of the same investigation.
+
+Environment.ssao_intensity defaults to 2.0 and that number belongs to the legacy
+estimator, whose obscurance is a proximity average rather than a visibility
+integral and measures a fraction of the real deficit. This one reports the
+deficit directly, so the same number doubles a figure that is already right. A
+new ground_truth/intensity_scale, defaulting to 0.5, divides it back down rather
+than moving an Environment default the legacy estimator still needs.
+
+The half resolution stride was recovered in the shader as full_size.x divided by
+gather_size.x. gather_size_for rounds UP and integer division rounds DOWN, so
+that yields 2 at every even width and 1 at every ODD one -- at which point the
+gather answers only for the top left quadrant and the result is magnified over
+the rest of the screen. Roughly half of all viewport widths. The stride is now
+passed in the push constant. Its signature is a brighter, smoother, left/right
+asymmetric image, so it was not what the screenshots showed, but it is real.
+
+Under scale_radius_with_distance the world reach was anchored to screen WIDTH via
+uv_to_view_mul.x, which carries the aspect ratio, while a camera holds its
+VERTICAL field of view fixed. The same setting therefore reached 1.8 times
+further on a 16:9 viewport than on the square one it was tuned on. Anchored to
+height now. The fixed-radius branch was already aspect invariant and is left
+alone, with a comment saying so.
+
+The harness could not have caught any of this and now can. It gains a closed
+interior scene at 1280x720 -- the two existing scenes are both open, seen from
+above, with a mean occlusion under one percent, so a correct occlusion barely
+enters the range the transfer operates on: 0.3 to 0.7 percent of those frames
+against 7 percent of a room. Both tracers and the CPU model learn about aspect
+ratio, the model gains the distance-scaled radius branch it never had, main.gd
+stops hardcoding the power so the shipped configuration can be scored at all,
+and the comparison prints the fraction of the frame below one 8-bit code, which
+is the number that would have shown this on day one.
+
+All four engine changes are provably neutral on the existing scores: the new
+curve is the exact identity at intensity one, the stride is 2 either way at 720,
+and the two radius anchors are the same number at 1:1.
+```
+Replace the modelled interior figures with the measured ones
+…
+a78e007
+```
+The guide carried the CPU model's numbers because the engine was still building.
+A real render under lavapipe puts the estimator at 0.0104 mean absolute error and
+0.936 correlation on the room rather than 0.0112 and 0.927, and adds the figure
+that actually matters: at the shipped intensity and power it scores 0.0152 and
+0.940 with nothing driven to black, against 0.0500 and a black frame fraction of
+3.20 percent through the curve this branch just replaced.
+
+The legacy estimator on the same room is 0.0367 and 0.653, which is the other
+half of what the screenshots showed -- it is not that it is subtle, it is that it
+correlates with the truth at 0.65.
+
+Both existing scenes re-rendered bit-identical, as predicted: solid 0.0307 and
+0.796, thin 0.0134 and 0.947.
+```
+Stop the half resolution upsample landing half a pixel off
+…
+e2d3952
+```
+The gather answers for full resolution PIXEL k * stride, whose center sits at
+continuous coordinate k * stride + 0.5. The upsample inverted that with the
+obvious form, (pos + 0.5) * source_size / dest_size - 0.5, which assumes instead
+that gather texel k represents the CENTER of its block. At a stride of two those
+differ by half a full resolution pixel on each axis, so every half resolution
+frame was displaced diagonally and every bilinear weight was computed against the
+wrong pair of texels.
+
+Confirmed two ways. The arithmetic: full pixel 10 belongs to gather texel 5 and
+the old expression maps it to 4.75. And empirically, cross correlating a half
+resolution render of the interior scene against a full resolution one at
+subpixel offsets puts their best alignment at exactly (-0.5, -0.5), which is
+this and nothing else.
+
+The stride is passed rather than derived from the ratio of the two sizes, which
+is also the only form that stays correct once the gather size has been rounded
+up at an odd width.
+
+This is half of why half resolution reads as soft rather than merely coarse. The
+other half is the reconstruction filter itself, which is still being measured.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Give the occlusion a denoiser that fits the noise it is handed
+…
+e590a3d
+```
+One 3x3 pass was the entire noise reduction budget, and at a large effect radius
+that is a fraction of what the gather's variance needs. The result read as grain
+wherever ambient light was the whole signal -- which is to say everywhere in
+shadow, because a lit surface hides it and shadow does not.
+
+Three changes, all measured on an interior scene against a ray trace taken at the
+same radius.
+
+The blur is separable and runs twice, and its width follows the effect radius and
+the slice count -- the two things the variance actually depends on. Three taps per
+axis at the shipped radius, seven at the top of the range. A fixed width cannot
+serve a setting that spans fifty to one in either direction: widening it
+unconditionally removes contact detail at a small radius that was never noise, and
+raises the error against the reference.
+
+Neighbours are weighted by their distance from the shaded point's own PLANE rather
+than by relative depth difference. A depth test has no notion of orientation, so on
+a surface seen at a glancing angle it discards neighbours lying on that very
+surface, and it keeps neighbours across a shallow step that is a real silhouette.
+About half the improvement came from this rather than from the extra width.
+
+The upsample's bilateral guide is now the full resolution depth and normal instead
+of the nearest gather texel's. Taking the reference surface from the coarse grid
+quantised every silhouette to it, and that -- not the reduced sample count -- was
+most of why half resolution read as low resolution rather than merely soft.
+
+Measured, real renders, at the radius a real interior wants:
+
+  full res   grain 0.00356 -> 0.00193 (-46%), mean absolute error 0.0705 -> 0.0701
+  half res   grain 0.00244 -> 0.00177 (-28%), unchanged error
+  at the default radius, half res, grain 0.00133 -> 0.00097 (-27%)
+
+Error moves slightly the RIGHT way, so this is not smoothness bought by blurring
+the signal away. Both existing scenes re-render bit identical.
+
+Two things deliberately NOT done, because measuring them said not to. A better
+dither is worth a few percent at best: the slice offset is already interleaved
+gradient noise, optimal over a 3x3 by construction, the residual is already blue,
+and a tiled pattern paired with a narrower filter is worse than what ships because
+a repeating pattern reads as structure where noise reads as film grain. And the
+sample split stays at four slices by eight steps: the grain numbers argue for
+rebalancing toward slices, which is 18 percent smoother at identical cost, but
+against a traced reference that same rebalance is 35 percent less accurate. Steps
+buy accuracy, slices buy smoothness, and the grain metric cannot see the half it
+is not measuring.
+
+screen_radius moves from 0.05 to 0.1 and its range now reaches 0.5. The first real
+interior this was pointed at wanted five times the old default and ran out of
+slider, which is what a value calibrated on synthetic scenes looks like.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Record the new screen radius default in the class reference
+…
+843db0d
+```
+The doctool reads defaults out of the running binary, and the previous commit
+regenerated the reference before rebuilding, so the file still claimed 0.05.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Separate what the fork IS from how it got there
+…
+f107ad7
+```
+The occlusion sections had been accumulating the reasoning behind each decision
+alongside the decision itself, and by now roughly a third of section 9 was an
+account of things that turned out to be wrong. That is worth keeping and it is
+not worth reading to find out what a setting does.
+
+FINDINGS.md now holds it: the two-reference validation method and why there are
+two, the three defects a traced reference found and why none of them looked like
+bugs, the strength curve that read as an estimator failure and was not, and the
+ideas that looked obvious and did not survive being measured -- a better dither,
+rebalancing slices against steps, multi-pass filtering. It says at the top that
+none of it is needed to use the engine and that none of it should migrate back.
+
+The guide keeps the facts and loses the arguments. Section 9.4 is now what to
+expect rather than what went wrong, and a new 9.5 lists the gaps: the denoiser is
+good enough rather than finished and should be revisited before anyone spends
+more samples on it, since the residue is estimator structure rather than sampling
+noise; half resolution reconstruction is still a 2x2 bilateral and shows it at
+silhouettes; and no GPU cost measurement exists at all, because everything so far
+was validated on a software rasterizer.
+
+Stale claims corrected while I was in there. The pass driver runs five dispatches,
+not four. The filter is separable and plane-weighted, not a 3x3 depth-weighted
+one. screen_radius is 0.1 rather than 0.05, so the derived denoise width at the
+shipped default is five taps per axis and not three -- the guide and the comment
+above filter_radius_for both still described the old default. Half resolution is
+no longer described as free of consequence: it scores the same against a ray trace
+but it costs sharpness at silhouettes, which is what a real scene shows. The
+harness README gained AO_POWER, which it had never listed, and lost a count of
+defects that was no longer two.
+
+The porting document keeps its list of load-bearing details, now five, but as a
+checklist rather than a story, because a port needs to know what to verify and not
+how it was discovered.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Hand the denoise the stride it needs to find its own normals
+…
+3efedfc
+```
+An audit of the comments turned up a comment that was wrong about the code, and
+then the code was wrong too.
+
+gather_stride is not the filter's tap step -- taps walk the gather's own grid. It
+is how a gather texel finds the full resolution pixel it answers for, which is
+where its view position and its NORMAL come from. The blur was handed a stride of
+one on the reasoning that it never crosses resolutions, which is true of its taps
+and false of everything else it does: at half resolution every plane weight was
+computed against the normal of an unrelated pixel in the top left quadrant of the
+screen, and against a view position reconstructed from the wrong UV.
+
+All three passes now get the real stride.
+
+The rest of the audit was prose. Corrected: the header still described three
+passes and a single denoise that only ran at reduced resolution, none of which is
+true; the radius span it called fifty to one is a hundred to one since the range
+doubled; the depth pyramid's five levels no longer cover the largest radius, which
+costs filtering rather than correctness and should say so; the plane tolerance is a
+fraction of THIS pixel's depth, not the neighbour's, and two comments disagreed
+about which; the intensity field arrives pre-scaled and had no comment at all; and
+the project setting a reader meets first said nothing about being a fraction of
+screen height, which is the change that alters what an existing value means.
+
+doc/classes/ProjectSettings.xml still said "fraction of the screen width". That one
+was mine, from the commit that changed it to height.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Correct a known gap that recommended the wrong fix
+…
+7083fa6
+```
+The guide said a wider joint-bilateral or an edge mask was the obvious next step
+for the stair stepping at silhouettes in half resolution. Measured, it is not:
+going from the shipped 2x2 to a 7x7 gains three percent at silhouettes for five
+times the taps. The problem is not too few candidates. Half resolution never
+evaluated a pixel near the edge, and no filter can invent a sample that was not
+taken.
+
+What does work is shading a checkerboard at full resolution rather than a grid at
+quarter resolution -- 33% better at silhouettes and 29% better overall, at twice
+the gather. Its reconstruction is also complete at four taps, since every unshaded
+pixel has all four immediate neighbors shaded by construction; twelve taps give an
+identical result to five decimal places.
+
+Recorded as a third quality rung worth having rather than as work done, since it
+costs twice the pixels and nobody has measured any of this on real hardware.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Record what the occlusion costs, and what the shape of that cost means
+…
+cdce91a
+```
+The guide said no GPU cost measurement existed. There is now a rough one from an
+RTX 5090, and its shape matters more than its total.
+
+Full resolution costs about 0.3 ms more per frame than quarter resolution. That
+figure comes from two directly measured framerates and does not depend on the
+third, less certain one. At a 120 fps budget it is three percent of the frame, so
+on that class of hardware the quality question answers itself.
+
+The shape is the useful part. Quarter resolution shades a quarter of the pixels
+and costs roughly two thirds of what full resolution costs, which puts somewhere
+between forty and sixty five percent of the effect in a fixed cost the resolution
+knob does not touch: the full resolution depth pyramid, the upsample that always
+runs at full resolution, and the barriers between five dispatches. Anyone trying
+to make this cheaper on weaker hardware should measure per pass rather than
+reaching for the resolution setting, which can only ever address the smaller half.
+
+Nothing has been measured on an iGPU, which is where it would actually matter.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Record the profiling that has not been done, and on what
+…
+a6ec7e4
+```
+The cost decomposition in the known gaps was derived from three whole-frame
+framerates on one desktop GPU, and the machine the answer actually matters on
+is an iGPU that has never been measured. Say so as a standing task, and say
+how to take it -- per pass, from the profiler block, rather than by
+subtracting whole-frame figures from each other.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Correct three descriptions that had drifted from the code
+…
+9bb4152
+```
+material_shadow_casting_disabled() was described as covering materials whose
+render mode disables shadows. It does not: casts_shadows() asks only about
+alpha and about reading the screen, depth or normal texture, and the
+shadows_disabled render mode governs receiving rather than casting. Say what
+the predicate actually tests, and note that an alpha scissor still casts,
+since that is the case people reach for.
+
+The CPU model of the gather carried the old screen_radius default of 0.05.
+Every other default in that signature mirrors the shipped Settings struct, so
+one that does not silently models a march half the size of the one that ships.
+
+The README described the fork as raytraced shadows alone. It also carries a
+second, independent addition -- the ground truth occlusion estimator -- and
+the findings document it produced was not linked from anywhere a first-time
+reader would look.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Make ssao_radius scale the whole march, not half of it
+…
+038f853
+```
+Under scale_radius_with_distance the gather derives two things from
+screen_radius: how many pixels the march walks, and the world distance that
+walk corresponds to, which is what the sample cutoff and the back face
+thickness are measured against. Environment.ssao_radius multiplied only the
+second, so the march covered the same span on screen whatever the radius was
+set to.
+
+Above 1.0 that put the cutoff somewhere the steps never reached and left
+thickness as the only thing that moved; below it the cutoff truncated the
+march while the steps stayed spread over the full span, spending the budget
+outside the volume being measured. Both read as the setting working, because
+thickness alone does change the picture.
+
+Measured in the CPU model on the interior scene, mean occlusion goes from
+0.0236 / 0.0604 / 0.0770 at radius 0.5 / 1.0 / 2.0 to 0.0317 / 0.0604 /
+0.1152. Doubling the radius used to buy 28% more occlusion, all of it
+thickness; it now buys 91%, which is what doubling the reach should give. The
+default is 1.0, where the two agree exactly, so no existing scene changes.
+
+Found by auditing comments against the code: the fork guide, the class
+reference and filter_radius_for() all described the radius as a multiplier on
+the on-screen reach, and only the shader disagreed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Bring every fork comment and document back in step with the code
+…
+bfd73aa
+```
+An audit of the roughly 1800 comment lines this fork adds, plus its documents
+and the class reference entries for its settings, each proposed correction
+independently re-checked against the code before it was taken. Four kinds of
+defect, and nothing else touched: comments that describe behavior the code
+does not have, comments that were right when written and have since gone
+stale, accounts of what was tried and failed, and pairs of statements that
+cannot both be true.
+
+The wrong ones that mattered. The a-trous loop's comment said the first
+iteration feeds its OUTPUT back as history; it feeds back its input, and the
+shader it drives says so and gives the opposite reason. The prefilter's depth
+falloff was described with its direction inverted. rt_slot was called a mask
+channel in four places, when it is an index into the raytraced light buffer
+and the channel is chosen per pixel. The penumbra texture was described as a
+blocker distance over the light's range rather than as a width in pixels. The
+sqrt encoding was said to spend five times more of the code range below a
+quarter visibility, in three copies of one paragraph; it spends twice as much.
+
+The stale ones. samples_per_light no longer has a two-ray early out, so its
+cost is linear. Volumetric fog under a raytraced sun traces its own ray and
+does not read the cascades, which four separate reader lists still claimed.
+A raytraced light renders no shadow map unless shadow_map_enabled asks for
+one, so shadow_map_opacity is zero rather than kept. The acceleration
+structure is no longer static-geometry-only with a full TLAS rebuild each
+frame. Three comment blocks in rt_scene.h had run together and sat above the
+wrong declarations.
+
+The history moved to FINDINGS.md rather than being deleted: the two-probe-ray
+early out and why removing it was not a regression, the Vogel ring, the two
+quantization defects, the blue noise spectral measurement, the two the
+denoiser refused, the BLAS cache and the device lock, and the enclosed-lamp
+query. Comments keep the conclusion and drop the investigation.
+
+Also: Settings::sample_count defaulted to 4 while the setting that overwrites
+it defaults to 1. The value is dead, but it is what a reader takes for the
+default.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Fix what a pre-merge review found, and say what is not supported
+…
+feae8af
+```
+A build configuration, a defect in the validation harness, and a family of
+documentation claims that were wrong or too broad.
+
+scons disable_3d=yes did not compile. _rt_report_cpu_cost was defined inside
+a 3D guard and called outside one, so a 3D-disabled template lost the
+definition and kept the call. The function takes two integers and prints
+them, so the guard was the wrong half to keep.
+
+The CPU model probed the slice basis with a UV-sized step where the shader
+steps eight pixels. On the two square scenes those are the same direction; on
+the 1280x720 interior they differ by about 15 degrees at a 45 degree slice, so
+every room-scene figure was scoring an estimator rotated away from the one
+that ships. It moved the numbers by under 0.0002 -- the estimator is close to
+isotropic -- which is exactly why agreement on totals is not evidence the
+model is right.
+
+Ground truth occlusion is wrong under an orthographic camera, in three places
+that each assume a perspective projection, and it neither falls back nor
+warns. Documented as unsupported with the three sites named, rather than
+fixed: the fix cannot be validated without rendering an orthographic frame on
+a GPU, and a partial fix would leave it wrong while looking addressed.
+
+The documentation family: subsurface transmittance falls back to the
+material's own depth rather than going unshadowed, which the previous commit
+got wrong in the guide while CLAUDE.md had it right; a raytraced light does
+render a shadow map, and does claim an atlas quadrant, when shadow_map_enabled
+asks for one; that flag helps two of the six uncovered effects rather than all
+of them; the denoise sizes itself from the radius only on the distance-scaled
+branch; and ssao_radius and ssao_intensity do not mean the same thing to both
+estimators, which the class reference now says as well.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012qhnTjFiAoePUXNXF5taHN
+```
+Hide details
+View details
+automata-rtx
+merged commit 1781e8e
+into
+master
+Sep 2, 2026
+10 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+automata-rtx
+deleted the
+claude/godot-rt-shadows-plan-39xqnn
+branch
+September 2, 2026 17:49
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

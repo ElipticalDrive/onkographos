@@ -1,0 +1,95 @@
+--- v002.md
++++ v003.md
+@@ -9,14 +9,14 @@
+ 
+ **Data Structures:**
+-- Depth Texture: A 2D array storing the distance from the camera origin to the nearest surface intersection for each pixel [S1].
++- Depth Texture: Stores ground truth depth values per pixel [S1].
+ - Ray: Defined by origin $o$ and direction $d$ [S1].
+ 
+ **Steps:**
+ 1. **Depth Retrieval:** For a given pixel, retrieve the ground truth depth $z_{gt}$ from the depth texture [S1].
+-2. **Sample Placement:** Place a fraction of the total samples $N$ locally around $z_{gt}$. The remaining samples are distributed uniformly or according to another strategy in the empty space before and after the surface [S1].
++2. **Sample Placement:** Place a fraction of the total samples $N$ locally around $z_{gt}$ [S1]. The remaining samples are distributed uniformly or according to another strategy in the empty space before and after the surface [S1].
+ 3. **Volume Rendering:** Evaluate the neural network at the sample positions to obtain density $\sigma$ and color $c$, then perform standard volume integration [S1].
+ 
+ **Formulas:**
+-The depth $z_{gt}$ is used to define the local region. If $N$ is the total number of samples, and $N_{local}$ is the number of samples placed locally, the positions are clustered around $z_{gt}$ [S1]. The exact distribution within the local cluster is not specified beyond "around the surface" [S1].
++Sample positions along the ray are computed as $p_i = o + t_i \cdot d$, where $t_i$ are the sampled depths [G]. The volume rendering equation accumulates color $C = \sum_{i=1}^{N} T_i (1 - e^{-\sigma_i \delta_i}) c_i$, where $T_i = e^{-\sum_{j=1}^{i-1} \sigma_j \delta_j}$ is the transmittance, $\delta_i$ is the step size, and $\sigma_i, c_i$ are the density and color at sample $i$ [G].
+ 
+ **Parameters:**
+@@ -31,36 +31,50 @@
+ **Pseudocode:**
+ ```python
+-def local_sampling(ray_origin, ray_direction, depth_texture, nerf_model, total_samples=64):
+-    # Get ground truth depth for the current pixel
+-    # Note: In practice, this requires a depth oracle or pre-computed depth map
+-    depth_z = depth_texture[ray_origin.x, ray_origin.y]
++def local_sampling(ray_origin, ray_direction, depth_texture, nerf_model, total_samples=64, local_samples=2, depth_offset=0.5):
++    # 1. Retrieve ground truth depth for the current pixel
++    z_gt = depth_texture[ray_origin.x, ray_origin.y]
+     
+-    # Determine local sample range around depth_z
+-    # The exact width of the local region is not specified in the source
+-    # [G] Assuming a small epsilon range around depth_z for demonstration
+-    epsilon = 0.1 
+-    local_start = max(0, depth_z - epsilon)
+-    local_end = depth_z + epsilon
++    # 2. Define sample depths along the ray
++    # Local samples clustered around z_gt
++    local_depths = [z_gt - depth_offset + i * (2 * depth_offset / max(1, local_samples - 1)) for i in range(local_samples)]
++    # Uniform samples for the rest of the ray up to a far plane
++    far_plane = 100.0
++    n_uniform = total_samples - local_samples
++    uniform_depths = [i * (far_plane / max(1, n_uniform)) for i in range(n_uniform)]
+     
+-    # Place N_local samples locally
+-    n_local = 2
+-    local_samples = linspace(local_start, local_end, n_local)
++    # Combine and sort all depths
++    all_depths = sorted(uniform_depths + local_depths)
+     
+-    # Place remaining samples uniformly in the rest of the ray
+-    n_uniform = total_samples - n_local
+-    # [G] Assuming min_depth and max_depth are defined for the scene
+-    uniform_samples = linspace(0, max_depth, n_uniform)
++    # 3. Volume rendering loop
++    accumulated_color = [0.0, 0.0, 0.0]
++    transmittance = 1.0
+     
+-    # Combine samples
+-    all_samples = concatenate([uniform_samples, local_samples])
+-    
+-    # Evaluate NeRF and render
+-    colors, alphas = volume_render(ray_origin, ray_direction, all_samples, nerf_model)
+-    return colors, alphas
++    for i, t in enumerate(all_depths):
++        # Compute 3D position from depth along the ray
++        point = [ray_origin[j] + t * ray_direction[j] for j in range(3)]
++        
++        # Query neural network for density and color
++        sigma, color = nerf_model(point)
++        
++        # Compute step size
++        delta_t = all_depths[i+1] - t if i + 1 < len(all_depths) else 0.1
++        
++        # Update transmittance and accumulated color
++        alpha = 1.0 - exp(-sigma * delta_t)
++        transmittance *= (1.0 - alpha)
++        accumulated_color = [accumulated_color[j] + transmittance * color[j] for j in range(3)]
++        
++        # Early exit if fully opaque
++        if transmittance < 1e-4:
++            break
++            
++    # Add background contribution if ray misses or stops early
++    far_plane_alpha = 1.0 - transmittance
++    return accumulated_color, far_plane_alpha
+ ```
+ ## Subtopics
+ 
+ ### [Mesh-based Sampling](6990-mesh-based-sampling.md)
+-Uses mesh boundaries to localize surface evaluation, requiring only two samples per ray. It is efficient and applicable as a post-processing step to existing NeRF models.
++Mesh-based Sampling localizes surface evaluation by estimating the volume density or Signed Distance Field (SDF) to define an inner and outer mesh boundary, using learned features attached to mesh vertices to estimate radiance. It sets itself apart from sibling methods by requiring only two samples per ray, significantly improving runtime efficiency while remaining applicable as a post-processing step to any existing NeRF models. Choose it when real-time performance is critical and mesh geometry is available or can be approximated.
+ 
+ ## Operating characteristics

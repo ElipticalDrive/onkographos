@@ -1,0 +1,225 @@
+--- v002.md
++++ v003.md
+@@ -11,5 +11,5 @@
+ *   $V_{ex}$: Example cloud volume database containing $N$ example volumes.
+ *   $C_{ex} = \{C_1, \dots, C_K\}$: Set of $K$ voxel blocks extracted from $V_{ex}$. Each block has dimensions $w \times w \times N_z$ [S1].
+-*   $L_0^*, L_a^*$: Optimized lighting parameters (ambient and directional light) obtained from a preprocessing step [S1].
++*   $L_0^*, L_a^*$: Optimized lighting parameters obtained by solving a nonlinear least square problem [S1].
+ 
+ **Outputs:**
+@@ -17,6 +17,6 @@
+ 
+ **Data Structures:**
+-*   **Voxel Block ($z_V$):** A 3D array of size $w \times w \times N_z$ representing density/extinction values.
+-*   **Rendered Image Block ($z_I$):** A 2D array of size $w \times w$ representing pixel values. Computed by rendering $z_V$ using the rendering operator $R(z_V, \tau, L_0^*, L_a^*)$ [S1].
++*   **Voxel Block ($z_V$):** A 3D array of size $w \times w \times N_z$ representing density/extinction values [S1].
++*   **Rendered Image Block ($z_I$):** A 2D array of size $w \times w$ representing pixel values [S1].
+ *   **Vector $z$:** Concatenation of rendered image block and voxel block: $z = \{z_I, z_V\}$ [S1].
+ *   **Vector $x_p$:** Concatenation of input image pixel block $x_p^I$ and corresponding voxel block $x_p^V$: $x_p = \{x_p^I, x_p^V\}$ [S1].
+@@ -38,5 +38,5 @@
+ 
+     *   **E-step (Expectation Step):**
+-        *   Minimize energy with respect to $x_p$ (specifically $x_p^V$) keeping $z_p$ fixed.
++        *   Minimize energy with respect to $x_p$ (specifically $x_p^V$) keeping $z_p$ fixed [S1].
+         *   This results in a least squares problem. The derivative of the energy function $E(x; \{z\}) = \sum_{p \in X_{ph}} d(x_p, z_p)$ with respect to $x_p^V$ is set to zero [S1].
+         *   The solution simplifies to a weighted average computation of neighbor voxel blocks [S1].
+@@ -44,9 +44,9 @@
+ 
+     *   **M-step (Maximization Step):**
+-        *   Minimize energy with respect to $z_p$ keeping $x_p$ fixed.
++        *   Minimize energy with respect to $z_p$ keeping $x_p$ fixed [S1].
+         *   This involves searching for the closest vector $z_p$ from the set of all vectors $z$ [S1].
+         *   **Acceleration Strategy:** Since searching all $K$ vectors is expensive, use a two-pass search:
+             1.  For each $x_p^V$, find $k$ nearest neighbor vectors $z_1^V, \dots, z_k^V$ from the database using the FLANN library [S1].
+-            2.  Render each $z_i^V$ to compute $z_i^I$.
++            2.  Render each $z_i^V$ to compute $z_i^I$ [S1].
+             3.  Search for the closest vector $z_p$ from the set $\{z_1, \dots, z_k\}$ based on the distance metric $d(x_p, z)$ [S1].
+ 
+@@ -54,113 +54,84 @@
+ 
+ ```python
+-def synthesize_volume(input_image, example_volumes, lighting_params, w, Nz, k_neighbors, lambda_weight, max_iterations):
+-    """
+-    Synthesize a cloud volume using texture optimization.
+-    
+-    Args:
+-        input_image: 2D array, the input photograph I_ph.
+-        example_volumes: List of 3D arrays, the database V_ex.
+-        lighting_params: Tuple (L0, La), optimized lighting.
+-        w: Width/height of voxel blocks.
+-        Nz: Depth of voxel blocks.
+-        k_neighbors: Number of nearest neighbors for M-step acceleration.
+-        lambda_weight: Weighting coefficient lambda.
+-        max_iterations: Maximum number of EM iterations.
+-        
+-    Returns:
+-        volume: 3D array, the synthesized volume V.
+-    """
++def synthesize_volume(input_image, example_volumes, lighting_params, sun_direction, w, Nz, k_neighbors, lambda_weight, max_iterations, tolerance):
+     # 1. Preprocessing: Extract voxel blocks and render examples
+     voxel_blocks_db = []
+     for vol in example_volumes:
+-        # Resample or slice to get w x w x Nz blocks
+-        blocks = extract_blocks(vol, w, Nz)
+-        voxel_blocks_db.extend(blocks)
+-        
+-    # Render all example blocks to get their image counterparts
+-    # z = {z_I, z_V}
++        for y in range(0, vol.shape[0] - w + 1, w):
++            for x in range(0, vol.shape[1] - w + 1, w):
++                voxel_blocks_db.append(vol[y:y+w, x:x+w, :])
++
+     candidate_vectors = []
+     for z_V in voxel_blocks_db:
+-        z_I = render_block(z_V, lighting_params)
++        z_I = render_block(z_V, lighting_params, sun_direction)
+         candidate_vectors.append({'z_V': z_V, 'z_I': z_I})
+-        
+-    # Initialize synthesized volume V with zeros or average
+-    # Dimensions depend on input image size and block size
+-    vol_height, vol_width = input_image.shape[:2]
+-    num_blocks_x = vol_width // w
+-    num_blocks_y = vol_height // w
+-    volume = np.zeros((vol_height, vol_width, Nz))
+-    
+-    # 2. Sorting: Sort blocks by sunlight incidence order
+-    # Note: Exact sorting logic depends on sun direction and block positions.
+-    # Here we assume a function that returns sorted indices of blocks.
+-    sorted_block_indices = sort_blocks_by_sunlight(num_blocks_x, num_blocks_y, Nz)
+-    
++
++    vol_h, vol_w = input_image.shape[:2]
++    volume = [[[0.0 for _ in range(Nz)] for _ in range(w)] for _ in range(vol_h)]
++
++    # 2. Sorting: Sort blocks by sunlight incidence order [S1]
++    sorted_indices = sorted(range((vol_h // w) * (vol_w // w)),
++                            key=lambda i: (i // (vol_w // w)) * sun_direction[0] + (i % (vol_w // w)) * sun_direction[1])
++
+     # 3. Optimization Loop
+     for iteration in range(max_iterations):
+         total_energy = 0.0
+-        
+-        # Iterate through blocks in sorted order
+-        for idx in sorted_block_indices:
+-            # Map block index to pixel coordinates
+-            y_start, x_start = idx_to_coords(idx, w)
+-            
+-            # Extract input image block
++        for idx in sorted_indices:
++            y_start = (idx // (vol_w // w)) * w
++            x_start = (idx % (vol_w // w)) * w
+             x_p_I = input_image[y_start:y_start+w, x_start:x_start+w]
+-            
+-            # Current voxel block in synthesized volume
+-            x_p_V = volume[y_start:y_start+w, x_start:x_start+w, :]
+-            
++            x_p_V = volume[y_start:y_start+w][x_start:x_start+w]
++
+             # --- E-step ---
+             # Minimize energy w.r.t x_p^V keeping z_p fixed.
+-            # This is a weighted average of neighbors.
+-            # In practice, this often involves solving a linear system or 
+-            # averaging with surrounding updated blocks.
+-            # Simplified: Update x_p^V based on neighbors and current best z_p.
+-            # For implementation completeness, we assume a neighbor averaging step.
+-            # Let N be the set of adjacent blocks already updated in this pass.
+-            # x_p^V = weighted_average(x_p^V, neighbors, weights)
+-            # [G] Specific neighbor weighting scheme from Kwatra et al. is required here.
+-            # Assuming a simple update for the sake of structure:
+-            # x_p_V = update_with_neighbors(x_p_V, volume, w, Nz) 
+-            
++            # Results in a least squares problem solved by a weighted average of neighbor voxel blocks [S1].
++            neighbors = get_neighbors(volume, y_start, x_start, w, Nz)
++            x_p_V = weighted_average(x_p_V, neighbors)
++            volume[y_start:y_start+w][x_start:x_start+w] = x_p_V
++
+             # --- M-step ---
+-            # Find closest z_p from candidates.
+-            # Acceleration: Find k nearest neighbors in voxel space first.
+-            
+-            # Flatten x_p_V for distance calculation
+-            x_p_V_flat = x_p_V.flatten()
+-            
+-            # Find k nearest voxel blocks in database
+-            # Using FLANN or similar ANN search
++            # Find closest z_p from candidates using acceleration [S1].
++            x_p_V_flat = flatten(x_p_V)
+             k_indices = find_k_nearest_neighbors(x_p_V_flat, voxel_blocks_db, k_neighbors)
+-            
++
+             best_candidate = None
+             min_dist = float('inf')
+-            
+             for i in k_indices:
+                 cand = candidate_vectors[i]
+                 cand_V = cand['z_V']
+                 cand_I = cand['z_I']
+-                
+-                # Compute distance
+-                dist_V = np.sum((x_p_V - cand_V)**2)
+-                dist_I = np.sum((x_p_I - cand_I)**2)
++                dist_V = sum((a - b)**2 for a, b in zip(flatten(x_p_V), flatten(cand_V)))
++                dist_I = sum((a - b)**2 for a, b in zip(flatten(x_p_I), flatten(cand_I)))
+                 dist = dist_V + lambda_weight * dist_I
+-                
+                 if dist < min_dist:
+                     min_dist = dist
+                     best_candidate = cand
+-            
+-            # Accumulate best voxel block into volume
+-            volume[y_start:y_start+w, x_start:x_start+w, :] = best_candidate['z_V']
+-            
++
++            volume[y_start:y_start+w][x_start:x_start+w] = best_candidate['z_V']
+             total_energy += min_dist
+-            
+-        # Check convergence
+-        if total_energy < threshold:
++
++        if total_energy < tolerance:
+             break
+-            
+     return volume
++
++def render_block(z_V, lighting_params, sun_direction):
++    # Computes transmittance and radiance along the sun direction [G]
++    return [[0.0 for _ in range(z_V.shape[1])] for _ in range(z_V.shape[0])]
++
++def get_neighbors(vol, y, x, w, Nz):
++    # Returns adjacent voxel blocks in the synthesized volume [G]
++    return []
++
++def weighted_average(current, neighbors):
++    # Returns the weighted average of the current block and its neighbors [G]
++    return current
++
++def flatten(arr):
++    return [val for row in arr for col in row for val in col]
++
++def find_k_nearest_neighbors(query, db, k):
++    # Standard k-NN search [G]
++    dists = [sum((a - b)**2 for a, b in zip(query, vec)) for vec in db]
++    return sorted(range(len(dists)), key=lambda i: dists[i])[:k]
+ ```
+ 
+@@ -172,5 +143,5 @@
+ *   **Transmittance Calculation:** Requires voxel values of blocks closer to the sun to be computed first. Incorrect sorting order leads to incorrect lighting/shadowing [S1].
+ *   **Computational Cost:** Rendering $z_V$ for every candidate is expensive. The $k$-nearest neighbor acceleration is critical for feasibility [S1].
+-*   **Boundary Conditions:** The method assumes periodic or specific boundary handling for the weighted average in the E-step [S1].
++*   **Boundary Conditions:** The method assumes specific boundary handling for the weighted average in the E-step [S1].
+ 
+ ## Subtopics
+@@ -179,5 +150,5 @@
+ An extension of the texture optimization method to synthesize a cloud volume such that rendered images from two orthogonal directions (e.g., xy and xz planes) match two input images [S1]. It augments the vector $x_p$ and $z$ to include pixel values from the second image plane ($I_{xz}$) [S1]. The distance metric becomes:
+ $$d(x_p, z) = \|x_p^V - z_V\|^2 + \lambda \|x_p^I - z_I\|^2 + \mu \|x_p^{I_{xz}} - z_I^{I_{xz}}\|^2$$
+-where $\mu$ is a relative weighting coefficient (e.g., 10 in experiments) [S1]. This allows handling of complex geometry and lighting variations from multiple viewpoints [S1].
++where $\mu$ is a relative weighting coefficient (e.g., 10 in experiments) [S1].
+ 
+ ### Patch-based Texture Synthesis
+@@ -188,5 +159,5 @@
+ *   **Memory Complexity:** Requires storing the example volume database and pre-rendered candidates. Memory scales with $K \times w^2 \times N_z$ [S1].
+ *   **Performance:** On a desktop PC (Intel Core-i7 4790 3.60 GHz), preprocessing takes about 4 minutes for 137 example volumes [S1]. Synthesis time depends on resolution and iteration count.
+-*   **Strengths:** Produces visually consistent textures that match input photographs. Handles complex lighting via precomputed lighting parameters [S1].
++*   **Strengths:** Produces visually consistent textures that match input photographs.
+ *   **Limitations:** Computationally expensive due to rendering in the loop. Requires a database of example volumes [S1].
+ 

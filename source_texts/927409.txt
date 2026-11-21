@@ -1,0 +1,350 @@
+100% procedural first-person survival RPG inspired by Elder Scrolls, Fallout, Starfield, BioShock and Cyberpunk 2077 - Wire server chunk data through to client renderer by Copilot · Pull Request #18 · opd-ai/wyrm
+
+Wire server chunk data through to client renderer by Copilot · Pull Request #18 · opd-ai/wyrm · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Copilot
+AI
+commented
+Apr 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Players joining a server see an endless flat empty expanse. The server generates and streams terrain correctly, but the client discards all received chunk data and never refreshes the world map after initial (empty) construction.
+Three broken links in the pipeline:
+handleChunkData was a no-op stub (sync.go) — Received ChunkData messages were logged and discarded. Now stores them via Manager.StoreNetworkChunk() and invalidates the LOD cache.
+rebuildWorldMap skipped all non-ready chunks (main.go) — The !ok guard on GetChunkLODAsync treated placeholders as errors, leaving the entire WorldMap at zero. Placeholders are now sampled as temporary terrain.
+updateChunkMap never re-evaluated (main.go) — World map only rebuilt on chunk boundary crossings. Added chunksPending tracking and HasNewChunks() dirty flag so rebuilds fire when async workers or the network deliver real chunks.
+New StoreNetworkChunk on chunk.Manager converts network-format data (uint16 heights, uint8 biomes) back into a full Chunk using the same helpers as local generation:
+```
+// pkg/world/chunk/manager.go
+func (cm *Manager) StoreNetworkChunk(x, y, size int, heightData []uint16, biomeData []uint8) {
+    // Validates size == cm.ChunkSize (rejects mismatched chunks)
+    // Reconstitutes heightmap using h*h*MaxElevation elevation curve
+    // Classifies terrain via classifyTerrain() and generates wall heights via generateWallHeights()
+    // Network chunks are render-only (DetailSpawns: nil) — authoritative entities arrive via entity updates
+    // Stores in loaded map and clears any pending async generation
+}
+```
+StateSynchronizer now takes chunkManager and lodManager references to close the integration gap. Chunk receipt logging is throttled (first chunk + every 10th) to avoid high log volume during streaming.
+Unit tests added for StoreNetworkChunk: round-trip payload verification (elevation curve, wall height range), chunk size mismatch rejection, and incomplete data handling.
+Copilot
+AI
+and others
+added 2 commits
+April 4, 2026 04:14
+fix: wire server chunk data to client renderer to eliminate flat empt…
+…
+286edba
+```
+…y world
+
+Three root causes fixed:
+1. handleChunkData() was a stub that discarded server terrain - now stores
+   chunks in local Manager and invalidates LOD cache
+2. rebuildWorldMap() skipped placeholder chunks entirely (!ok check) - now
+   samples all chunks including placeholders for temporary display
+3. updateChunkMap() never re-evaluated after async/network chunks completed -
+   now detects pending placeholders and new network chunks to trigger rebuilds
+
+Agent-Logs-Url: https://github.com/opd-ai/wyrm/sessions/d647d722-1dd5-4db6-8428-c1c5e76800d7
+
+Co-authored-by: opd-ai <187915325+opd-ai@users.noreply.github.com>
+```
+address review: add data validation logging, nil-guard warning, clari…
+…
+6abf762
+```
+…fy rebuild comments
+
+Agent-Logs-Url: https://github.com/opd-ai/wyrm/sessions/d647d722-1dd5-4db6-8428-c1c5e76800d7
+
+Co-authored-by: opd-ai <187915325+opd-ai@users.noreply.github.com>
+```
+Copilot
+AI
+assigned
+Copilot and
+opd-ai
+Apr 4, 2026
+Copilot created this pull request from a session on behalf of
+opd-ai
+April 4, 2026 04:21
+View session
+opd-ai
+marked this pull request as ready for review
+April 4, 2026 04:21
+Copilot
+AI
+review requested due to automatic review settings
+April 4, 2026 04:21
+Copilot started reviewing on behalf of
+opd-ai
+April 4, 2026 04:22
+View session
+Copilot
+AI
+reviewed
+Apr 4, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR fixes the client-side chunk rendering integration so network-received terrain chunks actually update the raycaster’s WorldMap, avoiding the “endless flat empty expanse” when joining a server.
+Changes:
+Client now stores received ChunkData into the local chunk.Manager, invalidates LOD cache entries, and exposes a “new chunks arrived” dirty flag.
+Client world map rebuild now samples placeholder LOD chunks (instead of skipping them) and rebuilds when async/network chunks replace placeholders.
+Added Manager.StoreNetworkChunk() to reconstitute chunks from network height/biome payloads and replace pending local generation.
+Reviewed changes
+Copilot reviewed 3 out of 3 changed files in this pull request and generated 5 comments.
+File
+Description
+pkg/world/chunk/manager.go
+Adds StoreNetworkChunk to ingest network chunk payloads into the local chunk cache.
+cmd/client/sync.go
+Wires ChunkData handling to StoreNetworkChunk, invalidates LOD, and adds a “new chunks” dirty flag API.
+cmd/client/main.go
+Rebuilds world map when new chunks arrive and samples placeholders so the map isn’t all-zero while chunks stream in.
+Comment thread
+pkg/world/chunk/manager.go
+Outdated
+Comment on lines
++1441
+to
++1458
+elevationMap[i] = h * MaxElevation
+// Classify terrain type from height
+switch {
+case h < WaterLevel:
+terrainTypes[i] = TerrainWater
+case h < ValleyThreshold:
+terrainTypes[i] = TerrainValley
+case h < HillThreshold:
+terrainTypes[i] = TerrainFlat
+case h < PeakThreshold:
+terrainTypes[i] = TerrainHill
+default:
+terrainTypes[i] = TerrainPeak
+}
+// Default wall height from terrain height
+wallHeights[i] = h
+Copilot
+AI
+Apr 4, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+StoreNetworkChunk reconstructs ElevationMap, TerrainTypes, and WallHeights in ways that diverge from the normal chunk generation logic in this package (e.g., elevation uses h*MaxElevation here vs the height*height*MaxElevation curve used elsewhere; wall heights are set to raw normalized height rather than the documented/clamped wall-height multipliers). This can lead to inconsistent terrain classification and wall height ranges for network-loaded chunks. Consider reusing the existing helpers (generateTerrainTypes/classifyTerrain and generateWallHeights/calculateWallHeight) and matching the elevation curve used by recalculateElevation so network chunks behave like locally generated ones.
+Suggested change
+elevationMap[i] = h * MaxElevation
+// Classify terrain type from height
+switch {
+case h < WaterLevel:
+terrainTypes[i] = TerrainWater
+case h < ValleyThreshold:
+terrainTypes[i] = TerrainValley
+case h < HillThreshold:
+terrainTypes[i] = TerrainFlat
+case h < PeakThreshold:
+terrainTypes[i] = TerrainHill
+default:
+terrainTypes[i] = TerrainPeak
+}
+// Default wall height from terrain height
+wallHeights[i] = h
+// Reconstruct derived data using the same rules as normal chunk generation.
+elevationMap[i] = h * h * MaxElevation
+terrainTypes[i] = classifyTerrain(h)
+wallHeights[i] = calculateWallHeight(h)
+Copilot uses AI. Check for mistakes.
+Comment thread
+pkg/world/chunk/manager.go
+Comment on lines
++1419
+to
++1427
+func (cm *Manager) StoreNetworkChunk(x, y, size int, heightData []uint16, biomeData []uint8) {
+key := [2]int{x, y}
+// Convert network height data (uint16, scaled by 100) back to float64 heightmap
+cells := size * size
+if len(heightData) < cells {
+log.Printf("warning: incomplete chunk height data for (%d,%d): got %d, expected %d",
+x, y, len(heightData), cells)
+}
+Copilot
+AI
+Apr 4, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+StoreNetworkChunk accepts an arbitrary size from the network message and stores a Chunk with Size: size into cm.loaded, even though Manager has a fixed ChunkSize. Mixed chunk sizes in the same manager can break callers that compute local coordinates assuming cm.ChunkSize (e.g., Chunk.GetHeight returns 0 for out-of-bounds when Size is smaller). It would be safer to validate size == cm.ChunkSize (or resample incoming data to cm.ChunkSize, or store it in a separate LOD-specific structure) before replacing the cached chunk.
+Copilot uses AI. Check for mistakes.
+Comment thread
+pkg/world/chunk/manager.go
+Outdated
+Comment on lines
++1465
+to
++1477
+chunkSeed := mixChunkSeed(cm.Seed, x, y)
+c := &Chunk{
+X: x,
+Y: y,
+Size: size,
+Seed: chunkSeed,
+HeightMap: heightMap,
+ElevationMap: elevationMap,
+TerrainTypes: terrainTypes,
+BiomeMap: biomeMap,
+DetailSpawns: generateDetailSpawns(size, chunkSeed, terrainTypes, biomeMap),
+WallHeights: wallHeights,
+}
+Copilot
+AI
+Apr 4, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+StoreNetworkChunk derives chunkSeed from cm.Seed and chunk coords to generate DetailSpawns. Since the network protocol does not appear to include the authoritative world/chunk seed, a client with a different cm.Seed than the server will generate different detail/barrier spawns for the same received height/biome data. Consider either (a) including the seed (or explicit spawn list) in ChunkData, or (b) avoiding gameplay-relevant spawn generation for network-loaded chunks and treating them as render-only until the server sends authoritative entities.
+Copilot uses AI. Check for mistakes.
+Comment thread
+pkg/world/chunk/manager.go
+Comment on lines
++1417
+to
++1423
+// StoreNetworkChunk stores a chunk received from the server into the local cache.
+// The chunk replaces any existing or pending local generation for those coordinates.
+func (cm *Manager) StoreNetworkChunk(x, y, size int, heightData []uint16, biomeData []uint8) {
+key := [2]int{x, y}
+// Convert network height data (uint16, scaled by 100) back to float64 heightmap
+cells := size * size
+Copilot
+AI
+Apr 4, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+There are existing tests for chunk generation behavior in this package, but StoreNetworkChunk currently has no test coverage. Adding a unit test that round-trips a known HeightData/BiomeData payload into a manager and asserts expected ChunkSize, non-nil maps, and valid wall-height ranges (MinWallHeight..MaxWallHeightMultiplier) would help prevent regressions.
+Copilot uses AI. Check for mistakes.
+Comment thread
+cmd/client/sync.go
+Comment on lines
++333
+to
++339
+// Mark that new chunk data has arrived and world map needs rebuild
+s.mu.Lock()
+s.chunkDirty = true
+s.mu.Unlock()
+log.Printf("stored chunk data for (%d, %d), size %d", x, y, size)
+}
+Copilot
+AI
+Apr 4, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+handleChunkData logs once per received chunk ("stored chunk data for ..."). With chunk streaming this can generate very high log volume and impact performance/diagnosability. Consider downgrading to debug-level logging (if available) or sampling/throttling (e.g., log only on first chunk per second, or only when data is incomplete).
+Copilot uses AI. Check for mistakes.
+opd-ai
+commented
+Apr 4, 2026
+Copy link
+Copy Markdown
+Owner
+@copilot apply changes based on the comments in this thread
+Copilot started work on behalf of
+opd-ai
+April 4, 2026 04:40
+View session
+Copilot
+AI
+and others
+added 2 commits
+April 4, 2026 04:47
+refactor: address review feedback on StoreNetworkChunk
+…
+0475f1e
+```
+- Use existing classifyTerrain/generateWallHeights helpers and h*h*MaxElevation
+  elevation curve to match locally-generated chunk behavior
+- Validate size == cm.ChunkSize and reject mismatched chunks
+- Skip detail spawn generation for network chunks (seed may differ from server)
+- Add unit tests: round-trip, size mismatch rejection, incomplete data handling
+- Throttle chunk receipt logging to first + every 10th chunk
+
+Agent-Logs-Url: https://github.com/opd-ai/wyrm/sessions/8013edff-6b2e-4059-b06f-e91f2972b761
+
+Co-authored-by: opd-ai <187915325+opd-ai@users.noreply.github.com>
+```
+fix: rename shadowed loop vars, use math.Abs and named tolerance in t…
+…
+015e86a
+```
+…ests
+
+Agent-Logs-Url: https://github.com/opd-ai/wyrm/sessions/8013edff-6b2e-4059-b06f-e91f2972b761
+
+Co-authored-by: opd-ai <187915325+opd-ai@users.noreply.github.com>
+```
+Copilot
+AI
+commented
+Apr 4, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+@copilot apply changes based on the comments in this thread
+Applied all five review comments in 0475f1e and 015e86a:
+Use existing helpers — StoreNetworkChunk now calls classifyTerrain() and generateWallHeights() with the h*h*MaxElevation elevation curve, matching locally-generated chunks.
+Validate chunk size — Rejects chunks where size != cm.ChunkSize with a warning log.
+Skip detail spawns — Network chunks set DetailSpawns: nil since client seed may differ from server; authoritative entities come via entity updates.
+Unit tests — Added TestStoreNetworkChunk (round-trip with elevation curve and wall height range assertions), TestStoreNetworkChunkSizeMismatch (rejected), and TestStoreNetworkChunkIncompleteData (graceful handling).
+Throttled logging — Per-chunk log replaced with counter-based throttling (first chunk + every 10th).
+Copilot finished work on behalf of
+opd-ai
+April 4, 2026 04:51
+Copilot
+AI
+requested a review
+from opd-ai
+April 4, 2026 04:51
+opd-ai
+merged commit a0a44a8
+into
+main
+Apr 4, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

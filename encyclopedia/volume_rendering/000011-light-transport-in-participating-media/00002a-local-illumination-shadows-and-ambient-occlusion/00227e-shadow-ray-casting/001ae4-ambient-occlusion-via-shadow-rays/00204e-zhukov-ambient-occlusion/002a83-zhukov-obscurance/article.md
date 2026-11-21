@@ -1,0 +1,162 @@
+# Zhukov Obscurance
+
+Also called: Ambient Occlusion (Zhukov et al.), Ambient Occlusion Approximation (Zhukov et al.), Distance Ambient Effect, Geometric Obscurance, Obscurance, Obscurance Illumination Model
+
+## Overview
+Zhukov Obscurance is a local illumination approximation that attenuates ambient light based on the distance to the nearest occluding geometry, generalizing standard binary ambient occlusion by replacing the visibility function with a distance suitability function [S2, unofficial]. Unlike standard ambient occlusion which yields a binary 0 or 1, this method provides a smooth gradient of darkening based on proximity, allowing for "Distance Ambient Effect" calculations [S2, unofficial]. It is distinct from global illumination techniques as it ignores indirect bounces, considering only local geometry [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Surface point position $x$.
+- Surface normal $n$.
+- Distance to the first intersection $d(x, \omega)$ for rays $\omega$ in the hemisphere $\Omega$ above $n$.
+- Parameter $\tau > 0$ controlling decay rate.
+- Ambient light intensity $I_a$.
+- Diffuse reflectance $k_a(x)$.
+
+**Outputs:**
+- Obscurance value $W(x) \in [0, 1]$.
+- Final ambient intensity $I(x)$.
+
+**Data Structures:**
+- The method operates on scalar values derived from ray casting. No specific complex data structure is defined in the sources for the core formula, though implementation typically requires a ray-marching or ray-casting routine to determine $d(x, \omega)$ [S1, unofficial][S2, unofficial].
+
+**Steps:**
+1. For the surface point $x$ and normal $n$, sample directions $\omega$ over the hemisphere $\Omega$ defined by $n$.
+2. For each direction $\omega$, cast a ray from $x$ and determine $d(x, \omega)$, the distance to the first intersection with any geometry. If no intersection is found, $d(x, \omega) \to +\infty$.
+3. Compute the distance suitability $\rho(d(x, \omega))$ for each intersection distance.
+4. Integrate the product of $\rho(d(x, \omega))$ and the cosine of the angle between $\omega$ and $n$ over the hemisphere, normalized by $\pi$.
+5. Compute the final intensity using the ambient light and reflectance.
+
+**Formulas:**
+The obscurance value $W(x, n)$ is defined as [S2, unofficial]:
+$$
+W(x, n) = \frac{1}{\pi} \int_{\Omega} \rho(d(x, \omega)) |\omega \cdot n| d\omega
+$$
+where:
+- $W(x, n)$ is the obscurance value, ranging from 0 (fully occluded) to 1 (fully open) [S2, unofficial].
+- $\Omega$ is the hemisphere of directions above the surface normal $n$.
+- $\rho(d)$ is the distance suitability function [S2, unofficial].
+- $d(x, \omega)$ is the distance to the first intersection in direction $\omega$ [S2, unofficial].
+
+The distance suitability function $\rho(d)$ is typically modeled as [S2, unofficial]:
+$$
+\rho(d) = 1 - e^{-\tau d}
+$$
+where:
+- $\tau$ is a positive parameter defining the decay rate [S2, unofficial].
+- Properties of $\rho(d)$:
+  - $\rho(0) = 0$ (fully occluded) [S2, unofficial].
+  - $\rho(+\infty) = 1$ (fully open) [S2, unofficial].
+  - $\rho'(d) > 0$ (monotonically increasing) [S2, unofficial].
+  - $\rho''(d) < 0$ (monotonically decreasing derivative/smoothness) [S2, unofficial].
+
+The final reflected intensity $I(x)$ is calculated as [S2, unofficial]:
+$$
+I(x) = I_a k_a(x) W(x)
+$$
+where:
+- $I_a$ is the ambient light intensity [S2, unofficial].
+- $k_a(x)$ is the diffuse reflectance for ambient light [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def zhukov_obscurance(x, n, raycaster, tau):
+    """
+    Computes Zhukov Obscurance for a surface point.
+    
+    Args:
+        x: Point position (vec3).
+        n: Surface normal (vec3).
+        raycaster: Function that returns distance to first intersection 
+                   for a ray origin and direction. Returns infinity if none.
+        tau: Positive decay rate parameter.
+        
+    Returns:
+        W: Obscurance value in [0, 1].
+    """
+    # Hemisphere sampling
+    # In practice, this is approximated by Monte Carlo integration or 
+    # pre-computed lookup tables as noted in related works [S1, unofficial].
+    # Here we show the conceptual integral evaluation.
+    
+    num_samples = 100 # Not given in sources; typical implementation detail [G]
+    integral_sum = 0.0
+    
+    for i in range(num_samples):
+        # Sample direction omega in hemisphere above n
+        omega = sample_hemisphere(n)
+        
+        # Get distance to first intersection
+        d = raycaster(x, omega)
+        
+        # Compute distance suitability rho(d)
+        # rho(d) = 1 - exp(-tau * d)
+        # Handle infinity: if d is infinity, rho is 1
+        if d == float('inf'):
+            rho = 1.0
+        else:
+            rho = 1.0 - math.exp(-tau * d)
+            
+        # Cosine term |omega . n|
+        cos_theta = abs(dot(omega, n))
+        
+        # Accumulate integral
+        # Note: Monte Carlo integration divides by probability density.
+        # For uniform hemisphere sampling, pdf = 1 / (2*pi).
+        # The formula has 1/pi. 
+        # Integral approx: (1/num_samples) * sum(rho * cos_theta)
+        # To match 1/pi factor: sum(rho * cos_theta) / num_samples * (2*pi) / pi 
+        # = sum(rho * cos_theta) / num_samples * 2
+        # However, standard MC for hemisphere integral of f(w) dw is:
+        # (Area / N) * sum(f(w_i) / pdf(w_i))
+        # Area of hemisphere = 2*pi. pdf = 1/(2*pi).
+        # So factor is 2*pi.
+        # The formula is (1/pi) * Integral.
+        # So result = (1/pi) * (2*pi/N) * sum(rho * cos_theta)
+        #          = (2/N) * sum(rho * cos_theta)
+        
+        integral_sum += rho * cos_theta
+        
+    W = (2.0 / num_samples) * integral_sum
+    
+    # Clamp to [0, 1] to handle numerical errors
+    W = max(0.0, min(1.0, W))
+    
+    return W
+
+def compute_ambient_intensity(x, n, raycaster, tau, I_a, k_a):
+    W = zhukov_obscurance(x, n, raycaster, tau)
+    I = I_a * k_a * W
+    return I
+```
+
+**Parameters:**
+- $\tau$: Positive parameter defining the decay rate. Typical values are not specified in the sources [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The exponential function $e^{-\tau d}$ may underflow for large $d$, resulting in $\rho(d) \approx 1$, which is correct behavior [S2, unofficial].
+- **Boundaries:** If $d=0$, $\rho(0)=0$, correctly indicating full occlusion [S2, unofficial].
+- **Degenerate Input:** The method does not account for indirect illumination, making it physically inaccurate for scenes where indirect light is significant [S1, unofficial].
+
+## Subtopics
+
+### Zhukov Ambient Occlusion
+The broader category of techniques using Zhukov's obscurance model. Zhukov Obscurance is the specific illumination model within this family. [Link](2245-zhukov-ambient-occlusion.md)
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of samples used to approximate the hemisphere integral. Each sample requires a ray intersection test.
+- **Memory Complexity:** Low, as it computes values per point. Can be pre-computed and stored in texture maps or vertex attributes for static scenes [S2, unofficial].
+- **Strengths:** Provides smooth, distance-based occlusion gradients; computationally efficient for static scenes if pre-computed; does not depend on light sources [S2, unofficial].
+- **Limitations:** Not physically accurate as it ignores indirect illumination; only considers local geometry [S1, unofficial].
+- **When to use:** When a smooth, distance-based ambient darkening is desired for static geometry, and performance is critical.
+- **When not to use:** When physically accurate global illumination is required.
+
+## Background
+Zhukov Obscurance was introduced by Zhukov, Iones, and Kronin in 1998 [S1, unofficial]. It was developed as an approximation for global illumination through occlusions, determining the occlusion of ambient light at interpolated points [S1, unofficial]. The technique was later elaborated upon by Iones et al. in 2003, who defined the distance suitability function properties and the exponential decay model [S2, unofficial]. It is used in computer graphics for simulating indirect illumination effects in real-time or pre-computed contexts.
+
+## Sources
+[S1] A Tile-Based Approach for Photo-Realistic Volume Rendering, http://hdl.handle.net/1794/23836, fetched 2026-10-26 (unofficial)
+[S2] GPU Ray Marching for Ambient Occlusion, https://www.scribd.com/document/520755804/imm6392, fetched 2026-10-28 (unofficial)

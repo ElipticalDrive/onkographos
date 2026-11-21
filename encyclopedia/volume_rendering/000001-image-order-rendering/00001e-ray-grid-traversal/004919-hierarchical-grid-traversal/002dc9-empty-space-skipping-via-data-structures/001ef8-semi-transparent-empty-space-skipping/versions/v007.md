@@ -1,0 +1,70 @@
+# Semi-transparent Empty-Space Skipping
+
+Also called: Analytic Integration with Empty-Space Skipping, Empty-Space Skipping for Semi-transparent Volumes, Semi-transparent Volumetric Rendering with Empty-Space Skipping
+
+## Overview
+Semi-transparent Empty-Space Skipping is a rendering technique for transparent or semi-transparent volumes that combines hierarchical acceleration structures for empty-space skipping with analytical integration for optical depth calculation [S1]. It solves the problem of efficiently rendering semi-transparent objects where rays must traverse the interior to determine exit points and accumulated opacity, without resorting to brute-force sampling throughout the empty space surrounding the object [S1]. Unlike opaque empty-space skipping which stops at the first hit, this method uses lower bounds to skip empty regions while continuing the ray to the exit point, evaluating the contribution analytically based on the segment length [S1].
+
+## How it works
+The method operates differently depending on whether the volume density is constant or varying. It builds upon the hierarchical grid traversal and empty-space skipping principles defined in the parent article [Empty Space Skipping via Data Structures](5619-empty-space-skipping-via-data-structures.md).
+
+### Inputs and Outputs
+*   **Inputs:** A volume dataset (constant or varying density), a camera ray origin $o$ and direction $d$, and an acceleration structure (e.g., BVH) representing the volume bounds.
+*   **Outputs:** The final color and opacity of the ray.
+
+### Data Structures
+The acceleration structure (e.g., BVH) stores bounds for volume regions. For semi-transparent rendering, these bounds are used to compute lower bounds on the distance to the volume surface, rather than upper bounds used for opaque occlusion [S1].
+
+### Steps
+
+1.  **Ray Traversal (Empty-Space Skipping):**
+    *   Trace the ray against the acceleration structure to find the entry point into the volume.
+    *   Use sphere tracing or hierarchical traversal with **lower bounds** to skip empty space outside the volume [S1].
+    *   Quadratic bounds are preferred over linear bounds to allow the ray to quickly move away from the entry surface, improving performance [S1].
+
+2.  **Interior Handling:**
+    *   **Case A: Constant Density Material:**
+        *   Once the entry point is found, the ray continues inside the volume toward the exit point.
+        *   Use the same BVH techniques (with lower bounds) to find the exit point efficiently [S1].
+        *   Evaluate the optical contribution (opacity/transmittance) **analytically** based on the length of the ray segment inside the volume and the constant density $\rho$ [S1].
+        *   Formula for transmittance $T$ over length $L$ with constant density $\rho$:
+            $$ T = e^{-\rho L} $$
+    *   **Case B: Varying Density Material:**
+        *   Full volumetric rendering is required inside the volume.
+        *   Switch to **constant-size ray-marching** to numerically integrate the density along the ray segment inside the volume [S1].
+        *   The empty-space skipping optimization only applies to the region *outside* the volume; the interior integration is not optimized by the skipping mechanism itself [S1].
+
+3.  **Compositing:**
+    *   Composite the result from the volume traversal with the background or subsequent geometry using standard front-to-back or back-to-front alpha compositing.
+
+### Parameters
+*   **Density Model:** Constant or Varying (FBM, etc.).
+*   **Bound Type:** Linear or Quadratic (Quadratic offers better performance by moving the ray away from the entry surface faster) [S1].
+
+### Edge Cases and Pitfalls
+*   **Varying Density Performance:** Performance gains from empty-space skipping for varying density materials depend heavily on the amount of empty space in the scene [S1]. If the volume is dense or fills most of the bounding box, the skipping benefit is reduced.
+*   **Interior Optimization:** For varying density, the interior ray-marching is not accelerated by the empty-space skipping logic, representing a bottleneck compared to the constant density case [S1].
+
+## Subtopics
+
+### Coherence Encoding
+An approach for coding empty regions to a coherency encoding that describes regions where opacity changes linearly, used to accelerate shear warp and ray casting for semi-transparent volumes [S2, abstract only, unofficial]. It reimplements the technique using a volume graphics library (VGL) and improves it by using preintegration to evaluate opacity and shading inside the coherent region [S2, abstract only, unofficial]. Unlike space leaping and early ray termination which are efficient for volumes with mostly opaque or transparent voxels, coherence encoding is more efficient for semi-transparent volumes [S2, abstract only, unofficial]. It achieved a speedup of up to a factor of 3 [S2, abstract only, unofficial].
+
+## Operating characteristics
+*   **Constant Density:**
+    *   On the Clouds scene, the 'Ours, Impr Quad.' method achieves a **5.7x speedup** over naive Sphere tracing (5.6ms vs 31.9ms) [S1].
+    *   Reduces average octaves from 1892.0 to 196.3 [S1].
+    *   Quadratic bounds perform significantly better than linear bounds or naive cases [S1].
+*   **Varying Density:**
+    *   On the Clouds scene, the 'Ours, Impr Quad.' method achieves a **1.8x speedup** over naive Sphere tracing (37.9ms vs 66.5ms) [S1].
+    *   Reduces average octaves from 4087.4 to 1675.9 [S1].
+    *   Performance gains are less pronounced than in the constant density case because the interior requires full ray-marching [S1].
+*   **Strengths:** Significant speedup for constant density semi-transparent objects; effective empty-space skipping for varying density outside the volume.
+*   **Limitations:** For varying density, interior integration remains a bottleneck; performance is sensitive to the ratio of empty space to volume density.
+
+## Background
+This method is described in the context of fast sphere tracing of procedural volumetric noise for very large and detailed scenes [S1]. It extends BVH-based sphere tracing techniques to handle semi-transparent materials by utilizing lower bounds for skipping and analytical integration for constant density [S1].
+
+## Sources
+[S1] Fast sphere tracing of procedural volumetric noise for very large and detailed scenes, https://doi.org/10.1111/cgf.70072, fetched 2026-10-26
+[S2] Real Time Rendering of Deformable and Semi-Transparent Objects by Volume Rendering, https://openalex.org/W2286863887, fetched 2026-10-26 (abstract only, unofficial)

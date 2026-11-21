@@ -1,0 +1,604 @@
+Point Cloud Library (PCL). Contribute to PointCloudLibrary/pcl development by creating an account on GitHub.
+
+[gpu] Add gpu octree tutorial by haritha-j · Pull Request #4347 · PointCloudLibrary/pcl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+haritha-j
+commented
+Aug 24, 2020
+Copy link
+Copy Markdown
+Contributor
+Performance comparison hasn't been added yet.
+add gpu octree tutorial
+2002837
+haritha-j
+added
+the
+module: gpu
+label
+Aug 24, 2020
+larshg
+reviewed
+Aug 24, 2020
+View reviewed changes
+Comment thread
+doc/tutorials/content/gpu_octree.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+SergioRAgostinho
+added
+module: tutorials
+priority: gsoc
+Reason for prioritization
+labels
+Aug 24, 2020
+SergioRAgostinho
+reviewed
+Aug 24, 2020
+View reviewed changes
+SergioRAgostinho
+left a comment
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Serious refactor required for the tutorial code. General items to correct in the future:
+Don't use std::endl unless you really need to flush the buffer.
+Try to keep functions small and concise. Refactor individual steps into new functions to keep a function span short. Rule of thumb: if it doesn't fit your editor window without scrolling, it's a good refactor candidate.
+In pcl, random point clouds should be generated with cloud generator. For general scalar you can use proper <random> utilities making use of random generators, or you can use UniformGenerator which is messy class but achieves the same behavior under the hood.
+Click to expand
+Details
+```
+/*
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ *  Point Cloud Library (PCL) - www.pointclouds.org
+ *  Copyright (c) 2020-, Open Perception
+ *
+ *  All rights reserved
+ */
+
+#include <pcl/common/generate.h> // CloudGenerator
+#include <pcl/common/random.h>   // UniformGenerator
+#include <pcl/gpu/octree/device_format.hpp> // gpu::NeighborIndices
+#include <pcl/gpu/octree/octree.hpp>        // gpu::Octree
+#include <pcl/point_cloud.h> // PointCloud
+#include <pcl/point_types.h> // PointXYZ
+
+#include <cmath> // NAN
+#include <iostream> // cout
+#include <vector> // vector
+
+auto
+kNearestSearch(const pcl::gpu::Octree& octree,
+               const pcl::gpu::Octree::Queries& queries,
+               const int k)
+{
+  // prepare output buffers on device
+  pcl::gpu::NeighborIndices indices_d(queries.size(), k);
+  pcl::gpu::Octree::ResultSqrDists sqr_dists_d;
+
+  // search GPU
+  octree.nearestKSearchBatch(queries, k, indices_d, sqr_dists_d);
+
+  // download results
+  std::vector<int> indices_h;
+  std::vector<float> sqr_dists_h;
+  indices_d.data.download(indices_h);
+  sqr_dists_d.download(sqr_dists_h);
+
+  return std::make_pair(indices_h, sqr_dists_h);
+}
+
+auto
+radiusSearch(const pcl::gpu::Octree& octree,
+             const pcl::gpu::Octree::Queries& queries,
+             const std::vector<float>& radiuses_h)
+{
+  // prepare radiuses
+  pcl::gpu::Octree::Radiuses radiuses_d;
+  radiuses_d.upload(radiuses_h);
+
+  // prepare output buffers on device
+  const auto max_results = octree.cloud_->size();
+  pcl::gpu::NeighborIndices indices_d(queries.size(), max_results);
+
+  // search GPU
+  // uncomment once radius search PR is merged
+  // pcl::gpu::Octree::ResultSqrDists sqr_dists_d;
+  octree.radiusSearch(queries, radiuses_d, max_results, indices_d /*, sqr_dists_d*/);
+
+  // download results
+  std::vector<int> indices_h;
+  std::vector<int> sizes;
+  indices_d.data.download(indices_h);
+  // sqr_dists_d.download(sqr_dists_h);
+  indices_d.sizes.download(sizes);
+
+  // rewrite once radius search pr is merged
+  const std::vector<float> sqr_dists_h(indices_h.size(), NAN);
+  return std::make_tuple(indices_h, sizes, sqr_dists_h);
+}
+
+auto
+approxNearestSearch(const pcl::gpu::Octree& octree,
+                    const pcl::gpu::Octree::Queries& queries)
+{
+  // prepare output buffers on device
+  pcl::gpu::NeighborIndices indices_d(queries.size(), 1);
+  pcl::gpu::Octree::ResultSqrDists sqr_dists_d;
+
+  // search GPU
+  octree.approxNearestSearch(queries, indices_d, sqr_dists_d);
+
+  // download results
+  std::vector<int> indices_h;
+  std::vector<float> sqr_dists_h;
+  indices_d.data.download(indices_h);
+  sqr_dists_d.download(sqr_dists_h);
+
+  return std::make_pair(indices_h, sqr_dists_h);
+}
+
+int
+main()
+{
+  using Generator =
+      pcl::common::CloudGenerator<pcl::PointXYZ, pcl::common::UniformGenerator<float>>;
+  Generator generator(Generator::GeneratorParameters(0, 1024.f)); // min max range
+
+  pcl::PointCloud<pcl::PointXYZ> cloud_h;
+  generator.fill(1000, 1, cloud_h);
+
+  constexpr size_t query_size = 10;
+  std::vector<pcl::PointXYZ> queries_h;
+  for (std::size_t i = 0; i < query_size; ++i)
+    queries_h.push_back(generator.get());
+
+  // prepare device cloud
+  pcl::gpu::Octree::PointCloud cloud_d;
+  cloud_d.upload(cloud_h.data(), cloud_h.size());
+
+  // upload queries
+  pcl::gpu::Octree::Queries queries_d;
+  queries_d.upload(queries_h);
+
+  // gpu build
+  pcl::gpu::Octree octree;
+  octree.setCloud(cloud_d);
+  octree.build();
+
+  // perform approximate nearest search
+  std::vector<int> indices;
+  std::vector<float> sqr_dists;
+  std::tie(indices, sqr_dists) = approxNearestSearch(octree, queries_d);
+
+  for (std::size_t i = 0; i < query_size; ++i) {
+    std::cout << "Approximate nearest neighbor search #" << i << " at " << queries_h[i]
+              << "\n\t" << cloud_h[indices[i]] << " (squared distance " << sqr_dists[i]
+              << ")\n";
+  }
+  std::cout << '\n';
+
+  // perform k = 1 nearest search
+  constexpr int K = 1;
+  std::tie(indices, sqr_dists) = kNearestSearch(octree, queries_d, K);
+
+  for (std::size_t i = 0; i < query_size; ++i) {
+    std::cout << "K nearest neighbor search #" << i << " at " << queries_h[i] << '\n';
+
+    for (std::size_t j = i * K; j < (i + 1) * K; ++j)
+      std::cout << '\t' << cloud_h[indices[j]] << " (squared distance " << sqr_dists[j]
+                << ")\n";
+  }
+  std::cout << '\n';
+
+  // perform radius search
+  pcl::common::UniformGenerator<float> radius_generator(75.f, 125.f);
+  std::vector<float> radiuses;
+  radiuses.reserve(query_size);
+  for (std::size_t i = 0; i < queries_h.size(); ++i)
+    radiuses.push_back(radius_generator.run());
+
+  std::vector<int> sizes;
+  std::tie(indices, sizes, sqr_dists) = radiusSearch(octree, queries_d, radiuses);
+
+  for (std::size_t i = 0; i < query_size; ++i) {
+    std::cout << "Radius search at " << queries_h[i] << " within radius " << radiuses[i]
+              << ". Found " << sizes[i] << " results.\n";
+
+    for (std::size_t j = 0; j < static_cast<std::size_t>(sizes[i]); ++j) {
+      const auto idx = i * cloud_h.size() + j;
+      std::cout << "\t" << cloud_h[indices[idx]] << " (squared distance "
+                << sqr_dists[idx] << ")\n";
+    }
+  }
+  std::cout << '\n';
+}
+```
+Comment thread
+doc/tutorials/content/gpu_octree.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+doc/tutorials/content/gpu_octree.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+doc/tutorials/content/sources/gpu_octree/CMakeLists.txt
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+GPU tutorial modifications
+6430a26
+SergioRAgostinho
+reviewed
+Aug 25, 2020
+View reviewed changes
+Comment thread
+doc/tutorials/content/gpu_octree.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+doc/tutorials/content/gpu_octree.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+doc/tutorials/content/gpu_octree.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+doc/tutorials/content/gpu_octree.rst
+Outdated
+.. note::
+The GPU K nearest neighbor algorithm differs from it's CPU counterpart in implementation. Specifically, the CPU algorithm will only find approximate nearest neighbors, where the user can set the upper bound of the error allowed. In contrast, the GPU algorithm finds the absolute nearest neighbor.
+SergioRAgostinho
+Aug 25, 2020
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Probably also add that this the only reason we're currently offering the kNearestNeighbor despite it only supporting k=1. Otherwise I would normally route people to using approxNearestNeighbor.
+Comment thread
+doc/tutorials/content/gpu_octree.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+doc/tutorials/content/gpu_octree.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+doc/tutorials/content/gpu_octree.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+additional modifications to gpu octree tutorial
+c72c1db
+SergioRAgostinho
+reviewed
+Aug 27, 2020
+View reviewed changes
+Comment thread
+doc/tutorials/content/gpu_octree.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+doc/tutorials/content/gpu_octree.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+doc/tutorials/content/gpu_octree.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+.ci/azure-pipelines/env.yml
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+doc/tutorials/content/sources/gpu_octree/gpu_octree.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+doc/tutorials/content/sources/gpu_octree/gpu_octree.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+make demo image clearer and minor tutorial fixes
+597995c
+SergioRAgostinho
+reviewed
+Aug 27, 2020
+View reviewed changes
+SergioRAgostinho
+left a comment
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Don't forget to open the PR with the CI change.
+Comment thread
+doc/tutorials/content/gpu_octree.rst
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+add performance comparison
+8e3950f
+haritha-j
+commented
+Aug 31, 2020
+Copy link
+Copy Markdown
+Contributor
+Author
+The code used for the benchmarks I added :
+```
+#include <pcl/point_cloud.h>
+#include <pcl/octree/octree.h>
+
+#include <pcl/common/generate.h> // CloudGenerator
+#include <pcl/common/random.h>   // UniformGenerator
+#include <pcl/gpu/octree/octree.hpp>
+#include <pcl/gpu/containers/device_array.h>
+#include <pcl/gpu/utils/safe_call.hpp>
+
+#include <benchmark/benchmark.h>
+
+struct GpuTestFixture : public benchmark::Fixture {
+  void
+  SetUp(const ::benchmark::State& state)
+  {
+    cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+
+    //set benchmark params
+    const std::size_t cloud_size = state.range(0);
+    const size_t query_size = state.range(1);
+
+    // Generate pointcloud data
+    using Generator = pcl::common::CloudGenerator<pcl::PointXYZ, pcl::common::UniformGenerator<float>>;
+
+    Generator generator(Generator::GeneratorParameters(0, 1024.f)); // min max range
+    generator.fill(cloud_size, 1, *cloud);
+
+    //prepare queries
+    for (std::size_t i = 0; i < query_size; ++i)
+      queries.push_back(generator.get());
+    queries_device.upload(queries);
+
+    //prepare device cloud
+    cloud_device.upload(cloud->points);
+
+    //gpu build
+    octree_device.setCloud(cloud_device);
+    octree_device.build();
+    octree_device.internalDownload();
+
+    //prepare radiuses
+    pcl::common::UniformGenerator<float> radius_generator(0.0f, 200.0f);
+    radiuses.reserve(query_size);
+    for (std::size_t i = 0; i < queries.size(); ++i)
+      radiuses.push_back(radius_generator.run());
+    radiuses_device.upload(radiuses);
+
+    //build host octree
+    octree_host = pcl::make_shared<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>>(host_octree_resolution);
+    octree_host->setInputCloud (cloud);
+    octree_host->addPointsFromInputCloud();
+  }
+
+    pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> cloud;
+    const size_t max_results = 1000;
+    const int k = 1;
+
+    //gpu storage
+    pcl::gpu::Octree::Queries queries_device;
+    pcl::gpu::Octree::PointCloud cloud_device;
+    pcl::gpu::Octree octree_device;
+    pcl::gpu::Octree::Radiuses radiuses_device;
+
+    //output buffers on device
+    pcl::gpu::NeighborIndices results_device;
+    pcl::gpu::Octree::ResultSqrDists dists_device;
+
+    std::vector<pcl::PointXYZ> queries;
+    std::vector<float> radiuses;
+
+    //host output buffers
+    std::vector<int> host_indices;
+    std::vector<float> host_square_distances;
+    int host_index;
+    float host_square_distance;
+
+    //host octree
+    const float host_octree_resolution = 25.f;
+    pcl::shared_ptr<pcl::octree::OctreePointCloudSearch<pcl::PointXYZ>> octree_host;
+};
+
+//gpu device radius search without distance return
+BENCHMARK_DEFINE_F(GpuTestFixture, Radius)(benchmark::State& st)
+{
+  for (auto _ : st)
+    octree_device.radiusSearch(queries_device, radiuses_device, max_results, results_device);
+}
+
+//gpu device radius search with distance return
+BENCHMARK_DEFINE_F(GpuTestFixture, RadiusDistances)(benchmark::State& st)
+{
+    for (auto _ : st)
+      octree_device.radiusSearch(queries_device, radiuses_device, max_results, results_device, dists_device);
+}
+
+//gpu sync radius search
+BENCHMARK_DEFINE_F(GpuTestFixture, RadiusSync)(benchmark::State& st)
+{
+    for (auto _ : st)
+    {
+      for(std::size_t i = 0; i < queries.size(); ++i)
+        octree_device.radiusSearchHost(queries[i], radiuses[i], host_indices, host_square_distances, max_results);
+    }
+}
+
+//cpu radius search
+BENCHMARK_DEFINE_F(GpuTestFixture, RadiusCPU)(benchmark::State& st)
+{
+    for (auto _ : st)
+    {
+      for(std::size_t i = 0; i < queries.size(); ++i)
+        octree_host->radiusSearch(queries[i], radiuses[i], host_indices, host_square_distances, max_results);
+    }
+}
+
+//gpu device approx nearest search
+BENCHMARK_DEFINE_F(GpuTestFixture, Approx)(benchmark::State& st)
+{
+    for (auto _ : st)
+      octree_device.approxNearestSearch(queries_device, results_device, dists_device);
+}
+
+//gpu sync approx nearest search
+BENCHMARK_DEFINE_F(GpuTestFixture, ApproxSync)(benchmark::State& st)
+{
+    for (auto _ : st)
+    {
+      for(std::size_t i = 0; i < queries.size(); ++i)
+        octree_device.approxNearestSearchHost(queries[i], host_index, host_square_distance);
+    }
+}
+
+//cpu approx nearest search
+BENCHMARK_DEFINE_F(GpuTestFixture, ApproxCPU)(benchmark::State& st)
+{
+    for (auto _ : st)
+    {
+      for(std::size_t i = 0; i < queries.size(); ++i)
+        octree_host->approxNearestSearch(queries[i], host_index, host_square_distance);
+    }
+}
+
+//gpu device knn search (k = 1)
+BENCHMARK_DEFINE_F(GpuTestFixture, KNN)(benchmark::State& st)
+{
+    for (auto _ : st)
+      octree_device.nearestKSearchBatch(queries_device, k, results_device, dists_device);
+}
+
+//cpu knn search (k = 1)
+BENCHMARK_DEFINE_F(GpuTestFixture, kNNCPU)(benchmark::State& st)
+{
+    for (auto _ : st)
+    {
+      for(std::size_t i = 0; i < queries.size(); ++i)
+        octree_host->nearestKSearch(queries[i], k, host_indices, host_square_distances);
+    }
+}
+
+//register benchmarks
+//BENCHMARK_REGISTER_F(GpuTestFixture, Radius) -> UseRealTime() -> Unit(benchmark::kMicrosecond) -> Args({1000000, 1000}) ->Args({1000000, 10000}) ->Args({100000, 1000});
+BENCHMARK_REGISTER_F(GpuTestFixture, RadiusDistances) -> UseRealTime() -> Unit(benchmark::kMicrosecond) ->Args({100000, 1000}) -> Args({1000000, 1000}) ->Args({1000000, 10000});
+BENCHMARK_REGISTER_F(GpuTestFixture, RadiusSync) -> UseRealTime() -> Unit(benchmark::kMicrosecond) -> Args({100000, 1000}) -> Args({1000000, 1000}) ->Args({1000000, 10000}) ;
+BENCHMARK_REGISTER_F(GpuTestFixture, RadiusCPU) -> UseRealTime() -> Unit(benchmark::kMicrosecond) -> Args({100000, 1000}) -> Args({1000000, 1000}) ->Args({1000000, 10000});
+BENCHMARK_REGISTER_F(GpuTestFixture, Approx) -> UseRealTime() -> Unit(benchmark::kMicrosecond) ->Args({100000, 1000}) -> Args({1000000, 1000}) ->Args({1000000, 10000}) ;
+BENCHMARK_REGISTER_F(GpuTestFixture, ApproxSync) -> UseRealTime() -> Unit(benchmark::kMicrosecond) -> Args({100000, 1000})  -> Args({1000000, 1000}) ->Args({1000000, 10000});
+BENCHMARK_REGISTER_F(GpuTestFixture, ApproxCPU) -> UseRealTime() -> Unit(benchmark::kMicrosecond) -> Args({100000, 1000}) -> Args({1000000, 1000}) ->Args({1000000, 10000});
+BENCHMARK_REGISTER_F(GpuTestFixture, KNN) -> UseRealTime() -> Unit(benchmark::kMicrosecond) -> Args({100000, 1000}) -> Args({1000000, 1000}) ->Args({1000000, 10000});
+BENCHMARK_REGISTER_F(GpuTestFixture, kNNCPU) -> UseRealTime() -> Unit(benchmark::kMicrosecond) -> Args({100000, 1000}) -> Args({1000000, 1000}) ->Args({1000000, 10000});
+
+BENCHMARK_MAIN();
+```
+SergioRAgostinho
+reviewed
+Aug 31, 2020
+View reviewed changes
+Comment thread
+doc/tutorials/content/gpu_octree.rst
+* - CPU based K Nearest Neighbour Search (from octree module) (k=1)
+- 20744 us
+- 58194 us
+- 282274 us
+SergioRAgostinho
+Aug 31, 2020
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+As a user I would now ask,
+above what threshold is it worth to offload things onto the gpu?
+haritha-j
+commented
+Sep 2, 2020
+View reviewed changes
+Comment thread
+doc/tutorials/content/gpu_octree.rst
+The following table shows a sample comparison between the performance of the CPU and GPU implementations.
+.. list-table:: Title
+haritha-j
+Sep 2, 2020
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Forgot to add title here.
+stale
+Bot
+commented
+Oct 4, 2020
+Copy link
+Copy Markdown
+Marking this as stale due to 30 days of inactivity. Commenting or adding a new commit to the pull request will revert this.
+stale
+Bot
+added
+the
+status: stale
+label
+Oct 4, 2020
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+module: gpu
+module: tutorials
+priority: gsoc
+Reason for prioritization
+status: stale
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,55 @@
+# Viewpoint Inside Volume Ray Setup
+
+Also called: Endoscopic Raycasting, Hybrid ray setup, Polygonal geometry intersection
+
+## Overview
+This method enables volume ray casting when the camera viewpoint is located inside the volume (e.g., virtual colonoscopy), a scenario where standard bounding-box ray setups fail because the near clipping plane intersects the front faces of the volume, creating holes in the ray entry data [S1, unofficial][S2, unofficial]. It extends the image-based ray setup by intersecting rays with explicit polygonal geometry to correctly determine entry points and clip internal surfaces, allowing for hybrid rendering of isosurfaces and direct volume rendering [S1, unofficial][S2, unofficial].
+
+## How it works
+The method builds on the image-based ray setup described in [Near Plane Clipping Correction](4848-near-plane-clipping-correction.md) [S1, unofficial][S2, unofficial]. It computes ray parameters per pixel using a pre-rendering step followed by the ray casting pass [S1, unofficial][S2, unofficial].
+
+**Inputs:**
+- Volume texture $V$.
+- Polygonal geometry mesh $M$ representing internal surfaces or the volume boundary [S1, unofficial][S2, unofficial].
+- Camera parameters (view and projection matrices) [G].
+- Ray step size $s$ and maximum ray length $L_{max}$ [G].
+
+**Outputs:**
+- Final color image $C$.
+
+**Data Structures:**
+1. **Ray Start Position Image ($I_{start}$):** A 2D texture storing the 3D world-space starting position of the ray for each pixel [S1, unofficial][S2, unofficial].
+2. **Ray Length Image ($I_{len}$):** A 2D texture storing the total length of the ray segment to be marched [S1, unofficial][S2, unofficial].
+3. **Modified Ray Length Image ($I_{len}'$):** Intermediate texture storing the clipped ray length after polygon intersection [S1, unofficial][S2, unofficial].
+4. **Compositing Buffer:** The final rendered image buffer [G].
+
+**Steps:**
+1. **Compute Starting Position Image ($I_{start}$):** For each pixel $(u, v)$, compute the ray origin. If the viewpoint is inside the volume, the origin is the camera position. If outside, it is the intersection with the near plane or bounding box [S1, unofficial][S2, unofficial]. This step builds on the base image-based ray setup [S1, unofficial][S2, unofficial].
+2. **Compute Ray Length Image ($I_{len}$):** For each pixel, compute the initial ray length, typically the distance from the ray origin to the far plane or bounding box exit point [S1, unofficial][S2, unofficial]. Store the length in $I_{len}$ [S1, unofficial][S2, unofficial].
+3. **Render Polygonal Geometry to Modify Ray Length:** This step clips the rays at internal surfaces or corrects entry points [S1, unofficial][S2, unofficial].
+    a. **Fill Holes:** If the near clipping plane clips into front faces, rasterize the near clipping plane geometry to fill gaps where no ray origin was defined [S1, unofficial][S2, unofficial].
+    b. **Intersect with Polygonal Mesh:** Rasterize the polygonal mesh $M$ using a depth buffer [S1, unofficial][S2, unofficial]. For each pixel, if a polygon is visible, compute the intersection distance $d_{int}$ from the ray origin $\mathbf{p}_0$ along the ray direction $\mathbf{d}$ [G].
+    c. **Clip Length:** Update the ray length in $I_{len}'$ to the minimum of the current length and the intersection distance [G]. The depth buffer ensures only the nearest surface is considered [S1, unofficial][S2, unofficial].
+4. **Raycasting:** For each pixel, retrieve $\mathbf{p}_0$ from $I_{start}$ and $L'$ from $I_{len}'$ [S1, unofficial][S2, unofficial]. March the ray from $\mathbf{p}_0$ along $\mathbf{d}$ for length $L'$, sampling the volume $V$ and compositing the result into the compositing buffer [S1, unofficial][S2, unofficial].
+5. **Blending:** Composite the result into the final image [S1, unofficial][S2, unofficial]. If hybrid rendering is used, the polygonal geometry may be rendered separately as an opaque surface, and the volume ray casting is performed only for the interior or exterior regions as defined by the geometry [S1, unofficial][S2, unofficial].
+
+**Parameters:**
+- Typical values: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- The near clipping plane may clip into the front faces of the volume, creating holes that must be filled using the near clipping plane or depth buffer [S1, unofficial][S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ for ray casting, where $N$ is the number of pixels. The pre-pass is $O(P)$, where $P$ is the number of polygons in the mesh [G].
+- **Memory Complexity:** $O(N)$ for the ray start and length images. Additional memory for the depth buffer during the polygon rasterization pass [G].
+- **Strengths:** Enables realistic endoscopic visualization; allows hybrid rendering [S1, unofficial][S2, unofficial].
+- **Limitations:** Requires explicit polygonal geometry [S1, unofficial][S2, unofficial].
+- **When to use:** Virtual colonoscopy, internal organ visualization, any scenario where the camera is inside the volume [S1, unofficial][S2, unofficial].
+- **When not to use:** Simple bounding-box volumes where the camera is outside [G].
+
+## Background
+The method was developed as an extension of image-based volume ray casting to support viewpoints inside the volume [S1, unofficial][S2, unofficial]. It was presented in the context of advanced illumination techniques for GPU-based volume ray casting [S1, unofficial][S2, unofficial]. The approach builds on earlier work by Scharsach et al. (2006) for handling near clipping plane issues [S1, unofficial][S2, unofficial]. It is particularly relevant for medical visualization, such as virtual colonoscopy, where the camera navigates inside the body [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] GPU-Based Volume Ray-Casting with Advanced Illumination, https://doi.org/10.2312/egt.20091069, fetched 2026-10-26 (unofficial)
+[S2] GPU-Based Volume Ray-Casting with Advanced Illumination, https://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/viscom/2008/advanced_illumination.pdf, fetched 2026-10-29 (unofficial)

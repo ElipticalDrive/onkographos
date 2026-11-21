@@ -1,0 +1,111 @@
+# Index-to-World Clipping Plane Generation
+
+Also called: ijkPlanes to VTK Clipping Planes
+
+## Overview
+This method converts voxel-space index bounds (defined by minimum and maximum coordinates along the $i$, $j$, and $k$ axes) into world-space clipping planes compatible with volume rendering pipelines. It solves the problem of aligning rectangular crop regions with the physical orientation of the volume data, ensuring that clipping boundaries respect the image's spatial transformation. It differs from inverse transformation methods by explicitly constructing plane primitives from index bounds rather than transforming existing world-space geometry.
+
+## How it works
+**Inputs:**
+- `indexToWorld`: A $4 \times 4$ transformation matrix mapping voxel indices to world coordinates [S1, S2, unofficial].
+- `ijkPlanes`: An array of six integers representing the bounding box in index space: `[iMin, iMax, jMin, jMax, kMin, kMax]` [S1, S2, unofficial].
+
+**Outputs:**
+- A collection of six clipping plane objects (e.g., `vtkPlane` instances), each defined by an origin point and a normal vector in world space [S1, S2, unofficial].
+
+**Data Structures:**
+- **Transformation Matrix**: A $4 \times 4$ matrix where the upper-left $3 \times 3$ submatrix contains rotation and scaling, and the fourth column contains translation [S1, S2, unofficial].
+- **Clipping Plane**: Defined by a point $P$ (origin) and a normal vector $\mathbf{n}$ [S1, unofficial].
+
+**Steps:**
+1. **Extract Rotation**: Retrieve the rotation component from the `indexToWorld` matrix. This is typically done by extracting the quaternion $\mathbf{q}$ representing the orientation [S1, S2, unofficial].
+2. **Define Rotation Helper**: Create a function `rotateVec(vec)` that applies the quaternion rotation to a 3D vector: $\mathbf{v}_{rot} = \mathbf{q} \otimes \mathbf{v} \otimes \mathbf{q}^{-1}$ (or using standard quaternion-vector multiplication routines) [S1, S2, unofficial].
+3. **Parse Bounds**: Extract the six integer bounds from the `ijkPlanes` array: $i_{min}, i_{max}, j_{min}, j_{max}, k_{min}, k_{max}$ [S1, S2, unofficial].
+4. **Compute World Corners**:
+   - Calculate the world coordinates for the minimum corner: $C_{min} = \text{indexToWorld}([i_{min}, j_{min}, k_{min}])$ [S2, unofficial].
+   - Calculate the world coordinates for the maximum corner: $C_{max} = \text{indexToWorld}([i_{max}, j_{max}, k_{max}])$ [S2, unofficial].
+   - *Note*: In some implementations, the origin for min-planes is taken directly as $C_{min}$ and for max-planes as $C_{max}$ [S1, S2, unofficial].
+5. **Generate Plane Normals**:
+   - Define the standard basis vectors: $\mathbf{e}_i = [1, 0, 0]$, $\mathbf{e}_j = [0, 1, 0]$, $\mathbf{e}_k = [0, 0, 1]$ [S1, unofficial].
+   - Rotate these vectors using the helper: $\mathbf{n}_i = \text{rotateVec}(\mathbf{e}_i)$, $\mathbf{n}_j = \text{rotateVec}(\mathbf{e}_j)$, $\mathbf{n}_k = \text{rotateVec}(\mathbf{e}_k)$ [S1, S2, unofficial].
+6. **Construct Planes**:
+   - **Min Planes** (X-min, Y-min, Z-min):
+     - Origin: $C_{min}$ [S1, S2, unofficial].
+     - Normal: $-\mathbf{n}_i$, $-\mathbf{n}_j$, $-\mathbf{n}_k$ respectively [S1, unofficial].
+   - **Max Planes** (X-max, Y-max, Z-max):
+     - Origin: $C_{max}$ [S1, S2, unofficial].
+     - Normal: $\mathbf{n}_i$, $\mathbf{n}_j$, $\mathbf{n}_k$ respectively [S1, unofficial].
+7. **Apply to Renderer**: Clear existing clipping planes from the volume mapper and add the newly generated planes [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_clipping_planes(index_to_world_matrix, ijk_planes):
+    # 1. Extract rotation quaternion from the 4x4 matrix
+    # Assuming a standard library function exists for this extraction
+    rotation_quaternion = extract_quaternion_from_matrix(index_to_world_matrix)
+    
+    # 2. Define vector rotation helper
+    def rotate_vec(vec):
+        return transform_quat_vector(rotation_quaternion, vec)
+    
+    # 3. Parse bounds
+    i_min, i_max, j_min, j_max, k_min, k_max = ijk_planes
+    
+    # 4. Compute world corners
+    # index_to_world_matrix is a 4x4 matrix; apply to homogeneous coordinates
+    origin_world = transform_point(index_to_world_matrix, [i_min, j_min, k_min])
+    corner_world = transform_point(index_to_world_matrix, [i_max, j_max, k_max])
+    
+    # 5. Define standard basis vectors
+    e_i = [1, 0, 0]
+    e_j = [0, 1, 0]
+    e_k = [0, 0, 1]
+    
+    # 6. Rotate basis vectors to world space
+    n_i = rotate_vec(e_i)
+    n_j = rotate_vec(e_j)
+    n_k = rotate_vec(e_k)
+    
+    # 7. Construct planes
+    # Min planes use origin_world and negative normals
+    plane_x_min = VTK_Plane(origin=origin_world, normal=[-n_i[0], -n_i[1], -n_i[2]])
+    plane_y_min = VTK_Plane(origin=origin_world, normal=[-n_j[0], -n_j[1], -n_j[2]])
+    plane_z_min = VTK_Plane(origin=origin_world, normal=[-n_k[0], -n_k[1], -n_k[2]])
+    
+    # Max planes use corner_world and positive normals
+    plane_x_max = VTK_Plane(origin=corner_world, normal=[n_i[0], n_i[1], n_i[2]])
+    plane_y_max = VTK_Plane(origin=corner_world, normal=[n_j[0], n_j[1], n_j[2]])
+    plane_z_max = VTK_Plane(origin=corner_world, normal=[n_k[0], n_k[1], n_k[2]])
+    
+    return [plane_x_min, plane_y_min, plane_z_min, plane_x_max, plane_y_max, plane_z_max]
+```
+
+**Parameters:**
+- `ijkPlanes`: Array of 6 integers `[minI, maxI, minJ, maxJ, minK, maxK]` [S2, unofficial].
+- `indexToWorld`: $4 \times 4$ matrix [S1, S2, unofficial].
+
+**Edge Cases:**
+- If the `indexToWorld` matrix includes non-uniform scaling, the normal vectors derived from rotating basis vectors may not be unit length. Normalization of the resulting normals is required for correct clipping behavior [G].
+- Degenerate bounds (e.g., $i_{min} > i_{max}$) should be handled or validated before generation [G].
+
+## Subtopics
+
+### Dynamic Cropping Plane Generation
+This variant generates clipping planes dynamically based on user interaction or changing crop regions. It follows the same core logic but updates the `ijkPlanes` input in real-time. The key distinction is the continuous recalculation of the `indexToWorld` transformation if the volume orientation changes, or the re-evaluation of the crop bounds as the user drags handles. It is chosen when interactive volume exploration requires precise, axis-aligned cropping in world space.
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ for plane generation, as it involves a fixed number of matrix-vector multiplications and plane constructions regardless of volume size.
+- **Memory Complexity**: $O(1)$, storing only six plane objects.
+- **Strengths**: Accurately respects the physical orientation of the volume data; efficient for interactive clipping.
+- **Limitations**: Requires access to the full index-to-world transformation matrix; assumes the clipping region is axis-aligned in index space.
+- **When to use**: When cropping a volume based on voxel indices but needing the clip boundaries to align with the world coordinate system.
+- **When not to use**: When the clipping region is defined in world space directly (use inverse transformation) or when the volume has no spatial transformation (identity matrix).
+
+## Background
+This method is commonly used in web-based volume rendering applications using VTK.js. It bridges the gap between logical voxel indices and physical world coordinates, enabling intuitive cropping interfaces where users define regions in index space but the renderer operates in world space. It is part of the broader set of coordinate transformation techniques used in medical imaging and scientific visualization.
+
+## Sources
+[S1] AbdelrahmanKK/Volume-Rendering-Web-Application-VTK, https://github.com/AbdelrahmanKK/Volume-Rendering-Web-Application-VTK, fetched 2026-10-27 (unofficial)
+[S2] mohammed-abo-arab/3D_WebGL_VolumeRendering, https://github.com/mohammed-abo-arab/3D_WebGL_VolumeRendering, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,122 @@
+# Hierarchical Marching Cubes Enumeration
+
+Also called: Dual Marching Cubes Tree Traversal
+
+## Overview
+Hierarchical Marching Cubes Enumeration is a recursive octree traversal algorithm that extracts manifold isosurface meshes by enumerating voxel faces, edges, and vertices, delegating to a standard Marching Cubes routine only at leaf nodes [S1, unofficial]. It differs from [Marching Cubes with Octree](1259-marching-cubes-with-octree.md) by explicitly separating the traversal logic into specialized functions for faces, edges, and vertices to ensure consistent mesh connectivity across varying tree depths, rather than treating octree nodes as independent voxel containers.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** An octree root node representing a scalar field, an isovalue, and configuration parameters (`grid_width`, `tolerance`, `maximum_depth`, `nominal_weight`) [S1, unofficial].
+*   **Output:** A set of triangles forming the isosurface mesh.
+
+**Data Structures:**
+The tree node structure contains the following fields [S1, unofficial]:
+*   `vector_type minimum_`: Minimum coordinate of the voxel.
+*   `config_type config_`: Configuration flags.
+*   `std::size_t grid_size_`: Grid resolution.
+*   `scalar_type grid_width_`: Physical width of the grid.
+*   `vector<std::size_t, 3> size_`: Dimensions of the voxel.
+*   `std::vector<node_type*> children_`: Pointers to 8 child nodes (if branch).
+*   `std::vector<boost::object_pool<branch_node_type>> branch_pool_`: Memory pool for branch nodes.
+*   `std::vector<boost::object_pool<leaf_node_type>> leaf_pool_`: Memory pool for leaf nodes.
+
+**Algorithm Steps:**
+The algorithm uses three specialized recursive functions: `f_x`, `f_y`, `f_z` for faces; `e_xy`, `e_yz`, `e_xz` for edges; and `v` for vertices. These functions traverse the octree to gather the necessary 8 corner nodes for a voxel.
+
+1.  **Face Enumeration (`f_x`, `f_y`, `f_z`):**
+    *   Takes two tree nodes (representing adjacent voxels sharing a face) and a receiver.
+    *   Checks if either node is a branch. If so, it recurses with mapped child indices to traverse the shared face boundary.
+    *   For `f_x` (x-axis face), the recursion maps children as follows: `(children[2], children[0])`, `(children[3], children[1])`, `(children[6], children[4])`, `(children[7], children[5])` [S1, unofficial].
+    *   If both nodes are leaves, it proceeds to edge enumeration for the four edges of the face.
+
+2.  **Edge Enumeration (`e_xy`, `e_yz`, `e_xz`):**
+    *   Takes four nodes (representing voxels sharing an edge) and a receiver.
+    *   Recurses on specific child index pairs to traverse the edge boundary.
+    *   If any node is a branch, it recurses deeper.
+    *   If all four nodes are leaves, it calls the vertex enumeration function `v` with the eight corner nodes of the voxel defined by the edge and the face context.
+
+3.  **Vertex Enumeration (`v`):**
+    *   Takes eight nodes (the 8 corners of a voxel).
+    *   Checks if any node is a branch. If so, it recurses with child indices `[7, 6, 5, 4, 3, 2, 1, 0]` [S1, unofficial].
+    *   If all eight nodes are leaves, it extracts vertex pointers and calls the standard `marching_cubes` routine [S1, unofficial].
+    *   The `marching_cubes` routine computes the cube index $C$ based on the sign of $(v_j - \text{iso})$ for each corner $j$ and generates triangles using the lookup table.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def traverse_face(node_a, node_b, receiver):
+    # Handle mismatched tree depths or boundary conditions
+    # If child does not exist, fall back to current node
+    child_a = node_a.children[2] if node_a.is_branch() else node_a
+    child_b = node_b.children[0] if node_b.is_branch() else node_b
+    # Recurse for first pair
+    traverse_face(child_a, child_b, receiver)
+    
+    child_a = node_a.children[3] if node_a.is_branch() else node_a
+    child_b = node_b.children[1] if node_b.is_branch() else node_b
+    traverse_face(child_a, child_b, receiver)
+    
+    child_a = node_a.children[6] if node_a.is_branch() else node_a
+    child_b = node_b.children[4] if node_b.is_branch() else node_b
+    traverse_face(child_a, child_b, receiver)
+    
+    child_a = node_a.children[7] if node_a.is_branch() else node_a
+    child_b = node_b.children[5] if node_b.is_branch() else node_b
+    traverse_face(child_a, child_b, receiver)
+
+def traverse_edge(node_a, node_b, node_c, node_d, receiver):
+    # Recurse on specific child index pairs for edge traversal
+    # ... (implementation details for e_xy, e_yz, e_xz vary by axis)
+    # If all are leaves, call vertex enumeration
+    if not any(n.is_branch() for n in [node_a, node_b, node_c, node_d]):
+        traverse_vertex(node_a, node_b, node_c, node_d, receiver)
+
+def traverse_vertex(node_0, node_1, node_2, node_3, node_4, node_5, node_6, node_7, receiver):
+    # Check if any node is a branch
+    if any(n.is_branch() for n in [node_0, node_1, node_2, node_3, node_4, node_5, node_6, node_7]):
+        # Recurse with child indices [7, 6, 5, 4, 3, 2, 1, 0]
+        # Note: The order [7,6,5,4,3,2,1,0] corresponds to the specific bit ordering
+        # used in the source implementation for consistent cube index calculation.
+        children = [n.children for n in [node_0, node_1, node_2, node_3, node_4, node_5, node_6, node_7]]
+        # Construct new nodes from children in reverse order
+        new_nodes = [
+            children[0][7] if children[0][0].is_branch() else children[0][0],
+            children[1][6] if children[1][0].is_branch() else children[1][0],
+            children[2][5] if children[2][0].is_branch() else children[2][0],
+            children[3][4] if children[3][0].is_branch() else children[3][0],
+            children[4][3] if children[4][0].is_branch() else children[4][0],
+            children[5][2] if children[5][0].is_branch() else children[5][0],
+            children[6][1] if children[6][0].is_branch() else children[6][0],
+            children[7][0] if children[7][0].is_branch() else children[7][0]
+        ]
+        traverse_vertex(*new_nodes, receiver)
+    else:
+        # All leaves: extract vertex pointers and call marching_cubes
+        vertices = [n.get_vertex() for n in [node_0, node_1, node_2, node_3, node_4, node_5, node_6, node_7]]
+        receiver.add_triangles(marching_cubes(vertices))
+```
+
+**Parameters:**
+*   `grid_width`: Default 1.0 [S1, unofficial].
+*   `tolerance`: Default 0.1 [S1, unofficial].
+*   `maximum_depth`: Default `max(std::size_t)` [S1, unofficial].
+*   `nominal_weight`: Default 0.1 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Mismatched Tree Depths:** The algorithm handles nodes at different depths by using a ternary fallback: `b1 ? *b1->children()[i] : n1`. If a child does not exist (because the sibling tree is shallower), it uses the current node `n1` [S1, unofficial].
+*   **Boundary Conditions:** Similar fallback logic applies at the boundaries of the volume to prevent out-of-bounds access.
+
+## Operating characteristics
+*   **Time Complexity:** Proportional to the number of active leaf nodes intersecting the isosurface. The recursive traversal ensures that only necessary nodes are visited.
+*   **Memory Complexity:** Depends on the octree depth and the number of branch nodes. The use of `boost::object_pool` helps manage memory efficiently for branch and leaf nodes.
+*   **Strengths:** Ensures watertight mesh connectivity across varying octree resolutions by explicitly handling face and edge traversals.
+*   **Limitations:** Implementation complexity is higher than simple voxel-based Marching Cubes due to the need for specialized traversal functions.
+*   **When to use:** When extracting isosurfaces from adaptive octrees where resolution varies significantly across the volume.
+
+## Background
+The method originates from the `planaria/dmc` repository, an unofficial implementation of Dual Marching Cubes [S1, unofficial]. It is designed to work with hierarchical data structures, specifically octrees, to optimize the extraction process.
+
+## Sources
+[S1] planaria/dmc, https://github.com/planaria/dmc, fetched 2026-10-26 (unofficial)

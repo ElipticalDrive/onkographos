@@ -1,0 +1,132 @@
+# Occlusion-Aware Masking
+
+Also called: Depth-based Visibility Mask Generation, Invisible Mask Computation, Invisible Region Detection via Depth Warping
+
+## Overview
+Occlusion-Aware Masking generates a consistency mask $M_l$ to identify and ignore pixels with geometric inconsistencies, such as artifacts or self-occlusion, during feature-level regularization in NeRF training [S1, unofficial]. It distinguishes itself from sibling methods by explicitly comparing rendered depth maps between a target view and a source view to detect warping errors, rather than relying solely on photometric color differences or optical flow consistency [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Rendered depth map of the target (unseen) view $D_j$, rendered depth map of the source (seen) view $D_i$, camera intrinsics $K$, relative rotation $R_{j \to i}$ between views, and a depth threshold $\tau$.
+*   **Outputs:** A binary consistency mask $M_l$ aligned with the dimensions of the $l$-th layer feature map.
+
+**Data Structures:**
+*   $D_j, D_i$: 2D arrays of floating-point depth values, size $H \times W$.
+*   $M_l$: 2D binary array (0 or 1), size $H_l \times W_l$, where $H_l, W_l$ are the spatial dimensions of the feature map at layer $l$.
+
+**Steps:**
+1.  **Reprojection:** For each pixel $p_j$ in the target view image $I_j$, compute its corresponding coordinate $p_{j \to i}$ in the source view image $I_i$. This is done by transforming the 3D point defined by $D_j(p_j)$ back to the source camera frame using $R_{j \to i}$ and $K$, then projecting it [S1, unofficial]. The coordinate is calculated as:
+    $$ p_{j \to i} \sim K R_{j \to i} D_j(p_j) K^{-1} p_j $$
+    where $\sim$ indicates approximate equality due to continuous coordinate values [S1, unofficial].
+2.  **Depth Sampling:** Sample the depth value $D_i(p_{j \to i})$ from the source depth map at the reprojected coordinate $p_{j \to i}$ using a differentiable sampler [S1, unofficial].
+3.  **Mask Generation:** Compute the binary mask $M(p_j)$ for each pixel in the target view by comparing the depth difference against the threshold $\tau$:
+    $$ M(p_j) = [ || D_j(p_j) - D_i(p_{j \to i}) || < \tau ] $$
+    where $[\cdot]$ is the Iverson bracket (1 if true, 0 if false) [S1, unofficial]. If the distance between the two depth points exceeds $\tau$, the rays are considered to render separate surfaces (occlusion or artifact), and the pixel is masked out [S1, unofficial].
+4.  **Resizing:** Apply nearest-neighbor downsampling to the generated mask $M$ to match the spatial dimensions of the $l$-th layer feature map outputs, resulting in $M_l$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_occlusion_mask(D_j, D_i, K, R_j_to_i, tau):
+    """
+    Generate occlusion-aware mask by comparing depth maps.
+    
+    Args:
+        D_j: Depth map of target view (H, W)
+        D_i: Depth map of source view (H, W)
+        K: Camera intrinsic matrix (3, 3)
+        R_j_to_i: Rotation matrix from target to source view (3, 3)
+        tau: Depth difference threshold
+        
+    Returns:
+        M: Binary mask (H, W)
+    """
+    H, W = D_j.shape
+    M = np.zeros((H, W), dtype=float)
+    
+    # Precompute inverse intrinsic for projection
+    K_inv = np.linalg.inv(K)
+    
+    for j in range(H):
+        for i in range(W):
+            # 1. Get 3D point in target camera frame
+            # Assuming homogeneous coordinates for p_j
+            p_j_hom = np.array([i, j, 1.0])
+            depth_val = D_j[j, i]
+            
+            # 2. Project to 3D in target frame
+            # x = K_inv * [u, v, 1] * depth
+            pt3d_target = K_inv @ p_j_hom * depth_val
+            
+            # 3. Transform to source camera frame
+            pt3d_source = R_j_to_i @ pt3d_target
+            
+            # 4. Project to source image plane
+            p_i_hom = K @ pt3d_source
+            p_i_hom = p_i_hom / p_i_hom[2] # Normalize by z
+            
+            u_i, v_i = p_i_hom[0], p_i_hom[1]
+            
+            # 5. Check bounds and sample depth
+            # Note: In practice, use bilinear/nearest sampling for continuous coords
+            if 0 <= u_i < W and 0 <= v_i < H:
+                # Sample D_i at (u_i, v_i)
+                # Using nearest neighbor for simplicity in this basic implementation
+                # [G] In production, use a differentiable sampler as noted in [S1, unofficial]
+                d_i_sample = D_i[int(round(v_i)), int(round(u_i))]
+                
+                # 6. Compare depths
+                diff = abs(D_j[j, i] - d_i_sample)
+                if diff < tau:
+                    M[j, i] = 1.0
+                else:
+                    M[j, i] = 0.0
+            else:
+                M[j, i] = 0.0
+                
+    return M
+
+def apply_mask_to_features(M, feature_map_l):
+    """
+    Resize mask and apply to feature map.
+    
+    Args:
+        M: Binary mask (H, W)
+        feature_map_l: Feature map at layer l (H_l, W_l, C_l)
+        
+    Returns:
+        M_l: Resized mask (H_l, W_l)
+    """
+    H_l, W_l = feature_map_l.shape[0], feature_map_l.shape[1]
+    # Nearest-neighbor downsampling
+    M_l = resize_nearest_neighbor(M, (H_l, W_l))
+    return M_l
+```
+
+**Parameters:**
+*   $\tau$: Threshold determining if two rays render depths of separate surfaces. If the distance between depth points is greater than $\tau$, the pixel is masked out [S1, unofficial]. Value not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Continuous Coordinates:** The reprojected coordinate $p_{j \to i}$ is a continuous value. A differentiable sampler is required to extract color/depth values accurately [S1, unofficial].
+*   **Boundary Conditions:** Pixels reprojected outside the source image bounds should be masked out (set to 0) [S1, unofficial][S2].
+*   **Precision:** Depth values must be rendered consistently between views to ensure valid comparison [S1, unofficial].
+
+## Subtopics
+
+### Optical Flow Masking
+A process to distinguish between valid and invalid optical flow areas to handle occlusion and lighting errors [S2]. It computes forward and backward optical flow coordinates, calculates the absolute difference between the predicted flow point and the target ground-truth image, and sets the mask to 1 if the difference is below a threshold $\theta$ and the point is within image bounds, else 0 [S2]. Parameter $\theta$ is the threshold between optical flow prediction and ground truth [S2].
+
+## Operating characteristics
+*   **Time Complexity:** $O(H \times W)$ per view pair for mask generation, where $H, W$ are image dimensions.
+*   **Memory Complexity:** $O(H \times W)$ for storing the depth maps and the mask.
+*   **Strengths:** Prevents imperfect and distorted warpings caused by erroneous geometry from influencing the model, degrading reconstruction quality [S1, unofficial]. Specifically handles artifacts and self-occlusion [S1, unofficial].
+*   **Limitations:** Requires accurate depth rendering from both views. Performance depends heavily on the choice of threshold $\tau$ [S1, unofficial].
+*   **When to use:** When training NeRFs with few shots or in scenes with significant occlusions and geometric artifacts [S1, unofficial].
+
+## Background
+Originated in GeCoNeRF (Geometric Consistency NeRF) for few-shot neural radiance fields [S1, unofficial]. The method addresses the issue of geometric inconsistencies in feature-level regularization by constructing a consistency mask $M_l$ [S1, unofficial].
+
+## Sources
+[S1] GeCoNeRF: Few-Shot Neural Radiance Fields via Geometric Consistency, https://core.ac.uk/works/309257742, fetched 2026-11-01 (unofficial)
+[S2] Bidirectional Optical Flow NeRF: High Accuracy and High Quality under Fewer Views, https://doi.org/10.1609/aaai.v37i1.25109, fetched 2026-10-29

@@ -1,0 +1,209 @@
+# ISMOS
+
+Also called: Approximate Image-Space Multidirectional Occlusion Shading Model
+
+## Overview
+ISMOS is a post-processing shading model for direct volume ray casting that simulates multidirectional lighting, shadows, and ambient occlusion within transparent volumes [S1]. It distinguishes itself from standard local illumination by providing depth cues through hard shadows and occlusion effects, while differing from deep shadow maps by computing occlusion in image space rather than via projection [S1]. The method handles opaque and transparent medium occlusion separately using full and partial occlusion techniques, blending shading from multiple layers to produce realistic results without requiring preprocessing [S1].
+
+## How it works
+ISMOS operates as a decoupled post-processing pass applied to the output of a direct volume ray casting renderer [S1]. It does not modify the ray casting integration itself but enhances the resulting image with lighting information derived from the volume's geometry and opacity [S1].
+
+### Inputs and Outputs
+**Inputs:**
+1.  **Color Buffer:** A floating-point texture containing the RGB color values computed by the volume ray caster [S1].
+2.  **Depth Texture:** A floating-point texture containing depth information. The layout depends on the rendering mode:
+    *   **Non-transparent rendering:** 1 component (depth only) [S1].
+    *   **Transparent object occlusion or multiple layer rendering:** 4 components (depth and auxiliary data for layer management) [S1].
+3.  **Light Parameters:** Position, direction, and intensity of light sources [S1].
+4.  **Opacity Approximation Parameter ($\beta$):** A scalar value stored within the color buffer (or an associated channel) used to estimate opacity at arbitrary depths [S1].
+
+**Outputs:**
+*   **Shaded Image:** A final image with applied shadows, ambient occlusion, and directional lighting effects [S1].
+
+### Data Structures
+*   **Color Buffer:** Stores RGB color data and the parameter $\beta$. The inclusion of $\beta$ eliminates the need for a separate opacity buffer [S1].
+*   **Depth Texture:**
+    *   Single-component format for opaque scenes.
+    *   Four-component format for transparent/multi-layer scenes. The specific content of the four components is not detailed beyond "depth texture" and "layer rendering" support, but it enables the handling of transparent object occlusion [S1].
+
+### Algorithm Steps
+1.  **Render Volume:** Perform standard direct volume ray casting to generate the initial color and depth buffers [S1].
+2.  **Compute Approximated Opacity:** For each pixel, retrieve the approximated opacity value using the parameter $\beta$ stored in the color buffer. This allows the model to estimate opacity at any depth $z$ without storing a dedicated opacity texture [S1].
+3.  **Sample Light Directions:** To simulate multidirectional lighting, generate light samples by rotating points on a disk.
+    *   Define a disk with radius $r$, centered at $(R + 0.5, 0.5, 0.0)$ in local sample space [S1].
+    *   Rotate the samples by an angle $\phi$ about the y-axis ($R_y(\phi)$).
+    *   Rotate the samples by an angle $\theta$ about the z-axis ($R_z(\theta)$) [S1].
+4.  **Calculate Occlusion:**
+    *   **Full Occlusion:** Used for opaque media. Determines if light is blocked by the volume geometry [S1].
+    *   **Partial Occlusion:** Used for transparent media. Accounts for the attenuation of light through transparent layers [S1].
+    *   The model distinguishes between opaque and transparent medium occlusion, handling them separately [S1].
+5.  **Blend Shading:** Combine the occlusion shading from multiple layers (if present) and blend it with the original volume color to produce the final shaded image [S1].
+
+### Formulas
+The rotation of light samples is defined by the combined rotation matrix $R_z(\theta) R_y(\phi)$ [S1]:
+
+$$
+R_z(\theta) R_y(\phi) = \begin{pmatrix} \cos(\theta)\cos(\phi) & -\sin(\theta) & \cos(\theta)\sin(\phi) \\ \sin(\theta)\cos(\phi) & \cos(\theta) & \sin(\theta)\sin(\phi) \\ -\sin(\phi) & 0 & \cos(\phi) \end{pmatrix}
+$$
+
+Where:
+*   $0 \le \theta \le 2\pi$
+*   $0 \le \phi \le \pi$ [S1]
+
+The approximated opacity is computed using the parameter $\beta$. The exact functional form $f(\beta, z)$ is not provided in the sources, only that it is stored in the color buffer and used to compute opacity at any depth $z$ [S1].
+
+### Parameters
+*   **$\beta$:** Parameter for approximated opacity. Value: Not specified in the sources [S1].
+*   **$r$:** Radius of the disk on which light samples are placed. Value: Not specified in the sources [S1].
+*   **$R$:** Offset added to the x-coordinate of the disk center. Value: Not specified in the sources [S1] [G: Typically $R$ might be related to the number of samples or a scaling factor, but the source does not define it].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ismos_shading(color_buffer, depth_texture, light_sources, beta_param):
+    """
+    Applies ISMOS shading to a volume rendered image.
+    
+    Args:
+        color_buffer: 2D array of floats (RGB + beta) from volume ray casting.
+        depth_texture: 2D array of floats (1 or 4 components) from volume ray casting.
+        light_sources: List of light source definitions (position, direction, intensity).
+        beta_param: Scalar value for opacity approximation.
+        
+    Returns:
+        shaded_image: 2D array of floats (RGB).
+    """
+    height, width = color_buffer.shape[:2]
+    shaded_image = np.zeros((height, width, 3))
+    
+    # Precompute rotation matrices for light sampling
+    # Note: The number of samples and specific disk radius r are not defined in sources.
+    # We assume a fixed set of angles theta and phi for demonstration.
+    num_samples = 6 # Example value, not from source
+    thetas = np.linspace(0, 2 * np.pi, num_samples, endpoint=False)
+    phis = np.linspace(0, np.pi, num_samples, endpoint=False)
+    
+    for y in range(height):
+        for x in range(width):
+            # 1. Retrieve base color and beta
+            base_color = color_buffer[y, x, :3]
+            beta = color_buffer[y, x, 3]
+            
+            # 2. Compute approximated opacity
+            # Exact formula for opacity from beta is not provided in sources [S1]
+            # [G] Placeholder for opacity calculation logic
+            opacity = compute_approximated_opacity(beta, depth_texture[y, x])
+            
+            # 3. Initialize lighting contribution
+            final_color = base_color
+            
+            for light in light_sources:
+                light_contribution = np.zeros(3)
+                
+                # 4. Sample light directions using rotation
+                for theta in thetas:
+                    for phi in phis:
+                        # Construct rotation matrix
+                        cos_t = np.cos(theta)
+                        sin_t = np.sin(theta)
+                        cos_p = np.cos(phi)
+                        sin_p = np.sin(phi)
+                        
+                        rot_matrix = np.array([
+                            [cos_t * cos_p, -sin_t, cos_t * sin_p],
+                            [sin_t * cos_p, cos_t, sin_t * sin_p],
+                            [-sin_p, 0, cos_p]
+                        ])
+                        
+                        # Define sample point on disk
+                        # Center at (R + 0.5, 0.5, 0.0)
+                        # [G] R and r values are not specified. Using placeholders.
+                        R_offset = 0.0 # Not specified
+                        disk_radius = 0.0 # Not specified
+                        
+                        # Sample on disk (simplified 2D disk in xy plane before rotation)
+                        # [G] The source describes rotating samples on a disk. 
+                        # The exact 2D coordinates on the disk are not specified.
+                        # Assuming a uniform distribution or fixed points for demonstration.
+                        sample_local = np.array([disk_radius, 0.0, 0.0]) 
+                        
+                        # Rotate sample
+                        sample_rotated = rot_matrix @ sample_local
+                        
+                        # Transform to world/view space relative to light
+                        # [G] The exact mapping from rotated sample to light direction 
+                        # is not detailed. Assuming sample_rotated contributes to light direction.
+                        light_dir = normalize(light.direction + sample_rotated)
+                        
+                        # 5. Check occlusion
+                        # Determine if the path to the light is blocked
+                        # Full occlusion for opaque, partial for transparent
+                        is_occluded = check_occlusion(x, y, light_dir, depth_texture, opacity)
+                        
+                        if not is_occluded:
+                            light_contribution += light.intensity * light.color
+                
+                # 6. Blend shading
+                # [G] Specific blending function (e.g., additive, multiplicative) 
+                # is not detailed. Assuming simple addition for shading model.
+                final_color += light_contribution
+            
+            shaded_image[y, x] = final_color
+            
+    return shaded_image
+
+def compute_approximated_opacity(beta, depth_value):
+    """
+    Computes opacity using beta parameter.
+    Note: The exact formula is not provided in the sources.
+    """
+    # [G] Placeholder implementation
+    return beta
+
+def check_occlusion(x, y, light_dir, depth_texture, opacity):
+    """
+    Checks if the pixel is occluded from the light.
+    Uses full occlusion for opaque media and partial for transparent.
+    Note: The specific ray marching or depth comparison logic is not detailed 
+    in the sources beyond "image-space multidirectional occlusion".
+    """
+    # [G] Placeholder for occlusion check logic
+    return False
+```
+
+### Edge Cases and Pitfalls
+*   **Indirect Lighting:** The model does not support indirect lighting (global illumination) because it is not interpreted within the shading model [S1].
+    *   *Mitigation:* The model can be extended by adding more buffers to store more precise transmittance for enclosed volumes with partially opaque objects [S1].
+*   **Transparent Layers:** Handling transparent object occlusion requires a 4-component depth texture. Failure to use the correct depth texture format will result in incorrect occlusion for transparent layers [S1].
+*   **Performance:** The overhead is constant for a fixed viewport size but increases with the number of light sources [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The performance overhead is constant for a fixed viewport size. It scales with the number of light sources, but the difference is fairly small [S1].
+*   **Memory Complexity:** Requires storage for color buffer, depth texture (1 or 4 components), and the $\beta$ parameter (stored in color buffer). No additional opacity buffer is required [S1].
+*   **Measured Performance:**
+    *   Hardware: Xeon CPU 2.66 GHz, NVidia GeForce GTX 295 [S1].
+    *   Viewport: 580 × 580 [S1].
+    *   Overhead:
+        *   Full occlusion with 1 light: 13.8 ms average [S1].
+        *   Full occlusion with 2 lights: 25.6 ms average [S1].
+        *   Difference between full and partial occlusion: ~11.4 ms [S1].
+        *   Opacity approximation overhead: ~15.9 ms [S1].
+    *   FPS: Ranges from 5.1 to 23.3 depending on the method and dataset [S1].
+*   **Strengths:**
+    *   Provides shadow and ambient occlusion effects that supply additional depth cues compared to simple local illumination [S1].
+    *   Decoupled from the rendering pass, making it applicable to any rendering system [S1].
+    *   Does not require preprocessing [S1].
+    *   Transfer function and light position can be changed interactively [S1].
+    *   Hard shadows are almost identical to deep shadow maps [S1].
+*   **Limitations:**
+    *   No indirect lighting support [S1].
+    *   Performance on volume rendering itself may not be faster than highly optimized renderers, as the focus is on the shading overhead [S1].
+*   **When to Use:** When depth cues from shadows and ambient occlusion are needed in direct volume rendering, and interactive light position changes are required, without the overhead of shadow map projection or preprocessing [S1].
+*   **When Not to Use:** When indirect lighting (global illumination) is required [S1].
+
+## Background
+ISMOS was introduced by Y. J. and S. K. in a 2021 paper titled "Approximate Image-Space Multidirectional Occlusion Shading Model for Direct Volume Rendering" [S1]. The work was supported by the Basic Research Program [S1]. The model was tested on various datasets including Engine, Teddy bear, Head, Abdomen, Carp, and Stag beetle [S1]. It was compared against deep shadow maps and image-space horizon-based ambient occlusion [S1].
+
+## Sources
+[S1] Approximate Image-Space Multidirectional Occlusion Shading Model for Direct Volume Rendering, https://doi.org/10.3390/app11125717, fetched 2026-10-26

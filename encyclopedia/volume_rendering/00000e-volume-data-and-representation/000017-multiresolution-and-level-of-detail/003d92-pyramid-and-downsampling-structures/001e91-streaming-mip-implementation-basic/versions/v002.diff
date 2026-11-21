@@ -1,0 +1,108 @@
+--- v001.md
++++ v002.md
+@@ -8,8 +8,8 @@
+ ## How it works
+ **Inputs:** A morphological pyramid of detail coefficients $\{d_j(x, y, z)\}$, sorted by error contribution (L1-error reduction) [S1].
+-**Outputs:** A 2D frame buffer image representing the MIP.
++**Outputs:** A 2D frame buffer image representing the MIP [S1].
+ 
+ **Data Structures:**
+-The implementation requires storing detail coefficients with specific attributes to support the projection logic. Each voxel (coefficient) is stored with:
++The implementation requires storing detail coefficients with specific attributes to support the projection logic [S1]. Each voxel (coefficient) is stored with:
+ 1.  **Position:** 4 bytes. The pyramid level $j$ is encoded into two bits of the position attribute [S1].
+ 2.  **Intensity:** 2 bytes (short), storing the coefficient value [S1].
+@@ -20,7 +20,7 @@
+ 2.  **Iteration:** Iterate through the sorted list of detail coefficients $\{d_j\}$ [S1].
+ 3.  **Projection Condition:** For each coefficient $k$ with value $val$ and pyramid level $j$, determine the projection point $(x, y)$ [S1].
+-4.  **Local Dilation:** Define a neighborhood around the projection point based on the level $j$. The dilation size is $j \cdot \tilde{A}$, where $\tilde{A}$ is the structuring element used in the pyramid synthesis [S1]. For a square $2 \times 2$ structuring element, the dilation radius/size corresponds to point sizes of 1, 2, and 4 for levels 0, 1, and 2 respectively [S1].
++4.  **Local Dilation:** Define a neighborhood around the projection point based on the level $j$ [S1]. The dilation size is $j \cdot \tilde{A}$, where $\tilde{A}$ is the structuring element used in the pyramid synthesis [S1]. For a square $2 \times 2$ structuring element, the point size corresponds to 1, 2, and 4 for levels 0, 1, and 2 respectively [S1].
+ 5.  **Update:** For all pixels in the dilated neighborhood:
+-    *   Let $curval$ be the current value in the frame buffer at that pixel.
++    *   Let $curval$ be the current value in the frame buffer at that pixel [S1].
+     *   If $curval < val$, overwrite $curval$ with $val$ [S1].
+ 6.  **Termination:** Stop when a pre-defined maximum number of coefficients has been projected or the desired accuracy threshold is met [S1].
+@@ -33,56 +33,32 @@
+ **Parameters:**
+ *   **Structuring Element $\tilde{A}$:** Typically a square $2 \times 2$ block [S1].
+-*   **Point Size:** Mapped to the hardware vertex program's `PSIZE` semantic. For level $j$, the point size scales with $j$ [S1].
++*   **Point Size:** Mapped to the hardware vertex program's `PSIZE` semantic [S1]. For level $j$, the point size scales with $j$ [S1].
+ *   **Sorting Criterion:** Coefficients are sorted by the reduction in L1-error between the partial reconstruction and the original data [S1].
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Global Dilation Invalid:** Global dilation cannot be used because the scale index (pyramid level) varies per coefficient, unlike level-by-level projection where the scale is constant for all coefficients in a level [S1].
+-*   **Ordering Loss:** Because coefficients are projected by error rather than intensity, voxels are no longer ordered by intensity in the rendering stream. This necessitates using the maximum operator for frame buffer writes, which may cause performance loss compared to alpha-blending or simple overwriting, although the impact is mitigated by the small size of the blended primitives [S1].
++*   **Ordering Loss:** Because coefficients are projected by error rather than intensity, voxels are no longer ordered by intensity in the rendering stream [S1]. This necessitates using the maximum operator for frame buffer writes, which may cause performance loss compared to alpha-blending or simple overwriting, although the impact is mitigated by the small size of the blended primitives [S1].
+ *   **Holes:** For non-axis-aligned parallel projections, the voxel-based method may yield pixel-sized holes in the result [S1]. This is typically addressed in a post-processing step using morphological closing with the structuring element $\tilde{A}$ [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def streaming_mip_basic(coefficients, frame_buffer, structuring_element_size=2):
++def streaming_mip_basic(coefficients, frame_buffer, width, height, structuring_element_size=2):
+     """
+     coefficients: List of tuples (level, x, y, z, value), sorted by error contribution.
+     frame_buffer: 2D array initialized to min_value.
++    width, height: Frame buffer dimensions.
+     structuring_element_size: Size of the base structuring element (e.g., 2 for 2x2).
+     """
+-    for coeff in coefficients:
+-        level, x, y, z, val = coeff
++    for level, x, y, z, val in coefficients:
++        # Dilation size matches the explicit example: 1, 2, 4 for levels 0, 1, 2 with a 2x2 element
++        dilation_size = 2 ** level
++        half = dilation_size // 2
+         
+-        # Determine dilation radius based on level and structuring element
+-        # For a 2x2 element, level 0 -> size 1, level 1 -> size 2, level 2 -> size 4
+-        # The "size" here refers to the extent of the neighborhood to check/update.
+-        # A common interpretation for dilation size j with base size S is radius proportional to j*S.
+-        # Based on S1: "point size will be 1, 2 and 4 at level 0, 1 and 2" for 2x2 element.
+-        # This implies the dilation radius or diameter scales linearly.
+-        # Let's assume the neighborhood is a square of side length `dilation_size`.
+-        
+-        dilation_size = (level + 1) * (structuring_element_size // 2) 
+-        # Note: S1 says point size 1, 2, 4 for levels 0, 1, 2. 
+-        # This looks like 2^level * base? No, 1, 2, 4 is 2^0, 2^1, 2^2.
+-        # But it also says "scaled neighborhood j * A~". 
+-        # If A~ is 2x2, j=1 -> 2x2, j=2 -> 4x4. 
+-        # Let's stick to the explicit example: size = 2^level * (base_size/2)? 
+-        # Actually, S1 says: "point size will be 1, 2 and 4 at level 0, 1 and 2".
+-        # This suggests the radius or half-width might be 2^level? Or the diameter?
+-        # If point size is the diameter, radius is 0.5, 1, 2.
+-        # Let's implement the neighborhood as a square centered at (x,y) with side `dilation_size`.
+-        
+-        dilation_size = 2 ** level * (structuring_element_size // 2)
+-        if dilation_size < 1:
+-            dilation_size = 1
+-            
+-        half_size = dilation_size // 2
+-        
+-        # Iterate over the dilated neighborhood
+-        for dy in range(-half_size, half_size + 1):
+-            for dx in range(-half_size, half_size + 1):
++        for dy in range(-half, half + 1):
++            for dx in range(-half, half + 1):
+                 px = x + dx
+                 py = y + dy
+                 
+-                # Check bounds
+-                if 0 <= px < frame_buffer.width and 0 <= py < frame_buffer.height:
++                if 0 <= px < width and 0 <= py < height:
+                     if frame_buffer[py, px] < val:
+                         frame_buffer[py, px] = val
+@@ -100,9 +76,9 @@
+ This technique reduces per-intersection cost by precomputing MIP-filtered weights using the inverse covariance matrix of the surfel's tangent frame [S3, unofficial]. The weight $w$ is calculated as $w = n_f \cdot \exp(-0.5 \cdot \rho_{\text{mip}}^2)$, where $\rho_{\text{mip}}^2 = \Sigma_{uu}^{-1} u^2 + 2 \Sigma_{uv}^{-1} uv + \Sigma_{vv}^{-1} v^2$ [S3, unofficial]. This avoids per-pixel Jacobian evaluation without visual loss in filtering quality [S3, unofficial].
+ 
+-### Block Inspection (Streamed)
+-This approach involves opening a second streamed volume over the same store, cropped to the picked brick's common-grid box, allowing the octree to pull the crop toward level 0 [S4, unofficial]. It fixes issues where `extractSubVolume` returns null for streamed volumes by falling back to a specific sampler backed by the coarse floor, ensuring correct picking behavior [S4, unofficial].
++### [Block Inspection (Streamed)](6010-block-inspection-streamed.md)
++Streamed volume block inspection by opening a second streamed volume over the same store, cropped to picked brick's common-grid box, letting octree pull crop toward level 0 [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of coefficients projected. In the worst case, all coefficients are projected, but early termination allows for $O(k)$ where $k$ is the number of coefficients needed for the desired accuracy [S1].
++*   **Time Complexity:** Depends on the number of coefficients projected [S1]. In the worst case, all coefficients are projected, but early termination allows for $O(k)$ where $k$ is the number of coefficients needed for the desired accuracy [S1].
+ *   **Memory Complexity:** 6 bytes per voxel for the basic implementation (4 bytes position + 2 bytes intensity) [S1]. The optimized variant uses 4 bytes per voxel [S1].
+ *   **Performance:** The basic implementation suffers from some performance loss due to the need for maximum operator writes to the frame buffer, as voxels are not ordered by intensity [S1]. However, the impact is limited because the blended primitives (dilated points) are small [S1]. The optimized variant eliminates this bottleneck [S1].
+@@ -117,3 +93,3 @@
+ [S2] Ray-Guided Streaming for Efficient and Detailed Voxel Rendering, https://www-sop.inria.fr/reves/Basilic/2009/CNLE09/CNLE09.pdf, fetched 2026-10-26 (unofficial)
+ [S3] 3DSS: 3D Surface Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2605.05876, fetched 2026-10-26 (unofficial)
+-[S4] feat(niivue): streamed multi-LOD rendering fixes, LOD compensation, budget plans, and block inspection, https://github.com/niivue/mono/pull/138, fetched 2026-10-27 (unofficial)+[S4] feat(niivue): streamed multi-LOD rendering fixes, LOD compensation, budget plans, and block inspection, https://github.com/niivue/mono/pull/138, fetched 2026-10-27

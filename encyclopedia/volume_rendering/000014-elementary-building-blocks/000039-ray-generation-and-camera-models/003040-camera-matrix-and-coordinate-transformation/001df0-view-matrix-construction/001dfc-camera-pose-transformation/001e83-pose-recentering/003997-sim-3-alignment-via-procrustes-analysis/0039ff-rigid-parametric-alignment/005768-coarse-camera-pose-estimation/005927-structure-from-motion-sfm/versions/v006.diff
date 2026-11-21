@@ -1,0 +1,260 @@
+--- v005.md
++++ v006.md
+@@ -1,150 +1,161 @@
+ # Structure-from-Motion (SfM)
+ 
+-Also called: COLMAP SfM, Camera Pose Estimation using SfM, HLOC SfM, LocalRF SfM
+ 
+ ## Overview
+-Structure-from-Motion (SfM) is a photogrammetric technique that recovers camera poses (extrinsics), camera calibration parameters (intrinsics), and a sparse 3D point cloud from a set of uncalibrated photographs [S2, unofficial]. It serves as the foundational preprocessing step for modern implicit and explicit radiance field methods, such as NeRF and Gaussian Splatting, by providing the necessary geometric constraints (camera positions) required to optimize scene representations against source images [S1][S2, unofficial]. Unlike its siblings in the camera pose estimation hierarchy, SfM operates globally on a set of images to establish a consistent coordinate system, whereas methods like [Coarse Camera Pose Estimation](15954-coarse-camera-pose-estimation.md) may rely on sequential or local assumptions.
++Structure-from-Motion (SfM) is a sparse reconstruction technique that estimates camera poses (extrinsics), camera calibration (intrinsics), and a sparse 3D point cloud from a set of uncalibrated photographs [S3, unofficial]. It serves as the foundational "load-bearing" preprocessing step for modern implicit and explicit radiance field methods (such as NeRF and Gaussian Splatting), providing the known camera positions required to optimize scene representations against source images [S3, unofficial]. Unlike general alignment methods that rely on semantic features or local priors, SfM anchors the coordinate system to the geometric consistency of the scene itself [S1, S2].
+ 
+ ## How it works
+-**Inputs:** A set of $N$ unordered images $\{I_1, \dots, I_N\}$, optionally with EXIF metadata.
+-**Outputs:** Camera poses $P_i \in \mathbb{R}^{3 \times 4}$ (rotation $R_i$ and translation $t_i$), intrinsic parameters $K$ (focal length, principal point, distortion), and a sparse 3D point cloud $\{X_j\}$.
++The method reconstructs the scene incrementally by recovering the relative and absolute geometry of cameras and 3D points.
+ 
+-**Data Structures:**
+-1.  **Keypoints:** For each image $i$, a list of detected features. Each feature $k$ contains:
+-    *   `x, y`: 2D coordinates in pixels.
+-    *   `scale`: Detection scale.
+-    *   `orientation`: Angle in radians.
+-    *   `descriptor`: A vector (e.g., 128-dim for SIFT) summarizing local texture.
+-2.  **Matches:** A list of correspondences between image $i$ and image $j$. Each match contains indices into the keypoint lists of both images.
++### Inputs and Outputs
++*   **Input:** A set of $N$ images $\{I_1, \dots, I_N\}$, optionally with EXIF metadata (focal length, principal point, distortion).
++*   **Output:**
++    *   Camera poses: A rotation matrix $R_i \in SO(3)$ and translation vector $t_i \in \mathbb{R}^3$ for each image $i$, forming the projection matrix $P_i = K [R_i | t_i]$.
++    *   Intrinsics: The camera calibration matrix $K$ (focal lengths $f_x, f_y$, principal point $c_x, c_y$, and distortion coefficients).
++    *   Sparse point cloud: A set of 3D points $X_j \in \mathbb{R}^3$ with associated color/normal data.
++
++### Data Structures
++1.  **Keypoints:** For each image $i$, a list of 2D points $u_{i,k} \in \mathbb{R}^2$ and their descriptors $d_{i,k} \in \mathbb{R}^D$ (typically $D=128$ for SIFT).
++2.  **Matches:** A list of correspondences $(u_{i,k}, u_{j,l})$ between images $i$ and $j$.
+ 3.  **Reconstruction:**
+-    *   `cameras`: List of camera objects with pose $P_i$ and intrinsics $K_i$.
+-    *   `points3D`: List of 3D points with position $X_j$, color, and a list of `observations` (image_id, keypoint_id, reprojection_error).
++    *   Cameras: Array of $(R_i, t_i, K)$.
++    *   Points: Array of $X_j$ with visibility mask $V_{j,i} \in \{0, 1\}$ indicating if point $j$ is visible in image $i$.
+ 
+-**Algorithm Steps:**
++### Steps
+ 
+-1.  **Feature Detection:** For each image $I_i$, detect distinctive keypoints (corners, spots) and compute descriptors.
+-    *   *Note:* SIFT is monochrome, discarding hue and saturation [S2, unofficial].
++1.  **Feature Extraction:** Detect distinctive keypoints (corners, spots, texture) in each image and compute descriptors robust to rotation, scale, and brightness changes. SIFT is the classic detector; it is monochrome, discarding hue and saturation [S3, unofficial].
+     *   *Pseudocode:*
+         ```python
+         keypoints = []
++        descriptors = []
+         for image in images:
+-            # Detect keypoints and compute descriptors
+-            # SIFT is the classic detector; SuperPoint is a learned alternative [S1, S4]
+-            kp, desc = detect_features(image) 
+-            keypoints.append({'image_id': image.id, 'keypoints': kp, 'descriptors': desc})
++            kp, desc = extract_sift(image) # Returns list of (x, y, scale, orientation) and descriptor vector
++            keypoints.append(kp)
++            descriptors.append(desc)
+         ```
+ 
+-2.  **Pairwise Matching:** Compare descriptors between image pairs to find candidate matches.
+-    *   For large $N$, use a vocabulary tree to avoid $O(N^2)$ comparisons [S2, unofficial].
+-    *   Match descriptors using nearest neighbor distance ratio (e.g., Lowe's ratio test).
++2.  **Pairwise Matching:** Compare descriptors between image pairs to find candidate matches. For large $N$, use a vocabulary tree to avoid $O(N^2)$ comparisons [S3, unofficial].
+     *   *Pseudocode:*
+         ```python
+         matches = []
+-        for i in range(len(keypoints)):
+-            for j in range(i + 1, len(keypoints)):
+-                # Compute descriptor distances
+-                dists = compute_descriptor_distances(keypoints[i]['descriptors'], keypoints[j]['descriptors'])
+-                # Select best matches
+-                pair_matches = select_best_matches(dists)
+-                if len(pair_matches) > threshold:
+-                    matches.append({'img_a': i, 'img_b': j, 'matches': pair_matches})
++        for i in range(N):
++            for j in range(i + 1, N):
++                # Find nearest neighbors in descriptor space
++                candidate_pairs = match_descriptors(descriptors[i], descriptors[j])
++                matches.append((i, j, candidate_pairs))
+         ```
+ 
+-3.  **Geometric Verification:** Discard incorrect matches using RANSAC and epipolar geometry.
+-    *   True matches must satisfy the epipolar constraint: $x_j^T F x_i = 0$ (fundamental matrix $F$ for uncalibrated) or $x_j^T E x_i = 0$ (essential matrix $E$ for calibrated) [S2, unofficial].
+-    *   RANSAC iteratively selects a minimal subset of matches (e.g., 5 points for $E$, 7 or 8 for $F$), computes the matrix, and counts inliers (matches satisfying the constraint within a threshold) [S2, unofficial].
++3.  **Geometric Verification (RANSAC):** Discard incorrect matches using epipolar geometry. True matches must satisfy the constraint that a point in one image lies on a specific line (epipolar line) in the other.
++    *   Use the Fundamental Matrix $F$ (uncalibrated) or Essential Matrix $E$ (calibrated).
++    *   RANSAC iteratively guesses a model from a minimal subset (e.g., 7 points for $F$, 5 for $E$), counts inliers (matches satisfying the geometric constraint within a threshold), and selects the model with the most inliers [S3, unofficial].
+     *   *Pseudocode:*
+         ```python
+         verified_matches = []
+-        for match_pair in matches:
+-            # RANSAC loop
+-            best_inliers = []
++        for (i, j, candidates) in matches:
++            inliers = []
++            best_model = None
++            best_inlier_count = 0
+             for _ in range(max_iterations):
+-                subset = random_sample(match_pair['matches'], k=5) # k depends on matrix type
+-                matrix = compute_epipolar_matrix(subset)
+-                inliers = [m for m in match_pair['matches'] if reprojection_error(m, matrix) < threshold]
+-                if len(inliers) > len(best_inliers):
+-                    best_inliers = inliers
+-            if len(best_inliers) > min_inliers:
+-                verified_matches.append({'img_a': match_pair['img_a'], 'img_b': match_pair['img_b'], 'matches': best_inliers})
++                subset = random_sample(candidates, k=7) # Minimal sample
++                model = estimate_fundamental_matrix(subset)
++                inlier_count = count_inliers(model, candidates, threshold)
++                if inlier_count > best_inlier_count:
++                    best_inlier_count = inlier_count
++                    best_model = model
++            if best_inlier_count > min_inliers:
++                verified_matches.append((i, j, best_model, best_inliers))
+         ```
+ 
+ 4.  **Incremental Reconstruction:**
+-    *   **Initialization:** Select a pair of images with a wide baseline and many verified matches. Reconstruct the two camera poses and triangulate the 3D points from these matches [S2, unofficial].
+-    *   **Registration:** For each remaining image, find images that share enough 3D points. Solve for the new camera pose using Perspective-n-Point (PnP) given the known 3D points and their 2D projections [S2, unofficial].
+-    *   **Triangulation:** Triangulate new 3D points from the newly registered camera and previously registered cameras. Triangulation finds the point $X$ that minimizes the distance to the rays from camera centers through the feature locations [S2, unofficial].
++    *   **Initialization:** Select a good starting pair of images with a wide baseline and many verified matches. Reconstruct the two camera poses and triangulate the 3D points shared by them [S3, unofficial].
++    *   **Registration:** For each new image, find images that share enough 3D points. Solve for the new camera pose using Perspective-n-Point (PnP) given the known 3D points and their 2D projections [S3, unofficial].
++    *   **Triangulation:** Triangulate new 3D points from the matched features in the new view and existing views. Rays from camera centers through feature locations are computed; the 3D point is the midpoint of the closest approach of these rays [S3, unofficial].
+     *   *Pseudocode:*
+         ```python
+-        # Initialize with best pair
+-        reg_cameras = [cam_a, cam_b]
+-        points3D = triangulate_points(reg_cameras, verified_matches[best_pair])
++        cameras = []
++        points = []
+         
+-        # Register remaining images
+-        unregistered = set(all_image_ids) - {cam_a.id, cam_b.id}
+-        while unregistered:
+-            # Find image with most matches to registered cameras
+-            next_img = find_best_candidate(unregistered, reg_cameras, points3D)
++        # Initialize with best pair (img_a, img_b)
++        R_a, t_a, R_b, t_b = recover_pose_from_epipolar(verified_matches[(img_a, img_b)])
++        cameras.append((img_a, R_a, t_a, K))
++        cameras.append((img_b, R_b, t_b, K))
++        points = triangulate_points(keypoints[img_a], keypoints[img_b], R_a, t_a, R_b, t_b)
++        
++        registered_images = {img_a, img_b}
++        unregistered_images = set(range(N)) - registered_images
++        
++        while unregistered_images:
++            # Find image with most matches to registered points
++            next_img = select_best_candidate(unregistered_images, points, cameras)
+             
+-            # Solve PnP
+-            pose = solve_pnp(next_img, points3D, verified_matches)
+-            reg_cameras.append(Camera(id=next_img.id, pose=pose))
+-            unregistered.remove(next_img.id)
++            # PnP to find pose
++            R_new, t_new = solve_pnp(keypoints[next_img], points, cameras)
++            cameras.append((next_img, R_new, t_new, K))
+             
+             # Triangulate new points
+-            new_points = triangulate_new_points(reg_cameras, next_img, verified_matches)
+-            points3D.extend(new_points)
++            new_points = triangulate_new_points(keypoints[next_img], R_new, t_new, points, cameras)
++            points.extend(new_points)
+             
+-            # Periodic Bundle Adjustment
+-            if len(reg_cameras) % ba_interval == 0:
+-                bundle_adjustment(reg_cameras, points3D)
++            registered_images.add(next_img)
++            unregistered_images.remove(next_img)
+         ```
+ 
+-5.  **Bundle Adjustment (BA):** Minimize the total reprojection error by optimizing all camera poses and 3D points simultaneously.
+-    *   **Objective:** Minimize $\sum_{i,j} \| x_{ij} - \pi(P_i, X_j) \|^2$, where $x_{ij}$ is the observed 2D point, $P_i$ is the camera pose, $X_j$ is the 3D point, and $\pi$ is the projection function including distortion [S2, unofficial].
+-    *   **Self-Calibration:** Intrinsics (focal length, principal point, distortion) are treated as unknowns and optimized alongside poses and points, rather than relying solely on EXIF metadata [S2, unofficial]. If images come from the same fixed-lens camera, intrinsics are shared to constrain the solution [S2, unofficial].
++5.  **Bundle Adjustment (BA):** Periodically optimize all camera poses and 3D points simultaneously to minimize the total reprojection error. The error is the pixel distance between the actual 2D projection and the estimated projection of each 3D point [S3, unofficial].
++    *   *Objective:* Minimize $\sum_{i,j} \| u_{i,j} - \pi(P_i, X_j) \|^2$, where $\pi$ is the projection function.
++    *   Intrinsics are often treated as unknowns to be recovered via self-calibration within BA, rather than relying solely on EXIF metadata [S3, unofficial]. If photos come from the same physical camera with a fixed lens, intrinsics are shared across the whole set [S3, unofficial].
+     *   *Pseudocode:*
+         ```python
+-        def bundle_adjustment(cameras, points3D):
+-            # Construct Jacobian and residual vector
+-            # Residuals are reprojection errors
+-            # Use Levenberg-Marquardt or similar non-linear least squares solver
+-            # Update cameras and points3D
+-            pass
++        def bundle_adjustment(cameras, points):
++            # Non-linear least squares optimization (e.g., Levenberg-Marquardt)
++            # Variables: Flatten all R, t, X, and optionally K
++            while not converged:
++                residuals = compute_reprojection_errors(cameras, points)
++                jacobian = compute_jacobian(cameras, points)
++                update = solve_linear_system(jacobian, residuals)
++                update_cameras_and_points(cameras, points, update)
+         ```
+ 
+-**Parameters:**
+-*   **Feature Detector:** SIFT (monochrome, scale-invariant) [S2, unofficial] or SuperPoint (learned) [S1, S4].
+-*   **Matcher:** SuperGlue (learned) [S1] or LightGlue (learned) [S4].
+-*   **Intrinsics:** Treated as unknowns in BA [S2, unofficial]. Shared across images if from the same camera [S2, unofficial].
+-*   **RANSAC Inlier Threshold:** Typically a few pixels [S2, unofficial].
++### Parameters
++*   **Feature Detector:** SIFT (default in COLMAP) or SuperPoint [S2][S3, unofficial].
++*   **Matcher:** Brute-force or LightGlue [S2, S4].
++*   **RANSAC Threshold:** Geometric error threshold for inlier classification (e.g., 1-2 pixels) [S3, unofficial].
++*   **Baseline:** Initial pair selection should maximize baseline to improve triangulation accuracy [S3, unofficial].
++*   **Segmentation Interval:** In progressive motion sequences, the trajectory may be segmented (e.g., every 5 frames) to introduce local priors, initializing new poses using the last frame of the previous segment: $[R|t]_{p+1} \leftarrow [R|t]_p$ [S1].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Zooming:** If photos are taken with zooming, intrinsics change, violating the shared-intrinsics assumption [S2, unofficial].
+-*   **Rolling Shutter:** Fast motion with rolling-shutter sensors smears geometry, violating the pinhole model assumption [S2, unofficial].
+-*   **Cropping/Resizing:** Invalidates principal point and focal length relative to the original sensor [S2, unofficial].
+-*   **Motion Blur:** Smears feature points, causing bad matches. Mitigation: drop blurriest frames or shoot at high shutter speeds [S2, unofficial].
+-*   **Tiny Baselines:** Processing too many nearly-identical video frames wastes compute and provides little triangulation information [S2, unofficial].
++### Edge Cases and Pitfalls
++*   **Zooming:** If photos are taken with zooming, intrinsics change, violating the shared-intrinsics assumption [S3, unofficial].
++*   **Rolling Shutter:** Fast motion with rolling-shutter sensors smears geometry, violating the pinhole model assumption [S3, unofficial].
++*   **Cropped/Resized Images:** Invalidate principal point and focal length relative to the original sensor [S3, unofficial].
++*   **Motion Blur:** Smears feature points, causing bad matches. Mitigation: detect/drop blurriest frames or shoot at high shutter speeds [S3, unofficial].
++*   **Tiny Baselines:** Processing too many nearly-identical video frames wastes compute and provides little new triangulation information [S3, unofficial].
+ 
+ ## Subtopics
+ 
+-### Canonical Frame Estimation via Facial Landmarks
+-A method to estimate a canonical frame of reference for selfie and full-body captures using facial landmarks, enabling automatic generation of novel view trajectories [S3]. It computes 2D facial landmarks using MediaPipe’s face mesh, triangulates them in 3D using SfM camera poses, sets a canonical coordinate frame centered at the facemesh (+y up, +x right, -z into the face), and scales the scene so that the interpupillary distance matches 6 cm [S3]. The 3D triangulation is only strictly correct if the subject is static, but is observed to be sufficiently good even with head rotation [S3].
++### [Canonical Frame Estimation via Facial Landmarks](16399-canonical-frame-estimation-via-facial-landmarks.md)
++This method estimates a canonical coordinate frame for selfie and full-body captures using facial landmarks, enabling the automatic generation of novel view trajectories for NeRF training. It serves as a preprocessing step that aligns all input camera poses to a canonical coordinate system using 3D facial keypoints and similarity transformation. Unlike general Structure-from-Motion (SfM) alignment which relies on scene geometry, this method anchors the coordinate system to specific semantic features of the subject (the face), ensuring consistent orientation regardless of the initial camera pose.
+ 
+ ### Deep Image Matching Initialization
+-An initialization pipeline that replaces traditional sparse SfM methods (like SIFT/SuperGlue) with a deep learning framework to construct a robust initial point cloud [S4]. It uses SuperPoint for feature extraction and LightGlue for feature matching [S4]. This approach is cited as offering better robustness, efficiency, and scalability compared to traditional SfM/MVS methods [S4].
++An initialization pipeline that replaces traditional sparse SfM methods with a deep learning framework to construct a robust initial point cloud [S4]. It uses SuperPoint as the feature extractor to detect keypoints and compute descriptors, and LightGlue as the feature matcher to match descriptors between images [S4]. This approach replaces SfM/MVS which have limitations in robustness, efficiency, and scalability compared to deep learning methods [S4].
++
++### On-the-Fly SfM
++A method for online feature matching and pose estimation. It performs Hierarchical Weighted Local Bundle Adjustment (BA) incorporating only neighboring connected and registered images after acquiring a new image, reducing time complexity compared to global BA [S5]. It achieves online feature matching via global feature retrieval on HNSW (Hierarchical Navigable Small World) to enable efficient dynamic updates for the matching matrix [S5].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** SfM is computationally intensive, particularly the pairwise matching ($O(N^2)$ without vocabulary trees) and bundle adjustment (non-linear least squares).
+-*   **Performance:** COLMAP is significantly faster than HLOC and LocalRF. For 310 frames, COLMAP takes ~8 minutes, HLOC ~68 minutes, and LocalRF ~23 hours [S1]. For 1392 frames, COLMAP takes ~49 minutes, HLOC ~21 hours, and LocalRF ~75 hours [S1].
+-*   **Scalability:** COLMAP performs well with dense views (e.g., 2784 frames) but may struggle with sparse views where HLOC is more effective [S1]. LocalRF is unsuitable for large frame counts due to extensive running time [S1]. GLOMAP offers a global solution that is dramatically quicker on large sets than COLMAP [S2, unofficial].
+-*   **Strengths:** Robust to viewpoint changes; provides metric scale if calibrated; standard output format (COLMAP) is widely supported.
+-*   **Limitations:** Sensitive to textureless regions, repetitive patterns, and motion blur; requires sufficient overlap and baseline between images; incremental approach can suffer from error drift without periodic BA [S2, unofficial].
++*   **Time Complexity:** Incremental SfM is generally $O(N^2)$ for matching and $O(N \cdot M)$ for BA, where $N$ is the number of images and $M$ is the number of points. Global SfM (e.g., GLOMAP) can be dramatically quicker on large sets [S3, unofficial].
++*   **Measured Performance:** On a machine with an RTX A6000 GPU and 128 GB RAM:
++    *   For 310 frames: COLMAP took 00:08:26, HLOC took 01:08:39, LocalRF took 23:20:52 [S2].
++    *   For 1392 frames: COLMAP took 00:49:29, HLOC took 21:51:34, LocalRF took 75:10:54 [S2].
++    *   For 2784 frames: COLMAP took 04:32:53 [S2].
++*   **Scaling:** COLMAP performs well with dense views (2784 frames) but is slower than HLOC on sparse views (310, 1392 frames) [S2]. HLOC is slower but more effective on sparse views [S2]. LocalRF handles long-range trajectories but has extensive running time [S2].
++*   **Strengths:** Robust to viewpoint changes; provides accurate initial poses for downstream optimization [S3, unofficial].
++*   **Limitations:** Struggles with repetitive textures, low-texture regions, and significant motion blur [S3, unofficial]. Requires sufficient overlap and baseline between images [S3, unofficial].
+ 
+ ## Background
+-Structure-from-Motion is a classic computer vision technique predating Gaussian Splatting by decades [S2, unofficial]. It is the same math that builds sparse point clouds in classic photogrammetry [S2, unofficial]. The de facto standard tool for SfM is COLMAP, an open-source package developed by Schönberger and Frahm (CVPR 2016) [S2, unofficial]. It is used to generate the camera poses and sparse point cloud that serve as the seed for Gaussian Splatting training [S2, unofficial].
++Structure-from-Motion is a classic computer vision technique that predates Gaussian Splats by decades [S3, unofficial]. It is the same math that builds the sparse point clouds in classic photogrammetry [S3, unofficial]. The de facto standard tool for SfM is COLMAP, an open-source package by Schönberger and Frahm (CVPR 2016) [S3, unofficial]. It is used to generate the camera poses and sparse point cloud that serve as the seed for Gaussian Splatting training [S3, unofficial].
+ 
+ ## Sources
+-[S1] Towards Abdominal 3-D Scene Rendering from Laparoscopy Surgical Videos Using NeRFs, https://doi.org/10.1007/978-3-031-45673-2_9, fetched 2026-10-26
+-[S2] Gaussian Splats Part 2: From Photos to a Trained Model, https://alphapixeldev.com/gaussian-splats-part-2-creating-gaussian-splats/, fetched 2026-10-29 (unofficial)
+-[S3] Nerfies: Deformable Neural Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00581, fetched 2026-10-26
+-[S4] Refining Gaussian Splatting: A Volumetric Densification Approach, https://doi.org/10.24132/CSRN.2025-6, fetched 2026-10-26+[S1] Neural Radiance Fields-Based 3D Reconstruction of Power Transmission Lines Using Progressive Motion Sequence Images., https://doi.org/10.3390/s23239537, fetched 2026-10-26
++[S2] Towards Abdominal 3-D Scene Rendering from Laparoscopy Surgical Videos Using NeRFs, https://doi.org/10.1007/978-3-031-45673-2_9, fetched 2026-10-26
++[S3] Gaussian Splats Part 2: From Photos to a Trained Model, https://alphapixeldev.com/gaussian-splats-part-2-creating-gaussian-splats/, fetched 2026-10-29 (unofficial)
++[S4] Refining Gaussian Splatting: A Volumetric Densification Approach, https://doi.org/10.24132/CSRN.2025-6, fetched 2026-10-26
++[S5] Gaussian On-the-Fly Splatting: A Progressive Framework for Robust Near Real-Time 3DGS Optimization, https://doi.org/10.1109/lra.2025.3632729, fetched 2026-10-30

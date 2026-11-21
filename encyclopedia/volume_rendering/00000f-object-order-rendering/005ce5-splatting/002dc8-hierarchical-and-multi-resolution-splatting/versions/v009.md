@@ -1,0 +1,64 @@
+# Hierarchical and Multi-Resolution Splatting
+
+Also called: Multi-Resolution Splatting, Hierarchical Splatting, LOD Splatting
+
+## Overview
+Hierarchical and Multi-Resolution Splatting optimizes the rendering of dense volumetric data and point clouds by organizing primitives into a spatial hierarchy, allowing the renderer to select primitives of varying granularity based on screen-space footprint or error metrics [G]. It solves the performance bottleneck of rendering high-density data by replacing clusters of fine primitives with single, aggregated coarse primitives in homogeneous or distant regions, while preserving detail in complex or foreground areas [G]. It distinguishes itself from sibling methods by its reliance on explicit error metrics or fixed downsampling rates to drive the selection of the appropriate resolution level, rather than relying solely on static distance thresholds or fixed grid subdivisions [G].
+
+## Shared principles
+The methods in this family share the mechanism of hierarchical decomposition and error-driven or distance-driven primitive selection, building on [Splatting](23-splatting.md) [G].
+
+1. **Hierarchical Decomposition:** The input data (volume, point cloud, or Gaussian set) is organized into a tree structure or grid (e.g., octree, pyramid, or uniform grid cells) [S1, unofficial][S2, unofficial][S6]. Each node or cell represents a spatial region and stores aggregate properties derived from its children or contained points [G].
+2. **Error Metric Computation:** For each internal node, a local error metric $E$ is computed to quantify the approximation cost of representing the node's children with the node's aggregate properties [G]. Not given in the sources.
+3. **Adaptive Traversal and Selection:** During rendering, the hierarchy is traversed from the root to the leaves or cells are traversed in front-to-back order [S6]. A node or cell is selected as a leaf (and thus rendered as a single primitive) if its error $E$ is below a user-defined threshold $\epsilon$ or if its projected screen-space footprint is smaller than a pixel threshold [G]. If the error exceeds the threshold, the algorithm recurses to the children [G].
+4. **Primitive Aggregation:** When a node is selected, its children are merged into a single representative primitive [G]. The primitive's attributes (position, size, color, opacity) are computed as weighted averages or sums of the children's attributes [G]. For Gaussian splats, this involves merging covariances and spherical harmonics coefficients [G].
+5. **Multi-Resolution Rendering:** The final image is composed of primitives from various levels of the hierarchy, allowing for efficient culling of distant or homogeneous regions while maintaining fidelity in foreground or complex areas [S6].
+
+## Subtopics
+
+### [Multi Resolution Alpha Blending](12118-multi-resolution-alpha-blending.md)
+Multi Resolution Alpha Blending is a fragment accumulation strategy used in hierarchical point splatting to resolve depth-ordering ambiguities when multiple splats project to the same pixel [G]. It solves the problem of correct alpha compositing in scenes with varying point densities by collecting, sorting, and blending fragments on a per-pixel basis rather than globally [G]. It differs from global sorting methods by operating on small, localized lists, which reduces computational overhead and memory bandwidth usage [G].
+
+### [Multi-Resolution and Level of Detail (Pyramid, LOD, Downsampling)](12128-multi-resolution-and-level-of-detail-pyramid-lod-downsamplin.md)
+Multi-Resolution and Level of Detail (LOD) techniques optimize volume and point cloud rendering by decomposing data into hierarchical structures, allowing the renderer to select primitives of varying granularity based on spatial error or screen-space footprint [G]. This family solves the performance bottleneck of rendering high-density data by replacing clusters of fine primitives with single, aggregated coarse primitives in homogeneous or distant regions, while preserving detail in complex or foreground areas [G]. It distinguishes itself from sibling methods by its reliance on explicit error metrics or fixed downsampling rates to drive the selection of the appropriate resolution level, rather than relying solely on static distance thresholds or fixed grid subdivisions [G].
+
+### [Octree-based Hierarchy](12129-octree-based-hierarchy.md)
+#### RBF Splatting with Octree and Fragment Programs
+- **Definition:** A splatting implementation using Rational Basis Functions (RBFs) located by an octree, evaluated via fragment programs on cache-sheets [S1, unofficial].
+- **Steps:** Add an octree to locate the Rational Basis Functions (RBFs) intersecting the cache-sheets [S1, unofficial]. For each sheet plane pixel, use a fragment program to evaluate the exponential Gaussian function of the RBFs [S1, unofficial].
+- **Performance:** 7 to 70 fps for Blunt-fin rendering at 400^2 resolution, caused by large variation of RBFs. Hardware: 2.8 GHz Pentium-IV, nVidia GeForce FX 5900 [S1, unofficial].
+
+#### TreeSplat
+- **Definition:** A method that organizes deformation as a mergeable tree, where each node represents a rigid part of an articulated object, and the overall deformation is computed by traversing the kinematic chain [S2, unofficial].
+
+#### Depth-Aware Multi-Layer Splatting
+- **Definition:** A splatting strategy that converts rasterized surface points into Gaussian splats and uses a multi-layer accumulation strategy based on depth to handle occlusion boundaries and disocclusions, producing smooth derivatives [S3].
+- **Steps:** Render multiple layers of G-buffers. Maintain three accumulation buffers during splatting: $S^+$ for splats occluding the target pixel, $S^-$ for occluded splats, and $S^o$ for splats at the same depth as the target pixel [S3]. To determine splat depth relation, pair up multi-layer surface intersections at splat center $p$ with closest intersections at target pixel $q$ in depth. The $p$ layer paired with the front-most $q$ layer is assigned to $S^o$, layers in front of it to $S^+$, and the rest to $S^-$ [S3]. After all splats are rendered, buffers are separately normalized following Eq. 3 and composited in $S^-$, $S^o$, $S^+$ order using over-compositing to produce the final result $S$ [S3].
+- **Pitfall:** Single-layer splatting treats all splats at the same depth, ignoring occlusions and producing spurious derivatives for occluded objects. Multi-layer splatting corrects this by distinguishing front, back, and coincident depths [S3].
+
+#### Splat Downscaling Optimization
+- **Definition:** Reduces Gaussian splat sizes to improve rendering speed while minimizing visual quality impact [S4, unofficial].
+- **Parameter:** SplatDownscaleFactor: Float parameter in range [0, 1] controlling the degree of size reduction [S4, unofficial].
+
+#### Splat Stacking
+- **Definition:** Copying a nearest-neighbour splat cluster into an empty adjacent voxel cell to fill space [S5, unofficial].
+- **Pitfall:** Visual coherence issues: only 60% of source voxels find an empty adjacent cell on the butterfly scene; SH coefficients are not copied resulting in slightly flat shading; noticeable visual seam at source/target boundary [S5, unofficial].
+- **Performance:** p95 10.6 ms across 200-op session; 121/200 ops committed; 4,735 splats stacked; subjective coherence rated 3/5 [S5, unofficial].
+
+#### Hierarchical Point Cloud Rendering
+- **Definition:** A rendering algorithm that traverses out-of-core hierarchical structures (uniform grid cells) in front-to-back order, dynamically selecting the Level of Detail (LOD) for each cell based on distance to the viewpoint to balance performance and quality [S6].
+- **Steps:** Generate a discretization of the scene using a uniform grid, storing cells out-of-core [S6]. Produce multiple simplified versions for each cell by decimating points by a factor of 10 for each decreasing LOD level, keeping these in main memory [S6]. Traverse cells overlapping the view frustum in front-to-back order [S6]. Dynamically select the most appropriate LOD for each cell based on the distance from the cell center to the viewpoint [S6]. Manually tune scaling factors for points at each LOD level to achieve visually pleasing results [S6]. If interaction stops and the viewpoint is held still, load from disk and display cells containing original points (finest LOD) [S6].
+- **Performance:** Tested on Intel Core i7-4790K CPU and GeForce GTX 970 with ~150 million points: 600 fps for far-away views, 300-600 fps for closer ones [S6]. Render quality remains good even with aggressive pruning (1 point out of 100) for areas with uniform sampling density [S6].
+
+## Background
+The concept of hierarchical splatting emerged alongside the need for real-time volume rendering [G]. Early implementations focused on accelerating the evaluation of splats using spatial data structures [G]. For instance, Jang et al. [Jang04] added an octree to locate rational basis functions (RBFs) intersecting cache-sheets, evaluating them via fragment programs [S1, unofficial]. This approach allowed for interactive frame rates on mid-sized datasets, though performance varied significantly based on the variation of RBFs [S1, unofficial]. Later, Neophytou et al. [Neophytou06] utilized floating-point rasterization facilities to avoid expensive fragment programs, achieving near-interactive frame rates on irregular data [S1, unofficial].
+
+In the context of Gaussian Splatting, hierarchical methods have been adapted to handle dynamic deformations and multi-resolution rendering [G]. TreeSplat, for example, organizes deformation as a mergeable tree for articulated objects [S2, unofficial]. Depth-aware multi-layer splatting was introduced to handle occlusion boundaries in differentiable rendering, ensuring accurate derivatives by distinguishing between occluding, occluded, and coincident splats [S3]. Optimization techniques like Splat Downscaling adjust splat sizes to improve rendering speed [S4, unofficial]. Splat Stacking copies nearest-neighbour splat clusters into empty adjacent voxel cells to fill space, though it introduces visual seams and flat shading due to uncopied SH coefficients [S5, unofficial]. Hierarchical Point Cloud Rendering traverses out-of-core uniform grid cells in front-to-back order, dynamically selecting LOD based on distance to the viewpoint [S6].
+
+## Sources
+[S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
+[S2] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S3] Differentiable Surface Rendering via Non-Differentiable Sampling, https://doi.org/10.1109/iccv48922.2021.00603, fetched 2026-10-26
+[S4] wuyize25/gsplat-unity, https://github.com/wuyize25/gsplat-unity, fetched 2026-10-27 (unofficial)
+[S5] stevekwon211/splatcarve, https://github.com/stevekwon211/splatcarve, fetched 2026-10-27 (unofficial)
+[S6] View-dependent Hierarchical Rendering of Massive Point Clouds through Textured Splats, https://doi.org/10.2312/ceig.20191203, fetched 2026-10-26

@@ -1,0 +1,114 @@
+# Neural Light Field Representations
+
+Also called: NeLF
+
+## Overview
+Neural Light Field Representations map camera ray parameters directly to final pixel color, bypassing the volumetric ray-marching and alpha-composition steps required by Neural Radiance Fields (NeRF) [S2]. Unlike NeRF, which predicts density and radiance at sampled points along a ray requiring multiple forward passes per pixel, NeLF performs a single forward pass per ray to output the integrated RGB value directly [S2]. This approach enables orders-of-magnitude faster rendering speeds and reduced computational complexity (FLOPs) while maintaining or exceeding the visual quality of NeRF [S2].
+
+## Shared principles
+All methods in this family build on [Specific Model Architectures](8585-specific-model-architectures.md). While the specific decomposition varies, the core principle is the decoupling of view-independent geometric/material features from view-dependent lighting effects.
+
+**Input Representation:**
+Raw coordinates $\mathbf{x}$ and $\mathbf{d}$ are mapped to a higher-dimensional space using positional encoding $\gamma(\cdot)$ to mitigate spectral bias [S1, S3].
+$$
+\gamma(\mathbf{x}) = (\sin(2^0 \pi \mathbf{x}), \cos(2^0 \pi \mathbf{x}), \dots, \sin(2^{L-1} \pi \mathbf{x}), \cos(2^{L-1} \pi \mathbf{x}))
+$$
+where $L$ is the number of frequency bands [S1, S3].
+
+**Network Topology:**
+The canonical implementation uses coupled Multi-Layer Perceptrons (MLPs). The density network $F_\sigma$ and color network $F_c$ are modified to output intermediate physical properties rather than raw color [S1, S2, S3].
+1.  **Density/Geometry Network:** Takes $\gamma(\mathbf{x})$ as input. It consists of $L$ hidden layers with ReLU activations and skip connections from the input to every 4th layer [S1, S3]. It outputs density $\sigma$ and latent features representing material properties (e.g., normals, roughness, albedo) [S1, S2, S3].
+2.  **Appearance/Lighting Network:** Takes the latent features, $\gamma(\mathbf{x})$, and $\mathbf{d}$ (or derived directions like reflection vectors) as input. It computes the final color $\mathbf{c}$ by combining material properties with lighting models (e.g., environment maps, specular models) [S1, S2, S3].
+
+**Rendering Integration:**
+During training, rays are sampled at points $\mathbf{x}_i$. The MLPs predict $\sigma_i$ and material properties. The pixel color $C(\mathbf{r})$ is computed via volumetric rendering:
+$$
+C(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i, \quad \text{where } \alpha_i = 1 - \exp(-\sigma_i \delta_i), \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)
+$$
+where $\delta_i$ is the distance between samples [S1, S3]. The color $\mathbf{c}_i$ is derived from the decomposed components specific to the child method.
+
+## Subtopics
+
+### [Neural Light Field (NeLF)](9257-neural-light-field-nelf.md)
+Neural Light Field (NeLF) represents a 3D scene as a direct mapping from camera ray parameters to final pixel color, bypassing the volumetric ray-marching and alpha-composition steps required by Neural Radiance Fields (NeRF). Unlike NeRF, which predicts density and radiance at sampled points along a ray requiring multiple forward passes per pixel, NeLF performs a single forward pass per ray to output the integrated RGB value directly. This approach enables orders-of-magnitude faster rendering speeds and reduced computational complexity (FLOPs) while maintaining or exceeding the visual quality of NeRF. The method is distinguished by its use of a deep residual Multi-Layer Perceptron (MLP) architecture and knowledge distillation from a pre-trained NeRF teacher model to handle the data scarcity inherent in training such deep networks.
+
+**Inputs and Outputs:**
+*   **Input:** A 4D oriented ray, parameterized by its origin $\mathbf{o} = (x_o, y_o, z_o)$ and normalized direction $\mathbf{d} = (x_d, y_d, z_d)$. In the specific implementation (R2L), the input vector is formed by concatenating the spatial coordinates of $K$ sampled points along the ray, resulting in a $3K$-dimensional vector.
+*   **Output:** A 3D RGB color vector $\mathbf{c} = (r, g, b)$ representing the final pixel color for that ray.
+
+**Data Structures and Layout:**
+The core data structure is the Deep Residual MLP network $G_\phi$.
+*   **Network Topology:** The network consists of $D$ layers with width $W$. The standard configuration uses extensive residual blocks in internal layers.
+    *   **Depth ($D$):** 88 layers.
+    *   **Width ($W$):** 256 (for 12M FLOPs budget) or 181 (for 6M FLOPs budget).
+    *   **Activation:** Standard residual block activations (typically ReLU) are used, with the final layer outputting RGB values.
+*   **Input Representation:**
+    *   **Point Sampling:** $K=16$ points are sampled along the ray.
+    *   **Vector Construction:** The input vector $\mathbf{x}_{in}$ is the concatenation of the 3D coordinates of these $K$ points: $\mathbf{x}_{in} = [x_1, y_1, z_1, \dots, x_K, y_K, z_K]$.
+    *   **Positional Encoding:** Input coordinates are enriched using positional encoding $\gamma(\cdot)$ as defined in the parent article.
+
+**Numbered Steps:**
+1.  **Ray Sampling:**
+    *   **Training:** Randomly sample $K=16$ points along the ray using stratified sampling to prevent overfitting to specific locations.
+    *   **Testing:** Evenly space $K=16$ points along the ray.
+2.  **Input Construction:** Concatenate the spatial coordinates of the $K$ sampled points to form the $3K$-dimensional input vector. Apply positional encoding to the coordinates.
+3.  **Forward Pass:** Feed the encoded input vector into the deep residual MLP $G_\phi$. The network processes the input through 88 layers with extensive residual connections.
+4.  **Output:** The network outputs the predicted RGB color $\mathbf{c}_{pred}$ directly.
+
+**Formulas:**
+**NeLF Mapping:**
+The NeLF network $G_\phi$ maps the ray parameters to color:
+$$
+\mathbf{c}_{pred} = G_\phi(\mathbf{o}, \mathbf{d})
+$$
+where $\mathbf{o} \in \mathbb{R}^3$ and $\mathbf{d} \in \mathbb{R}^3$ (normalized).
+
+**Loss Function (Distillation):**
+The network is trained by minimizing the Mean Squared Error (MSE) between the NeLF output and the target RGB value $\hat{\mathbf{c}}$ provided by the pre-trained NeRF teacher model $F_{\Theta^*}$:
+$$
+\mathcal{L} = \text{MSE}(G_\phi(\mathbf{o}, \mathbf{d}), \hat{\mathbf{c}})
+$$
+where $\hat{\mathbf{c}} = F_{\Theta^*}(\mathbf{o}, \mathbf{d})$.
+
+**Pseudo Data Generation:**
+Ray origins and directions are sampled from a uniform distribution $U$ within a viewing bounding box inferred from training camera poses:
+$$
+\begin{aligned}
+x_o, y_o, z_o &\sim U(x_{min}, x_{max}) \\
+x_d, y_d, z_d &\sim U(x_{d,min}, x_{d,max})
+\end{aligned}
+$$
+[ S2 ]
+
+**Parameters and Typical Values:**
+*   **$K$ (Sample Points):** 16.
+*   **Network Width ($W$):** 256 or 181.
+*   **Network Depth ($D$):** 88.
+*   **Batch Size:** 98,304 rays per batch.
+*   **Learning Rate:** Initial $5 \times 10^{-4}$, decayed during training.
+*   **Optimizer:** Adam.
+*   **Hard Example Ratio ($r$):** 0.2 (fraction of hard examples selected per batch).
+*   **Pseudo Data Size ($S$):** 10,000 images (performance saturates around 5,000).
+*   **Iterations:** 1,000k (1,000,000).
+
+**Edge Cases and Pitfalls:**
+*   **Trainability of Deep Networks:** Without extensive residual connections, deep NeLF networks (e.g., 88 layers) are barely trainable.
+*   **Data Scarcity:** Training a deep NeLF on original captured images alone leads to severe overfitting and poor generalization (e.g., PSNR of 19.81 on Lego scene with 0.1k images). Pseudo data from a teacher model is critical.
+*   **Reflection Surfaces:** Unlike methods relying on ground-truth depth (e.g., DONeRF), NeLF does not suffer from failures on reflective surfaces (water, mirrors) where depth is ambiguous.
+*   **Input Representation:** Concatenating spatial coordinates of sampled points yields better quality (PSNR 29.50) than using Plücker coordinates (PSNR 29.08) on the Lego scene.
+
+### Neural Multi-Light Implicit Representation (Stage 1)
+**Definition:**
+An extension of Neuralangelo that incorporates light position as an input to the network to enable multi-light implicit representation [S1].
+
+**Parameters:**
+*   **Input:** Camera pose, Light position, Points (x, y, z) [S1].
+*   **Training Time:** Stage 1 follows Neuralangelo training time. Stage 2 takes 19 hours [S1].
+*   **Hardware:** Experiments conducted on a single Nvidia RTX 3090 [S1].
+
+## Background
+Neural Light Field (NeLF) was introduced to address the computational bottleneck of volumetric rendering in NeRF [S2]. By learning the integrated radiance directly, it achieves significant speedups [S2]. The Neural Multi-Light Implicit Representation (MLI-NeRF) extends this paradigm to handle intrinsic decomposition under varying lighting conditions, using a two-stage process involving pseudo-label generation [S1].
+
+## Sources
+[S1] MLI-NeRF: Multi-Light Intrinsic-Aware Neural Radiance Fields, https://arxiv.org/abs/2411.17235v1, fetched 2026-10-26
+[S2] Neural Light Fields, https://arxiv.org/abs/1910.01392, fetched 2026-10-26

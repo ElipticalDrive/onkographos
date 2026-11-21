@@ -1,0 +1,180 @@
+# Platonic Solid Voxelization
+
+Also called: Analytic Platonic Solid Voxelization, Inside-Outside Test for Regular Polyhedra, Polyhedron Voxelization
+
+## Overview
+Platonic Solid Voxelization generates a 3D binary voxel array representing the interior of regular platonic solids (tetrahedron, cube, octahedron, dodecahedron, and icosahedron). It solves the problem of creating exact, resolution-dependent geometric primitives for volume rendering or collision detection without relying on mesh remeshing. Unlike [Analytic Tetrahedron Voxelization](3724-analytic-tetrahedron-voxelization.md), which computes conservative moments for arbitrary tetrahedra, this method outputs a simple binary mask (1 if inside, 0 if outside) for specific regular polyhedra. It differs from [Exact General Remeshing Scheme for Conservative Voxelization](3774-exact-general-remeshing-scheme-for-conservative-voxelization.md) by using a direct half-space intersection test rather than remeshing, making it faster for simple shapes but limited to regular solids and binary output.
+
+## How it works
+**Inputs:**
+- `poly`: Symbol or integer identifying the solid (`:tetra`, `:cubic`, `:octa`, `:dodeca`, `:icosa` or 4, 6, 8, 12, 20).
+- `voxel`: A 3D array of size $N \times N \times N$. Must be cubic.
+- `radius`: Float in $[0, 1]$. The radius of the circumscribed sphere relative to the array size $N$.
+- `translation`: 3D vector in $[-0.5, 0.5]^3$.
+- `axis`: Collection of 3D vectors defining rotation axes.
+- `angle`: Vector of rotation angles in radians.
+
+**Outputs:**
+- `voxel`: 3D array where `voxel[x,y,z] = 1` if the voxel center is inside the polyhedron, `0` otherwise.
+
+**Data Structures:**
+- **Vertices**: Matrix of size $3 \times V$. Columns are vertices $(x,y,z)$. $V$ is 4, 8, 6, 20, or 12.
+- **Faces**: Matrix of size $F \times FV$. Columns are faces. Rows are 1-based vertex indices. $FV$ is 3, 4, or 5.
+
+**Steps:**
+1.  **Initialize Rotation Matrix**: Set `rmtx` to the $3 \times 3$ identity matrix. For each index `idx` in `angle`, multiply `rmtx` by the rotation matrix for `axis[idx]` and `angle[idx]`.
+2.  **Assert Constraints**: Verify `radius` $\in [0, 1]$, `translation` $\in [-0.5, 0.5]^3$, and `voxel` dimensions are equal ($N \times N \times N$).
+3.  **Scale Parameters**: Calculate `radius_N = radius * N` and `translation_N = translation * N`.
+4.  **Retrieve Geometry**: Call the shape function for `poly` with `radius_N`. This returns `vertices` ($3 \times V$) and `faces` ($F \times FV$).
+    -   *Tetrahedron*: Vertices generated via spherical coordinates with specific $\theta, \phi$.
+    -   *Cube*: Vertices at $(\pm r/\sqrt{3}, \pm r/\sqrt{3}, \pm r/\sqrt{3})$.
+    -   *Octahedron*: Vertices at $(\pm r, 0, 0), (0, \pm r, 0), (0, 0, \pm r)$.
+    -   *Dodecahedron/Icosahedron*: Vertices derived from golden ratio $\phi_g = (1+\sqrt{5})/2$ or spherical coordinates.
+5.  **Rotate Vertices**: Compute `vertices_rot = rmtx * vertices`.
+6.  **Initialize Voxel Array**: Fill `voxel` with `1`.
+7.  **Voxel Loop**: Iterate $x_1, x_2, x_3$ from $1$ to $N$.
+    -   Calculate real-world coordinates:
+        $$x_{1r} = x_1 - 1 - \lfloor N/2 \rfloor + translation_{N,1}$$
+        $$x_{2r} = x_2 - 1 - \lfloor N/2 \rfloor + translation_{N,2}$$
+        $$x_{3r} = x_3 - 1 - \lfloor N/2 \rfloor + translation_{N,3}$$
+    -   Let $P = [x_{1r}, x_{2r}, x_{3r}]^T$.
+8.  **Inside Test**: For each face $f$ in `faces`:
+    -   Get the 3 vertices of the face from `vertices_rot`.
+    -   Compute normal $n = (v_1 - v_2) \times (v_1 - v_3)$.
+    -   Compute $D = n \cdot v_1$.
+    -   Check condition: $(-D) \cdot (n \cdot P - D) \ge 0$.
+    -   If false for any face, set `voxel[x1,x2,x3] = 0` and break.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def rotation_matrix(axis, angle):
+    """Rodrigues' rotation formula."""
+    axis = np.asarray(axis, dtype=np.float64)
+    axis = axis / np.linalg.norm(axis)
+    c = np.cos(angle)
+    s = np.sin(angle)
+    t = 1 - c
+    x, y, z = axis
+    return np.array([
+        [t*x*x + c,     t*x*y - s*z, t*x*z + s*y],
+        [t*x*y + s*z,   t*y*y + c,   t*y*z - s*x],
+        [t*x*z - s*y,   t*y*z + s*x, t*z*z + c    ]
+    ])
+
+def get_platonic_vertices_faces(poly, radius):
+    """Returns vertices (3xV) and faces (Fx3 or Fx4 or Fx5) for a given poly."""
+    # Implementation details omitted for brevity; see S1 for specific coordinate formulas.
+    # Returns vertices and faces scaled by radius.
+    pass
+
+def check_inside(P, vertices_face):
+    """
+    P: point (3,)
+    vertices_face: (3, k) matrix of face vertices
+    Returns True if P is on the inner side of the face plane.
+    """
+    v1 = vertices_face[:, 0]
+    v2 = vertices_face[:, 1]
+    v3 = vertices_face[:, 2] # For quads/pentagons, this logic assumes planar convex faces and consistent winding
+    
+    # Note: The source uses v1, v2, v3 for normal calculation. 
+    # For non-triangular faces, the source code view(vertices, :, view(faces, :, f)) 
+    # passes all vertices of the face to check_inside, but the formula 
+    # n = (v1-v2)x(v1-v3) only uses the first 3. 
+    # This implies the source assumes triangular decomposition or specific winding.
+    # However, the source code explicitly calculates n from v1, v2, v3.
+    # For a cube face (4 vertices), this test is only valid if the face is treated as a triangle 
+    # or if the winding ensures the first 3 define the plane correctly.
+    # Given the source code:
+    a = v1 - v2
+    b = v1 - v3
+    n = np.cross(a, b)
+    D = np.dot(n, v1)
+    
+    # Condition: (-D) * (n . P - D) >= 0
+    # This checks if P is on the same side of the plane as the origin relative to the normal direction?
+    # Actually, if n points outward, D > 0 for origin inside? 
+    # Let's stick to the source formula exactly.
+    val = (-D) * (np.dot(n, P) - D)
+    return val >= 0
+
+def generate_platonic(poly, N, radius, translation, axis_list, angle_list):
+    # 1. Init rotation
+    rmtx = np.eye(3)
+    for axis, angle in zip(axis_list, angle_list):
+        rmtx = rmtx @ rotation_matrix(axis, angle)
+        
+    # 2. Asserts
+    assert 0.0 <= radius <= 1.0
+    assert np.all(np.abs(translation) <= 0.5)
+    
+    # 3. Scale
+    radius_N = radius * N
+    translation_N = translation * N
+    
+    # 4. Get Shape
+    vertices, faces = get_platonic_vertices_faces(poly, radius_N)
+    
+    # 5. Rotate
+    vertices_rot = rmtx @ vertices
+    
+    # 6. Init Voxel
+    voxel = np.ones((N, N, N), dtype=np.float32)
+    
+    # 7. Loop
+    center_offset = N // 2
+    for x3 in range(N):
+        x3r = x3 - 1 - center_offset + translation_N[2]
+        for x2 in range(N):
+            x2r = x2 - 1 - center_offset + translation_N[1]
+            for x1 in range(N):
+                x1r = x1 - 1 - center_offset + translation_N[0]
+                P = np.array([x1r, x2r, x3r])
+                
+                inside = True
+                for f in range(faces.shape[1]):
+                    # Get face vertices
+                    face_indices = faces[:, f]
+                    # The source code uses view(vertices, :, view(faces, :, f))
+                    # This selects columns. 
+                    # Note: faces are 1-based in source, convert to 0-based for numpy if needed, 
+                    # but here we assume indices match.
+                    vertices_face = vertices_rot[:, face_indices]
+                    
+                    if not check_inside(P, vertices_face):
+                        inside = False
+                        break
+                
+                if not inside:
+                    voxel[x1, x2, x3] = 0.0
+                    
+    return voxel
+```
+
+**Parameters:**
+- `radius`: Circumscribed sphere radius relative to $N$. Default not specified, but typically $0.5$ for a solid filling the center.
+- `translation`: Center offset. Default $[0,0,0]$.
+- `axis`: Rotation axes. Default $[0,0,1]$.
+- `angle`: Rotation angles. Default $[0]$.
+
+**Edge Cases and Pitfalls:**
+- **Cubic Voxel Requirement**: The method asserts that the voxel array is cubic ($N \times N \times N$). Non-cubic arrays will fail.
+- **Face Normal Consistency**: The `check_inside` formula relies on the winding order of vertices in the `faces` matrix. The source code calculates $n = (v_1-v_2) \times (v_1-v_3)$. For non-triangular faces (cube, dodecahedron), only the first three vertices are used for the normal. This assumes the face is planar and the first three vertices define the plane correctly with consistent winding.
+- **Precision**: Floating point errors in the inside test may cause boundary voxels to be incorrectly classified. The condition $\ge 0$ includes the boundary.
+
+## Operating characteristics
+- **Time Complexity**: $O(N^3 \cdot F)$, where $N$ is the voxel dimension and $F$ is the number of faces. For a cube, $F=6$; for an icosahedron, $F=20$.
+- **Memory Complexity**: $O(N^3)$ for the output voxel array.
+- **Performance**: Fast for small to medium $N$. The inner loop is simple arithmetic.
+- **Strengths**: Exact binary representation; supports rotation and translation; simple implementation.
+- **Limitations**: Only supports 5 regular platonic solids; binary output (no density/moments); requires cubic voxel grids; not conservative (does not preserve volume/moments like [Analytic Tetrahedron Voxelization](3724-analytic-tetrahedron-voxelization.md)).
+
+## Background
+This method is implemented in the `PlatonicSolid.jl` package by subinbg [S1, unofficial]. It provides a straightforward way to generate voxelized regular polyhedra for use in graphics or simulation. The geometric definitions are based on standard mathematical properties of platonic solids [S1, unofficial].
+
+## Sources
+[S1] subinbg/PlatonicSolid.jl, https://github.com/subinbg/PlatonicSolid.jl, fetched 2026-10-27 (unofficial)

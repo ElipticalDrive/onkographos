@@ -1,0 +1,253 @@
+--- v001.md
++++ v002.md
+@@ -43,99 +43,51 @@
+ 
+ **Pseudocode:**
+-
+ ```python
++import math
++
+ def incremental_preconditioned_gradient_method(S, cameras, images, box_corners, voxel_size, 
+                                                omega, sigma, kappa_max, tau_threshold):
+-    """
+-    S: Total number of training frames
+-    cameras: List of camera configurations C_s
+-    images: List of observed images g_s
+-    box_corners: Tuple (a, b) defining the bounding box
+-    voxel_size: h, side length of voxels
+-    omega: Learning rate
+-    sigma: Regularization parameter
+-    kappa_max: Maximum number of cycles
+-    tau_threshold: Threshold for RMSE decay rate
+-    """
+     # 1. Initialize voxel model
+     N = calculate_voxel_count(box_corners, voxel_size)
+-    phi = zeros(N)
+-    
+-    # 2. Determine ray ordering step
+-    # Choose p relatively prime to S. For simplicity, if S is odd, p=2; else p=1 (though p=1 is not relatively prime to even S, 
+-    # the source suggests p and S are relatively prime. A safe generic choice for implementation if not specified:
+-    # find smallest p > 1 such that gcd(p, S) == 1. If S=1, p=1.
++    phi = [0.0] * N
++    
++    # 2. Determine ray ordering step p (relatively prime to S)
+     p = find_relatively_prime_step(S)
+     
+-    current_frame_index = 0 # s_0 = 1 implies index 0 in 0-based list, but formula uses 1-based indexing for s_k
+-    # Formula: s_{k+1} - 1 = (s_k + p - 1) mod S. 
+-    # Let idx_k be 0-based index. s_k = idx_k + 1.
+-    # idx_{k+1} + 1 - 1 = (idx_k + 1 + p - 1 - 1) mod S ? 
+-    # Source: s_{k+1} - 1 = (s_k + p - 1) mod S.
+-    # If s_k is 1-based index, then s_k - 1 is 0-based index.
+-    # Let idx = s - 1.
+-    # idx_{k+1} = ( (idx_k + 1) + p - 1 - 1 ) mod S ? No.
+-    # s_{k+1} = (s_k + p - 1) mod S + 1 ? 
+-    # Let's stick to the source formula strictly: s_{k+1} - 1 = (s_k + p - 1) mod S.
+-    # If s_k is 1..S, then s_k - 1 is 0..S-1.
+-    # Let u_k = s_k - 1.
+-    # u_{k+1} = ( (u_k + 1) + p - 1 - 1 ) mod S ? 
+-    # Source: s_{k+1} - 1 = (s_k + p - 1) mod S.
+-    # Example: S=5, p=2. s_0=1.
+-    # k=0: s_1 - 1 = (1 + 2 - 1) mod 5 = 2 mod 5 = 2 => s_1 = 3.
+-    # k=1: s_2 - 1 = (3 + 2 - 1) mod 5 = 4 mod 5 = 4 => s_2 = 5.
+-    # k=2: s_3 - 1 = (5 + 2 - 1) mod 5 = 6 mod 5 = 1 => s_3 = 2.
+-    # k=3: s_4 - 1 = (2 + 2 - 1) mod 5 = 3 mod 5 = 3 => s_4 = 4.
+-    # k=4: s_5 - 1 = (4 + 2 - 1) mod 5 = 5 mod 5 = 0 => s_5 = 1.
+-    # Sequence: 1, 3, 5, 2, 4.
+-    
+-    s_k = 1 # 1-based index
+-    prev_rmse = infinity
++    # 3. Initialize frame index (0-based, corresponds to s_0 = 1)
++    idx = 0
++    prev_rmse = float('inf')
+     cycle_count = 0
+     
+     while cycle_count < kappa_max:
+-        # 3. Iterate through all S frames
+-        for iteration in range(S):
+-            # Select frame s_k
+-            # Convert 1-based s_k to 0-based index for array access
+-            idx = s_k - 1
++        # 4. Iterate through all S frames (one cycle)
++        for _ in range(S):
+             C = cameras[idx]
+             g = images[idx]
+             
+-            # 4. Compute residual and gradient
+-            # Project model to image space: r = X_C phi - g
+-            # Note: X_C phi is computed via forward projection (ray tracing)
+-            # X_C^* v is computed via backprojection
+-            # The term (X_C X_C^* + sigma I)^{-1} requires solving a linear system
+-            # Let v = X_C phi - g
+-            # We need to solve (X_C X_C^* + sigma I) y = v for y
+-            # Then gradient = X_C^* y
+-            
+-            v = forward_projection(phi, C) - g
+-            
+-            # Solve (X_C X_C^* + sigma I) y = v using Conjugate Gradient
+-            # Inner solver tolerance: 1% relative residual, max 10 iterations
+-            y = conjugate_gradient_solve(X_C_X_C_star_plus_sigma_I, v, tolerance=0.01, max_iter=10)
+-            
+-            # Compute gradient
++            # 5. Compute residual v = X_C phi - g
++            v = forward_projection(phi, C)
++            for i in range(len(g)):
++                v[i] -= g[i]
++            
++            # 6. Solve (X_C X_C^* + sigma I) y = v using Conjugate Gradient
++            # Inner solver: 1% relative residual tolerance, max 10 iterations [S1]
++            y = conjugate_gradient_solve(phi, C, sigma, v, rel_tol=0.01, max_iter=10)
++            
++            # 7. Compute gradient = X_C^* y
+             gradient = backprojection(y, C)
+             
+-            # 5. Update model
+-            phi = phi - omega * gradient
+-            
+-            # 6. Select next frame
+-            # s_{k+1} - 1 = (s_k + p - 1) mod S
+-            s_k = ((s_k + p - 1) % S) + 1
+-            
+-        # End of one cycle (S iterations)
++            # 8. Update model: phi = phi - omega * gradient
++            for i in range(N):
++                phi[i] -= omega * gradient[i]
++            
++            # 9. Select next frame: s_{k+1} - 1 = (s_k + p - 1) mod S
++            # In 0-based indexing: idx_{k+1} = (idx_k + p) mod S
++            idx = (idx + p) % S
++            
++        # End of one cycle
+         cycle_count += 1
+         
+-        # 7. Check stopping criterion
+-        # Compute RMSE for the current cycle
+-        # RMSE is computed over the test set or training set? 
+-        # Source mentions RMSE for test set S^{[i]} in cross-validation context.
+-        # For stopping criterion, it says "decay rate of the RMSE between two successive cycles".
+-        # This implies computing RMSE on the training data or a validation set.
+-        # Assuming training data for the loop control as per "successive cycles" in training.
++        # 10. Check stopping criterion: decay rate of RMSE between successive cycles [S1]
+         current_rmse = compute_rmse(phi, cameras, images)
+         
+@@ -149,42 +101,89 @@
+     return phi
+ 
++def calculate_voxel_count(box_corners, voxel_size):
++    a, b = box_corners
++    n1 = math.ceil((b[0] - a[0]) / voxel_size)
++    n2 = math.ceil((b[1] - a[1]) / voxel_size)
++    n3 = math.ceil((b[2] - a[2]) / voxel_size)
++    return n1 * n2 * n3
++
+ def find_relatively_prime_step(S):
+     if S <= 1:
+         return 1
+     for p in range(2, S):
+-        if gcd(p, S) == 1:
++        if math.gcd(p, S) == 1:
+             return p
+-    return 1 # Should not happen for S > 1
++    return 1
+ 
+ def forward_projection(phi, C):
+-    # Ray tracing to compute X_C phi
++    # Computes X_C phi via ray-tracing accumulation over the voxel grid [S1]
+     # Returns vector of size M_s
+-    pass
++    M_s = len(C.rays)
++    out = [0.0] * M_s
++    for i, ray in enumerate(C.rays):
++        acc = 0.0
++        for t in ray.sample_points:
++            acc += phi[ray.voxel_index(t)]
++        out[i] = acc
++    return out
+ 
+ def backprojection(v, C):
+-    # Backprojection to compute X_C^* v
++    # Computes X_C^* v via ray-tracing accumulation over the voxel grid [S1]
+     # Returns vector of size N
+-    pass
+-
+-def conjugate_gradient_solve(A, b, tolerance, max_iter):
+-    # Solves Ax = b
+-    # A is implicitly (X_C X_C^* + sigma I)
+-    # Matrix-vector product for A:
+-    # def matvec(x):
+-    #    temp = forward_projection(backprojection(x, C), C) # X_C X_C^* x
+-    #    return temp + sigma * x
+-    pass
++    N = len(v) # Assumed equal to voxel count for simplicity in this linear operator
++    out = [0.0] * N
++    for i, ray in enumerate(C.rays):
++        for t in ray.sample_points:
++            out[ray.voxel_index(t)] += v[i]
++    return out
++
++def conjugate_gradient_solve(phi, C, sigma, b, rel_tol=0.01, max_iter=10):
++    # Solves (X_C X_C^* + sigma I) y = b using Conjugate Gradient [S1]
++    N = len(b)
++    x = [0.0] * N
++    r = list(b)
++    p = list(r)
++    rs_old = sum(r[i]*r[i] for i in range(N))
++    
++    for i in range(max_iter):
++        Ap = matvec_A(phi, C, sigma, p)
++        pAp = sum(p[i]*Ap[i] for i in range(N))
++        if pAp == 0:
++            break
++        alpha = rs_old / pAp
++        for j in range(N):
++            x[j] += alpha * p[j]
++            r[j] -= alpha * Ap[j]
++        rs_new = sum(r[j]*r[j] for j in range(N))
++        if math.sqrt(rs_new) / math.sqrt(sum(b[j]*b[j] for j in range(N))) < rel_tol:
++            break
++        beta = rs_new / rs_old
++        for j in range(N):
++            p[j] = r[j] + beta * p[j]
++        rs_old = rs_new
++    return x
++
++def matvec_A(phi, C, sigma, x):
++    # Computes (X_C X_C^* + sigma I) x
++    # First compute X_C^* x via backprojection
++    Xt_x = backprojection(x, C)
++    # Then compute X_C (X_C^* x) via forward projection
++    XtX_x = forward_projection(Xt_x, C)
++    # Add regularization term sigma * x
++    for i in range(len(x)):
++        XtX_x[i] += sigma * x[i]
++    return XtX_x
+ 
+ def compute_rmse(phi, cameras, images):
+-    # Computes RMSE over all training frames
+-    # eta = sqrt( (1 / sum(M_s)) * sum( ||X_C phi - g||^2 ) )
+-    total_sq_error = 0
++    # Computes RMSE over all training frames [S1]
++    total_sq_error = 0.0
+     total_pixels = 0
+     for C, g in zip(cameras, images):
+         pred = forward_projection(phi, C)
+-        diff = pred - g
+-        total_sq_error += dot(diff, diff)
++        for i in range(len(g)):
++            diff = pred[i] - g[i]
++            total_sq_error += diff * diff
+         total_pixels += len(g)
+-    return sqrt(total_sq_error / total_pixels)
++    return math.sqrt(total_sq_error / total_pixels)
+ ```
+ 
+@@ -218,8 +217,7 @@
+ - **Limitations:** Requires careful tuning of $\omega$ and $\sigma$; convergence depends on the ordering of frames [S1].
+ - **When to use:** Reflective tomography reconstruction where data arrives sequentially or memory is limited [S1].
+-- **When not to use:** When exact global solutions are required without iterative approximation, or when the problem is not ill-conditioned in a way that benefits from the specific preconditioner [S1].
+ 
+ ## Background
+-The Incremental Preconditioned Gradient Method was introduced in the context of flexible algebraic techniques for multiview reconstruction [S1]. It is based on the work of [S1] (2019), which proposes an online learning approach for reflective tomography using a preconditioned gradient descent on a least-squares cost function [S1]. The method adapts the Algebraic Reconstruction Technique (ART) by incorporating a preconditioner derived from the projection matrix structure [S1].
++The Incremental Preconditioned Gradient Method was introduced as an online learning approach for reflective tomography [S1]. It adapts the Algebraic Reconstruction Technique (ART) by incorporating a preconditioner derived from the projection matrix structure to solve a least-squares cost function incrementally [S1]. The method was proposed to address multiview reconstruction problems where high-frequency spatial information (surfaces) must be prioritized [S1].
+ 
+ ## Sources

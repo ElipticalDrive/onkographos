@@ -1,0 +1,236 @@
+User-facing trap, found while investigating #785. Filed separately because #785 is a test defect while this is a product behaviour question — the renderer is doing what its contract says, but the result is silent and very hard to diagnos...
+
+GaussianSplatWorld3D silently renders nothing when a GaussianSplatNode3D shares the scene (single-route-per-frame, warning only) · Issue #788 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+GaussianSplatWorld3D silently renders nothing when a GaussianSplatNode3D shares the scene (single-route-per-frame, warning only) #788
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+GaussianSplatWorld3D silently renders nothing when a GaussianSplatNode3D shares the scene (single-route-per-frame, warning only)#788
+Copy link
+Labels
+area:rendererRendering pipelineRendering pipelineenhancementNew feature or requestNew feature or requestpriority:P2Medium priorityMedium priorityuser-facingDirectly affects external users, docs, or public repo surfaceDirectly affects external users, docs, or public repo surface
+Description
+klausi3D
+opened on Jul 27, 2026
+Issue body actions
+User-facing trap, found while investigating #785. Filed separately because #785 is a test defect while this is a product behaviour question — the renderer is doing what its contract says, but the result is silent and very hard to diagnose.
+Symptom
+Place a GaussianSplatWorld3D and a GaussianSplatNode3D in the same scene. The world renders nothing. There is no error — only a WARN_PRINT_ONCE:
+```
+[GaussianSplatRenderer] Resident route rejected
+(reason=submission_hint_resident:instance_submission_not_feasible:resident_no_instances);
+frame skipped to preserve single-route-per-frame contract.
+   at: GaussianSplatRenderer::render_scene_instance (renderer/gaussian_splat_renderer.cpp:2478)
+```
+Hiding the node does not help: the route decision is per-frame and global, so toggling visible only decides whether the shared composite draws at all — it does not hand the frame back to the world submission. Measured: the world viewport stays at the uniform clear colour in every configuration tried.
+Mechanism
+GaussianSplatNode3D always publishes SUBMISSION_RESIDENCY_HINT_RESIDENT, documented at core/gs_project_settings.h:234-252:
+Scope: world submissions only … GaussianSplatNode3D … always publishes SUBMISSION_RESIDENCY_HINT_RESIDENT; do not treat route_policy as a project-wide backend knob.
+GaussianSplatWorld3D derives its hint from route_policy (nodes/gaussian_splat_world_3d.cpp:505-517). With both present the renderer commits to RESIDENT; the world submission contributes zero resident instances, so resident_no_instances is returned (renderer/resident_instance_contract_publisher.cpp:374) and the whole frame is skipped.
+Confirmed symmetrical: forcing route_policy=1 (streaming) makes the instance node's capture render the world's splats (data_source=StreamingGPU visible_splats=10) while the world capture stays blank. The two node types are never independently observable in one scene.
+Why it deserves a decision
+The behaviour is contract-consistent, so this is not obviously a bug — but from a user's seat "I added a second node and my scene went black, with one warning in the log" is a bad failure mode for a renderer aiming at a public alpha. The repo already treats this combination as unproven in two places (qa_test_runner.gd disables qa_stream_multi_asset.tscn "until the runtime surface can prove true resident/streaming coexistence"; tests/runtime/test_mixed_residency_routing.gd:3-5 repeats it), yet nothing stops a user from building the scene.
+Options
+Make it loud — promote the warning to a configuration warning on the node in the editor (_get_configuration_warnings()), so the scene tree shows the conflict at author time instead of at runtime. Cheapest, and probably worth doing regardless of what else is chosen.
+Make it work — support genuine per-submission routing so both node types can coexist. This is the real feature; it is what qa_stream_multi_asset is waiting on.
+Make it impossible — reject the combination explicitly with an error naming both nodes.
+Option 1 is not exclusive with 2 or 3 and closes the diagnosability gap immediately.
+Activity
+klausi3D
+added
+enhancementNew feature or requestNew feature or request
+priority:P2Medium priorityMedium priority
+area:rendererRendering pipelineRendering pipeline
+user-facingDirectly affects external users, docs, or public repo surfaceDirectly affects external users, docs, or public repo surface
+on Jul 27, 2026
+klausi3D
+added a commit that references this issue on Jul 28, 2026
+gaussian_splatting: activate the QA scene suite as a blocking visual …
+...
+568b7b8
+klausi3D commented on Aug 5, 2026
+klausi3D
+on Aug 5, 2026
+OwnerAuthor
+More actions
+Owner decision: unify — one user-facing node, residency becomes internal
+Direction taken 2026-08-05, following the game-developer readiness assessment and the inspector/overlay red-teams.
+The problem, stated as a user meets it
+GaussianSplatNode3D
+GaussianSplatWorld3D
+Transform
+✅
+❌ must stay at identity
+Streaming
+❌ resident only
+✅
+Inspector height
+3912 px
+434 px
+Put both in one scene and the whole frame is skipped, with a WARN_PRINT_ONCE as the only signal. The bake that bridges the two is a repository script shipped in no release, with no editor UI.
+A game developer needs both capabilities: transforms to place a capture in a scene, streaming to handle a realistic 1–5 M-splat capture. Requiring them to pick a node type that grants one and forbids the other — on day one, before they know the difference — is the defect. It is also unrecoverable without re-authoring the scene.
+Decision
+One user-facing node. Resident vs streaming becomes an internal strategy, selected from asset size and settings, not a node type the user must choose correctly in advance.
+The deciding argument: this is the only option under which a user cannot pick wrong. Every alternative preserves a decision that requires knowing the renderer's internals to make.
+Sequencing — the interim comes first
+This is R2/R3 and needs a design record before implementation, so it is deliberately not starting as code.
+Now — make the failure loud. Convert the silent frame-skip into a hard error plus a node configuration warning naming both nodes and what to do. A silently blank frame is the worst possible presentation of this constraint: it looks like a rendering bug, not a usage error. This is small, independent, and worth doing whether or not unification lands on schedule.
+Next — ADR. Where residency selection lives, what triggers it, how an existing scene using either node migrates, and what happens to GaussianSplatWorld3D as a class (deprecated shim vs removed). Existing scenes must keep loading — see Removed debug/enable_state_guardrails ClassDB property + methods break saved scenes and scripts with no compat shim #712 and the GaussianSplatDynamicInstance3D handling in gaussian_splatting: shrink the GaussianSplatNode3D inspector 78% — foldable overview, layer grid, storage-only asset arrays (#836, #834) #838 for how that constraint has bitten before.
+Then — implementation, sliced.
+Not in scope for the interim
+No property removal, no class deregistration, no scene-format change. Step 1 is diagnostics only.
+Related decisions taken at the same time
+Inspector regrouping proceeds (slice 2 of gaussian_splatting: shrink the GaussianSplatNode3D inspector 78% — foldable overview, layer grid, storage-only asset arrays (#836, #834) #838): 21 of 47 properties move off the default surface. Evidence: the owner's own editor folding state records Transform and Asset as the only groups ever unfolded, across every splat node in a real scene.
+stats/* node properties are deleted — read-only telemetry already duplicated in the Overview panel, rendering as unitless spinboxes.
+Debug property placement is deferred until Debug overlays are silently force-disabled in any scene with more than one splat node #831 and Debug flag inventory: of 16 flags, 5 are dead, 4 broken, 2 dead in practice #832 are fixed. Of 16 debug flags, 4 work, 4 are broken, 5 are dead, and 4 of 6 user-reachable overlays are silently force-disabled in any multi-node scene. Reorganising a surface whose controls mostly do nothing would be premature.
+Related: #825 (the readiness assessment that surfaced the transform/stream split), #836, #831, #832.
+klausi3D commented on Aug 9, 2026
+klausi3D
+on Aug 9, 2026
+OwnerAuthor
+More actions
+Correction: the mechanism paragraph above is imprecise, and the consequence is worse than filed
+Verified against origin/master @ a04472a82cf while writing the ADR (PR #856).
+What this issue says: the instance node's always-RESIDENT hint is why the renderer commits to RESIDENT.
+What the source does: the precedence at gaussian_splat_scene_director.cpp:2811-2859 is the reverse. The world hint wins when the submission is active and record_has_renderable_payload() holds (:2817-2827); instance records are only a fallback (:2830-2852).
+The reason string quoted above, submission_hint_resident:instance_submission, is reachable only through that fallback, and only when route_policy != RESIDENT — meaning the world hint was absent at route-decision time, not outranked.
+Consequence, and why this matters more than a citation fix: which node type disappears depends on load timing, not on fixed precedence. The failure is not "the world always loses" but "whichever submission wasn't ready yet loses", which is a worse diagnostic story than the issue describes.
+Also verified: route_policy resolves nothing. 0 drops the world; 1 drops the instance content. There is no setting that makes both observable.
+Line citations, drifted
+Four of the five have moved; recorded here so the next reader doesn't chase them:
+as filed
+actual at a04472a82cf
+gs_project_settings.h:234-252
+doc :235-246, fn :247
+gaussian_splat_world_3d.cpp:505-517
+:510-514
+resident_instance_contract_publisher.cpp:374
+:400
+gaussian_splat_renderer.cpp:2478
+reason :2474, WARN :2508, return :2513
+qa_test_runner.gd + test_mixed_residency_routing.gd:3-5
+confirmed verbatim (qa_test_runner.gd:53-55)
+Split out
+#857 — the instance-hint fallback loop (:2830-2846) ignores record.visible, while the same store's flag is honoured at :1603/:1754/:1929/:2075/:2923. A hidden GaussianSplatNode3D still steers the global route — i.e. the obvious workaround for this trap does not work.
+Decision
+Recorded in PR #856: Option 1 accepted as the interim, Option 2 accepted as the target but deferred behind #855 (a coexistence A/B across two routes that already disagree by SSIM 0.8813 cannot distinguish a routing defect from the known divergence), Option 3 rejected — the combination is not uniformly black today, so a hard error would turn partially-working scenes into no output on upgrade, and it would be the first thing Option 2 deletes.
+Still open: whether the world submission was not-yet-active or not-yet-renderable at hint time. That determines whether Option 2 must also fix a startup race, and it cannot be settled by reading — it needs a runtime capture.
+klausi3D
+added 2 commits that reference this issue on Aug 10, 2026
+docs: fix the #788 coexistence ADR's predicate, refresh ordering and …
+...
+06dc8c8
+docs: drop the unmeasured load-timing cause and fix the #788 workarou…
+...
+32f83f5
+klausi3D commented on Aug 10, 2026
+klausi3D
+on Aug 10, 2026
+OwnerAuthor
+More actions
+Retraction: the "load timing" attribution in my correction above is not measured
+My earlier correction on this issue (#788 (comment)) got the precedence right and then overreached on the cause. Independent review of PR #856 caught it. Retracting the causal half here so this thread does not carry an unverified claim.
+Retracted: "which node type disappears depends on load timing … whichever submission wasn't ready yet loses."
+That was an inference stated as a finding. Nothing in this repo measures it. The same comment even ends with "still open: whether the world submission was not-yet-active or not-yet-renderable" — so the paragraph contradicted its own closing line.
+What is actually established (re-verified at origin/master a04472a82cf):
+In get_submission_residency_hint_for_renderer() (core/gaussian_splat_scene_director.cpp:2816-2826) the world branch is an unconditional early return: an active world submission with a renderable payload and a hint always wins, and the instance loop at :2828-2852 is only reached when that gate fails.
+The world node sets has_desired_residency_hint = true unconditionally on every submission it publishes (nodes/gaussian_splat_world_3d.cpp:510), so for a committed submission the gate can only fail on is_active() or record_has_renderable_payload().
+Therefore the observed blank world plus submission_hint_resident:instance_submission proves exactly one thing: at route-decision time the world submission failed that gate. It proves nothing about why, and several of the candidate causes are steady states rather than timing:
+the submission was never committed — submit_world_submission() rejects when a live world already owns the scenario (:2390-2399) and the node returns without marking itself active (nodes/gaussian_splat_world_3d.cpp:516-522). Persistent while both worlds exist.
+the record was reset by release, cross-scenario eviction or teardown (SubmissionStore::reset(), core/gaussian_splat_scene_director.h:752).
+the payload is never renderable — record_has_renderable_payload() (:843-851) needs gaussian_data with get_count() > 0 or a valid payload_source with get_count() > 0; a world satisfying neither fails for the entire session.
+a load-timing race — one candidate among these, not the answer.
+What would settle it (not run; needs a build): the mixed scene with is_active(), record_has_renderable_payload() and has_desired_residency_hint logged from inside get_submission_residency_hint_for_renderer() (:2811) on every frame from the first frame to steady state. A gate that fails early and passes later is timing. A gate that never passes is state.
+Everything else in that comment stands: the precedence correction itself, the drifted line citations, route_policy resolving nothing (in either direction, per the gate above), the #857 split-out, and the Option 1 / 2 / 3 decision.
+The ADR in #856 has been corrected accordingly — 32f83f5984f. The user-facing configuration-warning text now names the observable outcome and no cause at all, which is the honest state until that capture exists.
+(Separately, and also from #856 review: the ADR's advertised workaround "keep them in separate scenes" was wrong. Node3D::get_world_3d() forwards to Viewport::find_world_3d() (scene/main/viewport.cpp:4670-4681), which recurses into the parent viewport — so two .tscn files instantiated under one viewport still share a World3D and still conflict. The workaround is a separate World3D: a SubViewport with own_world_3d, or running the scenes one at a time.)
+klausi3D
+added 11 commits that reference this issue on Aug 10, 2026
+docs: state the #788 coexistence predicate positively and re-derive t…
+...
+02018fd
+docs: base the #788 coexistence predicate on the registered scenario …
+...
+36df268
+docs: re-derive the #788 mutation table against the current predicate…
+...
+4e9f2f0
+docs: make #862 a prerequisite of the #788 warning, fix the World3D w…
+...
+d19e85e
+docs: correct the #788 ADR's T8 conjunct analysis and record the reje…
+...
+6d92290
+docs: fix two citation drifts in the #788 ADR found while re-verifying (
+...
+c95e2dd
+docs: drain the message queue before the #788 mutation window and giv…
+...
+cc1b1e7
+docs: specify the #788 warning refresh alongside #862's resubmission,…
+...
+176c443
+docs: stop prescribing a #788 workaround — no complete one exists on …
+...
+f4c25d6
+docs: pin where the #788 refresh is written inside its trigger site, …
+...
+84bdab0
+gaussian_splatting: ADR for single-route-per-frame node coexistence (#…
+...
+aa8c378
+klausi3D commented on Sep 23, 2026
+klausi3D
+on Sep 23, 2026
+OwnerAuthor
+More actions
+Maintainer decision (2026-09-23): Unreal-style bake to a streamable world
+The composition rule follows the Unreal Engine workflow. GaussianSplatNode3D instances are placed like static meshes at authoring time and are baked into one large, streamable world (GaussianSplatWorld3D / .gsplatworld) for fast runtime rendering. At runtime the baked world is the rendering authority for that content.
+What this means for the fix (derived; the exact contract belongs in the ADR)
+Bake step. An editor/tool action merges the placed nodes into the world asset: chunking and streaming layout, with each node's transform baked in. The world then owns that content.
+After baking, the source nodes must not render a second time, and they must not affect the world's submission. They become authoring-only, editor-visible for placement but excluded from runtime submission.
+The world must never be suppressed by the presence of nodes. Today any registered node record suppresses the world payload, including hidden, CPU-culled and data-evicted ones (evidence below). Under the bake model, that suppression is wrong in every case.
+Open sub-question for the ADR: content that is not static. In Unreal, movable actors render alongside baked static geometry, which would mean world plus movable nodes compose additively at runtime. Whether movable/animated splat nodes are supported next to a baked world, and how they are depth-composited with it, is still to be decided.
+Audit evidence (forensic audit record GS-AUDIT-SYS-001, P1, confirmed static call chain, audited at 6f4552076c7)
+core/gaussian_splat_scene_director.cpp L1698-L1742 — build_instance_buffer_for_renderer: the world-submission identity row is emitted only when instance_store.is_empty().
+core/gaussian_splat_scene_director.cpp L1753-L1770 — instance rows skip !record.visible, shadow-filtered and data-null records. A non-empty store can therefore produce zero rows: nothing renders, neither the node nor the world.
+Runtime confirmation (2026-09-23)
+Confirmed at runtime. Same camera and the same GaussianSplatWorld3D (test_splats.gsplatworld, 1024 splats). Non-background samples (stride 2) per phase: world only 5001; plus a hidden GaussianSplatNode3D 0; node visible but behind the camera 0; node in view 161, only the node's 16 splats (renderer reports 16 visible); node removed 5001 (world restored). While nothing is drawn, the shared renderer's stats still report visible_splats = 1024.
+Probe probe_world_node.gd (B) on Z:/wt-54 godot.windows.editor.dev.x86_64 (built 2026-09-22 09:39 at 6f4552076c7), 2026-09-23 14:10-14:11 UTC, RTX 3090 (driver 591.86), Vulkan Forward+, dev build (-O0), fresh project with no gaussian_splatting/* settings pinned.
+klausi3D
+added 3 commits that reference this issue on Sep 30, 2026
+docs: disclose #1089, #1092, #1077 and #788 as active limitations; link
+...
+144b43d
+docs: describe #788 as state-dependent, per the single-route ADR §3.2
+...
+c7e62af
+docs: revalidate every known-public-alpha limitation — status per ent…
+...
+c0d1ef5
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:rendererRendering pipelineRendering pipelineenhancementNew feature or requestNew feature or requestpriority:P2Medium priorityMedium priorityuser-facingDirectly affects external users, docs, or public repo surfaceDirectly affects external users, docs, or public repo surface
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

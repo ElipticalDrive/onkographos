@@ -1,0 +1,218 @@
+--- v008.md
++++ v009.md
+@@ -1,4 +1,3 @@
+ # Differentiable Volumetric Rendering (DVR)
+-
+ 
+ ## Overview
+@@ -38,7 +37,7 @@
+     In practice, to compute the gradient of the loss with respect to $\theta$ efficiently without storing intermediate volumetric data:
+     a. Let $\lambda = \frac{\partial \mathcal{L}}{\partial \hat{d}}$ be the incoming gradient from the loss with respect to depth [S2].
+-    b. Compute the scalar factor $\mu = - \left( \frac{\partial f_\theta(\hat{\mathbf{p}})}{\partial \hat{\mathbf{p}}} \cdot \mathbf{w} \right)^{-1} \lambda$ [S2].
+-    c. Multiply $\lambda$ element-wise by $\mu$ to get $\mu \lambda$ [S2].
+-    d. Backpropagate through $f_\theta(\hat{\mathbf{p}})$ using reverse-mode automatic differentiation with the modified gradient [S2].
++    b. Compute the scalar factor $\mu_{\text{factor}} = - \left( \frac{\partial f_\theta(\hat{\mathbf{p}})}{\partial \hat{\mathbf{p}}} \cdot \mathbf{w} \right)^{-1}$ [S2].
++    c. Multiply $\lambda$ element-wise by $\mu_{\text{factor}}$ to get $\mu = \lambda \cdot \mu_{\text{factor}}$ [S2].
++    d. Backpropagate through $f_\theta(\hat{\mathbf{p}})$ using reverse-mode automatic differentiation with the modified gradient $\mu$ [S2].
+ 
+ **Pseudocode:**
+@@ -51,5 +50,5 @@
+     ray_origin: (3,) tensor
+     ray_direction: (3,) tensor
+-    network: DVRNetwork instance
++    network: DVRNetwork instance (forward returns (occ, texture))
+     latent_code: (latent_dim,) tensor
+     tau: isosurface threshold
+@@ -57,20 +56,20 @@
+     s0: start distance
+     ds: step size
+-    Returns: color (3,), mu (scalar), p_hat (3,), df_dp (3,)
++    Returns: color (3,), mu_factor (scalar), p_hat (3,), df_dp (3,)
+     """
+-    # 1. Sample points along ray
+-    distances = torch.linspace(s0, s0 + n_samples * ds, n_samples)
++    # 1. Sample points along ray: p_j = r0 + (s0 + j*ds) * w
++    distances = s0 + torch.arange(n_samples) * ds
+     points = ray_origin.unsqueeze(0) + distances.unsqueeze(1) * ray_direction.unsqueeze(0)
+     
+-    # 2. Evaluate occupancy
++    # 2. Evaluate occupancy network f_theta
+     occ, _ = network(points, latent_code.unsqueeze(0))
+     occ = occ.squeeze(1)
+     
+-    # 3. Find transition interval
++    # 3. Find transition interval where f_theta crosses tau
+     inside = occ >= tau
+     transitions = (inside[1:] & ~inside[:-1])
+     
+     if not transitions.any():
+-        # No intersection found within sampling range
++        # No intersection found; return dummy values
+         return torch.zeros(3), torch.tensor(0.0), points[0], torch.zeros(3)
+         
+@@ -91,9 +90,10 @@
+     p_hat = ray_origin + d_hat * ray_direction
+     
+-    # 5. Evaluate texture at intersection
++    # 5. Evaluate texture network t_theta at intersection
+     _, texture = network(p_hat.unsqueeze(0), latent_code.unsqueeze(0))
+     color = texture.squeeze(0)
+     
+-    # 6. Compute gradient factor mu for backpropagation
++    # 6. Compute gradient factor for backward pass
++    # We need df/dp at p_hat to compute the scalar factor mu_factor = -1 / (df/dp . w)
+     p_hat.requires_grad = True
+     occ_hat, _ = network(p_hat.unsqueeze(0), latent_code.unsqueeze(0))
+@@ -103,28 +103,9 @@
+     df_dp_dot_w = torch.dot(df_dp, ray_direction)
+     if df_dp_dot_w.abs() < 1e-8:
+-        mu = torch.tensor(0.0)
++        mu_factor = torch.tensor(0.0)
+     else:
+-        mu = -1.0 / df_dp_dot_w
++        mu_factor = -1.0 / df_dp_dot_w
+         
+-    return color, mu, p_hat, df_dp
+-
+-def render_batch(ray_origins, ray_directions, network, latent_codes, tau=0.5, n_samples=128, s0=0.0, ds=0.01):
+-    """
+-    Renders a batch of pixels.
+-    ray_origins: (B, 3)
+-    ray_directions: (B, 3)
+-    latent_codes: (B, latent_dim)
+-    Returns: colors (B, 3), mu_factors (B,)
+-    """
+-    B = ray_origins.shape[0]
+-    colors = torch.zeros(B, 3)
+-    mu_factors = torch.zeros(B)
+-    
+-    for i in range(B):
+-        c, mu, _, _ = render_pixel(ray_origins[i], ray_directions[i], network, latent_codes[i], tau, n_samples, s0, ds)
+-        colors[i] = c
+-        mu_factors[i] = mu
+-        
+-    return colors, mu_factors
++    return color, mu_factor, p_hat, df_dp
+ 
+ def compute_gradients(ray_origins, ray_directions, network, latent_codes, target_colors, tau=0.5, n_samples=128, s0=0.0, ds=0.01):
+@@ -132,84 +113,53 @@
+     Computes gradients of loss w.r.t network parameters.
+     """
+-    network.train()
+-    optimizer = torch.optim.Adam(network.parameters(), lr=1e-4)
+-    
+     # Forward pass
+-    rendered_colors, mu_factors = render_batch(ray_origins, ray_directions, network, latent_codes, tau, n_samples, s0, ds)
++    colors, mu_factors, p_hats, df_dps = render_batch(ray_origins, ray_directions, network, latent_codes, tau, n_samples, s0, ds)
+     
+     # Loss
+-    loss = torch.mean(torch.abs(rendered_colors - target_colors))
++    loss = torch.mean(torch.abs(colors - target_colors))
+     
+-    # Backward pass
+-    # 1. Compute gradient of loss w.r.t rendered_colors
+-    dL_dcolor = torch.sign(rendered_colors - target_colors) / rendered_colors.shape[0]
++    # Backward pass setup
++    # 1. Gradient of loss w.r.t rendered colors: dL/dcolor
++    dL_dcolor = torch.sign(colors - target_colors) / colors.shape[0]
+     
+-    # 2. Compute gradient of loss w.r.t p_hat via texture network
+-    # We need to backprop through texture network to get dL/dp_hat
+-    # But we also need to inject the gradient through the occupancy network
++    # 2. Gradient of loss w.r.t p_hat via texture network
++    # dL/dp_hat = dL/dcolor * dt/dp_hat
++    dL_dp_hat = torch.autograd.grad(colors.sum(), p_hats, grad_outputs=dL_dcolor, create_graph=True)[0]
+     
+-    # Let's compute dL/dp_hat from the texture gradient
+-    # We can get this by backpropagating dL/dcolor through the texture network
++    # 3. Incoming gradient w.r.t depth: lambda = dL/dp_hat . w
++    lambda_val = torch.sum(dL_dp_hat * ray_directions, dim=1)
+     
+-    # However, the secant method breaks the graph. We must manually inject gradients.
++    # 4. Compute final gradient factor: mu = mu_factor * lambda
++    mu = mu_factors * lambda_val
+     
+-    # Re-evaluate p_hat and gradients for each pixel
++    # 5. Backpropagate through occupancy network f_theta
++    # The evidence states: multiply lambda by mu_factor, then backprop through f_theta.
++    # We inject the scaled gradient into the computation graph of f_theta.
++    dummy = (df_dps * mu.unsqueeze(1)).sum()
++    dummy.backward()
++    
++    return loss
++
++def render_batch(ray_origins, ray_directions, network, latent_codes, tau=0.5, n_samples=128, s0=0.0, ds=0.01):
++    B = ray_origins.shape[0]
++    colors = torch.zeros(B, 3)
++    mu_factors = torch.zeros(B)
++    p_hats = torch.zeros(B, 3)
++    df_dps = torch.zeros(B, 3)
++    
+     for i in range(B):
+-        distances = torch.linspace(s0, s0 + n_samples * ds, n_samples)
+-        points = ray_origins[i].unsqueeze(0) + distances.unsqueeze(1) * ray_directions[i].unsqueeze(0)
+-        occ, _ = network(points, latent_codes[i].unsqueeze(0))
+-        inside = occ.squeeze(1) >= tau
+-        transitions = (inside[1:] & ~inside[:-1])
+-        j = torch.argmax(transitions.float())
+-        p_j = points[j]
+-        p_j1 = points[j+1]
+-        f_j = occ[j] - tau
+-        f_j1 = occ[j+1] - tau
+-        denom = f_j1 - f_j
+-        if denom.abs() < 1e-8:
+-            d_hat = distances[j]
+-        else:
+-            d_hat = distances[j] - f_j * (distances[j+1] - distances[j]) / denom
+-        p_hat = ray_origins[i] + d_hat * ray_directions[i]
++        c, mu, p, df = render_pixel(ray_origins[i], ray_directions[i], network, latent_codes[i], tau, n_samples, s0, ds)
++        colors[i] = c
++        mu_factors[i] = mu
++        p_hats[i] = p
++        df_dps[i] = df
+         
+-        # Compute df/dp
+-        p_hat.requires_grad = True
+-        occ_hat, _ = network(p_hat.unsqueeze(0), latent_codes[i].unsqueeze(0))
+-        f_val = occ_hat - tau
+-        df_dp = torch.autograd.grad(f_val.sum(), p_hat, create_graph=True)[0].squeeze(0)
+-        
+-        # Compute dL/dp_hat from texture
+-        # We need the gradient of texture w.r.t p_hat
+-        # Let's assume we have dL/dcolor from the loss
+-        # dL/dp_hat = dL/dcolor * dt/dp_hat
+-        # We can compute dt/dp_hat by backpropagating dL/dcolor through the texture network
+-        
+-        # To do this cleanly, we can use torch.autograd.grad on the texture output
+-        _, texture = network(p_hat.unsqueeze(0), latent_codes[i].unsqueeze(0))
+-        dL_dp_hat = torch.autograd.grad(texture.sum(), p_hat, grad_outputs=dL_dcolor[i], create_graph=True)[0].squeeze(0)
+-        
+-        # Compute lambda = dL/dd_hat = dL/dp_hat . w
+-        lambda_val = torch.dot(dL_dp_hat, ray_directions[i])
+-        
+-        # Compute mu
+-        df_dp_dot_w = torch.dot(df_dp, ray_directions[i])
+-        if df_dp_dot_w.abs() < 1e-8:
+-            mu = torch.tensor(0.0)
+-        else:
+-            mu = -lambda_val / df_dp_dot_w
+-            
+-        # Backpropagate mu * df/dtheta through the occupancy network
+-        # df/dtheta is computed by autograd if we keep the graph
+-        # We multiply the gradient of f_val by mu
+-        mu.backward(mu, retain_graph=True) # This is not quite right for batched gradients
+-        
+-    optimizer.step()
+-    return loss
++    return colors, mu_factors, p_hats, df_dps
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **No Intersection:** If a ray does not cross the isosurface within the sampling interval $[s_0, n\Delta s + s_0]$, the transition detection fails. The implementation must handle this gracefully to avoid division by zero or invalid secant steps [S2].
+-*   **Numerical Stability:** Implicit differentiation requires computing $\frac{\partial f_\theta(\hat{\mathbf{p}})}{\partial \hat{\mathbf{p}}} \cdot \mathbf{w}$. If this dot product is near zero, the gradient factor $\mu$ becomes unstable. A small epsilon guard is required [S2].
+-*   **Sampling Resolution:** The accuracy of $\hat{d}$ depends on $n$ and $\Delta s$. Insufficient sampling may miss thin structures or cause secant divergence [S2].
++*   **No Intersection:** If a ray does not cross the isosurface within the sampling interval $[s_0, n\Delta s + s_0]$, the transition detection fails. The implementation must handle this gracefully to avoid division by zero or invalid secant steps [G].
++*   **Numerical Stability:** Implicit differentiation requires computing $\frac{\partial f_\theta(\hat{\mathbf{p}})}{\partial \hat{\mathbf{p}}} \cdot \mathbf{w}$. If this dot product is near zero, the gradient factor $\mu$ becomes unstable. A small epsilon guard is required [G].
++*   **Sampling Resolution:** The accuracy of $\hat{d}$ depends on $n$ and $\Delta s$. Insufficient sampling may miss thin structures or cause secant divergence [G].
+ 
+ ## Subtopics

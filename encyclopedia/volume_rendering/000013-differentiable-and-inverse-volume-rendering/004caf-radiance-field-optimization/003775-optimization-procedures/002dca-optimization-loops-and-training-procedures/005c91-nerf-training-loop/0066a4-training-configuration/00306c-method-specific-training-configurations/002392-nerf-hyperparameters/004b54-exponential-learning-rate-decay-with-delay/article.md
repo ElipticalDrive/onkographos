@@ -1,0 +1,108 @@
+# Exponential Learning Rate Decay with Delay
+
+Also called: Exponential Learning Rate Decay, log-linear LR scheduling
+
+## Overview
+Exponential Learning Rate Decay with Delay is a continuous learning rate schedule function used in NeRF optimization that interpolates between an initial and final learning rate over a specified number of steps, with an optional initial delay period [S1, unofficial][S2, unofficial][S3, unofficial]. It distinguishes itself from standard exponential decay by applying a reverse cosine decay multiplier during the delay phase before transitioning to the main log-linear decay trajectory [S1, unofficial][S2, unofficial][S3, unofficial].
+
+## How it works
+The method computes a scalar learning rate value given the current training step and a set of hyperparameters [S1, unofficial][S2, unofficial][S3, unofficial]. It combines two components: a base exponential decay curve and an optional delay multiplier [S1, unofficial][S2, unofficial][S3, unofficial].
+
+**Inputs:**
+- `step` (int): Current training step index (non-negative) [S1, unofficial][S2, unofficial][S3, unofficial].
+- `max_steps` (int): Total number of training steps [S1, unofficial][S2, unofficial][S3, unofficial].
+- `lr_init` (float): Initial learning rate [S1, unofficial][S2, unofficial][S3, unofficial].
+- `lr_final` (float): Final learning rate [S1, unofficial][S2, unofficial][S3, unofficial].
+- `lr_delay_steps` (int): Number of steps to apply the delay/warm-up phase [S1, unofficial][S2, unofficial][S3, unofficial].
+- `lr_delay_mult` (float): Multiplier scaling the learning rate during the delay phase [S1, unofficial][S2, unofficial][S3, unofficial].
+
+**Outputs:**
+- `lr` (float): The computed learning rate for the current step [S1, unofficial][S2, unofficial][S3, unofficial].
+
+**Data Structures:**
+No persistent data structures are required; the function is stateless and computes the value from inputs alone [G].
+
+**Parameters:**
+- `lr_delay_steps` (int): Number of steps to delay the decay (default 0) [S1, unofficial][S3, unofficial].
+- `lr_delay_mult` (float): Multiplier for the delay period (default 1.0) [S1, unofficial][S3, unofficial].
+- `max_steps` (int): Total optimization steps (default 1000000) [S3, unofficial].
+
+**Algorithm Steps:**
+1. **Edge Case Handling**: If `step < 0` or both `lr_init` and `lr_final` are 0.0, return 0.0 [S2, unofficial][S3, unofficial].
+2. **Compute Delay Rate**: If `lr_delay_steps > 0`, calculate the normalized delay progress $d = \text{clip}(\text{step} / \text{lr\_delay\_steps}, 0, 1)$ [S1, unofficial][S2, unofficial][S3, unofficial]. Compute the delay rate using reverse cosine decay:
+   $$ \text{delay\_rate} = \text{lr\_delay\_mult} + (1 - \text{lr\_delay\_mult}) \cdot \sin(0.5 \cdot \pi \cdot d) $$
+   [S1, unofficial][S2, unofficial][S3, unofficial]
+   Otherwise, set $\text{delay\_rate} = 1.0$ [S2, unofficial][S3, unofficial].
+3. **Compute Base Decay Progress**: Calculate the normalized training progress:
+   $$ t = \text{clip}(\text{step} / \text{max\_steps}, 0, 1) $$
+   [S1, unofficial][S2, unofficial][S3, unofficial]
+4. **Compute Log-Linear Interpolation**: Calculate the base learning rate using exponential interpolation between `lr_init` and `lr_final`:
+   $$ \text{log\_lerp} = \exp(\log(\text{lr\_init}) \cdot (1 - t) + \log(\text{lr\_final}) \cdot t) $$
+   [S1, unofficial][S2, unofficial][S3, unofficial]
+5. **Combine**: Return the final learning rate:
+   $$ \text{lr} = \text{delay\_rate} \cdot \text{log\_lerp} $$
+   [S1, unofficial][S2, unofficial][S3, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def get_expon_lr_func(lr_init, lr_final, lr_delay_steps, lr_delay_mult, max_steps):
+    """
+    Generates a learning rate schedule that decays exponentially from lr_init to lr_final
+    over max_steps, with an optional initial delay phase.
+    
+    Args:
+        lr_init: Initial learning rate.
+        lr_final: Final learning rate.
+        lr_delay_steps: Number of steps to delay the decay.
+        lr_delay_mult: Multiplier for the delay period.
+        max_steps: Total number of training steps.
+        
+    Returns:
+        A function that takes a step index and returns the learning rate.
+    """
+    def schedule(step):
+        # Edge case: invalid step or zero learning rates
+        if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
+            return 0.0
+            
+        # Compute delay rate
+        if lr_delay_steps > 0:
+            delay_progress = np.clip(step / lr_delay_steps, 0, 1)
+            delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(0.5 * np.pi * delay_progress)
+        else:
+            delay_rate = 1.0
+            
+        # Compute base exponential decay progress
+        t = np.clip(step / max_steps, 0, 1)
+        
+        # Log-linear interpolation
+        log_lerp = np.exp(np.log(lr_init) * (1 - t) + np.log(lr_final) * t)
+        
+        return delay_rate * log_lerp
+        
+    return schedule
+```
+
+**Edge Cases and Pitfalls:**
+- **Zero Learning Rates**: The implementation explicitly checks if both `lr_init` and `lr_final` are 0.0 to return 0.0 early [S2, unofficial][S3, unofficial]. If only one is 0.0, `np.log` returns `-inf`, which propagates through the interpolation [G].
+- **Division by Zero**: The conditional guard `if lr_delay_steps > 0` prevents division by zero during delay progress calculation [G]. The `clip` function in step 3 safely handles `max_steps = 0` by clamping the result to 1.0 before division effects propagate [G].
+- **Precision**: The log-linear interpolation avoids underflow/overflow for large step counts by operating in log space before exponentiation [G].
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ per step, involving basic arithmetic, trigonometric, and logarithmic operations [G].
+- **Memory Complexity**: $O(1)$, as no state is stored between steps [G].
+- **Strengths**: Provides a smooth transition from a suppressed initial rate to the main decay curve, stabilizing early training [S1, unofficial][S2, unofficial][S3, unofficial]. The log-linear interpolation ensures the learning rate decays exponentially in value [S1, unofficial][S2, unofficial][S3, unofficial].
+- **Limitations**: Requires tuning `lr_delay_steps` and `lr_delay_mult` [S1, unofficial][S2, unofficial][S3, unofficial].
+- **When to Use**: Suitable for NeRF training where stable initialization is critical [S1, unofficial][S2, unofficial][S3, unofficial].
+
+## Background
+The method was adapted from JaxNeRF and copied from Plenoxels [S1, unofficial]. It is used in various NeRF optimization pipelines to manage the learning rate schedule during training [S1, unofficial][S2, unofficial][S3, unofficial].
+
+## Sources
+[S1] minghanqin/LangSplat, https://github.com/minghanqin/LangSplat, fetched 2026-10-27 (unofficial)
+[S2] LogosIntelligenceLab/4d-gaussian-splatting, https://github.com/LogosIntelligenceLab/4d-gaussian-splatting, fetched 2026-10-27 (unofficial)
+[S3] otakuxiang/gaussian-splatting-jittor, https://github.com/otakuxiang/gaussian-splatting-jittor, fetched 2026-10-27 (unofficial)

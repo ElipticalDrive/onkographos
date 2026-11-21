@@ -1,0 +1,2912 @@
+# MedicalViz
+Volume rendering of medical images
+
+This app visualises multiple MRI scans of the human brain.
+The images are formed into an nrrd model (essentailly all the images are loaded in one dataset).
+Once this model is loaded we effectively have a three-dimensional texture.
+
+The rendering uses the proxy geometry method (as oppsed to other methods such as ray casting) whereby we create slices into the geomerty that we can then render the relevant image onto. This allows us to control the level of detail in the model as we can define the number of slices that are contained within it, more slices leads to a more detailed view of the structure.
+
+We can also alter the transparency of each slice and therefore show internal structures that would normally be difficult to visualise.
+
+The application offers many ways in which to interact with the data such as rendering a solid version of the model, or slicing through the model along each of the axes.
+
+All the controls are self explanatory and allow the patient data to be analysed in detail. You can also highlight and visualise a specific portion of the model by placing a box around the relevant structure and visualising this data in isolation.
+
+### webpack.common.js
+```
+const path = require("path");
+const HtmlWebpackPlugin = require("html-webpack-plugin");
+const MiniCssExtractPlugin = require("mini-css-extract-plugin");
+
+module.exports = {
+    module: {
+        rules: [
+            {
+                test: /\.js$/,
+                exclude: /node_modules/,
+                use: {
+                    loader: "babel-loader"
+                }
+            },
+            {
+                test: /\.html$/,
+                use: [
+                    {
+                        loader: "html-loader",
+                        options: { minimize: true}
+                    }
+                ]
+            },
+            {
+                test: /\.css$/,
+                use: [
+                    "style-loader",
+                    "css-loader"
+                ]
+            },
+            {
+                test: /\.(png|svg|jpg|gif)$/,
+                use: [
+                    "file-loader"
+                ]
+            }
+        ]
+    },
+    plugins: [
+        new HtmlWebpackPlugin({
+            template: "./src/index.html",
+            filename: "./index.html"
+        }),
+        new MiniCssExtractPlugin({
+            filename: "[name].css",
+            chunkFilename: "[id].css"
+        })
+    ]
+}
+```
+
+### webpack.dev.js
+```
+const { merge } = require('webpack-merge');
+ const common = require('./webpack.common.js');
+
+ module.exports = merge(common, {
+   mode: 'development',
+   devtool: 'inline-source-map'
+ });
+```
+
+### webpack.prod.js
+```
+const { merge } = require('webpack-merge');
+ const common = require('./webpack.common.js');
+
+ module.exports = merge(common, {
+   mode: 'production',
+ });
+```
+
+### src/NRRDLoader.d.ts
+```
+import {
+	LoadingManager
+} from '../../../src/Three';
+
+import {
+	Volume
+} from '../misc/Volume';
+
+export class NRRDLoader {
+
+	constructor( manager?: LoadingManager );
+	manager: LoadingManager;
+	path: string;
+
+	fieldFunctions: object;
+
+	load( url: string, onLoad: ( group: Volume ) => void, onProgress?: ( event: ProgressEvent ) => void, onError?: ( event: ErrorEvent ) => void ): void;
+	parse( data: string ) : Volume;
+	parseChars( array: number[], start?: number, end?: number ) : string;
+	setPath( value: string ) : this;
+
+}
+```
+
+### src/NRRDLoader.js
+```
+/*
+ *  three.js NRRD file loader
+ */
+
+import {
+	FileLoader,
+	Loader,
+	Matrix4,
+	Vector3
+} from "three";
+import { Zlib } from "./gunzip.module.min";
+import { Volume } from "./Volume";
+
+var NRRDLoader = function ( manager ) {
+
+	Loader.call( this, manager );
+
+};
+
+NRRDLoader.prototype = Object.assign( Object.create( Loader.prototype ), {
+
+	constructor: NRRDLoader,
+
+	load: function ( url, onLoad, onProgress, onError ) {
+
+		var scope = this;
+
+		var loader = new FileLoader( scope.manager );
+		loader.setPath( scope.path );
+		loader.setResponseType( 'arraybuffer' );
+		loader.load( url, function ( data ) {
+
+			onLoad( scope.parse( data ) );
+
+		}, onProgress, onError );
+
+	},
+
+	parse: function ( data ) {
+
+		// this parser is largely inspired from the XTK NRRD parser : https://github.com/xtk/X
+
+		var _data = data;
+
+		var _dataPointer = 0;
+
+		var _nativeLittleEndian = new Int8Array( new Int16Array( [ 1 ] ).buffer )[ 0 ] > 0;
+
+		var _littleEndian = true;
+
+		var headerObject = {};
+
+		function scan( type, chunks ) {
+
+			if ( chunks === undefined || chunks === null ) {
+
+				chunks = 1;
+
+			}
+
+			var _chunkSize = 1;
+			var _array_type = Uint8Array;
+
+			switch ( type ) {
+
+				// 1 byte data types
+				case 'uchar':
+					break;
+				case 'schar':
+					_array_type = Int8Array;
+					break;
+					// 2 byte data types
+				case 'ushort':
+					_array_type = Uint16Array;
+					_chunkSize = 2;
+					break;
+				case 'sshort':
+					_array_type = Int16Array;
+					_chunkSize = 2;
+					break;
+					// 4 byte data types
+				case 'uint':
+					_array_type = Uint32Array;
+					_chunkSize = 4;
+					break;
+				case 'sint':
+					_array_type = Int32Array;
+					_chunkSize = 4;
+					break;
+				case 'float':
+					_array_type = Float32Array;
+					_chunkSize = 4;
+					break;
+				case 'complex':
+					_array_type = Float64Array;
+					_chunkSize = 8;
+					break;
+				case 'double':
+					_array_type = Float64Array;
+					_chunkSize = 8;
+					break;
+
+			}
+
+			// increase the data pointer in-place
+			var _bytes = new _array_type( _data.slice( _dataPointer,
+				_dataPointer += chunks * _chunkSize ) );
+
+			// if required, flip the endianness of the bytes
+			if ( _nativeLittleEndian != _littleEndian ) {
+
+				// we need to flip here since the format doesn't match the native endianness
+				_bytes = flipEndianness( _bytes, _chunkSize );
+
+			}
+
+			if ( chunks == 1 ) {
+
+				// if only one chunk was requested, just return one value
+				return _bytes[ 0 ];
+
+			}
+
+			// return the byte array
+			return _bytes;
+
+		}
+
+		//Flips typed array endianness in-place. Based on https://github.com/kig/DataStream.js/blob/master/DataStream.js.
+
+		function flipEndianness( array, chunkSize ) {
+
+			var u8 = new Uint8Array( array.buffer, array.byteOffset, array.byteLength );
+			for ( var i = 0; i < array.byteLength; i += chunkSize ) {
+
+				for ( var j = i + chunkSize - 1, k = i; j > k; j --, k ++ ) {
+
+					var tmp = u8[ k ];
+					u8[ k ] = u8[ j ];
+					u8[ j ] = tmp;
+
+				}
+
+			}
+
+			return array;
+
+		}
+
+		//parse the header
+		function parseHeader( header ) {
+
+			var data, field, fn, i, l, lines, m, _i, _len;
+			lines = header.split( /\r?\n/ );
+			for ( _i = 0, _len = lines.length; _i < _len; _i ++ ) {
+
+				l = lines[ _i ];
+				if ( l.match( /NRRD\d+/ ) ) {
+
+					headerObject.isNrrd = true;
+
+				} else if ( l.match( /^#/ ) ) {
+				} else if ( m = l.match( /(.*):(.*)/ ) ) {
+
+					field = m[ 1 ].trim();
+					data = m[ 2 ].trim();
+					fn = NRRDLoader.prototype.fieldFunctions[ field ];
+					if ( fn ) {
+
+						fn.call( headerObject, data );
+
+					} else {
+
+						headerObject[ field ] = data;
+
+					}
+
+				}
+
+			}
+			if ( ! headerObject.isNrrd ) {
+
+				throw new Error( 'Not an NRRD file' );
+
+			}
+			if ( headerObject.encoding === 'bz2' || headerObject.encoding === 'bzip2' ) {
+
+				throw new Error( 'Bzip is not supported' );
+
+			}
+			if ( ! headerObject.vectors ) {
+
+				//if no space direction is set, let's use the identity
+				headerObject.vectors = [ new Vector3( 1, 0, 0 ), new Vector3( 0, 1, 0 ), new Vector3( 0, 0, 1 ) ];
+				//apply spacing if defined
+				if ( headerObject.spacings ) {
+
+					for ( i = 0; i <= 2; i ++ ) {
+
+						if ( ! isNaN( headerObject.spacings[ i ] ) ) {
+
+							headerObject.vectors[ i ].multiplyScalar( headerObject.spacings[ i ] );
+
+						}
+
+					}
+
+				}
+
+			}
+
+		}
+
+		//parse the data when registred as one of this type : 'text', 'ascii', 'txt'
+		function parseDataAsText( data, start, end ) {
+
+			var number = '';
+			start = start || 0;
+			end = end || data.length;
+			var value;
+			//length of the result is the product of the sizes
+			var lengthOfTheResult = headerObject.sizes.reduce( function ( previous, current ) {
+
+				return previous * current;
+
+			}, 1 );
+
+			var base = 10;
+			if ( headerObject.encoding === 'hex' ) {
+
+				base = 16;
+
+			}
+
+			var result = new headerObject.__array( lengthOfTheResult );
+			var resultIndex = 0;
+			var parsingFunction = parseInt;
+			if ( headerObject.__array === Float32Array || headerObject.__array === Float64Array ) {
+
+				parsingFunction = parseFloat;
+
+			}
+			for ( var i = start; i < end; i ++ ) {
+
+				value = data[ i ];
+				//if value is not a space
+				if ( ( value < 9 || value > 13 ) && value !== 32 ) {
+
+					number += String.fromCharCode( value );
+
+				} else {
+
+					if ( number !== '' ) {
+
+						result[ resultIndex ] = parsingFunction( number, base );
+						resultIndex ++;
+
+					}
+					number = '';
+
+				}
+
+			}
+			if ( number !== '' ) {
+
+				result[ resultIndex ] = parsingFunction( number, base );
+				resultIndex ++;
+
+			}
+			return result;
+
+		}
+
+		var _bytes = scan( 'uchar', data.byteLength );
+		var _length = _bytes.length;
+		var _header = null;
+		var _data_start = 0;
+		var i;
+		for ( i = 1; i < _length; i ++ ) {
+
+			if ( _bytes[ i - 1 ] == 10 && _bytes[ i ] == 10 ) {
+
+				// we found two line breaks in a row
+				// now we know what the header is
+				_header = this.parseChars( _bytes, 0, i - 2 );
+				// this is were the data starts
+				_data_start = i + 1;
+				break;
+
+			}
+
+		}
+		// parse the header
+		parseHeader( _header );
+
+		var _data = _bytes.subarray( _data_start ); // the data without header
+		if ( headerObject.encoding === 'gzip' || headerObject.encoding === 'gz' ) {
+
+			// we need to decompress the datastream
+			// here we start the unzipping and get a typed Uint8Array back
+			var inflate = new Zlib.Gunzip( new Uint8Array( _data ) ); // eslint-disable-line no-undef
+			_data = inflate.decompress();
+
+		} else if ( headerObject.encoding === 'ascii' || headerObject.encoding === 'text' || headerObject.encoding === 'txt' || headerObject.encoding === 'hex' ) {
+
+			_data = parseDataAsText( _data );
+
+		} else if ( headerObject.encoding === 'raw' ) {
+
+			//we need to copy the array to create a new array buffer, else we retrieve the original arraybuffer with the header
+			var _copy = new Uint8Array( _data.length );
+
+			for ( var i = 0; i < _data.length; i ++ ) {
+
+				_copy[ i ] = _data[ i ];
+
+			}
+
+			_data = _copy;
+
+		}
+		// .. let's use the underlying array buffer
+		_data = _data.buffer;
+
+		var volume = new Volume();
+		volume.header = headerObject;
+		//
+		// parse the (unzipped) data to a datastream of the correct type
+		//
+		volume.data = new headerObject.__array( _data );
+		// get the min and max intensities
+		var min_max = volume.computeMinMax();
+		var min = min_max[ 0 ];
+		var max = min_max[ 1 ];
+		// attach the scalar range to the volume
+		volume.windowLow = min;
+		volume.windowHigh = max;
+
+		// get the image dimensions
+		volume.dimensions = [ headerObject.sizes[ 0 ], headerObject.sizes[ 1 ], headerObject.sizes[ 2 ] ];
+		volume.xLength = volume.dimensions[ 0 ];
+		volume.yLength = volume.dimensions[ 1 ];
+		volume.zLength = volume.dimensions[ 2 ];
+		// spacing
+		var spacingX = ( new Vector3( headerObject.vectors[ 0 ][ 0 ], headerObject.vectors[ 0 ][ 1 ],
+			headerObject.vectors[ 0 ][ 2 ] ) ).length();
+		var spacingY = ( new Vector3( headerObject.vectors[ 1 ][ 0 ], headerObject.vectors[ 1 ][ 1 ],
+			headerObject.vectors[ 1 ][ 2 ] ) ).length();
+		var spacingZ = ( new Vector3( headerObject.vectors[ 2 ][ 0 ], headerObject.vectors[ 2 ][ 1 ],
+			headerObject.vectors[ 2 ][ 2 ] ) ).length();
+		volume.spacing = [ spacingX, spacingY, spacingZ ];
+
+
+		// Create IJKtoRAS matrix
+		volume.matrix = new Matrix4();
+
+		var _spaceX = 1;
+		var _spaceY = 1;
+		var _spaceZ = 1;
+
+		if ( headerObject.space == "left-posterior-superior" ) {
+
+			_spaceX = - 1;
+			_spaceY = - 1;
+
+		} else if ( headerObject.space === 'left-anterior-superior' ) {
+
+			_spaceX = - 1;
+
+		}
+
+
+		if ( ! headerObject.vectors ) {
+
+			volume.matrix.set(
+				_spaceX, 0, 0, 0,
+				0, _spaceY, 0, 0,
+				0, 0, _spaceZ, 0,
+				0, 0, 0, 1 );
+
+		} else {
+
+			var v = headerObject.vectors;
+
+			volume.matrix.set(
+				_spaceX * v[ 0 ][ 0 ], _spaceX * v[ 1 ][ 0 ], _spaceX * v[ 2 ][ 0 ], 0,
+				_spaceY * v[ 0 ][ 1 ], _spaceY * v[ 1 ][ 1 ], _spaceY * v[ 2 ][ 1 ], 0,
+				_spaceZ * v[ 0 ][ 2 ], _spaceZ * v[ 1 ][ 2 ], _spaceZ * v[ 2 ][ 2 ], 0,
+				0, 0, 0, 1 );
+
+		}
+
+		volume.inverseMatrix = new Matrix4();
+		volume.inverseMatrix.getInverse( volume.matrix );
+		volume.RASDimensions = ( new Vector3( volume.xLength, volume.yLength, volume.zLength ) ).applyMatrix4( volume.matrix ).round().toArray().map( Math.abs );
+
+		// .. and set the default threshold
+		// only if the threshold was not already set
+		if ( volume.lowerThreshold === - Infinity ) {
+
+			volume.lowerThreshold = min;
+
+		}
+		if ( volume.upperThreshold === Infinity ) {
+
+			volume.upperThreshold = max;
+
+		}
+
+		return volume;
+
+	},
+
+	parseChars: function ( array, start, end ) {
+
+		// without borders, use the whole array
+		if ( start === undefined ) {
+
+			start = 0;
+
+		}
+		if ( end === undefined ) {
+
+			end = array.length;
+
+		}
+
+		var output = '';
+		// create and append the chars
+		var i = 0;
+		for ( i = start; i < end; ++ i ) {
+
+			output += String.fromCharCode( array[ i ] );
+
+		}
+
+		return output;
+
+	},
+
+	fieldFunctions: {
+
+		type: function ( data ) {
+
+			switch ( data ) {
+
+				case 'uchar':
+				case 'unsigned char':
+				case 'uint8':
+				case 'uint8_t':
+					this.__array = Uint8Array;
+					break;
+				case 'signed char':
+				case 'int8':
+				case 'int8_t':
+					this.__array = Int8Array;
+					break;
+				case 'short':
+				case 'short int':
+				case 'signed short':
+				case 'signed short int':
+				case 'int16':
+				case 'int16_t':
+					this.__array = Int16Array;
+					break;
+				case 'ushort':
+				case 'unsigned short':
+				case 'unsigned short int':
+				case 'uint16':
+				case 'uint16_t':
+					this.__array = Uint16Array;
+					break;
+				case 'int':
+				case 'signed int':
+				case 'int32':
+				case 'int32_t':
+					this.__array = Int32Array;
+					break;
+				case 'uint':
+				case 'unsigned int':
+				case 'uint32':
+				case 'uint32_t':
+					this.__array = Uint32Array;
+					break;
+				case 'float':
+					this.__array = Float32Array;
+					break;
+				case 'double':
+					this.__array = Float64Array;
+					break;
+				default:
+					throw new Error( 'Unsupported NRRD data type: ' + data );
+
+			}
+
+			return this.type = data;
+
+		},
+
+		endian: function ( data ) {
+
+			return this.endian = data;
+
+		},
+
+		encoding: function ( data ) {
+
+			return this.encoding = data;
+
+		},
+
+		dimension: function ( data ) {
+
+			return this.dim = parseInt( data, 10 );
+
+		},
+
+		sizes: function ( data ) {
+
+			var i;
+			return this.sizes = ( function () {
+
+				var _i, _len, _ref, _results;
+				_ref = data.split( /\s+/ );
+				_results = [];
+				for ( _i = 0, _len = _ref.length; _i < _len; _i ++ ) {
+
+					i = _ref[ _i ];
+					_results.push( parseInt( i, 10 ) );
+
+				}
+				return _results;
+
+			} )();
+
+		},
+
+		space: function ( data ) {
+
+			return this.space = data;
+
+		},
+
+		'space origin': function ( data ) {
+
+			return this.space_origin = data.split( "(" )[ 1 ].split( ")" )[ 0 ].split( "," );
+
+		},
+
+		'space directions': function ( data ) {
+
+			var f, parts, v;
+			parts = data.match( /\(.*?\)/g );
+			return this.vectors = ( function () {
+
+				var _i, _len, _results;
+				_results = [];
+				for ( _i = 0, _len = parts.length; _i < _len; _i ++ ) {
+
+					v = parts[ _i ];
+					_results.push( ( function () {
+
+						var _j, _len2, _ref, _results2;
+						_ref = v.slice( 1, - 1 ).split( /,/ );
+						_results2 = [];
+						for ( _j = 0, _len2 = _ref.length; _j < _len2; _j ++ ) {
+
+							f = _ref[ _j ];
+							_results2.push( parseFloat( f ) );
+
+						}
+						return _results2;
+
+					} )() );
+
+				}
+				return _results;
+
+			} )();
+
+		},
+
+		spacings: function ( data ) {
+
+			var f, parts;
+			parts = data.split( /\s+/ );
+			return this.spacings = ( function () {
+
+				var _i, _len, _results = [];
+
+				for ( _i = 0, _len = parts.length; _i < _len; _i ++ ) {
+
+					f = parts[ _i ];
+					_results.push( parseFloat( f ) );
+
+				}
+				return _results;
+
+			} )();
+
+		}
+	}
+
+} );
+
+export { NRRDLoader };
+```
+
+### src/Volume.js
+```
+/**
+ * This class had been written to handle the output of the NRRD loader.
+ * It contains a volume of data and informations about it.
+ * For now it only handles 3 dimensional data.
+ * See the webgl_loader_nrrd.html example and the loaderNRRD.js file to see how to use this class.
+ * @class
+ * @author Valentin Demeusy / https://github.com/stity
+ * @param   {number}        xLength         Width of the volume
+ * @param   {number}        yLength         Length of the volume
+ * @param   {number}        zLength         Depth of the volume
+ * @param   {string}        type            The type of data (uint8, uint16, ...)
+ * @param   {ArrayBuffer}   arrayBuffer     The buffer with volume data
+ */
+
+import {
+	Matrix3,
+	Matrix4,
+	Vector3
+} from "three";
+import { VolumeSlice } from "./VolumeSlice";
+var Volume = function ( xLength, yLength, zLength, type, arrayBuffer ) {
+
+	if ( arguments.length > 0 ) {
+
+		/**
+		 * @member {number} xLength Width of the volume in the IJK coordinate system
+		 */
+		this.xLength = Number( xLength ) || 1;
+		/**
+		 * @member {number} yLength Height of the volume in the IJK coordinate system
+		 */
+		this.yLength = Number( yLength ) || 1;
+		/**
+		 * @member {number} zLength Depth of the volume in the IJK coordinate system
+		 */
+		this.zLength = Number( zLength ) || 1;
+
+		/**
+		 * @member {TypedArray} data Data of the volume
+		 */
+
+		switch ( type ) {
+
+			case 'Uint8' :
+			case 'uint8' :
+			case 'uchar' :
+			case 'unsigned char' :
+			case 'uint8_t' :
+				this.data = new Uint8Array( arrayBuffer );
+				break;
+			case 'Int8' :
+			case 'int8' :
+			case 'signed char' :
+			case 'int8_t' :
+				this.data = new Int8Array( arrayBuffer );
+				break;
+			case 'Int16' :
+			case 'int16' :
+			case 'short' :
+			case 'short int' :
+			case 'signed short' :
+			case 'signed short int' :
+			case 'int16_t' :
+				this.data = new Int16Array( arrayBuffer );
+				break;
+			case 'Uint16' :
+			case 'uint16' :
+			case 'ushort' :
+			case 'unsigned short' :
+			case 'unsigned short int' :
+			case 'uint16_t' :
+				this.data = new Uint16Array( arrayBuffer );
+				break;
+			case 'Int32' :
+			case 'int32' :
+			case 'int' :
+			case 'signed int' :
+			case 'int32_t' :
+				this.data = new Int32Array( arrayBuffer );
+				break;
+			case 'Uint32' :
+			case 'uint32' :
+			case 'uint' :
+			case 'unsigned int' :
+			case 'uint32_t' :
+				this.data = new Uint32Array( arrayBuffer );
+				break;
+			case 'longlong' :
+			case 'long long' :
+			case 'long long int' :
+			case 'signed long long' :
+			case 'signed long long int' :
+			case 'int64' :
+			case 'int64_t' :
+			case 'ulonglong' :
+			case 'unsigned long long' :
+			case 'unsigned long long int' :
+			case 'uint64' :
+			case 'uint64_t' :
+				throw 'Error in Volume constructor : this type is not supported in JavaScript';
+				break;
+			case 'Float32' :
+			case 'float32' :
+			case 'float' :
+				this.data = new Float32Array( arrayBuffer );
+				break;
+			case 'Float64' :
+			case 'float64' :
+			case 'double' :
+				this.data = new Float64Array( arrayBuffer );
+				break;
+			default :
+				this.data = new Uint8Array( arrayBuffer );
+
+		}
+
+		if ( this.data.length !== this.xLength * this.yLength * this.zLength ) {
+
+			throw 'Error in Volume constructor, lengths are not matching arrayBuffer size';
+
+		}
+
+	}
+
+	/**
+	 * @member {Array}  spacing Spacing to apply to the volume from IJK to RAS coordinate system
+	 */
+	this.spacing = [ 1, 1, 1 ];
+	/**
+	 * @member {Array}  offset Offset of the volume in the RAS coordinate system
+	 */
+	this.offset = [ 0, 0, 0 ];
+	/**
+	 * @member {Martrix3} matrix The IJK to RAS matrix
+	 */
+	this.matrix = new Matrix3();
+	this.matrix.identity();
+	/**
+	 * @member {Martrix3} inverseMatrix The RAS to IJK matrix
+	 */
+	/**
+	 * @member {number} lowerThreshold The voxels with values under this threshold won't appear in the slices.
+	 *                      If changed, geometryNeedsUpdate is automatically set to true on all the slices associated to this volume
+	 */
+	var lowerThreshold = - Infinity;
+	Object.defineProperty( this, 'lowerThreshold', {
+		get: function () {
+
+			return lowerThreshold;
+
+		},
+		set: function ( value ) {
+
+			lowerThreshold = value;
+			this.sliceList.forEach( function ( slice ) {
+
+				slice.geometryNeedsUpdate = true;
+
+			} );
+
+		}
+	} );
+	/**
+	 * @member {number} upperThreshold The voxels with values over this threshold won't appear in the slices.
+	 *                      If changed, geometryNeedsUpdate is automatically set to true on all the slices associated to this volume
+	 */
+	var upperThreshold = Infinity;
+	Object.defineProperty( this, 'upperThreshold', {
+		get: function () {
+
+			return upperThreshold;
+
+		},
+		set: function ( value ) {
+
+			upperThreshold = value;
+			this.sliceList.forEach( function ( slice ) {
+
+				slice.geometryNeedsUpdate = true;
+
+			} );
+
+		}
+	} );
+
+
+	/**
+	 * @member {Array} sliceList The list of all the slices associated to this volume
+	 */
+	this.sliceList = [];
+
+
+	/**
+	 * @member {Array} RASDimensions This array holds the dimensions of the volume in the RAS space
+	 */
+
+};
+
+Volume.prototype = {
+
+	constructor: Volume,
+
+	/**
+	 * @member {Function} getData Shortcut for data[access(i,j,k)]
+	 * @memberof Volume
+	 * @param {number} i    First coordinate
+	 * @param {number} j    Second coordinate
+	 * @param {number} k    Third coordinate
+	 * @returns {number}  value in the data array
+	 */
+	getData: function ( i, j, k ) {
+
+		return this.data[ k * this.xLength * this.yLength + j * this.xLength + i ];
+
+	},
+
+	/**
+	 * @member {Function} access compute the index in the data array corresponding to the given coordinates in IJK system
+	 * @memberof Volume
+	 * @param {number} i    First coordinate
+	 * @param {number} j    Second coordinate
+	 * @param {number} k    Third coordinate
+	 * @returns {number}  index
+	 */
+	access: function ( i, j, k ) {
+
+		return k * this.xLength * this.yLength + j * this.xLength + i;
+
+	},
+
+	/**
+	 * @member {Function} reverseAccess Retrieve the IJK coordinates of the voxel corresponding of the given index in the data
+	 * @memberof Volume
+	 * @param {number} index index of the voxel
+	 * @returns {Array}  [x,y,z]
+	 */
+	reverseAccess: function ( index ) {
+
+		var z = Math.floor( index / ( this.yLength * this.xLength ) );
+		var y = Math.floor( ( index - z * this.yLength * this.xLength ) / this.xLength );
+		var x = index - z * this.yLength * this.xLength - y * this.xLength;
+		return [ x, y, z ];
+
+	},
+
+	/**
+	 * @member {Function} map Apply a function to all the voxels, be careful, the value will be replaced
+	 * @memberof Volume
+	 * @param {Function} functionToMap A function to apply to every voxel, will be called with the following parameters :
+	 *                                 value of the voxel
+	 *                                 index of the voxel
+	 *                                 the data (TypedArray)
+	 * @param {Object}   context    You can specify a context in which call the function, default if this Volume
+	 * @returns {Volume}   this
+	 */
+	map: function ( functionToMap, context ) {
+
+		var length = this.data.length;
+		context = context || this;
+
+		for ( var i = 0; i < length; i ++ ) {
+
+			this.data[ i ] = functionToMap.call( context, this.data[ i ], i, this.data );
+
+		}
+
+		return this;
+
+	},
+
+	/**
+	 * @member {Function} extractPerpendicularPlane Compute the orientation of the slice and returns all the information relative to the geometry such as sliceAccess, the plane matrix (orientation and position in RAS coordinate) and the dimensions of the plane in both coordinate system.
+	 * @memberof Volume
+	 * @param {string}            axis  the normal axis to the slice 'x' 'y' or 'z'
+	 * @param {number}            index the index of the slice
+	 * @returns {Object} an object containing all the usefull information on the geometry of the slice
+	 */
+	extractPerpendicularPlane: function ( axis, RASIndex ) {
+
+		var iLength,
+			jLength,
+			sliceAccess,
+			planeMatrix = ( new Matrix4() ).identity(),
+			volume = this,
+			planeWidth,
+			planeHeight,
+			firstSpacing,
+			secondSpacing,
+			positionOffset,
+			IJKIndex;
+
+		var axisInIJK = new Vector3(),
+			firstDirection = new Vector3(),
+			secondDirection = new Vector3();
+
+		var dimensions = new Vector3( this.xLength, this.yLength, this.zLength );
+
+
+		switch ( axis ) {
+
+			case 'x' :
+				axisInIJK.set( 1, 0, 0 );
+				firstDirection.set( 0, 0, - 1 );
+				secondDirection.set( 0, - 1, 0 );
+				firstSpacing = this.spacing[ 2 ];
+				secondSpacing = this.spacing[ 1 ];
+				IJKIndex = new Vector3( RASIndex, 0, 0 );
+
+				planeMatrix.multiply( ( new Matrix4() ).makeRotationY( Math.PI / 2 ) );
+				positionOffset = ( volume.RASDimensions[ 0 ] - 1 ) / 2;
+				planeMatrix.setPosition( new Vector3( RASIndex - positionOffset, 0, 0 ) );
+				break;
+			case 'y' :
+				axisInIJK.set( 0, 1, 0 );
+				firstDirection.set( 1, 0, 0 );
+				secondDirection.set( 0, 0, 1 );
+				firstSpacing = this.spacing[ 0 ];
+				secondSpacing = this.spacing[ 2 ];
+				IJKIndex = new Vector3( 0, RASIndex, 0 );
+
+				planeMatrix.multiply( ( new Matrix4() ).makeRotationX( - Math.PI / 2 ) );
+				positionOffset = ( volume.RASDimensions[ 1 ] - 1 ) / 2;
+				planeMatrix.setPosition( new Vector3( 0, RASIndex - positionOffset, 0 ) );
+				break;
+			case 'z' :
+			default :
+				axisInIJK.set( 0, 0, 1 );
+				firstDirection.set( 1, 0, 0 );
+				secondDirection.set( 0, - 1, 0 );
+				firstSpacing = this.spacing[ 0 ];
+				secondSpacing = this.spacing[ 1 ];
+				IJKIndex = new Vector3( 0, 0, RASIndex );
+
+				positionOffset = ( volume.RASDimensions[ 2 ] - 1 ) / 2;
+				planeMatrix.setPosition( new Vector3( 0, 0, RASIndex - positionOffset ) );
+				break;
+
+		}
+
+		firstDirection.applyMatrix4( volume.inverseMatrix ).normalize();
+		firstDirection.argVar = 'i';
+		secondDirection.applyMatrix4( volume.inverseMatrix ).normalize();
+		secondDirection.argVar = 'j';
+		axisInIJK.applyMatrix4( volume.inverseMatrix ).normalize();
+		iLength = Math.floor( Math.abs( firstDirection.dot( dimensions ) ) );
+		jLength = Math.floor( Math.abs( secondDirection.dot( dimensions ) ) );
+		planeWidth = Math.abs( iLength * firstSpacing );
+		planeHeight = Math.abs( jLength * secondSpacing );
+
+		IJKIndex = Math.abs( Math.round( IJKIndex.applyMatrix4( volume.inverseMatrix ).dot( axisInIJK ) ) );
+		var base = [ new Vector3( 1, 0, 0 ), new Vector3( 0, 1, 0 ), new Vector3( 0, 0, 1 ) ];
+		var iDirection = [ firstDirection, secondDirection, axisInIJK ].find( function ( x ) {
+
+			return Math.abs( x.dot( base[ 0 ] ) ) > 0.9;
+
+		} );
+		var jDirection = [ firstDirection, secondDirection, axisInIJK ].find( function ( x ) {
+
+			return Math.abs( x.dot( base[ 1 ] ) ) > 0.9;
+
+		} );
+		var kDirection = [ firstDirection, secondDirection, axisInIJK ].find( function ( x ) {
+
+			return Math.abs( x.dot( base[ 2 ] ) ) > 0.9;
+
+		} );
+		var argumentsWithInversion = [ 'volume.xLength-1-', 'volume.yLength-1-', 'volume.zLength-1-' ];
+		var argArray = [ iDirection, jDirection, kDirection ].map( function ( direction, n ) {
+
+			return ( direction.dot( base[ n ] ) > 0 ? '' : argumentsWithInversion[ n ] ) + ( direction === axisInIJK ? 'IJKIndex' : direction.argVar );
+
+		} );
+		var argString = argArray.join( ',' );
+		sliceAccess = eval( '(function sliceAccess (i,j) {return volume.access( ' + argString + ');})' );
+
+
+		return {
+			iLength: iLength,
+			jLength: jLength,
+			sliceAccess: sliceAccess,
+			matrix: planeMatrix,
+			planeWidth: planeWidth,
+			planeHeight: planeHeight
+		};
+
+	},
+
+	/**
+	 * @member {Function} extractSlice Returns a slice corresponding to the given axis and index
+	 *                        The coordinate are given in the Right Anterior Superior coordinate format
+	 * @memberof Volume
+	 * @param {string}            axis  the normal axis to the slice 'x' 'y' or 'z'
+	 * @param {number}            index the index of the slice
+	 * @returns {VolumeSlice} the extracted slice
+	 */
+	extractSlice: function ( axis, index ) {
+
+		var slice = new VolumeSlice( this, index, axis );
+		this.sliceList.push( slice );
+		return slice;
+
+	},
+
+	/**
+	 * @member {Function} repaintAllSlices Call repaint on all the slices extracted from this volume
+	 * @see VolumeSlice.repaint
+	 * @memberof Volume
+	 * @returns {Volume} this
+	 */
+	repaintAllSlices: function () {
+
+		this.sliceList.forEach( function ( slice ) {
+
+			slice.repaint();
+
+		} );
+
+		return this;
+
+	},
+
+	/**
+	 * @member {Function} computeMinMax Compute the minimum and the maximum of the data in the volume
+	 * @memberof Volume
+	 * @returns {Array} [min,max]
+	 */
+	computeMinMax: function () {
+
+		var min = Infinity;
+		var max = - Infinity;
+
+		// buffer the length
+		var datasize = this.data.length;
+
+		var i = 0;
+		for ( i = 0; i < datasize; i ++ ) {
+
+			if ( ! isNaN( this.data[ i ] ) ) {
+
+				var value = this.data[ i ];
+				min = Math.min( min, value );
+				max = Math.max( max, value );
+
+			}
+
+		}
+		this.min = min;
+		this.max = max;
+
+		return [ min, max ];
+
+	}
+
+};
+
+export { Volume };
+```
+
+### src/VolumeSlice.js
+```
+/**
+ * This class has been made to hold a slice of a volume data
+ * @class
+ * @author Valentin Demeusy / https://github.com/stity
+ * @param   {Volume} volume    The associated volume
+ * @param   {number}       [index=0] The index of the slice
+ * @param   {string}       [axis='z']      For now only 'x', 'y' or 'z' but later it will change to a normal vector
+ * @see Volume
+ */
+
+import {
+	ClampToEdgeWrapping,
+	DoubleSide,
+	LinearFilter,
+	Mesh,
+	MeshBasicMaterial,
+	PlaneBufferGeometry,
+	Texture
+} from "three";
+var VolumeSlice = function ( volume, index, axis ) {
+
+	var slice = this;
+	/**
+	 * @member {Volume} volume The associated volume
+	 */
+	this.volume = volume;
+	/**
+	 * @member {Number} index The index of the slice, if changed, will automatically call updateGeometry at the next repaint
+	 */
+	index = index || 0;
+	Object.defineProperty( this, 'index', {
+		get: function () {
+
+			return index;
+
+		},
+		set: function ( value ) {
+
+			index = value;
+			slice.geometryNeedsUpdate = true;
+			return index;
+
+		}
+	} );
+	/**
+	 * @member {String} axis The normal axis
+	 */
+	this.axis = axis || 'z';
+
+	/**
+	 * @member {HTMLCanvasElement} canvas The final canvas used for the texture
+	 */
+	/**
+	 * @member {CanvasRenderingContext2D} ctx Context of the canvas
+	 */
+	this.canvas = document.createElement( 'canvas' );
+	/**
+	 * @member {HTMLCanvasElement} canvasBuffer The intermediary canvas used to paint the data
+	 */
+	/**
+	 * @member {CanvasRenderingContext2D} ctxBuffer Context of the canvas buffer
+	 */
+	this.canvasBuffer = document.createElement( 'canvas' );
+	this.updateGeometry();
+
+
+	var canvasMap = new Texture( this.canvas );
+	canvasMap.minFilter = LinearFilter;
+	canvasMap.wrapS = canvasMap.wrapT = ClampToEdgeWrapping;
+	var material = new MeshBasicMaterial( { map: canvasMap, side: DoubleSide, transparent: true } );
+	/**
+	 * @member {Mesh} mesh The mesh ready to get used in the scene
+	 */
+	this.mesh = new Mesh( this.geometry, material );
+	this.mesh.matrixAutoUpdate = false;
+	/**
+	 * @member {Boolean} geometryNeedsUpdate If set to true, updateGeometry will be triggered at the next repaint
+	 */
+	this.geometryNeedsUpdate = true;
+	this.repaint();
+
+	/**
+	 * @member {Number} iLength Width of slice in the original coordinate system, corresponds to the width of the buffer canvas
+	 */
+
+	/**
+	 * @member {Number} jLength Height of slice in the original coordinate system, corresponds to the height of the buffer canvas
+	 */
+
+	/**
+	 * @member {Function} sliceAccess Function that allow the slice to access right data
+	 * @see Volume.extractPerpendicularPlane
+	 * @param {Number} i The first coordinate
+	 * @param {Number} j The second coordinate
+	 * @returns {Number} the index corresponding to the voxel in volume.data of the given position in the slice
+	 */
+
+
+};
+
+VolumeSlice.prototype = {
+
+	constructor: VolumeSlice,
+
+	/**
+	 * @member {Function} repaint Refresh the texture and the geometry if geometryNeedsUpdate is set to true
+	 * @memberof VolumeSlice
+	 */
+	repaint: function () {
+
+		if ( this.geometryNeedsUpdate ) {
+
+			this.updateGeometry();
+
+		}
+
+		var iLength = this.iLength,
+			jLength = this.jLength,
+			sliceAccess = this.sliceAccess,
+			volume = this.volume,
+			canvas = this.canvasBuffer,
+			ctx = this.ctxBuffer;
+
+
+		// get the imageData and pixel array from the canvas
+		var imgData = ctx.getImageData( 0, 0, iLength, jLength );
+		var data = imgData.data;
+		var volumeData = volume.data;
+		var upperThreshold = volume.upperThreshold;
+		var lowerThreshold = volume.lowerThreshold;
+		var windowLow = volume.windowLow;
+		var windowHigh = volume.windowHigh;
+
+		// manipulate some pixel elements
+		var pixelCount = 0;
+
+		if ( volume.dataType === 'label' ) {
+
+			//this part is currently useless but will be used when colortables will be handled
+			for ( var j = 0; j < jLength; j ++ ) {
+
+				for ( var i = 0; i < iLength; i ++ ) {
+
+					var label = volumeData[ sliceAccess( i, j ) ];
+					label = label >= this.colorMap.length ? ( label % this.colorMap.length ) + 1 : label;
+					var color = this.colorMap[ label ];
+					data[ 4 * pixelCount ] = ( color >> 24 ) & 0xff;
+					data[ 4 * pixelCount + 1 ] = ( color >> 16 ) & 0xff;
+					data[ 4 * pixelCount + 2 ] = ( color >> 8 ) & 0xff;
+					data[ 4 * pixelCount + 3 ] = color & 0xff;
+					pixelCount ++;
+
+				}
+
+			}
+
+		} else {
+
+			for ( var j = 0; j < jLength; j ++ ) {
+
+				for ( var i = 0; i < iLength; i ++ ) {
+
+					var value = volumeData[ sliceAccess( i, j ) ];
+					var alpha = 0xff;
+					//apply threshold
+					alpha = upperThreshold >= value ? ( lowerThreshold <= value ? alpha : 0 ) : 0;
+					//apply window level
+					value = Math.floor( 255 * ( value - windowLow ) / ( windowHigh - windowLow ) );
+					value = value > 255 ? 255 : ( value < 0 ? 0 : value | 0 );
+
+					data[ 4 * pixelCount ] = value;
+					data[ 4 * pixelCount + 1 ] = value;
+					data[ 4 * pixelCount + 2 ] = value;
+					data[ 4 * pixelCount + 3 ] = alpha;
+					pixelCount ++;
+
+				}
+
+			}
+
+		}
+		ctx.putImageData( imgData, 0, 0 );
+		this.ctx.drawImage( canvas, 0, 0, iLength, jLength, 0, 0, this.canvas.width, this.canvas.height );
+
+
+		this.mesh.material.map.needsUpdate = true;
+
+	},
+
+	/**
+	 * @member {Function} Refresh the geometry according to axis and index
+	 * @see Volume.extractPerpendicularPlane
+	 * @memberof VolumeSlice
+	 */
+	updateGeometry: function () {
+
+		var extracted = this.volume.extractPerpendicularPlane( this.axis, this.index );
+		this.sliceAccess = extracted.sliceAccess;
+		this.jLength = extracted.jLength;
+		this.iLength = extracted.iLength;
+		this.matrix = extracted.matrix;
+
+		this.canvas.width = extracted.planeWidth;
+		this.canvas.height = extracted.planeHeight;
+		this.canvasBuffer.width = this.iLength;
+		this.canvasBuffer.height = this.jLength;
+		this.ctx = this.canvas.getContext( '2d' );
+		this.ctxBuffer = this.canvasBuffer.getContext( '2d' );
+
+		if ( this.geometry ) this.geometry.dispose(); // dispose existing geometry
+
+		this.geometry = new PlaneBufferGeometry( extracted.planeWidth, extracted.planeHeight );
+
+		if ( this.mesh ) {
+
+			this.mesh.geometry = this.geometry;
+			//reset mesh matrix
+			this.mesh.matrix.identity();
+			this.mesh.applyMatrix4( this.matrix );
+
+		}
+
+		this.geometryNeedsUpdate = false;
+
+	}
+
+};
+
+export { VolumeSlice };
+```
+
+### src/appConfig.js
+```
+// General parameters for this app
+
+const APPCONFIG = {
+    CUBE_COLOUR : 0xfff000,
+    CUBE_HEIGHT: 10,
+    CUBE_WIDTH: 10,
+    CUBE_DEPTH: 10,
+    CUBE_START_X: 0,
+    CUBE_START_Y: -150,
+    CUBE_START_Z: 0,
+    GROUND_WIDTH: 1800,
+    GROUND_HEIGHT: 1000,
+    GROUND_SEGMENTS: 16,
+    GROUND_MATERIAL: 0xcbcbcb,
+    RIGHT: 1,
+    LEFT: 0,
+    UP: 2,
+    DOWN: 3,
+    BACK: 4,
+    FORWARD: 5,
+    SCALE_DOWN: 0,
+    SCALE_UP: 1,
+    ZOOM_SPEED: 0.1,
+    PLANE_SIZE: 250,
+    PLANE_START_X: 100,
+    PLANE_START_Y: -120,
+    PLANE_START_Z: 120,
+    MOVE_SPEED: 12.5,
+    SCALE_SPEED: 2.5,
+    RENDER_FIRST: 1000,
+    CLIP_PLANE_X: 0,
+    CLIP_PLANE_Y: 1,
+    CLIP_PLANE_Z: 2,
+    PLANE_CORNER_RADIUS: 2.5,
+    NUM_CORNERS: 4,
+    MIN_CUBE_SCALE: 0.25,
+    MIN_DEVICE_WIDTH: 1024
+}
+
+// Line indices
+const lineIndices0 = [];
+lineIndices0.push(0, 1);
+lineIndices0.push(1, 4);
+lineIndices0.push(4, 7);
+lineIndices0.push(1, 5);
+lineIndices0.push(0, 2);
+lineIndices0.push(2, 5);
+lineIndices0.push(5, 7);
+lineIndices0.push(2, 6);
+lineIndices0.push(0, 3);
+lineIndices0.push(3, 6);
+lineIndices0.push(6, 7);
+lineIndices0.push(3, 4);
+
+const lineIndices1 = [];
+lineIndices1.push(1, 4);
+lineIndices1.push(4, 3);
+lineIndices1.push(3, 6);
+lineIndices1.push(4, 7);
+lineIndices1.push(1, 5);
+lineIndices1.push(5, 7);
+lineIndices1.push(7, 6);
+lineIndices1.push(5, 2);
+lineIndices1.push(1, 0);
+lineIndices1.push(0, 2);
+lineIndices1.push(2, 6);
+lineIndices1.push(0, 3);
+
+const lineIndices2 = [];
+lineIndices2.push(2, 6);
+lineIndices2.push(6, 7);
+lineIndices2.push(7, 4);
+lineIndices2.push(6, 3);
+lineIndices2.push(2, 0);
+lineIndices2.push(0, 3);
+lineIndices2.push(3, 4);
+lineIndices2.push(0, 1);
+lineIndices2.push(2, 5);
+lineIndices2.push(5, 1);
+lineIndices2.push(1, 4);
+lineIndices2.push(5, 7);
+
+const lineIndices3 = [];
+lineIndices3.push(3, 0);
+lineIndices3.push(0, 1);
+lineIndices3.push(1, 5);
+lineIndices3.push(0, 2);
+lineIndices3.push(3, 6);
+lineIndices3.push(6, 2);
+lineIndices3.push(2, 5);
+lineIndices3.push(6, 7);
+lineIndices3.push(3, 4);
+lineIndices3.push(4, 7);
+lineIndices3.push(7, 5);
+lineIndices3.push(4, 1);
+
+const lineIndices4 = [];
+lineIndices4.push(4, 3);
+lineIndices4.push(3, 0);
+lineIndices4.push(0, 2);
+lineIndices4.push(3, 6);
+lineIndices4.push(4, 7);
+lineIndices4.push(7, 6);
+lineIndices4.push(6, 2);
+lineIndices4.push(7, 5);
+lineIndices4.push(4, 1);
+lineIndices4.push(1, 5);
+lineIndices4.push(5, 2);
+lineIndices4.push(1, 0);
+
+const lineIndices5 = [];
+lineIndices5.push(5, 2);
+lineIndices5.push(2, 6);
+lineIndices5.push(6, 3);
+lineIndices5.push(2, 0);
+lineIndices5.push(5, 1);
+lineIndices5.push(1, 0);
+lineIndices5.push(0, 3);
+lineIndices5.push(1, 4);
+lineIndices5.push(5, 7);
+lineIndices5.push(7, 4);
+lineIndices5.push(4, 3);
+lineIndices5.push(7, 6);
+
+const lineIndices6 = [];
+lineIndices6.push(6, 7);
+lineIndices6.push(7, 5);
+lineIndices6.push(5, 1);
+lineIndices6.push(7, 4);
+lineIndices6.push(6, 3);
+lineIndices6.push(3, 4);
+lineIndices6.push(4, 1);
+lineIndices6.push(3, 0);
+lineIndices6.push(6, 2);
+lineIndices6.push(2, 0);
+lineIndices6.push(0, 1);
+lineIndices6.push(2, 5);
+
+const lineIndices7 = [];
+lineIndices7.push(7, 5);
+lineIndices7.push(5, 2);
+lineIndices7.push(2, 0);
+lineIndices7.push(5, 1);
+lineIndices7.push(7, 4);
+lineIndices7.push(4, 1);
+lineIndices7.push(1, 0);
+lineIndices7.push(4, 3);
+lineIndices7.push(7, 6);
+lineIndices7.push(6, 3);
+lineIndices7.push(3, 0);
+lineIndices7.push(6, 2);
+
+export { APPCONFIG, lineIndices0, lineIndices1, lineIndices3, lineIndices4, lineIndices2, lineIndices5, lineIndices6, lineIndices7 };
+```
+
+### src/baseApp.js
+```
+//Common base class for web apps
+import $ from "jquery";
+import { SceneConfig } from "./sceneConfig";
+import * as THREE from "three";
+//import * as TrackballControls from "three-trackballcontrols";
+let TrackballControls = require("three-trackballcontrols");
+
+export class BaseApp {
+    constructor() {
+        this.renderer = null;
+        this.scene = null;
+        this.camera = null;
+        this.controls = null;
+        this.stats = null;
+        this.container = null;
+        this.mouse = new THREE.Vector2();
+        this.pickedObjects = [];
+        this.selectedObject = null;
+        this.hoverObjects = [];
+        this.elapsedTime = 0;
+        this.clock = new THREE.Clock();
+        this.clock.start();
+        this.raycaster = new THREE.Raycaster();
+        this.objectsPicked = false;
+        this.tempVector = new THREE.Vector3();
+    }
+
+    init() {
+        this.createRenderer();
+        this.createCamera();
+        this.createControls();
+        /*
+        this.stats = new Stats();
+        container.appendChild(this.stats.dom);
+        */
+        this.statsShowing = false;
+        //$("#Stats-output").hide();
+    }
+
+    createRenderer() {
+        let canvas = document.createElement( 'canvas' );
+        let context = canvas.getContext( 'webgl2', { alpha: true, antialias: true } );
+        this.renderer = new THREE.WebGLRenderer( { canvas: canvas, context: context } );
+        this.renderer.setPixelRatio( window.devicePixelRatio );
+        this.renderer.setSize( window.innerWidth, window.innerHeight );
+        //this.renderer.sortObjects = false;
+        document.body.appendChild( this.renderer.domElement );
+
+        window.addEventListener('keydown', event => {
+            this.keyDown(event);
+        }, false);
+
+        window.addEventListener('resize', event => {
+            this.windowResize(event);
+        }, false);
+
+        this.renderer.domElement.addEventListener("mousedown", event => {
+            this.mouseClicked(event);
+        }, false);
+
+        this.renderer.domElement.addEventListener("mouseup", event => {
+            this.mouseUp(event);
+        }, false);
+
+        this.renderer.domElement.addEventListener("mousemove", event => {
+            this.mouseMoved(event);
+        }, false);
+    }
+
+    keyDown(event) {
+        //Key press functionality
+        switch(event.key) {
+            case "s":
+                if (this.stats) {
+                    if (this.statsShowing) {
+                        $("#Stats-output").hide();
+                        this.statsShowing = false;
+                    } else {
+                        $("#Stats-output").show();
+                        this.statsShowing = true;
+                    }
+                }
+                break;
+            case "p":
+                console.log('Cam =', this.camera.position);
+                console.log('Look =', this.controls.target);
+                break;
+        }
+    }
+
+    mouseClicked(event) {
+        //Update mouse state
+        event.preventDefault();
+        
+        this.mouse.down = true;
+    }
+
+    mouseUp(event) {
+        event.preventDefault();
+
+        this.sliceScale = 1;
+        this.renderUpdate = true;
+        this.mouse.down = false;
+    }
+
+    mouseMoved(event) {
+        //Update mouse state
+        event.preventDefault();
+        
+        if (this.mouse.down) {
+            this.sliceScale = $("#sampleScale").val();
+            this.renderUpdate = true;
+        }
+    }
+
+    windowResize() {
+        //Handle window resize
+        this.camera.aspect = window.innerWidth / window.innerHeight;
+        this.camera.updateProjectionMatrix();
+
+        this.renderer.setSize( window.innerWidth, window.innerHeight);
+    }
+
+    createScene() {
+        let scene = new THREE.Scene();
+
+        // DEBUG
+        
+        let ambientLight = new THREE.AmbientLight(SceneConfig.ambientLightColour);
+        scene.add(ambientLight);
+        
+
+        /*
+         var spotLight = new THREE.SpotLight(0xffffff);
+         spotLight.position.set(100, 100, 200);
+         spotLight.intensity = 1;
+         this.scene.add(spotLight);
+         */
+
+        /*
+         var directionalLight = new THREE.DirectionalLight( 0xffffff, 1.0 );
+         directionalLight.position.set( 1, 1, 1 );
+         this.scene.add( directionalLight );
+         */
+
+
+        let pointLight = new THREE.PointLight(SceneConfig.pointLightColour);
+        pointLight.position.set(0,0,400);
+        pointLight.name = 'PointLight';
+        // DEBUG
+        scene.add(pointLight);
+
+        this.scene = scene;
+    }
+
+    getObjectByName(name) {
+        return this.scene.getObjectByName(name);
+    }
+
+    createCamera() {
+        let camNear = new THREE.Vector3(SceneConfig.CameraPos.x, SceneConfig.CameraPos.y, SceneConfig.CameraPos.z);
+        this.camera = new THREE.PerspectiveCamera(SceneConfig.FOV, window.innerWidth / window.innerHeight, SceneConfig.NEAR_PLANE, SceneConfig.FAR_PLANE );
+        this.camera.position.copy(camNear);
+        this.camPosNear = camNear;
+    }
+
+    moveCamera(rotation) {
+        //Rotate camera about lookat point
+        this.cameraRotation += rotation;
+        let lookAt = this.controls.target;
+        this.tempVector.copy(this.camera.position);
+        this.tempVector.y = 0;
+        let radius = this.tempVector.distanceTo(lookAt);
+        let deltaX = radius*Math.sin(this.cameraRotation);
+        let deltaZ = radius*Math.cos(this.cameraRotation);
+        this.camera.position.set(lookAt.x + deltaX, this.camera.position.y, lookAt.z + deltaZ);
+    }
+
+    createControls() {
+        this.controls = new TrackballControls(this.camera, this.renderer.domElement);
+        this.controls.rotateSpeed = 1.0;
+        this.controls.zoomSpeed = 1.0;
+        this.controls.panSpeed = 1.0;
+
+        this.controls.staticMoving = true;
+        this.controls.dynamicDampingFactor = 0.3;
+
+        // Disable controls
+        const controlsDisabled = false;
+        this.controls.noRotate = controlsDisabled;
+        this.controls.noZoom = controlsDisabled;
+        this.controls.noPan = true;
+        
+        this.controls.keys = [ 65, 83, 68 ];
+
+        let lookAt = new THREE.Vector3(SceneConfig.LookAtPos.x, SceneConfig.LookAtPos.y, SceneConfig.LookAtPos.z);
+        this.controls.target.copy(lookAt);
+    }
+
+    update() {
+        //Do any updates
+        this.controls.update();
+        //this.stats.update();
+    }
+
+    run() {
+        this.update();
+        if (this.renderUpdate) {
+            this.renderVolume();
+            this.renderUpdate = false;
+        }
+        
+        this.renderer.render( this.scene, this.camera );
+        if(this.stats) this.stats.update();
+        requestAnimationFrame(() => {
+            this.run();
+        });
+    }
+
+    initStats() {
+        let stats = new Stats();
+
+        stats.setMode(0); // 0: fps, 1: ms
+
+        // Align top-left
+        stats.domElement.style.position = 'absolute';
+        stats.domElement.style.left = '0px';
+        stats.domElement.style.top = '0px';
+
+        $("#Stats-output").append( stats.domElement );
+
+        return stats;
+    }
+}
+```
+
+### src/index.js
+```
+import $ from "jquery";
+import * as THREE from "three";
+
+import { BaseApp } from "./baseApp";
+import "bootstrap";
+import { APPCONFIG, lineIndices0, lineIndices1, lineIndices3, lineIndices4, lineIndices2, lineIndices5, lineIndices6, lineIndices7 } from "./appConfig";
+import { NRRDLoader } from "./NRRDLoader";
+
+import "bootstrap/dist/css/bootstrap.min.css";
+import "./main.css";
+
+// Shaders
+const vshader = `
+    varying vec4 texPosition;
+
+    //varying vec3 vNormal;
+    varying vec3 vCam;
+
+    void main() {
+        //vNormal = normal;
+        vCam = cameraPosition;
+        texPosition = modelMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+`
+
+const fshader = `
+    precision mediump sampler3D;
+
+    varying vec4 texPosition;
+    uniform vec3 u_slices;
+    uniform sampler3D u_data;
+    uniform float u_thresh;
+    uniform float u_alphaScale;
+    uniform float u_clipPlaneX;
+    uniform float u_clipPlaneY;
+    uniform float u_clipPlaneZ;
+    uniform vec3 u_clipCubeMax;
+    uniform vec3 u_clipCubeMin;
+    uniform bool u_clipCubeEnabled;
+    uniform bool u_clipPlaneXEnabled;
+    uniform bool u_clipPlaneYEnabled;
+    uniform bool u_clipPlaneZEnabled;
+
+    void main() {
+        if (u_clipCubeEnabled) {
+            if (texPosition.x > u_clipCubeMax.x || texPosition.x < u_clipCubeMin.x) {
+                discard;
+            }
+            if (texPosition.y > u_clipCubeMax.y || texPosition.y < u_clipCubeMin.y) {
+                discard;
+            }
+            if (texPosition.z > u_clipCubeMax.z || texPosition.z < u_clipCubeMin.z) {
+                discard;
+            }
+        }
+
+        // Model is rotated so that y-axis => z-axis
+        if (u_clipPlaneXEnabled) {
+            if (texPosition.x > u_clipPlaneX) {
+                discard;
+            }
+        }
+
+        if (u_clipPlaneYEnabled) {
+            if (texPosition.z > u_clipPlaneY) {
+                discard;
+            }
+        }
+
+        if (u_clipPlaneZEnabled) {
+            if (texPosition.y < u_clipPlaneZ) {
+                discard;
+            }
+        }
+
+        vec3 texCoords = vec3((texPosition.x/u_slices.x) + 0.5, (texPosition.y/u_slices.y) + 0.5, (texPosition.z/u_slices.z) + 0.5);
+        gl_FragColor = texture(u_data, texCoords);
+        if (gl_FragColor.r < u_thresh) {
+            discard;
+        }
+        gl_FragColor.b = gl_FragColor.g = gl_FragColor.r;
+        gl_FragColor.a = gl_FragColor.r;
+        gl_FragColor.a *= u_alphaScale;
+    }
+`
+
+const fSolidShader = `
+    vec3 shading(vec3 N, vec3 V, vec3 L) {
+
+        // Materials
+        vec3 Ka = vec3(0.1, 0.1, 0.1); // Ambient
+        vec3 Kd = vec3(0.6, 0.6, 0.6); // Diffuse
+        vec3 Ks = vec3(0.2, 0.2, 0.2); // Specular
+        float shininess = 100.0; // Shininess
+
+        // Light properties
+        vec3 lightColour = vec3(1.0, 1.0, 1.0);
+        vec3 ambientLight = vec3(0.3, 0.3, 0.3);
+
+        // Halfway vector
+        vec3 H = normalize(L + V);
+
+        // Ambient term
+        vec3 ambient = Ka * ambientLight;
+
+        // Diffuse term
+        float diffuseLight = max(dot(L, N), 0.0);
+        vec3 diffuse = Kd * lightColour * diffuseLight;
+
+        // Specular term
+        float specularLight = pow(max(dot(H, N), 0.0), shininess);
+        if (diffuseLight <= 0.0) {
+            specularLight = 0.0;
+        }
+        vec3 specular = Ks * lightColour * specularLight;
+
+        return ambient + diffuse + specular;
+    }
+
+    precision mediump sampler3D;
+
+    varying vec4 texPosition;
+    //varying vec3 vNormal;
+    varying vec3 vCam;
+    uniform vec3 u_slices;
+    uniform sampler3D u_data;
+    uniform float u_thresh;
+    uniform float u_clipPlaneX;
+    uniform float u_clipPlaneY;
+    uniform float u_clipPlaneZ;
+    uniform bool u_clipPlaneXEnabled;
+    uniform bool u_clipPlaneYEnabled;
+    uniform bool u_clipPlaneZEnabled;
+    uniform vec3 u_clipCubeMax;
+    uniform vec3 u_clipCubeMin;
+    uniform bool u_clipCubeEnabled;
+
+    void main() {
+        if (u_clipCubeEnabled) {
+            if (texPosition.x > u_clipCubeMax.x || texPosition.x < u_clipCubeMin.x) {
+                discard;
+            }
+            if (texPosition.y > u_clipCubeMax.y || texPosition.y < u_clipCubeMin.y) {
+                discard;
+            }
+            if (texPosition.z > u_clipCubeMax.z || texPosition.z < u_clipCubeMin.z) {
+                discard;
+            }
+        }
+
+        // Model is rotated so that y-axis => z-axis
+        if (u_clipPlaneXEnabled) {
+            if (texPosition.x > u_clipPlaneX) {
+                discard;
+            }
+        }
+
+        if (u_clipPlaneYEnabled) {
+            if (texPosition.z > u_clipPlaneY) {
+                discard;
+            }
+        }
+
+        if (u_clipPlaneZEnabled) {
+            if (texPosition.y < u_clipPlaneZ) {
+                discard;
+            }
+        }
+
+        vec3 texCoords = vec3((texPosition.x/u_slices.x) + 0.5, (texPosition.y/u_slices.y) + 0.5, (texPosition.z/u_slices.z) + 0.5);
+        vec3 position = texCoords.xyz;
+        float thresh = texture(u_data, texCoords).r;
+        if (thresh < u_thresh) {
+            discard;
+        }
+
+        float delta = 1.0/256.0;
+        vec3 sample1, sample2;
+        sample1.x = texture(u_data, texCoords - vec3(delta, 0.0, 0.0)).x;
+        sample2.x = texture(u_data, texCoords + vec3(delta, 0.0, 0.0)).x;
+        sample1.y = texture(u_data, texCoords - vec3(0.0, delta, 0.0)).x;
+        sample2.y = texture(u_data, texCoords + vec3(0.0, delta, 0.0)).x;
+        sample1.z = texture(u_data, texCoords - vec3(0.0, 0.0, delta)).x;
+        sample2.z = texture(u_data, texCoords + vec3(0.0, 0.0, delta)).x;
+
+        vec3 lightPos = vec3(100.0, -600.0, 100.0);
+        vec3 lightPos2 = vec3(0.0, 300.0, 0.0);
+
+        vec3 N = normalize(sample1 - sample2);
+        vec3 L = normalize( lightPos - position);
+        vec3 L2 = normalize( lightPos2 - position);
+        vec3 V = normalize( vCam - position);
+
+        vec3 shade1 = shading(N, V, L);
+        vec3 shade2 = shading(N, V, L2);
+
+        gl_FragColor.rgb = shade1 + shade2;
+
+
+        gl_FragColor.a = 1.0;
+    }
+`
+
+let PLANE_INC = 1.0;
+
+// Front vertices
+const LEFT_EDGE_X = -80;
+const RIGHT_EDGE_X = 80;
+const TOP_EDGE_Y = 128;
+const BOTTOM_EDGE_Y = -128;
+const FRONT_EDGE_Z = 110.5;
+const BACK_EDGE_Z = -110.5;
+
+// Cube movement
+const DIR_LEFT = new THREE.Vector3(-1, 0, 0);
+const DIR_RIGHT = new THREE.Vector3(1, 0, 0);
+const DIR_DOWN = new THREE.Vector3(0, 0, -1);
+const DIR_UP = new THREE.Vector3(0, 0, 1);
+const DIR_BACK = new THREE.Vector3(0, 1, 0);
+const DIR_FORWARD = new THREE.Vector3(0, -1, 0);
+
+// Cube scale
+const CUBE_SCALE_DOWN = new THREE.Vector3(-1, -1, -1);
+const CUBE_SCALE_UP = new THREE.Vector3(1, 1, 1);
+
+// Vertices
+const volumeVertices = [];
+volumeVertices.push(new THREE.Vector3(RIGHT_EDGE_X, TOP_EDGE_Y, FRONT_EDGE_Z));
+volumeVertices.push(new THREE.Vector3(RIGHT_EDGE_X, TOP_EDGE_Y, BACK_EDGE_Z));
+volumeVertices.push(new THREE.Vector3(RIGHT_EDGE_X, BOTTOM_EDGE_Y, FRONT_EDGE_Z));
+volumeVertices.push(new THREE.Vector3(LEFT_EDGE_X, TOP_EDGE_Y, FRONT_EDGE_Z));
+
+volumeVertices.push(new THREE.Vector3(LEFT_EDGE_X, TOP_EDGE_Y, BACK_EDGE_Z));
+volumeVertices.push(new THREE.Vector3(RIGHT_EDGE_X, BOTTOM_EDGE_Y, BACK_EDGE_Z));
+volumeVertices.push(new THREE.Vector3(LEFT_EDGE_X, BOTTOM_EDGE_Y, FRONT_EDGE_Z));
+volumeVertices.push(new THREE.Vector3(LEFT_EDGE_X, BOTTOM_EDGE_Y, BACK_EDGE_Z));
+
+const uniforms = {
+    u_data: { value: null },
+    u_slices: { value: new THREE.Vector3()},
+    u_thresh: { value: $("#alphaRange").val() / 255.0 },
+    u_alphaScale: { value: $("#alphaScale").val() },
+    u_clipPlaneX: { value: $("#clipPlaneXValue").val() },
+    u_clipPlaneXEnabled: { value: false },
+    u_clipPlaneY: { value: $("#clipPlaneYValue").val() },
+    u_clipPlaneYEnabled: { value: false },
+    u_clipPlaneZ: { value: $("#clipPlaneZValue").val() },
+    u_clipPlaneZEnabled: { value: false },
+    u_clipCubeMax: { value: new THREE.Vector3()},
+    u_clipCubeMin: { value: new THREE.Vector3()},
+    u_clipCubeEnabled: { value: false }
+};
+
+// Shader materials
+const transparentVolumeShader = new THREE.ShaderMaterial({
+    uniforms: uniforms,
+    transparent: true,
+    vertexShader: vshader,
+    fragmentShader: fshader
+});
+
+const solidVolumeShader = new THREE.ShaderMaterial({
+    uniforms: uniforms,
+    transparent: false,
+    vertexShader: vshader,
+    fragmentShader: fSolidShader
+});
+
+class MedicalViz extends BaseApp {
+    constructor() {
+        super();
+        this.cameraRotate = false;
+        this.rotSpeed = Math.PI/20;
+        this.rotDirection = 1;
+        this.zoomingIn = false;
+        this.zoomingOut = false;
+        this.zoomSpeed = APPCONFIG.ZOOM_SPEED;
+        this.renderUpdate = false;
+
+        // Volume attributes
+        this.currentLineIndices = lineIndices0;
+        this.planeNormal = new THREE.Vector3();
+        this.viewingDir = new THREE.Line3();
+        this.offset = new THREE.Vector3();
+        this.planeOffset;
+        this.startSlice = 0;
+        this.intersectPlane = new THREE.Plane();
+        this.renderOveride = false;
+        this.sliceScale = 1;
+        this.planeInc = PLANE_INC * this.sliceScale;
+        this.currentShader = transparentVolumeShader;
+
+        // Cube attributes
+        this.cubeMoving = false;
+        this.cubeScaling = false;
+
+        //Temp variables
+        this.tempVec1 = new THREE.Vector3();
+        this.tempVec2 = new THREE.Vector3();
+    }
+
+    init() {
+        super.init();
+    }
+
+    createScene() {
+        // Init base createsScene
+        super.createScene();
+
+        // Create root object.
+        this.root = new THREE.Object3D();
+        this.scene.add(this.root);
+
+        let volumeLines = [];
+        
+        volumeLines.push(new THREE.Line3());
+        volumeLines[0].set(volumeVertices[0], volumeVertices[1]);
+        volumeLines.push(new THREE.Line3());
+        volumeLines[1].set(volumeVertices[1], volumeVertices[4]);
+        volumeLines.push(new THREE.Line3());
+        volumeLines[2].set(volumeVertices[4], volumeVertices[7]);
+        volumeLines.push(new THREE.Line3());
+        volumeLines[3].set(volumeVertices[1], volumeVertices[5]);
+
+        volumeLines.push(new THREE.Line3());
+        volumeLines[4].set(volumeVertices[0], volumeVertices[2]);
+        volumeLines.push(new THREE.Line3());
+        volumeLines[5].set(volumeVertices[2], volumeVertices[5]);
+        volumeLines.push(new THREE.Line3());
+        volumeLines[6].set(volumeVertices[5], volumeVertices[7]);
+        volumeLines.push(new THREE.Line3());
+        volumeLines[7].set(volumeVertices[2], volumeVertices[6]);
+
+        volumeLines.push(new THREE.Line3());
+        volumeLines[8].set(volumeVertices[0], volumeVertices[3]);
+        volumeLines.push(new THREE.Line3());
+        volumeLines[9].set(volumeVertices[3], volumeVertices[6]);
+        volumeLines.push(new THREE.Line3());
+        volumeLines[10].set(volumeVertices[6], volumeVertices[7]);
+        volumeLines.push(new THREE.Line3());
+        volumeLines[11].set(volumeVertices[3], volumeVertices[4]);
+
+        //this.volumeVertices = volumeVertices;
+        this.volumeLines = volumeLines;
+
+        // Load medical image data
+        let modelLoader = new NRRDLoader().load("./models/nrrd/MRIDataPNG.nrrd", volume => {
+            const TEXTURE_SIZE_X = volume.xLength;
+            const TEXTURE_SIZE_Y = volume.yLength;
+            const TEXTURE_SIZE_Z = volume.zLength;
+
+            let texture3D = new THREE.DataTexture3D( volume.data, TEXTURE_SIZE_X, TEXTURE_SIZE_Y, TEXTURE_SIZE_Z );
+            texture3D.format = THREE.RedFormat;
+            texture3D.type = THREE.UnsignedByteType;
+            texture3D.minFilter = texture3D.magFilter = THREE.LinearFilter;
+            texture3D.unpackAlignment = 1;
+            uniforms.u_slices.value.set(TEXTURE_SIZE_X, TEXTURE_SIZE_Y, TEXTURE_SIZE_Z);
+            uniforms.u_data.value = texture3D;
+
+            $("#loading").addClass("d-none");
+
+            this.renderUpdate = true;
+        });
+
+        // Add clip cube
+        let cubeMat = new THREE.LineBasicMaterial( { color: 0xff0000 });
+        let cubeGeom = this.createCubeSegments(APPCONFIG.CUBE_WIDTH);
+        let cube = new THREE.LineSegments( cubeGeom, cubeMat );
+        cube.computeLineDistances();
+        cube.position.set(APPCONFIG.CUBE_START_X, APPCONFIG.CUBE_START_Y, APPCONFIG.CUBE_START_Z);
+
+        // Set up clip cube
+        cube.geometry.computeBoundingBox();
+        uniforms.u_clipCubeMax.value = cube.geometry.boundingBox.max;
+        uniforms.u_clipCubeMin.value = cube.geometry.boundingBox.min;
+        
+        cube.visible = false;
+        this.scene.add( cube );
+        this.clipCube = cube;
+
+        // Add global clipping planes
+        // Clip plane representation
+        let clipPlaneGeom = new THREE.PlaneBufferGeometry(APPCONFIG.PLANE_SIZE, APPCONFIG.PLANE_SIZE);
+        let clipPlaneMat = new THREE.MeshLambertMaterial({
+            color: 0xffffff,
+            side: THREE.DoubleSide,
+            transparent: true,
+            opacity: 0.25
+        });
+
+        // Right to left plane
+        // Add handles at each corner
+        const spherePositions = [];
+        let sphereGeom = new THREE.SphereBufferGeometry(APPCONFIG.PLANE_CORNER_RADIUS);
+        let sphereMat = new THREE.MeshLambertMaterial( { color: 0xffa500});
+
+        let clipPlaneXGroup = new THREE.Group();
+        this.scene.add(clipPlaneXGroup);
+        
+        let currentSphere;
+        spherePositions.push(new THREE.Vector3(-APPCONFIG.PLANE_SIZE/2, APPCONFIG.PLANE_SIZE/2, 0));
+        spherePositions.push(new THREE.Vector3(APPCONFIG.PLANE_SIZE/2, APPCONFIG.PLANE_SIZE/2, 0));
+        spherePositions.push(new THREE.Vector3(APPCONFIG.PLANE_SIZE/2, -APPCONFIG.PLANE_SIZE/2, 0));
+        spherePositions.push(new THREE.Vector3(-APPCONFIG.PLANE_SIZE/2, -APPCONFIG.PLANE_SIZE/2, 0));
+
+        for (let i=0; i<APPCONFIG.NUM_CORNERS; ++i) {
+            currentSphere = new THREE.Mesh(sphereGeom, sphereMat);
+            currentSphere.position.copy(spherePositions[i]);
+            clipPlaneXGroup.add(currentSphere);
+        }
+        let clipPlaneX = new THREE.Mesh(clipPlaneGeom, clipPlaneMat);
+        clipPlaneXGroup.add(clipPlaneX);
+        clipPlaneXGroup.position.x = APPCONFIG.PLANE_START_X;
+        clipPlaneXGroup.rotation.y = Math.PI/2;
+        clipPlaneXGroup.renderOrder = APPCONFIG.RENDER_FIRST +2;
+        clipPlaneXGroup.visible = false;
+        this.clipPlaneXGroup = clipPlaneXGroup;
+
+        // Top to bottom plane
+        let clipPlaneYGroup = new THREE.Group();
+        this.scene.add(clipPlaneYGroup);
+
+        for (let i=0; i<APPCONFIG.NUM_CORNERS; ++i) {
+            currentSphere = new THREE.Mesh(sphereGeom, sphereMat);
+            currentSphere.position.copy(spherePositions[i]);
+            clipPlaneYGroup.add(currentSphere);
+        }
+        let clipPlaneY = new THREE.Mesh(clipPlaneGeom, clipPlaneMat);
+        clipPlaneYGroup.add(clipPlaneY);
+        clipPlaneYGroup.position.z = APPCONFIG.PLANE_START_Z;
+        clipPlaneYGroup.renderOrder = APPCONFIG.RENDER_FIRST + 1;
+        clipPlaneYGroup.visible = false;
+        this.clipPlaneYGroup = clipPlaneYGroup;
+
+        // Back to front plane
+        let clipPlaneZGroup = new THREE.Group();
+        this.scene.add(clipPlaneZGroup);
+
+        for (let i=0; i<APPCONFIG.NUM_CORNERS; ++i) {
+            currentSphere = new THREE.Mesh(sphereGeom, sphereMat);
+            currentSphere.position.copy(spherePositions[i]);
+            clipPlaneZGroup.add(currentSphere);
+        }
+        let clipPlaneZ = new THREE.Mesh(clipPlaneGeom, clipPlaneMat);
+        clipPlaneZGroup.add(clipPlaneZ);
+        clipPlaneZGroup.position.y = APPCONFIG.PLANE_START_Y;
+        clipPlaneZGroup.rotation.x = -Math.PI/2;
+        clipPlaneZGroup.renderOrder = APPCONFIG.RENDER_FIRST;
+        clipPlaneZGroup.visible = false;
+        this.clipPlaneZGroup = clipPlaneZGroup;
+    }
+
+    createCubeSegments(width) {
+        let cubeGeom = new THREE.BufferGeometry();
+        let position = [];
+        // Top
+        position.push( width/2, width/2, width/2, -width/2, width/2, width/2);
+        position.push( -width/2, width/2, width/2, -width/2, width/2, -width/2);
+        position.push( -width/2, width/2, -width/2, width/2, width/2, -width/2);
+        position.push( width/2, width/2, -width/2, width/2, width/2, width/2);
+
+        // Middle
+        position.push( width/2, width/2, width/2, width/2, -width/2, width/2);
+        position.push( -width/2, width/2, width/2, -width/2, -width/2, width/2);
+        position.push( -width/2, width/2, -width/2, -width/2, -width/2, -width/2);
+        position.push( width/2, width/2, -width/2, width/2, -width/2, -width/2);
+
+        // Bottom
+        position.push( width/2, -width/2, width/2, -width/2, -width/2, width/2);
+        position.push( -width/2, -width/2, width/2, -width/2, -width/2, -width/2);
+        position.push( -width/2, -width/2, -width/2, width/2, -width/2, -width/2);
+        position.push( width/2, -width/2, -width/2, width/2, -width/2, width/2);
+
+        cubeGeom.setAttribute("position", new THREE.Float32BufferAttribute( position, 3 ));
+
+        return cubeGeom;
+    }
+
+    update() {
+        let delta = this.clock.getDelta();
+
+        if (this.cubeMoving) {
+            this.clipCube.position.addScaledVector(this.cubeDirection, delta * APPCONFIG.MOVE_SPEED);
+        }
+
+        if (this.cubeScaling) {
+            this.clipCube.scale.addScaledVector(this.cubeScale, delta * APPCONFIG.SCALE_SPEED);
+            // Do not scale beyond zero
+            if (this.clipCube.scale.x < APPCONFIG.MIN_CUBE_SCALE) {
+                this.clipCube.scale.set(APPCONFIG.MIN_CUBE_SCALE, APPCONFIG.MIN_CUBE_SCALE, APPCONFIG.MIN_CUBE_SCALE);
+            }
+        }
+
+        super.update();
+    }
+
+    updateVolume() {
+        this.renderUpdate = true;
+    }
+
+    updateSampleDistance(distance) {
+        PLANE_INC = distance;
+        this.renderUpdate = true;
+    }
+
+    updateClipPlane(planeID, value) {
+        switch (planeID) {
+            case APPCONFIG.CLIP_PLANE_X:
+                uniforms.u_clipPlaneX.value = value;
+                this.clipPlaneXGroup.position.x = value;
+                break;
+
+            case APPCONFIG.CLIP_PLANE_Y:
+                uniforms.u_clipPlaneY.value = value;
+                this.clipPlaneYGroup.position.z = value;
+                break;
+
+            case APPCONFIG.CLIP_PLANE_Z:
+                uniforms.u_clipPlaneZ.value = value;
+                this.clipPlaneZGroup.position.y = value;
+                break;
+
+            default:
+                break;
+        }
+        
+        this.renderUpdate = true;
+    }
+
+    renderVolume() {
+        // Remove existing geometry
+        this.scene.remove(this.root);
+        this.root = new THREE.Object3D();
+        this.scene.add(this.root);
+
+        this.planeInc = PLANE_INC * this.sliceScale;
+
+        // Set up plane
+        // Plane normal
+        this.planeNormal.copy(this.camera.position);
+        this.planeNormal.sub(this.controls.target);
+        this.planeNormal.normalize();
+
+        // Plane offset
+        let nearest = this.getClosestVertex(volumeVertices, this.camera.position);
+
+        this.viewingDir.set(this.controls.target, this.camera.position);
+        this.viewingDir.closestPointToPoint(volumeVertices[nearest], false, this.offset);
+
+        this.planeOffset = this.offset.sub(this.controls.target).length();
+        this.numSlices = Math.round(this.planeOffset / this.planeInc) * 2;
+
+        // Show number of slices
+        $("#numSlices").html(this.numSlices);
+
+        uniforms.u_thresh.value = $("#alphaRange").val() / 255.0;
+        uniforms.u_alphaScale.value = $("#alphaScale").val();
+
+        this.planeOffset *= -1;
+        this.intersectPlane.set(this.planeNormal, this.planeOffset);
+
+        // Get intersection points
+        let intersectionPoints;
+        let currentGeometry;
+        let currentMesh;
+        for (let slice=0; slice<this.numSlices; ++slice) {
+            currentGeometry = new THREE.Geometry();
+            intersectionPoints = this.getIntersectionPoints(nearest, this.intersectPlane);
+            for (let i=0, numPoints=intersectionPoints.length; i<numPoints; ++i) {
+                currentGeometry.vertices.push(new THREE.Vector3().copy(intersectionPoints[i]));
+            }
+            // Advance plane
+            this.planeOffset += this.planeInc;
+            this.intersectPlane.set(this.planeNormal, this.planeOffset);
+
+            // Remove duplicates
+            currentGeometry.mergeVertices();
+
+            // Disregard if co-planer or no intersection at all
+            if (currentGeometry.vertices.length <= 2) {
+                continue;
+            }
+            
+            this.orderFaces(currentGeometry);
+
+            currentGeometry.computeBoundingSphere();
+            currentGeometry.computeFaceNormals();
+            currentMesh = new THREE.Mesh(currentGeometry, this.currentShader);
+            currentMesh.renderOrder = this.numSlices - slice;
+            this.root.add(currentMesh);
+        }
+    }
+
+    getIntersectionPoints(nearestVertex, intersectPlane) {
+        switch (nearestVertex) {
+            case 0:
+                this.currentLineIndices = lineIndices0;
+                break;
+
+            case 1:
+                this.currentLineIndices = lineIndices1;
+                break;
+
+            case 2:
+                this.currentLineIndices = lineIndices2;
+                break;
+
+            case 3:
+                this.currentLineIndices = lineIndices3;
+                break;
+
+            case 4:
+                this.currentLineIndices = lineIndices4;
+                break;
+
+            case 5:
+                this.currentLineIndices = lineIndices5;
+                break;
+
+            case 6:
+                this.currentLineIndices = lineIndices6;
+                break;
+
+            case 7:
+                this.currentLineIndices = lineIndices7;
+                break;
+
+            default:
+                break;
+
+        }
+        // Set line segments
+        let currentIndex = 0
+        let currentStart;
+        let currentEnd;
+        for (let i=0, numSegs=this.currentLineIndices.length/2; i<numSegs; ++i) {
+            currentStart = this.currentLineIndices[currentIndex];
+            currentEnd = this.currentLineIndices[currentIndex + 1];
+            this.volumeLines[i].set(volumeVertices[currentStart], volumeVertices[currentEnd]);
+            currentIndex += 2;
+        }
+
+        // Get intersections
+        let intersectionPoints = [];
+        let intersects;
+        intersects = this.getLineIntersections([0, 1, 2], intersectPlane);
+        if (intersects) {
+            intersectionPoints.push(intersects);
+        }
+
+        intersects = this.getLineIntersections([3], intersectPlane);
+        if (intersects) {
+            intersectionPoints.push(intersects);
+        }
+
+        intersects = this.getLineIntersections([4, 5, 6], intersectPlane);
+        if (intersects) {
+            intersectionPoints.push(intersects);
+        }
+
+        intersects = this.getLineIntersections([7], intersectPlane);
+        if (intersects) {
+            intersectionPoints.push(intersects);
+        }
+
+        intersects = this.getLineIntersections([8, 9, 10], intersectPlane);
+        if (intersects) {
+            intersectionPoints.push(intersects);
+        }
+
+        intersects = this.getLineIntersections([11], intersectPlane);
+        if (intersects) {
+            intersectionPoints.push(intersects);
+        }
+
+        return intersectionPoints;
+    }
+
+    getLineIntersections(lineNumbers, plane) {
+        let intersects;
+        let intersectPoint = new THREE.Vector3();
+
+        for (let i=0, numLines=lineNumbers.length; i<numLines; ++i) {
+            intersects = plane.intersectLine(this.volumeLines[lineNumbers[i]], intersectPoint);
+            if (intersects) {
+                return intersectPoint;
+            }
+        }
+
+        return false;
+    }
+
+    orderFaces(geometry) {
+        switch(geometry.vertices.length) {
+            case 3:
+                geometry.faces.push( new THREE.Face3(0, 2, 1));
+                break;
+
+            case 4:
+                geometry.faces.push( new THREE.Face3(0, 2, 1));
+                geometry.faces.push( new THREE.Face3(0, 3, 2));
+                break;
+
+            case 5:
+                geometry.faces.push( new THREE.Face3(0, 2, 1));
+                geometry.faces.push( new THREE.Face3(0, 3, 2));
+                geometry.faces.push( new THREE.Face3(0, 4, 3));
+                break;
+
+            case 6:
+                geometry.faces.push( new THREE.Face3(0, 2, 1));
+                geometry.faces.push( new THREE.Face3(0, 3, 2));
+                geometry.faces.push( new THREE.Face3(0, 4, 3));
+                geometry.faces.push( new THREE.Face3(0, 5, 4));
+                break;
+
+            default:
+                console.log("Too many points = ", geometry.vertices.length);
+                break;
+        }
+    }
+
+    getClosestVertex(vertices, point) {
+        let nearestDistance = 100000;
+        let distance;
+        let nearestVertex;
+
+        for (let i=0, numVerts=vertices.length; i<numVerts; ++i) {
+            distance = vertices[i].distanceTo(point);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearestVertex = i;
+            }
+        }
+
+        return nearestVertex;
+    }
+
+    moveClipCube(status, direction) {
+        if (!this.clipCube.visible) return;
+
+        switch (direction) {
+            case APPCONFIG.LEFT:
+                this.cubeDirection = DIR_LEFT;
+                break;
+
+            case APPCONFIG.RIGHT:
+                this.cubeDirection = DIR_RIGHT;
+                break;
+
+            case APPCONFIG.DOWN:
+                this.cubeDirection = DIR_DOWN;
+                break;
+
+            case APPCONFIG.UP:
+                this.cubeDirection = DIR_UP;
+                break;
+
+            case APPCONFIG.BACK:
+                this.cubeDirection = DIR_BACK;
+                break;
+
+            case APPCONFIG.FORWARD:
+                this.cubeDirection = DIR_FORWARD;
+                break;
+
+            default:
+                break;
+        }
+
+        this.cubeMoving = status;
+    }
+
+    scaleClipCube(status, direction) {
+        if (!this.clipCube.visible) return;
+
+        switch (direction) {
+            case APPCONFIG.SCALE_DOWN:
+                this.cubeScale = CUBE_SCALE_DOWN;
+                break;
+
+            case APPCONFIG.SCALE_UP:
+                this.cubeScale = CUBE_SCALE_UP;
+                break;
+
+            default:
+                break;
+        }
+
+        this.cubeScaling = status;
+    }
+
+    toggleClipCube() {
+        this.clipCube.visible = !this.clipCube.visible;
+    }
+
+    clipVolume() {
+        if (!this.clipCube.visible) return;
+
+        this.clipCube.geometry.computeBoundingBox();
+        // Take scaling into account
+        this.clipCube.geometry.boundingBox.max.multiply(this.clipCube.scale);
+        this.clipCube.geometry.boundingBox.min.multiply(this.clipCube.scale);
+
+        uniforms.u_clipCubeMax.value.addVectors(this.clipCube.geometry.boundingBox.max, this.clipCube.position);
+        uniforms.u_clipCubeMin.value.addVectors(this.clipCube.geometry.boundingBox.min, this.clipCube.position);
+        uniforms.u_clipCubeEnabled.value = !uniforms.u_clipCubeEnabled.value;
+
+        $("#clipVolume").html(uniforms.u_clipCubeEnabled.value ? "Reset" : "Clip");
+    }
+
+    toggleClipPlane(planeID) {
+        switch (planeID) {
+            case APPCONFIG.CLIP_PLANE_X:
+                this.clipPlaneXGroup.visible = !this.clipPlaneXGroup.visible;
+                uniforms.u_clipPlaneXEnabled.value = this.clipPlaneXGroup.visible;
+                break;
+
+            case APPCONFIG.CLIP_PLANE_Y:
+                this.clipPlaneYGroup.visible = !this.clipPlaneYGroup.visible;
+                uniforms.u_clipPlaneYEnabled.value = this.clipPlaneYGroup.visible;
+                break;
+
+            case APPCONFIG.CLIP_PLANE_Z:
+                this.clipPlaneZGroup.visible = !this.clipPlaneZGroup.visible;
+                uniforms.u_clipPlaneZEnabled.value = this.clipPlaneZGroup.visible;
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    toggleShader() {
+        this.currentShader = this.currentShader === transparentVolumeShader ? solidVolumeShader : transparentVolumeShader;
+        this.renderUpdate = true;
+    }
+
+    stopNotifications(elemList) {
+        for(let i=0, numElems=elemList.length; i<numElems; ++i) {
+            $('#' + elemList[i]).contextmenu(() => {
+                return false;
+            });
+        }
+    }
+}
+
+$( () => {
+    // Info for small res devices
+    if (window.innerWidth < APPCONFIG.MIN_DEVICE_WIDTH) {
+        $("#warningModal").modal();
+    }
+
+    // Initialise
+    const app = new MedicalViz();
+
+    app.init();
+    app.createScene();
+
+    $("#alphaRange").on("change", () => {
+        app.updateVolume();
+    });
+
+    $("#alphaScale").on("change", () => {
+        app.updateVolume();
+    });
+
+    $("#clipPlaneXValue").on("input", event => {
+        app.updateClipPlane(APPCONFIG.CLIP_PLANE_X, event.target.value);
+    });
+
+    $("#clipPlaneYValue").on("input", event => {
+        app.updateClipPlane(APPCONFIG.CLIP_PLANE_Y, event.target.value);
+    });
+
+    $("#clipPlaneZValue").on("input", event => {
+        app.updateClipPlane(APPCONFIG.CLIP_PLANE_Z, event.target.value);
+    });
+
+    // Move elements
+    let moveCubeLeft = $("#moveCubeLeft");
+    let moveCubeRight = $("#moveCubeRight");
+    let moveCubeDown = $("#moveCubeDown");
+    let moveCubeUp = $("#moveCubeUp");
+    let moveCubeBack = $("#moveCubeBack");
+    let moveCubeForward = $("#moveCubeForward");
+    let scaleCubeDown = $("#scaleCubeDown");
+    let scaleCubeUp = $("#scaleCubeUp");
+    let clipVolume = $("#clipVolume");
+    let toggleClipCube = $("#toggleClipCube");
+    let toggleClipPlaneX = $("#toggleClipPlaneX");
+    let toggleClipPlaneY = $("#toggleClipPlaneY");
+    let toggleClipPlaneZ = $("#toggleClipPlaneZ");
+    let toggleShader = $("#toggleShader");
+    let sampleDist = $("#sampleDist");
+
+    sampleDist.on("change", event => {
+        app.updateSampleDistance(event.target.value);
+    });
+
+    // Move cube via mouse
+    moveCubeLeft.on("mousedown", () => {
+        app.moveClipCube(true, APPCONFIG.LEFT);
+    });
+
+    moveCubeLeft.on("mouseup", () => {
+        app.moveClipCube(false);
+    });
+
+    moveCubeRight.on("mousedown", () => {
+        app.moveClipCube(true, APPCONFIG.RIGHT);
+    });
+
+    moveCubeRight.on("mouseup", () => {
+        app.moveClipCube(false);
+    });
+
+    moveCubeDown.on("mousedown", () => {
+        app.moveClipCube(true, APPCONFIG.DOWN);
+    });
+
+    moveCubeDown.on("mouseup", () => {
+        app.moveClipCube(false);
+    });
+
+    moveCubeUp.on("mousedown", () => {
+        app.moveClipCube(true, APPCONFIG.UP);
+    });
+
+    moveCubeUp.on("mouseup", () => {
+        app.moveClipCube(false);
+    });
+
+    moveCubeBack.on("mousedown", () => {
+        app.moveClipCube(true, APPCONFIG.BACK);
+    });
+
+    moveCubeBack.on("mouseup", () => {
+        app.moveClipCube(false);
+    });
+
+    moveCubeForward.on("mousedown", () => {
+        app.moveClipCube(true, APPCONFIG.FORWARD);
+    });
+
+    moveCubeForward.on("mouseup", () => {
+        app.moveClipCube(false);
+    });
+
+    scaleCubeDown.on("mousedown", () => {
+        app.scaleClipCube(true, APPCONFIG.SCALE_DOWN);
+    });
+
+    scaleCubeDown.on("mouseup", () => {
+        app.scaleClipCube(false);
+    });
+
+    scaleCubeUp.on("mousedown", () => {
+        app.scaleClipCube(true, APPCONFIG.SCALE_UP);
+    });
+
+    scaleCubeUp.on("mouseup", () => {
+        app.scaleClipCube(false);
+    });
+
+    // Move cube via touch
+    moveCubeLeft.on("touchstart", () => {
+        app.moveClipCube(true, APPCONFIG.LEFT);
+    });
+
+    moveCubeLeft.on("touchend", () => {
+        app.moveClipCube(false);
+    });
+
+    moveCubeRight.on("touchstart", () => {
+        app.moveClipCube(true, APPCONFIG.RIGHT);
+    });
+
+    moveCubeRight.on("touchend", () => {
+        app.moveClipCube(false);
+    });
+
+    moveCubeDown.on("touchstart", () => {
+        app.moveClipCube(true, APPCONFIG.DOWN);
+    });
+
+    moveCubeDown.on("touchend", () => {
+        app.moveClipCube(false);
+    });
+
+    moveCubeUp.on("touchstart", () => {
+        app.moveClipCube(true, APPCONFIG.UP);
+    });
+
+    moveCubeUp.on("touchend", () => {
+        app.moveClipCube(false);
+    });
+
+    moveCubeBack.on("touchstart", () => {
+        app.moveClipCube(true, APPCONFIG.BACK);
+    });
+
+    moveCubeBack.on("touchend", () => {
+        app.moveClipCube(false);
+    });
+
+    moveCubeForward.on("touchstart", () => {
+        app.moveClipCube(true, APPCONFIG.FORWARD);
+    });
+
+    moveCubeForward.on("touchend", () => {
+        app.moveClipCube(false);
+    });
+
+    scaleCubeDown.on("touchstart", () => {
+        app.scaleClipCube(true, APPCONFIG.SCALE_DOWN);
+    });
+
+    scaleCubeDown.on("touchend", () => {
+        app.scaleClipCube(false);
+    });
+
+    scaleCubeUp.on("touchstart", () => {
+        app.scaleClipCube(true, APPCONFIG.SCALE_UP);
+    });
+
+    scaleCubeUp.on("touchend", () => {
+        app.scaleClipCube(false);
+    });
+
+    clipVolume.on("click", () => {
+        app.clipVolume();
+    });
+
+    // Toggle clip planes
+    toggleClipCube.on("click", () => {
+        app.toggleClipCube();
+    });
+
+    toggleClipPlaneX.on("click", () => {
+        app.toggleClipPlane(APPCONFIG.CLIP_PLANE_X);
+    });
+
+    toggleClipPlaneY.on("click", () => {
+        app.toggleClipPlane(APPCONFIG.CLIP_PLANE_Y);
+    });
+
+    toggleClipPlaneZ.on("click", () => {
+        app.toggleClipPlane(APPCONFIG.CLIP_PLANE_Z);
+    });
+
+    toggleShader.on("click", () => {
+        app.toggleShader();
+    });
+
+    $("#info").on("click", () => {
+        $("#infoModal").modal();
+    });
+
+    let elemList = ["title", "alphaProperties", "clipPlanes", "cubeControls", "toggleShaderContainer", "copyright", "info"];
+    app.stopNotifications(elemList);
+
+    app.run();
+});
+```
+
+### src/sceneConfig.js
+```
+// General parameters to help with setting up scene
+
+const SceneConfig = {
+    clearColour: 0x5c5f64,
+    ambientLightColour: 0x383838,
+    pointLightColour: 0xffffff,
+    LightPos: {
+        x: 15,
+        y: 25,
+        z: 35
+    },
+    CameraPos: {
+        x: 0,
+        y: -500,
+        z: 100
+    },
+    LookAtPos: {
+        x: 0,
+        y: 0,
+        z: 0
+    },
+    NEAR_PLANE: 0.1,
+    FAR_PLANE: 10000,
+    FOV: 45
+};
+
+export { SceneConfig };
+```

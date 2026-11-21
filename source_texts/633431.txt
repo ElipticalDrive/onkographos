@@ -1,0 +1,920 @@
+Contribute to taojin-6/volumetric_kit_recon development by creating an account on GitHub.
+
+feat(tsdf): true distance near outlines by taojin-6 · Pull Request #318 · taojin-6/volumetric_kit_recon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+taojin-6
+commented
+Oct 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+feat(tsdf): true distance near outlines
+Builds on #316 and #317 (both merged).
+What. Near an outline, a voxel now takes the true distance to the surface instead of the projective one. This applies in both modes.
+Which voxels. A voxel qualifies when its depth sample is not a clean interpolation inside the band (a jump or a gap across its taps, past the band, or no return) and its footprint window (±1 to ±3 px) holds a return plus a gap or a depth range past the band.
+The distance. Such a voxel takes the Euclidean distance to the nearest back-projected return within ±2 to ±6 px, kept only under trunc_dist.
+The sign is the voxel's own pixel's:
+negative behind that pixel's surface;
+positive in front of it or beside it;
+positive over a gap, at a quarter of a sample's weight.
+Shadow. A voxel more than a voxel behind its nearest return, beside it, is in the outline's shadow. It keeps the projective sample.
+Colour. Positive rim samples bring no colour.
+Under Dynamic, two more rules keep movers clean:
+No rim distance near a change. Each camera's change test also marks its reach: every pixel within 6 px of a flagged pixel, with a bit for a departure (tsdf_change_reach.comp). Inside the reach, the fuse gives no rim distance, so a moving surface is fused from its fresh samples alone.
+A departure resets what it left beside it. Within the reach of a departure, the reset also clears a positive voxel whose own ray sees past its band or into a gap, if its nearest return is gone from the band or changed. It clears such a voxel whoever fused it: a rim distance, or the front of another camera's band, which that camera fuses again in the same set at one sample's weight. A gap within the reach counts at once, not as a dropout as a lone invalid sample does elsewhere. An arrival clears nothing.
+A pass a frame (tsdf_rim_map.comp) writes, for each pixel:
+the smallest window that holds an outline;
+the depth range of the returns within 6 px.
+So a voxel tests its window with one read, and skips a search that would find nothing. This changes no result: on take1 (120 sets, both modes) the triangles are the same as without the pass.
+No public API changes. The integrate and reset layouts grow to 14 bindings and the push constants to 64 bytes. Each camera keeps a change reach (a uint32 a pixel). Each frame of a call keeps a rim map and a return range.
+Why.
+Beside a silhouette, the projective distance is the background's. Marching cubes then steps the outline a cell at a time and leaves thin parts open:
+3.9% silhouette holes on take1;
+on the ground-truth bench, rims 2.6 mm inside the true silhouette.
+An earlier study's rim distance was the best still-scene fix. On its own, though, it shredded a 1 m/s sphere and left more debris than main (131 against 80 cm²), because near a moving outline it averaged distances to where the surface had been, or was going, into its fresh samples.
+Rules 1 and 2 fix that on top of feat(tsdf): Dynamic fusion evicts on change, conflicts average #317.
+Tested.
+New test, recon_tsdf_rim_distance. Noise-free ray-cast depth from a Femto-like camera, 1 cm voxels, through the Fuser.
+In both modes:
+a turned plate's outline lies 1.4 mm off the true edge on average and 5.0 mm at worst (projective: 2.9 / 8.1 mm Classic, 6.5 / 12.8 mm Dynamic);
+voxels beside its edge hold their Euclidean distance to 1.4 mm;
+a 1.6 cm rod meshes along its whole length.
+Under Dynamic:
+a plate moving 3 cm a set holds no weight beside its moving sides, and takes its distances back the first set it is still;
+a sphere at 1 m/s past a wall, seen by three cameras, stays at least 98.5% covered while it moves, and leaves nothing off the wall the set it goes.
+Removing each rule in turn fails its check (dev builds).
+feat(tsdf): Dynamic fusion evicts on change, conflicts average #317's test of a box over no return (recon_tsdf_dynamic_change): in the set the box goes, a departure here also clears what lies within 6 pixels of where a camera sees the wall past it, to 4 cm past the line where nothing returns behind the box. The check that nothing else changes that set now starts past that reach; the rest of the box still goes a set later, by its Vanished rays.
+Release with VKC_TEST_VALIDATION=1, at the final head, on the RTX 4090 (lab) and the M4 Mac mini:
+the full suite, 39/39 on each;
+the tsdf and sender tests under synchronization validation, 9/9 on each.
+The rim test prints the same figures on both, and at every commit.
+M5 Max, Release with validation, at this PR's head: the full suite 39/39; the tsdf and sender tests under synchronization validation 17/17.
+lavapipe with the sanitizers (CI's job, reproduced on the lab): 39/39 with no report. The moving-sphere case meshes with shared vertices: its wall's unshared mesh needs more than the 128 MiB storage-buffer range lavapipe reports (Vulkan's floor), so extract_host refused it, as documented.
+Replays. The rig's recorded takes, with synthetic movers drawn into the depth, on the lab RTX 4090. Ghost is mover surface left where nothing is. The runs used this PR's first cut on #317 before its second-invalid rule. The rim map and the return range changed no triangle against that cut (take1, 120 sets, both modes). Replayed again at the final code, with #317's second-invalid rule, the 1 m/s sphere gives the same figures (4.5 cm² left after it, gone in one set, 99% shown while it moves), and so does still take1 (0.80% holes, 2.3% edge flicker, 25.1 Mbps).
+Scenario
+main
+#317
+this PR
+Still take1 / take3: silhouette holes
+3.9 / 4.5%
+2.7 / 2.9%
+0.80 / 0.26%
+Still: edge flicker
+11.5 / 9.2%
+1.1 / 0.85%
+2.2 / 1.2%
+Still: stream
+74.8 / 64.9 Mbps
+15.0 / 11.3
+24.7 / 18.1
+Still take1, Classic: holes / flicker / stream
+2.6% / 0.83% / 17.0
+as main
+0.96% / 1.0% / 20.2
+Box enters, stays, leaves: ghost the set after; sets to clear
+169 cm²; 9
+0; 1
+0; 1
+Sphere 1 m/s: ghost after it leaves; sets to clear
+81 cm²; never
+50 cm²; never
+4.4 cm²; 1
+Sphere 0.1 m/s: the same
+81 cm²; never
+44 cm²; never
+0.6 cm²; 1
+Walking column: ghost after it leaves
+2.23 m²
+0.47 m²
+0.05 m²
+Moving surface shown while it moves
+90–95%
+99%
+99%
+Background missing beside the path while it moves (fast sphere / slow / column, mean), against each run's own still run
+3 / 13 / 32 cm²
+5 / 14 / 80
+25 / 104 / 362
+The same, against #317's still run (of which the two still runs' own difference)
+5 / 14 / 80
+10 / 44 / 182 (6 / 6 / 108)
+Against the ground-truth bench (realistic noise, against main):
+Dynamic:
+rims sit 1.2 mm inside the true silhouette (2.6 before);
+the surface within 2 cm of a rim is 97.4% covered (92.5%);
+the sawtooth is 4.6 mm (4.8).
+Classic:
+the sawtooth falls to 2.3 mm (3.0) and fattening to 2.3 cm² (13.7);
+rims sit 1.5 mm inside the true silhouette (0.7);
+19.6 cm² of sheets now sit more than 1 cm inside the objects (0.5).
+In the lit renders:
+Still scenes: chair slits and post holes close, and outlines stop stepping. Clutter looks lumpier, and under Classic a few small objects swell into blobs.
+The box, the spheres and the column leave no visible debris.
+The background missing near a mover's path is not obvious in the playback views.
+Trade-offs, open.
+Background beside a moving mover. Scored against its own still run, this PR's mover runs read far more background missing than feat(tsdf): Dynamic fusion evicts on change, conflicts average #317's (table). Much of that is outline surface its still run holds and rule 1 withholds near a change. The same meshes, re-scored against feat(tsdf): Dynamic fusion evicts on change, conflicts average #317's still run (no new replay):
+net of the two still runs' own difference in that region, the loss is about feat(tsdf): Dynamic fusion evicts on change, conflicts average #317's beside the fast sphere and the column, and about two and a half times it beside the slow sphere (about 38 against 14 cm²);
+peaks are higher: 75 / 86 / 951 cm² against 25 / 34 / 644;
+by the end of each run, no more is missing than the still runs' difference, within 1 cm².
+The cause is not isolated: no rule was taken out on the replays.
+What read as missing at the end against its own still run (19–29 cm²): for the box, 25–29 cm² of surface this PR's still run holds in the footprint, more than 2 cm from feat(tsdf): Dynamic fusion evicts on change, conflicts average #317's still surface, which the box run does not grow back once the box leaves. Against feat(tsdf): Dynamic fusion evicts on change, conflicts average #317's still run nothing is missing there at any set. Its cause is not isolated either.
+Cameras never evict each other? Rule 2 clears the front of another camera's band beside a departure, on rays that camera did not flag. That camera fuses it again in the same set, but at one sample's weight. Whether that fits the rule is the owner's call.
+Narrowing rule 2 to voxels a rim distance wrote would keep that band, at a bit a voxel.
+Any narrowing must keep the movers' ghost figures: feat(tsdf): Dynamic fusion evicts on change, conflicts average #317 alone leaves 46–50 cm² behind the fast sphere, and part of what clears it here may be rule 2.
+After a mover, edge flicker is 2.7–4.3% at the still sets, against 1.2–2.2% on the still run.
+Classic grows sheets inside objects on the bench, and its rims sit 0.8 mm deeper.
+In the rim test's moving sphere, while it stands still after moving, about 6.4k triangles form a sheet inside it (4–17 cm from its centre); it goes when the sphere leaves. Hidden, but it costs triangles and bits. Cause not confirmed (likely positive rim distances beside the leading outline, where no camera sees); a run of the same scene on main would tell.
+Cost. Release, take1 replay (four Femto cameras, 1 cm voxels), median of sets 40–119, interleaved on the RTX 4090:
+Dynamic
+Classic
+integrate a set, #317
+1.63 ms
+0.98 ms
+integrate a set, this PR
+2.79 ms
+1.93 ms
+this PR without the rim map's reads (first cut, same output)
+3.81 ms
+3.05 ms
+About 0.3 ms of the added time is the rim map and change reach passes. The rest is the nearest-return search beside outlines. PERF.md gains P11: a search that stops once no farther pixel can beat the best, measure first.
+Allocator peak: +23.6 MB for four cameras.
+M5 Max (the same replay, interleaved: main twice, this PR twice under Dynamic, once each under Classic):
+Dynamic
+Classic
+integrate a set, main (feat(tsdf): Dynamic fusion evicts on change, conflicts average #317)
+4.64 ms
+3.24 ms
+integrate a set, this PR
+8.26 ms
+6.60 ms
+The detect step goes from 0.11 to 0.25 ms with the change reach, and the reset from 1.46 to 1.58 ms. The added time is about three times the 4090's, so P11 matters most here.
+Docs. DESIGN.md (the integrator's contract and Dynamic's reach), DECISIONS.md (a 2026-10-29 entry and its index line), CHANGELOG (BREAKING for both modes' results) and PERF.md's work item P11.
+🤖 Generated with Claude Code
+taojin-6
+and others
+added 30 commits
+October 29, 2026 04:47
+feat(tsdf): a per-camera change detector
+…
+308c0d9
+```
+tsdf::ChangeDetector keeps, for each fixed camera slot, a history of every
+pixel on the device -- a running depth, the pixel's own temporal noise
+floored by the sensor's DepthNoise (sigma(z) = a + b z + c z^2), two
+cumulative sums and three counters -- and one pass a camera a frame tests
+each valid sample and writes the camera's mask (PixelChange: none, nearer,
+farther). Two-sided CUSUM, k 0.5 and h 8, or one frame past 6 sigma; an
+alarm restarts the pixel's history and freezes its noise estimate for 30
+samples; a pixel tests once it holds 30 samples; an invalid sample changes
+nothing. An optional gate word has a pass test nothing, as
+record_integrate's does.
+
+recon_tsdf_change_detector runs synthetic sequences a camera slot each:
+static ToF-like and stereo-like noise, steps, ramps, a foreground sweeping
+in, dropouts, a camera that leaves and returns, a resized one, and the
+refusals.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: the change detector's contract, operating point and evidence
+…
+9e5352d
+```
+DESIGN.md's tsdf section gives the detector's contract, DECISIONS.md its
+dated entry with the operating point measured on the rig's static takes and
+the test's synthetic numbers, and the changelog its entry.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(tsdf): Dynamic fusion evicts on change, conflicts average
+…
+68e2019
+```
+Dynamic no longer clears a voxel when one camera's one sample puts it past
+the band. A Dynamic set now runs, for every frame, its camera's change test
+(the integrator's ChangeDetector, a slot a camera: FrameInput::slot and
+FrameInput::noise), then every frame's reset along the rays its camera
+flagged -- the voxels in front of the new sample and in its band go back to
+unobserved, the history behind the band stays -- and then every frame's
+fuse, in slot order. Free space past the band averages in as +trunc at a
+tenth of a sample's weight, and only into a voxel that holds weight, so it
+wears away what no change removed but never evicts, and never makes an
+unobserved voxel observed. A closed gate also stops the change tests, so a
+set fused again is tested once. Classic is unchanged.
+
+The clear kernel becomes the reset kernel (tsdf_reset.comp); the push
+constants lose fuse_only. TsdfIntegrator::create and FuserConfig take a
+ChangeDetectorConfig, check_frames the mode, and sender::fuse_inputs gives
+each frame its camera's index as its slot. A camera's first Dynamic set
+zeroes its change history in a submit of its own.
+
+recon_tsdf_dynamic_change: two cameras 8 mm apart on a wall lose no weight
+while the scene is still; a card inside the wall's band, and a box, clear in
+the set they leave; the box arrives in a set, stays stable, and the wall it
+hides keeps its history; a set one camera misses resets nothing; and the
+slot and noise refusals. The Dynamic fixtures of the other tests run their
+change test from a pixel's second sample and give each camera a slot.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+perf(tsdf): the reset tests a voxel's weight before it projects it
+…
+7992539
+```
+Free space never gains weight under Dynamic, so most of what a set reaches
+holds none, as under the former clear: testing the weight first skips the
+projection for those voxels. On the M5 Max (take1, four Femto cameras,
+1 cm, Release, sets 40-119) the reset falls from 2.02 to 1.46 ms a set and
+integrate from 5.17 to 4.61 ms, main's 4.58-4.59. And a TODO for a surface
+that leaves with no return behind it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(tsdf): the detector's gate checked once with the integrator's, an…
+…
+cfc651b
+```
+…d tested
+
+Review findings on the detector:
+- the gate word's checks, which record_integrate and record_detect each
+  made, live once in an internal gate_word.hpp;
+- recon_tsdf_change_detector tests the gate: a 5 cm step behind a closed
+  word is not seen (the mask stays as it was) and is flagged when the word
+  opens, the word found at its offset; and a misaligned, out-of-range or
+  missing word is refused;
+- the header says a first frame at a new size starts its history whatever
+  the gate holds, and that the floor is the DepthNoise at the sample's
+  depth;
+- DESIGN.md's detector paragraph no longer splits the Fuser's, and the
+  DECISIONS entry records two measured choices the review questioned: the
+  floor at the sample's depth, and testing a restarted history at once.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(tsdf): a Dynamic set refuses before any work, and free space brin…
+…
+54e6545
+```
+…gs no colour
+
+Review findings on the Dynamic reset:
+- ChangeDetector::check makes every check record_detect makes of a camera
+  but its depth and gate (the history's binding range included), and the
+  integrator's checks run it for each frame of a Dynamic set, so what the
+  change test would refuse is refused before anything is recorded. Should a
+  test fail later (an allocation), the set's depth uploads still go to the
+  batch, which has recorded their copies. It replaces check_noise.
+- Dynamic's free space is a sample of what lies behind a voxel, so it
+  averages geometry only and brings no colour: a camera seeing past another
+  camera's rim no longer tints it. recon_tsdf_integrate_dynamic_set gives
+  the grazing camera a colour of its own and checks the frontal camera's band
+  keeps the frontal colour exactly; with free space fusing colour it fails.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(tsdf): the detector's warm-up counts the camera's frames, as meas…
+…
+22df03b
+```
+…ured
+
+Counted per pixel, a pixel first made valid by a mover over a background
+with no return never left its warm-up before the mover did, so its later
+intermittent returns of the background flagged nothing and Dynamic kept the
+mover's surface there: 382 cm² of ghost on the 1 m/s sphere replay (take1,
+lab RTX 4090) against main's 85, all of it where no camera now returns. The
+measured operating point tests every pixel from the camera's 30th frame on,
+a pixel from its second sample, which is what the detector now does.
+warm_up no longer has to be at most memory.
+
+recon_tsdf_change_detector adds the case: pixels with no return for 60
+frames, then a mover for 5, then none, flag the background's first return.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: Dynamic's change-driven contract, its decision and the changelog
+…
+129ad9c
+```
+DESIGN.md's tsdf section gives the new Dynamic contract (detect, reset,
+fuse in slot order; free space averaging into weighted voxels, geometry
+only) and the next steps; DECISIONS.md a dated entry superseding the
+2026-10-08 Dynamic set entry, with its index line, the M5 Max cost and the
+Classic bit-identity check; PERF.md's mentions of the clear follow it; and
+the changelog its entry.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge branch 'feat/tsdf-change-detector' into feat/tsdf-dynamic-chang…
+…
+335c91c
+```
+…e-reset
+```
+feat(tsdf): a surface first seen over no return flags Vanished when i…
+…
+80632f6
+```
+…t goes
+
+Invalid is not empty, so an invalid sample alone still flags nothing. But a
+pixel first valid once its camera tests had returned nothing until then, so
+its history now lasts only while it returns: its first invalid sample ends
+it, and flags PixelChange::Vanished after three valid samples in a row, the
+mask word's high 30 bits the depth that left (0.1 mm; change_of and
+vanished_depth decode it). That is what a mover leaves where nothing behind
+it returns, which no other camera's evidence will ever clear: with the
+warm-up fixed, Dynamic still kept 102 / 121 cm2 of the 1 m/s / 0.1 m/s
+sphere there (main 85 / 68) and 1.27 m2 of a walking column.
+
+Three in a row keeps still scenes quiet: on the recorded takes' validity,
+14-23 such flags a second over four cameras, against 1.8-2.6k with three
+samples in total and 6.6k where the sphere crossed. Pixels valid from the
+camera's start behave as before, bit for bit. freeze is now at most 511,
+its counter one bit narrower.
+
+recon_tsdf_change_detector: a mover's departure flags every pixel with its
+depth, a step while it is there notwithstanding; a 2-sample sporadic return
+ends silently, a 3-sample one flags.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge branch 'feat/tsdf-change-detector' into feat/tsdf-dynamic-chang…
+…
+9352e2b
+```
+…e-reset
+
+# Conflicts:
+#	DECISIONS.md
+```
+feat(tsdf): Dynamic resets a Vanished ray up to the surface that left
+…
+d36ee0a
+```
+A ray its camera flags Vanished (ChangeDetector: a surface first seen over
+no return gave way to no return) has no new sample; the reset decodes the
+depth that left from the mask word and resets what lies in front of it and
+in its band, as for any changed ray, keeping the history behind. It is the
+only evidence that ever clears a mover's surface where no camera returns
+behind it.
+
+recon_tsdf_dynamic_change gets a second scene: the wall only on the left,
+nothing returning elsewhere, a box there for ten sets. In the set it goes
+nothing of it meshes and no voxel of its band reads as inside a surface; no
+weight falls in any other set.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: Dynamic's Vanished reset, the cleared-space A/B, and warm-up in…
+…
+6f27781
+```
+… frames
+
+DESIGN.md, DECISIONS.md and the changelog describe the reset of a Vanished
+ray (up to the band of the surface that left) and the narrower open item
+it leaves. The decision records the A/B on what a reset leaves: fusing free
+space into every voxel (known-empty at a tenth of the weight) evicted the
+take3 box the same, with 0.3 points fewer silhouette holes, but 20% more
+bitrate and 33 MB more memory, so cleared space stays unobserved.
+
+The integrator's note and DESIGN.md now count the change detector's
+warm-up in the camera's frames, as the detector does since its fix.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: Dynamic's change-driven reset, measured on replays and both GPUs
+…
+bf4bc2e
+```
+The decision records what the replays of the rig's takes with synthetic
+movers show against main (lab RTX 4090): still scenes with a third fewer
+silhouette holes, a tenth of the edge flicker and a fifth of the bitrate;
+a box that leaves takes nothing with it (main: a 169 cm2 ring for 9 sets);
+a slow sphere leaves 38 cm2 (main 68) and a walking column that vanishes
+0.49 m2 (main 2.16). Its cost is the interleaved timing on the RTX 4090
+(+0.08 ms a set, the change tests) and the M5 Max (within noise), with the
+detector's 35.4 MB.
+
+The open item, the TODO and DESIGN.md's next step name both ways a
+surface leaving to no return still flags nothing: its pixel returned
+something in the camera's warm-up, or for under three samples in a row.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(tsdf): true distance near outlines
+…
+a25f90a
+```
+A voxel whose depth sample is not a clean interpolation inside the band (a
+jump or a gap across its taps, past the band, or no return) and whose
+footprint window touches an outline now takes the signed Euclidean distance
+to the nearest back-projected return around it, kept only under the band, in
+both modes: negative behind its own pixel's surface, positive in front of it,
+beside it or over a gap (a quarter of the weight there). A voxel more than a
+voxel behind its nearest return, beside it, is in the shadow behind the
+outline and is left as before. The outline then meshes at its true edge
+instead of stepping a cell at a time, and thin parts close. Beside and gap
+samples bring no colour.
+
+Under Dynamic a camera's change test now also marks its reach: every pixel
+within the rim distance's widest search (6 px) of a flagged pixel, with a bit
+for a departure (tsdf_change_reach.comp, a stamped map a camera). The fuse
+gives no rim distance inside the reach of a change, so a moving surface is
+fused from its fresh projective samples alone; and the reset clears, beside a
+departure, a positive voxel its camera sees past or into a gap whose nearest
+return is gone from the band or changed, so what a rim distance left beside an
+object leaves with it. The reset's change mask moves to binding 11's
+neighbour 10, the reach is 11; push constants grow to 64 bytes.
+
+recon_tsdf_rim_distance covers the plate outline, the distances beside it, a
+thin rod, a moving plate and a moving sphere. The sender test's per-set
+staging bound allows the two readback slots a larger frame grows.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(tsdf): the rim distance test bins the mesh for its coverage
+…
+e86bfda
+```
+The sphere's coverage looked through every vertex for each surface point,
+minutes a run on a slower host; 1 cm bins make it a lookup.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(sender): a rig's first Dynamic set zeroes the change reaches too
+…
+78e7732
+```
+The four-camera case counted a submit a change history only; the set's new
+cameras' change reaches take one more. It passed only when that set was fused
+again, which skips the exact count.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs(tsdf): the rim distance and the change reach in DESIGN and the API
+…
+742a755
+```
+DESIGN.md's integrator contract gains the true distance near outlines (both
+modes) and, under Dynamic, each camera's change reach: no rim distance within
+it, and the reset beside a departure. The integrator's Doxygen says the same.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0144QCrUzUVMGUP9nbKq2wwh
+```
+perf(tsdf): a rim map a frame, read once a voxel
+…
+56898ab
+```
+The rim distance scanned each voxel's footprint window (3x3 to 7x7) for an
+outline, and every voxel a frame reaches past the band or over a gap runs that
+test: on the 4090 a take1 set's integrate went from 1.62 to 3.81 ms. A pass a
+frame over its pixels (tsdf_rim_map.comp) now writes, per pixel, the smallest
+window, +-1 to +-3, that holds a return and a gap or a depth range past the
+band; a window that holds an outline holds it in every larger one, so a voxel
+tests its own with one read. Same test, same arithmetic: the fuse's results are
+unchanged. Each frame of a call keeps its map, a uint32 a pixel, at binding 12
+of the fuse's set.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0144QCrUzUVMGUP9nbKq2wwh
+```
+fix(tsdf): a Vanished word's depth stays in its 30 bits; freeze and d…
+…
+9eed8f8
+```
+…ropout tests
+
+vanished_word capped the depth at 1073741823.0, which rounds to 2^30 in
+fp32 and shifted out of the word: a Vanished of depth 0 past 107 km
+(reachable with max_depth the largest float). It caps at 1073741760, the
+largest fp32 below 2^30.
+
+recon_tsdf_change_detector now also checks:
+- the noise freeze: at 10 mm a frame, a pixel's largest drift before its
+  history restarts, p95 at most 60 mm (no test read past the first alarm);
+- a still surface over no return with i.i.d. 10% dropouts flags Vanished
+  30 p (1-p)^3 times a pixel a second, as the rule implies (printed);
+- a surface 200 km away keeps the cap's depth;
+- the resized camera's mask is exactly its new size.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0144QCrUzUVMGUP9nbKq2wwh
+```
+Merge branch 'feat/tsdf-change-detector' into feat/tsdf-dynamic-chang…
+…
+ec86a11
+```
+…e-reset
+```
+test(tsdf): a camera's free space keeps all of another's band weight
+…
+fedf82b
+```
+recon_tsdf_integrate_dynamic_set checked only that F's near band, where G
+sees past it, held some weight and F's colour, which the former clear
+(G evicts, F re-fuses one sample) also passed. It now also requires each
+of those voxels to hold at least the weight F alone gives it, so the old
+rule (about one F sample against two) fails it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0144QCrUzUVMGUP9nbKq2wwh
+```
+docs: Dynamic resets on change in the examples; the fast sphere at th…
+…
+8e9b4d8
+```
+…e final code
+
+- The examples, config/README.md and rig_viewer's toggle no longer say
+  Dynamic clears free space: it resets where a camera sees change, and is
+  for fixed cameras (config/README.md's --dynamic row).
+- The free-space weight's shift of another camera's rim is about a tenth
+  of the band at equal depth and grows as the camera seeing past comes
+  nearer (1/z^2); from 1.6 times nearer it carves the rim, as the former
+  clear did.
+- DECISIONS.md: the 1 m/s sphere replayed at the final code leaves 46.5 /
+  50.2 / 46.4 cm2 (moving / the set after / for good) against main's
+  77.9 / 81.3 / 84.8; "an earlier prototype" for the reset rule's source.
+- PERF.md P10: one reset dispatch for a set's cameras, measure first.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0144QCrUzUVMGUP9nbKq2wwh
+```
+docs: the detector's counters, dropouts over no return, and the new t…
+…
+bb6c2ad
+```
+…ests
+
+- DESIGN.md: a pixel's history holds two cumulative sums, four counters
+  and a flag (20 bytes).
+- DECISIONS.md: a still surface over no return flags Vanished at each
+  dropout after three valid samples, 30 p (1-p)^3 a pixel a second; the
+  tests now cover it, the noise freeze and the word's depth cap; "an
+  earlier prototype" for the spatial test compared against.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0144QCrUzUVMGUP9nbKq2wwh
+```
+Merge branch 'feat/tsdf-change-detector' into feat/tsdf-dynamic-chang…
+…
+a6cde86
+```
+…e-reset
+```
+docs: dropouts over no return under Dynamic, measured; the candidate …
+…
+cdb49d7
+```
+…rule
+
+A column that walks in and stands still with i.i.d. 15% dropouts on its
+pixels (take3, lab RTX 4090) keeps 97.0% of its surface (main with the
+same dropouts and this branch without them: 97.5%), with pinholes spread
+over its face where main's sit at its rim. Recorded in the entry's Open
+list with the candidate (Vanished on the second invalid in a row) for the
+owner to decide.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: the dynamic set test's weight check in the decision record
+…
+4c776b4
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge origin/main into feat/tsdf-change-detector
+…
+60c7d26
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge branch 'feat/tsdf-change-detector' into feat/tsdf-dynamic-chang…
+…
+f2bb375
+```
+…e-reset
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+perf(tsdf): skip the rim search where no return is within the band
+…
+f94bf26
+```
+The nearest-return search was most of the rim distance's remaining cost (a
+dev build without it: 1.93 against 3.55 ms a take1 set on the 4090), and most
+voxels that run it find nothing: they lie over a gap, far in depth from every
+return around. The rim map pass now also writes, per pixel, the nearest and
+farthest return within the widest search (6 pixels); a voxel a band or more in
+depth from both skips the search, which would find none, since a return's
+distance is at least its depth's. The grid is the same, bit for bit (take1, 120
+sets, both modes); integrate falls from 3.55 to 2.79 ms a set Dynamic and from
+2.77 to 1.93 Classic (B: 1.63 and 0.98).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+taojin-6
+and others
+added 19 commits
+October 29, 2026 16:08
+docs: the true rim distance's decision, measured on replays, the benc…
+…
+187aded
+```
+…h and the 4090
+
+DECISIONS.md gets the 2026-10-29 entry (the rule, why, the replays against
+main and B, the bench, the cost and the open items) and its index line;
+CHANGELOG and DESIGN.md name the rim map's return range.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge commit 'f2bb3756' into feat/tsdf-rim-distance
+839e3c6
+docs: the rim distance's record names no study or PR letter
+…
+bde2eb1
+```
+The decision entry compares against the change-driven Dynamic entry above by
+name, and the gap weight's comment points at the decision record.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge origin/main into feat/tsdf-dynamic-change-reset
+…
+6f98c3c
+```
+origin/main gained #316 (b7ef45d), the squash of feat/tsdf-change-detector
+at 60c7d26, which this branch already holds: every conflict resolves to this
+branch's side and the tree is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(tsdf): Vanished over no return on the second invalid sample in a row
+…
+cb7f4af
+```
+A still surface first seen over no return flagged Vanished at every
+dropout after three valid samples, 30 p (1 - p)^3 times a pixel a second,
+and Dynamic reset that ray's band each time: pinholes over a standing
+person's face. A lone invalid sample there now only marks the history
+(one more bit), and the next valid sample clears the mark, so the
+history, its sums and its count of valid samples go on as if it never
+happened; the second invalid sample in a row ends the history and flags.
+A real departure over no return is flagged one frame later. The rate on
+a still surface falls to p^2 (1 - p)^3 (1 + p)^2.
+
+The history's three counts are 9 bits, so memory is at most 511.
+
+Tests: single-frame dropouts over no return match a twin that skipped
+them, mask for mask; the still surface's rate; the departures one frame
+later; the box over no return under Dynamic cleared the set after it goes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(tsdf): the box over no return goes where seen past, then where not
+…
+b44eab7
+```
+Camera B sees the wall past the box's left part, so that part is flagged
+Farther and goes in the set the box goes. Where nothing returns behind it,
+that set now changes nothing (no weight falls, every triangle stays) and
+the next clears it, by Vanished rays alone. The former test let any weight
+fall in the set the box went, so it never told the two apart.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(tsdf): a failed change reach still hands the depth uploads to the…
+…
+ab3d591
+```
+… batch
+
+make_reach runs in a submit of its own before the set's change tests. Its
+failure returned at once, before the depth uploads went to the caller's
+batch with retain, which has already recorded their copies. It now goes
+through the same status as the change tests and their reach, so the uploads
+are retained whatever the passes do, as the comment above says.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(tsdf): the rim test bins only the sphere's vertices for its cove…
+…
+3d27459
+```
+…rage
+
+A point on the sphere looks for a vertex within 1 cm, so only vertices
+within 1 cm of its surface can count: the wall's 200k or so are no longer
+binned each set, which is most of the test's 14 s. The header gives the
+sphere's size as 0.4 m across (its radius is 0.2 m).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs(tsdf): the departure reset clears whoever fused a voxel; BREAKIN…
+…
+6a31ed3
+```
+…G for both modes
+
+Beside a departure the reset clears a positive voxel its camera's ray sees
+past or into a gap, whose nearest return is gone or changed, whichever
+camera fused it; a camera that still sees it fuses it again that set, at
+one sample's weight. IntegrationMode::Dynamic's and the class's Doxygen,
+DESIGN.md, the CHANGELOG and the decision's index line and rule now say so,
+where they said only that a departure resets the distances it left. The
+CHANGELOG labels the change BREAKING for both modes' results, as Classic's
+mesh and stream change too. The decision names the ground-truth bench by
+what it is.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs(perf): P11, a nearest-return search that stops once no farther p…
+…
+9ae94e9
+```
+…ixel can win
+
+The rim distance's search is what remains of its cost on the RTX 4090
+(about 0.86 ms of integrate's 2.79 a set). A ring-ordered search with a
+lower bound per ring gives the same result; measure first, with the
+M5 Max's cost of the rim distance. P10 notes that the reset now reads its
+camera's depth beside a departure.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: the movers' missing background against the change-driven still run
+…
+29b403d
+```
+The record compared each variant's missing background against its own
+still run, and this mode's still run holds far more outline surface. The
+existing mover meshes, re-scored against the change-driven still run (no
+replay), lose about what change-driven loses beside the fast sphere and the
+column, and about two and a half times it beside the slow sphere, net of
+the two still runs' own difference, with higher peaks; by the end of each
+run nothing more is missing. What read as 19-29 cm² staying missing (not
+13-29) is, for the box, surface this mode's still run holds in the
+footprint, not background lost. The cause of the extra loss is not
+isolated; the record no longer blames rule 2. The Open item states the
+cross-camera question and that any narrowing of rule 2 must keep the
+movers' ghost figures.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: the second-invalid rule measured on replays and the 4090
+…
+eefd9a2
+```
+The standing column with 15% dropouts is flagged 8.1k times a second
+instead of 41k, its face shows a few scattered pinholes where there were
+many, and 97.4% of it is shown at 4.3 mm rms. The vanishing column's
+sheet at its last pose stays one set longer, the sphere and the box are
+unchanged, and the dropout mark costs nothing measurable. B's open item
+on dropouts over no return is closed; two dropouts in a row stay open.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: reflow the Dynamic entry's cost paragraph
+…
+0909fd9
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge B's round-2 head 0909fd9 into feat/tsdf-rim-distance
+…
+7b39a00
+```
+B's second fix round so far: Vanished over no return on the second invalid
+sample in a row, its test, and docs; A squash-merged on main (#316).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(tsdf): the box over no return goes at once within a departure's …
+…
+522b340
+```
+…reach
+
+#317's second fix round made a lone invalid sample over no return change
+nothing, and its test checks that the part of the box with nothing behind
+it keeps every weight in the set it goes. Here a departure also resets, in
+that set, what lies within 6 pixels of it in its camera's image where its
+ray sees into a gap: camera B, which sees the wall past the box's left part,
+reaches to x = -0.04 m on the box, past the test's line at -0.05 (42
+weights fell there). The check now starts at x = 0, past that reach; the
+rest of the box still waits for its Vanished rays, a set later. The
+decision record says that a gap within a departure's reach counts at once.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: the standing column's walk-in debris, measured; each figure once
+…
+53f866e
+```
+DECISIONS' standing-column bullet now records what the second-invalid rule
+leaves of the column's walk-in under 15% dropouts: 0.66 m² of ghost while
+it stands against 0.60, and 64 cm² of background missing near its path
+against 47.5, nearly all during the walk-in (main 2.93 m² and 28 cm²).
+DESIGN's next work drops the walking column's and slow sphere's figures,
+which DECISIONS holds, and the CHANGELOG's detector entry is rewrapped.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge B's final head 53f866e into feat/tsdf-rim-distance
+…
+d622cf9
+```
+#317 after its second fix round: docs only since 0909fd9 (the standing
+column's walk-in debris, each figure once).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: the fast sphere and the tests at the final code
+…
+e32232f
+```
+With #317's second-invalid rule merged in, the 1 m/s sphere's replay (lab
+RTX 4090) gives the same: 4.5 cm² left the set after it goes, gone in one
+set, 99% shown while it moves; 11 cm² of background missing on average
+against the change-driven still run, 6 of it the still runs' own
+difference. The tests ran on the RTX 4090 and the M4 Mac mini, where the
+rim test prints the same figures.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge origin/main into feat/tsdf-rim-distance
+…
+829c08c
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+# Conflicts:
+#	CHANGELOG.md
+#	DECISIONS.md
+#	DESIGN.md
+#	PERF.md
+#	include/volumetric_kit/recon/tsdf/tsdf_integrator.hpp
+#	src/volumetric_kit/recon/tsdf/CMakeLists.txt
+#	src/volumetric_kit/recon/tsdf/shaders/tsdf_integrate.glsl
+#	src/volumetric_kit/recon/tsdf/tsdf_integrator.cpp
+#	tests/CMakeLists.txt
+#	tests/sender_set_sender_test.cpp
+#	tests/tsdf_dynamic_change_test.cpp
+```
+taojin-6
+self-assigned this
+Oct 29, 2026
+test(tsdf): the moving sphere meshes with shared vertices
+…
+8ba9bf1
+```
+The moving-sphere case's wall, 34 square metres across three cameras,
+meshes into 0.71 M triangles. Unshared, their 2.1 M vertices at 64 B
+each pass the 128 MiB maxStorageBufferRange that Vulkan guarantees and
+lavapipe reports, so extract_host refused the arena on the sanitizer
+job's first extract. Shared, they are 0.61 M (39 MB), and every check
+and printed figure is unchanged on the RTX 4090 and on lavapipe.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+taojin-6
+merged commit f794d65
+into
+main
+Oct 29, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+taojin-6
+deleted the
+feat/tsdf-rim-distance
+branch
+October 29, 2026 21:58
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

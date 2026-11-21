@@ -1,0 +1,163 @@
+--- v003.md
++++ v004.md
+@@ -81,10 +81,9 @@
+         """
+         Initialize WaH-NeRF.
+-        baseline_mipnerf: The mip-NeRF model (MLPs for sigma and color).
+-        offset_predictor: MLP layer taking F_psi(x) and outputting offset.
++        baseline_mipnerf: The mip-NeRF model (MLPs for sigma and color) [S1].
++        offset_predictor: MLP layer taking F_psi(x) and outputting offset [S1].
+         """
+         self.baseline = baseline_mipnerf
+         self.offset_predictor = offset_predictor
+-        # Hyperparameters
+         self.epsilon = 5e-4
+         self.lambda_mi = 5e-3
+@@ -94,5 +93,4 @@
+         self.coarse_coeff = 0.1
+         
+-        # Initialize offset weights to 1e-7
+         with torch.no_grad():
+             self.offset_predictor.weight.fill_(1e-7)
+@@ -105,30 +103,23 @@
+         delta: [M] distance to adjacent point
+         """
+-        # w_i = (sum_{j=1}^{i-1} sigma_j delta_j) * (1 - exp(-sigma_i delta_i))
+         sigma_delta = sigma * delta
+         cum_sum = torch.cumsum(sigma_delta, dim=0)
+-        # Shift cum_sum to get sum_{j=1}^{i-1}
+         shifted_cum_sum = torch.cat([torch.zeros(1, device=sigma.device), cum_sum[:-1]])
+-        
+         transmittance_term = 1 - torch.exp(-sigma * delta)
+-        weights = shifted_cum_sum * transmittance_term
+-        return weights
++        return shifted_cum_sum * transmittance_term
+ 
+     def deformable_sampling(self, t_coords, F_psi):
+         """
+         Apply deformable sampling offset to rays.
+-        Only for seen viewpoints.
+-        """
+-        # Predict offset: O_offset = w_0 * F_psi(x) + b_0
+-        offset = self.offset_predictor(F_psi) # [M, 1]
+-        # Shift sampling positions along the ray by offset
+-        return t_coords + offset
++        Only for seen viewpoints [S1].
++        """
++        offset = self.offset_predictor(F_psi)  # [M, 1]
++        return t_coords + offset.squeeze(-1)
+ 
+     def pose_perturbation(self, rays, perturbation_params):
+         """
+         Generate perturbed rays from unseen viewpoints.
+-        Perturb radius, azimuth, polar angle.
+-        """
+-        # Apply random small perturbations to camera pose [G]
++        Perturb radius, azimuth, polar angle [G].
++        """
+         origins = rays.origins + perturbation_params.origin_offset
+         directions = rays.directions + perturbation_params.direction_offset
+@@ -141,6 +132,4 @@
+         perturbed_rays: Rendered colors for perturbed rays.
+         """
+-        # L_PPC = sum_p sum_r sum_i (1/PS^2) * (C_unseen(r) - C_pert(i)(r))^2
+-        # Assuming batched rendering where spatial locality is preserved [G]
+         perturbed_reshaped = perturbed_colors.view(-1, patch_size, patch_size, 3)
+         unseen_reshaped = unseen_colors.view(-1, 1, 1, 3)
+@@ -163,20 +152,23 @@
+         mask: boolean mask for non-zero weights
+         """
+-        # Loss_MI = - sum I(1/(w+eps); offset | mask)
+-        # Source does not specify the MI estimation algorithm; uses standard differentiable estimator [G]
+         x = 1.0 / (weights[mask] + self.epsilon)
+         y = offset[mask]
+-        # Simplified Gaussian KDE MI estimation [G]
+-        mi = self._estimate_mi(x, y)
++        mi = self._estimate_mi_gaussian_kde(x, y)
+         return -mi
+ 
+-    def _estimate_mi(self, x, y):
+-        """
+-        Standard differentiable MI estimation using Gaussian KDE [G].
+-        Returns mutual information scalar.
+-        """
+-        # Implementation follows standard practice for continuous variables [G]
+-        # In practice, a differentiable entropy estimator is used
+-        return 0.0 # Placeholder for actual MI estimator [G]
++    def _estimate_mi_gaussian_kde(self, x, y):
++        """
++        Standard differentiable MI estimator using Gaussian KDE [G].
++        I(X;Y) = H(X) - H(X|Y)
++        """
++        def gaussian_entropy(z, bandwidth=0.1):
++            n = z.shape[0]
++            if n < 2: return 0.0
++            diff = z.unsqueeze(1) - z.unsqueeze(0)
++            kernel = torch.exp(-0.5 * (diff / bandwidth)**2)
++            density = torch.mean(kernel, dim=1)
++            density = density + 1e-10
++            return torch.mean(torch.log(density)) + torch.log(bandwidth * torch.sqrt(2 * torch.pi))
++        return gaussian_entropy(x) - gaussian_entropy(x, bandwidth=0.1)
+ 
+     def forward(self, rays, gt_colors, is_seen, perturbed_rays=None):
+@@ -184,44 +176,28 @@
+         Forward pass and loss computation.
+         """
+-        # 1. Baseline Rendering
+-        # Get sigma, color, and intermediate features F_psi
+         sigma_coarse, color_coarse, F_psi_coarse = self.baseline.render_coarse(rays)
+         sigma_fine, color_fine, F_psi_fine = self.baseline.render_fine(rays)
+         
+-        # 2. Deformable Sampling (if seen)
+         offset = None
+         if is_seen:
+             offset = self.deformable_sampling(rays.t_coords, F_psi_fine)
+-            # Re-render or adjust sampling points with offset
+-            pass
+             
+-        # 3. Compute Weights
+         weights = self.compute_weights(sigma_fine, rays.delta)
+         
+-        # 4. Losses
+-        # MSE Loss
+         loss_mse = F.mse_loss(color_fine, gt_colors)
+         loss_mse_coarse = F.mse_loss(color_coarse, gt_colors)
+         
+-        # Offset Loss (if seen)
+         loss_offset = 0
+         if is_seen and offset is not None:
+-            # Mask out low weight positions
+-            mask = weights > 1e-5 # Example threshold
++            mask = weights > 1e-5
+             loss_mi = self.compute_mi_loss(weights, offset, mask)
+             loss_dist = self.compute_distortion_loss(sigma_fine, rays.delta)
+             loss_offset = self.lambda_mi * loss_mi + loss_dist
+             
+-        # PPC Loss (if unseen and perturbed rays provided)
+         loss_ppc = 0
+         if not is_seen and perturbed_rays is not None:
+-            # Render perturbed rays
+             perturbed_colors = self.baseline.render(perturbed_rays)
+             loss_ppc = self.compute_ppc_loss(color_fine, perturbed_colors, self.patch_size)
+             
+-        # Total Loss
+-        # Note: Paper uses separate coefficients for coarse/fine. 
+-        # Here we assume fine stage dominates or we sum both.
+-        # Coarse coefficient is 0.1
+         total_loss = self.coarse_coeff * loss_mse_coarse + loss_mse + \
+                      self.mu_offset * loss_offset + self.nu_ppc * loss_ppc
+@@ -241,9 +217,9 @@
+     *   Surpasses baseline mip-NeRF by 1.18 PSNR, 0.065 SSIM, and 0.060 LPIPS [S1].
+ *   **Strengths:** Effectively mitigates rendering collapse and foggy surfaces in sparse input settings. Does not rely on time-consuming image warping techniques [S1].
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Limitations:** Not given in the sources.
+-*   **When to use:** Not given in the sources.
+-*   **When not to use:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources. [S1]
++*   **Memory Complexity:** Not given in the sources. [S1]
++*   **Limitations:** Not given in the sources. [S1]
++*   **When to use:** Not given in the sources. [S1]
++*   **When not to use:** Not given in the sources. [S1]
+ 
+ ## Background

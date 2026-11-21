@@ -1,0 +1,136 @@
+--- v003.md
++++ v004.md
+@@ -1,20 +1,21 @@
+ # Robust Depth Loss
+ 
++Also called: Huber-like Depth Loss
+ 
+ ## Overview
+-Robust Depth Loss is a regularization term designed to mitigate geometry error degradation in NeRF optimization when using dense but inaccurate pseudo-depth maps [S1]. It addresses the limitation of standard L2 loss, which is overly sensitive to outliers, by providing a loss function that is less sensitive to large depth errors while still encouraging the network to terminate rays near the pseudo-depth surface [S1]. This allows the NeRF to retain freedom for inaccurate geometry without being penalized excessively for outliers [S1].
++Robust Depth Loss is a geometric regularization term designed to supervise Neural Radiance Fields (NeRF) using dense but potentially inaccurate pseudo-depth maps [S1]. It addresses the degradation of extrapolation performance caused by geometry errors in pseudo-depth by being less sensitive to outliers than standard L2 loss [S1]. Unlike standard L2 loss which penalizes large errors quadratically, this loss saturates for large depth differences, encouraging the NeRF to terminate rays near the pseudo-depth while retaining freedom for inaccurate geometry regions where gradients become negligible [S1]. It is a core component of the S-NeRF framework for street view synthesis [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** The rendered depth expectation $\hat{D}(\mathbf{r})$ along the camera axis of ray $\mathbf{r}(t)$, and the ground truth or pseudo-depth value $D(\mathbf{r})$ from a geometry scaffold [S1].
+-*   **Output:** A scalar loss value $\mathcal{L}_{\text{robust}}(\mathbf{r})$ for the ray [S1].
++*   **Input:** Rendered expected depth $\hat{D}(\mathbf{r})$ and ground truth or pseudo-depth $D(\mathbf{r})$ for a ray $\mathbf{r}$.
++*   **Output:** Scalar loss value $\mathcal{L}_{\text{robust}}(\mathbf{r})$.
+ 
+ **Data Structures:**
+-*   $\hat{D}(\mathbf{r})$: The expected depth along the ray, typically computed as the weighted sum of sample depths using the volume rendering weights [S1].
+-*   $D(\mathbf{r})$: The reference depth value associated with the ray [S1].
+-*   $\beta$: A constant threshold parameter [S1].
++*   $\hat{D}(\mathbf{r})$: The depth expectation along the camera axis of ray $\mathbf{r}(t)$. In NeRF, this is typically computed as the expected distance: $\hat{D}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - e^{-\sigma_i \delta_i}) t_i$, where $t_i$ is the distance to the center of the $i$-th interval, $\delta_i$ is the interval length, $\sigma_i$ is the density, and $T_i$ is the accumulated transmittance [S1].
++*   $D(\mathbf{r})$: The supervision signal (pseudo-depth or ground truth).
++*   $\beta$: A constant threshold parameter.
+ 
+ **Parameters:**
+-*   $\beta$: The robustness threshold. Set to $0.1$ in experiments [S1].
++*   $\beta$: The threshold for switching between quadratic and logarithmic penalty. Set to $0.1$ in experiments [S1].
+ 
+ **Formula:**
+@@ -22,62 +23,69 @@
+ 
+ $$
+-\mathcal {L}_{\text {robust}}(\mathbf {r}) = \begin {cases} 0.5\Delta {D}(\mathbf {r})^{2}, &\text {if } \Delta {D}(\mathbf {r}) < \beta \\ \beta ^ {2} \left(0.5 + \log \left(\frac {\Delta {D}(\mathbf {r})}{\beta }\right)\right), &\text {otherwise } \end {cases}
++\mathcal {L}_{\text {robust}}(\mathbf {r}) = \begin {cases} 0.5\Delta {D}(\mathbf {r})^{2}, &\text {if } \Delta {D}(\mathbf {r}) < \beta \\ \beta ^ {2} (0.5 + \log (\frac {\Delta {D}(\mathbf {r})}{\beta })), &\text {otherwise } \end {cases}
+ $$
+-
+-**Steps:**
+-1.  Compute the absolute depth difference: $\Delta D(\mathbf{r}) = |\hat{D}(\mathbf{r}) - D(\mathbf{r})|$ [S1].
+-2.  Compare $\Delta D(\mathbf{r})$ with the threshold $\beta$ [S1].
+-3.  If $\Delta D(\mathbf{r}) < \beta$, calculate the quadratic term: $0.5 \cdot \Delta D(\mathbf{r})^2$ [S1].
+-4.  If $\Delta D(\mathbf{r}) \ge \beta$, calculate the logarithmic term: $\beta^2 \cdot (0.5 + \log(\Delta D(\mathbf{r}) / \beta))$ [S1].
+-5.  Return the result as $\mathcal{L}_{\text{robust}}(\mathbf{r})$ [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def robust_depth_loss(rendered_depth, target_depth, beta=0.1):
++def robust_depth_loss(rendered_depth, pseudo_depth, beta=0.1):
+     """
+-    Computes the robust depth loss for a single ray.
++    Computes the robust depth loss for a single ray or batch of rays.
+     
+     Args:
+-        rendered_depth (float): The expected depth along the ray, D_hat(r).
+-        target_depth (float): The ground truth or pseudo-depth value, D(r).
+-        beta (float): The robustness threshold, default 0.1.
++        rendered_depth (float or Tensor): The expected depth D_hat(r) from the NeRF.
++        pseudo_depth (float or Tensor): The supervision signal D(r).
++        beta (float): The threshold parameter, default 0.1.
+         
+     Returns:
+-        float: The computed loss L_robust(r).
++        float or Tensor: The computed loss L_robust(r).
+     """
+-    # Compute absolute depth difference
+-    delta_d = abs(rendered_depth - target_depth)
++    # Calculate absolute depth difference
++    delta_D = abs(rendered_depth - pseudo_depth)
+     
+-    if delta_d < beta:
+-        # Quadratic region: behaves like L2
+-        loss = 0.5 * (delta_d ** 2)
+-    else:
+-        # Logarithmic region: less sensitive to outliers
+-        # Gradient decreases as delta_d increases
+-        loss = (beta ** 2) * (0.5 + log(delta_d / beta))
+-        
++    # Apply piecewise function
++    # Case 1: Small error (quadratic)
++    # Case 2: Large error (logarithmic)
++    # Note: The formula uses log(delta_D / beta). 
++    # If delta_D is 0, log(0) is undefined, but the condition delta_D < beta handles 0.
++    # If delta_D >= beta, delta_D/beta >= 1, so log is >= 0.
++    
++    loss = where(delta_D < beta, 
++                 0.5 * delta_D**2, 
++                 beta**2 * (0.5 + log(delta_D / beta)))
++    
+     return loss
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The logarithmic term requires $\Delta D(\mathbf{r}) > 0$ to avoid $\log(0)$. If $\Delta D(\mathbf{r}) = 0$, the first branch is taken (since $0 < \beta$), yielding $0$, which is safe [S1].
+-*   **Boundaries:** The transition at $\Delta D(\mathbf{r}) = \beta$ is continuous. At $\beta$, the quadratic term is $0.5\beta^2$ and the logarithmic term is $\beta^2(0.5 + \log(1)) = 0.5\beta^2$ [S1].
+-*   **Gradient Behavior:** For $\Delta D(\mathbf{r}) > \beta$, the gradient with respect to $\hat{D}(\mathbf{r})$ is $\beta^2 / \Delta D(\mathbf{r})$, which approaches zero as the error grows, reducing the influence of outliers [S1].
++*   **Precision:** When $\Delta D(\mathbf{r})$ is very large, the gradient $\frac{\partial \mathcal{L}}{\partial \Delta D}$ approaches zero, which prevents the loss from dominating the optimization due to noisy pseudo-depth outliers [S1].
++*   **Boundary:** At $\Delta D(\mathbf{r}) = \beta$, the function and its first derivative are continuous.
++    *   Value: $0.5\beta^2$ vs $\beta^2(0.5 + \log(1)) = 0.5\beta^2$.
++    *   Derivative: $\beta$ vs $\beta^2 (\frac{1}{\Delta D}) |_{\beta} = \beta$.
++*   **Inaccurate Geometry:** The loss allows the NeRF to retain freedom for inaccurate geometry because the gradient becomes negligible when the absolute depth difference is very large [S1].
+ 
+ ## Subtopics
+ 
+ ### Depth Noise Robustness and Supervision
+-This variant, associated with S-NeRF, evaluates the robustness of depth supervision against noise [S2, unofficial]. It involves adding random Gaussian noise to original depth map inputs to simulate errors [S2, unofficial]. Outlier rates are computed using a threshold of 1 compared to original depth inputs [S2, unofficial]. The method demonstrates that training with strong depth noise causes only a slight drop in PSNR and SSIM (0.05–0.5%), as the confidence strategy accurately locates and measures depth outliers to avoid their negative influence [S2, unofficial]. Using only sparse depth improves PSNR by 5% over RGB-only baselines but is 2% worse in PSNR and 8% worse in LPIPS than dense depth with confidence [S2, unofficial]. The method does not rely on the quality of the depth completion network (e.g., NLSPN), as replacing it with traditional methods like Ku et al. (2018) yields similar rendering quality (24.41→24.40 PSNR) [S2, unofficial].
++This variant refers to the application of Robust Depth Loss within the S-NeRF framework to handle noisy depth inputs [S2, unofficial]. It involves a confidence strategy that locates and measures depth outliers to avoid their negative influence during training [S2, unofficial].
++*   **Noise Simulation:** Random Gaussian noise is added to original depth map inputs to simulate errors. Outlier rates are computed using a threshold of 1 compared to original depth inputs [S2, unofficial].
++*   **Performance:** Training with strong depth noise causes PSNR and SSIM to drop slightly by 0.05–0.5%, demonstrating robustness [S2, unofficial].
++*   **Sparse vs Dense:** Using only sparse depth improves PSNR by 5% over RGB-only S-NeRF but is 2% worse in PSNR and 8% worse in LPIPS than dense depth with confidence [S2, unofficial].
++*   **Dependency:** The method does not rely on the quality of the depth completion network (e.g., NLSPN). Replacing NLSPN with traditional methods (Ku et al., 2018; Van Gansbeke et al., 2019) yields similar rendering quality (24.41→24.40 PSNR) [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per ray, as it involves basic arithmetic and a logarithm [S1].
+-*   **Memory Complexity:** $O(1)$, requiring only the storage of $\beta$ and the current ray's depth values [S1].
+-*   **Strengths:** Reduces the impact of outliers in pseudo-depth maps, preventing geometry error degradation during extrapolation [S1]. It allows the NeRF to terminate rays around pseudo-depth while retaining freedom for inaccurate geometry [S1].
+-*   **Limitations:** It is specifically designed for scenarios with dense but inaccurate depth maps; its effectiveness with sparse or highly noisy depth maps depends on complementary confidence mechanisms [S1][S2, unofficial].
+-*   **When to use:** When optimizing NeRF with dense pseudo-depth maps that contain outliers or inaccuracies [S1].
+-*   **When not to use:** When high-quality, accurate depth maps are available, standard L2 loss may be sufficient and simpler [S1].
++*   **Time Complexity:** $O(1)$ per ray, identical to L2 loss, as it involves basic arithmetic and a logarithm.
++*   **Memory Complexity:** $O(1)$ per ray, storing only the scalar loss and intermediate difference.
++*   **Strengths:**
++    *   Reduces the impact of outliers in pseudo-depth maps, which are common in street view synthesis [S1][S2, unofficial].
++    *   Improves extrapolation performance compared to standard L2 loss when geometry scaffolds are inaccurate [S1].
++    *   Robust to significant depth noise (0.05–0.5% PSNR drop) [S2, unofficial].
++*   **Limitations:**
++    *   Relies on the quality of the pseudo-depth generation pipeline, though it is less sensitive than L2 [S1].
++    *   Does not inherently handle occlusions or multi-path depth; it assumes a single expected depth per ray [S1].
++*   **When to Use:** Use when supervising NeRF with dense pseudo-depth maps that contain outliers or noise, particularly in outdoor/street scenes [S1][S2, unofficial].
++*   **When Not to Use:** Use with caution if the depth supervision is extremely sparse and noisy, as dense depth provides more useful geometry information than sparse depth alone [S2, unofficial].
+ 
+ ## Background
+-Robust Depth Loss was proposed in the context of NeRFVS (Neural Radiance Fields for Free View Synthesis via Geometry Scaffolds) [S1]. It was introduced to address the issue where geometry error degrades extrapolation performance when combining NeRF with geometry scaffolds [S1]. The method is inspired by previous works on robust loss functions [S1].
++Robust Depth Loss was introduced in the context of NeRFVS (Neural Radiance Fields for Free View Synthesis via Geometry Scaffolds) [S1]. It was proposed to address the issue where geometry errors in pseudo-depth maps degrade the extrapolation performance of NeRF [S1]. The method is inspired by previous works combining NeRF and geometry [S1]. It is a key component of the S-NeRF framework for street view synthesis, which utilizes dense but inaccurate depth maps [S2, unofficial].
+ 
+ ## Sources

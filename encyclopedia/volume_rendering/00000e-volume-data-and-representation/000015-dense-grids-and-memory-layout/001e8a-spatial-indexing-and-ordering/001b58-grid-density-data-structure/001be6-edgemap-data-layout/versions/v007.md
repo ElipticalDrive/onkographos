@@ -1,0 +1,63 @@
+# EdgeMap Data Layout
+
+Also called: EdgeMap
+
+## Overview
+The EdgeMap data layout is a dense grid structure that stores geometric primitives (intersections, normals, and traversal directions) for isosurface extraction, specifically designed to support efficient mesh generation from volumetric data [S1, unofficial]. It differs from sibling methods like the [VoxelGrid Data Structure](1216-voxelgrid-data-structure.md) by explicitly decoupling geometric attributes from scalar values, storing them in parallel arrays indexed by a global edge map, which enables coherent mesh construction without repeated lookups [S1, unofficial].
+
+## How it works
+The EdgeMap struct organizes data into four parallel arrays, all sized to `Index.TotalSize`, which represents the total number of active edges or vertices in the grid topology [S1, unofficial].
+
+**Data Structures:**
+The core layout is defined by the `EdgeMap` struct containing the following fields:
+1.  `Index`: An `IndexMap` object that manages the mapping of local geometric primitives to global indices.
+2.  `Intersections`: A `unique_ptr<glm::vec3[]>` storing the 3D coordinates of intersection points.
+3.  `Normals`: A `unique_ptr<glm::vec3[]>` storing the surface normal vectors at each intersection.
+4.  `Directions`: A `unique_ptr<float[]>` storing traversal direction information (e.g., for ray marching or marching cubes variants).
+5.  `IndexOffset`: A `unique_ptr<int[]>` storing offset values for indexing into the global buffers.
+
+All arrays are contiguous and sized to `Index.TotalSize`. The `IndexMap` is responsible for determining the global identifier for vertices located on specific edges of a voxel cell, ensuring consistent adjacency across voxel boundaries [S1, unofficial].
+
+**Algorithm:**
+1.  **Initialization**: Allocate memory for `Intersections`, `Normals`, `Directions`, and `IndexOffset` arrays. The size is determined by `Index.TotalSize`, which is calculated based on the grid dimensions and the number of active edges.
+2.  **Index Calculation**: For each voxel, determine the local edges that intersect the isosurface. Use the `Edge ID Calculation` method to map these local edges to global indices in the `IndexMap` [S1, unofficial].
+3.  **Attribute Storage**:
+    *   Compute the intersection point for each active edge and store it in `Intersections` at the global index provided by `IndexMap`.
+    *   Compute the normal vector at the intersection point and store it in `Normals`.
+    *   Store traversal direction data in `Directions`.
+    *   Update `IndexOffset` to reflect the current position in the global buffer.
+4.  **Mesh Construction**: Use the global indices and offsets to connect vertices into triangles or other primitives, leveraging the coherent adjacency provided by the `IndexMap` [S1, unofficial].
+
+**Parameters:**
+*   `Index.TotalSize`: The total number of active edges/vertices. Not given in the sources.
+*   `glm::vec3`: 32-bit floating-point 3D vector.
+
+**Edge Cases:**
+*   **Precision**: Floating-point precision in `Intersections` and `Normals` may cause artifacts at boundaries if not handled carefully [G].
+*   **Boundaries**: Ensure that `IndexMap` correctly handles edge cases at the grid boundaries to avoid out-of-bounds access [G].
+
+## Subtopics
+
+### [Edge ID Calculation](1570-edge-id-calculation.md)
+Determines the unique global identifier for a vertex on a specific edge of a voxel cell, mapping local primitives to a global vertex buffer index. It differs from standard Cartesian indexing by using a specific vertex layout formula for 3D grid topology consistency.
+
+### [Enhanced Volume Data Set (EVDS)](11040-enhanced-volume-data-set-evds.md)
+Augments standard voxel grids with Boolean edge labels to encode local connectivity between vertices, solving the problem of separating segmentation from geometric modeling by providing a topological map.
+
+### [Geodesic Grid Connectivity Setup](17621-geodesic-grid-connectivity-setup.md)
+Constructs adjacency and incidence data structures for rendering on a geodesic unstructured grid, transforming raw topology into GPU-accessible formats via Texture Buffer Objects (TBOs).
+
+## Operating characteristics
+*   **Time Complexity**: Not given in the sources.
+*   **Memory Complexity**: Linear with respect to the number of active edges, $O(E)$, where $E$ is the number of active edges in the grid.
+*   **Performance**: Not given in the sources.
+*   **Strengths**: Efficient mesh generation due to coherent adjacency and decoupled geometric attributes.
+*   **Limitations**: Requires careful management of global indices and may have higher memory overhead compared to scalar-only grids.
+*   **When to use**: Suitable for isosurface extraction where mesh coherence and efficient traversal are critical.
+*   **When not to use**: Not suitable for applications requiring only scalar field visualization without mesh generation.
+
+## Background
+The EdgeMap data layout originates from the open-source project "Isosurface" by HeartofTheForce [S1, unofficial]. It is designed to facilitate efficient isosurface extraction from volumetric data by organizing geometric primitives in a way that supports coherent mesh construction.
+
+## Sources
+[S1] HeartofTheForce/Isosurface, https://github.com/HeartofTheForce/Isosurface, fetched 2026-10-26 (unofficial)

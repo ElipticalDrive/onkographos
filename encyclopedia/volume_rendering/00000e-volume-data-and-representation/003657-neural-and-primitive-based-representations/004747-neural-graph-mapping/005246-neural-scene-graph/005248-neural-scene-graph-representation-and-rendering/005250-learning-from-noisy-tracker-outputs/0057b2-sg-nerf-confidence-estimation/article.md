@@ -1,0 +1,144 @@
+# SG-NeRF Confidence Estimation
+
+Also called: Mean Matching Pairs Confidence, Scene Graph Confidence
+
+## Overview
+SG-NeRF Confidence Estimation is a method for initializing and weighting the training of neural radiance fields (NeRF) or neural surface reconstruction models when input camera poses are noisy. It constructs a scene graph from input images, sparsifies it using an angular threshold to remove incorrect matches, and assigns a confidence score to each image based on the mean number of valid matching pairs. This score forms a probability distribution that guides ray sampling, prioritizing images with higher matching quality. It differs from static SfM-based approaches by providing a dynamic initialization strategy that can be updated during training, as detailed in its variants.
+
+## How it works
+**Inputs:** A set of input images $I = \{I_1, \dots, I_N\}$, initial camera poses (rotation $R$ and translation $t$) estimated via Structure-from-Motion (SfM), and matched keypoint pairs between image pairs.
+**Outputs:** A normalized confidence score $CS(v_i)$ for each image node $v_i$ in the scene graph.
+
+**Data Structures:**
+*   **Scene Graph $G = (V, E)$:**
+    *   $V$: Set of nodes, where each node $v_i$ corresponds to image $I_i$.
+    *   $E$: Set of edges representing co-visibility and matching information.
+    *   $M$: Set of all matched keypoint pairs. $M_{i,j}$ is the set of matched pairs between $I_i$ and $I_j$.
+*   **Parameters:**
+    *   $\tau$: Angular threshold for relative rotations (typical values: 70 for SG-NeRF dataset, 45 for DTU dataset) [S1].
+
+**Steps:**
+1.  **Construct Scene Graph:** Initialize $G=(V,E)$ where nodes are images. Identify all matched keypoint pairs $M_{i,j}$ between image pairs.
+2.  **Sparsify Graph:** For every edge $(v_i, v_j)$, calculate the angular difference between the estimated relative rotation and the rotation implied by the matched keypoints (or simply use the estimated relative rotation if available). If the angular difference exceeds $\tau$, remove the edge $(v_i, v_j)$ and all associated matches $M_{i,j}$ from the graph [S1]. This step is critical because the original SfM graph is dense and contains many incorrect matches [S1].
+3.  **Compute Raw Confidence:** For each node $v_i$, compute the raw confidence score $CS_{raw}(v_i)$ as the mean number of matching pairs across all its remaining edges:
+    $$
+    CS_{raw}(v_i) = \frac{\sum_{M_{i,j} \in M_i} |M_{i,j}|}{|M_i|}
+    $$
+    where $|M_{i,j}|$ is the number of matched pairs between $I_i$ and $I_j$, and $|M_i|$ is the number of edges connected to $v_i$ in the sparsified graph [S1]. A higher score indicates better matching quality and a higher likelihood of being an inlier [S1].
+4.  **Normalize Confidence:** Normalize the scores to form a probability distribution:
+    $$
+    CS(v_i) = \frac{CS_{raw}(v_i)}{\sum_{v \in V} CS_{raw}(v)}
+    $$
+    This distribution guides the training process to sample more rays from poses with higher confidence [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_sg_nerf_confidence(images, poses, matches, tau):
+    """
+    Compute confidence scores for SG-NeRF initialization.
+    
+    Args:
+        images: List of input images.
+        poses: List of initial camera poses (R, t) from SfM.
+        matches: Dictionary mapping (i, j) to list of matched keypoints.
+        tau: Angular threshold for edge removal.
+        
+    Returns:
+        confidence_scores: Normalized confidence scores for each image.
+    """
+    n = len(images)
+    # Step 1: Initialize graph structure
+    # Edges are implicitly defined by the presence of matches
+    # We need to filter edges based on angular threshold
+    
+    valid_edges = {} # (i, j) -> list of matches
+    for (i, j), match_list in matches.items():
+        if i >= j: continue # Avoid duplicates
+        
+        # Calculate angular difference between estimated relative rotation
+        # and the rotation derived from matches (or use estimated relative rotation directly)
+        # Note: The source implies using the estimated relative rotation's angle
+        # against the threshold. In practice, this often means checking if the
+        # relative rotation error is within tau.
+        # Assuming 'get_relative_rotation_error' is a helper that computes
+        # the angle between the SfM relative rotation and the rotation
+        # consistent with the matches.
+        angle_error = get_relative_rotation_error(poses[i], poses[j], match_list)
+        
+        if angle_error <= tau:
+            valid_edges[(i, j)] = match_list
+            
+    # Step 2: Compute raw confidence for each node
+    raw_confidence = [0.0] * n
+    
+    for (i, j), match_list in valid_edges.items():
+        num_matches = len(match_list)
+        raw_confidence[i] += num_matches
+        raw_confidence[j] += num_matches
+        
+    # Count number of valid edges per node
+    edge_counts = [0] * n
+    for (i, j) in valid_edges.keys():
+        edge_counts[i] += 1
+        edge_counts[j] += 1
+        
+    # Calculate mean matching pairs
+    final_raw_confidence = [0.0] * n
+    for i in range(n):
+        if edge_counts[i] > 0:
+            final_raw_confidence[i] = raw_confidence[i] / edge_counts[i]
+        else:
+            final_raw_confidence[i] = 0.0 # No valid matches
+            
+    # Step 3: Normalize
+    total_confidence = sum(final_raw_confidence)
+    if total_confidence == 0:
+        return [1.0/n] * n # Fallback to uniform
+        
+    confidence_scores = [c / total_confidence for c in final_raw_confidence]
+    
+    return confidence_scores
+
+def get_relative_rotation_error(pose_i, pose_j, matches):
+    """
+    Helper to compute angular error.
+    In the context of SG-NeRF, this typically involves comparing the
+    relative rotation from SfM with the relative rotation estimated
+    from the matched keypoints (e.g., via PnP or RANSAC).
+    If the source implies using the SfM relative rotation directly
+    against a threshold derived from match consistency, the implementation
+    would differ. However, standard practice is to validate the SfM pose
+    using the matches.
+    [G] Implementation detail: Compute R_sfm = R_j * R_i^T.
+    Compute R_match from matches (e.g., using solvePnP or essential matrix).
+    Compute angle between R_sfm and R_match.
+    """
+    # Placeholder for actual geometric computation
+    # This function must return the angle in degrees
+    pass
+```
+
+## Subtopics
+
+### Scene Graph Updating
+A periodic update of the scene graph based on current geometry and pose estimations to remove wrong matches. It extends the initial confidence estimation by refining the graph during training. It removes edges exceeding the angular threshold $\tau$ and further removes keypoint matching pairs with a re-projection loss surpassing $\tau_{rep}$, which is gradually reduced throughout training. This strategy dynamically updates matching pairs during the pose-NeRF joint training process, whereas previous works typically use static scene graphs from SfM [S1].
+
+### Scene Graph Updating Strategy
+A specific implementation of the updating process that leverages the current Signed Distance Function (SDF) to eliminate incorrectly matched pairs. It uses the updated scene graph to provide more accurate information throughout the training process. This is described as the first study to update matching pairs dynamically during the pose-NeRF joint training process [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The initial confidence estimation is linear with respect to the number of edges in the scene graph. The updating strategy adds overhead proportional to the number of re-projection loss calculations, which depends on the number of matched pairs and the frequency of updates.
+*   **Memory Complexity:** Requires storing the scene graph and matched keypoints. The memory footprint is proportional to the number of images and the density of matches.
+*   **Performance:** The method improves reconstruction quality and pose accuracy, particularly in the presence of noisy initial poses. On the SG-NeRF dataset, it runs for an average of 13 hours for 150k iterations on NVIDIA RTX 3090 GPUs. On the DTU dataset, it runs for 22 hours for 300k iterations [S1].
+*   **Strengths:** Effectively handles noisy initial poses by filtering out incorrect matches. Provides a principled way to weight images during training.
+*   **Limitations:** Relies on the quality of initial SfM matches. If the initial matches are too poor, the sparsification might remove too many edges, leading to low confidence for all images. The gradual reduction of $\tau_{rep}$ requires careful tuning.
+*   **When to use:** When initial camera poses are noisy and contain outliers. When using neural surface reconstruction methods like NeuS or NeRF that benefit from guided ray sampling.
+*   **When not to use:** When high-quality initial poses are already available, as the overhead may not be justified. When real-time performance is critical, as the updating strategy adds computational cost.
+
+## Background
+SG-NeRF Confidence Estimation is part of the Robust SG-NeRF method, introduced in 2024 by researchers from Omnispace AI. It builds on the SG-NeRF framework, which was the first to utilize a scene graph to guide joint optimization in neural surface reconstruction. The method addresses the problem of noisy tracker outputs in Structure-from-Motion (SfM) by providing a robust confidence estimation and updating strategy. It is used for object-level 3D surface reconstruction from unorganized images captured in an inward-facing configuration. The method has been validated on the SG-NeRF and DTU datasets [S1].
+
+## Sources
+[S1] Robust SG-NeRF: Robust Scene Graph Aided Neural Surface Reconstruction, https://arxiv.org/abs/2411.13620v1, fetched 2026-10-26

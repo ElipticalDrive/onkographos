@@ -1,0 +1,250 @@
+--- v006.md
++++ v007.md
+@@ -26,5 +26,5 @@
+ 
+ 1.  **Ray Initialization:** For each pixel in the `viewport`, compute ray origin $\mathbf{o}$ and direction $\mathbf{d}$ from the view matrices [S2, unofficial].
+-2.  **Coarse Marching:** Call `raySurfaceTrilinearBrickCustom`.
++2.  **Coarse Marching:** Call `raySurfaceTrilinearBrickCustom` [S2, unofficial].
+     *   Get the leaf node and atlas offset for the current ray position [S2, unofficial].
+     *   Convert world position $\mathbf{p}_{world}$ to index coordinates $p$ using:
+@@ -54,6 +54,6 @@
+     *   **Ambient:** Start with `ambientColor` [S2, unofficial].
+     *   **Diffuse:** Add `diffuseColor * max(0.0, \mathbf{n} \cdot \mathbf{l})`, where $\mathbf{l}$ is the light direction [S2, unofficial].
+-    *   **Specular:** Compute reflection vector $\mathbf{R} = \text{normalize}(\text{reflect}(\mathbf{l}, \mathbf{n}))$ [S2, unofficial].
+-        *   Compute eye direction $\mathbf{E}$ (from hit point to camera) [S2, unofficial].
++    *   **Specular:** Compute reflection vector $\mathbf{R} = \text{normalize}(2(\mathbf{n} \cdot \mathbf{l})\mathbf{n} - \mathbf{l})$ [G].
++        *   Compute eye direction $\mathbf{E}$ (from hit point to camera) [G].
+         *   Add specular term:
+             $$ c_{spec} \cdot \frac{\alpha + 2}{6.82} \cdot \max(0, \mathbf{R} \cdot \mathbf{E})^\alpha $$
+@@ -72,33 +72,38 @@
+ def gvdb_raytrace_binary_search(ray_origin, ray_dir, gvdb_data, params):
+     """
+-    ray_origin: float3
+-    ray_dir: float3
+-    gvdb_data: GVDB dataset with SDF channel
++    ray_origin: tuple (ox, oy, oz)
++    ray_dir: tuple (dx, dy, dz)
++    gvdb_data: object with res, get_node_at_point, sample_sdf, get_interpolated_raw_sdf_gradient
+     params: object containing SCN_THRESH, SCN_PSTEP, binarySearchSteps, specularExponent, etc.
+     """
+     t_current = 0.0
+     p_start = ray_origin
+-    
+-    # Coarse Marching
+     hit_found = False
+     t_lower = 0.0
+     t_upper = 0.0
+     
++    # Coarse Marching
+     while True:
++        p_world = (p_start[0] + t_current * ray_dir[0],
++                   p_start[1] + t_current * ray_dir[1],
++                   p_start[2] + t_current * ray_dir[2])
++        
+         # Check bounds
+-        p_world = p_start + t_current * ray_dir
+-        if not is_inside_volume(p_world, gvdb_data):
+-            break
+-            
+-        # Get node and offset
+-        node = get_node_at_point(p_world, gvdb_data)
++        if not (0 <= p_world[0] < gvdb_data.res[0] and
++                0 <= p_world[1] < gvdb_data.res[1] and
++                0 <= p_world[2] < gvdb_data.res[2]):
++            break
++            
++        node = gvdb_data.get_node_at_point(p_world)
+         if node is None:
+             break
+             
+         # Convert to index coordinates
+-        p_idx = (p_world - node.v_min) / node.v_del[0]
+-        
+-        # Sample SDF with 0.5 offset to account for voxel influence region
+-        sdf_val = sample_sdf_with_offset(p_idx + float3(0.5, 0.5, 0.5), node)
++        p_idx = ((p_world[0] - node.v_min[0]) / node.v_del[0],
++                 (p_world[1] - node.v_min[1]) / node.v_del[1],
++                 (p_world[2] - node.v_min[2]) / node.v_del[2])
++                 
++        # Sample SDF with 0.5 offset
++        sdf_val = gvdb_data.sample_sdf(p_idx[0] + 0.5, p_idx[1] + 0.5, p_idx[2] + 0.5, node)
+         
+         if sdf_val >= params.SCN_THRESH:
+@@ -114,35 +119,31 @@
+ 
+     # Binary Search Refinement
+-    # Adjust start point if it's inside (SDF >= threshold means inside, but we want outside for lower bound logic in some implementations, 
+-    # however notes say: adjust start pos0 if SDF is negative (below surface) by stepping back. 
+-    # Note: SDF < 0 is outside, SDF > 0 is inside. SCN_THRESH is the isosurface.
+-    # The code snippet says: if tex3D >= SCN_THRESH (inside), tUpper = tMiddle.
+-    # So tLower is outside, tUpper is inside.
+-    
+-    # Adjust t_lower (outside) if it's actually inside? 
+-    # Notes say: adjust start point pos0 if its SDF is negative (below surface) by stepping back 0.5 units up to 4 times until SDF is positive.
+-    # This implies pos0 corresponds to t_lower. If SDF at t_lower is negative (outside), we step back? 
+-    # Wait, if SDF is negative, it's outside. We want t_lower to be outside. 
+-    # Let's follow the code snippet logic strictly:
+-    # tLower = tCurrent - SCN_PSTEP; tUpper = tCurrent;
+-    # Loop: tMiddle = 0.5 * (tLower + tUpper); p = pStart + tMiddle * dir;
+-    # if tex3D >= SCN_THRESH: tUpper = tMiddle; else: tLower = tMiddle;
+-    
+-    # Pre-adjustment based on notes:
+-    # "adjust the start point pos0 if its SDF is negative (below surface) by stepping back 0.5 units up to 4 times until SDF is positive."
+-    # This seems contradictory to standard bisection if pos0 is the lower bound. 
+-    # However, we will implement the adjustment as described in notes for robustness.
+-    
+-    pos0 = p_start + t_lower * ray_dir
++    # Adjust start point (t_lower) if SDF is negative
++    pos0 = (p_start[0] + t_lower * ray_dir[0],
++            p_start[1] + t_lower * ray_dir[1],
++            p_start[2] + t_lower * ray_dir[2])
+     for _ in range(4):
+-        if sample_sdf_with_offset((pos0 - node.v_min)/node.v_del[0] + float3(0.5,0.5,0.5), node) < 0: # Negative SDF
+-            pos0 -= ray_dir * 0.5
+-        else:
+-            break
+-            
+-    pos1 = p_start + t_upper * ray_dir
++        p_idx0 = ((pos0[0] - node.v_min[0]) / node.v_del[0] + 0.5,
++                  (pos0[1] - node.v_min[1]) / node.v_del[1] + 0.5,
++                  (pos0[2] - node.v_min[2]) / node.v_del[2] + 0.5)
++        if gvdb_data.sample_sdf(p_idx0[0], p_idx0[1], p_idx0[2], node) < 0:
++            pos0 = (pos0[0] - 0.5 * ray_dir[0],
++                    pos0[1] - 0.5 * ray_dir[1],
++                    pos0[2] - 0.5 * ray_dir[2])
++        else:
++            break
++            
++    # Adjust end point (t_upper) if SDF is positive
++    pos1 = (p_start[0] + t_upper * ray_dir[0],
++            p_start[1] + t_upper * ray_dir[1],
++            p_start[2] + t_upper * ray_dir[2])
+     for _ in range(4):
+-        if sample_sdf_with_offset((pos1 - node.v_min)/node.v_del[0] + float3(0.5,0.5,0.5), node) > 0: # Positive SDF (inside)
+-            pos1 += ray_dir * 0.5
++        p_idx1 = ((pos1[0] - node.v_min[0]) / node.v_del[0] + 0.5,
++                  (pos1[1] - node.v_min[1]) / node.v_del[1] + 0.5,
++                  (pos1[2] - node.v_min[2]) / node.v_del[2] + 0.5)
++        if gvdb_data.sample_sdf(p_idx1[0], p_idx1[1], p_idx1[2], node) > 0:
++            pos1 = (pos1[0] + 0.5 * ray_dir[0],
++                    pos1[1] + 0.5 * ray_dir[1],
++                    pos1[2] + 0.5 * ray_dir[2])
+         else:
+             break
+@@ -150,48 +151,93 @@
+     for i in range(params.binarySearchSteps):
+         t_middle = 0.5 * (t_lower + t_upper)
+-        p_mid = p_start + t_middle * ray_dir
+-        sdf_mid = sample_sdf_with_offset((p_mid - node.v_min)/node.v_del[0] + float3(0.5,0.5,0.5), node)
++        p_mid = (p_start[0] + t_middle * ray_dir[0],
++                 p_start[1] + t_middle * ray_dir[1],
++                 p_start[2] + t_middle * ray_dir[2])
++        p_idx_mid = ((p_mid[0] - node.v_min[0]) / node.v_del[0] + 0.5,
++                     (p_mid[1] - node.v_min[1]) / node.v_del[1] + 0.5,
++                     (p_mid[2] - node.v_min[2]) / node.v_del[2] + 0.5)
++        sdf_mid = gvdb_data.sample_sdf(p_idx_mid[0], p_idx_mid[1], p_idx_mid[2], node)
+         
+         if sdf_mid >= params.SCN_THRESH:
+             t_upper = t_middle
+-            pos1 = p_mid
+         else:
+             t_lower = t_middle
+-            pos0 = p_mid
+-            
+-    # Select final distance based on smaller absolute SDF
+-    sdf_lower = sample_sdf_with_offset((p_start + t_lower * ray_dir - node.v_min)/node.v_del[0] + float3(0.5,0.5,0.5), node)
+-    sdf_upper = sample_sdf_with_offset((p_start + t_upper * ray_dir - node.v_min)/node.v_del[0] + float3(0.5,0.5,0.5), node)
++            
++    # Select final distance
++    p_lower = (p_start[0] + t_lower * ray_dir[0],
++               p_start[1] + t_lower * ray_dir[1],
++               p_start[2] + t_lower * ray_dir[2])
++    p_upper = (p_start[0] + t_upper * ray_dir[0],
++               p_start[1] + t_upper * ray_dir[1],
++               p_start[2] + t_upper * ray_dir[2])
++    p_idx_lower = ((p_lower[0] - node.v_min[0]) / node.v_del[0] + 0.5,
++                   (p_lower[1] - node.v_min[1]) / node.v_del[1] + 0.5,
++                   (p_lower[2] - node.v_min[2]) / node.v_del[2] + 0.5)
++    p_idx_upper = ((p_upper[0] - node.v_min[0]) / node.v_del[0] + 0.5,
++                   (p_upper[1] - node.v_min[1]) / node.v_del[1] + 0.5,
++                   (p_upper[2] - node.v_min[2]) / node.v_del[2] + 0.5)
++    sdf_lower = gvdb_data.sample_sdf(p_idx_lower[0], p_idx_lower[1], p_idx_lower[2], node)
++    sdf_upper = gvdb_data.sample_sdf(p_idx_upper[0], p_idx_upper[1], p_idx_upper[2], node)
+     
+     if abs(sdf_lower) < abs(sdf_upper):
+         t_final = t_lower
+-        p_hit = p_start + t_lower * ray_dir
++        p_hit = p_lower
+     else:
+         t_final = t_upper
+-        p_hit = p_start + t_upper * ray_dir
++        p_hit = p_upper
+         
+     # Normal Computation
+     normal = None
+     if params.normal_enabled:
+-        grad = get_interpolated_raw_sdf_gradient(p_hit, gvdb_data)
+-        normal = normalize(grad)
+-        
++        grad = gvdb_data.get_interpolated_raw_sdf_gradient(p_hit)
++        mag = (grad[0]**2 + grad[1]**2 + grad[2]**2)**0.5
++        if mag > 0:
++            normal = (grad[0]/mag, grad[1]/mag, grad[2]/mag)
++        else:
++            normal = (0.0, 1.0, 0.0)
++            
+     # Shading
+     ambient = params.ambientColor
+-    diffuse = params.diffuseColor * max(0.0, dot(normal, params.lightDir))
+-    
+-    R = normalize(reflect(params.lightDir, normal))
+-    E = normalize(camera_position - p_hit)
+-    specular = params.specularColor * ((params.specularExponent + 2) / 6.82) * pow(max(0.0, dot(R, E)), params.specularExponent)
+-    
+-    color = ambient + diffuse + specular
+-    
++    diffuse = params.diffuseColor * max(0.0, normal[0]*params.lightDir[0] + normal[1]*params.lightDir[1] + normal[2]*params.lightDir[2])
++    
++    # R = 2 * dot(N, L) * N - L
++    dot_nl = normal[0]*params.lightDir[0] + normal[1]*params.lightDir[1] + normal[2]*params.lightDir[2]
++    R = (2*dot_nl*normal[0] - params.lightDir[0],
++         2*dot_nl*normal[1] - params.lightDir[1],
++         2*dot_nl*normal[2] - params.lightDir[2])
++    R_mag = (R[0]**2 + R[1]**2 + R[2]**2)**0.5
++    if R_mag > 0:
++        R = (R[0]/R_mag, R[1]/R_mag, R[2]/R_mag)
++        
++    E = (params.camera_position[0] - p_hit[0],
++         params.camera_position[1] - p_hit[1],
++         params.camera_position[2] - p_hit[2])
++    E_mag = (E[0]**2 + E[1]**2 + E[2]**2)**0.5
++    if E_mag > 0:
++        E = (E[0]/E_mag, E[1]/E_mag, E[2]/E_mag)
++        
++    specular = params.specularColor * ((params.specularExponent + 2) / 6.82) * max(0.0, R[0]*E[0] + R[1]*E[1] + R[2]*E[2])**params.specularExponent
++    color = (ambient[0] + diffuse[0] + specular[0],
++             ambient[1] + diffuse[1] + specular[1],
++             ambient[2] + diffuse[2] + specular[2])
++             
+     # Flow and Depth
++    # Project p_hit using current and next view matrices
+     screen_current = project_to_screen(p_hit, params.current_view_matrix)
+     screen_next = project_to_screen(p_hit, params.next_view_matrix)
+-    flow = 0.5 * (screen_current - screen_next)
+-    depth = screen_current.z
++    flow = (0.5 * (screen_current[0] - screen_next[0]),
++            0.5 * (screen_current[1] - screen_next[1]))
++    depth = screen_current[2]
+     
+     return p_hit, normal, color, flow, depth
++
++def project_to_screen(point, view_matrix):
++    # Standard perspective projection
++    x, y, z = point
++    w = view_matrix[3][0]*x + view_matrix[3][1]*y + view_matrix[3][2]*z + view_matrix[3][3]
++    if w == 0: w = 1e-6
++    return (view_matrix[0][0]*x + view_matrix[0][1]*y + view_matrix[0][2]*z + view_matrix[0][3]) / w, \
++           (view_matrix[1][0]*x + view_matrix[1][1]*y + view_matrix[1][2]*z + view_matrix[1][3]) / w, \
++           (view_matrix[2][0]*x + view_matrix[2][1]*y + view_matrix[2][2]*z + view_matrix[2][3]) / w
+ ```
+ 

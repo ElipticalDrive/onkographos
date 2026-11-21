@@ -1,0 +1,161 @@
+--- v004.md
++++ v005.md
+@@ -4,30 +4,36 @@
+ 
+ ## Overview
+-The Normal-L2 score quantifies the geometric fidelity of a reconstructed surface by measuring the angular deviation between predicted surface normals and ground-truth normals. It complements photometric metrics (like MSE) by ensuring that shading cues are consistent, which is critical for perceptual quality [S1]. It differs from sibling metrics like PSNR or SSIM, which operate on RGB pixel values, by operating directly on the differential geometry of the rendered or reconstructed surface [S1].
++The Normal-L2 Score computes the mean squared error between predicted surface normals and ground-truth normals to evaluate geometric fidelity in radiance-field optimization. It differs from sibling metrics like [PSNR Metric Calculation](2742-psnr-metric-calculation.md) by focusing on shading-critical surface orientation rather than color intensity, and from [IoU Loss](7110-iou-loss.md) by measuring local geometric accuracy rather than global silhouette alignment.
+ 
+ ## How it works
+ **Inputs:**
+-- Predicted surface normals $\mathbf{n}_{pred}$ at pixel locations.
+-- Ground-truth surface normals $\mathbf{n}_{gt}$ at corresponding pixel locations.
+-- Predicted mask $M_{pred}$ and ground-truth mask $M_{gt}$ (binary indicators of object presence).
++- Predicted surface normals tensor $N_{pred}$ (shape: $H \times W \times 3$).
++- Ground-truth surface normals tensor $N_{gt}$ (shape: $H \times W \times 3$), interpolated from a reference mesh.
++- Predicted binary mask $M_{pred}$ (shape: $H \times W$).
++- Ground-truth binary mask $M_{gt}$ (shape: $H \times W$).
+ 
+ **Outputs:**
+-- Scalar Normal-L2 error value.
++- Scalar Normal-L2 Score.
+ 
+ **Data Structures:**
+-- Normals are stored as 3D unit vectors $(x, y, z)$.
+-- Masks are boolean or binary float tensors of shape $(H, W)$.
++- Masks are boolean or float tensors where 1 indicates the object silhouette and 0 indicates background.
++- Normals are unit vectors.
+ 
+ **Steps:**
+-1. **Mask Intersection:** Compute the intersection mask $M_{int} = M_{pred} \land M_{gt}$. This ensures normals are only compared where both the prediction and ground truth agree on the object's silhouette [S1].
+-2. **Sampling:** Sample normal vectors at pixel coordinates defined by the intersection mask.
+-3. **Dot Product:** Compute the dot product between predicted and ground-truth normals: $d = \mathbf{n}_{pred} \cdot \mathbf{n}_{gt}$.
+-4. **Angle Calculation:** Compute the angle $\theta$ between normals: $\theta = \arccos(\min(1, \max(-1, d)))$. Clamping is required to handle numerical precision errors that might push $d$ slightly outside $[-1, 1]$ [G].
+-5. **Error Aggregation:** Compute the mean squared angle error over all pixels in $M_{int}$:
+-   $$ E = \frac{1}{|M_{int}|} \sum_{i \in M_{int}} \theta_i^2 $$
+-   Note: Some implementations may use the squared Euclidean distance between normals ($\|\mathbf{n}_{pred} - \mathbf{n}_{gt}\|^2$) as a proxy for angular error, which is equivalent to $2(1 - \cos \theta)$ for unit vectors. The source [S1] refers to "Normal-L2 score" and "normal error," implying a comparison of the normal vectors themselves. Given the context of "L2 score," the squared Euclidean distance is the standard interpretation unless "angle" is explicitly specified. However, "score" often implies a metric where lower is better. We provide the Euclidean L2 formulation as it is the direct "L2" of the vectors.
+-   
+-   *Revised Step 5 (Euclidean L2):*
+-   $$ E = \frac{1}{|M_{int}|} \sum_{i \in M_{int}} \|\mathbf{n}_{pred, i} - \mathbf{n}_{gt, i}\|^2 $$
++1. **Mask Intersection:** Compute the intersection mask $M_{int}$ where both predicted and ground-truth masks are active:
++   $$ M_{int} = M_{pred} \land M_{gt} $$
++   This ensures error is only computed on regions where the object is present in both prediction and ground truth, separating geometric error from segmentation error [S1].
++
++2. **Normal Sampling:** For each pixel $(u, v)$ in the image grid:
++   - If $M_{int}[u, v] == 1$, retrieve $N_{pred}[u, v]$ and $N_{gt}[u, v]$.
++   - If $M_{int}[u, v] == 0$, discard the pixel.
++
++3. **Error Calculation:** Compute the squared L2 distance for each valid pixel:
++   $$ E_{uv} = \| N_{pred}[u, v] - N_{gt}[u, v] \|_2^2 $$
++   Since normals are unit vectors, this simplifies to:
++   $$ E_{uv} = 2 - 2 (N_{pred}[u, v] \cdot N_{gt}[u, v]) $$
++
++4. **Aggregation:** Average the errors over all pixels in $M_{int}$:
++   $$ \text{Score} = \frac{1}{|M_{int}|} \sum_{u,v \in M_{int}} E_{uv} $$
+ 
+ **Parameters:**
+@@ -37,75 +43,50 @@
+ 
+ **Edge Cases:**
+-- **Empty Intersection:** If $|M_{int}| = 0$, the error is undefined or set to 0 depending on implementation. [G]
+-- **Degenerate Normals:** If ground-truth normals are not unit length, they must be normalized before comparison [G].
++- If $|M_{int}| = 0$, the score is undefined or set to infinity, indicating complete silhouette mismatch [G].
++- Normals must be normalized before comparison to ensure valid dot products [G].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_normal_l2_score(n_pred, n_gt, mask_pred, mask_gt):
+-    """
+-    n_pred: Tensor of shape (H, W, 3), predicted normals
+-    n_gt: Tensor of shape (H, W, 3), ground truth normals
+-    mask_pred: Tensor of shape (H, W), boolean or float 0/1
+-    mask_gt: Tensor of shape (H, W), boolean or float 0/1
+-    """
++def compute_normal_l2_score(N_pred, N_gt, M_pred, M_gt):
++    # M_pred, M_gt: H x W boolean tensors
++    # N_pred, N_gt: H x W x 3 float tensors, normalized
++    
+     # 1. Compute intersection mask
+-    mask_int = mask_pred & mask_gt
++    M_int = M_pred & M_gt
+     
+-    # 2. Count valid pixels
+-    num_pixels = mask_int.sum()
++    # 2. Get valid indices
++    valid_indices = torch.nonzero(M_int, as_tuple=True)
++    num_valid = len(valid_indices[0])
+     
+-    if num_pixels == 0:
+-        return 0.0 # Or raise error, depending on convention [G]
++    if num_valid == 0:
++        return float('inf') # Or handle as error
+         
+-    # 3. Extract normals where mask is true
+-    # Flatten tensors for easier indexing
+-    n_pred_flat = n_pred.view(-1, 3)
+-    n_gt_flat = n_gt.view(-1, 3)
+-    mask_int_flat = mask_int.view(-1)
++    # 3. Gather normals for valid pixels
++    N_pred_valid = N_pred[valid_indices]
++    N_gt_valid = N_gt[valid_indices]
+     
+-    n_pred_valid = n_pred_flat[mask_int_flat]
+-    n_gt_valid = n_gt_flat[mask_int_flat]
++    # 4. Compute squared L2 distance
++    # ||a - b||^2 = ||a||^2 + ||b||^2 - 2(a . b)
++    # Assuming normalized normals: ||a||^2 = 1, ||b||^2 = 1
++    dot_product = torch.sum(N_pred_valid * N_gt_valid, dim=-1)
++    squared_diff = 2.0 - 2.0 * dot_product
+     
+-    # 4. Compute squared Euclidean distance
+-    diff = n_pred_valid - n_gt_valid
+-    sq_dist = torch.sum(diff ** 2, dim=1)
+-    
+-    # 5. Mean error
+-    error = torch.mean(sq_dist)
+-    
+-    return error
++    # 5. Average
++    score = torch.mean(squared_diff)
++    return score
+ ```
+ 
+ ## Subtopics
+ 
+-### [Bounded Relative Error Norm (BREN)](16414-bounded-relative-error-norm-bren.md)
+-The Bounded Relative Error Norm (BREN) is a theoretical property of a reconstruction neural network $\Phi$ that ensures the ratio of the L2 norm of the reconstruction error to the L2 norm of the ground truth is bounded by a value strictly less than 1. It serves as a stability condition for convergence analysis in iterative reconstruction frameworks, such as ACID, by guaranteeing that the network output remains close to the ideal reconstruction. It distinguishes itself from standard Lipschitz continuity by normalizing the error bound relative to the signal magnitude, effectively acting as a special case of Lipschitz continuity tailored for relative error control in deep imaging. [Link to [BREN](16414-bounded-relative-error-norm-bren.md)]
+-
+-### KL Normal Loss
+-Computes the Kullback-Leibler divergence between a standard normal distribution and a diagonal Gaussian parameterized by the mean and variance of an output embedding tensor. It is used to regularize latent embeddings to follow a standard normal distribution. [S2, unofficial]
+-
+-**Definition:**
+-$$ KL = \sum_{d} 0.5 \left( \mu_d^2 + \sigma_d^2 - \ln(\sigma_d^2 + \epsilon) - 1 \right) $$
+-where $\mu_d$ is the mean along dimension 0 for dimension $d$, $\sigma_d^2$ is the variance, and $\epsilon = 1e-8$ for numerical stability. [S2, unofficial]
+-
+-**Steps:**
+-1. Compute mean: `mean = torch.mean(output_embedding, dim=0)`.
+-2. Compute std: `std = torch.std(output_embedding, dim=0)`.
+-3. Compute var: `var = std ** 2`.
+-4. Compute KL per dimension: `kl_per_dim = 0.5 * (mean**2 + var - torch.log(var + 1e-8) - 1)`.
+-5. Return total KL: `kl_total = torch.sum(kl_per_dim)`. [S2, unofficial]
+-
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of pixels in the intersection of the masks.
+-- **Memory Complexity:** $O(N)$ to store the valid normal vectors.
+-- **Strengths:** Directly measures geometric accuracy; sensitive to surface orientation errors which affect shading and realism.
+-- **Limitations:** Requires accurate ground-truth normals; sensitive to mask alignment errors (mitigated by using intersection mask); does not account for photometric consistency.
+-- **When to use:** When geometric fidelity and shading consistency are more important than raw pixel color accuracy.
+-- **When not to use:** When ground-truth normals are unavailable or unreliable.
++- **Time Complexity:** $O(H \times W)$ per camera view, dominated by mask intersection and element-wise operations.
++- **Memory Complexity:** $O(H \times W)$ to store intermediate masks and normal tensors.
++- **Strengths:** Directly correlates with shading quality; sensitive to local geometric errors like bumps or dents.
++- **Limitations:** Sensitive to normal orientation flips (sign ambiguity) if not handled; requires accurate ground-truth normals from a reference mesh.
++- **When to use:** When shading fidelity is critical and silhouette alignment is handled separately (e.g., via iIoU) [S1].
+ 
+ ## Background
+-The Normal-L2 score is used in neural rendering and implicit surface reconstruction to evaluate the quality of reconstructed geometry. It was prominently used in the Neural Geometric Level of Detail (Neural GLOD) paper to assess surface quality alongside photometric metrics [S1]. The use of spherical Fibonacci sequences for camera sampling ensures uniform coverage of the object [S1].
++Originated in the context of Neural Geometric Level of Detail (Neural GLOD) for real-time rendering with implicit 3D shapes [S1]. It is used to evaluate the quality of predicted surface normals against interpolated normals from a reference mesh, ensuring that the rendered geometry produces correct shading [S1].
+ 
+ ## Sources
+-[S1] Neural Geometric Level of Detail: Real-time Rendering with Implicit 3D Shapes, https://doi.org/10.1109/cvpr46437.2021.01120, fetched 2026-10-26
+-[S2] TurtleJayWang/VC-SDFGen, https://github.com/TurtleJayWang/VC-SDFGen, fetched 2026-10-28 (unofficial)+[S1] Neural Geometric Level of Detail: Real-time Rendering with Implicit 3D Shapes, https://doi.org/10.1109/cvpr46437.2021.01120, fetched 2026-10-26

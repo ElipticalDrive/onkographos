@@ -1,0 +1,208 @@
+# Depth from Ray Distance
+
+Also called: Camera-space depth conversion, Ray distance to depth
+
+## Overview
+Depth from Ray Distance converts the scalar ray distance $d$ (the Euclidean distance from the camera center to the intersection or accumulation point along the ray) into camera-space depth $z_c$ (the distance along the camera's optical axis). It solves the problem of interpreting differentiable volume rendering outputs, which naturally produce distances along the viewing ray, into a coordinate system compatible with standard depth maps and RGB-D sensors. It sets itself apart from sibling methods like [Expected Term Rendering](5952-expected-term-rendering.md) and [Median Depth Rendering](8815-median-depth-rendering.md) by providing a direct geometric projection of the ray distance rather than computing statistical moments or threshold crossings of the volume density.
+
+## How it works
+**Inputs and outputs:**
+- Input: Ray distance $d$ (scalar or tensor of shape $Q$), pixel coordinates $(x, y)$, camera intrinsic matrix $K$ ($3 \times 3$).
+- Output: Camera-space depth $z_c$ (scalar or tensor of shape $Q$).
+
+**Data structures:**
+- $K$: $3 \times 3$ matrix containing focal lengths $f_x, f_y$ and principal point $c_x, c_y$.
+- $(x, y)$: Pixel coordinates in image space.
+
+**Steps:**
+1. Compute the normalized homogeneous coordinate vector $\mathbf{v}_{norm}$ by applying the inverse camera intrinsics to the pixel coordinates:
+   $$
+   \begin{bmatrix} x_{tilde} \\ y_{tilde} \\ 1 \end{bmatrix} = K^{-1} \begin{bmatrix} x \\ y \\ 1 \end{bmatrix}
+   $$
+   This yields the direction vector components $x_{tilde}$ and $y_{tilde}$ in the camera coordinate system, normalized such that the $z$-component is 1.
+
+2. Calculate the norm of the normalized direction vector:
+   $$
+   ||\mathbf{v}_{norm}|| = \sqrt{x_{tilde}^2 + y_{tilde}^2 + 1}
+   $$
+
+3. Compute the camera-space depth $z_c$ by dividing the ray distance $d$ by this norm:
+   $$
+   z_c = \frac{d}{\sqrt{x_{tilde}^2 + y_{tilde}^2 + 1}}
+   $$
+
+**Formulas:**
+- $z_c = d / \sqrt{x_{tilde}^2 + y_{tilde}^2 + 1}$ [S1]
+- Where $z_c$ is the camera-space depth, $d$ is the ray distance, and $(x_{tilde}, y_{tilde}, 1)^T = K^{-1}(x, y, 1)^T$ is the normalized homogeneous coordinate derived from pixel coordinates $(x,y)$ and camera matrix $K$ [S1].
+
+**Parameters:**
+- Not given in the sources.
+
+**Edge cases and pitfalls:**
+- **Precision:** Division by the norm is stable as the norm is always $\ge 1$. However, if $K$ is ill-conditioned, $K^{-1}$ may introduce numerical noise.
+- **Boundaries:** If pixel coordinates $(x, y)$ are outside the valid image bounds, $x_{tilde}$ and $y_{tilde}$ will be large, resulting in a small $z_c$. This is mathematically correct for rays pointing far off-axis, but may require clamping in practice.
+- **Degenerate input:** If $K$ is singular, $K^{-1}$ is undefined. This is a precondition failure.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def depth_from_ray_distance(d: torch.Tensor, pixel_coords: torch.Tensor, K: torch.Tensor) -> torch.Tensor:
+    """
+    Convert ray distance d to camera-space depth z_c.
+    
+    Args:
+        d: Ray distance tensor of shape (Q,) or (H, W).
+        pixel_coords: Pixel coordinates tensor of shape (Q, 2) or (H, W, 2) with (x, y).
+        K: Camera intrinsic matrix of shape (3, 3).
+        
+    Returns:
+        z_c: Camera-space depth tensor of the same shape as d.
+    """
+    # Ensure pixel_coords is (..., 2)
+    if pixel_coords.dim() == 2:
+        # Q, 2
+        x = pixel_coords[:, 0]
+        y = pixel_coords[:, 1]
+    else:
+        # H, W, 2
+        x = pixel_coords[..., 0]
+        y = pixel_coords[..., 1]
+        
+    # Compute normalized homogeneous coordinates
+    # K_inv is 3x3
+    K_inv = torch.inverse(K)
+    
+    # Construct homogeneous vector [x, y, 1]
+    # Shape: (..., 3)
+    homo_coords = torch.stack([x, y, torch.ones_like(x)], dim=-1)
+    
+    # Apply inverse intrinsics
+    # Result shape: (..., 3)
+    norm_vec = torch.matmul(homo_coords, K_inv.T)
+    
+    x_tilde = norm_vec[..., 0]
+    y_tilde = norm_vec[..., 1]
+    
+    # Compute norm of the direction vector
+    # sqrt(x_tilde^2 + y_tilde^2 + 1)
+    norm = torch.sqrt(x_tilde**2 + y_tilde**2 + 1.0)
+    
+    # Compute depth
+    z_c = d / norm
+    
+    return z_c
+```
+
+## Subtopics
+
+### [Expected Term Rendering](5952-expected-term-rendering.md)
+Expected Term Rendering computes the expected termination distance (depth) for each ray traversing a volume, returning a tensor of size $Q$ (number of rays). It differs from standard depth rendering by calculating the weighted mean of sample depths along the ray, where weights are derived from the volume's transmittance and absorption properties [G]. This method builds on [Depth from Ray Distance](5665-depth-from-ray-distance.md) by specifically implementing the expected value strategy for depth estimation.
+
+### [Sigma-Threshold Depth Rendering](5955-sigma-threshold-depth-rendering.md)
+Sigma-Threshold Depth Rendering computes a binary mask indicating the sample index where cumulative weight accumulation exceeds a specified density threshold, effectively identifying a 'surface' location along the ray. It serves as a differentiable depth estimation method that renders a binary or thresholded output based on whether volume density exceeds a given value, referencing the approach used in Dex-NeRF. Unlike Expected Term Rendering which computes the mean distance, or Median Depth Rendering which finds the median, this method identifies the depth at which the accumulated opacity crosses a hard boundary. It builds on [Depth from Ray Distance](5665-depth-from-ray-distance.md) by introducing a termination condition based on accumulated sigma rather than fixed sample counts or probabilistic expectations.
+
+### [Median Depth Rendering](8815-median-depth-rendering.md)
+Median Depth Rendering computes the geometric depth of a volume by identifying the sample along a ray where the accumulated transmittance drops to 0.5. It solves the bias introduced by residual density in free space that affects Expected Depth Rendering, providing a sharper and less biased geometric representation for ambiguous or sparse scenes. Unlike Expected Depth Rendering, which integrates the entire ray's contribution to find a weighted average, Median Depth Rendering selects a single threshold-crossing point, making it robust to noise in empty regions.
+
+### [Robust Depth-Range Estimation](10825-robust-depth-range-estimation.md)
+Estimates a robust clipped depth range $[z_{min}, z_{max}]$ for binning by sampling visible Gaussians, applying a near-depth shift, and selecting percentiles via exact order statistics. It sets itself apart from sibling methods like Median Depth Rendering by using percentile-based range estimation with exact order statistics rather than a single median value, ensuring the binning range covers the majority of contributing geometry while excluding outliers.
+
+### [UrbanIR Inverse Rendering](16174-urbanir-inverse-rendering.md)
+UrbanIR Inverse Rendering is a differentiable volume rendering method that jointly optimizes a neural scene representation and lighting parameters from monocular video to recover physically plausible albedo, normals, semantics, and shadows. It solves the ill-posed nature of inverse rendering in urban environments by computing visibility via volume rendering transmittance rather than explicit geometry, ensuring consistency between the learned density field and shadow casting. Unlike sibling methods that focus on depth estimation or expected terms, this method explicitly models the interaction between sunlight and scene geometry to enable realistic relighting and shadow removal.
+
+### [Differentiable Ray Marching (Taichi)](17066-differentiable-ray-marching-taichi.md)
+A differentiable volume rendering technique implemented in Taichi using fixed-step ray marching and trilinear interpolation on a 3D density grid. It differs from sibling methods by relying on a fixed-step traversal with explicit alpha accumulation rather than expected terms or thresholding, and is implemented using Taichi's autodiff engine rather than PyTorch.
+
+### RGB-D Mapping Optimization
+**Formula:**
+- Photometric loss $L_p$ is the mean squared error between rendered color $\hat{C}$ and input color $C$: $L_p(\hat{C}(\sigma, c)) = \frac{1}{M} \sum_{i=1}^{M} ||\hat{C}(\sigma_i, c_i) - C||^2$ [S2].
+- Geometric depth loss $L_g$ is the mean squared error between rendered depth $\hat{D}$ and input depth $D$: $L_g(\hat{D}(\sigma)) = \frac{1}{M} \sum_{i=1}^{M} ||\hat{D}(\sigma) - D||^2$ [S2].
+- Total loss is $L = L_p + \lambda_d L_g$, where $\lambda_d$ is the scaling factor of the geometric loss [S2].
+- Partial derivative of rendered color $\hat{C}$ w.r.t. color $c_i$ is $\frac{\partial \hat{C}}{\partial c_i} = w_i(\sigma) = T_i (1 - \exp(-\sigma_i \delta_i))$ [S2].
+- Partial derivative of rendered depth $\hat{D}$ w.r.t. density $\sigma_i$ is $\frac{\partial \hat{D}}{\partial \sigma_i} = \delta_i [ t_i T_{i+1}(\sigma) - \hat{D} + \sum_{j=0}^{i} t_j w_j(\sigma) ]$, derived by interpreting distance $t_i$ as color $c_i$ [S2].
+
+**Parameter:**
+- $\lambda_d$: Scaling factor for the geometric loss term in the total loss function [S2].
+
+**Code:**
+- The derivatives are implemented directly in a custom CUDA kernel. Building on the code developed for Plenoxel [11] to boost computational speed [S2].
+
+### Camera Pose Tracking via Differentiable Rendering
+**Definition:**
+- Estimates camera pose by treating pose as the variable and radiance field parameters ($\vec{\sigma}, \vec{c}$) as static, performing image-to-model alignment using RGB-D input [S2].
+
+**Formula:**
+- Derivative of rendered depth $\hat{D}$ w.r.t. ray $\vec{r}$ is $\frac{\partial \hat{D}}{\partial \vec{r}} = \sum_{i=1}^{N} \frac{\partial \hat{D}}{\partial \sigma_i} \frac{\partial \sigma_i}{\partial \vec{p}_i} \frac{\partial \vec{p}_i}{\partial \vec{r}}$ [S2].
+- Derivative of sample point $\vec{p}_i$ w.r.t. ray $\vec{r}$ is decomposed as $\frac{\partial \vec{p}_i}{\partial \vec{r}} = [\frac{\partial \vec{p}_i}{\partial \vec{o}}, \frac{\partial \vec{p}_i}{\partial \vec{d}}] = [1, t_i]$ [S2].
+
+**Parameter:**
+- Optimizer: Adam [17] is used for tracking (mapping uses RMSProp) [S2].
+
+**Pitfall:**
+- The partial derivatives $\frac{\partial \sigma_i}{\partial \vec{p}_i}$, $\frac{\partial c_i}{\partial \vec{p}_i}$, and $\frac{\partial \vec{p}_i}{\partial \vec{r}}$ are model-specific and produce messy functions for trilinear interpolation; complete analytical equations are reserved for Appendix A [S2].
+
+### Gumbel Depth Perturbations
+**Definition:**
+- A method for aggregating coloring based on depth, using Gumbel-Max/Min distributions, resulting in the softmin function [S3].
+
+**Comparison:**
+- Unlike no depth perturbations or taking the closest triangle, Gumbel depth perturbations are truly continuous [S3].
+
+### [Differentiable Ray Marching (Taichi)](17066-differentiable-ray-marching-taichi.md)
+**Definition:**
+- A differentiable volume rendering technique implemented in PyTorch using adaptive-step ray marching with bounding box intersection and grid sampling.
+
+**Step:**
+- Compute ray direction from pixel coordinates, principal point, focal length, and camera rotation. Normalize.
+- Compute ray-box intersection parameters tmin and tmax for box [-1, 1]^3.
+- Add random jitter to starting t: `t = t - self.dt * torch.rand_like(t)`.
+- Initialize ray position, color, and alpha accumulators.
+- While loop: check validity inside box, sample density with `F.grid_sample`, compute step with jitter, update done flag.
+- Compute alpha contribution: `contrib = ((rayalpha + sample_alpha * step).clamp(max=1.) - rayalpha) * validf`.
+- Accumulate color and alpha, update ray position and t.
+
+**Parameter:**
+- `stepjitter` (jitter scale).
+
+**Layout:**
+- `raydir` tensor shape `[N, H, W, 3]` (NHWC).
+- `rayrgb` tensor shape `[N, 3, H, W]` (NCHW).
+- `rayalpha` tensor shape `[N, 1, H, W]` (NCHW).
+
+## Operating characteristics
+**Time and memory complexity:**
+- Time complexity: $O(1)$ per ray for the conversion itself, assuming $K^{-1}$ is precomputed. The dominant cost in a full pipeline is the ray marching or sphere tracing required to obtain $d$.
+- Memory complexity: $O(1)$ auxiliary memory per ray.
+
+**Measured performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Scales linearly with the number of rays $Q$.
+
+**Strengths and limitations:**
+- Strengths: Simple, differentiable, and geometrically exact for pinhole cameras.
+- Limitations: Depends entirely on the accuracy of the ray distance $d$ and camera intrinsics $K$. Does not handle multi-path or volumetric scattering directly; it only projects the resulting scalar distance.
+
+**When to use it and when not:**
+- Use when you have a differentiable renderer that outputs ray distances and need standard depth maps for RGB-D supervision or pose tracking.
+- Do not use when you need to account for volumetric averaging (use Expected Term Rendering) or surface thresholding (use Sigma-Threshold Depth Rendering).
+
+## Background
+**Origin:**
+- The method is derived from the standard pinhole camera model projection equations, adapted for differentiable rendering pipelines. The specific formulation $z_c = d / \sqrt{x_{tilde}^2 + y_{tilde}^2 + 1}$ is cited in [S1].
+
+**History and development:**
+- The approach is foundational in differentiable rendering systems that integrate with RGB-D sensors, such as those used in RGB-D mapping and tracking [S2].
+
+**Where it is used:**
+- Used in RGB-D mapping optimization [S2], camera pose tracking [S2], and as a component in differentiable sphere tracing [S1].
+
+## Sources
+[S1] DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing, https://doi.org/10.1109/cvpr42600.2020.00209, fetched 2026-10-26
+[S2] RGB-D Mapping and Tracking in a Plenoxel Radiance Field, https://doi.org/10.1109/wacv57701.2024.00331, fetched 2026-10-26
+[S3] GenDR: A Generalized Differentiable Renderer, https://doi.org/10.1109/cvpr52688.2022.00397, fetched 2026-10-26
+[S4] Gradients Computed by Taichi Don't Match Gradients Computed by PyTorch, https://github.com/taichi-dev/taichi/issues/2241, fetched 2026-10-27 (unofficial)

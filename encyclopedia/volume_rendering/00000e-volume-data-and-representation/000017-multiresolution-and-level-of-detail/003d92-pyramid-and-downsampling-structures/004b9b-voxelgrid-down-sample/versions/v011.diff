@@ -1,0 +1,208 @@
+--- v010.md
++++ v011.md
+@@ -4,87 +4,86 @@
+ 
+ ## Overview
+-VoxelGrid Down Sample reduces the resolution of a voxel grid representation, typically by a factor of 2, to generate lower-resolution levels of a multi-resolution hierarchy. It addresses the problem of managing memory and computational cost in volume rendering by creating coarser approximations of the scene geometry or density. It differs from sibling methods like [Morphological Pyramid](1641-morphological-pyramid.md) by often employing specific hardware-accelerated compute kernels (e.g., in GPU shaders) that combine repacking with upsampling logic, or by using max-pooling for feature reduction, whereas [Mipmap Generation](2602-mipmap-generation.md) typically focuses on texture filtering.
++VoxelGrid Down Sample reduces the resolution of a voxel grid representation to generate lower-resolution levels of a multi-resolution hierarchy [S1, unofficial][S2, unofficial]. It addresses memory and computational cost constraints in volume rendering by creating coarser approximations of scene geometry or density [S3, unofficial]. It differs from sibling methods like [Morphological Pyramid](1641-morphological-pyramid.md) by employing hardware-accelerated compute kernels that combine repacking with upsampling logic, or by using max-pooling for feature reduction, whereas [Mipmap Generation](2602-mipmap-generation.md) typically focuses on texture filtering [S2, unofficial][S4, unofficial].
+ 
+ ## How it works
+-The method manifests in three distinct implementations depending on the data type (scalar/vector volume, point cloud, or deep learning feature map) and the target hardware (CPU/GPU compute shader).
++The method manifests in three distinct implementations depending on the data type (scalar/vector volume, point cloud, or deep learning feature map) and the target hardware (CPU/GPU compute shader) [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial].
+ 
+ ### Inputs and Outputs
+-*   **Input:** A voxel grid (scalar or vector), a point cloud, or a feature tensor.
+-*   **Output:** A down-sampled voxel grid, a sparse point cloud, or a reduced feature tensor.
++*   **Input:** A voxel grid (scalar or vector), a point cloud, or a feature tensor [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial].
++*   **Output:** A down-sampled voxel grid, a sparse point cloud, or a reduced feature tensor [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial].
+ 
+ ### Data Structures
+-1.  **Voxel Grid (Scalar/Vector):** A 3D texture (`CVCT_tex3d`) or a flat compute buffer (`cb_gv`). The grid has a resolution $N \times N \times N$.
+-2.  **Point Cloud:** An $N \times D$ tensor of coordinates.
+-3.  **Feature Tensor:** A 4D tensor (Channels, Height, Width, Depth) or 3D tensor.
++1.  **Voxel Grid (Scalar/Vector):** A 3D texture (`CVCT_tex3d`) or a flat compute buffer (`cb_gv`). The grid has a resolution $N \times N \times N$ [S2, unofficial].
++2.  **Point Cloud:** An $N \times D$ tensor of coordinates [S3, unofficial].
++3.  **Feature Tensor:** A 4D tensor (Channels, Height, Width, Depth) or 3D tensor [S4, unofficial].
+ 
+ ### Implementation 1: GPU Compute Shader (Cascade Repacking)
+-This implementation, found in [S2, unofficial], repacks voxel data from a flat buffer into a 3D texture while simultaneously upsampling by a factor of 2. It is used to build cascaded levels of a Voxel Cone Tracing (VCT) system.
++This implementation, found in [S2, unofficial], repacks voxel data from a flat buffer into a 3D texture while simultaneously upsampling by a factor of 2. It is used to build cascaded levels of a Voxel Cone Tracing (VCT) system [S2, unofficial].
+ 
+ **Parameters:**
+-*   $GridResolution$: Integer resolution of the source grid.
+-*   $GridHalfResolution$: $GridResolution / 2$.
+-*   $GridCascadeBase$: A 2D vector where $x$ is the current cascade index offset and $y$ is the previous cascade index offset, used to adjust Y-coordinates in the 3D texture.
++*   $GridResolution$: Integer resolution of the source grid [S2, unofficial].
++*   $GridHalfResolution$: $GridResolution / 2$ [S2, unofficial].
++*   $GridCascadeBase$: A 2D vector where $x$ is the current cascade index $\times GridResolution$ and $y$ is the previous cascade index $\times GridResolution$, used to offset the Y coordinate in the 3D texture [S2, unofficial].
+ 
+ **Steps:**
+ 1.  **Thread Mapping:** For each thread with ID $id = (x, y, z)$, calculate the source coordinate in the lower-resolution grid:
+-    $$id1 = id \times 2 - GridHalfResolution$$
+-2.  **Boundary Check:** If any component of $id1$ is $\ge GridResolution$, the thread is out of bounds for the upsampled region.
++    $$id1 = id \times 2 - GridHalfResolution$$ [S2, unofficial].
++2.  **Boundary Check:** If any component of $id1$ is $\ge GridResolution$, the thread is out of bounds for the source data [S2, unofficial].
+     *   **Fallback:** Read directly from the source flat buffer `cb_gv` using the linear index:
+         $$src\_index = (id.z \times GridResolution + id.y) \times GridResolution + id.x$$
+-        $$f = CVCT\_gv[src\_index]$$
++        $$f = CVCT\_gv[src\_index]$$ [S2, unofficial].
+     *   Skip the upsampling logic.
+ 3.  **Upsampling (if in bounds):**
+     *   Adjust Y-coordinate for cascade offset:
+-        $$id1.y = id1.y + GridCascadeBase.y$$
+-    *   Sample 8 neighboring voxels from the 3D texture `CVCT_tex3d` at $id1$ and its neighbors. The neighbors are defined by offsets $(0,0,1), (1,0,0), (1,0,1), (0,1,0), (0,1,1), (1,1,0), (1,1,1)$.
++        $$id1.y = id1.y + GridCascadeBase.y$$ [S2, unofficial].
++    *   Sample 8 neighboring voxels from the 3D texture `CVCT_tex3d` at $id1$ and its neighbors. The neighbors are defined by offsets $(0,0,1), (1,0,0), (1,0,1), (0,1,0), (0,1,1), (1,1,0), (1,1,1)$ [S2, unofficial].
+     *   Apply component-wise minimum to pairs to determine the value:
+         $$ff.x = \min(CVCT\_tex3d[id1], CVCT\_tex3d[id1 + (0,0,1)])$$
+         $$ff.y = \min(CVCT\_tex3d[id1 + (1,0,0)], CVCT\_tex3d[id1 + (1,0,1)])$$
+         $$ff.z = \min(CVCT\_tex3d[id1 + (0,1,0)], CVCT\_tex3d[id1 + (0,1,1)])$$
+-        $$ff.w = \min(CVCT\_tex3d[id1 + (1,1,0)], CVCT\_tex3d[id1 + (1,1,1)])$$
++        $$ff.w = \min(CVCT\_tex3d[id1 + (1,1,0)], CVCT\_tex3d[id1 + (1,1,1)])$$ [S2, unofficial].
+     *   Invert the values (assuming the texture stores inverse density/opacity):
+-        $$ff = 1 - ff$$
++        $$ff = 1 - ff$$ [S2, unofficial].
+     *   Average the four components. Note: Sources [S2, unofficial] show a discrepancy in the averaging weights. One version uses $0.25$ (commented out), and the active version uses $0.5$:
+-        $$f = ff.x \times 0.5 + ff.y \times 0.5 + ff.z \times 0.5 + ff.w \times 0.5$$
+-        [G] The sum of weights $0.5 \times 4 = 2.0$ suggests this might be a specific normalization or error in the source code snippet, but the implementation must follow the source: `dot(ff, float4(0.5, 0.5, 0.5, 0.5))`.
++        $$f = ff.x \times 0.5 + ff.y \times 0.5 + ff.z \times 0.5 + ff.w \times 0.5$$ [S2, unofficial].
+ 4.  **Write Output:**
+     *   Adjust Y-coordinate for write offset:
+-        $$id.y = id.y + GridCascadeBase.x$$
++        $$id.y = id.y + GridCascadeBase.x$$ [S2, unofficial].
+     *   Write the inverted result back to the 3D texture:
+-        $$CVCT\_tex3d[id] = 1 - f$$
++        $$CVCT\_tex3d[id] = 1 - f$$ [S2, unofficial].
+ 
+ ### Implementation 2: Point Cloud Voxelization
+-This implementation, found in [S3, unofficial], downsamples a point cloud by assigning points to voxels and returning the centers of occupied voxels.
++This implementation, found in [S3, unofficial], downsamples a point cloud by assigning points to voxels and returning the centers of occupied voxels. It is faster than Open3D's implementation but uses more memory by processing all points in parallel [S3, unofficial].
+ 
+ **Parameters:**
+-*   $points$: $N \times D$ tensor of point coordinates.
+-*   $resolution$: Float, the voxel size.
+-*   $range\_per\_dim$: Optional bounds array. If None, calculated as $[min(points) - 2 \times resolution, max(points) + 2 \times resolution]$.
+-*   $ignore\_flat\_dim$: Boolean. If True and the Z-range is zero, treats the data as 2D.
++*   $points$: $N \times D$ tensor of point coordinates [S3, unofficial].
++*   $resolution$: Float, the voxel size [S3, unofficial].
++*   $range\_per\_dim$: Optional bounds array. If None, calculated as $[min(points) - 2 \times resolution, max(points) + 2 \times resolution]$ [S3, unofficial].
++*   $ignore\_flat\_dim$: Boolean. If True and the Z-range is zero, treats the data as 2D [S3, unofficial].
+ 
+ **Steps:**
+-1.  **Handle Empty Input:** If $points.shape[0] == 0$, return empty points.
++1.  **Handle Empty Input:** If $points.shape[0] == 0$, return points [S3, unofficial].
+ 2.  **Handle Flat Dimension:** If $ignore\_flat\_dim$ is True and $range\_per\_dim[-1][0] == range\_per\_dim[-1][1]$:
+-    *   Set $flat\_z = True$.
+-    *   Store $flat\_z\_val = range\_per\_dim[-1][0]$.
+-    *   Remove the last dimension from $range\_per\_dim$ and $points$.
+-3.  **Create Grid:** Create a boolean VoxelGrid with resolution $resolution$ and bounds $range\_per\_dim$.
+-4.  **Mark Voxels:** Set `voxel[points] = 1` for all input points.
+-5.  **Retrieve Centers:** Extract the centers of all occupied voxels (`pts`).
+-6.  **Restore Flat Dimension:** If $flat\_z$ was True, append a column of $flat\_z\_val$ to `pts` along the last dimension.
+-7.  **Return:** Return `pts`.
++    *   Set $flat\_z = True$ [S3, unofficial].
++    *   Store $flat\_z\_val = range\_per\_dim[-1][0]$ [S3, unofficial].
++    *   Remove the last dimension from $range\_per\_dim$ and $points$ [S3, unofficial].
++3.  **Create Grid:** Create a boolean VoxelGrid with resolution $resolution$ and bounds $range\_per\_dim$ [S3, unofficial].
++4.  **Mark Voxels:** Set `voxel[points] = 1` for all input points [S3, unofficial].
++5.  **Retrieve Centers:** Extract the centers of all occupied voxels (`pts`) [S3, unofficial].
++6.  **Restore Flat Dimension:** If $flat\_z$ was True, append a column of $flat\_z\_val$ to `pts` along the last dimension [S3, unofficial].
++7.  **Return:** Return `pts` [S3, unofficial].
+ 
+ ### Implementation 3: Max-Pooling Layer (Deep Learning)
+-This implementation, found in [S4, unofficial], downsamples feature maps in a neural network encoder.
++This implementation, found in [S4, unofficial], downsamples feature maps in a neural network encoder. It applies a max filter to non-overlapping sub-regions of the input to downsample the input and reduce parameters in subsequent layers [S4, unofficial].
+ 
+ **Parameters:**
+-*   Filter Size: $2 \times 2$.
+-*   Stride: 2.
+-*   Applied to channels with sizes 64, 32, and 8.
++*   Filter Size: $2 \times 2$ [S4, unofficial].
++*   Stride: 2 [S4, unofficial].
++*   Applied to channels with sizes 64, 32, and 8 [S4, unofficial].
+ 
+ **Steps:**
+-1.  Divide the input volume into non-overlapping $2 \times 2$ sub-regions.
+-2.  For each sub-region, compute the maximum value across all channels (or per-channel if specified).
+-3.  Output the maximum values as the downsampled feature map.
++1.  Divide the input volume into non-overlapping $2 \times 2$ sub-regions [S4, unofficial].
++2.  For each sub-region, compute the maximum value across all channels (or per-channel if specified) [S4, unofficial].
++3.  Output the maximum values as the downsampled feature map [S4, unofficial].
+ 
+ ### Pseudocode (Unified Python-like Style)
+@@ -144,18 +143,25 @@
+         range_per_dim = range_per_dim[:-1]
+         points = points[:, :-1]
+-    
+-    # Create grid (simplified logic for pseudocode)
+-    # In practice, this involves mapping points to grid indices
+-    # and marking occupied voxels.
+-    # Here we assume a helper `VoxelGrid` exists.
+-    grid = VoxelGrid(resolution=resolution, range_per_dim=range_per_dim, dtype=torch.bool)
+-    grid.mark(points)
+-    
+-    # Retrieve centers
+-    pts = grid.get_known_pos_and_values()
+-    
+-    # Restore flat dimension
++        
++    # Explicit grid creation and marking to avoid undefined VoxelGrid helper
++    # Calculate grid dimensions from range_per_dim
++    grid_dims = np.ceil((range_per_dim[:, 1] - range_per_dim[:, 0]) / resolution).astype(int)
++    grid = torch.zeros(grid_dims, dtype=torch.bool, device=points.device)
++    
++    # Map points to grid indices
++    indices = ((points - range_per_dim[:, 0]) / resolution).long()
++    # Clamp indices to grid bounds
++    indices = torch.clamp(indices, 0, grid_dims - 1)
++    # Mark occupied voxels
++    grid[indices[:, 0], indices[:, 1], indices[:, 2]] = True
++    
++    # Retrieve centers of occupied voxels
++    occupied_indices = torch.nonzero(grid, as_tuple=True)
++    if len(occupied_indices[0]) == 0:
++        return torch.empty((0, points.shape[1]), device=points.device)
++        
++    pts = (torch.stack(occupied_indices, dim=1).float() + 0.5) * resolution + range_per_dim[:, 0]
++    
+     if flat_z:
+-        # Append column of ones multiplied by flat_z_val
+         ones = torch.ones(pts.shape[0], 1, device=pts.device)
+         flat_col = ones * flat_z_val
+@@ -187,9 +193,5 @@
+     
+     # Sample 8 neighbors
+-    # Offsets: (0,0,1), (1,0,0), (1,0,1), (0,1,0), (0,1,1), (1,1,0), (1,1,1)
+-    # Note: id1 is the base coordinate. The neighbors are relative to id1.
+-    
+     def sample(coord):
+-        # Linearize coord for dictionary lookup or array access
+         cx, cy, cz = coord
+         return CVCT_tex3d[(cx, cy, cz)]
+@@ -209,9 +211,7 @@
+     f = ff[0] * 0.5 + ff[1] * 0.5 + ff[2] * 0.5 + ff[3] * 0.5
+     
+-    # Write back
+-    # id.y += GridCascadeBase.x
++    # Write back logic simulation
+     write_y = y + GridCascadeBase[0]
+-    # CVCT_tex3d[id] = 1 - f
+-    # return the value that would be written
++    # CVCT_tex3d[(x, write_y, z)] = 1.0 - f
+     return 1.0 - f
+ ```
+@@ -235,10 +235,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N^3)$ for full grid processing, where $N$ is the resolution. The GPU kernel processes threads in parallel, so wall-clock time depends on the number of threads and memory bandwidth.
+-*   **Memory Complexity:** $O(N^3)$ for the input and output grids. The point cloud method uses $O(M)$ where $M$ is the number of points, plus $O(N^3)$ for the grid structure.
+-*   **Strengths:** Efficient for building multi-resolution hierarchies on GPU; max-pooling is hardware-accelerated; point cloud voxelization is robust to noise.
++*   **Time Complexity:** $O(N^3)$ for full grid processing, where $N$ is the resolution. The GPU kernel processes threads in parallel, so wall-clock time depends on the number of threads and memory bandwidth [S2, unofficial].
++*   **Memory Complexity:** $O(N^3)$ for the input and output grids. The point cloud method uses $O(M)$ where $M$ is the number of points, plus $O(N^3)$ for the grid structure [S3, unofficial].
++*   **Strengths:** Efficient for building multi-resolution hierarchies on GPU; max-pooling is hardware-accelerated; point cloud voxelization is robust to noise [S2, unofficial][S4, unofficial][S3, unofficial].
+ *   **Limitations:** Max pooling loses high-frequency detail; the specific GPU kernel [S2, unofficial] has complex boundary handling and potential precision issues with the 0.5 averaging weights; point cloud method uses more memory by processing all points in parallel [S3, unofficial].
+ *   **When to use:** When building VCT cascades [S2, unofficial], reducing feature map size in CNNs [S4, unofficial], or simplifying point clouds for collision detection [S3, unofficial].
+-*   **When not to use:** When preserving high-frequency details is critical without post-processing; when memory is extremely constrained and the grid is sparse (use sparse voxel octrees instead).
++*   **When not to use:** When preserving high-frequency details is critical without post-processing; when memory is extremely constrained and the grid is sparse (use sparse voxel octrees instead) [G].
+ 
+ ## Background

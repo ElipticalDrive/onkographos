@@ -1,0 +1,144 @@
+--- v002.md
++++ v003.md
+@@ -4,81 +4,89 @@
+ 
+ ## Overview
+-This article defines the standardized hyperparameters and optimization schedules for training 3D Gaussian Splatting decoders and classifiers, specifically addressing downstream tasks like classification, part segmentation, and integration with 3D-aware Generative Adversarial Networks (GANs). It differs from general radiance-field optimization by focusing on fixed-attribute Gaussian encodings and specific dataset protocols rather than dynamic densification schedules. It complements [Optimization Schedule and Densification](15107-optimization-schedule-and-densification.md) by providing the static configuration values used when densification is either disabled (for classification) or handled via decoder-specific constraints.
++This article defines the specific hyperparameters, optimization schedules, and data sampling strategies required to train 3D Gaussian Splatting decoders, particularly in the context of 3D-aware generative models and downstream 3D classification tasks. It addresses the problem of configuring the Adam optimizer, learning rates, and camera sampling distributions to achieve convergence in explicit 3D space rendering. It differs from its parent, [Optimization Schedule and Densification](15107-optimization-schedule-and-densification.md), by focusing on the global training loop parameters (iterations, LR, batch size) rather than the dynamic primitive management (splitting, cloning, pruning) that occurs within the loop.
+ 
+ ## How it works
+ ### Inputs and Outputs
+ **Inputs:**
+-- Pre-trained Gaussian representations (e.g., from Gaussian-MAE or Gaussian-JEPA) or a target GAN latent space.
+-- Dataset-specific camera sampling distributions.
+-- Hyperparameter configuration (learning rate, batch size, epochs/iterations).
++- Pre-trained GAN encoder weights (e.g., EG3D, PanoHead) [S1].
++- Dataset (e.g., FFHQ, LPFF, FFHQ-H) [S1].
++- Target task (Novel View Synthesis, Classification, Part Segmentation) [S1][S2, unofficial].
+ 
+ **Outputs:**
+-- Fine-tuned Gaussian attributes (position, covariance, opacity, spherical harmonics coefficients) or a trained decoder mapping latent vectors to Gaussian parameters.
++- Optimized Gaussian parameters (position $\mathbf{p}$, covariance $\mathbf{\Sigma}$, opacity $\alpha$, spherical harmonics coefficients $\mathbf{c}$) [S1].
++- Trained decoder weights [S1].
+ 
+ ### Data Structures
+-The Gaussian representation follows the standard 3DGS layout but is grouped for specific downstream tasks:
+-- **Gaussian Grouping:** Gaussians are organized into groups to facilitate attribute handling.
+-  - *ModelNet Protocol:* 1,024 Gaussians total, organized into 64 groups of 32 Gaussians each. All 14 attributes are used.
+-  - *ShapeNet-Part Protocol:* 2,048 Gaussians total, organized into 128 groups of 32 Gaussians each.
+-- **Attributes:** Standard 3DGS attributes (position $\mathbf{p}$, rotation $\mathbf{q}$, scale $\mathbf{s}$, opacity $\alpha$, spherical harmonics coefficients $\mathbf{c}$). The specific count of attributes is fixed per protocol (e.g., 14 attributes for ModelNet).
++The training state maintains the standard 3DGS Gaussian attributes. For downstream protocols, Gaussians are grouped for processing:
++- **Grouping:** Gaussians are organized into groups of fixed size (e.g., 32) [S2, unofficial].
++- **Attributes:** All 14 attributes (position, rotation, scale, opacity, SH coefficients) are updated during full fine-tuning [S2, unofficial].
+ 
+-### Numbered Steps
+-1. **Initialization:** Load pre-trained Gaussian encodings. For classification tasks, initialize the classifier head (linear or MLP). For decoder tasks, initialize the Gaussian Splatting decoder network.
++### Steps
++1. **Initialization:** Initialize Gaussians from the pre-trained GAN's latent space or point cloud [S1][S2, unofficial].
+ 2. **Camera Sampling:**
+-   - For full 360° view synthesis (e.g., PanoHead): Sample random cameras uniformly around the object (360°).
+-   - For frontal view synthesis (e.g., EG3D): Sample cameras with mainly frontal views, applying small vertical and horizontal rotations.
+-3. **Optimization Loop:**
+-   - Render images from sampled cameras.
+-   - Compute loss (e.g., MSE, LPIPS, ID similarity, structural similarity for GANs; cross-entropy for classification).
+-   - Backpropagate gradients.
+-   - Update parameters using the specified optimizer.
+-4. **Probing/Fine-tuning Modes:**
+-   - *Full Fine-tuning:* Update all Gaussian attributes and classifier/decoder parameters.
+-   - *Linear/MLP Probing:* Freeze the Gaussian encoder (pre-trained features) and update only the classifier head.
++   - For full 360° scenes (e.g., PanoHead): Sample random cameras uniformly around the head [S1].
++   - For frontal-focused scenes (e.g., EG3D): Sample mainly frontal views with small vertical and horizontal rotations [S1].
++3. **Rendering:** Render the scene using the current Gaussian set [S1].
++4. **Loss Computation:** Compute loss using weights $\lambda = (0.2, 0.5, 1.0, 1.0, 0.2)$ for the respective loss terms (e.g., LPIPS, MSE, ID similarity) [S1].
++5. **Optimization Step:** Update Gaussian parameters and decoder weights using the Adam optimizer [S1][S2, unofficial].
++6. **Iteration:** Repeat for the specified number of iterations or epochs [S1][S2, unofficial].
+ 
+ ### Formulas
+-- **Loss Weights (Decoder):** For GAN decoder training, the total loss is a weighted sum:
+-  $$ \mathcal{L}_{total} = \lambda_1 \mathcal{L}_1 + \lambda_2 \mathcal{L}_2 + \lambda_3 \mathcal{L}_3 + \lambda_4 \mathcal{L}_4 + \lambda_5 \mathcal{L}_5 $$
+-  Typical weights: $(\lambda_1, \lambda_2, \lambda_3, \lambda_4, \lambda_5) = (0.2, 0.5, 1.0, 1.0, 0.2)$ [S2].
++The loss function for decoder training is a weighted sum:
++$$
++\mathcal{L} = \lambda_1 \mathcal{L}_1 + \lambda_2 \mathcal{L}_2 + \lambda_3 \mathcal{L}_3 + \lambda_4 \mathcal{L}_4 + \lambda_5 \mathcal{L}_5
++$$
++Where $\lambda = (0.2, 0.5, 1.0, 1.0, 0.2)$ [S1].
++
++For downstream classification/segmentation, the optimization uses standard cross-entropy or segmentation loss with the classifier head [S2, unofficial].
+ 
+ ### Parameters
+-- **Optimizer:** AdamW [S1, unofficial] or Adam [S2].
+-- **Learning Rate:**
+-  - ModelNet (Classification): $1 \times 10^{-3}$ [S1, unofficial].
+-  - ShapeNet-Part (Segmentation): $1 \times 10^{-4}$ [S1, unofficial].
+-  - GAN Decoder: $9 \times 10^{-4}$ [S2].
+-- **Weight Decay:** $0.05$ [S1, unofficial].
+-- **Batch Size:**
+-  - ModelNet: 256 [S1, unofficial].
+-  - ShapeNet-Part: 16 [S1, unofficial].
+-- **Epochs/Iterations:**
+-  - Classification/Segmentation: 300 epochs [S1, unofficial].
+-  - GAN Decoder: 500,000 iterations [S2].
+-- **Warm-up:** 5 epochs [S1, unofficial].
++**Decoder Training (Generative):**
++- **Iterations:** 500,000 [S1].
++- **Optimizer:** Adam [S1].
++- **Learning Rate:** 0.0009 [S1].
++- **Loss Weights:** $\lambda = (0.2, 0.5, 1.0, 1.0, 0.2)$ [S1].
++
++**Standard Downstream Protocols (Classification/Segmentation):**
++- **Optimizer:** AdamW [S2, unofficial].
++- **ModelNet10/40:**
++  - **Gaussians:** 1,024 [S2, unofficial].
++  - **Groups:** 64 groups of 32 Gaussians [S2, unofficial].
++  - **Attributes:** All 14 [S2, unofficial].
++  - **Epochs:** 300 [S2, unofficial].
++  - **Learning Rate:** $10^{-3}$ [S2, unofficial].
++  - **Weight Decay:** 0.05 [S2, unofficial].
++  - **Warm-up:** 5 epochs [S2, unofficial].
++  - **Batch Size:** 256 [S2, unofficial].
++- **ShapeNet-Part:**
++  - **Gaussians:** 2,048 [S2, unofficial].
++  - **Groups:** 128 groups of 32 Gaussians [S2, unofficial].
++  - **Epochs:** 300 [S2, unofficial].
++  - **Learning Rate:** $10^{-4}$ [S2, unofficial].
++  - **Batch Size:** 16 [S2, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-- **Run-to-Run Variance:** ModelNet fine-tuning exhibits appreciable run-to-run variation, particularly on ModelNet40. Results should be interpreted with caution, and provenance must be tracked [S1, unofficial].
+-- **Protocol Matching:** When comparing methods, ensure the Gaussian count and attribute sets match exactly (e.g., 1K Gaussians for both pretraining and transfer) to avoid confounding factors [S1, unofficial].
+-- **Camera Bias:** EG3D focuses on frontal views, while PanoHead supports 360°. Training configurations must align with the target view distribution to avoid artifacts in unseen angles [S2].
++- **Run-to-run Variance:** ModelNet fine-tuning exhibits appreciable run-to-run variation, particularly on ModelNet40 [S2, unofficial]. Results should be interpreted with caution regarding small cross-environment differences [S2, unofficial].
++- **Protocol Matching:** Ensure that pre-training and transfer protocols match (e.g., 1K-to-4K protocol) to avoid unfair comparisons [S2, unofficial].
+ 
+ ## Subtopics
+ 
+-### Error-Driven 2D Gaussian Training
+-Focuses on 2D Gaussian primitives with error-driven densification, differing in primitive dimensionality and densification triggers. See [Error-Driven 2D Gaussian Training](13985-error-driven-2d-gaussian-training.md).
++### Standard Downstream Protocols
++A standardized training and evaluation pipeline for classification and part segmentation tasks using Gaussian inputs [S2, unofficial]. It differs from generative decoder training by using fixed Gaussian counts (1K/2K) and epoch-based training rather than iteration-based training. It is chosen when evaluating the geometric fidelity of Gaussians for downstream 3D vision tasks [S2, unofficial].
+ 
+-### DashGaussian
+-Optimizes for specific rendering efficiency and compression, differing in attribute quantization and rendering pipeline. See [DashGaussian](15742-dashgaussian.md).
++### StopThePop Framework Integration
++A framework that integrates occlusion-aware densification with StopThePop's per-pixel depth ordering to remove popping artifacts and keep occlusion boundaries intact [S3, unofficial]. It differs from standard training by modifying the densification statistics accumulation to be occlusion-aware [S3, unofficial]. It is chosen for large-scale scenes with heavy occlusion where standard view-count normalizers diverge [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Training time is dominated by the number of iterations (500k for decoders) and batch size. Classification tasks are shorter (300 epochs) but require careful handling of variance [S1, unofficial][S2].
+-- **Memory Complexity:** Depends on the number of Gaussians (1K or 2K) and attributes. Grouping (32 Gaussians/group) may facilitate memory-efficient updates but does not change the total memory footprint significantly [S1, unofficial].
+-- **Strengths:** Standardized protocols allow for fair comparison across different Gaussian-based methods. Fixed grouping simplifies implementation for downstream tasks.
+-- **Limitations:** High variance in ModelNet results can obscure method improvements. Frontal-view bias in EG3D limits applicability to full 3D space rendering compared to PanoHead [S1, unofficial][S2].
+-- **When to Use:** Use for fine-tuning pre-trained Gaussian encoders for classification/segmentation or for training Gaussian decoders for GANs. Not suitable for general novel-view synthesis without adaptation.
++- **Time Complexity:** Training for 500,000 iterations is computationally expensive [S1]. Downstream protocols use fewer epochs (300) but may require careful tuning due to variance [S2, unofficial].
++- **Memory Complexity:** Depends on the number of Gaussians (1K-2K for downstream, variable for generative) [S1][S2, unofficial].
++- **Strengths:** High-quality 3D reconstruction for generative models [S1]; standardized evaluation for 3D classification [S2, unofficial].
++- **Limitations:** High variance in ModelNet results [S2, unofficial]; requires careful camera sampling strategy for generative models [S1].
+ 
+ ## Background
+-The training configurations described originate from studies on Gaussian-JEPA and Gaussian-MAE for 3D Gaussian splats, as well as Gaussian Splatting Decoders for 3D-aware GANs. These works established standardized protocols for evaluating Gaussian representations on downstream tasks, addressing the need for reproducible benchmarks in the rapidly evolving field of Gaussian-based rendering [S1, unofficial][S2]. The distinction between frontal (EG3D) and 360° (PanoHead) camera sampling highlights the adaptation of Gaussian splatting to different generative modeling constraints [S2].
++Originated from the application of 3D Gaussian Splatting to 3D-aware generative adversarial networks (GANs) [S1] and subsequent adaptations for 3D point cloud classification and segmentation [S2, unofficial]. The StopThePop integration addresses occlusion issues in large-scale scenes [S3, unofficial].
+ 
+ ## Sources
+-[S1] Gaussian-JEPA: Joint-Embedding Predictive Learning for 3D Gaussian Splats, https://arxiv.org/abs/2608.15651v1, fetched 2026-10-26 (unofficial)
+-[S2] Gaussian Splatting Decoder for 3D-aware Generative Adversarial Networks, https://doi.org/10.1109/cvprw63382.2024.00794, fetched 2026-10-29+[S1] Gaussian Splatting Decoder for 3D-aware Generative Adversarial Networks, https://doi.org/10.1109/cvprw63382.2024.00794, fetched 2026-10-29
++[S2] Gaussian-JEPA: Joint-Embedding Predictive Learning for 3D Gaussian Splats, https://arxiv.org/abs/2608.15651v1, fetched 2026-10-26 (unofficial)
++[S3] Counting Contributions, Not Views: Occlusion-Aware Densification for 3D Gaussian Splatting, https://arxiv.org/abs/2610.27108, fetched 2026-10-26 (unofficial)

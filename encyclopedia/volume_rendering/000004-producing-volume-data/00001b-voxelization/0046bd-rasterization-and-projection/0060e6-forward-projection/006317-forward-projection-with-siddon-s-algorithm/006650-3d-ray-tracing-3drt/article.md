@@ -1,0 +1,202 @@
+# 3D Ray Tracing (3DRT)
+
+Also called: 3DRT, Dose Simulation, Tomographic Projection Calculation, three-dimensional ray tracing, tomographic projection computation using 3D ray tracing
+
+## Overview
+3D Ray Tracing (3DRT) is a method for computing tomographic projections and simulating light dose delivery in volumetric additive manufacturing (VAM) by computationally casting optical rays in three dimensions [S1]. Unlike the parallel-ray assumption of the Radon transform, 3DRT accounts for non-telecentricity and finite etendue, enabling accurate modeling of chief-ray focusing and light cone distribution [S1]. It distinguishes itself from [Forward Projection with Siddon's Algorithm](18800-forward-projection-with-siddon-s-algorithm.md) by explicitly simulating the optical system's geometry (refraction, aperture stops) and multiple rays per pixel, rather than assuming idealized parallel projection paths [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** STL geometry, optical system parameters (projector pixel size, focal length, aperture stop size/location, vial dimensions, refractive indices), resin properties (wavelength $\lambda$, refractive index $n$), and anti-aliasing parameters.
+*   **Outputs:** Tomographic projection images (intensity maps for 360° rotation) and/or a 3D light dose distribution within the print volume.
+
+**Data Structures:**
+1.  **Voxel Array:** A logical 3D array where values are 1 (part present) or 0 (part absent). Converted to single-precision floating-point data type [S1].
+2.  **Ray Direction:** Stored as a Cartesian unit vector $(x, y, z)$ [S1].
+3.  **Aperture Stop Definition:** Locations of non-chief rays defined on the aperture stop plane using hexagonal filling [S1].
+
+**Parameters:**
+*   **Number of rays per pixel ($N$):** Typically $N=1$ for low etendue sources; $N=13$ for high etendue systems to account for finite etendue effects [S1].
+*   **Down-sampling factor:** Target object down-sampled by $4 \times 4 \times 4$ projector pixels to increase calculation speed [S1].
+*   **Angular samples:** 360 samples in 1-degree increments [S1].
+
+**Algorithm Steps:**
+
+1.  **Voxelization:** Convert the target STL geometry into a logical 3D voxel array. Convert the array to single-precision floating-point. Down-sample the array if necessary (e.g., $4 \times 4 \times 4$) [S1].
+2.  **Ray Initialization:** For each pixel in the Digital Micromirror Device (DMD) pixel array:
+    a.  Determine the direction of the **chief ray** based on the location of the aperture stop in the optical system [S1].
+    b.  Determine the directions of $N-1$ **non-chief rays** based on the size of the aperture stop. Use hexagonal filling to define the spatial locations of these rays on the aperture stop plane, then compute their direction vectors [S1].
+    c.  Store the direction of each ray as a Cartesian unit vector [S1].
+3.  **Optical Propagation:** For each ray:
+    a.  Propagate the ray from the pixel array to the first optical element.
+    b.  At each intersection with an optical surface (e.g., lens, vial wall), compute the refracted ray direction using the vectorized form of Snell’s law [S1].
+    c.  Propagate the ray to the next surface.
+    d.  Repeat until the ray intersects the final surface of the system (e.g., the inner-diameter of the vial furthest from the projector) [S1].
+4.  **Voxel Intersection:** Compute the set of Cartesian indices of intersection between the discrete voxel array and each ray passing through the print volume, using the ray coordinates within the vial [S1].
+5.  **Tomographic Projection Calculation:** For each ray:
+    a.  Identify all voxels in the target dose array that the ray intersects. Due to anti-aliasing, the ray intersects a set of voxels [S1].
+    b.  Calculate the pixel intensity as the sum of the values of all intersected voxels in the target dose array [S1].
+    c.  Repeat for all $N$ rays from each pixel, for all pixels, and for all 360 angular samples [S1].
+6.  **Dose Simulation (Optional but integrated):** For each tomographic image (angle):
+    a.  Cast rays from each pixel through the print volume along the pre-determined ray path [S1].
+    b.  For each voxel intersected by a ray, calculate the delivered dose $D$ as the product of:
+        *   Tomographic pixel intensity (from Step 5) [S1].
+        *   Scaling weight from the anti-aliasing method [S1].
+        *   Transmission loss at the print-volume interface (calculated using Fresnel coefficients for unpolarized light) [S1].
+        *   Transmission loss due to optical absorption within the volume (calculated using Beer-Lambert absorption) [S1].
+    c.  Accumulate dose in the voxel.
+    d.  Repeat for all rays and all angles [S1].
+
+**Formulas:**
+*   **Numerical Aperture:** $NA = n \sin(\theta)$, where $n$ is the refractive index of the resin and $\theta$ is the half-angle between the marginal ray and the optical axis [S1].
+*   **Diffraction-limited spot size:** $d = \frac{2\lambda}{NA}$, where $\lambda$ is the wavelength [S1].
+*   **Etendue (paraxial limit):** Product of pixel area and solid angle $\Omega = \pi \theta^2$ (where $2\theta$ is the full axial beam divergence) [S1].
+*   **Interface Transmission:** Calculated using Fresnel coefficients for unpolarized light [S1].
+*   **Volume Attenuation:** Calculated using Beer-Lambert absorption [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_3drt_projection(stl_mesh, optical_system, voxel_grid, num_rays_per_pixel=13):
+    """
+    Computes tomographic projections using 3D Ray Tracing.
+    
+    Args:
+        stl_mesh: Geometry definition.
+        optical_system: Dict containing projector pixel size, focal length, 
+                        aperture stop location/size, vial dimensions, refractive indices.
+        voxel_grid: 3D numpy array (float32) representing the target dose (1 or 0).
+        num_rays_per_pixel: Number of rays to cast per DMD pixel.
+        
+    Returns:
+        projections: 3D array (num_angles, height, width) of tomographic projections.
+    """
+    # 1. Voxelization and Down-sampling
+    # [G] Standard mesh-to-voxel conversion. Down-sample by 4x4x4 if specified.
+    target_dose = voxelize_and_downsample(stl_mesh, voxel_grid, downsample_factor=4)
+    
+    num_angles = 360
+    num_pixels = optical_system['pixel_array_size'] # (H, W)
+    projections = np.zeros((num_angles, num_pixels[0], num_pixels[1]))
+    
+    # 2. Pre-calculate Ray Paths
+    # [G] Helper to generate ray vectors based on optical system geometry
+    ray_paths = generate_ray_paths(optical_system, num_rays_per_pixel)
+    
+    for angle_idx in range(num_angles):
+        # Rotate the target dose or the ray origin/angle for the current tomographic view
+        current_dose = rotate_voxel_grid(target_dose, angle_idx * np.pi / 180)
+        
+        for y in range(num_pixels[0]):
+            for x in range(num_pixels[1]):
+                pixel_intensity = 0.0
+                
+                # 3. Cast N rays per pixel
+                for r in range(num_rays_per_pixel):
+                    ray = ray_paths[angle_idx][y][x][r]
+                    
+                    # 4. Propagate Ray through Optical System
+                    # [G] Apply Snell's law at each interface (projector lens, air, vial wall)
+                    # Returns ray state (origin, direction) inside the vial
+                    ray_in_vial = propagate_through_optics(ray, optical_system)
+                    
+                    # 5. Intersect with Voxel Grid
+                    # [G] Use Siddon's algorithm or similar to find voxel indices intersected by ray_in_vial
+                    intersected_voxel_indices = get_voxel_intersections(ray_in_vial, current_dose.shape)
+                    
+                    # 6. Calculate Intensity
+                    # Sum of target dose values in intersected voxels
+                    dose_sum = 0.0
+                    for idx in intersected_voxel_indices:
+                        dose_sum += current_dose[idx]
+                    
+                    pixel_intensity += dose_sum
+                
+                # Average or sum depending on normalization (Source implies sum for intensity calculation)
+                # Note: Source says "intensity... is given by the sum of all voxels". 
+                # If N>1, this accumulates dose from multiple rays.
+                projections[angle_idx, y, x] = pixel_intensity
+                
+    return projections
+
+def simulate_dose(projections, optical_system, voxel_grid_shape):
+    """
+    Simulates the delivered light dose in the print volume.
+    """
+    dose_volume = np.zeros(voxel_grid_shape, dtype=np.float32)
+    num_angles = 360
+    num_pixels = optical_system['pixel_array_size']
+    
+    # Pre-calculate ray paths for dose simulation (same as projection but with transmission losses)
+    ray_paths_dose = generate_ray_paths_with_losses(optical_system)
+    
+    for angle_idx in range(num_angles):
+        for y in range(num_pixels[0]):
+            for x in range(num_pixels[1]):
+                pixel_intensity = projections[angle_idx, y, x]
+                
+                for r in range(optical_system['num_rays_per_pixel']):
+                    ray = ray_paths_dose[angle_idx][y][x][r]
+                    
+                    # Propagate through optics to get ray in vial
+                    ray_in_vial = propagate_through_optics(ray, optical_system)
+                    
+                    # Get intersections
+                    intersected_voxel_indices = get_voxel_intersections(ray_in_vial, voxel_grid_shape)
+                    
+                    # Calculate Dose Contribution
+                    # Dose = Intensity * Anti-aliasing_weight * Fresnel_loss * BeerLambert_loss
+                    
+                    # [G] Anti-aliasing weight is typically related to the fraction of the pixel/voxel covered.
+                    # Source mentions "scaling weight due to the anti-aliasing method".
+                    aa_weight = 1.0 # Placeholder for specific anti-aliasing weight calculation
+                    
+                    # Fresnel transmission at air-vial interface
+                    fresnel_loss = calculate_fresnel_transmission(ray_in_vial.direction, optical_system['n_air'], optical_system['n_vial'])
+                    
+                    # Beer-Lambert absorption through the path length in the resin
+                    # [G] Path length is the distance from entry point to the voxel center or exit point.
+                    # Source says "attenuation within the volume is computed using Beer-Lambert absorption".
+                    # Assuming a simple model: I = I0 * exp(-alpha * distance)
+                    path_length = calculate_path_length(ray_in_vial, intersected_voxel_indices)
+                    absorption_coeff = optical_system['absorption_coefficient'] # [G] Not explicitly given, assumed parameter
+                    absorption_loss = np.exp(-absorption_coeff * path_length)
+                    
+                    dose_contribution = pixel_intensity * aa_weight * fresnel_loss * absorption_loss
+                    
+                    # Add dose to intersected voxels
+                    # [G] Distribute dose among intersected voxels based on intersection length or uniform?
+                    # Source says "For each voxel the ray intersects, a dose is added...".
+                    # It does not specify distribution among multiple voxels per ray. 
+                    # Assuming uniform addition per intersected voxel for simplicity, or proportional to path length.
+                    # Given "sum of all voxels" for projection, dose addition likely follows similar logic.
+                    for idx in intersected_voxel_indices:
+                        dose_volume[idx] += dose_contribution
+                        
+    return dose_volume
+```
+
+## Subtopics
+
+### Tomographic Projection Calculation
+The core output of 3DRT, providing intensity maps for 360° rotation that account for 3D optical effects. Chosen when high fidelity is required in non-telecentric or high-etendue systems. See [Tomographic Projection Calculation](52-tomographic-projection-calculation.md).
+
+### Dose Simulation
+The process of accumulating light energy in the voxel grid to predict curing. Chosen when verifying print quality or optimizing exposure times. See [Dose Simulation](53-dose-simulation.md).
+
+## Operating characteristics
+*   **Time Complexity:** Computation takes 10 to 100 times longer than a comparable Radon-based approach [S1]. The time differential increases for systems with larger etendue (requiring more rays per pixel) or more complex optical configurations [S1].
+*   **Memory Complexity:** Requires storage for the voxel array (single-precision float) and ray path data. The source notes a non-optimized MATLAB implementation on a laptop with 24 GB memory [S1].
+*   **Measured Performance:** In a high-etendue printer configuration (pixel size 10.8 µm, divergence 12.2°, $NA=0.1594$, voxel size 43.2 µm), 3DRT achieved a Jaccard similarity index of 0.71 compared to 0.65 for the Radon method [S1]. It enabled a vertical build size of 38 mm (at least 3-fold increase over Radon's 9/9 fins vs 3/9 fins) [S1].
+*   **Strengths:** Corrects for non-telecentricity and chief-ray focusing; accounts for finite etendue; enables larger build volumes; does not require an index-matching immersive bath; allows for multi-wavelength simulation [S1].
+*   **Limitations:** Computationally expensive; requires detailed knowledge of optical system parameters (lens positions, aperture stop) which may be unknown in commercial projectors [S1].
+*   **When to Use:** High-fidelity volumetric printing, especially with non-telecentric optics or high etendue sources where Radon-based methods fail to produce uniform dose distribution [S1].
+*   **When Not to Use:** Real-time feedback systems where computation speed is critical and approximate Radon-based methods are sufficient; systems with strictly telecentric, low-etendue optics where the computational overhead is unjustified [S1].
+
+## Background
+3D Ray Tracing (3DRT) was introduced as a method for computing tomographic projections in volumetric additive manufacturing (VAM) to address limitations in Radon-based approaches, specifically non-telecentric error and etendue effects [S1]. Prior methods, such as those by Orth et al., accounted for refraction at the air-vial interface but were limited to the vial-plane, failing to account for non-telecentric error along the vial axis [S1]. 3DRT was the first reported instance of using ray-tracing to directly compute tomographic projections and dose in this context, distinguishing itself by not requiring parallel rays or non-diverging rays [S1]. It is applied in tomographic VAM printers to compute projections for both telecentric and non-telecentric optical systems [S1].
+
+## Sources
+[S1] Versatile volumetric additive manufacturing with 3D ray tracing, https://opg.optica.org/abstract.cfm?uri=oe-31-4-5531, fetched 2026-10-25

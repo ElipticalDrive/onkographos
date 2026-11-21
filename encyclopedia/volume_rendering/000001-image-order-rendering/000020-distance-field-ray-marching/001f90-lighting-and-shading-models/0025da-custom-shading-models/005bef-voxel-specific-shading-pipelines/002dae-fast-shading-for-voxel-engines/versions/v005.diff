@@ -1,0 +1,156 @@
+--- v004.md
++++ v005.md
+@@ -2,79 +2,101 @@
+ 
+ ## Overview
+-Fast Shading for Voxel Engines is a CPU-based lighting algorithm for voxel engines that assumes vertical sun rays [S1, unofficial]. It modifies voxel palette indices to simulate lighting by darkening voxels based on the occupancy of their immediate neighbors [S1, unofficial]. It sets itself apart from general-purpose shading models by operating directly on discrete palette indices rather than computing continuous radiance, and by relying on a fixed, pre-defined neighborhood kernel instead of ray-marching for occlusion [S1, unofficial].
++Fast Shading for Voxel Engines (fast_shade2) is a CPU-based lighting algorithm for voxel engines that simulates directional illumination (specifically vertical sun rays) by modifying voxel palette indices [S1, unofficial]. It differs from its sibling [fast_shade1](5608-fast-shade1.md) by using a more complex neighborhood check involving 11 specific neighbors to determine shading intensity, offering higher visual detail at the cost of increased neighbor lookups [S1, unofficial]. It operates directly on the voxel grid data structure rather than rendering a mesh or ray-marching a distance field.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A 3D voxel grid of dimensions $x_{size} \times y_{size} \times z_{size}$, where each voxel stores a palette index [S1, unofficial].
+-- Output: The same voxel grid with updated palette indices representing shaded colors [S1, unofficial].
++- Input: A 3D voxel grid of dimensions $xsize \times ysize \times zsize$, where each voxel stores a palette index (integer).
++- Output: The same voxel grid with updated palette indices to reflect shading.
+ 
+ **Data Structures:**
+-- The voxel grid is stored as a 3D array of integers (palette indices) [S1, unofficial].
+-- Palette indices are grouped into tone groups of 32, where indices 1-32, 33-64, etc., represent dark-to-light gradients [S1, unofficial]. Index 0 represents empty space [S1, unofficial].
+-
+-**Parameters:**
+-- $x_{size}, y_{size}, z_{size}$: The dimensions of the current voxel level [S1, unofficial].
++- Voxel Grid: A 3D array or flattened 1D array where `get_voxel_pal(x, y, z)` returns the palette index of the voxel at coordinates $(x, y, z)$. Index 0 typically represents empty space. Palette indices are grouped in blocks of 32 (e.g., 1-32, 33-64) representing dark-to-light gradients [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1. Iterate through the voxel grid excluding the outermost layer to prevent boundary checks: $x \in [1, x_{size}-2]$, $y \in [1, y_{size}-2]$, $z \in [1, z_{size}-2]$ [S1, unofficial].
+-2. For each voxel at $(x, y, z)$, retrieve its current palette index: $v = \text{get\_voxel\_pal}(x, y, z)$ [S1, unofficial].
+-3. If $v = 0$ (empty), skip to the next voxel [S1, unofficial].
+-4. Calculate the lower bound (color margin) of the current tone group: $\text{color\_margin} = \lfloor (v-1)/32 \rfloor \times 32 + 1$ [S1, unofficial].
+-5. Initialize a shading offset $d = 0$ [S1, unofficial].
+-6. Check neighbors and subtract from the palette index based on occupancy: subtract 3 if $(x, y+1, z)$ is occupied; subtract 2 if $(x+1, y+1, z)$, $(x-1, y+1, z)$, $(x+1, y+1, z+1)$, or $(x+1, y+1, z-1)$ is occupied; subtract 1 if $(x+1, y, z+1)$, $(x-1, y, z-1)$, $(x+1, y, z-1)$, or $(x-1, y, z+1)$ is occupied [S1, unofficial].
+-7. Clamp the result to the lower bound of its tone group: if $v < \text{color\_margin}$, set $v = \text{color\_margin}$ [S1, unofficial].
+-8. Write the modified index back: $\text{set\_voxel\_pal}(x, y, z, v)$ [S1, unofficial].
++1. Iterate through all interior voxels: $x$ from 1 to $xsize-2$, $y$ from 1 to $ysize-2$, $z$ from 1 to $zsize-2$ [S1, unofficial].
++2. Retrieve the current voxel's palette index: `voxel = get_voxel_pal(x, y, z)` [S1, unofficial].
++3. Calculate the lower bound (color margin) for the current tone group:
++   $$ \text{color\_margin} = \left\lfloor \frac{\text{voxel} - 1}{32} \right\rfloor \times 32 + 1 $$
++   This ensures shading stays within the same brightness tier [S1, unofficial].
++4. If the voxel is not empty (`voxel != 0`), calculate the shading discount based on occupied neighbors:
++   - Subtract 3 if the voxel directly above $(x, y+1, z)$ is occupied.
++   - Subtract 2 if any of the following are occupied: $(x+1, y+1, z)$, $(x-1, y+1, z)$, $(x+1, y+1, z+1)$, or $(x+1, y+1, z-1)$.
++   - Subtract 1 if any of the following are occupied: $(x+1, y, z+1)$, $(x-1, y, z-1)$, $(x+1, y, z-1)$, or $(x-1, y, z+1)$.
++   *Note: The source lists $(x+1, y+1, z)$ twice in the "subtract 2" condition. This is treated as a single check.* [S1, unofficial].
++5. Clamp the result: If `voxel < color_margin`, set `voxel = color_margin` [S1, unofficial].
++6. Write the modified index back: `set_voxel_pal(x, y, z, voxel)` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def fast_shade2(voxel_grid, x_size, y_size, z_size):
+-    for x in range(1, x_size - 1):
+-        for y in range(1, y_size - 1):
+-            for z in range(1, z_size - 1):
+-                voxel = voxel_grid[x, y, z]
++def fast_shade2(xsize, ysize, zsize, get_voxel_pal, set_voxel_pal):
++    for x in range(1, xsize - 1):
++        for y in range(1, ysize - 1):
++            for z in range(1, zsize - 1):
++                voxel = get_voxel_pal(x, y, z)
++                
++                # Skip empty voxels
+                 if voxel == 0:
+                     continue
++                
++                # Calculate tone group lower bound
+                 color_margin = ((voxel - 1) // 32) * 32 + 1
+-                shading_offset = 0
+-                if voxel_grid[x, y + 1, z] != 0:
+-                    shading_offset += 3
+-                if voxel_grid[x + 1, y + 1, z] != 0:
+-                    shading_offset += 2
+-                if voxel_grid[x - 1, y + 1, z] != 0:
+-                    shading_offset += 2
+-                if voxel_grid[x + 1, y + 1, z + 1] != 0:
+-                    shading_offset += 2
+-                if voxel_grid[x + 1, y + 1, z - 1] != 0:
+-                    shading_offset += 2
+-                if voxel_grid[x + 1, y, z + 1] != 0:
+-                    shading_offset += 1
+-                if voxel_grid[x - 1, y, z - 1] != 0:
+-                    shading_offset += 1
+-                if voxel_grid[x + 1, y, z - 1] != 0:
+-                    shading_offset += 1
+-                if voxel_grid[x - 1, y, z + 1] != 0:
+-                    shading_offset += 1
+-                new_voxel = voxel - shading_offset
++                
++                discount = 0
++                
++                # Check neighbors for shading
++                # Subtract 3 if directly above is occupied
++                if get_voxel_pal(x, y + 1, z) != 0:
++                    discount += 3
++                
++                # Subtract 2 if specific upper-side neighbors are occupied
++                # Note: (x+1, y+1, z) is listed twice in source; checked once
++                if get_voxel_pal(x + 1, y + 1, z) != 0:
++                    discount += 2
++                if get_voxel_pal(x - 1, y + 1, z) != 0:
++                    discount += 2
++                if get_voxel_pal(x + 1, y + 1, z + 1) != 0:
++                    discount += 2
++                if get_voxel_pal(x + 1, y + 1, z - 1) != 0:
++                    discount += 2
++                
++                # Subtract 1 if specific side neighbors are occupied
++                if get_voxel_pal(x + 1, y, z + 1) != 0:
++                    discount += 1
++                if get_voxel_pal(x - 1, y, z - 1) != 0:
++                    discount += 1
++                if get_voxel_pal(x + 1, y, z - 1) != 0:
++                    discount += 1
++                if get_voxel_pal(x - 1, y, z + 1) != 0:
++                    discount += 1
++                
++                # Apply discount and clamp
++                new_voxel = voxel - discount
+                 if new_voxel < color_margin:
+                     new_voxel = color_margin
+-                voxel_grid[x, y, z] = new_voxel
++                
++                set_voxel_pal(x, y, z, new_voxel)
+ ```
++
++**Parameters:**
++- $xsize, ysize, zsize$: Dimensions of the voxel level [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- Boundary voxels (where $x=0, x=xsize-1, y=0, y=ysize-1, z=0, z=zsize-1$) are skipped in the iteration loop [S1, unofficial].
++- The palette index must not drop below `color_margin` [S1, unofficial].
++- The algorithm assumes a specific palette structure where indices 1-32, 33-64, etc., represent dark-to-light gradients [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### fast_shade1
+-A faster but less visually detailed variant of fast_shade2, also assuming vertical sun rays [S1, unofficial]. It uses fewer neighbor checks: it subtracts 3 if $(x, y+1, z)$ is occupied, subtracts 2 if $(x+1, y+1, z)$ is occupied, and subtracts 1 if $(x+1, y, z+1)$ or $(x-1, y, z-1)$ is occupied [S1, unofficial]. It shares the same tone-group clamping logic and iteration bounds as fast_shade2 [S1, unofficial]. Choose this variant when performance is critical and the reduced shadow detail is acceptable [S1, unofficial].
++### [fast_shade1](5608-fast-shade1.md)
++A faster variant that uses fewer neighbor checks, resulting in less visual detail compared to fast_shade2.
+ 
+ ## Operating characteristics
+-- Time Complexity: $O(N)$ where $N$ is the number of voxels in the grid, as each voxel is visited once [S1, unofficial]. The constant factor depends on the number of neighbor checks (10 for fast_shade2, 4 for fast_shade1) [S1, unofficial].
+-- Memory Complexity: $O(1)$ auxiliary space, as shading is applied in-place [S1, unofficial].
+-- Performance: Designed for CPU-only rendering, making it suitable for embedded systems or legacy hardware [S1, unofficial].
+-- Strengths: Extremely fast, simple to implement, no floating-point arithmetic required [S1, unofficial].
+-- Limitations: Only simulates vertical lighting; no dynamic light sources; no smooth gradients or specular highlights; limited shadow detail compared to ray-marched lighting [S1, unofficial].
+-- When to use: Real-time voxel engines where lighting is static or pre-computed, and CPU resources are limited [S1, unofficial].
+-- When not to use: Scenes requiring dynamic lighting, complex materials, or high-fidelity shadows [S1, unofficial].
++- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, with a constant factor proportional to the number of neighbor checks (11 lookups per voxel).
++- **Memory Complexity:** $O(1)$ auxiliary space, operating in-place on the voxel grid.
++- **Performance:** Designed for CPU-only rendering in voxel engines [S1, unofficial].
++- **Strengths:** Simple implementation, no floating-point arithmetic required for shading logic, fast execution on CPU.
++- **Limitations:** Limited to vertical sun rays, discrete palette-based shading lacks smooth gradients, boundary effects due to skipped edge voxels.
+ 
+ ## Background
+-Fast Shading for Voxel Engines was developed as part of the DOOMMY voxel engine, a CPU-based voxel game engine using Lua for scripting [S1, unofficial]. The engine was created by jabberx around 2012 [S1, unofficial]. The method was designed to provide basic lighting effects without the computational cost of ray marching or complex shading models, fitting the constraints of a pure CPU renderer [S1, unofficial].
++Fast Shading for Voxel Engines (fast_shade2) originates from the DOOMMY voxel engine, a CPU-based voxel game engine using Lua for scripting [S1, unofficial]. It was developed by jabberx around 2012 [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,108 @@
+# Composite Loss
+
+Also called: L1+L2+MS-SSIM+LPIPS, L1+L2+MS-SSIM+LPIPS loss
+
+## Overview
+The Composite Loss is a distortion metric used in differentiable volume rendering, specifically within 3D Gaussian Splatting, that combines multiple perceptual and pixel-level metrics to align rendered images more closely with human visual perception than standard L1 or SSIM losses alone [S1]. It sets itself apart from its sibling [Distortion Loss](11301-distortion-loss.md) by explicitly aggregating four distinct error signals—L1, L2, Multi-Scale Structural Similarity (MS-SSIM), and Learned Perceptual Image Patch Similarity (LPIPS)—rather than relying on a single structural or pixel-wise distance [S1].
+
+## How it works
+The method computes a weighted sum of four loss components, each measuring a different aspect of the difference between the rendered image and the ground truth image.
+
+**Inputs and Outputs:**
+- **Inputs:**
+  - $I_{render}$: The rendered image tensor (height $H$, width $W$, channels $C$).
+  - $I_{gt}$: The ground truth image tensor (height $H$, width $W$, channels $C$).
+  - $\omega_1, \omega_2, \omega_3, \omega_4$: Scalar weights for each loss term.
+- **Output:**
+  - $L_{composite}$: A scalar loss value.
+
+**Data Structures:**
+- Images are treated as tensors of floating-point values, typically normalized to $[0, 1]$ or $[-1, 1]$ depending on the specific implementation of the underlying metrics (LPIPS typically expects normalized inputs).
+
+**Formulas:**
+The composite loss is defined as [S1]:
+
+$$
+\mathcal{L}_{\textrm{composite}} = \omega_1 \mathcal{L}_{\textrm{L1}} + \omega_2 \mathcal{L}_{\textrm{L2}} + \omega_3 \mathcal{L}_{\textrm{MS-SSIM}} + \omega_4 \mathcal{L}_{\textrm{LPIPS}}
+$$
+
+Where:
+- $\mathcal{L}_{\textrm{L1}}$ is the per-pixel L1 norm (mean absolute error) between $I_{render}$ and $I_{gt}$.
+- $\mathcal{L}_{\textrm{L2}}$ is the per-pixel L2 norm (mean squared error) between $I_{render}$ and $I_{gt}$.
+- $\mathcal{L}_{\textrm{MS-SSIM}}$ is the Multi-Scale Structural Similarity loss [S1]. This is typically computed as $1 - \text{MS-SSIM}(I_{render}, I_{gt})$, where MS-SSIM evaluates structural similarity at multiple resolutions.
+- $\mathcal{L}_{\textrm{LPIPS}}$ is the Learned Perceptual Image Patch Similarity loss [S1]. It measures perceptual distance by comparing features extracted from a pretrained deep neural network.
+
+**Parameters:**
+The weights control the relative importance of each term. The specific configuration used in the source experiments is [S1]:
+- $\omega_1 = 0.05$ (L1)
+- $\omega_2 = 0.30$ (L2)
+- $\omega_3 = 0.60$ (MS-SSIM)
+- $\omega_4 = 0.10$ (LPIPS)
+
+Tuning these weights is described as non-trivial and engineering-intensive [S1].
+
+**Pitfalls and Edge Cases:**
+- **Overfitting to Training Metric:** When using LPIPS, the specific backbone network used for training must differ from the one used for evaluation to prevent the model from overfitting to the specific features of the training metric [S1]. The recommended practice is to train with LPIPS-AlexNet and evaluate with LPIPS-VGG [S1]. This remains consistent with common evaluation practices in the 3D Gaussian Splatting literature [S1].
+- **Precision:** Standard floating-point precision is assumed for the tensor operations. No specific bit-packing is mentioned.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def composite_loss(I_render, I_gt, weights=None):
+    """
+    Computes the composite loss for volume rendering optimization.
+    
+    Args:
+        I_render: Tensor of shape (H, W, C), rendered image.
+        I_gt: Tensor of shape (H, W, C), ground truth image.
+        weights: Dict with keys 'w1', 'w2', 'w3', 'w4'. Defaults to [0.05, 0.30, 0.60, 0.10].
+        
+    Returns:
+        Scalar loss value.
+    """
+    if weights is None:
+        weights = {'w1': 0.05, 'w2': 0.30, 'w3': 0.60, 'w4': 0.10}
+        
+    # 1. L1 Loss
+    # Mean Absolute Error
+    l1 = torch.mean(torch.abs(I_render - I_gt))
+    
+    # 2. L2 Loss
+    # Mean Squared Error
+    l2 = torch.mean((I_render - I_gt) ** 2)
+    
+    # 3. MS-SSIM Loss
+    # Compute MS-SSIM index, then convert to loss (1 - similarity)
+    # Note: Implementation details for MS-SSIM depend on the library (e.g., skimage or custom)
+    # Assuming a function ms_ssim_index that returns a value in [0, 1]
+    ms_ssim_val = ms_ssim_index(I_render, I_gt)
+    l_ms_ssim = 1.0 - ms_ssim_val
+    
+    # 4. LPIPS Loss
+    # Uses AlexNet backbone for training as per source recommendation
+    # Assumes a function lpips_loss that takes two images and returns perceptual distance
+    l_lpips = lpips_loss(I_render, I_gt, backbone='alexnet')
+    
+    # Combine with weights
+    loss = (weights['w1'] * l1 + 
+            weights['w2'] * l2 + 
+            weights['w3'] * l_ms_ssim + 
+            weights['w4'] * l_lpips)
+            
+    return loss
+```
+
+## Operating characteristics
+- **Time Complexity:** The computational cost is dominated by the LPIPS calculation, which requires forward passes through a pretrained deep neural network (AlexNet or VGG). MS-SSIM also adds overhead due to multi-scale decomposition. L1 and L2 are negligible in comparison.
+- **Memory Complexity:** Requires storing the intermediate feature maps for the LPIPS network and the multi-scale representations for MS-SSIM during the forward pass.
+- **Performance:** The configuration $\omega_1=0.05, \omega_2=0.30, \omega_3=0.60, \omega_4=0.10$ provides a favorable trade-off between reconstruction quality and representation efficiency [S1].
+- **Strengths:** Better alignment with human visual perception compared to standard L1/SSIM losses by incorporating deep perceptual features (LPIPS) and multi-scale structural information (MS-SSIM) [S1].
+- **Limitations:** Tuning the weights is non-trivial [S1]. The inclusion of LPIPS increases training time significantly compared to pixel-only losses.
+- **When to use:** When perceptual quality is prioritized over raw pixel-wise accuracy and computational efficiency is secondary to visual fidelity in 3D Gaussian Splatting optimization.
+
+## Background
+The Composite Loss formulation was introduced in the context of "Drop-In Perceptual Optimization for 3D Gaussian Splatting" by Özyılkan et al. [S1]. The authors studied three families of distortion losses: (i) L1 + SSIM, (ii) the Composite Loss (L1 + L2 + MS-SSIM + LPIPS), and (iii) Wasserstein Distortion [S1]. The composite loss generalizes the original L1 + SSIM loss by employing a weighted sum of more recent and commonly used distortion metrics [S1]. It was evaluated in a large-scale human subjective study comprising 39,320 pairwise ratings across 4 datasets and 3 distinct 3DGS frameworks [S1]. While Wasserstein Distortion emerged as a top performer in their specific analysis, the Composite Loss remains a significant baseline and alternative for perceptual optimization [S1].
+
+## Sources
+[S1] Drop-In Perceptual Optimization for 3D Gaussian Splatting, https://doi.org/10.1007/978-3-032-37350-2_25, fetched 2026-10-30

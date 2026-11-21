@@ -1,0 +1,82 @@
+--- v004.md
++++ v005.md
+@@ -3,44 +3,56 @@
+ 
+ ## Overview
+-Online Incremental NeRF Optimization addresses the problem of reconstructing 3D scenes from sequentially captured data in real-time or near-real-time, avoiding the need for a fixed, pre-collected dataset. Unlike offline methods such as DVGO which optimize on a static set of images, this method updates the radiance field representation incrementally as new observations arrive [S1, unofficial]. It is distinguished by its active planning capability, where the system plans next-best views based on current uncertainty, and its online adaptation, which integrates new data without retraining from scratch [S1, unofficial].
++Online Incremental NeRF Optimization addresses the problem of reconstructing 3D scenes from a continuous stream of incoming camera views, rather than a fixed, pre-collected dataset. It differs from offline methods like DVGO [S1, unofficial] by updating the scene representation $\Phi$ dynamically as new observations arrive, enabling active exploration and real-time adaptation. This approach is essential for robotics and large-scale mapping where data volume is unbounded and memory constraints require discarding older frames [S2, unofficial].
+ 
+ ## How it works
+-The method operates in a loop where the scene representation $\Phi$ and the training dataset $\mathcal{D}$ grow over time steps $t$.
++The method operates as a closed-loop system where the agent plans the next best view, captures new observations, and incrementally updates the radiance field.
+ 
+ **Inputs and Outputs:**
+-*   **Input:** Current scene representation $\Phi_t$, current dataset $\mathcal{D}_t = \{(P_i, I_i)\}$, and a new observation $(P_{new}, I_{new})$ or a query for the next best view.
+-*   **Output:** Updated representation $\Phi_{t+1}$ and updated dataset $\mathcal{D}_{t+1}$.
++*   **Input:** Current scene representation $\Phi$ (e.g., feature grids and decoder), current camera pose $P_t$, and new observation (image $I_{new}$ and pose $P_{new}$).
++*   **Output:** Updated scene representation $\Phi'$ and potentially the next camera pose $P_{t+1}$.
+ 
+ **Data Structures:**
+-*   **Radiance Field $\Phi$:** Typically a grid-based representation (e.g., hash grid) storing features, followed by a decoder (MLP) mapping features to color and opacity.
+-*   **Dataset $\mathcal{D}$:** A collection of camera poses $P$ and corresponding images $I$.
++*   **Scene Representation $\Phi$:** Typically consists of a spatial feature storage (e.g., hash grid, voxel grid) and a decoding network (MLP). The feature storage maps 3D coordinates to feature vectors.
++*   **Training Set $\mathcal{D}$:** A buffer of recent observations $(I_i, P_i)$. In online settings, this may be a sliding window or subject to eviction policies to manage memory [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Perception:** Acquire a new image $I_{new}$ from a new camera pose $P_{new}$ [S1, unofficial].
+-2.  **Incremental Update:** Add the new observation to the training set: $\mathcal{D}_{t+1} = \mathcal{D}_t \cup \{(P_{new}, I_{new})\}$ [S1, unofficial].
+-3.  **Optimization:** Perform gradient descent on the radiance field parameters $\Phi$ using the loss function $\mathcal{L}$ computed over $\mathcal{D}_{t+1}$:
+-    $$ \Phi_{t+1} = \Phi_t - \eta \nabla_\Phi \mathcal{L}(\Phi_t, \mathcal{D}_{t+1}) $$
+-    where $\eta$ is the learning rate [S1, unofficial].
+-4.  **Active Planning (Optional):** If the system is active, compute uncertainty (e.g., entropy) over the current view synthesis to determine the next best view $P_{next}$ to capture, guiding the perception step [S1, unofficial].
++1.  **Perception:** Render images from the current representation $\Phi$ using the current camera pose $P_t$ to assess reconstruction quality or uncertainty.
++2.  **Planning:** Determine the next best view $P_{t+1}$ based on criteria such as entropy or reconstruction error [S1, unofficial].
++3.  **Acquisition:** Capture new observation $(I_{new}, P_{new})$.
++4.  **Incremental Update:**
++    *   Add $(I_{new}, P_{new})$ to the training set $\mathcal{D}$.
++    *   Perform gradient descent on $\Phi$ using the new observation.
++    *   If the representation is grid-based, ensure new spatial regions are initialized or expanded to accommodate the new view [S2, unofficial].
++5.  **Iteration:** Repeat steps 1-4 for subsequent frames.
+ 
+-**Pitfalls:**
+-*   **Catastrophic Forgetting:** Updating shared MLP weights globally with new data can degrade previously learned regions that are no longer supervised [S2, unofficial].
+-*   **Memory Usage:** Storing all historical frames leads to high memory usage in large environments [S2, unofficial].
++**Formulas:**
++The optimization minimizes the photometric loss between rendered and observed images:
++$$ \mathcal{L} = \sum_{i \in \mathcal{D}} \| I_i - \mathcal{R}(\Phi, P_i) \|^2 $$
++where $\mathcal{R}$ is the volume rendering function. In online settings, $\mathcal{D}$ is updated incrementally [S1, unofficial].
++
++**Parameters:**
++*   **Learning Rate:** Often requires adjustment or resetting when new spatial regions are added to prevent catastrophic forgetting [S2, unofficial].
++*   **Entropy Threshold:** Used in active planning to determine when to stop or move [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Catastrophic Forgetting:** Updating shared MLP weights globally causes previously reconstructed regions to degrade if they are no longer supervised [S2, unofficial].
++*   **Memory Management:** Large environments generate high memory usage; older frames may need discarding, which exacerbates forgetting [S2, unofficial].
++*   **Initialization:** New grid cells or regions must be properly initialized to represent unseen areas without disrupting existing knowledge [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Incremental Reconstruction with Frozen Decoder
+-A strategy to mitigate catastrophic forgetting in online incremental reconstruction. It employs pre-trained, scene-agnostic decoders that remain frozen during the optimization of the feature grids [S2, unofficial]. This allows new grid cells to represent unseen areas while preserving the integrity of already reconstructed regions, as the decoder weights are not overwritten by new data [S2, unofficial]. Vanilla NeRF suffers from severe forgetting because every optimization step updates shared MLP weights globally [S2, unofficial]. Grid-based representations partially mitigate this due to spatially localized feature storage, but forgetting still occurs due to the decoder and hashgrid dictionary [S2, unofficial].
++A strategy to mitigate catastrophic forgetting in online incremental reconstruction. It employs pre-trained, scene-agnostic decoders that remain frozen during the optimization of feature grids [S2, unofficial]. This allows new grid cells to represent unseen areas while preserving the integrity of already reconstructed regions, as the decoder weights are not updated to overwrite previously learned information [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of training steps and the size of the current dataset $\mathcal{D}_t$. Each step involves rendering and backpropagation for the new and potentially retained old views.
+-*   **Memory Complexity:** Grows with the number of captured views and the resolution of the radiance field. Storing all frames increases memory usage significantly [S2, unofficial].
+-*   **Strengths:** Enables real-time reconstruction; supports active exploration; avoids retraining from scratch.
+-*   **Limitations:** Susceptible to catastrophic forgetting without specific architectural changes (e.g., frozen decoders); requires careful management of memory for large scenes [S2, unofficial].
+-*   **When to use:** Real-time SLAM, active 3D reconstruction, scenarios with streaming data.
+-*   **When not to use:** Offline processing with fixed datasets where global optimization is feasible and higher quality is required without temporal constraints.
++*   **Time Complexity:** Linear with respect to the number of new views processed, but each update requires full gradient computation over the current training set or a batch thereof.
++*   **Memory Complexity:** Depends on the scene representation size. Grid-based methods scale with the occupied volume. Online methods must manage memory by evicting old data or limiting grid expansion [S2, unofficial].
++*   **Strengths:** Enables real-time reconstruction and active exploration; suitable for large-scale, dynamic environments [S1, unofficial].
++*   **Limitations:** Susceptible to catastrophic forgetting if not carefully managed (e.g., via frozen decoders or regularization); performance may lag behind offline methods that optimize globally on all data [S1, unofficial].
++*   **When to Use:** Robotics navigation, real-time mapping, scenarios with streaming data and limited storage.
++*   **When Not to Use:** Offline processing where all data is available and maximum reconstruction quality is prioritized over speed/adaptability.
+ 
+ ## Background
+-The concept emerged from the need to adapt NeRFs to real-world scenarios involving imperfect data, large-scale scenes, and incremental reconstruction [S2, unofficial]. Traditional NeRF methods assume a fixed set of images, which is often impractical for robotic navigation or active mapping [S1, unofficial]. ActiveRMAP introduced the online incremental aspect combined with active view planning [S1, unofficial]. The issue of catastrophic forgetting in incremental NeRF training was highlighted in subsequent works, leading to strategies like frozen decoders [S2, unofficial].
++The concept emerged from the need to adapt NeRF for real-world robotic applications where data is acquired sequentially. ActiveRMAP introduced the online incremental framework, contrasting with offline methods like DVGO [S1, unofficial]. Subsequent work highlighted the challenge of catastrophic forgetting in grid-based representations and proposed frozen decoders as a mitigation strategy [S2, unofficial].
+ 
+ ## Sources

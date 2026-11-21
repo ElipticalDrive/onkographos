@@ -1,0 +1,103 @@
+--- v002.md
++++ v003.md
+@@ -18,5 +18,5 @@
+ 
+ ### Data Structures and Layout
+-The core data structure is the weight tensor. The algorithm assumes the weights define a discrete distribution over the initial sample indices [G]. The output `t_samples` defines the boundaries of the new intervals, implying `num_samples + 1` boundaries for `num_samples` intervals [G].
++The core data structure is the weight tensor [S1, unofficial][S2, unofficial]. The algorithm assumes the weights define a discrete distribution over the initial sample indices [G]. The output `t_samples` defines the boundaries of the new intervals, implying `num_samples + 1` boundaries for `num_samples` intervals [G].
+ 
+ ### Steps
+@@ -25,7 +25,7 @@
+ 3.  **Blurpool**: Compute the element-wise average of adjacent elements in `weights_max`: `weights_blur = 0.5 * (weights_max[..., :-1] + weights_max[..., 1:])` [S1, unofficial][S2, unofficial].
+ 4.  **Add Padding**: Add the `resample_padding` scalar to `weights_blur`: `weights_final = weights_blur + resample_padding` [S1, unofficial][S2, unofficial].
+-5.  **Sampling**: Sample new $t$ values from the normalized distribution defined by `weights_final` using a sorted piecewise constant PDF sampler: `new_t_vals = sorted_piecewise_constant_pdf(t_samples, weights_final, t_samples.shape[-1], randomized)` [S1, unofficial][S2, unofficial].
++5.  **Sampling**: Sample new $t$ values from the normalized distribution defined by `weights_final` using a sorted piecewise constant PDF sampler: `new_t_vals = sorted_piecewise_constant_pdf(t_vals, weights_final, t_vals.shape[-1], randomized)` [S1, unofficial][S2, unofficial].
+ 6.  **Gradient Control**: If `stop_grad` is true, wrap steps 1–5 in a no-gradient context (e.g., `torch.no_grad()` or `jax.lax.stop_gradient`) [S1, unofficial][S2, unofficial].
+-7.  **Ray Casting**: Cast rays using the new $t$ values, ray origins, directions, radii, and `ray_shape` to compute the mean positions and covariances: `means, covs = cast_rays(new_t_vals, origins, directions, radii, ray_shape)` [S1, unofficial][S2, unofficial].
++7.  **Ray Casting**: Cast rays using the new $t$ values, ray origins, directions, radii, and `ray_shape` to compute the mean positions and covariances: `means, covs = cast_rays(new_t_vals, origins, directions, radii, ray_shape, a, f, l)` [S1, unofficial][S2, unofficial].
+ 
+ ### Pseudocode
+@@ -33,10 +33,10 @@
+ import torch
+ 
+-def blurpool_resampling(weights, t_samples, origins, directions, radii, ray_shape, resample_padding=1e-6, stop_grad=False, randomized=True):
++def blurpool_resampling(weights, t_vals, origins, directions, radii, ray_shape, resample_padding=1e-6, stop_grad=False, randomized=True, a=None, f=None, l=None):
+     """
+     Resamples t-values along rays based on weights using blurpool technique.
+     Args:
+         weights: Tensor [batch_size, num_samples]
+-        t_samples: Tensor [batch_size, num_samples + 1]
++        t_vals: Tensor [batch_size, num_samples + 1]
+         origins: Tensor [batch_size, 3]
+         directions: Tensor [batch_size, 3]
+@@ -46,4 +46,5 @@
+         stop_grad: Boolean, if True, disable gradients
+         randomized: Boolean, if True, use randomized sampling
++        a, f, l: Additional ray parameters (exact usage not specified in sources [G])
+     Returns:
+         new_t_vals: Tensor [batch_size, num_samples + 1]
+@@ -53,8 +54,8 @@
+     if stop_grad:
+         with torch.no_grad():
+-            return _blurpool_core(weights, t_samples, origins, directions, radii, ray_shape, resample_padding, randomized)
+-    return _blurpool_core(weights, t_samples, origins, directions, radii, ray_shape, resample_padding, randomized)
++            return _blurpool_core(weights, t_vals, origins, directions, radii, ray_shape, resample_padding, randomized, a, f, l)
++    return _blurpool_core(weights, t_vals, origins, directions, radii, ray_shape, resample_padding, randomized, a, f, l)
+ 
+-def _blurpool_core(weights, t_samples, origins, directions, radii, ray_shape, resample_padding, randomized):
++def _blurpool_core(weights, t_vals, origins, directions, radii, ray_shape, resample_padding, randomized, a, f, l):
+     # Step 1: Pad weights with first and last elements along the last dimension
+     weights_pad = torch.cat([weights[..., :1], weights, weights[..., -1:]], dim=-1)
+@@ -65,11 +66,11 @@
+     # Step 4: Add padding
+     weights_final = weights_blur + resample_padding
+-    # Step 5: Sample new t values (implementation not provided in sources [G])
+-    new_t_vals = _sample_piecewise_constant(t_samples, weights_final, t_samples.shape[-1], randomized)
++    # Step 5: Sample new t values
++    new_t_vals = _sample_piecewise_constant(t_vals, weights_final, t_vals.shape[-1], randomized)
+     # Step 6: Cast rays
+-    means, covs = _cast_rays(new_t_vals, origins, directions, radii, ray_shape)
++    means, covs = _cast_rays(new_t_vals, origins, directions, radii, ray_shape, a, f, l)
+     return new_t_vals, (means, covs)
+ 
+-def _sample_piecewise_constant(t_samples, weights, num_samples, randomized):
++def _sample_piecewise_constant(t_vals, weights, num_samples, randomized):
+     # Normalize weights to form a probability distribution
+     probs = weights / weights.sum(dim=-1, keepdim=True)
+@@ -82,23 +83,27 @@
+     indices = torch.clamp(indices, 0, probs.shape[-1] - 1)
+     # Linear interpolation within intervals
+-    t_low = t_samples[torch.arange(t_samples.shape[0]), indices]
+-    t_high = t_samples[torch.arange(t_samples.shape[0]), indices + 1]
+-    p_low = cdf[torch.arange(cdf.shape[0]), indices]
+-    p_high = cdf[torch.arange(cdf.shape[0]), indices + 1]
++    batch_idx = torch.arange(t_vals.shape[0])[:, None]
++    t_low = t_vals[batch_idx, indices]
++    t_high = t_vals[batch_idx, indices + 1]
++    p_low = cdf[batch_idx, indices]
++    p_high = cdf[batch_idx, indices + 1]
+     denom = p_high - p_low
+     denom = torch.where(denom == 0, 1.0, denom)
+     t_new = t_low + (u - p_low) / denom * (t_high - t_low)
+     # Return boundaries: prepend first t, append last t to match [B, N+1] shape
+-    return torch.cat([t_samples[..., :1], t_new, t_samples[..., -1:]], dim=-1)
++    return torch.cat([t_vals[..., :1], t_new, t_vals[..., -1:]], dim=-1)
+ 
+-def _cast_rays(t_vals, origins, directions, radii, ray_shape):
++def _cast_rays(t_vals, origins, directions, radii, ray_shape, a, f, l):
+     # Compute mean positions along rays
+     means = origins[..., None, :] + t_vals[..., :, None] * directions[..., None, :]
+     # Compute covariance based on ray shape and radii [G]
++    # Exact covariance formula for parameters a, f, l is not specified in sources [G]
+     if ray_shape == "gaussian":
+-        covs = torch.eye(3, device=means.device).unsqueeze(0).unsqueeze(0) * (radii[..., None, None] ** 2)
+-        covs = covs.expand(means.shape[0], means.shape[1], -1, -1)
++        r2 = radii[..., None, None] ** 2
++        covs = torch.zeros(means.shape[0], means.shape[1], 3, 3, device=means.device)
++        covs[:, :, 0, 0] = r2
++        covs[:, :, 1, 1] = r2
+     else:
+-        covs = torch.zeros_like(means[..., None, None]).repeat(1, 1, 3, 3)
++        covs = torch.zeros(means.shape[0], means.shape[1], 3, 3, device=means.device)
+     return means, covs
+ ```

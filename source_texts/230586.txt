@@ -1,0 +1,105 @@
+# CinderGS
+
+<div align="center">
+
+**High-Performance 3D Gaussian Splatting & Volumetric Cage Kinematics in Pure Rust**
+
+[![CI](https://github.com/Sadik00789/CinderGS/actions/workflows/ci.yml/badge.svg)](https://github.com/Sadik00789/CinderGS/actions/workflows/ci.yml)
+[![Rust Edition 2024](https://img.shields.io/badge/Rust_Edition-2024-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85+-blue.svg?style=flat-square&logo=rust)](Cargo.toml)
+[![WGPU 30](https://img.shields.io/badge/WGPU-v30.0-blue.svg?style=flat-square&logo=webgpu)](https://wgpu.rs/)
+[![CubeCL 0.11](https://img.shields.io/badge/CubeCL-v0.11-darkgreen.svg?style=flat-square)](https://cubecl.org/)
+[![Tests](https://img.shields.io/badge/Tests-143%20passing-brightgreen.svg?style=flat-square)](tests/)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20WASM-lightgrey.svg?style=flat-square)](Cargo.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg?style=flat-square)](LICENSE)
+
+<br />
+
+[Overview](#-overview) •
+[Key Features](#-key-features) •
+[Architecture](#-architecture--pipeline) •
+[Performance](#-measured-performance) •
+[Quick Start](#-quick-start) •
+[Production Tooling](#-production-tooling) •
+[Controls](#-viewport-controls) •
+[Layout](#-repository-layout)
+
+---
+
+<img src="docs/cindergs_demo.gif" alt="CinderGS real-time Gaussian Splatting deformation demo" width="100%">
+
+<p><em>Real-time volumetric cage kinematics on the Mip-NeRF 360 bonsai capture (1,073,930 Gaussians). The canopy flexes and settles via damped springs while the trunk and base remain anchored. Rendered with the CubeCL backend on an NVIDIA GeForce RTX 3050 Laptop GPU.</em></p>
+
+</div>
+
+---
+
+## 🔭 Overview
+
+**CinderGS** is a production-grade 3D Gaussian Splatting (3DGS) rasterization and physics deformation engine written entirely in Rust. It eliminates complex C++/CUDA toolchain dependencies in favor of a modern, multi-backend compute architecture powered by **[CubeCL](https://cubecl.org/)** and **[WGPU](https://wgpu.rs/)**, while introducing physically grounded **tetrahedral cage kinematics** for real-time volumetric manipulation of Gaussian scenes.
+
+Whether ingesting multi-million Gaussian captures from raw PLY files, deforming complex organic structures with volume preservation and spherical harmonics rotation, or rendering high-resolution frames headlessly across camera trajectories, CinderGS provides an uncompromising balance of mathematical precision, memory safety, and high-throughput rendering.
+
+---
+
+## ✨ Key Features
+
+| Domain | Capability Highlights |
+| :--- | :--- |
+| **GPU Compute & Rasterization** | • Native compute kernels via **CubeCL 0.11** targeting Vulkan, Metal, and DirectX 12.<br>• Exact **CPU reference backend** with multi-threaded Rayon execution.<br>• **Unified device model**: single `wgpu::Device` and `Queue` shared across compute kernels and swapchain surface.<br>• 256-thread shared-memory 16×16 tile compositor with early ray termination (α > 0.9999).<br>• Full world-space Spherical Harmonics (SH) evaluation across degrees 0 to 3. |
+| **Volumetric Cage Kinematics** | • Tetrahedral cage meshes with automatic barycentric coordinate embedding.<br>• Closed-form covariance transport `Σ' = J Σ Jᵀ` with regularization against degeneracy.<br>• Optical density stabilization: `α' = 1 − (1 − α)^(1 / clamp(det J, 0.6, 1.8))`.<br>• Exact monomial SH rotation matrices for bands 1–3 via polar decomposition `J = R S`.<br>• Multi-cage support with individual stiffness, damping, rest configurations, and wireframes. |
+| **Physics & Dynamics** | • Semi-implicit Euler spring solver with frame-rate independent exponential damping (`γ = exp(−c Δt)`).<br>• Real-time screen-space cage vertex picking and camera-plane dragging.<br>• Automated jiggle excitation and settling simulations. |
+| **Sorting & Caching** | • Deterministic 64-bit `(tile_id, depth_key)` parallel sorting.<br>• **Sort Cache Optimization**: Reuses tile ordering across frames when camera and cages are static, avoiding redundant passes during inspection. |
+| **PLY Ingestion Engine** | • Robust schema-driven header parser (`binary_little_endian` and `binary_big_endian`).<br>• Handles `float` and `double` scalars, arbitrary property orderings, and custom attributes.<br>• Spherical harmonics degrees 0–3 (9/24/45 `f_rest` coefficients) repacked into the engine's 15-per-channel layout.<br>• High-throughput zero-copy `mmap` fast path for canonical 62-float buffers.<br>• Rich error diagnostics through dedicated `PlyError` variants. |
+| **Intelligent Auto-Framing** | • Statistical outlier rejection via 2nd/98th percentile bounding box trimming.<br>• Automatic derivation of hero cage dimensions, orbit pivot, and focal distance.<br>• Explicit CLI override flags (`--look-at`, `--distance`, `--bounds`) for room-scale captures. |
+| **Production Tooling** | • **Headless Render Farm** (`render`): Scriptable offline renderer reading JSON camera paths.<br>• **Autonomous Demo Recorder** (`record_demo`): Frame generator with automatic MP4/GIF encoding.<br>• **Interactive Timeline**: Keyframed camera trajectories and cage deformations with live scrubbing.<br>• **WebAssembly Drop-Zone**: In-browser PLY validation and inspection with zero network transmission. |
+
+---
+
+## 🏗️ Architecture & Pipeline
+
+CinderGS processes scenes through a staged pipeline designed to maximize throughput while preserving deterministic ordering and state caching:
+
+```text
+ PLY Capture ──► Schema Parser ──► GaussianSceneSoa
+                                          │
+                                          ▼
+                           ┌─────────────────────────────┐
+                           │   CageScene (N Cages)       │
+                           │   Barycentric Bindings      │
+                           │   Spring Dynamics Solver    │
+                           └──────────────┬──────────────┘
+                                          │ Deformed Vertices
+                                          ▼
+   ┌────────────────────────────────────────────────────────────────────────┐
+   │ Stage 1: Cage Deformation                                     [CPU/GPU]│
+   │   • Vertex mapping:       x' = Σ wₖ Xₖ                                 │
+   │   • Covariance transport: Σ' = J Σ Jᵀ,  J = Dₛ Dₘ⁻¹                    │
+   │   • Opacity stabilization: α' = 1 − (1 − α)^(1 / clamp(det J, 0.6, 1.8))│
+   │   • SH rotation:          Polar decomposition J = R S (CPU path)       │
+   ├────────────────────────────────────────────────────────────────────────┤
+   │ Stage 2: EWA Projection & Culling                             [CPU/GPU]│
+   │   • 3D-to-2D covariance projection: Σ₂D = J_cam Σ' J_camᵀ              │
+   │   • Conic matrix inversion & 3σ screen-space bounding radius          │
+   │   • Frustum culling against near plane and viewport boundaries         │
+   ├────────────────────────────────────────────────────────────────────────┤
+   │ Stage 3: Tile Binning & 64-bit Sort                               [CPU]│
+   │   • Overlap counting against 16×16 screen tiles                        │
+   │   • Radix/parallel sort on composite keys: (tile_id << 32) | depth     │
+   │   • Sort Cache: bypassed when camera and cages remain stationary       │
+   ├────────────────────────────────────────────────────────────────────────┤
+   │ Stage 4: Tile Compositor                                      [CPU/GPU]│
+   │   • 256-thread shared-memory workgroups (16×16 pixels/tile)            │
+   │   • World-space Spherical Harmonics evaluation (degrees 0–3)           │
+   │   • Front-to-back alpha blending with early ray termination (α > 0.9999)│
+   ├────────────────────────────────────────────────────────────────────────┤
+   │ Stage 5: Offscreen Blit Pass                                     [WGPU]│
+   │   • sRGB transfer, gamma correction, and fullscreen presentation blit  │
+   ├────────────────────────────────────────────────────────────────────────┤
+   │ Stage 6: Overlays & Telemetry                                    [WGPU]│
+   │   • Wireframe cage rendering, vertex handles, and immediate-mode HUD   │
+   └────────────────────────────────────────────────────────────────────────┘
+                                          │
+                                          ▼
+                                   WGPU Swapchain
+```

@@ -1,0 +1,903 @@
+Making it easier to work with shaders. Contribute to shader-slang/slang development by creating an account on GitHub.
+
+Fix #12185: make the DescriptorHandle SPIR-V representation kind-dependent under spvBindlessTextureNV by nv-slang-bot[bot] · Pull Request #12186 · shader-slang/slang · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+nv-slang-bot
+Bot
+commented
+Jul 22, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Motivation
+With the spvBindlessTextureNV capability, converting a DescriptorHandle<T> to a resource aborted the compiler with an internal error for every descriptor kind except textures and samplers:
+```
+error[E99997]: ... Slang::InternalError unexpected: Unsupported result type for CastDescriptorHandleToResource
+```
+slangc exited 255. Reported in #12185 (pdeayton-nv). Concretely, all of these aborted:
+RWStructuredBuffer<float>.Handle / ConstantBuffer<T>.Handle / ByteAddressBuffer handles
+RaytracingAccelerationStructure.Handle — even though the reporter expected acceleration structures to be convertible
+The same shaders compile fine without the capability, because they take a descriptor-heap path instead. SPV_NV_bindless_texture defines integer conversions only for image and sampler types; buffers have no encoding under it, and acceleration structures have a valid conversion (OpConvertUToAccelerationStructureKHR) that was simply not wired up.
+Proposed solution
+The root cause was that under spvBindlessTextureNV the handle representation was capability-wide uint64, while the spvBindlessTextureNV arm of defaultGetDescriptorFromHandle forwarded every descriptor kind to __castDescriptorHandleToResource, whose SPIR-V emitter only knows how to encode images and samplers.
+Following review (@csyonghe / @pdeayton-nv, "option a"), the representation of DescriptorHandle<T> is now kind-dependent rather than the unsupported kinds being diagnosed:
+uint64 for the kinds SPV_NV_bindless_texture can convert — the texture/sampler family (textures, samplers including comparison samplers, combined texture-samplers, and texel buffers). These lower through __castDescriptorHandleToResource to the OpConvertUTo*NV opcodes.
+uint2 for every other kind — buffers and acceleration structures. These reuse the existing dynamic-resource-heap path (identical to the plain spirv/glsl arm), so the original abort is fixed by construction: buffer handles compile via the heap path, and acceleration-structure handles keep their uint2 packing and lower via OpConvertUToAccelerationStructureKHR.
+For buffer and acceleration-structure handles this matches the representation already used on the plain (no-capability) SPIR-V path, so those handles' layout no longer changes just because the capability is enabled. (Texture/sampler handles are uint2 on the plain path and uint64 under this capability — that is the encoding difference the extension requires.)
+Because the width now depends on the kind, a global constant can be built at one width and read at the other, and that mismatch used to survive to module scope where it produced invalid SPIR-V. The four DescriptorHandle↔integer representation casts (and Select, which a ?: initializer can put between them) are therefore added to isInlinableGlobalInst, so such an initializer sinks into the function that uses the handle and the widths reconcile there.
+Change summary
+File
+Change
+source/slang/hlsl.meta.slang
+spvBindlessTextureNV arm of defaultGetDescriptorFromHandle: texture/sampler kinds → __castDescriptorHandleToResource; buffers/AS → the shared getDescriptorFromDynamicResourceHeap (extracted from the old spirv/glsl arm). lessThan/lessThanOrEquals compare in the native representation.
+source/slang/slang-ir-util.{h,cpp}
+isBindlessTextureNVEncodableResourceType(IRType*) (the uint64 kind set) and isDescriptorHandleRepresentedAsUInt64(IRInst*, bool) — the IR-side classifier used by every width consumer.
+source/slang/slang-ir-legalize-global-values.cpp
+Add the four representation casts and Select to isInlinableGlobalInst, beside the BitCast already there, so a cross-width global initializer is inlined into its using function instead of surviving at module scope.
+source/slang/slang-emit-spirv.cpp
+Emit the handle type as uint64 or uint2 per the classifier; emit a real OpBitcast for a runtime cross-width cast; classify the CastDescriptorHandleToResource conversion on the unwrapped result type (image → OpConvertUToImageNV, combined → OpConvertUToSampledImageNV, sampler incl. comparison → OpConvertUToSamplerNV).
+source/slang/slang-ir-byte-address-legalize.cpp
+Storage type and both cast-op selectors take the handle type and pick uint64/uint2 per the classifier.
+source/slang/slang-ir-layout.cpp, source/slang/slang-type-layout.cpp
+IR and AST layout return the uint64 layout only for the uint64 kinds; buffers/AS stay uint2.
+source/slang/slang-ir-peephole.cpp
+sizeof/alignof of a handle use the classifier for the width and honor the requested layout rule, so alignof(handle, Std430DataLayout) matches alignof(uint2, Std430DataLayout).
+source/slang/slang-ir-spirv-legalize.cpp
+DefaultConstruct of a handle zero-initializes at the correct width.
+tests/language-feature/descriptor-handle/desc-handle-nv-bindless-texture-kinds.slang (new)
+Per-kind conversion: AS, texel buffer, comparison sampler, and the three buffer kinds.
+tests/language-feature/descriptor-handle/desc-handle-nv-bindless-global-width.slang (new)
+A global initializer built at the other width: -O0 lane asserts it is sunk into the function, -O1 lane asserts the folded form, plus a binary-validation lane.
+tests/language-feature/descriptor-handle/desc-handle-nv-bindless-const-cast.slang (new)
+Global constants unwrapped at their own representation width, including through a ?:; pinned to -O1, where the folded constants exist.
+tests/language-feature/descriptor-handle/desc-handle-sizeof-bindless-buffer.slang (new)
+Kind-dependent sizeof/alignof.
+tests/language-feature/descriptor-handle/desc-handle-layout-query-bindless-buffer.slang (new)
+Explicit two-argument sizeof/alignof(T, LayoutRule) queries.
+tests/language-feature/descriptor-handle/desc-handle-nv-bindless-texture.slang, tests/bugs/gh-9916.slang
+Existing image/sampler controls: expectations updated for the corrected plain-image opcode.
+Concepts and vocabulary
+DescriptorHandle<T> representation — how a bindless handle is stored in SPIR-V. Under spvBindlessTextureNV it is kind-dependent: uint64 for the texture/sampler family, uint2 otherwise (and uint2 on the plain spirv/glsl path for all kinds).
+isBindlessTextureNVEncodableResourceType — the single classifier for "is this a kind SPV_NV_bindless_texture can convert", i.e. the kinds that use the uint64 representation. slang-type-layout.cpp carries a mirrored AST-side predicate with the same kind set.
+The four representation casts — Cast{UInt2,UInt64}ToDescriptorHandle and CastDescriptorHandleTo{UInt2,UInt64}. When the integer side matches the handle's representation they emit no instruction and the operand is forwarded, so the operand must already have the result's type; a runtime cross-width cast emits an OpBitcast instead.
+isInlinableGlobalInst — the list in slang-ir-legalize-global-values.cpp of global instructions that may be cloned into a using function. An op in this list can appear in a global initializer even when it is only legal inside a block.
+getDescriptorFromDynamicResourceHeap — the uint2-handle heap-lookup path, factored out of the old spirv/glsl arm so the spvBindlessTextureNV arm can reuse it for buffers/AS.
+Process report
+hlsl.meta.slang — kind-dependent producer. The old spvBindlessTextureNV arm was return __castDescriptorHandleToResource<T>(handleValue); for all kinds. It now routes the texture/sampler family to __castDescriptorHandleToResource and everything else to getDescriptorFromDynamicResourceHeap. Input-shape check: CastDescriptorHandleToResource is only valid for kinds the extension can encode; forwarding buffers to it was an over-broad producer emitting an input shape the consumer cannot represent, so narrowing it here is the right layer. A T.kind if/else is used rather than a static_assert switch because getDescriptorFromHandle<T> is type-checked as an un-specialized generic, where an eager static_assert(false) arm would fire even for textures. The lessThan/lessThanOrEquals split is required because a uint2 and a packed uint64 order differently (lexicographic lo-major vs numeric), so ordering must compare in each kind's native representation; equals needs no split since bit-equality is representation-independent.
+Global-scope width mismatch (slang-ir-legalize-global-values.cpp). Both integer constructors are available for every kind, so user code can write a global whose initializer width differs from the kind's representation:
+```
+static const DescriptorHandle<SamplerState> kSampler = DescriptorHandle<SamplerState>(uint2(3, 4));
+static const uint64_t kSamplerBits = (uint64_t)kSampler;
+```
+Because the representation casts emit nothing and forward their operand, that used to hand a %v2uint constant to uint64 arithmetic — spirv-val rejects it with "Expected arithmetic operands to have the same dimension as Result Type". The symmetric case, a uint64-initialized buffer handle reaching the descriptor heap, emitted OpCompositeExtract on a scalar, which asserts inside spirv-opt while constant folding. Bridging the widths needs an OpBitcast, which is not valid outside a block, so the fix is to stop the value surviving at module scope at all: the four casts and Select join BitCast in isInlinableGlobalInst, the chain is cloned into the using function, and ordinary folding reconciles the width there — at -O1 no bitcast is emitted at all. Input-shape check: the mismatched-width initializer is valid input (nothing in the type system ties the constructor's width to the kind's representation), and it is not an emit-layer problem, so the fix belongs in the global-value legalization that decides what may remain at module scope rather than in a consumer-side guard. Note this makes the mismatch well-defined rather than rejected — whether the type system should instead reject a cross-width round-trip is a separate semantic question, discussed on the PR.
+Representation casts in emit (slang-emit-spirv.cpp). When the handle's representation matches the integer side named by the cast op, the cast forwards its operand. At runtime, when they differ, a real OpBitcast is emitted in a block (v2uint↔ulong shares the (hi<<32)|lo = __asuint64 layout). The module-scope constant-reinterpret path that an earlier revision of this PR carried is gone, because the inlining above makes it unreachable.
+Width consumers. The representation width is decided in one place per layer and consumed identically by type emit, DefaultConstruct legalization, byte-address storage and cast-op selection, IR layout, the sizeof/alignof peephole, and AST layout/reflection. The peephole additionally honors the requested layout rule: a uint2 handle has std430/std140 alignment 8 but natural alignment 4, so alignof(DescriptorHandle<RWStructuredBuffer<float>>, Std430DataLayout) must equal alignof(uint2, Std430DataLayout). A uint64 handle is 8 under every rule, which is why a hardcoded-natural query was previously invisible — surfaced by @pdeayton-nv's explicit-query repro.
+Verification (GPU-less; SPIR-V validation on):
+The reporter's four categories — constant-buffer, structured-buffer, byte-address-buffer, and acceleration-structure handles — no longer abort. AS emits OpConvertUToAccelerationStructureKHR and passes spirv-val.
+Plain texture → OpConvertUToImageNV; combined texture-sampler → OpConvertUToSampledImageNV; texel buffer (a non-combined image type) → OpConvertUToImageNV; SamplerState / SamplerComparisonState → OpConvertUToSamplerNV.
+Global width mismatch: at -O0 the initializer is sunk into the function (OpSelect → OpBitcast after the entry point's OpLabel) and the binary validates; at -O1 it folds to a %ulong constant feeding OpIAdd and a %uint heap index, with no OpBitcast left.
+sizeof/alignof agree with emission for the tested kinds: uint2 handles report std430/std140 alignment 8 and natural 4; uint64 handles report 8 under every tested rule.
+Existing image/sampler cases remain supported; plain-image conversion is corrected from the previous unconditional OpConvertUToSampledImageNV to the type-correct OpConvertUToImageNV.
+Closes #12185.
+nv-slang-bot
+Bot
+added
+the
+pr: non-breaking
+PRs without breaking changes
+label
+Jul 22, 2026
+jhelferty-nv
+assigned
+jkwak-work
+Jul 22, 2026
+jhelferty-nv
+requested review from
+csyonghe and
+jkwak-work
+July 22, 2026 04:29
+nv-slang-bot
+Bot
+mentioned this pull request
+Jul 22, 2026
+spvBindlessTextureNV causes an internal error for DescriptorHandle types other than textures and samplers
+#12185
+Closed
+nv-slang-bot
+Bot
+force-pushed
+the
+fix/issue-12185
+branch
+from
+3e5cccb to
+5c0694b
+Compare
+July 22, 2026 05:28
+jkwak-work
+reviewed
+Jul 22, 2026
+View reviewed changes
+Comment thread
+source/slang/hlsl.meta.slang
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+source/slang/slang-emit-spirv.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+source/slang/slang-emit-spirv.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+source/slang/slang-emit-spirv.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+source/slang/slang-ir-util.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+source/slang/slang-ir-util.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+source/slang/slang-ir-spirv-legalize.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+source/slang/slang-ir-spirv-legalize.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+jkwak-work
+marked this pull request as ready for review
+July 22, 2026 15:54
+jkwak-work
+requested a review
+from a team
+as a code owner
+July 22, 2026 15:54
+nv-slang-bot
+Bot
+force-pushed
+the
+fix/issue-12185
+branch
+from
+5c0694b to
+ec7d8d8
+Compare
+July 22, 2026 16:13
+pdeayton-nv
+reviewed
+Jul 22, 2026
+View reviewed changes
+Comment thread
+source/slang/slang-emit-spirv.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+pdeayton-nv
+reviewed
+Jul 22, 2026
+View reviewed changes
+Comment thread
+source/slang/slang-ir-spirv-legalize.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+pdeayton-nv
+reviewed
+Jul 22, 2026
+View reviewed changes
+Comment thread
+tests/language-feature/descriptor-handle/desc-handle-nv-bindless-texture-kinds.slang
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+pdeayton-nv
+reviewed
+Jul 22, 2026
+View reviewed changes
+Comment thread
+source/slang/slang-diagnostics.lua
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+nv-slang-bot
+Bot
+force-pushed
+the
+fix/issue-12185
+branch
+2 times, most recently
+from
+427370d to
+b8287c3
+Compare
+July 22, 2026 20:26
+pdeayton-nv
+reviewed
+Jul 22, 2026
+View reviewed changes
+Comment thread
+source/slang/slang-ir-spirv-legalize.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+nv-slang-bot
+Bot
+force-pushed
+the
+fix/issue-12185
+branch
+from
+b8287c3 to
+ae82b08
+Compare
+July 22, 2026 21:18
+pdeayton-nv
+reviewed
+Jul 22, 2026
+View reviewed changes
+Comment thread
+source/slang/slang-ir-util.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+pdeayton-nv
+commented
+Jul 22, 2026
+Copy link
+Copy Markdown
+Contributor
+@nv-slang-bot, could you create follow-ups for the two issues identified during review:
+Diagnostics being emitted for unreachable code
+Valid ConstantBuffer source location in diagnostics
+nv-slang-bot
+Bot
+force-pushed
+the
+fix/issue-12185
+branch
+from
+ae82b08 to
+b0167a5
+Compare
+July 22, 2026 22:53
+This was referenced Jul 22, 2026
+spvBindlessTextureNV: E55215 diagnosed for DescriptorHandle conversions in post-OpKill dead code
+#12191
+Closed
+spvBindlessTextureNV: E55215 for ConstantBuffer DescriptorHandle has no valid source location
+#12192
+Open
+nv-slang-bot
+Bot
+commented
+Jul 22, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+@pdeayton-nv done — filed both follow-ups:
+Diagnostics emitted for unreachable code: spvBindlessTextureNV: E55215 diagnosed for DescriptorHandle conversions in post-OpKill dead code #12191
+Valid ConstantBuffer source location in diagnostics: spvBindlessTextureNV: E55215 for ConstantBuffer DescriptorHandle has no valid source location #12192
+Each links back to this PR and scopes the issue to what we found during review (the unreachable-code one is specific to the pre-1.6 OpKill configuration).
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+jkwak-work
+reviewed
+Jul 22, 2026
+View reviewed changes
+Comment thread
+source/slang/hlsl.meta.slang
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+jkwak-work
+added
+the
+Office-Yong
+To be discussed during Yong's office hours
+label
+Jul 22, 2026
+nv-slang-bot
+Bot
+force-pushed
+the
+fix/issue-12185
+branch
+from
+b0167a5 to
+4fbe216
+Compare
+July 22, 2026 23:33
+pdeayton-nv
+previously approved these changes
+Jul 23, 2026
+View reviewed changes
+pdeayton-nv
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+LGTM
+csyonghe
+reviewed
+Jul 23, 2026
+View reviewed changes
+Comment thread
+source/slang/hlsl.meta.slang
+Outdated
+return __getDynamicResourceHeap<T>()[((uint2)handleValue).x];
+case spvBindlessTextureNV:
+return __castDescriptorHandleToResource<T>(handleValue);
+if (T.kind == DescriptorKind.AccelerationStructure)
+csyonghe
+Jul 23, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+What if we delete the spvBindlessTextureNV case here, and add the logic to the spvDescriptrHeapEXT and the default case above to special case T.Kind == Texture/Sampler/CombinedTextureSampler cases? This way we can be sure the conversion opcode is used only when spvBindlessTextureNV capability is specified by the user and only when we are dealing with Texture/Sampler resources. And it also allows us to provide a well-defined behavior when the bindless texture extension is / is not used together with DescriptorHeapEXT.
+nv-slang-bot
+Bot
+Jul 23, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I like this direction — scoping the NV conversion opcode to texture / sampler / combined-texture-sampler is cleaner than generate-then-diagnose, and if it works it lets the E55215 diagnostic, the legalization guard, and the shared isBindlessTextureNVEncodableResourceType predicate all go away. But there's a representation blocker I ran into that I think decides how (and whether) this restructure lands, so I want to raise it before I change anything.
+The handle is uint64 capability-wide under spvBindlessTextureNV, not per-kind. In slang-emit-spirv.cpp (the kIROp_DescriptorHandleType case, ~2717–2733), the descriptor-handle type is emitted as OpTypeInt 64 whenever spvBindlessTextureNV is implied — for every T.kind, not just texture/sampler — and as uint2 otherwise. The case spirv: / case spvDescriptorHeapEXT: heap arms all index with ((uint2)handleValue).x, and the case spirv: acceleration-structure expression is RaytracingAccelerationStructure(__asuint64((uint2)handleValue)). Those all assume a uint2 handle.
+So if I delete the case spvBindlessTextureNV: arm and let the non-texture/sampler kinds fall through to case spirv: / case spvDescriptorHeapEXT:, under bindless-texture those arms receive a uint64 handle and try to consume it as uint2. We already saw this exact mismatch during this review: __asuint64((uint2)handleValue) fails SPIR-V validation under spvBindlessTextureNV (thread above — the %ulong handle can't feed __asuint64's %v2uint parameter). A buffer handle routed to the heap path hits the same uint64-as-uint2 problem.
+That's really the "well-defined behavior when bindless-texture is / isn't combined with DescriptorHeapEXT" question, and I think it comes down to a representation decision that's yours to make:
+(a) Make the bindless-texture handle representation kind-dependent — uint64 only for the kinds that go through the NV conversion op (texture/sampler/combined), uint2 for everything else — so the heap/AS expressions keep working unchanged for the non-NV kinds. This is the larger change: the "uint64 under spvBindlessTextureNV" decision is currently made capability-wide (per-capability, not per-kind) in a number of places, so making the width kind-dependent means threading the kind through all of them and keeping them agreed. It's not just the kIROp_DescriptorHandleType emit rule (slang-emit-spirv.cpp ~2717); the same capability-wide choice also appears in the equals/comparison arms (hlsl.meta.slang ~27485), default-construct lowering (slang-ir-spirv-legalize.cpp ~1744), the byte-address / structured-buffer storage-type path (slang-ir-byte-address-legalize.cpp), and the layout / reflection rules (slang-ir-layout.cpp ~446, slang-type-layout.cpp ~479 and ~5677). That list isn't exhaustive — the point is that it's a representation change spanning emit, legalization, and layout/reflection, so those would all need auditing so a uint2-represented non-NV kind isn't still sized or processed as uint64 somewhere.
+(b) Keep the handle uint64 capability-wide and give the heap-indexing and AS expressions a uint64-aware decode when bindless-texture is active. This needs a defined encoding contract for what the 64-bit handle means as a heap index when both bindless-texture and DescriptorHeapEXT are in play — a uint64 → uint/uint2 conversion that type-checks isn't automatically the semantically correct index, so the contract has to be specified, not just made to compile.
+Which of those do you have in mind? Once the representation is settled, the discrimination mechanism itself is simple: a nested __target_switch on spvBindlessTextureNV (it implies _spirv_1_0, so it's a valid nested case inside case spirv: / case spvDescriptorHeapEXT:) routes texture/sampler/combined → the NV op and everything else → that arm's heap path. The work is the representation audit above, not the switch.
+Two smaller notes so we're aligned on scope:
+Texel buffers (Buffer<T>.Handle, RWBuffer<T>.Handle) aren't DescriptorKind.Texture / Sampler / CombinedTextureSampler — they're UniformTexelBuffer / StorageTexelBuffer. Today they go through OpConvertUToImageNV (they are OpTypeImage). Under a strict "texture/sampler-only" classification they'd move to the heap path, so they're subject to the same representation decision above; I'd want to confirm we still want them on the NV op.
+I couldn't find a source-level "is capability X active" query in .meta.slang — capability gating here is structural (which __target_switch arm is selected, or a [require] on a callee), which is why the nested-switch is the tool for the discrimination rather than an inline if.
+I've kept the code as-is (it's approved and green) pending your call on (a) vs (b); once you pick, I'll restructure and re-verify the texture / sampler-comparison / texel-buffer / AS success cases plus the buffer kinds on their new path.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+pdeayton-nv
+Jul 23, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Please investigate option (a) more -> uint64 only for types affected by the spvBindlessTextureNV extension.
+It's a larger change but likely the cleaner and more correct solution.
+nv-slang-bot
+Bot
+Jul 23, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Investigated option (a) — it's feasible and I agree it's the cleaner/more correct solution. Here's the scope and the plan I'd follow; one item (acceleration structures) turns out simpler than I expected, and I want to confirm the kind→width mapping with you before I start.
+Kind → representation mapping. The kinds the spvBindlessTextureNV conversion opcodes actually cover — and so the ones that need to be uint64 — are the image/sampler family:
+DescriptorKind
+width
+why
+Texture
+uint64
+OpConvertUToImageNV (or …SampledImageNV when combined)
+CombinedTextureSampler
+uint64
+OpConvertUToSampledImageNV
+Sampler
+uint64
+OpConvertUToSamplerNV
+UniformTexelBuffer / StorageTexelBuffer
+uint64
+texel buffers are OpTypeImage → OpConvertUToImageNV
+ConstantBuffer / StorageBuffer
+uint2
+no NV opcode; heap-array indexing (((uint2)handle).x)
+AccelerationStructure
+uint2
+see below
+Unknown
+uint2
+no conversion
+Acceleration structures don't need uint64 — this is the part that came out simpler. I checked: a RaytracingAccelerationStructure.Handle compiled under plain -target spirv (uint2 handle, no bindless-texture) already lowers to OpConvertUToAccelerationStructureKHR and passes spirv-val, because the case spirv: arm packs the pair itself: RaytracingAccelerationStructure(__asuint64((uint2)handleValue)) (hlsl.meta.slang ~27767). The KHR opcode is independent of the NV extension. So under option (a), AS is simply not NV-affected → uint2, and it falls through to that existing case spirv: path unchanged. Concretely that means the (uint64_t)-cast AS special-case I added in the current PR gets deleted, not kept — the standalone case spvBindlessTextureNV: arm goes away entirely, and AS is handled by the pre-existing spirv arm.
+The kind is available everywhere it's needed, but not through one uniform accessor. On the IR side, IRDescriptorHandleType carries its element type as the resourceType operand (slang-ir-insts.lua ~415, accessor getResourceType()), and the consumer classifies it from that type (texture vs combined needs IRTextureType::isCombined(), buffers need explicit classification — it's not a single getOp() lookup). The AST-side layout code (slang-type-layout.cpp ~472) works on DescriptorHandleType / element Type* rather than IR, so it needs the AST-typed form of the same classification. And in .meta.slang generic source, T.kind is a compile-time constant already used for exactly this kind of branching (e.g. the switch(T.kind) in defaultGetDescriptorFromHandle), so the comparison operators can branch on it too.
+Plan:
+One source of truth for the width decision. Today the "uint64 if spvBindlessTextureNV else uint2" choice is duplicated capability-wide across ~6 sites — the IR type emit (slang-emit-spirv.cpp ~2717), default-construct legalization (slang-ir-spirv-legalize.cpp ~1744), byte-address/structured-buffer storage type (slang-ir-byte-address-legalize.cpp ~344), and the layout/reflection rules (slang-ir-layout.cpp ~446 (IR) and slang-type-layout.cpp ~479/~5677 (AST)). Since some sites are IR-side and some are AST-side, this can't literally be one IR-only function; I'd make the kind → is-uint64 classification the single source of truth (one predicate, shared by both an IR overload taking IRDescriptorHandleType and an AST overload taking the DescriptorHandleType/element Type*), so every site derives width from the same rule and emit / legalization / layout can't disagree.
+.meta.slang comparisons. DescriptorHandle::equals / lessThan / lessThanOrEquals currently __target_switch to (uint64_t)this for spvBindlessTextureNV/cuda and (uint2)this otherwise. For the SPIR-V (spvBindlessTextureNV) path I'd branch the cast on T.kind (uint64 for the image/sampler-family kinds, uint2 otherwise) so the source-level cast matches the emitted width; the case cuda: arm stays as-is unless you decide otherwise (item 4).
+Producer arm. With the representation kind-dependent, delete the standalone case spvBindlessTextureNV: arm; the image/sampler-family kinds get the NV conversion op, everything else (buffers, AS) takes the existing case spirv: / case spvDescriptorHeapEXT: heap and KHR paths. The E55215 diagnostic, the legalization guard, and the isBindlessTextureNVEncodableResourceType predicate all get removed.
+CUDA. The cuda arm of the comparisons also uses (uint64_t)this capability-wide today; I'll confirm CUDA descriptor-handle width isn't meant to stay uint64-for-all-kinds independently of the SPIR-V change, and keep CUDA behavior unchanged if so (this change is meant to be SPIR-V-representation-only).
+Re-verify the full matrix GPU-less: texture / combined / sampler / sampler-comparison / texel-buffer → NV op; AS → KHR op; constant/structured/byte-address buffer → heap path (no diagnostic); plus the layout/reflection tests.
+Two things I'd like you to confirm before I start: (1) the mapping table above, especially AS → uint2 (I'm fairly confident given the plain-spirv result, but it reverses what this PR currently does for AS); and (2) whether CUDA should stay uint64-capability-wide (item 4) or also become kind-dependent. Once you confirm I'll implement it — this supersedes the current approved diff, so it'll re-request review.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+pdeayton-nv
+Jul 23, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Let's keep AS -> uint2, but make sure it could be constructed from a uint64
+Keep CUDA as uint64-capability-wide to avoid altering current behavior
+nv-slang-bot
+Bot
+Jul 23, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Got it — implementing with:
+AS → uint2, kept constructible from uint64 via the existing case spirv: path (RaytracingAccelerationStructure(__asuint64((uint2)handleValue))), so the standalone NV-arm (uint64_t) AS cast goes away.
+CUDA → uint64 capability-wide, unchanged — only the SPIR-V (spvBindlessTextureNV) path becomes kind-dependent.
+So the final SPIR-V mapping is uint64 for texture / combined / sampler / texel-buffer, uint2 for constant/structured/byte-address buffer + AS + unknown. Starting now; this supersedes the current diff so it'll re-request review once it's built and verified.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+nv-slang-bot
+Bot
+Jul 24, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pushed the option-(a) rework (f4004c3f90, rebased onto current master). The DescriptorHandle SPIR-V representation is now kind-dependent under spvBindlessTextureNV instead of capability-wide uint64, so this supersedes the earlier approved diff and will want a fresh look.
+What changed
+Representation is now per-kind. Only the kinds the extension actually converts — textures, samplers, combined texture-samplers, and texel buffers — are uint64; constant/structured/byte-address buffers, acceleration structures, and unknown stay uint2. The texture/sampler set is the existing IR predicate isBindlessTextureNVEncodableResourceType, with a matching AST classifier for the layout/reflection paths and the same kind list in the hlsl.meta.slang routing/ordering; every place that chose the width capability-wide now derives it from the resource kind (SPIR-V type emit, default-construct legalization, byte-address storage, IR + AST layout/reflection, sizeof/alignof).
+The producer no longer forwards unsupported kinds to the NV op. defaultGetDescriptorFromHandle's spvBindlessTextureNV arm routes only the texture/sampler family to __castDescriptorHandleToResource; everything else goes through the shared dynamic-resource-heap path (extracted as getDescriptorFromDynamicResourceHeap), and acceleration structures keep the existing case spirv: OpConvertUToAccelerationStructureKHR lowering. Because the buffer kinds now compile via the heap instead of hitting an unencodable conversion, the E55215 diagnostic (and its legalization guard) are removed — the bug is fixed by construction rather than diagnosed.
+DescriptorHandle↔integer casts are representation-aware. When the integer width matches the handle's representation the cast is transparent; when they differ it converts (OpBitcast at runtime; a correctly-typed constant materialized at module scope, since a constant OpBitcast is not valid SPIR-V). Ordering (lessThan/lessThanOrEquals) compares in the handle's native representation — uint64 for CUDA (all kinds) and for the NV texture/sampler family, lexicographic uint2 for everything else — so a given buffer handle orders identically whether or not the extension is enabled; equals is unchanged (bit-equality is representation-independent). CUDA stays uint64 for all kinds, unchanged.
+Test coverage (all compiled locally with SLANG_RUN_SPIRV_VALIDATION=1; no GPU here, so these are compile/emit + static-validation checks):
+desc-handle-nv-bindless-texture.slang covers the sampler, combined-texture-sampler, sampled-image, and storage-image configurations (the three NV conversion opcodes OpConvertUToImageNV / OpConvertUToSampledImageNV / OpConvertUToSamplerNV).
+The updated desc-handle-nv-bindless-texture-kinds.slang covers texel buffer (→ OpConvertUToImageNV), sampler-comparison (→ OpConvertUToSamplerNV), acceleration structure (→ OpConvertUToAccelerationStructureKHR), and the constant/structured/byte-address buffer arms — the buffer arms assert emission succeeds with no image/sampler NV conversion opcode, no abort, and no diagnostic (the implementation routes them through the heap path).
+New desc-handle-sizeof-bindless-buffer.slang checks the uint2 kinds lay out 8/4 (alongside the existing 8/8 for the uint64 kinds in desc-handle-sizeof-bindless.slang).
+New desc-handle-nv-bindless-const-cast.slang covers the module-scope width-mismatched constant through both ?: branches.
+tests/bugs/gh-9916.slang (updated earlier in this PR) still passes.
+I also confirmed locally that a DescriptorHandle field stored/loaded through a ByteAddressBuffer round-trips and validates.
+One follow-up note: #12191/#12192 were about the E55215 diagnostic's dead-code and source-location behavior — with the diagnostic removed here they're likely moot, so I'll close them once this lands unless you'd rather keep them.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+jkwak-work
+assigned
+pdeayton-nv
+Jul 23, 2026
+Inline DescriptorHandle representation casts out of module scope
+…
+1ea3076
+```
+A DescriptorHandle's SPIR-V representation is uint64 for the kinds
+spvBindlessTextureNV can convert and uint2 for the rest, while both integer
+constructors are available for any kind. A global constant can therefore be
+built at one width and read at the other, and that mismatch used to survive to
+module scope, where it produced invalid SPIR-V two different ways:
+
+  static const DescriptorHandle<SamplerState> kSampler =
+      DescriptorHandle<SamplerState>(uint2(3, 4));
+  static const uint64_t kSamplerBits = (uint64_t)kSampler;
+
+fed a %v2uint constant to uint64 arithmetic ("Expected arithmetic operands to
+have the same dimension as Result Type"), and a uint64-initialized buffer handle
+reaching the descriptor heap emitted OpCompositeExtract on a scalar, which
+asserts inside spirv-opt while constant folding.
+
+Add the four representation casts, and Select, to isInlinableGlobalInst beside
+the BitCast that is already there. The initializer chain then sinks into the
+function that uses the handle, where ordinary folding reconciles the widths --
+the sampler read-back becomes an OpConstant %ulong feeding OpIAdd %ulong, and the
+buffer handle's heap index folds to a plain uint. Select is needed because a
+handle initializer may reach the cast through a compile-time ?:.
+
+This leaves the emitter's module-scope constant-reinterpret path unreachable for
+module-scope initializer chains after legalization, so
+remove it: tryGetConstantDescriptorHandleBits, emitConstantDescriptorHandleIntCast,
+descriptorHandleIntCastResultIsUInt64, and the release assert in emitGlobalInst.
+Checked by replacing that branch with a loud abort and finding that no tested
+case reaches it. The runtime bitcast path is unchanged and still handles a
+cross-width cast inside a function.
+```
+nv-slang-bot
+Bot
+force-pushed
+the
+fix/issue-12185
+branch
+from
+107f158 to
+1ea3076
+Compare
+August 3, 2026 18:42
+nv-slang-bot
+Bot
+commented
+Aug 3, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+That direction works, and it's better than either option I put to you. I implemented and tested it rather than just reasoning about it — 17/17 exit-code-clean with SLANG_RUN_SPIRV_VALIDATION=1, covering the three shapes that were failing and the fourteen that had to keep working.
+What I did
+Added the four representation casts and kIROp_Select to GlobalInstInliningContextGeneric::isInlinableGlobalInst, right beside the existing kIROp_BitCast:
+```
+case kIROp_BitCast:
+case kIROp_IntCast:
+case kIROp_FloatCast:
+case kIROp_CastUInt2ToDescriptorHandle:
+case kIROp_CastUInt64ToDescriptorHandle:
+case kIROp_CastDescriptorHandleToUInt2:
+case kIROp_CastDescriptorHandleToUInt64:
+case kIROp_Select:
+```
+Your instinct on kIROp_Select was well-aimed: my earlier constant-bits walker had needed an explicit Select case to cope with ?: initializers, which is independent evidence it belongs in that list.
+Why it works — better than "the bitcast is now legal"
+I expected this to sink the chain into the function so an OpBitcast would be legal there. What actually happens is cleaner: once inlined, ordinary constant folding resolves the width and no bitcast is needed at all.
+The module-scope read-back that previously emitted OpIAdd %ulong with a %v2uint operand (spirv-val: "Expected arithmetic operands to have the same dimension as Result Type") now emits:
+```
+%ulong_17179869187 = OpConstant %ulong 17179869187
+%26 = OpIAdd %ulong %ulong_17179869187 %20
+```
+Correctly-typed %ulong throughout.
+And the descriptor-heap case that was asserting inside spirv-opt (const_folding_rules.cpp:129: cc != nullptr, from a malformed OpCompositeExtract %uint %ulong_… 0 — an extract on a scalar) now emits a clean folded index:
+```
+%18 = OpAccessChain %_ptr_StorageBuffer_RWStructuredBuffer %__slang_resource_heap %uint_3
+```
+Results
+Previously failing, now compile + validate: module-scope read-back at the other width; uint64-initialized buffer handle through the heap path (the spirv-opt assert); module-scope uint2 → texture handle then Load.
+Still passing: both gh-9916 variants, your four original #12185 reproducers, per-kind conversions, the const-cast test (including the select initializers), consistent-width heap path, runtime cross-width, the sizeof/alignof layout-rule fix, and your alignof(…, Std430DataLayout) static_assert.
+What this does and does not settle
+Worth being precise, because these are two different layers:
+This fix is about representation survival. It stops a wrong-width value from existing at module scope, so the crash sites stop crashing.
+It does not change what a user can write. The width conversions are capability-gated but not kind-gated (hlsl.meta.slang — the __init(uint2) / __init(uint64_t) constructors and the extension uint2 / extension uint64_t read-backs are all generic over T with nothing tying the chosen width to the kind's representation). So after this change a cross-width handle round-trip still compiles silently — it just becomes well-defined behaviour instead of a crash.
+Whether that's the end state you want — mismatch is legal and defined, versus the type system rejecting it — is a semantics call for you and @csyonghe. My fix doesn't decide it, and I'm not assuming it does. If you'd like the mismatch diagnosed anyway, that's a separate (small) change on top; if defined-and-silent is fine, nothing more is needed.
+State of the diff
+All four of my earlier guard variants are out: no E39033 (gone from slang-diagnostics.lua), no descope, and none of my reverted gh-9916 edits.
+To be precise about the branch rather than just this commit: the branch does still touch hlsl.meta.slang and tests/bugs/gh-9916.slang, but both are from the original option-a commit (6efff26dcb), not from this work — the gh-9916 delta there is its CHECK_BINDLESS expectations following the corrected plain-texture opcode (OpConvertUToImageNV + OpConvertUToSamplerNV + OpSampledImage). Nothing in this commit touches either file.
+Your suggestion also let me remove the module-scope constant-reinterpret machinery this PR was carrying — tryGetConstantDescriptorHandleBits, emitConstantDescriptorHandleIntCast, descriptorHandleIntCastResultIsUInt64, and the SLANG_RELEASE_ASSERT branch in emitGlobalInst. That's 4 added / 100 deleted in slang-emit-spirv.cpp (net −96). The runtime OpBitcast path stays, since that one is still live.
+I probed rather than assumed before deleting: I replaced that branch with a loud SLANG_UNIMPLEMENTED_X, rebuilt, and ran ten cases through it (module-scope read-back, both cross-width module-scope initializers, gh-9916 bindless, const-cast, per-kind conversions, two of your reproducers, sizeof, and the no-capability path). None of the ten reached it — consistent with the inlining invariant, though ten cases is a probe result rather than proof of universal unreachability.
+So this commit is: five added case labels in isInlinableGlobalInst (plus a five-line comment), the 100-line emitter deletion, and the new test.
+The new regression test pins both failure modes rather than just "it compiles": it binds the reinterpreted %ulong constant and requires it as the OpIAdd operand (a surviving uint2 would make that a %v2uint operand), and binds the folded %uint heap index and requires it on the OpAccessChain (a surviving uint64 would make that an OpCompositeExtract over a %ulong).
+I negative-controlled both patterns by compiling the same test file with a pre-fix master build:
+```
+# pre-fix:  grep -c 'OpIAdd %ulong %ulong_17179869187'                      -> 0
+#           grep -c 'OpAccessChain %… %__slang_resource_heap %uint_3'       -> 0
+#           (that build aborts: "Unsupported result type for CastDescriptorHandleToResource")
+# post-fix: both -> 1
+```
+So the assertions genuinely fail if either bug returns. Note my local harness reports this test as ignored rather than running its FileCheck directives, so I verified the patterns against the emitted assembly directly; CI will exercise them properly.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+pdeayton-nv
+commented
+Aug 3, 2026
+Copy link
+Copy Markdown
+Contributor
+@nv-slang-bot, thoughts on this feedback?
+One clarification on the test fix: could we preserve two distinct checks? At -O0, verify that the global initializer is legally sunk into the function (OpLabel followed by the required OpSelect/OpBitcast) and validate the binary SPIR-V. Then add an -O1 lane retaining the existing OpConstant expectations and checking that the runtime bitcasts disappear. That would cover both the new global-inliner behavior and the expected optimized static const folding.
+Split the global-width test into -O0 and -O1 lanes
+…
+142627d
+```
+The single-lane version only observed the optimized output, where the width
+bridge has already folded away, so it could not show that the initializer was
+sunk into the function in the first place. Per review, cover both behaviors
+separately.
+
+The -O0 lane asserts the sink: after the entry point's OpLabel, the uint2
+initializer's OpSelect feeds an OpBitcast up to %ulong for the arithmetic, and
+the uint64 initializer is bitcast down to %v2uint before its low word indexes
+the descriptor heap. A companion -O0 run compiles to binary SPIR-V so the
+sunk form is validated.
+
+The -O1 lane keeps the folded expectations: a %ulong constant as the addition's
+operand, a %uint constant as the heap index, and no OpBitcast left in the module.
+
+The sampler initializer now goes through a compile-time ?: so the inlined chain
+carries a Select, which is one of the ops this PR adds to isInlinableGlobalInst.
+```
+nv-slang-bot
+Bot
+commented
+Aug 3, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Good call — and it caught a real weakness. My single-lane test only ever observed the optimized output, where both bitcasts have already folded away, so it could not demonstrate the sink at all. Split as you described in 142627d4d6.
+-O0 lane — the initializer is legally sunk
+Both bridges now show up inside the entry point's block, after its label:
+```
+%4        = OpLabel
+%22       = OpSelect %v2uint %true %25 %28
+%kSampler = OpBitcast %ulong %22              ; uint2 initializer widened for the uint64 read
+%32       = OpIAdd %ulong %kSampler %20
+%kBuffer  = OpBitcast %v2uint %ulong_17179869187   ; uint64 initializer narrowed for the heap
+%36       = OpCompositeExtract %uint %kBuffer 0
+%44       = OpAccessChain ... %__slang_resource_heap %36
+```
+The CHECKs capture the SSA ids so the chain is pinned, not just the opcodes: the OpSelect result must be what the widening OpBitcast consumes, that result must be the OpIAdd operand, and the narrowed value's low word must be the heap index. A second -O0 directive emits binary SPIR-V (to a file, so stdout stays empty) so the sunk form is validated rather than just inspected as text.
+I took your OpSelect mention as a hint and changed the sampler initializer to a compile-time ?:, then checked it actually survives to -O0 — it does, as OpSelect %v2uint %true %25 %28 above. That also gives kIROp_Select (one of the ops this PR adds to the inlinable list) direct coverage, rather than it riding along untested.
+-O1 lane — the folded form, bridge gone
+```
+%ulong_17179869187 = OpConstant %ulong 17179869187
+%uint_3            = OpConstant %uint 3
+%32 = OpIAdd %ulong %ulong_17179869187 %20
+%44 = OpAccessChain ... %__slang_resource_heap %uint_3
+```
+The OpConstant expectations are retained as you asked, and the runtime bitcasts are asserted gone. On that last point I initially wrote a single trailing CHECK_O1-NOT: OpBitcast, which was wrong: FileCheck bounds a -NOT by its adjacent positive matches, so a trailing one only covers to end-of-file and would have missed a bitcast sitting before the OpIAdd — exactly where the bridge would reappear. It's now bracketed:
+```
+CHECK_O1: OpLabel
+CHECK_O1-NOT: OpBitcast
+CHECK_O1: OpIAdd %ulong %[[BITS]]
+CHECK_O1-NOT: OpBitcast
+CHECK_O1: OpAccessChain {{...}} %__slang_resource_heap %[[INDEX]]
+CHECK_O1-NOT: OpBitcast
+CHECK_O1: OpFunctionEnd
+```
+so the three negatives together span the whole body. I verified the emission order matches that sequence (label → IAdd → heap access chain → function end, with zero OpBitcast between) rather than assuming it.
+Checks that the lanes are real
+Lane discrimination — each lane's key patterns appear at its own level and are absent at the other: OpSelect %v2uint 1/0, OpBitcast %ulong 1/0, OpBitcast %v2uint 1/0, OpIAdd with the %ulong constant 0/1, heap index %uint_3 0/1. So neither lane would pass in the other's place.
+Negative control — compiling this same file with a pre-fix build fails at both levels (error[E99997]: … unimplemented: Unhandled global inst in spirv-emit, exit 255) with zero matches for every key pattern above, so neither lane can pass without the fix.
+slang-test reports 100% of tests passed (1/1), 2 tests ignored here: the binary lane passes, and the two FileCheck lanes are ignored because FileCheck isn't available in my container — CI will exercise those.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+pdeayton-nv
+commented
+Aug 3, 2026
+Copy link
+Copy Markdown
+Contributor
+@nv-slang-bot , please make sure all tests are passing at the slang-test default of -O0, and also make sure any stale issue/PR title/body or comments are updated.
+Run the const-cast test at -O1, where its folded constants exist
+…
+65338db
+```
+slang-test injects -O0 by default (tools/slang-test/options.h), but this test
+asserts the folded form -- OpConstant %ulong 17179869187 and 25769803781. At -O0
+nothing folds: the emission is OpSelect %v2uint, OpBitcast %ulong, OpIAdd, so
+both CHECK-DAGs fail. It only passed under bare slangc, which defaults to a
+level that folds.
+
+Pin the directive to -O1 so it tests the level it describes. The unfolded -O0
+shape is already covered by desc-handle-nv-bindless-global-width.slang.
+```
+nv-slang-bot
+Bot
+changed the title
+Fix #12185: diagnose unsupported DescriptorHandle kinds under spvBindlessTextureNV
+Fix #12185: make the DescriptorHandle SPIR-V representation kind-dependent under spvBindlessTextureNV
+Aug 3, 2026
+nv-slang-bot
+Bot
+commented
+Aug 3, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Both done — and the -O0 sweep found a real failure, so thanks for asking for it.
+Tests at the -O0 default
+slang-test injects -O0 unless a test already carries an -O argument (defaultOptimizationLevel = "-O0" in tools/slang-test/options.h, prepended by addDefaultSlangOptimization). I had been spot-checking with bare slangc, which defaults to a level that folds — so I was verifying the wrong thing.
+One test was genuinely broken by that: desc-handle-nv-bindless-const-cast.slang asserts the folded constants (OpConstant %ulong 17179869187 / 25769803781), and at -O0 nothing folds — the emission is OpSelect %v2uint → OpBitcast %ulong → OpIAdd, so both CHECK-DAGs fail. Fixed by pinning that directive to -O1, the level it actually describes; the unfolded -O0 shape is already covered by the new desc-handle-nv-bindless-global-width.slang lanes. Verified both directions: all three CHECKs match at -O1, and both folded %ulong constants are absent at -O0, so the explicit level is load-bearing rather than decorative. (65338dbef9, pushed.)
+The rest of the PR's tests are fine at -O0: sizeof-bindless-buffer and layout-query-bindless-buffer match as-is; nv-bindless-texture-kinds matches every prefix, with the buffer-kind directives being -NOTs whose absence is the assertion; global-width pins -O0/-O1 explicitly; gh-9916 has two lanes — its non-bindless CHECK lane pins -O3, while its CHECK_BINDLESS lane takes the -O0 default, and I checked all six of that lane's directives match there (OpCapability BindlessTextureNV, OpConstant %ulong 5, OpConvertUToImageNV, OpConvertUToSamplerNV, OpSampledImage, OpImageSampleImplicitLod).
+Stale metadata
+PR title — was "diagnose unsupported DescriptorHandle kinds under spvBindlessTextureNV", describing the abandoned E55215 approach. Now: "Fix spvBindlessTextureNV causes an internal error for DescriptorHandle types other than textures and samplers #12185: make the DescriptorHandle SPIR-V representation kind-dependent under spvBindlessTextureNV".
+PR body — rewritten against the current diff. It had still named tryGetConstantDescriptorHandleBits and the SLANG_RELEASE_ASSERT (both deleted) and never mentioned isInlinableGlobalInst. The change summary now lists every one of the 17 changed files with no wildcards, and the process report covers the kind-dependent producer, the global-scope width mismatch and why the fix belongs in global-value legalization, the layout-rule peephole, and the input-shape check.
+Issue spvBindlessTextureNV causes an internal error for DescriptorHandle types other than textures and samplers #12185 comments — my 2026-07-22 "approved; awaiting merge" comment described E55215 and a status that no longer holds; it now carries a superseded warning. My 2026-07-24 option-a comment was substantively right but predated the layout and inlining fixes, so I refreshed it to include both, drop the stale head SHA, and note that DescriptorHandle representation round-trip leaves a bit_cast alive at module scope, aborting SPIR-V emit (E99997) #12219 merged as Fix #12219: fold DescriptorHandle representation round-trip in peephole #12263.
+PR Fix #12185: make the DescriptorHandle SPIR-V representation kind-dependent under spvBindlessTextureNV #12186 comments — the three where I proposed and escalated the E39033 diagnostic now carry a note that it was not the fix that landed, pointing at the inlining change instead. I left the design trail intact rather than rewriting history, since the reasoning is part of the review record.
+I re-fetched each edited comment afterward to confirm the change was actually live rather than trusting the response code.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+pdeayton-nv
+marked this pull request as ready for review
+August 3, 2026 22:56
+pdeayton-nv
+previously approved these changes
+Aug 3, 2026
+View reviewed changes
+jkwak-work
+reviewed
+Aug 4, 2026
+View reviewed changes
+Comment thread
+source/slang/hlsl.meta.slang
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+source/slang/hlsl.meta.slang
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+nv-slang-bot
+Bot
+mentioned this pull request
+Aug 4, 2026
+Nested __target_switch with no matching case fails with E41011 instead of continuing after the switch
+#12350
+Closed
+jkwak-work
+previously requested changes
+Aug 6, 2026
+View reviewed changes
+jkwak-work
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I think we need to discuss a bit more about the change.
+nv-slang-bot
+Bot
+commented
+Aug 6, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Happy to discuss — and I'd rather ask than guess, since your review didn't carry inline comments and I don't want to change the wrong thing.
+I won't push or rebase while your changes-requested review is open.
+Two possibilities I'd guess at, so you can just point at one:
+Whether the spvBindlessTextureNV arm should exit explicitly. In lessThan / lessThanOrEquals (hlsl.meta.slang:27511) that arm's if has no else, so for the buffer and acceleration-structure kinds control leaves the arm implicitly and continues to the shared uint2 path below. That's the shape you raised on r3716544275. I offered to add an explicit break; and asked @pdeayton-nv first rather than spend his approval on it. If you'd rather this PR not rely on the implicit exit, I can make that change.
+The overall approach — making the DescriptorHandle SPIR-V representation kind-dependent under spvBindlessTextureNV, rather than rejecting the kinds the extension can't encode. If you think the representation split is the wrong shape, I'd much rather hear it now than iterate on details inside it.
+Also possible, and both still open from earlier in this review: kind-gating (the width conversions are capability-gated but not kind-gated, so a cross-width handle round-trip still compiles silently — I flagged it as a semantics call for you and @csyonghe, not something this PR settles), and whether an implicit arm exit should diagnose at all. On that last one I don't want to put a position in your mouth: you closed #12350 saying the current behavior is preferred, and I'm genuinely unsure whether that also covered your separate suggestion that a missing break; should warn or error. If it did, item 1 is moot and I'll leave the code as-is.
+If it's none of these, or you'd rather take it to a meeting or an issue than a PR thread, that's fine too — just say which and I'll follow.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+nv-slang-bot
+Bot
+commented
+Aug 7, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+@jkwak-work — gentle ping on your review: could you point me at what you'd like to discuss? Any starting point works (a file, a commit, or a sentence), and I'll hold off on changes until then.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+jkwak-work
+reviewed
+Aug 28, 2026
+View reviewed changes
+Comment thread
+source/slang/hlsl.meta.slang
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+source/slang/hlsl.meta.slang
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+source/slang/hlsl.meta.slang
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Add explicit break; to spvBindlessTextureNV case in DescriptorHandle …
+…
+7d93db9
+```
+…comparisons
+
+Per review, add an explicit break; at the end of the spvBindlessTextureNV
+arm of lessThan/lessThanOrEquals to make the fall-through to the uint2
+comparison explicit. Functionally inert.
+```
+nv-slang-bot
+Bot
+dismissed
+pdeayton-nv’s stale review
+via
+7d93db9
+August 28, 2026 23:25
+nv-slang-bot
+Bot
+temporarily deployed
+to
+falcor-ci
+August 28, 2026 23:25
+Inactive
+pdeayton-nv
+approved these changes
+Aug 31, 2026
+View reviewed changes
+jkwak-work
+dismissed
+their stale review
+September 1, 2026 01:02
+The requested code change is made
+jkwak-work
+approved these changes
+Sep 1, 2026
+View reviewed changes
+jkwak-work
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Looks good to me
+pdeayton-nv
+added this pull request to the merge queue
+Sep 2, 2026
+Hide details
+View details
+Merged
+via the queue into
+master
+with commit 8d5db24
+Sep 2, 2026
+121 of 124 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Sep 11, 2026
+ByteAddressBuffer does not allow scalar alignments for manually-aligned vector/matrix loads
+#9958
+Closed
+Fix #13070: keep native bindless texture/sampler conversion when spvDescriptorHeapEXT is also enabled
+#13086
+Merged
+nv-slang-bot
+Bot
+mentioned this pull request
+Oct 13, 2026
+[3/3] ByteAddressBuffer: group partially-aligned accesses at the widest aligned width
+#11803
+Merged
+Hide environments
+Show environments
+This branch was previously deployed
+1 inactive
+deployment
+falcor-ci
+—
+7d93db92
+Deployed
+Aug 28, 2026 by
+nv-slang-bot[bot]
+via falcor-build-approval-gate #31597
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+pr: non-breaking
+PRs without breaking changes
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

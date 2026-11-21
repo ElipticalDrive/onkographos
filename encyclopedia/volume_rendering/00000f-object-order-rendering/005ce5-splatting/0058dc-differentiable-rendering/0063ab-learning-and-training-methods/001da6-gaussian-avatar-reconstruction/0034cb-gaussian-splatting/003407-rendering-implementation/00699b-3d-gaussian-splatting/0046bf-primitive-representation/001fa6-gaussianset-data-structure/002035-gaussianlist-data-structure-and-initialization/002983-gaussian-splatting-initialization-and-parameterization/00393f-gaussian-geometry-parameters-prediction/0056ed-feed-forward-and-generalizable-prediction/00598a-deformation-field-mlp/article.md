@@ -1,0 +1,136 @@
+# Deformation Field MLP
+
+Also called: Coordinate MLP, Deformation network
+
+## Overview
+The Deformation Field MLP is a coordinate-based neural network that predicts spatial offsets for 3D Gaussian primitives to model dynamic geometry or correct canonical shapes [S1][S2, unofficial]. It maps input coordinates (and optionally time) to deviations in position, rotation, and scale, serving as a smooth prior to prevent overfitting to sparse or noisy views [S1][S2, unofficial]. Unlike grid-based methods, it uses a compact MLP structure, making it suitable for dynamic scenes with high-rank variations where explicit point-based rendering exacerbates complexity [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Canonical 3D Gaussian position $\mu$ [S2, unofficial]. In dynamic variants, time $t$ is also included [S1].
+*   **Output:** Position offset $\Delta\mu$ [S2, unofficial]. In dynamic variants, offsets for position $\delta_x$, rotation $\delta_r$, and scaling $\delta_s$ [S1].
+
+**Data Structures:**
+*   **Network Parameters ($\theta$):** Weights and biases for an 8-layer Multi-Layer Perceptron (MLP) [S1][S2, unofficial].
+*   **Hidden Dimension:** 256 [S1][S2, unofficial].
+*   **Storage Overhead:** Approximately 2 MB compared to standard 3D Gaussians [S1].
+
+**Algorithm:**
+The network applies sinusoidal positional encoding to the input, processes it through two blocks of linear layers with a skip connection, and predicts the final offset.
+
+1.  **Positional Encoding:** Apply sinusoidal positional encoding $\gamma(\cdot)$ to the input coordinate $\mu$ [S2, unofficial]. For dynamic scenes, encode both $\mu$ and time $t$ [S1].
+2.  **Feature Extraction (Layers 1–4):** Pass the encoded input through four fully connected layers with ReLU activations and a hidden dimension of 256 [S1][S2, unofficial].
+3.  **Skip Connection:** Concatenate the original positional encoding $\gamma(\mu)$ (or $\gamma(\mu), \gamma(t)$) with the feature vector output from Layer 4 [S1][S2, unofficial].
+4.  **Feature Refinement (Layers 5–8):** Pass the concatenated vector through four additional fully connected layers with ReLU activations and a hidden dimension of 256 [S1][S2, unofficial].
+5.  **Offset Prediction:**
+    *   **Static/Canonical Correction:** Pass the final feature vector through a single linear layer (no activation) to output the position offset $\Delta\mu$ [S2, unofficial].
+    *   **Dynamic Deformation:** Pass the final feature vector through three separate linear layers (no activation) to output offsets $\delta_x$ (position), $\delta_r$ (rotation), and $\delta_s$ (scaling) [S1].
+6.  **Deformation Application:**
+    *   **Static:** Compute the deformed position $\mu' = \mu + \Delta\mu$ [S2, unofficial].
+    *   **Dynamic:** Apply offsets to the canonical Gaussian parameters to obtain the deformed Gaussian [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import math
+
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, num_bands=10):
+        super().__init__()
+        self.num_bands = num_bands
+
+    def forward(self, x):
+        # x shape: (..., 3) for position or (..., 4) for pos+time
+        # Standard PE: concat(sin(2^i * pi * x), cos(2^i * pi * x))
+        freq_bands = torch.exp(torch.linspace(0, math.log(10000), self.num_bands) * -math.log(10000))
+        # Expand dims for broadcasting
+        freq_bands = freq_bands.view(1, 1, -1)
+        x = x.unsqueeze(-1) * freq_bands
+        pe = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
+        return pe
+
+class DeformationFieldMLP(nn.Module):
+    def __init__(self, input_dim=3, output_dim=3, hidden_dim=256, num_bands=10, is_dynamic=False):
+        super().__init__()
+        self.pe = SinusoidalPositionalEncoding(num_bands)
+        self.is_dynamic = is_dynamic
+        
+        # Layers 1-4
+        self.layers_1_4 = nn.Sequential(
+            nn.Linear(input_dim * 2 * num_bands, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU()
+        )
+        
+        # Layers 5-8
+        self.layers_5_8 = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim), nn.ReLU(), # Input dim doubles due to concat
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU()
+        )
+        
+        # Output head
+        if is_dynamic:
+            self.head = nn.Linear(hidden_dim, output_dim * 3) # pos, rot, scale
+        else:
+            self.head = nn.Linear(hidden_dim, output_dim) # pos only
+
+    def forward(self, x):
+        # x: (..., input_dim)
+        pe = self.pe(x)
+        
+        # Layers 1-4
+        h = self.layers_1_4(pe)
+        
+        # Skip connection: concat input PE with hidden features
+        h = torch.cat([h, pe], dim=-1)
+        
+        # Layers 5-8
+        h = self.layers_5_8(h)
+        
+        # Output
+        delta = self.head(h)
+        return delta
+
+# Usage for static canonical correction
+# model = DeformationFieldMLP(input_dim=3, output_dim=3, is_dynamic=False)
+# delta_mu = model(mu)
+# mu_prime = mu + delta_mu
+
+# Usage for dynamic deformation
+# model = DeformationFieldMLP(input_dim=4, output_dim=3, is_dynamic=True) # 3 pos + 1 time
+# delta_x, delta_r, delta_s = torch.split(model(torch.cat([mu, t], dim=-1)), 3, dim=-1)
+```
+
+**Parameters:**
+*   **MLP Depth:** 8 layers [S1][S2, unofficial].
+*   **Hidden Width:** 256 neurons [S1][S2, unofficial].
+*   **PE Frequency Bands:** 10 [S2, unofficial].
+*   **Activation:** ReLU for hidden layers, none for output layers [S1][S2, unofficial].
+*   **Deformation Learning Rate:** $1.6 \times 10^{-5}$ [S2, unofficial].
+*   **Loss Weight ($\lambda$):** 0.2 for D-SSIM in L1+D-SSIM loss [S1][S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Initialization:** The output head must be initialized such that $\Delta\mu \approx 0$ (identity) to prevent the network from absorbing pose errors at the start of training [S2, unofficial].
+*   **Pose Accuracy:** Inaccurate camera poses can lead to convergence failure, as the deformation field may struggle to correct for large geometric mismatches [S1].
+*   **Dynamic Rank:** Grid/plane-based structures are avoided because dynamic scenes have higher rank than static scenes, and explicit point-based rendering exacerbates this [S1].
+
+## Operating characteristics
+*   **Memory:** Adds approximately 2 MB of storage overhead compared to standard 3D Gaussians [S1].
+*   **Complexity:** Time complexity is linear with respect to the number of Gaussians, as each Gaussian is processed independently through the MLP.
+*   **Strengths:** Injects a spatial smoothness prior, helping to avoid overfitting to sparse training views [S2, unofficial]. Compact structure suitable for dynamic scenes [S1].
+*   **Limitations:** Performance degrades with significantly inaccurate camera poses [S1]. May not outperform grid-based methods in static, low-rank scenes [S1].
+*   **When to Use:** Dynamic scene reconstruction [S1] or sparse-view reconstruction aided by canonical CAD models [S2, unofficial].
+*   **When Not to Use:** Static scenes with high-quality dense input where grid-based methods may be more efficient [S1].
+
+## Background
+The Deformation Field MLP was introduced in the context of deformable 3D Gaussian splatting for dynamic scene reconstruction [S1] and later adapted for sparse-view reconstruction aided by CAD models [S2, unofficial]. It draws inspiration from coordinate-based MLPs used in NeRF [S1] and other implicit representations. The method was developed to address the limitations of explicit point-based rendering in dynamic scenarios, where high-rank variations make grid-based approaches less effective [S1].
+
+## Sources
+[S1] Deformable 3D Gaussians for High-Fidelity Monocular Dynamic Scene Reconstruction, https://doi.org/10.1109/cvpr52733.2024.01922, fetched 2026-10-26
+[S2] CADSplat: Sparse-View 3D Gaussian Splatting Aided by CAD Models for Robust, Photorealistic Digital-Twin Reconstruction, https://arxiv.org/abs/2609.18473, fetched 2026-10-30 (unofficial)

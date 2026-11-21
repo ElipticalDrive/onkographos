@@ -1,0 +1,165 @@
+--- v005.md
++++ v006.md
+@@ -11,5 +11,5 @@
+ **Inputs and Outputs**
+ *   **Input:** A set of selected non-empty voxels, each defined by 3D coordinates $(x, y, z)$ and a property value $v$ (e.g., density or opacity) [S2, unofficial].
+-*   **Output:** A composited 2D image buffer [S1, unofficial].
++*   **Output:** A composited 2D image buffer [S2, unofficial].
+ 
+ **Data Structures**
+@@ -27,15 +27,10 @@
+ 
+ 1.  **Load Voxels:** Load the selected non-empty voxels into the `Voxels Texture` on the GPU. Each voxel is encoded as `<x, y, z, v>` in `FP32RGBA` format [S2, unofficial].
+-
+ 2.  **Viewing Transform:** Compute the `View Transformed Voxels Texture` using a fragment shader. For each texel in the `Voxels Texture`, transform the voxel coordinates (RGB) using the viewing matrix. Store the 2D raster projection coordinates in R and G, the depth value in B, and the voxel property value in Alpha [S2, unofficial].
+-
+ 3.  **GPGPU Sorting:** Sort the `View Transformed Voxels Texture` by depth using a GPU Bitonic Sort. The sorting key is the depth value (B channel). The sort uses Multiple Render Targets (MRT) to store keys and values in separate textures, allowing four `<key, value>` instances per RGBA texel. The key is the depth value, and the value is the voxel index in the texture. After sorting, a fragment shader fills the `Depth-Sorted Voxels Texture` from the sorted render targets [S2, unofficial]. This sorting creates an implicit representation of buckets, where slabs correspond to overlapping sorted subsequences of voxels in the texture [S1, unofficial].
+-
+ 4.  **Bucket Size Computation:** Compute the `Buckets Texture` in two steps [S2, unofficial]:
+     *   **Step 4a:** Use a fragment shader to identify bucket boundary voxels. Render the `Depth-Sorted Voxels Texture` into an `Auxiliary Texture`. For each voxel, determine if it is a boundary voxel (i.e., its center falls inside a slab but the next voxel in the sorted texture does not). If it is a boundary voxel, store its bucket coordinates in R and G, an arbitrary z-value inside the viewing frustum in B, and the bucket index in Alpha [S2, unofficial].
+     *   **Step 4b:** Use a vertex shader to construct the `Buckets Texture` from the `Auxiliary Texture`. The vertex shader renders the boundary voxels (identified by the z-value in B) to write the position of the last voxel of each bucket into the `Buckets Texture` [S2, unofficial].
+-
+ 5.  **Transfer Bucket Data:** Transfer the small `Buckets Texture` to the CPU to determine bucket distribution. This is a low-cost operation because the texture size is small (number of buckets/slabs) [S1, unofficial].
+-
+ 6.  **Rendering:** Process slabs sequentially. For each slab $i$, retrieve its bucket from the `Buckets Texture`. The radius of the voxel kernel determines that a slab is affected by its own bucket plus previous and following buckets (from $bucket_{i-radius}$ to $bucket_{i+radius}$) [S2, unofficial].
+     *   Use the Render to Vertex Buffer (R2VB) technique to create a Vertex Buffer Object (VBO) containing all voxels from the relevant buckets [S2, unofficial].
+@@ -45,79 +40,63 @@
+ 
+ **Pseudocode**
++```python
++# Pipeline Execution
++# Step 1: Load Voxels
++Voxels_Texture = create_2d_texture(num_voxels, 1, format="FP32RGBA")
++for i, v in enumerate(voxels):
++    Voxels_Texture[i] = (v.x, v.y, v.z, v.value)
+ 
+-```python
+-# Helper definitions for GPU pipeline stages
+-def load_voxels_to_gpu(voxels):
+-    """Load voxels into a 2D texture in FP32RGBA format."""
+-    tex = create_2d_texture(len(voxels), 1, format="FP32RGBA")
+-    for i, v in enumerate(voxels):
+-        tex[i] = (v.x, v.y, v.z, v.value)
+-    return tex
++# Step 2: Viewing Transform
++View_Transformed_Texture = create_2d_texture(num_voxels, 1, format="FP32RGBA")
++for i in range(num_voxels):
++    pos = Voxels_Texture[i].rgb
++    val = Voxels_Texture[i].a
++    # Transform 3D coordinates using viewing matrix
++    proj = transform_3d_to_2d_depth(pos, viewing_matrix)
++    View_Transformed_Texture[i] = (proj.xy, proj.z, val)
+ 
+-def viewing_transform(tex, viewing_matrix):
+-    """Fragment shader: project 3D coords, store depth in B."""
+-    out = create_2d_texture(tex.width, tex.height, format="FP32RGBA")
+-    for i in range(tex.width * tex.height):
+-        pos = tex[i].rgb
+-        val = tex[i].a
+-        proj = transform_pos(pos, viewing_matrix)
+-        out[i] = (proj.xy, proj.z, val)
+-    return out
++# Step 3: GPGPU Sorting
++# Sort by depth (B channel) using Bitonic Sort with MRT [G]
++Depth_Sorted_Texture = bitonic_sort_by_depth(View_Transformed_Texture)
+ 
+-def bitonic_sort_gpu(tex):
+-    """Sort tex by depth (B channel) using Bitonic Sort with MRT."""
+-    keys = [tex[i].b for i in range(len(tex))]
+-    values = list(range(len(tex)))
+-    sorted_keys, sorted_values = bitonic_sort(keys, values)
+-    out = create_2d_texture(tex.width, tex.height, format="FP32RGBA")
+-    for i in range(len(tex)):
+-        out[i] = tex[sorted_values[i]]
+-    return out
++# Step 4: Bucket Size Computation
++# Step 4a: Identify boundary voxels
++Auxiliary_Texture = create_2d_texture(num_voxels, 1, format="FP32RGBA")
++for i in range(num_voxels - 1):
++    curr_slab = get_slab_index(Depth_Sorted_Texture[i].b)
++    next_slab = get_slab_index(Depth_Sorted_Texture[i+1].b)
++    if curr_slab != next_slab:
++        # Boundary voxel: store slab index in A, arbitrary z inside frustum in B
++        Auxiliary_Texture[i] = (0.0, Z_INSIDE_FRUSTUM, curr_slab)
++    else:
++        Auxiliary_Texture[i] = (0.0, Z_OUTSIDE_FRUSTUM, 0.0)
++# Last voxel is always a boundary
++Auxiliary_Texture[num_voxels-1] = (0.0, Z_INSIDE_FRUSTUM, get_slab_index(Depth_Sorted_Texture[-1].b))
+ 
+-def compute_auxiliary_texture(sorted_tex):
+-    """Fragment shader: mark boundary voxels."""
+-    aux = create_2d_texture(sorted_tex.width, sorted_tex.height, format="FP32RGBA")
+-    for i in range(len(sorted_tex) - 1):
+-        curr_bucket = get_slab_index(sorted_tex[i].b)
+-        next_bucket = get_slab_index(sorted_tex[i+1].b)
+-        if curr_bucket != next_bucket:
+-            aux[i] = (curr_bucket.xy, Z_INSIDE_FRUSTUM, curr_bucket.index)
+-        else:
+-            aux[i] = (0.0, Z_OUTSIDE_FRUSTUM, 0.0)
+-    # Last voxel is always a boundary
+-    aux[len(sorted_tex)-1] = (get_slab_index(sorted_tex[-1].b).xy, Z_INSIDE_FRUSTUM, get_slab_index(sorted_tex[-1].b).index)
+-    return aux
++# Step 4b: Construct Buckets Texture
++Buckets_Texture = create_2d_texture(num_slabs, 1, format="FP32RGBA")
++for i in range(num_voxels):
++    if Auxiliary_Texture[i].b == Z_INSIDE_FRUSTUM:
++        slab_idx = Auxiliary_Texture[i].a
++        Buckets_Texture[slab_idx] = i
+ 
+-def construct_buckets_texture(aux_tex):
+-    """Vertex shader: write bucket boundary positions."""
+-    buckets = create_2d_texture(NUM_SLABS, 1, format="FP32RGBA")
+-    for i in range(len(aux_tex)):
+-        if aux_tex[i].b == Z_INSIDE_FRUSTUM:
+-            idx = aux_tex[i].a
+-            buckets[idx] = i
+-    return buckets
++# Step 5: Transfer Bucket Data
++bucket_distribution = read_back(Buckets_Texture)
+ 
+-def render_slabs(buckets_tex, sorted_tex, kernel_radius):
+-    """CPU-GPU coordination and drawing."""
+-    bucket_dist = read_back(buckets_tex)
+-    for slab_i in range(len(bucket_dist)):
+-        start_b = max(0, slab_i - kernel_radius)
+-        end_b = min(len(bucket_dist) - 1, slab_i + kernel_radius)
+-        indices = []
+-        for b in range(start_b, end_b + 1):
+-            end_idx = buckets_tex[b].r
+-            start_idx = buckets_tex[b-1].r if b > 0 else 0
+-            indices.extend(range(start_idx, end_idx + 1))
+-        vbo = create_vbo_from_indices(indices, sorted_tex)
+-        draw_arrays(vbo, primitive="POINTS", extension="POINT_SPRITES")
+-        composite_sheet_buffer()
+-
+-# Pipeline Execution
+-Voxels_Texture = load_voxels_to_gpu(voxels)
+-View_Transformed_Texture = viewing_transform(Voxels_Texture, viewing_matrix)
+-Depth_Sorted_Texture = bitonic_sort_gpu(View_Transformed_Texture)
+-Auxiliary_Texture = compute_auxiliary_texture(Depth_Sorted_Texture)
+-Buckets_Texture = construct_buckets_texture(Auxiliary_Texture)
+-render_slabs(Buckets_Texture, Depth_Sorted_Texture, kernel_radius)
++# Step 6: Rendering
++for slab_i in range(num_slabs):
++    start_b = max(0, slab_i - kernel_radius)
++    end_b = min(num_slabs - 1, slab_i + kernel_radius)
++    indices = []
++    for b in range(start_b, end_b + 1):
++        end_idx = Buckets_Texture[b].a
++        start_idx = Buckets_Texture[b-1].a if b > 0 else 0
++        indices.extend(range(start_idx, end_idx + 1))
++    # Create VBO from indices using R2VB [G]
++    vbo = create_vbo_from_indices(indices, Depth_Sorted_Texture)
++    # Render using DrawArrays with Point Sprites [G]
++    draw_arrays(vbo, primitive="POINTS")
++    # Composite sheet buffer with image buffer [G]
++    composite_sheet_buffer()
+ ```
+ 
+@@ -134,5 +113,5 @@
+ *   **Limitations:** Scattering (random writes) is inefficient on GPUs, necessitating the use of sorting and implicit bucket representation [S1, unofficial]. Determining bucket boundaries in a vertex shader is expensive due to inefficient texture fetches, requiring a two-step computation [S2, unofficial]. The bottleneck is the computation of the buckets [S2, unofficial].
+ *   **When to use:** When GPU computational resources are available and CPU-GPU memory transfer is a bottleneck. Suitable for static cameras where only the transfer function changes (only the render stage needs to be redone) or moving cameras where the full pipeline is executed [S2, unofficial].
+-*   **When not to use:** When the number of voxels exceeds the texture memory limit and bricking is not feasible or desirable. When the overhead of sorting outweighs the benefits of GPU-based bucket construction (e.g., very small datasets).
++*   **When not to use:** When the number of voxels exceeds the texture memory limit and bricking is not feasible or desirable [S1, unofficial].
+ 
+ ## Background

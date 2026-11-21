@@ -1,0 +1,163 @@
+I'm trying to project the images from the valve index passthrough cameras to the HMD view, but I have trouble getting the image projection to match up with the room view. I have the projection set up like this: Camera image space -> Inve...
+
+Passthrough camera projection matrix · Issue #1561 · ValveSoftware/openvr · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Passthrough camera projection matrix #1561
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Passthrough camera projection matrix#1561
+Copy link
+Description
+Rectus
+opened on Jun 13, 2021
+Issue body actions
+I'm trying to project the images from the valve index passthrough cameras to the HMD view, but I have trouble getting the image projection to match up with the room view.
+I have the projection set up like this:
+Camera image space -> Inverted camera projection matrix -> CameraToHeadTransform -> Inverted EyeToHeadTransform -> HMD projection matrix -> HMD clip space.
+I think everything except the camera projection matrix is set up correctly. I've tried using the inverted matrix from IVRTrackedCamera::GetCameraProjection(), as well as using IVRTrackedCamera::GetCameraIntrinsics() to manually set up the matrix, but I haven't gotten any good results with either. Neither of the functions are documented or have any examples, so I would be grateful for any insight in how they work.
+Activity
+funmaker commented on Jun 17, 2021
+funmaker
+on Jun 17, 2021
+Last edited by funmaker
+More actions
+Hi @Rectus, I've been working on same problem in my project. I managed to get pretty close to room view (my method vs room view), but it's still not 100% match and in the VR image does not appear at infinity but maybe 1-2m from viewer, so I still must be doing something wrong. Btw I'm not using undistorted frame types because I thought they might be cropped or scaled in an arbitrary way, so I've chosen to undistord them myself.
+The general way I do it is like described here: https://docs.opencv.org/3.4/db/d58/group__calib3d__fisheye.html#details
+take calibration data from Steam\config\lighthouse\lhr-xxxx\config.json. you can probably get all of them, from openvr api. (I also flipped z axis in extrinsics because that made things work, but it's probably wrong!)
+for each pixel on HMD that you want to draw, take its coordinates
+using raw projection to map these coordinates onto HMD's view(?) plane
+then rotate them by rotation matrix calculated using extrinsics, to rotate them to camera's coordinates
+divide these coords by their z to project them onto camera's plane
+calculate angle(theta) between camera's central axis and these coords
+apply distortion coefficients to this angle
+multiply coords by theta and divide by length of xy part of these cords(sqrt(x^2+y^2)) to get distorted coords
+finally, multiply them focal_x and focal_y and offset by the principal point to get camera's image coords
+All the magic happens in this shader, serup, and config, which is hardcoded for now.
+Another thing worth mentioning is that room view seems to morph lower side of passthough view. If you make headset at low position or face it to floor, it'll warp camera view to improve sense of perspective I guess.
+If you or someone else figure something out, it'd be great to get some more hints. Right now I'm stuck because the difference is so small it's hard to tell what is wrong. An example or working passthrough project would be a real godsend.
+👍React with 👍2Reacted by Yuxuan Shui and Swyter
+Rectus commented on Jun 20, 2021
+Rectus
+on Jun 20, 2021
+Author
+More actions
+Thanks for the reply! I'm suspecting the trick might be to find the correct inverse to the camera intrinsics. As far as I understand, the intrinsic transformation (focal length, optical center) is from the 3D environment into the 2D image plane. If I'm reading your shader code right, it transforms the image coordinates directly with the intrinsic values, when it might need to use the inverse of that transformation.
+Maybe the results of IVRTrackedCamera::GetCameraProjection() doesn't readily invert into something usable, so I probably have to build an inverse matrix out of the intrinsic values manually.
+I think I might have a bit better idea on what I need to do now, and I'll be sure to post the results if I come up with something.
+Rectus commented on Jul 12, 2021
+Rectus
+on Jul 12, 2021
+Author
+More actions
+Stop Sign VR recently added a passthrough feature. I asked them how they set it up, and they apparently did manual calibration for all supported cameras.
+It would be nice if someone at Valve could double check that the available camera intrinsics are correct, and maybe provide some documentation on what format they are in.
+Rectus commented on Sep 10, 2021
+Rectus
+on Sep 10, 2021
+Author
+More actions
+I managed to get it working with IVRTrackedCamera::GetCameraProjection() by setting up a quad with clip space coordinates, and transforming it to wold space and then back to the HMD camera space with the regular MVP matrix. The trick to using GetCameraProjection() seems to be to set the clip space z coordinates of the vertices to the far plane (1.0 in D3D), with that the far plane input to GetCameraProjection() will act as the projection distance.
+-1 to 1 clip space -> Inverted camera projection matrix -> Pose matrix from the camera frame header -> World (tracking) space -> HMD pose matrix -> Inverted EyeToHeadTransform -> HMD projection matrix -> HMD clip space.
+Using the pose matrix from the current frame header is important since it is the pose from the time the frame was taken, and using it to transform into tracking space will apply the correct temporal reprojection. It maps to the left eye on the Index though, so you have to use the CameraToHeadTransforms to get the correct pose for the right eye.
+Here is the test app i got it working with, a modified version of the hello_vr example with what is likely some extremely bad Direct3D12 code.
+https://gist.github.com/Rectus/521f6dc9d4294cc6107ec0e2226bb469
+The important parts are here:
+https://gist.github.com/Rectus/521f6dc9d4294cc6107ec0e2226bb469#file-openvr_trackingtest_main-cpp-L2639
+https://gist.github.com/Rectus/521f6dc9d4294cc6107ec0e2226bb469#file-openvr_trackingtest_main-cpp-L2454
+https://gist.github.com/Rectus/521f6dc9d4294cc6107ec0e2226bb469#file-passthrough-hlsl-L35
+Regarding the morph in the SteamVR passthrough, it seems like it lerps the projection distance closer from the horizon line downwards. It shouldn't be too difficult to implement.
+I didn't manage to make a useful matrix out of IVRTrackedCamera::GetCameraIntrinsics(). Comparing the matrices, there is an offset to the focal length I haven't figured out yet.
+Rectus commented on Sep 13, 2021
+Rectus
+on Sep 13, 2021
+Author
+More actions
+One big issue with the solution above is that it only works if you have a quad in the passthrough camera space to transform.
+To be able to overlay the passthrough to arbitrary screenspace coordinates, the process would have to be reversed. Just inverting the matrix does not works, since projecting a screenspace position to woldspace will put it on a plane relative to the HMD projection matrix instead of the camera image plane. A solution to this might be to modify the HMD projection matrix to use an oblique clipping plane.
+Rectus commented on Sep 16, 2021
+Rectus
+on Sep 16, 2021
+Author
+More actions
+Got the reverse working in a really roundabout way, by first taking a [-1, -1] to [1, 1] quad, transforming its vertices with the working solution above, and then using the results to calculate a 3x3 projection matrix for transforming the sceenspace coordinates. Not the most elegant solution, but it works.
+Rectus commented on Sep 20, 2021
+Rectus
+on Sep 20, 2021
+Author
+More actions
+Here is an example for this solution as well. The main differences are in the GetUVTransform() function and the shader.
+https://gist.github.com/Rectus/4a52b4c662de0eb9e662f900d84df63d
+I still don't understand how the intrinsics in the matrix from IVRTrackedCamera::GetCameraProjection() are being calculated from the focal length and center. I would be grateful if anyone from Valve could shed some light on this.
+Rectus commented on Oct 15, 2021
+Rectus
+on Oct 15, 2021
+Author
+More actions
+I released an UE4 plugin for passthrough support:
+https://github.com/Rectus/UE4SteamVRPassthrough
+https://github.com/Rectus/UE4SteamVRPassthrough_Example
+👍React with 👍2Reacted by Fun Maker and Caffiendish
+yshui commented on Mar 6, 2024
+yshui
+on Mar 6, 2024
+More actions
+@funmaker hi, sorry for mentioning you from this old thread, but I really want to know how did you uncover the formula for f-theta distortion correction. I search the internet but can't find anything related to f-theta or extended f-theta.
+Rectus commented on Mar 6, 2024
+Rectus
+on Mar 6, 2024
+Author
+More actions
+F-theta seems to just be another name for an equidistant fisheye lens, but yeah, there seems to be practically no information about the term, apart from laser equipment vendors.
+The parameters OpenVR provides seem to be be designed to plug into the OpenCV fisheye library. From a quick look it seems to be using the Kannala-Brandt model: https://oulu3dvision.github.io/calibgeneric/Kannala_Brandt_calibration.pdf
+👍React with 👍1Reacted by Yuxuan Shui
+funmaker commented on Mar 6, 2024
+funmaker
+on Mar 6, 2024
+More actions
+@yshui IIRC I just randomly stumbled onto this OpenCV documentation page and realized that parameters match what is provided by OpenVR. I just assumed that's what they are using and roll along with it. I took the equations from that page.
+Note that I still haven't managed to perfectly reverse engineer passthrough. I managed to run @Rectus's project, but AFAIR it still didn't align perfectly. However my testing set up was not reliable and feeling burn out with this problem, I focused on other parts of my project. I do plan to revisit it one day, and would love to get it right. But I feel like I might need to call it quit and calibrate/find parameters myself and ignore the data provided/used inside OpenVR.
+Rectus commented on Mar 6, 2024
+Rectus
+on Mar 6, 2024
+Author
+More actions
+Note that I still haven't managed to perfectly reverse engineer passthrough. I managed to run @Rectus's project, but AFAIR it still didn't align perfectly. However my testing set up was not reliable and feeling burn out with this problem, I focused on other parts of my project. I do plan to revisit it one day, and would love to get it right. But I feel like I might need to call it quit and calibrate/find parameters myself and ignore the data provided/used inside OpenVR.
+I actually managed to get it very close to the room view in a later project (sorry, I for got to post about it here): https://github.com/Rectus/openxr-steamvr-passthrough
+Turns out the 2D room view mode is projected on to a cylinder with the bottom aligned with the floor level.
+Also, it seems that the provided undistorted frames doesn't do proper fisheye correction, at least with the Index cameras. Manually undistorting it like you did was a great idea. Valve actually released an example of doing that with OpenCV (also doing stereo reconstruction), but I didn't find it until a year and half ago: https://github.com/ValveSoftware/openvr/tree/master/samples/hmd_opencv_sandbox
+I implemented that into my project above, and it works somewhat well. The calibration parameters still don't seem to be 100% correct, but I'm getting projections much closer to real-life.
+👍React with 👍1Reacted by Fun Maker
+yshui commented on Mar 7, 2024
+yshui
+on Mar 7, 2024
+More actions
+@funmaker @Rectus this is really useful information, thank you!
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

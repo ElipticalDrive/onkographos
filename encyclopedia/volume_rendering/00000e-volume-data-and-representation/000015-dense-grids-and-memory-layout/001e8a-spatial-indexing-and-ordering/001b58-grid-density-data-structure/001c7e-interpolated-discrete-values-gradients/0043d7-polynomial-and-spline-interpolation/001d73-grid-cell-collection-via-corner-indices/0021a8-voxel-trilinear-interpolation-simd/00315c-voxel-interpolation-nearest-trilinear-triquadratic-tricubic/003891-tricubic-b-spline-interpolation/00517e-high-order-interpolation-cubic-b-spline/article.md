@@ -1,0 +1,79 @@
+# High Order Interpolation (Cubic/B-Spline)
+Also called: Cubic Convolution
+## Overview
+High order interpolation methods, such as cubic convolution or B-spline interpolation, provide superior image quality compared to trilinear interpolation, particularly when rendering at large magnification factors where trilinear kernels may produce visible diamond structures or crosses [S1, unofficial]. These methods are chosen when visual fidelity is prioritized over performance, accepting a significant increase in computational cost and memory bandwidth usage [S1, unofficial]. This method builds on [Tricubic B-Spline Interpolation](8246-tricubic-b-spline-interpolation.md) by generalizing the approach to higher-order polynomial kernels.
+## How it works
+Inputs: A 3D volume grid $V$ of scalar or vector values, and a query point $P = (x, y, z)$ within the volume bounds [G].
+Outputs: The interpolated value $I(P)$ [G].
+
+Data Structures:
+- Volume Grid $V$: A 3D array of voxels [G].
+- Neighborhood: A $4 \times 4 \times 4$ block of voxels centered around the integer coordinates of $P$. This requires accessing 64 voxels [S1, unofficial].
+
+Steps:
+1. Compute integer grid coordinates $(i, j, k) = (\lfloor x \rfloor, \lfloor y \rfloor, \lfloor z \rfloor)$ [G].
+2. Identify the 64 neighboring voxels forming a $4 \times 4 \times 4$ neighborhood surrounding the query point [S1, unofficial].
+3. Compute fractional offsets $dx = x - i$, $dy = y - j$, $dz = z - k$ [G].
+4. Evaluate the 1D cubic basis function $W(t)$ for each dimension. The exact kernel definition is not provided in the sources [S1, unofficial]. Standard implementations use either uniform cubic B-spline or cubic convolution (e.g., Keys' cubic) [G].
+5. Compute the interpolated value using the 3D tensor product of the 1D basis functions:
+   $$ I(P) = \sum_{a=0}^{3} \sum_{b=0}^{3} \sum_{c=0}^{3} V(i+a, j+b, k+c) \cdot W(dx-a) \cdot W(dy-b) \cdot W(dz-c) $$
+   where $W$ is the 1D cubic interpolation kernel [G].
+6. Return $I(P)$ [G].
+
+Pseudocode:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def high_order_interpolation(V, x, y, z):
+    i, j, k = floor(x), floor(y), floor(z)
+    dx, dy, dz = x - i, y - j, z - k
+    result = 0.0
+    for a in range(4):
+        for b in range(4):
+            for c in range(4):
+                voxel = V[i+a, j+b, k+c]
+                w_x = cubic_kernel(dx - a)
+                w_y = cubic_kernel(dy - b)
+                w_z = cubic_kernel(dz - c)
+                result += voxel * w_x * w_y * w_z
+    return result
+
+def cubic_kernel(t):
+    # Standard cubic B-spline or convolution kernel implementation [G]
+    # Not given in the sources [S1, unofficial]
+    abs_t = abs(t)
+    if abs_t < 1.0:
+        return (2.0/3.0) + (0.5 * abs_t**2) * (abs_t - 1.0)
+    elif abs_t < 2.0:
+        return (1.0/6.0) * (2.0 - abs_t)**3
+    else:
+        return 0.0
+```
+
+Parameters:
+- Kernel type: Cubic B-spline or Cubic Convolution. Specific coefficients are not provided in the sources [S1, unofficial].
+- Neighborhood size: 64 voxels ($4 \times 4 \times 4$) [S1, unofficial].
+
+Edge cases and pitfalls:
+- Boundary conditions: The $4 \times 4 \times 4$ neighborhood may extend outside the volume bounds. Boundary handling is not specified in the sources [S1, unofficial].
+- Precision: Cubic interpolation involves more floating-point operations than trilinear, potentially amplifying precision errors in low-precision hardware [G].
+- Aliasing: Interpolation of scalar values is prone to aliasing if high-frequency details are missed by the classification step, regardless of the interpolation order [S1, unofficial].
+
+## Subtopics
+
+### [B-spline Volume Representation with Subdivision](14820-b-spline-volume-representation-with-subdivision.md)
+Represents medical image datasets using B-spline basis functions for smooth interpolation and multi-resolution rendering, avoiding linear interpolation quality loss while maintaining interactive rates. It sets itself apart by using subdivision algorithms faster than direct basis evaluation, and differs from mipmaps by explicitly maintaining high-resolution ROI representations alongside low-resolution global approximations.
+
+## Operating characteristics
+Time Complexity: $O(1)$ per voxel, but with a significantly higher constant factor than trilinear interpolation due to the 64-voxel neighborhood and cubic kernel evaluations [S1, unofficial].
+Memory Bandwidth: Requires loading 64 voxels per query, leading to significantly higher memory bandwidth consumption compared to the 8 voxels required for trilinear interpolation [S1, unofficial].
+Strengths: Higher image quality, especially at large magnification factors, avoiding the artifacts associated with trilinear interpolation [S1, unofficial].
+Limitations: Significantly higher computational cost and memory bandwidth requirements [S1, unofficial].
+When to use: When visual quality is critical and computational resources are sufficient [S1, unofficial].
+When not to use: When performance or memory bandwidth is constrained [S1, unofficial].
+
+## Background
+High order interpolation methods like cubic convolution and B-spline interpolation are established techniques in volume visualization, offering a trade-off between quality and performance [S1, unofficial]. They are used in applications where the artifacts of trilinear interpolation (such as diamond structures at large magnifications) are unacceptable [S1, unofficial].
+
+## Sources
+[S1] Volume Visualization and Volume Rendering Techniques, https://www.cs.unh.edu/~cs880/visualization/Meissner-VolRenderingEGTutorial-rdb.pdf, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,87 @@
+# Fast Per-subject Fine-tuning
+
+
+## Overview
+Fast Per-subject Fine-tuning is a compensation strategy that addresses artifacts and imperfections for unseen persons by fine-tuning specific network parameters after initial generalizable training [S1]. It treats the network optimized on a general dataset as an initialization state and performs rapid optimization on the new subject's data [S1]. It distinguishes itself from full retraining by freezing the feature blending network, focusing adaptation only on the deformation field and the generalizable neural radiance field [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Pre-trained parameters for the deformation field $MLP_d$, generalizable radiance field $\Phi$, and feature blending network $MLP_B$; sparse multi-view images for an unseen subject.
+*   **Output:** Adapted parameters $\theta_d$ and $\theta_\Phi$ optimized for the unseen subject's geometry and appearance.
+
+**Data Structures:**
+The model parameters are partitioned into:
+1.  $\theta_d$: Parameters of the deformation field $MLP_d$.
+2.  $\theta_\Phi$: Parameters of the generalizable neural radiance field $\Phi$.
+3.  $\theta_B$: Parameters of the feature blending network $MLP_B$.
+
+**Steps:**
+1.  **Initialization:** Load pre-trained weights $\theta_d$, $\theta_\Phi$, and $\theta_B$ obtained from training on a general dataset [S1].
+2.  **Freeze Blending Network:** Set $\theta_B$ as non-trainable to prevent gradient updates [S1].
+3.  **Optimization Loop:** For the unseen subject, optimize $\theta_d$ and $\theta_\Phi$ using the subject's sparse multi-view images [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fast_per_subject_fine_tuning(theta_d, theta_phi, theta_b, unseen_subject_data):
+    # 1. Freeze feature blending network parameters
+    for param in theta_b:
+        param.requires_grad = False
+        
+    # 2. Initialize optimizer for deformation and radiance field parameters
+    optimizer = Optimizer([theta_d, theta_phi], lr=0.01)  # [G] Standard optimizer setup
+    
+    # 3. Optimization loop
+    for iteration in range(1000):  # [G] Standard iteration count
+        optimizer.zero_grad()
+        rendered_images = render(unseen_subject_data, theta_d, theta_phi, theta_b)
+        loss = compute_loss(rendered_images, unseen_subject_data.gt_images)
+        loss.backward()
+        optimizer.step()
+        
+    return theta_d, theta_phi, theta_b
+
+# Self-contained helper definitions
+class Param:
+    def __init__(self, data): self.data = data; self.grad = None; self.requires_grad = True
+class Optimizer:
+    def __init__(self, params, lr): self.params = params; self.lr = lr
+    def zero_grad(self):
+        for p in self.params:
+            if p.requires_grad: p.grad = None
+    def step(self):
+        for p in self.params:
+            if p.requires_grad: p.data -= self.lr * p.grad
+def render(data, theta_d, theta_phi, theta_b):
+    # [G] Standard volumetric rendering using theta_d, theta_phi, and frozen theta_b
+    return [sample_ray(ray, theta_d, theta_phi, theta_b) for ray in data.rays]
+def compute_loss(rendered, ground_truth):
+    return sum((r - g)**2 for r, g in zip(rendered, ground_truth)) / len(rendered)
+```
+
+**Parameters:**
+*   Learning rate: Not given in the sources.
+*   Max iterations: Not given in the sources.
+
+**Edge Cases:**
+*   Not given in the sources.
+
+## Subtopics
+
+### [Meta-learning Pretraining for Portrait NeRF](13404-meta-learning-pretraining-for-portrait-nerf.md)
+A meta-learning approach that pretrains a NeRF parameter $\theta_p^*$ to easily adapt to unseen subjects by learning common representations from a dataset. Unlike methods that transfer gradients from the support set, it only propagates gradients from the query set to the pretrained model, as the support set is available at test time and adapted via fine-tuning. Choose this when standard meta-learning fails for view synthesis due to GPU batch limits on millions of scene coordinate gradients.
+
+## Operating characteristics
+*   **Time Complexity:** Significantly faster than full retraining because it only optimizes $\theta_d$ and $\theta_\Phi$ while using pre-trained weights as initialization [S1].
+*   **Memory Complexity:** Requires storing gradients only for $\theta_d$ and $\theta_\Phi$, reducing memory footprint during adaptation [S1].
+*   **Strengths:** Effectively removes artifacts and recovers high-frequency details for unseen persons [S1]. Efficient adaptation to new identities [S1].
+*   **Limitations:** Not given in the sources.
+*   **When to use:** When sparse input views cause artifacts and lack high-frequency details in generalizable models [S1].
+*   **When not to use:** Not given in the sources.
+
+## Background
+This method was introduced in a framework for efficiently generating human radiance fields from sparse inputs [S1]. It addresses the limitation that generalizable models may produce artifacts for specific unseen individuals due to data diversity and sparsity [S1]. The approach is inspired by image-based rendering techniques that use adjacent views to refine textures [S1].
+
+## Sources
+[S1] HumanNeRF: Efficiently Generated Human Radiance Field from Sparse Inputs, https://doi.org/10.1109/cvpr52688.2022.00759, fetched 2026-10-26

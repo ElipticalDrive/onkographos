@@ -1,0 +1,64 @@
+# Binary Classification
+Also called: Binary Classifier
+## Overview
+Binary classification is a volume rendering method that reduces memory consumption and accelerates rendering by categorizing input volume voxels into two distinct groups: "0-voxels" (excluded) and "1-voxels" (included) based on a threshold [S1, unofficial]. It functions as a hard decision process, creating sharp transitions in the output opacity and color, which distinguishes it from soft classification methods that use smooth transitions [S2, unofficial]. By producing a binary mask of the object of interest, the method effectively discards background data to enable real-time performance on large datasets [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar volume $V$ where each voxel at position $\mathbf{x}$ has an intensity value $v = f(\mathbf{x})$ [S2, unofficial]. A threshold value $T$ or a range $[T_{\min}, T_{\max}]$ is required [S1, unofficial][S2, unofficial].
+*   **Output:** A binary mask or a reduced volume containing only the "1-voxels" [S1, unofficial]. Each voxel is assigned an opacity $\alpha \in \{0, 1\}$ and a constant color vector $C$ [G].
+
+**Data Structures:**
+The method operates on a 3D grid [G]. Optimized implementations use architectures like CUBE, which employs a 3-D cubic frame buffer with skewed memory organization and a multiple-write bus to allow parallel data manipulation [S1, unofficial]. The core logical operation remains a simple comparison against the threshold [S1, unofficial].
+
+**Steps:**
+1.  **Thresholding:** For each voxel $\mathbf{x}$ in the input volume, compare its intensity $f(\mathbf{x})$ against the threshold $T$ or range $[T_{\min}, T_{\max}]$ [S1, unofficial].
+2.  **Assignment:** Assign optical properties based on the classification result [G].
+3.  **Discarding/Optimization:** 0-voxels are discarded or skipped during rendering to reduce memory bandwidth and computation time [S1, unofficial].
+
+**Formulas:**
+$$ \alpha(\mathbf{x}) = \begin{cases} 1 & \text{if } T_{\min} \le f(\mathbf{x}) \le T_{\max} \\ 0 & \text{otherwise} \end{cases} $$
+$$ C(\mathbf{x}) = \begin{cases} C_{\text{object}} & \text{if } \alpha(\mathbf{x}) = 1 \\ C_{\text{background}} & \text{otherwise} \end{cases} $$
+where $\alpha(\mathbf{x})$ is the opacity, $C(\mathbf{x})$ is the color vector, $f(\mathbf{x})$ is the voxel intensity, and $T_{\min}$, $T_{\max}$ define the inclusion range [G].
+
+**Parameters:**
+*   **Threshold ($T$) / Range ($[T_{\min}, T_{\max}]$):** Defines the interval of intensities considered part of the object of interest [S2, unofficial]. The sources use $0.3$ to $0.7$ as an illustrative example for the classifier process, not as a standard typical value [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Artifacts:** Binary classification introduces sharp transitions in the output function, which generates high frequencies in the output spectrum, leading to rendering artifacts [S2, unofficial].
+*   **Accuracy:** The technique is prone to false positives (including background as object) and false negatives (excluding object as background), which severely affect image quality [S1, unofficial].
+*   **Blurring vs. Aliasing:** Pre-classification (applying the threshold to voxel values before interpolation) produces blurred images when the rendering resolution exceeds the volume resolution [G]. Post-classification (interpolating first, then thresholding) preserves defined edges but is prone to aliasing because high-frequency details may be missed [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def binary_classify(volume: List[float], threshold_min: float, threshold_max: float) -> List[tuple]:
+    """
+    Classifies volume voxels into 1-voxels (included) and 0-voxels (excluded).
+    Returns a list of (opacity, color) tuples for each voxel.
+    """
+    result = []
+    for v in volume:
+        if threshold_min <= v <= threshold_max:
+            result.append((1.0, (1.0, 1.0, 1.0)))
+        else:
+            result.append((0.0, (0.0, 0.0, 0.0)))
+    return result
+```
+## Subtopics
+
+### [Level-0 Mask Classifier](9057-level-0-mask-classifier.md)
+A binary classification method used within hierarchical neural volume representations (NeuralVDB) to predict voxel occupancy. It distinguishes between active and inactive values at the voxel resolution, enabling sparse field training by excluding background samples from loss calculation.
+
+## Operating characteristics
+*   **Time Complexity:** The classification step is $O(N)$ where $N$ is the number of voxels [G]. Optimized architectures like CUBE reduce rendering time from $O(n^3)$ to $O(n^2 \log n)$ [S1, unofficial].
+*   **Memory Complexity:** Memory consumption is reduced proportionally to the ratio of 1-voxels to total voxels [S1, unofficial].
+*   **Strengths:** Enables real-time rendering speeds for massive datasets by eliminating unnecessary computation and memory access for background data [S1, unofficial].
+*   **Limitations:** Poor image quality due to aliasing and artifacts from sharp transitions; sensitive to threshold selection [S1, unofficial][S2, unofficial].
+*   **When to use:** When real-time performance is critical and the data has a clear separation between background and foreground [G].
+*   **When not to use:** When high-fidelity, smooth edges and accurate representation of semi-transparent structures are required; volumetric compositing is preferred in those cases [S1, unofficial].
+## Background
+Binary classification was a distinguishable feature of early real-time rendering algorithms, with notable architectures like the CUBE (CUbic frame Buffer) system proposed by Kaufman utilizing it to manipulate data in a 3-D cubic frame buffer [S1, unofficial]. The technique was widely used before volumetric compositing became the standard pipeline, as compositing allowed for semi-transparent rendering without the binary artifacts [S1, unofficial]. The theoretical basis for the artifacts introduced by binary classification (high frequencies in the spectrum) was analyzed by Frieder [S2, unofficial].
+## Sources
+[S1] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)
+[S2] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)

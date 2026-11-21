@@ -1,0 +1,141 @@
+# Paraxial Ray Tracing
+
+Also called: Perturbation ray tracing, Two-point tracing component
+
+## Overview
+Paraxial ray tracing is a method for tracing rays in the vicinity of a central ray by computing first-order perturbations $\delta \mathbf{x}$ and $\delta \mathbf{p}$, allowing for the estimation of caustics and light transport [S1]. It builds on [Parabolic Sphere Tracing](14525-parabolic-sphere-tracing.md) by leveraging the analytical properties of the parabolic trajectory to efficiently propagate ray bundles. Unlike standard sphere tracing which tracks a single ray, this method maintains a bundle of nearby rays to estimate how light diverges or converges, which is critical for rendering refractive caustics in heterogeneous media.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Central ray state $\mathbf{y}_c = \{\mathbf{x}_c, \mathbf{p}_c\}$, paraxial perturbation state $\mathbf{d}\mathbf{y} = \{\delta \mathbf{x}, \delta \mathbf{p}\}$, refractive index gradient $\boldsymbol{\gamma}$, and cell boundary normal $\mathbf{n}$ at intersection.
+*   **Output:** Updated paraxial state $\mathbf{d}\mathbf{y}^+$ after crossing a cell boundary, or propagated state within a cell.
+
+**Data Structures:**
+The ray state is represented as a 6-dimensional vector $\mathbf{y} = [\mathbf{x}, \mathbf{p}]^T$, where $\mathbf{x} \in \mathbb{R}^3$ is position and $\mathbf{p} \in \mathbb{R}^3$ is momentum (direction scaled by refractive index). The paraxial state is similarly $\mathbf{d}\mathbf{y} = [\delta \mathbf{x}, \delta \mathbf{p}]^T$.
+
+**Formulas:**
+The squared refractive index (RIF) is defined as a linear function of position:
+$$ \eta^2(\mathbf{x}) = A_0 + \boldsymbol{\gamma} \cdot \mathbf{x} $$
+where $\boldsymbol{\gamma} = \nabla \eta^2$ is constant within a cell [S1].
+
+The central ray trajectory $\mathbf{x}_c(\tau)$ and momentum $\mathbf{p}_c(\tau)$ are second-order polynomials:
+$$ \mathbf{x}_c(\tau) = \frac{1}{4}\boldsymbol{\gamma} \tau^2 + \mathbf{p}_0\tau + \mathbf{x}_0 $$
+$$ \mathbf{p}_c(\tau) = \frac{1}{2}\boldsymbol{\gamma} \tau + \mathbf{p}_0 $$
+where $\mathbf{x}_0$ and $\mathbf{p}_0$ are the position and momentum at the start of the cell ($\tau=0$) [S1].
+
+The paraxial perturbations $\delta \mathbf{x}(\tau)$ and $\delta \mathbf{p}(\tau)$ evolve linearly within a cell:
+$$ \delta \mathbf{x}(\tau) = \delta \mathbf{x}_0 + \tau \cdot \delta \mathbf{p}_0 $$
+$$ \delta \mathbf{p}(\tau) = \delta \mathbf{p}_0 $$
+This is governed by the ray propagator matrix $\mathcal{P}_0(\tau)$:
+$$ \mathcal{P}_0(\tau) = \begin{pmatrix} I_3 & \tau \cdot I_3 \\ O_3 & I_3 \end{pmatrix} $$
+where $I_3$ is the $3 \times 3$ identity matrix and $O_3$ is the $3 \times 3$ null matrix [S1].
+
+**Steps:**
+1.  **Initialize:** Set central ray $\mathbf{x}_0, \mathbf{p}_0$ and paraxial perturbations $\delta \mathbf{x}_0, \delta \mathbf{p}_0$ at the entry of the current cell.
+2.  **Propagate:** For a step $\tau$, update the central ray using the parabolic formulas. Update paraxial perturbations using $\mathcal{P}_0(\tau)$:
+    $$ \begin{pmatrix} \delta \mathbf{x}(\tau) \\ \delta \mathbf{p}(\tau) \end{pmatrix} = \mathcal{P}_0(\tau) \begin{pmatrix} \delta \mathbf{x}_0 \\ \delta \mathbf{p}_0 \end{pmatrix} $$
+3.  **Intersect:** Find the intersection with the cell boundary at parameter $\tau_i$.
+4.  **Update Continuity:** Upon crossing the boundary, the RIF has $C^1$ discontinuities. While the central ray trajectory remains continuous, the paraxial perturbations must be updated to maintain continuity of the paraxial ray bundle [S1]. Apply the transformation matrix $\Pi$:
+    $$ \mathbf{d}\mathbf{y}^+(\tau_i) = \Pi \cdot \mathcal{P}_0(\tau_i) \cdot \mathbf{d}\mathbf{y}(0) $$
+    The matrix $\Pi$ is defined as:
+    $$ \Pi = \begin{pmatrix} I_3 - \frac{\mathbf{p}_0 \otimes \mathbf{n}}{\mathbf{p}_0 \cdot \mathbf{n}} & O_3 \\ -\frac{1}{2} \frac{\boldsymbol{\gamma} \otimes \mathbf{n}}{\mathbf{p}_0 \cdot \mathbf{n}} & I_3 \end{pmatrix} $$
+    where $\otimes$ is the exterior product $(\mathbf{u} \otimes \mathbf{v})_{ij} = u_i v_j$, $\mathbf{p}_0$ is the initial ray direction entering the cell, and $\mathbf{n}$ is the normal vector of the intersected cell boundary [S1].
+5.  **Repeat:** Use the updated state as the new $\mathbf{x}_0, \mathbf{p}_0, \delta \mathbf{x}_0, \delta \mathbf{p}_0$ for the next cell.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def propagate_paraxial(x0, p0, dx0, dp0, gamma, n, tau):
+    """
+    Propagate central ray and paraxial perturbations for a step tau.
+    x0, p0: 3D vectors (position, momentum)
+    dx0, dp0: 3D vectors (position perturbation, momentum perturbation)
+    gamma: 3D vector (gradient of squared RIF)
+    n: 3D vector (cell boundary normal, used for continuity update if crossing)
+    tau: float (step size)
+    """
+    # Central ray propagation (Parabolic Sphere Tracing)
+    # x(tau) = 1/4 * gamma * tau^2 + p0 * tau + x0
+    # p(tau) = 1/2 * gamma * tau + p0
+    xc = x0 + p0 * tau + 0.25 * gamma * (tau ** 2)
+    pc = p0 + 0.5 * gamma * tau
+
+    # Paraxial propagation
+    # dx(tau) = dx0 + tau * dp0
+    # dp(tau) = dp0
+    dx = dx0 + tau * dp0
+    dp = dp0
+
+    return xc, pc, dx, dp
+
+def update_paraxial_continuity(dx, dp, p0, gamma, n):
+    """
+    Update paraxial perturbations when crossing a cell boundary.
+    Applies the transformation matrix Pi.
+    """
+    # Compute dot product p0 . n
+    dot_pn = dot(p0, n)
+    
+    # Avoid division by zero if ray is parallel to boundary
+    if abs(dot_pn) < 1e-9:
+        return dx, dp
+
+    # Compute exterior products
+    # (u x v)_ij = u_i * v_j
+    p0_outer_n = outer_product(p0, n)
+    gamma_outer_n = outer_product(gamma, n)
+
+    # Identity matrices
+    I3 = identity_matrix(3)
+    O3 = zero_matrix(3)
+
+    # Construct Pi matrix
+    # Pi = [ I3 - (p0 x n) / (p0 . n)    O3       ]
+    #      [ -0.5 * (gamma x n) / (p0 . n)  I3      ]
+    
+    term1 = I3 - (p0_outer_n / dot_pn)
+    term2 = -0.5 * (gamma_outer_n / dot_pn)
+    
+    Pi = block_matrix([[term1, O3], [term2, I3]])
+
+    # Current paraxial state vector
+    dy = vector_to_matrix([dx, dp]) # Shape 6x1
+    
+    # Apply transformation
+    dy_new = matrix_vector_multiply(Pi, dy)
+    
+    dx_new = dy_new[0:3]
+    dp_new = dy_new[3:6]
+    
+    return dx_new, dp_new
+```
+
+**Parameters:**
+*   $\mathbf{p}_0$: Initial ray direction vector when entering the current cell. Used in the denominator of the $\Pi$ matrix transformation [S1].
+*   $\mathbf{n}$: Normal vector of the intersected cell boundary. Used in the $\Pi$ matrix transformation [S1].
+*   $\boldsymbol{\gamma}$: Gradient of the squared refractive index. Assumed constant within a cell [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Discontinuities:** The RIF has $C^1$ discontinuities at cell boundaries. While the ray trajectory remains continuous, the paraxial perturbations must be updated using $\Pi$ to maintain continuity of the paraxial ray bundle [S1].
+*   **Parallel Rays:** If $\mathbf{p}_0 \cdot \mathbf{n} \approx 0$, the ray is parallel to the boundary, leading to division by zero in $\Pi$. This requires a guard or alternative handling [G].
+*   **Precision:** High-order polynomial evaluation can suffer from precision issues over large $\tau$. Step sizes should be kept small relative to the curvature induced by $\boldsymbol{\gamma}$ [G].
+
+## Subtopics
+
+### Unbiased Estimation of Transmitted Lighting
+A path tracing technique to estimate transmitted caustics by finding direct paths between a receptor point and a light source using Fermat's principle, handling both refractive interfaces and heterogeneous media [S1]. It assumes the path consists of $n-1$ intermediate points $\mathbf{x}_i$ lying on refractive interfaces defined by SDFs $g_i$. The optical path length is $L(\mathbf{x}_0, \dots, \mathbf{x}_n) = \sum_{k=0}^{n-1} \int_{\mathbf{x}_k}^{\mathbf{x}_{k+1}} \eta ds$. Unlike Manifold Walk, which handles surface deformations, this method characterizes curved light paths inside heterogeneous material, allowing unified estimation of surface and volume induced caustics. Bubbles are considered opaque obstacles to limit complexity. Implemented in Mitsuba3 with 1M samples per pixel [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of cells traversed, similar to standard ray marching, but with higher constant factors due to matrix operations for paraxial updates.
+*   **Memory Complexity:** Low, requiring storage for central ray state and 6-dimensional paraxial perturbation vector per ray.
+*   **Strengths:** Enables efficient estimation of caustics and light transport in heterogeneous media by tracking ray bundles analytically. Unified handling of surface and volume caustics.
+*   **Limitations:** Limited to media where squared RIF is linear (constant gradient). Requires careful handling of boundary continuity.
+*   **When to Use:** Rendering transparent objects with spatially varying refractive indices where caustics are important.
+*   **When Not to Use:** Media with complex, non-linear RIF distributions that cannot be approximated by linear segments, or when caustics are not required.
+
+## Background
+Originated in the context of Parabolic Sphere Tracing for rendering old glass and heterogeneous media [S1]. The method leverages the analytical solution of ray tracing equations when the squared refractive index is a linear function of position, resulting in parabolic ray trajectories. This allows for simple first-order perturbation analysis (paraxial ray tracing) to estimate light transport and caustics.
+
+## Sources
+[S1] Parabolic Sphere Tracing of Signed Distance Fields for Old Glass Modelling and Rendering, https://doi.org/10.1109/tvcg.2025.3613853, fetched 2026-11-05

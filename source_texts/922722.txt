@@ -1,0 +1,123 @@
+[![Actions Status](https://github.com/m-doughty/Noise-Simplex-Native/actions/workflows/test.yml/badge.svg)](https://github.com/m-doughty/Noise-Simplex-Native/actions)
+
+NAME
+====
+
+Noise::Simplex::Native — Fast NativeCall port of [Noise::Simplex](Noise::Simplex) (2-D & 3-D Simplex-noise generator for Raku)
+
+SYNOPSIS
+========
+
+```raku
+use Noise::Simplex::Native;
+
+# 2-D field
+my $s   = Noise::Simplex::Native::Simplex.new(seed => 42);
+my &n2d = $s.create-noise2d;
+say n2d(12.3, 9.8);          # → value ≈ [-1, 1]
+
+# 3-D slice
+my &n3d = $s.create-noise3d;
+say n3d(1.0, 2.0, 0.5);
+
+# RAII: native ctx is released when $s and any closures go out of scope.
+```
+
+DESCRIPTION
+===========
+
+Drop-in replacement for [Noise::Simplex](Noise::Simplex) with the per-sample hot loop implemented in C and called via NativeCall. Public API is byte-for-byte the same as the original, plus an additive `dispose` method for deterministic teardown.
+
+The permutation table is built in Raku using the same [Math::Random::MT](Math::Random::MT) seeding as the original module, then handed to the C side as a 256-byte array. Same seed → identical permutation table on both modules (verified by test).
+
+CLASS
+=====
+
+`Simplex`
+---------
+
+  * `.new(:$seed!)`
+
+Create a generator initialised with an integer seed. Different seeds produce independent noise fields.
+
+  * `.create-noise2d` → Callable
+
+Returns a two-argument callable `sub ($x, $y --` Num)>. Inputs may be Int, Rat, or Num — they are coerced to Num at the boundary.
+
+  * `.create-noise3d` → Callable
+
+Returns a three-argument callable `sub ($x, $y, $z --` Num)>.
+
+  * `.build-permutation-table` → Array[Int]
+
+Returns the 512-element permutation table. Useful for verification; not normally called directly by users.
+
+  * `.fill-noise2d-grid(:$x0!, :$dx!, :$w!, :$y0!, :$dy!, :$h!)` → CArray[num64]
+
+Bulk-fill a 2D regular grid in a single NativeCall. Returns a `CArray[num64]` of length `$w * $h` where index `$j * $w + $i` holds `noise2d($x0 + $i * $dx, $y0 + $j * $dy)`. Bit-identical to the per-sample closure.
+
+  * `.fill-noise3d-grid(:$x0!, :$dx!, :$w!, :$y0!, :$dy!, :$h!, :$z0!, :$dz!, :$d!)` → CArray[num64]
+
+Bulk-fill a 3D regular volume. Returns a `CArray[num64]` of length `$w * $h * $d` with z-major iteration: index `($k * $h + $j) * $w + $i` holds the sample at `(x0 + i*dx, y0 + j*dy, z0 + k*dz)`. Bit-identical to the per-sample closure (modulo the same simplex-diagonal caveat that applies to all 3D output, see DETERMINISM below).
+
+  * `.dispose` → Nil
+
+Idempotent. Releases the native ctx eagerly. After `.dispose`, any sample call throws "used after dispose".
+
+  * `submethod DESTROY`
+
+Runs `.dispose` at GC time. Users should not call this directly — it exists to make RAII work.
+
+RANGE
+=====
+
+Outputs are centred on zero and scaled to roughly `[-1, 1]` using factors 70 (2-D) and 32 (3-D), same as the original.
+
+PERFORMANCE
+===========
+
+Pure-Raku Noise::Simplex spends nearly all its time in the per-sample closure: array indexing, six squarings, several multiplies, and a couple of permutation lookups. NativeCall removes the closure overhead and runs the math in IEEE 754 double directly. On a 65k- sample 2D fill the per-sample speedup over pure Raku is around 15-20× on Apple Silicon; YMMV across hardware.
+
+For dense regular-grid sampling, prefer the `.fill-noise{2,3}d-grid` methods. They sample the whole grid in a single NativeCall — boundary cost paid once instead of N times, and the C compiler inlines the inner noise function into the loop at `-O3`. Typical extra speedup over the per-sample closures is 5-10× on a 256x256 grid, so the end-to-end win over pure Raku approaches two orders of magnitude when the bulk path is used.
+
+MEMORY MANAGEMENT
+=================
+
+The native ctx (~20 KB) is held inside the `Simplex` instance and released by `submethod DESTROY` at garbage-collection time. Users do not need to call `.dispose`.
+
+The closures returned by `create-noise2d` / `create-noise3d` capture `self` strongly, so the `Simplex` instance (and its native ctx) stays alive as long as any closure holds a reference. This is the key safety property: closures returned to a caller remain valid even if the original `Simplex` binding goes out of scope.
+
+`.dispose` exists for callers that want deterministic release — for example, freeing the ctx eagerly in a long-running batch job between many seeds. It is idempotent. Calling any sample closure after `.dispose` throws.
+
+DETERMINISM
+===========
+
+Output relative to the pure-Raku [Noise::Simplex](Noise::Simplex), for the same seed:
+
+  * **2-D** — bit-identical when inputs are exactly representable in IEEE 754 double (integers, powers-of-2 fractions). For inputs the original keeps in Rat for any intermediate step (e.g. `-3.3`), the result may diverge by ≤1 ULP because the native module coerces `.Num` at the boundary while the original computes Rat-precision sums where it can.
+
+  * **3-D** — typically within ULPs, but may diverge by O(0.001) at simplex-diagonal coordinates. The original 3D pipeline computes in arbitrary-precision Rat (its `$f3 = 1/3` and `$g3 = 1/6` are Rat literals, and Rat propagates through the whole *floor → X0 → x0* derivation). At coordinates where `x0`, `y0`, or `z0` happen to be exactly equal in Rat (e.g. on the `x = y` plane), Raku's exact comparison and C's accumulated-rounding comparison can pick *different* simplex corners. The two outputs are then both valid simplex noise but not the same sample. This is fundamental — no compiler flag can close the gap.
+
+In practice, on a 1024-sample 3D grid the median absolute difference is ULP-small (<1e-15) and the worst-case is bounded under 0.05.
+
+The native code is compiled with `-fno-fast-math` and `-ffp-contract=off` so the compiler may not reorder FP operations or fuse multiply-adds — across-build determinism within this module is preserved.
+
+ENVIRONMENT
+===========
+
+  * `NOISE_SIMPLEX_NATIVE_LIB` — full path to a hand-built shared library, overriding the bundled one. For custom builds, system copies, or air-gapped installs.
+
+SEE ALSO
+========
+
+[Noise::Simplex](Noise::Simplex) — the original pure-Raku implementation.
+
+AUTHOR
+======
+
+Matt Doughty
+
+LICENSE
+=======
+
+Artistic 2.0

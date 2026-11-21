@@ -1,0 +1,454 @@
+--- v002.md
++++ v003.md
+@@ -3,44 +3,57 @@
+ 
+ ## Overview
+-DM-NeRF is a single-pipeline method that simultaneously reconstructs continuous 3D scene geometry, decomposes all individual objects in 3D space, and supports flexible object shape manipulation (translation, rotation, size adjustment, deformation) from 2D images only [S1, unofficial]. It sets itself apart from standard NeRF variants by introducing an "object field" that predicts a one-hot object code for every 3D point, enabling instance-level decomposition without 3D ground truth labels [S1, unofficial]. Unlike [Unified Decompositional and Compositional NeRF](14413-unified-decompositional-and-compositional-nerf.md), which may handle composition differently, DM-NeRF focuses on decomposing the entire space into object fields and manipulating their geometries via a lightweight inverse query algorithm that explicitly tackles visual occlusions and collisions [S1, unofficial].
++DM-NeRF is a method that simultaneously reconstructs continuous 3D scene geometry, decomposes all individual objects in 3D space, and supports flexible object shape manipulation (translation, rotation, size adjustment, deformation) from 2D images only [S1, unofficial]. It extends the standard NeRF architecture by introducing an **object field** that predicts a unique one-hot object code for every 3D point, enabling instance-level decomposition without 3D ground truth labels [S1, unofficial]. Unlike sibling methods that may rely on explicit point clouds or separate segmentation pipelines, DM-NeRF integrates decomposition and manipulation into a single differentiable rendering pipeline, addressing visual occlusions and collisions via a lightweight inverse query algorithm [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of $L$ images for a static scene with known camera poses and intrinsics, denoted as $\{(I_1, \xi_1, K_1) \cdots (I_L, \xi_L, K_L)\}$ [S1, unofficial].
+-*   **Output:** Novel view rendered images, decomposed 3D object masks, and manipulated scene geometry [S1, unofficial].
+-
+-**Data Structures and Layout:**
+-The network architecture consists of an MLP with the following layer dimensions: $128 \rightarrow 256 \rightarrow 256 \rightarrow 256 \rightarrow 256 \rightarrow 256 \rightarrow 256 \rightarrow 256 \rightarrow 256 \rightarrow 256 \rightarrow 128$ [S1, unofficial].
+-*   **Positional Encoding:** Inputs are encoded using $\text{PE}(x,y,z)$ for 3D location and $\text{PE}(\theta,\phi)$ for viewing direction [S1, unofficial].
+-*   **Object Prediction Tensor:** For each view, the network outputs a tensor $I_l \in \mathbb{R}^{U \times V \times (H+1)}$, where $U, V$ are spatial width and height, and $H$ is the predefined number of objects [S1, unofficial]. The first $H$ channels represent object predictions, and the $(H+1)$-th channel represents empty space [S1, unofficial].
+-*   **Ground Truth Label Tensor:** Paired ground truth labels are $\bar{I}_l \in \mathbb{R}^{U \times V \times T}$, where $T$ is the number of ground truth objects [S1, unofficial].
+-
+-**Network Outputs:**
+-For a query point $p=(x,y,z)$ and viewing direction $v=(\theta,\phi)$:
+-1.  **Volume Density ($\sigma$):** Function of location only.
+-2.  **Object Code ($o$):** A one-hot vector of length $H+1$, representing the object ID for the point. Function of location only.
+-3.  **Color ($c$):** RGB vector, function of location and viewing direction [S1, unofficial].
+-
+-**Training Steps:**
+-1.  **Positional Encoding:** Compute $\text{PE}(x,y,z)$ and $\text{PE}(\theta,\phi)$ for the query point and direction [S1, unofficial].
+-2.  **Forward Pass:** Feed encoded inputs into the MLP to predict $\sigma$, $o$, and $c$ [S1, unofficial].
+-3.  **Volume Rendering:** Render the 2D image color using standard volume rendering integration over the ray, using $\sigma$ and $c$ [S1, unofficial].
+-4.  **2D Object Matching:**
+-    *   Reshape the first $H$ channels of the predicted tensor $I_l$ to $M \in \mathbb{R}^{N \times H}$, where $N = U \times V$ [S1, unofficial].
+-    *   Reshape the ground truth tensor $\bar{I}_l$ to $\bar{M} \in \mathbb{R}^{N \times T}$ [S1, unofficial].
+-    *   Compute the Soft Intersection-over-Union (sIoU) cost matrix $C^{sIoU}_{h,t}$ between predicted and ground truth masks [S1, unofficial].
+-    *   Compute the Cross-Entropy Score (CES) [S1, unofficial].
+-    *   Use the Hungarian algorithm to associate every ground truth 2D object mask with a unique predicted 2D object mask based on sIoU and CES [S1, unofficial].
+-5.  **Loss Computation:**
+-    *   Compute color reconstruction loss against ground truth images [S1, unofficial].
+-    *   Compute object field losses, including $\ell_{3d}^{empty}$ and $\ell_{3d}^{obj}$, to jointly learn correct codes for empty 3D points and object points [S1, unofficial].
+-6.  **Optimization:** Update network weights using the combined loss [S1, unofficial].
+-
+-**Object Manipulation:**
+-1.  **Specify Target:** Select an object ID and transformation parameters (translation, rotation, scale, deformation) [S1, unofficial].
+-2.  **Inverse Query:** Use a lightweight inverse query algorithm to identify the 3D points belonging to the specified object [S1, unofficial].
+-3.  **Tackle Visual Occlusions:** Explicitly handle occluded regions and collisions during the editing process to avoid artifacts [S1, unofficial].
+-4.  **Edit Geometry:** Apply the transformation to the identified object points [S1, unofficial].
+-5.  **Render:** Render the novel view using the modified geometry and the original radiance field [S1, unofficial].
++*   **Input:** A set of $L$ images for a static scene with known camera poses and intrinsics, denoted as $\{(I_1, \xi_1, K_1) \dots (I_L, \xi_L, K_L)\}$, where $I_l$ is the image, $\xi_l$ is the pose, and $K_l$ is the intrinsic matrix [S1, unofficial].
++*   **Output:** For a ray $r$, the method renders a color $\hat{C}(r)$ and provides an object code $o$ for every sampled point, allowing for the extraction of individual object geometries and their manipulation [S1, unofficial].
++
++**Data Structures:**
++*   **Object Code:** A one-hot vector of dimension $H+1$, where $H$ is the predefined maximum number of objects. The extra channel typically represents empty/background space [S1, unofficial].
++*   **Prediction Tensor:** For each image $l$, the 2D object prediction tensor $I_l$ has dimensions $R \times U \times V \times (H+1)$, where $U$ and $V$ are spatial width and height, and $R$ is the batch size (or number of rays) [S1, unofficial].
++*   **Ground Truth Label Tensor:** The paired ground truth object label tensor $\bar{I}_l$ has dimensions $R \times U \times V \times T$, where $T$ is the number of ground truth objects [S1, unofficial].
++
++**Network Architecture:**
++The pipeline consists of three components:
++1.  **NeRF Backbone:** Learns volume density $\sigma$ and color $\mathbf{c}$ [S1, unofficial].
++2.  **Object Field:** Learns a unique object code $\mathbf{o}$ for every 3D point [S1, unofficial].
++3.  **Object Manipulator:** Edits the shape of specified objects and handles occlusions [S1, unofficial].
++
++The core network takes positional encoded position $\gamma(\mathbf{p})$ and viewing direction $\gamma(\mathbf{v})$ as input. The architecture uses the following MLP layer dimensions:
++$$ 128 \rightarrow 256 \rightarrow 256 \rightarrow 256 \rightarrow 256 \rightarrow 256 \rightarrow 256 \rightarrow 256 \rightarrow 256 \rightarrow 256 \rightarrow 128 $$
++[S1, unofficial]
++
++**Positional Encoding:**
++Compute positional encoding $PE(\mathbf{p})$ for 3D location $\mathbf{p}=(x,y,z)$ and $PE(\mathbf{v})$ for viewing direction $\mathbf{v}=(\theta, \phi)$ [S1, unofficial].
++
++**Forward Pass:**
++1.  Concatenate $PE(\mathbf{p})$ and $PE(\mathbf{v})$ as input to the network.
++2.  The network outputs:
++    *   Volume density $\sigma \in \mathbb{R}$ (function of location only) [S1, unofficial].
++    *   Object code $\mathbf{o} \in \mathbb{R}^{H+1}$ (function of location only) [S1, unofficial].
++    *   Color $\mathbf{c} \in \mathbb{R}^3$ (function of location and viewing direction) [S1, unofficial].
++
++**Rendering:**
++Standard volume rendering is used for color:
++$$ \hat{C}(r) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i $$
++where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$, $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, and $\delta_i$ is the distance between samples [S1, unofficial].
++
++Object codes are rendered similarly to auxiliary outputs:
++$$ \hat{\mathbf{O}}(r) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{o}_i $$
++[S1, unofficial]
++
++**Training Losses:**
++The object field is optimized using multiple loss functions under the supervision of color images with 2D object masks only [S1, unofficial]. Key losses include:
++*   $\ell_{3d}^{empty}$: Regularization for empty 3D points.
++*   $\ell_{3d}^{obj}$: Supervision for occupied points.
++These are jointly designed to learn correct codes for empty 3D points [S1, unofficial].
++
++**Object Manipulation (Inverse Query Algorithm):**
++To manipulate an object (e.g., translation, rotation, scaling, deformation):
++1.  Identify the target object code $\mathbf{o}_{target}$.
++2.  Execute the 'Tackle visual occlusions' step to handle occluded regions [S1, unofficial].
++3.  Apply the transformation to the 3D points associated with $\mathbf{o}_{target}$.
++4.  Re-render the scene using the transformed points and the original radiance field parameters [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -48,179 +61,195 @@
+ ```python
+ import numpy as np
+-from scipy.optimize import linear_sum_assignment
+ 
+ def positional_encoding(x, num_freq_bands=10):
+-    """Standard NeRF positional encoding."""
+-    # Implementation details omitted for brevity, assumed standard [S1, unofficial]
+-    pass
+-
+-def forward_pass(xyz, dirs, network_weights):
+-    """
+-    Forward pass of the DM-NeRF MLP.
+-    Returns: sigma (density), o (object code), c (color)
+-    """
+-    # 1. Compute positional encodings
+-    pe_xyz = positional_encoding(xyz)
+-    pe_dirs = positional_encoding(dirs)
+-    
+-    # 2. Concatenate and pass through MLP
+-    # Architecture: 128 -> 256 (x8) -> 128
+-    # Input dim depends on PE expansion
+-    x = np.concatenate([pe_xyz, pe_dirs], axis=-1)
+-    
+-    # MLP layers
+-    x = relu(linear(x, network_weights['w1'], network_weights['b1']))
+-    for i in range(8):
+-        x = relu(linear(x, network_weights[f'w{i+2}'], network_weights[f'b{i+2}']))
++    """
++    Standard NeRF positional encoding.
++    x: array of shape (..., D)
++    Returns: array of shape (..., D + 2*D*num_freq_bands)
++    """
++    scales = np.array([2**i for i in range(num_freq_bands)])
++    scaled_x = np.multiply(x, scales)[:, None, :]
++    scaled_x = np.reshape(scaled_x, (scaled_x.shape[0], -1, scaled_x.shape[-1]))
++    encoded = np.sin(np.concatenate([scaled_x, scaled_x + np.pi/2], axis=-1))
++    return np.concatenate([x, encoded], axis=-1)
++
++def forward_pass(p, v, network_weights):
++    """
++    Forward pass through DM-NeRF network.
++    p: query point coordinates (x, y, z), shape (..., 3)
++    v: viewing direction (theta, phi), shape (..., 2)
++    network_weights: parameters for the MLP
++    Returns: sigma, o, c
++    """
++    # Compute positional encodings
++    pe_p = positional_encoding(p)
++    pe_v = positional_encoding(v)
++    
++    # Concatenate inputs
++    input_vec = np.concatenate([pe_p, pe_v], axis=-1)
++    
++    # Pass through MLP layers
++    # Layer 1: 128 -> 256
++    h = apply_linear(input_vec, network_weights['W1'], network_weights['b1'])
++    h = relu(h)
++    
++    # Layers 2-10: 256 -> 256
++    for i in range(2, 11):
++        h = apply_linear(h, network_weights[f'W{i}'], network_weights[f'b{i}'])
++        h = relu(h)
++        
++    # Layer 11: 256 -> 128
++    h = apply_linear(h, network_weights['W11'], network_weights['b11'])
+     
+     # Split outputs
+-    # Note: Exact split indices depend on final layer output size
+-    # Assuming last layer outputs 128 dims, split into sigma, o, c
+-    # sigma: 1 dim, o: H+1 dims, c: 3 dims
+-    # This is a simplification; actual implementation may use separate heads or specific splits
+-    # Based on [S1, unofficial], sigma and o are functions of location, c of location+dir
+-    # The diagram shows PE(xyz) going to a branch for sigma/o and PE(xyz)+PE(dirs) for c
+-    # Re-interpreting architecture from Figure 7 description:
+-    
+-    # Branch 1: Location only for sigma and o
+-    x_loc = relu(linear(pe_xyz, network_weights['w_loc1'], network_weights['b_loc1']))
+-    for i in range(8):
+-        x_loc = relu(linear(x_loc, network_weights[f'w_loc{i+2}'], network_weights[f'b_loc{i+2}']))
+-    sigma = linear(x_loc, network_weights['w_sigma'], network_weights['b_sigma']) # 1 dim
+-    o = linear(x_loc, network_weights['w_o'], network_weights['b_o']) # H+1 dims
+-    
+-    # Branch 2: Location + Direction for color
+-    x_view = np.concatenate([x_loc, pe_dirs], axis=-1)
+-    x_view = relu(linear(x_view, network_weights['w_view1'], network_weights['b_view1']))
+-    c = linear(x_view, network_weights['w_c'], network_weights['b_c']) # 3 dims
++    # Assuming the last 128 units are split into sigma, o, c based on architecture
++    # Note: Exact split depends on implementation details not fully specified in source.
++    # Based on Figure 7 description:
++    # Density sigma is a scalar.
++    # Object code o is H+1 dimensional.
++    # Color c is 3 dimensional.
++    # The intermediate 128 layer likely feeds into these heads.
++    
++    # Simplified assumption for implementation:
++    # The network outputs raw logits for sigma, o, c.
++    sigma = h[..., 0] # Scalar density
++    o = h[..., 1:1+H+1] # Object code (H+1 channels)
++    c = h[..., 1+H+1:1+H+1+3] # Color (3 channels)
+     
+     return sigma, o, c
+ 
+-def compute_siou_cost(predicted_mask, gt_mask):
+-    """Compute Soft Intersection-over-Union cost."""
+-    intersection = np.sum(predicted_mask * gt_mask)
+-    union = np.sum(predicted_mask) + np.sum(gt_mask) - intersection
+-    if union == 0:
+-        return 0
+-    return 1.0 - (intersection / union) # Cost is 1 - IoU
+-
+-def match_objects(predicted_tensor, gt_tensor, H, T):
+-    """
+-    Match predicted object masks to ground truth using Hungarian algorithm.
+-    predicted_tensor: (U, V, H+1)
+-    gt_tensor: (U, V, T)
+-    """
+-    U, V, _ = predicted_tensor.shape
+-    N = U * V
+-    
+-    # Reshape to (N, H) and (N, T)
+-    # Note: predicted_tensor includes empty space at index H, so we take first H
+-    M_pred = predicted_tensor[:, :, :H].reshape(N, H)
+-    M_gt = gt_tensor.reshape(N, T)
+-    
+-    # Compute cost matrix
+-    # Cost matrix C[h, t]
+-    C = np.zeros((H, T))
+-    for h in range(H):
+-        for t in range(T):
+-            # sIoU cost
+-            cost_siou = compute_siou_cost(M_pred[:, h], M_gt[:, t])
+-            # CES cost (Cross-Entropy Score) - simplified as difference for demonstration
+-            # Actual CES definition from Yang et al. 2019 is more complex
+-            cost_ces = np.mean(np.abs(M_pred[:, h] - M_gt[:, t]))
+-            C[h, t] = cost_siou + cost_ces
+-            
+-    # Hungarian algorithm
+-    row_ind, col_ind = linear_sum_assignment(C)
+-    
+-    return row_ind, col_ind
+-
+-def train_step(images, poses, intrinsics, gt_masks, network_weights, H, T):
+-    """
+-    Single training step.
+-    images: (L, U, V, 3)
+-    gt_masks: (L, U, V, T)
+-    """
+-    L, U, V, _ = images.shape
+-    
+-    total_loss = 0
+-    
+-    for l in range(L):
+-        # Sample rays from image l
+-        rays = generate_rays(poses[l], intrinsics[l], U, V)
+-        
+-        # Forward pass
+-        sigma, o, c = forward_pass(rays.xyz, rays.dirs, network_weights)
+-        
+-        # Volume rendering to get rendered color
+-        rendered_color = volume_render(rays, sigma, c)
+-        
+-        # Color loss
+-        color_loss = np.mean((rendered_color - images[l])**2)
+-        
+-        # Object field loss
+-        # 1. Match predicted 2D masks to GT
+-        pred_tensor = o.reshape(U, V, H+1) # Assuming o is sampled per pixel
+-        gt_tensor = gt_masks[l]
+-        
+-        row_ind, col_ind = match_objects(pred_tensor, gt_tensor, H, T)
+-        
+-        # 2. Compute losses for empty and object points
+-        # l_3d_empty and l_3d_obj are designed to learn correct codes
+-        # Exact formula not provided, but involves ensuring empty points have high empty code
+-        # and object points have high object code
+-        obj_loss = compute_object_loss(o, pred_tensor, gt_tensor, row_ind, col_ind)
+-        
+-        total_loss += color_loss + obj_loss
+-        
+-    return total_loss
+-
+-def manipulate_object(scene_rays, object_id, transformation, network_weights):
++def render_ray(r, network_weights, num_samples):
++    """
++    Render a single ray using volume rendering.
++    r: ray origin and direction
++    network_weights: network parameters
++    num_samples: number of samples along the ray
++    Returns: color, object_code
++    """
++    origins, directions = r
++    t_vals = np.linspace(0.0, 1.0, num_samples)
++    z_vals = origins + directions * t_vals
++    
++    # Sample points
++    points = z_vals
++    
++    # Get density, object code, and color
++    sigma, o, c = forward_pass(points, directions, network_weights)
++    
++    # Compute alpha
++    deltas = np.diff(z_vals, axis=-1)
++    deltas = np.concatenate([deltas, np.array([1e10])], axis=-1) # Last delta large
++    alpha = 1.0 - np.exp(-sigma * deltas)
++    
++    # Compute transmittance
++    exp_neg_sigma_delta = np.exp(-sigma * deltas)
++    T = np.cumprod(exp_neg_sigma_delta, axis=-1)
++    T = np.concatenate([np.ones_like(T[..., :1]), 1.0 - T[..., :1]], axis=-1)
++    
++    # Render color
++    weights = T * alpha
++    color = np.sum(weights[..., None] * c, axis=-1)
++    
++    # Render object code
++    obj_code = np.sum(weights[..., None] * o, axis=-1)
++    
++    return color, obj_code
++
++def train_dm_nerf(images, poses, intrinsics, gt_masks, network_weights, num_epochs):
++    """
++    Train DM-NeRF.
++    images: list of L images
++    poses: list of L poses
++    intrinsics: list of L intrinsics
++    gt_masks: list of L ground truth 2D object masks
++    network_weights: initial network parameters
++    num_epochs: number of training epochs
++    Returns: trained network_weights
++    """
++    for epoch in range(num_epochs):
++        for l in range(len(images)):
++            I_l = images[l]
++            xi_l = poses[l]
++            Kl = intrinsics[l]
++            I_bar_l = gt_masks[l]
++            
++            # Sample rays from image I_l
++            rays = sample_rays(I_l, xi_l, Kl)
++            
++            # Render
++            rendered_color, rendered_obj_code = render_ray(rays, network_weights)
++            
++            # Compute losses
++            # 1. Color loss (e.g., MSE)
++            color_loss = mse(rendered_color, I_l)
++            
++            # 2. Object code loss
++            # Reshape predictions and ground truth for Hungarian matching
++            # I_l predictions: R x U x V x (H+1) -> M (N x H)
++            # I_bar_l ground truth: R x U x V x T -> M_bar (N x T)
++            # Note: N = U * V
++            M = reshape_predictions(rendered_obj_code, H)
++            M_bar = reshape_ground_truth(I_bar_l, T)
++            
++            # Hungarian algorithm to associate masks
++            # Cost matrix based on sIoU and CES
++            cost_matrix = compute_cost_matrix(M, M_bar)
++            assignments = hungarian_algorithm(cost_matrix)
++            
++            # Compute object loss based on assignments
++            obj_loss = compute_object_loss(M, M_bar, assignments)
++            
++            # 3. Empty space regularization
++            empty_loss = compute_empty_loss(rendered_obj_code, rays)
++            
++            # Total loss
++            total_loss = color_loss + obj_loss + empty_loss
++            
++            # Update weights
++            network_weights = update_weights(network_weights, total_loss)
++            
++    return network_weights
++
++def manipulate_object(network_weights, target_obj_code, transformation, rays):
+     """
+     Manipulate a specific object in the scene.
+-    """
+-    # 1. Identify points belonging to object_id
+-    # This requires querying the object field for all points or using inverse query
+-    # Inverse query algorithm is lightweight and avoids dense 3D evaluation
+-    object_points = inverse_query(scene_rays, object_id, network_weights)
+-    
+-    # 2. Tackle visual occlusions
+-    # Explicitly handle occluded regions
+-    occlusion_mask = handle_occlusions(object_points, scene_rays)
+-    
+-    # 3. Apply transformation
+-    transformed_points = apply_transformation(object_points, transformation)
+-    
+-    # 4. Render
+-    # Use transformed points for density and color calculation
+-    rendered_image = render_with_transformed_geometry(transformed_points, occlusion_mask, network_weights)
+-    
+-    return rendered_image
++    network_weights: trained network parameters
++    target_obj_code: the object code to manipulate
++    transformation: transformation matrix or parameters
++    rays: rays for rendering
++    Returns: manipulated color
++    """
++    # 1. Identify points belonging to the target object
++    # This requires querying the object field for all points in the scene
++    # or using the inverse query algorithm to find relevant points efficiently
++    points_to_transform = inverse_query_algorithm(network_weights, target_obj_code, rays)
++    
++    # 2. Apply transformation
++    transformed_points = apply_transformation(points_to_transform, transformation)
++    
++    # 3. Tackle visual occlusions
++    # Handle occluded regions to prevent artifacts
++    transformed_points = tackle_visual_occlusions(transformed_points, network_weights)
++    
++    # 4. Re-render
++    # Use transformed points to sample density, object code, and color
++    # Note: Density and object code are functions of location, so they change
++    # Color depends on viewing direction, so it remains consistent if lighting is static
++    manipulated_color = render_with_transformed_points(transformed_points, network_weights, rays)
++    
++    return manipulated_color
+ ```
+ 
+-**Parameters:**
+-*   $H$: Predefined number of objects. Determines the channel dimension of 2D object prediction tensors. [S1, unofficial]
+-*   $T$: Number of ground truth objects. Determines the channel dimension of 2D ground truth label tensors. [S1, unofficial]
+-*   $L$: Number of generated 2D images used for 2D object matching and supervision. [S1, unofficial]
+-*   $U, V$: Spatial width and height dimensions of the 2D object prediction and ground truth label images. [S1, unofficial]
+-
+-**Edge Cases and Pitfalls:**
+-*   **No 3D Ground Truth:** Learning the object code faces the issue of no ground truth 3D object codes available for full supervision [S1, unofficial].
+-*   **Variable Object Count:** The number of total objects is variable and there is no fixed order for objects [S1, unofficial].
+-*   **Empty Space:** Non-occupied (empty) 3D space must be taken into account, but there are no labels for supervision as well [S1, unofficial].
+-*   **Occlusion Artifacts:** Manipulating originally occluded objects or parts may produce artifacts due to inaccuracies in the learned radiance fields [S1, unofficial].
+-*   **Lighting Discrepancies:** Lighting factors are not decomposed, causing illumination discrepancies on edited objects compared to non-manipulated scenes [S1, unofficial].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** The method uses a lightweight inverse query algorithm for manipulation, avoiding the need to evaluate dense 3D points from implicit fields explicitly, which improves efficiency compared to naive explicit structure extraction [S1, unofficial].
+-*   **Memory Complexity:** Depends on the MLP size and the number of objects $H$. The object field requires storing a one-hot vector of size $H+1$ for every point.
+-*   **Measured Performance:** Novel view rendering quality is clearly better than PointNeRF [S1, unofficial]. However, quality decreases after manipulation compared to non-manipulation baselines [S1, unofficial].
+-*   **Strengths:** Simultaneously reconstructs, decomposes, manipulates, and renders complex 3D scenes in a single pipeline from 2D images [S1, unofficial]. Robust and accurate object decomposition [S1, unofficial].
+-*   **Limitations:** Manipulation of occluded objects may produce artifacts [S1, unofficial]. Lighting factors are not decomposed [S1, unofficial].
+-*   **When to Use:** When 3D scene geometry decomposition and manipulation from 2D images is required, and novel view rendering quality is a priority [S1, unofficial].
+-*   **When Not to Use:** When lighting decomposition is required or when high-fidelity manipulation of heavily occluded objects is critical without potential artifacts [S1, unofficial].
++*   **Time Complexity:** Training involves standard NeRF volume rendering complexity, $O(N \cdot L)$, where $N$ is the number of samples per ray and $L$ is the number of rays/images. The Hungarian algorithm for 2D object matching adds a complexity of $O(N^3)$ per image, where $N$ is the number of pixels/points, which can be a bottleneck [S1, unofficial].
++*   **Memory Complexity:** Requires storing the MLP weights and intermediate activations. The object code dimension $H$ adds a small constant memory overhead per point [S1, unofficial].
++*   **Performance:** Novel view rendering quality is clearly better than PointNeRF [S1, unofficial]. However, rendering quality decreases after manipulation compared to non-manipulation baselines [S1, unofficial].
++*   **Strengths:** Simultaneous reconstruction, decomposition, and manipulation in a single pipeline; robust object decomposition from 2D views only; handles visual occlusions and collisions [S1, unofficial].
++*   **Limitations:** Lighting factors are not decomposed, causing illumination discrepancies on edited objects; manipulation of originally occluded objects may produce artifacts due to inaccuracies in the learned radiance fields; requires predefined number of objects $H$ [S1, unofficial].
++*   **When to use:** When 3D scene decomposition and manipulation are required from 2D images without 3D ground truth labels.
++*   **When not to use:** When high-fidelity lighting manipulation is required or when the number of objects is unknown and highly dynamic beyond the predefined $H$ [S1, unofficial].
+ 
+ ## Background
+-DM-NeRF was published as a conference paper at ICLR 2023 [S1, unofficial]. It addresses the need for users to virtually manipulate objects in 3D scenes, such as in mixed reality applications, by allowing them to edit real scenes from 2D images [S1, unofficial]. It builds on the success of NeRF by adding an object field component to decompose the entire 3D space into object fields [S1, unofficial].
++DM-NeRF was published as a conference paper at ICLR 2023 [S1, unofficial]. It addresses the challenge of 3D scene geometry decomposition and manipulation from 2D images, a task relevant for mixed reality applications where users desire to virtually manipulate objects in 3D scenes [S1, unofficial]. The method builds on the success of NeRF by adding an object field component, allowing for instance-level decomposition and manipulation without explicit 3D structures [S1, unofficial].
+ 
+ ## Sources

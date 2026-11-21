@@ -1,0 +1,107 @@
+# Local 3DGS Optimization
+Also called: Local 3DGS Pose Optimization
+
+## Overview
+Local 3DGS Optimization is an iterative method for estimating the relative camera pose (transformation) between two nearby images by optimizing a local 3D Gaussian Splatting representation against photometric loss [S1]. It solves the problem of camera pose estimation without requiring external Structure-from-Motion (SfM) tools like COLMAP, relying instead on monocular depth estimation and differentiable rendering [S1]. It sets itself apart from global optimization methods by freezing the Gaussian attributes (position, scale, rotation, opacity, SH) after initialization and learning only the pose parameters (quaternion and translation) to align the local scene representation with the target view [S1].
+
+## How it works
+**Inputs:**
+*   Two nearby images $I_t$ and $I_{t+1}$ [S1].
+*   Monocular Depth Estimation Model (DPT) [S1].
+*   Camera intrinsic parameters (or heuristics if unknown) [S1].
+
+**Outputs:**
+*   Final relative pose $Q_t$ [S1].
+
+**Data Structures:**
+*   **Local 3DGS ($G_t$):** A set of 3D Gaussians. Attributes include position, spherical harmonic (SH) coefficients, opacity, scale, and rotation [S1]. These are initialized from $I_t$ and its depth map $D_t$ [S1].
+*   **Pose ($T_t$):** A transformation matrix (or quaternion + translation vector) representing the camera pose relative to the local Gaussian frame [S1]. Initialized as Identity $I$ [S1].
+*   **Rendered Image ($\hat{I}$):** Output of the differentiable rasterizer [S1].
+
+**Steps:**
+1.  **Depth Estimation:** Compute monocular depth map $D_t$ for image $I_t$ using the DPT model [S1].
+2.  **Local 3DGS Initialization:** Initialize the local 3D Gaussian representation $G_t$ from $I_t$ and $D_t$ using `InitGauss($I_t, D_t$)` [S1]. This involves downsampling the point cloud derived from the depth map before fitting [S1].
+3.  **Local 3DGS Fitting:** Optimize $G_t$ to fit $I_t$ by minimizing photometric loss.
+    *   Initialize $T_t = I$ [S1].
+    *   Iterate for 500 steps [S1]:
+        *   Render $\hat{I}_t$ by rasterizing $G_t$ [S1].
+        *   Compute loss $L$ between $I_t$ and $\hat{I}_t$ [S1].
+        *   Update $G_t$ using Adam optimizer on $\nabla L$ [S1].
+    *   *Note:* After this phase, $G_t$ attributes are frozen [S1].
+4.  **Pose Optimization:** Estimate the pose $T_t$ that transforms $G_t$ to align with $I_{t+1}$.
+    *   Initialize $T_t = I$ [S1].
+    *   Iterate for 300 steps [S1]:
+        *   Transform Gaussians: $G'_t = T_t \odot G_t$ [S1].
+        *   Render $\hat{I}_{t+1}$ by rasterizing $G'_t$ [S1].
+        *   Compute loss $L$ between target image $I_{t+1}$ and rendered image $\hat{I}_{t+1}$ [S1].
+        *   Update pose parameters (quaternion and translation) using Adam optimizer on $\nabla L$ [S1].
+        *   *Constraint:* Gaussian attributes (position, SH, opacity, scale, rotation) remain fixed during this phase [S1].
+5.  **Pose Accumulation:** The final relative pose $Q_t$ is the product of transformations $T_i$ from the start of the sequence up to the current step [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def local_3dgs_optimization(I_t, I_t_plus_1, DPT_model, camera_intrinsics):
+    # Step 1: Depth Estimation
+    D_t = DPT_model(I_t)
+    
+    # Step 2: Local 3DGS Initialization
+    # InitGauss downsamples the point cloud from D_t and fits 3DGS
+    G_t = InitGauss(I_t, D_t, camera_intrinsics)
+    
+    # Step 3: Local 3DGS Fitting (500 iterations)
+    # Optimize Gaussian attributes to fit I_t
+    for step in range(500):
+        I_hat = Rasterize(G_t, camera_intrinsics)
+        L = Loss(I_t, I_hat)
+        G_t = Adam_Update(G_t, L)
+        
+    # Freeze Gaussian attributes
+    G_t.requires_grad = False
+    
+    # Step 4: Pose Optimization (300 steps)
+    # Initialize pose as Identity
+    T_t = Identity()
+    
+    for step in range(300):
+        # Transform Gaussians by current pose estimate
+        G_transformed = Transform(G_t, T_t)
+        
+        # Render transformed Gaussians
+        I_hat_plus_1 = Rasterize(G_transformed, camera_intrinsics)
+        
+        # Compute loss against target image
+        L = Loss(I_t_plus_1, I_hat_plus_1)
+        
+        # Update only pose parameters (quaternion and translation)
+        T_t = Adam_Update_Pose(T_t, L)
+        
+    return T_t
+```
+
+**Parameters:**
+*   **Local 3DGS Fitting Iterations:** 500 [S1].
+*   **Pose Optimization Steps:** 300 [S1].
+*   **Monocular Depth Model:** DPT (Vision Transformers for Dense Prediction) [S1].
+*   **Camera Intrinsic Heuristic:** If intrinsics are unknown, Field of View (FoV) is set to $79^\circ$ and principal points are set to the image center [S1].
+*   **Loss Function:** Photometric loss (implied L1/SSIM based on parent context, but specifically "photometric loss" is cited for this method) [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Unknown Intrinsics:** Using heuristic intrinsics (FoV $79^\circ$, center principal point) leads to slight degradation in Novel View Synthesis (NVS) and camera pose estimation quality compared to known intrinsics [S1].
+*   **Dramatic Motion:** The method is designed to handle dramatic camera motions (large maximum rotation angles between frames), as tested on sequences with up to $180^\circ$ rotation [S1].
+*   **Point Cloud Size:** High-resolution input images can lead to huge point clouds; downsampling is required before fitting to manage memory and computation [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The method involves two distinct optimization phases: 500 iterations for local 3DGS fitting and 300 steps for pose optimization [S1]. The total computational cost is proportional to the number of Gaussians and the resolution of the images, with the pose optimization being relatively lightweight as it only updates pose parameters [S1].
+*   **Memory Complexity:** Depends on the number of Gaussians in $G_t$, which is determined by the downsampled point cloud from the monocular depth map [S1].
+*   **Strengths:** Does not require COLMAP or external SfM pipelines; handles dramatic camera motions; provides photo-realistic novel view synthesis [S1].
+*   **Limitations:** Performance degrades slightly if camera intrinsics are unknown and heuristics are used; relies on the accuracy of the monocular depth estimation model (DPT) [S1].
+*   **When to use:** When COLMAP is unavailable or unreliable, and relative pose estimation between nearby frames is needed for 3DGS reconstruction [S1].
+*   **When not to use:** When high-precision camera intrinsics are available and can be optimized jointly, or when the scene has very small baseline changes where traditional SfM might be more robust [S1].
+
+## Background
+Local 3DGS Optimization was introduced in the "COLMAP-Free 3D Gaussian Splatting" paper by Zhou et al. (CVPR 2024) [S1]. It addresses the dependency on traditional SfM pipelines (like COLMAP) for initializing 3D Gaussian Splatting [S1]. The method leverages monocular depth estimation (DPT) and differentiable rendering to estimate camera poses and initialize 3DGS representations directly from image pairs [S1]. It is part of the broader effort to make 3DGS training and initialization more accessible and robust to varying input conditions [S1].
+
+## Sources
+[S1] COLMAP-Free 3D Gaussian Splatting, https://doi.org/10.1109/cvpr52733.2024.01965, fetched 2026-10-26

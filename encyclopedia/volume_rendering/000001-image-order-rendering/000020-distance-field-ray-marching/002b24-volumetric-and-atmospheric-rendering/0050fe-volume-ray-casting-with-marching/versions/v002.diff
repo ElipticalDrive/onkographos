@@ -1,0 +1,312 @@
+--- v001.md
++++ v002.md
+@@ -4,155 +4,192 @@
+ 
+ ## Overview
+-Volume Ray Casting with Marching is an image-order rendering technique that casts rays from the camera through a scalar volume, sampling the field at discrete intervals to accumulate color and opacity using front-to-back compositing [S2, unofficial]. It distinguishes itself from sibling methods by explicitly combining a fixed-step traversal with jittered sampling to mitigate aliasing, early ray termination (ERT) for performance, and opacity correction to maintain physical accuracy despite discrete stepping [S2, unofficial]. Unlike [SDF Cloud Rendering](2064-sdf-cloud-rendering.md) which uses signed distance fields for surface extraction, this method directly integrates volumetric properties [S2, unofficial].
++Volume Ray Casting with Marching is an image-order rendering technique that casts rays from the camera through a volumetric scalar field, sampling the field at discrete intervals to accumulate color and opacity using front-to-back compositing [S2, unofficial]. It solves the problem of visualizing 3D scalar data (such as medical CT scans or atmospheric density) by projecting it onto a 2D screen while preserving depth cues and transparency [S2, unofficial]. Unlike [SDF Cloud Rendering](2064-sdf-cloud-rendering.md), which relies on signed distance fields for surface-like rendering, this method integrates density directly, and unlike [Atmospheric Ray Marching](4874-atmospheric-ray-marching.md), which often targets specific post-processing effects like god rays, this method provides a general-purpose integration of the radiative transfer equation for arbitrary volume textures [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   Volume texture (scalar field), typically 8-bit, 16-bit, or float [S2, unofficial].
+-*   Colormap texture (2D, mapping scalar value to RGBA) [S2, unofficial].
+-*   Volume bounding box defined by `box_min` and `box_max` [S2, unofficial].
+-*   Camera parameters: origin $\mathbf{o}$, direction $\mathbf{d}$, and volume dimensions `volume_dims` [S2, unofficial].
+-*   Step size scaling factor `dt_scale` [S2, unofficial].
++The method computes the final pixel color by integrating light contribution along a ray $r(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the camera origin and $\mathbf{d}$ is the normalized direction vector. The integration proceeds from the camera outward (front-to-back) through the volume bounds.
+ 
+-**Outputs:**
+-*   Accumulated color $C$ and opacity $\alpha$ for each pixel [S2, unofficial].
++### Inputs and Outputs
++*   **Inputs**:
++    *   Camera parameters: Origin $\mathbf{o}$, direction $\mathbf{d}$, view matrix, projection matrix.
++    *   Volume data: A 3D texture (scalar field) defined by dimensions $V_{dims} = (V_x, V_y, V_z)$ and bounds $[box_{min}, box_{max}]$.
++    *   Transfer function: A 2D colormap texture mapping scalar values to RGBA color.
++    *   Parameters: Step size scale factor $dt_{scale}$, early termination threshold $T_{thresh}$ (typically 0.95 opacity).
++*   **Outputs**:
++    *   Final pixel color $C_{final}$ and accumulated opacity $A_{final}$.
+ 
+-**Data Structures:**
+-*   **Volume Texture:** 3D texture. Access via normalized coordinates. For 16-bit data, values are read as integers and divided by 65536.0; for 8-bit/float, read directly [S2, unofficial].
+-*   **Colormap Texture:** 2D texture. The x-coordinate represents the normalized scalar value, and the y-coordinate is fixed at 0.5 [S2, unofficial].
++### Data Structures
++*   **Volume Texture**: 3D texture storing scalar values. For 16-bit data, values are normalized by 65536.0; for 8-bit/float, values are used directly [S2, unofficial].
++*   **Colormap Texture**: 2D texture where the x-coordinate represents the normalized scalar value and the y-coordinate is fixed (e.g., 0.5) to sample the transfer function [S2, unofficial].
++*   **Ray State**:
++    *   $t_{entry}$: Distance to volume entry.
++    *   $t_{exit}$: Distance to volume exit.
++    *   $p$: Current position in world space.
++    *   $C$: Accumulated color (RGB).
++    *   $A$: Accumulated opacity (A).
+ 
+-**Algorithm Steps:**
++### Numbered Steps
+ 
+-1.  **Ray Setup:**
+-    *   Calculate the ray direction $\mathbf{d} = \text{normalize}(\mathbf{v}_{ray})$ [S2, unofficial].
+-    *   Intersect the ray with the volume bounding box to find entry distance $t_0$ and exit distance $t_1$ [S2, unofficial].
+-    *   If $t_0 > t_1$, discard the ray [S2, unofficial].
+-    *   Clamp entry distance: $t_{hit} = \max(t_0, 0.0)$ [S2, unofficial].
++1.  **Calculate Back Plate Position**: Determine the position of the back of the volume bounding box relative to the camera to establish the maximum ray extent [S1, unofficial].
++2.  **Calculate Ray Direction**: Normalize the view ray direction vector $\mathbf{d}$ [S2, unofficial].
++3.  **Calculate Front Plate Position**: Determine the position of the front of the volume bounding box [S1, unofficial].
++4.  **Intersect Ray with Volume Bounds**: Compute the entry distance $t_0$ and exit distance $t_1$ where the ray intersects the bounding box defined by $box_{min}$ and $box_{max}$ [S2, unofficial].
++    *   If $t_0 > t_1$, discard the ray (the ray does not intersect the volume) [S2, unofficial].
++    *   Clamp the entry distance to non-negative values: $t_{entry} = \max(t_0, 0.0)$ [S2, unofficial].
++5.  **Calculate Step Size**: Determine the step size $\Delta t$ based on the volume dimensions, ray direction, and a scaling factor $dt_{scale}$ [S2, unofficial]. The base step is derived from the voxel traversal rates:
++    $$ \Delta t = dt_{scale} \times \min \left( \frac{1}{|d_x| \cdot V_x}, \frac{1}{|d_y| \cdot V_y}, \frac{1}{|d_z| \cdot V_z} \right) $$
++    [S2, unofficial]. Note: In implementation, this is often computed as `1.0 / (vec3(volume_dims) * abs(ray_dir))` [S2, unofficial].
++6.  **Generate Jitter Offset**: To reduce aliasing artifacts (specifically "wood grain" patterns), generate a random offset for the starting position within the first voxel [S2, unofficial]. The offset is calculated using a hash function (e.g., `wang_hash`) on the fragment coordinates:
++    $$ \text{offset} = \text{wang\_hash}(\text{int}(gl\_FragCoord.x + 640.0 \cdot gl\_FragCoord.y)) $$
++    [S2, unofficial].
++7.  **Initialize Sample Position**: Set the initial sample position $p$ at the entry point plus the jittered offset:
++    $$ p = \mathbf{o} + (t_{entry} + \text{offset} \cdot \Delta t) \cdot \mathbf{d} $$
++    [S2, unofficial].
++8.  **Marching Loop**: Iterate along the ray from $t_{entry}$ to $t_{exit}$ with step $\Delta t$. In each iteration:
++    a. **Sample Volume Value**: Sample the scalar value $v$ from the volume texture at position $p$ [S2, unofficial].
++        *   For 16-bit data: $v = \text{texture}(\text{volume}, p).r / 65536.0$ [S2, unofficial].
++        *   For 8-bit/float data: $v = \text{texture}(\text{volume}, p).r$ [S2, unofficial].
++    b. **Map to Color**: Sample the colormap texture using the normalized value $v$ to get the transfer function output [S2, unofficial]:
++        $$ \text{trans\_sample} = \text{texture}(\text{colormap}, \text{vec2}(v, 0.5)) $$
++        [S2, unofficial].
++    c. **Combine Color and Opacity**: Construct the sample color $C_{sample}$ and opacity $A_{sample}$ [S2, unofficial]:
++        $$ C_{sample} = \text{trans\_sample}.rgb $$
++        $$ A_{sample} = v \cdot \text{trans\_sample}.a $$
++        [S2, unofficial].
++    d. **Apply Opacity Correction**: Correct the sample opacity for the step size to approximate the integral of absorption over the segment [S2, unofficial]:
++        $$ A_{corrected} = 1 - (1 - A_{sample})^{dt_{scale}} $$
++        [S2, unofficial].
++    e. **Front-to-Back Compositing**: Accumulate the color and opacity into the running totals $C$ and $A$ [S2, unofficial]:
++        $$ C \leftarrow C + (1.0 - A) \cdot A_{corrected} \cdot C_{sample} $$
++        $$ A \leftarrow A + (1.0 - A) \cdot A_{corrected} $$
++        [S2, unofficial].
++    f. **Advance Position**: Move to the next sample point:
++        $$ p \leftarrow p + \mathbf{d} \cdot \Delta t $$
++        [S2, unofficial].
++    g. **Early Ray Termination (ERT)**: If the accumulated opacity $A \ge 0.95$, break the loop [S2, unofficial].
++9.  **Update Controller and View Matrix**: After the marching pass, update the controller and view matrix based on the previous state, applying rescaling if necessary [S1, unofficial].
++10. **Draw Frame and Generate Color Maps**: Render the frame around the volume and generate any necessary color maps for the current frame [S1, unofficial].
+ 
+-2.  **Step Size Calculation:**
+-    *   Compute the base step size $dt$ based on volume dimensions and ray direction [S2, unofficial]:
+-        $$ dt = dt_{scale} \times \min \left( \frac{1}{|d_x| \cdot D_x}, \frac{1}{|d_y| \cdot D_y}, \frac{1}{|d_z| \cdot D_z} \right) $$
+-        where $D_x, D_y, D_z$ are the volume dimensions [S2, unofficial].
+-
+-3.  **Jittering:**
+-    *   Generate a random offset to jitter the starting position within the first voxel to reduce aliasing artifacts (e.g., 'wood grain') [S2, unofficial].
+-    *   Calculate offset using a hash function (e.g., `wang_hash`) on fragment coordinates [S2, unofficial]:
+-        $$ \text{offset} = \text{wang\_hash}(\text{int}(gl\_FragCoord.x + 640.0 \cdot gl\_FragCoord.y)) $$
+-    *   [G] The hash output is typically normalized to $[0, 1)$ or $[-0.5, 0.5)$. The source implies it scales with $dt$.
+-
+-4.  **Initialization:**
+-    *   Initialize sample position $\mathbf{p}$:
+-        $$ \mathbf{p} = \mathbf{o} + (t_{hit} + \text{offset} \cdot dt) \cdot \mathbf{d} $$
+-    *   Initialize accumulated color $C = (0, 0, 0)$ and opacity $\alpha = 0$ [S2, unofficial].
+-
+-5.  **Marching Loop:**
+-    *   Loop from current distance $t = t_{hit}$ to $t_1$ with step $dt$ [S2, unofficial].
+-    *   **Sample:** Read scalar value $v$ from volume texture at $\mathbf{p}$ [S2, unofficial].
+-        *   If 16-bit: $v = \text{texture}(\text{volume}, \mathbf{p}).r / 65536.0$ [S2, unofficial].
+-        *   Else: $v = \text{texture}(\text{volume}, \mathbf{p}).r$ [S2, unofficial].
+-    *   **Map:** Retrieve RGBA from colormap: $\mathbf{c}_{map} = \text{texture}(\text{colormap}, (v, 0.5))$ [S2, unofficial].
+-    *   **Combine:** Form segment color $\mathbf{c}_{seg}$ and opacity $\alpha_{seg}$:
+-        $$ \mathbf{c}_{seg} = \mathbf{c}_{map}.rgb $$
+-        $$ \alpha_{seg} = v \cdot \mathbf{c}_{map}.a $$
+-    *   **Opacity Correction:** Adjust opacity for the step size to approximate integral absorption [S2, unofficial]:
+-        $$ \alpha_{corrected} = 1 - (1 - \alpha_{seg})^{dt_{scale}} $$
+-    *   **Accumulate (Front-to-Back):**
+-        $$ C \leftarrow C + (1 - \alpha) \cdot \alpha_{corrected} \cdot \mathbf{c}_{seg} $$
+-        $$ \alpha \leftarrow \alpha + (1 - \alpha) \cdot \alpha_{corrected} $$
+-    *   **Early Ray Termination (ERT):** If $\alpha \ge 0.95$, break loop [S2, unofficial].
+-    *   **Advance:** $\mathbf{p} \leftarrow \mathbf{p} + \mathbf{d} \cdot dt$ [S2, unofficial].
+-
+-6.  **Finalization:**
+-    *   Draw frame around volume and generate color maps if not pre-computed [S1, unofficial].
+-    *   Update controller and view matrix based on previous state, applying rescaling if necessary [S1, unofficial].
+-
+-**Pseudocode:**
++### Pseudocode
+ 
+ ```python
+-def volume_ray_casting(ray_origin, ray_dir, volume_tex, colormap_tex, volume_dims, dt_scale):
+-    # 1. Ray-Bbox Intersection
+-    # Simplified AABB intersection logic
+-    inv_dir = 1.0 / ray_dir
+-    t0 = (volume_dims.min - ray_origin) * inv_dir
+-    t1 = (volume_dims.max - ray_origin) * inv_dir
+-    t_enter = max(min(t0), min(t1))
+-    t_exit = min(max(t0), max(t1))
++def volume_ray_casting(camera_origin, camera_direction, volume_texture, colormap_texture, volume_dims, dt_scale, t_thresh):
++    """
++    Renders a single pixel using volume ray casting with marching.
+     
+-    if t_enter > t_exit:
+-        return vec3(0.0) # Ray misses volume
+-
+-    t_hit = max(t_enter, 0.0)
++    Args:
++        camera_origin: vec3, camera position.
++        camera_direction: vec3, normalized ray direction.
++        volume_texture: 3D texture object.
++        colormap_texture: 2D texture object.
++        volume_dims: vec3, dimensions of the volume (Vx, Vy, Vz).
++        dt_scale: float, step size multiplier.
++        t_thresh: float, opacity threshold for early termination.
++        
++    Returns:
++        vec4, final color with accumulated opacity.
++    """
++    # 1. Intersect ray with bounding box [box_min, box_max]
++    # Note: box_min and box_max are assumed to be available in the shader context
++    t0, t1 = intersect_box(camera_origin, camera_direction, box_min, box_max)
+     
+-    # 2. Step Size Calculation
+-    # dt_vec = 1.0 / (volume_dims * abs(ray_dir))
+-    dt_vec = 1.0 / (volume_dims * abs(ray_dir))
++    # If no intersection, return transparent black
++    if t0 > t1:
++        return vec4(0.0, 0.0, 0.0, 0.0)
++    
++    # Clamp entry to non-negative
++    t_entry = max(t0, 0.0)
++    t_exit = t1
++    
++    # 2. Calculate step size
++    # dt_vec = 1.0 / (volume_dims * abs(camera_direction))
++    # dt = dt_scale * min(dt_vec)
++    dt_vec = vec3(1.0) / (volume_dims * abs(camera_direction))
+     dt = dt_scale * min(dt_vec.x, dt_vec.y, dt_vec.z)
+     
+-    # 3. Jittering
+-    # Assuming fragment coordinates are available as global or passed
+-    # offset = wang_hash(int(gl_FragCoord.x + 640.0 * gl_FragCoord.y))
+-    # Note: wang_hash returns integer, needs normalization. 
+-    # Source implies offset * dt is added. Let's assume hash returns [0, 2^32) or similar.
+-    # For implementation, we assume a normalized random float [0, 1) derived from hash.
+-    hash_val = wang_hash(int(gl_FragCoord.x + 640.0 * gl_FragCoord.y))
+-    jitter = normalize_hash(hash_val) # [0, 1)
+-    p = ray_origin + (t_hit + jitter * dt) * ray_dir
++    # 3. Generate jitter offset
++    # Assuming gl_FragCoord is available in the shader context
++    frag_coord = get_frag_coord() # vec2
++    offset = wang_hash(int(frag_coord.x + 640.0 * frag_coord.y))
+     
+-    # 4. Initialization
++    # 4. Initialize position
++    p = camera_origin + (t_entry + offset * dt) * camera_direction
++    
++    # 5. Initialize accumulators
+     acc_color = vec3(0.0)
+     acc_alpha = 0.0
+     
+-    # 5. Marching Loop
+-    current_t = t_hit
+-    while current_t < t_exit:
+-        # Sample Volume
+-        # val = texture(volume, p).r
+-        # If 16-bit data: val /= 65536.0
+-        val = texture(volume_tex, p).r
++    # 6. Marching loop
++    t = t_entry + offset * dt
++    while t < t_exit:
++        # Sample volume value
++        val_raw = texture(volume_texture, p).r
++        # Normalize if 16-bit, else use directly
++        val = val_raw / 65536.0 if is_16bit else val_raw
+         
+-        # Map to Color
+-        trans_sample = texture(colormap_tex, vec2(val, 0.5))
+-        seg_color = trans_sample.rgb
+-        seg_alpha_raw = val * trans_sample.a
++        # Map to color via colormap
++        trans_sample = texture(colormap_texture, vec2(val, 0.5))
+         
+-        # Opacity Correction
+-        seg_alpha = 1.0 - pow(1.0 - seg_alpha_raw, dt_scale)
++        # Combine color and opacity
++        sample_color = trans_sample.rgb
++        sample_alpha = val * trans_sample.a
+         
+-        # Accumulate
+-        # color.rgb += (1.0 - color.a) * val_color.a * val_color.rgb
+-        # color.a += (1.0 - color.a) * val_color.a
+-        weight = (1.0 - acc_alpha) * seg_alpha
+-        acc_color += weight * seg_color
+-        acc_alpha += weight
++        # Apply opacity correction for step size
++        corrected_alpha = 1.0 - pow(1.0 - sample_alpha, dt_scale)
++        
++        # Front-to-back compositing
++        # C_new = C_old + (1 - A_old) * A_sample * C_sample
++        # A_new = A_old + (1 - A_old) * A_sample
++        acc_color += (1.0 - acc_alpha) * corrected_alpha * sample_color
++        acc_alpha += (1.0 - acc_alpha) * corrected_alpha
+         
+         # Early Ray Termination
+-        if acc_alpha >= 0.95:
++        if acc_alpha >= t_thresh:
+             break
+             
+         # Advance
+-        p += ray_dir * dt
+-        current_t += dt
++        t += dt
++        p = camera_origin + t * camera_direction
+         
+-    return acc_color
++    return vec4(acc_color, acc_alpha)
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Aliasing:** Lack of jittering causes 'wood grain' artifacts [S2, unofficial].
+-*   **Flat Surfaces:** Jittering can cause artifacts on flat surfaces ('with offset is bad for flat surfaces') [S2, unofficial].
+-*   **16-bit Data:** Requires division by 65536.0 to normalize [S2, unofficial].
+-*   **Performance:** ERT threshold of 0.95 is used to terminate rays early [S2, unofficial].
++### Parameters
++*   `dt_scale`: A uniform float parameter controlling the step size multiplier. It scales the base voxel traversal step. Typical value not specified in sources [S2, unofficial].
++*   `t_thresh`: Early termination threshold. Default value is 0.95 opacity [S2, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Aliasing**: Not jittering the starting position causes "wood grain" aliasing artifacts [S2, unofficial]. However, jittering can cause artifacts on flat surfaces ("with offset is bad for flat surfaces") [S2, unofficial].
++*   **Double Launch**: Calculating the front and back plate positions separately may require launching the process twice. It is recommended to calculate the front plate and start marching in the same shader pass to avoid redundant computation [S1, unofficial].
++*   **Precision**: Ensure correct normalization of volume texture data (e.g., dividing by 65536.0 for 16-bit data) to prevent incorrect density interpretation [S2, unofficial].
++
++## Subtopics
++
++### [Shadow Occlusion via Occlusion Camera](16371-shadow-occlusion-via-occlusion-camera.md)
++This method uses a dedicated child camera (the "Occlusion Camera") to render a depth map from the light's perspective, allowing scene geometry to block volumetric light beams. Unlike standard URP shadows which depend on the light's Shadow Type and global URP shadow settings, this occlusion map operates independently, enabling volumetric shadows even when the light casts no regular geometric shadows.
++
++### [Basic Volumetric Cone Lighting](17756-basic-volumetric-cone-lighting.md)
++Basic Volumetric Cone Lighting is a post-processing technique that renders a volumetric light beam shaped like a cone originating from a light position and pointing in a specific direction, using screen-space raymarching. It solves the problem of rendering visible light shafts (god rays) in real-time by accumulating light density along rays cast from the camera into the scene. It is distinguished from sibling methods like [Shadow Occlusion via Occlusion Camera](16371-shadow-occlusion-via-occlusion-camera.md) by its reliance on a single depth buffer for culling rather than a secondary camera pass, and from [Volume Ray Casting with Marching](14353-volume-ray-casting-with-marching.md) by its specific application to spotlight-shaped volumetric effects rather than general volume density integration.
++
++### Neural Asset Shader
++A technique to convert a neural radiance field model into efficient GLSL or HLSL shader code, enabling real-time volumetric raycasting that blends with existing engine subsystems [S3, unofficial]. It transpiles the optimized model architecture (grid features + MLPs) into pixel shader code, executes volumetric raycasting in the pixel shader by aggregating sample points to compute the final color, and blends the rendered neural asset result with the background consisting of other mesh- or volume-based objects [S3, unofficial].
++
++### Raymarched Anisotropic Scattering with Soft Shadows
++Enhanced raymarching for volumetric media that supports configurable dual-lobe anisotropic scattering, soft screen-space penumbrae, and spatial step jitter [S4, unofficial]. It packs shadow steps and anisotropy values into a single uniform slot for compatibility, applies spatial step jitter during raymarching to reduce aliasing and banding artifacts, modulates density based on height for natural atmospheric effects, generates coherent wisps and axis-weighted dust patterns for visual detail, and calculates soft screen-space penumbrae for shadows cast by volumetric objects [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of steps along the ray. $N$ depends on volume depth and step size $dt$.
+-*   **Memory Complexity:** $O(V)$ for volume texture storage, $O(C)$ for colormap.
+-*   **Performance:** Early Ray Termination (ERT) significantly reduces average computation time for opaque volumes [S2, unofficial].
+-*   **Strengths:** Simple to implement; jittering reduces aliasing; ERT improves performance [S2, unofficial].
+-*   **Limitations:** Fixed step size may lead to inaccuracies or aliasing if not jittered; jittering can artifact flat surfaces [S2, unofficial].
+-*   **When to use:** Real-time visualization of scalar volumes where aliasing is a concern and simple compositing is sufficient [S2, unofficial].
+-*   **When not to use:** When high-fidelity lighting (multiple scattering) is required, or when the volume has very thin structures that might be missed by large steps [S2, unofficial].
++*   **Time Complexity**: Linear with respect to the number of samples along the ray, which depends on the volume depth and step size. The step size is inversely proportional to the ray direction components and volume dimensions [S2, unofficial].
++*   **Memory Complexity**: Depends on the size of the 3D volume texture and the 2D colormap texture. No additional large buffers are required beyond standard render targets [S2, unofficial].
++*   **Performance**: The method is computationally intensive due to the large number of texture samples required for smooth rendering. Early Ray Termination (ERT) significantly reduces the average number of samples per ray, especially for opaque regions [S2, unofficial].
++*   **Strengths**: Provides high-quality, physically-based volume rendering with accurate transparency and depth cues. It is flexible and works with any scalar field data [S2, unofficial].
++*   **Limitations**: Susceptible to aliasing artifacts ("wood grain") if not jittered, and jittering can introduce artifacts on flat surfaces [S2, unofficial]. Performance degrades with large volumes or high resolution.
++*   **When to Use**: Suitable for general-purpose volume visualization where quality is prioritized over extreme performance, or when ERT can effectively cull opaque regions.
++*   **When Not to Use**: Not suitable for real-time applications with very large volumes or strict performance constraints without optimization (e.g., hierarchical level-of-detail).
+ 
+ ## Background
+-This method is described in the context of WebGL-based numerical PDE visualization and the VisWeb library [S1, S2, unofficial]. It is presented as a standard technique for volume rendering in web environments, leveraging GPU shaders for parallel ray casting [S1, S2, unofficial]. The specific implementation details, including jittering and opacity correction, are derived from the VisWeb project [S2, unofficial].
++The technique is a fundamental method in volume rendering, rooted in the discretization of the Radiative Transfer Equation (RTE) along rays [S2, unofficial]. It is widely used in medical imaging, scientific visualization, and computer graphics for rendering 3D scalar data. The specific implementation details, such as jittering and early termination, are common optimizations to improve visual quality and performance [S2, unofficial]. The method is often implemented in fragment shaders for GPU acceleration [S2, unofficial].
+ 
+ ## Sources
+ [S1] WebGL for Numerical PDEs (Session 11): Volume Ray Casting, https://www.youtube.com/watch?v=X095f9QzSBo, fetched 2026-10-27 (unofficial)
+-[S2] johanna-b/VisWeb, https://github.com/johanna-b/VisWeb, fetched 2026-10-27 (unofficial)+[S2] johanna-b/VisWeb, https://github.com/johanna-b/VisWeb, fetched 2026-10-27 (unofficial)
++[S3] Neural Assets: Volumetric Object Capture and Rendering for Interactive Environments, https://core.ac.uk/download/552466290.pdf, fetched 2026-10-30 (unofficial)
++[S4] Improve volumetric lighting and emissive glow proxies, https://github.com/EVEngine/EVEngine/pull/462, fetched 2026-10-26 (unofficial)

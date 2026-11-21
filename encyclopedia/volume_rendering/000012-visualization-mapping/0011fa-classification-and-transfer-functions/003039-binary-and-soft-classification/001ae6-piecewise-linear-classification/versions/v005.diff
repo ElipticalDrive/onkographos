@@ -1,0 +1,95 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Piecewise-Linear Classification is a local classification technique that maps voxel intensity and derived features (such as gradient magnitude) to RGBA optical properties using piecewise-linear functions, commonly called ramps [S2, unofficial][S3, unofficial]. It solves the problem of emphasizing specific data features by allowing users to define smooth transitions between material classes, distinguishing it from the hard thresholds of [Binary Classification](931-binary-classification.md) and enabling multi-channel control unlike basic single-channel methods [S1, unofficial]. It is a specific instance of [Binary and Soft Classification](6229-binary-and-soft-classification.md) that relies on linear interpolation between user-defined keypoints.
++Piecewise-Linear Classification is a local classification technique that maps voxel intensity and derived features (such as gradient magnitude) to RGBA optical properties using piecewise-linear functions, commonly called ramps [S2, unofficial][S3, unofficial]. It solves the problem of emphasizing specific data features by mapping scalar values to visual properties [S2, unofficial]. It is a specific instance of [Binary and Soft Classification](6229-binary-and-soft-classification.md) that relies on linear interpolation between user-defined keypoints [S3, unofficial].
+ 
+ ## How it works
+@@ -13,16 +13,15 @@
+ **Data Structures:**
+ The transfer function is defined by keypoints. For each output channel (Red, Green, Blue, Alpha), a pair of sorted 1D arrays is stored:
+-*   $x_p$: Tensor of shape $(K,)$ containing sorted x-coordinates (input values) of the keypoints.
+-*   $y_p$: Tensor of shape $(K,)$ containing y-coordinates (output values) at those keypoints.
++*   $x_p$: Tensor of shape $(C, K)$ containing sorted x-coordinates (input values) of the keypoints [S3, unofficial].
++*   $y_p$: Tensor of shape $(C, K)$ containing y-coordinates (output values) at those keypoints [S3, unofficial].
+ *   $K$: The number of keypoints. The system supports any number of segments, though UIs may limit this (e.g., to three segments) [S2, unofficial].
+ 
+ **Numbered Steps:**
+-1.  **Define Keypoints:** The user specifies keypoints $(x_{p,i}, y_{p,i})$ for $i=0 \dots K-1$. By default, these are linear ramps representing 1:1 mappings, where high intensity maps to high opacity and white color [S1, unofficial].
++1.  **Define Keypoints:** The user specifies keypoints $(x_{p,i}, y_{p,i})$ for $i=0 \dots K-1$ [S3, unofficial]. By default, these are linear ramps representing 1:1 mappings, where high intensity maps to high opacity and white color [S1, unofficial].
+ 2.  **Compute Opacity:** Opacity is computed by passing the intensity $v$ through an intensity ramp and the gradient magnitude $g$ through a gradient ramp, then multiplying the results [S2, unofficial].
+     $$ \alpha = \text{Ramp}_{\alpha}(v) \times \text{Ramp}_{\alpha}(g) $$
+ 3.  **Compute Color:** Color components are computed by passing the intensity $v$ through separate red, green, and blue ramp functions [S2, unofficial].
+     $$ r = \text{Ramp}_{r}(v), \quad g = \text{Ramp}_{g}(v), \quad b = \text{Ramp}_{b}(v) $$
+-4.  **Evaluate Ramp Function:** For a given input $x$ and keypoints $x_p, y_p$, the output $y$ is determined by finding the segment containing $x$ and linearly interpolating [S3, unofficial].
+-    *   Extrapolation beyond the first and last keypoints is handled by extending the first and last segments, respectively [S3, unofficial].
++4.  **Evaluate Ramp Function:** For a given input $x$ and keypoints $x_p, y_p$, the output $y$ is determined by finding the segment containing $x$ and linearly interpolating [S3, unofficial]. Extrapolation beyond the first and last keypoints is handled by extending the first and last segments, respectively [S3, unofficial].
+ 
+ **Pseudocode:**
+@@ -67,5 +66,5 @@
+     mask = (x_unsq >= xp_left) & (x_unsq < xp_right)
+     
+-    # 6. Handle cases where no segment is selected (x >= last keypoint)
++    # 6. Handle cases where no segment is selected (x < first or x >= last keypoint)
+     # none_selected shape: (B, C, N)
+     none_selected = ~mask.any(dim=-1)
+@@ -75,7 +74,11 @@
+     idx = mask.float().argmax(dim=-1)
+     
+-    # 8. Assign last segment index to unselected points
++    # 8. Assign extrapolation indices: last segment for x >= last keypoint, first segment for x < first keypoint
+     if none_selected.any():
+-        idx[none_selected] = xp.shape[-1] - 2  # K - 2
++        idx[none_selected] = torch.where(
++            x_unsq.squeeze(-1) < xp[:, 0, None, None], 
++            0, 
++            xp.shape[-1] - 2  # K - 2
++        )
+         
+     # 9. Gather left and right x and y values for interpolation
+@@ -83,15 +86,11 @@
+     gather_idx = idx.unsqueeze(-1)
+     
+-    # xp_l, xp_r shape: (B, C, N, 1)
++    # xp_l, xp_r, yp_l, yp_r shape: (B, C, N, 1)
+     xp_l = torch.gather(xp, 2, gather_idx)
+-    xp_r = torch.gather(xp_right, 2, gather_idx) # Note: xp_right is already shifted, but gather needs correct indexing relative to xp
+-    # Correction: xp_right in step 4 was sliced. We need to gather from the original xp array using idx+1 for right side
+     xp_r = torch.gather(xp, 2, gather_idx + 1)
+-    
+-    # yp_l, yp_r shape: (B, C, N, 1)
+     yp_l = torch.gather(yp, 2, gather_idx)
+     yp_r = torch.gather(yp, 2, gather_idx + 1)
+     
+-    # 10. Linear interpolation
++    # 10. Linear interpolation [G]
+     # Avoid division by zero if xp_l == xp_r
+     denom = xp_r - xp_l
+@@ -116,17 +115,17 @@
+ **Edge Cases and Pitfalls:**
+ *   **Shape Validation:** If $x_p$ and $y_p$ do not have shape $(C, K)$, a `ValueError` is raised [S3, unofficial].
+-*   **Local Ambiguity:** Local classification fails when the region of interest has similar intensity and gradient to its background. For example, in MRI data, anatomically distinct regions of the same organ may be indistinguishable using only local classification [S2, unofficial].
++*   **Local Ambiguity:** Local classification fails when the region of interest has similar intensity and gradient to its background [S2, unofficial].
+ *   **Extrapolation:** Values outside the range of $x_p$ are extrapolated using the first or last segment [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot C \cdot K)$ per voxel, where $N$ is the number of samples, $C$ is the number of channels, and $K$ is the number of keypoints. In practice, $K$ is small, making it $O(N \cdot C)$.
+-*   **Memory Complexity:** $O(C \cdot K)$ to store the keypoints.
+-*   **Strengths:** Intuitive user interface; allows rapid switching between classifiers with a single keystroke to compare views [S2, unofficial]; computationally efficient for GPU implementation via texture lookup or simple interpolation [S1, unofficial].
+-*   **Limitations:** Cannot distinguish regions with similar local features (intensity/gradient) but different global context [S2, unofficial].
+-*   **When to use:** When the user needs to quickly visualize specific intensity ranges or gradients and the data has distinct local feature distributions.
+-*   **When not to use:** When the data contains regions with ambiguous local features that require global context or multi-dimensional classification beyond intensity and gradient [S2, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Allows rapid switching between classifiers with a single keystroke to compare views [S2, unofficial].
++*   **Limitations:** Fails when the region of interest has similar intensity and gradient to its background [S2, unofficial].
++*   **When to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-Piecewise-linear classification was introduced as a standard method for volume visualization to allow users to define transfer functions interactively. It is often associated with early volume rendering systems that utilized 3D texture mapping for hardware acceleration [S1, unofficial]. The technique was formalized in systems like the one described in *Achieving Direct Volume Visualization with Interactive Semantic Region Selection* (1990), which highlighted the use of ramps for opacity and color mapping [S2, unofficial]. It remains a foundational technique in volume rendering, often implemented as a default or starting point for more complex classification methods.
++The technique was formalized in systems described in *Achieving Direct Volume Visualization with Interactive Semantic Region Selection*, which highlighted the use of ramps for opacity and color mapping [S2, unofficial]. Early implementations leveraged 3D texture mapping in hardware for display, converting volume intensity levels into RGBA format [S1, unofficial].
+ 
+ ## Sources

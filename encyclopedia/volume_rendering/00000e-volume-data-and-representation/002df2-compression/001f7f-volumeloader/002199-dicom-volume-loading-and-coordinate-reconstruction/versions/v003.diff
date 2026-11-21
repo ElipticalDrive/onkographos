@@ -1,0 +1,435 @@
+--- v002.md
++++ v003.md
+@@ -1,233 +1,189 @@
+ # DICOM Volume Loading and Coordinate Reconstruction
+ 
+-Also called: DICOM File Loading and Stacking, DICOM Loader, DICOM Volume Reconstruction Loading & Density Conversion, DICOM to Density Conversion, Volume DICOM Loading and Rescaling
++Also called: DICOM File Loading and Stacking, DICOM Loader, DICOM Volume Loading and Normalization, DICOM Volume Reconstruction Loading & Density Conversion, DICOM to Density Conversion, Volume DICOM Loading and Rescaling
+ 
+ ## Overview
+-This method loads a 3D volumetric dataset from a series of DICOM image files, reconstructs the physical voxel grid by resolving coordinate system conventions, and converts raw pixel values into physical density [S2, unofficial]. It specifically addresses the discrepancy between DICOM's pixel-center coordinate convention and the corner-point convention required by downstream volume rendering engines, while handling the non-cubic nature of medical voxels [S1, unofficial]. It differs from generic volume loaders by explicitly managing DICOM-specific metadata (Rescale Slope/Intercept, Pixel Spacing, Slice Thickness) and orientation flips (rot90) necessary for correct anatomical alignment [S2, S3, unofficial].
++This method loads a 3D volume from a series of DICOM slice files, converts raw pixel values to physical density (Hounsfield Units normalized to water = 1.0), and reconstructs the correct voxel partition by accounting for DICOM coordinate conventions and spacing [S2, S3, unofficial]. It sets itself apart from generic loaders by explicitly handling the conversion from DICOM's middle-of-pixel coordinate system to the corner-point convention required by many rendering engines (e.g., ODL), and by normalizing density relative to water rather than just scaling to [0, 1] [S2, unofficial].
+ 
+ ## How it works
+-**Inputs:** A directory of DICOM files (typically `.dcm` or `.IMA`), sorted by filename [S2, unofficial].
+-**Outputs:** A 3D density array (float), a physical bounding box (min/max points), and voxel dimensions (scale) [S2, S3, unofficial].
+-
+-### Data Structures
+-1.  **DICOM Metadata Object:** Extracted per file [S2, S3, unofficial].
+-    *   `rows`: Integer (image height in pixels) [S3, unofficial].
+-    *   `cols`: Integer (image width in pixels) [S3, unofficial].
+-    *   `pixelSpacing`: Array of 2 floats `[spacing_y, spacing_x]` in mm [S2, unofficial].
+-    *   `sliceThickness`: Float in mm [S2, unofficial].
+-    *   `bitsAllocated`: Integer (usually 16) [S3, unofficial].
+-    *   `pixelRepresentation`: Integer (0 for unsigned, 1 for signed) [S3, unofficial].
+-    *   `rescaleSlope`: Float (default 1.0) [S2, unofficial].
+-    *   `rescaleIntercept`: Float (default -1000.0) [S2, unofficial].
+-    *   `dataCollectionCenterPatient`: Array of 3 floats `[x, y, z]` in mm [S2, unofficial].
+-    *   `reconstructionTargetCenterPatient`: Array of 3 floats `[x, y, z]` in mm [S2, unofficial].
+-2.  **Volume Data Buffer:**
+-    *   Type: `Uint16Array` or `Float32Array` depending on intermediate processing [S3, unofficial].
+-    *   Size: `rows * cols * num_slices` [S3, unofficial].
+-3.  **Physical Bounds:**
+-    *   `min_pt`: Array of 3 floats `[x, y, z]` [S2, unofficial].
+-    *   `max_pt`: Array of 3 floats `[x, y, z]` [S2, unofficial].
+-
+-### Steps
++**Inputs:** A directory of DICOM files (typically `.dcm` or `.IMA`), sorted by filename.
++**Outputs:** A 3D volume array (density values), voxel size (scale), and world-space bounds (min/max points).
++
++**Data Structures:**
++*   `volumeData`: 3D array of shape `(num_slices, height, width)` or `(width, height, num_slices)` depending on final layout. Dtype `float32` for density, or `uint16` for raw storage [S2, S4, unofficial].
++*   `scale`: Array `[pixelSpacing[0], pixelSpacing[1], sliceThickness]` in millimeters [S2, S3, unofficial].
++*   `bounds`: `min_pt` and `max_pt` defining the world-space bounding box [S2, unofficial].
++
++**Steps:**
+ 
+ 1.  **File Selection and Sorting:**
+-    *   Scan the input directory for DICOM files [S2, unofficial].
+-    *   Filter by suffix (e.g., `.IMA` or `.dcm`) [S2, unofficial].
+-    *   Sort files alphabetically by filename to ensure correct slice ordering [S2, unofficial].
+-
+-2.  **Metadata Extraction and Validation:**
+-    *   For each file, decode the DICOM header [S2, unofficial].
+-    *   Extract `rows`, `cols`, `pixelSpacing`, `sliceThickness`, `bitsAllocated`, `pixelRepresentation`, `rescaleSlope`, `rescaleIntercept`, `dataCollectionCenterPatient`, and `reconstructionTargetCenterPatient` [S2, S3, unofficial].
+-    *   Calculate `bytesPerVoxel = bitsAllocated / 8` [S3, unofficial].
+-    *   **Pitfall:** If `bytesPerVoxel != 2`, throw an error. Unsupported byte depths are not handled [S3, unofficial].
+-
+-3.  **Pixel Data Loading and Orientation Correction:**
+-    *   Read raw pixel data as unsigned short (`'H'`) [S2, unofficial].
+-    *   Reshape raw data to `[cols, rows]` in C-order [S2, unofficial].
+-    *   Apply rotation to correct DICOM orientation: `data_array = np.rot90(data_array, k=-1)` (equivalent to 270-degree counter-clockwise or -90-degree rotation) [S2, unofficial].
+-    *   *Note:* This rotation accounts for the standard DICOM display convention where the image is flipped horizontally relative to the patient's left-right axis [S2, unofficial].
+-
+-4.  **Hounsfield Unit (HU) to Density Conversion:**
+-    *   Convert raw pixel values to Hounsfield Units:
+-        $$ \text{HU} = \text{RescaleSlope} \cdot \text{data\_array} + \text{RescaleIntercept} $$
+-    *   Convert HU to normalized density (where water = 1.0):
+-        $$ \text{density} = \frac{\text{HU} + 1000}{1000} $$
+-        $$ \text{density} = \frac{\text{RescaleSlope} \cdot \text{data\_array} + \text{RescaleIntercept} + 1000}{1000} $$ [S2, unofficial].
+-    *   *Note:* Some implementations store intermediate values as signed integers by adding $2^{15}$ (32768) to handle negative HU values before conversion [S3, unofficial].
+-
+-5.  **Volume Stacking:**
+-    *   Initialize a 3D buffer `volumeData` of size `rows * cols * num_slices` [S3, unofficial].
+-    *   Iterate through sorted slices $i$ from $0$ to $N-1$:
+-        *   Calculate `sliceOffset = i * (rows * cols)`.
+-        *   Copy converted density values into `volumeData[sliceOffset : sliceOffset + (rows*cols)]` [S3, unofficial].
+-
+-6.  **Coordinate Reconstruction and Bounding Box Calculation:**
++    Load all DICOM files from the specified directory. Filter for extensions `.dcm` or `.IMA`. Sort the file list alphabetically to ensure correct slice ordering [S2, S4, unofficial].
++
++2.  **Metadata Extraction:**
++    Read the first DICOM file to determine base dimensions and pixel representation [S4, unofficial].
++    *   `rows`: Number of rows (height).
++    *   `cols`: Number of columns (width).
++    *   `bitsAllocated`: Bits per sample.
++    *   `pixelRepresentation`: 0 for unsigned, 1 for signed [S3, unofficial].
++    *   `pixelSpacing`: `[spacing_y, spacing_x]` (Note: DICOM order is often Y then X) [S2, unofficial].
++    *   `sliceThickness`: Distance between slices [S2, unofficial].
++    *   `RescaleSlope` and `RescaleIntercept`: Used for HU conversion [S2, unofficial].
++    *   `DataCollectionCenterPatient`: 3D point `(x, y, z)` for the center of the slice [S2, unofficial].
++    *   `ReconstructionTargetCenterPatient`: Optional target center [S2, unofficial].
++
++3.  **Volume Initialization:**
++    Calculate `num_slices` from the number of files.
++    Initialize a buffer. If storing raw data, use `Uint16Array` of size `rows * cols * num_slices` [S3, unofficial]. If storing density, use `float32` array of shape `(num_slices, rows, cols)` [S4, unofficial].
++
++4.  **Pixel Data Loading and Orientation Correction:**
++    Iterate through each sorted DICOM file:
++    *   Read the pixel array.
++    *   Determine `bytesPerVoxel = bitsAllocated / 8`. If `bytesPerVoxel != 2`, throw an error (unsupported format) [S3, unofficial].
++    *   Cast pixel data to `float32`.
++    *   Reshape to `[cols, rows]` in C-order [S2, unofficial].
++    *   **Orientation Fix:** DICOM images are often stored upside-down or rotated relative to standard image coordinates. Apply a -90 degree rotation: `data_array = np.rot90(data_array, k=-1)` [S2, S4, unofficial].
++    *   Store in the volume buffer.
++
++5.  **HU to Density Conversion:**
++    Convert raw pixel values to Hounsfield Units (HU), then to physical density where water (0 HU) = 1.0 [S2, unofficial].
++    Formula:
++    $$ \text{HU} = \text{RescaleSlope} \cdot \text{raw\_value} + \text{RescaleIntercept} $$
++    $$ \text{density} = \frac{\text{HU} + 1000}{1000} $$
++    Combined:
++    $$ \text{density} = \frac{\text{RescaleSlope} \cdot \text{raw\_value} + \text{RescaleIntercept} + 1000}{1000} $$
++    [S2, unofficial].
++
++    *Note: Some implementations normalize to [0, 255] for visualization, but for physical volume rendering, the density formula above is required [S2, unofficial].*
++
++6.  **Coordinate Reconstruction and Bounds Calculation:**
++    Compute the world-space bounding box. DICOM coordinates represent the *center* of the voxel, while many renderers expect *corner* coordinates [S2, unofficial].
++
+     *   **Voxel Size:**
+-        $$ \text{voxel\_size} = [\text{pixelSpacing}[0], \text{pixelSpacing}[1], \text{sliceThickness}] $$ [S2, S3, unofficial].
+-        *   Note: `pixelSpacing[0]` corresponds to Y (rows) and `pixelSpacing[1]` to X (cols) in DICOM, but after rotation, the array dimensions map to physical axes. The scale vector is typically `[pixelSpacing[0], pixelSpacing[1], sliceThickness]` [S3, unofficial].
+-    *   **Slice Distance Calculation:**
+-        *   If `num_slices > 1`:
+-            $$ \text{slice\_distance} = | \text{DataCollectionCenterPatient}_{\text{slice1}}[2] - \text{DataCollectionCenterPatient}_{\text{slice0}}[2] | $$
+-        *   If `num_slices == 1`:
+-            $$ \text{slice\_distance} = \text{sliceThickness} $$ [S2, unofficial].
+-    *   **Center Point Calculation:**
+-        *   Use `ReconstructionTargetCenterPatient` or `DataCollectionCenterPatient` of the first slice as the reference center `mid_pt` [S2, unofficial].
+-    *   **Bounds Calculation (Corner-Point Convention):**
+-        *   Volume rendering engines often require corner-point coordinates, whereas DICOM stores pixel centers [S2, unofficial].
+-        *   Calculate `min_pt` and `max_pt` based on `voxel_size` and `shape` (`[rows, cols, num_slices]`) [S2, unofficial].
+-        *   **Z-Axis Bounds:**
+-            *   Compute raw bounds using the Z-component of `DataCollectionCenterPatient` for the first and last slices [S2, unofficial].
+-            *   Adjust for corner-point convention by subtracting/adding half the `slice_distance` [S2, unofficial].
+-            *   **Pitfall:** If the calculation of Z-bounds fails (e.g., min > max due to sorting or convention errors), reverse the order: use the last slice for `min_pt[2]` and the first for `max_pt[2]`, and log an error [S2, unofficial].
+-        *   **Y-Axis (Axis 1) Convention:**
+-            *   DICOM Y-axis convention is often reversed relative to standard Cartesian coordinates used in rendering [S2, unofficial]. Swap `min_pt[1]` and `max_pt[1]` to correct this [S2, unofficial].
+-        *   **X-Axis (Axis 0):**
+-            *   Typically follows standard left-to-right or right-to-left depending on the specific DICOM orientation tags (PatientLeft/Right) [S2, unofficial]. The rotation in Step 3 handles the in-plane flip, but the bounding box must align with the final array layout [S2, unofficial].
+-
+-7.  **Final Volume Layout:**
+-    *   The resulting volume data is often transposed or rearranged to match the renderer's expected memory layout (e.g., from `[rows, cols, slices]` to `[slices, rows, cols]` or similar, depending on the specific engine's `VolumeLoader` interface) [S2, unofficial].
+-    *   The physical size in millimeters is stored separately from the texture dimensions to allow for anisotropic scaling during rendering [S1, unofficial].
+-
+-### Pseudocode
++        $$ \text{voxel\_size} = [\text{pixelSpacing}[0], \text{pixelSpacing}[1], \text{sliceThickness}] $$
++        [S2, unofficial].
++
++    *   **Slice Distance:**
++        If `num_slices > 1`:
++        Calculate the distance between the first two slices using the Z-component of `DataCollectionCenterPatient`:
++        $$ \text{slice\_distance} = | \text{DataCollectionCenterPatient}_1.z - \text{DataCollectionCenterPatient}_0.z | $$
++        [S2, unofficial].
++        If `num_slices == 1`:
++        Approximate `slice_distance = sliceThickness` [S2, unofficial].
++
++    *   **Z-Axis Bounds:**
++        Use the first and last slice centers. Adjust for the corner-point convention by adding/subtracting half the slice distance [S2, unofficial]:
++        $$ \text{min\_pt}[2] = \text{DataCollectionCenterPatient}_{\text{first}}.z - \frac{\text{slice\_distance}}{2} $$
++        $$ \text{max\_pt}[2] = \text{DataCollectionCenterPatient}_{\text{last}}.z + \frac{\text{slice\_distance}}{2} $$
++        [S2, unofficial].
++        *Pitfall:* If the Z-computation fails or bounds are inverted, reverse the min/max assignment (use last slice for min, first for max) and log an error [S2, unofficial].
++
++    *   **X/Y Axis Bounds:**
++        Calculate based on `ReconstructionTargetCenterPatient` or derived from image dimensions and pixel spacing.
++        *Pitfall:* DICOM Y-axis (Axis 1) convention is often reversed compared to image coordinates. Swap min and max values for the Y-axis if necessary [S2, unofficial].
++
++    *   **Final Bounds:**
++        $$ \text{min\_pt} = [x_{min}, y_{min}, z_{min}] $$
++        $$ \text{max\_pt} = [x_{max}, y_{max}, z_{max}] $$
++        [S2, unofficial].
++
++7.  **Transposition (Optional/Implementation Dependent):**
++    Some pipelines transpose the volume from `(rows, cols, slices)` to `(slices, rows, cols)` or `(1, 2, 0)` layout to match renderer expectations [S2, S4, unofficial].
++
++**Pseudocode:**
+ 
+ ```python
+ import numpy as np
++import pydicom
+ import os
+ import glob
+ 
+-def parse_dicom(filepath):
+-    """Minimal DICOM parser stub extracting required fields from a file."""
+-    # In practice, this reads the DICOM file and extracts attributes.
+-    # Returns a namespace-like object with the fields listed in the evidence.
+-    class DicomDataset:
+-        def __init__(self, rows, cols, pixel_spacing, slice_thickness, 
+-                     bits_allocated, pixel_representation, rescale_slope, 
+-                     rescale_intercept, data_collection_center, reconstruction_center, pixel_array):
+-            self.rows = rows
+-            self.cols = cols
+-            self.pixel_spacing = pixel_spacing
+-            self.slice_thickness = slice_thickness
+-            self.bits_allocated = bits_allocated
+-            self.pixel_representation = pixel_representation
+-            self.rescale_slope = rescale_slope
+-            self.rescale_intercept = rescale_intercept
+-            self.data_collection_center_patient = data_collection_center
+-            self.reconstruction_target_center_patient = reconstruction_center
+-            self.pixel_array = pixel_array
+-    # Placeholder for actual file I/O and DICOM parsing logic
+-    return DicomDataset(0, 0, [1.0, 1.0], 1.0, 16, 0, 1.0, -1000.0, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], np.zeros((1,1)))
+-
+-def load_dicom_volume(folder_path, suffix='.dcm'):
+-    """
+-    Loads a DICOM series from a folder, converts to density, and computes physical bounds.
+-    """
+-    # 1. File Selection and Sorting
+-    files = sorted(glob.glob(os.path.join(folder_path, f'*{suffix}')))
++def load_dicom_volume(directory, extension='.dcm'):
++    # 1. File Selection
++    files = sorted(glob.glob(os.path.join(directory, f'*{extension}')))
+     if not files:
+-        raise ValueError("No DICOM files found.")
++        raise ValueError("No DICOM files found")
++
++    # 2. Metadata Extraction from first file
++    ds_first = pydicom.dcmread(files[0])
++    rows = int(ds_first.Rows)
++    cols = int(ds_first.Columns)
++    pixel_spacing = list(ds_first.PixelSpacing) # [y, x]
++    slice_thickness = float(ds_first.SliceThickness)
++    rescale_slope = float(ds_first.RescaleSlope)
++    rescale_intercept = float(ds_first.RescaleIntercept)
++    bits_allocated = int(ds_first.BitsAllocated)
++    
++    if bits_allocated != 16:
++        raise ValueError("Unsupported bitsAllocated. Expected 16.")
+ 
+     num_slices = len(files)
+-    slices_data = []
+-    metadata_list = []
+-
+-    # 2. Metadata Extraction and Pixel Loading
+-    for f in files:
+-        ds = parse_dicom(f) 
+-        
+-        rows = ds.rows
+-        cols = ds.cols
+-        pixel_spacing = ds.pixel_spacing # [spacing_y, spacing_x]
+-        slice_thickness = ds.slice_thickness
+-        rescale_slope = ds.rescale_slope
+-        rescale_intercept = ds.rescale_intercept
+-        data_collection_center = ds.data_collection_center_patient
+-        reconstruction_center = ds.reconstruction_target_center_patient
+-        
+-        # Extract raw pixel data
+-        raw_pixels = ds.pixel_array
+-        
+-        # Validate bytes per voxel
+-        bits_allocated = ds.bits_allocated
+-        bytes_per_voxel = bits_allocated // 8
+-        if bytes_per_voxel != 2:
+-            raise ValueError(f"Unsupported bytes per voxel: {bytes_per_voxel}")
+-
+-        # Reshape to [cols, rows] C-order
+-        data_array = raw_pixels.reshape((cols, rows))
+-        
+-        # Rotate -90 degrees to correct orientation
+-        data_array = np.rot90(data_array, k=-1)
+-        
+-        slices_data.append(data_array)
+-        metadata_list.append({
+-            'pixel_spacing': pixel_spacing,
+-            'slice_thickness': slice_thickness,
+-            'data_collection_center': data_collection_center,
+-            'reconstruction_center': reconstruction_center
+-        })
+-
+-    # 3. HU to Density Conversion
+-    densities = []
+-    for i, data_array in enumerate(slices_data):
+-        # Handle signed pixel representation if required
+-        shift = 2**15 if metadata_list[i]['pixel_representation'] == 1 else 0
+-        # HU = Slope * Pixel + Intercept
+-        hu_values = rescale_slope * data_array + rescale_intercept
+-        # Density = (HU + 1000) / 1000
+-        density_slice = (hu_values + 1000) / 1000.0
+-        densities.append(density_slice)
+-
+-    # Stack into 3D volume [rows, cols, num_slices]
+-    volume_data = np.stack(densities, axis=-1)
+-
+-    # 4. Coordinate Reconstruction
+-    first_meta = metadata_list[0]
+-    last_meta = metadata_list[-1]
+-    
+-    # Voxel Size [x, y, z] in mm
+-    voxel_size = [first_meta['pixel_spacing'][1], first_meta['pixel_spacing'][0], first_meta['slice_thickness']]
+-    
+-    shape = volume_data.shape # (rows, cols, num_slices)
++    
++    # 3. Initialize Volume
++    # Shape: (num_slices, rows, cols)
++    volume = np.zeros((num_slices, rows, cols), dtype=np.float32)
++
++    # 4. Load and Process Slices
++    for i, f in enumerate(files):
++        ds = pydicom.dcmread(f)
++        # Read pixel data
++        pixel_array = ds.pixel_array
++        
++        # Cast to float
++        data = pixel_array.astype(np.float32)
++        
++        # Orientation Correction: Reshape to (cols, rows) and rotate -90 deg
++        # Note: pixel_array shape is (rows, cols)
++        data = data.reshape((cols, rows))
++        data = np.rot90(data, k=-1) # Rotate -90 degrees
++        
++        # 5. HU to Density Conversion
++        hu = rescale_slope * data + rescale_intercept
++        density = (hu + 1000.0) / 1000.0
++        
++        volume[i, :, :] = density
++
++    # 6. Coordinate Reconstruction
++    # Voxel Size
++    voxel_size = [pixel_spacing[0], pixel_spacing[1], slice_thickness]
+     
+     # Slice Distance
+     if num_slices > 1:
+-        z1 = metadata_list[0]['data_collection_center'][2]
+-        z2 = metadata_list[1]['data_collection_center'][2]
++        ds_second = pydicom.dcmread(files[1])
++        z1 = float(ds_first.DataCollectionCenterPatient[2])
++        z2 = float(ds_second.DataCollectionCenterPatient[2])
+         slice_distance = abs(z2 - z1)
+     else:
+-        slice_distance = first_meta['slice_thickness']
+-
+-    # Center Point
+-    mid_pt = first_meta['reconstruction_center'] # or data_collection_center
+-    
+-    # Calculate Bounds
+-    # Physical extent of the volume
+-    extent_x = shape[0] * voxel_size[0] # rows * pixel_spacing_y
+-    extent_y = shape[1] * voxel_size[1] # cols * pixel_spacing_x
+-    extent_z = shape[2] * slice_distance # num_slices * slice_thickness
+-    
+-    # Initial min/max based on center and extent
+-    min_pt = [mid_pt[0] - extent_x/2, mid_pt[1] - extent_y/2, mid_pt[2] - extent_z/2]
+-    max_pt = [mid_pt[0] + extent_x/2, mid_pt[1] + extent_y/2, mid_pt[2] + extent_z/2]
+-    
+-    # Adjust Z for corner-point convention using actual slice centers
+-    try:
+-        z_first_center = metadata_list[0]['data_collection_center'][2]
+-        z_last_center = metadata_list[-1]['data_collection_center'][2]
+-        
+-        min_pt[2] = z_first_center - slice_distance / 2
+-        max_pt[2] = z_last_center + slice_distance / 2
+-    except Exception:
+-        # Fallback if calculation fails
+-        min_pt[2], max_pt[2] = max_pt[2], min_pt[2]
+-        print("Error: Z-axis bounds calculation failed, reversed min/max.")
+-
+-    # Adjust Y-axis convention (swap min/max)
+-    min_pt[1], max_pt[1] = max_pt[1], min_pt[1]
+-
+-    # Transpose volume array to (1, 2, 0) layout
+-    volume_data = np.transpose(volume_data, (1, 2, 0))
+-
+-    return volume_data, min_pt, max_pt, voxel_size
++        slice_distance = slice_thickness
++
++    # Z Bounds (Corner Point Convention)
++    z_first = float(ds_first.DataCollectionCenterPatient[2])
++    ds_last = pydicom.dcmread(files[-1])
++    z_last = float(ds_last.DataCollectionCenterPatient[2])
++    
++    min_pt_z = z_first - (slice_distance / 2.0)
++    max_pt_z = z_last + (slice_distance / 2.0)
++    
++    # X/Y Bounds (Simplified: assuming origin at 0,0 for center, adjust based on specific DICOM tags if available)
++    # Using ReconstructionTargetCenterPatient if available, else estimate from spacing
++    # Note: Y-axis convention may need swapping [S2, unofficial]
++    width_mm = cols * pixel_spacing[1]
++    height_mm = rows * pixel_spacing[0]
++    
++    # Assuming center of image is at (0,0) in patient space for simplicity if tags missing
++    # Real implementation should use ImagePositionPatient or ReconstructionTargetCenterPatient
++    min_pt_x = -width_mm / 2.0
++    max_pt_x = width_mm / 2.0
++    min_pt_y = -height_mm / 2.0
++    max_pt_y = height_mm / 2.0
++    
++    # Swap Y min/max if DICOM convention requires it [S2, unofficial]
++    # This depends on specific viewer/renderer requirements. 
++    # Generic swap:
++    min_pt_y, max_pt_y = max_pt_y, min_pt_y
++
++    min_pt = [min_pt_x, min_pt_y, min_pt_z]
++    max_pt = [max_pt_x, max_pt_y, max_pt_z]
++
++    return volume, voxel_size, min_pt, max_pt
+ ```
+ 
+@@ -235,20 +191,25 @@
+ 
+ ### DICOM Volume Texture Preparation
+-This variant prepares the loaded volume for GPU rendering by quantizing the continuous density values into a discrete window range (defined by lower and upper Hounsfield unit thresholds) and integer-downsampling the texture if any axis exceeds 256 voxels [S1, unofficial]. It stores the physical size of the volume in millimeters separately from the texture dimensions to preserve anisotropic scaling information during the downsampling process [S1, unofficial].
++Prepares the loaded volume for GPU rendering by quantizing voxel values into a specific window range (lower/upper thresholds in HU) and integer-downsampling if any axis exceeds 256 voxels. Physical size in millimeters is stored separately from texture dimensions [S1, unofficial].
++
++### DICOM to MHA Conversion
++Converts DICOM series to MetaImage (MHD/RAW) format. Reads the first file for dimensions/spacing, initializes a numpy array, iterates through files to populate it, transposes axes from `(x, y, z)` to `(z, y, x)` to match DICOM storage, and saves using SimpleITK [S5, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources. The dominant cost is reading and decoding DICOM headers and pixel data [S2, unofficial].
+-*   **Memory Complexity:** Not given in the sources. Additional memory is required for DICOM header parsing [S2, unofficial].
+-*   **Performance:** Loading speed depends heavily on I/O throughput and the efficiency of the DICOM parsing library (`bacaDicom` or similar) [S2, unofficial]. Conversion to density is a fast element-wise operation [S2, unofficial].
+-*   **Strengths:** Handles the complex coordinate transformations required for medical imaging (corner-point vs. center-point, axis flips) [S2, unofficial]. Correctly maps HU to physical density [S2, unofficial].
+-*   **Limitations:** Assumes all slices have the same dimensions and orientation [S2, unofficial]. Does not handle missing slices or irregular spacing automatically without explicit `slice_distance` calculation [S2, unofficial]. Unsupported bit depths (e.g., 8-bit or 32-bit) are rejected [S3, unofficial].
+-*   **When to use:** When loading CT or MRI series for volume rendering where anatomical accuracy and correct physical scaling are critical [S1, unofficial].
+-*   **When not to use:** For non-medical volumetric data, or when real-time streaming of irregularly spaced slices is required without pre-processing [S1, unofficial].
++*   **Time Complexity:** $O(N \cdot R \cdot C)$, where $N$ is the number of slices, $R$ is rows, $C$ is columns. Linear with respect to total voxel count.
++*   **Memory Complexity:** $O(N \cdot R \cdot C)$ for storing the volume array.
++*   **Performance:** Loading speed depends on I/O throughput and DICOM parsing overhead. Conversion to density is computationally cheap. Orientation correction (rotation) adds minor overhead.
++*   **Strengths:** Handles standard medical imaging conventions (HU, spacing, orientation). Provides physically meaningful density values.
++*   **Limitations:** Assumes consistent slice ordering and spacing. Fails if `bytesAllocated` is not 16. Requires careful handling of coordinate system differences (DICOM vs. Renderer).
++*   **When to use:** When loading CT data for physical volume rendering or MPR.
++*   **When not to use:** For non-CT modalities without HU scaling, or when real-time streaming is required without full volume load.
+ 
+ ## Background
+-This method originates from implementations in medical imaging visualization libraries, specifically those integrating DICOM loading with WebGL/WebGPU volume rendering engines [S1, unofficial]. It addresses the specific challenges of rendering DICOM series in web-based environments, where standard image viewers often fail to represent the 3D nature of the data correctly (e.g., treating slices as cubes) [S1, unofficial]. The approach is documented in unofficial repositories such as `Panacea` (for the texture preparation and rendering pipeline) [S1, unofficial], `DGR` (for the DICOM loading and gradient-based processing) [S2, unofficial], and `ossium` (for the WebGPU-based DICOM loader and coordinate handling) [S3, unofficial].
++DICOM (Digital Imaging and Communications in Medicine) is the standard for medical imaging data. Loading DICOM volumes requires parsing specific tags (PixelSpacing, SliceThickness, RescaleSlope) and handling the coordinate system differences between DICOM (patient-centered, middle-of-voxel) and typical graphics APIs (corner-of-voxel). This method bridges that gap, enabling accurate volume rendering of medical data. It is commonly used in medical visualization software, research prototypes, and clinical PACS viewers.
+ 
+ ## Sources
+ [S1] feat(body-exposure): render a DICOM series in 3D, not a description of one, https://github.com/rizkyazhar486/Panacea/pull/1585, fetched 2026-10-26 (unofficial)
+ [S2] wskingdom/DGR, https://github.com/wskingdom/DGR, fetched 2026-10-26 (unofficial)
+-[S3] fraserlove/ossium, https://github.com/fraserlove/ossium, fetched 2026-10-27 (unofficial)+[S3] fraserlove/ossium, https://github.com/fraserlove/ossium, fetched 2026-10-27 (unofficial)
++[S4] GitHub - priscilla100/medical_volume_renderer, https://github.com/priscilla100/medical_volume_renderer/, fetched 2026-10-29 (unofficial)
++[S5] comedate/VolumeRendering, https://github.com/comedate/VolumeRendering, fetched 2026-10-27 (unofficial)

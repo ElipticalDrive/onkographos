@@ -1,0 +1,89 @@
+Summary Today only directional lights with LightFlags::CastsShadows actually emit shadow maps. Point and spot lights — the lights tracked by LightBVH — accept the flag and shadow-bias parameters on the API surface (XLight::SetShadowResol...
+
+Enable shadow casting from BVH-tracked lights (point & spot) · Issue #18 · wjkristiansen/Canvas · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Enable shadow casting from BVH-tracked lights (point & spot) #18
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Enable shadow casting from BVH-tracked lights (point & spot)#18
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+wjkristiansen
+opened on Jun 5, 2026
+Issue body actions
+Summary
+Today only directional lights with LightFlags::CastsShadows actually emit shadow maps. Point and spot lights — the lights tracked by LightBVH — accept the flag and shadow-bias parameters on the API surface (XLight::SetShadowResolution, SetShadowDepthBias) but the renderer silently drops them. This issue tracks lighting those casters end-to-end so that any BVH-tracked light can occlude geometry.
+Current state
+CRenderQueue12::SubmitLight (src/CanvasGfx12/Lib/RenderQueue12.cpp:2648) only enqueues a PendingShadowCaster when pLight->GetType() == LightType::Directional.
+CRenderQueue12::ResolveShadowCasters (src/CanvasGfx12/Lib/RenderQueue12.cpp:2812) builds a single texel-snapped orthographic world->shadow-clip matrix via BuildDirectionalShadowMatrixFromBounds. There is no perspective / paraboloid / cubemap path.
+Shadow atlas: lazy D32_Float, 4096², fixed kShadowAtlasTilesPerSide = 2 → 2048² tiles, max 4 casters per frame (EnsureShadowAtlas, AllocateShadowTile).
+Shadow PSO: depth-only m_pDisplacedShadowPSO (VS+HS+DS) for displaced terrain, no non-tessellated mesh path, no cube-face support.
+HlslLight carries a single ShadowViewProj matrix + one ShadowAtlasRectUV. Composite (PSComposite.hlsl) samples one shadow map per light.
+LightBVH (src/CanvasCore/LightBVH.h) already produces the visible-light set and influence AABBs needed to drive caster selection and shadow-frustum sizing; its header explicitly disclaims shadow-caster culling, which this issue lifts.
+Goal
+When a LightBVH-tracked light (point or spot) has LightFlags::CastsShadows set and is in the visible-light set for the frame, the renderer:
+Allocates a shadow region in the atlas (one tile for spot, six for point — or a dual-paraboloid pair, see Open questions).
+Renders scene casters into that region with a light-space projection appropriate to the light type.
+Samples it in the composite shader so the light''s contribution is occluded.
+Proposed work
+Core / API (CanvasCore)
+No new public surface expected; existing XLight::SetShadowResolution / SetShadowDepthBias already cover both types. Confirm semantics for point lights (per-face resolution vs. atlas footprint).
+Extend LightBVH consumers (or CScene::SubmitRenderables) so the per-frame shadow-caster list is derived from the BVH visible set, not just from directional lights walked during traversal.
+Renderer (CanvasGfx12)
+SubmitLight: drop the Directional-only guard. Enqueue a PendingShadowCaster for any visible light whose type is supported and whose CastsShadows flag is set.
+ResolveShadowCasters:
+Spot: build a perspective world->shadow-clip from the light''s apex, axis, outer cone half-angle, and cutoff distance (already on HlslLight). Reuse one atlas tile.
+Point: choose between (a) 6-face cubemap (six tiles + per-face view-proj) or (b) dual-paraboloid (two tiles). Decide in Open questions below. Either way, HlslLight will need either six ShadowViewProj slots / a face index, or two paraboloid matrices.
+Compute tight shadow frustums from the light''s influence AABB (already in LightBVH) intersected with m_FrameWorldBounds, so atlas resolution is not wasted on empty space.
+Atlas:
+Replace the fixed 2×2 grid with a variable-resolution packer (the existing RectanglePacker library is the obvious candidate) so a single 4096² atlas can hold a mix of one 2048² directional tile, several 512² spot tiles, and 256²×6 cube faces.
+Grow kShadowAtlasDefaultSize and/or report overflow gracefully; today overflow silently drops casters.
+Shadow PSO(s): add a non-tessellated depth-only PSO for ordinary XMeshInstance casters (the current path only handles displaced terrain). Reuse VSGeometry bytecode with no PS.
+Composite (PSComposite.hlsl): extend the per-light shadow sampling to handle spot (single perspective sample) and point (cube / paraboloid lookup with the appropriate face / hemisphere selection). PCF kernel and bias logic should remain shared.
+HlslLight / HlslTypes.h: add fields for the additional matrices / face count. Bump any shader version assumptions.
+Tests
+Extend LightBVHTest (or add a ShadowCasterSelectionTest) to verify that toggling CastsShadows on a tracked point/spot light produces a PendingShadowCaster and that out-of-frustum casters are excluded.
+Add a CanvasUnitTest that builds the spot perspective matrix and asserts that the light''s influence cone is fully inside the resulting shadow frustum.
+Visual smoke test: extend CanvasLightGarden to drop a couple of CastsShadows spot/point lights over a known mesh and capture a reference frame.
+Open questions
+Point-light projection: cubemap (correct, 6× cost) or dual paraboloid (cheaper, slight distortion at the seam)? Recommendation: start with cubemap for correctness; revisit paraboloid as an optimisation.
+Atlas policy: hard per-frame budget (e.g. N caster-tiles, LRU eviction) vs. dynamic resize. Recommendation: keep a fixed atlas size but variable-rect packing; spill lowest-priority casters (sort by intensity / distance²).
+Per-light caster bias: today XLight::SetShadowDepthBias only feeds the receiver-side terms; the caster-side DepthBias / SlopeScaledDepthBias is baked into the PSO. Should we promote the caster bias to per-light too (would require dynamic PSO state or shader-side bias)?
+Acceptance criteria
+LightFlags::CastsShadows on a point or spot light produces visible shadows in CanvasLightGarden and CanvasModelViewer.
+No regression in directional shadows or in BVH frustum culling tests.
+ctest --build-config Release passes, including new shadow-caster tests.
+src/CanvasGfx12/README.md "Light Submission" section updated to document the new caster paths.
+Activity
+wjkristiansen
+added
+enhancementNew feature or requestNew feature or request
+on Jun 5, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

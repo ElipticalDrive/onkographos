@@ -1,0 +1,81 @@
+Godot Engine – Multi-platform 2D and 3D game engine - Add anisotropic voxel mipmaps and separate diffuse/reflection bias to VoxelGI by NeoCry · Pull Request #12 · NeoCry/godot_landscape
+
+Add anisotropic voxel mipmaps and separate diffuse/reflection bias to VoxelGI by NeoCry · Pull Request #12 · NeoCry/godot_landscape · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+NeoCry
+commented
+Sep 16, 2026
+Copy link
+Copy Markdown
+Owner
+What problem(s) does this PR solve?
+VoxelGI's voxel mipmaps are purely isotropic: each coarser octree level is just the plain average of its 8 children's color+alpha. Cone tracing against this chain has no notion of which side of a coarse cell is occluded, so light leaks through thin geometry (walls, floors, thin props) once cones start sampling higher mip levels. Separately, the diffuse (multi-cone) and reflection (single specular cone) cone traces always shared the exact same bias value, even though they usually want different tuning (reflections benefit from a smaller bias for sharp contact reflections; diffuse GI benefits from a larger bias to reduce self-occlusion noise).
+This PR adds:
+Anisotropic voxel mipmaps. During mip generation, each octree cell now also builds 6 directional (+X/-X/+Y/-Y/+Z/-Z) copies of its color+alpha by compositing its 8 children front-to-back along each axis (the technique from Crassin & Green, Octree-Based Sparse Voxelization), instead of a single isotropic average. Cone tracing blends the 3 axis-matching directional textures weighted by direction * direction, which lets it pick up directional occlusion instead of always sampling an isotropic blur. This is opt-in per probe via a new VoxelGIData.anisotropic_strength (0.0 by default = identical behavior/cost to before; the bake blends the isotropic and anisotropic result by this factor and the run-time cone tracer only samples the anisotropic textures when it's > 0).
+Separate diffuse/reflection tracing bias. VoxelGIData.bias now only affects the diffuse cones; a new VoxelGIData.reflection_bias controls the single specular/reflection cone independently.
+Both properties are wired end-to-end: VoxelGIData (scene) → RenderingServer → RendererGI → the RD (Forward+/Mobile) backend, which is the only backend that actually implements VoxelGI cone tracing (GLES3/Compatibility and the dummy backend already no-op every VoxelGI method, so they just got matching empty overrides for the new virtuals). The forward-clustered inline GI path (used for transparent/forward-shaded materials) also picks up reflection_bias; wiring up anisotropic sampling there as well is left as follow-up since it needs its own texture bindings in that shader's descriptor set.
+Additional information
+Use of AI disclosure: this PR was written by Claude (Anthropic's Claude Code), including the design of the anisotropic compositing algorithm, all C++/GLSL changes, and this description, from a request to add anisotropic voxel mipmaps and separate diffuse/reflection tracing parameters to VoxelGI. It has not been tested against a real engine build (no build environment was available in the session), so please treat it as a from-scratch review candidate rather than a validated patch.
+Implementation notes for reviewers:
+servers/rendering/renderer_rd/shaders/environment/voxel_gi.glsl: bake-time compute shader. Adds an aniso_outputs storage buffer (6 vec4s per octree cell) alongside the existing isotropic outputs buffer, a leaf-level init that scales opacity per direction by dot(normal, dir) (radiance is view-independent, but a thin surface has near-zero cross-section edge-on/from behind), and the front-to-back compositing pass per internal octree level, gated by aniso_strength (a previously-declared-but-unused push constant field).
+servers/rendering/renderer_rd/shaders/environment/gi.glsl: run-time cone tracer. Adds 6 new texture3D[MAX_VOXEL_GI_INSTANCES] bindings and a sample_aniso_voxel() helper that blends them; voxel_cone_trace()/voxel_cone_trace_45_degrees() take a bool p_anisotropic and fall back to the original single-texture sampling when it's false.
+The VoxelGIData uniform struct byte layout is duplicated in 4 places (gi.h, gi.glsl, scene_forward_clustered_inc.glsl, volumetric_fog_process.glsl); all 4 were updated in lockstep to keep the std140 layout identical, since a mismatch there would silently corrupt every existing field, not just the new ones.
+Descriptor/VRAM cost: the anisotropic textures and buffers are always allocated once a probe has any mipmaps (to keep the uniform set layout simple), costing roughly one extra full copy of the base mip chain's memory (6 directions × mip levels 1..N is smaller than one full level-0-sized copy). The 6 new sampled-image array bindings in gi.glsl are also always declared in the shader regardless of whether any probe uses them. If this is a concern for lower-end/mobile GPUs with tight descriptor limits, let me know and I can look at making the bindings conditional on a specialization constant.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01Bd72UuZ4Q6pufJUGyvBcop
+Generated by Claude Code
+Add anisotropic voxel mipmaps and separate diffuse/reflection bias to…
+…
+9917482
+```
+… VoxelGI
+
+VoxelGI mipmaps were purely isotropic, averaging all 8 child cells of an
+octree node into a single color+alpha value per level. This causes light
+leaking through thin geometry (walls, floors) since cone tracing cannot
+tell which side of a coarse cell was actually occluded.
+
+Build 6 additional directional mipmap chains (+X/-X/+Y/-Y/+Z/-Z) per
+VoxelGI probe by front-to-back compositing each octree cell's children
+along each axis (Crassin & Green's anisotropic filtering technique).
+Cone tracing blends the 3 axis-matching directional textures by
+direction^2 instead of sampling the single isotropic chain, picking up
+directional occlusion. This is opt-in via a new per-probe
+`anisotropic_strength` (VoxelGIData), since it costs extra bake time,
+VRAM and a few more texture samples at trace time.
+
+Also split the single cone tracing `bias` into separate `bias` (diffuse
+cones) and `reflection_bias` (the single specular/reflection cone), so
+reflections and diffuse GI can be tuned independently instead of always
+sharing one bias value.
+
+Both features are wired through the full RenderingServer -> RendererGI ->
+RD backend stack, with no-op stubs added to the GLES3 and dummy backends
+(VoxelGI cone tracing is RD-only). The forward-clustered inline GI path
+picks up the new reflection_bias; anisotropic sampling there is left for
+follow-up work since it needs its own texture bindings.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Bd72UuZ4Q6pufJUGyvBcop
+```
+NeoCry
+merged commit e3fa69e
+into
+master
+Sep 16, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

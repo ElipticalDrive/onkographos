@@ -1,0 +1,313 @@
+--- v007.md
++++ v008.md
+@@ -1,116 +1,226 @@
+ # CSG Operations on Implicit Functions
+ 
+-Also called: CSG Operations, CSG implicit surfaces, SDF Boolean Operators, SDF Boolean Operations, CSG with SDFs, Constructive Solid Geometry with SDFs
++Also called: CSG Operations, SDF Boolean Operations, SDF Boolean Operators, Boolean SDF operators, CSG with SDFs, CSG SDF combination, CSG implicit surfaces, CSG Operations for SDFs, Constructive Solid Geometry with SDFs
+ 
+ ## Overview
+-CSG Operations on Implicit Functions is a method of creating complex geometric shapes from simple Signed Distance Function (SDF) primitives via boolean operations: union, intersection, and difference [S1, unofficial][S3, unofficial][S4, unofficial][S5][S7, unofficial][S10, unofficial]. It combines scalar fields using binary node operations to construct complex implicit surfaces [S2, unofficial]. Unlike explicit mesh-based CSG, which requires complex boolean intersection algorithms on polygonal geometry, SDF CSG reduces scene composition to simple arithmetic on distance values [S2, unofficial][S8, unofficial]. This allows for the rendering of near-tangent intersections and complex composite geometries with minimal computational overhead per sample [S4, unofficial][S8, unofficial].
++CSG Operations on Implicit Functions is a technique for creating complex geometric shapes from simple Signed Distance Function (SDF) primitives via boolean operations: union, intersection, and difference [S2, unofficial][S5, unofficial][S4, unofficial]. It maps set-theoretic boolean logic directly to arithmetic operators on scalar distance values, allowing the construction of complex implicit surfaces from simple components [S3, unofficial]. Unlike explicit mesh-based CSG which requires complex topological handling, this method reduces scene composition to simple arithmetic, enabling the rendering of near-tangent intersections and complex composites with minimal code overhead [S6, unofficial]. It builds on [SDF Domain Manipulation Operators](1730-sdf-domain-manipulation-operators.md) which handle spatial transformations, while this article handles the combination of the resulting distance fields.
+ 
+ ## How it works
++
+ ### Inputs and Outputs
+-- **Inputs**: Two SDF functions, $f_A(p)$ and $f_B(p)$, which return the signed distance from a query point $p$ to the surface of object A or B [S2, unofficial][S7, unofficial].
+-- **Output**: A composite SDF function $f_{scene}(p)$ that represents the boolean combination of the input shapes [S2, unofficial][S4, unofficial].
++*   **Inputs**: Two (or more) SDF values, $d_A$ and $d_B$, evaluated at the same query point $\mathbf{p}$. These values represent the signed distances to the surfaces of object A and object B, respectively.
++*   **Outputs**: A single combined SDF value $d_{combined}$ representing the distance to the resulting boolean surface.
+ 
+ ### Data Structures
+-The scene is represented as a node hierarchy where each node holds pointers to two child `ScalarField` objects [S2, unofficial]. Nodes are evaluated recursively or iteratively to compute the final distance [S2, unofficial].
++The scene is typically represented as a binary tree (or expression tree) where leaves are primitive SDF functions and internal nodes are CSG operators [S1, unofficial][S3, unofficial].
++
++**Tree Layout:**
++```python
++class CSGNode:
++    def __init__(self, operation, left, right):
++        self.operation = operation  # Union, Intersection, Difference
++        self.left = left            # CSGNode or PrimitiveSDF
++        self.right = right          # CSGNode or PrimitiveSDF
++
++class PrimitiveSDF:
++    def __init__(self, sdf_func, material_id):
++        self.sdf_func = sdf_func  # Function returning float
++        self.material_id = material_id
++```
+ 
+ ### Formulas
+-The core arithmetic mappings for standard CSG operations are [S2, unofficial][S5][S7, unofficial][S8, unofficial][S9, unofficial]:
+-1. **Union**: The distance to the union is the minimum of the individual distances. A point is inside the union if it is inside at least one of the shapes [S2, unofficial][S5][S8, unofficial][S9, unofficial].
+-   $$ f_{union}(p) = \min(f_A(p), f_B(p)) $$
+-2. **Intersection**: The distance to the intersection is the maximum of the individual distances. A point is inside the intersection only if it is inside both shapes [S2, unofficial][S5][S8, unofficial][S9, unofficial].
+-   $$ f_{intersect}(p) = \max(f_A(p), f_B(p)) $$
+-3. **Difference (Subtraction)**: The difference $A \setminus B$ is computed by intersecting $A$ with the complement of $B$. The complement of an SDF is obtained by negating its distance values [S2, unofficial][S5].
+-   $$ f_{sub}(p) = \max(f_A(p), -f_B(p)) $$
+-4. **XOR**: Exclusive OR can be constructed from the above operations [S6, unofficial].
+-   $$ f_{xor}(p) = \max(\min(f_A(p), f_B(p)), -\max(f_A(p), f_B(p))) $$
+-
+-### Numbered Steps
+-1. Instantiate nodes with pointers to child SDFs: `new UnionNode(a, b)`, `new IntersectionNode(a, b)`, `new DifferenceNode(a, b)` [S2, unofficial].
+-2. Chain nodes by passing output nodes as inputs to subsequent nodes to build the scene graph [S2, unofficial].
+-3. Evaluate the final root node's `Value(p)` method at the query point to get the combined SDF distance [S2, unofficial].
++The core mechanism relies on the properties of signed distances:
++*   $d < 0$: Point is inside the surface.
++*   $d > 0$: Point is outside the surface.
++*   $d = 0$: Point is on the surface.
++
++**1. Union ($A \cup B$)**
++The union contains points inside A OR inside B. The distance to the closest surface is the minimum of the two distances [S2, unofficial][S8, unofficial][S9, unofficial][S11, unofficial][S12, unofficial].
++$$ d_{union} = \min(d_A, d_B) $$
++
++**2. Intersection ($A \cap B$)**
++The intersection contains points inside A AND inside B. The distance to the boundary is bounded by the farthest surface, ensuring the point remains inside both [S2, unofficial][S7][S8, unofficial][S9, unofficial][S11, unofficial][S12, unofficial].
++$$ d_{intersection} = \max(d_A, d_B) $$
++
++**3. Difference ($A - B$)**
++Subtracting B from A is equivalent to intersecting A with the complement (inverse) of B. The complement of an SDF is obtained by negating its value [S2, unofficial][S7][S8, unofficial][S9, unofficial][S11, unofficial][S12, unofficial][S13, unofficial].
++$$ d_{difference} = \max(d_A, -d_B) $$
++
++**4. XOR**
++Points inside exactly one of the shapes.
++$$ d_{xor} = \max(\min(d_A, d_B), -\max(d_A, d_B)) $$
++[S9, unofficial]
++
++### Smooth Variants
++Standard boolean operations result in sharp creases. Smooth variants blend the transition using a parameter $k$ (typically $0.1$ to $1.0$) [S3, unofficial].
++
++**Smooth Union (smin):**
++Creates a rounded fillet of radius approximately $k$.
++$$ h = \text{clamp}\left(0.5 + 0.5 \frac{d_B - d_A}{k}, 0.0, 1.0\right) $$
++$$ d_{smooth\_union} = \text{mix}(d_B, d_A, h) - k \cdot h \cdot (1.0 - h) $$
++[S11, unofficial][S12, unofficial]
++
++**Smooth Intersection (smax):**
++$$ d_{smooth\_intersection} = -\text{smin}(-d_A, -d_B, k) $$
++[S4, unofficial]
++
++**Smooth Difference:**
++$$ d_{smooth\_difference} = \text{smax}(d_A, -d_B, k) $$
++[S10, unofficial]
+ 
+ ### Pseudocode
+-The following Python-like pseudocode implements the recursive evaluation of a CSG tree [S2, unofficial][S7, unofficial].
++The following implementation demonstrates recursive evaluation of a CSG tree and the core arithmetic operations.
++
+ ```python
+-class ScalarField:
++import math
++
++def min(a, b):
++    return a if a < b else b
++
++def max(a, b):
++    return a if a > b else b
++
++def clamp(val, min_val, max_val):
++    if val < min_val: return min_val
++    if val > max_val: return max_val
++    return val
++
++def mix(a, b, t):
++    return a + t * (b - a)
++
++def smin(a, b, k):
++    """Smooth minimum for union blending."""
++    h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0)
++    return mix(b, a, h) - k * h * (1.0 - h)
++
++def smax(a, b, k):
++    """Smooth maximum for intersection blending."""
++    return -smin(-a, -b, k)
++
++def union_sdf(d_a, d_b):
++    """Standard Union: min(d_a, d_b)."""
++    return min(d_a, d_b)
++
++def intersection_sdf(d_a, d_b):
++    """Standard Intersection: max(d_a, d_b)."""
++    return max(d_a, d_b)
++
++def difference_sdf(d_a, d_b):
++    """Standard Difference: max(d_a, -d_b)."""
++    return max(d_a, -d_b)
++
++def smooth_union_sdf(d_a, d_b, k):
++    """Smooth Union with blend factor k."""
++    return smin(d_a, d_b, k)
++
++def smooth_difference_sdf(d_a, d_b, k):
++    """Smooth Difference with blend factor k."""
++    return smax(d_a, -d_b, k)
++
++class CSGNode:
++    def __init__(self, op, left, right, k=0.0):
++        self.op = op
++        self.left = left
++        self.right = right
++        self.k = k
++
++    def evaluate(self, p):
++        d_left = self.left.evaluate(p)
++        d_right = self.right.evaluate(p)
++        
++        if self.op == "union":
++            if self.k > 0:
++                return smooth_union_sdf(d_left, d_right, self.k)
++            return union_sdf(d_left, d_right)
++        elif self.op == "intersection":
++            if self.k > 0:
++                return -smin(-d_left, -d_right, self.k)
++            return intersection_sdf(d_left, d_right)
++        elif self.op == "difference":
++            if self.k > 0:
++                return smooth_difference_sdf(d_left, d_right, self.k)
++            return difference_sdf(d_left, d_right)
++        else:
++            raise ValueError(f"Unknown operation: {self.op}")
++
++class PrimitiveSDF:
+     def __init__(self, func):
+         self.func = func
+-    def evaluate(self, pos):
+-        return self.func(pos)
+-
+-class Node:
+-    def __init__(self, op, left, right):
+-        self.operation = op
+-        self.left = left
+-        self.right = right
+-    def evaluate(self, pos):
+-        a_dist = self.left.evaluate(pos)
+-        b_dist = self.right.evaluate(pos)
+-        if self.operation == "Union":
+-            return min(a_dist, b_dist)
+-        elif self.operation == "Intersection":
+-            return max(a_dist, b_dist)
+-        elif self.operation == "Difference":
+-            return max(a_dist, -b_dist)
+-        else:
+-            raise ValueError("Unknown operation")
+-
+-def evaluate_csg(node, pos):
+-    """Evaluates the CSG tree at position pos. Returns the combined signed distance."""
+-    if isinstance(node, ScalarField):
+-        return node.evaluate(pos)
+-    return node.evaluate(pos)
++
++    def evaluate(self, p):
++        return self.func(p)
++
++# Example: Sphere minus Box
++def sphere(p, center, radius):
++    return math.sqrt(sum((p[i] - center[i])**2 for i in range(3))) - radius
++
++def box(p, center, half_size):
++    # Axis-aligned box SDF
++    dist = 0.0
++    for i in range(3):
++        diff = max(abs(p[i] - center[i]) - half_size[i], 0.0)
++        dist += diff**2
++    return math.sqrt(dist)
++
++# Build tree: Union(Sphere, Box) -> Intersection with Inverted Sphere (Difference)
++# Actually, let's do Sphere - Box
++sphere_node = PrimitiveSDF(lambda p: sphere(p, [0,0,0], 1.0))
++box_node = PrimitiveSDF(lambda p: box(p, [0,0,0], [0.5, 0.5, 0.5]))
++diff_node = CSGNode("difference", sphere_node, box_node)
++
++# Evaluate at point
++point = [0.0, 0.0, 0.0]
++distance = diff_node.evaluate(point)
+ ```
+ 
+-### Parameters and Variants
+-- **Smooth Union**: Alternative Union with smooth transition [S7, unofficial]. Takes additional float $k$ (0 to 2) determining smoothness, typically 0.1 to 1.0 [S7, unofficial][S2, unofficial]. Implementation: `h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0); return mix(b, a, h) - k * h * (1.0 - h)` [S7, unofficial][S8, unofficial].
+-- **Stairs Operations**: `Union Stairs`, `Difference Stairs`, and `Intersection Stairs` create steps between edges [S7, unofficial]. Takes floats $r$ (step width) and $n$ (number of steps) [S7, unofficial].
+-- **Noise**: Unary operation adding Perlin noise to signed distance. Takes float `noiseProp` (0 to 0.5). Uses GLSL mix function [S7, unofficial].
+-- **Onion**: Unary operation creating a hole inside a shape. Takes float `thickness` (smaller value = larger hole) [S7, unofficial].
+-
+ ### Edge Cases and Pitfalls
+-- **Scaling**: Scaling an SDF requires scaling the input coordinates by the inverse of the scale factor and scaling the output distance by the scale factor to maintain correct distance values [S1, unofficial][S8, unofficial].
+-- **DeMorgan’s Theorem**: DeMorgan’s theorem ($A \cap B = \overline{\overline{A} \cup \overline{B}}$) does not work directly with min/max operators for distance bounds because the minimum operator is not complemented properly. Using `max` ensures the bound holds [S5].
+-- **Subtraction Artefact**: `max(-a, b)` is exact only when the surface of A is entirely contained within B. If A pokes through the boundary of B, the resulting SDF is not Lipschitz-1 and sphere marching may skip surfaces — add a small EPSILON correction or tighten the step size in those regions [S8, unofficial].
+-- **Material Boundaries**: The polygonizer does not consider materials, leading to drastic color changes between vertices at CSG boundaries. To separate colors, material changes must be treated as surface boundaries (inside/outside changes) [S10, unofficial].
+-- **Distance Bounds**: For intersection, the resulting function is a bound on the true distance, not necessarily the exact distance. Specifically, in Case II ($d_A < 0, d_B > 0$), the closest point in A to p may not be in the intersection, but no point in the intersection can be closer than $d_B$ [S5].
++1.  **Lipschitz Continuity in Difference**: The standard difference formula $\max(d_A, -d_B)$ is exact only when the surface of A is entirely contained within B, or when B does not "poke through" the boundary of A in a way that creates non-Lipschitz-1 regions [S11, unofficial]. If A pokes through B, the resulting SDF may not be a true distance field, causing sphere marching to skip surfaces. Mitigation: Add a small EPSILON correction or tighten the step size in those regions [S11, unofficial].
++2.  **DeMorgan’s Theorem Limitations**: While set theory defines intersection as the complement of the union of complements, applying this to min/max operators for distance bounds does not work directly because the minimum operator is not complemented properly in the distance domain. Using $\max$ for intersection ensures the bound holds [S7].
++3.  **Material Boundaries**: Standard CSG operations combine distance values but do not inherently track material IDs across the boolean boundary. Polygonizers may produce drastic color changes at CSG boundaries because they treat material changes as surface boundaries [S13, unofficial]. To separate colors, material changes must be explicitly treated as surface boundaries.
++4.  **Scaling**: Scaling an SDF requires scaling the input coordinates by the inverse of the scale factor and scaling the output distance by the scale factor to maintain correct distance values [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Stack-Based SDF Editor](1696-stack-based-sdf-editor.md)
+-An interactive editor that constructs SDFs from primitives and operations using a stack-based interface similar to Reverse Polish Notation (RPN), implicitly representing a tree with postorder traversal. It differs from explicit tree editors by deferring structure resolution until compilation, allowing users to build complex scenes by pushing operations onto a linear stack where only the top item is visible until combined.
++An interactive editor that constructs SDFs from primitives and operations using a stack-based interface similar to Reverse Polish Notation (RPN). It differs from explicit tree editors by deferring structure resolution until compilation, allowing users to build complex scenes by pushing operations onto a linear stack where only the top item is visible until combined.
+ 
+ ### Constructive Solid Geometry (CSG) on Level Sets
+-A voxel-based implementation of CSG operations on discrete level set data [S11, unofficial]. Operations are performed element-wise on voxel buffers [S11, unofficial].
+-- **Union**: $A_{new}(i,j,k) = \min(A(i,j,k), B(i,j,k))$ [S11, unofficial].
+-- **Intersection**: $A_{new}(i,j,k) = \max(A(i,j,k), B(i,j,k))$ [S11, unofficial].
+-- **Difference**: $A_{new}(i,j,k) = \max(A(i,j,k), -B(i,j,k))$ [S11, unofficial].
+-In user interface terms, intersection corresponds to a copy operation, union to a paste operation, and difference to a cut operation [S11, unofficial].
++A voxel-based variant of CSG operations applied to discrete volumetric data rather than continuous implicit functions [S14, unofficial].
++*   **Union**: $A_{new}(i,j,k) = \min(A(i,j,k), B(i,j,k))$
++*   **Intersection**: $A_{new}(i,j,k) = \max(A(i,j,k), B(i,j,k))$
++*   **Difference**: $A_{new}(i,j,k) = \max(A(i,j,k), -B(i,j,k))$
++This approach operates on voxel grids, making it suitable for volume rendering pipelines that process discrete data rather than ray-marched continuous fields [S14, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Not given in the sources. [G]
+-- **Memory Complexity**: Not given in the sources. [G]
+-- **Strengths**:
+-    - Simplicity: Boolean operations are reduced to `min`/`max` [S2, unofficial][S8, unofficial].
+-    - No Mesh Booleaning: Avoids the computational complexity and numerical instability of polygonal boolean operations [S8, unofficial].
+-    - Free Normals: Surface normals are derived from the gradient of the composite SDF, which is consistent with the geometry [S8, unofficial].
+-- **Limitations**:
+-    - Approximate Distance: The resulting SDF is a bound, not the exact distance to the CSG boundary, which can affect sphere tracing step sizes (though still valid for rendering) [S5].
+-    - Sharp Edges: Standard CSG produces sharp, non-smooth edges unless smooth variants are used [S7, unofficial].
+-    - Material Handling: The polygonizer does not consider materials, leading to drastic color changes between vertices at CSG boundaries [S10, unofficial].
++
++*   **Time Complexity**: $O(N)$ per ray, where $N$ is the depth of the CSG tree. Each ray march step requires evaluating all nodes in the tree down to the leaves.
++*   **Memory Complexity**: $O(D)$ where $D$ is the depth of the CSG tree (recursion stack) or $O(T)$ if the tree is stored explicitly.
++*   **Strengths**:
++    *   **Simplicity**: Complex geometry is defined with very little code [S12, unofficial].
++    *   **Free Normals**: Surface normals are derived from the gradient of the combined SDF, which is consistent with the boolean logic [S12, unofficial].
++    *   **No Topology Errors**: Avoids meshing artifacts like holes or self-intersections common in polygonal CSG [S11, unofficial].
++*   **Limitations**:
++    *   **Sharp Edges**: Standard boolean operations produce sharp, non-smooth edges. Smooth variants introduce approximation errors and require tuning the blend factor $k$ [S11, unofficial].
++    *   **Distance Accuracy**: The resulting SDF is a bound, not necessarily the exact Euclidean distance, especially for concave shapes or complex differences [S7].
++    *   **Performance**: Deep CSG trees increase the number of primitive evaluations per ray step, potentially slowing down rendering [S7].
+ 
+ ## Background
+-CSG was introduced in the 1970s for solid modeling [S2, unofficial][S3, unofficial]. The application of CSG to implicit surfaces using min/max operators was formalized by Ricci in 1974 [S5]. The technique became widely popular in real-time graphics with the advent of ray marching and SDFs, notably demonstrated by Iñigo Quilez and Jamie Wong in the 2010s [S1, unofficial][S8, unofficial]. It is used in voxel editors and differentiable rendering pipelines [S4, unofficial][S10, unofficial][S11, unofficial].
++
++CSG was introduced by Ian Buckland and others in the early 1980s for solid modeling [S2, unofficial]. The application of CSG to Signed Distance Functions was popularized in the context of ray marching and shader programming by artists and researchers such as Inigo Quilez and Jamie Wong in the 2010s [S2, unofficial][S11, unofficial][S12, unofficial]. The mathematical foundation relies on the properties of min and max operators on implicit surfaces, as described by Ricci in 1974 [S7]. The technique is widely used in real-time graphics, particularly in Shadertoy-style demos and procedural generation, due to its conciseness and visual appeal [S2, unofficial][S12, unofficial].
+ 
+ ## Sources
+-[S1] Ray Marching and Signed Distance Functions, http://jamie-wong.com/2016/07/15/ray-marching-signed-distance-functions/, fetched 2026-10-26 (unofficial)
+-[S2] skanderzoghlami/QT-Project-Surfaces-Implicites-Marching-Cube-Sphere-Tracing, https://github.com/skanderzoghlami/QT-Project-Surfaces-Implicites-Marching-Cube-Sphere-Tracing, fetched 2026-10-26 (unofficial)
+-[S3] Ray Marching and Signed Distance Functions, https://github.com/guevara/read-it-later/issues/4535, fetched 2026-10-26 (unofficial)
+-[S4] GitHub - narnia-ai-mason/iso-surface-rendering: Robust iso-surface ..., https://github.com/narnia-ai-mason/iso-surface-rendering, fetched 2026-10-26 (unofficial)
+-[S5] (PDF) Sphere Tracing: A Geometric Method for the Antialiased Ray ..., https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27
+-[S6] JamesRicher/TerminalSignedDistanceFieldRenderer, https://github.com/JamesRicher/TerminalSignedDistanceFieldRenderer, fetched 2026-10-27 (unofficial)
+-[S7] PDF COS 426 Final Project Writeup Raymarching with Signed Distance Fields, https://jbaum98.github.io/cos426_final_project/writeup.pdf, fetched 2026-10-27 (unofficial)
+-[S8] Ray Marching and Signed Distance Functions — GLSL in the..., https://www.mysimulator.uk/content/articles/ray-marching-sdf.html, fetched 2026-10-29 (unofficial)
+-[S9] Ray Marching and Signed Distance Functions: Sphere Tracing..., https://www.mysimulator.uk/articles/ray-marching/, fetched 2026-10-29 (unofficial)
+-[S10] http://www.oocities.org/tzukkers/isosurf/isosurfaces.html, http://www.oocities.org/tzukkers/isosurf/isosurfaces.html, fetched 2026-10-30 (unofficial)
+-[S11] Production Volume Rendering, https://cg.informatik.uni-freiburg.de/intern/seminar/volumeRenderingProductionFundamentals2011.pdf, fetched 2026-10-27 (unofficial)+
++[S1] sungiant/sdf, https://github.com/sungiant/sdf, fetched 2026-10-26 (unofficial)
++[S2] Ray Marching and Signed Distance Functions, http://jamie-wong.com/2016/07/15/ray-marching-signed-distance-functions/, fetched 2026-10-26 (unofficial)
++[S3] skanderzoghlami/QT-Project-Surfaces-Implicites-Marching-Cube-Sphere-Tracing, https://github.com/skanderzoghlami/QT-Project-Surfaces-Implicites-Marching-Cube-Sphere-Tracing, fetched 2026-10-26 (unofficial)
++[S4] arguskern/lumina-graphics-lab, https://github.com/arguskern/lumina-graphics-lab, fetched 2026-10-26 (unofficial)
++[S5] Ray Marching and Signed Distance Functions, https://github.com/guevara/read-it-later/issues/4535, fetched 2026-10-26 (unofficial)
++[S6] GitHub - narnia-ai-mason/iso-surface-rendering: Robust iso-surface ..., https://github.com/narnia-ai-mason/iso-surface-rendering, fetched 2026-10-26 (unofficial)
++[S7] (PDF) Sphere Tracing: A Geometric Method for the Antialiased Ray ..., https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27
++[S8] markpmlim/RaymarchingAndSDF, https://github.com/markpmlim/RaymarchingAndSDF, fetched 2026-10-27 (unofficial)
++[S9] JamesRicher/TerminalSignedDistanceFieldRenderer, https://github.com/JamesRicher/TerminalSignedDistanceFieldRenderer, fetched 2026-10-27 (unofficial)
++[S10] PDF COS 426 Final Project Writeup Raymarching with Signed Distance Fields, https://jbaum98.github.io/cos426_final_project/writeup.pdf, fetched 2026-10-27 (unofficial)
++[S11] Ray Marching and Signed Distance Functions — GLSL in the..., https://www.mysimulator.uk/content/articles/ray-marching-sdf.html, fetched 2026-10-29 (unofficial)
++[S12] Ray Marching and Signed Distance Functions: Sphere Tracing..., https://www.mysimulator.uk/articles/ray-marching/, fetched 2026-10-29 (unofficial)
++[S13] http://www.oocities.org/tzukkers/isosurf/isosurfaces.html, http://www.oocities.org/tzukkers/isosurf/isosurfaces.html, fetched 2026-10-30 (unofficial)
++[S14] Production Volume Rendering, https://cg.informatik.uni-freiburg.de/intern/seminar/volumeRenderingProductionFundamentals2011.pdf, fetched 2026-10-27 (unofficial)

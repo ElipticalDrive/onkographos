@@ -1,0 +1,123 @@
+--- v002.md
++++ v003.md
+@@ -1,28 +1,23 @@
+ # Robust Depth Loss
+ 
+-Also called: Huber-like depth loss
+ 
+ ## Overview
+-Robust Depth Loss is a geometry supervision term designed to mitigate the degradation of extrapolation performance caused by geometry errors in pseudo-depth maps [S1]. It addresses the problem where standard L2 losses are overly sensitive to outliers in inaccurate depth data, encouraging the NeRF to terminate rays precisely at erroneous depths [S1]. It sets itself apart from standard L1 or L2 depth losses by providing a gradient that decreases to zero for large errors, thereby retaining freedom for inaccurate geometry while still guiding the ray termination around the pseudo-depth [S1].
++Robust Depth Loss is a regularization term designed to mitigate geometry error degradation in NeRF optimization when using dense but inaccurate pseudo-depth maps [S1]. It addresses the limitation of standard L2 loss, which is overly sensitive to outliers, by providing a loss function that is less sensitive to large depth errors while still encouraging the network to terminate rays near the pseudo-depth surface [S1]. This allows the NeRF to retain freedom for inaccurate geometry without being penalized excessively for outliers [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** The rendered expected depth $\hat{D}(\mathbf{r})$ along the camera axis of ray $\mathbf{r}(t)$, and the reference depth value $D(\mathbf{r})$ from a geometry scaffold or pseudo-depth map [S1].
++*   **Input:** The rendered depth expectation $\hat{D}(\mathbf{r})$ along the camera axis of ray $\mathbf{r}(t)$, and the ground truth or pseudo-depth value $D(\mathbf{r})$ from a geometry scaffold [S1].
+ *   **Output:** A scalar loss value $\mathcal{L}_{\text{robust}}(\mathbf{r})$ for the ray [S1].
+ 
+ **Data Structures:**
+-*   No specific data structures are required beyond the scalar depth values $\hat{D}(\mathbf{r})$ and $D(\mathbf{r})$ and the scalar threshold $\beta$ [S1].
++*   $\hat{D}(\mathbf{r})$: The expected depth along the ray, typically computed as the weighted sum of sample depths using the volume rendering weights [S1].
++*   $D(\mathbf{r})$: The reference depth value associated with the ray [S1].
++*   $\beta$: A constant threshold parameter [S1].
+ 
+ **Parameters:**
+-*   $\beta$: A constant threshold for the robust depth loss. The sources specify a value of $0.1$ [S1].
+-
+-**Algorithm:**
+-1.  Compute the absolute depth difference: $\Delta D(\mathbf{r}) = |\hat{D}(\mathbf{r}) - D(\mathbf{r})|$ [S1].
+-2.  Evaluate the loss based on the magnitude of $\Delta D(\mathbf{r})$ relative to $\beta$:
+-    *   If $\Delta D(\mathbf{r}) < \beta$, apply quadratic loss.
+-    *   If $\Delta D(\mathbf{r}) \ge \beta$, apply logarithmic loss [S1].
++*   $\beta$: The robustness threshold. Set to $0.1$ in experiments [S1].
+ 
+ **Formula:**
+-The loss is defined as [S1]:
++The loss is defined as a piecewise function based on the absolute depth difference $\Delta D(\mathbf{r}) = |\hat{D}(\mathbf{r}) - D(\mathbf{r})|$ [S1]:
+ 
+ $$
+@@ -30,31 +25,35 @@
+ $$
+ 
+-where $\Delta D(\mathbf{r}) = \hat{D}(\mathbf{r}) - D(\mathbf{r})$ represents the absolute depth difference [S1]. Note: The source text defines $\Delta D$ as the difference but uses it in a squared term and log argument, implying the magnitude is used for the condition and the absolute value is implied for the log argument to be valid. The text explicitly states "$\Delta D(\mathbf{r}) = \hat{D}(\mathbf{r}) - D(\mathbf{r})$ represents the absolute depth difference", which is a contradiction in standard notation (difference vs absolute difference). However, the condition $\Delta D < \beta$ and the log term $\log(\Delta D / \beta)$ require $\Delta D$ to be non-negative. We interpret $\Delta D(\mathbf{r})$ as $|\hat{D}(\mathbf{r}) - D(\mathbf{r})|$ for implementation correctness [S1].
++**Steps:**
++1.  Compute the absolute depth difference: $\Delta D(\mathbf{r}) = |\hat{D}(\mathbf{r}) - D(\mathbf{r})|$ [S1].
++2.  Compare $\Delta D(\mathbf{r})$ with the threshold $\beta$ [S1].
++3.  If $\Delta D(\mathbf{r}) < \beta$, calculate the quadratic term: $0.5 \cdot \Delta D(\mathbf{r})^2$ [S1].
++4.  If $\Delta D(\mathbf{r}) \ge \beta$, calculate the logarithmic term: $\beta^2 \cdot (0.5 + \log(\Delta D(\mathbf{r}) / \beta))$ [S1].
++5.  Return the result as $\mathcal{L}_{\text{robust}}(\mathbf{r})$ [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+-def robust_depth_loss(rendered_depth, reference_depth, beta=0.1):
++def robust_depth_loss(rendered_depth, target_depth, beta=0.1):
+     """
+-    Computes the Robust Depth Loss.
++    Computes the robust depth loss for a single ray.
+     
+     Args:
+-        rendered_depth (float): The expected depth D_hat(r) along the ray.
+-        reference_depth (float): The reference depth D(r) from the scaffold.
+-        beta (float): The threshold constant, default 0.1.
++        rendered_depth (float): The expected depth along the ray, D_hat(r).
++        target_depth (float): The ground truth or pseudo-depth value, D(r).
++        beta (float): The robustness threshold, default 0.1.
+         
+     Returns:
+-        float: The computed loss value.
++        float: The computed loss L_robust(r).
+     """
+     # Compute absolute depth difference
+-    delta_d = abs(rendered_depth - reference_depth)
++    delta_d = abs(rendered_depth - target_depth)
+     
+     if delta_d < beta:
+-        # Quadratic region
++        # Quadratic region: behaves like L2
+         loss = 0.5 * (delta_d ** 2)
+     else:
+-        # Logarithmic region for outliers
+-        # Note: Source defines this as beta^2 * (0.5 + log(delta_d / beta))
+-        loss = (beta ** 2) * (0.5 + math.log(delta_d / beta))
++        # Logarithmic region: less sensitive to outliers
++        # Gradient decreases as delta_d increases
++        loss = (beta ** 2) * (0.5 + log(delta_d / beta))
+         
+     return loss
+@@ -62,24 +61,23 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The logarithmic term requires $\Delta D(\mathbf{r}) > 0$. If $\Delta D(\mathbf{r}) = 0$, the loss is 0 (from the quadratic branch if $\beta > 0$). If $\Delta D(\mathbf{r})$ is extremely small but non-zero, numerical stability should be considered, though the quadratic branch handles values $< \beta$ smoothly [S1].
+-*   **Boundaries:** The loss is continuous at $\Delta D(\mathbf{r}) = \beta$. At this point, the quadratic loss is $0.5\beta^2$ and the logarithmic loss is $\beta^2(0.5 + \log(1)) = 0.5\beta^2$ [S1].
+-*   **Gradient Behavior:** For $\Delta D(\mathbf{r}) > \beta$, the gradient decreases as $\Delta D(\mathbf{r})$ increases, becoming negligible for very large errors. This prevents the NeRF from being forced to fit inaccurate geometry [S1].
++*   **Precision:** The logarithmic term requires $\Delta D(\mathbf{r}) > 0$ to avoid $\log(0)$. If $\Delta D(\mathbf{r}) = 0$, the first branch is taken (since $0 < \beta$), yielding $0$, which is safe [S1].
++*   **Boundaries:** The transition at $\Delta D(\mathbf{r}) = \beta$ is continuous. At $\beta$, the quadratic term is $0.5\beta^2$ and the logarithmic term is $\beta^2(0.5 + \log(1)) = 0.5\beta^2$ [S1].
++*   **Gradient Behavior:** For $\Delta D(\mathbf{r}) > \beta$, the gradient with respect to $\hat{D}(\mathbf{r})$ is $\beta^2 / \Delta D(\mathbf{r})$, which approaches zero as the error grows, reducing the influence of outliers [S1].
+ 
+ ## Subtopics
+ 
+ ### Depth Noise Robustness and Supervision
+-This variant, associated with S-NeRF, focuses on the robustness of the depth supervision pipeline to noise in the input depth maps [S2, S2, unofficial]. It involves adding random Gaussian noise to original depth map inputs to simulate depth errors and computing outlier rates using a threshold of 1 compared to original depth inputs [S2, S2, unofficial]. The method employs a confidence strategy to locate and measure depth outliers accurately, avoiding their negative influence during training [S2, S2, unofficial]. Training with strong depth noise causes PSNR and SSIM to drop slightly by 0.05–0.5%, demonstrating robustness [S2, S2, unofficial]. Using only sparse depth improves PSNR by 5% over RGB-only S-NeRF but is 2% worse in PSNR and 8% worse in LPIPS than dense depth with confidence [S2, S2, unofficial]. Replacing the default NLSPN depth completion with traditional methods (Ku et al. 2018 or Van Gansbeke et al. 2019) yields similar rendering quality (24.41→24.40 PSNR), showing the method does not rely on specific depth completion quality [S2, S2, unofficial].
++This variant, associated with S-NeRF, evaluates the robustness of depth supervision against noise [S2, unofficial]. It involves adding random Gaussian noise to original depth map inputs to simulate errors [S2, unofficial]. Outlier rates are computed using a threshold of 1 compared to original depth inputs [S2, unofficial]. The method demonstrates that training with strong depth noise causes only a slight drop in PSNR and SSIM (0.05–0.5%), as the confidence strategy accurately locates and measures depth outliers to avoid their negative influence [S2, unofficial]. Using only sparse depth improves PSNR by 5% over RGB-only baselines but is 2% worse in PSNR and 8% worse in LPIPS than dense depth with confidence [S2, unofficial]. The method does not rely on the quality of the depth completion network (e.g., NLSPN), as replacing it with traditional methods like Ku et al. (2018) yields similar rendering quality (24.41→24.40 PSNR) [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The computation is $O(1)$ per ray, involving basic arithmetic operations and a logarithm. It is negligible compared to the volume rendering integration [S1].
+-*   **Memory Complexity:** $O(1)$ per ray, storing only the scalar loss and intermediate difference [S1].
+-*   **Measured Performance:** In NeRFVS, the robust loss addresses geometry error degradation in extrapolation performance [S1]. In S-NeRF, the confidence-guided supervision (which utilizes robust principles) allows for similar rendering quality even with worse depth completion methods [S2, S2, unofficial].
+-*   **Strengths:** Less sensitive to outliers than L2 loss; encourages NeRF to terminate rays around pseudo-depth while retaining freedom for inaccurate geometry; robust to depth noise [S1][S2, S2, unofficial].
+-*   **Limitations:** Requires a threshold parameter $\beta$; relies on the availability of pseudo-depth or geometry scaffolds [S1].
+-*   **When to use:** When using dense but inaccurate depth maps or pseudo-depth from geometry scaffolds where outliers are present [S1].
+-*   **When not to use:** When high-quality, clean depth maps are available and L2/L1 losses are sufficient; when computational resources are extremely constrained (though the cost is minimal) [S1].
++*   **Time Complexity:** $O(1)$ per ray, as it involves basic arithmetic and a logarithm [S1].
++*   **Memory Complexity:** $O(1)$, requiring only the storage of $\beta$ and the current ray's depth values [S1].
++*   **Strengths:** Reduces the impact of outliers in pseudo-depth maps, preventing geometry error degradation during extrapolation [S1]. It allows the NeRF to terminate rays around pseudo-depth while retaining freedom for inaccurate geometry [S1].
++*   **Limitations:** It is specifically designed for scenarios with dense but inaccurate depth maps; its effectiveness with sparse or highly noisy depth maps depends on complementary confidence mechanisms [S1][S2, unofficial].
++*   **When to use:** When optimizing NeRF with dense pseudo-depth maps that contain outliers or inaccuracies [S1].
++*   **When not to use:** When high-quality, accurate depth maps are available, standard L2 loss may be sufficient and simpler [S1].
+ 
+ ## Background
+-The Robust Depth Loss was proposed in the NeRFVS paper (2023) to optimize NeRF with dense while inaccurate depth maps derived from geometry scaffolds [S1]. It was inspired by previous methods combining NeRF and geometry, specifically aiming to prevent the degradation of extrapolation performance caused by geometry errors [S1]. The S-NeRF paper (2023) further explores the robustness of depth supervision strategies, including confidence-guided approaches that mitigate the impact of depth outliers [S2, S2, unofficial].
++Robust Depth Loss was proposed in the context of NeRFVS (Neural Radiance Fields for Free View Synthesis via Geometry Scaffolds) [S1]. It was introduced to address the issue where geometry error degrades extrapolation performance when combining NeRF with geometry scaffolds [S1]. The method is inspired by previous works on robust loss functions [S1].
+ 
+ ## Sources

@@ -1,0 +1,144 @@
+TL;DR (English) The placeholder camera trajectory (build_orbit_camera) emits c2w matrices in an OpenGL-style camera basis, while SolarWM's training data contract uses an OpenCV-style basis ([right, down, forward], first-frame-relative vi...
+
+[Bug] SolarWMCameraAttach: yaw/dolly/pedestal directions inverted — camera frame convention mismatch (OpenGL vs OpenCV) · Issue #3 · smthemex/ComfyUI_SolarWM_H3 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Bug] SolarWMCameraAttach: yaw/dolly/pedestal directions inverted — camera frame convention mismatch (OpenGL vs OpenCV) #3
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+[Bug] SolarWMCameraAttach: yaw/dolly/pedestal directions inverted — camera frame convention mismatch (OpenGL vs OpenCV)#3
+Copy link
+Description
+sxxzwbl
+opened on Sep 15, 2026
+Issue body actions
+TL;DR (English)
+The placeholder camera trajectory (build_orbit_camera) emits c2w matrices in an
+OpenGL-style camera basis, while SolarWM's training data contract uses an
+OpenCV-style basis ([right, down, forward], first-frame-relative via
+inv(c2w[t]) @ c2w[0]). The mismatch conjugates the relative transform and
+inverts exactly yaw / dolly / pedestal, while pitch / truck stay correct.
+Applying a 180°-about-right basis conversion (up and forward columns
+negated) before the PRoPE assembly fixes all five motion directions — verified
+across multiple seeds and trajectories in an external bridge node.
+现象
+使用 SolarWMCameraAttach（占位轨道 orbit/dolly）+ 原生 H3（fl2va int8）+
+adapter_model_comfy_new.safetensors 进行方向性测试（同轨迹、同 seed，单一
+运动类型），五项运动的方向表现如下：
+#
+运动
+预期
+实际
+1
+横摇：左转 90° 后回转 90°
+先左后右
+方向相反
+2
+俯仰：上转 90° 后下转 90°
+先上后下
+正确
+3
+推拉：前推后拉
+推近再拉远
+方向相反（测两次均反；其中一次输出完全静止画面）
+4
+平移：先左后右
+先左后右
+正确
+5
+升降：先上后下
+先上后下
+方向相反
+反转模式稳定可复现（跨 seed、跨轨迹），且恰好是"2 对 3 反"——这不是随机的
+转换噪声，而是系统性的坐标约定问题。
+根因分析
+SolarWM 官方数据契约（data contract / camera.py）中：
+c2w 列基为 [right, down, forward]（OpenCV 风格，注释明确 "no axis flip"）
+相机条件使用首帧相对化：inv(c2w[t]) @ c2w[0]
+而节点内占位轨道 build_orbit_camera 生成的 c2w 是 OpenGL 风格基
+（[right, up, back]）。两种约定相差一个绕 right 轴的 180° 旋转（记为 D）。
+首帧相对化对固定变换 D 不抵消，而是共轭：
+```
+rel' = inv(c2w·D[t]) @ (c2w·D[0]) = D⁻¹ · rel · D
+```
+共轭效应逐项分析：
+分量
+在 D 下
+结果
+yaw（绕 up 轴旋转）
+变号
+反转 ✓ 与实测一致
+dolly（forward 平移）
+变号
+反转 ✓
+pedestal（up 平移）
+变号
+反转 ✓
+pitch（绕 right 轴旋转）
+不变
+正确 ✓
+truck（right 平移）
+不变
+正确 ✓
+"2 对 3 反"的精确模式与共轭预测完全吻合，可排除其他转换错误。
+（注：PRoPE 数学本身无问题——我将节点的 prope 计算与 SolarWM 官方
+torch_prope.py 逐行比对，完全一致；build_row_plan、潜在帧采样、
+96:128 维投影亦无偏差。问题隔离在喂给 PRoPE 的 c2w 约定上。）
+修复建议
+在构建 PRoPE 矩阵前，把占位 c2w 转到训练约定——等价于右乘
+diag(1, -1, -1)（翻转 up 与 forward 两列）：
+```
+c2w_cv = c2w_ogl @ torch.diag(torch.tensor([1.0, -1.0, -1.0]))
+```
+或提供 invert 开关供不同来源的轨迹选择约定。
+验证情况
+我已在外部桥接节点（OmniCam MotionScene → 本节点 PRoPE 链路）中应用上述
+基变换：
+五项运动方向全部正确，跨 seed / 跨轨迹稳定
+修复前偶发的"完全静止画面"（模型收到自相矛盾的条件）不再出现
+附带发现：LoRA 的 38-49 号 DiT 块对 attn 强度敏感（0.3 为甜点，1.0 会引入
+人物错乱），25-37 为相机语义核心区——供参考
+环境
+ComfyUI: v0.3x（ 最新版）
+节点：ComfyUI_SolarWM_H3 最新
+模型：minimax_h3_fl2va_pruned_int8_convrot + adapter_model_comfy_new.safetensors
+测试轨迹：OmniCam MotionScene 单连续相机（yaw/pitch/dolly/truck/pedestal 各一段）
+Activity
+smthemex commented on Sep 16, 2026
+smthemex
+on Sep 16, 2026
+Owner
+More actions
+stage 0.5 的镜头反向我观察到了，下个PR会修正，下个PR会更新stage2的推理代码，stage2的lora模型已经上传了，谢谢指正。
+Naist4869 commented on Sep 16, 2026
+Naist4869
+on Sep 16, 2026
+More actions
+stage 0.5 的镜头反向我观察到了，下个PR会修正，下个PR会更新stage2的推理代码，stage2的lora模型已经上传了，谢谢指正。
+微笑大佬总是在ai行业最前沿
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

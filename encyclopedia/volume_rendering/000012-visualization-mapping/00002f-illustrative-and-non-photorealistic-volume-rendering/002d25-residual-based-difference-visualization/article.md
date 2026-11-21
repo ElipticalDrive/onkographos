@@ -1,0 +1,66 @@
+# Residual-based Difference Visualization
+
+Also called: Residual DVR
+
+## Overview
+Residual-based Difference Visualization is a comparative volume rendering technique designed to reveal structural discrepancies between a reference volume field and an optimized volume field [S1, unofficial]. It solves the problem of identifying regions where an optimized transfer function fails to compensate for differences in the underlying data, thereby guiding further analysis or optimization [S1, unofficial]. It is distinct from standard difference visualization by explicitly rendering the residual field derived from the difference of two transfer-function-applied volumes, rather than comparing raw scalar values [S1, unofficial].
+
+## How it works
+**Inputs:**
+1.  Reference volume field $V_r$.
+2.  Optimized volume field $V_o$.
+3.  Reference transfer function $T_r$.
+4.  Optimized transfer function $T_o$.
+
+**Outputs:**
+*   A residual volume field $V_{res}$ representing the magnitude of difference between the two rendered fields.
+
+**Data Structures:**
+*   The residual field $V_{res}$ is a 3D scalar field (or RGBA field if storing vector components, though the method specifies an $l_2$-norm scalar) with dimensions matching the input volumes. Each voxel stores a single scalar value representing the residual magnitude.
+
+**Steps:**
+1.  **Apply Transfer Functions:** For each voxel $i$ in the domain, compute the color output for both fields:
+    $$ c_r(i) = T_r(V_r(i)) $$
+    $$ c_o(i) = T_o(V_o(i)) $$
+    Where $c_r$ and $c_o$ are RGBA vectors.
+
+2.  **Pre-multiply Alpha:** Ensure the RGB components are pre-multiplied with the alpha component for both colors to weight transparency correctly:
+    $$ c'_r = c_r \cdot \alpha_r $$
+    $$ c'_o = c_o \cdot \alpha_o $$
+    [S1, unofficial]
+
+3.  **Compute Residual:** Calculate the difference vector between the pre-multiplied colors and compute the $l_2$-norm to obtain the scalar residual value for voxel $i$:
+    $$ V_{res}(i) = \| c'_r(i) - c'_o(i) \|_2 $$
+    [S1, unofficial]
+
+    *Note:* The sources specify using the $l_2$-norm of the $RGB\alpha$ difference vector. This implies the difference is taken over the 4 components (R, G, B, A) or that the pre-multiplied RGB is treated as the vector magnitude. Given the phrasing "RGB colors pre-multiplied with $\alpha$", the vector is likely $(R_r\alpha_r, G_r\alpha_r, B_r\alpha_r, \alpha_r)$ vs $(R_o\alpha_o, G_o\alpha_o, B_o\alpha_o, \alpha_o)$. However, standard practice for color difference often focuses on RGB. The source says "$RGB\alpha$ difference vector", suggesting all 4 components are included in the norm calculation.
+
+4.  **Render:** Render the resulting residual field $V_{res}$ using standard Direct Volume Rendering (DVR) or a specific visualization mapping to highlight high-difference regions.
+
+**Parameters:**
+*   Norm type: $l_2$ (Euclidean) [S1, unofficial].
+*   Alpha handling: Pre-multiplication is required [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Transparency Weighting:** Failing to pre-multiply RGB by alpha will cause highly transparent regions to contribute equally to the residual as opaque regions, potentially obscuring structural differences in dense areas [S1, unofficial].
+*   **Transfer Function Sensitivity:** The method reveals differences in the *rendered* output, not just the scalar field. Differences may arise from transfer function parameterization rather than data structure [S1, unofficial].
+
+## Subtopics
+
+### Complex Subtraction Imaging
+An imaging technique used to enhance the visualization of changes in tissue contrast by subtracting a reference image from a current image [S2]. Unlike the volume-based residual DVR, this is often applied to image streams (e.g., MRI) [S2]. The reference image can be fixed in time or dynamic (to approximate a time derivative) [S2]. It is used in interventional guidance to highlight temporal changes in tissue properties [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of voxels $N$ for the residual computation step ($O(N)$), assuming constant-time transfer function evaluation. The final rendering cost depends on the chosen DVR algorithm applied to the residual field.
+*   **Memory Complexity:** Requires storage for two input volumes, two transfer functions, and one output residual volume ($O(N)$).
+*   **Strengths:** Directly highlights where optimization or changes in data structure affect the visual output; handles transparency correctly via pre-multiplication [S1, unofficial].
+*   **Limitations:** Only reveals differences in the *rendered* appearance, not raw data differences; sensitive to transfer function choices [S1, unofficial].
+*   **When to use:** When comparing two volume datasets or two transfer functions to identify regions of significant visual discrepancy [S1, unofficial].
+*   **When not to use:** When the goal is to visualize absolute values or when transfer function differences are not of interest [S1, unofficial].
+
+## Background
+The method was introduced in the context of transfer function optimization for comparative volume rendering [S1, unofficial]. It supports improved analysis by guiding users toward regions in the domain where structural differences are high and cannot be compensated by the optimized transfer function [S1, unofficial]. A related technique, Complex Subtraction Imaging, was used in real-time volume rendered MRI for interventional guidance to enhance visualization of changes in tissue contrast [S2].
+
+## Sources
+[S1] Transfer Function Optimization for Comparative Volume Rendering, https://doi.org/10.48550/arxiv.2306.05885, fetched 2026-10-26 (unofficial)
+[S2] Real-Time Volume Rendered MRI for Interventional Guidance, https://pmc.ncbi.nlm.nih.gov/articles/PMC2570028/, fetched 2026-10-27

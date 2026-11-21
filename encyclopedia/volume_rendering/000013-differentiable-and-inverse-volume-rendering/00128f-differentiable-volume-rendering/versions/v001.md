@@ -1,0 +1,91 @@
+# Differentiable volume rendering
+
+Also called: Differentiable DVR, DiffDVR, Differentiable Ray Marching
+
+## Overview
+Differentiable volume rendering computes the gradient of a rendered image (or derived metric like depth) with respect to scene parameters (density, geometry, transfer functions, camera poses) by making the rendering integral differentiable [S5, unofficial]. It solves the inverse problem of optimizing 3D scene representations from 2D observations without requiring 3D ground truth supervision [S2, unofficial][S3, unofficial]. Unlike standard rasterization or path tracing which may lack analytical gradients for complex volumetric interactions, this family enables end-to-end optimization of implicit fields, explicit grids, and physical parameters via gradient descent [S5, unofficial]. It sets itself apart from [Radiance-field optimization](44-radiance-field-optimization.md) by focusing on the general differentiability of the volume rendering integral itself, rather than specific neural field architectures, and from [Tomographic reconstruction as inverse rendering](45-tomographic-reconstruction-as-inverse-rendering.md) by encompassing both tomographic and non-tomographic (e.g., RGB-only) optimization loops [S5, unofficial].
+
+## Shared principles
+The core mechanism is the evaluation of the volume rendering equation and the propagation of gradients through the integration steps. The standard emission-absorption model computes the color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$ as [S1][S5, unofficial]:
+
+$$
+\hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
+$$
+
+where $\sigma_i$ is the density, $\delta_i$ is the step size, $\mathbf{c}_i$ is the color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance [S1][S5, unofficial].
+
+Differentiation strategies fall into three main categories:
+1.  **Reverse-Mode Automatic Differentiation (AD):** Standard backpropagation through the computational graph. This requires storing $O(kn)$ intermediate states (where $n$ is pixels and $k$ is samples), leading to high memory usage [S5, unofficial].
+2.  **Adjoint Method:** Computes gradients by propagating adjoint variables backward through the rendering algorithm, evaluating the chain rule from output to input. This has computational complexity largely constant in the number of parameters, making it preferable for optimizing many parameters like the transfer function [S1][S3, unofficial].
+3.  **Analytic Inversion / Explicit Gradients:** Uses a-priori knowledge of the DVR operations to invert the order of operations or derive closed-form gradients, reducing memory consumption to $O(n)$ by avoiding the storage of intermediate results [S5, unofficial].
+
+## Subtopics
+
+### [Differentiable Volumetric Rendering (DVR)](775-differentiable-volumetric-rendering-dvr.md)
+Differentiable Volumetric Rendering (DVR) predicts pixel color by casting a ray, finding the first intersection with an implicit isosurface defined by a neural network, and querying a texture network at that point. It solves the problem of optimizing implicit neural representations of 3D shape and texture directly from 2D RGB images without requiring 3D ground truth supervision. Unlike voxel-based differentiable rendering methods or LSTM-based renderers, DVR does not store intermediate volumetric data or unrolled computation graphs for the forward pass, making its memory footprint independent of sampling accuracy and allowing for higher resolution. Choose this when optimizing implicit neural fields (SDFs/occupancy) for shape and texture.
+
+### [Adjoint Method](789-adjoint-method.md)
+The Adjoint Method is a technique for computing gradients of a volume rendering loss with respect to input parameters (such as transfer function, volume density, camera, or step size) by propagating adjoint variables backward through the rendering algorithm. It solves the problem of differentiating the rendering integral by evaluating the chain rule from left to right (output to input), which is equivalent to backpropagation. Unlike the Forward-Mode Automatic Differentiation, which scales linearly with the number of parameters, the Adjoint Method has computational complexity largely constant in the number of parameters, making it preferable for optimizing many parameters like the transfer function. It builds on [Differentiable volume rendering](43-differentiable-volume-rendering.md). Choose this when optimizing high-dimensional parameters (e.g., transfer functions) where reverse-mode AD is too memory-intensive.
+
+### [Forward-Mode Automatic Differentiation](853-forward-mode-automatic-differentiation.md)
+A differentiation technique that propagates derivatives forward through the computation graph using operator overloading, computing the derivative of the output with respect to parameters simultaneously with the forward pass. Choose this when the number of parameters is small relative to the number of outputs, as it scales linearly with the number of parameters.
+
+### [Plenoxel Data Structure](930-plenoxel-data-structure.md)
+Plenoxel is an explicit, sparse 3D grid representation for photorealistic view synthesis that stores opacity and spherical harmonic (SH) coefficients directly, optimized via gradient descent without neural networks. It differs from its sibling [Differentiable Volumetric Rendering (DVR)](775-differentiable-volumetric-rendering-dvr.md) by using a discrete, sparse voxel structure with trilinear interpolation rather than a continuous implicit field, and from [PlenOctrees](https://arxiv.org/abs/2112.05131) by maintaining continuity in the plenoptic function through interpolation, which is critical for successful optimization. Choose this for explicit, memory-efficient voxel-based optimization of view synthesis.
+
+### [Neural Field Derivatives via Autograd](1266-neural-field-derivatives-via-autograd.md)
+This method computes spatial differential operators (gradient, divergence, Laplacian) of neural field outputs with respect to their spatial inputs using automatic differentiation (autograd). It enables supervision on gradient targets in differentiable volume rendering by providing exact derivatives of the implicit function, avoiding the need for finite-difference approximations. It differs from [Differentiable Volumetric Rendering (DVR)](775-differentiable-volumetric-rendering-dvr.md) by focusing on the internal field derivatives rather than the rendering integral, and from [Differentiable Volume Rendering via Box Splines](2449-differentiable-volume-rendering-via-box-splines.md) by relying on framework-level autodiff rather than analytical spline derivatives. Choose this when applying regularization or constraints based on spatial derivatives of the implicit field.
+
+### [Differentiable Depth Rendering](1332-differentiable-depth-rendering.md)
+Differentiable Depth Rendering computes exact gradients of rendered depth values with respect to implicit function parameters by applying the Implicit Function Theorem (IFT). It solves the problem of differentiating through robust, non-differentiable forward tracing algorithms (such as bisection or sphere tracing) by replacing the backward pass with a surrogate gradient expression. Unlike [Differentiable Volumetric Rendering (DVR)](775-differentiable-volumetric-rendering-dvr.md) which integrates density along rays, this method targets implicit surfaces defined by zero-level sets, and unlike [Approximated Gradient Back-Propagation](5666-approximated-gradient-back-propagation.md), it retains exact gradient information by accounting for the dependence of sample points on latent codes. Choose this for differentiable surface reconstruction from depth or normal targets.
+
+### [Differentiable Direct Volume Rendering (DiffDVR)](1355-differentiable-direct-volume-rendering-diffdvr.md)
+DiffDVR is an image-based optimization method that uses differentiable direct volume rendering to optimize transfer functions and other continuous parameters by minimizing residuals between rendered images and reference images. It sets itself apart from standard reverse-mode automatic differentiation (AD) by using analytic inversion of the blending functions to recompute intermediate results, thereby reducing memory consumption from $O(kn)$ to $O(n)$. Unlike least-squares voxel-based solvers, DiffDVR accounts for ray-based integration effects like occlusion and attenuation, emphasizing structural differences more strongly in residual maps. Choose this for optimizing transfer functions or voxel densities in large volumes where memory is a constraint.
+
+### [Implicit Inverse Opacity Gradient](1372-implicit-inverse-opacity-gradient.md)
+Implicit Inverse Opacity Gradient is a method for computing the gradient of the inverse opacity function $t(\theta) = F_r^{-1}(y, \theta)$ with respect to model parameters $\theta$, without back-propagating through the iterative binary search used to find the depth $t$. It solves the problem of differentiating through a root-finding procedure by applying the implicit function theorem to the forward opacity equation $y = F_r(t, \theta)$. Unlike [Differentiable Volumetric Rendering (DVR)](775-differentiable-volumetric-rendering-dvr.md) which differentiates the forward integral directly, this method isolates the depth estimation step, allowing the binary search to remain non-differentiable while providing an analytical gradient for the inverse mapping. Choose this when optimizing depth targets derived from opacity constraints.
+
+### [Differentiable Rendering via Gradient-Based Optimization](1989-differentiable-rendering-via-gradient-based-optimization.md)
+This method is an iterative optimization algorithm that updates a volumetric density field $\rho$ (or other scene parameters) to minimize the Mean Squared Error (MSE) between input images $I$ and rendered images $L_{out}$, using gradients computed by a differentiable renderer. It solves the inverse problem of reconstructing volumetric properties from observed imagery by treating rendering as a differentiable function. Unlike [Differentiable Volumetric Rendering (DVR)](775-differentiable-volumetric-rendering-dvr.md) which focuses on the forward gradient computation, this method focuses on the *optimization loop* that consumes those gradients to update parameters. It differs from [Adjoint Method](789-adjoint-method.md) implementations in that it often utilizes high-level automatic differentiation (AD) frameworks (like Dr.Jit) rather than manually deriving adjoint equations, though it may use adjoint integrators like Path Replay Backpropagation under the hood. Choose this for general inverse rendering workflows using high-level AD frameworks.
+
+### [Differentiable Volume Rendering via Box Splines](2449-differentiable-volume-rendering-via-box-splines.md)
+This method computes the differentiable X-ray transform (forward projection) of a volume defined on a uniform grid using box spline interpolation, providing exact gradients with respect to ray parameters (origin $\mathbf{t}$ and direction $\mathbf{n}$) and volume coefficients. It solves the problem of back-propagating gradients through the ray-tracing integral in tomography and geometry calibration without relying on finite differences or implicit automatic differentiation through the entire ray march. Unlike standard differentiable renderers that may use finite differences or implicit autodiff, this method explicitly computes ray-traced geometry gradients for anchors and directions using specific adjoint functions, while using the standard adjoint transform for volume coefficients. Choose this for differentiable tomographic reconstruction where exact geometry gradients are required.
+
+### [Differential Diffusion Theory for Participating Media](3028-differential-diffusion-theory-for-participating-media.md)
+A physically-based differentiable rendering framework for participating media that uses diffusion approximation to compute gradients of radiance with respect to scene parameters (density, absorption, lighting) efficiently, avoiding the high cost of backpropagation or finite differences. Choose this for differentiable rendering of dense participating media where standard ray marching is too noisy or expensive.
+
+### [Dual-Pass Differentiable Volume Rendering with Sparse Gradient Recording](3558-dual-pass-differentiable-volume-rendering-with-sparse-gradie.md)
+A differentiable rendering technique that executes forward and backward passes concurrently to reuse the Jacobian term $J_{ss}$ during backpropagation, utilizing a sparse structure `gradRec` to store gradients only along sampled ray paths rather than the entire volume grid. Choose this when memory constraints prevent storing full Jacobians but ray paths are sparse.
+
+### [Differentiable Rendering and Sampling Methods](4973-differentiable-rendering-and-sampling-methods.md)
+Not given in the sources.
+
+### [Differential path integral estimator with MIS and NEE](6332-differential-path-integral-estimator-with-mis-and-nee.md)
+Computes the gradient of the rendered image with respect to parameters $\theta$ by integrating differential measurement contributions over path space, using MIS to combine BRDF and emitter sampling, and NEE to connect paths to emitters. Choose this for differentiable path tracing in complex scenes with multiple bounces and emissive objects.
+
+### [Smooth Gradient Estimation via Convolution](6449-smooth-gradient-estimation-via-convolution.md)
+A technique to enable differentiation of the rendering equation by smoothing the integrand via convolution with a kernel, allowing the differential operator to move inside the integral. Choose this when dealing with discontinuities (e.g., visibility boundaries) that make standard gradients unstable.
+
+### [Reparameterization Estimators](6499-reparameterization-estimators.md)
+Not given in the sources.
+
+### TensoRF Volume Rendering
+Rendering images by marching along rays, sampling $Q$ shading points, and computing pixel color using differentiable volume rendering [S6, unofficial]. The color is computed as $C = \sum_{q=1}^{\infty} \tau_q (1 - \exp(-\sigma_q \Delta_q)) c_q$, where $\tau_q$ is transmittance, $\sigma_q$ is density, $c_q$ is color, and $\Delta_q$ is ray step size at sample $q$ [S6, unofficial]. Transmittance is defined as $\tau_q = \exp(-\sum_{p=1}^{q-1} \sigma_p \Delta_p)$ [S6, unofficial]. Choose this when using tensor factorization (CP or VM) to represent the radiance field for memory-efficient optimization [S6, unofficial].
+
+### Differentiable Volume Rendering with Analytical Gradients
+A rendering technique that computes radiance and its analytical derivatives with respect to volume density directly, avoiding the overhead of propagating gradients through long computational graphs inherent in automatic differentiation [S1]. It advances ray position via $x_u \rightarrow x_u + \boldsymbol{u} \Delta d$ [S1]. Choose this for fluid reconstruction or dynamic density optimization where analytical gradients provide significant performance gains over AD [S1].
+
+### Grey-box Differentials
+A technique where differentials are computed for a composition $z = f(g(x))$ by using analytic gradients for the inner function $g$ (white box) and sampled gradients for the outer function $f$ (black box) [S7]. First-order: $\nabla_z (z = f(g(x))) = (\nabla_x g(x))^T \cdot \nabla_y f(y=g(x))$ [S7]. Second-order: $\nabla^2_z f(g(x)) \approx (\nabla_x g(x))^T \cdot \nabla^2_y f(g(x)) \cdot \nabla_x g(x)$ [S7]. Choose this when the inner function (e.g., neural network) has known analytic gradients and the outer function (e.g., physical renderer) is a black box with sampled gradients [S7].
+
+## Background
+Differentiable volume rendering emerged as a key technique for inverse graphics and 3D reconstruction from 2D images. Early work focused on differentiable ray marching for neural implicit representations, such as Differentiable Volumetric Rendering (DVR) [S1][S2, unofficial][S3, unofficial]. The challenge of memory consumption in reverse-mode automatic differentiation for large volumes was addressed by DiffDVR, which introduced analytic inversion of blending functions to reduce memory complexity from $O(kn)$ to $O(n)$ [S5, unofficial]. Subsequent developments included the Adjoint Method for efficient gradient computation with respect to many parameters [S1][S3, unofficial], and explicit gradient methods for tomography using box splines [S1]. The field has expanded to include differentiable depth rendering via the Implicit Function Theorem [S2, unofficial], sparse gradient recording [3558], and hybrid grey-box differentials [S7]. It is widely used in neural radiance fields (NeRF), tomographic reconstruction, and transfer function optimization [S5, unofficial][S6, unofficial].
+
+## Sources
+[S1] Physics-Based Differentiable Rendering for Efficient and Plausible Fluid Modeling from Monocular Video, https://doi.org/10.3390/e25091348, fetched 2026-10-26
+[S2] B1ueber2y/DIST-Renderer, https://github.com/B1ueber2y/DIST-Renderer, fetched 2026-10-26 (unofficial)
+[S3] omkarchittar/Neural_Radiance_Fields, https://github.com/omkarchittar/Neural_Radiance_Fields, fetched 2026-10-26 (unofficial)
+[S4] kyle-rosa/ray_marching, https://github.com/kyle-rosa/ray_marching, fetched 2026-10-26 (unofficial)
+[S5] (PDF) Differentiable Direct Volume Rendering - ResearchGate, https://www.researchgate.net/publication/353510271_Differentiable_Direct_Volume_Rendering, fetched 2026-10-30 (unofficial)
+[S6] PDF TensoRF: Tensorial Radiance Fields - ECVA, https://www.ecva.net/papers/eccv_2022/papers_ECCV/papers/136920332.pdf, fetched 2026-10-29 (unofficial)
+[S7] Stochastic Gradient Estimation for Higher-Order Differentiable Rendering, https://doi.org/10.1109/iccv51701.2025.02618, fetched 2026-10-29

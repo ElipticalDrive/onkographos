@@ -1,0 +1,126 @@
+# CUDA Execution Configuration Optimization
+Also called: Block Size and Grid Size Tuning, GPU Occupancy Optimization
+
+## Overview
+CUDA Execution Configuration Optimization is the process of selecting thread block dimensions, grid dimensions, and shared memory allocation to maximize GPU occupancy and rendering performance for ray-casting volume rendering [S1, S2, unofficial]. It addresses the problem that performance varies significantly (up to 265%) based on these parameters, with no single optimal configuration for all datasets or algorithms [S2, unofficial]. Unlike general occupancy tuning, this method specifically accounts for the high branch divergence and load imbalance inherent in ray-grid traversal, where threads within a warp often execute different code paths or terminate at different times [S2, unofficial].
+
+## How it works
+**Inputs:**
+- Volume dataset dimensions (e.g., $N_x, N_y, N_z$).
+- Target resolution (image width $W$, height $H$).
+- GPU hardware capabilities (max threads per block, max warps per SM, register file size).
+- Algorithmic characteristics (branching density, early ray termination usage, memory access pattern).
+
+**Outputs:**
+- Optimal block dimensions $(B_x, B_y, B_z)$ such that $B_x \times B_y \times B_z$ is the total threads per block.
+- Optimal grid dimensions $(G_x, G_y)$ such that $G_x \times G_y \ge W \times H$.
+- Shared memory size (if applicable).
+
+**Data Structures:**
+- **Execution Configuration:** A tuple $(B_x, B_y, B_z, G_x, G_y, S_{mem})$.
+- **Occupancy Metric:** $O = \frac{N_{active\_warps}}{N_{max\_warps\_per\_SM}}$ [S1, unofficial].
+
+**Parameters:**
+- **Block Size ($B$):** The number of threads per block. Common benchmarked sizes include $4\times4, 4\times8, 4\times16, 4\times32, 8\times8, 8\times16, 8\times32, 16\times16$ [S1, unofficial].
+- **Minimum Threads:** CUDA blocks require a minimum of 32 threads to saturate computational throughput in a standard SIMT model, but smaller blocks (e.g., 16) perform well in raycasting due to divergence [S2, unofficial].
+- **Exclusion Threshold:** Configurations with fewer than 4 threads per block are excluded because a warp requires at least 4 clock cycles to schedule, guaranteeing under-utilization [S2, unofficial].
+- **Typical Optimal Size:** Empirically, the "sweet spot" is 16 or 32 threads per block, depending on memory ordering and Early Ray Termination (ERT) status [S2, unofficial].
+
+**Steps:**
+1. **Map Pixels to Threads:** Assign one thread per pixel. The grid size is calculated as $G_x = \lceil W / B_x \rceil$ and $G_y = \lceil H / B_y \rceil$ [S1, unofficial].
+2. **Select Block Dimensions:** Choose $B_x, B_y$ from the set of candidate sizes. The product $B_{total} = B_x \times B_y$ determines the block size [S1, unofficial].
+3. **Calculate Occupancy:** Use the CUDA occupancy calculator or hardware limits to determine the maximum number of warps per SM for the given kernel register and shared memory usage [S1, unofficial].
+4. **Benchmark Performance:** Render standard datasets (e.g., Bucky $32^3$, Engine $256^3$, Porsche $559\times1024\times347$) for each candidate configuration [S1, unofficial].
+5. **Analyze Trade-offs:** Compare frames per second (FPS) against L2 cache miss rates and divergence metrics [S2, unofficial].
+6. **Select Optimal Configuration:** Choose the configuration with the highest FPS, balancing warp saturation and cache utilization [S2, unofficial].
+
+**Formulas:**
+- Occupancy:
+  $$ O = \frac{\text{Number of active warps}}{\text{Maximum warps allowed per multiprocessor}} $$
+  [S1, unofficial]
+
+- Grid Dimensions:
+  $$ G_x = \left\lceil \frac{W}{B_x} \right\rceil, \quad G_y = \left\lceil \frac{H}{B_y} \right\rceil $$
+  [S1, unofficial]
+
+**Pitfalls:**
+- **Load Imbalance:** Larger thread blocks exhibit greater load imbalance because the variation in ray lengths increases with block size [S2, unofficial].
+- **Divergence:** Threads in a warp (32 threads) are executed in subsets of 8. If threads do not share a common instruction (e.g., due to conditionals like empty-space skipping or ERT), they diverge and execute serially [S2, unofficial].
+- **Cache vs. Saturation Trade-off:** Small blocks may have fewer L2 cache misses but fail to saturate the warp scheduler. Large blocks saturate the scheduler but may cause more cache misses and load imbalance. The optimal size is a trade-off between these two factors [S2, unofficial].
+- **Dataset Dependency:** The optimal block size for one problem is not the same as for another, even on the same platform [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def optimize_cuda_execution_config(volume_dims, image_dims, gpu_props):
+    """
+    Determine optimal CUDA execution configuration for volume rendering.
+    """
+    W, H = image_dims
+    candidates = [
+        (4, 4), (4, 8), (4, 16), (4, 32),
+        (8, 8), (8, 16), (8, 32),
+        (16, 16)
+    ]
+    
+    best_config = None
+    max_fps = 0
+    
+    for Bx, By in candidates:
+        # Exclude blocks with < 4 threads to avoid guaranteed under-utilization
+        if Bx * By < 4:
+            continue
+            
+        # Calculate grid dimensions
+        Gx = (W + Bx - 1) // Bx
+        Gy = (H + By - 1) // By
+        
+        # Calculate occupancy based on GPU props (registers, shared mem)
+        # This step typically uses CUDA Occupancy Calculator logic
+        occupancy = calculate_occupancy(gpu_props, Bx * By)
+        
+        # Benchmark rendering performance
+        # In practice, this involves launching the kernel and measuring FPS
+        fps = benchmark_rendering(Bx, By, Gx, Gy, volume_dims)
+        
+        if fps > max_fps:
+            max_fps = fps
+            best_config = {
+                'block': (Bx, By),
+                'grid': (Gx, Gy),
+                'occupancy': occupancy,
+                'fps': fps
+            }
+            
+    return best_config
+```
+
+## Subtopics
+
+### Shader Occupancy Optimization for DDA
+Focuses on reducing register allocation and minimizing state carried across loops to allow more warps per SM. This is a prerequisite for effective execution configuration tuning, as it defines the register/shared memory constraints used in occupancy calculations [Parent].
+
+### Early Ray Termination (ERT)
+An algorithmic optimization that can change the optimal block size. ERT introduces conditionals that increase divergence, potentially favoring smaller block sizes (e.g., 16 threads) to mitigate load imbalance [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** The optimization process itself is offline (benchmarking). The runtime cost of the kernel is $O(N)$ where $N$ is the number of pixels, but the constant factor varies significantly with configuration.
+- **Memory Complexity:** Depends on shared memory usage and register allocation per thread. The configuration selection aims to maximize occupancy without exceeding hardware limits.
+- **Measured Performance:** On an NVIDIA GTX280 with an Intel Core 2 Quad 2.33GHz processor and 4GB memory:
+  - Bucky ($32\times32\times32$): 61 FPS with block sizes $4\times16, 4\times32, 8\times8, 8\times16, 8\times32$ [S1, unofficial].
+  - Engine ($256\times256\times256$): 31 FPS with block sizes $4\times16, 4\times32, 8\times8, 8\times16, 8\times32$ [S1, unofficial].
+  - Porsche ($559\times1024\times347$): 21 FPS with block sizes $4\times16, 4\times32, 8\times8, 8\times16, 8\times32$ [S1, unofficial].
+  - The $16\times16$ block size yielded lower performance (21 FPS on Engine, 20 FPS on Porsche) compared to $8\times8/8\times16/8\times32$ (31 FPS on Engine, 21 FPS on Porsche) [S1, unofficial].
+- **Performance Variation:** Performance varies by as much as 265% depending on thread block size [S2, unofficial].
+- **Strengths:** Maximizes hardware utilization by aligning thread counts with warp scheduler capabilities and cache hierarchy.
+- **Limitations:** Highly sensitive to dataset characteristics (ray length distribution) and algorithmic details (branching). Requires empirical benchmarking for each new dataset or algorithm variant.
+- **When to Use:** When deploying ray-casting volume rendering on CUDA GPUs, especially for datasets with varying complexity or when enabling/disabling optimizations like ERT.
+- **When Not to Use:** For simple, uniform workloads where a fixed, sub-optimal configuration is acceptable for simplicity, or when the overhead of benchmarking outweighs the performance gain.
+
+## Background
+The method originated from research into GPU-accelerated voxel traversal and ray-casting volume rendering in the late 2000s. Key studies by Braley et al. (2010) and subsequent work by researchers at the University of North Texas highlighted the significant impact of execution configuration on performance [S1, S2, unofficial]. The NVIDIA CUDA Programming Guide recommends experimentation due to the kernel-dependent nature of execution configuration effects [S2, unofficial]. The findings were validated on NVIDIA GTX280 hardware, establishing benchmarks for block sizes and occupancy metrics that remain relevant for understanding SIMT execution characteristics.
+
+## Sources
+[S1] GPU Accelerated Voxel Traversal using the Prediction Buffer, https://people.cs.vt.edu/yongcao/publication/pdf/Braley10.pdf, fetched 2026-10-25 (unofficial)
+[S2] Multi-core and Many-core Shared-memory Parallel Raycasting Volume Rendering Optimization and Tuning, https://digital.library.unt.edu/ark:/67531/metadc829701/?q=empty space skipping volume rendering, fetched 2026-10-28 (unofficial)

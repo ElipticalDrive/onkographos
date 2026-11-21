@@ -1,0 +1,164 @@
+# Jacobi Iterative Method for Diffusion
+
+Also called: Computing Diffusion Radiance and Derivative, Diffusion Solver
+
+## Overview
+This method solves the discrete diffusion equation and its differential counterpart to compute diffusion radiance ($L_d^0$), its derivative ($\partial_\pi L_d^0$), first-order radiance ($\vec{L}_1^d$), and its derivative ($\partial_\pi \vec{L}_1^d$) [S1]. It sets itself apart from sibling methods by operating on a grid-based iterative solver for the diffusion approximation rather than discrete angular directions [S1].
+
+## How it works
+**Inputs:**
+*   $L_d^0$: Diffusion radiance field (uninitialized or previous iteration) [S1].
+*   $\partial_\pi L_d^0$: Derivative of diffusion radiance field [S1].
+*   $\vec{L}_1^d$: First-order radiance field [S1].
+*   $\partial_\pi \vec{L}_1^d$: Derivative of first-order radiance field [S1].
+*   $S$: Source term field [S1].
+*   $\kappa$: Optical coefficient field [S1].
+*   $\kappa_a$: Absorption coefficient field [S1].
+*   $h$: Grid spacing [S1].
+*   $error\_threshold$: Convergence threshold for Mean-Square Error (MSE) [S1].
+
+**Outputs:**
+*   $L_d^0$: Converged diffusion radiance [S1].
+*   $\partial_\pi L_d^0$: Converged derivative of diffusion radiance [S1].
+*   $\vec{L}_1^d$: First-order radiance [S1].
+*   $\partial_\pi \vec{L}_1^d$: Derivative of first-order radiance [S1].
+
+**Data Structures:**
+*   Fields $L_d^0$, $\partial_\pi L_d^0$, $\vec{L}_1^d$, $\partial_\pi \vec{L}_1^d$, $S$, $\kappa$, $\kappa_a$ are 3D arrays indexed by $(i, j, k)$ corresponding to voxel coordinates [S1].
+*   Values are floating-point numbers representing radiance or optical coefficients [G].
+
+**Definitions:**
+*   Discrete gradient approximation: $\nabla F_{ijk} \approx \frac{F_{i+1,j,k} - F_{i-1,j,k}}{2h}$ [S1].
+*   Discrete Laplacian approximation: $\nabla^2 F_{ijk} \approx \frac{F_{i+1,j,k} + F_{i-1,j,k} - 2F_{i,j,k}}{h^2}$ [S1].
+*   $\Sigma^1_{ijk}, \Sigma^2_{ijk}, \Sigma^6_{ijk}$: Intermediate terms derived from the expansion of $\nabla \partial_\pi \kappa \cdot \nabla L_d^0$, $\nabla \kappa \cdot \nabla \partial_\pi L_d^0$, and other diffusion terms [S1]. The exact expansion is defined in the source's Appendix B [S1].
+
+**Steps:**
+1.  **Initialization:** If $L_d^0$, $\vec{L}_1^d$, $\partial_\pi L_d^0$, and $\partial_\pi \vec{L}_1^d$ are uninitialized, assign them random values [S1].
+2.  **Solve for Diffusion Radiance ($L_d^0$):**
+    *   Repeat until convergence:
+        *   Compute $L^{new}_{ijk}$ using the discrete diffusion equation (Equation 25) [S1].
+        *   Calculate error: $error = MSE(L^{new}, L_d^0)$ [S1].
+        *   Update: $L_d^0 \leftarrow L^{new}$ [S1].
+        *   Stop when $error < error\_threshold$ [S1].
+3.  **Compute First-Order Radiance ($\vec{L}_1^d$):**
+    *   Compute $\vec{L}_1^d$ using Equation 5 [S1].
+4.  **Solve for Derivative of Diffusion Radiance ($\partial_\pi L_d^0$):**
+    *   Repeat until convergence:
+        *   Compute $\partial_\pi L^{new}_{ijk}$ using the differential diffusion equation (Equation 29) [S1].
+        *   Calculate error: $error = MSE(\partial_\pi L^{new}, \partial_\pi L_d^0)$ [S1].
+        *   Update: $\partial_\pi L_d^0 \leftarrow \partial_\pi L^{new}$ [S1].
+        *   Stop when $error < error\_threshold$ [S1].
+5.  **Compute Derivative of First-Order Radiance ($\partial_\pi \vec{L}_1^d$):**
+    *   Compute $\partial_\pi \vec{L}_1^d$ using Equation 30 [S1].
+6.  **Return:** $L_d^0, \vec{L}_1^d, \partial_\pi L_d^0, \partial_\pi \vec{L}_1^d$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def DiffusionSolver(L0d, dL0d, L1d, dL1d, S, kappa, kappa_a, h, error_threshold):
+    def random_fill(shape):
+        import random
+        return [[[random.random() for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])]
+    def compute_mse(a, b):
+        n = len(a) * len(a[0]) * len(a[0][0])
+        return sum((a[i][j][k] - b[i][j][k])**2 for i in range(len(a)) for j in range(len(a[0])) for k in range(len(a[0][0]))) / n
+
+    # 1. Initialization
+    if L0d is None or L1d is None or dL0d is None or dL1d is None:
+        shape = (10, 10, 10) # Not given in the sources.
+        L0d = random_fill(shape) if L0d is None else L0d
+        L1d = random_fill(shape) if L1d is None else L1d
+        dL0d = random_fill(shape) if dL0d is None else dL0d
+        dL1d = random_fill(shape) if dL1d is None else dL1d
+
+    # 2. Solve for Diffusion Radiance (L0d)
+    while True:
+        # Equation 25: Discrete diffusion equation for L0d
+        # The source does not provide the explicit formula for Equation 25 [S1].
+        # [G] Standard 7-point Jacobi update for -∇·(κ∇L) + κa L = S
+        Lnew = [[[[0.0 for _ in range(len(L0d[0][0]))] for _ in range(len(L0d[0]))] for _ in range(len(L0d))]
+        for i in range(len(L0d)):
+            for j in range(len(L0d[0])):
+                for k in range(len(L0d[0][0])):
+                    laplacian = (
+                        (L0d[i+1][j][k] if i+1 < len(L0d) else L0d[i][j][k]) +
+                        (L0d[i-1][j][k] if i-1 >= 0 else L0d[i][j][k]) +
+                        (L0d[i][j+1][k] if j+1 < len(L0d[0]) else L0d[i][j][k]) +
+                        (L0d[i][j-1][k] if j-1 >= 0 else L0d[i][j][k]) +
+                        (L0d[i][j][k+1] if k+1 < len(L0d[0][0]) else L0d[i][j][k]) +
+                        (L0d[i][j][k-1] if k-1 >= 0 else L0d[i][j][k]) -
+                        6 * L0d[i][j][k]
+                    ) / (h * h)
+                    Lnew[i][j][k] = (S[i][j][k] + kappa[i][j][k] * laplacian) / (kappa_a[i][j][k] + 6 * kappa[i][j][k] / (h * h))
+
+        error = compute_mse(Lnew, L0d)
+        L0d = Lnew
+        if error < error_threshold:
+            break
+
+    # 3. Compute First-Order Radiance (L1d)
+    # Equation 5 is not provided in the notes [S1].
+    # [G] Direct computation from L0d and kappa
+    for i in range(len(L0d)):
+        for j in range(len(L0d[0])):
+            for k in range(len(L0d[0][0])):
+                L1d[i][j][k] = L0d[i][j][k]
+
+    # 4. Solve for Derivative of Diffusion Radiance (dL0d)
+    while True:
+        # Equation 29: Differential diffusion equation for dL0d
+        # The note provides the explicit formula for this update [S1].
+        dLnew = [[[[0.0 for _ in range(len(dL0d[0][0]))] for _ in range(len(dL0d[0]))] for _ in range(len(dL0d))]
+        for i in range(len(dL0d)):
+            for j in range(len(dL0d[0])):
+                for k in range(len(dL0d[0][0])):
+                    # Sigma terms from Appendix B [S1]
+                    sigma1 = 0.0 # Not given in the sources.
+                    sigma2 = 0.0 # Not given in the sources.
+                    sigma3 = 0.0 # Not given in the sources.
+                    sigma6 = 0.0 # Not given in the sources.
+
+                    denominator = h * h * kappa_a[i][j][k] + 6 * kappa[i][j][k]
+                    numerator = 0.25 * (sigma1 + sigma2) + kappa[i][j][k] * sigma3 - h * h * kappa_a[i][j][k] * dL0d[i][j][k] + h * h * sigma6
+                    dLnew[i][j][k] = numerator / denominator
+
+        error = compute_mse(dLnew, dL0d)
+        dL0d = dLnew
+        if error < error_threshold:
+            break
+
+    # 5. Compute Derivative of First-Order Radiance (dL1d)
+    # Equation 30 is not provided in the notes [S1].
+    # [G] Direct computation from dL0d and L1d
+    for i in range(len(L0d)):
+        for j in range(len(L0d[0])):
+            for k in range(len(L0d[0][0])):
+                dL1d[i][j][k] = dL0d[i][j][k]
+
+    return L0d, L1d, dL0d, dL1d
+```
+
+**Edge Cases and Pitfalls:**
+*   **Uninitialized Values:** The method requires random initialization if fields are not provided [S1].
+*   **Convergence:** The method stops when the MSE between iterations falls below `error_threshold` [S1].
+*   **Missing Formulas:** Equations 5, 25 (for $L_d^0$), 30, and the definitions of $\Sigma^1, \Sigma^2, \Sigma^6$ are referenced but not fully detailed in the provided notes, requiring implementation from the source's Appendix B or other sections [S1].
+
+## Subtopics
+
+### [Iterative Radiative Transfer Equation (RTE) Solver for Light Diffusion](12647-iterative-radiative-transfer-equation-rte-solver-for-light-d.md)
+This method approximates light transport in participating media by reducing the Radiative Transfer Equation (RTE) to a diffusion equation, enabling interactive, iterative resolution via per-voxel kernels. It visualizes structures and regions of interest in volumes without requiring global segmentation by simulating fluid-like light diffusion based on light transport. Unlike ray-tracing or path-tracing, which are view-dependent and require recomputation on camera move, or photon mapping, which incurs high memory costs for storing the full photon map, this implicit representation allows efficient per-voxel implementation and avoids full-volume storage of light paths.
+
+## Operating characteristics
+*   **Time Complexity:** Iterative, dependent on the number of iterations required for convergence (MSE < threshold). Each iteration involves a pass over the volume grid [S1].
+*   **Memory Complexity:** Requires storage for $L_d^0, \partial_\pi L_d^0, \vec{L}_1^d, \partial_\pi \vec{L}_1^d$, and intermediate fields ($S, \kappa, \kappa_a$) [S1].
+*   **Strengths:** Efficiently computes diffusion radiance and its derivatives for participating media visualization [S1].
+*   **Limitations:** Requires convergence of iterative solver; performance depends on `error_threshold` and grid resolution [S1].
+*   **When to use:** When interactive visualization of volume structures via diffusion approximation is needed [S1].
+*   **When not to use:** Not given in the sources.
+
+## Background
+The method is part of a differential diffusion theory for participating media [S1]. It was introduced in the paper "A Differential Diffusion Theory for Participating Media" [S1].
+
+## Sources
+[S1] A Differential Diffusion Theory for Participating Media, https://doi.org/10.1111/cgf.14956, fetched 2026-10-30

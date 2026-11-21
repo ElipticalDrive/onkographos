@@ -1,0 +1,105 @@
+# Separable 3D Gaussian Filter
+
+Also called: 3D Gaussian Filter via Separable 1D Filters, Gaussian filter
+
+## Overview
+A 3D Gaussian filter implemented as three consecutive 1D filters to leverage separability for interactive performance [S1, unofficial]. It serves as a low-pass filter that reduces high-frequency elements in volume data, often used to compute spatial importance maps for volume illustration [S1, unofficial]. It sets itself apart from non-linear alternatives like the [Bilateral Filter](8983-bilateral-filter.md) by relying solely on spatial distance rather than value similarity, making it computationally faster but less effective at edge preservation [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D scalar volume $V$ of dimensions $D_x \times D_y \times D_z$.
+- Input: Filter radius $R$ and standard deviation $\sigma$.
+- Output: A filtered 3D volume $V'$.
+
+**Data Structures:**
+- The volume is stored as a 3D array of floating-point values.
+- The 1D Gaussian kernel $G(x)$ is precomputed for the range $[-R, R]$.
+
+**Formulas:**
+The 1D Gaussian function is defined as [S1, unofficial]:
+$$ G(x) = \frac{1}{\sqrt{2\pi}\sigma} e^{-\frac{x^2}{2\sigma^2}} $$
+where $x$ is the distance from the origin and $\sigma$ is the standard deviation.
+
+The 3D Gaussian kernel is the product of three 1D Gaussians, one per direction [S1, unofficial]. Due to separability, the 3D convolution is equivalent to three consecutive 1D convolutions [S1, unofficial].
+
+**Parameters:**
+- $R$: Filter radius. The sampling rate is controlled by specifying the number of standard deviations spanning the filter radius, allowing frequency adjustment without changing the radius [S2, unofficial].
+- $\sigma$: Standard deviation.
+
+**Steps:**
+1. **Axis 1 Convolution:** Apply 1D Gaussian convolution along the first axis (e.g., x-axis) to produce an intermediate volume $V_{xy}$.
+2. **Axis 2 Convolution:** Apply 1D Gaussian convolution along the second axis (e.g., y-axis) to $V_{xy}$ to produce $V_{xyz}$.
+3. **Axis 3 Convolution:** Apply 1D Gaussian convolution along the third axis (e.g., z-axis) to $V_{xyz}$ to produce the final blurred volume $V_{blur}$.
+4. **Subtraction:** Subtract the original volume $V$ from the filtered volume $V_{blur}$ to obtain the final result $V'$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def separable_3d_gaussian_filter(volume, radius, sigma):
+    """
+    Applies a 3D Gaussian filter via separable 1D convolutions and subtracts the original.
+    
+    Args:
+        volume: 3D numpy array (Dx, Dy, Dz)
+        radius: int, half-width of the kernel
+        sigma: float, standard deviation of the Gaussian
+        
+    Returns:
+        3D numpy array, the filtered volume minus the original
+    """
+    # Precompute 1D Gaussian kernel
+    x = np.arange(-radius, radius + 1)
+    kernel_1d = (1.0 / (np.sqrt(2 * np.pi) * sigma)) * np.exp(-(x**2) / (2 * sigma**2))
+    kernel_1d /= kernel_1d.sum() # Normalize
+    
+    # Step 1: Convolve along axis 0 (x)
+    # Using 1D convolution with 'same' padding to keep dimensions
+    temp1 = np.zeros_like(volume)
+    for i in range(volume.shape[0]):
+        # Convolve each slice along the first dimension
+        # Note: In a full implementation, this would be vectorized or GPU-accelerated
+        temp1[i, :, :] = np.convolve(volume[i, :, :], kernel_1d, mode='same')
+        
+    # Step 2: Convolve along axis 1 (y)
+    temp2 = np.zeros_like(temp1)
+    for j in range(temp1.shape[1]):
+        # Convolve each row along the second dimension
+        temp2[:, j, :] = np.convolve(temp1[:, j, :], kernel_1d, mode='same')
+        
+    # Step 3: Convolve along axis 2 (z)
+    temp3 = np.zeros_like(temp2)
+    for k in range(temp2.shape[2]):
+        # Convolve each column along the third dimension
+        temp3[:, :, k] = np.convolve(temp2[:, :, k], kernel_1d, mode='same')
+        
+    # Step 4: Subtract original volume
+    result = temp3 - volume
+    
+    return result
+```
+
+**Edge Cases and Pitfalls:**
+- It is still necessary to determine the distance of neighboring data points to determine the data frequency and set filter parameters [S2, unofficial].
+- Boundary conditions must be handled during convolution (e.g., padding or clamping) to avoid artifacts at the volume edges.
+
+## Subtopics
+
+### [Bilateral Filter](8983-bilateral-filter.md)
+A non-linear filter used to reduce noise while preserving edges by weighting pixels based on both spatial proximity and value similarity. Unlike the [Separable 3D Gaussian Filter](8956-separable-3d-gaussian-filter.md) which only uses spatial distance, the Bilateral filter also uses value similarity, preserving edges better.
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot R)$, where $N$ is the number of voxels and $R$ is the filter radius. The separability reduces the complexity from $O(N \cdot R^3)$ for a direct 3D convolution to $O(N \cdot R)$.
+- **Memory Complexity:** $O(N)$ for storing the volume and intermediate results.
+- **Performance:** A CUDA implementation can achieve interactive rates [S1, unofficial]. For a CT body (256 × 256 × 415), the total time includes 3 convolutions, subtraction, and memory allocations [S1, unofficial].
+- **Strengths:** Interactive performance due to separability; simple implementation; effective low-pass filtering.
+- **Limitations:** Does not preserve edges as well as non-linear filters like the Bilateral filter [S1, unofficial]; requires careful parameter tuning based on data frequency [S2, unofficial].
+- **When to use:** When interactive performance is critical and edge preservation is not the primary concern.
+- **When not to use:** When edge preservation is required; consider the [Bilateral Filter](8983-bilateral-filter.md) instead.
+
+## Background
+The method was introduced in the context of interactive volume illustration, where it is used to compute spatial importance maps for modulating color and opacity transfer functions [S1, unofficial]. The separability of the Gaussian filter allows for efficient implementation on GPUs using CUDA [S1, unofficial]. The approach is part of a pipeline that includes stipple rendering and transfer function modulation [S1, unofficial].
+
+## Sources
+[S1] Interactive Volume Illustration Using Intensity Filtering, https://doi.org/10.2312/compaesth/compaesth10/051-058, fetched 2026-10-26 (unofficial)
+[S2] DTIC ADA215533: Sampling Scattered Data Onto Rectangular Grids for Volume Visualization, https://archive.org/details/DTIC_ADA215533, fetched 2026-10-26 (unofficial)

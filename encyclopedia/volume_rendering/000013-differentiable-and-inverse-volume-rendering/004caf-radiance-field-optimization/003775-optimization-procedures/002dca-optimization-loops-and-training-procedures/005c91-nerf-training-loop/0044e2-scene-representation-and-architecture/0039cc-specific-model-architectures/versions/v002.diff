@@ -1,0 +1,180 @@
+--- v001.md
++++ v002.md
+@@ -1,117 +1,80 @@
+ # Specific Model Architectures
+ 
+-Also called: SfMNeRF, DASNeRF, SinNeRF, NeRF in the Wild
++Also called: NeRF Architectures, Radiance Field Network Designs
+ 
+ ## Overview
+-Specific Model Architectures refers to modifications of the standard Neural Radiance Field (NeRF) MLP and training pipeline to address specific limitations such as sparse input views, dynamic scenes, or complex lighting. Unlike the generic NeRF Training Loop [970-nerf-training-loop.md] which assumes a dense set of calibrated images, these architectures integrate external priors (e.g., monocular depth, SfM features) or structural changes (e.g., appearance embeddings) to improve geometry reconstruction and novel view synthesis under challenging conditions. They set themselves apart from sibling methods like [Mip-NeRF 360](3306-mip-nerf-360.md) (which focuses on angular resolution and sampling) by explicitly altering the model's internal representation or loss landscape to encode geometric or semantic constraints.
++Specific Model Architectures refers to the family of neural network designs used within the NeRF Training Loop to map 3D coordinates and viewing directions to radiance and density. While the standard NeRF uses a simple Multi-Layer Perceptron (MLP), this family encompasses methods that modify the network topology, input encoding, or internal structure to address specific challenges such as real-time rendering, sparse views, geometric ambiguity, or high-resolution synthesis. These architectures set themselves apart from sibling methods like [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md) by focusing on the *representation* of the scene rather than the *sampling* strategy, and from [Training Configuration](2332-training-configuration.md) by defining the learnable parameters' structure.
+ 
+-## How it works
+-The core NeRF model maps 5D coordinates $(x, y, z, \theta, \phi)$ to volume density $\sigma$ and color $c$ via an MLP [S2]. Specific architectures modify this mapping, the sampling strategy, or the optimization objective.
++## Shared principles
++The core mechanism of all architectures in this family is the implicit representation of a 3D scene as a continuous function $f_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$, where $\mathbf{x} \in \mathbb{R}^3$ is the spatial coordinate, $\mathbf{d} \in \mathbb{S}^2$ is the viewing direction, $\sigma$ is the volume density, and $\mathbf{c}$ is the emitted color. The network $\Theta$ is optimized via gradient descent to minimize the difference between rendered images and ground truth observations.
+ 
+-### Inputs and Outputs
+-*   **Inputs:** Camera poses $[R, t]$, intrinsic matrix $K$, input images $I$, and optionally external priors (depth maps $D_{prior}$, SIFT features, or temporal indices).
+-*   **Outputs:** Rendered color $\hat{C}(r)$ and depth $D(r)$ for query rays $r$.
+-
+-### Data Structures
+-1.  **NeRF MLP:** A multi-layer perceptron. In standard NeRF, input is position encoding $\gamma(x)$ and direction $\gamma(d)$. In modified architectures (e.g., DASNeRF), the input may be fused with additional 5D vectors or embeddings [S2].
+-2.  **Depth Prior Map:** A 2D array of depth values estimated by a separate network (e.g., DepthAnythingV2) [S2].
+-3.  **SIFT Features:** A list of 2D keypoints and their descriptors, used to establish 3D correspondences [S1].
+-4.  **Pyramid Levels:** For pyramidal training, a hierarchy of downsampled images $I^0 \dots I^{L-1}$ [S1].
+-
+-### Numbered Steps
+-
+-1.  **Initialization and Prior Extraction:**
+-    *   If using depth priors (DASNeRF), run a monocular depth estimation network (e.g., DepthAnythingV2) on input images to obtain $D_{V2}$ [S2].
+-    *   If using SfM constraints (SfMNeRF), extract SIFT features from input images and match them across views to identify corresponding points [S1].
+-
+-2.  **Ray Sampling:**
+-    *   For each pixel, generate a ray $r(t) = o + td$ bounded by $[t_n, t_f]$ [S2].
+-    *   Sample $N$ points along the ray. Standard NeRF uses uniform or hierarchical sampling. DASNeRF employs a three-layer dynamic sampling mechanism and 3D cone frustum sampling to obtain five-dimensional information (coordinates and ray info) [S2].
+-    *   For sub-pixel rendering (SfMNeRF), generate sub-pixel coordinates $p = (x + x_{off}, y + y_{off})$ where offsets are in $(0, 1)$ [S1].
+-
+-3.  **Neural Evaluation:**
+-    *   Encode positions and directions using positional encoding $\gamma$ [S2].
+-    *   In DASNeRF, fuse the processed five-dimensional input information with features from the previous MLP layer at each layer [S2].
+-    *   In "NeRF in the Wild", append an Appearance embedding $e_a$ and Transient embedding $e_t$ to the input or intermediate features to model lighting changes and moving objects [S4, unofficial].
+-    *   Output density $\sigma$ and color $c$ from the final layer [S2].
+-
+-4.  **Volume Rendering:**
+-    *   Compute transmittance $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ and opacity $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ [S2].
+-    *   Render color: $\hat{C}(r) = \sum_{i=1}^{N} \omega_i c_i$, where $\omega_i = T_i \alpha_i$ [S2].
+-    *   Render depth: $d_r = \sum_{i=1}^{N} \omega_i t_i$ [S2].
+-
+-5.  **Loss Calculation and Optimization:**
+-    *   Calculate the primary rendering loss $L_{nerf}$ (MSE between rendered and ground truth colors) [S2].
+-    *   Calculate specific architectural losses (see Formulas below).
+-    *   Update MLP weights using an optimizer (e.g., Adam) [S1].
+-
+-### Formulas
+-
+-**Standard NeRF Rendering [S2]:**
+-$$ \hat{C}(r) = \sum_{i=1}^{N} \omega_i c_i, \quad \omega_i = T_i \alpha_i $$
+-$$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right), \quad \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
+-$$ L_{nerf} = \sum_{r \in R} \| C(r) - \hat{C}(r) \|_2^2 $$
+-
+-**SfMNeRF Constraints [S1]:**
+-*   **Sub-pixel Ground Truth:** $\hat{I}(p) = \sum_{i \in \{top, bottom\}, j \in \{left, right\}} w^{ij} I(p^{ij})$
+-*   **Rendering Loss:** $L_{ren} = \frac{1}{m} \sum_{p_i \in \Omega_p} \| \hat{I}(p_i) - \tilde{I}(p_i) \|_2^2$
+-*   **3D Feature Position Loss:** $\mathbf{x}_s = \sum_{j=1}^{N_c} w_j (\mathbf{o} + t_j \mathbf{d})$, where $w_j = T_j (1 - \exp(-\sigma_j \delta_j))$.
+-    $$ L_{3D} = \frac{1}{n} \sum_{k=1}^n \| \mathbf{x}_s^k - \mathbf{x}_{s'}^k \|_2^2 $$
+-*   **Epipolar Loss:** $L_{epi} = \min_t \{ \| d_{p_r} - d_{p_t} \|_2^2 \}$
+-*   **Photometric Consistency:**
+-    $$ \hat{p}_t = K T_{r->t} \mathbf{x}_p, \quad T_{r->t} = [\mathbf{r}, \mathbf{t}] $$
+-    $$ L_{pr} = \sum_{p(k) \in \Omega_p} M(p(k)) | \hat{I}_r(p(k)) - \hat{I}_t(\hat{p}_t(k)) | $$
+-    $$ L_{SSIM} = M \left( \frac{1 - SSIM_{r->t}}{2} \right) $$
+-*   **Depth Smoothness:** $L_{ds} = \sum_{p(k) \in \Omega_p} | \nabla D(p(k)) \cdot (e^{-|\hat{I}(p(k))|}) |$
+-*   **Total Loss:** $L_{total} = \lambda_{ren} L_{ren} + \lambda_{3D} L_{3D} + \lambda_{pr} L_{pr} + \lambda_{epi} L_{epi} + \lambda_{SSIM} L_{SSIM} + \lambda_{ds} L_{ds}$
+-
+-**DASNeRF Constraints [S2]:**
+-*   **Depth Ordering Fidelity (DOF):**
+-    $$ L_{DOF} = \sum_{d_{V2}^{k1} \leq d_{V2}^{k2}} \max(d_r^{k1} - d_r^{k2} + m_{ar}, 0) $$
+-*   **Dynamic Boundary Adjustment:**
+-    $$ m_{ar} = \alpha \cdot \frac{1}{N} \sum_{i=1}^{N} | d_r^{k1}[i] - d_r^{k2}[i] | $$
+-*   **Depth Structural Consistency (DSC):**
+-    $$ R_{DSC} = \sum_{k1} \sum_{d_{V2}^{k2} \in KNN(d_{V2}^{k2})} \max(| d_r^{k1} - d_r^{k2} | - m_{ar}', 0) $$
+-*   **Total Loss:** $L = L_{nerf} + \lambda L_{DOF} + \gamma R_{DSC}$
+-
+-**Pyramidal Strategy (SfMNeRF) [S1]:**
+-*   **Depth Prior Loss:** $L_{depth} = \sum_{p(k) \in \Omega_p} | D(p(k)) - D_r^{L-1}(p(k)/2) |$
+-
+-### Parameters
+-*   **SfMNeRF Loss Weights [S1]:** $\lambda_{ren} = 1.0$, $\lambda_{3D} = 1.0$, $\lambda_{pr} = 0.001$, $\lambda_{epi} = 0.0001$, $\lambda_{SSIM} = 0.008$, $\lambda_{ds} = 0.01$.
+-*   **DASNeRF Loss Weights [S2]:** $\lambda = 0.2$ (for DOF), $\gamma = 0.02$ (for DSC).
+-*   **DASNeRF Hyperparameters [S2]:** $\alpha$ controls the magnitude of the margin in dynamic boundary adjustment.
+-*   **SfMNeRF Patch Size [S1]:** $32 \times 32$.
+-*   **Sampling:** Both methods use hierarchical sampling with 64 coarse and 64 fine samples [S1].
+-
+-### Edge Cases and Pitfalls
+-*   **Epipolar Points:** A large number of epipolar points causes computational inefficiency. Occluded points may not have corresponding points on the epipolar line. SfMNeRF filters implausible points using color similarity thresholds [S1].
+-*   **Depth Ambiguity:** Standard NeRF suffers from shape-radiance ambiguity. Sparse inputs exacerbate this. Depth priors help but may introduce noise if the depth estimator fails on transparent/reflective surfaces [S2].
+-*   **Complex Interlacing:** Methods relying on geometric priors may fail to distinguish separation when entities and artifacts are complexly interlaced [S3].
++Key shared components include:
++1.  **Positional Encoding:** Most architectures (except R2L) utilize positional encoding $\gamma(\mathbf{x})$ to map low-frequency inputs to high-frequency features, enabling the MLP to learn high-frequency details [S4].
++2.  **Volume Rendering:** The output of the network is integrated along rays using the standard volume rendering equation:
++    $$ C(r) = \sum_{i=1}^{N} T_i \alpha_i c_i $$
++    where $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the accumulated transmittance, $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ is the opacity, and $\delta_i$ is the distance between samples [S1, unofficial].
++3.  **Optimization:** Parameters are updated using stochastic gradient descent (typically Adam) to minimize photometric loss [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [AdaNeRF](6195-adanerf.md)
+-AdaNeRF accelerates NeRF for real-time rendering by reducing sample points per ray. It splits the network into a lightweight Sampling Network and a heavier Shading Network. The Sampling Network predicts sample importance weights in a single evaluation, allowing for fixed sample positions and incremental sparsity introduction during training. It is chosen when rendering speed is critical and some quality trade-off is acceptable. Link: [AdaNeRF](6195-adanerf.md).
++AdaNeRF is an architecture designed for real-time rendering by decoupling the sampling process from the shading process. It splits the standard NeRF into a lightweight **Sampling Network** and a heavier **Shading Network**. The Sampling Network predicts importance weights for a fixed set of sample points along a ray in a single forward pass, allowing the Shading Network to process only the most significant samples. This reduces computational cost compared to standard NeRF, which evaluates all samples. It is chosen when real-time performance is critical and geometric ambiguity can be mitigated by pre-training. See [AdaNeRF](6195-adanerf.md).
++
++### [SfMNeRF](8664-sfmnerf.md)
++SfMNeRF is an architecture that integrates Structure-from-Motion (SfM) constraints directly into the NeRF training loop to improve geometric accuracy under sparse input conditions. Unlike standard NeRF, which relies solely on photometric loss, SfMNeRF explicitly constrains the 3D structure using matched feature positions, epipolar geometry, and multi-view photometric consistency. It uses a pyramidal construction strategy to avoid local minima caused by large pixel motions. It is chosen when input views are sparse and accurate geometry is required. See [SfMNeRF](8664-sfmnerf.md).
++
++### [DASNeRF](8668-dasnerf.md)
++DASNeRF is an architecture for sparse-view 3D reconstruction that integrates monocular depth priors and a dynamic sampling mechanism. It distinguishes itself by replacing uniform sampling with a three-layer dynamic mechanism and enforcing depth consistency via a Depth Ordering Fidelity Loss and Depth Structural Consistency Regularization derived from the DepthAnythingV2 model. It uses per-layer input fusion with five-dimensional vectors (spatial coordinates and ray information) to enhance feature representation. It is chosen when high-fidelity detail is needed from sparse inputs and external depth priors are available. See [DASNeRF](8668-dasnerf.md).
++
++### [R2L (Neural Light Field)](8670-r2l-neural-light-field.md)
++R2L (Radiance-to-Light-field) is a deep neural light field network trained via knowledge distillation from a pre-trained NeRF teacher model. It differs from standard NeRF by employing an unprecedentedly deep architecture (e.g., width 256, depth 88) with extensive internal residual blocks, trading width for depth to capture fine-grained details. Unlike depth-dependent methods, R2L does not rely on ground-truth depth, allowing it to handle reflective surfaces (e.g., water, mirrors) effectively. It takes 5D coordinates $(x, y, \theta, \phi)$ directly as input without positional encoding. It is chosen for efficient novel view synthesis with reduced computational cost and robustness to reflections. See [R2L (Neural Light Field)](8670-r2l-neural-light-field.md).
++
++### AligNeRF
++AligNeRF improves training NeRF on high-resolution images by combining MLP with convolutional layers to encode more neighborhood information and reduce parameters [S1, unofficial]. It proposes alignment-aware strategies to correct inaccuracies in alignment caused by moving objects, which often lead to performance degradation [S1, unofficial]. It is chosen when training on high-resolution images with dynamic elements [S1, unofficial].
+ 
+ ### SinNeRF
+-SinNeRF uses depth maps to constrain unobserved views via Adversarial loss and Perceptual loss [S4, unofficial]. It is designed to handle scenarios where depth information is available but views are sparse or missing, leveraging generative priors to fill in unseen geometry. Link: Not given in the sources.
++SinNeRF is a method that uses a depth map to constrain unobserved views via Adversarial loss and Perceptual loss [S1, unofficial]. It constructs a semi-supervised learning process by introducing and propagating a universal 3D model [S2].
+ 
+ ### NeRF in the Wild
+-NeRF in the Wild modifies the standard architecture to handle real-world conditions. It adds an Appearance embedding to express different lighting conditions and a Transient embedding to model changing geometry (e.g., moving people, vehicles) [S4, unofficial]. It is chosen when training data contains varying illumination or dynamic elements that violate the static scene assumption. Link: Not given in the sources.
++NeRF in the Wild adds an Appearance embedding to express different lighting conditions and a Transient embedding to model changing geometry [S1, unofficial]. It addresses the lack of robustness in standard NeRF when dealing with unconstrained photo collections where lighting and content vary [S1, unofficial].
+ 
+-## Operating characteristics
+-*   **Time Complexity:** SfMNeRF and DASNeRF add overhead for prior extraction (SIFT matching, depth estimation) and additional loss computations (epipolar, DOF). SfMNeRF's pyramidal strategy increases training time due to multi-level optimization [S1]. DASNeRF's dynamic sampling adds minor overhead [S2].
+-*   **Memory Complexity:** Similar to standard NeRF, dominated by the MLP weights. SfMNeRF requires storing SIFT features and pyramid levels. DASNeRF requires storing depth priors [S1, S2].
+-*   **Performance:** Evaluated on LLFF-NeRF, ScanNet, and DTU MVS datasets. SfMNeRF surpasses state-of-the-art approaches given sparse inputs [S1]. DASNeRF improves sparse reconstruction details and is 10 times faster in depth inference than MiDaS-based alternatives [S2].
+-*   **Strengths:** Improved geometry accuracy with sparse views; robustness to lighting/dynamics (NeRF in the Wild); real-time capability (AdaNeRF).
+-*   **Limitations:** Dependence on external priors (depth/SfM) which may be inaccurate; increased training complexity; potential for artifacts if priors conflict with photometric data.
++### StyleNeRF
++StyleNeRF is a 3D-aware generative model that merges 3D scene representation with style-based generative models [S2]. It uses NeRF to generate low-resolution feature maps and samples them to high resolution to avoid super-computation volume rendering, applying regularization terms to improve 3D consistency [S2].
++
++### CLIP-NeRF
++CLIP-NeRF adds CLIP (a text-image pre-trained multimodal model) to provide greater freedom in shape operations and global deformation [S2]. It uses a disentangled conditional NeRF architecture where a learned deformation network is applied to shape modulation, and appearance codes are embedded into volume rendering to map color output [S2].
++
++### NeRF-RPN
++NeRF-RPN uses a multi-scale Object-NeRF architecture where the scene branch encodes geometry and appearance via a voxel representation of 3D neural volume features, and the object branch encodes each independent object [S2]. It allows for 3D bounding box regression directly in NeRF without rendering [S2].
++
++### JacobiNeRF
++JacobiNeRF synthesizes a NeRF model based on second-order information (Jacobian matrix) to maximize mutual information between highly correlated entities under random scene perturbations [S2]. The rendering equation is:
++$$ \hat{C}(r, z_s, z_c) = \sum_{i=1}^{N_c-1} c_i \alpha_i \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
++where $a_i = 1 - \exp(-\sigma_i \delta_i)$ is consistent with discrete volume rendering [S2].
++
++### DE-NeRF
++DE-NeRF decomposes lighting, geometry, and appearance to allow relighting of high-frequency environments and appearance editing [S3]. It trains a signed distance field (SDF) function using 2D images to reconstruct a display grid. The scene is decomposed into geometric and appearance features (diffuse reflection, roughness, specular tint). These features, along with the distance $h$ from the sampling point to the grid, are input into four corresponding MLPs to predict diffuse albedo, roughness, and specular tint. Diffuse reflectance is integrated with the environment map to get diffuse color $c_d$. A specular lighting MLP $F_s$ predicts specular lighting $c_l$, which is multiplied with specular hue to get specular color $c_s$. The final color is $c = c_s + c_d$ [S3]. On NeRF Synthetic and Shiny Blender datasets, PSNR is 2 points higher than latest papers [S3].
++
++### General Radiance Field Rendering via MLP
++This method uses an MLP to predict RGB values and volumetric density for a 3D point using its aggregated feature vector $\bar{F}_p$ and viewing direction [S4]. Unlike original NeRF which uses point position $xyz$ as input, this method uses $\bar{F}_p$ [S4]. All 3D locations and RGB values are processed by the positional encoding proposed by NeRF [S4]. Optimization uses L2 loss between rendered RGBs and ground truth [S4].
++
++### RefSR-NeRF
++RefSR-NeRF is a reference-guided super-resolution neural radiation field framework combining NeRF and RefSR-CNN [S3]. Stage 1 modifies NeRF sampling to adopt patch ray sampling on high-resolution input images to obtain a low-resolution image. RefSR-CNN yields feature maps from detail-dominant and degradation-dominant modules, which are fused to reconstruct a high-resolution image [S3]. On the NeRF-LLFF dataset, PSNR is nearly one point higher than the best paper [S3].
++
++### RelightingNeRF
++RelightingNeRF is proposed for handling unstructured photographs and free-viewpoint reconstruction [S3]. It changes the model architecture to output SDF values and latent features. The first MLP takes sampling point position and outputs SDF values and latent features. Normals, shadow cues, and specular cues are obtained from SDF values. The second MLP takes sampling point positions, lighting positions, viewing directions, and latent features to produce the final color [S3].
++
++### DiffusioNeRF
++DiffusioNeRF utilizes a denoising diffusion model to learn priors for scene geometry and color [S3]. During NeRF training, random RGBD patches are rendered. The estimated gradients of the log-likelihood are backpropagated to the color and density fields to normalize the geometry and color [S3]. On the LLFF dataset, PSNR indicators in 3, 6, and 9 input views are 1-2 points higher [S3].
++
++### GeoNeRF
++GeoNeRF is a model with two parts: a geometric morphology reasoner and a renderer [S2]. The reasoner builds a cascaded cost volume for source view sequences. The renderer infers geometric and appearance representations using a Transformer-based attention mechanism and cascaded cost volumes, then renders fine images using volume rendering [S2].
+ 
+ ## Background
+-NeRF was introduced by Mildenhall et al. in 2020 [1]. Subsequent works addressed its limitations. SfMNeRF was proposed to improve novel view synthesis under sparse input conditions by integrating depth prediction and SfM constraints [S1]. DASNeRF was developed to enhance sparse reconstruction using DepthAnythingV2 and dynamic sampling [S2]. AdaNeRF targets real-time rendering [S1]. NeRF in the Wild and SinNeRF address dynamic scenes and unobserved views respectively [S4, unofficial]. These methods represent the evolution of NeRF from a dense-view, static assumption to robust, sparse-view, and dynamic-aware representations.
++The original NeRF architecture was introduced by Mildenhall et al. in 2020 [S4]. Subsequent research has focused on modifying this architecture to address limitations such as slow rendering, poor performance with sparse views, and lack of semantic understanding. AdaNeRF [S1, unofficial], SfMNeRF [S1, unofficial], and DASNeRF [S1, unofficial] focus on sparse view and efficiency. R2L [S1, unofficial] focuses on distillation and depth. NeRF in the Wild [S1, unofficial] and SinNeRF [S1, unofficial] address unconstrained and single-view scenarios. DE-NeRF [S3] and RelightingNeRF [S3] introduce SDFs for relighting. Generative approaches like StyleNeRF [S2] and CLIP-NeRF [S2] integrate GANs and CLIP. The field continues to evolve with architectures like DiffusioNeRF [S3] leveraging diffusion models.
+ 
+ ## Sources
+-[S1] Improving neural radiance fields with depth-aware optimization for novel view synthesis, https://doi.org/10.1016/j.imavis.2026.106052, fetched 2026-10-26
+-[S2] DASNeRF: depth consistency optimization, adaptive sampling, and hierarchical structural fusion for sparse view neural radiance fields., https://doi.org/10.1371/journal.pone.0321878, fetched 2026-10-27
+-[S3] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31
+-[S4] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)+[S1] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)
++[S2] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31
++[S3] Methods and Strategies for Improving the Novel View Synthesis Quality of Neural Radiation Field, https://doi.org/10.1109/access.2024.3382997, fetched 2026-10-30
++[S4] GRF: Learning a General Radiance Field for 3D Representation and Rendering, https://doi.org/10.1109/iccv48922.2021.01490, fetched 2026-10-26

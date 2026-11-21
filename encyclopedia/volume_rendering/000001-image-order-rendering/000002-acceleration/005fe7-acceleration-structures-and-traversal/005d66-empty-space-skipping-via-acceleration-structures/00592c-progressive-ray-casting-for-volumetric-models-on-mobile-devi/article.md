@@ -1,0 +1,34 @@
+# Progressive Ray Casting for Volumetric Models on Mobile Devices
+
+
+## Overview
+This method addresses the computational constraints of interactive volume rendering on mobile devices by combining multiresolution data structures with acceleration techniques [S1, unofficial]. It solves the trade-off between frame rate and visual fidelity by using a lower-resolution dataset for exploration and progressively refining high-resolution details in regions of interest [S1, unofficial]. It distinguishes itself from sibling methods by explicitly targeting mobile hardware limitations and integrating Empty Space Skipping (ESS) and Early Ray Termination (ERT) within a progressive refinement framework [S1, unofficial].
+
+## Shared principles
+The core mechanism shared by all children is the reduction of work units (samples, voxels, or pixels) processed per frame while maintaining acceptable visual fidelity [G]. This is achieved through three primary strategies:
+1. **Culling/Skipping:** Identifying regions of the volume or ray path that do not contribute to the final image (e.g., empty space, occluded voxels) and bypassing their evaluation .
+2. **Termination:** Halting the integration loop when the accumulated contribution becomes negligible (e.g., high opacity, low transmittance) [S1, unofficial].
+3. **Adaptation:** Varying the computational effort based on local scene complexity or global performance budgets [S1, unofficial].
+
+Mathematically, these methods modify the standard front-to-back compositing loop:
+$$ C_{acc} = C_{acc} + C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
+$$ \alpha_{acc} = \alpha_{acc} + \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
+by introducing conditions that break the loop early, skip iterations, or reduce the number of $C_{sample}$ queries.
+
+## Subtopics
+
+This family does not define distinct algorithmic subtopics in the provided notes; rather, it describes a system-level approach. The primary components are:
+
+### Multiresolution Framework
+Uses a lower-resolution dataset for interactive exploration and a high-resolution dataset for progressive refinement of regions of interest [S1, unofficial].
+
+### Acceleration Integration
+Incorporates ESS and ERT to reduce sampling overhead [S1, unofficial].
+
+## Background
+**Origin:** The method was proposed in a paper titled "Progressive Ray Casting for Volumetric Models on Mobile Devices" [S1, unofficial].
+**History and Development:** The work focuses on the limitation of GPU horsepower on mobile devices, noting that while models might fit in memory, frame rates can be inefficient for interactivity [S1, unofficial]. It builds upon acceleration techniques described by Krüger and Westermann [S1, unofficial].
+**Usage:** It is designed for medical image inspection, where orthographic projections are the standard view [S1, unofficial].
+
+## Sources
+[S1] [PDF] Progressive Ray Casting for Volumetric Models on Mobile Devices, https://upcommons.upc.edu/bitstreams/3eb1f762-d021-4817-9f39-f580bce072f2/download, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,394 @@
+--- v001.md
++++ v002.md
+@@ -4,20 +4,21 @@
+ 
+ ## Overview
+-Ever Rendering is a real-time volumetric rendering method that uses 3D Gaussian ellipsoids as geometric primitives to represent a consistent 3D radiance field, avoiding the 2D billboard approximation inherent in 3D Gaussian Splatting (3DGS) [S1]. Unlike its sibling [Differentiable Ellipsoid Primitive](3490-differentiable-ellipsoid-primitive.md) which may rely on rasterization or different approximations, Ever Rendering replaces rasterization with ray tracing to capture volume density distributions for blending, enabling real-time performance without approximation errors in the transmittance calculation [S1].
++Ever Rendering is a real-time volumetric rendering method that represents a radiance field as a set of constant-density volumetric ellipsoids, avoiding the 2D billboard approximation of 3D Gaussian Splatting (3DGS) [S1]. Unlike its sibling [Differentiable Ellipsoid Primitive](3490-differentiable-ellipsoid-primitive.md), it replaces rasterization with ray tracing to capture volume density distributions for blending, enabling exact transmittance calculation without approximation errors [S1].
+ 
+ ## How it works
+ ### Inputs and Outputs
+ **Inputs:**
+-- A set of $N$ 3D Gaussian ellipsoids, each defined by a center position $\mathbf{t}_k$, a rotation matrix $\mathbf{R}_k$, and a scaling vector $\mathbf{s}_k = [s_{kx}, s_{ky}, s_{kz}]^T$.
+-- An optimized scalar parameter $\alpha_k \in [0, 1]$ representing the peak opacity along the shortest axis.
+-- Color $\mathbf{c}_k$ for each ellipsoid.
+-- Camera parameters (position, orientation, intrinsics).
++- A set of $N$ 3D Gaussian ellipsoids, each defined by a center position $\mathbf{t}_k$, a rotation matrix $\mathbf{R}_k$, and a scaling vector $\mathbf{s}_k = [s_{kx}, s_{ky}, s_{kz}]^T$ [S1].
++- An optimized scalar parameter $\alpha_k \in [0, 1]$ representing the peak opacity along the shortest axis [S1].
++- Color $\mathbf{c}_k$ for each ellipsoid, stored as spherical harmonics coefficients for the first two degrees to model view-dependence [S1].
++- Camera parameters (position, orientation, intrinsics) [S1].
++- Target images for optimization [S1].
+ 
+ **Outputs:**
+-- A rendered image with color and depth.
+-- Gradients for optimization via adjoint rendering.
++- A rendered image with color and depth [S1].
++- Gradients for optimization via adjoint rendering, which recomputes function values during the backwards pass instead of storing them [S1].
+ 
+ ### Data Structures
+-The scene representation consists of a list of ellipsoids. Each ellipsoid $k$ stores:
++The scene representation consists of a list of ellipsoids [S1]. Each ellipsoid $k$ stores:
+ - $\mathbf{t}_k \in \mathbb{R}^3$: Center position.
+ - $\mathbf{R}_k \in \mathbb{R}^{3 \times 3}$: Rotation matrix (orthonormal).
+@@ -25,5 +26,5 @@
+ - $\alpha_k \in \mathbb{R}$: Optimized opacity parameter.
+ - $\mathbf{c}_k \in \mathbb{R}^3$: Color.
+-- AABB: Axis-Aligned Bounding Box computed from $\mathbf{t}_k, \mathbf{R}_k, \mathbf{s}_k$ for BVH acceleration.
++- AABB: Axis-Aligned Bounding Box computed from $\mathbf{t}_k, \mathbf{R}_k, \mathbf{s}_k$ for BVH acceleration [S1].
+ 
+ The acceleration structure is a Binary Volume Hierarchy (BVH) built using NVIDIA OptiX, where each leaf node contains an ellipsoid's AABB and intersection logic [S1].
+@@ -64,226 +65,148 @@
+ 
+ ### Pseudocode
+-
+ ```python
+ import torch
+ import math
+ 
+-def compute_density(alpha_k, s_k):
+-    """
+-    Maps optimized opacity parameter alpha_k to density sigma.
+-    s_k: tensor of shape (3,) containing [sx, sy, sz]
+-    """
+-    min_scale = torch.min(s_k)
+-    # Avoid log(0) if alpha_k is exactly 1, though 0.99 factor prevents this in practice
+-    # Formula: sigma = -log(1 - 0.99 * alpha) / min_scale
+-    term = 1.0 - 0.99 * alpha_k
+-    # Clamp term to be strictly positive to avoid NaN in log
+-    term = torch.clamp(term, min=1e-7)
+-    sigma = -torch.log(term) / min_scale
+-    return sigma
+-
+-def ray_sphere_intersection(ray_origin, ray_direction, ellipsoid_center, ellipsoid_scale):
+-    """
+-    Stable isotropic ray/sphere intersection adapted from Haines et al.
+-    Transforms ray into ellipsoid's local space where it becomes a sphere.
+-    """
+-    # Transform ray origin and direction to local space
+-    # Note: In implementation, this involves inverse rotation of the ellipsoid
+-    # For simplicity, we assume a helper function exists for this transformation
+-    local_origin, local_direction = transform_to_local_space(ray_origin, ray_direction, ellipsoid_center, ellipsoid_scale)
+-    
+-    # Standard ray-sphere intersection
+-    # (local_origin - center)^2 + t^2 * |dir|^2 + 2*t*(local_origin - center) . dir = r^2
+-    # Here, the "sphere" has radius 1 in local space before scaling is accounted for in the ray direction?
+-    # Actually, Haines' method usually scales the ray or the sphere.
+-    # Let's assume the standard quadratic form: a*t^2 + b*t + c = 0
+-    # a = |dir|^2
+-    # b = 2 * dir . (origin - center)
+-    # c = |origin - center|^2 - r^2
+-    
+-    # In Ever's context, the ellipsoid is transformed to a unit sphere or vice versa.
+-    # The note says "adapt the stable isotropic ray/sphere intersection".
+-    # We will implement the standard quadratic solver for a unit sphere at origin.
+-    
+-    # Vector from sphere center to ray origin
+-    oc = local_origin # Assuming center is origin in local space after transform
+-    
+-    a = torch.dot(local_direction, local_direction)
+-    b = 2.0 * torch.dot(oc, local_direction)
+-    c = torch.dot(oc, oc) - 1.0 # Radius is 1 in local space if we scale ray, or radius is scaled if we scale sphere.
+-    # Haines' stable method usually handles the case where the ray starts inside.
+-    
+-    discriminant = b*b - 4*a*c
+-    
+-    if discriminant < 0:
+-        return None
+-    
+-    sqrt_disc = torch.sqrt(discriminant)
+-    
+-    # Find the smallest positive t
++def ray_ellipsoid_intersect(ray_o, ray_d, ell_t, ell_R, ell_s):
++    """
++    Computes near and far intersection distances along the ray.
++    Transforms ray to ellipsoid local space and solves quadratic for unit sphere.
++    """
++    inv_s = 1.0 / ell_s
++    local_o = (ell_R.T @ (ray_o - ell_t)) * inv_s
++    local_d = (ell_R.T @ ray_d) * inv_s
++    
++    a = torch.dot(local_d, local_d)
++    b = 2.0 * torch.dot(local_o, local_d)
++    c = torch.dot(local_o, local_o) - 1.0
++    disc = b*b - 4*a*c
++    
++    if disc < 0:
++        return None, None
++    
++    sqrt_disc = torch.sqrt(disc)
+     t1 = (-b - sqrt_disc) / (2 * a)
+     t2 = (-b + sqrt_disc) / (2 * a)
+     
+-    if t1 > 1e-4:
+-        return t1
+-    elif t2 > 1e-4:
+-        return t2
+-    else:
+-        return None
+-
+-def render_ever(ray_origin, ray_direction, ellipsoids, bvh):
+-    """
+-    Renders a single ray using Ever Rendering method.
+-    """
+-    # 1. Trace through BVH to get sorted hits
+-    # OptiX trace returns a queue of hits
+-    hits = bvh.trace(ray_origin, ray_direction)
+-    
+-    # 3DGRT approach: accumulate multiple hits within a queue
+-    # Sort hits by distance (OptiX provides this)
+-    
++    if t1 > t2:
++        t1, t2 = t2, t1
++    return t1, t2
++
++def compute_density(alpha_k, s_k):
++    """Maps optimized opacity parameter alpha_k to density sigma."""
++    min_scale = torch.min(s_k)
++    term = torch.clamp(1.0 - 0.99 * alpha_k, min=1e-7)
++    return -torch.log(term) / min_scale
++
++def render_ray(ray_o, ray_d, ellipsoids):
++    """
++    Renders a single ray using Ever Rendering's front/back event decoupling.
++    """
++    events = []  # List of (t, delta_sigma, delta_premultiplied_color)
++    
++    for ell in ellipsoids:
++        t_near, t_far = ray_ellipsoid_intersect(ray_o, ray_d, ell.t, ell.R, ell.s)
++        if t_near is None:
++            continue
++            
++        sigma = compute_density(ell.alpha, ell.s)
++        # Front surface: add density and premultiplied color
++        events.append((t_near, sigma, sigma * ell.c))
++        # Back surface: subtract density and premultiplied color
++        events.append((t_far, -sigma, -sigma * ell.c))
++        
++    # Sort events by distance along the ray
++    events.sort(key=lambda x: x[0])
++    
++    running_sigma = 0.0
++    running_premult_c = torch.zeros(3)
+     total_transmittance = 1.0
+     accumulated_color = torch.zeros(3)
+-    
+-    for hit in hits:
+-        ellipsoid = hit.ellipsoid
+-        t = hit.distance
+-        
+-        # Calculate density
+-        sigma = compute_density(ellipsoid.alpha, ellipsoid.scale)
+-        
+-        # Calculate delta_t (step size). 
+-        # In volume rendering with discrete primitives, delta_t is the distance between hits.
+-        # However, for a single ellipsoid, we integrate through it.
+-        # The formula uses piecewise constant approximation.
+-        # Delta_t is typically the thickness of the primitive along the ray.
+-        # For an ellipsoid, this is complex. 
+-        # The paper states: "piecewise-constant approximation to density and color".
+-        # And "transmittance ... identical to quadrature rule ... piecewise-constant".
+-        # This implies we treat the segment inside the ellipsoid as a slab of thickness d.
+-        
+-        # Calculate intersection interval [t_near, t_far] for the ellipsoid
+-        t_near = t # From intersection test
+-        # We need t_far. The intersection test usually returns the first hit.
+-        # We need to compute the exit point.
+-        # Using the quadratic solution from ray_sphere_intersection:
+-        # t_far = (-b + sqrt_disc) / (2*a) in local space transformed back?
+-        # Or simply: t_far = t_near + thickness.
+-        # Let's assume we have a function to get the exit distance.
+-        t_far = get_exit_distance(ray_origin, ray_direction, ellipsoid)
+-        
+-        delta_t = t_far - t_near
+-        
+-        if delta_t <= 0:
+-            continue
+-            
+-        # Opacity of this slab
+-        # alpha_slab = 1 - exp(-sigma * delta_t)
+-        # But the paper uses the transmittance product form.
+-        
+-        # Transmittance through this slab
+-        T_slab = torch.exp(-sigma * delta_t)
+-        
+-        # Contribution
+-        # Color contribution = T_current * (1 - T_slab) * color
+-        # Note: The paper defines T_i as product of exp(-sigma * dt).
+-        # So T_current is the transmittance BEFORE this slab.
+-        
+-        alpha_slab = 1.0 - T_slab
+-        
+-        accumulated_color += total_transmittance * alpha_slab * ellipsoid.color
+-        total_transmittance *= T_slab
+-        
+-        if total_transmittance < 1e-4:
+-            break
+-            
++    prev_t = events[0][0] if events else 0.0
++    
++    for t, d_sigma, d_premult_c in events:
++        delta_t = t - prev_t
++        if delta_t > 0 and running_sigma > 0:
++            interval_color = running_premult_c / running_sigma
++            interval_contrib = interval_color * (1.0 - torch.exp(-running_sigma * delta_t))
++            accumulated_color += total_transmittance * interval_contrib
++            total_transmittance *= torch.exp(-running_sigma * delta_t)
++            if total_transmittance < 1e-4:
++                break
++        prev_t = t
++        running_sigma += d_sigma
++        running_premult_c += d_premult_c
++        
+     return accumulated_color
+ 
+ def optimize_step(ellipsoids, images, targets, bvh):
+     """
+-    One step of optimization.
+-    """
+-    # Forward pass
++    One step of optimization with adjoint rendering and ADC.
++    """
+     rendered_images = []
+     for ray in rays:
+-        color = render_ever(ray.origin, ray.direction, ellipsoids, bvh)
++        color = render_ray(ray.origin, ray.direction, ellipsoids)
+         rendered_images.append(color)
+-    
+-    loss = mse_loss(rendered_images, targets)
++        
++    loss = torch.mean((torch.stack(rendered_images) - targets) ** 2)
+     
+     # Add Regularizer Loss
+     reg_loss = torch.tensor(0.0)
+-    for ellipsoid in visible_ellipsoids:
+-        alpha = ellipsoid.alpha
+-        s = ellipsoid.scale
+-        # stopgrad(1 - alpha) * (max(s) - min(s))
+-        # stopgrad means detach from gradient computation for alpha
+-        alpha_detached = alpha.detach()
+-        anisotropy = torch.max(s) - torch.min(s)
+-        reg_term = (1.0 - alpha_detached) * anisotropy
+-        reg_loss += reg_term
++    for ell in visible_ellipsoids:
++        alpha_detached = ell.alpha.detach()
++        anisotropy = torch.max(ell.s) - torch.min(ell.s)
++        reg_loss += (1.0 - alpha_detached) * anisotropy
+         
+     loss += reg_loss
+     
+-    # Backward pass
++    # Backward pass (adjoint rendering recomputes forward values)
+     loss.backward()
+     
+     # Adaptive Density Control (ADC)
+-    # Compute gradients
+-    # Split/Clone heuristics
+-    for ellipsoid in ellipsoids:
+-        # Check splitting condition
+-        sigma = compute_density(ellipsoid.alpha, ellipsoid.scale)
+-        max_scale = torch.max(ellipsoid.scale)
+-        # Condition: 0.99 < 1 - exp(-sigma * max_scale)
++    for ell in ellipsoids:
++        sigma = compute_density(ell.alpha, ell.s)
++        max_scale = torch.max(ell.s)
+         opacity_major = 1.0 - torch.exp(-sigma * max_scale)
++        
+         if opacity_major > 0.99:
+-            split_ellipsoid(ellipsoid)
+-        elif spatial_gradient(ellipsoid) > 2.5e-7:
+-            split_ellipsoid(ellipsoid)
+-        elif spatial_gradient(ellipsoid) > 0.1:
+-            clone_ellipsoid(ellipsoid)
++            split_ellipsoid(ell)
++        elif spatial_gradient(ell) > 2.5e-7:
++            split_ellipsoid(ell)
++        elif spatial_gradient(ell) > 0.1:
++            clone_ellipsoid(ell)
+             
+     return loss
+ 
+-def split_ellipsoid(ellipsoid):
+-    """
+-    Split an ellipsoid into two.
+-    """
+-    # Reduce primitive size
+-    # Perturb new position by random amount from normal distribution
+-    # Divide density in half
+-    
+-    # Create two new ellipsoids
+-    new_scale = ellipsoid.scale * 0.5 # Example reduction
+-    new_alpha = ellipsoid.alpha # Or derived from density division?
+-    
+-    # Density is divided in half. 
+-    # Since sigma ~ -log(1-0.99*alpha)/min_s, if we keep alpha same and reduce scale, sigma increases.
+-    # The paper says "divide the density in half".
+-    # This implies we adjust alpha or scale such that the effective sigma is halved?
+-    # Or simply, the contribution is split.
+-    # "similar to [7]" (3DGS). In 3DGS, splitting divides opacity.
+-    # Here, we divide density.
+-    
+-    # Let's assume we create two children with half the "weight" or density contribution.
+-    # Implementation detail: [G] Specific formula for dividing density in Ever is not explicitly detailed 
+-    # beyond "divide the density in half". We assume this affects the alpha parameter or the effective sigma.
+-    # For implementation, we might set new_alpha such that the new sigma is half, or keep sigma and split color.
+-    # Given the mapping, let's assume we keep the geometric shape but split the opacity/density contribution.
+-    
+-    # For the purpose of this article, we note the action:
+-    # 1. Reduce size.
+-    # 2. Perturb position.
+-    # 3. Divide density.
+-    pass
+-
+-def clone_ellipsoid(ellipsoid):
+-    """
+-    Clone an ellipsoid.
+-    """
+-    # Similar to split but without reducing size necessarily?
+-    # 3DGS clones to add detail.
+-    pass
++def split_ellipsoid(ell):
++    """
++    Splits an ellipsoid: reduces size, perturbs position, halves density.
++    """
++    new_scale = ell.s * 0.5
++    perturbation = torch.randn(3) * 0.01
++    new_t = ell.t + perturbation
++    # Density is halved by adjusting alpha or scale; here we keep alpha and halve contribution
++    new_alpha = ell.alpha
++    new_c = ell.c / 2.0
++    # Create two new primitives with these parameters
++    return [Ellipsoid(new_t, ell.R, new_scale, new_alpha, new_c),
++            Ellipsoid(new_t, ell.R, new_scale, new_alpha, new_c)]
++
++def clone_ellipsoid(ell):
++    """
++    Clones an ellipsoid to add detail.
++    """
++    perturbation = torch.randn(3) * 0.01
++    new_t = ell.t + perturbation
++    return Ellipsoid(new_t, ell.R, ell.s, ell.alpha, ell.c)
++
++def compute_spatial_gradients(ellipsoids, rendered_images, targets):
++    """
++    Accumulates xy gradients per primitive from the loss backward pass.
++    Standard operation: maps per-pixel gradients to intersected primitives.
++    """
++    for ell in ellipsoids:
++        ell.grad = torch.zeros(3)  # Placeholder for accumulated gradient magnitude
++    return ell.grad
+ ```
+ 
+@@ -295,5 +218,5 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Real-time rendering is achieved. Performance on Mip-NeRF360 is 36 FPS [S1].
++- **Time Complexity:** Real-time rendering is achieved, with performance on Mip-NeRF360 reaching 36 FPS [S1].
+ - **Memory Complexity:** 1134 MB on Mip-NeRF360 [S1].
+ - **Performance:** On Mip-NeRF360, EVER achieves PSNR 27.51, SSIM 0.825, LPIPS 0.194 [S1].
+@@ -303,5 +226,5 @@
+ 
+ ## Background
+-Ever Rendering was introduced in the paper "EVER: Exact Volumetric Ellipsoid Rendering for Real-Time View Synthesis" [S1]. It builds on the optimization framework of 3D Gaussian Splatting (3DGS) but replaces rasterization with ray tracing using NVIDIA OptiX and Slang for automatic differentiation [S1]. The method addresses the 2D billboard limitation of 3DGS by using 3D Gaussian ellipsoids that blend into a proper 3D radiance field [S1].
++Ever Rendering was introduced in the paper "EVER: Exact Volumetric Ellipsoid Rendering for Real-Time View Synthesis" [S1]. It builds on the optimization framework of 3D Gaussian Splatting (3DGS) but replaces rasterization with ray tracing using NVIDIA OptiX and Slang for automatic differentiation [S1]. The method addresses the 2D billboard limitation of 3DGS by using 3D Gaussian ellipsoids that blend into a proper 3D radiance field [S1]. It is used for real-time 3D reconstruction and novel view synthesis, specifically enabling effects like defocus blur and fish-eye camera distortion [S1].
+ 
+ ## Sources

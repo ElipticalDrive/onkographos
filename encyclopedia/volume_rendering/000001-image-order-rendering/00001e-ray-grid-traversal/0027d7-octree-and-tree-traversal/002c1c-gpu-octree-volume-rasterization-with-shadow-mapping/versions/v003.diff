@@ -1,0 +1,137 @@
+--- v002.md
++++ v003.md
+@@ -4,15 +4,15 @@
+ 
+ ## Overview
+-This method implements high-performance GPU volume rendering by decoupling the branch-intensive octree traversal from the raycasting loop, using a rasterization pass to identify active voxels and a shadow mapping pass for lighting [S1, unofficial][S2, abstract only, unofficial]. It solves the performance bottleneck of traditional raycasting on sparse data by moving empty-space culling into a graphics pipeline stage, achieving 2 to 4 times faster rendering speeds than state-of-the-art algorithms on large out-of-core datasets [S2, abstract only, unofficial]. Unlike sibling methods that rely on pure ray-tracing traversal or fixed-step DDA, this approach uses view-dependent proxy geometry rasterization to generate a per-pixel list of penetrated bricks, ensuring front-to-back processing and tighter ray segments [S2, abstract only, unofficial].
++This method implements high-performance GPU volume rendering by decoupling the branch-intensive octree traversal from the raycasting loop, using a rasterization pass to identify active volume regions and a shadow mapping pass for lighting [S1, unofficial][S2, abstract only, unofficial]. It solves the performance bottleneck of traditional raycasting on sparse data by moving empty-space culling into a graphics pipeline stage, achieving 2 to 4 times faster rendering speeds than state-of-the-art algorithms on large out-of-core datasets [S2, abstract only, unofficial]. Unlike sibling methods that rely on pure ray-tracing traversal or fixed-step DDA, this approach uses view-dependent proxy geometry rasterization to generate a per-pixel list of penetrated bricks, ensuring front-to-back processing and tighter ray segments [S2, abstract only, unofficial]. It builds on [Octree and Tree Traversal](4134-octree-and-tree-traversal.md) and relates to [Stackless Traversal](5202-stackless-traversal.md) and [DDA Tree Traversal with Mini-Stack](5244-dda-tree-traversal-with-mini-stack.md).
+ 
+ ## How it works
+-The method operates in two main phases: a traversal/rasterization phase to identify active volume regions, and a rendering phase that may include a shadow map pass.
++The method operates in two main phases: a traversal/rasterization phase to identify active volume regions, and a rendering phase that may include a shadow map pass [S1, unofficial][S2, abstract only, unofficial].
+ 
+ ### Inputs and Outputs
+ *   **Inputs:**
+     *   Octree structure composed of bricks, where each brick is split into regular macrocells [S2, abstract only, unofficial].
+-    *   Frame dimensions: `m_frameWidth`, `m_frameHeight` [S1, unofficial].
++    *   Frame dimensions: `m_windowWidth`, `m_windowHeight` [S1, unofficial].
+     *   Camera and light parameters [S1, unofficial].
+-    *   Job queue for parallel traversal [S1, unofficial].
++    *   Job queue for parallel traversal managed via a device pointer [S1, unofficial].
+ *   **Outputs:**
+     *   Final color buffer (via PBO/Texture) [S1, unofficial].
+@@ -20,11 +20,11 @@
+ 
+ ### Data Structures
+-*   **Traversal Queue:** A device pointer `dTravQueuePtr` used to manage parallel traversal jobs. It is initialized to `hEndIndex` before traversal begins [S1, unofficial].
++*   **Traversal Queue:** A device pointer `dTravQueuePtr` used to manage parallel traversal jobs [S1, unofficial]. It is initialized to `hEndIndex` before traversal begins [S1, unofficial].
+ *   **Depth Buffer Texture:** Configured with `cudaTextureDesc`:
+-    *   `addressMode[0] = cudaAddressModeClamp`
+-    *   `filterMode = cudaFilterModePoint`
+-    *   `normalizedCoords = false`
++    *   `addressMode[0] = cudaAddressModeClamp` [S1, unofficial].
++    *   `filterMode = cudaFilterModePoint` [S1, unofficial].
++    *   `normalizedCoords = false` [S1, unofficial].
+     *   `readMode = cudaReadModeElementType` [S1, unofficial].
+-*   **Shadow Map:** Stores minimum depth values. Initialized with `minDepth = INT_MAX` [S1, unofficial].
++*   **Shadow Map:** Stores minimum depth values [S1, unofficial]. Initialized with `minDepth = 2147483647` [S1, unofficial].
+ 
+ ### Algorithm Steps
+@@ -32,6 +32,5 @@
+     *   Set `hStartIndex = 0` and `hEndIndex = obj.data()->jobs().size()` [S1, unofficial].
+     *   Initialize `dTravQueuePtr[0] = hEndIndex` [S1, unofficial].
+-    *   Set `octreeLevel = 0` [S1, unofficial].
+-
++    *   Initialize `octreeLevel` to 0 [G].
+ 2.  **Traversal Loop:**
+     *   While `hEndIndex - hStartIndex > 0`:
+@@ -41,22 +40,16 @@
+         4.  Increment `octreeLevel` [S1, unofficial].
+     *   *Pitfall:* If `dTravQueuePtr[0]` is not updated correctly by the kernel, the loop may infinite loop or terminate prematurely [S1, unofficial].
+-
+ 3.  **Rendering Pass:**
+     *   If `shadowPass` is true:
+         1.  Launch `drawShadowMap` kernel [S1, unofficial].
+-        2.  *Pitfall:* If no voxels are found, `minDepth` remains `INT_MAX` and `shadowMap[index]` is not written [S1, unofficial].
++        2.  *Pitfall:* If no voxels are found, `minDepth` remains `2147483647` and `shadowMap[index]` is not written [S1, unofficial].
+     *   Else:
+         1.  Launch `draw` kernel [S1, unofficial].
+ 
+-### Rasterization-Based Empty Space Culling (Variant Detail)
+-For the variant described in [S2, abstract only, unofficial], the traversal is replaced/augmented by a rasterization pass:
+-1.  **Proxy Geometry:** Generate proxy geometry representing a view-dependent cut of the octree nodes [S2, abstract only, unofficial].
+-2.  **Rasterization:** Rasterize this proxy geometry to capture all penetrated bricks in a per-pixel list [S2, abstract only, unofficial].
+-3.  **Ordering:** Ensure the per-pixel list is captured in front-to-back order [S2, abstract only, unofficial].
+-4.  **Raycasting:** Cast rays only inside the tighter segments defined by the penetrated bricks/macrocells [S2, abstract only, unofficial].
+-5.  **Culling:** Achieve two levels of empty space skipping: brick level and macrocell level [S2, abstract only, unofficial].
+-
+ ### Pseudocode
+ ```python
++# Device-side mutable container for the traversal queue pointer
++d_trav_queue_ptr = [0]
++
+ def render_frame(model, camera, light, window_width, window_height):
+     # 1. Initialize traversal state
+@@ -69,10 +62,11 @@
+     while h_end_index - h_start_index > 0:
+         # Launch traverse kernel for current job range and depth
+-        launch_traverse_kernel(
++        traverse_kernel(
+             job_start=h_start_index,
+             job_end=h_end_index,
+             level=octree_level,
+             camera=camera,
+-            model=model
++            model=model,
++            queue_ptr=d_trav_queue_ptr
+         )
+         
+@@ -83,19 +77,39 @@
+         
+     # 3. Rendering Pass
++    shadow_pass_enabled = True  # Controlled by application state
+     if shadow_pass_enabled:
+         # Shadow map generation
+-        launch_draw_shadow_map_kernel(
++        draw_shadow_map_kernel(
+             camera=camera,
+             light=light,
+             model=model,
+-            min_depth_init=INT_MAX
++            min_depth_init=2147483647
+         )
+     else:
+         # Direct volume rendering
+-        launch_draw_kernel(
++        draw_kernel(
+             camera=camera,
+             light=light,
+             model=model
+         )
++
++# Helper: GPU kernel launch for traversal
++def traverse_kernel(job_start, job_end, level, camera, model, queue_ptr):
++    # Standard GPU kernel launch pattern
++    # Processes jobs in [job_start, job_end) at given octree depth
++    # Updates queue_ptr[0] with next batch index upon completion
++    pass
++
++# Helper: GPU kernel launch for shadow map rendering
++def draw_shadow_map_kernel(camera, light, model, min_depth_init):
++    # Standard GPU kernel launch pattern
++    # Renders shadow map using min_depth_init as initial depth value
++    pass
++
++# Helper: GPU kernel launch for direct volume rendering
++def draw_kernel(camera, light, model):
++    # Standard GPU kernel launch pattern
++    # Renders final color buffer
++    pass
+ ```
+ 
+@@ -112,5 +126,4 @@
+ *   **Limitations:** Complexity of managing rasterization-based culling and proxy geometry generation [S2, abstract only, unofficial].
+ *   **When to use:** Large out-of-core volume datasets where traditional raycasting traversal is a bottleneck [S2, abstract only, unofficial].
+-*   **When not to use:** Small in-core datasets where overhead may outweigh benefits, or when strict real-time constraints require simpler traversal methods [Not given in the sources].
+ 
+ ## Background

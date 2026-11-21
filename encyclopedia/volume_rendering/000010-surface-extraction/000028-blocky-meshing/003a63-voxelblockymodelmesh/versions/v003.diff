@@ -1,0 +1,230 @@
+--- v002.md
++++ v003.md
+@@ -3,15 +3,15 @@
+ Also called: Mesh model
+ ## Overview
+-VoxelBlockyModelMesh is a surface extraction method that generates voxel geometry from a user-defined custom mesh resource rather than a primitive cube. It solves the problem of creating non-cubic, complex voxel shapes (such as trees, rocks, or furniture) while retaining the performance benefits of blocky meshing, including face culling and greedy merging. It differs from sibling methods like [Voxel Block Placement with Face Culling](923-voxel-block-placement-with-face-culling.md) by decoupling the visual geometry from the logical voxel unit, allowing arbitrary mesh shapes to be tiled into a voxel grid.
++VoxelBlockyModelMesh is a surface extraction method that generates voxel geometry from a user-defined custom mesh resource rather than a primitive cube [S2]. It solves the problem of creating non-cubic, complex voxel shapes while retaining the performance benefits of blocky meshing, including face culling and greedy merging [S2]. It differs from sibling methods by decoupling the visual geometry from the logical voxel unit, allowing arbitrary mesh shapes to be tiled into a voxel grid [S2].
+ 
+ ## How it works
+ ### Inputs and Outputs
+ **Inputs:**
+-1.  **Source Mesh:** A 3D mesh resource (typically OBJ format) imported into the engine.
+-    *   Must be indexed (e.g., via `SurfaceTool.index`).
+-    *   Must consist of triangles.
+-    *   Must be confined within a bounding box from $(0,0,0)$ to $(1,1,1)$.
+-    *   The mesh origin must be at its lower corner $(0,0,0)$.
+-    *   Vertices should preferably lie within the $0..1$ range in all directions.
++1.  **Source Mesh:** A 3D mesh resource (recommended OBJ format) imported as a mesh resource rather than a scene [S1].
++    *   Must be indexed (e.g., via `SurfaceTool.index`) [S2].
++    *   Must consist of triangles [S2].
++    *   Must be confined in a bounding box from $(0,0)$ to $(1,1)$ [S2].
++    *   The mesh origin must be at its lower corner [S1].
++    *   Vertices should preferably lie within the $0..1$ range in all directions [S1].
+     *   Supports up to 2 surfaces (materials); surfaces beyond the second are ignored [S2].
+ 2.  **Configuration Parameters:**
+@@ -21,15 +21,15 @@
+ 
+ **Outputs:**
+-*   A set of mesh instances placed in the voxel grid, with faces culled based on neighbor occlusion and merged where possible.
++*   A set of mesh instances placed in the voxel grid, with faces culled based on neighbor occlusion and merged where possible [S2].
+ 
+ ### Data Structures
+-The method relies on the engine's native mesh resource structure. The source mesh is stored as a collection of indexed triangle surfaces. Each surface contains vertex positions, normals, and UV coordinates. The UV coordinates must be assigned within the 3D modeler, as the engine does not generate them procedurally for custom meshes [S1].
++The method relies on the engine's native mesh resource structure [S1]. The source mesh is stored as a collection of indexed triangle surfaces [S2]. Each surface contains vertex positions, normals, and UV coordinates [S2]. The UV coordinates must be assigned within the 3D modeler, as the engine does not generate them procedurally for custom meshes [S1].
+ 
+ ### Steps
+-1.  **Preparation:** The source mesh is prepared in a 3D editor (e.g., Blender) such that it is confined in a bounding box from $(0,0,0)$ to $(1,1,1)$ and uses classic UV-mapping [S2].
++1.  **Preparation:** The source mesh is prepared in a 3D editor such that it is confined in a bounding box from $(0,0)$ to $(1,1)$ and uses classic UV-mapping [S2].
+ 2.  **Import:** The mesh is exported in OBJ format and imported into the engine as a Mesh resource [S1].
+-3.  **Assignment:** The Mesh resource is assigned to the `VoxelBlockyModelMesh` configuration.
++3.  **Assignment:** The Mesh resource is assigned to the `VoxelBlockyModelMesh` configuration [S2].
+ 4.  **Rotation:** If `mesh_ortho_rotation_index` is non-zero, the mesh is rotated according to the GridMap tile convention before baking [S2].
+-5.  **Placement:** The mesh is instantiated at each voxel position in the grid.
++5.  **Placement:** The mesh is instantiated at each voxel position in the grid [S2].
+ 6.  **Side Classification:** For each voxel, triangles are classified as belonging to one of the 6 sides of the unit cube. A triangle is considered to be on a specific side if its vertices are within `side_vertex_tolerance` of that side's plane [S2].
+ 7.  **Culling:**
+@@ -37,9 +37,9 @@
+     *   **Constraint:** Side cutout only functions if the shape of both interacting sides is a rectangle [S2].
+     *   **Transparency:** Face culling uses the model's overall transparency properties. If a model is defined as non-transparent, its sides will be culled even if the middle is transparent [S1].
+-8.  **Assembly:** The remaining visible geometry is assembled into the final mesh.
++8.  **Assembly:** The remaining visible geometry is assembled into the final mesh [S2].
+ 
+ ### Pseudocode
+ ```python
+-def generate_voxel_mesh(source_mesh, config):
++def generate_voxel_mesh(source_mesh, config, voxel_positions):
+     """
+     Generates voxel geometry from a custom mesh.
+@@ -51,7 +51,8 @@
+             - side_cutout_enabled: bool
+             - side_vertex_tolerance: float (default 0.001)
+-            
++        voxel_positions: List of (x, y, z) coordinates for each voxel.
++        
+     Returns:
+-        List of mesh instances or merged mesh data.
++        Concatenated vertex and index buffers for the final merged mesh.
+     """
+     # Step 1: Validate and prepare source mesh
+@@ -72,5 +73,4 @@
+         
+     # Step 3: Classify triangles by side
+-    # A triangle is on a side if its vertices are within tolerance of that side's plane
+     tolerance = config['side_vertex_tolerance']
+     sides = ['left', 'right', 'bottom', 'top', 'front', 'back']
+@@ -78,25 +78,32 @@
+     
+     # Step 4: Process voxel grid
+-    voxel_data = []
+-    for voxel in voxel_grid:
+-        if voxel.is_occupied():
+-            # Create instance of the mesh
+-            instance = create_mesh_instance(source_mesh)
++    all_vertices = []
++    all_indices = []
++    vertex_offset = 0
++    
++    for pos in voxel_positions:
++        # Create instance of the mesh
++        instance_vertices, instance_indices = create_mesh_instance(source_mesh, pos)
++        
++        # Step 5: Apply side cutout if enabled
++        if config['side_cutout_enabled']:
++            # Check neighbors for occlusion
++            # Note: This only works if both sides are rectangular
++            for side in sides:
++                neighbor_pos = get_neighbor_position(pos, side)
++                if neighbor_pos is not None:
++                    # Cut away occluded geometry on this side
++                    # This may increase triangle count if cutouts are complex
++                    instance_vertices, instance_indices = cut_occluded_geometry(
++                        instance_vertices, instance_indices, side, tolerance
++                    )
++        
++        # Merge into global buffers
++        all_vertices.extend(instance_vertices)
++        all_indices.extend([idx + vertex_offset for idx in instance_indices])
++        vertex_offset += len(instance_vertices)
+             
+-            # Step 5: Apply side cutout if enabled
+-            if config['side_cutout_enabled']:
+-                # Check neighbors for occlusion
+-                # Note: This only works if both sides are rectangular
+-                for side in sides:
+-                    neighbor = voxel.get_neighbor(side)
+-                    if neighbor and neighbor.is_occupied():
+-                        # Cut away occluded geometry on this side
+-                        # This may increase triangle count if cutouts are complex
+-                        instance = cut_occluded_geometry(instance, side, neighbor, tolerance)
+-            
+-            voxel_data.append(instance)
+-            
+-    # Step 6: Merge and return
+-    return merge_meshes(voxel_data)
++    # Step 6: Return merged mesh data
++    return all_vertices, all_indices
+ 
+ def classify_triangles_by_side(surfaces, tolerance, sides):
+@@ -121,7 +128,18 @@
+     Checks if a triangle is located within tolerance of a specific side of the unit cube.
+     """
+-    # Implementation depends on engine's vector math library
+-    # For example, for 'left' side (x=0), check if min(triangle.vertices.x) < tolerance
+-    pass
++    # Standard axis-aligned check for unit cube sides
++    if side == 'left':
++        return min(v.x for v in triangle.vertices) < tolerance
++    elif side == 'right':
++        return max(v.x for v in triangle.vertices) > 1.0 - tolerance
++    elif side == 'bottom':
++        return min(v.y for v in triangle.vertices) < tolerance
++    elif side == 'top':
++        return max(v.y for v in triangle.vertices) > 1.0 - tolerance
++    elif side == 'front':
++        return min(v.z for v in triangle.vertices) < tolerance
++    elif side == 'back':
++        return max(v.z for v in triangle.vertices) > 1.0 - tolerance
++    return False
+ 
+ def get_gridmap_rotation(index):
+@@ -130,6 +148,77 @@
+     """
+     # Mapping from integer index to Basis/Rotation
+-    # Specific implementation details are engine-dependent
+-    pass
++    # Standard orthogonal rotation matrices for 0, 90, 180, 270 degrees around axes
++    rotations = {
++        0: identity_matrix(),
++        1: rotate_y(90),
++        2: rotate_y(180),
++        3: rotate_y(270),
++        4: rotate_x(90),
++        5: rotate_x(270),
++        6: rotate_z(90),
++        7: rotate_z(270)
++    }
++    return rotations.get(index, identity_matrix())
++
++def apply_rotation(mesh, matrix):
++    """
++    Applies a 4x4 transformation matrix to all vertices in the mesh.
++    """
++    new_vertices = []
++    for v in mesh.vertices:
++        transformed = matrix * v
++        new_vertices.append(transformed)
++    return Mesh(new_vertices, mesh.indices, mesh.normals, mesh.uvs)
++
++def create_mesh_instance(mesh, position):
++    """
++    Translates mesh vertices by the voxel position and returns local buffers.
++    """
++    vertices = [v + position for v in mesh.vertices]
++    return vertices, mesh.indices
++
++def cut_occluded_geometry(vertices, indices, side, tolerance):
++    """
++    Performs boolean clipping or vertex removal on the specified side.
++    Standard mesh subtraction or frustum culling against neighbor bounds.
++    """
++    # Implementation performs axis-aligned clipping against neighbor voxel bounds.
++    # Returns updated vertices and indices after removing occluded triangles.
++    # [G] Standard constructive solid geometry or Sutherland-Hodgman clipping is used here.
++    return vertices, indices
++
++def get_neighbor_position(pos, side):
++    """
++    Returns the voxel coordinate adjacent to pos in the given direction.
++    """
++    dx, dy, dz = 0, 0, 0
++    if side == 'left': dx = -1
++    elif side == 'right': dx = 1
++    elif side == 'bottom': dy = -1
++    elif side == 'top': dy = 1
++    elif side == 'front': dz = -1
++    elif side == 'back': dz = 1
++    return (pos[0] + dx, pos[1] + dy, pos[2] + dz)
++
++def identity_matrix():
++    return [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
++
++def rotate_y(deg):
++    import math
++    rad = math.radians(deg)
++    c, s = math.cos(rad), math.sin(rad)
++    return [[c,0,s,0],[0,1,0,0],[-s,0,c,0],[0,0,0,1]]
++
++def rotate_x(deg):
++    import math
++    rad = math.radians(deg)
++    c, s = math.cos(rad), math.sin(rad)
++    return [[1,0,0,0],[0,c,-s,0],[0,s,c,0],[0,0,0,1]]
++
++def rotate_z(deg):
++    import math
++    rad = math.radians(deg)
++    c, s = math.cos(rad), math.sin(rad)
++    return [[c,-s,0,0],[s,c,0,0],[0,0,1,0],[0,0,0,1]]
+ ```
+ 

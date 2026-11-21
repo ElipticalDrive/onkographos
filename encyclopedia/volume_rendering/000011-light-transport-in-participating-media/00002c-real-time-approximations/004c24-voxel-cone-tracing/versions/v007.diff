@@ -1,0 +1,108 @@
+--- v006.md
++++ v007.md
+@@ -1,8 +1,8 @@
+ # Voxel Cone Tracing
+ 
+-Also called: VCTGI, Voxel Cone Tracing for Global Illumination, Voxel-based cone tracing
++Also called: VCTGI, VXGI (Voxel Global Illumination), VXGINode, Voxel Cone Tracing for Diffuse GI, Voxel Cone Tracing for Global Illumination, Voxel-based cone tracing
+ 
+ ## Overview
+-Voxel Cone Tracing (VCT) is a real-time global illumination technique that approximates indirect lighting by voxelizing the scene into a 3D texture or sparse voxel octree and sampling it via expanding cones [S2][S3, S24, unofficial]. It solves the problem of computing multiple light bounces interactively by collapsing the hemispherical integral of the rendering equation into a sum of cone traces, allowing diffuse and specular reflections to be estimated with significantly lower cost than full path tracing [S2][S3, unofficial]. It sets itself apart from [Spherical Harmonic Volumetric Visibility](1225-spherical-harmonic-volumetric-visibility.md) by supporting glossy/specular reflections natively without basis function approximation, and from [Froxel-based Volumetric Rendering](1919-froxel-based-volumetric-rendering.md) by using a global hierarchical structure (octree or dense 3D texture) rather than camera-centric frustums [S3, S25, unofficial].
++Voxel Cone Tracing (VCT) is a real-time global illumination technique that approximates indirect lighting by voxelizing the scene into a 3D texture or sparse voxel octree and sampling it via expanding cones [S2][S3, unofficial]. It solves the problem of computing multiple light bounces interactively by collapsing the hemispherical integral of the rendering equation into a sum of cone traces, allowing diffuse and specular reflections to be estimated with significantly lower cost than full path tracing [S2][S3, unofficial]. It sets itself apart from [Spherical Harmonic Volumetric Visibility](1225-spherical-harmonic-volumetric-visibility.md) by supporting glossy/specular reflections natively without basis function approximation, and from [Froxel-based Volumetric Rendering](1919-froxel-based-volumetric-rendering.md) by using a global hierarchical structure (octree or dense 3D texture) rather than camera-centric frustums [S3, S25, unofficial].
+ 
+ ## How it works
+@@ -21,10 +21,11 @@
+ 
+ 1.  **Voxelization:**
+-    *   Render scene geometry into the voxel grid. Disable depth testing and culling to capture all triangles [S28, unofficial].
++    *   Render scene geometry into the voxel grid [S21, unofficial].
++    *   Disable depth testing and culling to capture all triangles [S28, unofficial].
+     *   Use conservative rasterization or a geometry shader to project triangles along their dominant normal axis to prevent cracks [S23][S28, unofficial].
+     *   Inject direct lighting (from shadow maps or radiosity mapping) into the lowest level of the voxel grid [S4, S24, unofficial].
+ 
+ 2.  **Filtering (Mipmap Generation):**
+-    *   Downsample the voxel grid to generate mipmaps. Each level $m$ represents a larger spatial area [S24, unofficial].
++    *   Downsample the voxel grid to generate mipmaps [S24, unofficial].
+     *   For anisotropic variants, store directional copies (e.g., 6 directions) to prevent light leaking through thin geometry [S1, S4, unofficial].
+ 
+@@ -44,25 +45,40 @@
+         *   Trace cones toward light sources or use the accumulated alpha from diffuse cones to estimate ambient occlusion [S3, unofficial].
+ 
+-    **Cone Trace Loop (Per Cone):**
+-    Let $x$ be the fragment position, $\vec{w}$ be the normalized cone direction, $\gamma$ be the cone aperture angle, and $d_{max}$ be the max trace distance [S3, unofficial].
+-
+-    1.  Initialize: $t = \epsilon$ (small offset to avoid self-intersection), $\alpha = 0$ (accumulated occlusion), $C = (0,0,0)$ (accumulated color) [S3, unofficial].
+-    2.  Loop while $t < d_{max}$ and $\alpha < 1.0$:
+-        a.  Calculate cone diameter: $d = 2 t \tan(\gamma/2)$ [S3, unofficial].
+-        b.  Calculate Mipmap Level of Detail (LOD): $lod = \log_2(d / V_{size})$, where $V_{size}$ is the base voxel size [S3, S24, unofficial]. Clamp $lod$ to $[0, LOD_{max}]$.
+-        c.  Calculate sample position: $p = x + t \vec{w}$ [S3, unofficial].
+-        d.  Sample voxel data: $V = \text{TextureLod}(VoxelTexture, p, lod)$ [S3, unofficial].
+-        e.  Update Accumulation:
+-            $$C_{new} = \alpha C_{old} + (1 - \alpha) \alpha_V C_V$$
+-            $$\alpha_{new} = \alpha_{old} + (1 - \alpha_{old}) \alpha_V$$
+-            Where $\alpha_V$ and $C_V$ are the alpha and color components of $V$ [S3, unofficial].
+-            *Note: Some implementations use simpler front-to-back blending: $C += (1-\alpha) V.rgb$, $\alpha += (1-\alpha) V.a$ [S29, unofficial].*
+-        f.  Advance distance: $t \leftarrow t + \beta d$, where $\beta$ is a step factor (often 1.0 or slightly less to ensure coverage) [S3, unofficial].
+-    3.  Return $C$ as the cone's contribution.
++    **Pseudocode (Per Cone):**
++    ```python
++    def cone_trace(origin, direction, aperture_angle, max_dist, voxel_texture, voxel_size, max_mip):
++        dist = voxel_size  # Offset to avoid self-intersection
++        acc_color = vec3(0.0)
++        acc_alpha = 0.0
++        step_factor = 1.0  # Ensures coverage; can be slightly less
++        
++        while dist < max_dist and acc_alpha < 1.0:
++            # Calculate cone diameter at current distance
++            diameter = 2.0 * dist * tan(aperture_angle / 2.0)
++            
++            # Determine mipmap level to match cone footprint
++            lod = log2(diameter / voxel_size)
++            lod = clamp(lod, 0.0, max_mip)
++            
++            # Sample position
++            pos = origin + direction * dist
++            
++            # Fetch voxel data (color and alpha)
++            sample = voxel_texture.sample_level(pos, lod)
++            
++            # Front-to-back alpha blending
++            transmittance = 1.0 - acc_alpha
++            acc_color += transmittance * sample.rgb
++            acc_alpha += transmittance * sample.a
++            
++            # Advance along cone axis
++            dist += diameter * step_factor
++            
++        return acc_color, acc_alpha
++    ```
+ 
+ 4.  **Final Computation:**
+     Combine direct lighting, indirect diffuse, indirect specular, and occlusion:
+-    $$L_{out} = L_{direct} \cdot V_{shadow} + L_{indirect, diff} + L_{indirect, spec}$$
+-    [S3, unofficial]
++    $$L_{out} = L_{direct} \cdot V_{shadow} + L_{indirect, diff} + L_{indirect, spec}$$ [S3, unofficial]
+ 
+ **Parameters:**
+@@ -100,11 +116,11 @@
+ 
+ ### Temporal Multibounce
+-Achieves multiple light bounces by using information from previous frames during voxelization. It modifies only the base mipmap level and uses higher levels for indirect lighting from the previous stage, with an attenuation factor to ensure convergence [S29, unofficial].
++Achieves multiple light bounces by using information from previous frames during voxelization [S29, unofficial]. It modifies only the base mipmap level and uses higher levels for indirect lighting from the previous stage, with an attenuation factor to ensure convergence [S29, unofficial].
+ 
+ ### Cone Traced Reflections
+-Uses the same cone tracing technique as diffuse GI but adjusts step size based on surface roughness. Rough surfaces use larger cones (like diffuse), while smooth surfaces keep mip levels minimal. Separate voxel data for diffuse and specular is recommended, potentially with alternating update frequencies [S35, unofficial].
++Uses the same cone tracing technique as diffuse GI but adjusts step size based on surface roughness [S35, unofficial]. Rough surfaces use larger cones (like diffuse), while smooth surfaces keep mip levels minimal [S35, unofficial]. Separate voxel data for diffuse and specular is recommended, potentially with alternating update frequencies [S35, unofficial].
+ 
+ ### Self-Occlusion Avoidance via Offset
+-Prevents a surface from sampling its own voxel contribution by offsetting the ray origin. If the offset is too large, close-by surfaces lose GI contribution; if too small, self-intersection occurs. Anisotropic voxels can solve the disconnect but require more memory [S35, unofficial].
++Prevents a surface from sampling its own voxel contribution by offsetting the ray origin [S35, unofficial]. If the offset is too large, close-by surfaces lose GI contribution; if too small, self-intersection occurs [S35, unofficial]. Anisotropic voxels can solve the disconnect but require more memory [S35, unofficial].
+ 
+ ### Alpha Accumulation for Voxel Cone Tracing
+@@ -112,5 +128,5 @@
+ 
+ ### AHD Cone Tracing
+-Restricts cone tracing to a single direction for static geometry using AHD encoding. Ambient occlusion is computed analytically, while directional occlusion is computed by tracing a single cone intersected with sphere object representations [S6, unofficial].
++Restricts cone tracing to a single direction for static geometry using AHD encoding [S6, unofficial]. Ambient occlusion is computed analytically, while directional occlusion is computed by tracing a single cone intersected with sphere object representations [S6, unofficial].
+ 
+ ### Edge Detection and Selective Re-tracing

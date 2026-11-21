@@ -1,0 +1,148 @@
+# 3D Gaussian Data Layout
+
+Also called: 3DGS Parameter Storage, Gaussian Struct Definition, GaussianModel, GaussianModel PyTorch Module
+
+## Overview
+The 3D Gaussian Data Layout defines the memory organization and parameterization of a single 3D Gaussian primitive within a Gaussian Splatting system. It solves the problem of efficiently storing and accessing heterogeneous geometric attributes (position, scale, rotation, opacity, and color) for optimization and rendering. It sets itself apart from its parent [GaussianSet Data Structure](2074-gaussianset-data-structure.md) by defining the atomic unit's internal fields rather than the container's aggregation strategy, and from its sibling [Gaussian Data Packing](3257-gaussian-data-packing.md) by focusing on the logical attribute types and their mathematical representations (e.g., log-space scales, quaternions) rather than low-level binary serialization.
+
+## How it works
+The layout supports two primary implementation paradigms: a C++ struct-based layout for rendering pipelines and a PyTorch tensor-based layout for differentiable optimization. Both store the same logical attributes but differ in activation functions and storage formats.
+
+### Inputs and Outputs
+*   **Input:** Raw geometric data (e.g., from a point cloud or neural network) or optimized parameters.
+*   **Output:** A structured representation of a single Gaussian primitive ready for covariance computation or rasterization.
+
+### Data Structures
+
+#### C++ Struct Layout (Rendering)
+Defined in [S1, unofficial], the `Gaussian` struct uses `nalgebra` types. It stores precomputed 3D covariance to accelerate projection.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```rust
+pub struct Gaussian {
+    pub position: na::Vector3<f32>,  // x, y, z
+    pub scale: na::Vector3<f32>,    // scale_0, scale_1, scale_2 (linear space)
+    pub opacity: f32,               // opacity [0, 1]
+    pub rotation: na::Quaternion<f32>, // w, x, y, z (unit quaternion)
+    pub sh: na::SVector<f32, 48>,   // Spherical Harmonics coefficients (DC + 45 rest)
+    pub cov3d: na::Matrix3<f32>,    // 3x3 symmetric covariance matrix
+}
+```
+*   `sh_dim`: The number of SH coefficients. Common values are 3 (DC only), 12 (degree 1), 27 (degree 2), or 48 (degree 3) [S1, unofficial].
+*   `cov3d`: Precomputed to avoid redundant matrix operations during rasterization [S1, unofficial].
+
+#### PyTorch Tensor Layout (Optimization)
+Defined in [S3, unofficial], `GaussianModel` stores parameters in log-space or log-odds to ensure positivity during gradient descent, applying activation functions during access.
+
+*   `_xyz`: `Tensor(N, 3)`, float32. Raw positions.
+*   `_features_dc`: `Tensor(N, 1, 3)`, float32. 0th-degree SH coefficients (colors).
+*   `_scaling`: `Tensor(N, 3)`, float32. Log-scales.
+*   `_rotation`: `Tensor(N, 4)`, float32. Raw quaternions.
+*   `_opacity`: `Tensor(N, 1)`, float32. Log-odds.
+
+### Numbered Steps: Parameter Access and Conversion
+
+1.  **Retrieve Position:** Return `_xyz` directly.
+2.  **Retrieve Scale:**
+    *   Compute `s = torch.exp(_scaling)`.
+    *   Clamp to maximum value: `s = torch.clamp(s, max=10.0)` [S3, unofficial].
+3.  **Retrieve Rotation:**
+    *   Normalize the quaternion: `q = torch.nn.functional.normalize(_rotation)` [S3, unofficial].
+4.  **Retrieve Opacity:**
+    *   Apply sigmoid: `o = torch.sigmoid(_opacity)`, mapping log-odds to $[0, 1]$ [S3, unofficial].
+5.  **Retrieve Color:**
+    *   Extract `feat_dc` from `_features_dc`.
+    *   If higher degrees are stored, flatten `_features_rest` into `feat_extra`.
+    *   Combine `feat_dc` and `feat_extra` for SH evaluation [S2, unofficial].
+
+### Pseudocode: Gaussian Conversion (PyTorch)
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+class GaussianLayout:
+    def __init__(self, xyz, features_dc, scaling, rotation, opacity):
+        self._xyz = xyz
+        self._features_dc = features_dc
+        self._scaling = scaling
+        self._rotation = rotation
+        self._opacity = opacity
+
+    def get_position(self):
+        return self._xyz
+
+    def get_scaling(self):
+        # Convert log-space to linear space with upper bound
+        return torch.clamp(torch.exp(self._scaling), max=10.0)
+
+    def get_rotation(self):
+        # Ensure unit quaternion
+        return F.normalize(self._rotation, dim=-1)
+
+    def get_opacity(self):
+        # Convert log-odds to probability
+        return torch.sigmoid(self._opacity)
+
+    def get_features(self):
+        return self._features_dc
+
+    @staticmethod
+    def from_list(data):
+        """
+        Reconstruct Gaussian from a flat list/array.
+        Layout: [centroid(3), scale(3), rotation(4), opacity(1), feat_dc(3), feat_extra(...)]
+        """
+        # data is a 1D tensor or array
+        centroid = data[0:3]
+        scale = data[3:6]
+        rotation = data[6:10]
+        opacity = data[10]
+        feat_dc = data[11:14]
+        feat_extra = data[14:]
+        
+        # Note: In optimization, scale/opacity are typically stored in log-space.
+        # This constructor assumes raw values if used for initialization,
+        # or log-values if used for loading optimized checkpoints.
+        return GaussianLayout(
+            xyz=centroid,
+            features_dc=feat_dc,
+            scaling=scale, # Assuming log-scale if coming from optimizer
+            rotation=rotation,
+            opacity=opacity # Assuming log-odds if coming from optimizer
+        )
+```
+
+### Edge Cases and Pitfalls
+*   **Quaternion Normalization:** Rotations must be unit quaternions. Failure to normalize `_rotation` leads to skewed scaling in the covariance matrix [S3, unofficial].
+*   **Scale Clamping:** Scales are clamped at 10.0 to prevent numerical instability during rendering [S3, unofficial].
+*   **SH Degree Mismatch:** The size of `feat_extra` depends on `max_sh_degree`. Degree 0 has no extra coefficients; Degree 1 has 9; Degree 2 has 24; Degree 3 has 45 [S2, unofficial].
+*   **Log-Space Initialization:** When initializing from a point cloud, scales and opacities must be converted to log-space before storage in the PyTorch layout [S3, unofficial].
+
+## Subtopics
+
+### [Gaussian Data Structure](2273-gaussian-data-structure.md)
+The Gaussian Data Structure (also known as GaussianList) is the primary in-memory container for 3D Gaussian Splatting primitives, organizing per-Gaussian attributes into column-major arrays to facilitate efficient GPU rendering and optimization. It solves the problem of managing a dynamic, large-scale set of heterogeneous geometric primitives by providing a flat, contiguous memory layout that supports batched processing, while explicitly storing precomputed 3D covariance matrices to accelerate the projection step. It sets itself apart from its parent [3D Gaussian Data Layout](2242-3d-gaussian-data-layout.md) by defining the specific container type (a list of arrays rather than a struct-of-arrays or array-of-structs) and from its sibling [Gaussian Data Packing](3257-gaussian-data-packing.md) by focusing on the logical attribute organization rather than low-level bit-packing or serialization.
+
+### [Gaussian Data Packing](3257-gaussian-data-packing.md)
+Gaussian Data Packing serializes 3D Gaussian Splat attributes into a fixed-width binary buffer to facilitate efficient GPU-side access during rasterization. It differs from sibling methods like [SPZ Packed Format](3926-spz-packed-format.md) by using an interleaved, texture-friendly layout with a fixed width of 8 `uint32_t` per Gaussian, rather than parallel buffers or image-based compression.
+
+### GeometryState Allocation
+GeometryState contains contiguous memory blocks for P Gaussians: depths (float, P), clamped (float, P*3), internal_radii (float, P), means2D (float, P), cov3D (float, P*6), conic_opacity (float, P), rgb (float, P*3), tiles_touched (uint32_t, P), scanning_space (variable size from cub::DeviceScan::InclusiveSum), point_offsets (uint32_t, P) [S4, unofficial].
+
+## Operating characteristics
+*   **Memory:** The C++ struct layout is compact but includes precomputed covariance, increasing per-Gaussian memory usage. The PyTorch layout stores raw parameters, requiring runtime computation of covariance, which trades memory for compute.
+*   **Performance:** Precomputing covariance (C++ layout) accelerates rendering but requires synchronization when Gaussians move. The PyTorch layout defers this cost to the optimization step or requires explicit recomputation.
+*   **Scalability:** The PyTorch layout scales well with batched operations on GPUs due to tensor parallelism. The C++ layout scales with memory bandwidth for rendering.
+
+## Background
+The 3D Gaussian Data Layout originates from the 3D Gaussian Splatting (3DGS) framework. The PyTorch implementation is widely used in optimization pipelines, as seen in [S3, unofficial] and [S2, unofficial]. The C++ struct definition is used in high-performance rendering engines, as seen in [S1, unofficial]. The layout evolved to support differentiable rendering by using log-space parameters for scales and opacities, ensuring gradients flow correctly through positivity constraints [S3, unofficial].
+
+## Sources
+[S1] thomasantony/splat, https://github.com/thomasantony/splat, fetched 2026-10-27 (unofficial)
+[S2] cilix-ai/gs-embedding, https://github.com/cilix-ai/gs-embedding, fetched 2026-10-27 (unofficial)
+[S3] metin-yat/mini-splat, https://github.com/metin-yat/mini-splat, fetched 2026-10-28 (unofficial)
+[S4] NorahCadeJS/GAI-GS, https://github.com/NorahCadeJS/GAI-GS, fetched 2026-10-27 (unofficial)

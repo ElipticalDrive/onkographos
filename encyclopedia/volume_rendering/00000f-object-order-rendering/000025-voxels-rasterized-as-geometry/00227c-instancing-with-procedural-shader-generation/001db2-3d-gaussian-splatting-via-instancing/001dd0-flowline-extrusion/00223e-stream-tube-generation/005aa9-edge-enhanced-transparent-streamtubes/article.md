@@ -1,0 +1,101 @@
+# Edge Enhanced Transparent Streamtubes
+
+Also called: Reflection map transparency, Semi-transparent tubes with emphasised silhouettes
+
+## Overview
+Edge Enhanced Transparent Streamtubes is a hardware-accelerated rendering technique that represents fibre tracts as semi-transparent tubes with emphasised silhouettes [S1]. It improves the identification of individual fibre tracts and their 3D arrangement by revealing inner structures and softening silhouette edges [S1]. Unlike standard polygon transparency which lacks real-world attenuation effects, this method approximates the apparent change in transparency at silhouette edges of real objects, reducing visual cluttering and aliasing effects in densely packed streamlines [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Streamlines defining the path of fibre tracts.
+*   **Output:** Rasterized images of semi-transparent streamtubes with enhanced silhouette edges.
+
+**Data Structures:**
+*   **Streamtube Geometry:** A thin cylinder fitted around each streamline. The cross-section is not explicitly defined in the source text for this specific method (unlike the parent method's pentagonal shape), but the shading relies on Gouraud shading [S1].
+*   **Precomputed Transparency Texture:** A 1D or 2D texture encoding transparency as a function of the incidence angle. The shape of the gradient in this texture is adjustable to strengthen silhouette edges or increase overall opacity [S1].
+
+**Steps:**
+1.  **Generate Streamtube Geometry:** Fit a thin Gouraud-shaded cylinder around each streamline [S1].
+2.  **Precompute Transparency Texture:** Create a texture where the color/alpha value represents the desired transparency based on the incidence angle [S1].
+3.  **Configure Texture Coordinate Generation:** Enable `GL_REFLECTION_MAP` texture coordinate generation [S1].
+4.  **Compute Reflection Vector:** The hardware computes the reflection vector $R$ in eye coordinates for each fragment [S1].
+5.  **Map to Texture Coordinates:** Use the $x$ and $y$ components of $R$ to generate texture coordinates [S1].
+6.  **Transform Coordinate Range:** Apply a scale and translate in the texture matrix to convert the reflection vector coordinate range $[-1, 1]$ to the texture coordinate range $[0, 1]$ [S1].
+7.  **Sample and Render:** Sample the precomputed texture using the generated coordinates to determine the fragment's transparency and color, then render using standard alpha blending [S1].
+
+**Formulas and Parameters:**
+*   **Incidence Angle ($\theta$):** The angle between the normal vector $N$ at a point on the streamtube and the view vector $V$ (ray from the point to the eye) [S1].
+*   **Reflection Vector ($R$):** In eye coordinates, $R$ is computed by the hardware based on the normal and view direction [S1].
+*   **Coordinate Mapping:**
+    The reflection vector components $R_x, R_y$ range from $-1$ to $1$.
+    *   $0$ corresponds to face-on points.
+    *   $\pm 1$ corresponds to points with a normal near $45^\circ$.
+    *   $0$ corresponds to points on the silhouette [S1].
+    The texture coordinate $T$ is derived from $R$ via:
+    $$ T = \frac{R + 1}{2} $$
+    This is implemented via a texture matrix transformation [S1].
+*   **Transparency Function:** Let $T_{trans}(\alpha)$ be the transparency value sampled from the texture, where $\alpha$ is the incidence angle proxy provided by the reflection vector coordinates. The final alpha $\alpha_{final}$ is determined by this lookup [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization phase
+def setup_edge_enhanced_streamtubes():
+    # 1. Create streamtube geometry around streamlines
+    # Geometry consists of vertices with normals and eye-space positions
+    streamtube_mesh = fit_gouraud_cylinder(streamlines)
+    
+    # 2. Precompute transparency texture
+    # Texture stores transparency as a function of incidence angle
+    # The gradient shape is adjustable to control silhouette strength
+    transparency_texture = create_1d_texture_from_function(incidence_angle_to_transparency)
+    
+    # 3. Configure OpenGL/Hardware state
+    enable_texture_coord_generation(GL_REFLECTION_MAP)
+    
+    # 4. Set texture matrix to map reflection vector [-1, 1] to texture coords [0, 1]
+    # R_x, R_y are the x and y components of the reflection vector in eye coordinates
+    texture_matrix = Matrix4x4()
+    texture_matrix.scale(0.5, 0.5, 1.0)
+    texture_matrix.translate(0.5, 0.5, 0.0)
+    set_texture_matrix(texture_matrix)
+    
+    bind_texture(transparency_texture)
+    enable_texture(GL_TEXTURE_1D) # Or GL_TEXTURE_2D if using 2D lookup
+
+# Rendering phase
+def render_streamtubes(camera, light):
+    # For each fragment in the streamtube mesh:
+    # Hardware computes reflection vector R in eye coordinates
+    # R = reflect(-view_direction, normal)
+    
+    # Texture coordinates are generated from R.x and R.y
+    tex_coord = generate_tex_coord_from_reflection_vector(R)
+    
+    # Sample transparency from precomputed texture
+    # The texture encodes higher transparency near silhouette edges (where R approaches 0 or specific ranges)
+    alpha = sample_texture(transparency_texture, tex_coord)
+    
+    # Perform standard alpha blending
+    blend_with_background(alpha)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Visual Cluttering:** Densely packed streamtubes can result in aliasing and visual cluttering. This method reduces these problems without requiring user interaction or density changes [S1].
+*   **Standard Transparency Limitations:** Standard polygon transparency lacks real-world effects like attenuation and reflection at small incidence angles, and can reduce the impact of shading. This method approximates the apparent change in transparency that happens towards the silhouette edges of real objects such as glasses [S1].
+*   **Parameter Tuning:** The shape of the gradient in the precomputed texture must be carefully adjusted. Making silhouette edges too strong or tubes too opaque can negate the benefits of semi-transparency [S1].
+
+## Operating characteristics
+*   **Performance:** Hardware accelerated via `GL_REFLECTION_MAP` texture coordinate generation, avoiding per-fragment incidence angle calculations in the shader [S1].
+*   **Memory:** Requires storage for the precomputed transparency texture [S1].
+*   **Strengths:** Reveals inner structures without user interaction; improves identification of individual fibre tracts and 3D arrangement; reduces aliasing and visual cluttering in dense scenes [S1].
+*   **Limitations:** Approximates physical transparency rather than simulating it exactly; relies on hardware support for reflection map texture coordinate generation [S1].
+*   **When to use:** When visualizing densely packed fibre tracts (e.g., in DTI brain imaging) where individual tract identification and 3D arrangement perception are critical [S1].
+*   **When not to use:** When physically accurate light transport (attenuation, reflection) is required, or when hardware support for reflection map texture coordinate generation is unavailable [S1].
+
+## Background
+The method was presented by W. L. Wu, H. Linden, and T. Holmberg in the paper "DTI Volume Rendering Techniques for Visualising the Brain Anatomy" (CARS 2005) [S1]. It was developed to improve the perception of 3D arrangements of fibre tracts in Diffusion Tensor Imaging (DTI) data. The authors noted that standard streamline visualization suffers from aliasing and cluttering, and that simply reducing density loses information. This method was introduced alongside a second method using direct volume rendering with multiple colour and transparency look-up tables [S1].
+
+## Sources
+[S1] DTI Volume Rendering Techniques for Visualising the Brain Anatomy, https://www.cs.auckland.ac.nz/~burkhard/Publications/CARS05_WuenscheLindenHolmberg.pdf, fetched 2026-10-29

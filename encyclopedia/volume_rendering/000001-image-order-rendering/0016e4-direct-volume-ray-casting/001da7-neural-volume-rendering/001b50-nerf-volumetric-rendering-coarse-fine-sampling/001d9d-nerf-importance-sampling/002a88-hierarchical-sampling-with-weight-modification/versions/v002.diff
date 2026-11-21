@@ -1,0 +1,160 @@
+--- v001.md
++++ v002.md
+@@ -4,14 +4,14 @@
+ 
+ ## Overview
+-This method refines the sampling distribution along rays in neural volume rendering by generating additional sample points based on the alpha compositing weights of a coarse model. It addresses the limitation of standard importance sampling, which may miss thin structures or empty regions, by smoothing the weight distribution before sampling. It sets itself apart from standard NeRF importance sampling by applying a specific "blurpool" filter to the weights, ensuring a smoother upper envelope that encourages exploration of empty space while maintaining focus on high-weight regions.
++Hierarchical Sampling with Weight Modification is a technique to refine the sampling distribution along rays by using the weights from a coarse model to generate additional sample points, improving rendering quality with minimal overhead. It sets itself apart from standard NeRF importance sampling by applying a "blurpool" filter (max followed by blur) and a bias term to the coarse weights before generating fine samples, ensuring robust sampling in empty regions and smoother weight envelopes [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Coarse sample positions $\mathbf{t}^c$ along a ray, and the corresponding alpha compositing weights $w$ computed from the coarse model.
+-- Output: Refined fine sample positions $\mathbf{t}^f$.
++- Input: Coarse sample positions $\mathbf{t}^c$ along a ray, and their corresponding alpha compositing weights $w$ derived from the coarse neural volume rendering model.
++- Output: Refined fine sample positions $\mathbf{t}^f$ and modified weights $w'$ used for probability density estimation.
+ 
+ **Data Structures:**
+-- $w$: A 1D array of size $N_c$ (number of coarse samples), where $w_k$ is the weight of the $k$-th coarse sample.
+-- $w'$: A 1D array of size $N_c$, storing the modified weights.
++- $w$: A 1D array of size $N_c$ (number of coarse samples), containing the opacity weights $\alpha_k \sigma_k \Delta_k$ normalized such that $\sum w_k = 1$.
++- $w'$: A 1D array of size $N_c$, containing the modified weights.
+ 
+ **Parameters:**
+@@ -21,17 +21,15 @@
+ 
+ **Steps:**
+-1. **Coarse Sampling:** Produce coarse samples $\mathbf{t}^c$ using stratified sampling along the ray [S1].
+-2. **Weight Computation:** Compute the alpha compositing weights $w$ for the coarse samples using the coarse model [S1].
+-3. **Weight Modification:** Modify the weights $w$ to create a smoothed upper envelope:
+-   a. Apply a 2-tap max filter to $w$. For each index $k$, compute the local maximums:
+-      $$ m_k = \max(w_{k-1}, w_k) $$
+-      $$ m_{k+1} = \max(w_k, w_{k+1}) $$
+-      (Boundary conditions: For $k=0$, assume $w_{-1}=0$; for $k=N_c-1$, assume $w_{N_c}=0$) [G].
+-   b. Apply a 2-tap blur filter (averaging) to the result of the max filter:
+-      $$ w'_k = \frac{1}{2}(m_k + m_{k+1}) + \alpha $$
+-      Substituting the max filter results:
+-      $$ w'_k = \frac{1}{2}(\max(w_{k-1}, w_k) + \max(w_k, w_{k+1})) + \alpha \quad (18) $$
+-   c. Re-normalize $w'$ so that $\sum w'_k = 1$ [S1].
+-4. **Fine Sampling:** Sample fine sample positions $\mathbf{t}^f$ from the modified weights $w'$ using inverse transform sampling [S1].
++1. **Coarse Sampling:** Produce coarse sample positions $\mathbf{t}^c$ using stratified sampling along the ray segment [S1].
++2. **Weight Computation:** Compute the alpha compositing weights $w_k$ for each coarse sample $k$ based on the neural network's output at $\mathbf{t}^c$.
++3. **Weight Modification:** Apply the blurpool filter and bias to $w$ to produce $w'$:
++   - Apply a 2-tap max filter to $w$. For each index $k$, compute $m_k = \max(w_{k-1}, w_k)$ for $k>0$ and handle boundaries appropriately [S1].
++   - Apply a 2-tap blur (average) filter to the result of the max filter.
++   - Add the hyperparameter $\alpha$ to each element.
++   - The combined formula for the modified weight $w'_k$ is:
++     $$w'_k = \frac{1}{2}(\max(w_{k-1}, w_k) + \max(w_k, w_{k+1})) + \alpha$$
++     where boundary conditions for $w_{-1}$ and $w_{N_c}$ must be defined (e.g., clamping or zero-padding) [S1].
++   - Re-normalize $w'$ so that $\sum w'_k = 1$ [S1].
++4. **Fine Sampling:** Sample fine sample positions $\mathbf{t}^f$ from the distribution defined by $w'$ using inverse transform sampling [S1].
+ 
+ **Pseudocode:**
+@@ -39,68 +37,59 @@
+ def hierarchical_sampling_with_weight_modification(w, alpha=0.01):
+     """
+-    Modifies weights w using a 2-tap max filter followed by a 2-tap blur filter,
+-    adds alpha, and renormalizes.
+-    
+-    Args:
+-        w: List of floats, alpha compositing weights from coarse samples.
+-        alpha: Hyperparameter for empty region sampling.
+-        
+-    Returns:
+-        w_prime: List of floats, modified and normalized weights.
++    Modifies coarse weights w using blurpool and bias, then returns normalized weights.
++    w: list of floats, size N_c
++    alpha: float, bias term
++    Returns: list of floats, size N_c, normalized to sum to 1
+     """
+     n = len(w)
+-    w_prime = [0.0] * n
++    if n == 0:
++        return []
+     
+     # Step 1: 2-tap max filter
+-    # m[k] = max(w[k-1], w[k])
+-    # We need max(w[k-1], w[k]) and max(w[k], w[k+1]) for the blur step
++    # Handle boundaries: assume w[-1] = w[0] and w[n] = w[n-1] for simplicity, 
++    # or clamp. The source does not specify boundary handling explicitly [S1].
++    # We will use clamping to nearest neighbor for robustness [G].
++    max_filtered = []
++    for k in range(n):
++        w_prev = w[k-1] if k > 0 else w[0]
++        w_curr = w[k]
++        w_next = w[k+1] if k < n-1 else w[n-1]
++        
++        max_left = max(w_prev, w_curr)
++        max_right = max(w_curr, w_next)
++        
++        # Step 2: 2-tap blur (average)
++        blurred = 0.5 * (max_left + max_right)
++        max_filtered.append(blurred)
++        
++    # Step 3: Add alpha
++    biased = [x + alpha for x in max_filtered]
+     
+-    # Handle boundaries: assume w[-1] = 0 and w[n] = 0
+-    w_padded = [0.0] + w + [0.0]
++    # Step 4: Re-normalize
++    total = sum(biased)
++    if total == 0:
++        # Fallback to uniform if all weights are zero/negative (unlikely with alpha > 0)
++        return [1.0 / n] * n
+     
+-    max_vals = []
+-    for k in range(n):
+-        # w[k-1] is w_padded[k], w[k] is w_padded[k+1], w[k+1] is w_padded[k+2]
+-        left_max = max(w_padded[k], w_padded[k+1])
+-        right_max = max(w_padded[k+1], w_padded[k+2])
+-        max_vals.append((left_max + right_max) / 2.0)
+-        
+-    # Step 2: Add alpha
+-    for k in range(n):
+-        max_vals[k] += alpha
+-        
+-    # Step 3: Renormalize
+-    total = sum(max_vals)
+-    if total == 0:
+-        # Fallback to uniform if all weights are zero (empty ray)
+-        uniform = [1.0 / n] * n
+-        return uniform
+-        
+-    w_prime = [v / total for v in max_vals]
+-    
+-    return w_prime
++    normalized = [x / total for x in biased]
++    return normalized
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Empty Regions:** If all coarse weights are zero, the modified weights will be $\alpha$. Renormalization ensures a valid probability distribution.
+-- **Boundary Conditions:** The max filter requires neighbors outside the array. Assuming zero weights outside the ray segment is standard [G].
+-- **Precision:** Ensure floating-point precision is sufficient for small $\alpha$ values to avoid numerical instability during renormalization.
++- Boundary conditions for the max filter are not explicitly defined in the source [S1]. Implementers must choose a strategy (e.g., clamping, zero-padding, or reflection) [G].
++- If $\alpha$ is too small, empty regions may still be undersampled [S1].
++- Precision issues may arise if weights are very small; adding $\alpha$ helps mitigate this [S1].
+ 
+ ## Subtopics
+ 
+-### [L0-Sampler](7382-l0-sampler.md)
+-An enhanced sampling strategy that concentrates sampling points near the surface by shaping the weight function $w(t)$ to approximate the L0 distance form, replacing the piecewise constant interpolation of HVS with piecewise exponential functions.
+-
+ ## Operating characteristics
+-- **Time Complexity:** The weight modification step is $O(N_c)$, where $N_c$ is the number of coarse samples. The fine sampling step is $O(N_f \log N_c)$ or $O(N_f)$ with cumulative sum lookup. Overall, it adds minimal overhead compared to standard importance sampling.
+-- **Memory Complexity:** $O(N_c)$ to store the modified weights.
+-- **Measured Performance:** In mip-NeRF, using 128 coarse and 128 fine samples yields the same number of total MLP evaluations as NeRF (which uses 64 coarse and 128 fine, but with a separate fine MLP), providing a fair comparison [S1].
+-- **Strengths:** Ensures sampling in empty regions, reduces aliasing artifacts by smoothing the weight distribution.
+-- **Limitations:** The smoothing may slightly blur the distinction between high and low weight regions, potentially leading to less precise sampling in very complex scenes.
+-- **When to Use:** When using a single MLP for both coarse and fine sampling, or when anti-aliasing is a priority.
+-- **When Not to Use:** When computational budget is extremely tight and empty regions are not a concern.
++- **Time Complexity:** The weight modification step is $O(N_c)$ due to the linear pass of the max and blur filters. Fine sampling via inverse transform sampling is $O(N_f \log N_c)$ or $O(N_f)$ with precomputed cumulative sums [S1].
++- **Memory Complexity:** $O(N_c)$ to store the modified weights [S1].
++- **Performance:** Uses the same number of total MLP evaluations as standard NeRF (128 coarse + 128 fine) for fair comparison [S1].
++- **Strengths:** Ensures sampling in empty regions via $\alpha$; smooths weight envelope for better fine-stage sampling [S1].
++- **Limitations:** Requires careful tuning of $\alpha$; boundary handling is implementation-dependent [S1].
+ 
+ ## Background
+-This method was introduced in mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields [S1]. It builds on the NeRF importance sampling technique but modifies the weight distribution to better handle multiscale structures and anti-aliasing. The "blurpool" filter was adapted from image processing techniques [S1].
++Originated in mip-NeRF by Barron et al. (2021) [S1]. It builds on NeRF's hierarchical sampling but introduces the blurpool technique to improve the quality of fine-stage sampling [S1].
+ 
+ ## Sources

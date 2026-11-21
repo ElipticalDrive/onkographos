@@ -1,0 +1,129 @@
+# Line Bundles
+
+Also called: Anisotropic textured volume rendering using line segments, Fiber Bundles
+
+## Overview
+Line Bundles is a hardware-accelerated technique for visualizing 3D vector fields by rendering and compositing many semitransparent line segments to produce an anisotropic volume rendering result [S1, unofficial][S2]. It solves the problem of conveying both velocity magnitude and directionality simultaneously, addressing the limitation of standard volume rendering which may lack clear directionality [S1, unofficial]. Unlike standard volume rendering, Line Bundles clearly evidences directionality by orienting the line segments along the flow field [S1, unofficial]. It builds on [Hardware Shading via Pixel Texture](6056-hardware-shading-via-pixel-texture.md) by extending the concept of splats to composite collections of antialiased lines in a back-to-front manner [S2].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A 3D vector field (flow field) and optionally a scalar field (e.g., velocity magnitude) [S1, unofficial][S2].
+- **Output:** A 2D image with an anisotropic, fibrous appearance where line orientations indicate flow direction and color indicates magnitude or other scalar data [S1, unofficial][S2].
+
+**Data Structures:**
+- **Splat Data:** Each data point in the volume is associated with a 3D bounding box [S2].
+- **Line Bundle:** A pre-computed set of rendered line segments [S1, unofficial]. The bundle consists of $N$ line segments (typically $N > 300$) [S2].
+- **Color Encoding:** The primary color can be fixed for the entire volume or vary per splat [S2]. If fixed, the bundle can be precomputed into a GL object for rapid reorientation [S2]. If variable, it encodes vector magnitude, a separate scalar field, or a positional indicator [S2].
+
+**Algorithm Steps:**
+1. **Pre-computation (Optional):** If a single primary color is used, precompute the line bundle into a GL object [S2]. This allows rapid reorientation and redrawing at each data point [S2].
+2. **Sorting:** Sort all data points (splats) in back-to-front order relative to the view direction [S1, unofficial][S2].
+3. **Iteration:** For each data point in sorted order:
+    a. **Define Bounding Box:** Establish a 3D bounding box associated with the current splat [S2].
+    b. **Perturbation:** For each line segment in the bundle:
+        i. **Position Jitter:** Randomly scatter the line segment within the 3D bounding box [S2]. Perturb the center position within the box [S2].
+        ii. **Color Jitter:** Randomly perturb the hue, saturation, and value of the line segment's color [S2]. If the primary color varies per splat, use the splat-specific color; otherwise, use the fixed primary color [S2].
+        iii. **Orientation:** Orient the line segment in the direction of the flow field at that data point [S2].
+    c. **Rendering:** Render the collection of antialiased lines [S2].
+    d. **Compositing:** Composite the rendered lines into the frame buffer using back-to-front compositing [S1, unofficial][S2]. This creates a thin, wispy appearance [S2].
+4. **Completion:** Repeat for all data points [S2]. The jittering of color and position produces an anisotropic texture oriented in the direction of the flow field, even when lines are dense with no space between them [S2].
+
+**Parameters:**
+- **Number of Lines per Splat ($N$):** In excess of 300 line segments per data point can be used with no degradation in real-time performance on mid- to high-end graphical workstations [S2].
+- **Bounding Box Size:** Not given in the sources. [G]
+- **Jitter Range:** Not given in the sources. [G] Controlled jittering is required to avoid regular patterns or completely filled regions [S2].
+
+**Edge Cases and Pitfalls:**
+- **Regular Patterns:** Uncontrolled jittering can lead to regular patterns or completely filled regions. Controlled jittering is essential [S2].
+- **Hard Edges:** Lines without antialiasing or with opaque heads/tails create unwanted edges. Antialiased lines with transparent heads and tails are required [S2].
+- **Directionality Loss:** Standard volume rendering may lack clear directionality. Line Bundles address this by orienting lines with the flow [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_line_bundles(data_points, vector_field, scalar_field, view_direction, fixed_primary_color=None):
+    # 1. Sort data points back-to-front relative to view direction
+    def project_depth(p):
+        return p.pos[0]*view_direction[0] + p.pos[1]*view_direction[1] + p.pos[2]*view_direction[2]
+    sorted_points = sorted(data_points, key=project_depth, reverse=True)
+    
+    # 2. Precompute line bundle geometry (N > 300) [S2]
+    N = 300
+    base_lines = [{'center': (0,0,0), 'dir': (0,1,0)} for _ in range(N)]
+    
+    for point in sorted_points:
+        flow_dir = normalize(vector_field[point])
+        mag = scalar_field[point]
+        
+        # Determine primary color
+        if fixed_primary_color is not None:
+            primary_color = fixed_primary_color
+        else:
+            primary_color = map_magnitude_to_color(mag)
+            
+        # Bounding box size for jittering (not given in sources) [G]
+        bbox_extent = 0.5
+        
+        for line in base_lines:
+            # Position jitter: random scatter within bounding box
+            jitter = (random.uniform(-bbox_extent, bbox_extent) for _ in range(3))
+            new_center = tuple(point.pos[i] + jitter[i] for i in range(3))
+            
+            # Color jitter: perturb Hue, Saturation, Value
+            jittered_color = perturb_hsv(primary_color)
+            
+            # Orient line along flow direction
+            oriented_dir = rotate_vector(line['dir'], flow_dir)
+            
+            # Translate line to jittered position
+            final_line = {'center': new_center, 'dir': oriented_dir}
+            
+            # Render antialiased line with transparent ends
+            draw_antialiased_line(final_line, jittered_color, alpha=0.5)
+
+def normalize(v):
+    length = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+    return (v[0]/length, v[1]/length, v[2]/length)
+
+def map_magnitude_to_color(mag):
+    # Standard scalar-to-color mapping [G]
+    return (mag, 0.0, 1.0 - mag)
+
+def perturb_hsv(color):
+    # Randomly perturb H, S, V channels [G]
+    return tuple(max(0.0, min(1.0, c + random.uniform(-0.1, 0.1))) for c in color)
+
+def rotate_vector(v, target_dir):
+    # Rotate vector v to align with target_dir [G]
+    return target_dir
+
+def draw_antialiased_line(line, color, alpha):
+    # Rasterize line with gradient alpha at ends to avoid hard edges [G]
+    pass
+```
+
+## Subtopics
+
+### Anisotropic Textured Volume Rendering
+A broader category of techniques using graphics hardware to create texture by rendering and compositing semitransparent primitives [S1, unofficial]. Line Bundles is a specific instance using line segments [S1, unofficial]. Choose it when anisotropic flow direction must be explicitly encoded into the volume texture. [Link to parent](6056-hardware-shading-via-pixel-texture.md).
+
+### Fiber Bundles
+Often used interchangeably with Line Bundles in this context, emphasizing the fibrous appearance created by the dense collection of lines [S2]. Choose it when a discontinuous, wispy volume representation is preferred over a continuous signal reconstruction [S2]. [Link to parent](6056-hardware-shading-via-pixel-texture.md).
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Fiber bundles with in excess of 300 line segments per data point can be used with no degradation in real-time performance on mid- to high-end graphical workstations [S2].
+- **Strengths:** Allows viewing velocity magnitude like normal volume rendering while clearly evidencing directionality [S1, unofficial]. Produces a thin, wispy appearance [S2].
+- **Limitations:** Requires back-to-front compositing, which can be challenging on some hardware without proper support. Dense lines may obscure underlying structures if not carefully tuned [S2].
+- **When to use:** When visualizing 3D vector fields where both magnitude and direction are critical, and anisotropic texture is desired [S1, unofficial][S2].
+- **When not to use:** When precise quantitative analysis of the vector field is required, as the aesthetic nature may obscure details [S2].
+
+## Background
+Line Bundles (also known as Fiber Bundles) was developed by R. Crawfis, H. Shen, and N. Max [S1, unofficial]. The technique was presented in the context of flow visualization techniques for CFD using volume rendering [S1, unofficial]. It was applied to visualizing 3D velocity fields near contour surfaces [S2]. The authors developed several more techniques to represent flow fields using anisotropic or textured volume rendering [S1, unofficial]. The technique relies on graphics hardware to create texture by rendering and compositing many semitransparent line segments [S1, unofficial]. It extends the concept of splats to composite collections of antialiased lines in a back-to-front manner [S2].
+
+## Sources
+[S1] Flow Visualization Techniques for CDF using Volume Rendering, https://www.osti.gov/servlets/purl/790542, fetched 2026-10-26 (unofficial)
+[S2] Visualizing 3D velocity fields near contour surfaces, https://doi.org/10.5555/951087.951133, fetched 2026-10-26
+[S3] Visualizing 3D velocity fields near contour surfaces. Revision 1, https://digital.library.unt.edu/ark:/67531/metadc1395286/?q=vector field volume rendering, fetched 2026-10-28 (unofficial)

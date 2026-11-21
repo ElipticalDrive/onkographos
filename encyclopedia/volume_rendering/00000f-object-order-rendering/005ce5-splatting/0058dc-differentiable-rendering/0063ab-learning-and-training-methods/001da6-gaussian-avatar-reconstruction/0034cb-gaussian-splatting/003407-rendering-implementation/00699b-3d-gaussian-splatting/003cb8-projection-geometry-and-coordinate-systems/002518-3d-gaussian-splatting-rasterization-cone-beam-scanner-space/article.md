@@ -1,0 +1,231 @@
+# 3D Gaussian Splatting Rasterization (Cone-Beam/Scanner Space)
+
+Also called: Cone-beam Gaussian Rasterization, Radiative Gaussian Projection, Transformation module in X-ray rasterization, X-ray Rasterization
+
+## Overview
+This method renders X-ray projections by integrating 3D Gaussian primitives along ray paths, resulting in a sum of 2D Gaussians rather than the alpha-compositing used in natural light imaging [S1]. It adapts the standard 3D Gaussian Splatting pipeline for cone-beam CT simulation by transforming Gaussians from world space to a scanner-specific ray space where viewing rays are parallel to the principal axis, enabling analytical integration [S1]. Unlike standard splatting which learns integrated density in the 2D image plane, this method preserves the actual 3D density, avoiding integration bias during tomographic reconstruction [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $M$ 3D Gaussians defined by mean position $\mathbf{p}_i$, covariance $\boldsymbol{\Sigma}_i$, and density $\rho_i$ in world space; scanner parameters including source-to-detector distance $LSD$, source-to-object distance $LSO$, rotation angle $\theta$, and detector physical dimensions $(D_x, D_y)$ [S1].
+*   **Outputs:** A 2D projection image where each pixel value is the sum of contributions from 2D Gaussians derived from the 3D inputs [S1].
+
+**Data Structures:**
+*   **3D Gaussian Primitive:** Stores $\mathbf{p}_i \in \mathbb{R}^3$, $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite), and scalar density $\rho_i$ [S1].
+*   **Scanner Parameters:** Scalar $LSD$, $LSO$, $\theta$; vector $(D_x, D_y)$ [S1].
+*   **Ray Space Gaussian:** Transformed position $\tilde{\mathbf{p}}_i \in \mathbb{R}^3$, transformed covariance $\tilde{\boldsymbol{\Sigma}}_i \in \mathbb{R}^{3 \times 3}$ [S1].
+*   **2D Gaussian Primitive:** Projected position $\hat{\mathbf{p}}_i \in \mathbb{R}^2$, projected covariance $\hat{\boldsymbol{\Sigma}}_i \in \mathbb{R}^{2 \times 2}$, and projected density $\hat{\rho}_i \in \mathbb{R}$ [S1].
+
+**Steps:**
+
+1.  **Define Scanner Geometry:**
+    Calculate the Field of View (FOV) based on the detector size and source-to-detector distance [S1]:
+    $$
+    \text{FOV}_x = 2 \cdot \arctan\left(\frac{D_x}{2 \cdot LSD}\right), \quad \text{FOV}_y = 2 \cdot \arctan\left(\frac{D_y}{2 \cdot LSD}\right)
+    $$
+    Define the scanner space with the origin at the X-ray source and the z-axis pointing to the projection center [S1].
+
+2.  **World-to-Scanner Transformation:**
+    Construct the transformation matrix $\mathbf{T}$ to map points from world space to scanner space [S1]:
+    $$
+    \mathbf{T} = \begin{bmatrix} \mathbf{W} & \mathbf{t} \\ \mathbf{0}^\top & 1 \end{bmatrix}
+    $$
+    where $\mathbf{W}$ and $\mathbf{t}$ are defined as [S1]:
+    $$
+    \mathbf{W} = \begin{bmatrix} 1 & 0 & 0 \\ 0 & -\cos\theta & -\sin\theta \\ 0 & \sin\theta & -\cos\theta \end{bmatrix}, \quad \mathbf{t} = \begin{bmatrix} 0 \\ LSO \\ 0 \end{bmatrix}
+    $$
+    Apply this transformation to the Gaussian mean $\mathbf{p}_i$ to get the intermediate position $\mathbf{p}'_i$ (implicitly part of the projective mapping $\phi$) [S1].
+
+3.  **Local Affine Approximation (Ray Space Transformation):**
+    For each Gaussian, compute the local Jacobian matrix $\mathbf{J}_i$ of the projective mapping $\phi$ at the Gaussian's position [S1]. The method relies on a local affine approximation using the Jacobian $\mathbf{J}_i$ [S1]. Transform the covariance $\boldsymbol{\Sigma}_i$ into ray space $\tilde{\boldsymbol{\Sigma}}_i$ using the viewing transformation $\mathbf{W}$ and the local Jacobian $\mathbf{J}_i$ [S1]:
+    $$
+    \tilde{\boldsymbol{\Sigma}}_i = \mathbf{J}_i \mathbf{W} \boldsymbol{\Sigma}_i \mathbf{W}^\top \mathbf{J}_i^\top
+    $$
+    The new position in ray space is $\tilde{\mathbf{p}}_i = \phi(\mathbf{p}_i)$ [S1].
+
+4.  **Projection to 2D:**
+    Obtain the 2D Gaussian parameters by dropping the third rows and columns of the ray space position $\tilde{\mathbf{p}}_i$ and covariance $\tilde{\boldsymbol{\Sigma}}_i$ [S1]:
+    $$
+    \hat{\mathbf{p}}_i = [\tilde{\mathbf{p}}_i[0], \tilde{\mathbf{p}}_i[1]]^\top
+    $$
+    $$
+    \hat{\boldsymbol{\Sigma}}_i = \begin{bmatrix} \tilde{\boldsymbol{\Sigma}}_i[0][0] & \tilde{\boldsymbol{\Sigma}}_i[0][1] \\ \tilde{\boldsymbol{\Sigma}}_i[1][0] & \tilde{\boldsymbol{\Sigma}}_i[1][1] \end{bmatrix}
+    $$
+
+5.  **Density Scaling:**
+    Calculate the projected density $\hat{\rho}_i$ by scaling the original 3D density $\rho_i$ with a factor $\mu_i$ derived from the determinants of the covariances [S1]. The density scaling factor $\mu_i$ involves the square root of the ratio of determinants [S1]:
+    $$
+    \mu_i = \sqrt{\frac{2\pi |\tilde{\boldsymbol{\Sigma}}_i|}{|\hat{\boldsymbol{\Sigma}}_i|}}
+    $$
+    $$
+    \hat{\rho}_i = \mu_i \rho_i
+    $$
+    This step ensures the method assigns the actual 3D density to the kernel, unlike standard 3DGS which learns integrated density [S1].
+
+6.  **Rasterization:**
+    Render the projection by summing the 2D Gaussians [S1]. The pixel value $I_r(\mathbf{r})$ for a ray $\mathbf{r}$ is the integral of the 3D Gaussians along the ray, which analytically simplifies to the sum of 2D Gaussians [S1]:
+    $$
+    I_r(\mathbf{r}) = \sum_{i=1}^{M} \int G_{3i}(\mathbf{r}(t)|\rho_i, \mathbf{p}_i, \boldsymbol{\Sigma}_i) dt = \sum_{i=1}^{M} G_{2i}(\hat{\mathbf{x}}|\hat{\rho}_i, \hat{\mathbf{p}}_i, \hat{\boldsymbol{\Sigma}}_i)
+    $$
+    where $G_{2i}$ is the normalized 2D Gaussian distribution [S1]:
+    $$
+    G_{2i}(\hat{\mathbf{x}}) = \frac{1}{2\pi |\hat{\boldsymbol{\Sigma}}_i|^{1/2}} \exp\left(-\frac{1}{2}(\hat{\mathbf{x}} - \hat{\mathbf{p}}_i)^\top \hat{\boldsymbol{\Sigma}}_i^{-1} (\hat{\mathbf{x}} - \hat{\mathbf{p}}_i)\right)
+    $$
+    The contribution of each Gaussian to the image is $\hat{\rho}_i G_{2i}(\hat{\mathbf{x}})$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_fov(detector_width, detector_height, source_to_detector_dist):
+    """Computes the Field of View angles for the scanner [S1]."""
+    fov_x = 2 * np.arctan(detector_width / (2 * source_to_detector_dist))
+    fov_y = 2 * np.arctan(detector_height / (2 * source_to_detector_dist))
+    return fov_x, fov_y
+
+def get_transformation_matrix(rotation_angle, source_to_object_dist):
+    """Constructs the transformation matrix T from world space to scanner space [S1]."""
+    cos_theta = np.cos(rotation_angle)
+    sin_theta = np.sin(rotation_angle)
+    
+    W = np.array([
+        [1, 0, 0],
+        [0, -cos_theta, -sin_theta],
+        [0, sin_theta, -cos_theta]
+    ])
+    
+    t = np.array([0, source_to_object_dist, 0])
+    
+    T = np.eye(4)
+    T[:3, :3] = W
+    T[:3, 3] = t
+    return T, W
+
+def get_jacobian(p_world, T, fov_x, fov_y):
+    """
+    Computes the local Jacobian matrix J_i for the projective mapping [S1].
+    [G] The source references Eq. 29 in [69] for J_i but does not provide the explicit formula.
+    A standard pinhole projection Jacobian scales by 1/z along the viewing axis.
+    """
+    p_homo = np.append(p_world, 1)
+    p_ray_homo = T @ p_homo
+    p_ray = p_ray_homo[:3]
+    z = p_ray[2]
+    
+    # Focal lengths derived from FOV and detector size
+    focal_x = detector_width / (2 * np.tan(fov_x / 2))
+    focal_y = detector_height / (2 * np.tan(fov_y / 2))
+    
+    # Standard perspective projection Jacobian for ray space
+    J = np.array([
+        [focal_x / z, 0, 0],
+        [0, focal_y / z, 0],
+        [0, 0, 0]
+    ])
+    return J
+
+def rasterize_cone_beam(gaussians, T, W, fov_x, fov_y, detector_width, detector_height):
+    """
+    Rasterizes 3D Gaussians into a 2D X-ray projection [S1].
+    """
+    projected_gaussians = []
+    
+    for g in gaussians:
+        p_i = g['position']
+        Sigma_i = g['covariance']
+        rho_i = g['density']
+        
+        # Step 2: World to Scanner
+        p_homo = np.append(p_i, 1)
+        p_ray_homo = T @ p_homo
+        p_ray = p_ray_homo[:3]
+        
+        # Step 3: Local Affine Approximation
+        J_i = get_jacobian(p_i, T, fov_x, fov_y)
+        Sigma_tilde = J_i @ W @ Sigma_i @ W.T @ J_i.T
+        
+        # Step 4: Projection to 2D
+        p_hat = p_ray[:2]
+        Sigma_hat = Sigma_tilde[:2, :2]
+        
+        # Step 5: Density Scaling
+        det_Sigma_tilde = np.linalg.det(Sigma_tilde)
+        det_Sigma_hat = np.linalg.det(Sigma_hat)
+        
+        if det_Sigma_tilde <= 0 or det_Sigma_hat <= 0:
+            continue
+            
+        mu_i = np.sqrt(2 * np.pi * det_Sigma_tilde / det_Sigma_hat)
+        rho_hat = mu_i * rho_i
+        
+        projected_gaussians.append({
+            'position': p_hat,
+            'covariance': Sigma_hat,
+            'density': rho_hat
+        })
+        
+    return projected_gaussians
+
+def sum_2d_gaussians(projected_gaussians, image_shape, fov_x, fov_y, detector_width, detector_height):
+    """
+    Sums the 2D Gaussians to form the final image [S1].
+    """
+    image = np.zeros(image_shape)
+    focal_x = detector_width / (2 * np.tan(fov_x / 2))
+    focal_y = detector_height / (2 * np.tan(fov_y / 2))
+    
+    for g in projected_gaussians:
+        p = g['position']
+        Sigma = g['covariance']
+        rho = g['density']
+        
+        # Compute bounding box for the 2D Gaussian
+        inv_Sigma = np.linalg.inv(Sigma)
+        eigenvalues = np.linalg.eigvalsh(Sigma)
+        radius = 3.0 * np.sqrt(np.max(eigenvalues))
+        
+        x_min, x_max = int(p[0] - radius), int(p[0] + radius)
+        y_min, y_max = int(p[1] - radius), int(p[1] + radius)
+        
+        x_min, y_min = max(0, x_min), max(0, y_min)
+        x_max, y_max = min(image_shape[1], x_max), min(image_shape[0], y_max)
+        
+        for y in range(y_min, y_max):
+            for x in range(x_min, x_max):
+                diff = np.array([x - p[0], y - p[1]])
+                exponent = -0.5 * diff @ inv_Sigma @ diff
+                val = (1.0 / (2 * np.pi * np.sqrt(np.linalg.det(Sigma)))) * np.exp(exponent)
+                image[y, x] += rho * val
+                
+    return image
+```
+
+**Edge Cases and Pitfalls:**
+*   **Integration Bias:** If standard 3DGS is used for X-ray projection, learning the integrated density in the 2D image plane leads to inconsistency in density retrieval because different views yield different results for the same 3D density [S1]. This method solves this by assigning the actual 3D density to the kernel and forwardly computing the 2D projection [S1].
+*   **Determinant Calculation:** The density scaling factor $\mu_i$ involves the square root of the ratio of determinants [S1]. If the covariance matrices are singular or near-singular, this can lead to numerical instability [S1].
+*   **Jacobian Approximation:** The method relies on a local affine approximation using the Jacobian $\mathbf{J}_i$ [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S1].
+*   **Memory Complexity:** Not given in the sources [S1].
+*   **Measured Performance:** Not given in the sources [S1].
+*   **Strengths:**
+    *   Enables analytical integration of 3D Gaussians for X-ray projections, avoiding the need for ray marching or sampling [S1].
+    *   Preserves the actual 3D density, allowing for consistent tomographic reconstruction without integration bias [S1].
+    *   Adapts the efficient rasterization pipeline of 3DGS to cone-beam geometry [S1].
+*   **Limitations:**
+    *   Relies on the local affine approximation, which may be less accurate for large Gaussians or highly curved projection mappings [S1].
+    *   Requires specific scanner parameters (LSD, LSO, $\theta$) and geometry setup [S1].
+*   **When to use:** When simulating or reconstructing cone-beam CT scans using 3D Gaussian representations [S1].
+*   **When not to use:** For standard natural light imaging where alpha-compositing is appropriate, or when high accuracy is required for very large Gaussians where the affine approximation fails [S1].
+
+## Background
+*   **Origin:** The method is introduced in "R$^2$-Gaussian: Rectifying Radiative Gaussian Splatting for Tomographic Reconstruction" [S1].
+*   **History:** It builds upon the standard 3D Gaussian Splatting framework [23] and the Ewa Splatting technique [69] for handling anisotropic splats [S1]. It adapts these for the specific geometry of cone-beam X-ray scanners, which resemble a pinhole camera model [S1].
+*   **Usage:** Used in the context of tomographic reconstruction from X-ray projections, specifically for rectifying radiative Gaussian splatting [S1].
+
+## Sources
+[S1] R$^2$-Gaussian: Rectifying Radiative Gaussian Splatting for Tomographic Reconstruction, https://arxiv.org/abs/2405.20693v2, fetched 2026-10-26

@@ -1,0 +1,217 @@
+--- v002.md
++++ v003.md
+@@ -4,127 +4,115 @@
+ 
+ ## Overview
+-ZeroGS is a pipeline for training 3D Gaussian Splatting (3DGS) from hundreds of unposed and unordered images without requiring Structure-from-Motion (SfM) tools like COLMAP [S1, unofficial]. It leverages a pretrained foundation model (Spann3R) as a neural scene representation and employs an incremental training buffer to progressively register images [S1, unofficial]. Unlike sibling methods that predict sparse points or align dense pointmaps globally, ZeroGS regresses points in the global coordinate frame of a seed image and refines poses via a point-to-camera ray consistency loss [S1, unofficial].
++ZeroGS is a pipeline for training 3D Gaussian Splatting (3DGS) from hundreds of unposed and unordered images without requiring Structure-from-Motion (SfM) tools like COLMAP [S1, unofficial]. It leverages a pretrained foundation model (Spann3R) as a neural scene representation and employs an incremental training buffer to progressively register images and refine camera poses [S1, unofficial]. It differs from its siblings by regressing points in a global coordinate frame without aligning dense pairwise pointmaps, and by using a rendering loss for optimization rather than reprojection error [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of $N$ unposed, unordered images $\{I_i\}_{i=1}^N$.
+-*   **Output:** A set of 3D Gaussians $\mathcal{G}$ and refined camera poses for all registered images.
++- **Inputs:** A set of unposed, unordered images $\{I_k\}$. One seed image is selected to initialize the global coordinate frame.
++- **Outputs:** A set of 3D Gaussians $\{G_k\}$, refined camera poses, and rendered images.
+ 
+ **Data Structures:**
+-*   **Training Buffer:** A collection of registered images and their associated poses/3D Gaussians.
+-*   **Spatial Feature Memory:** Used by Spann3R to store fused features for global coordinate regression [S1, unofficial].
++- **Training Buffer:** A collection of registered images and their associated poses used to finetune the neural model.
++- **Spatial Feature Memory:** Used by Spann3R to store fused features for global coordinate prediction [S1, unofficial].
+ 
+-**Method Steps:**
++**Preliminaries (Spann3R/DUSt3R Architecture):**
++Given an image pair $(I_i, I_j)$, the network predicts pointmaps $X_{i,j}$ (image $j$'s points in camera $i$'s frame) and $X_{j,i}$ (image $i$'s points in camera $j$'s frame) [S1, unofficial].
++1. **Encoding:** A Vision Transformer (ViT) $V$ encodes both images into shared features:
++   $$f_{ie}, f_{je} = V(I_i, I_j)$$
++2. **Decoding:** Reference decoder $D_{ref}$ and target decoder $D_{tgt}$ process the features:
++   $$f_{id} = D_{ref}(f_{ie}, f_{je})$$
++   $$f_{jd} = D_{tgt}(f_{je}, f_{ie})$$
++3. **Projection:** Projection heads $H_{ref}$ and $H_{tgt}$ map decoder features to pointmaps:
++   $$X_{i,i}, X_{j,i} = H_{ref}(f_{id}), H_{tgt}(f_{jd})$$
++   Spann3R extends this to predict pointmaps $(X_{i,g}, X_{j,g})$ in a global coordinate frame using a fused feature $f_t^G$ from spatial feature memory [S1, unofficial].
+ 
+-1.  **Seed Initialization:** Initialize the pipeline using a pretrained Spann3R model and a single seed image $I_{seed}$ [S1, unofficial]. This differs from standard incremental SfM which initializes from an image pair [S1, unofficial].
++**Algorithm Steps:**
++1. **Initialization:** Initialize the pipeline from the pretrained Spann3R model and a single seed image, fixing its pose as the global coordinate origin [S1, unofficial].
++2. **Batch Registration:** Register a batch of unregistered images simultaneously (rather than individually) using the current model state.
++   - Use Spann3R to predict 3D Gaussians $G_k$ and pointmaps $X_k$ for the image pair (seed/registered vs. new) [S1, unofficial].
++   - Compute coarse camera poses for new images using RANSAC and a Perspective-n-Point (PnP) solver on 2D-3D correspondences derived from the predicted pointmaps [S1, unofficial].
++3. **Pose Refinement:** Refine the coarse camera poses by minimizing a point-to-camera ray consistency loss between the predicted 3D points and camera centers across multiple views [S1, unofficial].
++4. **Rendering and Loss:** Rasterize the 3D Gaussians using the refined poses to render images. Compute an RGB loss between rendered and ground-truth images.
++5. **Back-propagation:** Back-propagate the RGB loss to update the neural scene representation (Spann3R weights) [S1, unofficial].
++6. **Buffer Update:** At the end of each training epoch, update the training buffer by registering new images that were successfully processed in the current batch [S1, unofficial].
++7. **Iteration:** Repeat steps 2–6 until all images are registered or no more images can be registered [S1, unofficial].
+ 
+-2.  **Batch Registration:** Register a batch of unregistered images $\{I_{new}\}$ against the current training buffer.
+-    *   For each image pair $(I_{ref}, I_{new})$ where $I_{ref}$ is in the buffer, use Spann3R to predict 3D Gaussians $\mathcal{G}$ and pointmaps $X$ [S1, unofficial].
+-    *   The Spann3R network computes features using a Vision Transformer (ViT) shared encoder $V$ and transformer decoders $D_{ref}, D_{tgt}$:
+-        $$ f_{ie}, f_{je} = V(I_i, I_j) $$
+-        $$ f_{id} = D_{ref}(f_{ie}, f_{je}), \quad f_{jd} = D_{tgt}(f_{je}, f_{ie}) $$
+-        $$ X_{i,i}, X_{j,i} = H_{ref}(f_{id}), H_{tgt}(f_{jd}) $$
+-        where $V$ is the ViT shared encoder, $D_{ref}/D_{tgt}$ are reference/target transformer decoders, $H_{ref}/H_{tgt}$ are projection heads mapping decoder features to pointmaps, and $X_{i,j}$ is the pointmap of image $j$ in camera $i$'s coordinate frame [S1, unofficial].
+-    *   Unlike DUSt3R, which aligns pairwise pointmaps to a global frame post-processing (time-consuming and memory-intensive), Spann3R predicts pointmaps $X_{i,g}, X_{j,g}$ directly in the global coordinate frame of the seed image using a feature fusion mechanism and spatial feature memory [S1, unofficial].
++**Parameters:**
++- **Hardware:** Runs on a 24GB consumer-level GPU for hundreds of images [S1, unofficial].
++- **Batch Size:** Images are registered in batches, not individually [S1, unofficial].
+ 
+-3.  **Coarse Pose Estimation:** Compute initial camera poses for the new images using RANSAC and a Perspective-n-Point (PnP) solver on the 2D-3D correspondences derived from the predicted pointmaps [S1, unofficial].
+-
+-4.  **Pose Refinement:** Refine the coarse camera poses by minimizing a point-to-camera ray consistency loss. This loss minimizes the distance between the predicted 3D points and the camera centers across multiple views [S1, unofficial].
+-
+-5.  **Scene Optimization:** Rasterize the 3D Gaussians using the refined camera poses to render images. Compute an RGB loss (e.g., L1) between rendered and input images. Back-propagate gradients to update the model parameters [S1, unofficial]. Note that while SfM typically optimizes scenes via reprojection error, ZeroGS optimizes using a rendering loss [S1, unofficial].
+-
+-6.  **Buffer Update:** At the end of each training epoch, update the training buffer by registering new images that meet the registration criteria [S1, unofficial].
+-
+-7.  **Iteration:** Repeat steps 2-6 until all images are registered or no more images can be registered [S1, unofficial].
++**Edge Cases and Pitfalls:**
++- **Memory Limits:** Aligning dense pairwise pointmaps to a global frame (as done in DUSt3R post-processing for >2 images) is time-consuming and can exceed GPU memory limits [S1, unofficial]. ZeroGS avoids this by regressing directly in the global frame of the seed image [S1, unofficial].
++- **Textureless Areas:** 3DGS initialization from textureless areas can struggle to identify Gaussians; the neural initialization helps mitigate this [S1, unofficial].
+ 
+ **Pseudocode:**
++```python
++def ZeroGS(images, seed_image_index):
++    # Initialize global coordinate frame with seed image
++    seed_pose = IdentityPose()
++    model = LoadPretrainedSpann3R()
++    training_buffer = {seed_image_index: seed_pose}
++    registered = {seed_image_index}
++    unregistered = set(range(len(images))) - registered
+ 
+-```python
+-def zero_gs_pipeline(images, pretrained_spann3r, seed_image):
+-    """
+-    ZeroGS pipeline for training 3DGS from unposed images.
+-    
+-    Args:
+-        images: List of all input images.
+-        pretrained_spann3r: Pretrained Spann3R model.
+-        seed_image: One image to initialize the global coordinate frame.
+-        
+-    Returns:
+-        Gaussians: Set of 3D Gaussians.
+-        Poses: Camera poses for all registered images.
+-    """
+-    # Initialize training buffer with seed image
+-    buffer = {seed_image: {'pose': Identity(), 'gaussians': None}}
+-    all_registered = {seed_image}
+-    unregistered = images - all_registered
+-    
+-    # Initialize spatial feature memory for global frame
+-    memory = initialize_memory(seed_image)
+-    
+     while unregistered:
+         # Select a batch of unregistered images
+-        batch = select_batch(unregistered, buffer)
++        batch = SelectBatch(unregistered, training_buffer)
+         
+-        new_registered = set()
++        # Predict pointmaps and Gaussians for pairs (buffer images, batch images)
++        # Spann3R predicts in global frame relative to seed
++        pointmaps, gaussians = model.Predict(images[batch], images[training_buffer.keys()])
+         
+-        for img_new in batch:
+-            # Find reference images in buffer for correspondence
+-            refs = select_references(img_new, buffer)
++        # Coarse pose estimation via RANSAC + PnP
++        coarse_poses = []
++        for img_idx in batch:
++            # 2D-3D correspondences from pointmaps
++            correspondences = GetCorrespondences(pointmaps[img_idx], images[training_buffer.keys()])
++            pose = SolvePnP(correspondences)
++            coarse_poses.append(pose)
++        
++        # Refine poses using point-to-camera ray consistency loss
++        refined_poses = RefinePoses(coarse_poses, gaussians, training_buffer)
++        
++        # Render and compute loss
++        rendered_images = Rasterize(gaussians, refined_poses)
++        rgb_loss = ComputeRGBLoss(rendered_images, images[batch])
++        
++        # Update model weights
++        model.Backpropagate(rgb_loss)
++        
++        # Update buffer and sets
++        for i, img_idx in enumerate(batch):
++            training_buffer[img_idx] = refined_poses[i]
++            registered.add(img_idx)
++            unregistered.discard(img_idx)
+             
+-            for img_ref in refs:
+-                # Predict pointmaps and Gaussians using Spann3R
+-                # Spann3R outputs pointmaps in global frame of seed image
+-                gaussians, pointmaps = pretrained_spann3r.predict(
+-                    img_ref, img_new, memory
+-                )
+-                
+-                # Estimate coarse pose using RANSAC + PnP
+-                coarse_pose = ransac_pnp(img_ref, img_new, pointmaps)
+-                
+-                # Refine pose using point-to-camera ray consistency loss
+-                refined_pose = refine_pose(
+-                    img_ref, img_new, pointmaps, coarse_pose
+-                )
+-                
+-                # Store registration
+-                buffer[img_new] = {
+-                    'pose': refined_pose,
+-                    'gaussians': gaussians
+-                }
+-                new_registered.add(img_new)
+-                
+-                # Update memory with new features
+-                update_memory(memory, img_new, gaussians)
+-        
+-        # Optimize scene with rendering loss
+-        optimize_scene(buffer, pretrained_spann3r)
+-        
+-        # Update sets
+-        all_registered.update(new_registered)
+-        unregistered -= new_registered
+-        
+-        if not new_registered:
+-            break
+-            
+-    return buffer['gaussians'], buffer['poses']
++    return gaussians, training_buffer
+ ```
+ 
+-**Parameters:**
+-*   **GPU Memory:** Runs on a 24GB consumer-level GPU for hundreds of images [S1, unofficial].
++## Subtopics
+ 
+-**Pitfalls:**
+-*   **Memory Limits:** Aligning dense pointmaps to a global frame for >2 images (as done in DUSt3R post-processing) is time-consuming and can exceed GPU memory limits [S1, unofficial]. ZeroGS avoids this by using Spann3R's global frame regression.
+-*   **Textureless Areas:** 3DGS can struggle to identify Gaussians in textureless areas; the incremental registration and foundation model priors help mitigate this [S1, unofficial].
++### AnySplat Pipeline
++A pipeline for generalizable 3DGS. [AnySplat Pipeline](12847-anysplat-pipeline.md)
++
++### FineSplat
++Focuses on fine-grained details in 3DGS. [FineSplat](15257-finesplat.md)
++
++### SparSplat
++Uses sparse representations for efficiency. [SparSplat](15813-sparsplat.md)
++
++### HFGaussian
++High-frequency Gaussian splatting. [HFGaussian](16422-hfgaussian.md)
++
++### Splatt3R
++Generalizable 3DGS from few images. [Splatt3R](16423-splatt3r.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not explicitly given, but incremental registration and batch processing are designed for scalability to hundreds of images [S1, unofficial].
+-*   **Memory Complexity:** Fits within 24GB consumer GPU memory for hundreds of images [S1, unofficial].
+-*   **Strengths:** Handles unposed, unordered images without COLMAP; recovers more accurate poses than state-of-the-art pose-free NeRF/3DGS methods; renders higher quality images than 3DGS with COLMAP poses [S1, unofficial].
+-*   **Limitations:** Requires a pretrained foundation model (Spann3R); finetuning foundation models is challenging due to lack of ground-truth 3D points in unseen scenes [S1, unofficial].
+-*   **When to use:** When camera poses are unavailable and the dataset is large/unordered.
+-*   **When not to use:** When high-precision COLMAP poses are already available, or when GPU memory is severely constrained (<24GB) for very large scenes.
++- **Time and Memory Complexity:** Runs on a 24GB consumer-level GPU for hundreds of images [S1, unofficial]. Avoids the memory explosion of global alignment of dense pointmaps seen in DUSt3R [S1, unofficial].
++- **Measured Performance:** Evaluated on LLFF, MipNeRF360, and Tanks-and-Temples datasets. Recovers more accurate camera poses than state-of-the-art pose-free NeRF/3DGS methods and renders higher quality images than 3DGS with COLMAP poses [S1, unofficial].
++- **Strengths:** Handles unposed/unordered images; no COLMAP required; scalable to hundreds of images; higher fidelity than pose-free baselines.
++- **Limitations:** Relies on pretrained foundation models (Spann3R/DUSt3R); initialization from a single seed image fixes the gauge freedom [S1, unofficial].
+ 
+ ## Background
+-ZeroGS was proposed to address the limitation of traditional Structure-from-Motion (SfM) which requires posed images and limits completeness [S1, unofficial]. It builds on [Feed-forward and Generalizable Prediction](15832-feed-forward-and-generalizable-prediction.md) by using a pretrained foundation model (Spann3R, based on DUSt3R) as the neural scene representation [S1, unofficial]. It differs from [ACE0](12847-anysplat-pipeline.md) by predicting dense pointmaps and 3D Gaussians (vs. sparse), using transformers (vs. CNN/MLP), and taking image pairs as input batches (vs. pixels from multiple views) [S1, unofficial]. It differs from [InstantSplat](12847-anysplat-pipeline.md) and [Splatt3R](16423-splatt3r.md) by regressing points in the global coordinate frame of a seed image without aligning dense pointmaps, followed by incremental registration [S1, unofficial]. Evaluated on LLFF, MipNeRF360, and Tanks-and-Temples datasets [S1, unofficial].
++ZeroGS was proposed to address the limitation of traditional SfM (e.g., COLMAP) which requires posed images or fails on unordered/dense captures [S1, unofficial]. It builds on [Feed-forward and Generalizable Prediction](15832-feed-forward-and-generalizable-prediction.md) by using a pretrained foundation model (Spann3R, based on DUSt3R) to predict dense pointmaps and 3D Gaussians [S1, unofficial]. It differs from ACE0 by using transformers and dense pointmaps, and from InstantSplat/Splatt3R by regressing in a global frame without pairwise alignment [S1, unofficial].
+ 
+ ## Sources

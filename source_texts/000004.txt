@@ -1,0 +1,1049 @@
+··· Manuscript · Jonas Graetz (Dittmann) · jonas.graetz@physik.uni-wuerzburg.de · 31 August 2020 ···
+High performance volume ray casting:
+A branchless generalized Joseph projector
+arXiv:1609.00958v2 [physics.med-ph] 31 Aug 2020
+Jonas Graetz
+numeric integration of image data along these ray paths.
+Irrespective of any additional features, the fundamental component of every X-ray imaging model therefore is an adequate
+sampling and accumulation strategy for the evaluation and
+integration of values from three dimensional voxel grids. As
+many samples – between 108 and 1010 for typical volume sizes
+of 5003 to 20003 voxels – are required to compute 2D X-ray
+projections, and thousands of such projections are required
+within iterative tomographic reconstruction, efficiency of the
+sampling and integration process is of outmost importance.
+The sampling strategy further affects the outcome of iterative
+reconstruction algorithms, which are based on optimizing the
+similarity between simulated and actual X-ray projections. Both
+aspects – efficiency and physical modeling – have given rise
+to a considerable body of literature. As the constraints and
+capabilities of computing hardware are constantly evolving,
+the quest for most efficient solutions remains a timeless task
+though.
+Abstract—A concise and highly performant branchless formulation of a Joseph-type interpolating ray-casting algorithm for
+the computation of X-ray projections is presented. It efficiently
+utilizes the hardware resources of modern graphics processing
+units at the scale of their theoretic maximum performance
+reaching access rates of 600 GB/s within read-and-write memory,
+and is further shown to do so without compromising on image
+quality. The computation of X-ray projections from discrete
+voxel grids is an ubiquitous task in many problems related to
+volume image processing, including tomographic reconstruction
+and visualization. Although its central role has given rise to
+numerous publications discussing the optimal modeling of rayvolume intersections, a unique benchmark in this respect does
+not exist. Here, a 3D Shepp-Logan phantom is used, which allows
+the computation of analytic reference projections that can further
+serve as input to iterative reconstructions without committing the
+inverse crime. The proposed algorithm (GJP) is compared to the
+competing and widely adopted digital differential analyzer (DDA),
+which computes exact line-box intersections. It is thereby found to
+outperform the DDA on recent graphics processors in all respects:
+Despite accessing twice as much memory, the GJP is still able to
+calculate projections twice as fast. It further exhibits considerably
+less discretization artifacts, and neither oversampling of the DDA
+nor a smooth interpolation kernel within the GJP are able to
+improve on these results in any respect.
+A. Contributions
+A formulation of a 3D generalization of Joseph’s classic
+interpolating projection method is given and discussed. It is
+shown to feature excellent memory access efficiency without
+explicitly restricting the projection geometry nor making use
+of sophisticated memory layout schemes or read-only texture
+memory. The contribution is twofold: On the one hand, a
+concise and efficient algorithm is derived, benchmarked and
+provided in an easily implementable form, ensuring its practical
+availability. Likewise importantly, its qualitative eligibility
+with respect to volume projection and iterative tomographic
+reconstruction as compared to more complex approaches is
+assessed in order to establish it as not only extremely fast,
+but also competitive despite its intriguing simplicity. As no
+unique benchmark exists in this respect, a survey of previous
+literature is given on the one hand, and selected experiments
+demonstrating and comparing discretization artifacts of several
+approaches are shown on the other hand. The initial manuscript
+has previously been made available by the author as preprint [1],
+and first results have been presented at the Fully3D conference
+[2].
+I. I NTRODUCTION
+The simulation of X-ray images (or the generation of
+“digitally reconstructed radiographs”) by numeric projection
+of gridded volume images represents, in the context of
+computed tomography, the calculation of the forward problem
+within iterative solutions of the inverse problem, i.e., the
+reconstruction problem. It is thus also referred to as “forward
+projection” (as opposed to the “backprojection” step) and is
+both one of the most essential and time consuming aspects
+of iterative reconstruction techniques. Forward or volume
+projection therefore takes a central role with respect to both
+efficiency and quality of these algorithms
+Foremost, simulated X-ray projection involves tracing rays
+through volumes based on given projection geometries and
+J. Graetz is with the Chair for X-ray Microscopy at the University
+of Würzburg and the Fraunhofer nano-tomography group of the magnetic
+resonance and X-ray imaging department MRB of the Fraunhofer IIS/EZRT
+in Würzburg, Germany. (email: jonas.graetz@physik.uni-wuerzburg.de)
+Acknowledgements: The anonymous reviewers of the initial manuscript are
+acknowledged for their constructive comments that have considerably shaped
+the following presentation. R. Hanke and S. Zabler are acknowledged for
+facilitating the present work. Funding is acknowledged from the Bavarian State
+Ministry of Economic Affairs, Infrastructure, Transport and Technology which
+supported the project group ”Nano-CT Systems for Material Characterization”,
+and by the German Federal Minisry of Education and Research (grant
+05E19AN1) supporting the BM18 beamline at the European Synchrotron
+Radiation Facility.
+II. L ITERATURE R EVIEW
+Two general classes of volume projection approaches may
+be distinguished upfront: those following integration paths and
+performing some kind of sampling on the volume image grid,
+and those iterating over volume elements and accumulating
+renderings of each voxel’s projection onto the detection screen
+1
+··· Manuscript · Jonas Graetz (Dittmann) · jonas.graetz@physik.uni-wuerzburg.de · 31 August 2020 ···
+based on the projection perspective and a model of the voxels’ coordinate axes. The final objective of calculating exact ray-box
+geometry. The first approaches are referred to as “ray driven”, intersections though can as well be achieved with driving-axis
+“ray casting” or “ray tracing” methods, while the latter methods based algorithms [7], [21], although the complexity increases
+are usually termed “voxel driven” or “splatting”. The methods in the 3D case.
+first of all differ in their memory access pattern: while ray
+In addition to basic algorithmic concepts, the assumed
+driven methods iterate over camera pixels and generally require underlying system model is a central aspect. Particularly
+less efficient random read access to the volume image data, prevalent is the assumption that imaged objects can be exactly
+splatting methods can sequentially iterate over the volume modeled by cubic voxels of homogeneous density, and incident
+elements, yet instead require a large amount of non-sequential radiation by rectangular beam profiles of finite extent (as
+read and write accesses to the projection image. Intermediate opposed to the also common assumption of pencil beams, cf.
+approaches are resampling strategies (e.g., the shear-warp Siddon [15]). Much effort has been put into the development
+approach [3]) and the more recent “distance driven” method of exact projection algorithms in this respect [7], [21], [22],
+[4], [5]. The former transform the volume image such that [23], [24], [25], [26], [27], [28], [29], using both ray driven
+the subsequent projection reduces to a summation over one and splatting approaches. When arguing that there is no
+coordinate axis and are most similar to ray driven methods. outstanding reason to assume homogeneous cubic voxels, the
+The latter approach aims to combine the sequential memory complexity for an “exact” volume projector can be reduced by
+access pattern of voxel driven methods with sequential write using algorithmically more convenient voxel basis functions
+accesses to the projection image.
+as compared to the box profile. Modeling of both voxel and
+Ray driven projection has two important advantages, where- beam profiles can then be merged into diffused, overlapping
+fore it will be the method of choice here: first, it is trivially interpolation kernels or projection footprints parametrized by
+parallelizable, as by design no concurrent write accesses to the ray-voxel distances [13], [30], [31], [32], [33]. Other methods
+projection screen need to be managed. Secondly, the correct replace the latter distance by even more efficient approximations
+normalization of ray integrals with respect to the associated run [6], [4], [34]. The modeled beam width is directly related to
+lengths through the volume is considerably simpler as compared the extent of the employed interpolation or sampling kernel,
+to splatting approaches. Simplicitly is a key to efficiency, and and an approximate modeling of the beam width (neglecting
+it will be shown that highly efficient memory access patterns e.g. divergence) has been found to be sufficient in practice
+are possible also with ray driven approaches.
+[35]. Joseph’s 2D projector in particular straight forwardly
+Tracing of linear paths through grids has been studied since performs linear interpolation among the nearest neighbors of
+the advent of raster graphics. The following review shall provide each sampling point, which may as well be interpreted as an
+a reasonable overview of the essential ideas that have come up approximation to normalized radial basis function interpolation
+in the past, with a particular focus on the tomography context. within a tightly limited radius. The modeled beam width thus
+A central concept in the majority of fast ray casting approximately corresponds to the voxel raster spacing. It has
+algorithms on regular grids is the notion of a “driving axis” been extended to 3D in the past by several authors to e.g.
+[6], [7], [8], [9], [10] as already introduced in the 1960s by trace X-rays through parallel stacks of textured planes [36],
+Bresenham in the context of rasterized line drawing. Instead of [37] or for list mode reconstructions in positron emission
+just arbitrarily defining a number of sampling points along the tomography [38], and is also found in recent reconstruction
+linear coordinate of an integration path, the path will rather toolkits [39], [40]. More elaborate calculations of line integrals
+be traversed in unit steps of the designated driving axis of over multilinearily interpolated grids [41] have not been found
+the algorithm. The driving axis is chosen to be the dimension to provide practical benefits [42], and neither has the distance
+along which the considered path progresses fastest, such that the driven method [43]. In their reviews of the field, Pan et al. and
+resulting non-integer step sizes along the remaining coordinate Nuyts et al. similarly conclude that the particular interpolation
+axes are always guaranteed to not exceed the grid spacing, method is generally secondary as compared to an adequate
+thereby ensuring that no intersected pixels or voxels will be resolution of the voxel grid with respect to the features it
+skipped in the tracing procedure. Figure 1 gives an illustration. is supposed to represent [44], [45]. Eventually, an increasing
+This concept of grid-aligned sampling is explicitly or consensus can be identified supporting both the eligibility and
+implicitly used e.g. by Josephs’ algorithm [6] (one of the the sufficiency of basic interpolated sampling approaches.
+early methods proposed for 2D iterative tomographic reConsidering computational efficiency again, it is preferable
+construction), by shear-warp resampling techniques [11], [3] to keep both the interpolation kernel size and the grid resolution
+(proposed for volume visualization) or ray-driven formulations to a necessary minimum. Various strategies have been used to
+of splatting algorithms [12], [13], [14] as well as by the push that optimum beyond localized kernels by using grids with
+recent “Distance Driven Method” [4], [5]. It emerges naturally adaptive resolution [46], [47] and non-cartesian layout [48],
+from practical sampling considerations, as interpolation can [49] or even unstructured point clouds [50]. With regard to
+thereby be avoided along the driving axis. Prominent alternative cache efficiency of the given hardware, the layout of the volume
+techniques are the much-cited algorithm by Siddon [15] and image data in memory may be better arranged with regard
+variants thereof [16], [17], [18], [19], [20] (known as digital to expected access patterns using e.g. techniques such as Zdifferential analyzer or DDA algorithm in the field of computer ordering or blocking [51]. Similarly, the algorithm design may
+graphics), which trace lines in irregular steps from intersection be optimized to better follow a given memory layout [4], [52].
+to intersection with any of the raster planes perpendicular to the A central drawback of these more elaborate approaches to the
+2
+··· Manuscript · Jonas Graetz (Dittmann) · jonas.graetz@physik.uni-wuerzburg.de · 31 August 2020 ···
+reduction and optimization of memory accesses is the increased
+algorithmic complexity, limiting the net performance gain. In
+the case of very small grids (typically less than 106 voxels) and
+particularly when high degrees of symmetry can be exploited,
+precalculation and explicit storage of the sparse system matrix
+describing the projection process can be an option as well, as
+addressed e.g. by [49]. Finally, when simultaneously calculating
+large amounts of X-ray projections of the same volume, divide
+and conquer approaches allow to systematically reduce the
+amount of total memory accesses by exploiting spatial overlaps
+of rays from close by viewing angles [53]. For parallel beam
+geometries, this can also be achieved by evaluating projections
+in Fourier space [54], based on the Fourier slice theorem.
+In the present work, the efficient calculation of individual
+projections within read-and-write memory will be addressed,
+whereby efficiency will be drawn from simplicity as opposed
+to managing irregular grids or memory layouts.
+Starting with SGI graphics workstations in the 1990s,
+researchers have further been utilizing the processing power of
+dedicated graphics processors (GPUs) in order to speed up CT
+reconstruction. Reviews on the usage of GPUs in tomography
+have been given e.g. by Mueller, Pratx, Desprès and co-authors
+[55], [56], [57].
+The aim of the present work is to demonstrate a ray driven
+projection algorithm whose memory efficiency is implicit in
+its coherent sampling pattern among parallel threads, and
+which is further formulated in a computationally lean way.
+It thereby allows to perfectly utilize the specific capabilities of
+modern general purpose graphics processors, finally resolving
+the common conflict between sampling quality and processing
+speed.
+The increment vector r̃ between successive sampling points
+will be chosen such that the resulting sampling points remain
+aligned with the driving axis, which holds for
+r̃ =
+!
+[~s + o r̃]m = 0
+⇒ o = −sm
+~p (i) = (~s + o r̃) + i r̃
+(2)
+m = argmax(|ri |) .
+(3)
+(6)
+for integer i ∈ [0, imax ], where imax is defined by the extent of
+the voxel grid along axis m. These sampling points can readily
+be used for linear interpolated sampling, as is e.g. directly
+provided by texture memory of modern GPUs.
+B. Interpolated sampling
+When sampling from (GPU) main memory, the 4neighborhood {~v(i,1) ,~v(i,2) ,~v(i,3) ,~v(i,4) } of integer valued grid
+coordinates around each sampling point ~p (i) needs to be
+(i)
+explicitly enumerated. The driving axis component pm is,
+by construction of the sampling increment r̃ and offset o,
+guaranteed to be integer for all integer i. The remaining noninteger components necessarily lie between two integer ones
+along their respective coordinate axes. For each sampling point
+~p (i) , the set of four neighboring voxels can thus be determined
+by regarding all combinations of floor
+values of
+  andceiling
+
+these non-integer components (with
+and
+being the floor
+and ceiling operators respectively):
+ (i)   (i)   (i) 
+~v(i,1) = p1 , p2 , p3
+ (i)   (i)   (i) 
+~v(i,2) = p1 , p2 , p3
+(7)
+ (i)   (i)   (i) 
+~v(i,3) = p1 , p2 , p3
+ (i)   (i)   (i) 
+~v(i,4) = p1 , p2 , p3 ,
+The basic sampling concept is illustrated in Figure 1. A
+ray emanating from a source at ~s traverses a voxel volume
+and hits a detector pixel at ~
+d. Along its intersection with the
+volume, the latter will be sampled in steps of r̃, which will
+be concretized in the following. While the resulting scheme is
+equivalent to general driving axis based methods, the present
+vector representation allows for a unified treatment of all cases,
+such that the “driving axis”, which normally distinguishes
+different code branches, now only determines the orientation
+of sampling planes within a branchless sampling loop.
+Given the positions of source ~s and detector pixel d~ relative
+to the volume origin, the integration path is characterized by
+the set of points ~p
+~r = d~ −~s
+(5)
+where o is the distance between source and first sampling plane
+in units of the sampling increment r̃ . o will thus be termed
+“sampling offset”. The volume can now be sampled at points
+~p (i) along the defined path in unit steps of axis m by evaluating
+III. M ETHODS
+(1)
+(4)
+Assuming that grid coordinates correspond here to non-negative
+memory indices, the first possible sampling point is defined
+by the intersection of the ray with a plane through the origin
+and perpendicular to the driving axis m, i.e.,
+A. Driving axis aligned grid traversal
+~p =~s + l~r
+~r
+.
+rm
+exploiting that
+ (i)   (i) 
+(i)
+pm = pm = pm .
+(8)
+Independent of m ∈ {1, 2, 3}, the vectors ~v(i,1−4) define a group
+of four voxels in a plane perpendicular to the driving axis.
+Illustrations of the planes spanned by these nearest neighbor
+voxels around sampling points ~p (i) are given in Figure 1.
+Special cases arise when either of the non-m components of
+~p (i) happen to be also integer, which leads to redundant vectors
+among ~v(i,1−4) . Given the final objective of interpolation, these
+cases will be accounted for by adequate choice of the respective
+interpolation weights.
+with
+and l ∈ R being the free parameter. The driving axis m is then
+identified by the largest component of ~r:
+i
+3
+··· Manuscript · Jonas Graetz (Dittmann) · jonas.graetz@physik.uni-wuerzburg.de · 31 August 2020 ···
+pixe
+l det
+ecto
+r
+e
+voxel volum
+(0,0,0)
+→
+d
+(detector
+pixel)
+→
+→
+s
+(source)
+ray r
+ray →
+~r
+~r
+rement
+inc
+g
+lin
+samp
+spline
+xis →
+driving a
+0.5
+0.0
+0
+1
+2
+3
+4
+5
+grid index
+bilinear
+1
+0
+0
+0
+int
+erp
+ola
+ted
+spline
+1
+1
+0
+i
+1.0
+i+3
+0.0
+i+2
+linear
+0.5
+i+1
+interpolated axis →
+interpolation weight
+1.0
+ray →
+ax
+is
+→
+1
+Figure 1. Ray casting through a volume along a line defined by two points ~s and d~ (upper left). On the right, driving-axis
+√ aligned sampling is illustrated on
+the grid scale. Integer steps along the driving axis imply increments of r̃ =~r/rm along the actual path, with 1 ≤ r̃ ≤ 3. Due to the alignment with one
+designated axis, interpolation is required only within 4-voxel blocks extending along the remaining axes (four of such blocks are shown in different colors).
+Above, the corresponding sampling points ~p (i) are illustrated within their sampling planes described by the respective nearest neighbour locations ~v(i,1−4) . On
+the center left, the one dimensional interpolation kernels resulting from Equations 13 and 14 are illustrated. Each marker represents a point on the grid, and the
+color-matched kernels represent the respective interpolation weights as a function of fractional position between grid points. The resulting two dimensional
+interpolation scheme is demonstrated below.
+Interpolation will be based on scalar distance weights
+w(d);
+d ∈ [0, 1]
+with w(1 − d) = 1 − w(d)
+~v(i,1−4) can be conveniently represented as:
+wcl,k = 1 − wfl,k
+wfl,m = wcl,m = 1
+for k 6= m
+for k 6= m
+(i)
+(i)
+(i)
+(i)
+(i)
+(i)
+(i)
+(i)
+(i)
+(i)
+w(i,3) = wcl,1 · wfl,2 · wcl,3
+(12)
+w(i,4) = wcl,1 · wcl,2 · wfl,3
+without requiring further explicit consideration of the particular
+driving axis m.
+Two specific weighting functions shall be considered:
+where the superscripts (fl) and (cl) indicate distances to the
+(i)
+integer grid indices below and above the components pk of
+(cl)
+(fl)
+~p (i) . The definition of dk as complement to dk guarantees
+correct interpolation weights also in the special case of integer
+(i)
+components pk , where floor and ceiling values coincide. When
+explicitly defining
+(fl)
+(i)
+w(i,2) = wfl,1 · wcl,2 · wcl,3
+with respect to the component wise distances of the contributing
+grid points next to a sampling point:
+(fl)
+(i)  (i) 
+(cl)
+(fl)
+dk = pk − pk ;
+dk = 1 − dk ,
+(10)
+wfl,k = w(dk )
+(i)
+w(i,1) = wfl,1 · wfl,2 · wfl,3
+(9)
+wlin (d) = 1 − d
+(13)
+2
+3
+wspl (d) = 1 − 3d + 2d ,
+(14)
+with wlin reproducing classic multilinear interpolation and wspl
+being a smooth spline function in the style of a smooth cosine
+window that ensures differentiability also at grid points, i.e.,
+when d = 0 or d = 1. The practical consequences of the different
+interpolations schemes are later addressed in Sections IV-A–
+IV-B and Figures 2–3 therein.
+Algorithm 1 combines the above considerations on volume traversal, implicit identification of sampling planes, and
+interpolation among the respective nearest neighbors into a
+single sampling loop. As can be verified by explicitly assuming
+different driving axes, the weighted sampling performed in
+lines 17–20 always correspond to a 2D-interpolation among
+the nearest neighbors of the respective sampling point within
+(11)
+the interpolation weights w(i,1−4) for the respective voxels
+4
+··· Manuscript · Jonas Graetz (Dittmann) · jonas.graetz@physik.uni-wuerzburg.de · 31 August 2020 ···
+a plane perpendicular to the axis m.
+Algorithm 1 Branchless ray casting through a cuboid voxel
+volume with axis aligned sampling and first order interpolation
+among four nearest neighbors. Scaling by r̃ accounts for
+the varying sampling distances depending on the orientation
+of the ray ~r. 2D X-ray projection images of a volume are
+obtained by parallel evaluation for multiple rays defined by a
+~ Highest
+focal point ~s and multiple detector pixel locations d.
+GPU cache efficiency is achieved when the driving axis m does
+not coincide with the fastest changing index of the memory
+layout.
+~ defined in units of voxel grid indices
+1: assuming : ~s, d
+~ −~s
+2: ~r ← d
+. integration path orientation
+3: m ← argmaxi (|ri |)
+. m: major (driving) axis
+4: r̃ ←~r/rm
+. r̃: sampling increment vector
+5: o ← −sm
+. o: sampling offset, ~s: ray source point
+6: imax ← volumeDimensions[m]
+. number of sampling points
+7: a ← 0
+. a: accumulator variable
+8: for i = 0 .. imax − 1 do
+. iterate over sampling points
+9:
+~p ←~s + (o + i) · r̃
+. ~p: current sampling point
+10:
+if ~p is in volume then
+11:
+~pfl ← floor(~p)
+. find lower voxel grid indices
+12:
+~pcl ← ceil(~p)
+. find upper voxel grid indices
+13:
+assert: pfl,m = pcl,m = pm
+14:
+~wfl ← w(~p −~pfl ) . interpolation weights (Eqs. 13, 14)
+15:
+~wcl ← ~1 − ~wfl
+. complementary weights
+16:
+wcl,m ← wfl,m ← 1
+. special case: driving axis
+17:
+a ← a + volume[ pfl,1 , pfl,2 , pfl,3 ] · kr̃k · wfl,1 · wfl,2 · wfl,3
+18:
+a ← a + volume[ pfl,1 , pcl,2 , pcl,3 ] · kr̃k · wfl,1 · wcl,2 · wcl,3
+19:
+a ← a + volume[ pcl,1 , pfl,2 , pcl,3 ] · kr̃k · wcl,1 · wfl,2 · wcl,3
+20:
+a ← a + volume[ pcl,1 , pcl,2 , pfl,3 ] · kr̃k · wcl,1 · wcl,2 · wfl,3
+21:
+end if
+22: end for.
+0
+DDA
+DDA 2×
+GJPspl
+GJPlin
+128
+256
+384
+512
+0
+128
+256
+384
+IV. R ESULTS
+512
+A. Quality of projection images
+0
+128
+256
+384
+512 0
+128
+256
+384
+512
+Relative `1 error [%]
+The performance with respect to adequate modeling of of ray1.0
+volume intersections is demonstrated on cone beam projections
+GJPlin
+GJPspl
+DDA
+DDA 2×
+of a classic three dimensional Shepp Logan phantom based on
+0.8
+the definition reproduced in [58]. The phantom is described
+by a sum of ellipsoids, which can on the one hand be easily
+rasterized at any desired resolution and on the other hand
+0.6
+allows the direct calculation of projection images by analytical
+evaluation of line integrals over the defining ellipsoids. A
+0.4
+ground truth is thus available for comparison with respective
+numeric projections calculated from the rasterized version. In
+0.2
+order to also adequately account for the extent and integrating
+nature of detector pixels, the reference projections are evaluated
+0.0
+as an average over 64 line integrals between the focal spot
+0
+90
+180
+270
+360
+and regular arrays of 8 × 8 points within each detector pixel.
+Projection angle [°]
+Analogously, oversampling is applied also in the rasterization
+process of the phantom: It is rasterized on a regular grid of Figure 2. Approximation errors of different projection algorithms for a
+10° conebeam geometry. Numeric projections of the rasterized Shepp Logan
+5123 voxels, whereby each voxel value is determined as an phantom (on a 5123 grid) onto a 5122 detector are compared to corresponding
+average over 5 × 5 × 5 regularly distributed samples of the reference projections obtained by analytic integration of the ellipsoids defining
+the phantom. At the top, an illustration of the Shepp Logan phantom and
+function defining the phantom.
+the applied projection geometry is given. Below, example difference images
+Following typical experimental conditions, a cone angle of for a frontal view are shown. On the bottom, the `1 norm of these residuals,
+10° is modeled (i.e., the focal distance is about 5.7 times the normalized to the `1 norm of the analytic reference projection, is plotted for
+detector width), projecting the volume onto a square detector all projection angles of a circular scanning trajectory within the axial plane.
+of 5122 pixels. In total, 803 (≈ π2 512) projection images
+5
+··· Manuscript · Jonas Graetz (Dittmann) · jonas.graetz@physik.uni-wuerzburg.de · 31 August 2020 ···
+from different orientations covering a full circle are computed,
+whereby the chosen number of projections corresponds to a
+common recommendation with regard to analytic tomographic
+reconstruction (cf. [59]).
+Figure 2 shows residual projection errors observed for
+various numeric projection approaches. Although the general
+occurrence of such residuals is generally expected due to the
+inherently approximative nature of discrete volume represenations, the adequacy of a projection model may reasonably
+be measured by its ability to keep such residuals minimal.
+Siddon’s pencil beam projection model, realized using the
+DDA algorithm, exhibits most artifacts, particularly in cases
+where rays run roughly parallel to grid axes. In these situations
+the model of pencil beams intersecting box-shaped voxels is
+equivalent to nearest neighbor sampling. When oversampling
+the DDA by a factor of two in each dimension in order to
+approximate a finite beam extent, i.e. tracing and averaging over
+four rays per detector pixel, the resulting projection residuals
+become comparable to those of the non-oversampled GJPspl
+algorithm using spline interpolation, although the latter further
+shows a considerable reduction of high frequency artifacts.
+The best results are, despite the kinked interpolation kernel,
+achieved by the liner interpolating GJPlin algorithm.
+DDA
+DDA 2x
+GJPspl
+B. Quality of iterative tomographic reconstructions
+As iterative reconstruction techniques such as SART ([60],
+“Simultaneous Algebraic Reconstruction Technique”) subsequently enforce consistency of the reconstructed volume with
+each experimentally observed projection image based on a given
+forward model (formally represented by a matrix A, applied to
+GJPlin
+a vector of volume elements f , yielding a set of line integrals
+g), inaccuracies of the respective discrete forward projectors
+will directly translate to artifacts in the reconstruction result.
+In contrast to typical artifacts arising when reconstructing
+from an under-determined system of equations, e.g., when
+reconstructing from too few projections, deficiencies of the
+projection model defining the system matrix A inherently do
+not lie in its null space, and can therefore not, without loss of
+resolution, be compensated by typical regularization approaches
+that are otherwise used to suppress artifacts emerging in the
+Reference
+null space of A, i.e., in image domains that are not affected
+by A and its defining projection model.
+In order to illustrate the practical consequences, multiple
+SART reconstructions are compared using different projection
+algorithms. In general, such experiments typically suffer either
+from unrelated artifacts when working with actual experimental
+data, or from the “inverse crime” that is often committed when
+synthesizing experimental data based on the same algorithms
+that are also used in the subsequent reconstruction procedure.
+Both issues can however be avoided in the case of the Shepp- Figure 3. Axial (left) and sagittal (right) central slices of iterative SART
+Logan phantom due to the possibility to analytically calculate reconstructions (10 iterations) on a discrete voxel grid from analytic projections
+its projections without prior rasterization, as has been done of a 3D Shepp Logan phantom using different numeric projection methods
+within the iterative process. The chosen grayscale window shows a range
+already for the previous benchmark.
+of [0.16,0.32] out of the maximal range of [0,1]. Limitations of the discrete
+Figure 3 shows central axial and sagittal slices of respective forward models (cf. Fig. 2) manifest themselves in the final reconstruction
+SART reconstructions on a 5123 voxel grid of the Shepp-Logan result. At the bottom, a reconstruction from perfect input data (synthesized
+with GJPlin from the rasterized Shepp Logan phantom) is shown for reference,
+phantom from analytically calculated projections as described demonstrating
+the artifacts expected from the reconstruction process itself.
+previously. As volume rasterization is here only introduced Wavy features at the sagittal top and bottom represent cone beam artifacts.
+6
+··· Manuscript · Jonas Graetz (Dittmann) · jonas.graetz@physik.uni-wuerzburg.de · 31 August 2020 ···
+with the discrete imaging model fundamental to iterative and OpenCL terminology respectively). This eliminates the
+reconstruction techniques, the observed reconstruction artifacts potential influence of technicalities introduced by the paralcan be largely attributed to the employed discrete projection lelization schemes of graphics processors. Measured execution
+method. While other parameters such as iteration count or times further exhibit a variance of up to 10% when running
+the interpolation scheme of the voxel based backprojector can the same code multiple times due to dynamic performance
+also be argued to affect the reconstruction outcome, it should adaptions related to temperature management. Reported are
+nevertheless be without doubt that these, in contrast to the the fastest measured times for each algorithm.
+forward model, do not actually explicitly define the properties
+Table I lists the so evaluated run times as averages over
+of the solution. The bottom panel of Fig. 3 illustrates the 360 equidistant projection angles for two GPU models. As a
+isolated effect of the present reconstruction procedure by using measure for GPU occupancy it further lists average memory
+ideal input data synthesized with the same forward model access rates based on the total runtime and the amount of
+(GJPlin ) also used for iterative reconstruction. In contrast to accessed voxels by each raytracing algorithm respectively.
+artifacts arising from the forward model itself, pure reconstruc- Although the latter is not strictly known in the case of GJPhwlin
+tion artifacts can generally be suppressed by regularization due to unknown implementation details within the GPU, it is
+techniques, which have here explicitly not been applied to reasonably assumed to be the same as for GJPlin .
+avoid ambiguities in the interpretation of the presented results.
+A number of interesting conclusions can be drawn from the
+In accordance with the previously found projection errors observed timings: First of all, the DDA algorithm can only
+shown in Fig. 2, the reconstruction quality is found to be benefit from newer hardware (GTX 1080) in the oversampled
+worst for the non-oversampling DDA, comparable for 2-fold case. Oversampling increases the number of duplicate accesses
+oversampled DDA and GJPspl and best for GJPlin . Although it to the same voxels by parallel threads handling neighboring
+is out of the scope of the present work to explicitly demonstrate rays, wherefore it can be reasonably assumed that the oversamthe effect of each SART parameter, the reader shall however be pled DDA better profits from memory caches. The additional
+assured that variations in iteration count, relaxation factor and computational overhead associated with oversampling appears
+backprojection interpolation scheme have been confirmed to to be a limiting factor on older hardware in contrast, where
+not fundamentally change the relative performance of different the overall runtime increases almost linear with the amount of
+forward models. This is in accordance with the preceding traced rays. This assessment is consistent with the observation
+reasoning attributing the differing artifact patterns to differing that the DDA algorithm does not profit from optimized accesses
+discretization errors among the various methods.
+to read only texture memory. The GJP algorithm in contrast
+Finally, these results are further independent of additive is able to outperform even the regular DDA algorithm by
+noise, which has here intentionally not been regarded. As SART a factor of up to 2, despite accessing about twice as much
+is, despite being iterative, a linear reconstruction technique, memory on average. The driving axis aligned sampling scheme
+additive terms to the projection images can generally be of the GJP ensures that neighboring threads partially access
+considered independently and will, although adding to the the same voxels in the course of interpolated sampling, thereby
+reconstruction result, not fundamentally alter it.
+exploiting memory caches even better than the oversampled
+DDA. The additional speedup observed when simplifying the
+GJP algorithm even further (by using the intrinsic interpolation
+C. Projection speed
+capabilities of texture memory) indicates that it operates close to
+Run time performance is evaluated for projections of a
+the limits both of the computational resources and the available
+cylindric volume (as common for tomographic reconstructions)
+memory bandwidth.
+within a cubic bounding box of 5123 voxels onto a 5122 pixel
+detector. The sampling offset o marking the first sampling
+V. D ISCUSSION AND C ONCLUSION
+point and the total number of sampling points imax are adapted
+The
+calculation
+of projections from discrete volumes is a core
+to ray-cylinder intersections as opposed to ray-boundingbox
+aspect
+of
+iterative
+reconstruction techniques, both with respect
+intersections to this purpose. The performance of Algorithm 1
+to
+reconstruction
+speed
+and quality. Although a remarkable
+is benchmarked against the branchless DDA formulation given
+variety
+of
+approaches
+to
+the advanced modeling of rayby [20]. The volume is stored in 32bit floating point format
+volume
+intersections
+has
+been
+presented in previous literature,
+in either main- or texture memory of the graphics processing
+the
+demand
+for
+maximal
+parallelizability
+and computational
+unit. For the case of texture memory, also hardware provided
+efficiency
+on
+modern
+graphics
+processors
+immediately
+collapses
+interpolation is tested. As typical for computed tomography
+the
+wide
+palette
+of
+choices
+to
+ray
+driven
+methods
+with
+strongly
+setups, projections are performed for a multitude of source and
+confined
+sampling
+kernels.
+“Ray
+driven”
+thereby
+implies
+a
+detector orientations over the full angular range of 360° on
+sampling
+loop
+iteratively
+traversing
+the
+voxel
+grid
+along
+defined
+a circular trajectory around the volume center. The rotational
+axis is aligned parallel to the fastest index of the memory paths (rays) between focal point and detector pixels, and
+layout (i.e., the last dimension in the case of Fortran-style “strongly confined” implies the evaluation of only the immediate
+memory order, or the first dimension in the case of C-style neighborhood around each sampling point. For the traversal
+memory order). For each individual configuration of source of regular grids, two methods can be named: the digital
+and detector, the run time is optimized over a wide range of differential analyzer (DDA) algorithm [16], traversing the grid
+possible thread block or work group size parameters (CUDA in unevenly spaced steps from intersection to intersection with
+7
+RAM Tex.
+··· Manuscript · Jonas Graetz (Dittmann) · jonas.graetz@physik.uni-wuerzburg.de · 31 August 2020 ···
+DDA
+GTX970 GTX1080
+4.59 ms
+3.46 ms
+118 GB/s 157 GB/s
+4.39 ms
+5.20 ms
+123 GB/s 104 GB/s
+DDA 2×
+GTX970 GTX1080
+15.2 ms
+6.74 ms
+143 GB/s 323 GB/s
+15.7 ms
+7.65 ms
+139 GB/s 285 GB/s
+GJPlin
+GTX970 GTX1080
+4.97 ms
+2.40 ms
+334 GB/s 686 GB/s
+5.69 ms
+2.70 ms
+292 GB/s 609 GB/s
+GJPhwlin
+GTX970 GTX1080
+3.28 ms
+2.23 ms
+502 GB/s 740 GB/s
+—
+—
+—
+—
+Table I
+AVERAGE PROJECTION SPEED IN MILLISECONDS AND MEMORY ACCESS RATES IN GIGABYTES PER SECOND FOR 2D PROJECTIONS OF A CYLINDRICAL
+VOLUME WITHIN A 5123 BOUNDING BOX ONTO A 5122 DETECTOR IN A 10° CONEBEAM SETUP MEASURED AN N VIDIA GTX 970 AND GTX 1080 GPU.
+any of the orthogonal grid planes, and methods traversing the
+grid in equidistant steps aligned with a designated driving
+axis. The former technique allows to precisely determine
+line-box intersection lengths and corresponds to the much
+cited pencil-beam X-ray imaging model given by Siddon
+[15], while the latter technique is typically combined with
+interpolated sampling and then corresponds to the competing
+model proposed in the context of tomographic reconstruction
+by Joseph [6].
+A branchless formulation of a Joseph type interpolating
+volume projection algorithm has been derived here, with the
+particular benefit of being extremely simple, which is a general
+prerequisite for maximal computational efficiency. Driving axis
+aligned sampling ensures an optimal amount of sampling points
+along each path in the sense that voxels are neither skipped nor
+oversampled. The resulting synchronous progression of parallel
+rays through the voxel grid thereby ensures high cache hit rates
+without explicitly constraining the exact imaging geometry
+(as opposed to e.g. the cache optimized Siddon’s algorithm
+proposed by [52], or the symmetry exploiting projection model
+given by [49]). Interpolated sampling among the remaining
+dimensions has been argued, besides being a practical necessity,
+to be consistent with ideas on exact modeling of X-ray
+projections based on normalized radial basis functions or
+projection footprints. Approximate matching of the voxel grid
+spacing to the average density of rays between focal point
+and detector array thereby ensures an adequate modeling of
+beam width, implicitly reproducing the integrating nature of
+detector pixels of finite extent without requiring far ranging
+interpolation kernels or oversampled ray casting. In accordance
+with assessments given in previous literature, higher order
+effects such as cone beam related variations in beam extent
+can be safely neglected in the modeling. (cf. e.g. [45], [35])
+The performed benchmarks compared a number of selfsuggesting variants of both ray casting algorithms with respect
+to artifacts and computational efficiency, addressing the recurring questions of adequate beam shape modeling and the
+role of the chosen interpolation kernel. The results indicate
+that no tradeoff needs to be made between computational
+efficiency and fitness for the purpose: the proposed simple
+and efficient branchless 3D Joseph projector employing linear
+interpolation is found to clearly perform best both with regard to
+approximation of the ground truth and with regard to efficiency,
+operating in the range of the theoretic maximum capabilities
+of the employed hardware.
+A recurring concern with regard to local interpolation exists
+in situations where a sufficient matching of the voxel grid
+resolution to the detector resolution is seemingly impossible.
+Such situations can e.g. arise when attempting to combine
+isotropic volume sampling with highly asymmetric detector
+pixels. It is in such cases obviously generally possible to cast
+an adequate amount of rays per detector bin ensuring sufficient
+coverage of the voxel grid, i.e., to adequately oversample the
+detector image. Similarly, the voxel shape may be chosen
+non-square (in terms of spatial units) to adequately match
+the detector properties, which in units of grid indices does
+not alter the discussed algorithms. Arguments questioning the
+representativeness of the Shepp-Logan phantom, that has here
+been chosen for the sake of analytic integrability, may be
+countered by noting that the observed artifacts arise at extended
+material boundaries of moderate curvature, i.e., a situation that
+is typical to CT applications.
+The proposed formulation of a linearly interpolating Josephtype projection algorithm may eventually be considered a
+favorable choice in many regards (simplicity of implementation,
+computational efficiency, and fitness for the purpose) for typical
+CT reconstruction applications, in particular as compared
+to the competing DDA algorithm, and further considering
+that oversampling (i.e., increasing the density of traced rays)
+generally remains an option.
+R EFERENCES
+[1] J. Dittmann (Graetz), “Efficient ray tracing on 3d regular grids for fast
+generation of digitally reconstructed radiographs in iterative tomographic
+reconstruction techniques,” arXiv:1609.00958, 2016.
+[2] J. Dittmann (Graetz) and R. Hanke, “Simple and efficient raycasting
+on modern gpu’sread-and-write memory for fast forward projectionsin
+iterative cbct reconstruction,” Proc. 14th Intl. Meeting on Fully 3D Image
+Reconstruction, pp. 781–784, 2017.
+[3] P. Lacroute and M. Levoy, “Fast volume rendering using a shearwarp factorization of the viewing transformation,” in SIGGRAPH ’94
+(D. Schweitzer, A. Glassner, and M. Keeler, eds.), pp. 451–458, ACM,
+1994.
+[4] B. De Man and S. Basu, “Distance-driven projection and backprojection
+in three dimensions,” Phys. Med. Biol., vol. 49, no. 11, pp. 2463–2475,
+2004.
+[5] R. Liu, L. Fu, B. D. Man, and H. Yu, “Gpu-based branchless distancedriven projection and backprojection,” IEEE Trans. Comput. Imag., vol. 3,
+no. 4, pp. 617–632, 2017.
+[6] P. M. Joseph, “An improved algorithms for reprojecting rays through
+pixel images,” IEEE Trans. Med. Imaging, vol. MI-1, no. 3, pp. 192–196,
+1982.
+[7] S. B. Lo, “Strip and line path integrals with a square pixel matrix:
+A unified theory for computational ct projections,” IEEE Trans. Med.
+Imaging, vol. 7, no. 4, pp. 355–363, 1988.
+[8] A. Fujimoto, T. Tanaka, and K. Iwata, “Arts: Accelerated ray-tracing
+system,” Computer Graphics and Applications, IEEE, vol. 6, no. 4,
+pp. 16–26, 1986.
+[9] R. Endl and M. Sommer, “Classification of ray-generators in uniform
+subdivisions and octrees for ray tracing,” Computer Graphics Forum,
+vol. 13, no. 1, pp. 3–19, 1994.
+8
+··· Manuscript · Jonas Graetz (Dittmann) · jonas.graetz@physik.uni-wuerzburg.de · 31 August 2020 ···
+[10] Y. K. Liu and B. Žalik, “A general multi-step algorithm for voxel
+traversing along a line,” Computer Graphics Forum, vol. 27, no. 1,
+pp. 73–80, 2008.
+[11] G. G. Cameron and P. E. Undrill, “Rendering volumetric medical image
+data on a simd-architecture computer,” pp. 135–145, May 1992.
+[12] S. Matej and R. M. Lewitt, “Practical considerations for 3-d image
+reconstruction using spherically symmetric volume elements,” IEEE
+Trans. Med. Imaging.
+[13] K. Mueller and R. Yagel, “Fast perspective volume rendering with
+splatting by utilizing a ray-driven approach,” Proceedings of the 7th
+Conference on Visualization ’96, pp. 65–72, 1996.
+[14] R. Bippus, T. Köhler, F. Bergner, B. Brendel, E. Hansis, and R. Proksa,
+“Projector and backprojector for iterative ct reconstruction with blobs
+using cuda,” 11th International Meeting on Fully Three-Dimensional
+Image Reconstruction in Radiology and Nuclear Medicine, 2011.
+[15] R. L. Siddon, “Fast calculation of the exact radiological path for a
+three-dimensional ct array,” Med. Phys., vol. 12, no. 2, pp. 252–255,
+1985.
+[16] J. Amanatides and A. Woo, “A fast voxel traversal algorithm for ray
+tracing,” Eurographics, vol. 87, no. 3, p. 10, 1987.
+[17] F. Jacobs, E. Sundermann, B. De Sutter, M. Christiaens, and I. Lemahieu,
+“A fast algorithm to calculate the exact radiological path through a pixel
+or voxel space,” Journal of computing and information technology, vol. 6,
+no. 1, pp. 89–94, 1998.
+[18] H. Zhao and A. J. Reader, “Fast ray-tracing technique to calculate line
+integral paths in voxel arrays,” Nuclear Science Symposium Conference
+Record, 2003 IEEE, vol. 4, pp. 2808–2812, 2004.
+[19] M. de Greef, J. Crezee, J. C. van Eijk, and R. Pool, “Accelerated ray
+tracing for radiotherapy dose calculations on a gpu,” Med. Phys., vol. 36,
+no. 9, pp. 4095–4102, 2009.
+[20] K. Xiao, D. Chen, and X. Hu, “Efficient implementation of the 3d-dda
+ray traversal algorithm on gpu and its application in radiation dose
+calculation,” Med. Phys., vol. 39, no. 12, pp. 7619–7625, 2012.
+[21] H. Gao, “Fast parallel algorithms for the x-ray transform and its adjoint,”
+Med. Phys., vol. 39, no. 11, pp. 7110–7120, 2012.
+[22] W. Yao and K. Leszczynski, “Analytically derived weighting factors
+for transmission tomography cone beam projections,” Phys. Med. Biol.,
+vol. 54, no. 3, pp. 13–533, 2009.
+[23] Y. Long, A. Fessler, and J. Balter, “3d forward and back-projection for
+x-ray ct using seperable footprints,” IEEE Trans. Med. Imaging, vol. 29,
+no. 11, pp. 1839–1850, 2010.
+[24] M. Wu and J. Fessler, “Gpu acceleration of 3d forward and backward
+projection using separable footprints for x-ray ct image reconstruction,”
+Proceedings of the International Meeting on Fully 3D Image Reconstruction in Radiology and Nuclear Medicine, vol. 6, p. 021911, 2011.
+[25] V. Nguyen and S. Lee, “Graphics processing unit-accelerated iterative
+tomographic reconstruction with strip-integral system model,” Optical
+Engineering, vol. 51, no. 9, pp. 093203–1–11, 2012.
+[26] S. Zhang, D. Zhang, H. Gong, O. Ghasemalizadeh, G. Wang, and G. Cao,
+“Fast and accurate computation of system matrix for area integral modelbased algebraic reconstruction technique,” Optical Engineering, vol. 53,
+no. 11, pp. 113101–1–9, 2014.
+[27] S. Ha, A. Kumar, and K. Mueller, “A study of volume integration models
+for iterative cone-beam computed tomography,” Proceedings of the 13th
+Meeting on Fully 3D Image Reconstruction, 2015.
+[28] S. Ha, H. Li, and K. Mueller, “Efficient area-based ray integration using
+summed area tables and regression models,” Proceedings of the 4th
+International Meeting on image formation in X-ray CT, pp. 507–510,
+2016.
+[29] R. Sampson, M. McGaffin, T. Wenisch, and J. Fessler, “Investigating
+multi-threaded simd for helical ct reconstruction on a cpu,” Proceedings
+of the 4th International Meeting on image formation in X-ray CT, pp. 275–
+278, 2016.
+[30] K. M. Hanson and G. W. Wecksung, “Local basis-function approach to
+computed tomography,” Applied Optics, vol. 24, no. 23, pp. 4028–4039,
+1985.
+[31] R. M. Lewitt, “Alternatives to voxels for image representation in iterative
+roconstruction algorithms,” Phys. Med. Biol., vol. 37, no. 3, pp. 705–716,
+1992.
+[32] A. Ziegler, T. Köhler, T. Nielsen, and R. Proksa, “Efficient projection
+and backprojection scheme for spherically symmetric basis functions in
+divergent beam geometry,” Med. Phys., vol. 33, no. 12, pp. 4653–4663,
+2006.
+[33] F. Momey, L. Denis, C. Burnier, É. Thiébaut, J. Becker, and L. Desbat,
+“Spline driven: High accuracy projectors for tomographic reconstruction
+from few projections,” IEEE. Trans. Imag. Process., vol. 24, no. 12,
+pp. 4715–4725, 2015.
+[34] J. Sunnegårdh and P. Danielsson, “A new anti-aliased projection operator
+for iterative ct reconstruction,” 2007.
+[35] C. Hofmann, M. Knaup, and M. Kachelrieß, “Effects of ray profile
+modeling on resolution recovery in clinical ct,” Med. Phys., vol. 41,
+no. 2, pp. 021907–1–14, 2014.
+[36] F. Xu and K. Mueller, “Accelerating popular tomographic reconstruction
+algorithms on commodity pc graphics hardware,” IEEE Trans. Nucl. Sci.,
+vol. 52, no. 3, pp. 654–663, 2005.
+[37] F. Xu and K. Mueller, “A comparative study of popular interpolation
+and integration methods for use in computed tomography,” 3rd IEEE
+International Symposium on Biomedical Imaging: Nano to Macro,
+pp. 1252–1255, 2006.
+[38] C. Schretter, “A fast tube-of-response raytracer,” Med. Phys., vol. 33,
+no. 12, pp. 4744–4748, 2006.
+[39] S. Rit, M. Oliva, S. Brousmiche, R. Labarbe, D. Sarrut, and G. Sharp,
+“The reconstruction toolkit (rtk), an open-source cone-beam ct reconstruction toolkit based on the insight toolkit (itk),” J. Phys.: Conf. Ser,
+vol. 489, p. 012079, 2014.
+[40] W. van Aarle, W. Palenstijn, J. Cant, E. Janssens, F. Bleichrodt,
+A. Dabravolski, J. D. Beenhouwer, K. J. Batenburg, and J. Sijbers,
+“Fast and flexible x-ray tomography using the astra toolbox,” Optics
+Express, vol. 24, no. 22, pp. 25129–25147, 2016.
+[41] T. Köhler, H. Turbell, and M. Grass, “Efficient forward projection through
+discrete data sets using tri-linear interpolation,” IEEE Nuclear Science
+Symposium. Conference Record (Cat. No.00CH37149), vol. 2, pp. 15/113–
+15/115, 2000.
+[42] H. Turbell, Cone-Beam Reconstruction Using Filtered Backprojection.
+PhD thesis, 2001.
+[43] K. Hahn, H. Schöndube, K. Stiersdorfer, J. Hornegger, and F. Noo, “A
+comparison of linear interpolating models for iterative ct reconstruction,”
+Med. Phys., vol. 43, no. 12, pp. 6455–6473, 2016.
+[44] X. Pan, E. Sidky, and M. Vannier, “Why do commercial ct scanners still
+employ traditional, filtered back-projection for image reconstruction?,”
+Inverse Probl., vol. 25, no. 12, p. 123009, 2009.
+[45] J. Nuyts, B. D. Man, J. Fessler, W. Zbijewski, and F. Beekman,
+“Modelling the physics in the iterative reconstruction for transmission
+computed tomography,” Phys. Med. Biol., vol. 58, no. 12, pp. R63–R96,
+2013.
+[46] I. Ihrke and M. Magnor, “Adaptive grid optical tomography,” Graphical
+Models, vol. 68, no. 5, pp. 484–495, 2006.
+[47] T. van Leeuwen and K. Batenburg, “Adaptive grid refinement for discrete
+tomography,” Discrete Geometry for Computer Imagery. DGCI 2014.
+Lecture Notes in Computer Science, vol. 8668, 2014.
+[48] A. Sitek, R. H. Huesman, and G. T. Gullberg, “Tomographic reconstruction using an adaptive tetrahedral mesh defined by a point cloud,” IEEE
+Trans. Med. Imaging, vol. 25, no. 9, pp. 1172–1179, 2006.
+[49] J. Scheins, K. Vahedipour, U. Pietrzyk, and N. Shah, “High performance
+volume-of-intersection projectors for 3d-pet image reconstruction based
+on polar symmetries and simd vectorisation,” Phys. Med. Biol., vol. 60,
+no. 24, pp. 9349–9375, 2015.
+[50] J. Gregson, M. Krimerman, M. Hullin, and W. Heidrich, “Stochastic
+tomography and its applications in 3d imaging of mixing fluids,” ACM
+Trans. Graph., vol. 31, no. 4, p. Article 52, 2012.
+[51] J. Beyer, M. Hadwiger, and H. Pfister, “A survey of gpu-based large-scale
+volume visualization,” Eurographics Conference on Visualization, 2014.
+[52] W. Thompson and W. Lionheart, “Gpu accelerated structure-exploiting
+matched forward and back projection for algebraic iterative cone beam ct
+reconstruction,” The Third International Conference on Image Formation
+in X-Ray Computed Tomography, 2014.
+[53] J. Brokish, D. Keesing, and Y. Bresler, “Iterative circular conebeam
+ct reconstruction using fast hierarchical backprojection/reprojection
+operators,” Proc. SPIE 7622, Medical Imaging, p. 76221R, 2010.
+[54] S. Matej and J. Fessler, “Iterative tomographic image reconstruction using
+fourier-based forward and back-projectors,” IEEE Trans. Med. Imaging,
+vol. 23, no. 4, pp. 401–412, 2004.
+[55] K. Mueller, F. Xu, and N. Neophytou, “Why do commodity graphics
+hardware boards (gpus) work so well for acceleration of computed
+tomography?,” Proc. SPIE 6498, Computational Imaging V, p. 64980N,
+2007.
+[56] G. Pratx and L. Xing, “Gpu computing in medical physics: A review,”
+Med. Phys., vol. 38, no. 5, pp. 2685–2697, 2011.
+[57] P. Després and X. Jia, “A review of gpu-based medical image reconstruction,” Physica Medica, vol. 42, 2017.
+[58] M.
+Schabel,
+“3d
+shepp
+logan
+phantom,”
+https://de.mathworks.com/matlabcentral/fileexchange/9416-3d-shepplogan-phantom, 2006.
+9
+··· Manuscript · Jonas Graetz (Dittmann) · jonas.graetz@physik.uni-wuerzburg.de · 31 August 2020 ···
+[59] T. M. Buzug, Einführung in die Computertomographie: mathematischphysikalische Grundlagen der Bildrekonstruktion. Springer-Verlag, 2011.
+[60] A. H. Andersen and A. C. Kak, “Simultaneous algebraic reconstruction
+technique (sart): A superior implementation of the art algorithm,”
+Ultrasonic Imaging, vol. 6, pp. 81–94, 1984.
+10

@@ -1,0 +1,57 @@
+--- v002.md
++++ v003.md
+@@ -1,26 +1,44 @@
+ # Lighting-Specific Compositing
++
++
+ ## Overview
+-Lighting-Specific Compositing integrates lighting calculations (e.g., in-scattering, shadows) directly into the volume compositing pipeline rather than treating them as post-processes [G]. It solves the problem of efficiently approximating complex light transport effects within the ray-casting accumulation loop [G]. It differs from general [Compositing](2436-compositing.md) by embedding light-specific state into the accumulation logic, and from [Pre-Integration Lookup](2854-pre-integration-lookup.md) by avoiding precomputed lookup tables in favor of dynamic accumulation [G].
++Lighting-Specific Compositing refers to a family of compositing strategies that integrate lighting effects (such as in-scattering, multi-channel illumination, or boundary-aware shading) directly into the ray-casting accumulation loop, rather than treating lighting as a post-process or separate pass. It solves the problem of correctly integrating volumetric light transport and material interfaces within the depth-aware accumulation state. It sets itself apart from standard front-to-back compositing by modifying the sample contribution $g_k$ or opacity $\alpha_i$ based on lighting models or geometric cues before blending, and differs from [Final Scene Composition](2722-final-scene-composition.md) by handling lighting within the volume ray-caster rather than compositing final rendered layers.
++
+ ## Shared principles
+-The family augments the standard front-to-back compositing equation (see [Compositing and Blending](2515-compositing-and-blending.md)) with additional state variables that track lighting-specific quantities [G]. In lighting-specific compositing, extra buffers or accumulators are maintained to store quantities such as in-scattered intensity or per-channel illumination contributions [G]. These quantities are updated incrementally along the ray, often using weighted averages or specific blending functions that account for the statistical nature of the approximation [G]. The final pixel color is derived by combining these lighting-specific accumulators with the standard opacity-weighted color accumulation [G].
++All methods in this family operate on the standard ray-casting accumulator state $(C_{acc}, \alpha_{acc})$ initialized to $(0, 0)$ [S1, S2, unofficial]. The core mechanism updates these accumulators for each sample $i$ along the ray:
++$$
++C_{acc}^{(i)} = C_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \cdot \Delta C_i
++$$
++$$
++\alpha_{acc}^{(i)} = \alpha_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \cdot \Delta \alpha_i
++$$
++where $\Delta C_i$ and $\Delta \alpha_i$ are the lighting-modified color and opacity contributions for sample $i$. The term $(1 - \alpha_{acc}^{(i-1)})$ represents the transmittance $T$ from the camera side [S1, S51, unofficial].
++
++Unlike standard compositing where $\Delta C_i = c_i \alpha_i$ and $\Delta \alpha_i = \alpha_i$, lighting-specific methods compute $\Delta C_i$ and/or $\Delta \alpha_i$ using additional lighting or geometric information. The final pixel color is composited over a background $C_{bg}$:
++$$
++C_{final} = C_{acc} + (1 - \alpha_{acc}) C_{bg}
++$$
++Early ray termination is applied if $\alpha_{acc}$ exceeds a threshold [S10, S12, unofficial].
++
+ ## Subtopics
+ 
+ ### [Incremental Blending for In-scattering](2880-incremental-blending-for-in-scattering.md)
+-A method for approximating volumetric light scattering by accumulating scattered light contributions from multiple directions into a single stored intensity buffer. It differs from [Intermixing](5139-intermixing.md) by targeting the in-scattering term specifically using a harmonic mean update strategy, and from [Incremental Lighting for In-Scattering](3401-incremental-lighting-for-in-scattering.md) by lacking per-channel indirect attenuation. Choose this when efficient single-buffer approximation of in-scattering is required without per-channel complexity. See [Incremental Blending for In-scattering](2880-incremental-blending-for-in-scattering.md).
++Approximates volumetric light scattering by accumulating scattered light intensity from $J$ discrete directions. It differs from standard compositing by maintaining a separate accumulator for in-scattered intensity updated via an arithmetic-mean blending function derived from the current sample count $j$. Choose this when in-scattering is required but full path-tracing is too expensive.
+ 
+ ### [Intermixing](5139-intermixing.md)
+-A technique for rendering multiple co-registered volume channels simultaneously by evaluating illumination models and combining results at different stages of the ray-casting pipeline. It differs from classification-level intermixing by evaluating illumination per channel rather than interpolating input values first, and from image-level intermixing by preserving depth information during accumulation. Choose this for multi-channel data fusion where occlusion handling between channels is critical. See [Intermixing](5139-intermixing.md).
++Renders multi-channel volume data by evaluating the illumination model separately for each channel at every ray sample and combining contributions with depth-aware occlusion handling. It sets itself apart from image-level intermixing by maintaining shared opacity accumulators, ensuring correct occlusion between channels. Choose this for multi-dataset volumes (e.g., multi-physics simulations) where channel-specific lighting is needed.
++
++### [Boundary Enhancement](8071-boundary-enhancement.md)
++Improves visibility of object boundaries by modifying opacity based on the alignment between the view vector and the volume gradient (silhouette term). It sets itself apart from standard rendering by explicitly emphasizing material interfaces rather than relying solely on scalar density. Choose this for medical illustration or technical visualization where boundary clarity is critical.
+ 
+ ### Shadow Catcher Compositing
+-- **Definition:** A technique for rendering shadow catchers where the camera sees the background darkened by the ratio of visible to total direct light, with alpha carrying shadow opacity [S1, unofficial].
+-- **Steps:** Darken the background by the ratio of visible to total direct light. Store shadow opacity in the alpha channel on a transparent background [S1, unofficial].
+-- **Pitfalls:** Indirect rays must still see the ground to ensure correct global illumination interaction [S1, unofficial].
++A technique for rendering shadow catchers where the camera sees the background darkened by the ratio of visible to total direct light, with alpha carrying shadow opacity [S1, unofficial]. It darkens the background by this ratio and stores shadow opacity in the alpha channel on a transparent background [S1, unofficial]. A pitfall is that indirect rays must still see the ground to ensure correct global illumination interaction [S1, unofficial].
+ 
+ ### Contour Rendering Compositing
+-- **Definition:** A compositing step for contour rendering that uses Maximum Intensity Projection (MIP) or Local Maximum Intensity Projection (LMIP) to combine ray samples [S2, unofficial].
+-- **Steps:** Perform classification and shading for all ray samples. Composite using MIP (max intensity) or LMIP to prevent stronger contours from hiding weaker, closer contours [S2, unofficial].
++A compositing step for contour rendering that uses Maximum Intensity Projection (MIP) or Local Maximum Intensity Projection (LMIP) to combine ray samples [S2, unofficial]. It performs classification and shading for all ray samples, then composites using MIP or LMIP to prevent stronger contours from hiding weaker, closer contours [S2, unofficial].
+ 
+ ## Background
+-The concept of integrating lighting into compositing arises from the need to handle volumetric effects like in-scattering and shadows efficiently in direct volume rendering [G]. Early methods often separated lighting and compositing, leading to inaccuracies or high memory costs [G]. The specific techniques listed here have been developed to address these efficiency and accuracy trade-offs in real-time and offline rendering contexts [G]. The shadow catcher technique is often associated with physically based rendering pipelines that require accurate shadow reception for compositing synthetic volumes into real-world backgrounds or for GI baking [G].
++The concept of integrating lighting into compositing arises from the need to simulate complex light transport phenomena (like in-scattering) and multi-material interactions in real-time or interactive volume rendering. Shadow catcher compositing is used in physical rendering pipelines to capture shadows on transparent backgrounds for compositing into other scenes [S1, unofficial]. Contour rendering compositing using MIP/LMIP was developed to provide intuitive previews of volume data without prior knowledge of the dataset structure [S2, unofficial].
++
+ ## Sources
+ [S1] Add volumetric rendering, advanced materials, and imager effects, https://github.com/MihrimatriX/photon-engine/pull/3, fetched 2026-10-28 (unofficial)

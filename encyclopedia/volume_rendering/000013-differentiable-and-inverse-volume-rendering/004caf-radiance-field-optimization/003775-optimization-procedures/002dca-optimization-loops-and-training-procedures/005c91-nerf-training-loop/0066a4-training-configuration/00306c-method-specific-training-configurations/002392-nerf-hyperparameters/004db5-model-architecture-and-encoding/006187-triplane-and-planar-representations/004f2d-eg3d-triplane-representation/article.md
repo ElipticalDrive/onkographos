@@ -1,0 +1,60 @@
+# EG3D Triplane Representation
+
+Also called: ConvONet / EG3D (Tri-plane), EG3D Triplane-Based 3D GAN, Hybrid Triplane Representation, Tri-plane Features, Tri-plane representation
+
+## Overview
+The EG3D Triplane Representation is a 3D scene encoding method that stores features in three orthogonal 2D grids ($xy, xz, yz$) to enable efficient neural volumetric rendering [S2]. It distinguishes itself from standard 3D voxel grids by reducing memory footprint through 2D convolution and from MLP-only representations by explicitly storing spatial features, though it introduces axis-aligned bias that can complicate handling of complex structures [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A noise vector $z$ and camera pose parameters (in the generative context) or a 3D point $\mathbf{x} \in \mathbb{R}^3$ (in the query context).
+*   **Output:** For a point query, a feature vector $\mathbf{f}$, color $c$, and volume density $\sigma$. For rendering, a feature image $\mathbf{I}_f \in \mathbb{R}^{32 \times 128 \times 128}$, a raw RGB image $\mathbf{I}_{128} \in \mathbb{R}^{3 \times 128 \times 128}$, and optionally a depth map $\mathbf{I}_D \in \mathbb{R}^{128 \times 128}$ [S2].
+
+**Data Structures**
+The scene is represented by a triplane tensor $\mathbf{T}$ with shape $\mathbb{R}^{3 \times C \times D \times D}$ [S2].
+*   **Dimensions:** $3$ axis-aligned planes ($xy, xz, yz$).
+*   **Channels ($C$):** 32.
+*   **Resolution ($D \times D$):** $256 \times 256$ [S2].
+*   **Total Size:** $3 \times 32 \times 256 \times 256$ elements [S2].
+
+**Feature Aggregation**
+To query a point $\mathbf{x}$, features are gathered by projecting $\mathbf{x}$ onto each canonical plane and bilinearly interpolating the nearby features [S2]. Let $\mathbf{f}_{xy}, \mathbf{f}_{xz}, \mathbf{f}_{yz}$ be the features gathered from the respective planes. These are combined using a mean operator $\Phi$ and passed to a lightweight MLP to predict radiance field properties [S2]:
+
+$$
+(\mathbf{f}, c, \sigma) = \text{MLP}(\Phi(\mathbf{f}_{xy}, \mathbf{f}_{xz}, \mathbf{f}_{yz}))
+$$
+
+The output values, including color, are independent of viewing direction and depend only on $\mathbf{x}$ [S2].
+
+**Rendering**
+Points are sampled along rays, and their features are aggregated to render images via volume rendering [S2].
+1.  Accumulate points along rays using the queried $(\mathbf{f}, c, \sigma)$ values.
+2.  Perform volume rendering [Max 1995] to produce a feature image $\mathbf{I}_f \in \mathbb{R}^{32 \times 128 \times 128}$ and a raw RGB image $\mathbf{I}_{128} \in \mathbb{R}^{3 \times 128 \times 128}$ [S2].
+3.  Extract a dense depth map $\mathbf{I}_D \in \mathbb{R}^{128 \times 128}$ from the volume rendering [S2].
+4.  Feed $\mathbf{I}_f$ and $\mathbf{I}_{128}$ into a 2D super-resolution network to yield the final output $\mathbf{I}_{512} \in \mathbb{R}^{3 \times 512 \times 512}$ [S2]:
+
+$$
+\text{SuperRes}(\mathbf{I}_f, \mathbf{I}_{128}) = \mathbf{I}_{512}
+$$
+
+**Parameters**
+*   **Image Resolution:** Input images and final output are $512 \times 512$ [S2].
+*   **Intermediate Resolution:** $128 \times 128$ [S2].
+
+**Pitfalls**
+*   **Axis-Aligned Bias:** The orthogonal coordinate transformation can be challenging to handle complicated structures due to the axis-aligned bias of the representation [S1, unofficial].
+*   **Optimization:** Optimization is more easily affected by local minima compared to MLP representations that benefit from inductive smoothness bias [S1, unofficial].
+*   **Memory:** Requires high spatial resolution to represent fine details, leading to large memory usage [S1, unofficial].
+
+## Operating characteristics
+*   **Performance:** Rendering from a triplane achieves 42 fps on an RTX 3090 [S2].
+*   **Quality:** Provides comparable quality to state-of-the-art 2D GANs by FID [S2].
+*   **Memory:** Significantly reduces memory footprint compared to standard 3D grids by using 2D convolutions [S1, unofficial].
+*   **Limitations:** The axis-aligned nature limits its ability to represent complex, non-axis-aligned structures efficiently [S1, unofficial].
+
+## Background
+The triplane representation was used in ConvONet and EG3D to model 3D scenes by applying an orthogonal coordinate transformation to spatial points within a bounded scene [S1, unofficial]. It is viewed as an instance of the Factor Fields framework with $N=1$, $\gamma_1(\mathbf{x}) = \text{Orthogonal-2D}(\mathbf{x})$, $f_1(\mathbf{x}) = \text{2D-Maps}(\mathbf{x})$, and $P(\mathbf{x}) = \text{MLP}(\mathbf{x})$ [S1, unofficial]. EG3D specifically learns unconditional 3D-aware image generation from single-view images and noisy camera poses [S2].
+
+## Sources
+[S1] Factor Fields: A Unified Framework for Neural Fields and Beyond, https://doi.org/10.48550/arxiv.2302.01226, fetched 2026-10-26 (unofficial)
+[S2] Real-Time Radiance Fields for Single-Image Portrait View Synthesis, https://doi.org/10.1145/3592460, fetched 2026-10-27

@@ -1,0 +1,150 @@
+# Stereo Pseudo 3D Rendering via Image Stacks
+
+Also called: Pseudo Stereo Pair Generation, Web-based Stereo Pseudo 3D
+
+## Overview
+This method generates a stereo pair of images from a pre-existing 2D image stack to simulate binocular parallax and volumetric depth perception using standard web technologies. It solves the problem of visualizing scientific volumetric data (e.g., medical scans) in a browser without specialized hardware or client-side rendering engines. It is distinguished from full ray-casting volume rendering by relying on image overlay and CSS positioning rather than per-pixel shading, and from single-slice viewers like BrainMaps.org by allowing simultaneous visibility of multiple depth layers [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A stack of $N$ 2D images (e.g., PNG slices) representing cross-sections of a volume.
+*   **Output:** Two HTML DOM trees (stacks) containing positioned `<img>` elements that, when viewed with stereo merging techniques (e.g., cross-viewing), produce a 3D effect.
+
+**Data Structures**
+The implementation relies on the HTML Document Object Model (DOM).
+*   **Containers:** Two `<div>` elements with `position: absolute` CSS styling. One serves as the base stack (`imgstacks`), the other as the offset stack (`imgoffsets`).
+*   **Image Elements:** `<img>` nodes created dynamically. Each has `position: absolute`, and explicit `top`, `left`, `width`, and `height` style properties.
+*   **Preprocessing:** Input images must have alpha channels added, with background pixels set to transparent to allow proper overlay blending [S1].
+
+**Parameters**
+*   **Opacity of interleaving layer ($\alpha$):** Typically 10% (0.1) for the semi-opaque white image [S1].
+*   **Horizontal offset per slice ($\Delta x$):** Typically 1 pixel relative to the previous slice's position [S1].
+*   **Image Resolution:** Example usage subsampled to 180x180 pixels from 512x512 source [S1].
+
+**Steps**
+1.  **Preprocess Images:** Convert input slices to PNG format with transparent backgrounds. Generate a single semi-opaque white image (e.g., 180x180 pixels, 10% opacity) to be reused for distance attenuation [S1].
+2.  **Initialize DOM:** Create two absolute-positioned `<div>` containers in the HTML structure: one for the base stack and one for the offset stack [S1].
+3.  **Generate Base Stack:**
+    *   Iterate through the image stack from $i = 0$ to $N-1$.
+    *   For each data slice $i$:
+        *   Create an `<img>` element.
+        *   Set `src` to the data slice.
+        *   Set `position` to `absolute`.
+        *   Set `top` and `left` to the base coordinates (e.g., 0,0 relative to container).
+        *   Append to the base stack container.
+    *   Insert the semi-opaque white image between every pair of data slices to simulate distance attenuation (aerial perspective) [S1].
+4.  **Generate Offset Stack:**
+    *   Iterate through the image stack from $i = 0$ to $N-1$.
+    *   For each data slice $i$:
+        *   Create an `<img>` element.
+        *   Set `src` to the data slice.
+        *   Set `position` to `absolute`.
+        *   Calculate horizontal position: $x_i = x_{i-1} + \Delta x$. For the first slice, $x_0$ is the base left position.
+        *   Set `left` to $x_i$. Keep `top` identical to the base stack.
+        *   Append to the offset stack container.
+    *   Insert the semi-opaque white image between every pair of data slices in the offset stack as well [S1].
+5.  **Display:** Load both stacks into the browser. The user views the combined result using stereo merging (e.g., crossing eyes for parallel view or diverging for crossed view) [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_stereo_pseudo_3d(image_stack, num_slices, offset_per_slice=1, opacity=0.1):
+    """
+    Generates DOM structures for stereo pseudo 3D rendering.
+    image_stack: List of image data/paths.
+    num_slices: Number of data slices N.
+    offset_per_slice: Horizontal pixel shift per slice depth.
+    opacity: Opacity of the interleaving attenuation layer.
+    """
+    # 1. Preprocessing assumed done: images are transparent PNGs.
+    # Generate a single semi-opaque white image for attenuation.
+    # In a real implementation, this is a static asset downloaded once.
+    attenuation_image = create_semi_opaque_white_image(opacity)
+
+    # 2. Initialize DOM containers
+    base_container = create_dom_element("div", id="imgstacks", position="absolute")
+    offset_container = create_dom_element("div", id="imgoffsets", position="absolute")
+    content_container = create_dom_element("div", id="imgcontent", position="absolute")
+    content_container.append(base_container)
+    content_container.append(offset_container)
+
+    # 3. Build Base Stack
+    current_top = 0
+    current_left = 0
+    
+    for i in range(num_slices):
+        # Add data slice
+        img_elem = create_dom_element("img")
+        img_elem.src = image_stack[i]
+        img_elem.style.position = "absolute"
+        img_elem.style.top = str(current_top) + "px"
+        img_elem.style.left = str(current_left) + "px"
+        base_container.append(img_elem)
+        
+        # Add attenuation layer between slices (except after the last one)
+        if i < num_slices - 1:
+            att_img = create_dom_element("img")
+            att_img.src = attenuation_image.src
+            att_img.style.position = "absolute"
+            att_img.style.top = str(current_top) + "px"
+            att_img.style.left = str(current_left) + "px"
+            base_container.append(att_img)
+
+    # 4. Build Offset Stack
+    # The offset stack mirrors the base stack but with horizontal shifts
+    # The shift accumulates or is relative to the previous slice.
+    # Note: The source implies offsetting relative to the previous location.
+    
+    # We need to track the position for the offset stack independently
+    offset_top = 0
+    offset_left = 0
+    
+    for i in range(num_slices):
+        # Add data slice with offset
+        img_elem = create_dom_element("img")
+        img_elem.src = image_stack[i]
+        img_elem.style.position = "absolute"
+        img_elem.style.top = str(offset_top) + "px"
+        # Apply horizontal offset. 
+        # Source says "offsetted by 1 pixel from the previous location".
+        # This implies a cumulative shift or a shear.
+        # If it's a shear, the shift depends on depth (i).
+        # Source: "images on the top of the stack will be shifted the most"
+        # This implies cumulative offset: offset = i * offset_per_slice
+        current_offset_x = i * offset_per_slice
+        img_elem.style.left = str(current_offset_x) + "px"
+        offset_container.append(img_elem)
+        
+        # Add attenuation layer
+        if i < num_slices - 1:
+            att_img = create_dom_element("img")
+            att_img.src = attenuation_image.src
+            att_img.style.position = "absolute"
+            att_img.style.top = str(offset_top) + "px"
+            att_img.style.left = str(current_offset_x) + "px"
+            offset_container.append(att_img)
+
+    return content_container
+```
+
+**Edge Cases and Pitfalls**
+*   **Pseudo-Accuracy:** Fixed linear offsetting produces "pseudo" accurate stereo pairs, not fully accurate geometric projections. Nonlinear offsetting based on a depth function can improve accuracy but is not implemented in the basic method [S1].
+*   **Viewpoint Rigidity:** The viewpoint is predetermined by the image stack organization. Interactive viewpoint changes (rotation, zoom) are not supported on the fly [S1].
+*   **Viewer Strain:** Stereo merging requires the user to perform cross-viewing or parallel viewing, which can cause eye strain. Optical aids (mirrors/prisms) may be required [S1].
+*   **Performance Scaling:** Memory and load time scale linearly with the number of images. Large stacks (e.g., 500+ images) may require significant bandwidth and memory [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear $O(N)$ with respect to the number of images $N$ for loading and DOM construction.
+*   **Memory Complexity:** Linear $O(N)$, as each image is stored in the browser cache and DOM.
+*   **Measured Performance:** On a 1.7 GHz PC with 1GB RAM, displaying 50 overlayed images took approximately 3 seconds after download. Load time and memory usage scaled linearly for 15, 30, and 50 images (95kB–126kB each) on Firefox 2.0 and IE 7.0 [S1].
+*   **Strengths:** Requires no specialized software, hardware, or client-side computation; works in standard web browsers with CSS/JS support. Allows viewing multiple stacked images simultaneously to perceive volumetric structures [S1].
+*   **Limitations:** No interactive viewpoint changes; stereo accuracy is approximate; requires user ability to merge stereo images; potential eye strain [S1].
+*   **When to Use:** Web-based display of static scientific volumetric data where interactive 3D rendering is not feasible or necessary.
+*   **When Not to Use:** When interactive viewpoint rotation, high-precision geometric stereo, or real-time animation is required [S1].
+
+## Background
+The method was developed by D. C.-Y. Eng and Y. Choe and presented at the Pacific Graphics 2008 conference [S1]. It was applied to visualize 50 slices of mouse spinal cord scans from the KESM (Kavli Institute for the Exploration of the Spinal Cord) dataset, where blood vessels were stained with India ink. The approach contrasts with BrainMaps.org, which displays one slide at a time, and other web-based 3D approaches that require specialized software or hardware [S1].
+
+## Sources
+[S1] Stereo Pseudo 3D Rendering for Web-based Display of Scientific Volumetric Data, https://doi.org/10.2312/vg/vg-pbg08/073-080, fetched 2026-10-26

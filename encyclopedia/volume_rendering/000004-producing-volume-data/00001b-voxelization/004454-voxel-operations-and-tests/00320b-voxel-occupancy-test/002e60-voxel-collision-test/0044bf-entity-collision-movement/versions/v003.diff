@@ -1,0 +1,326 @@
+--- v002.md
++++ v003.md
+@@ -1,145 +1,203 @@
+ # Entity Collision & Movement
+ 
+-Also called: Entity Physics, Grid-Based Movement, Player Movement & Collision, Voxel Entity Physics
++Also called: Entity Physics, Grid-Based Movement, PhysicsSolver, Player Movement & Collision, Voxel Entity Physics, VoxelCore Collision Detection, VoxelCore Physics Solver
+ 
+ ## Overview
+-Entity Collision & Movement handles the physics simulation and positional updates of an entity within a voxel grid, ensuring it moves correctly without intersecting solid blocks [S2, unofficial]. It distinguishes itself from simple raycasting by integrating gravity, ground detection, and axis-aligned sliding against voxel walls [S1, S2, unofficial].
++Entity Collision & Movement is a discrete-time physics solver for voxel-based environments that handles collision detection, response, step-height climbing, and crouching for dynamic hitboxes against static voxel chunks and other dynamic solid hitboxes [S2, unofficial]. It differs from simple grid checks by integrating gravity, ground detection, and axis-aligned movement with wall-sliding collision detection against voxel blocks [S3, unofficial]. It builds on [Voxel Collision Test](5774-voxel-collision-test.md) by extending simple occupancy checks into a full state-based simulation loop.
+ 
+ ## How it works
+-**Inputs:** Entity state (position, velocity, yaw), input direction vector, time step ($dt$), and the voxel world data (chunks/blocks).
+-**Outputs:** Updated entity position and velocity.
++**Inputs and Outputs:**
++- **Inputs:** Entity position, velocity, input direction (yaw, forward/strafe vectors), time delta ($dt$), and a collection of static voxel chunks and dynamic hitboxes.
++- **Outputs:** Updated entity position, velocity, and grounded state.
+ 
+ **Data Structures:**
+-*   **Entity:** Contains `position` (vec3), `velocity` (vec3), and `onGround` (bool) [S2, unofficial].
+-*   **World:** A collection of `Chunk` objects. Each chunk has a fixed size (`CHUNK_SIZE`) and height (`CHUNK_HEIGHT`) [S2, unofficial]. Blocks are stored in a 3D array `blocks[localX][localY][localZ]` [S2, unofficial].
+-*   **Block ID:** Solid blocks are represented by any integer other than 255 (air) [S2, unofficial].
++The core state is stored in a `Hitbox` struct [S2, unofficial]:
++- `position`: `glm::vec3` (current world position)
++- `velocity`: `glm::vec3` (current velocity)
++- `halfsize`: `glm::vec3` (half-extents of the AABB)
++- `grounded`: `bool` (is currently on ground)
++- `prevGrounded`: `bool` (state from previous substep)
++- `prevVelocity`: `glm::vec3`
++- `prevPosition`: `glm::vec3`
++- `groundMaterial`: `string`
++- `groundVelocity`: `glm::vec3`
++- `gravityScale`: `float`
++- `stepHeight`: `float` (maximum climbable step height)
++- `elasticity`: `float` (coefficient of restitution)
++- `type`: `BodyType` enum (STATIC, DYNAMIC, etc.)
++- `crouching`: `bool`
++
++An `AABB` struct is used for collision checks [S2, unofficial]:
++- `b`: `glm::vec3` (max bounds)
++- Methods: `scale(glm::vec3)`, `translated(glm::vec3)`, `intersects(AABB)`, `min()`, `max()`.
++
++Voxel access uses `blockAt(goal, chunks)` [S3, unofficial]:
++- Computes chunk indices: $x_{chunk} = \lfloor x / \text{CHUNK\_SIZE} \rfloor$, $z_{chunk} = \lfloor z / \text{CHUNK\_SIZE} \rfloor$.
++- Accesses `chunk->blocks[localX][localY][localZ]`.
++- Returns `255` for air, otherwise the block ID.
+ 
+ **Parameters:**
+-*   `MOVE_SPEED`: 10 [S2, unofficial].
+-*   `JUMP_POWER`: 10 [S2, unofficial].
+-*   `GRAVITY`: 30 [S2, unofficial].
+-*   `ENTITY_HEIGHT`: 2 blocks [S2, unofficial].
+-
+-**Steps:**
+-1.  **Gravity Application:** Apply gravitational acceleration to the vertical velocity: $velocity.y \leftarrow velocity.y - GRAVITY \times dt$ [S2, unofficial].
+-2.  **Ground Detection:** Check the block at the entity's feet position. The check location is `position - (0, ENTITY_HEIGHT, 0)` [S2, unofficial].
+-    *   If the block is not air (255), set `onGround = true`.
+-    *   If `onGround` is true and `velocity.y < 0`, set `velocity.y = 0` [S2, unofficial].
+-    *   Snap `position.y` to `ceil(position.y)` to align with the block surface [S2, unofficial].
+-    *   If not on ground, update vertical position: $position.y \leftarrow position.y + velocity.y \times dt$ [S2, unofficial].
+-3.  **Fall-off Reset:** If `position.y < 0`, teleport the entity to `y = 100` and reset `velocity.y` to 0 [S2, unofficial].
+-4.  **Horizontal Movement Calculation:**
+-    *   Normalize the input direction vector to the horizontal plane (ignore Y) [S2, unofficial].
+-    *   Calculate the `front` vector based on yaw: $front = (\cos(yaw), 0, \sin(yaw))$ [S2, unofficial].
+-    *   Calculate the `right` vector: $right = normalize(cross(front, up))$, where $up = (0, 1, 0)$ [S2, unofficial].
+-    *   Calculate the movement `change` vector:
+-        $$change = front \times (-input.z \times MOVE\_SPEED \times dt) + right \times (input.x \times MOVE\_SPEED \times dt)$$
+-        Note: The source code uses `dir.z` for forward/backward and `dir.x` for strafe, with a negative sign on the front component [S2, unofficial].
+-5.  **Collision Resolution (Axis-Aligned Sliding):**
+-    *   Define `goal` as `position - (0, ENTITY_HEIGHT - 0.5, 0)` [S2, unofficial].
+-    *   Check if `blockAt(goal + change)` is air (255).
+-        *   If yes, update position to `goal + change + (0, ENTITY_HEIGHT - 0.5, 0)` [S2, unofficial].
+-        *   If no, attempt to slide along X: Set `change.x = 0`. Check `blockAt(goal + change)`.
+-            *   If air, update position [S2, unofficial].
+-            *   If not, attempt to slide along Z: Set `change.z = 0` (resetting X to 0 as well). Check `blockAt(goal + change)`.
+-            *   If air, update position [S2, unofficial].
+-6.  **Jumping:** If `onGround` is true and jump is triggered, set `velocity.y = JUMP_POWER` [S2, unofficial].
++- `E`: Small epsilon for floating-point comparisons and AABB scaling (e.g., $E \times 2.0f$) [S2, unofficial].
++- `MOVE_SPEED`: 10 [S3, unofficial].
++- `MAX_FIX`: Maximum distance for position correction [S2, unofficial].
++- `JUMP_POWER`: 10 [S3, unofficial].
++- `GRAVITY`: 30 (downward acceleration per second) [S3, unofficial].
++- `ENTITY_HEIGHT`: 2 (vertical size in blocks) [S3, unofficial].
++- `substeps`: Number of physics substeps per frame (e.g., 8) [S2, unofficial].
++
++**Algorithm Steps:**
++
++1. **Initialization:**
++   - Clear `groundMaterial`.
++   - Set `prevGrounded = grounded`.
++   - Reset `grounded = false`.
++   - Store `prevVelocity = velocity`.
++   - Calculate substep delta: $dt_{sub} = dt / \text{substeps}$ [S2, unofficial].
++
++2. **Gravity Application:**
++   - Apply gravity to velocity: $v_y \leftarrow v_y - \text{GRAVITY} \times dt_{sub}$ [S1, S2, unofficial].
++   - Update position: $p \leftarrow p + v \times dt_{sub} + \frac{1}{2} g \times dt_{sub}^2$ [S2, unofficial].
++
++3. **Ground Detection:**
++   - Check block at $p - (0, \text{ENTITY\_HEIGHT}, 0)$ [S3, unofficial].
++   - If block $\neq 255$:
++     - Set `onGround = true`.
++     - If $v_y < 0$, set $v_y = 0$.
++     - Snap $p_y = \lceil p_y \rceil$ [S3, unofficial].
++
++4. **Movement Calculation:**
++   - Compute horizontal direction from yaw:
++     - $\vec{front} = (\cos(\text{yaw}), 0, \sin(\text{yaw}))$
++     - $\vec{right} = \text{normalize}(\vec{front} \times (0,1,0))$ [S3, unofficial].
++   - Calculate change vector:
++     - $\Delta \vec{p} = \vec{front} \times (-\text{MOVE\_SPEED} \times dt_{sub}) + \vec{right} \times (\text{MOVE\_SPEED} \times dt_{sub})$ [S3, unofficial].
++   - Angle wrapping: if $\text{yaw} \ge 2\pi$ or $\text{yaw} \le -2\pi$, reset to 0 [S1, unofficial].
++
++5. **Collision Resolution (Axis-Aligned):**
++   - Check collision at $p + \Delta \vec{p}$.
++   - If air (255), move there.
++   - Else, zero out X component of $\Delta \vec{p}$ and recheck. If air, move.
++   - Else, zero out Z component of $\Delta \vec{p}$ and recheck. If air, move [S3, unofficial].
++   - For complex shapes, use `calc_collision` template which iterates solid hitboxes and voxel chunks, checking intersection and direction [S2, unofficial].
++
++6. **Step-Up Climbing:**
++   - If `stepHeight > 0` and $v_y \le 0$:
++     - Check for obstacles ahead in movement direction by scaling AABB and iterating x/z coordinates [S2, unofficial].
++     - If obstacle is climbable (height $\le$ `stepHeight`), adjust position and velocity to climb [S2, unofficial].
++
++7. **Crouching:**
++   - If not crouching or not grounded, return [S2, unofficial].
++   - Check ground contact at two axes (x and z) by checking obstacles at $y = p_y - \text{halfsize}_y - E$ [S2, unofficial].
++   - If no obstacle found at an axis, reset position and velocity at that axis to initial values and zero velocity [S2, unofficial].
++   - Force `grounded = true` after check [S2, unofficial].
++
++8. **Dynamic Hitbox Interaction:**
++   - Find nearby solid hitboxes using spatial culling based on movement budget and extents [S2, unofficial].
++   - For each dynamic hitbox, call `calcCollisions` with `stepHeight` if previously grounded and `gravityScale > 0` [S2, unofficial].
++   - Check ceiling collisions if $v_y > 0$ by iterating x/z coordinates and scaling AABB [S2, unofficial].
++
++9. **Edge Cases:**
++   - If $p_y < 0$, teleport to $y=100$ and reset $v_y = 0$ [S3, unofficial].
++   - Floating-point precision issues are mitigated by using epsilon $E$ in AABB scaling and distance checks [S2, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def update_entity(entity, input_dir, yaw, chunks, dt):
+-    # 1. Gravity
+-    entity.velocity.y -= GRAVITY * dt
+-
+-    # 2. Ground Detection
+-    # Check block at feet: position - (0, ENTITY_HEIGHT, 0)
+-    feet_pos = entity.position - vec3(0, ENTITY_HEIGHT, 0)
+-    block = block_at(feet_pos, chunks)
+-
+-    if block != 255:
+-        entity.on_ground = True
+-        if entity.velocity.y < 0:
+-            entity.velocity.y = 0
+-        entity.position.y = ceil(entity.position.y)
+-    else:
+-        entity.on_ground = False
+-        entity.position.y += entity.velocity.y * dt
+-
+-    # 3. Fall-off Reset
++def update_entity(entity, chunks, dynamic_hitboxes, dt, yaw, input_dir):
++    substeps = 8
++    dt_sub = dt / substeps
++    
++    # Initialize state
++    entity.prev_ground = entity.grounded
++    entity.grounded = False
++    entity.prev_velocity = entity.velocity
++    
++    for i in range(substeps):
++        # Apply gravity
++        entity.velocity.y -= GRAVITY * dt_sub
++        entity.position += entity.velocity * dt_sub + 0.5 * GRAVITY * dt_sub * dt_sub
++        
++        # Ground detection
++        check_pos = entity.position - (0, ENTITY_HEIGHT, 0)
++        block = block_at(check_pos, chunks)
++        if block != 255:
++            entity.grounded = True
++            if entity.velocity.y < 0:
++                entity.velocity.y = 0
++            entity.position.y = math.ceil(entity.position.y)
++        
++        # Calculate movement
++        front = (math.cos(yaw), 0, math.sin(yaw))
++        right = normalize(cross(front, (0, 1, 0)))
++        move_dir = normalize((input_dir.x, 0, input_dir.z))
++        
++        change = front * (-MOVE_SPEED * dt_sub) * move_dir.z + \
++                 right * (MOVE_SPEED * dt_sub) * move_dir.x
++        
++        # Collision resolution
++        goal = entity.position + change
++        if block_at(goal, chunks) == 255:
++            entity.position = goal
++        else:
++            change.x = 0
++            goal = entity.position + change
++            if block_at(goal, chunks) == 255:
++                entity.position = goal
++            else:
++                change.z = 0
++                goal = entity.position + change
++                if block_at(goal, chunks) == 255:
++                    entity.position = goal
++        
++        # Step-up climbing
++        if entity.step_height > 0 and entity.velocity.y <= 0:
++            # Check for climbable obstacles ahead
++            # ... (simplified: check block at position + change + (0, step_height, 0))
++            pass
++            
++        # Crouching check
++        if entity.crouching and entity.grounded:
++            # Check ground contact at x and z axes
++            # ... (simplified: check obstacles at y = pos.y - halfsize.y - E)
++            pass
++            
++    # Edge case: fall below world
+     if entity.position.y < 0:
+         entity.position.y = 100
+         entity.velocity.y = 0
+-
+-    # 4. Horizontal Movement
+-    # Normalize input to horizontal plane
+-    move_dir = normalize(vec3(input_dir.x, 0, input_dir.z))
+-    
+-    # Calculate vectors
+-    front = vec3(cos(yaw), 0, sin(yaw))
+-    up = vec3(0, 1, 0)
+-    right = normalize(cross(front, up))
+-    
+-    # Calculate change vector
+-    # Source: change += front * dir.z * (float) -MOVE_SPEED * (float)dt;
+-    # Source: change += right * dir.x * (float) MOVE_SPEED * (float)dt;
+-    change = front * (-move_dir.z * MOVE_SPEED * dt) + right * (move_dir.x * MOVE_SPEED * dt)
+-
+-    # 5. Collision Resolution
+-    # Goal is position adjusted for entity height offset used in block check
+-    goal = entity.position - vec3(0, ENTITY_HEIGHT - 0.5, 0)
+-    
+-    if block_at(goal + change, chunks) == 255:
+-        entity.position = goal + change + vec3(0, ENTITY_HEIGHT - 0.5, 0)
+-    else:
+-        # Try sliding X
+-        new_change = change
+-        new_change.x = 0
+-        if block_at(goal + new_change, chunks) == 255:
+-            entity.position = goal + new_change + vec3(0, ENTITY_HEIGHT - 0.5, 0)
+-        else:
+-            # Try sliding Z
+-            new_change = change
+-            new_change.z = 0
+-            if block_at(goal + new_change, chunks) == 255:
+-                entity.position = goal + new_change + vec3(0, ENTITY_HEIGHT - 0.5, 0)
+-
+-def jump(entity):
+-    if entity.on_ground:
+-        entity.velocity.y = JUMP_POWER
+-
+-def block_at(goal, chunks):
+-    # Round to nearest integer block coordinate
+-    x = round(goal.x - 0.5)
+-    y = goal.y
+-    z = round(goal.z - 0.5)
+-    
+-    # Calculate chunk indices
+-    x_chunk_idx = floor(x / CHUNK_SIZE)
+-    z_chunk_idx = floor(z / CHUNK_SIZE)
+-    
+-    # Find the correct chunk
+-    for chunk in chunks:
+-        if y >= chunk.CHUNK_HEIGHT:
+-            break
+-        if chunk.position.x == x_chunk_idx and chunk.position.y == z_chunk_idx:
+-            local_x = x - chunk.position.x * CHUNK_SIZE
+-            local_y = y
+-            local_z = z - chunk.position.y * CHUNK_SIZE
+-            return chunk.blocks[local_x][local_y][local_z]
+-            
+-    return 255 # Air if chunk not found or out of bounds
++        
++    # Angle wrapping
++    if yaw >= 2 * math.pi or yaw <= -2 * math.pi:
++        yaw = 0
+ ```
+ 
++## Subtopics
++
++### Voxel Collision Test
++Simple grid check for occupancy. [Voxel Collision Test](5774-voxel-collision-test.md)
++
++### Voxel Occupancy Test
++Basic block existence check. [Voxel Occupancy Test](5773-voxel-occupancy-test.md)
++
++### Voxel Operations and Tests
++General voxel manipulation. [Voxel Operations and Tests](5772-voxel-operations-and-tests.md)
++
++### Voxelization
++Converting geometry to voxels. [Voxelization](5771-voxelization.md)
++
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per frame for a single entity, assuming chunk lookup is $O(1)$ or $O(\log N)$ depending on chunk storage structure. The collision resolution involves at most 3 block lookups [S2, unofficial].
+-*   **Memory Complexity:** $O(1)$ additional memory per entity [S2, unofficial].
+-*   **Strengths:** Simple to implement; provides basic "slide" behavior against walls; handles gravity and ground detection [S2, unofficial].
+-*   **Limitations:** Only supports axis-aligned sliding; does not handle diagonal sliding or complex collisions (e.g., head-bumping ceilings during movement) [S2, unofficial]. The teleport-on-fall is a simple safeguard rather than a physics solution [S2, unofficial].
+-*   **When to use:** Simple voxel games where high-fidelity physics is not required [S2, unofficial].
++- **Time Complexity:** Spatial culling reduces collision checks from $O(N \times M)$ to $O(N \times K)$ where $K$ is the number of nearby solids per hitbox [S2, unofficial].
++- **Memory Complexity:** Linear in the number of active hitboxes and chunks.
++- **Performance:** Depends on the number of substeps and nearby solids. Higher substeps improve stability but increase CPU cost [S2, unofficial].
++- **Strengths:** Handles complex interactions like step-climbing, crouching, and dynamic hitboxes. Stable with discrete substeps [S2, unofficial].
++- **Limitations:** Discrete nature can cause tunneling at high speeds. Requires careful tuning of `stepHeight` and `MAX_FIX` [S2, unofficial].
++- **When to Use:** Real-time voxel games requiring player physics.
++- **When Not to Use:** High-precision continuous collision detection is needed.
+ 
+ ## Background
+-This method is derived from implementations found in voxel engine tutorials and prototypes, specifically those involving grid-based movement and collision detection [S1, S2, unofficial]. It is commonly used in early-stage voxel game development to provide basic player interaction with the world [S1, S2, unofficial].
++Originating from voxel game engines like VoxelCore and VoxelEngine, this method implements a discrete-time physics solver for voxel environments [S2, S3, unofficial]. It evolved from simple raycasting prototypes to full state-based simulation with substeps to handle gravity, ground detection, and collision response [S1, S2, S3, unofficial].
+ 
+ ## Sources
+ [S1] Raycasting Prototype with DDA, https://github.com/GPMLAD/raycasting, fetched 2026-10-25 (unofficial)
+-[S2] GitHub Repo for VoxelEngine, https://github.com/TheSlabby/VoxelEngine, fetched 2026-10-29 (unofficial)+[S2] MihailRis/voxelcore, https://github.com/MihailRis/voxelcore, fetched 2026-10-26 (unofficial)
++[S3] GitHub Repo for VoxelEngine, https://github.com/TheSlabby/VoxelEngine, fetched 2026-10-29 (unofficial)

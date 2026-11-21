@@ -1,0 +1,183 @@
+--- v001.md
++++ v002.md
+@@ -19,5 +19,5 @@
+ 
+ ### Data Structures
+-*   **Interval Tree (CPU):** Stores the extrema (min/max) of the scalar field for each cell. Used for early cell culling to determine if a cell contains the isovalue [S1, book].
++*   **Interval Tree (CPU):** Stores the extrema (min/max) of the scalar field for each cell [S1, book]. Used for early cell culling to determine if a cell contains the isovalue [S1, book].
+ *   **VBO_unproj (GPU):** Vertex Buffer Object storing unprojected seeds. Each seed has 4 components: $(x, y, z, w)$, where $w$ stores the Finite-Time Lyapunov Exponent (FTLE) value [S1, book].
+ *   **VBO_quads (GPU):** Vertex Buffer Object storing the generated surface-tangent quadrilaterals (quads) [S1, book].
+@@ -31,10 +31,9 @@
+ 
+ ### Phase 1: Object Space Pre-processing
+-This phase generates an initial approximation of the isosurface. It is executed once per dataset for the heuristic, and re-executed when the isovalue changes [S1, book].
++This phase generates an initial approximation of the isosurface [S1, book]. The heuristic is executed once per dataset and does not depend on the isovalue [S1, book]. The object-space phase (seed projection) is re-executed when the isovalue changes [S1, book].
+ 
+ 1.  **Seeding:** Place $n_s$ seeds uniformly distributed inside each cell [S1, book].
+ 2.  **Gradient Integration:** Integrate the gradient field $\nabla P$ from each seed position for $n_i$ steps to guide the seeds towards the isosurface [S1, book].
+ 3.  **Newton-Raphson Refinement:** Apply $n_{N1}$ Newton-Raphson iterations to project the integrated seeds precisely onto the isosurface $P(\mathbf{x}) = \tau$. The iteration stops if the error $\epsilon_1$ is reached [S1, book].
+-    *   Formula: $\mathbf{x}_{new} = \mathbf{x}_{old} - \frac{P(\mathbf{x}_{old}) - \tau}{\nabla P(\mathbf{x}_{old}) \cdot \mathbf{d}_{proj}}$ (Directional NR along gradient) [S1, book].
+ 4.  **Heuristic (FTLE & Neighbor Exclusion):**
+     *   Compute the FTLE for each seed to estimate the "stretching" of the gradient flow, which correlates with the required quad size [S1, book].
+@@ -43,5 +42,5 @@
+         $$ a_{min} = \max_{t \in [0,1]} \frac{|s_n \cdot \nabla s(\mathbf{x} + t s_n)|}{||s_n|| \, ||\nabla s(\mathbf{x} + t s_n)||} $$
+         where $s_n$ is the segment from $\mathbf{x}$ to neighbor $n$ [S1, book].
+-5.  **Quad Generation:** For each successfully projected seed, generate a surface-tangent, seed-centered quadrilateral (quad). The size of the quad is scaled by the FTLE value and a user-defined scale factor $s_q$ [S1, book].
++5.  **Quad Generation:** For each successfully projected seed, generate a surface-tangent, seed-centered quadrilateral (quad) [S1, book]. The size of the quad is scaled by the FTLE value [S1, book].
+ 6.  **Transform Feedback:** Record the generated quads into `VBO_quads` [S1, book].
+ 
+@@ -49,113 +48,90 @@
+ This phase refines the isosurface representation using the quads from Phase 1 [S1, book].
+ 
+-1.  **Cell Selection and Sorting:** Select cells containing the isovalue (using the Interval Tree). Sort them front-to-back (fast, inexact sort) to optimize early-z culling [S1, book].
+-2.  **Rasterization:** Rasterize the quads in `VBO_quads`. The vertex shader redirects vertices to rasterization [S1, book].
++1.  **Cell Selection and Sorting:** Select cells containing the isovalue (using the Interval Tree) [S1, book]. Sort them front-to-back (fast, inexact sort) to optimize early-z culling [S1, book].
++2.  **Rasterization:** Rasterize the quads in `VBO_quads` [S1, book]. The vertex shader redirects vertices to rasterization [S1, book].
+ 3.  **Fragment Processing (Ray Casting):** For each fragment generated:
+     *   Use the fragment's position as an initial guess for ray casting [S1, book].
+     *   Perform $n_{N2}$ Newton-Raphson iterations to refine the intersection point on the isosurface [S1, book].
+     *   **Noise Reduction:** Compare the angle of the polynomial gradient vector at the fragment position before and after projection. If the angle difference exceeds a threshold, discard the fragment (assumed jump to another surface) [S1, book].
+-    *   **Shading:** Shade the fragment at the refined position. **Crucially**, do not update the depth coordinate in the depth buffer. This allows the early-z test to cull occluded fragments from subsequent cells/quad sets, significantly boosting performance [S1, book].
++    *   **Shading:** Shade the fragment at the refined position. **Crucially**, do not update the depth coordinate in the depth buffer [S1, book]. This allows the early-z test to cull occluded fragments from subsequent cells/quad sets, significantly boosting performance [S1, book].
+ 
+ ### Pseudocode
+ 
+ ```python
+-# Constants
+-NS_SMALL = 1000
+-NS_LARGE = 512 # 8^3
+-NI = 50
+-NN1 = 10
+-EPS1 = 1e-3
+-NN2 = 3
+-EPS2 = 1e-4
+-THRESHOLD_ANGLE = 0.5
+-
+ def ihos_render(mesh, isovalue, camera):
+-    # Phase 1: Object Space (Pre-processing)
+-    # 1. Interval Tree Culling (CPU)
+     active_cells = []
+     for cell in mesh:
+         if cell.min_val <= isovalue <= cell.max_val:
+             active_cells.append(cell)
+-    
+-    # 2. Seed Projection (GPU)
+-    # Initialize VBO_unproj with uniform seeds and FTLE=0
++            
++    # Phase 1: Object Space Pre-processing
+     for cell in active_cells:
+         bind_bubo(cell)
+-        seeds = generate_uniform_seeds(cell, NS_SMALL if cell.is_small else NS_LARGE)
++        n_seeds = NS_SMALL if cell.is_small else NS_LARGE
++        seeds = generate_uniform_seeds(cell, n_seeds)
+         
+-        # Gradient Integration
+         for seed in seeds:
+-            for step in range(NI):
+-                seed.pos += gradient(cell.poly, seed.pos) * step_size
+-                
+-        # Newton-Raphson Projection
++            pos = seed.pos
++            for _ in range(NI):
++                grad = gradient_poly(cell.poly, *pos)
++                pos = pos + grad * step_size
++            seed.pos = pos
++            
+         for seed in seeds:
+-            for step in range(NNN1):
+-                val = evaluate(cell.poly, seed.pos) - isovalue
+-                grad = gradient(cell.poly, seed.pos)
+-                # Directional NR along gradient
+-                delta = val / dot(grad, grad)
+-                seed.pos -= grad * delta
++            pos = seed.pos
++            for _ in range(NN1):
++                val = evaluate_poly(cell.poly, *pos) - isovalue
+                 if abs(val) < EPS1:
+                     break
+-        
+-        # FTLE and Quad Generation
++                grad = gradient_poly(cell.poly, *pos)
++                delta = val / dot(grad, grad)
++                pos = pos - grad * delta
++            seed.pos = pos
++            
+         quads = []
+         for seed in seeds:
+-            if is_on_surface(cell.poly, seed.pos, isovalue, EPS1):
++            val = evaluate_poly(cell.poly, *seed.pos) - isovalue
++            if abs(val) < EPS1:
+                 ftle = compute_ftle(cell.poly, seed.pos)
+-                # Neighbor exclusion heuristic
+                 neighbors = get_neighbors(seed.pos)
+                 valid_neighbors = []
+                 for n in neighbors:
+                     seg = n.pos - seed.pos
+-                    min_angle = max_angle_between(seg, gradient(cell.poly, seed.pos + t*seg) for t in [0,1])
++                    min_angle = 0.0
++                    for t in [0.0, 0.5, 1.0]:
++                        g = gradient_poly(cell.poly, *(seed.pos + t * seg))
++                        angle = abs(dot(seg, g)) / (length(seg) * length(g))
++                        if angle > min_angle:
++                            min_angle = angle
+                     if min_angle < THRESHOLD_ANGLE:
+                         valid_neighbors.append(n)
+-                
+-                # Generate Quad
+                 quad = generate_surface_tangent_quad(seed.pos, ftle, valid_neighbors)
+                 quads.append(quad)
+-        
+-        # Store in VBO_quads via Transform Feedback
+         store_quads(quads)
+ 
+-    # Phase 2: Image Space (Rendering)
+-    # Sort active_cells front-to-back
++    # Phase 2: Image Space Ray Casting
+     active_cells.sort(key=lambda c: distance_to_camera(c.center))
+-    
+     for cell in active_cells:
+         bind_bubo(cell)
+         bind_shaders_for_degree(cell.poly.degree)
+-        
+-        # Rasterize Quads
+         fragments = rasterize(VBO_quads)
+-        
+         for frag in fragments:
+-            # Ray Casting Refinement
+             pos = frag.position
+-            for step in range(NN2):
+-                val = evaluate(cell.poly, pos) - isovalue
+-                grad = gradient(cell.poly, pos)
++            old_grad = frag.gradient_before
++            for _ in range(NN2):
++                val = evaluate_poly(cell.poly, *pos) - isovalue
++                if abs(val) < EPS2:
++                    break
++                grad = gradient_poly(cell.poly, *pos)
+                 delta = val / dot(grad, grad)
+                 new_pos = pos - grad * delta
+-                
+-                # Noise Reduction: Check gradient angle consistency
+-                old_grad = frag.gradient_before
+-                new_grad = gradient(cell.poly, new_pos)
+-                angle_diff = angle_between(old_grad, new_grad)
+-                
++                new_grad = gradient_poly(cell.poly, *new_pos)
++                angle_diff = abs(dot(old_grad, new_grad)) / (length(old_grad) * length(new_grad))
+                 if angle_diff > THRESHOLD_ANGLE:
+-                    discard_fragment(frag)
+                     break
+-                
+                 pos = new_pos
+-                if abs(evaluate(cell.poly, pos) - isovalue) < EPS2:
+-                    break
+-            
+-            # Shade without updating depth
+-            color = phong_shading(pos, gradient(cell.poly, pos), camera)
+-            write_color(frag, color)
+-            # Do NOT write to depth buffer
++                old_grad = new_grad
++            color = phong_shading(pos, gradient_poly(cell.poly, *pos), camera)
++            framebuffer[frag.id] = color
+ ```
+ 

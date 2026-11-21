@@ -1,0 +1,76 @@
+# Lookup Table Implementation
+
+Also called: Post-Interpolation Transfer Function Lookup Table, vzParameterLookupTable
+
+## Overview
+Lookup Table Implementation is the mechanism for mapping scalar volume data values to RGBA color and opacity properties using a one-dimensional lookup table (LUT) applied after texture interpolation in the imaging pipeline [S1]. It solves the problem of efficient, hardware-accelerated classification by storing pre-computed or dynamically generated appearance properties in a contiguous array, allowing the GPU to sample visual attributes via standard texture fetches [S1]. What sets it apart from direct function evaluation is that it decouples the mathematical definition of the transfer function from the rendering loop, relying on a discrete, power-of-two sized table that can be updated dynamically or uploaded as a texture resource [S1].
+
+## Shared principles
+The core mechanism involves storing a 1D array of 4-component vectors $(R, G, B, \alpha)$ where each entry corresponds to a normalized scalar value in the domain $[0, 1]$ [S1][S2, unofficial][S3].
+
+**Data Structure and Constraints**
+*   **Format:** Entries are typically stored as interleaved 4-component vectors. Common formats include `float4` (32-bit floats per component) or 8-bit integers (`uint8_t[4]`) [S1][S2, unofficial][S3]. Hardware-specific implementations may use non-standard widths, such as 36-bit entries (8-bit RGB, 12-bit alpha) [S3].
+*   **Size:** The number of entries $N$ must be a power of two (e.g., 256, 1024, 4096, 65536) to support hardware texture sampling and indexing [S1][S2, unofficial][S3].
+*   **Layout:** A contiguous 1D array where index $i$ maps to the normalized coordinate $x = i / (N-1)$ or $x = (i + 0.5) / N$ depending on the binning scheme [S2, unofficial].
+
+**Normalization and Sampling**
+The input scalar value $v$ is normalized to the domain $[0, 1]$ using window/level parameters ($x_{min}, x_{max}$):
+$$ x = \frac{v - x_{min}}{x_{max} - x_{min}} $$
+Values outside $[x_{min}, x_{max}]$ are clamped to $[0, 1]$ [S2, unofficial][S3].
+
+Two primary sampling methods are used:
+1.  **Hardware Interpolation:** The LUT is uploaded as a 1D texture with `LINEAR` filter mode and `CLAMP_TO_EDGE` wrap mode. The hardware interpolates between adjacent entries based on the normalized coordinate $x$ [S1][S2, unofficial].
+2.  **Direct Lookup:** The integer index is computed for nearest-neighbor sampling:
+    $$ idx = \text{clamp}(\lfloor x \cdot (N-1) \rfloor, 0, N-1) $$
+    The value at `table[idx]` is returned [S3].
+
+**Opacity Correction**
+In hardware pipelines, opacities may require correction to account for non-unit sample spacing $\Delta$ [S1, S3]. The opacity entry $\alpha_0$ is computed as:
+$$ \alpha_0 = 1 - e^{-map[C_i] \Delta_0} $$
+If the distance changes to $\Delta_k$, opacity values must be corrected accordingly [S1, S3].
+
+**Resource Management**
+*   **Upload:** The LUT is uploaded to GPU memory as a 1D texture (e.g., `GL_TEXTURE_1D` or `GL_TEXTURE_2D` with height 1) or a Shader Storage Buffer Object (SSBO) [S2, unofficial][S3].
+*   **Binding:** Uniforms such as `tf_size`, `tf_window_left`, and `tf_window_width` are set to define the domain and resolution for the shader [S2, unofficial][S3].
+*   **Updates:** Modifications to `dataPtr`, `dataType`, or `dataFormat` trigger a reload of the table [S1].
+
+## Subtopics
+
+### [Hardcoded Transfer Function](1098-hardcoded-transfer-function.md)
+A method that maps a single scalar data value directly to a color and opacity tuple using a static, pre-defined 1D LUT. It solves the problem of visualizing scalar field data with minimal user interaction and computational resources. Unlike gradient-based or texture-based transfer functions, it cannot differentiate between samples with the same scalar value but different local structure.
+
+### [UpdateOpacityTransferFunction](2489-updateopacitytransferfunction.md)
+Manages the lifecycle of a 1D opacity transfer function on the GPU, handling memory allocation, data validation, and binding to shader resources. It differs from [Hardcoded Transfer Function](1098-hardcoded-transfer-function.md) by supporting dynamic updates and from [1D Transfer Function Generation and Sampling](2689-1d-transfer-function-generation-and-sampling.md) by focusing on the GPU upload and validation step rather than mathematical generation. A key feature is its optional integration of a Cumulative Distribution Function (CDF) correction to support Discrete Density Accumulation (DDA) optimizations.
+
+### [1D Transfer Function Generation and Sampling](2689-1d-transfer-function-generation-and-sampling.md)
+Maps scalar volume data values to RGBA properties using a 1D LUT constructed from user-defined control points. It solves the problem of quantitative data visualization by assigning visual appearance to numerical voxel intensities. Unlike [Parametric Function Generation](5349-parametric-function-generation.md) which computes values analytically, this method performs a deterministic, per-voxel assignment based on a pre-computed 1D LUT. It builds on [Lookup Table Implementation](5347-lookup-table-implementation.md) by defining the specific algorithm for constructing the LUT from control points and sampling it during rendering.
+
+### [Shading Lookup Table Computation](3589-shading-lookup-table-computation.md)
+Generates the color and opacity entries for a 1D LUT by applying a shading model (e.g., Phong) to the scalar field values. It solves the problem of mapping raw scalar data to visually meaningful RGBA values that account for lighting, material properties, and view orientation, rather than using static, pre-shaded colors. It differs from [Hardcoded Transfer Function](1098-hardcoded-transfer-function.md) by computing values dynamically based on current scene parameters, and from [UpdateOpacityTransferFunction](2489-updateopacitytransferfunction.md) by encompassing the full color/opacity computation rather than just opacity adjustments.
+
+### Cosine Ramp Table Generation
+A helper procedure that generates a cosine-shaped ramp table for smoothly attenuating density values [S2, unofficial]. It is used to fade out density contributions based on distance from the center of a volume slab [S2, unofficial].
+**Steps:**
+1.  Loop $i$ from 0 to `RAMP_SIZE`-1 [S2, unofficial].
+2.  Compute normalized distance: $dist = i / (RAMP\_SIZE - 1.0)$ [S2, unofficial].
+3.  Compute ramp value: $ramp[i] = (\cos(dist \cdot \pi) + 1.0) / 2.0$ [S2, unofficial].
+
+### Oblivious Lookup Tables
+A method to map a set of input values $X$ to output values $Y$ using dot products, allowing evaluation on encrypted data without revealing the input value, solving the inability to use comparison operators in probabilistic PHE [S3].
+**Formula:**
+$$ V \cdot \tilde{l} = \tilde{y} $$
+where $V$ is a Vandermonde matrix with rows $\tilde{v}_i = (1, x_i^1, \dots, x_i^{n-1})$, $\tilde{l}$ is the lookup vector, and $\tilde{y}$ is the result vector [S3].
+$$ f(x_i) = (1, x_i^1, x_i^2, \dots, x_i^{n-1}) \cdot \tilde{l} = y_i $$
+**Parameters:**
+*   $V$: A Vandermonde matrix used to ensure linear independence of vectors $\tilde{v}_i$ [S3].
+**Pitfalls:**
+*   It is not possible to calculate the vector $\tilde{v}_i$ from an encrypted $[x_i]$ because it requires multiplying two encrypted numbers, which Paillier does not support [S3].
+*   Storing vectors $\tilde{v}_i$ instead of scalars $x_i$ increases storage by a factor of $n$ (e.g., 256 for 8-bit voxels), leading to impractical sizes (16TB for a $512^3$ volume) [S3].
+
+## Background
+The concept of using lookup tables for volume rendering classification originated with early hardware-accelerated volume rendering systems. The `vzParameterLookupTable` class, part of the SGI OpenGL Volumizer toolkit, formalized the interface for specifying these tables as one-dimensional textures applied in the imaging pipeline after texture interpolation [S1]. The interface required specifying width (power of two), data pointer, data type, and external format, allowing for shallow copying of data pointers and dynamic reloading upon modification [S1]. This approach enabled efficient post-interpolation transfer function application, becoming a standard technique in volumizer-based rendering pipelines [S1].
+
+## Sources
+[S1] Chapter 4. Texture Mapping Render Action, https://techpubs.jurassic.nl/library/manuals/4000/007-4389-010/sgi_html/ch04.html, fetched 2026-10-27
+[S2] Procedural Modeling, Animation, and Rendering of Gases, Fluids, and Textures, https://www.researchgate.net/profile/David-Ebert-4/publication/2786953_Procedural_Modeling_Animation_and_Rendering_of_Gases_Fluids_and_Textures/links/00b7d51a73e42a3c4e000000/Procedural-Modeling-Animation-and-Rendering-of-Gases-Fluids-and-Textures.pdf, fetched 2026-10-31 (unofficial)
+[S3] Homomorphic-Encrypted Volume Rendering, https://arxiv.org/abs/2009.02122v2, fetched 2026-10-26

@@ -1,0 +1,312 @@
+# CodeNeRF
+
+Also called: Disentangled Neural Radiance Fields for Object Categories
+
+## Overview
+CodeNeRF is an implicit 3D neural representation that learns the variation of object shapes and textures across a semantic category, enabling the synthesis of novel views of unseen objects from a single unposed input image [S1]. Unlike standard NeRF which is scene-specific, CodeNeRF disentangles shape and texture by learning separate latent embeddings, allowing for joint optimization of camera viewpoint, shape code, and texture code at test time [S1]. It differs from sibling methods like DoF-NeRF by explicitly decoupling shape and texture into independent embedding spaces, whereas alternatives like M1 (direction input to shape network) or M2 (single embedding) fail to maintain disentanglement, leading to incorrect textures or unwanted shape changes during editing [S1].
+
+## How it works
+CodeNeRF employs an auto-decoder architecture with decoupled shape and texture embedding spaces. The model consists of two MLPs: a shape network $F^s_{\Theta_s}$ and a texture network $F^t_{\Theta_t}$, which together form the radiance field $F_\Theta$ [S1].
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   3D spatial position $\mathbf{x} \in \mathbb{R}^3$.
+    *   Viewing direction $\mathbf{d} \in \mathbb{R}^3$.
+    *   Shape latent code $\mathbf{z_s} \in \mathbb{R}^{D_s}$.
+    *   Texture latent code $\mathbf{z_t} \in \mathbb{R}^{D_t}$.
+    *   Camera parameters (azimuth $\phi$, elevation $\theta$, distance $\rho$) during inference optimization [S1].
+*   **Outputs:**
+    *   Volume density $\sigma \in \mathbb{R}$.
+    *   View-dependent color $\mathbf{c} \in \mathbb{R}^3$ [S1].
+
+### Data Structures
+*   **Network Parameters $\Theta$:** Weights for $F^s_{\Theta_s}$ and $F^t_{\Theta_t}$.
+*   **Latent Embeddings:**
+    *   $\mathbf{z_s}$: Shape code.
+    *   $\mathbf{z_t}$: Texture code.
+    *   During training, a set of embeddings $\{\mathbf{z_s}_j, \mathbf{z_t}_j\}_{j=1}^M$ is maintained for $M$ objects [S1].
+*   **Camera Pose:** Represented by spherical coordinates $(\phi, \theta, \rho)$ or equivalent rotation/translation matrices for ray generation [S1].
+
+### Positional Encoding
+Positional encoding $\gamma(\cdot)$ is applied to coordinates and directions to capture high-frequency details [S1]:
+*   For 3D point coordinates $\mathbf{x}$: 10 frequencies are used [S1].
+*   For viewing directions $\mathbf{d}$: 4 frequencies are used [S1].
+
+### Network Architecture
+The architecture is split into two stages to enforce disentanglement [S1]:
+
+1.  **Shape Network ($F^s_{\Theta_s}$):**
+    Takes the positional encoding of the 3D point $\gamma_{\mathbf{x}}(\mathbf{x})$ and the shape code $\mathbf{z_s}$ as input. It outputs the volume density $\sigma$ and an intermediate feature vector $\mathbf{v} \in \mathbb{R}^{256}$ [S1].
+    $$ F^s_{\Theta_s}: (\gamma_{\mathbf{x}}(\mathbf{x}), \mathbf{z_s}) \rightarrow (\sigma, \mathbf{v}) $$
+
+2.  **Texture Network ($F^t_{\Theta_t}$):**
+    Takes the intermediate feature vector $\mathbf{v}$, the positional encoding of the viewing direction $\gamma_{\mathbf{d}}(\mathbf{d})$, and the texture code $\mathbf{z_t}$ as input. It outputs the RGB color $\mathbf{c}$ [S1].
+    $$ F^t_{\Theta_t}: (\mathbf{v}, \gamma_{\mathbf{d}}(\mathbf{d}), \mathbf{z_t}) \rightarrow (\mathbf{c}) $$
+
+The combined radiance field is $F_\Theta = F^t_{\Theta_t} \circ F^s_{\Theta_s}$ [S1].
+
+### Volume Rendering
+Color is aggregated along camera rays $\mathbf{r}(t) = \mathbf{c} + t\mathbf{d}$ using standard volume rendering equations with $N$ uniform samples from near to far bounds [S1]. The estimated pixel color $\hat{C}(\mathbf{r})$ is:
+
+$$ \hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
+
+Where:
+*   $\delta_i = t_{i+1} - t_i$ is the distance between adjacent samples [S1].
+*   $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance [S1].
+*   $\sigma_i$ and $\mathbf{c}_i$ are the density and color at sample $i$ [S1].
+
+### Training Procedure
+During training, the model learns from a set of $N$ images depicting $M$ objects with known poses [S1].
+
+1.  **Ray Sampling:** For each image, sample a batch of 4094 rays using intrinsic and extrinsic camera parameters [S1].
+2.  **Point Sampling:** Sample 64 points along each ray [S1].
+3.  **Forward Pass:** Feed points, directions, and current latent codes $\{\mathbf{z_s}_j, \mathbf{z_t}_j\}$ into $F_\Theta$ to obtain $\sigma$ and $\mathbf{c}$ [S1].
+4.  **Rendering:** Compute rendered colors $\hat{C}(\mathbf{r})$ using volume rendering [S1].
+5.  **Loss Calculation:** Minimize the total loss $\mathcal{L}$ [S1]:
+
+    $$ \mathcal{L}(\Theta, \{\mathbf{z_s}^i, \mathbf{z_t}^i\}^M) = \sum_{\mathbf{r} \in \mathcal{R}} ||\hat{C}(\mathbf{r}) - C(\mathbf{r})||_2^2 + \frac{1}{\nu^2} \sum_{i=1}^M (||\mathbf{z_s}^i||_2^2 + ||\mathbf{z_t}^i||_2^2) $$
+
+    Where:
+    *   The first term is the photometric L2 loss [S1].
+    *   The second term is an L2 regularization loss on the latent vectors with weight $1/\nu^2$ [S1].
+    *   $\mathcal{R}$ is the set of sampled rays [S1].
+
+6.  **Optimization:** Update network parameters $\Theta$ and latent embeddings $\{\mathbf{z_s}_j, \mathbf{z_t}_j\}_{j=1}^M$ jointly using AdamW [S1].
+
+### Inference Optimization
+Given a single unposed reference image of an unseen object, CodeNeRF reconstructs the object and estimates its viewpoint [S1].
+
+1.  **Initialization:**
+    *   Network weights $\Theta$ are fixed (pre-trained) [S1].
+    *   Latent vectors $\mathbf{z_s}, \mathbf{z_t}$ are initialized with the mean vector of the trained embeddings [S1].
+    *   Camera parameters $(\phi, \theta, \rho)$ are initialized with large errors (average 80 degrees rotation error from ground truth) [S1].
+2.  **Joint Optimization:** Minimize the photometric loss and regularization term with respect to $\mathbf{z_s}, \mathbf{z_t}$ and camera parameters $(\phi, \theta, \rho)$ [S1]:
+
+    $$ \min_{\mathbf{z_s}, \mathbf{z_t}, \phi, \theta, \rho} \mathcal{L}(\mathbf{z_s}, \mathbf{z_t}, \phi, \theta, \rho) + \frac{1}{\nu^2} (||\mathbf{z_s}||_2^2 + ||\mathbf{z_t}||_2^2) $$
+
+3.  **Iteration:** Run optimization for 299 iterations [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def positional_encoding(x, num_frequencies):
+    """
+    Standard positional encoding.
+    x: input tensor of shape (..., D)
+    num_frequencies: int
+    Returns: encoded tensor of shape (..., D * 2 * num_frequencies)
+    """
+    # Implementation details of PE are standard; 
+    # 10 frequencies for x, 4 for d as per [S1]
+    pass
+
+def shape_network(x_encoded, z_s, theta_s):
+    """
+    F^s_Theta_s: (gamma_x(x), z_s) -> (sigma, v)
+    x_encoded: encoded 3D position
+    z_s: shape latent code
+    theta_s: weights for shape network
+    Returns: sigma (density), v (feature vector R^256)
+    """
+    # MLP forward pass
+    pass
+
+def texture_network(v, d_encoded, z_t, theta_t):
+    """
+    F^t_Theta_t: (v, gamma_d(d), z_t) -> (c)
+    v: intermediate feature vector
+    d_encoded: encoded viewing direction
+    z_t: texture latent code
+    theta_t: weights for texture network
+    Returns: c (RGB color)
+    """
+    # MLP forward pass
+    pass
+
+def volume_rendering(sigma, c, t_near, t_far, num_samples):
+    """
+    Renders color from density and color samples along a ray.
+    sigma: array of densities
+    c: array of colors
+    t_near, t_far: near and far bounds
+    num_samples: int
+    Returns: rendered color
+    """
+    t = np.linspace(t_near, t_far, num_samples)
+    delta = np.diff(t, append=t[-1] + (t[-1] - t[-2])) # Approximation for last delta if needed, 
+                                                       # but standard is uniform spacing
+    # Correct delta calculation for uniform samples
+    # delta_i = t_{i+1} - t_i
+    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
+    
+    # Vectorized implementation
+    deltas = np.diff(t)
+    # Handle last sample if necessary, usually N samples cover the interval
+    # Assuming N samples are placed at t_1...t_N
+    # delta_i is distance between t_i and t_{i+1}
+    # For the last sample, we need a delta. Standard NeRF uses N samples.
+    # Let's assume uniform spacing h = (t_far - t_near) / (N - 1) if points are endpoints
+    # Or N points inside. The source says "N uniform samples".
+    # Let's stick to the formula provided: delta_i = t_{i+1} - t_i.
+    # This implies N-1 deltas for N points? 
+    # Actually, standard NeRF uses N samples. 
+    # Formula: sum_{i=1}^N T_i (1 - exp(-sigma_i delta_i)) c_i
+    # This requires delta_i for each i.
+    # If t has N elements, we need N deltas. 
+    # Usually t is defined such that we have intervals.
+    # Let's assume standard implementation where we sample N points.
+    
+    # Re-reading [S1]: "N uniform samples from the near to far bounds"
+    # "delta_i = t_{i+1} - t_i"
+    # This implies we need t_1 ... t_{N+1} or similar.
+    # Standard NeRF (Knapik et al / Mildenhall et al) usually samples N points.
+    # Let's assume the source implies the standard differentiable volume rendering.
+    
+    # Simplified standard volume rendering logic
+    alphas = 1.0 - np.exp(-sigma * deltas)
+    transmittance = np.exp(-np.cumsum(sigma * deltas))
+    # T_i in formula is exp(-sum_{j=1}^{i-1} sigma_j delta_j)
+    # This matches transmittance[i-1] if we index carefully.
+    
+    # Using numpy broadcasting for ray batch
+    # alpha = 1 - exp(-sigma * delta)
+    # T = exp(-cumsum(sigma * delta))
+    # Contribution = T * alpha * color
+    
+    # Note: The exact indexing depends on whether T_i includes i-1 or i.
+    # Formula: T_i = exp(-sum_{j=1}^{i-1} ...). So T_1 = 1.
+    
+    cum_sigma_delta = np.cumsum(sigma * deltas)
+    T = np.exp(np.concatenate([[0], cum_sigma_delta[:-1]])) # T_1=1, T_2=exp(-sigma_1 delta_1)
+    
+    # Wait, T_i in sum is weight for sample i.
+    # Weight_i = T_i * (1 - exp(-sigma_i delta_i))
+    
+    weights = T * (1.0 - np.exp(-sigma * deltas))
+    color = np.sum(weights * c, axis=-1)
+    return color
+
+def train_step(images, poses, network_params, latent_codes, hyperparams):
+    """
+    One training iteration.
+    """
+    # 1. Sample 4094 rays per image [S1]
+    rays = sample_rays(images, poses, num_rays=4094)
+    
+    # 2. Sample 64 points along each ray [S1]
+    points, directions = sample_points_along_rays(rays, num_samples=64)
+    
+    # 3. Encode inputs
+    x_encoded = positional_encoding(points, num_frequencies=10)
+    d_encoded = positional_encoding(directions, num_frequencies=4)
+    
+    # 4. Forward pass
+    # Shape network
+    sigma, v = shape_network(x_encoded, latent_codes['z_s'], network_params['theta_s'])
+    
+    # Texture network
+    c = texture_network(v, d_encoded, latent_codes['z_t'], network_params['theta_t'])
+    
+    # 5. Render
+    rendered_colors = volume_rendering(sigma, c, rays['t_near'], rays['t_far'], 64)
+    
+    # 6. Compute Loss
+    photometric_loss = np.mean((rendered_colors - images['colors'])**2)
+    reg_loss = (np.linalg.norm(latent_codes['z_s'])**2 + np.linalg.norm(latent_codes['z_t'])**2) / hyperparams['nu']**2
+    
+    total_loss = photometric_loss + reg_loss
+    
+    # 7. Backprop and Update
+    # Update network_params and latent_codes using AdamW
+    # LR: 1e-4 for network, 1e-3 for latents [S1]
+    pass
+
+def inference_optimize(single_image, pretrained_network_params, hyperparams):
+    """
+    Reconstruct unseen object from single unposed image.
+    """
+    # 1. Initialize latent codes with mean of trained embeddings [S1]
+    z_s = np.mean(trained_embeddings['z_s'])
+    z_t = np.mean(trained_embeddings['z_t'])
+    
+    # 2. Initialize camera pose with large random error [S1]
+    phi = random_angle() # Azimuth
+    theta = random_angle() # Elevation
+    rho = random_distance() # Distance
+    # Initial rotation error > 30 deg, avg 80 deg [S1]
+    
+    # 3. Optimization Loop (299 iterations) [S1]
+    for i in range(299):
+        # Generate rays from current camera pose
+        rays = generate_rays_from_pose(phi, theta, rho, single_image['intrinsic'])
+        
+        # Sample points
+        points, directions = sample_points_along_rays(rays, num_samples=64)
+        
+        # Encode
+        x_encoded = positional_encoding(points, num_frequencies=10)
+        d_encoded = positional_encoding(directions, num_frequencies=4)
+        
+        # Forward pass (Network weights fixed)
+        sigma, v = shape_network(x_encoded, z_s, pretrained_network_params['theta_s'])
+        c = texture_network(v, d_encoded, z_t, pretrained_network_params['theta_t'])
+        
+        # Render
+        rendered_colors = volume_rendering(sigma, c, rays['t_near'], rays['t_far'], 64)
+        
+        # Loss
+        photometric_loss = np.mean((rendered_colors - single_image['colors'])**2)
+        reg_loss = (np.linalg.norm(z_s)**2 + np.linalg.norm(z_t)**2) / hyperparams['nu']**2
+        total_loss = photometric_loss + reg_loss
+        
+        # Backprop w.r.t z_s, z_t, phi, theta, rho
+        # LR: 1e-2 for latents and camera params [S1]
+        # Camera LR: phi=1e-2, theta=1e-1, rho=1e-1 [S1]
+        update_variables(z_s, z_t, phi, theta, rho, total_loss)
+        
+    return z_s, z_t, phi, theta, rho
+```
+
+### Parameters
+*   **Positional Encoding Frequencies:** 10 for $\mathbf{x}$, 4 for $\mathbf{d}$ [S1].
+*   **Optimizer:** AdamW [S1].
+*   **Learning Rates (Training):**
+    *   Network parameters $\Theta$: $1 \times 10^{-4}$ [S1].
+    *   Latent vectors $\mathbf{z_s}, \mathbf{z_t}$: $1 \times 10^{-3}$ [S1].
+*   **Learning Rates (Inference):**
+    *   Latent vectors $\mathbf{z_s}, \mathbf{z_t}$: $1 \times 10^{-2}$ [S1].
+    *   Camera azimuth $\phi$: $1 \times 10^{-2}$ [S1].
+    *   Camera elevation $\theta$: $1 \times 10^{-1}$ [S1].
+    *   Camera distance $\rho$: $1 \times 10^{-1}$ [S1].
+*   **Regularization Weight:** $1/\nu^2$ [S1]. Value of $\nu$ not explicitly given in sources.
+*   **Samples per Ray:** 64 [S1].
+*   **Rays per Image (Training):** 4094 [S1].
+*   **Inference Iterations:** 299 [S1].
+
+### Edge Cases and Pitfalls
+*   **Camera Initialization:** Initial camera pose estimates can have rotation errors above 30 degrees (average 80 degrees from ground truth). The optimization must be robust to this; it converged in 85% of cases in experiments [S1].
+*   **Disentanglement Failure:** If the architecture is modified to input viewing direction into the shape network (M1) or use a single embedding for shape and texture (M2), disentanglement fails. M1 synthesizes incorrect textures, and M2 causes unwanted shape changes during texture editing [S1].
+*   **No 3D Supervision:** The model is trained end-to-end from images only, without 3D ground truth supervision, relying on multi-view photometric consistency [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training involves optimizing network weights and latent codes for all objects in the category. Inference requires iterative optimization (299 iterations) per unseen object to find latent codes and camera pose [S1].
+*   **Memory Complexity:** Requires storing latent embeddings for each object in the training set ($M$ objects) [S1].
+*   **Performance:** On the ShapeNet-SRN benchmark, CodeNeRF achieves competitive PSNR and SSIM scores for novel view synthesis and few-shot reconstruction compared to methods like SRN, PixelNeRF, and GRF [S1].
+*   **Strengths:**
+    *   Disentangles shape and texture, allowing independent editing [S1].
+    *   Does not require known camera pose at inference time [S1].
+    *   Generalizes well to unseen objects from a single image [S1].
+*   **Limitations:**
+    *   Requires training on a category of objects first [S1].
+    *   Inference optimization is iterative and slower than feed-forward methods [S1].
+    *   Convergence is not guaranteed (85% success rate in pose estimation) [S1].
+
+## Background
+CodeNeRF was introduced by [S1] at ICCV 2021. It builds on the original NeRF [S1] and takes inspiration from SRN [S1] and DeepSDF [S1]. It addresses the limitation of NeRF being scene-specific by learning a category-level representation. It is used for single-view reconstruction, novel view synthesis, and shape/texture editing on datasets like ShapeNet-SRN (cars and chairs) [S1].
+
+## Sources
+[S1] CodeNeRF: Disentangled Neural Radiance Fields for Object Categories, https://doi.org/10.1109/iccv48922.2021.01271, fetched 2026-10-26

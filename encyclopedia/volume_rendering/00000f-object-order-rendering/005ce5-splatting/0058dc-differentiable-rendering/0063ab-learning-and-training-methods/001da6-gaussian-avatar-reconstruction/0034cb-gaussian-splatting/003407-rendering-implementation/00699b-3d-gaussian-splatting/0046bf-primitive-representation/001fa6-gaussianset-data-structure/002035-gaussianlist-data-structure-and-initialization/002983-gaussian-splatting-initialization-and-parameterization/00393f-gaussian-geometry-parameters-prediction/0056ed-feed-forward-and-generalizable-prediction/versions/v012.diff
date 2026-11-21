@@ -1,0 +1,122 @@
+--- v011.md
++++ v012.md
+@@ -1,67 +1,87 @@
+ # Feed-forward and Generalizable Prediction
+ 
+-Also called: Feed-forward 3D Gaussian Splatting, Generalizable 3DGS, One-shot 3D Reconstruction
++Also called: Feed-forward 3D Gaussian Splatting, Generalizable 3DGS, One-shot 3DGS
+ 
+ ## Overview
+-Feed-forward and Generalizable Prediction refers to methods that estimate 3D Gaussian Splatting (3DGS) parameters directly from a set of input images in a single forward pass, eliminating the need for per-scene optimization or iterative training [S1]. This approach solves the latency bottleneck of traditional differentiable volume rendering, which requires minutes to hours of optimization per scene [S1]. Unlike sibling methods that rely on fixed grids, specific view constraints, or per-subject fine-tuning, this family leverages learned priors from foundation models or large-scale datasets to generalize across unseen scenes [S1].
++Feed-forward and Generalizable Prediction refers to a family of methods that predict 3D Gaussian Splatting parameters directly from input images in a single forward pass, eliminating the need for iterative per-scene optimization [S1]. This approach solves the latency bottleneck of traditional 3DGS, which requires minutes to hours of optimization per scene, by leveraging deep learning to generalize from training data to novel scenes. It differs from sibling methods like [GSGEN](8985-gsgen.md) or [Textured-GS](9436-textured-gs.md) by focusing on direct regression of geometry and appearance attributes from uncalibrated or sparse inputs, often utilizing foundation models (e.g., MASt3R, DINOv2) or specialized transformer architectures to ensure multi-view consistency and geometric accuracy without explicit Structure-from-Motion (SfM) pipelines [S1].
+ 
+ ## Shared principles
+-The core mechanism involves a neural network that maps 2D image features to 3D Gaussian parameters ($\mu, \sigma, r, s, c, \alpha$) without iterative gradient descent on the scene representation itself.
++All methods in this family share the following mechanism and mathematical framework:
+ 
+-1.  **Input Normalization:** To handle scale ambiguity inherent in monocular or sparse-view reconstruction, scenes are normalized. Camera poses are expressed in a mean context camera frame, and translations are rescaled so that all context camera centers lie within $[-1, 1]^3$ [S1].
+-2.  **Feature Encoding:** Input images are encoded using Vision Transformers (ViT) or CNNs (e.g., FPN, DINOv2, MASt3R) to extract multi-scale features [S1].
+-3.  **Cross-View Aggregation:** Features from multiple views are aggregated. This may involve warping features to a target view using homography [S1], constructing cost volumes [S1], or using attention mechanisms (view-wise or 3D spatial) to exchange information across views [S1].
+-4.  **Parameter Prediction:** A decoder head predicts Gaussian attributes. These may be predicted per-pixel (resulting in a parameter map) or per-token (resulting in a set of primitives) [S1].
+-5.  **Differentiable Rendering:** The predicted Gaussians are rendered using standard differentiable rasterization to compute losses (RGB, depth, geometry) for training the feed-forward network [S1].
++1.  **Input Normalization:** Input images $I \in \mathbb{R}^{N \times H \times W \times 3}$ are typically normalized to a standard range (e.g., $[-1, 1]$ or $[0, 1]$) and resized to a fixed resolution (e.g., $448 \times 448$ or $512 \times 512$) [S1].
++2.  **Feature Encoding:** A shared encoder (often a Vision Transformer like DINOv2 or a specialized backbone like MASt3R) extracts multi-scale features $F^l$ from the input images [S1]. These features capture semantic and geometric cues necessary for depth and correspondence estimation.
++3.  **Gaussian Parameter Regression:** The network predicts a set of 3D Gaussian primitives. Each Gaussian $i$ is defined by:
++    *   Mean position: $\mu_i \in \mathbb{R}^3$
++    *   Scale: $s_i \in \mathbb{R}^3$ (often predicted in log-space or via exponential activation)
++    *   Rotation: $r_i \in \mathbb{R}^4$ (quaternion, normalized)
++    *   Opacity: $\alpha_i \in [0, 1]$ (sigmoid activation)
++    *   Color/Appearance: $c_i$ (Spherical Harmonics coefficients or RGB) [S1]
++4.  **Differentiable Rendering:** The predicted Gaussians are rendered into 2D images using differentiable rasterization. The color of a pixel $C$ is computed via alpha blending:
++    $$ C = \sum_{i \in N} c_i \alpha'_i \prod_{j=1}^{i-1} (1 - \alpha'_j) $$
++    where $\alpha'_i = \alpha_i \cdot \text{2D Gaussian}(x)$ represents the projected opacity of the $i$-th Gaussian at pixel $x$ [S1].
++5.  **Loss Functions:** Training typically involves minimizing the difference between rendered images $\hat{I}$ and ground truth images $I$ using losses such as L1 loss, SSIM, or LPIPS [S1]. Some methods also incorporate geometry losses (depth consistency, Chamfer distance) or pose consistency losses [S1].
+ 
+ ## Subtopics
+ 
+ ### [AnySplat Pipeline](12847-anysplat-pipeline.md)
+-AnySplat is a feed-forward method for novel-view synthesis that predicts 3D Gaussian Splatting parameters directly from uncalibrated input images using a transformer-based architecture. It solves the problem of requiring calibrated camera poses and sparse-view inputs by jointly predicting Gaussian geometry, depth, and camera poses in a single forward pass. Unlike sibling methods that often rely on fixed grids or specific view constraints, AnySplat uses a differentiable voxelization module to convert pixel-wise Gaussians into a renderable set, supervised by pseudo-geometry priors from a pretrained VGGT model.
++The AnySplat Pipeline is a feed-forward method that predicts a dense set of 3D Gaussians directly from uncalibrated input images, bypassing iterative per-scene optimization. It differs from sibling methods by explicitly predicting camera poses and depth alongside Gaussian parameters, using a differentiable voxelization step to regularize the output before rendering. It is chosen when uncalibrated inputs are available and explicit camera pose estimation is required alongside the 3D reconstruction.
+ 
+ ### [FineSplat](15257-finesplat.md)
+-FineSplat is a feed-forward 3D Gaussian Splatting (3DGS) framework that predicts a set of 3D Gaussians from $N$ context views (with or without known poses) using a two-stage dual-grouping strategy. It balances local detail preservation with global multi-view reasoning by employing high-resolution 4x4 patch tokens and a dual-grouping mechanism: view-wise token grouping in Stage 1 and 3D spatial grouping in Stage 2. This approach preserves fine-grained visual information while avoiding the prohibitive computational costs of global multi-view attention.
++FineSplat is a feed-forward 3D Gaussian Splatting framework that predicts a set of 3D Gaussians from $N$ context views (with or without known poses) using a two-stage dual-grouping strategy to balance local detail preservation with global multi-view reasoning. It distinguishes itself from sibling methods like YoNoSplat and ZipSplat by using high-resolution 4x4 patch tokens instead of coarser 14x14 patches, combined with a serialized attention mechanism in 3D space to avoid the prohibitive cost of global multi-view attention. This approach preserves fine-grained visual information while maintaining high efficiency, achieving superior quality per unit of time compared to explicit k-nearest-neighbor search or global attention baselines.
+ 
+ ### [SparSplat](15813-sparsplat.md)
+-SparSplat is a generalizable, feed-forward model that maps a set of sparse input images (typically 3) to planar surface elements, represented as 2D Gaussian Splatting (2DGS) parameters, in a single forward pass to perform 3D shape reconstruction and novel view synthesis. It differs from its sibling [AnySplat Pipeline](12847-anysplat-pipeline.md) and [Splatt3R](16423-splatt3r.md) by explicitly optimizing for surface consistency via 2D primitives rather than 3D volume primitives, enabling coherent TSDF mesh extraction. Unlike [FineSplat](15257-finesplat.md) and [HFGaussian](16422-hfgaussian.md) which focus on high-fidelity rendering or specific optimization strategies, SparSplat is designed for immediate feed-forward inference from sparse views without per-scene optimization.
++SparSplat is a generalizable, feed-forward model that maps a set of sparse input images to planar surface elements (2D Gaussian Splatting parameters) in a single forward pass to perform 3D shape reconstruction and novel view synthesis. It differs from its sibling [MVSGaussian](12847-anysplat-pipeline.md) by using a 2D Gaussian representation instead of 3D primitives, which ensures consistent 3D geometry suitable for explicit mesh extraction via TSDF fusion, whereas 3DGS-based methods often produce depth inconsistencies that lead to warped or disconnected surfaces. It is designed for fast multi-view reconstruction from sparse inputs (typically 3 views), leveraging deep features from foundation models like DINOv2 and MASt3R.
+ 
+ ### [HFGaussian](16422-hfgaussian.md)
+-HFGaussian is a generalizable, human-centric 3D Gaussian Splatting framework that estimates 3D human avatars with integrated biomechanical features (3D skeleton, 3D keypoints, dense pose) and 3D pose in real time from sparse input images, without per-subject fine-tuning. It builds on [Feed-forward and Generalizable Prediction](15832-feed-forward-and-generalizable-prediction.md) by introducing "feature splatting" to decouple human feature representation from photometric Gaussian parameters, allowing separate optimization for features with different spatial frequencies. Unlike methods relying on parametric body models (SMPL/STAR) or direct parameterization of Gaussians with features, HFGaussian learns additional feature parameters for each Gaussian, decoded after rendering, enabling simultaneous real-time novel view synthesis, pose estimation, and feature rendering.
++HFGaussian is a generalizable, feed-forward framework for real-time 3D human avatar reconstruction that simultaneously estimates novel views, 3D pose, and integrated biomechanical features (such as dense pose and continuous surface embeddings) from sparse input images. Unlike standard 3D Gaussian Splatting methods that require per-subject optimization or rely on parametric body models like SMPL, HFGaussian predicts Gaussian parameters directly from image features without fine-tuning on unseen data. It distinguishes itself by decoupling photometric rendering from feature estimation: while standard Gaussians handle color and geometry, separate optimized feature parameters are splatted and decoded to represent high-frequency biomechanical attributes, overcoming the performance constraints of parameterizing all features with the same Gaussian opacity and scaling.
+ 
+ ### [Splatt3R](16423-splatt3r.md)
+-Splatt3R is a feed-forward model that predicts 3D Gaussian Splat parameters directly from a pair of uncalibrated, unposed natural images, enabling novel view synthesis without requiring camera intrinsics, extrinsics, or depth information. It distinguishes itself from other generalizable 3D-GS methods by extending the MASt3R foundation model with a parallel "Gaussian head" and employing a loss masking strategy that allows supervision of extrapolated viewpoints beyond the stereo baseline, rather than limiting training to interpolated views between input images.
++Splatt3R is a feed-forward model that predicts 3D Gaussian Splat parameters directly from a pair of uncalibrated, unposed natural images, eliminating the need for camera intrinsics, extrinsics, or iterative per-scene optimization. It distinguishes itself from other generalizable 3D-Gaussian methods by extending the MASt3R foundation model with a dedicated Gaussian head and employing a loss masking strategy that enables robust novel view synthesis for extrapolated viewpoints beyond the stereo baseline, rather than being limited to interpolation between input views.
+ 
+ ### [ZeroGS](16425-zerogs.md)
+-ZeroGS is a pipeline for training 3D Gaussian Splatting (3DGS) from hundreds of unposed and unordered images without requiring Structure-from-Motion (SfM) tools like COLMAP. It leverages a pretrained foundation model (Spann3R) as a neural scene representation and employs an incremental training buffer to progressively register images and refine camera poses. It differs from its siblings by regressing points in a global coordinate frame without aligning dense pairwise pointmaps, and by using a rendering loss for optimization rather than reprojection error.
++ZeroGS is a pipeline for training 3D Gaussian Splatting (3DGS) from hundreds of unposed and unordered images without requiring Structure-from-Motion (SfM) tools like COLMAP. It differs from its siblings by leveraging a pretrained foundation model (Spann3R) to predict dense 3D Gaussians and pointmaps directly from image pairs, followed by an incremental registration process that refines camera poses and expands the training buffer. Unlike ACE0, it predicts dense primitives rather than sparse points and uses transformers instead of CNNs; unlike InstantSplat and Splatt3R, it regresses points in a global seed frame without aligning dense pairwise pointmaps, avoiding memory bottlenecks.
+ 
+ ### [Shape Completion Training](16514-shape-completion-training.md)
+-Shape Completion Training is a decoder-based method that predicts all 14 Gaussian attributes from partial 3D inputs without requiring target coordinates, utilizing a folding grid expansion to increase primitive density. It differs from sibling methods like [AnySplat Pipeline](12847-anysplat-pipeline.md) and [FineSplat](15257-finesplat.md) by explicitly training a decoder to complete missing geometry and attributes from sparse or occluded inputs, rather than relying solely on forward rendering or global optimization.
++Shape Completion Training is a method for predicting the full set of 14 3D Gaussian attributes from partial, incomplete input observations without requiring target coordinates. It addresses the problem of reconstructing missing geometry in sparse or occluded scenes by leveraging a decoder-based architecture that expands coarse primitives into a dense Gaussian set. It differs from sibling methods like [AnySplat Pipeline](12847-anysplat-pipeline.md) or [Splatt3R](16423-splatt3r.md) by explicitly modeling shape completion via a fixed folding grid expansion mechanism and training with a combined Chamfer-distance and attribute-matching loss, rather than relying solely on direct pixel-wise regression or iterative optimization.
+ 
+ ### [GlobalSplat](16571-globalsplat.md)
+-GlobalSplat is a feed-forward 3D Gaussian Splatting framework that aligns multi-view inputs into a fixed set of global latent scene tokens before decoding explicit 3D geometry, preventing representation bloat and ensuring global consistency. Unlike sibling methods that form primitives in dense view-aligned spaces and align them globally afterward, GlobalSplat learns a compact, global latent representation that encodes multi-view input and resolves cross-view correspondences before decoding any explicit 3D geometry. This approach enables compact, globally consistent reconstructions without relying on pretrained pixel-prediction backbones or reusing latent features from dense baselines.
++GlobalSplat is a feed-forward 3D Gaussian Splatting framework that aligns multi-view inputs into a fixed set of global latent scene tokens before decoding explicit 3D geometry, preventing representation bloat and ensuring global consistency. Unlike sibling methods that form primitives in dense view-aligned spaces and align them globally afterward, GlobalSplat aggregates multi-view inputs into a fixed number of latent tokens (2048) regardless of input view count, then decodes these tokens into a strict, view-invariant budget of Gaussians (16K). This approach achieves competitive novel-view synthesis quality with significantly lower GPU memory usage, smaller disk footprint, and faster inference times compared to dense baselines.
+ 
+ ### [RLSplat](16575-rlsplat.md)
+-RLSplat is a resource-linear, budget-controllable feed-forward 3D Gaussian Splatting (FF3DGS) framework that generates exactly $B$ Gaussians for a given scene, ensuring that inference latency and peak memory scale linearly with the budget $B$. Unlike sibling methods such as EcoSplat and F4 Splat, which predict a dense set of candidates and prune them (resulting in nearly constant inference cost regardless of the target budget), RLSplat uses a learned allocation policy to distribute the budget across local scene regions from the start. This approach allows the method to adapt to diverse resource constraints in real-time applications like AR/VR and robotics without retraining.
++RLSplat is a resource-linear, budget-controllable feed-forward 3D Gaussian Splatting (FF3DGS) framework that ensures inference latency, peak memory, and representation size scale linearly with the requested Gaussian budget $B$. Unlike prior budget-controllable methods (e.g., EcoSplat, F4 Splat) that predict a dense set of candidates and prune them—resulting in nearly constant inference costs regardless of $B$—RLSplat learns a Gaussian allocation policy to distribute exactly $B$ Gaussians across local scene regions from the start. It solves the problem of rigid resource usage in real-time applications like AR/VR and robotics by allowing the user to specify a target Gaussian count, with the system adapting the density of primitives to local geometric complexity.
+ 
+ ### 3D-aware Image Synthesis via Sparse Voxel Grids
+-- **Definition:** A 3D-aware image synthesis generator that predicts color and density values on a sparse voxel grid, conditioned on camera pose [S1].
+-- **Steps:**
+-    - Use a mapping network with 2 layers and 64 channels [S1].
+-    - Set the channel base to 4000 (reduced from StyleGAN2's 32768) to account for higher parameter count in 3D convolutions [S1].
+-    - Implement skip connections that add an upsampled version of the output grid of the previous layer to the input of the next layer [S1].
+-    - Condition the generator on a camera pose represented by a rotation matrix and a translation vector, yielding a 12-dimensional input vector [S1].
+-    - Output coefficients of spherical harmonics for color; use degree 0 (single coefficient per color channel) [S1].
+-    - Multiply the network's density output by a factor of 30 to facilitate generating high density values for sharp surfaces [S1].
+-- **Parameters:** Channel base: 4000; Density multiplier: 30; Mapping network layers: 2; Mapping network channels: 64; Spherical harmonics degree: 0 [S1].
++#### definition
++- [S1] A 3D-aware image synthesis generator that predicts color and density values on a sparse voxel grid, conditioned on camera pose.
++#### step
++- [S1] Use a mapping network with 2 layers and 64 channels.
++- [S1] Set the channel base to 4000 (reduced from StyleGAN2's 32768) to account for higher parameter count in 3D convolutions.
++- [S1] Implement skip connections that add an upsampled version of the output grid of the previous layer to the input of the next layer.
++- [S1] Condition the generator on a camera pose represented by a rotation matrix and a translation vector, yielding a 12-dimensional input vector.
++- [S1] Output coefficients of spherical harmonics for color; use degree 0 (single coefficient per color channel).
++- [S1] Multiply the network's density output by a factor of 30 to facilitate generating high density values for sharp surfaces.
++#### parameter
++- [S1] Channel base: 4000.
++- [S1] Density multiplier: 30.
++- [S1] Mapping network layers: 2.
++- [S1] Mapping network channels: 64.
++- [S1] Spherical harmonics degree: 0.
+ 
+ ### Deformation Field MLP
+-- **Definition:** An MLP network $F_\theta$ that maps 3D Gaussian coordinates and time to deviations in position, rotation, and scaling [S2].
+-- **Steps:**
+-    - Input: 3D Gaussian coordinate $x$ and time $t$. Process: Pass through eight fully connected layers with ReLU activations and 256-dimensional hidden layers to output a 256-dimensional feature vector. Concatenate the feature vector and the input in the fourth layer. Output: Pass the feature vector through three additional fully connected layers (without activation) to separately output offsets $\delta x, \delta r, \delta s$ for position, rotation, and scaling [S2].
+-- **Parameters:** Hidden layer dimension: 256; Number of initial fully connected layers: 8; Number of output layers: 3 (one for each offset); Activation function: ReLU for hidden layers, none for output layers; Additional storage compared to 3D Gaussians: 2MB [S2].
+-- **Comparison:** Does not use grid/plane-based structures because dynamic scenes have higher rank than static scenes, and explicit point-based rendering exacerbates this rank [S2].
++#### definition
++- [S2] An MLP network $F_\theta$ that maps 3D Gaussian coordinates and time to deviations in position, rotation, and scaling.
++#### step
++- [S2] Input: 3D Gaussian coordinate $x$ and time $t$. Process: Pass through eight fully connected layers with ReLU activations and 256-dimensional hidden layers to output a 256-dimensional feature vector. Concatenate the feature vector and the input in the fourth layer. Output: Pass the feature vector through three additional fully connected layers (without activation) to separately output offsets $\delta x, \delta r, \delta s$ for position, rotation, and scaling.
++#### parameter
++- [S2] Hidden layer dimension: 256.
++- [S2] Number of initial fully connected layers: 8.
++- [S2] Number of output layers: 3 (one for each offset).
++- [S2] Activation function: ReLU for hidden layers, none for output layers.
++- [S2] Additional storage compared to 3D Gaussians: 2MB.
++#### comparison
++- [S2] Does not use grid/plane-based structures because dynamic scenes have higher rank than static scenes, and explicit point-based rendering exacerbates this rank.
+ 
+ ## Background
+-Feed-forward 3D Gaussian Splatting emerged as a solution to the high computational cost of traditional 3DGS, which requires per-scene optimization. Early works like [Splatt3R](16423-splatt3r.md) and [AnySplat](12847-anysplat-pipeline.md) adapted foundation models (MASt3R, VGGT) to predict Gaussian parameters directly. Subsequent methods like [FineSplat](15257-finesplat.md) and [GlobalSplat](16571-globalsplat.md) improved accuracy through better token grouping and global latent representations. Human-centric applications like [HFGaussian](16422-hfgaussian.md) and resource-constrained applications like [RLSplat](16575-rlsplat.md) extended the paradigm to specific domains. The family also includes variants for dynamic scenes, such as the Deformation Field MLP [S2], and methods for unposed images like [ZeroGS](16425-zerogs.md).
++Feed-forward 3D Gaussian Splatting emerged as a response to the computational inefficiency of iterative optimization-based 3DGS. Traditional 3DGS requires per-scene optimization, which is slow and impractical for real-time applications or large-scale datasets. Early works in 3D-aware image synthesis, such as VoxGRAF [S1], explored sparse voxel grids and neural rendering conditioned on camera poses, laying the groundwork for feed-forward approaches. The integration of foundation models like MASt3R [S1] and Spann3R [S1] provided robust depth and correspondence priors, enabling generalizable prediction of 3D structures from uncalibrated images. Recent developments focus on improving efficiency (e.g., GlobalSplat [S1], RLSplat [S1]), handling sparse inputs (e.g., SparSplat [S1]), and extending to dynamic scenes (e.g., Deformable 3D Gaussians [S2]).
+ 
+ ## Sources

@@ -1,0 +1,89 @@
+Froxel fog is how most real-time renderers draw volumetric fog and light shafts: the view frustum is cut into a grid of cells that are screen tiles…
+
+Shadowing newly revealed froxels without a… · Traverse
+In this article
+Froxel fog is how most real-time renderers draw volumetric fog and light shafts: the view frustum is cut into a grid of cells that are screen tiles across and depth slices deep (frustum voxels, hence the name), each cell stores how dense the medium is and how much sunlight reaches it, and one march front to back along each column of cells turns that into the in-scattered light and transmittance the frame composites over the scene. The approach was established in Bart Wronski's volumetric fog talk at SIGGRAPH 2014 and given a physically based form in Sébastien Hillaire's talk in the same course a year later, and implementations since lean on temporal reprojection, because the sun's shadow term in a cell needs a good number of shadow map samples before it stops flickering and nobody can afford them all in one frame.
+Reprojection has a hole in it, and the hole is where the visible noise comes from: a cell that was behind a wall, under a character or outside the frustum last frame has no history to blend with, so on the frame it comes into view it is shaded by whatever handful of samples that one frame took, and a light shaft swept by a moving camera sparkles along its leading edge. In Breda, our rendering framework, the fog in breda-volumetric-fog takes extra shadow samples for those cells and then runs a small 3D Gaussian blur over them and only them, finding them with an append list and an indirect dispatch so the cost follows the number of revealed cells rather than the size of the grid. We think that is the right shape for the problem as long as the sun holds still, which the extra samples depend on, and the blur turned out to be nearly a box filter, which is worth knowing if you copy it.
+This post covers the grid, why revealed cells are the noisy ones, the ways to deal with them, what we built and the bugs in its first version. It does not cover the scattering integral, the height fog density model or compositing, which are ordinary.
+The grid, and how deep its slices are
+Breda's grid uses 8 by 8 pixel tiles across the screen and 64 slices in depth, which the shader froxel_inject_density_and_shadows fills with a density in an R16Sfloat volume and a sun shadow factor in an R8Unorm volume, one thread per column walking its 64 slices front to back and stopping at the first slice past the opaque surface in that tile. Where the slices sit is the decision that shapes everything later, and ours are exponential:
+z(s)=2(s+8)/8−2z(s) = 2^{(s + 8)/8} - 2
+where zz is the view depth of the near face of slice ss, so slice 0 starts at the camera, slice 8 at 2, slice 32 at 30 and the far face of slice 63 at 510, and every slice is 21/82^{1/8} times as thick as the one in front of it.
+Near face and thickness of each slice, from froxelSliceToLinearDepth. Depth is in view units.
+That spacing spends most of the slices near the camera, and it matters for the blur later on: one slice of blur radius is 0.18 deep at the front of the grid and 42.5 deep at the back, so a kernel that looks isotropic in index space is anything but in the world.
+Why the revealed froxels are the noisy ones
+Each frame, a froxel with valid history takes four new shadow samples, jittered across its screen tile and its depth by blue noise, and blends them into the reprojected value from last frame with a weight of 0.05, which is a running average with a time constant of twenty frames and is the only reason four samples a frame look smooth. The reprojection is the part that fails: the shader projects the froxel's centre into last frame's camera, and it throws the history away when that lands outside the old grid, when the froxel is past the opaque surface, or when the old tiled depth says the point was hidden behind something, in which case the froxel takes 100% of the current frame instead of 5%.
+A froxel in that state is what the code calls revealed, and the problem is plain once it is put in those terms: its shadow factor comes from one frame of samples, its converged neighbours carry an average with a twenty-frame time constant, and every revealed froxel along the edge of a moving occluder disagrees with the converged ones next to it in a pattern that changes every frame. Worse, the value it gets on the frame it is revealed does not go away on the next frame, because from then on it is the history, and the 5% blend means it fades as 0.95n0.95^n:
+The first frame's share of a froxel's value, assuming the camera holds still. Reprojection resamples history trilinearly, so in motion the curve is only approximate.
+Half of the revealed frame's value is still there 13.5 frames later and a tenth of it after 45, which means anything done to a revealed froxel on its first frame, good or bad, stays visible for a long time.
+Four ways to quiet a revealed froxel
+There are more options than it looks, and they cost very different things:
+ApproachWhat it costsWhat it leaves
+Take many more samples, for revealed froxels onlyShadow map lookups, paid only where history failedNoise falls with the square root of the count, so it never gets cheap
+Keep a history of the shadow map itselfA second shadow map and its reprojectionNeeds history for every cascade, which we do not have
+Blur the whole shadow grid every frameA full pass over every froxelSoftens converged froxels that did not need it
+Blur only the revealed froxelsA list, an indirect dispatch and a copy backBias on the reveal frame that fades over the next frames
+The second row is the one that would fix the cause rather than the symptom, because a revealed froxel is only noisy for lack of earlier samples and a shadow history would supply them, but Breda's cascaded shadow maps have no history buffer, and adding one for every cascade is a project of its own. The third row is simple and wasteful in exactly the way that matters, since most froxels in most frames are converged and blurring them trades away detail for nothing.
+So we combined the first and the fourth: more samples for revealed froxels, then a blur restricted to them, which keeps the cost proportional to how much of the screen was just revealed and leaves converged fog alone.
+Extra samples, and borrowing last frame's camera
+A revealed froxel gets two batches of shadow samples instead of four jittered ones. The first, sampleShadowStructuredMultiSampling, takes eight samples along the view ray spread across two froxels' worth of depth centred on this one, weighted by a triangle filter of 1, 2, 3, 4, 4, 3, 2, 1 so the froxel's own depth counts most. The second takes four blue noise jittered samples, but along the rays of last frame's camera at the same screen position and depth, which the shader describes as fresh samples at the history position standing in for the temporal accumulation the froxel does not have.
+That second batch only makes sense under an assumption the shader states outright, in a comment saying that there is no history buffer for the cascaded shadow maps and that it relies on the sun not moving. Sampling today's shadow map at last frame's positions stands in for last frame's samples only if the shadow map has not changed in between, so a moving sun breaks it, and so does a moving occluder casting into the fog. The two batches are averaged half and half, which gives a revealed froxel twelve samples, while the running average of a converged froxel is worth 39 frames of four for independent noise, and the pull request that added the blur starts from the observation that revealed froxels were still visibly noisy with all twelve.
+Finding the revealed froxels on the GPU
+Only the inject shader knows which froxels were revealed, and it runs one thread per column, so the list has to be built on the GPU as it goes. Each thread that sets a froxel's current frame weight to 1 appends that froxel's coordinate to a buffer through an atomic counter:
+```
+if (currentFrameAmount >= 1.0) {
+    // Needs blur
+    uint entryIdx = bnd.atomicCounter.interlockedAddUniformU32(0, 1);
+    bnd.froxelIdsToBlur.store<uint3>(entryIdx, froxelId);
+}
+```
+and records, per column, the index of the last slice before the opaque surface in a small R8Uint texture, froxelLastIndex, which the blur uses to avoid pulling in froxels that are inside geometry.
+The CPU never learns how long the list is, which is the point: a one-thread pass, froxel_dispatch_args, reads the counter and writes the dispatch size for 64-thread groups, and the blur and the copy back both run through dispatch_indirect, so a frame where nothing was revealed costs a single-thread pass and two empty indirect dispatches, and a camera cut, where reprojection fails for most of the grid, costs a blur over most of the grid. The list buffer is sized for that worst case, one 12 byte entry for every froxel in the grid plus a 4 byte result, because there is no smaller bound that is safe.
+The blur and the copy are separate passes because a blur that writes into the volume it reads from would see some neighbours before and some after they were blurred, depending on which thread ran first, so blur_revealed_froxels writes its results into a compact buffer indexed by list position and composite_revealed_froxels copies them into the shadow volume afterwards. A second full shadow volume would also have worked, at the cost of a grid-sized copy every frame for a list that is usually short.
+The kernel, and what sigma 2 actually does
+The blur visits the 26 neighbours of a revealed froxel and itself, skipping any outside the grid or behind the opaque surface in their column, and weights them with a 3D Gaussian:
+w(𝐨)=exp⁡(−‖𝐨‖22σ2),σ=2w(\mathbf{o}) = \exp\left(-\frac{\lVert\mathbf{o}\rVert^2}{2\sigma^2}\right), \qquad \sigma = 2
+where 𝐨\mathbf{o} is the integer offset from the centre in froxels. The shader also multiplies by the Gaussian's normalising constant, which cancels when the sum is divided by the total weight, so it can go.
+With a radius of one froxel, the only squared distances in the kernel are 0, 1, 2 and 3, and at σ=2\sigma = 2 the weights for those come out at 1, 0.88, 0.78 and 0.69 before normalising, which is close enough to equal that the kernel behaves almost exactly like a 27-tap box. A useful way to put a number on that is the effective sample count, (∑w)2/∑w2(\sum w)^2 / \sum w^2, which is what the blur divides the variance of independent noise by:
+The 3x3x3 blur as its sigma changes Normalised tap weights and effective sample count of the blur in blur_revealed_froxels as sigma sweeps from 0.3 to 4. The shader uses 2, where the kernel is worth 26.7 samples against 27 for a box. Assumes all 26 neighbours are usable and their noise is independent.
+At σ=2\sigma = 2 that comes out at 26.7, against 27 for a box, so the blur divides the noise variance of a fully surrounded froxel by 26.7 and its standard deviation by 5.2. A smaller sigma keeps more of the centre froxel and blurs less, and at σ=0.65\sigma = 0.65 the kernel is down to 10.5 effective samples, which is the dial to reach for if a revealed edge looks too soft, though as it stands the code is a box filter with extra arithmetic, and we would rather it said so.
+The reason it is not as harmless as a box sounds is the slice spacing above: one froxel in xx and yy is 8 pixels everywhere, but one froxel in zz is 0.18 deep near the camera and over 40 deep at the back, so in the far half of the grid the blur mixes shadow across tens of units of depth, and because the blurred value seeds the history it stays there for dozens of frames.
+The counter nobody set to zero
+The first version had a handful of bugs, none of which showed up on D3D12, and the way they surfaced is the most useful part of this post for anyone writing a GPU append list.
+A GPU crash investigation on Vulkan, the day after the blur merged, turned up the following. The atomic counter was created with create_storage_buffer, with no initial data, and nothing in the frame cleared it, so the list started at whatever value the memory held, the indirect dispatch was sized from that, and the inject shader could append at indices past the end of the list. The blur loaded froxelLastIndex at the neighbour's coordinate before checking that the neighbour was inside the grid, it tested neighborID > 0 rather than >= 0 and so skipped every neighbour on the first row, column and slice, and it divided by the weight sum without checking it, which is zero for a froxel with no usable neighbours and makes a NaN. Separately, the inject and scattering shaders rejected threads with > where they needed >= against the grid size, so one extra row and column of threads ran off the edge.
+D3D12 defines an out-of-bounds read through a descriptor as returning zero and an out-of-bounds write as being dropped, so on our D3D12 backend all of this was invisible, while our Vulkan backend runs without robust buffer access for performance, where the same accesses are undefined, and that is the backend the crashes were on. The fix, in the follow-up change, creates the counter with create_storage_buffer_with_data and an initial zero so it is reset every frame, moves the bounds test ahead of the load, corrects the comparisons, and falls back to the unblurred value when no neighbour is usable:
+```
+if (weightedSum > 0.0f) {
+    blurredShadow /= weightedSum;
+} else {
+    // No valid neighbors, fall back to the unblurred value instead of producing a NaN.
+    blurredShadow = bnd.shadowGrid.load3DUniform<float>(froxelId);
+}
+```
+If your append lists only ever run on a backend that clamps out-of-bounds access, assume they have this bug until a backend that does not clamp has run them.
+What it costs
+The pull request reports an average of 1 ms from a profiler capture, without the resolution, the hardware or exactly which passes the number covers, so we cannot honestly break it down further, and because the blur's cost scales with the number of revealed froxels a single average says little about the frames that matter, which are camera cuts and fast pans. The measurement we want, and do not yet have, is the blur and copy cost against the length of the list, captured over a camera path with cuts in it.
+Where it falls down
+The design has three weak points, and two of them were listed by the team in the original change.
+The blur spans both depth neighbours. The pull request noted that depth should be blurred with either the front or the back froxel rather than both, and on our main branch the kernel still covers both.
+Banding in the bright fog. The same list reported banding in the bright areas of the fog in the ambient lighting, which is still open.
+A static sun. Both the extra samples and the history blend assume the shadow map does not change between frames, which is true for a fixed sun and a static scene and false for a time of day cycle or a moving occluder casting into the fog.
+Where to go next
+If you are building froxel fog, the two course talks linked at the top are still the best starting points for the grid and the scattering integral, and the thing to measure first is not the blur at all but how many froxels fail reprojection per frame on your worst camera path, because that number sets both the noise you need to hide and the cost of hiding it. Draw the revealed froxels as a debug overlay before writing the blur; if they are a thin band along occluder edges this approach is cheap, and if whole regions light up on every pan the history test is too strict and is the thing to fix.
+If we started again we would keep the list and the indirect dispatch, which cost little and scale correctly, pick sigma deliberately rather than inherit one that turns the Gaussian into a box, and blur in world space rather than in index space so a far froxel does not borrow shadow from a slice 42.5 units deep. The larger fix is a shadow history for the cascades, which would let a revealed froxel find the samples it is missing instead of having its neighbours' averaged in, and until that exists the blur is the right trade, because it costs almost nothing when little is revealed and touches only the froxels that need it, and the price is a slightly soft shadow on the reveal frame that the running average washes out over the next few dozen.
+Keep exploring the implementation.
+animationAI drafted
+What GPU skinning spends its time on: bounding boxes, bone matrices and weights
+Linear blend skinning is the standard way to deform a character mesh with a skeleton: every vertex stores up to four bone indices and four weights, and its animated position is the weighted sum of where each of those…
+Traverse Research2 October 202613 min read
+Read article
+fundamentalsAI drafted
+What is a tensor, and why do graphics people keep saying it?
+In graphics and machine learning conversations, a tensor is a block of numbers with a shape: a list of sizes, one per axis, that tells you how many indices you need to find a single value and how far each index can go.…
+Traverse Research2 October 20268 min read
+Read article
+light transportAI drafted
+Where a half-resolution GI ray starts
+ReSTIR GI is the technique most real-time renderers now reach for when they want ray-traced diffuse bounce light: every pixel traces one cheap ray into the scene, keeps it as a candidate sample of incoming light, and…
+Traverse Research1 October 202611 min read
+Read article

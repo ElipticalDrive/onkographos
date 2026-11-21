@@ -1,0 +1,214 @@
+I can consistently reproduce this on Linux and Windows on various versions of Slicer. 
+On Linux I can capture the error (not through Slicer, but from the log of the virtualGL) something to do with opengl_max_texture limi…
+
+GPU based volume rendering fails if one dimension is more than 2000px - Support - 3D Slicer Community
+GPU based volume rendering fails if one dimension is more than 2000px
+Support
+muratmaga
+(Murat Maga)
+April 19, 2019, 6:22pm
+1
+I can consistently reproduce this on Linux and Windows on various versions of Slicer.
+On Linux I can capture the error (not through Slicer, but from the log of the virtualGL) something to do with opengl_max_texture limitation. On windows there is no error produced (as far as I can tell), simply a blank rectangle in volume rendering window.
+behavior is consistent with multiple graphics card including 1080TI with 11GB of RAM and the latest driver from Nvidia (425 series).
+data from research microCT often exceeds 2K in one dimension and given that we are GPUs with 16GB of ram, Slicer really need to work with this kind of high-resolution data.
+2019.06.18 Hangout
+3d view in volume rendering
+2019.05.07 Hangout / Project Week
+muratmaga
+(Murat Maga)
+April 19, 2019, 6:49pm
+2
+As a note this specifically happens on unsigned integer datasets. To reproduce, download MRHEad.NRRD, User ResampleScalarImage 1, 0.1, 1.3, and see it render correct in Volume Rendering.
+Then use CastScalarVolume to cast it as unsigned integer, and then see it no longer renders, but a empty volume.
+muratmaga
+(Murat Maga)
+April 22, 2019, 7:29pm
+3
+This is the only error message I can generate using Slicer 4.11 on centos with Nvidia Geforce 980Ti with drivers 410.78. On windows it simply doesn’t render without giving any error message.
+If it helps, datasets, which are resampled MRHead.nrrd files are here:
+https://seattlechildrens1.box.com/v/sampleLargeVRData
+[root@magalab-head bin]# /home/apps/Slicer-4.11.0-2019-04-16-linux-amd64/Slicer
+Switch to module: “Welcome”
+Loaded volume from file: /mnt/ramdisk/large_test_volumes/large_short.nrrd. Dimensions: 2560x2560x676. Number of components: 1. Pixel type: short.
+“Volume” Reader has successfully read the file “/mnt/ramdisk/large_test_volumes/large_short.nrrd” “[36.21s]”
+Switch to module: “VolumeRendering”
+ERROR: OpenGL MAX_3D_TEXTURE_SIZE is 2048
+Invalid texture dimensions [2560, 2560, 676]
+lassoan
+(Andras Lasso)
+April 22, 2019, 7:46pm
+4
+This makes sense. There are often such GPU hardware/driver limitations.
+Normally you would crop/resample the volume to a sensible size: if you need to see small details then crop to the region of interest, if you need to see the entire volume then you don’t lose any visible details by resampling the volume.
+If multi-volume rendering implementation would be completed in VTK (it’s very close, only shading is missing) then we could split up the volume into a couple of pieces and render them using multi-volume rendering.
+muratmaga
+(Murat Maga)
+April 22, 2019, 8:08pm
+5
+Thanks @lassoan. I think there are couple issues that I would like to address:
+One is the users’ perspective, if it doesn’t display the volume due to a limitation, it should give out an error message (or may be to suggest to switching to CPU based rendering which works fine, but slow). Otherwise, there is really nothing to go with.
+Would it be possible to know for sure where the limitation is coming from (HW/driver both, VTK)? In my field, 3-4GB datasets are common, and people do like to look at full detail at full size (e.g., an elongated small fish microCT would have a volume such as 1024x1024x3000 slices). If you resample you would loose the details in the small/thin bones, if you crop it, you would loose the ability to look at the whole thing together.
+So I am trying to understand what should be recommendation? I thought 1080TI would be recent enough and have enough VRAM (11GB) to contain the full-resolution dataset. Quadros offer a lot of VRAM, but can’t seem to find any information about MAX_3D_TEXTURE_SIZE specs of graphic cards.
+lassoan
+(Andras Lasso)
+April 22, 2019, 9:31pm
+6
+Limitations of GPU hardware/driver should not be an issue in theory, since large volumes can be tiled so that each part can fit into maximum total size and per-axis dimension. If total size limit is reached then volumes can be automatically resampled (this was implemented in the old GPU volume renderer but not in the current one).
+Ideally, these features could be implemented transparently at VTK level, but may be implemented at application level, too.
+I would not count on waiting on future GPUs that have higher limits. 1. We cannot control when will it happen. It may take years. 2. Rendering large volumes in one block may lead to other errors, such as non-responsiveness of the renderer (and the operating system terminating the application due to TDR timeout).
+pieper
+(Steve Pieper (Isomics, Inc.))
+April 22, 2019, 9:33pm
+7
+Hi @muratmaga -
+I’ve been poking around at this but don’t have much to report back - I agree with you that we need a much better error messages, but for that we might need to update VTK’s reporting of the error. Then too any further fixes would be at the VTK level as @lassoan says.
+I believe the limitation is in the hardware (or drivers). You should be able to check using this link and check the value of MAX_3D_TEXTURE_SIZE in the Textures box. It should be the same for VTK as webgl. I get very different values for different cards (2048 for a software OpenGL, 8192 for a nvidia 1080 on windows, and 16384 for a AMD on a mac pro). I haven’t yet tested how they do on the big volumes yet.
+muratmaga
+(Murat Maga)
+April 23, 2019, 6:39pm
+8
+@lassoan
+We had a chat with @pieper today and done some test. There seems to be a disconnect between what our test hardware is capable (Geforce 1080TI) as reported by OpenGL Hardware Capabilitiy viewer (OpenGL Hardware Database by Sascha Willems) and what is reported by VTK/Slicer (and also the WebGL report link that @pieper provided). According to the OpenGL Hardware Capability Viewer
+GL_MAX_3D_TEXTURE_SIZE is 16K for 1080TI, as oppose to 2K reported by VTK. Screen shots and the full report is below. I don’t know what to make of this, all I can say same issues persist in the latest Paraview as well.
+You can query all reported 1080TI at
+https://opengl.gpuinfo.org/listreports
+image657×661 41.8 KB
+image599×602 41.1 KB
+Better GPU will benefit or not VR volume rendering
+Chris_Rorden
+(Chris Rorden)
+April 23, 2019, 6:55pm
+9
+@pieper - it is necessary that no dimension exceeds MAX_3D_TEXTURE_SIZE. However, this is not sufficient to ensure that the texture can be loaded. Many cards can load up to MAX_3D_TEXTURE_SIZE in one dimension only if the other dimensions have much lower resolution. In other words, you can not assume that you can load a volume of MAX_3D_TEXTURE_SIZE^3.
+The correct solution is to test glTexImage3D(GL_PROXY_TEXTURE_3D…) before you call glTexImage3D(GL_TEXTURE_3D…).
+muratmaga
+(Murat Maga)
+April 23, 2019, 7:34pm
+10
+@Chris_Rorden
+We are definitely not trying to load 16K^3 datasets. MOst of our datasets are around 3-5 gigavoxels. This particular one is 2560x2560x676.
+Issue might be relating to VTK reporting the MAX_3D_TEXTURE as erroneously as 2K, as shown in the error message:
+ERROR: OpenGL MAX_3D_TEXTURE_SIZE is 2048
+Invalid texture dimensions [2560, 2560, 676]
+This error is consistent for same dataset rendered with GPU rendering both under Slicer and Paraview (5.6.0).
+pieper
+(Steve Pieper (Isomics, Inc.))
+April 23, 2019, 9:46pm
+11
+Yes, since this is in both Slicer and ParaView this is something at the VTK level.
+I may not have time for a couple weeks, but I think the right thing to do is try creating a VTK test that replicates the issue so that it can be debugged in isolation and easily replicated on various hardware and driver scenarios.
+muratmaga
+(Murat Maga)
+April 24, 2019, 11:52pm
+12
+Well one test with a Quadro P4000, which is also reported to have 16K max_3d_texture_size, resulted in efficient rendering of the same volume with GPU in a Slicer nightly. Performance is decent enough for such large volume (2560x2560x676).
+So we are trying to understand why right value for this setting is not detected for 1080TI. Any input/suggestion would be highly appreciated.
+muratmaga
+(Murat Maga)
+April 26, 2019, 9:40pm
+13
+Finally managed to build Slicer locally. This is the error message from the latest (4-24) on Windows 7, with 1080TI. Volume is 2560x2560x676 and data type is uchar.
+"Volume" Reader has successfully read the file "E:/large_Uchar.nrrd" "[74.52s]"
+Switch to module: "VolumeRendering"
+Generic Warning: In C:\S\B\VTK\Rendering\VolumeOpenGL2\vtkOpenGLGPUVolumeRayCast
+Mapper.cxx, line 1230
+Error after glDrawElements in RenderVolumeGeometry! 1 OpenGL errors detected
+0 : (1285) Out of memory
+Generic Warning: In C:\S\B\VTK\Rendering\VolumeOpenGL2\vtkOpenGLGPUVolumeRayCast
+Mapper.cxx, line 1230
+Error after glDrawElements in RenderVolumeGeometry! 1 OpenGL errors detected
+0 : (1285) Out of memory
+This should not get an out of memory on this card, especially the same volume renders fine on a Quadro P4000 with 8GB of RAM. This is memory usage as reported by nvidia-smi on the same machine during the rendering attempt. As you can see only ~300MB of 11GB was being used at the moment.
+C:\Program Files\NVIDIA Corporation\NVSMI>nvidia-smi.exe
+Fri Apr 26 14:34:22 2019
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 425.31 Driver Version: 425.31 CUDA Version: 10.1 |
+|-------------------------------+----------------------+----------------------+
+| GPU Name TCC/WDDM | Bus-Id Disp.A | Volatile Uncorr. ECC |
+| Fan Temp Perf Pwr:Usage/Cap| Memory-Usage | GPU-Util Compute M. |
+|===============================+======================+======================|
+| 0 GeForce GTX 108... WDDM | 00000000:91:00.0 On | N/A |
+| 30% 52C P0 64W / 250W | 311MiB / 11264MiB | 0% Default |
++-------------------------------+----------------------+----------------------+
++-----------------------------------------------------------------------------+
+| Processes: GPU Memory |
+| GPU PID Type Process name Usage |
+|=============================================================================|
+| 0 5384 C+G ...86)\Webex\Webex\Applications\ptOIEx.exe N/A |
+| 0 7376 C+G C:\Windows\system32\Dwm.exe N/A |
+| 0 8128 C+G ...icer-build\bin\Debug\SlicerApp-real.exe N/A |
+| 0 8748 C+G ...o\2017\Community\Common7\IDE\devenv.exe N/A |
++-----------------------------------------------------------------------------+
+lassoan
+(Andras Lasso)
+April 26, 2019, 9:49pm
+14
+You can try if this GL logger tool can give more information: https://github.com/dtrebilco/glintercept
+Anyway, I would suggest to report this to VTK (reproduce it with a VTK example) or maybe to the Paraview forum (provide step-by-step description of what you do). Also provide a sample data set they can test with (it can be some synthetic volume that can be compressed very well).
+muratmaga
+(Murat Maga)
+April 30, 2019, 4:24pm
+15
+Thanks @lassoan. I couldn’t get glintercept to log anything, but I didn’t spend a lot of time with the configuration either.
+Meanwhile we encountered a strange issue with the Debugging through VS. Slicer was built (in debug mode) and works normally. When we set SlicerApp in VS as the startup project and start debugging, we immediately get this error message “The program can’t start because vtkRenderingGL2PSOpenGL2-8.2.dll is missing from your computer”, and debugger fails.
+@pieper Any ideas why this might be?
+pieper
+(Steve Pieper (Isomics, Inc.))
+April 30, 2019, 4:41pm
+16
+@muratmaga did you start visual studio via the slicer launcher?
+muratmaga
+(Murat Maga)
+April 30, 2019, 6:11pm
+17
+We opened the Slicer.sln within the Slicer-build folder, navigate down to the SLicerApp to debug.
+muratmaga
+(Murat Maga)
+April 30, 2019, 6:15pm
+18
+Nevermind that fixed it. Debuggin now.
+muratmaga
+(Murat Maga)
+May 17, 2019, 11:11pm
+19
+Reporting few more things for posterity. This issue appears to be with Geforce cards, or at least specifically 1080TIs we had in the lab. We had rendered large datasets up to hardware limits of Quadro RTX4000 and P4000, successfully, even using the same driver as Geforce (or at least, all required was a reboot when we swapped cards). This was with today nightly (5/16).
+Specifically things seems to work if all dimensions are lower than the reported MAX_3D_TExture_SIZE variable and the full dataset fits into GPU’s RAM. For example, resampled MRhead.nrrd 14222x256x130 (short) works perfectly well on Quadro RTX4000, as well as a version 1969x1969x1878(uchar).
+We don’t have any other recent Geforce cards to test this any further, but it looks like people who will be working with large microCT derived datasets can benefit from Quadro line.
+lassoan
+(Andras Lasso)
+May 18, 2019, 5:14pm
+20
+Thank you for the useful information. We had bad experience with Quadro cards in the past: they had many more compatibility issues than GeForce cards. But it is good to know that they may work better for volume rendering of large volumes.
+We have about 30 computers in our lab with various graphics cards, so if you can set up a quick test (test data and script) then I could ask people to run it and report their results.
+next page →
+Related topics
+Topic
+Replies
+Views
+Activity
+Better GPU will benefit or not VR volume rendering
+Support
+64
+2370
+December 29, 2021
+Stitching artifact with volume rendering large volumes (Feb 17 2021 nightly)
+Development
+20
+1302
+March 7, 2021
+Volume rendering hangs Slicer
+Support
+1
+281
+December 16, 2020
+volume rendering in 3dslicer
+Support
+15
+1179
+June 20, 2019
+Volume rendering causes application crash
+Support
+8
+1788
+August 23, 2018

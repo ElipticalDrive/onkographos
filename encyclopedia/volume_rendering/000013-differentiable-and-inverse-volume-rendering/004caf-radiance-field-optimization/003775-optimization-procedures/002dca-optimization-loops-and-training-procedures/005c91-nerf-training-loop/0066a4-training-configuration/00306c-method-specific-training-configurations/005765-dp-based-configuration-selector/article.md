@@ -1,0 +1,156 @@
+# DP-based Configuration Selector
+
+Also called: Multiple-Choice Knapsack Configuration Selection, Dynamic-programming-based configuration selection, MCK-based configuration selection, NeRFlex configuration selector
+
+## Overview
+The DP-based Configuration Selector is a method for selecting optimal neural radiance field (NeRF) configurations for multiple segmented objects under a strict global memory constraint $H$. It solves the configuration selection problem by formulating it as a Multiple-Choice Knapsack (MCK) problem, which is NP-hard [S1]. Unlike greedy approaches that rely on feasibility conditions often violated in multi-knob NeRF scenarios, this method uses dynamic programming to guarantee an optimal solution within the memory limit [S1]. It is specifically designed for mobile deployment where exceeding memory limits causes rendering failures or severe performance degradation [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:**
+    *   $I$: The set of segmented objects, with size $n = |I|$.
+    *   $C_i$: The configuration space for object $i$, containing discrete configuration pairs $\theta$.
+    *   $f_{si}(\theta)$: A profiling function estimating the memory size (in bytes) of object $i$'s NeRF representation given configuration $\theta$.
+    *   $f_{qi}(\theta)$: A profiling function estimating the rendering quality (e.g., SSIM or PSNR) of object $i$'s NeRF representation given configuration $\theta$.
+    *   $H$: The maximum allowed total memory size for the multi-modal NeRF representation [S1].
+*   **Output:**
+    *   `configs`: A list of pairs $(i, \theta_i^*)$ representing the selected optimal configuration for each object $i$ [S1].
+
+**Data Structures**
+The algorithm utilizes three primary data structures [S1]:
+1.  `q`: A 1D array of size $H+1$. `q[j]` stores the maximum achievable total quality for the processed objects using exactly (or at most) capacity $j$. Initialized to 0.
+2.  `choices`: A 2D array of dimensions $n \times (H+1)$. `choices[i][j]` stores the configuration pair $\theta$ selected for object $i$ when the remaining capacity is $j$. Initialized to null/None.
+3.  `configs`: An empty list to store the final selected configuration pairs during backtracking [S1].
+
+**Parameters**
+*   **Configuration Pair $\theta_i = (g_i, p_i)$**: Represents the geometry resolution knob $g_i$ and texture parameter knob $p_i$ for object $i$ [S1].
+*   **Memory Constraint $H$**: Fixed memory size available on the target device. Typical values are 240MB for iPhone 13 and 150MB for Pixel 4 [S1].
+*   **Baseline Configuration**: For single NeRF or Block-NeRF baselines, the recommended pair is $(128, 17)$ [S1].
+
+**Algorithm Steps**
+The algorithm proceeds in two phases: DP table filling and backtracking [S1].
+
+1.  **Initialization**:
+    *   For each object $i \in I$, initialize the minimum configuration $\theta_i^* \leftarrow \min(C_i) = (\min(g_i), \min(p_i))$ [S1].
+    *   Initialize `q` as an array of zeros of length $H+1$.
+    *   Initialize `choices` as a 2D array of nulls with dimensions $n \times (H+1)$.
+    *   Initialize `configs` as an empty list [S1].
+
+2.  **DP Table Filling**:
+    Iterate through each object $i$ from $0$ to $n-1$. For each object, iterate through the capacity $j$ from $H$ down to $0$ (to ensure each object is selected at most once per capacity level in the knapsack formulation) [S1].
+    
+    For each configuration $\theta \in C_i$:
+    *   **Calculate Threshold**: Compute the minimum memory required by all *other* objects $h \neq i$ using their minimum configurations:
+        $$ r_i = H - \sum_{h=1, h \neq i}^{n} \min_{\theta_t \in C_h} f_{sh}(\theta_t) $$
+        [S1]
+    *   **Feasibility Check**: If the size of the current configuration $f_{si}(\theta) \ge r_i$, skip this configuration. This ensures that selecting $\theta$ leaves enough room for the minimal configurations of all other objects, satisfying the feasibility condition [S1].
+    *   **State Transition**: If the current capacity $j$ is sufficient for the configuration ($j \ge f_{si}(\theta)$):
+        *   Calculate the potential new quality: $Q_{new} = q[j - f_{si}(\theta)] + f_{qi}(\theta)$.
+        *   If $q[j] < Q_{new}$:
+            *   Update `q[j]` $\leftarrow Q_{new}$.
+            *   Record the choice: `choices[i][j]` $\leftarrow \theta$ [S1].
+
+3.  **Backtracking**:
+    *   Initialize `current_capacity` $= H$.
+    *   Iterate from the last object index $m = n-1$ down to $0$:
+        *   If `choices[m][current_capacity]` is not null:
+            *   Let $\theta_{selected} = \text{choices}[m][\text{current\_capacity}]$.
+            *   Add the pair $(m, \theta_{selected})$ to `configs`.
+            *   Update `current_capacity` $\leftarrow \text{current\_capacity} - f_{sm}(\theta_{selected})$.
+        *   Else:
+            *   Assign the minimum configuration $\theta_m^*$ to object $m$ and add $(m, \theta_m^*)$ to `configs`. [G: The source algorithm description implies that if no choice was recorded, the object was not part of the optimal DP path for the remaining capacity, but since every object must be rendered, the fallback to the minimum configuration is necessary to ensure a valid solution. The source notes state "Initialize the minimum configuration... $\theta_i^*$" at the start, implying this is the fallback.]
+    *   Return `configs` [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dp_configuration_selector(objects, size_func, quality_func, H):
+    """
+    Selects optimal NeRF configurations for a set of objects under memory constraint H.
+    
+    Args:
+        objects: List of object identifiers I.
+        size_func: Function f_si(theta) returning memory size for object i and config theta.
+        quality_func: Function f_qi(theta) returning quality for object i and config theta.
+        H: Maximum allowed memory size.
+        
+    Returns:
+        configs: List of tuples (object_index, selected_config_pair).
+    """
+    n = len(objects)
+    # Data structures
+    # q[j] stores max quality for capacity j
+    q = [0.0] * (H + 1)
+    # choices[i][j] stores the config theta selected for object i at capacity j
+    choices = [[None] * (H + 1) for _ in range(n)]
+    
+    # Precompute minimum configurations for all objects to calculate thresholds
+    # Note: C_i is the configuration space for object i
+    min_configs = {}
+    min_sizes = {}
+    for i, obj in enumerate(objects):
+        C_i = get_configuration_space(obj) # Helper to get C_i
+        min_configs[i] = min(C_i, key=lambda theta: size_func(i, theta))
+        min_sizes[i] = size_func(i, min_configs[i])
+        
+    # DP Table Filling
+    for i, obj in enumerate(objects):
+        C_i = get_configuration_space(obj)
+        
+        # Calculate the minimum memory required by all OTHER objects
+        # Sum of min sizes for all h != i
+        min_other_size = sum(min_sizes[h] for h in range(n) if h != i)
+        r_i = H - min_other_size
+        
+        # Iterate capacity downwards to satisfy MCK constraints (each object picked once)
+        for j in range(H, -1, -1):
+            for theta in C_i:
+                size = size_func(i, theta)
+                
+                # Feasibility check: ensure remaining capacity can fit min configs of others
+                if size >= r_i:
+                    continue
+                
+                # State transition
+                if j >= size:
+                    new_quality = q[j - size] + quality_func(i, theta)
+                    if new_quality > q[j]:
+                        q[j] = new_quality
+                        choices[i][j] = theta
+                        
+    # Backtracking
+    configs = []
+    current_capacity = H
+    
+    for i in range(n - 1, -1, -1):
+        selected_theta = choices[i][current_capacity]
+        if selected_theta is not None:
+            configs.append((i, selected_theta))
+            current_capacity -= size_func(i, selected_theta)
+        else:
+            # Fallback to minimum configuration if not explicitly chosen in DP path
+            # This ensures all objects have a valid configuration
+            configs.append((i, min_configs[i]))
+            
+    return configs
+```
+
+**Edge Cases and Pitfalls**
+*   **Infeasibility of Greedy Conditions**: The feasibility condition $\sum_{\theta_j \in C_i} f_{si}(\theta_j) + \min_{h \neq i} \min_{\theta_t \in C_h} f_{sh}(\theta_t) \le H$ is often not met in NeRFlex due to the presence of two control knobs ($g$ and $p$) [S1]. Greedy algorithms fail here, necessitating DP [S1].
+*   **Memory Limits**: On iPhone 13, exceeding 240MB causes the local WebGL rendering engine to fail to load data. On Pixel 4, exceeding 150MB causes average FPS to drop by ~15, leading to stuttering [S1].
+*   **Precision**: The size function $f_{si}$ and quality function $f_{qi}$ are derived from profiling models. Inaccuracies in these models can lead to suboptimal selections or constraint violations if the estimated size is significantly lower than the actual runtime size [S1].
+
+## Operating characteristics
+*   **Time Complexity**: $O(nhc)$, where $n$ is the number of objects, $h$ is the memory constraint $H$, and $c$ is the size of the configuration space $C$ for an object [S1]. The threshold calculation takes $O(n)$ per object, and the DP process takes $O(hc)$ per object [S1].
+*   **Memory Complexity**: $O(nh)$ for the `choices` table and $O(h)$ for the `q` array [S1].
+*   **Strengths**: Guarantees an optimal solution to the MCK problem within the memory constraint, unlike greedy approaches which may fail or produce sub-optimal results when feasibility conditions are not met [S1].
+*   **Limitations**: The problem is NP-hard [S1]. The pseudo-polynomial time complexity $O(nhc)$ can be prohibitive if $H$ or $c$ is very large. It requires accurate profiling models for size and quality [S1].
+*   **When to Use**: When deploying multi-NeRF systems on resource-constrained devices (e.g., mobile phones) where strict memory limits must be respected and optimal quality is desired [S1].
+*   **When Not to Use**: When real-time configuration selection is required and $n$ or $H$ are too large for the $O(nhc)$ complexity, or when profiling models are unavailable or inaccurate [S1].
+
+## Background
+The DP-based Configuration Selector was introduced in the **NeRFlex** paper [S1]. NeRFlex is a resource-aware real-time high-quality rendering system for complex scenes on mobile devices. The method addresses the challenge of managing memory for multiple segmented NeRF objects on devices with limited RAM, such as the iPhone 13 and Pixel 4 [S1]. The problem is formulated as a Multiple-Choice Knapsack (MCK) problem, which is known to be NP-hard [S1]. Previous approaches for single-object NeRFs or those relying on greedy search were insufficient due to the multi-knob nature of the configuration space and the strict feasibility requirements of greedy algorithms [S1].
+
+## Sources
+[S1] NeRFlex: Resource-aware Real-time High-quality Rendering of Complex Scenes on Mobile Devices, https://doi.org/10.1109/icdcs63083.2025.00067, fetched 2026-10-29

@@ -1,0 +1,187 @@
+--- v003.md
++++ v004.md
+@@ -7,10 +7,10 @@
+ 
+ ## How it works
+-**Inputs:** Camera intrinsic parameters (focal length $f$, pixel dimensions $\Delta x, \Delta y$), camera extrinsic parameters (optical center $\mathbf{o}$), scene bounding box (AABB), and a density/color field (typically parameterized by a Tri-Mip encoding and a tiny MLP).
+-**Outputs:** Final pixel color $C_{out}$.
++**Inputs:** Camera intrinsic parameters (focal length $f$, pixel dimensions $\Delta x, \Delta y$), camera extrinsic parameters (optical center $\mathbf{o}$), scene bounding box (AABB), and a density/color field parameterized by a Tri-Mip encoding and a tiny MLP [S1].
++**Outputs:** Final pixel color $C_{out}$ [S1].
+ 
+ **Data Structures:**
+-*   **Cone $C$:** Defined by apex $\mathbf{o}$ and direction $\mathbf{d}$.
+-*   **Sampling Spheres $S$:** A set of spheres $\{S_i\}$, each defined by center $\mathbf{x}_i$ and radius $r_i$.
++*   **Cone $C$:** Defined by apex $\mathbf{o}$ and direction $\mathbf{d}$ [S1].
++*   **Sampling Spheres $S$:** A set of spheres $\{S_i\}$, each defined by center $\mathbf{x}_i$ and radius $r_i$ [S1].
+ *   **Occupancy Grid:** A binary grid marking empty vs. non-empty space to skip samples [S1].
+ 
+@@ -21,13 +21,13 @@
+     $$ \tilde{r} = \sqrt{\frac{\Delta x \cdot \Delta y}{\pi}} $$
+     [S1]
+-    Emit a cone $C$ from the camera projection center $\mathbf{o}$ along the direction $\mathbf{d} = \mathbf{p}_o - \mathbf{o}$, where $\mathbf{p}_o$ is the pixel center. The central axis of the cone is defined as:
++    Emit a cone $C$ from the camera projection center $\mathbf{o}$ along the direction $\mathbf{d} = \mathbf{p}_o - \mathbf{o}$, where $\mathbf{p}_o$ is the pixel center [S1]. The central axis of the cone is defined as:
+     $$ \mathbf{a}(t) = \mathbf{o} + t\mathbf{d} $$
+     [S1]
+ 
+ 2.  **Sampling Distance Determination:**
+-    Determine sampling distances $t_i$ by uniformly sampling between the camera's near plane $t_n$ and far plane $t_f$, or the intersections of the cone's central axis with the AABB of the 3D space. An occupancy grid is used to skip samples in empty areas and concentrate samples near surfaces [S1].
++    Determine sampling distances $t_i$ by uniformly sampling between the camera's near plane $t_n$ and far plane $t_f$, or the intersections of the cone's central axis with the AABB of the 3D space [S1]. An occupancy grid is used to skip samples in empty areas and concentrate samples near surfaces [S1].
+ 
+ 3.  **Sphere Parameterization:**
+-    For each distance $t_i$, calculate the sphere center $\mathbf{x}_i$ and inscribed radius $r_i$. The center lies on the central axis:
++    For each distance $t_i$, calculate the sphere center $\mathbf{x}_i$ and inscribed radius $r_i$ [S1]. The center lies on the central axis:
+     $$ \mathbf{x}_i = \mathbf{o} + t_i \mathbf{d} $$
+     [S1]
+@@ -37,5 +37,5 @@
+ 
+ 4.  **Featurization:**
+-    Featurize each sphere by orthogonally projecting it onto the three Tri-Mip planes (XY, YZ, XZ) and sampling the corresponding mipmaps based on the sphere's occupied area. This yields a feature vector $\mathbf{f}_i$ [S1].
++    Featurize each sphere by orthogonally projecting it onto the three Tri-Mip planes (XY, YZ, XZ) and sampling the corresponding mipmaps based on the sphere's occupied area [S1]. This yields a feature vector $\mathbf{f}_i$ [S1].
+ 
+ 5.  **Density and Color Prediction:**
+@@ -45,5 +45,5 @@
+ 
+ 6.  **Volume Rendering Integration:**
+-    Integrate the density and color of the sampled spheres using front-to-back volume rendering to produce the final pixel color. The contribution of each sphere is approximated by numerical quadrature:
++    Integrate the density and color of the sampled spheres using front-to-back volume rendering to produce the final pixel color [S1]. The contribution of each sphere is approximated by numerical quadrature:
+     $$ C_{out} = \sum_{i} T_i \left(1 - \exp(-\tau_i (t_{i+1} - t_i))\right) \mathbf{c}_i $$
+     with transmittance:
+@@ -54,24 +54,26 @@
+ 
+ ```python
+-def cone_casting_rendering(camera, scene, pixel_center):
++def cone_casting_rendering(camera, scene, pixel_center, num_samples=64, beta=1.0, epsilon=1e-4):
+     # 1. Cone Definition
+     o = camera.optical_center
+-    d = normalize(pixel_center - o)
++    d = [pixel_center[0] - o[0], pixel_center[1] - o[1], pixel_center[2] - o[2]]
++    norm_d = math.sqrt(d[0]**2 + d[1]**2 + d[2]**2)
++    d_norm = [d[0]/norm_d, d[1]/norm_d, d[2]/norm_d]
++    
+     # Calculate pixel disc radius in world coordinates
+-    # Note: delta_x, delta_y must be derived from camera intrinsics/extrinsics
+-    delta_x, delta_y = get_pixel_world_dimensions(camera, pixel_center)
+-    r_tilde = sqrt((delta_x * delta_y) / pi)
++    delta_x, delta_y = camera.pixel_width_world, camera.pixel_height_world
++    r_tilde = math.sqrt((delta_x * delta_y) / math.pi)
+     
+     # 2. Sampling Distances
+     # Intersect central axis with AABB or use near/far planes
+-    t_start, t_end = intersect_axis_with_aabb(o, d, scene.aabb)
++    t_start, t_end = intersect_axis_with_aabb(o, d_norm, scene.aabb)
+     if t_start is None:
+-        return black_color
++        return [0.0, 0.0, 0.0]
+         
+-    # Uniform sampling or occupancy-grid guided sampling
+-    t_values = uniform_sample(t_start, t_end, num_samples)
++    # Uniform sampling
++    t_values = [t_start + i * (t_end - t_start) / num_samples for i in range(num_samples + 1)]
+     
+     # 3. Sphere Parameterization and Rendering Loop
+-    accumulated_color = 0.0
++    accumulated_color = [0.0, 0.0, 0.0]
+     accumulated_transmittance = 1.0
+     
+@@ -81,14 +83,12 @@
+         
+         # Sphere center on axis
+-        x_curr = o + t_curr * d
++        x_curr = [o[0] + t_curr * d_norm[0], o[1] + t_curr * d_norm[1], o[2] + t_curr * d_norm[2]]
+         
+         # Sphere radius (inscribed)
+-        # beta is a base radius parameter, f is focal length
+-        norm_d = norm(d)
+-        norm_x_o = norm(x_curr - o)
++        norm_x_o = math.sqrt((x_curr[0]-o[0])**2 + (x_curr[1]-o[1])**2 + (x_curr[2]-o[2])**2)
+         numerator = norm_x_o * camera.focal_length * beta
+-        denominator_term1 = sqrt(norm_d**2 - camera.focal_length**2) - beta
+-        denominator = norm_d * sqrt(denominator_term1**2 + camera.focal_length**2)
+-        r_curr = numerator / denominator
++        inner_sqrt = math.sqrt(max(0, norm_d**2 - camera.focal_length**2)) - beta
++        denominator = norm_d * math.sqrt(inner_sqrt**2 + camera.focal_length**2)
++        r_curr = numerator / denominator if denominator != 0 else 0.0
+         
+         # Check occupancy grid to skip empty space
+@@ -97,20 +97,20 @@
+             
+         # 4. Featurization (Tri-Mip)
+-        # Project sphere onto XY, YZ, XZ planes and sample mipmaps
++        # Orthogonally projects sphere onto XY, YZ, XZ planes and samples mipmaps
++        # based on the sphere's occupied area. Returns feature vector f.
+         f_curr = tri_mip_encode(x_curr, r_curr, scene.tri_mip_maps)
+         
+         # 5. MLP Prediction
+-        tau_curr, c_curr = tiny_mlp(f_curr, d, scene.mlp_weights)
++        # Non-linearly maps feature vector f and view direction d to density tau and color c
++        tau_curr, c_curr = tiny_mlp(f_curr, d_norm, scene.mlp_weights)
+         
+         # 6. Integration
+-        # Step size for this segment
+         dt = t_next - t_curr
++        alpha_curr = 1.0 - math.exp(-tau_curr * dt)
+         
+-        # Opacity for this segment
+-        alpha_curr = 1.0 - exp(-tau_curr * dt)
+-        
+-        # Front-to-back compositing
+         weight = accumulated_transmittance * alpha_curr
+-        accumulated_color += weight * c_curr
++        accumulated_color[0] += weight * c_curr[0]
++        accumulated_color[1] += weight * c_curr[1]
++        accumulated_color[2] += weight * c_curr[2]
+         accumulated_transmittance *= (1.0 - alpha_curr)
+         
+@@ -120,16 +120,43 @@
+             
+     return accumulated_color
++
++def intersect_axis_with_aabb(origin, direction, aabb):
++    # Returns (t_min, t_max) or (None, None) if no intersection
++    t_min, t_max = 0.0, float('inf')
++    for i in range(3):
++        if direction[i] == 0:
++            if origin[i] < aabb.min[i] or origin[i] > aabb.max[i]:
++                return None, None
++        else:
++            t1 = (aabb.min[i] - origin[i]) / direction[i]
++            t2 = (aabb.max[i] - origin[i]) / direction[i]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++    if t_min > t_max or t_max < 0:
++        return None, None
++    return t_min, t_max
++
++def tri_mip_encode(center, radius, tri_mip_maps):
++    # Implementation details depend on specific Tri-Mip encoding architecture [G].
++    pass
++
++def tiny_mlp(features, direction, weights):
++    # Implementation details depend on specific MLP architecture [G].
++    pass
+ ```
+ 
+ **Parameters:**
+-*   $\beta$ (base radius): Not given in the sources.
++*   $\beta$ (base radius): Base radius parameter for sphere inscribing [S1].
+ *   $f$ (focal length): Provided by camera intrinsics [S1].
+ *   $\Delta x, \Delta y$ (pixel dimensions): Derived from camera parameters [S1].
+ *   $t_n, t_f$ (near/far planes): Provided by camera settings or AABB intersections [S1].
++*   $\text{num\_samples}$: Number of sampling points along the cone axis [G].
++*   $\epsilon$: Early termination threshold for transmittance [G].
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Anisotropy:** MipNeRF uses multivariate Gaussians which are anisotropic; this method uses spheres to ensure isotropic pre-filtering, which is required for Tri-Mip encoding [S1].
+ *   **Empty Space:** Without an occupancy grid, computation is wasted in empty areas [S1].
+-*   **Precision:** The radius formula involves square roots and differences; care must be taken with numerical stability when the camera is very close to the scene or when $f$ is large relative to $\|\mathbf{d}\|$ [S1].
++*   **Boundary Conditions:** If the ray direction is parallel to an AABB face, the intersection logic must handle division by zero correctly [G].
++*   **Degenerate Input:** If $\|\mathbf{d}\|_2 = 0$ or $f^2 > \|\mathbf{d}\|_2^2$, the radius formula becomes undefined; clamp or handle gracefully [G].
+ 
+ ## Subtopics
+@@ -147,5 +174,5 @@
+ *   **Limitations:** Requires calibrated multi-view images for reconstruction; relies on the specific Tri-Mip encoding structure [S1].
+ *   **When to use it:** For static scene reconstruction and rendering where anti-aliasing is critical and computational efficiency is desired [S1].
+-*   **When not to use it:** For dynamic scenes without extension, or when isotropic pre-filtering is not required [S1].
++*   **When not to use it:** Not given in the sources.
+ 
+ ## Background

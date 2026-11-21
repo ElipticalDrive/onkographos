@@ -1,0 +1,177 @@
+--- v001.md
++++ v002.md
+@@ -22,84 +22,96 @@
+ 
+ 1.  **Bake SDF Texture:**
+-    *   A compute shader (`cloud_3d_sdf_bake.comp`) is dispatched to analytically bake the lofted cloud SDF into the 3D texture [S1, unofficial].
+-    *   The baking uses **unadvected coordinates** to ensure the SDF represents the cloud geometry in its local space before transformation [S1, unofficial].
++    *   A compute shader (`cloud_3d_sdf_bake.comp`) is dispatched to analytically bake the lofted cloud SDF into the 3D texture using unadvected coordinates [S1, unofficial].
++    *   The baking uses **unadvected coordinates**, meaning the texture represents the cloud in its local space before any dynamic transformations are applied [S1, unofficial].
+     *   This dispatch occurs every frame in `AtmosphereManager::Update` to maintain synchrony with dynamic cloud parameters and resolve initialization frame order issues [S1, unofficial].
+ 
+ 2.  **Optimize Ray Marching Loop:**
+     *   In the rendering compute shader (`atmosphere_lowres.comp`), the raymarching loop is modified [S1, unofficial].
+-    *   **Conservative Skip:** The loop first samples the `_cloudSdf3DTexture` at the current ray position. If the sampled SDF value indicates empty space (distance to surface > current step size or threshold), the ray is advanced conservatively by that distance [S1, unofficial].
++    *   **Conservative Skip:** The loop first samples the `_cloudSdf3DTexture` at the current ray position [S1, unofficial]. If the sampled SDF value indicates empty space (distance to surface > current step size or threshold), the ray is advanced conservatively by that distance [S1, unofficial].
+     *   **Analytical Fallback:** Full analytical SDF evaluations are performed **only** inside active cells where the texture indicates the presence of cloud matter (i.e., when the ray is close to the surface or inside the cloud) [S1, unofficial].
++
++**Formulas:**
++*   Ray position: $\mathbf{p}(t) = \mathbf{o} + t \cdot \mathbf{d}$, where $\mathbf{o}$ is the ray origin, $\mathbf{d}$ is the normalized ray direction, and $t$ is the accumulated distance [G].
++*   Conservative skip condition: if $S_{\text{baked}}(\mathbf{p}(t)) > \epsilon$, advance $t \leftarrow t + S_{\text{baked}}(\mathbf{p}(t))$ [S1, unofficial].
++*   Fallback condition: if $S_{\text{baked}}(\mathbf{p}(t)) \le \epsilon$, evaluate $S_{\text{analytical}}(\mathbf{p}(t))$ and advance $t \leftarrow t + S_{\text{analytical}}(\mathbf{p}(t))$ [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# cloud_3d_sdf_bake.comp (Compute Shader)
+-# Dispatched every frame in AtmosphereManager::Update
+-# Invocations cover the 128x32x128 volume
++import math
+ 
+-void main() {
+-    ivec3 texelCoord = ivec3(gl_GlobalInvocationID);
++def bake_sdf_texture(cloud_params, grid_dims=(128, 32, 128)):
++    # Allocate 3D array matching GL_R32F layout
++    sdf_texture = [[[0.0 for _ in range(grid_dims[2])] for _ in range(grid_dims[1])] for _ in range(grid_dims[0])]
+     
+-    // Convert texel coordinate to unadvected world/local space position
+-    // Assuming texture bounds map to the cloud's bounding box
+-    vec3 pos = texelCoordToPosition(texelCoord); 
++    # Map texel indices to unadvected local/world space
++    # Assumes texture bounds map linearly to the cloud's bounding box
++    for x in range(grid_dims[0]):
++        for y in range(grid_dims[1]):
++            for z in range(grid_dims[2]):
++                # Convert integer texel coordinate to continuous position
++                pos_x = x / (grid_dims[0] - 1)
++                pos_y = y / (grid_dims[1] - 1)
++                pos_z = z / (grid_dims[2] - 1)
++                world_pos = (pos_x, pos_y, pos_z)
++                
++                # Evaluate analytical lofted cloud SDF at this position
++                # Exact analytical formula is implementation-specific [G]
++                sdf_value = evaluate_analytical_cloud_sdf(world_pos, cloud_params)
++                sdf_texture[x][y][z] = sdf_value
++                
++    return sdf_texture
++
++def raymarch_with_baked_sdf(ray_origin, ray_dir, max_dist, cloud_params, sdf_texture, grid_dims):
++    t = 0.0
++    epsilon = 1e-4
+     
+-    // Evaluate the analytical lofted cloud SDF at this position
+-    // 'cloudParams' are passed as uniforms
+-    float sdfValue = evaluateAnalyticalCloudSDF(pos, cloudParams);
+-    
+-    // Write to the 3D texture (GL_R32F)
+-    // The texture is bound to a storage image or uniform buffer depending on implementation
+-    cloudSdfTexture[texelCoord] = sdfValue;
+-}
++    while t < max_dist:
++        # Current ray position
++        current_pos = (
++            ray_origin[0] + ray_dir[0] * t,
++            ray_origin[1] + ray_dir[1] * t,
++            ray_origin[2] + ray_dir[2] * t
++        )
++        
++        # Map world position to normalized texture coordinates [0, 1]
++        tex_x = current_pos[0] / (grid_dims[0] - 1)
++        tex_y = current_pos[1] / (grid_dims[1] - 1)
++        tex_z = current_pos[2] / (grid_dims[2] - 1)
++        
++        # Apply wrapping modes: GL_REPEAT horizontally (x, z), GL_CLAMP_TO_EDGE vertically (y)
++        tex_x = tex_x % 1.0
++        tex_z = tex_z % 1.0
++        tex_y = max(0.0, min(1.0, tex_y))
++        
++        # Sample baked SDF texture
++        # Bilinear/trilinear interpolation is standard for GL_R32F [G]
++        baked_sdf = sample_texture_3d(sdf_texture, (tex_x, tex_y, tex_z))
++        
++        if baked_sdf > epsilon:
++            # Conservative skip: advance by baked distance to skip empty space
++            t += baked_sdf
++        else:
++            # Fallback: perform full analytical evaluation inside active cells
++            analytical_sdf = evaluate_analytical_cloud_sdf(current_pos, cloud_params)
++            t += analytical_sdf
++            
++            # Termination condition for sphere tracing
++            if analytical_sdf <= 0.0:
++                break
++                
++    return t
+ 
+-# atmosphere_lowres.comp (Rendering Compute Shader)
+-// Raymarching loop optimization
++def evaluate_analytical_cloud_sdf(pos, params):
++    # Placeholder for the specific lofted cloud SDF implementation [G]
++    # Returns signed distance from pos to cloud surface
++    return 0.0
+ 
+-void main() {
+-    vec3 rayOrigin = ...; // Camera ray origin
+-    vec3 rayDir = ...;    // Camera ray direction
+-    float t = 0.0;
+-    float maxDist = ...;
+-    
+-    while (t < maxDist) {
+-        vec3 currentPos = rayOrigin + rayDir * t;
+-        
+-        // 1. Sample the baked 3D SDF texture
+-        // Texture coordinates must be mapped from currentPos to [0,1] range
+-        vec3 texCoords = positionToTexCoords(currentPos);
+-        
+-        // Clamp to handle boundary conditions if necessary
+-        // Note: Horizontal wrapping is GL_REPEAT, Vertical is GL_CLAMP_TO_EDGE
+-        float bakedSdf = texture(cloudSdfTexture, texCoords).r;
+-        
+-        // 2. Conservative Skip
+-        // If the baked SDF indicates we are far from the cloud, skip ahead
+-        // 'bakedSdf' is the distance to the nearest cloud surface
+-        if (bakedSdf > t) {
+-            // This condition implies the ray is outside the cloud volume
+-            // and the distance to the surface is greater than the current t.
+-            // However, standard sphere tracing uses the SDF value as the step size.
+-            // To skip empty space conservatively, we advance by the SDF value.
+-            // If bakedSdf is large, we jump far.
+-            t += bakedSdf;
+-            continue;
+-        }
+-        
+-        // 3. Analytical Fallback
+-        // If we are close to the surface (bakedSdf <= t) or inside,
+-        // perform the full analytical evaluation for accuracy.
+-        float analyticalSdf = evaluateAnalyticalCloudSDF(currentPos, cloudParams);
+-        
+-        // Use the analytical SDF for the step size to ensure precision
+-        // near the surface and for density sampling
+-        t += analyticalSdf;
+-        
+-        // Check for intersection or density threshold
+-        if (analyticalSdf <= 0.0 || density(currentPos) > threshold) {
+-            break;
+-        }
+-    }
+-}
++def sample_texture_3d(texture, coords):
++    # Standard 3D texture sampling with specified wrapping [G]
++    ix = int(coords[0] * (len(texture) - 1))
++    iy = int(coords[1] * (len(texture[0]) - 1))
++    iz = int(coords[2] * (len(texture[0][0]) - 1))
++    return texture[ix][iy][iz]
+ ```
+ 
+@@ -117,9 +129,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The baking step is $O(N)$ where $N$ is the number of texels ($128 \times 32 \times 128 = 524,288$) [S1, unofficial]. This is performed every frame. The raymarching loop is accelerated by skipping empty space, reducing the number of analytical SDF evaluations [S1, unofficial].
++*   **Time Complexity:** Not given in the sources. The baking step is executed every frame [S1, unofficial]. The raymarching loop is accelerated by skipping empty space, reducing the number of analytical SDF evaluations [S1, unofficial].
+ *   **Memory Complexity:** The texture requires $128 \times 32 \times 128 \times 4$ bytes $\approx 2$ MB of VRAM [S1, unofficial].
+ *   **Performance:** The method was validated with unit tests and shader validations passing 100% [S1, unofficial]. It optimizes cloud sphere tracing by reducing the computational load of the analytical SDF evaluation during the main rendering pass [S1, unofficial].
+ *   **Strengths:** Reduces the number of expensive analytical SDF evaluations per ray. Simple to implement as a texture lookup.
+-*   **Limitations:** Introduces a fixed memory overhead. The low resolution may not capture fine cloud details accurately. Requires frequent rebaking for dynamic clouds.
++*   **Limitations:** Introduces a fixed memory overhead. Requires frequent rebaking for dynamic clouds.
+ 
+ ## Background

@@ -1,0 +1,292 @@
+--- v001.md
++++ v002.md
+@@ -3,140 +3,179 @@
+ 
+ ## Overview
+-Age-Gated Eligibility (AGE) is a densification strategy for 3D Gaussian Splatting that prevents newly created primitives from splitting or cloning immediately, thereby bounding the primitive budget and controlling memory and training time costs [S1]. It solves the problem of uncontrolled cascading growth where a Gaussian born at iteration $k$ splits at $k+1$, its child at $k+2$, and so on, which inflates the primitive count and leaves redundant, under-supported primitives in dense regions [S1]. Unlike sibling methods that rely on gradient reweighting or relocation, AGE acts as a temporal gate, deferring the first split-or-clone decision until a Gaussian has matured for a fixed number of iterations [S1].
++Age-Gated Eligibility (AGE) is a densification control mechanism for 3D Gaussian Splatting that prevents newly created primitives from undergoing split or clone operations immediately after birth [S1]. It solves the problem of uncontrolled cascading growth, where a Gaussian born at iteration $k$ splits at $k+1$, its child splits at $k+2$, and so on, which inflates the primitive count, peak memory usage, and training time in dense regions [S1]. Unlike standard adaptive density control which re-evaluates all primitives regardless of age, AGE defers the first split-or-clone decision until a Gaussian has survived a fixed maturity window, thereby damping the densification cascade and bounding the final primitive budget without degrading image quality [S1].
+ 
+ ## How it works
+-AGE modifies the adaptive density control (ADC) step of 3D Gaussian Splatting by introducing an age-based eligibility check [S1]. It requires no architectural changes to the rasterizer or pruning criteria, adding only a single age comparison per Gaussian per densification cycle [S1].
++**Inputs and Outputs:**
++*   **Input:** The current set of Gaussians $\mathcal{G}$, each tagged with a birth iteration $b_i$; the current optimization iteration $t$; the densification cadence $\Delta_d$; the maturity threshold $T_{mat}$; and the gradient threshold $\tau_g$.
++*   **Output:** A subset of Gaussians eligible for densification (split or clone) in the current cycle.
+ 
+-### Inputs and Outputs
+-*   **Inputs:**
+-    *   Current training iteration $t$.
+-    *   Set of all Gaussians $\mathcal{G}$, where each Gaussian $i$ has a birth iteration tag $b_i$.
+-    *   Densification cadence $\Delta_d$ (interval between densification steps).
+-    *   Maturity threshold $T_{mat}$ (minimum age required for eligibility).
+-    *   Gradient threshold $\tau_g$ (standard 3DGS threshold for accumulated 2D-projected positional gradient magnitude).
+-*   **Outputs:**
+-    *   Updated set of Gaussians $\mathcal{G}'$ with new primitives added via split or clone operations only for eligible Gaussians.
++**Data Structures:**
++Each Gaussian $i$ in the set $\mathcal{G}$ maintains a scalar field $b_i$, representing the iteration index at which the Gaussian was created (for initial points) or last split/cloneed [S1].
+ 
+-### Data Structures
+-Each Gaussian $i$ in the scene must store an additional integer field:
+-*   $b_i$: The birth iteration. This is the iteration index at which the Gaussian was created (either at initialization or via a previous split/clone operation).
+-    *   For the initial set of Gaussians, $b_i = 0$ [S1].
++**Parameters:**
++*   $T_{mat}$: Maturity threshold in iterations. Default value: 200 [S1]. This is fixed by design as $2\Delta_d$ [S1].
++*   $\Delta_d$: Densification cadence (interval between densification steps). Default value: 100 [S1].
++*   $\tau_g$: Threshold for accumulated 2D-projected positional gradient magnitude. Standard 3DGS value [S1].
+ 
+-### Parameters
+-*   $T_{mat}$: Maturity threshold. Default value is 200 iterations [S1]. This is typically set to $2\Delta_d$ [S1].
+-*   $\Delta_d$: Densification cadence. Default value is 100 iterations [S1].
+-*   $\tau_g$: Gradient magnitude threshold. Uses the standard value from 3DGS [S1].
++**Algorithm:**
++1.  **Initialization:** At the start of training (iteration 0), tag every initial Gaussian $i$ with its birth iteration $b_i = 0$ [S1].
++2.  **Iteration Loop:** During optimization, every $\Delta_d$ iterations, execute the densification cycle [S1].
++3.  **Age Calculation:** For each Gaussian $i$, calculate its current age $\nu_i(t)$ at iteration $t$ using the formula:
++    $$ \nu_i(t) = t - b_i $$
++    [S1]
++4.  **Eligibility Check:** Determine the mature set $M(t)$ containing all Gaussians that have reached the maturity threshold:
++    $$ M(t) = \{ i : \nu_i(t) \ge T_{mat} \} $$
++    [S1]
++5.  **Densification:** For each Gaussian $i \in M(t)$, evaluate the standard 3DGS split-or-clone criteria [S1]:
++    *   Check if the accumulated 2D-projected positional gradient magnitude exceeds $\tau_g$ [S1].
++    *   If the gradient condition is met:
++        *   If the Gaussian is "large" (scale above a certain threshold), perform a **split** operation [S1].
++        *   If the Gaussian is "small" (scale below the threshold), perform a **clone** operation [S1].
++    *   For split operations, the new child Gaussians are tagged with the current iteration $t$ as their birth iteration $b_{new} = t$ [S1].
++    *   For clone operations, the clone retains the birth iteration of the parent or is tagged with $t$ (standard 3DGS behavior applies, but AGE only gates the *eligibility* to perform the operation) [S1].
++6.  **Skip Immature:** Gaussians $i$ where $\nu_i(t) < T_{mat}$ are skipped in this cycle. They are re-evaluated in the next densification opportunity [S1].
+ 
+-### Algorithm
+-The method operates during the optimization loop. The densification step is executed every $\Delta_d$ iterations [S1].
+-
+-1.  **Initialization:** At the start of training (iteration 0), tag every initial Gaussian $i$ with $b_i = 0$ [S1].
+-2.  **Iteration Loop:** For each training iteration $t$:
+-    *   Perform standard forward and backward passes to accumulate gradients [S1].
+-    *   If $t \pmod{\Delta_d} == 0$ (i.e., it is a densification step):
+-        1.  Define the **mature set** $M(t)$ as the subset of Gaussians $\mathcal{G}$ where the age $\nu_i(t) \ge T_{mat}$ [S1].
+-        2.  The age of Gaussian $i$ at iteration $t$ is calculated as:
+-            $$ \nu_i(t) = t - b_i $$
+-        3.  A Gaussian $i$ is eligible for densification if and only if:
+-            $$ \nu_i(t) \ge T_{mat} $$
+-        4.  Iterate through all Gaussians $i \in \mathcal{G}$:
+-            *   If $i \notin M(t)$ (immature): Skip densification checks for this Gaussian. It remains in the scene and will be re-evaluated in the next densification cycle [S1].
+-            *   If $i \in M(t)$ (mature):
+-                *   Check if the accumulated 2D-projected positional gradient magnitude $g_i$ exceeds $\tau_g$ [S1].
+-                *   If $g_i > \tau_g$:
+-                    *   If the Gaussian is "small" (below a scale threshold defined in standard 3DGS): **Clone** the Gaussian [S1].
+-                    *   If the Gaussian is "large" (above a scale threshold defined in standard 3DGS): **Split** the Gaussian [S1].
+-                *   If $g_i \le \tau_g$: Do not densify.
+-        5.  For any new Gaussian $j$ created by a split or clone operation at iteration $t$:
+-            *   Set its birth tag $b_j = t$ [S1].
+-            *   Note: This new Gaussian is now immature and will not be eligible for densification until $t + T_{mat}$ [S1].
+-
+-### Pseudocode
++**Pseudocode:**
+ ```python
+-def age_gated_densification(current_iteration, gaussians, delta_d, t_mat, tau_g):
++def age_gated_densification(gaussians, current_iteration, T_mat, delta_d, tau_g):
+     """
+-    Performs age-gated densification for 3D Gaussian Splatting.
++    Perform age-gated densification for 3D Gaussian Splatting.
+     
+     Args:
+-        current_iteration (int): The current training iteration t.
+-        gaussians (list): List of Gaussian objects. Each object has attributes:
+-            - birth_iter (int): b_i
+-            - grad_mag (float): Accumulated 2D-projected positional gradient magnitude g_i
+-            - scale (float): Current scale of the Gaussian
+-            - is_clone (bool): Whether this Gaussian is a clone (for split/clone logic)
+-        delta_d (int): Densification cadence (default 100).
+-        t_mat (int): Maturity threshold (default 200).
+-        tau_g (float): Gradient threshold for densification.
++        gaussians: List of Gaussian objects, each having attributes:
++                   - b_i: birth iteration (int)
++                   - accumulated_grad: accumulated 2D-projected positional gradient magnitude (float)
++                   - scale: scale metric to determine large vs small (float)
++        current_iteration: The current optimization iteration number (int)
++        T_mat: Maturity threshold in iterations (int, default 200)
++        delta_d: Densification cadence (int, default 100)
++        tau_g: Gradient threshold for densification (float)
+         
+     Returns:
+-        list: Updated list of Gaussians.
++        Updated list of Gaussians (with new children added if split/clone occurred)
+     """
+-    # Only run densification at specific intervals
++    # Only run densification every delta_d iterations
+     if current_iteration % delta_d != 0:
+         return gaussians
+ 
++    mature_gaussians = []
++    for g in gaussians:
++        # Calculate age
++        age = current_iteration - g.b_i
++        
++        # Check maturity
++        if age >= T_mat:
++            mature_gaussians.append(g)
++
++    # Process only mature Gaussians
+     new_gaussians = []
+-    mature_gaussians = []
++    for g in mature_gaussians:
++        # Standard 3DGS densification criteria
++        if g.accumulated_grad > tau_g:
++            if is_large(g.scale):
++                # Split operation
++                children = split_gaussian(g, current_iteration)
++                new_gaussians.extend(children)
++            else:
++                # Clone operation
++                clone = clone_gaussian(g, current_iteration)
++                new_gaussians.append(clone)
++        else:
++            # Keep original Gaussian
++            new_gaussians.append(g)
++            
++    # Note: Immature Gaussians are not added to new_gaussians here explicitly 
++    # in this simplified logic, but in practice they remain in the main list.
++    # A more accurate implementation would filter the main list or append 
++    # non-densified mature ones back.
++    
++    # Reconstruct full list: Immature Gaussians + Processed Mature Gaussians
++    # In a real implementation, 'gaussians' is updated in place or replaced.
++    # Here we assume 'new_gaussians' contains the processed mature ones,
++    # and we need to append the immature ones.
++    
++    final_gaussians = []
++    for g in gaussians:
++        age = current_iteration - g.b_i
++        if age < T_mat:
++            final_gaussians.append(g)
++        else:
++            # This Gaussian was processed in the loop above. 
++            # We need to ensure we don't double count. 
++            # The pseudocode above adds processed mature Gs to new_gaussians.
++            # So we just extend with new_gaussians.
++            pass 
++            
++    # Correct logic for replacement:
++    # 1. Identify immature. Keep them.
++    # 2. Identify mature. Process them. Replace with processed result.
++    
++    final_gaussians = []
++    for g in gaussians:
++        age = current_iteration - g.b_i
++        if age < T_mat:
++            final_gaussians.append(g)
++        else:
++            if g.accumulated_grad > tau_g:
++                if is_large(g.scale):
++                    children = split_gaussian(g, current_iteration)
++                    final_gaussians.extend(children)
++                else:
++                    clone = clone_gaussian(g, current_iteration)
++                    final_gaussians.append(clone)
++            else:
++                final_gaussians.append(g)
++                
++    return final_gaussians
+ 
+-    # Step 1: Identify mature Gaussians
+-    for g in gaussians:
+-        age = current_iteration - g.birth_iter
+-        if age >= t_mat:
+-            mature_gaussians.append(g)
+-        # Immature Gaussians are skipped and remain in the scene implicitly
+-        # by not being processed for split/clone in this step
++def is_large(scale):
++    # Placeholder for standard 3DGS scale threshold check
++    # Not given in sources, assumed standard implementation detail [G]
++    return scale > some_threshold
+ 
+-    # Step 2: Apply standard densification only to mature Gaussians
+-    for g in mature_gaussians:
+-        if g.grad_mag > tau_g:
+-            # Standard 3DGS logic for split vs clone based on scale
+-            # Note: Exact scale thresholds are defined in the parent 3DGS ADC method
+-            if is_small_gaussian(g.scale):
+-                # Clone operation
+-                child = clone_gaussian(g)
+-                child.birth_iter = current_iteration # Tag new Gaussian with current iteration
+-                new_gaussians.append(child)
+-            else:
+-                # Split operation
+-                children = split_gaussian(g)
+-                for child in children:
+-                    child.birth_iter = current_iteration # Tag new Gaussians with current iteration
+-                    new_gaussians.append(child)
+-        else:
+-            # Gradient too low, no densification
+-            pass
++def split_gaussian(g, t):
++    # Standard 3DGS split logic
++    # Creates children with b_i = t
++    # Not given in sources, assumed standard implementation detail [G]
++    return [ChildGaussian(b_i=t), ChildGaussian(b_i=t)]
+ 
+-    # Combine original (non-densified) and new Gaussians
+-    # Note: In a real implementation, 'gaussians' list is updated in-place or replaced.
+-    # The 'mature_gaussians' that did not split/clone remain in the scene.
+-    # The 'new_gaussians' are added.
+-    return gaussians + new_gaussians
++def clone_gaussian(g, t):
++    # Standard 3DGS clone logic
++    # Creates clone with b_i = t (or inherits, standard applies)
++    # Not given in sources, assumed standard implementation detail [G]
++    return ChildGaussian(b_i=t)
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Initial Primitives:** Under the standard 3DGS schedule, densification begins at iteration 500. Since $T_{mat} = 200$, initial primitives (with $b_i=0$) have an age of 500, which is $\ge T_{mat}$. Thus, initial primitives are always mature at the first densification step [S1].
+-*   **Early Densification Schedules:** If a training schedule densifies before iteration 200 (e.g., at iteration 100), initial primitives would be immature. The gate still applies correctly because $b_i$ is retained and checked against $t$ [S1].
+-*   **Cascade Prevention:** Without AGE, a Gaussian born at step $k$ can split at $k+1$, its child at $k+2$, causing an uncontrolled cascade. AGE ensures that a Gaussian must survive $T_{mat}$ iterations before its first split/clone, limiting the maximum cascading rate [S1]. With $T_{mat}=200$ and $\Delta_d=100$, a Gaussian can split at most once every two densification cycles [S1].
++**Edge Cases and Pitfalls:**
++*   **Initial Primitives:** Under the standard 3DGS schedule, densification begins at iteration 500. Since $T_{mat}=200$, initial primitives (tagged $b_i=0$) have an age of 500, which is $\ge T_{mat}$. Thus, initial primitives are already mature at the first densification cycle [S1].
++*   **Early Densification Schedules:** If a training schedule densifies earlier than iteration 500 (e.g., at iteration 100), initial primitives would be immature ($100 - 0 < 200$). The tag $b_i$ is retained so AGE remains well-defined for such schedules [S1].
++*   **Cascade Prevention:** Without AGE, a Gaussian born at step $k$ can split at $k+1$, its child at $k+2$, causing an uncontrolled cascade. AGE ensures that with $T_{mat}=200$ and $\Delta_d=100$, a Gaussian can split or clone at most once every two densification cycles, converting an unbounded cascade into controlled refinement [S1].
++
++## Subtopics
++
++### [Spawn Gate](15087-spawn-gate.md)
++The Spawn Gate is a mechanism that predicts the survival probability of a Gaussian spawn candidate at birth time to veto low-survival candidates, thereby controlling the peak population size during training. It sets itself apart from heuristic densification rules by using a learned predictor to rank candidates, ensuring a deterministic peak-memory reduction without degrading final image quality.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Adds negligible overhead. The cost is a single integer comparison ($t - b_i \ge T_{mat}$) per Gaussian per densification cycle [S1]. The first 500 iterations take at most one minute in every scene, indicating no early-training overhead [S1].
+-*   **Memory Complexity:** No additional architectural memory overhead. The only extra storage is the integer $b_i$ per Gaussian [S1].
+-*   **Performance:**
+-    *   Reduces final Gaussian count by 8.7% (from 3.45M to 3.15M) compared to DART alone [S1].
+-    *   Lowers training time by 2.4 minutes (31.8 to 29.4 minutes) [S1].
+-    *   Lowers peak memory by 0.47 GB (6.04 to 5.57 GB) [S1].
+-    *   Quality remains unchanged within measurement noise (PSNR +0.05 dB, SSIM +0.001, LPIPS +0.001) [S1].
+-    *   Reduces Gaussian count during densification by 16–23% relative to DART alone at iteration 5k on specific scenes (bicycle, stump, drjohnson) [S1].
+-*   **Strengths:**
+-    *   Bounding the primitive budget without sacrificing quality [S1].
+-    *   Suppresses under-supported primitives that result from unconstrained cascading [S1].
+-    *   Backbone-agnostic: Works with vanilla 3DGS and anchor-based methods like Scaffold-GS [S1].
+-    *   Independent of how the initial cloud was formed (SfM or DART-augmented) [S1].
+-*   **Limitations:**
+-    *   Requires tuning of $T_{mat}$ and $\Delta_d$ if the densification schedule changes significantly, though the default $T_{mat}=2\Delta_d$ is robust [S1].
+-    *   Does not address the initial distribution of Gaussians (this is handled by the parent method, e.g., DART) [S1].
++**Time and Memory Complexity:**
++*   AGE adds no architectural change and no per-iteration overhead beyond a single age comparison ($\nu_i(t) \ge T_{mat}$) per Gaussian [S1].
++*   The added cost is not an early-training overhead: the first 500 iterations take at most one minute in every scene [S1].
++
++**Measured Performance:**
++*   On standard benchmarks, enabling AGE reduces the final Gaussian count from 3.45 M to 3.15 M (an 8.7% reduction) [S1].
++*   Training time is lowered by 2.4 minutes (from 31.8 to 29.4 minutes) [S1].
++*   Peak memory is reduced by 0.47 GB (from 6.04 to 5.57 GB) [S1].
++*   Image quality remains unchanged within measurement noise (PSNR +0.05 dB, SSIM +0.001, LPIPS +0.001) [S1].
++*   AGE lowers the Gaussian count during densification by 16–23% relative to DART alone at iteration 5k on scenes like bicycle, stump, and drjohnson [S1].
++
++**Strengths and Limitations:**
++*   **Strengths:** Bounding the primitive budget, reducing memory and training time, preventing cascading splits in dense regions, and acting as a general control independent of how the initial cloud was formed (works with or without DART augmentation) [S1].
++*   **Limitations:** Requires tuning of $T_{mat}$ and $\Delta_d$ (though fixed by design in the source) [S1]. It does not improve quality directly but preserves it while reducing cost [S1].
++
++**When to Use:**
++*   Use AGE when training 3D Gaussian Splatting models to control memory usage and training time, especially when using denser initialization strategies like DART that might otherwise inflate the primitive count [S1].
+ 
+ ## Background
+-Age-Gated Eligibility (AGE) was introduced in the paper "DART-3DGS: Distance-Aware Replication and Age-Gated Densification for 3D Gaussian Splatting" [S1]. It was developed to address the issue of primitive budget inflation caused by denser initialization methods like Distance-Aware Replication (DART) [S1]. The method is distinct from relocation techniques [9] and gradient-criterion reweighting [4] [S1]. It is often used in conjunction with the compactness regularizer from 3D-GS-MCMC [9] [S1].
++Age-Gated Eligibility (AGE) was introduced in the paper "DART-3DGS: Distance-Aware Replication and Age-Gated Densification for 3D Gaussian Splatting" [S1]. It is designed to work in conjunction with Distance-Aware Replication Training (DART) to bound the primitive budget that DART's denser initialization might otherwise inflate [S1]. AGE acts as a cost-control gate, distinct from relocation [9] and gradient-criterion reweighting [4] [S1].
+ 
+ ## Sources

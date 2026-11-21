@@ -1,0 +1,277 @@
+--- v008.md
++++ v009.md
+@@ -4,144 +4,116 @@
+ 
+ ## Overview
+-RDLS-SS-DWT+Pred is a lossless volumetric compression transform that combines the 3D Discrete Wavelet Transform (DWT) with Reversible Denoising Lifting Steps (RDLS), Step Skipping (SS), and predictive coding [S1]. It solves the problem of high entropy in wavelet subbands by applying spatial prediction to the final subbands, significantly improving compression ratios for medical images compared to standard DWT or SS-DWT alone [S1]. It differs from its siblings by integrating denoising lifting steps and step skipping into the wavelet decomposition before applying prediction, whereas siblings like [Delta Encoding](1096-delta-encoding.md) or [Lorenz Predictor with Arithmetic Coding](8070-lorenz-predictor-with-arithmetic-coding.md) typically apply prediction directly to raw data or simpler transforms [S1].
++RDLS-SS-DWT+Pred is a lossless compression transform for 3D volumetric data that combines the Reversible Denoising Lifting Steps with Step Skipping (RDLS-SS-DWT) with predictive coding applied to the final subbands [S1]. It solves the problem of high entropy in wavelet coefficients by further decorrelating the data using spatial prediction, achieving significant bitrate reductions compared to standard DWT-based methods [S1]. It differs from its sibling [SS-DWT+Pred](5256-ss-dwt-pred.md) by incorporating denoising filters within the lifting steps, though sources indicate that using actual denoising filters may be avoided without sacrificing bitrate improvements, making it functionally similar to the simpler variant [S1].
+ 
+ ## How it works
+-**Inputs:** A 3D volumetric image $V$ of dimensions $W \times H \times D$.
+-**Outputs:** A set of entropy-coded residuals for each final subband.
++The method constructs a hybrid transform by applying RDLS-SS-DWT to the input volume $V$, followed by a prediction step on the resulting final subbands.
++
++**Inputs and Outputs:**
++*   Input: 3D volumetric data $V$ with dimensions $D_x \times D_y \times D_z$.
++*   Output: A set of prediction errors for each final subband, ready for entropy encoding.
+ 
+ **Data Structures:**
+-The transform decomposes the volume into subbands. The final subbands are the high-frequency components at the deepest decomposition level. The specific layout of coefficients depends on the chosen RDLS filters and skipped steps, but generally follows standard DWT subband naming (LL, LH, HL, HH, etc., extended to 3D).
++The RDLS-SS-DWT produces a hierarchical decomposition. The "final subbands" refer to the detail subbands at the deepest decomposition level. For a 3-level decomposition, these are the subbands at level 3. The specific subbands depend on the RDLS configuration, but generally include high-frequency components in X, Y, and Z directions.
+ 
+ **Parameters:**
+-*   **Decomposition Level:** Set to 3 levels in experimental implementations [S1].
+-*   **RDLS Filters:** Selected from a candidate set (including Null, None, and denoising filters) [S1].
+-*   **Skipped Steps:** Selected from a candidate set to reduce computational cost [S1].
+-*   **Predictor Set:** A set of candidate predictors (see Table 1 below) [S1].
++*   Decomposition level: 3 (fixed in experiments) [S1].
++*   Candidate predictors: A set of spatial predictors defined by their neighborhood weights [S1].
++*   NOP predictor: A fallback predictor that assumes the value is 0 [S1].
++
++**Steps:**
++
++1.  **Transform:** Apply RDLS-SS-DWT to the input volume $V$. This involves applying reversible denoising lifting steps and skipping specific lifting steps based on a heuristic (either based on actual JP3D bitrates or an entropy estimator) [S1].
++2.  **Identify Final Subbands:** Extract the detail subbands at the final decomposition level (Level 3) [S1].
++3.  **Predictor Selection:** For each final subband, evaluate a set of candidate predictors. The selection criterion is the memoryless entropy of the prediction errors.
++    *   The memoryless entropy $H$ is calculated as:
++        $$ H = -\sum_{i=\text{MinPE}}^{\text{MaxPE}} p_i \log_2(p_i) $$
++        where $M$ is the number of samples in the subband, $\text{MinPE}$ and $\text{MaxPE}$ are the smallest and greatest prediction errors respectively, and $p_i$ is the probability of occurrence of prediction error $i$. By convention, $0 \log_2 0 = 0$ [S1].
++    *   The predictor yielding the minimum $H$ is selected for that subband.
++    *   If all actual predictors increase entropy compared to the NOP predictor, the NOP predictor is used [S1].
++4.  **Prediction Application:** Apply the selected predictor to the samples in the subband.
++    *   Prediction is performed in raster scan order: volume slices from front to back, slice rows from top to bottom, pixels in a row from left to right [S1].
++    *   If a predictor requires neighbors that are out of bounds (e.g., for the front-top-left pixel), a simpler predictor (e.g., NOP) is used for that specific sample [S1].
++5.  **Output:** The result is the set of prediction errors for all final subbands.
+ 
+ **Candidate Predictors:**
+-The following predictors are defined based on neighbor locations relative to the current voxel. Let $A, B, C, D, E, F, G, H$ be the values of neighboring voxels in the current slice or adjacent slices as defined in the source's Figure 2 [S1].
+-
+-| Predictor | Prediction Formula | Context |
+-| :--- | :--- | :--- |
+-| NOP | $0$ | Default if others fail or increase entropy |
+-| $P_X$ | $0$ | Horizontal (Axial) |
+-| $P_Y$ | $0$ | Vertical |
+-| $P_Z$ | $0$ | Depth |
+-| $AVG_{XY}$ | $(A + B)/2$ | Axial slice |
+-| $AVG_{XZ}$ | $(A + D)/2$ | Vertical slice |
+-| $AVG_{YZ}$ | $(B + D)/2$ | Depth slice |
+-| $MED_{XY}$ | $\text{median}(A, B, A+B-C)$ | Axial slice |
+-| $MED_{XZ}$ | $\text{median}(A, D, A+D-E)$ | Vertical slice |
+-| $MED_{YZ}$ | $\text{median}(B, D, B+D-F)$ | Depth slice |
+-| $AVG3D$ | $(A + B + D)/3$ | 3D average |
+-
+-*Note: The specific geometric mapping of A-H to spatial neighbors is defined in the source's Figure 2 [S1]. For implementation, standard 3D neighbors (left, above, previous slice) are used where applicable.*
+-
+-**Algorithm Steps:**
+-
+-1.  **Transform Construction:**
+-    Apply the 3D-DWT with RDLS and Step Skipping to the input volume $V$. The RDLS filters and skipped steps are selected using a heuristic (see [Adaptive Transform Construction Heuristic](11258-adaptive-transform-construction-heuristic.md)) to minimize estimated bitrate [S1].
+-
+-2.  **Subband Iteration:**
+-    For each final subband $S$ produced by the transform:
+-    
+-    a. **Entropy Estimation:**
+-       For each candidate predictor $P$ in the predictor set:
+-       1.  Compute the prediction error $e_i = v_i - \hat{v}_i$ for all samples $i$ in subband $S$, where $\hat{v}_i$ is the prediction using $P$.
+-       2.  Handle boundary conditions: If a predictor cannot be computed for a voxel (e.g., neighbors are out of bounds), use the NOP predictor for that voxel [S1].
+-       3.  Calculate the memoryless entropy $H_P$ of the errors:
+-           $$ H_P = -\sum_{i=\text{MinPE}}^{\text{MaxPE}} p_i \log_2(p_i) $$
+-           where $M$ is the number of samples in the subband, $\text{MinPE}$ and $\text{MaxPE}$ are the smallest and greatest prediction errors, $p_i$ is the probability of error $i$ occurring in the subband, and $0 \log_2 0 = 0$ [S1].
+-
+-    b. **Predictor Selection:**
+-       Select the predictor $P_{best}$ that yields the minimum entropy $H_P$. If all actual predictors result in higher entropy than NOP, select NOP [S1].
+-
+-    c. **Residual Encoding:**
+-       Compute the residuals $d_i = v_i - \hat{v}_i$ using $P_{best}$ and entropy-code them (e.g., using JPEG 2000's MQ coder) [S1].
+-
+-3.  **Reconstruction:**
+-    The decoder applies the inverse RDLS-SS-DWT transform to the entropy-decoded residuals, then applies the inverse prediction $v_i = \hat{v}_i + d_i$ in raster scan order to recover the original volume [S1].
++The source defines a set of candidate predictors based on neighboring samples $A, B, C, D, E, F, G, H$ in a 3D neighborhood. The notation $P_X, P_Y, P_Z$ refers to predictions along axes. The specific predictors include:
++*   NOP: Predicts 0.
++*   $P_X, P_Y, P_Z$: Simple directional predictors (exact formulas not explicitly given in text, but implied by context of "Axial", "Horizontal", "Vertical" labels in Table 1 of source) [S1].
++*   AVG_XY, AVG_XZ, AVG_YZ: Averages of neighbors in respective planes.
++*   MED_XY, MED_XZ, MED_YZ: Medians of neighbors in respective planes.
++*   AVG3D: Average of 3D neighbors.
++*   Specific weighted combinations like $(A+B)/2$, $(A+D)/2$, etc., and median-based predictors like $\text{median}(A, B, A+B-C)$ [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def rdls_ss_dwt_plus_pred(volume, decomposition_level=3):
++def rdls_ss_dwt_plus_pred(volume):
+     """
+-    Applies RDLS-SS-DWT followed by predictive coding to a 3D volume.
+-    volume: 3D numpy array or similar structure [D, H, W]
+-    decomposition_level: int, fixed at 3 for experiments [S1]
++    Applies RDLS-SS-DWT followed by predictive coding to the final subbands.
++    volume: 3D numpy array of shape (Dx, Dy, Dz)
+     """
+-    # Step 1: Apply RDLS-SS-DWT transform
+-    # The heuristic for filter/step selection is delegated to the 
+-    # Adaptive Transform Construction Heuristic [S1].
+-    subbands = apply_rdls_ss_dwt(volume, decomposition_level)
++    # Step 1: Apply RDLS-SS-DWT
++    # The heuristic for RDLS filter selection and step skipping is assumed to be
++    # handled by a separate function or pre-configured.
++    # Returns a dictionary of subbands, e.g., {'L3': subband_3, ...}
++    # Note: RDLS-SS-DWT implementation details are in [Parent](4393-predictive-and-differential-coding.md)
++    subbands = rdls_ss_dwt(volume, decomposition_level=3)
+     
+-    # Candidate predictors defined in source Table 1 [S1]
+-    # Note: Geometric mapping of neighbors (A, B, C...) is from source Figure 2 [S1]
+-    predictors = [
++    final_subbands = get_final_subbands(subbands, level=3)
++    
++    prediction_errors = {}
++    
++    # Candidate predictors definition
++    # Note: Exact neighbor indices for A, B, C... depend on the specific subband orientation
++    # and the raster scan order. The source Table 1 defines the logic.
++    candidate_predictors = [
+         PredictorNOP(),
+-        PredictorPX(),
+-        PredictorPY(),
+-        PredictorPZ(),
+-        PredictorAVGXY(),
+-        PredictorAVGXZ(),
+-        PredictorAVGYZ(),
+-        PredictorMEDXY(),
+-        PredictorMEDXZ(),
+-        PredictorMEDYZ(),
+-        PredictorAVG3D()
++        PredictorAXIAL(),
++        PredictorHORIZONTAL(),
++        PredictorVERTICAL(),
++        PredictorAVG_XY(),
++        PredictorAVG_XZ(),
++        PredictorAVG_YZ(),
++        PredictorMED_XY(),
++        PredictorMED_XZ(),
++        PredictorMED_YZ(),
++        PredictorAVG3D(),
++        PredictorWeightedSum1(),
++        PredictorWeightedSum2(),
++        PredictorWeightedSum3(),
++        PredictorMedian1(),
++        PredictorMedian2(),
++        PredictorMedian3()
+     ]
+     
+-    encoded_subbands = {}
+-    
+-    # Step 2: Process each final subband
+-    for subband_name, subband_data in subbands.items():
++    for subband_name, subband_data in final_subbands.items():
+         best_predictor = None
+         min_entropy = float('inf')
+-        best_residuals = None
+         
+-        # Step 2a: Evaluate each predictor
+-        for pred in predictors:
+-            # Compute residuals handling boundaries
+-            residuals = compute_residuals_with_boundary_check(subband_data, pred)
++        # Step 3: Evaluate predictors
++        for predictor in candidate_predictors:
++            # Step 4: Apply predictor and compute errors
++            errors = apply_predictor(subband_data, predictor)
+             
+-            # Step 2b: Calculate memoryless entropy
+-            entropy = calculate_memoryless_entropy(residuals)
++            # Compute memoryless entropy
++            entropy = compute_memoryless_entropy(errors)
+             
+             if entropy < min_entropy:
+                 min_entropy = entropy
+-                best_predictor = pred
+-                best_residuals = residuals
++                best_predictor = predictor
+         
+-        # Step 2c: Encode best residuals
+-        # In practice, this involves histogram packing and entropy coding (e.g., MQ coder) [S1]
+-        encoded_subbands[subband_name] = entropy_encode(best_residuals)
++        # Apply best predictor to get final errors
++        final_errors = apply_predictor(subband_data, best_predictor)
++        prediction_errors[subband_name] = final_errors
+         
+-    return encoded_subbands
++    return prediction_errors
+ 
+-def compute_residuals_with_boundary_check(data, predictor):
++def compute_memoryless_entropy(errors):
+     """
+-    Computes residuals, falling back to NOP if predictor fails at boundaries.
+-    """
+-    residuals = np.zeros_like(data)
+-    for z in range(data.shape[0]):
+-        for y in range(data.shape[1]):
+-            for x in range(data.shape[2]):
+-                try:
+-                    prediction = predictor.predict(data, z, y, x)
+-                    residuals[z, y, x] = data[z, y, x] - prediction
+-                except BoundaryError:
+-                    # Fallback to NOP (predicts 0) [S1]
+-                    residuals[z, y, x] = data[z, y, x]
+-    return residuals
+-
+-def calculate_memoryless_entropy(residuals):
+-    """
+-    H = - sum(p_i * log2(p_i))
+-    0 * log2(0) = 0 [S1]
++    Computes H = -sum(p_i * log2(p_i))
+     """
+     # Count occurrences of each error value
+-    unique, counts = np.unique(residuals, return_counts=True)
+-    total_samples = len(residuals)
++    unique, counts = np.unique(errors, return_counts=True)
++    total_samples = len(errors)
+     
+     entropy = 0.0
+@@ -152,4 +124,22 @@
+                 entropy -= p_i * np.log2(p_i)
+     return entropy
++
++def apply_predictor(subband, predictor):
++    """
++    Applies a predictor to the subband in raster scan order.
++    Handles boundary conditions by falling back to NOP if neighbors are invalid.
++    """
++    errors = np.zeros_like(subband)
++    # Raster scan order: z, y, x
++    for z in range(subband.shape[0]):
++        for y in range(subband.shape[1]):
++            for x in range(subband.shape[2]):
++                try:
++                    predicted_value = predictor.predict(subband, x, y, z)
++                    errors[z, y, x] = subband[z, y, x] - predicted_value
++                except BoundaryError:
++                    # Fallback to NOP if predictor cannot be computed
++                    errors[z, y, x] = subband[z, y, x] # NOP predicts 0, so error = value - 0
++    return errors
+ ```
+ 
+@@ -157,16 +147,17 @@
+ 
+ ### [Adaptive Transform Construction Heuristic](11258-adaptive-transform-construction-heuristic.md)
+-A greedy parameter selection method for the RDLS-SS-DWT transform. It selects denoising filters for RDLS subbands and predictors for the final subbands to minimize the estimated bitrate of the compressed volume. It differs from exhaustive search by using a fast entropy estimation to approximate JP3D bitrate, allowing image-adaptive configuration without prohibitive computational cost.
++A greedy parameter selection method for the RDLS-SS-DWT part of the transform. It selects denoising filters and steps to skip to minimize estimated bitrate, using a fast entropy estimator instead of actual JP3D bitrates to reduce computational cost.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The transform involves 3D DWT with lifting steps and prediction. The heuristic selection of filters and predictors adds overhead. Entropy coding is noted as the slowest part of the JP3D pipeline [S1].
+-*   **Memory Complexity:** Requires storage for the volume and subbands. No significant additional memory beyond standard DWT buffers.
+-*   **Performance:** In experiments on medical images (CT, MRI, US), RDLS-SS-DWT+Pred showed bitrate improvements over standard DWT ranging from -0.175% to -8.973% (negative indicates reduction) [S1]. The improvement is particularly significant for MRI1 [S1].
+-*   **Comparison with SS-DWT+Pred:** The bitrate difference between RDLS-SS-DWT+Pred and SS-DWT+Pred is very small [S1]. This suggests that using actual denoising filters in RDLS (filters other than Null and None) may be avoided without sacrificing bitrate improvements, as SS-DWT+Pred yields similar results [S1].
+-*   **Strengths:** Significant compression ratio improvement for medical images; adaptive to image characteristics via heuristic.
+-*   **Limitations:** Heuristic selection can be suboptimal for some images; entropy coding is computationally expensive [S1].
++*   **Time Complexity:** The transform itself is linear in the number of voxels. The predictor selection adds a constant factor overhead (number of candidate predictors) per subband. The entropy estimation for heuristic selection can be costly if actual JP3D bitrates are used, but is low-cost if an entropy estimator is used [S1].
++*   **Memory Complexity:** Requires storage for the volume and the subbands. No significant additional memory overhead compared to standard DWT, aside from temporary buffers for prediction errors [S1].
++*   **Performance:** In experiments on medical images (CT, MRI, US), RDLS-SS-DWT+Pred achieved bitrate reductions ranging from -0.175% to -8.973% compared to standard DWT [S1]. The improvement was most significant for MRI1 (-8.973%) [S1].
++*   **Strengths:** Significant lossless compression improvement, especially for medical images. Adaptive to data characteristics via predictor selection.
++*   **Limitations:** The heuristic for RDLS filter selection can be slow if based on actual bitrates. The benefit of using actual denoising filters (RDLS) over simpler step skipping (SS-DWT) is marginal, suggesting the complexity of RDLS may not be justified [S1].
++*   **When to use:** When lossless compression of 3D volumetric data is required and the data exhibits spatial correlation that can be exploited by prediction. Particularly effective for medical imaging data [S1].
++*   **When not to use:** If computational speed is critical and the marginal gain over SS-DWT+Pred is not worth the complexity of RDLS. If the data is already highly decorrelated [S1].
+ 
+ ## Background
+-The method was proposed in 2020 by researchers from Vrije Universiteit Brussel (VUB) and Interdisciplinary Institute for BroadBand Technology (IBBT) [S1]. It builds on previous work generalizing 2D-DWT variants to 3D using step skipping [S1]. The initial phase of the research was presented in a conference report [S1]. The implementation is available as a patch to IRIS-JP3D [S1].
++The method was proposed in 2020 by researchers from Vrije Universiteit Brussel (VUB) and Interdisciplinary Institute for BroadBand Technology (IBBT) [S1]. It builds on previous work on 2D-DWT variants using step skipping and reversible denoising lifting steps [S1]. The implementation was provided as a patch to IRIS-JP3D [S1]. The initial phase of the research was presented in a conference report [S1].
+ 
+ ## Sources

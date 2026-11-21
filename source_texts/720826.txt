@@ -1,0 +1,141 @@
+Parent #17. Lighting stays curated, not automatic: ADR 0008 keeps screen-space history out of the image, and ADR 0019 excludes per-pixel stochastic many-light techniques (MegaLights, ReSTIR) for that reason. So a scene's light count is a...
+
+Point lights that cast no shadow take no shadow ray and no mask place · Issue #422 · gariasf/praxis · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Point lights that cast no shadow take no shadow ray and no mask place #422
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#441
+Closed
+Point lights that cast no shadow take no shadow ray and no mask place#422
+#441
+Copy link
+Assignees
+Labels
+enhancementNew feature or requestNew feature or requestready-for-agentFully specified, ready for an AFK agentFully specified, ready for an AFK agent
+Milestone
+M3
+Description
+gariasf
+opened on Oct 31, 2026
+Issue body actions
+Parent
+#17. Lighting stays curated, not automatic: ADR 0008 keeps screen-space history out of the image, and ADR 0019 excludes per-pixel stochastic many-light techniques (MegaLights, ReSTIR) for that reason. So a scene's light count is a content budget, and authoring holds the levers. The cheapest lever is a per-light switch for the shadow: most fill lights never needed one, yet today every point light that reaches a pixel costs a shadow ray there and takes one of the shadow mask's 59 places.
+What to build
+A point light can be authored to cast no shadow. Such a light still lights every pixel its range reaches, as the lit pass sums it now, but the shadow mask pass traces no ray toward it and gives it no shadow mask place. The 59 places then go to the lights that do cast shadows, and the shadow rays fall with the count of unshadowed lights.
+town's lamps keep their shadows. A Reference scene shows the difference: an existing one gains unshadowed fill lights, or a closed-form test shows that its rays and places drop by the count of unshadowed lights while the lit result changes only where those lights' shadows were.
+Start here
+src/components.rs: PointLight, the authoring data that gains the switch. Its default must keep today's behaviour (casts a shadow), so existing scenes and Goldens do not move.
+src/render/uniforms.rs: LightData, whose _pad_offset and _pad_intensity words could carry the flag without growing the struct (src/render/shader_tests.rs checks it against its WGSL twin).
+src/render/prepare.rs: prepare_lights, which writes LightData from the World.
+src/render/shaders/shadow_mask.wgsl and src/render/shadow_mask_pass.rs: SHADOW_MASK_LIGHTS. A light's mask bit is its entry index in the pixel's list (directional lights, then the Froxel's point lights), so skipping an unshadowed light's ray alone frees no place. The lit pass must find each shadowed light's bit the same way the shadow mask pass assigns it.
+src/render/light_count_pass.rs: the count_point_lights Render switch, which counts each lit pixel's point lights. Decide whether it counts shadowed lights apart.
+Ruled out: a directional light switch (the sun is the one light that always needs its shadow; add it if a scene needs one), and spot or area lights (none exist yet).
+Acceptance criteria
+A PointLight authored to cast no shadow lights the pixels it reaches as before, takes no shadow ray and no shadow mask place, and the frame's shadowed lights fill the places in the lit pass's order.
+Every existing Reference scene renders unchanged: its Goldens and its Baselines' counters do not move.
+A test at the shadow mask's seam shows a pixel reached by more than 59 point lights, some unshadowed, giving every shadowed light a place, where today the lights past 59 lose theirs.
+shadow_mask_lights_overflowed counts only shadowed lights left without a place.
+Verification seam
+The shadow mask pass and lit pass on a small closed-form scene (lights placed so the per-pixel count is known), plus the Goldens. Metric that must not regress: town's and shadows' GPU frame time in the bench, since no existing light changes. Size: a component field, one LightData flag, and the mask's place assignment, well under 400 lines.
+Blocked by
+None.
+Not yet specified
+A light budget the cooker checks: once lights are authored into cooked Chunks (ADR 0018's cooker, M4 streaming), the cook warns about or refuses a spot where more shadowed lights overlap than a Budget allows. Revive when the cooker reads lights.
+A runtime priority for dynamic lights (spells, fire, carried torches) that picks which ones get shadows when a pixel's count passes the places. Revive when gameplay spawns lights.
+Shadows off past a distance (light LOD). Revive when a Reference scene shows far shadowed lights costing rays.
+Activity
+gariasf
+added
+needs-triageMaintainer needs to evaluate this issueMaintainer needs to evaluate this issue
+on Oct 31, 2026
+gariasf commented on Oct 31, 2026
+gariasf
+on Oct 31, 2026
+OwnerAuthor
+More actions
+This was generated by AI during triage.
+Agent Brief
+Category: enhancement
+Milestone: M3 (owner's choice in triage, 2026-10-31)
+Summary: A PointLight can be authored to cast no shadow; it is still summed by the lit pass but takes no shadow ray and no shadow mask bit, so the 59 bits go to the lights that do cast shadows.
+Current behavior (verified on main a00280dc):
+PointLight has color, intensity, range; every point light casts a shadow.
+The shadow mask pass (surface_word in the shadow mask shader) walks the directional lights, then the pixel's Froxel list (or every point light with FROXEL_LIGHTS off), and a light's bit is its entry index in that walk. A light whose entry is >= SHADOW_MASK_LIGHTS adds to shadow_mask_lights_overflowed and casts no shadow. A listed light out of range of the surface still uses up its entry.
+The lit pass finds a point light's bit the same way: directional_light_count + entry, or, where the mask's Froxel differs from the fragment's (MSAA edges), froxel_mask_bit, which binary-searches the mask Froxel's list. That only works because lists are in light order.
+prepare_lights rebuilds the whole light buffer each frame from the queries: directional lights, then point lights, in query order. Froxel lists keep light order.
+Recommended approach (the agent may choose another and say why in the PR):
+Partition, not flag. prepare_lights writes shadowed point lights before unshadowed ones, and the light uniform carries shadowed_point_light_count in one of LightUniform's _pad words. The light buffer is in light order and Froxel lists follow it, so each list then holds its shadowed lights first, and:
+the shadow mask pass stops its point-light walk at the first unshadowed light: no ray, no bit, no overflow count;
+a shadowed light's bit stays its entry, so masked and froxel_mask_bit need no change beyond treating a light with index >= directional + shadowed count as never masked;
+LightData keeps its size and layout; no new per-light flag.
+With every light shadowed (every existing scene), buffer order, bits and uploaded bytes are what they are today. A per-light flag in LightData's pad words would instead force the mask pass and froxel_mask_bit to count shadowed entries before each light: a linear walk where today there is a binary search.
+Key interfaces:
+PointLight: gains a shadow switch whose default (Default, and every existing constructor) casts a shadow.
+LightUniform: one pad word becomes the shadowed point light count (the shader test checks it against its WGSL twin).
+prepare_lights: writes shadowed point lights first, then unshadowed ones; light capacity and its overflow count behave as before.
+Shadow mask shader's point-light walk and the lit pass's mask lookup: bits go only to shadowed lights, in the order both passes share.
+shadow_mask_lights_overflowed: counts only shadowed lights that got no bit.
+count_point_lights (light count pass): leave as is. A new counter would add a field to every Baseline, which the AC rules out; ticket it if a scene needs it.
+Acceptance criteria:
+A PointLight authored to cast no shadow lights the pixels it reaches as before, takes no shadow ray and no mask bit, and the shadowed lights fill the bits in the lit pass's order.
+Every existing Reference scene renders unchanged: Goldens and Baselines' counters do not move. town's lamps keep their shadows.
+A GPU test at the shadow mask's seam (next to a_light_past_the_shadow_masks_bits_casts_no_shadow_and_is_counted, whose shadowed_floor helper builds lights from LightData) shows a pixel reached by more than 59 point lights, some unshadowed, where every shadowed light gets a bit and casts its shadow, and where today's ordering would have left lights past 59 without one.
+shadow_mask_lights_overflowed counts only shadowed lights left without a bit (asserted by that test).
+The test covers both FROXEL_LIGHTS paths, or the PR says why one is enough.
+Bench: town's and shadows' GPU frame time do not regress (interleaved A/B on a quiet M4 Pro; quote praxis report).
+Out of scope:
+A shadow switch for directional lights.
+Spot or area lights.
+A light Budget checked by the cooker, runtime shadow priority for dynamic lights, and shadow LOD by distance (the issue's Not yet specified).
+Freeing the bits that listed but out-of-range lights use up today.
+Changing SHADOW_MASK_LIGHTS or the mask's word layout.
+Notes:
+Point lights' turn verdict spreads to a pixel's facing samples #417 also edits the shadow mask's point-light walk. Whoever merges second rebases; neither blocks the other.
+The shading-side change (never masking an unshadowed light) touches WGSL in the lit pass. If it changes a shared shading function, it needs an oracle test (CLAUDE.md review checklist).
+Rendering path: the PR carries before/after/difference gallery images even though existing scenes should show zero difference.
+gariasf
+added
+enhancementNew feature or requestNew feature or request
+ready-for-agentFully specified, ready for an AFK agentFully specified, ready for an AFK agent
+and removed
+needs-triageMaintainer needs to evaluate this issueMaintainer needs to evaluate this issue
+on Oct 31, 2026
+gariasf
+added this to the M3 milestone on Oct 31, 2026
+gariasf
+self-assigned this
+on Oct 31, 2026
+gariasf commented on Oct 31, 2026
+gariasf
+on Oct 31, 2026
+OwnerAuthor
+More actions
+Claimed by session praxis-422 (worktree praxis-422, branch feat/422-unshadowed-point-lights).
+gariasf
+closed this as completedin #441on Oct 31, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+gariasf
+Labels
+enhancementNew feature or requestNew feature or requestready-for-agentFully specified, ready for an AFK agentFully specified, ready for an AFK agent
+Projects
+No projects
+Milestone
+M3
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

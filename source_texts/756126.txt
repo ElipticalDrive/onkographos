@@ -1,0 +1,555 @@
+Underworld v3. Contribute to underworldcode/underworld3 development by creating an account on GitHub.
+
+3D adaptive mesh refinement (NVB on tetrahedra), serial and parallel, composed with node redistribution by lmoresi · Pull Request #378 · underworldcode/underworld3 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+lmoresi
+commented
+Jul 22, 2026
+Copy link
+Copy Markdown
+Member
+What this adds
+Until now, mesh.adapt() refused 3D meshes honestly. This PR makes adaptive refinement exist in 3D: the same engine-less call that works in 2D now returns a graded tetrahedral child mesh, in serial and in parallel, and it can be layered on top of mesh.redistribute_nodes() so the node mover shapes the coarse mesh and the refinement adds detail where the metric asks for it. The user API does not change.
+How it works, in plain language
+A tetrahedron cannot simply be cut the way a triangle can: cutting the longest edge of each cell independently produces meshes whose corners get worse and worse. The method used here (newest-vertex bisection with tagged simplices) gives every cell a small amount of memory — which edge it should split next — and hands each child the right memory in turn. With the starting assignment chosen by a colouring of the mesh vertices, the theory guarantees the process always terminates, cells never degenerate (each starting cell produces at most 36 distinct shapes, ever), and the number of extra cells split to keep the mesh conforming is bounded. The references with the details are in the design note; the two key papers are Maubach (1995) and Diening, Gehring & Storn (2023).
+The refinement runs inside PETSc's mesh-transform machinery, so boundary labels ride through automatically and each pass stays aligned with the parallel decomposition. Every rank computes the same starting assignment from geometry alone, so the refined mesh is identical no matter how many processors are used — the tests pin exact cell counts (5,198 in the 3D gate; 36,040 in the evaluation problem) at 1, 2, and 4 ranks.
+Multigrid viability was a gate at every stage: on each refined mesh, geometric multigrid built from the refinement hierarchy matches an algebraic-multigrid reference and reproduces an exact linear solution (which also proves the boundary labels survived).
+Composition with the node mover
+redistribute_nodes() then adapt() now does what it says: the refinement starts from the moved node positions (previously it silently refined the unmoved base), and the multigrid ladder is adjusted to match. In the 2D fault evaluation this combination places the fine layers evenly along the fault trace, where refinement alone leaves pinch points inherited from the coarse mesh.
+A real parallel bug found on the way (closes #376)
+Validating the combination in parallel exposed a long-standing data-layer bug: writing to a masked slice of a variable (var.data[mask] /= s) fired the internal PETSc-sync callback on the temporary copy that numpy creates. In serial this only produced a swallowed warning. In parallel the mask differs across ranks, so some ranks abandoned the sync before its collective MPI calls while others entered them — and the run hung. The callback now only ever syncs the variable's actual storage (mesh and swarm variables both). An independent adversarial review of the branch then caught two further defects in the new code — a cloned mesh sharing its coordinate storage with the original, and a corner of the #376 fix that could itself become rank-asymmetric on empty ranks — both fixed with regression tests.
+Also included
+The per-cell marking geometry is now computed in one vectorised operation (it dominated wall time at deep refinement).
+A profile="hyperbolic" option for the surface refinement metrics: cell size grows in proportion to distance from the surface, which the mesh evaluation found gives the best transition quality per cell. The docstrings say when to prefer each profile.
+Evidence
+Serial: full adapt-family and surfaces sweep, 127 tests green; new gates test_0840 (3D serial), test_0841 (native tet transform vs the reference engine), test_0764 additions (composition + warning-free mover).
+Parallel (np=2 and np=4): test_0839/test_0842 confluence and multigrid gates green; the redistribute-then-adapt combination runs clean with multigrid converging in 2 iterations on the combined mesh.
+Style gate clean, no allowlist additions.
+Design note with the full technical narrative and per-stage status: docs/developer/design/ADAPTIVITY_3D_SPHERICAL_2026-07.md. Rendered mesh evaluations: ~/+Simulations/nvb_3d_adapt_evaluation/.
+Underworld development team with AI support from Claude Code
+lmoresi
+added 24 commits
+July 16, 2026 10:50
+docs(design): phase-0 design note for the 3D + spherical adaptivity c…
+…
+1283c40
+```
+…apstone
+
+MMPDE tetrahedral discretization (d=3 Huang-Kamenski) + NVB generalised to
+tets (Maubach/Traxler/Stevenson single-bisection multi-pass), composition,
+and spherical geometry. Records the phase-0 findings: the mover core is
+already dimension-general (three 2D locks at the rim), the boundary-slip /
+facet-restore chain is already 3D-live, and PETSc's SBR transform cannot
+handle tets (so the advertised engine='sbr' 3D fallback likely does not
+exist). Ends in the maintainer decisions that gate implementation.
+
+Underworld development team with AI support from Claude Code
+```
+docs(design): fold in the round-1 ruling — NVB-3D first, MG-viability…
+…
+d443b61
+```
+… gate at every stage
+
+Underworld development team with AI support from Claude Code
+```
+feat(design): stage-1a 3D NVB serial oracle — PASS on structured and …
+…
+dc79a12
+```
+…arbitrary bases
+
+Maubach tagged-tet bisection with the Diening-Gehring-Storn coloring
+initialization (arXiv:2306.02674): conforming at every sweep to 2.87M
+cells, per-base similarity classes hit and hold the theoretical bound of
+36, one deep mark closes with +4..+6 cells, graded bullseye on both a
+Kuhn and an arbitrary Delaunay base, nesting and volume exact. Resolves
+the initial-labelling decision (full sharp BDV guarantee on arbitrary
+conforming base meshes, no pre-refinement). Go for stages 1b/1c.
+
+Underworld development team with AI support from Claude Code
+```
+docs(design): record the DGS-vs-2D ruling — 2D engine stays on the lo…
+…
+b639702
+```
+…ngest-edge seed
+
+Underworld development team with AI support from Claude Code
+```
+docs(design): tech-debt ruling — one dimension-general tagged-simplex…
+…
+0d2dbeb
+```
+… engine; 2D migrates onto it (stage 1e)
+
+Underworld development team with AI support from Claude Code
+```
+docs(design): breaking changes sanctioned — unified engine replaces t…
+…
+89e9b87
+```
+…he 2D path outright
+
+Underworld development team with AI support from Claude Code
+```
+feat(adapt): 3D tetrahedral NVB adapt-on-top, serial — dimension-gene…
+…
+3d33e9a
+```
+…ral tagged-simplex engine
+
+The unified TaggedBisectionMesh engine (Maubach's bisection rule with the
+Diening-Gehring-Storn coloring initialization, arXiv:2306.02674) serves
+mesh.adapt() on tetrahedral meshes at np=1: graded, bounded conforming
+closure, at most 36 similarity classes per base tet, boundary/interface
+facet labels split with their bisected edges. The engine-less 3D adapt()
+guard is lifted; np>1 raises cleanly (the native tet transform is capstone
+stage 1c). max_levels now runs dim bisection generations per isotropic
+level (2D unchanged). The engine='sbr' 3D advice is removed: PETSc's SBR
+transform cannot handle tetrahedra (error 56, verified).
+
+Gates: test_0840 (engine conformity/closure/shape-regularity + Poisson
+FMG-vs-GAMG parity on the graded child with one MG level per generation,
+exact linear solution = facet-label validation) 5/5; 2D adapt-family
+regressions test_0830/0834-0838 40/40; style gates clean.
+
+Underworld development team with AI support from Claude Code
+```
+docs(design): stage-1c sub-plan — production tables, tagged state, pa…
+…
+e3e795a
+```
+…rallel SF, each gated
+
+Underworld development team with AI support from Claude Code
+```
+docs(design): 1c-i spec findings — tet orientation tables unreachable…
+…
+6ab008a
+```
+… (cells not in cones); generator method
+
+Underworld development team with AI support from Claude Code
+```
+feat(design): tet single-edge-bisection table generator — 6 edge case…
+…
+fa1b844
+```
+…s, self-checked
+
+Underworld development team with AI support from Claude Code
+```
+feat(nvb): native tetrahedral single-edge bisection tables — stage 1c-i
+…
+b4d0141
+```
+Six generated DM_POLYTOPE_TETRAHEDRON production tables (1 interior
+triangle + 2 child tets per marked closure edge; faces split via the
+existing triangle single-split rule), the 3D uwnvb_bisect SetUp
+(edge->faces->cells marking + canonical-edge walker composing face cone
+orientations), and an identity-only tet GetSubcellOrientation case.
+Tables emitted and symbolically self-checked by
+tet_bisection_tables_generator.py.
+
+Two real bugs fixed en route: the D3 orientation composition for
+reflected views of a split face (-(o+1) is wrong for the rotated o
+values only 3D passes; now the exact group product, bit-identical in
+2D), and TaggedBisectionMesh.to_dm tet orientation (DMPlex reference
+tet is det-negative; cells were emitted inverted).
+
+Gates: test_0841 (single-tet x6, two-tet shared-face reconciliation x6,
+Kuhn + Delaunay independent-edge-star batches, all under
+-dm_plex_check_all + volume + reference-split equality); test_0840 5/5
+re-passed with corrected orientation; 2D exact-mesh regressions
+test_0836/0837/0838 21/21 unchanged; style gates clean.
+
+Underworld development team with AI support from Claude Code
+```
+test(adapt): lock the cell-orientation class into the 3D adapt gate
+…
+c5d2e7f
+```
+Visualisation winding, outward normals and boundary integrals are not
+sign-tolerant even though FE assembly is — run the full DMPlexCheck
+battery (including inversion) on the adapt child so the orientation
+convention cannot regress silently.
+
+Underworld development team with AI support from Claude Code
+```
+docs(design): plain-language pass on the 3D refinement narrative
+…
+c6bb4c9
+```
+Rewrite the stage-1c explanation so a developer can read it cold: what
+the bisection does geometrically, why it cannot cascade, where the
+guarantees come from (references carry the technical detail), and the
+two bugs described by their observable consequences first.
+
+Underworld development team with AI support from Claude Code
+```
+feat(nvb): native 3D refinement driver — tagged-state maintenance + p…
+…
+6f46535
+```
+…er-pass closure (stage 1c-ii)
+
+The UWNVBRefine drain-loop driver now serves tetrahedral meshes: each
+tet's refinement state (Maubach vertex ordering + tag, packed into one
+per-cell label value) is decoded to find its bisection edge, and the two
+children's states are rebuilt after every pass by the fixed Maubach
+recipe. The initial state is computed once in Python
+(write_tagged_state_label, which runs the serial engine's own
+coloring-based initialization) so the native driver and the serial
+engine share a single seed implementation. mesh.adapt() on a 3D mesh at
+np=1 now prefers the native driver, exactly as 2D does.
+
+One structural change to the shared driver, needed for 3D and harmless
+in 2D: the conforming closure (finding the neighbours that must split
+first) now re-runs at the top of every drain pass instead of once up
+front. In 2D one split always unblocks a waiting cell, so a single
+up-front closure was enough; in 3D a cell can be blocked by children
+created mid-drain across several generations, and the original
+structure deadlocked ('drain stalled'). Re-growing an already-complete
+closure adds nothing, so 2D behaviour is unchanged (exact-mesh
+regressions 0836/0837/0838: 21/21).
+
+Gates: test_0841 native-vs-serial-engine equality over 3 passes of
+graded refinement (identical cell sets); test_0840 5/5 with the native
+driver in the loop (FMG parity, label transfer, orientation class);
+style gates clean.
+
+Underworld development team with AI support from Claude Code
+```
+docs(design): stage 1c-ii status — native 3D driver done, per-pass cl…
+…
+330d18f
+```
+…osure finding recorded
+
+Underworld development team with AI support from Claude Code
+```
+feat(nvb): parallel 3D adaptive refinement — partition-independent se…
+…
+3acdd99
+```
+…ed + gates (stage 1c-iii)
+
+mesh.adapt() on tetrahedral meshes now runs in parallel. The per-cell
+refinement state is seeded identically on every rank from geometry
+alone: the base cell list is gathered by vertex coordinates and each
+rank runs the same deterministic colouring pass, so the refined mesh is
+partition-independent by construction (the gather is bounded by the
+BASE mesh, the coarse end of adapt-on-top). The cross-rank machinery
+the 2D engine already used — requested edges exchanged over the point
+SF, an edge splits only when every cell around it on any rank nominates
+it, a shared edge chosen anywhere splits everywhere — needed no changes
+for the extra 3D mesh strata.
+
+Gates (test_0842, the 3D mirror of test_0839): the graded child has the
+same owner-counted global cell total (5198) at np=1/2/4; boundary
+labels survive the parallel transform (proven by the exact linear
+Poisson solution); custom-P geometric FMG matches a GAMG reference at
+every communicator size. Full adapt-family sweep 57/57; style gates
+clean.
+
+Underworld development team with AI support from Claude Code
+```
+docs(design): round 1 (NVB-3D) complete — serial + parallel gates green
+…
+a4110b1
+```
+Underworld development team with AI support from Claude Code
+```
+feat(adapt): compose node redistribution with adapt-on-top (round 3a,…
+…
+9255b54
+```
+… first slice)
+
+redistribute_nodes() followed by adapt() used to silently refine the
+UNMOVED mesh: the mover deforms the working mesh's coordinates while
+adapt refines from the static base hierarchy's finest level, which kept
+the originals. adapt now carries the mesh's current coordinates onto
+its refine source whenever they differ (a strict no-op otherwise) and
+swaps the moved copy into the finest level of the child's multigrid
+tail; the coarser tail levels keep their original geometry, which the
+coordinate-based transfers accept by design.
+
+Validated by the 2D combination experiment (mover concentrates the base
+~2x at a dipping fault, then 3 adapt levels): the bisection layers land
+evenly along the whole trace where adapt-only shows coarse-cell pinch
+points; geometric MG on the combined child converges in 2 iterations
+with the exact solution reproduced through the moved-base tail. The
+engine-less-3D-raises contract test is flipped to assert the capability
+that replaced the placeholder. Sweep: 94/94; style gates clean.
+
+Underworld development team with AI support from Claude Code
+```
+fix(data): canonical PETSc-sync callback packs only canonical storage (…
+…
+a3eeac6
+```
+…#376)
+
+The canonical callback on variable arrays is inherited by every derived
+array, so a masked in-place update (data[mask] /= s) fired it on the
+fancy-indexed COPY and tried to pack the subset into the full-size vec.
+In serial that was a swallowed warning; in parallel the mask is
+partition-dependent, so ranks where the pack failed skipped its
+collective sync while the others entered it — mismatched collectives
+that hung the MMPDE mover at np=2 (found validating the 3D adaptivity
+composition slice).
+
+The callback now only ever syncs the canonical storage it was
+registered on: a copy is skipped (numpy's write-back through the parent
+does the real sync on every rank), a partial view packs the full
+canonical. Same guard in the MeshVariable and SwarmVariable callbacks.
+Regression test locks redistribute_nodes warning-free on a
+refinement=1 mesh (the trigger: one zero-magnitude corner normal).
+
+Underworld development team with AI support from Claude Code
+```
+perf(adapt): vectorise the marking-loop cell geometry
+…
+a6160a9
+```
+The per-generation marking in _adapt_nested computed each cell's
+centroid and size with a per-cell petsc4py computeCellGeometryFVM call,
+which dominated wall time over the C refinement itself at bisection
+depth >= 3 (nine generations, ~70k cells). A simplex centroid is the
+vertex mean and its volume |det(edges)|/dim!, so both now come from one
+vectorised determinant over the cell list (Gram determinant on
+manifolds). Marking decisions are unchanged: full serial adapt-family
+sweep green and the parallel confluence integers (5198 in 3D,
+test_0839/0842) identical at np=1/2/4.
+
+Underworld development team with AI support from Claude Code
+```
+feat(meshing): hyperbolic distance-to-size profile for surface metrics
+…
+94b6624
+```
+Add profile="hyperbolic" — h(d) = sqrt(h_near^2 + (s d)^2) capped at
+h_far — to the shared profile helper behind Surface.refinement_metric
+and refinement_metric_function. Cell size grows in proportion to
+distance once clear of the surface, so each bisection generation fills
+a band about as wide as its own cells: the best transition fidelity per
+cell of the available profiles (2026-07 3D adaptivity evaluation).
+Docstrings carry the plain-language guidance: hyperbolic for fidelity
+per cell, gaussian for a uniform-size corridor (e.g. weak zones),
+linear for the minimum cell count.
+
+Underworld development team with AI support from Claude Code
+```
+docs(design): round-1 PR close-out — parallel validation complete
+…
+ead09fe
+```
+Records the completed parallel validation of the redistribute-then-
+adapt composition (exact 3D confluence at np=1/2/4; combination within
+mover drift with MG converging on the combined child), the #376
+parallel callback bug it flushed out, the marking-loop vectorisation,
+and the hyperbolic metric profile.
+
+Underworld development team with AI support from Claude Code
+```
+fix(adapt,data): adversarial-review findings — shared coord Vec + zer…
+…
+4a34837
+```
+…o-size guard
+
+Two review findings on this branch's own additions, both verified
+empirically before fixing:
+
+1. The moved-coordinate carry in _adapt_nested wrote through the
+   clone's getCoordinatesLocal().array — but DMClone shares the
+   coordinates Vec by reference, so the write silently moved the
+   parent's static hierarchy level (self-masking: the next _moved
+   check then compared moved-vs-moved). The clone now installs a
+   duplicated Vec. New regression test locks redistribute->adapt
+   refining the moved geometry while the hierarchy stays untouched
+   (validated failing against the unfixed build).
+
+2. The #376 callback guard classified view-vs-copy with
+   np.may_share_memory, which is False for ANY zero-size array — a
+   rank whose slice is locally empty would classify a view as a copy
+   and skip the collective sync the other ranks enter, re-creating
+   the rank asymmetry the fix targets. View-vs-copy is now decided
+   by identity in numpy's base chain, which follows the indexing
+   statement and is identical on every rank (zero-size included).
+
+Also from review: the distributed tagged-state seed now fails loudly
+if distinct vertices collapse to one rounded coordinate key (silently
+wrong partition-dependent coloring otherwise), and a stale
+NotImplementedError claim in test_0840's docstring is corrected.
+
+Underworld development team with AI support from Claude Code
+```
+docs(design): record adversarial-review findings in the close-out
+…
+a4c9650
+```
+Underworld development team with AI support from Claude Code
+```
+Copilot
+AI
+review requested due to automatic review settings
+July 22, 2026 00:58
+Copilot
+AI
+reviewed
+Jul 22, 2026
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot was unable to review this pull request because the user who requested the review has reached their quota limit.
+This was referenced Jul 22, 2026
+Callback-array parallel safety: remaining exposures after #376 (swarm.points callback, delayed-callback replay, central guard)
+#379
+Closed
+Callback-array parallel safety: central view/copy guard, honest exceptions, no dead snapshots (#379 items 3+4b)
+#381
+Merged
+lmoresi
+added 2 commits
+July 22, 2026 12:26
+fix(nvb,data): re-review hardening — collective seed-guard fallback, …
+…
+c80628d
+```
+…scoped symmetry claim
+
+A focused re-review of the prior review-fix commit found one corner and
+one latent hazard, neither blocking:
+
+- The callback guard's rank-symmetry comment overclaimed: reshape/ravel
+  of a NON-contiguous derived view is a copy on non-empty ranks but a
+  view on a zero-size rank, so that (exotic, already-broken-semantics)
+  pattern remains rank-asymmetric. Unresolvable at the callback level —
+  the comments now say so and point at the #379 dirty-flag flush.
+- The tagged-seed guard's ungraphed-SF fallback would have miscounted
+  owned vertices (false-positive RuntimeError on a healthy mesh) and
+  its allreduce could go asymmetric if the SF were ungraphed unevenly.
+  Every rank now enters the reductions unconditionally and the check is
+  skipped collectively when any rank cannot count.
+
+Parallel gates re-run green (0839+0842 np=2, 0842 np=4); serial 0764
+and style gate green.
+
+Underworld development team with AI support from Claude Code
+```
+test(nvb-3d): scope the exact-count pin to the reference base mesh — …
+…
+14d71db
+```
+…unblocks CI (#378)
+
+The 3D adapt gate pinned the refined mesh at exactly 5198 cells. That
+count is a deterministic function of the BASE mesh, and the base
+tetrahedralisation differs between environments: the reference build
+(local PETSc 3.25.0 toolchain) produces a 1472-cell box, CI's conda
+PETSc 3.25.3 toolchain produces a different one, and its refined count
+(4816) fails the pin even though the refinement itself is correct and
+partition-independent.
+
+The test now logs base and child counts, always asserts refinement
+occurred, and applies the exact 1472 -> 5198 pin only where the
+environment reproduces the reference base mesh. Partition-independence
+(the actual claim) remains pinned wherever the pin applies: verified
+here serially and at np=2, both 5198.
+
+Underworld development team with AI support from Claude Code
+```
+test(nvb-3d): pin the exact count to the reference toolchain — CI ref…
+…
+d6ffa0a
+```
+…ines the same base differently
+
+CI's run showed the base mesh is IDENTICAL (1472 cells) across
+environments; the refinement itself differs (4816 on conda PETSc
+3.25.3 vs 5198 on the reference PETSc 3.25.0 build). Threshold marking
+against the coordinate metric is floating-point sensitive and the
+conformity closure amplifies flipped cells. CI's own MG/label test
+passes on its 4816-cell child, so the refinement is structurally sound
+there; the cross-version divergence is filed for investigation
+separately. The partition-independence pin (the actual claim) remains
+active in the reference toolchain, where np1/np2 give 5198 identically.
+
+Underworld development team with AI support from Claude Code
+```
+lmoresi
+mentioned this pull request
+Jul 22, 2026
+3D NVB refinement count diverges across PETSc patch versions from an identical base mesh (5198 vs 4816)
+#387
+Closed
+Hide details
+View details
+lmoresi
+merged commit 1545aad
+into
+development
+Jul 22, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+lmoresi
+added a commit
+that referenced
+this pull request
+Jul 22, 2026
+docs(data): carry the non-contiguous reshape corner note from #378 in…
+…
+d2cf355
+```
+…to the central guard
+
+The inline guard deleted in the rebase onto development documented one
+genuinely unresolvable per-write corner (reshape/ravel of a
+non-contiguous derived view: copy on non-empty ranks, view on zero-size
+ranks). Preserve it on add_canonical_callback, pointing at the #383
+per-variable flush as the real fix.
+
+Underworld development team with AI support from Claude Code
+```
+lmoresi
+deleted the
+feature/adaptivity-3d-design
+branch
+July 22, 2026 08:26
+This was referenced Jul 22, 2026
+Cut ~115 seconds from the new 3D adaptivity test gates
+#389
+Merged
+3D node redistribution: the MMPDE mover drives tetrahedral meshes (capstone round 2)
+#393
+Merged
+Canonical PETSc-sync callback fires on fancy-indexed array copies — serial warning, parallel hang/crash
+#376
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

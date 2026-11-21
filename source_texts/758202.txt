@@ -1,0 +1,1528 @@
+1
+TransGI: Real-Time Dynamic Global Illumination
+With Object-Centric Neural Transfer Model
+arXiv:2506.09909v1 [cs.GR] 11 Jun 2025
+Yijie Deng∗ , Lei Han∗ , Lu Fang§
+Abstract—Neural rendering algorithms have revolutionized
+computer graphics, yet their impact on real-time rendering under
+arbitrary lighting conditions remains limited due to strict latency
+constraints in practical applications. The key challenge lies in formulating a compact yet expressive material representation. To address this, we propose TransGI, a novel neural rendering method
+for real-time, high-fidelity global illumination. It comprises an
+object-centric neural transfer model for material representation
+and a radiance-sharing lighting system for efficient illumination.
+Traditional BSDF representations and spatial neural material
+representations lack expressiveness, requiring thousands of ray
+evaluations to converge to noise-free colors. Conversely, realtime methods trade quality for efficiency by supporting only
+diffuse materials. In contrast, our object-centric neural transfer
+model achieves compactness and expressiveness through an MLPbased decoder and vertex-attached latent features, supporting
+glossy effects with low memory overhead. For dynamic, varying
+lighting conditions, we introduce local light probes capturing
+scene radiance, coupled with an across-probe radiance-sharing
+strategy for efficient probe generation. We implemented our
+method in a real-time rendering engine, combining compute
+shaders and CUDA-based neural networks. Experimental results
+demonstrate that our method achieves real-time performance of
+less than 10 ms to render a frame and significantly improved
+rendering quality compared to baseline methods.
+Index Terms—Global illumination, neural transfer model,
+across-probe radiance-sharing.
+I. I NTRODUCTION
+R
+EAL-time global illumination (GI) is crucial for achieving high visual quality and an immersive interactive experience in video games and other industrial designs. However,
+contemporary methods for high-fidelity global illumination
+incur substantial computational costs, necessitating trade-offs
+between quality and temporal efficiency. To clarify terminology, in this work we follow the convention used in DDGI [1],
+where global illumination specifically refers to indirect lighting.
+A widely adopted approach for real-time global illumination is the probe-based lighting system, exemplified by dynamic diffuse global illumination (DDGI) [1]. This technique
+achieves real-time performance by minimizing computations
+from the per-pixel level to sparsely scattered light probes,
+Yijie Deng is with Tsinghua University and Tsinghua Shenzhen International Graduate School. E-mail: fightingdyj@gmail.com
+Lei Han is with Huawei Technology, Inc. E-mail: hanlei40@hisilicon.com.
+Lu Fang is with Dept. of Electrical Engineering at Tsinghua University
+and also Beijing National Research Center for Information Science and
+Technology (BNRist), Beijing 100084. E-mail: fanglu@tsinghua.edu.cn
+∗: Equal Contribution.
+§: Correspondence Author
+Manuscript received June 4, 2024; revised April 6, 2025.
+simultaneously simplifying materials to diffuse-only representations. While this approach offers computational efficiency,
+the oversimplification of light probes and object materials
+imposes severe limitations, hindering support for complex
+materials and realistic lighting scenarios.
+Recently, neural rendering algorithms have demonstrated
+the potential to revolutionize computer graphics by learning
+representations and complex light-material interactions from
+data. Real-time neural appearance models [2] have found a
+way to represent complicated materials in a unified manner
+using small multi-layer perceptrons, but they still operate
+within the traditional path-tracing pipeline, which cannot
+eliminate Monte-Carlo noise. Neural precomputed radiance
+transfer (Neural-PRT) [3] leverages the instant lighting concept
+from PRT [4] and encodes the scene radiance transfer in
+a neural network. By decoding the transfer vectors of the
+viewing frame and the light vectors from the environment
+maps, novel views can be rendered by combining these two
+vectors. However, the models employed in Neural-PRT are
+fitted per-scene and fixed at the scene scale. Consequently, they
+can only be utilized for static scene geometries, lacking the
+ability to support object-level dynamics such as movement and
+rotation. Real-time neural radiance cache (NRC) [5] proposed
+to use an online-trained neural network to memorize the
+global illumination, but it still requires high-quality path-traced
+results for training, which is not feasible on low-end devices.
+To address these limitations and provide a more robust and
+flexible global illumination algorithm, we propose TransGI to
+achieve high-quality global illumination in real-time with the
+proposed object-centric neural transfer model and the realtime radiance-sharing lighting system. Our rendering process
+is built upon Precomputed Radiance Transfer (PRT) [4], where
+an object’s shaded response to light sources is precomputed
+and compressed into a transfer function. This transfer function
+is represented in a linear basis, typically using spherical harmonics for a single evaluated outgoing direction, usually called
+transfer coefficients. It maps the incoming radiance to the
+outgoing radiance. The incoming light is dynamically sampled
+and represented using the same basis, usually called light coefficients. Consequently, the rendering process is reduced from
+evaluating the light integral to a simple dot product between
+transfer coefficients and light coefficients. This approach offers
+significant computational savings during real-time rendering.
+However, traditional PRT approaches exhibit inherent limitations that restrict their applicability in contemporary realtime rendering applications: (1) Static scenes. PRT operates
+by precomputing and storing the light transport information
+for a given scene geometry. Consequently, the scene geometry
+2
+Our GI(6.8ms)+DI
+DI
+GI & Probe Locations
+Fig. 1: Left: Real-time global illumination result produced by our method, combined with path-traced direct illumination. Right:
+Path-traced direct illumination. Bottom left: The overall global illumination result and the probe locations of our method.
+must remain static during rendering, as any changes would
+invalidate the precomputed data. (2) Limited representational
+capabilities. To achieve real-time performance, PRT simplifies
+the representation of materials and lighting models. This
+simplification constrains the types of materials and lighting
+scenarios that can be accurately depicted. (3) Restricted lighting dynamics. PRT typically assumes a global distant light
+source, which may not be suitable for scenes with complex,
+dynamic lighting conditions.
+To address these issues, our method solves these problems
+by:
+• Representing radiance transfer at object-scale instead
+of scene-scale, thereby supporting object-level dynamics
+such as object movement, addition, and removal.
+• Utilizing neural networks and latent features to compress
+densely-sampled object transfer functions, enabling the
+representation of more realistic and complex materials.
+• Employing local light probes to store scene lighting
+information, facilitating dynamic lighting scenarios, such
+as moving light sources and rapidly changing lighting
+conditions.
+Specifically, our object-centric neural transfer model is constructed by first densely sampling the object transfer function
+and then training and compressing it within a neural network
+and vertex-attached latent features. For a high-fidelity representation of the object transfer, it should be fully sampled at
+the object surface positions and outgoing directions. However,
+this poses a severe challenge for storage if we store the raw
+sampled transfer coefficients for querying and interpolation.
+For instance, a sampling density of 100 points per area and
+1000 directions per point for a box of one square area would
+require over 20GB of storage for a 300-byte basis, which is not
+feasible in real-time rendering pipelines. To address this issue,
+we propose compressing the densely-sampled transfer function
+using a neural network and vertex-attached latent features. The
+neural network takes the vertex latent vectors, the outgoing
+direction, and necessary G-Buffers (Geometry Buffers) as
+input and outputs the transfer coefficients. After training, the
+neural network can achieve a very high compression rate,
+requiring less than 1MB of storage, while the per-vertex latent
+features are only a 1D vector, also occupying a small space
+in storage.
+As for the proposed real-time radiance-sharing lighting
+system, it is composed of sparsely-scattered light probes,
+generated in real-time with our across-probe radiance-sharing
+strategy. Similar to DDGI [1], we place sparsely-scattered light
+probes in the scene, and each probe is equipped with a pathtraced irradiance map to capture the local radiance energy.
+However, as the color of each pixel in the irradiance map is
+computed independently via path-tracing, the computational
+burden increases linearly with the number of light probes
+and the resolution of the irradiance map, hindering real-time
+efficiency. To address this issue, we propose the across-probe
+irradiance sharing strategy, where a probe can share the perray radiance energy of its neighboring probes, and the highresolution irradiance map can be computed by rasterizing the
+shared shaded points. This approach allows for the efficient
+computation of high-resolution irradiance maps by leveraging
+3
+the radiance information from neighboring probes, reducing
+the computational burden associated with independent pathtracing for each probe. The irradiance map is then projected
+onto a suitable basis (e.g., spherical harmonics) to obtain light
+coefficients for further rendering.
+By combining sparsely-scattered light probes with the
+across-probe irradiance sharing strategy, our real-time
+radiance-sharing lighting system enables efficient computation
+of high-quality, dynamic lighting while maintaining real-time
+performance.
+The proposed algorithm is implemented in a real-time
+rendering engine Falcor [6] to verify its efficacy. This involves
+seamlessly integrating compute shaders and CUDA-based neural networks [7]. The whole system is optimized to run on
+portable devices and performs significantly better than DDGI,
+which cannot represent the view-dependent GI of glossy
+surfaces. We have also conducted extensive experiments to
+validate the real-time performance and high-fidelity rendering
+of our method, achieving high efficiency of less than 10 ms
+to render a frame and significantly higher quality than the
+baseline method DDGI.
+Figure 1 showcases the global illumination rendering results
+produced by our method. As demonstrated, our approach
+generates real-time, visually smooth, and physically plausible
+global illumination effects, significantly enhancing the realism
+of lighting in indoor environments.
+In summary, our contributions are:
+A compact object-centric neural transfer model enabling
+high-fidelity dynamic global illumination of complex
+geometry and materials with minimal memory overhead.
+• A real-time probe-based lighting system leveraging the
+across-probe radiance-sharing strategy for efficient computation of high-quality, dynamic lighting.
+• A real-time implementation for seamlessly integrating
+neural material models within a widely adopted rendering engine Falcor [6], demonstrating the feasibility and
+performance of the proposed techniques in real-world
+applications.
+•
+II. R ELATED W ORK
+Global illumination is crucial for achieving realistic lighting
+in computer graphics, yet it remains a challenging problem due
+to the following reasons: (1) It is difficult to support multilayered complex materials at interactive frame rates. (2) It is
+challenging to support dynamic lighting conditions in realtime.
+Physically-based rendering methods, featured by path tracing [8]–[11], are capable of achieving realistic rendering quality through Monte Carlo integration of the rendering equation
+[12]. However, these methods are computationally expensive
+and produce noisy rendering results at low sample counts.
+To achieve real-time global illumination, various approaches
+have been proposed, primarily based on the following two
+simplifications:
+•
+•
+Material simplifications.
+Dynamics Restrictions.
+We review the existing real-time global illumination methods
+and compare our proposed method with them in Section II-A,
+highlighting how our approach overcomes the limitations of
+material simplifications and dynamics restrictions. As neural
+networks have been increasingly adopted in computer graphics
+for representing complex materials, we review the neural
+material representation methods in Section II-B and compare
+them with our neural transfer model, which aims to achieve
+real-time rendering performance without compromising on
+representing object materials and dynamic lighting conditions.
+A. Real-time Global Illumination
+To achieve real-time performance, most existing global
+illumination methods impose restrictions on light transport,
+primarily supporting only diffuse materials. The most widely
+adopted technique in industry is Dynamic Diffuse Global
+Illumination (DDGI) [1], which represents the irradiance field
+using scattered light probes, consequently limiting light propagation to diffuse paths. Similar approaches, such as [13]–
+[17], also constrain their computation to diffuse materials or
+limited light bounces, sacrificing support for more complex
+light interactions. While Neural Radiance Cache (NRC) [5]
+employs a neural network to efficiently store and retrieve
+the rendered scene radiance, its performance is suboptimal
+when handling glossy materials due to the complexity of
+accurately modeling specular reflections and their intricate
+light transport interactions. To overcome the limitations of existing methods in supporting complex materials, our approach
+employs a compact neural representation that encodes the
+intricate transfer properties of opaque materials. This neural
+transfer model captures glossy effects while maintaining realtime performance, thereby enabling more realistic rendering
+of sophisticated materials.
+To support more complicated materials, some scene dynamics and lighting dynamics are sacrificed in some existing global
+illumination methods. Precomputed Radiance Transfer (PRT)
+[4] precomputes the radiance transfer function of the scene
+to handle glossy materials and achieve efficient rendering.
+However, it is limited to distant lighting and does not support
+scene dynamics such as object movement or addition/removal,
+as the transfer function treats all objects as a whole. A similar
+approach boosted with neural networks, Neural-PRT [3], fits
+the scene radiance transfer in a neural network and decodes
+the transfer vectors and lighting vectors with a fitted decoder.
+However, it is trained per scene, lacking generalizability. Other
+precomputation methods [18]–[22] use different representations for complex materials but also do not support scene
+dynamics. [23] reproduces accurate glossy effects with sparse
+glossy light probes but requires hours of baking time and
+supports only static scenes. [24] supports some scene dynamics
+by training a neural network to store the radiance variance
+according to changing dynamic parameters, but it also requires
+lengthy training time and can only handle limited scene
+dynamics. To support flexible rendering while being efficient
+in all procedures, we make our neural representations objectcentric, enabling scene dynamics such as object movement,
+removal, and addition. In contrast to PRT-based methods that
+4
+only adapt to distant lighting, we use local light probes as
+in DDGI [1] to support local and variant light changes. The
+probes can also be generated in real-time with our across-probe
+radiance-sharing strategy.
+Lumen1 , a prominent rendering technique extensively employed in video game development, exhibits high performance
+but necessitates high-end hardware for optimal frame rates and
+increased storage capacity to accommodate essential rendering
+caches. In contrast, our approach leverages lightweight neural
+representations, comprising solely of vertex-attached 1D vectors and a light MLP as the transfer decoder, thereby mitigating
+device requirements.
+Overall, our method achieves both complex material representation and dynamic rendering through an object-centric
+neural transfer model and an across-probe radiance-sharing
+strategy for probe generation.
+B. Neural Material Representation
+Neural networks have been increasingly adopted in computer graphics for representing complex materials, aiming to
+improve rendering quality and achieve more compact representations.
+Several works have utilized neural networks for material
+representation. [25] employed a neural network to convert fur
+parameters into a participating medium, simplifying the simulation. [26] introduced neural textures and used them within
+deferred rendering. [27] proposed an autoencoder framework
+to compress BTF slices, while [28] represented BTFs using
+neural biplanes and a general decoder for radiance decoding
+from the biplanes. [29], [30] applied CNNs to regress 2D or
+4D maps that express the appearance of real objects. [31]
+used Generative Adversarial Networks (GANs) to generate
+reflectance functions perceptually similar to synthetic or measured input data, rendering them through partial evaluation
+of the generator network. [32] proposed a neural method for
+representing and rendering various material appearances at
+different scales with neural textures. [2], [33], [34] focused
+on representing complex multi-layer materials using neural
+networks. Notably, [2] encodes the BRDF model in small
+MLPs and supports multi-layer normal maps for complicated
+materials. However, most of these methods are limited to
+offline rendering, except for [2], which demonstrated realtime implementation in a real-time rendering engine. Nevertheless, [2] still operates within the traditional path-tracing
+paradigm, suffering from Monte Carlo noise and requiring
+post-processing techniques for noise-free rendering results.
+Our objective is to capitalize on the simplicity and computational efficiency of the lightweight neural representation
+employed in [2] for real-time rendering. However, instead
+of modeling the spatial Bidirectional Reflectance Distribution
+Function (BRDF), we aim to model the transfer properties
+of materials across the entire frequency spectrum, facilitating
+more informative encoding and noise-free rendering. To maintain high computational efficiency, we strive to keep the object
+representation as simple as possible, opting for 1D vertex
+1 https://advances.realtimerendering.com/s2022/SIGGRAPH2022Advances-Lumen-Wright%20et%20al.pdf
+latent features, while leveraging a lightning-fast Multilayer
+Perceptron (MLP) neural decoder implemented in CUDA for
+accelerated performance.
+III. OVERVIEW
+The whole pipeline is illustrated in Figure 2, where the rendering process is decomposed into two workflows: decoding
+transfer coefficients and generating light coefficients. These
+two rendering components are analogous to the notations used
+in the traditional PRT [4], and we explain their meanings
+below:
+• Transfer coefficients: These coefficients represent the
+material’s transfer properties, encoding how the material
+interacts with light at different frequencies, capturing the
+complex behavior of the material’s reflectance properties.
+• Light coefficients: These coefficients represent the incoming radiance energy from all incident angles, which are
+multiplied by transfer coefficients to get the final shading
+color.
+To better understand the mathematical formulation of the
+proposed method, we provide a brief introduction to Precomputed Radiance Transfer (PRT) in this section. Subsequently,
+we illustrate the process of decoding transfer coefficients in
+Section IV and generating light coefficients in Section V,
+respectively.
+Our objective is to facilitate real-time global illumination
+that supports high-fidelity rendering, particularly for intricate
+reflective materials. This entails accurately reproducing the
+outgoing radiance Lo (xo , ωo ) leveraging both the incoming
+radiance Li (xo ) and the surface material response f (xo , ωo ):
+Lo (xo , ωo ) = F(Li (xo ), f (xo , ωo )),
+(1)
+where xo represents the shaded point’s position, ωo is the
+outgoing direction, and F denotes the function that combines
+the incoming radiance and surface material response to yield
+the shaded color.
+Traditionally, Equation (1) is evaluated by representing the
+surface material response as the spatially varying bidirectional
+reflective distribution function (SVBRDF) f (x, ωi , ωo ) and the
+incoming radiance as the spatially varying per-ray radiance
+Li (xo , ωi ):
+Z
+Lo (xo , ωo ) =
+f (x, ωi , ωo )Li (xo , ωi )(ωi · n)dωi ,
+(2)
+Ω
+where ωi represents the incident light direction, n is the surface
+shading normal direction, and Ω is the upper hemisphere
+defined by n.
+However, rendering reflective materials using SVBRDF and
+its variants often results in noisy outcomes due to two primary
+reasons. Firstly, inadequate samples per pixel can lead to
+significant Monte Carlo sampling noise. Secondly, SVBRDF
+and its variants, being independent of geometry, demand more
+samples to mitigate noise arising from complex occlusion
+within an object.
+Precomputed Radiance Transfer (PRT) [4], addresses these
+issues by precomputing and integrating the material response
+5
+Latent Features
+Attached to Vertex
+ViewDir
+Normal
+Albedo
++
+Novel View
+G-Buffers
+Neural Transfer Decoder
+Feature Map
+Transfer Coefficients
+Multiplication
+Rendered Image
+Unwrap
+Shaded Points
+Probe
+Interpolation
+Rasterized Envmap
+Source Probe
+Target Probe
+SH Projection
+SH Light Probe
+Path Tracing
+Light Coefficients
+Rasterization
+Across-Probe Radiance Sharing
+Fig. 2: The pipeline of our method. Top row: A novel view is specified, and the corresponding G-Buffers (albedo, surface
+normal, and view direction) and the feature map are generated within the rendering engine. The feature map is interpolated
+with per-vertex latent features using barycentric coordinates. These generated maps are then fed into the neural transfer decoder
+to output the transfer coefficients. Bottom row: The irradiance map of a target probe is rasterized using its and its neighboring
+source probes’ shaded points, which is then projected into the frequency domain using spherical harmonics basis, referred to
+as an SH Light Probe. To shade a surface point, the light coefficients are interpolated using conditional trilinear interpolation.
+Finally, the rendered image is produced by multiplying the transfer coefficients and light coefficients.
+and incident radiance across all possible incident light directions ωi as transfer coefficients and light coefficients, respectively. Thus it is able to produce noise-free rendering results
+with sufficient samples in the precomputation stage. Moreover,
+the transfer coefficients are multiplied by a visibility term
+which encodes the intricate self-occlusion of objects, which
+simplifies the interaction between light and objects, facilitating
+noise-free rendering of complex geometries. The equation of
+PRT can be written as:
+K
+Lo (xo , ωo ) = ∑ lk (xo , ωo )(tk1 (xo , ωo ) + tk2 (xo , ωo ) + ...), (3)
+k=1
+where K denotes the number of coefficients, lk represents the
+light coefficient for the k-th term, tk1 is the corresponding
+transfer coefficient accounting for the lights directly emitting
+from the light sources, and tk2,3,... is the interreflected transfer
+coefficients accounting for indirect lights from the object
+surface itself bouncing for 2 or more times. Further breakdown
+of Equation (3) is provided in Equations (4) and (5):
+Z
+lk (xo , ωo ) =
+Li (ωi )βk (ωi )dωi ,
+(4)
+Ω
+Z
+tk1 (xo , ωo ) =
+f (xo , ωi , ωo )V (xo , ωi ,t)(ωi · n)βk (ωi )dωi , (5)
+Ω
+where β is an infinite set of basis functions used to project and
+reconstruct arbitrary functions, and V (xo , ωi ,t) is a visibility
+term that equals 1 when the ray from xo to direction ωi does
+not intersect the object itself, and 0 otherwise. Following the
+derivation of tk1 , the subsequent computation of interreflected
+transfer coefficients tk2,3,... can be accomplished by referring to
+the methodology outlined in [4].
+However, PRT’s conventional approach to material representation using 1-D vectors for diffuse materials and 2-D matrices
+for glossy materials [4] limits its support to simple lighting
+models such as the Lambertian model and Phong/Blinn-Phong
+model, thus constraining the representational capacity of the
+SVBRDF function f to only diffuse and glossy materials.
+Furthermore, PRT assumes distant lighting, further restricting
+its practical utility. Additionally, to accurately capture interobject indirect lighting effects, PRT requires the calculation
+of interreflected transfer coefficients tk2,3,... , which are not
+only computationally expensive but also become invalid when
+objects move within the scene, making dynamic scenes particularly challenging.
+To overcome these limitations, we propose an object-centric
+neural transfer model that extends the expressive power of
+materials in global illumination. This model utilizes vertexattached latents and a neural transfer decoder to represent an
+object’s intricate self-occlusion and a broad range of reflective
+materials, including the complex Disney BRDF model [35]
+and even measured realistic materials lacking an explicit
+analytic formulation. To accommodate dynamic and varying
+lighting conditions, including light sources in close proximity,
+we introduce a real-time light probe generation method with
+6
+an innovative across-probe radiance-sharing strategy. These
+light probes effectively capture inter-object lighting effects by
+tracing multi-bounce light rays throughout the scene and converting them to spherical harmonic light coefficients, thereby
+accounting for indirect lighting without the computational
+burden of calculating the complicated interreflected transfer
+coefficients.
+z(x0 ) = λ1 z(i1 ) + λ2 z(i2 ) + λ3 z(i3 ),
+(7)
+where λ1−3 are the barycentric coordinates that sum up to 1,
+and i1−3 represent the vertex indices of the triangle in which
+the surface position xo is situated.
+B. Data-driven modeling
+IV. O BJECT-C ENTRIC N EURAL T RANSFER M ODEL
+Unlike conventional rendering approaches that leverage
+analytical hand-crafted functions like the Disney BSDF [35]
+to represent materials, which can only respond to a single
+ray direction, we propose to represent full-range material
+responses in the frequency domain using a novel object-centric
+neural transfer model. Thus, with only one inference, the fullrange responses of materials can be evaluated, demonstrating
+the potential for efficient rendering without the need for
+expensive sampling or ray tracing. We present our method
+in two parts, the representation of the object-centric neural
+transfer model is first introduced in Section IV-A and the
+detailed process of collecting data and training the model is
+described in Section IV-B
+A. Network Architecture and Representation
+Our aim with the transfer model is to directly generate highfidelity, view- and position-dependent transfer coefficients t
+derived from intricate reflective materials and self-occlusion
+within objects. In contrast to approaches like [2], which
+utilize neural networks to output BRDF values f (xo , ωo , ωi )
+for individual incident lighting directions ωi , our method for
+predicting transfer coefficients tk (xo , ωo ) yields noise-free rendering outcomes, as tk encompasses a comprehensive integral
+over ωi .
+Technically, our object-centric neural transfer model comprises two key components: vertex latents and neural transfer
+decoder. The vertex latents are a set of d-dimensional vectors
+attached at every vertex of an object, encoding fundamental
+per-vertex transfer properties. And the neural transfer decoder
+is a multi-layer perceptron (MLP), which can be either objectspecific or scene-specific. The object-specific decoder encodes
+transfer properties for a single object, offering compactness
+and precision. However, instantaneously and concurrently inferring thousands of separate neural networks poses challenges
+for real-time implementation. Therefore, the default choice
+for this paper is the scene-specific decoder, trained to generalize across all objects within the scene. This decoder can
+accommodate rigid object movements and rotations within the
+scene and has demonstrated its ability to produce high-quality
+rendering results in experiments.
+A fully-trained model facilitates the generation of view- and
+position-dependent transfer coefficients:
+t0−K (xo , ωo ) = Φ(z(xo ), ωo , n, α),
+geometric information, and z(xo ) denotes the barycentricinterpolated latent at surface position xo :
+(6)
+where Φ is the neural transfer decoder, α denotes a threechannel surface albedo serving as supplementary input enhancement, the surface shading normal n provides additional
+We collect the training data by uniformly sampling surface
+positions of an object and outgoing directions. Each complete
+sample set comprises the input part {i1−3 , λ1−3 , xo , ωo , n, α}
+and the output part t0−K (xo , ωo ) for the training process.
+To generate the input part, we first select a triangle based
+on its ratio of area relative to the entire surface area of
+the object. i1−3 denote the three vertex indices of the chosen triangle. Subsequently, we randomly generate a set of
+barycentric coordinates λ1−3 to determine a random position
+xo within the triangle. The albedo α is obtained by querying
+the material of the triangle, while the surface shading normal
+n is interpolated using the barycentric coordinates and the
+corresponding normal directions at vertices i1−3 .
+Concerning the output part, as inferred from Equation
+(5), it involves an integral over ωi , so for each sample,
+we generate numerous directions of ωi to achieve a comprehensive integration, typically set to 2000 in our default
+implementation. The BRDF f (xo , ωi , ωo ) can be any complex
+SVBRDF model with spatially varying roughness, metallicity,
+anisotropic response, and other properties challenging to describe with analytical formulas. The visibility term V (xo , ωi )
+needs to be modulated by a distance threshold t, denoted as
+V (xo , ωi ,t). This term evaluates to 1 when the ray from xo
+to direction ωi does not intersect the object or intersects but
+the distance between xo and the intersection point exceeds
+t; otherwise, it is 0. This modification is necessary because
+the original PRT assumes distant light sources. However, our
+method aims to accommodate nearby variant lights. If a light
+source exists within an object, the original visibility term
+could yield erroneous rendering results, surfaces within the
+object will be entirely dark. There are several options for
+the basis functions β , including wavelets, spherical Gaussians,
+and spherical harmonics. We opt for spherical harmonics due
+to their advantageous properties such as orthogonality and
+rotation invariance. Therefore, a generated sample of t0 (xo , ωo )
+can be written as:
+L
+l
+t(xo , ωo ) = ∑ ∑
+Z
+f (xo , ωi , ωo )V (xo , ωi ,t)(ωi ·n)Ylm (ωi )dωi ,
+l=0 m=−l Ω
+(8)
+where Ylm is a spherical harmonic function of degree l and
+order m, L denotes the maximum degree, and the number of
+coefficients K equals to (L + 1)2 .
+The training process is straightforward, entailing the joint
+optimization of vertex latents and the neural transfer decoder.
+In practice, we assemble a batch of training samples to
+construct z(xo ) from λ1−3 , i1−3 and randomly initialized vertex
+latents z. Subsequently, z(xo ) is concatenated with ωo , n, α to
+form the complete input channels, which are then fed into
+7
+Equation 4 should also be projected and represented using
+spherical harmonics:
+L
+Visibility = 1
+Visibility = 0
+Sampled Surface Point
+GT Transfer Coefficients
+BackPropagate
+Latent
+Feature
+L1 Loss
+Predicted Transfer Coefficients
+Albedo
+Normal
+ViewDir
+l
+lk (xo , ωo ) = ∑ ∑
+Neural Transfer Decoder
+Fig. 3: Data collection and training process for our appearance
+model. Top row: A random surface point xo is sampled
+together with the outgoing direction ωo , and valid material
+evaluations (that do not intersect with the surface itself)
+are integrated over the incident direction ωi , followed by
+multiplying the basis function β to get the ground truth
+(GT) transfer coefficients. Bottom row: The interpolated latent
+features are concatenated with necessary G-buffers and then
+fed into the neural transfer decoder to output the predicted
+transfer coefficients. The latent features and the neural transfer
+decoder are jointly optimized by backpropagating the L1-loss.
+the neural transfer decoder to generate the predicted transfer
+coefficients. Both components are optimized using L1-loss,
+comparing the predicted and ground truth transfer coefficients.
+Upon training the model for the initial transfer coefficients t0 , datasets containing transfer coefficients for additional
+inter-object light bounces can be derived using the trained
+model, following the approach outlined in [4]. This process
+enables the neural transfer model and the vertex-attached
+latent features to be further trained, consequently encoding
+the intricate properties of inter-object reflections within the
+learned representations.
+The data collection and training process are illustrated in
+Figure 3.
+V. L IGHT P ROBE
+In this section, we present our real-time lighting system,
+constructed from sparsely scattered light probes within the
+scene. We explain the representation of these light probes in
+Section V-A, while Section V-B outlines our methodology
+for generating real-time light probes through an innovative
+across-probe radiance-sharing strategy. Finally, we introduce
+the interpolation strategy of light probes in Section V-C.
+A. SH Light Probes
+As we adopt spherical harmonics as the basis functions to
+represent transfer coefficients, the light coefficients shown in
+Z
+Li (ωi )Ylm (ωi )dωi .
+(9)
+l=0 m=−l Ω
+Since global illumination mainly display the low-to-mid
+frequency lighting effects, it can be rendered smoothly with
+sparsely scattered light probes in the scene [1], [13]–[15], [36].
+We align with the convention of storing radiance in sparselyplaced probes within the scene. However, diverging from the
+practice of storing a radiance map in each probe, we store a set
+of light coefficients generated by projecting the radiance map
+onto the spherical harmonic basis in the frequency domain.
+We refer to our probes as SH Light Probes.
+To account for inter-object lighting effects, we allow the
+incoming light Li (ωi ) to bounce multiple times in the scene.
+Specifically, in the probe-based lighting system, we perform
+multi-bounce ray tracing for each probe to compute the pixel
+colors of the radiance map. This approach captures interobject lighting interactions and eliminates the need to calculate
+the inter-reflected transfer coefficients tk2,3,... in Equation 3.
+Consequently, we can approximate Equation 3 as follows:
+K
+Lo (xo , ωo ) = ∑ (lk1 (xo , ωo ) + lk2 (xo , ωo ) + . . .)tk1 (xo , ωo ),
+k=1
+(10)
+where lk1 (xo , ωo ) represents the light coefficients for direct incoming light, and lk2,3,... (xo , ωo ) represents the light coefficients
+for indirect incoming light generated by multiple ray bounces
+in the scene. This transformation can be computed efficiently
+with modern rendering engines such as Falcor [6], which
+support multi-bounce ray tracing at minimal computational
+cost. This approach enables effective lighting of movable
+objects since inter-object lighting is handled by real-time
+generated light probes rather than being encoded in the transfer
+coefficients.
+B. Across-probe Radiance Sharing
+Regarding the generation of a single light probe, traditional
+approaches tend to employ path-tracing to compute the pixel
+color of the irradiance map. However, this method inevitably
+leads to a scaling problem, wherein as the resolution of the
+irradiance map and the number of light probes increase, the
+computational overhead for path-tracing will also escalate.
+To address this, we propose the across-probe radiancesharing strategy, aiming to decouple the linear relationship
+between computation and probe parameters. The main insight
+of this strategy is that the low-to-mid frequency per-ray
+radiance can be shared by different light probes. This strategy
+involves two steps: Per-Probe Radiance Scattering and Atomic
+Probe Map Rasterization.
+Per-Probe Radiance Scattering. Suppose we place N × N ×
+N SH Light Probes in the scene. For each probe, M rays are
+cast from the probe’s location in random directions, excluding
+rays that directly intersect light sources, as only global illumination is accounted for. For each frame, the shaded points are
+rendered with a single path sample, and the noise caused by
+8
+insufficient samples is mitigated through pixel accumulation
+during the rasterization stage. Consequently, after each frame,
+we obtain a total of M × N 3 points, each associated with a
+radiance color and a world-space position.
+Atomic Probe Map Rasterization. Once we obtain a set
+of shaded points, we can perform point cloud rasterization
+to generate the irradiance map for each probe. However,
+naively rasterizing all points to each probe is not temporally
+efficient, as the point-to-probe rasterization operation cannot
+be effectively parallelized due to potential conflicts when
+multiple points attempt to write to the same pixel, causing
+memory synchronization issues. Additionally, there exists a
+scalability problem wherein rasterizing all points to each
+probe would lead to M × N 3 × N 3 rasterization operations. To
+mitigate these issues, we introduce two modifications. First, we
+treat each rasterization operation as an atomic operation, akin
+to [37], [38], which leverages shader atomic operations that
+encompass uninterrupted read and write operations to ensure
+correct results. This approach enables effective parallelization
+of the point-to-probe rasterization operation on the GPU,
+enhancing efficiency. Second, for each probe, we rasterize its
+irradiance map using its own shaded points and the shaded
+points from its 3D nearest 26 probes, instead of utilizing all
+points. By doing so, we increase the sample rate for a single
+probe and reduce the number of rasterization operations from
+M × N 3 × N 3 to M × 27 × N 3 . We show a 2D example of this
+rasterization process in the bottom left part of Figure 2.
+Our strategy lessons the scalability issue dramatically by
+assuming a relatively small number of per-probe rays M in
+conjunction with the rasterization technique. Traditionally, the
+color of each pixel on an irradiance map is independently
+path-traced, necessitating an increase in the number of pathtracing operations to improve the probe quality, i.e., the map
+resolution. However, as the per-ray radiance is shared across
+multiple probes in our strategy, the resolution of the probe
+irradiance map is decoupled from the number of per-probe
+path-tracing operations M. This affords us the opportunity to
+generate high-resolution probe irradiance maps with only a
+small value of M through rasterization. Moreover, our atomic
+probe map rasterization technique can be performed efficiently
+in real-time implementations, enabling rapid mitigation of
+noise in the irradiance maps by accumulating the rasterized
+points at each frame.
+C. Probe Interpolation
+Since the light probes are scattered in a regular grid, we use
+trilinear interpolation of the 8 nearest probes to estimate the incoming radiance at a shading point. To minimize light/shadow
+leak artifacts, we employ similar pruning techniques as in
+DDGI [1], which involves discarding the probes that are
+occluded by other surfaces and the probes that are not on
+the same side of the shading point with respect to the surface
+geometry. If all 8 probes are pruned, we perform a weighted
+average of their contributions based on their distance to the
+shading point and the cosine angular weight between the
+shading point normal and the vector towards each probe, which
+is similar to the approach used in DDGI [1].
+VI. E XPERIMENTS
+A. Experiments Setup
+Sample Scenes. We evaluate the scene-scale global illumination on several modified scenes from the Bitterli dataset [39].
+All scenes are modified to exclude transparent objects but can
+encompass multiple light sources and hundreds of reflective
+objects with materials exhibiting diverse effects, such as
+diffuse, coated diffuse, rough plastic, metallic, and conductive
+surfaces. The lighting configurations in these scenes include
+area lights for individual windows, local point light sources
+for small fixtures such as light bulbs, and distant environment
+maps for certain open scenes. In addition, we evaluate three
+object-scale scenes from the Grand Bazaar2 , where each scene
+contains either a metallic object or a complex-textured object,
+illuminated solely by an environment map. These scenes are
+used to assess the ability of our neural transfer model to
+represent complex, multi-layered material effects.
+Baselines. We evaluate the methods under two setups: global
+illumination (GI) and global illumination combined with direct
+illumination (GI+DI). For the GI setup, we compare our
+method against Dynamic Diffuse Global Illumination (DDGI)
+[1] and path-traced results without direct illumination. For the
+GI+DI setup, we incorporate the path-traced direct illumination component into both our method and DDGI for fair comparison with the path-traced reference image. Subsequently,
+we compare our results with DDGI+DI and path-traced results
+encompassing both global and direct illumination.
+We also compare our method against NRC [5], a global
+illumination technique that uses a single MLP to cache radiance. We adopt its open-source implementation from RTXGI
+[40]. However, because RTXGI and Falcor use different scene
+formats, Living Room-2 is the only scene they both support. In
+addition, their distinct code implementations introduce some
+unavoidable rendering differences. Consequently, we compare
+our method and NRC only qualitatively in Section VI-B1.
+Configuration. To evaluate the scene-scale illumination, for
+both our method and DDGI [1], a grid of 8 × 8 × 8 light
+probes are placed in each scene. Each probe in DDGI shoots
+256 rays per frame, while each probe shoots 100 rays in our
+method. The path-traced referenced images are generated by
+accumulating 20000 samples per pixel. As for object-scale
+illumination, the only light source is an environment map
+which is projected onto the spherical harmonics basis to get
+a set of light coefficients. And the default maximum degree
+of spherical harmonics is set to 4, balancing its ability of
+representation and efficiency.
+Metrics. We evaluate the performance of the methods in
+terms of both computational efficiency and rendering quality.
+For temporal efficiency, we evaluate our training efficiency
+on object-scale scenes to show our fast convergence. And for
+inference efficiency, we compare all methods using the average
+time required to render a single frame. As for rendering quality, we assess the methods by computing three quality metrics
+with respect to the path-traced reference image: the root mean
+squared error (RMSE), which measures the average magnitude
+2 https://www.bigmediumsmall.com/grand-bazaar
+9
+Ours
+DDGI
+Staircase
+Living Room-3
+Living Room-2
+Living Room
+Dining Room
+Bathroom
+GT GI
+Fig. 4: Qualitative comparison in terms of global illumination on the selected 6 scenes from the Bitterli dataset [39].
+10
+Ours + DI
+DDGI + DI
+Staircase
+Living Room-3
+Living Room-2
+Living Room
+Dining Room
+Bathroom
+GT
+Fig. 5: Qualitative comparison in terms of global illumination+direct illumination on the selected 6 scenes from the Bitterli
+dataset [39].
+11
+Ours GI
+Living Room
+DDGI
+Living Room-3
+Ours GI
+Living Room
+Reference
+Bathroom
+Ours GI
+Reference
+Ours GI
+DDGI
+Fig. 6: Qualitative GI comparison on specular/glossy effects.
+Fig. 7: Qualitative GI comparison on light/shadow leaks.
+of the errors; the L1 loss, which captures the average absolute
+difference; and the structural similarity (SSIM) index, which
+evaluates the perceptual similarity by considering luminance,
+contrast and structural factors.
+Implementation. To eliminate potential influences arising
+from disparities in rendering engines, shading languages, and
+experimental hardwares, we implement our method in the
+real-time rendering engine Falcor [6] and also execute DDGI
+and path-tracing within the same framework for fair comparisons. For the neural network components, we integrate the
+CUDA-based MLP framework tiny-cuda-nn [7] with Falcor,
+enabling seamless data transfer between the shader and CUDA
+environments. All experiments are conducted on a desktop
+computer equipped with an RTX 5000 GPU. For the scale of
+the training data of a scene, we sample 40,960,000 points per
+scene, where these sampled points are scattered on objects’
+surfaces weighted by their surface areas. And this sampling
+procedure can be done very efficiently using Falcor within 30
+minutes. For training the neural transfer model, we employ a
+Fullyfused MLP from tiny-cuda-nn [7] with 3 hidden layers
+(128 dimensions each). The network takes 16-dimensional
+inputs (7D vertex features concatenated with 9D GBuffer data
+including albedo, normal, and view direction) and outputs
+75-dimensional vectors corresponding to 4th-degree spherical
+harmonics. We optimize using Adam with an initial learning
+rate of 1e-4 and a MultiStepLR scheduler. With 2048 pixel
+samples per batch, training converges after approximately
+200,000 iterations ( 2 hours) while occupying less than 2 GB
+of video memory.
+Specular/Glossy Effects. From Figure 6, we can observe that
+our method produces reasonable glossy reflection effects on
+the lamps of the Living Room scene and the mirror holder
+of the Bathroom scene. However, as DDGI [1] only accounts
+for diffuse materials, it cannot reproduce glossy effects. Furthermore, for the mirrors in both scenes, our method renders
+contents that are more accurate and visually closer to the
+ground truth reference compared to DDGI. Since our overall
+rendering result is closer to the reference image, the contents
+reflected in the mirrors, which involve one additional light
+bounce, are also more faithful to the reference. And since the
+scenes displayed in Figure 6 are overly complex with many
+other light transport effects, we especially show how our neural
+transfer model could represent the glossy reflection at objectlevel in Figure 8. This figure specifically compares our method
+against path tracing reference renderings for challenging objects with complex multi-layered meterials, including metal
+teapots, a kettle, and a glossy jar. The results demonstrate that
+our neural transfer model successfully captures the nuanced
+characteristics of glossy materials and reproduces reflections
+that closely align with path-traced ground truth.
+Light/Shadow Leak. From Figure 7, we can observe that
+our method provides smoother rendering results without abrupt
+light or shadow leakage artifacts caused by probe interpolation.
+However, such leakage artifacts are evident at the edges of the
+rooms in the results produced by DDGI [1]. This is because
+during probe interpolation, we strictly prune probes that are
+not on the same side of the surface geometry as the shading
+point, which effectively prevents light and shadow leaks for
+indoor environments. In contrast, DDGI takes all probes into
+account during interpolation, which may introduce light and
+shadow leakage artifacts.
+We also compare our method with NRC [5] in Figure 9. We
+can see that the NRC rendering suffers from visible noise. This
+is because NRC relies on a single global neural network to
+approximate the scene’s radiance at run time, which struggles
+to capture noise-free lighting details with limited samples.
+2) Quantitative Evaluation: We provide quantitative comparisons for global illumination (GI) in Table I and for the
+combined global illumination and direct illumination (GI+DI)
+in Table II. The results demonstrate that our method achieves
+B. Evaluations
+1) Qualitative Evaluation: To evaluate the scene-scale
+global illumination quality, we first present an overall comparative evaluation in Figure 4 for global illumination (GI)
+and in Figure 5 for global illumination combined with direct
+illumination (GI+DI). From an overall perspective, our method
+can provide more stable and visually plausible rendering
+results that are closer to the ground truth reference, compared
+to the DDGI method [1]. Detailed qualitative comparisons and
+analysis are provided below:
+12
+Ours
+Error Map
+Teapot
+Reference
+Original Layout
+Move Desk forward
+Move Desk Backward
+Move Desk Backward and Sofa to the left
+Kettle
+SSIM: 0.953
+SSIM: 0.850
+Jar
+Fig. 10: Visualizing global illumination effects in the Living
+Room scene under various object displacement scenarios.
+SSIM: 0.941
+Fig. 8: Object-level qualitative/quantitative comparison and
+error maps between our neural appearance model and the pathtraced reference results.
+GT GI
+NRC GI
+GT Transfer of (l=0,m=0)
+Ours Transfer of (l=0,m=0)
+Error Map (Mean L1 Error=0.014)
+GT Transfer of (l=1,m=0)
+Ours Transfer of (l=1,m=0)
+Error Map (Mean L1 Error=0.011)
+GT Transfer of (l=2,m=0)
+Ours Transfer of (l=2,m=0)
+Error Map (Mean L1 Error=0.011)
+Fig. 11: Qualitative/quantitative comparison of GT transfer
+coefficients and our predicted transfer coefficients on the scene
+Living Room.
+Ours GI
+Fig. 9: Qualitative comparison in terms of global illumination
+between our method and NRC [5] on the scene Living Room2.
+superior quality across all three evaluation metrics on these
+six scenes.
+3) Dynamic Movement Support: Figure 10 presents global
+illumination renderings of the living-room scene with various
+object repositioning configurations. We demonstrate the robustness of our approach by testing two distinct displacement
+scenarios: translating the desk forward and backward along
+its axis, and shifting the sofa laterally to the left. The results
+confirm that our method maintains consistent and physically
+plausible lighting effects despite these object manipulations.
+This spatial invariance stems from our technique of embedding
+transfer features directly onto object vertices, enabling our approach to accommodate any rigid body transformation without
+retraining the scene network. Furthermore, as objects move,
+the spherical harmonic probes in the scene are dynamically
+updated, causing the light coefficients to adjust in real-time
+and produce visually coherent illumination results.
+4) Visualization of Intermediate Results: Transfer coefficients. In Figure 11, we compare the ground-truth (GT) transfer coefficients with our predictions for three selected spherical
+harmonic channels: (ℓ = 0, m = 0), (ℓ = 1, m = 0), (ℓ = 2, m =
+0). Our predicted coefficients closely match the ground truth,
+as shown by the small differences in most regions. The error
+map reveals that the main discrepancies appear on glossy
+surfaces, which exhibit high-frequency signals that are more
+challenging for the network to capture in full detail.
+Light Coeffieicnts. In Figure 12, we compare the light coefficients interpolated using plain probe generation (where each
+probe’s radiance map is independent) and our across-probe
+radiance-sharing light probe generation detailed in Section
+V-C. For visualization, we selected three spherical harmonic
+channels: (ℓ = 0, m = 0), (ℓ = 1, m = 0), (ℓ = 2, m = 0). The
+results show that light coefficients interpolated using the
+proposed across-probe radiance-sharing strategy closely match
+those generated using plain probe generation for ℓ = 1, which
+13
+TABLE II: Quantitative comparison in terms of global illumination+direct illumination on the selected 6 scenes from the
+Bitterli dataset [39].
+Plain Light Coe of (l=0,m=0)
+Radiance-Shared Light Coe of (l=0,m=0)
+Error Map (Mean L1 Error=0.029)
+Scene
+Bathroom
+Dining Room
+Plain Light Coe of (l=1,m=0)
+Radiance-Shared Light Coe of (l=1,m=0)
+Error Map (Mean L1 Error=0.083)
+Living Room
+Living Room 2
+Living Room 3
+Plain Light Coe of (l=2,m=0)
+Radiance-Shared Light Coe of (l=2,m=0)
+Error Map (Mean L1 Error=0.092)
+Fig. 12: Qualitative/quantitative comparison of light coefficients interpolated using plain probe generation and acrossprobe radiance-sharing light probe generation on the scene
+Living Room.
+TABLE I: Quantitative comparison in terms of global illumination on the selected 6 scenes from the Bitterli dataset [39].
+Scene
+Bathroom
+Dining Room
+Living Room
+Living Room 2
+Living Room 3
+Staicase
+Method
+RMSE
+L1
+SSIM
+Ours
+DDGI
+Ours
+DDGI
+Ours
+DDGI
+Ours
+DDGI
+Ours
+DDGI
+Ours
+DDGI
+0.108
+0.282
+0.033
+0.061
+0.069
+0.185
+0.075
+0.269
+0.058
+0.261
+0.039
+0.185
+0.087
+0.244
+0.014
+0.037
+0.039
+0.144
+0.053
+0.212
+0.038
+0.244
+0.029
+0.130
+0.741
+0.611
+0.901
+0.504
+0.839
+0.442
+0.815
+0.655
+0.923
+0.720
+0.878
+0.165
+accounts for a large portion of the illuminance. However,
+the differences become more pronounced for higher-frequency
+spherical harmonic channels, which indicates that the shared
+strategy loses accuracy in finer high-frequency spherical harmonics.
+5) Efficiency Evaluation: We evaluate both temporal efficiency for training and inference stages and memory efficiency
+of our method.
+Reference
+Training Time: 0.42min
+SSIM: 0.8049
+Training Time: 1.25min
+SSIM: 0.8297
+Training Time: 4.20min Training Time: 42.67min
+SSIM: 0.8388
+SSIM: 0.8493
+Fig. 13: The temporal efficiency evaluation for training of our
+method.
+Staicase
+Method
+RMSE
+L1
+SSIM
+Ours+DI
+DDGI+DI
+Ours+DI
+DDGI+DI
+Ours+DI
+DDGI+DI
+Ours+DI
+DDGI+DI
+Ours+DI
+DDGI+DI
+Ours+DI
+DDGI+DI
+0.096
+0.223
+0.023
+0.054
+0.058
+0.132
+0.059
+0.214
+0.043
+0.119
+0.034
+0.128
+0.067
+0.179
+0.010
+0.028
+0.029
+0.094
+0.037
+0.163
+0.025
+0.100
+0.025
+0.093
+0.836
+0.741
+0.960
+0.844
+0.905
+0.756
+0.897
+0.795
+0.963
+0.900
+0.902
+0.386
+TABLE III: Efficiency evaluation of our method and DDGI
+on scene Living Room.
+Method
+Stage
+Time(ms)
+Ours
+Generate Network Input Buffer
+Network Inference
+Collect Shaded Points
+Probe Rasterization
+SH Multiplication(Render)
+Total
+0.9
+1.5
+1.3
+2.2
+0.8
+6.7
+DDGI
+Probe Update
+Probe Interpolation(Render)
+Total
+1.2
+0.5
+1.7
+The temporal efficiency evaluation for training of our
+method is shown in Figure 13. The figure portrays the convergence curve of our method, showcasing its rapid convergence
+rate in achieving a relatively high SSIM metric.
+The temporal efficiency evaluation for inference of our
+method in comparison with DDGI is presented in Table III.
+This table showcases the performance metrics evaluated on the
+Living Room scene, with the reported times corresponding to
+the rendering duration for a single frame. Overall, although
+DDGI is 4× faster than our method, the time required to
+render a single frame with our approach is still less than 10ms,
+which satisfies the requirements of real-time rendering. DDGI
+achieves such a fast rendering speed due to its simplification
+of materials and low resolution of probe irradiance maps.
+Our method involves more stages, and each stage is quite
+independent, resulting in a longer rendering time for a single
+frame.
+The memory usage of our method for the 6 evaluated scenes
+is presented in Table IV. We can observe that even for the
+scene with the largest number of vertices, Bathroom with
+over 600k vertices, the memory footprint is less than 50Mb.
+This memory efficiency can be attributed to the fact that our
+default model appends only a 7-channel float vertex feature to
+each vertex. Consequently, our method can be highly memoryefficient, making it suitable for both off-the-shelf desktop
+devices and mobile devices with limited memory resources.
+In summary, the proposed method TransGI offers the following advantages:
+• Specular/glossy effects handling: Our method can handle
+ideal specular surfaces with an extra light bounce, and
+14
+TABLE IV: Memory usage of our method for the 6 evaluated
+scenes from the Bitterli dataset [39].
+Scene
+Bathroom
+Dining Room
+Living Room
+Living Room-2
+Living Room-3
+Staircase
+Vertex Number
+Network(Kb)
+Vertex Features(Mb)
+678985
+141756
+118439
+357509
+451607
+179652
+799
+799
+799
+799
+799
+799
+42.33
+8.58
+7.11
+21.77
+27.20
+10.88
+it effectively captures glossy effects within the representation capabilities of the spherical basis and the neural
+transfer model.
+• Real-time rendering. Although not as efficient as DDGI
+[1], our method can still provide a real-time rendering experience with complex code divergence between CUDA
+and shader pipelines.
+• Little storage overhead.
+C. Ablation Study
+There are several hand-crafted parameters in our method,
+so to determine the optimal model parameters for my method,
+a series of ablation experiments are conducted, as shown in
+Table VI, where metrics are evaluated on the scene Living
+Room in terms of global illumination effect. The impact of
+each ablation choice is evaluated in terms of rendering quality
+(RMSE) rendering time changes (rendering time), along with
+the associated process. We explain the impact of our ablation
+choices below.
+Resolution of irradiance map. The resolution of the irradiance map for each probe significantly impacts the probe
+rasterization process. Higher resolutions result in more pixelwrite operations and can improve rendering quality. However,
+there is a limit to the quality improvement achieved by
+increasing the resolution; quadrupling the resolution does not
+substantially enhance rendering quality. This is because the
+low-frequency global illumination is not sensitive to higher
+sampling rates. Conversely, downsampling the irradiance map
+resolution can fail to capture a wide range of shaded points,
+leading to degraded rendering quality. Therefore, an optimal
+resolution for the irradiance map must strike a balance. In
+this implementation, a resolution of 100 × 50 was chosen to
+achieve this balance.
+Number of Probes. It is evident that increasing the number
+of probes enhances rendering quality. This increase also results
+in a higher number of shaded points, thereby requiring more
+time for path tracing and probe rasterization. However, this
+does not necessarily translate to a linearly increased computation time if the additional workload remains within the
+parallel processing capabilities of the tested GPU. As shown
+in Table VI, denser sampling of probes leads to increase in
+both rendering time and quality. Conversely, undersampling
+of probes results in a significant drop in rendering quality but
+not a significant drop in efficiency, which proves the default
+probe setup of 8 × 8 × 8 is still within computational power of
+the tested GPU.
+Shaded rays per probe. The number of shaded rays per
+probe for each frame is a scaling parameter that balances
+TABLE V: Ablation study of the network hyperparameters’
+impact on the rendering quality and efficiency on the scene
+Living Room.
+dvertex
+dhidden
+lhidden
+SSIM
+Time(ms)
+7
+7
+7
+23
+55
+7
+7
+96
+128
+256
+128
+128
+128
+128
+3
+3
+3
+3
+3
+4
+5
+0.834
+0.839
+0.839
+0.842
+0.843
+0.846
+0.851
+0.9
+1.5
+2.3
+1.5
+1.6
+2.0
+2.4
+TABLE VI: Ablation experiment evaluations on quality and
+efficiency for global illumination of Living Room.
+Time
+Changes(ms)
+SSIM
+Resolution of irradiance map =100×200
+Resolution of irradiance map =50×25
+Number of Probes =16×16×16
+Number of Probes =4×4×4
+Dimension of Vertex Features =23
+Shaded rays per probe =50
+Shaded rays per probe =200
++6.0
+-0.5
++7.5
+-0.2
++0.2
+-0.2
++1.5
+0.842
+0.814
+0.867
+0.781
+0.841
+0.822
+0.853
+Default Model
+6.7ms
+0.839
+Ablation Choice
+quality and efficiency. As shown in Table VI, varying the
+number of shaded rays has minimal impact on rendering time
+and does not significantly affect rendering quality. This is
+primarily because the probes serve as a scene radiance cache
+that accumulates per-frame scene radiance, achieving a stable
+energy state within the initial few frames. Consequently, with
+sufficient frame accumulation, the probe energy stabilizes,
+making the number of shaded rays per probe per frame less
+critical.
+Hyperparameters of the neural transfer model. There are
+many hyperparameters to be tuned to train the neural transfer
+model, including: the dimension of vertex feature dvertex ,
+the hidden dimension of the neural transfer model MLP
+dhidden and the number of hidden layers of the MLP lhidden .
+We provide a comprehensive ablation study of the above
+hyperparameters in Table V. From the table, we can see
+that by tuning the hyperparameters, we can achieve different
+trade-offs between rendering quality and efficiency. Increasing
+the hidden dimension (dhidden ) from 96 to 128 improves the
+SSIM from 0.834 to 0.839, but further increasing it to 256
+yields no significant quality improvement while increasing
+the rendering time by 53%. Similarly, increasing the vertex
+feature dimension (dvertex ) from 7 to 23 or 55 only marginally
+improves quality (0.839 to 0.843) with minimal impact on
+rendering time. The most effective quality improvement comes
+from increasing the number of hidden layers (lhidden ), with a
+5-layer network achieving the highest SSIM of 0.851, though
+at a 60% higher computational cost compared to the 3-layer
+network. Based on these results, we chose a balanced configuration with dvertex = 7, dhidden = 128, and lhidden = 3 for our
+experiments, which provides good quality while maintaining
+real-time performance.
+15
+Reference
+Ours
+Ours
+with Per-Pixel Probe
+Dining Room
+Ours GI
+Fig. 14: With sparse sh light probes, our method cannot
+produce accurate interreflection effects between two glossy
+objects.
+VII. L IMITATIONS AND F UTURE W ORK
+Fixed Number of Basis Functions. The proposed TransGI
+projects the transfer function into a frequency space represented by a chosen set of basis functions. The requisite
+number of basis functions varies substantially, contingent upon
+the material properties. Diffuse materials necessitate fewer
+than 10 basis functions, while glossy materials demand hundreds, and specular materials require an infinite number. Our
+current implementation strikes a balance between accuracy
+and efficiency by employing a fixed number of 75 SH basis
+functions for all materials and utilizing an extra ray tracing
+step per pixel to approximate specular responses. Experiments
+in Figure 4 demonstrate that TransGI closely approximates ray
+tracing with high visual quality. Furthremore, the efficiency
+of our method can be significantly improved considering that
+the rendering environment predominantly comprises diffuse
+materials, which require far fewer basis functions. Future
+work will focus on dynamically determining the number of
+basis functions based on each material’s transfer function to
+optimize the trade-off between quality and efficiency.
+Object Interreflection. As illustrated in Figure 14, our
+method struggles to capture bright interreflection effects between two glossy objects. Traditional precomputed radiance
+transfer (PRT) techniques [4] can model such effects by treating the entire scene as a whole and precomputing interreflected
+radiance transfer on each vertex. In contrast, our objectcentric approach handles objects independently for dynamic
+rendering, neglecting inter-object interreflected radiance transfer. However, such interreflection effects could potentially be
+compensated by using denser light probes in our method. As
+shown in the rightmost column of Figure 14, we conducted an
+experiment with an extreme condition, placing light probes for
+each pixel, which reasonably restored the interreflection effects
+as observed in the reference path-tracing image. However,
+such a dense grid of light probes would lead to unacceptable
+computational costs, hindering real-time efficiency. Therefore,
+a future research direction would be to improve the efficiency
+of light probe generation or explore more efficient strategies
+to model interreflection effects between objects within our
+framework.
+VIII. C ONCLUSIONS
+In this paper, we have presented a novel global illumination
+technique that achieves real-time and high-fidelity rendering.
+Our key innovation is an object-centric neural transfer model
+that encodes the complex, multi-layered material properties
+of objects using a compact MLP and vertex-attached latent
+features. This lightweight, highly compressed representation
+facilitates real-time rendering of intricate objects with minimal
+memory overhead. Additionally, we have introduced radiancesharing light probes to support local and dynamic illumination.
+By leveraging radiance information from neighboring probes,
+these probes increase the sample rate and quality of individual
+probes, yielding higher-fidelity results with reduced computation.
+We have implemented our method in a real-time rendering
+engine, using compute shaders and CUDA-based neural networks, demonstrating its feasibility in practice. Our approach
+achieves real-time performance while delivering significantly
+improved rendering quality compared to baseline methods. In
+summary, our work presents a practical and efficient solution
+for real-time global illumination of neural rendering with
+complex, dynamic material properties, paving the way for
+advanced real-time rendering applications.
+R EFERENCES
+[1] Z. Majercik, J.-P. Guertin, D. Nowrouzezahrai, and M. McGuire, “Dynamic diffuse global illumination with ray-traced irradiance fields,”
+Journal of Computer Graphics Techniques, vol. 8, no. 2, 2019.
+[2] T. Zeltner, F. Rousselle, A. Weidlich, P. Clarberg, J. Novák, B. Bitterli,
+A. Evans, T. Davidovič, S. Kallweit, and A. Lefohn, “Real-time neural
+appearance models,” ACM Trans. Graph., apr 2024, just Accepted.
+[Online]. Available: https://doi.org/10.1145/3659577
+[3] G. Rainer, A. Bousseau, T. Ritschel, and G. Drettakis, “Neural
+precomputed radiance transfer,” Computer Graphics Forum, vol. 41,
+no. 2, pp. 365–378, 2022. [Online]. Available: https://onlinelibrary.
+wiley.com/doi/abs/10.1111/cgf.14480
+[4] P.-P. Sloan, J. Kautz, and J. Snyder, “Precomputed radiance transfer for
+real-time rendering in dynamic, low-frequency lighting environments,”
+ACM Trans. Graph., vol. 21, no. 3, p. 527–536, jul 2002. [Online].
+Available: https://doi.org/10.1145/566654.566612
+[5] T. Müller, F. Rousselle, J. Novák, and A. Keller, “Real-time neural
+radiance caching for path tracing,” ACM Trans. Graph., vol. 40, no. 4,
+jul 2021. [Online]. Available: https://doi.org/10.1145/3450626.3459812
+[6] S. Kallweit, P. Clarberg, C. Kolb, T. Davidovič, K.-H. Yao, T. Foley,
+Y. He, L. Wu, L. Chen, T. Akenine-Möller, C. Wyman, C. Crassin,
+and N. Benty, “The falcor rendering framework,” BSD-Licensed Github
+Repository, August 2022.
+[7] T. Müller, “tiny-cuda-nn,” 4 2021. [Online]. Available: https:
+//github.com/NVlabs/tiny-cuda-nn
+[8] E. Veach and L. J. Guibas, Metropolis Light Transport, 1st ed. New
+York, NY, USA: Association for Computing Machinery, 2023. [Online].
+Available: https://doi.org/10.1145/3596711.3596744
+[9] C. Kelemen, L. Szirmay-Kalos, G. Antal, and F. Csonka, “A simple
+and robust mutation strategy for the metropolis light transport
+algorithm,” Computer Graphics Forum, vol. 21, no. 3, pp. 531–540,
+2002. [Online]. Available: https://onlinelibrary.wiley.com/doi/abs/10.
+1111/1467-8659.t01-1-00703
+[10] B. Bitterli and W. Jarosz, “Selectively metropolised monte carlo light
+transport simulation,” ACM Trans. Graph., vol. 38, no. 6, nov 2019.
+[Online]. Available: https://doi.org/10.1145/3355089.3356578
+[11] E. Veach and L. Guibas, “Bidirectional estimators for light transport,” in
+Photorealistic Rendering Techniques, G. Sakas, S. Müller, and P. Shirley,
+Eds. Berlin, Heidelberg: Springer Berlin Heidelberg, 1995, pp. 145–
+167.
+[12] J. T. Kajiya, “The rendering equation,” SIGGRAPH Comput. Graph.,
+vol. 20, no. 4, p. 143–150, aug 1986. [Online]. Available:
+https://doi.org/10.1145/15886.15902
+[13] G. Greger, P. Shirley, P. Hubbard, and D. Greenberg, “The irradiance
+volume,” IEEE Computer Graphics and Applications, vol. 18, no. 2, pp.
+32–43, 1998.
+16
+[14] M. McGuire, M. Mara, D. Nowrouzezahrai, and D. Luebke, “Realtime global illumination using precomputed light field probes,” in
+Proceedings of the 21st ACM SIGGRAPH Symposium on Interactive
+3D Graphics and Games, ser. I3D ’17. New York, NY, USA:
+Association for Computing Machinery, 2017. [Online]. Available:
+https://doi.org/10.1145/3023368.3023378
+[15] A. Silvennoinen and J. Lehtinen, “Real-time global illumination
+by precomputed local reconstruction from sparse radiance probes,”
+ACM Trans. Graph., vol. 36, no. 6, nov 2017. [Online]. Available:
+https://doi.org/10.1145/3130800.3130852
+[16] T. Ritschel, T. Grosch, and H.-P. Seidel, “Approximating dynamic
+global illumination in image space,” in Proceedings of the 2009
+Symposium on Interactive 3D Graphics and Games, ser. I3D ’09.
+New York, NY, USA: Association for Computing Machinery, 2009, p.
+75–82. [Online]. Available: https://doi.org/10.1145/1507149.1507161
+[17] G. Nichols, J. Shopf, and C. Wyman, “Hierarchical image-space
+radiosity for interactive global illumination,” Computer Graphics
+Forum, vol. 28, no. 4, pp. 1141–1149, 2009. [Online]. Available: https:
+//onlinelibrary.wiley.com/doi/abs/10.1111/j.1467-8659.2009.01491.x
+[18] R. Ng, R. Ramamoorthi, and P. Hanrahan, “All-frequency shadows
+using non-linear wavelet lighting approximation,” ACM Trans.
+Graph., vol. 22, no. 3, p. 376–381, jul 2003. [Online]. Available:
+https://doi.org/10.1145/882262.882280
+[19] X. Liu, P.-P. Sloan, H.-Y. Shum, and J. Snyder, “All-frequency precomputed radiance transfer for glossy objects,” in Proceedings of
+the Fifteenth Eurographics Conference on Rendering Techniques, ser.
+EGSR’04. Goslar, DEU: Eurographics Association, 2004, p. 337–344.
+[20] W. Sun and A. Mukherjee, “Generalized wavelet product integral
+for rendering dynamic glossy objects,” in ACM SIGGRAPH 2006
+Papers, ser. SIGGRAPH ’06. New York, NY, USA: Association
+for Computing Machinery, 2006, p. 955–966. [Online]. Available:
+https://doi.org/10.1145/1179352.1141980
+[21] R. Wang, J. Tran, and D. Luebke, “All-frequency relighting of glossy
+objects,” ACM Trans. Graph., vol. 25, no. 2, p. 293–318, apr 2006.
+[Online]. Available: https://doi.org/10.1145/1138450.1138456
+[22] R. S. Overbeck, C. Donner, and R. Ramamoorthi, “Adaptive wavelet
+rendering,” ACM Trans. Graph., vol. 28, no. 5, p. 1–12, dec 2009.
+[Online]. Available: https://doi.org/10.1145/1618452.1618486
+[23] S. Rodriguez, T. Leimkühler, S. Prakash, C. Wyman, P. Shirley,
+and G. Drettakis, “Glossy probe reprojection for interactive global
+illumination,” ACM Trans. Graph., vol. 39, no. 6, nov 2020. [Online].
+Available: https://doi.org/10.1145/3414685.3417823
+[24] S. Diolatzis, J. Philip, and G. Drettakis, “Active exploration for neural
+global illumination of variable scenes,” ACM Trans. Graph., vol. 41,
+no. 5, may 2022. [Online]. Available: https://doi.org/10.1145/3522735
+[25] L.-Q. Yan, W. Sun, H. W. Jensen, and R. Ramamoorthi, “A
+bssrdf model for efficient rendering of fur with global illumination,”
+ACM Trans. Graph., vol. 36, no. 6, nov 2017. [Online]. Available:
+https://doi.org/10.1145/3130800.3130802
+[26] J. Thies, M. Zollhöfer, and M. Nießner, “Deferred neural rendering:
+image synthesis using neural textures,” ACM Trans. Graph., vol. 38,
+no. 4, jul 2019. [Online]. Available: https://doi.org/10.1145/3306346.
+3323035
+[27] G. Rainer, W. Jakob, A. Ghosh, and T. Weyrich, “Neural btf
+compression and interpolation,” Computer Graphics Forum, vol. 38,
+no. 2, pp. 235–244, 2019. [Online]. Available: https://onlinelibrary.
+wiley.com/doi/abs/10.1111/cgf.13633
+[28] J. Fan, B. Wang, M. Hasan, J. Yang, and L.-Q. Yan, “Neural biplane
+representation for btf rendering and acquisition,” in ACM SIGGRAPH
+2023 Conference Proceedings, ser. SIGGRAPH ’23. New York, NY,
+USA: Association for Computing Machinery, 2023. [Online]. Available:
+https://doi.org/10.1145/3588432.3591505
+[29] K. Rematas, T. Ritschel, M. Fritz, E. Gavves, and T. Tuytelaars, “Deep
+reflectance maps,” in 2016 IEEE Conference on Computer Vision and
+Pattern Recognition (CVPR), 2016, pp. 4508–4516.
+[30] M. Maximov, T. Ritschel, L. Leal-Taixé, and M. Fritz, “Deep appearance
+maps,” in 2019 IEEE/CVF International Conference on Computer Vision
+(ICCV), 2019, pp. 8728–8737.
+[31] A. Kuznetsov, M. Hašan, Z. Xu, L.-Q. Yan, B. Walter, N. K. Kalantari,
+S. Marschner, and R. Ramamoorthi, “Learning generative models for
+rendering specular microgeometry,” ACM Trans. Graph., vol. 38, no. 6,
+nov 2019. [Online]. Available: https://doi.org/10.1145/3355089.3356525
+[32] A. Kuznetsov, K. Mullia, Z. Xu, M. Hašan, and R. Ramamoorthi,
+“Neumip: multi-resolution neural materials,” ACM Trans. Graph.,
+vol. 40, no. 4, jul 2021. [Online]. Available: https://doi.org/10.1145/
+3450626.3459795
+[33] J. Fan, B. Wang, M. Hasan, J. Yang, and L.-Q. Yan, “Neural
+layered brdfs,” in ACM SIGGRAPH 2022 Conference Proceedings, ser.
+SIGGRAPH ’22. New York, NY, USA: Association for Computing
+Machinery, 2022. [Online]. Available: https://doi.org/10.1145/3528233.
+3530732
+[34] J. Guo, Z. Li, X. He, B. Wang, W. Li, Y. Guo, and L.-Q.
+Yan, “Metalayer: A meta-learned bsdf model for layered materials,”
+ACM Trans. Graph., vol. 42, no. 6, dec 2023. [Online]. Available:
+https://doi.org/10.1145/3618365
+[35] B. Burley and W. D. A. Studios, “Physically-based shading at disney,”
+in Acm Siggraph, vol. 2012. vol. 2012, 2012, pp. 1–7.
+[36] S. Datta, N. Goli, and J. Zhang, “Adaptive dynamic global illumination,”
+2023. [Online]. Available: https://arxiv.org/abs/2301.05125
+[37] M. Schütz, B. Kerbl, and M. Wimmer, “Rendering point clouds with
+compute shaders and vertex order optimization,” Computer Graphics
+Forum, vol. 40, no. 4, pp. 115–126, 2021. [Online]. Available:
+https://onlinelibrary.wiley.com/doi/abs/10.1111/cgf.14345
+[38] M. Schütz, B. Kerbl, and M. Wimmer, “Software rasterization
+of 2 billion points in real time,” Proc. ACM Comput. Graph.
+Interact. Tech., vol. 5, no. 3, jul 2022. [Online]. Available:
+https://doi.org/10.1145/3543863
+[39] B. Bitterli, “Rendering resources,” 2016, https://benediktbitterli.me/resources/.
+[40] NVIDIA. (2024) NVIDIA® RTXGI. [Online]. Available: https:
+//github.com/NVIDIAGameWorks/RTXGI
+IX. B IOGRAPHY S ECTION
+Yijie Deng is currently a PhD candidate student in
+New York University. He received Master’s degree
+in Tsinghua-Berkeley Shenzhen Institute (TBSI),
+Tsinghua University in 2024. He received B.E. from
+Wuhan University in 2021. His research interest is
+3D vision, Graphics and Robotics.
+Lei Han is currently a researcher in Linx Lab of
+HiSilicon (subsidiary of Huawei Technologies). He
+studied Electrical Engineering at the Hong Kong
+University of Science and Technology and Tsinghua
+University. He received the B.S. degree in July 2013
+and joined the Department of Electrical Computing
+Engineering at the Hong Kong University of Science
+and Technology in September 2016, where he is pursuing the PhD degree. His current research focuses
+on multi-view geometry and 3D computer vision.
+Lu Fang is currently an Associate Professor in Tsinghua University. She received Ph.D from the Hong
+Kong Univ. of Science and Technology in 2011,
+and B.E. from Univ. of Science and Technology
+of China in 2007. Her research interests include
+computational imaging and visual intelligence. Dr.
+Fang is currently IEEE Senior Member, Associate
+Editor of IEEE TIP and TMM.

@@ -1,0 +1,207 @@
+# MLLM-Guided Transfer Function Optimization
+
+Also called: IntuiTF
+
+## Overview
+MLLM-Guided Transfer Function Optimization (IntuiTF) is an evolutionary optimization method that uses a Multimodal Large Language Model (MLLM) as a perceptual evaluator to guide the search for optimal transfer functions in direct volume rendering [S1, unofficial]. It solves the problem of subjective and computationally expensive human-in-the-loop optimization by converting qualitative user intents (text or reference images) and formal quality metrics into quantitative fitness scores via pairwise comparisons [S1, unofficial]. Unlike gradient-based or purely metric-driven methods, IntuiTF relies on a Swiss-system tournament to rank transfer functions, allowing it to handle complex aesthetic and semantic criteria that are difficult to define analytically [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+1.  **Population:** A set of candidate transfer functions, typically represented as a collection of Gaussian components [S1, unofficial].
+2.  **User Intent:** Expressed via natural language text or reference images [S1, unofficial].
+3.  **Evaluation Aspects:** Five criteria used by the MLLM:
+    *   Information richness (visible features, suppressed noise) [S1, unofficial].
+    *   Feature discrimination (extraction of different structural features) [S1, unofficial].
+    *   Color harmony (aesthetic preferences) [S1, unofficial].
+    *   Text intent alignment (textual consistency) [S1, unofficial].
+    *   Visual intent alignment (color/structural style matching against reference images) [S1, unofficial].
+
+**Outputs:**
+1.  **Optimized Transfer Function:** The transfer function with the highest fitness score after convergence [S1, unofficial].
+2.  **Fitness Scores:** Quantitative values derived from Elo ratings to drive evolutionary selection [S1, unofficial].
+
+### Data Structures
+*   **Transfer Function Representation:** Defined by Gaussian components. Each component has parameters including position ($\mu_i$) and other shape parameters [S1, unofficial].
+*   **Elo Rating:** A scalar value $\sigma_i \in \mathbb{R}$ for each transfer function $i$, initialized to 1600 [S1, unofficial].
+*   **Rank:** An integer derived from sorting transfer functions by their Elo scores [S1, unofficial].
+
+### Algorithm Steps
+
+1.  **Initialization:**
+    *   Initialize the population of transfer functions.
+    *   Set initial Elo scores $\sigma_i = 1600$ for all $i$ [S1, unofficial].
+    *   Set evolutionary parameters: crossover and mutation rates [S1, unofficial].
+
+2.  **Pairwise Comparison (Swiss-System Tournament):**
+    *   Conduct $\lceil \log_2(n) \rceil + 2$ rounds, where $n$ is the population size [S1, unofficial].
+    *   In each round, pair transfer functions with similar Elo ratings, avoiding repeated matchups [S1, unofficial].
+    *   For each pair $(i, j)$:
+        a.  Render volume images using transfer functions $i$ and $j$ [S1, unofficial].
+        b.  Input the image pair, evaluation aspects, and user intent to the MLLM evaluator [S1, unofficial].
+        c.  Obtain user/MLLM decision: 1. Left ($i$) is better; 2. Right ($j$) is better; 3. Cannot decide [S1, unofficial].
+        d.  Determine actual outcome $S$: $S=1$ if $i$ wins, $S=0$ if $i$ loses [S1, unofficial].
+
+3.  **Elo Rating Update:**
+    *   Calculate expected outcome $E$ (probability $i$ is better than $j$):
+        $$ E = \left(1 + 10^{(\sigma_j - \sigma_i)/400}\right)^{-1} $$
+        where $\sigma_i$ and $\sigma_j$ are the Elo scores of transfer functions $i$ and $j$ [S1, unofficial].
+    *   Calculate rating adjustment $\Delta$:
+        $$ \Delta = K \cdot (S - E) $$
+        where $K = 32$ is the rating adjustment factor [S1, unofficial].
+    *   Update scores:
+        $$ \sigma_i \leftarrow \sigma_i + \Delta $$
+        $$ \sigma_j \leftarrow \sigma_j - \Delta $$
+        [S1, unofficial].
+
+4.  **Fitness Score Conversion:**
+    *   Rank transfer functions based on current Elo scores [S1, unofficial].
+    *   Calculate dynamic selection pressure:
+        $$ \text{progress} = \min(1.0, \text{current\_gen} / \text{max\_gen}) $$
+        $$ \text{current\_pressure} = \text{min\_pressure} + (\text{max\_pressure} - \text{min\_pressure}) \cdot (\text{progress})^k $$
+        where $\text{min\_pressure} = 1.2$, $\text{max\_pressure} = 4.0$, and $k = 2.0$ [S1, unofficial].
+    *   Calculate fitness for transfer function with rank $r$ (1 being best):
+        $$ \text{fitness} = (n - r + 1)^{\text{current\_pressure}} $$
+        where $n$ is population size [S1, unofficial].
+
+5.  **Evolutionary Selection and Variation:**
+    *   Select parents for the next generation using roulette wheel selection based on fitness scores [S1, unofficial].
+    *   Apply crossover and mutation operators [S1, unofficial].
+    *   Adjust mutation rates based on the current interaction stage (see Operating characteristics) [S1, unofficial].
+
+6.  **Iteration:**
+    *   Repeat steps 2-5 until convergence or max generations reached [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mllm_optimization(population_size, max_gen, user_intent, evaluation_aspects):
+    # Initialize transfer functions and Elo scores
+    tf_list = initialize_transfer_functions(population_size)
+    elo_scores = [1600.0] * population_size
+    
+    min_pressure = 1.2
+    max_pressure = 4.0
+    k = 2.0
+    K = 32
+    
+    for gen in range(max_gen):
+        # Determine stage-specific parameters
+        stage = get_stage(gen, max_gen)
+        crossover_rate, mutation_rate = get_rates(stage)
+        
+        # Swiss-System Tournament
+        rounds = ceil(log2(population_size)) + 2
+        for round_num in range(rounds):
+            pairs = create_swiss_pairs(tf_list, elo_scores, round_num)
+            
+            for i, j in pairs:
+                # Render images
+                img_i = render_volume(tf_list[i])
+                img_j = render_volume(tf_list[j])
+                
+                # MLLM Evaluation
+                decision = mllm_evaluate(
+                    img_pair=(img_i, img_j),
+                    aspects=evaluation_aspects,
+                    intent=user_intent
+                )
+                
+                # Determine outcome S for i
+                if decision == "Left is better":
+                    S = 1
+                elif decision == "Right is better":
+                    S = 0
+                else:
+                    # Handle "Cannot decide" - typically no change or draw
+                    S = 0.5 
+                
+                # Calculate Elo Update
+                sigma_i = elo_scores[i]
+                sigma_j = elo_scores[j]
+                E = (1 + 10 ** ((sigma_j - sigma_i) / 400)) ** -1
+                delta = K * (S - E)
+                
+                elo_scores[i] += delta
+                elo_scores[j] -= delta
+        
+        # Convert Elo to Fitness
+        sorted_indices = argsort(elo_scores, descending=True)
+        ranks = [0] * population_size
+        for rank, idx in enumerate(sorted_indices):
+            ranks[idx] = rank + 1
+            
+        progress = min(1.0, gen / max_gen)
+        current_pressure = min_pressure + (max_pressure - min_pressure) * (progress ** k)
+        
+        fitness_scores = []
+        for idx in range(population_size):
+            r = ranks[idx]
+            fitness = (population_size - r + 1) ** current_pressure
+            fitness_scores.append(fitness)
+            
+        # Evolutionary Step
+        new_population = []
+        parents = select_parents(tf_list, fitness_scores)
+        
+        for parent in parents:
+            child = mutate(parent, mutation_rate, stage)
+            new_population.append(child)
+            
+        tf_list = new_population
+        
+    return tf_list[argmax(elo_scores)]
+```
+
+### Edge Cases and Pitfalls
+*   **MLLM Ambiguity:** The "Cannot decide" outcome requires handling. The pseudocode assumes a draw ($S=0.5$), but sources do not specify the exact handling. Implementers must define this behavior [S1, unofficial].
+*   **Feature Freezing:** In the Refinement stage, only Gaussian components of selected features evolve. If no features are selected or the selection logic fails, the optimization may stall [S1, unofficial].
+*   **Precision:** Elo ratings are real numbers. Standard floating-point precision is sufficient, but accumulation of small $\Delta$ values over many rounds should be monitored for stability [S1, unofficial].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time Complexity:** Dominated by volume rendering and MLLM inference. Each generation requires $\lceil \log_2(n) \rceil + 2$ rounds of pairwise comparisons. Each comparison involves rendering two images and an MLLM call. Total MLLM calls per generation: $O(n \log n)$ [S1, unofficial].
+*   **Memory Complexity:** $O(n)$ to store transfer functions and Elo scores. Rendering memory depends on volume resolution and image size [S1, unofficial].
+
+### Measured Performance
+*   Not given in the sources.
+
+### Strengths and Limitations
+*   **Strengths:**
+    *   Aligns with human perceptual preferences and aesthetic criteria (color harmony, information richness) [S1, unofficial].
+    *   Supports multi-modal user intent (text and images) [S1, unofficial].
+    *   Dynamic selection pressure adapts to optimization stage, balancing exploration and exploitation [S1, unofficial].
+*   **Limitations:**
+    *   Computationally expensive due to MLLM inference and rendering [S1, unofficial].
+    *   Relies on the quality and consistency of the MLLM evaluator [S1, unofficial].
+    *   "Cannot decide" outcomes may slow convergence if frequent [S1, unofficial].
+
+### When to Use
+*   Use when user intent is subjective, aesthetic, or difficult to quantify with formal metrics [S1, unofficial].
+*   Use when text or reference images are available to guide the search [S1, unofficial].
+
+### When Not to Use
+*   Use when real-time performance is critical and MLLM latency is unacceptable [S1, unofficial].
+*   Use when user intent is strictly quantitative and can be defined by a differentiable loss function [S1, unofficial].
+
+## Background
+
+### Origin
+*   The method was introduced in the paper "IntuiTF: MLLM-Guided Transfer Function Optimization for Direct Volume Rendering" [S1, unofficial].
+*   It integrates concepts from evolutionary algorithms, Elo rating systems (commonly used in chess and generative model evaluation), and Multimodal Large Language Models [S1, unofficial].
+
+### History and Development
+*   The system supports a three-stage interaction: Exploration, Customization, and Refinement [S1, unofficial].
+*   It builds on previous works in transfer function evaluation that identified formal quality aspects like information richness and feature discrimination [S1, unofficial].
+
+### Where it is Used
+*   Direct volume rendering systems requiring intuitive, intent-driven transfer function design [S1, unofficial].
+*   Visualization applications where aesthetic quality and semantic alignment are prioritized over raw computational efficiency [S1, unofficial].
+
+## Sources
+
+[S1] IntuiTF: MLLM-Guided Transfer Function Optimization for Direct Volume Rendering, https://arxiv.org/abs/2506.18407v2, fetched 2026-10-26 (unofficial)

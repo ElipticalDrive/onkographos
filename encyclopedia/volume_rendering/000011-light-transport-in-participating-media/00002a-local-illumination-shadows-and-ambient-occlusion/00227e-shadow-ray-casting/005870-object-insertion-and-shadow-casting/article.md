@@ -1,0 +1,127 @@
+# Object Insertion and Shadow Casting
+
+Also called: Object Insertion, Object Insertion and Shadow Casting in UrbanIR, UrbanIR Object Insertion
+
+## Overview
+Object Insertion and Shadow Casting is a hybrid rendering strategy for integrating virtual 3D objects into pre-existing volume-rendered scenes (such as those reconstructed from single videos). It solves the problem of visual inconsistency by ensuring that inserted objects both cast shadows onto the scene and receive shadows from the scene, while remaining consistent with the existing volume's depth and lighting. It is distinguished from sibling methods by being explicitly **visibility-aware**, allowing it to correctly render objects that enter existing shadows, a feature not present in earlier similar approaches [S1].
+
+## How it works
+The method operates in two main phases: the insertion pass (camera ray casting) and the shadow pass (light ray casting). It assumes a pre-existing volume representation (e.g., NeRF) and a mesh representation of the inserted object.
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Camera ray $r$ (origin and direction).
+    *   Volume rendering depth $D_{vol}(r)$ (the depth at which the volume terminates or is sampled).
+    *   Inserted object mesh $M$.
+    *   Light source direction $\mathbf{l}$ and position (for shadow calculation).
+    *   Volume albedo $A_{vol}$, normal $N_{vol}$, and depth $D_{vol}$ fields.
+*   **Outputs:**
+    *   Updated albedo $A(r)$, normal $N(r)$, depth $D(r)$, and visibility $V(r)$ for the final pixel.
+
+### Data Structures
+*   **Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
+*   **Mesh Intersection:** Returns hit point $\mathbf{p}$, distance $t$, normal $\mathbf{n}$, and albedo $\mathbf{c}$.
+*   **Volume Sampler:** Provides $A_{vol}(\mathbf{x})$, $N_{vol}(\mathbf{x})$, and $D_{vol}$ for any point $\mathbf{x}$.
+
+### Steps
+1.  **Camera Ray Casting (Insertion Pass):**
+    *   Cast a ray $r$ from the camera through the pixel.
+    *   Estimate the intersection between ray $r$ and the inserted object mesh $M$. Let the intersection distance be $t_{obj}$ and the hit point be $\mathbf{p}_{obj}$ [S1].
+    *   Retrieve the volume rendering depth $D_{vol}(r)$ for the same ray [S1].
+    *   **Condition:** If the ray hits the mesh ($t_{obj}$ exists) AND $t_{obj} < D_{vol}(r)$:
+        *   Replace the volume attributes with object attributes:
+            $$ A(r) = A_{obj}(\mathbf{p}_{obj}) $$
+            $$ N(r) = N_{obj}(\mathbf{p}_{obj}) $$
+            $$ D(r) = t_{obj} $$
+        *   Otherwise, retain the volume attributes $A_{vol}(r)$, $N_{vol}(r)$, and $D_{vol}(r)$ [S1].
+
+2.  **Shadow Pass (Visibility Calculation):**
+    *   For the point $\mathbf{p}$ (either the object hit point $\mathbf{p}_{obj}$ if inserted, or the volume surface point if not), cast a shadow ray towards the light source with direction $\mathbf{l}$ [S1].
+    *   Estimate the intersection between the shadow ray and the inserted object mesh $M$ [S1].
+    *   **Condition:** If the shadow ray hits the mesh (occlusion by the object):
+        *   Update visibility: $V(r) = 0$ [S1].
+    *   If the shadow ray does not hit the mesh, visibility is determined by the volume transmittance (as per parent [Shadow Ray Casting](2796-shadow-ray-casting.md) principles) [S1]. Note: The source explicitly states $V(r)=0$ on mesh hit, implying binary occlusion for the object itself in this specific step [S1].
+
+3.  **Shading and Rendering:**
+    *   Apply shading using the updated attributes $A(r)$, $N(r)$, and visibility $V(r)$ [S1].
+    *   The final color incorporates the light source intensity modulated by $V(r)$ and the surface albedo/normal [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def insert_object_and_cast_shadow(camera_ray, volume_sampler, object_mesh, light_source):
+    """
+    Implements Object Insertion and Shadow Casting.
+    camera_ray: Ray object with origin and direction.
+    volume_sampler: Object providing get_depth(ray), get_albedo(point), get_normal(point).
+    object_mesh: Object providing intersect(ray) -> (hit_point, distance, normal, albedo) or None.
+    light_source: Object providing direction and position.
+    """
+    
+    # Step 1: Camera Ray Casting
+    # Estimate ray-mesh intersection for the inserted object [S1]
+    obj_hit = object_mesh.intersect(camera_ray)
+    
+    # Get volume depth for the ray [S1]
+    vol_depth = volume_sampler.get_depth(camera_ray)
+    
+    # Determine if object is in front of volume [S1]
+    if obj_hit is not None and obj_hit.distance < vol_depth:
+        # Replace volume attributes with object attributes [S1]
+        final_albedo = obj_hit.albedo
+        final_normal = obj_hit.normal
+        final_depth = obj_hit.distance
+        hit_point = obj_hit.point
+        is_object = True
+    else:
+        # Retain volume attributes [S1]
+        final_albedo = volume_sampler.get_albedo(camera_ray.origin + camera_ray.direction * vol_depth)
+        final_normal = volume_sampler.get_normal(camera_ray.origin + camera_ray.direction * vol_depth)
+        final_depth = vol_depth
+        hit_point = camera_ray.origin + camera_ray.direction * vol_depth
+        is_object = False
+
+    # Step 2: Shadow Pass
+    # Calculate visibility from surface point to light source [S1]
+    # Cast shadow ray from hit_point towards light [G]
+    shadow_direction = light_source.direction
+    shadow_ray = Ray(origin=hit_point, direction=shadow_direction)
+    
+    # Estimate ray-mesh intersection for tracing rays [S1]
+    shadow_hit = object_mesh.intersect(shadow_ray)
+    
+    # If rays hit the mesh (occlusion by the object), update visibility V(r) = 0 [S1]
+    if shadow_hit is not None:
+        visibility = 0.0
+    else:
+        # If not occluded by object, visibility depends on volume transmittance
+        # This part relies on the parent method's transmittance calculation [G]
+        # Assuming standard volume shadowing for non-object occlusion
+        visibility = compute_volume_transmittance(shadow_ray, volume_sampler)
+
+    # Step 3: Shading
+    # Apply shading using updated A(r), N(r), V(r) [S1]
+    # Simple diffuse shading model [G]
+    light_intensity = light_source.intensity
+    diffuse_factor = max(0, dot(final_normal, shadow_direction))
+    final_color = final_albedo * light_intensity * visibility * diffuse_factor
+    
+    return final_color, final_albedo, final_normal, final_depth, visibility
+```
+
+### Parameters and Edge Cases
+*   **Depth Comparison:** The condition $t_{obj} < D_{vol}(r)$ is critical. If the object is behind the volume, it is not inserted [S1].
+*   **Precision:** Ray-mesh intersection accuracy affects the correctness of the insertion boundary [S1].
+*   **Visibility Awareness:** Unlike other methods, this approach checks if the *object itself* is in shadow by testing occlusion against the object mesh in the shadow pass, ensuring realistic self-shadowing and interaction with scene shadows [S1].
+
+## Operating characteristics
+*   **Complexity:** The method adds a constant number of ray-mesh intersections per pixel (one for insertion, one for shadowing) to the existing volume rendering cost.
+*   **Strengths:** It provides high-fidelity integration of virtual objects by handling both object-to-scene and scene-to-object shadows [S1]. It is visibility-aware, handling cases where objects enter existing shadows [S1].
+*   **Limitations:** It requires a mesh representation of the inserted object and accurate depth information from the volume [S1]. Performance depends on the efficiency of the ray-mesh intersection algorithm [S1].
+
+## Background
+The method was introduced in **UrbanIR** (Large-Scale Urban Scene Inverse Rendering from a Single Video) [S1]. It addresses the limitations of previous object insertion techniques by ensuring that inserted objects interact realistically with the lighting and shadows of the reconstructed urban scene [S1]. It is specifically designed for inverse rendering pipelines where scene geometry and lighting are estimated from video data [S1].
+
+## Sources
+[S1] UrbanIR: Large-Scale Urban Scene Inverse Rendering from a Single Video, https://doi.org/10.1109/3dv66043.2025.00052, fetched 2026-10-30

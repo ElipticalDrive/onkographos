@@ -1,0 +1,104 @@
+# General Ray-Triangle Intersection (Plücker Coordinates)
+Also called: Triangle Ray Intersection, rayIntersectsTriangle
+## Overview
+This method determines if a ray intersects a triangle in 3D space using Plücker coordinates to handle arbitrary ray directions [S1, unofficial]. It solves the ray-primitive intersection problem by combining a front-face culling test based on the ray-triangle normal dot product with a winding-order consistency check derived from edge Plücker coordinates [S1, unofficial].
+## How it works
+**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, triangle vertices $\mathbf{a}, \mathbf{b}, \mathbf{c}$ [S1, unofficial].
+**Outputs:** Boolean indicating intersection [S1, unofficial].
+
+**Data Structures:**
+*   `vec3f`: 3D vector type with components `x, y, z` [S1, unofficial].
+*   `float`: 32-bit floating point number [S1, unofficial].
+
+**Steps:**
+1.  **Normal Calculation:** Compute the triangle normal $\mathbf{n}$ [S1, unofficial].
+2.  **Front-Face Culling:** Calculate the dot product between the normal and the ray direction:
+    $$ \cos ND = \mathbf{n} \cdot \mathbf{d} $$
+    If $\cos ND == 0$, return false [S1, unofficial]. This ignores the case where the ray lies in the triangle's plane [S1, unofficial].
+3.  **Intersection Parameter:** If the intersection distance $t$ is required, calculate it:
+    $$ t = \frac{-\mathbf{n} \cdot (\mathbf{o} - \mathbf{a})}{\cos ND} $$
+    [S1, unofficial].
+4.  **Coordinate Translation:** Translate the triangle vertices to the ray origin space:
+    $$ \mathbf{a} = \mathbf{a} - \mathbf{o} $$
+    $$ \mathbf{b} = \mathbf{b} - \mathbf{o} $$
+    $$ \mathbf{c} = \mathbf{c} - \mathbf{o} $$
+    [S1, unofficial].
+5.  **Plücker Coordinate Calculation:** Compute the Plücker coordinates for the three edges of the triangle relative to the ray direction [S1, unofficial]. The Plücker coordinate function is defined as:
+    $$ \text{pluecker}(\mathbf{a}_0, \mathbf{a}_1, \mathbf{b}_0, \mathbf{b}_1) = \mathbf{a}_1 \cdot (\mathbf{b}_1 \times \mathbf{b}_0) + \mathbf{b}_1 \cdot (\mathbf{a}_1 \times \mathbf{a}_0) $$
+    [S1, unofficial]. Apply this to the edges:
+    $$ s_x = \text{pluecker}(\mathbf{0}, \mathbf{d}, \mathbf{a}, \mathbf{b}) $$
+    $$ s_y = \text{pluecker}(\mathbf{0}, \mathbf{d}, \mathbf{b}, \mathbf{c}) $$
+    $$ s_z = \text{pluecker}(\mathbf{0}, \mathbf{d}, \mathbf{c}, \mathbf{a}) $$
+    [S1, unofficial].
+6.  **Winding Order Check:** Determine intersection based on the signs of $s_x, s_y, s_z$ [S1, unofficial].
+    *   If $\min(s_x, s_y, s_z) \ge 0$ or $\max(s_x, s_y, s_z) \le 0$, return true (intersection) [S1, unofficial].
+    *   Otherwise, return false [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_triangle_intersection_plucker(ray_origin, ray_dir, tri_a, tri_b, tri_c):
+    # 1. Calculate normal
+    edge1 = tri_b - tri_a
+    edge2 = tri_c - tri_a
+    normal = cross(edge1, edge2)
+    
+    # 2. Front-face culling
+    cos_nd = dot(normal, ray_dir)
+    if cos_nd == 0.0:
+        return False
+    
+    # 3. Calculate t
+    t = -dot(ray_origin - tri_a, normal) / cos_nd
+    
+    # 4. Translate vertices to ray origin space
+    a = tri_a - ray_origin
+    b = tri_b - ray_origin
+    c = tri_c - ray_origin
+    
+    # 5. Compute Plücker coordinates
+    def pluecker(a0, a1, b0, b1):
+        return dot(a1 - a0, cross(b1, b0)) + dot(b1 - b0, cross(a1, a0))
+    
+    sx = pluecker(vec3f(0.0), ray_dir, a, b)
+    sy = pluecker(vec3f(0.0), ray_dir, b, c)
+    sz = pluecker(vec3f(0.0), ray_dir, c, a)
+    
+    # 6. Check winding order
+    if min(sx, sy, sz) >= 0.0 or max(sx, sy, sz) <= 0.0:
+        return True
+    else:
+        return False
+```
+
+**Parameters:**
+*   `cos_nd` threshold: Strictly `0.0` check [S1, unofficial].
+
+**Edge Cases:**
+*   **Ray in Plane:** If $\cos ND == 0$, the method returns false, ignoring the possibility of the ray lying in the triangle's plane [S1, unofficial].
+*   **Degenerate Triangles:** If the triangle area is zero, the normal is zero, leading to division by zero or undefined behavior [G].
+*   **Precision:** Floating point precision issues may arise near the edges of the triangle [G].
+
+## Subtopics
+
+### [Axis-Aligned Ray-Triangle Intersection (Plücker Coordinates)](911-axis-aligned-ray-triangle-intersection-pl-cker-coordinates.md)
+An algorithm to determine if a ray intersects a triangle, optimized for axis-aligned rays using Plücker coordinates to simplify cross products.
+
+### [Möller-Trumbore Ray-Triangle Intersection](1274-m-ller-trumbore-ray-triangle-intersection.md)
+The Möller-Trumbore algorithm computes the intersection of a ray with a triangle by solving for the parametric distance $t$ and barycentric coordinates $(u, v)$ directly, avoiding the explicit calculation of the triangle's plane equation. It sets itself apart from general analytic methods by using Cramer's rule to derive these parameters in a single step, which minimizes storage requirements and computational overhead. Unlike the Plücker method, which relies on Plücker coordinates to handle arbitrary ray directions with a different algebraic structure, Möller-Trumbore operates directly in Cartesian space using cross and dot products.
+
+## Operating characteristics
+**Time Complexity:** $O(1)$ per triangle [G].
+**Memory Complexity:** $O(1)$ auxiliary space [G].
+**Performance:** The method is efficient for general rays [S1, unofficial].
+**Strengths:** Handles arbitrary ray directions [S1, unofficial].
+**Limitations:** Does not handle rays lying in the triangle's plane [S1, unofficial].
+**When to use:** When intersecting general rays against triangles and only the boolean intersection result is needed [S1, unofficial].
+
+## Background
+The method is described in the context of general ray-triangle intersection using Plücker coordinates [S1, unofficial]. Plücker coordinates are a representation of lines in projective geometry, often used in computer graphics for efficient line-line and line-plane intersection tests [G].
+
+## Sources
+[S1] GuangyanCai/isoext, https://github.com/GuangyanCai/isoext, fetched 2026-10-27 (unofficial)
+[S2] facebookresearch/NSVF, https://github.com/facebookresearch/NSVF, fetched 2026-10-27 (unofficial)

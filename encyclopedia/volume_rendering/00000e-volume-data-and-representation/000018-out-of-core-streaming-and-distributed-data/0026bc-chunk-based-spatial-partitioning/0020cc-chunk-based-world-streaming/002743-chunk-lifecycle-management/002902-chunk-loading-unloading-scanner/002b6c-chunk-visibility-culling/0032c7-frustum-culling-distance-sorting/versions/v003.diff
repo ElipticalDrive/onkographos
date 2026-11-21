@@ -1,0 +1,141 @@
+--- v002.md
++++ v003.md
+@@ -4,69 +4,58 @@
+ 
+ ## Overview
+-This method filters visible chunks and sorts them by distance for rendering order [S1, unofficial]. It builds on [Chunk Visibility Culling](5031-chunk-visibility-culling.md) by adding a distance-based sort to the visible set, ensuring correct depth ordering for transparent or blended rendering passes [G]. It differs from [Octree Frustum Culling & LOD Selection](5771-octree-frustum-culling-lod-selection.md) by operating on flat chunk lists rather than hierarchical tree traversal, and from [Out-of-Core Frustum Clipping](6688-out-of-core-frustum-clipping.md) by not performing geometric clipping of chunk geometry, only visibility culling [G].
++This method filters visible chunks and sorts them by distance for rendering order [S1, unofficial]. It determines which chunks intersect the view frustum and orders them to support depth-sorted compositing or nearest-first data streaming [S1, S2, unofficial]. It differs from [Octree Frustum Culling & LOD Selection](5771-octree-frustum-culling-lod-selection.md) by operating on a flat list of chunks rather than a hierarchical tree, and from [Out-of-Core Frustum Clipping](6688-out-of-core-frustum-clipping.md) by focusing on discrete chunk visibility and sorting rather than continuous geometric clipping [S1, S2, unofficial].
+ 
+ ## How it works
+-**Inputs:** Camera view and projection matrices; list of active chunks; camera world position [G].
+-**Outputs:** Sorted list of visible chunks [S1, unofficial].
++**Inputs:** Camera view and projection matrices; list of active chunks with world positions; camera position.
++**Outputs:** Sorted list of visible chunks.
+ 
+ **Data Structures:**
+-*   `Chunk`: Contains world position fields `GetXWorldPos()` and `GetZWorldPos()` returning floating-point coordinates [S1, unofficial].
+-*   `Frustum`: Constructed from view and projection matrices. Provides method `IsChunkInFrustum(wx, wz)` which checks if a chunk's horizontal bounds intersect the frustum [S1, unofficial].
+-*   `m_LastCamChunkPos`: Tracks the camera's chunk position to avoid unnecessary sorting [S1, unofficial].
++- `Chunk`: Contains world position fields `GetXWorldPos()` and `GetZWorldPos()` [S1, unofficial].
++- `Frustum`: Constructed from view and projection matrices [S1, unofficial].
++- `m_LastCamChunkPos`: Tracks the camera's current chunk position to avoid unnecessary sorting [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Frustum Construction:** Create the view frustum from the current camera view and projection matrices [S1, unofficial].
+-2.  **Camera Chunk Tracking:** Compute the current camera chunk position [S1, unofficial].
+-3.  **Change Detection:** If the camera chunk position has changed since the last frame (compared against `m_LastCamChunkPos`), proceed to rebuild the ordered list [S1, unofficial].
+-4.  **Visibility Filtering:** Iterate through all chunks. For each chunk, check if it is ready (`IsMeshReady()`) and if it intersects the frustum using `frustum.IsChunkInFrustum(wx, wz)` [S1, unofficial]. Add visible chunks to a temporary list.
+-5.  **Distance Sorting:** Sort the visible chunks by distance from the camera. The sort uses a comparator that calculates squared distances in the XZ plane [S1, unofficial].
++1. **Construct Frustum:** Create the view frustum from the current projection and view matrices [S1, unofficial].
++2. **Check Chunk Change:** Compute the camera's current chunk position. If `m_LastCamChunkPos` differs from the current position, proceed to rebuild the ordered list; otherwise, skip sorting [S1, unofficial].
++3. **Filter Visible Chunks:** Iterate through all chunks. For each chunk, check if it is ready (`IsMeshReady()`) and if it intersects the frustum (`frustum.IsChunkInFrustum(wx, wz)`) [S1, unofficial].
++4. **Sort Chunks:** Sort the visible chunks using a distance comparison [S1, unofficial]. The sorting logic uses squared Euclidean distance in the XZ plane [S1, unofficial]:
++   - Calculate squared distance for chunk A: $d_A = \text{glm::vec2}(a \to \text{GetXWorldPos}(), a \to \text{GetZWorldPos}()) - \text{CamPos}$, then $\text{distSq}_A = \text{glm::dot}(d_A, d_A)$ [S1, unofficial].
++   - Calculate squared distance for chunk B: $d_B = \text{glm::vec2}(b \to \text{GetXWorldPos}(), b \to \text{GetZWorldPos}()) - \text{CamPos}$, then $\text{distSq}_B = \text{glm::dot}(d_B, d_B)$ [S1, unofficial].
++   - Compare: Return true if $\text{distSq}_A > \text{distSq}_B$ to sort in descending order (farthest first) [S1, unofficial].
+ 
+-**Distance Calculation Formula:**
+-For a chunk $A$ with world position $(x_A, z_A)$ and camera position $(x_C, z_C)$:
+-$$ distSq_A = (x_A - x_C)^2 + (z_A - z_C)^2 $$
+-The comparator returns `true` if $distSq_A > distSq_B$, resulting in a descending sort order (farthest first) [S1, unofficial].
+-
+-**Parameters:**
+-*   `m_LastCamChunkPos`: The previous camera chunk position [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **2D Distance:** The sorting uses only X and Z coordinates, ignoring Y. This assumes chunks are sorted on the horizontal plane [S1, unofficial].
+-*   **Precision:** Using squared distance avoids precision issues with square roots but may lead to ties for chunks at the same horizontal distance [G].
++**Pitfalls:**
++- **2D Distance:** The sorting uses only X and Z coordinates, ignoring Y. This assumes chunks are sorted on the horizontal plane [S1, unofficial].
++- **Precision:** Using squared distance avoids square root computation but requires consistent coordinate scaling [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def UpdateChunkVisibility(view_matrix, proj_matrix, camera_world_pos, chunks, last_cam_chunk_pos, chunk_size=16):
+-    # Step 1: Create frustum from projection and view matrices
+-    frustum = ExtractFrustumPlanes(view_matrix, proj_matrix)
+-
+-    # Step 2: Compute camera chunk position
+-    current_cam_chunk_pos = (int(camera_world_pos.x / chunk_size), int(camera_world_pos.z / chunk_size))
+-
+-    # Step 3: If camera chunk changed, rebuild ordered list
++def update_chunk_visibility(camera, chunks, last_cam_chunk_pos):
++    # 1. Construct frustum from view and projection matrices [S1, unofficial]
++    frustum = create_frustum(camera.view_matrix, camera.projection_matrix)
++    
++    # 2. Compute camera chunk position [S1, unofficial]
++    current_cam_chunk_pos = get_camera_chunk_position(camera.position)
++    
++    # 3. If camera chunk changed, rebuild ordered list [S1, unofficial]
+     if current_cam_chunk_pos != last_cam_chunk_pos:
+         visible_chunks = []
+-
+-        # Step 4: Iterate chunks, check IsMeshReady() and frustum.IsChunkInFrustum(wx, wz)
++        
++        # 4. Iterate chunks, check IsMeshReady() and frustum.IsChunkInFrustum(wx, wz) [S1, unofficial]
+         for chunk in chunks:
+-            if chunk.IsMeshReady():
+-                wx = chunk.GetXWorldPos()
+-                wz = chunk.GetZWorldPos()
+-                if frustum.IsChunkInFrustum(wx, wz):
+-                    visible_chunks.append(chunk)
+-
+-        # Step 5: Sort chunks using std::sort with distance comparison
+-        visible_chunks.sort(key=lambda c: GetSquaredHorizontalDistance(c, camera_world_pos), reverse=True)
+-
++            if chunk.is_mesh_ready() and frustum.is_chunk_in_frustum(chunk.wx, chunk.wz):
++                visible_chunks.append(chunk)
++        
++        # 5. Sort chunks using std::sort with distance comparison [S1, unofficial]
++        # Sorting logic: Descending order by squared XZ distance [S1, unofficial]
++        visible_chunks.sort(key=lambda c: squared_xz_distance(c, camera.position), reverse=True)
++        
+         last_cam_chunk_pos = current_cam_chunk_pos
+-
++        
+     return visible_chunks, last_cam_chunk_pos
+ 
+-def ExtractFrustumPlanes(view_matrix, proj_matrix):
+-    # Standard operation: compute six clipping planes from combined view-projection matrix [G]
+-    return FrustumPlanes()
+-
+-def GetSquaredHorizontalDistance(chunk, camera_pos):
+-    dx = chunk.GetXWorldPos() - camera_pos.x
+-    dz = chunk.GetZWorldPos() - camera_pos.z
++def squared_xz_distance(chunk, camera_pos):
++    # 1. Calculate squared distance from camera to chunk A: dA = glm::vec2(a->GetXWorldPos(), a->GetZWorldPos()) - CamPos, then distSqA = glm::dot(dA, dA) [S1, unofficial]
++    dx = chunk.get_x_world_pos() - camera_pos.x
++    dz = chunk.get_z_world_pos() - camera_pos.z
+     return dx * dx + dz * dz
+ ```
+@@ -75,17 +64,22 @@
+ 
+ ### Chunk Sorting by Distance
+-Sorting chunks based on their distance to the camera, likely for depth sorting or LOD selection, though the specific usage of the sorted list is not detailed in this snippet (only the sort logic is shown) [S1, unofficial]. It uses squared distance in the XZ plane, ignoring Y, which assumes chunks are sorted on the horizontal plane [S1, unofficial].
++Sorts chunks based on their distance to the camera, likely for depth sorting or LOD selection [S1, unofficial]. It uses squared XZ distance for efficiency [S1, unofficial]. Choose this when horizontal plane sorting is sufficient and Y-axis variation is negligible [S1, unofficial].
++
++### Nearest-First Downloads and Empty-Space Skipping
++A data streaming strategy where chunks are requested in order of distance from the camera, and chunks whose brightest voxel is below a threshold are skipped entirely [S2, unofficial]. Choose this for out-of-core streaming to prioritize visible data and skip empty regions [S2, unofficial].
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(N \log N)$ for sorting $N$ visible chunks [G]. The frustum check is $O(N)$ [G].
+-**Memory Complexity:** $O(N)$ to store the list of visible chunks [G].
+-**Strengths:** Simple to implement; ensures correct rendering order for transparent chunks [G].
+-**Limitations:** Ignores Y-axis distance, which may cause incorrect sorting for vertically stacked chunks; recalculates full sort on chunk change, which may be inefficient if chunk changes are frequent but minor [S1, unofficial].
+-**When to use:** When transparent chunk rendering requires strict back-to-front or front-to-back ordering and chunks are primarily distributed horizontally [G].
+-**When not to use:** When vertical sorting is critical or when chunk visibility changes frequently without camera movement [G].
++- **Time Complexity:** $O(N \log N)$ for sorting $N$ visible chunks [S1, unofficial]. Frustum culling is $O(N)$ [S1, unofficial].
++- **Memory Complexity:** $O(N)$ to store visible chunk references [S1, unofficial].
++- **Performance:** Avoids unnecessary sorting by tracking camera chunk position [S1, unofficial].
++- **Strengths:** Simple to implement; efficient for flat chunk lists [S1, unofficial].
++- **Limitations:** Ignores Y-axis for distance sorting [S1, unofficial]; does not handle hierarchical culling [S1, unofficial].
++- **When to use:** When chunks are flat and horizontal sorting is sufficient [S1, unofficial].
++- **When not to use:** When Y-axis depth is critical or chunks are hierarchical [S1, unofficial].
+ 
+ ## Background
+-It is used in real-time voxel rendering systems to manage chunk visibility and rendering order [S1, unofficial].
++Originated in voxel engine implementations for efficient chunk rendering [S1, unofficial]. Used in progressive multiscale loading for large volume datasets [S2, unofficial].
+ 
+ ## Sources
+-[S1] adrienlabayle/VoxelEngine, https://github.com/adrienlabayle/VoxelEngine, fetched 2026-10-27 (unofficial)+[S1] adrienlabayle/VoxelEngine, https://github.com/adrienlabayle/VoxelEngine, fetched 2026-10-27 (unofficial)
++[S2] Volume rendering: progressive multiscale loading, sorted compositing, lighting and more from a histotomography fork (2.8 TB volume @ 16bits) - what, if anything, would be worth upstreaming?, https://github.com/google/neuroglancer/issues/1134, fetched 2026-10-26 (unofficial)

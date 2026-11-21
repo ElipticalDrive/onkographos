@@ -1,0 +1,340 @@
+--- v003.md
++++ v004.md
+@@ -4,142 +4,154 @@
+ 
+ ## Overview
+-Camera Ray Generation computes the 3D world-space origin $\mathbf{o}$ and direction $\mathbf{d}$ for viewing rays corresponding to each pixel in a raster image, given explicit camera intrinsic and extrinsic parameters [S5, S9, S12, unofficial]. It solves the problem of mapping 2D screen coordinates to 3D world-space rays for volume rendering or ray tracing [S5, S9, unofficial]. Unlike [Pinhole Camera Ray Generation](5058-pinhole-camera-ray-generation.md), which often derives rays directly from geometric primitives such as field of view (FOV) and camera basis vectors, this method relies on explicit intrinsic ($K$) and extrinsic ($c2w$) matrices to define the projection geometry [S1, S2, S9, unofficial]. It builds on [Ray Sampling and Generation](15460-ray-sampling-and-generation.md) by providing the specific geometric transformation from image space to world space.
++Camera Ray Generation computes the 3D world-space origin and direction vectors for viewing rays corresponding to each pixel in a raster image, given explicit camera intrinsic and extrinsic parameters [S5, S9, S12, unofficial]. It solves the problem of mapping 2D screen coordinates to 3D world-space rays for volume rendering or ray tracing [S5, S9, unofficial]. Unlike [Pinhole Camera Ray Generation](5058-pinhole-camera-ray-generation.md), which often derives rays directly from geometric primitives such as field of view (FOV) and camera basis vectors, this method relies on explicit intrinsic ($K$) and extrinsic ($c2w$) matrices to define the projection geometry [S1, S2, S9, unofficial]. It builds on [Ray Sampling and Generation](15460-ray-sampling-and-generation.md) by providing the specific geometric unprojection logic required to initialize the parallel execution model [G].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs:**
+-    *   Image dimensions: width $W$, height $H$ [S4, S5, unofficial].
+-    *   Pixel coordinates: integer grid $(i, j)$ where $i \in [0, W-1]$ and $j \in [0, H-1]$ [S4, S5, unofficial].
+-    *   Intrinsic matrix $K$ (3x3) containing focal lengths $f_x, f_y$ and principal point $(c_x, c_y)$ [S5, S9, S16, unofficial].
+-    *   Extrinsic matrix $c2w$ (4x4) representing the camera-to-world transformation [S5, S9, S17, unofficial].
+-    *   Optional: Sub-pixel offsets $(s_x, s_y)$ for anti-aliasing [S12, unofficial]; Depth values $z$ for unprojection [S9, unofficial].
+-*   **Outputs:**
+-    *   Ray origins $\mathbf{o}$ (world space) [S5, S9, unofficial].
+-    *   Ray directions $\mathbf{d}$ (world space, normalized) [S5, S9, unofficial].
+-
+-**Data Structures**
+-*   **Ray Bundle:** A structure containing tensors for origins and directions. In PyTorch-based implementations, this is often a tuple or named tuple `(origins, directions, viewdirs)` with shape $(N, 3)$ where $N = W \times H$ [S9, S17, unofficial].
+-*   **Camera Parameters:**
+-    *   $K = \begin{bmatrix} f_x & 0 & c_x \\ 0 & f_y & c_y \\ 0 & 0 & 1 \end{bmatrix}$ [S9, unofficial].
+-    *   $c2w = \begin{bmatrix} R & t \\ 0 & 1 \end{bmatrix}$ where $R$ is 3x3 rotation and $t$ is 3x1 translation [S17, unofficial].
+-
+-**Steps**
+-1.  **Generate Pixel Grid:** Create 2D grids for pixel indices $i$ and $j$ [S4, S5, unofficial].
+-    *   $i \in [0, W-1]$, $j \in [0, H-1]$.
+-    *   Apply coordinate centering mode: 'lefttop' (no offset), 'center' (add 0.5), or 'random' (add uniform noise) [S4, unofficial].
+-    *   Apply flips if specified (e.g., `flip_x`, `flip_y`) [S5, unofficial].
++**Inputs:**
++*   Image dimensions: width $W$, height $H$ [S4, S5, unofficial].
++*   Pixel coordinates: integer grid $(i, j)$ where $0 \le i < W$ and $0 \le j < H$ [S4, S5, unofficial].
++*   Camera Intrinsics: $3 \times 3$ matrix $K$ containing focal lengths ($f_x, f_y$) and principal point ($c_x, c_y$) [S5, S9, S12, unofficial].
++*   Camera Extrinsic: $4 \times 4$ matrix $c2w$ (camera-to-world) containing rotation $R$ and translation $T$ [S5, S9, S12, unofficial].
++*   Optional: Sub-pixel offsets $(s_x, s_y)$ for anti-aliasing [S12, unofficial].
++*   Optional: Depth values $z$ if unprojecting specific 3D points rather than directions [S9, unofficial].
++
++**Outputs:**
++*   Ray Origins: Tensor of shape $(H, W, 3)$ or $(N, 3)$ representing world-space positions [S5, S9, S17, unofficial].
++*   Ray Directions: Tensor of shape $(H, W, 3)$ or $(N, 3)$ representing normalized world-space vectors [S5, S9, S17, unofficial].
++
++**Data Structures:**
++*   `RayBundle` or `Rays` namedtuple/struct containing fields: `origins` (float32), `directions` (float32), `viewdirs` (float32) [S17, S19, unofficial].
++*   In some implementations, a `Ray` struct contains `origin` and `direction` (normalized) [S15, unofficial].
++
++**Steps:**
++
++1.  **Generate Pixel Coordinates:** Create a meshgrid of pixel indices $i$ (width) and $j$ (height) [S4, S5, unofficial].
++    *   $i \in [0, W-1]$, $j \in [0, H-1]$ [S4, unofficial].
++    *   Apply flips if specified (e.g., `flip_x`, `flip_y`) to match coordinate system conventions [S5, unofficial].
++    *   Adjust coordinates based on mode: 'center' adds 0.5 to pixel centers, 'random' adds uniform noise [S4, unofficial].
++
+ 2.  **Compute Normalized Device Coordinates (NDC) or Camera Space Coordinates:**
+-    *   *Method A (Matrix Inversion):* Homogenize 2D coordinates to add a 1.0 component: $p_{2d} = [i, j, 1]^T$ [S9, unofficial]. Multiply by the inverse intrinsic matrix to get ray directions in camera space: $\mathbf{d}_{cam} = K^{-1} p_{2d}$ [S9, unofficial].
+-    *   *Method B (FOV/Aspect):* Compute aspect-corrected UV coordinates in $[-1, 1]$ with y-up: $uv = (vUv \cdot 2.0 - 1.0)$; $uv.x *= W/H$ [S8, unofficial]. Compute view plane coordinates: $vp_x = l + (r - l) \cdot (i + s_x) / W$; $vp_y = t - (t - b) \cdot (j + s_y) / H$ [S12, unofficial].
+-3.  **Compute Camera-Space Direction:**
+-    *   Using Method A: $\mathbf{d}_{cam} = [ (i - c_x)/f_x, (j - c_y)/f_y, 1 ]^T$ [S5, S17, unofficial]. Note: If the coordinate system has Y-down (common in images), negate the Y component or the result of the inverse intrinsic multiplication [S5, unofficial].
+-    *   Using Method B: $\mathbf{d}_{cam} = [vp_x, vp_y, -dist]^T$ where $dist$ is the view plane distance [S12, unofficial].
+-4.  **Normalize Camera-Space Direction:**
+-    *   $\mathbf{d}_{cam} = \mathbf{d}_{cam} / \|\mathbf{d}_{cam}\|$ [S9, S17, unofficial].
++    *   Method A (Matrix-based): Homogenize 2D coordinates by appending a 1.0 component to form vectors $\mathbf{p}_{2d} = [i, j, 1]^T$ [S9, unofficial].
++    *   Method B (Geometric): Compute aspect-corrected UV coordinates in $[-1, 1]$ with y-up:
++        $$ \text{uv}_x = \frac{i + s_x + 0.5}{W} \cdot 2 - 1 $$
++        $$ \text{uv}_y = \frac{j + s_y + 0.5}{H} \cdot 2 - 1 $$
++        $$ \text{uv}_x \leftarrow \text{uv}_x \cdot \frac{W}{H} $$
++        [S8, S12, unofficial]. Note: Vulkan's flipped Y-axis in clip space may require negating Y during reconstruction [S14, unofficial].
++
++3.  **Unproject to Camera Space:**
++    *   Using Intrinsics $K$: Multiply by the inverse intrinsic matrix to get ray directions in camera space $\mathbf{d}_{cam}$ [S9, unofficial].
++        $$ \mathbf{d}_{cam} = K^{-1} \begin{bmatrix} i - c_x \\ j - c_y \\ f \end{bmatrix} $$
++        Where $f$ is typically 1.0 for direction normalization, or derived from focal length [S9, S13, unofficial].
++    *   Alternatively, using FOV and Basis Vectors:
++        $$ \mathbf{d}_{cam} = \text{normalize}(\text{uv}_x \cdot \mathbf{u}_{right} + \text{uv}_y \cdot \mathbf{u}_{up} - \mathbf{u}_{forward}) $$
++        [S8, S12, unofficial]. Here $\mathbf{u}_{right}, \mathbf{u}_{up}, \mathbf{u}_{forward}$ are the camera basis vectors.
++
++4.  **Normalize Directions:**
++    *   Normalize the camera-space direction vectors to unit length:
++        $$ \mathbf{d}_{cam} \leftarrow \frac{\mathbf{d}_{cam}}{\|\mathbf{d}_{cam}\|} $$
++        [S9, S17, unofficial].
++
+ 5.  **Transform to World Space:**
+-    *   **Direction:** Rotate the camera-space direction by the rotation part of the extrinsic matrix $R$: $\mathbf{d}_{world} = R \cdot \mathbf{d}_{cam}$ [S5, S17, unofficial].
+-    *   **Origin:** Extract the translation part $t$ from the extrinsic matrix $c2w$. Broadcast $t$ to match the shape of the directions: $\mathbf{o}_{world} = t$ [S5, S9, S17, unofficial].
+-6.  **Optional: Unproject with Depth:**
+-    *   If depth $z$ is provided, scale the camera-space direction by $z$: $\mathbf{p}_{cam} = \mathbf{d}_{cam} \cdot z$ [S9, unofficial].
+-    *   Transform $\mathbf{p}_{cam}$ to world space to get 3D points, or use $\mathbf{o}_{world}$ and $\mathbf{d}_{world}$ for ray marching [S9, unofficial].
+-
+-**Formulas**
+-*   **Inverse Intrinsic Unprojection:**
+-    $$ \mathbf{d}_{cam} = K^{-1} \begin{bmatrix} i \\ j \\ 1 \end{bmatrix} = \begin{bmatrix} (i - c_x)/f_x \\ (j - c_y)/f_y \\ 1 \end{bmatrix} $$
+-    [S5, S9, unofficial]
+-*   **World Space Direction:**
+-    $$ \mathbf{d}_{world} = R \cdot \mathbf{d}_{cam} $$
+-    [S5, S17, unofficial]
+-*   **World Space Origin:**
+-    $$ \mathbf{o}_{world} = t $$
+-    [S5, S17, unofficial]
+-*   **Pixel Radii (for anti-aliasing):**
+-    $$ dx = \sqrt{\sum (\mathbf{d}_{i} - \mathbf{d}_{i+1})^2} $$
+-    $$ \text{radii} = \frac{dx \cdot 2}{\sqrt{12}} $$
+-    [S17, unofficial]
+-
+-**Parameters**
+-*   $f_x, f_y$: Focal lengths in pixels [S16, unofficial].
+-*   $c_x, c_y$: Principal point coordinates [S16, unofficial].
+-*   $c2w$: 4x4 Camera-to-World matrix [S17, unofficial].
+-*   `mode`: Pixel centering strategy ('lefttop', 'center', 'random') [S4, unofficial].
+-*   `downsample`: Factor to reduce image resolution before ray generation [S16, unofficial].
+-
+-**Edge Cases and Pitfalls**
+-*   **Coordinate System Mismatch:** The 3D texture or volume may be centered at different coordinates than the 3D model (e.g., model at $(0,0,0)$, texture at $(63,63,63)$), requiring remapping of camera movements into voxel coordinates [S7, unofficial].
+-*   **Vulkan Flipped Y:** Vulkan's flipped Y-axis in clip space requires negating Y during view-space reconstruction [S14, unofficial].
+-*   **Degenerate Matrices:** Check for zero viewport height or degenerate intrinsic/extrinsic matrices to avoid NaNs [S15, unofficial].
+-*   **Front-of-Camera Check:** Ensure 3D points in camera space are in front of the camera ($Z > -\epsilon$) before processing [S9, unofficial].
+-
+-**Pseudocode**
++    *   Rotate the camera-space directions using the rotation part of the extrinsic matrix $R$ (top-left $3 \times 3$ of $c2w$) [S5, S17, unofficial].
++        $$ \mathbf{d}_{world} = R \cdot \mathbf{d}_{cam} $$
++        [S5, S17, unofficial].
++    *   Extract the ray origin from the translation part of the extrinsic matrix $T$ (last column of $c2w$) [S5, S9, unofficial].
++        $$ \mathbf{o}_{world} = T $$
++        [S5, S9, unofficial]. Broadcast $\mathbf{o}_{world}$ to match the shape of $\mathbf{d}_{world}$ [S17, unofficial].
++
++6.  **Optional: Depth Unprojection:**
++    *   If 3D points are required instead of directions, scale the unprojected camera-space directions by the depth $z$:
++        $$ \mathbf{p}_{cam} = \mathbf{d}_{cam} \cdot z $$
++        [S9, unofficial].
++    *   Transform $\mathbf{p}_{cam}$ to world space using $c2w$ [S9, unofficial].
++
++7.  **Front-of-Camera Check:**
++    *   Verify that points in camera space have $z > -\epsilon$ (where $\epsilon = 10^{-6}$) to ensure they are in front of the camera [S9, unofficial].
++
++**Pseudocode:**
++
+ ```python
+-import torch
+ import numpy as np
+ 
+-def generate_camera_rays(W, H, K, c2w, mode='center', flip_x=False, flip_y=False):
++def generate_camera_rays(W, H, K, c2w, subpixel_offsets=None, mode='center'):
+     """
+     Generate camera rays for volume rendering.
+     
+     Args:
+-        W (int): Image width.
+-        H (int): Image height.
+-        K (Tensor): 3x3 intrinsic matrix.
+-        c2w (Tensor): 4x4 camera-to-world extrinsic matrix.
+-        mode (str): Pixel centering ('lefttop', 'center', 'random').
+-        flip_x (bool): Flip x coordinates.
+-        flip_y (bool): Flip y coordinates.
++        W: Image width.
++        H: Image height.
++        K: 3x3 intrinsic matrix [[fx, 0, cx], [0, fy, cy], [0, 0, 1]].
++        c2w: 4x4 camera-to-world transformation matrix.
++        subpixel_offsets: Optional tuple (sx, sy) for anti-aliasing.
++        mode: 'center' (pixel centers), 'lefttop' (corners), 'random' (jitter).
+         
+     Returns:
+-        origins (Tensor): (H, W, 3) world-space origins.
+-        directions (Tensor): (H, W, 3) world-space directions.
++        origins: (H, W, 3) array of world-space ray origins.
++        directions: (H, W, 3) array of normalized world-space ray directions.
+     """
+-    # 1. Generate Pixel Grid
+-    i, j = torch.meshgrid(torch.arange(W), torch.arange(H), indexing='ij')
+-    i = i.float()
+-    j = j.float()
+-    
+-    # 2. Apply Centering Mode
++    # 1. Generate Pixel Coordinates
++    i, j = np.meshgrid(np.arange(W), np.arange(H), indexing='ij')
++    
++    # 2. Adjust for mode and subpixel offsets
+     if mode == 'center':
+-        i += 0.5
+-        j += 0.5
++        i = i.astype(np.float32) + 0.5
++        j = j.astype(np.float32) + 0.5
+     elif mode == 'random':
+-        i += torch.rand_like(i)
+-        j += torch.rand_like(j)
++        i = i.astype(np.float32) + np.random.uniform(0, 1, size=(H, W))
++        j = j.astype(np.float32) + np.random.uniform(0, 1, size=(H, W))
++    
++    if subpixel_offsets is not None:
++        sx, sy = subpixel_offsets
++        i += sx
++        j += sy
+         
+-    # 3. Apply Flips
+-    if flip_x:
+-        i = W - 1 - i
+-    if flip_y:
+-        j = H - 1 - j
+-        
+-    # 4. Homogenize and Unproject to Camera Space
+-    # p_2d = [i, j, 1]
+-    # d_cam = K_inv @ p_2d
+-    K_inv = torch.inverse(K)
+-    coords = torch.stack([i, j, torch.ones_like(i)], dim=-1) # (H, W, 3)
+-    
+-    # einsum: K_inv (3,3) @ coords (..., 3) -> (..., 3)
+-    d_cam = torch.einsum('ij, ...j -> ...i', K_inv, coords)
+-    
+-    # Handle Y-flip in camera space if needed (depends on convention)
+-    # Some conventions require negating Y after unprojection if image Y is down
+-    # d_cam[..., 1] = -d_cam[..., 1] 
+-    
+-    # 5. Normalize Camera-Space Directions
+-    d_cam = d_cam / torch.norm(d_cam, dim=-1, keepdim=True)
+-    
+-    # 6. Transform to World Space
+-    R = c2w[:3, :3] # 3x3 rotation
+-    t = c2w[:3, 3]  # 3x1 translation
+-    
+-    # Rotate directions: d_world = R @ d_cam
+-    # einsum: R (3,3) @ d_cam (..., 3) -> (..., 3)
+-    d_world = torch.einsum('ij, ...j -> ...i', R, d_cam)
+-    
+-    # Broadcast origin
+-    origins = t.unsqueeze(0).unsqueeze(0).expand_as(d_world)
+-    
+-    return origins, d_world
++    # 3. Unproject to Camera Space using Intrinsics
++    # Extract intrinsic parameters
++    fx = K[0, 0]
++    fy = K[1, 1]
++    cx = K[0, 2]
++    cy = K[1, 2]
++    
++    # Compute normalized coordinates relative to principal point
++    # Note: Coordinate system conventions vary. This assumes standard pinhole model.
++    # If inverse_y is true, j is flipped.
++    u = (i - cx) / fx
++    v = (j - cy) / fy
++    
++    # Construct direction vectors in camera space (z=1 plane)
++    # Shape: (H, W, 3)
++    directions_cam = np.stack([u, v, np.ones_like(u)], axis=-1)
++    
++    # 4. Normalize Directions
++    norms = np.linalg.norm(directions_cam, axis=-1, keepdims=True)
++    # Avoid division by zero
++    norms = np.maximum(norms, 1e-6)
++    directions_cam = directions_cam / norms
++    
++    # 5. Transform to World Space
++    # Extract rotation and translation from c2w
++    R = c2w[:3, :3]
++    T = c2w[:3, 3]
++    
++    # Rotate directions: (H, W, 3) @ (3, 3) -> (H, W, 3)
++    # Using einsum or matmul
++    directions_world = np.einsum('ijk,kl->ijl', directions_cam, R)
++    
++    # 6. Set Origins
++    # Broadcast translation T to (H, W, 3)
++    origins_world = np.broadcast_to(T, (H, W, 3))
++    
++    return origins_world, directions_world
+ ```
++
++**Parameters with Typical Values:**
++*   $K$: Depends on camera calibration. Typical $f_x, f_y \approx 500-1000$ pixels for standard lenses [S16, unofficial].
++*   $c2w$: Identity for world-aligned cameras; varies for tracked cameras [S5, unofficial].
++*   $\epsilon$: $10^{-6}$ for front-of-camera check [S9, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Coordinate System Mismatch:** The 3D texture/model may be centered at different coordinates than the camera's reference frame, requiring remapping of camera movements into voxel coordinates [S7, unofficial].
++*   **Vulkan Y-Axis:** Vulkan's flipped Y-axis in clip space requires negating Y during view-space reconstruction [S14, unofficial].
++*   **Degenerate Matrices:** Check for zero viewport height or singular intrinsic matrices to avoid NaNs [S15, unofficial].
++*   **Aspect Ratio:** Incorrect aspect ratio correction leads to distorted FOV [S8, S15, unofficial].
+ 
+ ## Subtopics
+@@ -180,44 +192,46 @@
+ ### PathCamera
+ A camera that glides forward along a procedural road centerline, yawing to follow bends and banking gently, producing an orthonormal ray basis for the shader [S8, unofficial].
+-*   **Steps:** Update position: $z += speed \cdot dt$; Compute eye position: $position = [roadX(z), height, z]$; Compute target position: $target = [roadX(z + lookAhead), lookHeight, z + lookAhead]$; Compute forward vector: $forward = normalize(target - position)$; Compute right vector: $right = normalize(cross(forward, WORLD\_UP))$; Compute up vector: $up = normalize(cross(right, forward))$ [S8, unofficial].
++*   **Steps:** Update position $z += \text{speed} \cdot dt$; Compute eye position $[roadX(z), \text{height}, z]$; Compute target $[roadX(z + \text{lookAhead}), \text{lookHeight}, z + \text{lookAhead}]$; Compute forward $\text{normalize}(\text{target} - \text{position})$; Compute right $\text{normalize}(\text{cross}(\text{forward}, \text{WORLD\_UP}))$; Compute up $\text{normalize}(\text{cross}(\text{right}, \text{forward}))$ [S8, unofficial].
+ *   **Parameters:** Eye height: 3.5 world units; Look-ahead distance: 15 world units; Look height: 1.5 world units; World up vector: $[0, 1, 0]$ [S8, unofficial].
+ 
+ ### PinholeRayTracer Configuration
+ Camera orientation convention: Z-axis along optical axis (orthogonal to image plane), X-axis pointing towards bottom/ground, Y-axis according to right-hand rule [S18, unofficial].
+-*   **Parameters:** RES: Box resolution, i.e., the size of the voxel/box. Default: 0.02f; RANGE_MAX: Maximum range of the sensor. Default: 100000.0f; HFOV: Half horizontal field of view. Default: $M\_PI \cdot 160.0f / 180.0f$; VFOV: Half vertical field of view. Default: $M\_PI \cdot 160.0f / 180.0f$; HSIZE: Horizontal image size. Default: 6; VSIZE: Vertical image size. Default: 4 [S18, unofficial].
++*   **Parameters:** RES: 0.02f; RANGE_MAX: 100000.0f; HFOV: $M\_PI \cdot 160.0f / 180.0f$; VFOV: $M\_PI \cdot 160.0f / 180.0f$; HSIZE: 6; VSIZE: 4 [S18, unofficial].
+ 
+ ### Spherical Ray Casting
+-*   **Steps:** Create linearly spaced theta and phi values: $\theta\_vals = \text{linspace}(0, 2\pi, width + 1)$ and $\phi\_vals = \text{linspace}(0, \pi, height + 1)$; Create a meshgrid for theta and phi: $\theta, \phi = \text{meshgrid}(\theta\_vals, \phi\_vals, \text{indexing='xy'})$; Compute directions in camera reference frame (y is up): $directions = \text{stack}([- \sin(\phi) \cdot \sin(\theta), \cos(\phi), \sin(\phi) \cdot \cos(\theta)], \text{axis=-1})$; Transform directions to world space using the camera rotation matrix: $directions = \text{matmul}(camtoworld[:3, :3], directions[..., \text{None}])[..., 0]$; Compute offset directions dx and dy using $\text{diff}$: $dy = \text{diff}(directions[:, :-1], \text{axis=0})$ and $dx = \text{diff}(directions[:-1, :], \text{axis=1})$; Crop the directions to remove the extra row/column from the meshgrid: $directions = directions[:-1, :-1]$; Compute origins by broadcasting the camera translation: $origins = \text{broadcast\_to}(camtoworld[:3, -1], directions.shape)$; Compute radii using the norms of dx and dy: $radii = (0.5 \cdot (dx\_norm + dy\_norm))[..., \text{None}] \cdot 2 / \sqrt{12}$; Set imageplane to zeros: $imageplane = \text{zeros\_like}(directions[..., :2])$ [S19, unofficial].
++Generates rays by creating a meshgrid of spherical coordinates $\theta$ and $\phi$ [S19, unofficial].
++*   **Steps:** Create linearly spaced $\theta \in [0, 2\pi]$ and $\phi \in [0, \pi]$; Compute directions in camera frame (y is up): $[-\sin\phi \sin\theta, \cos\phi, \sin\phi \cos\theta]$; Transform to world space using camera rotation matrix; Compute offset directions dx and dy; Crop directions to remove extra row/column; Compute origins by broadcasting camera translation; Compute radii using norms of dx and dy; Set imageplane to zeros [S19, unofficial].
+ *   **Layout:** Returns `utils.Rays` with lossmult=1, near/far values, and cam_idx=0 [S19, unofficial].
+ 
+ ### 2D Eraser
+ A 2D sculpting tool that removes voxels inside a selection volume defined by perspective projection from the user's point of view through a circular cursor on the view plane [S20].
+-*   **Steps:** Set cursor as a circle aligned with the view plane; set virtual pointer origin to user's point of view; set direction vector (line of sight) from point of view to cursor center; set cursor radius $r$ and 2D position $P$ via user selection of a screen pixel; For each voxel, project its center onto the view plane using perspective projection; calculate 2D Euclidean distance $d$ from projected voxel center $V$ to cursor center $P$; if $d < r$, remove the voxel [S20].
++*   **Steps:** Set cursor as a circle aligned with the view plane; Set virtual pointer origin to user's point of view; Set direction vector from point of view to cursor center; For each voxel, project its center onto the view plane; Calculate 2D Euclidean distance $d$ from projected voxel center $V$ to cursor center $P$; If $d < r$, remove the voxel [S20].
+ *   **Formula:** Selection condition: $d < r$, where $d$ is the 2D Euclidean distance on the view plane between the projected voxel center and cursor center $P$, and $r$ is the cursor radius [S20].
+ *   **Pitfall:** Perspective projection causes the selection volume to be a cone with apex at the point of view, making the tool dependent on viewing parameters. Orthographic projection yields a cylinder, which is preferred for 3D tools to detach from the point of view [S20].
+ 
+ ### Ray Extraction
+-*   **Steps:** Select a point on a plane surface of the volume cube aligned with two of the three primary axes (e.g., Y and Z); Cast a ray down to the third axis (e.g., X-axis) to determine the ray path; Derive four ray representations: 1) An image pair co-planar to the ray in the other two axes (e.g., X-Z and X-Y planes). 2) An intensity profile along the ray. 3) The corresponding SOI label profile. 4) Location coordinates of entry and exit points [S21].
++Selects a point on a plane surface of the volume cube aligned with two of the three primary axes (e.g., Y and Z) and casts a ray down to the third axis (e.g., X-axis) to determine the ray path [S21].
++*   **Steps:** Derive four ray representations: 1) An image pair co-planar to the ray in the other two axes (e.g., X-Z and X-Y planes). 2) An intensity profile along the ray. 3) The corresponding SOI label profile. 4) Location coordinates of entry and exit points [S21].
+ *   **Parameters:** Number of rays: 64 rays per axis, 192 total per volume [S21].
+ 
+ ### Front of Camera Check
+ Checks if 3D points in camera space are in front of the camera ($Z > -\epsilon$) [S9, unofficial].
+-*   **Steps:** Check if the Z coordinate (last element) is $> -\epsilon$: return $xyz[..., -1] > -\epsilon$ [S9, unofficial].
+-*   **Parameters:** epsilon: float = 1e-6 (tolerance for front-of-camera check) [S9, unofficial].
++*   **Steps:** Check if the Z coordinate (last element) is $> -\epsilon$: return $\text{xyz}[..., -1] > -\epsilon$ [S9, unofficial].
++*   **Parameters:** $\epsilon$: float = $10^{-6}$ (tolerance for front-of-camera check) [S9, unofficial].
+ 
+ ### Voxel Picking
+-*   **Steps:** Press the right mouse button to select the line of sight through the cursor; Draw a signal corresponding to the values of voxels along this line at the bottom of the screen [S22].
++Press the right mouse button to select the line of sight through the cursor [S22]. Draw a signal corresponding to the values of voxels along this line at the bottom of the screen [S22].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(W \cdot H)$ for generating rays for all pixels, where $W$ and $H$ are image dimensions. The matrix operations (inversion, multiplication) are constant time for fixed-size matrices (3x3, 4x4) [S5, S9, unofficial].
+-*   **Memory Complexity:** $O(W \cdot H)$ to store the ray origins and directions for all pixels [S9, S17, unofficial].
+-*   **Performance:** On modern GPUs, this operation is highly parallelizable and can be executed in a single kernel launch or fragment shader pass [S4, S5, unofficial]. The use of tensor operations (e.g., `einsum`, `meshgrid`) in frameworks like PyTorch allows for efficient batch processing [S5, S9, unofficial].
+-*   **Strengths:** Flexible camera models via explicit matrices; supports arbitrary camera movements and orientations; compatible with standard computer vision pipelines [S7, S9, unofficial].
+-*   **Limitations:** Requires pre-computed or tracked camera poses; sensitive to coordinate system mismatches between the volume and the camera space [S7, unofficial]; potential for numerical instability if matrices are degenerate [S15, unofficial].
+-*   **When to Use:** When camera parameters are known (e.g., from SLAM, COLMAP, or simulation); for training neural radiance fields (NeRF) where ground-truth poses are available; for interactive volume exploration with arbitrary camera control [S3, S9, S16, unofficial].
+-*   **When Not to Use:** When camera parameters are unknown or need to be optimized jointly with the scene (use optimization-based methods); when performance is critical and a simpler orthographic or fixed-perspective model suffices [S7, unofficial].
++*   **Time Complexity:** $O(W \cdot H)$ for generating rays for all pixels, where $W$ and $H$ are image dimensions [S4, S5, unofficial]. Each ray computation is $O(1)$ involving matrix-vector multiplications [S9, unofficial].
++*   **Memory Complexity:** $O(W \cdot H \cdot 3)$ to store origins and directions [S5, S9, unofficial].
++*   **Performance:** Highly parallelizable on GPUs due to the independent nature of each pixel's ray generation [G]. Performance is limited by memory bandwidth when storing large ray buffers [S17, unofficial].
++*   **Strengths:** Flexible camera models via explicit matrices; supports arbitrary camera movements and poses [S7, S9, unofficial].
++*   **Limitations:** Requires accurate camera calibration (intrinsics/extrinsics); sensitive to coordinate system mismatches [S7, S14, unofficial].
++*   **When to Use:** When camera parameters are known from calibration or tracking (e.g., NeRF, SLAM outputs) [S5, S9, unofficial].
++*   **When Not to Use:** When simple geometric primitives (e.g., fixed FOV) are sufficient and matrix overhead is undesirable [S12, unofficial].
+ 
+ ## Background
+-Camera Ray Generation is a fundamental technique in computer graphics, originating from the need to map 2D image coordinates to 3D world coordinates for rendering and analysis. The use of intrinsic and extrinsic matrices for this purpose is standard in computer vision and photogrammetry, with roots in the pinhole camera model [S9, S16, unofficial]. In the context of volume rendering, this method became essential with the rise of neural radiance fields (NeRF) and other neural rendering techniques, which require precise ray generation for training and inference [S3, S9, S16, unofficial]. The method has been implemented in various frameworks, including PyTorch-based libraries like Nerfstudio and TensoRF, as well as in custom shaders for real-time volume visualization [S3, S7, S16, unofficial].
++Camera Ray Generation is a fundamental technique in computer graphics, originating from the need to map rasterized screen coordinates to 3D space for ray tracing and volume rendering [S5, S9, unofficial]. It is widely used in neural radiance fields (NeRF) and other view synthesis methods where camera poses are estimated from images [S3, S9, S16, unofficial]. The method relies on the pinhole camera model and its matrix representation, which has been standard since the early days of computer vision and graphics [S12, S14, unofficial].
+ 
+ ## Sources

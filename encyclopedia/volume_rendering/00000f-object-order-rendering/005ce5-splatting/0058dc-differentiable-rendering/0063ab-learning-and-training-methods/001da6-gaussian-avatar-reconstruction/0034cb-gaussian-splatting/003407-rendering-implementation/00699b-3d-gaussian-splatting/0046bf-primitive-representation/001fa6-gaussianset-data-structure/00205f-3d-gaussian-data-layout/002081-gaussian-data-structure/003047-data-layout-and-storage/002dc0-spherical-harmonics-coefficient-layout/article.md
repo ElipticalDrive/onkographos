@@ -1,0 +1,92 @@
+# Spherical Harmonics Coefficient Layout
+
+Also called: Per-Dimension SH Storage, SH Buffer Layout
+
+## Overview
+This method defines the memory layout for spherical harmonic (SH) coefficients within the Structure-of-Arrays (SoA) data structure of 3D Gaussian Splatting. It solves the problem of efficiently storing and accessing per-gaussian color information by grouping coefficients by splat, then by coefficient index, and finally by RGB channel. It differs from interleaved layouts (which group by channel) by optimizing for sequential access patterns during coefficient evaluation [5570-spherical-harmonics-coefficient-layout.md].
+
+## How it works
+**Inputs:**
+- $N$: Number of Gaussians.
+- $D$: Total number of SH coefficients for the chosen degree, calculated as $D = \text{dimensionsForDegree}(shDegree)$ [S1, unofficial].
+- Source data: A collection of splats, each containing $D$ SH vectors.
+
+**Outputs:**
+- A contiguous linear buffer (e.g., `FloatBuffer`) of size $N \times D \times 3$ floats.
+
+**Data Structure:**
+The buffer is indexed using the formula:
+$$ idx = ((i \times D) + d) \times 3 + c $$
+Where:
+- $i \in [0, N-1]$ is the splat index.
+- $d \in [0, D-1]$ is the SH coefficient index.
+- $c \in \{0, 1, 2\}$ represents the RGB channel (0 for Red, 1 for Green, 2 for Blue).
+
+**Steps:**
+1. Initialize a buffer of size $N \times D \times 3$.
+2. Iterate over each splat index $i$ from $0$ to $N-1$.
+3. For each splat, iterate over each coefficient index $d$ from $0$ to $D-1$.
+4. For each coefficient, write the three components to the buffer:
+   - Red component at index $((i \times D) + d) \times 3 + 0$.
+   - Green component at index $((i \times D) + d) \times 3 + 1$.
+   - Blue component at index $((i \times D) + d) \times 3 + 2$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def write_sh_coefficients(buffer, splats, sh_dimensions):
+    """
+    Writes SH coefficients into a flat buffer in SoA layout.
+    
+    Args:
+        buffer: A mutable array or buffer of size N * sh_dimensions * 3.
+        splats: A list or collection of splat objects.
+        sh_dimensions: The total number of SH coefficients D for the current degree.
+    """
+    n = len(splats)
+    for i in range(n):
+        splat = splats[i]
+        for d in range(sh_dimensions):
+            # Get the base index for this coefficient's RGB triplet
+            base_idx = (i * sh_dimensions + d) * 3
+            
+            # Write R, G, B components
+            buffer[base_idx + 0] = splat.get_sh_x(d)
+            buffer[base_idx + 1] = splat.get_sh_y(d)
+            buffer[base_idx + 2] = splat.get_sh_z(d)
+```
+
+**Parameters:**
+- `shDimensions` ($D$): Determined by the SH degree. For degree 0, $D=1$; for degree 1, $D=4$; for degree 2, $D=9$; for degree 3, $D=16$; for degree 4, $D=25$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Degree Mismatch:** Ensure `shDimensions` matches the actual number of coefficients stored in the splat objects. Using an incorrect $D$ will cause buffer overflows or misaligned reads [S1, unofficial].
+- **Precision:** Coefficients are stored as 32-bit floats. Quantization methods (e.g., INT8) are separate optimizations [S3, unofficial].
+
+## Subtopics
+
+### [SH Coefficient Interleaving](15882-sh-coefficient-interleaving.md)
+SH Coefficient Interleaving is a data layout strategy that packs SH coefficients into a single contiguous array by grouping coefficients by channel rather than by degree. It solves the problem of efficient memory access during rendering by ensuring that all color channels for a specific SH degree are stored adjacently, which aligns with how SH values are evaluated and applied to RGB output. It differs from the standard layout (which stores all coefficients for one channel before moving to the next) by optimizing for vectorized processing of the RGB triplet during the final color computation step [15882-sh-coefficient-interleaving.md].
+
+### Spherical Harmonics Texture Management
+This variant manages SH coefficients by storing them in separate GPU textures keyed by block identifiers. The process involves iterating over all SH keys, reusing existing textures, marking them for update if `needsUpdate` is true, or creating new textures from the source data if they do not exist. This approach is used in streaming contexts to manage memory and update frequency [S2, unofficial].
+
+### INT8 Spherical Harmonics
+This variant uses INT8 quantization for spherical harmonics coefficients to reduce memory traffic and bandwidth requirements. It is part of hardware-optimized rendering pipelines that leverage Tensor Cores for acceleration [S3, unofficial].
+
+## Operating characteristics
+- **Memory Complexity:** $O(N \times D)$. The storage size is directly proportional to the number of Gaussians and the number of SH coefficients per Gaussian.
+- **Access Pattern:** Sequential access within a splat's coefficients is efficient. Random access to a specific coefficient requires calculating the index $((i \times D) + d) \times 3 + c$.
+- **Strengths:** The layout aligns with the SoA paradigm, allowing efficient bulk transfers and updates. It simplifies the mapping from splat index to coefficient data.
+- **Limitations:** Not optimized for vectorized RGB operations during rendering compared to interleaved layouts. Requires careful handling of $D$ to avoid misalignment.
+- **When to use:** Standard 3D Gaussian Splatting implementations where simplicity and compatibility with SoA buffers are prioritized.
+- **When not to use:** When rendering performance is bottlenecked by memory bandwidth and vectorized RGB processing is critical; consider interleaved layouts or quantized variants.
+
+## Background
+The layout is part of the 3D Gaussian Splatting rendering pipeline, specifically within the data structure management for differentiable volume rendering. It was formalized in the context of efficient GPU-based rendering of Gaussian splats. The specific indexing scheme is documented in unofficial implementations such as JSplat [S1, unofficial] and Gaussian-Splat-Lite [S2, unofficial]. Quantized variants have been explored in recent research for hardware acceleration [S3, unofficial].
+
+## Sources
+[S1] JSplat, https://github.com/javagl/JSplat, fetched 2026-10-30 (unofficial)
+[S2] WilliamLiu-1997/Gaussian-Splat-Lite, https://github.com/WilliamLiu-1997/Gaussian-Splat-Lite, fetched 2026-10-27 (unofficial)
+[S3] RoofGS: Roofline-Guided End-to-End Acceleration of 3D Gaussian Splatting, https://arxiv.org/abs/2608.15785, fetched 2026-10-29 (unofficial)

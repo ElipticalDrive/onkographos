@@ -1,0 +1,319 @@
+Use case A renderer and a compute worker each own a thread-confined RHI context, but the contexts wrap the same native VkDevice and VkQueue. CPU command recording can proceed independently; calls that access that shared queue on the host...
+
+Vulkan: define shared host synchronization for multiple RHI contexts wrapping the same native queue · Issue #863 · shader-slang/slang-rhi · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Vulkan: define shared host synchronization for multiple RHI contexts wrapping the same native queue #863
+New issue
+Copy link
+New issue
+Copy link
+Open
+Performance
+Open
+Vulkan: define shared host synchronization for multiple RHI contexts wrapping the same native queue#863
+Performance
+Copy link
+Assignees
+Labels
+designenhancementNew feature or requestNew feature or request
+Milestone
+Q4 2026 (Fall)
+Description
+j8asic
+opened on Sep 14, 2026
+Issue body actions
+Use case
+A renderer and a compute worker each own a thread-confined RHI context, but the contexts wrap the same native VkDevice and VkQueue. CPU command recording can proceed independently; calls that access that shared queue on the host must follow Vulkan's synchronization requirements.
+Relevant queue calls occur through both the public command queue and internal helpers: submission, buffer initialization/readback, presentation, and swapchain teardown. Locking only an application's public submit() call does not cover all of these paths.
+Downstream workaround and its limitation
+A downstream patch routes queue submit, present and idle calls through one process-wide mutex. That prevents overlapping covered host calls, but it also serializes unrelated queues/devices and holds the global lock through an idle wait. It is not the design proposed for upstream.
+Requested design discussion
+Could native-device/queue import support an explicit shared synchronization object, or another documented mechanism shared by all wrappers of the same native queue?
+The critical section should cover only host operations requiring queue synchronization, not ordinary CPU recording or completion polling. Queue identity and lifetime must be handled correctly; a mutex attached separately to each RHI wrapper is insufficient. Native calls made outside RHI must participate in the same protocol, or be explicitly prohibited while RHI owns access.
+This is host synchronization for one native queue, not Vulkan/CUDA external-memory ownership transfer and not a claim that all RHI device methods become thread-safe.
+Validation
+Exercise two contexts submitting from separate threads, concurrent internal upload/readback paths, presentation and surface teardown under validation. Also test separate native queues/devices to ensure they do not acquire an unnecessary common lock. Check that idle-wait handling cannot prevent unrelated progress and that device destruction retires every user of the synchronization object.
+References
+Vulkan API wrapper
+Vulkan queue submission and host synchronization
+This is an API/contract proposal based on a working downstream design constraint, rather than a request to merge the global mutex unchanged.
+Downstream used patch
+```
+--- a/src/vulkan/vk-api.h
++++ b/src/vulkan/vk-api.h
+@@ -25,6 +25,8 @@
+ #ifdef None
+ #undef None
+ #endif
++
++#include <mutex>
+ 
+ namespace rhi::vk {
+ 
+@@ -564,6 +566,26 @@
+ 
+ struct VulkanApi
+ {
++    // Distinct RHI contexts can wrap one VkDevice/VkQueue. Vulkan requires
++    // external synchronization of queue host calls, including upload helpers
++    // and presentation. Keep CPU recording and fence polling outside this lock.
++    static std::mutex& queueHostMutex() { static std::mutex mutex; return mutex; }
++    VkResult queueSubmit(VkQueue queue, uint32_t count, const VkSubmitInfo* info, VkFence fence) const
++    {
++        std::lock_guard<std::mutex> lock(queueHostMutex());
++        return vkQueueSubmit(queue, count, info, fence);
++    }
++    VkResult queueWaitIdle(VkQueue queue) const
++    {
++        std::lock_guard<std::mutex> lock(queueHostMutex());
++        return vkQueueWaitIdle(queue);
++    }
++    VkResult queuePresent(VkQueue queue, const VkPresentInfoKHR* info) const
++    {
++        std::lock_guard<std::mutex> lock(queueHostMutex());
++        return vkQueuePresentKHR(queue, info);
++    }
++
+     VK_API_ALL_PROCS(VK_API_DECLARE_PROC)
+ 
+     enum class ProcType
+--- a/src/vulkan/vk-command.cpp
++++ b/src/vulkan/vk-command.cpp
+@@ -2128,7 +2128,7 @@
+         timelineSubmitInfo.pSignalSemaphoreValues = signalValues.data();
+     }
+ 
+-    SLANG_VK_RETURN_ON_FAIL_REPORT(m_api.vkQueueSubmit(m_queue, 1, &submitInfo, m_surfaceSync.fence), m_device);
++    SLANG_VK_RETURN_ON_FAIL_REPORT(m_api.queueSubmit(m_queue, 1, &submitInfo, m_surfaceSync.fence), m_device);
+     m_surfaceSync.fence = VK_NULL_HANDLE;
+ 
+     retireCommandBuffers();
+@@ -2140,7 +2140,7 @@
+ {
+     DeviceImpl* device = getDevice<DeviceImpl>();
+     auto& api = device->m_api;
+-    SLANG_VK_RETURN_ON_FAIL_REPORT(api.vkQueueWaitIdle(m_queue), device);
++    SLANG_VK_RETURN_ON_FAIL_REPORT(api.queueWaitIdle(m_queue), device);
+     retireCommandBuffers();
+     return SLANG_OK;
+ }
+--- a/src/vulkan/vk-surface.cpp
++++ b/src/vulkan/vk-surface.cpp
+@@ -389,7 +389,7 @@
+ void SurfaceImpl::destroySwapchain()
+ {
+     auto& api = m_device->m_api;
+-    api.vkQueueWaitIdle(m_device->m_queue->m_queue);
++    api.queueWaitIdle(m_device->m_queue->m_queue);
+     m_textures.clear();
+     for (FrameData& frameData : m_frameData)
+     {
+@@ -575,7 +575,7 @@
+     presentInfo.pImageIndices = &m_currentTextureIndex;
+     presentInfo.waitSemaphoreCount = 1;
+     presentInfo.pWaitSemaphores = &renderFinishedSemaphore;
+-    VkResult result = api.vkQueuePresentKHR(m_device->m_queue->m_queue, &presentInfo);
++    VkResult result = api.queuePresent(m_device->m_queue->m_queue, &presentInfo);
+     if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+     {
+         reportVulkanError(result, "vkQueuePresentKHR", SLANG_RHI_SOURCE_LOCATION(), m_device);
+--- a/src/vulkan/vk-device-queue.cpp
++++ b/src/vulkan/vk-device-queue.cpp
+@@ -121,7 +121,7 @@
+ 
+     FenceInfo& fence = m_fences[m_commandBufferIndex];
+ 
+-    m_api->vkQueueSubmit(m_queue, 1, &submitInfo, fence.fence);
++    m_api->queueSubmit(m_queue, 1, &submitInfo, fence.fence);
+ 
+     // mark signaled fence value
+     fence.value = m_nextFenceValue;
+--- a/src/vulkan/vk-device-queue.h
++++ b/src/vulkan/vk-device-queue.h
+@@ -39,7 +39,7 @@
+     void retireCompletedResources();
+ 
+     /// Blocks until all work submitted to GPU has completed
+-    void waitForIdle() { m_api->vkQueueWaitIdle(m_queue); }
++    void waitForIdle() { m_api->queueWaitIdle(m_queue); }
+ 
+     /// Get the graphics queue index (as set on init)
+     int getQueueIndex() const { return m_queueIndex; }
+--- a/src/vulkan/vk-buffer.cpp
++++ b/src/vulkan/vk-buffer.cpp
+@@ -166,7 +166,7 @@
+ 
+     for (auto& view : m_views)
+     {
+-        m_buffer.m_api->vkDestroyBufferView(m_buffer.m_api->m_device, view.second, nullptr);
++        device->m_api.vkDestroyBufferView(device->m_api.m_device, view.second, nullptr);
+     }
+ 
+     if (m_sharedHandle)
+```
+Activity
+nv-slang-bot
+added
+enhancementNew feature or requestNew feature or request
+design
+on Sep 14, 2026
+nv-slang-bot
+added the
+Feature
+issue type on Sep 14, 2026
+nv-slang-bot commented on Sep 14, 2026
+nv-slang-botBot
+on Sep 14, 2026 – with nv-slang-bot
+Contributor
+More actions
+Triage — design-discussion / enhancement (needs maintainer design input)
+Confirmed the mechanism and the underlying hazard against main @ e17f6d7 (source only — a data race isn't GPU-free reproducible, so no reproduced label):
+The shared native queue is real and needs no explicit import. DeviceNativeHandles carries only instance/physicalDevice/device (include/slang-rhi.h:3431-3433); the VkQueue is always fetched via vkGetDeviceQueue(m_device, m_queueFamilyIndex, 0, …) (src/vulkan/vk-device.cpp:1857), so two DeviceImpl wrapping the same native VkDevice receive the same VkQueue handle.
+Queue host-calls are entirely unguarded today — and this is already latent within a single Device, not only across contexts. Two internal submitters (CommandQueueImpl::submit vk-command.cpp:2131; VulkanDeviceQueue::flushStepA vk-device-queue.cpp:124), plus present/teardown (vk-surface.cpp:578 / :392) and both vkQueueWaitIdle sites (vk-command.cpp:2143, vk-device-queue.h:42), all touch the same handle with no lock. The existing mutexes guard only the command-buffer pool.
+The lifetime caveat you flagged is confirmed: destroying one DeviceImpl runs vkQueueWaitIdle on the shared queue (~DeviceImpl → waitOnHost / flushAndWait, vk-device.cpp:152,158), idling the other wrapper's in-flight work; the imported instance/device are (correctly) not destroyed.
+Solution space (full detail in triage notes — not selecting one; this is a design call):
+A — app-supplied shared sync object via native import. Only an app-shared object can satisfy your hard requirement that native calls made outside RHI participate; cost is new public API/ABI surface.
+B — library-owned per-native-queue lock registry (keyed on the VkQueue handle, refcounted, retired with the last wrapper). No API change and avoids the global-mutex over-serialization — but a library-private lock can't be shared with the app's own raw calls.
+C — document the app-synchronized contract + expose queue identity (getNativeHandle already returns {VkQueue, …}, vk-command.cpp:2148), plus a single internal choke-point so an app lock can reach RHI-internal submits.
+Recommended starting point: a design-neutral prerequisite worth doing regardless — route all six internal queue host-calls through one guarded wrapper (a single choke-point that also closes the latent intra-Device hazard) — then layer the shareable object (A) on top, with the public-API shape as a maintainer decision. Agreed the process-wide static mutex should not land as-is.
+Next step: maintainer design input on the public contract before implementation. Happy to prep a draft of the design-neutral choke-point consolidation on request.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+j8asic commented on Sep 14, 2026
+j8asic
+on Sep 14, 2026
+ContributorAuthor
+More actions
+Obviously I favour A, with B as the safe default... one shared synchronization object per native queue, auto managed but accessible to native integrations. That fits independent (e.g. in my heavy PoC renderer/worker) contexts without forcing coarse application-level locking.
+My train of thought. All RHI wrappers of the same queue should share that object, with an explicit mechanism for application-owned native calls to participate. Different queues should remain independent. Lock around the submit/present/queue-idle calls including internal helpers, not CPU recording or fence/timeline waits. Resolve and retain the shared object when creating/importing the context, rather than performing registry lookups on every submission. This should introduce no additional GPU waits.
+👀React with 👀1Reacted by nv-slang-bot
+nv-slang-bot commented on Sep 14, 2026
+nv-slang-botBot
+on Sep 14, 2026 – with nv-slang-bot
+Contributor
+More actions
+Thanks — that lines up with the recommended hybrid (B as the safe default, A layered on top for sharing). A few specifics I'd affirm:
+Resolve-and-retain the shared object at context create/import (rather than a per-submit registry lookup) is a good refinement — it removes any hot-path lookup cost and gives the object a clean lifetime tied to the set of wrappers.
+Guarding submit / present / queue-idle including the internal helpers (and leaving CPU recording and fence/timeline waits outside) matches what the code needs: today those internal submitters — CommandQueueImpl and VulkanDeviceQueue, plus surface present/teardown — all touch the one shared VkQueue unguarded, so the lock has to sit at that shared choke-point, not on the public submit() alone.
+Three constraints the design must keep: out-of-RHI native calls can participate in the same object; distinct queues stay fully independent (no common lock); and the object is correctly retired when the last wrapper (device) of a queue is destroyed.
+On the public-API shape — how the shared object is exposed/supplied at native import — I'll defer that to a maintainer; I'm not authorizing an API design or committing to an implementation here.
+One piece that is safe and useful regardless of the eventual API: the design-neutral choke-point consolidation — routing all six internal queue host-calls through a single guarded wrapper. That's available as a first step whenever a maintainer greenlights the direction, and it closes the confirmed latent intra-Device hazard on its own.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+🚀React with 🚀1Reacted by Josip Basic
+jkwak-work
+assigned
+expipiplus1
+on Sep 14, 2026
+jkwak-work
+changed the issue type from
+Feature
+to
+Performance
+on Sep 14, 2026
+jkwak-work
+added this to the Q4 2026 (Fall) milestone on Sep 16, 2026
+jhelferty-nv
+assigned
+jhelferty-nv
+and unassigned
+expipiplus1
+on Sep 28, 2026
+jhelferty-nv
+assigned
+skallweitNV
+and unassigned
+jhelferty-nv
+on Oct 19, 2026
+skallweitNV commented on Oct 19, 2026
+skallweitNV
+on Oct 19, 2026
+Collaborator
+More actions
+@j8asic, in your use case, you have a two rhi Device instances that both use the same underlying VkDevice and VkQueue instances?
+👀React with 👀1Reacted by nv-slang-bot
+j8asic commented on Oct 19, 2026
+j8asic
+on Oct 19, 2026
+ContributorAuthor
+More actions
+Yes @skallweitNV. The renderer and compute worker each have a separate thread-confined rhi::Device instance, but both wrap the same native VkDevice and the same VkQueue handle. They don’t use separate queues, so their host calls to that queue need shared synchronization.
+👀React with 👀1Reacted by nv-slang-bot
+skallweitNV commented on Oct 19, 2026
+skallweitNV
+on Oct 19, 2026
+Collaborator
+More actions
+I see. So making the entire call around queue->submit mutually exclusive in the application is not optimal because you lock longer than necessary? That's the main reason you want a finer grained hook where you can add the lock?
+👀React with 👀1Reacted by nv-slang-bot
+skallweitNV commented on Oct 19, 2026
+skallweitNV
+on Oct 19, 2026
+Collaborator
+More actions
+I think we should probably add a new desc struct that can be chained to DeviceDesc that provides a queue lock/unlock callback provided from the application. Or did you have something else in mind?
+👀React with 👀1Reacted by nv-slang-bot
+j8asic commented on Oct 19, 2026
+j8asic
+on Oct 19, 2026
+ContributorAuthor
+More actions
+That could work for my use case. All RHI wrappers of the same native queue can share the callback state, and the callbacks cover every RHI host call that needs queue synchronization, including internal helpers. The application’s direct Vulkan calls could take that same lock. I’d want separate queues to be able to use separate locks if one desc can cover multiple queues, the hook would need a way to distinguish them. I’d pictured a shared synchronization object, but this callback approach could provide the same coordination point.
+👀React with 👀1Reacted by nv-slang-bot
+skallweitNV commented on Oct 19, 2026
+skallweitNV
+on Oct 19, 2026
+Collaborator
+More actions
+how would the API for the shared synchronization object look like?
+👀React with 👀1Reacted by nv-slang-bot
+j8asic commented on Oct 19, 2026
+j8asic
+on Oct 19, 2026
+ContributorAuthor
+More actions
+app-owned lock state passed through a Vulkan-specific desc chained to DeviceDesc. Every RHI device wrapping the same VkQueue gets the same userData and callbacks... the queue handle lets the app keep locks for distinct queues independent. RHI would call them around each queue host operation that requires external synchronization, including internal helpers. The app would use that same lock state around its own direct Vulkan calls.
+```
+struct VulkanQueueHostSyncDesc
+{
+    static constexpr StructType kStructType = StructType::VulkanQueueHostSyncDesc;
+    StructType structType = kStructType;
+    const void* next = nullptr;
+
+    void* userData = nullptr;
+    void (*lock)(void* userData, NativeHandle queue) = nullptr;
+    void (*unlock)(void* userData, NativeHandle queue) = nullptr;
+};
+```
+👀React with 👀1Reacted by nv-slang-bot
+skallweitNV commented on Oct 19, 2026
+skallweitNV
+on Oct 19, 2026
+Collaborator
+More actions
+Yeah, that pretty much matches what I had in mind, but this can easily be used for other backends as well.
+So I would call this QueueHostSyncDesc instead. We can still document what backends implement it, but I don't think this needs to be Vulkan only.
+👍React with 👍1Reacted by Josip Basic
+👀React with 👀1Reacted by nv-slang-bot
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+skallweitNV
+Labels
+designenhancementNew feature or requestNew feature or request
+Type
+Performance
+Projects
+No projects
+Milestone
+Q4 2026 (Fall)
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

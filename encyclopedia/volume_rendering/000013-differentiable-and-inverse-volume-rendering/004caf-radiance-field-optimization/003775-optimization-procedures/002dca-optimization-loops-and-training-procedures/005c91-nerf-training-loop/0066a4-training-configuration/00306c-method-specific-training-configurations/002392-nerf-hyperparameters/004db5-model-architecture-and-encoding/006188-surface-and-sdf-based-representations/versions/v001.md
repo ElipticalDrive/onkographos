@@ -1,0 +1,61 @@
+# Surface and SDF-Based Representations
+
+Also called: SDF-based NeRF, Implicit Surface Rendering, Occupancy Fields
+
+## Overview
+This family replaces the standard volume density $\sigma$ output of canonical NeRF with a Signed Distance Function (SDF) or occupancy field to represent geometry [S1, unofficial]. By modeling the scene as an implicit surface, these methods achieve sharper geometry extraction and better surface definition than density-based approaches, which often suffer from "fuzzy" boundaries [S1, unofficial]. They differ from siblings like [Voxel and Grid Representations](18218-voxel-and-grid-representations.md) by using continuous neural fields for geometry rather than discrete grids, and from [Triplane and Planar Representations](18410-triplane-and-planar-representations.md) by explicitly optimizing for distance-to-surface metrics rather than just feature aggregation.
+
+## Shared principles
+The core mechanism involves predicting a scalar field $f(\mathbf{x})$ that represents the signed distance to the nearest surface (or occupancy) at position $\mathbf{x}$, rather than volume density [S1, unofficial]. This scalar field is transformed into opacity $\alpha$ or density $\sigma$ for volume rendering integration.
+
+**SDF to Opacity/Density Transformation**
+The SDF value $s(\mathbf{x})$ is converted into a probability of occupancy or density using a distribution parameterized by a variance or sparsity term $\beta$ [S1, 18174-sdf-based-volume-rendering-with-laplacian-cdf.md, unofficial].
+
+1.  **Laplacian CDF (Standard SDF):** Used in [SDF-based Volume Rendering with Laplacian CDF](18174-sdf-based-volume-rendering-with-laplacian-cdf.md). The opacity $\sigma$ is derived from the Cumulative Distribution Function (CDF) of a Laplacian distribution:
+    $$
+    \sigma = \begin{cases} 
+    \frac{1}{2} \exp\left(\frac{s}{\beta}\right) & \text{if } s \le 0 \\
+    1 - \frac{1}{2} \exp\left(-\frac{s}{\beta}\right) & \text{if } s > 0 
+    \end{cases}
+    $$
+    where $\beta$ controls the tightness of the surface representation [18174-sdf-based-volume-rendering-with-laplacian-cdf.md].
+
+2.  **Piecewise Exponential (I2-SDF):** Used in [I2-SDF](18170-i2-sdf.md). The density $\sigma$ is defined as:
+    $$
+    \sigma(\mathbf{x}) = 
+    \begin{cases} 
+    \frac{1}{\beta}(1 - \exp(d(\mathbf{x})/\beta)) & \text{if } d(\mathbf{x}) < 0 \\
+    \frac{1}{2\beta}\exp(-d(\mathbf{x})/2\beta) & \text{if } d(\mathbf{x}) \ge 0 
+    \end{cases}
+    $$
+    where $d(\mathbf{x})$ is the SDF value and $\beta$ is a learnable sparsity parameter [18170-i2-sdf.md].
+
+**Inverse CDF Sampling**
+To sample points efficiently near the surface, methods like [SDF-based Volume Rendering with Laplacian CDF](18174-sdf-based-volume-rendering-with-laplacian-cdf.md) use inverse CDF sampling. Random numbers $u_i \in [0, 1]$ are generated and transformed to sample distances $t_i$ using the inverse of the CDF $\Phi^{-1}(u_i)$, concentrating samples near the zero-crossing of the SDF [18174-sdf-based-volume-rendering-with-laplacian-cdf.md]. Stratification is applied by dividing the unit interval into bins [18174-sdf-based-volume-rendering-with-laplacian-cdf.md].
+
+**Occupancy Fields**
+As seen in [UniSurf](#unisurf), an occupancy field acts as an indicator of surface presence. For solid objects, the occupancy at the $i^{th}$ sample corresponds to an indicator of whether the sample is inside the surface [S1, unofficial].
+
+## Subtopics
+
+### [I2-SDF](18170-i2-sdf.md)
+I2-SDF is a neural implicit framework for complex indoor scenes that jointly recovers underlying shape, radiance, and material fields from multi-view images [18170-i2-sdf.md]. It distinguishes itself by decomposing the radiance field into spatially-varying material and emission components using surface-based, differentiable Monte Carlo raytracing, enabling physically based scene relighting and editing [18170-i2-sdf.md]. Unlike standard NeRF approaches that treat radiance as a monolithic field, I2-SDF employs a two-stage training scheme and error-guided adaptive sampling to resolve ambiguities and improve reconstruction quality on fine-grained small objects [18170-i2-sdf.md].
+
+### [SDF-based Volume Rendering with Laplacian CDF](18174-sdf-based-volume-rendering-with-laplacian-cdf.md)
+This method renders geometry by outputting a Signed Distance Function (SDF) value $s$ and a variance parameter $\beta$ from a neural network, then transforming $s$ into opacity $\sigma$ using a Laplacian Cumulative Distribution Function (CDF) [18174-sdf-based-volume-rendering-with-laplacian-cdf.md]. It builds on [Model Architecture and Encoding](13550-model-architecture-and-encoding.md) by integrating triplane features and SDF-based sampling. Unlike standard NeRF which outputs density directly, this approach enables tight surface extraction and inverse CDF sampling for more accurate depth estimation [18174-sdf-based-volume-rendering-with-laplacian-cdf.md].
+
+### UniSurf
+#### definition
+- [S1, unofficial] A method unifying volume rendering (radiance fields) and surface rendering (implicit surfaces) to achieve high-quality geometry and sharp textures without mask supervision.
+#### step
+- [S1, unofficial] Uses an occupancy field where the occupancy at the $i^{th}$ sample corresponds to an indicator of surface presence.
+- [S1, unofficial] Uses volume rendering in the early stage for optimization without mask supervision.
+- [S1, unofficial] Uses surface rendering in the later stage to extract level-set surfaces.
+#### comparison
+- [S1, unofficial] Unlike pure surface rendering which requires mask supervision and has blurry texture mapping, this method provides high-quality novel views and sharp textures/colors without mask supervision.
+
+## Background
+The concept of unifying neural radiance fields with implicit surfaces was introduced by Oechsle et al. in "Unifying Implicit Surfaces and Radiance Fields" (ICCV 2021) [S1, unofficial]. Prior to this, surface extraction from NeRF relied on thresholding density fields, which resulted in inaccurate geometry and blurry textures [S1, unofficial]. UniSurf demonstrated that treating the output as an occupancy field allows for the application of surface rendering techniques in later training stages, combining the best of both worlds: the robustness of volume rendering for optimization and the precision of implicit surfaces for geometry [S1, unofficial]. This family has since evolved to include more sophisticated SDF transformations and sampling strategies, such as the Laplacian CDF approach and material decomposition in I2-SDF.
+
+## Sources
+[S1] Lecture 7 – Neural Radiance Fields Prof. Dr., https://virtualhumans.mpi-inf.mpg.de/3DVision25/slides25/pdf/Lecture_07_Neural_Radiance_Fields.pdf, fetched 2026-10-27 (unofficial)

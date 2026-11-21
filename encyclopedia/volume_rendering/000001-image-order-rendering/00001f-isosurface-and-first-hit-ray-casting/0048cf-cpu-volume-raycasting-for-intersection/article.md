@@ -1,0 +1,169 @@
+# CPU Volume Raycasting for Intersection
+
+Also called: RaycastScene, Volume Raycasting for Intersection, VolumeRaycaster
+
+## Overview
+This method performs a CPU-based ray-primitive intersection test against a scene containing multiple volume datasets, returning the closest hit between a world-space ray and any volume object [S1, unofficial]. It iterates through all volume instances, samples voxel data, and evaluates visibility windows to determine intersections [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: A world-space ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, and a scene graph containing instances of `VolumeRenderedObject` [S1, unofficial].
+- **Output**: A `RaycastHit` structure containing the closest `VolumeRenderedObject`, the intersection point in world space, and the distance from the ray origin [S1, unofficial]. Returns false if no volume is hit [S1, unofficial].
+
+**Data Structures**
+The hit result is stored in a `RaycastHit` struct with the following fields [S1, unofficial]:
+- `VolumeRenderedObject volumeObject`: Reference to the hit volume object.
+- `Vector3 point`: The 3D intersection point in world coordinates.
+- `float distance`: The Euclidean distance from the ray origin to the hit point.
+
+**Algorithm Steps**
+1. **Scene Traversal**: Retrieve all active `VolumeRenderedObject` instances in the scene [S1, unofficial].
+2. **Collection**: For each object, invoke `RaycastObject` with the world-space ray and collect successful hits into a list [S1, unofficial].
+3. **Sorting**: Sort the list of hits by `distance` in ascending order [S1, unofficial].
+4. **Selection**: Return the first hit in the sorted list if the list is not empty; otherwise, return failure [S1, unofficial].
+
+**Per-Object Intersection (`RaycastObject`)**
+For a specific volume object, the intersection logic proceeds as follows [S1, unofficial]:
+1. **Transform Setup**: Retrieve the volume's local-to-world transform and its cross-section (cutout) data [S1, unofficial].
+2. **Visibility Window**: Calculate the minimum and maximum valid data values based on the dataset's min/max and user-defined visibility window parameters [S1, unofficial].
+3. **Local Space Conversion**: Transform the ray origin $\mathbf{o}$ and direction $\mathbf{d}$ from world space to the volume's local space using the inverse of the volume's transform matrix [S1, unofficial].
+4. **AABB Intersection**: Define a unit axis-aligned bounding box (AABB) centered at the origin with bounds $[0, 1]^3$ (i.e., `Vector3.zero` to `Vector3.one`) [S1, unofficial]. Intersect the local ray with this AABB to find the entry parameter $t_{start}$ [S1, unofficial].
+5. **Raymarch Initialization**: Initialize the raymarch position and direction [S1, unofficial]. If the ray does not intersect the AABB, return false [S1, unofficial].
+6. **Sampling Loop**: Iterate along the ray direction within the AABB bounds [S1, unofficial]:
+    a. **Cutout Test**: Check if the current world-space position is occluded by any cross-section/cutout object (e.g., planes, boxes) [S1, unofficial]. If hidden, skip sampling for this step [S1, unofficial].
+    b. **Coordinate Conversion**: Convert the current world-space position to texture coordinates $(u, v, w)$ by adding an offset of $0.5$ to the normalized local coordinates [S1, unofficial].
+    c. **Index Calculation**: Calculate the integer indices $(i, j, k)$ for the volume dataset based on the texture coordinates [S1, unofficial].
+    d. **Data Sampling**: Sample the raw data value $V$ at index $(i, j, k)$ [S1, unofficial].
+    e. **Normalization**: Normalize $V$ to the range $[0.0, 1.0]$ using the dataset's global min and max values: $V_{norm} = \frac{V - V_{min}}{V_{max} - V_{min}}$ [S1, unofficial].
+    f. **Transfer Function**: Evaluate the transfer function alpha $\alpha$ for $V_{norm}$ [S1, unofficial].
+    g. **Hit Condition**: If $V_{norm}$ is within the visibility window and $\alpha > 0$, a hit is recorded [S1, unofficial].
+7. **Result Construction**: Transform the hit position back to world space. Calculate the distance as the magnitude of the vector from the original ray origin to the hit point. Return true with the hit data [S1, unofficial].
+
+**Cutout Evaluation (`IsCutout`)**
+The `IsCutout` function determines if a point is inside or outside specific geometric shapes (Plane, BoxInclusive, BoxExclusive) using matrix transformation [S1, unofficial]:
+- **Plane**: Uses the plane's normal and distance from origin.
+- **BoxInclusive/BoxExclusive**: Uses the box's transformation matrix to transform the point into local box space and checks if coordinates lie within bounds.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class RaycastHit:
+    def __init__(self, volume_object, point, distance):
+        self.volumeObject = volume_object
+        self.point = point
+        self.distance = distance
+
+def find_objects_of_type(scene_objects, type_name):
+    """Returns all objects in the scene matching the type name."""
+    return [obj for obj in scene_objects if obj.type == type_name]
+
+def intersect_ray_aabb(origin, direction, min_bound, max_bound):
+    """Returns t_start where ray enters unit AABB, or None if no intersection."""
+    t_min = float('-inf')
+    t_max = float('inf')
+    for i in range(3):
+        if direction[i] == 0:
+            if origin[i] < min_bound[i] or origin[i] > max_bound[i]:
+                return None
+        else:
+            t1 = (min_bound[i] - origin[i]) / direction[i]
+            t2 = (max_bound[i] - origin[i]) / direction[i]
+            t_min = max(t_min, min(t1, t2))
+            t_max = min(t_max, max(t1, t2))
+    if t_max < 0 or t_min > t_max:
+        return None
+    return t_min
+
+def texture_coords_to_indices(uvw, resolution):
+    """Converts normalized texture coordinates to integer voxel indices."""
+    return [int(c * res) for c, res in zip(uvw, resolution)]
+
+def point_in_halfspace(point, normal, distance):
+    """Returns True if point is on the positive side of the plane."""
+    return sum(p * n for p, n in zip(point, normal)) + distance >= 0
+
+def vector_magnitude(v):
+    """Returns Euclidean length of vector v."""
+    return math.sqrt(sum(x * x for x in v))
+
+def is_inside_box(local_pos, bounds_min, bounds_max):
+    """Returns True if local_pos is within box bounds."""
+    return all(b_min <= p <= b_max for p, b_min, b_max in zip(local_pos, bounds_min, bounds_max))
+
+def cpu_volume_raycast_scene(world_ray_origin, world_ray_direction, scene_objects):
+    """Finds the closest volume intersection in a scene."""
+    hits = []
+    volume_objects = find_objects_of_type(scene_objects, "VolumeRenderedObject")
+    for obj in volume_objects:
+        hit = raycast_object(world_ray_origin, world_ray_direction, obj)
+        if hit is not None:
+            hits.append(hit)
+    hits.sort(key=lambda h: h.distance)
+    return hits[0] if hits else None
+
+def raycast_object(world_ray_origin, world_ray_direction, volume_obj):
+    """Tests intersection with a single volume object."""
+    transform = volume_obj.transform
+    cutouts = volume_obj.cross_section_data
+    v_min = volume_obj.dataset_min
+    v_max = volume_obj.dataset_max
+    vis_window = volume_obj.visibility_window
+    
+    local_ray_origin = transform.world_to_local(world_ray_origin)
+    local_ray_direction = transform.world_to_local_direction(world_ray_direction)
+    
+    t_start = intersect_ray_aabb(local_ray_origin, local_ray_direction, 
+                                 min_bound=(0.0, 0.0, 0.0), max_bound=(1.0, 1.0, 1.0))
+    if t_start is None:
+        return None
+        
+    current_pos = local_ray_origin + local_ray_direction * t_start
+    step_size = 0.01  # Standard fixed step size [G]
+    
+    while t_start <= 1.0:
+        world_pos = transform.local_to_world(current_pos)
+        if not is_occluded(world_pos, cutouts):
+            uvw = [c + 0.5 for c in current_pos]
+            i, j, k = texture_coords_to_indices(uvw, volume_obj.resolution)
+            raw_value = volume_obj.data_sample(i, j, k)
+            if v_max != v_min:
+                normalized = (raw_value - v_min) / (v_max - v_min)
+            else:
+                normalized = 0.0
+            alpha = volume_obj.transfer_function(normalized)
+            if vis_window.min <= normalized <= vis_window.max and alpha > 0:
+                hit_point_world = transform.local_to_world(current_pos)
+                distance = vector_magnitude([w - o for w, o in zip(hit_point_world, world_ray_origin)])
+                return RaycastHit(volume_obj, hit_point_world, distance)
+        t_start += step_size
+        current_pos = local_ray_origin + local_ray_direction * t_start
+    return None
+
+def is_occluded(world_pos, cutouts):
+    """Checks if position is inside any cutout shape."""
+    for cutout in cutouts:
+        if cutout.type == "Plane":
+            if point_in_halfspace(world_pos, cutout.plane_normal, cutout.plane_distance):
+                return True
+        elif cutout.type in ["BoxInclusive", "BoxExclusive"]:
+            local_pos = cutout.transform.world_to_local(world_pos)
+            if is_inside_box(local_pos, cutout.bounds_min, cutout.bounds_max):
+                return True
+    return False
+```
+
+## Operating characteristics
+- **Time Complexity**: $O(N \cdot M + K \log K)$, where $N$ is the number of volume objects, $M$ is the number of samples per ray, and $K$ is the number of hits [G].
+- **Memory Complexity**: $O(K)$ for storing hit results [G].
+- **Measured Performance**: Not given in the sources.
+- **Strengths**: Simple implementation, integrates directly with CPU-side scene graphs [S1, unofficial].
+- **Limitations**: Poor scalability with high-resolution volumes or many objects [G].
+
+## Background
+This method is implemented in the `UnityVolumeRendering` project [S1, unofficial]. It is designed for interactive tools within the Unity engine, leveraging its component-based architecture (`VolumeRenderedObject`, `SlicingPlane`) [S1, unofficial].
+
+## Sources
+[S1] GitHub - mlavik1/UnityVolumeRendering: Volume rendering, implemented in ..., https://github.com/mlavik1/UnityVolumeRendering, fetched 2026-10-28 (unofficial)

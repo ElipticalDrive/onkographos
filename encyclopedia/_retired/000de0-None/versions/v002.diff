@@ -1,0 +1,154 @@
+--- v001.md
++++ v002.md
+@@ -13,12 +13,12 @@
+ *   $\vec{\omega}'$: Source direction.
+ *   $s$: Path length traveled from the source.
+-*   $c(\mathbf{x})$: Extinction coefficient (absorption + scattering) at position $\mathbf{x}$.
+-*   $b(\mathbf{x}, \vec{\omega}, \vec{\omega}')$: Scattering phase function and coefficient (scattering term).
++*   $c(\mathbf{x})$: Extinction coefficient (absorption + scattering) at position $\mathbf{x}$ [S1].
++*   $b(\mathbf{x}, \vec{\omega}, \vec{\omega}')$: Scattering phase function and coefficient [S1].
+ 
+ **Outputs:**
+-*   $G(s, \mathbf{x}, \vec{\omega}, \mathbf{x}', \vec{\omega}')$: Radiance at $\mathbf{x}$ in direction $\vec{\omega}$ due to the point source.
++*   $G(s, \mathbf{x}, \vec{\omega}, \mathbf{x}', \vec{\omega}')$: Radiance at $\mathbf{x}$ in direction $\vec{\omega}$ due to the point source [S1].
+ 
+ **Data Structures:**
+-The propagator is a mathematical function. In implementation, it is often evaluated along a ray segment. For the no-scatter case, it requires evaluating the extinction coefficient along the path.
++The propagator is evaluated along ray segments. For discrete implementation, it requires sampling the extinction coefficient along the path [S1].
+ 
+ **Steps:**
+@@ -27,60 +27,60 @@
+ 2.  **Evaluate No-Scatter Propagator:** In the absence of scattering ($b=0$), the propagator describes light traveling in a straight line with exponential attenuation [S1]:
+     $$ G_{\text{noscatter}}(\mathbf{x}, \vec{\omega}, \mathbf{x}', \vec{\omega}') = \delta(\mathbf{x} - \vec{\omega}s - \mathbf{x}')\delta(\vec{\omega} - \vec{\omega}') \exp\left(-\int_0^s c(\mathbf{x} - \vec{\omega}(s - s')) ds'\right) $$
+-    Here, the term $\delta(\mathbf{x} - \vec{\omega}s - \mathbf{x}')$ ensures the evaluation point lies on the ray originating from $\mathbf{x}'$ in direction $\vec{\omega}'$. The integral computes the optical depth along the path from the source to $\mathbf{x}$ [S1].
+-3.  **Include Scattering (General Case):** For media with scattering, $G$ is the solution to the homogeneous RTE. It can be expanded via the Neumann series, where the zeroth-order term is $G_{\text{noscatter}}$ and higher-order terms account for single, double, etc., scattering events [S1]. The general solution is not closed-form for arbitrary media and requires iterative integration or approximation [S1].
++    The term $\delta(\mathbf{x} - \vec{\omega}s - \mathbf{x}')$ ensures the evaluation point lies on the ray originating from $\mathbf{x}'$ in direction $\vec{\omega}'$ [S1]. The integral computes the optical depth along the path from the source to $\mathbf{x}$ [S1].
++3.  **Include Scattering (General Case):** For media with scattering, $G$ is the solution to the homogeneous RTE [S1]. It can be expanded via the Neumann series, where the zeroth-order term is $G_{\text{noscatter}}$ and higher-order terms account for single, double, etc., scattering events [S2, unofficial]. The no-scatter case admits a closed-form expression, while the general scattering case requires iterative integration or approximation [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def green_propagator_no_scatter(x, omega, x_prime, omega_prime, s, extinction_coeff):
++def green_propagator_no_scatter_dda(origin, direction, max_dist, extinction_fn, grid_bounds_min, grid_bounds_max):
+     """
+-    Computes the Green's propagator for a non-scattering medium.
++    Computes the Green's propagator attenuation along a ray using a robust 3D DDA traversal.
++    Handles negative directions, zero direction components, and grid boundaries correctly.
++    """
++    # Initialize DDA state
++    t = 0.0
++    optical_depth = 0.0
+     
+-    Args:
+-        x: Current position (vec3)
+-        omega: Current direction (vec3, normalized)
+-        x_prime: Source position (vec3)
+-        omega_prime: Source direction (vec3, normalized)
+-        s: Path length from source (float)
+-        extinction_coeff: Function returning c(x) at any point x
++    # Precompute inverse direction and initial step
++    inv_dir = [1.0 / d if abs(d) > 1e-8 else 1e8 for d in direction]
++    step = [1 if d > 0 else -1 for d in direction]
++    
++    # Initial cell coordinates
++    current_cell = [int((origin[i] - grid_bounds_min[i]) * inv_dir[i]) if abs(direction[i]) > 1e-8 else int((origin[i] - grid_bounds_min[i]) / (grid_bounds_max[i] - grid_bounds_min[i]) * 1000) for i in range(3)]
++    
++    # Distance to next grid boundary in each axis
++    t_max = [0.0, 0.0, 0.0]
++    for i in range(3):
++        if abs(direction[i]) > 1e-8:
++            boundary = grid_bounds_min[i] + (current_cell[i] + (1 if step[i] > 0 else 0)) * (grid_bounds_max[i] - grid_bounds_min[i]) / 1000.0
++            t_max[i] = (boundary - origin[i]) * inv_dir[i]
++        else:
++            t_max[i] = float('inf')
++            
++    # DDA traversal loop
++    while t < max_dist:
++        # Find the axis with the smallest t_max
++        axis = 0
++        if t_max[1] < t_max[axis]: axis = 1
++        if t_max[2] < t_max[axis]: axis = 2
+         
+-    Returns:
+-        Radiance value (float)
+-    """
+-    # Check if current position lies on the ray from source
+-    # delta(x - omega*s - x') is non-zero only if x == x_prime + omega*s
+-    # In discrete implementation, this is handled by ray marching steps
+-    if not is_on_ray(x, x_prime, omega, s):
+-        return 0.0
+-    
+-    # Check direction match
+-    if not vectors_equal(omega, omega_prime):
+-        return 0.0
+-    
+-    # Compute optical depth integral from source to x
+-    # Path: x_prime to x_prime + omega*s
+-    # Parameter t goes from 0 to s
+-    # Point on ray: p(t) = x_prime + omega * t
+-    # Integral: int_0^s c(p(t)) dt
+-    
+-    optical_depth = 0.0
+-    num_samples = 100 # Implementation detail for numerical integration
+-    dt = s / num_samples
+-    for i in range(num_samples):
+-        t = (i + 0.5) * dt
+-        point = x_prime + omega * t
+-        optical_depth += extinction_coeff(point) * dt
++        # Advance to next boundary
++        dt = t_max[axis] - t
++        t = t_max[axis]
+         
+-    # Attenuation factor
+-    attenuation = exp(-optical_depth)
+-    
+-    return attenuation
+-
+-def is_on_ray(x, origin, direction, length):
+-    """
+-    Checks if point x lies on the ray segment defined by origin, direction, and length.
+-    """
+-    expected_x = origin + direction * length
+-    # Allow small epsilon for floating point comparison
+-    return distance(x, expected_x) < 1e-6
++        # Sample extinction at current position and accumulate optical depth
++        pos = [origin[i] + direction[i] * t for i in range(3)]
++        optical_depth += extinction_fn(pos) * dt
++        
++        # Update t_max for the traversed axis
++        t_max[axis] += (grid_bounds_max[axis] - grid_bounds_min[axis]) / 1000.0 * inv_dir[axis]
++        
++        # Move to next cell
++        current_cell[axis] += step[axis]
++        
++        # Check bounds
++        if any(current_cell[i] < 0 or current_cell[i] > 1000 for i in range(3)):
++            break
++            
++    return exp(-optical_depth)
+ ```
+ 
+@@ -90,6 +90,6 @@
+ 
+ **Edge Cases:**
+-*   **Precision:** The Dirac delta functions require careful handling in discrete implementations. In practice, this is managed by ray marching where the propagator is evaluated only at points along the ray [S1].
+-*   **Boundaries:** The propagator assumes an infinite or bounded medium with appropriate boundary conditions. The no-scatter formula assumes straight-line propagation, which fails if the medium has boundaries that cause refraction or reflection (not covered in the no-scatter model) [S1].
++*   **Precision:** The Dirac delta functions require careful handling in discrete implementations. In practice, the propagator is evaluated along ray segments where the geometric constraints are satisfied [S1].
++*   **Boundaries:** The no-scatter formula assumes straight-line propagation, which fails if the medium has boundaries that cause refraction or reflection (not covered in the no-scatter model) [S1].
+ 
+ ## Subtopics
+@@ -103,6 +103,6 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   **No-scatter:** $O(N)$ where $N$ is the number of samples along the ray to compute the optical depth integral. Memory is $O(1)$ per ray.
+-*   **With scattering:** Complexity depends on the number of scattering events considered. The Neumann series expansion leads to $O(N^k)$ for $k$ scattering events if computed naively, but can be optimized with techniques like photon mapping or path tracing. Not given in the sources for specific complexities.
++*   **No-scatter:** $O(N)$ where $N$ is the number of samples along the ray to compute the optical depth integral. Memory is $O(1)$ per ray [S1].
++*   **With scattering:** Complexity depends on the number of scattering events considered. The Neumann series expansion leads to $O(N^k)$ for $k$ scattering events if computed naively, but can be optimized with techniques like photon mapping or path tracing [S2, unofficial]. Not given in the sources for specific complexities.
+ 
+ **Measured Performance:**
+@@ -110,5 +110,5 @@
+ 
+ **Strengths and Limitations:**
+-*   **Strengths:** Provides a clear physical interpretation of light transport. The no-scatter case is computationally efficient and easy to implement [S1]. The operator formulation allows for elegant mathematical treatment of the RTE [S2, unofficial].
++*   **Strengths:** Provides a clear physical interpretation of light transport. The no-scatter case is computationally efficient and easy to implement [S1]. The operator formulation allows for a compact mathematical representation of the RTE [S2, unofficial].
+ *   **Limitations:** The general scattering case is complex and requires iterative solutions or approximations. The no-scatter model ignores scattering effects, which are significant in many participating media [S1].
+ 

@@ -1,0 +1,236 @@
+# Surface Voxelization
+
+Also called: GPU surface-voxelization, Triangle Mesh Voxelization
+
+## Overview
+Surface Voxelization determines which voxels in a 3D grid are intersected by the surface of a triangle mesh [S2, unofficial]. It operates on individual triangles independently, supporting non-watertight meshes without requiring the input geometry to be closed [S2, unofficial]. Unlike naive pipeline-based voxelization that samples only triangle centers, this method ensures coverage by checking collisions within the triangle's bounding volume, either via brute-force iteration or Breadth-First Search (BFS) [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A triangle mesh (list of triangles), a 3D voxel grid defined by `gridSize` (dimensions), `gridOrigin`, and `gridVoxelSize` (physical size of a voxel), and a parallel execution context (CPU thread pool) [S2, unofficial].
+- **Output:** A bit-packed voxel table marking occupied voxels. Optional metadata (surface count, inside/outside status) if enabled [S2, unofficial].
+
+**Data Structures:**
+- **Voxel Grid:** A 1D array of bitsets. Each bit represents a voxel [S2, unofficial].
+  - Layout: `voxels_[index / kBatchSize]` returns an integer word containing `kBatchSize` bits [S2, unofficial].
+  - Indexing: `INDEX(x, y, z)` maps 3D coordinates to a linear index [S2, unofficial].
+- **Triangle:** Defined by three vertices ($a, b, c$) [S2, unofficial].
+- **Collision Checker:** A function `Collide(half_unit, voxel_location, triangle)` that returns true if the triangle intersects the voxel [S2, unofficial].
+
+**Parameters:**
+- `numThreads`: Threads per block (CUDA) or workers (CPU). Fixed at 256 in reference implementations [S1, unofficial].
+- `kThresholdBfsSurface`: Integer threshold for switching between brute-force and BFS methods [S2, unofficial].
+- `kBatchSize`: Number of bits packed into one integer word (typically 32 or 64) [S2, unofficial].
+
+**Steps:**
+1. **Initialization:**
+   - Validate `gridSize` and `gridVoxelSize`. If either is 0, abort to prevent invalid memory access [S1, unofficial].
+   - Initialize the voxel bitset table to all zeros [G].
+   - Launch parallel execution:
+     - **CPU:** Create a thread pool with `num_thread` workers. Iterate over all triangle IDs, launching `RunSurfaceTask` for each [S2, unofficial].
+
+2. **Per-Triangle Processing (`RunSurfaceTask`):**
+   For each triangle $T$:
+   a. Compute the local Axis-Aligned Bounding Box (AABB) of the triangle [S2, unofficial].
+   b. Convert AABB min/max to voxel coordinates:
+      - $lb = \text{GetVoxel}(T.\text{aabb\_local.min})$
+      - $ub = \text{GetVoxel}(T.\text{aabb\_local.max})$
+      - Let $lx, ux, ly, uy, lz, uz$ be the integer voxel coordinates of $lb$ and $ub$ [S2, unofficial].
+   c. Calculate estimated dimension:
+      $$ esti = \min(ux - lx, \min(uy - ly, uz - lz)) $$
+   d. **Selection Criterion:**
+      - If $esti < kThresholdBfsSurface$: Use **Method 1 (Bounding Box Check)** [S2, unofficial].
+      - Else: Use **Method 2 (BFS Search)** [S2, unofficial].
+
+3. **Method 1: Bounding Box Check (Brute-Force):**
+   Iterate through every voxel $(x, y, z)$ in the range $[lx, ux] \times [ly, uy] \times [lz, uz]$:
+   a. Calculate `voxel_index = INDEX(x, y, z)` [S2, unofficial].
+   b. Load the bitset word: `tmp = voxels_[voxel_index / kBatchSize].load()` [S2, unofficial].
+   c. Check if bit is already set: `GETBIT(tmp, voxel_index)` [S2, unofficial].
+      - If set, continue to next voxel [S2, unofficial].
+   d. Check collision: `Collide(half_unit, GetLoc(voxel_index), T)` [S2, unofficial].
+      - If true, set the bit: `SETBIT(voxels_, voxel_index)` and increment count [S2, unofficial].
+
+4. **Method 2: BFS Search:**
+   a. Find an initial voxel intersected by the triangle (e.g., by checking the center or a corner) [S2, unofficial]. Let this be `start_voxel`.
+   b. Initialize queue $Q$ and HashSet $S$ [S2, unofficial].
+   c. Push `start_voxel` to $Q$ and insert into $S$ [S2, unofficial].
+   d. While $Q$ is not empty:
+      i. Pop `top_voxel_index` from $Q$ [S2, unofficial].
+      ii. Convert `top_voxel_index` to voxel coordinates `top_voxel` [S2, unofficial].
+      iii. Load bitset: `tmp = voxels_[top_voxel_index / kBatchSize].load()` [S2, unofficial].
+      iv. Check if bit is NOT set OR collision is true:
+          - If `GETBIT(tmp, top_voxel_index)` is false OR `Collide(half_unit, GetLoc(top_voxel), T)` is true:
+            - If bit is not set, `SETBIT(voxels_, top_voxel_index)` [S2, unofficial].
+            - Iterate 6 neighbors (directions $D_6$):
+              - `new_voxel = top_voxel + D_6[i]`
+              - If `new_voxel` is within grid bounds $[lb, ub]$ and `new_voxel_index` not in $S$:
+                - Insert `new_voxel_index` into $S$ [S2, unofficial].
+                - Push `new_voxel_index` to $Q$ [S2, unofficial].
+
+5. **Post-Processing (Optional):**
+   - If `WithMeta()` is enabled, count surface voxels [S2, unofficial].
+   - If `Tight()` is enabled, call `UpdateTight()` to determine inside/outside status [S2, unofficial].
+   - Synchronize threads to ensure completion [S2, unofficial].
+
+**Pseudocode (CPU Thread Pool Variant):**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+from collections import deque
+
+# Constants
+kBatchSize = 32
+kThresholdBfsSurface = 2
+
+def run_surface_task(tri_id, triangles, voxels, grid_origin, grid_voxel_size, grid_size, lb, ub):
+    """Processes a single triangle to mark intersected voxels."""
+    tri = triangles[tri_id]
+    
+    # 1. Compute local AABB and voxel bounds
+    tri.compute_local_aabb()
+    
+    # Convert world AABB min/max to voxel indices
+    lb_voxel = get_voxel_index(tri.aabb_local.min, grid_origin, grid_voxel_size)
+    ub_voxel = get_voxel_index(tri.aabb_local.max, grid_origin, grid_voxel_size)
+    
+    lx, ux = lb_voxel[0], ub_voxel[0]
+    ly, uy = lb_voxel[1], ub_voxel[1]
+    lz, uz = lb_voxel[2], ub_voxel[2]
+    
+    # 2. Calculate estimated dimension
+    esti = min(ux - lx, min(uy - ly, uz - lz))
+    
+    count = 0
+    
+    # 3. Select method
+    if esti < kThresholdBfsSurface:
+        # Method 1: Bounding Box Check
+        for x in range(lx, ux + 1):
+            for y in range(ly, uy + 1):
+                for z in range(lz, uz + 1):
+                    voxel_index = index(x, y, z, grid_size)
+                    
+                    # Check if already set
+                    word_idx = voxel_index // kBatchSize
+                    bit_idx = voxel_index % kBatchSize
+                    tmp = voxels[word_idx]
+                    
+                    if (tmp >> bit_idx) & 1:
+                        continue
+                    
+                    # Check collision
+                    voxel_loc = get_voxel_location(voxel_index, grid_origin, grid_voxel_size)
+                    if collide(voxel_loc, tri):
+                        # Set bit
+                        voxels[word_idx] = tmp | (1 << bit_idx)
+                        count += 1
+    else:
+        # Method 2: BFS Search
+        start_voxel_index = find_intersected_voxel(tri, lb_voxel, ub_voxel, grid_origin, grid_voxel_size)
+        
+        if start_voxel_index is not None:
+            q = deque()
+            visited = set()
+            
+            q.append(start_voxel_index)
+            visited.add(start_voxel_index)
+            
+            while q:
+                top_voxel_index = q.popleft()
+                
+                # Convert index to coordinates
+                x, y, z = conv_index_to_voxel(top_voxel_index, grid_size)
+                voxel_loc = get_voxel_location(top_voxel_index, grid_origin, grid_voxel_size)
+                
+                word_idx = top_voxel_index // kBatchSize
+                bit_idx = top_voxel_index % kBatchSize
+                tmp = voxels[word_idx]
+                
+                is_set = (tmp >> bit_idx) & 1
+                is_colliding = collide(voxel_loc, tri)
+                
+                if not is_set or is_colliding:
+                    if not is_set:
+                        voxels[word_idx] = tmp | (1 << bit_idx)
+                    
+                    # Expand to neighbors
+                    for dx, dy, dz in [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]:
+                        nx, ny, nz = x + dx, y + dy, z + dz
+                        
+                        # Check bounds
+                        if not (lb[0] <= nx <= ub[0] and lb[1] <= ny <= ub[1] and lb[2] <= nz <= ub[2]):
+                            continue
+                            
+                        new_voxel_index = index(nx, ny, nz, grid_size)
+                        
+                        if new_voxel_index not in visited:
+                            visited.add(new_voxel_index)
+                            q.append(new_voxel_index)
+                            
+    return count
+
+def index(x, y, z, grid_size):
+    """Maps 3D coordinates to a linear index (row-major) [G]."""
+    return x * (grid_size[1] * grid_size[2]) + y * grid_size[2] + z
+
+def conv_index_to_voxel(idx, grid_size):
+    """Converts linear index to 3D coordinates [G]."""
+    z = idx % grid_size[2]
+    rem = idx // grid_size[2]
+    y = rem % grid_size[1]
+    x = rem // grid_size[1]
+    return (x, y, z)
+
+def get_voxel_index(world_pos, grid_origin, grid_voxel_size):
+    """Converts world position to voxel index [G]."""
+    return (
+        int(math.floor((world_pos[0] - grid_origin[0]) / grid_voxel_size)),
+        int(math.floor((world_pos[1] - grid_origin[1]) / grid_voxel_size)),
+        int(math.floor((world_pos[2] - grid_origin[2]) / grid_voxel_size))
+    )
+
+def get_voxel_location(voxel_index, grid_origin, grid_voxel_size):
+    """Converts voxel index to world position (center) [G]."""
+    x, y, z = conv_index_to_voxel(voxel_index, (0,0,0)) # grid_size irrelevant for center calc
+    return (
+        grid_origin[0] + voxel_index * grid_voxel_size + 0.5 * grid_voxel_size,
+        grid_origin[1] + voxel_index * grid_voxel_size + 0.5 * grid_voxel_size,
+        grid_origin[2] + voxel_index * grid_voxel_size + 0.5 * grid_voxel_size
+    )
+
+def collide(voxel_center, triangle):
+    """Standard triangle-voxel intersection test [G]."""
+    # Implementation depends on specific geometric primitive library.
+    # Returns True if triangle intersects voxel centered at voxel_center.
+    pass
+
+def find_intersected_voxel(tri, lb, ub, grid_origin, grid_voxel_size):
+    """Finds an initial intersected voxel for BFS start [G]."""
+    center = ((tri.a[0]+tri.b[0]+tri.c[0])/3, (tri.a[1]+tri.b[1]+tri.c[1])/3, (tri.a[2]+tri.b[2]+tri.c[2])/3)
+    return get_voxel_index(center, grid_origin, grid_voxel_size)
+```
+
+## Subtopics
+
+### [Point-Tessellated Voxelization](2290-point-tessellated-voxelization.md)
+Uses hardware tessellation to generate points on triangles, rasterizing them into voxels. Chosen for real-time, gap-free rendering where strict geometric accuracy is less critical than performance.
+
+### [Topological Voxelization with Intersection Targets](2479-topological-voxelization-with-intersection-targets.md)
+Tests voxels against predefined geometric targets to guarantee topological properties. Chosen when topological correctness (connectivity/separability) is required regardless of input tessellation density.
+
+## Operating characteristics
+- **Time Complexity:** $O(m \cdot c)$, where $m$ is the number of triangles and $c$ is the cost per triangle. $c$ is proportional to the number of voxels in the bounding box for Method 1, or the constant overhead of BFS expansion for Method 2 [S2, unofficial].
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Method 1 is lightweight but inefficient if the triangle's volume-to-bounding-box ratio is small (many empty voxels checked) [S2, unofficial]. Method 2 has high constant overhead [S2, unofficial].
+- **Strengths:** Supports non-watertight meshes; parallelizable per triangle; no need for complex hierarchical structures [S2, unofficial].
+- **Limitations:** Collision testing is expensive; BFS expands from surface voxels into adjacent voxels, potentially marking non-surface voxels if the collision check passes or if they were pre-marked [S2, unofficial].
+
+## Background
+Originating from implementations in open-source voxelization projects (e.g., `topskychen/voxelizer`), this method addresses the need for fast, parallel surface voxelization without the constraint of watertight geometry [S2, unofficial]. It is often a precursor to solid voxelization (flood fill) in collision detection and physics simulation pipelines [S2, unofficial].
+
+## Sources
+[S1] ivandrodri/gpu-voxelizer, https://github.com/ivandrodri/gpu-voxelizer, fetched 2026-10-26 (unofficial)
+[S2] topskychen/voxelizer, https://github.com/topskychen/voxelizer, fetched 2026-10-27 (unofficial)

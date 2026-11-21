@@ -1,0 +1,141 @@
+--- v002.md
++++ v003.md
+@@ -4,55 +4,108 @@
+ 
+ ## Overview
+-Vertex Ambient Occlusion Approximation is a local illumination technique for voxel-based rendering that estimates self-shadowing by analyzing the occupancy of neighboring voxels around a mesh vertex. It solves the problem of flat, unshaded voxel surfaces by darkening concave areas and crevices, simulating the visual effect of ambient occlusion without the computational cost of ray casting. It differs from [Voxel Ambient Occlusion](6646-voxel-ambient-occlusion.md) by operating on vertex data rather than volume samples, and from [JAOCC Shading](3634-jaocc-shading.md) by using a simplified geometric neighborhood check instead of a precomputed cache or complex spherical harmonics.
++Vertex Ambient Occlusion Approximation is a local illumination technique that darkens vertices of a polygon mesh (generated from voxel data) based on the density of solid voxels in their immediate neighborhood, simulating shadowing in crevices [S2, unofficial]. It solves the problem of harsh, blocky lighting transitions and incorrect zero-light values on blocked faces by sampling neighbors rather than the cell itself [S2, unofficial]. Unlike standard ray-casted ambient occlusion, it achieves a similar darkening effect in concave areas as a side effect of this averaging process, without the computational cost of ray casting [S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- A voxel grid $V$ where each voxel is either solid (1) or empty (0).
+-- A set of vertices $\mathbf{v}_i$ derived from the voxel mesh, each with a position $\mathbf{p}_i$ and an approximated normal $\mathbf{n}_i$.
+-- The voxel coordinates $(x, y, z)$ corresponding to the vertex position.
++- A voxel grid representing the scene geometry.
++- A vertex position $(x, y, z)$ in voxel coordinates.
++- A vertex normal vector $\mathbf{n}$.
++- A boolean function `is_solid(x, y, z)` that returns true if the voxel at the given coordinates is occupied.
+ 
+ **Outputs:**
+-- An ambient occlusion factor $AO \in [0, 1]$ for each vertex.
+-- The shaded color $C_{shaded} = C_{base} \times AO$.
++- An ambient occlusion factor $AO \in [0, 1]$.
++- The final vertex color, computed by multiplying the base color by the AO factor.
+ 
+ **Data Structures:**
+-- The voxel grid is typically stored as a 3D array or hash map. Access must handle boundary checks, returning 0 (empty) for coordinates outside the grid bounds [S2, unofficial].
++- The voxel grid is accessed via integer coordinates. Boundary checks are required to prevent out-of-bounds access [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Neighbor Iteration:** For a vertex at voxel coordinates $(x, y, z)$, iterate through all 26 immediate neighbors defined by offsets $(dx, dy, dz) \in \{-1, 0, 1\}^3 \setminus \{(0,0,0)\}$ [S2, unofficial].
+-2.  **Normal Culling:** Calculate the direction vector $\mathbf{d}$ from the vertex to the neighbor. Compute the dot product $dot = \mathbf{d} \cdot \mathbf{n}$. If $dot < 0$, the neighbor is on the "back" side of the surface relative to the normal; skip this neighbor [S2, unofficial].
+-3.  **Occlusion Counting:**
+-    - Increment a counter `total` for every neighbor that passes the normal culling step.
+-    - If the neighbor voxel is solid (occupancy = 1), increment a counter `occluded` [S2, unofficial].
+-4.  **Factor Calculation:** Compute the AO factor using one of the following formulas:
+-    - **Method A (Simple Ratio):**
+-      $$ AO = 1.0 - \frac{occluded}{total} \times 0.5 $$
+-      If `total` is 0, $AO = 1.0$ [S2, unofficial].
+-    - **Method B (Weighted Sum):**
+-      $$ AO = \frac{side.x + side.y + \max(corner, side.x \times side.y)}{10.0} $$
+-      Where `side` and `corner` are scalar occupancy values (0.0 or 1.0) aggregated from specific neighbor groups (e.g., face-adjacent vs. corner-adjacent) [S1, unofficial].
+-5.  **Shading:** Multiply the vertex's base RGB color components by the computed $AO$ factor [S2, unofficial].
++1. Initialize counters: `total = 0`, `occluded = 0`.
++2. Iterate through all 26 neighbors of the vertex $(x, y, z)$. Let the neighbor offset be $(dx, dy, dz)$ where $dx, dy, dz \in \{-1, 0, 1\}$, excluding $(0, 0, 0)$.
++3. For each neighbor:
++   a. Calculate the direction vector $\mathbf{d} = (dx, dy, dz)$.
++   b. Compute the dot product $dot = \mathbf{d} \cdot \mathbf{n}$.
++   c. If $dot < 0$, the neighbor is on the 'back' side of the surface relative to the normal; skip this neighbor [S2, unofficial].
++   d. Otherwise, increment `total`.
++   e. If `is_solid(x + dx, y + dy, z + dz)` is true, increment `occluded` [S2, unofficial].
++4. Compute the AO factor:
++   $$ AO = 1.0 - \frac{occluded}{total} \times 0.5 $$
++   If `total` is 0, set $AO = 1.0$ [S2, unofficial].
+ 
+-**Pitfalls:**
+-- **Boundary Conditions:** Accessing neighbors outside the voxel grid must return 0 (empty) to prevent crashes and ensure correct shading at the volume edges [S2, unofficial].
+-- **Normal Accuracy:** The quality of the AO depends heavily on the accuracy of the vertex normal $\mathbf{n}$. Incorrect normals lead to incorrect culling and shading artifacts.
++**Alternative Formula:**
++Some implementations use a weighted sum of side and corner neighbors [S1, unofficial]:
++$$ ao = \frac{side.x + side.y + \max(corner, side.x \times side.y)}{10.0} $$
++where `side` and `corner` are scalar voxel occupancy values (0.0 or 1.0). This formula appears in contexts involving specific directional checks or simplified neighbor weighting [S1, unofficial].
++
++**Pseudocode:**
++```python
++def compute_vertex_ao(x, y, z, normal, is_solid):
++    total = 0
++    occluded = 0
++    
++    # Iterate through 26 neighbors
++    for dx in [-1, 0, 1]:
++        for dy in [-1, 0, 1]:
++            for dz in [-1, 0, 1]:
++                # Skip the center voxel
++                if dx == 0 and dy == 0 and dz == 0:
++                    continue
++                
++                # Calculate direction vector
++                dx_f = float(dx)
++                dy_f = float(dy)
++                dz_f = float(dz)
++                
++                # Dot product with normal
++                dot = dx_f * normal.x + dy_f * normal.y + dz_f * normal.z
++                
++                # Skip neighbors on the back side
++                if dot < 0:
++                    continue
++                
++                total += 1
++                
++                # Check if neighbor is solid
++                # Boundary check: assume out-of-bounds is not solid [S2, unofficial]
++                if is_solid(x + dx, y + dy, z + dz):
++                    occluded += 1
++    
++    # Compute AO factor
++    if total == 0:
++        ao = 1.0
++    else:
++        ao = 1.0 - (occluded / total) * 0.5
++        
++    return ao
++```
++
++**Parameters:**
++- The multiplier $0.5$ in the AO factor formula is a typical value [S2, unofficial].
++- The neighbor range is fixed to the 26 immediate neighbors in the voxel grid [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Boundary Checks:** The `is_solid` function must return false (non-solid) if coordinates are outside the voxel grid bounds to prevent out-of-bounds access [S2, unofficial].
++- **Zero Total:** If no neighbors are on the front side of the surface (`total == 0`), the AO factor defaults to 1.0 (no occlusion) [S2, unofficial].
++- **Precision:** Floating-point comparisons for the dot product should handle small negative values due to normal normalization errors if necessary, though the source specifies a strict `< 0` check [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Smooth Vertex Lighting with Ambient Occlusion Effect](10956-smooth-vertex-lighting-with-ambient-occlusion-effect.md)
+-A lighting calculation method for voxel meshes that computes vertex lighting by averaging light values from surrounding voxel cells to ensure smooth transitions, while naturally darkening concave areas to simulate ambient occlusion. It differs from standard ambient occlusion, which simulates self-shadowing by casting rays from a surface and darkening areas based on distance to other surfaces, by achieving a similar darkening effect in concave areas as a side effect of averaging surrounding voxel light values, without ray casting.
++This method calculates the lighting value for a specific vertex of a polygon mesh generated from voxel data by averaging the light intensities of the four surrounding voxel cells in the direction of the face normal. It solves the problem of harsh, blocky lighting transitions and incorrect zero-light values on blocked faces by sampling neighbors rather than the cell itself. Unlike standard ray-casted ambient occlusion, it achieves a similar darkening effect in concave areas as a side effect of this averaging process, without the computational cost of ray casting.
+ 
+ ### Least-Square Baking
+-A method using signal processing to improve interpolated ambient occlusion factors by minimizing the distance between samples and interpolated data in the least-square sense [S3, unofficial]. It samples the occlusion signal uniformly across the mesh and derives vertex values to minimize the error between the samples and the interpolated data [S3, unofficial]. Developed for vertex data storage but can be applied to texture and volumes [S3, unofficial].
++A method using signal processing to improve interpolated ambient occlusion factors by minimizing the distance between samples and interpolated data in the least-square sense [S3, unofficial]. It samples the occlusion signal uniformly across the mesh and derives vertex values to minimize the error between samples and interpolated data [S3, unofficial]. Developed for vertex data storage but can be applied to texture and volumes [S3, unofficial].
+ 
+ ## Operating characteristics
+ - **Time Complexity:** $O(1)$ per vertex, as it iterates over a fixed number of neighbors (26).
+-- **Memory Complexity:** $O(1)$ auxiliary memory per vertex for counters.
+-- **Performance:** Very fast, suitable for real-time rendering on CPU or GPU. No precomputation required if computed per-frame, or very cheap to bake if static.
+-- **Strengths:** Simple to implement, low memory footprint, provides immediate visual improvement over flat voxel shading.
+-- **Limitations:** Approximate; does not account for distance-based attenuation (only binary occupancy), leading to "hard" shadows. Quality depends on mesh resolution and normal accuracy.
++- **Memory Complexity:** $O(1)$ auxiliary space per vertex.
++- **Performance:** Lower runtime cost compared to ray-casting methods because it avoids ray traversal and intersection tests [S3, unofficial].
++- **Strengths:** Fast, simple to implement, effective for voxel-based scenes, reduces blocky artifacts.
++- **Limitations:** Approximate, may not capture long-range occlusion, dependent on voxel resolution and normal accuracy.
++- **When to Use:** Real-time rendering of voxel-based scenes where performance is critical and approximate occlusion is acceptable.
++- **When Not to Use:** When high-fidelity, long-range occlusion is required, or when the scene is not voxel-based.
+ 
+ ## Background
+-The method originates from early voxel engine implementations where efficient shading was required. It is documented in unofficial sources related to voxel game engines like Prometheus Engine and Bevy Voxel Engine [S1, unofficial][S2, unofficial]. The concept of baking AO into vertex data using least-squares optimization was introduced by Kavan et al. [S3, unofficial].
++The method originates from voxel-based rendering engines, specifically those using post-processing steps to darken vertices based on local voxel density [S2, unofficial]. It is part of a broader family of ambient occlusion techniques designed for real-time graphics, leveraging the structured nature of voxel data for efficient computation [S3, unofficial].
+ 
+ ## Sources

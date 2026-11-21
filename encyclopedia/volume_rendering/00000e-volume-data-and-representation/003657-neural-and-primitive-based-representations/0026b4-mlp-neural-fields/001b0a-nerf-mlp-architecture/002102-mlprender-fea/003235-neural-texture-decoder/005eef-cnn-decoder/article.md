@@ -1,0 +1,111 @@
+# CNN Decoder
+
+Also called: Convolutional Texture Generator
+
+## Overview
+The CNN Decoder is a convolutional neural network that generates spatial neural texture stacks (NTS) or stylized feature maps from latent inputs, serving as the final synthesis step in neural texture-based rendering pipelines. It differs from MLP-based decoders by operating on spatial grids to preserve local geometric coherence, making it suitable for generating high-resolution texture maps for UV unwrapping or style transfer. It builds on [Neural Texture Decoder](6704-neural-texture-decoder.md).
+
+## How it works
+The method varies by application domain (human avatar vs. style transfer). The core operation is a forward pass through a convolutional network.
+
+### Inputs and Outputs
+*   **Human Avatar Variant:**
+    *   Input: Concatenated vector of human pose $\theta$ and one-hot body part label $k_i$.
+    *   Output: Neural texture stack $E_i$ (128-dimensional spatial tensor) for body part $i$.
+*   **Style Transfer Variant:**
+    *   Input: Stylized feature map $F_{cs}$ (derived from rendered features and style statistics).
+    *   Output: Stylized novel view (RGB image).
+
+### Data Structures
+*   **Neural Texture Stack (NTS):** A 2D spatial tensor of size $H \times W \times 128$ (dimensions not explicitly fixed in [S2] other than channel depth, but implied by "spatial").
+*   **Pose Vector $\theta$:** Continuous vector representing SMPL pose parameters.
+*   **One-hot Label $k_i$:** Binary vector of size 24, where the $i$-th element is 1.
+
+### Steps
+1.  **Input Preparation (Avatar Variant):** Concatenate the pose vector $\theta$ with the one-hot body part label $k_i$ to form input vector $x_i = [\theta; k_i]$.
+2.  **Batch Processing (Avatar Variant):** To predict all 24 neural textures simultaneously, concatenate inputs for all parts $i \in \{1, \dots, 24\}$ into a batch of size 24.
+3.  **Forward Propagation:** Pass the input(s) through the generator network $G$.
+    *   The network $G$ consists of 5 convolutional layers [S2].
+    *   For the avatar variant, the output is the spatial neural texture stack $E_i$.
+    *   For the style transfer variant, the input is the stylized feature map $F_{cs}$, and the output is the final image [S1].
+4.  **Local Relation Extraction (Avatar Variant):** A CNN-based module extracts local relations of the neural texture stack with respect to the human pose [S2].
+5.  **Output:** Return the spatial neural texture stacks $E_i$ for UV unwrapping [S2] or the stylized image [S1].
+
+### Parameters
+*   **Number of Body Parts:** 24 [S2].
+*   **NTS Channel Dimension:** 128 [S2].
+*   **Network Depth:** 5 convolutional layers [S2].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_neural_textures_avatar(pose_vector, num_parts=24):
+    """
+    Generates neural texture stacks for a human avatar.
+    pose_vector: numpy array, shape (D,)
+    Returns: list of 24 tensors, each shape (H, W, 128)
+    """
+    # 1. Prepare inputs for all 24 body parts
+    inputs = []
+    for i in range(num_parts):
+        # Create one-hot vector for part i
+        one_hot_label = np.zeros(num_parts)
+        one_hot_label[i] = 1.0
+        # Concatenate pose and label
+        x_i = np.concatenate([pose_vector, one_hot_label])
+        inputs.append(x_i)
+    
+    # Stack into batch of size 24
+    batch_input = np.stack(inputs, axis=0) # Shape: (24, D + 24)
+    
+    # 2. Forward propagate through Generator G
+    # G consists of 5 convolutional layers
+    # Note: The exact convolutional kernel sizes and strides are not given in sources [G]
+    neural_texture_stacks = Generator_G(batch_input) 
+    
+    # neural_texture_stacks shape: (24, H, W, 128)
+    
+    # 3. Extract local relations (CNN-based module)
+    # This step is mentioned in [S2] but details are not provided [G]
+    refined_stacks = LocalRelationModule(neural_texture_stacks)
+    
+    return refined_stacks
+
+def generate_stylized_view(style_transfer_variant, stylized_feature_map):
+    """
+    Generates a stylized novel view from a stylized feature map.
+    stylized_feature_map: Tensor F_cs
+    Returns: RGB Image
+    """
+    # 1. Input is stylized feature map F_cs
+    # 2. Forward through CNN Decoder
+    # The decoder architecture details are not explicitly given in [S1] [G]
+    stylized_image = CNN_Decoder(stylized_feature_map)
+    
+    return stylized_image
+```
+
+### Edge Cases and Pitfalls
+*   **Batch Size:** The avatar variant requires a batch size of exactly 24 to predict all body parts in one forward pass [S2].
+*   **Input Dimensionality:** The pose vector dimension must match the expected input size of the generator network $G$ [S2].
+*   **Spatial Resolution:** The output resolution of the neural texture stacks is not specified in the sources [S2].
+
+## Subtopics
+
+### Pose-Conditioned Convolutional Texture Generator
+A specific application of the CNN Decoder for human avatar rendering. It generates 24 neural texture stacks (one per body part) conditioned on human pose and part labels. It is chosen when real-time rendering of editable free-view human performance is required. It uses a batch size of 24 to predict all textures simultaneously [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** The avatar variant enables real-time rendering of editable free-view human performance [S2]. The style transfer variant allows for full-resolution feature map rendering, avoiding the computational intensity and low-resolution limitations of prior works [S1].
+*   **Strengths:** Preserves local geometric coherence via convolutional operations; efficient batch processing for multi-part textures.
+*   **Limitations:** Requires specific input conditioning (pose/labels); spatial resolution details are not provided.
+
+## Background
+The CNN Decoder originates from two distinct lines of research. The avatar variant was introduced in "UV Volumes for Real-time Rendering of Editable Free-view Human Performance" (2023) by [S2], where it is used to construct UV volumes for human point clouds. The style transfer variant was introduced in "StyleRF: Zero-Shot 3D Style Transfer of Neural Radiance Fields" (2023) by [S1], where it generates stylized novel views from decomposed high-level features.
+
+## Sources
+[S1] StyleRF: Zero-Shot 3D Style Transfer of Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00806, fetched 2026-10-26
+[S2] UV Volumes for Real-time Rendering of Editable Free-view Human Performance, https://doi.org/10.1109/cvpr52729.2023.01595, fetched 2026-10-26

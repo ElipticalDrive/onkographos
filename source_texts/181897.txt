@@ -1,0 +1,1251 @@
+Capturing thin structures in VOF simulations with two-plane
+reconstruction
+Austin Hana,∗, Robert Chiodib , Olivier Desjardinsa
+a Sibley School of Mechanical and Aerospace Engineering, Cornell University, Ithaca, NY 14853, United States
+b Computer, Computational, and Statistical Sciences Division, Los Alamos National Laboratory, Los Alamos, NM 87545,
+arXiv:2403.10729v1 [physics.flu-dyn] 15 Mar 2024
+United States
+Abstract
+A novel interface reconstruction strategy for volume of fluid (VOF) methods is introduced that represents
+the liquid-gas interface as two planes that co-exist within a single computational cell. In comparison to
+the piecewise linear interface calculation (PLIC), this new algorithm greatly improves the accuracy of the
+reconstruction, in particular when dealing with thin structures such as films. The placement of the two
+planes requires the solution of a non-linear optimization problem in six dimensions, which has the potential
+to be overly expensive. An efficient solution to this optimization problem is presented here that exploits
+two key ideas: an algorithm for extracting multiple plane orientations from transported surface data, and
+an efficient and mass-conserving distance-finding algorithm that accounts for two planes with arbitrary
+orientation. Additionally, a simple and robust strategy is presented to accurately represent the surface
+tension forces produced at the interface of subgrid-thickness films. The performance of this new VOF
+reconstruction is demonstrated on several test cases that illustrate the capability to handle arbitrarily thin
+films.
+Keywords: Volume of fluid, interface reconstruction, multiphase flow, thin films, subgrid scale
+1. Introduction
+Volume of fluid (VOF) methods are commonly used to track moving material interfaces in multiphase
+flow simulations. VOF methods implicitly represent the interface between two immiscible fluids a and b in
+each computational cell Ωi as a local fraction of volume
+Z
+1
+αi =
+χ(x)dV,
+Vi Ωi
+where Vi is the cell volume, x ∈ R3 , and χ is an indicator function that follows
+
+
+1 for x ∈ fluid a
+χ(x) =
+
+0 for x ∈ fluid b.
+(1)
+(2)
+∗ Corresponding author
+Email address: ah2262@cornell.edu (Austin Han)
+Preprint submitted to
+March 19, 2024
+From these volume fractions, typical geometric VOF methods utilize a piecewise-linear interface calculation
+(PLIC) (DeBar, 1974; Youngs, 1982) to model the interface as a single plane
+P (x) = n · x − d = 0,
+(3)
+where n is the interface normal vector that points from fluid a to fluid b, and d is the normal-distance to
+the plane, where d is chosen such that the volume fractions on either side of the plane are α and 1 − α. The
+normal vector can be computed using several methods including Youngs’ method (Youngs, 1982), the leastsquares volume of fluid interface reconstruction algorithm (LVIRA) and its “efficient” variant for structured
+meshes (ELVIRA), both proposed by Pilliod and Puckett (2004), and the moment-of-fluid method (MOF)
+(Dyadechko and Shashkov, 2008). However, regardless of normal computation method, PLIC methods are
+subject to an inherent mesh resolution limit where the minimum thickness for a fluid (e.g., liquid or gas)
+structure is approximately the size of a single computational cell. This leads to the erroneous breakup of
+poorly-resolved fluid structures due to numerical error, or “numerical breakup.”
+The discrepancy between numerical breakup and physical breakup depends on the shape of the subgrid
+structure. For liquid ligaments, capillary instabilities can develop at diameters on the order of a few cell
+lengths, and therefore, numerical breakup can still predict most of the resulting droplet sizes (Kim and
+Moin, 2020). In constrast, the characteristic instability and breakup scales for liquid films can be on the
+order of a few microns and below, which is several orders of magnitude lower than the characteristic sizes
+of the liquid structures, such as droplets and liquid jets, from which these films are formed (Villermaux and
+Bossa, 2009). The mesh resolution requirement to resolve this breakup is therefore immense. For instance,
+the numerical study of Ling and Mahmood (2023) examined the aerodynamic breakup of a millimeter-scale
+drop in the bag breakup regime utilizing adaptive mesh refinement with a minimum cell size corresponding
+to 2048 cells across the initial diameter. The ability to represent thin films on coarse meshes may enable
+the prediction of the evolution and breakup of thin films at minimal computational cost. Several methods
+have been proposed to represent subgrid films within a VOF framework by approximating the interface with
+multiple planes per cell (López et al., 2005; Jemison et al., 2015; Shashkov and Kikinzon, 2023; Hergibo
+et al., 2023, 2024; Chiodi and Shashkov, 2024). However, these methods are limited to two-dimensional
+interfaces.
+This paper presents an interface reconstruction in three dimensions that uses up to two planes in each
+cell to represent thin structures. This approach is hereinafter referred to as R2P (reconstruction with 2
+planes). First, spherical k-means clustering (Dhillon and Modha, 2001) is utilized on advected interfacial
+segments to determine the number of planes in the new reconstruction and form an initial guess of the plane
+orientation. Then, nonlinear optimization is performed to improve the orientation estimate of the planes
+by minimizing the error between the advected volume moments and the reconstructed moments, integrated
+over a neighborhood of cells. For each iteration of the optimization step, local volume conservation is
+2
+enforced with an efficient routine. Section 2 provides the mathematical formulation and implementation of
+the method, while Section 3 compares the method to standard single-plane reconstruction methods through
+canonical test cases. Finally, Section 4 discusses and demonstrates the modeling of surface tension for subgrid
+liquid structures in various scenarios. Note that although this work refers to the fluids a and b in Eq. (2) as
+liquid and gas, respectively, the proposed method is not constrained to liquid-gas interface reconstruction,
+but could be useful for any immiscible interface. An implementation of the proposed method is accessible
+via the open-source Interface Reconstruction Library (IRL) (Chiodi and Desjardins, 2022; Chiodi, 2023).
+2. Reconstruction with 2 Planes
+Here, the nomenclature used for the method description and the assumptions necessary for the operation
+of the algorithm are introduced. At a given time tn , where n is the time step, each computational cell
+volume Ωi is associated with an interface reconstruction Γni composed of Nin planes, where 0 ≤ Nin ≤ 2.
+The set of polygons formed from the intersection Ωi ∩ Γni is subdivided into a set of triangles Tin within
+each cell, where Tin = ∅ for non-interfacial cells, and where a particular triangulation is not prescribed for
+the purposes of this work. Each triangle is advected forward in time using a Lagrangian advection scheme,
+subdivided at its intersection with the cell faces, and deposited onto the Eulerian mesh as a set of polygons,
+such that each cell contains a set of polygons
+Pin+1 =
+N[
+cell
+
+Ωi ∩ T (Tjn ) ,
+(4)
+j=1
+where Ncell is the number of cells in the domain. Here, T is an operator representing the Lagrangian transport from tn to tn+1 of a triangle wherein the velocity of each vertex is computed by trilinear interpolation
+of the face-centered velocities of a staggered flow solver, and the time integration is performed with a second
+order implicit Runge-Kutta method. These polygons collectively form a second-order estimate of the interface in the cell at time tn+1 . The choice of triangulation of Γni should not affect the order of accuracy of the
+method but will alter the collection Pin+1 . Figure 1a shows a 2D example of the advected polygons within a
+cell and their precursor triangles. Note that in 2D, the polygons appear as line segments in the figure. The
+goal of the algorithm proposed herein is to construct the phase interface at the new time tn+1 , i.e., to build
+Γn+1
+. Since the following steps comprise cell-local operations at a single timestep, the cell index i and time
+i
+step n are omitted, except for the time variable t, in the remainder of this section.
+2.1. Formation of Initial Guess with Spherical K-Means
+The first step of the algorithm is to form an initial guess of the interface normal vectors in each cell Ω.
+Each advected polygon in P has a corresponding normal in N = {N1 , N2 , ..., NQ } along with a surface area
+in W = {w1 , w2 , ..., wQ } that is used as a weight, where Q = |P|. Within each cell, these data form a weighted
+3
+directional distribution defined on a unit sphere in 3D (unit circle in 2D), i.e., N ⊆ S = {x ∈ R3 | ∥x∥ = 1}.
+For reference, the directional distribution resulting from the surface in the red box of Figure 1a is shown in
+Figure 1b, where the location of the red bar indicates the normal of an advected polygon, and the length of
+the red bar represents its normalized surface area. To determine the number of planes that should constitute
+the reconstruction at time tn+1 , an average normal vector m is computed from the normals of the advected
+polygons in each cell, weighted by their respective surface areas:
+PQ
+j=1 wj Nj
+.
+m = PQ
+j=1 wj
+(5)
+As 0 ≤ ∥m∥ ≤ 1, the magnitude of m measures the variance of the surface normal distribution. A magnitude
+∥m∥ close to 1 indicates that the distribution is strongly unimodal and that the interface at tn+1 in the cell
+is adequately represented with a single plane (N = 1) with a normal given by n = m/∥m∥, while lower
+values of ∥m∥ indicate that the interface should be represented by two planes (N = 2). A threshold value
+λ is defined such that
+N=
+
+
+1, if ∥m∥ ≥ λ,
+(6)
+
+2, if ∥m∥ < λ,
+where λ = 0.99 is chosen in this work. For two advected polygons with equal surface area, λ = 0.99
+corresponds to an angle between the two corresponding normals of 16.22◦ . In the case that ∥m∥ < λ, two
+representative average normals are chosen through the spherical k-means algorithm (Dhillon and Modha,
+2001). While it is possible to utilize a threshold of λ = 1, thereby enforcing a two-plane reconstruction for
+all interfacial cells, lowering λ decreases the cost of the reconstruction by allowing it to use a single plane in
+well-resolved regions of the interface.
+The spherical k-means algorithm is an iterative algorithm where at each iteration k, N is partitioned
+into two disjoint subsets N1k and N2k . Defining a normal vector for each subset as nk1 and nk2 , the subsets
+are defined as N1k = {N ∈ N |N · nk1 ≥ N · nk2 } and N2k = {N ∈ N |N · nk1 < N · nk2 }, sorting N based on
+colinearity with nk1 and nk2 . A mean vector is computed for each subset as
+mk1 =
+P|N1k |
+l=1 wl Nl
+P|N1k |
+l=1 wl
+and
+mk2 =
+P|N2k |
+l=1 wl Nl
+,
+P|N2k |
+w
+l
+l=1
+(7)
+= mk2 /∥mk2 ∥. The algorithm
+and normal vectors computed from those as nk+1
+= mk1 /∥mk1 ∥ and nk+1
+1
+2
+terminates when N1k = N1k+1 and N2k = N2k+1 , at which point the two plane normal vectors are taken as
+nk1 and nk2 . The initial guess for n1 is chosen to be the normal vector with the largest corresponding surface
+area, i.e., n01 = Nl where l = argmaxj∈[1,Q] (wj ). The initial normal vector n02 is then chosen to be the
+normal in N most dissimilar to n01 , i.e., n02 = Nl , where l = argminj∈[1,Q] (n01 · Nj ).
+The two representative normals identified for the example distribution are given by the black arrows
+in Figure 1b. Note that while this work limits the reconstructions to N = 2, this process is theoretically
+4
+(a) 2D example of surface elements T (T n ) (
+n
+vected from the reconstruction Γ
+(
+) ad-
+(b) Normal vectors of the surface elements of P n+1 in
+). The seg-
+(a) shown on the unit circle. Normals are represented
+ment of surface element contained within the red box
+by a red bar with bar length indicating relative surface
+constitutes P n+1 . Dashed lines represent cell bound-
+area. Black arrows show the two mean norms found
+aries.
+from spherical k-means clustering.
+Figure 1: Example of surface interface elements advected between tn and tn+1 and the resulting normal vector distribution for
+the elements in the red box.
+extendable to an N -plane interface representation (for N < Q), where the number of subsets for N is
+increased until min(∥m∥ = {∥m1 ∥, ∥m2 ∥, ..., ∥mN ∥}) > λ.
+2.2. Volume Conserving Placement of Planes
+The spherical k-means clustering of the weighted directional distribution from the previous section determines the number of planes in the initial guess and their normal vectors. To fully define the planes as in
+Eq. (3), the normal-distance d to each plane must be determined. Furthermore, the distances must result in
+an interface representation that exactly recovers the phase volumes in the cell to machine precision in order
+for the interface reconstruction to be conservative.
+Many methods have been developed to determine a volume-conservative distance for a single plane, as
+required by PLIC. For specific cell geometries, such as rectangular prisms and tetrahedra, analytical solutions
+exist (Scardovelli and Zaleski, 2000; Yang and James, 2006). For the more general case, d is typically found
+through a bracketing and solution approach, where possible values of d are bracketed and the exact value is
+subsequently found analytically or iteratively (López et al., 2019; Ahn and Shashkov, 2007; Ivey and Moin,
+2015; López et al., 2016; Diot and François, 2016). To find the distance for a set of planes that co-exist in
+a cell, R2P utilizes a similar approach in the form of non-linear root finding.
+Let d1 and d2 be the two distances corresponding to the two planes. An initial guess for d1 and d2 is
+obtained from the spherical k-means clustering, and the guess is iteratively improved to conserve volume.
+From spherical k-means, the initial distances are computed using the surface centroids s of the corresponding
+5
+surface elements in P whose normal vectors belong to N1 and N2 . This initial distance guess can be computed
+as
+d01 = n1 · s1
+and d02 = n2 · s2 .
+(8)
+In all other cases, such as during the non-linear optimization algorithm presented in the next section, the
+initial guess for distances is directly supplied.
+These two distance values, along with the normal vectors n1 and n2 , define the multi-plane reconstruction
+consisting of the two planes P1 and P2 . From this reconstruction, the liquid volume fraction for the cell, α̃,
+is computed using the Interface Reconstruction Library (Chiodi and Desjardins, 2022; Chiodi, 2023). The
+error in liquid volume fraction can then be calculated as
+eα = α − α̃,
+(9)
+where α is the liquid volume fraction in the cell at tn+1 . As a matter of convention, quantities derived from
+a planar reconstruction are denoted with˜.
+To drive Eq. (9) to zero, thereby finding a volume-conservative placement of the two planes, the distances
+at the k th iteration are written as
+dk1 = d01 + δ k
+and dk2 = d02 + δ k ,
+(10)
+and non-linear root-finding is used to find the value of δ such that eα = 0. Importantly, there is guaranteed
+to be a unique value of δ to achieve this since δ can be made sufficiently small or large such that α̃ = 0 or
+α̃ = 1. Note that there is the potential for the volume-conservative solution to force one of the planes outside
+of the cell, effectively reducing the reconstruction to a single plane. This has been found to be desirable in
+practice.
+Numerically, δ is found using the Illinois method (Dowell and Jarratt, 1971), which is a modification to
+the Regula-Falsi method for finding the zero of a function. The Illinois method requires an initial bracket
+of values for δ, between which the root lies. These bracketing values are computed as
+δlower = min(min(xm · nn ) − d0n )
+n
+m
+and δupper = max(max(xm · nn ) − d0n ),
+n
+m
+(11)
+where xm are the vertices of the cell, and n ∈ [1, 2]. At both values, the planes in the reconstruction exist
+outside the cell, with α̃ = 0 for δ = δlower and α̃ = 1 for δ = δupper . Although R2P only necessitates two
+planes for the bracketing, this approach works for any number of planes.
+2.3. Optimization of the Reconstruction
+The initial guess is further improved using non-linear optimization towards a final reconstruction. When
+the single-plane case is identified through spherical k-means, the initial guess is overwritten by the estimate
+n=
+cb − ca
+,
+∥cb − ca ∥
+6
+(12)
+where cb and ca are the gas and liquid phase centroids in the cell Ω for which the interface is being
+reconstructed, respectively. This estimate was found to be more accurate than the initial guess from k-means
+for single-plane reconstructions. Ordinarily, calculating n in this manner is unreliable due to the potential
+for structures of the same phase to enter the cell from different directions. However, such situations are
+associated with highly dissimilar interface normal vectors in the cell and consequently are treated with
+multiple planes. In the case where a two-plane reconstruction is deemed necessary, the spherical k-means
+initial guess, n1 and n2 , is kept.
+For a cell Ω containing an interface, the goal of the optimization is to best approximate geometric
+information in a stencil of cells N (e.g., a 3 × 3 × 3 stencil in a Cartesian mesh) by minimizing the error
+eR =
+wα,j (αj − α̃j )
+Ωj ∈N
+2
+2
+2
+X
++
+X
+wa,j (caj − c̃aj )
++
+X
+wb,j (cbj − c̃bj )
+
++ wΣ
+√
+p 2
+(13)
+Σ − Σ̃
+Ωj ∈N
+Ωj ∈N
+where the reference quantities, written without the ˜ , are the geometric quantities computed during the
+Lagrangian advection of the phase volumes and interface surface.
+As can be seen, eR is constructed from four separate types of error, which are, from left to right: liquid
+volume fractions in the stencil (α), liquid centroids in the stencil (ca ), gas centroids in the stencil (cb ), and
+the interface surface area (Σ) for the cell being reconstructed. Each of these types of error also have an
+associated weighting vector, w, with the requirement that
+∥wα ∥ + ∥wa ∥ + ∥wb ∥ + |wΣ | = 1.
+(14)
+As eR only depends on the surface area error of the reconstructed cell and not the surrounding stencil cells,
+wΣ is a scalar.
+These weights serve two purposes. First, they are functions of space, which allows the relative importance
+of each cell in the stencil to be modified for each individual type of error through the use of spatially
+dependent weighting coefficients. Second, the relative importance of each type of error to one another can
+be changed through modification of the weighting vector magnitude. It is interesting to note that both
+LVIRA (Pilliod and Puckett, 2004) and MOF (Dyadechko and Shashkov, 2008) are contained as subsets of
+this optimization problem solely through the selection of proper weighting vectors.
+For all results presented herein, ∥wα ∥ = 0, removing the contribution from errors in representing local
+volume fractions. The centroid weightings for a given cell Ωj in the stencil depend on their proximity to the
+phase centroids of the cell being reconstructed:
+a
+a 2
+b
+b 2
+wa,j = e−∥c −cj ∥
+(15)
+wb,j = e−∥c −cj ∥ .
+For two-plane reconstructions, the relative importance of the surface area error and centroid error is
+7
+computed based on the volume fraction in the stencil as
+|wΣ | =
+3
+(1 − 2ᾱ)2
+4
+(16)
+∥wa ∥ = ∥wb ∥ = 0.5,
+where ᾱ is the average liquid volume fraction computed over the entire stencil, and the weights are subsequently normalized to satisfy Eq. (14). In this way, the creation or destruction of large amounts of surface
+area is prevented for small liquid and gas structures. For single-plane reconstructions, the centroid error is
+solely considered by setting |wΣ | = 0. These weightings have been developed heuristically but have delivered
+good results in practice, as will be shown. There is potential for further optimization of the weighting by
+using techniques such as machine learning.
+During the optimization, the two normal vectors are parameterized as an equal but opposite rotation of
+a normal vector about a rotation axis. This can be written as
+n1 = Rt (β)ns
+and n2 = Rt (−β)ns ,
+(17)
+where Rt (β) is a quaternion performing a rotation about an axis t by β degrees, and ns is a normal
+vector. Here, a shorthand notation of a quaternion-normal vector multiplication resulting in a vector is used,
+neglecting the transformations to and from quaternions. The single-plane reconstruction is encompassed in
+this parameterization by enforcing a value of β = 0, leading to n1 = n2 = ns .
+The optimization is performed inside a local orthonormal reference frame constructed as shown in Figure
+2, where ts1 and ts2 are two tangent vectors orthogonal to ns . The tangent vector ts1 is also used as the
+rotation vector t in the parameterization of n1 and n2 given in Eq. (17). The error function given by Eq.
+(13) is then minimized using the Levenberg-Marquardt algorithm (Levenberg, 1944) to rotate the reference
+frame of [ts1 , ts2 , ns ] to find the optimal solution. In a two-plane reconstruction, the value of β also needs
+to be determined, along with optimal values of d1 and d2 . To ensure that values of d1 and d2 lead to
+a volume-conservative reconstruction, they are projected onto a volume-conserving solution space using
+the one-dimensional minimization problem described in Section 2.2. The inclusion of d1 and d2 in the
+optimization allows for the translation of the interface planes, which is important to accurately capture thin
+films spanning multiple cells. For single-plane reconstructions, d is computed, either using an analytical
+method for hexahedral and tetrahedral cells (Scardovelli and Zaleski, 2000; Yang and James, 2006) or an
+iterative method for other cell geometries.
+3. Verification Tests
+The proposed reconstruction method is evaluted with a series of canonical test cases, in each case
+comparing the accuracy, error mesh convergence, and cost of the reconstruction with those of the singleplane ELVIRA reconstruction (Pilliod and Puckett, 2004). The test cases use velocity fields that return the
+8
+Figure 2: Diagram of the local orthonormal reference frame created and the relationship between the shared plane given by ns
+and Plane 1 and Plane 2 defined by n1 and n2 .
+initial interface to its original position. Errors in the volume fraction transport and reconstruction steps,
+however, accumulate and produce errors in the final interface shape. In each case, two error metrics are
+computed: the shape error
+PNcell
+Eshape =
+Vi αi (T ) − αi (0)
+,
+PNcell
+i=1 Vi αi (0)
+i=1
+(18)
+which measures the deviation of the transported and reconstructed interface from the initial condition, and
+the conservation error
+PNcell
+i=1
+Ec =
+Vi αi (T ) −
+PNcell
+PNcell
+i=1
+i=1
+Vi αi (0)
+Vi
+,
+(19)
+which measures the change in liquid volume integrated over the domain. Since the test cases utilize uniform
+meshes, Vi is constant for a given mesh resolution. In addition, the computational time necessary to perform
+the volume transport, interface transport, and interface reconstruction steps during each time step , Tc , is
+measured.
+All simulations are performed on a Beowulf cluster with nodes containing dual six-core Intel X5670
+processors. All test cases are performed with the NGA2 flow solver (Desjardins et al., 2008; Desjardins,
+2023), in which the advection of the volume moments is performed with the method of Owkes and Desjardins
+(2014). The Interface Reconstruction Library (IRL) (Chiodi and Desjardins, 2022; Chiodi, 2023) is used
+for the necessary computational geometry and reconstruction algorithms. The tolerance in volume fraction
+error (Eq. (9)) used in the root-finding step in Section 2.2 is 10−12 .
+3.1. Zalesak’s Disk
+The case proposed by Zalesak (1979) tests the ability of a VOF scheme to transport a two-dimensional
+shape with sharp corners. In this test, a notched disk is subjected to rigid-body rotation by the velocity
+field
+(u, v) = (−2πy, 2πx).
+9
+(20)
+Table 1: Zalesak case conservation error.
+N
+Ec
+16
+3.76 · 10−15
+32
+7.41 · 10−15
+64
+2.86 · 10−15
+128
+9.69 · 10−16
+256
+1.68 · 10−16
+The disk has a diameter 0.3, a notch width of 0.05, a notch height of 0.25, and is initially centered at
+(x, y) = (0, 0.25) within a square domain [−0.5, 0.5]2 . The velocity field returns the disk to its initial position
+after t = 1 time units. The simulations are performed on computational domains of N = [16, 32, 64, 128, 256]
+cells in each direction. For each mesh resolution, the time step size is ∆t = 32/(100N ). The two-dimensional
+simulations are performed on a three-dimensional Cartesian mesh that is one cell in depth with cell thickness
+1/N . For all mesh sizes, the simulations are performed on nine cores within a single node of the Beowulf
+cluster.
+Figure 3 compares the initial and final interface shapes after one rotation for the mesh resolutions
+N = [32, 64, 128]. Across all mesh resolutions, R2P produces a final interface shape that better retains
+the sharp features of the initial shape than ELVIRA. With the default parameters, including the two-plane
+threshold λ = 0.99, R2P does not perfectly retain the sharp corners due to the switching between oneand two-plane reconstructions. If λ is set to 1, thereby enforcing two-plane reconstructions at all instances,
+then the sharp corners are retained after one rotation. Figure 4 shows the mesh dependence of the shape
+error from and computational cost of the compared reconstruction methods. Both the ELVIRA and R2P
+methods exhibit first-order convergence in shape error, but the R2P method produces errors that are lower
+than those from the ELVIRA method by a factor of two or greater. The increased accuracy comes with an
+increased computational cost Tc , where the cost difference is greatest in the lowest resolution simulations
+where two-plane reconstruction is utilized more often. Finally, the conservation error is shown in Table 1,
+where for all mesh resolutions, R2P preserves liquid volume to machine precision.
+3.2. Deformation of a Disk
+The 2D deformation case of Leveque (1996) uses a cyclic velocity field to deform and recover a circular
+interface. The disk is deformed by the velocity field
+u = + sin2 (πx) sin(2πy) cos(πt/T ),
+(21a)
+v = − sin2 (πy) sin(2πx) cos(πt/T ),
+(21b)
+10
+N = 32, t = 0
+N = 32, t = 1, ELVIRA
+N = 32, t = 1, R2P
+N = 64, t = 0
+N = 64, t = 1, ELVIRA
+N = 64, t = 1, R2P
+N = 128, t = 0
+N = 128, t = 1, ELVIRA
+N = 128, t = 1, R2P
+Figure 3: Interface shape for the Zalesak test case. The left column shows the initial condition, formed with an ELVIRA
+reconstruciton, which should be matched ideally after one revolution. The middle column shows the resulting shape after one
+revolution using ELVIRA interface reconstruction, while the right column shows the resulting shape after one revolution using
+R2P interface reconstruction.
+11
+100
+10−1
+Tc
+Eshape
+10−1
+10−2
+10−2
+10−3
+10−3
+16
+32
+64
+128
+10−2
+256
+10−1
+Eshape
+N
+Figure 4: Zalesak case shape error (left) and computational time per time step (right). ELVIRA (
+order(
+); 2nd order(
+); R2P (
+); 1st
+).
+where the disk returns to its original position and shape at t = T , and a value of T = 8 is specified. The disk
+has a diameter D = 0.3 and is centered at (x, y) = (0.5, 0.75) in a [0, 1]2 square domain. As in the Zalesak
+case, five mesh resolutions of N = [16, 32, 64, 128, 256] are used, and the two-dimensional simulations are
+performed on a three-dimensional Cartesian mesh that is one cell in depth with cell thickness 1/N . To
+produce a reference volume fraction field for the disk deformation at t = T /2, a high-resolution simulation is
+performed with N = 4096 using ELVIRA. For each mesh resolution, the time step size is ∆t = 64/(100N ).
+For all mesh sizes, the simulations are performed on nine cores within a single node of the Beowulf cluster.
+Figures 5 and 6 compare the interface shapes for the mesh resolutions N = [32, 64, 128] using ELVIRA and
+R2P, respectively. When using the single-plane reconstruction, the thin film that forms by t = T /2 breaks
+up erroneously due to the lack of local resolution. While this breakup reduces with higher resolutions, the
+thinnest portion of the deformed disk still breaks up with N = 128 and 256. The erroneous interface breakup
+does not occur using R2P with any N , as the subgrid portions of the deformed disk are captured with a twoplane reconstruction. Figure 7 shows the mesh dependence of the shape error from and computational cost of
+the compared reconstruction methods, where the shape error is measured at t = T /2 relative to the N = 4096
+reference volume fraction field. Both the ELVIRA and R2P methods exhibit first-order convergence in shape
+error, but the R2P method produces lower errors than those from the ELVIRA method. The computational
+cost Tc of R2P relative to ELVIRA is comparable for a given shape error, where the cost difference between
+the two methods is greatest in the lowest resolution simulations where two-plane reconstruction is utilized
+more often. While the shape errors are similar for a given computational cost, Figures 5 and 6 clearly
+show that only R2P is able to preserve the interface topology for the tested mesh resolutions. Finally,
+the conservation error is shown in Table 2, where for all mesh resolutions, R2P preserves liquid volume to
+machine precision.
+12
+N = 32, t = 0
+N = 32, t = T /2
+N = 32, t = T
+N = 64, t = 0
+N = 64, t = T /2
+N = 64, t = T
+N = 128, t = 0
+N = 128, t = T /2
+N = 128, t = T
+Figure 5: Interface shape for the 2D deformation test case using ELVIRA interface reconstruction.
+13
+N = 32, t = 0
+N = 32, t = T /2
+N = 32, t = T
+N = 64, t = 0
+N = 64, t = T /2
+N = 64, t = T
+N = 128, t = 0
+N = 128, t = T /2
+N = 128, t = T
+Figure 6: Interface shape for the 2D deformation test case using R2P interface reconstruction.
+14
+10−1
+10−1
+Tc
+Eshape
+100
+10−2
+10−2
+10−3
+10−3
+16
+32
+64
+128
+256
+10−2
+10−1
+100
+Eshape
+N
+Figure 7: 2D deformation case shape error (left) and computational time per time step (right) at t = T /2. ELVIRA (
+R2P (
+); 1st order(
+); 2nd order(
+).
+Table 2: 2D deformation case conservation error.
+N
+Ec
+16
+3.04 · 10−13
+32
+1.77 · 10−13
+64
+4.91 · 10−14
+128
+8.37 · 10−15
+256
+1.79 · 10−15
+15
+);
+3.3. Deformation of a Sphere
+In the 3D deformation case, also proposed by Leveque (1996), a sphere is deformed by the time-dependent
+velocity field
+u = 2 sin2 (πx) sin(2πy) sin(2πz) cos(πt/T ),
+(22a)
+v = − sin(2πx) sin2 (πy) sin(2πz) cos(πt/T ),
+(22b)
+w = − sin(2πx) sin(2πy) sin2 (πz) cos(πt/T ),
+(22c)
+where the sphere returns to its original position and shape at t = T . In this work, a final time of T = 3
+is used. The sphere has a diameter D = 0.3 and is centered at (x, y, z) = (0.35, 0.35, 0.35) in a [0, 1]3
+cubic domain. In each spatial dimension, N = [16, 32, 64, 128, 256] cells are used, and the time step size is
+∆t = 32/(100N ). To produce a reference volume fraction field for the sphere deformation at t = T /2, a
+high-resolution simulation is performed with N = 768 using R2P. For all mesh sizes, the simulations are
+performed on eight nodes (using eight cores each) of the Beowulf cluster.
+Figures 8 and 9 compare the interface shapes for the mesh resolutions N = [32, 64, 128] using ELVIRA
+and R2P, respectively. Just as in the 2D deformation case, the thin film that forms by t = T /2 breaks
+up erroneously when using a single-plane reconstruction due to the lack of local resolution. The fragments
+produced by the mid-time breakup remain at t = T , and the final sphere interface departs from the initial
+interface. The erroneous interface breakup does not occur with R2P, as the subgrid portions of the deformed
+sphere are captured with a two-plane reconstruction. Furthermore, the final interface shape, when using
+R2P, is much closer to the initial spherical interface. Figure 10 shows the mesh dependence of the shape error
+from and computational cost of the compared reconstruction methods, where the shape error is computed
+at t = T /2 relative to the N = 768 reference volume fraction field. Both the ELVIRA and R2P methods
+exhibit first-order convergence in shape error, but the R2P method produces lower errors than those from
+the ELVIRA method. The ELVIRA and R2P methods incur similar computational costs relative to the
+shape error, although R2P requires a lower mesh resolution to achieve any given shape error. Finally, the
+conservation error is shown in Table 3, where for all mesh resolutions, R2P preserves liquid volume to
+machine precision.
+3.4. Transport of a 2D Thin-Film Bubble
+R2P greatly improves the capturing of the sheet formation in the canonical deformation test cases. To
+directly evaluate the ability of R2P to transport thin sheets, a thin-film bubble is initialized and transported
+in the rigid body velocity field
+(u, v) = (−2πy, 2πx)
+(23)
+at a CFL of 0.96 for one full rotation. This bubble is initially centered at (x, y) = (0.0, 0.25) in a L =
+[−0.5, 0.5]2 domain and parameterized by an outer radius R = 0.15 and film thickness h. To study the effect
+16
+N = 32, t = 0
+N = 32, t = T /2
+N = 32, t = T
+N = 64, t = 0
+N = 64, t = T /2
+N = 64, t = T
+N = 128, t = 0
+N = 128, t = T /2
+N = 128, t = T
+Figure 8: Interface shape for the 3D deformation test case using ELVIRA interface reconstruction.
+17
+N = 32, t = 0
+N = 32, t = T /2
+N = 32, t = T
+N = 64, t = 0
+N = 64, t = T /2
+N = 64, t = T
+N = 128, t = 0
+N = 128, t = T /2
+N = 128, t = T
+Figure 9: Interface shape for the 3D deformation test case using R2P interface reconstruction. Single-plane reconstructions are
+shown in blue, while two-plane reconstructions are shown in red.
+18
+101
+10−1
+100
+Tc
+Eshape
+100
+10−2
+10−1
+10−3
+16
+32
+64
+128
+10−2
+256
+10−2
+N
+10−1
+100
+Eshape
+Figure 10: 3D deformation case shape error (left) and computational time per time step (right) at t = T /2. ELVIRA (
+R2P (
+); 1st order(
+); 2nd order(
+).
+Table 3: 3D deformation case conservation error.
+N
+Ec
+16
+9.10 · 10−14
+32
+2.89 · 10−14
+64
+5.51 · 10−15
+128
+2.63 · 10−15
+256
+8.24 · 10−16
+19
+);
+h/∆x = 1
+Figure 11: Initial interface (
+h/∆x = 1/4
+) and interface after one rotation (
+h/∆x = 1/16
+) of a thin-film bubble.
+of film resolution on the results, the mesh spacing is held constant at ∆x = 1/50 and h is varied from ∆x
+to ∆x/16. As Figure 11 shows, the thin-film bubble is maintained at all mesh resolutions, forming no gaps
+during the rotation. When h/∆x < 1 such that the bubble is formed from mostly two-plane reconstructions,
+the bubble diameter decreases after one rotation due to erroneous transfer of gas from inside to outside the
+bubble. The drift of the interface occurs because while the transported liquid and gas centroid locations
+are included in the cost function in Eq. (13), they are not used as constraints on the interface position,
+unlike the liquid volume fraction. Therefore, the centroid locations can move with each instantiation of the
+interface reconstruction, even in a zero velocity field, as the centroids are recomputed to be consistent with
+the new reconstruction. Mass is conserved to machine precision (Ec = O(10−14 )), however, as can be seen
+in the thickening of the film after one rotation alongside the diameter decrease.
+4. Surface Tension Modeling
+For subgrid-thickness films, the accurate estimation of surface tension forces requires special treatment
+compared to fluid features that can be captured with one-plane interfaces. The continuum surface force
+(CSF) method (Brackbill et al., 1992), commonly used in VOF simulations, approximates the volumetric
+surface tension force at interfacial cells with
+σκδn ≈ σκ∇α/[χ],
+(24)
+where κ is the interfacial curvature, δ is the interface Dirac delta function, and [χ] = χ2 − χ1 = 1 is the
+jump in indicator function across the interface. The volume fraction gradient ∇α is an approximation of
+δn, and as such, the CSF method assumes that α transitions between 0 and 1 within a distance ∆x about
+the interface. This assumption is violated in the case of a subgrid-thickness film, where α can be much
+20
+less than 1, leading to a significant underprediction of ∇α and thereby the surface tension-induced pressure
+jump across the film.
+To mitigate this issue, the film is “thickened” with the introduction of a ficticious volume fraction field
+
+
+
+1
+
+
+
+γ= 0
+
+
+
+
+α
+for Ω ∈ L
+for Ω ∈ G
+(25)
+for Ω ∈
+/ L ∪ G,
+where L is the set of liquid film cells, and G is the set of gas film cells as defined in Appendix A. The
+volume fraction field enforces a volume fraction jump of 1 when computing ∇γ between an interfacial cell
+and a non-interfacial cell. The volumetric surface tension force is then approximated as
+σκδn ≈ σκ∇γ.
+(26)
+A staggered discretization of the force at the face between two cells A and B is
+σκ∇γ ≈ (σκ)AB
+γB − γA
+,
+∆x
+(27)
+where □AB signifies a face-centered value. By construction, this scheme is well-balanced provided that the
+discrete gradient operators for γ and the pressure are equivalent (Popinet, 2018).
+4.1. Face-centered Curvature
+To compute κAB , the curvature is interpolated at the cell faces from the cell-centered curvatures of the
+bounding cells. Each interfacial polygon in a cell contains a representative local interfacial curvature value,
+and these curvatures are denoted κ1 and κ2 in the case of a two-plane cell. The discrete curvatures can be
+estimated through a number of methods that utilize polygonal or pointwise interfacial data (Popinet, 2009;
+Jibben et al., 2019; Han et al., 2024). The face-centered curvature κf is computed as the average of the
+cell-centered curvatures, weighted by the surface area w of the corresponding polygon. For the face between
+two cells A and B,
+κfAB =
+PNA
+PNB
+i=1 wA,i κA,i +
+i=1 wB,i κB,i
+,
+PNA
+PNB
+i=1 wA,i +
+i=1 wB,i
+(28)
+where NA and NB are the number of planes in cells A and B, respectively. In the special case where
+max(NA , NB ) = 2 and min(NA , NB ) = 0, however, this surface averaging may be inappropriate because
+it does not capture the individual pressure jumps across the film interfaces. In the case that κ1 ≈ −κ2 ,
+as in a thin-film bubble, the pressure jump would be severely underestimated, as κfAB ≈ 0. Instead, the
+face-centered curvature is chosen to be equal to the curvature corresponding to the interfacial polygon
+whose normal is most aligned with the face normal. The direction of the face normal used to determine the
+curvature is chosen such that it points from the cell with higher γ to the cell with lower γ, since the interface
+21
+normal points from the liquid to the gas phase. In the case where NA = 2 and NB = 0, the face-centered
+curvature is
+κfAB = κA,i ,
+
+
+
+i = argmax npA,i · sgn(0.5 − γB )nfAB ,
+(29)
+i
+where npA,i is the normal vector of the i-th plane in cell A, γB is the volume fraction of the non-interfacial
+cell, and nfAB is the normal vector of the cell face pointing from cell A to cell B.
+4.2. Surface Tension at Film Edges
+The film curvature model discussed in Section 4.1, however, does not apply to the edges of these films.
+In the absence of a curvature model for film edges, it is necessary to resolve the edge on the mesh in order to maintain the local surface tension force. At low mesh resolutions, this can be achieved by utilizing
+single-plane PLIC reconstructions near the film edge that introduce numerical surface tension to maintain a
+cylindrical rim shape. The LVIRA method (Pilliod and Puckett, 2004) is used in this work as the PLIC reconstruction. To determine whether to switch to an LVIRA representation for a given cell Ωi , the magnitude
+of a surface-averaged normal vector,
+P
+M =
+PQj
+k=1 wk Nk
+,
+PQj
+i=1 wk
+Ωj ∈Ni
+Ωj ∈Ni
+P
+(30)
+is computed from the normals of the advected polygons within the neighborhood Ni of Ωi . Then, a smoothing
+operation is performed on M by weighting it by A, the surface area of the interface reconstruction Γ, and
+averaging over the cell neighborhood again to produce
+P
+Ω ∈N Aj Mj
+.
+M¯ = Pj i
+Ωi ∈Ni Aj
+(31)
+The smoothed, surface-averaged normal magnitude M¯ is computed as a measure of the unimodality of the
+surface normal distribution across the cell neighborhood. As 0 ≤ M¯ ≤ 1, a magnitude M¯ close to 1 indicates
+that the distribution is strongly unimodal and that LVIRA should be used to compute the interface normal,
+while lower values of M¯ indicate that the interface should be represented by two planes with R2P.
+4.3. Thin-Film Bubble in Equilibrium
+The proposed surface tension model, in conjunction with R2P, is used to simulate a 2D thin-film bubble
+in static equilibrium. This test demonstrates the ability of the method to capture the correct pressure jump
+across the thin film and establishes that the modified CSF method does not induce spurious velocities around
+the interface (Francois et al., 2006; Popinet, 2009) when the bubble is in theoretical equilibrium, where the
+interfacial curvature is fixed to the exact value. The inner diameter is D = 0.3, and the outer diameter is
+D + h, where the film thickness h = 10−3 . The bubble is placed in a two-dimensional square domain of
+22
+(a) Color map of thin-film bubble pressure
+field relative to the domain average.
+(b) Closeup of thin-film bubble.
+The
+(c) Color map of thickned volume fraction
+field γ with interface in white.
+two-plane interface representation is shown
+in black.
+Figure 12: Thin-film bubble with fixed curvature in static equilibrium.
+Theoretical
+Numerical
+% error
+13.289183223
+13.289183080
+1.08 × 10−6
+Table 4: Pressure jump across the thin film.
+length L = 1 with periodic boundary conditions and a uniform Cartesian grid of cell length ∆x = 0.02. The
+center of the bubble is placed at the center of the domain. The viscosity ratio is unity with a viscosity of
+µ = 10−3 , the density is a constant ρ = 1, and the surface tension coefficient is σ = 1. The Laplace number
+La = ρσD/µ2 = 3.0 × 105 . The time step size is ∆t = 8 × 10−4 , and the simulation is performed up to the
+time T = 25.
+The expected pressure jump across the thin-film can be computed from the Young-Laplace equation by
+summing the pressure jumps across the inner and outer interfaces as
+∆P = σ(κinner + κouter ) =
+1
+1
++
+≈ 13.289183223.
+0.150 0.151
+(32)
+The pressure field is shown in Figure 12, along with the thickened volume fraction field γ and the time
+evolution of the maximum velocity in the domain. Table 4 compares the theoretical pressure jump across
+the thin film from Eq. (32) and the numerical result shown Figure 12. Note that due to the artificial
+thickening of the film for the surface tension calculation, the pressure jump is stairstepped between the
+outer and inner pressure values such that the pressure takes an intermediate value inside the film cells.
+Figure 12 and Table 4 both show that R2P is capable of both representing the thin film and capturing
+the correct pressure jump. Furthermore, the proposed thin-film surface tension calculation recovers exact
+numerical balance with the pressure force.
+Next, the spurious velocities are measured in the case of a translating 2D thin-film bubble and compared
+23
+10−1
+Umax
+10−2
+10−3
+10−4
+10−5
+0
+0.2
+0.4
+0.6
+0.8
+1
+t
+(a) Maximum velocity.
+(b) Thin-film bubble interface.
+Figure 13: Time evolution of the maximum velocity around the phase interface for a liquid droplet (
+and thin-film bubble (
+), gas bubble (
+),
+). Phase interface of the thin-film bubble in (b) at t = 0 (red) and t = T (black).
+to those from a translating liquid droplet and a translating gas bubble. Unlike in the static equilibrium
+case, the curvature used to compute the surface tension force is estimated by parabolic fitting onto the
+interface reconstruction (Jibben et al., 2019; Han et al., 2024), and therefore, exact numerical balance is not
+expected. The geometry is identical to that of the static equilibrium case with the exception of the droplet
+and bubble each having a single diameter of D = 0.3. The viscosity ratio µa /µb is 50, the density ratio
+ρa /ρb is 1000, the gas Reynolds number Reb = ρb U0 D/µb is 100, the Weber number We = ρb U02 D/σ is 20,
+the Laplace number is 60, and the translation velocity U0 = 1 is in the x-direction. The cases are run with a
+time step size ∆t = 6.4 × 10−3 to a final time of T = 1 such that the interface traverses the periodic domain
+once and returns to its initial position. Figure 13 shows the time evolution of the maximum velocity for the
+liquid droplet, gas bubble, and thin-film bubble cases, along with the initial and final interface shapes for
+the translated thin-film bubble. While the droplet and gas bubble exhibit lower spurious velocities than the
+thin-film bubble by over one order of magnitude, the spurious velocities remain at below 0.1U0 throughout
+the thin-film bubble translation. As discussed in Section 3.4, the interface exhibits drift towards the center
+of the bubble due to the movement of gas from the inside of the bubble.
+4.4. Bag Formation on an Impulsively Accelerated Droplet
+The following test of the proposed method simulates the aerodynamic deformation of a liquid droplet.
+At moderate Weber numbers of We ≈ 15, the droplet evolves in the “bag breakup” regime, where the
+droplet flattens into a disk, deforms into a bag-shaped liquid sheet, and eventually breaks up into smaller
+droplets. The initial droplet diameter is D = 1, the domain size is [Lx , Ly , Lz ] = [20, 10, 10], and the uniform
+computational mesh size is ∆x = D/12.8. The simulation is performed with a time step size of ∆t = 5×10−2
+to a time of T = 82, at which point the liquid bag has a thickness of h < 2 × 10−3 ∆x at its thinnest point.
+24
+The film thickness inside a cell Ωi is defined as
+P
+
+P
+2 min
+α
+V
+,
+(1
+−
+α
+)V
+j
+j
+Ωj ∈Ni j j
+Ωj ∈Ni
+P
+hi =
+,
+A
+Ωj ∈Ni j
+(33)
+where Ni is the set of all cells that share a vertex with cell Ωi , Vi is the cell volume, and Ai is the surface area
+of the liquid-gas interface Γi in the cell. As the modeling of the sheet breakup is outside the scope of this
+work, this test serves to demonstrate the ability of R2P to capture the formation of the subgrid-thickness
+liquid bag. The simulation is performed at Reb = 100 and We = 20, with ρb = 1, ρa /ρb = 1000, and
+µa /µb = 50. The gas inflow is generated from a precursor simulation of homogeneous isotropic turbulence
+with Rλ = 45, and it has a turbulence intensity of 5% and a mean inflow velocity of U = 1. A threshold
+value of M¯ = 0.5 determines the use of a PLIC reconstruction at the edge of the liquid sheet.
+Figure 14 compares the interface shapes of the deformed droplet at t = T resulting from ELVIRA and
+R2P interface reconstruction. The respective computational costs of the simulations utilizing ELVIRA and
+R2P reconstructions are 46.7 and 54.2 core-hours, reflecting a modest 16% increase from ELVIRA to R2P.
+The two-plane interface representation is able to capture the formation and evolution of the liquid film
+without erroneous tearing, while the ELVIRA representation causes the deforming droplet to puncture due
+to the lack of numerical resolution and produce additional liquid structures unphysically. To demonstrate
+the effect of the film surface tension model, the simulation with two-plane reconstruction is performed with
+and without the surface tension model, the latter being the standard CSF method. The film thickness profile
+and interface shape using both surface tension models are compared in Figure 15 alongside an image from
+the experiments of Opfer et al. (2014). When using R2P with the standard CSF surface tension model,
+the interface deforms unevenly due to the surrounding turbulent gas, whereas when using the film surface
+tension model, the interface deforms relatively uniformly, as the surface tension stabilizes the interface by
+counteracting the perturbations from the turbulent velocity field. The spherical bag shape produced by the
+simulation using the film surface tension model is closer to the experimentally observed shape. Additionally,
+the selective use of a PLIC reconstruction where M¯ = 0.5 maintains the toroidal rim at the edge of the
+sheet. Without the numerical surface tension introduced from the PLIC reconstruction, i.e., with M¯ = 1,
+the entire drop has been observed to deform into a sheet. Since the two-plane reconstruction maintains the
+liquid film at arbitrary thicknesses, subgrid-scale breakup models could be applied at any point to produce
+child droplets from the liquid film volume.
+4.5. Binary Collision of Offset Droplets
+This demonstration of the proposed method simulates the collision of two droplets, where the parameters
+are chosen to replicate the bouncing collision depicted in Figure 4r of Qian and Law (1997). Two identical
+droplets with diameter D = 360 µm, ρb = 1.225 kg m−3 , µb = 1.827×10−5 Pa s, ρa /ρb = 622 and µa /µb = 116
+are initialized with a relative velocity U such that We = 0.0232 and Reb = 28.5. The initial positions of
+25
+(a) ELVIRA.
+(b) R2P with film surface tension model.
+(c) R2P with standard CSF surface tension.
+Figure 14: Interface shape for the deformation of an impulsively accelerated droplet with D/∆x = 12.8. Single-plane reconstructions are shown in blue, while two-plane reconstructions are shown in red.
+26
+Figure 15: Interface shape for the deformation of an impulsively accelerated droplet with D/∆x = 12.8 using CSF surface
+tension (middle) and film surface tension model (right). Interface elements are colored by film thickness. Experimental image
+from Opfer et al. (2014) shown on the left, reproduced with permission from the publisher.
+the droplets have a relative vertical offset B = χ/D = 0.84, where χ is the projection of the separation
+distance between the droplet centers in the direction normal to U , such that B = 0 corresponds to a head-on
+collision, and B = 1 indicates a grazing collision. The computational mesh size is ∆x = D/23.04, and the
+time step size is ∆t = 2 µs. For this test, a threshold value of M¯ = 0.8 is used. The collision is depicted in a
+series of snapshots in Figure 16, where the interface shapes resulting from ELVIRA and R2P reconstructions
+are compared. The formation of a micron-thickness subgrid gas film with R2P is indicated by the presence
+of two-plane interface reconstructions in Figure 16h. The formation of this film prevents the droplets from
+coalescing during the collision, which matches the experimental result. The colliding droplets coalesce when
+ELVIRA is used because the gas film is not captured. However, the collision outcome, i.e., whether the
+droplets coalesce or bounce, for an arbitrary choice of parameters is dictated by intermolecular forces that
+are not captured by the Navier-Stokes equations (Mackay and Mason, 1963). As with the liquid film formed
+during the deformation of the impulsively accelerated droplet, subgrid-scale models could be applied on the
+gas film cells to recover these non-continuum effects.
+4.6. Buoyant Bubble
+This final demonstration simulates a gas bubble of D = 1 mm rising to the surface of a liquid pool
+due to buoyant forces. Water and air are respectively used as the liquid and gas, with ρa = 1000 kg m−3 ,
+ρa /ρb = 816 and µa /µb = 63.9. The Bond number is Bo = ∆ρgD2 /σ = 1.96, and the Morton number is
+Mo = gµ4a ∆ρ/ρ2a σ 3 = 1.31 × 10−7 , where g = 9.81 m s−2 is gravitational acceleration and ∆ρ = ρa − ρb .
+The initial position of the bubble center is 1.45D below the pool surface. The computational mesh size is
+∆x = D/32, and the time step size is ∆t = 10 µs. Figure 17 shows the interface shape when the bubble
+reaches the pool surface, and a thin liquid film forms between the top of the bubble and the pool surface.
+27
+(a) t = 0 ms
+(b) t = 18 ms
+(c) t = 38 ms
+(d) t = 0 ms
+(e) t = 29 ms
+(f) t = 61 ms
+(g) t = 0 ms
+(h) t = 29 ms
+(i) t = 61 ms
+Figure 16: Interface shape for the binary collision of offset droplets using ELVIRA (middle) and R2P (bottom) with D/∆x =
+23.04. Single-plane reconstructions are shown in blue, while two-plane reconstructions are shown in red. Photographic images
+from Figure 4r in Qian and Law (1997) are shown on the top row with permission from the publisher.
+28
+This liquid film in the figure is colored by thickness h according to Eq. (33), and the minimum thickness of
+the film is h = 3.20 × 10−3 ∆x. This case further illustrates the versatility of R2P in capturing films in flows
+involving massive differences in length scales between fluid structures, such as bubbly flows.
+(a) Interface elements colored by film thickness.
+(b) Closeup of the interface. The cells are colored by volume fraction.
+Figure 17: Interface shape for a buoyant bubble at the surface of a liquid pool.
+5. Conclusions
+This work presents R2P, an interface reconstruction method capable of representing liquid-gas interfaces
+with two planes per computational cell within a geometric VOF framework. The initial guess of the interface
+centroids and normals is obtained through spherical k-means clustering (Dhillon and Modha, 2001) of the
+advected interface polygons. This initial guess is refined through a non-linear least squares procedure that
+minimizes the difference between the transported volume moments and the reconstructed volume moments
+within the local neighborhood of the interfacial cell while also minimizing the destruction or creation of
+surface area. A root-finding step during the optimization procedure ensures discrete volume conservation.
+The pressure jump across subgrid-thickness films due to surface tension is recovered through the use of a
+ficticious volume fraction field that artificially thickens the film. These routines have been implemented in
+the Interface Reconstruction Library (IRL) (Chiodi and Desjardins, 2022; Chiodi, 2023) and the two-phase
+flow solver NGA2 (Desjardins et al., 2008; Desjardins, 2023).
+Tests of R2P with a variety of canonical cases, including the rotation of a slotted disk and the reversible
+deformation of a cylinder and sphere, demonstrate that R2P seamlessly transitions between one- and twoplane reconstructions, enabling the capturing of thin films at all mesh resolutions. Compared to the oneplane ELVIRA reconstruction, R2P results in lower shape errors at fixed mesh resolution and comparable
+computational cost at fixed shape error. However, given that the interface reconstruction is a small part
+of the total cost of a flow solver, R2P’s advantages are best observed when utilized within a two-phase
+29
+Navier-Stokes solver. In the first example, R2P enables the formation of subgrid-thickness liquid bags
+from impulsively accelerated droplets with initial diameter D/∆x = O(10). The cost increase of R2P
+from ELVIRA in this test is only 16% even though ELVIRA entirely fails to form the liquid bag. Similarly,
+subgrid-thickness gas films can be formed between colliding droplets of comparable diameter. R2P, therefore,
+enables a potential cost savings of orders of magnitude compared to single-plane PLIC reconstructions that
+require the full resolution of the micron-scale films. Future work will develop subgrid-scale models to predict
+droplet formation from the breakup of these films.
+6. Acknowledgements
+Robert Chiodi was supported by the Office of Naval Research through a National Defense Science and
+Engineering Graduate Research Fellowship. This work was sponsored by the Office of Naval Research (ONR)
+as part of the Multidisciplinary University Research Initiatives (MURI) Program, under grant number
+N00014-16-1-2617. The views and conclusions contained herein are those of the authors only and should not
+be interpreted as representing those of ONR, the U.S. Navy or the U.S. Government. This material is based
+upon work supported by NSF under CAREER award Grant No. CBET-1351545 and XSEDE computing
+resources on TACC Stampede 2. This work was supported by the US Department of Energy through
+the Los Alamos National Laboratory. Los Alamos National Laboratory is operated by Triad National
+Security, LLC, for the National Nuclear Security Administration of U.S. Department of Energy (Contract
+No. 89233218CNA000001).
+The authors thank Professor Mahdi Esmaily for his comments on a draft of this manuscript.
+Appendix A. Film Cell Classification
+It is necessary to identify contiguous film regions to which the surface tension treatment described in
+Section 4 should be applied. As a film may contain adjacent one-plane and two-plane cells, only applying
+the proposed surface tension model to two-plane cells would underestimate the surface tension forces across
+the film. Furthermore, the proposed surface tension strategy requires the identification of the film phase of
+each cell. This section outlines the classification scheme used to identify the set of liquid film cells L and
+gas film cells G in the domain.
+Let V be the set of liquid-containing cells
+V = {Ωi | hi < 1.5∆x},
+where the local film thickness h is calculated as
+
+P
+P
+2 min
+α
+V
+,
+(1
+−
+α
+)V
+j
+j
+j
+j
+Ωj ∈Ni
+Ωj ∈Ni
+P
+hi =
+,
+A
+Ωj ∈Ni j
+30
+(A.1)
+(A.2)
+where Ni is the set of all cells that share a vertex with cell Ωi , Vi is the cell volume, and Ai is the surface area
+of the liquid-gas interface Γi in the cell. The threshold value of hi < 1.5∆x is chosen to avoid overapplication
+of the film surface tension method and was found to work well for a variety of cases. The factor of 2 is used
+because a film is bounded by an interface on both sides. The cell neighborhood Ni is not to be confused
+with the cell neighborhood Ni , used in the rest of the subsection, which is the set of cells that share at least
+one face with Ωi . Additionally, for each plane m in Γi , where 1 ≤ m ≤ Ni , the normal vector is denoted by
+ni,m , and the surface centroid is denoted by si,m . The set of liquid film cells L is the union of interfacial
+cell sets
+L = L2 ∪ L1 ,
+(A.3)
+L2 = {Ωi ∈ V | (Ni = 2) ∧ ((si,2 − si,1 ) · ni,2 ≥ 0) ∧ (ni,1 · ni,2 < 0.5)}
+(A.4)
+where
+is the set of two-plane cells containing a liquid film, and L1 = L11 ∪ L12 ∪ L13 is the union of
+1. the set of single-plane cells that neighbor a two-plane liquid film cell,
+
+
+L11 = {Ωi ∈ V | (Ni = 1) ∧ (∃Ωj ∈ Ni ) Nj ∈ L2 },
+(A.5)
+2. the set of single-plane cells that neighbor another single-plane cell such that a liquid film exists between
+their respective interfaces,
+L12 = {Ωi ∈ V | (Ni = 1) ∧ (∃Ωj ∈ Ni )
+[(Nj = 1) ∧ (ni,1 · nj,1 < −0.5) ∧ ((sj,1 − si,1 ) · nj,1 > 0) ∧ ((si,1 − sj,1 ) · ni,1 > 0)]}, (A.6)
+and
+3. the set of single-plane cells that neighbor a two-plane non-film cell such that a liquid film exists between
+their respective interfaces
+L13 = {Ωi ∈ V | (Ni = 1) ∧ (∃Ωj ∈ Ni )[(Nj = 2) ∧ (Nj ∈
+/ L2 )
+∧ (ni,1 · nj < −0.5) ∧ ((sj − si,1 ) · nj > 0) ∧ ((si,1 − sj ) · ni,1 > 0)]}, (A.7)
+where
+PNj
+nj =
+and
+m=1 wj,m nj,m
+PNj
+m=1 wj,m
+(A.8)
+PNj
+sj =
+m=1 wj,m sj,m
+PNj
+m=1 wj,m
+are the surface-averaged normal and centroid of the neighbor two-plane cell.
+31
+(A.9)
+Likewise, the set of gas film cells G is the union of interfacial cell sets
+G = G2 ∪ G1,
+(A.10)
+where G 2 is the set of two-plane cells containing a gas film
+G 2 = {Ωi ∈ V | (Ni = 2) ∧ ((si,2 − si,1 ) · ni,2 < 0) ∧ (ni,1 · ni,2 < 0.5)},
+(A.11)
+and G 1 = G 11 ∪ G 12 ∪ G 13 is the union of
+1. the set of single-plane cells that neighbor a two-plane gas cell,
+
+
+G 11 = {Ωi ∈ V | (Ni = 1) ∧ (∃Ωj ∈ Ni ) Nj ∈ G 2 },
+(A.12)
+2. the set of single-plane cells that neighbor another single-plane cell such that a gas film exists between
+their respective interfaces,
+G 12 = {Ωi ∈ V | (Ni = 1) ∧ (∃Ωj ∈ Ni )
+[(Nj = 1) ∧ (ni,1 · nj,1 < −0.5) ∧ ((sj,1 − si,1 ) · nj,1 < 0) ∧ ((si,1 − sj,1 ) · ni,1 < 0)]}, (A.13)
+and
+3. the set of single-plane cells that neighbor a two-plane non-film cell such that a gas film exists between
+their respective interfaces
+G 13 = {Ωi ∈ V | (Ni = 1) ∧ (∃Ωj ∈ Ni )[(Nj = 2) ∧ (Nj ∈
+/ G2)
+∧ (ni,1 · nj < −0.5) ∧ ((sj − si,1 ) · nj < 0) ∧ ((si,1 − sj ) · ni,1 < 0)]}, (A.14)
+where nj and sj are defined by Eqs. A.8 and A.9, respectively.
+For sets L13 and G 13 it is possible that the dot products (sj − si,1 ) · nj and (si,1 − sj ) · ni,1 will have
+opposing signs such that the phase is ambiguous. In this case, the phase of Ωi is determined by the phase
+of Ωj .
+References
+Ahn, H.T., Shashkov, M., 2007. Multi-material interface reconstruction on generalized polyhedral meshes. Journal of Computational Physics 226, 2096–2132. doi:10.1016/J.JCP.2007.06.033.
+Brackbill, J.U., Kothe, D.B., Zemach, C., 1992. A continuum method for modeling surface tension. Journal of Computational
+Physics 100, 335–354. doi:10.1016/0021-9991(92)90240-Y. cSF method¡br/¿Paper uses grad(alpha) for normal.
+Chiodi,
+R.,
+2023.
+Interface
+Reconstruction
+Library
+(IRL).
+interface-reconstruction-library.
+32
+URL:
+https://github.com/robert-chiodi/
+Chiodi, R., Desjardins, O., 2022. General, robust, and efficient polyhedron intersection in the interface reconstruction library. Journal of Computational Physics 449, 110787. URL: https://linkinghub.elsevier.com/retrieve/pii/
+S0021999121006823, doi:10.1016/j.jcp.2021.110787.
+Chiodi,
+ing
+R.,
+Shashkov,
+polygon-inscribed
+M.,
+ellipses
+2024.
+in
+A
+2D.
+moment-of-fluid
+URL:
+interface
+reconstruction
+us-
+https://www.researchgate.net/profile/
+Mikhail-Shashkov-3/publication/378208485_Title_A_moment-of-fluid_interface_
+reconstruction_using_polygon-inscribed_ellipses_in_2D_A_moment-of-fluid_interface_
+reconstruction_using_polygon-inscribed_ellipses_in_2D/links/65cd4e431e1ec12eff9bebd7/
+Title-A-moment-of-fluid-interface-reconstruction-using-polygon-inscribed-ellipses-in-2D-A-moment-of-fluid-in
+pdf.
+DeBar, R.B., 1974.
+Fundamentals of the kraken code.
+Technical Report , UCID–17366URL: http://www.osti.gov/
+servlets/purl/7227630/, doi:10.2172/7227630.
+Desjardins, O., 2023. NGA2. URL: https://github.com/desjardi/NGA2.
+Desjardins, O., Blanquart, G., Balarac, G., Pitsch, H., 2008. High order conservative finite difference scheme for variable density
+low mach number turbulent flows. Journal of Computational Physics 227, 7125–7159. doi:10.1016/j.jcp.2008.03.027.
+Dhillon, I.S., Modha, D.S., 2001. Concept decompositions for large sparse text data using clustering. Machine Learning 42,
+143–175. URL: https://doi.org/10.1023/A:1007612920971, doi:10.1023/A:1007612920971.
+Diot, S., François, M.M., 2016. An interface reconstruction method based on an analytical formula for 3d arbitrary convex
+cells. Journal of Computational Physics 305, 63–74. doi:10.1016/j.jcp.2015.10.011.
+Dowell, M., Jarratt, P., 1971. A modified regula falsi method for computing the root of an equation. BIT 11, 168–174. URL:
+https://dl.acm.org/doi/10.1007/BF01934364, doi:10.1007/BF01934364.
+Dyadechko, V., Shashkov, M., 2008. Reconstruction of multi-material interfaces from moment data. Journal of Computational
+Physics 227, 5361–5384. doi:10.1016/j.jcp.2007.12.029.
+Francois, M.M., Cummins, S.J., Dendy, E.D., Kothe, D.B., Sicilian, J.M., Williams, M.W., 2006. A balanced-force algorithm
+for continuous and sharp interfacial surface tension models within a volume tracking framework. Journal of Computational
+Physics 213, 141–173. doi:10.1016/j.jcp.2005.08.004.
+Han, A., Evrard, F., Desjardins, O., 2024. Comparison of methods for curvature estimation from volume fractions. International
+Journal of Multiphase Flow 174, 104769. doi:10.1016/j.ijmultiphaseflow.2024.104769.
+Hergibo, P., Liang, Q., Phillips, T.N., Xie, Z., 2024. A quadtree-based adaptive moment-of-fluid method for interface reconstruction with filaments. Journal of Computational Physics 499, 112719. doi:10.1016/j.jcp.2023.112719.
+Hergibo, P., Phillips, T.N., Xie, Z., 2023. A moment-of-fluid method for resolving filamentary structures using a symmetric
+multi-material approach. Journal of Computational Physics 491, 112401. doi:10.1016/j.jcp.2023.112401.
+Ivey, C.B., Moin, P., 2015. Accurate interface normal and curvature estimates on three-dimensional unstructured non-convex
+polyhedral meshes. Journal of Computational Physics 300, 365–386. doi:10.1016/j.jcp.2015.07.055.
+Jemison, M., Sussman, M., Shashkov, M., 2015. Filament capturing with the multimaterial moment-of-fluid method. Journal
+of Computational Physics 285, 149–172. doi:10.1016/j.jcp.2015.01.014.
+Jibben, Z., Carlson, N., Francois, M., 2019. A paraboloid fitting technique for calculating curvature from piecewise-linear
+interface reconstructions on 3d unstructured meshes. Computers & Mathematics with Applications 78, 643–653. URL:
+https://linkinghub.elsevier.com/retrieve/pii/S0898122118305194, doi:10.1016/j.camwa.2018.09.009.
+Kim, D., Moin, P., 2020. Subgrid-scale capillary breakup model for liquid jet atomization. Combustion Science and Technology
+192, 1334–1357. URL: https://www.tandfonline.com/doi/full/10.1080/00102202.2020.1732950, doi:10.1080/
+00102202.2020.1732950.
+Levenberg, K., 1944. A method for the solution of certain non-linear problems in least squares. Quarterly of Applied Mathe-
+33
+matics 2, 164–168. URL: https://www.ams.org/qam/1944-02-02/S0033-569X-1944-10666-0/, doi:10.1090/qam/
+10666.
+Leveque, R.J., 1996. High-resolution conservative algorithms for advection in incompressible flow. SIAM Journal on Numerical
+Analysis 33, 627–665. doi:10.1137/0733033.
+Ling, Y., Mahmood, T., 2023. Detailed numerical investigation of the drop aerobreakup in the bag breakup regime. URL:
+http://arxiv.org/abs/2305.00124.
+López, J., Hernández, J., Gómez, P., Faura, F., 2005. An improved plic-vof method for tracking thin fluid structures in
+incompressible two-phase flows. Journal of Computational Physics 208, 51–74. URL: https://linkinghub.elsevier.
+com/retrieve/pii/S0021999105000513, doi:10.1016/j.jcp.2005.01.031.
+López, J., Hernández, J., Gómez, P., Faura, F., 2016. A new volume conservation enforcement method for plic reconstruction
+in general convex grids. Journal of Computational Physics 316, 338–359. URL: https://www.sciencedirect.com/
+science/article/pii/S002199911630050X, doi:https://doi.org/10.1016/j.jcp.2016.04.018.
+López, J., Hernández, J., Gómez, P., Faura, F., 2019. Non-convex analytical and geometrical tools for volume truncation,
+initialization and conservation enforcement in vof methods. Journal of Computational Physics 392, 666–693. doi:10.1016/
+J.JCP.2019.04.055.
+Mackay, G.D.M., Mason, S.G., 1963. The gravity approach and coalescence of fluid drops at liquid interfaces. The Canadian Journal of Chemical Engineering 41, 203–212. URL: https://onlinelibrary.wiley.com/doi/10.1002/cjce.
+5450410504, doi:10.1002/cjce.5450410504.
+Opfer, L., Roisman, I.V., Venzmer, J., Klostermann, M., Tropea, C., 2014. Droplet-air collision dynamics: Evolution of the film
+thickness. Physical Review E - Statistical, Nonlinear, and Soft Matter Physics 89, 1–6. doi:10.1103/PhysRevE.89.013023.
+Owkes, M., Desjardins, O., 2014. A computational framework for conservative, three-dimensional, unsplit, geometric transport
+with application to the volume-of-fluid (vof) method. Journal of Computational Physics 270, 587–612. doi:10.1016/j.
+jcp.2014.04.022.
+Pilliod, J.E., Puckett, E.G., 2004. Second-order accurate volume-of-fluid algorithms for tracking material interfaces. Journal
+of Computational Physics 199, 465–502. doi:10.1016/j.jcp.2003.12.023.
+Popinet, S., 2009. An accurate adaptive solver for surface-tension-driven interfacial flows. Journal of Computational Physics
+228, 5838–5866. URL: https://linkinghub.elsevier.com/retrieve/pii/S002199910900240X, doi:10.1016/j.
+jcp.2009.04.042.
+Popinet, S., 2018.
+122316–045034.
+Numerical Models of Surface Tension.
+Annual Review of Fluid Mechanics 50, annurev–fluid–
+URL: http://www.annualreviews.org/doi/10.1146/annurev-fluid-122316-045034, doi:10.
+1146/annurev-fluid-122316-045034. arXiv: 1507.05135 ISBN: 1545-1593 (Electronic)\r0066-426X (Linking).
+Qian, J., Law, C.K., 1997. Regimes of coalescence and separation in droplet collision. Journal of Fluid Mechanics 331, 59–
+80. URL: https://doi.org/10.1017/S0022112096003722, doi:10.1017/S0022112096003722. publisher: Cambridge
+University Press.
+Scardovelli, R., Zaleski, S., 2000. Analytical relations connecting linear interfaces and volume fractions in rectangular grids.
+Journal of Computational Physics 164, 228–237. doi:10.1006/jcph.2000.6567.
+Shashkov, M., Kikinzon, E., 2023. Moments-based interface reconstruction, remap and advection. Journal of Computational
+Physics 479, 111998. URL: https://doi.org/10.1016/j.jcp.2023.111998, doi:10.1016/j.jcp.2023.111998.
+Villermaux, E., Bossa, B., 2009. Single-drop fragmentation determines size distribution of raindrops. Nature Physics 5, 697–702.
+doi:10.1038/nphys1340.
+Yang, X., James, A.J., 2006. Analytic relations for reconstructing piecewise linear interfaces in triangular and tetrahedral
+grids. Journal of Computational Physics 214, 41–54. URL: https://www.sciencedirect.com/science/article/pii/
+S0021999105004225, doi:https://doi.org/10.1016/j.jcp.2005.09.002.
+34
+Youngs, D.L., 1982. Time-dependent multi-material flow with large fluid distortion, in: Morton, K., Baines, M. (Eds.),
+Numerical Methods for Fluid Dynamics. Academic Press, pp. 273–285.
+Zalesak, S.T., 1979.
+Fully multidimensional flux-corrected transport algorithms for fluids.
+Journal of Computational
+Physics 31, 335–362. URL: https://linkinghub.elsevier.com/retrieve/pii/0021999179900512, doi:10.1016/
+0021-9991(79)90051-2.
+35

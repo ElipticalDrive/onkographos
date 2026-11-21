@@ -1,0 +1,2896 @@
+# Marching-Cubes-Terrain  
+Unity implementation of voxel terrain using **Marching Cubes**, **Signed Distance Functions**, and **indirect rendering**.  
+
+Made by Jack Welfer.
+
+**Watch the demo!**
+[![Watch the demo](Images/DemoThumbnail.png)](https://www.youtube.com/watch?v=wEyjIHqGbDA)  
+
+---
+
+## Key Features
+- GPU voxel evaluation with compute shaders  
+- Marching Cubes fully on GPU (no CPU readback or stalls)  
+- Indirect rendering with procedural draw calls  
+- Chunk-based LOD with per-chunk AABB culling  
+- Buffer pooling & manual resource management  
+- Extensively Profiled to achieve render thread of ~1.5ms 
+
+---
+
+## Overview
+Hello and thanks for checking out my repo!  
+This project is part of a larger game I’m building called **Fight Game**. A big philosophy I’ve had since starting in February 2023 is removing as many “immersion breakers” as possible. One of the biggest immersion boosts is making terrain feel alive and dynamic, which is why I went down the rabbit hole of voxel terrain.  
+
+At a high level:  
+- Voxels give me a way to represent volume in 3D space.  
+- Signed Distance Functions (SDFs) define shapes by returning the distance from a point to the surface.  
+- Marching Cubes interpolates those voxel values into triangles via a lookup table.  
+- Everything is computed and rendered on the GPU for speed.  
+
+All in all, I'm very satisfied with the results. Comparing the performance to other popular solutions on the Unity Asset Store, I've achieved results that run 2-3x faster than most GPU-CPU approaches.
+
+---
+## What I learned & what I’ll change next time
+
+- Small, verified steps work. Tight feedback loops kept regressions low.  
+
+- The hard part was **readability vs. performance**. Hidden state and side effects made the top-level flow harder to follow.  
+
+- Next time I’ll use a **functional core, imperative shell**:  
+  - Keep hot paths (kernels/tight loops) optimized, but isolate them behind pure functions with explicit inputs/outputs.  
+  - Push mutations to the edges (I/O, buffers), avoid shared globals, and pass a context struct instead.  
+
+
+
+
+## The Algorithm (Step by Step)
+
+### Chunking
+The world is subdivided into chunks. Each chunk has a defined **ChunkDimensions** (world size) and **ChunkResolution** (grid count). This makes it easy to parallelize work and later assign LODs or cull chunks.  
+
+![Chunks](Images/Chunks.png)  
+
+### Voxels
+Each chunk is then subdivided into voxels. A **VoxelResolution** defines how many voxels per dimension we sample.  
+
+![Voxels](Images/Voxels.png)  
+
+### SDF Sampling
+Every voxel gets a value by sampling the SDF at its position. For a 12×12×12 chunk grid with ~41³ voxels each, that’s ~120 million evaluations! Doing this on the CPU would be a disaster, so I moved the entire process to **compute shaders**.  
+
+### Marching Cubes
+With voxels populated, Marching Cubes generates the mesh. Initially I had this on CPU (bad idea), then swapped to Keijiro’s GPU version. The problem was that Keijiro’s approach still read back to CPU, stalling performance. I rewired it to use **Indirect Rendering** so the GPU generates and renders everything directly.  
+
+This massively improved performance — the RenderThread stays ~1.5ms even with terrain generation active. The tradeoff is no CPU mesh copy, so physics/collision will need a custom solution later.  
+
+---
+
+## Optimizations
+Here are the most important optimizations I’ve added so far:
+- GPU Voxel Evaluation  
+- GPU Marching Cubes  
+- Indirect Rendering Path  
+- AABB Voxel Bounds Culling per chunk  
+- Buffer pooling and Manual Resource Management  
+- Level of detail  
+- Batching Draw calls per LOD  
+- Priority updates for new SDFs  
+
+---
+
+## Future Improvements
+- Async LOD updates (spread work across multiple frames)  
+- GPU-driven culling & dispatch compaction  
+- Improved Physics/collision integration for GPU-only meshes  
+
+---
+
+## Credits
+- Credit to [Keijiro](https://github.com/keijiro/ComputeMarchingCubes/tree/main) for the original GPU Marching Cubes implementation.  
+
+---
+
+## License
+_All rights reserved. This code is provided for reference only. Not for reuse, modification, or distribution without permission._
+
+### TerrainPipeline.cs
+```
+using System;
+using System.Collections.Generic;
+using Unity.Mathematics;
+using UnityEngine;
+
+[Serializable]
+public struct TerrainLod
+{
+    public int LOD;
+    public int3 VoxelResolution;
+    public int chunkRadius;
+}
+public class TerrainPipeline : MonoBehaviour
+{
+    public static TerrainPipeline Instance;
+    //References
+    public TerrainChunker terrainChunker;
+    //Dependencies
+    [Header("Dependencies")]
+    public ComputeShader MarchingCubesCompute;
+    public ComputeShader VoxelEvalShader;
+    public ComputeShader IndirectArgumentAdjuster;
+    public Material TerrainMaterial;
+    public Transform Player;
+    private Vector3 playerPosition => Player.position;
+    // Config Settings
+    [Header("Config Settings")]
+    public int3 ChunkDimensions; 
+    public int3 ChunkResolution;
+    //LOD
+    [Header ("Lods (Ensure LODS are in order of highest to lowest voxel Resolution!)")]
+    public List<TerrainLod> terrainLods;
+
+    //SDFS
+    public TerrainSDFFactory terrainSDFFactory;
+    public TerrainSDFRegistry terrainSDFRegistry;
+    // Debugging
+    [Header("Debugging")]
+    public bool displayChunks = true;
+    public bool displayVoxels = true;
+    private TerrainChunkCollection terrainChunkCollection;
+    public struct VoxelDebugData
+    {
+        public float[] voxels;
+        public int3 resolution;
+        public float3 gridMinCorner;
+        public float3 voxelSize;
+        public VoxelDebugData(float[] voxels, int3 res, float3 gridMinCorner, float3 voxelSize)
+        {
+            this.voxels = voxels;
+            this.resolution = res;
+            this.gridMinCorner = gridMinCorner;
+            this.voxelSize = voxelSize;
+        }
+    }
+    private List<VoxelDebugData> voxelDebugData;
+    #region  Input Validation
+
+    private void OnValidate()
+    {
+        
+        //Validate Input
+        if (ChunkDimensions.x != ChunkDimensions.y || ChunkDimensions.y != ChunkDimensions.z) { Debug.LogError("Keep Chunk Dimensions Cube-like."); }
+
+        int lastLod = -1;
+        foreach (TerrainLod terrainLod in terrainLods)
+        {
+            bool decreasingLOD = terrainLod.LOD < lastLod;
+            bool outOfRange =  math.any(terrainLod.chunkRadius > ChunkResolution);
+            bool evenVoxelResolution = terrainLod.VoxelResolution.x % 2 == 0 || terrainLod.VoxelResolution.y % 2 == 0 || terrainLod.VoxelResolution.z % 2 == 0;
+            lastLod = terrainLod.LOD;
+
+            if (decreasingLOD) Debug.LogError("Invalid LOD Ordering. Ensure LOD is in increasing order.");
+            if (evenVoxelResolution) Debug.LogError("Invalid Voxel Resolution(s). Must be odd.");
+            if (outOfRange) Debug.LogError("Invalid Voxel Range. Must be less than voxelResolution.");
+        }
+
+        if (!Player)                    Debug.LogError("Player cannot be null.");
+        if (!MarchingCubesCompute)      Debug.LogError("Missing Marching Cubes Shader");
+        if (!VoxelEvalShader)           Debug.LogError("Missing Voxel Evaluation Shader");
+        if (!TerrainMaterial)           Debug.LogError("Missing Terrain Material");
+    }
+    #endregion
+    #region MonoBehavior Lifecycle
+    private void Awake()
+    {
+        Instance = this;
+
+    
+        //Init SDF collection
+        terrainSDFRegistry = new TerrainSDFRegistry();
+        terrainSDFFactory = new TerrainSDFFactory(terrainSDFRegistry);
+        //terrainSDFFactory.Init_SphereSDF(40f, new Vector3(25, 80, 7), 0);
+        //terrainSDFFactory.Init_TorusSDF(40f, 15f, new Vector3(0, -20f, 0), 0);
+        terrainSDFFactory.Init_PlaneSDF(Vector3.up, -25, 0);
+
+        terrainChunker = new TerrainChunker(this, playerPosition, ChunkResolution, ChunkDimensions, terrainLods);
+        terrainChunkCollection = terrainChunker.TerrainChunkCollection;
+        voxelDebugData = new();
+      
+    }
+    private void OnDestroy()
+    {
+        terrainChunker.Dispose();
+        GpuIndirectDrawRegistry.ClearFrame();
+    }
+    private void Update()
+    {
+        terrainChunker.UpdateChunks(playerPosition);
+    }
+    #endregion
+    
+    #region Debugging
+    public void AddVoxelDebugData(VoxelDebugData data)
+    {
+        voxelDebugData.Add(data);
+    }
+    public void ClearVoxelDebugData()
+    { 
+        voxelDebugData.Clear();  
+    }
+    
+    private void OnDrawGizmos()
+    {
+
+        if (terrainChunkCollection == null || !(terrainChunkCollection.TerrainChunks != null))
+            return;
+
+
+        var chunks = terrainChunkCollection.TerrainChunks;
+        if (displayVoxels)
+            foreach (VoxelDebugData voxelDebugDatum in voxelDebugData)
+            {
+                SDFVoxelGizmoVisualizer.DrawVoxelSDFGizmos(
+                    voxelDebugDatum.voxels,
+                    voxelDebugDatum.resolution,
+                    voxelDebugDatum.gridMinCorner,
+                    voxelDebugDatum.voxelSize
+                );
+            }
+
+        if (displayChunks)
+            for (int i = 0; i < chunks.Length; i++)
+            {
+                var chunk = chunks[i];
+
+                Gizmos.color = (chunk.ChunkLOD.LOD == 1) ? Color.red : (chunk.ChunkLOD.LOD == 2) ? Color.blue : Color.green;
+                float3 center = chunk.MinCornerWS + chunk.ChunkSize * 0.5f;
+                Gizmos.DrawWireCube(center, chunk.ChunkSize);
+            }
+    }
+    
+    #endregion
+}
+```
+
+### Chunking/TerrainChunk.cs
+```
+using System.Collections.Generic;
+using MarchingCubes;
+using Unity.Collections;
+using Unity.Mathematics;
+
+public struct TerrainChunk_Val
+{
+    // Integer 3D index of the chunk in the chunk grid (e.g., [x, y, z])
+    public readonly int3 ChunkIndex;
+
+    // World-space position of the chunk's minimum corner (bottom-left-front)
+    public readonly float3 MinCornerWS;
+
+    // Size of the chunk in world units (assumed cubic or rectangular)
+    public readonly float3 ChunkSize;
+    public TerrainLod ChunkLOD;
+    
+    // Constructor for convenience
+    public TerrainChunk_Val(int3 chunkIndex, float3 minCornerWS, float3 chunkSize)
+    {
+        ChunkIndex = chunkIndex;
+        MinCornerWS = minCornerWS;
+        ChunkSize = chunkSize;
+        ChunkLOD = new TerrainLod() { LOD = -1};
+      
+    }
+   
+
+}
+public class TerrainChunk_Ref
+{
+    // Integer 3D index of the chunk in the chunk grid (e.g., [x, y, z])
+    public readonly int3 ChunkIndex;
+
+    // World-space position of the chunk's minimum corner (bottom-left-front)
+    public readonly float3 MinCornerWS;
+
+    // Size of the chunk in world units (assumed cubic or rectangular)
+    public readonly float3 ChunkSize;
+
+    // Computed max corner of the chunk's AABB in world space
+    public float3 MaxCornerWS => MinCornerWS + ChunkSize;
+    public TerrainLod ChunkLOD;
+  
+   
+    // Constructor for convenience
+    public TerrainChunk_Ref(int3 chunkIndex, float3 minCornerWS, float3 chunkSize)
+    {
+        ChunkIndex = chunkIndex;
+        MinCornerWS = minCornerWS;
+        ChunkSize = chunkSize;
+        ChunkLOD = new TerrainLod() { LOD = -1};
+    
+    }
+    public void Dispose()
+    {
+    
+    }
+}
+
+
+/// <summary>
+/// Contains metadata about a colllection of chunks
+/// </summary>
+public class TerrainChunkCollection
+{
+
+    public TerrainChunk_Val[] TerrainChunks;
+    public int3 Resolution; /// number of chunks in each direction [x,y,z]
+    public int3 ChunkDimension; /// world space dimensions of each chunk [x,y,z]
+    public float3 Origin;
+    public static int created = 0;
+    public static int destroyed = 0;
+    public TerrainChunkCollection(int3 resolution, int3 chunkDimension, TerrainChunk_Val[] terrainChunks, float3 origin)
+    {
+        Origin = origin;
+        TerrainChunks = terrainChunks;
+        Resolution = resolution;
+        ChunkDimension = chunkDimension;
+
+    }
+    
+}
+```
+
+### Chunking/TerrainChunker.cs
+```
+using Unity.Mathematics;
+using UnityEngine;
+using System.Collections.Generic;
+using System.Linq;
+using Unity.Profiling;
+using System.Runtime.CompilerServices;
+using System;
+
+/// <summary>
+/// Responsible for creating and updating our terrain chunks
+/// </summary>
+public class TerrainChunker
+{
+    public static ProfilerMarker ChangedLods = new ProfilerMarker("Changed Lods");
+    public static ProfilerMarker NewSDF = new ProfilerMarker("New SDF");
+
+    /// <summary>
+    /// Returns the number of cells filled by a manhattanfill of specified radius.
+    /// </summary>
+    /// <param name="radius"></param>
+    /// <returns></returns>
+    public static long ManhattanFloodFillCount3D(int radius)
+    {
+        long r = radius;
+        // Centered octahedral number: N(R) = (4R^3 + 6R^2 + 8R)/3 + 1
+        return ((4 * r * r * r + 6 * r * r + 8 * r) / 3) + 1;
+    }
+    // === Settings ===
+    public TerrainChunkCollection TerrainChunkCollection;
+    List<TerrainLod> AllLods;
+    // === State Trackers ===
+    bool initialized = false;
+    int playerChunkIndex; //index of the chunk the player is in
+    HashSet<int> chunksToUpdate; //indices of chunks with a mesh 
+    Dictionary<int, uint> numberOfSDFSPerChunk; //# of sdfs in each chunk at present time 
+
+    // === References ===
+    TerrainMeshBuilderIndirect terrainMeshBuilder;
+    TerrainPipeline terrainPipeline;
+    VoxelsFactory voxelsFactory;
+    #region Public API
+    /// <summary>
+    /// Constructor initializes chunks with ChunkDimensions as chunksize and ChunkResolution as number of chunks in each dimension.
+    /// </summary>
+    /// <param name="terrainPipeline"></param>
+    /// <param name="playerPosition"></param>
+    /// <param name="ChunkDimensions"></param>
+    /// <param name="ChunkResolution"></param>
+    /// <param name="lods"></param>
+    public TerrainChunker (TerrainPipeline terrainPipeline, Vector3 playerPosition, int3 ChunkDimensions, int3 ChunkResolution, List<TerrainLod> lods)
+    {
+        this.terrainPipeline = terrainPipeline;
+        terrainMeshBuilder = new TerrainMeshBuilderIndirect(lods[0].VoxelResolution.x * lods[0].VoxelResolution.y * lods[0].VoxelResolution.z, terrainPipeline.MarchingCubesCompute, terrainPipeline.IndirectArgumentAdjuster, terrainPipeline.TerrainMaterial, lods);
+        AllLods = lods;
+        chunksToUpdate = new();
+        numberOfSDFSPerChunk = new Dictionary<int, uint>(); //default val 0 
+        int n = ChunkResolution.x * ChunkResolution.y * ChunkResolution.z;
+        numberOfSDFSPerChunk = new Dictionary<int, uint>(n);
+        for (int i = 0; i < n; i++)
+        {
+            numberOfSDFSPerChunk.Add(i, 0u);
+        }
+        
+        voxelsFactory = new VoxelsFactory(terrainPipeline, this, terrainPipeline.VoxelEvalShader, ChunkResolution, lods);
+        CalculateChunks(ChunkDimensions, ChunkResolution);
+    }
+    public void Dispose()
+    {
+        voxelsFactory.Dispose();
+        terrainMeshBuilder.Dispose();
+    }
+    int oldNumberOfSDFS = 0;
+    /// <summary>
+    /// Recalculates LOD for each chunk, recalculates voxels for chunks whose LOD has changed, and redraws meshes for voxels whose value changed WHEN any of the following condtions are met:
+    /// 1) Player has changed chunk
+    /// 2) #TODO Change made to SDF collection.
+    /// </summary>
+    /// <param name="playerPosition"></param>
+    public void UpdateChunks(Vector3 playerPosition)
+    {
+
+        int oldPlayerChunkIndex = playerChunkIndex;
+        playerChunkIndex = GetPlayerChunkIndex(playerPosition);
+        bool playerChangedChunk = playerChunkIndex != oldPlayerChunkIndex;
+        bool newSDFMade = terrainPipeline.terrainSDFRegistry.GetNewSDFS() != null;
+        bool SDFRemoved = terrainPipeline.terrainSDFRegistry.GetRemovedSDFS() != null;
+
+        if (playerChangedChunk || !initialized || newSDFMade || SDFRemoved)
+        {
+
+            terrainPipeline.ClearVoxelDebugData();
+       
+            if (newSDFMade || SDFRemoved)
+            {
+                voxelsFactory.SetSDFBuffer(terrainPipeline.terrainSDFRegistry);
+            }
+
+            if (playerChangedChunk || !initialized)
+            {
+                UpdateFrom_ChangedLOD();
+            }
+
+            if (newSDFMade || SDFRemoved)
+            {
+                UpdateFrom_ChangedSDF();
+            }
+
+            initialized = true;
+        }
+
+        oldNumberOfSDFS = terrainPipeline.terrainSDFRegistry.TerrainSDFS.Count;
+
+    }
+
+    void UpdateFrom_ChangedLOD()
+    {
+
+        using (ChangedLods.Auto())
+        {
+            RecalculateLOD();
+            MainVoxelPass();
+            foreach (int chunkIndex in chunksToUpdate)
+            {
+                CalculateMesh(chunkIndex);
+            }
+            foreach (TerrainLod lod in AllLods)
+            {
+                terrainMeshBuilder.BuildLOD(lod);
+            }
+        }
+    }
+    void UpdateFrom_ChangedSDF()
+    {
+        using (NewSDF.Auto())
+        {
+            List<int> newChunkIndiciesInBounds = GetIndicesInBounds();
+            //UpdateNumSDFSPerChunk();
+            HashSet<TerrainLod> lodsInBounds = MainVoxelPass(newChunkIndiciesInBounds);
+            foreach (int chunkIndex in chunksToUpdate)
+            {
+                CalculateMesh(chunkIndex);
+            }
+            foreach (TerrainLod lod in AllLods)
+            {
+                terrainMeshBuilder.BuildLOD(lod);
+            }
+        }
+
+        List<int> GetIndicesInBounds()
+        {
+            List<int> allIndiciesInBounds = new List<int>();
+            List<TerrainSDF_GPU> sdfsMadeThisTick = terrainPipeline.terrainSDFRegistry.GetNewSDFS();
+            List<TerrainSDF_GPU> sdfsRemovedThisTick = terrainPipeline.terrainSDFRegistry.GetRemovedSDFS();
+           
+            if (sdfsMadeThisTick != null)
+                foreach (TerrainSDF_GPU sdf in sdfsMadeThisTick)
+                {
+                    AABB sdfBounds = TerrainSDFRegistry.ComputeBounds(sdf);
+                    List<int> chunkIndiciesInBounds = TerrainChunkUtils.GetChunksOverlappingAABB(sdfBounds, TerrainChunkCollection.TerrainChunks[0].MinCornerWS, TerrainChunkCollection.TerrainChunks[0].ChunkSize, terrainPipeline.ChunkResolution);
+                    allIndiciesInBounds.AddRange(chunkIndiciesInBounds);
+                }
+            if (sdfsRemovedThisTick != null)
+                foreach (TerrainSDF_GPU sdf in sdfsRemovedThisTick)
+                {
+                    AABB sdfBounds = TerrainSDFRegistry.ComputeBounds(sdf);
+                    List<int> chunkIndiciesInBounds = TerrainChunkUtils.GetChunksOverlappingAABB(sdfBounds, TerrainChunkCollection.TerrainChunks[0].MinCornerWS, TerrainChunkCollection.TerrainChunks[0].ChunkSize, terrainPipeline.ChunkResolution);
+                    allIndiciesInBounds.AddRange(chunkIndiciesInBounds);
+                }
+            return allIndiciesInBounds;
+
+        }
+        void UpdateNumSDFSPerChunk()
+        {
+            List<int> allIndiciesInBounds = new List<int>();
+            List<TerrainSDF_GPU> sdfsMadeThisTick = terrainPipeline.terrainSDFRegistry.GetNewSDFS();
+            List<TerrainSDF_GPU> sdfsRemovedThisTick = terrainPipeline.terrainSDFRegistry.GetRemovedSDFS();
+           
+            if (sdfsMadeThisTick != null)
+                foreach (TerrainSDF_GPU sdf in sdfsMadeThisTick)
+                {
+                    AABB sdfBounds = TerrainSDFRegistry.ComputeBounds(sdf);
+                    List<int> chunkIndiciesInBounds = TerrainChunkUtils.GetChunksOverlappingAABB(sdfBounds, TerrainChunkCollection.TerrainChunks[0].MinCornerWS, TerrainChunkCollection.TerrainChunks[0].ChunkSize, terrainPipeline.ChunkResolution);
+                    foreach (int chunkIndexInBounds in chunkIndiciesInBounds)
+                    {
+                        numberOfSDFSPerChunk[chunkIndexInBounds]++;
+                    }
+                }
+            if (sdfsRemovedThisTick != null)
+                foreach (TerrainSDF_GPU sdf in sdfsRemovedThisTick)
+                {
+                    AABB sdfBounds = TerrainSDFRegistry.ComputeBounds(sdf);
+                    List<int> chunkIndiciesInBounds = TerrainChunkUtils.GetChunksOverlappingAABB(sdfBounds, TerrainChunkCollection.TerrainChunks[0].MinCornerWS, TerrainChunkCollection.TerrainChunks[0].ChunkSize, terrainPipeline.ChunkResolution);
+                    foreach (int chunkIndexInBounds in chunkIndiciesInBounds)
+                    {
+                        numberOfSDFSPerChunk[chunkIndexInBounds]--;
+                    }
+                }
+
+        }
+    }
+    /// <summary>
+    /// Rebuilds mesh for a specified chunk and tracks it.
+    /// </summary>
+    /// <param name="index"></param>
+    /// <param name="resolution"></param>
+    /// <param name="voxelBuffer"></param>
+    public void CalculateMesh(int chunkIndex)
+    {
+        TerrainChunk_Val chunk = TerrainChunkCollection.TerrainChunks[chunkIndex];
+        int3 resolution = chunk.ChunkLOD.VoxelResolution;
+        ComputeBuffer voxelBuffer = voxelsFactory.GetVoxelBuffer(chunkIndex);
+        float voxelSize = (chunk.ChunkSize / ((float3)(resolution - new int3(1, 1, 1)))).x;
+        //terrainMeshBuilder.UnloadMesh(chunkIndex);
+        if (chunk.ChunkLOD.LOD == -1) return;
+        terrainMeshBuilder.CalculateMesh(chunkIndex, voxelBuffer, voxelSize, resolution, chunk.MinCornerWS + chunk.ChunkSize * .5f, chunk.ChunkLOD);
+    }
+    /// <summary>
+    /// Get the chunk index corresponding to the chunk containing the player
+    /// </summary>
+    /// <param name="playerPosition"></param>
+    /// <returns></returns>
+    public int GetPlayerChunkIndex(float3 playerPosition)
+    {
+        // Grid dimensions
+        int chunksX = TerrainChunkCollection.Resolution.x;
+        int chunksY = TerrainChunkCollection.Resolution.y;
+        int chunksZ = TerrainChunkCollection.Resolution.z;
+        float3 chunkSize = TerrainChunkCollection.ChunkDimension;
+
+        // Compute world-space size of entire grid
+        float3 totalGridSize = new float3(
+            chunksX * chunkSize.x,
+            chunksY * chunkSize.y,
+            chunksZ * chunkSize.z
+        );
+
+        float3 gridCenter = TerrainChunkCollection.Origin;
+        float3 gridMinCorner = TerrainChunkCollection.TerrainChunks[0].MinCornerWS;
+
+        // Offset player position relative to this origin
+        float3 localPos = playerPosition - gridMinCorner;
+
+        // Find chunk coordinates
+        int cx = (int)math.floor(localPos.x / chunkSize.x);
+        int cy = (int)math.floor(localPos.y / chunkSize.y);
+        int cz = (int)math.floor(localPos.z / chunkSize.z);
+
+        // Clamp to grid bounds (optional)
+        cx = math.clamp(cx, 0, chunksX - 1);
+        cy = math.clamp(cy, 0, chunksY - 1);
+        cz = math.clamp(cz, 0, chunksZ - 1);
+
+        // Convert to 1D index
+        int index = cx + cy * chunksX + cz * chunksX * chunksY;
+
+        return index;
+    }
+    #endregion
+    #region Private Methods
+    void RecalculateLOD()
+    {
+        terrainPipeline.ClearVoxelDebugData();
+
+        //Reset all AllLods
+        for (int chunkIndex = 0; chunkIndex < TerrainChunkCollection.TerrainChunks.Length; chunkIndex++)
+        {
+            TerrainChunkCollection.TerrainChunks[chunkIndex].ChunkLOD.LOD = -1; //Set to not loaded by default
+        }
+            
+        //Calc new AllLods
+        CalculateLodsByManhattan(AllLods);
+
+        voxelsFactory.UpdateVoxelBuffersForChunks();
+    }
+
+    void MainVoxelPass()
+    {
+        var chunks   = TerrainChunkCollection.TerrainChunks;   // contiguous
+        var registry = terrainPipeline.terrainSDFRegistry;     // cache once
+
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            ref TerrainChunk_Val chunk = ref chunks[i];  // no copy
+            if (chunk.ChunkLOD.LOD == -1) continue;
+            //chunk culling
+            //chunk culling
+            bool culled = CullChunk(in chunk, registry);
+            if (culled) chunksToUpdate.Add(i);
+            if (!culled) chunksToUpdate.Remove(i);
+            if (!culled) continue;
+
+
+            // Prefer an overload that takes `in TerrainChunk_Val`
+            voxelsFactory.EvaluateVoxelGroup(i, chunk, chunk.ChunkLOD);
+        }
+    }
+    /// <summary>
+    /// Takes as input a list of chunk indices corresponding to chunks that need updated voxels, outputs a set of AllLods which need to be rebuilt.
+    /// </summary>
+    /// <param name="chunkIndices"></param>
+    /// <returns></returns>
+    HashSet<TerrainLod> MainVoxelPass(List<int> chunkIndices)
+    {
+        var chunks = TerrainChunkCollection.TerrainChunks;   // contiguous
+        var registry = terrainPipeline.terrainSDFRegistry;     // cache once
+
+        HashSet<TerrainLod> lodsInBounds = new HashSet<TerrainLod>();  //output
+        foreach (int chunkIndex in chunkIndices)
+        {
+            ref TerrainChunk_Val chunk = ref chunks[chunkIndex];  // no copy
+            if (chunk.ChunkLOD.LOD == -1) continue;
+
+            //chunk culling
+            bool culled = CullChunk(in chunk, registry);
+            if (culled) chunksToUpdate.Add(chunkIndex);
+            if (!culled) chunksToUpdate.Remove(chunkIndex);
+            if (!culled) continue;
+ 
+            lodsInBounds.Add(chunk.ChunkLOD);
+            // Prefer an overload that takes `in TerrainChunk_Val`
+            voxelsFactory.EvaluateVoxelGroup(chunkIndex, chunk, chunk.ChunkLOD);
+        }
+        return lodsInBounds;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static bool CullChunk(in TerrainChunk_Val chunk, TerrainSDFRegistry registry)
+    {
+        // Precompute once, keep on stack
+        Vector3 half = chunk.ChunkSize * 0.5f;
+        Vector3 center = (Vector3)chunk.MinCornerWS + half;
+        float sdf = registry.EvaluateDistanceAt(center);
+
+        // Avoid sqrt
+        float halfDiagSq = half.sqrMagnitude;
+        float sdfSq = sdf * sdf;
+        bool culled = sdfSq < halfDiagSq;
+        return culled;
+    }
+    void CalculateChunks(int3 resolution, int3 chunkDimension)
+    {
+        if (chunkDimension.x % 2 != 0 || chunkDimension.y % 2 != 0 || chunkDimension.z % 2 != 0)
+        {
+            Debug.LogError("Failed to calculate chunks. chunkDimension was odd.");
+            return;
+        }
+        if (resolution.x % 2 != 0 || resolution.y % 2 != 0 || resolution.z % 2 != 0)
+        {
+            Debug.LogError("Failed to calculate chunks. resolution was odd.");
+            return;
+        }
+
+        int totalSize = resolution.x * resolution.y * resolution.z;
+        TerrainChunk_Val[] terrainChunks = new TerrainChunk_Val[totalSize];
+
+        int resolutionXDiv2 = resolution.x / 2;
+        int resolutionYDiv2 = resolution.y / 2;
+        int resolutionZDiv2 = resolution.z / 2;
+        int3 firstChunkPosition = new int3(-resolutionXDiv2 * chunkDimension.x + chunkDimension.x / 2,
+                                           -resolutionYDiv2 * chunkDimension.y + chunkDimension.y / 2,
+                                           -resolutionZDiv2 * chunkDimension.z + chunkDimension.z / 2);
+
+        for (int x = 0; x < resolution.x; x++)
+        {
+            for (int y = 0; y < resolution.y; y++)
+            {
+                for (int z = 0; z < resolution.z; z++)
+                {
+                    int3 chunkPosition = firstChunkPosition + new int3(x * chunkDimension.x, y * chunkDimension.y, z * chunkDimension.z);
+                    int3 chunkIndex = new int3(x, y, z);
+                    TerrainChunk_Val terrainChunk = new TerrainChunk_Val(chunkIndex, chunkPosition, chunkDimension);
+                    terrainChunks[x + y * resolution.x + z * resolution.x * resolution.y] = terrainChunk;
+                }
+            }
+        }
+
+        TerrainChunkCollection = new TerrainChunkCollection(resolution, chunkDimension, terrainChunks, float3.zero);
+
+    }
+    
+    List<List<int>> CalculateLodsByManhattan(IReadOnlyList<TerrainLod> lods)
+    {
+        if (lods == null || lods.Count == 0)
+            return null;
+
+        // Prepare result buckets in the same order as input
+        var results = Enumerable.Range(0, lods.Count)
+                                .Select(_ => new List<int>())
+                                .ToList();
+
+        // Sort by radius for tier checks, but remember original indices
+        var ordered = lods.Select((lod, idx) => (lod, idx))
+                        .OrderBy(p => p.lod.chunkRadius)
+                        .ToArray();
+
+        int3 res = terrainPipeline.ChunkResolution;
+
+        // Player chunk coords
+        int cx = playerChunkIndex % res.x;
+        int cy = (playerChunkIndex / res.x) % res.y;
+        int cz = playerChunkIndex / (res.x * res.y);
+
+        int maxRadius = ordered[^1].lod.chunkRadius;
+
+        for (int dz = -maxRadius; dz <= maxRadius; dz++)
+        {
+            for (int dy = -maxRadius; dy <= maxRadius; dy++)
+            {
+                for (int dx = -maxRadius; dx <= maxRadius; dx++)
+                {
+                    int distance = math.abs(dx) + math.abs(dy) + math.abs(dz);
+                    if (distance > maxRadius) continue;
+
+                    int nx = cx + dx;
+                    int ny = cy + dy;
+                    int nz = cz + dz;
+
+                    // Skip out-of-bounds
+                    if (nx < 0 || ny < 0 || nz < 0 ||
+                        nx >= res.x || ny >= res.y || nz >= res.z)
+                        continue;
+
+                    int index = nx + ny * res.x + nz * res.x * res.y;
+
+                    // Find first LOD band whose radius includes this distance
+                    for (int s = 0; s < ordered.Length; s++)
+                    {
+                        if (distance <= ordered[s].lod.chunkRadius)
+                        {
+                            results[ordered[s].idx].Add(index);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        //Set new Lods on Chunks
+            int LodIndex = 0;
+            foreach (List<int> indicesOfALod in results)
+            {
+                foreach (int chunkIndex in indicesOfALod)
+                {
+                TerrainChunkCollection.TerrainChunks[chunkIndex].ChunkLOD = AllLods[LodIndex];
+                }
+                //Update voxels on new Lods
+                LodIndex++;
+            }
+
+        return results; // results[i] corresponds to lods[i]
+    }
+   
+   
+
+   
+    #endregion
+
+}
+/// <summary>
+/// Utilites Pertaining to a collection of TerrainChunks
+/// </summary>
+public static class TerrainChunkUtils
+{
+    public static int IndexConverter(int3 index, int3 resolution)
+    {
+        return index.x + index.y * resolution.x + index.z * resolution.x * resolution.y;
+    }
+ 
+/// <summary>
+/// Returns indices of all chunks that intersect the given AABB.
+/// Indexing is x + Nx * (y + Ny * z).
+/// </summary>
+/// <param name="aabb">World-space bounds to test.</param>
+/// <param name="gridMinWS">World-space min of the whole chunk grid (min corner of chunk (0,0,0)).</param>
+/// <param name="chunkSizeWS">World-space size of one chunk along XYZ.</param>
+/// <param name="chunksPerAxis">Number of chunks along each axis (Nx, Ny, Nz).</param>
+/// <param name="result">List to fill (cleared). If null, a new list is created.</param>
+public static List<int> GetChunksOverlappingAABB(
+    AABB aabb,
+    float3 gridMinWS,
+    float3 chunkSizeWS,
+    int3  chunksPerAxis,
+    List<int> result = null)
+{
+    result ??= new List<int>(32);
+    result.Clear();
+
+    // Early-out for degenerate AABB
+    if (math.any(aabb.Min > aabb.Max)) return result;
+
+    // Clamp query to grid extents
+    float3 gridMaxWS = gridMinWS + chunkSizeWS * (float3)chunksPerAxis;
+    float3 qMin = math.max(aabb.Min, gridMinWS);
+    float3 qMax = math.min(aabb.Max, gridMaxWS);
+
+    // No overlap with grid at all
+    if (math.any(qMin >= qMax)) return result;
+
+    // Compute inclusive chunk coords for min/max.
+    // Treat qMax as *exclusive* by nudging inward to avoid counting the next cell
+    // when the max lies exactly on a chunk boundary.
+    const float eps = 1e-5f;
+    int3 minC = (int3)math.floor((qMin - gridMinWS) / chunkSizeWS);
+    int3 maxC = (int3)math.floor(((qMax - new float3(eps)) - gridMinWS) / chunkSizeWS);
+
+    // Clamp to valid index range
+    int3 last = chunksPerAxis - 1;
+    minC = math.clamp(minC, 0, last);
+    maxC = math.clamp(maxC, 0, last);
+
+    // If after clamping the box is outside, bail
+    if (math.any(minC > maxC)) return result;
+
+    // Enumerate all covered chunks
+    for (int z = minC.z; z <= maxC.z; z++)
+    for (int y = minC.y; y <= maxC.y; y++)
+    for (int x = minC.x; x <= maxC.x; x++)
+    {
+        int idx = x + chunksPerAxis.x * (y + chunksPerAxis.y * z);
+        result.Add(idx);
+    }
+
+    return result;
+}
+
+}
+```
+
+### Marching Cubes/MarchingCubesGPU.compute
+```
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel MeshReconstruction
+// Workaround for the absence of sizeof operator in HLSL
+#define SIZEOF_UINT 4
+#define SIZEOF_FLOAT3 12
+
+// Parameters
+int3 Dims;
+float Scale;
+float Isovalue;
+float3 chunkCenter;
+float3 HalfVoxelOffset; //offset applied to counteract quantization errors
+
+
+struct VertexGPU {
+    float3 pos;
+    float3 nrm;
+    float2 uv;
+};
+struct Triangle
+{
+    VertexGPU a,b,c;
+};
+//Input
+StructuredBuffer<float> Voxels;
+StructuredBuffer<uint2> TriangleTable;
+
+//Output
+//AppendStructuredBuffer<Triangle> VertexBuffer;
+AppendStructuredBuffer<Triangle> g_Tris;
+
+
+// Grid space to object space transformation
+float3 TransformPoint(float3 p)
+{
+    return (p + 0.5 - Dims / 2) * Scale;
+}
+
+//
+// "Triangle table" that contains triangle lists for each cube configuration
+//
+
+
+uint EdgeIndexFromTriangleTable(uint2 data, uint index)
+{
+    return 0xfu & (index < 8 ? data.x >> ((index + 0) * 4) :
+                               data.y >> ((index - 8) * 4));
+}
+
+
+float VoxelValue(uint x, uint y, uint z)
+{
+    return Voxels[x + Dims.x * (y + Dims.y * z)];
+}
+
+// Voxel value with calculated gradient
+float4 VoxelValueWithGradient(uint3 i)
+{
+    uint3 i_n = max(i, 1) - 1;
+    uint3 i_p = min(i + 1, Dims - 1);
+    float v = VoxelValue(i.x, i.y, i.z);
+    float v_nx = VoxelValue(i_n.x, i.y, i.z);
+    float v_px = VoxelValue(i_p.x, i.y, i.z);
+    float v_ny = VoxelValue(i.x, i_n.y, i.z);
+    float v_py = VoxelValue(i.x, i_p.y, i.z);
+    float v_nz = VoxelValue(i.x, i.y, i_n.z);
+    float v_pz = VoxelValue(i.x, i.y, i_p.z);
+    return float4(v_px - v_nx, v_py - v_ny, v_pz - v_nz, v);
+}
+
+//
+// Cube geometry/topology
+//
+
+// This must match one defined in Paul Bourke's article:
+// http://paulbourke.net/geometry/polygonise/
+
+uint3 CubeVertex(uint index)
+{
+    bool x = index & 1;
+    bool y = index & 2;
+    bool z = index & 4;
+    return uint3(x ^ y, y, z);
+}
+
+uint2 EdgeVertexPair(uint index)
+{
+    // (0, 1) (1, 2) (2, 3) (3, 0)
+    // (4, 5) (5, 6) (6, 7) (7, 4)
+    // (0, 4) (1, 5) (2, 6) (3, 7)
+    uint v1 = index & 7;
+    uint v2 = index < 8 ? ((index + 1) & 3) | (index & 4) : v1 + 4;
+    return uint2(v1, v2);
+}
+// Helper to emit one triangle
+void EmitTri(float3 a, float3 b, float3 c, float3 aNrm, float3 bNrm, float3 cNrm, int useFlatNormals)
+{
+    // Flat-shaded normal
+    float3 nFlat = normalize(cross(b - a, c - a));
+    Triangle t;
+
+    VertexGPU v0;
+    VertexGPU v1;
+    VertexGPU v2;
+
+    if (useFlatNormals == 1)
+    {
+        v0.nrm = nFlat; v1.nrm = nFlat;  v2.nrm = nFlat;
+    }
+    else
+    {
+        v0.nrm = aNrm; v1.nrm = bNrm; v2.nrm = cNrm;
+    }
+        
+    v0.pos = a; v0.uv = float2(0,0); 
+    v1.pos = b; v1.uv = float2(1,0); 
+    v2.pos = c; v2.uv = float2(0,1); 
+
+    t.a = v0;
+    t.b = v1;
+    t.c = v2;
+    
+    g_Tris.Append(t);
+
+}
+//
+// Marching cube mesh reconstruction kernel
+//
+
+[numthreads(4, 4, 4)]
+void MeshReconstruction(uint3 id : SV_DispatchThreadID)
+{
+   
+    // Boundary check
+    if (any(id + 1 >= Dims.xyz)) return;
+
+    // Voxel samples at each cube vertex
+    float4 samples[8];
+    for (uint i = 0; i < 8; i++)
+        samples[i] = VoxelValueWithGradient(id + CubeVertex(i));
+
+    // Cube configuration selector
+    // (initialized as a bit field of vertex binary states)
+    uint selector = 0;
+    for (i = 0; i < 8; i++)
+        selector |= (samples[i].w < Isovalue) << i;
+
+    // Special case for empty cubes; Exit ealy if there is no intersection.
+    if (selector == 0 || selector == 0xff) return;
+
+    // Intersection points on each edge
+    // We do this in a GPU-oriented way; Do the calculation on all the edges
+    // including ones without an intersection.
+    float3 vertices[12];
+    float3 normals[12];
+    for (i = 0; i < 12; i++)
+    {
+        uint2 pair = EdgeVertexPair(i);
+        float4 sample1 = samples[pair.x];
+        float4 sample2 = samples[pair.y];
+        float3 vertex1 = id + CubeVertex(pair.x);
+        float3 vertex2 = id + CubeVertex(pair.y);
+        float param = (Isovalue - sample1.w) / (sample2.w - sample1.w);
+        vertices[i] = TransformPoint(lerp(vertex1, vertex2, param));
+        normals[i] = -normalize(lerp(sample1.xyz, sample2.xyz, param));
+    }
+
+    // Output triangles in the selected cube configuration.
+    uint2 tri_data = TriangleTable[selector];
+    for (i = 0; i < 15; i += 3)
+    {
+        uint e1 = EdgeIndexFromTriangleTable(tri_data, i);
+        uint e2 = EdgeIndexFromTriangleTable(tri_data, i + 1);
+        uint e3 = EdgeIndexFromTriangleTable(tri_data, i + 2);
+        if (e1 == 15) return;
+
+        /*
+        //write triangle
+        Triangle t;
+        t.a = vertices[e1];
+        t.b = vertices[e3];
+        t.c = vertices[e2];
+        VertexBuffer.Append(t);
+        */
+        //Write Gpu Vertices
+        
+        VertexGPU v0;  
+        v0.pos = vertices[e1]; v0.nrm = normals[e1]; v0.uv = vertices[e1].xz * Scale;
+
+        VertexGPU v1;  
+        v1.pos = vertices[e2]; v1.nrm = normals[e2]; v1.uv = vertices[e2].xz * Scale;
+
+        VertexGPU v2;  
+        v2.pos = vertices[e3]; v2.nrm = normals[e3]; v2.uv = vertices[e3].xz * Scale;
+
+        //g_Verts.Append(v0); g_Verts.Append(v2); g_Verts.Append(v1);
+
+        EmitTri(vertices[e1] + chunkCenter + HalfVoxelOffset, vertices[e3] + chunkCenter + HalfVoxelOffset, vertices[e2] + chunkCenter + HalfVoxelOffset, normals[e1], normals[e3], normals[e2], 1);
+        
+        //WriteVertex(vidx + 0, vertices[e1], normals[e1]);
+        //WriteVertex(vidx + 1, vertices[e2], normals[e2]);
+        //WriteVertex(vidx + 2, vertices[e3], normals[e3]);
+        //WriteIndices(vidx, uint3(vidx, vidx + 1, vidx + 2));
+    }
+}
+```
+
+### Marching Cubes/MeshBuilderIndirect.cs
+```
+using Unity.Mathematics;
+using UnityEngine;
+using MarchingCubes;
+using System.Collections.Generic;
+
+/// <summary>
+/// Builds and manages a mesh for chunks.
+/// </summary>
+public class TerrainMeshBuilderIndirect
+{
+    private const int SIZEOF_TRIANGLE = 96;
+    //private ComputeBufferPool VertexBufferPool;
+    //private ComputeBufferPool IndirectArgsPool;
+    private ComputeBuffer[] VertexBuffers;
+    private ComputeBuffer[] IndirectArgBuffers;
+    private GpuIndirectDrawRegistry.IndirectDrawCall[] indirectDrawCallEntrys;
+    private ComputeBuffer triangleTable;
+    Material terrainMat;
+    ComputeShader marchingCubes;
+    ComputeShader indirectArgumentSetter;
+    Dictionary<int, MeshBuilder> meshBuilders;
+    public TerrainMeshBuilderIndirect(int maximumTriangleBudget, ComputeShader marchingCubes, ComputeShader indirectArgsSetter, Material terrainMaterial, List<TerrainLod> lods)
+    {
+        this.marchingCubes = marchingCubes;
+        indirectArgumentSetter = indirectArgsSetter;
+        terrainMat = terrainMaterial;
+        //VertexBufferPool = new ComputeBufferPool(numberofChunksActiveAtOnce, maximumTriangleBudget, SIZEOF_TRIANGLE, ComputeBufferType.Append);
+
+        int numberOfLODS = lods.Count;
+        VertexBuffers = new ComputeBuffer[numberOfLODS];
+        IndirectArgBuffers = new ComputeBuffer[numberOfLODS];
+        indirectDrawCallEntrys = new GpuIndirectDrawRegistry.IndirectDrawCall[numberOfLODS];
+        for (int i = 0; i < numberOfLODS; i++)
+        {
+            int3 voxelRes = lods[i].VoxelResolution;
+
+            int numberofChunksActiveAtOnce;
+            if (i == 0)
+                numberofChunksActiveAtOnce = (int)TerrainChunker.ManhattanFloodFillCount3D(lods[0].chunkRadius);
+            else
+                numberofChunksActiveAtOnce = (int)(TerrainChunker.ManhattanFloodFillCount3D(lods[i].chunkRadius) - TerrainChunker.ManhattanFloodFillCount3D(lods[i - 1].chunkRadius));
+
+            VertexBuffers[i] = new ComputeBuffer(voxelRes.x * voxelRes.y * voxelRes.z * numberofChunksActiveAtOnce, SIZEOF_TRIANGLE, ComputeBufferType.Append);
+            VertexBuffers[i].SetCounterValue(0);
+            IndirectArgBuffers[i] = new ComputeBuffer(5, sizeof(uint), ComputeBufferType.IndirectArguments);
+            indirectDrawCallEntrys[i] = new GpuIndirectDrawRegistry.IndirectDrawCall();
+        }
+
+        // Marching cubes triangle table
+        triangleTable = new ComputeBuffer(256, sizeof(ulong));
+        triangleTable.SetData(PrecalculatedData.TriangleTable);
+
+        //IndirectArgsPool = new ComputeBufferPool(numberofChunksActiveAtOnce, 5, sizeof(uint), ComputeBufferType.IndirectArguments);
+
+        meshBuilders = new();
+    }
+    
+    public void CalculateMesh(int chunkIndex, ComputeBuffer voxelBuffer, float voxelSize, int3 voxelResolution, float3 chunkCenterWS, TerrainLod lod)
+    {
+
+        ComputeBuffer vertexBuffer = VertexBuffers[lod.LOD - 1]; //indexs start at 1 for lod
+
+        MeshBuilder meshBuilder = new MeshBuilder(voxelBuffer, vertexBuffer, triangleTable, marchingCubes, terrainMat);
+
+        if (meshBuilders.ContainsKey(chunkIndex))
+            meshBuilders[chunkIndex] = meshBuilder;
+        else
+            meshBuilders.Add(chunkIndex, meshBuilder);
+
+        meshBuilder.CalculateIsoSurface(voxelSize, chunkCenterWS, (voxelResolution.x, voxelResolution.y, voxelResolution.z));
+    }
+    public void BuildLOD(TerrainLod lod)
+    {
+        UnloadLOD(lod);
+        ComputeBuffer indirectArgsBuffer = IndirectArgBuffers[lod.LOD - 1];
+        ComputeBuffer vertexBuffer = VertexBuffers[lod.LOD - 1];
+
+        indirectArgsBuffer.SetData(new uint[5] {
+            1u, // vertexCountPerInstance (fixed: 3 verts per triangle)
+            1u, // instanceCount (set every frame from triangle append counter)
+            0u, // startVertex
+            0u, // startInstance
+            0u  // unused
+        });
+
+        // Copy TRIANGLE count → args[0] (vertexCount) at byte offset 0
+        ComputeBuffer.CopyCount(vertexBuffer, indirectArgsBuffer, 0);
+        indirectArgumentSetter.SetInt("vertexCountMultiplier", 3);
+        indirectArgumentSetter.SetInt("instanceCountMultiplier", 1);
+        indirectArgumentSetter.SetInt("startVertex", 0);
+        indirectArgumentSetter.SetInt("startInstance", 0);
+        indirectArgumentSetter.SetBuffer(0, "indirectArgsBuffer", indirectArgsBuffer);
+        indirectArgumentSetter.Dispatch(0, 1, 1, 1); 
+
+        Matrix4x4 m = Matrix4x4.TRS(Vector3.zero, Quaternion.identity, Vector3.one);
+
+        // Enqueue for the render pass (registry still calls it "verts"; that's fine—it's your triangle buffer)
+        GpuIndirectDrawRegistry.IndirectDrawCall indirectDrawCallEntry = new GpuIndirectDrawRegistry.IndirectDrawCall
+            {
+                tris = vertexBuffer,          // the buffer we’ll bind as _Tris in the pass
+                args = indirectArgsBuffer,    // args with [3, triangleCount, 0, 0, 0]
+                material = terrainMat,
+                trs = m
+            };
+
+        //Track the entry
+        indirectDrawCallEntrys[lod.LOD - 1] = indirectDrawCallEntry;
+
+        //Enqueue the draw call
+        GpuIndirectDrawRegistry.Add(indirectDrawCallEntry);
+            
+        //reset counter
+        vertexBuffer.SetCounterValue(0); 
+    }
+
+    void UnloadLOD(TerrainLod lod)
+    {
+        GpuIndirectDrawRegistry.RemoveIndirectDrawCall(indirectDrawCallEntrys[lod.LOD - 1]);
+    }
+    public void Dispose()
+    {
+        foreach (MeshBuilder mb in meshBuilders.Values)
+        {
+            //mb?.Unload(VertexBufferPool, IndirectArgsPool);
+        }
+        foreach (ComputeBuffer cb in VertexBuffers)
+        {
+            cb.Dispose(); 
+        }
+        foreach (ComputeBuffer cb in IndirectArgBuffers)
+        {
+            cb.Dispose();
+        }
+        foreach (GpuIndirectDrawRegistry.IndirectDrawCall indirectDrawCall in indirectDrawCallEntrys)
+                GpuIndirectDrawRegistry.RemoveIndirectDrawCall(indirectDrawCall);
+        //VertexBufferPool?.Dispose();
+        //IndirectArgsPool?.Dispose();
+    }
+    
+
+    private class MeshBuilder
+    {
+        ComputeBuffer voxelBuffer;
+        ComputeBuffer vertexBuffer;
+        ComputeBuffer triangleTable;
+        ComputeShader marchingCubes;
+        Material terrainMaterial;
+        public MeshBuilder(ComputeBuffer voxBuf, ComputeBuffer vertBuf, ComputeBuffer triTable, ComputeShader marchingCubes, Material terrainMaterial)
+        {
+            voxelBuffer = voxBuf;
+            vertexBuffer = vertBuf;
+            triangleTable = triTable;
+            this.marchingCubes = marchingCubes;
+            this.terrainMaterial = terrainMaterial;
+            
+        }
+
+        public void CalculateIsoSurface(float voxelSize, float3 chunkCenterWS, (int, int, int) voxelResolution)
+        {
+            // Reset triangle append counter
+            //vertexBuffer.SetCounterValue(0);
+
+            // Dispatch generation (kernel 0 assumed). Make sure your kernel writes AppendStructuredBuffer<Triangle> g_Tris.
+            marchingCubes.SetBuffer(0, "g_Tris", vertexBuffer);
+            marchingCubes.SetInts("Dims", voxelResolution);
+            marchingCubes.SetFloat("Scale", voxelSize);
+            marchingCubes.SetFloat("Isovalue", 0f);
+            float HalfVoxeloffset = voxelSize * -.5f;
+            marchingCubes.SetFloats("HalfVoxelOffset", HalfVoxeloffset, HalfVoxeloffset, HalfVoxeloffset);
+            marchingCubes.SetFloats("chunkCenter", chunkCenterWS.x, chunkCenterWS.y, chunkCenterWS.z);
+            marchingCubes.SetBuffer(0, "TriangleTable", triangleTable);
+            marchingCubes.SetBuffer(0, "Voxels", voxelBuffer);
+
+            // NOTE: This dispatch uses your existing group counts (keep if that matches your [numthreads])
+            marchingCubes.Dispatch(0, (voxelResolution.Item1 + 3) / 4, (voxelResolution.Item2 + 3) / 4, (voxelResolution.Item3 + 3) / 4);
+
+
+        }
+         
+    }
+
+}
+```
+
+### Marching Cubes/TriangleTable.cs
+```
+namespace MarchingCubes {
+
+static class PrecalculatedData
+{
+    // Generated from Paul Bourke's table
+    // http://paulbourke.net/geometry/polygonise/
+    public static ulong [] TriangleTable =
+    {
+        0xffffffffffffffffUL,
+        0xfffffffffffff380UL,
+        0xfffffffffffff910UL,
+        0xffffffffff189381UL,
+        0xfffffffffffffa21UL,
+        0xffffffffffa21380UL,
+        0xffffffffff920a29UL,
+        0xfffffff89a8a2382UL,
+        0xfffffffffffff2b3UL,
+        0xffffffffff0b82b0UL,
+        0xffffffffffb32091UL,
+        0xfffffffb89b912b1UL,
+        0xffffffffff3ab1a3UL,
+        0xfffffffab8a801a0UL,
+        0xfffffff9ab9b3093UL,
+        0xffffffffffb8aa89UL,
+        0xfffffffffffff874UL,
+        0xffffffffff437034UL,
+        0xffffffffff748910UL,
+        0xfffffff137174914UL,
+        0xffffffffff748a21UL,
+        0xfffffffa21403743UL,
+        0xfffffff748209a29UL,
+        0xffff4973727929a2UL,
+        0xffffffffff2b3748UL,
+        0xfffffff40242b74bUL,
+        0xfffffffb32748109UL,
+        0xffff1292b9b49b74UL,
+        0xfffffff487ab31a3UL,
+        0xffff4b7401b41ab1UL,
+        0xffff30bab9b09874UL,
+        0xfffffffab99b4b74UL,
+        0xfffffffffffff459UL,
+        0xffffffffff380459UL,
+        0xffffffffff051450UL,
+        0xfffffff513538458UL,
+        0xffffffffff459a21UL,
+        0xfffffff594a21803UL,
+        0xfffffff204245a25UL,
+        0xffff8434535235a2UL,
+        0xffffffffffb32459UL,
+        0xfffffff594b802b0UL,
+        0xfffffffb32510450UL,
+        0xffff584b82852512UL,
+        0xfffffff45931ab3aUL,
+        0xffffab81a8180594UL,
+        0xffff30bab5b05045UL,
+        0xfffffffb8aa85845UL,
+        0xffffffffff975879UL,
+        0xfffffff375359039UL,
+        0xfffffff751710870UL,
+        0xffffffffff753351UL,
+        0xfffffff21a759879UL,
+        0xffff37503505921aUL,
+        0xffff25a758528208UL,
+        0xfffffff7533525a2UL,
+        0xfffffff2b3987597UL,
+        0xffffb72029279759UL,
+        0xffff751871810b32UL,
+        0xfffffff51771b12bUL,
+        0xffffb3a31a758859UL,
+        0xf0aba010b7905075UL,
+        0xf07570805a30b0abUL,
+        0xffffffffff5b75abUL,
+        0xfffffffffffff56aUL,
+        0xffffffffff6a5380UL,
+        0xffffffffff6a5109UL,
+        0xfffffff6a5891381UL,
+        0xffffffffff162561UL,
+        0xfffffff803621561UL,
+        0xfffffff620609569UL,
+        0xffff823625285895UL,
+        0xffffffffff56ab32UL,
+        0xfffffff56a02b80bUL,
+        0xfffffff6a5b32910UL,
+        0xffffb892b92916a5UL,
+        0xfffffff315356b36UL,
+        0xffff6b51505b0b80UL,
+        0xffff9505606306b3UL,
+        0xfffffff89bb96956UL,
+        0xffffffffff8746a5UL,
+        0xfffffffa56374034UL,
+        0xfffffff7486a5091UL,
+        0xffff49737179156aUL,
+        0xfffffff874156216UL,
+        0xffff743403625521UL,
+        0xffff620560509748UL,
+        0xf962695923497937UL,
+        0xfffffff56a4872b3UL,
+        0xffffb720242746a5UL,
+        0xffff6a5b32874910UL,
+        0xf6a54b7b492b9129UL,
+        0xffff6b51535b3748UL,
+        0xfb404b7b016b5b15UL,
+        0xf74836b630560950UL,
+        0xffff9b7974b96956UL,
+        0xffffffffffa4694aUL,
+        0xfffffff380a946a4UL,
+        0xfffffff04606a10aUL,
+        0xffffa16468618138UL,
+        0xfffffff462421941UL,
+        0xffff462942921803UL,
+        0xffffffffff624420UL,
+        0xfffffff624428238UL,
+        0xfffffff32b46a94aUL,
+        0xffff6a4a94b82280UL,
+        0xffffa164606102b3UL,
+        0xf1b8b12184a16146UL,
+        0xffff36b319639469UL,
+        0xf14641916b0181b8UL,
+        0xfffffff4600636b3UL,
+        0xffffffffff86b846UL,
+        0xfffffffa98a876a7UL,
+        0xffffa76a907a0370UL,
+        0xffff0818717a176aUL,
+        0xfffffff37117a76aUL,
+        0xffff768981861621UL,
+        0xf937390976192962UL,
+        0xfffffff206607087UL,
+        0xffffffffff276237UL,
+        0xffff76898a86ab32UL,
+        0xf7a9a76790b72702UL,
+        0xfb32a767a1871081UL,
+        0xffff17616a71b12bUL,
+        0xf63136b619768698UL,
+        0xffffffffff76b190UL,
+        0xffff06b0b3607087UL,
+        0xfffffffffffff6b7UL,
+        0xfffffffffffffb67UL,
+        0xffffffffff67b803UL,
+        0xffffffffff67b910UL,
+        0xfffffff67b138918UL,
+        0xffffffffff7b621aUL,
+        0xfffffff7b6803a21UL,
+        0xfffffff7b69a2092UL,
+        0xffff89a38a3a27b6UL,
+        0xffffffffff726327UL,
+        0xfffffff026067807UL,
+        0xfffffff910732672UL,
+        0xffff678891681261UL,
+        0xfffffff73171a67aUL,
+        0xffff801781a7167aUL,
+        0xffff7a69a0a70730UL,
+        0xfffffff9a88a7a67UL,
+        0xffffffffff68b486UL,
+        0xfffffff640603b63UL,
+        0xfffffff109648b68UL,
+        0xffff63b139369649UL,
+        0xfffffff1a28b6486UL,
+        0xffff640b60b03a21UL,
+        0xffff9a2920b648b4UL,
+        0xf36463b34923a39aUL,
+        0xfffffff264248328UL,
+        0xffffffffff264240UL,
+        0xffff834642432091UL,
+        0xfffffff642241491UL,
+        0xffff1a6648168318UL,
+        0xfffffff40660a01aUL,
+        0xf39a9303a6834364UL,
+        0xffffffffff4a649aUL,
+        0xffffffffffb67594UL,
+        0xfffffff67b594380UL,
+        0xfffffffb67045105UL,
+        0xffff51345343867bUL,
+        0xfffffffb6721a459UL,
+        0xffff594380a217b6UL,
+        0xffff204a24a45b67UL,
+        0xf67b25a523453843UL,
+        0xfffffff945267327UL,
+        0xffff786260680459UL,
+        0xffff045051673263UL,
+        0xf851584812786826UL,
+        0xffff73167161a459UL,
+        0xf459078701671a61UL,
+        0xfa737a6a305a4a04UL,
+        0xffffa84a458a7a67UL,
+        0xfffffff98b9b6596UL,
+        0xffff590650360b63UL,
+        0xffffb65510b508b0UL,
+        0xfffffff1355363b6UL,
+        0xffff65b8b9b59a21UL,
+        0xfa21965690b603b0UL,
+        0xf52025a50865b58bUL,
+        0xffff35a3a25363b6UL,
+        0xffff283265825985UL,
+        0xfffffff260069659UL,
+        0xf826283865081851UL,
+        0xffffffffff612651UL,
+        0xf698965683a61631UL,
+        0xffff06505960a01aUL,
+        0xffffffffffa65830UL,
+        0xfffffffffffff65aUL,
+        0xffffffffffb57a5bUL,
+        0xfffffff03857ba5bUL,
+        0xfffffff091ba57b5UL,
+        0xffff1381897ba57aUL,
+        0xfffffff15717b21bUL,
+        0xffffb27571721380UL,
+        0xffff7b2209729579UL,
+        0xf289823295b27257UL,
+        0xfffffff573532a52UL,
+        0xffff52a578258028UL,
+        0xffff2a37353a5109UL,
+        0xf25752a278129289UL,
+        0xffffffffff573531UL,
+        0xfffffff571170780UL,
+        0xfffffff735539309UL,
+        0xffffffffff795789UL,
+        0xfffffff8ba8a5485UL,
+        0xffff03bba50b5405UL,
+        0xffff54aba8a48910UL,
+        0xf41314943b54a4baUL,
+        0xffff8548b2582152UL,
+        0xfb151b2b543b0b40UL,
+        0xf58b8545b2950520UL,
+        0xffffffffff3b2549UL,
+        0xffff483543253a52UL,
+        0xfffffff0244252a5UL,
+        0xf910854583a532a3UL,
+        0xffff2492914252a5UL,
+        0xfffffff153358548UL,
+        0xffffffffff501540UL,
+        0xffff530509358548UL,
+        0xfffffffffffff549UL,
+        0xfffffffba9b947b4UL,
+        0xffffba97b9794380UL,
+        0xffffb470414b1ba1UL,
+        0xf4bab474a1843413UL,
+        0xffff219b294b97b4UL,
+        0xf3801b2b197b9479UL,
+        0xfffffff04224b47bUL,
+        0xffff42343824b47bUL,
+        0xffff947732972a92UL,
+        0xf70207872a4797a9UL,
+        0xfa040a1a472a3a73UL,
+        0xffffffffff4782a1UL,
+        0xfffffff317714194UL,
+        0xffff178180714194UL,
+        0xffffffffff347304UL,
+        0xfffffffffffff784UL,
+        0xffffffffff8ba8a9UL,
+        0xfffffffa9bb93903UL,
+        0xfffffffba88a0a10UL,
+        0xffffffffffa3ba13UL,
+        0xfffffff8b99b1b21UL,
+        0xffff9b2921b93903UL,
+        0xffffffffffb08b20UL,
+        0xfffffffffffffb23UL,
+        0xfffffff98aa82832UL,
+        0xffffffffff2902a9UL,
+        0xffff8a1810a82832UL,
+        0xfffffffffffff2a1UL,
+        0xffffffffff819831UL,
+        0xfffffffffffff190UL,
+        0xfffffffffffff830UL,
+        0xffffffffffffffffUL
+    };
+}
+
+} // namespace MarchingCubes
+```
+
+### Marching Cubes/Util.cs
+```
+using UnityEngine;
+
+namespace MarchingCubes {
+
+static class ComputeShaderExtensions
+{
+    public static void SetInts
+      (this ComputeShader compute, string name, (int x, int y, int z) t)
+      => compute.SetInts(name, t.x, t.y, t.z);
+
+    public static void SetInts
+      (this ComputeShader compute, string name, Vector3Int v)
+      => compute.SetInts(name, v.x, v.y, v.z);
+
+    public static void DispatchThreads
+      (this ComputeShader compute, int kernel, int x, int y, int z)
+    {
+        uint xc, yc, zc;
+        compute.GetKernelThreadGroupSizes(kernel, out xc, out yc, out zc);
+
+        x = (x + (int)xc - 1) / (int)xc;
+        y = (y + (int)yc - 1) / (int)yc;
+        z = (z + (int)zc - 1) / (int)zc;
+
+        compute.Dispatch(kernel, x, y, z);
+    }
+
+    public static void DispatchThreads
+      (this ComputeShader compute, int kernel, (int x, int y, int z) t)
+      => DispatchThreads(compute, kernel, t.x, t.y, t.z);
+
+    public static void DispatchThreads
+      (this ComputeShader compute, int kernel, Vector3Int v)
+      => DispatchThreads(compute, kernel, v.x, v.y, v.z);
+}
+
+} // namespace MarchingCubes
+```
+
+### Physics/TerrainPhysics.cs
+```
+using UnityEngine;
+using Unity.Mathematics;
+
+public static class TerrainPhysics
+{
+
+    public static class TerrainCollision
+    {
+        public struct Settings
+        {
+            public float mass;            // kg
+            public float beta;            // 0..1, fraction of error fixed per step (e.g. 0.2)
+            public float contactOffset;   // meters, contact shell (e.g. 0.006)
+            public float slop;            // meters, ignore tiny errors (e.g. 0.002)
+            public float frictionMu;      // Coulomb friction coefficient
+            public float maxPushSpeed;    // m/s clamp on normal correction (e.g. 10)
+                                          // (stiffness/damping not used by ERP)
+        }
+
+        /// <summary>
+        /// ERP/Baumgarte collision resolve: removes a fraction of penetration per step and
+        /// kills inward normal velocity. Uses SDF for depth and normal for direction.
+        /// </summary>
+        public static Vector3 Resolve(Vector3 pos, Vector3 vel, float sdfDistance, Vector3 sdfNormal, float dt, Settings s)
+        {
+            if (dt <= 0f) return vel;
+            if (sdfNormal.sqrMagnitude < 1e-10f) return vel;
+
+            Vector3 n = Vector3.Normalize(sdfNormal);
+
+            // Treat contact as "inside" a shell at contactOffset.
+            // Positive penetration means we want correction.
+            float penetration = Mathf.Max(0f, (s.contactOffset - sdfDistance) - s.slop);
+            if (penetration <= 0f) return vel;
+
+            // Incoming normal velocity (positive = separating, negative = moving into surface)
+            float vN = Vector3.Dot(vel, n);
+
+            // Baumgarte/ERP velocity bias along the normal:
+            //   - remove inward velocity (so we don't keep hitting the wall)
+            //   - add a bias that removes beta * penetration distance per step
+            float dvN = 0f;
+            if (vN < 0f) dvN += -vN; // kill inward component
+            dvN += s.beta * (penetration / Mathf.Max(1e-6f, dt));
+
+            // Clamp the push-out to avoid explosive corrections
+            dvN = Mathf.Min(dvN, s.maxPushSpeed);
+
+            // Apply normal correction
+            vel += n * dvN;
+
+            // Non-penetration guard: do not end with inward normal velocity
+            float vN2 = Vector3.Dot(vel, n);
+            if (vN2 < 0f) vel -= n * vN2;
+
+            // --- Tangential friction (Coulomb-like impulse cap) ---
+            // Normal impulse magnitude Jn ≈ m * dvN
+            float Jn = s.mass * Mathf.Max(0f, dvN);
+            if (s.frictionMu > 0f && Jn > 0f)
+            {
+                Vector3 vT = vel - n * Vector3.Dot(vel, n);
+                float vTmag = vT.magnitude;
+                if (vTmag > 1e-6f)
+                {
+                    float JtMax = s.frictionMu * Jn;
+                    float JtNeeded = s.mass * vTmag;
+                    float Jt = Mathf.Min(JtNeeded, JtMax);
+                    Vector3 dvT = (-Jt / s.mass) * (vT / vTmag);
+                    vel += dvT;
+                }
+            }
+
+            return vel;
+        }
+    }
+    public static bool justCollided = false;
+    public static Vector3 RunCollisionsStep(TerrainSDFRegistry terrainSDFS, Vector3 currentPosition, Vector3 oldPosition, Vector3 currentVelocity)
+    {
+        float oldDistance = terrainSDFS.EvaluateDistanceAt(oldPosition);
+        float newDistance = terrainSDFS.EvaluateDistanceAt(currentPosition);
+        //Debug.Log("Old Distance: " + oldDistance);
+        //Debug.Log("New Distance: " + newDistance);
+        int oldDistanceInt = (int)oldDistance;
+        int newDistanceInt = (int)newDistance;
+
+
+
+        if (oldDistance > 0 && newDistance < 0 || oldDistance < 0 && newDistance > 0)
+        {
+            Debug.Log("Collision!");
+
+            Vector3 surfaceNormal = EstimateGradient(terrainSDFS, oldPosition);
+            if (newDistance > 0) { surfaceNormal *= -1; }
+            Debug.DrawRay(currentPosition, surfaceNormal, Color.blue, 100f);
+            var s = new TerrainCollision.Settings
+            {
+                mass = 1.0f,
+                beta = 0.8f,            // 0.1–0.3 typical
+                contactOffset = 0.015f, // 3–10 mm
+                slop = 0.003f,          // 1–3 mm
+                frictionMu = 0.6f,
+                maxPushSpeed = float.PositiveInfinity
+            };
+
+            justCollided = true;
+            return /*TerrainCollision.Resolve(currentPosition, currentVelocity, newDistance, surfaceNormal, Time.fixedDeltaTime, s)*/  (-1 * currentVelocity);
+        }
+        justCollided = false;
+        return Vector3.zero;
+    }
+
+    private static float3 EstimateGradient(TerrainSDFRegistry reg, float3 p, float eps = 1e-3f)
+    {
+        // central differences
+        float dx = reg.EvaluateDistanceAt(p + new float3(eps, 0, 0)) - reg.EvaluateDistanceAt(p - new float3(eps, 0, 0));
+        float dy = reg.EvaluateDistanceAt(p + new float3(0, eps, 0)) - reg.EvaluateDistanceAt(p - new float3(0, eps, 0));
+        float dz = reg.EvaluateDistanceAt(p + new float3(0, 0, eps)) - reg.EvaluateDistanceAt(p - new float3(0, 0, eps));
+
+        return math.normalize(new float3(dx, dy, dz));
+    }
+
+    /// <summary>
+    /// Returns vector from point p to closest surface point (approx).
+    /// </summary>
+    public static float3 EvaluateVectorDistanceAt(TerrainSDFRegistry reg, float3 p)
+    {
+        float d = reg.EvaluateDistanceAt(p);         // signed distance
+        float3 grad = EstimateGradient(reg, p); // surface normal (outward)
+        return grad * d;                         // vector offset
+    }
+
+    public static bool Raycast(TerrainSDFRegistry reg, Vector3 direction, float distance, Vector3 origin)
+    {
+        direction.Normalize();
+        float3 position = origin + (direction * distance);
+        float d1 = reg.EvaluateDistanceAt(position);
+        float d2 = reg.EvaluateDistanceAt(origin);
+        if (d1 > 0 && d2 < 0 || d1 < 0 && d2 > 0)
+        {
+            return true;
+        }
+        return false;
+
+    }
+}
+```
+
+### Rendering/AdjustIndirectArgs.compute
+```
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel SetArguments
+
+RWStructuredBuffer<uint>  indirectArgsBuffer;
+uint vertexCountMultiplier;
+uint instanceCountMultiplier;
+uint startVertex;
+uint startInstance;
+
+[numthreads(1,1,1)]
+void SetArguments (uint3 id : SV_DispatchThreadID)
+{
+    indirectArgsBuffer[0] *= vertexCountMultiplier;
+    indirectArgsBuffer[1] *= instanceCountMultiplier;
+    indirectArgsBuffer[2] = startVertex;
+    indirectArgsBuffer[3] = startInstance;
+    indirectArgsBuffer[4] = 0;
+ }
+```
+
+### Rendering/IndirectDrawer.cs
+```
+using UnityEngine;
+using UnityEngine.Rendering;
+using UnityEngine.Rendering.Universal;
+using UnityEngine.Rendering.RenderGraphModule;
+
+public class ProceduralIndirectFeatureRG : ScriptableRendererFeature
+{
+    [System.Serializable]
+    public class Settings
+    {
+        public Material material;                       // VS uses SV_VertexID; pass 0 = "UniversalForward"
+        public RenderPassEvent evt = RenderPassEvent.AfterRenderingOpaques;
+        public string passName = "ProceduralIndirect_Smoke_RG";
+    }
+
+    class Pass : ScriptableRenderPass
+    {
+        readonly Settings s;
+        ComputeBuffer args; // [vertexCount, instanceCount, startVertex, startInstance, unused]
+
+        class PassData { public Material mat; public ComputeBuffer args; }
+
+        public Pass(Settings settings)
+        {
+            s = settings;
+            renderPassEvent = s.evt;
+
+            args = new ComputeBuffer(5, sizeof(uint), ComputeBufferType.IndirectArguments);
+            args.SetData(new uint[5] { 3, 1, 0, 0, 0 }); // 3 verts, 1 instance
+        }
+
+        public override void RecordRenderGraph(RenderGraph rg, ContextContainer frameData)
+        {
+            if (s.material == null) return;
+
+            // Get current camera color/depth targets from URP
+            var resources = frameData.Get<UniversalResourceData>();
+
+            using var builder = rg.AddRasterRenderPass<PassData>(s.passName, out var passData);
+            builder.SetRenderAttachment(resources.activeColorTexture, 0);
+            builder.SetRenderAttachmentDepth(resources.activeDepthTexture, AccessFlags.ReadWrite);
+
+            // We’re issuing raw cmd (no renderer lists), so allow global state changes.
+            builder.AllowGlobalStateModification(true);
+
+            passData.mat  = s.material;
+            passData.args = args;
+
+            builder.SetRenderFunc((PassData data, RasterGraphContext ctx) =>
+            {
+
+                // optional: profiler marker already from builder.SetProfilingSampler(...)
+                //Debug.Log($"# of Indirect Draw Calls: {GpuIndirectDrawRegistry.FrameEntries.Count}");
+                foreach (var e in GpuIndirectDrawRegistry.FrameEntries)
+                {
+                    // Bind this mesh's vertex buffer for the material
+                    ctx.cmd.SetGlobalBuffer("_Tris", e.tris);
+
+                    // Issue the indirect draw (non-indexed)
+                    ctx.cmd.DrawProceduralIndirect(
+                        e.trs,                 // model matrix (identity if posWS)
+                        e.material,            // URP material (pass 0 = forward)
+                        0,                     // shader pass index
+                        MeshTopology.Triangles,
+                        e.args, 0
+                    );
+                }
+              
+            });
+        }
+
+        public void Dispose() { args?.Dispose(); args = null; }
+    }
+
+    public Settings settings = new();
+    Pass pass;
+
+    public override void Create() => pass = new Pass(settings);
+
+    public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
+        => renderer.EnqueuePass(pass);
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        pass?.Dispose();
+    }
+}
+```
+
+### Rendering/Terrain.shader
+```
+Shader "Universal Render Pipeline/Procedural/GPU Stream (Lit)"
+{
+    Properties
+    {
+        _BaseColor ("Base Color", Color) = (1,1,1,1)
+        _Metallic  ("Metallic", Range(0,1)) = 0.0
+        _Smoothness("Smoothness", Range(0,1)) = 0.5
+    }
+
+    SubShader
+    {
+        Tags { "RenderPipeline"="UniversalPipeline" "RenderType"="Opaque" "Queue"="Geometry" }
+        LOD 200
+
+        Pass
+        {
+            Name "ForwardLit"
+            Tags { "LightMode"="UniversalForward" }
+
+            ZWrite On
+            ZTest LEqual
+            Cull Off
+
+            HLSLPROGRAM
+            #pragma target 4.5
+
+            // ---------------- URP feature toggles ----------------
+            #pragma multi_compile _ _MAIN_LIGHT_SHADOWS
+            #pragma multi_compile _ _MAIN_LIGHT_SHADOWS_CASCADE
+            #pragma multi_compile _ _ADDITIONAL_LIGHTS_VERTEX _ADDITIONAL_LIGHTS
+            #pragma multi_compile _ _ADDITIONAL_LIGHT_SHADOWS
+            #pragma multi_compile _ _SHADOWS_SOFT
+            #pragma multi_compile_fog
+
+            #pragma vertex   Vert
+            #pragma fragment Frag
+
+            // ---------------- Includes ----------------
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+
+            // --------- SRP Batcher-friendly material params ---------
+            CBUFFER_START(UnityPerMaterial)
+                float4 _BaseColor;
+                float  _Metallic;
+                float  _Smoothness;
+            CBUFFER_END
+
+            struct VertexGPU {
+                float3 posWS;
+                float3 nrmWS;
+                float2 uv;
+            };
+            struct Triangle {
+                VertexGPU v0;
+                VertexGPU v1;
+                VertexGPU v2;
+            };
+
+            StructuredBuffer<Triangle> _Tris; // bind this from C#/RenderPass
+         
+            VertexGPU FetchCorner(uint triIndex, uint corner)
+            {
+                Triangle t = _Tris[triIndex];
+                if (corner == 0)      return t.v0;
+                else if (corner == 1) return t.v1;
+                else                  return t.v2;
+            }
+
+            //Vertex Shader In
+            struct VSIn {
+                uint vertexID  : SV_VertexID;   // 0..2 (because args[0] = 3)
+                uint instanceID: SV_InstanceID; // triangle index (args[1] instances)
+            };
+            //Vertex Shader Out
+            struct VSOut {
+                float4 posCS   : SV_Position;
+                float3 posWS   : TEXCOORD0;
+                half3  nrmWS   : TEXCOORD1;
+                float2 uv      : TEXCOORD2;
+                //float4 fogCoord: TEXCOORD3;
+                //float4 shadowCoord : TEXCOORD4;
+            };
+
+            VSOut Vert (VSIn vin)
+            {
+                // Map flat vertex index -> triangle + corner (0,1,2)
+                uint triIndex = vin.vertexID / 3;
+                uint corner   = vin.vertexID - triIndex * 3; // (= vin.vertexID % 3)
+                VertexGPU v = FetchCorner(triIndex, corner);
+               
+                VSOut o;
+                o.posWS = v.posWS;
+                o.nrmWS = normalize(v.nrmWS);
+                o.uv    = v.uv;
+
+                // World -> Clip using URP helper
+                o.posCS = TransformWorldToHClip(o.posWS);
+                /*
+                o.fogCoord = ComputeFogFactor(o.posCS);
+
+                // Shadow coord for main light (URP handles cascade variants)
+                o.shadowCoord = TransformWorldToShadowCoord(o.posWS);
+                */
+
+                return o;
+                
+                /*
+                float3 tri[3] = {
+                    float3(-0.2, -0.2, 0.0),
+                    float3( 0.2, -0.2, 0.0),
+                    float3( 0.0,  0.2, 0.0)
+                };
+                float3 p = tri[vin.vertexID% 3];                // repeat if more verts
+                VSOut o;
+                o.posCS = TransformObjectToHClip(float4(p,1)); // or TransformWorldToHClip if you prefer WS
+                return o;
+                */
+            }
+
+            float4 Frag (VSOut i) : SV_Target
+            {
+                half3 N = normalize(i.nrmWS);
+                
+                // Camera view dir (from pixel to camera)
+                half3 V = normalize(GetWorldSpaceViewDir(i.posWS));
+
+                // If the normal points away from the camera, flip it
+                if (dot(N, V) < 0.0h)
+                    N = -N;
+
+                float3 L = normalize(float3(1,1,0));
+                float lambert = saturate(dot(N, L));
+                return lerp(0.25, 1.0, lambert);
+            }
+            ENDHLSL
+        }
+    }
+}
+```
+
+### SDFS/TerrainSDFFactory.cs
+```
+using Unity.Mathematics;
+using UnityEngine;
+
+public class TerrainSDFFactory
+{
+    private readonly TerrainSDFRegistry registry;
+
+    public TerrainSDFFactory(TerrainSDFRegistry registry)
+    {
+        this.registry = registry;
+    }
+
+    public void Init_SphereSDF(float radius, float3 originWS, uint FlippedNormals)
+    {
+        var sdf = new TerrainSDF_GPU
+        {
+            SDFType = (uint)TerrainSDFType.Sphere,
+            Radius = radius,
+            OriginWS = new float4(originWS, 0)
+        };
+        registry.RegisterSDF(sdf);
+    }
+
+    public void Init_SphereSubtract(float radius, float3 originWS, uint FlippedNormals)
+    {
+        var sdf = new TerrainSDF_GPU
+        {
+            SDFType = (uint)TerrainSDFType.SphereSubtract,
+            Radius = radius,
+            OriginWS = new float4(originWS, 0),
+            FlippedNormals = FlippedNormals
+        };
+        registry.RegisterSDF(sdf);
+    }
+
+    public void Init_BoxSDF(float3 halfExtents, float3 originWS, uint FlippedNormals)
+    {
+        var sdf = new TerrainSDF_GPU
+        {
+            SDFType = (uint)TerrainSDFType.Box,
+            HalfExtents = new float4(halfExtents, 0),
+            OriginWS = new float4(originWS, 0),
+            FlippedNormals = FlippedNormals
+        };
+        registry.RegisterSDF(sdf);
+    }
+
+    public void Init_TorusSDF(float ringRadius, float tubeRadius, float3 originWS, uint FlippedNormals)
+    {
+        var sdf = new TerrainSDF_GPU
+        {
+            SDFType = (uint)TerrainSDFType.Torus,
+            TorusRadii = new float4(ringRadius, tubeRadius, 0, 0),
+            OriginWS = new float4(originWS, 0),
+            FlippedNormals = FlippedNormals
+        };
+        registry.RegisterSDF(sdf);
+    }
+
+    public void Init_CylinderSDF(float radius, float3 originWS, float3 cylinderEnd, uint FlippedNormals)
+    {
+        var sdf = new TerrainSDF_GPU
+        {
+            SDFType = (uint)TerrainSDFType.Cylinder,
+            Radius = radius,
+            OriginWS = new float4(originWS, 0),
+            CylinderEnd = new float4(cylinderEnd, 0),
+            FlippedNormals = FlippedNormals
+        };
+        registry.RegisterSDF(sdf);
+    }
+
+    public void Init_PlaneSDF(float3 normal, float yLevel, uint FlippedNormals)
+    {
+        var sdf = new TerrainSDF_GPU
+        {
+            SDFType = (uint)TerrainSDFType.Plane,
+            PlaneNorm_YLevel = new float4(yLevel),
+            FlippedNormals = FlippedNormals
+        };
+        registry.RegisterSDF(sdf);
+    }
+}
+```
+
+### SDFS/TerrainSDFRegistry.cs
+```
+using System.Collections.Generic;
+using Unity.Mathematics;
+using static Unity.Mathematics.math;
+
+public struct AABB
+{
+    public float3 Min;
+    public float3 Max;
+
+    public AABB(float3 min, float3 max)
+    {
+        Min = min;
+        Max = max;
+    }
+
+    public static AABB Empty => new AABB(new float3(float.PositiveInfinity),
+                                         new float3(float.NegativeInfinity));
+    public static AABB Full => new AABB(new float3(float.NegativeInfinity),
+                                         new float3(float.PositiveInfinity));
+
+    public bool IsEmpty => Min.x > Max.x || Min.y > Max.y || Min.z > Max.z;
+
+    public void Encapsulate(AABB other)
+    {
+        Min = math.min(Min, other.Min);
+        Max = math.max(Max, other.Max);
+    }
+
+    public AABB Intersect(AABB other)
+    {
+        float3 min = math.max(Min, other.Min);
+        float3 max = math.min(Max, other.Max);
+        if (math.any(min > max)) // no overlap
+            return Empty;
+        return new AABB(min, max);
+    }
+}
+
+
+public class TerrainSDFRegistry
+{
+    private List<TerrainSDF_GPU> terrainSDFs = new List<TerrainSDF_GPU>();
+    public IReadOnlyList<TerrainSDF_GPU> TerrainSDFS => terrainSDFs;
+
+    public void RegisterSDF(TerrainSDF_GPU terrainSDF_GPU) =>
+        terrainSDFs.Add(terrainSDF_GPU);
+
+    // ------------------ NEW: CPU distance evaluation ------------------
+
+    /// <summary>
+    /// Returns signed distance at world-space position <paramref name="p"/>,
+    /// combining all registered SDFs with the same rules as the HLSL path.
+    /// </summary>
+    public float EvaluateDistanceAt(float3 p)
+    {
+        float acc = 1e9f; // large positive start (outside everything)
+
+        foreach (var s in terrainSDFs)
+        {
+            float d = EvaluateOneCPU(s, p); // primitive distance
+
+            switch ((TerrainSDFType)s.SDFType)
+            {
+                case TerrainSDFType.SphereSubtract:
+                    // subtraction: acc = max(-d, acc)
+                    acc = max(-d, acc);
+                    break;
+
+                case TerrainSDFType.Sphere:
+                case TerrainSDFType.Box:
+                case TerrainSDFType.Torus:
+                case TerrainSDFType.Cylinder:
+                case TerrainSDFType.Plane:
+                    // union: acc = min(d, acc)
+                    acc = min(d, acc);
+                    break;
+            }
+        }
+
+        return acc;
+    }
+
+    // ---- Primitive evaluators (match HLSL) ----
+    private static float EvaluateOneCPU(in TerrainSDF_GPU s, float3 p)
+    {
+        switch ((TerrainSDFType)s.SDFType)
+        {
+            case TerrainSDFType.Sphere:
+            case TerrainSDFType.SphereSubtract:
+                return SdSphere(p, s.OriginWS.xyz, s.Radius);
+
+            case TerrainSDFType.Box:
+                return SdBox(p, s.OriginWS.xyz, s.HalfExtents.xyz);
+
+            case TerrainSDFType.Torus:
+                return SdTorus(p, s.OriginWS.xyz, s.TorusRadii.xy);
+
+            case TerrainSDFType.Cylinder:
+                return SdCylinderSegment(p, s.OriginWS.xyz, s.CylinderEnd.xyz, s.Radius);
+
+            case TerrainSDFType.Plane:
+                return SdPlaneY(p, s.PlaneNorm_YLevel.w);
+
+            default:
+                return 1e9f;
+        }
+    }
+
+    private static float SdSphere(float3 p, float3 c, float r)
+    {
+        return length(p - c) - r;
+    }
+
+    private static float SdBox(float3 p, float3 c, float3 he)
+    {
+        float3 d = abs(p - c) - he;
+        return length(max(d, 0)) + min(max(d.x, max(d.y, d.z)), 0);
+    }
+
+    private static float SdTorus(float3 p, float3 c, float2 kr) // kr = (ringR, tubeR)
+    {
+        float3 r = p - c;
+        float2 q = float2(length(r.xz) - kr.x, r.y);
+        return length(q) - kr.y;
+    }
+
+    private static float SdCylinderSegment(float3 p, float3 a, float3 b, float r)
+    {
+        float3 pa = p - a;
+        float3 ba = b - a;
+        float  h  = saturate(dot(pa, ba) / dot(ba, ba));
+        return length(pa - ba * h) - r;
+    }
+
+    private static float SdPlaneY(float3 p, float yLevel)
+    {
+        return p.y - yLevel;
+    }
+
+    // ------------------ Existing bounds logic (unchanged) ------------------
+
+    public AABB GetInnerBounds(AABB outerBounds)
+    {
+        AABB result = AABB.Empty;
+
+        foreach (var sdf in terrainSDFs)
+        {
+            AABB sdfBounds = ComputeBounds(sdf);
+
+            // intersect with outer bounds
+            AABB clamped = sdfBounds.Intersect(outerBounds);
+
+            if (!clamped.IsEmpty)
+            {
+                if (result.IsEmpty)
+                    result = clamped;
+                else
+                    result.Encapsulate(clamped);
+            }
+        }
+
+        if (result.Equals(AABB.Full))
+        {
+            return outerBounds;
+        }
+        return result;
+    }
+
+    private static AABB ComputeBounds(TerrainSDF_GPU sdf)
+    {
+        switch ((TerrainSDFType)sdf.SDFType)
+        {
+            case TerrainSDFType.Sphere:
+            case TerrainSDFType.SphereSubtract:
+            {
+                float3 center = sdf.OriginWS.xyz;
+                float3 r = new float3(sdf.Radius);
+                return new AABB(center - r, center + r);
+            }
+            case TerrainSDFType.Box:
+            {
+                float3 center = sdf.OriginWS.xyz;
+                float3 ext = sdf.HalfExtents.xyz;
+                return new AABB(center - ext, center + ext);
+            }
+            case TerrainSDFType.Torus:
+            {
+                // crude bound: ring radius + tube radius in XZ plane, tube radius in Y
+                float3 center = sdf.OriginWS.xyz;
+                float R = sdf.TorusRadii.x;
+                float r = sdf.TorusRadii.y;
+                float3 ext = new float3(R + r, r, R + r);
+                return new AABB(center - ext, center + ext);
+            }
+            case TerrainSDFType.Cylinder:
+            {
+                float3 a = sdf.OriginWS.xyz;
+                float3 b = sdf.CylinderEnd.xyz;
+                float r = sdf.Radius;
+                float3 min = math.min(a, b) - new float3(r, r, r);
+                float3 max = math.max(a, b) + new float3(r, r, r);
+                return new AABB(min, max);
+            }
+            case TerrainSDFType.Plane:
+            {
+                return AABB.Full;
+            }
+            default:
+                // Planes are infinite → return an empty bound
+                return AABB.Empty;
+        }
+    }
+}
+```
+
+### SDFS/TerrainSDF_GPU.cs
+```
+using System.Runtime.InteropServices;
+using Unity.Mathematics;
+
+public enum TerrainSDFType
+{
+    SphereSubtract,
+    Sphere,
+    Box,
+    Torus,
+    Cylinder,
+    Plane
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct TerrainSDF_GPU
+{
+    public uint   SDFType;   // 4
+    public float  Radius;    // 4
+    public uint FlippedNormals; //4
+    public float _pad0;     // 4  -> total 16
+
+    public float4 OriginWS;          // 16
+    public float4 HalfExtents;       // 16
+    public float4 TorusRadii;        // 16
+    public float4 CylinderEnd;       // 16
+    public float4 PlaneNorm_YLevel;  // 16
+}
+```
+
+### SDFS/Terrain_SDF.hlsl
+```
+#ifndef TERRAIN_SDF_INCLUDED
+#define TERRAIN_SDF_INCLUDED
+
+// Keep enum numeric values in sync with C#
+static const uint TERRAIN_SDF_SphereSubtract = 0;
+static const uint TERRAIN_SDF_Sphere         = 1;
+static const uint TERRAIN_SDF_Box            = 2;
+static const uint TERRAIN_SDF_Torus          = 3;
+static const uint TERRAIN_SDF_Cylinder       = 4;
+static const uint TERRAIN_SDF_Plane          = 5;
+
+struct TerrainSDF
+{
+    // 16B
+    uint  SDFType;   // enum
+    float Radius;    // sphere/cylinder radius
+    uint FlipNormals;
+    float _pad0;    // keep 16B alignment
+
+    // 16B each (xyz used, w is padding or specific param noted below)
+    float4 OriginWS;           // xyz center
+    float4 HalfExtents;        // xyz box half extents
+    float4 TorusRadii;         // x = ring radius, y = tube radius, zw unused
+    float4 CylinderEnd;        // xyz endpoint of cylinder segment
+    float4 PlaneNorm_YLevel;   // xyz = plane normal (optional), w = yLevel
+};
+
+// ---- SDF primitives ----
+inline float sdSphere(float3 p, float3 c, float r)
+{
+    return length(p - c) - r;
+}
+
+inline float sdBox(float3 p, float3 c, float3 he)
+{
+    float3 d = abs(p - c) - he;
+    return length(max(d, 0)) + min(max(d.x, max(d.y, d.z)), 0);
+}
+
+inline float sdTorus(float3 p, float3 c, float2 kr)
+{
+    float3 r = p - c;
+    float2 q = float2(length(r.xz) - kr.x, r.y);
+    return length(q) - kr.y;
+}
+
+inline float sdCylinderSegment(float3 p, float3 a, float3 b, float r)
+{
+    float3 pa = p - a;
+    float3 ba = b - a;
+    float  h  = saturate(dot(pa, ba) / dot(ba, ba));
+    return length(pa - ba * h) - r;
+}
+
+inline float sdPlaneY(float3 p, float yLevel)
+{
+    return p.y - yLevel;
+}
+
+// ---- Evaluate one SDF primitive (no boolean yet) ----
+inline float EvaluateOne(const TerrainSDF s, float3 p)
+{
+    switch (s.SDFType)
+    {
+        case TERRAIN_SDF_Sphere:
+            return sdSphere(p, s.OriginWS.xyz, s.Radius);
+        case TERRAIN_SDF_SphereSubtract:
+            return sdSphere(p, s.OriginWS.xyz, s.Radius);
+
+        case TERRAIN_SDF_Box:
+            return sdBox(p, s.OriginWS.xyz, s.HalfExtents.xyz);
+
+        case TERRAIN_SDF_Torus:
+            return sdTorus(p, s.OriginWS.xyz, s.TorusRadii.xy);
+
+        case TERRAIN_SDF_Cylinder:
+            return sdCylinderSegment(p, s.OriginWS.xyz, s.CylinderEnd.xyz, s.Radius);
+
+        case TERRAIN_SDF_Plane:
+            return sdPlaneY(p, s.PlaneNorm_YLevel.x); // yLevel in .w
+
+        default:
+            return 1e9; // large positive
+    }
+}
+
+// ---- Combine into an accumulated field (matches your C# logic) ----
+// Usage: float d = 1e9; AccumulateSDF(sdf[i], p, d); // d becomes union/subtract result
+inline void AccumulateSDF(const TerrainSDF s, float3 p, inout float acc)
+{
+    const float d = EvaluateOne(s, p);
+
+    switch (s.SDFType)
+    {
+        case TERRAIN_SDF_SphereSubtract:
+            // subtract sphere from the current field
+            acc = max(-d, acc);
+            break;
+
+        case TERRAIN_SDF_Sphere:
+            acc = min(d, acc);
+            break;
+        case TERRAIN_SDF_Box:
+            acc = min(d, acc);
+                break;
+        case TERRAIN_SDF_Torus:
+            acc = min(d, acc);
+            break;
+        case TERRAIN_SDF_Cylinder:
+            acc = min(d, acc);
+            break;
+        case TERRAIN_SDF_Plane:
+            // union
+            acc = min(d, acc);
+            break;
+    }
+}
+
+// ---- Evaluate a sequence from a StructuredBuffer ----
+inline float EvaluateSDFSequence(StructuredBuffer<TerrainSDF> seq, uint count, float3 p)
+{
+    float acc = 1e9;
+    [loop] for (uint i = 0; i < count; i++)
+    {
+        AccumulateSDF(seq[i], p, acc);
+    }
+    return acc;
+}
+
+#endif // TERRAIN_SDF_INCLUDED
+```
+
+### Voxels/EvaluateVoxels.compute
+```
+#include "../SDFS/Terrain_SDF.hlsl"
+#pragma kernel CSMain
+
+// Inputs
+StructuredBuffer<TerrainSDF> _SDFs;
+uint  _SDFCount;
+
+uint3  _Res;            // sample resolution (X,Y,Z)
+float3 _VoxelSizeWS;    // size of a voxel in world units
+float3 _GridMinWS;      // world-space position of the grid's min corner
+int3 _InnerVoxelDims;  // the dimensions of the voxels in Bounds of the sdf
+int3 _StartingIndex; // the index of the first voxel (starting from 0,0,0) that is in the AABB bounds we're evaluating on this chunk
+
+//extracting correct indices from bigger batch buffer
+//int _SubBufferStartIndex;
+
+// Input / Output
+RWStructuredBuffer<float> _Voxels;
+
+
+
+// x-fast → y → z layout
+uint OuterFlatFromInnerFlat(
+    uint  startingIndex1D, // s_i
+    uint  index,           // k in [0, Bx*By*Bw)
+    uint3 outerDims,       // (Ax, Ay, Az)
+    uint3 innerDims        // (Bx, By, Bz)
+){
+    const uint Ax = outerDims.x, Ay = outerDims.y;
+    const uint Bx = innerDims.x, By = innerDims.y;
+
+    const uint extraCols  = Ax * 1u - Bx;          // (Ax - Bx)
+    const uint extraPlane = Ax * Ay - Bx * By;     // (Ax*Ay - Bx*By)
+
+    const uint rowsInPlane = (index / Bx) % By;    // floor(k/Bx) mod By
+    const uint planes      =  index / (Bx * By);   // floor(k/(Bx*By))
+
+    return startingIndex1D
+         + index
+         + extraCols  * rowsInPlane
+         + extraPlane * planes;
+}
+
+
+[numthreads(64,1,1)]
+void CSMain(uint3 dtid : SV_DispatchThreadID)
+{
+    
+    uint idx   = dtid.x;
+    uint startingIndex = _StartingIndex;
+    idx = OuterFlatFromInnerFlat(startingIndex, idx, _Res, _InnerVoxelDims);
+    uint idxOriginal = idx;
+    
+    uint sizeX = _Res.x;
+    uint sizeY = _Res.y;
+    uint sizeZ = _Res.z;
+
+    uint total = sizeX * sizeY * sizeZ;
+    if (idx >= total) return;
+
+    // Decode idx -> (x,y,z) with strides
+    uint strideY = sizeX;
+    uint strideZ = sizeX * sizeY;
+
+    uint z = idx / strideZ;
+    idx   -= z * strideZ;
+    uint y = idx / strideY;
+    uint x = idx - y * strideY;
+
+    // Corner sampling (good for MC). For centers, add +0.5 * _VoxelSizeWS
+    float3 pWS = _GridMinWS + float3(x, y, z) * _VoxelSizeWS; //+ 0.5 * _VoxelSizeWS;
+
+    float sdf = EvaluateSDFSequence(_SDFs, _SDFCount, pWS);
+    _Voxels[idxOriginal] = sdf;
+    //_Voxels[dtid.x] = -1;
+}
+/*#include "../SDFS/Terrain_SDF.hlsl"
+#pragma kernel CSMain
+
+// Inputs
+StructuredBuffer<TerrainSDF> _SDFs;
+uint  _SDFCount;
+
+uint3  _Res;            // sample resolution (X,Y,Z)
+float3 _VoxelSizeWS;    // size of a voxel in world units
+float3 _GridMinWS;      // world-space position of the grid's min corner
+
+// Input / Output
+RWStructuredBuffer<float> _Voxels;
+
+[numthreads(64,1,1)]
+void CSMain(uint3 dtid : SV_DispatchThreadID)
+{
+    uint idx   = dtid.x;
+    uint sizeX = _Res.x;
+    uint sizeY = _Res.y;
+    uint sizeZ = _Res.z;
+
+    uint total = sizeX * sizeY * sizeZ;
+    if (idx >= total) return;
+
+    // Decode idx -> (x,y,z) with strides
+    uint strideY = sizeX;
+    uint strideZ = sizeX * sizeY;
+
+    uint z = idx / strideZ;
+    idx   -= z * strideZ;
+    uint y = idx / strideY;
+    uint x = idx - y * strideY;
+
+    // Corner sampling (good for MC). For centers, add +0.5 * _VoxelSizeWS
+    float3 pWS = _GridMinWS + float3(x, y, z) * _VoxelSizeWS;
+
+    float sdf = EvaluateSDFSequence(_SDFs, _SDFCount, pWS);
+    _Voxels[dtid.x] = sdf;
+    //_Voxels[dtid.x] = -1;
+}
+*/
+```
+
+### Voxels/VoxelDebugger.cs
+```
+using Unity.Mathematics;
+using UnityEngine;
+using Unity.Collections;
+
+public static class SDFVoxelGizmoVisualizer
+{
+    public static void DrawVoxelSDFGizmos(float[] voxels, int3 resolution, float3 gridMinCorner, float3 voxelSize)
+    {
+        if (voxels == null || voxels.Length == 0) return;
+
+        for (int z = 0; z < resolution.z; z++)
+        {
+            for (int y = 0; y < resolution.y; y++)
+            {
+                for (int x = 0; x < resolution.x; x++)
+                {
+                    int index = z * resolution.x * resolution.y + y * resolution.x + x;
+                    float sdfValue = voxels[index];
+
+                    // Map sdf to color:
+                    // red channel = for negative values from -10 to 0, remapped from 1 to 0
+                    // green channel = for positive values from 0 to 10, remapped from 0 to 1
+                    float red = 0f;
+                    float green = 0f;
+
+                    if (sdfValue < 0f)
+                    {
+                        // Clamp sdfValue to [-10,0], remap so -10 -> 1, 0 -> 0
+                        red = math.clamp(1f - (sdfValue / -10f), 0f, 1f);
+                    }
+                    else if (sdfValue > 0f)
+                    {
+                        // Clamp sdfValue to [0,10], remap so 0 -> 0, 10 -> 1
+                        green = math.clamp(sdfValue / 10f, 0f, 1f);
+                    }
+
+                    Color color = new Color(red, green, 0f, 1f); // Semi-transparent for visibility
+                    Gizmos.color = color;
+
+                    float3 voxelWorldPos = gridMinCorner + new float3(x * voxelSize.x, y * voxelSize.y, z * voxelSize.z);
+                    if (sdfValue != 0f)
+                        Gizmos.DrawCube(voxelWorldPos + voxelSize * .5f, voxelSize * 0.9f);
+                }
+            }
+        }
+    }
+}
+```
+
+### Voxels/VoxelsFactory.cs
+```
+using UnityEngine;
+using Unity.Mathematics;
+using System.Collections.Generic;
+using UnityEngine.Rendering;
+using System.Linq;
+using Unity.Profiling;
+/// <summary>
+/// Builds and updates groups of voxels for an entire chunk grid. 
+/// </summary>
+public class VoxelsFactory
+{
+    public static ProfilerMarker BufferStep = new ProfilerMarker("BufferStep");
+
+    struct VoxelGroup
+    {
+        public ComputeBufferPool pool;
+        public ComputeBuffer voxelBuffer;
+        public int LOD;
+    }
+    class RetiredBuffer
+    {
+        public ComputeBuffer buffer;
+        public float timeRetired;
+        public int chunkIndex;
+    }
+    List<RetiredBuffer> retiredBuffers = new List<RetiredBuffer>();
+    Dictionary<int, ComputeBufferPool> voxelBufferPoolsByLod;
+    TerrainPipeline terrainPipeline;
+    TerrainChunker terrainChunker;
+    VoxelGroup[] voxelGroups;
+    ComputeShader voxelEvaluatorShader;
+    ComputeBuffer sdfs;
+    TerrainSDFRegistry terrainSDFRegistry;
+    int sdfCount = 0;
+    #region Public API
+    public VoxelsFactory(TerrainPipeline terrainPipeline, TerrainChunker terrainChunker, ComputeShader voxelEvaluatorShader, int3 ChunkResolution, List<TerrainLod> terrainLods)
+    {
+        this.terrainPipeline = terrainPipeline;
+        this.terrainChunker = terrainChunker;
+        this.voxelEvaluatorShader = voxelEvaluatorShader;
+        ChunkResolution = terrainPipeline.ChunkResolution;
+        voxelBufferPoolsByLod = new Dictionary<int, ComputeBufferPool>();
+
+        terrainSDFRegistry = terrainPipeline.terrainSDFRegistry;
+        //one group of voxels per chunk
+        voxelGroups = new VoxelGroup[ChunkResolution.x * ChunkResolution.y * ChunkResolution.z];
+
+        //init voxelbufferpools for different level of details
+        //init sdfs
+        sdfs = new ComputeBuffer(100, 16 * 6);
+        
+        InitializeVoxelPools(terrainLods);
+        InitializeVoxelGroups();
+        SetSDFBuffer(terrainSDFRegistry);
+    }
+    public void Dispose()
+    {
+        for (int i = 0; i < voxelGroups.Length; i++)
+        { 
+            voxelGroups[i].voxelBuffer?.Dispose();
+            voxelGroups[i].voxelBuffer = default;
+
+        }
+        sdfs?.Dispose();
+        sdfs = default;
+
+        foreach (KeyValuePair<int, ComputeBufferPool> bufferPool in voxelBufferPoolsByLod)
+            bufferPool.Value?.Dispose();
+    }
+    /// <summary>
+    /// Dynamically reallocates and frees buffers for each chunk depending on LOD. 
+    /// If chunk LOD switches, but is still loaded -> free old buffer and realloc new one
+    /// If chunk goes from loaded to unloaded -> free old buffer
+    /// If chunk goes from unloaded to loaded -> alloc buffer
+    /// If chunk stays unloaded -> do nothing
+    /// </summary>
+    public void UpdateVoxelBuffersForChunks()
+    {
+        using (BufferStep.Auto())
+        {
+            for (int chunkIndex = 0; chunkIndex < voxelGroups.Length; chunkIndex++)
+            {
+                TerrainChunk_Val chunk = terrainChunker.TerrainChunkCollection.TerrainChunks[chunkIndex];
+                ComputeBuffer voxelBuffer = voxelGroups[chunkIndex].voxelBuffer;
+                int newLOD = chunk.ChunkLOD.LOD;
+                int oldLOD = voxelGroups[chunkIndex].LOD;
+                //if wasn't loaded before and not loaded now
+                if (oldLOD == -1 && newLOD == -1)
+                {
+                    //Debug.Log("Case 0");
+                    continue;
+                }
+                //if wasn't loaded before and is loaded now
+                if (oldLOD == -1 && newLOD != -1)
+                {
+                    //Debug.Log("Case 1");
+                    voxelBuffer = UpdateBuffer(chunkIndex, newLOD);
+                }
+                //if was loaded before and isn't loaded now
+                else if (oldLOD != -1 && newLOD == -1)
+                {
+                    //Debug.Log("Case 2");
+                    FreeBuffer(chunkIndex);
+                }
+                //if was loaded before and is loaded now with different lod
+                else if (newLOD != voxelGroups[chunkIndex].LOD)
+                {
+                    //Debug.Log("Case 3");
+                    FreeBuffer(chunkIndex);
+                    voxelBuffer = UpdateBuffer(chunkIndex, newLOD);
+                }
+                //set result
+                voxelGroups[chunkIndex].voxelBuffer = voxelBuffer;
+                voxelGroups[chunkIndex].LOD = newLOD;
+            }
+        }
+    }
+    /// <summary>
+    /// Evaluates a group of voxels corresponding to a chunk based on the current collection of Signed Distance Functions. Uses AABB culling to only recalculate voxels in bounds of the SDFs. Automatically enqueues chunk's mesh to be rebuilt, if neccessary.
+    /// </summary>
+    /// <param name="chunkIndex"></param>
+    /// <param name="chunk"></param>
+    public void EvaluateVoxelGroup(int chunkIndex, TerrainChunk_Val chunk, TerrainLod lod, bool cullVoxels = false)
+    {
+        
+            /// This algo gets a little confusing so just remember these key points:
+            /// 1) We subtract the -1 from voxelRes during voxel size so that our voxels will extend exactly one voxel beyond the chunk.
+            /// These extra voxels act as a "halo", they are used to make sure that we dont get holes when the SDF is near the borders of the chunk. Remember, marching cubes needs 8 voxels in a cube for one sample, 
+            /// meaning on the edges of chunk we need one voxel to stick out so that we can still get a full sample.
+
+        ComputeBuffer voxelBuffer = voxelGroups[chunkIndex].voxelBuffer;
+
+        int3 voxelRes = lod.VoxelResolution;
+        float3 voxelSize = terrainPipeline.ChunkDimensions / (float3)(voxelRes - 1);
+        int voxelCount = voxelRes.x * voxelRes.y * voxelRes.z;
+        AABB chunkBounds = new AABB(chunk.MinCornerWS, chunk.MinCornerWS + chunk.ChunkSize);
+        AABB voxelBounds = chunkBounds;
+        int3 regionRes = voxelRes;
+        int numVoxelsInSDFBounds = voxelCount;
+        int3 startingIndex = int3.zero;
+
+        if (cullVoxels)
+        {
+            Debug.LogWarning("Cull Voxels Enabled. Cull Voxels currently significant impacts CPU performance at the benefit of GPU (to a, estimated, minimal extent).");
+            voxelBounds = terrainSDFRegistry.GetInnerBounds(chunkBounds);
+            float3 boundsDiff = voxelBounds.Max - voxelBounds.Min;
+            if (math.any(boundsDiff == float.NegativeInfinity) || math.any(boundsDiff == float.PositiveInfinity)) return;
+            //+1 here because we want to include the extra "halo" of voxels
+            regionRes = new int3(
+                (int)math.ceil(boundsDiff.x / voxelSize.x + 1),
+                (int)math.ceil(boundsDiff.y / voxelSize.y + 1),
+                (int)math.ceil(boundsDiff.z / voxelSize.z + 1)
+            );
+            numVoxelsInSDFBounds = regionRes.x * regionRes.y * regionRes.z;
+            if (numVoxelsInSDFBounds == 0) { return; }
+            startingIndex = (int3)GetStartingIndex(voxelBounds.Min, chunk.MinCornerWS, voxelSize, voxelRes);
+
+        }
+            
+            //Prepare dispatch
+            voxelEvaluatorShader.SetInts("_Res", voxelRes.x, voxelRes.y, voxelRes.z);
+            voxelEvaluatorShader.SetFloats("_VoxelSizeWS", voxelSize.x, voxelSize.y, voxelSize.z);
+            voxelEvaluatorShader.SetFloats("_GridMinWS", chunk.MinCornerWS.x, chunk.MinCornerWS.y, chunk.MinCornerWS.z);
+            voxelEvaluatorShader.SetInts("_StartingIndex", startingIndex.x, startingIndex.y, startingIndex.z);
+            voxelEvaluatorShader.SetInts("_InnerVoxelDims", regionRes.x, regionRes.y, regionRes.z);
+            voxelEvaluatorShader.SetBuffer(0, "_Voxels", voxelBuffer);
+            voxelEvaluatorShader.SetInt("_SDFCount", sdfCount);
+            voxelEvaluatorShader.SetBuffer(0, "_SDFs", sdfs);
+            //Dispatch
+            voxelEvaluatorShader.Dispatch(0, (numVoxelsInSDFBounds + 63) / 64, 1, 1);
+
+            //Queue Mesh Creation
+            //terrainChunker.CalculateMesh(chunkIndex, voxelRes, voxelBuffer);
+
+            //Debugging
+            if (terrainPipeline.displayVoxels)
+                Debug.DrawLine(voxelBounds.Min, voxelBounds.Max, Color.yellow, 1000f);
+            //Optional Async readback to get debugging info (Bad for performance)
+            if (terrainPipeline.displayVoxels)
+            {
+                AsyncGPUReadback.Request(voxelBuffer, (AsyncGPUReadbackRequest) =>
+                {
+
+                    float[] voxels = AsyncGPUReadbackRequest.GetData<float>().ToArray();
+                    TerrainPipeline.VoxelDebugData voxelDebugData = new TerrainPipeline.VoxelDebugData(voxels, voxelRes, chunk.MinCornerWS, voxelSize);
+
+                    if (lod.LOD == 1)
+                    {
+                        terrainPipeline.AddVoxelDebugData(voxelDebugData);
+                    }
+
+                });
+            }
+    }
+    public ComputeBuffer GetVoxelBuffer(int chunkIndex )
+    { 
+        return voxelGroups[chunkIndex].voxelBuffer;
+    }
+    #endregion
+    #region Private Methods
+    ComputeBuffer UpdateBuffer(int chunkIndex, int lod)
+    {
+        VoxelGroup voxelGroup = voxelGroups[chunkIndex];
+        ComputeBufferPool computeBufferPool = voxelBufferPoolsByLod[lod];
+        voxelGroup.voxelBuffer = computeBufferPool.TryGetBuffer();
+        //Safety measure to ensure we always have a buffer, even tho this technically could lead to a crash
+        if (voxelGroup.voxelBuffer == null) //TryGetBuffer() Failed
+            voxelGroup.voxelBuffer = computeBufferPool.TryAddBuffer();
+        voxelGroup.LOD = lod;
+        voxelGroup.pool = computeBufferPool;
+        numAllocated++;
+        voxelGroups[chunkIndex] = voxelGroup;
+        return voxelGroup.voxelBuffer;
+    }
+    void FreeBuffer(int chunkIndex)
+    {
+        VoxelGroup voxelGroup = voxelGroups[chunkIndex];
+        ComputeBuffer voxelBuffer = voxelGroup.voxelBuffer;
+        voxelGroup.pool.TryFreeBuffer(voxelBuffer);
+        voxelGroup.voxelBuffer = null;
+        voxelGroup.pool = null;
+        voxelGroup.LOD = -1;
+        numFreed++;
+        voxelGroups[chunkIndex] = voxelGroup;
+    }
+
+    public void SetSDFBuffer(TerrainSDFRegistry SDFRegistry)
+    {
+        IReadOnlyDictionary<uint, TerrainSDF_GPU> terrainSDFs = SDFRegistry.TerrainSDFS;
+        sdfCount = terrainSDFs?.Count ?? 0;
+        
+        if (sdfCount == 0) return;
+        sdfs.SetData(terrainSDFs.Values.ToArray<TerrainSDF_GPU>());
+    }
+    void InitializeVoxelPools(List<TerrainLod> terrainLods)
+    {
+        foreach (TerrainLod lod in terrainLods)
+        {
+            ComputeBufferPool computeBufferPool = new ComputeBufferPool((int)TerrainChunker.ManhattanFloodFillCount3D(lod.chunkRadius + 1), lod.VoxelResolution.x * lod.VoxelResolution.y * lod.VoxelResolution.z * 2, sizeof(float), ComputeBufferType.Default);
+            voxelBufferPoolsByLod.Add(lod.LOD, computeBufferPool);
+        }
+        voxelBufferPoolsByLod.Add(-1, null); // add this to represent the non loaded LOD (i.e: -1)
+    }
+    void InitializeVoxelGroups()
+    {
+        for (int i = 0; i < voxelGroups.Length; i++)
+        {
+            voxelGroups[i] = new VoxelGroup() { LOD = -1 };
+            //voxelGroups[i].voxelBuffer = new ComputeBuffer(terrainPipeline.terrainLods[0].VoxelResolution.x * terrainPipeline.terrainLods[0].VoxelResolution.y * terrainPipeline.terrainLods[0].VoxelResolution.z, sizeof(float), ComputeBufferType.Default);
+        }
+    }
+    uint GetStartingIndex(float3 _VoxelMinBounds, float3 _GridMinWS, float3 _VoxelSizeWS, int3 _Res)
+    {
+        int3 startingVoxelIndex = (int3)((_VoxelMinBounds - _GridMinWS) / _VoxelSizeWS);
+        uint startingVoxelIndex1D = (uint)(startingVoxelIndex.x + startingVoxelIndex.y * _Res.x + startingVoxelIndex.z * _Res.x * _Res.y);
+        return startingVoxelIndex1D;
+    }
+    int numFreed = 0;
+    int numAllocated = 0;
+    public void DebugBufferCounts()
+    {
+        Debug.Log("Allocated: " + numAllocated);
+        Debug.Log("Freed: " + numFreed);
+    }
+    #endregion
+}
+```

@@ -1,0 +1,378 @@
+--- v005.md
++++ v006.md
+@@ -4,157 +4,195 @@
+ 
+ ## Overview
+-The Total Loss Function is the composite objective used to optimize radiance field parameters (density, geometry, color, latent codes) by combining multiple regularization and reconstruction terms. It solves the ill-posed nature of inverse volume rendering by balancing photometric fidelity with geometric priors and latent space constraints. It differs from sibling methods by aggregating heterogeneous loss components—such as pixel-wise reconstruction, total variation, and distributional priors—into a single scalar value, whereas siblings like [Total Variation Regularization](860-total-variation-regularization.md) or [MSE Loss and PSNR Conversion](1651-mse-loss-and-psnr-conversion.md) focus on specific aspects of the error landscape.
++The Total Loss Function is the composite objective used to optimize radiance field parameters (such as density, color, SDF, or latent codes) by combining a primary data fidelity term with various regularization penalties. It solves the ill-posed nature of inverse volume rendering by enforcing constraints like spatial smoothness, geometric consistency, and latent distribution alignment. It differs from individual regularization terms (e.g., [Total Variation Regularization](860-total-variation-regularization.md)) by aggregating all components into a single scalar value for gradient-based optimization, and from [Regularization losses](1413-regularization-losses.md) by defining the specific weighting and inclusion of these terms for a given training pipeline.
+ 
+ ## How it works
+-The total loss is a weighted sum of distinct terms, each targeting a specific property of the rendered output or the underlying scene representation. The specific composition varies by architectural variant (e.g., VAE-based, SDF-based, or Deformable Grid-based).
++The total loss $\mathcal{L}_{total}$ is computed as the sum of a photometric (or geometric) reconstruction loss and a weighted sum of regularization terms. The specific components and weights vary by method variant, but the general structure follows the shared principles of the parent category.
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Rendered image $\hat{\mathbf{I}}$, ground truth image $\mathbf{I}^*$, scene parameters $\theta$ (e.g., density $\sigma$, color $\mathbf{c}$, SDF $f$, latent codes $\mathbf{z}$), and auxiliary data (masks, normals, depths).
+-*   **Outputs:** A scalar loss value $\mathcal{L}$ used for gradient-based optimization.
++*   **Inputs:**
++    *   Rendered image $\hat{\mathbf{I}}$ (or color $\hat{C}$, throughput $T$).
++    *   Ground-truth image $\mathbf{I}^*$ (or color $C$, mask $m$).
++    *   Scene parameters $\theta$ (e.g., density $\sigma$, color $\mathbf{c}$, SDF $f$, latent codes $\mathbf{z}$).
++    *   Auxiliary data: Depth maps, normals, binary masks, or bilateral grid parameters.
++*   **Outputs:**
++    *   Scalar loss value $\mathcal{L}_{total}$ used for backpropagation.
+ 
+ ### Data Structures
+-The loss calculation typically operates on tensors of shape $(N, H, W, C)$ for images or $(N, K, C)$ for ray samples, where $N$ is batch size, $H,W$ are spatial dimensions, $C$ is channels (usually 3 for RGB), and $K$ is samples per ray.
++*   **Images/Tensors:** Rendered and ground-truth images are typically stored as tensors of shape $(H, W, 3)$ or flattened to $(N, 3)$ where $N$ is the number of pixels or batch rays.
++*   **Masks:** Binary masks $m \in \{0, 1\}$ are used to weight specific loss terms (e.g., [Composite Image Loss with Visibility Weighting](4262-composite-image-loss-with-visibility-weighting.md), [Empty Space Loss](#empty-space-loss)).
++*   **Latent Codes:** $\mathbf{z}$ is a vector or tensor representing the encoded scene state, often constrained to a normal distribution.
+ 
+ ### Formulas and Steps
+-The general structure is:
+-$$ \mathcal{L} = \sum_k w_k \mathcal{L}_k $$
+-
+-#### 1. Photometric Reconstruction Loss
+-Measures the difference between rendered and ground truth colors.
+-*   **L1 Loss (Common in SDF/NeuS variants):**
+-    $$ \mathcal{L}_{\text{rgb}} = \frac{1}{N} \sum_{i=1}^N |C_i - \hat{C}_i| $$
+-    where $N$ is the number of batch rays, $C_i$ is ground truth color, and $\hat{C}_i$ is rendered color [S2, unofficial].
+-*   **L2 Loss (Common in VAE/Volumes variants):**
+-    $$ \mathcal{L}_{\text{rec}} = \frac{1}{P} \sum_{\mathbf{p}} \left\| \hat{\mathbf{I}}_{\text{rgb}}(\mathbf{p}) - \mathbf{I}_{\text{rgb}}^*(\mathbf{p}) \right\|^2 $$
+-    where $P$ is the number of sampled pixels [S1].
+-
+-#### 2. Geometric Regularization
+-*   **Eikonal Loss (SDF-based):** Enforces that the gradient of the SDF field has unit magnitude, promoting a valid signed distance function.
+-    $$ \mathcal{L}_{\text{eik}} = \frac{1}{MN} \sum_{i,j=1}^{MN} \|\nabla f(p_{i,j}) - 1\|^2 $$
+-    where $M$ is sampled locations per ray, $N$ is batch rays, and $f$ is the SDF [S2, unofficial].
+-*   **Total Variation (TV) Loss:** Encourages spatial smoothness in opacity or volume fields.
+-    $$ J_{\text{tv}}(\mathbf{V}_\alpha) $$
+-    Applied to volume opacity $\mathbf{V}_\alpha$ [S1].
+-*   **Deformation Norm/TV:** Used in dynamic scenes to regularize deformation fields [S6].
+-
+-#### 3. Latent and Prior Losses
+-*   **KL Divergence:** For VAE-based encoders, regularizes latent codes $\mathbf{z}$ to follow a standard normal distribution.
+-    $$ D_{\text{KL}}(\mathbf{z} \parallel \mathcal{N}(0, 1)) $$
+-    [S1].
+-*   **Beta Prior:** Encourages specific opacity distributions at ray exit points [S1].
+-
+-#### 4. Auxiliary Losses
+-*   **Empty Space Loss:** Encourages throughput to be 0 where object masks are inactive.
+-    $$ L_{\text{empty}} = w \cdot \frac{1}{N} \sum_{i=1}^N (1 - m_i) \cdot |T_i - 0| $$
+-    where $m_i$ is the binary mask and $T_i$ is throughput [S3, unofficial].
+-*   **Opacity Loss:** Encourages throughput to be 1 where object masks are active.
+-    $$ L_{\text{opacity}} = w \cdot \frac{1}{N} \sum_{i=1}^N m_i \cdot |T_i - 1| $$
+-    [S3, unofficial].
+-*   **Per-point RGB Loss:** Supervises color emission at individual query points rather than accumulated color [S4].
+-*   **Background Entropy Loss:** Enforces concentration of background probability [S4].
+-
+-### Parameters and Typical Values
+-*   **$\lambda_{\text{KL}}$:** Weight for KL divergence. Typical value: $0.001$ [S1].
+-*   **$\lambda_{\text{tv}}$:** Weight for Total Variation. Typical value: $0.01$ [S1].
+-*   **$\lambda_{\text{B}}$:** Weight for Beta Prior. Typical value: $0.1$ [S1].
+-*   **$\lambda_{\text{Eik}}$:** Weight for Eikonal loss. Typical value: $0.01$ [S5] or $0.1$ (multiplied to L_rgb term) [S2, unofficial].
+-*   **$\lambda_1, \lambda_2, \lambda_3$:** Weights for uncertain SDF, bias, and point cloud losses. Typical values: $1, 1, 0.25$ [S2, unofficial].
+-*   **Deformable Grid Weights (Coarse Stage):** $w_{ptc}=0.1, w_{bg}=0.01, w_{d\_norm}=0.1, w_{d\_tv}=1$ [S6].
+-*   **Deformable Grid Weights (Fine Stage):** $w_{ptc}=0.01, w_{bg}=0.001, w_{d\_norm}=0.01, w_{d\_tv}=1$ [S6].
+-*   **Large Motion Scenes:** $w_{d\_norm}$ reduced to $0.01$ (coarse) and $0.001$ (fine) [S6].
++The general form is:
++$$
++\mathcal{L}_{total} = \mathcal{L}_{data} + \sum_k \lambda_k \mathcal{L}_{reg, k}
++$$
++
++Specific formulations from cited sources include:
++
++**1. Neural Volumes Style [S1]:**
++$$
++\ell(\theta) = \frac{1}{P} \sum_{\mathbf{p}} \left\| \hat{\mathbf{I}}_{\text{rgb}}(\mathbf{p}) - \mathbf{I}_{\text{rgb}}^*(\mathbf{p}) \right\|^2 + \lambda_{\text{KL}} D_{\text{KL}}(\mathbf{z} \parallel \mathcal{N}(0, 1)) + J_{\text{tv}}(\mathbf{V}_\alpha) + J_{\text{B}}(\mathbf{I}_\alpha)
++$$
++*   $\hat{\mathbf{I}}_{\text{rgb}}$: Rendered RGB image.
++*   $\mathbf{I}_{\text{rgb}}^*$: Ground truth RGB image.
++*   $P$: Number of sampled pixels.
++*   $\mathbf{z}$: Latent encoding.
++*   $D_{\text{KL}}$: KL divergence between $\mathbf{z}$ and standard normal $\mathcal{N}(0, 1)$.
++*   $J_{\text{tv}}$: Total variation prior on volume opacity $\mathbf{V}_\alpha$.
++*   $J_{\text{B}}$: Beta prior on exit opacity $\mathbf{I}_\alpha$.
++
++**2. Point-NeuS Style [S2, unofficial]:**
++$$
++\mathcal{L}_{rgb} = \frac{1}{N} \sum_{i=1}^N |C_i - \hat{C}_i|
++$$
++$$
++\mathcal{L}_{eik} = \frac{1}{MN} \sum_{i,j=1}^{MN} \|\nabla f(p_{i,j}) - 1\|^2
++$$
++$$
++\mathcal{L} = (\mathcal{L}_{rgb} + 0.1\mathcal{L}_{eik}) + (\lambda_1\mathcal{L}_{usdf} + \lambda_2\mathcal{L}_{bias} + \lambda_3\mathcal{L}_{pc})
++$$
++*   $N$: Number of batch rays.
++*   $M$: Number of sampled locations on each ray.
++*   $C_i, \hat{C}_i$: Ground truth and rendered colors.
++*   $f(p_{i,j})$: SDF value at sample point.
++*   $\lambda_1, \lambda_2, \lambda_3$: Weights for uncertain SDF, bias, and point cloud consistency losses.
++
++**3. HybridNeRF Style [S5]:**
++$$
++\mathcal{L}(\mathbf{r}) = \mathcal{L}_{\text{photo}}(\mathbf{r}) + \lambda_{\text{Eik}} \mathcal{L}_{\text{Eik}}(\mathbf{r}) + \mathcal{L}_{\text{prop}}(\mathbf{r})
++$$
++*   $\mathcal{L}_{\text{photo}}$: Photometric loss.
++*   $\mathcal{L}_{\text{Eik}}$: Eikonal loss.
++*   $\mathcal{L}_{\text{prop}}$: Interlevel proposal loss.
++
++**4. Neural Deformable Voxel Grid Style [S6]:**
++$$
++\mathcal{L} = \mathcal{L}_{photo} + w_{ptc} \cdot \mathcal{L}_{ptc} + w_{bg} \cdot \mathcal{L}_{bg} + w_{d\_norm} \cdot \mathcal{L}_{d\_norm} + w_{d\_tv} \cdot \mathcal{L}_{d\_tv}
++$$
++*   $w_{ptc}, w_{bg}, w_{d\_norm}, w_{d\_tv}$: Weights for photometric, background, deformation norm, and total variation losses.
++
++**5. Empty Space Loss [S3, unofficial]:**
++$$
++L = w \cdot \frac{1}{N} \sum_{i=1}^{N} (1 - m_i) \cdot |T_i - 0|
++$$
++*   $T_i$: Throughput AOV.
++*   $m_i$: Binary mask (1 if object present, 0 if empty).
++*   $w$: Weight.
++
++**6. Opacity Loss [S3, unofficial]:**
++$$
++L = w \cdot \frac{1}{N} \sum_{i=1}^{N} m_i \cdot |T_i - 1|
++$$
++
++**7. Bilateral Grid TV Loss [S7, unofficial]:**
++$$
++L_{TV} = \frac{1}{B} \sum_{i=2}^{D} \frac{\sum_{j} (x_{..., j+1, ...} - x_{..., j, ...})^2}{N_i}
++$$
++*   $B$: Batch size.
++*   $D$: Number of dimensions.
++*   $N_i$: Number of elements in dimension $i$ excluding batch and channel.
+ 
+ ### Pseudocode
++The following Python-like pseudocode demonstrates the aggregation of common loss components. It assumes helper functions for rendering and specific regularizers are available.
++
+ ```python
+-def compute_total_loss(rendered_rgb, gt_rgb, sdf_grad, latent_z, 
+-                       throughput, mask, params, loss_type='standard'):
++def compute_total_loss(rendered_rgb, gt_rgb, rendered_throughput, mask, 
++                       sdf_gradients, latent_z, bilateral_grids, 
++                       config):
+     """
+-    Computes the total loss based on the selected variant.
++    Computes the total loss for radiance field optimization.
+     
+     Args:
+-        rendered_rgb: Tensor of rendered RGB colors.
+-        gt_rgb: Tensor of ground truth RGB colors.
+-        sdf_grad: Gradient of the SDF field (for Eikonal loss).
+-        latent_z: Latent encoding vector (for KL loss).
+-        throughput: Rendering throughput (for opacity/empty space losses).
+-        mask: Binary mask tensor (1 for object, 0 for background).
+-        params: Dictionary of hyperparameters (weights, etc.).
+-        loss_type: String indicating the specific loss configuration.
++        rendered_rgb: Tensor of shape (N, 3), rendered colors.
++        gt_rgb: Tensor of shape (N, 3), ground truth colors.
++        rendered_throughput: Tensor of shape (N,), rendering throughput.
++        mask: Tensor of shape (N,), binary mask (0 or 1).
++        sdf_gradients: Tensor of shape (N, 3), gradients of SDF.
++        latent_z: Tensor of shape (..., D), latent codes.
++        bilateral_grids: List of tensors, bilateral grid parameters.
++        config: Object containing hyperparameters and weights.
+         
+     Returns:
+         Scalar loss value.
+     """
+-    loss = 0.0
+-    
+-    # 1. Photometric Loss
+-    if loss_type in ['standard', 'neuS', 'hybrid']:
+-        # L1 Loss
++    # 1. Photometric Loss (L1 or L2)
++    # Use L1 as per [S2, unofficial], or L2 as per [S1]
++    if config.loss_type == 'l1':
+         l_rgb = torch.mean(torch.abs(rendered_rgb - gt_rgb))
+-        loss += l_rgb
+-    elif loss_type == 'vae':
+-        # L2 Loss
++    else:
+         l_rgb = torch.mean((rendered_rgb - gt_rgb) ** 2)
+-        loss += l_rgb
+         
+-    # 2. Geometric Regularization
+-    if loss_type in ['neuS', 'hybrid']:
+-        # Eikonal Loss: ||grad(f) - 1||^2
+-        # Note: sdf_grad is assumed to be normalized or pre-computed gradient magnitude
+-        l_eik = torch.mean((sdf_grad - 1.0) ** 2)
+-        loss += params.get('lambda_eik', 0.01) * l_eik
+-        
+-    if loss_type == 'vae':
+-        # Total Variation on Opacity
+-        # J_tv(V_alpha) implementation depends on specific TV definition
+-        # Assuming standard L1 TV on volume grid
+-        l_tv = compute_total_variation(params['volume_opacity'])
+-        loss += params.get('lambda_tv', 0.01) * l_tv
+-        
+-    # 3. Latent Prior
+-    if loss_type == 'vae':
+-        # KL Divergence: D_KL(z || N(0,1))
+-        # Assuming latent_z is sampled from N(mu, logvar)
+-        mu, logvar = latent_z['mu'], latent_z['logvar']
+-        l_kl = -0.5 * torch.mean(1 + logvar - mu**2 - torch.exp(logvar))
+-        loss += params.get('lambda_kl', 0.001) * l_kl
+-        
+-        # Beta Prior on Exit Opacity
+-        # J_B(I_alpha) implementation depends on specific Beta formulation
+-        l_beta = compute_beta_prior(params['exit_opacity'])
+-        loss += params.get('lambda_beta', 0.1) * l_beta
+-        
+-    # 4. Auxiliary/Mask-based Losses
+-    if loss_type == 'mask_regularized':
+-        # Empty Space Loss: Encourage throughput ~ 0 where mask is 0
+-        l_empty = torch.mean((1 - mask) * torch.abs(throughput - 0.0))
+-        loss += params.get('w_empty', 1.0) * l_empty
+-        
+-        # Opacity Loss: Encourage throughput ~ 1 where mask is 1
+-        l_opacity = torch.mean(mask * torch.abs(throughput - 1.0))
+-        loss += params.get('w_opacity', 1.0) * l_opacity
+-        
+-    # 5. Deformable Grid Specifics (if applicable)
+-    if loss_type == 'deformable_grid':
+-        # Add deformation norm and TV losses
+-        l_d_norm = compute_deformation_norm(params['deformation_field'])
+-        l_d_tv = compute_deformation_tv(params['deformation_field'])
+-        
+-        # Weights depend on training stage (coarse/fine)
+-        w_ptc = params['w_ptc']
+-        w_bg = params['w_bg']
+-        w_d_norm = params['w_d_norm']
+-        w_d_tv = params['w_d_tv']
+-        
+-        loss += w_ptc * l_rgb # Assuming l_rgb is photonic term
+-        loss += w_bg * compute_background_loss()
+-        loss += w_d_norm * l_d_norm
+-        loss += w_d_tv * l_d_tv
+-        
+-    return loss
++    # 2. Eikonal Loss (if SDF is used) [S2, unofficial][S5]
++    l_eik = torch.mean((torch.norm(sdf_gradients, dim=1) - 1.0) ** 2)
++    
++    # 3. Latent Regularization (KL Divergence) [S1]
++    # Assuming latent_z is mean of encoder output, assuming unit variance for simplicity
++    # D_KL(z || N(0,1)) = 0.5 * sum(1 + log(var) - mean^2 - var)
++    # Simplified for standard normal prior:
++    l_kl = torch.mean(0.5 * torch.sum(latent_z ** 2, dim=-1))
++    
++    # 4. Empty Space Loss [S3, unofficial]
++    # Encourages throughput to be 0 where mask is 0
++    l_empty = torch.mean((1.0 - mask) * torch.abs(rendered_throughput))
++    
++    # 5. Opacity Loss [S3, unofficial]
++    # Encourages throughput to be 1 where mask is 1
++    l_opacity = torch.mean(mask * torch.abs(rendered_throughput - 1.0))
++    
++    # 6. Total Variation on Bilateral Grids [S7, unofficial]
++    l_tv_bilgrid = 0.0
++    for grid in bilateral_grids:
++        # Compute TV for each spatial dimension
++        tv_sum = 0.0
++        for dim in range(2, grid.dim()):
++            # Shift tensor along dimension
++            shift_left = torch.roll(grid, -1, dims=dim)
++            diff = grid - shift_left
++            # Handle boundary condition (last element wraps or is zero)
++            # Standard TV usually ignores boundary or assumes zero padding
++            # Here we sum squared differences
++            tv_sum += torch.sum(diff ** 2)
++        # Normalize by number of elements excluding batch and channel
++        # Assuming shape (B, C, D1, D2, ...)
++        num_elements = grid.numel() / (grid.shape[0] * grid.shape[1])
++        l_tv_bilgrid += tv_sum / num_elements
++    l_tv_bilgrid /= grid.shape[0] # Average over batch
++    
++    # 7. Aggregate with Weights
++    # Weights from [S1][S2, S3, unofficial][S5, S6]
++    w_eik = config.get('w_eik', 0.1) # [S2, unofficial] uses 0.1
++    w_kl = config.get('w_kl', 0.001) # [S1] uses 0.001
++    w_empty = config.get('w_empty', 1.0) # [S3, unofficial] default
++    w_opacity = config.get('w_opacity', 1.0) # [S3, unofficial] default
++    w_tv_bilgrid = config.get('w_tv_bilgrid', 1.0) # [S7, unofficial] multiplier
++    
++    total_loss = (l_rgb + 
++                  w_eik * l_eik + 
++                  w_kl * l_kl + 
++                  w_empty * l_empty + 
++                  w_opacity * l_opacity + 
++                  w_tv_bilgrid * l_tv_bilgrid)
++                  
++    return total_loss
+ ```
+ 
++### Parameters
++*   **Learning Rate:** $10^{-4}$ for encoder-decoder weights [S1]; separate rates for background images ($10^{-1}$) and gain/bias ($10^{-3}$) [S1].
++*   **Batch Size:** 16 [S1].
++*   **Pixel Sampling:** Randomly sample $128 \times 128$ pixels [S1].
++*   **Weights:**
++    *   $\lambda_{\text{KL}} = 0.001$ [S1].
++    *   $\lambda_{\text{Eik}} = 0.01$ [S5].
++    *   $\lambda_1 = 1, \lambda_2 = 1, \lambda_3 = 0.25$ [S2, unofficial].
++    *   Coarse stage: $w_{ptc}=0.1, w_{bg}=0.01, w_{d\_norm}=0.1, w_{d\_tv}=1$ [S6].
++    *   Fine stage: $w_{ptc}=0.01, w_{bg}=0.001, w_{d\_norm}=0.01, w_{d\_tv}=1$ [S6].
++*   **Optimizer:** Adam [S1].
++
+ ### Edge Cases and Pitfalls
+-*   **Precision:** Step sizes in normalized voxel space $[-1, 1]^3$ are used to ensure ray end is the expected saturation point at initialization [S1].
+-*   **Memory:** Randomly sampling $128 \times 128$ pixels reduces memory usage during training [S1].
+-*   **Degenerate Input:** If masks are missing or throughput AOV is not available, empty space/opacity losses should default to 0 or be skipped [S3, unofficial].
++*   **Precision:** Step sizes in normalized voxel space $[-1, 1]^3$ help ensure saturation at network initialization [S1].
++*   **Memory:** Random pixel sampling reduces memory usage [S1].
++*   **Large Motion:** For scenes with large motion (e.g., 'Hell Warrior'), $w_{d\_norm}$ is reduced to 0.01 (coarse) and 0.001 (fine) [S6].
++*   **Degenerate Input:** If throughput AOV is missing, Empty Space Loss returns 0.0 [S3, unofficial].
+ 
+ ## Subtopics
+@@ -163,29 +201,34 @@
+ The Composite Image Loss with Visibility Weighting ($L_c$) is a composite objective function used to train radiance field models, specifically SuRFNet, by aligning rendered images with ground-truth references while suppressing errors in occluded or unobserved regions. It sets itself apart from standard photometric losses by explicitly masking the L1 and SSIM terms with a visibility map $V_M$, ensuring that supervision is only applied to pixels corresponding to visible surfaces, while retaining a full-image perceptual loss.
+ 
++### [Sparse Depth Consistency Loss](7294-sparse-depth-consistency-loss.md)
++The total loss function combining photometric, regularization, sparse depth, and specific augmentation losses for both main and augmented models.
++
+ ### Empty Space Loss
+-An AOV loss that encourages the rendering throughput to equal 0.0 in regions where a binary object mask is inactive [S3, unofficial]. It is computed as $L = w \cdot \frac{1}{N} \sum_{i=1}^N (1 - m_i) \cdot |T_i - 0|$, where $m_i$ is the binary mask and $T_i$ is throughput [S3, unofficial]. Typical weight $w=1.0$ [S3, unofficial].
++An AOV loss that encourages the rendering throughput to equal 0.0 in regions where a binary object mask is inactive [S3, unofficial]. It is computed by retrieving the 'throughput' AOV, converting the binary mask to a float tensor, computing the absolute difference between throughput and 0.0, multiplying by $(1.0 - mask)$, and averaging over all pixels [S3, unofficial]. Formula: $L = w \cdot \frac{1}{N} \sum_{i=1}^{N} (1 - m_i) \cdot |T_i - 0|$, where $w=1.0$ is the default weight [S3, unofficial].
+ 
+ ### Opacity Loss
+-An AOV loss that encourages the rendering throughput to equal 1.0 in regions where a binary object mask is active [S3, unofficial]. It is computed as $L = w \cdot \frac{1}{N} \sum_{i=1}^N m_i \cdot |T_i - 1|$, where $m_i$ is the binary mask and $T_i$ is throughput [S3, unofficial]. Typical weight $w=1.0$ [S3, unofficial].
++An AOV loss that encourages the rendering throughput to equal 1.0 in regions where a binary object mask is active [S3, unofficial]. Formula: $L = w \cdot \frac{1}{N} \sum_{i=1}^{N} m_i \cdot |T_i - 1|$, where $w=1.0$ is the default weight [S3, unofficial].
+ 
+ ### Auxiliary Losses
+-Includes per-point RGB loss (supervising color emission of each query point directly) and background entropy loss (enforcing rendered background probability concentration) [S4]. Adding both yields PSNR 35.54, compared to 35.37 (none) or 35.53 (one loss) [S4].
++Includes per-point RGB loss to supervise color emission of each query point directly, and background entropy loss to enforce rendered background probability concentration [S4]. Adding both auxiliary losses yields PSNR 35.54, compared to 35.37 (none) or 35.53 (one loss) [S4].
+ 
+ ### HybridNeRF Optimization Loss
+-The total loss $\mathcal{L}(\mathbf{r})$ is the sum of photometric loss $\mathcal{L}_{\text{photo}}$, Eikonal loss $\mathcal{L}_{\text{Eik}}$ weighted by $\lambda_{\text{Eik}}$, and interlevel proposal loss $\mathcal{L}_{\text{prop}}$ [S5]. Typical $\lambda_{\text{Eik}} = 0.01$ [S5].
++The total loss $\mathcal{L}(\mathbf{r})$ is the sum of photometric loss $\mathcal{L}_{\text{photo}}$, Eikonal loss $\mathcal{L}_{\text{Eik}}$ weighted by $\lambda_{\text{Eik}}$, and interlevel proposal loss $\mathcal{L}_{\text{prop}}$ [S5]. $\lambda_{\text{Eik}} = 0.01$ [S5].
+ 
+ ### Loss Function Configuration
+ Overall loss: $\mathcal{L} = \mathcal{L}_{photo} + w_{ptc} \cdot \mathcal{L}_{ptc} + w_{bg} \cdot \mathcal{L}_{bg} + w_{d\_norm} \cdot \mathcal{L}_{d\_norm} + w_{d\_tv} \cdot \mathcal{L}_{d\_tv}$ [S6]. Coarse stage weights: $w_{ptc}=0.1, w_{bg}=0.01, w_{d\_norm}=0.1, w_{d\_tv}=1$. Fine stage weights: $w_{ptc}=0.01, w_{bg}=0.001, w_{d\_norm}=0.01, w_{d\_tv}=1$. For large motion scenes, $w_{d\_norm}$ is set to 0.01 (coarse) and 0.001 (fine) [S6].
+ 
++### Total Variation Loss
++A regularization loss that computes the total variation of the bilateral grid parameters to encourage smoothness in the learned color transformations [S7, unofficial]. Formula: $L_{TV} = \frac{1}{B} \sum_{i=2}^{D} \frac{\sum_{j} (x_{..., j+1, ...} - x_{..., j, ...})^2}{N_i}$, where $B$ is batch size, $D$ is number of dimensions, and $N_i$ is the number of elements in dimension $i$ excluding batch and channel [S7, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Training duration varies significantly by scene and complexity. For example, 500,000 iterations took 10 days on a single NVIDIA Tesla V100 for the Neural Volumes model [S1]. Deformable grid methods aim for faster convergence, with PSNR increasing slightly after 20k iterations [S6].
+-*   **Memory Complexity:** Memory usage is managed by sampling subsets of pixels (e.g., $128 \times 128$) [S1]. The choice of differentiation strategy (Reverse-Mode AD vs. Adjoint vs. Analytic) also impacts memory, with Analytic Inversion reducing memory to $O(n)$ [S5].
+-*   **Strengths:** Combines multiple constraints to stabilize training and improve geometry/texture quality. The use of auxiliary losses (per-point RGB, background entropy) can boost PSNR [S4].
+-*   **Limitations:** Requires careful tuning of multiple hyperparameters ($\lambda$ weights) which can vary by scene and training stage [S6]. Large motion scenes may require reduced deformation weights [S6].
+-*   **When to Use:** When optimizing complex radiance fields that require both photometric accuracy and geometric consistency (e.g., SDF-based or VAE-based methods).
+-*   **When Not to Use:** For simple static scenes where a single photometric loss might suffice, or when computational resources are extremely limited and hyperparameter tuning is infeasible.
++*   **Time Complexity:** Training duration varies significantly by method. Neural Volumes takes about 10 days on a single NVIDIA Tesla V100 for 500,000 iterations [S1]. Direct Voxel Grid Optimization achieves convergence in minutes (e.g., 7.3 minutes for 12 dimensions, 2 layers, 128 channels) [S4].
++*   **Memory Complexity:** Random sampling of $128 \times 128$ pixels is used to reduce memory usage [S1].
++*   **Scaling:** Coarse-to-fine training strategies can speed up convergence [S6].
++*   **Strengths:** Combines multiple constraints to stabilize training and improve geometry/color fidelity.
++*   **Limitations:** Requires careful tuning of multiple hyperparameters ($\lambda_k$). Some terms (like Eikonal) may degrade rendering quality near fine-grained structures if not adapted spatially [S5].
+ 
+ ## Background
+-The concept of a total loss function in differentiable volume rendering emerged with the rise of Neural Radiance Fields (NeRF) and its variants. Early works like Neural Volumes [S1] introduced composite objectives combining photometric, KL, and TV losses for dynamic volumes. Subsequent works like NeuS [S2, unofficial] integrated Eikonal losses for SDF regularization. HybridNeRF [S5] and Deformable Voxel Grids [S6] further refined these objectives with adaptive weights and auxiliary terms to handle specific challenges like proposal networks and dynamic deformation. The specific formulations and weights are often dataset and architecture-dependent.
++The Total Loss Function is a fundamental concept in differentiable volume rendering, evolving from early neural rendering methods to modern neural implicit representations. It was formalized in works such as Neural Volumes [S1] and Point-NeuS [S2, unofficial], integrating photometric, geometric, and latent regularization terms. The approach builds on the shared principles of regularization losses [1413-regularization-losses.md], adapting them to specific architectural choices like SDFs, voxel grids, or bilateral grids.
+ 
+ ## Sources
+@@ -195,3 +238,4 @@
+ [S4] Direct Voxel Grid Optimization: Super-fast Convergence for Radiance Fields Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00538, fetched 2026-10-26
+ [S5] HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces, https://doi.org/10.1109/cvpr52733.2024.01858, fetched 2026-10-26
+-[S6] Neural Deformable Voxel Grid for Fast Optimization of Dynamic View Synthesis, https://doi.org/10.1007/978-3-031-26319-4_27, fetched 2026-10-26+[S6] Neural Deformable Voxel Grid for Fast Optimization of Dynamic View Synthesis, https://doi.org/10.1007/978-3-031-26319-4_27, fetched 2026-10-26
++[S7] nerfstudio-project/gsplat, https://github.com/nerfstudio-project/gsplat, fetched 2026-10-27 (unofficial)

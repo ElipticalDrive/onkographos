@@ -1,0 +1,217 @@
+--- v003.md
++++ v004.md
+@@ -4,95 +4,145 @@
+ 
+ ## Overview
+-Intrinsic NeRF is a variant of [NeRF (Neural Radiance Fields)](1185-nerf-neural-radiance-fields.md) that solves the ill-posed inverse rendering problem by decoupling geometry, illumination, and material properties without requiring supervised labels for lighting or reflectance [S1]. It differs from standard NeRF by outputting separate shading and reflectance components instead of a single color value, enabling downstream tasks such as relighting and material editing [S1].
++Intrinsic NeRF is a variant of Neural Radiance Fields that decouples geometry, illumination, and material properties by decomposing the rendered color into reflectance and shading components, solving the ill-posed inverse rendering problem without supervision [S1]. It differs from standard NeRF by explicitly outputting physical scene attributes (density, reflectance, shading) rather than just radiance, enabling downstream tasks like relighting and material analysis [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-The method takes a set of calibrated camera poses and corresponding RGB images as input [G]. Supervision uses only the RGB images without additional lighting or material labels [S1]. It outputs a continuous volumetric representation defined by a function $F_I$ that maps a 3D location $\mathbf{X}$ and a view direction $\mathbf{D}$ to a tuple $(\sigma, \mathbf{R}, S)$ [S1].
+-- $\sigma$: Volume density (scalar).
+-- $\mathbf{R}$: Reflectance (vector in $\mathbb{R}^3$), representing material properties.
+-- $S$: Shading (scalar in $\mathbb{R}$), representing illumination effects.
++*   **Input:** 3D location $\mathbf{X} \in \mathbb{R}^3$ and view direction $\mathbf{D} \in \mathbb{R}^3$ (normalized).
++*   **Output:** A tuple $(\sigma, \mathbf{R}, S)$ where $\sigma \in \mathbb{R}$ is volume density, $\mathbf{R} \in \mathbb{R}^3$ is reflectance (albedo), and $S \in \mathbb{R}$ is shading (incident illumination intensity) [S1].
+ 
+ **Data Structures:**
+-Two Multi-Layer Perceptrons (MLPs) are used to approximate the intrinsic components:
+-1.  **Reflectance MLP:** Takes only the 3D location $\mathbf{X}$ as input. It does not depend on the view direction or lighting conditions [S1].
+-2.  **Shading MLP:** Takes both the 3D location $\mathbf{X}$ and the view direction $\mathbf{D}$ as inputs. It captures view-dependent shading effects [S1].
++Two Multi-Layer Perceptrons (MLPs) are used:
++1.  **Reflectance MLP ($f_R$):** Takes $\mathbf{X}$ as input. Outputs $\mathbf{R}$.
++2.  **Shading MLP ($f_S$):** Takes $\mathbf{X}$ and $\mathbf{D}$ as inputs. Outputs $S$.
++3.  **Density MLP ($f_\sigma$):** (Implicitly part of the standard NeRF architecture or a separate head) Takes $\mathbf{X}$ as input. Outputs $\sigma$. [S1]
+ 
+-**Algorithm Steps:**
+-1.  **Ray Sampling:** For each camera ray $\mathbf{r}$, sample $N$ points along the ray from near plane $t_n$ to far plane $t_f$ [G].
+-2.  **Intrinsic Field Evaluation:** For each sample point $t_i$ with position $\mathbf{X}_i$ and view direction $\mathbf{D}$:
+-    - Compute density $\sigma_i$ using the standard NeRF density MLP (or the shared geometry component) [G].
+-    - Compute reflectance $\mathbf{R}_i = \text{MLP}_R(\mathbf{X}_i)$ [S1].
+-    - Compute shading $S_i = \text{MLP}_S(\mathbf{X}_i, \mathbf{D})$ [S1].
+-3.  **Volume Rendering:** Compute the rendered color $\hat{\mathbf{C}}(\mathbf{r})$ by integrating the product of transmittance, density, and the dot product of shading and reflectance along the ray [S1]:
+-    $$
+-    \hat{\mathbf{C}}(\mathbf{r}) = \int_{t_n}^{t_f} T(t) \sigma(t) (\mathbf{S}(t) \cdot \mathbf{R}(t)) dt
+-    $$
+-    where $T(t)$ is the accumulated transmittance along the ray [S1].
+-4.  **Loss Computation:** Minimize the reconstruction loss between the rendered color and the ground truth RGB image $\mathbf{C}(\mathbf{r})$ using only RGB supervision [S1]:
+-    $$
+-    \mathcal{L} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \|\hat{\mathbf{C}}(\mathbf{r}) - \mathbf{C}(\mathbf{r})\|_2^2
+-    $$
+-    where $\mathcal{R}$ is the set of camera rays in a batch [S1].
++**Formulas:**
++The rendered color $\hat{\mathbf{C}}(\mathbf{r})$ for a ray $\mathbf{r}$ is computed via volume rendering integration from near plane $t_n$ to far plane $t_f$:
++$$
++\hat{\mathbf{C}}(\mathbf{r}) = \int_{t_n}^{t_f} T(t) \sigma(t) (\mathbf{S}(t) \cdot \mathbf{R}(t)) dt
++$$
++where:
++*   $T(t) = \exp\left(-\int_{t_n}^{t} \sigma(s) ds\right)$ is the transmittance.
++*   $\mathbf{S}(t)$ is the shading scalar at $t$.
++*   $\mathbf{R}(t)$ is the reflectance vector at $t$.
++*   The dot product $\mathbf{S}(t) \cdot \mathbf{R}(t)$ effectively scales the reflectance by the shading intensity [S1].
++
++**Training:**
++The model is trained using only RGB images from the input dataset, with no additional lighting or material labels [S1]. The loss function is the mean squared error between the rendered color and the ground truth RGB:
++$$
++\mathcal{L} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \|\hat{\mathbf{C}}(\mathbf{r}) - \mathbf{C}(\mathbf{r})\|_2^2
++$$
++where $\mathbf{C}(\mathbf{r})$ is the ground truth color and $\mathcal{R}$ is the set of camera rays in a batch [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def intrinsic_nerf_forward(ray_origins, ray_directions, mlp_reflectance, mlp_shading, mlp_density, t_near, t_far, num_samples):
+-    # 1. Stratified sampling along the ray [G]
+-    t_vals = linspace(t_near, t_far, num_samples)
+-    t_vals = t_vals + random.uniform(0, 1, size=t_vals.shape) * (t_far - t_near) / num_samples
++def intrinsic_nerf_forward(xyz, view_dir, density_mlp, reflectance_mlp, shading_mlp):
++    """
++    Computes density, reflectance, and shading for a batch of points.
++    
++    Args:
++        xyz: Tensor of shape (N, 3), 3D coordinates.
++        view_dir: Tensor of shape (N, 3), normalized view directions.
++        density_mlp: MLP taking xyz -> sigma (scalar).
++        reflectance_mlp: MLP taking xyz -> R (vector, 3).
++        shading_mlp: MLP taking xyz, view_dir -> S (scalar).
++        
++    Returns:
++        sigma: Tensor of shape (N, 1), density.
++        R: Tensor of shape (N, 3), reflectance.
++        S: Tensor of shape (N, 1), shading.
++    """
++    # Compute density from location only
++    sigma = density_mlp(xyz)
++    
++    # Compute reflectance from location only
++    R = reflectance_mlp(xyz)
++    
++    # Compute shading from location and view direction
++    S = shading_mlp(xyz, view_dir)
++    
++    return sigma, R, S
+ 
+-    # 2. Compute deltas and midpoints
++def render_intrinsic_ray(rays_o, rays_d, t_n, t_f, num_samples, density_mlp, reflectance_mlp, shading_mlp):
++    """
++    Renders a single ray using volume rendering with intrinsic decomposition.
++    
++    Args:
++        rays_o: Origin of the ray (3,).
++        rays_d: Direction of the ray (3,).
++        t_n: Near plane distance.
++        t_f: Far plane distance.
++        num_samples: Number of samples along the ray.
++        
++    Returns:
++        C_hat: Rendered color (3,).
++    """
++    # Sample points along the ray
++    t_vals = torch.linspace(t_n, t_f, num_samples)
++    xyz = rays_o.unsqueeze(0) + t_vals.unsqueeze(1) * rays_d.unsqueeze(0) # Shape: (num_samples, 3)
++    
++    # Get view direction (constant for the ray)
++    view_dir = rays_d.unsqueeze(0).expand_as(xyz)
++    
++    # Query networks
++    sigma, R, S = intrinsic_nerf_forward(xyz, view_dir, density_mlp, reflectance_mlp, shading_mlp)
++    
++    # Compute transmittance
++    # alpha = 1 - exp(-sigma * delta_t)
++    # T(t) = product(1 - alpha)
++    # Standard volume rendering accumulation
+     deltas = t_vals[1:] - t_vals[:-1]
+-    delta_inf = t_far - t_vals[-1]
+-    deltas = concatenate([deltas, delta_inf])
+-    t_mid = t_vals + deltas / 2.0
+-    X = ray_origins + ray_directions * t_mid[:, newaxis, newaxis]
++    # Add infinite delta for the last segment to handle transparency correctly
++    deltas = torch.cat([deltas, torch.tensor([1e10], device=deltas.device)])
++    
++    alpha = 1.0 - torch.exp(-sigma * deltas)
++    T = torch.cumprod(torch.cat([torch.ones_like(alpha[:, :1]), 1.0 - alpha + 1e-10], dim=1)[:, :-1], dim=1)
++    
++    # Weighted sum of color
++    # Color contribution = T(t) * alpha(t) * S(t) * R(t)
++    weights = T * alpha
++    color_contribution = weights.unsqueeze(-1) * S * R
++    
++    C_hat = torch.sum(color_contribution, dim=0)
++    
++    return C_hat
+ 
+-    # 3. Evaluate MLPs
+-    sigma = mlp_density(X)  # Shape: (B, num_samples, 1)
+-    R = mlp_reflectance(X)  # Shape: (B, num_samples, 3)
+-    D_expanded = ray_directions[:, newaxis, :].expand(-1, num_samples, -1)
+-    S = mlp_shading(X, D_expanded)  # Shape: (B, num_samples, 1)
+-
+-    # 4. Compute alpha and transmittance
+-    alpha = 1.0 - exp(-relu(sigma) * deltas[:, :, newaxis])
+-    T = ones_like(alpha[:, :1])
+-    for i in range(num_samples):
+-        T = concatenate([T, T[:, -1:] * (1.0 - alpha[:, i:i+1, :])], dim=1)
+-    T = T[:, 1:, :]
+-
+-    # 5. Volume rendering
+-    color_contrib = T * alpha * (S * R)
+-    rendered_colors = sum(color_contrib, dim=1)
+-
+-    return rendered_colors
++def train_step(batch, density_mlp, reflectance_mlp, shading_mlp, optimizer):
++    """
++    Single training step.
++    """
++    optimizer.zero_grad()
++    
++    # batch contains rays_o, rays_d, and ground truth colors C
++    C_hat = render_intrinsic_ray(...) # Implementation details for batched rays omitted for brevity
++    
++    # Loss calculation
++    loss = torch.mean((C_hat - batch.C_gt) ** 2)
++    
++    loss.backward()
++    optimizer.step()
++    
++    return loss.item()
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+--   **Ill-posedness:** Without additional constraints, the decomposition of shading and reflectance is ambiguous [S1].
+--   **Noise:** Without smoothness regularization, normal maps exhibit significantly more noise, particularly in complex scenes [S1].
++*   **Ill-posedness:** Without supervision on shading or reflectance, the decomposition is ambiguous. The model relies on the inductive bias that reflectance is view-independent and shading is view-dependent [S1].
++*   **View Direction Normalization:** View directions must be normalized before input to the shading MLP to ensure consistent lighting estimation [S1].
++*   **Density Independence:** The density field $\sigma$ is typically shared or derived from the same location-based network as in standard NeRF, but the color composition explicitly separates it from the material/illumination split [S1].
+ 
+ ## Subtopics
+ 
+-### Geometry Decomposition and Normal Regularization
+-This variant extends the basic Intrinsic NeRF by explicitly computing and regularizing geometry to improve the smoothness of the extracted normal maps [S1]. It computes depth and normal maps via volume rendering integrals:
+--   **Depth Map:** $\mathbf{D}(\mathbf{r}) = \int_{t_n}^{t_f} T(t) \sigma(t) t dt$ [S1].
+--   **Normal Map:** $\mathbf{N}(\mathbf{r}) = \int_{t_n}^{t_f} T(t) \sigma(t) (-\nabla(\sigma)) dt$ [S1].
+-
+-To prevent noisy normal maps, especially in complex scenes, it introduces a depth-dependent normal regularization loss $\mathcal{L}_d$:
+-$$
+-\mathcal{L}_d = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \left(1 - \frac{\mathbf{N}(\mathbf{r}) \cdot \mathbf{N}(\mathbf{r}_{adj})}{|\mathbf{N}(\mathbf{r})| |\mathbf{N}(\mathbf{r}_{adj})|}\right) \frac{1}{\mathbf{D}(\mathbf{r})^2}
+-$$
+-where $\mathbf{N}(\mathbf{r}_{adj})$ is the normal of the neighborhood around pixel $\mathbf{r}$ [S1]. The term $\frac{1}{\mathbf{D}(\mathbf{r})^2}$ acts as a depth-dependent weight, guiding regularization because a pixel in the background corresponds to a larger physical area than one in the foreground [S1]. Without this smoothness regularization, normal maps exhibit significantly more noise [S1].
++### [Geometry Decomposition and Normal Regularization](4854-geometry-decomposition-and-normal-regularization.md)
++Enhances geometric consistency by computing differentiable normal maps from the volume density field and applying depth-dependent regularization loss. It solves noisy geometry issues by enforcing surface smoothness weighted by physical area.
+ 
+ ## Operating characteristics
+--   **Complexity:** Time complexity is dominated by the evaluation of three MLPs (density, reflectance, shading) per sample point, similar to standard NeRF but with slightly higher memory usage due to the additional outputs [G].
+--   **Memory:** Requires storing parameters for two additional MLPs (reflectance and shading) compared to standard NeRF [G].
+--   **Strengths:** Enables inverse rendering tasks such as relighting and material editing without supervised labels for lighting or materials [S1].
+--   **Limitations:** The decomposition is inherently ill-posed [S1].
+--   **When to use:** When the goal is to extract physically meaningful material and lighting properties for relighting, rather than just novel view synthesis [G].
++*   **Time Complexity:** Similar to standard NeRF training, dominated by MLP evaluations for density, reflectance, and shading per sample. The additional shading MLP adds computational overhead proportional to the number of samples.
++*   **Memory Complexity:** Requires storing parameters for three MLPs (density, reflectance, shading) instead of one or two.
++*   **Strengths:** Enables inverse rendering tasks such as relighting and material analysis without explicit supervision [S1].
++*   **Limitations:** The decomposition is inherently ill-posed; results depend heavily on the network architecture's inductive biases [S1].
++*   **When to use:** When the goal is to extract physical scene properties (albedo, lighting) for relighting or editing, rather than just novel view synthesis.
+ 
+ ## Background
+-Intrinsic NeRF was introduced to address the challenge of inverse rendering in 3D scenes using neural radiance fields [S1]. It adapts the concept of intrinsic image decomposition, traditionally used in 2D computer vision, to the 3D volumetric setting [S1]. The method allows for the decoupling of geometry, illumination, and material properties, facilitating applications like scene relighting and object insertion [S1].
++Intrinsic NeRF was introduced to address the ill-posed problem of inverse rendering 3D scenes without supervision by utilizing a simplified intrinsic image decomposition model [S1]. It builds on the NeRF framework by adding explicit outputs for reflectance and shading [S1].
+ 
+ ## Sources

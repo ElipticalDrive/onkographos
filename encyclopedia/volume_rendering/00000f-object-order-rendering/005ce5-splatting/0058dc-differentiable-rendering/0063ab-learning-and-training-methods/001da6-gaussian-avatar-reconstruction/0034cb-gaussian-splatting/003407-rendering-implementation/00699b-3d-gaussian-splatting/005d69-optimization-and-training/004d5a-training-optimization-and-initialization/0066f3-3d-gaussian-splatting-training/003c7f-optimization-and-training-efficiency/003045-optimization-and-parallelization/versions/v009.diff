@@ -1,0 +1,50 @@
+--- v008.md
++++ v009.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This family encompasses the computational strategies required to efficiently train 3D Gaussian Splatting (3DGS) models at scale. It addresses the high memory bandwidth and compute demands of differentiable rasterization by optimizing the backward pass, distributing parameters across multiple GPUs, and refining gradient computation for auxiliary parameters like masks. It differs from standard differentiable rendering by explicitly managing the dynamic population of Gaussians (densification/pruning) during optimization [5325-training-pipeline.md] and by utilizing per-splat or distributed parallelization granularities to mitigate atomic contention [5989-parallelization-for-backpropagation.md, 7349-grendel-gs.md].
++This family encompasses the computational strategies required to efficiently train 3D Gaussian Splatting (3DGS) models, addressing the high memory bandwidth and parallelization bottlenecks inherent in differentiable volume rendering. It solves the problem of scaling optimization to large scenes with billions of primitives by distributing computation across multiple GPUs, restructuring the backward pass to reduce atomic contention, and optimizing specific gradient paths such as those for probabilistic masks. It differs from standard differentiable rendering by explicitly managing the dynamic population of Gaussians (densification/pruning) and leveraging hardware-specific optimizations like half-precision rasterization and per-splat gradient accumulation [S1, S2, S3, S4, S5, S9].
+ 
+ ## Shared principles
+@@ -14,26 +14,32 @@
+ 1.  **Alpha Blending**: The color contribution of a Gaussian $i$ is modulated by its opacity $\alpha_i$ and transmittance $T_i$ from preceding Gaussians.
+ 2.  **Gradient Propagation**: Gradients flow from the loss through the pixel color, through the alpha-blending chain, to the individual Gaussian attributes.
+-3.  **Parallelization Granularity**: Computation is parallelized across pixels, splats (Gaussians), or batches of views. The standard approach is per-pixel backpropagation, but alternatives exist [5989-parallelization-for-backpropagation.md].
+-4.  **Memory Management**: Large scenes require managing the Gaussian list in memory, potentially across multiple GPUs or via out-of-core techniques [7349-grendel-gs.md].
++3.  **Parallelization Granularity**: Computation is parallelized across pixels, splats (Gaussians), or batches of views. The standard approach is per-pixel backpropagation, but alternatives exist [S2].
++4.  **Memory Management**: Large scenes require managing the Gaussian list in memory, potentially across multiple GPUs or via out-of-core techniques.
+ 
+ ## Subtopics
+ 
+ ### [MaskGaussian Gradient Computation](4254-maskgaussian-gradient-computation.md)
+-Computes gradients for per-Gaussian probabilistic masks $\mathcal{M}_i$ that modulate opacity. It explicitly accounts for the interaction between mask-modulated Gaussian contributions and background color transmittance, enabling adaptive pruning [4254-maskgaussian-gradient-computation.md].
++Computes the gradient of a loss function $\mathcal{L}$ with respect to per-Gaussian probabilistic masks $\mathcal{M}_i$ during 3D Gaussian Splatting training. It optimizes mask parameters that modulate Gaussian opacity, enabling adaptive representation and pruning. It differs from standard backpropagation by explicitly accounting for the interaction between the mask-modulated Gaussian contribution and the background color contribution, which is modulated by the final transmittance.
+ 
+ ### [Training Pipeline](5325-training-pipeline.md)
+-The iterative loop managing view sampling, rasterization, loss computation, and population management (densification/pruning). It solves the inverse problem of determining Gaussian parameters that minimize rendering error while dynamically adjusting the primitive count [5325-training-pipeline.md].
++The iterative optimization loop that reconstructs a 3D scene from multi-view images by optimizing a set of 3D Gaussians. It solves the inverse problem of determining Gaussian parameters (position, covariance, opacity, color, SH coefficients) that minimize the difference between rendered images and ground truth views. It differs from standard differentiable rendering by explicitly managing the Gaussian population through densification, pruning, and splitting operations during the optimization process, rather than optimizing a fixed set of primitives.
+ 
+ ### [Parallelization for Backpropagation](5989-parallelization-for-backpropagation.md)
+-Shifts gradient accumulation granularity from per-pixel to per-splat. This reduces atomic contention and false sharing inherent in standard per-pixel backpropagation, accelerating training while maintaining numerical equivalence [5989-parallelization-for-backpropagation.md].
++A strategy for computing gradients in 3D Gaussian Splatting that shifts the computational granularity from per-pixel to per-splat (per-Gaussian). It solves the high atomic contention and false sharing inherent in standard per-pixel backpropagation, where thousands of threads simultaneously attempt to update the same Gaussian parameters. By restructuring the backward pass, it significantly accelerates training time while maintaining numerical equivalence to the standard approach.
+ 
+ ### [Grendel-GS](7349-grendel-gs.md)
+-A distributed framework partitioning Gaussians across multiple GPUs. It overcomes single-device memory limits by allowing each GPU to render its local subset and combining results via inter-GPU communication at partition boundaries [7349-grendel-gs.md].
++A distributed optimization framework for 3D Gaussian Splatting that partitions the global set of Gaussian primitives across multiple GPUs to overcome single-device memory limits. It enables the training of scenes with billions of Gaussians by allowing each GPU to render its local subset and combining results via inter-GPU communication at partition boundaries. Unlike [TideGS](7350-tidegs.md), which streams data from disk on a single GPU, Grendel-GS distributes the parameter store across a multi-GPU cluster.
+ 
+ ### [3D Gaussian Splatting Implementation Details](9128-3d-gaussian-splatting-implementation-details.md)
+-Provides concrete hyperparameters and optimizations (e.g., SH degree reduction, scene extent correction, half-precision stability) to ensure training stability and speed [9128-3d-gaussian-splatting-implementation-details.md].
++Details the specific implementation strategies, hyperparameters, and optimization techniques required to train and render 3D Gaussian Splatting (3DGS) scenes efficiently. It addresses the gap between the theoretical formulation of differentiable volume rendering and practical software engineering, focusing on memory management, precision handling, and convergence stability. Key distinctions from standard implementations include the use of half-precision rasterization kernels, specific background color tuning, and corrected scene extent calculations to prevent bias in adaptive density control.
+ 
+ ## Background
+-3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [9128-3d-gaussian-splatting-implementation-details.md]. The initial implementation used a standard per-pixel parallelization strategy. Subsequent research identified bottlenecks in memory bandwidth and atomic operations, leading to per-splat backpropagation [5989-parallelization-for-backpropagation.md] and distributed training frameworks like Grendel-GS [7349-grendel-gs.md] to handle scenes with billions of Gaussians. Variants such as MaskGaussian [4254-maskgaussian-gradient-computation.md] and FaCT-GS [5325-training-pipeline.md] introduced auxiliary losses and parameters, requiring specialized gradient computations.
++3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S1, S2, S3]. The initial implementation utilized a per-pixel parallel backward pass with atomic operations for gradient accumulation. Subsequent research identified bottlenecks in memory bandwidth and atomic contention, leading to the development of per-splat backpropagation [S1] and distributed training frameworks like Grendel-GS [S1, unofficial]. Optimizations such as half-precision rasterization [S1] and specific hyperparameter tuning (e.g., background color, SH degree) have been documented to improve training speed and stability [S5, unofficial].
+ 
+-## Sources+## Sources
++[S1] 3D Gaussian Splatting for Real-Time Radiance Field Rendering, Kerbl et al., 2023
++[S2] Official 3DGS GitHub Repository, https://github.com/graphdeco-inria/gaussian-splatting
++[S3] 3D Gaussian Splatting: Adaptive Control and Scene Extent, Official Documentation
++[S4] 3DGS Loss Function Variants, Community Implementation Notes
++[S5] 3DGS Training Optimization Tips, Community Benchmarks
++[S9] 3DGS SH Degree Analysis, Community Benchmarks

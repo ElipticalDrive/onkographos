@@ -1,0 +1,433 @@
+--- v001.md
++++ v002.md
+@@ -4,227 +4,231 @@
+ 
+ ## Overview
+-Sub-case decomposition reduces the combinatorial explosion of configuration cases in n-dimensional marching cubes by decomposing major cases into edge-connected sub-cases (fragments of boundary where vertices have the same status with respect to the threshold) [S1]. It sets itself apart from siblings like [Snap Marching Cubes](2181-snap-marching-cubes.md) and [Bitwise Marching Cubes](7374-bitwise-marching-cubes.md) by explicitly managing the geometry of the isosurface intersection via tetrahedronization of sub-components rather than relying on static lookup tables for all possible vertex configurations or field snapping [S1].
++Sub-case decomposition reduces the combinatorial explosion of configuration cases in n-dimensional marching cubes by decomposing major cases into edge-connected sub-cases, where vertices share the same status relative to the threshold [S1]. Unlike standard marching cubes that treat all 256 (in 3D) or exponentially many (in higher dimensions) configurations as distinct or grouped only by symmetry, this method groups configurations into a smaller set of "major cases" and further breaks them down into "sub-cases" to simplify table storage and generation for 4D and higher [S1]. It builds on [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) by introducing a two-level lookup structure (primary and secondary tables) to handle the increased complexity of n-cube intersections [S1].
+ 
+ ## How it works
+-The method operates on a structured grid to extract isosurfaces in $n$-dimensions. It replaces the standard single-lookup approach with a two-level table structure (Primary and Secondary) and a pre-processing phase that decomposes major cases into sub-cases.
++The method operates by pre-computing a set of major cases and their constituent sub-cases, then storing them in a hierarchical table structure. The core innovation is the decomposition of a major case (a set of configurations equivalent under rotation, mirror, and complement) into edge-connected fragments (sub-cases) to manage the geometry of the isosurface intersection [S1].
+ 
+ ### Inputs and Outputs
+-- **Input**: Scalar field values at grid vertices, isovalue threshold, grid dimensions.
+-- **Output**: A triangle (or simplex) mesh representing the isosurface.
++*   **Input:** An n-dimensional structured grid of scalar field values.
++*   **Output:** A triangle (or simplex) mesh representing the isosurface.
++*   **Pre-computed Data:** Primary and Secondary lookup tables containing orientation matrices and simplex indices for major and sub-cases [S1].
+ 
+ ### Data Structures
+ 
+-**1. Orientation Matrix**
+-Represents the transformation from the primary table index into individual simplex elements.
+-- **Layout**: 32-bit integer.
+-- **Encoding**: Uses 2 bits per position in the transformation matrix.
+-- **Values**: Rotations are by $90^\circ$. Values $1, 0, -1$ are mapped to binary `00`, `01`, `10` respectively [S1].
+-
+-**2. Primary Table**
+-Maps the 65536 possible vertex configurations (indices $0 \dots 65535$) to secondary table entries.
+-- **Method 3a (Major Cases)**: Array of 65536 tuples `(Orientation, Major-Index)`. Size: ~328 KB (assuming 5 bytes per tuple, though padding may increase this) [S1].
+-- **Method 3b (Sub-Cases)**: Array of 65536 pointers to arrays of `(Orientation, Sub-Index)` tuples. The array size includes the number of sub-cases per major case [S1].
+-
+-**3. Secondary Table**
+-Contains the actual simplex (tetrahedron) definitions.
+-- **Tetrahedron Layout**: 4 bytes per tetrahedron. Each byte represents one vertex label (integer index) [S1].
+-- **Method 2 (Complete)**: Stores all simplices for all 65536 indices directly. Total size: 1.75 MB (calculated as $4 \times 356,817$ bytes for tetrahedra + $5 \times 65,536$ bytes for array pointers) [S1].
+-- **Method 3a/3b**: Stores simplices only for the reduced set of major or sub-cases. For 3D/4D, this involves 222 major cases and 74 sub-cases [S1].
+-
+-### Pre-processing: Generating Major and Sub-Cases
+-
+-**Step 1: Identify Major Cases**
+-1. Create two lists: `searched_cases` and `major_cases`.
+-2. Initialize `searched_cases` with all unmarked indices ($0 \dots 65535$).
+-3. While `searched_cases` is not empty:
+-    a. Take the next unmarked index $I$ from `searched_cases`.
+-    b. Add $I$ to `major_cases`.
+-    c. Exhaustively transform $I$ using rotation ($R$), mirror ($M$), and complement ($C$) operators.
+-    d. Mark all generated configurations as searched in `searched_cases`.
+-4. Repeat until all indices are searched [S1].
+-
+-**Step 2: Tetrahedronization of Sub-Cases**
+-Sub-cases are defined as edge-connected fragments of a major case where vertices share the same status (inside/outside) relative to the threshold. The geometry of each sub-case is decomposed into tetrahedra.
+-
+-1. Represent the sub-case object as a list of vertices. Each vertex is linked to a list of its neighbors. Initially, all vertices have three connections [S1].
+-2. Select the next vertex (in order on the list) with the fewest incident edges.
+-3. Remove this vertex from the object, generating one or two tetrahedra.
+-    - A vertex with 3 connections generates 1 tetrahedron.
+-    - A vertex with 4 connections generates 2 tetrahedra.
+-4. Update the connectivity of the remaining object by connecting the remaining vertices in the same configuration as the base of the split tetrahedron.
+-5. If any vertex has 5 or more incident edges, backtrack to the previous level and attempt a different split.
+-    - In practice, using the "fewest edges" strategy, backtracking occurs for only 3 of the 74 sub-cases in 3D/4D [S1].
+-
+-**Step 3: Create Orientation Matrix**
+-For each sub-case derived from a major case:
+-1. Rotate the sub-case into the standard sub-case configuration.
+-2. Calculate the inverse transformation matrix of the whole operation.
+-3. Encode this matrix into the 32-bit Orientation Matrix [S1].
+-
+-### Disambiguation Strategy
+-Ambiguities occur when the surface intersects one face of the $n$-cube through each of its four edges, potentially generating spurious holes or additional surface segments. This face occurs in 2D and propagates to higher dimensions [S1].
+-
+-- **Strategy**: Use separate complementary case configurations.
+-- For each ambiguous face $f$ in a given $n$-cube, there are $2^{\#f}$ possible sub-case configurations, but in practice only a subset is required (similar under rotation).
+-- This maintains vertex order (clockwise relative to the surface-object), aiding the renderer [S1].
++#### 1. Orientation Matrix
++Represents the transformation from the primary table index to individual simplex elements.
++*   **Layout:** 32-bit integer.
++*   **Encoding:** Uses 2 bits per position in the transformation matrix.
++*   **Values:** Rotations are by 90°. Values $1, 0, -1$ are mapped to binary `00`, `01`, `10` respectively [S1].
++*   **Calculation:** Calculated by rotating each sub-case into a standard sub-case and computing the inverse transformation matrix of the whole operation [S1].
++
++#### 2. Primary Table
++Maps the cell configuration index (0 to $2^n - 1$) to a secondary table index and orientation.
++*   **Method 3a (Major Cases):** Array of 65,536 tuples `(orientation, major-index)`. Size: ~328 KB (assuming 5 bytes per tuple, though padding may increase this) [S1].
++*   **Method 3b (Sub-Cases):** Array of 65,536 pointers to arrays of `(orientation, sub-index)` tuples. The array size includes the number of sub-cases per major case [S1].
++
++#### 3. Secondary Table
++Contains the actual geometric data (simplices/tetrahedra) for the cases.
++*   **Method 2 (Complete Simplex):** A single large table for all indices. Size: 1.75 MB for 3D/4D hybrid stats (356,817 tetrahedra + pointers) [S1].
++*   **Method 3a (Major Cases):** Array of pointers to arrays of tetrahedra for the 222 major cases. Size: ~10.2 KB for tetrahedra data + pointers (2,332 tetrahedra total for major cases) [S1].
++*   **Method 3b (Sub-Cases):** Array of pointers to arrays of tetrahedra for the sub-cases.
++
++#### 4. Tetrahedron Storage
++*   **Layout:** 4 bytes per tetrahedron.
++*   **Content:** One byte for each of the 4 vertex labels [S1].
++
++### Algorithm Steps
++
++#### Phase 1: Pre-processing (Generating Major and Sub-Cases)
++This phase identifies the unique major cases and decomposes them into sub-cases.
++
++1.  **Initialize Lists:** Create two lists: `searched_cases` (indices already processed) and `major_cases` (unique representatives).
++2.  **Iterate Indices:** Take the next unmarked index from the search list.
++3.  **Identify Major Case:** Add this index to the `major_cases` list.
++4.  **Mark Equivalents:** Exhaustively transform this index using rotation ($R$), mirror ($M$), and complement ($C$) operators. Mark all resulting configurations as `searched`.
++5.  **Repeat:** Continue until all indices are searched [S1].
++6.  **Decompose into Sub-Cases:** For each major case, divide it into disjoint edge-connected sub-components. A sub-case is defined as a fragment of the boundary where vertices have the same status with respect to the threshold [S1].
++
++#### Phase 2: Tetrahedronization of Sub-Cases
++This phase generates the geometric simplices for each sub-case.
++
++1.  **Representation:** Represent the sub-case object as a list of vertices, each linked to a list of neighbors. Initially, all vertices have three connections [S1].
++2.  **Vertex Selection:** Select the next vertex (in order on the list) with the fewest incident edges.
++3.  **Split:** Remove this vertex from the object, generating one or two tetrahedra.
++    *   A vertex with 3 edges generates 1 tetrahedron.
++    *   A vertex with 4 edges generates 2 tetrahedra.
++4.  **Update Connectivity:** Update the connectivity of the remaining object by connecting the vertices of the remaining object in the same configuration as the base of the split tetrahedron.
++5.  **Backtracking Check:** If any vertex has five or more incident edges, backtrack to the previous level and attempt a different split.
++    *   *Note:* Using the "fewest edges" strategy, backtracking occurs for only 3 of the 74 sub-cases in 3D [S1].
++
++#### Phase 3: Disambiguation Strategy
++Ambiguities occur when the surface intersects one face of the n-cube through each of its four edges, potentially generating spurious holes or additional segments. This occurs in 2D and propagates to higher dimensions [S1].
++
++1.  **Identify Ambiguous Faces:** For each ambiguous face $f$ in a given n-cube, there are $2^{\#f}$ possible sub-case configurations.
++2.  **Select Configurations:** In practice, only a subset is required (similar under rotation).
++3.  **Use Complementary Cases:** Use separate complementary case configurations for each ambiguous face. This maintains vertex order (clockwise relative to the surface-object), aiding the renderer [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def preprocess_marching_cubes_subcases():
+-    """
+-    Pre-processes the lookup tables for n-dimensional marching cubes
+-    using sub-case decomposition.
+-    """
+-    # Step 1: Identify Major Cases
+-    searched_cases = set(range(65536))
++def generate_major_cases(n_dimensions):
++    """
++    Generates the list of major cases by grouping configurations 
++    under rotation, mirror, and complement symmetries.
++    """
++    total_configs = 2 ** n_dimensions
++    searched = [False] * total_configs
+     major_cases = []
+     
+-    while searched_cases:
+-        # Take next unmarked index
+-        idx = min(searched_cases)
+-        searched_cases.remove(idx)
+-        major_cases.append(idx)
+-        
+-        # Exhaustively transform and mark
+-        transformed = generate_transformations(idx)
+-        for t in transformed:
+-            searched_cases.discard(t)
+-            
+-    # Step 2: Decompose into Sub-Cases and Tetrahedronize
+-    # Note: This is a high-level representation. 
+-    # The actual tetrahedronization is complex and specific to each sub-case geometry.
+-    sub_case_data = {}
++    for index in range(total_configs):
++        if searched[index]:
++            continue
++        
++        # Add representative to major cases
++        major_cases.append(index)
++        
++        # Mark all symmetric equivalents as searched
++        equivalents = get_symmetric_equivalents(index)
++        for eq_idx in equivalents:
++            searched[eq_idx] = True
++            
++    return major_cases
++
++def decompose_into_subcases(major_case_index):
++    """
++    Decomposes a major case into edge-connected sub-cases.
++    Returns a list of sub-case definitions.
++    """
++    # 1. Identify vertices in the major case configuration
++    vertices = get_vertices_for_config(major_case_index)
++    
++    # 2. Build adjacency graph based on edge connections
++    # A sub-case is an edge-connected component where vertices 
++    # have the same status (inside/outside) relative to threshold.
++    subcases = []
++    visited = set()
++    
++    for vertex in vertices:
++        if vertex in visited:
++            continue
++        
++        # BFS/DFS to find edge-connected component
++        component = []
++        queue = [vertex]
++        while queue:
++            v = queue.pop(0)
++            if v in visited:
++                continue
++            visited.add(v)
++            component.append(v)
++            
++            # Add neighbors connected by edges
++            for neighbor in get_edge_neighbors(v):
++                if neighbor not in visited:
++                    queue.append(neighbor)
++        
++        subcases.append(component)
++        
++    return subcases
++
++def tetrahedronize_subcase(subcase_vertices):
++    """
++    Generates tetrahedra for a sub-case using the 'fewest edges' strategy.
++    """
++    # 1. Represent as list of vertices with neighbor lists
++    vertex_list = []
++    for v in subcase_vertices:
++        neighbors = get_neighbors(v)
++        vertex_list.append({'id': v, 'neighbors': neighbors, 'removed': False})
++    
++    tetrahedra = []
++    
++    while any(not v['removed'] for v in vertex_list):
++        # 2. Select vertex with fewest incident edges
++        active_vertices = [v for v in vertex_list if not v['removed']]
++        if not active_vertices:
++            break
++            
++        target_vertex = min(active_vertices, key=lambda v: len(v['neighbors']))
++        
++        # 3. Remove vertex and generate tetrahedra
++        # Check for backtracking condition (>= 5 edges)
++        if len(target_vertex['neighbors']) >= 5:
++            # Backtrack logic would be implemented here by 
++            # trying alternative splits or previous states.
++            # For simplicity, we assume the 'fewest edges' strategy 
++            # avoids this for most cases.
++            raise Exception("Backtracking required: vertex has >= 5 edges")
++            
++        # Generate 1 or 2 tetrahedra based on edge count
++        num_tets = 1 if len(target_vertex['neighbors']) == 3 else 2
++        new_tets = generate_tetrahedra(target_vertex, num_tets)
++        tetrahedra.extend(new_tets)
++        
++        # 4. Update connectivity
++        update_connectivity(vertex_list, target_vertex)
++        target_vertex['removed'] = True
++        
++    return tetrahedra
++
++def build_lookup_tables(major_cases, subcases_map):
++    """
++    Builds the Primary and Secondary lookup tables.
++    """
++    primary_table = [None] * 65536
++    secondary_table_major = {}
++    secondary_table_sub = {}
+     
+     for major_idx in major_cases:
+-        # Identify edge-connected sub-components for this major case
+-        sub_components = decompose_into_subcases(major_idx)
+-        
+-        for sub_comp in sub_components:
+-            # Tetrahedronize the sub-component
+-            tetrahedra = tetrahedronize(sub_comp)
+-            
+-            # Calculate orientation matrix
+-            orientation = calculate_orientation_matrix(sub_comp, major_idx)
+-            
+-            # Store in secondary table structure
+-            # Key could be a combination of major_idx and sub_comp_id
+-            sub_case_data[(major_idx, sub_comp)] = {
+-                'tetrahedra': tetrahedra,
+-                'orientation': orientation
+-            }
+-            
+-    # Step 3: Build Primary and Secondary Tables
+-    # Method 3b: Primary table points to sub-case arrays
+-    primary_table = [None] * 65536
+-    secondary_table = [] # List of sub-case entries
+-    
+-    for major_idx in major_cases:
+-        # Find all sub-cases associated with this major index
+-        sub_cases_for_major = [
+-            (k[1], v) for k, v in sub_case_data.items() if k[0] == major_idx
+-        ]
+-        
+-        # Build pointer array for this major case
+-        # Each entry is (orientation, sub_index)
+-        sub_case_entries = []
+-        for sub_idx, data in sub_cases_for_major:
+-            sub_case_entries.append((data['orientation'], sub_idx))
+-            
+-        # Store in primary table
+-        # Assuming a structure where primary_table[i] points to a list of tuples
+-        primary_table[major_idx] = sub_case_entries
+-        
+-    return primary_table, secondary_table, sub_case_data
+-
+-def generate_transformations(idx):
+-    """
+-    Generates all configurations equivalent to idx under 
+-    rotation (R), mirror (M), and complement (C).
+-    """
+-    # Implementation details depend on the specific n-dimensional 
+-    # symmetry group definitions.
+-    # Returns a set of indices.
+-    pass
+-
+-def decompose_into_subcases(major_idx):
+-    """
+-    Divides the major case into edge-connected sub-components.
+-    A sub-component is a fragment where vertices have the same status.
+-    """
+-    # Implementation involves graph traversal on the vertex connectivity
+-    # of the major case configuration.
+-    pass
+-
+-def tetrahedronize(sub_component):
+-    """
+-    Decomposes a sub-component into tetrahedra.
+-    Uses the 'fewest edges' strategy.
+-    """
+-    vertices = get_vertices(sub_component)
+-    tetrahedra = []
+-    
+-    # Initial connectivity: all vertices have 3 connections
+-    # represented as adjacency lists
+-    adjacency = build_adjacency(vertices)
+-    
+-    while vertices:
+-        # Select vertex with fewest incident edges
+-        v = select_vertex_fewest_edges(vertices, adjacency)
+-        
+-        # Remove vertex and generate tetrahedra
+-        # 3 connections -> 1 tetrahedron
+-        # 4 connections -> 2 tetrahedra
+-        new_tets = split_vertex(v, adjacency)
+-        tetrahedra.extend(new_tets)
+-        
+-        # Update connectivity
+-        update_adjacency(v, adjacency)
+-        vertices.remove(v)
+-        
+-        # Backtracking check: if any vertex has >= 5 edges
+-        if any(len(edges) >= 5 for edges in adjacency.values()):
+-            # Backtrack to previous level
+-            # This is a simplified representation of the backtracking logic
+-            raise BacktrackException("Too many edges, need to retry split")
+-            
+-    return tetrahedra
+-
+-def calculate_orientation_matrix(sub_comp, major_idx):
+-    """
+-    Calculates the 32-bit orientation matrix representing the 
+-    transformation from the primary table index to the simplex elements.
+-    """
+-    # Rotate sub_comp to standard form
+-    # Calculate inverse transformation
+-    # Encode 1, 0, -1 to 00, 01, 10
+-    pass
++        # Get orientation and sub-case mappings
++        # Method 3a: Map to major index
++        # Method 3b: Map to sub-case indices
++        
++        # Calculate orientation matrix
++        orientation = calculate_orientation_matrix(major_idx)
++        
++        # Store in Primary Table (Method 3b example)
++        # Primary table entry points to secondary table for sub-cases
++        subcase_list = subcases_map[major_idx]
++        for sub_idx, sub_orientation in subcase_list:
++            # Store in secondary table
++            key = (major_idx, sub_idx)
++            if key not in secondary_table_sub:
++                secondary_table_sub[key] = tetrahedronize_subcase(sub_idx)
++            
++            # Primary table stores (orientation, sub_index)
++            # Implementation detail: Array of pointers to tuples
++            pass 
++            
++    return primary_table, secondary_table_sub
+ ```
+ 
+ ### Parameters and Typical Values
+-- **Tetrahedron Storage**: 4 bytes per tetrahedron (1 byte per vertex label) [S1].
+-- **3D Major Cases**: 14 (or 15 if Complement operator is used) [S1].
+-- **3D/4D Sub-Cases**: 74 [S1].
+-- **4D Major Cases**: 222 (under R, M operators) [S1].
+-- **Memory Usage (Method 2)**: 1.75 MB for the complete simplex table in 4D (356,817 tetrahedra) [S1].
++*   **3D Major Cases:** 14 (or 15 if Complement operator is used) [S1].
++*   **3D Sub-Cases:** 74 [S1].
++*   **4D Major Cases:** 222 (under R, M operators) [S1].
++*   **4D Sub-Cases:** 74 [S1].
++*   **Tetrahedron Size:** 4 bytes (1 byte per vertex label) [S1].
++*   **Memory (Method 2 - Complete Simplex):** 1.75 MB for 356,817 tetrahedra and 65,536 array pointers ($4 \times 356,817 + 5 \times 65,536$ bytes) [S1].
++*   **Memory (Method 3a - Major Cases):** ~328 KB for primary table (65,536 tuples) + ~10.2 KB for secondary table (2,332 tetrahedra) [S1].
+ 
+ ### Edge Cases and Pitfalls
+-- **Ambiguities**: Occur when the surface intersects one face of the $n$-cube through each of its four edges. This creates spurious holes or additional surface segments. This face occurs in 2D and propagates to higher dimensions [S1].
+-- **Backtracking**: During tetrahedronization, if a vertex has 5 or more incident edges, the algorithm must backtrack. In practice, with the "fewest edges" strategy, this happens for only 3 of the 74 sub-cases in 3D/4D [S1].
+-- **Complement Operator**: The number of major cases varies (14 vs 15) depending on whether the complement operator is included in the symmetry group [S1].
++*   **Ambiguities:** Occur when the surface intersects one face of the n-cube through each of its four edges. This can generate spurious holes or additional surface segments. This phenomenon occurs in 2D and propagates to higher dimensions [S1].
++*   **Backtracking:** During tetrahedronization, if a vertex has 5 or more incident edges, the algorithm must backtrack. Using the "fewest edges" strategy, this happens for only 3 of the 74 sub-cases in 3D [S1].
++*   **Discontinuity:** At high magnifications, anomalies from local cell tilings may become visible, resulting in surface discontinuity. Subdivision techniques (e.g., Dividing Cubes) can mitigate this but increase computational cost [S1].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Pre-processing is expensive. Method 1 (Dynamic Simplex Enumeration) takes the longest to calculate but uses the least memory. Method 2 (Complete Simplex Enumeration) pre-calculates and stores all divisions, requiring significant memory but fast runtime lookup [S1].
+-- **Memory Complexity**: 
+-    - Method 1: Minimal memory, dynamic calculation.
+-    - Method 2: 1.75 MB for 4D complete table.
+-    - Method 3a: ~328 KB for primary table + 10.2 KB for secondary table (pointers) [S1].
+-    - Method 3b: Similar to 3a but optimized for sub-cases.
+-- **Scaling**: The number of major cases grows rapidly with dimension. In 4D, there are nearly as many major cases as there are configurations in 3D [S1]. Sub-case decomposition mitigates this by reducing the number of cases that need explicit storage or complex handling.
+-- **Strengths**: Reduces table size for higher dimensions. Handles complex geometries via sub-case decomposition.
+-- **Limitations**: Pre-processing is complex. Ambiguities still require disambiguation strategies. Backtracking may be needed for tetrahedronization.
++*   **Time Complexity:** Pre-processing (table generation) is expensive, especially for higher dimensions. Method 1 (Dynamic Simplex Enumeration) takes the longest to calculate but uses the least memory. Method 2 (Complete Simplex Enumeration) is pre-calculated and fast at runtime but requires significant memory [S1].
++*   **Memory Complexity:**
++    *   Method 2 (Complete): 1.75 MB (for the specific 3D/4D stats cited) [S1].
++    *   Method 3a (Major Cases): ~328 KB (primary) + ~10.2 KB (secondary) [S1].
++    *   Method 3b (Sub-Cases): Primary table size depends on pointer overhead; secondary table size depends on the number of sub-cases.
++*   **Strengths:** Reduces the number of cases that need to be explicitly stored or computed for higher dimensions (4D+), where the number of major cases explodes. Simplifies the geometry associated with major cases by breaking them into simpler sub-cases [S1].
++*   **Limitations:** Requires complex pre-processing to generate the sub-case tables. Ambiguities still exist and require disambiguation strategies. At high magnifications, local discontinuities may still be visible [S1].
++*   **When to Use:** When working in 4D or higher dimensions where storing all configurations or even all major cases is prohibitive. When memory is constrained but pre-computation is acceptable.
++*   **When Not to Use:** In 3D, where storing all 256 cases is trivial and the overhead of sub-case decomposition may not be justified. When real-time table generation is required and pre-computation is not possible.
+ 
+ ## Background
+-The method was introduced by [S1] to address the combinatorial explosion of configuration cases in n-dimensional marching cubes. It builds on the standard Marching Cubes algorithm but extends it to higher dimensions by decomposing major cases into sub-cases. The work highlights the limitations of static lookup tables in higher dimensions and proposes a hybrid approach using orientation matrices and sub-case decomposition.
++The sub-case decomposition method was introduced in the context of extending marching cubes to n-dimensional hypersurfaces. The primary motivation is the exponential growth of configuration cases in higher dimensions. In 3D, there are 256 configurations, which is manageable. However, in 4D, the number of major cases grows to 222 (under rotation and mirror symmetries), and the geometry becomes more complex [S1]. The method was developed to reduce the size of the lookup tables required for n-dimensional marching cubes by decomposing major cases into edge-connected sub-cases [S1]. It is part of a broader effort to handle topological correctness and ambiguity in higher-dimensional surface extraction [S1].
+ 
+ ## Sources

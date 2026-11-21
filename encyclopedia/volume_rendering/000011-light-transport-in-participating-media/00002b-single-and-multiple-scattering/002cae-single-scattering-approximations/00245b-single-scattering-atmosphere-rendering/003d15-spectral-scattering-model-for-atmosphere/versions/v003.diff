@@ -1,0 +1,205 @@
+--- v002.md
++++ v003.md
+@@ -10,14 +10,14 @@
+ 
+ **Inputs and Outputs:**
+-*   **Inputs:** Viewpoint position $P_O$, view direction $V$, light source direction $L$ (Sun/stars), atmospheric density profiles, water body geometry (seabed depth), and spectral parameters.
+-*   **Outputs:** Final spectral color $I_F$ for each pixel.
++*   **Inputs:** Viewpoint position $P_O$, view direction $V$, light source direction $L$ (Sun/stars), atmospheric density profiles, water body geometry (seabed depth), and spectral parameters [S2].
++*   **Outputs:** Final spectral color $I_F$ for each pixel [S2].
+ 
+ **Data Structures:**
+-The method relies on precomputed lookup tables (LUTs) generated via CPU-based spectral integration. These tables store spectral data for real-time GPU sampling.
+-*   **Atmospheric Scattering Texture:** 4D table packed into a $32 \times 128 \times 256$ 3D texture. Resolution: $32 \times 128 \times 32 \times 8$ (dimensions for spatial/angular/spectral data).
+-*   **Water Scattering Texture:** 3D texture, resolution $32 \times 64 \times 64$.
+-*   **Extinction Texture:** 2D texture, resolution $256 \times 512$.
+-*   **Ambient Texture:** 1D texture, size 256.
+-*   **Precision:** 16-bit floating-point values per channel. Total memory: ~10MB [S2].
++The method relies on precomputed lookup tables (LUTs) generated via CPU-based spectral integration [S2]. These tables store spectral data for real-time GPU sampling [S2].
++*   **Atmospheric Scattering Texture:** 4D table packed into a $32 \times 128 \times 256$ 3D texture with resolution $32 \times 128 \times 32 \times 8$ [S2].
++*   **Water Scattering Texture:** 3D texture with resolution $32 \times 64 \times 64$ [S2].
++*   **Extinction Texture:** 2D texture with resolution $256 \times 512$ [S2].
++*   **Ambient Texture:** 1D texture with size 256 [S2].
++*   **Precision:** 16-bit floating-point values per channel, consuming ~10MB total memory [S2].
+ 
+ **Parameters:**
+@@ -32,10 +32,10 @@
+ 
+ 1.  **Scattering Coefficients:**
+-    The scattering coefficients for Rayleigh ($\sigma_R$) and Mie ($\sigma_M$) are calculated based on particle polarizability $\alpha_{\{R,M\}}$, index of refraction $n_e$, molecular number density $N_{\{R,M\}}$, and wavelength $\lambda$. $\sigma_M$ is wavelength-independent [S2].
++    The scattering coefficients for Rayleigh ($\sigma_R$) and Mie ($\sigma_M$) are calculated based on mean particle polarizability $\alpha_{\{R,M\}}$, index of refraction $n_e$, molecular number density $N_{\{R,M\}}$, and wavelength $\lambda$. $\sigma_M$ is wavelength-independent [S2].
+ 
+ 2.  **Density Scale Function:**
+     The density at altitude $h$ is modeled exponentially:
+-    $$ p_{\{R,M\}}(P) = \exp\left(-\frac{h}{H_{\{R,M\}}}\right) $$
+-    where $H_{\{R,M\}}$ is the scale height [S2].
++    $$ p_{\{R,M\}}(P) = \exp(-H_{\{R,M\}}) $$
++    where $H_{\{R,M\}}$ is the scale height expressing the altitude where density scales down by $1/e$ [S2].
+ 
+ 3.  **Phase Functions:**
+@@ -61,5 +61,5 @@
+     *   Compute refraction ray $V_{0R}$ in the fragment shader using `refract()` [S2].
+     *   Determine incident light $I_0I(P_g, V_R, \lambda)$: if $V_R$ hits the star disc, $I_0I(P_g, V_R, \lambda) = I_0I(P_g, L, \lambda)$; otherwise, it is zero [S2].
+-    *   Obtain water scattering $I_S^{water}$ by fetching the water scattering texture using the depth $D$ of the intersection point with the seabed [S2].
++    *   Obtain water scattering $I_S$ by fetching the water scattering texture using the depth $D$ of the intersection point with the seabed [S2].
+     *   Light transmission through water molecules is considered analytically [S1].
+ 
+@@ -74,68 +74,85 @@
+ 
+ ```python
+-# Precomputation Phase (CPU)
++import math
++
+ def precompute_spectral_luts():
+-    # Spectral sampling
+-    wavelengths = linspace(visible_min, visible_max, 15)
++    wavelengths = [400.0 + i * (700.0 - 400.0) / 14.0 for i in range(15)]
++    atm_scatter_tex = [[[[0.0 for _ in range(8)] for _ in range(32)] for _ in range(128)] for _ in range(32)]
++    water_scatter_tex = [[[0.0 for _ in range(64)] for _ in range(64)] for _ in range(32)]
++    extinction_tex = [[0.0 for _ in range(512)] for _ in range(256)]
++    ambient_tex = [0.0 for _ in range(256)]
+     
+-    # Initialize textures
+-    atm_scatter_tex = allocate_3d_texture(32, 128, 256)
+-    water_scatter_tex = allocate_3d_texture(32, 64, 64)
+-    extinction_tex = allocate_2d_texture(256, 512)
+-    ambient_tex = allocate_1d_texture(256)
++    for order in range(1, 7):
++        for w in wavelengths:
++            sigma_R = compute_scattering_coeff(w, type="Rayleigh")
++            sigma_M = compute_scattering_coeff(w, type="Mie")
++            for s in range(30):
++                p_R = math.exp(-h / 8000.0)
++                p_M = math.exp(-h / 1200.0)
++                t = (sigma_R * p_R + sigma_M * p_M) * (s / 30.0)
++                # Accumulate scattering contributions and store in LUTs
++                pass
++    return atm_scatter_tex, water_scatter_tex, extinction_tex, ambient_tex
++
++def compute_scattering_coeff(w, type):
++    if type == "Mie":
++        return 0.0001 # Wavelength-independent placeholder for Mie
++    return 5.0e-6 * (550.0 / w) ** 4 # Rayleigh approximation
++
++def render_spectral_atmosphere(view_pos, view_dir, light_dir, depth_buffer):
++    atm_lut = sample_3d_texture(atm_scatter_tex, view_pos, view_dir)
++    water_lut = sample_3d_texture(water_scatter_tex, depth_buffer.get_water_depth())
++    ext_lut = sample_2d_texture(extinction_tex, view_pos, view_dir)
+     
+-    for order in range(1, 7): # 6 orders sufficient
+-        for lambda in wavelengths:
+-            # Compute scattering coefficients sigma_R, sigma_M
+-            # Compute optical depths using trapezoidal integration (30 samples)
+-            # Accumulate contributions for single and multiple scattering
+-            # Store results in LUTs
+-            pass
+-
+-# Rendering Phase (GPU Fragment Shader)
+-def render_spectral_atmosphere(view_pos, view_dir, light_dir, depth_buffer):
+-    # Fetch precomputed LUTs
+-    atm_lut = sample_3d_texture(atm_scatter_tex, ...)
+-    water_lut = sample_3d_texture(water_scatter_tex, ...)
+-    ext_lut = sample_2d_texture(extinction_tex, ...)
+-    
+-    # Compute optical depth t(Pa, Pb, lambda) using LUTs
+     t_atm = compute_optical_depth(view_pos, view_dir, ext_lut)
+-    
+-    # Compute single scattering contribution I_P
+-    # Use phase functions F_R, F_M and density scale functions
+     I_P = compute_single_scattering(view_pos, view_dir, light_dir, atm_lut)
+     
+-    # Handle water body if visible
+     if depth_buffer.is_water():
+-        # Compute refraction ray
+-        V_0R = refract(view_dir, normal, index_of_refraction)
+-        
+-        # Check if refraction ray hits star disc
+-        if hits_star_disc(V_0R, light_dir):
+-            I_incident = spectral_intensity(light_dir)
+-        else:
+-            I_incident = 0
+-            
+-        # Fetch water scattering from LUT using depth D
++        V_0R = refract(view_dir, depth_buffer.get_normal(), 1.33)
++        I_incident = spectral_intensity(light_dir) if hits_star_disc(V_0R, light_dir) else 0.0
+         D = depth_buffer.get_water_depth()
+         I_water = sample_3d_texture(water_lut, D)
++        I_S = compute_surface_reflection() + I_water
++        t_water = compute_water_optical_depth(D)
++        I_F = I_S + I_P * math.exp(-t_water)
++    else:
++        I_S = compute_surface_color()
++        I_F = I_S + I_P * math.exp(-t_atm)
+         
+-        # Combine surface reflection and water scattering
+-        I_S = compute_surface_reflection() + I_water
+-        
+-        # Attenuate medium contribution by water/atmosphere path
+-        t_water = compute_water_optical_depth(D)
+-        I_F = I_S + I_P * exp(-t_water)
+-    else:
+-        # Standard atmosphere rendering
+-        I_S = compute_surface_color()
+-        I_F = I_S + I_P * exp(-t_atm)
+-        
+-    # Tone mapping
+-    E = exposure_constant
+-    I_F_final = 1.0 - exp(-E * I_F)
+-    
++    E = 1.0
++    I_F_final = 1.0 - math.exp(-E * I_F)
+     return I_F_final
++
++def sample_3d_texture(tex, x, y, z):
++    return tex[int(x) % len(tex)][int(y) % len(tex[0])][int(z) % len(tex[0][0])]
++
++def sample_2d_texture(tex, x, y):
++    return tex[int(x) % len(tex)][int(y) % len(tex[0])]
++
++def refract(ray, normal, eta):
++    return [ray[i] * eta for i in range(3)]
++
++def hits_star_disc(ray, light):
++    return math.dot(ray, light) > 0.99
++
++def compute_optical_depth(pos, dir, tex):
++    return sample_2d_texture(tex, pos[0], pos[1])
++
++def compute_single_scattering(pos, dir, light, tex):
++    theta = math.acos(math.dot(dir, light))
++    F_R = 0.75 * (1 + math.cos(theta)**2)
++    return F_R * sample_3d_texture(tex, pos[0], pos[1], pos[2])
++
++def compute_surface_reflection():
++    return [0.0, 0.0, 0.0]
++
++def compute_surface_color():
++    return [0.0, 0.0, 0.0]
++
++def spectral_intensity(light):
++    return [1.0, 1.0, 1.0]
++
++def compute_water_optical_depth(depth):
++    return depth * 0.05
+ ```
+ 
+@@ -151,12 +168,15 @@
+ Klassen's Spectral Atmospheric Method is a physically-based rendering technique for simulating sky color and solar illumination in planetary atmospheres by explicitly treating spectral scattering. It solves the problem of inaccurate color reproduction in atmospheric rendering, where standard RGB-based approximations fail to capture the wavelength-dependent nature of Rayleigh and Mie scattering. It sets itself apart from its siblings by introducing a full spectral treatment (33 wavelengths) for the sky while retaining RGB efficiency for non-selective fog, and by distinguishing between single-scattering haze layers and multiple-scattering sky color contributions.
+ 
++### Irwin's Spectral Earth Atmosphere Method
++Irwin's method is similar to Nishita et al. but differs in the use of spectral wavelength sampling and reconstruction techniques instead of working in the RGB colour model [S1]. It simulates the light of the sky and the Sun as seen from the ground or from outer space for an atmosphere consisting of pure air with exponentially falling mass density [S1]. Only single scattering and Rayleigh scattering are considered, neglecting the light from the sky (not the sun) reflected from the Earth’s surface and ozone absorption [S1]. The atmosphere is modeled as a spherical shell, and illumination paths are solved by numerical integration [S1].
++
+ ## Operating characteristics
+ 
+-*   **Time Complexity:** Precomputation is intensive. It took 1.5 hours for the entire dataset with 6 scattering orders on an Intel Core 2 Duo 1.86 GHz CPU [S2].
++*   **Time Complexity:** Precomputation is intensive, taking 1.5 hours for the entire dataset with 6 scattering orders on an Intel Core 2 Duo 1.86 GHz CPU [S2].
+ *   **Memory Complexity:** Lookup tables consume ~10MB of texture memory (16-bit float per channel) [S2].
+ *   **Performance:** Real-time performance is achieved on GPU. At 1024×768 resolution, average 180 FPS (min 85 FPS). At 2560×2048 resolution, average 60 FPS (min 29 FPS), with ~1.1 million static triangles [S2].
+-*   **Scaling:** Performance is stable across resolutions. The method is slower than Bruneton and Neyret [2008] because it evaluates reflection and scattering from water bodies, whereas Bruneton and Neyret report lower framerates because they account for terrain morphology, which this method does not [S2].
+-*   **Strengths:** Physically-based, fully spectral, supports arbitrarily dense atmospheres and large water bodies, real-time capable.
+-*   **Limitations:** High precomputation time, neglects seabed color contribution, fake clouds do not cast shadows.
++*   **Scaling:** The method is slower than Bruneton and Neyret [2008] because it evaluates reflection and scattering from water bodies, whereas Bruneton and Neyret report lower framerates because they account for terrain morphology, which this method does not [S2].
++*   **Strengths:** Physically-based, fully spectral, supports arbitrarily dense atmospheres and large water bodies, real-time capable [S2].
++*   **Limitations:** High precomputation time, neglects seabed color contribution, fake clouds do not cast shadows [S1, S2].
+ *   **Usage:** Targets real-time applications such as flight simulators, games, virtual environments, and software like Google Earth (after simplifications) [S2].
+ 

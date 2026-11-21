@@ -1,0 +1,435 @@
+--- v004.md
++++ v005.md
+@@ -4,70 +4,125 @@
+ 
+ ## Overview
+-Chunk-Based Voxel Terrain Generation is a procedural method that divides a 3D world into fixed-size cubic chunks, populating each with voxel data via 3D noise sampling and biome logic [S1, S2, unofficial]. It differs from heightmap-based approaches by explicitly generating a dense 3D voxel grid per chunk before mesh extraction, allowing for overhangs and caves, while differing from raymarching methods by computing the discrete volume explicitly [S2, unofficial]. This method builds on [Chunk Generation with Base Terrain](1110-chunk-generation-with-base-terrain.md) by defining the specific procedural noise sampling and block placement rules used within each chunk.
++Chunk-Based Voxel Terrain Generation is a procedural technique that constructs a 3D voxel world by sampling 3D noise functions to determine block density and height, then filtering these values against thresholds to place solid blocks [S1, S3, unofficial]. It differs from static generation by organizing the output into fixed-size chunks, enabling efficient memory management and localized updates, and from pure implicit volumes by explicitly discretizing the space into a grid of binary or typed voxels rather than a continuous field [S1, S3, unofficial]. It builds on [Chunk Generation with Base Terrain](1110-chunk-generation-with-base-terrain.md) by adding biome logic, run-length encoding, and explicit face culling for mesh generation.
+ 
+ ## How it works
+ **Inputs:**
+-- World configuration: `seed`, `world_size` (X/Z extent), `max_elevation`, `water_level`, `equator_temp`, `temp_decay_coeff` [S1, unofficial].
+-- Chunk parameters: `CHUNK_SIZE` (8 or 32 voxels per side), `VOXEL_SIZE` (1 meter) [S1, S2, unofficial].
+-- Noise parameters: Amplitudes and frequencies for height, moisture, and wackiness noise [S1, unofficial].
+-- Player position: Determines which chunks to generate and load [S2, unofficial].
++- World seed (integer).
++- Configuration parameters: `max_elevation`, `world_size` (X/Z extent), `water_level`, `equator_temp`, `temp_decay_coeff`, `chunk_size` (default 8 or 32), `render_distance` (default 256), `cut_off` (default -0.75), `terrain_scope` (default 1.0) [S1, S2, S3, unofficial].
++- Player position (for chunk loading/unloading) [S2, unofficial].
+ 
+ **Outputs:**
+-- A set of `VoxelChunk` objects, each containing a voxel array and a generated mesh [S1, S2, unofficial].
+-- Mesh geometry consisting of visible faces after culling internal and water-adjacent faces [S1, unofficial].
++- A set of `VoxelChunk` objects, each containing a dense voxel grid and a mesh of visible faces [S1, S2, unofficial].
+ 
+ **Data Structures:**
+-1. **Voxel Array:** A 1D `Uint8Array` of size `CHUNK_LENGTH = CHUNK_SIZE^3` [S1, unofficial]. Index for voxel `(x,y,z)` is `x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE` [S1, unofficial].
+-2. **Chunk Cache Item:** Contains `enc` (RLE encoded data), `faces` (Map of VoxelID to packed face data), `n` (face count), `is_empty` (boolean) [S1, unofficial].
+-3. **Packed Face Data:** An array `[x, y, z, voxel_id, direction_index]` for each visible face [S1, unofficial].
+-4. **Vertex Buffers:** `position_buffer` (Float32, `num_vertices * 3`), `vert_id_buffer` (Float32, `num_vertices`), `packed_buffer` (Float32, `num_vertices`), `index_buffer` (Uint16, `num_faces * 6`) [S1, unofficial].
++1.  **Voxel Grid:** A 1D array of size $N^3$ (where $N$ is `chunk_size`) storing voxel types as `Uint8` indices [S1, unofficial].
++2.  **Chunk Cache:** A map from chunk coordinates $(cx, cy, cz)$ to `ChunkCacheItem` [S1, unofficial].
++    -   `enc`: `Uint16Array` containing Run-Length Encoded (RLE) data of the voxel grid.
++    -   `faces`: `Map<VoxelID, number[]>` storing packed face data.
++    -   `n`: Total face count.
++    -   `is_empty`: Boolean flag.
++3.  **Packed Face Data:** An array of 5 numbers per face: $(x, y, z, \text{voxel\_id}, \text{direction\_index})$ [S1, unofficial].
++4.  **Mesh Buffers:**
++    -   `position_buffer`: `Float32Array` of size $V \times 3$.
++    -   `vert_id_buffer`: `Float32Array` of size $V$.
++    -   `packed_buffer`: `Float32Array` of size $V$.
++    -   `index_buffer`: `Uint16Array` of size $F \times 6$ (2 triangles per face) [S1, unofficial].
+ 
+ **Steps:**
+-1. Initialize noise functions with configured amplitudes and frequencies [S1, unofficial].
+-2. Initialize a loading threshold sphere to trigger chunk unloading when the player exits [S2, unofficial].
+-3. For each chunk at coordinates $(C_x, C_y, C_z)$, calculate a chunk-level wackiness exponent [S1, unofficial].
+-4. Populate the voxel array by evaluating height noise, applying the wackiness exponent, and determining voxel types based on biome logic [S1, unofficial].
+-5. Run-length encode the voxel array and flag empty chunks [S1, unofficial].
+-6. Identify visible faces by checking all 6 neighbors for out-of-bounds, AIR, or WATER conditions [S1, unofficial].
+-7. Generate mesh geometry from visible faces and finalize the chunk [S1, S2, unofficial].
+-
+-**Formulas:**
+-- Temperature: $T(z) = \text{clamp}(E - |z - Z_{eq}| \cdot D, 0, 1)$, where $E$ is `equator_temp`, $Z_{eq}$ is `world_size/2`, and $D$ is `temp_decay_coeff` [S1, unofficial].
+-- Generation Height: $H = \text{noise}_{\text{height}}(X_w, Z_w)^{E_{\text{chunk}}} \cdot \text{max\_elevation}$ [S1, unofficial].
+-- Chunk Wackiness Exponent: $E_{\text{chunk}}$ maps wackiness noise $W \in [0, 1]$ as follows: $W < 0.2 \rightarrow 16$, $0.2 \le W < 0.4 \rightarrow 8$, $0.4 \le W < 0.6 \rightarrow 2$, $W > 0.8 \rightarrow 0.5$, else $E_{\text{chunk}} = W$ [S1, unofficial].
+-
+-**Parameters:**
+-- `CHUNK_SIZE`: 8 [S1, unofficial] or 32 [S2, unofficial].
+-- `VOXEL_SIZE`: 1 meter [S1, unofficial].
+-- `render_distance`: 256 meters [S2, unofficial].
+-- `cut_off`: -0.75 (noise threshold for voxel presence) [S2, unofficial].
+-- `terrain_scope`: 1.0 (noise zoom factor) [S2, unofficial].
+-- `smoothIterations`: 2 (blur passes, range 0-4) [S3, unofficial].
+-- `caveNoiseScale`: 0.07 (cave cavity scale) [S3, unofficial].
+-- `spawnRoomRadius`: 9 meters [S3, unofficial].
+-- `borderThickness`: 2 voxels [S3, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- Neighbor boundary check: Neighbors outside chunk bounds are treated as visible faces (exposed to void or adjacent chunk) [S1, unofficial].
+-- Water visibility: Faces adjacent to WATER voxels are rendered, treating water as transparent/empty for culling [S1, unofficial].
+-- Thread safety: `last_loading_position` must not be replaced by `loading_threshold.global_position` because it is read by worker threads; doing so causes runtime errors [S2, unofficial].
+-- Stale chunk processing: If the player moves during generation, the thread must immediately return to avoid generating mismatched chunks [S2, unofficial].
+-- Precision: Noise evaluation uses floating point; height calculation involves exponentiation which can amplify small noise differences [S1, unofficial].
++
++1.  **Initialize Noise Functions:**
++    -   Create height noise from `seed` [S1, unofficial].
++    -   Create moisture noise from `seed` shuffled by 10 [S1, unofficial].
++    -   Create "wackiness" noise from moisture seed shuffled by 10 [S1, unofficial].
++    -   Initialize `OctavedNoise2d` instances with specific frequencies/amplitudes:
++        -   Height: frequency 1.2, amplitude 400.
++        -   Moisture: frequency 1.0, amplitude 200.
++        -   Wackiness: frequency 1.0, amplitude 20 [S1, unofficial].
++    -   Define temperature function: $T(z) = \text{clamp}(E - |z - Z_{eq}| \cdot D, 0, 1)$, where $E$ is `equator_temp`, $Z_{eq}$ is `world_size`/2, and $D$ is `temp_decay_coeff` [S1, unofficial].
++
++2.  **Calculate Chunk-Level Wackiness:**
++    -   Evaluate wackiness noise at $(cx/100, cz/100)$ [S1, unofficial].
++    -   Map result to exponent `chunk_exp`:
++        -   $< 0.2 \rightarrow 16$
++        -   $< 0.4 \rightarrow 8$
++        -   $< 0.6 \rightarrow 2$
++        -   $> 0.8 \rightarrow 0.5$
++        -   Else $\rightarrow$ raw value [S1, unofficial].
++
++3.  **Generate Voxel Data:**
++    -   For each voxel $(x, y, z)$ in the chunk ($0 \le x,y,z < N$):
++        -   Calculate world coordinates: $W_x = cx \cdot N + x$, $W_z = cz \cdot N + z$, $W_y = cy \cdot N + y$ [S1, unofficial].
++        -   Evaluate height noise at $(W_x, W_z)$ [S1, unofficial].
++        -   Calculate terrain height: $H = (\text{noise}(W_x, W_z))^{\text{chunk\_exp}} \cdot \text{max\_elevation}$ [S1, unofficial].
++        -   Determine voxel type using `determineGeneratedVoxel(H, wackiness, W)` [S1, unofficial]:
++            -   If $W_y < \text{water\_level}$:
++                -   If $W_y \ge H$: WATER.
++                -   If $W_y + 2 \ge H$: SAND.
++                -   If $W_y + 8 \ge H$: MUD.
++                -   If $W_y + 14 \ge H$: SANDSTONE.
++                -   Else: STONE.
++            -   If $W_y > H$: AIR.
++            -   Else (land):
++                -   Get moisture $M = \text{moisture}(W_x, W_z)$ and temperature $T = T(W_z)$ [S1, unofficial].
++                -   If $M \le 0.3$ and $T \ge 0.7$ (Desert):
++                    -   If $W_y + 3 \ge H$: SAND.
++                    -   If $W_y + 7 \ge H$: SANDSTONE.
++                    -   Else: STONE.
++                -   If $M \le 0.4$ and $T \le 0.3$ (Tundra):
++                    -   If $W_y + 1 \ge H$: SNOW.
++                    -   If $W_y + 6 \ge H$: PACKED_DIRT.
++                    -   Else: STONE.
++                -   If $M > 0.7$ and wackiness $> 0.7$ and $T > 0.7$ (Jungle/Mushroom):
++                    -   If $W_y + 1 \ge H$: MYCELIUM.
++                    -   If $W_y + 7 \ge H$: DIRT.
++                    -   Else: STONE.
++                -   Else (Default/Jungle):
++                    -   If $W_y + 1 \ge H$: GRASS/FERTILE_DIRT.
++                    -   Else: DIRT/STONE (implementation varies, typically dirt then stone) [S1, unofficial].
++        -   Store voxel type in grid [S1, unofficial].
++
++4.  **Encode and Cache:**
++    -   Run-length encode the voxel grid into `enc` [S1, unofficial].
++    -   If RLE length is 2 and second element is AIR, flag `is_empty = true` [S1, unofficial].
++    -   Identify visible faces:
++        -   For each non-AIR/non-WATER voxel, check 6 neighbors [S1, unofficial].
++        -   If neighbor is OOB or AIR/WATER, face is visible [S1, unofficial].
++        -   Pack face data $(x, y, z, \text{voxel\_id}, \text{dir})$ into `faces` map [S1, unofficial].
++    -   Generate mesh geometry:
++        -   For each visible face, create 4 vertices (quad corners) [S1, unofficial].
++        -   Store positions, vertex IDs, and packed data in buffers [S1, unofficial].
++        -   Generate 2 triangles (6 indices) per face [S1, unofficial].
++
++5.  **Manage Loading/Unloading (Runtime):**
++    -   Initialize a loading threshold `Area3D` with a sphere shape of radius $R = \text{render\_distance} \cdot 0.25$ [S2, unofficial].
++    -   Position sphere at player [S2, unofficial].
++    -   On player movement, start background thread [S2, unofficial]:
++        -   Wait for previous thread to finish [S2, unofficial].
++        -   Get chunks to load within threshold [S2, unofficial].
++        -   Sort chunks by distance to player [S2, unofficial].
++        -   Iterate sorted chunks:
++            -   Check if player position changed; if so, abort [S2, unofficial].
++            -   Compute chunk position and generate chunk [S2, unofficial].
++            -   Instantiate `VoxelChunk`, populate voxels, generate mesh, add to scene tree [S2, unofficial].
++    -   Remove chunks outside threshold [S2, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def generate_chunk(chunk_coords, config, noises):
+-    CHUNK_SIZE = config.CHUNK_SIZE
+-    VOXEL_SIZE = config.VOXEL_SIZE
+-    CHUNK_LENGTH = CHUNK_SIZE ** 3
+-    WATER_LEVEL = config.water_level
+-    MAX_ELEVATION = config.max_elevation
+-    EQ_TEMP = config.equator_temp
+-    TEMP_DECAY = config.temp_decay_coeff
+-    WORLD_SIZE = config.world_size
+-    Z_EQ = WORLD_SIZE / 2
+-
+-    # 1. Calculate chunk wackiness exponent
+-    wackiness_val = noises.wackiness.eval(chunk_coords.x / 100, chunk_coords.z / 100)
++import math
++
++def generate_chunk(chunk_coords, config, noise_functions):
++    """
++    Generates a single chunk of voxel data and mesh.
++    chunk_coords: (cx, cy, cz)
++    config: dict with max_elevation, water_level, world_size, etc.
++    noise_functions: dict with height, moisture, wackiness, temperature
++    """
++    N = config['chunk_size']
++    CHUNK_LENGTH = N ** 3
++    voxel_grid = [0] * CHUNK_LENGTH  # 0 = AIR
++    
++    # 1. Calculate chunk-level wackiness
++    wackiness_val = noise_functions['wackiness'].eval(chunk_coords[0]/100, chunk_coords[2]/100)
+     if wackiness_val < 0.2:
+         chunk_exp = 16
+@@ -81,76 +136,127 @@
+         chunk_exp = wackiness_val
+ 
+-    voxel_data = [0] * CHUNK_LENGTH
+-    FACE_DIRECTIONS = [[0,1,0], [0,-1,0], [1,0,0], [-1,0,0], [0,0,1], [0,0,-1]]
+-
+-    # 2. Populate voxel array
+-    for x in range(CHUNK_SIZE):
+-        for z in range(CHUNK_SIZE):
+-            world_x = chunk_coords.x * CHUNK_SIZE * VOXEL_SIZE + x * VOXEL_SIZE
+-            world_z = chunk_coords.z * CHUNK_SIZE * VOXEL_SIZE + z * VOXEL_SIZE
+-            height_noise_val = noises.height.eval(world_x, world_z)
+-            gen_height = (height_noise_val ** chunk_exp) * MAX_ELEVATION
+-
+-            for y in range(CHUNK_SIZE):
+-                world_y = chunk_coords.y * CHUNK_SIZE * VOXEL_SIZE + y * VOXEL_SIZE
+-                voxel_type = determine_voxel(gen_height, wackiness_val, world_x, world_y, world_z, noises, config)
+-                idx = x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE
+-                voxel_data[idx] = voxel_type
+-
+-    # 3. RLE encode and check empty
+-    rle_data = run_length_encode(voxel_data)
+-    is_empty = len(rle_data) == 2 and rle_data[1] == VOXEL_TYPES.AIR
+-
+-    # 4. Generate mesh (visible faces)
++    # 2. Populate voxel grid
++    for x in range(N):
++        wx = chunk_coords[0] * N + x
++        for z in range(N):
++            wz = chunk_coords[2] * N + z
++            # Evaluate height noise
++            h_noise = noise_functions['height'].eval(wx, wz)
++            gen_height = (h_noise ** chunk_exp) * config['max_elevation']
++            
++            for y in range(N):
++                wy = chunk_coords[1] * N + y
++                voxel_type = determine_voxel_type(gen_height, wackiness_val, wx, wy, wz, config, noise_functions)
++                idx = x + y * N + z * N * N
++                voxel_grid[idx] = voxel_type
++
++    # 3. Run-Length Encode
++    rle_data = run_length_encode(voxel_grid)
++    
++    # 4. Identify Visible Faces and Generate Mesh
+     faces = []
+-    for x in range(CHUNK_SIZE):
+-        for y in range(CHUNK_SIZE):
+-            for z in range(CHUNK_SIZE):
+-                idx = x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE
+-                v_type = voxel_data[idx]
+-                if v_type == VOXEL_TYPES.AIR or v_type == VOXEL_TYPES.WATER:
++    directions = [
++        [0, 1, 0], [0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]
++    ]
++    
++    for x in range(N):
++        for y in range(N):
++            for z in range(N):
++                idx = x + y * N + z * N * N
++                voxel = voxel_grid[idx]
++                if voxel == 0 or voxel == 5: # AIR or WATER
+                     continue
+-                for d_idx, dx, dy, dz in enumerate(FACE_DIRECTIONS):
+-                    nx, ny, nz = x + dx, y + dy, z + dz
+-                    if not (0 <= nx < CHUNK_SIZE and 0 <= ny < CHUNK_SIZE and 0 <= nz < CHUNK_SIZE):
+-                        faces.append([x, y, z, v_type, d_idx])
+-                        continue
+-                    n_idx = nx + ny * CHUNK_SIZE + nz * CHUNK_SIZE * CHUNK_SIZE
+-                    n_type = voxel_data[n_idx]
+-                    if n_type == VOXEL_TYPES.AIR or n_type == VOXEL_TYPES.WATER:
+-                        faces.append([x, y, z, v_type, d_idx])
+-
+-    return voxel_data, faces, is_empty
+-
+-def determine_voxel(gen_height, wackiness, wx, wy, wz, noises, config):
+-    if wy < config.water_level:
+-        if wy >= gen_height: return VOXEL_TYPES.WATER
+-        if wy + 2 >= gen_height: return VOXEL_TYPES.SAND
+-        if wy + 8 >= gen_height: return VOXEL_TYPES.MUD
+-        if wy + 14 >= gen_height: return VOXEL_TYPES.SANDSTONE
+-        return VOXEL_TYPES.STONE
+-    if wy > gen_height: return VOXEL_TYPES.AIR
+-
+-    moisture = noises.moisture.eval(wx, wz)
+-    eq_dist = abs(wz - config.world_size / 2)
+-    temperature = clamp(config.equator_temp - eq_dist * config.temp_decay_coeff, 0, 1)
+-
++                
++                for dir_idx, dir in enumerate(directions):
++                    nx, ny, nz = x + dir[0], y + dir[1], z + dir[2]
++                    is_visible = False
++                    if 0 <= nx < N and 0 <= ny < N and 0 <= nz < N:
++                        n_idx = nx + ny * N + nz * N * N
++                        n_voxel = voxel_grid[n_idx]
++                        if n_voxel == 0 or n_voxel == 5:
++                            is_visible = True
++                    else:
++                        is_visible = True # OOB is visible
++                    
++                    if is_visible:
++                        faces.append((x, y, z, voxel, dir_idx))
++
++    # 5. Create Mesh Buffers
++    # Each face is a quad (4 vertices, 2 triangles)
++    vertices = []
++    indices = []
++    packed_data = []
++    
++    for face in faces:
++        fx, fy, fz, vid, dir_idx = face
++        # Define quad corners based on direction
++        # Simplified: assuming unit cubes at integer coordinates
++        # This part depends on specific vertex layout, but generally 4 corners per face
++        # For a face with normal (dx, dy, dz), corners are derived from (fx, fy, fz)
++        # Example for top face (0,1,0): corners at (x,y+1,z), (x+1,y+1,z), (x+1,y+1,z+1), (x,y+1,z+1)
++        # Implementation detail: [G] Standard quad generation for each direction
++        
++        # Placeholder for actual vertex math based on direction
++        # In a real implementation, this would compute 4 vertices and 6 indices
++        pass 
++
++    return {
++        'voxel_grid': voxel_grid,
++        'rle': rle_data,
++        'faces': faces,
++        'mesh_data': {'vertices': vertices, 'indices': indices, 'packed': packed_data}
++    }
++
++def determine_voxel_type(gen_height, wackiness, wx, wy, wz, config, noise_functions):
++    water_level = config['water_level']
++    
++    # Underwater logic
++    if wy < water_level:
++        if wy >= gen_height:
++            return 5 # WATER
++        if wy + 2 >= gen_height:
++            return 4 # SAND
++        if wy + 8 >= gen_height:
++            return 7 # MUD
++        if wy + 14 >= gen_height:
++            return 8 # SANDSTONE
++        return 6 # STONE
++    
++    # Above terrain
++    if wy > gen_height:
++        return 0 # AIR
++    
++    # Land logic
++    moisture = noise_functions['moisture'].eval(wx, wz)
++    temperature = noise_functions['temperature'](wz)
++    
++    # Desert
+     if moisture <= 0.3 and temperature >= 0.7:
+-        if wy + 3 >= gen_height: return VOXEL_TYPES.SAND
+-        if wy + 7 >= gen_height: return VOXEL_TYPES.SANDSTONE
+-        return VOXEL_TYPES.STONE
++        if wy + 3 >= gen_height:
++            return 4 # SAND
++        if wy + 7 >= gen_height:
++            return 8 # SANDSTONE
++        return 6 # STONE
++    
++    # Tundra
+     if moisture <= 0.4 and temperature <= 0.3:
+-        if wy + 1 >= gen_height: return VOXEL_TYPES.SNOW
+-        if wy + 6 >= gen_height: return VOXEL_TYPES.PACKED_DIRT
+-        return VOXEL_TYPES.STONE
+-    if moisture > 0.7:
+-        if wackiness > 0.7 and temperature > 0.7:
+-            if wy + 1 >= gen_height: return VOXEL_TYPES.MYCELIUM
+-            if wy + 7 >= gen_height: return VOXEL_TYPES.DIRT
+-            return VOXEL_TYPES.STONE
+-        else:
+-            if wy + 1 >= gen_height: return VOXEL_TYPES.GRASS
+-            return VOXEL_TYPES.DIRT [G]
+-    return VOXEL_TYPES.DIRT [G]
++        if wy + 1 >= gen_height:
++            return 9 # SNOW
++        if wy + 6 >= gen_height:
++            return 3 # PACKED_DIRT
++        return 6 # STONE
++    
++    # Jungle/Mushroom
++    if moisture > 0.7 and wackiness > 0.7 and temperature > 0.7:
++        if wy + 1 >= gen_height:
++            return 10 # MYCELIUM
++        if wy + 7 >= gen_height:
++            return 11 # DIRT
++        return 6 # STONE
++    
++    # Default/Jungle
++    if wy + 1 >= gen_height:
++        return 1 # GRASS
++    return 2 # DIRT (or STONE depending on depth, but typically dirt layer)
+ ```
+ 
+@@ -158,17 +264,47 @@
+ 
+ ### [Chunk-based Voxel World Generation](4832-chunk-based-voxel-world-generation.md)
+-Generates a 3D voxel world by sampling 3D simplex noise to determine surface height and internal density, filtering blocks against water level and density thresholds. It differs from sibling methods by using a separate noise function for vertical density rather than a single heightmap, allowing for overhangs and caves, while maintaining a simple threshold-based placement logic [G]. It builds on [Chunk-Based Voxel Terrain Generation](4140-chunk-based-voxel-terrain-generation.md) by defining the specific procedural noise sampling and block placement rules used within each chunk [G].
++Chunk-based Voxel World Generation is a procedural technique that constructs a 3D voxel world by sampling 3D noise functions to determine block density and height, then filtering these values against thresholds to place solid blocks. It differs from static generation by organizing the output into fixed-size chunks, enabling efficient memory management and localized updates, and from pure implicit volumes by explicitly discretizing the space into a grid of binary or typed voxels rather than a continuous field.
++
++### [Procedural Terrain Heightmap Generation](1850-procedural-terrain-heightmap-generation.md)
++Generates 2D heightmaps for terrain, which can be used as input for voxel generation or meshing.
++
++### [Voxel Evaluation with AABB Culling](2415-voxel-evaluation-with-aabb-culling.md)
++Optimizes voxel access by bounding volumes.
++
++### [Procedural Cave Generation](2579-procedural-cave-generation.md)
++Adds internal voids to terrain chunks.
++
++### [Procedural Voxel World Generation](3891-procedural-voxel-world-generation.md)
++Broader world generation including structures.
++
++### [Spiral Chunk Generation](4271-spiral-chunk-generation.md)
++Loads chunks in a spiral pattern.
++
++### [Simplex Noise Chunk Generation](5016-simplex-noise-chunk-generation.md)
++Uses simplex noise for smoother terrain.
++
++### [Procedural Object Generation](5028-procedural-object-generation.md)
++Adds trees/rocks to chunks.
++
++### [Volumetric Terrain Generation via Layered Limits](13346-volumetric-terrain-generation-via-layered-limits.md)
++Uses layered limits for terrain.
++
++### [Online Terrain Generation](13358-online-terrain-generation.md)
++Generates terrain on-demand.
++
++### [Voxel Octree Terrain Generation and Meshing](15190-voxel-octree-terrain-generation-and-meshing.md)
++Uses octrees for sparse voxel storage.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(C \cdot S^3)$ per chunk, where $C$ is the number of chunks and $S$ is chunk size [S1, S2, unofficial]. Mesh generation scales with the exposed surface area [S1, unofficial].
+-- **Memory Complexity:** $O(C \cdot S^3)$ for voxel data, plus $O(F)$ for mesh geometry, where $F$ is the number of visible faces [S1, S2, unofficial].
+-- **Performance:** Real-time generation is achieved via background threads and distance-sorted loading [S2, unofficial]. A chunk size of 8x8x8 generates quickly but increases per-chunk overhead, while 32x32x32 reduces overhead but increases per-chunk generation time [S1, S2, unofficial].
+-- **Strengths:** Simple implementation, supports complex biomes and verticality via 3D noise, efficient culling of internal faces [S1, S2, unofficial].
+-- **Limitations:** Dense voxel grid consumes significant memory for large worlds, noise artifacts may appear at chunk boundaries without smoothing, and thread safety requires careful state management [S1, S2, unofficial].
+-- **When to Use:** When a fully volumetric, explorable terrain with caves and overhangs is required, and performance constraints allow for dense voxel storage [S1, S2, unofficial].
+-- **When Not to Use:** When memory is extremely limited, or when terrain is strictly 2D heightmap-based [S1, S2, unofficial].
++- **Time Complexity:** $O(N^3)$ per chunk for generation, where $N$ is chunk size. Mesh generation is $O(F)$ where $F$ is number of visible faces.
++- **Memory Complexity:** $O(N^3)$ for voxel grid, $O(F)$ for mesh. RLE compression reduces storage for homogeneous chunks.
++- **Performance:** Depends on chunk size and noise evaluation speed. Godot 4 C++ implementation [S2, unofficial] allows real-time loading.
++- **Strengths:** Efficient memory usage via chunks, localized updates, simple meshing via face culling.
++- **Limitations:** Dense voxel grid can be memory-intensive for large chunks. Noise evaluation can be CPU-bound.
++- **When to use:** Real-time voxel worlds with dynamic terrain.
++- **When not to use:** Static, high-poly terrain where meshing is preferred over voxels.
+ 
+ ## Background
+-Originating from early voxel games and popularized by titles like *Minecraft*, chunk-based generation allows for infinite, procedurally generated worlds [S1, S2, S3, unofficial]. The specific implementation details cited here are derived from community projects: [S1, unofficial] provides a JavaScript/WebGL implementation with octaved noise and biome logic, [S2, unofficial] provides a Godot 4 C++ extension with threaded loading, and [S3, unofficial] provides a Unity implementation with density fields and deformation [S1, S2, S3, unofficial].
++Originated from Minecraft-like voxel games. Implemented in Godot 4 C++ extension [S2, unofficial] and WebGL [S1, unofficial]. Uses octaved noise for terrain shaping [S1, unofficial].
+ 
+ ## Sources

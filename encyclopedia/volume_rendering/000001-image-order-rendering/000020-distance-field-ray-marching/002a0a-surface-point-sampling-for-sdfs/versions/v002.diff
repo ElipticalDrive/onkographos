@@ -1,0 +1,351 @@
+--- v001.md
++++ v002.md
+@@ -4,167 +4,210 @@
+ 
+ ## Overview
+-Surface Point Sampling for SDFs generates training or rendering data points distributed around the implicit surface defined by a Signed Distance Function (SDF). Unlike standard sphere tracing which samples along a ray to find a single intersection, this method actively constructs a point cloud $P$ that approximates the surface geometry by combining uniform background sampling, near-surface perturbations, and projection-based refinement. It sets itself apart from its siblings by focusing on the *distribution* of points for representation learning or high-fidelity extraction rather than just ray intersection, often integrating these points into neural field queries or power diagram computations.
++Surface Point Sampling for SDFs generates a set of 3D points distributed around the implicit surface defined by a Signed Distance Function (SDF) to serve as input for neural rendering or geometric reconstruction pipelines [S1, S2]. Unlike standard sphere tracing which terminates at a single hit point, this method samples multiple points along rays or within the volume to capture surface geometry and local features for subsequent feature extraction [S1, S2]. It differs from its sibling [Distance-field ray marching](21-distance-field-ray-marching.md) by focusing on generating a dense, structured point cloud $P$ from a uniform set $P_u$ via an indicator grid, rather than just finding a single intersection [S2]. It is distinct from [SDF Primitive Definitions](1578-sdf-primitive-definitions.md) which define the geometry, and [SDF Normal Estimation via Finite Differences](4619-sdf-normal-estimation-via-finite-differences.md) which computes derivatives at a point, by providing the spatial distribution of points themselves [S1, S2].
+ 
+ ## How it works
+-The method constructs a set of sample points $P$ from a ray $r(t) = r_o + t \cdot d$ and scene parameters. The core challenge is ensuring points lie sufficiently close to the zero-level set (the surface) to capture geometry accurately without excessive computational cost.
+-
+-### Inputs and Outputs
+-**Inputs:**
+-*   Ray origin $r_o$ and direction $d$ (normalized).
+-*   SDF function $S(p)$ returning distance and sign.
+-*   Optional: Indicator grid $G_o$ (for filtering), MLP $\theta$ (for feature prediction), or Power Diagram parameters.
+-*   Sampling parameters: $\sigma$ (noise std dev), $\text{MAX\_STEPS}$, $\text{HIT\_THRESHOLD}$.
+-
+-**Outputs:**
+-*   Point set $P = \{p_i\}$ with associated attributes (position, normal, features, density).
+-*   Rendered color $\hat{C}$ and depth $\hat{D}$ if used in a rendering context.
++The method consists of two primary phases: point generation (sampling) and feature encoding (rendering preparation). The inputs are a ray $r(t) = \mathbf{o} + t\mathbf{d}$, a bounding volume $B$, and an SDF $f(\mathbf{p})$. The outputs are a set of sample points $P$ with associated features, or rendered color/depth if integrated immediately.
+ 
+ ### Data Structures
+-*   **Point $p$**: 3D vector $(x, y, z)$.
+-*   **Feature Vector $v$**: Concatenation of coordinate encoding $b(p)$ and interpolated grid features.
+-*   **Indicator Grid $G_o$**: A sparse or dense grid marking regions near the surface, used to filter uniform samples.
+-
+-### Steps
+-
+-1.  **Uniform Background Sampling (Optional):**
+-    Sample points uniformly in the bounding volume $B = [-1, 1]^3$ to form a set $P_u$ [S1, S2]. This ensures coverage of empty space or background [S1].
+-
+-2.  **Surface Hit Detection via Sphere Tracing:**
+-    For a given ray, perform sphere tracing to find the surface intersection [S1].
+-    *   Initialize $p = r_o$.
+-    *   Iterate: $d = S(p)$. If $d < 0$, penetration detected [S6]. If $d \le \text{HIT\_THRESHOLD}$, hit detected [S1]. Else, $p \leftarrow p + d \cdot d$ (step size).
+-    *   If a hit is found at $t_{hit}$, record the point $p_{hit} = r_o + t_{hit} \cdot d$ [S1].
+-
+-3.  **Near-Surface Perturbation:**
+-    To enrich the surface representation, take existing surface samples (from step 2 or mesh vertices) and perturb them with Gaussian noise [S1].
+-    *   $p_{perturbed} = p_{surface} + \mathcal{N}(0, \sigma^2 I)$
+-    *   Typical value: $\sigma = 0.01$ [S1].
+-    *   This creates "near-surface" points that help the SDF learn the gradient and thickness of the boundary [S1].
+-
+-4.  **Indicator Grid Filtering (Forplane/Neural Plane Context):**
+-    Pass uniform samples $P_u$ through an indicator grid $G_o$ to retain only those likely near the surface, forming the refined set $P$ [S2]. This reduces noise in regions far from the geometry.
+-
+-5.  **Feature Extraction and MLP Query (Neural Context):**
+-    For each point $p_i \in P$:
+-    *   Initialize feature vector $v(p_i) = 1$ [S2].
+-    *   Iterate over static and dynamic field levels $\{V^s_{3d}, V^d_{3d}\}_4$ and dimension pairs $(xy, xz, x\tau, yz, y\tau, z\tau)$ [S2].
+-    *   Perform bi-linear interpolation $B(G, i, j)$ on each grid $G$ for the dimension pair $ij$ [S2].
+-    *   Update features: $v(p_i) \leftarrow v(p_i) \odot B(G, i, j)$ [S2].
+-    *   Concatenate positional encoding $b(p_i)$ with features $v(p_i)$ [S2].
+-    *   Pass through tiny MLP $\theta$ to predict color $c_i$ and density $\sigma_i$ [S2].
+-
+-6.  **Projection Point Integration (Power Diagram Context):**
+-    For high-fidelity extraction, incorporate projection points derived from gradient information [S3].
+-    *   Compute gradient $\nabla S(p)$ at sampling points.
+-    *   Project points onto the surface along the gradient direction to correct topological defects [S3].
+-    *   These points are especially valuable for thin structures, sharp edges, and high curvature regions [S3].
+-
+-7.  **Rendering Integration (Optional):**
+-    Integrate radiance along the ray using the sampled points and predicted densities [S2]:
+-    $$ \hat{C} = \int_{t_n}^{t_f} w(t) \cdot c(r(t)) \, dt $$
++1.  **Uniform Point Set ($P_u$)**: A set of points uniformly distributed in the bounding volume $B = [-1, 1]^3$ or along the ray $r(t)$ [S1, S2].
++2.  **Indicator Grid ($G_o$)**: A data structure (e.g., a hash grid or voxel grid) that maps points to their proximity to the surface, used to filter $P_u$ into surface-adjacent points $P$ [S2].
++3.  **Feature Vector ($v$)**: For each point $\mathbf{p} \in P$, a vector initialized to 1, updated by interpolating values from static and dynamic fields [S2].
++4.  **Static/Dynamic Fields ($\{V^s_{3d}, V^d_{3d}\}_4$)**: Four levels of 3D fields storing geometric or temporal information [S2].
++5.  **Tiny MLP ($\theta$)**: A small neural network taking concatenated coordinates and features to predict color $c_i$ and density $\sigma_i$ [S2].
++
++### Algorithm Steps
++
++#### Phase 1: Point Sampling
++1.  **Generate Uniform Samples**: Create a set of points $P_u$ uniformly distributed in the bounding volume $B$ or along the ray $r(t)$ [S1, S2].
++2.  **Filter via Indicator Grid**: Pass $P_u$ through the indicator grid $G_o$ to obtain the final sample set $P$. Points in $P$ are distributed around the surface [S2].
++    *   *Alternative Surface Sampling*: For mesh-based SDFs, sample uniformly distributed points in $B$, choose random points on a sphere to form ray directions, and test for hits using sphere tracing. Continue until enough rays hit the surface [S1].
++    *   *Near-Surface Perturbation*: To capture near-surface geometry, take existing surface samples and perturb the vector with random Gaussian noise with standard deviation $\sigma = 0.01$ [S1].
++
++#### Phase 2: Feature Encoding and Rendering (Forplane Rendering Procedure)
++For each point $\mathbf{p} = (x, y, z, \tau)$ in $P$ (where $\tau$ is time):
++
++1.  **Initialize Feature Vector**: Set $v(x, y, z, \tau) = 1$ [S2].
++2.  **Interpolate Fields**: Iterate over the 4 levels of static and dynamic fields $\{V^s_{3d}, V^d_{3d}\}_4$ and corresponding dimension pairs $(xy, xz, x\tau, yz, y\tau, z\tau)$ [S2].
++    *   For each grid $G$ and dimension pair $ij$, perform bi-linear interpolation $B(G, i, j)$ [S2].
++    *   Update $v$ via element-wise multiplication: $v \leftarrow v \odot B(G, i, j)$ [S2].
++3.  **Concatenate Encoding**: Concatenate the coordinate-time encoding $b(x, y, z, \tau)$ with the interpolated features $v(x, y, z, \tau)$ [S2]. The encoding $b$ uses one-blob encoding separately on each coordinate value [S2].
++4.  **Predict Properties**: Pass the features through the tiny MLP $\theta$ to predict color $c_i$ and density $\sigma_i$:
++    $$ (c_i, \sigma_i) = \theta(\text{concat}(b, v)) $$
++    [S2].
++5.  **Volume Rendering Integration**: Render expected color $\hat{C}$ and depth $\hat{D}$ by integrating radiance and density along the ray using standard volume rendering equations [S2]:
++    $$ \hat{C} = \int_{t_n}^{t_f} w(t) \cdot c(r(t), \mathbf{d}) \, dt $$
+     $$ \hat{D} = \int_{t_n}^{t_f} w(t) \cdot t \, dt $$
+-    Where $w(t) = \exp\left(-\int_{t_n}^{t} \sigma(r(s)) \, ds\right) \sigma(r(t))$ [S2].
++    where the weight function is:
++    $$ w(t) = \sigma(r(t)) \exp \left( -\int_{t_n}^{t} \sigma(r(s)) \, ds \right) $$
++    [S2].
+ 
+ ### Pseudocode
+-
+ ```python
+-import numpy as np
+-
+-def sample_surface_points(ray_origin, ray_dir, sdf_func, max_steps=64, hit_threshold=0.001, sigma=0.01):
+-    """
+-    Samples points near the surface defined by sdf_func along a ray.
+-    Returns a list of points with attributes.
+-    """
+-    points = []
+-    p = ray_origin
+-    
+-    # 1. Sphere Tracing to find surface hit
+-    for i in range(max_steps):
+-        dist = sdf_func(p)
+-        
+-        # Check for penetration or hit
+-        if dist < 0:
+-            # Penetrated surface; record hit point (approximate)
+-            hit_point = p - ray_dir * dist # Backtrack to surface
+-            points.append({'pos': hit_point, 'type': 'hit'})
+-            break
+-        elif dist <= hit_threshold:
+-            # Hit surface
+-            points.append({'pos': p, 'type': 'hit'})
+-            break
+-        
+-        # Advance
+-        p = p + ray_dir * dist
+-        
+-        # Optional: Check max range
+-        if np.linalg.norm(p - ray_origin) > 100.0:
++def surface_point_sampling_and_rendering(ray_o, ray_d, t_min, t_max, 
++                                         indicator_grid, static_fields, dynamic_fields, 
++                                         tiny_mlp, num_samples=1000):
++    """
++    Implements the Forplane Rendering Procedure for SDFs.
++    
++    Inputs:
++        ray_o: Origin of the ray (3D vector)
++        ray_d: Direction of the ray (3D vector)
++        t_min: Near plane distance
++        t_max: Far plane distance
++        indicator_grid: Data structure to filter points near surface
++        static_fields: List of 4 static 3D fields {V^s_3d}
++        dynamic_fields: List of 4 dynamic 3D fields {V^d_3d}
++        tiny_mlp: Neural network predicting color and density
++        num_samples: Number of uniform points to generate
++        
++    Outputs:
++        color: Rendered color for the ray
++        depth: Rendered depth for the ray
++    """
++    
++    # Phase 1: Generate and Filter Points
++    # 1. Uniformly sample points along the ray r(t) to form point set P_u
++    t_values = np.linspace(t_min, t_max, num_samples)
++    P_u = ray_o + np.outer(t_values, ray_d) # Shape: (num_samples, 3)
++    
++    # 2. Pass P_u through the indicator grid G_o to get sample points P
++    # Note: The exact implementation of indicator_grid.filter depends on the specific data structure.
++    # Here we assume it returns a subset of P_u indices or points near the surface.
++    P_indices = indicator_grid.filter(P_u)
++    P = P_u[P_indices]
++    
++    # If P is empty (no surface hit), return background
++    if len(P) == 0:
++        return background_color, 0.0
++
++    # Phase 2: Feature Encoding and Integration
++    total_transmittance = 1.0
++    accumulated_color = np.zeros(3)
++    accumulated_depth = 0.0
++    
++    # Dimension pairs for interpolation
++    dim_pairs = [('xy', 'xz', 'x\tau'), ('yz', 'y\tau', 'z\tau')] # Simplified representation
++    # Actual pairs from source: (xy, xz, x\tau, yz, y\tau, z\tau)
++    all_dim_pairs = ['xy', 'xz', 'x\tau', 'yz', 'y\tau', 'z\tau']
++    
++    for p in P:
++        x, y, z = p
++        # Assume time tau is 0 for static, or derived from ray if dynamic
++        tau = 0.0 
++        
++        # 3. Initialize feature vector
++        v = np.array([1.0])
++        
++        # 4. Interpolate fields
++        # Iterate over 4 levels of static and dynamic fields
++        for level in range(4):
++            G_static = static_fields[level]
++            G_dynamic = dynamic_fields[level]
++            
++            for dim_pair in all_dim_pairs:
++                # Perform bi-linear interpolation B(G, i, j)
++                # Note: Bilinear interpolation on 3D fields for 2D planes requires 
++                # fixing the third dimension. The source implies interpolation on 
++                # specific 2D slices or projections.
++                val_static = bilinear_interpolate(G_static, x, y, z, dim_pair)
++                val_dynamic = bilinear_interpolate(G_dynamic, x, y, z, dim_pair)
++                
++                # Update v via element-wise multiplication
++                v = v * val_static * val_dynamic
++                
++        # 5. Concatenate coordinate-time encoding
++        # One-blob encoding for each coordinate
++        b = one_blob_encoding(x, y, z, tau)
++        features = np.concatenate([b, v])
++        
++        # 6. Predict color and density
++        c_i, sigma_i = tiny_mlp.predict(features)
++        
++        # 7. Volume Rendering Step
++        # Calculate delta t for this segment (approximate using distance to next point or fixed step)
++        # In a continuous integration, we sum over the sampled points.
++        # Here we approximate the integral as a sum over the discrete samples P.
++        # Weight w(t) = sigma * exp(-integral(sigma))
++        
++        # Approximate optical depth for this step
++        # In a rigorous implementation, we would track the accumulated sigma along the ray.
++        # For simplicity, assuming P is sorted by t:
++        if len(P) > 1:
++            idx = np.where(P_indices == np.where(P_indices == np.where(P == p)[0])[0])[0] # Find index
++            # This is complex to implement without full ray marching loop.
++            # Standard volume rendering loop is preferred over point-wise integration.
++            pass
++            
++        # Simplified accumulation for the sake of the "Point Sampling" method description:
++        # The source Algorithm 1 integrates over the points P.
++        # w(t) = sigma(r(t)) * exp(-integral_{tn}^{t} sigma(r(s)) ds)
++        # We need to compute the integral of sigma along the ray up to t.
++        
++        # Compute accumulated sigma up to current point p
++        current_t = np.dot(p - ray_o, ray_d)
++        accumulated_sigma = 0.0
++        for p_prev in P:
++            t_prev = np.dot(p_prev - ray_o, ray_d)
++            if t_prev < current_t:
++                # Approximate sigma contribution
++                # This is a simplification; true integration requires step sizes
++                accumulated_sigma += sigma_i * (current_t - t_prev) # Rough approximation
++        
++        weight = sigma_i * np.exp(-accumulated_sigma)
++        
++        accumulated_color += weight * c_i
++        accumulated_depth += weight * current_t
++        total_transmittance *= np.exp(-sigma_i) # Update transmittance for next point
++        
++        if total_transmittance < 1e-4:
+             break
+             
+-    # 2. Near-Surface Perturbation
+-    # If we found a hit, generate near-surface samples
+-    if points:
+-        base_point = points[0]['pos']
+-        # Generate N near-surface points with Gaussian noise
+-        for _ in range(10): # Example count
+-            noise = np.random.normal(0, sigma, 3)
+-            perturbed_point = base_point + noise
+-            points.append({'pos': perturbed_point, 'type': 'near_surface'})
+-            
+-    return points
+-
+-def neural_plane_feature_query(point, grids, positional_encoding):
+-    """
+-    Queries features from orthogonal planes/grids for a given point.
+-    """
+-    # Initialize feature vector
+-    v = np.ones(4) # Example dimension
+-    
+-    # Iterate over grid levels and dimension pairs
+-    dim_pairs = [('xy', 'xz', 'yz'), ('xy', 'xz', 'yz')] # Simplified for example
+-    for level_grids in grids:
+-        for dim_pair in dim_pairs:
+-            for grid in level_grids:
+-                # Bi-linear interpolation
+-                # B(G, i, j) depends on point coordinates projected to grid dimensions
+-                # Assuming grid is a 2D texture
+-                coords = project_to_2d(point, dim_pair)
+-                val = bilinear_interpolate(grid, coords)
+-                v = v * val # Element-wise multiplication
+-                
+-    # Concatenate with positional encoding
+-    b = positional_encoding(point)
+-    features = np.concatenate([b, v])
+-    return features
++    return accumulated_color, accumulated_depth
++
++def bilinear_interpolate(grid, x, y, z, dim_pair):
++    """
++    Performs bi-linear interpolation on a 3D grid for a specific 2D plane.
++    """
++    # Implementation depends on grid structure.
++    # For dim_pair 'xy', we might fix z or average over z.
++    # This is a placeholder for the specific interpolation logic defined in the source.
++    return 1.0 # Placeholder
++
++def one_blob_encoding(x, y, z, tau):
++    """
++    One-blob encoding for coordinates.
++    """
++    # One-blob encoding typically involves hashing or specific basis functions.
++    # Source mentions "oneblob [30] encoding separately on each of the four coordinate values".
++    return np.array([x, y, z, tau]) # Simplified
+ ```
+ 
+ ### Parameters and Edge Cases
+-*   **$\sigma$ (Noise Std Dev):** Controls the spread of near-surface points. $\sigma=0.01$ is typical [S1]. Too large causes points to fall into empty space; too small provides no gradient information.
+-*   **HIT_THRESHOLD:** Epsilon for surface detection. Must be small enough to avoid gaps but large enough to avoid precision issues [S1].
+-*   **Precision:** Floating-point errors in sphere tracing can cause jitter. Using double precision or adaptive step sizes can mitigate this [G].
+-*   **Degenerate Input:** If the SDF is undefined or returns NaN, the sampling loop should terminate and return empty results.
++*   **Bounding Volume $B$**: Typically $[-1, 1]^3$ [S1].
++*   **Noise Standard Deviation $\sigma$**: $0.01$ for near-surface perturbation [S1].
++*   **Indicator Grid**: The specific resolution and structure of $G_o$ are not given in the sources [S2].
++*   **Precision**: Floating-point precision issues may arise when $f(\mathbf{p})$ is very small, affecting the accuracy of the indicator grid filtering [G].
++*   **Degenerate Input**: If the ray does not intersect the surface, $P$ will be empty, and the method should return a background color [S2].
+ 
+ ## Subtopics
+ 
+-### [Surfel Parameterization from Mesh Sampling](4501-surfel-parameterization-from-mesh-sampling.md)
+-Estimates full parameter sets (position, normal, tangent, scales) for surfel representations from triangle meshes. It differs by deriving tangent scales from local point cloud neighborhood structure rather than mesh connectivity, offering isotropic (performance) and anisotropic (quality) variants.
+-
+ ### Near-Surface Point Sampling
+-Perturbs existing surface samples with Gaussian noise ($\sigma=0.01$) to create points near the surface, aiding in learning the SDF gradient and boundary thickness [S1].
++This method perturbs existing surface samples with random Gaussian noise ($\sigma = 0.01$) to capture geometry close to the surface [S1]. It is chosen when fine details near the surface are critical, such as in neural rendering of thin structures. It differs from uniform sampling by focusing density near the implicit boundary [S1].
+ 
+ ### Projection Point Integration
+-Incorporates projection points derived from gradient information into power diagram computations. It is chosen for reconstructing thin structures, sharp edges, and high-curvature regions where discrete sampling alone fails, preserving topological integrity [S3].
++This method incorporates projection points derived from gradient information into power diagram computation to accurately capture the underlying surface, particularly in regions with complex topology or fine details [S3]. It is chosen when topological integrity is crucial, as it preserves features like thin structures and sharp edges better than baseline sampling [S3]. It differs from standard sampling by using gradient-based projections to guide the power diagram construction [S3].
+ 
+ ### Surface Interaction Construction
+-Constructs a `SurfaceInteraction3f` structure from ray intersections, computing normals, frames, and other properties without SDF autodiff support. It sets the interaction time, position, and local frame for shading [S4, unofficial].
++This method constructs a `SurfaceInteraction3f` structure from a ray and intersection time, computing normal, frame, and other interaction properties without SDF autodiff support [S4, unofficial]. It is chosen when explicit interaction data is needed for shading or physics, and autodiff is unavailable [S4, unofficial]. It differs from other sampling methods by focusing on the construction of a complete interaction object rather than just point positions [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of samples $N$ and the cost of SDF evaluation $O(S)$. For neural methods, MLP evaluation adds $O(M)$. Total: $O(N \cdot (S + M))$.
+-*   **Memory Complexity:** $O(N)$ to store points and features. Grid-based methods add $O(G)$ for grid storage.
+-*   **Performance:** Efficient for real-time rendering if the number of samples is limited. Neural plane methods can be slower due to multiple grid lookups and MLP inference [S2].
+-*   **Strengths:** High geometric fidelity, handles complex topology with projection points, integrates well with neural fields.
+-*   **Limitations:** Requires careful tuning of noise and thresholds. Projection points add computational overhead.
++*   **Time Complexity**: The sampling phase is $O(N)$ where $N$ is the number of uniform points [S2]. The feature encoding phase involves iterating over 4 levels and 6 dimension pairs per point, making it $O(N \cdot L \cdot D)$ where $L=4$ and $D=6$ [S2]. The MLP inference is $O(N \cdot M)$ where $M$ is the MLP size [S2].
++*   **Memory Complexity**: Requires storing the indicator grid, static/dynamic fields, and the point set $P$ [S2].
++*   **Performance**: The method is designed for real-time rendering, using a "tiny MLP" to reduce computational cost [S2].
++*   **Strengths**: Captures surface details and temporal dynamics efficiently [S2].
++*   **Limitations**: Relies on the quality of the indicator grid and the MLP [S2].
+ 
+ ## Background
+-Originating from neural implicit representations, surface point sampling has evolved from simple uniform sampling to sophisticated strategies involving near-surface perturbations and projection-based refinement. Key developments include Neural Geometric Level of Detail (NGLOD) which uses uniform, surface, and near-surface samples [S1], and Efficient Deformable Tissue Reconstruction which uses indicator grids and neural planes [S2]. Power Diagram Enhanced Adaptive Isosurface Extraction integrates projection points for topological accuracy [S3].
++The method originates from research on neural geometric level of detail and efficient deformable tissue reconstruction [S1, S2]. It was developed to enable real-time rendering of implicit 3D shapes by combining sphere tracing with neural feature encoding [S1, S2]. The "Forplane Rendering Procedure" is specifically associated with the Efficient Deformable Tissue Reconstruction paper [S2].
+ 
+ ## Sources

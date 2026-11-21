@@ -1,0 +1,320 @@
+--- v005.md
++++ v006.md
+@@ -4,37 +4,55 @@
+ 
+ ## Overview
+-SDF to Density Conversion transforms a Signed Distance Function (SDF) $d(\mathbf{x})$ into a volumetric density field $\sigma(\mathbf{x})$ suitable for differentiable volume rendering [S1][S4, S5, unofficial]. It solves the problem of rendering continuous 3D surfaces without explicit mesh extraction by treating the zero-level set of the SDF as a volumetric boundary, allowing standard volume rendering to capture both surface appearance and thin structures [S2, S5, unofficial]. Unlike standard volume rendering which takes density directly, this method derives density from the distance to the implicit surface, enabling the representation of open surfaces and varying thickness through specific distribution functions [S1][S5, unofficial]. It sets itself apart from its siblings by providing the core mathematical mapping function, whereas [VolSDF Volume Rendering](2551-volsdf-volume-rendering.md) provides the complete rendering pipeline and [Volume SDF Rendering](1344-volume-sdf-rendering.md) focuses on the integration with neural SDF backends and specific parameterizations [S3][S5, unofficial].
++SDF to Density Conversion transforms a Signed Distance Function (SDF) value $d(\mathbf{x})$ into a volumetric density $\sigma(\mathbf{x})$ or intermediate opacity $\rho(\mathbf{x})$ suitable for differentiable volume rendering [S4, S5, unofficial][S9]. It solves the problem of rendering continuous 3D implicit surfaces without explicit mesh extraction by treating the zero-level set of the SDF as a volumetric boundary [G]. Unlike standard volume rendering which takes density directly, this method derives density from the distance to the implicit surface, enabling the representation of open surfaces and varying thickness through exponential or sigmoidal falloffs [S1][S4, S5, unofficial]. It sets itself apart from its siblings by providing the core mathematical mapping function, whereas [VolSDF Volume Rendering](2551-volsdf-volume-rendering.md) provides the complete rendering pipeline and [Volume SDF Rendering](1344-volume-sdf-rendering.md) focuses on neural integration with analytic backends [S3].
+ 
+ ## How it works
+-The method maps the signed distance $d$ at a point $\mathbf{x}$ to an intermediate density $\rho$ using exponential falloffs controlled by learnable or tuned parameters $\alpha$ and $\beta$, then converts this to final volume density $\sigma$ based on ray step size [S4, S5, unofficial].
+-
+-**Inputs and Outputs:**
+-*   **Input:** Signed distance value $d$ (or array of values), parameters $\alpha$ (scale), $\beta$ (falloff/sharpness), and ray segment length $\Delta t$ (or $\Delta$).
+-*   **Output:** Volume density $\sigma$ (and optionally color features).
++**Inputs:**
++- Signed distance value $d$ (or $s = -d$) at a point $\mathbf{x}$ along a ray [S4, S5, unofficial].
++- Parameters $\alpha$ (scaling factor) and $\beta$ (falloff/sharpness control) [S4, S5, unofficial].
++- Ray segment length $\Delta t$ (distance between consecutive sample points) [S4, S5, unofficial].
++- Optional: `rainbow` flag for color generation [S4, S5, unofficial].
++
++**Outputs:**
++- Volumetric density $\sigma$ (or extinction coefficient) [S4, S5, unofficial].
++- Intermediate density $\rho$ (opacity probability) [S4, S5, unofficial].
++- Feature/color vector $c$ [S4, S5, unofficial].
+ 
+ **Data Structures:**
+-*   **SDF Field:** A spatially indexed function (grid, texture, or procedural) satisfying the Eikonal equation $|\nabla d(\mathbf{x})| = 1$ [S1].
+-*   **Parameters:**
+-    *   $\alpha$ (alpha): Scalar multiplier for intermediate density, controls overall opacity. Initialized from configuration or learned [S4, S5, unofficial].
+-    *   $\beta$ (beta): Scalar controlling the exponential falloff rate. Smaller values yield sharper surfaces [S4, S5, unofficial].
+-    *   $\Delta t$ (delta_t): Distance between consecutive sample points along the ray [S4, S5, unofficial].
+-
+-**Numbered Steps:**
+-1.  **Evaluate SDF:** Compute the signed distance $d$ at the sample point $\mathbf{x}$ along the ray. If $d > 0$, the point is outside the surface; if $d < 0$, it is inside [S4, S5, unofficial].
+-2.  **Compute Intermediate Density ($\rho$):** Map $d$ to $\rho$ using a piecewise exponential function. Two common formulations exist:
+-    *   *Formulation A (VolSDF/NeuS style):*
+-        $$ \psi = \begin{cases} 0.5 e^{-d / \beta} & d > 0 \\ 1 - 0.5 e^{d / \beta} & d \le 0 \end{cases} $$
+-        $$ \rho = \alpha \cdot \psi $$
+-        [S4, S5, unofficial]
+-    *   *Formulation B (NeuS Sigmoid style):*
+-        $$ 1 - T(t) = \text{sigmoid}(s \cdot -d) $$
+-        where $s$ is a global scaling coefficient acting as sharpness [S9].
+-3.  **Compute Final Density ($\sigma$):** Convert intermediate density to volume density by accounting for the ray step size $\Delta t$. This ensures the transmittance is consistent regardless of sampling density [S4, S5, unofficial].
+-    $$ \sigma = -\frac{\ln(1 - \rho)}{\Delta t} $$
+-    [S4, S5, unofficial]
+-    *Note:* If $\rho$ is computed via the sigmoid formulation, $\sigma$ is derived implicitly through the derivative of the CDF [S9].
+-4.  **Compute Color Features (Optional):**
+-    *   Compute `base_color`. If `rainbow` mode is enabled, `base_color` is derived from the position relative to the SDF center, clamped to $[0.02, 0.98]$. Otherwise, it is $1.0$ [S4, S5, unofficial].
+-    *   Multiply `base_color` by a learnable feature tensor and the intermediate density $\rho$ (or $\sigma$ depending on implementation) to get the final feature vector [S4, S5, unofficial].
++- Scalar values for $d, \alpha, \beta, \Delta t$.
++- Vectors for sample points $\mathbf{x}$ and features $c$.
++
++**Steps:**
++
++1. **Compute Signed Distance:** Evaluate the SDF at the sample point $\mathbf{x}$ to get $d(\mathbf{x})$ [S5, unofficial].
++2. **Normalize Distance:** Compute $s = -d(\mathbf{x})$. This ensures $s > 0$ inside the object and $s < 0$ outside, aligning with the exponential falloff definition [S5, unofficial].
++3. **Compute Intermediate Density ($\psi$ or $\rho$):** Apply the piecewise exponential function [S4, S5, unofficial]:
++   $$
++   \psi(s) = \begin{cases} 
++   0.5 \cdot \exp(s / \beta) & \text{if } s \le 0 \\
++   1 - 0.5 \cdot \exp(-s / \beta) & \text{if } s > 0 
++   \end{cases}
++   $$
++   Scale by $\alpha$ to get the intermediate density $\rho$:
++   $$
++   \rho = \alpha \cdot \psi(s)
++   $$
++   Here, $\beta$ controls the sharpness of the transition; smaller $\beta$ yields sharper surfaces [S5, unofficial]. $\alpha$ controls overall opacity [S4, unofficial].
++4. **Compute Volumetric Density ($\sigma$):** Convert intermediate density to volumetric density using the ray segment length $\Delta t$ [S4, S5, unofficial]:
++   $$
++   \sigma = -\frac{\ln(1 - \rho)}{\Delta t}
++   $$
++   This step ensures that the probability of absorption over the segment $\Delta t$ matches $\rho$ [S5, unofficial].
++5. **Compute Color/Feature (Optional):**
++   - If `rainbow` is true, compute base color from position:
++     $$
++     \text{base\_color} = \text{clamp}(|\mathbf{x} - \mathbf{c}|, 0.02, 0.98)
++     $$
++     where $\mathbf{c}$ is the center [S4, S5, unofficial].
++   - Else, $\text{base\_color} = 1.0$ [S4, S5, unofficial].
++   - Final feature:
++     $$
++     c = \text{base\_color} \cdot \text{feature\_param} \cdot \rho
++     $$
++     (Note: Some implementations multiply by $\rho$ or use $\rho$ for weighting [S4, S5, unofficial]).
+ 
+ **Pseudocode:**
+@@ -43,122 +61,96 @@
+ import math
+ 
+-def sdf_to_density(signed_distance: torch.Tensor, alpha: float, beta: float) -> torch.Tensor:
+-    """
+-    Converts signed distance values to intermediate density using exponential falloff.
+-    
+-    Args:
+-        signed_distance: Tensor of SDF values d.
+-        alpha: Scaling factor for density.
+-        beta: Falloff sharpness parameter.
+-        
+-    Returns:
+-        Intermediate density rho.
+-    """
+-    # Formulation A: Piecewise exponential
+-    # If d > 0 (outside): 0.5 * exp(-d/beta)
+-    # If d <= 0 (inside):  1 - 0.5 * exp(d/beta)
+-    # Note: Some implementations use s = -d to simplify logic [S5, unofficial]
+-    
+-    # Using the direct d formulation from [S4, unofficial]
+-    inside = signed_distance <= 0.0
+-    outside = ~inside
+-    
+-    # Calculate psi components
+-    # For inside: 0.5 * exp(d / beta) -> wait, [S4, unofficial] says 1 - 0.5 * exp(d/beta) for d<=0
+-    # Let's follow [S4, unofficial] exactly:
+-    # rho = 0.5 * exp(-d/beta) for d > 0
+-    # rho = 1 - 0.5 * exp(d/beta) for d <= 0
+-    
+-    psi_inside = 1.0 - 0.5 * torch.exp(signed_distance / beta)
+-    psi_outside = 0.5 * torch.exp(-signed_distance / beta)
+-    
+-    psi = torch.where(inside, psi_inside, psi_outside)
++def sdf_to_density(signed_distance, alpha, beta):
++    """
++    Converts signed distance to intermediate density.
++    signed_distance: torch.Tensor of shape (N,)
++    alpha: float, scaling factor
++    beta: float, falloff sharpness
++    """
++    # s = -d, so s > 0 inside, s < 0 outside
++    s = -signed_distance
++    
++    # Piecewise exponential
++    # Inside (s <= 0): 0.5 * exp(s / beta)
++    # Outside (s > 0): 1 - 0.5 * exp(-s / beta)
++    psi = torch.where(
++        s <= 0.0,
++        0.5 * torch.exp(s / beta),
++        1.0 - 0.5 * torch.exp(-s / beta)
++    )
+     
+     # Scale by alpha
+     density_intermediate = alpha * psi
+-    
+     return density_intermediate
+ 
+-def compute_volume_density(intermediate_density: torch.Tensor, delta_t: torch.Tensor) -> torch.Tensor:
+-    """
+-    Converts intermediate density to volume density sigma using ray step size.
+-    
+-    Args:
+-        intermediate_density: rho from sdf_to_density.
+-        delta_t: Distance between sample points along the ray.
+-        
+-    Returns:
+-        Volume density sigma.
+-    """
+-    # Formula: sigma = -ln(1 - rho) / delta_t
+-    # Guard against log(0) or negative arguments due to precision
+-    rho_clamped = torch.clamp(intermediate_density, min=0.0, max=1.0 - 1e-6)
+-    
+-    sigma = -torch.log(1.0 - rho_clamped) / delta_t
+-    
++def compute_volumetric_density(density_intermediate, delta_t):
++    """
++    Converts intermediate density to volumetric density sigma.
++    density_intermediate: torch.Tensor of shape (N,)
++    delta_t: torch.Tensor of shape (N,), segment lengths
++    """
++    # Avoid log(0) or log(negative) by clamping density_intermediate to [0, 1)
++    # In practice, density_intermediate should be < 1 if alpha is tuned correctly.
++    # If density_intermediate >= 1, sigma becomes infinite or NaN.
++    clamped_density = torch.clamp(density_intermediate, min=0.0, max=0.9999)
++    
++    sigma = -torch.log(1.0 - clamped_density) / delta_t
+     return sigma
+ 
+-def render_step(sdf_fn, ray_bundle, alpha, beta, rainbow=False, center=None, feature_param=None):
+-    """
+-    Full rendering step converting SDF to density and color.
+-    
+-    Args:
+-        sdf_fn: Function evaluating SDF at points.
+-        ray_bundle: Contains sample_points and deltas.
+-        alpha, beta: Density parameters.
+-        rainbow: Boolean for color mode.
+-        center: Center point for rainbow coloring.
+-        feature_param: Learnable feature tensor.
+-        
+-    Returns:
+-        Dict with 'density' and 'feature'.
++def render_step(ray_bundle, sdf_fn, alpha, beta, rainbow=False, center=None, feature_param=None):
++    """
++    Full rendering step for SDF to density conversion.
++    ray_bundle: dict with 'sample_points' (N, 3) and 'deltas' (N,)
++    sdf_fn: callable returning signed distance
+     """
+     # 1. Extract sample points and depth values
+-    sample_points = ray_bundle.sample_points
+-    deltas = ray_bundle.deltas
+-    
+-    # 2. Pad last segment to prevent division by zero [S4, unofficial]
+-    # Assuming deltas has length N-1 for N points, or N for N segments.
+-    # If deltas is length N-1, pad with large value.
+-    if deltas.shape[0] < sample_points.shape[0]:
+-        last_delta = torch.full((1,), 1e10, device=deltas.device)
+-        deltas = torch.cat([deltas, last_delta], dim=0)
++    points = ray_bundle['sample_points']
++    deltas = ray_bundle['deltas']
++    
++    # 2. Handle last segment padding if necessary (e.g., ray termination)
++    # If the last delta is 0 or undefined, pad with a large value to prevent division by zero
++    if deltas[-1] == 0 or torch.isnan(deltas[-1]):
++        deltas[-1] = 1e10
+         
+     # 3. Evaluate SDF
+-    signed_distance = sdf_fn(sample_points)
++    signed_distances = sdf_fn(points)
+     
+     # 4. Convert to intermediate density
+-    rho = sdf_to_density(signed_distance, alpha, beta)
+-    
+-    # 5. Compute final volume density
+-    sigma = compute_volume_density(rho, deltas)
++    density_inter = sdf_to_density(signed_distances, alpha, beta)
++    
++    # 5. Compute volumetric density
++    sigma = compute_volumetric_density(density_inter, deltas)
+     
+     # 6. Compute base color
+     if rainbow:
+         if center is None:
+-            center = torch.zeros_like(sample_points)
+-        base_color = torch.abs(sample_points - center)
++            center = torch.zeros(3, device=points.device)
++        base_color = torch.abs(points - center)
+         base_color = torch.clamp(base_color, min=0.02, max=0.98)
+     else:
+-        base_color = torch.ones_like(sample_points[..., :1]) # Assuming 1D or broadcastable
++        base_color = torch.ones_like(points)
+         
+-    # 7. Compute feature
+-    # feature = base_color * feature_param * rho (or sigma? [S5, unofficial] says density_ which is rho)
+-    if feature_param is not None:
+-        feature = base_color * feature_param * rho
+-    else:
+-        feature = base_color * rho
+-        
++    # 7. Compute final feature
++    if feature_param is None:
++        feature_param = torch.ones(1, device=points.device)
++    feature = base_color * feature_param * density_inter # Or sigma, depending on specific impl [S4, S5, unofficial]
++    
+     return {
+         'density': sigma,
+-        'feature': feature
++        'feature': feature,
++        'depth': ray_bundle['depth'] # Assuming depth is passed or computed
+     }
+ ```
+ 
++**Parameters:**
++- $\alpha$: Scalar multiplier for intermediate density, controls overall opacity. Typical values are learned or tuned constants [S4, S5, unofficial].
++- $\beta$: Scalar controlling exponential falloff rate. Smaller values yield sharper surfaces [S5, unofficial]. Typical values are learned or tuned constants [S5, unofficial].
++- `rainbow`: Boolean flag. If true, computes base color from position; else 1.0 [S4, S5, unofficial].
++- `sharpness` (in Glass Ball IOR): Controls gradient of IOR transition, value 7 in example [S2, unofficial].
++
+ **Edge Cases and Pitfalls:**
+-*   **Division by Zero:** The last segment's delta $\Delta t$ must be padded with a large value (e.g., $10^{10}$) to prevent division by zero or undefined behavior when the ray exits the sampling volume [S4, unofficial].
+-*   **Log Domain Errors:** Ensure $\rho < 1$ before taking $\ln(1-\rho)$ to avoid numerical instability. Clamp $\rho$ to $[0, 1-\epsilon]$ [S5, unofficial].
+-*   **Gradient Flow:** The conversion must be differentiable with respect to spatial coordinates and parameters $\alpha, \beta$ to enable gradient-based optimization [S1]. The exponential and sigmoid functions used are smooth and differentiable everywhere.
+-*   **Topology Preservation:** Modifications to the SDF must not alter the sign of the level set at the boundary, preserving the binary classification of inside/outside [S1].
++- **Division by Zero:** The last segment's delta is padded with $10^{10}$ to prevent division by zero when the ray exits the sampling volume [S4, S5, unofficial].
++- **Density > 1:** If $\rho \ge 1$, $\ln(1-\rho)$ is undefined. Ensure $\alpha$ is tuned such that $\rho < 1$ [S5, unofficial].
++- **Precision:** Floating-point precision issues may arise for very small $\beta$ or large distances [G].
+ 
+ ## Subtopics
+@@ -180,30 +172,29 @@
+ 
+ ### Procedural Index of Refraction Distribution
+-Simulates mirages by creating a non-uniform distribution of the index of refraction (IOR) in air, where IOR decreases with increasing temperature [S2, unofficial]. It creates a normal lapse layer ($index = 0.95 \cdot 2^z$) and an inversion layer ($index = 0.8^z$), combines them via minimum, and sets IOR to 1.0 for $z < 0$ [S2, unofficial]. It also simulates a glass ball by calculating radial offset from ball radius and applying a sharpness-controlled linear falloff, clipping IOR to $[1, 1.5]$ [S2, unofficial].
++Simulates mirages by creating a non-uniform distribution of the index of refraction (IOR) in air, where IOR decreases with increasing temperature [S2, unofficial]. It creates a normal lapse layer ($index = 0.95 \cdot 2^z$) and an inversion layer ($index = 0.8^z$), combines them via minimum, and sets IOR to 1.0 for $z < 0$ [S2, unofficial]. It clips IOR to $[1, 1.5]$ and uses a sharpness parameter (7) to control the gradient of the IOR transition from a glass ball surface [S2, unofficial].
+ 
+ ### FBM-based Implicit Density Definition
+-Defines an implicit volumetric object where density $\rho$ is derived from a Fractional Brownian Motion (FBM) field $f$. Density is zero when $f(\mathbf{p}) < v$, and remapped via a positive function $h$ when $f(\mathbf{p}) \ge v$. The 0-isosurface of $\rho$ corresponds to the v-isosurface of $f$ [S6]. Pitfall: If $h$ is not positive, the 0-isosurface correspondence fails [S6].
++Defines an implicit volumetric object where density $\rho$ is derived from a Fractional Brownian Motion (FBM) field $f$ [S6]. Density is zero when $f(\mathbf{p}) < v$, and remapped via a positive function $h$ when $f(\mathbf{p}) \ge v$ [S6]. The 0-isosurface of $\rho$ corresponds to the $v$-isosurface of $f$ [S6]. Pitfall: If $h$ is not positive, the correspondence breaks [S6].
+ 
+ ### Density-based Volume Region
+-Extends VolumeRegion by scaling absorption, scattering, extinction, and emission coefficients by a spatially varying density function $density(\mathbf{pt})$ [S7, unofficial]. Fields include base spectra ($\sigma_a, \sigma_s, l_e$) and Henyey-Greenstein anisotropy $g_{scatter}$ [S7, unofficial].
++Extends VolumeRegion by scaling absorption, scattering, extinction, and emission coefficients by a spatially varying density function $density(\mathbf{pt})$ [S7, unofficial]. Formulas: $\sigma_a(\mathbf{pt}) = \sigma_a \cdot density(\mathbf{pt})$, $\sigma_s(\mathbf{pt}) = \sigma_s \cdot density(\mathbf{pt})$, $\sigma_t(\mathbf{pt}) = (\sigma_a + \sigma_s) \cdot density(\mathbf{pt})$, $L_{ve}(\mathbf{pt}) = L_e \cdot density(\mathbf{pt})$ [S7, unofficial]. Uses Henyey-Greenstein phase function with parameter $g_{scatter}$ [S7, unofficial].
+ 
+ ### Smeared Heaviside Function for Mean Curvature
+-A smeared-out Heaviside function $H$ used to compute mean curvature for regularization, defined piecewise based on a threshold $\epsilon_H$ [S8]. $\epsilon_H$ is the mean edge distance between sites, excluding the 5% longer edges [S8].
++A smeared-out Heaviside function $H$ used to compute mean curvature for regularization [S8]. Defined piecewise based on threshold $\epsilon_H$: $H(\hat{\phi}) = 0$ if $\hat{\phi} < -\epsilon_H$; $1/2 + \hat{\phi}/(2\epsilon_H) + (1/(2\pi))\sin(\pi\hat{\phi}/\epsilon_H)$ if $-\epsilon_H \le \hat{\phi} \le \epsilon_H$; $1$ if $\hat{\phi} > \epsilon_H$ [S8]. $\epsilon_H$ is the mean edge distance between sites, excluding the 5% longer edges [S8].
+ 
+ ### NeuS Volume Rendering Transformation
+-Transforms SDF values into volumetric densities for alpha compositing, ensuring the CDF of volume rendering matches a scaled, flipped sigmoid shape [S9]. The transmittance $T(t)$ is related to SDF $S(t)$ by $1 - T(t) = \text{sigmoid}(s \cdot -SDF(t))$, where $s$ is a learned global scaling coefficient [S9]. This ties the magnitude of volume density globally to its sharpness, which is alpha-invariant but restrictive [S9].
++Transforms SDF values into volumetric densities for alpha compositing, ensuring the CDF of volume rendering matches a scaled, flipped sigmoid shape [S9]. Transmittance $T(t)$ is related to SDF $S(t)$ by $1 - T(t) = \text{sigmoid}(s \cdot -SDF(t))$, where $s$ is a global scaling coefficient [S9]. The weighting function $w(t)$ has local maxima at SDF value 0 [S9]. Pitfall: Ties magnitude of volume density globally to sharpness via $s$, which is restrictive [S9].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of sample points along the ray. The SDF evaluation and density conversion are constant-time operations per point [S4, S5, unofficial].
+-*   **Memory Complexity:** $O(N)$ for storing sample points, SDF values, and densities during a forward pass. The SDF itself may require $O(V)$ memory if stored as a grid, or $O(1)$ if procedural/neural [S4, S5, unofficial].
+-*   **Measured Performance:** Performance depends heavily on the SDF evaluation method (neural network vs. analytic primitive) and the number of samples per ray [S4, S5, unofficial].
+-*   **Scaling:** Scales linearly with the number of samples. Adaptive sampling can reduce $N$ in empty space [S4, unofficial].
+-*   **Strengths:** Differentiable, allows for smooth anti-aliasing, supports thin structures and open surfaces, integrates well with neural rendering pipelines [S1][S4, S5, unofficial].
+-*   **Limitations:** Requires careful tuning of $\alpha$ and $\beta$ for different scenes. The assumption of a valid distance function (Eikonal equation) is critical [S1]. The global scaling in NeuS can be restrictive [S9].
+-*   **When to Use:** When rendering implicit surfaces defined by SDFs, especially in neural rendering contexts (NeRF, VolSDF, NeuS) [S1][S5, unofficial][S9].
+-*   **When Not to Use:** When explicit meshes are available and preferred, or when the SDF is not a valid distance function [S1].
++- **Time Complexity:** $O(N)$ where $N$ is the number of sample points along rays [S4, S5, unofficial].
++- **Memory Complexity:** $O(N)$ for storing intermediate densities and features [S4, S5, unofficial].
++- **Performance:** Efficient on GPU due to vectorized operations (e.g., `torch.where`) [S5, unofficial].
++- **Strengths:** Differentiable, allows for gradient-based optimization of SDF parameters [S4, S5, unofficial]. Handles thin structures and open surfaces [S1].
++- **Limitations:** Requires careful tuning of $\alpha$ and $\beta$ to avoid artifacts [S5, unofficial]. Sensitive to ray sampling density [G].
++- **When to Use:** Neural implicit surface rendering, differentiable rendering, volume visualization of implicit surfaces [S4, S5, unofficial].
++- **When Not to Use:** When explicit meshes are available and preferred, or when non-differentiable rendering is sufficient [G].
+ 
+ ## Background
+-The method originates from the need to render implicit surfaces using volume rendering techniques, particularly in the context of Neural Radiance Fields (NeRF) and neural implicit representations. Key papers include VolSDF [Yariv et al. 2021] and NeuS [Wang et al. 2021], which introduced differentiable volume rendering from SDFs [S1, S9]. The technique has been widely adopted in subsequent works for inverse rendering and 3D reconstruction [S1].
++Originated in the context of neural implicit surface representations like VolSDF [Wang et al. 2021] and NeuS [Yariv et al. 2021] [S1]. VolSDF learns scaling and shrinking coefficients on distance-transformed volume densities [S9]. NeuS demands the CDF of volume rendering to match a sigmoid shape [S9]. The method is widely used in differentiable rendering and inverse rendering applications [S1].
+ 
+ ## Sources

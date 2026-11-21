@@ -1,0 +1,1404 @@
+# Streaming Binary Greedy Meshing
+
+**A cache-friendly variant of the Binary Greedy Meshing algorithm that pipelines visibility and meshing together.**
+
+Streaming Binary Greedy Meshing (SBGM) is a performance-oriented variant of the Binary Greedy Meshing (BGM) algorithm that combines face visibility generation and greedy merging into a streaming traversal, retaining two rolling face data slices instead of six full chunk face arrays.
+
+This repository contains the SBGM implementation, the reference BGM implementation used as a baseline, a terrain generator, a benchmarking harness, and a validator that compares both meshers to a brute force visibility algorithm.
+
+**Project status:** This repository is an experimental implementation to demonstrate the algorithm and is not production ready. It intentionally stores chunks as 62³ voxels with a 1-voxel padding halo (64³) for algorithmic simplicity.
+
+## How it works
+Traditional BGM first builds six exposed face mask arrays, one per direction, then meshes each direction in its own pass. These masks alone are 180 KiB, do not fit in L1 data cache (most consumer CPUs have 32/48 KiB L1D), and consequently get evicted before they are consumed in the meshing pass.
+
+SBGM instead traverses a chunk one x-slice at a time, maintaining two rolling buffers of x-slices and per-direction merge state, and emits quads for all six directions as runs terminate. This reduces exposed face data down to two 11 KiB slices that are immediately consumed for meshing, improving cache locality.
+
+## Algorithm comparison
+<table>
+<tr>
+<th>BGM</th>
+<th>SBGM</th>
+</tr>
+<tr>
+<td>
+
+```
+build six full-chunk face masks
+
+for each face direction:
+    find and merge compatible face runs
+    emit a quad for each completed rectangle
+```
+
+</td>
+<td>
+
+```
+build face data for x-slices 1 and 2
+
+for each interior x-slice:
+    for each z-column:
+        process visible X faces
+        process completed Y merge runs
+        process visible Z faces
+        emit a quad whenever a compatible run cannot continue
+
+    discard the previous slice
+    build the next x-slice into the freed buffer
+```
+
+</td>
+</tr>
+</table>
+
+## Results
+Caveat: benchmark numbers are on a single machine and a single benchmark terrain type and will vary.
+
+Benchmarking is done using a deterministic sinusoidal heightmap terrain and may not be representative of all workloads.
+A single untimed warmup pass is done before measurement to ensure cache and branch predictor are warm.
+
+Ryzen 5 5600x, Windows 10, MSVC 19.44.35221.0, 64x64 grid at 8 iterations:
+```
+mesher                   median          min          max      avg quads           throughput
+BGM              100.27 us/chunk     98.83 us    100.67 us         2011.6        9,973 chunks/s
+SBGM              37.52 us/chunk     37.33 us     38.53 us         1973.9       26,650 chunks/s
+
+speedup: 2.67x
+```
+<sup><sub>Quad counts differ as SBGM merges adjacent faces in a different order; the benchmark validator confirms functionally equivalent coverage</sub></sup>
+
+## Requirements
+- CMake 3.20+
+- C++17 compiler
+- A "modern" (2013 or newer) x86-64 CPU supporting AVX2/BMI/BMI2
+
+## Build and run
+
+```sh
+cmake -S . -B build
+cmake --build build --config Release
+
+# Windows
+.\build\Release\sbgm_benchmark.exe [grid_width] [grid_depth] [iterations]
+# Linux
+./build/sbgm_benchmark [grid_width] [grid_depth] [iterations]
+```
+
+## License
+MIT - see [LICENSE](LICENSE).
+
+## Attribution
+[Binary Greedy Meshing](https://github.com/cgerikj/binary-greedy-meshing) - Original algorithm. The reference implementation [`mesher.h`](mesher.h) originates from this project and is licensed separately under its own MIT license included in the file header.
+
+### main.cpp
+```
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
+
+#define BM_IMPLEMENTATION
+#include "mesher.h"
+
+#define SBGM_IMPLEMENTATION
+#include "sbgm.h"
+
+#include "terrain.h"
+#include "validator.h"
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <exception>
+#include <numeric>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+using terrain::Chunk;
+
+constexpr size_t kMaxQuads =
+    (size_t)terrain::kChunkSize * terrain::kChunkSize * terrain::kChunkSize * 6;
+
+struct ReferenceScratch {
+    std::array<uint64_t, terrain::kChunkSize * terrain::kChunkSize * 6> face_masks{};
+    std::array<uint8_t, terrain::kChunkSize * terrain::kChunkSize> forward_merged{};
+    std::array<uint8_t, terrain::kChunkSize> right_merged{};
+    std::vector<uint64_t> vertices = std::vector<uint64_t>(kMaxQuads);
+    MeshData mesh_data{};
+
+    ReferenceScratch()
+    {
+        mesh_data.faceMasks = face_masks.data();
+        mesh_data.forwardMerged = forward_merged.data();
+        mesh_data.rightMerged = right_merged.data();
+        mesh_data.vertices = &vertices;
+        mesh_data.maxVertices = (int)vertices.size();
+    }
+
+    size_t run(const Chunk& chunk)
+    {
+        mesh_data.opaqueMask = const_cast<uint64_t*>(chunk.opaque_mask.data());
+        ::mesh(chunk.voxels.data(), mesh_data);
+
+        size_t count = 0;
+        for (int face = 0; face < 6; ++face)
+            count += (size_t)mesh_data.faceVertexLength[face];
+        return count;
+    }
+};
+
+struct Stats {
+    double mean_us;
+    double median_us;
+    double min_us;
+    double max_us;
+};
+
+static Stats summarize(std::vector<double> values)
+{
+    const double total = std::accumulate(values.begin(), values.end(), 0.0);
+    std::sort(values.begin(), values.end());
+    return {
+        total / (double)values.size(),
+        values[values.size() / 2],
+        values.front(),
+        values.back(),
+    };
+}
+
+template <typename MeshChunk>
+static double measure_batch_us(const std::vector<Chunk>& chunks,
+                               MeshChunk&& mesh_chunk,
+                               volatile uint64_t& result_sink)
+{
+    uint64_t batch_quads = 0;
+    const auto begin = Clock::now();
+    for (const Chunk& chunk : chunks)
+        batch_quads += mesh_chunk(chunk);
+    const double elapsed =
+        std::chrono::duration<double, std::micro>(Clock::now() - begin).count();
+
+    result_sink = result_sink + batch_quads;
+    return elapsed / (double)chunks.size();
+}
+
+struct Options {
+    int grid_w = 64;
+    int grid_d = 64;
+    int iterations = 8;
+};
+
+struct ValidationResult {
+    uint64_t reference_quads = 0;
+    uint64_t sbgm_quads = 0;
+};
+
+struct BenchmarkResult {
+    Stats reference;
+    Stats sbgm;
+};
+
+static Options parse_options(int argc, char** argv)
+{
+    Options options;
+    if (argc > 1)
+        options.grid_w = std::max(1, std::atoi(argv[1]));
+    if (argc > 2)
+        options.grid_d = std::max(1, std::atoi(argv[2]));
+    if (argc > 3)
+        options.iterations = std::max(1, std::atoi(argv[3]));
+    return options;
+}
+
+static std::vector<Chunk> make_dataset(const Options& options)
+{
+    return terrain::make_dataset(options.grid_w, options.grid_d);
+}
+
+static ValidationResult validate_dataset(const std::vector<Chunk>& chunks,
+                                         ReferenceScratch& reference,
+                                         sbgm::MeshData& optimized)
+{
+    ValidationResult result;
+
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        result.reference_quads += reference.run(chunks[i]);
+        result.sbgm_quads += sbgm::mesh(chunks[i].voxels.data(),
+                                        chunks[i].opaque_mask.data(), optimized);
+        validator::validate(chunks[i].voxels.data(), reference.mesh_data,
+                            reference.vertices, optimized, i);
+    }
+    std::printf("correctness: PASS (visible faces and materials match)\n");
+    return result;
+}
+
+static void warm_up(const std::vector<Chunk>& chunks,
+                    ReferenceScratch& reference,
+                    sbgm::MeshData& optimized)
+{
+    for (const Chunk& chunk : chunks) {
+        reference.run(chunk);
+        sbgm::mesh(chunk.voxels.data(), chunk.opaque_mask.data(), optimized);
+    }
+}
+
+static BenchmarkResult benchmark(const std::vector<Chunk>& chunks,
+                                 int iterations,
+                                 ReferenceScratch& reference,
+                                 sbgm::MeshData& optimized)
+{
+    std::vector<double> reference_samples;
+    std::vector<double> sbgm_samples;
+    reference_samples.reserve((size_t)iterations);
+    sbgm_samples.reserve((size_t)iterations);
+
+    volatile uint64_t result_sink = 0;
+    for (int iteration = 0; iteration < iterations; ++iteration) {
+        auto measure_reference = [&] {
+            return measure_batch_us(chunks, [&](const Chunk& chunk) {
+                return reference.run(chunk);
+            }, result_sink);
+        };
+        auto measure_sbgm = [&] {
+            return measure_batch_us(chunks, [&](const Chunk& chunk) {
+                return sbgm::mesh(chunk.voxels.data(),
+                                  chunk.opaque_mask.data(), optimized);
+            }, result_sink);
+        };
+
+        if ((iteration & 1) != 0) {
+            sbgm_samples.push_back(measure_sbgm());
+            reference_samples.push_back(measure_reference());
+        } else {
+            reference_samples.push_back(measure_reference());
+            sbgm_samples.push_back(measure_sbgm());
+        }
+    }
+
+    return {summarize(reference_samples), summarize(sbgm_samples)};
+}
+
+static std::string format_integer(uint64_t value)
+{
+    std::string result = std::to_string(value);
+    for (size_t position = result.size(); position > 3; position -= 3)
+        result.insert(position - 3, 1, ',');
+    return result;
+}
+
+static void print_report(const BenchmarkResult& benchmark_result,
+                         const ValidationResult& validation,
+                         size_t chunk_count)
+{
+    const Stats& bgm_stats = benchmark_result.reference;
+    const Stats& sbgm_stats = benchmark_result.sbgm;
+    const double speedup = bgm_stats.median_us / sbgm_stats.median_us;
+    const std::string bgm_throughput =
+        format_integer((uint64_t)std::llround(1'000'000.0 / bgm_stats.median_us));
+    const std::string sbgm_throughput =
+        format_integer((uint64_t)std::llround(1'000'000.0 / sbgm_stats.median_us));
+
+    std::printf("\n%-12s %18s %12s %12s %14s %20s\n",
+                "mesher", "median", "min", "max", "avg quads", "throughput");
+    std::printf("%-12s %10.2f us/chunk %9.2f us %9.2f us %14.1f %12s chunks/s\n",
+                "BGM", bgm_stats.median_us, bgm_stats.min_us, bgm_stats.max_us,
+                (double)validation.reference_quads / chunk_count, bgm_throughput.c_str());
+    std::printf("%-12s %10.2f us/chunk %9.2f us %9.2f us %14.1f %12s chunks/s\n",
+                "SBGM", sbgm_stats.median_us, sbgm_stats.min_us, sbgm_stats.max_us,
+                (double)validation.sbgm_quads / chunk_count, sbgm_throughput.c_str());
+    std::printf("\nspeedup: %.2fx\n", speedup);
+}
+
+static int run(int argc, char** argv)
+{
+    const Options options = parse_options(argc, argv);
+    const size_t chunk_count = (size_t)options.grid_w * (size_t)options.grid_d;
+
+    std::printf("dataset: %dx%d padded terrain chunks, %d iterations\n",
+                options.grid_w, options.grid_d, options.iterations);
+    std::printf("\n");
+
+    std::vector<Chunk> chunks = make_dataset(options);
+    ReferenceScratch reference;
+    sbgm::MeshData optimized;
+
+    const ValidationResult validation = validate_dataset(chunks, reference, optimized);
+    warm_up(chunks, reference, optimized);
+    const BenchmarkResult result =
+        benchmark(chunks, options.iterations, reference, optimized);
+    print_report(result, validation, chunk_count);
+    return 0;
+}
+
+} // namespace
+
+int main(int argc, char** argv)
+{
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "\nerror: %s\n", error.what());
+        return 1;
+    }
+}
+```
+
+### mesher.h
+```
+/*
+MIT License
+
+Copyright (c) 2020 Erik Johansson
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+ */
+
+//   Define BM_IMPLEMENTATION in exactly one source file to include the implementation
+//   and include the mesher.h without that define as often as needed
+//
+//   it could look like this
+//
+//   #define BM_IMPLEMENTATION
+//   #include "mesher.h"
+//
+//   There are other defines to control the behaviour of the library.
+//   * Define BM_VECTOR with your own vector implementation - otherwise it will use std::vector
+
+#ifndef MESHER_H
+#define MESHER_H
+
+#ifndef BM_VECTOR
+#include <vector>
+#define BM_VECTOR std::vector
+#endif
+
+#include <stdint.h>
+
+// CS = chunk size (max 62)
+static constexpr int CS = 62;
+
+// Padded chunk size
+static constexpr int CS_P = CS + 2;
+static constexpr int CS_2 = CS * CS;
+static constexpr int CS_P2 = CS_P * CS_P;
+static constexpr int CS_P3 = CS_P * CS_P * CS_P;
+
+struct MeshData {
+  uint64_t* faceMasks = nullptr; // CS_2 * 6
+  uint64_t* opaqueMask = nullptr; //CS_P2
+  uint8_t* forwardMerged = nullptr; // CS_2
+  uint8_t* rightMerged = nullptr; // CS
+  BM_VECTOR<uint64_t>* vertices = nullptr;
+  int vertexCount = 0;
+  int maxVertices = 0;
+  int faceVertexBegin[6] = { 0 };
+  int faceVertexLength[6] = { 0 };
+};
+
+// @param[in] voxels: The input data includes duplicate edge data from neighboring chunks which is used
+// for visibility culling. For optimal performance, your world data should already be structured
+// this way so that you can feed the data straight into this algorithm.
+// Input data is ordered in ZXY and is 64^3 which results in a 62^3 mesh.
+//
+// @param[out] meshData The allocated vertices in MeshData with a length of meshData.vertexCount.
+void mesh(const uint8_t* voxels, MeshData& meshData);
+
+#endif // MESHER_H
+
+#ifdef BM_IMPLEMENTATION
+
+#ifndef BM_MEMSET
+#define BM_MEMSET memset
+#include <string.h> // memset
+#endif
+
+static inline const int getAxisIndex(const int axis, const int a, const int b, const int c) {
+  if (axis == 0) return b + (a * CS_P) + (c * CS_P2);
+  else if (axis == 1) return b + (c * CS_P) + (a * CS_P2);
+  else return c + (a * CS_P) + (b * CS_P2);
+}
+
+static inline const void insertQuad(BM_VECTOR<uint64_t>& vertices, uint64_t quad, int& vertexI, int& maxVertices) {
+  if (vertexI >= maxVertices - 6) {
+    vertices.resize(maxVertices * 2, 0);
+    maxVertices *= 2;
+  }
+
+  vertices[vertexI] = quad;
+
+  vertexI++;
+}
+
+static inline const uint64_t getQuad(uint64_t x, uint64_t y, uint64_t z, uint64_t w, uint64_t h, uint64_t type) {
+  return (type << 32) | (h << 24) | (w << 18) | (z << 12) | (y << 6) | x;
+}
+
+constexpr uint64_t P_MASK = ~(1ull << 63 | 1);
+
+void mesh(const uint8_t* voxels, MeshData& meshData) {
+  meshData.vertexCount = 0;
+  int vertexI = 0;
+
+  uint64_t* opaqueMask = meshData.opaqueMask;
+  uint64_t* faceMasks = meshData.faceMasks;
+  uint8_t* forwardMerged = meshData.forwardMerged;
+  uint8_t* rightMerged = meshData.rightMerged;
+
+  // Hidden face culling
+  for (int a = 1; a < CS_P - 1; a++) {
+    const int aCS_P = a * CS_P;
+
+    for (int b = 1; b < CS_P - 1; b++) {
+      const uint64_t columnBits = opaqueMask[(a * CS_P) + b] & P_MASK;
+      const int baIndex = (b - 1) + (a - 1) * CS;
+      const int abIndex = (a - 1) + (b - 1) * CS;
+
+      faceMasks[baIndex + 0 * CS_2] = (columnBits & ~opaqueMask[aCS_P + CS_P + b]) >> 1;
+      faceMasks[baIndex + 1 * CS_2] = (columnBits & ~opaqueMask[aCS_P - CS_P + b]) >> 1;
+
+      faceMasks[abIndex + 2 * CS_2] = (columnBits & ~opaqueMask[aCS_P + (b + 1)]) >> 1;
+      faceMasks[abIndex + 3 * CS_2] = (columnBits & ~opaqueMask[aCS_P + (b - 1)]) >> 1;
+
+      faceMasks[baIndex + 4 * CS_2] = columnBits & ~(opaqueMask[aCS_P + b] >> 1);
+      faceMasks[baIndex + 5 * CS_2] = columnBits & ~(opaqueMask[aCS_P + b] << 1);
+    }
+  }
+
+  // Greedy meshing faces 0-3
+  for (int face = 0; face < 4; face++) {
+    const int axis = face / 2;
+
+    const int faceVertexBegin = vertexI;
+
+    for (int layer = 0; layer < CS; layer++) {
+      const int bitsLocation = layer * CS + face * CS_2;
+
+      for (int forward = 0; forward < CS; forward++) {
+        uint64_t bitsHere = faceMasks[forward + bitsLocation];
+        if (bitsHere == 0) continue;
+
+        const uint64_t bitsNext = forward + 1 < CS ? faceMasks[(forward + 1) + bitsLocation] : 0;
+
+        uint8_t rightMerged = 1;
+        while (bitsHere) {
+          unsigned long bitPos;
+          #ifdef _MSC_VER
+            _BitScanForward64(&bitPos, bitsHere);
+          #else
+            bitPos = __builtin_ctzll(bitsHere);
+          #endif
+
+          const uint8_t type = voxels[getAxisIndex(axis, forward + 1, bitPos + 1, layer + 1)];
+          uint8_t& forwardMergedRef = forwardMerged[bitPos];
+
+          if ((bitsNext >> bitPos & 1) && type == voxels[getAxisIndex(axis, forward + 2, bitPos + 1, layer + 1)]) {
+            forwardMergedRef++;
+            bitsHere &= ~(1ull << bitPos);
+            continue;
+          }
+
+          for (int right = bitPos + 1; right < CS; right++) {
+            if (!(bitsHere >> right & 1) || forwardMergedRef != forwardMerged[right] || type != voxels[getAxisIndex(axis, forward + 1, right + 1, layer + 1)]) break;
+            forwardMerged[right] = 0;
+            rightMerged++;
+          }
+          bitsHere &= ~((1ull << (bitPos + rightMerged)) - 1);
+
+          const uint8_t meshFront = forward - forwardMergedRef;
+          const uint8_t meshLeft = bitPos;
+          const uint8_t meshUp = layer + (~face & 1);
+
+          const uint8_t meshWidth = rightMerged;
+          const uint8_t meshLength = forwardMergedRef + 1;
+
+          forwardMergedRef = 0;
+          rightMerged = 1;
+
+          uint64_t quad;
+          switch (face) {
+          case 0:
+          case 1:
+            quad = getQuad(meshFront + (face == 1 ? meshLength : 0), meshUp, meshLeft, meshLength, meshWidth, type);
+            break;
+          case 2:
+          case 3:
+            quad = getQuad(meshUp, meshFront + (face == 2 ? meshLength : 0), meshLeft, meshLength, meshWidth, type);
+            break;
+          }
+
+          insertQuad(*meshData.vertices, quad, vertexI, meshData.maxVertices);
+        }
+      }
+    }
+
+    const int faceVertexLength = vertexI - faceVertexBegin;
+    meshData.faceVertexBegin[face] = faceVertexBegin;
+    meshData.faceVertexLength[face] =faceVertexLength;
+  }
+
+  // Greedy meshing faces 4-5
+  for (int face = 4; face < 6; face++) {
+    const int axis = face / 2;
+
+    const int faceVertexBegin = vertexI;
+
+    for (int forward = 0; forward < CS; forward++) {
+      const int bitsLocation = forward * CS + face * CS_2;
+      const int bitsForwardLocation = (forward + 1) * CS + face * CS_2;
+
+      for (int right = 0; right < CS; right++) {
+        uint64_t bitsHere = faceMasks[right + bitsLocation];
+        if (bitsHere == 0) continue;
+
+        const uint64_t bitsForward = forward < CS - 1 ? faceMasks[right + bitsForwardLocation] : 0;
+        const uint64_t bitsRight = right < CS - 1 ? faceMasks[right + 1 + bitsLocation] : 0;
+        const int rightCS = right * CS;
+
+        while (bitsHere) {
+          unsigned long bitPos;
+          #ifdef _MSC_VER
+            _BitScanForward64(&bitPos, bitsHere);
+          #else
+            bitPos = __builtin_ctzll(bitsHere);
+          #endif
+
+          bitsHere &= ~(1ull << bitPos);
+
+          const uint8_t type = voxels[getAxisIndex(axis, right + 1, forward + 1, bitPos)];
+          uint8_t& forwardMergedRef = forwardMerged[rightCS + (bitPos - 1)];
+          uint8_t& rightMergedRef = rightMerged[bitPos - 1];
+          
+          if (rightMergedRef == 0 && (bitsForward >> bitPos & 1) && type == voxels[getAxisIndex(axis, right + 1, forward + 2, bitPos)]) {
+            forwardMergedRef++;
+            continue;
+          }
+          
+          if ((bitsRight >> bitPos & 1) && forwardMergedRef == forwardMerged[(rightCS + CS) + (bitPos - 1)] && type == voxels[getAxisIndex(axis, right + 2, forward + 1, bitPos)]) {
+            forwardMergedRef = 0;
+            rightMergedRef++;
+            continue;
+          }
+
+          const uint8_t meshLeft = right - rightMergedRef;
+          const uint8_t meshFront = forward - forwardMergedRef;
+          const uint8_t meshUp = bitPos - 1 + (~face & 1);
+
+          const uint8_t meshWidth = 1 + rightMergedRef;
+          const uint8_t meshLength = 1 + forwardMergedRef;
+
+          forwardMergedRef = 0;
+          rightMergedRef = 0;
+          
+          const uint64_t quad = getQuad(meshLeft + (face == 4 ? meshWidth : 0), meshFront, meshUp, meshWidth, meshLength, type);
+
+          insertQuad(*meshData.vertices, quad, vertexI, meshData.maxVertices);
+        }
+      }
+    }
+  
+    const int faceVertexLength = vertexI - faceVertexBegin;
+    meshData.faceVertexBegin[face] = faceVertexBegin;
+    meshData.faceVertexLength[face] =faceVertexLength;
+  }
+
+  meshData.vertexCount = vertexI + 1;
+}
+
+#endif // BM_IMPLEMENTATION
+```
+
+### sbgm.h
+```
+// Define SBGM_IMPLEMENTATION in exactly one source file before including this
+// header. Other translation units can include it normally.
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+namespace sbgm {
+
+constexpr int CS = 62;
+constexpr int CS_P = CS + 2;
+constexpr int CS_P2 = CS_P * CS_P;
+constexpr int CS_P3 = CS_P * CS_P * CS_P;
+constexpr uint64_t P_MASK = ~(1ull << 63 | 1ull);
+
+struct MeshData {
+    std::array<uint8_t, CS_P> forward_merged{};
+    std::array<uint8_t, CS_P> pos_forward_merged{};
+    std::array<uint8_t, CS_P2> y_right_merged{};
+    std::array<uint8_t, 64> cache_pad0{};
+    std::array<uint8_t, CS_P2> y_pos_right_merged{};
+    std::array<uint8_t, 64> cache_pad1{};
+    std::array<uint8_t, CS_P2> z_forward_merged{};
+    std::array<uint8_t, 64> cache_pad2{};
+    std::array<uint8_t, CS_P2> z_pos_forward_merged{};
+
+    std::array<std::vector<uint64_t>, 6> vertices;
+    std::array<size_t, 6> face_vertex_counts{};
+    size_t vertex_count = 0;
+};
+
+size_t mesh(const uint8_t* voxels, const uint64_t* opaque_mask, MeshData& md);
+
+} // namespace sbgm
+
+#ifdef SBGM_IMPLEMENTATION
+
+#include <immintrin.h>
+
+namespace sbgm {
+
+static constexpr size_t MERGED_FORWARD = 0;
+static constexpr size_t MERGED_POS_FORWARD = MERGED_FORWARD + CS_P;
+static constexpr size_t MERGED_Y_RIGHT = MERGED_POS_FORWARD + CS_P;
+static constexpr size_t MERGED_Y_POS_RIGHT = MERGED_Y_RIGHT + CS_P2 + 64;
+static constexpr size_t MERGED_Z_FORWARD = MERGED_Y_POS_RIGHT + CS_P2 + 64;
+static constexpr size_t MERGED_Z_POS_FORWARD = MERGED_Z_FORWARD + CS_P2 + 64;
+
+static_assert(offsetof(MeshData, pos_forward_merged) - offsetof(MeshData, forward_merged) == MERGED_POS_FORWARD);
+static_assert(offsetof(MeshData, y_right_merged) - offsetof(MeshData, forward_merged) == MERGED_Y_RIGHT);
+static_assert(offsetof(MeshData, y_pos_right_merged) - offsetof(MeshData, forward_merged) == MERGED_Y_POS_RIGHT);
+static_assert(offsetof(MeshData, z_forward_merged) - offsetof(MeshData, forward_merged) == MERGED_Z_FORWARD);
+static_assert(offsetof(MeshData, z_pos_forward_merged) - offsetof(MeshData, forward_merged) == MERGED_Z_POS_FORWARD);
+
+static inline uint64_t column_mask(const uint64_t* opaque, size_t x, size_t z)
+{
+    return opaque[z + x * CS_P];
+}
+
+static inline uint64_t get_quad(uint64_t x, uint64_t y, uint64_t z,
+                                uint64_t w, uint64_t h, uint64_t type)
+{
+    return (type << 32) | (h << 24) | (w << 18) | (z << 12) | (y << 6) | x;
+}
+
+static inline uint64_t* mesh_x_bits(const uint8_t* __restrict col,
+                                    int sign,
+                                    size_t x,
+                                    size_t z,
+                                    uint64_t bits_here,
+                                    uint64_t bits_next,
+                                    uint8_t* __restrict forward_merged,
+                                    uint64_t* __restrict out)
+{
+    while (bits_here) {
+        const uint64_t y = _tzcnt_u64(bits_here);
+        const uint64_t y_mask = _blsi_u64(bits_here);
+        const uint8_t material = col[y];
+        uint8_t& forward_span = forward_merged[y];
+
+        if ((bits_next & y_mask) != 0ull &&
+            material == col[y + CS_P]) {
+            forward_span++;
+            bits_here &= ~y_mask;
+            continue;
+        }
+
+        const uint64_t height_bits = (bits_here & ~bits_next) >> y;
+        const uint64_t max_height = _tzcnt_u64(~height_bits);
+        size_t height = 1;
+        while (height < max_height) {
+            const size_t next_y = y + height;
+            if (forward_span != forward_merged[next_y])
+                break;
+            if (material != col[next_y])
+                break;
+
+            forward_merged[next_y] = 0;
+            height++;
+        }
+
+        const uint64_t quad_mask = _bzhi_u64(~0ull, (unsigned)height) << y;
+        bits_here &= ~quad_mask;
+
+        const size_t width = (size_t)forward_span + 1;
+        const size_t start_z = z - (size_t)forward_span;
+        forward_span = 0;
+
+        if (sign > 0)
+            *out++ = get_quad(start_z - 1, x, y - 1, width, height, material);
+        else
+            *out++ = get_quad(start_z - 1 + width, x - 1, y - 1,
+                              width, height, material);
+    }
+
+    return out;
+}
+
+static inline uint64_t* mesh_z_bits(const uint8_t* __restrict col,
+                                    int sign,
+                                    size_t z,
+                                    size_t x,
+                                    uint64_t bits_here,
+                                    uint64_t bits_next,
+                                    uint8_t* __restrict forward_merged,
+                                    uint64_t* __restrict out)
+{
+    while (bits_here) {
+        const uint64_t y = _tzcnt_u64(bits_here);
+        const uint64_t y_mask = _blsi_u64(bits_here);
+        const uint8_t material = col[y];
+        uint8_t& forward_span = forward_merged[y];
+
+        if ((bits_next & y_mask) != 0ull &&
+            material == col[y + CS_P2]) {
+            forward_span++;
+            bits_here &= ~y_mask;
+            continue;
+        }
+
+        const uint64_t height_bits = (bits_here & ~bits_next) >> y;
+        const uint64_t max_height = _tzcnt_u64(~height_bits);
+        size_t height = 1;
+        while (height < max_height) {
+            const size_t next_y = y + height;
+            if (forward_span != forward_merged[next_y])
+                break;
+            if (material != col[next_y])
+                break;
+
+            forward_merged[next_y] = 0;
+            height++;
+        }
+
+        const uint64_t quad_mask = _bzhi_u64(~0ull, (unsigned)height) << y;
+        bits_here &= ~quad_mask;
+
+        const size_t width = (size_t)forward_span + 1;
+        const size_t start_x = x - (size_t)forward_span;
+        forward_span = 0;
+
+        if (sign > 0)
+            *out++ = get_quad(z, start_x - 1 + width, y - 1,
+                              width, height, material);
+        else
+            *out++ = get_quad(z - 1, start_x - 1, y - 1,
+                              width, height, material);
+    }
+
+    return out;
+}
+
+struct FaceSlice {
+    uint64_t x_neg[CS_P];
+    uint64_t x_pos[CS_P];
+    uint64_t z_neg[CS_P];
+    uint64_t z_pos[CS_P];
+    uint64_t y_neg[CS_P];
+    uint64_t y_pos[CS_P];
+    uint8_t y_neg_span[CS_P2];
+    uint8_t y_pos_span[CS_P2];
+};
+
+static inline void build_y_face_column(const uint8_t* __restrict col,
+                                              size_t span_base,
+                                              uint64_t neg_current,
+                                              uint64_t pos_current,
+                                              uint64_t neg_next,
+                                              uint64_t pos_next,
+                                              uint8_t* __restrict neg_forward,
+                                              uint8_t* __restrict pos_forward,
+                                              uint64_t* __restrict neg_end,
+                                              uint64_t* __restrict pos_end,
+                                              uint8_t* __restrict neg_span_end,
+                                              uint8_t* __restrict pos_span_end)
+{
+    uint64_t neg_bits = neg_current;
+    uint64_t neg_terminal = neg_current;
+    while (neg_bits) {
+        const uint64_t y = _tzcnt_u64(neg_bits);
+        const uint64_t y_mask = _blsi_u64(neg_bits);
+        neg_bits &= neg_bits - 1;
+
+        const uint8_t material = col[y];
+        if ((neg_next & y_mask) != 0ull &&
+            material == col[y + CS_P]) {
+            neg_forward[y]++;
+            neg_terminal &= ~y_mask;
+        } else {
+            neg_span_end[span_base + y] = neg_forward[y];
+            neg_forward[y] = 0;
+        }
+    }
+
+    uint64_t pos_bits = pos_current;
+    uint64_t pos_terminal = pos_current;
+    while (pos_bits) {
+        const uint64_t y = _tzcnt_u64(pos_bits);
+        const uint64_t y_mask = _blsi_u64(pos_bits);
+        pos_bits &= pos_bits - 1;
+
+        const uint8_t material = col[y];
+        if ((pos_next & y_mask) != 0ull &&
+            material == col[y + CS_P]) {
+            pos_forward[y]++;
+            pos_terminal &= ~y_mask;
+        } else {
+            pos_span_end[span_base + y] = pos_forward[y];
+            pos_forward[y] = 0;
+        }
+    }
+
+    *neg_end = neg_terminal;
+    *pos_end = pos_terminal;
+}
+
+static inline void build_y_face_slice(const uint8_t* __restrict voxels,
+                                      const uint64_t* __restrict opaque,
+                                      size_t x,
+                                      uint64_t* __restrict neg_end,
+                                      uint64_t* __restrict pos_end,
+                                      uint8_t* __restrict neg_span_end,
+                                      uint8_t* __restrict pos_span_end,
+                                      uint64_t* __restrict z_neg,
+                                      uint64_t* __restrict z_pos)
+{
+    uint8_t neg_forward[CS_P] = {};
+    uint8_t pos_forward[CS_P] = {};
+
+    uint64_t prev_occ = column_mask(opaque, x, 0);
+    uint64_t current_occ = column_mask(opaque, x, 1);
+    uint64_t column_bits = current_occ & P_MASK;
+    uint64_t neg_current = column_bits & ~(current_occ << 1);
+    uint64_t pos_current = column_bits & ~(current_occ >> 1);
+    const uint8_t* col = voxels + x * CS_P2 + CS_P;
+
+    for (size_t z = 1; z < CS; z++) {
+        const uint64_t next_occ = column_mask(opaque, x, z + 1);
+        const uint64_t next_bits = next_occ & P_MASK;
+        const uint64_t neg_next = next_bits & ~(next_occ << 1);
+        const uint64_t pos_next = next_bits & ~(next_occ >> 1);
+        z_neg[z] = column_bits & ~prev_occ;
+        z_pos[z] = column_bits & ~next_occ;
+        build_y_face_column(col, z * CS_P,
+                            neg_current, pos_current, neg_next, pos_next,
+                            neg_forward, pos_forward, neg_end + z, pos_end + z,
+                            neg_span_end, pos_span_end);
+
+        prev_occ = current_occ;
+        current_occ = next_occ;
+        column_bits = next_bits;
+        neg_current = neg_next;
+        pos_current = pos_next;
+        col += CS_P;
+    }
+
+    // z = 62: the +Z neighbor is padding, so y spans must terminate here.
+    z_neg[CS] = column_bits & ~prev_occ;
+    z_pos[CS] = column_bits & ~column_mask(opaque, x, CS + 1);
+    build_y_face_column(col, (size_t)CS * CS_P,
+                        neg_current, pos_current, 0, 0,
+                        neg_forward, pos_forward, neg_end + CS, pos_end + CS,
+                        neg_span_end, pos_span_end);
+}
+
+static inline void build_face_slice(const uint8_t* __restrict voxels,
+                                    const uint64_t* __restrict opaque,
+                                    size_t x,
+                                    FaceSlice& slice)
+{
+    // Padding rows make every interior slice a middle slice.
+    const uint64_t* left = opaque + (x - 1) * CS_P;
+    const uint64_t* mid = opaque + x * CS_P;
+    const uint64_t* right = opaque + (x + 1) * CS_P;
+    const __m256i p_mask = _mm256_set1_epi64x((long long)P_MASK);
+    for (size_t z = 0; z < CS_P; z += 4) {
+        const __m256i occ = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(mid + z));
+        const __m256i column_bits = _mm256_and_si256(occ, p_mask);
+        const __m256i left_occ = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(left + z));
+        const __m256i right_occ = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(right + z));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(slice.x_neg + z),
+                            _mm256_andnot_si256(left_occ, column_bits));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(slice.x_pos + z),
+                            _mm256_andnot_si256(right_occ, column_bits));
+    }
+    // z = 63 sentinel stops forward merges at the last interior column.
+    slice.x_neg[CS + 1] = 0;
+    slice.x_pos[CS + 1] = 0;
+
+    build_y_face_slice(voxels, opaque, x,
+                       slice.y_neg, slice.y_pos,
+                       slice.y_neg_span, slice.y_pos_span,
+                       slice.z_neg, slice.z_pos);
+}
+
+static inline uint64_t* mesh_y_end_bits_x_major(const uint8_t* __restrict col,
+                                                int sign,
+                                                size_t x,
+                                                size_t z,
+                                                uint64_t bits_here,
+                                                uint64_t bits_right,
+                                                const uint8_t* __restrict span_here,
+                                                const uint8_t* __restrict span_right,
+                                                uint8_t* __restrict right_merged,
+                                                uint64_t* __restrict out)
+{
+    while (bits_here) {
+        const uint64_t y = _tzcnt_u64(bits_here);
+        const uint64_t y_mask = 1ull << y;
+        bits_here &= bits_here - 1;
+
+        const uint8_t material = col[y];
+        const uint8_t forward_span = span_here[y];
+        uint8_t& right_span = right_merged[y];
+
+        if ((bits_right & y_mask) != 0ull &&
+            forward_span == span_right[y] &&
+            material == col[y + CS_P2]) {
+            right_span++;
+            continue;
+        }
+
+        const size_t start_z = z - (size_t)forward_span;
+        const size_t start_x = x - (size_t)right_span;
+        const size_t length_z = (size_t)forward_span + 1;
+        const size_t width_x = (size_t)right_span + 1;
+        right_span = 0;
+
+        if (sign > 0)
+            *out++ = get_quad(start_z - 1 + length_z, start_x - 1, y,
+                              length_z, width_x, material);
+        else
+            *out++ = get_quad(start_z - 1, start_x - 1, y - 1,
+                              length_z, width_x, material);
+    }
+
+    return out;
+}
+
+static void mesh_face_columns_all_x_slices(const uint8_t* __restrict voxels,
+                                           const uint64_t* __restrict opaque,
+                                           MeshData& md,
+                                           uint64_t* __restrict outputs[6])
+{
+    FaceSlice slices[2];
+    const FaceSlice zero_slice = {};
+    FaceSlice* current = &slices[0];
+    FaceSlice* next = &slices[1];
+    build_face_slice(voxels, opaque, 1, *current);
+    build_face_slice(voxels, opaque, 2, *next);
+
+    uint8_t* const merged = md.forward_merged.data();
+
+    for (size_t x = 1; x <= CS; x++) {
+        const FaceSlice* right = (x < CS) ? next : &zero_slice;
+        const uint8_t* slice_voxels = voxels + x * CS_P2;
+        for (size_t z = 1; z <= CS; z++) {
+            const uint8_t* col = slice_voxels + z * CS_P;
+            const size_t span_base = z * CS_P;
+
+            const uint64_t x_neg_here = current->x_neg[z];
+            const uint64_t x_pos_here = current->x_pos[z];
+            if (x_neg_here)
+                outputs[1] = mesh_x_bits(col, -1, x, z, x_neg_here, current->x_neg[z + 1],
+                                         merged + MERGED_FORWARD, outputs[1]);
+            if (x_pos_here)
+                outputs[0] = mesh_x_bits(col, +1, x, z, x_pos_here, current->x_pos[z + 1],
+                                         merged + MERGED_POS_FORWARD, outputs[0]);
+
+            const uint64_t y_neg_here = current->y_neg[z];
+            if (y_neg_here)
+                outputs[5] = mesh_y_end_bits_x_major(
+                    col, -1, x, z, y_neg_here, right->y_neg[z],
+                    current->y_neg_span + span_base,
+                    right->y_neg_span + span_base,
+                    merged + MERGED_Y_RIGHT + span_base, outputs[5]);
+
+            const uint64_t y_pos_here = current->y_pos[z];
+            if (y_pos_here)
+                outputs[4] = mesh_y_end_bits_x_major(
+                    col, +1, x, z, y_pos_here, right->y_pos[z],
+                    current->y_pos_span + span_base,
+                    right->y_pos_span + span_base,
+                    merged + MERGED_Y_POS_RIGHT + span_base, outputs[4]);
+
+            const uint64_t z_neg_here = current->z_neg[z];
+            const uint64_t z_pos_here = current->z_pos[z];
+            if (z_neg_here)
+                outputs[3] = mesh_z_bits(col, -1, z, x, z_neg_here,
+                                         right->z_neg[z],
+                                         merged + MERGED_Z_FORWARD + span_base, outputs[3]);
+            if (z_pos_here)
+                outputs[2] = mesh_z_bits(col, +1, z, x, z_pos_here,
+                                         right->z_pos[z],
+                                         merged + MERGED_Z_POS_FORWARD + span_base, outputs[2]);
+        }
+
+        FaceSlice* tmp = current;
+        current = next;
+        next = tmp;
+        if (x + 2 <= CS)
+            build_face_slice(voxels, opaque, x + 2, *next);
+    }
+
+}
+
+size_t mesh(const uint8_t* voxels, const uint64_t* opaque_mask, MeshData& md)
+{
+    static constexpr size_t MAX_FACE_QUADS = (size_t)CS * CS * CS;
+    uint64_t* outputs[6];
+    uint64_t* begins[6];
+    for (size_t face = 0; face < 6; ++face) {
+        if (md.vertices[face].size() < MAX_FACE_QUADS)
+            md.vertices[face].resize(MAX_FACE_QUADS);
+        begins[face] = md.vertices[face].data();
+        outputs[face] = begins[face];
+    }
+
+    mesh_face_columns_all_x_slices(voxels, opaque_mask, md, outputs);
+
+    md.vertex_count = 0;
+    for (size_t face = 0; face < 6; ++face) {
+        md.face_vertex_counts[face] = (size_t)(outputs[face] - begins[face]);
+        md.vertex_count += md.face_vertex_counts[face];
+    }
+    return md.vertex_count;
+}
+
+} // namespace sbgm
+
+#endif // SBGM_IMPLEMENTATION
+```
+
+### terrain.h
+```
+#pragma once
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+#include <immintrin.h>
+
+namespace terrain {
+
+constexpr int kChunkSize = 62;
+constexpr int kPaddedSize = 64;
+constexpr int kPaddedArea = kPaddedSize * kPaddedSize;
+constexpr int kPaddedVolume = kPaddedArea * kPaddedSize;
+
+struct Chunk {
+    std::vector<uint8_t> voxels = std::vector<uint8_t>(kPaddedVolume);
+    std::array<uint64_t, kPaddedArea> opaque_mask{};
+};
+
+inline uint64_t build_y_column_avx2(const uint8_t* column)
+{
+    const __m256i zero = _mm256_setzero_si256();
+    const __m256i lo = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(column));
+    const __m256i hi = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(column + 32));
+    const uint32_t lo_air =
+        (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(lo, zero));
+    const uint32_t hi_air =
+        (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(hi, zero));
+    return (uint64_t)(lo_air ^ 0xffffffffu)
+         | ((uint64_t)(hi_air ^ 0xffffffffu) << 32);
+}
+
+inline void build_opaque_mask(const uint8_t* voxels, uint64_t* opaque_mask)
+{
+    for (int x = 0; x < kPaddedSize; ++x) {
+        for (int z = 0; z < kPaddedSize; ++z) {
+            opaque_mask[z + x * kPaddedSize] =
+                build_y_column_avx2(voxels + z * kPaddedSize + x * kPaddedArea);
+        }
+    }
+}
+
+inline int terrain_height(float h)
+{
+    const int height = (int)h;
+    return std::max(1, std::min(kChunkSize - 1, height));
+}
+
+inline uint8_t terrain_material(int y, int height)
+{
+    if (y < height - 4)
+        return 1;
+    if (y < height - 1)
+        return 2;
+    return 3;
+}
+
+inline void fill_chunk(Chunk& chunk, int world_x, int world_z)
+{
+    std::fill(chunk.voxels.begin(), chunk.voxels.end(), uint8_t{0});
+
+    for (int x = -1; x <= kChunkSize; ++x) {
+        const float wx = (float)(world_x + x) * 0.04f;
+        for (int z = -1; z <= kChunkSize; ++z) {
+            const float wz = (float)(world_z + z) * 0.04f;
+            const int height = terrain_height(
+                14.0f
+                + 8.0f * std::sin(wx) * std::cos(wz * 1.3f)
+                + 4.0f * std::sin(wx * 2.3f + wz * 1.7f)
+                + 2.0f * std::cos(wx * 3.7f - wz * 2.1f));
+
+            for (int y = 0; y < height; ++y) {
+                const size_t index = (size_t)(y + 1)
+                    + (size_t)(z + 1) * kPaddedSize
+                    + (size_t)(x + 1) * kPaddedArea;
+                chunk.voxels[index] = terrain_material(y, height);
+            }
+        }
+    }
+
+    build_opaque_mask(chunk.voxels.data(), chunk.opaque_mask.data());
+}
+
+inline std::vector<Chunk> make_dataset(int grid_width, int grid_depth)
+{
+    const size_t chunk_count = (size_t)grid_width * (size_t)grid_depth;
+    std::vector<Chunk> chunks(chunk_count);
+    for (int z = 0; z < grid_depth; ++z) {
+        for (int x = 0; x < grid_width; ++x) {
+            fill_chunk(chunks[(size_t)z * grid_width + x],
+                       x * kChunkSize, z * kChunkSize);
+        }
+    }
+    return chunks;
+}
+
+} // namespace terrain
+```
+
+### validator.h
+```
+#ifndef SBGM_BENCHMARK_VALIDATOR_H
+#define SBGM_BENCHMARK_VALIDATOR_H
+
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace validator {
+
+constexpr int kChunkSize = 62;
+constexpr int kPaddedSize = 64;
+constexpr int kPaddedArea = kPaddedSize * kPaddedSize;
+
+static inline size_t voxel_index(int x, int y, int z)
+{
+    return (size_t)(y + 1) + (size_t)(z + 1) * kPaddedSize
+         + (size_t)(x + 1) * kPaddedArea;
+}
+
+// Canonical unit-face layout:
+// axis X: u=Y, v=Z; axis Y: u=Z, v=X; axis Z: u=X, v=Y.
+static uint64_t face_token(int axis, bool positive, int depth,
+                           int u, int v, uint8_t material)
+{
+    return (uint64_t)u
+         | ((uint64_t)v << 6)
+         | ((uint64_t)depth << 12)
+         | ((uint64_t)axis << 18)
+         | ((uint64_t)positive << 20)
+         | ((uint64_t)material << 21);
+}
+
+static void add_rect(std::vector<uint64_t>& faces, const char* source,
+                     int axis, bool positive, int depth,
+                     int u, int v, int du, int dv, uint8_t material)
+{
+    if (axis < 0 || axis > 2 || depth < 0 || depth >= kChunkSize
+        || u < 0 || v < 0 || du <= 0 || dv <= 0
+        || u + du > kChunkSize || v + dv > kChunkSize || material == 0) {
+        throw std::runtime_error(std::string(source) + " emitted an invalid quad");
+    }
+
+    for (int b = 0; b < dv; ++b)
+        for (int a = 0; a < du; ++a)
+            faces.push_back(face_token(axis, positive, depth, u + a, v + b, material));
+}
+
+static std::vector<uint64_t> expected_faces(const uint8_t* voxels)
+{
+    std::vector<uint64_t> faces;
+    faces.reserve(32 * 1024);
+
+    static constexpr int dx[6] = {-1, +1, 0, 0, 0, 0};
+    static constexpr int dy[6] = {0, 0, -1, +1, 0, 0};
+    static constexpr int dz[6] = {0, 0, 0, 0, -1, +1};
+
+    for (int x = 0; x < kChunkSize; ++x) {
+        for (int z = 0; z < kChunkSize; ++z) {
+            for (int y = 0; y < kChunkSize; ++y) {
+                const uint8_t material = voxels[voxel_index(x, y, z)];
+                if (material == 0)
+                    continue;
+
+                for (int direction = 0; direction < 6; ++direction) {
+                    const size_t neighbor = voxel_index(
+                        x + dx[direction], y + dy[direction], z + dz[direction]);
+                    if (voxels[neighbor] != 0)
+                        continue;
+
+                    const int axis = direction / 2;
+                    const bool positive = (direction & 1) != 0;
+                    const int depth = axis == 0 ? x : (axis == 1 ? y : z);
+                    const int u = axis == 0 ? y : (axis == 1 ? z : x);
+                    const int v = axis == 0 ? z : (axis == 1 ? x : y);
+                    faces.push_back(face_token(axis, positive, depth, u, v, material));
+                }
+            }
+        }
+    }
+
+    std::sort(faces.begin(), faces.end());
+    return faces;
+}
+
+static std::vector<uint64_t> reference_faces(const MeshData& mesh_data,
+                                             const std::vector<uint64_t>& vertices)
+{
+    std::vector<uint64_t> faces;
+    faces.reserve(32 * 1024);
+
+    for (int face = 0; face < 6; ++face) {
+        const int begin = mesh_data.faceVertexBegin[face];
+        const int length = mesh_data.faceVertexLength[face];
+        for (int i = 0; i < length; ++i) {
+            const uint64_t q = vertices[(size_t)begin + (size_t)i];
+            const int a = (int)(q & 63);
+            const int b = (int)((q >> 6) & 63);
+            const int c = (int)((q >> 12) & 63);
+            const int w = (int)((q >> 18) & 63);
+            const int h = (int)((q >> 24) & 255);
+            const uint8_t material = (uint8_t)(q >> 32);
+
+            if (face == 0)
+                add_rect(faces, "reference", 0, true, b - 1, c, a, h, w, material);
+            else if (face == 1)
+                add_rect(faces, "reference", 0, false, b, c, a - w, h, w, material);
+            else if (face == 2)
+                add_rect(faces, "reference", 2, true, a - 1, b - w, c, w, h, material);
+            else if (face == 3)
+                add_rect(faces, "reference", 2, false, a, b, c, w, h, material);
+            else if (face == 4)
+                add_rect(faces, "reference", 1, true, c - 1, a - w, b, w, h, material);
+            else
+                add_rect(faces, "reference", 1, false, c, a, b, w, h, material);
+        }
+    }
+
+    std::sort(faces.begin(), faces.end());
+    return faces;
+}
+
+static std::vector<uint64_t> sbgm_faces(const sbgm::MeshData& mesh_data)
+{
+    std::vector<uint64_t> faces;
+    faces.reserve(32 * 1024);
+
+    for (int face = 0; face < 6; ++face) {
+        for (size_t i = 0; i < mesh_data.face_vertex_counts[face]; ++i) {
+            const uint64_t q = mesh_data.vertices[face][i];
+            const int a = (int)(q & 63);
+            const int b = (int)((q >> 6) & 63);
+            const int c = (int)((q >> 12) & 63);
+            const int w = (int)((q >> 18) & 63);
+            const int h = (int)((q >> 24) & 255);
+            const uint8_t material = (uint8_t)(q >> 32);
+
+            if (face == 0)
+                add_rect(faces, "sbgm", 0, true, b - 1, c, a, h, w, material);
+            else if (face == 1)
+                add_rect(faces, "sbgm", 0, false, b, c, a - w, h, w, material);
+            else if (face == 2)
+                add_rect(faces, "sbgm", 2, true, a - 1, b - w, c, w, h, material);
+            else if (face == 3)
+                add_rect(faces, "sbgm", 2, false, a, b, c, w, h, material);
+            else if (face == 4)
+                add_rect(faces, "sbgm", 1, true, c - 1, a - w, b, w, h, material);
+            else
+                add_rect(faces, "sbgm", 1, false, c, a, b, w, h, material);
+        }
+    }
+
+    std::sort(faces.begin(), faces.end());
+    return faces;
+}
+
+static void require_equal(const std::vector<uint64_t>& actual,
+                          const std::vector<uint64_t>& expected,
+                          const char* name, size_t chunk_index)
+{
+    if (actual == expected)
+        return;
+
+    size_t mismatch = 0;
+    while (mismatch < actual.size() && mismatch < expected.size()
+           && actual[mismatch] == expected[mismatch])
+        ++mismatch;
+
+    const uint64_t actual_value = mismatch < actual.size() ? actual[mismatch] : ~0ull;
+    const uint64_t expected_value = mismatch < expected.size() ? expected[mismatch] : ~0ull;
+    auto field = [](uint64_t value, int shift, uint64_t mask) {
+        return (unsigned long long)((value >> shift) & mask);
+    };
+    char message[512];
+    std::snprintf(message, sizeof(message),
+                  "%s equivalence failed on chunk %zu (unit faces %zu vs %zu, first mismatch %zu; "
+                  "actual axis/sign/depth/u/v/mat=%llu/%llu/%llu/%llu/%llu/%llu, "
+                  "expected=%llu/%llu/%llu/%llu/%llu/%llu)",
+                  name, chunk_index, actual.size(), expected.size(), mismatch,
+                  field(actual_value, 18, 3), field(actual_value, 20, 1),
+                  field(actual_value, 12, 63), field(actual_value, 0, 63),
+                  field(actual_value, 6, 63), field(actual_value, 21, 255),
+                  field(expected_value, 18, 3), field(expected_value, 20, 1),
+                  field(expected_value, 12, 63), field(expected_value, 0, 63),
+                  field(expected_value, 6, 63), field(expected_value, 21, 255));
+    throw std::runtime_error(message);
+}
+
+static void validate(const uint8_t* voxels,
+                     const MeshData& reference_mesh,
+                     const std::vector<uint64_t>& reference_vertices,
+                     const sbgm::MeshData& sbgm_mesh,
+                     size_t chunk_index)
+{
+    const std::vector<uint64_t> expected = expected_faces(voxels);
+    const std::vector<uint64_t> reference =
+        reference_faces(reference_mesh, reference_vertices);
+    const std::vector<uint64_t> optimized = sbgm_faces(sbgm_mesh);
+    require_equal(reference, expected, "reference", chunk_index);
+    require_equal(optimized, expected, "sbgm", chunk_index);
+    require_equal(optimized, reference, "cross-mesher", chunk_index);
+}
+
+} // namespace validator
+
+#endif
+```

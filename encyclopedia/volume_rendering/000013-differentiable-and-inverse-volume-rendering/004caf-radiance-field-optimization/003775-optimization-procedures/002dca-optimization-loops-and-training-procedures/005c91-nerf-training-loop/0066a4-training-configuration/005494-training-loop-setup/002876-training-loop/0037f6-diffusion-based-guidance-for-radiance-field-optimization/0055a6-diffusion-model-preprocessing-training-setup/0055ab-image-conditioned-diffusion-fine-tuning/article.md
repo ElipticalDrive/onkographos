@@ -1,0 +1,120 @@
+# Image-Conditioned Diffusion Fine-Tuning
+
+Also called: Training Stage 1
+
+## Overview
+Image-Conditioned Diffusion Fine-Tuning is the first stage of a two-step training strategy for a diffusion model prior used in street view synthesis. It enables the model to learn high-level semantic content and object existence from adjacent reference images without relying on camera pose information [S1]. Unlike methods that simultaneously encode images and poses, this approach isolates semantic understanding to handle complex driving scenes with mutual occlusions, where pose alone is insufficient for the diffusion model to fully comprehend the 3D scene structure [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** An input image $I$, a text prompt $T$, and two reference images $I_{\text{ref}} = \{I_{\text{pre}}, I_{\text{next}}\}$ representing the previous and next frames relative to $I$ [S1].
+*   **Outputs:** A fine-tuned U-Net parameter set $\theta$ that can conditionally generate images based on text and reference image semantics [S1].
+
+**Data Structures**
+*   **Text Embedding ($e_T$):** A sequence of vectors $[e_T^0, \dots, e_T^{L_T}]$ where $L_T$ is the token sequence length and each $e_T^i \in \mathbb{R}^D$ [S1].
+*   **Image Embedding ($e_{I_i}$):** A sequence of vectors $[e_{I_i}^0, \dots, e_{I_i}^{L_I}]$ for each reference image $I_i$, where $L_I$ is the number of image patches [S1].
+*   **Latent Feature Map ($z_0$):** The encoded representation of the input image $I$ in the latent space [S1].
+
+**Frozen Components**
+The following components are frozen during this stage:
+1.  VAE Encoder and Decoder [S1].
+2.  CLIP Text Encoder $\mathcal{E}_{\text{text}}$ [S1].
+3.  CLIP Image Encoder $\mathcal{E}_{\text{Image}}$ [S1].
+
+**Trainable Components**
+*   U-Net parameters $\theta$ [S1].
+
+**Algorithm Steps**
+1.  **Reference Selection:** Select a previous frame $I_{\text{pre}}$ and a next frame $I_{\text{next}}$ as the reference set $I_{\text{ref}} = \{I_{\text{pre}}, I_{\text{next}}\}$ for the current input image $I$ [S1].
+2.  **Text Encoding:** Encode the text prompt $T$ using the frozen CLIP Text Encoder $\mathcal{E}_{\text{text}}$ to obtain the text embedding $e_T$:
+    $$ e_T = \mathcal{E}_{\text{text}}(T) = [e_T^0, \dots, e_T^{L_T}], \quad e_T^i \in \mathbb{R}^D $$
+    where $D$ is the embedding dimension [S1].
+3.  **Image Encoding:** Encode each reference image $I_i \in \{I_{\text{pre}}, I_{\text{next}}\}$ using the frozen CLIP Image Encoder $\mathcal{E}_{\text{Image}}$ to obtain patch-wise features $e_{I_i}$:
+    $$ e_{I_i} = \mathcal{E}_{\text{Image}}(I_i) = [e_{I_i}^0, \dots, e_{I_i}^{L_I}], \quad i \in \{\text{pre}, \text{next}\} $$
+    where $L_I$ is the number of image patches [S1].
+4.  **Feature Concatenation:** Concatenate the reference image features $e_{I_{\text{ref}}} = [e_{I_{\text{pre}}}, e_{I_{\text{next}}}]$ to the text embedding $e_T$ along the token length dimension [S1].
+5.  **Latent Encoding:** Encode the input image $I$ into a latent feature map $z_0$ using the frozen VAE encoder [S1].
+6.  **Cross-Attention Fusion:** Fuse the combined embedding (text + reference images) with the latent feature map $z_0$ via the cross-attention layer within the U-Net [S1].
+7.  **Optimization:** Optimize the U-Net parameters $\theta$ by minimizing the denoising loss:
+    $$ \mathcal{L}(\theta) = \mathbb{E}_{z_0, \epsilon \sim \mathcal{N}(\mathbf{0}, \mathbf{1}), t, T, I_{\text{ref}}} \left\| \epsilon - \epsilon_\theta(z_t, t, e_T, e_{I_{\text{ref}}}) \right\|_2^2 $$
+    where $\epsilon$ is random noise sampled from a standard normal distribution, $t$ is the denoising timestep, and $z_t$ is the noisy latent at timestep $t$ [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_stage_1(input_image, text_prompt, prev_image, next_image, u_net, vae_encoder, clip_text_encoder, clip_image_encoder, optimizer):
+    """
+    Trains the U-Net parameters theta using image-conditioned diffusion loss.
+    Assumes vae_encoder, clip_text_encoder, and clip_image_encoder are frozen.
+    """
+    # 1. Encode Text
+    # e_T shape: (1, L_T, D)
+    e_T = clip_text_encoder(text_prompt)
+    
+    # 2. Encode Reference Images
+    # e_I_pre and e_I_next shape: (1, L_I, D)
+    e_I_pre = clip_image_encoder(prev_image)
+    e_I_next = clip_image_encoder(next_image)
+    
+    # 3. Concatenate Reference Features to Text Embedding
+    # Combined embedding shape: (1, L_T + 2*L_I, D)
+    # Note: The source concatenates e_I_ref to e_T along token length.
+    # Assuming e_I_ref is [e_I_pre, e_I_next]
+    combined_embedding = concatenate([e_T, e_I_pre, e_I_next], dim=1)
+    
+    # 4. Encode Input Image to Latent
+    # z_0 shape: (1, C, H_lat, W_lat)
+    z_0 = vae_encoder.encode(input_image)
+    
+    # 5. Training Loop (Iterative)
+    for iteration in range(total_iterations):
+        # Sample noise and timestep
+        epsilon = torch.randn_like(z_0)
+        t = sample_random_timestep()
+        
+        # Create noisy latent z_t
+        # z_t = alpha_t * z_0 + sigma_t * epsilon (Standard DDPM/DDIM noise schedule)
+        z_t = add_noise(z_0, epsilon, t)
+        
+        # Predict noise using U-Net with cross-attention
+        # The U-Net takes z_t, t, and the combined embedding
+        predicted_noise = u_net(z_t, t, combined_embedding)
+        
+        # Calculate Loss
+        loss = mse_loss(predicted_noise, epsilon)
+        
+        # Backpropagate and update U-Net parameters
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+    return u_net.parameters()
+```
+
+**Parameters**
+*   **CLIP Image Encoder Input Size:** $224 \times 224 \times 3$ [S1].
+*   **CLIP Image Encoder Hidden State Dimension:** $1 \times 50 \times 768$, where 50 is the token length (1 cls token + 49 patch tokens) [S1].
+*   **Training Iterations:** 625,000 iterations [S1].
+*   **Hardware:** 4 NVIDIA V100 GPUs (32GB VRAM each) [S1].
+*   **Batch Size:** 4 [S1].
+
+## Subtopics
+
+### Depth ControlNet Integration
+A second fine-tuning stage that adds a ControlNet module to the frozen Stage 1 model to incorporate spatial relationships via depth maps derived from LiDAR point clouds [S1]. It derives depth maps for reference and input images by projecting 3D LiDAR point clouds onto the image plane and completing them using an off-the-shelf depth completion model [S1]. The ControlNet is initialized as a trainable copy of the U-Net’s encoder block from Stage 1 [S1]. Depth features are encoded using a pre-trained depth encoder (structure identical to CLIP Image Encoder) and fused with CLIP image features via average pooling: $\tilde{e}_{I_i} = \text{AvgPool}(e_{I_i}, e_{D_i})$ for $i \in \{\text{pre}, \text{next}\}$ [S1]. These fused features are concatenated with the text embedding and injected into the ControlNet via cross-attention [S1]. The ControlNet parameters $\tilde{\theta}$ are trained using the loss: $\mathcal{L}(\tilde{\theta}) = \mathbb{E}_{z_0, \epsilon \sim \mathcal{N}(\mathbf{0}, \mathbf{1}), t, T, \{I_{\text{ref}}, D_{\text{ref}}\}} \left\| \epsilon - \epsilon_\theta(z_t, t, c_D, e_T, \tilde{e}_{I_{\text{ref}}}) \right\|_2^2$ [S1]. Training iterations for this stage are 125,000 steps [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** The method is evaluated on KITTI and KITTI-360 datasets [S1]. Specific quantitative metrics (PSNR, SSIM, LPIPS) are not provided in the source text, though ablation studies are referenced [S1].
+*   **Strengths:** Effectively learns high-level semantic information and object existence from adjacent frames without requiring pose information, addressing the challenge of mutual occlusion in complex driving scenes [S1].
+*   **Limitations:** Does not inherently capture spatial relationships between objects; this requires the subsequent Stage 2 (ControlNet) [S1].
+*   **When to Use:** When synthesizing street views where semantic consistency across adjacent frames is critical, and pose information is either unavailable or insufficient for the diffusion model to understand scene content [S1].
+*   **When Not to Use:** When spatial accuracy and depth consistency are the primary requirements without additional depth conditioning (Stage 2) [S1].
+
+## Background
+The method originates from the paper "SGD: Street View Synthesis with Gaussian Splatting and Diffusion Prior" [S1]. It is part of a pipeline that uses a fine-tuned Stable Diffusion 1.5 model as a prior for optimizing 3D Gaussian Splatting representations [S1]. The two-stage training strategy was developed to address the limitations of previous methods like ReconFusion, which introduced images and poses simultaneously, finding that pose alone was insufficient for diffusion models to fully understand 3D scenes with complex occlusions [S1]. The CLIP Image Encoder used is taken from `clip-vit-B-32` [S1]. The depth encoder is pre-trained using contrastive learning as proposed in [11] (not cited in the provided source list) [S1]. The ControlNet module is based on the architecture described in [50] (not cited in the provided source list) [S1].
+
+## Sources
+[S1] SGD: Street View Synthesis with Gaussian Splatting and Diffusion Prior, https://doi.org/10.1109/wacv61041.2025.00375, fetched 2026-10-27

@@ -1,0 +1,93 @@
+# Auxiliary Depth Prediction Head
+
+Also called: Depth-guided point sampling, Pseudo-depth Guided Sampling
+
+## Overview
+The Auxiliary Depth Prediction Head is a technique that trains a convolutional network to predict depth maps and confidence scores jointly with radiance field reconstruction, using these predictions to supervise rendered depth, narrow sampling ranges, and guide point sampling [S1, unofficial]. It differs from methods relying on third-party depth sources (e.g., COLMAP) by learning compact geometry end-to-end without external priors [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Encoding volume $V^l$ at scale level $l$.
+*   **Output:** Predicted depth map $D^l$ and confidence map $U^l$.
+
+**Data Structures:**
+*   $V^l$: Encoding volume tensor.
+*   $D^l$: Depth map tensor.
+*   $U^l$: Confidence map tensor.
+*   $F_{depth}$: Convolutional layer acting as the depth prediction head.
+
+**Parameters:**
+*   Number of levels: 3.
+*   Number of encoding points $[N^A_l]$: $[48, 32, 8]$ for levels $l=1, 2, 3$ respectively.
+*   Reduction factor $\alpha_l$: $[1/6, 1/4, 1/2]$ for levels $l=1, 2, 3$ respectively.
+*   Depth range reduction factor $\beta_l$: $[1/6, 1/16]$ (Note: Source lists two values for three levels) [S1, unofficial].
+
+**Steps:**
+1.  **Depth Prediction:** Append a convolutional layer $F_{depth}$ after each scale encoding volume $V^l$ to predict the depth map $D^l$ and confidence $U^l$:
+    $$D^l, U^l = F_{depth}(V^l) \quad (10)$$
+    The head compresses similarity of source features, offering higher accuracy than regression approaches in textured regions [S1, unofficial].
+
+2.  **Supervision:** Use the predicted depth map $D^l$ to supervise the pixel depth calculated by volume rendering [S1, unofficial].
+
+3.  **Narrowing Depth Range:** Reduce the number of sampling points by narrowing the depth range of the next level $R_{l+1}$ to $R_l * \beta_l$, centered on the predicted depth value $D^l$, where $\beta_l < 1$ is the reducing factor [S1, unofficial].
+
+4.  **Guiding Point Sampling:** Use the predicted depth map to guide point sampling for radiance field reconstruction [S1, unofficial].
+
+5.  **Training:** Train the auxiliary depth prediction head in an unsupervised manner using the same loss function as unsupervised Multi-View Stereo (MVS) tasks [S1, unofficial]. This improves the accuracy of the predicted depth, which in turn helps supervise rendered depth and guide sampling [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Define the auxiliary depth prediction head
+class DepthPredictionHead(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Convolutional layer to predict depth and confidence
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
+
+    def forward(self, encoding_volume):
+        # Predict depth map D and confidence U
+        # D, U = F_depth(V)
+        out = self.conv(encoding_volume)
+        depth_map = out[:, 0:1, :, :]
+        confidence = out[:, 1:2, :, :]
+        return depth_map, confidence
+
+# Usage in multi-scale pipeline
+def process_level(encoding_volume, current_depth_range, beta_factor):
+    # 1. Predict depth and confidence
+    depth_map, confidence = DepthPredictionHead()(encoding_volume)
+    
+    # 2. Narrow depth range for next level
+    # New range is centered on predicted depth, scaled by beta
+    new_range_width = current_depth_range * beta_factor
+    new_center = depth_map
+    # Implementation of range narrowing depends on specific ray marching logic
+    # [G] Assuming standard ray marching: new_far = new_center + new_range_width/2
+    # new_near = new_center - new_range_width/2
+    
+    return depth_map, confidence, new_range_width
+```
+
+**Edge Cases and Pitfalls:**
+*   **Missing Parameter:** The source provides two values for $\beta_l$ ($[1/6, 1/16]$) but specifies three levels. It is unclear which level corresponds to which value or if a value is missing [S1, unofficial].
+*   **Occlusion/Lighting:** Geometric information in point volume features may be inaccurate due to occlusion or lighting, necessitating depth-guided neighbor feature fusion (not detailed in this article) [S1, unofficial].
+
+## Subtopics
+
+### [Depth Prediction for Early Stopping (DPES)](15069-depth-prediction-for-early-stopping-dpes.md)
+Predicts early stopping positions for tiles in streaming 3D Gaussian Splatting using truncated depth from reference frames, pruning Gaussian sorting.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Experiments demonstrate superior performance in novel view synthesis and dense geometry modeling without per-scene optimization [S1, unofficial].
+*   **Strengths:** Learns more compact geometry compared to counterparts using third-party depth [S1, unofficial].
+*   **Limitations:** Geometric accuracy may suffer in regions with occlusion or poor lighting without additional feature fusion [S1, unofficial].
+
+## Background
+The method was proposed by Jingliang Li, Qiang Zhou, Chaohui Yu, Zhengda Lu, Jun Xiao, Zhibin Wang, and Fan Wang in 2023 in the paper "Improved Neural Radiance Fields Using Pseudo-depth and Fusion" [S1, unofficial]. It is inspired by CasMVSNet [S1, unofficial] and aims to address the lack of depth guidance in methods like MVSNeRF, which sample points uniformly across the entire depth range [S1, unofficial].
+
+## Sources
+[S1] Improved Neural Radiance Fields Using Pseudo-depth and Fusion, https://core.ac.uk/download/577699041.pdf, fetched 2026-10-30 (unofficial)

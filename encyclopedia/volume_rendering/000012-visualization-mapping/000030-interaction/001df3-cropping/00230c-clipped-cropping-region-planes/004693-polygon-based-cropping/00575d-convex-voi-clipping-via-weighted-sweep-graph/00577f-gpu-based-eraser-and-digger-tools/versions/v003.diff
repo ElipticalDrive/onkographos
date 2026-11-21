@@ -1,0 +1,146 @@
+--- v002.md
++++ v003.md
+@@ -60,17 +60,18 @@
+ ```python
+ def update_sculpt_buffer(sculpt_buffer, voxel_centers, srp_2d, radius, digging_depth, is_digger_mode, view_matrix_inv, proj_matrix):
+-    """
+-    Updates the SculptBuffer based on the current SRP and tool parameters.
+-    """
+     # 1. Compute ray from SRP using inverse viewing transformation [S1]
+-    # Standard inverse projection maps 2D screen point to 3D ray origin and direction
+-    ray_origin, ray_direction = _standard_inverse_view_transform(srp_2d, view_matrix_inv, proj_matrix)
++    ray_origin = unproject_2d_to_3d(srp_2d, view_matrix_inv, proj_matrix, 0.0)
++    ray_end = unproject_2d_to_3d(srp_2d, view_matrix_inv, proj_matrix, 1.0)
++    ray_direction = [ray_end[0] - ray_origin[0], ray_end[1] - ray_origin[1], ray_end[2] - ray_origin[2]]
++    ray_direction = normalize_3d(ray_direction)
+ 
+     for i, center in enumerate(voxel_centers):
+         # 2. Project voxel center to projection plane (screen) [S1]
+-        projected_center = _standard_project_to_screen(center, proj_matrix)
++        projected_center = project_3d_to_2d(center, proj_matrix)
+ 
+         # 3. Compute 2D Euclidean distance to SRP [S1]
+-        dist_2d = _standard_euclidean_distance(projected_center, srp_2d)
++        dx = projected_center[0] - srp_2d[0]
++        dy = projected_center[1] - srp_2d[1]
++        dist_2d = (dx * dx + dy * dy) ** 0.5
+ 
+         # 4. Update SculptBuffer with minimum distance [S1]
+@@ -83,76 +84,66 @@
+         if is_digger_mode:
+             # Digger Logic: Check depth along viewing direction [S1]
+-            # Compute depth to first intersection with volume boundary [G]
+-            depth_to_surface = _standard_ray_volume_intersection(center, ray_origin, ray_direction)
++            depth_to_surface = ray_box_intersection(center, ray_origin, ray_direction)
+ 
++            # Note: Sources contradict on depth threshold logic [S1].
++            # Source states: "only those voxels that have depth greater than the digging depth are discarded"
++            # but also: "For voxels that have depths smaller than the digger depth, a value is written... that forces it to be invisible" [S1].
++            # Implementation follows the explicit invisibility instruction for depth < digging_depth.
+             if is_in_circle and depth_to_surface < digging_depth:
+-                # Write value to force invisibility [S1]
+-                sculpt_buffer[i] = INVISIBLE_MARKER
++                sculpt_buffer[i] = 0.0  # Value <= radius forces invisibility [S1]
+         else:
+             # Eraser Logic: Simple radius check [S1]
+             if is_in_circle:
+-                # Mark as invisible [S1]
+-                sculpt_buffer[i] = INVISIBLE_MARKER
++                sculpt_buffer[i] = 0.0  # Value <= radius forces invisibility [S1]
+ 
+ def render(clipped_image, sculpt_buffer, radius):
+-    """
+-    Renders the volume using the SculptBuffer for visibility.
+-    """
++    # Renders the volume using the SculptBuffer for visibility [S1]
+     for i, voxel in enumerate(clipped_image.voxels):
+-        # Check visibility based on SculptBuffer [S1]
+         if sculpt_buffer[i] <= radius:
+-            continue # Skip rendering (invisible)
++            continue  # Skip rendering (invisible) [S1]
+         else:
+             render_voxel(voxel, clipped_image[i])
+ 
+-# Hardware Limitation Workaround [S1]
+ def generate_2d_sculpt_buffer(sculpt_buffer_3d):
+-    """
+-    Generates a 2D representation of the 3D SculptBuffer to bypass 
+-    hardware limitations on 3D texture writes from fragment processing.
+-    """
+-    # Store slices side-by-side [S1]
++    # Generates a 2D representation of the 3D SculptBuffer to bypass hardware limitations on 3D texture writes [S1]
+     width = sculpt_buffer_3d.width * sculpt_buffer_3d.depth
+     height = sculpt_buffer_3d.height
+-    buffer_2d = np.zeros((height, width))
++    buffer_2d = [0.0] * (height * width)
+     for z in range(sculpt_buffer_3d.depth):
+         for y in range(sculpt_buffer_3d.height):
+             for x in range(sculpt_buffer_3d.width):
+-                buffer_2d[y, x + z * sculpt_buffer_3d.width] = sculpt_buffer_3d[x, y, z]
++                buffer_2d[y * width + x + z * sculpt_buffer_3d.width] = sculpt_buffer_3d[x, y, z]
+     return buffer_2d
+ 
+ def load_3d_sculpt_buffer(buffer_2d, sculpt_buffer_3d):
+-    """
+-    Reads back the 2D buffer to CPU and reconstructs the 3D buffer on GPU.
+-    """
+-    # Read back to CPU and reconstruct 3D structure [S1]
++    # Reads back the 2D buffer to CPU and reconstructs the 3D buffer on GPU [S1]
+     for z in range(sculpt_buffer_3d.depth):
+         for y in range(sculpt_buffer_3d.height):
+             for x in range(sculpt_buffer_3d.width):
+-                sculpt_buffer_3d[x, y, z] = buffer_2d[y, x + z * sculpt_buffer_3d.width]
++                sculpt_buffer_3d[x, y, z] = buffer_2d[y * sculpt_buffer_3d.width * sculpt_buffer_3d.depth + x + z * sculpt_buffer_3d.width]
+ 
+-# Standard helper operations (self-contained)
+-INVISIBLE_MARKER = float('-inf')
++# Standard helper operations (self-contained) [G]
++def unproject_2d_to_3d(screen_coord, view_inv, proj, z_near):
++    # Standard inverse projection: maps 2D screen coords to 3D ray point at given depth [G]
++    clip = [screen_coord[0], screen_coord[1], z_near, 1.0]
++    return view_inv @ clip  # Matrix-vector multiplication [G]
+ 
+-def _standard_inverse_view_transform(srp_2d, view_matrix_inv, proj_matrix):
+-    # Standard graphics pipeline inverse: unproject 2D screen coords to 3D ray
+-    # Returns (origin, direction) in world space
+-    pass # Standard linear algebra operation [G]
++def project_3d_to_2d(center, proj):
++    # Standard projection: transforms 3D center to 2D screen coords [G]
++    clip = proj @ center
++    return [clip[0] / clip[3], clip[1] / clip[3]]
+ 
+-def _standard_project_to_screen(center, proj_matrix):
+-    # Standard perspective/parallel projection: transform 3D center to 2D screen coords
+-    pass # Standard linear algebra operation [G]
++def normalize_3d(v):
++    length = (v[0]**2 + v[1]**2 + v[2]**2) ** 0.5
++    return [v[0]/length, v[1]/length, v[2]/length]
+ 
+-def _standard_euclidean_distance(p1, p2):
+-    # Standard 2D distance: sqrt((p1.x - p2.x)^2 + (p1.y - p2.y)^2)
+-    pass # Standard math operation [G]
+-
+-def _standard_ray_volume_intersection(center, ray_origin, ray_direction):
+-    # Standard ray-box intersection to find distance to first volume boundary hit
+-    pass # Standard computational geometry operation [G]
++def ray_box_intersection(center, origin, direction):
++    # Sources do not specify the exact intersection algorithm [S1].
++    # Standard slab method computes distance to first volume boundary hit [G].
++    return 0.0  # Placeholder for standard ray-box intersection logic [G]
+ 
+ def render_voxel(voxel, data):
+-    # Standard rasterization/shading step
+-    pass # Standard graphics operation [G]
++    # Standard rasterization/shading step [G]
++    pass  # Standard graphics operation [G]
+ ```
+ 
+@@ -169,6 +160,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1].
++*   **Memory Complexity:** Not given in the sources [S1].
+ *   **Performance:** Real-time interactive performance is achieved by offloading the selection logic to the GPU [S1].
+ *   **Strengths:** Intuitive "painting" interaction; supports persistent selection (accumulation of SRPs) via the `SculptBuffer` [S1].

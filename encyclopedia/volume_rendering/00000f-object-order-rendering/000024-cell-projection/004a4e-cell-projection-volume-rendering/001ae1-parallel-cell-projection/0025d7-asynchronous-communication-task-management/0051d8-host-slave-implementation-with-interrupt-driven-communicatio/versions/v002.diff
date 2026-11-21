@@ -1,0 +1,270 @@
+--- v001.md
++++ v002.md
+@@ -4,45 +4,50 @@
+ 
+ ## Overview
+-A parallel processing scheme where a host node handles I/O and data preparation while slave nodes handle computation, using asynchronous, interrupt-driven communication to minimize idle time and overhead [S1, unofficial]. It sets itself apart from synchronous host-slave models by allowing the host to process subcubes and handle interrupts concurrently with data transfer, and from double-buffering variants by explicitly employing an interrupt handler to manage background transmission and request processing [S1, unofficial].
++This method is a parallel processing scheme for volume rendering where a host node handles I/O and data preparation, while slave nodes handle the computationally intensive fitting and polygon generation. It solves the idle time and communication overhead problems of standard host-slave partitions by using asynchronous, interrupt-driven communication to overlap computation with data transfer [S1, unofficial]. It sets itself apart from its sibling [Asynchronous Communication with Double-Buffering](4280-asynchronous-communication-with-double-buffering.md) by specifically employing an interrupt handler on the host to manage background subcube transmission and by implementing specific strategies like exponential subcube reduction and early communication requests to minimize latency [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Volume data slices, approximation order (e.g., (1,1,1) or (3,3,3)).
+-*   **Output:** Rendered image polygons.
++*   **Input:** Volume data slices, rendering parameters (approximation order, e.g., (3,3,3)).
++*   **Output:** Rendered image composed of polygons sent from slaves to the host.
+ 
+ **Data Structures:**
+-*   **C3 Data:** Computed per-pixel data requiring 27 neighboring pixel values [S1, unofficial].
+-*   **Subcubes:** Blocks of volume data sent to slaves.
+-*   **Polygons:** Computed geometric primitives sent back to the host.
+-*   **Buffers:** Two buffers used for asynchronous message packing [S1, unofficial].
++*   **C3 Data:** Computed by the host. Requires 27 pixel information to compute the C3 data of a single pixel [S1, unofficial].
++*   **Subcubes:** Chunks of volume data transferred from host to slaves.
++*   **Polygons:** Computed by slaves, stored in local memory, and sent to the host.
++*   **Communication Buffers:** Two buffers are used for asynchronous message passing.
+ 
+ **Parameters:**
+-*   **Preload Slices:** 2 slices for (1,1,1) approximation; 3 slices for (3,3,3) approximation [S1, unofficial].
+-*   **Chunk Size:** Large quantities at slice start, reducing exponentially near slice end [S1, unofficial].
++*   **Preload Slices:** For (1,1,1) approximation, preload 2 slices. For (3,3,3) approximation, preload 3 slices [S1, unofficial].
++*   **Buffer Count:** 2 buffers for asynchronous communication [S1, unofficial].
+ 
+-**Steps:**
++**Numbered Steps:**
+ 
+-1.  **Host Initialization:** Preload the host with the specified number of slices (2 for (1,1,1), 3 for (3,3,3)) to reduce idle time dominance [S1, unofficial].
+-2.  **Host Step 1 (Read & Compute):** Read slice $i$ and compute its C3 data. This step requires 27 pixel information to compute the C3 data of a pixel [S1, unofficial].
+-3.  **Host Step 2 (Interrupt Start):** Start the interrupt handler to allow background subcube transmission. This step returns immediately without waiting [S1, unofficial].
+-4.  **Host Step 3 (Next Slice):** Read new slice $i+1$ and compute its C3 data [S1, unofficial].
+-5.  **Host Step 4 (Wait & Assist):** Wait for all subcubes of the "old" slice $i$ to be transferred to slave nodes by the interrupt-driven handler. The subcubes prepared by the new slice $i+1$ are transferred in the next iteration. While waiting, the host helps process additional subcubes [S1, unofficial].
+-6.  **Host Step 5 (Loop):** Go to Step 3 [S1, unofficial].
+-7.  **Slave Step 1 (Request):** Request and get subcubes from the host. Slaves send a request to the host when almost finished processing current subcubes to process newly arrived subcubes without delay [S1, unofficial].
+-8.  **Slave Step 2 (Fit):** Fit (3,3,3) functions [S1, unofficial].
+-9.  **Slave Step 3 (Compute):** Compute polygons [S1, unofficial].
+-10. **Slave Step 4 (Send):** Send polygons to the host. Slaves store calculated polygons in local memory and empty them to the host when they accumulate to a certain level [S1, unofficial].
++1.  **Host Initialization:**
++    *   Read the first slice $i$ and compute its C3 data [S1, unofficial].
++    *   Start the interrupt handler to enable background subcube transmission [S1, unofficial].
+ 
+-**Communication Strategy:**
++2.  **Host Main Loop (for each slice):**
++    *   Read the next slice $i+1$ and compute its C3 data [S1, unofficial].
++    *   Wait for all subcubes of the "old" slice $i$ to be transferred to slave nodes by the interrupt handler [S1, unofficial].
++    *   While waiting, the host may help process additional subcubes to utilize idle time [S1, unofficial].
++    *   Increment slice index and repeat.
++
++3.  **Slave Processing (Concurrent with Host):**
++    *   Request and get subcubes from the host [S1, unofficial].
++    *   Fit (3,3,3) functions to the subcube data [S1, unofficial].
++    *   Compute polygons based on the fitted functions [S1, unofficial].
++    *   Send polygons to the host [S1, unofficial].
++
++**Communication Strategies:**
+ *   **Asynchronous Communication:** Alternates between two buffers. When `send_message` is called, the node returns immediately and packs data into the other buffer, waiting only if the previous message is not completed [S1, unofficial].
+-*   **Early Communication:** Slaves request new subcubes before finishing current ones to reduce communication latency [S1, unofficial].
+-*   **Message Packing:** Pack a couple of rows of subcubes into one transmission packet to reduce the number of transferred packets and total bytes. Shared boundary pixels are sent only once instead of four times (since a pixel can be shared by 4 subcubes) [S1, unofficial].
+-*   **Interrupt-Driven Host:** Use an interrupt handler to process communication requests, allowing the host to listen to slaves and hand out subcubes/receive polygons even while doing other work [S1, unofficial].
+-*   **Exponential Reduction:** The host sends large quantities of subcubes at the beginning of a slice and reduces the number sent exponentially when the slice is almost done to avoid long idle time waiting for a slave [S1, unofficial].
++*   **Early Communication:** When a slave is almost finished processing subcubes, it sends a request to the host to process newly arrived subcubes without delay, reducing communication latency [S1, unofficial].
++*   **Message Packing:** The host packs a couple of rows of subcubes into one transmission packet. Shared boundary pixels are sent only once instead of four times (since a pixel can be shared by 4 subcubes) [S1, unofficial].
++*   **Exponential Subcube Reduction:** The host sends large quantities of subcubes at the beginning of a slice and reduces the number sent exponentially when the slice is almost done to avoid long idle time waiting for a slave [S1, unofficial].
++*   **Local Memory Management:** Slaves store calculated polygons in local memory and empty them to the host when they accumulate to a certain level [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# Global state
++# Global variables
+ buffers = [Buffer(), Buffer()]
+ buffer_index = 0
+@@ -51,105 +56,109 @@
+ polygon_buffer = []
+ 
++def send_message(data, buffer_idx):
++    """
++    Asynchronous send. Returns immediately.
++    If previous message in buffer_idx is not done, wait.
++    """
++    if not buffers[buffer_idx].is_ready():
++        wait_for_completion(buffer_idx)
++    buffers[buffer_idx].pack(data)
++    buffers[buffer_idx].send()
++
++def interrupt_handler():
++    """
++    Runs in background. Handles incoming requests and sends subcubes.
++    """
++    global buffer_index
++    while interrupt_handler_active:
++        if slave_request_received():
++            # Pack subcubes into the other buffer
++            next_buffer = 1 - buffer_index
++            subcubes = get_next_subcubes()
++            send_message(subcubes, next_buffer)
++            buffer_index = next_buffer
++        if polygon_data_available():
++            polygons = get_polygons()
++            send_message(polygons, buffer_index)
++
+ def host_algorithm():
+-    # Preload slices
+-    preload_slices(2 if approximation == (1,1,1) else 3)
++    """
++    Host Node's Interrupt Driven Algorithm
++    """
++    global interrupt_handler_active
+     
+-    slice_i = 0
++    # Step 1: Read slice i and compute its C3 data
++    slice_i = read_slice(0)
++    c3_data_i = compute_c3_data(slice_i)
++    
++    # Step 2: Start interrupt handler
++    interrupt_handler_active = True
++    start_interrupt_handler(interrupt_handler)
++    
++    slice_idx = 0
++    
+     while more_slices():
+-        # Step 1: Read slice i and compute C3 data
+-        read_slice(slice_i)
+-        compute_c3_data(slice_i)
++        # Step 3: Read new slice i+1 and compute its C3 data
++        slice_idx += 1
++        slice_next = read_slice(slice_idx)
++        c3_data_next = compute_c3_data(slice_next)
+         
+-        # Step 2: Start interrupt handler for background transmission
+-        start_interrupt_handler()
++        # Step 4: Wait for all subcubes of the "old" slice i to be transferred
++        # The subcubes prepared by the new slice i+1 is transferred at the next iteration
++        wait_for_subcube_transfer(slice_idx - 1)
+         
+-        # Step 3: Read new slice i+1 and compute C3 data
+-        read_slice(slice_i + 1)
+-        compute_c3_data(slice_i + 1)
+-        
+-        # Step 4: Wait for old slice i subcubes to be transferred
+-        # Also help process subcubes while waiting
+-        wait_for_transfer(slice_i)
++        # Help process subcubes while waiting
+         process_additional_subcubes()
+         
+-        # Step 5: Go to step 3 (loop)
+-        slice_i += 1
+-
+-def start_interrupt_handler():
+-    global interrupt_handler_active
+-    interrupt_handler_active = True
+-    # Interrupt handler runs in background
+-    # It handles:
+-    # 1. Receiving slave requests
+-    # 2. Sending subcubes to slaves
+-    # 3. Receiving polygons from slaves
+-    pass
++        # Prepare subcubes for next iteration
++        # Note: In a real implementation, subcubes would be queued here
++        # based on c3_data_next and sent via interrupt handler
++        queue_subcubes(c3_data_next)
+ 
+ def slave_algorithm():
+-    while more_subcubes():
+-        # Step 1: Request and get subcubes
++    """
++    Slave Node's Algorithm
++    """
++    while True:
++        # Step 1: Request and get subcubes from the host
++        subcubes = request_and_get_subcubes()
++        
++        # Step 2: Fit (3,3,3) functions
++        fitted_functions = fit_3x3x3_functions(subcubes)
++        
++        # Step 3: Compute polygons
++        polygons = compute_polygons(fitted_functions)
++        
++        # Store in local memory
++        polygon_buffer.append(polygons)
++        
++        # Empty polygons to host when accumulated
++        if len(polygon_buffer) > threshold:
++            send_message(polygon_buffer, buffer_index)
++            polygon_buffer.clear()
++            
++        # Step 4: Send polygons to the host (handled by send_message above)
++        
++        # Early communication: Request next subcubes if almost finished
+         if almost_finished():
+             send_request_to_host()
+-        subcubes = get_subcubes_from_host()
+-        
+-        # Step 2: Fit (3,3,3) functions
+-        fit_functions(subcubes)
+-        
+-        # Step 3: Compute polygons
+-        polygons = compute_polygons()
+-        
+-        # Step 4: Send polygons to host
+-        # Store in local memory, empty when accumulated
+-        polygon_buffer.append(polygons)
+-        if len(polygon_buffer) > threshold:
+-            send_polygons_to_host(polygon_buffer)
+-            polygon_buffer = []
+-
+-def send_message(data, buffer_idx):
+-    # Asynchronous send
+-    # If previous message not completed, wait
+-    if not is_message_complete(buffer_idx):
+-        wait_for_completion(buffer_idx)
+-    
+-    # Pack data into buffer
+-    buffers[buffer_idx].pack(data)
+-    
+-    # Trigger transmission
+-    buffers[buffer_idx].send()
+-    
+-    # Switch buffer index
+-    buffer_idx = 1 - buffer_idx
+-    return buffer_idx
+-
+-def interrupt_handler():
+-    # Process communication requests
+-    # Hand out subcubes
+-    # Receive polygons
+-    # Called asynchronously
+-    pass
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Critical Section Violations:** Interrupt-driven software is tricky to implement; hard-to-trace bugs may occur intermittently due to critical section violations [S1, unofficial].
+-*   **Idle Time:** If preload slices are not used, idle time becomes a large portion of total processing time, especially with many groups [S1, unofficial].
+-*   **Boundary Pixels:** Shared boundary pixels must be sent only once to avoid redundant transmission (4 times if sent per subcube) [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Multi-Host Partition Scheme](14583-multi-host-partition-scheme.md)
+-A parallelization strategy where nodes are divided into groups, each with one host and several slaves, processing a subset of slices. It is a hybrid of host-slave and symmetry partitions, allowing load balancing by reassigning finished group nodes as slaves to other groups.
++A parallel volume rendering strategy that divides processing nodes into independent groups, each containing one host and multiple slaves, to process subsets of volume slices. It solves the load imbalance and I/O bottlenecks of pure symmetry partitions and the single-host computing bottleneck of pure host-slave schemes by allowing dynamically reassigning idle nodes from finished groups to busy ones.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Achieves near linear speed up when preloading hosts with 2 images for (1,1,1) approximation [S1, unofficial]. For (3,3,3) approximation with 65 slices of 192x128 resolution, slave idle time is smaller compared to (1,1,1) because computation time is longer, making communication time less important [S1, unofficial].
+-*   **Scaling:** Not given in the sources.
+-*   **Strengths:** Minimizes idle time for both host and slaves; overlaps computation with communication; reduces communication overhead via message packing and early requests.
+-*   **Limitations:** Complex implementation due to interrupt handling and critical section management; potential for intermittent bugs.
+-*   **When to Use:** When communication overhead is significant and computation can be effectively partitioned between host and slaves.
+-*   **When Not to Use:** When implementation complexity is a concern or when computation time is very short relative to communication time.
++*   **Time Complexity:** The host performs I/O and C3 data computation, which is relatively fast compared to polygon generation. The slaves perform the heavy computation. The asynchronous nature overlaps communication with computation, reducing total time.
++*   **Memory Complexity:** Requires local memory on slaves to store polygons until a threshold is reached. Two buffers are used for communication.
++*   **Performance:** Preloading slices reduces idle time dominance. For (3,3,3) approximation, communication time becomes less important compared to computation time. Near linear speed up is achieved with preloading [S1, unofficial].
++*   **Strengths:** Minimizes idle time for both host and slaves. Reduces communication overhead through message packing and asynchronous transfer.
++*   **Limitations:** Complex implementation due to interrupt-driven software. Critical section violations can cause hard-to-trace bugs [S1, unofficial].
++*   **When to use:** When communication overhead is significant and the host can be utilized for data preparation and background communication management.
++*   **When not to use:** When the implementation complexity is prohibitive or when the communication latency is negligible compared to computation time.
+ 
+ ## Background
+-Originated in the context of scalar field modeling and visualization on the Intel Delta architecture [S1, unofficial]. The method addresses problems associated with traditional host-slave partitions, such as idle host and idle slave nodes, by introducing asynchronous, interrupt-driven communication and specific data management strategies [S1, unofficial].
++This method originates from the work on Scalar Field Modeling & Visualization on the Intel Delta [S1, unofficial]. It was developed to alleviate problems associated with the host-slave partition in parallel volume rendering, specifically idle time and communication overhead. The approach uses an interrupt handler to manage background subcube transmission, allowing the host to remain productive while waiting for slaves.
+ 
+ ## Sources

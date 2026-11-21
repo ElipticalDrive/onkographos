@@ -1,0 +1,305 @@
+--- v001.md
++++ v002.md
+@@ -4,101 +4,223 @@
+ 
+ ## Overview
+-Deformable Neural Radiance Fields (Nerfies) reconstructs non-rigidly deforming scenes by decomposing the scene into a static canonical template volume (a standard NeRF) and a per-observation continuous deformation field [S1]. Unlike methods that condition deformation on time or define it on discrete grids/meshes, Nerfies conditions the deformation on a learned per-frame latent code, allowing it to model complex, non-rigid motions from casually captured images [S1]. It distinguishes itself from sibling methods by introducing elastic regularization to resolve ambiguities between motion and scaling, and a coarse-to-fine optimization strategy to avoid local minima [S1].
++Deformable Neural Radiance Fields (Nerfies) reconstructs non-rigidly deforming scenes by decomposing the scene into a static canonical template volume (a standard NeRF) and a per-observation continuous deformation field that maps observation-space coordinates to canonical-space coordinates [S1]. Unlike methods that condition deformation on time or define it on discrete meshes/voxels, Nerfies conditions the deformation on a learned per-frame latent code and models the deformation as a continuous function using an MLP [S1]. It distinguishes itself from siblings by introducing elastic regularization to resolve ambiguities between motion and scaling, and a coarse-to-fine optimization strategy to avoid local minima [S1].
+ 
+ ## How it works
+-**Inputs:** A set of $n$ images of a non-rigidly deforming scene, captured from varying viewpoints. Each image $i$ has an associated camera pose.
+-**Outputs:** A canonical radiance field $F$, a deformation field $T$, and per-frame latent codes $\omega_i$ (deformation) and $\psi_i$ (appearance).
++**Inputs and Outputs:**
++*   **Inputs:** A set of $n$ images $\{I_i\}_{i=1}^n$ of a non-rigidly deforming scene, along with their camera poses.
++*   **Outputs:** A canonical NeRF $F$ (representing the template) and a deformation field $T$ (parameterized by an MLP), along with per-frame latent codes $\omega_i$ (deformation) and $\psi_i$ (appearance). The system renders novel views of the deforming subject.
+ 
+ **Data Structures:**
+-1.  **Canonical NeRF ($F$):** An MLP mapping $(x', d, \psi_i) \to (\sigma, c)$, where $x'$ is a canonical 3D coordinate, $d$ is viewing direction, $\sigma$ is density, and $c$ is color.
+-2.  **Deformation MLP ($W$):** An MLP mapping $(x, \omega_i) \to (r, v)$, where $x$ is an observation-space 3D coordinate, $\omega_i$ is the deformation latent code, $r \in \mathbb{R}^3$ is the rotation vector, and $v \in \mathbb{R}^3$ is the translation vector component of the screw motion.
+-    *   Architecture: Depth 6, hidden size 128, skip connection at the 4th layer [S1].
+-    *   Activation: Softplus for density in $F$; standard activations for $W$ [S1].
++1.  **Canonical NeRF $F$:** An MLP mapping $(x', d, \psi_i) \to (\sigma, c)$, where $x'$ is a canonical 3D coordinate, $d$ is a viewing direction, $\sigma$ is density, and $c$ is color.
++2.  **Deformation MLP $W$:** An MLP mapping $(x, \omega_i) \to (r, v) \in \mathbb{R}^6$, where $x$ is an observation-space 3D coordinate and $\omega_i$ is the deformation latent code. The output $(r, v)$ parameterizes an SE(3) transformation.
+ 3.  **Latent Codes:**
+-    *   $\omega_i \in \mathbb{R}^8$: Per-frame deformation latent code [S1].
+-    *   $\psi_i \in \mathbb{R}^8$: Per-frame appearance latent code [S1].
+-4.  **Positional Encoding:** $\gamma_\alpha(x)$ modulates input frequencies based on annealing parameter $\alpha$ [S1].
++    *   $\omega_i \in \mathbb{R}^8$: Per-frame learned latent deformation code encoding the scene state.
++    *   $\psi_i \in \mathbb{R}^8$: Per-frame learned latent appearance code modulating color output to handle exposure/white balance variations.
++4.  **Positional Encoding:** Input coordinates $x$ are encoded using $\gamma_\alpha(x)$, which applies frequency-dependent weights $w_k(\alpha)$ to sinusoidal basis functions.
+ 
+ **Parameters:**
+-*   $N$: Total training iterations for annealing (e.g., 80,000) [S1].
+-*   $m$: Maximum number of frequency bands (e.g., 6) [S1].
+-*   $c$: Robust loss hyperparameter (0.03) [S1].
+-*   $\lambda, \mu$: Loss weighting coefficients (typically $10^{-3}$) [S1].
+-*   Samples per ray: 256 coarse and 256 fine samples for full HD [S1].
+-
+-**Algorithm Steps:**
++*   **Network Architecture:** Deformation network depth 6, hidden size 128, skip connection at the 4th layer. [S1]
++*   **Samples:** 256 coarse and 256 fine ray samples per ray for full HD (1920x1080). [S1]
++*   **Annealing:** 6 frequency bands; $\alpha$ annealed from 0 to 6 over 80K iterations. [S1]
++*   **Loss Weights:** $\lambda = \mu = 10^{-3}$ for elastic and background regularization. [S1]
++*   **Robust Loss Hyperparameter:** $c = 0.03$ for the Geman-McClure function. [S1]
++
++**Step-by-Step Method:**
+ 
+ 1.  **Initialization:**
+-    *   Initialize the canonical NeRF $F$ and deformation MLP $W$ [S1].
+-    *   Initialize the weights of the last layer of $W$ from $U(-10^{-5}, 10^{-5})$ to ensure the deformation starts near the identity transformation [S1].
+-    *   Initialize latent codes $\omega_i$ and $\psi_i$ via embedding layers [S1].
+-
+-2.  **Deformation Field Formulation:**
+-    *   The deformation field $W$ outputs a screw axis $S = (r; v) \in \mathbb{R}^6$ [S1].
+-    *   Compute the rotation matrix $e^r \in SO(3)$ using Rodrigues' formula:
+-        $$ e^r = I + \frac{\sin \theta}{\theta}[r]_\times + \frac{1 - \cos \theta}{\theta^2}[r]_\times^2 $$
+-        where $\theta = \|r\|$, $\hat{r} = r/\|r\|$, and $[r]_\times$ is the cross-product matrix [S1].
+-    *   Compute the translation $p$ using the matrix $G$:
+-        $$ p = Gv, \quad G = I + \frac{1 - \cos \theta}{\theta^2}[r]_\times + \frac{\theta - \sin \theta}{\theta^3}[r]_\times^2 $$
+-    *   The transformed canonical point $x'$ is:
+-        $$ x' = e^S x = e^r x + p $$
+-        [S1]
+-
+-3.  **Rendering (Forward Pass):**
+-    *   For each training image $i$:
+-        a. Cast rays in the observation frame and sample points $x$ along the rays [S1].
+-        b. Encode $x$ using the current positional encoding $\gamma_\alpha(x)$ [S1].
+-        c. Query the deformation MLP $W$ with $(\gamma_\alpha(x), \omega_i)$ to get $(r, v)$ [S1].
+-        d. Compute $x'$ using the formulas in Step 2 [S1].
+-        e. Query the canonical NeRF $F$ with $(x', d, \psi_i)$ to obtain density $\sigma$ and color $c$ [S1].
+-        f. Compute the rendered color $\hat{C}(\mathbf{r})$ using the standard volume rendering equation (see Parent article) [S1].
+-
+-4.  **Loss Computation:**
+-    *   **Photometric Loss:** Mean Squared Error (MSE) between rendered color $\hat{C}$ and ground truth image color [S1].
+-    *   **Elastic Regularization:**
+-        a. Compute the Jacobian $J_T(x)$ of the deformation field $T$ with respect to $x$ using automatic differentiation [S1].
+-        b. Compute the Singular Value Decomposition (SVD) of $J_T(x) = U \Sigma V^T$ [S1].
+-        c. Compute the robust elastic loss using the Geman-McClure function:
+-            $$ L_{\text{elastic-r}}(x) = \rho(\|\log \Sigma\|_F, c) $$
+-            where $\rho(x, c) = \frac{2(x/c)^2}{(x/c)^2 + 4}$ and $c=0.03$ [S1].
+-            *Note: $\|\log \Sigma\|_F$ penalizes deviation of singular values from 1, treating expansion and contraction symmetrically [S1].*
+-        d. Weight the elastic loss at each sample by its contribution $w_i$ to the rendered view (from NeRF transmittance/density) to allow free deformation in empty space [S1].
+-    *   **Background Regularization (Optional):**
+-        If static 3D points $\{x_1, \dots, x_K\}$ are known (e.g., from SfM):
++    *   Initialize the weights of the last layer of the deformation MLP $W$ from a uniform distribution $U(-10^{-5}, 10^{-5})$. This ensures the deformation starts near the identity, as the exponential map $e^S$ is the identity when $S=0$ [S1].
++    *   Initialize latent codes $\omega_i$ and $\psi_i$ via embedding layers.
++
++2.  **Ray Casting and Sampling:**
++    *   For a target view, cast rays $\mathbf{r}$ through the camera.
++    *   Sample $N$ points $x_i$ along each ray in the observation space.
++
++3.  **Deformation (Observation to Canonical):**
++    *   For each sample point $x_i$ and frame $i$, retrieve the deformation latent code $\omega_i$.
++    *   Encode $x_i$ using the positional encoding $\gamma_\alpha(x_i)$, where $\alpha$ is the current annealing parameter.
++    *   Pass $(\gamma_\alpha(x_i), \omega_i)$ through the deformation MLP $W$ to obtain $(r, v) \in \mathbb{R}^6$.
++    *   Compute the SE(3) transformation $e^S$ from the screw axis $S = (r; v)$:
++        *   Compute rotation angle $\theta = \|r\|$ and axis $\hat{r} = r/\|r\|$.
++        *   Compute rotation matrix $e^r$ using Rodrigues' formula:
++            $$ e^r = I + \frac{\sin \theta}{\theta}[r]_\times + \frac{1 - \cos \theta}{\theta^2}[r]_\times^2 $$
++            where $[r]_\times$ is the cross-product matrix of $r$.
++        *   Compute translation $p$ using the matrix $G$:
++            $$ G = I + \frac{1 - \cos \theta}{\theta^2}[r]_\times + \frac{\theta - \sin \theta}{\theta^3}[r]_\times^2 $$
++            $$ p = Gv $$
++        *   Transform the point to canonical space: $x'_i = e^r x_i + p$.
++
++4.  **Radiance Field Evaluation:**
++    *   Query the canonical NeRF $F$ with the transformed point $x'_i$, viewing direction $d$, and appearance code $\psi_i$ to obtain density $\sigma_i$ and color $c_i$.
++
++5.  **Volume Rendering:**
++    *   Compute the rendered color $\hat{C}(\mathbf{r})$ using the standard emission-absorption model:
++        $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
++        where $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance and $\delta_i$ is the step size.
++
++6.  **Loss Computation and Regularization:**
++    *   **Photometric Loss:** Compute MSE between $\hat{C}(\mathbf{r})$ and the ground truth image color.
++    *   **Elastic Regularization:** Compute the Jacobian $J_T(x)$ of the deformation field with respect to $x$ using automatic differentiation. Compute the singular values $\Sigma$ of $J_T(x)$. Apply the robust elastic loss:
++        $$ L_{\text{elastic-r}}(x) = \rho(\|\log \Sigma\|_F, c) $$
++        where $\rho(x, c) = \frac{2(x/c)^2}{(x/c)^2 + 4}$ is the Geman-McClure robust error function with $c=0.03$.
++        *   Weight this loss by the sample's contribution to the rendered view $w_i$ to allow free deformation in empty space.
++    *   **Background Regularization (Optional):** If static 3D points $\{x_k\}_{k=1}^K$ are known, penalize their movement:
+         $$ L_{\text{bg}} = \frac{1}{K} \sum_{k=1}^K \|T(x_k) - x_k\|^2 $$
+-        [S1]
+-    *   **Total Loss:**
+-        $$ L_{\text{total}} = L_{\text{rgb}} + \lambda L_{\text{elastic-r}} + \mu L_{\text{bg}} $$
+-        [S1]
+-
+-5.  **Optimization:**
+-    *   Update parameters (NeRF weights, deformation MLP weights, latent codes) using Adam optimizer [S1].
+-    *   **Coarse-to-Fine Annealing:**
+-        a. Define the weight for frequency band $j$ as:
+-            $$ w_j(\alpha) = \frac{1 - \cos(\pi \cdot \text{clamp}(\alpha - j, 0, 1))}{2} $$
+-            where $\alpha \in [0, m]$ [S1].
+-        b. Linearly anneal $\alpha$ during training: $\alpha(t) = m \cdot \frac{t}{N}$, where $t$ is the current iteration and $N$ is the total iterations for annealing [S1].
+-        c. The positional encoding becomes $\gamma_\alpha(x) = (x, \dots, w_k(\alpha)\sin(2^k \pi x), w_k(\alpha)\cos(2^k \pi x), \dots)$ [S1].
+-
+-**Pitfalls:**
+-*   Without regularization, deformation fields are prone to distortions, over-fitting, and local minima [S1].
+-*   Ambiguities between motion and scaling can lead to implausible results if not constrained [S1].
+-*   High-frequency positional encoding early in training can cause the model to fail to capture large motions (e.g., head rotation) by overfitting to minute details (e.g., smiles) [S1].
++    *   **Total Loss:** $L_{\text{total}} = L_{\text{rgb}} + \lambda L_{\text{elastic-r}} + \mu L_{\text{bg}}$.
++
++7.  **Optimization:**
++    *   Optimize the parameters of $F$, $W$, $\omega_i$, and $\psi_i$ using Adam.
++    *   Anneal the positional encoding bandwidth parameter $\alpha(t)$ linearly: $\alpha(t) = m \cdot \frac{t}{N}$, where $t$ is the current iteration, $N$ is the total iterations for $\alpha$ to reach $m$, and $m$ is the max number of frequency bands (e.g., 6). This implements coarse-to-fine optimization.
++
++**Pseudocode:**
++
++```python
++import torch
++import torch.nn as nn
++import numpy as np
++
++def rodrigues(r):
++    """
++    Computes rotation matrix from rotation vector r using Rodrigues' formula.
++    r: (3,) tensor
++    Returns: (3, 3) tensor
++    """
++    theta = torch.norm(r, dim=-1, keepdim=True)
++    r_hat = r / (theta + 1e-8)
++    sin_theta = torch.sin(theta)
++    cos_theta = torch.cos(theta)
++    
++    # Cross-product matrix [r]_x
++    # For a vector r = [x, y, z], [r]_x = [[0, -z, y], [z, 0, -x], [-y, x, 0]]
++    r_hat_x = torch.zeros_like(r_hat).repeat(1, 3, 3) # Placeholder for batched implementation details
++    # Simplified for single vector r:
++    x, y, z = r_hat[:, 0], r_hat[:, 1], r_hat[:, 2]
++    R_x = torch.stack([torch.zeros_like(x), -z, y,
++                       z, torch.zeros_like(x), -x,
++                       -y, x, torch.zeros_like(x)], dim=1).view(-1, 3, 3)
++    
++    I = torch.eye(3).to(r.device)
++    R = I + sin_theta * R_x + (1 - cos_theta) * torch.bmm(R_x, R_x)
++    return R
++
++def compute_se3_transform(r, v):
++    """
++    Computes SE(3) transform from screw axis parameters r (rotation vector) and v (translation vector).
++    r: (3,) tensor
++    v: (3,) tensor
++    Returns: (3, 3) rotation matrix R, (3,) translation vector p
++    """
++    theta = torch.norm(r)
++    r_hat = r / (theta + 1e-8)
++    sin_theta = torch.sin(theta)
++    cos_theta = torch.cos(theta)
++    
++    # Rotation matrix
++    R = rodrigues(r)
++    
++    # Translation matrix G
++    # G = I + ((1 - cos(theta)) / theta^2) * [r]_x + ((theta - sin(theta)) / theta^3) * [r]_x^2
++    # Using r_hat for stability
++    r_hat_x = torch.zeros(3, 3)
++    x, y, z = r_hat
++    r_hat_x[0, 1] = -z; r_hat_x[0, 2] = y
++    r_hat_x[1, 0] = z; r_hat_x[1, 2] = -x
++    r_hat_x[2, 0] = -y; r_hat_x[2, 1] = x
++    
++    term1 = ((1 - cos_theta) / (theta**2 + 1e-8)) * r_hat_x
++    term2 = ((theta - sin_theta) / (theta**3 + 1e-8)) * torch.mm(r_hat_x, r_hat_x)
++    G = torch.eye(3) + term1 + term2
++    
++    p = torch.mm(G, v.unsqueeze(1)).squeeze(1)
++    return R, p
++
++def nerfies_forward(x_obs, omega, psi, canonical_nerf, deformation_mlp, pos_encoder, alpha):
++    """
++    Forward pass for a single point in observation space.
++    """
++    # 1. Deformation
++    # Encode input
++    x_encoded = pos_encoder(x_obs, alpha) # Returns weighted positional encoding
++    # Get screw axis parameters
++    r_v = deformation_mlp(torch.cat([x_encoded, omega], dim=-1))
++    r = r_v[:, :3]
++    v = r_v[:, 3:]
++    
++    # Compute SE(3) transform
++    R, p = compute_se3_transform(r, v)
++    
++    # Transform point to canonical space
++    # x_obs is (N, 3), R is (N, 3, 3), p is (N, 3)
++    x_canonical = torch.bmm(R, x_obs.unsqueeze(-1)).squeeze(-1) + p
++    
++    # 2. Radiance Field
++    # Query canonical NeRF
++    # Assuming canonical_nerf takes (x, d, psi)
++    # d is viewing direction, psi is appearance code
++    sigma, color = canonical_nerf(x_canonical, d, psi)
++    
++    return sigma, color
++
++def elastic_regularization(deformation_mlp, x_obs, omega):
++    """
++    Computes elastic regularization loss.
++    """
++    x_obs.requires_grad_(True)
++    # Get deformation output
++    x_encoded = pos_encoder(x_obs, alpha)
++    r_v = deformation_mlp(torch.cat([x_encoded, omega], dim=-1))
++    r = r_v[:, :3]
++    v = r_v[:, 3:]
++    
++    # Compute transformed point x'
++    R, p = compute_se3_transform(r, v)
++    x_prime = torch.bmm(R, x_obs.unsqueeze(-1)).squeeze(-1) + p
++    
++    # Compute Jacobian J_T(x) = dx'/dx
++    # Using automatic differentiation
++    jacobian = torch.autograd.grad(x_prime.sum(), x_obs, create_graph=True)[0]
++    
++    # Compute Singular Values
++    # SVD of jacobian
++    U, S, Vh = torch.linalg.svd(jacobian)
++    
++    # Log of singular values
++    log_S = torch.log(S + 1e-8)
++    
++    # Elastic loss: Frobenius norm of log(S)
++    # L_elastic = ||log Sigma||_F
++    elastic_loss = torch.norm(log_S, dim=-1) ** 2 # Sum of squares of log singular values
++    
++    # Robust loss
++    c = 0.03
++    robust_loss = 2 * (elastic_loss / c)**2 / ((elastic_loss / c)**2 + 4)
++    
++    return robust_loss
++
++def coarse_to_fine_alpha(t, N, m):
++    """
++    Computes annealing parameter alpha.
++    """
++    return m * (t / N)
++```
+ 
+ ## Subtopics
+ 
+ ### [Coarse-to-Fine Optimization](13448-coarse-to-fine-optimization.md)
+-Coarse-to-Fine Optimization is a training strategy for deformable neural radiance fields that stabilizes convergence by gradually increasing the model's capacity to represent high-frequency details. It addresses the difficulty of simultaneously optimizing complex geometry, texture, and non-rigid deformation from scratch by annealing the frequency components of the positional encoding used by the deformation network [13448-coarse-to-fine-optimization.md].
++Coarse-to-Fine Optimization is a training strategy for deformable neural radiance fields that stabilizes convergence by gradually increasing the model's capacity to represent high-frequency details. It addresses the difficulty of simultaneously optimizing complex geometry, texture, and non-rigid deformation from scratch by annealing the frequency components of the positional encoding used by the deformation network. It starts with low-frequency bands to learn smooth, large-scale motions, then introduces higher frequencies to capture fine details, preventing local minima.
++
++### [Template-Free NeRF (TFS-NeRF)](16781-template-free-nerf-tfs-nerf.md)
++TFS-NeRF is a template-free 3D semantic NeRF method for reconstructing dynamic scenes from sparse or single-view RGB videos, specifically handling interactions between two or more entities (rigid, non-rigid, or deformable). It distinguishes itself from Nerfies by explicitly disentangling the motions of interacting entities and from LBS-based approaches like TAVA by using an Invertible Neural Network (INN) to predict Linear Blend Skinning (LBS) weights directly, thereby bypassing computationally expensive root-finding optimizations. This enables time-efficient training and semantically separable geometry reconstruction without relying on pre-defined template models (e.g., SMPL) or latent codes.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is computationally intensive. Full HD models require training on 8 V100 GPUs for a week, while half-resolution models take 16 hours [S1].
+-*   **Memory Complexity:** High memory usage due to storing intermediate states for backpropagation through the deformation field and volume rendering, typical of reverse-mode AD [44-radiance-field-optimization.md].
+-*   **Strengths:** Handles non-rigid deformation from casual, hand-held captures; resolves ambiguities between motion and scaling via elastic regularization; avoids local minima via coarse-to-fine annealing [S1].
+-*   **Limitations:** Prone to local minima without regularization; requires careful tuning of annealing parameters; deformation field can distort in empty space if not weighted properly [S1].
+-*   **When to use:** When reconstructing non-rigidly deforming scenes (e.g., humans) from casually captured video/images where explicit time correspondence or dense flow is unavailable [S1].
+-*   **When not to use:** For rigid scenes (standard NeRF is sufficient) or scenes with significant specular/transmission effects not handled by the appearance code [S1].
++*   **Time Complexity:** Training is computationally intensive. Full HD models require training on 8 V100 GPUs for a week, while half-resolution models take 16 hours [S1]. The deformation field evaluation adds overhead to each ray sample compared to static NeRF.
++*   **Memory Complexity:** High memory usage due to storing latent codes for each frame and the large MLPs for both the canonical NeRF and deformation field. The use of automatic differentiation for elastic regularization also requires storing intermediate states for the Jacobian computation.
++*   **Performance:** Capable of photorealistic rendering of non-rigidly deforming scenes (e.g., human faces, bodies) from casually captured mobile phone videos [S1].
++*   **Strengths:** Continuous deformation field allows for smooth, high-quality reconstructions without discretization artifacts. Elastic regularization resolves ambiguities between motion and scaling. Coarse-to-fine optimization improves robustness.
++*   **Limitations:** Prone to local minima without coarse-to-fine optimization. Requires careful tuning of regularization weights. Performance degrades if the scene has significant non-rigid deformations that violate the "as-rigid-as-possible" prior (e.g., extreme stretching).
++*   **When to use:** When reconstructing non-rigidly deforming scenes (like humans) from casual video, especially when a template is not available or when continuous deformation is preferred over discrete mesh-based methods.
++*   **When not to use:** For static scenes (use standard NeRF), or for scenes with severe non-rigid deformations that break the local rigidity assumption (e.g., fluid-like motions).
+ 
+ ## Background
+-Nerfies was introduced by Mildenhall et al. in 2021 [S1]. It extends the original Neural Radiance Fields (NeRF) method [39] to handle dynamic, non-rigid scenes. The method was motivated by the challenge of capturing people with hand-held cameras, where non-rigidity and camera motion complicate reconstruction. It builds on the principle that a continuous deformation field can map observation-space points to a canonical template space [S1]. The approach draws inspiration from geometry processing and physical simulation, specifically elastic energy formulations, to regularize the deformation field [S1].
++Deformable Neural Radiance Fields (Nerfies) was introduced by Mildenhall et al. in 2021 [S1]. It builds on the original NeRF paper [39] by adding a continuous volumetric deformation field conditioned on per-frame latent codes. The method was motivated by the challenge of capturing people with hand-held cameras, where non-rigidity and camera motion make reconstruction difficult. It draws inspiration from geometry processing and physical simulation, specifically elastic energy formulations, to regularize the deformation field. The method was evaluated on data captured using a rig of two synchronized mobile phones [S1].
+ 
+ ## Sources

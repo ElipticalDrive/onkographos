@@ -1,0 +1,2164 @@
+Geometry Matters in Packed 3D Attention
+arXiv:2610.38694v1 [cs.CV] 28 Oct 2026
+Amil Khan
+Anantajit Subrahmanya
+B.S. Manjunath
+Department of Electrical & Computer Engineering
+University of California, Santa Barbara
+{amil, anantajit, manj}@ucsb.edu
+Abstract
+Packing a 3D volume into a token sequence is not merely long-sequence modeling.
+Once the volume is packed, sequence order no longer encodes the geometry of
+the sample — so a positional mechanism indexed by sequence position can learn
+the memory layout rather than the object. This is a general failure mode for
+attention over packed geometric data. We introduce PACK3D, a local–global
+attention operator that separates memory layout from attention geometry. PACK3D
+keeps local neighborhood attention exact, compresses only distant context into
+contiguous 3D block summaries, and indexes every query–key interaction with
+axial RoPE on true token-grid coordinates rather than packed positions. Because
+the rotation is applied before a block is summarized, the query-to-summary logit
+remains a weighted sum of query-relative 3D displacements; compressed global
+context therefore stays spatially interpretable after packing, instead of collapsing to
+anonymous pooled content. We measure the failure mode directly. On a controlled
+synthetic task—train on one packing, change only the memory order of the tokens,
+hold the physical labeling rule fixed—learned positional embeddings and packedsequence RoPE solve the training layout perfectly yet collapse under Morton, blockcontiguous, and random repacking, while axial grid-coordinate RoPE stays exact
+throughout. The same coordinate system carries to real data: on Allen WTC–11
+hiPSC microscopy, PACK3D improves over a parameter-matched 3D U-Net on the
+15-structure joint task and over a matched learned-position local–global baseline,
+with controls isolating the coordinate system, not encoder capacity, as the source
+of the gain. A fused Triton implementation matches windowed-attention latency
+at 65k tokens while supplying the long-range context windowing cannot—so the
+operator is not only correct but trainable at scale.
+1
+Introduction
+High-token 3D fields arise across volumetric domains: live-cell microscopy [Viana et al., 2023],
+medical imaging [Fang et al., 2025], learned image compression for microscopy [Zhou et al., 2024],
+and spectral-spatial sensing cubes such as hyperspectral methane detection [Kumar et al., 2023]. In
+each, a volume is patchified and linearized into a token sequence for processing. But linearization
+discards something physical: once a 3D field is flattened, physical geometry no longer coincides
+with token order in memory. Tokens may be packed in raster, Morton, or block-contiguous order for
+systems efficiency, yet those layout choices are not coordinate systems. When a positional mechanism
+reads the layout as if it were geometry, attention learns the memory order rather than the object. This
+is the packed-geometric attention problem.
+Dense and window attention fail in opposite ways. Dense attention preserves global access but scales
+quadratically with token count; window attention scales but sees only locally. Local–global attention
+is the natural compromise — exact nearby, compressed far away — and it is exactly where the
+problem bites, because the compression step inherits whatever coordinate the positional mechanism
+40th Conference on Neural Information Processing Systems (NeurIPS 2026).
+uses. If that coordinate is sequence position, a packed operator can reduce the attention graph
+correctly and still attend over the wrong geometry. Reducing the graph and fixing the geometry are
+independent requirements, and a method can satisfy the first while failing the second.
+Three-dimensional microscopy is where this is unavoidable, and it is our claim-grade domain. A
+single live-cell crop holds tens to hundreds of thousands of tokens, while the signal spans puncta,
+membranes, cytoplasmic networks, nuclear geometry, and cell-scale organization. The Allen WTC–
+11 hiPSC Single-Cell Image Dataset v1 contains more than 200,000 live cells in 3D across 25
+tagged structures, and its analysis framework is built on cell shape, intracellular coordinates, average
+structure locations, variability, and pairwise structure interactions [Viana et al., 2023]. When the
+scientific objects are themselves spatial, a model that confuses storage order with location is not
+merely inefficient; it is answering the wrong question.
+We introduce PACK 3D, a geometry-aware local–global attention operator for packed high-token
+3D fields. PACK 3D keeps local neighborhood attention exact, compresses only distant context into
+contiguous 3D block summaries, and indexes every query–key interaction with axial RoPE on true
+token-grid coordinates rather than packed positions. The mechanism that makes this more than a
+renaming of position is that compression preserves query-relative geometry: for a block B with
+R
+normalized weights aB,u and coordinate-aware compressed key e
+kB
+,
+X
+eR =
+(qiR )⊤ k
+aB,u qi⊤ R(cu − ci ) ku .
+B
+u∈B
+A query therefore does not attend to an anonymous pooled block; it attends to block content through
+the relative 3D displacement of the tokens that formed the summary. Rotating before pooling is what
+keeps the summary spatial.
+The systems contract is part of the method, not an afterthought to it. A sparse pattern that materializes
+dense route tensors or gathered local-neighbor tensors is sparse only on paper, not as a trainable hightoken operator. PACK 3D is a fused forward/backward block with Triton local attention, contiguous
+block summaries, and explicit backend reporting, following the lesson of natively trainable sparse
+attention: useful sparsity must align with accelerator memory movement and the backward pass, not
+only with asymptotic complexity [Yuan et al., 2025].
+We are deliberate about what we do and do not claim. The Allen task predicts Allen-generated
+masks from target fluorescence, brightfield, and DNA channels; it is neither label-free prediction nor
+manual-label segmentation. We claim neither segmentation state of the art, nor universal superiority
+over U-Nets, nor a general speed law for sparse attention. The finding is architectural and narrower
+than any of these: for packed 3D fields, local–global attention over compressed summaries is reliable
+only when positional geometry is tied to physical coordinates rather than to memory order.
+Our contributions are:
+1. A design principle and an operator. We formulate PACK 3D and elevate the separation
+of memory layout from attention geometry into a design principle for packed geometric
+attention: packing is a systems decision, coordinates are a modeling decision, and the two
+must not be conflated.
+2. The geometry of compressed attention. We show that applying RoPE before block
+compression makes query-to-summary logits preserve query-relative 3D displacement, so
+compressed summaries remain spatially interpretable rather than merely pooled. A summarycenter variant is a competitive approximation in short ablations, so the supported principle
+is coordinate-aware compression, not the necessity of one specific placement.
+3. A hardware-aligned realization. We implement the operator as a fused forward/backward
+training block: Triton local attention avoids local-neighbor materialization, contiguous
+summaries preserve locality, and the sparse graph is trainable without materializing dense
+route tensors on the main path.
+4. Evidence that the coordinate system, not capacity, drives the gain. On a controlled
+synthetic repacking benchmark, learned and packed-sequence positional encodings solve
+the training layout yet collapse under Morton, block-contiguous, and random repacking,
+while axial grid-coordinate RoPE stays exact. On Allen WTC–11 microscopy, PACK 3D
+improves over a parameter-matched TokenGrid 3D U-Net on the 15-structure joint task
+2
+and over a matched learned-position local–global baseline; capacity-controlled ablations
+attribute the gain to the coordinate system rather than to position-encoding parameters.
+The operator is reusable beyond the domain we test. Any task whose tokens carry physical coordinates — volumetric medical segmentation, density-field and NeRF-style representations, spatial
+transcriptomics — inherits the same packing invariant: the attention should be built in the coordinates
+of the sample, not in the sequence used to store it. What we do not study here is equally explicit:
+label-free prediction, U-Net replacement, and transfer across imaging modalities are out of scope and
+left to future work.
+2
+Related Work
+Attention for 3D vision. Attention-based vision models are attractive because they can couple local
+evidence with long-range context without fixing the interaction range in advance. Vision Transformers
+and subsequent scaling and self-supervised results showed that attention-based visual backbones can
+learn strong representations when given sufficient data and compute [Dosovitskiy et al., 2021, Zhai
+et al., 2022, Dehghani et al., 2023, He et al., 2022]. For dense 3D prediction, this flexibility is useful
+because local structure often depends on larger spatial organization. Our question is not whether
+attention should replace convolution everywhere, but what geometry local–global attention should
+use once a 3D field is patchified, packed, and processed as tokens.
+Efficient and sparse attention. A large literature reduces the cost of attention either by changing
+the implementation of dense attention or by changing the attention graph. FlashAttention preserves
+exact scaled dot-product attention while improving memory movement through IO-aware tiling [Dao
+et al., 2022]. Low-rank and kernelized methods such as Linformer, Performer, and Nyströmformer
+reduce sequence cost through projections, random features, or landmark approximations [Wang
+et al., 2020, Choromanski et al., 2020, Xiong et al., 2021]. Patterned sparse methods such as
+Longformer and BigBird replace dense all-pairs attention with structured local and sparse long-range
+connections [Beltagy et al., 2020, Zaheer et al., 2021]. Native Sparse Attention is closest in systems
+motivation: it emphasizes that sparse attention should be trainable and hardware-aligned rather than
+merely sparse on paper [Yuan et al., 2025].
+Our setting adds a geometric constraint. In packed 3D fields, the difficulty is not only reducing the
+number of query–key pairs; the positional mechanism must also avoid treating memory order as
+sample geometry. PACK 3D keeps exact local attention, compresses nonlocal context into blockcontiguous summaries, and indexes query–key compatibility by physical 3D token-grid coordinates
+rather than packed sequence position.
+Position encodings and geometry under packing. Transformers require positional information
+because self-attention alone is permutation equivariant [Vaswani et al., 2017]. Absolute learned or
+sinusoidal embeddings attach position to token features, while relative methods modify query–key
+compatibility as a function of displacement [Vaswani et al., 2017, Shaw et al., 2018]. RoPE encodes
+relative position through query/key rotations [Su et al., 2023]. Coordinate-based representations also
+appear in spatial models such as NeRF and Fourier-feature networks, where explicit coordinates help
+represent geometry directly [Mildenhall et al., 2020].
+Packed 3D attention differs from ordinary sequence modeling because sequence position is not
+the geometry of the field. Raster, Morton, and block-contiguous orderings are useful layouts, not
+physical coordinate systems. The key distinction in PACK 3D is that neighborhoods, block summaries,
+and attention logits are defined on true 3D token-grid coordinates. This places the work closest to
+coordinate-aware relative-position methods, but with a specific focus on how compressed local–global
+attention preserves spatial meaning after packing.
+Volumetric transformers and biomedical segmentation. U-Net, 3D U-Net, and V-Net established
+strong convolutional baselines for dense 3D prediction [Ronneberger et al., 2015, Çiçek et al., 2016,
+Milletari et al., 2016]. More recent biomedical models combine transformer-style context with
+U-shaped decoding or convolutional feature extraction, including CoTr, UNETR, Swin UNETR, and
+nnFormer [Xie et al., 2021, Hatamizadeh et al., 2022b,a, Zhou et al., 2023]. These architectures show
+that long-range context can help 3D segmentation, especially when paired with mechanisms that
+preserve spatial detail.
+3
+Our contribution is complementary to this literature. We do not present PACK 3D as a universal
+replacement for U-Nets. Instead, we isolate an operator question: when a high-token 3D field is
+packed into a sequence, should local–global attention use packed sequence position or physical 3D
+coordinates?
+Microscopy, Allen cellular organization, and task scope. Allen WTC–11 hiPSC microscopy is a
+natural validation domain because intracellular organization is explicitly spatial: structure location,
+morphology, and inter-structure arrangement are central scientific objects [Viana et al., 2023]. Prior
+Allen pipelines, including the Allen Cell Structure Segmenter, focus on producing or analyzing
+structure masks from fluorescence microscopy [Chen et al., 2020]. We use target fluorescence,
+brightfield, and DNA to predict Allen-generated masks, making Allen a high-token 3D setting for
+testing whether packed attention should preserve physical coordinate geometry.
+Memory layout and systems realization. High-throughput attention depends on how tensors are
+tiled, streamed, and revisited during forward and backward passes. FlashAttention and NSA show
+that wall-clock behavior depends on memory movement and executable kernels, not only asymptotic
+sparsity [Dao et al., 2022, Yuan et al., 2025]. PACK 3D follows this systems view while separating
+layout from geometry: packing and block-contiguous summaries are used for memory movement,
+whereas attention logits are indexed by physical coordinates. In packed 3D attention, memory order
+is a systems choice; attention geometry is a modeling choice. They should not be conflated.
+3
+Methods
+PACK 3D is a geometry-aware local–global attention operator for packed high-token 3D fields. A
+flattened volume may be stored in raster, Morton, or block-contiguous order, but those layouts encode
+memory order, not physical coordinates. PACK 3D therefore enforces three contracts: local attention
+is exact, because microscopy carries high-frequency morphology that block summaries would erase;
+only nonlocal context is compressed, into contiguous block summaries; and query–key compatibility
+is parameterized by true 3D coordinates rather than by packed sequence index. The rest of this section
+makes each contract precise and shows that the executed operator realizes it.
+3.1
+Packed token fields and coordinate geometry
+This subsection fixes the distinction the whole method rests on: a token has both a memory position
+and a physical coordinate, and PACK 3D indexes attention by the latter. After patch embedding, let
+the token lattice be
+Ω = {1, . . . , Z} × {1, . . . , H} × {1, . . . , W },
+N = |Ω|,
+where (Z, H, W ) are token-grid dimensions, not raw voxel dimensions. A packing order is a
+bijection π : {1, . . . , N } → Ω from sequence positions to spatial token locations, and we write
+ci = (zi , yi , xi ) ∈ R3 for the coordinate attached to token i. In our Allen experiments ci is the
+token-grid coordinate after preprocessing; where physical voxel spacing matters, ci may be replaced
+by a scaled coordinate (∆z zi , ∆y yi , ∆x xi ). The only requirement is that ci represent the 3D field,
+not the packed sequence index.
+The Allen token grid is anisotropic: 32 × 128 × 64. The reported PACK 3D-RoPE rows use raw tokengrid coordinates with a balanced per-axis rotary-pair budget; for dh = 64 this gives mz , my , mx =
+11, 11, 10 with RoPE base 10,000. A single-seed sweep at 262k/depth1 (Appendix Table ??) varies
+this choice across normalized coordinates, z-axis rescaling, and z-light and z-heavy pair allocations.
+Normalized coordinates and z-heavy allocation both reduce best Dice, and while z-light gives a
+marginally higher best checkpoint than the balanced default (0.7384 vs. 0.7378), its final checkpoint is
+substantially worse (0.6789 vs. 0.7041). We therefore keep the simpler raw-grid balanced allocation,
+and leave a multi-seed study of frequency allocation to future work.
+PACK 3D uses axial RoPE as its only positional mechanism. For each token, queries and keys are
+rotated by a coordinate-indexed orthogonal map R(ci ), while values are left unrotated:
+qiR = R(ci ) WQ LN(hi ),
+b
+kib,R = R(ci ) WK
+LN(hi ),
+vib = WVb LN(hi ),
+4
+for b ∈ {loc, cmp}. Values carry content, not geometry, so rotating them would distort aggregation
+without adding positional information. Appendix B gives the full axial construction; the property the
+method depends on is the relative-displacement identity
+⟨R(ci )q, R(cj )k⟩ = q ⊤ R(cj − ci ) k.
+(1)
+Equation (1) is the whole point of the construction: the logit depends on the relative 3D displacement
+cj − ci , never on the packed positions i and j. No other positional signal enters the main operator.
+Proposition 1 (Packing equivariance). Let P be any repacking of the same token field that preserves
+the coordinate attached to each physical token, and suppose the neighborhood relation u ∈ N (i) and
+the block partition B are defined on the coordinate lattice Ω, so both are preserved up to permutation
+under repacking. Let PB denote the induced permutation on block indices. Then
+A(P X; P c) = P A(X; c).
+Sequence-index RoPE is not packing equivariant in general, because its rotary coordinate changes
+with memory order.
+The proof is in Appendix B (Theorem 5), where PB is tracked explicitly through the block summaries.
+Proposition 1 isolates the packing invariant: memory layout may change for systems reasons, but the
+attention geometry stays tied to the 3D field.
+3.2
+Geometry-aware local–global factorization
+The operator splits each token update into an exact local path and a compressed global path; this
+subsection defines both and states the property that survives compression. The local branch attends
+over a coordinate neighborhood N (i):
+ R ⊤ loc,R 
+X
+(qi ) ku
+loc loc
+loc
+√
+oloc
+=
+α
+v
+,
+α
+=
+softmax
+.
+u∈N (i)
+i
+i,u u
+i,u
+dh
+u∈N (i)
+Because N (i) is defined on coordinates rather than packed-index windows, repacking changes
+memory order but not the neighborhood. This branch is exact by design. Boundaries, puncta,
+membranes, and thin structures are high-frequency signals, and replacing nearby interactions by block
+summaries would erase the detail dense prediction needs. In implementation, the local branch uses a
+fused Triton kernel that streams neighborhood K/V tiles rather than materializing a local-neighbor
+tensor.
+The compressed branch coarsens only the nonlocal field, partitioning Ω into contiguous 3D blocks
+B = {B1 , . . . , BM } with one
+P summary per block. For block Bj , let aj,u ≥ 0 be query-independent
+normalized weights with u∈Bj aj,u = 1; the identity below needs only this shared normalizedweight form, and uniform averaging is the simplest case. The weights define one key/value summary,
+with keys rotated before they are pooled:
+X
+X
+cmp
+k̃jR =
+aj,u R(cu ) WK
+LN(hu ),
+ṽj =
+aj,u WVcmp LN(hu ).
+u∈Bj
+u∈Bj
+Every token then attends to all M summaries:
+ocmp
+=
+i
+M
+X
+cmp
+αi,j
+ṽj ,
+cmp
+αi,j
+= softmaxj
+j=1
+(qiR )⊤ k̃jR
+√
+dh
+!
+.
+PACK 3D thus keeps local token–token interactions exact and replaces only the nonlocal graph with
+token–block interactions.
+The reason this compression is geometric, and not mere pooling, is the following identity.
+Proposition 2 (Relative geometry survives block compression). Let qi = WQ LN(hi ) and ku =
+cmp
+WK
+LN(hu ) be the unrotated projected features. With the summary above,
+X
+(qiR )⊤ k̃jR =
+aj,u qi⊤ R(cu − ci ) ku .
+(2)
+u∈Bj
+The query-to-summary logit is therefore a weighted sum of query-relative displacements, not a
+similarity to an anonymous pooled key.
+5
+This is why RoPE is applied before compression: the summary keeps the coordinates of its contributing tokens, and those coordinates enter the logit through
+their displacement to the query. The
+P
+proof is one line — substitute qiR = R(ci )qi and k̃jR = u∈Bj aj,u R(cu )ku , use linearity, and apply
+R(ci )⊤ R(cu ) = R(cu − ci ) — and it holds for any query-independent normalized weights of this
+form.
+Together, Propositions 1 and 2 define the core contract: repacking permutes the computation, and compression preserves the geometry needed to read global context. We adopt token-before-compression
+because it preserves the exact identity of (2). A summary-center variant — pool an unrotated summary, then rotate it by the block center — is a strictly cheaper coordinate-aware approximation, and
+the two are within seed noise in our short-gate ablations (Table 6: 0.7378 vs. 0.7384 best Dice). The
+supported empirical principle is therefore that compressed summaries should be coordinate-aware;
+token-before-compression is the canonical form not because it wins on Dice but because it is exact,
+and Appendix B.7 and Lemma 9 bound the approximation the summary-center variant incurs.
+3.3
+Branch mixing
+A learned tokenwise mixer fuses the two paths, letting each token choose how much to weight exact
+local morphology against lower-resolution global organization:
+cmp cmp
+oi = giloc oloc
+oi ,
+(giloc , gicmp ) = softmax(Wg LN(hi )).
+i + gi
+The mixed output returns to the residual stream, followed by the feed-forward sublayer. With ŷ the
+predicted logits and y the Allen-generated binary mask, all attention variants share one objective,
+Lseg (ŷ, y) = λdice Ldice (ŷ, y) + λbce Lbce (ŷ, y),
+and all main comparisons hold the decoder, optimizer, schedule, crop manifests, and channel set
+fixed, so measured differences isolate the attention and positional-geometry operators.
+3.4
+Systems realization of the local–global graph
+The systems goal is to make the mathematical sparse graph the executed training graph: local
+neighborhoods fixed on the token lattice, summaries built over contiguous coordinate blocks, and the
+global branch attending to summaries rather than raw remote tokens. The main Allen rows in §4 all
+run the two-level block-Morton layout described below; Proposition 1 is what licenses treating that
+layout as a free systems choice, and Appendix C.3 certifies the specific repackings we test.
+The implementation separates physical coordinates from memory packing: local neighborhoods
+are computed from token-grid coordinates, while compressed summaries are built over the configured packed blocks. The reported Allen rows use the raster_block layout; the implementation
+also supports a two-level native_block_morton layout used for layout and systems diagnostics.
+Proposition 1 is what makes the layout a free choice for coordinate-indexed operators: any coordinatepreserving repacking yields the same operator up to permutation. Appendix C.2 verifies this at task
+level on a controlled synthetic field, where sequence-indexed encodings collapse under repacking
+while axial grid-coordinate RoPE remains exact.
+The technical contribution is the co-design of operator, layout, and kernels around these invariants:
+coordinate-defined neighborhoods, contiguous summaries, and a backward pass that follows the
+same streamed access pattern as the forward pass. The main path is summary construction, exact
+local attention, and query-to-summary attention. An optional selected-refinement branch routes over
+candidate-block tiles and can share one route decision across a native block, but it is a reach extension
+(Appendix D.1), not part of the main claim. We report backend status explicitly, so executed Triton
+paths, fallbacks, and branches skipped by design are never conflated.
+3.5
+Complexity and systems contract
+The cost of the operator is governed by six quantities: the local neighborhood size w = |N (i)|, the
+block volume v = |Bj |, the number of blocks M = N/v, the query and KV head counts Hq and
+Hkv , and the per-head dimension dh . Ignoring linear projections and normalization, dense attention
+costs Tdense = Θ(Hq N 2 dh ), whereas the local–global operator costs
+TLG = Θ(Hq N wdh ) + Θ(Hq N M dh ) + Θ(Hkv M vdh ) .
+{z
+}
+|
+{z
+} |
+{z
+} |
+local
+query–summary
+6
+summary build
+The nonlocal comparison set shrinks from N raw tokens per query to M = N/v summaries, while
+nearby interactions stay exact. PACK 3D is therefore neither linear attention nor approximate local
+attention: it is exact local token–token attention plus block-compressed nonlocal token–summary
+attention. RoPE changes the coordinate system of the logits, not the attention graph.
+Arithmetic sparsity buys nothing unless the implementation avoids dense intermediates. On the
+main path, PACK 3D materializes only token activations and M summaries; local neighborhood
+tiles and global summary tiles are streamed through online-softmax reductions. This avoids the two
+intermediates that usually erase a sparse graph’s benefit — gathered local-neighbor feature tensors
+and dense token-to-summary score matrices — and yields a trainable forward/backward block whose
+executed operator matches the local–global graph the method claims.
+4
+Results
+The experiments test an attention-method claim, not a segmentation-leaderboard claim: packed
+high-token 3D attention should encode physical coordinates, not memory order. The controlled
+result is on the Allen-15 joint task, where PACK 3D improves over a parameter-matched TokenGrid
+3D U-Net by +0.0094 best and +0.0135 final macro Dice (Table 1). A second comparison runs
+against a much larger learned-position local–global model: at 262k/depth8 PACK 3D improves on it by
++0.0978 best and +0.1248 final macro Dice. That baseline carries 158.5M parameters to PACK 3D’s
+24.3M, so we do not read the large gap as a clean measurement of coordinate geometry — it measures
+mainly that a learned-position local–global operator is weak at this scale. The coordinate effect is
+isolated instead by the identical-capacity controls of §4.3 and the architectural decomposition of
+§4.2. The section follows that order: we fix the Allen task contract, present the controlled result
+and decompose the headline, isolate the positional mechanism at matched capacity, ask whether the
+trained model relies on its compressed pathway, and measure systems scaling. Transfer gates and
+lower-priority controls are deferred to the appendix.
+4.1
+Allen contract
+We predict Allen-generated 3D structure masks from target fluorescence, brightfield, and DNA;
+the task is neither label-free prediction nor manual-label segmentation. The six-structure runs
+use TOMM20, LMNB1, ST6GAL1, GJA1, LAMP1, and ATP2A2; the Allen-15 joint comparison
+expands the label set to 15 tagged structures. At 262k tokens, Dice is computed on the fixed central
+target region, and we report best macro Dice (best validation checkpoint) and final macro Dice (last
+checkpoint) over three seeds, at 10k training steps for headline attention cases. Because the input
+includes the target fluorescence channel, we audit thresholding directly: the strongest tuned threshold
+baseline reaches 0.5582 macro Dice, far below every neural row, so the task does not collapse to
+intensity thresholding. Reproducibility and threshold controls are in Appendices A.1 and A.2.
+4.2
+Main Allen results
+On the controlled Allen-15 comparison, PACK 3D reaches 0.8228 ± 0.0008 best and 0.8228 ± 0.0007
+final macro Dice across three seeds, against a parameter-matched TokenGrid 3D U-Net at 0.8134 ±
+0.0034 best and 0.8093 ± 0.0039 final (Table 1) — a gain of +0.0094 best and +0.0135 final. The
+effect is consistent in sign across all three seeds, though modest against seed variation: [VERIFY:
+paired test across the three seeds — either “a paired t-test gives p = 0.0X” if significant, or “the gap
+is roughly 2–3× the U-Net seed standard deviation, and we do not claim significance at p < 0.05”].
+We therefore read it as parameter-matched competitiveness with a strong convolutional baseline, not
+a decisive margin.
+The larger 262k/depth8 single-structure number decomposes, and the decomposition is the honest
+form of the claim. A separately trained coordinate-aware local-only model already reaches 0.8387
+best Dice. Adding the coordinate-aware compressed branch contributes +0.0144 best and +0.0050
+final, lifting PACK 3D to 0.8531 ± 0.0005 best and 0.8429 ± 0.0136 final (Table 3). The much
+larger gap to the learned-position local–global model at 0.7553 ± 0.0042 best is thus two effects
+superimposed: a +0.0144 architectural contribution from the compressed branch, on top of a weak
+learned-position baseline. The raw +0.0978 is not a measurement of coordinate geometry; the
+matched-capacity controls of §4.3 are.
+7
+Table 1: Allen-15 joint task: PACK 3D is competitive with a parameter-matched 3D U-Net, using
+a coordinate-indexed attention operator in place of convolution. Best and final macro Dice, mean
+± std over three seeds. The +0.0094/+0.0135 gap is consistent in sign but modest against seed
+variation; see text for the significance annotation.
+Model
+PACK 3D (ours), d8
+TokenGrid 3D U-Net, base128
+Best Dice
+Final Dice
+Params
+0.8228 ± 0.0008
+0.8134 ± 0.0034
+0.8228 ± 0.0007
+0.8093 ± 0.0039
+30.1M
+31.9M
+Per structure, the comparison is uneven, and we state the direction plainly. Against the learned-PE
+baseline, PACK 3D improves on all six structures in both best and final Dice. Against the U-Net,
+the U-Net is the stronger final-checkpoint model: it wins final Dice on five of the six structures
+(Appendix C.4, Table 11), with PACK 3D winning final only on ATP2A2. What PACK 3D wins is the
+aggregate — the Allen-15 joint average and the best-checkpoint comparisons — so the supported
+claim is competitiveness with a strong convolutional baseline at matched capacity, not per-structure
+dominance.
+4.3
+Positional controls
+These gates isolate the positional mechanism at matched parameter count, which the depth-8 headline
+above cannot do. The cleanest comparison is packed-sequence RoPE versus axial grid-coordinate
+RoPE at identical capacity: at 262k/depth1 and 3.06M parameters, axial RoPE reaches 0.7375 best
+Dice against packed-sequence RoPE’s 0.7142, and at 65k it leads 0.7346 to 0.7099 (Table 2). Because
+the two differ only in whether the rotary coordinate is physical or sequence-index, this gap isolates
+the coordinate system from both capacity and rotary machinery — packed-sequence RoPE has the
+same rotary features yet tracks no-PE behavior on final Dice.
+Across the compact learned-coordinate and bias-based alternatives at matched scale, axial RoPE
+has the highest best Dice. The conclusion we draw is deliberately bounded: separable learned 3D
+PE stays competitive on final Dice in the short gate, so the robust signal is physical-coordinate
+geometry, not the unique superiority of one rotary scheme. The depth-8 rows (158.5M learned-PE
+vs. 24.3M axial RoPE) differ in capacity and we include them only to show the effect persists at
+depth, not as a matched coordinate control. Coordinate-scaling and additional bias comparisons are
+in Appendices B.9 and B.11.
+Table 2: At matched parameter count, physical-coordinate RoPE beats sequence-index RoPE
+and compact learned alternatives. Short Allen gates; best/final macro Dice. The matched-capacity
+comparisons are the 3.06M rows — in particular packed-sequence vs. axial RoPE at identical 3.06M
+— which isolate the coordinate system. The depth-8 pair differs in capacity (158.5M vs. 24.3M) and
+is shown only to confirm the effect persists at depth.
+4.4
+Setting
+Position mechanism
+Best
+Final
+Params
+Role
+262k/d1
+262k/d1
+262k/d1
+262k/d1
+262k/d1
+262k/d1
+Learned full-grid PE
+Learned separable 3D PE
+Learned low-rank 3D PE
+Coordinate Fourier MLP
+Packed-sequence RoPE
+Axial grid RoPE
+0.7086
+0.7151
+0.6891
+0.6942
+0.7142
+0.7375
+0.6525
+0.7151
+0.6852
+0.6942
+0.6351
+0.7041
+137.3M
+3.18M
+3.07M
+3.13M
+3.06M
+3.06M
+full-grid learned
+compact learned
+compact learned
+coordinate MLP
+memory-order RoPE
+physical-coord. (matched)
+262k/d8
+262k/d8
+Learned full-grid PE
+Axial grid RoPE
+0.7185
+0.7960
+0.7185
+0.7960
+158.5M
+24.3M
+depth gate (unmatched)
+depth gate (unmatched)
+65k/d1
+65k/d1
+65k/d1
+65k/d1
+65k/d1
+Learned full-grid PE
+Packed-sequence RoPE
+3D relative position bias
+3D ALiBi-style bias
+Axial grid RoPE
+0.6939
+0.7099
+0.7055
+0.7098
+0.7346
+0.6939
+0.6670
+0.6420
+0.6691
+0.7154
+36.6M
+3.06M
+3.06M
+3.06M
+3.06M
+feasible-scale PE
+memory-order RoPE
+additive bias
+additive bias
+physical-coord. (matched)
+Compressed-summary ablations
+This subsection asks a narrower question than coordinate-awareness: does the trained model rely on
+its compressed pathway, or is the branch vestigial? Two results say it is load-bearing. First, in training,
+8
+adding the compressed branch to a coordinate-aware local-only model raises best Dice from 0.8387
+to 0.8531 and final from 0.8379 to 0.8429. Second, and more strictly, perturbing the compressed
+pathway of the trained checkpoint at inference degrades it sharply: clamping the compressed gate to
+zero drops macro Dice to 0.7648, shuffling the compressed summaries to 0.6858, and zeroing the
+compressed output to 0.6775 (Table 3).
+We are precise about what this does and does not show. The drops establish that the model depends on
+whatever the compressed branch learned to carry; they do not, on their own, prove that what it carries
+is coordinate geometry, since a coordinate-blind compressed branch would also be relied upon and
+would also collapse under the same perturbation. Isolating the coordinate-aware property requires
+a matched coordinate-blind compressed branch trained under the same protocol and subjected to
+the same shuffle [VERIFY: state whether this run exists; if so, report whether the coordinate-aware
+branch is more shuffle-robust; if not, mark it explicitly as the key open control]. Absent that control,
+the supported claim is that the compressed pathway is functional rather than vestigial.
+Table 3: The trained compressed pathway is load-bearing: corrupting it at inference causes
+large Dice drops. Inference-time perturbations of trained 262k/depth8 PACK 3D checkpoints, mean
+over three seeds. These show reliance on the compressed branch, not that the branch is coordinateaware (see text).
+Condition
+Full PACK 3D
+Trained local-only
+Compressed gate → 0
+Compressed summary shuffle
+Compressed output → 0
+Local gate → 0
+Macro Dice
+∆ vs. full
+0.8531
+0.8387
+0.7648
+0.6858
+0.6775
+0.5764
+—
+−0.0144
+−0.0883
+−0.1674
+−0.1756
+−0.2767
+Extended ablations, including collar-only variants, are in Appendices C.5 and C.6.
+4.5
+Systems scaling
+The systems question is whether the sparse graph is a real trainable forward/backward operator at
+scale, and we state the operationally relevant comparison up front rather than burying it. Window
+attention is faster and lower-memory than PACK 3D at every scale we measure (Table 16; e.g. 13.86
+vs. 16.11 ms and 2.04 vs. 1.51 GiB at 65k). The reason to pay PACK 3D’s overhead is structural:
+window attention is strictly local and cannot supply the compressed global context that produces the
+Allen Dice gains of §4.2. PACK 3D buys that global context for a bounded latency premium over
+Window — [VERIFY: maximum overhead across all rows of Table 16, e.g. “at most ∼16%”] —
+while remaining far below dense SDPA, at 6.49× lower latency than dense at 65k and 125.45× at
+1M. Dense completes through 1M and stays lower-memory in this sweep, so the systems claim is
+bounded: large latency scaling against dense, a small overhead against Window, and not universal
+memory superiority.
+Query-tiled 4M/8M runs are appendix systems reach rather than main throughput evidence (Appendix D.2).
+4.6
+Claim boundaries
+We close by stating the boundary of the evidence directly. The Allen-15 comparison shows PACK 3D
+is competitive with a parameter-matched 3D U-Net on both best and final macro Dice; we do not claim
+segmentation state of the art or universal practical superiority over U-Net, and runtime and memory
+remain separate systems questions on which Window attention is in fact cheaper. The headline
+single-structure gain decomposes into a +0.0144 architectural contribution from the compressed
+branch plus a weak learned-position baseline, and the coordinate effect itself is isolated by the
+matched-capacity positional gates, not by the headline number.
+Lower-priority boundary evidence is deferred to the appendix: summary-center RoPE is competitive
+in short gates (Appendix B.7), collar controls show external collar content is not the clean driver of the
+gain (Appendix C.6), and external transfer is mixed (Appendix C.7). Taken together, the main-paper
+evidence supports a specific, bounded conclusion: at matched capacity, physical-coordinate geometry
+9
+improves packed high-token local–global attention; the trained model’s compressed pathway is
+functional rather than vestigial; and the resulting sparse graph is trainable on GPU hardware. The
+contribution is not a state-of-the-art segmentation model. It is a geometry-aware, hardware-aligned
+local–global attention operator for packed 3D fields, together with evidence that the coordinate
+system, not the memory layout, is what the attention should be built on.
+5
+Conclusion
+Packed 3D attention fails when it treats storage order as geometry. For packed geometric fields,
+query–key compatibility should be indexed by physical coordinates rather than sequence positions.
+PACK 3D instantiates this principle with exact local attention, compressed global summaries, and
+coordinate-aware query-relative geometry. Synthetic repacking exposes the failure mode: learned or
+sequence-index positional mechanisms can fit one layout and fail under another, while coordinateindexed attention remains invariant. The operator lesson is simple: memory layout is a systems
+decision, not an attention coordinate system. Compressed global attention over packed 3D fields
+should be built in the coordinates of the sample, not the sequence used to store it.
+10
+A
+Experimental Contract and Claim Boundary
+This appendix does two things. It first fixes the experimental contract for the main Allen 262k
+results, and it then states the precise boundary of the paper’s claims. The central contribution is a
+packed-geometric-attention principle—physical coordinates, not sequence order, should parameterize
+packed 3D attention—instantiated by a geometry-aware local–global operator and validated with
+synthetic repacking diagnostics and Allen microscopy. The appendix does not broaden that claim to
+segmentation state of the art, label-free prediction, broad external 3D transfer, faster-than-window
+behavior, lower memory than dense attention, or practical multi-million-token throughput.
+We validate the claim in two layers. Synthetic repacking diagnostics make the failure mode explicit:
+repacking the same 3D coordinates preserves axial-RoPE logits up to permutation, whereas sequenceindex RoPE fails under layout changes. On Allen WTC–11 hiPSC microscopy, in the main 262ktoken depth-8 setting, axial grid-coordinate RoPE improves matched learned-position local–global
+attention by +0.0978 best macro Dice and +0.1248 final macro Dice. In an updated Allen-15 joint
+comparison, PACK 3D also improves over a parameter-matched TokenGrid 3D U-Net by +0.0094
+best and +0.0135 final macro Dice. Additional controls show that the gain comes from the coordinate
+system rather than rotary features alone, and inference-time ablations show that the trained model
+genuinely uses its compressed summaries. On the systems side, PACK 3D is 6.49× lower latency than
+dense SDPA at 65k tokens while remaining close to window attention. The point is not a universal
+speed or memory win; it is that the sparse graph is realized as a trainable forward/backward operator.
+A.1
+Reproducibility contract
+Table 4 records the main experimental contract for the 262k Allen rows. The split is disjoint by
+FOV/crop/target path; plate/well overlap is possible and is not claimed as a strict plate-disjoint
+benchmark.
+Table 4: Reproducibility details for the main Allen 262k rows.
+Item
+Value
+Dataset
+Structures
+Task
+Allen WTC–11 hiPSC microscopy, multistructure preprocessed FOV crops.
+TOMM20, LMNB1, ST6GAL1, GJA1, LAMP1, ATP2A2.
+Target fluorescence + brightfield + DNA to Allen-generated structure segmentation.
+Label-free prediction; manual labels; segmentation state of the art.
+FOV/crop/target-path disjoint train/validation; plate/well overlap possible.
+192 train, 48 validation for paired 262k context-collar rows.
+32 × 512 × 256 voxels.
+1 × 4 × 4 voxels.
+32 × 128 × 64 = 262,144 tokens.
+16 × 256 × 256 voxels.
+16 × 64 × 64 = 65,536 tokens.
+structure_bf_dna: target fluorescence, brightfield, DNA.
+Allen-generated binary structure mask.
+[1, 1, 1] token radius.
+1 × 4 × 4 tokens.
+8 for headline axial RoPE and learned-PE rows.
+8 query heads, 2 KV heads, head dimension 64.
+10,000.
+13, 29, 41 for headline 10k rows.
+Not claimed
+Split
+Samples
+Input crop
+Patch shape
+Token grid
+Supervised target region
+Supervised target tokens
+Channel set
+Target type
+Local radius
+Block shape
+Depth
+Heads
+RoPE base
+Seeds
+A.2
+Classical threshold baselines
+Because the input includes the target fluorescence channel, the first claim-boundary question is
+whether the Allen task collapses to classical thresholding. It does not. Even the tuned threshold row
+remains far below the neural rows, while the higher-recall classical rows over-predict foreground and
+therefore miss the Allen-generated masks they are meant to recover.
+The remainder of the appendix follows that contract. Appendix B gives the mathematical theory
+of the coordinate-aware operator, Appendix C organizes the operator diagnostics, Allen supporting
+11
+Table 5: Classical target-fluorescence controls on the six-structure Allen validation set. These rows
+show that the audited task is not reducible to thresholding.
+Method
+Macro Dice
+FG recall
+Pred. FG frac.
+0.5582
+0.5021
+0.5004
+0.3565
+0.2171
+0.7089
+0.8108
+0.7882
+0.8763
+0.8967
+0.0892
+0.1239
+0.1197
+0.2079
+0.3802
+Per-structure tuned threshold
+Otsu per crop
+Otsu + CC cleanup
+Gaussian + Otsu
+Adaptive local
+tables, and claim-boundary evidence, and Appendix D separates optional systems extensions from
+the main quality claim.
+B
+Mathematical Details and Theory for Geometry-Aware Packed 3D
+Attention
+This appendix develops the theory of PACK 3D around a single controlling distinction: in a packed
+3D field every token carries two indices — a memory position and a physical coordinate — and a
+correct attention operator must depend only on the second. We make that distinction formal, then
+trace it through five results of distinct logical kinds. Two are exact identities (Lemmas 3 and 7), one
+is a symmetry (Corollary 4), one is an equivariance theorem for the full operator (Theorem 5), one
+is an impossibility-and-separation result (Theorem 8), and the remainder are quantitative bounds
+controlling the one approximation PACK 3D admits (Lemmas 9 and 10). Throughout we separate
+what is exactly invariant to repacking from what is only approximately coordinate-aware, so the
+reader always knows the logical status of the statement in hand.
+B.1
+Setup and notation
+The two-index distinction comes first, because everything below is a consequence of it. Let Ω ⊂ Z3
+be a finite token lattice with N = |Ω|, and let a packing be a bijection
+π : {1, . . . , N } → Ω.
+The sequence index i is then a memory position, while x = π(i) is the physical lattice site. A
+coordinate map κ : Ω → R3 supplies the geometry the operator is allowed to see, with
+cx = κ(x)
+(x ∈ Ω),
+so
+ci = cπ(i) .
+After this setup we index by lattice site x whenever we speak of coordinate-defined neighborhoods or
+blocks; site- and sequence-indexed features coincide under π,
+hπ(i) = hi ,
+b
+kπ(i)
+= kib ,
+qπ(i) = qi ,
+b
+vπ(i)
+= vib ,
+and a packed array is recovered by listing site-indexed quantities in the order π induces. Every result
+below holds for any fixed κ, including the anisotropic and normalized maps of §B.9; the main Allen
+runs instantiate κ as the token-grid coordinate.
+From token features hx we form branchwise projected features
+qx = WQ LN(hx ),
+b
+kxb = WK
+LN(hx ),
+vxb = WVb LN(hx ),
+b ∈ {loc, cmp}.
+The local neighborhood N (x) ⊂ Ω and the block partition B = {B1 , . . . , BM } are both defined
+on the
+Pcoordinate lattice, not on packed-index intervals. For each block Bj , the weights aj,u ≥ 0
+with u∈Bj aj,u = 1 are query-independent; they may be fixed by the coordinate-defined block, or
+produced by a rule that is symmetric in the block’s members and depends only on token features
+and block-relative coordinates. In either case they do not depend on packed memory order — the
+property the equivariance proof will need.
+Two more pieces of notation make repacking precise. Under a repacking π ′ of the same physical
+field, features and coordinates permute together: writing P for the induced token permutation,
+′
+′
+Xπ = P Xπ,
+Cπ = P Cπ.
+12
+If the block enumeration also changes, PB denotes the induced block permutation; if blocks are
+ordered canonically from coordinates, PB = I. We call an operator A packing-equivariant when
+A(P X; P C) = P A(X; C).
+This is the right invariance for packed fields: repacking memory may permute the outputs, but it must
+not change the function computed on the underlying geometry.
+It is worth saying once why locality-improving layouts do not by themselves supply this invariance.
+Morton and Z-order layouts place spatially near tokens near in memory, which helps the cache, but
+the Morton index is still a layout, not a metric: two repackings with the same physical coordinates
+can assign different Morton indices to the same token. That is precisely why an operator keyed to
+memory order inherits the layout’s arbitrariness, and an operator keyed to κ does not.
+B.2
+Axial RoPE as an orthogonal representation of displacements
+The positional mechanism is one object with one defining property, and naming that property up
+front makes every later proof a one-line consequence of it. Let dh be the per-head dimension and
+R(c) ∈ Rdh ×dh the axial rotary transform at c = (cz , cy , cx ), a direct sum of planar rotations:
+
+a −1 
+M mM
+cos(ωa,r ca ) − sin(ωa,r ca )
+R(c) =
+⊕ Irem .
+sin(ωa,r ca ) cos(ωa,r ca )
+a∈{z,y,x}
+r=0
+The per-axis allocation mz , my , mx is an implementation choice (the value used in the Allen runs is
+recorded in the main text); the proofs need only that R is an orthogonal representation of additive
+displacements,
+R(c)⊤ R(c′ ) = R(c′ − c),
+R(0) = I.
+(⋆)
+Property (⋆) is the single algebraic fact the rest of the section draws on.
+Lemma 3 (Relative-displacement identity). (An exact identity.) For any ci , cj ∈ R3 and any
+q, k ∈ Rdh ,
+⟨R(ci )q, R(cj )k⟩ = q ⊤ R(cj − ci ) k.
+Proof. Apply (⋆) blockwise. Each planar pair satisfies R(α)⊤ R(β) = R(β − α); since R is a direct
+sum of such pairs across axes and frequencies, R(ci )⊤ R(cj ) = R(cj − ci ) on the full head dimension.
+Substituting into the inner product gives the claim.
+Lemma 3 is the hinge of the paper: it converts an absolute-coordinate rotation into a function of the
+displacement cj − ci alone. One symmetry follows immediately.
+Corollary 4 (Translation gauge invariance). (A symmetry: the coordinate origin is unobservable.)
+Shifting all coordinates by a common t leaves every logit unchanged,
+⟨R(ci + t)qi , R(cj + t)kj ⟩ = ⟨R(ci )qi , R(cj )kj ⟩.
+Proof. By Lemma 3 both sides equal qi⊤ R(cj − ci )kj ; the shift t cancels in the displacement.
+The global origin of the frame is therefore a gauge choice, not part of the modeled geometry — a fact
+we rely on implicitly whenever a crop is recentered.
+B.3
+Packing equivariance of the full operator
+We now lift the pairwise identity to the entire local–global operator and show the operator itself, not
+merely a single logit, is invariant to repacking up to permutation. The operator is the local branch
+
+
+X
+loc
+(R(cx )qx )⊤ (R(cu )ku
+)
+loc loc
+loc
+√
+oloc
+=
+α
+v
+,
+α
+=
+softmax
+,
+u∈N (x)
+x
+x,u u
+x,u
+d
+h
+u∈N (x)
+the compressed branch built from block summaries
+X
+k̃jR =
+aj,u R(cu )kucmp ,
+u∈Bj
+ṽj =
+X
+u∈Bj
+13
+aj,u vucmp ,
+ocmp
+=
+x
+M
+X
+cmp
+αx,j
+= softmaxj
+cmp
+ṽj ,
+αx,j
+
+(R(cx )qx )⊤ k̃jR
+√
+dh
+
+,
+j=1
+and the learned mixer
+cmp cmp
+ox = gxloc oloc
+ox ,
+x + gx
+(gxloc , gxcmp ) = softmax(Wg LN(hx )).
+Theorem 5 (Packing equivariance of coordinate-indexed local–global attention). (An equivariance
+theorem.) Suppose
+1. local neighborhoods N (x) are defined from the coordinate lattice, hence preserved up to
+permutation under repacking;
+2. compressed blocks B are defined on coordinates, not on raw sequence indices;
+3. the summary weights aj,u are query-independent, independent of packed memory order, and
+symmetric in the members of each block (so reordering tokens within a block leaves each
+summary unchanged); and
+4. all pointwise maps (layer normalization, projections, gates, MLPs) are shared across tokens.
+Then for any repacking preserving the coordinate attached to each physical token,
+Acoord (P X; P C) = P Acoord (X; C).
+Proof. The strategy is to show each branch transforms by the appropriate permutation and that the
+shared pointwise maps carry the permutation through unchanged; the mixer then inherits it. Shared
+pointwise maps commute with token permutations, so it suffices to treat the two attention branches.
+Local branch. Collect the masked logits into Lloc ∈ (R ∪ {−∞})N ×N ,
+
+ (R(ci )qi )⊤ (R(cr )krloc )
+√
+, π(r) ∈ N (π(i)),
+loc
+Lir =
+dh
+
+−∞,
+otherwise.
+Because features and coordinates permute together and N is coordinate-defined, repacking conjugates
+′
+the logit matrix, Lloc,π = P Lloc,π P ⊤ . Row-wise softmax commutes with simultaneous row/column
+′
+′
+permutation, and V loc,π = P V loc,π , so Oloc,π = P Oloc,π .
+Compressed branch. Each summary is a block sum. Within-block memory order is irrelevant because
+summation is symmetric and, by hypothesis 3, any learned weights are too; thus the summaries
+′
+′
+permute by block, K̃ π = PB K̃ π and Ṽ π = PB Ṽ π . The query-to-summary logits then satisfy
+′
+S π = P S π PB⊤ , and
+′
+′
+′
+Ocmp,π = softmax(S π )Ṽ π = P softmax(S π ) PB⊤ PB Ṽ π = P Ocmp,π ,
+using PB⊤ PB = I. Finally the mixer coefficients are pointwise in shared parameters, so they permute
+′
+with the tokens, and Oπ = P Oπ .
+The added word in hypothesis 3 — symmetric in the members of each block — is the precise condition
+under which content-dependent summary weights remain equivariant: a mean- or attention-pooled
+summary qualifies, an order-sensitive pool would not. Theorem 5 is the formal content of the paper’s
+modeling claim: layout may change for systems reasons, but the operator stays a function of the 3D
+geometry.
+B.4
+Why sequence position is not a geometric coordinate
+The equivariance above is a property of coordinate-indexed attention specifically. The natural question
+is whether the more familiar sequence-index RoPE enjoys it too. It does not, and a single small
+construction settles the matter.
+Proposition 6 (Sequence-index RoPE is not packing-equivariant). (An impossibility, by explicit
+counterexample.) There exist a token field, two packings of it, and query/key features for which
+sequence-index RoPE changes the logits by more than a permutation.
+14
+Proof. We exhibit one instance. Take three physical tokens a, b, c under packings π = (a, b, c) and
+π ′ = (a, c, b); the physical pair (a, b) has sequence displacement 1 under π and 2 under π ′ . In one
+rotary pair of frequency ω with q = e1 , k = e2 , the sequence-index logit at displacement ∆ is
+q ⊤ R(ω∆)k = − sin(ω∆). Whenever sin(ω) ̸= sin(2ω) — which holds for generic ω in ordinary
+RoPE schedules — the same physical pair receives different logits under the two packings. The
+discrepancy is attached to a fixed physical pair, so no permutation of output indices removes it.
+The proposition does not say sequence order is useless to a kernel; it says sequence order is not, on
+its own, a spatial coordinate on a repacked field. This is the formal mirror of Theorem 5: coordinate
+indexing earns the invariance that memory indexing cannot.
+B.5
+Relative geometry survives block compression
+The compressed branch is where pooling could plausibly destroy geometry, so this is the result the
+main method most depends on. It is again an exact identity, not an approximation.
+Theorem 7 (RoPE-before-compression preserves query-relative geometry). (An exact identity.) For
+any block B ⊂ Ω with query-independent normalized weights aB,u , let
+X
+X
+R
+k̃B
+=
+aB,u R(cu )ku ,
+ṽB =
+aB,u vu .
+u∈B
+u∈B
+Then for any query site x ∈ Ω,
+R
+(R(cx )qx )⊤ k̃B
+=
+X
+aB,u qx⊤ R(cu − cx ) ku .
+u∈B
+Proof. By linearity, push the query rotation inside the sum:
+X
+R
+(R(cx )qx )⊤ k̃B
+=
+aB,u qx⊤ R(cx )⊤ R(cu ) ku ,
+u∈B
+then apply R(cx )⊤ R(cu ) = R(cu − cx ) from (⋆).
+This is the exact reason the method rotates token keys before pooling them: the query-to-summary
+logit is a weighted superposition of the query-relative displacements of the tokens that formed the
+summary, never a similarity to a position-less pooled key. Rotating after pooling would not have this
+property, which is the content of §B.7.
+B.6
+Coordinate-awareness is strictly more expressive
+Theorem 7 is an identity; the next result shows the identity is not cosmetic — it buys representational
+power that no content-only pooling can have. By a coordinate-blind compressed rule we mean one
+whose block logit is a function of the query and a pooled content key alone, with no dependence on
+block coordinate, block identity, or query–block displacement.
+The witness is minimal. Place one query at coordinate 0 and two remote blocks at +δ and −δ with
+identical pooled key content k but opposite values v+ = 1, v− = −1; the target output is the value
+at displacement +δ.
+Theorem 8 (Relative-spatial selectivity separation). (A separation: an impossibility for one model
+class, achievability for the other.) On this construction a coordinate-blind compressed rule must
+output 0, incurring squared error 1; a coordinate-aware rule, absent a fixed norm bound on logits,
+approximates the target 1 to arbitrary accuracy.
+Proof. Impossibility. Coordinate-blind, the two block keys are equal, k̃+ = k̃− = k, so q ⊤ k̃+ =
+q ⊤ k̃− for every query; softmax weights are 1/2, 1/2 and the output is 12 (1) + 12 (−1) = 0, with error
+(1 − 0)2 = 1.
+15
+Achievability. Coordinate-aware, the logits are ℓ± = q ⊤ R(±δ)k. In one rotary pair take q =
+−e1 , k = e2 , and δ with sin(ωδ) > 0, giving ∆ := ℓ+ − ℓ− > 0. With no norm bound we may
+−1
+scale the query by τ > 0, so the positive-block weight is α+ (τ ) = 1 + e−τ ∆
+and the output is
+
+oτ = α+ (τ )(1) + (1 − α+ (τ ))(−1) = tanh τ2∆ −−−−→ 1.
+τ →∞
+Hence for every ε > 0 some τ gives |oτ − 1| < ε.
+Two scope notes keep this result from being over-read. First, it is a statement about representational
+capacity, not about what a trained network in fact does; whether PACK 3D’s learned compressed
+branch exploits this gap is the empirical question the main-text ablations address, and those ablations establish that the branch is load-bearing without isolating the full capacity gap. Second, the
+achievability half uses unbounded logit scaling, so the separation is exact in the limit rather than at
+any fixed temperature. Within those bounds the message is clean: if a task selects global information
+by relative position, content-only compression provably cannot, and coordinate-aware compression
+provably can.
+B.7
+RoPE placement in the compressed branch: exact vs. approximate
+Theorem 7 is exact for token-before-compression. The cheaper summary-center variant — pool
+unrotated keys, then rotate the pool by a block center — is only approximate, and we are explicit
+that the empirical gap between them is within seed noise while the theoretical status differs. Table 6
+reports the short gate.
+Table 6: RoPE placement in the compressed branch (262k/depth1). Token-before-compression is
+the exact formulation of Theorem 7; summary-center RoPE is a strictly cheaper coordinate-aware
+approximation, competitive in this short gate and to be read as a promising simplification, not a
+beaten baseline.
+Variant
+Token-before-compression
+Summary-center RoPE
+Compressed branch unrotated
+Best Dice
+Final Dice
+Local gate
+Cmp. gate
+0.7378
+0.7384
+0.7333
+0.7048
+0.6947
+0.6830
+0.5054
+0.4942
+0.5134
+0.4946
+0.5058
+0.4866
+We therefore make no claim that token-before-compression is empirically necessary in this gate.
+The supported empirical principle is the weaker, robust one — compressed summaries should be
+coordinate-aware — and token-before-compression is the canonical form because it alone preserves
+the exact token-level identity, not because it wins on Dice. The next subsection bounds exactly how
+far the summary-center approximation can drift from that identity.
+B.8
+How far the summary-center approximation can drift
+This subsection is quantitative: it controls the summary-center error by geometric quantities one can
+read off a block. Define
+X
+R
+k̂B
+= R(µB ) k̄B ,
+k̄B =
+aB,u ku ,
+u∈B
+R
+for a chosen center µB ; the resulting logit (R(cx )qx )⊤ k̂B
+= qx⊤ R(µB − cx )k̄B approximates, but
+does not equal, the exact logit of Theorem 7.
+Lemma 9 (Block-center approximation error). (A deterministic bound in block geometry.) Fix a
+query site x. Let B have center µB and radius ρB = maxu∈B ∥cu − µB ∥2 , and assume ∥qx ∥2 ≤ Q,
+∥ku ∥2 ≤ K, ∥ku − k̄B ∥2 ≤ ϵK for all u ∈ B, and that R is LR -Lipschitz in operator norm over the
+block’s coordinate range. Then
+X
+aB,u qx⊤ R(cu − cx )ku − qx⊤ R(µB − cx )k̄B ≤ QϵK + QKLR ρB .
+u∈B
+√
+Scaling logits by 1/ dh scales the bound by the same factor.
+16
+P
+Proof. Add and subtract the intermediate u∈B aB,u qx⊤ R(cu − cx )k̄B and apply the triangle inequality, splitting the error into a key-variation term and a coordinate-variation term. For the first,
+orthogonality of each R(cu − cx ) gives
+⊤
+u∈B aB,u qx R(cu − cx )(ku − k̄B )
+P
+For the second, ∥k̄B ∥2 ≤
+⊤
+u∈B aB,u qx
+P
+≤
+P
+u∈B aB,u ∥qx ∥2 ∥ku − k̄B ∥2 ≤ QϵK .
+P
+u∈B aB,u ∥ku ∥2 ≤ K, so
+
+P
+R(cu −cx )−R(µB −cx ) k̄B ≤ u∈B aB,u ∥qx ∥2 ∥R(cu −cx )−R(µB −cx )∥op ∥k̄B ∥2 ≤ QKLR ρB .
+Summing the two bounds gives the claim.
+For axial RoPE one may take LR proportional to the largest allocated rotary frequency, so the bound
+degrades with higher frequencies or larger blocks — the two knobs that make a block less locally
+uniform. The logit bound becomes an output bound through the following stability estimate.
+Lemma 10 (Softmax/output stability). (A Lipschitz bound from logits to outputs.) If ∥ℓ − ℓ̂∥∞ ≤ ϵ
+then ∥ softmax(ℓ) − softmax(ℓ̂)∥1 ≤ 2ϵ, and if additionally ∥ṽB ∥2 ≤ V for all blocks,
+P
+B softmax(ℓ)B ṽB −
+P
+B softmax(ℓ̂)B ṽB
+≤ 2V ϵ.
+2
+Proof. P
+With s(x) = softmax(x) and Jacobian Js = diag(s) − ss⊤ , for any u, ∥Js u∥1 ≤
+∥u∥∞ i,j |(Js )ij | = 2(1 − ∥s∥22 )∥u∥∞ ≤ 2∥u∥∞ ; the mean-value theorem along the segment from
+P
+P
+ℓ to ℓ̂ gives the first bound. The second follows from ∥ B δB ṽB ∥2 ≤ B |δB |∥ṽB ∥2 ≤ V ∥δ∥1
+with δ = s(ℓ) − s(ℓ̂).
+Composing Lemmas 9 and 10 shows the summary-center output error is controlled by block diameter,
+within-block key variation, and the local rotary Lipschitz constant. This is not a claim that microscopy
+is globally smooth; it is the formal reason PACK 3D compresses only the nonlocal field and keeps
+local attention exact, since the bound is small exactly where blocks are coordinate- and contenthomogeneous.
+B.9
+Coordinate scaling and anisotropy
+Because every result above is stated for an arbitrary fixed κ, anisotropic and normalized coordinates
+are covered with no further work. For a site u = (uz , uy , ux ) one may use physical
+spacing
+
+uy
+uz
+x
+cu = (∆z uz , ∆y uy , ∆x ux ) or normalized coordinates cu = Z−1
+. Changing κ
+, H−1
+, Wu−1
+changes the geometry RoPE sees but none of the algebraic statements: Lemma 3 through Theorem 8
+hold verbatim. The main Allen runs use token-grid coordinates; spacing-aware coordinates are a
+sensitivity analysis, not a different method.
+B.10
+Attention-graph complexity
+The reduction is in the graph, indexed by κ, not in the coordinate system itself. Dense attention
+computes N 2 token–token interactions. With neighborhood size w = |N (x)|, block volume v = |Bj |,
+and M = N/v summaries, PACK 3D computes N w exact local interactions, N M = N 2 /v query–
+summary interactions, and M v = N summary-construction terms. The nonlocal graph thus changes
+from token–token to token–block, cutting global pairings by a factor v. This is block-compressed
+global attention with explicit coordinate geometry — linear only in the degenerate case v ∝ N , and
+otherwise strictly between window and dense.
+B.11
+Comparison with additive 3D relative biases
+A coordinate-aware logit can also be built additively, via a 3D relative-position or ALiBI-style bias,
+LxB = qx⊤ k̃B + b(cx , µB ),
+17
+Table 7: Feasible-scale coordinate-aware positional alternatives (65k tokens). Axial grid-coordinate
+RoPE leads 3D RPB and 3D ALiBI on best and final Dice; note also the order-of-magnitude time
+cost of the materialized-bias baseline.
+Positional method
+Learned full-grid PE
+Packed-sequence RoPE
+Axial grid-coordinate RoPE
+3D relative position bias
+3D ALiBI-style bias
+Best Dice
+Final Dice
+Time (s)
+Peak GiB
+0.6939
+0.7099
+0.7346
+0.7055
+0.7098
+0.6939
+0.6670
+0.7154
+0.6420
+0.6691
+71.8
+68.3
+79.4
+588.0
+74.3
+2.60
+2.22
+2.27
+3.35
+2.97
+and this is a legitimate alternative, not a strawman: we compare against both at the feasible 65k scale
+in Table 7, where axial RoPE is the strongest of the tested mechanisms on both best and final Dice.
+The distinction we draw is one of systems contract, not of principle.
+The contrast is structural. At 262k tokens with M = 16,384 summaries, a naive additive bias
+materializes a query-by-summary displacement tensor of N M = 262,144 × 16,384 ≈ 4.29B
+elements per head group, exceeding 8.5B for two KV groups before batch expansion; a fair hightoken bias baseline therefore needs its own streaming bias-aware kernel. Axial RoPE avoids the
+tensor entirely: by (⋆) it injects the same relative geometry through query/key rotation and reuses the
+ordinary dot-product path. The displacement enters the logit either way; only RoPE keeps it off the
+memory bus.
+B.12
+Summary of the theory
+The theory supports four claims.
+First, coordinate-indexed local–global attention is a well-defined operator on a packed 3D field:
+repacking the same physical field only permutes the output.
+Second, sequence-index positional attention is not a geometric operator on packed 3D fields, because
+changing memory layout changes the positional coordinate.
+Third, coordinate-aware compressed summaries preserve query-relative geometry. A query-tosummary logit is not just a content similarity to a pooled token; it is a weighted sum of content
+interactions modulated by relative 3D displacement.
+Fourth, coordinate-aware compression is strictly more expressive than coordinate-blind compression
+for relative-spatial selection. If two remote blocks have identical content but different relative positions, content-only compressed attention cannot distinguish them, while coordinate-aware compressed
+attention can.
+These statements are independent of Allen microscopy and segmentation. They formalize the general
+principle behind PACK 3D: packing is for memory movement; coordinates are for attention geometry.
+The central empirical lesson is therefore the same as the mathematical one: once a 3D field is
+packed into a sequence, positional encoding becomes part of the attention operator’s geometry.
+For compressed global attention to work in high-token 3D microscopy, it must encode physical
+coordinates rather than memory order.
+18
+C
+Diagnostics, Supporting Results, and Claim Boundaries
+This section follows the evidence chain in three movements. It first reports operator-level diagnostics
+that confirm the implementation computes the operator the theory describes; then the Allen tables
+that support the main result, reported with their unevenness against U-Net stated plainly rather
+than smoothed; and finally the boundary controls that mark where the present evidence stops. The
+diagnostics answer "does the code match the math," the Allen tables answer "and does it help on real
+data," and the boundary controls answer "and where does the claim run out."
+C.1
+Geometry diagnostics: does the implementation match the theory
+Before any task-level number is interpreted, these checks confirm that the executed operator satisfies
+the algebraic identities of §3 — that the code realizes the theorems rather than merely resembling
+them. Table 8 records the verified properties.
+Table 8: Geometry-level implementation tests for axial RoPE. Each row is a numerical check that an
+identity from §3 holds in the executed operator.
+Test
+Verified property
+Packed-order invariance
+Repacking the same 3D coordinates leaves attention logits unchanged
+up to permutation.
+Packed sequence position changes under repacking, confirming it is not
+a valid 3D coordinate.
+⟨R(ci )q, R(cj )k⟩ = q ⊤ R(cj − ci )k holds numerically.
+RoPE rotates Q/K only; values pass through unrotated.
+Local, compressed, and selected branch keys are RoPE-rotated when
+axial RoPE is enabled.
+Sequence-index failure diagnostic
+Relative-displacement identity
+Values unrotated
+Branch-key rotation
+C.2
+Task-level synthetic repacking benchmark
+The invariance diagnostics above are operator-level: they show the logits transform correctly. This
+subsection measures the consequence at the level of a task. We construct a controlled synthetic 3D
+labeling problem with a known geometric rule, train each positional mechanism on raster-packed
+tokens, and then evaluate the same trained model on the same physical task after changing only the
+memory order of the tokens. The physical coordinates and the target rule are held fixed; the sole
+intervention is the packing. This is the task-level form of Proposition 6: if a mechanism has learned
+the memory layout rather than the geometry, repacking should destroy its predictions.
+It does, and cleanly (Table 9). Learned positional embeddings and packed-sequence RoPE both solve
+the raster layout perfectly — 1.000 Dice — and both collapse under repacking, to 0.449 (Morton),
+0.418 (block-contiguous), and 0.378 (random). Axial grid-coordinate RoPE stays at 1.000 Dice under
+every repacking. A no-positional baseline is flat at 0.554 across all packings but never solves the task,
+confirming the task genuinely requires position: the sequence-indexed mechanisms do not merely
+lose their advantage under repacking, they fall below position-blindness (0.378–0.449 vs. 0.554),
+because they have learned to read a signal that repacking has made actively misleading.
+Two features of the table are worth reading deliberately. First, the learned-PE and packed-sequenceRoPE rows are identical at every packing. This is expected, not a coincidence: both mechanisms
+key on sequence position, so a given repacking scrambles the same information for each, and both
+land on the same wrong label overlap. The shared failure is the point — it is the property of being
+sequence-indexed, not any detail of the encoder, that repacking breaks. Second, the degraded values
+are exact rationals on the synthetic grid (for instance 0.449 = 22/49), reflecting the controlled
+finite-grid construction rather than measurement noise. The benchmark therefore converts the paper’s
+central claim from an operator identity — “axial-RoPE logits are invariant under repacking” —
+into a task measurement: “sequence-indexed position learns a memory layout that does not survive
+repacking, while coordinate-indexed position learns the geometry that does.”
+19
+Table 9: Task-level synthetic repacking benchmark. Each model is trained on raster-packed tokens
+and evaluated on the same physical 3D labeling rule after changing only the token memory order.
+Sequence-indexed mechanisms solve the training layout and collapse under repacking — below the
+position-blind baseline — while axial grid-coordinate RoPE is invariant.
+Dice under test-time packing
+Positional mechanism
+No positional encoding
+Learned PE
+Packed-sequence RoPE
+Axial grid-coordinate RoPE
+C.3
+Raster (train)
+Morton
+Block-contig.
+Random
+0.554
+1.000
+1.000
+1.000
+0.554
+0.449
+0.449
+1.000
+0.554
+0.418
+0.418
+1.000
+0.554
+0.378
+0.378
+1.000
+Synthetic packing-invariance diagnostics
+These unit-level checks perturb packing order directly while holding physical coordinates fixed, complementing the algebraic tests above. Axial grid-coordinate RoPE stays invariant up to permutation
+under raster, block, or Morton repacking of the same coordinates; packed-sequence RoPE changes
+its logits the moment memory order changes (Table 10). These are operator-level invariants. The
+task-level measurement of the same failure — Dice under repacking on a controlled synthetic field
+— is reported separately in [VERIFY: cross-reference the Phase 8J synthetic-benchmark subsection
+once it is placed; if Phase 8J is folded in here, replace this sentence with its results and delete the
+"operator-level only" framing].
+Table 10: Synthetic packing-invariance diagnostics. Axial grid-coordinate RoPE is invariant up to
+permutation under repacking; packed-sequence RoPE is not.
+Encoding
+Packing change
+Behavior
+Axial grid-coordinate RoPE
+Packed-sequence RoPE
+Raster/block/Morton permutation
+Same coordinates, changed memory
+order
+Changed coordinate-to-index assignment
+Same coordinate deltas under repacking
+Invariant up to permutation.
+Logits change with the sequence index.
+Not invariant unless repacked consistently.
+Coordinate-aware in principle; hightoken comparison needs streaming
+bias-aware kernels.
+Learned absolute table
+3D RPB / ALiBI
+C.4
+Per-structure Allen results
+The per-structure breakdown supports a precise claim and refutes an over-broad one, so we state both.
+Against the learned-PE baseline, axial RoPE W+G improves on all six structures in both best and
+final Dice — the gain over a weak positional baseline is uniform. Against the U-Net, the picture is
+deliberately reported as even rather than dominant: U-Net wins or ties on final Dice for [VERIFY:
+count from Table 11 — by the entries shown, TOMM20, ST6GAL1, GJA1, and LAMP1, i.e. four
+of six] of the structures, while axial RoPE leads on the others and on the Allen-15 average (§4.2).
+The supported reading is that coordinate-aware attention is competitive with a strong convolutional
+baseline at matched capacity, not that it dominates per structure.
+[VERIFY: I bolded LMNB1 as neither — Axial 0.893 vs U-Net 0.907, so U-Net wins final there
+too; that makes it 5 of 6 on final, not 4. Recount against the real CSV: by the numbers printed,
+U-Net’s final Dice exceeds Axial’s on TOMM20, LMNB1, ST6GAL1, GJA1, and LAMP1, with
+Axial winning final only on ATP2A2. If that holds, the prose above should say "five of six," and
+"even" becomes "U-Net is the stronger final-checkpoint model per structure, while axial RoPE wins
+the Allen-15 average and best-Dice checkpoints." Do not ship "four of six" or "competitive" until this
+count is confirmed against the data — the printed numbers may not match the current run.]
+20
+Table 11: Per-structure best/final Dice on the six Allen structures (entries are best/final). Axial RoPE
+improves over learned PE on all six; against U-Net the comparison is even, with U-Net winning or
+tying on final Dice for several structures. Bold marks the higher final Dice between Axial W+G and
+U-Net.
+Structure
+Axial W+G
+Learned W+G
+Axial local-only
+U-Net
+TOMM20
+LMNB1
+ST6GAL1
+GJA1
+LAMP1
+ATP2A2
+0.892/0.876
+0.921/0.893
+0.855/0.852
+0.742/0.740
+0.889/0.881
+0.819/0.815
+0.783/0.729
+0.796/0.769
+0.807/0.794
+0.683/0.646
+0.802/0.765
+0.661/0.605
+0.857/0.860
+0.909/0.906
+0.834/0.839
+0.759/0.762
+0.865/0.866
+0.808/0.794
+0.892/0.893
+0.903/0.907
+0.861/0.864
+0.761/0.765
+0.883/0.886
+0.801/0.778
+Table 12: Inference-time compressed-branch ablations on trained 262k/depth8 axial RoPE W+G
+checkpoints. Large Dice drops with large logit shifts establish that the compressed pathway is
+load-bearing; they do not isolate coordinate-awareness (see text). Mean over three seeds.
+Condition
+Macro Dice
+∆ vs. full
+Logit L2
+0.8531
+0.8387
+0.8350
+0.8458
+0.7648
+0.6858
+0.6775
+0.5764
+—
+−0.0144
+−0.0181
+−0.0074
+−0.0883
+−0.1674
+−0.1756
+−0.2767
+0.0000
+1.3101
+0.6454
+0.3585
+1.5702
+1.4834
+1.5444
+2.9167
+Full W+G
+Trained local-only
+Central summaries only
+Collar summaries only
+Compressed gate → 0
+Compressed summary shuffle
+Compressed output → 0
+Local gate → 0
+C.5
+Compressed-branch inference ablations
+These ablations establish that the trained compressed pathway is load-bearing, and we are careful to
+claim exactly that and no more. Two facts support it. The trained-control row shows axial RoPE W+G
+(0.8531) exceeds a separately trained axial local-only model (0.8387). More stringently, perturbing
+the compressed pathway of the trained checkpoint at inference degrades it sharply — clamping the
+compressed gate to zero drops Dice to 0.7648, shuffling the summaries to 0.6858, zeroing the output
+to 0.6775 — and the Logit L2 column shows these drops coincide with large changes in the attention
+logits themselves (Table 12), so the perturbations act through the operator’s representation rather than
+through an output-only artifact.
+What these rows do not establish is that the pathway is coordinate-aware. A coordinate-blind
+compressed branch, trained under the same protocol, would also be relied upon and would also
+collapse under the same perturbations, simply from distribution shift. Isolating coordinate-awareness
+requires a matched coordinate-blind branch subjected to the identical shuffle and a test of whether
+the coordinate-aware branch is more shuffle-robust [VERIFY: state whether this control was run;
+if so, report it here; if not, mark it as the key open control, consistent with §4.4]. The expressivity
+argument that coordinate-aware compression can do what coordinate-blind compression cannot is the
+separation theorem (Theorem 8); these ablations show the pathway is used, not that it exhausts that
+expressive gap.
+C.6
+Collar and stability controls
+A natural objection to the compressed-branch result is that the gain comes not from compressed
+global geometry but from the external collar content the summaries draw on. These controls rule that
+out: replacing the real collar with zeros or a shuffle leaves Dice close to the real-collar row (Table 13;
+0.8531 real vs. 0.8447 zero vs. 0.8503 shuffled on best Dice), so external collar content is not the
+clean causal driver of the gain — the same boundary stated in §4.6. The small best-final gaps in the
+W+G rows, against the near-zero gap of the local-only row, also indicate the W+G checkpoints are
+not simply less stable.
+21
+Table 13: Collar and stability controls. Zeroing or shuffling the external collar leaves Dice close to
+the real-collar row, so collar content does not cleanly explain the gain.
+Group
+Best Dice
+Final Dice
+Best−final gap
+Axial RoPE W+G, real collar
+Axial RoPE W+G, zero collar
+Axial RoPE W+G, shuffled collar
+Axial RoPE local-only, real collar
+Learned PE W+G, real collar
+0.8531
+0.8447
+0.8503
+0.8387
+0.7553
+0.8429
+0.8422
+0.8417
+0.8379
+0.7181
+0.0103
+0.0025
+0.0086
+0.0008
+0.0372
+Table 14: Decoder-controlled external 3D transfer on MSD Heart and Spleen. Single-seed gates;
+mixed outcomes, treated as claim-boundary evidence. Bold marks the best value in each columnblock.
+C.7
+Task
+Method
+2k Dice
+10k Best
+10k Final
+Peak GiB
+Heart
+Heart
+Heart
+Heart
+Heart
+TokenGrid U-Net
+Window+decoder
+LG+decoder, learned PE
+LG+decoder, packed RoPE
+LG+decoder, axial 3D RoPE
+0.8067
+0.8231
+0.8155
+0.8231
+0.8072
+0.8307
+0.8231
+0.8155
+0.8624
+0.8713
+0.8157
+0.7767
+0.8026
+0.8538
+0.8713
+0.204
+3.357
+2.717
+2.342
+2.388
+Spleen
+Spleen
+Spleen
+Spleen
+Spleen
+TokenGrid U-Net
+Window+decoder
+LG+decoder, learned PE
+LG+decoder, packed RoPE
+LG+decoder, axial 3D RoPE
+0.9156
+0.9008
+0.8953
+0.8998
+0.9083
+0.9360
+0.9111
+0.9127
+0.8998
+0.9221
+0.9292
+0.9058
+0.8939
+0.8976
+0.9013
+0.204
+3.357
+2.717
+2.342
+2.388
+Decoder-controlled external transfer
+Whether the coordinate-aware encoder transfers beyond Allen is a question we test but do not resolve,
+and we report the result as mixed because it is. With the decoder held fixed — same MONAI
+BasicUNet token-grid decoder, fixed ZYX manifests, N = 65,536 tokens, 10k steps — axial gridcoordinate RoPE is the best attention row by best Dice on both MSD Heart and Spleen, and has the
+best final Dice on Heart. But these are single-seed gates, U-Net remains strongest overall on Spleen,
+and among attention rows Window edges axial on final Dice in places (Table 14). We therefore
+treat external transfer as claim-boundary evidence, not main-paper support: it is consistent with the
+coordinate principle generalizing, but a single seed per cell cannot establish it.
+22
+D
+Optional Selected Refinement and Systems Extensions
+The material in this final appendix section is deliberately separated from the main evidence chain.
+The main method is local plus compressed global attention with axial grid-coordinate RoPE. The
+codebase also supports selected sparse refinement, query-tiled execution, multi-atom summaries,
+and high-token reach modes, but these are implementation/reach extensions rather than main quality
+claims.
+D.1
+Selected sparse refinement
+For a query block Qb , the optional selected branch pools queries,
+q̄b = Pooli∈Qb (qiR ),
+scores compressed block summaries,
+q̄b⊤ k̃jR
+√
+dh
+pb,j = softmaxj
+!
+,
+selects top-k blocks
+Ib = TopKj (pb,j , ksel ),
+and lets each query in Qb attend to raw K/V tokens from those selected blocks:
+
+
+sel,R
+R
+sel
+osel
+i = Attn qi , K∪j∈I Bj , V∪j∈I Bj .
+b
+b
+For GQA/MQA, selected block indices are shared within each KV group so that selected K/V access
+remains blockwise and hardware-aligned.
+In the current evidence-aligned paper, this branch is retained for systems reach and appendix analysis.
+It is not the main Allen quality path.
+D.2
+High-token systems reach
+The high-token H200 rows support execution reach, not practical throughput. Query-tiled paths
+run to 4M and 8M tokens, but the rows are slow and skip some diagnostics above the configured
+auxiliary-materialization threshold. They are therefore appendix systems evidence rather than a main
+quality or throughput claim.
+Section 4.5 measures that contract directly. On full-layers, the operator stays close to Window latency
+and well below dense SDPA as context grows, while Dense SDPA remains lower-memory in our
+sweep. The systems claim is therefore measured latency scaling, not universal memory superiority.
+Query-tiled multi-million-token execution and selected refinement remain systems extensions rather
+than required parts of the main quality story.
+23
+Table 15: Representative high-token reach rows. These rows show that the implementation can
+execute at multi-million-token scale, but they are not practical-throughput claims.
+Tokens
+Route granularity
+Fwd+Bwd ms
+Peak GiB
+Tokens/sec
+4,194,304
+4,194,304
+8,388,608
+8,388,608
+query-block shared
+token-exact
+query-block shared
+token-exact
+45,113
+113,675
+176,190
+452,953
+51.50
+51.50
+102.04
+102.04
+92,973
+36,897
+47,611
+18,520
+Table 16: Full-layer context scaling in the pool64 setting. PACK 3D stays close to Window latency
+and far below dense SDPA as context grows.
+Tokens
+Dense ms
+PACK 3D ms
+Window ms
+Dense/PACK 3D
+Dense GiB
+PACK 3D GiB
+Window GiB
+65k
+131k
+262k
+524k
+1M
+104.55
+405.62
+1620.07
+6641.53
+27034.70
+16.11
+28.36
+54.64
+107.49
+215.51
+13.86
+26.62
+52.49
+104.19
+207.76
+6.49
+14.30
+29.65
+61.79
+125.45
+1.19
+2.32
+4.57
+9.08
+18.10
+1.51
+2.95
+5.82
+11.58
+23.09
+2.04
+4.02
+7.98
+15.89
+31.72
+24
+References
+Iz Beltagy, Matthew E. Peters, and Arman Cohan. Longformer: The Long-Document Transformer,
+December 2020. URL http://arxiv.org/abs/2004.05150. arXiv:2004.05150 [cs].
+Jianxu Chen, Liya Ding, Matheus P. Viana, HyeonWoo Lee, M. Filip Sluezwski, Benjamin Morris,
+Melissa C. Hendershott, Ruian Yang, Irina A. Mueller, and Susanne M. Rafelski. The Allen Cell
+and Structure Segmenter: a new open source toolkit for segmenting 3D intracellular structures in
+fluorescence microscopy images, December 2020. URL https://www.biorxiv.org/content/
+10.1101/491035v2. Pages: 491035 Section: New Results.
+Krzysztof Choromanski, Valerii Likhosherstov, David Dohan, Xingyou Song, Andreea Gane, Tamas
+Sarlos, Peter Hawkins, Jared Davis, Afroz Mohiuddin, Lukasz Kaiser, David Belanger, Lucy
+Colwell, and Adrian Weller. Rethinking Attention with Performers, September 2020. URL
+https://arxiv.org/abs/2009.14794v4.
+Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. FlashAttention: Fast and MemoryEfficient Exact Attention with IO-Awareness. Advances in Neural Information Processing Systems,
+35:16344–16359, December 2022. URL https://proceedings.neurips.cc/paper_files/
+paper/2022/hash/67d57c32e20fd0a7a302cb81d36e40d5-Abstract-Conference.html.
+Mostafa Dehghani, Josip Djolonga, Basil Mustafa, Piotr Padlewski, Jonathan Heek, Justin Gilmer,
+Andreas Steiner, Mathilde Caron, Robert Geirhos, Ibrahim Alabdulmohsin, Rodolphe Jenatton,
+Lucas Beyer, Michael Tschannen, Anurag Arnab, Xiao Wang, Carlos Riquelme, Matthias Minderer,
+Joan Puigcerver, Utku Evci, Manoj Kumar, Sjoerd van Steenkiste, Gamaleldin F. Elsayed, Aravindh
+Mahendran, Fisher Yu, Avital Oliver, Fantine Huot, Jasmijn Bastings, Mark Patrick Collier,
+Alexey Gritsenko, Vighnesh Birodkar, Cristina Vasconcelos, Yi Tay, Thomas Mensink, Alexander
+Kolesnikov, Filip Pavetić, Dustin Tran, Thomas Kipf, Mario Lučić, Xiaohua Zhai, Daniel Keysers,
+Jeremiah Harmsen, and Neil Houlsby. Scaling Vision Transformers to 22 Billion Parameters,
+February 2023. URL http://arxiv.org/abs/2302.05442. arXiv:2302.05442 [cs].
+Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas
+Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, Jakob Uszkoreit,
+and Neil Houlsby. An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale,
+June 2021. URL http://arxiv.org/abs/2010.11929. arXiv:2010.11929 [cs].
+Mengjie Fang, Zipei Wang, Sitian Pan, Xin Feng, Yunpeng Zhao, Dongzhi Hou, Ling Wu, Xuebin
+Xie, Xu-Yao Zhang, Jie Tian, and Di Dong. Large models in medical imaging: Advances and
+prospects. Chinese Medical Journal, 138(14):1647–1664, July 2025. ISSN 2542-5641. doi:
+10.1097/CM9.0000000000003699.
+Ali Hatamizadeh, Vishwesh Nath, Yucheng Tang, Dong Yang, Holger R. Roth, and Daguang Xu.
+Swin UNETR: Swin Transformers for Semantic Segmentation of Brain Tumors in MRI Images. In
+Alessandro Crimi and Spyridon Bakas, editors, Brainlesion: Glioma, Multiple Sclerosis, Stroke
+and Traumatic Brain Injuries, pages 272–284, Cham, 2022a. Springer International Publishing.
+ISBN 978-3-031-08999-2. doi: 10.1007/978-3-031-08999-2_22.
+Ali Hatamizadeh, Yucheng Tang, Vishwesh Nath, Dong Yang, Andriy Myronenko, Bennett Landman,
+Holger R. Roth, and Daguang Xu. UNETR: Transformers for 3D Medical Image Segmentation.
+In 2022 IEEE/CVF Winter Conference on Applications of Computer Vision (WACV), pages 1748–
+1758, January 2022b. doi: 10.1109/WACV51458.2022.00181. URL https://ieeexplore.
+ieee.org/document/9706678. ISSN: 2642-9381.
+Kaiming He, Xinlei Chen, Saining Xie, Yanghao Li, Piotr Dollár, and Ross Girshick. Masked
+Autoencoders Are Scalable Vision Learners. In 2022 IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), pages 15979–15988, June 2022. doi: 10.1109/CVPR52688.
+2022.01553. URL https://ieeexplore.ieee.org/document/9879206. ISSN: 2575-7075.
+Satish Kumar, Ivan Arevalo, A. S. M. Iftekhar, and B. S. Manjunath. MethaneMapper: Spectral
+Absorption aware Hyperspectral Transformer for Methane Detection, April 2023. URL http:
+//arxiv.org/abs/2304.02767. arXiv:2304.02767 [eess].
+25
+Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and
+Ren Ng. NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis. In Andrea
+Vedaldi, Horst Bischof, Thomas Brox, and Jan-Michael Frahm, editors, Computer Vision – ECCV
+2020, pages 405–421, Cham, 2020. Springer International Publishing. ISBN 978-3-030-58452-8.
+doi: 10.1007/978-3-030-58452-8_24.
+Fausto Milletari, Nassir Navab, and Seyed-Ahmad Ahmadi. V-Net: Fully Convolutional Neural
+Networks for Volumetric Medical Image Segmentation. In 2016 Fourth International Conference
+on 3D Vision (3DV), pages 565–571, October 2016. doi: 10.1109/3DV.2016.79. URL https:
+//ieeexplore.ieee.org/document/7785132.
+Olaf Ronneberger, Philipp Fischer, and Thomas Brox. U-Net: Convolutional Networks for Biomedical
+Image Segmentation. In Nassir Navab, Joachim Hornegger, William M. Wells, and Alejandro F.
+Frangi, editors, Medical Image Computing and Computer-Assisted Intervention – MICCAI 2015,
+pages 234–241, Cham, 2015. Springer International Publishing. ISBN 978-3-319-24574-4. doi:
+10.1007/978-3-319-24574-4_28.
+Peter Shaw, Jakob Uszkoreit, and Ashish Vaswani. Self-Attention with Relative Position Representations. In Marilyn Walker, Heng Ji, and Amanda Stent, editors, Proceedings of the 2018
+Conference of the North American Chapter of the Association for Computational Linguistics:
+Human Language Technologies, Volume 2 (Short Papers), pages 464–468, New Orleans, Louisiana,
+June 2018. Association for Computational Linguistics. doi: 10.18653/v1/N18-2074. URL
+https://aclanthology.org/N18-2074/.
+Jianlin Su, Yu Lu, Shengfeng Pan, Ahmed Murtadha, Bo Wen, and Yunfeng Liu. RoFormer: Enhanced
+Transformer with Rotary Position Embedding, November 2023. URL http://arxiv.org/abs/
+2104.09864. arXiv:2104.09864 [cs].
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N
+Gomez, Ł ukasz Kaiser, and Illia Polosukhin. Attention is All you Need. In Advances in Neural Information Processing Systems, volume 30. Curran Associates,
+Inc., 2017.
+URL https://papers.nips.cc/paper_files/paper/2017/hash/
+3f5ee243547dee91fbd053c1c4a845aa-Abstract.html.
+Matheus P. Viana, Jianxu Chen, Theo A. Knijnenburg, Ritvik Vasan, Calysta Yan, Joy E. Arakaki,
+Matte Bailey, Ben Berry, Antoine Borensztejn, Eva M. Brown, Sara Carlson, Julie A. Cass, Basudev Chaudhuri, Kimberly R. Cordes Metzler, Mackenzie E. Coston, Zach J. Crabtree, Steve
+Davidson, Colette M. DeLizo, Shailja Dhaka, Stephanie Q. Dinh, Thao P. Do, Justin Domingus,
+Rory M. Donovan-Maiye, Alexandra J. Ferrante, Tyler J. Foster, Christopher L. Frick, Griffin
+Fujioka, Margaret A. Fuqua, Jamie L. Gehring, Kaytlyn A. Gerbin, Tanya Grancharova, Benjamin W. Gregor, Lisa J. Harrylock, Amanda Haupt, Melissa C. Hendershott, Caroline Hookway,
+Alan R. Horwitz, H. Christopher Hughes, Eric J. Isaac, Gregory R. Johnson, Brian Kim, Andrew N. Leonard, Winnie W. Leung, Jordan J. Lucas, Susan A. Ludmann, Blair M. Lyons,
+Haseeb Malik, Ryan McGregor, Gabe E. Medrash, Sean L. Meharry, Kevin Mitcham, Irina A.
+Mueller, Timothy L. Murphy-Stevens, Aditya Nath, Angelique M. Nelson, Sandra A. Oluoch,
+Luana Paleologu, T. Alexander Popiel, Megan M. Riel-Mehan, Brock Roberts, Lisa M. Schaefbauer, Magdalena Schwarzl, Jamie Sherman, Sylvain Slaton, M. Filip Sluzewski, Jacqueline E.
+Smith, Youngmee Sul, Madison J. Swain-Bowden, W. Joyce Tang, Derek J. Thirstrup, Daniel M.
+Toloudis, Andrew P. Tucker, Veronica Valencia, Winfried Wiegraebe, Thushara Wijeratna, Ruian
+Yang, Rebecca J. Zaunbrecher, Ramon Lorenzo D. Labitigan, Adrian L. Sanborn, Graham T.
+Johnson, Ruwanthi N. Gunawardane, Nathalie Gaudreault, Julie A. Theriot, and Susanne M.
+Rafelski. Integrated intracellular organization and its variations in human iPS cells. Nature, 613
+(7943):345–354, January 2023. ISSN 1476-4687. doi: 10.1038/s41586-022-05563-7. URL
+https://www.nature.com/articles/s41586-022-05563-7.
+Sinong Wang, Belinda Z. Li, Madian Khabsa, Han Fang, and Hao Ma. Linformer: Self-Attention with
+Linear Complexity, June 2020. URL http://arxiv.org/abs/2006.04768. arXiv:2006.04768
+[cs].
+Yutong Xie, Jianpeng Zhang, Chunhua Shen, and Yong Xia. CoTr: Efficiently Bridging CNN and
+Transformer for 3D Medical Image Segmentation. In Marleen de Bruijne, Philippe C. Cattin,
+Stéphane Cotin, Nicolas Padoy, Stefanie Speidel, Yefeng Zheng, and Caroline Essert, editors,
+26
+Medical Image Computing and Computer Assisted Intervention – MICCAI 2021, pages 171–
+180, Cham, 2021. Springer International Publishing. ISBN 978-3-030-87199-4. doi: 10.1007/
+978-3-030-87199-4_16.
+Yunyang Xiong, Zhanpeng Zeng, Rudrasis Chakraborty, Mingxing Tan, Glenn Fung, Yin Li, and
+Vikas Singh. Nyströmformer: A Nystöm-based Algorithm for Approximating Self-Attention.
+Proceedings of the ... AAAI Conference on Artificial Intelligence. AAAI Conference on Artificial
+Intelligence, 35(16):14138–14148, 2021. ISSN 2159-5399. URL https://pmc.ncbi.nlm.nih.
+gov/articles/PMC8570649/.
+Jingyang Yuan, Huazuo Gao, Damai Dai, Junyu Luo, Liang Zhao, Zhengyan Zhang, Zhenda Xie,
+Yuxing Wei, Lean Wang, Zhiping Xiao, Yuqing Wang, Chong Ruan, Ming Zhang, Wenfeng
+Liang, and Wangding Zeng. Native Sparse Attention: Hardware-Aligned and Natively Trainable
+Sparse Attention. In Wanxiang Che, Joyce Nabende, Ekaterina Shutova, and Mohammad Taher
+Pilehvar, editors, Proceedings of the 63rd Annual Meeting of the Association for Computational
+Linguistics (Volume 1: Long Papers), pages 23078–23097, Vienna, Austria, July 2025. Association
+for Computational Linguistics. ISBN 979-8-89176-251-0. doi: 10.18653/v1/2025.acl-long.1126.
+URL https://aclanthology.org/2025.acl-long.1126/.
+Manzil Zaheer, Guru Guruganesh, Avinava Dubey, Joshua Ainslie, Chris Alberti, Santiago Ontanon, Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang, and Amr Ahmed. Big Bird: Transformers for Longer Sequences, January 2021. URL http://arxiv.org/abs/2007.14062.
+arXiv:2007.14062 [cs].
+Xiaohua Zhai, Alexander Kolesnikov, Neil Houlsby, and Lucas Beyer. Scaling Vision Transformers.
+In 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages
+1204–1213, June 2022. doi: 10.1109/CVPR52688.2022.01179. URL https://ieeexplore.
+ieee.org/document/9880094. ISSN: 2575-7075.
+Hong-Yu Zhou, Jiansen Guo, Yinghao Zhang, Xiaoguang Han, Lequan Yu, Liansheng Wang, and
+Yizhou Yu. nnFormer: Volumetric Medical Image Segmentation via a 3D Transformer. IEEE
+Transactions on Image Processing, 32:4036–4045, 2023. ISSN 1941-0042. doi: 10.1109/TIP.2023.
+3293771. URL https://ieeexplore.ieee.org/document/10183842.
+Yu Zhou, Jan Sollmann, and Jianxu Chen. Deep-learning-based image compression for microscopy
+images: An empirical study. Biological Imaging, 4:e16, 2024. ISSN 2633-903X. doi: 10.1017/
+S2633903X24000151.
+Özgün Çiçek, Ahmed Abdulkadir, Soeren S. Lienkamp, Thomas Brox, and Olaf Ronneberger. 3D UNet: Learning Dense Volumetric Segmentation from Sparse Annotation. In Sebastien Ourselin, Leo
+Joskowicz, Mert R. Sabuncu, Gozde Unal, and William Wells, editors, Medical Image Computing
+and Computer-Assisted Intervention – MICCAI 2016, pages 424–432, Cham, 2016. Springer
+International Publishing. ISBN 978-3-319-46723-8. doi: 10.1007/978-3-319-46723-8_49.
+27
+NeurIPS Paper Checklist
+1. Claims
+Question: Do the main claims made in the abstract and introduction accurately reflect the
+paper’s contributions and scope?
+Answer: [Yes]
+Justification: Contributions are summarized in the abstract and are explicitly stated in a
+bulleted list. Assumptions and contribution claims are present in all sections of the paper
+(reg. comparison to existing methods, etc).
+Guidelines:
+• The answer [N/A] means that the abstract and introduction do not include the claims
+made in the paper.
+• The abstract and/or introduction should clearly state the claims made, including the
+contributions made in the paper and important assumptions and limitations. A [No] or
+[N/A] answer to this question will not be perceived well by the reviewers.
+• The claims made should match theoretical and experimental results, and reflect how
+much the results can be expected to generalize to other settings.
+• It is fine to include aspirational goals as motivation as long as it is clear that these goals
+are not attained by the paper.
+2. Limitations
+Question: Does the paper discuss the limitations of the work performed by the authors?
+Answer: [Yes]
+Justification: We accurately represent the claims throughout the paper and explicitly lay out
+what we are not claiming (unproven claims at this time)
+Guidelines:
+• The answer [N/A] means that the paper has no limitation while the answer [No] means
+that the paper has limitations, but those are not discussed in the paper.
+• The authors are encouraged to create a separate “Limitations” section in their paper.
+• The paper should point out any strong assumptions and how robust the results are to
+violations of these assumptions (e.g., independence assumptions, noiseless settings,
+model well-specification, asymptotic approximations only holding locally). The authors
+should reflect on how these assumptions might be violated in practice and what the
+implications would be.
+• The authors should reflect on the scope of the claims made, e.g., if the approach was
+only tested on a few datasets or with a few runs. In general, empirical results often
+depend on implicit assumptions, which should be articulated.
+• The authors should reflect on the factors that influence the performance of the approach.
+For example, a facial recognition algorithm may perform poorly when image resolution
+is low or images are taken in low lighting. Or a speech-to-text system might not be
+used reliably to provide closed captions for online lectures because it fails to handle
+technical jargon.
+• The authors should discuss the computational efficiency of the proposed algorithms
+and how they scale with dataset size.
+• If applicable, the authors should discuss possible limitations of their approach to
+address problems of privacy and fairness.
+• While the authors might fear that complete honesty about limitations might be used by
+reviewers as grounds for rejection, a worse outcome might be that reviewers discover
+limitations that aren’t acknowledged in the paper. The authors should use their best
+judgment and recognize that individual actions in favor of transparency play an important role in developing norms that preserve the integrity of the community. Reviewers
+will be specifically instructed to not penalize honesty concerning limitations.
+3. Theory assumptions and proofs
+Question: For each theoretical result, does the paper provide the full set of assumptions and
+a complete (and correct) proof?
+28
+Answer: [Yes]
+Justification: Proof of claims are included in the main text (or proof sketches). Full proofs
+are present in the appendix.
+Guidelines:
+• The answer [N/A] means that the paper does not include theoretical results.
+• All the theorems, formulas, and proofs in the paper should be numbered and crossreferenced.
+• All assumptions should be clearly stated or referenced in the statement of any theorems.
+• The proofs can either appear in the main paper or the supplemental material, but if
+they appear in the supplemental material, the authors are encouraged to provide a short
+proof sketch to provide intuition.
+• Inversely, any informal proof provided in the core of the paper should be complemented
+by formal proofs provided in appendix or supplemental material.
+• Theorems and Lemmas that the proof relies upon should be properly referenced.
+4. Experimental result reproducibility
+Question: Does the paper fully disclose all the information needed to reproduce the main experimental results of the paper to the extent that it affects the main claims and/or conclusions
+of the paper (regardless of whether the code and data are provided or not)?
+Answer: [Yes]
+Justification: Full details of experiments are present in the appendix. Code will be made
+available after publication.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• If the paper includes experiments, a [No] answer to this question will not be perceived
+well by the reviewers: Making the paper reproducible is important, regardless of
+whether the code and data are provided or not.
+• If the contribution is a dataset and/or model, the authors should describe the steps taken
+to make their results reproducible or verifiable.
+• Depending on the contribution, reproducibility can be accomplished in various ways.
+For example, if the contribution is a novel architecture, describing the architecture fully
+might suffice, or if the contribution is a specific model and empirical evaluation, it may
+be necessary to either make it possible for others to replicate the model with the same
+dataset, or provide access to the model. In general. releasing code and data is often
+one good way to accomplish this, but reproducibility can also be provided via detailed
+instructions for how to replicate the results, access to a hosted model (e.g., in the case
+of a large language model), releasing of a model checkpoint, or other means that are
+appropriate to the research performed.
+• While NeurIPS does not require releasing code, the conference does require all submissions to provide some reasonable avenue for reproducibility, which may depend on the
+nature of the contribution. For example
+(a) If the contribution is primarily a new algorithm, the paper should make it clear how
+to reproduce that algorithm.
+(b) If the contribution is primarily a new model architecture, the paper should describe
+the architecture clearly and fully.
+(c) If the contribution is a new model (e.g., a large language model), then there should
+either be a way to access this model for reproducing the results or a way to reproduce
+the model (e.g., with an open-source dataset or instructions for how to construct
+the dataset).
+(d) We recognize that reproducibility may be tricky in some cases, in which case
+authors are welcome to describe the particular way they provide for reproducibility.
+In the case of closed-source models, it may be that access to the model is limited in
+some way (e.g., to registered users), but it should be possible for other researchers
+to have some path to reproducing or verifying the results.
+5. Open access to data and code
+29
+Question: Does the paper provide open access to the data and code, with sufficient instructions to faithfully reproduce the main experimental results, as described in supplemental
+material?
+Answer: [No]
+Justification: Data is already public. Code will be released with the final publication.
+Guidelines:
+• The answer [N/A] means that paper does not include experiments requiring code.
+• Please see the NeurIPS code and data submission guidelines (https://neurips.cc/
+public/guides/CodeSubmissionPolicy) for more details.
+• While we encourage the release of code and data, we understand that this might not
+be possible, so [No] is an acceptable answer. Papers cannot be rejected simply for not
+including code, unless this is central to the contribution (e.g., for a new open-source
+benchmark).
+• The instructions should contain the exact command and environment needed to run to
+reproduce the results. See the NeurIPS code and data submission guidelines (https:
+//neurips.cc/public/guides/CodeSubmissionPolicy) for more details.
+• The authors should provide instructions on data access and preparation, including how
+to access the raw data, preprocessed data, intermediate data, and generated data, etc.
+• The authors should provide scripts to reproduce all experimental results for the new
+proposed method and baselines. If only a subset of experiments are reproducible, they
+should state which ones are omitted from the script and why.
+• At submission time, to preserve anonymity, the authors should release anonymized
+versions (if applicable).
+• Providing as much information as possible in supplemental material (appended to the
+paper) is recommended, but including URLs to data and code is permitted.
+6. Experimental setting/details
+Question: Does the paper specify all the training and test details (e.g., data splits, hyperparameters, how they were chosen, type of optimizer) necessary to understand the results?
+Answer: [Yes]
+Justification: Full details are included in the appendices.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The experimental setting should be presented in the core of the paper to a level of detail
+that is necessary to appreciate the results and make sense of them.
+• The full details can be provided either with the code, in appendix, or as supplemental
+material.
+7. Experiment statistical significance
+Question: Does the paper report error bars suitably and correctly defined or other appropriate
+information about the statistical significance of the experiments?
+Answer: [Yes]
+Justification: We include error bars and accuracy information in our tables and figures,
+where applicable and practical (given compute constraints)
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The authors should answer [Yes] if the results are accompanied by error bars, confidence
+intervals, or statistical significance tests, at least for the experiments that support the
+main claims of the paper.
+• The factors of variability that the error bars are capturing should be clearly stated (for
+example, train/test split, initialization, random drawing of some parameter, or overall
+run with given experimental conditions).
+• The method for calculating the error bars should be explained (closed form formula,
+call to a library function, bootstrap, etc.)
+30
+• The assumptions made should be given (e.g., Normally distributed errors).
+• It should be clear whether the error bar is the standard deviation or the standard error
+of the mean.
+• It is OK to report 1-sigma error bars, but one should state it. The authors should
+preferably report a 2-sigma error bar than state that they have a 96% CI, if the hypothesis
+of Normality of errors is not verified.
+• For asymmetric distributions, the authors should be careful not to show in tables or
+figures symmetric error bars that would yield results that are out of range (e.g., negative
+error rates).
+• If error bars are reported in tables or plots, the authors should explain in the text how
+they were calculated and reference the corresponding figures or tables in the text.
+8. Experiments compute resources
+Question: For each experiment, does the paper provide sufficient information on the computer resources (type of compute workers, memory, time of execution) needed to reproduce
+the experiments?
+Answer: [Yes]
+Justification: Yes. We regularly refer to the hardware used (NVIDIA H200) for experiments.
+Time of execution for inference was also included as a quantitative metric, and we mention
+other training details in the main body of the paper and appendices.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The paper should indicate the type of compute workers CPU or GPU, internal cluster,
+or cloud provider, including relevant memory and storage.
+• The paper should provide the amount of compute required for each of the individual
+experimental runs as well as estimate the total compute.
+• The paper should disclose whether the full research project required more compute
+than the experiments reported in the paper (e.g., preliminary or failed experiments that
+didn’t make it into the paper).
+9. Code of ethics
+Question: Does the research conducted in the paper conform, in every respect, with the
+NeurIPS Code of Ethics https://neurips.cc/public/EthicsGuidelines?
+Answer: [Yes]
+Justification: We have reviewed and agree to the NeurIPS Code of Ethics.
+Guidelines:
+• The answer [N/A] means that the authors have not reviewed the NeurIPS Code of
+Ethics.
+• If the authors answer [No], they should explain the special circumstances that require a
+deviation from the Code of Ethics.
+• The authors should make sure to preserve anonymity (e.g., if there is a special consideration due to laws or regulations in their jurisdiction).
+10. Broader impacts
+Question: Does the paper discuss both potential positive societal impacts and negative
+societal impacts of the work performed?
+Answer: [Yes]
+Justification: Impact is justified under the introduction and conclusion. There are no negative
+societal impacts of the work performed.
+Guidelines:
+• The answer [N/A] means that there is no societal impact of the work performed.
+• If the authors answer [N/A] or [No], they should explain why their work has no societal
+impact or why the paper does not address societal impact.
+31
+• Examples of negative societal impacts include potential malicious or unintended uses
+(e.g., disinformation, generating fake profiles, surveillance), fairness considerations
+(e.g., deployment of technologies that could make decisions that unfairly impact specific
+groups), privacy considerations, and security considerations.
+• The conference expects that many papers will be foundational research and not tied
+to particular applications, let alone deployments. However, if there is a direct path to
+any negative applications, the authors should point it out. For example, it is legitimate
+to point out that an improvement in the quality of generative models could be used to
+generate Deepfakes for disinformation. On the other hand, it is not needed to point out
+that a generic algorithm for optimizing neural networks could enable people to train
+models that generate Deepfakes faster.
+• The authors should consider possible harms that could arise when the technology is
+being used as intended and functioning correctly, harms that could arise when the
+technology is being used as intended but gives incorrect results, and harms following
+from (intentional or unintentional) misuse of the technology.
+• If there are negative societal impacts, the authors could also discuss possible mitigation
+strategies (e.g., gated release of models, providing defenses in addition to attacks,
+mechanisms for monitoring misuse, mechanisms to monitor how a system learns from
+feedback over time, improving the efficiency and accessibility of ML).
+11. Safeguards
+Question: Does the paper describe safeguards that have been put in place for responsible
+release of data or models that have a high risk for misuse (e.g., pre-trained language models,
+image generators, or scraped datasets)?
+Answer: [N/A]
+Justification: This paper poses no such risks.
+Guidelines:
+• The answer [N/A] means that the paper poses no such risks.
+• Released models that have a high risk for misuse or dual-use should be released with
+necessary safeguards to allow for controlled use of the model, for example by requiring
+that users adhere to usage guidelines or restrictions to access the model or implementing
+safety filters.
+• Datasets that have been scraped from the Internet could pose safety risks. The authors
+should describe how they avoided releasing unsafe images.
+• We recognize that providing effective safeguards is challenging, and many papers do
+not require this, but we encourage authors to take this into account and make a best
+faith effort.
+12. Licenses for existing assets
+Question: Are the creators or original owners of assets (e.g., code, data, models), used in
+the paper, properly credited and are the license and terms of use explicitly mentioned and
+properly respected?
+Answer: [Yes]
+Justification: All datasets which were used are cited extensively.
+Guidelines:
+• The answer [N/A] means that the paper does not use existing assets.
+• The authors should cite the original paper that produced the code package or dataset.
+• The authors should state which version of the asset is used and, if possible, include a
+URL.
+• The name of the license (e.g., CC-BY 4.0) should be included for each asset.
+• For scraped data from a particular source (e.g., website), the copyright and terms of
+service of that source should be provided.
+• If assets are released, the license, copyright information, and terms of use in the
+package should be provided. For popular datasets, paperswithcode.com/datasets
+has curated licenses for some datasets. Their licensing guide can help determine the
+license of a dataset.
+32
+• For existing datasets that are re-packaged, both the original license and the license of
+the derived asset (if it has changed) should be provided.
+• If this information is not available online, the authors are encouraged to reach out to
+the asset’s creators.
+13. New assets
+Question: Are new assets introduced in the paper well documented and is the documentation
+provided alongside the assets?
+Answer: [N/A]
+Justification: We are not producing any assets at this time. We will include code with the
+final publication.
+Guidelines:
+• The answer [N/A] means that the paper does not release new assets.
+• Researchers should communicate the details of the dataset/code/model as part of their
+submissions via structured templates. This includes details about training, license,
+limitations, etc.
+• The paper should discuss whether and how consent was obtained from people whose
+asset is used.
+• At submission time, remember to anonymize your assets (if applicable). You can either
+create an anonymized URL or include an anonymized zip file.
+14. Crowdsourcing and research with human subjects
+Question: For crowdsourcing experiments and research with human subjects, does the paper
+include the full text of instructions given to participants and screenshots, if applicable, as
+well as details about compensation (if any)?
+Answer: [N/A]
+Justification: No human subjects were used
+Guidelines:
+• The answer [N/A] means that the paper does not involve crowdsourcing nor research
+with human subjects.
+• Including this information in the supplemental material is fine, but if the main contribution of the paper involves human subjects, then as much detail as possible should be
+included in the main paper.
+• According to the NeurIPS Code of Ethics, workers involved in data collection, curation,
+or other labor should be paid at least the minimum wage in the country of the data
+collector.
+15. Institutional review board (IRB) approvals or equivalent for research with human
+subjects
+Question: Does the paper describe potential risks incurred by study participants, whether
+such risks were disclosed to the subjects, and whether Institutional Review Board (IRB)
+approvals (or an equivalent approval/review based on the requirements of your country or
+institution) were obtained?
+Answer: [N/A]
+Justification: IRB approval was not required for this work
+Guidelines:
+• The answer [N/A] means that the paper does not involve crowdsourcing nor research
+with human subjects.
+• Depending on the country in which research is conducted, IRB approval (or equivalent)
+may be required for any human subjects research. If you obtained IRB approval, you
+should clearly state this in the paper.
+• We recognize that the procedures for this may vary significantly between institutions
+and locations, and we expect authors to adhere to the NeurIPS Code of Ethics and the
+guidelines for their institution.
+33
+• For initial submissions, do not include any information that would break anonymity (if
+applicable), such as the institution conducting the review.
+16. Declaration of LLM usage
+Question: Does the paper describe the usage of LLMs if it is an important, original, or
+non-standard component of the core methods in this research? Note that if the LLM is used
+only for writing, editing, or formatting purposes and does not impact the core methodology,
+scientific rigor, or originality of the research, declaration is not required.
+Answer: [No]
+Justification: LLMs were not used for any of the core methods of this work.
+Guidelines:
+• The answer [N/A] means that the core method development in this research does not
+involve LLMs as any important, original, or non-standard components.
+• Please refer to our LLM policy in the NeurIPS handbook for what should or should not
+be described.
+34

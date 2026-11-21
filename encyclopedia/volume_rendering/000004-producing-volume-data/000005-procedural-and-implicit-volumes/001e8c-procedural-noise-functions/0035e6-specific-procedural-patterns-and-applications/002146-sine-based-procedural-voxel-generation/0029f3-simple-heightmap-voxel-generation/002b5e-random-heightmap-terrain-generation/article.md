@@ -1,0 +1,148 @@
+# Random Heightmap Terrain Generation
+Also called: Random Terrain Grid
+
+## Overview
+Random Heightmap Terrain Generation creates a voxel terrain mesh by assigning independent, uniformly distributed random heights to vertices on a 2D grid [S1, unofficial]. It differs from its parent, Simple Heightmap Voxel Generation, by replacing deterministic sine/cosine functions with stochastic noise, and from its child, Midpoint Displacement Fractal, by lacking spatial correlation between adjacent vertices [S1, unofficial]. This method is chosen when a non-smooth, jagged, or purely random terrain surface is desired without the computational overhead of fractal algorithms.
+
+## How it works
+**Inputs:**
+- `xWidth`: Width of the terrain grid in world units.
+- `zWidth`: Depth of the terrain grid in world units.
+- `xDetail`: Number of segments along the X axis.
+- `zDetail`: Number of segments along the Z axis.
+- `height`: Maximum absolute height of random vertices.
+
+**Outputs:**
+- A mesh defined by a list of faces. Each face is an object containing vertex indices `A`, `B`, `C` and normal components `NX`, `NY`, `NZ`.
+
+**Data Structures:**
+- `vertices`: An array of size $(xDetail + 1) \times (zDetail + 1)$. Each element stores the 3D coordinates $(x, y, z)$ of a vertex.
+- `faces`: An array of face objects.
+
+**Steps:**
+1. Initialize the `vertices` array with size $(xDetail + 1) \times (zDetail + 1)$.
+2. Iterate over grid indices $i_Z$ from $0$ to $zDetail$ and $i_X$ from $0$ to $xDetail$.
+3. Calculate the linear index `currIndex` for the current vertex:
+   $$ \text{currIndex} = (i_Z \times xDetail) + i_X $$
+4. Calculate the world coordinates for the vertex:
+   $$ \text{tempX} = \left(\frac{i_X}{xDetail}\right) \times xWidth - \frac{xWidth}{2} $$
+   $$ \text{tempZ} = \left(\frac{i_Z}{zDetail}\right) \times zWidth - \frac{zWidth}{2} $$
+   $$ \text{tempY} = height \times (2 \times (\text{Math.random()} - 0.5)) $$
+   Store the vertex at `vertices[currIndex]` with coordinates $(\text{tempX}, \text{tempY}, \text{tempZ})$.
+5. Iterate over grid cells $i_Z$ from $0$ to $zDetail-1$ and $i_X$ from $0$ to $xDetail-1$.
+6. For each cell, identify the four corner vertices using the current `currIndex` (calculated as in Step 3 for the top-left corner of the cell):
+   - Upper triangle vertices: $A = \text{currIndex}$, $B = \text{currIndex} + 1$, $C = \text{currIndex} + xDetail + 1$.
+   - Lower triangle vertices: $A = \text{currIndex}$, $B = \text{currIndex} + xDetail$, $C = \text{currIndex} + xDetail + 1$.
+7. Compute the face normal for each triangle using the cross product of edge vectors. For a triangle with vertices $A, B, C$:
+   $$ \vec{U} = \text{vertices}[B] - \text{vertices}[A] $$
+   $$ \vec{V} = \text{vertices}[C] - \text{vertices}[A] $$
+   $$ \vec{N} = \vec{U} \times \vec{V} $$
+   Normalize $\vec{N}$ to get $(NX, NY, NZ)$.
+8. Store the face data (indices $A, B, C$ and normal $NX, NY, NZ$) in the `faces` array.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_random_heightmap(xWidth, zWidth, xDetail, zDetail, height):
+    # 1. Initialize vertex array
+    xVerts = xDetail + 1
+    zVerts = zDetail + 1
+    vertices = [None] * (xVerts * zVerts)
+    
+    # 2-4. Generate vertices with random heights
+    for iZ in range(zVerts):
+        for iX in range(xVerts):
+            currIndex = (iZ * xVerts) + iX
+            
+            # Calculate world coordinates
+            tempX = (iX / xDetail) * xWidth - (xWidth / 2)
+            tempZ = (iZ / zDetail) * zWidth - (zWidth / 2)
+            
+            # Random height between -height and +height
+            # Math.random() returns [0, 1), so (2 * (r - 0.5)) returns [-1, 1)
+            tempY = height * (2 * (random.random() - 0.5))
+            
+            vertices[currIndex] = Vector3(tempX, tempY, tempZ)
+            
+    faces = []
+    
+    # 5-8. Generate faces and normals
+    for iZ in range(zDetail):
+        for iX in range(xDetail):
+            currIndex = (iZ * xVerts) + iX
+            
+            # Upper triangle: A, B, C
+            A = vertices[currIndex]
+            B = vertices[currIndex + 1]
+            C = vertices[currIndex + xVerts + 1]
+            
+            # Lower triangle: A, B, C
+            D = vertices[currIndex + xVerts]
+            E = vertices[currIndex + xVerts + 1]
+            F = vertices[currIndex + 1] # Note: Source defines lower triangle as A, B+xVerts, C+xVerts+1
+            # Re-reading source: 
+            # Upper: A=curr, B=curr+1, C=curr+xVerts+1
+            # Lower: A=curr, B=curr+xVerts, C=curr+xVerts+1
+            # This implies the quad is split into two triangles sharing the diagonal from curr to curr+xVerts+1
+            
+            # Triangle 1 (Upper)
+            U1 = B - A
+            V1 = C - A
+            N1 = cross(U1, V1)
+            N1 = normalize(N1)
+            faces.append({
+                'A': currIndex,
+                'B': currIndex + 1,
+                'C': currIndex + xVerts + 1,
+                'NX': N1.x, 'NY': N1.y, 'NZ': N1.z
+            })
+            
+            # Triangle 2 (Lower)
+            A2 = A
+            B2 = vertices[currIndex + xVerts]
+            C2 = vertices[currIndex + xVerts + 1]
+            
+            U2 = B2 - A2
+            V2 = C2 - A2
+            N2 = cross(U2, V2)
+            N2 = normalize(N2)
+            faces.append({
+                'A': currIndex,
+                'B': currIndex + xVerts,
+                'C': currIndex + xVerts + 1,
+                'NX': N2.x, 'NY': N2.y, 'NZ': N2.z
+            })
+            
+    return faces
+```
+
+**Parameters:**
+- `xWidth`, `zWidth`: Define the physical extent of the terrain.
+- `xDetail`, `zDetail`: Control the resolution (grid density).
+- `height`: Controls the vertical amplitude of the noise.
+
+**Edge Cases:**
+- `xDetail` or `zDetail` equal to 0 results in no faces.
+- `height` equal to 0 results in a flat plane.
+- Random number generator seeding is not specified in the source, but reproducibility requires it [G].
+
+## Subtopics
+
+### [Midpoint Displacement Fractal](16935-midpoint-displacement-fractal.md)
+Generates a 2D noise grid using recursive midpoint displacement to create a fractal terrain or noise map. It differs from its parent, Random Heightmap Terrain Generation, by imposing spatial correlation through recursive averaging and roughening, rather than assigning independent random heights to all vertices. This method is chosen when a continuous, fractal-like heightmap is required for procedural voxel generation.
+
+## Operating characteristics
+- **Time Complexity:** $O(xDetail \times zDetail)$ for vertex generation and face creation.
+- **Memory Complexity:** $O(xDetail \times zDetail)$ for storing vertices and faces.
+- **Performance:** Very fast due to lack of complex noise function evaluation or recursive calls.
+- **Strengths:** Simple implementation; produces highly varied, jagged terrain suitable for specific aesthetic styles or testing.
+- **Limitations:** No spatial coherence; adjacent vertices are uncorrelated, leading to a "noisy" or "static-like" appearance rather than natural terrain. Not suitable for realistic landscapes.
+- **When to use:** Prototyping, stylized voxel art, or when computational resources are extremely limited.
+- **When not to use:** When natural-looking, smooth, or correlated terrain is required.
+
+## Background
+The method is documented in the context of a JavaScript-based Minecraft-like voxel engine implementation [S1, unofficial]. It serves as a basic procedural generation technique within that specific codebase.
+
+## Sources
+[S1] mayakeele/bad-minecraft, https://github.com/mayakeele/bad-minecraft, fetched 2026-10-27 (unofficial)

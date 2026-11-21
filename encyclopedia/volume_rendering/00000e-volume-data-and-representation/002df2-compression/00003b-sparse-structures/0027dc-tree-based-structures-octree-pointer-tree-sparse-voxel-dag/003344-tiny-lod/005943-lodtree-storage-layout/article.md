@@ -1,0 +1,138 @@
+# LODTree Storage Layout
+
+Also called: LODTree
+
+## Overview
+The LODTree storage layout is a sparse, hierarchical data structure designed to store volumetric data with multiple levels of detail (LOD) in a compact format, enabling efficient dynamic isosurface extraction [S1, unofficial]. It differs from sibling methods like [Trilinear Evaluation on Compressed Trees](7074-trilinear-evaluation-on-compressed-trees.md) by explicitly managing virtual voxel expansion across discrete LOD levels using a bit-mapped cell representation to minimize storage overhead [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A structured grid volume dataset with $k$ original voxels (cells).
+*   **Output:** An LODTree file containing $V$ nodes, where each node represents a virtual voxel at a specific level of detail.
+
+**Data Structures:**
+Each node in the LODTree file is stored as a fixed-size record of 6 bytes [S1, unofficial]:
+1.  **Index:** 4 bytes. An integer index pointing to the node or its parent/children within the tree structure.
+2.  **Keys:** 2 bytes. A combined field storing the minimum value, maximum value, and Level-of-Detail (LOD) identifier for the cell [S1, unofficial].
+    *   *Note:* The exact bit-packing scheme for the min, max, and LOD keys within these 2 bytes is not specified in the sources, but heavy use of bit-mapped representation is required to achieve this compactness [S1, unofficial].
+
+**Storage Calculation and Geometry:**
+The LODTree expands the original voxel grid into virtual voxels across $n$ levels of detail. The expansion logic is defined as follows:
+*   Let $k$ be the number of voxels in the original data file.
+*   Let $n$ be the number of levels of detail.
+*   Each level of detail creates additional cells equal to the original number of cells divided by the cube of the cell size scaling factor. The source text implies a geometric progression where the total number of nodes $V$ is given by:
+    $$ V = \sum_{i=0}^{n-1} \frac{k}{s^{3i}} $$
+    Where $s$ is the scaling factor per level. The source text contains garbled formulas but clarifies that for an infinite number of levels, the fractional number of LODTree cells required per original voxel converges to the Riemann zeta function $\zeta(3)$ [S1, unofficial].
+
+**Parameters and Values:**
+*   **Riemann Zeta Bound:** The series $\sum_{i=1}^{\infty} \frac{1}{i^3}$ converges to $\zeta(3) \approx 1.20206$ [S1, unofficial]. This value serves as an upper bound for the fractional number of LODTree cells required for each voxel in the simulation data file.
+*   **Node Size:** 6 bytes per LODTree cell (4 bytes index + 2 bytes keys) [S1, unofficial].
+*   **Example Overhead:** For $n=10$ levels of detail, the overhead is calculated as 6.72 bytes per cell in the original structured grid data set [S1, unofficial].
+*   **Overhead Factor:** Assuming 4 bytes per original voxel, the approximate byte overhead factor is 1.7 ($6.72 / 4$) [S1, unofficial].
+
+**Pseudocode:**
+The following pseudocode calculates the theoretical storage overhead for an LODTree given the number of original voxels and levels of detail, based on the geometric series described in the sources.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def calculate_lodtree_overhead(num_original_voxels, num_levels):
+    """
+    Calculates the storage overhead for an LODTree structure.
+    
+    Args:
+        num_original_voxels (int): k, the number of voxels in the original structured grid.
+        num_levels (int): n, the number of levels of detail.
+        
+    Returns:
+        tuple: (total_nodes, overhead_bytes_per_original_voxel, overhead_factor)
+    """
+    # Constants from source [S1, unofficial]
+    bytes_per_index = 4
+    bytes_per_keys = 2
+    bytes_per_node = bytes_per_index + bytes_per_keys  # 6 bytes
+    
+    # The source implies a geometric series expansion. 
+    # While the exact scaling factor 's' is not explicitly defined in the text,
+    # the example for 10 levels yielding 6.72 bytes overhead suggests a specific 
+    # expansion ratio. We use the provided example result to validate the logic.
+    # The source states: "each level of detail creates additional cells equal to 
+    # the original number of cells divided by the cube of the cell size."
+    # This implies a scaling factor s. For standard LOD, s=2 is common, 
+    # but the source does not specify s. We calculate the multiplier factor 
+    # based on the provided example: 6.72 bytes overhead for 10 levels.
+    
+    # Let M be the multiplier factor such that Total Nodes = k * M
+    # Overhead Bytes = Total Nodes * 6
+    # Overhead per original voxel = (k * M * 6) / k = M * 6
+    # Given Overhead per original voxel = 6.72
+    # M = 6.72 / 6 = 1.12
+    
+    # We can verify if M=1.12 corresponds to a geometric series sum.
+    # Sum = (1 - r^n) / (1 - r) where r is the ratio of expansion.
+    # If r = 1/8 (halving dimensions, 1/8th volume), sum for n=10:
+    # (1 - (1/8)^10) / (1 - 1/8) = (1 - very_small) / 0.875 ≈ 1.142
+    # This is close to 1.12. The source text is garbled regarding the exact formula 
+    # for the sum, but the numerical result is explicit.
+    
+    # For implementation, we use the explicit numerical factor derived from the source example.
+    # If a different number of levels is used, the factor changes.
+    # The source provides the formula: (number of nodes factor) * 6 bytes.
+    # We will implement the calculation using the Riemann Zeta bound for infinite levels
+    # and a geometric series for finite levels, assuming a standard halving scale (s=2).
+    
+    # Assumption: Standard LOD where each level halves the resolution in each dimension.
+    # Ratio r = 1 / (2^3) = 1/8.
+    ratio = 1.0 / 8.0
+    
+    # Calculate geometric series sum for n levels
+    # Sum = 1 + r + r^2 + ... + r^(n-1)
+    if ratio == 1.0:
+        multiplier = num_levels
+    else:
+        multiplier = (1.0 - ratio**num_levels) / (1.0 - ratio)
+        
+    total_nodes = num_original_voxels * multiplier
+    total_overhead_bytes = total_nodes * bytes_per_node
+    overhead_per_original_voxel = total_overhead_bytes / num_original_voxels
+    
+    # Approximate byte overhead factor relative to 4 bytes per original voxel
+    original_voxel_size = 4.0
+    overhead_factor = overhead_per_original_voxel / original_voxel_size
+    
+    return total_nodes, overhead_per_original_voxel, overhead_factor
+
+# Example from source [S1, unofficial]:
+# 10 levels of detail -> 6.72 bytes overhead per cell.
+# Let's check if r=1/8 yields this.
+# multiplier for n=10, r=1/8: (1 - (1/8)^10) / (7/8) ≈ 1.1428
+# overhead = 1.1428 * 6 = 6.857 bytes.
+# The source says 6.72. 6.72 / 6 = 1.12.
+# 1.12 corresponds to a ratio r where (1-r^10)/(1-r) = 1.12.
+# This suggests the scaling factor might not be exactly 2, or the source uses a 
+# simplified approximation. Since the exact scaling factor is not given, 
+# the implementer should use the explicit overhead value if known, 
+# or derive the ratio from the specific application's LOD definition.
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The source notes that the actual storage consumed by each voxel in the data file is slightly higher than 4 bytes to account for data points constituting the edges of the structured grid [S1, unofficial]. Implementers must account for this when calculating the exact overhead factor.
+*   **Infinite Levels:** The Riemann zeta bound $\zeta(3) \approx 1.20206$ is an upper bound for infinite levels. For finite levels, the geometric series must be used [S1, unofficial].
+*   **Bit-mapping:** Achieving the 6-byte node size requires heavy use of bit-mapped cell data representation. Improper packing will increase the node size and degrade performance [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** The storage overhead is approximately 1.7 times the size of the original voxel data for 10 levels of detail [S1, unofficial]. The theoretical upper bound for infinite levels is a factor of $\zeta(3) \times 6 / 4 \approx 1.803$ times the original data size (assuming 4 bytes/voxel) [S1, unofficial].
+*   **Measured Performance:** For 10 levels of detail, the overhead is 6.72 bytes per cell in the original structured grid data set [S1, unofficial].
+*   **Strengths:** Compact storage for multi-resolution data; enables dynamic isosurface extraction without pre-computing static geometry for each threshold [S1, unofficial].
+*   **Limitations:** Overhead increases with the number of LOD levels; requires careful bit-packing to maintain the 6-byte node size; not suitable if static geometry is preferred for very few thresholds [S1, unofficial].
+*   **When to use:** When dynamic isosurface extraction at multiple thresholds and LODs is required for large volumetric datasets [S1, unofficial].
+*   **When not to use:** When the number of required isosurface thresholds is very small (e.g., <10), as static geometry representations may be more efficient [S1, unofficial].
+
+## Background
+The LODTree storage layout was introduced in the context of dynamic isosurface extraction and level-of-detail techniques in voxel space [S1, unofficial]. It was developed to address the storage overhead concerns associated with large simulation volume datasets while maintaining the functionality of dynamic isosurface viewing [S1, unofficial]. The method relies on the mathematical properties of the Riemann zeta function to bound the storage expansion [S1, unofficial].
+
+## Sources
+[S1] Dynamic Isosurface Extraction and Level-of-Detail in Voxel Space, https://digital.library.unt.edu/ark:/67531/metadc694729/?q=marching%20cubes, fetched 2026-10-28 (unofficial)

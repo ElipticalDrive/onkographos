@@ -1,0 +1,118 @@
+# Orthographic Voxel Sprite Rendering
+
+Also called: Flat Billboard Voxel Rendering, Volumetric Ortho-Sprite Preview, VoxelOrthoSprite
+
+## Overview
+Orthographic Voxel Sprite Rendering projects a 3D voxel model onto a 2D sprite plane using parallel rays to create a flat billboard appearance [S1, unofficial]. It solves the problem of per-eye pixel shimmer in VR by ensuring both eyes march identical rays, rendering the model as a single static image that appears identical from both eyes [S1, unofficial]. Unlike [Image-Space Sheet-Buffered Splatting Pipeline](8961-image-space-sheet-buffered-splatting-pipeline.md), which uses complex sheet buffers, this method uses a single fragment pass with a chunky virtual-pixel grid and outline detection [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Live voxel textures (e.g., `ImageTexture3D`), model bounding box, camera head position (midpoint between eyes), light direction.
+- **Output:** 2D sprite image with palette colors, per-face lighting, and a one-pixel black outline.
+
+**Data Structures:**
+- **Voxel Textures:** 3D textures storing voxel material IDs. Layout depends on the underlying storage (e.g., Godot `ImageTexture3D` with R8 format) [S1, unofficial].
+- **Bounding Box:** Defined by `box_center` (vec3) and `box_size` (vec3) in voxel units [S1, unofficial].
+- **Virtual Pixel Grid:** Defined by `sigma` (pixels per voxel) [S1, unofficial].
+
+**Parameters:**
+- `sigma`: Virtual pixels per voxel. Default: 4.0. Higher values increase resolution [S1, unofficial].
+- `quad_size`: Size of the proxy quad in voxel units. Default: `vec2(1.0)` (scaled to model footprint) [S1, unofficial].
+- `light_dir`: Unit vector from model to light in voxel space. Default: `vec3(0.57735)` [S1, unofficial].
+
+**Steps:**
+
+1.  **Quad Rasterization:**
+    Rasterize a quad mesh sized to the model's orthographic footprint plus a margin for the outline. The quad is centered on the model's bounding box center. Each fragment receives a `quad_uv` coordinate representing its position on the unit quad (-0.5 to 0.5 on each axis), interpolated perspective-correctly [S1, unofficial].
+
+2.  **Coordinate Conversion and Snapping:**
+    Convert fragment position to voxel units. Calculate `delta_px` as `1.0 / sigma`, representing the width of one virtual pixel in voxel units [S1, unofficial]. Snap the `quad_uv` offset to the nearest virtual pixel center:
+    $$ offset = \text{round}\left(\frac{quad\_uv \times quad\_size}{delta\_px}\right) \times delta\_px $$
+    The coordinate space is Godot Y-up voxel space (one unit per voxel) [S1, unofficial].
+
+3.  **Ray Marching:**
+    Define the ray direction `ray_dir_local` and quad orientation from the HEAD position (midpoint between eyes), not the per-eye position, to ensure identical rays for both eyes [S1, unofficial]. Calculate `sprite_right` as `cross(ray_dir_local, sprite_up_local)` [S1, unofficial].
+    Calculate box boundaries:
+    $$ box\_min = box\_center - box\_size \times 0.5 $$
+    $$ box\_max = box\_center + box\_size \times 0.5 $$
+    Calculate `max_dim` as `max(max(box_size.x, box_size.y), box_size.z)` [S1, unofficial].
+    Calculate ray origin:
+    $$ origin = box\_center + offset.x \times sprite\_right + offset.y \times sprite\_up\_local - 2.0 \times max\_dim \times ray\_dir\_local $$
+    Call `march_box(origin, ray_dir_local, box_min, box_max, normal, hit_pos)` [S1, unofficial]. If a hit is found, retrieve the material ID [S1, unofficial].
+
+4.  **Lighting and Color:**
+    If `material > 0u`, calculate lighting:
+    $$ lighting = \max(\text{dot}(normal, light\_dir), 0.0) \times 0.7 + 0.3 $$
+    Set albedo:
+    $$ ALBEDO = \text{get\_material\_color}(material) \times lighting $$
+    If `material == 0u` (miss), proceed to outline detection [S1, unofficial].
+
+5.  **Outline Detection:**
+    If the march results in a miss, test the four cardinal neighbor pixels. Trace rays at:
+    - $offset - vec2(delta\_px, 0.0)$
+    - $offset + vec2(delta\_px, 0.0)$
+    - $offset + vec2(0.0, delta\_px)$
+    - $offset - vec2(0.0, delta\_px)$
+    If any neighbor hit results in `material > 0u`, set `ALBEDO` to `vec3(0.0)` (black outline). Otherwise, discard the fragment [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_orthographic_voxel_sprite(quad_uv, quad_size, sigma, box_center, box_size, ray_dir_local, sprite_up_local, light_dir, get_material_color, march_box):
+    # 1. Calculate virtual pixel parameters
+    delta_px = 1.0 / sigma
+    
+    # 2. Snap quad_uv to virtual pixel grid
+    # quad_uv is in range [-0.5, 0.5]
+    offset = round((quad_uv * quad_size) / delta_px) * delta_px
+    
+    # 3. Calculate ray origin and boundaries
+    sprite_right = cross(ray_dir_local, sprite_up_local)
+    box_min = box_center - box_size * 0.5
+    box_max = box_center + box_size * 0.5
+    max_dim = max(max(box_size.x, box_size.y), box_size.z)
+    
+    origin = box_center + offset.x * sprite_right + offset.y * sprite_up_local - 2.0 * max_dim * ray_dir_local
+    
+    # 4. March ray
+    normal, hit_pos, material = march_box(origin, ray_dir_local, box_min, box_max)
+    
+    # 5. Handle hit
+    if material > 0:
+        lighting = max(dot(normal, light_dir), 0.0) * 0.7 + 0.3
+        albedo = get_material_color(material) * lighting
+        return albedo
+    
+    # 6. Handle miss: Outline detection
+    neighbors = [
+        offset - vec2(delta_px, 0.0),
+        offset + vec2(delta_px, 0.0),
+        offset + vec2(0.0, delta_px),
+        offset - vec2(0.0, delta_px)
+    ]
+    
+    for neighbor_offset in neighbors:
+        neighbor_origin = box_center + neighbor_offset.x * sprite_right + neighbor_offset.y * sprite_up_local - 2.0 * max_dim * ray_dir_local
+        _, _, neighbor_material = march_box(neighbor_origin, ray_dir_local, box_min, box_max)
+        if neighbor_material > 0:
+            return vec3(0.0) # Black outline
+            
+    return None # Discard fragment
+```
+
+## Operating characteristics
+- **Time Complexity:** O(1) per fragment for the quad rasterization and snapping. Ray marching complexity depends on the voxel density and `march_box` implementation, typically O(N) where N is the number of voxels traversed. Outline detection adds up to 4 additional ray marches per miss.
+- **Memory Complexity:** O(1) per fragment. Requires storage for voxel textures and bounding box data.
+- **Performance:** Single fragment pass makes it efficient for preview purposes. Performance scales with `sigma` (higher sigma means more fragments, but coarser voxel traversal per fragment if optimized) and voxel density.
+- **Strengths:** Eliminates per-eye shimmer in VR by using head-centered rays. Simple implementation.
+- **Limitations:** Low resolution compared to full raymarching. Outline detection can be expensive if many misses occur. Not suitable for high-fidelity final rendering.
+- **When to use:** VR previews, low-poly voxel art, performance-critical applications where visual fidelity is secondary to consistency.
+- **When not to use:** High-resolution rendering, perspective-correct detailed views, scenes with complex lighting requirements beyond simple diffuse.
+
+## Background
+Originating from the Voxel2Pixel graphics library by Ben McLean, this technique was developed to address specific VR rendering artifacts in voxel-based applications [S1, unofficial]. It is used in Godot engine-based voxel editors and viewers as a `VoxelOrthoSprite` node [S1, unofficial].
+
+## Sources
+[S1] Voxel2Pixel, https://github.com/BenMcLean/Voxel2Pixel, fetched 2026-10-29 (unofficial)

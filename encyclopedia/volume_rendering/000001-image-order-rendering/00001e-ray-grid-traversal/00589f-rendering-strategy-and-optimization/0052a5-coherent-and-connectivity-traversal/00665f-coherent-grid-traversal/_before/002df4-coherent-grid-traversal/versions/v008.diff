@@ -1,0 +1,196 @@
+--- v007.md
++++ v008.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A packet of $N \times N$ coherent rays (spanning an angle $< \pi/2$) defined by origins $\mathbf{o}$ and directions $\mathbf{d}$; a uniform grid of dimensions $N_x \times N_y \times N_z$; the grid's bounding box.
+-*   **Output:** A sequence of grid cells (or bricks) overlapped by the ray packet frustum, in traversal order along the major axis.
++*   **Input:** A packet of $N \times N$ coherent rays (spanning an angle $< \pi/2$) defined by origins $\mathbf{o}$ and directions $\mathbf{d}$ [S2, S4, S5]; a uniform grid of dimensions $N_x \times N_y \times N_z$ [S4, S5]; the grid's bounding box [S4, S5].
++*   **Output:** A sequence of grid cells (or bricks) overlapped by the ray packet frustum, in traversal order along the major axis [S4, S5].
+ 
+ **Data Structures:**
+@@ -37,15 +37,9 @@
+ ```python
+ def coherent_grid_traversal(rays, grid_dims, grid_bounds):
+-    # 1. Transform rays to canonical grid space
+-    # Assuming rays are transformed such that grid is [0, Nx) x [0, Ny) x [0, Nz)
+-    # rays: list of Ray objects with origin (o) and direction (d)
+-    
++    # 1. Transform rays to canonical grid space (assumed pre-computed)
+     # 2. Select major axis K
+-    # Pick the axis with the max absolute component of the first ray's direction
+     first_ray = rays[0]
+     abs_d = [abs(first_ray.d[i]) for i in range(3)]
+     k_axis = abs_d.index(max(abs_d))
+-    
+-    # Determine minor axes U and V
+     u_axis = (k_axis + 1) % 3
+     v_axis = (k_axis + 2) % 3
+@@ -57,21 +51,18 @@
+             raise ValueError("Rays are not coherent along major axis K")
+             
+-    # 3. Compute Frustum Planes
+-    # For primary rays, use 4 corner rays. For simplicity, assume we have
+-    # min/max slopes for U and V planes in grid space.
+-    # du_min, du_max, dv_min, dv_max are the slopes of the bounding planes
+-    # in grid coordinate space.
+-    # These are computed from the corner rays' origins and directions projected
+-    # onto the U-V plane relative to K.
+-    # Example calculation for a corner ray (o, d):
+-    # slope_u = (o[u] + t*d[u] - o[k]*d[u]/d[k]) / (o[k] - o[k]) ... simplified:
+-    # The slope in grid space is d[u]/d[k] and d[v]/d[k].
+-    # We need min/max of these slopes across all corner rays.
+-    
++    # 3. Compute Frustum Planes (slopes and offsets in grid space)
+     slopes = []
++    offsets = []
+     for ray in rays:
+         if ray.d[k_axis] == 0:
+-            continue # Should not happen if coherent
+-        slopes.append((ray.d[u_axis] / ray.d[k_axis], ray.d[v_axis] / ray.d[k_axis]))
++            continue
++        du = ray.d[u_axis] / ray.d[k_axis]
++        dv = ray.d[v_axis] / ray.d[k_axis]
++        slopes.append((du, dv))
++        # U(K) = offset_u + K * du => offset_u = U(0) - 0 * du
++        # Using ray origin projected to K=0 plane:
++        offset_u = ray.o[u_axis] - ray.o[k_axis] * du
++        offset_v = ray.o[v_axis] - ray.o[k_axis] * dv
++        offsets.append((offset_u, offset_v))
+         
+     du_min = min(s[0] for s in slopes)
+@@ -80,46 +71,4 @@
+     dv_max = max(s[1] for s in slopes)
+     
+-    # 4. Clip to Grid to find k_min and k_max
+-    # Intersect frustum with grid bounds along K
+-    # Grid bounds in canonical space: [0, Nx), [0, Ny), [0, Nz)
+-    # The frustum extends from near to far. We need the intersection of the
+-    # frustum's K-extent with [0, Nz).
+-    # Assuming rays are already clipped to view volume, we just need to
+-    # find the slice indices where the frustum enters and exits the grid.
+-    # This is done by clipping the frustum planes against the grid boundaries.
+-    # Simplified: find the min/max K coordinate of the frustum intersection
+-    # with the grid bounding box.
+-    
+-    # Let's assume we have pre-computed k_min and k_max from frustum-grid intersection
+-    k_min = 0
+-    k_max = grid_dims[k_axis] - 1
+-    
+-    # 5. Initialize Overlap Box B(0) for slice k_min
+-    # Compute min/max U, V coordinates at k_min
+-    # B(k) = [u_min, v_min, u_max, v_max]
+-    # u_min(k) = u_origin + k * du_min
+-    # u_max(k) = u_origin + k * du_max
+-    # ... where u_origin is the U-coordinate of the frustum at K=0?
+-    # Actually, the planes are defined by (U - U0) = slope * (K - K0).
+-    # So U(K) = U0 + slope * (K - K0).
+-    # We need to determine the offset.
+-    # Let's assume the frustum is defined by 4 planes:
+-    # U = du_min * K + offset_u_min
+-    # U = du_max * K + offset_u_max
+-    # V = dv_min * K + offset_v_min
+-    # V = dv_max * K + offset_v_max
+-    
+-    # Compute offsets from the first ray's origin or corner rays
+-    # For a corner ray (o, d), U = o[u] + (K - o[k]) * d[u]/d[k]
+-    # So offset = o[u] - o[k] * d[u]/d[k]
+-    
+-    offsets = []
+-    for ray in rays:
+-        if ray.d[k_axis] == 0:
+-            continue
+-        offset_u = ray.o[u_axis] - ray.o[k_axis] * (ray.d[u_axis] / ray.d[k_axis])
+-        offset_v = ray.o[v_axis] - ray.o[k_axis] * (ray.d[v_axis] / ray.d[k_axis])
+-        offsets.append((offset_u, offset_v))
+-        
+     offset_u_min = min(o[0] for o in offsets)
+     offset_u_max = max(o[0] for o in offsets)
+@@ -127,9 +76,15 @@
+     offset_v_max = max(o[1] for o in offsets)
+     
+-    # Initial box B(0) at k=0? No, we start at k_min.
+-    # B(k) = [u_min(k), v_min(k), u_max(k), v_max(k)]
+-    # u_min(k) = offset_u_min + k * du_min
+-    # ...
+-    
++    # 4. Clip to Grid to find k_min and k_max
++    # Frustum K-extent is clipped to [0, grid_dims[k_axis])
++    # Assuming frustum near/far in canonical space are known or derived from ray origins
++    frustum_k_min = max(0.0, min(ray.o[k_axis] for ray in rays))
++    frustum_k_max = max(ray.o[k_axis] + ray.d[k_axis] * 1000.0 for ray in rays) # Simplified far plane
++    k_min = max(0, int(frustum_k_min))
++    k_max = min(grid_dims[k_axis] - 1, int(frustum_k_max))
++    if k_min > k_max:
++        return
++        
++    # 5. Initialize Overlap Box B(0) for slice k_min
+     b_u_min = offset_u_min + k_min * du_min
+     b_u_max = offset_u_max + k_min * du_max
+@@ -137,11 +92,10 @@
+     b_v_max = offset_v_max + k_min * dv_max
+     
+-    # Delta for incremental update
+     delta_b = (du_min, du_max, dv_min, dv_max)
+     
+     # 6. Traverse Slices
+     for k in range(k_min, k_max + 1):
+-        # Convert to cell IDs
+-        i0 = int(b_u_min) # Truncate
++        # Convert to cell IDs via truncation
++        i0 = int(b_u_min)
+         i1 = int(b_u_max)
+         j0 = int(b_v_min)
+@@ -159,5 +113,5 @@
+                 yield (i, j, k)
+                 
+-        # Incremental update for next slice
++        # Incremental update for next slice: B(k+1) = B(k) + ΔB
+         b_u_min += delta_b[0]
+         b_u_max += delta_b[1]
+@@ -167,8 +121,8 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Ray Divergence:** If rays in a packet span an angle $> \pi/2$, they may have different signs along the traversal axis, violating the front-to-back assumption [S4, S5]. Mitigation: Split the packet into subpackets [S5].
+-*   **Silhouette Hit Points:** If primary rays hit object silhouettes, hit points can be distant, creating a wide frustum where the method breaks down [S5]. Mitigation: Split the packet if min/max hit distances are too large [S5].
++*   **Ray Divergence:** If rays span an angle $> \pi/2$, they may have different signs along the traversal axis, violating the front-to-back assumption [S4]. Mitigation: Ensure packet coherence or split packets only when hit points are too distant (silhouettes), as general splitting deteriorates to single-ray traversal [S4, S5].
++*   **Silhouette Hit Points:** If primary rays hit object silhouettes, hit points can be distant, creating a wide frustum where the method breaks down [S5]. Mitigation: Split the packet into subpackets if min/max hit distances are too large [S5].
+ *   **Roll Angle:** When the "roll" angle of the bundles to the volume angle is close to $\pi/4$, block fetches can double [S1, S9, unofficial].
+-*   **Redundant Intersections:** Grids do not conform tightly to geometry, causing redundant triangle intersections [S4]. Mitigation: Use SIMD frustum culling and mailboxing [S4, S5].
++*   **Redundant Intersections:** Grids do not conform tightly to geometry, and filling cells with bounding boxes exacerbates redundant triangle intersections [S4]. Mitigation: Use SIMD frustum culling and mailboxing [S4, S5].
+ *   **Straddling Triangles:** Large triangles or small triangles straddling boundaries may appear in multiple cells [S4]. Mitigation: Mailboxing [S4, S5].
+ 
+@@ -176,20 +130,20 @@
+ 
+ ### [Sphere-Center Method](5200-sphere-center-method.md)
+-An optimization for glyph-based particle visualization that eliminates data duplication by storing each particle in exactly one grid cell, traversing an enlarged frustum to ensure containment.
++An optimization for glyph-based particle visualization that eliminates data duplication by storing each particle in exactly one grid cell, traversing an enlarged frustum to ensure containment. Choose it when visualizing large particle datasets to avoid redundant intersection tests and storage overhead.
+ 
+ ### [Macrocell Hierarchical CGT](5464-macrocell-hierarchical-cgt.md)
+-Extends CGT to large volumes using a recursive hierarchy of macrocells ($2^3$ children) to amortize traversal costs, using an iterative stack.
++Extends CGT to large volumes using a recursive hierarchy of macrocells ($2^3$ children) to amortize traversal costs, using an iterative stack. Choose it when flat CGT performance degrades on massive datasets, as it maintains slice-based traversal while managing spatial hierarchy.
+ 
+ ### [Slice Parallelisation](6292-slice-parallelisation.md)
+-A parallelization scheme assigning processing elements to slices of the volume, requiring explicit data structures to map bundles to slices.
++A parallelization scheme assigning processing elements to slices of the volume, requiring explicit data structures to map bundles to slices. Choose it when reducing redundant block fetches from neighboring bundles is prioritized over direct bundle processing.
+ 
+ ### [Bundle Parallelisation](6293-bundle-parallelisation.md)
+-A parallelization scheme where bundles of rays are processed in parallel, distributing work across processing elements.
++A parallelization scheme where bundles of rays are processed in parallel, distributing work across processing elements. Choose it for straightforward implementation on multi-core systems, accepting potential redundant block fetches from neighboring bundles.
+ 
+ ### [SIMD Sphere/Frustum Culling](10012-simd-sphere-frustum-culling.md)
+-A culling technique for spheres that checks if the sphere center is contained within an enlarged bounding frustum, avoiding unnecessary intersection tests.
++A culling technique for spheres that checks if the sphere center is contained within an enlarged bounding frustum, avoiding unnecessary intersection tests. Choose it for particle-based visualization where planar shaft culling is inapplicable.
+ 
+ ### [Hierarchical Grid with Macrocells](10019-hierarchical-grid-with-macrocells.md)
+-A hierarchical grid structure that divides densely populated regions more finely, using parameter range culling for early-out tests.
++A hierarchical grid structure that divides densely populated regions more finely, using parameter range culling for early-out tests. Choose it when aggressive early-out tests on particle properties are needed to replace simple empty/non-empty flags.
+ 
+ ## Operating characteristics
+@@ -202,5 +156,5 @@
+ 
+ ## Background
+-Coherent Grid Traversal was introduced in 2006 by Wald, Ize, Kensler, Knoll, and Parker in "Ray Tracing Animated Scenes using Coherent Grid Traversal" published in ACM Transactions on Graphics (SIGGRAPH) [S4, S5]. It was developed to address the limitations of packet-based kd-tree traversal for dynamic scenes, where rebuilding the kd-tree is expensive. The algorithm abandons cell-by-cell traversal (3DDDA) in favor of slice-by-slice traversal to maintain coherence within ray packets [S2, S4, S5]. It has been used in systems for interactive visualization of large particle datasets [S8] and volume rendering [S1, S9, unofficial].
++Coherent Grid Traversal was introduced in 2006 by Wald, Ize, Kensler, Knoll, and Parker in "Ray Tracing Animated Scenes using Coherent Grid Traversal" published in ACM Transactions on Graphics (SIGGRAPH) [S4, S5]. It was developed to address the limitations of packet-based kd-tree traversal for dynamic scenes, where rebuilding the kd-tree is expensive [S4, S5]. The algorithm abandons cell-by-cell traversal (3DDDA) in favor of slice-by-slice traversal to maintain coherence within ray packets [S2, S4, S5]. It has been used in systems for interactive visualization of large particle datasets [S8] and volume rendering [S1, S9, unofficial].
+ 
+ ## Sources

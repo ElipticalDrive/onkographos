@@ -1,0 +1,164 @@
+# Distributed 3DGS Training
+
+Also called: Grendel Distributed Training, HPC-scale distributed 3DGS
+
+## Overview
+Distributed 3DGS Training is a method that partitions 3D Gaussian Splatting parameters and datasets across multiple GPUs or HPC nodes to overcome single-GPU memory limits, enabling the training of high-resolution and large-scale scenes (e.g., >100M Gaussians) [S1, S2, unofficial]. It sets itself apart from single-GPU baselines by using spatial partitioning with ghost cells for boundary consistency and sparse all-to-all communication to distribute the rasterization workload [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A COLMAP dataset (images, camera poses), distributed across nodes.
+- **Output:** A global 3D Gaussian model (positions, covariances, opacities, SH coefficients) merged from local node states.
+
+**Data Structures:**
+The system partitions the scene spatially. Each node maintains a local subset of Gaussians.
+- **Local Gaussians:** A subset of the global Gaussian set, defined by spatial bounds.
+- **Ghost Cells:** Boundary regions where Gaussians from neighboring nodes are replicated to ensure smooth transitions during local rasterization [S2, unofficial].
+- **Background Masks:** Binary masks used during local rendering to eliminate artifacts at the boundaries of the partition [S2, unofficial].
+
+**Numbered Steps:**
+1. **Partition Dataset:** The training dataset (images and poses) is partitioned across nodes. Each node is responsible for a subset of views or a spatial region [S2, unofficial].
+2. **Initialize Local Models:** Each node initializes its local `GaussianModel` with a subset of the global parameters [S1, unofficial].
+3. **Ghost Cell Management:** At the boundaries of each node's spatial partition, ghost cells are created. These contain copies of Gaussians from adjacent partitions to ensure that rasterization near the boundary is accurate and smooth [S2, unofficial].
+4. **Local Training:** Each node performs independent training steps:
+    a. Load a batch of images (camera views) assigned to this node.
+    b. Render the local Gaussians using the differentiable rasterizer, applying background masks to handle boundaries [S2, unofficial].
+    c. Compute loss (L1 + SSIM) against ground truth images.
+    d. Update local Gaussian parameters (positions, covariances, SH coefficients, opacities) using Adam optimizer.
+    e. Perform densification and pruning locally based on gradient thresholds [S1, unofficial].
+5. **Communication:** Perform sparse all-to-all communication to transfer required Gaussian parameters to the appropriate pixel partitions or neighboring nodes for ghost cell synchronization [S1, unofficial].
+6. **Gradient Aggregation:** Aggregate gradients across nodes. Specifically, use `torch.distributed.all_reduce` with `SUM` operation to synchronize gradients for shared parameters (e.g., if Gaussians are replicated or if global statistics are needed) [S1, unofficial].
+7. **Merge:** Periodically merge local models to ensure global consistency. This may involve averaging parameters or resolving conflicts for Gaussians in overlapping regions [S2, unofficial].
+
+**Formulas:**
+- **Learning Rate Scaling:** The learning rate is scaled by the square root of the batch size.
+  $$ \eta_{new} = \eta_{base} \times \sqrt{\frac{BS_{new}}{BS_{base}}} $$
+  Where $BS$ is the batch size (number of camera views) [S1, unofficial].
+
+- **Loss Function:** Standard 3DGS loss (L1 + SSIM) [S1, unofficial].
+  $$ L = (1 - \lambda) L_1 + \lambda L_{SSIM} $$
+  Where $\lambda$ is the SSIM weight (default 0.2) [S1, unofficial].
+
+**Parameters:**
+- `--bsz`: Batch size (number of camera views) per step. Default: 1 [S1, unofficial].
+- `--lr_scale_mode`: Learning rate scaling mode. Default: `sqrt` [S1, unofficial].
+- `--iterations`: Total training iterations. Default: 30,000 [S1, unofficial].
+- `--preload_dataset_to_gpu`: Preload ground truth images to GPU memory. Warning: May cause OOM on large datasets [S1, unofficial].
+- `--sh_degree`: Spherical harmonics degree. Default: 3 [S1, unofficial].
+- `--densify_grad_threshold`: Gradient threshold for densification. Default: 0.0002 [S1, unofficial].
+- `--white_background`: Use white background. Default: False [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+def distributed_train(args):
+    # Initialize distributed process group
+    dist.init_process_group(backend=args.backend)
+    local_rank = dist.get_rank()
+    world_size = dist.get_world_size()
+
+    # Initialize local Gaussian model
+    gaussians = GaussianModel(dataset.sh_degree)
+    scene = Scene(args, gaussians, load_iteration=0, shuffle=False)
+    
+    # Determine background color
+    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+    # Setup optimizer
+    optimizer = torch.optim.Adam(gaussians.get_params(), lr=args.position_lr_init)
+
+    # Training loop
+    for iteration in range(args.iterations + 1):
+        # 1. Load batch of images for this node
+        # Note: In distributed setting, each node loads its assigned subset of views
+        cameras = scene.getTrainCameras()
+        # Filter cameras assigned to this rank (simplified logic)
+        local_cameras = [c for i, c in enumerate(cameras) if i % world_size == local_rank]
+        
+        if not local_cameras:
+            continue
+
+        # 2. Render local Gaussians
+        # Apply background masks for boundary handling [S2, unofficial]
+        rendered_image = render_set(
+            dataset.model_path, 
+            "train", 
+            scene.loaded_iter, 
+            local_cameras, 
+            gaussians, 
+            pipeline, 
+            background
+        )
+
+        # 3. Compute Loss
+        gt_image = local_cameras[0].original_image # Simplified
+        loss = compute_loss(rendered_image, gt_image)
+
+        # 4. Backpropagate
+        loss.backward()
+
+        # 5. Aggregate Gradients
+        # All-reduce gradients across all nodes
+        for param in gaussians.get_params():
+            if param.grad is not None:
+                dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+                param.grad /= world_size
+
+        # 6. Update Parameters
+        optimizer.step()
+        optimizer.zero_grad()
+
+        # 7. Densification/Pruning (Local)
+        if iteration % args.densification_interval == 0:
+            densify_and_prune(gaussians, iteration, args)
+
+        # 8. Merge/Checkpoint
+        if iteration in args.save_iterations:
+            save_checkpoint(gaussians, args.model_path, iteration)
+        
+        if iteration in args.test_iterations:
+            evaluate_metrics(gaussians, scene.getTestCameras())
+
+    dist.destroy_process_group()
+```
+
+**Edge Cases and Pitfalls:**
+- **OOM on Preload:** Setting `--preload_dataset_to_gpu` on large datasets can cause Out-Of-Memory errors. Use with caution [S1, unofficial].
+- **Load Balancing:** Uneven distribution of scene complexity or camera views can lead to load imbalance. Moderate-sized datasets may show limited scaling gains if nodes are underutilized [S2, unofficial].
+- **Boundary Artifacts:** Without ghost cells and background masks, rendering artifacts may appear at partition boundaries [S2, unofficial].
+
+## Subtopics
+
+### [Ghost Ellipsoids for Chunked Training](3559-ghost-ellipsoids-for-chunked-training.md)
+Uses ghost ellipsoids to handle chunk boundaries, similar to ghost cells but for chunked rendering.
+
+### [CoR-GS](1486-cor-gs.md)
+Focuses on camera-order rendering, potentially offering different parallelization strategies.
+
+### [EffGS](3365-effgs.md)
+Optimizes memory and compute efficiency, which can complement distributed training.
+
+## Operating characteristics
+- **Time Complexity:** Scales with the number of nodes and Gaussians. Theoretical speedup is linear with node count, but communication overhead and load imbalance reduce efficiency [S2, unofficial].
+- **Memory Complexity:** Memory per GPU is reduced by a factor of $N$ (number of nodes), allowing training of scenes that exceed single-GPU memory limits (e.g., 11.2M Gaussians on A100) [S2, unofficial].
+- **Measured Performance:**
+    - On Richtmyer-Meshkov dataset (106.7M Gaussians, 5.3 GB, 2048x2048): 3.1x speedup from 4 to 8 nodes. PSNR 30.04, SSIM 0.97, LPIPS 0.019 [S2, unofficial].
+    - On Rayleigh-Taylor dataset (18.2M Gaussians): 1.4x speedup from 2 to 4 nodes [S2, unofficial].
+    - On Mip360 (4K resolution): 4 GPUs reduced training time from 2h 38min to 0h 50min for bicycle scene, with memory per GPU dropping from 37.18 GB to 10.39 GB [S1, unofficial].
+- **Strengths:** Enables training of very large scenes; reduces per-GPU memory usage; maintains reconstruction quality [S1, S2, unofficial].
+- **Limitations:** Scaling gains are limited for moderate-sized datasets; load balancing for uneven distributions is a challenge; communication overhead [S2, unofficial].
+- **When to Use:** Large-scale scenes (e.g., scientific volumes, high-res urban scans) that exceed single-GPU memory.
+- **When Not to Use:** Small to moderate scenes where single-GPU training is sufficient and faster due to lower communication overhead.
+
+## Background
+Originated from the need to scale 3D Gaussian Splatting to large scientific volumes and high-resolution scenes that exceed single-GPU memory constraints [S2, unofficial]. The method was introduced by Zhao et al. in "On Scaling Up 3D Gaussian Splatting Training" (2024) [S1, unofficial]. It builds on the original 3DGS framework [S1, unofficial] and integrates distributed computing techniques from HPC.
+
+## Sources
+[S1] nyu-systems/Grendel-GS, https://github.com/nyu-systems/Grendel-GS, fetched 2026-10-27 (unofficial)
+[S2] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)

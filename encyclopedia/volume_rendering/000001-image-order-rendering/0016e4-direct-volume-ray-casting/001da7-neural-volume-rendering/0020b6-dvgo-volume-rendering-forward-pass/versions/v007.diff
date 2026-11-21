@@ -1,0 +1,177 @@
+--- v006.md
++++ v007.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The DVGO forward pass renders a 3D scene represented by a direct voxel grid of density and color features into a 2D image by querying the grid along camera rays and compositing the results [S1, unofficial]. It differs from standard NeRF by replacing the multi-layer perceptron (MLP) with a direct lookup in a 3D texture (voxel grid), enabling significantly faster training and inference while maintaining view-dependent color through auxiliary feature vectors [S1, S2, unofficial].
++The DVGO forward pass renders a 3D scene represented by a direct voxel grid of density and color features into a 2D image by querying the grid along camera rays and compositing the results [S1, unofficial]. It differs from standard NeRF by replacing the multi-layer perceptron (MLP) with a direct lookup in a 3D texture (voxel grid), enabling significantly faster training and inference while maintaining view-dependent color through auxiliary feature vectors [S1, unofficial].
+ 
+ ## How it works
+@@ -63,6 +63,4 @@
+ def dvgo_forward_pass(rays_o, rays_d, near, far, stepsize, model, render_kwargs):
+     N = rays_o.shape[0]
+-    
+-    # 1. Ray Sampling
+     num_samples = int((far - near) / stepsize)
+     t_vals = torch.linspace(0., 1., num_samples, device=rays_o.device)
+@@ -73,5 +71,5 @@
+     ray_id = torch.arange(N, device=rays_o.device).unsqueeze(1).expand(-1, num_samples).reshape(-1)
+     step_id = torch.arange(num_samples, device=rays_o.device).unsqueeze(0).expand(N, -1).reshape(-1)
+-    
++
+     # 2. Free Space Culling
+     if model.mask_cache is not None:
+@@ -94,14 +92,10 @@
+     norm_pts = (ray_pts_flat - model.xyz_min) / (model.xyz_max - model.xyz_min)
+     norm_pts = torch.clamp(norm_pts, 0.0, 1.0)
+-    density = F.grid_sample(
+-        model.density_grid.unsqueeze(0).unsqueeze(0),
+-        norm_pts.unsqueeze(0).unsqueeze(0).unsqueeze(0),
+-        align_corners=True
+-    ).squeeze()
+-    
++    density = trilinear_interpolate(model.density_grid, norm_pts)
++
+     # 4. Density to Alpha
+     interval = stepsize * model.voxel_size_ratio
+     alpha = 1.0 - torch.exp(-(density + model.act_shift) * interval)
+-    
++
+     # 5. Early Termination (Alpha)
+     if model.fast_color_thres > 0:
+@@ -115,26 +109,26 @@
+ 
+     # 6. Weight Computation
+-    # Sort by ray_id and step_id to ensure correct order per ray
++    # Sort by ray_id and step_id
+     sort_idx = torch.argsort(ray_id * 100000 + step_id)
+     ray_id = ray_id[sort_idx]
+     step_id = step_id[sort_idx]
+     alpha = alpha[sort_idx]
+-    
++
++    one_minus_alpha = 1.0 - alpha
++    T = torch.ones(M, device=rays_o.device)
+     # Compute transmittance T per ray
+-    T = torch.ones(M, device=rays_o.device)
+-    one_minus_alpha = 1.0 - alpha
+-    cum_prod = torch.cumprod(one_minus_alpha, dim=0)
+-    # T[j] = 1 if j is start of ray, else cum_prod[j-1]
+-    ray_starts = torch.zeros(N, dtype=torch.long, device=rays_o.device)
++    for j in range(1, M):
++        if ray_id[j] != ray_id[j-1]:
++            T[j] = 1.0
++        else:
++            T[j] = T[j-1] * one_minus_alpha[j-1]
++    weights = T * alpha
++
++    # Compute alphainv_last per ray
+     counts = torch.bincount(ray_id, minlength=N)
+-    ray_starts = torch.cat([torch.tensor([0], device=rays_o.device), torch.cumsum(counts[:-1], dim=0)])
+-    T[ray_starts] = 1.0
+-    T[ray_starts[1:]] = cum_prod[ray_starts[1:] - 1]
+-    
+-    weights = T * alpha
+-    # alphainv_last per ray is T at the last sample * (1 - alpha at last sample)
++    ray_starts = torch.cat([torch.tensor([0], device=ray_id.device), torch.cumsum(counts[:-1], dim=0)])
+     last_indices = ray_starts + counts - 1
+     alphainv_last_per_ray = T[last_indices] * (1 - alpha[last_indices])
+-    
++
+     # 7. Early Termination (Weight)
+     if model.fast_color_thres > 0:
+@@ -147,5 +141,4 @@
+         T = T[weight_mask]
+         M = ray_pts_flat.shape[0]
+-        
+         counts = torch.bincount(ray_id, minlength=N)
+         ray_starts = torch.cat([torch.tensor([0], device=ray_id.device), torch.cumsum(counts[:-1], dim=0)])
+@@ -156,21 +149,11 @@
+     norm_pts_filtered = (ray_pts_flat - model.xyz_min) / (model.xyz_max - model.xyz_min)
+     norm_pts_filtered = torch.clamp(norm_pts_filtered, 0.0, 1.0)
+-    
+-    color_features = F.grid_sample(
+-        model.color_grid.unsqueeze(0).unsqueeze(0),
+-        norm_pts_filtered.unsqueeze(0).unsqueeze(0).unsqueeze(0),
+-        align_corners=True
+-    ).squeeze()
+-    
++    color_features = trilinear_interpolate(model.color_grid, norm_pts_filtered)
+     rgb = torch.zeros(M, 3, device=rays_o.device)
+     diffuse = torch.zeros(M, 3, device=rays_o.device)
+-    
++
+     if model.use_diffuse_color:
+-        diffuse = F.grid_sample(
+-            model.diffuse_grid.unsqueeze(0).unsqueeze(0),
+-            norm_pts_filtered.unsqueeze(0).unsqueeze(0).unsqueeze(0),
+-            align_corners=True
+-        ).squeeze()
+-        
++        diffuse = trilinear_interpolate(model.diffuse_grid, norm_pts_filtered)
++
+     if model.rgbnet is None:
+         if model.use_diffuse_color:
+@@ -199,5 +182,5 @@
+     bg = render_kwargs['bg'].to(rays_o.device)
+     rgb_marched = rgb_marched + alphainv_last_per_ray.unsqueeze(-1) * bg
+-    
++
+     # 10. Optional Outputs
+     extras = {}
+@@ -234,4 +217,35 @@
+     }
+ 
++def trilinear_interpolate(grid, points):
++    """Standard trilinear interpolation [G]."""
++    grid_shape = torch.tensor(grid.shape, device=points.device, dtype=torch.float32)
++    coords = points * (grid_shape - 1)
++    x0 = torch.clamp(torch.floor(coords[:, 0]).long(), 0, grid_shape[0]-1)
++    y0 = torch.clamp(torch.floor(coords[:, 1]).long(), 0, grid_shape[1]-1)
++    z0 = torch.clamp(torch.floor(coords[:, 2]).long(), 0, grid_shape[2]-1)
++    x1 = torch.clamp(x0 + 1, 0, grid_shape[0]-1)
++    y1 = torch.clamp(y0 + 1, 0, grid_shape[1]-1)
++    z1 = torch.clamp(z0 + 1, 0, grid_shape[2]-1)
++    dx = coords[:, 0] - x0.float()
++    dy = coords[:, 1] - y0.float()
++    dz = coords[:, 2] - z0.float()
++    # Interpolate values at corners
++    v000 = grid[x0, y0, z0]
++    v100 = grid[x1, y0, z0]
++    v010 = grid[x0, y1, z0]
++    v110 = grid[x1, y1, z0]
++    v001 = grid[x0, y0, z1]
++    v101 = grid[x1, y0, z1]
++    v011 = grid[x0, y1, z1]
++    v111 = grid[x1, y1, z1]
++    # Trilinear combination
++    v00 = v000 * (1 - dx) + v100 * dx
++    v01 = v001 * (1 - dx) + v101 * dx
++    v10 = v010 * (1 - dx) + v110 * dx
++    v11 = v011 * (1 - dx) + v111 * dx
++    v0 = v00 * (1 - dy) + v10 * dy
++    v1 = v01 * (1 - dy) + v11 * dy
++    return v0 * (1 - dz) + v1 * dz
++
+ def positional_encoding(x, min_deg=0, max_deg=10, scale=1, base_freq=2.0):
+     """Standard sinusoidal positional encoding [G]."""
+@@ -254,7 +268,5 @@
+ ### Edge Cases and Pitfalls
+ *   **Zero Density Initialization**: DVGO initializes the density grid with zeros, resulting in nearly zero entropy initially. This prevents guiding the agent to choose the next-best view with highest information gain in active vision tasks [S2, unofficial].
+-*   **Precision**: Trilinear interpolation in the voxel grid can introduce artifacts if the grid resolution is too low.
+-*   **Boundaries**: Ray points outside the voxel grid bounds must be clamped or filtered to avoid out-of-bounds memory access.
+-*   **Early Termination Threshold**: Setting `fast_color_thres` too high may skip valid samples, leading to inaccurate rendering. Setting it too low may not provide performance benefits.
++*   **Boundaries**: Ray points outside the voxel grid bounds must be clamped or filtered to avoid out-of-bounds memory access [G].
+ 
+ ## Subtopics
+@@ -264,9 +276,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of samples per ray. The lookup is $O(1)$ per sample, making it faster than MLP-based methods which are $O(N \cdot S \cdot D)$ where $D$ is the MLP depth.
+-*   **Memory Complexity**: $O(D_x \cdot D_y \cdot D_z \cdot (1 + k_0 + 3))$, where $D_x, D_y, D_z$ are the grid dimensions, $k_0$ is the color feature dimension, and 3 is for diffuse color. This is significantly less than storing a full radiance field MLP weights for high-resolution scenes.
+-*   **Performance**: Faster training and inference compared to NeRF due to the direct voxel grid lookup. However, it may suffer from aliasing artifacts if the grid resolution is not high enough.
+-*   **Strengths**: Fast training, efficient memory usage for high-resolution scenes, easy to integrate with existing voxel-based pipelines.
+-*   **Limitations**: Lower quality than NeRF in complex scenes due to the discrete nature of the voxel grid. View-dependent effects are limited by the feature dimension $k_0$.
++Not given in the sources.
+ 
+ ## Background

@@ -1,0 +1,161 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method assigns a learnable unit normal to each 3D Gaussian to replace noisy gradient-based estimates, preventing optimization from overfitting to training lighting conditions by aligning rendered normals with geometry priors derived from depth gradients [S1, unofficial][S2]. It differs from pure gradient-based approaches by explicitly optimizing normal attributes per Gaussian and using expected depth to generate stable pseudo-normal targets for supervision [S2].
++This method assigns a learnable unit normal to each 3D Gaussian to replace noisy gradient-based estimates, preventing the optimization from overfitting to training lighting conditions by aligning rendered normals with geometry priors derived from expected depth gradients [S1, unofficial][S2]. It differs from pure gradient-based approaches by explicitly optimizing normal attributes per Gaussian and supervising them against pseudo-normals computed from expected depth [S2].
+ 
+ ## How it works
+@@ -18,6 +18,6 @@
+ 1. **Compute Expected Depth:** For each pixel, compute the expected depth $z_E$ along the ray using the weighted sum of Gaussian depths $z_i$ [S2]:
+    $$ z_E = \frac{\sum_{i \in N} w_i z_i}{\sum_{i \in N} w_i} $$
+-   where $w_i = T_i g_i \alpha_i$ are the splatting weights, $T_i$ is transmittance, $g_i$ is the Gaussian density, and $\alpha_i$ is opacity. $N$ is the set of Gaussians overlapping the pixel [S2].
+-2. **Compute Pseudo-Normals:** Calculate the image-space gradients of the expected depth $\nabla z_E = (\partial_x z_E, \partial_y z_E)$ [S2]. Convert these gradients into world-space pseudo-normals $\mathbf{n}'_i$ (or $\hat{\mathbf{n}}_\nabla$) using the camera projection matrix [G].
++   where $w_i = T_i g_i \alpha_i$ are the splatting weights, $T_i$ is transmittance, $g_i$ is the Gaussian density, and $\alpha_i$ is opacity [S2]. $N$ is the set of Gaussians overlapping the pixel [S2].
++2. **Compute Pseudo-Normals:** Calculate the image-space gradients of the expected depth $\nabla z_E = (\partial_x z_E, \partial_y z_E)$ [S2]. Convert these gradients into world-space pseudo-normals $\hat{\mathbf{n}}_\nabla$ (or $\mathbf{n}'_i$) using the camera projection matrix [G].
+ 3. **Splat Learnable Normals:** For each pixel, accumulate the learnable normals $\mathbf{n}_i$ from overlapping Gaussians using the splatting weights $w_i$ [S2]:
+    $$ \tilde{\mathbf{n}} = \frac{\sum_{i \in N} w_i \mathbf{n}_i}{\sum_{i \in N} w_i + \epsilon_n} $$
+@@ -38,75 +38,63 @@
+ **Pseudocode:**
+ ```python
+-def compute_normal_loss(gaussians, camera, mask):
+-    epsilon_n = 1e-6
+-    lambda_n_tv = 0.1  # Not given in sources [G]
+-    expected_depth = {}
+-    acc_normal = {}
+-    acc_weight = {}
+-    
+-    # Rasterization pass: accumulate depth and normals per pixel
+-    for x, y in mask:
+-        w_sum = 0.0
+-        z_sum = 0.0
+-        n_sum = [0.0, 0.0, 0.0]
+-        for g in gaussians:
+-            if not is_inside_frustum(g, x, y): continue
+-            w = g.transmittance * g.density * g.opacity
+-            w_sum += w
+-            z_sum += w * g.depth
+-            n_sum[0] += w * g.normal[0]
+-            n_sum[1] += w * g.normal[1]
+-            n_sum[2] += w * g.normal[2]
+-        expected_depth[(x, y)] = z_sum / w_sum if w_sum > 0 else 0.0
+-        acc_normal[(x, y)] = n_sum
+-        acc_weight[(x, y)] = w_sum
+-
+-    # Compute pseudo-normals from depth gradients
+-    pseudo_normals = {}
+-    for (x, y) in expected_depth:
+-        dz_dx = expected_depth.get((x + 1, y), expected_depth[(x, y)]) - expected_depth[(x, y)]
+-        dz_dy = expected_depth.get((x, y + 1), expected_depth[(x, y)]) - expected_depth[(x, y)]
+-        # Convert image-space gradients to world-space pseudo-normal using camera projection [G]
+-        pseudo_normals[(x, y)] = normalize([dz_dx, dz_dy, 1.0])
+-
+-    # Compute loss
+-    loss = 0.0
++def compute_normal_loss(gaussians, camera, mask, epsilon_n=1e-6, lambda_n_tv=0.1):
++    H, W = camera.height, camera.width
++    expected_depth = [[0.0] * W for _ in range(H)]
++    acc_normal = [[[0.0, 0.0, 0.0] for _ in range(W)] for _ in range(H)]
++    acc_weight = [[0.0] * W for _ in range(H)]
++    # [G] Rasterization step to find overlapping Gaussians per pixel
++    for y in range(H):
++        for x in range(W):
++            for g in gaussians_overlapping(x, y):
++                w = g.transmittance * g.density * g.opacity
++                expected_depth[y][x] += w * g.depth
++                acc_normal[y][x][0] += w * g.normal[0]
++                acc_normal[y][x][1] += w * g.normal[1]
++                acc_normal[y][x][2] += w * g.normal[2]
++                acc_weight[y][x] += w
++    # Compute pseudo-normals from expected depth gradients
++    depth_grad_x = [[expected_depth[y][min(x+1, W-1)] - expected_depth[y][x] for x in range(W)] for y in range(H)]
++    depth_grad_y = [[expected_depth[min(y+1, H-1)][x] - expected_depth[y][x] for x in range(W)] for y in range(H)]
++    pseudo_normals = [[None] * W for _ in range(H)]
++    for y in range(H):
++        for x in range(W):
++            # World-space normal from depth gradient: n = (-dz/dx, -dz/dy, 1)
++            n = [-depth_grad_x[y][x], -depth_grad_y[y][x], 1.0]
++            norm = sqrt(n[0]**2 + n[1]**2 + n[2]**2)
++            pseudo_normals[y][x] = [v / norm for v in n]
++    # Transform pseudo-normals to world space if needed [G]
++    # Normalize accumulated learnable normals
++    normalized_normals = [[[0.0, 0.0, 0.0] for _ in range(W)] for _ in range(H)]
++    for y in range(H):
++        for x in range(W):
++            norm = sqrt(acc_normal[y][x][0]**2 + acc_normal[y][x][1]**2 + acc_normal[y][x][2]**2)
++            normalized_normals[y][x] = [acc_normal[y][x][i] / (norm + epsilon_n) for i in range(3)]
++    # Compute L2 alignment loss (S2) or dot-product loss (S1) [S1, unofficial][S2]
++    loss_normal = 0.0
++    for y in range(H):
++        for x in range(W):
++            if mask[y][x] > 0.5:
++                diff = [normalized_normals[y][x][i] - pseudo_normals[y][x][i] for i in range(3)]
++                loss_normal += sqrt(diff[0]**2 + diff[1]**2 + diff[2]**2)
++    # Compute Total Variation loss
+     tv_loss = 0.0
+-    for (x, y) in acc_normal:
+-        n_vec = acc_normal[(x, y)]
+-        norm_val = math.sqrt(n_vec[0]**2 + n_vec[1]**2 + n_vec[2]**2) + epsilon_n
+-        n_hat = [n_vec[0]/norm_val, n_vec[1]/norm_val, n_vec[2]/norm_val]
+-        
+-        p_n = pseudo_normals.get((x, y), [0.0, 0.0, 0.0])
+-        dot = n_hat[0]*p_n[0] + n_hat[1]*p_n[1] + n_hat[2]*p_n[2]
+-        loss -= dot
+-        
+-        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+-            neighbor = (x + dx, y + dy)
+-            if neighbor in acc_normal:
+-                n_n = acc_normal[neighbor]
+-                n_norm = math.sqrt(n_n[0]**2 + n_n[1]**2 + n_n[2]**2) + epsilon_n
+-                n_neighbor_hat = [n_n[0]/n_norm, n_n[1]/n_norm, n_n[2]/n_norm]
+-                tv_loss += math.sqrt((n_hat[0]-n_neighbor_hat[0])**2 + (n_hat[1]-n_neighbor_hat[1])**2 + (n_hat[2]-n_neighbor_hat[2])**2)
+-    
+-    return loss + lambda_n_tv * tv_loss
+-
+-def is_inside_frustum(g, x, y):
+-    # Standard rasterization overlap check [G]
+-    return True
+-
+-def normalize(v):
+-    norm = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+-    return [v[0]/norm, v[1]/norm, v[2]/norm] if norm > 0 else [0.0, 0.0, 0.0]
++    for y in range(H):
++        for x in range(W):
++            for i in range(3):
++                if x < W - 1:
++                    tv_loss += abs(normalized_normals[y][x+1][i] - normalized_normals[y][x][i])
++                if y < H - 1:
++                    tv_loss += abs(normalized_normals[y+1][x][i] - normalized_normals[y][x][i])
++    return loss_normal + lambda_n_tv * tv_loss
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+ - **Precision:** The normalization denominator must include a small epsilon to avoid division by zero [S2].
+-- **Degenerate Input:** If a pixel has no overlapping Gaussians, the accumulated normal is zero, leading to undefined normalization. The mask $M$ selects valid pixels for the loss summation, ensuring only pixels with valid geometry contribute [S1, unofficial].
++- **Degenerate Input:** If a pixel has no overlapping Gaussians, the accumulated normal is zero, leading to undefined normalization [S2]. The mask $M$ selects valid pixels for the loss summation [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Normal Field Supervision via Rendering and Depth Derivatives
+-The parent method that uses depth derivatives to supervise the normal field. This method extends it by introducing learnable normals per Gaussian [9627-normal-field-supervision-via-rendering-and-depth-derivatives.md].
++The parent method that uses depth derivatives to supervise the normal field [9627-normal-field-supervision-via-rendering-and-depth-derivatives.md]. This method extends it by introducing learnable normals per Gaussian [S2].
+ 
+ ### Gaussian Splatting Volume Rendering
+@@ -114,13 +102,13 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Additional overhead per pixel for accumulating normals and computing depth gradients. The depth gradient computation is $O(HW)$, and the normal accumulation is part of the standard rasterization pass [S2].
++- **Time Complexity:** Additional overhead per pixel for accumulating normals and computing depth gradients [S2]. The depth gradient computation is $O(HW)$, and the normal accumulation is part of the standard rasterization pass [S2].
+ - **Memory Complexity:** Requires storing an additional learnable normal vector per Gaussian and rendering buffers for expected depth and accumulated normals [S2].
+ - **Strengths:** Prevents overfitting to lighting conditions by providing a geometry prior [S1, unofficial]. More stable than pure gradient-based normals [S2].
+ - **Limitations:** Requires additional parameters per Gaussian. The quality of pseudo-normals depends on the accuracy of expected depth [S2].
+-- **When to use:** When accurate surface normals are needed for inverse rendering or PBR, and to prevent normal rotation from overfitting to training light conditions [S1, unofficial].
++- **When to use:** When accurate surface normals are needed for inverse rendering or PBR [S1, unofficial][S2].
+ - **When not to use:** When computational resources are extremely limited, as it adds overhead to the rasterization pass [S2].
+ 
+ ## Background
+-The method originates from ECCV 2024 Submission #12158 [S1, unofficial] and VisibilitySplat [S2], which aim to improve the geometric consistency of 3D Gaussian Splatting for inverse rendering tasks. It addresses the issue that gradient-based normals are noisy and inconsistent across views [S2].
++The method originates from an ECCV 2024 submission [S1, unofficial] and VisibilitySplat [S2], which aim to improve the geometric consistency of 3D Gaussian Splatting for inverse rendering tasks. It addresses the issue that gradient-based normals are noisy and inconsistent across views [S2].
+ 
+ ## Sources

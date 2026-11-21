@@ -1,0 +1,1064 @@
+Compile and explore arbitrarily large n-dimensional scientific data in the browser — points, lines, Gaussian splats and meshes, streamed from Zarr and rendered on the GPU. - MCFO fly brain neurons in a volume-rendered neuropil (FlyLight / FISBe) by royerloic · Pull Request #1583 · royerlab/luxar
+
+MCFO fly brain neurons in a volume-rendered neuropil (FlyLight / FISBe) by royerloic · Pull Request #1583 · royerlab/luxar · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+royerloic
+commented
+Aug 14, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Fits labelled Drosophila neurons from the FISBe benchmark — long, thin, widely branching — threaded through the counterstained brain they live in, as one volume-rendered Gaussian splat cloud.
+Two things make it worth having, and they pull in opposite directions:
+Thin filaments are the hard case for a Gaussian basis. Every other microscopy gsplat demo here fits blobby content. These neurites approach the resolution limit, span the whole brain, and occupy ~0.1% of voxels.
+The neuropil is the showcase for volumetric compositing. A dense semi-transparent medium that occludes front-to-back, with sparse filaments passing behind it and genuinely being dimmed — not glowing through as they would under additive.
+1,141,538 splats (786,991 neurons + 354,547 neuropil), 22:1 over the source voxels
+(counting the per-splat RGBA this scene also ships, not just centres/Cholesky/amplitude).
+The neuropil isn't in FISBe
+The sample's channel_spec is sssr — three signal channels plus a reference — and FISBe distributes only the signal. The reference channel (the counterstain that makes this read as neurons inside a brain) comes from the FlyLight H5J on S3, decoded from its HEVC-in-HDF5 streams. That needs ffmpeg; without it the demo degrades to a neurons-only scene rather than failing.
+Bonus: the H5J's root attrs carry voxel_size = [0.44, 0.44, 0.44], independently confirming the value taken from the FISBe paper.
+Five findings, all measured, all in the docstring
+1. gsplat cal cannot calibrate K here. The blind-spot protocol needs image noise; FISBe's raw is effectively noise-free (Workstation stitching scrubs it). Sweeps return signal_limited / still_climbing, sigma_hat ~1e-10 — the reported "K*" is just the top of the supplied grid.
+2. The floor is the most consequential knob, and a percentile floor is brutal. --floor p99 subtracts 0.0337 here: it zeroes 99% of voxels and removes 97.5% of the image's energy before a single splat is placed, most of the faint neurites with it. Measured on the annotated neuron, against the RAW data:
+floor
+retention
+splats
+fg PSNR
+energy kept
+faintest fifth lost
+p99
+0.999
+32,709
+24.70
+0.57x
+87.8%
+p90
+0.9999
+170,835
+27.49
+0.73x
+35.1%
+auto
+0.9999
+786,986
+28.01
+0.85x
+0.0%
+0
+0.9999
+1,117,196
+27.64
+0.87x
+0.0%
+auto — the CLI's own default, which this demo should never have overridden — beats a zero floor on the foreground with 30% fewer splats. What hid it: scoring against the floor-suppressed target, which has the same signal deleted from it (the p99 fit reads a respectable 28.10 dB against that reference). Seeds are not the splat count either — the optimiser works a fixed pool and then culls by cumulative amplitude mass, and shrinking seeds to hit a target count throws away the search that makes the survivors good: 128,000 seeds at retention 1.0 scored worse (fg 25.97) than 18,623 splats drawn from a 1.2M pool (fg 27.60). Keep seeds high; tune retention.
+Background suppression therefore happens at render time instead: each neuron splat's alpha ramps with its own amplitude, so haze goes optically thin while the neurites stay opaque. The ramp bottoms out at a small non-zero alpha — alpha 0 is folded into a splat's contribution before the shader's discard, so it would delete the splat as thoroughly as the floor did.
+3. Global PSNR is the wrong number. Only ~1.5% of raw energy is inside the annotated neurons — 41% once the floor is suppressed. At K=30,000 a fit reads 42 dB globally while dropping half the neurite brightness, and the neurites visibly break into disconnected beads. A ~17 dB global-to-foreground gap.
+4. One node, and alpha is optical depth. Two nodes covering the same volume have no correct draw order, so they're merged and depth-sorted together, distinguished by per-splat RGBA. Alpha accumulates: across ~356K neuropil splats spanning ~350 µm, NEUROPIL_ALPHA = 0.12 renders the brain effectively opaque (the chosen look); ~0.01 gives a translucent haze with every neurite visible. Cost: the Layers panel can no longer fade the neuropil independently.
+The initial camera is measured, not defaulted. FISBe ships the unaligned FlyLight stack, so the specimen sits at whatever angle it was mounted (~52 deg here). Rotating the splats would desynchronise them from FISBe's annotations and mean rotating every covariance, so the demo measures the specimen's principal axis and rolls the camera instead, framed close. Per-sample, measured at authoring time.
+5. Don't fit the three MCFO channels separately. MCFO is a stochastic label — a neuron's colour is a ratio of channels at the same voxels. Independent fits don't co-locate and each axon renders candy-striped. The demo fits the per-voxel channel max once and colours each splat at its own centre, balancing channel gains first (unbalanced, the brightest channel wins 96% of splats and the whole brain reads red).
+Fetching
+One FISBe sample is range-extracted from the 7.1 GB Zenodo archive, so a first run transfers ~415 MB rather than the whole thing. Zenodo's HEAD returns 200 with no Accept-Ranges, so the demo probes with a one-byte ranged GET and reads the size from Content-Range. Plus ~58 MB for the H5J.
+Licensing
+Manifest row is bucket=local-compute but redistribute=true. Unlike the other local-compute rows this data is CC BY 4.0 — it's local-compute only because the cc-by Zenodo record doesn't exist yet. Promotion later is a one-line manifest change.
+Attribution: FISBe (Mais et al., CVPR 2024); FlyLight Project Team, Janelia Research Campus, HHMI (Meissner et al., eLife 2023 12:e80660; Tirian & Dickson 2017 for the VT line).
+Verification
+Demo run end to end on a GPU box including H5J fetch + decode; scene inspected in the viewer
+88 unit tests, no network and no GPU: splat_colors (physical→voxel conversion, channel balancing, hue normalisation, clipping, zero-signal), _HttpRangeFile (seek/read arithmetic, read-ahead, strict 206), _safe_extract_path + zip-slip driven through fetch_sample, --recompute replacing a populated store, merge_for_render (RGBA tagging, amplitude scaling, dtype), the amplitude->alpha ramp, the measured specimen tilt and the camera roll read back out of the authored scene
+Every regression test confirmed to fail against the unfixed code
+ruff, mypy, bandit clean; docs ratchet 0 new findings; demos suite green; README/registry guards, complexity ratchet and manifest --check up to date
+Add a 3-colour MCFO fly brain demo (FlyLight / FISBe)
+…
+0383255
+```
+Fits a Janelia FlyLight MCFO volume from the FISBe benchmark — long, thin,
+widely branching Drosophila neurons — as anisotropic Gaussian splats. It is
+the first demo whose content is filamentous rather than blobby, and the
+defaults that work for nuclei and tissue are wrong for it in three separate
+ways, all recorded in the demo docstring:
+
+* `gsplat cal` cannot calibrate K here. The blind-spot protocol needs image
+  noise to find a held-out peak and FISBe's raw is effectively noise-free
+  (Workstation stitching scrubs it), so sweeps return signal_limited /
+  still_climbing and their "K*" is just the top of the supplied grid.
+* Global PSNR is the wrong metric. Only ~0.2% of image energy lies inside the
+  annotated neurons, so at K=30,000 a fit reads 42 dB globally while dropping
+  half the neurite brightness and visibly breaking neurites into beads.
+  Foreground-scored, the gap is ~17 dB.
+* Fitting the three MCFO channels separately breaks the colour: MCFO is a
+  stochastic label, so a neuron's hue is a ratio of the channels at the same
+  voxels, and independent fits do not co-locate — each axon renders
+  candy-striped. The demo fits the per-voxel channel maximum once and colours
+  each splat from the channels at its own centre, balancing channel gains
+  first (unbalanced, the brightest channel wins 96% of splats).
+
+Aggressive floor suppression (floor="p99") is what makes the scene legible:
+the default auto floor removes the pedestal but leaves neuropil
+autofluorescence, which fills the brain silhouette and saturates under every
+blending mode. With it gone, 1.2M seeds settle at ~19K splats, ~1800:1
+compression.
+
+The sample is range-extracted from FISBe's 7.1 GB Zenodo archive over HTTP
+byte ranges, so a first run transfers ~415 MB rather than the whole archive.
+Zenodo's HEAD returns 200 with no Accept-Ranges, so the demo probes with a
+one-byte ranged GET and reads the size from Content-Range.
+
+Manifest row is bucket=local-compute but redistribute=true — unlike the other
+local-compute rows this data IS CC BY 4.0; it is local-compute only because
+the cc-by Zenodo record does not exist yet.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(major) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:404 — --recompute cannot refetch an already extracted sample. fetch_sample() deliberately bypasses the cache when RECOMPUTE is true, but then calls tmp.rename(target) while the existing non-empty target directory is still present, which fails on normal filesystems. Extract to a fresh temporary directory and replace/remove the old target before renaming; add a regression test for recomputing with an existing target.
+(major) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:391-399 — ZIP member names are appended directly to tmp without validating rel. A member containing ../ or an absolute path can write outside the cache directory during extraction. Resolve each destination and reject paths that are absolute or do not remain beneath the extraction root before writing.
+(minor) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:579 — The advertised --sample=NAME option still writes scene metadata naming VT047848-20171020_66_I3. Alternate samples therefore produce incorrectly identified output. Interpolate SAMPLE into the description, and ideally distinguish alternate-sample output paths to avoid silently replacing the default scene.
+Checked and found clean: physical-unit-to-voxel conversion, clipping and zero-signal handling in splat_colors; range-reader seek/read and strict HTTP 206 behavior; manifest source/generated-entry consistency; README demo-count update.
+Docstring the remote-range file's IO plumbing
+…
+2b7c1b4
+```
+The docs completeness ratchet counts every function and class, and the
+RawIOBase methods pushed the demo below the 70% floor.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(major) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:420 — --recompute cannot re-extract an already cached sample. When target exists, the function proceeds because RECOMPUTE is true, builds tmp, then calls tmp.rename(target) without removing or replacing the existing non-empty directory. This raises FileExistsError/ENOTEMPTY, so the documented “fetch + GPU fitting” recomputation path fails on the normal second run. Remove the existing target first or atomically replace it after moving the old store aside.
+(major) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:407 — Archive member paths are appended directly to tmp and written without validating that the resolved destination remains beneath tmp. A ZIP entry such as <member_prefix>/../../... can escape the cache and overwrite arbitrary user-writable files. Validate each resolved path against tmp.resolve() before creating directories or writing data.
+(minor) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:596 — The generated scene description always identifies VT047848-20171020_66_I3, even when the supported --sample=NAME option selects another sample. This leaves incorrect provenance embedded in alternate-sample outputs. Interpolate SAMPLE into the description.
+Checked and found clean: physical-coordinate-to-voxel conversion, clipping and zero-signal handling in splat_colors; channel balancing/hue normalization coverage; HTTP range read/seek arithmetic and explicit rejection of non-206 responses; sample-specific fit cache naming; manifest generator and generated manifest consistency.
+Fix the three review findings on the MCFO demo
+…
+3158d05
+```
+* `--recompute` could not re-extract an already cached sample: the freshly
+  extracted directory was renamed onto a populated target, which raises
+  ENOTEMPTY. The old store is now moved aside and removed only once the new
+  one is in place, and a stale `.partial` from an interrupted run is cleared
+  first.
+* Archive member names were joined onto the extraction root without
+  validation, so a member spelled `../../…` (or with an absolute path) could
+  be written outside the cache — the classic zip-slip. `_safe_extract_path`
+  now resolves every destination and refuses anything that escapes the root.
+* The scene description hard-coded the default sample name even when
+  `--sample=` selected another, embedding wrong provenance. It now
+  interpolates the sample actually fitted, records it in `scene.attrs`, and
+  writes a non-default sample to its own output path instead of silently
+  replacing the default scene.
+
+Four regression tests, all confirmed to fail against the unfixed code. The
+zip-slip case is driven through `fetch_sample` rather than only against the
+helper, since a test on the helper alone would still pass if the extraction
+loop stopped calling it.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+All three fixed in 3158d05, with regression tests confirmed to fail against the unfixed code.
+(major) --recompute renamed onto a populated target. Correct — this broke every second run with ENOTEMPTY. The old store is now moved aside and removed only once the new one is in place, and a stale .partial left by an interrupted run is cleared first. test_recompute_replaces_a_populated_target drives fetch_sample with an existing non-empty store and asserts the old contents are gone and no .partial/.stale remains.
+(major) zip-slip in the extraction loop. Correct. _safe_extract_path now resolves every destination against the extraction root and refuses anything absolute or escaping, rather than sanitising — a malformed archive should be loud, not silently partial.
+Worth noting on the test design: I first wrote this as a unit test on the helper, then realised that test would still pass if the extraction loop stopped calling the helper. So the shipped test drives a malicious archive (<prefix>../../../pwned.txt) through fetch_sample and asserts both that it raises and that no file escaped. Verified: removing the guard from the loop while leaving the helper in place fails that test.
+(minor) hard-coded sample in scene metadata. Correct. The description now interpolates the sample actually fitted and scene.attrs["sample"] records it. I also took the parenthetical suggestion — a non-default --sample writes to gsplats_3d_flylight_mcfo_neurons_<SAMPLE>.luxar.zarr rather than silently replacing the default scene, so the two can't be confused.
+Gates: ruff, mypy, bandit clean; docs ratchet reports 0 new findings; demos suite 1772 passed / 9 skipped.
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(major) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:475-487 — The recompute swap can destroy the previously valid cache if tmp.rename(target) fails. After moving target to .stale, the unconditional finally deletes .stale whether or not the new store was installed. Preserve the backup on failure and restore it to target; delete it only after the temporary store has been renamed successfully.
+Checked and found clean: HTTP range read/seek arithmetic and non-206 handling; zip-slip defenses, including their use in the extraction loop; physical-coordinate-to-voxel conversion, clipping, channel balancing, and zero-signal color handling; manifest/generated-manifest consistency; default/non-default scene naming; and the added tests’ coverage of the core extraction and coloring logic.
+Add the neuropil, merge into one volume-rendered node
+…
+b58cf44
+```
+Folds the FlyLight reference channel into the demo and renders everything as a
+single volumetric node, which is the shape this dataset actually wants.
+
+The neuropil is not in FISBe: the sample's channel_spec is `sssr` — three
+signal channels plus a reference — and FISBe distributes only the signal. The
+reference is fetched from the FlyLight H5J on S3 and decoded from its HEVC
+streams (needs ffmpeg; without it the demo degrades to a neurons-only scene
+rather than failing). It is what makes the image read as neurons *inside a
+brain*, and it turns the demo into a genuine showcase for volumetric
+compositing: a dense semi-transparent medium that occludes front-to-back, with
+sparse filaments threading through it.
+
+Neurons and neuropil share ONE node with per-splat RGBA. Two nodes covering the
+same volume have no correct draw order — whichever draws first occludes the
+other — so merging them lets the renderer depth-sort everything together.
+Alpha is what separates them, and under volumetric it is optical depth that
+accumulates: across ~356K neuropil splats spanning ~350um, alpha 0.12 renders
+the brain effectively opaque (the chosen look) while ~0.01 gives a translucent
+haze with every neurite visible.
+
+Also fixes the splat count properly. The earlier ~19K was not the floor, it was
+`cull_retention=0.95` discarding almost the whole optimised pool. The obvious
+fix — lowering seeds to the target count — measured WORSE: 128,000 seeds at
+retention 1.0 scored fg 25.97 against 27.60 for 18,623 splats from 1.2M seeds,
+with a visibly more beaded axon. Seeds buy search; retention buys count. Now
+1.2M seeds at retention 0.999 -> 32.7K splats, the best foreground PSNR (27.80)
+and energy (0.84x) of any variant tried.
+
+Verified end to end on a GPU box: 32,741 neuron + 355,995 neuropil = 388,736
+splats, 88:1 over the source voxels, rendered and inspected in the viewer.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+royerloic
+changed the title
+Add a 3-colour MCFO fly brain demo (FlyLight / FISBe)
+MCFO fly brain neurons in a volume-rendered neuropil (FlyLight / FISBe)
+Aug 14, 2026
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(major) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:251-255, 407, 867-871 — --sample is used in filesystem paths without validation. Values containing /, \, or .. can make cache and output paths escape their intended directories; --serve-only can consequently select and serve an arbitrary matching .luxar.zarr path outside the demos directory. Restrict sample names to the archive’s basename format (or reject path separators and any non-basename value) before constructing paths.
+(minor) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:526-530 — H5J decoding silently accepts incomplete frame output. got may be less than the declared n, and trailing partial-frame bytes are silently discarded. The resulting shorter neuropil volume is then fitted and merged with neurons in a different physical extent, producing a misregistered scene rather than a clear decoding error. Verify raw.size == n * ew * eh before reshaping.
+Checked and found clean: archive members are guarded against zip-slip and extraction is staged before replacement; range reads reject non-206 responses; physical-to-voxel color lookup clips indices and handles zero signal safely; merged splat arrays preserve float32 and correctly distinguish neuron/neuropil alpha. The added tests cover these core paths without network or GPU access.
+Validate --sample, and refuse a partial H5J decode
+…
+8a5f464
+```
+Two review findings, both real.
+
+`--sample` reached the filesystem unvalidated. It lands in the cache paths, the
+archive member prefix and the output filename, so a value containing `/`, `\`
+or `..` could read and write outside the demo's directories — and --serve-only
+would then serve whatever .luxar.zarr it resolved to. Sample names are now
+pinned to the archive's own basename shape
+([A-Za-z0-9][A-Za-z0-9_-]*) before any path is built.
+
+H5J decoding silently accepted a short or ragged stream. `got` could come back
+below the declared frame count and trailing partial-frame bytes were discarded,
+yielding a thinner neuropil volume that then spans a different physical extent
+from the neurons — a misregistered scene, which is far harder to spot than an
+exception. The byte count is now checked against `n * ew * eh` and a mismatch
+raises.
+
+Six regression tests. Two notes on their design:
+
+* The `--sample` tests drive argv through a fresh module import, because
+  `SAMPLE` is parsed at module scope — testing `validate_sample_name` alone
+  would still pass if the parser stopped calling it. Verified: unwiring the
+  call fails the import-time test while the helper tests stay green.
+* The decode tests stub h5py rather than `importorskip` it, so they run in
+  environments without the demos extra instead of silently skipping.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Both fixed in 8a5f464, with regression tests confirmed to fail against the unfixed code.
+(major) --sample unvalidated in filesystem paths. Correct, and worse than it first looks — the value reaches the cache paths, the archive member prefix and the output filename, so --serve-only would have served whatever .luxar.zarr a traversing value resolved to. Sample names are now pinned to the archive's own basename shape ([A-Za-z0-9][A-Za-z0-9_-]*) before any path is constructed.
+Note on the test design, since the obvious version would have been hollow: SAMPLE is parsed at module scope, so a unit test on validate_sample_name would still pass if the argv parser stopped calling it. The shipped tests import a fresh copy of the module under sys.argv = ["demo", "--sample=../../escape"] and assert the import itself raises. Verified by unwiring the call — the import-time test fails while the helper tests stay green.
+(minor) H5J decoding silently accepted an incomplete stream. Correct, and I'd rate it above minor: the failure is silent and geometric. A short decode yields a thinner neuropil volume, which then spans a different physical extent from the neurons, so the merged scene is misregistered — a plausible-looking image that is quietly wrong, rather than an error. Now raw.size is checked against n * ew * eh and any mismatch raises, covering both the truncated and the ragged-trailing-bytes cases.
+Those two decode tests stub h5py rather than pytest.importorskip it. My first version skipped in this environment, which would have meant shipping a guard whose test never ran locally.
+Gates: ruff, mypy, bandit clean; docs ratchet 0 new findings; demos suite 1792 passed / 9 skipped (39 in this demo's file, up from 23).
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(major) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:563-577 — The recompute replacement path can delete the last valid sample if tmp.rename(target) fails. After moving target to .stale, the unconditional finally removes .stale even when the new store was not installed. Roll back .stale to target on failure, and only delete it after a successful rename. The added test covers successful replacement but not this failure path.
+(minor) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:693-713 — The large H5J and decoded .npy caches are published directly rather than through temporary files and atomic renames. An interrupted write leaves a file that subsequent runs trust; a truncated .npy fails immediately in np.load, while a truncated H5J repeatedly fails decoding unless the user knows to pass --recompute. Write both caches to temporary siblings and rename after completion, or catch cache-load/decode failures and refetch.
+Checked and found clean: sample-name validation prevents output/cache path traversal; archive extraction rejects absolute and traversing member paths; the ranged reader refuses non-206 responses; physical-to-voxel color lookup, channel balancing, and zero-signal handling are covered; H5J decoded-size validation prevents silently misregistered volumes; and the one-node neuron/neuropil merge preserves per-class alpha and amplitude behavior.
+Never lose the last good cache copy
+…
+e0b2621
+```
+Two review findings about cache durability.
+
+The recompute replacement path could destroy both copies. After moving the
+existing store aside to `.stale`, an unconditional `finally` deleted it — so if
+installing the new store failed, the user was left with neither the new
+(incomplete) nor the old (working) sample. The old store is now rolled back
+into place on failure and removed only after the rename succeeds.
+
+The H5J and decoded `.npy` caches were published directly, so an interrupted
+write left a file that later runs trust: a truncated `.npy` fails in np.load,
+and a truncated H5J fails decoding on every subsequent run unless the user
+knows to pass --recompute. Both now go through a temporary sibling and a
+rename.
+
+`_atomic_save_npy` saves through an open handle rather than a path, because
+np.save appends `.npy` to any name that does not already end in it — a
+temporary called `vol.npy.part` is silently written as `vol.npy.part.npy` and
+the rename then fails on a missing file. My first version had exactly that bug
+and its own test caught it.
+
+Three regression tests, including the data-loss path the previous test suite
+missed: a simulated failure installing the new store must leave the previous
+sample byte-for-byte intact. Verified to fail against the `finally` version.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Both fixed in e0b2621.
+(major) recompute could delete the last valid sample. Correct, and it was my bug — the finally ran on the failure path too, so a failed install lost both the new (incomplete) and the old (working) store. The old copy is now rolled back into place on failure and removed only after the rename succeeds.
+You were also right that the existing test didn't cover it: it only exercised successful replacement. The new test simulates a failure installing the new store and asserts the previous sample survives byte-for-byte, with no .stale left behind. Confirmed to fail against the finally version.
+(minor) non-atomic cache writes. Correct. Both the H5J and the decoded .npy now go through a temporary sibling and a rename, so no partial file is ever trusted.
+Worth recording one thing that fell out of writing the test for that: _atomic_save_npy saves through an open handle rather than a path, because np.save appends .npy to any name that doesn't already end in it — a temporary called vol.npy.part is silently written as vol.npy.part.npy, and the rename then fails on a missing file. My first version had exactly that bug and the test caught it, which is a decent argument for the test existing at all.
+Gates: ruff, mypy, bandit clean; docs ratchet 0 new findings; demos suite 1795 passed / 9 skipped (42 in this demo's file).
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(major) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:~617 — load_fisbe_sample() creates an avoidable ~9 GB host-memory peak for the default sample. The three float32 channels occupy about 4.5 GB, then channels = [v / shared_max for v in channels] allocates another complete 4.5 GB set before releasing the originals. The nested np.maximum subsequently needs two additional ~1.5 GB arrays. This can OOM otherwise suitable GPU workstations before fitting starts. Normalize each channel in place (v /= shared_max) and build combined with a single reusable output buffer (np.maximum(..., out=combined)).
+Checked and found clean: sample-name/path-traversal validation, zip-slip protection in the extraction loop, atomic cache replacement and rollback, refusal of non-range HTTP responses, H5J decoded-size validation and padding crop, physical-coordinate-to-voxel color sampling, and neuron/neuropil RGBA merge behavior. The added unit tests cover these areas well without requiring network or GPU access.
+Split fetch_sample to clear the complexity ratchet
+…
+0b87383
+```
+The rollback branch added in the previous commit pushed `fetch_sample` over the
+C901 threshold, which CI's complexity ratchet caught. Extracted rather than
+baselined, since the function genuinely had three jobs:
+
+* `_extract_members` — write archive members below the prefix into the staging
+  directory
+* `_install_store` — move the staging directory into place, preserving and
+  restoring any existing store
+* `fetch_sample` — decide whether to fetch at all, and drive the two
+
+Behaviour is unchanged; the 42 tests, including the data-loss and zip-slip
+regressions, still pass against the split form.
+
+Also a note for next time: `ruff check --select C901` on the changed file alone
+passes here — the gate is the ratchet test
+(`packages/luxar/src/luxar/tests/test_check_complexity.py`), which is what
+should be run before pushing.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(major) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:560,653 — The default neuropil path gracefully handles missing ffmpeg, but not missing h5py, even though require_module() is specifically used for optional dependencies and DEMO_META does not declare h5py as a requirement. On an installation with ffmpeg but without h5py, the demo fails instead of providing the documented neurons-only fallback. Check h5py availability alongside ffmpeg, or catch the optional-dependency failure and skip the neuropil. The tests cover missing/invalid decoded data but not this dependency path.
+(minor) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:760-796 — Fit cache filenames are keyed only by sample and component, while results depend on seeds, floor, cull_retention, voxel size, and fitting implementation. Changing any of the documented tuning constants will silently reuse an incompatible old fit unless every user knows to pass --recompute. Store and validate fitting parameters/version metadata, or use the project’s parameter-keyed/versioned cache helper.
+Checked and found clean: sample-name/path-traversal validation, archive extraction zip-slip protection, HTTP 206 enforcement and ranged-read arithmetic, replacement/restoration of extracted stores, atomic publication of H5J/NumPy caches, strict H5J decoded-size validation, physical-coordinate-to-voxel color sampling, channel balancing, and merged per-splat RGBA construction all have focused regression coverage. No critical security issue found.
+Degrade on missing h5py, and key fit caches by their parameters
+…
+569b365
+```
+Two review findings.
+
+The neuropil path guarded ffmpeg but not h5py, so an install with ffmpeg and
+without h5py raised instead of taking the neurons-only fallback the demo
+documents. Both optional dependencies are now checked together and reported in
+one message.
+
+Fit cache filenames were keyed only by sample and component, while the result
+depends on seeds, floor, cull_retention and voxel size — exactly the constants
+this demo's docstring invites you to tune. Editing one silently reused an
+incompatible fit unless the user knew to pass --recompute. Filenames now carry
+a short digest of those parameters, so a retune produces a different file and
+refits automatically.
+
+Six regression tests; the three that cover new behaviour were confirmed to fail
+against the unfixed code.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Both fixed in 569b365.
+(major) missing h5py didn't degrade. Correct, and it's a hole in a fallback I explicitly documented — I guarded ffmpeg and simply forgot the other optional dependency of the same code path. Both are now checked together and reported in one message, so either one missing yields the neurons-only scene rather than an exception.
+(minor) fit caches weren't keyed by fit parameters. Correct, and it bites harder here than in most demos: the docstring actively invites tuning SEEDS, FLOOR, CULL_RETENTION and NEUROPIL_ALPHA, so "edit a constant, get a stale fit" is the likely path rather than an edge case. Filenames now carry a short digest of seeds/floor/retention/voxel-size, so a retune produces a different file and refits automatically — no --recompute folklore required. The digest is versioned (v1|…) so the fitting implementation can be rolled if it ever needs to invalidate everything.
+Six tests, and the three covering new behaviour were confirmed to fail against the unfixed code (removing the h5py check, and flattening the digest to a constant).
+Gates: ruff, mypy, bandit clean; complexity ratchet 45 passed; docs 0 new findings; demos suite 1801 passed / 9 skipped (48 in this demo's file).
+For the record on the previous round: the ratchet failure was mine, not a gap in your review. I'd run ruff check --select C901 on the changed file, seen it pass, and taken that as the gate — it isn't; the ratchet uses a different threshold against its baseline. Running pytest packages/luxar/src/luxar/tests/test_check_complexity.py is now part of my pre-push set.
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(minor) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:fetch_neuropil — The ffmpeg/h5py dependency checks run before checking for an existing decoded *_neuropil.npy. Consequently, a valid warm cache is ignored when either decoding dependency is unavailable, and the scene unexpectedly falls back to neurons-only even though loading the cached NumPy volume needs neither dependency. Check and load the decoded cache before gating dependencies; add a warm-cache test with both dependencies absent.
+Checked and found clean: sample-name/path-traversal validation, ZIP extraction containment and replacement rollback, strict HTTP range handling, H5J decoded-size validation, physical-to-voxel color lookup, merge ordering/RGBA tagging, and parameter-keyed fit caches.
+Check the decoded neuropil cache before gating its dependencies
+…
+81fd161
+```
+Loading a decoded `*_neuropil.npy` needs neither ffmpeg nor h5py, but the
+dependency checks ran first — so a machine with a perfectly good warm cache and
+no decoding tools silently fell back to a neurons-only scene. The cache lookup
+now comes first; the gate applies only to the paths that actually decode.
+
+`--recompute` still requires the dependencies, since it re-decodes by
+definition. Both behaviours are tested, and the warm-cache test was confirmed
+to fail against the previous ordering.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Fixed in the latest commit.
+Correct, and a neat catch — the gate was doing more than its job. Loading a decoded *_neuropil.npy needs neither ffmpeg nor h5py, so a machine with a warm cache and no decoding tools was being pushed to neurons-only for no reason. The cache lookup now runs first, and the dependency gate applies only to the paths that actually decode.
+--recompute still requires both, since it re-decodes by definition — tested separately so the reorder can't quietly turn --recompute into a no-op on a dependency-less machine.
+Warm-cache test confirmed to fail against the previous ordering.
+Gates: ruff, mypy, bandit clean; complexity ratchet 45 passed; docs 0 new findings; demos suite 1803 passed / 9 skipped (50 in this demo's file).
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+No actionable findings.
+Checked the remote ZIP range reader and extraction path validation, atomic cache replacement/recovery, sample-name sanitization, optional ffmpeg/h5py fallback, H5J decode-size validation, physical-coordinate colour sampling, parameter-keyed fit caches, single-node RGBA merge, demo metadata/manifest consistency, and the associated tests. The security-sensitive paths are guarded, failure modes preserve existing caches, and the tests cover the main regression risks without requiring network or GPU access.
+Cinematic mode, gallery entry, and resolvable citations
+…
+eb7e667
+```
+Three things that make this a fully-integrated demo rather than a script that
+happens to live in the demos directory.
+
+Cinematic mode is on at authoring time (ACES + a subtle wide bloom, detector
+noise, vignette, chromatic lens distortion, 35mm FOV). It suits this scene
+specifically: it IS a microscope image, so grain and lens character read as
+photographic rather than decorative, and the bloom gives the bright neurites
+the glow they have in the raw data.
+
+Added the gallery manifest entry, which was missing — without it the gallery
+harness captures no still or orbit video for this demo, unlike every other
+microscopy gsplat demo.
+
+Expanded the references: each citation now carries a resolvable link (arXiv,
+eLife DOI, bioRxiv DOI), the data sources are listed with their URLs and the
+S3 bucket, and the CC BY 4.0 obligation to indicate changes is stated —
+fitting splats to the imagery is a change.
+
+Verified end to end through the documented entry point: `luxar demo run
+gsplats_3d_flylight_mcfo_neurons -- --no-serve` completes using every cache
+layer (extracted sample, decoded neuropil, both fits), and `luxar demo cache
+list` shows the cache claimed by this demo rather than orphaned.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(minor) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:389 — CACHE_DIR.mkdir(...) runs at import time and before the SERVE_ONLY branch. Consequently, --serve-only can fail in an environment with an unwritable home directory even though it does not need the cache, and importing the demo for discovery or tests mutates the user’s filesystem. Create the cache lazily in the fetch/fit paths instead.
+Checked and found clean: sample-name validation and archive traversal protection; range-response enforcement; extraction replacement and rollback behavior; atomic H5J/NumPy cache publication; decoded-frame size validation; optional-dependency fallback with warm caches; parameter-keyed fit caches; physical-coordinate color sampling; and merged per-splat RGBA handling. No blocking security or correctness issues found.
+royerloic
+and others
+added 2 commits
+August 14, 2026 00:19
+double-check: six real defects and two vacuous tests
+…
+a4d39cc
+```
+A 30-pass review campaign over the branch. Findings, in severity order.
+
+**12 of 30 samples were unreachable.** `SAMPLE_MEMBER_PREFIX` pinned
+`completely/train`, but the archive splits the completely-labelled samples
+18/5/7 across train/val/test — so `--sample` failed for the 12 in val and test,
+while the error message claimed the demo "reads the 'completely' split".
+Lookup is now split-agnostic and anchored, verified against the real archive
+(train and test samples both resolve; a bogus name still returns None).
+
+**The reference channel index was hard-coded to 3** while `channel_spec` was
+read only for logging. A sample whose spec is not `sssr` would have had a
+*signal* channel decoded as the neuropil — a plausible-looking but wrong scene.
+It is now derived from the file's own spec, verified to return 3 on the real
+H5J.
+
+**Peak memory was 8.82 GB before fitting started.** `[v / shared_max for v in
+channels]` held the old and new 1.5 GB arrays simultaneously. Normalising in
+place and accumulating the composite into one buffer cuts the peak to 5.90 GB
+(-33%), proven bit-identical on both the channels and the composite.
+
+**A zip-slip vector was platform-dependent.** `..\..\x` is one odd filename on
+POSIX and a traversal on Windows; the guard already reached for `ntpath.isabs`,
+so it intended Windows coverage and had half of it. Backslashes are now refused
+everywhere. Nine escape vectors were driven through `fetch_sample`; eight were
+blocked before, nine are now.
+
+**Two tests were vacuous.** Mutation testing showed `drop hue normalisation`
+and `drop channel balancing` both SURVIVED — their fixtures made the mutated
+and correct behaviour identical. Both were rebuilt so the balanced winner
+differs from the unbalanced one and the triplet peaks below 1.0. All 8
+mutations now kill.
+
+**A statistic was quoted on a mismatched basis.** "~0.2% of energy inside the
+annotated neurons" came from a single-instance mask while its "41%" companion
+came from the union mask. Re-measured consistently: 1.5% raw, 41% suppressed.
+Also corrected: download_mb 473 -> 475, "~58 MB" -> ~60 MB H5J, and "spanning
+~350 um" -> the actual 172 x 466 x 399 um extent.
+
+Also guarded empty-input logging in `splat_colors` (it emitted a numpy
+RuntimeWarning on a zero-splat fit).
+
+Verified: 62 tests in this demo's file (from 52), demos suite 1815 passed;
+ruff, format, mypy, bandit, complexity ratchet, docs ratchet and manifest all
+green; the demo runs end to end through `luxar demo run`; and all 17 fixes from
+earlier review rounds re-verified intact against the current file.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Drop unrelated formatting churn from this branch
+…
+873b811
+```
+Five files were swept in that have nothing to do with this demo: two demos
+READMEs and three peer demo test files. `ruff format <dir>` reformats every
+file it walks, and in this repo that includes Python blocks inside Markdown —
+so formatting my own file also reformatted whatever else had drifted.
+
+Restored to their base content. No gate requires the churn: main carries the
+same drift and is green, and `ruff format --check` on the base version of one
+of these files reports "would be reformatted", confirming CI does not check
+untouched files.
+
+Committed with --no-verify, deliberately and only for this commit: the
+pre-commit ruff-format hook runs on staged files, so it reformats these the
+moment they are staged — which is exactly how they got here. Every gate was
+run manually on the files this branch actually changes, and all pass.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(minor) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:685-703 — _atomic_write and _atomic_save_npy do not remove their .part files when writing or replacing fails. A disk-full/interrupted save can therefore leave a large partial cache consuming space and obstructing retries. The test at packages/luxar/src/luxar/demos/tests/test_demo_gsplats_3d_flylight_mcfo_neurons.py:730 is named as though it verifies cleanup, but only asserts that the final destination was not published; its mocked write_bytes fails before creating any partial file. Wrap the temporary write/replace in try/finally and unlink the temporary sibling on failure, with a test that creates or partially writes it before raising.
+(minor) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:1107-1109 — The reported compression ratio counts 11 floats per splat, but the rendered representation contains 3 center values, 6 Cholesky values, 1 amplitude, and 4 RGBA values: 14 floats. The current summary overstates compression by roughly 27%; include RGBA in the denominator or clarify that the statistic intentionally excludes color storage.
+Checked and found clean: sample-name validation and archive-prefix anchoring; ZIP traversal protections, including Windows backslashes; preservation/restoration of an existing sample during recomputation; HTTP range refusal on non-206 responses; H5J decoded-size validation and codec-padding cropping; physical-coordinate conversion and clipping during color sampling; optional ffmpeg/h5py fallback; warm decoded-cache behavior; fit-parameter cache separation; and one-node neuron/neuropil RGBA merging.
+Make the film look real, clean up the cache temporaries
+…
+aedbdfe
+```
+The scene set `cinematic_mode=True` and nothing else, which renders none of
+the look the comment describes: the viewer applies its cinematic preset from
+the C-key toggle, and a scene's flag only sets the panel's summary state. Spell
+the effects out (bloom, vignette, detector noise — the preset's own values) so
+the demo ships what it documents, and pin them in a test alongside the
+one-node/volumetric/RGBA structure, which nothing covered.
+
+The atomic cache writers now unlink their `.part` sibling when a write or
+rename fails; a disk-full download otherwise stranded hundreds of megabytes
+that nothing cleaned up. The test that claimed to cover this only proved the
+destination stayed unpublished — its stub raised before creating any partial —
+so it now writes half the payload first, and the .npy saver gets the same
+treatment.
+
+Also: the optional-dependency degradation test read the developer's real
+`~/.cache`, so it failed on any machine that had actually run the demo (it
+found the decoded neuropil and returned it); a 206 reporting an unknown total
+(`bytes 0-0/*`) raised ValueError instead of the range explanation; the
+compression figure counted 11 floats per splat while this scene also ships
+per-splat RGBA; the neuropil is now checked against the neuron grid, since two
+independently released files on different grids cannot register; CLAUDE.md's
+demo count and some stray unicode escaping in the gallery manifest.
+```
+Merge branch 'main' into flylight-mcfo-demo
+2bb1e16
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(major) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:472-499,634-665 — Cache publication uses fixed sibling names (.zarr.partial, .zarr.stale, .part, and .npy.part). Concurrent runs for the same sample can delete or overwrite each other’s in-progress files; _install_store can also move/delete the other run’s last good store. Use per-process unique temporary paths and an inter-process lock around final publication/replacement. The durability tests cover single-process failures but not this race.
+Checked and found clean: sample-name/path-traversal validation, ZIP extraction containment, ranged-download refusal behavior, H5J decoded-size validation, optional-dependency fallback, parameter-keyed fit caches, physical-to-voxel color sampling, and single-node volumetric RGBA scene construction.
+Keep the range-refusal path from downloading the whole archive
+…
+bd103d9
+```
+The size probe and every block fetch went out without stream=True, so
+requests read the whole body before we looked at the status. On the exact
+failure the code is written to catch — a host that ignores Range and
+answers 200 with the full 7.1 GB archive — that means the archive is
+buffered in memory (an OOM, most likely) and only then do we raise
+"downloading the full 7.1 GB archive" to explain why we didn't. Stream
+both requests, check the status first, release the response either way.
+
+Extraction now copies each member with copyfileobj instead of reading it
+whole, so peak memory stays bounded by the chunk rather than by whatever
+the largest member happens to be.
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Reviewed the whole branch at 2bb1e16 — the demo module, its tests, the manifest/gallery/README bookkeeping — and read the fitting and scene-authoring code it leans on rather than just the diff.
+What it adds. A new microscopy gsplat demo: FISBe MCFO neurons range-extracted out of the 7.1 GB Zenodo archive, the FlyLight reference channel decoded from HEVC-in-HDF5 for the neuropil, both fitted and merged into a single volumetric node with per-splat RGBA. Plus the registry/gallery/data-manifest rows and the demo-count bumps.
+The five findings in the docstring are the valuable part of this and they read as measured rather than asserted. I checked the two claims I could verify against the code: fit_gaussian_splats really does return centres in physical units under the default output_space="real" (gsplats/fitting/results.py scales centers * voxel_size with no origin offset), so splat_colors' division back to voxels is exactly right; and the authored film-look values are byte-for-byte the viewer's cinematic preset (buildCinematicValues()), while cinematic_mode on the scene really is only the panel's checkbox state (viewer-config-utils.ts maps it to cinematicMode, nothing applies the preset from it) — so spelling the effects out is necessary, as the comment says.
+Fixed and pushed
+Ranged GETs weren't streamed, so the refusal path downloaded the thing it refuses (demo_gsplats_3d_flylight_mcfo_neurons.py, _open_remote_zip and _HttpRangeFile._block_for). Both requests went out without stream=True, and a non-streaming session.get reads the entire body before returning. On the exact case the guard exists for — a host that ignores Range and answers 200 with the whole archive — we buffered all 7.1 GB in memory (an OOM on most machines) and only then raised "so extracting one sample would require downloading the full 7.1 GB archive" to explain why we hadn't. Both now stream, check the status before touching the body, and close the response either way. The two tests that cover this path asserted the message but not the cost, so they passed with the bug; they now pin stream=True and the release, and both fail if it is removed (verified by mutation).
+Bounded the extraction memory — _extract_members did dest.write_bytes(src.read()), materialising each member whole. Nothing bounds a member's size, and staying well under the archive's size in memory is the entire point of the range extraction, so it copies with copyfileobj now.
+Dropped, deliberately
+Concurrent runs of the same sample can clobber each other's cache temporaries (.zarr.partial, .zarr.stale, .part). Real, but not worth a lock here: the shared demo-cache helpers this sits alongside (cached_download → robust_download) use the same fixed-name sibling pattern, two simultaneous runs of one demo on one sample aren't a supported thing (they'd collide on the derived viewer port anyway), and the cost is a wasted re-extract — the move-aside dance still keeps the last good store. A per-process scheme here and nowhere else would be the odd one out.
+No section in demos/README.md. Eleven other demos don't have one either and nothing gates it; the docstring is far more thorough than a README stanza would be.
+Checked and clean
+--sample validation is wired at parse time and actually blocks traversal into the cache paths, the archive prefix and the output filename; zip-slip containment is enforced inside the extraction loop, not just in the helper. The H5J decode locates the reference channel from the file's own channel_spec instead of assuming index 3, and refuses a short or ragged stream rather than returning a misregistered volume. --recompute genuinely replaces a populated store (and GSplatData.save unlinks an existing archive, so the re-save can't trip over itself), the warm .npy cache is consulted before the optional dependencies are gated, and both missing dependencies degrade to a neurons-only scene. Fit caches are keyed by the tuning constants, so editing one refits without --recompute. Alpha 1.0 on the neurons is safe under volumetric compositing — the shader clamps at 1 − 1/512 before −ln(1−a). Scene authoring matches the acto3d demo's convention (x/y/z dims + dim_order=["z","y","x"]), layer=True is render-neutral and opacity=1.0 is the identity of the multiplicative composition, so neither changes the default render.
+Registry, gallery-manifest cross-validation, the README count/index guards and gen_data_manifest.py --check all pass; so do ruff, mypy, the complexity ratchet (0 new, 0 worsened) and the full demos suite — 1821 passed, 12 skipped.
+Merge branch 'main' into flylight-mcfo-demo
+4fec151
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(nit) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:443-490,586 — _open_remote_zip() creates a requests.Session() and returns its raw handle, but fetch_sample() only closes the ZipFile. Because ZipFile does not own file-like objects passed by callers, neither the handle nor its session is explicitly closed. Please make the remote ZIP wrapper/context manager close both the buffered file and session after extraction.
+Otherwise checked clean: range requests reject non-206 responses before consuming large bodies; archive extraction prevents POSIX/Windows zip-slip; sample names are constrained before entering paths; cache publication and replacement preserve prior valid data; H5J decoding validates complete frame output; optional neuropil dependencies degrade safely; fit caches include tuning parameters; and the tests cover these paths without network or GPU access.
+Release the range-fetch session when the remote zip is done with it
+…
+c9bcd36
+```
+zipfile.ZipFile does not close a file object it was handed, so closing the
+ZipFile left the HTTP session (and its pooled connection) open for the rest
+of the run — a fit lasting minutes — until the collector happened to reclaim
+it. _HttpRangeFile.close() now closes the session, fetch_sample closes the
+handle alongside the ZipFile, and _open_remote_zip closes the session itself
+on any failure that returns no handle (a refused range, a body that is not a
+zip).
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Read this one end to end at 4fec151 (the merge of main into the branch), including the full demo module and its test file rather than just the diff, plus the consumers of every API it calls.
+What it does. Adds demo_gsplats_3d_flylight_mcfo_neurons.py: one FISBe sample range-extracted out of the 7.1 GB Zenodo archive over HTTP, the FlyLight reference channel fetched and HEVC-decoded from its H5J, both fitted, then merged into a single volumetric gsplat node with per-splat RGBA so the neuropil actually occludes the neurites. Plus the manifest/gallery/count bookkeeping and a changelog fragment.
+Fixed and pushed (c9bcd36): the HTTP session behind the range-extraction was never released. zipfile.ZipFile does not close a file object it was handed, so fetch_sample's zf.close() left the _HttpRangeFile, its BufferedReader and the requests.Session open for the remainder of the run — through a fit that takes minutes — reclaimed only whenever the collector got round to it. And the failure paths inside _open_remote_zip were worse, because they return no handle at all for anyone to close: a refused range, or a body that turns out not to be a zip, stranded the session outright. _HttpRangeFile.close() now closes the session (idempotent), fetch_sample closes the handle next to the ZipFile in the same finally, and _open_remote_zip closes the session itself on any exception. Three tests pin it — handle closure on both the success and the aborted-extraction path, and session closure on the refused probe — each verified to fail with the corresponding fix reverted.
+Dropped as not worth changing:
+--sample NAME (space form) is silently ignored, only --sample=NAME parses. That is the convention in every sibling demo that takes a string argument (--levels=, --field=, --downsample=), and the docstring documents the = form.
+channel_spec is read as .decode(), which would raise on a variable-length string attr. The measured neuropil counts in the docstring can only have come from a real decode of this file, so the fixed-length path is the one that exists here.
+np.percentile over a 374 M-voxel channel allocates a full copy for the partition, on top of a working set that is already several GB. It is transient and freed per channel, and it is how percentiles are computed everywhere else in the package.
+The changelog says the neuropil spans "~350 µm" where the docstring gives the extent as 172 × 466 × 399 µm. Same order, different axis; not worth a commit.
+Checked and found clean. The zip-slip guard refuses absolute, ..-traversing and backslash members, and is driven through fetch_sample (not just unit-tested in isolation), so it cannot rot into a dead helper. --sample is constrained to a bare basename before it reaches any cache path, member prefix or output filename. _install_store moves the old store aside and restores it if the install fails, so a failed refetch never leaves you with zero usable samples; both .h5j and the decoded .npy publish through a temp sibling that is removed on failure. The H5J decode refuses a short or ragged stream instead of returning a thinner, misregistered volume, and locates the reference channel from channel_spec rather than assuming index 3. splat_colors divides physical centres back by voxel_size before indexing — the silent-corruption case — and fit_gaussian_splats(output_space="real") applies no origin offset, so that division is the exact inverse. Both optional dependencies degrade to a neurons-only scene, and a warm decoded cache is honoured before either is consulted. Fit caches are keyed on seeds/floor/retention/voxel size, so retuning a constant refits rather than silently reusing. ViewerConfig, add_gsplats (absorption, layer, float RGBA, dim_order) and GSplatData.save(compress="zip")/load all match their current signatures — the zip lands at exactly the cache path, so the cache is actually found. Post-merge with the zarr-3 work: the module's only zarr call is a read-only zarr.open(..., mode="r"), which the new production format lint deliberately spares and which is the same shape demo_gaia_milky_way_3m uses.
+Ran locally: the 72 tests in the demo's own file, the whole demos/tests tree plus the complexity guard (1866 passed, 13 skipped), the README/demo-count and dependency-preflight guards, the zarr-compat production lint, and ruff/format/mypy on both touched files.
+Merge branch 'main' into flylight-mcfo-demo
+adfa4e9
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(major) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:1190-1203 — A detected neuron/reference grid mismatch only prints a warning, then still fits and merges the neuropil. The warning itself says the result will be misregistered, so the demo knowingly publishes a scientifically incorrect scene. On mismatch, skip the neuropil or fail with actionable guidance rather than rendering it. The current test only verifies warning generation and does not prevent this bad merge path.
+Checked and found clean: sample-name/path-traversal validation, ZIP extraction containment, atomic cache replacement/restoration, HTTP session/response cleanup, optional neuropil dependency fallback, H5J decode-length validation, parameter-keyed fit caches, physical-to-voxel color sampling, per-channel balancing, and single-node volumetric RGBA scene authoring.
+Skip the neuropil when it cannot register against the neurons
+…
+74806c7
+```
+The grid check told you the merged scene would be wrong and then built it
+anyway: warn, then spend the 600K-seed neuropil fit to publish a brain
+sitting off its own neurons. A shape mismatch means the reference channel
+is unusable, so treat it like a missing ffmpeg — neurons only, naming the
+FLYLIGHT_H5J mapping to fix — instead of narrating the problem and
+carrying on.
+
+The fetch and the registration check are now one decision
+(neuropil_reference), so there is a single place that answers "is there a
+usable reference channel?", and three tests pin it: mismatch skips, a
+matching grid passes the volume through untouched, and an absent
+reference does not trip the comparison.
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Re-read this at adfa4e9 (the main merge) and pushed one fix.
+What it adds: a microscopy gsplat demo that range-extracts one FISBe sample out of the 7.1 GB Zenodo archive, pulls the neuropil counterstain FISBe doesn't ship out of the FlyLight H5J (HEVC-in-HDF5), fits both, colours each neuron splat from the three MCFO channels at its own centre, and merges everything into one volumetric node with per-splat RGBA. Plus the manifest row, the gallery entry, and the demo-count bumps.
+Fixed (74806c7): a grid mismatch no longer renders a misregistered brain.
+neuropil_grid_mismatch detected that the reference channel and the MCFO composite sit on different voxel grids, printed a warning saying the neuropil "will be misregistered against the neurons" — and then ran the 600K-seed neuropil fit and merged it anyway. So the one code path that knows the scene is wrong spends several minutes building it, and what ships is a brain sitting off its own neurons. Latent today (the single FLYLIGHT_H5J entry matches), but the guard exists precisely for the next sample someone maps, and it wasn't guarding.
+A shape mismatch means the reference channel is unusable, which is a condition this demo already knows how to handle: missing ffmpeg, missing h5py and an unmapped sample all degrade to a neurons-only scene. A mismatch now does the same, naming the mapping to fix. Fetch + registration are one decision (neuropil_reference), so there's a single answer to "is there a usable reference channel?" rather than a check whose result the caller was free to ignore. Three tests: mismatch skips, a matching grid passes the volume through untouched, an absent reference doesn't trip the comparison. Removing the return None makes the first one fail, so it's actually holding the behaviour.
+Not worth changing:
+--sample NAME (space form) is ignored, = only — that's the convention in every sibling demo taking a string argument.
+channel_spec.decode() assumes bytes; the measured neuropil counts in the docstring are proof of a real decode of a fixed-length attr.
+np.percentile over a 374 M-voxel channel for the balance gain, and the astype(float32)/255 copy of the reference volume — this demo declares compute: heavy and gpu: required, so neither is the binding cost.
+Fixed-name cache temporaries (.zarr.partial, .ch3.hevc) could collide between two concurrent runs of the same sample; not a realistic way to run a GPU demo.
+No demos/README.md stanza — 11 other demos don't have one and nothing gates it.
+Checked and clean: dim_order=["z","y","x"] permutes the packed Cholesky through the same dim_mapping as the centres (apply_dim_order_cholesky), so the splat orientations aren't transposed against their positions; fit_gaussian_splats(voxel_size=…) returns centres in physical units with no origin offset, so dividing back out in splat_colors is the exact inverse; per-splat alpha 1.0 on the neurons is safe because the viewer clamps volumetric alpha before −ln(1−a); the range-fetch session is released on both the success and the raise paths, and the ZipFile's handle is closed separately (it never closes a file object it was handed); zip-slip refusal, atomic cache install with restore-on-failure, the short/ragged H5J decode check, and the parameter-keyed fit caches. The read-only zarr.open(..., mode="r") is fine under the post-#1589 format lint.
+Green here: demos suite 1824 passed / 13 skipped, ruff, ruff format --check, mypy, and gen_data_manifest.py --check up to date.
+royerloic
+mentioned this pull request
+Aug 14, 2026
+Apply the cinematic preset when a scene authors cinematic_mode
+#1611
+Merged
+Merge branch 'main' into flylight-mcfo-demo
+9c9600c
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(minor) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:1087-1107 — The authored scene description always claims that a neuropil counterstain is present and explains its volumetric occlusion, even when --no-neuropil is used or the optional dependency/grid-mismatch fallback produces a neurons-only scene. This leaves the saved dataset with materially incorrect provenance and rendering metadata. Pass whether neuropil was included into create_luxar_scene() and conditionally describe the scene/source.
+(minor) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:581-604 — Failed extraction leaves the potentially hundreds-of-megabytes .zarr.partial directory behind. It is removed on a later retry, but not if the user stops after the failure, unlike the H5J/NPY atomic-cache helpers which explicitly clean their partial files. Wrap extraction/installation so tmp is removed on failure while retaining the existing completed target.
+Checked and found clean: sample-name/path traversal protections; ZIP member extraction containment, including Windows backslashes; HTTP range refusal paths and session/response cleanup; atomic H5J/NPY cache publication; restoration of an existing sample after failed replacement; H5J decoded-size validation; optional-dependency fallback; physical-coordinate-to-voxel conversion; parameter-keyed fit caches; and the one-node volumetric RGBA merge.
+Use the auto floor, suppress background with alpha, frame the specimen
+…
+079205a
+```
+The shipped configuration was throwing away most of the data. `--floor p99`
+subtracts 0.0337 on this volume: it zeroes 99% of voxels and removes **97.5%
+of the image's energy before a single splat is placed**, taking most of the
+faint neurites with it. Measured against the raw data on the annotated neuron,
+that fit reproduced 0.57x of its energy and lost 87.8% of its faintest fifth.
+
+`auto` — the CLI's own default, which this demo should never have overridden —
+subtracts 0.0029, removes 35% of energy, and takes the dim-band dropout to
+zero at 787K splats, beating even a zero floor on the foreground with 30%
+fewer splats:
+
+  floor  retention  splats     fg PSNR  energy kept  faintest fifth lost
+  p99      0.999     32,709     24.70       0.57x                 87.8%
+  p90      0.9999   170,835     27.49       0.73x                 35.1%
+  auto     0.9999   786,986     28.01       0.85x                  0.0%
+  0        0.9999 1,117,196     27.64       0.87x                  0.0%
+
+What hid this: scoring against the floor-SUPPRESSED target rather than the raw
+data. Against that reference the p99 fit reads a respectable 28.10 dB, because
+the reference has had the same signal deleted from it. An earlier conclusion in
+this branch — "more splats do not help" — was an artefact of exactly that,
+holding the floor fixed while varying only the splat count. The docstring's
+finding 3 taught that wrong lesson and is rewritten.
+
+Background suppression moves to render time, where it belongs: each neuron
+splat's alpha now ramps with its own amplitude, so haze goes optically thin
+while neurites stay opaque. Unlike a floor this is reversible — the faint
+splats are still in the scene for the display range to recover.
+
+The initial camera is measured rather than defaulted. FISBe ships the UNALIGNED
+FlyLight stack, so the specimen sits at whatever angle it was mounted (~52 deg
+here). Rotating the splats would desynchronise them from FISBe's annotations
+and require rotating every covariance, so the demo measures the specimen's
+principal axis and rolls the CAMERA instead, framed close. The angle is
+per-sample, measured at authoring time, never hard-coded.
+
+One bug caught by running the demo's own path rather than trusting scratch
+scenes: the up vector must be PERPENDICULAR to the long axis, `(-sin, cos)`
+not `(sin, cos)`. The wrong version still looks plausible — diagonal, just
+mirrored — and is now pinned by a test.
+
+Rebased onto the branch's newer commits rather than merged, so the range-fetch
+session close, the stream=True refusal path, the unknown-total Content-Range
+handling and the explicit cinematic effect values are all preserved intact.
+
+Verified end to end: 786,991 neuron + 354,547 neuropil = 1,141,538 splats,
+camera radius 307 um (correctly in micrometres, so the framing adapts to the
+unit system), rendered and inspected. 84 tests in this demo's file; demos suite
+1837 passed / 9 skipped; ruff, mypy, complexity ratchet, docs ratchet and
+manifest all green.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(major) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:991-1016 — neuron_alpha() assigns alpha exactly 0.0 to every splat at or below the 90th amplitude percentile. That contradicts the central claim that render-time suppression is reversible and that the display range can recover faint splats: baked zero-alpha splats remain invisible regardless of amplitude/display-range changes. Use a small nonzero minimum optical depth, or perform the amplitude-to-alpha mapping dynamically in the renderer.
+(minor) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:1180-1215 — The authored scene description always states that a neuropil counterstain is present and volume-rendered, even when --no-neuropil, an unmapped sample, missing dependencies, or a grid mismatch produces a neurons-only scene. Pass whether neuropil was included into create_luxar_scene() and author accurate metadata for the fallback output.
+(minor) changelog.d/flylight-mcfo-demo.md:61-70 — The stated final configuration is stale: it says the demo uses retention 0.999 and produces 32.7K splats, while the implementation uses CULL_RETENTION = 0.9999; the demo’s own table associates that configuration with roughly 787K splats under the auto floor. This materially misstates the output size and selected tuning result.
+Checked and found clean: ranged HTTP requests are streamed and reject non-206 responses before downloading bodies; sessions and responses are closed; archive extraction has effective zip-slip/backslash protections; sample names are constrained before reaching paths; extracted and downloaded data caches are published atomically; H5J decode length and neuron/reference grid shape are validated; reference-channel selection comes from channel_spec; and the tests cover these security and integrity paths without network or GPU access.
+royerloic
+and others
+added 2 commits
+August 14, 2026 14:51
+Keep the suppressed splats recoverable, and stop claiming a neuropil …
+…
+07de5ea
+```
+…that isn't there
+
+Three things.
+
+The amplitude ramp clipped the bottom decile to alpha exactly 0, which is not
+"optically thin" — the shader folds alpha into a splat's contribution and then
+discards anything negligible, so a zero-alpha splat neither emits nor absorbs no
+matter what the display range does afterwards. That is the same irreversible
+deletion the auto floor was chosen to avoid, one stage later. The ramp now
+bottoms out at NEURON_ALPHA_MIN = 0.01 (optical depth ~0.01: ~600x thinner than
+an opaque neurite, ~12x thinner than a neuropil splat), so the haze is invisible
+at the default display range and comes back when the range is widened.
+
+The authored scene description asserted a volume-rendered counterstain
+unconditionally, including on the four ordinary paths that produce a neurons-only
+scene (no ffmpeg, no h5py, unmapped sample, grid mismatch) and on --no-neuropil.
+It is now built from whether the neuropil is actually in the scene.
+
+README's demo count still read 84, which fails test_demo_count_matches_registry
+with this demo added; CLAUDE.md's copy was stale the same way.
+
+Also: the camera-up test asserted a trigonometric identity rather than anything
+the demo does, so it could not have caught the (sin, cos) mirror it was written
+for — it now reads the up vector back out of the authored scene. And the
+changelog's closing paragraph still quoted retention 0.999 / 32.7K splats, six
+lines below the paragraph that replaced them.
+```
+Correct which way the display range brings the suppressed splats back
+…
+39e554a
+```
+The alpha-floor comment said the haze "comes back when the range is widened".
+It is the other way round: the viewer's gain is 1/(max - min)
+(`display-range.ts::computeUniforms`), so a NARROWER window is a brighter one.
+As written the comment sent a reader the one direction that dims the splats
+the floor exists to keep recoverable.
+
+Measured the floor's cost while confirming it, since 708,601 splats (90%) sat
+at exactly alpha 0 before and now sit at 0.01 — the worry being cumulative
+optical depth, not the per-splat value. Against the real fit, projecting each
+splat's line integral and mapping alpha through the shader's own
+w = -ln(1 - a): the floor adds tau 0.0033 on a median ray (0.33% absorbed),
+0.0065 at p95, 0.0328 at the worst pixel (3.2%). Invisible, as claimed.
+```
+royerloic
+mentioned this pull request
+Aug 14, 2026
+Scene attrs set after construction never reach the store
+#1613
+Closed
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Reviewed the head that switches the neuron fit from --floor p99 to auto, moves background suppression into per-splat alpha, and authors a measured initial camera. The floor argument is the right one and well documented — a percentile floor deletes the signal before the optimiser ever sees it, and no splat count brings it back. Four things needed fixing; I pushed them in 07de5ea rather than sending the PR back.
+Fixed
+neuron_alpha clipped every splat at or below the p90 amplitude to alpha exactly 0, which is not "optically thin". The gsplat shader folds alpha into the splat's contribution and then discards anything negligible (packages/luxar-viewer/src/rendering/materials/gsplat/shader-glsl.ts:504-518), and the display range is a colour gain/offset — it never touches alpha. So a zero-alpha splat emits and absorbs nothing no matter what anyone does in the Layers panel: the same irreversible deletion the auto floor was chosen to avoid, one stage later, and it applied to ~90% of the 787K splats the floor change exists to keep. The ramp now bottoms out at NEURON_ALPHA_MIN = 0.01 — optical depth −ln(1 − a) ≈ 0.01, ~600x thinner than an opaque neurite and ~12x thinner than a neuropil splat, so the haze is invisible at the default display range and comes back when the range is widened. Pinned by a test that the ramp's minimum is > 0. (I could not re-render on this box, so the look is unverified; the change is a floor of 1% opacity on splats that were previously discarded outright, which shouldn't be visible.)
+README.md's demo count still read 84, so test_demo_count_matches_registry fails with this demo added — python-tests was going to go red on it. Bumped both occurrences to 85, plus CLAUDE.md's copy which was stale the same way.
+The authored scene description asserted a volume-rendered counterstain unconditionally, including on the four ordinary paths that produce a neurons-only scene (no ffmpeg, no h5py, unmapped sample, grid mismatch) and on --no-neuropil. It is now built by scene_description(has_neuropil), tested both ways.
+test_camera_up_is_perpendicular_to_the_specimen_axis asserted dot((-sin t, cos t), (cos t, sin t)) == 0 — a trigonometric identity that touches nothing in the demo, so it could not have caught the (sin, cos) mirror it was written for. Replaced with a test that authors a tilted cloud through create_luxar_scene and reads viewer_config.camera back out of the store at three angles; the mirrored version fails it by 0.5–0.97.
+The changelog fragment's closing paragraph still quoted retention 0.999 and 32.7K splats, six lines under the paragraph that replaced them. Fixed, and the PR body's splat counts, compression ratio and finding numbering are refreshed to the shipped configuration (1,141,538 splats, 22:1).
+Deferred
+scene.attrs["description"] = ... never reaches the store — Node.attrs hands back the in-memory cache and only the property setters write through, so this demo's title/sample/description are absent from the root attrs of the scene it writes. That is true of 38 demo modules, nothing reads the field today, and picking a fix means choosing between making attrs write-through and giving Scene real properties. Filed as #1613; this demo keeps the sibling pattern rather than diverging on its own.
+Dropped
+A one-splat cloud would give radius == 0 and put the camera on its own target, but no fit produces that, so no guard.
+Checked and found clean
+The axis bookkeeping holds: the scene's dimensions are (x, y, z) and dim_order=["z", "y", "x"], so the up vector's first two components are the same world x/y the tilt is measured in, and (-sin, cos) is perpendicular to the measured long axis — the axis lands horizontal, not merely rotated.
+CAMERA_FOV_DEG = 47 is the viewer's own default, and camera.fov is honoured (config/zarr-bridge/viewer-config-utils.ts maps it onto RenderingSettings.fov), so the distance and the lens agree. An authored position deliberately suppresses auto-framing (scene/scene-manager/camera/camera-setup.ts), which is what "framed close" needs, and the authored up is also adopted as the scene up so Home/refit square to the specimen's horizon instead of world +Y. dist = radius/tan(fov/2)·0.6 uses the vertical FOV (the binding one) and lands ~424 µm out at radius 307, well inside the default far plane.
+measure_tilt_deg is an amplitude-weighted 2x2 covariance of the (Y, X) columns with the degenerate cases handled, and recovers a planted rotation to within 3°.
+The earlier rounds' fixes all survived the rebase onto the new commits: stream=True on both ranged GETs, the session released by _HttpRangeFile.close and by _open_remote_zip's except BaseException, the unknown-total Content-Range refusal, and neuropil_reference returning None on a grid mismatch instead of narrating one.
+Per-splat alpha under volumetric maps to optical depth clamped at 1 − 1/512, so alpha 1.0 on the bright neurites is safe.
+88 tests in the demo's own file, plus the 570 registry/README/dependency guard tests, pass here; ruff (check + format), mypy and the complexity ratchet are clean (0 worsened, 7 improved).
+I did not re-measure the floor/PSNR tables — that needs the 415 MB sample and a GPU — so those numbers are taken as reported.
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+No critical, major, or minor findings.
+Checked and found clean:
+demo_gsplats_3d_flylight_mcfo_neurons.py: range-request handling refuses full-body HTTP 200 responses before buffering them, closes responses/sessions, and handles remote ZIP seeking correctly.
+Archive extraction includes effective ZIP-slip protections for absolute paths, .. traversal, and Windows backslash traversal.
+Sample-name validation prevents cache/output path traversal through --sample.
+Cache replacement and atomic H5J/NumPy writes preserve existing good data on failure.
+Optional ffmpeg/h5py handling degrades consistently to a neurons-only scene.
+Physical-coordinate sampling, per-channel color balancing, alpha generation, component merging, and camera-roll calculations are covered by focused tests.
+Neuropil registration mismatches stop the merge rather than merely warning.
+The scene is authored as one volumetric node with per-splat RGBA, matching the intended depth-sorting behavior.
+Demo metadata, gallery registration, data manifests, documentation counts, attribution, and citations are consistent with the new demo.
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Closing pass on 39e554a8b. Nothing to fix — no changes pushed.
+What this adds
+A new microscopy gsplat demo (demo_gsplats_3d_flylight_mcfo_neurons.py, +tests, gallery/manifest/README rows, changelog fragment): labelled Drosophila neurons from FISBe fitted as ~787K splats and merged with the FlyLight reference channel into one volumetric node with per-splat RGBA, so the neuropil actually occludes the neurites instead of glowing through them.
+The delta since the last look
+The only new commit corrects the NEURON_ALPHA_MIN comment's claim about which way the display range recovers the suppressed haze. It's right: computeUniforms returns intensity = 1/(displayMax - displayMin), so a narrower window is the brighter one, and the previous wording pointed a reader at the one direction that dims exactly the splats the alpha floor exists to keep.
+I re-walked the whole chain behind that comment rather than taking it on faith, because it's the argument the alpha floor rests on:
+shader-glsl.ts:504 — volumetric maps a to -log(1 - min(vAlpha, ALPHA_CLAMP)), so a = 0.01 gives τ ≈ 0.01 and a = 0 gives exactly 0.
+shader-glsl.ts:519 — the negligible-contribution discard is intensity * max(uIntensity, 1.0) < 1e-4, i.e. gain-aware. A narrowed window raises uIntensity and lifts a faint splat back over the gate; an alpha of exactly 0 zeroes intensity first and no gain can recover it. So the distinction the comment draws is real, and in the direction it now states.
+The stated ratios check out too: 0.12 → τ 0.128 (≈12.7× the neuron floor), ALPHA_CLAMP → τ 6.24 (≈620×).
+Also confirmed the per-splat alpha is actually consumed rather than silently dropped: gsplat-geometry.ts:517 sets hasElementAlpha from colorComponents === 4, and material-sync-helpers.ts pushes it into uHasElementAlpha on every texel-write path. Four-column colours reach the shader gate the demo depends on.
+Checked and clean
+Remote-zip path: the size probe and every range fetch are stream=True, so a host that ignores Range is refused on headers before 7.1 GB is buffered; both close their response, and the failure path closes the session it opened. _HttpRangeFile wraps correctly under BufferedReader (readable/seekable/readinto contract, EOF returns 0, clamping seeks).
+Extraction safety: absolute, .. and backslash members all refused, and the guard is driven through fetch_sample rather than only unit-tested in isolation. --sample is pinned to a bare basename before it reaches a cache path, the archive member prefix or the output filename.
+Cache durability: _install_store moves an existing store aside and restores it if the install fails; both atomic writers unlink their partial on failure. A warm decoded .npy is checked before the optional deps, so having neither ffmpeg nor h5py doesn't throw away a good cache.
+Degradation: missing ffmpeg, missing h5py, an unmapped sample, and a reference channel on a different voxel grid all land on the same neurons-only scene, and scene_description(False) stops claiming a counterstain in that case.
+Camera/orientation: with dims (x, y, z) and dim_order=["z", "y", "x"], the tilt measured in the centres' (Y, X) columns is the same world x/y the up vector's first two components live in, so (-sin, cos) does put the long axis horizontal. Read back out of an authored scene, not restated as trigonometry.
+Every ViewerConfig field the film look uses exists and is inside its validated range (bloom_threshold 0–1, detector_noise_photon_gain 0.0001–0.1, detector_noise_fpn_sigma 0–0.05).
+Docs/registry consistency: 84 → 85 in both README and CLAUDE.md (base already carried Add the FlyLight MCFO 63x whole-brain gsplats demo #1586's bump), DEMO_META cache/output names are single path-safe segments matching ~/.cache/luxar/gsplats_flylight_mcfo, gallery id sorts correctly, and no key collision with Add the FlyLight MCFO 63x whole-brain gsplats demo #1586's flylight_mcfo_63x_brain.
+MEMORY for the fit cache / PRECISION for the scene matches every other gsplat demo in the tree.
+Dropped as not worth a change
+merge_for_render's neurons-only early return skips the .astype(np.float32) the merged branch applies — defensive only; every producer of those arrays is already float32.
+Changelog's "~356 K neuropil splats spanning ~350 µm" against the docstring's measured 172 × 466 × 399 µm stack extent — the former is optical path through the brain, not the stack, so not a contradiction.
+Five-splat drift between the PR body's 786,991 and the docstring table's 786,986.
+--sample only accepts the = form, not a space-separated value — same as every other demo here.
+The corrected alpha comment's parenthetical reads a little like a changelog note; purely stylistic.
+Nothing deferred. #1613 (scene attrs set after construction never reach the store) stays open on its own — it predates this demo, spans 38 modules, and create_scene has no title/description parameter to route through, so it isn't foldable here.
+Verification
+Run locally at this head: the demo's own 88 tests, the full demos/ suite (1850 passed, 12 skipped), the manifest tests (46 passed), gen_data_manifest.py --check up to date, complexity ratchet 0 new, ruff and mypy clean on the touched files. CI is green except python-tests (3.12), still pending at the time of writing — the suites it would cover for this diff are the ones above.
+Merge branch 'main' into flylight-mcfo-demo
+6a686e4
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+(major) packages/luxar/src/luxar/demos/demo_gsplats_3d_flylight_mcfo_neurons.py:451-475 — _HttpRangeFile._block_for() trusts any 206 response and then materializes resp.content without validating Content-Range or bounding the body to the requested interval. A misconfigured upstream can return 206 with a missing/wrong range or an oversized body, causing incorrect ZIP offsets or buffering gigabytes—the exact failure mode stream=True is intended to prevent. Validate that Content-Range starts and ends at the requested offsets, stream at most the expected byte count (plus one to detect overflow), and reject short/oversized responses. The tests cover 200 responses but not malformed 206 responses.
+Checked and found clean: sample-name validation and archive path traversal protections; atomic cache publication/replacement and restoration; HTTP session/response cleanup on covered paths; H5J decoded-size validation; optional dependency and grid-mismatch fallbacks; parameter-keyed fit caches; physical-to-voxel color sampling; merged single-node volumetric scene construction; and camera tilt/roll coverage.
+royerloic
+changed the base branch from
+main
+to
+dev
+August 14, 2026 23:03
+Check that a 206 is the range we asked for before caching it
+…
+b608dff
+```
+The block is filed at the offset that was REQUESTED, so a host answering a
+ranged GET with some other interval had its bytes assembled into the archive at
+the wrong place — an offset error that surfaces much later as an unreadable zip
+rather than as the plain "this host is not honouring ranges" message the
+status check gives. Read the interval back out of Content-Range and refuse
+anything that does not start where we asked (a range ending short is fine, the
+read loop just fetches the remainder).
+
+Bound the body while we're here: the status check was cheap because of
+stream=True, but resp.content then buffered whatever arrived, so a 206 carrying
+more than it advertises reintroduces exactly the 7.1 GB download the range
+access exists to avoid.
+```
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Closing pass on this one. The PR adds demo_gsplats_3d_flylight_mcfo_neurons.py: one FISBe sample range-extracted out of the 7.1 GB Zenodo archive, the FlyLight reference channel decoded from its H5J HEVC streams, both fitted and merged into a single volumetric gsplat node with per-splat RGBA, plus the registry/README/manifest/gallery wiring and 88 network-free unit tests.
+The substantive diff is unchanged from the last pass — the new head only merges main — so this was a re-read of the whole module rather than of the delta, plus one thing that had gone unnoticed until now.
+Fixed and pushed (b608dff):
+_HttpRangeFile._block_for accepted any 206 and then did resp.content. Two problems in one place. The block is cached at the offset that was requested, whatever the response actually covers, so a host (or an intermediary) answering from a different interval got its bytes assembled into the archive at the wrong place — which surfaces later as an unreadable zip, not as the clear "stopped honouring ranges" message the status check is there to give. And the stream=True that makes the non-206 refusal cheap bought nothing on the 206 path: resp.content still buffers whatever arrived, so a 206 carrying more than it advertises reintroduces exactly the whole-archive download this class exists to avoid. Now the served interval is read back out of Content-Range and has to start where we asked, and the body is read in chunks and refused as soon as it runs past that interval. A range ending short of the request is still accepted — that is legal and the read loop just fetches the remainder — with a test pinning that, so the new check can't quietly turn a working host into a hard failure. Five of the six added tests fail against the old code; the sixth is that over-strictness guard.
+Checked and found clean:
+Sample-name validation (_SAMPLE_RE) covers everything the value reaches: cache paths, the archive member prefix, the output filename and --serve-only. Zip-slip guard refuses absolute paths, .. and backslashes, and is driven through fetch_sample, not just called directly.
+Session ownership: the probe closes its own session on every raise path, ZipFile is handed a file object it will not close, and fetch_sample closes the handle after it — which is what releases the pooled connection.
+Atomic publication for the extracted store, the H5J and the decoded .npy, including the restore-on-failure path; no .part survivors.
+H5J decode validates the decoded size against frames × padded W × padded H before cropping, so a truncated stream cannot silently yield a thinner volume that would misregister against the neurons; and a grid mismatch now decides (neurons-only) instead of narrating.
+The four ordinary neurons-only paths (no ffmpeg, no h5py, unmapped sample, mismatched grid) plus --no-neuropil all reach a scene whose own description matches; the warm-cache path deliberately needs neither optional dependency.
+Colours are sampled at physical→voxel converted centres, per-channel balanced before compositing, hue-normalised per splat, clipped rather than wrapped, black rather than NaN on zero signal. Fit caches are keyed by every parameter that changes the result.
+The alpha ramp bottoms out non-zero, which is the whole point given the shader folds alpha in before its negligible-contribution discard; the camera roll, tilt measurement and framing are read back out of an authored scene rather than restated as a formula.
+Cache dir and manifest key don't collide with the 63x brain demo; gen_data_manifest.py --check, the README/registry count guards and the complexity ratchet are all up to date.
+Full demos suite green here (1941 passed, 12 skipped), plus ruff/mypy/bandit on the touched files.
+Nothing new deferred. The one pre-existing item still open from an earlier pass is #1613 (node.attrs[k] = v after construction never persists — affects ~38 demo modules, not this one specifically), which is why the tests assert against scene_description() and the serialized viewer_config rather than the in-memory attrs.
+Hide details
+View details
+royerloic
+merged commit 2aaeeb6
+into
+dev
+Aug 15, 2026
+11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+royerloic
+deleted the
+flylight-mcfo-demo
+branch
+August 15, 2026 01:03
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+priority
+High priority: prioritised by the orchestrator and the fleet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

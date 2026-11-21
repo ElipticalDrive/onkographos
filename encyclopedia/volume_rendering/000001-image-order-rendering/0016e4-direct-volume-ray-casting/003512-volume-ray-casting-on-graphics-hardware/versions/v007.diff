@@ -1,0 +1,231 @@
+--- v006.md
++++ v007.md
+@@ -4,140 +4,116 @@
+ 
+ ## Overview
+-This method is a multi-pass algorithm for direct volume ray-casting on programmable graphics hardware (specifically DirectX 9-level architectures) that exploits intrinsic parallelism and efficient communication via a stream model [S1, unofficial]. It solves the problem of integrating acceleration techniques like early ray termination and empty-space skipping into 3D texture-based volume rendering by using texture render targets to accumulate state between passes [S1, unofficial]. It sets itself apart from single-pass hardware methods by explicitly managing the ray-marching state (accumulated color, opacity, and termination flags) across multiple rendering passes, allowing the GPU's early z-test to discard fragments that have already reached an opacity threshold or hit an iso-surface [S1, unofficial].
++This method implements direct volume ray casting on programmable graphics hardware (specifically DirectX 9-level architectures like the ATI 9700) using a multi-pass stream model [S1, unofficial]. It solves the performance bottleneck of CPU-based ray casting by exploiting the intrinsic parallelism of fragment processors and efficient inter-pass communication via texture render targets [S1, unofficial]. Unlike single-pass rasterization techniques, this approach explicitly manages ray traversal state across multiple rendering passes, enabling hardware-accelerated early ray termination and empty-space skipping through the early z-test mechanism [S1, unofficial]. It differs from [Direct volume rendering](1184-direct-volume-rendering.md) by decoupling the ray integration steps into discrete, communicable passes rather than attempting to compute the full integral in a single shader invocation.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A 3D volume texture (scalar field), a pre-computed ray direction texture (2D), and rendering parameters (opacity threshold, iso-surface value, step size).
+-*   **Output:** A final 2D color image.
++The method relies on a multi-pass rendering pipeline where the output of one pass serves as the input texture for the next. It utilizes specific hardware features available in Pixel Shader 2.0 APIs: per-fragment texture fetches (up to 8 textures, with limited dependent fetches), texture render targets (allowing rendering to 2D textures aligned with the viewport), texture coordinate generation, per-fragment arithmetic, and depth replace capabilities [S1, unofficial].
+ 
+-**Data Structures:**
+-The method relies on a set of 2D textures aligned with the viewport to communicate state between passes. The exact layout is not specified in the sources, but the following logical textures are required [S1, unofficial]:
+-1.  **Ray Direction Texture:** Stores the ray direction vector for each pixel in local texture coordinates.
+-2.  **Accumulation Textures:** At least two 2D textures (one for color, one for opacity) to store the accumulated results of the ray marching. Floating-point textures are used to support negative values if necessary [S1, unofficial].
+-3.  **Iso-surface Intersection Texture:** Stores the local texture coordinates of iso-surface intersections, if applicable [S1, unofficial].
++### Inputs and Outputs
++- **Input Volume:** A 3D scalar texture representing the volumetric data.
++- **Ray Direction Textures:** Two 2D textures storing the pre-computed ray direction vectors in local texture coordinates for each pixel [S1, unofficial].
++- **Accumulation Textures:** 2D textures (typically floating-point) storing the accumulated color and opacity from previous passes [S1, unofficial].
++- **Output:** The final rendered image stored in the frame buffer or a target texture.
+ 
+-**Numbered Steps:**
+-1.  **Pre-computation:** For each pixel, compute the direction of the ray of sight through the volume in local texture coordinates. Store these directions in a 2D texture [S1, unofficial].
+-2.  **Initialization:** Initialize the accumulation textures (color and opacity) to zero. Initialize the iso-surface intersection texture if used [S1, unofficial].
+-3.  **Main Ray Marching Passes:** Perform a fixed number of rendering passes. In each pass:
+-    a.  Bind the accumulation textures from the previous pass as input textures.
+-    b.  Bind the ray direction texture.
+-    c.  Execute a fragment shader that:
+-        i.  Samples the volume at the current ray position.
+-        ii. Computes the color $C_i$ and opacity $\alpha_i$ for the sample.
+-        iii. Updates the accumulated color and opacity using the front-to-back compositing equations defined in the parent article [S1, S2, S3, S4, unofficial].
+-        iv. Advances the ray position along the direction vector.
+-        v.  Writes the updated accumulated color and opacity to the output accumulation textures [S1, unofficial].
+-4.  **Termination Check Pass:** Between main passes, perform an additional pass:
+-    a.  Read the accumulated opacity from the accumulation texture.
+-    b.  Test if the accumulated opacity exceeds a specified threshold or if an iso-surface has been hit (if iso-surface rendering is enabled).
+-    c.  If the test succeeds, set the fragment's depth value (z-value) to the maximum possible value.
+-    d.  If the test fails, set the fragment's depth value to zero [S1, unofficial].
+-5.  **Early Z-Test Filtering:** Enable the depth test with the function `GREATER`. Because fragments that have terminated (step 4c) have their depth set to the maximum, they will fail the `GREATER` test in subsequent main passes (step 3) and be discarded. Fragments that have not terminated (step 4d) have depth zero and will pass the test, allowing them to continue marching [S1, unofficial].
+-6.  **Final Pass:** After all main passes, perform a final pass to composite the accumulated color and opacity into the final image. If iso-surface intersections were stored, use them to restrict gradient and shading computations to those points [S1, unofficial].
++### Data Structures
++1.  **Ray Direction Textures ($T_{dir}$):** Two 2D textures, one for the x-component and one for the y-component of the ray direction vector in texture space. These are computed prior to ray traversal for each pixel [S1, unofficial].
++2.  **Accumulation Buffer ($T_{acc}$):** A 2D floating-point texture storing the accumulated color $C'$ and opacity $\alpha'$ for each pixel. The layout typically interleaves or separates these values, allowing access in subsequent passes [S1, unofficial].
++3.  **Z-Buffer:** Used for the early z-test. The depth value is manipulated to control fragment processing [S1, unofficial].
+ 
+-**Formulas:**
+-The front-to-back compositing equations are used in the main passes [S1, S2, S3, S4, unofficial]:
+-$$
+-C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
+-$$
+-$$
+-\alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
+-$$
+-Where $C'_{i}$ and $\alpha'_{i}$ are the accumulated color and opacity after step $i$, and $C_i$ and $\alpha_i$ are the color and opacity of the current sample.
++### Algorithm Steps
++1.  **Pre-computation:** For each pixel, compute the ray direction in local texture coordinates. Store these directions in two 2D textures ($T_{dir}$) [S1, unofficial].
++2.  **Initialization:** Initialize the accumulation texture $T_{acc}$ with zero color and zero opacity. Set the z-buffer to allow processing.
++3.  **Main Passes (Ray Traversal):** Perform a fixed number of rendering passes. In each pass:
++    a.  Bind the current accumulation texture $T_{acc}$ and ray direction textures $T_{dir}$ as inputs.
++    b.  Execute a fragment shader that performs one step of ray integration:
++        -   Sample the volume data at the current ray position.
++        -   Apply the transfer function to obtain color $C_i$ and opacity $\alpha_i$.
++        -   Update accumulated color and opacity using the front-to-back compositing equations:
++            $$ C'_{new} = C'_{old} + (1 - \alpha'_{old}) \alpha_i C_i $$
++            $$ \alpha'_{new} = \alpha'_{old} + (1 - \alpha'_{old}) \alpha_i $$
++        -   Advance the ray position using the pre-computed direction.
++    c.  Write the updated $C'_{new}$ and $\alpha'_{new}$ to the accumulation texture $T_{acc}$ for the next pass [S1, unofficial].
++4.  **Termination Check Pass:** Between main passes, execute an additional pass to test for early termination:
++    a.  Read the accumulated opacity $\alpha'$ from the accumulation texture.
++    b.  Check if $\alpha'$ exceeds a specified threshold or if an iso-surface has been hit (if applicable).
++    c.  If the condition is met, set the fragment's depth value to the maximum possible z-value using the depth replace feature.
++    d.  If the condition is not met, set the depth value to zero (or the current ray depth) [S1, unofficial].
++5.  **Early Z-Test Filtering:** Configure the graphics hardware to use a GREATER depth test. Because fragments that have reached the opacity threshold have their depth set to the maximum, they will fail the GREATER test in subsequent passes and be discarded, effectively skipping empty space and terminating rays early [S1, unofficial].
++6.  **Final Pass (Optional):** If an iso-surface was hit, a final pass may be executed to restrict gradient and shading computations to the intersection points identified in previous steps [S1, unofficial].
+ 
+-**Parameters:**
+-*   **Opacity Threshold:** The value at which a ray is considered opaque enough to terminate. Not given in the sources.
+-*   **Iso-surface Value:** The scalar value defining the iso-surface. Not given in the sources.
+-*   **Number of Main Passes:** A fixed number of passes for ray traversal. Not given in the sources.
+-*   **Step Size:** The distance between samples along the ray. Not given in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Floating-point textures are required to store negative values and ensure precision in accumulation [S1, unofficial].
+-*   **Dependent Texture Fetches:** The number of dependent texture fetches is limited on the target hardware (ATI 9700), which may restrict the complexity of the shader [S1, unofficial].
+-*   **Early Z-Test Timing:** The early z-test is applied before the shader program is executed. This means the termination check pass must correctly set the depth values to effectively skip fragments in subsequent passes [S1, unofficial].
+-
+-**Pseudocode:**
++### Pseudocode
+ ```python
+ # Pre-computation
+-ray_direction_texture = compute_ray_directions(volume_bounds, camera_params)
++for each pixel (x, y):
++    ray_dir = compute_ray_direction(x, y, camera_params)
++    dir_texture_x[x, y] = ray_dir.x
++    dir_texture_y[x, y] = ray_dir.y
+ 
+ # Initialization
+-accum_color_texture = create_2d_texture(width, height, format=FLOAT)
+-accum_opacity_texture = create_2d_texture(width, height, format=FLOAT)
+-accum_color_texture.clear(0.0)
+-accum_opacity_texture.clear(0.0)
++accum_texture = zeros(width, height, 4) # RGBA, initialized to 0
+ 
+-# Main Ray Marching Loop
+-for pass_index in range(number_of_main_passes):
+-    # Bind previous accumulation textures as inputs
+-    bind_texture(accum_color_texture, unit=0)
+-    bind_texture(accum_opacity_texture, unit=1)
+-    bind_texture(ray_direction_texture, unit=2)
++# Main Loop
++for pass_index in range(num_passes):
++    # Bind textures
++    bind_texture(accum_texture, unit=0)
++    bind_texture(dir_texture_x, unit=1)
++    bind_texture(dir_texture_y, unit=2)
++    bind_volume(volume_data, unit=3)
+     
+-    # Set up render target for current pass
+-    set_render_target(accum_color_texture, accum_opacity_texture)
++    # Set render target to a temporary accumulation texture
++    bind_render_target(temp_accum_texture)
+     
+-    # Execute fragment shader for ray marching
+-    execute_shader(ray_marching_shader)
++    # Execute fragment shader for one ray step
++    # Shader logic:
++    # 1. Read current C', alpha' from unit 0
++    # 2. Read ray direction from unit 1, 2
++    # 3. Compute sample position p = current_pos + direction * step_size
++    # 4. Sample volume at p to get scalar value d
++    # 5. Apply transfer function T(d) to get C_i, alpha_i
++    # 6. Update C', alpha' using compositing equations
++    # 7. Write new C', alpha' to temp_accum_texture
++    
++    render_pass()
++    
++    # Swap accumulation textures
++    swap(accum_texture, temp_accum_texture)
+     
+     # Termination Check Pass
+-    bind_texture(accum_opacity_texture, unit=0)
+-    set_render_target(depth_buffer_only=True)
+-    set_depth_test_function(GREATER)
++    bind_texture(accum_texture, unit=0)
++    bind_render_target(z_buffer_control_texture)
+     
+-    # Execute termination check shader
+-    execute_shader(termination_check_shader)
++    # Execute termination shader
++    # Shader logic:
++    # 1. Read alpha' from unit 0
++    # 2. If alpha' > threshold OR iso-surface hit:
++    #      depth = MAX_DEPTH
++    #    Else:
++    #      depth = 0.0
++    # 3. Write depth to z-buffer (using depth replace)
++    render_pass()
+     
+-    # Reset render target for next main pass
+-    set_render_target(accum_color_texture, accum_opacity_texture)
++    # Configure depth test for next main passes
++    set_depth_test(GREATER)
++    # Fragments with MAX_DEPTH will fail the GREATER test and be discarded
+ 
+-# Final Pass
+-bind_texture(accum_color_texture, unit=0)
+-bind_texture(accum_opacity_texture, unit=1)
+-set_render_target(framebuffer)
+-execute_shader(final_composite_shader)
++# Final Output
++bind_render_target(framebuffer)
++bind_texture(accum_texture, unit=0)
++render_pass() # Final copy/compositing if needed
+ ```
+ 
+-## Subtopics
+-
+-### Back-face rasterized volume rendering
+-Uses back-face rasterization to generate rays. [Back-face rasterized volume rendering](1296-back-face-rasterized-volume-rendering.md)
+-
+-### GPU Multi-Volume Ray Casting Mapper
+-Extends the concept to multiple volumes. [GPU Multi-Volume Ray Casting Mapper](2461-gpu-multi-volume-ray-casting-mapper.md)
+-
+-### Hardware-Accelerated Volume Rendering via 3D Texturing
+-Uses 3D textures directly for sampling. [Hardware-Accelerated Volume Rendering via 3D Texturing](2799-hardware-accelerated-volume-rendering-via-3d-texturing.md)
+-
+-### 3D Pixel Texture Classification
+-Uses pixel textures for classification. [3D Pixel Texture Classification](6055-3d-pixel-texture-classification.md)
+-
+-### Hardware Shading via Pixel Texture
+-Uses pixel textures for shading. [Hardware Shading via Pixel Texture](6056-hardware-shading-via-pixel-texture.md)
+-
+-### GPU Ray Casting for Light Field Display
+-Adapts ray casting for light fields. [GPU Ray Casting for Light Field Display](6503-gpu-ray-casting-for-light-field-display.md)
+-
+-### VStudio Framework Volume Rendering Pipeline
+-A framework for volume rendering pipelines. [VStudio Framework Volume Rendering Pipeline](6916-vstudio-framework-volume-rendering-pipeline.md)
+-
+-### Entry Point Adjustment
+-Adjusts ray entry points. [Entry Point Adjustment](7406-entry-point-adjustment.md)
+-
+-### Custom Hardware Units
+-Uses custom hardware for rendering. [Custom Hardware Units](8284-custom-hardware-units.md)
++### Parameters and Edge Cases
++-   **Opacity Threshold:** The threshold for early termination must be chosen carefully. Too high, and visual artifacts appear; too low, and performance gains are reduced [S1, unofficial].
++-   **Floating Point Textures:** Essential for storing negative values and high dynamic range accumulated data. Not all hardware supports this, but it is required for this method on the target architecture [S1, unofficial].
++-   **Dependent Texture Fetches:** Limited on ATI hardware. The method minimizes dependent fetches by pre-computing ray directions and using fixed-step traversal [S1, unofficial].
++-   **Iso-surface Hit:** If an iso-surface is hit, the coordinates are written to a 2D texture. This requires additional logic to detect the hit and store the coordinates, which may complicate the simple opacity-threshold termination [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The time complexity is proportional to the number of pixels multiplied by the number of main passes. The early z-test reduces the effective number of passes for opaque regions. Not given in the sources.
+-*   **Memory Complexity:** The memory complexity is dominated by the storage of the 2D textures for accumulation and ray directions. Not given in the sources.
+-*   **Measured Performance:** Performance gains up to a factor of 3 were demonstrated for typical renditions of volumetric data sets on the ATI 9700 graphics card [S1, unofficial].
+-*   **Strengths:** Exploits intrinsic parallelism of the GPU; uses efficient communication via texture render targets; effectively integrates early ray termination and empty-space skipping [S1, unofficial].
+-*   **Limitations:** Limited by the number of dependent texture fetches on the target hardware; requires multiple rendering passes which may introduce overhead [S1, unofficial].
+-*   **When to use:** When using DirectX 9-level hardware with programmable shaders and texture render target support [S1, unofficial].
+-*   **When not to use:** When hardware does not support texture render targets or has severe limitations on dependent texture fetches [S1, unofficial].
++-   **Performance:** Demonstrates performance gains up to a factor of 3 for typical volumetric data sets on the ATI 9700 graphics card compared to non-accelerated or less optimized methods [S1, unofficial].
++-   **Complexity:** The method introduces overhead due to multiple rendering passes and texture swaps. The number of passes is fixed, which may lead to unnecessary computation for rays that terminate early if the threshold is not optimally set.
++-   **Hardware Dependency:** Strictly dependent on hardware features available in Pixel Shader 2.0 era GPUs, specifically texture render targets, depth replace, and early z-test support [S1, unofficial].
++-   **Scalability:** Scales with the number of fragments processed in parallel. The fixed number of passes limits the maximum ray length that can be accurately represented without adaptive stepping, which is not explicitly detailed in the source [S1, unofficial].
+ 
+ ## Background
+-This method was proposed in a paper by the authors of [S1, unofficial] for implementation on DirectX 9-level hardware, specifically the ATI 9700 graphics card. It builds upon the Pixel Shader 2.0 API, which provides features such as per-fragment texture fetch operations, texture render targets, texture coordinate generation, per-fragment arithmetic, and depth replace [S1, unofficial]. The method was demonstrated on a variety of real-world data sets [S1, unofficial].
++This method was proposed in 2003 by researchers at the Technical University of Munich (TUM) as part of their work on acceleration techniques for GPU-based volume rendering [S1, unofficial]. It was designed to leverage the emerging programmable graphics hardware (DirectX 9 level) to achieve real-time or interactive rendering of large volumetric datasets, which was previously challenging for CPUs [S1, unofficial]. The stream model approach was a novel contribution at the time, exploiting the parallelism of fragment processors and the communication capabilities of texture render targets [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,140 @@
+Detecting pulsars. Contribute to pravirkr/loki development by creating an account on GitHub.
+
+CUDA: GPU preprocessing, portable FFTs (no cuFFT), accurate Fourier brute fold by pravirkr · Pull Request #31 · pravirkr/loki · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+pravirkr
+commented
+Oct 13, 2026
+Copy link
+Copy Markdown
+Owner
+Results
+Wall time on an L40S, nthreads = 1, 10 GB budget, mean of 3 runs. The baseline is main (f4dd590) with the same robust-preprocessing config.
+Workload
+main
+this PR
+Speedup
+W1 / W2, freq-only 2^23
+1.62 / 1.66 s
+0.54 / 0.57 s
+3.0x / 2.9x
+W3 / W4, accel 2^23
+2.35 / 2.45 s
+0.60 / 0.69 s
+3.9x / 3.6x
+W1L / W2L, freq-only 2^25
+6.14 / 6.26 s
+1.12 / 1.26 s
+5.5x / 5.0x
+W3L, accel time 2^25
+12.77 s
+4.97 s
+2.6x
+W4L, accel Fourier 2^25
+16.37 s
+8.26 s
+2.0x
+W2Ln / W4Ln, nbins 50-800
+6.14 / 15.47 s
+1.09 / 7.34 s
+5.6x / 2.1x
+Changes
+GPU robust preprocessing
+lib/cuda/preprocess_cuda.cu runs the per-sample passes:
+block medians and MAD variances (exact radix selection);
+the running median;
+whitening, the bad-block sums and the output pass.
+The block-level steps stay on the host. Their code is shared with the CPU through RobustStages (lib/io/preprocess_robust.cpp).
+z-score and zap/birdies stay on the CPU.
+The CLI preprocesses on the search's backend (5-8 s → 0.2 s at 2^25).
+cuFFT removed
+GpuFFTManager (lib/cuda/fft_cuda.cu): one PortableFFT per row, real packing for even lengths, Bluestein otherwise.
+A row's output does not depend on the batch, inputs are preserved, and there are no plans. Speed matches cuFFT: W2L 52.4 vs 52.8 ms, W2Ln 31.6 vs 32.1 ms.
+GPU Fourier searches support nbins <= 2048 and reject larger values early (check_gpu_fourier_nbins).
+Fourier brute fold: accuracy
+kernel_fold_complex_tiled replaces both kernels:
+phasors from the double phase reduced to a cycle, then sincospif;
+re-seeded every 64 samples;
+two-level sums;
+tiles in shared memory.
+Fused scorers (bit-exact)
+One multi-value butterfly for all width maxima in the FFA warp scorers.
+c2c step phasors are computed once per transform and shared.
+About -10% on the fused kernels.
+Standalone FFA and EP on the sweep kernel
+FFA::execute, compute_ffa* and EP's FFA stage use the sweep's brute-fold and merge kernels (FP32 phasors).
+The replaced kernels are kept in lib/cuda/ffa_legacy_kernels_cuda.cu.
+Not done (measured or decided)
+Deterministic run-length time brute fold: 3.7-5.5x slower, reverted.
+Fourier brute fold as GEMM: the fold is 17-34 ms per run; not worth it.
+Cone tiling across freq-only groups (F3): not done. Estimated about 15% of freq-only wall time.
+Device-specific scorer tuning: out of scope (portability).
+CUDA: GPU preprocessing, portable FFTs (no cuFFT), accurate Fourier b…
+…
+5ae55fa
+```
+…rute fold
+
+Final CUDA optimizations for FFA. Every sweep workload is 2-5.6x faster.
+
+Preprocessing
+- Robust preprocessing runs on the GPU for GPU searches. Medians use exact
+  radix selection. The block-level host steps are shared through RobustStages.
+  The z-score method and the spectral zap stay on the CPU.
+- At 2^25: 5.2-7.9 s on one core becomes 0.2 s.
+
+FFTs
+- cuFFT is removed. GpuFFTManager runs each row through PortableFFT, with
+  real packing for even lengths and Bluestein's algorithm otherwise. A
+  row's output does not depend on the batch, inputs are preserved, and
+  there are no plans. Speed matches cuFFT on the sweep R2C.
+- GPU Fourier paths accept nbins <= 2048 (shared memory fits on every
+  architecture); larger values are rejected when the search is built.
+- The EP reserve drops from 1.5 to 0.5 GiB for multi-nbins sweeps. EP
+  memory model 9.
+
+Fourier brute fold
+- New kernel_fold_complex_tiled: phasors from the double phase reduced to
+  a cycle, then sincospif, re-seeded every 64 samples; two-level sums;
+  segments tiled through shared memory; 1D grid.
+
+Fused scorers (exact)
+- One multi-value butterfly reduces all width maxima in the FFA warp
+  scorers. The c2c step phasors are shared across a transform's lanes.
+
+Standalone FFA and EP
+- FFA::execute, compute_ffa* and EP's FFA stage use the sweep's brute-fold
+  and merge kernels.
+- Host overloads use the per-thread default stream.
+```
+Hide details
+View details
+pravirkr
+merged commit 55d719f
+into
+main
+Oct 13, 2026
+5 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+pravirkr
+deleted the
+ffa_leftover
+branch
+October 13, 2026 00:29
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

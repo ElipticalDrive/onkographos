@@ -1,0 +1,189 @@
+# Adaptive Hierarchical Splatting with View-Dependent LOD
+
+Also called: View-Dependent Multiresolution Splatting
+
+## Overview
+A rendering method for non-uniform volumetric data that uses a hierarchical structure (octree or adaptive tree) to select levels of detail (LOD) based on a screen-space error metric, allowing for interactive navigation and progressive refinement [S1]. It sets itself apart from standard octree splatting by using a fixed linear footprint for conservative LOD culling and non-uniform elliptical splats for leaf nodes to preserve local data distribution details [S1].
+
+## How it works
+**Inputs:**
+- Non-uniform volumetric data points.
+- Camera parameters (position, orientation, projection matrix).
+- Screen-space error metric threshold ($E_{screen}$) in pixels [S1].
+- Scalar value error metric threshold ($E_{scalar}$) for progressive refinement [S1].
+
+**Outputs:**
+- A rasterized image of the volume.
+
+**Data Structures:**
+1.  **Hierarchy Node:**
+    -   `Lx`, `Ly`, `Lz`: Rectilinear cell dimensions (floats) [S1].
+    -   `children`: Array of pointers to child nodes (internal nodes only) [S1].
+    -   `data_points`: List of non-uniform data points (leaf nodes only) [S1].
+    -   `avg_scalar`: Average scalar value of the node (for $E_{scalar}$ calculation) [S1].
+    -   `rms_deviation`: RMS deviation of scalar values from average (for $E_{scalar}$ calculation) [S1].
+2.  **Splat:**
+    -   `center`: 3D position (sample point) [S1].
+    -   `scale`: Derived from Voronoi cell [S1].
+    -   `orientation`: Derived from Voronoi cell [S1].
+    -   `texture`: Scalar value mapped to color/opacity [S1].
+
+**Hierarchy Construction:**
+The hierarchy is built based on data dimensions $N_x=2^m$, $N_y=2^n$, $N_z=2^p$ where $m > n > p$ [S1].
+1.  Create $p$ levels with 8 children (8-fold branching) [S1].
+2.  Create $n-p$ levels with 4 children (4-fold branching) [S1].
+3.  Create $m-n$ levels with 2 children (2-fold branching) [S1].
+4.  Determine bin size for leaf nodes based on the minimum spacing of underlying data points, ensuring no more than two points per bin [S1].
+5.  Fill bins with data points. Only filled bins are stored and accumulated into the tree [S1].
+6.  For each node, calculate the fixed linear footprint size conservatively set to the maximum possible diagonal:
+    $$ F_{linear} = \sqrt{L_x^2 + L_y^2 + L_z^2} $$
+    [S1].
+
+**Rendering Steps:**
+1.  **Culling:** Cull volume elements not in the view frustum as the viewpoint changes [S1].
+2.  **Traversal:** Traverse the hierarchy from the root to the leaves.
+3.  **LOD Selection:** For each node, perspective project the linear footprint $F_{linear}$ onto the screen and convert to pixels ($P_{pixels}$) [S1].
+    -   If $P_{pixels} > E_{screen}$, traverse to children.
+    -   If $P_{pixels} \le E_{screen}$, stop traversal at this node and render it [S1].
+4.  **Leaf Rendering:** For leaf nodes containing non-uniform data points:
+    -   Construct elliptical splats centered at sample points [S1].
+    -   Determine scale and orientation of each splat based on the Voronoi cell of the point to provide uniform coverage over neighbors [S1].
+    -   Combine closest splats to generate Levels of Detail (LODs) [S1].
+5.  **Internal Node Rendering:** For internal nodes selected by LOD, render a single averaged splat representing the node's scalar average [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_volume(root_node, camera, E_screen):
+    """
+    Render volume using adaptive hierarchical splatting.
+    """
+    splats_to_render = []
+    traverse(root_node, camera, E_screen, splats_to_render)
+    composite(splats_to_render)
+
+def traverse(node, camera, E_screen, splats):
+    """
+    Recursively traverse the hierarchy to select LOD.
+    """
+    # Calculate fixed linear footprint
+    footprint_linear = math.sqrt(node.Lx**2 + node.Ly**2 + node.Lz**2)
+    
+    # Perspective project to screen pixels
+    # Note: Implementation of perspective projection depends on camera matrix.
+    # Assuming a helper function that projects the diagonal length to screen space.
+    footprint_pixels = project_to_screen_pixels(footprint_linear, camera)
+    
+    # Check screen space error metric
+    if footprint_pixels > E_screen:
+        # If node has children, traverse them
+        if node.has_children():
+            for child in node.children:
+                traverse(child, camera, E_screen, splats)
+        else:
+            # Leaf node with no children but still too large? 
+            # Sources imply traversal stops when footprint <= metric.
+            # If leaf is too large, it should be rendered as is or subdivided.
+            # Given the construction, leaves are data points.
+            render_leaf(node, splats)
+    else:
+        # Footprint is small enough, render this node
+        if node.is_leaf():
+            render_leaf(node, splats)
+        else:
+            render_internal_node(node, splats)
+
+def render_leaf(node, splats):
+    """
+    Render non-uniform data points in a leaf node using elliptical splats.
+    """
+    for point in node.data_points:
+        # Determine Voronoi cell for this point
+        voronoi_cell = compute_voronoi_cell(point, node.data_points)
+        
+        # Derive scale and orientation from Voronoi cell
+        scale = get_scale_from_voronoi(voronoi_cell)
+        orientation = get_orientation_from_voronoi(voronoi_cell)
+        
+        # Create elliptical splat
+        splat = EllipticalSplat(
+            center=point.position,
+            scale=scale,
+            orientation=orientation,
+            value=point.scalar_value
+        )
+        splats.append(splat)
+
+def render_internal_node(node, splats):
+    """
+    Render an internal node as a single averaged splat.
+    """
+    splat = EllipticalSplat(
+        center=node.center, # Approximate center
+        scale=node.footprint_linear, # Or projected size
+        orientation=Identity, # Or average orientation
+        value=node.avg_scalar
+    )
+    splats.append(splat)
+
+def project_to_screen_pixels(linear_size, camera):
+    """
+    Project a linear 3D size to screen pixels.
+    This is a placeholder for the specific projection math.
+    """
+    # Typically involves viewing frustum geometry.
+    # For a perspective camera, size in pixels ~ (linear_size * focal_length) / distance
+    # The source uses a conservative diagonal.
+    return linear_size * camera.focal_length / camera.distance_to_node_center
+
+def compute_voronoi_cell(point, points):
+    """
+    Compute the Voronoi cell for a point given its neighbors.
+    """
+    # Standard Voronoi computation
+    pass
+
+def get_scale_from_voronoi(cell):
+    return cell.size
+
+def get_orientation_from_voronoi(cell):
+    return cell.orientation
+```
+
+**Parameters:**
+-   **Screen space error metric ($E_{screen}$):** Threshold in pixels for the projected footprint. Typical values tested: 1, 2, 4, 8, 16, 32 pixels [S1]. A value of 1 pixel results in an image barely distinguishable from high resolution [S1].
+-   **Scalar value error metric ($E_{scalar}$):** Derived from RMS deviation of scalar values in a node from their average. Used for progressive refinement when pausing for inspection [S1].
+
+**Edge Cases and Pitfalls:**
+-   **Aliasing:** Using a view-dependent metric $\ge 1$ pixel removes aliasing (in the sense of Swan et al.) but reduces splat count. Error is confined to 1 pixel or less if metric $\le 1$ pixel [S1].
+-   **Non-uniform coverage:** A single elliptical splat cannot provide uniform coverage for all neighbors in a non-uniform cell (e.g., overlapping some, missing others). Solved by using multiple splats oriented by Voronoi cells [S1].
+-   **Overestimation:** Using a fixed linear footprint (diagonal) instead of precise orientation-dependent footprint saves computation but accepts a slight overestimation of splat count [S1].
+
+## Subtopics
+
+### [Embedded, Adaptive Volume Tree Structure](15500-embedded-adaptive-volume-tree-structure.md)
+This method organizes multiresolution splats of 3D non-uniform data into a hierarchical structure capable of handling different data types and large spatial magnitude differences between overviews and details. It is specifically designed for earth-based environments, such as atmospheric data, where the domain is a thin layer relative to the planetary ellipsoid. It sets itself apart from standard octree splatting by using a lat/lon quadtree for the global overview and switching to an embedded volume tree only when local dimensions become comparable, allowing for efficient view-dependent LOD selection as described in [Adaptive Hierarchical Splatting with View-Dependent LOD](15498-adaptive-hierarchical-splatting-with-view-dependent-lod.md).
+
+## Operating characteristics
+-   **Time Complexity:** Depends on the screen-space error metric. Larger metrics result in fewer splats and faster rendering.
+-   **Memory Complexity:** Depends on the hierarchy depth and number of data points. Only filled bins are stored [S1].
+-   **Measured Performance:**
+    -   Hardware: SGI 195MHz R1000 with Infinite Reality 2 [S1].
+    -   Resolution: 800x600 pixels [S1].
+    -   Altitude: 2667km [S1].
+    -   Max rendering time (before culling): 1.7 seconds [S1].
+    -   Rendering times for screen-space metrics of 4, 8, 16, 32 pixels: 1.26s, 0.328s, 0.063s, 0.014s respectively [S1].
+-   **Strengths:** Interactive navigation, progressive refinement, handles non-uniform data, culling efficiency [S1].
+-   **Limitations:** Fixed footprint overestimation, computation per splat for non-uniform leaf nodes [S1].
+-   **When to use:** Interactive visualization of large-scale non-uniform volumetric data (e.g., earth-based environments) [S1].
+-   **When not to use:** When precise orientation-dependent footprint is required for minimal splat count, or when data is uniformly distributed (standard octree may be simpler) [S1].
+
+## Background
+-   **Origin:** Jang, Ribarsky, Shaw, and Faust (2002) [S1].
+-   **History:** Developed for interactive navigation of large-scale non-uniform volumetric data, specifically earth-based environments like atmospheric data [S1].
+-   **Usage:** Demonstrated with NEXRAD Doppler Radar data [S1].
+
+## Sources
+[S1] View-Dependent Multiresolution Splatting of Non-Uniform Data, https://doi.org/10.2312/vissym/vissym02/125-132, fetched 2026-10-30

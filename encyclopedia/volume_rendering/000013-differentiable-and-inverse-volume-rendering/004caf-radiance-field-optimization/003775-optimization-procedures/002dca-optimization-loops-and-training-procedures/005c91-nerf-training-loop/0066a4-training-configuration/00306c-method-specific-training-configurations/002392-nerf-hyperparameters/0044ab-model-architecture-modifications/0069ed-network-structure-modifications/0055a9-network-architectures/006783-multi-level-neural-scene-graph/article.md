@@ -1,0 +1,346 @@
+# Multi-Level Neural Scene Graph
+
+Also called: NSG
+
+## Overview
+Multi-Level Neural Scene Graph (NSG) is a scene representation that decomposes an environment into a graph of static, dynamic, and temporal nodes to model urban environments with moving objects and appearance variations [S1]. It distinguishes itself from sibling architectures by explicitly separating the radiance field into a static component $\phi$ and a dynamic component $\psi$, conditioned on sequence-level and object-level latent vectors respectively, enabling the disentanglement of scene-dependent appearance from object texture [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   A set of training rays $\mathcal{R}$, where each ray is defined by $(r, t, s)$: ray direction/origin parameters, time $t$, and sequence $s$ [S1].
+*   Ground truth colors $\hat{C}(r, t, s)$ and depths $\hat{D}(r, t, s)$ [S1].
+*   LiDAR point clouds and ego-vehicle poses $P$ for space contraction bounds [S1].
+*   Initial ego-vehicle poses $P_{ts} \in SE(3)$ and object poses $\xi_{ot} \in SE(3)$ [S1].
+
+**Outputs:**
+*   Rendered color $C(r, t, s)$ and expected depth $D(r, t, s)$ for each ray [S1].
+*   Optimized radiance field parameters $\theta$, including MLP weights, latent vectors, and pose residuals [S1].
+
+### Data Structures
+
+**Scene Graph $G = (V, E)$:**
+*   **Nodes $V$:**
+    *   Root node $v_r$: Defines the global coordinate system. Associated latent vector $\omega_r$ (not used for conditioning fields in the described method).
+    *   Camera nodes $\{v_c\}_{c \in C}$: Associated with camera calibration.
+    *   Sequence nodes $\{v_{st}\}_{s \in S, t \in T_s}$: Associated with latent vector $\omega_{st}$.
+    *   Dynamic object nodes $\{v_o\}_{o \in O_s}$: Associated with latent vector $\omega_o$.
+*   **Edges $E$:** Oriented rigid transformations between coordinate frames.
+    *   $e_{v_{st} v_r} = P_{ts}$: Transformation from global frame to sequence frame (ego-vehicle pose).
+    *   $e_{v_c v_{st}} = T_c$: Transformation from ego-vehicle frame to camera frame (fixed calibration).
+    *   $e_{v_o v_{st}} = \xi_{ot}$: Transformation from sequence frame to object local frame.
+*   **Bounding Boxes:** Each dynamic object node $v_o$ has an associated 3D bounding box $b_{to}$ in its local coordinate frame [S1].
+
+**Latent Vectors:**
+*   $\omega_{st} = [A_s F(t), G_s F(t)]$: Sequence-level latent vector.
+    *   $A_s$: Appearance matrix for sequence $s$.
+    *   $G_s$: Transient geometry matrix for sequence $s$.
+    *   $F(\cdot)$: 1D basis function of sines and cosines with linearly increasing frequencies at log-scale [S1].
+*   $\omega_o$: Object-level latent vector conditioning the dynamic field [S1].
+
+**Coordinate System Contraction:**
+*   Unbounded scene space is contracted into a unit cube.
+*   Bounds are computed from LiDAR point clouds and ego-vehicle poses $P$ [S1].
+*   Any 3D position $x$ is normalized to this unit cube before processing [S1].
+
+### Numbered Steps
+
+#### 1. Graph Traversal and Coordinate Transformation
+1.  For a given ray $(r, t, s)$, traverse the graph to identify relevant dynamic object nodes $v_o$ present in sequence $s$ at time $t$ [S1].
+2.  Retrieve the 3D bounding box $b_{to}$ for each dynamic object node [S1].
+3.  Compute the ray origin $o$ and direction $d$ in the global coordinate system:
+    $$ o = R_{ts} t_c + t_{ts} $$
+    $$ d = R_{ts} R_c K_c^{-1} (p_x, p_y, 1)^T $$
+    where $R_{ts}, t_{ts}$ are the rotation and translation from $P_{ts}$, $R_c, t_c$ are from $T_c$, and $K_c$ is the camera intrinsic matrix [S1].
+4.  For each dynamic object node, transform the ray into the object's local coordinate frame using the edge transformation $\xi_{ot}$ and the sequence pose $P_{ts}$:
+    $$ x_{local} = (P_{ts} \xi_{ot})^{-1} I_3 \frac{1}{\max(s_o)} x_{global} $$
+    (Note: The source formula $(P_{ts} \xi_{ot})^{-1} I_3 (1/\max(s_o))$ implies scaling by the inverse of the maximum object size $\max(s_o)$ for normalization, applied to the position vector) [S1].
+5.  Compute the entry $u_{in}$ and exit $u_{out}$ points of the ray intersecting the local bounding box $b_{to}$ [S1].
+
+#### 2. Radiance Field Evaluation
+Evaluate the static field $\phi$ and dynamic field $\psi$ at sampling location $r(u)$ along the ray.
+
+**Static Field $\phi(x, d, \omega_{st})$:**
+1.  Compute multi-scale 3D hash grid features: $f_x = H_3(x)$ [S1].
+2.  Compute density feature and density: $(h_{\sigma_\phi}, \sigma_\phi) = \text{MLP}_{\sigma_\phi}(f_x)$ [S1].
+3.  Compute color: $c_\phi = \text{MLP}_{c_\phi}(h_{\sigma_\phi}, \gamma_{SH}(d), A_s F(t))$ [S1].
+    *   $\gamma_{SH}(\cdot)$ is spherical harmonics encoding [S1].
+4.  Compute transient geometry feature and color: $(\sigma_G, c_G) = \text{MLP}_G(h_{\sigma_\phi}, G_s F(t))$ [S1].
+5.  Combine static and transient outputs to get final $\phi$ color and density (mixture analogous to Eq. 12 in source, but specifically for static part) [S1].
+
+**Dynamic Field $\psi(x, d, \omega_{st}, \omega_o)$:**
+1.  Transform position $x$ and direction $d$ to local object coordinates (as in Step 1.4) [S1].
+2.  Compute density feature and density: $(h_{\sigma_\psi}, \sigma_\psi) = \text{MLP}_{\sigma_\psi}(\gamma_{PE}(x), \omega_o)$ [S1].
+    *   $\gamma_{PE}(\cdot)$ is positional encoding [S1].
+3.  Compute color: $c_\psi = \text{MLP}_{c_\psi}(h_{\sigma_\psi}, \gamma_{PE}(d), \omega_o, \omega_{st})$ [S1].
+
+**Composite Rendering:**
+1.  If the sampling location $r(u)$ is **not** within the interval $[u_{in}, u_{out}]$ of any dynamic node's bounding box, set $\sigma_\psi = 0$ and $c_\psi = 0$ [S1].
+2.  Compute composite density and color:
+    $$ \sigma = \sigma_\phi + \sigma_\psi $$
+    $$ c = \frac{\sigma_\phi}{\sigma_\phi + \sigma_\psi} c_\phi + \frac{\sigma_\psi}{\sigma_\phi + \sigma_\psi} c_\psi $$
+    [S1]
+
+#### 3. Composite Ray Sampling
+1.  **Proposal Density:** Distill the static density $\sigma_\phi$ into a proposal density $\sigma_{prop}(r(u), \omega_{st})$ [S1].
+2.  **Sampling Strategy:** Use two iterations of ray sampling [S1].
+    *   **Iteration 1 (Uniform):** Sample uniformly along the ray [S1].
+    *   **Iteration 2 (Inverse Transform):** Sample based on the Cumulative Distribution Function (CDF) $F(u) = 1 - U(u)$, where $U(u) = \exp\left(-\int_{u_{in}}^u \sigma(u') du'\right)$ [S1].
+3.  **Joint Sampling:** Sample jointly from $\sigma_{prop}$ and $\sigma_\psi$. Constrain sampling from $\sigma_\psi$ to the interval $[u_{in}, u_{out}]$ of the relevant dynamic nodes [S1].
+
+#### 4. Pose Optimization (Hierarchical)
+1.  Optimize pose residuals $\delta P_{ts} \in \mathfrak{se}(3)$ for ego-vehicle poses and $\delta \xi_{ot} \in \mathfrak{se}(2)$ for object poses [S1].
+2.  Update ego-vehicle pose: $\hat{P}_{ts} = \text{expmap}(\delta P_{ts}) P_{ts}$ [S1].
+3.  Update object pose: $\hat{\xi}_{ot} = \text{expmap}(\delta \xi_{ot})_{SE(2) \to SE(3)} \xi_{ot}$ [S1].
+    *   Note: Object pose residuals are constrained to $\mathfrak{se}(2)$ (ground plane motion) and mapped to $SE(3)$ [S1].
+4.  Keep camera extrinsics $T_c$ fixed [S1].
+
+#### 5. Loss Computation
+Total loss $\mathcal{L}$ is the sum of:
+$$ \mathcal{L} = \sum_{(r,t,s) \in \mathcal{R}} \left( \mathcal{L}_{rgb} + \lambda_{dist} \mathcal{L}_{dist} + \lambda_{prop} \mathcal{L}_{prop} + \lambda_{dep} \mathcal{L}_{dep} + \lambda_{entr} \mathcal{L}_{entr} \right) $$
+[S1]
+
+*   **Photometric Loss:** $\mathcal{L}_{rgb}(r, t, s) = \| C(r, t, s) - \hat{C}(r, t, s) \|_2^2$ [S1].
+*   **Expected Depth Loss:** $\mathcal{L}_{dep}(r, t, s) = \| D(r, t, s) - \hat{D}(r, t, s) \|_2^2$, where $\hat{D}(r, t, s) = \int_{u_{in}}^{u_{f}} u U(u) \sigma(r(u), t, s) du$ [S1].
+*   **Entropy Regularization:** Encourages separation between $\phi$ and $\psi$ densities within bounding boxes:
+    $$ \mathcal{L}_{entr}(r, t, s) = \int_{u_{in}}^{u_{f}} H\left( \frac{\sigma_\psi(r(u), t, s)}{\sigma_\phi(r(u), s) + \sigma_\psi(r(u), t, s)} \right) du $$
+    where $H(\cdot)$ is Shannon entropy [S1].
+*   **Distillation/Proposal Loss:** $\mathcal{L}_{dist}$ and $\mathcal{L}_{prop}$ follow the method in [2] (Instant-NGP/NeRF), supervising $\sigma_{prop}$ with $\sigma_\phi$ [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_basis_function(t, num_frequencies=10):
+    """
+    1D basis function of sines and cosines with linearly increasing frequencies at log-scale.
+    t is normalized to [-1, 1].
+    """
+    # Implementation detail: Standard positional encoding basis
+    # F(t) = [sin(2^k * pi * t), cos(2^k * pi * t)] for k in 0..num_frequencies-1
+    # Note: Source [S1] cites [61, 69] for log-scale frequencies.
+    # For implementation, we use standard NeRF positional encoding as proxy if exact log-scale 
+    # implementation is not specified, but strictly following "linearly increasing frequencies at log-scale" 
+    # usually implies geometric progression.
+    frequencies = np.logspace(0, np.log10(2**num_frequencies), num_frequencies)
+    t_expanded = t[:, np.newaxis] * frequencies[np.newaxis, :]
+    return np.concatenate([np.sin(t_expanded), np.cos(t_expanded)], axis=1)
+
+def contract_space(x, bounds):
+    """
+    Contract unbounded scene space into a unit cube.
+    bounds: computed from LiDAR and ego-vehicle poses.
+    """
+    # Normalize x to [-1, 1] based on bounds
+    x_center = (bounds.min + bounds.max) / 2
+    x_scale = (bounds.max - bounds.min) / 2
+    return (x - x_center) / x_scale
+
+def evaluate_static_field(x, d, omega_st, hash_grid, mlp_sigma_phi, mlp_c_phi, mlp_G):
+    """
+    Evaluate static radiance field phi.
+    omega_st = [A_s F(t), G_s F(t)]
+    """
+    # 1. Hash grid features
+    fx = hash_grid.query(x)
+    
+    # 2. Density
+    h_sigma_phi, sigma_phi = mlp_sigma_phi(fx)
+    
+    # 3. Color
+    # gamma_SH is spherical harmonics encoding
+    d_sh = spherical_harmonics_encoding(d, degree=3) # Standard degree 3 for NeRF
+    A_s_F_t = omega_st['appearance']
+    c_phi = mlp_c_phi(h_sigma_phi, d_sh, A_s_F_t)
+    
+    # 4. Transient geometry
+    G_s_F_t = omega_st['geometry']
+    sigma_G, c_G = mlp_G(h_sigma_phi, G_s_F_t)
+    
+    # Mixture of static and transient (analogous to Eq 12 structure for static part)
+    # Source says "final colors and densities are computed as a mixture... analogous to Eq 12"
+    # Assuming simple additive mixture for static part components before combining with dynamic
+    sigma_static = sigma_phi + sigma_G
+    c_static = (sigma_phi * c_phi + sigma_G * c_G) / (sigma_static + 1e-8)
+    
+    return sigma_static, c_static
+
+def evaluate_dynamic_field(x_local, d_local, omega_o, omega_st, mlp_sigma_psi, mlp_c_psi):
+    """
+    Evaluate dynamic radiance field psi.
+    x_local, d_local are in object coordinate frame.
+    """
+    # 1. Density
+    # gamma_PE is positional encoding
+    x_pe = positional_encoding(x_local, num_frequencies=10)
+    h_sigma_psi, sigma_psi = mlp_sigma_psi(x_pe, omega_o)
+    
+    # 2. Color
+    d_pe = positional_encoding(d_local, num_frequencies=10)
+    c_psi = mlp_c_psi(h_sigma_psi, d_pe, omega_o, omega_st)
+    
+    return sigma_psi, c_psi
+
+def ray_box_intersection(ray_origin, ray_direction, box_min, box_max):
+    """
+    Compute entry (u_in) and exit (u_out) of ray with AABB.
+    Returns None if no intersection.
+    """
+    # Standard AABB-ray intersection
+    t_min = (box_min - ray_origin) / ray_direction
+    t_max = (box_max - ray_origin) / ray_direction
+    
+    t_enter = np.maximum(t_min, t_max).min()
+    t_exit = np.minimum(t_min, t_max).max()
+    
+    if t_enter > t_exit or t_exit < 0:
+        return None, None
+    
+    return t_enter, t_exit
+
+def render_ray(ray_params, graph, time_t, sequence_s, hash_grid, models):
+    """
+    Render a single ray using the Multi-Level Neural Scene Graph.
+    """
+    # 1. Coordinate Transformation
+    # Get ego-vehicle pose P_ts and object poses xi_ot
+    P_ts = graph.get_pose(sequence_s, time_t) # Ego-vehicle pose
+    T_c = graph.camera_calibration # Fixed
+    
+    # Ray origin and direction in global frame
+    o_global = P_ts.R @ T_c.t + P_ts.t # o = R_ts t_c + t_ts (Note: source uses t_c for cam extrinsic translation)
+    # d = R_ts R_c K_c^-1 (px, py, 1)
+    # Assuming ray_params provides (px, py) or direction in camera frame
+    d_cam = ray_params.direction_in_cam
+    d_global = P_ts.R @ T_c.R @ d_cam
+    d_global = d_global / np.linalg.norm(d_global)
+    
+    # 2. Traverse Graph for Dynamic Objects
+    dynamic_nodes = graph.get_dynamic_nodes(sequence_s, time_t)
+    
+    # 3. Composite Sampling and Rendering
+    # Use composite ray sampling strategy
+    # Distill static density for proposal
+    sigma_prop = distill_static_density(ray_params, sequence_s, hash_grid, models['mlp_sigma_phi'])
+    
+    # Sample points
+    # Two iterations: 1. Uniform, 2. Inverse Transform Sampling
+    samples = composite_sample(ray_params, sigma_prop, dynamic_nodes, time_t, sequence_s)
+    
+    sigma_total = 0.0
+    color_total = np.zeros(3)
+    
+    for u, weight in samples:
+        x_global = ray_params.origin + u * ray_params.direction
+        
+        # Contract space
+        x_contracted = contract_space(x_global, graph.bounds)
+        
+        # Evaluate Static Field
+        sigma_phi, c_phi = evaluate_static_field(
+            x_contracted, ray_params.direction, 
+            graph.get_sequence_latent(sequence_s, time_t),
+            hash_grid, models['mlp_sigma_phi'], models['mlp_c_phi'], models['mlp_G']
+        )
+        
+        # Evaluate Dynamic Field
+        sigma_psi = 0.0
+        c_psi = np.zeros(3)
+        
+        # Check intersection with dynamic nodes
+        for node in dynamic_nodes:
+            # Transform ray to local object frame
+            # Edge e_vo_vst = xi_ot
+            xi_ot = graph.get_object_pose(node, time_t)
+            # Local transform: (P_ts xi_ot)^-1
+            # Note: Source formula includes scaling 1/max(s_o). 
+            # Assuming xi_ot includes scale or we normalize by object size.
+            # For simplicity, assume xi_ot is SE(3) and we handle scale in coordinate transform if needed.
+            # The source says: (P_ts xi_ot)^-1 I_3 (1/max(s_o))
+            # Let's assume we transform x_global to local_x
+            local_x = inverse_transform(P_ts @ xi_ot) @ x_global
+            local_x = local_x / node.max_size # Scale normalization
+            
+            local_d = inverse_rotation(P_ts @ xi_ot) @ ray_params.direction
+            
+            # Check if within bounding box
+            u_in, u_out = ray_box_intersection(local_x, local_d, node.box_min, node.box_max)
+            
+            # Check if current u (in global) maps to interval [u_in, u_out] in local
+            # This requires mapping u back to local distance or transforming u_global to local ray parameter
+            # Simplified: if global point is within transformed box
+            if is_point_in_box(local_x, node.box_min, node.box_max):
+                sigma_psi, c_psi = evaluate_dynamic_field(
+                    local_x, local_d,
+                    node.latent_vector,
+                    graph.get_sequence_latent(sequence_s, time_t),
+                    models['mlp_sigma_psi'], models['mlp_c_psi']
+                )
+                break # Assume only one dynamic object per sample for simplicity or accumulate
+        
+        # Composite
+        sigma = sigma_phi + sigma_psi
+        if sigma > 1e-8:
+            c = (sigma_phi * c_phi + sigma_psi * c_psi) / sigma
+        else:
+            c = np.zeros(3)
+            
+        # Alpha compositing
+        alpha = 1.0 - np.exp(-sigma * u_step) # u_step is distance between samples
+        color_total += weight * alpha * c
+        # Note: Standard NeRF compositing: C = sum T_i alpha_i c_i
+        # Here 'weight' from sampling might already account for T_i, or we compute T_i explicitly.
+        # Source uses standard volumetric rendering integral.
+        
+    return color_total
+
+def optimize_pose_residuals(graph, loss_gradients):
+    """
+    Hierarchical pose optimization.
+    """
+    # Optimize ego-vehicle pose residuals delta_P_ts in se(3)
+    delta_P_ts = compute_se3_residual(loss_gradients, 'ego_vehicle')
+    P_ts_new = expmap_se3(delta_P_ts) @ graph.get_pose('ego_vehicle')
+    graph.set_pose('ego_vehicle', P_ts_new)
+    
+    # Optimize object pose residuals delta_xi_ot in se(2)
+    for node in graph.dynamic_nodes:
+        delta_xi_ot = compute_se2_residual(loss_gradients, node)
+        # Map se(2) to SE(3)
+        xi_ot_new = expmap_se2_to_se3(delta_xi_ot) @ graph.get_object_pose(node)
+        graph.set_object_pose(node, xi_ot_new)
+```
+
+### Edge Cases and Pitfalls
+*   **Dynamic Node Boundary:** When computing composite rendering, $\sigma_\psi$ must be set to zero if the sampling location $r(u)$ does not lie within the 3D bounding box of a dynamic node [S1]. Failure to do so results in incorrect density mixing in empty space.
+*   **Coordinate Transformation:** The transformation of 3D position $x$ and viewing direction $d$ into the local object coordinate frame uses $(P_{ts} \xi_{ot})^{-1} I_3 (1/\max(s_o))$. The scaling factor $1/\max(s_o)$ is critical for normalizing the object size, likely to match the training distribution of the MLP [S1].
+*   **Pose Constraints:** Object pose residuals are constrained to $\mathfrak{se}(2)$ (ground plane motion), assuming objects are upright. Optimizing them in full $\mathfrak{se}(3)$ may lead to instability [S1].
+*   **Time Normalization:** Time $t$ must be normalized to $[-1, 1]$ using the maximum sequence length to ensure the basis function $F(t)$ operates correctly [S1].
+
+## Operating characteristics
+
+*   **Time Complexity:** Rendering involves evaluating two MLPs ($\phi$ and $\psi$) and a hash grid lookup per sample. The composite sampling strategy reduces the number of samples needed compared to dense sampling, as $\sigma_{prop}$ skips empty space [S1].
+*   **Memory Complexity:** The scene graph structure is lightweight, storing only latent vectors and poses. The primary memory cost is the 3D hash grid for $\phi$ and the MLP weights for $\phi$ and $\psi$ [S1].
+*   **Strengths:**
+    *   Disentangles static and dynamic components, allowing for better generalization across sequences and objects [S1].
+    *   Handles appearance variations (e.g., auto-exposure) and transient geometry (e.g., tree leaves) via sequence-level latents [S1].
+    *   Efficient rendering via composite sampling and space contraction [S1].
+*   **Limitations:**
+    *   Requires accurate initial poses and bounding boxes for dynamic objects [S1].
+    *   Complexity increases with the number of dynamic objects and sequences [S1].
+*   **When to Use:** Suitable for dynamic urban environments with multiple sequences, moving objects, and appearance variations [S1].
+*   **When Not to Use:** Static scenes or scenes with very few dynamic objects may not benefit from the complexity of the graph structure [S1].
+
+## Background
+
+*   **Origin:** Multi-Level Neural Scene Graphs were introduced in "Multi-Level Neural Scene Graphs for Dynamic Urban Environments" (CVPR 2024) [S1].
+*   **Development:** The method builds upon previous work in neural radiance fields (NeRF) and dynamic scene representations, incorporating ideas from hash grids, pose optimization, and composite sampling [S1].
+*   **Usage:** Designed for novel view synthesis in dynamic urban environments, leveraging LiDAR and camera data [S1].
+
+## Sources
+
+[S1] Multi-Level Neural Scene Graphs for Dynamic Urban Environments, https://doi.org/10.1109/cvpr52733.2024.01996, fetched 2026-10-29

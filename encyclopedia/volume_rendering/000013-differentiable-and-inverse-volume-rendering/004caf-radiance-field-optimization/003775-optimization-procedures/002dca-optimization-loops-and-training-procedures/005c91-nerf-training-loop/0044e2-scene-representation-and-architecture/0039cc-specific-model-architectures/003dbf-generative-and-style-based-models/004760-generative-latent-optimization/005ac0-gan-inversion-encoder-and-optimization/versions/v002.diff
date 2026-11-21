@@ -1,0 +1,187 @@
+--- v001.md
++++ v002.md
+@@ -1,30 +1,43 @@
+ # GAN Inversion Encoder and Optimization
+ Also called: GSN Inversion Encoder and Optimization
++
+ ## Overview
+-This method enables view synthesis and scene editing by inverting a trained Generative Scene Network (GSN) or locally conditioned radiance field. It employs a learned encoder to map input views to an initial latent code grid, which is then refined via optimization to reconstruct the scene. It differs from standard GAN inversion by operating on a structured latent grid conditioned on camera poses rather than a single global latent vector, allowing for spatially varying scene representations [S1].
++This method enables view synthesis and scene completion by inverting a trained generative radiance field (specifically a Generative Scene Network, GSN) into a latent code grid [S1]. It solves the problem of generating unseen parts of a scene or editing scenes by optimizing local latent codes rather than sampling from the prior distribution [S1]. Unlike methods relying on global coordinate systems which suffer rendering quality degradation as rotation angles increase, this approach uses a local coordinate system that is robust to rearrangements of latent codes, such as 2D rotations [S1].
++
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** A set of posed source views $S = \{(X, T)_i\}_{i=t-5}^t$, where $X$ is the image and $T$ is the camera pose.
+-- **Outputs:** An optimized latent code grid $\hat{W}$.
++*   **Inputs:** A set of posed source views $S = \{(X, T)_i\}_{i=t-5}^t$, where $X$ represents the image data and $T$ represents the camera pose transformations [S1].
++*   **Outputs:** An optimized latent code grid $\hat{W}$ that conditions the radiance field to synthesize new views [S1].
+ 
+ **Data Structures:**
+-- **Encoder $E_{\theta_E}$:** A neural network mapping views and poses to latent codes.
+-- **Feature Volume $V$:** A 3D tensor $V \in \mathbb{R}^{c \times s \times s \times s}$ storing back-projected features.
+-- **Latent Grid $W_0$:** A 2D tensor $W_0 \in \mathbb{R}^{c \times s \times s}$ representing the initial latent codes.
+-- **Optimized Grid $\hat{W}$:** The result of optimizing $W_0$.
++*   **Encoder Parameters ($\theta_E$):** Weights of the neural network encoder $E_{\theta_E}$ [S1].
++*   **Feature Volume ($V$):** A 3D volume with layout $V \in \mathbb{R}^{c \times s \times s \times s}$, where $c$ is the channel dimension and $s$ is the spatial resolution [S1].
++*   **Latent Code Grid ($W_0$):** The initial grid of latent codes with layout $W_0 \in \mathbb{R}^{c \times s \times s}$, derived from $V$ [S1].
++*   **Radiance Field ($f$):** The trained generator function that maps latent codes and camera poses to images [S1].
+ 
+-**Steps:**
+-1. **Encoder Forward Pass:** Process source views $X$ through a backbone network (UNet with ResNet-50 encoder) to extract feature maps.
+-2. **Back-Projection:** Use camera poses $T$ to back-project the feature maps into the shared feature volume $V \in \mathbb{R}^{c \times s \times s \times s}$ [S1].
+-3. **Pooling:** Perform average pooling over the height dimension of $V$ to obtain the initial latent code grid $W_0 \in \mathbb{R}^{c \times s \times s}$ [S1].
+-4. **Orientation Selection:** Predict $W_0$ at multiple rotation angles about the y-axis for the input views. Select the orientation that minimizes the auto-encoding LPIPS loss [60] to find the generator's preferred orientation. Use this orientation for subsequent optimization [S1].
+-5. **Optimization:** Optimize $W_0$ via Stochastic Gradient Descent (SGD) for 1000 iterations to produce $\hat{W}$ [S1]. The radiance field $f$ parameters are frozen during this step [S1].
++**Numbered Steps:**
++1.  **Encoder Architecture Setup:** Construct an encoder $E_{\theta_E}$ consisting of a UNet backbone [47] with a ResNet-50 encoder [S1]. The encoder maps input views and poses to a feature volume: $E_{\theta_E} : \mathbb{R}^{3 \times w \times h} \times SE(3) \rightarrow \mathbb{R}^{c \times s \times s \times s}$ [S1].
++2.  **Feature Extraction and Back-projection:** Process the input views $\hat{X}$ through the backbone to obtain feature maps [S1]. Back-project these feature maps using the camera poses $T$ into the shared feature volume $V \in \mathbb{R}^{c \times s \times s \times s}$ [S1].
++3.  **Latent Grid Initialization:** Perform average pooling over the height dimension of $V$ to produce the initial latent code grid $W_0 \in \mathbb{R}^{c \times s \times s}$ [S1].
++4.  **Orientation Selection:** Since scenes do not share a canonical orientation, predict $W_0$ at multiple rotation angles about the y-axis for the source views $\{T_i\}_{i=t-5}^t$ [S1]. Define the preferred orientation as the one that minimizes an auto-encoding LPIPS loss [60]. Use this orientation during the subsequent optimization [S1].
++5.  **Optimization:** Optimize the initial grid $W_0$ via Stochastic Gradient Descent (SGD) for 1000 iterations to obtain the final grid $\hat{W}$ [S1]. The radiance field parameters are frozen during this process [S1].
+ 
+-**Formula:**
+-The encoder is trained using a reconstruction loss:
++**Formulas:**
++The encoder is trained by minimizing the reconstruction loss [S1]:
+ $$
+ L(\hat{X}, T, W; \theta_E) = \|W - E_{\theta_E}(\hat{X}, T)\|_2^2 + \|\hat{X} - f(E_{\theta_E}(\hat{X}, T), T)\|_2^2
+ $$
+-where the first term encourages reconstruction of the local latent grid and the second term encourages samples from the locally conditioned radiance field $f$ to match the original input views [S1].
++Where:
++*   The first term $\|W - E_{\theta_E}(\hat{X}, T)\|_2^2$ encourages the reconstruction of the local latent grid [S1].
++*   The second term $\|\hat{X} - f(E_{\theta_E}(\hat{X}, T), T)\|_2^2$ encourages samples from the locally conditioned radiance field $f$ to match the original input views [S1].
++
++**Parameters:**
++*   **Optimization Iterations:** 1000 iterations [S1].
++*   **Optimizer:** SGD [S1].
++*   **Source View Window:** 6 views ($i=t-5$ to $t$) [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Mixed Precision:** Mixed precision training is not applied to the discriminator (if present in the base GSN) as training stability decreases in that case [S1].
++*   **Orientation Ambiguity:** Failure to select the generator's preferred orientation via LPIPS minimization may result in suboptimal reconstruction due to lack of canonical alignment [S1].
+ 
+ **Pseudocode:**
+@@ -32,58 +45,59 @@
+ def gan_inversion_encoder_optimization(source_views, camera_poses, encoder, radiance_field, num_iterations=1000):
+     """
+-    Inverts a GSN using an encoder and optimization.
++    Inverts a GSN for view synthesis.
+     
+     Args:
+         source_views: List of images X.
+-        camera_poses: List of camera poses T.
++        camera_poses: List of poses T.
+         encoder: Trained encoder E_theta_E.
+-        radiance_field: Trained locally conditioned radiance field f.
+-        num_iterations: Number of SGD steps.
++        radiance_field: Trained generator f.
+         
+     Returns:
+-        optimized_W: The optimized latent code grid.
++        optimized_W: Optimized latent code grid.
+     """
+-    # Step 1-3: Encode views to initial latent grid
+-    # Backbone processes views to feature maps
+-    feature_maps = encoder.backbone(source_views)
+-    
+-    # Back-project features to volume V using poses
+-    V = back_project_features(feature_maps, camera_poses, volume_size=(s, s, s))
+-    
+-    # Average pool over height dimension to get W0
+-    W0 = average_pool_height(V)
+-    
+-    # Step 4: Find preferred orientation
++    # Step 1: Find preferred orientation
+     best_orientation = None
+     min_lpips_loss = infinity
+     
+-    # Try multiple rotation angles about y-axis
++    # Test multiple rotation angles about the y-axis
+     for angle in rotation_angles:
+         rotated_poses = rotate_poses(camera_poses, angle, axis='y')
+-        # Predict W0 with rotated poses
+-        W0_rotated = encoder(source_views, rotated_poses)
+-        # Calculate LPIPS loss between original views and reconstruction
+-        # Note: Reconstruction requires passing W0_rotated through radiance field
+-        reconstructed_views = radiance_field.render(W0_rotated, rotated_poses)
+-        lpips_loss = compute_lpips_loss(source_views, reconstructed_views)
++        # Predict initial latent grid W0 for this orientation
++        W0_candidate = encoder(source_views, rotated_poses)
++        
++        # Calculate auto-encoding LPIPS loss
++        # Note: LPIPS calculation requires specific perceptual loss implementation
++        lpips_loss = compute_lpips_loss(source_views, radiance_field(W0_candidate, rotated_poses))
+         
+         if lpips_loss < min_lpips_loss:
+             min_lpips_loss = lpips_loss
+             best_orientation = angle
+-            W0 = W0_rotated
+             
+-    # Apply best orientation to poses for optimization
++    # Apply preferred orientation
+     final_poses = rotate_poses(camera_poses, best_orientation, axis='y')
+     
+-    # Step 5: Optimize W0
+-    W_opt = W0.clone().requires_grad_(True)
+-    optimizer = SGD([W_opt], lr=learning_rate)
++    # Step 2: Initialize W0 using the encoder with preferred orientation
++    W0 = encoder(source_views, final_poses)
++    
++    # Step 3: Optimize W0 via SGD
++    # Note: W0 requires gradient tracking
++    W_opt = W0.clone().detach().requires_grad_(True)
++    optimizer = SGD([W_opt], lr=learning_rate) # Learning rate not specified in sources [G]
+     
+     for i in range(num_iterations):
+         optimizer.zero_grad()
+-        # Render current latent grid
+-        rendered_views = radiance_field.render(W_opt, final_poses)
++        
++        # Forward pass through radiance field
++        synthesized_views = radiance_field(W_opt, final_poses)
++        
+         # Compute reconstruction loss
+-        loss = compute_reconstruction_loss(source_views, rendered_views)
++        # Term 1: Latent grid reconstruction (if ground truth W available during training, 
++        # but here we optimize for synthesis, so primarily term 2 matters for inference)
++        # The source defines L for encoder training. For inference optimization, 
++        # the loss is typically just the image reconstruction term against source views.
++        # However, the source states "optimize W0 via SGD... to get W_hat".
++        # We assume the loss function used for optimization mirrors the second term of Eq 3.
++        loss = torch.norm(synthesized_views - source_views, p=2)
++        
+         loss.backward()
+         optimizer.step()
+@@ -92,24 +106,20 @@
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- **Orientation Ambiguity:** Scenes may not share a canonical orientation. Failure to select the preferred orientation can lead to poor reconstruction [S1].
+-- **Training Stability:** Mixed precision training should not be applied to the discriminator if present, as it decreases stability [S1].
+-- **Memory Cost:** Training the generator incurs memory costs; optimization is performed with frozen generator parameters to reduce this [S1].
+-
+ ## Subtopics
+ 
+ ### [GSN Inversion](16716-gsn-inversion.md)
+-The process of finding a latent code grid $\hat{W}$ that, when passed through a trained locally conditioned radiance field $f$, reconstructs input source views $S$ and predicts target views $T$. It solves the problem of generating unseen parts of a scene or editing scenes by optimizing latent codes rather than sampling from the prior.
++GSN Inversion is a method for view synthesis and scene completion that inverts source views into a latent code grid to locally condition a trained radiance field. It solves the problem of generating unseen parts of a scene or editing scenes by optimizing latent codes rather than sampling from the prior. Unlike methods relying on global coordinate systems, GSN uses a local coordinate system that is robust to rearrangements of latent codes, such as 2D rotations, whereas global systems suffer rendering quality degradation as rotation angles increase.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Optimization requires 1000 SGD iterations per scene [S1].
+-- **Memory Complexity:** Depends on the size of the feature volume $V \in \mathbb{R}^{c \times s \times s \times s}$ and the latent grid [S1].
+-- **Strengths:** Allows for view synthesis and scene editing by optimizing latent codes. Handles multiple views and camera poses [S1].
+-- **Limitations:** Requires a pre-trained encoder and radiance field. Optimization can be computationally expensive [S1].
+-- **When to Use:** When view synthesis or editing of scenes represented by a GSN is required [S1].
+-- **When Not to Use:** When real-time inference is critical, as optimization adds latency [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** Not given in the sources.
++*   **Strengths:** Robustness to 2D rotations and rearrangements of latent codes due to the local coordinate system [S1].
++*   **Limitations:** Requires a pre-trained GSN and encoder [S1]. Sensitive to the choice of canonical orientation [S1].
++*   **When to use:** When view synthesis or scene completion is required for a scene generated by a GSN, particularly when the scene orientation is unknown or variable [S1].
++*   **When not to use:** When global coordinate consistency is strictly required and the scene is not generated by a GSN [S1].
+ 
+ ## Background
+-The method is based on GAN inversion techniques applied to Generative Scene Networks (GSN) [S1]. It was introduced in "Unconstrained Scene Generation with Locally Conditioned Radiance Fields" [S1]. The approach builds on common practices for GAN inversion [57] and uses a hybrid inversion approach [S1].
++The method originates from the work on Unconstrained Scene Generation with Locally Conditioned Radiance Fields [S1]. It adapts common practices for GAN inversion [57] to the context of Generative Scene Networks (GSN). The encoder architecture is conceptually similar to prior works [22, 36] [S1].
+ 
+ ## Sources

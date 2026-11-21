@@ -1,0 +1,99 @@
+# Vendored Blosc+LZ4 Compression Pipeline
+
+Also called: NanoVDB Blosc headers, OpenVDB Blosc integration
+
+## Overview
+This method provides a stripped-down, vendored compression and decompression pipeline for sparse volume data structures in OpenVDB and NanoVDB, using only the LZ4 compressor and non-threaded Blosc context methods [S1, unofficial]. It eliminates the external Blosc dependency by embedding a minimal implementation directly into the library, ensuring that Blosc becomes a mandatory, built-in component rather than an optional external link [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Raw sparse volume data blocks (float or vec3f) and metadata.
+- **Output:** Compressed binary buffers compatible with OpenVDB/NanoVDB headers.
+
+**Data Structures:**
+The implementation exposes two header files for integration:
+1. `openvdb_blosc.h`: Wraps the Blosc functionality for OpenVDB.
+2. `nanovdb_blosc.h`: Wraps the Blosc functionality for NanoVDB.
+
+All symbols are prefixed to avoid namespace clashes (e.g., `openvdb_blosc_init()` instead of `blosc_init()`) [S1, unofficial].
+
+**Parameters:**
+- **BLOSC_DOSHUFFLE (0x04):** Controls byte shuffling. OpenVDB only uses byte shuffle, not bit shuffle [S1, unofficial].
+- **SIMD Width:** Restricted to 4-wide byte shuffling only, implemented via SSE2. Falls back to non-vectorized implementation on ARM/NEON [S1, unofficial].
+
+**Steps:**
+1. Vendor Blosc version 1.21.6 and its LZ4 dependency into the `ext/` directory of the project [S1, unofficial].
+2. Strip unused Blosc functionality to reduce the codebase to approximately 1000 lines [S1, unofficial].
+3. Build a single Blosc object file that exposes only four specific methods:
+   - `blosc_init()`
+   - `blosc_compress_ctx()`
+   - `blosc_decompress_ctx()`
+   - `blosc_cbuffer_sizes()`
+   All other Blosc and LZ4 implementation details are hidden within this object file [S1, unofficial].
+4. Prefix all exposed symbols with the library namespace (e.g., `openvdb_blosc_init()`, `nanovdb_blosc_init()`) [S1, unofficial].
+5. Wrap the prefixed symbols in `openvdb_blosc.h` and `nanovdb_blosc.h` [S1, unofficial].
+6. Integrate these headers and the compiled object file into the OpenVDB and NanoVDB build systems, removing external CMake dependency checks for Blosc [S1, unofficial].
+
+**Pseudocode:**
+The following pseudocode illustrates the core shuffle control logic found in the decoder, specifically how the `doshuffle` flag is evaluated [S1, unofficial]:
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def decode_block(header_flags, typesize, dest, context):
+    # Calculate number of uncompressed bytes in block
+    ntbytes = get_uncompressed_block_size(context)
+    
+    # Pointer to destination buffer
+    _tmp = dest
+    
+    # Get type size from context
+    typesize = context.typesize
+    
+    # Determine if shuffling is enabled
+    # BLOSC_DOSHUFFLE is 0x04
+    # Shuffling only occurs if flag is set AND typesize > 1
+    doshuffle = (header_flags & 0x04) and (typesize > 1)
+    
+    # If shuffling is enabled, apply inverse shuffle
+    # Note: The current implementation ignores bitshuffle flag (0x04)
+    # and only supports byte shuffle. Bitshuffled data results in corruption.
+    if doshuffle:
+        # Apply SSE2-based 4-wide byte unshuffle or fallback
+        unshuffle_bytes(_tmp, ntbytes, typesize)
+    
+    # Decompress LZ4 data into _tmp
+    decompress_lz4(context.compressed_data, _tmp, ntbytes)
+```
+
+**Edge Cases and Pitfalls:**
+- **Bitshuffle Corruption:** The decoder ignores the bitshuffle flag (0x04). If bitshuffled LZ4 data is provided, the decoder accepts it without reversing the transformation, resulting in corrupted output [S1, unofficial]. Although OpenVDB's writer only uses byte shuffle, unsupported bitshuffled input should be explicitly rejected to prevent silent data corruption [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- The stripped Blosc implementation consists of approximately 1000 lines of code [S1, unofficial].
+- Decompression performance is within a 5% tolerance of the external `libblosc.so` library [S1, unofficial].
+
+**Measured Performance:**
+Comparison of decompression performance relative to `libblosc.so` (where 1.0x is equal performance):
+
+| Shape | Decompression Performance |
+| :--- | :--- |
+| 8^3 float | 0.90x |
+| 8^3 vec3f | 1.01x |
+| 16^3 float | 1.08x |
+| 16^3 vec3f | 1.02x |
+| 32^3 float | 1.07x |
+| 32^3 vec3f | 0.95x |
+
+[S1, unofficial]
+
+**Strengths and Limitations:**
+- **Strengths:** Eliminates external dependency management; simplifies build systems by removing conditional macros and CMake checks for Blosc; performance is comparable to the standard library [S1, unofficial].
+- **Limitations:** Blosc is now mandatory; the implementation does not support bitshuffle, requiring explicit rejection of such inputs to avoid corruption [S1, unofficial].
+
+## Background
+This method was introduced in PR #2363 by danrbailey on October 13, 2026, to the AcademySoftwareFoundation/openvdb repository [S1, unofficial]. It is based on Blosc version 1.21.6 [S1, unofficial]. The change was motivated by the desire to eliminate the Blosc dependency entirely from OpenVDB, as Blosc is exclusively used with LZ4 and in non-threaded contexts (_ctx methods) within both OpenVDB and NanoVDB [S1, unofficial].
+
+## Sources
+[S1] Remove Blosc, https://github.com/AcademySoftwareFoundation/openvdb/pull/2363, fetched 2026-10-28 (unofficial)

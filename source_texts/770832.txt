@@ -1,0 +1,685 @@
+The React Framework. Contribute to vercel/next.js development by creating an account on GitHub.
+
+Add offline zstd dictionary tooling and train a taskdata dictionary by lukesandberg · Pull Request #98281 · vercel/next.js · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+lukesandberg
+commented
+Sep 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+What?
+Adds static zstd dictionary support to turbo-persistence and enables a 64 KiB dictionary for the TaskData family.
+Family
+Compression
+Infra
+LZ4
+TaskMeta
+LZ4
+TaskCache
+LZ4
+TaskData
+zstd3 + static dictionary
+Also adds zstd_dictionary, a small offline tool that trains a replacement dictionary from copied cache directories and prints an LZ4/zstd3/new-dictionary comparison.
+Why?
+TaskData dominates persistent cache size and contains recurring serialized structures derived from JS/CSS and module graphs. A static dictionary gives zstd useful matches immediately.
+Corrected held-out evaluation groups small values into production-like 8–12 KiB compression units:
+Metric
+zstd3
+Dictionary
+Delta
+Raw compressed bytes
+52,387,060
+44,924,356
+-14.25%
+Median encode diagnostic
+772.23 ms
+822.26 ms
++6.48%
+Median decode diagnostic
+225.30 ms
+192.72 ms
+-14.46%
+The raw byte savings equal 9.65% of the copied holdout cache-directory size. Timings are single-process diagnostics; real Next.js builds are the final validation.
+A separate TaskMeta experiment did not justify replacing LZ4: dictionary-zstd was 26.55% smaller, but 4.01× slower to encode and 4.61× slower to decode.
+How?
+CompressionConfig supports LZ4, zstd3, and zstd3 with a static dictionary.
+Meta files record the zstd dictionary ID and validate it at open time.
+Writers reuse prepared dictionary compressors; readers reuse a thread-local decompressor.
+sst_inspect accepts multiple source dictionaries keyed by dictionary ID.
+The checked-in dictionary and replacement command live in src/database/taskdata-dictionary/.
+```
+cargo run -p turbo-persistence --release --bin zstd_dictionary -- \
+  --family 2 \
+  --source-dictionary turbopack/crates/turbo-tasks-backend/src/database/taskdata-dictionary/taskdata.zdict \
+  --output /tmp/taskdata.zdict \
+  path/to/cache-a path/to/cache-b
+```
+The command compares against its training inputs, so its output is diagnostic rather than held-out evidence.
+Verification
+```
+cargo test -p turbo-persistence -- --test-threads=1
+cargo test -p turbo-persistence --all-targets --no-run
+cargo test -p turbo-tasks-backend
+cargo fmt --all -- --check
+cargo clippy -p turbo-persistence -p turbo-tasks-backend --all-targets -- -D warnings
+```
+The production corpus used 194 test/production files, yielding 204 training and 38 held-out TaskData caches. The checked-in artifact is 65,536 bytes with zstd dictionary ID 1166300072.
+github-actions
+Bot
+commented
+Sep 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Failing test suites
+Commit: 31b0cc3 | About building and testing Next.js
+pnpm test-dev test/e2e/app-dir/instant-validation/suspense-boundaries.test.ts (job)
+instant validation > dev - client navigation > invalid - static prefetch - missing suspense around runtime (DD)
+Expand output
+● instant validation › dev - client navigation › invalid - static prefetch - missing suspense around runtime
+```
+expect(received).toMatchInlineSnapshot(snapshot)
+
+Snapshot name: `instant validation dev - client navigation invalid - static prefetch - missing suspense around runtime 1`
+
+- Snapshot  - 23
++ Received  +  1
+
+- {
+-   "cause": [
+-     {
+-       "label": "Caused by: Instant Validation",
+-       "source": "app/suspense-in-root/static/missing-suspense-around-runtime/page.tsx (3:24) @ instant
+- > 3 | export const instant = { level: 'experimental-error' }
+-     |                        ^",
+-       "stack": [
+-         "instant app/suspense-in-root/static/missing-suspense-around-runtime/page.tsx (3:24)",
+-         "Set.forEach <anonymous>",
+-       ],
+-     },
+-   ],
+-   "description": "Next.js encountered runtime data during a navigation.",
+-   "environmentLabel": "Server",
+-   "label": "Instant",
+-   "source": "app/suspense-in-root/static/missing-suspense-around-runtime/page.tsx (6:16) @ Page
+- > 6 |   await cookies()
+-     |                ^",
+-   "stack": [
+-     "Page app/suspense-in-root/static/missing-suspense-around-runtime/page.tsx (6:16)",
+-   ],
+- }
++ "Redbox did not open."
+
+  59 |         await expectNoDevValidationErrors(browser, await browser.url())
+  60 |       } else {
+> 61 |         await expect(browser).toDisplayCollapsedRedbox(`
+     |                               ^
+  62 |          {
+  63 |            "cause": [
+  64 |              {
+
+  at Object.toDisplayCollapsedRedbox (e2e/app-dir/instant-validation/suspense-boundaries.util.ts:61:31)
+```
+pnpm test-dev test/development/app-dir/instant-navs-devtools/instant-navs-devtools.test.ts (job)
+instant-nav-panel > transitions between capture types > should avoid showing stale SPA state when reloading from a captured SPA state into captured MPA state (DD)
+Expand output
+● instant-nav-panel › transitions between capture types › should avoid showing stale SPA state when reloading from a captured SPA state into captured MPA state
+```
+expect(received).toContain(expected) // indexOf
+
+Expected substring: "/target-page/my-post"
+Received string:    "http://localhost:33581/"
+
+  809 |       // capture an MPA load of the wrong route.
+  810 |       await retry(async () => {
+> 811 |         expect(await browser.url()).toContain('/target-page/my-post')
+      |                                     ^
+  812 |       }, 10000)
+  813 |
+  814 |       await browser.refresh()
+
+  at toContain (development/app-dir/instant-navs-devtools/instant-navs-devtools.test.ts:811:37)
+  at retry (lib/next-test-utils.ts:940:14)
+  at Object.<anonymous> (development/app-dir/instant-navs-devtools/instant-navs-devtools.test.ts:810:7)
+```
+pnpm test-dev-turbo test/development/app-dir/instant-navs-devtools/instant-navs-devtools.test.ts (turbopack) (job)
+instant-nav-panel > SPA captures > should show loading skeleton during SPA navigation after clicking Start (DD)
+Expand output
+● instant-nav-panel › SPA captures › should show loading skeleton during SPA navigation after clicking Start
+```
+locator.waitFor: Timeout 60000ms exceeded.
+Call log:
+  - waiting for locator('[data-testid="dynamic-skeleton"]') to be visible
+
+  624 |       await browser
+  625 |         .locator('[data-testid="dynamic-skeleton"]')
+> 626 |         .waitFor({ state: 'visible' })
+      |          ^
+  627 |       expect(
+  628 |         await browser.locator('[data-testid="dynamic-content"]').count()
+  629 |       ).toBe(0)
+
+  at Object.waitFor (development/app-dir/instant-navs-devtools/instant-navs-devtools.test.ts:626:10)
+```
+lukesandberg
+commented
+Sep 4, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/offline.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 4, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/README.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 4, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/taskdata_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 4, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/taskdata_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 4, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/taskdata_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 4, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/taskdata_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 4, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/taskdata_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 4, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/taskdata_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 4, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/taskdata_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 4, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/taskdata_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 4, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/taskdata_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 4, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/offline.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+changed the title
+Add offline TaskData dictionary tooling
+Add offline zstd dictionary tooling
+Sep 5, 2026
+lukesandberg
+commented
+Sep 5, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/zstd_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 5, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/zstd_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 5, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/zstd_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 5, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/zstd_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 5, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/zstd_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 5, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-tasks-backend/README.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 5, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-tasks-backend/README.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 5, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/zstd_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 5, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/zstd_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 5, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/zstd_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 5, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/zstd_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 5, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/zstd_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 6, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/zstd_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 6, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/compression.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 6, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/compression.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 6, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/offline.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 17, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/sst_inspect.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 17, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/sst_inspect.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 17, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/sst_inspect.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 17, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/zstd_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 17, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/zstd_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 17, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/zstd_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 17, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/src/bin/zstd_dictionary.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 17, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-tasks-backend/README.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 17, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-persistence/README.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 17, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-tasks-backend/src/database/taskdata-dictionary.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+lukesandberg
+commented
+Sep 17, 2026
+View reviewed changes
+Comment thread
+turbopack/crates/turbo-tasks-backend/scripts/train-taskdata-dictionary.sh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+vercel-fleet-prod
+Bot
+and others
+added 15 commits
+September 17, 2026 07:14
+Add offline TaskData dictionary evaluator
+…
+f53c843
+```
+Co-authored-by: Luke Sandberg <210140+lukesandberg@users.noreply.github.com>
+```
+Train TaskData dictionaries offline
+…
+d8e70ef
+```
+Co-authored-by: Luke Sandberg <210140+lukesandberg@users.noreply.github.com>
+```
+Simplify zstd dictionary tooling
+…
+6f553a4
+```
+Co-authored-by: Luke Sandberg <210140+lukesandberg@users.noreply.github.com>
+```
+Tighten zstd dictionary sampling
+…
+dc93e45
+```
+Co-authored-by: Luke Sandberg <210140+lukesandberg@users.noreply.github.com>
+```
+Enable a baseline TaskData zstd dictionary
+…
+51884b3
+```
+Co-authored-by: Luke Sandberg <210140+lukesandberg@users.noreply.github.com>
+```
+Make TaskData dictionary trainer executable
+…
+8770351
+```
+Co-authored-by: Luke Sandberg <210140+lukesandberg@users.noreply.github.com>
+```
+Allow zstd dictionary training from LZ4 caches
+…
+0ba8095
+```
+Co-authored-by: Luke Sandberg <210140+lukesandberg@users.noreply.github.com>
+```
+Remove dictionary sample kind tracking
+…
+f011b48
+```
+Co-authored-by: Luke Sandberg <210140+lukesandberg@users.noreply.github.com>
+```
+Use typed dictionary timing and context keys
+…
+9c6e81a
+```
+Co-authored-by: Luke Sandberg <210140+lukesandberg@users.noreply.github.com>
+```
+Support keyed dictionaries in SST inspector
+…
+ff946a8
+```
+Co-authored-by: Luke Sandberg <210140+lukesandberg@users.noreply.github.com>
+```
+Model production blocks in dictionary evaluation
+…
+7d3f971
+```
+Co-authored-by: Luke Sandberg <210140+lukesandberg@users.noreply.github.com>
+```
+Compare dictionary results with LZ4
+…
+43ec9bb
+```
+Co-authored-by: Luke Sandberg <210140+lukesandberg@users.noreply.github.com>
+```
+Adapt persistence compression to access modes
+…
+86062d9
+```
+Co-authored-by: Luke Sandberg <210140+lukesandberg@users.noreply.github.com>
+```
+Simplify zstd dictionary tooling
+…
+7b48608
+```
+Co-authored-by: Luke Sandberg <210140+lukesandberg@users.noreply.github.com>
+```
+Resolve index block rebase conflict
+…
+31b0cc3
+```
+Co-authored-by: Luke Sandberg <210140+lukesandberg@users.noreply.github.com>
+```
+lukesandberg
+force-pushed
+the
+codex/taskdata-dictionary-tool
+branch
+from
+0017e04 to
+31b0cc3
+Compare
+September 17, 2026 07:14
+Train TaskData zstd dictionary on real-world apps
+…
+4eaabae
+```
+The previous dictionary was a proof of concept trained against the
+`test/production` test fixtures. Retrain it against 34 real-world Next.js
+applications from the `next-benchmarks` corpus (9.88 GB of TaskData values),
+excluding private applications and the synthetic bundler fixtures.
+
+Measured on cold `next build` cache sizes with `sst_inspect`, plain `Zstd3`
+versus `Zstd3WithDictionary`:
+
+- training set (32 apps): -5.8% TaskData bytes, -6.2% value bytes
+- held out (5 apps):      -4.5% TaskData bytes, -4.9% value bytes, -3.2% cache
+
+Every application improved, by between 2.7% and 13.3%. The held-out
+applications were never seen during training, so -4.5% is the figure to
+expect in practice.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+lukesandberg
+changed the title
+Add offline zstd dictionary tooling
+Add offline zstd dictionary tooling and train a taskdata dictionary
+Sep 17, 2026
+vjeux
+mentioned this pull request
+Oct 13, 2026
+Turbopack: with turbopackFileSystemCacheForBuild a cold next build of a large App Router app is 2.1–2.6× slower (single-threaded aggregation-graph phase) and the 15–21 GB cache is mostly chunk-group dependency edges
+#100086
+Open
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

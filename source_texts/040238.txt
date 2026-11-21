@@ -1,0 +1,1042 @@
+IRCasTRF: Inverse Rendering by Optimizing Cascaded Tensorial
+Radiance Fields, Lighting, and Materials from Multi-view Images
+Wenpeng Xing∗
+Jie Chen†
+Department of Computer Science
+Hong Kong Baptist University
+Hong Kong SAR, China
+cswpxing@comp.hkbu.edu.hk
+Department of Computer Science
+Hong Kong Baptist University
+Hong Kong SAR, China
+chenjie@comp.hkbu.edu.hk
+Ka Chun Cheung
+Simon See
+Nvidia AI Technology Centre
+Hong Kong SAR, China
+chcheung@nvidia.com
+Nvidia AI Technology Centre
+Singapore
+ssee@nvidia.com
+ABSTRACT
+ACM Reference Format:
+Wenpeng Xing, Jie Chen, Ka Chun Cheung, and Simon See. 2023. IRCasTRF: Inverse Rendering by Optimizing Cascaded Tensorial Radiance Fields,
+Lighting, and Materials from Multi-view Images. In Proceedings of the
+31st ACM International Conference on Multimedia (MM ’23), October 29November 3, 2023, Ottawa, ON, Canada. ACM, New York, NY, USA, 10 pages.
+https://doi.org/10.1145/3581783.3612010
+We propose an inverse rendering pipeline that simultaneously reconstructs scene geometry, lighting, and spatially-varying material
+from a set of multi-view images. Specifically, the proposed pipeline
+involves volume and physics-based rendering, which are performed
+separately in two steps: exploration and exploitation. During the
+exploration step, our method utilizes the compactness of neural
+radiance fields and a flexible differentiable volume rendering technique to learn an initial volumetric field. Here, we introduce a novel
+cascaded tensorial radiance field method on top of the Canonical
+Polyadic (CP) decomposition to boost model compactness beyond
+conventional methods. In the exploitation step, a shading pass that
+incorporates a differentiable physics-based shading method is applied to jointly optimize the scene’s geometry, spatially-varying
+materials, and lighting, using image reconstruction loss. Experimental results demonstrate that our proposed inverse rendering
+pipeline, IRCasTRF, outperforms prior works in inverse rendering
+quality. The final output is highly compatible with downstream
+applications like scene editing and advanced simulations. Further
+details are available on the project page: https://ircasrf.github.io/.
+1
+INTRODUCTION
+Novel view synthesis has been a long-standing research problem in
+computer vision. Given a set of posed multi-view images, it aims to
+learn a scene representation and synthesize novel views. Early studies utilize Light Field techniques [56, 57] and Multi-Plane Images
+(MPI) [54, 55] to record the scene. Recent advancements in neural scene representations [32, 36, 53], which utilize differentiable
+rendering techniques, have led to the development of continuous
+volumetric fields. However, the learned volumetric fields suffer
+from entangled appearance and environmental lighting, making
+them unsuitable for direct use in downstream applications. Learning separate specifications for geometry, materials, and lighting
+from images, known as inverse rendering, has emerged as an intersection between computer vision and graphics. Despite significant
+progress, inverse rendering remains challenging due to its inherently underconstrained nature [64]. Because optimizing both the
+geometry and spatially-varying material simultaneously can lead to
+local minima, adversely impacting the quality of reconstruction. To
+address this challenge, neural pipelines that employ separate stages
+for exploration and exploitation have emerged as a novel trend in inverse rendering research [38, 60]. This approach helps improve the
+efficiency and stability of the inherently underconstrained learning
+process.
+We introduce a novel hybrid pipeline called IRCasTRF to solve
+the challenging problem of inverse rendering. Our pipeline consists
+of two stages: exploration and exploitation, utilizing both volumetric field and explicit mesh representations’ strengths. Specifically,
+in the exploration stage, IRCasTRF first leverages the advantages in
+compactness and efficiency of our proposed novel volumetric field
+representation – Cascaded Canonical Polyadic Tensorial Radiance
+Fields (CasCPRF). The proposed CasCPRF leverage inspirations
+from TensoRF [9] and Hierarchical Tucker (H-Tucker) [16], which
+CCS CONCEPTS
+• Computing methodologies → Volumetric models; Image and
+video acquisition; Hierarchical representations.
+KEYWORDS
+Inverse rendering; Canonical Polyadic decomposition; Neural radiance fields; Novel view synthesis; Bidirectional reflectance distribution function.
+∗ The work was done when the author was a research intern at Nvidia AI Technology
+Centre, Hong Kong.
+† Corresponding author: Jie Chen
+This work is licensed under a Creative Commons Attribution
+International 4.0 License.
+MM ’23, October 29-November 3, 2023, Ottawa, ON, Canada
+© 2023 Copyright held by the owner/author(s).
+ACM ISBN 979-8-4007-0108-5/23/10.
+https://doi.org/10.1145/3581783.3612010
+2644
+MM ’23, October 29-November 3, 2023, Ottawa, ON, Canada
+Wenpeng Xing, Jie Chen, Ka Chun Cheung, & Simon See
+can more compactly approximate a high-order radiance field feature volume than TensoRF [9] and also maintain training efficiency.
+Secondly, in the exploitation stage, we convert the volumetric field
+into an explicit mesh representation and perform physics-based
+shading, in which lighting information, spatially-varying material
+properties, and geometry offsets are learned via using an efficient
+differentiable mesh rasterizer and shader [20, 28, 37].
+To summarize, our contributions are:
+• We propose a novel tensor decomposed radiance field representation – CasCPRF that achieves better compactness
+than TensoRF [9] to approximate a high-order radiance field
+feature volume.
+• A hybrid inverse rendering pipeline that combines the advantages of tensor decomposition and explicit representation,
+to decompose the scene into spatially-varying materials, environment lighting, and geometry.
+Empirical studies demonstrate that our highly compact tensor
+decomposed radiance field representation, CasCPRF, can achieve
+superior rendering quality compared to TensoRF [9] when using
+the same model size. Additionally, our hybrid pipeline outperforms
+previous inverse rendering methods [37, 60] in terms of rendering
+quality.
+these are referred to as spatially-varying BRDFs (SVBRDFs). Recent
+learning-based techniques have facilitated recovering SVBRDFs
+from single or multiple images [6, 13], with or without using a flash
+[2, 12, 15, 29]. Using a static camera with a moving light source to
+recover surface normal and albedo is called Photometric Stereo (PS)
+[41, 43, 52], which have been extended to estimate SVBRDFs. Datadriven deep learning models can be used to estimate SVBRDFs
+purely from images by leveraging large synthetic datasets that
+include real SVBRDF samples [12, 15, 30]. To improve accuracy,
+these models may also incorporate geometry priors obtained from
+scanners or multi-view images [4, 5, 41, 64].
+3
+2 RELATED WORKS
+2.1 Neural Scene Representation
+Neural scene representation represents the scene as a volumetric
+function with both geometry and appearance optimized through
+differentiable rendering techniques. NeRF [36] and its variants
+[11, 23, 44, 51, 59, 62–64] are generative methods of converting
+spatial coordinates into density and colors for volume rendering.
+However, NeRF lacks direct surface regularization and is slow in inference. An alternative approach, NeuS [50], learns a neural signed
+distance function (SDF) using differentiable volume rendering, and
+the surface can be extracted by finding the zero-level set of SDF
+values. Additionally, NeuS improves surface smoothness via eikonal
+loss [17]. Apart from learning SDF through volume rendering techniques, there is another class of surface-based neural scene representations that learn and render disentangled surfaces and appearance. For instance, IDR [58] uses MLPs to acquire disentangled
+surfaces and appearance for rendering. Meanwhile, PhySG [61]
+learns geometry as SDF and approximates BRDFs and lighting
+using Spherical Gaussians (SGs) [22]. IRON [60] places a strong
+emphasis on improving the accuracy of geometric features, such as
+edges. However, conventional surface-based methods employ MLPs
+as their network backbones, which can considerably slow down
+their computational efficiency. In contrast, Nvdiffrec [37] takes an
+alternative approach by explicitly learning and evolving a mesh
+from scratch using DMTet [42] in conjunction with differentiable
+mesh rendering gradients. Nonetheless, this technique may fall
+prey to local minima and learn implausible surfaces.
+2.2
+METHOD
+In this paper, we present a hybrid pipeline that first reconstructs
+volumetric fields by tensor decomposition, which is efficient, compact, and can easily adapt to complex shapes, thus producing a
+good topology initialization for the second stage. Next, we estimate
+albedo, roughness, environment lighting, and surface normal using
+physics-based shading methods [20, 28, 37], building on the preliminary topology generated in the previous stage. The primary
+contribution of our approach is the CasCPRF method, a compact
+and efficient volumetric field representation built upon tensor decomposition. By explicitly extracting the mesh from the CasCPRF,
+we initialize the geometry for shading in the second stage. This
+leads to better training results than previous inverse rendering
+techniques [37, 60]. Figure 1 shows an overview of the pipeline.
+3.1
+Problem setup
+Our approach is trained with 𝑁 images I 𝑗 ∈ R𝐻 ×𝑊 ×3, 𝑗 ∈ 1 . . . 𝑁
+captured in the same illumination. In the first stage, we aim to
+learn and approximate high-order radiance fields feature volume
+𝒱 ∈ R𝐼𝑥 ×𝐼 𝑦 ×𝐼𝑧 × (𝐼𝜎 +𝐼𝑐 ) by CasCPRF, in which at each point x =
+(𝑥, 𝑦, 𝑧) ∈ R3 it estimates features of density F𝜎 ∈ R𝐼𝜎 and colors
+F𝑐 ∈ R𝐼𝑐 . The resulting feature volume 𝒱 is used to extract an
+initial preliminary mesh M for geometry initialization in the second
+stage, in which we use a physically-based material model [7, 37]
+and estimate an isotropic specular GGX lobe [37, 49] that is jointly
+described by roughness 𝜔𝑜 ∈ R, metallic m ∈ R, and a diffuse
+Lambertian lobe. We learn a high-resolution cube map as trainable
+parameters and use an image-based lighting model following [10]
+to best explain the training views.
+3.2
+Preliminaries
+Learning a scene as radiance fields feature volume with learnable
+voxel parameters [9, 14, 46] has seen great success in efficiency and
+accuracy. However, storing a 5D radiance field feature volume as a
+high-order tensor is memory and storage-consuming. Therefore, a
+compact approximation of the high-order tensor volume is in favor.
+3.2.1 Tensorial Radiance Fields. TensoRF [9] adopts tensor decomposition to compactly approximate a high-order radiance field feature volume 𝒱, it factorizes 𝒱 into a sum of rank-one tensors
+named Canonical Polyadic decomposition (CPD) [8, 19]. CPD has
+high compactness on model size and is formulated below:
+BRDF Estimation
+Physics-based shading heavily relies on BRDF evaluations, but
+obtaining accurate BRDF parameters can be challenging and demands meticulous control over the capturing process. On top of
+that, when different points on a surface exhibit varying BRDFs,
+𝒱=
+𝑅
+∑︁
+𝑟 =1
+2645
+𝑦
+v𝑟𝑥 ⊗ v𝑟 ⊗ v𝑟𝑧 ,
+(1)
+IRCasTRF
+MM ’23, October 29-November 3, 2023, Ottawa, ON, Canada
+Specular texture
+Diffuse texture
+Normal
+Per-vertex position
+supervision
+BRDF rendering
+gradients
+Global position offset
+...
+Environment
+supervision
+Multi-view Images
+output
+CasCPRF Volume
+Diffuse
+Specular
+Environment
+Normal
+output
+Uncolored Coarse Mesh
+Decomposed BRDF and environment
+Editing
+Figure 1: A hybrid inverse rendering pipeline to learn geometry, spatially-varying material properties, and environment
+lighting.
+in which ⊗ is the outer product, 𝑅 is the total number of components, v𝑟𝑥 ∈ R (𝐼𝜎 +𝐼𝑐 ) ×𝐼𝑥 are rank-one tensors in mode 𝑥 for the 𝑟 -th
+component.
+The color of each pixel is rendered along ray by the quadrature
+volume rendering approach [34, 36] that approximates a continuous
+integral as shown below:
+C=
+𝑁
+𝑠
+∑︁
+𝑇𝑖 × (1 − exp(−𝜎𝑖 Δ𝑖 ))𝑐𝑖 ,
+contents. Our results demonstrate that this approach can improve
+quality and model compactness. Please refer to Section 3.3 for more
+introductions.
+3.3
+The CasCPRF (cascaded CPD) method is a novel approach to effectively approximating a high-order radiance field feature volume
+𝒱. An illustration of the overall CasCPRF pipeline can be seen in
+Figure 2. Our approach first draws inspiration from the hierarchical
+tucker decomposition (HTD) [18] that decomposes a tensor volume
+into a tree structure, the vectors in a higher level are estimated by
+multiplying vectors from the lower level. We also draw inspiration
+from Bacon’s [31] band-limited coordinate networks which manipulate the frequency of each layer to attain an analytical Fourier
+spectrum for multi-scale scene representation. By utilizing a cascaded structure and differentiable learning process, our proposed
+method CasCPRF also serves as a multi-scale scene representation.
+By employing a cascaded scheme, our approach enables the expansion of the high-order radiance field feature volumes across
+multiple modes and hierarchical levels. This results in a multi-scale
+scene representation that implicitly controls the frequency band of
+learned contents in each scale, thereby facilitating a more compact
+tensor approximation. As a result, CasCPRF can produce superior reconstruction quality compared to its single-scale counterpart while
+utilizing the same model size budget. Empirical experiments reveal
+that the coarsest scale, which has a low spatial resolution, primarily
+learns specular patterns characterized by low spatial frequency but
+high angular frequency. On the other hand, the finer scale, with
+higher spatial resolution, focuses on learning texture details characterized by high spatial frequency but low angular frequency. This
+separation of frequencies in different scales of cascaded structure
+leads to a compact scene representation.
+More specifically, the total number of cascaded levels is denoted
+as 𝐷. The rank-one vectors in each cascaded level constitute a vec𝑑 −1
+𝑛
+tor subspace {∀𝑛 : v𝑛,𝑑 ∈ R𝐼𝑛 /2 ×𝑅 , 𝑛 = 𝑥, 𝑦, 𝑧} in which 𝑅𝑛
+signifies the number of components/ranks in the 𝑛-th mode of 𝒱
+for each cascaded level. We align the modes with the XYZ axis for
+3D shape reconstruction. For each mode 𝑛, the total number of components is obtained by adding up the corresponding components
+for color and density: 𝑅𝑛 = 𝑅𝜎𝑛 + 𝑅𝑐𝑛 . And 𝑅𝑛 << 𝐼𝑥 , 𝐼 𝑦 , 𝐼𝑧 results in
+a very compact representation. The cascaded structure is initialized
+(2)
+𝑖=1
+𝑇𝑖 = exp(−
+𝑖∑︁
+−1
+𝜎 𝑗 Δ 𝑗 ),
+(3)
+𝑗=1
+in which Δ𝑛 is the distance between two adjacent sampled points,
+and 𝑇𝑖 denotes the accumulated transmittance. 𝑁𝑠 points are sampled per ray along the camera’s viewing direction to cast the radiance field feature volume. The radiance {𝜎, c} of the point x is
+calculated as 𝜎 = ReLU(F𝜎 ) and c = MLP𝑐 (F𝑐 , PE(𝜔𝑜 )). Here,
+MLP𝑐 is a small MLP rendering network, 𝜔𝑜 is viewing direction,
+and PE(·) is sinusoidal positional encoding function [36, 47]:
+PE(x) = [sin(20 × x), cos(20 × x), . . . ,
+sin(2𝑁q −1 × x), cos(2𝑁q −1 × x)],
+Exploration: CasCPRF
+(4)
+in which 𝑁 q is the number of frequency band.
+The density features F𝜎 and color features F𝑐 of each sampled
+spatial point x are produced by grid sampling the radiance field
+feature volume 𝒱 that is approximated by tensor decomposition.
+3.2.2 Multi-scale Representation by Tunable Frequency Bandwidth.
+NeRF [36] owes its success to the high-frequency Fourier features
+produced by Equation (4), which enable the coordinate-based MLP
+to overcome the spectral bias [3, 40] existing in MLP. Taking threedimensional coordinates x ∈ R3 as input, MLP has difficulty in
+learning the complex topology and shape of the scene. This can be
+explained by the neural tangent kernel (NTK) [24] which shows
+that the eigenvalue spectrum decays rapidly with the increase of
+frequency. Hence, the MLP converges worse to high-frequency
+contents than the lower. BACON [31] proposes band-limited coordinate networks by using tunable bandwidths for multi-scale scene
+representation and achieving favorable results. Our paper proposes
+a novel approach to achieving multi-scale scene representation,
+which utilizes a cascaded structure with disentangled frequency
+2646
+MM ’23, October 29-November 3, 2023, Ottawa, ON, Canada
+R
+Wenpeng Xing, Jie Chen, Ka Chun Cheung, & Simon See
+𝐯𝐫𝐱,𝟏
+𝐯rz,1
+𝐯rx,2
+y,2
+𝐯r
+=෍
+𝐅𝜎 , 𝐅c
++ 𝐯rz,2
++
+𝐯rx,3
+𝐯rz,3
+y,3
+𝐯r
+- gt
+y,1
+𝐯r
+𝑟=1
+c, 𝜎
+𝜎 = ReLU(𝐅𝜎 )
+𝐜 = MLPc (𝐅c , PE( 0 ))
+Marching cube
+0
+Coarse mesh
+Ray direction
+Figure 2: The pipeline of CasCPRF in the exploration step.
+in a binary-tree style at the beginning of the training. Specifically,
+the number of rows of rank-one vectors in mode 𝑛 and cascaded
+level 𝑑 is set to 𝐼𝑛,𝑑 = 𝐼𝑛 /2𝑑 −1 .
+Formally, we can factorize the density feature volume 𝒱𝜎 and
+color feature volume 𝒱𝑐 as follows:
+𝒱𝜎 =
+𝑥
+𝐷
+𝜎
+∑︁ 𝑅
+∑︁
+(
+𝑦
+v𝑟𝑥,𝑑 ×
+𝑑=1 𝑟 =1
+𝒱𝑐 =
+𝑅𝑐𝑥
+𝐷
+∑︁ ∑︁
+(
+𝑑=1 𝑟 =1
+v𝑟𝑥,𝑑 ×
+𝑅
+𝜎
+∑︁
+𝑦,𝑑
+v𝑟 ×
+𝑧
+𝑅
+𝜎
+∑︁
+v𝑟𝑧,𝑑 ),
+(5)
+𝑅𝑐
+𝑅𝑐
+∑︁
+∑︁
+𝑦,𝑑
+v𝑟 ×
+v𝑟𝑧,𝑑 ).
+(6)
+𝑟 =1
+𝑟 =1
+𝑦
+𝑧
+𝑟 =1
+facilitating alignment with training images. To improve training
+efficiency, our approach initializes both the per-vertex deformation
+vectors Δv𝑖 and global movement vector Δm as explicit learnable
+parameters, without utilizing neural networks. The global movement vector Δm is learned first during warm-up iterations. Since
+accurate positioning is critical for optimizing topology, materials,
+and lighting, this global alignment process serves as a foundation
+for future refinement.
+3.4.2 Material. We learn the material as the Disney [7] material
+model that includes parameters for diffuse term b𝑑 and the specular
+GGX lobe [49]. The specular lobe in the Disney material model
+consists of a roughness value 𝑟 and a metalness parameter 𝑚. To
+calculate the specular term b𝑠 , we use an interpolation approach
+based on the plastic and metallic appearance, expressed as b𝑠 =
+(1 − 𝑚) · 0.04 + 𝑚 · b𝑑 [26, 37]. This enables our approach to be
+compatible with existing rendering engines, ensuring that its output
+format can be readily utilized.
+𝑟 =1
+The density features F𝜎 and color features F𝑐 per spatial point
+x can be grid sampled from the corresponding restored feature
+volume: 𝒱𝜎 (x) −
+→ F𝜎 , 𝒱𝑐 (x) −
+→ F𝑐 . We convert the features F𝜎 , F𝑐
+to radiance {𝜎, c} using the implementation described in Section
+3.2. Next, we apply the volume rendering approach from Equation
+(3) to render the radiance fields into the color prediction C.
+To obtain the preliminary mesh M for geometry initialization,
+we follow the conventional surface estimation procedure in [9, 36],
+which first estimates a complete density volume and applies Marching Cubes (MC) algorithm [33] to extract the surface of the object.
+Although the preliminary mesh M may be affected by some highfrequency noise, it still provides a suitable topology initialization
+for performing physics-based shading.
+3.4
+3.4.3 Texturing. Surface texture parameterization has been a longstanding research issue in computer graphics. To ensure that the
+texture seamlessly varies with changing topology during reconstruction, approaches such as Nvdiffrec [37] and PhySG [61] learn
+a volumetric texture that is indexed by world-space positions and
+modeled compactly using an MLP network. However, we found
+that this approach tends to converge slowly and produce overlysmoothed results. Consequently, we adopted a different strategy
+[37]: initializing the 2D texture using learnable parameters and
+generating the index from the input mesh in Blender. To simplify
+the problem, we fixed the indexes between the vertices and the 2D
+texture map during the optimization.
+Exploitation: Physics-based Shading
+Mesh, being widely used in computer graphics rendering pipelines,
+has significantly enhanced the potential of fully differentiable inverse rendering techniques by amalgamating with computer vision
+[37, 60, 61]. In the exploitation stage, we refine the preliminary
+mesh M in topology finetune, materials, texturing, and lighting
+using physics-based rendering techniques. The complete pipeline
+of the exploitation stage is presented in Figure 3.
+3.4.4 Physics-based shading. To illuminate the mesh, we employed
+a physics-based shading model [25, 37] and a learned environment cube map. This technique uses the rendering equation [25]
+expressed as:
+3.4.1 Topology finetune. The geometry of the initial mesh can be
+refined and optimized in Cartesian space through the use of image
+rendering loss gradients. Starting with a preliminary mesh M with
+vertex positions v, our approach learns per-vertex deformation vectors Δv𝑖 ∈ R3 and global movement vector Δm ∈ R3 , which are
+applied to all vertices to produce the fine-tuned mesh denoted by
+M̂: v𝑖 + Δv𝑖 + Δm −
+→ M̂. Our approach utilizes per-vertex deformation vectors Δv𝑖 to optimize and correct the topology, which can
+shrink noisy vertices and smooth surfaces. In addition, the global
+movement vector Δm controls the overall movement of the mesh,
+∫
+𝐿𝑜 (𝜔𝑜 ) =
+Ω
+𝑓𝑟 (𝜔𝑖 , 𝜔𝑜 )𝐿𝑖 (𝜔𝑖 )(𝜔𝑖 · n) 𝑑𝜔𝑖 ,
+(7)
+which is an integral of incoming light from the integration domain
+Ω and produces outgoing radiance 𝐿𝑜 for view direction 𝜔𝑜 . Here,
+𝑓𝑟 (·) represents BSDF evaluation, 𝐿𝑖 is incident radiance from direction 𝜔𝑖 , and n represents surface normal. The BSDF evaluation
+is implemented as a Cook-Torrance microfacet specular shading
+2647
+IRCasTRF
+MM ’23, October 29-November 3, 2023, Ottawa, ON, Canada
+in which xsurf represents all surface points, Δx is random displacement vector. Finally, the loss function in the exploitation stage is
+expressed as:
+Environment
+lighting
+Per-Vertex Optimization
+Global Alignment
+Lexploit = 𝜆mat Lmat + 𝜆light Llight + Lcolor
+(12)
+Gradients
+Physics-based
+shading
+Rendering
+loss
+4 IMPLEMENTATION DETAILS
+4.1 Configurations of CasCPRF
+Current mesh
+The CasCPRF is implemented using PyTorch [39]. In each mode
+𝑛, the number of components for density features 𝑅𝜎𝑛 and color
+features 𝑅𝑐𝑛 can differ, and comprehensive experiments have been
+made to investigate the difference. To reach a balance between
+compactness and performance, we simplify the experiments by only
+𝑦
+𝑦
+extracting the mesh from Ours_24 (𝑅𝑐𝑥 + 𝑅𝑐 + 𝑅𝑐𝑧 )+24 (𝑅𝜎𝑥 + 𝑅𝜎 + 𝑅𝜎𝑧 )
+for the shading pass in the exploitation stage. We set the resolution
+of the initial feature voxel grid to be 𝐼𝑥,1 × 𝐼 𝑦,1 × 𝐼𝑧,1 = 1253 , which
+can then be upsampled to a higher resolution, not exceeding 2503 ,
+depending on the bounding box that is adaptively adjusted during
+training. To create a multi-scale representation, we use 𝐷 = 3
+cascaded levels. The color rendering network MLP𝑐 is implemented
+as a two-layer-MLP each with 128 nodes and ReLU activation [1].
+We use Adam optimizer [27] to optimize the learnable parameters
+of CasCPRF and the color rendering network MLP𝑐 . The initial
+learning rate of CasCPRF and color rendering network MLP𝑐 is 0.02
+and 0.0001 respectively. We train our model using 3e4 iterations
+and set the batch size as 4096 on a single Nvidia A100 GPU (40GB)
+which takes approximately 25 minutes to complete.
+Figure 3: The pipeline of the exploitation stage.
+model [49]:
+𝐷n 𝐺 𝐹
+(8)
+4 (𝜔𝑖 · 𝜔𝑜 ) (𝜔𝑖 · n)
+in which 𝐷 n , 𝐺, and 𝐹 are respectively the GGX normal distribution
+(NDF) [49], geometric shadowing, and Fresnel effect.
+Considering rendering efficiency, we adopt a differentiable version of the split-sum approximation [21, 37] for image-based lighting. The split-sum operation is popular since using only two texture
+lookups with mipmap (mip) pyramid level and viewing direction 𝜔𝑜 .
+Following [37], the environment cube map for image-based lighting
+is initialized and learned as trainable parameters M ∈ R6×512×512
+in 6 mip levels. The environment map at the coarser/smaller level is
+integrated with increased roughness values. Each coarser/smaller
+level is constructed from the base level 6 using the pre-filtering
+approach [21] which is implemented as a specialized CUDA implementation [37] to reduce training time consumption.
+𝑓𝑟 (𝜔𝑖 , 𝜔𝑜 ) =
+3.5
+4.2
+Optimization Task
+3.5.1 Exploration stage. The basic goal of our approach is learning
+a compact scene representation to synthesize novel views. Therefore, we rely on an image reconstruction loss that minimizes the
+mean-square error between the rendered colors C and their ground
+truth values Ĉ. Additionally, we use a total variation (TV) loss Ltv
+on the vectors v of CasCPRF to enforce smoother surfaces and
+reduce noise:
+Lexplor = ∥C − Ĉ∥ 22 + 𝜆tv Ltv (v),
+Configurations of Exploitation Stage
+We initialize the global movement vector Δm randomly within [-0.3,
+0.3]. The per-vertex deformation vectors Δv are derived from gradients. Following [37, 64], we constrain the minimum and maximum
+values of albedo texture, b𝑑 , to be within [0, 1]. And limit the minimal roughness value 𝑟 to 0.08, environment lighting is randomly
+initialized as 0.5. We use Adam optimizer [27] to optimize learnable
+parameters over 5000 iterations with a learning rate of 0.03 falloff
+from 1.0 to 0.1 exponentially. After 150 warm-up iterations, we
+enable per-vertex movement vectors Δx to alter the topology while
+disabling global movement Δm. We train the model in the exploitation stage on a single NVIDIA A100 GPU (40GB) using a batch of 8
+images with a resolution of 512×512, taking approximately 1 hour
+to finish.
+(9)
+where 𝜆tv is a hyper-parameter.
+3.5.2 Exploitation stage. In the exploitation stage, our algorithm
+produces colors in a high-dynamic range. Following previous works
+[20, 37], the image reconstruction loss Lcolor computes 𝐿1 norm
+on the tone mapped colors Γ(·). To regularize the light and materials, we employ light and materials regularizers [37, 64]. Specifically, light regularizer Llight assumes that real-world scenes contain
+mostly white lighting. Therefore, the light regularizer penalizes
+color shifts:
+3
+3
+1 ∑︁
+1 ∑︁
+Llight =
+| C̄𝑖 −
+C̄𝑖 |
+(10)
+3 𝑖=0
+3 𝑖=0
+5 EXPERIMENTS
+5.1 Dataset
+We evaluate the effectiveness of our approach on publicly available
+multi-view image datasets for novel view synthesis, including the
+NeRF-synthetic dataset [36] and RefNeRF-synthetic dataset [48].
+The former comprises 8 synthetic objects, each captured with 100
+training images and 200 testing images viewed from an inwardfacing-upper-hemi sphere. Likewise, the latter contains 6 synthetic
+objects with reflective surfaces, with the same organization as the
+NeRF-synthetic dataset.
+in which C̄ is per-channel average color intensities. To regularize
+materials, we use a material smoothness loss Lmat [37, 64]:
+∑︁
+Lmat =
+|b𝑑 (xsurf ) − b𝑑 (xsurf + Δx)|
+(11)
+xsurf
+2648
+MM ’23, October 29-November 3, 2023, Ottawa, ON, Canada
+(a) DVGO
+(b) IRON in Explor. (c) IRON in Exploit.
+Wenpeng Xing, Jie Chen, Ka Chun Cheung, & Simon See
+(d) Nvdiffrec
+(e) Ours in Explor. (f) Ours in Exploit.
+(g) GT
+Figure 4: Qualitative comparisons in the RefNeRF-synthetic dataset [48].
+5.2
+Table 1: Quantitative results of hybrid stages.
+Quantitative Comparison
+Our method is evaluated against several approaches on either the
+NeRF-synthetic dataset [36] or RefNeRF-synthetic dataset [48], with
+Table 1 presenting the quantitative outcomes. We utilize three measures, i.e., the structural similarity index measure (SSIM), peak
+signal-to-noise ratio (PSNR), and VGG-based perceptual similarity
+measured by LPIPS, to assess the rendering quality. In the NeRFsynthetic dataset, we report the results of SRN [45], NeRF [36],
+DVGO [46] from [9]. The results of Nvdiffrec [37] and IRON [60]
+are obtained by our rerunning. In the RefNeRF-synthetic dataset,
+we report the results of PhySG [61] and RefNeRF [48] from [48]. The
+results of DVGO [46], IRON [60], and Nvdiffrec [37] are obtained
+by our rerunning. Table 1 indicates that our approach outperforms
+Nvdiffrec [37] and IRON [60] while achieving a comparable outcome to other neural rendering methods. It’s noteworthy that NeRF
+[36] takes approximately 20 hours to train one model, making it
+slower in training and inference. On the other hand, DVGO’s [46]
+model size runs up to hundreds of megabytes. However, CasCPRF
+only requires about 25 minutes to train and has a small model size
+of 1 to 3 MB. As a result, our proposed method provides an efficient
+and compact radiance field representation. Upon completing the
+exploitation stage (i.e., shading pass), which takes approximately 1
+hour to train, our output can be readily used for downstream applications. In contrast, NeRF [36] and DVGO [46] are not compatible
+with current graphics applications. Further details are available on
+the supplementary materials and project page.
+We conducted thorough experiments to demonstrate the compactness of our approach by comparing it against TensoRF [9], a
+Stage
+PSNR↑
+SSIM↑
+LPIPS↓
+End2End
+22.26
+31.01
+31.95
+27.32
+0.846
+0.947
+0.957
+0.913
+0.170
+0.081
+0.053
+0.099
+IRON [60]
+Exploration
+Exploitation
+14.43
+21.78
+0.693
+0.875
+0.276
+0.133
+CasCPRF (Ours)
+Full Model Ours
+Exploration
+Exploitation
+29.18
+29.47
+0.927
+0.939
+0.093
+0.081
+DVGO [46]
+PhySG [61]
+RefNeRF [48]
+Nvdiffrec [37]
+End2End
+29.79
+26.21
+35.96
+25.10
+0.923
+0.921
+0.967
+0.852
+0.142
+0.121
+0.058
+0.192
+IRON [60]
+Exploration
+Exploitation
+14.75
+17.97
+0.774
+0.797
+0.389
+0.226
+CasCPRF (Ours)
+Full Model Ours
+Exploration
+Exploitation
+29.49
+27.19
+0.932
+0.924
+0.143
+0.147
+Method
+SRN [45]
+NeRF [36]
+DVGO [46]
+Nvdiffrec [37]
+Dataset
+NeRF-synthetic
+[36]
+RefNeRFsynthetic [48]
+baseline method, using varying numbers of color and density components, denoted as 𝑅𝑐 and 𝑅𝜎 , respectively. These experiments
+were conducted to yield different model-size budgets. Figure 5
+displays the evaluation metrics. Our approach consistently outperforms TensoRF across various model-size budgets. The greatest performance advantage of our approach is observed when the model
+size is exceptionally small, approximately 1.8 MB for the NeRFsynthetic dataset and 2.1 MB for the RefNeRF-synthetic dataset.
+Table 2 provides a detailed quantitative comparison of our approach
+against TensoRF at different small model size budgets. Additionally,
+2649
+IRCasTRF
+MM ’23, October 29-November 3, 2023, Ottawa, ON, Canada
+Table 2: Quantitative ablation results in the NeRF-synthetic dataset [36] and RefNeRF-synthetic dataset [48]. Results are
+averaged across all scenes.
+Í𝑁
+𝑖 Í𝑁
+𝑖
+𝑖=1 𝑅𝑐 + 𝑖=1 𝑅𝜎
+Dataset
+Model size (MB) ↓
+TensoRF [9]
+PSNR↑ SSIM↑
+LPIPS↓
+Model size (MB) ↓
+Ours
+PSNR↑
+SSIM↑
+LPIPS↓
+NeRF-synthetic [35]
+4+12
+12+4 †
+12+12
+1.793
+1.962
+1.884
+24.806
+22.157
+26.121
+0.876
+0.852
+0.892
+0.166
+0.206
+0.147
+1.805
+2.016
+1.865
+26.625
+25.244
+27.581
+0.897
+0.871
+0.910
+0.132
+0.171
+0.119
+RefNeRF-synthetic [48]
+4+12
+12+4
+12+12
+2.116
+2.173
+2.134
+24.970
+24.120
+28.930
+0.889
+0.888
+0.928
+0.213
+0.205
+0.153
+2.113
+2.033
+2.126
+27.916
+25.304
+29.641
+0.929
+0.905
+0.935
+0.156
+0.175
+0.137
+† Fail to converge in the scene chair, ficus, and mic.
+(a) NeRF-synthetic dataset
+(a) 𝑑 = 1
+(b) RefNeRF-synthetic dataset
+Figure 5: Model size VS. evaluation metrics.
+Figure 7 displays qualitative comparisons of three trained models
+selected from Table 2. Based on the outcomes presented in Table 2,
+Figure 5, and Figure 7, we can draw the following conclusions:
+• Our results exhibit clear performance advantages over TensoRF when using the same small model size budget, validating CasCPRF’s higher compactness relative to TensoRF.
+Furthermore, Figure 7 verifies that CasCPRF captures geometry details more effectively than TensoRF.
+• As the number of color or density components increases, our
+approach’s comparative advantage diminishes due to larger
+model sizes. Nonetheless, our method remains consistently
+superior to TensoRF on RefNeRF-synthetic dataset [48] as
+depicted by the statistical lines in Figure 5.
+• Compared to TensoRF, CasCPRF - a multi-scale tensor decomposition approach - is more reliable in dealing with a
+decrease in the number of density components. In a series
+of experiments where we reduced the sum of density com𝑦
+ponents 𝑅𝜎𝑥 + 𝑅𝜎 + 𝑅𝜎𝑧 from 12 to 4, our results - as shown in
+Figure 7 and Table 2 - demonstrate that CasCPRF maintains
+better compression robustness than its counterpart.
+5.3
+(b) 𝑑 = 2
+(c) 𝑑 = 3
+(d) Rendering
+(e) GT
+Figure 6: Images rendered from various cascaded levels.
+spatially-varying materials and lighting as demonstrated in Figure
+8. The results of Nvdiffrec [37] exhibit noticeable cracking due to a
+lack of mesh topology initialization, leaving them susceptible to local minima. Meanwhile, IRON’s outputs appear over-smoothed and
+display fewer specular effects than other methods. Although DVGO
+[46] produces appealing view-dependent effects, as previously mentioned, it proves incompatible with standard CG pipelines.
+5.4
+Ablation Study
+5.4.1 CasCPRF. As the compactness of CasCPRF against the baseline TensoRF [9] has already been demonstrated in Section 5.2, we
+now aim to delve deeper to CasCPRF by examing the relationships
+between frequency and multi-scale scene representation. We render the colors in different cascaded levels in Figure 6, with 𝑑 = 1
+representing the highest resolution and 𝑑 = 3 indicating the lowest.
+At the level 𝑑 = 3, the cascaded structure restricts the spatial resolution, resulting in low-frequency spatial colors but high-frequency
+specular patterns (which are visualized on the project page). Conversely, level 𝑑 = 1 does not have such limitations and thus boasts
+more high-frequency spatial textures.
+In summary, experiments demonstrate that the cascaded structure implicitly modulates the frequency of content learned at different levels. Specifically, the fine level predominantly learns spatially high-frequency content, while the coarsest level focuses on
+angularly high-frequency content. This leads to an implicit disentanglement of frequencies by the cascaded structure, which results
+Qualitative Results
+Visual comparisons with other competing methods are depicted
+in Figure 4. We observed that our exploitation-based approach is
+capable of producing more accurate reflective surfaces than our
+exploration-based approach. This improved accuracy is attributed
+to CasCPRF’s learned decomposed scene contents, inclusive of
+2650
+MM ’23, October 29-November 3, 2023, Ottawa, ON, Canada
+(a) TensoRF_4+12
+(b) Ours_4+12
+Wenpeng Xing, Jie Chen, Ka Chun Cheung, & Simon See
+(c) TensoRF_12+4
+(d) Ours_12+4
+(e) TensoRF_12+12
+(f) Ours_12+12
+(g) GT
+Figure 7: Visual ablation results in the NeRF-synthetic dataset. The forked rectangles indicate that the model failed to converge.
+6 DISCUSSION OF LIMITATION AND FUTURE
+WORK
+(a) Diffuse b𝑑 (b) Specular b𝑠
+(c) Lighting
+(d) Normal
+Our pipeline has the following limitations and potential avenues
+for future research:
+• The RGB colors acquired during the exploration stage do not
+play a role in the second stage. Improving the integration of
+the two stages may enhance the effectiveness of the pipeline.
+• Exploring the integration of parametric controls into the
+cascaded scheme could be a potential avenue for future research.
+• The compactness of our method can be further improved by
+using vector quantization.
+• The resolution of the explicit mesh obtained through the
+marching cube algorithm is constrained by storage limitations.
+(e) Rendered
+Figure 8: Ablation study of per-vertex optimization. The first
+row displays the results of Ours w/o Δv of mic in the NeRFsynthetic dataset [36]. The second row depicts the results of
+the Full model ours.
+in a more compact model with improved rendering quality and
+robustness when the model size is decreased.
+7
+Table 3: Ablation study of exploitation stage.
+Dataset
+PSNR↑
+SSIM↑
+LPIPS↓
+Ours w/o Δv
+Ours w/o Δm
+Full Model Ours
+NeRFsynthetic [36]
+23.50
+24.46
+29.47
+0.865
+0.900
+0.939
+0.138
+0.128
+0.081
+Ours w/o Δv
+Ours w/o Δm
+Full Model Ours
+RefNeRFsynthetic [48]
+22.82
+25.52
+27.19
+0.820
+0.909
+0.924
+0.219
+0.159
+0.147
+Method
+CONCLUSION
+We propose a hybrid inverse rendering pipeline that leverages the
+benefits of both neural rendering and physics-based shading. Specifically, in the exploration stage, we introduce a novel compact neural
+scene representation known as CasCPRF, which compactly approximates a high-order radiance field feature volume by employing
+tensor decomposition to expand varying frequency contents across
+multiple hierarchical levels and modes. In the second exploitation
+stage, an explicit mesh is extracted and processed through the
+shading pass, which learns decomposed scene elements such as geometry, spatially-varying materials, and lighting. Our experiments
+demonstrate that our proposed method surpasses other state-ofthe-art inverse rendering approaches.
+5.4.2 Exploitation. To validate the importance of the per-vertex
+deformation vectors Δv and global movement vector Δm in our
+pipeline, we conduct an ablation study by removing them from
+the reconstruction process. Our quantitative results presented in
+Table 3 indisputably demonstrate that both vectors play a crucial
+role in achieving high-quality reconstruction. Figure 8 presents the
+visualization of our ablation results for per-vertex optimization. We
+observe that in the absence of Δv, our reconstructed object contains
+floating noisy points, resulting in impaired lighting.
+ACKNOWLEDGEMENT
+The research was supported by the Theme-based Research Scheme,
+Research Grants Council of Hong Kong (T45-205/21-N).
+2651
+IRCasTRF
+MM ’23, October 29-November 3, 2023, Ottawa, ON, Canada
+REFERENCES
+[31] David B Lindell, Dave Van Veen, Jeong Joon Park, and Gordon Wetzstein. 2022.
+Bacon: Band-limited coordinate networks for multiscale scene representation. In
+CVPR. 16252–16262.
+[32] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel Schwartz, Andreas
+Lehrmann, and Yaser Sheikh. 2019. Neural volumes: Learning dynamic renderable
+volumes from images. arXiv preprint:1906.07751 (2019).
+[33] William E Lorensen and Harvey E Cline. 1987. Marching cubes: A high resolution
+3D surface construction algorithm. ACM Siggraph Computer Graphics 21, 4 (1987),
+163–169.
+[34] Nelson Max. 1995. Optical models for direct volume rendering. IEEE Transactions
+on Visualization and Computer Graphics 1, 2 (1995), 99–108.
+[35] Ben Mildenhall, Pratul P. Srinivasan, Rodrigo Ortiz-Cayon, Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and Abhishek Kar. 2019. Local Light Field
+Fusion: Practical View Synthesis with Prescriptive Sampling Guidelines. ACM
+Transactions on Graphics 38, 4, Article 29 (2019), 14 pages.
+[36] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi
+Ramamoorthi, and Ren Ng. 2020. NeRF: Representing Scenes as Neural Radiance
+Fields for View Synthesis. In ECCV. 405–421.
+[37] Jacob Munkberg, Jon Hasselgren, Tianchang Shen, Jun Gao, Wenzheng Chen,
+Alex Evans, Thomas Müller, and Sanja Fidler. 2022. Extracting Triangular 3D
+Models, Materials, and Lighting From Images. In CVPR. 8280–8290.
+[38] Xingang Pan, Ayush Tewari, Lingjie Liu, and Christian Theobalt. 2022. GAN2X:
+Non-Lambertian Inverse Rendering of Image GANs. In 3DV. IEEE, 711–721.
+[39] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory
+Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, et al. 2019.
+Pytorch: An imperative style, high-performance deep learning library. NIPS 32
+(2019).
+[40] Nasim Rahaman, Aristide Baratin, Devansh Arpit, Felix Draxler, Min Lin, Fred
+Hamprecht, Yoshua Bengio, and Aaron Courville. 2019. On the spectral bias of
+neural networks. In ICML. PMLR, 5301–5310.
+[41] Carolin Schmitt, Simon Donne, Gernot Riegler, Vladlen Koltun, and Andreas
+Geiger. 2020. On joint estimation of pose, geometry and svBRDF from a handheld
+scanner. In CVPR. 3493–3503.
+[42] Tianchang Shen, Jun Gao, Kangxue Yin, Ming-Yu Liu, and Sanja Fidler. 2021.
+Deep marching tetrahedra: a hybrid representation for high-resolution 3d shape
+synthesis. NIPS 34 (2021), 6087–6101.
+[43] Boxin Shi, Zhe Wu, Zhipeng Mo, Dinglong Duan, Sai-Kit Yeung, and Ping Tan.
+2016. A benchmark dataset and evaluation for non-lambertian and uncalibrated
+photometric stereo. In CVPR. 3707–3716.
+[44] Jinglei Shi and Christine Guillemot. 2022. Distilled low rank neural radiance field
+with quantization for light field compression. arXiv preprint arXiv:2208.00164
+(2022).
+[45] Vincent Sitzmann, Michael Zollhöfer, and Gordon Wetzstein. 2019. Scene Representation Networks: Continuous 3D-Structure-Aware Neural Scene Representations. In NeurIPS. 1119–1130.
+[46] Cheng Sun, Min Sun, and Hwann-Tzong Chen. 2022. Direct voxel grid optimization: Super-fast convergence for radiance fields reconstruction. In CVPR.
+5459–5469.
+[47] Matthew Tancik, Pratul P Srinivasan, Ben Mildenhall, Sara Fridovich-Keil, Nithin
+Raghavan, Utkarsh Singhal, Ravi Ramamoorthi, Jonathan T Barron, and Ren
+Ng. 2020. Fourier features let networks learn high frequency functions in low
+dimensional domains. arXiv preprint:2006.10739 (2020).
+[48] Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler, Jonathan T Barron,
+and Pratul P Srinivasan. 2022. Ref-nerf: Structured view-dependent appearance
+for neural radiance fields. In CVPR. 5481–5490.
+[49] Bruce Walter, Stephen R Marschner, Hongsong Li, and Kenneth E Torrance. 2007.
+Microfacet Models for Refraction through Rough Surfaces. Rendering techniques
+2007 (2007), 18th.
+[50] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku Komura, and Wenping
+Wang. 2021. NeuS: Learning Neural Implicit Surfaces by Volume Rendering for
+Multi-view Reconstruction. NIPS 34 (2021), 27171–27183.
+[51] Zirui Wang, Shangzhe Wu, Weidi Xie, Min Chen, and Victor Adrian Prisacariu.
+2021. NeRF −− : Neural Radiance Fields Without Known Camera Parameters.
+arXiv preprint:2102.07064 (2021).
+[52] Robert J Woodham. 1980. Photometric method for determining surface orientation from multiple images. Optical engineering 19, 1 (1980), 139–144.
+[53] Wenpeng Xing and Jie Chen. 2022. MVSPlenOctree: Fast and generic reconstruction of radiance fields in PlenOctree from multi-view stereo. In ACM MM.
+5114–5122.
+[54] Wenpeng Xing and Jie Chen. 2022. NEX+: Novel view synthesis with neural
+regularisation over multi-plane images. In ICASSP. IEEE, 1581–1585.
+[55] Wenpeng Xing and Jie Chen. 2022. Temporal-MPI: Enabling multi-plane images
+for dynamic scene modelling via temporal basis learning. In ECCV. Springer,
+323–338.
+[56] Wenpeng Xing, Jie Chen, and Yike Guo. 2023. Robust Local Light Field Synthesis via Occlusion-aware Sampling and Deep Visual Feature Fusion. Machine
+Intelligence Research 20, 3 (2023), 408–420.
+[1] Abien Fred Agarap. 2018. Deep learning using rectified linear units (relu). arXiv
+preprint:1803.08375 (2018).
+[2] Miika Aittala, Tim Weyrich, Jaakko Lehtinen, et al. 2015. Two-shot SVBRDF
+capture for stationary materials. ACM Transactions on Graphics 34, 4 (2015),
+110–1.
+[3] Ronen Basri, Meirav Galun, Amnon Geifman, David Jacobs, Yoni Kasten, and
+Shira Kritchman. 2020. Frequency bias in neural networks for input of nonuniform density. In ICML. 685–694.
+[4] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T Barron, Ce Liu, and
+Hendrik Lensch. 2021. Nerd: Neural reflectance decomposition from image
+collections. In ICCV. 12684–12694.
+[5] Mark Boss, Varun Jampani, Raphael Braun, Ce Liu, Jonathan Barron, and Hendrik Lensch. 2021. Neural-pil: Neural pre-integrated lighting for reflectance
+decomposition. NIPS 34 (2021), 10691–10704.
+[6] Mark Boss, Varun Jampani, Kihwan Kim, Hendrik Lensch, and Jan Kautz. 2020.
+Two-shot spatially-varying brdf and shape estimation. In CVPR. 3982–3991.
+[7] Brent Burley and Walt Disney Animation Studios. 2012. Physically-based shading
+at disney. In ACM SIGGRAPH, Vol. 2012. vol. 2012, 1–7.
+[8] J Douglas Carroll and Jih-Jie Chang. 1970. Analysis of individual differences in
+multidimensional scaling via an N-way generalization of “Eckart-Young” decomposition. Psychometrika 35, 3 (1970), 283–319.
+[9] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. 2022. TensoRF:
+Tensorial Radiance Fields. In ECCV. Springer, 333–350.
+[10] Robert L Cook and Kenneth E. Torrance. 1982. A reflectance model for computer
+graphics. ACM Transactions on Graphics (1982), 7–24.
+[11] Boyang Deng, Jonathan T. Barron, and Pratul P. Srinivasan. 2020. JaxNeRF:
+an efficient JAX implementation of NeRF. https://github.com/google-research/
+google-research/tree/master/jaxnerf
+[12] Valentin Deschaintre, Miika Aittala, Fredo Durand, George Drettakis, and Adrien
+Bousseau. 2018. Single-Image SVBRDF Capture with a Rendering-Aware Deep
+Network. ACM Transactions on Graphics 37, 4 (2018).
+[13] Valentin Deschaintre, Miika Aittala, Frédo Durand, George Drettakis, and Adrien
+Bousseau. 2019. Flexible svbrdf capture with a multi-image deep network. In
+Computer graphics forum, Vol. 38. 1–13.
+[14] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht,
+and Angjoo Kanazawa. 2022. Plenoxels: Radiance Fields Without Neural Networks. In CVPR. 5501–5510.
+[15] Duan Gao, Xiao Li, Yue Dong, Pieter Peers, Kun Xu, and Xin Tong. 2019. Deep
+inverse rendering for high-resolution SVBRDF estimation from an arbitrary
+number of images. ACM Transactions on Graphics 38, 4 (2019), 134–1.
+[16] Lars Grasedyck. 2010. Hierarchical singular value decomposition of tensors.
+SIAM journal on matrix analysis and applications 31, 4 (2010), 2029–2054.
+[17] Amos Gropp, Lior Yariv, Niv Haim, Matan Atzmon, and Yaron Lipman. 2020.
+Implicit Geometric Regularization for Learning Shapes. In Proceedings of Machine
+Learning and Systems 2020. 3569–3579.
+[18] Wolfgang Hackbusch and Stefan Kühn. 2009. A new scheme for the tensor
+representation. Journal of Fourier analysis and applications 15, 5 (2009), 706–722.
+[19] Richard A Harshman et al. 1970. Foundations of the PARAFAC procedure: Models
+and conditions for an" explanatory" multimodal factor analysis. (1970).
+[20] Jon Hasselgren, Jacob Munkberg, Jaakko Lehtinen, Miika Aittala, and Samuli
+Laine. 2021. Appearance-Driven Automatic 3D Model Simplification.. In EGSR.
+85–97.
+[21] Stephen Hill, Stephen McAuley, Laurent Belcour, Will Earl, Niklas Harrysson,
+Sébastien Hillaire, Naty Hoffman, Lee Kerley, Jasmin Patry, Rob Pieké, et al. 2020.
+Physically based shading in theory and practice. In ACM SIGGRAPH. 1–12.
+[22] Daniel Hsu and Sham M Kakade. 2013. Learning mixtures of spherical gaussians:
+moment methods and spectral decompositions. In Proceedings of the 4th conference
+on Innovations in Theoretical Computer Science. 11–20.
+[23] Tao Hu, Shu Liu, Yilun Chen, Tiancheng Shen, and Jiaya Jia. 2022. Efficientnerf
+efficient neural radiance fields. In CVPR. 12902–12911.
+[24] Arthur Jacot, Franck Gabriel, and Clément Hongler. 2018. Neural tangent kernel:
+Convergence and generalization in neural networks. NIPS 31 (2018).
+[25] James T Kajiya. 1986. The rendering equation. In Proceedings of the 13th annual
+conference on Computer graphics and interactive techniques. 143–150.
+[26] Michael Kazhdan and Hugues Hoppe. 2013. Screened poisson surface reconstruction. ACM Transactions on Graphics 32, 3 (2013), 1–13.
+[27] Diederik P Kingma and Jimmy Ba. 2014. Adam: A method for stochastic optimization. arXiv preprint:1412.6980 (2014).
+[28] Samuli Laine, Janne Hellsten, Tero Karras, Yeongho Seol, Jaakko Lehtinen, and
+Timo Aila. 2020. Modular primitives for high-performance differentiable rendering. ACM Transactions on Graphics 39, 6 (2020), 1–14.
+[29] Xiao Li, Yue Dong, Pieter Peers, and Xin Tong. 2017. Modeling surface appearance
+from a single photograph using self-augmented convolutional neural networks.
+ACM Transactions on Graphics 36, 4 (2017), 1–11.
+[30] Zhengqin Li, Kalyan Sunkavalli, and Manmohan Chandraker. 2018. Materials for
+masses: SVBRDF acquisition with a single mobile phone image. In ECCV. 72–87.
+2652
+MM ’23, October 29-November 3, 2023, Ottawa, ON, Canada
+Wenpeng Xing, Jie Chen, Ka Chun Cheung, & Simon See
+[57] Wenpeng Xing, Jie Chen, Zaifeng Yang, Qiang Wang, and Yike Guo. 2022. Scaleconsistent fusion: From heterogeneous local sampling to global immersive rendering. IEEE Transactions on Image Processing 31 (2022), 6109–6123.
+[58] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan Atzmon, Basri Ronen, and Yaron Lipman. 2020. Multiview Neural Surface Reconstruction by
+Disentangling Geometry and Appearance. NIPS 33 (2020).
+[59] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa. 2021. pixelnerf:
+Neural radiance fields from one or few images. In CVPR. 4578–4587.
+[60] Kai Zhang, Fujun Luan, Zhengqi Li, and Noah Snavely. 2022. IRON: Inverse
+Rendering by Optimizing Neural SDFs and Materials from Photometric Images.
+In CVPR. 5555–5564.
+[61] Kai Zhang, Fujun Luan, Qianqian Wang, Kavita Bala, and Noah Snavely. 2021.
+PhySG: Inverse Rendering with Spherical Gaussians for Physics-based Material
+Editing and Relighting. In CVPR. 5453–5462.
+[62] Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen Koltun. 2020. Nerf++:
+Analyzing and improving neural radiance fields. arXiv preprint arXiv:2010.07492
+(2020).
+[63] Xiuming Zhang, Sean Fanello, Yun-Ta Tsai, Tiancheng Sun, Tianfan Xue, Rohit
+Pandey, Sergio Orts-Escolano, Philip Davidson, Christoph Rhemann, Paul Debevec, et al. 2021. Neural light transport for relighting and view synthesis. ACM
+Transactions on Graphics 40, 1 (2021), 1–17.
+[64] Xiuming Zhang, Pratul P Srinivasan, Boyang Deng, Paul Debevec, William T
+Freeman, and Jonathan T Barron. 2021. Nerfactor: Neural factorization of shape
+and reflectance under an unknown illumination. ACM Transactions on Graphics
+40, 6 (2021), 1–18.
+2653

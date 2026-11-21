@@ -1,0 +1,178 @@
+# Grid Density Data Structure
+
+Also called: 3D Grid, 3D Scalar Grid, Dense Voxel Grid Storage, Volume Grid Data Structure
+
+## Overview
+The Grid Density Data Structure is a dense, axis-aligned 3D grid representation used to store scalar density values for volume rendering [S1, S5, unofficial]. It solves the problem of discretizing a continuous volumetric field into a fixed-resolution memory layout that supports fast, direct sampling without the indirection overhead of sparse structures [S1, S5, unofficial]. Unlike sparse alternatives such as [VoxelGrid Data Structure](1216-voxelgrid-data-structure.md) or [Bucket-based Spatial Indexing](12914-bucket-based-spatial-indexing.md), which offer memory efficiency at the cost of traversal speed, the dense grid guarantees $O(1)$ access time by mapping 3D coordinates directly to a contiguous 1D array [S1, S5, unofficial]. It serves as the foundational storage for methods like [Interpolated Discrete Values & Gradients](1268-interpolated-discrete-values-gradients.md) and [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md).
+
+## How it works
+**Inputs:**
+- Grid resolution $N$ (assumed equal in all dimensions, typically a power of 2) [S1, unofficial].
+- World-space bounds: minimum point $\mathbf{p}_{min}$ and maximum point $\mathbf{p}_{max}$, forming an axis-aligned bounding box (AABB) where the physical size is equal in all three dimensions [S1, unofficial].
+- Optional: A transformation matrix $\mathbf{W}$ mapping local grid coordinates to world coordinates, and its inverse $\mathbf{D}$ for ray intersection [S3, unofficial].
+
+**Outputs:**
+- A dense 3D scalar field accessible via 3D integer indices $(x, y, z)$ or 1D linear index $I$.
+
+**Data Structures:**
+The grid is stored as a contiguous 1D array of floating-point values. The layout is defined by the following fields [S1, S3, S4, unofficial]:
+
+1.  **`density`**: A 1D array of `float` values. Size is $N_x \cdot N_y \cdot N_z$.
+2.  **`dimension`** (or `nx`, `ny`, `nz`): Integer resolution per axis. For cubic grids, $N_x = N_y = N_z = N$ [S1, S4, unofficial].
+3.  **`bounds`**: An array of two 3D points `bounds[0]` ($\mathbf{p}_{min}$) and `bounds[1]` ($\mathbf{p}_{max}$) defining the world-space extent [S1, unofficial].
+4.  **`voxel_size`**: The physical spacing between grid points, calculated as $(\mathbf{p}_{max} - \mathbf{p}_{min}) / (N - 1)$ [S4, unofficial].
+
+*Note: Some implementations extend this structure to store additional fields like temperature or majorant values in parallel arrays or handles, but the core density structure remains a single contiguous float array [S2, unofficial].*
+
+**Indexing Formula:**
+Coordinates $(x, y, z)$ are mapped to a 1D linear index $I$ using row-major ordering (Z-major, Y-major, X-minor) [S3, unofficial]:
+$$ I = (z \cdot N_y + y) \cdot N_x + x $$
+where $0 \le x < N_x$, $0 \le y < N_y$, and $0 \le z < N_z$ [S3, unofficial].
+
+**Algorithm: Grid Initialization and Population**
+The following pseudocode demonstrates initializing a grid and populating it with a radial density profile, as described in [S3, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def create_grid(nx, ny, nz):
+    """
+    Creates a dense 3D grid structure.
+    Returns a dictionary containing the density array and dimensions.
+    """
+    # Initialize density array of size nx * ny * nz to 0.0
+    density = [0.0] * (nx * ny * nz)
+    
+    # Store dimensions and bounds
+    # Assuming a cubic grid centered at origin for this example
+    # Bounds would typically be passed in or derived from world space requirements
+    bounds_min = (-1.0, -1.0, -1.0)
+    bounds_max = (1.0, 1.0, 1.0)
+    
+    return {
+        "density": density,
+        "nx": nx,
+        "ny": ny,
+        "nz": nz,
+        "bounds": [bounds_min, bounds_max]
+    }
+
+def populate_radial_density(grid):
+    """
+    Populates the grid with a radial density falloff.
+    Based on the formula from [S3, unofficial].
+    """
+    nx = grid["nx"]
+    ny = grid["ny"]
+    nz = grid["nz"]
+    density = grid["density"]
+    
+    # Iterate through interior voxels to avoid boundary artifacts
+    # Range starts at 1 and ends at N-2 to enforce zero edges [S3, unofficial]
+    for z in range(1, nz - 1):
+        for y in range(1, ny - 1):
+            for x in range(1, nx - 1):
+                # Calculate distance from center of grid
+                # Center is at (nx-1)/2, (ny-1)/2, (nz-1)/2
+                dist_sq = (x - (nx - 1) / 2)**2 + \
+                          (y - (ny - 1) / 2)**2 + \
+                          (z - (nz - 1) / 2)**2
+                dist = math.sqrt(dist_sq)
+                
+                # Compute density value
+                # Formula: density = 1 / (2^(dist + 2)) [S3, unofficial]
+                val = 1.0 / (2**(dist + 2))
+                
+                # Map 3D coordinates to 1D index
+                index = (z * ny + y) * nx + x
+                density[index] = val
+
+def sample_grid(grid, world_point):
+    """
+    Samples the grid density at a specific world coordinate.
+    Requires conversion from world space to local grid indices.
+    """
+    bounds_min = grid["bounds"][0]
+    bounds_max = grid["bounds"][1]
+    nx = grid["nx"]
+    ny = grid["ny"]
+    nz = grid["nz"]
+    
+    # Convert world point to local grid coordinates (0 to N-1)
+    # Assuming axis-aligned and equal scaling in all dimensions [S1, unofficial]
+    # Local X = (world_x - min_x) / (max_x - min_x) * (N - 1)
+    local_x = (world_point[0] - bounds_min[0]) / (bounds_max[0] - bounds_min[0]) * (nx - 1)
+    local_y = (world_point[1] - bounds_min[1]) / (bounds_max[1] - bounds_min[1]) * (ny - 1)
+    local_z = (world_point[2] - bounds_min[2]) / (bounds_max[2] - bounds_min[2]) * (nz - 1)
+    
+    # Clamp to valid range [0, N-1] to handle boundary cases [G]
+    local_x = max(0, min(nx - 1, local_x))
+    local_y = max(0, min(ny - 1, local_y))
+    local_z = max(0, min(nz - 1, local_z))
+    
+    # For nearest-neighbor sampling (dense grid default without interpolation)
+    ix = int(round(local_x))
+    iy = int(round(local_y))
+    iz = int(round(local_z))
+    
+    # Ensure indices are within bounds
+    ix = max(0, min(nx - 1, ix))
+    iy = max(0, min(ny - 1, iy))
+    iz = max(0, min(nz - 1, iz))
+    
+    # Calculate 1D index
+    index = (iz * ny + iy) * nx + ix
+    
+    return grid["density"][index]
+```
+
+**Parameters:**
+- **Resolution ($N$)**: Number of voxels per dimension. Common values are powers of 2 (8, 16, 32, 64, 128) to facilitate texture mapping and memory alignment [S1, unofficial].
+- **Bounds**: Defined by $\mathbf{p}_{min}$ and $\mathbf{p}_{max}$. The physical size must be identical in all three dimensions for cubic voxels [S1, unofficial].
+- **Voxel Size**: Implicitly determined by bounds and resolution. Not given in the sources as a direct input parameter for the basic structure, but derived as $(\mathbf{p}_{max} - \mathbf{p}_{min}) / (N - 1)$ [S4, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Boundary Artifacts**: Hard edges at the grid boundary can cause visual artifacts. It is recommended to enforce zero density at the outermost voxels (indices 0 and $N-1$) to smooth the falloff [S3, unofficial].
+- **Memory Usage**: Dense grids require memory proportional to $N^3$. High resolutions quickly exhaust available memory, limiting the detail that can be stored compared to sparse structures [S5, unofficial].
+- **Indirection Overhead**: While dense grids avoid the pointer chasing of sparse trees, they suffer from poor cache locality if the ray traversal jumps between distant parts of the grid without spatial coherence [S5, unofficial].
+
+## Subtopics
+
+### [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md)
+Estimates spatial derivatives using discrete stencils on the grid. Chosen when analytic gradients are unavailable or when a deterministic, grid-aligned approximation is preferred over stochastic estimation.
+
+### [EdgeMap Data Layout](1109-edgemap-data-layout.md)
+Stores geometric primitives for isosurface extraction. Chosen when mesh generation from the volume is required, decoupling geometry from scalar values.
+
+### [VoxelGrid Data Structure](1216-voxelgrid-data-structure.md)
+Maps world coordinates to discrete voxel indices. Chosen for general occupancy or label storage where $O(1)$ access is critical and memory is sufficient.
+
+### [Interpolated Discrete Values & Gradients](1268-interpolated-discrete-values-gradients.md)
+Computes continuous fields via tri-cubic interpolation. Chosen when smooth, differentiable fields are needed for ray marching, providing $C^0$ continuity and analytic gradients.
+
+### [Euclidean Distance Field (EDF) Data Structure](3220-euclidean-distance-field-edf-data-structure.md)
+Stores distance to nearest occupied voxel. Chosen to accelerate ray traversal by skipping empty space, trading memory bandwidth for traversal speed.
+
+### [Grid Resolution Heuristic](4871-grid-resolution-heuristic.md)
+Computes optimal grid densities. Chosen to balance traversal cost and intersection overhead in spatial acceleration structures.
+
+## Operating characteristics
+- **Time Complexity**: Access and update are $O(1)$ with respect to the number of voxels, as indexing is a direct arithmetic calculation [S1, S5, unofficial].
+- **Memory Complexity**: $O(N^3)$, where $N$ is the resolution per dimension. Memory usage grows cubically, making high-resolution grids expensive [S5, unofficial].
+- **Performance**: Dense grids are significantly faster to sample than sparse grids because they avoid indirection overhead (pointer chasing) [S5, unofficial]. However, the maximum achievable resolution is lower than sparse methods due to memory constraints [S5, unofficial].
+- **Strengths**: Simple implementation, fast sampling, compatibility with 3D texture hardware, ability to store precomputed data (e.g., lighting) [S5, unofficial].
+- **Limitations**: High memory consumption, fixed resolution (cannot adapt to local detail), poor spatial locality for non-adjacent slices if not using space-filling curves [S1, S5, unofficial].
+- **When to Use**: Suitable for scenes with moderate resolution requirements, or when the overhead of sparse structures is unacceptable. Often used as a target format for data loaded from sparse formats like OpenVDB [S5, unofficial].
+- **When Not to Use**: When memory is severely constrained, or when the volume has large empty regions where sparse structures (like [VoxelGrid Data Structure](1216-voxelgrid-data-structure.md)) would be more efficient.
+
+## Background
+The 3D grid density structure is a fundamental concept in volume rendering, originating from the need to discretize fluid simulations and volumetric data for rendering [S1, unofficial]. It is analogous to how bitmaps represent 2D images [S1, unofficial]. Early implementations in ray tracers used simple 1D arrays mapped to 3D coordinates, often assuming axis-aligned bounding boxes for efficient ray intersection [S1, unofficial]. The structure has been widely adopted in both academic research (e.g., PBRT implementations) and industry tools (e.g., OpenVDB, though OpenVDB itself is sparse, it often converts to dense grids for specific operations) [S1, S5, unofficial]. The specific radial density formula used in examples often derives from educational implementations demonstrating heterogeneous media [S3, unofficial].
+
+## Sources
+[S1] Volume Rendering Based On 3D Voxel Grids, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/volume-rendering-voxel-grids.html, fetched 2026-10-24 (unofficial)
+[S2] Shibodd/volume_path_tracer, https://github.com/Shibodd/volume_path_tracer, fetched 2026-10-26 (unofficial)
+[S3] PDF Volumetric Path Tracing, https://jugoodma.github.io/docs/740-paper.pdf, fetched 2026-10-27 (unofficial)
+[S4] lijiemark/floating-islands-generator, https://github.com/lijiemark/floating-islands-generator, fetched 2026-10-27 (unofficial)
+[S5] Volumetric Cloud Rendering - Jack Tollenaar, https://www.jacktollenaar.top/articles/clouds.html, fetched 2026-10-29 (unofficial)

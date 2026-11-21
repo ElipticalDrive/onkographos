@@ -1,0 +1,173 @@
+# MobileNeRF Staged Training
+
+Also called: MobileNeRF Training Stages
+
+## Overview
+MobileNeRF Staged Training is a multi-stage optimization protocol designed to train the MobileNeRF neural field representation efficiently on mobile hardware constraints. It addresses the challenge of jointly optimizing geometry (vertices), appearance (MLPs), and acceleration structures (grids) by decoupling them into sequential phases. Unlike standard NeRF training which optimizes all parameters simultaneously, this method fixes geometry and acceleration structures in later stages to stabilize convergence and reduce computational overhead during the final refinement of appearance features.
+
+## How it works
+The method optimizes the MobileNeRF representation through three distinct training stages, interleaved with specific acceleration grid optimization steps. The representation consists of a regular-grid mesh $\mathbf{M}$ defined by vertices $\mathbf{V}$, an acceleration grid $\mathbf{G}$, and three Multi-Layer Perceptrons (MLPs): an opacity MLP with parameters $\theta_{OpacityMLP}$, a features MLP with parameters $\theta_{FeaturesMLP}$, and a shader MLP with parameters $\theta_{ShaderMLP}$ (also denoted as $\theta_A$).
+
+### Inputs and Outputs
+*   **Inputs:** Training images, camera poses, initial vertex positions $\mathbf{V}$, initial MLP weights, acceleration grid $\mathbf{G}$ (initialized to zero or sparse values), and scene type (synthetic 360°, forward-facing, or unbounded 360°).
+*   **Outputs:** Optimized vertices $\mathbf{V}$, acceleration grid $\mathbf{G}$, and MLP parameters $\theta_{OpacityMLP}, \theta_{FeaturesMLP}, \theta_{ShaderMLP}$.
+
+### Data Structures
+*   **Vertices ($\mathbf{V}$):** Defines the geometry of the regular-grid mesh $\mathbf{M}$.
+*   **Acceleration Grid ($\mathbf{G}$):** A 3D grid of size $P \times P \times P$ used to prune voxels during ray marching.
+*   **MLPs:** Three separate networks for opacity, features, and shading.
+
+### Parameters
+*   $w_d$: Weight for the distance loss $\mathcal{L}_{dist}$.
+    *   Synthetic 360° scenes: $0.0$ [S1].
+    *   Forward-facing scenes: $0.01$ [S1].
+    *   Unbounded 360° scenes: $0.001$ [S1].
+*   $w_{g1}, w_{g2}$: Weights for sparse and smooth grid losses. Value is $10^{-5}$ for both [S1].
+*   $\tau_G$: Threshold for pruning voxels in the acceleration grid. Value is $0.1$ [S1].
+
+### Numbered Steps
+
+1.  **Initialization:** Initialize vertices $\mathbf{V}$, acceleration grid $\mathbf{G}$, and MLP parameters $\theta_{OpacityMLP}, \theta_{FeaturesMLP}, \theta_{ShaderMLP}$.
+
+2.  **Stage 1: Joint Optimization:**
+    Optimize all parameters jointly to minimize the Stage 1 loss:
+    $$ \mathcal{L}_{Stage1} = \mathcal{L}_{Color} + w_d \mathcal{L}_{dist} + \mathcal{L}_{v} $$
+    where $\mathcal{L}_{Color}$ is the color reconstruction loss, $\mathcal{L}_{dist}$ is the distance loss, and $\mathcal{L}_{v}$ is the volume loss [S1].
+    *   **Acceleration Grid Optimization:** Concurrently or interleaved, optimize $\mathbf{G}$ to minimize:
+        $$ \mathcal{L}_{Grid} = \mathcal{L}_{Grid}^{bnd} + w_{g1} \mathcal{L}_{Grid}^{sparse} + w_{g2} \mathcal{L}_{Grid}^{smooth} $$
+        where $\mathcal{L}_{Grid}^{bnd}$ is the boundary loss, $\mathcal{L}_{Grid}^{sparse}$ is the sparse loss, and $\mathcal{L}_{Grid}^{smooth}$ is the smooth loss [S1].
+    *   **Ray Marching Adaptation:** During the first quarter of Stage 1 iterations, $\mathbf{G}$ is inaccurate. The ray marching algorithm keeps all $3P$ intersected voxels and intersection points regardless of $\tau_G$ [S1].
+
+3.  **Stage 2: Modified Color Loss:**
+    Optimize all parameters jointly again, but using a modified color loss $\mathcal{L}_{Color}^{stage2}$:
+    $$ \mathcal{L}_{Stage2} = \mathcal{L}_{Color}^{stage2} + w_d \mathcal{L}_{dist} + \mathcal{L}_{v} $$
+    The acceleration grid $\mathbf{G}$ is also optimized using the same grid loss as Stage 1 [S1].
+    *   **Ray Marching Adaptation:** In the next quarter of training, $\mathbf{G}$ is used to remove empty voxels. The algorithm keeps at most $3P/2$ non-empty voxels and the $3P/2$ intersection points closest to the camera [S1]. The training batch size is doubled [S1].
+
+4.  **Stage 3: Post-Convergence Refinement:**
+    When the loss converges, fix the weights of vertices $\mathbf{V}$, opacity MLP parameters $\theta_{OpacityMLP}$ (denoted $\theta_A$ in some contexts, but notes specify fixing V, $\theta_A$, and G), and the acceleration grid $\mathbf{G}$ [S1].
+    Optimize only the features MLP parameters $\theta_{FeaturesMLP}$ and shader MLP parameters $\theta_{ShaderMLP}$ to minimize the binarized color loss:
+    $$ \mathcal{L}_{Stage3} = \mathcal{L}_{Color}^{bin} $$
+    *   **Ray Marching Adaptation:** In the remainder of the training, keep at most $3P/4$ non-empty voxels and intersection points [S1]. The batch size is doubled again [S1].
+    *   **Unbounded Scenes Exception:** For concentric boxes in unbounded 360° scenes, compute intersections and keep all of them throughout the process [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mobile_nrf_staged_training(scene_type, images, poses, P, tau_G):
+    # Initialize parameters
+    V = initialize_vertices()
+    G = initialize_grid(P)
+    theta_OpacityMLP = initialize_mlp()
+    theta_FeaturesMLP = initialize_mlp()
+    theta_ShaderMLP = initialize_mlp()
+    
+    # Set distance loss weight based on scene type
+    if scene_type == "synthetic_360":
+        w_d = 0.0
+    elif scene_type == "forward_facing":
+        w_d = 0.01
+    elif scene_type == "unbounded_360":
+        w_d = 0.001
+    else:
+        w_d = 0.0 # Default or error
+        
+    w_g1 = 1e-5
+    w_g2 = 1e-5
+    
+    total_iterations = get_total_iterations()
+    quarter = total_iterations // 4
+    
+    for iteration in range(total_iterations):
+        # Determine ray marching strategy based on training progress
+        if iteration < quarter:
+            # First quarter: G is inaccurate, keep all intersections
+            max_voxels = 3 * P
+            max_intersections = 3 * P
+            use_grid_pruning = False
+        elif iteration < 2 * quarter:
+            # Second quarter: Use G to prune, keep 3P/2
+            max_voxels = 3 * P // 2
+            max_intersections = 3 * P // 2
+            use_grid_pruning = True
+            batch_size = initial_batch_size * 2
+        elif iteration < 3 * quarter:
+            # Third quarter: Keep 3P/4
+            max_voxels = 3 * P // 4
+            max_intersections = 3 * P // 4
+            use_grid_pruning = True
+            batch_size = initial_batch_size * 4
+        else:
+            # Final quarter: Keep 3P/4 (same as third quarter logic for pruning)
+            max_voxels = 3 * P // 4
+            max_intersections = 3 * P // 4
+            use_grid_pruning = True
+            batch_size = initial_batch_size * 4
+            
+        # Unbounded scenes exception: keep all intersections
+        if scene_type == "unbounded_360":
+            max_voxels = None # Keep all
+            max_intersections = None # Keep all
+            use_grid_pruning = False
+
+        # Sample rays and render
+        rays = sample_rays(images, poses, batch_size)
+        colors, depths = render_mobile_nrf(
+            V, G, theta_OpacityMLP, theta_FeaturesMLP, theta_ShaderMLP,
+            rays, tau_G, use_grid_pruning, max_voxels, max_intersections
+        )
+        
+        # Compute losses based on stage
+        if iteration < 2 * quarter:
+            # Stage 1 and 2
+            loss_color = compute_color_loss(colors, images)
+            if iteration < quarter:
+                # Stage 1
+                loss = loss_color + w_d * compute_distance_loss(depths) + compute_volume_loss()
+            else:
+                # Stage 2
+                loss = compute_color_loss_stage2(colors, images) + w_d * compute_distance_loss(depths) + compute_volume_loss()
+                
+            # Optimize all parameters
+            optimize(V, theta_OpacityMLP, theta_FeaturesMLP, theta_ShaderMLP, loss)
+            
+            # Optimize Grid G
+            loss_grid = compute_boundary_loss(G) + w_g1 * compute_sparse_loss(G) + w_g2 * compute_smooth_loss(G)
+            optimize(G, loss_grid)
+            
+        else:
+            # Stage 3: Post-convergence
+            # Fix V, theta_OpacityMLP, G
+            loss = compute_color_loss_bin(colors, images)
+            
+            # Optimize only Features and Shader MLPs
+            optimize(theta_FeaturesMLP, theta_ShaderMLP, loss)
+            
+    return V, G, theta_OpacityMLP, theta_FeaturesMLP, theta_ShaderMLP
+```
+
+### Edge Cases and Pitfalls
+*   **Inaccurate Grid Early On:** In the first quarter, the acceleration grid $\mathbf{G}$ is not reliable. Failing to disable pruning or keep all $3P$ intersections will lead to missing geometry and poor convergence [S1].
+*   **Batch Size Scaling:** The batch size must be doubled when the number of kept intersections is halved to maintain stable gradient statistics [S1].
+*   **Unbounded Scenes:** Standard pruning logic fails for concentric boxes in unbounded 360° scenes; all intersections must be retained [S1].
+*   **Texture Constraints:** Mobile hardware requires texture sizes to be powers of 2 and at most $4096 \times 4096$. Large texture images must be split into multiple tiles [S1].
+
+## Subtopics
+
+### MobileNeRF Training Objective
+The core training objective minimizes $\mathcal{L}_{Color} + w_d \mathcal{L}_{dist} + \mathcal{L}_{v}$ with respect to vertices $\mathbf{V}$, opacity MLP parameters $\theta_{OpacityMLP}$, features MLP parameters $\theta_{FeaturesMLP}$, and shader MLP parameters $\theta_{ShaderMLP}$ [S1]. This objective is used in the first stage. The distance loss weight $w_d$ varies by scene type, and the loss terms include color, distance, and volume components [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The ray marching complexity is $O(P)$ for finding intersections on a regular grid of size $P \times P \times P$ [S1]. The staged approach reduces the number of parameters optimized in later stages, potentially speeding up convergence.
+*   **Memory Complexity:** The acceleration grid $\mathbf{G}$ requires $O(P^3)$ memory. Vertices $\mathbf{V}$ and MLP parameters also consume memory, but the fixed-parameter stages reduce gradient storage requirements in Stage 3.
+*   **Strengths:** Stabilizes training by decoupling geometry/acceleration from appearance refinement. Adapts ray marching efficiency based on training progress. Suitable for mobile hardware constraints.
+*   **Limitations:** Requires careful tuning of stage transitions and batch size scaling. The acceleration grid optimization adds complexity.
+*   **When to Use:** When training MobileNeRF on mobile devices or when standard joint optimization fails to converge due to geometry/acceleration instability.
+
+## Background
+MobileNeRF was introduced to exploit the polygon rasterization pipeline for efficient neural field rendering on mobile architectures [S1]. The staged training protocol was developed to handle the joint optimization of geometry, acceleration structures, and neural appearance models under the computational and memory constraints of mobile GPUs [S1].
+
+## Sources
+[S1] MobileNeRF: Exploiting the Polygon Rasterization Pipeline for Efficient Neural Field Rendering on Mobile Architectures, https://doi.org/10.1109/cvpr52729.2023.01590, fetched 2026-10-26

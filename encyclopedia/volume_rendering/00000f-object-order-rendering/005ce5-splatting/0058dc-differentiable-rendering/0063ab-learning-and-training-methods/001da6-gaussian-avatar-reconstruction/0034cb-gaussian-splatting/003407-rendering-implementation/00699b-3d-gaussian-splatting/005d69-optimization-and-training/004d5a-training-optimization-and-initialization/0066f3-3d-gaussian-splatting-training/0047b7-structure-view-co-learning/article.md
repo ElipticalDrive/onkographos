@@ -1,0 +1,110 @@
+# Structure-View Co-learning
+
+
+## Overview
+Structure-View Co-learning (SVC) is a training module that combines structural and view-dependent gradients to enable robust joint optimization of Gaussian positions and appearance [S1]. It addresses the limitations of single-view optimization schemes, which often suffer from local minima and visual artifacts, by enforcing global coherence and local detail preservation simultaneously [S1]. Unlike methods that treat geometry and appearance independently, SVC integrates a Cross-View Consistency Loss with a geometric pruning mechanism to reduce redundancy while maintaining structural integrity [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of 3D Gaussians with parameters $\{x_a, \alpha, \mathbf{R}, \mathbf{s}\}$ (location, opacity, rotation, scale), a set of training views with camera poses $x_p$, and target RGB images.
+*   **Outputs:** Optimized Gaussian parameters and rendered RGB images.
+
+**Data Structures:**
+Each Gaussian stores standard 3DGS parameters. SVC introduces additional learnable parameters for view-dependent color modeling. In the Spherical Voronoi variant, each Gaussian is equipped with additional parameters $\{\tau_k\}, \{s_k\}, \{c_k\}$ [S2, unofficial].
+*   **Spherical Voronoi Sites:** Each site $k$ stores three floats for location ($s_k \in \mathbb{R}^3$) and three floats for radiance ($c_k \in \mathbb{R}^3$) [S2, unofficial].
+*   **Memory Footprint:** The total learnable parameters per Gaussian for the view-direction parameterization is 48 floats (16 sites $\times$ 3 floats for location + 16 sites $\times$ 3 floats for radiance) [S2, unofficial]. The temperature $\tau_k$ is not stored but computed on the fly from the site norm [S2, unofficial].
+
+**Loss Function:**
+The total loss $\mathcal{L}$ is a weighted combination of view gradient loss $\mathcal{L}_V$ and structure gradient loss $\mathcal{L}_S$ [S1]:
+$$ \mathcal{L} = \lambda (\lambda_V \mathcal{L}_V + \lambda_S \mathcal{L}_S) $$
+where $\lambda$ is a global scaling factor, and $\lambda_V, \lambda_S$ are weights for the respective components [S1]. The structure component often includes a Cross-View Consistency Loss ($L_{CVC}$) to ensure geometric consistency across different viewpoints [S1].
+
+**Algorithm Steps:**
+1.  **Initialization:** Initialize Spherical Voronoi sites uniformly using Fibonacci sampling on the sphere $S^2$ [S2, unofficial]. For 3DGS, equip each Gaussian with the additional parameters $\{\tau_k\}, \{s_k\}, \{c_k\}$ [S2, unofficial].
+2.  **Forward Pass (Rendering):**
+    *   For each Gaussian, evaluate the radiance $f_{SV}(\omega; \tau, s, c) : S^2 \to \mathbb{R}^3$ based on the view direction $\omega$ [S2, unofficial].
+    *   In the weighted variant, compute the unit direction $\hat{s}_k = s_k / \|s_k\|$ and implicit temperature $\tau_k = \|s_k\|$ for each site [S2, unofficial].
+    *   Render the image using standard alpha-blending of Gaussians.
+3.  **Loss Computation:**
+    *   Compute the view-dependent loss $\mathcal{L}_V$ (e.g., L1 or SSIM between rendered and target images) [S1].
+    *   Compute the structural loss $\mathcal{L}_S$. This may involve a Cross-View Consistency Loss ($L_{CVC}$) comparing features or depths from different views [S1].
+    *   Combine losses: $\mathcal{L} = \lambda (\lambda_V \mathcal{L}_V + \lambda_S \mathcal{L}_S)$ [S1].
+4.  **Backpropagation and Update:**
+    *   Compute gradients for all parameters, including Gaussian positions and the new view-dependent parameters [S1].
+    *   Update parameters using an optimizer (e.g., Adam) [S1].
+5.  **Cross-View Pruning (CVPM):**
+    *   Periodically, evaluate consistency between views. If the Structural Similarity Index (SSIM) between views $i$ and $j$ is high ($> 0.6$), compute $L_{CVC}$ [S1].
+    *   Prune unexpected Gaussians based on geometric consistency criteria, such as depth discrepancies or distance thresholds (e.g., $d_i(p) < 0.01 \land d_j(p) < 0.5 \lor d_i(p) > 3\sigma$) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def structure_view_co_learning(gaussians, views, target_images, lambda_v, lambda_s, lambda_global):
+    """
+    Performs one step of Structure-View Co-learning.
+    """
+    # 1. Forward pass: Render images
+    rendered_images = []
+    for view in views:
+        # Evaluate radiance using Spherical Voronoi if applicable
+        # For each Gaussian, compute color based on view direction omega
+        # f_sv = spherical_voronoi_radiance(omega, sites, colors, temperatures)
+        image = render_gaussians(gaussians, view.camera)
+        rendered_images.append(image)
+    
+    # 2. Compute Losses
+    # View-dependent loss (e.g., L1 or SSIM)
+    loss_v = 0
+    for rendered, target in zip(rendered_images, target_images):
+        loss_v += l1_loss(rendered, target)
+    loss_v /= len(views)
+    
+    # Structural loss (e.g., Cross-View Consistency)
+    loss_s = cross_view_consistency_loss(gaussians, views)
+    
+    # Combined loss
+    total_loss = lambda_global * (lambda_v * loss_v + lambda_s * loss_s)
+    
+    # 3. Backpropagation
+    total_loss.backward()
+    
+    # 4. Optimization Step
+    optimizer.step()
+    optimizer.zero_grad()
+    
+    # 5. Pruning (optional, periodic)
+    if step % prune_interval == 0:
+        prune_gaussians(gaussians, views, threshold=0.6)
+        
+    return total_loss
+```
+
+**Parameters:**
+*   $\lambda_V, \lambda_S$: Weights for view and structure losses. Typical values are not specified in the sources [S1].
+*   Number of Spherical Voronoi sites: 8 sites per Gaussian for standard benchmarks, 128 for synthetic scenes, 1024 for real scenes [S2, unofficial].
+*   SSIM Threshold for pruning: 0.6 [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The temperature $\tau_k$ is computed from the norm of the site vector, which may lead to numerical instability if the site vector is near zero [S2, unofficial].
+*   **Boundaries:** The Spherical Voronoi parameterization assumes the view direction is on the unit sphere $S^2$ [S2, unofficial].
+*   **Degenerate Input:** If views are too similar, the consistency loss may not provide sufficient gradient for geometry updates [S1].
+
+## Subtopics
+
+### View-direction parameterization with Spherical Voronoi
+A method that replaces traditional spherical harmonics with a Spherical Voronoi partition of the sphere to model view-dependent color [S2, unofficial]. It treats the sites' locations, radiance, and implicit temperatures as jointly learnable parameters [S2, unofficial]. It is chosen when high-fidelity view-dependent effects (e.g., glossy reflections) are required, as it offers higher expressiveness than spherical harmonics [S2, unofficial]. It uses 48 learnable parameters per Gaussian (16 sites $\times$ 6 floats) [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The rendering complexity is dominated by the Gaussian splatting process, which is $O(N)$ where $N$ is the number of Gaussians. The additional cost of evaluating the Spherical Voronoi function is proportional to the number of sites $K$ per Gaussian, making it $O(N \cdot K)$ [S2, unofficial].
+*   **Memory Complexity:** The memory footprint increases by 48 floats per Gaussian for the Spherical Voronoi parameters [S2, unofficial].
+*   **Performance:** The Spherical Voronoi formulation yields consistent improvements over baselines, achieving higher PSNR than spherical harmonics, spherical Gaussians, and spherical bicubics on standard benchmarks (Mip-NeRF360, DeepBlending, Tanks&Temples, NeRF-Synthetic) [S2, unofficial].
+*   **Strengths:** Robust joint optimization of geometry and appearance; better handling of complex directional behaviors like reflections [S1][S2, unofficial].
+*   **Limitations:** Increased memory usage per Gaussian; requires careful initialization of Voronoi sites [S2, unofficial].
+
+## Background
+Structure-View Co-learning was introduced in the context of large-scale unbounded scene reconstruction to address the limitations of existing 3DGS methods that suffer from detail loss or lack global spatial awareness [S1]. The Spherical Voronoi parameterization was proposed to provide a more expressive representation for view-dependent color, building on the idea of differentiable partitions of the sphere [S2, unofficial].
+
+## Sources
+[S1] SplatCo: Structure-View Collaborative Gaussian Splatting for Detail-Preserving Rendering of Large-Scale Unbounded Scenes, https://doi.org/10.48550/arXiv.2505.17951, fetched 2026-10-27
+[S2] Spherical Voronoi: Directional Appearance as a Differentiable Partition of the Sphere, https://doi.org/10.48550/arXiv.2512.14180, fetched 2026-10-30 (unofficial)

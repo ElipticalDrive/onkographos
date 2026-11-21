@@ -1,0 +1,97 @@
+# Global Accumulator + Compaction
+
+Also called: FGatherVisibleCountsCS, FPrefixSumVisibleCountsCS, Global counting
+
+## Overview
+A two-pass GPU compute system that gathers visible splat counts per proxy and computes prefix sums to generate indirect dispatch and draw arguments for global Phase-3 rendering passes [S1, unofficial]. It aggregates per-proxy visibility data into a global array and prepares execution parameters for subsequent geometry generation and indexing stages [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** `PerProxyVisibleCount` (SRV StructuredBuffer<uint>), `ProxyIndex` (uint32), `ProxyCount` (uint32), `MaxRenderBudget` (uint32) [S1, unofficial].
+*   **Output:** `GlobalVisibleCountArray` (UAV RWStructuredBuffer<uint>), `GlobalBaseOffsets` (UAV RWStructuredBuffer<uint>), `GlobalCalcDistIndirectArgs` (UAV RWStructuredBuffer<uint>), `GlobalSortIndirectArgs` (UAV RWStructuredBuffer<uint>), `GlobalSortParams` (UAV RWStructuredBuffer<uint>), `GlobalDrawIndirectArgs` (UAV RWStructuredBuffer<uint>) [S1, unofficial].
+
+**Data Structures:**
+1.  `GlobalVisibleCountArray`: RWStructuredBuffer<uint> of size `ProxyCount` [S1, unofficial].
+2.  `GlobalBaseOffsets`: RWStructuredBuffer<uint> of size `ProxyCount` [S1, unofficial].
+3.  `GlobalCalcDistIndirectArgs`: RWStructuredBuffer<uint> for distance calculation dispatch arguments [S1, unofficial].
+4.  `GlobalSortIndirectArgs`: RWStructuredBuffer<uint> for radix sort dispatch arguments [S1, unofficial].
+5.  `GlobalSortParams`: RWStructuredBuffer<uint> for sort parameters [S1, unofficial].
+6.  `GlobalDrawIndirectArgs`: RWStructuredBuffer<uint> for draw call arguments [S1, unofficial].
+
+**Steps:**
+1.  **Gather Visible Counts:** Dispatch `FGatherVisibleCountsCS` with 1 thread per proxy [S1, unofficial]. Each thread copies `GPUResources->VisibleSplatCountBuffer[0]` into `GlobalVisibleCountArray[ProxyIndex]` [S1, unofficial].
+2.  **Compute Prefix Sums & Indirect Arguments:** Dispatch `FPrefixSumVisibleCountsCS` with 1 thread total [S1, unofficial]. The thread iterates through `GlobalVisibleCountArray` to compute exclusive prefix sums, calculates the total visible splat count, applies the `MaxRenderBudget` clamp, and writes the results to the indirect argument buffers for the CalcDistances, RadixSort, and DrawSplats passes [S1, unofficial].
+
+**Formulas:**
+Let $C[i]$ be the visible splat count for proxy $i$. The exclusive prefix sum offset is $O[i] = \sum_{j=0}^{i-1} C[j]$ for $i \in [0, ProxyCount)$, with $O[0] = 0$. The total visible splat count is $T = \sum_{j=0}^{ProxyCount-1} C[j]$. The clamped total is $T_{clamped} = \min(T, MaxRenderBudget)$ if $MaxRenderBudget > 0$, otherwise $T_{clamped} = T$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# FGatherVisibleCountsCS
+# Dispatch: 1 thread per proxy
+def gather_visible_counts(per_proxy_visible_count, global_visible_count_array, proxy_index):
+    global_visible_count_array[proxy_index] = per_proxy_visible_count[proxy_index]
+
+# FPrefixSumVisibleCountsCS
+# Dispatch: 1 thread total
+def prefix_sum_and_compact(global_visible_count_array, global_base_offsets,
+                           global_calc_dist_indirect_args, global_sort_indirect_args,
+                           global_sort_params, global_draw_indirect_args,
+                           proxy_count, max_render_budget):
+    current_offset = 0
+    if proxy_count > 0:
+        global_base_offsets[0] = 0
+        for i in range(1, proxy_count):
+            current_offset += global_visible_count_array[i-1]
+            global_base_offsets[i] = current_offset
+        total_splats = current_offset + global_visible_count_array[proxy_count - 1]
+    else:
+        total_splats = 0
+
+    if max_render_budget > 0 and total_splats > max_render_budget:
+        total_splats = max_render_budget
+
+    # Write indirect arguments for Phase-3 passes
+    global_sort_params[0] = total_splats
+    # Exact indirect argument layouts are not specified in the sources [G]
+    global_sort_params[1] = 0
+    global_sort_indirect_args[0] = 0
+    global_sort_indirect_args[1] = 1
+    global_sort_indirect_args[2] = 1
+    global_calc_dist_indirect_args[0] = 1
+    global_calc_dist_indirect_args[1] = 1
+    global_calc_dist_indirect_args[2] = 1
+    global_draw_indirect_args[0] = total_splats
+    global_draw_indirect_args[1] = 1
+    global_draw_indirect_args[2] = 0
+    global_draw_indirect_args[3] = 0
+    global_draw_indirect_args[4] = 0
+```
+
+**Parameters:**
+*   `MaxRenderBudget`: uint32. Cap on total visible splats. 0 means no cap [S1, unofficial].
+
+**Edge Cases:**
+*   If `ProxyCount` is 0, the prefix sum loop is skipped and all totals are 0 [G].
+*   `MaxRenderBudget` clamping may truncate the scene, requiring subsequent logic to handle partial rendering or culling [S1, unofficial].
+
+## Subtopics
+
+### [Indirect Argument Preparation](10426-indirect-argument-preparation.md)
+A GPU compute shader that prepares indirect dispatch and draw arguments from the visible splat count generated by the preceding Global Accumulator + Compaction pass. It serves as the orchestration layer that translates per-proxy visibility data into the specific argument structures required by the graphics API for subsequent Phase-3 rendering and sorting kernels. Unlike the compaction pass which gathers data, this method configures the execution parameters for the geometry generation and indexing stages. Choose it when explicit control over dispatch dimensions and sort parameters is required for the rendering pipeline. [Indirect Argument Preparation](10426-indirect-argument-preparation.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(P)$ for gathering counts and $O(P)$ for the sequential prefix sum pass, where $P$ is the proxy count [S1, unofficial].
+*   **Memory Complexity:** $O(P)$ for `GlobalVisibleCountArray` and `GlobalBaseOffsets` [S1, unofficial].
+*   **Strengths:** Centralizes visibility data and directly generates batched rendering arguments for downstream passes [S1, unofficial].
+*   **Limitations:** The single-threaded prefix sum approach may become a bottleneck if $P$ is extremely large [S1, unofficial].
+*   **When to use:** When transitioning from per-proxy visibility culling to global batched rendering passes for splat distance calculation, sorting, and drawing [S1, unofficial].
+
+## Background
+Implemented in the OpenSplat4D project, this method is part of a Gaussian Splatting performance optimization suite [S1, unofficial]. It addresses the need to efficiently transition from per-proxy visibility culling to global batched rendering passes for splat distance calculation, sorting, and drawing [S1, unofficial]. The prefix sum computation leverages the fully optimized one-way prefix sum provided in the CUDPP library [S2, unofficial].
+
+## Sources
+[S1] YuanBaoSMadLab/OpenSplat4D, https://github.com/YuanBaoSMadLab/OpenSplat4D, fetched 2026-10-27 (unofficial)
+[S2] Fast 4-way parallel radix sorting on GPUs, https://www.sci.utah.edu/~csilva/papers/cgf.pdf, fetched 2026-10-29 (unofficial)

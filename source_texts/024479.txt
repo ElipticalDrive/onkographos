@@ -1,0 +1,566 @@
+# NDJIR: Neural Direct and Joint Inverse Rendering for Geometry, Lights, and Materials of Real Object
+
+Kazuki Yoshiyama Takuya Narihira
+
+Sony Group Corporation Research & Development Center
+
+{Kazuki.Yoshiyama, Takuya.Narihira}@sony.com
+
+### Abstract
+
+The goal of inverse rendering is to decompose geometry, lights, and materials given pose multi-view images. To achieve this goal, we propose neural direct and joint inverse rendering, NDJIR. Different from prior works which relies on some approximations of the rendering equation, NDJIR directly addresses the integrals in the rendering equation and jointly decomposes geometry: signed distance function, lights: environment and implicit lights, materials: base color, roughness, specular reflectance using the powerful and flexible volume rendering framework, voxel grid feature, and Bayesian prior. Our method directly uses the physically-based rendering, so we can seamlessly export an extracted mesh with materials to DCC tools and show material conversion examples. We perform intensive experiments to show that our proposed method can decompose semantically well for real object in photogrammetric setting and what factors contribute towards accurate inverse rendering.
+
+### 1. Introduction
+
+Inverse rendering – given multi-view posed images, we decompose geometry, lights, materials – is a long standing problem in computer vision and graphics. In the era of deep learning, it mainly started in 2D image space [1, 6, 18, 37, 51, 51]. After the great success of neural renderings of implicit representation [45, 60], directly working in 3D space is prominent [4, 5, 25, 35, 47, 63, 65, 67, 68].
+
+However, modeling the rendering equation [30] directly requires sampling lights, which might be prohibitive in memory footprint and computationally expensive when we integrate with the volume rendering [44]. To tackle that problem, there are some approximations proposed: Spherical Gaussian (SG)s [4,65,68], pre-integrated light [5], splitsum [47], and co-located light [3, 64]. Multi-stage training [35, 64, 65, 68] is another form to address the problem. Different direction of approach is using surface rendering [25, 47], but such methods require accurate object mask. None of these approaches do not directly and jointly optimize for the integral of the rendering equation under the powerful and flexible volume rendering. Additionally, prior works are mainly evaluated on synthetic data, which limits practical applicability.
+
+Contribution: In this paper, we propose neural direct and joint inverse rendering, NDJIR [´en(d)Ãi3:r] which light model is tailored to real object in photogrammetric setting. NDJIR directly addresses the integral of the rendering equation and jointly solves the inverse rendering problem with priors. Our key insights are four folds: 1) an indicator function multiplied to the integrand of the specular term allows for simple joint training, 2) directly addressing the integral with importance sampling mitigates degeneration of material networks, 3) introducing Bayesian priors reduces degeneration more, and 4) dense voxel grid feature reinforces more plausible results. We also conducted intensive studies using real datasets. Code is available in https://github.com/sony/NDJIR.
+
+### 2. Related work
+
+Geometry extraction: There are several 3D geometry representations, e.g., mesh, signed distance field (SDF), and volume density. Correspondingly, differentiable renderers were proposed [10, 32, 36, 38, 40–43, 45, 48, 60] in a decade in order to extract such a representation. Notably, NeuS [57] and VolSDF [59] integrates SDF representation with volume rendering [45], SDF is implicit representation and 0 level set corresponds to surface, so we can easily extract mesh once SDF is acquired, and volume rendering [45] mitigates the need of corresponding accurate object masks. As a result, we can extract a mesh given multi-view posed images of an object. Based on the works [45, 57], we jointly decompose geometry, lights, and materials.
+
+Materials and lights estimation: Neural-based materials and lights estimation started in 2D image space [1, 6, 18, 37, 51, 51]. Soon after the success of differentiable rendering of implicit representation [45, 60]; materials and lights estimation is mainly based on neural rendering [4, 5, 25, 35, 47, 63, 65, 67, 68]. Spherical Gaussian (SG)s are often used in [4, 65, 68] for illumination, but it can only represent low to middle frequency and specular materials. Evaluating physically-based rendering (PBR) directly is considered costly, so there are other approximations to PBR: pre-integrated lighting [5], split-sum [47], and co-located light [3,64]. Recently, Hasselgren et al. [25] directly optimizes physically-based rendering using Monte Carlo integration and denoiser on top of rendered image. However, applying denoiser requires full resolution image, which might be bounded by image resolution. Their work relies on DMTet [54] so uses the surface rendering on extracted mesh at each iteration of training, which reduces memory footprint compared to using the volume rendering and may allow for full resolution rendering. Nonetheless, this type of approaches sacrifices level of details of geometry and needs accurate foreground object mask. Contrarily, our approach utilizes the powerfully volume rendering to directly evaluate PBR by circumventing illumination evaluation in 3D space but in pixel space and introducing an indicator function, being able to produce high-poly mesh and high frequent materials.
+
+Acceleration structure: One of shortcomings of the volume rendering is slowness. Prior works to mitigate slow rendering in runtime [19, 27, 39, 58, 61] are based on voxel grid structure, which influences following works for faster training [17, 55, 56, 58]. Density is directly optimized on voxel grid [17, 31, 55] to remove evaluations of MLP. TensorF [8] factorizes voxel grid to vector-matrix low-rank representation to speed up look-up from voxel grid representation. Instant NGP [46] uses hash table on voxel grid to further acceleration. These works aims for novel view synthesis, an acquired underlying geometry is not smooth so can not easily be exported to existing DCC tools as 3D asset. Thus, we use the simple dense voxel grid feature.
+
+### 3. Method
+
+In this section, we formulate the novel forward rendering tailored to inverse rendering of real object. Our proposed method is based on two important prior works: NeuS [57] and Physically-based rendering with Cook-Torrance specular BRDF (Bidirectional Reflectance Distribution Function) model [12]. These models are briefly described in Sec. 3.1. In Sec. 3.2, we introduce light model specific to photogrammetry setting and integrate the light model to PBR in computationally efficient and trainable way. Even if we can train inverse rendering system, we may not be able to obtain meaningful materials since we only have ground truth color as supervision, there are plenty of solutions for materials to be estimated. Therefore, we pose priors on materials in Sec. 3.4. At the end of this section Sec. 3.5, we elaborate implementation of NDJIR. Note we assume object is opaque and dielectric, and lights are white. Furthermore, we only denote the dimension of sample points along a ray for simplicity, and several input arguments to a function in equations are excluded for visibility in Secs. 3.1 and 3.2. For rigorous inputs and outputs, see Sec. 3.3. More detailed equations and network diagram can be found in the supplementary material.
+
+#### 3.1. Background
+
+Volume rendering with SDF: Given sample points {xi} N i=0 along a ray r, NeuS [57] formulates the volume rendering with SDF s to render a color Cˆ as follows,
+
+
+$$\hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i, T_i = \prod_{j=1}^{i-1} (1 - \alpha_j), \quad (1)$$
+
+$$\alpha_j = \max \left( \frac{\Phi(s_j, \sigma) - \Phi(s_{j+1}, \sigma)}{\Phi(s_j, \sigma)}, 0 \right),$$
+
+where c is radiance, α is opacity using adjacent SDFs, T is accumulated transmittance, Φ is the cumulative distribution function of logistic distribution with the globally trainable scale σ.
+
+Physically-based rendering: Rendering equation [30] with Cook-Torrance specular BRDF model [12] is the principle of modern graphics engines e.g., [11, 16, 24]. Given a surface point xˆ, normals nˆ, corresponding spatially-varying materials: base color cˆb, roughness αˆr, and specular reflectance fˆ0, viewing direction v, and light direction l over hemisphere Ω+ aligned with nˆ, the rendered color Cˆ(r) is modeled as
+
+
+$$\begin{aligned} & \underbrace{\frac{\hat{c}_b}{\pi} \int_{\Omega_+} L(\hat{x}, l) (\hat{n} \cdot l) dl}_{\text{diffuse term}} \\ & + \underbrace{\int_{\Omega_+} \frac{D(\mathbf{v}, l, \hat{n}, \hat{\alpha}_r) G(\mathbf{v}, l, \hat{n}, \hat{\alpha}_r) F(\mathbf{v}, l, \hat{f}_0)}{4(\hat{n} \cdot \mathbf{v})(\hat{n} \cdot l)} L(\hat{x}, l) (\hat{n} \cdot l) dl}_{\text{specular term}} \end{aligned} \quad (2)$$
+
+L is incoming light intensity, D is normal distribution function, G is masking-shadowing function, and F is Fresnel function. With arbitrary two vectors a and b, (a· b) is saturated dot product max(a T b, dot). We use Filament BRDF model [24] for D, G, and F. For space, explicit models of D, G, and F are excluded but in the supplementary.
+
+### 3.2. Joint inverse rendering
+
+NDJIR models the incoming light intensity attenuated by the dot product L(x,l)(n,l) for the diffuse and specular term, respectively:
+
+
+$$L_P(\mathbf{x}, \mathbf{v}, \mathbf{n}) (L_V(\mathbf{x}, \mathbf{l}) L_E(\mathbf{l}) (\mathbf{n} \cdot \mathbf{l}) + L_I(\mathbf{x})), \quad (3)$$
+
+
+
+| $L_P(\mathbf{x}, \mathbf{v}, \mathbf{n})L_V(\mathbf{x}, \mathbf{l})L_E(\mathbf{l})(\mathbf{n} \cdot \mathbf{l}),$ | (4) |
+|-------------------------------------------------------------------------------------------------------------------|-----|
+|-------------------------------------------------------------------------------------------------------------------|-----|
+
+where LV is soft visibility, LE is intensity of environment map, LI is intensity of implicit illumination, and LP is photogrammetric light intensity.
+
+Environment map LE is same as in the classical PBR to query light intensity directionally, and the implicit illumination LI resembles the photon map [28] to query light intensity in space, both of which together captures direct and indirect illumination well. Implicit illumination LI is one of keys to successful training; otherwise, training fails to bad local minima. Notable light model in NDJIR is photogrammetric light LP tailored to photogrammetry setting where a photographer dynamically becomes masks of lights and casts shadows, which is not modeled by classical PBR using a typical pinhole camera model. Photogrammetric light LP is also a importance factor for joint inverse rendering.
+
+Plugging both Eq. \(3\) and Eq. \(4\) to Eq. \(2\), LP is factored out, but still we have the integrals. If we integrate the volume rendering Eq. \(1\) with the physically-based rendering Eq. \(2\) naively, we must sample incident lights per batch, ray, and, point during training, which prohibitively occupies memory footprint and is computationally expensive. Therefore, for computing the specular term in Eq. \(2\), we apply the volume rendering Eq. \(1\) to spatially-varying quantities: roughness αr, specular reflectance f0, analytically computed normals n, photogrammetric light LP , and implicit illumination LI , one exception is computing LV , we apply the volume rendering Eq. \(1\) to x. In other words, we first reduce point dimension by volume rendering and compute the specular term in pixel space. Then, we perform incident light sampling to compute the integrals in Eq. \(2\). This idea is similar to [4]; however, we can directly optimize thanks to the indicator function of Eq. \(6\) and do not use any approximations. For computing diffuse component in Eq. \(2\), we first entangle cb and Lp and utilize the same way as in computing the specular term for the integral then multiply them. Finally, using shorthand notation ˆ· as the volume rendering Eq. \(1\) to each quantity (·) other than c, the rendered color Cˆ(r) of NDJIR is the summation of the diffuse and specular terms formulated as
+
+
+$$\frac{\widehat{L}_{\text{pr}} \mathbf{c}_b}{\pi} \int_{\Omega_+} \left( L_V(\hat{\mathbf{x}}, \mathbf{l}) L_E(\mathbf{l}) (\hat{\mathbf{n}} \cdot \mathbf{l}) + \widehat{L}_I(\mathbf{x}) \right) d\mathbf{l}, \quad (5)$$
+
+
+$$\widehat{L}_p \int_{\Omega_+} \frac{D(\mathbf{v}, l, \hat{\mathbf{n}}, \hat{\alpha}_r) G(\mathbf{v}, l, \hat{\mathbf{n}}, \hat{\alpha}_r) F(\mathbf{v}, l, \hat{\mathbf{f}}_0)}{4(\hat{\mathbf{n}} \cdot \mathbf{v})(\hat{\mathbf{n}} \cdot l)} (6)$$
+
+$$L_V(\hat{\mathbf{x}}, l) L_E(l)(\hat{\mathbf{n}} \cdot l) I(\mathbf{v}, l, \hat{\mathbf{n}}) dl,$$
+
+where I(v,l, nˆ) is the indicator function of 1 if ((nˆ · l) ≥ I )∧((nˆ · v) ≥ I )∧ (nˆ · v+l ||v+l||2 ) ≥ I , otherwise 0.
+
+Entanglement of Lp and cb is important; otherwise, training does not successfully start. Indicator function is also necessary for joint-training. As geometry and corresponding normals are changing during training, dot products of numerator in Eq. \(6\) can be negative. Negative values are omitted by the saturation of dot product, but we also have several dot products in denominator of the specular term, so does DGF, such that saturated dot products increase value of the specular term, which results in really large gradients in backward pass. To prevent such gradient explosion, we introduce the indicator function. In that sense, the indicator function can be viewed as hard visibility factor specific to the specular term in joint inverse rendering.
+
+We are mixing the volume rendering and physically based rendering; however, once training starts, the trainable scale σ of Eq. \(1\) is going up, geometry is gradually being formed, then the specular term is considered in training, and rendering is going towards surface rendering. Therefore, NDJIR approaches to LP × PBR computed on surface in the end of training.
+
+#### 3.3. Network
+
+All geometry, lights, and materials are represented by naive multi-layer perceptron (MLP); geometric network is denoted by fG(x) ∈ R DG+1, base color network cb(x,FG) ∈ R 3 , roughness network αr(x,FG, n) ∈ R, specular reflectance network f0(x,FG, n) ∈ R 3 , environment light network LE(l) ∈ R, soft visibility network LV (x,l,FG, n) ∈ R, implicit illumination network LI (x,FG, n) ∈ R, and photogrammetric light network LP (x, v,FG, n, d−1 ) ∈ R. FG ∈ R DG is geometric feature as one of the outputs of fG in addition to SDF s ∈ R. We add the inverse squared distance d −2 as input of Lp, which improves geometric reconstruction empirically.
+
+Choice of inputs is based on our preliminary experiments where normals n captures light distribution spatially. For base color network, we do not expect that light is baked into base color, thus we exclude normals from inputs. Light networks use a single channel output because of white light assumption to reduce ambiguity. For specular reflectance, we use 3 channels in order to increase degree of freedom.
+
+Positional encoding γ(·, `) [45] is applied to the geometric network as γ(x, `G), the environment light network as γ(l, `E), the soft visibility network as γ(l, `V ), and the photogrammetric light network as γ(v, `P ), where ` is the number of frequencies. Results are concatenated to the original input.
+
+Dense voxel grid feature of linear interpolation with grid size G is used but only for x in the geometric network. We tried several variants: the one with varying interpolations (cosine and lanzcos), triplane and triline grid feature similar to tensor factorization [8], and voxel hash grid feature [46]. With varying interpolations achieve similar performance both quantitatively and qualitatively. Triplane and triline grid feature extracts smoother geometry but sometimes bad separation between foreground object and background, depending on scene; also, semantic separation of materials are worse than using dense voxel. With voxel hash feature [46] can not be trained, we conjecture this is due to the simultaneous use of Eikonal regularization [23].
+
+#### 3.4. Loss and prior
+
+Our loss functions are composed of RGB color loss LRGB, Eikonal regularization LE [23], total variation loss LT V [17], base color prior Lcb , roughness prior Lαr , and specular prior Lf0 . These losses are computed as follows.
+
+RGB color loss LRGB is defined as L1 loss of the residual between render color Cˆ(r) and ground truth color C(r):
+
+$$\mathcal{L}_{RGB} = \|\hat{C}(\mathbf{r}) - C(\mathbf{r})\|_1. \quad (7)$$
+
+Eikonal regularization LE is the constraint SDF meets:
+
+$$\mathcal{L}_E = (\|s\|_2 - 1)^2. \quad (8)$$
+
+Total variation loss LT V of voxel grid feature is computed as
+
+$$\mathcal{L}_{TV} = \sqrt{\Delta f_{i+1,j,k}^2 + \Delta f_{i,j+1,k}^2 + \Delta f_{i,j,k+1}^2} \quad (9)$$
+
+where ∆fi+1,j,k is the difference of adjacent features along x axis, same for y and z axes, fi,j,k is positionallyembedded trainable feature corresponding to discretized query point.
+
+Base color prior Lcb is defined spatially between query point and near point perturbed by cb ,
+
+
+$$\mathcal{L}_{\mathbf{c}_b} = \|\mathbf{c}_b(\mathbf{x}) - \mathbf{c}_b(\mathbf{x} + \epsilon_{\mathbf{c}_b})\|_1. \quad (10)$$
+
+Even if we can train inverse rendering system jointly, we found roughness and specular reflectance tend to degenerate and outputs either unary (0 or 1) or binary (0 and 1) value(s). This can be mitigated by using smaller MLPs and increasing the number of incident lights to some extent. Even though, roughness and specular reflectance networks would degenerate, so we introduce priors on both networks.
+
+For specular reflectance, we know that specular reflectance of common object is 0.04 [24] as prior knowledge, but we do not know for roughness, so we simply set a certain value rp as prior. Because using a deterministic value is too strong, we pose Laplacian distribution as prior distribution under Bayesian deep learning framework [33].
+
+$$\mathcal{L}_{\alpha_r} = \frac{\|\alpha_r - r_p\|_1}{\sigma_{\alpha_r}} + \log(\sigma_{\alpha_r}), \quad (11)$$
+
+$$\mathcal{L}_{\mathbf{f}_0} = \frac{\|\mathbf{f}_0 - \mathbf{0.04}\|_1}{\sigma_{\mathbf{f}_0}} + \log(\sigma_{\mathbf{f}_0}), \quad (12)$$
+
+where the roughness network is forked at the last layer of MLP and outputs σαr additionally and same for σf0 of the specular reflectance network.
+
+Our final objective to be minimized with corresponding weights, AABB-ray intersection mask MA, and denominators N and M is
+
+$$\begin{aligned} & \frac{\overline{\mathcal{L}}_{RGB}}{N} + \lambda_E \frac{\overline{\mathcal{L}}_{EMA}}{M} + \lambda_{TV} \frac{\overline{\mathcal{L}}_{TVMA}}{M} \\ & + \lambda_{cb} \frac{\overline{\mathcal{L}}_{cb} \overline{M}_A}{M} + \lambda_{\alpha_r} \frac{\overline{\mathcal{L}}_{\alpha_r \overline{M}_A}}{M} + \lambda_{f_0} \frac{\overline{\mathcal{L}}_{f_0} \overline{M}_A}{M}, \end{aligned} \quad (13)$$
+
+where · is the summation of all dimensions.
+
+#### 3.5. Implementation
+
+Our scene is normalized in the same way as [60] such that an object is approximately inside a unit-sphere located on the origin. We put on the origin the voxel grid which min and max coordinates are (−1, −1, −1) and (1, 1, 1), respectively. Grid size is 512, and feature size are 4. During training, we sample 4 camera locations and cast 512 rays at each iteration; if a ray hits the axis-aligned bounding box (AABB) of the voxel grid, we sample 64 points between near and far hits, then upsample 4 times 16 points same as [57]. For background modeling, we use NeRF++ [66] and sample 32 points per ray staring from the far hit of AABB. If a ray does not hit AABB, we sample points only for background modeling from the location of the distance ||camera location||2 − 1 along that ray.
+
+Voxel grid feature is implemented in CUDA [49] and supports double-backward [15]. This is needed; otherwise, extracted geometry is locally jagged. For total variation loss, the asymmetric backward is used in [17], but we found the symmetric backward mitigates the baked light on base color cb, so the symmetric backward is used. When using the voxel grid feature, the extracted mesh is rugged, but applying simple average filter dramatically mitigates and produces smoother mesh. Application of average filters is 2 times as default.
+
+fG has 8 layers and one skip connection at the middle as in [57] with DG = 256. cb and Lp are 4 layers of 256 feature size. The other MLPs have 4 layers of 128 feature size. We use softplus(β = 100) [69] as activation function, and output is ranged in [−1, 1] by the sigmoid function in all MLPs except for LE, σαr , and σf0 which use softplus(β = 1) as output activation function. As in [24], we remap roughness and specular reflectance networks such that actual roughness is αr ← α r and specular reflectance is f0 ← 0.16 × f 2 0 . To prevent 0 division, we clip as max(αr, 0.089). `G = 6, `E = `V = 6, and `P = 4 are set in positional encodings. All networks are initialized using Glorot initialization [21] except for fG where the geometric initialization [2] is used. Voxel grid features are directly initialized by sampling from N (0,(10−3 ) 2 ).
+
+When computing the integrals, we use Monte Carlo integration. The number of incident lights is 128 per pixel. In Eq. \(5\), the uniform sampling is used and the importance sampling in consideration of roughness αr in Eq. \(6\) same as [24]. As suggested in [62], we do not propagate gradients in the sampling process.
+
+n = 10−16 is added to volume rendered normals nˆ, then the result is unit-vector normalized. Even small n produces bias, but this is necessary to prevent 0-division especially at the beginning of training. cb is sampled from Normal distribution N (0,( √ 3 2 G ) 2 ). We set dot = I = 10−8 , λE = 10−1 , λT V = 10−1 , λcb = 10−1 , λαr = 10−5 , λf0 = 10−3 , and rp = 0.5 as default. N is multiplication of the batch size of 4 and sampled pixels of 512, and M is multiplication of the number of rays hitting AABB and sampled points of 128.
+
+For training, we use Adam optimizer [34] with 10−3 weight decay and 5 × 10−4 learning rate, and the warmup [22] is applied for 1.5 % of the total epoch 1500. After the warmup period, the learning rate cosine-decays towards 5 × 10−6 . Training takes 2.8 and 3.7 hours for 49 and 64 images of DTU MVS dataset [29], respectively using A100 GPU.
+
+To extract mesh, we use MarchingCubs algorithm with grid size of 512. For texture baking, we use Blender [11], first we use Smart UV unwrap to get uv-coordinates which is then applied to baking vertex attributes to texture maps in Cycles renderer. To physically-based render extracted meshes with decomposed materials, we utilize Open3D [70] and set the sun light direction above object(s).
+
+### 4. Experiment
+
+Dataset: We use DTU MVS dataset [29] curated by [60]. Dataset contains 15 scenes where real object(s) is captured with a industrial robot. 16 LEDs are located above object(s). 49 and 64 images are given with camera poses.
+
+Evaluation: For inverse rendering of real object, it is hard to evaluate quantitatively in material space, so we compare our method in image space using PSNR and SSIM. Geometrically, we evaluate decomposition quantity with reference given by DTU MVS dataset. In the other cases, we show qualitative comparisons.
+
+Baseline: We use NeuS [57] as quantitative baseline. For qualitative comparison, we implement a method bearing the similar spirit of split-sum [47] and pre-integrated light [5] under our framework. The derivation and more results are found in the supplementary material.
+
+### 4.1. Primary result
+
+Decomposed geometry and materials: Fig. 1 (top) shows decomposed geometry and materials. Geometries are well extracted. Base colors are flat and do not contain high light intensity and specularity. Roughness and specular
+
+Table 1. Qualitative evaluations.
+
+
+
+| Scan ID | NeuS | Chamfer ↓ NDJIR | NeuS  | PSNR ↑ NDJIR | NeuS  | SSIM ↑ NDJIR |
+|---------|------|-----------------|-------|--------------|-------|--------------|
+| 24      | 1.00 | 0.70            | 23.98 | 28.10        | 0.732 | 0.820        |
+| 37      | 1.37 | 1.19            | 22.79 | 23.67        | 0.778 | 0.803        |
+| 40      | 0.93 | 0.64            | 25.21 | 27.51        | 0.722 | 0.761        |
+| 55      | 0.43 | 0.49            | 26.03 | 28.61        | 0.739 | 0.783        |
+| 63      | 1.10 | 1.53            | 28.32 | 30.53        | 0.915 | 0.890        |
+| 65      | 0.65 | 0.83            | 29.80 | 31.39        | 0.809 | 0.839        |
+| 69      | 0.57 | 0.78            | 27.45 | 28.98        | 0.818 | 0.847        |
+| 83      | 1.48 | 1.04            | 28.89 | 31.90        | 0.831 | 0.842        |
+| 97      | 1.09 | 1.21            | 26.03 | 29.15        | 0.812 | 0.819        |
+| 105     | 0.83 | 0.79            | 28.93 | 31.71        | 0.815 | 0.836        |
+| 106     | 0.52 | 0.52            | 32.47 | 33.30        | 0.866 | 0.877        |
+| 110     | 1.20 | 2.09            | 30.78 | 31.81        | 0.863 | 0.868        |
+| 114     | 0.35 | 0.35            | 29.37 | 30.34        | 0.847 | 0.842        |
+| 118     | 0.49 | 0.64            | 34.23 | 33.29        | 0.878 | 0.870        |
+| 122     | 0.54 | 0.63            | 33.95 | 27.55        | 0.878 | 0.869        |
+
+reflectance reflect light intensity, specularity, and semantic object color in the scene. Higher specularity means lower roughness and higher specular reflectance. Parts of similar colors are segmented with close values of roughness and specular reflectance, yet light frequencies are considered. Implicit illumination certainly captures light distribution spatially for each scene.
+
+Rendered images: Fig. 1 (bottom) illustrates the rendered images. Neurally-rendered images looks real, and PBR images are also towards photorealistic.
+
+Comparison to baseline: Tab. 1 shows quantitative comparison. NDJIR achieves competitive performance in all metrics even as it decomposes all the components: geometry, lights, and materials. In Fig. 2, with the approximation, geometry is not properly reconstructed on higher intensity or deep concave region. Also, the roughness does not reflects geometric smoothness in part of the roof and same material property of the building wall.
+
+#### 4.2. Analysis and ablation study
+
+Distribution of roughness: Fig. 3 illustrates how effective the increasing number of light samples per pixel (spp) and Bayesian prior are. When we use lower spps, roughness networks seem degenerated, outputting unary (0 or 1) or binary (0 and 1) value(s). However, once we increase spps, especially to 128, it is mitigated for some scenes, but we still have degeneration. Using Bayesian prior more reduces degeneration, and the peak of the distribution is around 0.5. Fig. 4 shows spatially-varying roughnesses. Without Bayesian prior, the values are binarily distributed. Using triplane × triline acceleration structure or without voxel grid feature bears lower spatially-varying property and can not capture high specularity.
+
+Geometric effect of acceleration structure: In addition to material decomposition, the dense voxel grid feature influences geometry Fig. 5. Voxel grid features captures ge-
+
+
+
+
+
+Figure 1. Decomposed materials and rendered images. (·) is a given environment map in Open3D.
+
+
+
+Figure 2. Comparison with split-sum and pre-integrated light using scan65 (top) and scan24 (bottom). Red boxes indicate high light intensity region, and blue boxes represent deep concave parts.
+
+
+
+Figure 3. Roughness distributions with varying number of light samples per pixel (N) over all scenes of DTU MVS dataset.
+
+ometric details but often produces some tiny geometric artifacts. However, it can be reduced and/or controlled by a few simple average filters as post-processing. Straight through estimator (STE) [13] is one way to compute gradients of interpolation, but STE produces lots of non-erasable jagged artifacts, meaning normals of the voxel grid feature are important. Without acceleration structure cannot capture geometric details with large batch and smaller iteration training, also with triplane × triline acceleration structure cannot separate foreground and background well, depending on scene.
+
+Decomposed environment light: Environment light network represents directional light distribution as in Fig. 6, it captures light intensity only in an upper hemisphere like the scene setting of DTU MVS dataset. When increasing
+
+
+
+
+
+Figure 4. Comparison of spatially-varying roughness with different configurations (scan69). Red boxes mean high specularity regions.
+
+
+
+Figure 5. Comparison of geometric details with different acceleration structures and average filter (N×) as post-processing (scan55).
+
+
+
+
+
+Figure 6. Environment lights with different number of frequencies in positional encoding (scan55). Values below P E are the actual (min, max) values. For visibility, values are normalized such that the maximum is 255.
+
+frequencies of the positional encoding, the network more represents light interference of LEDs.
+
+Sampling method: Importance sampling of the specular term Eq. \(6\) is a key to model specularity precisely. As in Fig. 8, using uniform sampling still bakes high light intensity and specularity on base color; importance sampling
+
+
+
+Figure 7. Rebaking implicit illumination to base color (scan69) with interpolation coefficient c.
+
+
+
+Figure 8. Comparison of base color with different sampling methods in Monte Carlo integration. Red boxes indicate high light intensity or specularity regions.
+
+
+
+Figure 9. Metallic conversion of metallic object.
+
+mitigates strong light baking to more extent.
+
+### 4.3. Material conversion
+
+Metallic conversion: Metalness is not modeled in our method, but once specular reflectance is obtained, we can simulate metalness according to the strength of specular reflectance to some extent. Fig. 9 are the results of reflectance-aware metallic conversion. Metal-like objects exhibit more metallic than non-metal PBR.
+
+Rebaking of implicit illumination: We sometimes want to bake light distribution of a captured scene to base color, e.g., 3D printing. Fig. 7 shows the interpolation results between base color and base color × implicit illumination. As seen, when increasing the interpolation coefficient, we can more re-bake light distribution to base color as postprocessing.
+
+## 5. Discussion and conclusion
+
+Discussion: Here, we mainly discuss limitations of our method. NDJIR sometimes underestimates or overestimates e.g., in Fig. 1, the left cheek and chest of scan69 and the left jaw of scan65. Increasing the number of light samples and introducing Bayesian prior prevents roughness and specular networks from degenerating, but we still have extreme values as in Fig. 3. We believe in that more reasonable priors can mitigate degeneration and extract more plausible results. Dense voxel grid feature produces tiny noisy artifacts and/or non-smooth geometry even if we apply average filters as in Fig. 9, e.g., scissors . Importance sampling of Eq. \(6\), modeling implicit illumination as in Fig. 7, and strong regularization of Eq. \(10\) can make base color flatter in Fig. 8 at the cost of removal of small colors, e.g., dot eyes and thin mouth of scan69. We do not model metalness, so metallic conversion in Fig. 9 is object-agnostic.
+
+Conclusion: We propose NDJIR, neural direct and joint inverse rendering for geometry, lights, and materials of real object tailored to photogrammetry setting. Our proposed method is direct and joint optimization. NDJIR achieves better performances with the prior work and semantically well decomposition of real object.
+
+Table S2. Notation table.
+
+
+
+| Notation |       |                 | Description       |                                  |
+|----------|-------|-----------------|-------------------|----------------------------------|
+| x        | ∈     | R 3             | query             | point                            |
+| s        | ∈     | R               | signed            | distance                         |
+| α        | ∈     | R               | opacity           |                                  |
+| T        | ∈     | R               | accumulated       | transmittance                    |
+| F        | G     | ∈ R D G         | geometric         | feature                          |
+| n        | ∈     | R 3             | normals           |                                  |
+| l        | ∈     | R 3             |                   |                                  |
+|          |       |                 | light             | direction                        |
+| v        | ∈     | R 3             | viewing           | direction                        |
+| d        | − 2   | ∈ R             | inverse           | squared distance                 |
+| c        | b ∈   | R 3             | base              | color                            |
+| α        | r     | ∈ R             | roughness         |                                  |
+| f        | 0     | ∈ R 3           |                   |                                  |
+|          |       |                 | specular          | reflectance                      |
+| L        | E     | ∈ R             | environment       | light intensity                  |
+| L        | V     | ∈ R             | soft              | visibility                       |
+| L        | I     | ∈ R             | implicit          | illumination                     |
+| L        | P     | ∈ R             | photogrammetric   | light intensity                  |
+| C ˆ      | ∈     | R 3             |                   |                                  |
+|          |       |                 | rendered          | color                            |
+| D        | ∈     | R               | normal            | distribution function            |
+| G        | ∈     | R               | masking-shadowing | function                         |
+| F        | ∈     | R 3             | Fresnel           | function                         |
+| h        | ∈     | R 3             | half              | vector                           |
+| I        | ∈     | R               | indicator         | function                         |
+| Ω        | +     |                 | upper-hemisphere  | domain                           |
+| ( a      |       | b ) ∈ R         | saturated         | dot-product                      |
+|         | dot   | ∈ R             | small             | threshold for dot-product        |
+|         | I ∈   | R               | small             | threshold for indicator function |
+| a ˆ      |       |                 | volume            | rendering, or on surface         |
+| c        | ∈     | R 3             |                   |                                  |
+|          |       |                 | camera            | location                         |
+| t near   |       | ∈ R             | start             | distance of point sampling       |
+| t far    |       | ∈ R             | end               | distance of point sampling       |
+| G        | ∈     | R 3             | grid              | sizes                            |
+| F        | V     | ∈ R G x × G y × | G z × D V voxel   | grid feature                     |
+| w        | ∈     | R               | interpolation     | coefficient                      |
+| f        | i,j,j | ∈ R D V         | i, j,             | k -th voxel grid feature         |
+| f ¯      | ∈     | R D V           | interpolated      | voxel grid feature               |
+| m        |       |                 | mins              | of AABB                          |
+| M        |       |                 | maxes             | of AABB                          |
+| s        |       |                 | scales            | of AABB                          |
+
+### S1. Network diagram
+
+Fig. S10 shows the network diagram for visual understanding of inputs and outputs.
+
+### S2. Scene layout and point sampling
+
+Fig. S11 shows the scene layout. With the preprocessing [60], we assume that an object of interest is located on the origin and inside the unit-sphere. If a ray hits the axisaligned bounding box (AABB) with min = (−1, −1, −1) and max = (1, 1, 1), we can denote the intersection points as (tnear, tfar) and samples points between them. From tfar, we also sample points for background modeling as in NeRF++ [66]. If a ray does not hit AABB, then we use ||c||2 − 1 as tfar and apply NeRF++ only.
+
+### S3. Monte Carlo integration
+
+We will in detail describe how to compute the diffuse and specular term which contain the integrals. Our implementation is almost same as in [24]. However, to make the paper self-contained, we elaborate Monte Carlo integration.
+
+First of all, the rendering equation [30] with Cook-Torrance specular BRDF model [12] is given:
+
+
+$$\underbrace{\frac{\hat{c}_b}{\pi} \int_{\Omega_+} L(\hat{x}, l) (\hat{n} \cdot l) dl}_{\text{diffuse term}} + \underbrace{\int_{\Omega_+} \frac{D(\mathbf{v}, l, \hat{n}, \hat{\alpha}_r) G(\mathbf{v}, l, \hat{n}, \hat{\alpha}_r) F(\mathbf{v}, l, \hat{f}_0)}{4(\hat{n} \cdot \mathbf{v})(\hat{n} \cdot l)} L(\hat{x}, l) (\hat{n} \cdot l) dl}_{\text{specular term}} \quad (\text{S1})$$
+
+where D, G, and F are defined as in [24],
+
+$$\begin{aligned} D &= \frac{\hat{\alpha}_r^2}{\pi ((\hat{n} \cdot \mathbf{h})^2 (\hat{\alpha}_r^2 - 1) + 1)^2}, \\ G &= \frac{2(\hat{n} \cdot \mathbf{l})}{(\hat{n} \cdot \mathbf{l}) + \sqrt{\hat{\alpha}_r^2 + (1 - \hat{\alpha}_r^2)(\hat{n} \cdot \mathbf{l})^2}} \quad (S2) \\ &\times \frac{2(\hat{n} \cdot \mathbf{v})}{(\hat{n} \cdot \mathbf{v}) + \sqrt{\hat{\alpha}_r^2 + (1 - \hat{\alpha}_r^2)(\hat{n} \cdot \mathbf{v})^2}}, \\ F &= \mathbf{f}_0 + (1 - \mathbf{f}_0)(1 - (\mathbf{v} \cdot \mathbf{h}))^5. \end{aligned}$$
+
+In case of Filament model [24], we can simplify the shadowing-masking function G in consideration of the denominator of Eq. \(S1\) and without the height correction of microfacet:
+
+$$V := \frac{G}{4(\hat{n} \cdot \mathbf{v})(\hat{n} \cdot \mathbf{l})} = \frac{1}{(\hat{n} \cdot \mathbf{l}) + \sqrt{\hat{a}_r^2 + (1 - \hat{a}_r^2)(\hat{n} \cdot \mathbf{l})^2}} \times \frac{1}{(\hat{n} \cdot \mathbf{v}) + \sqrt{\hat{a}_r^2 + (1 - \hat{a}_r^2)(\hat{n} \cdot \mathbf{v})^2}}. \quad (\text{S3})$$
+
+Thus, the simplified rendering equation is
+
+$$\underbrace{\frac{\hat{c}_b}{\pi} \int_{\Omega_+} L(\hat{x}, l) (\hat{n} \cdot l) dl}_{\text{diffuse term}} + \underbrace{\int_{\Omega_+} D(v, l, \hat{n}, \hat{\alpha}_r) V(v, l, \hat{n}, \hat{\alpha}_r) F(v, l, \hat{f}_0) L(\hat{x}, l) (\hat{n} \cdot l) dl}_{\text{specular term}}. \quad (\text{S4})$$
+
+Accordingly, the diffuse and specular terms of NDJIR forward rendering model become
+
+
+$$\frac{\widehat{L}_{pb} c_b}{\pi} \int_{\Omega_+} \left( L_V(\hat{\mathbf{x}}, \mathbf{l}) L_E(\mathbf{l}) (\hat{\mathbf{n}} \cdot \mathbf{l}) + \widehat{L}_I(\hat{\mathbf{x}}) \right) d\mathbf{l}, \quad (S5)$$
+
+
+
+Figure S10. Network diagram. P.E. means the positional encoding. Voxel indicates the look-up result of the dense voxel grid feature. VR is the abbreviation of the volume rendering, and the dotted lines mean the result of VR. Ranges below some notations are the output ranges.  $\oplus$  and  $\otimes$  is element-wise addition and multiplication, respectively. Note  $\alpha$  and  $T$  go to all VRs, but for visibility, such lines are omitted. Also,  $l$  is the result of the uniform or importance samplings so depends on  $\alpha_r$  and  $\hat{n}$ , but its line is omitted for visibility.
+
+
+$$\widehat{L}_p \int_{\Omega_+} D(\mathbf{v}, \mathbf{l}, \hat{n}, \hat{\alpha}_r) V(\mathbf{v}, \mathbf{l}, \hat{n}, \hat{\alpha}_r) F(\mathbf{v}, \mathbf{l}, \hat{\mathbf{f}}_0) L_V(\hat{\mathbf{x}}, \mathbf{l}) L_E(\mathbf{l}) (\hat{n} \cdot \mathbf{l}) I(\mathbf{v}, \mathbf{l}, \hat{n}) d\mathbf{l}, \quad (\text{S6})$$
+
+For computing the specular term Eq. (S6), we use Monte Carlo integration with importance sampling:
+
+
+$$\frac{\widehat{L}_p}{N_L} \sum_i^{N_L} \frac{D(\mathbf{v}, \mathbf{l}_i, \hat{n}, \hat{\alpha}_r) V(\mathbf{v}, \mathbf{l}_i, \hat{n}, \hat{\alpha}_r) F(\mathbf{v}, \mathbf{l}_i, \hat{\mathbf{f}}_0)}{p(\mathbf{v}, \mathbf{l}_i, \hat{n}, \hat{\alpha}_r)} L_V(\hat{\mathbf{x}}, \mathbf{l}_i) L_E(\mathbf{l}_i) (\hat{n} \cdot \mathbf{l}_i) I(\mathbf{v}, \mathbf{l}_i, \hat{n}), \quad (\text{S7})$$
+
+where  $N_L$  is the number of light samples per pixel, and  $p$  is the probabilistic distribution function (PDF). We use  $D(\mathbf{v}, \mathbf{l}_i, \hat{n}, \hat{\alpha}_r)(\hat{n} \cdot \mathbf{h})$  for the PDF but consider the reflection of viewing direction  $\mathbf{v}$  around half vector  $\mathbf{h}$ , so the transformed PDF is
+
+
+$$p = D(\mathbf{v}, \mathbf{l}_i, \hat{n}, \hat{\alpha}_r) (\hat{n} \cdot \mathbf{h}) \frac{1}{4(\mathbf{v} \cdot \mathbf{h})}. \quad (\text{S8})$$
+
+Putting Eq. (S8) into Eq. (S7) leads to
+
+
+$$\frac{\widehat{L}_p}{N_L} \sum_i^{N_L} V(\mathbf{v}, \mathbf{l}_i, \hat{n}, \hat{\alpha}_r) F(\mathbf{v}, \mathbf{l}_i, \hat{\mathbf{f}}_0) \frac{4(\mathbf{v} \cdot \mathbf{h})}{(\hat{n} \cdot \mathbf{h})} L_V(\hat{\mathbf{x}}, \mathbf{l}_i) L_E(\mathbf{l}_i) (\hat{n} \cdot \mathbf{l}_i) I(\mathbf{v}, \mathbf{l}_i, \hat{n}). \quad (\text{S9})$$
+
+Now, we have the discretized form for the specular term Eq. (S9), the final piece is the way to sample  $l$  according to the PDF. Using the solid angle representation, we can define the PDF as
+
+$$p(\theta, \phi) = \frac{\hat{\alpha}_r^2}{\pi(\cos^2 \theta (\hat{\alpha}_r^2 - 1) + 1)^2} \cos \theta \sin \theta, \quad (\text{S10})$$
+
+where  $\theta$  and  $\phi$  is azimuthal and polar angle, respectively. Applying the inverse transform method, we can sample  $l$  using
+
+$$\begin{aligned} \phi &= 2\pi \zeta_\phi, \\ \theta &= \cos^{-1} \sqrt{\frac{1 - \zeta_\theta}{(\hat{\alpha}_r^2 - 1) \zeta_\theta + 1}}, \\ l &= (\cos \phi \sin \theta, \sin \phi \sin \theta, \cos \theta), \end{aligned} \quad (\text{S11})$$
+
+where  $\zeta_\phi$  and  $\zeta_\theta$  are sampled from the uniform distribution of the range  $[0, 1)$ . Now,  $l$  is defined in the upper-hemisphere on the world coordinate system, so we transform it to the local coordinate system where the normals  $\hat{n}$  is the up-vector:  $l \leftarrow T(n)l$ . As noted in the main script, we do not backpropagate gradients in the sampling process as suggested in [62].
+
+
+
+Figure S11. Scene layout. For visibility, we draw the corresponding 2D case.
+
+Since the range of azimuthal angle is as twice as polar angle, we sample two times larger samples regarding θ than φ then use all possible combinations of θ and φ (same as the batch-wise meshgrid operation). For example, when we samples 8 points for the polar angle, the number of light samples per pixel is 8 × 16 = 128.
+
+In summary, for computing the specular term, we sample light l according to Eq. \(S11\), then transform it as l ← T(n)l, finally apply it to Eq. \(S9\).
+
+Similarly, the diffuse term Eq. \(S5\) can be computed by Monte Carlo integration but with uniform sampling:
+
+$$\frac{\widehat{L_p c_b}}{N_L} \sum_{i=1}^{N_L} L_V(\hat{\mathbf{x}}, \mathbf{l}_i) L_E(\mathbf{l}_i) (\hat{\mathbf{n}} \cdot \mathbf{l}_i) + \widehat{L_p c_b \widehat{L_I(\mathbf{x})}}. \quad (\text{S12})$$
+
+Note that the normalization factor π is canceled out, and θ of Eq. \(S11\) becomes
+
+$$\theta = \cos^{-1}(1 - \zeta_\theta). \quad (\text{S13})$$
+
+### S4. Derivation of model with split-sum and PIL
+
+As baseline, we implemented the model which bears the similar spirit of split-sum [47] and pre-integrated light (PIL) [5].
+
+We split the specular term of Eq. \(S1\) into two factors:
+
+$$\int_{\Omega_+} L(\hat{x}, l)(\hat{n} \cdot l) dl \int_{\Omega_+} \frac{DGF}{4(\hat{n} \cdot v)(\hat{n} \cdot l)} (\hat{n} \cdot l) dl. \quad (\text{S14})$$
+
+Then, representing the light integral factor divided by π using pre-integrated neural network L˜(xˆ, nˆ, v, d−2 ), the rendering equation Eq. \(S1\) becomes
+
+$$\tilde{L}\hat{\mathbf{c}}_b + (\pi\tilde{L}) \int_{\Omega_+} \frac{DGF}{4(\hat{\mathbf{n}} \cdot \mathbf{v})(\hat{\mathbf{n}} \cdot \mathbf{l})} (\hat{\mathbf{n}} \cdot \mathbf{l}) d\mathbf{l}. \quad (\text{S15})$$
+
+Similarly to NDJIR forward rendering model, we entangle the two factors in the diffuse term and apply volume rendering to quantities, then the forward rendering model of split-sum + PIL approximation is
+
+$$\widehat{Lc_b} + (\pi\widehat{L}) \int_{\Omega_+} \frac{DGF}{4(\hat{n} \cdot \mathbf{v})(\hat{n} \cdot \mathbf{l})} (\hat{n} \cdot \mathbf{l}) d\mathbf{l}. \quad (\text{S16})$$
+
+#### S5. Double backward of voxel grid feature
+
+Naive implementation of the voxel grid feature is to use function composition each of which supports auto-grad as implemented in modern neural network libraries [7, 26, 50]. However, such implementation constructs a long and complex computation graph which can not be optimized automatically, resulting in computational overhead in speed and large memory footprint. Thus, we implement specific CUDA [49] kernels to support double-backward [15].
+
+#### S5.1. Forward function
+
+Given query points {xb} = {(xb, yb, zb)}, voxel grid feature FV with grid size G and bounded in min m and max M, we first transform query point to the discrete coordinate system:
+
+$$\bar{x}_b = \frac{x_b - m}{M - m} G = s(x_b - m). \quad (\text{S17})$$
+
+Then, the voxel grid feature outputs
+
+$$\bar{f}(\bar{x}_b) = \sum_{i,j,k} w_{i,j,k}(\bar{x}_b) \mathbf{f}_{i,j,k}(\bar{x}_b), \quad (\text{S18})$$
+
+where wi,j,k(x¯b) is the interpolation coefficient, and fi,j,k(x¯b) is the voxel grid feature queried by x¯b at i, j, k-th location of the discrete coordinate system.
+
+#### S5.2. Grad function
+
+For gradient function, we denote as g (n) gradient operator on n-th order gradient graph. Here, we have two inputs: query point xb and voxel grid feature fi,j,k. Correspondingly, there are two grad functions.
+
+Gradient w.r.t. query point:
+
+
+$$g^{(1)}x_b = \sum_d g^{(1)}\bar{f}^d(\bar{\mathbf{x}}_b) \sum_{i,j,k} s_x \frac{\partial w_{i,j,k}(\bar{\mathbf{x}}_b)}{\partial \bar{\mathbf{x}}_b} f_{i,j,k}^d(\bar{\mathbf{x}}_b)$$
+
+$$g^{(1)}y_b = \sum_d g^{(1)}\bar{f}^d(\bar{\mathbf{x}}_b) \sum_{i,j,k} s_y \frac{\partial w_{i,j,k}(\bar{\mathbf{x}}_b)}{\partial \bar{\mathbf{y}}_b} f_{i,j,k}^d(\bar{\mathbf{x}}_b)$$
+
+$$g^{(1)}z_b = \sum_d g^{(1)}\bar{f}^d(\bar{\mathbf{x}}_b) \sum_{i,j,k} s_z \frac{\partial w_{i,j,k}(\bar{\mathbf{x}}_b)}{\partial \bar{z}_b} f_{i,j,k}^d(\bar{\mathbf{x}}_b). \quad (\text{S19})$$
+
+Note that sx, sy, and sz come from the chain rule of the backpropagation, ∂wi,j,k(x¯b) = ∂x¯b ∂wi,j,k(x¯b) ∂x¯b .
+
+∂xb ∂xb Gradient w.r.t. voxel grid feature:
+
+$$g^{(1)} \mathbf{f}_{i,j,k}(\bar{\mathbf{x}}_b) += g^{(1)} \bar{\mathbf{f}}(\bar{\mathbf{x}}_b) w_{i,j,k}(\bar{\mathbf{x}}_b) \quad (\text{S20})$$
+
+We can write a specific form regarding the derivative of wi,j,k(x¯b), but it depends on implementation of interpolation. Further, if we write a specific form, notations become more complicated. Thus, this form is enough to proceed. Note that in case of Straight Through Estimator (STE) [13], ∂wi,j,k(x¯) ∂x¯ = 0 and same for y and z, meaning the normals of the voxel grid feature would be ignored.
+
+#### S5.3. Grad grad function
+
+For gradients of gradients, there are five cases. However, we are only interested in Eikonal regularization [23] thus solely consider two cases.
+
+Gradient of Eq. \(S19\) w.r.t. grad output:
+
+$$\begin{aligned} g^{(2)} g^{(1)} \bar{f}^d(\bar{\mathbf{x}}_b) &= g^{(2)} g^{(1)} x_b \sum_{i,j,k} s_x \frac{\partial w_{i,j,k}(\bar{\mathbf{x}}_b)}{\partial \bar{\mathbf{x}}_b} f_{i,j,k}^d(\bar{\mathbf{x}}_b) \\ &+ g^{(2)} g^{(1)} y_b \sum_{i,j,k} s_y \frac{\partial w_{i,j,k}(\bar{\mathbf{x}}_b)}{\partial \bar{y}_b} f_{i,j,k}^d(\bar{\mathbf{x}}_b) \\ &+ g^{(2)} g^{(1)} z_b \sum_{i,j,k} s_z \frac{\partial w_{i,j,k}(\bar{\mathbf{x}}_b)}{\partial \bar{z}_b} f_{i,j,k}^d(\bar{\mathbf{x}}_b) \end{aligned} \tag{S21}$$
+
+Gradient of Eq. \(S19\) w.r.t. voxel grid feature:
+
+$$\begin{aligned} g^{(2)} f_{i,j,k}^d(\bar{\mathbf{x}}_b) + & g^{(2)} g^{(1)} x_b g^{(1)} \bar{f}^d(\bar{\mathbf{x}}_b) s_x \frac{\partial w_{i,j,k}(\bar{\mathbf{x}}_b)}{\partial \bar{\mathbf{x}}_b} \\ & + g^{(2)} g^{(1)} y_b g^{(1)} \bar{f}^d(\bar{\mathbf{x}}_b) s_y \frac{\partial w_{i,j,k}(\bar{\mathbf{x}}_b)}{\partial \bar{y}_b} \\ & + g^{(2)} g^{(1)} z_b g^{(1)} \bar{f}^d(\bar{\mathbf{x}}_b) s_z \frac{\partial w_{i,j,k}(\bar{\mathbf{x}}_b)}{\partial \bar{z}_b}. \end{aligned} \tag{S22}$$
+
+In CUDA implementation, we do not optimize codes, simply parallelize both b and d dimensions, and use the atomic add operation for the respective summations. Note that fi,j,k(x¯b) is the result of look-up, we do not (cannot) backpropagate w.r.t. x.
+
+### S6. More experimental results
+
+### S6.1. More primary result
+
+Decomposed geometry, light, and materials: Figs. S12 to S15 show decomposed components of primary results. Geometry is well extracted, base color is flatter, and comprehensively, combinations of roughness, specular reflectance, and implicit illumination exhibits a photogrammetric settings: high intensity and/or specularity corresponds to lower roughness, low specular reflectance shows low specularity, and implicit illumination captures light distribution spatially.
+
+However, there are several failure cases. 1) Black color of base color are removed, e.g., eyes of scan37, scan55, scan69, scan83, and scan109. This might be mainly due to the implicit illumination and photogrammetric networks. Since either network can be able to output 0, base color can be any values in that case. With strong base color prior, such values are towards colors in neighbors. Nonetheless, this might be trade-off to remove shadows from base color, we can observe clear removals of shadow in base color, e.g, the block shadow in scan40 and hat shadow in scan69. To some extent, we can add black color on base color as seen in the rebaking examples of the main script at the cost of non-flat base color and baked shadow. Further study of better light model is needed in order to mitigate such drawbacks. 2) Quality of geometric reconstruction is highly affected by hight specularity, especially on yellow colors. On some yellow colored regions with high specularity, e.g., in scan63 and scan110, geometric reconstructions clearly worse. Correspondingly, the roughness is intuitively flipped on such regions in scan63. For better geometric reconstruction on such regions, we may need more view-consistent constraints as modeled in [14]. 3) As noted in the main script, we do not model metalness, so decomposing metallic object is not optimal.
+
+Rendered images: Figs. S12 to S15 also show rendered images of primary results. Neural rendered images look real, and PBR images are towards photorealism.
+
+Decomposed environment lights: Fig. S16 illustrates decomposed environment lights of all scenes. All environment lights exhibit non-uniformity and capture the DTU MVS light setting except for the one of scan114 which clearly fails to decompose environment lights and shows strong uniformity.
+
+#### S6.2. More analysis and ablation study
+
+Distribution of specular reflectance: In Fig. S17, similar to the tends of the roughness distribution as in the main script, when we increase the number of light samples, especially to 128, degeneration of the network mitigates. Using Bayesian prior [33], we can clearly observe the peak of the distribution around 0.04.
+
+Decomposed environment lights with uniform sampling: Fig. S18 shows difference of the decomposed environment maps between using importance and uniform samplings. When we use the importance sampling, clear separation of light intensity on the upper-hemisphere is observed. On the upper-hemisphere, the environment light intensity is strong; on the other hand, the environment light intensity is quite low on the lower-hemisphere, or on the floor. This indicates that modeling the specular term with importance sampling contributes to better decomposition of envi-
+
+
+
+
+
+Figure S12. Decomposed materials and rendered images. (·) is a given environment map in Open3D.
+
+
+
+
+
+Figure S13. Decomposed materials and rendered images. (·) is a given environment map in Open3D.
+
+
+
+
+
+Figure S14. Decomposed materials and rendered images. (·) is a given environment map in Open3D.
+
+
+
+
+
+Figure S15. Decomposed materials and rendered images. (·) is a given environment map in Open3D.
+
+ronment light.
+
+## S7. Custom dataset
+
+Scenes are captured in an author's room where an object is located on a small white desk, walls color is also white, the sun light through a window is completely blocked by a curtain, and a flat ceiling light is the only direct light source.
+
+### S7.1. Preprocessing pipeline overview
+
+With custom dataset, the overall pipeline of preprocessing is as follows:
+
+- 1. Take video and extract images
+- 2. Deblur images
+- 3. Create object masks
+- 4. Estimate camera parameters
+
+
+
+Figure S16. Decomposed environment lights of all scenes. Values are the actual (min, max) values. For visibility, values are normalized such that the maximum is 255
+
+
+
+Figure S17. Specular reflectance distributions with varying number of light samples per pixel (N) over all scenes of DTU MVS dataset. Specular reflectance of 3 channels are averaged.
+
+#### 5. Normalize camera poses
+
+When we take videos, over the upper hemisphere of an object, one by her(him)self moves a smart-phone camera around 360◦ over azimuthal angle for each 45◦ and 90◦ in
+
+
+
+Figure S18. Comparison of decomposed environment lights between uniform sampling and importance sampling. Values below are the actual (min, max) values. For visibility, values are normalized such that the maximum is 255
+
+polar angle. Some camera features, e.g., AI-enhancement and/or camera shake correction are not used. Approximately, 100 images are uniformly extracted. For each image, we apply deblurring [9] and background matting [20], then use COLMAP [52, 53] with such images and masks to estimate camera poses and an intrinsic. Finally, we normalize camera poses such that their visual hulls are contained in the unit sphere [60].
+
+### S7.2. Result of custom dataset
+
+Figs. S19 to S21 show decomposed materials, PBR images, base color with implicit illumination baked, and its PBR.
+
+Note that different from DTU MVS dataset which uses the ground truth camera parameters, we reply on estimation for camera parameters such that we use Lanczos filter with the window size of 2 in the voxel grid feature implementation, which we found is more stable training in custom dataset. Correspondingly, the average filter to meshes is applied one time, and the stronger total variation weight λT V = 1.0 and the roughness prior weight λrp = 10−4 are used. Training epoch is 1000.
+
+
+
+Figure S19. Results of bears on cake scene. (·) is a given environment map in Open3D. c is interpolation coefficient.
+
+
+
+
+
+Figure S20. Results of camel scene. (·) is a given environment map in Open3D. c is interpolation coefficient.
+
+
+
+Figure S21. Results of Santa Claus scene. (·) is a given environment map in Open3D. c is interpolation coefficient.
+
+### References
+
+- [1] Louis-Philippe Asselin, Denis Laurendeau, and Jean-Franc¸ois Lalonde. Deep SVBRDF estimation on real materials. In Vitomir Struc and Francisco Gomez ´ Fernandez, editors, ´ 8th International Conference on 3D Vision, 3DV 2020, Virtual Event, Japan, November 25-28, 2020, pages 1157–1166. IEEE, 2020. 1 [2] Matan Atzmon and Yaron Lipman. SAL: sign agnostic learning of shapes from raw data. In 2020 IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2020, Seattle, WA, USA, June 13-19, 2020, pages 2562–2571. Computer Vision Foundation / IEEE, 2020. 4 [3] Sai Bi, Zexiang Xu, Pratul P. Srinivasan, Ben Mildenhall, Kalyan Sunkavalli, Milos Hasan, Yannick Hold-Geoffroy, David J. Kriegman, and Ravi Ramamoorthi. Neural reflectance fields for appearance acquisition. CoRR, abs/2008.03824, 2020. 1, 2 [4] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T. Barron, Ce Liu, and Hendrik P. A. Lensch. Nerd: Neural reflectance decomposition from image collections. In 2021 IEEE/CVF International Conference on Computer Vision, ICCV 2021, Montreal, QC, Canada, October 10-17, 2021, pages 12664–12674. IEEE, 2021. 1, 2, 3 [5] Mark Boss, Varun Jampani, Raphael Braun, Ce Liu, Jonathan T. Barron, and Hendrik P. A. Lensch. Neuralpil: Neural pre-integrated lighting for reflectance decomposition. In Marc'Aurelio Ranzato, Alina Beygelzimer, Yann N. Dauphin, Percy Liang, and Jennifer Wortman Vaughan, editors, Advances in Neural Information Processing Systems 34: Annual Conference on Neural Information Processing Systems 2021, NeurIPS 2021, December 6-14, 2021, virtual, pages 10691–10704, 2021. 1, 2, 5, 7, 11 [6] Mark Boss, Varun Jampani, Kihwan Kim, Hendrik
+- P. A. Lensch, and Jan Kautz. Two-shot spatiallyvarying BRDF and shape estimation. In 2020 IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2020, Seattle, WA, USA, June 13-19, 2020, pages 3981–3990. Computer Vision Foundation / IEEE, 2020. 1 [7] James Bradbury, Roy Frostig, Peter Hawkins, Matthew James Johnson, Chris Leary, Dougal Maclaurin, George Necula, Adam Paszke, Jake VanderPlas, Skye Wanderman-Milne, and Qiao Zhang. JAX: composable transformations of Python+NumPy programs, 2018. 11 [8] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. Tensorf: Tensorial radiance fields. CoRR, abs/2203.09517, 2022. 2, 3 [9] Liangyu Chen, Xiaojie Chu, Xiangyu Zhang, and Jian Sun. Simple baselines for image restoration. arXiv preprint arXiv:2204.04676, 2022. 17 [10] Wenzheng Chen, Huan Ling, Jun Gao, Edward J. Smith, Jaakko Lehtinen, Alec Jacobson, and Sanja Fidler. Learning to predict 3d objects with an interpolation-based differentiable renderer. In Hanna M. Wallach, Hugo Larochelle, Alina Beygelzimer, Florence d'Alche-Buc, Emily B. Fox, and Ro- ´ man Garnett, editors, Advances in Neural Information Processing Systems 32: Annual Conference on Neural Information Processing Systems 2019, NeurIPS 2019, December 8-14, 2019, Vancouver, BC, Canada, pages 9605–9616, 2019. 1 [11] Blender Online Community. Blender - a 3D modelling and rendering package. Blender Foundation, Stichting Blender Foundation, Amsterdam, 2018. 2, 5 [12] Robert L. Cook and Kenneth E. Torrance. A reflectance model for computer graphics. ACM Trans. Graph., 1(1):7–24, 1982. 2, 9 [13] Matthieu Courbariaux, Yoshua Bengio, and Jean-Pierre David. Binaryconnect: Training deep neural networks with binary weights during propagations. In Corinna Cortes, Neil D. Lawrence, Daniel D. Lee, Masashi Sugiyama, and Roman Garnett, editors, Advances in Neural Information Processing Systems 28: Annual Conference on Neural Information Processing Systems 2015, December 7-12, 2015, Montreal, Quebec, Canada, pages 3123–3131, 2015. 7, 12 [14] Franc¸ois Darmon, Ben´ edicte Bascle, Jean-Cl ´ ement ´ Devaux, Pascal Monasse, and Mathieu Aubry. Improving neural implicit surfaces geometry with patch warping. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2022, New Orleans, LA, USA, June 18-24, 2022, pages 6250–6259. IEEE, 2022. 12 [15] H. Drucker and Y. Le Cun. Double backpropagation increasing generalization performance. In IJCNN-91- Seattle International Joint Conference on Neural Networks, volume ii, pages 145–150 vol.2, 1991. 4, 11 [16] Epic Games. Unreal engine. 2 [17] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels: Radiance fields without neural networks. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2022, New Orleans, LA, USA, June 18-24, 2022, pages 5491–5500. IEEE, 2022. 2, 4 [18] Duan Gao, Xiao Li, Yue Dong, Pieter Peers, Kun Xu, and Xin Tong. Deep inverse rendering for high-resolution SVBRDF estimation from an arbitrary
+
+number of images. ACM Trans. Graph., 38(4):134:1– 134:15, 2019. 1 [19] Stephan J. Garbin, Marek Kowalski, Matthew Johnson, Jamie Shotton, and Julien P. C. Valentin. Fastnerf: High-fidelity neural rendering at 200fps. In 2021 IEEE/CVF International Conference on Computer Vision, ICCV 2021, Montreal, QC, Canada, October 10- 17, 2021, pages 14326–14335. IEEE, 2021. 2 [20] Daniel Gatis. Rembg, 2020. 17 [21] Xavier Glorot and Yoshua Bengio. Understanding the difficulty of training deep feedforward neural networks. In Yee Whye Teh and D. Mike Titterington, editors, Proceedings of the Thirteenth International Conference on Artificial Intelligence and Statistics, AISTATS 2010, Chia Laguna Resort, Sardinia, Italy, May 13-15, 2010, volume 9 of JMLR Proceedings, pages 249–256. JMLR.org, 2010. 4 [22] Priya Goyal, Piotr Dollar, Ross B. Girshick, Pieter No- ´ ordhuis, Lukasz Wesolowski, Aapo Kyrola, Andrew Tulloch, Yangqing Jia, and Kaiming He. Accurate, large minibatch SGD: training imagenet in 1 hour. CoRR, abs/1706.02677, 2017. 5 [23] Amos Gropp, Lior Yariv, Niv Haim, Matan Atzmon, and Yaron Lipman. Implicit geometric regularization for learning shapes. In Proceedings of the 37th International Conference on Machine Learning, ICML 2020, 13-18 July 2020, Virtual Event, volume 119 of Proceedings of Machine Learning Research, pages 3789–3799. PMLR, 2020. 4, 12 [24] Romain Guy and Mathias Agopian. Physically based rendering in filament. 2, 4, 5, 9 [25] Jon Hasselgren, Nikolai Hofmann, and Jacob Munkberg. Shape, light & material decomposition from images using monte carlo rendering and denoising. CoRR, abs/2206.03380, 2022. 1, 2 [26] Akio Hayakawa, Masato Ishii, Yoshiyuki Kobayashi, Akira Nakamura, Takuya Narihira, Yukio Obuchi, Andrew Shin, Takuya Yashima, and Kazuki Yoshiyama. Neural network libraries: A deep learning framework designed from engineers' perspectives, 2021. 11 [27] Peter Hedman, Pratul P. Srinivasan, Ben Mildenhall, Jonathan T. Barron, and Paul E. Debevec. Baking neural radiance fields for real-time view synthesis. In 2021 IEEE/CVF International Conference on Computer Vision, ICCV 2021, Montreal, QC, Canada, October 10-17, 2021, pages 5855–5864. IEEE, 2021. 2 [28] Henrik Wann Jensen. Global illumination using photon maps. In Xavier Pueyo and Peter Schroder, editors, ¨ Rendering Techniques '96, Proceedings of the Eurographics Workshop in Porto, Portugal, August 27-31, 1996, Eurographics, pages 21–30. Springer, 1996. 3 [29] Rasmus Ramsbøl Jensen, Anders Lindbjerg Dahl, George Vogiatzis, Engin Tola, and Henrik Aanæs. Large scale multi-view stereopsis evaluation. In 2014 IEEE Conference on Computer Vision and Pattern Recognition, CVPR 2014, Columbus, OH, USA, June 23-28, 2014, pages 406–413. IEEE Computer Society, 2014. 5 [30] James T. Kajiya. The rendering equation. In David C. Evans and Russell J. Athay, editors, Proceedings of the 13th Annual Conference on Computer Graphics and Interactive Techniques, SIGGRAPH 1986, Dallas, Texas, USA, August 18-22, 1986, pages 143–150. ACM, 1986. 1, 2, 9 [31] Animesh Karnewar, Tobias Ritschel, Oliver Wang, and Niloy J. Mitra. Relu fields: The little non-linearity that could. In Munkhtsetseg Nandigjav, Niloy J. Mitra, and Aaron Hertzmann, editors, SIGGRAPH '22: Special Interest Group on Computer Graphics and Interactive Techniques Conference, Vancouver, BC, Canada, August 7 - 11, 2022, pages 27:1–27:9. ACM, 2022. 2 [32] Hiroharu Kato, Yoshitaka Ushiku, and Tatsuya Harada. Neural 3d mesh renderer. In 2018 IEEE Conference on Computer Vision and Pattern Recognition, CVPR 2018, Salt Lake City, UT, USA, June 18-22, 2018, pages 3907–3916. Computer Vision Foundation / IEEE Computer Society, 2018. 1 [33] Alex Kendall and Yarin Gal. What uncertainties do we need in bayesian deep learning for computer vision? In Isabelle Guyon, Ulrike von Luxburg, Samy Bengio, Hanna M. Wallach, Rob Fergus, S. V. N. Vishwanathan, and Roman Garnett, editors, Advances in Neural Information Processing Systems 30: Annual Conference on Neural Information Processing Systems 2017, December 4-9, 2017, Long Beach, CA, USA, pages 5574–5584, 2017. 4, 12 [34] Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic optimization. In Yoshua Bengio and Yann LeCun, editors, 3rd International Conference on Learning Representations, ICLR 2015, San Diego, CA, USA, May 7-9, 2015, Conference Track Proceedings, 2015. 5 [35] Zhengfei Kuang, Kyle Olszewski, Menglei Chai, Zeng Huang, Panos Achlioptas, and Sergey Tulyakov. Neroic: neural rendering of objects from online image collections. ACM Trans. Graph., 41(4):56:1–56:12, 2022. 1, 2 [36] Samuli Laine, Janne Hellsten, Tero Karras, Yeongho Seol, Jaakko Lehtinen, and Timo Aila. Modular primitives for high-performance differentiable rendering. ACM Trans. Graph., 39(6):194:1–194:14, 2020. 1
+
+[37] Zhengqin Li, Mohammad Shafiei, Ravi Ramamoorthi, Kalyan Sunkavalli, and Manmohan Chandraker. Inverse rendering for complex indoor scenes: Shape, spatially-varying lighting and SVBRDF from a single image. In 2020 IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2020, Seattle, WA, USA, June 13-19, 2020, pages 2472–2481. Computer Vision Foundation / IEEE, 2020. 1 [38] Chen-Hsuan Lin, Chaoyang Wang, and Simon Lucey. SDF-SRN: learning signed distance 3d object reconstruction from static images. In Hugo Larochelle, Marc'Aurelio Ranzato, Raia Hadsell, Maria-Florina Balcan, and Hsuan-Tien Lin, editors, Advances in Neural Information Processing Systems 33: Annual Conference on Neural Information Processing Systems 2020, NeurIPS 2020, December 6-12, 2020, virtual, 2020. 1 [39] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and Christian Theobalt. Neural sparse voxel fields. In Hugo Larochelle, Marc'Aurelio Ranzato, Raia Hadsell, Maria-Florina Balcan, and Hsuan-Tien Lin, editors, Advances in Neural Information Processing Systems 33: Annual Conference on Neural Information Processing Systems 2020, NeurIPS 2020, December 6-12, 2020, virtual, 2020. 2 [40] Shichen Liu, Weikai Chen, Tianye Li, and Hao Li. Soft rasterizer: A differentiable renderer for imagebased 3d reasoning. In 2019 IEEE/CVF International Conference on Computer Vision, ICCV 2019, Seoul, Korea (South), October 27 - November 2, 2019, pages 7707–7716. IEEE, 2019. 1 [41] Shaohui Liu, Yinda Zhang, Songyou Peng, Boxin Shi, Marc Pollefeys, and Zhaopeng Cui. DIST: rendering deep implicit signed distance function with differentiable sphere tracing. In 2020 IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2020, Seattle, WA, USA, June 13-19, 2020, pages 2016–2025. Computer Vision Foundation / IEEE, 2020. 1 [42] Stephen Lombardi, Tomas Simon, Jason M. Saragih, Gabriel Schwartz, Andreas M. Lehrmann, and Yaser Sheikh. Neural volumes: learning dynamic renderable volumes from images. ACM Trans. Graph., 38(4):65:1–65:14, 2019. 1 [43] Matthew M. Loper and Michael J. Black. Opendr: An approximate differentiable renderer. In David J. Fleet, Tomas Pajdla, Bernt Schiele, and Tinne Tuyte- ´ laars, editors, Computer Vision - ECCV 2014 - 13th European Conference, Zurich, Switzerland, September 6-12, 2014, Proceedings, Part VII, volume 8695 of Lecture Notes in Computer Science, pages 154–169. Springer, 2014. 1 [44] Ricardo Martin-Brualla, Noha Radwan, Mehdi S. M. Sajjadi, Jonathan T. Barron, Alexey Dosovitskiy, and Daniel Duckworth. Nerf in the wild: Neural radiance fields for unconstrained photo collections. In IEEE Conference on Computer Vision and Pattern Recognition, CVPR 2021, virtual, June 19-25, 2021, pages 7210–7219. Computer Vision Foundation / IEEE, 2021. 1 [45] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. In Andrea Vedaldi, Horst Bischof, Thomas Brox, and Jan-Michael Frahm, editors, Computer Vision - ECCV 2020 - 16th European Conference, Glasgow, UK, August 23-28, 2020, Proceedings, Part I, volume 12346 of Lecture Notes in Computer Science, pages 405–421. Springer, 2020. 1, 3 [46] Thomas Muller, Alex Evans, Christoph Schied, and ¨ Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph., 41(4):102:1–102:15, 2022. 2, 3, 4 [47] Jacob Munkberg, Wenzheng Chen, Jon Hasselgren, Alex Evans, Tianchang Shen, Thomas Muller, Jun ¨ Gao, and Sanja Fidler. Extracting triangular 3d models, materials, and lighting from images. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2022, New Orleans, LA, USA, June 18-24, 2022, pages 8270–8280. IEEE, 2022. 1, 2, 5, 7, 11 [48] Michael Niemeyer, Lars M. Mescheder, Michael Oechsle, and Andreas Geiger. Differentiable volumetric rendering: Learning implicit 3d representations without 3d supervision. In 2020 IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2020, Seattle, WA, USA, June 13-19, 2020, pages 3501–3512. Computer Vision Foundation / IEEE, 2020. 1 [49] NVIDIA Corporation. NVIDIA CUDA C programming guide, 2010. Version 3.2. 4, 11 [50] Adam Paszke, Sam Gross, Soumith Chintala, Gregory Chanan, Edward Yang, Zachary DeVito, Zeming Lin, Alban Desmaison, Luca Antiga, and Adam Lerer. Automatic differentiation in pytorch. 2017. 11 [51] Shen Sang and Manmohan Chandraker. Single-shot neural relighting and SVBRDF estimation. In Andrea Vedaldi, Horst Bischof, Thomas Brox, and Jan-Michael Frahm, editors, Computer Vision - ECCV 2020 - 16th European Conference, Glasgow, UK, August 23-28, 2020, Proceedings, Part XIX, volume 12364 of Lecture Notes in Computer Science, pages 85–101. Springer, 2020. 1
+
+- [52] Johannes Lutz Schonberger and Jan-Michael Frahm. ¨ Structure-from-motion revisited. In Conference on Computer Vision and Pattern Recognition (CVPR), 2016. 17 [53] Johannes Lutz Schonberger, Enliang Zheng, Marc ¨ Pollefeys, and Jan-Michael Frahm. Pixelwise view selection for unstructured multi-view stereo. In European Conference on Computer Vision (ECCV), 2016. 17 [54] Tianchang Shen, Jun Gao, Kangxue Yin, Ming-Yu Liu, and Sanja Fidler. Deep marching tetrahedra: a hybrid representation for high-resolution 3d shape synthesis. In Marc'Aurelio Ranzato, Alina Beygelzimer, Yann N. Dauphin, Percy Liang, and Jennifer Wortman Vaughan, editors, Advances in Neural Information Processing Systems 34: Annual Conference on Neural Information Processing Systems 2021, NeurIPS 2021, December 6-14, 2021, virtual, pages 6087– 6101, 2021. 2 [55] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel grid optimization: Super-fast convergence for radiance fields reconstruction. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2022, New Orleans, LA, USA, June 18-24, 2022, pages 5449–5459. IEEE, 2022. 2 [56] Towaki Takikawa, Alex Evans, Jonathan Tremblay, Thomas Muller, Morgan McGuire, Alec Jacobson, ¨ and Sanja Fidler. Variable bitrate neural fields. In Munkhtsetseg Nandigjav, Niloy J. Mitra, and Aaron Hertzmann, editors, SIGGRAPH '22: Special Interest Group on Computer Graphics and Interactive Techniques Conference, Vancouver, BC, Canada, August 7
+- - 11, 2022, pages 41:1–41:9. ACM, 2022. 2 [57] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku Komura, and Wenping Wang. Neus: Learning neural implicit surfaces by volume rendering for multi-view reconstruction. In Marc'Aurelio Ranzato, Alina Beygelzimer, Yann N. Dauphin, Percy Liang, and Jennifer Wortman Vaughan, editors, Advances in Neural Information Processing Systems 34: Annual Conference on Neural Information Processing Systems 2021, NeurIPS 2021, December 6-14, 2021, virtual, pages 27171–27183, 2021. 1, 2, 4, 5 [58] Liwen Wu, Jae Yong Lee, Anand Bhattad, Yu-Xiong Wang, and David A. Forsyth. Diver: Real-time and accurate neural radiance fields with deterministic integration for volume rendering. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2022, New Orleans, LA, USA, June 18-24, 2022, pages 16179–16188. IEEE, 2022. 2 [59] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit surfaces. In Marc'Aurelio Ranzato, Alina Beygelzimer, Yann N. Dauphin, Percy Liang, and Jennifer Wortman Vaughan, editors, Advances in Neural Information Processing Systems 34: Annual Conference on Neural Information Processing Systems 2021, NeurIPS 2021, December 6-14, 2021, virtual, pages 4805– 4815, 2021. 1 [60] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan Atzmon, Ronen Basri, and Yaron Lipman. Multiview neural surface reconstruction by disentangling geometry and appearance. In Hugo Larochelle, Marc'Aurelio Ranzato, Raia Hadsell, Maria-Florina Balcan, and Hsuan-Tien Lin, editors, Advances in Neural Information Processing Systems 33: Annual Conference on Neural Information Processing Systems 2020, NeurIPS 2020, December 6-12, 2020, virtual, 2020. 1, 4, 5, 9, 17 [61] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and Angjoo Kanazawa. Plenoctrees for real-time rendering of neural radiance fields. In 2021 IEEE/CVF International Conference on Computer Vision, ICCV 2021, Montreal, QC, Canada, October 10-17, 2021, pages 5732–5741. IEEE, 2021. 2 [62] Tizian Zeltner, Sebastien Speierer, Iliyan Georgiev, ´ and Wenzel Jakob. Monte carlo estimators for differential light transport. ACM Trans. Graph., 40(4):78:1– 78:16, 2021. 5, 10 [63] Jason Zhang, Gengshan Yang, Shubham Tulsiani, and Deva Ramanan. Ners: Neural reflectance surfaces for sparse-view 3d reconstruction in the wild. In Marc'Aurelio Ranzato, Alina Beygelzimer, Yann N. Dauphin, Percy Liang, and Jennifer Wortman Vaughan, editors, Advances in Neural Information Processing Systems 34: Annual Conference on Neural Information Processing Systems 2021, NeurIPS 2021, December 6-14, 2021, virtual, pages 29835–29847, 2021. 1, 2 [64] Kai Zhang, Fujun Luan, Zhengqi Li, and Noah Snavely. IRON: inverse rendering by optimizing neural sdfs and materials from photometric images. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2022, New Orleans, LA, USA, June 18-24, 2022, pages 5555–5564. IEEE, 2022. 1, 2 [65] Kai Zhang, Fujun Luan, Qianqian Wang, Kavita Bala, and Noah Snavely. Physg: Inverse rendering with spherical gaussians for physics-based material editing and relighting. In IEEE Conference on Computer Vision and Pattern Recognition, CVPR 2021, virtual, June 19-25, 2021, pages 5453–5462. Computer Vision Foundation / IEEE, 2021. 1, 2 [66] Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen Koltun. Nerf++: Analyzing and improving
+
+neural radiance fields. CoRR, abs/2010.07492, 2020. 4, 9
+
+[67] Xiuming Zhang, Pratul P. Srinivasan, Boyang Deng, Paul E. Debevec, William T. Freeman, and Jonathan T. Barron. Nerfactor: neural factorization of shape and reflectance under an unknown illumination. ACM Trans. Graph., 40(6):237:1–237:18, 2021. 1, 2 [68] Yuanqing Zhang, Jiaming Sun, Xingyi He, Huan Fu, Rongfei Jia, and Xiaowei Zhou. Modeling indirect illumination for inverse rendering. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2022, New Orleans, LA, USA, June 18-24, 2022, pages 18622–18631. IEEE, 2022. 1, 2 [69] Hao Zheng, Zhanlei Yang, Wenju Liu, Jizhong Liang, and Yanpeng Li. Improving deep neural networks using softplus units. In 2015 International Joint Conference on Neural Networks, IJCNN 2015, Killarney, Ireland, July 12-17, 2015, pages 1–4. IEEE, 2015. 4 [70] Qian-Yi Zhou, Jaesik Park, and Vladlen Koltun. Open3D: A modern library for 3D data processing. arXiv:1801.09847, 2018. 5

@@ -1,0 +1,97 @@
+# Fractal Brownian Motion (fBm) via Octave Summation
+
+Also called: Fractal Brownian Motion (fBm) Repeater, Fractal Noise, Multi-octave Noise, Multi-octave Simplex Noise, Octave Noise
+
+## Overview
+Fractal Brownian Motion (fBm) via Octave Summation generates multi-scale procedural volume data by summing multiple octaves of a base noise function, scaling frequency and amplitude per octave to create fractal noise [S1, unofficial]. It differs from its parent [Simplex Noise](978-simplex-noise.md) by introducing hierarchical detail through octave accumulation, and from siblings like [Simplex Noise 2D](4155-simplex-noise-2d.md) by operating in 3D volume space with configurable spectral decay.
+
+## How it works
+**Inputs and Outputs:**
+- Input: 3D coordinate $\mathbf{p} = (x, y, z)$, integer `octaves` $N$, `lacunarity` $L$ (frequency multiplier), `gain` $G$ (amplitude decay), and a base noise function $B(\mathbf{p})$ (e.g., Simplex Noise) [S1, unofficial].
+- Output: Scalar field value $V \in \mathbb{R}$.
+
+**Data Structures:**
+No persistent data structures are required; the method is stateless and computes values on demand.
+
+**Algorithm:**
+1. Initialize accumulator $V = 0.0$.
+2. Initialize current amplitude $A = 1.0$.
+3. Initialize current frequency multiplier $F = 1.0$.
+4. Loop for $i$ from $0$ to $N-1$:
+   a. Scale the input coordinate: $\mathbf{p}_i = \mathbf{p} \times F$.
+   b. Evaluate base noise: $n = B(\mathbf{p}_i)$.
+   c. Add weighted contribution: $V = V + n \times A$.
+   d. Update amplitude: $A = A \times G$.
+   e. Update frequency: $F = F \times L$.
+5. Return $V$.
+
+**Parameters:**
+- `octaves` ($N$): Integer count of noise layers. Higher values increase detail at smaller scales [S2, unofficial].
+- `lacunarity` ($L$): Frequency multiplier for each octave. Typically $L=2.0$ [S1, unofficial].
+- `gain` ($G$): Amplitude decay factor per octave. Typically $G=0.5$ [S1, unofficial].
+- `basis`: The base noise function used (e.g., Simplex Noise) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If $G \ge 1.0$, the signal may diverge or saturate, losing fractal characteristics.
+- High `octaves` values increase computational cost linearly.
+- Precision loss may occur if $F$ becomes very large, causing coordinate wrapping or quantization errors in the base noise function.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fbm_octave_summation(p, octaves, lacunarity, gain, base_noise):
+    """
+    Computes Fractal Brownian Motion via octave summation.
+    
+    Args:
+        p (tuple): 3D coordinate (x, y, z).
+        octaves (int): Number of octaves to sum.
+        lacunarity (float): Frequency multiplier per octave.
+        gain (float): Amplitude decay per octave.
+        base_noise (function): Function taking (x, y, z) returning float.
+        
+    Returns:
+        float: Accumulated noise value.
+    """
+    value = 0.0
+    amplitude = 1.0
+    frequency = 1.0
+    
+    for i in range(octaves):
+        # Scale input coordinates by current frequency
+        scaled_p = (p[0] * frequency, p[1] * frequency, p[2] * frequency)
+        
+        # Evaluate base noise function
+        noise_val = base_noise(scaled_p[0], scaled_p[1], scaled_p[2])
+        
+        # Add weighted contribution to accumulator
+        value += noise_val * amplitude
+        
+        # Update amplitude and frequency for next octave
+        amplitude *= gain
+        frequency *= lacunarity
+        
+    return value
+```
+
+## Subtopics
+
+### [Fractal Simplex Noise](18144-fractal-simplex-noise.md)
+Fractal Simplex Noise generates multi-scale procedural volume data by summing multiple octaves of Simplex Noise, building on [Fractal Brownian Motion (fBm) via Octave Summation](16998-fractal-brownian-motion-fbm-via-octave-summation.md). It differs from standard fBm by using Simplex Noise as the base generator, which offers superior gradient continuity and reduced directional artifacts compared to Perlin noise. The method terminates early when the feature size becomes smaller than one pixel, determined by the inverse of the derivative, optimizing performance for high-frequency details that are visually insignificant.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the number of octaves. Each octave requires one evaluation of the base noise function.
+- **Memory Complexity:** $O(1)$, as no intermediate data structures are stored.
+- **Performance:** Performance scales linearly with `octaves`. The cost is dominated by the base noise function (e.g., Simplex Noise) evaluation.
+- **Strengths:** Generates natural-looking, multi-scale detail with minimal memory overhead. Easy to implement and tune via `lacunarity` and `gain`.
+- **Limitations:** Computationally expensive for high `octaves` counts. Lacks true spectral continuity at octave boundaries if the base noise is not carefully constructed.
+- **When to use:** Ideal for procedural volume textures, terrain generation, and organic surface details where multi-scale variation is required.
+- **When not to use:** Avoid when real-time performance is critical and high-frequency detail is not visually necessary, or when strict spectral continuity is required without aliasing artifacts.
+
+## Background
+Fractal Brownian Motion (fBm) is a mathematical model used to describe random processes with self-similar properties. In computer graphics, it was adapted to generate procedural noise by summing multiple octaves of a base noise function. The method is widely used in procedural generation for volume rendering, terrain synthesis, and texture mapping. The specific implementation via octave summation with Simplex Noise as the base generator is found in unofficial repositories such as [Russoul/voxelized3d](https://github.com/Russoul/voxelized3d) [S1, unofficial] and [jshrake/lexov](https://github.com/jshrake/lexov) [S2, unofficial].
+
+## Sources
+[S1] Russoul/voxelized3d, https://github.com/Russoul/voxelized3d, fetched 2026-10-26 (unofficial)
+[S2] jshrake/lexov, https://github.com/jshrake/lexov, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,117 @@
+# garden-mesh-viewer
+
+A tiny three.js viewer for a polygonal mesh of the Mip-NeRF 360
+**garden** scene, reconstructed from a 3D Gaussian Splat via Poisson
+surface reconstruction. Includes the extraction script so you can
+regenerate the mesh from the splat yourself.
+
+- **Live demo (same scene + 3D Gaussian Splat overlay):**
+  <https://kitan-a.com/3dgs/garden/>
+- **Source splat (134 MB, antimatter15 .splat format):**
+  <https://huggingface.co/datasets/dylanebert/3dgs> → `garden/garden-7k.splat`
+
+The starting splat was trained by Dylan Ebert for ~7000 iterations on
+the original Mip-NeRF 360 garden capture; we just re-package it as a
+mesh suitable for direct three.js / Unity / Blender import.
+
+## Repo layout
+
+```
+.
+├── README.md
+├── web/
+│   └── index.html              # zero-build three.js + PLYLoader viewer
+├── scripts/
+│   ├── splat_to_mesh.py        # splat → mesh.{ply,glb}
+│   ├── environment.yml         # conda env to run the script
+│   └── download_mesh.sh        # fetch pre-built mesh from kitan-a.com
+└── .gitignore
+```
+
+## Run the viewer in 30 seconds
+
+```bash
+git clone https://github.com/vladimiralbrekhtccr/garden-mesh-viewer.git
+cd garden-mesh-viewer
+bash scripts/download_mesh.sh           # downloads mesh.ply + mesh.glb to web/
+cd web
+python3 -m http.server 8000             # any static server works
+# open http://localhost:8000
+```
+
+Files served:
+- `mesh.glb` — 23 MB, vertex-colored, ready for GLTFLoader.
+- `mesh.ply` — 44 MB, vertex-colored, for PLYLoader / Blender / MeshLab.
+
+## Embed the mesh in your own three.js scene
+
+```js
+import * as THREE     from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+new GLTFLoader().load('mesh.glb', g => {
+  g.scene.traverse(o => { if (o.isMesh)
+    o.material = new THREE.MeshStandardMaterial({
+      vertexColors: true, side: THREE.DoubleSide, roughness: 1, metalness: 0,
+    });
+  });
+  g.scene.rotation.set(Math.PI, 0, 0);  // INRIA +Y-down → three.js Y-up
+  scene.add(g.scene);
+});
+```
+
+Don't forget an ambient light — the mesh has no baked lighting.
+
+## Regenerate the mesh from the splat
+
+You only need this if you want to tweak the filter thresholds or
+Poisson depth.
+
+```bash
+# 1. download the source splat
+curl -L -o garden.splat \
+    "https://huggingface.co/datasets/dylanebert/3dgs/resolve/main/garden/garden-7k.splat"
+
+# 2. make the conda env (open3d + trimesh)
+conda env create -f scripts/environment.yml
+conda activate garden-mesh
+
+# 3. run
+python scripts/splat_to_mesh.py
+# → mesh.ply + mesh.glb in the current directory
+```
+
+CPU time is ~5–15 min depending on cores (Poisson is the slow stage).
+Capped at 24 threads by default — change `N_THREADS` at the top of the
+script.
+
+## How the recipe works
+
+The splat is **4.4 million 3D Gaussians** — translucent oriented
+ellipsoids. Most aren't surfaces; many are low-opacity floaters
+representing the unbounded background and atmospheric haze. Naive
+Poisson on all of them produces a blobby mess. The script filters
+hard before reconstructing:
+
+1. **Opacity > 0.5** — drops the 82% of splats that are mostly
+   transparent (median opacity in the source is 0.125).
+2. **Max scale < 0.05** — drops huge "background sphere" gaussians.
+3. **Tight bounding box** around the central table area — foliage and
+   grass don't form surfaces in any algorithm, so we don't try.
+4. **Voxel downsample** to 0.006 units.
+5. **Normal estimation** via KNN, then **tangent-plane orientation
+   propagation** (open3d's `orient_normals_consistent_tangent_plane`).
+6. **Poisson reconstruction** at depth 11.
+7. **Density cutoff** at the 10th percentile (drops low-confidence faces).
+8. **Largest connected component** only (kills floating shards).
+9. **Per-vertex color** transferred from the nearest splat via KDTree.
+
+The output is a watertight-ish vertex-colored mesh of the table region.
+Resolution is bounded by Poisson depth (depth=11 → max grid 2048³) and
+by the input point density (~260k oriented points after filtering).
+
+## License
+
+MIT for the scripts and viewer in this repo. The source splat is
+released by Dylan Ebert on Hugging Face; see that dataset for its
+license. The original Mip-NeRF 360 capture is from Barron et al. 2022.

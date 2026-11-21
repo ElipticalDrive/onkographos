@@ -1,0 +1,140 @@
+# Volume Sculpting
+
+Also called: Clay or wax-like sculpting
+
+## Overview
+Volume sculpting is a free-form interactive modeling technique based on the metaphor of sculpting and painting a voxel-based solid material, such as a block of marble or wood [S2, book]. It solves the difficulty of modeling topologically complex and highly-detailed objects in traditional CAD systems and enables scientists and physicians to explore inner structures of volumetric datasets by gradually removing material [S1, unofficial][S2, book]. It sets itself apart from surface-based sculpting by operating directly on the volume buffer, allowing for localized rendering updates and Boolean operations between independent volume buffers [S1, unofficial][S2, book].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A source volume buffer representing the object (scalar field), a tool definition (either a pre-existing volume-sampled tool or a user-defined geometry), and user interaction parameters (position, orientation, scale).
+*   **Output:** A modified volume buffer with material removed, and a rendered image updated via localized reprojection.
+
+**Data Structures:**
+*   **Volume Buffer:** A 3D array of scalar values representing the material density or signed distance. The interior of the sculpted object is represented by positive field values, and a null field where no material exists [Parent].
+*   **Tool Buffer:** A 3D array representing the geometry of the sculpting tool (e.g., chisel, saw).
+
+**Steps:**
+1.  **Tool Selection and Generation:**
+    *   **Carving:** Select a pre-existing volume-sampled tool [S1, unofficial][S2, book].
+    *   **Sawing:** Generate a volume-sampled tool on-the-fly using a user interface [S1, unofficial][S2, book].
+2.  **Tool Positioning:** Position the tool buffer relative to the object volume buffer based on user input [S1, unofficial][S2, book].
+3.  **Sculpting Operation:**
+    *   **Carving:** Perform a Boolean subtraction between the object volume buffer and the tool volume buffer [S1, unofficial][S2, book].
+    *   **Sawing:** Remove a whole chunk of material at once using the generated tool [S1, unofficial][S2, book].
+4.  **Aliasing Prevention and Speed:** Employ 3D splatting to prevent object space aliasing and achieve interactive speed during sawing [S1, unofficial][S2, book].
+5.  **Rendering Update:** Employ localized rendering to reproject only pixels affected by the localized sculpting actions (carving/sawing) [S1, unofficial][S2, book].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_sculpt(object_buffer, tool_buffer, interaction_mode, tool_params):
+    """
+    Perform volume sculpting on a voxel-based solid material.
+    
+    Args:
+        object_buffer: 3D array representing the current state of the object.
+        tool_buffer: 3D array representing the sculpting tool geometry.
+        interaction_mode: 'carving' or 'sawing'.
+        tool_params: Parameters for tool positioning and generation.
+        
+    Returns:
+        Modified object_buffer and list of affected pixels for rendering.
+    """
+    # Step 1: Tool Generation
+    if interaction_mode == 'sawing':
+        # Generate tool on-the-fly using user interface parameters
+        tool_buffer = generate_tool_on_the_fly(tool_params)
+    elif interaction_mode == 'carving':
+        # Use pre-existing tool
+        tool_buffer = get_pre_existing_tool(tool_params)
+    else:
+        raise ValueError("Unknown interaction mode")
+
+    # Step 2: Tool Positioning
+    # Position tool relative to object based on user input
+    positioned_tool = position_tool(tool_buffer, tool_params)
+
+    # Step 3: Sculpting Operation
+    if interaction_mode == 'carving':
+        # Boolean subtraction between object and tool
+        # Assuming tool values represent material to be removed
+        # object_buffer = object_buffer - positioned_tool
+        # Note: Exact Boolean subtraction logic depends on field representation
+        # [G] Assuming simple subtraction for removal where tool > 0
+        affected_voxels = perform_boolean_subtraction(object_buffer, positioned_tool)
+    elif interaction_mode == 'sawing':
+        # Remove whole chunk at once
+        # [G] Similar to carving but potentially larger tool or different logic
+        affected_voxels = perform_boolean_subtraction(object_buffer, positioned_tool)
+    
+    # Step 4: Aliasing Prevention (3D Splatting)
+    # [G] 3D splatting is employed to prevent object space aliasing
+    # This step is implicit in the rendering update for interactive speed
+    # [G] Assuming splatting affects the rendering pipeline, not the buffer directly
+    # The buffer modification is the primary sculpting action
+
+    # Step 5: Localized Rendering
+    # Reproject only pixels affected by the changes
+    affected_pixels = localize_rendering(affected_voxels)
+    
+    return object_buffer, affected_pixels
+
+def generate_tool_on_the_fly(params):
+    """
+    Generate a volume-sampled tool based on user interface parameters.
+    [G] Implementation details depend on specific UI and tool geometry
+    """
+    # Placeholder for tool generation logic
+    pass
+
+def position_tool(tool, params):
+    """
+    Position the tool in the object's coordinate space.
+    """
+    # Apply translation, rotation, scaling to tool
+    pass
+
+def perform_boolean_subtraction(object_buffer, tool_buffer):
+    """
+    Perform Boolean subtraction of tool from object.
+    """
+    # [G] Assuming scalar field representation where positive values are material
+    # Tool values > 0 indicate material to remove
+    # object_buffer = max(0, object_buffer - tool_buffer)
+    # Or specific Boolean logic based on field definitions
+    pass
+
+def localize_rendering(affected_voxels):
+    """
+    Determine which pixels in the render buffer need updating.
+    """
+    # Map affected voxels to screen pixels
+    pass
+```
+
+**Parameters:**
+*   **Tool Geometry:** Defined by the tool buffer.
+*   **Interaction Mode:** 'carving' or 'sawing'.
+*   **Tool Parameters:** Position, orientation, scale.
+
+**Edge Cases and Pitfalls:**
+*   **Object Space Aliasing:** Prevented by 3D splatting [S1, unofficial][S2, book].
+*   **Performance:** Localized rendering is crucial for real-time interaction [S1, unofficial][S2, book].
+*   **Data Structure:** Multi-resolution data structures (e.g., octrees) are better than flat 3D arrays for large datasets [S2, book].
+
+## Operating characteristics
+*   **Time Complexity:** Real-time interaction is achieved through localized rendering and 3D splatting [S1, unofficial][S2, book].
+*   **Memory Complexity:** Depends on the data structure used. Flat 3D arrays are simpler but less efficient for large datasets compared to multi-resolution structures like octrees [S2, book].
+*   **Strengths:** Enables exploration of inner structures by removing material; handles topologically complex objects better than CAD [S1, unofficial][S2, book].
+*   **Limitations:** Requires careful handling of aliasing and performance for real-time interaction [S1, unofficial][S2, book].
+*   **When to Use:** When modeling topologically complex objects or exploring inner structures of volumetric datasets [S1, unofficial][S2, book].
+*   **When Not to Use:** When high-fidelity surface representation is required without internal structure exploration [S2, book].
+
+## Background
+Volume sculpting was introduced for clay or wax-like sculptures [S2, book]. It is motivated by the difficulty of modeling topologically complex and highly-detailed objects in most CAD systems and the need for scientists and physicians to explore inner structures of simulated or sampled datasets by gradually removing material [S1, unofficial][S2, book]. The approach allows for real-time human interaction by localizing sculpting actions in the volume buffer and employing localized rendering [S1, unofficial][S2, book].
+
+## Sources
+[S1] PDF Volume Visualization: Principles and Advances, https://courses.cs.duke.edu/spring03/cps296.8/papers/KaufmanVolumeVisualization.pdf, fetched 2026-10-28 (unofficial)
+[S2] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

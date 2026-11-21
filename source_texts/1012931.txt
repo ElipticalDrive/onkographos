@@ -1,0 +1,251 @@
+Open-source game engine and editor under active development. - Baked lighting: light probe irradiance volume by dovvnloading · Pull Request #69 · dovvnloading/Auvra
+
+Baked lighting: light probe irradiance volume by dovvnloading · Pull Request #69 · dovvnloading/Auvra · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+dovvnloading
+commented
+Oct 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+What this adds
+Probe baking (runtime/lighting/lightBaker.ts)
+The World Editor bakes a level's indirect light into a grid of light probes, a few probes per frame in the viewport.
+At each probe, a 16 px cube camera sees the level's static geometry and lights. The sky it sees reproduces the scene's ambient, hemisphere and environment fill. Each view is reduced to first-order spherical harmonics.
+The reduction runs on the GPU into a small strip that is read back once every 64 probes, instead of six synchronous reads per probe. That made the room test about 8.7× faster (16.5 s → 1.9 s) with the same results.
+Bounce 1 lights geometry with the open sky. Each further bounce lights it with the previous bounce, so an enclosed room gets only what came in through its openings.
+A front/back-face pass finds probes buried in geometry; they take their neighbours' light.
+Shadow maps are fitted to the whole level and drawn once per step.
+Static geometry means props, foliage and terrain that never move (no Mover, Rotator or non-fixed Rigid Body on them or their parents), plus instanced layers. Lights on moving objects are left out.
+Shading (runtime/lighting/bakedLighting.ts)
+Standard, physical, lambert, phong and toon materials read the volume through a shared shader chunk, in place of the uniform sky fill. The volume replaces ambient, hemisphere and the environment's diffuse light; specular reflections stay.
+Sampling: hardware-trilinear 3D textures with a normal offset, fading out past the outer probes.
+Each scene sets the shared uniforms to its own volume, or none, as it starts drawing. This means World Editor views, play, previews and the model viewer each draw correctly.
+Characters and other moving objects take the light of wherever they stand.
+Storage and builds
+New validated project asset type application/vnd.auvra.lightvolume, with an AUVRALV1 header and 12 float32 per probe. The host checks its header, dimensions, size and finite values.
+The asset is referenced from the level's new bakedLighting record (settings plus probes), so it goes into builds with an .alv file extension.
+Light Bake Volume component
+A box, drawn in the editor, that limits where probes go. Without one, probes cover all static geometry, so a large terrain spreads them thin.
+With volumes, probes fill the smallest box around them at the chosen gap, while geometry outside still blocks and bounces light.
+Adding, moving or resizing a volume marks the bake out of date.
+Editor
+The Lighting panel gains a Baked Lighting section: Gap, Bounces, Intensity, Bake (with progress and Cancel), and Clear.
+It shows the probe count and spacing, and flags Out of date when static objects, their lights, the sky or the bake settings change.
+Intensity changes apply without baking again.
+Checked in the editor
+Starter Game 3
+The bake took about 23 s: 15,463 probes, with spacing widened to 2.56 to stay within the 16,384-probe limit. Before the GPU reduction, it took about 2 minutes for 6,480 probes.
+It was saved and reloaded from the project asset with the same values, and drawn in the World Editor and in play.
+A closed room with one doorway, baked offscreen in the editor:
+Open ground facing up gets about 0.48 / 0.55 / 0.74, close to the unbaked sky fill.
+Inside the room is about 4–5× darker.
+Near the doorway is brighter than deeper in.
+Surfaces facing the red wall get red bounce light (0.097 / 0.026 / 0.031).
+320 buried probes were found and filled.
+Light Bake Volume
+A 20 × 8 × 20 volume in Starter Game 3 gave 605 probes at the requested 2.00 spacing, baked in about 5 s.
+I then removed it and baked the whole level again.
+No errors
+No console errors while baking, after a reload, or in play mode.
+Fix found along the way
+The material preview canvas is now in the renderer's stable surface list (also pushed to Node-based material editor #68, where CI had failed on it).
+Tests
+Frontend:
+bakedLighting (settings, asset round trip, grid, hole filling, which objects and lights the bake sees, signature, shader install, per-scene volume stack)
+the scene, navigation, hydration and level persistence tests
+Host: test_light_volume (asset validation, MIME sniffing, schema, build extension), plus the splat map, template build and material override tests.
+Checks: tsc, tsc with the strict config, the diagnostics, renderer and frame checks, and the editor and player builds.
+🤖 Generated with Claude Code
+dovvnloading
+and others
+added 10 commits
+October 28, 2026 16:32
+feat: material graph model and compiler
+…
+70b82c5
+```
+The core of node-based materials:
+- runtime/materials/materialGraph.ts:
+  - node definitions (output, constants, time, UV, tiling, panner,
+    texture, normal map, fresnel, world position, vertex colour, noise,
+    and math and vector nodes);
+  - normalising of stored graphs;
+  - cycle checks;
+  - a compiler that turns a graph into GLSL, with float/vector
+    conversion between ports.
+- runtime/materials/graphMaterial.ts: a MeshStandardMaterial that
+  splices the compiled graph in place of its colour, opacity, roughness,
+  metalness, normal, emissive and occlusion reads. Lights, shadows, fog,
+  reflections, skinning and instancing stay three's. Constants and
+  textures are uniforms, so edits apply in place; only rewiring rebuilds
+  the shader.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: material assets carry node graphs; model materials can use one
+…
+d097779
+```
+- Material documents take a free-form graph.
+- Material overrides take a materialId, which must name a material asset.
+- Graphs bind to a model's own (shared) standard materials in place, so
+  every placed copy follows, and unbind back to the material's own
+  shading.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: material library binds assigned assets to model materials
+…
+6e8c5fa
+```
+- runtime/materials/materialLibrary.ts holds the project's material
+  assets, loads the textures their graphs sample, and binds each model
+  material whose override names an asset.
+- Editing an asset re-binds every material using it, and textures reach
+  each graph as they load.
+- Project hydration fills the library before models load.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: sandbox enemy gets its own copy of the player's model
+…
+eb9cd39
+```
+When the player and enemy blueprints link the same model, both sandbox
+entities used one THREE.Group: the second graph runtime took over its
+mixer, and the first then played an action from the uncached mixer,
+which three.js rejects in _lendBinding and the Sandbox tab crashed.
+
+The enemy now gets a skeleton-aware copy of a shared model, and an
+entity places each new object it is given at its spawn.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: node-based material editor and material asset assignment
+…
+f0ac3f2
+```
+The Materials tab lists the project's material assets and edits each
+one as a node graph: a palette of input, UV, texture, surface, math and
+vector nodes, typed pins with conversions, click-to-remove wires, a
+loop check, a settings panel for the selected node and a live preview
+sphere. Edits save on their own.
+
+A model material's override can name a material asset; the material is
+then shaded by the graph wherever the model draws. Every canvas runs
+one shared material clock, so Time nodes animate in each viewport, in
+play and in builds.
+
+Deleting a material asset clears it from the model overrides that use
+it in the same project change, and deleting a texture clears it from
+the graph nodes that sample it, so neither leaves a reference the
+project would refuse.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/main' into claude/material-graph
+…
+192c36b
+```
+# Conflicts:
+#	fbx-viewer (1)/scripts/diagnostics/verify.mjs
+```
+fix: list the material graph preview among the stable render surfaces
+…
+bd03ba8
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: baked lighting with an irradiance volume of light probes
+…
+0eeeee8
+```
+The World Editor bakes a level's indirect light into a grid of light
+probes. At each probe a small cube camera sees the level's static
+geometry and lights against a sky that gives the scene's ambient,
+hemisphere and environment fill; the view is reduced to first-order
+spherical harmonics. Bounce one lights the geometry with the open sky,
+each further bounce with the last, so light reaching an enclosed room
+is what came in through its openings. A front/back face pass finds the
+probes buried in geometry, which take their neighbours' light.
+
+Every lit material (standard, physical, lambert, phong, toon) reads the
+volume where it is drawn in place of the uniform sky fill, through a
+shared shader chunk and uniforms; each scene sets them to its own
+volume, or none, as it starts drawing. Characters and other moving
+objects take the light of wherever they stand, in the editor and in
+play. Outside the grid the unbaked fill applies.
+
+The volume is a new validated project asset type
+(application/vnd.auvra.lightvolume) referenced from the level's
+bakedLighting record, so it goes into builds. The Lighting panel gains
+Gap, Bounces and Intensity, Bake with progress and Cancel, Clear, and
+an Out of date flag when static objects, their lights, the sky or the
+bake settings change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+perf: reduce light probes on the GPU and read them back in batches
+…
+f89b73c
+```
+Each probe's cube map is reduced to its spherical harmonics (or, for
+the inside test, its front and back face counts) by a shader into a
+slot of a small strip, read back once per 64 probes instead of six
+synchronous reads per probe. The same room bakes in 1.9 s instead of
+16.5 s with the same results, so a bake now allows 16,384 probes.
+
+The shader chunks are patched once even when the module loads again
+(a hot reload), guarded by a marker in the chunk.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: Light Bake Volume component limits where light probes go
+…
+608e98c
+```
+Without one the probes cover all of a level's static geometry, so a
+large terrain spreads them thin. With volumes, the probes fill the
+smallest box around them at the chosen gap, while geometry outside
+still blocks and bounces light. The box is drawn in the editor, and
+adding, moving or resizing one marks the bake out of date.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+dovvnloading
+merged commit 5e40ab4
+into
+main
+Oct 28, 2026
+13 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+dovvnloading
+deleted the
+claude/baked-lighting
+branch
+November 3, 2026 01:10
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

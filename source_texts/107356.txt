@@ -1,0 +1,125 @@
+Summary nanovdb::tools::cuda::PointsToGrid::countNodes builds the tree one level at a time. After each level it copies that level's node count to the host and blocks, then sizes the next level's buffers from it. For ValueOnIndex input, o...
+
+NanoVDB CUDA PointsToGrid: read node counts back once instead of per level · Issue #2362 · AcademySoftwareFoundation/openvdb · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+NanoVDB CUDA PointsToGrid: read node counts back once instead of per level #2362
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+NanoVDB CUDA PointsToGrid: read node counts back once instead of per level#2362
+Copy link
+Assignees
+Labels
+enhancementnanovdb
+Description
+swahtz
+opened on Oct 13, 2026
+Issue body actions
+Summary
+nanovdb::tools::cuda::PointsToGrid::countNodes builds the tree one level at a time. After each level it copies that level's node count to the host and blocks, then sizes the next level's buffers from it. For ValueOnIndex input, one voxelsToGrid call blocks the host six or seven times. On small inputs those waits dominate the build.
+Every level's count is bounded by the number of input points. Intermediate buffers can therefore be sized without reading counts back, leaving one readback, before getBuffer, which needs exact counts for the grid buffer.
+Motivation
+fVDB rebuilds grids from voxel coordinates every training step in dynamic sparse-conv workloads (GridBatch.from_ijk → tools::cuda::voxelsToGrid). Measured on an RTX PRO 6000 (SM120), CUDA 13.0, B = 1:
+Voxels
+from_ijk time
+Kernel launches
+cudaStreamSynchronize
+D2H copies
+848
+0.60 ms
+~40
+13
+11
+4.1M
+1.23 ms
+~44
+13
+11
+At 848 voxels the GPU work is a few microseconds, so the build cost is sync and launch overhead. These totals include fVDB's wrapper (a joffsets host copy and a metadata readback). By code inspection, PointsToGrid accounts for six or seven of the host waits per grid. fVDB also calls voxelsToGrid once per grid in a batch, so the waits scale with batch size.
+For comparison, FlexGEMM's hash-based sparse-conv neighbor build does one host sync in total and takes 0.13 ms at 848 voxels.
+Host waits in countNodes (ValueOnIndex path)
+Line numbers are from nanovdb/nanovdb/tools/cuda/PointsToGrid.cuh on master @ 86b5ea9.
+Line
+Wait
+What the host needs
+693
+cudaStreamSynchronize
+Tile count, to size mTileKeysBuf and choose segmented vs serial voxel-key sort
+715
+D2H into pageable memory (blocking)
+Points per tile, for the serial per-tile sort loop (fewer than 32 tiles)
+784
+cudaEventSynchronize
+Voxel count, to size mPointsPerVoxelPrefixBuf
+807
+cudaEventSynchronize
+Leaf count, to size mPointsPerLeafPrefixBuf
+812
+cudaStreamSynchronize
+Nothing new as far as I can tell; the leaf count is already on the host
+819
+cudaStreamSynchronize
+Lower-node count, to size mLowerKeysBuf
+538 (getHandle)
+cudaStreamSynchronize
+End of build
+The serial path at line 715 also launches a voxel-key kernel and a radix sort per tile, so small inputs pay extra launches too.
+Proposal
+Size the per-level buffers (tile keys, voxel and leaf prefix sums, leaf and lower keys) by pointCount, which bounds every level's count. Keep the counts on the device.
+Make the steps that consume a count work from the device copy. Scans and run-length encodes can run over the bounded range and ignore the tail. The lower-node count (DeviceSelect::Unique over leaf keys) needs a bounded or sentinel-padded input, or a small unique-count kernel.
+Choose between segmented and serial voxel-key sort without the tile count, for example always segmented, or by pointCount.
+Read {tiles, lower, leaves, voxels} back in one D2H before getBuffer, which needs exact counts to size and lay out the grid buffer.
+Drop the wait at line 812, which appears redundant. Consider making the trailing sync in getHandle optional for callers whose buffers are stream-ordered.
+The Point build path keeps its extra readbacks for the density bisection and the points-per-leaf limit; this proposal targets the voxel path.
+Expected result
+One host wait per voxelsToGrid call instead of six or seven.
+Fewer launches for inputs with fewer than 32 tiles.
+Temporary scratch grows toward pointCount-sized buffers at each level. The builder already allocates pointCount-sized key and index buffers, so peak memory should change little.
+Follow-up
+A batched voxelsToGrid, sorting keys prefixed by grid index once for the whole batch, would make the wait count independent of batch size. This mirrors the batch-capable TopologyBuilder in #2336.
+Related
+NanoVDB: per-leaf VBM build kernel; cache leafCount for async rebuilds #2291: per-leaf VoxelBlockManager build, which removes the getTreeData D2H from the VBM cold build
+NanoVDB: batch-capable TopologyBuilder (CUDA) #2336: batch-capable tools::cuda::TopologyBuilder
+Reactions are currently unavailable
+Activity
+swahtz
+added
+enhancement
+nanovdb
+on Oct 13, 2026
+swahtz
+self-assigned this
+on Oct 22, 2026
+swahtz
+added a commit that references this issue on Oct 23, 2026
+NanoVDB: read PointsToGrid node counts back once instead of per level
+...
+This issue will close once commit 58673aa is merged into the 'master' branch.
+58673aa
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+swahtz
+Labels
+enhancementnanovdb
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,316 @@
+--- v004.md
++++ v005.md
+@@ -4,49 +4,67 @@
+ 
+ ## Overview
+-Multi-resolution Hash Encoding (MHE) is a feature embedding method that maps 3D spatial coordinates to a high-dimensional feature vector using a set of trainable hash tables at multiple resolutions, enabling efficient neural scene representation [S2]. It solves the problem of slow training and rendering in Neural Radiance Fields (NeRF) by replacing the large, deep Multi-Layer Perceptron (MLP) with a multi-resolution learnable hash grid [S3, unofficial]. This design leverages GPU-optimized hash table lookups to reduce MLP depth and width substantially, achieving a 1000–10,000× training speedup compared to vanilla NeRF while maintaining comparable rendering quality [S1]. It sets itself apart from traditional positional encoding by replacing fixed basis functions with learnable parameters stored in sparse hash grids, significantly reducing memory usage and training time while maintaining high reconstruction quality [S1].
++Multi-resolution Hash Encoding (MERH) accelerates neural radiance field (NeRF) training and rendering by replacing the slow, deep multi-layer perceptron (MLP) of vanilla NeRF with a trainable, multi-resolution hash grid [S1, S2, S13]. It maps 3D coordinates to high-dimensional feature vectors via hash table lookups and trilinear interpolation, which are then decoded by a shallow neural network to predict density and color [S1, S2]. It sets itself apart from standard NeRF by achieving significant reductions in learning time and convergence iterations through a generic, trainable encoding that allows the network to be shallow with fewer parameters [S1, S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D spatial coordinate $\mathbf{x} \in \mathbb{R}^3$ (and optionally a viewing direction $\mathbf{d}$).
+-*   **Output:** A concatenated feature vector $\mathbf{F} \in \mathbb{R}^{L \cdot F}$, where $L$ is the number of resolution levels and $F$ is the feature dimension per level. This vector is fed into a small MLP (decoder) to predict density and color.
++*   **Input:** A 3D spatial coordinate $\mathbf{x} \in \mathbb{R}^3$ (and optionally a viewing direction $\mathbf{d} \in \mathbb{R}^3$).
++*   **Output:** A feature vector $\mathbf{F} \in \mathbb{R}^{L \cdot F}$ used by a decoder MLP to predict density $\sigma$ and color $\mathbf{c}$.
+ 
+ **Data Structures:**
+-The encoding consists of $L$ levels. Each level $l$ has a hash table with $T$ entries. Each entry stores a learnable feature vector of dimension $F$.
+-*   **Hash Table Layout:** A 1D array of size $T$. Each element is a vector of size $F$.
+-*   **Resolution Layout:** Level $l$ corresponds to a conceptual 3D grid of resolution $N_l$.
+-*   **Total Parameters:** $L \times T \times F$ for the hash tables, plus the decoder MLP parameters.
+-
+-**Parameters (Typical Values):**
+-*   Number of levels $L$: 16–20 [S4][S7, unofficial].
+-*   Hash table size $T$: $2^{19}$ is a common default, balancing cache locality and capacity [S6, unofficial][S14]. Performance drops significantly if $2 \cdot T \cdot F > 6 \text{ MB}$ (L2 cache limit on RTX 3090) [S14].
+-*   Feature dimension $F$: 2–4 per level. $F=2$ provides the best cost-quality trade-off on tested GPUs [S7, unofficial][S14].
+-*   Minimum resolution $N_{\min}$: 16 [S5][S7, unofficial].
+-*   Maximum resolution $N_{\max}$: 512–2048 [S5][S7, unofficial].
+-*   Hash table entry precision: Half precision (2 bytes) for storage, with a master copy in full precision for stable mixed-precision parameter updates [S14].
+-
+-**Algorithm:**
+-
+-1.  **Define Resolutions:** Calculate the resolution $N_l$ for each level $l \in [1, L]$. The resolutions grow exponentially between $N_{\min}$ and $N_{\max}$:
+-    $$ N_l = \lfloor N_{\min} \cdot b^{l-1} \rfloor $$
+-    where $b = (N_{\max} / N_{\min})^{1/(L-1)}$ [S10, unofficial]. Alternatively, $b = 2^{\frac{\log_2(N_{\max}/N_{\min})}{L}}$ [S5].
+-
+-2.  **Hash Function:** Define a spatial hash function $h: \mathbb{Z}^3 \to \mathbb{Z}_T$ that maps integer grid coordinates to hash table indices. A common implementation uses bit-wise XOR with large unique prime numbers $\pi_i$:
+-    $$ h(i, j, k) = (i \cdot \pi_1 \oplus j \cdot \pi_2 \oplus k \cdot \pi_3) \pmod T $$
+-    where $\pi_1 = 1$, $\pi_2 = 2,654,435,761$, and $\pi_3 = 805,459,861$ [S10, unofficial].
+-
+-3.  **Query for Each Level:** For a given input point $\mathbf{x}$ and level $l$:
+-    a.  **Grid Coordinates:** Compute the fractional grid coordinates by scaling $\mathbf{x}$ by $N_l$. Determine the integer coordinates of the cell containing $\mathbf{x}$:
+-        $$ \mathbf{c}_{\text{floor}} = \lfloor \mathbf{x} \cdot N_l \rfloor, \quad \mathbf{c}_{\text{ceil}} = \lceil \mathbf{x} \cdot N_l \rceil $$
+-        These define the 8 vertices of the cell in $\mathbb{Z}^3$ [S5].
+-    b.  **Hash Lookup:** Map each of the 8 vertices to hash table indices using $h$. Retrieve the corresponding $F$-dimensional feature vectors from the hash table for level $l$. Let these be $\mathbf{v}_1, \dots, \mathbf{v}_8$ [S10, unofficial].
+-    c.  **Interpolation:** Perform trilinear interpolation of the 8 feature vectors based on the relative position of $\mathbf{x}$ within the cell. To improve continuity of high-level features, a second-order continuous interpolation weight function $d(x)$ can be used instead of linear weights:
+-        $$ d(x) = 6x^5 - 15x^4 + 10x^3 $$
+-        where $x$ is the fractional coordinate component [S5]. Let the interpolated feature vector for level $l$ be $\mathbf{f}_l \in \mathbb{R}^F$ [S10, unofficial].
+-
+-4.  **Concatenation:** Concatenate the feature vectors from all $L$ levels to form the final input vector:
++The encoding consists of $L$ levels. Each level $l \in \{1, \dots, L\}$ has:
++1.  **Resolution:** A grid resolution $N_l$. The coarsest resolution is $N_{min}$ and the finest is $N_{max}$.
++2.  **Hash Table:** A 1D array of size $T_l$ (typically $2^{19}$ or $2^{20}$). Each entry stores a learnable feature vector of dimension $F$ (typically $F=2$ or $F=4$).
++3.  **Hash Function:** A mapping $h: \mathbb{Z}^3 \to \{0, \dots, T_l-1\}$ that maps integer grid coordinates to table indices.
++
++**Parameters:**
++*   $L$: Number of levels. Default is 16–20 [S4][S7, unofficial].
++*   $N_{min}$: Coarsest resolution. Default is 16 [S5][S7, unofficial].
++*   $N_{max}$: Finest resolution. Default is 512 or 2048 [S5][S7, unofficial].
++*   $T_l$: Hash table size per level. Default is $2^{19}$ [S6, S10, unofficial].
++*   $F$: Feature dimension per entry. Default is 2 or 4 [S7, S10, unofficial].
++*   $\pi_i$: Large unique prime numbers for hashing. Common values: $\pi_1=1, \pi_2=2,654,435,761, \pi_3=805,459,861$ [S10, unofficial].
++
++**Algorithm Steps:**
++
++1.  **Calculate Resolutions:**
++    Compute the resolution $N_l$ for each level $l$. The resolutions grow geometrically:
++    $$ N_l = \lfloor N_{min} \cdot b^{l-1} \rfloor $$
++    where the base $b$ is determined by the range $[N_{min}, N_{max}]$:
++    $$ b = \left( \frac{N_{max}}{N_{min}} \right)^{\frac{1}{L-1}} $$
++    [S5][S10, unofficial]
++
++2.  **Hash Table Lookup (Per Level):**
++    For each level $l$, perform the following for the input point $\mathbf{x}$:
++    
++    a. **Grid Coordinates:**
++    Scale the point by the resolution $N_l$ and compute the floor and ceiling integer coordinates:
++    $$ \mathbf{c}_{floor} = \lfloor \mathbf{x} \cdot N_l \rfloor $$
++    $$ \mathbf{c}_{ceil} = \lceil \mathbf{x} \cdot N_l \rceil $$
++    These define the 8 vertices of the voxel cell containing $\mathbf{x}$ in the $l$-th grid.
++    [S5][S10, unofficial]
++
++    b. **Hashing:**
++    Map each vertex coordinate $\mathbf{v} \in \{\mathbf{c}_{floor}, \mathbf{c}_{ceil}\}$ to a hash table index using bitwise XOR and prime numbers:
++    $$ h(\mathbf{v}) = (v_x \cdot \pi_1 \oplus v_y \cdot \pi_2 \oplus v_z \cdot \pi_3) \pmod{T_l} $$
++    [S6, S10, unofficial]
++    Retrieve the feature vector $\mathbf{f}_{\mathbf{v}}$ from the hash table at index $h(\mathbf{v})$. If the entry is uninitialized, use a default value (e.g., zero or small random initialization) [G].
++
++    c. **Trilinear Interpolation:**
++    Compute the relative position of $\mathbf{x}$ within the cell:
++    $$ \mathbf{w} = (\mathbf{x} \cdot N_l) - \mathbf{c}_{floor} $$
++    where $\mathbf{w} = (w_x, w_y, w_z)$.
++    Interpolate the 8 retrieved feature vectors $\mathbf{f}_{\mathbf{v}}$ using trilinear interpolation weights derived from $\mathbf{w}$ to obtain the level-specific feature vector $\mathbf{f}_l$:
++    $$ \mathbf{f}_l = \text{TrilinearInterpolate}(\{\mathbf{f}_{\mathbf{v}}\}, \mathbf{w}) $$
++    [S5][S10, unofficial]
++    *Note:* Some implementations use a second-order continuous interpolation weight function $d(x) = 6x^5 - 15x^4 + 10x^3$ to improve continuity [S5].
++
++3.  **Concatenation:**
++    Concatenate the feature vectors from all $L$ levels to form the final input vector:
+     $$ \mathbf{F} = [\mathbf{f}_1; \mathbf{f}_2; \dots; \mathbf{f}_L] \in \mathbb{R}^{L \cdot F} $$
+-    [S6, S10, unofficial].
+-
+-5.  **Decoding:** Feed $\mathbf{F}$ (and optionally view direction $\mathbf{d}$ encoded via Spherical Harmonics or Fourier features) into a small MLP to predict density $\sigma$ and color $\mathbf{c}$ [S10, unofficial].
++    [S6, S10, unofficial]
++
++4.  **Decoding:**
++    Feed $\mathbf{F}$ (and optionally view direction $\mathbf{d}$ encoded via Spherical Harmonics or Fourier features) into a small MLP (Decoder) to predict density $\sigma$ and color $\mathbf{c}$.
++    [S2, S15]
+ 
+ **Pseudocode:**
+@@ -55,90 +73,78 @@
+ import numpy as np
+ 
+-def multi_resolution_hash_encode(x, L, N_min, N_max, T, F, hash_tables, primes):
++def multi_resolution_hash_encoding(x, L, N_min, N_max, T, F, pi):
+     """
+-    x: numpy array of shape (3,), input 3D coordinate
+-    L: int, number of levels
+-    N_min: float, minimum grid resolution
+-    N_max: float, maximum grid resolution
+-    T: int, hash table size
+-    F: int, feature dimension per level
+-    hash_tables: list of L numpy arrays, each of shape (T, F)
+-    primes: tuple of 3 large prime numbers (pi1, pi2, pi3)
++    Computes the multi-resolution hash encoding for a single 3D point x.
++    
++    Args:
++        x: numpy array, shape (3,), input 3D coordinate.
++        L: int, number of resolution levels.
++        N_min: int, coarsest grid resolution.
++        N_max: int, finest grid resolution.
++        T: int, hash table size (number of entries per level).
++        F: int, feature dimension per entry.
++        pi: tuple of 3 ints, prime numbers for hashing.
++        
++    Returns:
++        F_vec: numpy array, shape (L * F,), concatenated feature vector.
+     """
+-    pi1, pi2, pi3 = primes
+-    features = []
+-    
+-    # Calculate resolution ratio b
+-    # Using formula from [S10, unofficial]: b = (N_max / N_min)^(1/(L-1))
++    # Calculate base for geometric progression
+     b = (N_max / N_min) ** (1.0 / (L - 1))
+     
++    F_vec = []
++    
+     for l in range(L):
+-        # Calculate resolution for this level
++        # 1. Calculate resolution for this level
+         N_l = int(np.floor(N_min * (b ** l)))
+         
+-        # 1. Compute grid coordinates
+-        # Scale x by resolution
++        # 2. Compute grid coordinates (floor and ceil)
+         scaled_x = x * N_l
+-        
+-        # Floor and ceil to get cell corners
+         c_floor = np.floor(scaled_x).astype(int)
+         c_ceil = np.ceil(scaled_x).astype(int)
+         
+-        # Relative position within the cell (fractional part)
+-        # Note: scaled_x - c_floor gives the fractional part [0, 1)
+-        frac = scaled_x - c_floor
+-        
+-        # 2. Identify 8 vertices
+-        # Vertices are combinations of floor/ceil for x, y, z
+-        # Indices: 000, 001, 010, 011, 100, 101, 110, 111
+-        # where bit 0 is x, bit 1 is y, bit 2 is z
+-        vertices = []
+-        for i in range(8):
+-            vx = c_floor[0] if (i & 1) == 0 else c_ceil[0]
+-            vy = c_floor[1] if (i & 2) == 0 else c_ceil[1]
+-            vz = c_floor[2] if (i & 4) == 0 else c_ceil[2]
+-            vertices.append((vx, vy, vz))
+-            
+-        # 3. Hash lookup
+-        # Retrieve feature vectors for all 8 vertices
+-        vertex_features = []
+-        for (vx, vy, vz) in vertices:
+-            # Hash function: (vx * pi1 ^ vy * pi2 ^ vz * pi3) % T
+-            h_idx = (vx * pi1 ^ vy * pi2 ^ vz * pi3) % T
+-            # Get feature vector from hash table for level l
+-            feat = hash_tables[l][h_idx]
+-            vertex_features.append(feat)
+-            
+-        vertex_features = np.array(vertex_features) # Shape (8, F)
+-        
+-        # 4. Trilinear Interpolation
+-        # Weights for the 8 corners based on fractional coordinates
+-        # Corner 0 (0,0,0) weight: (1-fx)*(1-fy)*(1-fz)
+-        # Corner 7 (1,1,1) weight: fx*fy*fz
+-        fx, fy, fz = frac[0], frac[1], frac[2]
+-        
+-        # Precompute weights for each corner
+-        # Using the order defined by bits: i=0 is (0,0,0), i=7 is (1,1,1)
+-        weights = np.zeros(8)
+-        for i in range(8):
+-            wx = fx if (i & 1) else (1 - fx)
+-            wy = fy if (i & 2) else (1 - fy)
+-            wz = fz if (i & 4) else (1 - fz)
+-            weights[i] = wx * wy * wz
+-            
+-        # Interpolate features
+-        f_l = np.dot(weights, vertex_features)
+-        features.append(f_l)
+-        
+-    # Concatenate all level features
+-    F_concat = np.concatenate(features, axis=0)
+-    return F_concat
++        # 3. Compute relative position (weights)
++        w = scaled_x - c_floor
++        
++        # 4. Retrieve and interpolate features
++        # There are 8 vertices: combinations of floor/ceil for x, y, z
++        features = []
++        for i in range(2): # x: 0=floor, 1=ceil
++            for j in range(2): # y: 0=floor, 1=ceil
++                for k in range(2): # z: 0=floor, 1=ceil
++                    # Select coordinate
++                    vx = c_floor[0] if i == 0 else c_ceil[0]
++                    vy = c_floor[1] if j == 0 else c_ceil[1]
++                    vz = c_floor[2] if k == 0 else c_ceil[2]
++                    
++                    # Hash the coordinate
++                    # h(v) = (vx * pi[0] ^ vy * pi[1] ^ vz * pi[2]) % T
++                    idx = (vx * pi[0] ^ vy * pi[1] ^ vz * pi[2]) % T
++                    
++                    # Retrieve feature from global hash tables
++                    # Note: In implementation, hash_tables is a list of L arrays
++                    # Each array has shape (T, F)
++                    f_v = hash_tables[l][idx] 
++                    features.append(f_v)
++        
++        # 5. Trilinear Interpolation
++        # Reshape features to (2, 2, 2, F)
++        feat_grid = np.array(features).reshape(2, 2, 2, F)
++        
++        # Interpolate using weights w
++        # f_l = sum over vertices of (weight * feature)
++        # Weight for vertex (i,j,k) is w_x^i * (1-w_x)^(1-i) ...
++        f_l = np.zeros(F)
++        for i in range(2):
++            for j in range(2):
++                for k in range(2):
++                    weight = (w[0] if i else 1-w[0]) * \
++                             (w[1] if j else 1-w[1]) * \
++                             (w[2] if k else 1-w[2])
++                    f_l += weight * feat_grid[i, j, k]
++        
++        F_vec.append(f_l)
++        
++    return np.concatenate(F_vec)
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Hash Collisions:** Multiple 3D points may map to the same hash entry. In a global model, this causes gradients from different scene parts to be averaged, degrading reconstruction quality [S6, unofficial]. Increasing $T$ reduces collisions but increases memory and training time because gradients must be computed for all bins during backpropagation, even if many are empty [S6, S10, unofficial].
+-*   **Cache Misses:** Allocating hash tables that exceed the GPU's L2 cache (e.g., > 6 MB on RTX 3090) significantly increases training time due to cache misses, without improving quality [S10, unofficial][S14].
+-*   **Precision:** Storing hash table entries in half precision optimizes performance, but a full-precision master copy is required for stable Adam optimizer updates [S14].
+-*   **Gradient Sparsity:** When $T \gg \text{BatchSize}$, many hash table entries have zero gradients. Skipping Adam steps for these entries saves ~10% performance [S14].
+ 
+ ## Subtopics
+@@ -157,5 +163,5 @@
+ 
+ ### [Standard Multi-resolution Hash Encoding](13152-standard-multi-resolution-hash-encoding.md)
+-Standard Multi-resolution Hash Encoding (SMHE) maps 3D spatial coordinates to a high-dimensional feature vector using a set of trainable hash tables at multiple resolutions, enabling efficient neural scene representation. It distinguishes itself from traditional positional encoding by replacing fixed basis functions with learnable parameters stored in sparse hash grids, significantly reducing memory usage and training time while maintaining high reconstruction quality.
++Standard Multi-resolution Hash Encoding (MERH) accelerates neural radiance field training and rendering by replacing traditional positional encoding with a trainable, multi-resolution hash grid. It maps 3D coordinates to high-dimensional feature vectors via hash table lookups and trilinear interpolation, which are then decoded by a shallow neural network to predict density and color. It sets itself apart from standard NeRF by achieving significant reductions in learning time and convergence iterations through a generic, trainable encoding that allows the network to be shallow with fewer parameters.
+ 
+ ### [MF-NeRF Mixed-Feature Hash Encoding](13261-mf-nerf-mixed-feature-hash-encoding.md)
+@@ -169,26 +175,34 @@
+ 
+ ### HashNeRF Variant 4
+-Pipeline 1: Linear(32, 64, bias=False), ReLU; Linear(64, 16, bias=False); Concat(input views, output1). Pipeline 2: Linear(20, 64, bias=False), ReLU; Linear(64, 64, bias=False); Concat(input views, output2). Pipeline 3: Linear(50, 128, bias=False), ReLU; Linear(128, 64, bias=False), ReLU; Linear(64, 3, bias=False). PSNR: 27.119; Training Time: 319.669. Outperformed other variants at 1,000 iterations. PSNR 27.12 vs original baseline 28.2 [S19, unofficial].
++This variant uses a specific MLP architecture for the decoder head. Pipeline 1: Linear(32, 64, bias=False), ReLU; Linear(64, 16, bias=False); Concat(input views, output1). Pipeline 2: Linear(20, 64, bias=False), ReLU; Linear(64, 64, bias=False); Concat(input views, output2). Pipeline 3: Linear(50, 128, bias=False), ReLU; Linear(128, 64, bias=False), ReLU; Linear(64, 3, bias=False). It achieved a PSNR of 27.119 with a training time of 319.669 seconds, outperforming other variants at 1,000 iterations, though slightly below the original baseline PSNR of 28.2 [S19, unofficial].
+ 
+ ### F-Hash
+-An extension of multi-resolution hash encoding to four dimensions using Tesseract grids and collision-free minimal perfect hashing for faster convergence. Compression ratios: 9.5–55.2×. Convergence speed: 10–100× faster than standard hash encoding. Performance on combustion data: 47.1 dB in 7.4 minutes vs. 23.7 dB in 45.7 minutes [S20, unofficial].
++An extension of multi-resolution hash encoding to four dimensions using Tesseract grids and collision-free minimal perfect hashing for faster convergence [S20, unofficial]. It achieves compression ratios of 9.5–55.2× and convergence speeds 10–100× faster than standard hash encoding [S20, unofficial]. On combustion data, it achieved 47.1 dB in 7.4 minutes versus 23.7 dB in 45.7 minutes for standard methods [S20, unofficial].
+ 
+ ### Canonical Network with Multi-resolution Hash Encoding
+-A neural network that maps 3D spatial coordinates to a scalar density value, serving as the static representation of the object's attenuation coefficient field. It eliminates the need for color output and viewing direction input because X-ray imaging is monochromatic and lacks orientation-dependent reflection. Input: 3D position (x, y, z). Output: Scalar density $\rho$. Implementation: Use multi-resolution hash encoding [15] as the feature extractor $\Theta$. Unlike classical X-CT where density is a discrete 3D voxel grid, this method represents the density field as a continuous function $\Theta(x, y, z)$ [S21, unofficial].
++A neural network that maps 3D spatial coordinates to a scalar density value, serving as the static representation of the object's attenuation coefficient field [S21, unofficial]. It eliminates the need for color output and viewing direction input because X-ray imaging is monochromatic and lacks orientation-dependent reflection [S21, unofficial]. Unlike classical X-CT where density is a discrete 3D voxel grid, this method represents the density field as a continuous function $\Theta(x, y, z)$ using multi-resolution hash encoding as the feature extractor [S21, unofficial].
+ 
+ ### Hybrid Encoding
+-An encoding formed by concatenating the view encoding with all-but-the-first-dimension of the hash encoding. Used as input to the color MLP. Hash encoding for density MLP: $\gamma'(x) = \gamma_0(x)$ (only first dimension retained). Hybrid encoding for color MLP: $\gamma''(d, x) = [\gamma(d), \gamma_{1:N_x}(x)]$ [S22, unofficial].
++An encoding formed by concatenating the view encoding with all-but-the-first-dimension of the hash encoding. Used as input to the color MLP [S22, unofficial]. The hash encoding for the density MLP retains only the first dimension $\gamma'(x) = \gamma_0(x)$, while the hybrid encoding for the color MLP is $\gamma''(d, x) = [\gamma(d), \gamma_{1:N_x}(x)]$ [S22, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is proportional to the number of sampled points rather than the complexity of the scene, due to the shallow MLP [S1]. Instant-NGP converges to 95% of final PSNR in 2.4 ± 0.4 minutes on Blender scenes, compared to 18.4 minutes for 3DGS and 12.4 hours for NeRF [S1].
+-*   **Memory Complexity:** Training requires more than twelve times as much video memory as rendering due to intermediate activations and Adam optimizer statistics [S4]. The hash table size $T$ directly impacts memory usage; $T=2^{19}$ with $L=16$ and $F=4$ results in 12.6M encoding parameters, which is 1,191× larger than weight parameters (10k) [S10, unofficial].
+-*   **Measured Performance:** On an NVIDIA A100 GPU at 1080p, Instant-NGP renders at 2.4 ± 0.4 FPS [S1]. This is 12× faster than NeRF (0.2 FPS) but 28× slower than 3DGS (68.4 FPS) [S1]. On the NeRF Synthetic (Blender) dataset, Instant-NGP achieved PSNR = 32.6 ± 0.4 dB [S1]. On the Mip-NeRF 360 unbounded dataset, it achieved PSNR = 26.4 ± 0.6 dB [S1].
+-*   **Strengths:** Extremely fast training (seconds to minutes), high rendering speed compared to MLP-based NeRF, good preservation of sharpness and fine details compared to frequency-based encoding [S9].
+-*   **Limitations:** Moderate surface accuracy compared to SDF-based methods like NeuS because it uses a faster density representation rather than explicit surface geometry [S1]. Performance degrades on unbounded scenes compared to methods like Mip-NeRF 360 or 3DGS [S1]. Hash collisions can degrade quality if $T$ is too small [S6, unofficial].
+-*   **When to Use:** Rapid prototyping, applications requiring immediate visual feedback during acquisition, and scenarios where training time is a critical bottleneck [S1].
+-*   **When Not to Use:** Applications requiring real-time interactive rendering (>50 FPS) where 3DGS is superior, or applications requiring high-precision surface geometry where NeuS or similar SDF methods are preferred [S1].
++**Time and Memory Complexity:**
++*   **Memory:** The memory usage is dominated by the hash tables. For $L$ levels, table size $T$, and feature dimension $F$, the total parameters are $L \cdot T \cdot F$. With $L=20, T=2^{20}, F=2$, this is approximately 41.9M parameters [S7, unofficial]. Training requires significantly more memory than rendering (more than 12x) due to intermediate activations and Adam optimizer statistics [S4].
++*   **Time:** Training is 1000–10000x faster than vanilla NeRF, converging in 2–5 minutes on a single GPU [S1]. Rendering is >3000x faster than vanilla NeRF [S12, unofficial]. However, it is slower than explicit methods like 3D Gaussian Splatting (2.4 FPS vs 68.4 FPS on A100) [S1].
++
++**Measured Performance:**
++*   On NeRF Synthetic (Blender) dataset: PSNR = 32.6 ± 0.4 dB [S1].
++*   On Mip-NeRF 360 unbounded dataset: PSNR = 26.4 ± 0.6 dB [S1].
++*   Rendering speed: 2.4 ± 0.4 FPS on an A100 GPU at 1080p [S1].
++
++**Strengths and Limitations:**
++*   **Strengths:** Extremely fast training and convergence; high-quality reconstruction of fine details and textures; efficient memory usage compared to dense grids [S1, S9].
++*   **Limitations:** Moderate surface accuracy compared to SDF-based methods like NeuS because it uses a faster density representation rather than explicit surface geometry [S1]. Performance drops significantly if hash table size $T$ exceeds cache limits (e.g., > $2^{19}$ on RTX 3090 due to 6 MB L2 cache limit) [S14]. Hash collisions can degrade reconstruction quality in global models [S6, unofficial]. Soft tissues with low contrast are harder to reconstruct than hard tissues [S9].
++
++**When to Use:**
++Use when fast training and real-time or near-real-time rendering are required, and high surface accuracy is not the primary constraint. Ideal for rapid prototyping and applications requiring immediate visual feedback [S1].
+ 
+ ## Background
+-Multi-resolution Hash Encoding was introduced in the paper "Instant Neural Graphics Primitives with a Multiresolution Hash Encoding" by Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller in 2022 [S14]. It was developed to address the computational bottleneck of NeRF, which relies on a large, deep MLP that is expensive to train and render [S3, unofficial]. The method leverages the fact that modern GPUs have highly optimized hash table lookup operations, allowing the scene representation to be stored in learnable feature grids rather than network weights [S1]. This approach has become a standard baseline for fast NeRF training and has inspired numerous variants and applications in medical imaging, agricultural reconstruction, and scientific visualization [S9, S11][S20, unofficial].
++Originating from the "Instant Neural Graphics Primitives" paper by Müller et al. (2022) [S1, S14], Multi-resolution Hash Encoding was introduced to address the computational bottleneck of vanilla NeRF, which relies on a large, deep MLP. By replacing the MLP with a multi-resolution hash-encoded feature grid, Instant-NGP leverages highly optimized GPU hash table lookups to reduce MLP depth and width substantially. This approach allows for training convergence in minutes rather than hours, while maintaining comparable rendering quality to more expensive methods [S1]. It has since become a standard baseline for fast neural rendering [S11].
+ 
+ ## Sources

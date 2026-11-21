@@ -1,0 +1,292 @@
+Modular native Android voxel engine and game framework in Rust - Landscape distance rings: stacked voxel steps instead of a smooth shell by 5omeOtherGuy · Pull Request #79 · 5omeOtherGuy/Matterweave
+
+Landscape distance rings: stacked voxel steps instead of a smooth shell by 5omeOtherGuy · Pull Request #79 · 5omeOtherGuy/Matterweave · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+5omeOtherGuy
+commented
+Sep 14, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+The distance rings rendered as a smooth shell: lod_tile_mesh sampled one height per grid
+vertex and joined the corners, so distant mountains were clean triangles with gradient-shaded
+slopes and no step anywhere. Each coarse cell is now one flat top at its own quantised height,
+each difference to a neighbour is a vertical wall spanning the full step, and every face carries
+its own normal and colour, so a top and the wall under it break hard.
+Based on main at 8367740 (#77 and #78 already merged). The diff is the tile mesh builder, its
+tests, and one doc-comment line in the sample.
+What changed
+Flat tops. One column sample per coarse cell centre, over a (32+2)^2 grid (one cell of
+halo each side). The halo is what makes a tile border decidable: the height across the border is
+the neighbouring tile's own cell centre, so both tiles see the same pair of numbers.
+Walls. A face between two drawn cells belongs to the higher cell, so exactly one of the
+two tiles emits it. Tiles meet with neither a crack nor a doubled wall; the tests check both, on
+x borders and on z borders (the pair that catches a row inversion).
+Quantisation. Heights are floored to a per-level step - never raised above the sampled
+ground, so a ring cannot occlude the finer mesh inside it. LOD_STEP_M sits next to
+LANDSCAPE_RINGS with the derivation in the doc comment: a step must subtend 2 px at the ring's
+outer half-extent (65 degrees over a 1440 px viewport = 1.576 mm per metre of distance),
+rounded to the nearest power of two metres and never below the world's 1 m voxel. That gives
+1, 1, 2, 4, 8, 16 m for the 2, 4, 8, 16, 32, 64 m rings; a test reproduces the table from the
+ring set with the same integer arithmetic the comment describes.
+Greedy merge. Tops merge into maximal rectangles of equal (height, top colour), walls into
+runs of equal (top, foot, colour). A flat 1024-cell tile is one quad; a wall run is one quad
+however many cells it spans.
+Flat shading. Four vertices per face, one normal and one colour each; top normal +Y, wall
+normals exactly ±x/±z. Winding is checked against the normal per quad (the main pass culls
+back faces), and the axis normals also make the shader's indirect_diffuse take its axis path
+instead of returning zero for a non-axis normal.
+Wall colour is the sub-surface material - soil under grass, stone under snow - for a step
+inside sub_depth, bare stone below that. This replaces the old always-STONE skirt colour and
+is what gives a wall a real break against the top above it. It is the same material
+material_in_column reports, without the per-voxel ore/rock hash; stated simplification.
+Skirts are gone, not kept. A face against a cell this level does not draw (hole, bound, clip
+edge) is a wall that reaches FILTER_WALL_CELLS (= 2, the old skirt depth) cells below its own
+top, and further down when the neighbour across it stands lower. So the free-edge guarantee is
+the same depth as before, expressed as one merged run per step instead of per-cell quads.
+cell_drawn answers "always yes" for halo cells. A halo cell is a neighbouring tile's cell, and
+the sample normalises a clip to the tile before caching a filter, so letting the clip decide a
+halo cell would make two filters with equal geometry produce different meshes - the existing
+normalizing_a_filter_cannot_change_the_mesh test caught exactly that.
+Heights, quantisation, wall spans and positions are integer arithmetic; only the vertex colours and
+the i32 -> f32 position conversion are float, as before.
+Budget (host, llvmpipe, debug build, back-to-back A/B on one machine)
+Both runs are --landscape at the sample's spawn camera (EYE -192 11 1472, the same camera as the
+lead's phone frame), 384-tile plan, LANDSCAPE COUNTERS + a probe over the plan.
+measure
+before
+after
+ratio
+tiles resident / declared
+332 / 384
+332 / 384
+-
+tile geometry (tile mem)
+57240 KiB
+31145 KiB
+0.54x
+triangles over the plan
+697792
+379674
+0.54x
+per-tile generation
+0.73 ms (384 in 281.2 ms)
+0.83 ms (384 in 318.5 ms)
+1.14x
+Per level, bytes and triangles per tile (before -> after):
+level
+cell
+step
+B/tile
+tris/tile
+1
+2 m
+1 m
+184716 -> 79393
+2199 -> 945
+2
+4 m
+1 m
+146496 -> 62175
+1744 -> 740
+3
+8 m
+2 m
+145824 -> 102456
+1736 -> 1219
+4
+16 m
+4 m
+146496 -> 82044
+1744 -> 976
+5
+32 m
+8 m
+145824 -> 87333
+1736 -> 1039
+6
+64 m
+16 m
+146496 -> 84918
+1744 -> 1010
+Budget was 1.3x bytes and 2x time: 0.54x and 1.14x. A flat sea tile is 1 quad (2 triangles)
+where it was 2048 triangles; ring_plan_geometry_stays_within_its_budget pins both totals against
+the recorded pre-voxel numbers. The per-tile generation figure is an A/B of the tile mesh builder;
+generation moved to the background worker in #78, so the current base no longer prints a per-tile
+cost line.
+Acceptance metric (host, 1:1, no scaling)
+python3 ~/pi/tmp/fidelity/voxel-step-metric.py <frame.png> --crop X0,Y0,X1,Y1
+Distant terrain crop 0,330,260,370 - the terraced land at 1-2 km on the left of the frame,
+its stepped silhouette against the water and sky:
+crop 0,330,260,370
+K1 (>= 0.020)
+K2 (>= 18)
+verdict
+before
+0.0069 FAIL
+58.7 PASS
+SMOOTH
+after
+0.0281 PASS
+19.8 PASS
+STEPPED
+Wide mountain band 0,295,1280,352 (the 1-8 km horizon band, mostly sky and sea):
+crop 0,295,1280,352
+K1
+K2
+verdict
+before
+0.0049
+17.4
+SMOOTH
+after
+0.0074
+2.6
+SMOOTH
+I am not claiming that one as a pass. Two effects, both stated rather than tuned away:
+Fog, not shading, limits the far band. Aerial perspective (FOG_DENSITY 0.0006) leaves 30% of
+a surface's own colour at 2 km, 9% at 4 km and 3% at 8 km; a top-vs-wall lighting break is ~33
+levels before fog and under the metric's 8 levels past ~4 km. The 4-8 km mountains are hazy in the
+before image too. FOG_DENSITY is the sample's knob and the lead's call; this change does not
+touch it.
+K2 falls on the big crop, from 17.4 to 2.6: flat shading removes the per-triangle gradient
+that was inflating the distinct-colour count there, and the band is mostly smooth sky and sea. The
+metric's K2 is therefore the one number that a flat-shaded mesh moves the other way on a
+fog-dominated crop - on the terrain crop it still passes (19.8).
+A per-window scan of the after frame (256 px windows of the y 330-370 band) gives K1 0.028 and
+0.035 in the two leftmost windows, where the land is 1-2 km away, 0.020 in the third, and 0.007 in
+the rightmost, where the same land is 4-8 km away and fog-washed. The same scan on the before frame
+is 0.007, 0.010, 0.010, 0.005.
+Screenshots (host, Xvfb 1280x768, llvmpipe, deterministic spawn camera)
+Screenshots are not committed, per this repo's practice. They are on this machine at
+/mnt/bench/work/voxlod-evidence/: before/before.png (base) and after/rebased.png (this
+change), full frames; pr_crop_before.png, pr_crop_after.png are the 1:1 metric crop, and
+pr_zoom_before_over_after.png is the same region at 3x nearest-neighbour, before above, after
+below. Reproduce with --landscape --smoke-frames 900 and ffmpeg -f x11grab: the camera is fixed
+by the seed, so the frame is reproducible.
+Before: every distant hill is a smooth triangle; the slopes shade as one gradient and the water
+line meets them with no step.
+After: the same hills are stacked plateaus - flat tops with grey stone/soil faces under them,
+staircase silhouettes against the sky, hard light/dark breaks where a top meets the wall beneath
+it, and a visibly stepped shoreline where the ring cells meet the sea.
+The --landscape-exercise flight (60 m altitude over the same terrain) shows the near rings as
+contoured terraces with green tops and dark faces; no cracks or gaps at ring seams, and none at
+the fine-window boundary.
+Digests (deliberate change, stated)
+material_flora_and_tile_fingerprint_is_stable: 0xa5ee_08d9_33ba_1fc4 -> 0x63ec_1387_d1e7_09da.
+The tile mesh is derived render output, so any deliberate builder change moves this digest. The mix
+was also widened from normal[1] to all three normal channels: with axis-aligned normals, the y
+channel alone can no longer tell a +x wall from a +z wall. Columns, materials and flora are
+unchanged.
+Verification run here
+cargo test --workspace --locked: green, 52 suites, 0 failures (core landscape: 30 integration +
+63 lib tests, including the new ones).
+cargo fmt --all -- --check: clean. cargo clippy --workspace --all-targets --locked -- -D warnings: clean.
+python3 tools/check_docs.py: PASS (35 files, 80 links, 16 ADRs, 20 requirements).
+Five smoke greps still print, all on llvmpipe with the validation layer enabled:
+LANDSCAPE SMOKE PASS; LANDSCAPE COUNTERS: ... tiles resident 332 declared 384 (tile mem
+31145 KiB); LANDSCAPE COUNTERS: ... evicted 91 on --landscape-exercise; LANDSCAPE SKY: SKY DOME ON | CLOUDS LOW | TARGET 320x192 Q0; clouds_smoke: eight frames passed.
+Zero Vulkan validation ERROR|Validation Error|VUID- lines in the landscape smoke, the exercise
+run and the clouds run.
+New tests: flat tops at their own quantised height for every cell of a tile (level 1/2/4/6), one
+wall spanning the full step across x and z tile borders with no doubling, walls on a hole edge
+reaching the skirt depth, per-face shading/winding, the step table against its derivation,
+greedy-merge rules on synthetic grids, a flat sea tile costing one quad, and the plan geometry
+budget.
+Not run
+No device evidence. The map, the phone capture and any frame-time claim remain the lead's.
+Not re-run here: async_indirect, stream_stress, --smoke-exercise, the gallery capture
+checks, the renderer comparison, instancing_smoke/indirect_smoke/shadow_cache_smoke. They
+are CI steps and this diff does not touch the render crate; CI decides.
+Generated with a temporary probe example for the before/after triangle and byte numbers; the
+probe is deleted, not part of the diff.
+Landscape distance rings: stacked voxel steps instead of a smooth shell
+…
+2e59c6a
+```
+`lod_tile_mesh` sampled one height per grid vertex and joined the corners, so
+every ring rendered as a smooth heightfield: distant mountains were clean
+triangles with gradient-shaded slopes and no step anywhere. Each coarse cell is
+now one flat top at its own quantised height, every difference to a neighbour is
+a vertical wall spanning the full step, and every face carries its own normal
+and colour, so a top and the wall under it break hard.
+
+- Heights come from one sample at the cell centre, over a (32+2)^2 grid, so a
+  tile border is decided from the neighbour's own cell across it. A face between
+  two drawn cells belongs to the higher one, so two tiles agree on the wall
+  between them without drawing it twice: no crack and no doubled wall.
+- Heights are floored to a per-level step derived from what subtends 2 px at
+  that ring's outer distance - 1 m at the 2 m ring, 16 m at the 64 m ring.
+  `LOD_STEP_M` sits next to `LANDSCAPE_RINGS` with the derivation and a test
+  that reproduces it from the ring set.
+- Coplanar tops are greedy-merged into rectangles and equal walls into runs:
+  a flat 1024-cell tile is one quad, a wall run is one quad however many cells
+  it spans.
+- A wall shows the cell's sub-surface material - soil under grass, stone under
+  snow - which is what makes it read as a face rather than a darker copy of the
+  top above it.
+- The boundary skirts are gone. A face against a cell this level does not draw
+  (hole, bound, clip edge) is a wall that reaches `FILTER_WALL_CELLS` cells
+  below its own top, and further down when the neighbour across it is lower.
+
+Heights, quantisation, wall spans and positions are integer; only the vertex
+colours and the i32 to f32 position conversion are float, as before.
+
+Measured at the sample's spawn camera over the 384-tile plan (host, llvmpipe,
+debug build, A/B on one machine): tile geometry 57240 KiB to 31145 KiB, 697792
+to 379674 triangles, per-tile generation 0.73 ms to 0.83 ms. The tile digest
+moves with the builder: 0xa5ee_08d9_33ba_1fc4 to 0x63ec_1387_d1e7_09da (the
+digest now mixes the whole normal, not just its y channel).
+
+Tests: flat tops at their own quantised height per cell, one wall spanning the
+step across both x and z tile borders, walls on a hole edge, per-face shading
+and winding, the step table against its derivation, the merge rules on synthetic
+grids, a flat sea tile costing one quad, and the ring plan geometry budget
+against the pre-voxel numbers.
+```
+Hide details
+View details
+5omeOtherGuy
+merged commit 8ee3e6a
+into
+main
+Sep 15, 2026
+6 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Sep 15, 2026
+Landscape distance: two-term aerial perspective with a dark end
+#82
+Merged
+Surface variation: deterministic per-voxel tone and per-material families
+#84
+Merged
+Render: keep one-pixel steps through the reduced-resolution upscale
+#88
+Merged
+5omeOtherGuy
+deleted the
+engine/voxel-lod-terrain
+branch
+October 12, 2026 14:32
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

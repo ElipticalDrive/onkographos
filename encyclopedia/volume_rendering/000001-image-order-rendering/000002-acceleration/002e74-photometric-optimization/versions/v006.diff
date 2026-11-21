@@ -1,0 +1,244 @@
+--- v005.md
++++ v006.md
+@@ -4,114 +4,113 @@
+ 
+ ## Overview
+-Photometric optimization is a training procedure for differentiable volume rendering that minimizes the pixel-wise difference between rendered images and ground-truth observations [S1, S4, S5]. It serves as the primary loss-driven mechanism for refining scene representations (geometry, appearance, lighting) and camera parameters by backpropagating gradients through the volume rendering equation [S1, S4, S5]. It sets itself apart from [Optimization Configuration](2133-optimization-configuration-adam-exponential-decay-selective-.md) by defining the objective function rather than the solver dynamics, and from [Stage-based Differentiable Volume/Radiance Field Training](4241-stage-based-differentiable-volume-radiance-field-training.md) by focusing on the specific loss formulation (photometric vs. multi-stage constraints) rather than the temporal scheduling of training phases [S1, S4].
++Photometric optimization is a training procedure for differentiable volume rendering that minimizes the pixel-wise difference between rendered images and ground-truth observations. It solves the inverse problem of recovering scene parameters (geometry, appearance, lighting) by treating the rendering process as a differentiable function. It sets itself apart from its siblings by focusing exclusively on the minimization of the photometric loss $\mathcal{L}$ via gradient descent, often jointly optimizing scene representations and environmental factors like lighting or camera poses, without necessarily relying on auxiliary geometric losses or explicit mesh extraction during the core training loop [S1, S4, S5].
+ 
+ ## How it works
+-**Inputs:** A batch of rays $\mathcal{R}$ sampled from training views; ground-truth colors $C(\mathbf{r})$ for each ray; scene parameters $\theta$ (e.g., density grids, color MLP weights, environment maps, deformation vectors); and optionally camera poses $P$.
+-
+-**Outputs:** Updated scene parameters $\theta'$ and/or poses $P'$ after one or more gradient descent steps.
++**Inputs and Outputs:**
++*   **Inputs:** A set of input images $I$, corresponding camera poses $P$ (potentially noisy or fixed), and an initial scene representation (e.g., feature grids, MLPs, voxel structures).
++*   **Outputs:** Optimized scene parameters (density, color, geometry) and optionally optimized camera poses or environmental maps.
+ 
+ **Data Structures:**
+-*   **Ray Batch $\mathcal{R}$:** A set of $N$ rays, where each ray $\mathbf{r}$ is defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
+-*   **Ground Truth $C(\mathbf{r})$:** RGB color vectors corresponding to the rays in $\mathcal{R}$.
+-*   **Scene Parameters $\theta$:** Varies by representation. For grid-based methods (e.g., EgoNeRF, DaReNeRF), this includes feature grids $G_\sigma, G_a$ and decoding MLPs $f_{\text{MLP}}$ [S1, S4]. For inverse rendering methods (e.g., IRCasTRF), this includes per-vertex deformation vectors $\Delta v$ and global movement vectors $\Delta m$ [S2].
++The specific data structures depend on the underlying scene representation (e.g., EgoNeRF's balanced spherical grid, DaReNeRF's direction-aware representation). Generally, these involve:
++*   Feature grids $G_\sigma, G_a$ storing density and appearance features [S1].
++*   Decoding MLPs $f_{\text{MLP}}$ mapping features to color [S1].
++*   Environment maps $E$ for lighting [S1].
++*   Masks $M$ for sparse representations [S4].
+ 
+-**Core Loss Function:**
+-The primary objective is the photometric loss, typically the Mean Squared Error (MSE) between rendered color $\hat{C}(\mathbf{r})$ and ground-truth color $C(\mathbf{r})$ [S1, S4]:
++**Numbered Steps:**
++1.  **Ray Sampling:** Randomly sample a batch of rays $\mathcal{R}$ from the input images [S1, S4].
++2.  **Rendering:** For each ray $\mathbf{r} \in \mathcal{R}$, compute the rendered color $\hat{C}(\mathbf{r})$ using the volume rendering equation [S1, S4].
++3.  **Loss Computation:** Compute the photometric loss $\mathcal{L}_{photo}$ between the rendered color $\hat{C}(\mathbf{r})$ and the ground-truth color $C(\mathbf{r})$ [S1, S4].
++4.  **Regularization (Optional):** Compute additional regularization losses such as Total Variation (TV) loss on feature grids to reduce noise or enforce spatio-temporal continuity [S1, S4]. Compute mask sparsity loss $L_m$ if using sparse representations [S4].
++5.  **Gradient Computation:** Compute gradients of the total loss with respect to the scene parameters using automatic differentiation or analytic gradients [S1, S4].
++6.  **Parameter Update:** Update the scene parameters (and optionally camera poses or environment maps) using an optimizer (e.g., Adam) [S1, S4].
+ 
++**Formulas:**
++The core photometric loss is defined as [S1, S4]:
+ $$
+ \mathcal{L}_{photo} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \| \hat{C}(\mathbf{r}) - C(\mathbf{r}) \|_2^2
+ $$
++where $\mathcal{R}$ is the batch of sampled rays, $\hat{C}(\mathbf{r})$ is the rendered color, and $C(\mathbf{r})$ is the ground-truth color [S1, S4].
+ 
+-where $|\mathcal{R}|$ is the number of rays in the batch [S1, S4].
++For methods using sparse representations (e.g., DaReNeRF), the total loss includes regularization and mask sparsity terms [S4]:
++$$
++\mathcal{L} = \mathcal{L}_{photo} + \lambda_{reg} \mathcal{L}_{reg} + \lambda_m L_m
++$$
++where $\mathcal{L}_{reg}$ is the Total Variation (TV) loss on the direction-aware representation, $\lambda_{reg}$ is the regularization weight, $L_m$ is the mask sparsity loss (sum of all mask values), and $\lambda_m$ is the mask loss weight [S4].
+ 
+-**Regularization and Auxiliary Losses:**
+-Depending on the specific variant, additional terms are added to the total loss $\mathcal{L}$:
++For histogram matching optimization (e.g., cloud synthesis), parameters $L_0$ and $L_a$ are optimized by minimizing the difference between the histogram of the input photograph $I_{ph}$ and the rendered image $I(L_0, L_a)$ [S6]:
++$$
++\arg \min_{L_0, L_a} \sum_{n=1}^{n_L} [h(I_{ph}, n) - h(I(L_0, L_a), n)]^2
++$$
++where $n_L$ is the number of intensity levels, and $h(I, n)$ is the normalized $n$-th histogram of image $I$ [S6].
+ 
+-1.  **Total Variation (TV) Loss:** Used to enforce spatio-temporal continuity and reduce noise, particularly in real-world datasets with imperfect poses or dynamic scenes [S1, S4].
+-    $$
+-    \mathcal{L}_{reg} = \text{TV}(G)
+-    $$
+-    where $G$ is the feature grid or direction-aware representation [S1, S4].
++**Parameters:**
++*   $\lambda_{reg}$: Regularization weight for TV loss. Not given in the sources.
++*   $\lambda_m$: Weight for mask sparsity loss. Not given in the sources.
++*   $L_0, L_a$: Parameters for histogram matching. Optimized values denoted as $L^*_0, L^*_a$ [S6].
+ 
+-2.  **Mask Sparsity Loss:** Used in compressed representations (e.g., DaReNeRF) to encourage sparsity in learned masks $M$ [S4].
+-    $$
+-    \mathcal{L}_m = \sum M
+-    $$
+-    where the sum is over all mask values [S4].
+-
+-3.  **Deformation/Geometry Loss:** Implicit in the photometric term for methods like IRCasTRF, where the absence of specific parameters (like $\Delta v$) leads to artifacts [S2].
+-
+-**Total Loss Formulation (General):**
+-$$
+-\mathcal{L} = \mathcal{L}_{photo} + \lambda_{reg} \mathcal{L}_{reg} + \lambda_m \mathcal{L}_m
+-$$
+-where $\lambda_{reg}$ and $\lambda_m$ are hyperparameters controlling the weight of regularization and sparsity losses, respectively [S4].
+-
+-**Optimization Steps:**
+-1.  **Ray Sampling:** Randomly sample a batch of rays $\mathcal{R}$ from the training camera poses [S1, S4].
+-2.  **Forward Rendering:** For each ray $\mathbf{r} \in \mathcal{R}$, compute the rendered color $\hat{C}(\mathbf{r})$ using the current scene parameters $\theta$ and the standard emission-absorption volume rendering equation [44-radiance-field-optimization.md].
+-3.  **Loss Computation:** Calculate $\mathcal{L}_{photo}$ using the formula above. If applicable, compute $\mathcal{L}_{reg}$ and $\mathcal{L}_m$ [S1, S4].
+-4.  **Gradient Computation:** Compute gradients $\nabla_\theta \mathcal{L}$ and/or $\nabla_P \mathcal{L}$ using automatic differentiation or analytic inversion [44-radiance-field-optimization.md].
+-5.  **Parameter Update:** Update parameters $\theta$ (and poses $P$ if optimized) using an optimizer (e.g., Adam) [S1, S4].
++**Edge Cases and Pitfalls:**
++*   **Imperfect Camera Poses:** In real-world datasets, camera poses may be inaccurate. Optimizing a TV loss on the feature grid can help reduce noise caused by pose errors [S1].
++*   **Empty Regions:** Rendering in empty regions wastes computation. Using an "emptiness voxel" to skip points in empty regions can accelerate training [S4].
++*   **Floating Noisy Points:** In inverse rendering with deformation vectors, removing per-vertex deformation vectors $\Delta v$ can cause floating noisy points in the reconstructed mesh, degrading lighting quality [S2].
++*   **Coarse-to-Fine Requirement:** Some methods (like EgoNeRF) do not require a coarse-to-fine reconstruction approach because their balanced feature grid guarantees a nearly uniform ray-grid hitting rate [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+-def photometric_optimization_step(scene_params, camera_poses, gt_images, ray_sampler, optimizer):
++def photometric_optimization(scene_params, images, poses, optimizer):
+     """
+-    Performs one step of photometric optimization.
++    Performs photometric optimization for volume rendering.
+     
+     Args:
+-        scene_params: Dictionary containing feature grids, MLPs, or mesh parameters.
+-        camera_poses: Current camera poses (optional, if optimizing poses).
+-        gt_images: Ground truth images corresponding to camera_poses.
+-        ray_sampler: Function to sample rays from camera_poses.
+-        optimizer: Optimization object (e.g., Adam).
++        scene_params: Dictionary containing scene parameters (e.g., feature grids, MLP weights, environment map).
++        images: List of ground-truth images.
++        poses: List of camera poses.
++        optimizer: Optimization algorithm (e.g., Adam).
+         
+     Returns:
+-        Updated scene_params and camera_poses.
++        Optimized scene_params.
+     """
+-    # 1. Sample rays
+-    rays = ray_sampler(camera_poses)
+-    # rays contains origins, directions, and indices to ground truth pixels
+-    
+-    # 2. Forward pass: Render images
+-    rendered_images = render_volume(scene_params, rays)
+-    
+-    # 3. Compute Photometric Loss
+-    # Assuming gt_images are aligned with rays
+-    gt_colors = gather_gt_colors(gt_images, rays)
+-    l_photo = mean_squared_error(rendered_images, gt_colors)
+-    
+-    # 4. Compute Regularization Losses (if applicable)
+-    l_reg = 0.0
+-    if 'feature_grid' in scene_params:
+-        l_reg = total_variation_loss(scene_params['feature_grid'])
++    for epoch in range(num_epochs):
++        # 1. Ray Sampling
++        rays = sample_rays(images, poses)
+         
+-    l_mask = 0.0
+-    if 'mask' in scene_params:
+-        l_mask = sum(scene_params['mask'])
++        # 2. Rendering
++        rendered_colors = []
++        for ray in rays:
++            # Render color for ray using current scene_params
++            color = render_ray(ray, scene_params)
++            rendered_colors.append(color)
++        rendered_colors = torch.stack(rendered_colors)
+         
+-    # 5. Combine Losses
+-    # Hyperparameters lambda_reg and lambda_mask should be defined externally
+-    total_loss = l_photo + lambda_reg * l_reg + lambda_mask * l_mask
+-    
+-    # 6. Backward pass and update
+-    optimizer.zero_grad()
+-    total_loss.backward()
+-    optimizer.step()
+-    
+-    return scene_params, camera_poses
++        # 3. Loss Computation
++        ground_truth_colors = [ray.color for ray in rays]
++        ground_truth_colors = torch.stack(ground_truth_colors)
++        
++        # Photometric Loss
++        l_photo = torch.mean((rendered_colors - ground_truth_colors) ** 2)
++        
++        # Regularization Loss (Optional, e.g., TV loss)
++        l_reg = compute_tv_loss(scene_params.feature_grid)
++        
++        # Mask Sparsity Loss (Optional, e.g., for sparse representations)
++        l_mask = compute_mask_sparsity_loss(scene_params.masks)
++        
++        # Total Loss
++        total_loss = l_photo + lambda_reg * l_reg + lambda_mask * l_mask
++        
++        # 4. Gradient Computation
++        optimizer.zero_grad()
++        total_loss.backward()
++        
++        # 5. Parameter Update
++        optimizer.step()
++        
++    return scene_params
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Imperfect Poses:** In real-world datasets, camera poses are often noisy. Optimizing poses jointly with scene parameters requires additional regularization (e.g., TV loss on feature grids) to prevent noise amplification [S1].
+-*   **Empty Regions:** Rendering into empty space can waste computation. Using an "emptiness voxel" to skip points in empty regions accelerates training and improves stability [S4].
+-*   **Missing Deformation Vectors:** In inverse rendering methods, removing per-vertex deformation vectors ($\Delta v$) leads to floating noisy points and degraded lighting quality [S2].
+ 
+ ## Subtopics
+ 
+ ### [Image-based reconstruction optimization](6677-image-based-reconstruction-optimization.md)
+-Image-based reconstruction optimization solves for object shapes, poses, textures, and lighting by minimizing image losses using gradients estimated via differentiable rendering pipelines. It sets itself apart from its siblings by explicitly formulating the inverse problem as an unconstrained optimization task where latent parameters (such as shape vectors and pose angles) are updated via gradient descent to minimize the photometric difference between a rendered image and an observed target. Unlike [Gradient-Based SE(3) Optimization](7526-gradient-based-se-3-optimization.md), which may focus on rigid body transformations, this approach often jointly optimizes complex latent shape representations and appearance parameters.
++Image-based reconstruction optimization solves for object shapes, poses, textures, and lighting by minimizing image losses using gradients estimated via differentiable rendering pipelines. It sets itself apart from its siblings by explicitly formulating the inverse problem as an unconstrained optimization task where latent parameters (such as shape vectors and pose angles) are updated via gradient descent to minimize the photometric difference between a rendered image and an observed target. Unlike [Gradient-Based SE(3) Optimization](7526-gradient-based-se-3-optimization.md), which focuses on rigid body transformations, this approach jointly optimizes complex latent shape representations and appearance parameters.
+ 
+ ### [Gradient-Based SE(3) Optimization](7526-gradient-based-se-3-optimization.md)
+@@ -120,4 +119,7 @@
+ ### [Joint Optimization of Scene and Renderer](11490-joint-optimization-of-scene-and-renderer.md)
+ Joint Optimization of Scene and Renderer is a photometric optimization method that simultaneously refines the geometric and appearance attributes of a scene representation alongside the parameters of a neural renderer. It solves the problem of reconstructing high-quality novel views from a sparse set of input images by treating per-pixel attributes (color, depth, normal, uncertainty, and latent features) as learnable parameters. It differs from [Image-based reconstruction optimization](6677-image-based-reconstruction-optimization.md) by explicitly optimizing the scene's underlying point-based representation attributes rather than just camera poses or static geometry, and it differs from [Gradient-Based SE(3) Optimization](7526-gradient-based-se-3-optimization.md) by focusing on per-view attribute refinement rather than global camera pose estimation.
++
++### [Adaptive IOR Optimization](13856-adaptive-ior-optimization.md)
++Adaptive IOR Optimization is a training procedure for neural radiance fields that iteratively searches for the optimal Index of Refraction (IOR) to minimize the reconstruction error of transparent foreground objects. It solves the problem of unknown or inaccurate IOR values in refractive scene reconstruction by decoupling background training from foreground IOR selection. It differs from sibling methods like [Image-based reconstruction optimization](6677-image-based-reconstruction-optimization.md) by explicitly treating IOR as a discrete search parameter rather than a continuous gradient-based variable, and from [Gradient-Based SE(3) Optimization](7526-gradient-based-se-3-optimization.md) by focusing on material properties rather than camera pose.
+ 
+ ### Exploitation Stage Optimization Vectors
+@@ -128,19 +130,24 @@
+ 
+ ### DaReNeRF Training Strategy
+-Training process using photometric loss, total variation regularization, coarse-to-fine resolution scheduling, and emptiness voxel skipping [S4]. Steps include: computing photometric loss between rendered colors $C(r)$ and ground-truth colors $\hat{C}(r)$; computing total variation (TV) loss on the direction-aware representation to enforce spatio-temporal continuity; computing mask sparsity loss $L_m$ as the sum of all mask values; combining losses: $L = L_{photo} + \lambda_{reg} L_{reg} + \lambda_m L_m$; using coarse-to-fine training strategy, progressively increasing grid resolution; generating emptiness voxel by evaluating opacities across time steps and aggregating via maximum operation; and skipping points in empty regions using the emptiness voxel during rendering [S4]. Regularization weight is $\lambda_{reg}$ [S4].
++Training process using photometric loss, total variation regularization, coarse-to-fine resolution scheduling, and emptiness voxel skipping [S4]. Compute photometric loss between rendered colors $C(r)$ and ground-truth colors $\hat{C}(r)$ [S4]. Compute total variation (TV) loss on the direction-aware representation to enforce spatio-temporal continuity [S4]. Compute mask sparsity loss $L_m$ as the sum of all mask values [S4]. Combine losses: $L = L_{photo} + \lambda_{reg} L_{reg} + \lambda_m L_m$ [S4]. Use coarse-to-fine training strategy, progressively increasing grid resolution [S4]. Generate emptiness voxel by evaluating opacities across time steps and aggregating via maximum operation [S4]. Skip points in empty regions using the emptiness voxel during rendering [S4]. Regularization weight: $\lambda_{reg}$ [S4].
+ 
+ ### Test-Time Photometric Optimization
+-Transforms test views to coordinate system of optimized poses by applying scale/rotation/translation from alignment analysis [S5]. Runs test-time photometric optimization on trained models to factor out pose error from view synthesis quality. This is a gradient-driven camera pose alignment minimizing photometric error on synthesized image while keeping NeRF model fixed [S5]. Used in experiments where poses are refined, and also in experiments with fixed initial noisy poses for fairness [S5].
++Transform test views to coordinate system of optimized poses by applying scale/rotation/translation from alignment analysis [S5]. Run test-time photometric optimization on trained models to factor out pose error from view synthesis quality. This is a gradient-driven camera pose alignment minimizing photometric error on synthesized image while keeping NeRF model fixed [S5]. Use test-time photometric optimization in experiments where poses are refined, and also in experiments with fixed initial noisy poses for fairness [S5].
++
++### Histogram Matching for Parameter Optimization
++A technique to determine parameters L0 and La by minimizing the difference between the histogram of the input photograph and the histogram of rendered example cloud volumes [S6]. Solve the nonlinear least square problem using a quasi-Newton method [S6]. Formula: $\arg \min_{L0, La} \sum_{n=1}^{nL} [h(I_{ph}, n) - h(I(L0, La), n)]^2$, where $nL$ is number of intensity levels, $h(I, n)$ is the normalized $n$-th histogram of image $I$, and $I(L0, La)$ is the rendered image of example volumes using L0 and La [S6]. Parameter: $L^*_0, L^*_a$: The optimized parameters for L0 and La after minimization [S6].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of rays $|\mathcal{R}|$ and samples per ray $N$ for the forward pass and gradient computation [44-radiance-field-optimization.md].
+-*   **Memory Complexity:** Depends on the differentiation strategy. Reverse-mode AD requires $O(kn)$ intermediate states, while analytic inversion reduces this to $O(n)$ [44-radiance-field-optimization.md].
+-*   **Strengths:** Directly optimizes for visual fidelity (PSNR/SSIM); differentiable; works with various scene representations (grids, MLPs, meshes) [S1, S2, S4].
+-*   **Limitations:** Sensitive to initial camera poses; prone to local minima if regularization is insufficient; computationally expensive for high-resolution scenes without acceleration techniques (e.g., emptiness voxels) [S1, S4, S5].
+-*   **When to Use:** When ground-truth images are available and the goal is high-fidelity novel view synthesis or inverse rendering [S1, S2, S4].
+-*   **When Not to Use:** When ground-truth is unavailable (unsupervised) or when computational resources are severely limited without acceleration [S4, S5].
++*   **Time Complexity:** Depends on the number of rays sampled per iteration and the complexity of the scene representation. Coarse-to-fine strategies can accelerate convergence [S4].
++*   **Memory Complexity:** Depends on the scene representation. Feature grids and MLPs require significant memory. Sparse representations with masking can reduce memory usage [S4].
++*   **Measured Performance:** EgoNeRF achieves high-quality novel view synthesis for large-scale scenes without requiring coarse-to-fine reconstruction [S1]. DaReNeRF shows competitive PSNR/SSIM/LPIPS compared to other dynamic NeRF methods [S4].
++*   **Scaling:** Scales with the number of input images and the complexity of the scene. Sparse representations and emptiness voxels can improve scalability [S4].
++*   **Strengths:** Simple loss function, differentiable, can optimize various scene parameters jointly [S1, S4].
++*   **Limitations:** Can be sensitive to initial camera poses and lighting conditions. May converge to local minima [S1, S5].
++*   **When to use:** When high-quality novel view synthesis is required and ground-truth images are available. Suitable for both static and dynamic scenes [S1, S4].
++*   **When not to use:** When computational resources are limited and high-quality results are not critical. When ground-truth images are not available [S1].
+ 
+ ## Background
+-Photometric optimization is a fundamental technique in differentiable rendering, originating from the need to train neural radiance fields (NeRF) and other implicit scene representations from multi-view images [S1, S3, S4]. The method leverages the differentiability of the volume rendering equation to backpropagate pixel errors to scene parameters [44-radiance-field-optimization.md]. Key developments include the use of feature grids (e.g., EgoNeRF) to ensure uniform ray-grid hitting rates, direction-aware representations for dynamic scenes (DaReNeRF), and inverse rendering frameworks that optimize geometry, materials, and lighting jointly (IRCasTRF) [S1, S2, S4]. Test-time optimization has also been introduced to refine poses post-training [S5].
++Photometric optimization is a fundamental technique in differentiable rendering and inverse graphics. It has been widely used in NeRF-based methods for novel view synthesis [S1, S4, S5]. The method relies on the differentiability of the volume rendering equation, allowing gradients to be backpropagated from the image space to the scene parameters [44-radiance-field-optimization.md]. EgoNeRF introduced a balanced spherical grid for egocentric view synthesis, demonstrating the effectiveness of photometric optimization for large-scale scenes [S1]. DaReNeRF extended this to dynamic scenes using a direction-aware representation [S4]. Test-time photometric optimization has been proposed to refine camera poses and factor out pose errors from view synthesis quality [S5].
+ 
+ ## Sources
+@@ -149,3 +156,4 @@
+ [S3] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31
+ [S4] DaReNeRF: Direction-aware Representation for Dynamic Scenes, https://doi.org/10.1109/cvpr52733.2024.00481, fetched 2026-10-27
+-[S5] SPARF: Neural Radiance Fields from Sparse and Noisy Poses, https://doi.org/10.1109/cvpr52729.2023.00408, fetched 2026-10-26+[S5] SPARF: Neural Radiance Fields from Sparse and Noisy Poses, https://doi.org/10.1109/cvpr52729.2023.00408, fetched 2026-10-26
++[S6] Example-based synthesis of three-dimensional clouds from photographs, https://doi.org/10.1145/3095140.3095168, fetched 2026-10-29

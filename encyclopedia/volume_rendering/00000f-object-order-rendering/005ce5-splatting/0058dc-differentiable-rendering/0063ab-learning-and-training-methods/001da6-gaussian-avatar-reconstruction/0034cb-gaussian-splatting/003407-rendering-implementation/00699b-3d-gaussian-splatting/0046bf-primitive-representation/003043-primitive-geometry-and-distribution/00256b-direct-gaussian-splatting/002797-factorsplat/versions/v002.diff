@@ -1,0 +1,422 @@
+--- v001.md
++++ v002.md
+@@ -1,31 +1,40 @@
+ # FactorSplat
+ 
+-Also called: FactorSplat: Appearance-Controllable Gaussian Proxies for Medical Volume Rendering
+ 
+ ## Overview
+-FactorSplat is a per-scene N-dimensional Gaussian splatting (N-DGS) proxy that accepts region-specific intensity-to-RGBA transfer function (TF) curves at inference time, allowing appearance changes without retraining or refitting [S1, unofficial]. It solves the problem of image-trained Gaussian proxies baking one transfer function into their appearance, which prevents supporting new presets without rebuilding the proxy [S1, unofficial]. Unlike VEG which stores scalar values and applies 1D mappings under emission-absorption, FactorSplat uses region-specific intensity TFs and cinematic-rendering supervision, combining direct lookup with an image-trained N-DGS proxy [S1, unofficial]. Unlike DeepONet which generates full weights with a hypernetwork, FactorSplat grounds function-valued TF inputs in each Gaussian's local support with per-primitive factors mapping local codes to appearance offsets [S1, unofficial].
++FactorSplat is a per-scene N-dimensional Gaussian splatting (N-DGS) proxy that accepts region-specific intensity-to-RGBA transfer function (TF) curves at inference time, allowing appearance changes without retraining or refitting [S1, unofficial]. It solves the problem of image-trained Gaussian proxies baking one transfer function into their appearance, which prevents supporting new presets without rebuilding the proxy [S1, unofficial]. Unlike standard Gaussian Splatting where geometry and appearance are tightly coupled to a single rendering configuration, FactorSplat decouples the geometric primitives from the appearance logic, allowing multiple TFs to share the same underlying Gaussian proxy [S1, unofficial]. It differs from region-aware VEG by using region-specific intensity TFs and cinematic-rendering supervision, combining direct lookup with an image-trained N-DGS proxy [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of $N$ Gaussian primitives defined by centers $\boldsymbol{\mu}_i$, covariances $\boldsymbol{\Sigma}_i$, and opacity logits $o_i$. A bank of training presets $\mathcal{T}_{train}$ and their corresponding reference images. At inference, a target preset $T$ defined by region-specific intensity-to-RGBA curves $\mathbf{R}_T(m, h)$.
+-*   **Output:** Rendered images for the target preset $T$ using the shared geometry and TF-dependent appearance attributes.
++*   **Input:** A set of $N$ Gaussian primitives defined by centers $\boldsymbol{\mu}_i$, covariances $\boldsymbol{\Sigma}_i$, and opacity logits $o_i$. A set of $M$ segmented regions/materials. A target transfer function preset $T$, defined by region-specific intensity-to-RGBA curves.
++*   **Output:** Rendered image with colors and opacities adjusted for preset $T$, while maintaining the shared geometry and directional appearance of the base proxy.
+ 
+ **Data Structures:**
+-*   **Gaussian Primitives:** Each primitive $i$ stores:
++*   **Gaussian Primitives:** For each primitive $i$:
+     *   $\boldsymbol{\mu}_i \in \mathbb{R}^3$: Center.
+     *   $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3 \times 3}$: Covariance.
+     *   $o_i \in \mathbb{R}$: Opacity logit.
+-    *   $\mathbf{C}^{base}_i \in \mathbb{R}^{Q_b \times 3}$: Spherical Harmonic (SH) coefficients for RGB, where $Q_b=4$ (degree-one SH: 1 DC + 3 directional).
+-    *   $\mathbf{z}_i \in \mathbb{R}^r$: Learned low-rank residual code (initialized and updated during training).
++    *   $\mathbf{C}^{\text{base}}_i \in \mathbb{R}^{Q_b \times 3}$: Spherical Harmonic (SH) coefficients for RGB, where $Q_b=4$ (degree-one SH: 1 DC + 3 directional).
++    *   $\mathbf{z}_i \in \mathbb{R}^r$: Learned low-rank residual vector (initialized to zero).
+ *   **Transfer Function Representation:**
+-    *   Presets are exported on a common grid of $S$ intensity samples $\{h_s\}_{s=1}^S$.
+-    *   Raw TF curves are averaged onto $B=64$ intensity bins to create $\mathbf{R}_T^{(B)} \in [0, 1]^{M \times B \times 4}$, where $M$ is the number of segmented regions/materials.
+-    *   Each region-intensity pair $(m, b)$ is encoded as a single integer $u = m \cdot B + b$.
++    *   Base preset $T_0$ and target preset $T$.
++    *   Common grid of $S$ intensity samples $\{h_s\}_{s=1}^S$.
++    *   Raw TF curves averaged onto $B=64$ intensity bins: $\mathbf{R}^{(B)}_T \in [0, 1]^{M \times B \times 4}$.
++    *   Region channel $m \in \{0, \dots, M-1\}$.
++    *   Intensity-bin index $b \in \{0, \dots, B-1\}$.
++*   **Local Support Data (per primitive $i$):**
++    *   $K_i \le 27$: Number of valid samples in the $3 \times 3 \times 3$ voxel window around $\boldsymbol{\mu}_i$.
++    *   $\mathbf{m}_{ik} \in \{0, \dots, M-1\}$: Region channel of the $k$-th valid sample.
++    *   $\mathbf{b}_{ik} \in \{0, \dots, B-1\}$: Intensity-bin index of the $k$-th valid sample.
++    *   $w_{ik} \in [0, 1]$: Normalized nonnegative weight for the $k$-th sample, such that $\sum_{k=1}^{K_i} w_{ik} = 1$.
++    *   $u_{ik} = \mathbf{m}_{ik} \cdot B + \mathbf{b}_{ik}$: Encoded integer identifier for the pair $(\mathbf{m}_{ik}, \mathbf{b}_{ik})$.
+ 
+ **Parameters:**
+-*   $B = 64$: Number of intensity bins [S1, unofficial].
+-*   $K = 27$: Maximum number of valid samples in the voxel window [S1, unofficial].
+-*   $H, r$: Hidden and output dimensions of the local functional encoder MLP [S1, unofficial].
+-*   $T_0$: The base condition preset, centered such that the method yields exact identity at $T_0$ [S1, unofficial].
++*   $B = 64$: Number of intensity bins for TF discretization [S1, unofficial].
++*   $S$: Number of intensity samples in the common grid [S1, unofficial].
++*   $M$: Number of segmented regions/materials [S1, unofficial].
++*   $H, r$: Hidden and output dimensions of the pointwise MLP $\phi_\eta$ [S1, unofficial].
++*   $T_0$: Designated base condition preset. The method is centered on this preset, giving exact identity at $T_0$ [S1, unofficial].
++*   $h$: Calibrated scalar intensity (HU for CT, normalized scalar for MR) [S1, unofficial].
+ 
+ **Steps:**
+@@ -33,38 +42,36 @@
+ 1.  **Initialization:**
+     *   Initialize Gaussian primitives with centers $\boldsymbol{\mu}_i$, covariances $\boldsymbol{\Sigma}_i$, and opacity logits $o_i$. The base opacity is $\sigma(o_i)$ where $\sigma$ is the logistic sigmoid [S1, unofficial].
+-    *   Initialize the learned residual code $\mathbf{z}_i$ to zero [S1, unofficial].
+-    *   Define the base preset $T_0$ [S1, unofficial].
+-
+-2.  **TF Preprocessing (Offline/Per-Preset):**
+-    *   For a given preset $T$, export the intensity-to-RGBA curve $\mathbf{R}_T(m, h) = (\mathbf{p}_T(m, h), a_T(m, h)) \in [0, 1]^3 \times [0, 1]$ for each region $m \in \{0, \dots, M-1\}$ and intensity $h$ [S1, unofficial].
+-    *   Average the raw TF curves onto $B=64$ intensity bins to obtain $\mathbf{R}_T^{(B)} \in [0, 1]^{M \times B \times 4}$ [S1, unofficial].
+-    *   Compute the raw, unpremultiplied RGBA change relative to the base preset $T_0$:
+-        $$ \delta \mathbf{r}_T(m, b) = \mathbf{R}_T^{(B)}(m, b) - \mathbf{R}_{T_0}^{(B)}(m, b) \in \mathbb{R}^4 $$
+-        where $m$ is the region index and $b$ is the intensity bin index [S1, unofficial].
+-
+-3.  **Local Descriptor Sampling (Per Primitive, at Initialization):**
+-    *   For each primitive $i$, sample the $3 \times 3 \times 3$ voxel window around its center $\boldsymbol{\mu}_i$ [S1, unofficial].
+-    *   Identify valid samples $k$. For each valid sample, determine the region channel $m_{ik}$ and the intensity-bin index $b_{ik}$ based on the voxel's value and the current TF binning [S1, unofficial].
+-    *   Let $K_i \le 27$ be the count of valid samples. If $K_i = 0$, set $\mathbf{d}_i = \mathbf{0}$ and $\mathbf{z}_i = \mathbf{0}$ and skip further processing for this primitive [S1, unofficial].
++    *   Initialize the learned residual vectors $\mathbf{z}_i = \mathbf{0}$ [S1, unofficial].
++    *   Initialize the pointwise MLP $\phi_\eta(\mathbf{v}) = \mathbf{W}_2 \text{ReLU}(\mathbf{W}_1 \mathbf{v})$ with weights $\mathbf{W}_1 \in \mathbb{R}^{H \times 4}$ and $\mathbf{W}_2 \in \mathbb{R}^{r \times H}$ [S1, unofficial].
++
++2.  **TF Discretization:**
++    *   Export every preset on the common grid of $S$ intensity samples $\{h_s\}$ to create the sampled input tensor $\mathbf{R}_T \in [0, 1]^{M \times S \times 4}$ [S1, unofficial].
++    *   Average raw TF curves onto $B=64$ intensity bins to get $\mathbf{R}^{(B)}_T \in [0, 1]^{M \times B \times 4}$ [S1, unofficial].
++
++3.  **Local Support Sampling (at initialization):**
++    *   For each primitive $i$, sample the $3 \times 3 \times 3$ voxel window around it [S1, unofficial].
++    *   Identify valid samples $k$ with region channel $\mathbf{m}_{ik}$ and intensity-bin index $\mathbf{b}_{ik}$ [S1, unofficial].
++    *   Count valid samples $K_i \le 27$ [S1, unofficial].
+     *   Compute normalized nonnegative weights $w_{ik}$ such that $\sum_{k=1}^{K_i} w_{ik} = 1$ [S1, unofficial].
+-    *   Encode each pair $(m_{ik}, b_{ik})$ as a single integer $u_{ik} = m_{ik} \cdot B + b_{ik}$ [S1, unofficial].
+-
+-4.  **Appearance Conditioning (At Inference/TF Switch):**
+-    *   **Physical Lookup:** Compute the physical local lookup offset $\mathbf{d}_i(T)$ by the weighted mean of the RGBA change over the primitive's samples:
+-        $$ \mathbf{d}_i(T) = \sum_{k=1}^{K_i} w_{ik} \delta \mathbf{r}_T(m_{ik}, b_{ik}) $$
+-        Here $\mathbf{d}_i = (\mathbf{d}^c_i, \mathbf{d}^\alpha_i) \in \mathbb{R}^3 \times \mathbb{R}$ represents the RGB and opacity offset [S1, unofficial].
+-    *   **Learned Residual:**
+-        *   Embed each RGBA difference using a bias-free pointwise MLP $\phi_\eta(\mathbf{v}) = \mathbf{W}_2 \text{ReLU}(\mathbf{W}_1 \mathbf{v})$, where $\mathbf{W}_1 \in \mathbb{R}^{H \times 4}$ and $\mathbf{W}_2 \in \mathbb{R}^{r \times H}$ [S1, unofficial].
+-        *   Pool the local codes for primitive $i$ using weighted sum:
+-            $$ \mathbf{z}_{i,T} = \sum_{k=1}^{K_i} w_{ik} \phi_\eta(\delta \mathbf{r}_T(m_{ik}, b_{ik})) \in \mathbb{R}^r $$
+-            If $K_i = 0$, $\mathbf{z}_{i,T} = \mathbf{0}$ [S1, unofficial].
+-    *   **Attribute Update:**
+-        *   The backbone opacity passed to the rasterizer is $\sigma(o_i) s_{view_i}(\pi)$, where $s_{view_i}(\pi)$ is the TF-independent opacity attenuation from the N-DGS backbone [S1, unofficial].
+-        *   Modify only the view-independent (DC) color and opacity using $\mathbf{d}_i(T)$ and $\mathbf{z}_{i,T}$. The directional SH coefficients remain TF-independent [S1, unofficial].
+-        *   Specifically, the DC color coefficient $\mathbf{C}^{base}_{i,0}$ is adjusted by the RGB part of $\mathbf{d}_i(T)$ and the contribution from $\mathbf{z}_{i,T}$ (mapped back to RGB space via the appearance response module, see Subtopics). The opacity logit $o_i$ is adjusted by the opacity part of $\mathbf{d}_i(T)$ and the contribution from $\mathbf{z}_{i,T}$ [S1, unofficial].
+-
+-5.  **Rendering:**
+-    *   Rasterize the Gaussians using EWA splatting and front-to-back alpha compositing [S1, unofficial].
+-    *   Use the updated DC color and opacity for the final pixel colors [S1, unofficial].
++    *   Define empirical joint mass $p_i(m, b) = \sum_{k=1}^{K_i} w_{ik} \cdot \mathbb{1}[(\mathbf{m}_{ik}, \mathbf{b}_{ik}) = (m, b)]$ [S1, unofficial].
++    *   Encode each pair $(\mathbf{m}_{ik}, \mathbf{b}_{ik})$ as a single integer $u_{ik} = \mathbf{m}_{ik} \cdot B + \mathbf{b}_{ik}$ [S1, unofficial].
++
++4.  **Appearance Conditioning (at inference for preset $T$):**
++    *   Compute the raw, unpremultiplied RGBA change for preset $T$ relative to base $T_0$:
++        $$ \delta \mathbf{r}_T(m, b) = \mathbf{R}^{(B)}_T(m, b) - \mathbf{R}^{(B)}_{T_0}(m, b) \in \mathbb{R}^4 $$
++        where $\mathbf{R}_T(m, h) = (\mathbf{p}_T(m, h), a_T(m, h)) \in [0, 1]^3 \times [0, 1]$ [S1, unofficial].
++    *   **Physical Lookup:** Compute the physical local lookup offset $\mathbf{d}_i(T)$ by weighted mean of $\delta \mathbf{r}_T$ over the primitive's samples:
++        $$ \mathbf{d}_i(T) = \sum_{k=1}^{K_i} w_{ik} \cdot \delta \mathbf{r}_T(\mathbf{m}_{ik}, \mathbf{b}_{ik}) $$
++        If $K_i = 0$, set $\mathbf{d}_i(T) = \mathbf{0}$ [S1, unofficial].
++    *   **Learned Residual:** Embed each RGBA difference using the bias-free pointwise MLP $\phi_\eta(\mathbf{v}) = \mathbf{W}_2 \text{ReLU}(\mathbf{W}_1 \mathbf{v})$. Pool the local codes for primitive $i$ using weighted sum:
++        $$ \mathbf{z}_{i,T} = \sum_{k=1}^{K_i} w_{ik} \cdot \phi_\eta(\delta \mathbf{r}_T(\mathbf{m}_{ik}, \mathbf{b}_{ik})) \in \mathbb{R}^r $$
++        If $K_i = 0$, set $\mathbf{z}_{i,T} = \mathbf{0}$ [S1, unofficial].
++    *   **Apply Appearance:** Both $\mathbf{d}_i(T)$ and $\mathbf{z}_{i,T}$ modify only the view-independent (DC) color and opacity. Directional SH coefficients remain TF-independent [S1, unofficial].
++        *   Let $\mathbf{C}^{\text{base}}_{i,0} \in \mathbb{R}^3$ be the DC color coefficient from $\mathbf{C}^{\text{base}}_i$.
++        *   Let $\alpha_i = \sigma(o_i) s_{\text{view}_i}(\pi)$ be the backbone opacity, where $s_{\text{view}_i}(\pi)$ is the TF-independent opacity attenuation [S1, unofficial].
++        *   The final DC color $\mathbf{C}^{\text{final}}_{i,0}$ and opacity $\alpha^{\text{final}}_i$ are adjusted by $\mathbf{d}_i(T)$ and $\mathbf{z}_{i,T}$. The exact mapping from $\mathbf{z}_{i,T}$ to color/opacity offset is not explicitly detailed in the sources beyond being a residual correction [S1, unofficial]. [G: Typically, $\mathbf{z}_{i,T}$ is projected to $\mathbb{R}^4$ (RGB+opacity) and added to the base values, clamped to valid ranges.]
++
++5.  **Pruning:**
++    *   Prune primitives based on maximum opacity over the training bank of TFs to preserve coverage and protect primitives needed by different training TFs [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -73,166 +80,144 @@
+ import numpy as np
+ 
+-def initialize_primitives(num_primitives, mu, Sigma, o):
+-    """
+-    Initialize Gaussian primitives.
+-    mu: (N, 3) centers
+-    Sigma: (N, 3, 3) covariances
+-    o: (N,) opacity logits
+-    """
+-    # Shared geometry and base SH coefficients (Q_b=4, 3 channels)
+-    C_base = np.zeros((num_primitives, 4, 3)) 
+-    # Learned residual codes (r dimensions)
+-    z = np.zeros((num_primitives, r))
+-    return mu, Sigma, o, C_base, z
+-
+-def preprocess_tf(preset_curves, base_preset_curves, M, B, S):
+-    """
+-    Preprocess TF curves into binned RGBA differences.
+-    preset_curves: dict mapping preset_id to (M, S, 4) array
+-    base_preset_curves: (M, S, 4) array for T0
+-    M: number of regions
+-    B: number of bins (64)
+-    S: number of intensity samples
+-    Returns:
+-    delta_r: (M, B, 4) array of RGBA differences
+-    """
+-    # Average raw TF curves onto B bins
+-    # Assuming preset_curves[preset_id] is (M, S, 4)
+-    # This step is done per preset at inference or precomputed
+-    R_T_B = average_to_bins(preset_curves, M, S, B)
+-    R_T0_B = average_to_bins(base_preset_curves, M, S, B)
++def factor_splat_inference(
++    primitives,  # List of dicts with keys: mu, Sigma, o, C_base, z
++    tf_curves,   # Dict: preset_id -> (M, S, 4) array of RGBA values
++    base_preset_id, # str: ID of T0
++    target_preset_id, # str: ID of T
++    M,           # int: number of regions
++    B,           # int: number of intensity bins (64)
++    S,           # int: number of intensity samples
++    W1, W2       # np.arrays for MLP phi_eta
++):
++    """
++    Computes the appearance-modified DC color and opacity for each primitive
++    for a given target transfer function preset.
++    """
++    # 1. Discretize TFs
++    # Average raw TF curves onto B bins. 
++    # Note: In practice, this is done once at initialization or when TFs change.
++    # Here we assume R_B is precomputed or computed on the fly.
++    R_B_base = average_tf_bins(tf_curves[base_preset_id], S, B)
++    R_B_target = average_tf_bins(tf_curves[target_preset_id], S, B)
+     
+-    # Compute raw, unpremultiplied RGBA change
+-    delta_r = R_T_B - R_T0_B
+-    return delta_r
+-
+-def average_to_bins(curves, M, S, B):
+-    """
+-    Average curves of shape (M, S, 4) onto B bins.
+-    """
+-    # Implementation depends on binning strategy (e.g., histogram averaging)
+-    # Not fully specified in sources, assumed to be a standard binning operation
++    # 2. Compute RGBA change delta_r
++    # delta_r_T(m, b) = R_T^(B)(m, b) - R_T0^(B)(m, b)
++    delta_r = R_B_target - R_B_base  # Shape: (M, B, 4)
++    
++    results = []
++    
++    for prim in primitives:
++        mu = prim['mu']
++        K_i = prim['K_i']
++        m_ik = prim['m_ik']  # Array of shape (K_i,)
++        b_ik = prim['b_ik']  # Array of shape (K_i,)
++        w_ik = prim['w_ik']  # Array of shape (K_i,)
++        z_learned = prim['z'] # Array of shape (r,)
++        C_base = prim['C_base'] # Shape: (4, 3) -> 1 DC + 3 directional
++        o = prim['o']
++        
++        # Handle edge case: no valid samples
++        if K_i == 0:
++            d_i = np.zeros(4) # Or (3,) for color? Source says d_i = (d_c_i, d_alpha_i) in R^3 x R
++            z_i_T = np.zeros_like(z_learned)
++        else:
++            # 3. Physical Lookup d_i(T)
++            # delta_r_T(m_ik, b_ik)
++            # m_ik and b_ik are indices into delta_r
++            delta_r_samples = delta_r[m_ik, b_ik, :]  # Shape: (K_i, 4)
++            
++            # Weighted mean
++            d_i = np.sum(w_ik[:, np.newaxis] * delta_r_samples, axis=0) # Shape: (4,)
++            
++            # 4. Learned Residual z_i,T
++            # phi_eta(v) = W2 ReLU(W1 v)
++            # Embed each RGBA difference
++            phi_eta_samples = np.array([phi_eta(v, W1, W2) for v in delta_r_samples]) # Shape: (K_i, r)
++            
++            # Weighted sum
++            z_i_T = np.sum(w_ik[:, np.newaxis] * phi_eta_samples, axis=0) # Shape: (r,)
++            
++        # 5. Apply to DC color and opacity
++        # C_base[0] is DC color (RGB)
++        # o is opacity logit
++        # d_i contains color offset (3) and opacity offset (1)? 
++        # Source says d_i = (d_c_i, d_alpha_i) in R^3 x R. 
++        # Let's assume d_i[:3] is color offset, d_i[3] is opacity offset.
++        
++        dc_color_offset = d_i[:3]
++        alpha_offset = d_i[3]
++        
++        # z_i_T is residual for DC color and opacity. 
++        # Source doesn't specify exact mapping from R^r to R^4. 
++        # [G] Assuming a linear projection or that z_i_T is already in R^4? 
++        # Source says z_i,T in R^r. 
++        # Let's assume there is a projection layer P_z: R^r -> R^4 for color/opacity.
++        # Since not given, we note this as a gap. 
++        # However, source says "Both branches modify only the view-independent (DC) color and opacity."
++        # And "z_i,T ... model the cinematic renderer's residual response."
++        # We will assume a simple projection for the sake of completeness, marked [G].
++        # In the actual paper, there might be a small MLP or linear layer.
++        # For this article, we state the gap.
++        
++        # Final DC Color
++        final_dc_color = C_base[0] + dc_color_offset + [G: projection of z_i_T to RGB]
++        
++        # Final Opacity
++        # Backbone opacity is sigma(o) * s_view
++        # d_i has opacity offset. 
++        # z_i_T has opacity residual.
++        # [G] Assuming alpha_offset is added to the logit or opacity directly?
++        # Source says "modify ... opacity". Usually additive to opacity or logit.
++        # Let's assume additive to opacity for simplicity, clamped.
++        base_opacity = sigmoid(o)
++        final_opacity = np.clip(base_opacity + alpha_offset + [G: projection of z_i_T to alpha], 0, 1)
++        
++        results.append({
++            'dc_color': final_dc_color,
++            'opacity': final_opacity,
++            'directional_sh': C_base[1:] # Unchanged
++        })
++        
++    return results
++
++def phi_eta(v, W1, W2):
++    """Bias-free pointwise MLP."""
++    return W2 @ np.maximum(0, W1 @ v)
++
++def average_tf_bins(tf_array, S, B):
++    """
++    Averages TF curves from S samples to B bins.
++    tf_array shape: (M, S, 4)
++    Returns shape: (M, B, 4)
++    """
++    # This is a placeholder for the binning logic.
++    # In practice, this involves histogramming or averaging intensity values.
++    # The source says "Average raw TF curves onto B=64 intensity bins".
++    # We assume the intensity grid {h_s} is mapped to B bins.
++    # [G] Specific binning algorithm not provided.
+     pass
+-
+-def sample_local_descriptor(mu, voxel_grid, M, B):
+-    """
+-    Sample local material-intensity descriptor for a primitive.
+-    mu: (3,) center
+-    voxel_grid: 3D array of region IDs and intensities
+-    M: number of regions
+-    B: number of bins
+-    Returns:
+-    valid_indices: list of valid sample indices k
+-    m_ik: (K_i,) region indices
+-    b_ik: (K_i,) bin indices
+-    weights: (K_i,) normalized weights
+-    """
+-    # Sample 3x3x3 voxel window around mu
+-    # Identify valid samples (within bounds, non-empty)
+-    # Determine region channel m_ik and intensity bin b_ik
+-    # Compute weights w_ik (e.g., inverse distance or uniform)
+-    # Normalize weights
+-    pass
+-
+-def compute_physical_lookup(delta_r, m_ik, b_ik, weights):
+-    """
+-    Compute physical local lookup offset d_i(T).
+-    delta_r: (M, B, 4)
+-    m_ik: (K_i,)
+-    b_ik: (K_i,)
+-    weights: (K_i,)
+-    Returns:
+-    d_i: (4,) RGBA offset
+-    """
+-    # Encode pair as integer index if needed, but direct indexing is fine
+-    # delta_r[m_ik, b_ik] gives (K_i, 4)
+-    changes = delta_r[m_ik, b_ik]
+-    d_i = np.sum(weights[:, np.newaxis] * changes, axis=0)
+-    return d_i
+-
+-def compute_learned_residual(delta_r, m_ik, b_ik, weights, W1, W2):
+-    """
+-    Compute learned residual code z_i,T.
+-    delta_r: (M, B, 4)
+-    m_ik: (K_i,)
+-    b_ik: (K_i,)
+-    weights: (K_i,)
+-    W1: (H, 4)
+-    W2: (r, H)
+-    Returns:
+-    z_i: (r,)
+-    """
+-    changes = delta_r[m_ik, b_ik] # (K_i, 4)
+-    # Embed each RGBA difference
+-    embedded = np.maximum(0, changes @ W1.T) # ReLU(W1v)
+-    embedded = embedded @ W2.T # W2 ReLU(W1v)
+-    # Pool
+-    z_i = np.sum(weights[:, np.newaxis] * embedded, axis=0)
+-    return z_i
+-
+-def update_appearance(C_base, o, d_i, z_i, appearance_response_module):
+-    """
+-    Update DC color and opacity.
+-    C_base: (4, 3) SH coefficients
+-    o: scalar opacity logit
+-    d_i: (4,) physical offset
+-    z_i: (r,) learned residual
+-    Returns:
+-    updated_C_base: (4, 3)
+-    updated_o: scalar
+-    """
+-    # d_i = (d_c, d_alpha)
+-    d_c = d_i[:3]
+-    d_alpha = d_i[3]
+-    
+-    # Map z_i to DC color and opacity offset using appearance response module
+-    # This is handled by the child article [Factorized Appearance Response]
+-    # For this article, we assume z_i contributes to DC color and opacity
+-    z_color, z_opacity = appearance_response_module(z_i)
+-    
+-    # Update DC coefficient (index 0)
+-    C_base[0] += d_c + z_color
+-    
+-    # Update opacity logit
+-    # Note: d_alpha is an opacity offset, not logit offset. 
+-    # Sources say "modify only the view-independent (DC) color and opacity".
+-    # It is not explicitly stated if d_alpha is added to opacity or logit.
+-    # Given base opacity is sigma(o), and d_alpha is in [0,1] range (RGBA),
+-    # it is likely added to the final opacity or used to adjust the logit.
+-    # However, sources say "modify ... opacity", and d_i is RGBA change.
+-    # We will assume d_alpha is added to the final opacity value before compositing,
+-    # or used to adjust the logit. Given the complexity, we note the ambiguity.
+-    # But sources say "modify only the view-independent (DC) color and opacity".
+-    # Let's assume d_alpha is added to the opacity value.
+-    # But the rasterizer uses sigma(o). So we might need to adjust o.
+-    # Let's stick to the high-level description: "modify ... opacity".
+-    # We will update o such that sigma(o) is adjusted by d_alpha + z_opacity.
+-    # This requires inverse sigmoid, which might be unstable.
+-    # Alternatively, d_alpha might be a logit offset.
+-    # Given "unpremultiplied RGBA change", d_alpha is in [0,1].
+-    # We will assume the appearance response module handles the mapping to logit space.
+-    updated_o = o + d_alpha + z_opacity # Placeholder for logit adjustment
+-    # Note: The exact mapping of d_alpha and z_opacity to the logit is not fully detailed.
+-    # It is likely that the appearance response module outputs logit adjustments.
+-    
+-    return C_base, updated_o
+ ```
+ 
++**Edge Cases and Pitfalls:**
++*   If a primitive has no valid samples ($K_i = 0$), the lookup offset $\mathbf{d}_i$ and residual $\mathbf{z}_{i,T}$ are set to $\mathbf{0}$ [S1, unofficial].
++*   The region index $m$ only selects the corresponding TF curve; permuting the curve axis and identifiers together leaves the lookup unchanged [S1, unofficial].
++*   Centering the branches on an authored base TF $T_0$ ensures exact identity at $T_0$ (i.e., $\mathbf{d}_i(T_0) = \mathbf{0}$ and $\mathbf{z}_{i,T_0} = \mathbf{0}$) [S1, unofficial].
++
+ ## Subtopics
+ 
+ ### [Factorized Appearance Response](4717-factorized-appearance-response.md)
+-Translates the local code into a DC-SH residual for color and an opacity-logit residual using low-rank factors.
++Factorized Appearance Response is the mechanism within FactorSplat that maps a transfer function (TF) $T$ to per-Gaussian color and opacity adjustments using low-rank factorizations. It enables appearance changes without retraining by computing residuals relative to a base appearance, conditioned on the TF. It differs from standard Gaussian Splatting by decoupling the geometric primitives from the appearance logic, allowing multiple TFs to share the same underlying Gaussian proxy.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The local lookup and residual computation are performed per primitive per TF switch. The lookup is $O(K_i)$ where $K_i \le 27$. The MLP evaluation is $O(H)$ per sample. The pooling is $O(K_i)$. Overall, conditioning is $O(N \cdot K_i \cdot H)$. Rendering is $O(N)$ per pixel using EWA splatting.
+-*   **Memory Complexity:** Stores $N$ Gaussians with shared geometry and SH coefficients. The learned residual codes add $O(N \cdot r)$ memory. The TF curves add $O(M \cdot B \cdot 4)$ memory.
++*   **Time Complexity:** The appearance conditioning is computed once per TF switch. The lookup and residual computation depend on the number of primitives $N$ and the local support size $K_i \le 27$. The MLP evaluation is constant time per sample. Rasterization remains $O(N)$ per pixel.
++*   **Memory Complexity:** Storage includes the Gaussian primitives ($O(N)$), the TF curves ($O(M \cdot S \cdot 4)$), and the MLP weights ($O(H \cdot 4 + r \cdot H)$). The local support data is stored per primitive ($O(N)$).
+ *   **Measured Performance:** On seven CT and MR scans, FactorSplat improves mean PSNR and changed-region error over region-aware VEG across validation, interpolation, unseen composition, and out-of-distribution (OOD) edits [S1, unofficial].
+-*   **Strengths:** Supports unseen TFs without optimization or per-preset parameters. Combines direct lookup with an image-trained N-DGS proxy. Geometry and directional appearance are shared, reducing redundancy.
+-*   **Limitations:** Requires region segmentation for the TF curves. The learned residual may not perfectly capture complex cinematic rendering effects if the local support is insufficient.
+-*   **When to use:** When dynamic appearance changes are required for medical volume rendering without retraining.
+-*   **When not to use:** When region segmentation is not available or when the TFs are not region-specific.
++*   **Strengths:** Allows appearance changes without retraining or refitting. Decouples geometry from appearance. Handles region-specific intensity TFs.
++*   **Limitations:** Requires region segmentation. Assumes a common intensity grid. Performance depends on the quality of the base proxy and the TF curves.
++*   **When to use:** When dynamic appearance changes are needed for a fixed geometry, especially in medical volume rendering with region-specific TFs.
++*   **When not to use:** When geometry also needs to change with the TF, or when region segmentation is not available.
+ 
+ ## Background
+-FactorSplat was introduced in "FactorSplat: Appearance-Controllable Gaussian Proxies for Medical Volume Rendering" [S1, unofficial]. It addresses the limitations of image-trained Gaussian proxies that bake one transfer function into their appearance. The method builds on N-DGS [S1, unofficial] and combines ideas from VEG [S1, unofficial] and DeepONet [S1, unofficial], but differs by using region-specific intensity TFs and cinematic-rendering supervision.
++FactorSplat was introduced in the paper "FactorSplat: Appearance-Controllable Gaussian Proxies for Medical Volume Rendering" [S1, unofficial]. It builds on N-DGS [S1, unofficial] and addresses the limitations of image-trained Gaussian proxies that bake one transfer function into their appearance. It is compared to VEG [S1, unofficial] and DeepONet [S1, unofficial].
+ 
+ ## Sources

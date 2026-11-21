@@ -1,0 +1,185 @@
+--- v001.md
++++ v002.md
+@@ -4,107 +4,108 @@
+ 
+ ## Overview
+-A method to map pre-shaded textures onto terrain or volume surfaces without visible repetition artifacts by using aperiodic tiling schemes with specific boundary conditions [S1]. Unlike standard periodic wrapping which creates obvious seams, this method ensures that objects crossing tile boundaries are correctly replicated on "twin" edges while preventing correlation artifacts at corners [S1]. It is distinct from sibling methods like [Sine-based procedural voxel generation](2477-sine-based-procedural-voxel-generation.md) because it relies on pre-computed, static texture patterns rather than on-the-fly mathematical noise functions [S1].
++A method to map pre-shaded texture cells onto a terrain or volume surface without visible repetition, using aperiodic boundary conditions and edge-matching constraints. It differs from standard periodic tiling by enforcing specific edge correlations to prevent seams, and from simple noise-based tiling by relying on pre-computed geometric patterns rather than procedural generation at render time.
+ 
+ ## How it works
+-**Inputs:**
+-- Spatial coordinates $(u, v, w)$ for texture lookup.
+-- Reference texture containing the arranged aperiodic tiles.
+-- Hardware texture sampler supporting linear interpolation.
+-
+-**Outputs:**
+-- Color/density value at the sampled coordinate.
++**Inputs and Outputs:**
++*   **Input:** A set of pre-shaded triangular tile patterns (typically 8 triangles: 4 north-pointing, 4 south-pointing) arranged in a reference texture.
++*   **Output:** A seamless, non-repeating texture map for terrain or volume rendering.
+ 
+ **Data Structures:**
+-- **Reference Texture:** A 2D image containing 8 triangular tiles arranged to satisfy edge constraints.
+-- **Tile Geometry:** Triangular regions within the texture. Each tile has edges with specific boundary conditions (colors/types).
+-- **Twin Edges:** Pairs of edges sharing the same boundary condition. Objects crossing one must be replicated on the other.
++*   **Reference Texture:** A 2D image containing the 8 triangular tiles. To support hardware linear interpolation at boundaries, the texture must be wrapped such that "twin edges" (edges sharing the same boundary condition) are coherent.
++*   **Tile Selection Logic:** A mapping from spatial coordinates to one of the 8 tile types based on aperiodic triplet selection.
+ 
+ **Steps:**
+-
+-1.  **Define Boundary Conditions:**
+-    Assume 2 different boundary conditions in each of the 3 directions (triangular tiling). This yields 8 possible triplets and 16 possible triangles (pointing north or south) [S1].
+-
+-2.  **Select Tile Subset:**
+-    To save memory, select a subset of 8 triangles (4 pointing north, 4 pointing south) to ensure each triplet is used once without breaking aperiodicity [S1]. Higher variability can be achieved by keeping all 16 tiles [S1].
+-
+-3.  **Arrange Tiles in Reference Texture:**
+-    Arrange the 8 tiles in the reference texture such that edge constraints are met. Each edge kind appears twice (twin edges) [S1].
+-
+-4.  **Shear and Wrap:**
+-    The natural wrapping of triangular tiles is slanted (e.g., bottom and top triangles share an edge). To make it tractable by hardware textures, shear and wrap the pattern to obtain square wrapping [S1].
+-
+-5.  **Build Patterns (Pre-computation):**
+-    - Place objects crossing boundary edges first. These objects must be replicated on the twin edge [S1].
+-    - Ensure neighborhoods of twin edges are correlated but not identical (only content exactly on the axis is identical) [S1].
+-    - **Constraint:** Objects must never cross two edges (e.g., corners) to avoid correlating them and replicating on half the cells [S1].
+-    - Start by placing one tree close to a corner (not crossing 2 edges) to avoid vicinity bias [S1].
+-    - Freely place other trees, constrained only by not crossing the triangle tile boundary [S1].
+-
+-6.  **Sample Texture:**
+-    Use standard hardware texture sampling with linear interpolation on the sheared, square-wrapped reference texture [S1].
++1.  **Define Boundary Conditions:** Assume 2 different boundary conditions in each of the 3 directions of a triangular tiling. This yields 8 possible triplets and 16 possible triangles (pointing north or south).
++2.  **Select Subset:** Choose a subset of 8 triangles (4 north, 4 south) to save memory. Ensure each triplet is used once to maintain aperiodicity [S1].
++3.  **Arrange Reference Texture:**
++    *   Place the 8 tiles in the reference texture such that edge constraints are met.
++    *   Each edge kind appears twice in the texture; these are "twin edges."
++    *   The natural wrapping is slanted (e.g., bottom and top triangles share an edge).
++    *   Apply a shear transformation to the pattern to convert the slanted wrapping into a square wrapping tractable by hardware textures [S1].
++4.  **Build Patterns (Content Placement):**
++    *   **Constraint 1:** Objects crossing an edge axis must be replicated on the twin edge. Neighborhoods are correlated but not identical [S1].
++    *   **Constraint 2:** Objects must never cross two edges (e.g., corners) to avoid correlating them and replicating on half the cells [S1].
++    *   **Placement Strategy:**
++        1.  Place trees crossing boundaries first (replicated on twin edges).
++        2.  Start with one tree close to a corner (not crossing 2 edges) to avoid vicinity bias [S1].
++        3.  Freely place other trees, constrained only by not crossing the triangle tile boundary [S1].
++5.  **Render:** Sample the reference texture using the aperiodic mapping. Use hardware linear interpolation for mag/min filters.
+ 
+ **Pseudocode:**
+-
+ ```python
+-def sample_aperiodic_texture(u, v, reference_texture):
++def sample_aperiodic_texture(u, v, reference_texture, tile_map):
+     """
+-    Samples the aperiodic texture at coordinates (u, v).
+-    Assumes the reference texture has been pre-sheared and arranged
+-    according to the edge-matching constraints.
++    Samples the aperiodic texture at normalized coordinates (u, v).
++    reference_texture: The sheared, square-wrapped texture containing 8 tiles.
++    tile_map: A function or lookup that determines which of the 8 tiles 
++              corresponds to the current spatial location based on aperiodic rules.
+     """
+-    # 1. Normalize coordinates to [0, 1]
+-    u = u % 1.0
+-    v = v % 1.0
++    # Determine which of the 8 triangular tiles covers the current point
++    tile_index = tile_map(u, v)
+     
+-    # 2. Sample the texture using hardware linear interpolation
+-    # The texture is arranged such that edge artifacts are minimized
+-    # by coherent blending of twin edges.
+-    color = reference_texture.sample_linear(u, v)
++    # Get the local coordinates within the specific triangular tile
++    # Note: The reference texture is sheared, so standard UV mapping applies 
++    # to the square-wrapped result.
++    local_u, local_v = get_local_coords_in_tile(tile_index, u, v)
++    
++    # Sample the texture. Hardware linear interpolation handles the 
++    # coherence between twin edges if the reference texture was built correctly.
++    color = reference_texture.sample(local_u, local_v)
+     
+     return color
+ 
+-def build_aperiodic_reference_texture():
++def build_reference_texture(tiles):
+     """
+-    Pre-computation step to create the reference texture.
+-    This is done offline, not per-frame.
++    Constructs the reference texture from 8 pre-shaded triangular tiles.
++    Ensures twin edges are coherent and applies shear for square wrapping.
+     """
+-    # 1. Define 8 triangular tiles with specific boundary conditions
+-    tiles = create_triangular_tiles(num_tiles=8)
++    # 1. Arrange tiles so each edge kind appears twice (twin edges)
++    arranged_tiles = arrange_tiles_for_twin_edges(tiles)
+     
+-    # 2. Arrange tiles in a 2D grid, ensuring twin edges match
+-    # Twin edges share the same boundary condition and are placed
+-    # such that linear interpolation blends them coherently.
+-    arranged_texture = arrange_tiles_in_grid(tiles)
+-    
+-    # 3. Shear the texture to convert slanted wrapping to square wrapping
+-    sheared_texture = shear_and_wrap(arranged_texture)
+-    
+-    # 4. Populate tiles with objects (e.g., trees)
+-    # - Place objects crossing boundaries first, replicating on twin edges
+-    # - Ensure no object crosses two edges (corners)
+-    # - Place one object near a corner (not crossing 2 edges) to avoid bias
+-    populate_tiles_with_objects(sheared_texture)
++    # 2. Apply shear transformation to convert slanted wrapping to square
++    sheared_texture = apply_shear_and_wrap(arranged_tiles)
+     
+     return sheared_texture
++
++def place_objects_in_tile(tile, objects):
++    """
++    Places objects (e.g., trees) into a tile respecting edge constraints.
++    """
++    # Place objects crossing boundaries first
++    boundary_objects = [obj for obj in objects if obj.crosses_boundary()]
++    for obj in boundary_objects:
++        # Replicate on twin edge
++        replicate_on_twin_edge(obj)
++        
++    # Place one tree near a corner (not crossing 2 edges) to avoid bias
++    corner_tree = find_near_corner_object(objects)
++    if corner_tree:
++        place(corner_tree, near_corner=True)
++        
++    # Place remaining objects freely (not crossing tile boundary)
++    free_objects = [obj for obj in objects if not obj.crosses_boundary() and obj != corner_tree]
++    for obj in free_objects:
++        place(obj, constraint="not_crossing_tile_boundary")
+ ```
+ 
+ **Parameters:**
+-- Number of tiles: 8 triangles used in implementation. 16 possible if higher variability required [S1].
++*   **Number of Tiles:** 8 triangles (4 north, 4 south) are sufficient for aperiodicity. 16 triangles can be used for higher variability [S1].
++*   **Texture Resolution:** Depends on implementation, but must support the sheared square wrapping [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Hardware Linear Interpolation:** At tile borders, hardware linear interpolation blends outside color with inside color. If not coherent, this causes artifacts [S1].
+-- **Corner Crossing:** Objects crossing two edges (corners) correlate them and replicate on half the cells, breaking aperiodicity [S1].
+-- **Pre-shaded Limitation:** Patterns cannot be rotated if textures are pre-shaded, limiting dynamic lighting variations [S1].
++*   **Hardware Linear Interpolation:** At tile borders, hardware linear interpolation blends outside color with inside color. If the reference texture is not arranged to make twin edges coherent, artifacts will appear [S1].
++*   **Corner Crossing:** Objects crossing two edges (corners) must be avoided, as this correlates edges and causes replication on half the cells [S1].
++*   **Pre-shading Limitation:** Patterns are pre-shaded, so they cannot be rotated at render time [S1].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per sample, as it relies on standard texture lookup [S1].
+-- **Memory Complexity:** Depends on the number of tiles and texture resolution. Using 8 tiles saves memory compared to 16 [S1].
+-- **Strengths:** Avoids visible repetition in large terrains; compatible with pre-shaded textures [S1].
+-- **Limitations:** Limited to pre-shaded patterns (no dynamic lighting); requires careful pre-computation of tile arrangements [S1].
+-- **When to Use:** When rendering large terrains or volumes with static, pre-shaded textures where repetition is undesirable [S1].
+-- **When Not to Use:** When dynamic lighting or rotation of patterns is required [S1].
++*   **Time Complexity:** Constant time per sample, assuming efficient tile lookup. The shearing and wrapping are pre-computed.
++*   **Memory Complexity:** Proportional to the number of tiles (8 or 16) and their resolution.
++*   **Strengths:** Eliminates visible repetition in large terrains/volumes without requiring complex procedural noise at render time. Compatible with hardware linear filtering if built correctly.
++*   **Limitations:** Requires pre-shading, limiting dynamic lighting. Manual placement of objects in tiles is required to avoid artifacts. Limited variability compared to fully procedural methods.
++*   **When to Use:** Real-time rendering of large, static or semi-static scenes (e.g., forests) where repetition is noticeable and pre-shading is acceptable.
++*   **When Not to Use:** Dynamic lighting scenarios, or when high variability and organic randomness are required without pre-computation.
+ 
+ ## Background
+-Originated in the context of rendering forest scenes in real-time, specifically to avoid repetitivity when mapping texcells onto terrain [S1]. The method builds on the aperiodic scheme described in [NC99] and addresses issues related to pre-shaded textures as in [CSHD03] [S1]. It is used in real-time rendering of natural scenes, particularly forests [S1].
++Originated in the context of rendering forest scenes in real-time, specifically to avoid repetitivity when mapping texcells onto a terrain. The method relies on the aperiodic scheme described in [NC99] and is discussed in detail in [S1]. It addresses the limitation of pre-shaded textures, which cannot be rotated, by using separate boundary conditions in each direction.
+ 
+ ## Sources

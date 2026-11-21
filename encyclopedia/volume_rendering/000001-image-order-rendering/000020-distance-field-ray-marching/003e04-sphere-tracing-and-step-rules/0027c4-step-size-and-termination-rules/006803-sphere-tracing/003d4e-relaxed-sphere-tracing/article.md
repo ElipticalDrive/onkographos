@@ -1,0 +1,87 @@
+# Relaxed Sphere Tracing
+
+Also called: Keinert et al. sphere tracing
+
+## Overview
+Relaxed sphere tracing is a sphere tracing variant that scales up the signed distance function estimate (SDFE) value to take larger steps, thereby improving rendering performance [S1, S2, unofficial]. It reverts to the basic conservative step size if the unbounding spheres of two consecutive steps are disjoint, ensuring that no surface intersections are skipped [S1, unofficial]. It is distinguished from its sibling [Enhanced Sphere Tracing](3811-enhanced-sphere-tracing.md) by its simpler geometric approximation; while relaxed tracing uses a fixed relaxation factor, enhanced tracing optimally approximates planar surfaces by ensuring consecutive unbounding spheres are tangential, resulting in decisively better error-decrease velocity [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray origin $\mathbf{p} \in \mathbb{R}^3$, ray direction $\mathbf{v} \in \mathbb{R}^3$ with $|\mathbf{v}|=1$, Signed Distance Function Estimate $f: \mathbb{R}^3 \to \mathbb{R}$, relaxation parameter $\omega$, maximum iteration count $i_{max}$, and a minimum distance threshold for termination.
+*   **Output:** Distance $t \in [0, \infty)$ traveled along the ray to the surface.
+
+**Data Structures:**
+*   Scalar variables: $t$ (current distance), $r_i$ (SDF value at previous step), $r_{i+1}$ (SDF value at current step), $d_i$ (step size), $i$ (iteration counter).
+
+**Parameters:**
+*   $\omega$: Relaxation parameter. A typical example value is $0.6$, yielding a step size factor of $1.6$ [S2, unofficial]. The sources do not specify a general optimal range, but it must be positive [S1, unofficial].
+*   $i_{max}$: Maximum number of iterations to prevent infinite loops in empty space.
+
+**Algorithm Steps:**
+1.  Initialize $t = 0$, $i = 0$, $r_i = 0$, $r_{i+1} = \infty$ [S1, unofficial].
+2.  Loop while $i < i_{max}$ and $r_{i+1}$ is not "too small" (indicating the surface has not been reached or passed):
+    a. Calculate the relaxed step size: $d_i = r_i + \omega \cdot r_i = r_i(1 + \omega)$ [S1, S2, unofficial].
+    b. Sample the SDF at the new position: $r_{i+1} = f(\mathbf{p} + (t + d_i)\mathbf{v})$ [S1, unofficial].
+    c. **Safety Check:** If the unbounding spheres of the previous step (radius $r_i$) and the current step (radius $r_{i+1}$) are disjoint, the step $d_i$ was too large and might have skipped the surface. The condition for disjointness is $d_i > r_i + r_{i+1}$ [S1, S2, unofficial].
+    d. If disjoint ($d_i > r_i + r_{i+1}$):
+        i. Revert to the conservative step size: $d_i = r_i$ [S1, S2, unofficial].
+        ii. Re-sample the SDF at the corrected position: $r_{i+1} = f(\mathbf{p} + (t + d_i)\mathbf{v})$ [S1, unofficial].
+    e. Update distance and state: $t = t + d_i$, $r_i = r_{i+1}$ [S1, unofficial].
+    f. Increment iteration: $i = i + 1$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def relaxed_sphere_tracing(p, v, f, omega, i_max, min_dist):
+    t = 0.0
+    i = 0
+    r_prev = 0.0
+    r_curr = float('inf')
+    
+    while i < i_max and r_curr > min_dist:
+        # Step 1: Calculate relaxed step size
+        d = r_prev * (1.0 + omega)
+        
+        # Step 2: Sample SDF at new position
+        r_curr = f(p + (t + d) * v)
+        
+        # Step 3: Safety check for disjoint unbounding spheres
+        # If the step size d is greater than the sum of the radii,
+        # the spheres are disjoint and the surface might be skipped.
+        if d > r_prev + r_curr:
+            # Revert to conservative step size
+            d = r_prev
+            # Re-sample
+            r_curr = f(p + (t + d) * v)
+        
+        # Step 4: Update state
+        t = t + d
+        r_prev = r_curr
+        i = i + 1
+        
+    return t
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The check $d_i > r_i + r_{i+1}$ relies on floating-point arithmetic. In degenerate cases where the surface is extremely close, precision errors might cause unnecessary fallbacks or missed detections.
+*   **Termination:** The algorithm terminates when $r_{i+1}$ becomes "too small." The exact threshold is not specified in the sources, but it typically corresponds to a value near machine epsilon or a predefined resolution limit [S1, unofficial].
+*   **Lipschitz Constant:** The SDF $f$ is assumed to have a Lipschitz constant $\text{Lip } f \le 1$ [S1, unofficial]. This property ensures that the distance function does not change faster than the Euclidean distance, which is fundamental to the correctness of sphere tracing.
+
+**Transformation for Boundary Inspection:**
+An alternative formulation by Bálint and Valasek [S1, unofficial] incorporates a transformation into the SDF to prevent overstepping the nonzero boundary without explicit branching. Let $\alpha = \frac{\sqrt{2}}{p \cdot \text{width}^2 \cdot \text{Cheigh} \cdot t^2}$ (where $p$, $\text{width}$, $\text{Cheigh}$, and $t$ are scene-specific parameters). One can inspect $g(t) = f(\mathbf{p} + t\mathbf{v}) - \alpha t$. The modified SDF is:
+$$ F(t) = \frac{f(\mathbf{p} + t\mathbf{v})}{1 + \alpha - \alpha t} $$
+This transformation efficiently offsets the surface by a value that increases with distance, allowing the use of standard sphere tracing logic on $F(t)$ without special termination conditions [S1, unofficial].
+
+## Operating characteristics
+*   **Performance:** Relaxed sphere tracing offers a performance increase over basic sphere tracing by taking larger steps in empty space or far from surfaces [S2, unofficial]. However, it is decisively worse than [Enhanced Sphere Tracing](3811-enhanced-sphere-tracing.md) in terms of error-decrease velocity across all iteration counts [S1, unofficial]. Enhanced tracing outperforms relaxed tracing on every iteration count because its optimal approximation of smooth surfaces allows for longer steps and fewer execution branches caused by fallbacks [S1, unofficial].
+*   **Complexity:** Time complexity is $O(k)$ where $k$ is the number of iterations, similar to basic sphere tracing, but with a potentially smaller $k$ due to larger steps. Memory complexity is $O(1)$ as it only stores a few scalar values per ray.
+*   **Strengths:** Simple to implement; provides a good balance between speed and safety compared to basic sphere tracing.
+*   **Limitations:** The fixed relaxation factor $\omega$ is not adaptive. In regions with high curvature or complex geometry, the fallback mechanism may trigger frequently, reducing the performance benefit. It is less efficient than enhanced sphere tracing [S1, unofficial].
+
+## Background
+Relaxed sphere tracing was introduced by Keinert et al. [KSK*14] as a faster algorithm via relaxation of the original sphere tracing method [S2, unofficial]. It was later used in the Claybook project to implement a real-time simulation-based computer game [S2, unofficial]. The method was analyzed and compared against basic and enhanced sphere tracing by Csaba Bálint and Gábor Valasek in their 2018 paper "Accelerating Sphere Tracing" [S1, unofficial]. The authors noted that while Keinert's method scales up the conservative step size, it requires a check for disjoint unbounding spheres to maintain correctness [S1, unofficial].
+
+## Sources
+[S1] Accelerating Sphere Tracing, https://www.researchgate.net/publication/329152815_Accelerating_Sphere_Tracing, fetched 2026-11-04 (unofficial)
+[S2] Csaba Bálint 1. Introduction 2. Sphere Tracing 3. Relaxed ..., https://people.inf.elte.hu/csabix/publications/articles/WSPS_2019_Poster.pdf, fetched 2026-10-29 (unofficial)

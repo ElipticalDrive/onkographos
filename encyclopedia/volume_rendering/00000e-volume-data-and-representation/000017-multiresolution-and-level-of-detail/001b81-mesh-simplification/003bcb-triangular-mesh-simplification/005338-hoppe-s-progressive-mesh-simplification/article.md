@@ -1,0 +1,105 @@
+# Hoppe's Progressive Mesh Simplification
+
+Also called: Hoppe's Simplification, Mesh Simplification for Multiresolution, Progressive Mesh Simplification
+
+## Overview
+Hoppe's Progressive Mesh Simplification is an iterative edge-collapse algorithm that generates a hierarchy of coarse meshes from a high-resolution input by preserving topological consistency while removing geometric details [S1]. It differs from its siblings by strictly enforcing manifold topology via Hoppe's consistency checks and using a simplified error metric based solely on edge length, prioritizing an even vertex distribution and low computational cost over the preservation of sharp features or optimized vertex positions [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A triangular mesh $M_0$ with $V$ vertices and $F$ faces.
+*   **Output:** A sequence of meshes $M_0, M_1, \dots, M_k$ where each $M_{i+1}$ is a simplification of $M_i$, and a data structure allowing reconstruction of the original mesh from any level $M_i$ [S1].
+
+**Data Structures:**
+1.  **Mesh Representation:** Adjacency lists storing vertex positions, face indices, and 1-ring neighbor connectivity.
+2.  **Edge Heap:** A priority queue (ordered heap) storing all edges in the current mesh, keyed by their collapse error cost [S1].
+3.  **Edge Metadata:** For each edge, store the computed error cost and a validity flag [S1].
+
+**Error Metric:**
+The error cost $E(e)$ for an edge $e$ is defined solely by its Euclidean length $L(e)$ [S1]:
+$$ E(e) = L(e) $$
+Unlike metrics that preserve sharp edges or curvature, this metric aims to remove details evenly across high-curvature regions to create a uniform vertex distribution [S1].
+
+**Algorithm Steps:**
+1.  **Initialization:** Compute the length $L(e)$ for every edge $e$ in $M_0$. Insert all edges into the priority queue $H$ with key $E(e) = L(e)$ [S1].
+2.  **Iteration:** While $H$ is not empty:
+    a.  Pop the edge $e_{min}$ with the minimum error cost from $H$ [S1].
+    b.  **Consistency Check:** Verify if collapsing $e_{min}$ maintains topological consistency using Hoppe's consistency checks (based on topological analysis of the 1-ring neighborhood) [S1].
+    c.  **Collapse:** If valid:
+        i.  Collapse $e_{min}$ to its geometric midpoint $v_{mid} = \frac{v_1 + v_2}{2}$, where $v_1, v_2$ are the endpoints of $e_{min}$ [S1].
+        ii. Update the 1-ring neighbor structure of the affected vertices to reflect the new connectivity (faces removed, new faces created) [S1].
+        iii. Recompute the error costs for all edges incident to the modified 1-ring neighborhood.
+        iv. Update the positions of these edges in $H$ [S1].
+    d.  If invalid, discard $e_{min}$ from further consideration (or mark as invalid) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hoppe_simplification(mesh):
+    # mesh: object with vertices, faces, and adjacency lists
+    # Returns: list of meshes representing the hierarchy
+    
+    hierarchy = [mesh]
+    current_mesh = mesh
+    
+    # Step 1: Initialize heap with edge lengths
+    edge_heap = PriorityQueue()
+    for edge in current_mesh.edges:
+        # Error metric is solely based on edge length [S1]
+        cost = edge.length()
+        edge_heap.push(edge, cost)
+        
+    while not edge_heap.is_empty():
+        # Step 2: Pop edge with minimum cost [S1]
+        edge = edge_heap.pop_min()
+        
+        # Step 3: Check topological consistency [S1]
+        if not hoppe_consistency_check(current_mesh, edge):
+            continue
+            
+        # Step 4: Collapse to midpoint [S1]
+        v1, v2 = edge.endpoints()
+        midpoint = (v1.position + v2.position) / 2.0
+        
+        # Perform edge collapse operation
+        # This modifies topology (faces) and geometry (vertex positions) [S1]
+        collapsed_mesh = collapse_edge(current_mesh, edge, midpoint)
+        
+        # Step 5: Update 1-ring neighbors and heap [S1]
+        affected_edges = get_affected_edges(collapsed_mesh, edge)
+        
+        for a_edge in affected_edges:
+            # Remove old entry if present, or update key
+            new_cost = a_edge.length()
+            edge_heap.update_key(a_edge, new_cost)
+            
+        current_mesh = collapsed_mesh
+        hierarchy.append(current_mesh)
+        
+    return hierarchy
+```
+
+**Edge Cases and Pitfalls:**
+*   **Self-intersections:** Mitigated by collapsing to the midpoint rather than an optimized position, which keeps computation costs low and minimizes self-intersection risk [S1].
+*   **Degenerate Input:** The consistency checks must handle cases where edge collapse would create non-manifold geometry or duplicate vertices [S1].
+
+## Subtopics
+
+### [Quadric Error Metrics Simplification](16816-quadric-error-metrics-simplification.md)
+Uses quadratic error metrics to optimize vertex positions and preserve sharp features, allowing non-manifold operations, whereas Hoppe's method uses length-based metrics and strict topology preservation.
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by heap operations. Each collapse requires updating the heap for incident edges. With a binary heap, each update is $O(\log E)$. Total complexity is roughly $O(E \log E)$ for full simplification, where $E$ is the number of edges [S1].
+*   **Memory Complexity:** $O(V + E)$ to store the mesh and the heap [S1].
+*   **Performance:** The method is computationally efficient due to the simple error metric (length only) and the avoidance of position optimization [S1].
+*   **Strengths:** Guarantees topological consistency; low risk of self-intersection; simple implementation; produces even vertex distribution [S1].
+*   **Limitations:** Does not preserve sharp edges or high-curvature details as effectively as quadric-based methods; geometric fidelity may degrade at very coarse resolutions compared to optimized methods [S1].
+*   **When to use:** When topological integrity is critical and an even distribution of vertices is desired, such as in hierarchical isosurface segmentation for medical imaging [S1].
+*   **When not to use:** When preserving sharp features or minimizing geometric error in high-curvature regions is the primary goal [S1].
+
+## Background
+The method is based on the progressive mesh representation introduced by Hugues Hoppe [S1, 15]. It was applied in the context of hierarchical isosurface segmentation for brain cortex models, where preserving main folds (gyri and sulci) while eliminating details was required for multi-resolution mapping [S1]. The consistency checks used are from Hoppe et al. [S1, 15].
+
+## Sources
+[S1] Hierarchical Isosurface Segmentation Based on Discrete Curvature, https://inria.hal.science/inria-00537470v1, fetched 2026-10-26

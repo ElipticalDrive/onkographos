@@ -1,0 +1,124 @@
+# Distance-from-Center (DFC) Map Generation
+
+Also called: DFC maps
+
+## Overview
+Distance-from-Center (DFC) map generation converts per-view depth maps into a global radial distance representation relative to a scene center. It solves the problem of separating foreground and background elements in outdoor scenes by providing a unified metric that is invariant to camera position. Unlike sibling methods that operate in local camera coordinates or raw point clouds, DFC maps express depth in a common global reference frame, enabling a single distance threshold to segment foreground and background regions across all views [S1].
+
+## How it works
+**Inputs:**
+- A set of camera poses (extrinsics) and intrinsic parameters for $N$ views.
+- A depth map $D_v$ for each view $v$, where $D_v(u, v)$ is the depth value at pixel coordinates $(u, v)$.
+- A defined scene center $O$ (typically the origin of the world coordinate system or the centroid of the sparse point cloud).
+
+**Outputs:**
+- A set of DFC maps, one per view, where each pixel stores the Euclidean distance from the unprojected 3D point to $O$.
+
+**Data Structures:**
+- **Scene Center $O$**: A 3D vector $(O_x, O_y, O_z)$.
+- **DFC Map $M_v$**: A 2D array of floats, same dimensions as $D_v$. $M_v(u, v)$ stores the distance.
+
+**Steps:**
+1. **Unprojection**: For each view $v$ and each pixel $(u, v)$ in the depth map $D_v$:
+   - Retrieve the depth value $d = D_v(u, v)$.
+   - If $d$ is invalid (e.g., zero or infinity), set $M_v(u, v)$ to invalid and continue.
+   - Convert pixel coordinates $(u, v)$ to normalized device coordinates $(x_n, y_n)$ using intrinsics.
+   - Construct the ray direction $\mathbf{r}$ in camera coordinates.
+   - Transform $\mathbf{r}$ and the camera origin $C_v$ to world coordinates using the camera pose.
+   - Compute the 3D point $P$ in world coordinates: $P = C_v + d \cdot \mathbf{r}$.
+2. **Distance Calculation**:
+   - Compute the Euclidean distance from $P$ to the scene center $O$:
+     $$ \text{dist} = \| P - O \|_2 = \sqrt{(P_x - O_x)^2 + (P_y - O_y)^2 + (P_z - O_z)^2} $$
+   - Store $\text{dist}$ in $M_v(u, v)$.
+
+**Parameters:**
+- **Scene Center $O$**: Not given in the sources. Typically derived from the centroid of the initial COLMAP sparse point cloud or set to $(0,0,0)$ if the scene is centered [S1].
+
+**Edge Cases and Pitfalls:**
+- **Invalid Depth**: Pixels with missing depth must be handled to avoid NaNs in the DFC map.
+- **Precision**: Floating-point precision in distance calculation should be sufficient to distinguish foreground/background boundaries.
+- **Degenerate Input**: If the scene center $O$ is poorly chosen (e.g., far from the scene), the DFC values may not effectively separate foreground/background.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def generate_dfc_maps(depth_maps, poses, intrinsics, scene_center):
+    """
+    depth_maps: list of 2D numpy arrays, shape (H, W), values in meters.
+    poses: list of 4x4 numpy arrays, world-to-camera or camera-to-world? 
+           Assuming poses are camera-to-world matrices T_cam2world.
+    intrinsics: 3x3 numpy array, camera intrinsic matrix K.
+    scene_center: 3D numpy array, shape (3,), coordinates of O.
+    
+    Returns:
+    dfc_maps: list of 2D numpy arrays, same shape as depth_maps.
+    """
+    dfc_maps = []
+    
+    # Precompute inverse intrinsics for unprojection
+    K_inv = np.linalg.inv(intrinsics)
+    
+    for depth_map, T_cam2world in zip(depth_maps, poses):
+        H, W = depth_map.shape
+        dfc_map = np.zeros((H, W))
+        
+        # Create meshgrid for pixel coordinates
+        u, v = np.meshgrid(np.arange(W), np.arange(H))
+        
+        # Normalize pixel coordinates to camera space
+        # x = (u - cx) / fx, y = (v - cy) / fy, z = 1
+        fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+        cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+        
+        x_cam = (u - cx) / fx
+        y_cam = (v - cy) / fy
+        z_cam = np.ones_like(u)
+        
+        # Stack to form ray directions in camera coordinates
+        rays_cam = np.stack([x_cam, y_cam, z_cam], axis=-1) # Shape (H, W, 3)
+        
+        # Transform rays to world coordinates
+        # R_cam2world is the upper-left 3x3 of T_cam2world
+        R_cam2world = T_cam2world[:3, :3]
+        rays_world = np.einsum('ijk,ljk->ijl', rays_cam, R_cam2world) # Shape (H, W, 3)
+        
+        # Camera origin in world coordinates
+        C_world = T_cam2world[:3, 3] # Shape (3,)
+        
+        # Unproject: P = C + d * r
+        # depth_map is (H, W), rays_world is (H, W, 3)
+        # P_world = C_world + depth_map[..., None] * rays_world
+        P_world = C_world + depth_map[:, :, np.newaxis] * rays_world # Shape (H, W, 3)
+        
+        # Compute distance to scene center
+        # diff = P_world - scene_center
+        diff = P_world - scene_center[np.newaxis, np.newaxis, :]
+        distances = np.sqrt(np.sum(diff**2, axis=-1)) # Shape (H, W)
+        
+        dfc_map = distances
+        dfc_maps.append(dfc_map)
+        
+    return dfc_maps
+```
+
+## Subtopics
+
+### Foreground-Background Segmentation via DFC Histogram
+This variant uses the DFC maps to automatically determine a threshold for separating foreground and background. It estimates the histogram of DFC values from the original point cloud with a binning interval of 10 meters. The threshold $R_i$ is set at the first bin interval where the point count is less than 2.5% of the total reconstructed points. This threshold is then used to generate masked background images (removing foreground pixels) and filtered foreground points (keeping points within distance $R_i$ from the center) [S1]. The parameter $R_i$ is scene-dependent but the heuristic is robust; manual override is possible. Changing $R_i$ within reasonable ranges has minimal impact on novel view synthesis metrics but may affect reconstruction detail in moved regions [S1].
+
+## Operating characteristics
+- **Time Complexity**: $O(N \cdot H \cdot W)$, where $N$ is the number of views, and $H, W$ are image dimensions. Each pixel is processed once for unprojection and distance calculation.
+- **Memory Complexity**: $O(N \cdot H \cdot W)$ to store the DFC maps.
+- **Strengths**: Provides a global, view-invariant metric for depth, simplifying foreground/background segmentation in outdoor scenes.
+- **Limitations**: Relies on accurate depth maps and camera poses. The heuristic for $R_i$ may fail in scenes with unusual depth distributions.
+- **When to use**: Outdoor scene reconstruction where background separation is critical, such as in Gaussian Splatting with environment map baking [S1].
+- **When not to use**: Indoor scenes with complex lighting or where global center is ambiguous.
+
+## Background
+The DFC map generation method was introduced in the context of EnvMap-GS, a two-stage outdoor Gaussian reconstruction method that bakes background into an environment map. It was proposed by D. Pintani et al. to address the challenge of separating foreground and background in outdoor scenes for 3D Gaussian Splatting [S1].
+
+## Sources
+[S1] EnvMap-GS: two-stage outdoor Gaussian reconstruction with background-to-environment map baking, https://doi.org/10.1007/s00371-026-04593-w, fetched 2026-10-29

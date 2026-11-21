@@ -1,0 +1,159 @@
+--- v001.md
++++ v002.md
+@@ -16,5 +16,5 @@
+ 
+ **Data Structures:**
+-*   **3D Gaussian Primitive:** Defined by $\boldsymbol{\mu}$ (position) and $\boldsymbol{\Sigma}$ (shape/orientation). The density function is $G(\mathbf{x}) = \exp\left(-\frac{1}{2}(\mathbf{x} - \boldsymbol{\mu})^\top \boldsymbol{\Sigma}^{-1}(\mathbf{x} - \boldsymbol{\mu})\right)$ [S1, unofficial].
++*   **3D Gaussian Primitive:** Defined by $\boldsymbol{\mu}$ (position) and $\boldsymbol{\Sigma}$ (shape/orientation) [S1, unofficial]. The density function is $G(\mathbf{x}) = \exp\left(-\frac{1}{2}(\mathbf{x} - \boldsymbol{\mu})^\top \boldsymbol{\Sigma}^{-1}(\mathbf{x} - \boldsymbol{\mu})\right)$ [S1, unofficial].
+ *   **BVH:** A hierarchical spatial partitioning structure storing bounding volumes for subsets of Gaussians to accelerate intersection tests [S1, unofficial].
+ 
+@@ -28,5 +28,5 @@
+ 
+ **Analytic Line Integral Formula:**
+-For a single anisotropic 3D Gaussian $G(\mathbf{x})$ and a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, the line integral $I$ is computed analytically. While the full closed-form derivation involves integrating the exponential quadratic form along the line, the core operation is:
++For a single anisotropic 3D Gaussian $G(\mathbf{x})$ and a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, the line integral $I$ is computed analytically [S1, unofficial]. The core operation is:
+ $$ I = \int_{-\infty}^{\infty} G(\mathbf{o} + t\mathbf{d}) \, dt $$
+ This avoids the affine collapse inherent in splatting methods [S1, unofficial].
+@@ -42,4 +42,6 @@
+ **Pseudocode:**
+ ```python
++import math
++
+ def analytic_forward_projection(gaussians, bvh, rays):
+     """
+@@ -55,53 +57,70 @@
+     """
+     projections = []
+-    
+     for ray in rays:
+-        # Step 1: Find intersecting primitives using BVH
+-        # The BVH efficiently culls non-intersecting Gaussians
+-        intersecting_gaussians = bvh.query(ray.origin, ray.direction)
+-        
++        intersecting_gaussians = bvh_query(bvh, ray.origin, ray.direction)
+         total_integral = 0.0
+-        
+         for gaussian in intersecting_gaussians:
+-            # Step 2: Compute analytic line integral of this Gaussian along the ray
+-            # Integral of exp(-0.5 * (x - mu)^T Sigma^-1 (x - mu)) along ray(t) = o + t*d
+-            # This is computed analytically to avoid approximation errors
+-            integral_contribution = compute_analytic_line_integral(
+-                gaussian.mu, 
+-                gaussian.Sigma, 
+-                ray.origin, 
+-                ray.direction
++            total_integral += compute_analytic_line_integral(
++                gaussian.mu, gaussian.Sigma, ray.origin, ray.direction
+             )
+-            total_integral += integral_contribution
+-            
+         projections.append(total_integral)
+-        
+     return projections
++
++def bvh_query(node, origin, direction):
++    """Standard recursive BVH traversal to find intersecting primitives."""
++    if not ray_aabb_intersect(origin, direction, node.bbox):
++        return []
++    if node.is_leaf:
++        return [g for g in node.gaussians if gaussian_ray_intersect(g, origin, direction)]
++    return bvh_query(node.left, origin, direction) + bvh_query(node.right, origin, direction)
++
++def ray_aabb_intersect(origin, direction, bbox):
++    """Slab method for ray-AABB intersection."""
++    tmin = (bbox.min - origin) / direction
++    tmax = (bbox.max - origin) / direction
++    t1 = min(tmin); t2 = max(tmin)
++    t3 = min(tmax); t4 = max(tmax)
++    return max(t1, t3) <= min(t2, t4)
++
++def gaussian_ray_intersect(g, origin, direction):
++    """Bounding sphere check for pruning non-intersecting Gaussians."""
++    dist_sq = sum((o - m)**2 for o, m in zip(origin, g.mu))
++    return dist_sq <= g.radius_sq
+ 
+ def compute_analytic_line_integral(mu, Sigma, origin, direction):
+     """
+     Computes the analytic line integral of a 3D Gaussian along a ray.
++    Integral: int_{-inf}^{inf} exp(-0.5 * (r(t) - mu)^T Sigma^-1 (r(t) - mu)) dt
++    where r(t) = origin + t * direction.
++    """
++    d = direction / math.sqrt(sum(c**2 for c in direction))
++    diff = [o - m for o, m in zip(origin, mu)]
++    Sigma_inv = invert_matrix(Sigma)
+     
+-    The integral is: int_{-inf}^{inf} exp(-0.5 * (r(t) - mu)^T Sigma^-1 (r(t) - mu)) dt
+-    where r(t) = origin + t * direction.
++    a = dot(d, mat_vec_mul(Sigma_inv, d))
++    b = 2.0 * dot(diff, mat_vec_mul(Sigma_inv, d))
++    c = dot(diff, mat_vec_mul(Sigma_inv, diff))
+     
+-    This involves evaluating the quadratic form along the line and integrating the resulting
+-    1D Gaussian function. The result is proportional to exp(-0.5 * dist^2) / sqrt(det(Sigma))
+-    scaled by geometric factors related to the ray direction and Sigma.
+-    
+-    Note: The exact closed-form expression depends on the eigen-decomposition of Sigma 
+-    and the projection of (origin - mu) onto the ray direction.
+-    """
+-    # Implementation detail:
+-    # 1. Compute the inverse covariance matrix: Sigma_inv = inv(Sigma)
+-    # 2. Define the quadratic form Q(t) = (origin + t*direction - mu)^T * Sigma_inv * (origin + t*direction - mu)
+-    # 3. Expand Q(t) into at^2 + bt + c
+-    # 4. The integral of exp(-0.5 * (at^2 + bt + c)) dt from -inf to inf is:
+-    #    sqrt(2*pi / a) * exp(-0.5 * (c - b^2 / (4a)))
+-    # 5. Return this value.
+-    
+-    # [G] Placeholder for the specific algebraic expansion of the quadratic form
+-    # along the ray direction. The key is that 'a' is always positive for valid Gaussians.
+-    pass
++    if a <= 0:
++        return 0.0
++    return math.sqrt(2.0 * math.pi / a) * math.exp(-0.5 * (c - b**2 / (4.0 * a)))
++
++def dot(v1, v2):
++    return sum(a * b for a, b in zip(v1, v2))
++
++def mat_vec_mul(M, v):
++    return [sum(row[j] * v[j] for j in range(len(v))) for row in M]
++
++def invert_matrix(M):
++    """Standard 3x3 matrix inversion."""
++    det = (M[0][0]*(M[1][1]*M[2][2]-M[1][2]*M[2][1]) -
++           M[0][1]*(M[1][0]*M[2][2]-M[1][2]*M[2][0]) +
++           M[0][2]*(M[1][0]*M[2][1]-M[1][1]*M[2][0]))
++    inv_det = 1.0 / det
++    return [
++        [(M[1][1]*M[2][2]-M[1][2]*M[2][1])*inv_det, (M[0][2]*M[2][1]-M[0][1]*M[2][2])*inv_det, (M[0][1]*M[1][2]-M[0][2]*M[1][1])*inv_det],
++        [(M[1][2]*M[2][0]-M[1][0]*M[2][2])*inv_det, (M[0][0]*M[2][2]-M[0][2]*M[2][0])*inv_det, (M[0][2]*M[1][0]-M[0][0]*M[1][2])*inv_det],
++        [(M[1][0]*M[2][1]-M[1][1]*M[2][0])*inv_det, (M[0][1]*M[2][0]-M[0][0]*M[2][1])*inv_det, (M[0][0]*M[1][1]-M[0][1]*M[1][0])*inv_det]
++    ]
+ ```
+ 
+@@ -109,12 +128,12 @@
+ 
+ ### Splatting-based Tomography
+-Projects Gaussians into 2D screen space using local affine approximations. It is faster but suffers from affine collapse and cannot easily handle nonlinear geometric corrections [S1, unofficial]. Choose when speed is critical and geometric accuracy requirements are low.
++Projects Gaussians into 2D screen space using local affine approximations [S1, unofficial]. It suffers from affine collapse and cannot easily handle nonlinear geometric corrections [S1, unofficial].
+ 
+ ### Analytic 3D Gaussian Ray Tracing for Tomography
+-Computes line integrals analytically along rays. It provides higher quantitative accuracy and supports complex scanner geometries (e.g., PET arc correction) [S1, unofficial]. Choose when accuracy and geometric flexibility are paramount.
++Computes line integrals analytically along rays [S1, unofficial]. It provides higher quantitative accuracy and supports complex scanner geometries (e.g., PET arc correction) [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the BVH traversal and the number of intersecting primitives per ray. BVH construction is $O(N \log N)$, and ray intersection is typically $O(\log N)$ on average [S1, unofficial].
+-*   **Memory Complexity:** $O(N)$ to store the Gaussian primitives and the BVH structure [S1, unofficial].
++*   **Time Complexity:** Depends on the BVH traversal and the number of intersecting primitives per ray [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources.
+ *   **Strengths:**
+     *   Avoids affine collapse, yielding more physically consistent forward projections [S1, unofficial].
+@@ -125,8 +144,8 @@
+     *   Requires efficient acceleration structures (BVH) to be practical for large scenes [S1, unofficial].
+ *   **When to use:** PET and CT modalities, especially those with cylindrical detector arrangements requiring arc correction [S1, unofficial].
+-*   **When not to use:** Real-time rendering where speed is more important than quantitative accuracy, or when simple affine approximations are sufficient.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-The method was proposed in "Radioactive 3D Gaussian Ray Tracing for Tomographic Reconstruction" [S1, unofficial]. It addresses limitations of splatting-based pipelines, such as degraded reconstruction quantitative accuracy and difficulty in incorporating nonlinear geometric corrections [S1, unofficial]. The framework was evaluated on both PET and CT modalities, including NEMA phantom simulations and realistic PET data [S1, unofficial]. It builds on the concept of 3D Gaussian Splatting but adapts it for tomographic reconstruction by replacing splatting with analytic ray tracing [S1, unofficial].
++The method was proposed in "Radioactive 3D Gaussian Ray Tracing for Tomographic Reconstruction" [S1, unofficial]. It addresses limitations of splatting-based pipelines, such as degraded reconstruction quantitative accuracy and difficulty in incorporating nonlinear geometric corrections [S1, unofficial]. The framework was evaluated on both PET and CT modalities, including NEMA phantom simulations and realistic PET data [S1, unofficial]. It builds on [Forward Projection (aTx)](1492-forward-projection-atx.md) by replacing splatting with analytic ray tracing [S1, unofficial].
+ 
+ ## Sources

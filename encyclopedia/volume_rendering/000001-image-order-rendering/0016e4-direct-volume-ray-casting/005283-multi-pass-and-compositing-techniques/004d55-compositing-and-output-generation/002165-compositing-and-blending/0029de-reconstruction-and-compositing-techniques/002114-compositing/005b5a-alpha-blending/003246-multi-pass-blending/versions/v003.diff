@@ -1,0 +1,124 @@
+--- v002.md
++++ v003.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A visibility-ordered cell (e.g., from a curvilinear or tetrahedral grid) with vertex attributes: color $C$ and opacity $\alpha$ [S1, unofficial].
++*   **Input:** A visibility-ordered cell (e.g., from a curvilinear or tetrahedral grid) with vertex attributes: color $\mathbf{C}$ and opacity $\alpha$ [S1, unofficial].
+ *   **Output:** The composited color and alpha in the framebuffer, correctly accounting for the exponential transmission of light through the cell's depth [S1, unofficial].
+ 
+@@ -18,5 +18,5 @@
+ 
+ **Formulas:**
+-The physical model assumes that for a semi-transparent light-emitting medium with planar faces, the depth $z$ varies linearly along any line, but the effective transmission of color varies exponentially [S1, unofficial]. The transmitted light $f(z)$ at depth $z$ is:
++The physical model assumes that for a semi-transparent light-emitting medium with planar faces, the depth $z$ varies linearly along any line, but the effective transmission of color varies exponentially [S1, unofficial]. The accumulated light contribution $f(z)$ at depth $z$ is:
+ $$ f(z) = 1 - e^{-a z} $$
+ where $a$ is the absorption coefficient and $z$ is the depth [S1, unofficial].
+@@ -70,11 +70,10 @@
+     # Precompute quadratic coefficients c0, c1 for the color term.
+     # g(z) = (c0 + c1*z) * (z/A)
+-    # Constraints: g(0)=0, g(A)=1-exp(-a*A).
+-    # The source states c0 and c1 minimize squared error on [0, A] [S1, unofficial].
+-    # Exact closed-form is in Appendix A [S1, unofficial].
++    # Constraint g(A) = f(A) => c0 + c1*A = 1 - exp(-a*A)
+     target_val = 1.0 - math.exp(-absorption_coeff * A)
+-    best_c0, best_c1 = 0.0, 0.0
++    
++    best_c1 = 0.0
+     min_error = float('inf')
+-    # Numerical minimization of squared error over [0, A]
++    # Numerical minimization of squared error over [0, A] as described in the source
+     for c1 in range(-1000, 1000):
+         c1_f = c1 / 100.0
+@@ -87,28 +86,21 @@
+         if error < min_error:
+             min_error = error
+-            best_c0, best_c1 = c0_f, c1_f
++            best_c1 = c1_f
++    best_c0 = target_val - best_c1 * A
+ 
+     # Pass 1: First opacity attenuation
+-    # Blend: one minus source alpha -> dst = dst * (1 - src_alpha)
+-    # Alpha: linear depth z/A
+-    render_pass(vertex_colors, [z / A for z in vertex_depths], 'ONE_MINUS_SRC_ALPHA', A)
++    apply_pass(vertex_colors, [z / A for z in vertex_depths], 'ONE_MINUS_SRC_ALPHA', fb, A)
+ 
+     # Pass 2: Second opacity attenuation
+-    # Blend: one minus source alpha
+-    # Alpha: linear depth z/A
+-    # Combined attenuation: (1 - z/A)^2
+-    render_pass(vertex_colors, [z / A for z in vertex_depths], 'ONE_MINUS_SRC_ALPHA', A)
++    apply_pass(vertex_colors, [z / A for z in vertex_depths], 'ONE_MINUS_SRC_ALPHA', fb, A)
+ 
+     # Pass 3: Color addition
+-    # Blend: source color x source alpha -> dst = dst + src_color * src_alpha
+-    # Color: modulated by (c0 + c1*z)
+-    # Alpha: z/A
+     modulated_colors = []
+     for i, z in enumerate(vertex_depths):
+         color_term = best_c0 + best_c1 * z
+         modulated_colors.append(tuple(c * color_term for c in vertex_colors[i]))
+-    render_pass(modulated_colors, [z / A for z in vertex_depths], 'SRC_ALPHA_SAT', A)
++    apply_pass(modulated_colors, [z / A for z in vertex_depths], 'SRC_ALPHA', fb, A)
+ 
+-def render_pass(colors, alphas, blend_func, A):
++def apply_pass(colors, alphas, blend_func, fb, A):
+     """
+     Simulates a hardware rendering pass with explicit blend math.
+@@ -119,9 +111,9 @@
+     for z in [i * A / 100.0 for i in range(101)]:
+         src_alpha = z / A
+-        src_color = interpolate_color(z, colors, [z / A for z in [0, A]])
++        src_color = interpolate_color(z, colors, [0.0, A])
+         if blend_func == 'ONE_MINUS_SRC_ALPHA':
+             # Hardware blend: dst = dst * (1 - src_alpha)
+             fb[:] = fb[:] * (1.0 - src_alpha)
+-        elif blend_func == 'SRC_ALPHA_SAT':
++        elif blend_func == 'SRC_ALPHA':
+             # Hardware blend: dst = dst + src_color * src_alpha
+             fb[:] = fb[:] + src_color * src_alpha
+@@ -130,30 +122,33 @@
+     """Linear interpolation of vertex colors based on depth z."""
+     # In practice, this is handled by the GPU rasterizer
+-    return colors[0]
++    if depths[1] == depths[0]:
++        return colors[0]
++    t = (z - depths[0]) / (depths[1] - depths[0])
++    return tuple(c0 * (1 - t) + c1 * t for c0, c1 in zip(colors[0], colors[1]))
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The method relies on the hardware's ability to accurately interpolate linear attributes and perform the blend operations. Precision errors in the quadratic approximation can lead to visible artifacts, especially with high absorption coefficients where the exponential decay is steep.
++*   **Precision:** The method relies on the hardware's ability to accurately interpolate linear attributes and perform the blend operations [G]. Precision errors in the quadratic approximation can lead to visible artifacts, especially with high absorption coefficients where the exponential decay is steep [G].
+ *   **Visibility Ordering:** Correctness depends on a valid visibility ordering where no earlier cell occludes a later cell in screen space [S1, unofficial].
+-*   **Thick Cells:** The approximation is valid on the interval $[0, A]$. If the cell projection is not convex or the depth variation is complex, the linear interpolation of $z$ may not accurately represent the path length, leading to errors.
++*   **Thick Cells:** The approximation is valid on the interval $[0, A]$ [S1, unofficial]. If the cell projection is not convex or the depth variation is complex, the linear interpolation of $z$ may not accurately represent the path length, leading to errors [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Visibility Ordering
+-The prerequisite for correct compositing. Ensures that cells are processed in an order such that earlier cells do not occlude later ones in screen space. [Link](5751-visibility-ordering.md)
++The prerequisite for correct compositing. Ensures that cells are processed in an order such that earlier cells do not occlude later ones in screen space [S1, unofficial]. [Link](5751-visibility-ordering.md)
+ 
+ ### Gouraud Shading
+-The underlying hardware rasterization technique used for linear interpolation of vertex attributes, which multi-pass blending extends via multiple passes. [Link](5752-gouraud-shading.md)
++The underlying hardware rasterization technique used for linear interpolation of vertex attributes, which multi-pass blending extends via multiple passes [S1, unofficial]. [Link](5752-gouraud-shading.md)
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Three passes per cell, making it significantly slower than single-pass linear blending. The source notes "The extra time in computation and rendering are substantial" [S1, unofficial].
+-*   **Memory Complexity:** Low, as it uses standard framebuffer operations and does not require storing intermediate volume data per pixel.
+-*   **Strengths:** Allows the use of standard hardware polygon renderers for volume rendering, avoiding the need for software ray casting. Provides a much better approximation of opacity and intensity than linear interpolation.
+-*   **Limitations:** Computationally expensive due to multiple passes. Approximation errors exist, particularly for cells with high absorption or complex geometry. Requires careful visibility ordering.
+-*   **When to Use:** When hardware acceleration is required and the visual quality of linear blending is insufficient, and software ray casting is too slow.
+-*   **When Not to Use:** For real-time applications with very high frame rate requirements, or when exact physical accuracy is required.
++*   **Memory Complexity:** Low, as it uses standard framebuffer operations and does not require storing intermediate volume data per pixel [G].
++*   **Strengths:** Allows the use of standard hardware polygon renderers for volume rendering, avoiding the need for software ray casting. Provides a much better approximation of opacity and intensity than linear interpolation [S1, unofficial].
++*   **Limitations:** Computationally expensive due to multiple passes. Approximation errors exist, particularly for cells with high absorption or complex geometry. Requires careful visibility ordering [S1, unofficial].
++*   **When to Use:** When hardware acceleration is required and the visual quality of linear blending is insufficient, and software ray casting is too slow [G].
++*   **When Not to Use:** For real-time applications with very high frame rate requirements, or when exact physical accuracy is required [G].
+ 
+ ## Background
+-Multi-pass blending was introduced in the context of rapid exploration of curvilinear grids using direct volume rendering [S1, unofficial]. It addresses the limitations of earlier methods that used linear interpolation (Gouraud shading) for color and opacity, which produced incorrect intensity and opacity estimates [S1, unofficial]. The method was developed to leverage existing hardware polygon renderers while achieving higher fidelity in volume visualization.
++Multi-pass blending was introduced in the context of rapid exploration of curvilinear grids using direct volume rendering [S1, unofficial]. It addresses the limitations of earlier methods that used linear interpolation (Gouraud shading) for color and opacity, which produced incorrect intensity and opacity estimates [S1, unofficial]. The method was developed to leverage existing hardware polygon renderers while achieving higher fidelity in volume visualization [S1, unofficial].
+ 
+ ## Sources

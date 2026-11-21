@@ -1,0 +1,312 @@
+--- v001.md
++++ v002.md
+@@ -45,5 +45,5 @@
+ 
+ 2.  **Generate Shading Map Guider:**
+-    a.  Synthesize a geometrically continuous large scene using geometry-based synthesis (matching density only) to create a base target scene [S1].
++    a.  Synthesize a geometrically continuous large scene using geometry-based synthesis (matching density only) to create a base target scene. Then, apply ray tracing to generate the shading map guider for the target illumination [S1].
+     b.  Select $n_p$ points from this scene with high density [S1].
+     c.  For each selected point $x$ and a point light source $x_l$:
+@@ -68,5 +68,5 @@
+         ii. **Phase 2 (Color):** From the $k_g$ candidates, select one patch for color continuity in the overlap area based on the color feature field $V^{(f)}$ [S1].
+     c.  Stitch the selected patch’s density field and radiance field onto the target area [S1].
+-    d.  Repeat until the target scene is fully synthesized.
++    d.  Repeat until the target scene is fully synthesized [S1].
+ 
+ **Pseudocode:**
+@@ -74,235 +74,89 @@
+ ```python
+ import numpy as np
+-from scipy.ndimage import gaussian_filter, median_filter
+-from sklearn.neighbors import NearestNeighbors # Assuming standard ML library for KNN
+-
+-def compute_depth(density_grid, transmittance, sigma, delta, t):
+-    """
+-    Computes depth d using the formula from the source.
+-    Note: The source formula sums over k, but indices i are used in the exponent.
+-    We assume a loop over samples k where i corresponds to the k-th sample.
+-    """
+-    d = 0.0
+-    for k in range(len(sigma)):
+-        # T_i is transmittance at sample k
+-        # sigma_i is density at sample k
+-        # delta_i is distance at sample k
+-        # t_i is position/weight factor at sample k
+-        term = transmittance[k] * (1 - np.exp(-sigma[k] * delta[k])) * t[k]
+-        d += term
+-    return d
+-
+-def extract_shading_map(exemplar_images, exemplar_density_grid, M):
+-    """
+-    Extracts the Shading Map from the exemplar.
+-    """
+-    # 1. Intrinsic Decomposition
+-    shading_images = []
+-    for img in exemplar_images:
+-        shading, albedo = PIE_Net(img) # [G] Placeholder for PIE-Net inference
+-        shading_images.append(shading)
+-    
+-    # 2. Smoothing
+-    smoothed_shading_images = []
+-    for shading in shading_images:
+-        blurred = gaussian_filter(shading, sigma=2) # [G] Gaussian blur
+-        fitted = polynomial_fit(blurred) # [G] Polynomial fitting
+-        smoothed_shading_images.append(fitted)
+-        
+-    # 3. Projection to 3D
+-    # Initialize Shading Map volume with zeros or NaNs
+-    # Dimensions: (X, Y, Z, M)
++
++def shading_guided_nerf_synthesis(exemplar_images, exemplar_density, target_density, light_sources, M, k_s, k_g, n_p, n_s, n_c):
++    # 1. Extract Exemplar Shading Map
++    # [G] Intrinsic decomposition to derive shading and albedo from images
++    shading_images = [intrinsic_decomposition(img) for img in exemplar_images]
++    # [G] Gaussian blurring and polynomial fitting to smooth shading
++    smoothed_shading = [smooth_shading(img) for img in shading_images]
++    
++    # Initialize Shading Map volume (X, Y, Z, M)
+     shading_map = np.full((X, Y, Z, M), np.nan)
+     
+     for m in range(M):
+-        # Assume we have camera parameters for viewpoint m
+         camera = get_camera_params(m)
+-        shading_img = smoothed_shading_images[m]
+-        
++        shading_img = smoothed_shading[m]
+         for y in range(shading_img.shape[0]):
+             for x in range(shading_img.shape[1]):
+-                # Cast ray from camera through pixel (x,y)
+                 ray_origin, ray_direction = camera.unproject(x, y)
+-                
+-                # Intersect ray with density grid to find depth d
+-                # [G] Simplified ray marching or analytical intersection
+-                samples = ray_march(ray_origin, ray_direction, exemplar_density_grid)
+-                
+-                # Calculate depth d using formula
+-                # Note: Source formula uses T_i, sigma_i, delta_i, t_i
+-                # We assume these are available from the ray march
+-                d = compute_depth(samples.transmittance, samples.sigma, samples.delta, samples.t)
+-                
+-                # Project shading value to voxel at depth d
++                samples = ray_march(ray_origin, ray_direction, exemplar_density)
++                # Depth formula: d = sum_k T_i (1 - exp(-sigma_i delta_i)) t_i
++                d = sum(s.transmittance * (1 - np.exp(-s.sigma * s.delta)) * s.t for s in samples)
+                 voxel_coords = ray_origin + d * ray_direction
+                 if is_inside_grid(voxel_coords):
+                     shading_map[voxel_coords] = shading_img[y, x]
+                     
+-    # 4. Post-processing
+-    # Fill holes using KNN
++    # Post-processing
+     for m in range(M):
+         channel = shading_map[:, :, :, m]
+-        # Identify NaNs
+-        nan_mask = np.isnan(channel)
+-        if np.any(nan_mask):
+-            # [G] KNN interpolation with inverse distance weighting
+-            channel = knn_interpolate(channel, weights='inverse_distance')
+-            
+-        # Median filtering for noise
++        # KNN interpolation with inverse distance weighting for holes
++        channel = knn_interpolate(channel, weights='inverse_distance')
++        # Median filtering for noisy points
+         channel = median_filter(channel, size=3)
+-        
+         shading_map[:, :, :, m] = channel
+         
+-    # 5. Retain best channels
++    # Retain n_c channels with lowest missing rate
+     missing_rates = np.mean(np.isnan(shading_map), axis=(0,1,2))
+-    sorted_indices = np.argsort(missing_rates)
+-    best_channels = sorted_indices[:n_c]
+-    
+-    final_shading_map = shading_map[:, :, :, best_channels]
+-    return final_shading_map
+-
+-def generate_shading_map_guider(target_geometry_density, light_sources, M):
+-    """
+-    Generates the Shading Map Guider for the target scene.
+-    """
+-    # 1. Geometry-based synthesis to create base scene
+-    # [G] This step creates a geometrically continuous scene using density matching only
+-    base_scene_density = geometry_based_synthesis(target_geometry_density)
+-    
+-    # 2. Select high-density points
++    best_channels = np.argsort(missing_rates)[:n_c]
++    exemplar_shading_map = shading_map[:, :, :, best_channels]
++    
++    # 2. Generate Shading Map Guider
++    # [G] Geometry-based synthesis to create base target scene
++    base_scene_density = geometry_based_synthesis(target_density)
++    # Select n_p points with high density
+     high_density_points = select_high_density_points(base_scene_density, n_p)
+     
+-    # 3. Calculate brightness for each point and viewpoint
+-    # Initialize Guider volume
+     shading_map_guider = np.zeros((X, Y, Z, M))
+-    
+     for point in high_density_points:
+         x = point
+         for m in range(M):
+-            # Assume light source configuration for viewpoint m
+-            # [G] In practice, this might involve multiple light sources or a specific setup
+             light_source = get_light_source(m)
+             I = light_source.intensity
+             x_l = light_source.position
+-            
+-            # Sample points along path
++            # Sample n_s points along path
+             path_points = sample_path(x_l, x, n_s)
+             x_ns = path_points[-1]
+-            
+-            # Calculate probability p_ns
+-            # [G] Need density at x_ns from base_scene_density
+             sigma_ns = get_density(base_scene_density, x_ns)
+-            delta_ns = distance(x_l, x_ns) / n_s # Approximation
++            delta_ns = distance(x_l, x_ns) / n_s
+             T_ns = calculate_transmittance(x_l, x_ns, base_scene_density)
+             p_ns = T_ns * (1 - np.exp(-sigma_ns * delta_ns))
+-            
+-            # Calculate brightness
+             dist_sq = np.linalg.norm(x - x_l)**2
+             brightness = p_ns * (1/n_s) * (I / dist_sq)
+-            
+-            # Assign to voxel
+             voxel_coords = get_voxel_coords(x)
+             shading_map_guider[voxel_coords, m] = brightness
+             
+-    return shading_map_guider
+-
+-def synthesize_patch(exemplar_shading_map, exemplar_density, exemplar_color, 
+-                     target_shading_guider, target_area_patch, k_s, k_g, n_c):
+-    """
+-    Selects and returns the best patch from the exemplar for the target area.
+-    """
+-    # 1. Find k_s closest patches based on shading distance
+-    # Flatten shading vectors for comparison
+-    exemplar_patches = extract_patches(exemplar_shading_map, patch_size)
+-    target_shading_vec = extract_patch_shading(target_area_patch, exemplar_shading_map)
+-    
+-    # Normalize scales
+-    exemplar_patches = normalize(exemplar_patches)
+-    target_shading_vec = normalize(target_shading_vec)
+-    
+-    # Use kd-tree for L2 distance
+-    kd_tree = KDTree(exemplar_patches)
+-    distances, indices = kd_tree.query(target_shading_vec, k=k_s)
+-    
+-    candidate_patches = exemplar_patches[indices]
+-    candidate_indices = indices
+-    
+-    # 2. Two-Phase Selection
+-    # Phase 1: Geometric continuity
+-    # Filter candidates based on density field V^(d)
+-    geometric_candidates = []
+-    for i, idx in enumerate(candidate_indices):
+-        patch_density = extract_patch_density(exemplar_density, idx)
+-        # Check continuity with target area boundary
+-        if is_geometrically_continuous(patch_density, target_area_patch):
+-            geometric_candidates.append((idx, patch_density))
+-            
+-    # Select k_g candidates
+-    geometric_candidates = geometric_candidates[:k_g]
+-    
+-    # Phase 2: Color continuity
+-    # Select one patch based on color feature field V^(f)
+-    best_patch_idx = None
+-    min_color_diff = np.inf
+-    
+-    for idx, patch_density in geometric_candidates:
+-        patch_color = extract_patch_color(exemplar_color, idx)
+-        # Check continuity in overlap area
+-        color_diff = calculate_color_overlap_diff(patch_color, target_area_patch)
+-        if color_diff < min_color_diff:
+-            min_color_diff = color_diff
+-            best_patch_idx = idx
+-            
+-    return best_patch_idx
+-
+-def full_synthesis_pipeline(exemplar_data, target_geometry, light_sources):
+-    """
+-    Main pipeline for Shading-Guided NeRF Synthesis.
+-    """
+-    # 1. Extract Exemplar Shading Map
+-    exemplar_shading_map = extract_shading_map(
+-        exemplar_data.images, 
+-        exemplar_data.density_grid, 
+-        M=50
+-    )
+-    
+-    # 2. Generate Shading Map Guider
+-    shading_map_guider = generate_shading_map_guider(
+-        target_geometry.density, 
+-        light_sources, 
+-        M=50
+-    )
+-    
+     # 3. Synthesize Scene
+-    synthesized_density = np.zeros(target_geometry.shape)
+-    synthesized_color = np.zeros(target_geometry.shape)
+-    
+-    # Iterate over target area patches
++    synthesized_density = np.zeros(target_density.shape)
++    synthesized_color = np.zeros(target_density.shape)
++    
+     for patch in target_geometry.patches:
+-        # Find best exemplar patch
+-        best_idx = synthesize_patch(
+-            exemplar_shading_map, 
+-            exemplar_data.density, 
+-            exemplar_data.color, 
+-            shading_map_guider, 
+-            patch, 
+-            k_s=10, # Example value
+-            k_g=5,  # Example value
+-            n_c=10  # Example value
+-        )
++        # Normalize scales
++        exemplar_patches = normalize(exemplar_patches)
++        target_shading_vec = normalize(target_shading_vec)
++        
++        # Find k_s closest patches using L2 distance (accelerated by kd-tree)
++        distances, indices = kd_tree.query(target_shading_vec, k=k_s)
++        candidate_patches = exemplar_patches[indices]
++        
++        # Two-phase selection
++        # Phase 1: Geometric continuity based on density field
++        geometric_candidates = filter_by_density_continuity(candidate_patches, target_area_patch, k_g)
++        # Phase 2: Color continuity based on color feature field
++        best_patch_idx = select_by_color_continuity(geometric_candidates, target_area_patch)
+         
+         # Stitch patch
+-        patch_density = extract_patch_density(exemplar_data.density, best_idx)
+-        patch_color = extract_patch_color(exemplar_data.color, best_idx)
+-        
+-        # Apply rotations if needed to find best match
+-        # [G] Rotate exemplar by 90, 180, 270 degrees
+-        for angle in [0, 90, 180, 270]:
+-            rotated_density = rotate(patch_density, angle)
+-            rotated_color = rotate(patch_color, angle)
+-            # Re-evaluate continuity and select best
+-            # ...
+-            
+-        # Stitch to target
++        patch_density = extract_patch_density(exemplar_density, best_patch_idx)
++        patch_color = extract_patch_color(exemplar_color, best_patch_idx)
+         stitch(synthesized_density, synthesized_color, patch, patch_density, patch_color)
+         
+@@ -323,6 +177,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources. The method involves ray tracing for shading map generation and patch matching using kd-trees, which suggests complexity related to the number of points $n_p$, samples $n_s$, and patches $k_s$.
+-*   **Memory Complexity:** Not given in the sources. Requires storage for the exemplar density/color fields, the exemplar shading map, and the target shading map guider.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources. Requires storage for the exemplar density/color fields, the exemplar shading map, and the target shading map guider [S1].
+ *   **Measured Performance:** Not given in the sources.
+ *   **Scaling:** Not given in the sources.
+@@ -337,5 +191,4 @@
+     *   Relies on the availability of multiple images of the exemplar for intrinsic decomposition [S1].
+ *   **When to use:** When synthesizing large-scale scenes with repetitive structures and complex lighting, where maintaining consistent lighting is critical [S1].
+-*   **When not to use:** When the scene does not have repetitive structures or when lighting is simple and can be handled by standard feature grid matching [S1].
+ 
+ ## Background

@@ -1,0 +1,161 @@
+--- v003.md
++++ v004.md
+@@ -4,21 +4,21 @@
+ 
+ ## Overview
+-A stage-based optimization loop for differentiable volume or radiance field reconstruction that alternates between image-based and ray-based sampling modes, applies stochastic preconditioning with exponential alpha decay, and optionally upsamples parameters between stages [S1, unofficial]. It differs from standard NeRF training loops by explicitly managing memory via ray batching and progressive resolution upsampling, while using a specific stochastic preconditioning schedule to stabilize gradient updates [S1, unofficial].
++A stage-based optimization loop for differentiable volume or radiance field reconstruction that alternates between image-based and ray-based sampling modes, applies stochastic preconditioning with exponential alpha decay, and optionally upsamples parameters between stages [S1, unofficial]. It differs from standard NeRF training loops by explicitly managing memory via ray batching and progressive resolution upsampling, while using a specific stochastic preconditioning schedule to stabilize gradient updates [S1, unofficial]. It builds on [Optimization Loops and Training Procedures](5622-optimization-loops-and-training-procedures.md).
+ 
+ ## How it works
+ **Inputs:**
+-- Scene parameters (density $\sigma$, color $\mathbf{c}$, etc.) to be optimized.
+-- Reference images, masks, and pre-extracted ray batches.
+-- Configuration parameters (see below).
++- Scene parameters (density $\sigma$, color $\mathbf{c}$, etc.) to be optimized [S1, unofficial].
++- Reference images, masks, and pre-extracted ray batches [S1, unofficial].
++- Configuration parameters (see below) [S1, unofficial].
+ 
+ **Outputs:**
+-- Optimized scene parameters.
+-- Rendered test images and PSNR metrics.
++- Optimized scene parameters [S1, unofficial].
++- Rendered test images and PSNR metrics [S1, unofficial].
+ 
+ **Data Structures:**
+ - `spn_state`: Dictionary containing:
+-  - `alpha` (float): Current preconditioning scale.
+-  - `step` (int): Iteration counter.
+-  - `gamma` (float): Exponential decay factor.
++  - `alpha` (float): Current preconditioning scale [S1, unofficial].
++  - `step` (int): Iteration counter [S1, unofficial].
++  - `gamma` (float): Exponential decay factor [S1, unofficial].
+ 
+ **Parameters:**
+@@ -36,57 +36,66 @@
+ **Steps:**
+ 
+-1. **Initialization:**
+-   - Set integrator loss type.
+-   - Configure Stochastic Preconditioning (SPN) with `stochastic_preconditioning_starting_alpha`, `stochastic_preconditioning_iterations`, and `stochastic_preconditioning_update_interval`.
+-   - Initialize Random Number Generator (RNG) with seed `stage_idx * 1000` [S1, unofficial].
+-   - Compute `gamma`:
+-     - If `stochastic_preconditioning_iterations` == 0, set `gamma = 0.0` and `alpha = 0.0` to prevent division by zero [S1, unofficial].
+-     - Otherwise, calculate:
+-       $$
+-       \gamma = 10^{-4 \cdot \frac{1}{\text{stochastic\_preconditioning\_iterations}}}
+-       $$
+-       [S1, unofficial]
++1. **Initialization:** Set integrator loss type. Configure Stochastic Preconditioning (SPN) with `stochastic_preconditioning_starting_alpha`, `stochastic_preconditioning_iterations`, and `stochastic_preconditioning_update_interval` [S1, unofficial]. Initialize Random Number Generator (RNG) with seed `stage_idx * 1000` [S1, unofficial]. Compute `gamma`: if `stochastic_preconditioning_iterations` equals 0, set `gamma = 0.0` and `alpha = 0.0` to prevent division by zero [S1, unofficial]. Otherwise, calculate $\gamma = 10^{-4 / \text{stochastic\_preconditioning\_iterations}}$ [S1, unofficial].
+ 
+-2. **Sampling Mode Selection:**
+-   - If `use_ray_batching` is true:
+-     - Shuffle the pre-extracted ray batch using the current RNG [S1, unofficial].
+-     - Sample `rays_per_batch` rays from the shuffled batch.
+-     - Convert rays to Mitsuba tensors [S1, unofficial].
+-   - If `use_ray_batching` is false:
+-     - Select a random sensor index.
+-     - Sample all rays from that image using `sample_rays_from_image` to obtain rays, target colors, and masks [S1, unofficial].
++2. **Sampling Mode Selection:** If `use_ray_batching` is true, shuffle the pre-extracted ray batch using the current RNG [S1, unofficial]. Sample `rays_per_batch` rays from the shuffled batch and convert them to tensors [S1, unofficial]. If false, select a random sensor index and sample all rays from that image using `sample_rays_from_image` to obtain rays, target colors, and masks [S1, unofficial].
+ 
+-3. **Rendering and Gradient Computation:**
+-   - Retrieve current `spn_alpha` from the integrator [S1, unofficial].
+-   - Set AOV (Arbitrary Output Variable) loss masks if available [S1, unofficial].
+-   - Create an independent sampler seeded with the iteration index and ray count [S1, unofficial].
+-   - Render rays with automatic gradient computation:
+-     ```python
+-     rendered_colors, loss, aovs = integrator.render_rays_with_gradient(
+-         rays=rays_mi,
+-         target_colors=target_colors,
+-         sampler=sampler,
+-         scene=scene,
+-         spp=config.spp,
+-         spn_alpha=spn_alpha
+-     )
+-     ```
+-     [S1, unofficial]
++3. **Rendering and Gradient Computation:** Retrieve current `spn_alpha` from the integrator [S1, unofficial]. Set AOV loss masks if available [S1, unofficial]. Create an independent sampler seeded with the iteration index and ray count [S1, unofficial]. Render rays with automatic gradient computation [S1, unofficial].
+ 
+-4. **Optimization Step:**
+-   - Append the scalar `loss` value to the losses list [S1, unofficial].
+-   - Step the optimizer [S1, unofficial].
+-   - Perform post-step updates on the integrator [S1, unofficial].
++4. **Optimization Step:** Append the scalar loss value to the losses list [S1, unofficial]. Step the optimizer [S1, unofficial]. Perform post-step updates on the integrator [S1, unofficial].
+ 
+-5. **Stage Evaluation:**
+-   - After `num_iterations_per_stage` iterations:
+-     - Render `num_test_images` test images using the current scene state [S1, unofficial].
+-     - Compute PSNR against reference images [S1, unofficial].
++5. **Stage Evaluation:** After `num_iterations_per_stage` iterations, render `num_test_images` test images using the current scene state [S1, unofficial]. Compute PSNR against reference images [S1, unofficial].
+ 
+-6. **Upsampling (Optional):**
+-   - If `enable_upsampling` is true and not the final stage:
+-     - Upsample integrator parameters [S1, unofficial].
+-     - Update the scene state [S1, unofficial].
+-     - Proceed to the next stage [S1, unofficial].
++6. **Upsampling (Optional):** If `enable_upsampling` is true and not the final stage, upsample integrator parameters and update the scene state before proceeding to the next stage [S1, unofficial].
++
++**Pseudocode:**
++```python
++def stage_based_training_loop(config, scene, reference_data, optimizer):
++    # Initialize SPN state
++    spn_state = {
++        'alpha': config.stochastic_preconditioning_starting_alpha,
++        'step': 0,
++        'gamma': 0.0
++    }
++    if config.stochastic_preconditioning_iterations == 0:
++        spn_state['gamma'] = 0.0
++        spn_state['alpha'] = 0.0
++    else:
++        spn_state['gamma'] = 10.0 ** (-4.0 / config.stochastic_preconditioning_iterations)
++
++    losses = []
++    rng = Random(seed=config.stage_idx * 1000)
++
++    for stage_idx in range(config.num_stages):
++        for iteration in range(config.num_iterations_per_stage):
++            # Sampling Mode Selection
++            if config.use_ray_batching:
++                rng.shuffle(reference_data.ray_batch)
++                rays, target_colors, masks = sample_rays_from_batch(reference_data.ray_batch, config.rays_per_batch, rng)
++            else:
++                sensor_idx = rng.integers(len(reference_data.sensors))
++                rays, target_colors, masks = sample_rays_from_image(reference_data.sensors[sensor_idx])
++
++            # Rendering and Gradient Computation
++            sampler = IndependentSampler(seed=iteration * config.rays_per_batch)
++            # Performs differentiable volume rendering and returns colors, scalar loss, and AOVs
++            rendered_colors, loss, aovs = differentiable_volume_render(
++                rays=rays, target_colors=target_colors, sampler=sampler,
++                scene=scene, spp=config.spp, spn_alpha=spn_state['alpha']
++            )
++
++            # Optimization Step
++            losses.append(loss)
++            optimizer.step()
++            integrator.post_step_update()
++
++        # Stage Evaluation
++        test_images = render_test_images(scene, config.num_test_images, config.spp)
++        psnr = compute_psnr(test_images, reference_data.test_references)
++
++        # Upsampling (Optional)
++        if config.enable_upsampling and stage_idx < config.num_stages - 1:
++            upsample_integrator_parameters(scene)
++            update_scene_state(scene)
++```
+ 
+ **Edge Cases and Pitfalls:**
+@@ -98,9 +107,9 @@
+ - **Performance:** Stochastic preconditioning with exponential decay helps stabilize training, particularly in early stages [S1, unofficial].
+ - **Scaling:** Progressive upsampling allows the model to learn coarse structures first before refining details, improving convergence [S1, unofficial].
+-- **Strengths:** Flexible sampling modes, memory-efficient ray batching, stable optimization via SPN.
+-- **Limitations:** Requires careful tuning of SPN parameters and upsampling schedule.
++- **Strengths:** Flexible sampling modes, memory-efficient ray batching, stable optimization via SPN [S1, unofficial].
++- **Limitations:** Requires careful tuning of SPN parameters and upsampling schedule [S1, unofficial].
+ 
+ ## Background
+-This method originates from the TLIR (Two-Stage Learning for Inverse Rendering) project, implemented in the Mitsuba 2 renderer [S1, unofficial]. It is designed for differentiable volume and radiance field reconstruction, leveraging Mitsuba's automatic differentiation capabilities [S1, unofficial].
++This method originates from the TLIR project, implemented in the Mitsuba 2 renderer [S1, unofficial]. It is designed for differentiable volume and radiance field reconstruction [S1, unofficial].
+ 
+ ## Sources

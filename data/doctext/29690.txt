@@ -1,0 +1,881 @@
+# NeRF-Casting: Improved View-Dependent Appearance with Consistent Reflections
+
+DOR VERBIN, Google, USA
+
+PRATUL P. SRINIVASAN, Google, USA
+
+PETER HEDMAN, Google, UK
+
+BEN MILDENHALL, Google, USA
+
+BENJAMIN ATTAL, Carnegie Mellon University, USA
+
+RICHARD SZELISKI, Google, USA
+
+JONATHAN T. BARRON, Google, USA
+
+# Interactive webpage at 
+
+
+
+Fig. 1. Our method, NeRF-Casting, recovers and renders scenes with higher-quality reflections than prior work. Here we show cropped renderings and a ground-truth image for a scene in our dataset (top), as well as a slice from a video rendering along a smooth camera path (one horizontal row of pixels stacked vertically across multiple video frames) to emphasize the continuity of high-frequency reflected content in our result (bottom). Please see the videos provided in the supplemental webpage to observe the accurate motion of our rendered reflections.
+
+Neural Radiance Fields (NeRFs) typically struggle to reconstruct and render highly specular objects, whose appearance varies quickly with changes in viewpoint. Recent works have improved NeRF's ability to render detailed specular appearance of distant environment illumination, but are unable to synthesize consistent reflections of closer content. Moreover, these techniques rely on large computationally-expensive neural networks to model outgoing radiance, which severely limits optimization and rendering speed. We address these issues with an approach based on ray tracing: instead of querying an expensive neural network for the outgoing view-dependent radiance at points along each camera ray, our model casts reflection rays from these points and traces them through the NeRF representation to render feature vectors which are decoded into color using a small inexpensive network. We demonstrate that our model outperforms prior methods for view synthesis of scenes containing shiny objects, and that it is the only existing NeRF method that can synthesize photorealistic specular appearance and reflections in real-world scenes, while requiring comparable optimization time to current state-of-the-art view synthesis models.
+
+CCS Concepts: • Computing methodologies → Reflectance modeling; Ray tracing; 3D imaging.
+
+Additional Key Words and Phrases: View synthesis, neural radiance fields, reflections
+
+# 1 INTRODUCTION
+
+Neural Radiance Fields (NeRFs) represent a 3D scene's underlying geometry and color using neural networks, for the goal of rendering novel unobserved views of the scene. Early variants of NeRF used multi-layer perceptrons (MLPs) to map from 3D coordinates to volume densities and view-dependent colors. However, the large MLPs needed to represent detailed 3D geometry and color are extremely slow to train and evaluate. Recent work has focused on making NeRF more efficient by replacing large MLPs with voxelgrid-like data structures or combinations of grids and small MLPs. These methods have enabled scaling NeRF to representing detailed large-scale scenes, but their benefits are limited to 3D geometry and mostly diffuse color.
+
+Scaling NeRF's ability to model realistic view-dependent appearance is still a challenge. State-of-the-art models for view synthesis of shiny objects with high-frequency view-dependent appearance are limited in two ways. First, they are only able to synthesize accurate reflections of distant environment illumination and struggle to render convincing reflections of nearby scene content. Second, they
+
+rely on large MLPs to represent the view-dependent outgoing radiance at any point and struggle to scale to larger real-world scenes with detailed reflections.
+
+We present an approach that solves both of these issues by introducing ray tracing into NeRF's rendering model. Instead of querying an expensive MLP for the view-dependent appearance at each point along a camera ray, our method casts reflection rays from these points into the NeRF geometry, samples properly anti-aliased features from the reflected scene content, and uses a small MLP to decode these features into reflected color. Casting rays into the recovered NeRF naturally synthesizes consistent reflections of nearby and distant content. Moreover, computing appearance by ray tracing reduces the burden of representing highly-detailed view-dependent functions at each point in the scene with a large MLP.
+
+Our approach is both more efficient than prior work for improving NeRF's view-dependent appearance and renders higher quality specular reflections, particularly of nearby content.
+
+# 2 RELATED WORK
+
+A Neural Radiance Field [Mildenhall et al. 2020] consists of an MLP that maps from a 3D coordinate within the scene to the corresponding volume density and view-dependent color at that position. NeRF renders rays passing through a scene by querying the MLP at sampled points along each ray and integrating the returned volume densities and colors into a single color. Evaluating an MLP hundreds of millions of times to render a single image can be prohibitively slow, so recent research has focused on making NeRF more efficient and scalable. In particular, many effective methods trade compute for storage and leverage data structures based on voxel grids to accelerate NeRF's optimization and rendering. These include standard voxel grids [Fridovich-Keil et al. 2022; Karnewar et al. 2022; Sun et al. 2022], low-rank tensor factorizations [Chen et al. 2022], and voxel pyramids with hash maps [Müller et al. 2022]. These methods are primarily focused on scaling NeRF's representation of 3D volume density to represent larger and more detailed scenes. However, they do not usually modify NeRF's representation of view-dependent color, which is a 5D function of both position and viewing direction.
+
+A separate line of work has focused on improving NeRF's ability to reconstruct and render highly specular (or shiny) content. Ref-NeRF [Verbin et al. 2022] demonstrated that reparameterizing outgoing radiance as a function of the reflected view direction is effective in cases where geometry is estimated accurately. However, Ref-NeRF's parameterization of outgoing radiance is most effective for objects that are mainly illuminated by distant light sources, which is often the case for synthetically-generated scenes. Furthermore, the outgoing radiance at every point must be encoded in the weights of an MLP. In the case of highly glossy objects, this MLP must have a large enough capacity to represent the entire environment viewed from any point in the scene, and is therefore costly to evaluate. Other works that focus on recovering specular appearance with NeRF also adopt Ref-NeRF's reparameterization of view-dependent appearance. ENVIDR [Liang et al. 2023] pre-trains the MLP that maps from reflection direction to color to effectively encode a prior on view-dependent appearance. UniSDF [Wang et al. 2023] improves Ref-NeRF's geometry representation to obtain smoother normals
+
+that are better for rendering surface reflection. SpecNeRF [Ma et al. 2023] modifies Ref-NeRF's encoding of view directions to vary spatially according to a set of optimized 3D Gaussians, which helps the view-dependent color network model reflections of nearby content. However, this encoding does not ensure accurate reflections when light sources are occluded. NeAI [Zhuang et al. 2024] traces reflection cones within an MLP-based NeRF to compute specular appearance, but requires ground-truth geometry and masks that separate the object from the environment in order to supervise the MLP that represents reflected lighting. Work concurrent to ours by Wu et al. [2024] proposes a Neural Directional Encoding that also traces cones through the NeRF model to simulate near-field reflections. However, they rely on a large MLP to represent geometry, which is slow to train and render compared to more modern grid-based representations. Furthermore, they primarily focus on synthetic scenes with clearly separated near-field and distant content.
+
+The methods discussed above address the same problem as our work: improving view-dependent appearance in view synthesis. An alternative approach to synthesizing specular appearance is inverse rendering: estimating representations of scene materials and lighting, alongside geometry. Many existing works combine NeRF with inverse rendering and explicitly model light transport through the 3D scene to recover representations that can render specular appearance [Bi et al. 2020; Jin et al. 2023; Mai et al. 2023; Srinivasan et al. 2021]. However, these techniques must perform expensive Monte Carlo integration over the entire hemisphere of incoming lighting (using hundreds to thousands of sampled reflection rays) to estimate outgoing radiance at any point in the scene, and they are typically orders of magnitude slower than standard NeRF models. Our proposed method specifically focuses on rendering specular appearance for view synthesis and is able to render accurate reflections with low computational overhead compared to existing view synthesis models.
+
+### 3 PRELIMINARIES AND NOTATION
+
+Neural Radiance Fields [Mildenhall et al. 2020] uses volume rendering to combine the densities and emitted view-dependent radiance values at samples along rays:
+
+
+$$\bar{\mathbf{c}} = \sum_i w^{(i)} \mathbf{c}^{(i)}, \quad (1)$$
+
+$$w^{(i)} = \left( 1 - \exp\left(-\tau^{(i)} \left( t^{(i+1)} - t^{(i)} \right) \right) \right) \exp\left( -\sum_{j < i} \tau^{(j)} \left( t^{(j+1)} - t^{(j)} \right) \right)$$
+
+where �� (��) is the ��th sample along the ray, and �� (��) and c (��) are the volume density and color (respectively) at the ��th sample location, o+ �� (��)d, where o is the ray's origin and d its direction. Throughout this paper we denote the volume-rendered values with a "bar", similar to c¯ on the left of Equation 1.
+
+NeRF-Casting: Improved View-Dependent Appearance with Consistent Reflections • 3
+
+higher representational capacity to points near the cameras using a
+spatial contraction function that maps all points in R3 to a sphere
+of radius 2:
+(
+x
+if ∥x∥ ≤ 1 ,
+
+(2)
+C(x) = 
+1
+x
+if
+∥x∥ > 1 .
+2 − ∥x∥
+∥x∥
+
+Color
+Decoder
+
+<latexit sha1_base64="DmyBoOQI9TwoTisFpiuYXZUBi2w=">AAAEKHicdVPLbhMxFHUbHmV4tIUlm4FppSJolJmEx3IEG5ZFIm2l8VB5HE9ixY+R7aGJLH8Ev8EPsIU/YIe6ReI/8ExSqenjWpbuPdfn2vfhomJUm17vbG29c+v2nbsb94L7Dx4+2tzafnyoZa0wGWLJpDoukCaMCjI01DByXCmCeMHIUTH90PiPvhKlqRSfzbwiOUdjQUuKkfHQydZLyJGZFKUt3Be7R184+Ox8vYJ+hbAgBi1cJ1tRr9trJbyqxEslAks5ONle/wdHEtecCIMZ0jqLe5XJLVKGYkZcAGtNKoSnaEwyrwrEic5tm5ULdz0yCkup/BYmbNGLDIu41nNe+JNNDvqyrwGv9WEkMGErt9tTpOc+2CrYUI2UTK/Cs1IhfOnxpnyXWyqq2hCBF28vaxYaGTZVD0dUEWzY3CsIK+rTD/EE+TDG9yYIfBOmBPnmGW8HUJBTLDlHYmShriuiKK+kJi7r51nbL6lGuY1i2xoVankXT6bWRomzUd95uTFe6rIkX0VSH9V56s2ctHmF3Q3CEEqJGB2L1vDmpKRsB/LUTKI4SnZaG2J1jbN/0el2A3deAGkmPv/Vy/30zrXP2CCl5KnL4jzrN0PU5q4IW1wPJ4WcWahqRjI4opzMKgWbuWl0kSTQkJlp7GS/m1QGeiKaNTV0tjuojHOLKHxKlNgf8HoZr2mjJ9mhs35+585yZ4WDzdhJZgdxW9/Af4z48je4qhwm3fhN9/WnQZS+X36RDfAUPAd7IAZvQQo+ggMwBBh8Az/AT/Cr873zu/Onc7Y4ur625DwBK9L5+x9o4GNc</latexit>
+
+b ,(i) (i)
+
+o
+<latexit sha1_base64="TwGJC6/tAJWp4InnfoILVwaRgKI=">AAAEBXicdVNLbxMxEHYbHmV5tXDksmJbiUuj7CY8jitx6bFIpK1Yryqv422s+LGyvTSR5TN/gCv8A26IK7+DH8D/wN4EKeljJEsz3/gbz4xnqoZRbQaDP1vbvTt3793feRA9fPT4ydPdvWcnWrYKkzGWTKqzCmnCqCBjQw0jZ40iiFeMnFaz98F/+pkoTaX4aBYNKTm6ELSmGBkPfYIcmWlVW+nOd5NBf9BJfF1JV0oCVnJ8vrf9F04kbjkRBjOkdZEOGlNapAzFjLgItpo0CM/QBSm8KhAnurRdyi4+8MgkrqXyR5i4Q9cZFnGtF7zyN0OK+qovgDf6MBKYsI3X7SXSCx9sEwxUIyXTm/C8VghfSd7U70pLRdMaIvAy97plsZFxaGk8oYpgwxZeQVhRX36Mp8iHMb7xUeR7PCPI/4zxdgQFucSScyQmFuq2IYryRmriimFZdN8h1aS0SWo7o0Edb/1mbm2SOZsMnZdb4+WuyMpNJPdRnafezslDFvYgimMoJWL0QnSGN6c1ZfuQ52aapEm239kQqxucw3WnO4jc/wZIM/X1bz7uR3OhfcUGKSUvXZGWxTAMUVe7Imz5PJxWcm6hahkp4IRyMm8UDHMTdJFl0JC5CXZ22M8aAz0RzUMPne2PGuPcMgqfESUOR7xdxQvf6El27Kyf34Wz3FnhYBg7yewo7fob+cVIr67BdeUk66dv+q8/jJL8aLUiO+AFeAlegRS8BTk4AsdgDDAQ4Cv4Br73vvR+9H72fi2vbm+tOM/BhvR+/wMdd1gP</latexit>
+
+<latexit sha1_base64="7Lq4+b+RLHaB5/rsB0a6bsBgdqg=">AAAB+XicbVDLSsNAFL3xWesr6tLNYBHqpiQi1WXRjcsK9gFtLJPppB06mYSZSaGE/IkbF4q49U/c+TdO2iy09cDA4Zx7uWeOH3OmtON8W2vrG5tb26Wd8u7e/sGhfXTcVlEiCW2RiEey62NFORO0pZnmtBtLikOf044/ucv9zpRKxSLxqGcx9UI8EixgBGsjDWy7H2I99oOUZE9plV1kA7vi1Jw50CpxC1KBAs2B/dUfRiQJqdCEY6V6rhNrL8VSM8JpVu4nisaYTPCI9gwVOKTKS+fJM3RulCEKImme0Giu/t5IcajULPTNZJ5TLXu5+J/XS3Rw46VMxImmgiwOBQlHOkJ5DWjIJCWazwzBRDKTFZExlphoU1bZlOAuf3mVtC9rbr1Wf7iqNG6LOkpwCmdQBReuoQH30IQWEJjCM7zCm5VaL9a79bEYXbOKnRP4A+vzB3VOk48=</latexit>
+
+c(i)
+
+<latexit sha1_base64="q2XvNx6lry1E6U29/R4Mq6OhILw=">AAAEaHichVNJb9NAFJ60AYrZUjggxMXUrVSkNoqdsBwtuHAsEmkreUw1noybUWaxZsY00Wh+JEd+ABf+AFfGTio1XcSzLL3te/PWomJUm8HgV2djs3vv/oOth8Gjx0+ePuttPz/WslaYjLFkUp0WSBNGBRkbahg5rRRBvGDkpJh9buwnP4jSVIpvZlGRnKNzQUuKkfGqs94MGlR/t/v0rYNvLr8D2H4h5MhMi9LO3R0ecIaqCv0PLlbws1406A9aCm8y8YqJwIqOzrY3fsOJxDUnwmCGtM7iQWVyi5ShmBEXwFqTCuEZOieZZwXiROe27YoL97xmEpZS+V+YsNVeRVjEtV7wwns2ierrtkZ5qw0jgQlbe91eIL3wwdaVDdRIyfS6el4qhK8lb8qPuaWiqg0ReJl7WbPQyLCZWjihimDDFp5BWFFffoinyIcxfrZB4Ds9I8gP33g5gIJcYMk5EhMLdV0RRXklNXHZMM/aoUg1yW0U21aoUIu76plaGyXORkPn6c54qcuSfF2T+qjOQ+/GpE0Wdi8IQyglYvRctIIXpyVlu5CnZhrFUbLbyhCrW4zDq0a3F7jLBkgz9fWvP+63f6F9xQYpJS9cFufZsFmitnZF2PJ5OC3k3EJVM5LBCeVkXinY7E3DiySBhsxNIyeH/aQy0APRvOmhs/1RZZxbRuEzosThiNereM0YPciOnfX7u3CWO38OsFk7yewobvsb+MOIr5/BTeY46cfv++++jqL00+pEtsBrsAP2QQw+gBR8AUdgDDD4Cf52QKez+afb677svlq6bnRWmBdgjbo7/wCjt3N1</latexit>
+
+<latexit sha1_base64="WVvfe5RLFFsOvI8x88EWUAAI6XI=">AAAB8nicbVBNSwMxEM36WetX1aOXYBEqSNkVqR6LXjxWsB+wXUs2zbah2WRJZoWy9Gd48aCIV3+NN/+NabsHbX0w8Hhvhpl5YSK4Adf9dlZW19Y3Ngtbxe2d3b390sFhy6hUU9akSijdCYlhgkvWBA6CdRLNSBwK1g5Ht1O//cS04Uo+wDhhQUwGkkecErCS39VD9ZhV+NnkvFcqu1V3BrxMvJyUUY5Gr/TV7SuaxkwCFcQY33MTCDKigVPBJsVualhC6IgMmG+pJDEzQTY7eYJPrdLHkdK2JOCZ+nsiI7Ex4zi0nTGBoVn0puJ/np9CdB1kXCYpMEnni6JUYFB4+j/uc80oiLElhGpub8V0SDShYFMq2hC8xZeXSeui6tWqtfvLcv0mj6OAjtEJqiAPXaE6ukMN1EQUKfSMXtGbA86L8+58zFtXnHzmCP2B8/kDm8KQ1A==</latexit>
+
+<latexit sha1_base64="q2XvNx6lry1E6U29/R4Mq6OhILw=">AAAEaHichVNJb9NAFJ60AYrZUjggxMXUrVSkNoqdsBwtuHAsEmkreUw1noybUWaxZsY00Wh+JEd+ABf+AFfGTio1XcSzLL3te/PWomJUm8HgV2djs3vv/oOth8Gjx0+ePuttPz/WslaYjLFkUp0WSBNGBRkbahg5rRRBvGDkpJh9buwnP4jSVIpvZlGRnKNzQUuKkfGqs94MGlR/t/v0rYNvLr8D2H4h5MhMi9LO3R0ecIaqCv0PLlbws1406A9aCm8y8YqJwIqOzrY3fsOJxDUnwmCGtM7iQWVyi5ShmBEXwFqTCuEZOieZZwXiROe27YoL97xmEpZS+V+YsNVeRVjEtV7wwns2ierrtkZ5qw0jgQlbe91eIL3wwdaVDdRIyfS6el4qhK8lb8qPuaWiqg0ReJl7WbPQyLCZWjihimDDFp5BWFFffoinyIcxfrZB4Ds9I8gP33g5gIJcYMk5EhMLdV0RRXklNXHZMM/aoUg1yW0U21aoUIu76plaGyXORkPn6c54qcuSfF2T+qjOQ+/GpE0Wdi8IQyglYvRctIIXpyVlu5CnZhrFUbLbyhCrW4zDq0a3F7jLBkgz9fWvP+63f6F9xQYpJS9cFufZsFmitnZF2PJ5OC3k3EJVM5LBCeVkXinY7E3DiySBhsxNIyeH/aQy0APRvOmhs/1RZZxbRuEzosThiNereM0YPciOnfX7u3CWO38OsFk7yewobvsb+MOIr5/BTeY46cfv++++jqL00+pEtsBrsAP2QQw+gBR8AUdgDDD4Cf52QKez+afb677svlq6bnRWmBdgjbo7/wCjt3N1</latexit>
+
+(i) (i) (i)
+⌧ (i)
+, ⌧x(i)
+, ,
+n, n
+, ⇢
+x(i)
+
+<latexit sha1_base64="mHn6bfYqSH+pjtKKHBG2Kfybuvw=">AAAB+XicbVDLSsNAFL2pr1pfUZduBotQNyURqS6LblxWsA9oa5lMJ+3QySTMTIol5E/cuFDErX/izr9x0mahrQcGDufcyz1zvIgzpR3n2yqsrW9sbhW3Szu7e/sH9uFRS4WxJLRJQh7KjocV5UzQpmaa004kKQ48Ttve5Dbz21MqFQvFg55FtB/gkWA+I1gbaWDbvQDrsecnT+ljUmHn6cAuO1VnDrRK3JyUIUdjYH/1hiGJAyo04ViprutEup9gqRnhNC31YkUjTCZ4RLuGChxQ1U/myVN0ZpQh8kNpntBorv7eSHCg1CzwzGSWUy17mfif1421f91PmIhiTQVZHPJjjnSIshrQkElKNJ8ZgolkJisiYywx0aaskinBXf7yKmldVN1atXZ/Wa7f5HUU4QROoQIuXEEd7qABTSAwhWd4hTcrsV6sd+tjMVqw8p1j+APr8weVtZOk</latexit>
+
+x(i)
+
+<latexit sha1_base64="1/Du5LvyX9bd4ZWwolhiBQ34kIo=">AAACCXicbVDLSsNAFJ34rPUVdelmsAiuSiJSXRbdCG4q2Ac0IUymk3bsZBJmJkIZsnXjr7hxoYhb/8Cdf+OkzUJbD1w4nHMv994TpoxK5Tjf1tLyyuraemWjurm1vbNr7+13ZJIJTNo4YYnohUgSRjlpK6oY6aWCoDhkpBuOrwq/+0CEpAm/U5OU+DEachpRjJSRAht6kUBYezKLvRAJ7cVIjcJIR3lwn+f6Jg/smlN3poCLxC1JDZRoBfaXN0hwFhOuMENS9l0nVb5GQlHMSF71MklShMdoSPqGchQT6evpJzk8NsoARokwxRWcqr8nNIqlnMSh6SwOlfNeIf7n9TMVXfia8jRThOPZoihjUCWwiAUOqCBYsYkhCAtqboV4hEw0yoRXNSG48y8vks5p3W3UG7dnteZlGUcFHIIjcAJccA6a4Bq0QBtg8AiewSt4s56sF+vd+pi1LlnlzAH4A+vzBz8Qm1g=</latexit>
+
+n̄
+
+P¯
+fj
+K
+
+<latexit sha1_base64="CULaGwAT5eUU7X4UncqIm+bfO70=">AAAEDXicdVNJbtswFGXiDqk6Oe2yG6FKgG5iWLI7LAV0k2UK1EkAUQgomooJcxBIKrFB8Ay9QLftDboruu0ZeoDeo6TsAnGGDxD4A9+ff9Uwqs1w+Gdru3fv/oOHO4+ix0+ePnve331xrGWrMJlgyaQ6rZAmjAoyMdQwctoognjFyEk1/xjsJxdEaSrFZ7NsSMnRuaA1xch41Vm/DyukLOTIzKraCufO+slwMOwovsmkayYBazo6293+C6cSt5wIgxnSukiHjSktUoZiRlwEW00ahOfonBSeFYgTXdoudRfve800rqXyT5i4015FWMS1XvLK/ww56uu2oLzVhpHAhG1Et5dIL72zTWWAGimZ3lQvaoXwteRN/aG0VDStIQKvcq9bFhsZh9bGU6oINmzpGYQV9eXHeIa8G+MHEEW+yXOC/ISMlyMoyCWWnCMxtVC3DVGUN1ITV4zKopuHVNPSJulqOA3qcFd/5tYmmbPJyHm601/uiqzc1OTeq/PQuzF5yMLuR3EMpUSMnotO8OKspmwP8tzMkjTJ9joZYnWLcXTV6PYj978B0sx8/ZvB/Youta/YIKXkpSvSshiFJepqV4StwsNZJRcWqpaRAk4pJ4tGwbA3gRdZBg1ZmCBnB4OsMdAD0SL00NnBuDHOrbzwOVHiYMzbtb8wRg+yE2f9/i6d5c5fAgxrJ5kdp11/I38Y6fUzuMkcZ4P03eDtp3GSH65PZAe8Aq/BG5CC9yAHh+AITAAGF+Ar+Aa+9770fvR+9n6tvm5vrTEvwQb1fv8D9+hbBA==</latexit>
+
+o
+<latexit sha1_base64="TwGJC6/tAJWp4InnfoILVwaRgKI=">AAAEBXicdVNLbxMxEHYbHmV5tXDksmJbiUuj7CY8jitx6bFIpK1Yryqv422s+LGyvTSR5TN/gCv8A26IK7+DH8D/wN4EKeljJEsz3/gbz4xnqoZRbQaDP1vbvTt3793feRA9fPT4ydPdvWcnWrYKkzGWTKqzCmnCqCBjQw0jZ40iiFeMnFaz98F/+pkoTaX4aBYNKTm6ELSmGBkPfYIcmWlVW+nOd5NBf9BJfF1JV0oCVnJ8vrf9F04kbjkRBjOkdZEOGlNapAzFjLgItpo0CM/QBSm8KhAnurRdyi4+8MgkrqXyR5i4Q9cZFnGtF7zyN0OK+qovgDf6MBKYsI3X7SXSCx9sEwxUIyXTm/C8VghfSd7U70pLRdMaIvAy97plsZFxaGk8oYpgwxZeQVhRX36Mp8iHMb7xUeR7PCPI/4zxdgQFucSScyQmFuq2IYryRmriimFZdN8h1aS0SWo7o0Edb/1mbm2SOZsMnZdb4+WuyMpNJPdRnafezslDFvYgimMoJWL0QnSGN6c1ZfuQ52aapEm239kQqxucw3WnO4jc/wZIM/X1bz7uR3OhfcUGKSUvXZGWxTAMUVe7Imz5PJxWcm6hahkp4IRyMm8UDHMTdJFl0JC5CXZ22M8aAz0RzUMPne2PGuPcMgqfESUOR7xdxQvf6El27Kyf34Wz3FnhYBg7yewo7fob+cVIr67BdeUk66dv+q8/jJL8aLUiO+AFeAlegRS8BTk4AsdgDDAQ4Cv4Br73vvR+9H72fi2vbm+tOM/BhvR+/wMdd1gP</latexit>
+
+<latexit sha1_base64="cHTCEtFIyH3dYgH0dy3UwuVj/jQ=">AAAB/XicbVDLSsNAFL2pr1pf8bFzEyxC3ZREpLosunFZwT6gjWEynbRjJ5MwMxFrCP6KGxeKuPU/3Pk3TtsstHpg4HDOvdwzx48Zlcq2v4zCwuLS8kpxtbS2vrG5ZW7vtGSUCEyaOGKR6PhIEkY5aSqqGOnEgqDQZ6Ttjy4mfvuOCEkjfq3GMXFDNOA0oBgpLXnmXi9EaugH6X12k1boUealt5lnlu2qPYX1lzg5KUOOhmd+9voRTkLCFWZIyq5jx8pNkVAUM5KVeokkMcIjNCBdTTkKiXTTafrMOtRK3woioR9X1lT9uZGiUMpx6OvJSVY5703E/7xuooIzN6U8ThTheHYoSJilImtShdWngmDFxpogLKjOauEhEggrXVhJl+DMf/kvaR1XnVq1dnVSrp/ndRRhHw6gAg6cQh0uoQFNwPAAT/ACr8aj8Wy8Ge+z0YKR7+zCLxgf3+6rlY0=</latexit>
+
+(i)
+
+<latexit sha1_base64="6dB0ekGhTr4c4HTqYxbgTjgYHLk=">AAACDXicbVDLSsNAFJ3UV62vqEs3g1WoICURqS6LblxWsA9oY5hMJ+3YySTMTIQS8gNu/BU3LhRx696df+OkDaitBy4czrmXe+/xIkalsqwvo7CwuLS8Ulwtra1vbG6Z2zstGcYCkyYOWSg6HpKEUU6aiipGOpEgKPAYaXujy8xv3xMhachv1DgiToAGnPoUI6Ul1zzoKRTfJhV6lLrJXXoMewFSQ89P/PRHdc2yVbUmgPPEzkkZ5Gi45mevH+I4IFxhhqTs2laknAQJRTEjaakXSxIhPEID0tWUo4BIJ5l8k8JDrfShHwpdXMGJ+nsiQYGU48DTndmtctbLxP+8bqz8cyehPIoV4Xi6yI8ZVCHMooF9KghWbKwJwoLqWyEeIoGw0gGWdAj27MvzpHVStWvV2vVpuX6Rx1EEe2AfVIANzkAdXIEGaAIMHsATeAGvxqPxbLwZ79PWgpHP7II/MD6+AYN+m94=</latexit>
+
+(i)
+
+xj
+
+d
+<latexit sha1_base64="kQuxrC/uaN9r2g4afDBRkSoO5lo=">AAAEBXicdVPJbtswEGXiLqm6Je2xF6GKgV5iWLK7HAX0kmMK1ElQUQgoirIJcxFIqrFB8Nwf6LX9g96KXvsd/YD+RynZBewsAxCYecM3nBnOFDWj2gyHf3Z2e3fu3ru/9yB4+Ojxk6f7B89OtWwUJhMsmVTnBdKEUUEmhhpGzmtFEC8YOSvm71v/2WeiNJXio1nWJOdoKmhFMTIe+gQ5MrOisqW72I+Gg2En4XUlXisRWMvJxcHuX1hK3HAiDGZI6ywe1ia3SBmKGXEBbDSpEZ6jKcm8KhAnOrddyi7se6QMK6n8ESbs0E2GRVzrJS/8zTZFfdXXgjf6MBKYsK3X7SXSSx9sG2ypRkqmt+FFpRC+kryp3uWWiroxROBV7lXDQiPDtqVhSRXBhi29grCivvwQz5APY3zjg8D3eE6Q/xnj7QAKcokl50iUFuqmJoryWmrislGedd8hVZnbKLadUaOOt3kztTZKnI1Gzsut8VKXJfk2kvqozlNv56RtFrYfhCGUEjE6FZ3hzVlF2SHkqZlFcZQcdjbE6gbnaNPp+oH73wBpZr7+7cf9aC61r9ggpeSly+I8G7VD1NWuCFs9D2eFXFioGkYyWFJOFrWC7dy0ukgSaMjCtHZyNEhqAz0RLdoeOjsY18a5VRQ+J0ocjXmzjtd+oyfZibN+fpfOcmeFg+3YSWbHcdffwC9GfHUNriunySB+M3j9YRylx+sV2QMvwEvwCsTgLUjBMTgBE4CBAF/BN/C996X3o/ez92t1dXdnzXkOtqT3+x/11VgE</latexit>
+
+(i)
+
+⌧j , f j
+
+d
+<latexit sha1_base64="kQuxrC/uaN9r2g4afDBRkSoO5lo=">AAAEBXicdVPJbtswEGXiLqm6Je2xF6GKgV5iWLK7HAX0kmMK1ElQUQgoirIJcxFIqrFB8Nwf6LX9g96KXvsd/YD+RynZBewsAxCYecM3nBnOFDWj2gyHf3Z2e3fu3ru/9yB4+Ojxk6f7B89OtWwUJhMsmVTnBdKEUUEmhhpGzmtFEC8YOSvm71v/2WeiNJXio1nWJOdoKmhFMTIe+gQ5MrOisqW72I+Gg2En4XUlXisRWMvJxcHuX1hK3HAiDGZI6ywe1ia3SBmKGXEBbDSpEZ6jKcm8KhAnOrddyi7se6QMK6n8ESbs0E2GRVzrJS/8zTZFfdXXgjf6MBKYsK3X7SXSSx9sG2ypRkqmt+FFpRC+kryp3uWWiroxROBV7lXDQiPDtqVhSRXBhi29grCivvwQz5APY3zjg8D3eE6Q/xnj7QAKcokl50iUFuqmJoryWmrislGedd8hVZnbKLadUaOOt3kztTZKnI1Gzsut8VKXJfk2kvqozlNv56RtFrYfhCGUEjE6FZ3hzVlF2SHkqZlFcZQcdjbE6gbnaNPp+oH73wBpZr7+7cf9aC61r9ggpeSly+I8G7VD1NWuCFs9D2eFXFioGkYyWFJOFrWC7dy0ukgSaMjCtHZyNEhqAz0RLdoeOjsY18a5VRQ+J0ocjXmzjtd+oyfZibN+fpfOcmeFg+3YSWbHcdffwC9GfHUNriunySB+M3j9YRylx+sV2QMvwEvwCsTgLUjBMTgBE4CBAF/BN/C996X3o/ez92t1dXdnzXkOtqT3+x/11VgE</latexit>
+
+In order to represent density and color, Zip-NeRF accelerates
+mip-NeRF 360 by replacing its large MLP with a hash encoding,
+based on Instant Neural Graphics Primitives [Müller et al. 2022],
+followed by a smaller MLP. To prevent aliasing, Zip-NeRF replaces
+point samples of the hash encoding grid with their expectation over
+3D Gaussians. Since these expected values cannot be computed exactly, they are approximated using two components: multisampling
+and downweighting. Multisampling replaces each Gaussian with
+multiple smaller Gaussians, and downweighting multiplies each of
+the gathered features at these samples by a multiplier designed to
+prevent voxels much smaller than the Gaussian from affecting the
+features. The contraction function in Equation 2 must be taken into
+account when computing the appropriate amount of downweighting: the determinant of the Jacobian of C, det 𝐽 C , “deflates” the
+Gaussians’
+volumes, so
+downweights the grid resolution
+ √
+ Zip-NeRF
+
+𝑛 ℓ by erf
+8𝜎 (x)𝑛 ℓ −1 , where:
+√︁
+(3)
+𝜎 (x) = 𝛾 · 𝑟¤ ∥x − o∥ 3 det 𝐽 C (x) ,
+
+x̄
+<latexit sha1_base64="Qn0cHsXD6WqDq2CbbbZbrxTiNRg=">AAAEDXicdVNJbtswFGXiDqk6Oe2yG6FKgG5iWLI7LAV0k2UK1EkAUQgomooJcxBIKrFB8Ay9QLftDboruu0ZeoDeo6TsAnGGDxD4/32+zz+xahjVZjj8s7Xdu3f/wcOdR9HjJ0+fPe/vvjjWslWYTLBkUp1WSBNGBZkYahg5bRRBvGLkpJp/DP6TC6I0leKzWTak5Ohc0JpiZDx01u/DCikLOTKzqrYL5876yXAw7CS+qaRrJQFrOTrb3f4LpxK3nAiDGdK6SIeNKS1ShmJGXARbTRqE5+icFF4ViBNd2i51F+97ZBrXUvkjTNyhVxkWca2XvPI3Q476ui+At/owEpiwjdftJdJLH2wTDFQjJdOb8KJWCF9L3tQfSktF0xoi8Cr3umWxkXFobTylimDDll5BWFFffoxnyIcxfgBR5Js8J8hPyHg7goJcYsk5ElMLddsQRXkjNXHFqCy6eUg1LW2SrobToI539WZubZI5m4yclzvj5a7Iyk0k91Gdp97NyUMWdj+KYyglYvRcdIY3ZzVle5DnZpakSbbX2RCrW5yjq063H7n/DZBm5uvffNyv6FL7ig1SSl66Ii2LUViirnZF2Op5OKvkwkLVMlLAKeVk0SgY9iboIsugIQsT7OxgkDUGeiJahB46Oxg3xrlVFD4nShyMebuOF8boSXbirN/fpbPcWeFgWDvJ7Djt+hv5j5Fe/wY3leNskL4bvP00TvLD9RfZAa/Aa/AGpOA9yMEhOAITgMEF+Aq+ge+9L70fvZ+9X6ur21trzkuwIb3f/wAb+1sO</latexit>
+
+<latexit sha1_base64="GmYWlBtyVplNrJjUIcMisAYkE20=">AAAEKnicdVPLbtQwFHU7PEp4tbBkE5FWFImOJpnhsYxAQmyQisS0leKochynY40fke20M7L8FfwGP8AW/oBdxRb+AyczSJ2WXsnSvef6XN+Xi5pRbQaD87X13o2bt25v3Anu3rv/4OHm1qMDLRuFyRhLJtVRgTRhVJCxoYaRo1oRxAtGDovpu9Z/eEqUplJ8NvOa5BydCFpRjIyHjjf3oKyJQkYqgTixpx/fu13IkZkUlS3dsxchLJCycIrqGrnnx5vRoD/oJLyqxEslAkvZP95a/wNLiRtOhMEMaZ3Fg9rkFilDMSMugI0mNcJTdEIyr7ZJ6Nx2dblwxyNlWEnljzBhh15kWMS1nvPC32xT1pd9LfhfH0YCE7byuj1Deu6DrYIt1UjJ9Co8qxTCl5I31ZvcUlE3hgi8yL1qWGhk2PY9LKki2LC5VxBW1Jcf4gnyYYyfThD4nk8J8uMz3g6gIGdYco5EaaFu/IQor6UmLhvmWTceqcrcRrHtjBp1vIs3U2ujxNlo6LxcGy91WZKvIqmP6jz1ek7aZmF3gjCEUiJGT0RneHNSUbYNeWomURwl250NsfqPc3jR6XYC968B0kx8/auP+/2da1+xQUrJM5fFeTZsl6irXRG2eB5OCjmzUDWMZLCknMxqBdu9aXWRJNCQmWntZK+f1AZ6Ipq1PXS2P6qNc4sofEqU2BvxZhmvHaMn2bGzfn/nznJnhYPt2klmR3HX38B/jPjyN7iqHCT9+FX/5adRlL5dfpEN8AQ8BbsgBq9BCj6AfTAGGHwB38B38KP3tfezd977tbi6vrbkPAYr0vv9F60yZq0=</latexit>
+
+o0
+
+vMF(d0 , ̄)
+
+<latexit sha1_base64="hmFZUePpmjxjuHEljy0UAY6OIoU=">AAAEBnicdVNLbxMxEHYbHmV5tXDksmJbwaVRdhMex5W49Fgk0lZaryqv422s+LGyvSSR5Tt/gCv8A26IK3+DH8D/wN4EqeljJEsz3/gbz4xnqoZRbQaDP1vbvTt3793feRA9fPT4ydPdvWcnWrYKkzGWTKqzCmnCqCBjQw0jZ40iiFeMnFazD8F/+pkoTaX4ZJYNKTm6ELSmGBkPFZAjM61qK92r891k0B90El9X0rWSgLUcn+9t/4UTiVtOhMEMaV2kg8aUFilDMSMugq0mDcIzdEEKrwrEiS5tl7OLDzwyiWup/BEm7tDLDIu41kte+ZshR33VF8AbfRgJTNjG63aO9NIH2wQD1UjJ9Ca8qBXCV5I39fvSUtG0hgi8yr1uWWxkHHoaT6gi2LClVxBW1Jcf4ynyYYzvfBT5Js8I8l9jvB1BQeZYco7ExELdNkRR3khNXDEsV/8h1aS0SWo7o0Ed7/LN3NokczYZOi+3xstdkZWbSO6jOk+9nZOHLOxBFMdQSsTohegMb05ryvYhz800SZNsv7MhVjc4h5ed7iBy/xsgzdTXv/m4n82l9hUbpJScuyIti2EYoq52RdjqeTit5MJC1TJSwAnlZNEoGOYm6CLLoCELE+zssJ81BnoiWoQeOtsfNca5VRQ+I0ocjni7jhe+0ZPs2Fk/v0tnubPCwTB2ktlR2vU38ouRXl2D68pJ1k/f9t98HCX50XpFdsAL8BK8Bil4B3JwBI7BGGAgwVfwDXzvfen96P3s/Vpd3d5ac56DDen9/gfU3lhA</latexit>
+
+Fig. 2. Our model architecture for rendering a single ray with origin o and
+direction d. We sample 𝑁 points x (𝑖 ) along the ray and use a spatial encoder
+based on Zip-NeRF to encode each point into density 𝜏 (𝑖 ) , roughness 𝜌 (𝑖 ) ,
+and surface normal n (𝑖 ) . These are alpha composited to compute a single
+expected termination point x̄, a von Mises-Fisher distribution (vMF) width
+¯
+𝜅, and surface normal n̄. Then d is reflected around that surface to construct
+a vMF distribution over reflected rays vMF(d′ , 𝜅¯ ). We sample 𝐾 reflected
+rays (𝐾 = 5) with location o′ and directions d′𝑗 (as in Figure 3). These 𝐾
+rays are then cast, and points along them are encoded with the same model
+(𝑖 )
+(𝑖 )
+as the initial ray into 𝑁 ′ densities 𝜏 𝑗 and features f 𝑗 . These features
+are alpha composited along each ray to get per-ray features f̄ 𝑗 , and the
+composited features are averaged into a single reflection feature f. This
+feature is broadcast over the original ray’s samples and passed, along with
+bottleneck features b (𝑖 ) , mixing coefficients 𝛽 (𝑖 ) , and viewing direction d,
+to the color decoder to produce RGB colors c (𝑖 ) for each point along the
+ray. These colors are alpha composited to render a pixel color c̄.
+
+where 𝛾 is a fixed hyperparameter.
+
+4
+
+MODEL
+d02
+<latexit sha1_base64="cp+mvrWg3JL2cVrOYfe49NxW9Cg=">AAAECHicdVPNbtQwEHa7/JTw0xaOXCLSFVy62mSXn2MEF45FYttKcbRyHKdrrX+C7dBdWX4BXoArvAE3xJW34AF4D5zsInX7M5KlmW/8jWfGM0XNqDbD4Z+t7d6t23fu7twL7j94+Gh3b//xsZaNwmSCJZPqtECaMCrIxFDDyGmtCOIFIyfF/F3rP/lMlKZSfDTLmuQcnQlaUYyMh3LIkZkVlS3d82ky3YuGg2En4VUlXisRWMvRdH/7LywlbjgRBjOkdRYPa5NbpAzFjLgANprUCM/RGcm8KhAnOrdd1i7se6QMK6n8ESbs0IsMi7jWS174m22W+rKvBa/1YSQwYRuv23Oklz7YJthSjZRMb8KLSiF8KXlTvcktFXVjiMCr3KuGhUaGbVfDkiqCDVt6BWFFffkhniEfxvjeB4Fv85wg/znG2wEU5BxLzpEoLdRNTRTltdTEZaM8635EqjK3UWw7o0Yd7+LN1NoocTYaOS83xktdluSbSOqjOk+9mZO2Wdh+EIZQSsTomegMb84qyg4gT80siqPkoLMhVtc4Rxedrh+4/w2QZubr33zcT+dS+4oNUkqeuyzOs1E7RF3tirDV83BWyIWFqmEkgyXlZFEr2M5Nq4skgYYsTGsnh4OkNtAT0aLtobODcW2cW0Xhc6LE4Zg363jtN3qSnTjr53fpLHdWONiOnWR2HHf9DfxixJfX4KpynAziV4OXH8ZR+na9IjvgKXgGXoAYvAYpeA+OwARg8Al8Bd/A996X3o/ez96v1dXtrTXnCdiQ3u9/C9JY1A==</latexit>
+
+We design our method with three goals in mind: First, we want to
+model accurate detailed reflections without relying on computationally expensive MLP evaluations. Second, we would like to only cast
+a small number of reflected rays. Third, we would like to minimize
+the computation required to query our representation at each point
+along these reflection rays.
+Our representation of 3D volume density and features is based on
+Zip-NeRF. As described in Section 3, Zip-NeRF uses a multi-scale
+hashgrid to store 3D features, a small MLP (1 layer, width 64) to
+decode these features into density, and a larger MLP (3 layers, width
+256) to decode these features into color. This means that querying
+the density and feature for samples along rays is cheap relative
+to evaluating color. Considering these constraints, we propose the
+following procedure to render specular appearance:
+(1) Query volume density along each camera ray to compute
+the ray’s expected termination point and surface normal.
+(2) Cast a reflected cone through the expected termination point
+in the reflection direction.
+(3) Use a small MLP to combine the accumulated reflection
+feature with other sampled quantities (such as the diffuse
+color features and per-sample blending weights) to produce
+a color value for each sample along the ray.
+(4) Alpha composite these samples and densities into the final
+color.
+These steps are illustrated in Figure 2 and explained in more detail
+below.
+Section 4.1 describes how our method estimates the cone of reflection rays to be traced. Section 4.2 details how our model traces a
+
+n̄
+
+n̄
+
+<latexit sha1_base64="CULaGwAT5eUU7X4UncqIm+bfO70=">AAAEDXicdVNJbtswFGXiDqk6Oe2yG6FKgG5iWLI7LAV0k2UK1EkAUQgomooJcxBIKrFB8Ay9QLftDboruu0ZeoDeo6TsAnGGDxD4A9+ff9Uwqs1w+Gdru3fv/oOHO4+ix0+ePnve331xrGWrMJlgyaQ6rZAmjAoyMdQwctoognjFyEk1/xjsJxdEaSrFZ7NsSMnRuaA1xch41Vm/DyukLOTIzKraCufO+slwMOwovsmkayYBazo6293+C6cSt5wIgxnSukiHjSktUoZiRlwEW00ahOfonBSeFYgTXdoudRfve800rqXyT5i4015FWMS1XvLK/ww56uu2oLzVhpHAhG1Et5dIL72zTWWAGimZ3lQvaoXwteRN/aG0VDStIQKvcq9bFhsZh9bGU6oINmzpGYQV9eXHeIa8G+MHEEW+yXOC/ISMlyMoyCWWnCMxtVC3DVGUN1ITV4zKopuHVNPSJulqOA3qcFd/5tYmmbPJyHm601/uiqzc1OTeq/PQuzF5yMLuR3EMpUSMnotO8OKspmwP8tzMkjTJ9joZYnWLcXTV6PYj978B0sx8/ZvB/Youta/YIKXkpSvSshiFJepqV4StwsNZJRcWqpaRAk4pJ4tGwbA3gRdZBg1ZmCBnB4OsMdAD0SL00NnBuDHOrbzwOVHiYMzbtb8wRg+yE2f9/i6d5c5fAgxrJ5kdp11/I38Y6fUzuMkcZ4P03eDtp3GSH65PZAe8Aq/BG5CC9yAHh+AITAAGF+Ar+Aa+9770fvR+9n6tvm5vrTEvwQb1fv8D9+hbBA==</latexit>
+
+o
+<latexit sha1_base64="TwGJC6/tAJWp4InnfoILVwaRgKI=">AAAEBXicdVNLbxMxEHYbHmV5tXDksmJbiUuj7CY8jitx6bFIpK1Yryqv422s+LGyvTSR5TN/gCv8A26IK7+DH8D/wN4EKeljJEsz3/gbz4xnqoZRbQaDP1vbvTt3793feRA9fPT4ydPdvWcnWrYKkzGWTKqzCmnCqCBjQw0jZ40iiFeMnFaz98F/+pkoTaX4aBYNKTm6ELSmGBkPfYIcmWlVW+nOd5NBf9BJfF1JV0oCVnJ8vrf9F04kbjkRBjOkdZEOGlNapAzFjLgItpo0CM/QBSm8KhAnurRdyi4+8MgkrqXyR5i4Q9cZFnGtF7zyN0OK+qovgDf6MBKYsI3X7SXSCx9sEwxUIyXTm/C8VghfSd7U70pLRdMaIvAy97plsZFxaGk8oYpgwxZeQVhRX36Mp8iHMb7xUeR7PCPI/4zxdgQFucSScyQmFuq2IYryRmriimFZdN8h1aS0SWo7o0Edb/1mbm2SOZsMnZdb4+WuyMpNJPdRnafezslDFvYgimMoJWL0QnSGN6c1ZfuQ52aapEm239kQqxucw3WnO4jc/wZIM/X1bz7uR3OhfcUGKSUvXZGWxTAMUVe7Imz5PJxWcm6hahkp4IRyMm8UDHMTdJFl0JC5CXZ22M8aAz0RzUMPne2PGuPcMgqfESUOR7xdxQvf6El27Kyf34Wz3FnhYBg7yewo7fob+cVIr67BdeUk66dv+q8/jJL8aLUiO+AFeAlegRS8BTk4AsdgDDAQ4Cv4Br73vvR+9H72fi2vbm+tOM/BhvR+/wMdd1gP</latexit>
+
+n̄
+
+<latexit sha1_base64="CULaGwAT5eUU7X4UncqIm+bfO70=">AAAEDXicdVNJbtswFGXiDqk6Oe2yG6FKgG5iWLI7LAV0k2UK1EkAUQgomooJcxBIKrFB8Ay9QLftDboruu0ZeoDeo6TsAnGGDxD4A9+ff9Uwqs1w+Gdru3fv/oOHO4+ix0+ePnve331xrGWrMJlgyaQ6rZAmjAoyMdQwctoognjFyEk1/xjsJxdEaSrFZ7NsSMnRuaA1xch41Vm/DyukLOTIzKraCufO+slwMOwovsmkayYBazo6293+C6cSt5wIgxnSukiHjSktUoZiRlwEW00ahOfonBSeFYgTXdoudRfve800rqXyT5i4015FWMS1XvLK/ww56uu2oLzVhpHAhG1Et5dIL72zTWWAGimZ3lQvaoXwteRN/aG0VDStIQKvcq9bFhsZh9bGU6oINmzpGYQV9eXHeIa8G+MHEEW+yXOC/ISMlyMoyCWWnCMxtVC3DVGUN1ITV4zKopuHVNPSJulqOA3qcFd/5tYmmbPJyHm601/uiqzc1OTeq/PQuzF5yMLuR3EMpUSMnotO8OKspmwP8tzMkjTJ9joZYnWLcXTV6PYj978B0sx8/ZvB/Youta/YIKXkpSvSshiFJepqV4StwsNZJRcWqpaRAk4pJ4tGwbA3gRdZBg1ZmCBnB4OsMdAD0SL00NnBuDHOrbzwOVHiYMzbtb8wRg+yE2f9/i6d5c5fAgxrJ5kdp11/I38Y6fUzuMkcZ4P03eDtp3GSH65PZAe8Aq/BG5CC9yAHh+AITAAGF+Ar+Aa+9770fvR+9n6tvm5vrTEvwQb1fv8D9+hbBA==</latexit>
+
+o
+<latexit sha1_base64="TwGJC6/tAJWp4InnfoILVwaRgKI=">AAAEBXicdVNLbxMxEHYbHmV5tXDksmJbiUuj7CY8jitx6bFIpK1Yryqv422s+LGyvTSR5TN/gCv8A26IK7+DH8D/wN4EKeljJEsz3/gbz4xnqoZRbQaDP1vbvTt3793feRA9fPT4ydPdvWcnWrYKkzGWTKqzCmnCqCBjQw0jZ40iiFeMnFaz98F/+pkoTaX4aBYNKTm6ELSmGBkPfYIcmWlVW+nOd5NBf9BJfF1JV0oCVnJ8vrf9F04kbjkRBjOkdZEOGlNapAzFjLgItpo0CM/QBSm8KhAnurRdyi4+8MgkrqXyR5i4Q9cZFnGtF7zyN0OK+qovgDf6MBKYsI3X7SXSCx9sEwxUIyXTm/C8VghfSd7U70pLRdMaIvAy97plsZFxaGk8oYpgwxZeQVhRX36Mp8iHMb7xUeR7PCPI/4zxdgQFucSScyQmFuq2IYryRmriimFZdN8h1aS0SWo7o0Edb/1mbm2SOZsMnZdb4+WuyMpNJPdRnafezslDFvYgimMoJWL0QnSGN6c1ZfuQ52aapEm239kQqxucw3WnO4jc/wZIM/X1bz7uR3OhfcUGKSUvXZGWxTAMUVe7Imz5PJxWcm6hahkp4IRyMm8UDHMTdJFl0JC5CXZ22M8aAz0RzUMPne2PGuPcMgqfESUOR7xdxQvf6El27Kyf34Wz3FnhYBg7yewo7fob+cVIr67BdeUk66dv+q8/jJL8aLUiO+AFeAlegRS8BTk4AsdgDDAQ4Cv4Br73vvR+9H72fi2vbm+tOM/BhvR+/wMdd1gP</latexit>
+
+<latexit sha1_base64="CULaGwAT5eUU7X4UncqIm+bfO70=">AAAEDXicdVNJbtswFGXiDqk6Oe2yG6FKgG5iWLI7LAV0k2UK1EkAUQgomooJcxBIKrFB8Ay9QLftDboruu0ZeoDeo6TsAnGGDxD4A9+ff9Uwqs1w+Gdru3fv/oOHO4+ix0+ePnve331xrGWrMJlgyaQ6rZAmjAoyMdQwctoognjFyEk1/xjsJxdEaSrFZ7NsSMnRuaA1xch41Vm/DyukLOTIzKraCufO+slwMOwovsmkayYBazo6293+C6cSt5wIgxnSukiHjSktUoZiRlwEW00ahOfonBSeFYgTXdoudRfve800rqXyT5i4015FWMS1XvLK/ww56uu2oLzVhpHAhG1Et5dIL72zTWWAGimZ3lQvaoXwteRN/aG0VDStIQKvcq9bFhsZh9bGU6oINmzpGYQV9eXHeIa8G+MHEEW+yXOC/ISMlyMoyCWWnCMxtVC3DVGUN1ITV4zKopuHVNPSJulqOA3qcFd/5tYmmbPJyHm601/uiqzc1OTeq/PQuzF5yMLuR3EMpUSMnotO8OKspmwP8tzMkjTJ9joZYnWLcXTV6PYj978B0sx8/ZvB/Youta/YIKXkpSvSshiFJepqV4StwsNZJRcWqpaRAk4pJ4tGwbA3gRdZBg1ZmCBnB4OsMdAD0SL00NnBuDHOrbzwOVHiYMzbtb8wRg+yE2f9/i6d5c5fAgxrJ5kdp11/I38Y6fUzuMkcZ4P03eDtp3GSH65PZAe8Aq/BG5CC9yAHh+AITAAGF+Ar+Aa+9770fvR+9n6tvm5vrTEvwQb1fv8D9+hbBA==</latexit>
+
+o
+<latexit sha1_base64="TwGJC6/tAJWp4InnfoILVwaRgKI=">AAAEBXicdVNLbxMxEHYbHmV5tXDksmJbiUuj7CY8jitx6bFIpK1Yryqv422s+LGyvTSR5TN/gCv8A26IK7+DH8D/wN4EKeljJEsz3/gbz4xnqoZRbQaDP1vbvTt3793feRA9fPT4ydPdvWcnWrYKkzGWTKqzCmnCqCBjQw0jZ40iiFeMnFaz98F/+pkoTaX4aBYNKTm6ELSmGBkPfYIcmWlVW+nOd5NBf9BJfF1JV0oCVnJ8vrf9F04kbjkRBjOkdZEOGlNapAzFjLgItpo0CM/QBSm8KhAnurRdyi4+8MgkrqXyR5i4Q9cZFnGtF7zyN0OK+qovgDf6MBKYsI3X7SXSCx9sEwxUIyXTm/C8VghfSd7U70pLRdMaIvAy97plsZFxaGk8oYpgwxZeQVhRX36Mp8iHMb7xUeR7PCPI/4zxdgQFucSScyQmFuq2IYryRmriimFZdN8h1aS0SWo7o0Edb/1mbm2SOZsMnZdb4+WuyMpNJPdRnafezslDFvYgimMoJWL0QnSGN6c1ZfuQ52aapEm239kQqxucw3WnO4jc/wZIM/X1bz7uR3OhfcUGKSUvXZGWxTAMUVe7Imz5PJxWcm6hahkp4IRyMm8UDHMTdJFl0JC5CXZ22M8aAz0RzUMPne2PGuPcMgqfESUOR7xdxQvf6El27Kyf34Wz3FnhYBg7yewo7fob+cVIr67BdeUk66dv+q8/jJL8aLUiO+AFeAlegRS8BTk4AsdgDDAQ4Cv4Br73vvR+9H72fi2vbm+tOM/BhvR+/wMdd1gP</latexit>
+
+d02
+<latexit sha1_base64="cp+mvrWg3JL2cVrOYfe49NxW9Cg=">AAAECHicdVPNbtQwEHa7/JTw0xaOXCLSFVy62mSXn2MEF45FYttKcbRyHKdrrX+C7dBdWX4BXoArvAE3xJW34AF4D5zsInX7M5KlmW/8jWfGM0XNqDbD4Z+t7d6t23fu7twL7j94+Gh3b//xsZaNwmSCJZPqtECaMCrIxFDDyGmtCOIFIyfF/F3rP/lMlKZSfDTLmuQcnQlaUYyMh3LIkZkVlS3d82ky3YuGg2En4VUlXisRWMvRdH/7LywlbjgRBjOkdRYPa5NbpAzFjLgANprUCM/RGcm8KhAnOrdd1i7se6QMK6n8ESbs0IsMi7jWS174m22W+rKvBa/1YSQwYRuv23Oklz7YJthSjZRMb8KLSiF8KXlTvcktFXVjiMCr3KuGhUaGbVfDkiqCDVt6BWFFffkhniEfxvjeB4Fv85wg/znG2wEU5BxLzpEoLdRNTRTltdTEZaM8635EqjK3UWw7o0Yd7+LN1NoocTYaOS83xktdluSbSOqjOk+9mZO2Wdh+EIZQSsTomegMb84qyg4gT80siqPkoLMhVtc4Rxedrh+4/w2QZubr33zcT+dS+4oNUkqeuyzOs1E7RF3tirDV83BWyIWFqmEkgyXlZFEr2M5Nq4skgYYsTGsnh4OkNtAT0aLtobODcW2cW0Xhc6LE4Zg363jtN3qSnTjr53fpLHdWONiOnWR2HHf9DfxixJfX4KpynAziV4OXH8ZR+na9IjvgKXgGXoAYvAYpeA+OwARg8Al8Bd/A996X3o/ez96v1dXtrTXnCdiQ3u9/C9JY1A==</latexit>
+
+d01
+
+d01
+<latexit sha1_base64="NR7oH+A2FTd3uTP335Xhy8ycfEw=">AAAECHicdVPNbtQwEHa7/JTw0xaOXCLSFVy62mSXn2MEF45FYttKcbRyHKdrrX+C7dBdWX4BXoArvAE3xJW34AF4D5zsInX7M5KlmW/8jWfGM0XNqDbD4Z+t7d6t23fu7twL7j94+Gh3b//xsZaNwmSCJZPqtECaMCrIxFDDyGmtCOIFIyfF/F3rP/lMlKZSfDTLmuQcnQlaUYyMh3LIkZkVlS3d82k83YuGg2En4VUlXisRWMvRdH/7LywlbjgRBjOkdRYPa5NbpAzFjLgANprUCM/RGcm8KhAnOrdd1i7se6QMK6n8ESbs0IsMi7jWS174m22W+rKvBa/1YSQwYRuv23Oklz7YJthSjZRMb8KLSiF8KXlTvcktFXVjiMCr3KuGhUaGbVfDkiqCDVt6BWFFffkhniEfxvjeB4Fv85wg/znG2wEU5BxLzpEoLdRNTRTltdTEZaM8635EqjK3UWw7o0Yd7+LN1NoocTYaOS83xktdluSbSOqjOk+9mZO2Wdh+EIZQSsTomegMb84qyg4gT80siqPkoLMhVtc4Rxedrh+4/w2QZubr33zcT+dS+4oNUkqeuyzOs1E7RF3tirDV83BWyIWFqmEkgyXlZFEr2M5Nq4skgYYsTGsnh4OkNtAT0aLtobODcW2cW0Xhc6LE4Zg363jtN3qSnTjr53fpLHdWONiOnWR2HHf9DfxixJfX4KpynAziV4OXH8ZR+na9IjvgKXgGXoAYvAYpeA+OwARg8Al8Bd/A996X3o/ez96v1dXtrTXnCdiQ3u9/CDpY0w==</latexit>
+
+<latexit sha1_base64="NR7oH+A2FTd3uTP335Xhy8ycfEw=">AAAECHicdVPNbtQwEHa7/JTw0xaOXCLSFVy62mSXn2MEF45FYttKcbRyHKdrrX+C7dBdWX4BXoArvAE3xJW34AF4D5zsInX7M5KlmW/8jWfGM0XNqDbD4Z+t7d6t23fu7twL7j94+Gh3b//xsZaNwmSCJZPqtECaMCrIxFDDyGmtCOIFIyfF/F3rP/lMlKZSfDTLmuQcnQlaUYyMh3LIkZkVlS3d82k83YuGg2En4VUlXisRWMvRdH/7LywlbjgRBjOkdRYPa5NbpAzFjLgANprUCM/RGcm8KhAnOrdd1i7se6QMK6n8ESbs0IsMi7jWS174m22W+rKvBa/1YSQwYRuv23Oklz7YJthSjZRMb8KLSiF8KXlTvcktFXVjiMCr3KuGhUaGbVfDkiqCDVt6BWFFffkhniEfxvjeB4Fv85wg/znG2wEU5BxLzpEoLdRNTRTltdTEZaM8635EqjK3UWw7o0Yd7+LN1NoocTYaOS83xktdluSbSOqjOk+9mZO2Wdh+EIZQSsTomegMb84qyg4gT80siqPkoLMhVtc4Rxedrh+4/w2QZubr33zcT+dS+4oNUkqeuyzOs1E7RF3tirDV83BWyIWFqmEkgyXlZFEr2M5Nq4skgYYsTGsnh4OkNtAT0aLtobODcW2cW0Xhc6LE4Zg363jtN3qSnTjr53fpLHdWONiOnWR2HHf9DfxixJfX4KpynAziV4OXH8ZR+na9IjvgKXgGXoAYvAYpeA+OwARg8Al8Bd/A996X3o/ez96v1dXtrTXnCdiQ3u9/CDpY0w==</latexit>
+
+d0
+
+ṙ
+
+<latexit sha1_base64="SDF04j8AU+cE1RFLOZw5l0UVKhU=">AAAEBnicdVPNbhMxEHYbfsry18KRy4ptBJdG2U34Oa7gwrFIpK20XlVer7ex4p+V7aWJLN95Aa7wBtwQV16DB+A98G6ClKTtSJZmvvE3nhnPFDWj2gyHf3Z2e7du37m7dy+4/+Dho8f7B09OtGwUJhMsmVRnBdKEUUEmhhpGzmpFEC8YOS1m71v/6WeiNJXik1nUJOfoQtCKYmQ8lEGOzLSobOlenO9Hw8Gwk/CqEq+UCKzk+Pxg9y8sJW44EQYzpHUWD2uTW6QMxYy4ADaa1AjP0AXJvCoQJzq3Xc4u7HukDCup/BEm7NB1hkVc6wUv/M02R73ta8FrfRgJTNjG6/YS6YUPtgm2VCMl05vwvFIIbyVvqre5paJuDBF4mXvVsNDIsO1pWFJFsGELryCsqC8/xFPkwxjf+SDwTZ4R5L/GeDuAglxiyTkSpYW6qYmivJaauGyUL/9DqjK3UWw7o0Ydb/1mam2UOBuNnJcb46UuS/JNJPVRnafezEnbLGw/CEMoJWL0QnSGN6cVZYeQp2YaxVFy2NkQq2uco3Wn6wfufwOkmfr6Nx/3s7nQvmKDlJKXLovzbNQOUVe7Imz5PJwWcm6hahjJYEk5mdcKtnPT6iJJoCFz09rJ0SCpDfRENG976OxgXBvnllH4jChxNObNKl77jZ5kJ876+V04y50VDrZjJ5kdx11/A78Y8fYaXFVOkkH8evDq4zhK361WZA88A8/BSxCDNyAFH8AxmAAMJPgKvoHvvS+9H72fvV/Lq7s7K85TsCG93/8Aq3JYLw==</latexit>
+
+d
+<latexit sha1_base64="kQuxrC/uaN9r2g4afDBRkSoO5lo=">AAAEBXicdVPJbtswEGXiLqm6Je2xF6GKgV5iWLK7HAX0kmMK1ElQUQgoirIJcxFIqrFB8Nwf6LX9g96KXvsd/YD+RynZBewsAxCYecM3nBnOFDWj2gyHf3Z2e3fu3ru/9yB4+Ojxk6f7B89OtWwUJhMsmVTnBdKEUUEmhhpGzmtFEC8YOSvm71v/2WeiNJXio1nWJOdoKmhFMTIe+gQ5MrOisqW72I+Gg2En4XUlXisRWMvJxcHuX1hK3HAiDGZI6ywe1ia3SBmKGXEBbDSpEZ6jKcm8KhAnOrddyi7se6QMK6n8ESbs0E2GRVzrJS/8zTZFfdXXgjf6MBKYsK3X7SXSSx9sG2ypRkqmt+FFpRC+kryp3uWWiroxROBV7lXDQiPDtqVhSRXBhi29grCivvwQz5APY3zjg8D3eE6Q/xnj7QAKcokl50iUFuqmJoryWmrislGedd8hVZnbKLadUaOOt3kztTZKnI1Gzsut8VKXJfk2kvqozlNv56RtFrYfhCGUEjE6FZ3hzVlF2SHkqZlFcZQcdjbE6gbnaNPp+oH73wBpZr7+7cf9aC61r9ggpeSly+I8G7VD1NWuCFs9D2eFXFioGkYyWFJOFrWC7dy0ukgSaMjCtHZyNEhqAz0RLdoeOjsY18a5VRQ+J0ocjXmzjtd+oyfZibN+fpfOcmeFg+3YSWbHcdffwC9GfHUNriunySB+M3j9YRylx+sV2QMvwEvwCsTgLUjBMTgBE4CBAF/BN/C996X3o/ez92t1dXdnzXkOtqT3+x/11VgE</latexit>
+
+<latexit sha1_base64="ITnFSMlK2dlVWaN1ozqi2bu/Zu0=">AAAEAXicdVPNbhMxEHYbfsry18KRy4ptJC6Nspvwc1zBhWORSFppvaocx2lM/LOyvSSR5RMvwBXegBviypPwALwH9iZISdqOZGnmG3/jmfHMqGJUm273z95+69btO3cP7kX3Hzx89Pjw6MlQy1phMsCSSXU+QpowKsjAUMPIeaUI4iNGzkazd8F/9pkoTaX4aJYVKTm6FHRCMTIeGsKxNLG6OEy6nW4j8VUlXSsJWMvpxdH+X8/ENSfCYIa0LtJuZUqLlKGYERfBWpMK4Rm6JIVXBeJEl7ZJ18Vtj4zjiVT+CBM36CbDIq71ko/8TY7MVO/6AnitDyOBCdt63c6RXvpg22CgGimZ3oYXE4XwTvJm8qa0VFS1IQKvcp/ULDYyDu2Mx1QRbNjSKwgr6suP8RT5MMY3PYogRzOC/K8Yb0dQkDmWnCMxtlDXFVGUV1ITV/TKAoakpBqXNkltY1So4W3ezK1NMmeTnvNyY7zcFVm5jeQ+qvPUmzl5yMK2oziGUiJGL0VjeHM6oewY8txMkzTJjhsbYnWNs7fpdO3I/W+ANFNf//bjfiyX2ldskFJy7oq0LHphiJraFWGr5+F0JBcWqpqRAo4pJ4tKwTA3QRdZBg1ZmGBnJ52sMtAT0SL00NlOvzLOraLwGVHipM/rdbzwjZ5kB876+V06y50VDoaxk8z206a/kV+MdHcNrirDrJO+6rz80E/yt+sVOQDPwHPwAqTgNcjBe3AKBgCDT+Ar+Aa+t760frR+tn6tru7vrTlPwZa0fv8DQqRV4Q==</latexit>
+
+d
+<latexit sha1_base64="kQuxrC/uaN9r2g4afDBRkSoO5lo=">AAAEBXicdVPJbtswEGXiLqm6Je2xF6GKgV5iWLK7HAX0kmMK1ElQUQgoirIJcxFIqrFB8Nwf6LX9g96KXvsd/YD+RynZBewsAxCYecM3nBnOFDWj2gyHf3Z2e3fu3ru/9yB4+Ojxk6f7B89OtWwUJhMsmVTnBdKEUUEmhhpGzmtFEC8YOSvm71v/2WeiNJXio1nWJOdoKmhFMTIe+gQ5MrOisqW72I+Gg2En4XUlXisRWMvJxcHuX1hK3HAiDGZI6ywe1ia3SBmKGXEBbDSpEZ6jKcm8KhAnOrddyi7se6QMK6n8ESbs0E2GRVzrJS/8zTZFfdXXgjf6MBKYsK3X7SXSSx9sG2ypRkqmt+FFpRC+kryp3uWWiroxROBV7lXDQiPDtqVhSRXBhi29grCivvwQz5APY3zjg8D3eE6Q/xnj7QAKcokl50iUFuqmJoryWmrislGedd8hVZnbKLadUaOOt3kztTZKnI1Gzsut8VKXJfk2kvqozlNv56RtFrYfhCGUEjE6FZ3hzVlF2SHkqZlFcZQcdjbE6gbnaNPp+oH73wBpZr7+7cf9aC61r9ggpeSly+I8G7VD1NWuCFs9D2eFXFioGkYyWFJOFrWC7dy0ukgSaMjCtHZyNEhqAz0RLdoeOjsY18a5VRQ+J0ocjXmzjtd+oyfZibN+fpfOcmeFg+3YSWbHcdffwC9GfHUNriunySB+M3j9YRylx+sV2QMvwEvwCsTgLUjBMTgBE4CBAF/BN/C996X3o/ez92t1dXdnzXkOtqT3+x/11VgE</latexit>
+
+d03
+<latexit sha1_base64="2Z6oe9pyxg2ATBdNCIHdeLgtWto=">AAAECHicdVPNbtQwEHa7/JTw0xaOXCLSFVy62mSXn2MEF45FYttKcbRyHKdrrX+C7dBdWX4BXoArvAE3xJW34AF4D5zsInX7M5KlmW/8jWfGM0XNqDbD4Z+t7d6t23fu7twL7j94+Gh3b//xsZaNwmSCJZPqtECaMCrIxFDDyGmtCOIFIyfF/F3rP/lMlKZSfDTLmuQcnQlaUYyMh3LIkZkVlS3d8+louhcNB8NOwqtKvFYisJaj6f72X1hK3HAiDGZI6ywe1ia3SBmKGXEBbDSpEZ6jM5J5VSBOdG67rF3Y90gZVlL5I0zYoRcZFnGtl7zwN9ss9WVfC17rw0hgwjZet+dIL32wTbClGimZ3oQXlUL4UvKmepNbKurGEIFXuVcNC40M266GJVUEG7b0CsKK+vJDPEM+jPG9DwLf5jlB/nOMtwMoyDmWnCNRWqibmijKa6mJy0Z51v2IVGVuo9h2Ro063sWbqbVR4mw0cl5ujJe6LMk3kdRHdZ56Mydts7D9IAyhlIjRM9EZ3pxVlB1AnppZFEfJQWdDrK5xji46XT9w/xsgzczXv/m4n86l9hUbpJQ8d1mcZ6N2iLraFWGr5+GskAsLVcNIBkvKyaJWsJ2bVhdJAg1ZmNZODgdJbaAnokXbQ2cH49o4t4rC50SJwzFv1vHab/QkO3HWz+/SWe6scLAdO8nsOO76G/jFiC+vwVXlOBnErwYvP4yj9O16RXbAU/AMvAAxeA1S8B4cgQnA4BP4Cr6B770vvR+9n71fq6vbW2vOE7Ahvd//AA9qWNU=</latexit>
+
+d03
+
+ṙ
+<latexit sha1_base64="ITnFSMlK2dlVWaN1ozqi2bu/Zu0=">AAAEAXicdVPNbhMxEHYbfsry18KRy4ptJC6Nspvwc1zBhWORSFppvaocx2lM/LOyvSSR5RMvwBXegBviypPwALwH9iZISdqOZGnmG3/jmfHMqGJUm273z95+69btO3cP7kX3Hzx89Pjw6MlQy1phMsCSSXU+QpowKsjAUMPIeaUI4iNGzkazd8F/9pkoTaX4aJYVKTm6FHRCMTIeGsKxNLG6OEy6nW4j8VUlXSsJWMvpxdH+X8/ENSfCYIa0LtJuZUqLlKGYERfBWpMK4Rm6JIVXBeJEl7ZJ18Vtj4zjiVT+CBM36CbDIq71ko/8TY7MVO/6AnitDyOBCdt63c6RXvpg22CgGimZ3oYXE4XwTvJm8qa0VFS1IQKvcp/ULDYyDu2Mx1QRbNjSKwgr6suP8RT5MMY3PYogRzOC/K8Yb0dQkDmWnCMxtlDXFVGUV1ITV/TKAoakpBqXNkltY1So4W3ezK1NMmeTnvNyY7zcFVm5jeQ+qvPUmzl5yMK2oziGUiJGL0VjeHM6oewY8txMkzTJjhsbYnWNs7fpdO3I/W+ANFNf//bjfiyX2ldskFJy7oq0LHphiJraFWGr5+F0JBcWqpqRAo4pJ4tKwTA3QRdZBg1ZmGBnJ52sMtAT0SL00NlOvzLOraLwGVHipM/rdbzwjZ5kB876+V06y50VDoaxk8z206a/kV+MdHcNrirDrJO+6rz80E/yt+sVOQDPwHPwAqTgNcjBe3AKBgCDT+Ar+Aa+t760frR+tn6tru7vrTlPwZa0fv8DQqRV4Q==</latexit>
+
+d
+
+<latexit sha1_base64="2Z6oe9pyxg2ATBdNCIHdeLgtWto=">AAAECHicdVPNbtQwEHa7/JTw0xaOXCLSFVy62mSXn2MEF45FYttKcbRyHKdrrX+C7dBdWX4BXoArvAE3xJW34AF4D5zsInX7M5KlmW/8jWfGM0XNqDbD4Z+t7d6t23fu7twL7j94+Gh3b//xsZaNwmSCJZPqtECaMCrIxFDDyGmtCOIFIyfF/F3rP/lMlKZSfDTLmuQcnQlaUYyMh3LIkZkVlS3d8+louhcNB8NOwqtKvFYisJaj6f72X1hK3HAiDGZI6ywe1ia3SBmKGXEBbDSpEZ6jM5J5VSBOdG67rF3Y90gZVlL5I0zYoRcZFnGtl7zwN9ss9WVfC17rw0hgwjZet+dIL32wTbClGimZ3oQXlUL4UvKmepNbKurGEIFXuVcNC40M266GJVUEG7b0CsKK+vJDPEM+jPG9DwLf5jlB/nOMtwMoyDmWnCNRWqibmijKa6mJy0Z51v2IVGVuo9h2Ro063sWbqbVR4mw0cl5ujJe6LMk3kdRHdZ56Mydts7D9IAyhlIjRM9EZ3pxVlB1AnppZFEfJQWdDrK5xji46XT9w/xsgzczXv/m4n86l9hUbpJQ8d1mcZ6N2iLraFWGr5+GskAsLVcNIBkvKyaJWsJ2bVhdJAg1ZmNZODgdJbaAnokXbQ2cH49o4t4rC50SJwzFv1vHab/QkO3HWz+/SWe6scLAdO8nsOO76G/jFiC+vwVXlOBnErwYvP4yj9O16RXbAU/AMvAAxeA1S8B4cgQnA4BP4Cr6B770vvR+9n71fq6vbW2vOE7Ahvd//AA9qWNU=</latexit>
+
+<latexit sha1_base64="kQuxrC/uaN9r2g4afDBRkSoO5lo=">AAAEBXicdVPJbtswEGXiLqm6Je2xF6GKgV5iWLK7HAX0kmMK1ElQUQgoirIJcxFIqrFB8Nwf6LX9g96KXvsd/YD+RynZBewsAxCYecM3nBnOFDWj2gyHf3Z2e3fu3ru/9yB4+Ojxk6f7B89OtWwUJhMsmVTnBdKEUUEmhhpGzmtFEC8YOSvm71v/2WeiNJXio1nWJOdoKmhFMTIe+gQ5MrOisqW72I+Gg2En4XUlXisRWMvJxcHuX1hK3HAiDGZI6ywe1ia3SBmKGXEBbDSpEZ6jKcm8KhAnOrddyi7se6QMK6n8ESbs0E2GRVzrJS/8zTZFfdXXgjf6MBKYsK3X7SXSSx9sG2ypRkqmt+FFpRC+kryp3uWWiroxROBV7lXDQiPDtqVhSRXBhi29grCivvwQz5APY3zjg8D3eE6Q/xnj7QAKcokl50iUFuqmJoryWmrislGedd8hVZnbKLadUaOOt3kztTZKnI1Gzsut8VKXJfk2kvqozlNv56RtFrYfhCGUEjE6FZ3hzVlF2SHkqZlFcZQcdjbE6gbnaNPp+oH73wBpZr7+7cf9aC61r9ggpeSly+I8G7VD1NWuCFs9D2eFXFioGkYyWFJOFrWC7dy0ukgSaMjCtHZyNEhqAz0RLdoeOjsY18a5VRQ+J0ocjXmzjtd+oyfZibN+fpfOcmeFg+3YSWbHcdffwC9GfHUNriunySB+M3j9YRylx+sV2QMvwEvwCsTgLUjBMTgBE4CBAF/BN/C996X3o/ez92t1dXdnzXkOtqT3+x/11VgE</latexit>
+
+x̄
+<latexit sha1_base64="Qn0cHsXD6WqDq2CbbbZbrxTiNRg=">AAAEDXicdVNJbtswFGXiDqk6Oe2yG6FKgG5iWLI7LAV0k2UK1EkAUQgomooJcxBIKrFB8Ay9QLftDboruu0ZeoDeo6TsAnGGDxD4/32+zz+xahjVZjj8s7Xdu3f/wcOdR9HjJ0+fPe/vvjjWslWYTLBkUp1WSBNGBZkYahg5bRRBvGLkpJp/DP6TC6I0leKzWTak5Ohc0JpiZDx01u/DCikLOTKzqrYL5876yXAw7CS+qaRrJQFrOTrb3f4LpxK3nAiDGdK6SIeNKS1ShmJGXARbTRqE5+icFF4ViBNd2i51F+97ZBrXUvkjTNyhVxkWca2XvPI3Q476ui+At/owEpiwjdftJdJLH2wTDFQjJdOb8KJWCF9L3tQfSktF0xoi8Cr3umWxkXFobTylimDDll5BWFFffoxnyIcxfgBR5Js8J8hPyHg7goJcYsk5ElMLddsQRXkjNXHFqCy6eUg1LW2SrobToI539WZubZI5m4yclzvj5a7Iyk0k91Gdp97NyUMWdj+KYyglYvRcdIY3ZzVle5DnZpakSbbX2RCrW5yjq063H7n/DZBm5uvffNyv6FL7ig1SSl66Ii2LUViirnZF2Op5OKvkwkLVMlLAKeVk0SgY9iboIsugIQsT7OxgkDUGeiJahB46Oxg3xrlVFD4nShyMebuOF8boSXbirN/fpbPcWeFgWDvJ7Djt+hv5j5Fe/wY3leNskL4bvP00TvLD9RfZAa/Aa/AGpOA9yMEhOAITgMEF+Aq+ge+9L70fvZ+9X6ur21trzkuwIb3f/wAb+1sO</latexit>
+
+x̄
+
+x̄
+<latexit sha1_base64="GmYWlBtyVplNrJjUIcMisAYkE20=">AAAEKnicdVPLbtQwFHU7PEp4tbBkE5FWFImOJpnhsYxAQmyQisS0leKochynY40fke20M7L8FfwGP8AW/oBdxRb+AyczSJ2WXsnSvef6XN+Xi5pRbQaD87X13o2bt25v3Anu3rv/4OHm1qMDLRuFyRhLJtVRgTRhVJCxoYaRo1oRxAtGDovpu9Z/eEqUplJ8NvOa5BydCFpRjIyHjjf3oKyJQkYqgTixpx/fu13IkZkUlS3dsxchLJCycIrqGrnnx5vRoD/oJLyqxEslAkvZP95a/wNLiRtOhMEMaZ3Fg9rkFilDMSMugI0mNcJTdEIyr7ZJ6Nx2dblwxyNlWEnljzBhh15kWMS1nvPC32xT1pd9LfhfH0YCE7byuj1Deu6DrYIt1UjJ9Co8qxTCl5I31ZvcUlE3hgi8yL1qWGhk2PY9LKki2LC5VxBW1Jcf4gnyYYyfThD4nk8J8uMz3g6gIGdYco5EaaFu/IQor6UmLhvmWTceqcrcRrHtjBp1vIs3U2ujxNlo6LxcGy91WZKvIqmP6jz1ek7aZmF3gjCEUiJGT0RneHNSUbYNeWomURwl250NsfqPc3jR6XYC968B0kx8/auP+/2da1+xQUrJM5fFeTZsl6irXRG2eB5OCjmzUDWMZLCknMxqBdu9aXWRJNCQmWntZK+f1AZ6Ipq1PXS2P6qNc4sofEqU2BvxZhmvHaMn2bGzfn/nznJnhYPt2klmR3HX38B/jPjyN7iqHCT9+FX/5adRlL5dfpEN8AQ8BbsgBq9BCj6AfTAGGHwB38B38KP3tfezd977tbi6vrbkPAYr0vv9F60yZq0=</latexit>
+
+o0
+
+o0
+
+<latexit sha1_base64="Qn0cHsXD6WqDq2CbbbZbrxTiNRg=">AAAEDXicdVNJbtswFGXiDqk6Oe2yG6FKgG5iWLI7LAV0k2UK1EkAUQgomooJcxBIKrFB8Ay9QLftDboruu0ZeoDeo6TsAnGGDxD4/32+zz+xahjVZjj8s7Xdu3f/wcOdR9HjJ0+fPe/vvjjWslWYTLBkUp1WSBNGBZkYahg5bRRBvGLkpJp/DP6TC6I0leKzWTak5Ohc0JpiZDx01u/DCikLOTKzqrYL5876yXAw7CS+qaRrJQFrOTrb3f4LpxK3nAiDGdK6SIeNKS1ShmJGXARbTRqE5+icFF4ViBNd2i51F+97ZBrXUvkjTNyhVxkWca2XvPI3Q476ui+At/owEpiwjdftJdJLH2wTDFQjJdOb8KJWCF9L3tQfSktF0xoi8Cr3umWxkXFobTylimDDll5BWFFffoxnyIcxfgBR5Js8J8hPyHg7goJcYsk5ElMLddsQRXkjNXHFqCy6eUg1LW2SrobToI539WZubZI5m4yclzvj5a7Iyk0k91Gdp97NyUMWdj+KYyglYvRcdIY3ZzVle5DnZpakSbbX2RCrW5yjq063H7n/DZBm5uvffNyv6FL7ig1SSl66Ii2LUViirnZF2Op5OKvkwkLVMlLAKeVk0SgY9iboIsugIQsT7OxgkDUGeiJahB46Oxg3xrlVFD4nShyMebuOF8boSXbirN/fpbPcWeFgWDvJ7Djt+hv5j5Fe/wY3leNskL4bvP00TvLD9RfZAa/Aa/AGpOA9yMEhOAITgMEF+Aq+ge+9L70fvZ+9X6ur21trzkuwIb3f/wAb+1sO</latexit>
+
+<latexit sha1_base64="Qn0cHsXD6WqDq2CbbbZbrxTiNRg=">AAAEDXicdVNJbtswFGXiDqk6Oe2yG6FKgG5iWLI7LAV0k2UK1EkAUQgomooJcxBIKrFB8Ay9QLftDboruu0ZeoDeo6TsAnGGDxD4/32+zz+xahjVZjj8s7Xdu3f/wcOdR9HjJ0+fPe/vvjjWslWYTLBkUp1WSBNGBZkYahg5bRRBvGLkpJp/DP6TC6I0leKzWTak5Ohc0JpiZDx01u/DCikLOTKzqrYL5876yXAw7CS+qaRrJQFrOTrb3f4LpxK3nAiDGdK6SIeNKS1ShmJGXARbTRqE5+icFF4ViBNd2i51F+97ZBrXUvkjTNyhVxkWca2XvPI3Q476ui+At/owEpiwjdftJdJLH2wTDFQjJdOb8KJWCF9L3tQfSktF0xoi8Cr3umWxkXFobTylimDDll5BWFFffoxnyIcxfgBR5Js8J8hPyHg7goJcYsk5ElMLddsQRXkjNXHFqCy6eUg1LW2SrobToI539WZubZI5m4yclzvj5a7Iyk0k91Gdp97NyUMWdj+KYyglYvRcdIY3ZzVle5DnZpakSbbX2RCrW5yjq063H7n/DZBm5uvffNyv6FL7ig1SSl66Ii2LUViirnZF2Op5OKvkwkLVMlLAKeVk0SgY9iboIsugIQsT7OxgkDUGeiJahB46Oxg3xrlVFD4nShyMebuOF8boSXbirN/fpbPcWeFgWDvJ7Djt+hv5j5Fe/wY3leNskL4bvP00TvLD9RfZAa/Aa/AGpOA9yMEhOAITgMEF+Aq+ge+9L70fvZ+9X6ur21trzkuwIb3f/wAb+1sO</latexit>
+
+<latexit sha1_base64="hmFZUePpmjxjuHEljy0UAY6OIoU=">AAAEBnicdVNLbxMxEHYbHmV5tXDksmJbwaVRdhMex5W49Fgk0lZaryqv422s+LGyvSSR5Tt/gCv8A26IK3+DH8D/wN4EqeljJEsz3/gbz4xnqoZRbQaDP1vbvTt3793feRA9fPT4ydPdvWcnWrYKkzGWTKqzCmnCqCBjQw0jZ40iiFeMnFazD8F/+pkoTaX4ZJYNKTm6ELSmGBkPFZAjM61qK92r891k0B90El9X0rWSgLUcn+9t/4UTiVtOhMEMaV2kg8aUFilDMSMugq0mDcIzdEEKrwrEiS5tl7OLDzwyiWup/BEm7tDLDIu41kte+ZshR33VF8AbfRgJTNjG63aO9NIH2wQD1UjJ9Ca8qBXCV5I39fvSUtG0hgi8yr1uWWxkHHoaT6gi2LClVxBW1Jcf4ynyYYzvfBT5Js8I8l9jvB1BQeZYco7ExELdNkRR3khNXDEsV/8h1aS0SWo7o0Ed7/LN3NokczYZOi+3xstdkZWbSO6jOk+9nZOHLOxBFMdQSsTohegMb05ryvYhz800SZNsv7MhVjc4h5ed7iBy/xsgzdTXv/m4n82l9hUbpJScuyIti2EYoq52RdjqeTit5MJC1TJSwAnlZNEoGOYm6CLLoCELE+zssJ81BnoiWoQeOtsfNca5VRQ+I0ocjni7jhe+0ZPs2Fk/v0tnubPCwTB2ktlR2vU38ouRXl2D68pJ1k/f9t98HCX50XpFdsAL8BK8Bil4B3JwBI7BGGAgwVfwDXzvfen96P3s/Vpd3d5ac56DDen9/gfU3lhA</latexit>
+
+<latexit sha1_base64="GmYWlBtyVplNrJjUIcMisAYkE20=">AAAEKnicdVPLbtQwFHU7PEp4tbBkE5FWFImOJpnhsYxAQmyQisS0leKochynY40fke20M7L8FfwGP8AW/oBdxRb+AyczSJ2WXsnSvef6XN+Xi5pRbQaD87X13o2bt25v3Anu3rv/4OHm1qMDLRuFyRhLJtVRgTRhVJCxoYaRo1oRxAtGDovpu9Z/eEqUplJ8NvOa5BydCFpRjIyHjjf3oKyJQkYqgTixpx/fu13IkZkUlS3dsxchLJCycIrqGrnnx5vRoD/oJLyqxEslAkvZP95a/wNLiRtOhMEMaZ3Fg9rkFilDMSMugI0mNcJTdEIyr7ZJ6Nx2dblwxyNlWEnljzBhh15kWMS1nvPC32xT1pd9LfhfH0YCE7byuj1Deu6DrYIt1UjJ9Co8qxTCl5I31ZvcUlE3hgi8yL1qWGhk2PY9LKki2LC5VxBW1Jcf4gnyYYyfThD4nk8J8uMz3g6gIGdYco5EaaFu/IQor6UmLhvmWTceqcrcRrHtjBp1vIs3U2ujxNlo6LxcGy91WZKvIqmP6jz1ek7aZmF3gjCEUiJGT0RneHNSUbYNeWomURwl250NsfqPc3jR6XYC968B0kx8/auP+/2da1+xQUrJM5fFeTZsl6irXRG2eB5OCjmzUDWMZLCknMxqBdu9aXWRJNCQmWntZK+f1AZ6Ipq1PXS2P6qNc4sofEqU2BvxZhmvHaMn2bGzfn/nznJnhYPt2klmR3HX38B/jPjyN7iqHCT9+FX/5adRlL5dfpEN8AQ8BbsgBq9BCj6AfTAGGHwB38B38KP3tfezd977tbi6vrbkPAYr0vv9F60yZq0=</latexit>
+
+vMF(d0 , ̄)
+
+vMF(d0 , ̄)
+
+o0
+
+<latexit sha1_base64="hmFZUePpmjxjuHEljy0UAY6OIoU=">AAAEBnicdVNLbxMxEHYbHmV5tXDksmJbwaVRdhMex5W49Fgk0lZaryqv422s+LGyvSSR5Tt/gCv8A26IK3+DH8D/wN4EqeljJEsz3/gbz4xnqoZRbQaDP1vbvTt3793feRA9fPT4ydPdvWcnWrYKkzGWTKqzCmnCqCBjQw0jZ40iiFeMnFazD8F/+pkoTaX4ZJYNKTm6ELSmGBkPFZAjM61qK92r891k0B90El9X0rWSgLUcn+9t/4UTiVtOhMEMaV2kg8aUFilDMSMugq0mDcIzdEEKrwrEiS5tl7OLDzwyiWup/BEm7tDLDIu41kte+ZshR33VF8AbfRgJTNjG63aO9NIH2wQD1UjJ9Ca8qBXCV5I39fvSUtG0hgi8yr1uWWxkHHoaT6gi2LClVxBW1Jcf4ynyYYzvfBT5Js8I8l9jvB1BQeZYco7ExELdNkRR3khNXDEsV/8h1aS0SWo7o0Ed7/LN3NokczYZOi+3xstdkZWbSO6jOk+9nZOHLOxBFMdQSsTohegMb05ryvYhz800SZNsv7MhVjc4h5ed7iBy/xsgzdTXv/m4n82l9hUbpJScuyIti2EYoq52RdjqeTit5MJC1TJSwAnlZNEoGOYm6CLLoCELE+zssJ81BnoiWoQeOtsfNca5VRQ+I0ocjni7jhe+0ZPs2Fk/v0tnubPCwTB2ktlR2vU38ouRXl2D68pJ1k/f9t98HCX50XpFdsAL8BK8Bil4B3JwBI7BGGAgwVfwDXzvfen96P3s/Vpd3d5ac56DDen9/gfU3lhA</latexit>
+
+<latexit sha1_base64="hmFZUePpmjxjuHEljy0UAY6OIoU=">AAAEBnicdVNLbxMxEHYbHmV5tXDksmJbwaVRdhMex5W49Fgk0lZaryqv422s+LGyvSSR5Tt/gCv8A26IK3+DH8D/wN4EqeljJEsz3/gbz4xnqoZRbQaDP1vbvTt3793feRA9fPT4ydPdvWcnWrYKkzGWTKqzCmnCqCBjQw0jZ40iiFeMnFazD8F/+pkoTaX4ZJYNKTm6ELSmGBkPFZAjM61qK92r891k0B90El9X0rWSgLUcn+9t/4UTiVtOhMEMaV2kg8aUFilDMSMugq0mDcIzdEEKrwrEiS5tl7OLDzwyiWup/BEm7tDLDIu41kte+ZshR33VF8AbfRgJTNjG63aO9NIH2wQD1UjJ9Ca8qBXCV5I39fvSUtG0hgi8yr1uWWxkHHoaT6gi2LClVxBW1Jcf4ynyYYzvfBT5Js8I8l9jvB1BQeZYco7ExELdNkRR3khNXDEsV/8h1aS0SWo7o0Ed7/LN3NokczYZOi+3xstdkZWbSO6jOk+9nZOHLOxBFMdQSsTohegMb05ryvYhz800SZNsv7MhVjc4h5ed7iBy/xsgzdTXv/m4n82l9hUbpJScuyIti2EYoq52RdjqeTit5MJC1TJSwAnlZNEoGOYm6CLLoCELE+zssJ81BnoiWoQeOtsfNca5VRQ+I0ocjni7jhe+0ZPs2Fk/v0tnubPCwTB2ktlR2vU38ouRXl2D68pJ1k/f9t98HCX50XpFdsAL8BK8Bil4B3JwBI7BGGAgwVfwDXzvfen96P3s/Vpd3d5ac56DDen9/gfU3lhA</latexit>
+
+Ray distribution,
+zero roughness (1/ = 0)
+
+<latexit sha1_base64="+V9n5ymQCbf2TO1TPkOQ6J6++wo=">AAAEB3icdVPNbhMxEHYbfsry0xaOXFZsI3GgUXZTfsRpJS4ciyBtpfWqchwnseKfle2lWVl+AF6AK7wBN8SVx+ABeA/sTZCS/oxkaeYbf+OZ8cyoYlSbfv/P1nbn1u07d3fuRfcfPHy0u7f/+ETLWmEyxJJJdTZCmjAqyNBQw8hZpQjiI0ZOR/N3wX/6mShNpfhkmoqUHE0FnVCMjIfgRyqmjMQKNS+i872k3+u3El9V0pWSgJUcn+9v/4VjiWtOhMEMaV2k/cqUFilDMSMugrUmFcJzNCWFVwXiRJe2TdrFXY+M44lU/ggTt+g6wyKudcNH/iZHZqYv+wJ4rQ8jgQnbeN1eIN34YJtgoBopmd6EFxOF8KXkzeRNaamoakMEXuY+qVlsZByaGo+pItiwxisIK+rLj/EM+TDGtz6KIEdzgvzfGG9HUJALLDlHYmyhriuiKK+kJq4YlAUMSUk1Lm2S2taoUMtbv5lbm2TOJgPn5cZ4uSuychPJfVTnqTdz8pCF7UZxDKVEjE5Fa3hzNqHsAPLczJI0yQ5aG2J1jXOw7nTdyP1vgDQzX//m4344G+0rNkgpeeGKtCwGYYja2hVhy+fhbCQXFqqakQKOKSeLSsEwN0EXWQYNWZhgZ4e9rDLQE9Ei9NDZ3lFlnFtG4XOixOERr1fxwjd6kh066+e3cZY7KxwMYyeZPUrb/obFSC+vwVXlJOulr3ovP2RJ/na1IjvgKXgGnoMUvAY5eA+OwRBgUIGv4Bv43vnS+dH52fm1vLq9teI8ARvS+f0PvSJX4g==</latexit>
+
+<latexit sha1_base64="fo/wn2H/sRF91z7aS6lHqZMdLq4=">AAAEHHicdVNLbxMxEHYbHmV5tXDkwIptpSLRKLspD3FaiQvHIkhbab2qHMfJWvFjZXtpguUjf4M/wBX+ATfEFYkfwP/A3gSp6WMkSzPf+BvPjGeGNaPa9Hp/1tY7167fuLlxK7p95+69+5tbDw61bBQmAyyZVMdDpAmjggwMNYwc14ogPmTkaDh9E/xHH4nSVIoPZl6TkqOJoGOKkfHQyebjXfQ0fk/FhJFYofmz+BNRMlaymVSCaB2dbCa9bq+V+KKSLpUELOXgZGv9LxxJ3HAiDGZI6yLt1aa0SBmKGXERbDSpEZ6iCSm8KhAnurRtJS7e8cgoHkvljzBxi55lWMS1nvOhv8mRqfR5XwAv9WEkMGErr9tTpOc+2CoYqEZKplfh2VghfC55M35VWirqxhCBF7mPGxYbGYdOxyOqCDZs7hWEFfXlx7hCPozx/xFFkKMpQf7DjLcjKMgplpwjMbJQNzVRlNdSE1f0ywKGpKQalTZJbWvUqOWdvZlbm2TOJn3n5cp4uSuychXJfVTnqVdz8pCF3YniGEqJGJ2I1vBmNaZsG/LcVEmaZNutDbG6xNk/63Q7kfvfAGkqX//q435i59pXbJBS8tQVaVn0wxC1tSvCFs/DaihnFqqGkQKOKCezWsEwN0EXWQYNmZlgZ3vdrDbQE9Es9NDZ7n5tnFtE4VOixN4+b5bxwjd6kh046+d37ix3VjgYxk4yu5+2/Q2LkZ5fg4vKYdZNX3Sfv8uS/PVyRTbAI/AE7IIUvAQ5eAsOwABg8Bl8Bd/A986Xzo/Oz86vxdX1tSXnIViRzu9/6E9fgQ==</latexit>
+
+<latexit sha1_base64="jbmlyegU3dWzrLsOkhTUA6l2OqE=">AAAEDHicdVPNbhMxEHYbfsry0xaOXFZsI3FplN20gDitxIVjkUhbab2KHMfJWvHPyvbSBMuvwAtwhTfghrjyDjwA74G9CVLTn5EszXzjbzwznhnXjGrT7//Z2u7cuXvv/s6D6OGjx0929/afnmrZKEyGWDKpzsdIE0YFGRpqGDmvFUF8zMjZeP4u+M8+EaWpFB/NsiYlRzNBpxQj46HR3u5nomSsZDOrBNE6Gu0l/V6/lfi6kq6VBKzlZLS//RdOJG44EQYzpHWR9mtTWqQMxYy4CDaa1AjP0YwUXhWIE13aNnMXdz0yiadS+SNM3KKXGRZxrZd87G9yZCp91RfAG30YCUzYxuv2AumlD7YJBqqRkulNeDFVCF9J3kzflJaKujFE4FXu04bFRsahs/GEKoINW3oFYUV9+TGukA9jfP+jCHI0J8h/kPF2BAW5wJJzJCYW6qYmivJaauKKQVnAkJRUk9ImqW2NGrW8yzdza5PM2WTgvNwaL3dFVm4iuY/qPPV2Th6ysN0ojqGUiNGZaA1vVlPKDiDPTZWkSXbQ2hCrG5yDy07Xjdz/BkhT+fo3H/cTutS+YoOUkheuSMtiEIaorV0RtnoeVmO5sFA1jBRwQjlZ1AqGuQm6yDJoyMIEOzvsZbWBnogWoYfO9o5q49wqCp8TJQ6PeLOOF77Rk+zQWT+/S2e5s8LBMHaS2aO07W9YjPTqGlxXTrNe+qp3/CFL8rfrFdkBz8EL8BKk4DXIwXtwAoYAgwZ8Bd/A986Xzo/Oz86v1dXtrTXnGdiQzu9/VRhZ9Q==</latexit>
+
+<latexit sha1_base64="UIAYkA9/aISeCtWVpmCzd9IR0kY=">AAAD/3icdVNLbxMxEHYbHmV5tIUjlxXbSuXQKLsJD3FaiQvHIpG20npVeR2na8WPle2liSwf+ANc4R9wQ1z5KfwA/gf2JkhNHyNZmvnG33hmPFM1jGozGPzZ2OzduXvv/taD6OGjx0+2d3afHmvZKkzGWDKpTiukCaOCjA01jJw2iiBeMXJSzd4H/8lnojSV4pNZNKTk6FzQKcXIBOigehmd7SSD/qCT+LqSrpQErOTobHfzL5xI3HIiDGZI6yIdNKa0SBmKGXERbDVpEJ6hc1J4VSBOdGm7ZF2875FJPJXKH2HiDr3MsIhrveCVv8mRqfVVXwBv9GEkMGFrr9sLpBc+2DoYqEZKptfh+VQhfCV5M31bWiqa1hCBl7lPWxYbGYdmxhOqCDZs4RWEFfXlx7hGPozxLY8iyNGMIP8nxtsRFOQCS86RmFio24YoyhupiSuGZQFDUlJNSpuktjMa1PEu38ytTTJnk6Hzcmu83BVZuY7kPqrz1Ns5ecjC7kdxDKVEjJ6LzvBmPaVsD/Lc1EmaZHudDbG6wTm87HT7kfvfAGlqX//6434oF9pXbJBS8sIVaVkMwxB1tSvCls/DupJzC1XLSAEnlJN5o2CYm6CLLIOGzE2ws8N+1hjoiWgeeuhsf9QY55ZR+IwocTji7Spe+EZPsmNn/fwunOXOCgfD2ElmR2nX37AY6dU1uK4cZ/30df/VxyzJ361WZAs8By/AAUjBG5CDD+AIjAEGNfgKvoHvvS+9H72fvV/Lq5sbK84zsCa93/8ApbhUSw==</latexit>
+
+(b)
+
+<latexit sha1_base64="egZg/huqzJb+2zC16IiQGWloMGE=">AAAEJnicdVNLbxMxEHYbHmV5tXDksmJTqT0QZTflISSklbhwLBJpK61XleM4WSt+rGwvTbD8G/gb/AGu8A+4IcSNC/8DexOkpo+RLM184288M54Z1Yxq0+//3tjs3Lh56/bWnejuvfsPHm7vPDrSslGYDLFkUp2MkCaMCjI01DByUiuC+IiR49HsbfAffyRKUyk+mEVNSo6mgk4oRsZDp9v7n4iSsZLNtBJE63ivC/VEIWxTZ+EM1TVy8Zu4392PTreTfq/fSnxZSVdKAlZyeLqz+ReOJW44EQYzpHWR9mtTWqQMxYy4CDaa1AjP0JQUXhWIE13atiYX73pkHE+k8keYuEXPMyziWi/4yN/kyFT6oi+AV/owEpiwtdftGdILH2wdDFQjJdPr8Dy050LyZvKqtFTUjSECL3OfNCw2Mg49j8dUEWzYwisIK+rLj3GFfBjjfyaKIEczgvzXGW9HUJAzLDlHYmyhbmqiKK+lJq4YlAUMSUk1Lm2S2taoUcs7fzO3NsmcTQbOy7Xxcldk5TqS+6jOU6/n5CELuxvFMZQSMToVreHNakJZF/LcVEmaZN3Whlhd4Rycd7rdyP1vgDSVr3/9cT+7C+0rNkgpeeaKtCwGYYja2hVhy+dhNZJzC1XDSAHHlJN5rWCYm6CLLIOGzE2ws2e9rDbQE9E89NDZ3kFtnFtG4TOixLMD3qzihW/0JDt01s/vwlnurHAwjJ1k9iBt+xsWI724BpeVo6yXvug9f58l+evVimyBJ+Ap2AMpeAly8A4cgiHA4DP4Cr6B750vnR+dn51fy6ubGyvOY7AmnT//AGamY1Q=</latexit>
+
+Ray distribution,
+general roughness (1/ > 0)
+<latexit sha1_base64="DGX2kJ4vvl14gHDEto/qCZb4tM0=">AAAED3icdVPLbhMxFHUbHmV4tWXJZsQ0EgsaZSbhIVYjsWFZEGkrjUeVx3EaK36MbA9NZPkj+AG28AfsEFs+gQ/gP7AnQUr6uJKle8/1uS9fVzWj2vT7f7a2O7du37m7cy+6/+Dho8e7e/vHWjYKkxGWTKrTCmnCqCAjQw0jp7UiiFeMnFSzd8F/8pkoTaX4ZBY1KTk6F3RCMTIeOtvd/4gW8djnUbRqAvQiOttN+r1+K/FVJV0pCVjJ0dne9l84lrjhRBjMkNZF2q9NaZEyFDPiIthoUiM8Q+ek8KpAnOjStsW7uOuRcTyRyh9h4hZdZ1jEtV7wyt/kyEz1ZV8Ar/VhJDBhG9ntBdILH2wTDFQjJdOb8HyiEL5UvJm8KS0VdWOIwMvaJw2LjYzDcP0gFcGGhYkirKhvP8ZT5MMY/wRRBDmaEeTfyHg7goJcYMk5EmMLdVMTRXktNXHFoCxgKEqqcWmT1LZGjVre+s3c2iRzNhk4LzfGy12RlZtI7qM6T72Zk4cqbDeKYyglYvRctIY3pxPKDiDPzTRJk+ygtSFW1zgH607Xjdz/AUgz9f1vJvdLutC+Y4OUkheuSMtiEJao7V0RtkwPp5WcW6gaRgo4ppzMawXD3gRdZBk0ZG6CnR32stpAT0TzMENne8PaOLeMwmdEicMhb1bxwjN6kh056/d34Sx3VjgY1k4yO0zb+YaPkV7+BleV46yXvuq9/JAl+dvVF9kBT8Ez8Byk4DXIwXtwBEYAgzn4Cr6B750vnR+dn51fy6vbWyvOE7Ahnd//AOqQWu0=</latexit>
+
+<latexit sha1_base64="DGX2kJ4vvl14gHDEto/qCZb4tM0=">AAAED3icdVPLbhMxFHUbHmV4tWXJZsQ0EgsaZSbhIVYjsWFZEGkrjUeVx3EaK36MbA9NZPkj+AG28AfsEFs+gQ/gP7AnQUr6uJKle8/1uS9fVzWj2vT7f7a2O7du37m7cy+6/+Dho8e7e/vHWjYKkxGWTKrTCmnCqCAjQw0jp7UiiFeMnFSzd8F/8pkoTaX4ZBY1KTk6F3RCMTIeOtvd/4gW8djnUbRqAvQiOttN+r1+K/FVJV0pCVjJ0dne9l84lrjhRBjMkNZF2q9NaZEyFDPiIthoUiM8Q+ek8KpAnOjStsW7uOuRcTyRyh9h4hZdZ1jEtV7wyt/kyEz1ZV8Ar/VhJDBhG9ntBdILH2wTDFQjJdOb8HyiEL5UvJm8KS0VdWOIwMvaJw2LjYzDcP0gFcGGhYkirKhvP8ZT5MMY/wRRBDmaEeTfyHg7goJcYMk5EmMLdVMTRXktNXHFoCxgKEqqcWmT1LZGjVre+s3c2iRzNhk4LzfGy12RlZtI7qM6T72Zk4cqbDeKYyglYvRctIY3pxPKDiDPzTRJk+ygtSFW1zgH607Xjdz/AUgz9f1vJvdLutC+Y4OUkheuSMtiEJao7V0RtkwPp5WcW6gaRgo4ppzMawXD3gRdZBk0ZG6CnR32stpAT0TzMENne8PaOLeMwmdEicMhb1bxwjN6kh056/d34Sx3VjgY1k4yO0zb+YaPkV7+BleV46yXvuq9/JAl+dvVF9kBT8Ez8Byk4DXIwXtwBEYAgzn4Cr6B750vnR+dn51fy6vbWyvOE7Ahnd//AOqQWu0=</latexit>
+
+Single
+(a) Single
+ray,ray,
+zero roughness
+zero roughness
+
+<latexit sha1_base64="7pEBVWJXcKCrsG5ORSiYlyaaVGs=">AAAD/3icdVPNbhMxEHYbfsry0xaOXFZsI5VDo+wm/IjTSlw4Fom0ldarynGcrhX/rGwvTWT5wAtwhTfghrjyKDwA74G9CVKTtiNZmvnG33hmPDOuGdWm3/+ztd25c/fe/Z0H0cNHj5/s7u0/PdGyUZiMsGRSnY2RJowKMjLUMHJWK4L4mJHT8ex98J9+JkpTKT6ZRU1Kji4EnVKMTIAO8cvofC/p9/qtxNeVdKUkYCXH5/vbf+FE4oYTYTBDWhdpvzalRcpQzIiLYKNJjfAMXZDCqwJxokvbJuvirkcm8VQqf4SJW/QqwyKu9YKP/U2OTKU3fQG80YeRwIStvW4vkV74YOtgoBopmV6H51OF8EbyZvq2tFTUjSECL3OfNiw2Mg7NjCdUEWzYwisIK+rLj3GFfBjjWx5FkKMZQf5PjLcjKMgllpwjMbFQNzVRlNdSE1cMygKGpKSalDZJbWvUqOVdvZlbm2TOJgPn5dZ4uSuych3JfVTnqbdz8pCF7UZxDKVEjF6I1vBmNaXsAPLcVEmaZAetDbG6wTm46nTdyP1vgDSVr3/9cT+UC+0rNkgpeemKtCwGYYja2hVhy+dhNZZzC1XDSAEnlJN5rWCYm6CLLIOGzE2ws6NeVhvoiWgeeuhsb1gb55ZR+IwocTTkzSpe+EZPsiNn/fwunOXOCgfD2Elmh2nb37AY6eYaXFdOsl76uvfqY5bk71YrsgOegxfgEKTgDcjBB3AMRgCDCnwF38D3zpfOj87Pzq/l1e2tFecZWJPO73+pUlRM</latexit>
+
+(c)
+
+<latexit sha1_base64="WKjXcAK/E/zmet12y0xMOXU+Xcc=">AAAEKXicdVNLbxMxEHYbHmV5tXDkYrGpVCQaZTflIQ5oJS4ci0TaSutV5ThOdhU/VraXJrL8J/gb/AGu8A+4AVfE/8DeBKnpYyRLM9/4G8+MZ0Y1q7Tp939tbHZu3Lx1e+tOdPfe/QcPt3ceHWnZKEKHRDKpTkZYU1YJOjSVYfSkVhTzEaPHo9m74D/+RJWupPhoFjUtOJ6KalIRbDx0uv18SgVVmEElm2kpqNZwr4v0RGFiE2fRDNc1dvAt7HefRafbcb/XbwVeVpKVEoOVHJ7ubP5FY0kaToUhDGudJ/3aFBYrUxFGXYQaTWtMZnhKc68KzKkubFuWg7seGcOJVP4IA1v0PMNirvWCj/xNjk2pL/oCeKWPYEEoW3vdnmG98MHWwUA1UjK9Ds9Dey4kbyavC1uJujFUkGXuk4ZBI2FoOxxXihLDFl7BRFW+fEhK7MMY/zlRhDieUex/z3g7QoKeEck5FmOLdFNTVfFaauryQZGjkJRU48LGiW2NGre88zcza+PU2XjgvFwbL3N5WqwjmY/qPPV6ThaysLsRhEhKzKqpaA1vlpOKdRHPTBkncdptbUTUFc7Beafbjdz/BkhT+vrXH/fju9C+YoOVkmcuT4p8EIaorV1RtnwelSM5t0g1jOZoXHE6rxUKcxN0kabI0LkJdrrfS2uDPBHPQw+d7R3UxrllFD6jSuwf8GYVL3yjJ9mhs35+F85yZ4VDYewkswdJ29+wGMnFNbisHKW95GXvxYc0zt6sVmQLPAFPwR5IwCuQgffgEAwBAZ/BV/ANfO986fzo/Oz8Xl7d3FhxHoM16fz5BxPUZJE=</latexit>
+
+Fig. 3. We visualize the reflection cone tracing procedure described in Section 4.1. (a) A basic model for o :
+reflections:
+a ray cast from a camera ray origin
+camera center
+camera view direction
+o along view direction d that dx̄ :
+terminates
+at a coordinate x̄ with a surface nor: camera ray termination
+n̄ : surface normal
+mal n̄ is “mirrored” around the surface
+tangent to yield a reflected “camera
+̄ : surface roughness
+reflection
+“camera” center
+ray origin” o′ and direction d′ . o :
+This
+model
+does not consider that Zip-NeRF
+vMF(r, ̄) : von Mises-Fisher distribution
+sampled rays,
+reflection directions
+traces pixel cones instead of {r } :
+camera
+which we address by (b) casting
+{x̄ } : reflected ray terminations
+a reflection cone with radius 𝑟¤ instead of a ray, and parameterizing not
+just a single reflected ray direction but a von Mises-Fisher distribution over
+reflected rays vMF(d′ , 𝜅¯ ), where 𝜅¯ is the inverse-roughness of the surface.
+We approximate this distribution with a small set of rays {d′𝑗 }. (c) When
+the surface is not a perfect mirror, the reflection cone widens and the origin
+of the reflected ray cone must be pulled closer to the surface location to
+maintain the same intersection with the pixel cone.
+<latexit sha1_base64="3QmtLBis37D28LRe296U0RjungQ=">AAAF/nicdVTdbhM5FB6yG7bM7kK7XHJjbegWJBpl0u6CuIpAQtwgsdK2IMVR8TiexBv/jGxPm8iyxAtwC2/AHeKWV9kH2PfgeJLSTBssjXT+vs/nHJ8zeSm4db3ef9daP/zYvv7T1o30519+vXlre+e3Y6srQ9kR1UKb1zmxTHDFjhx3gr0uDSMyF+xVPnsa/a9OmbFcq3/comQjSSaKF5wSB6aTnVaCJXHTvPA6oD8e4wcIOzZ3nhLJDEGUKcdMQBin53HjTXGnnJ2hMTeMRtplfE6MPwfNwyaUIQsE9JIrshmmmjBbmYJQhpQ2koi18BkpS7Ix1OhqMlXM2kYNOuytBxtWiGXm6M2bZW57e43adQk2p40Cpz998SzcO6cyAVjWkri/TnwKjC+4ZXb/GbdTZqBF1hmeVxflenTBdPIvws0qiCwFG6O1BL812X7DX2r0FZYVOvI0G15TnGx3et1efdBVIVsJnWR1XsLM/I/HmlYS+kMFsXaY9Uo38sQ4TgULKa4sKwmdkQkbghh7Zke+ntWAdsEyRoU28CmHaus6whNp7ULmEBlLspd90bjRR4miTDRu92fELoCsaYxQp7WwTfO8MIReSt4Vj0aeq7JyTNFl7kUlkNMo7tLqLcQCBEINh/IRnRKggR7bNE7bjBFYSQd6ihU7o1pKosYe2woGistSWxaGB6Nh/XzajEe+ky3fsiQ1bj1y4H2nH3znIMD5Lt8gDPujpmUArAGg38cMYhZ+N0UIa00En6haAXVacHEXy4GbdrJO/26tY2o2OA/WnWE3DecN0A5GP21eDv+khYWKHTFGn4VhNhoexCGqazdMLK/H01zPPTaVYEM85pLNS4Pj3ERZ9fv1fEe9v9/tlw4DkMxjD4PvHpYuhCWLnDGj9g9lteKLzwggfxQ8zO8ieBngV4Pj2GnhD7O6vyksRnZ5Da4Kx/1u9lf3z78PO4MnqxXZSu4kvyf3kix5mAyS58nL5CihrUnrXet960P7bftj+1P78zK0dW2FuZ00TvvLVzdQEJo=</latexit>
+
+0
+
+j
+j
+
+small set of rays within this cone and computes volume density and
+features at sampled points along these rays. Section 4.3 presents
+the complete appearance model that decodes the accumulated reflection feature into a specular color. Finally, Section 4.4 provides
+additional details describing how our model of 3D geometry and
+features differs from the standard Zip-NeRF architecture.
+
+
+
+Mip-NeRF [Barron et al. 2021] replaces infinitesimal rays with pixel cones with origin o, direction d and radius ��¤ (determined by the pixel footprint on the image plane). Casting cones instead of rays prevents aliasing in the scene representation and as a result, prevents aliasing in the rendered images. To represent large-scale unbounded scenes, mip-NeRF 360 [Barron et al. 2022] allocates
+
+higher representational capacity to points near the cameras using a spatial contraction function that maps all points in R 3 to a sphere of radius 2:
+
+
+$$x(\mathbf{x}) = \begin{cases} \mathbf{x} & \text{if } \|\mathbf{x}\| \leq 1, \\ \left(2 - \frac{1}{\|\mathbf{x}\|}\right) \frac{\mathbf{x}}{\|\mathbf{x}\|} & \text{if } \|\mathbf{x}\| > 1. \end{cases} \quad (2)$$
+
+In order to represent density and color, Zip-NeRF accelerates mip-NeRF 360 by replacing its large MLP with a hash encoding, based on Instant Neural Graphics Primitives [Müller et al. 2022], followed by a smaller MLP. To prevent aliasing, Zip-NeRF replaces point samples of the hash encoding grid with their expectation over 3D Gaussians. Since these expected values cannot be computed exactly, they are approximated using two components: multisampling and downweighting. Multisampling replaces each Gaussian with multiple smaller Gaussians, and downweighting multiplies each of the gathered features at these samples by a multiplier designed to prevent voxels much smaller than the Gaussian from affecting the features. The contraction function in Equation 2 must be taken into account when computing the appropriate amount of downweighting: the determinant of the Jacobian of C, det ��C, "deflates" the Gaussians' volumes, so Zip-NeRF downweights the grid resolution ��ℓ by erf √ 8��(x)��ℓ −1 , where:
+
+
+$$\sigma(\mathbf{x}) = \gamma \cdot \dot{r} \|\mathbf{x} - \mathbf{0}\| \sqrt[3]{\det J_C(\mathbf{x})}, \quad (3)$$
+
+where �� is a fixed hyperparameter.
+
+### 4 MODEL
+
+We design our method with three goals in mind: First, we want to model accurate detailed reflections without relying on computationally expensive MLP evaluations. Second, we would like to only cast a small number of reflected rays. Third, we would like to minimize the computation required to query our representation at each point along these reflection rays.
+
+Our representation of 3D volume density and features is based on Zip-NeRF. As described in Section 3, Zip-NeRF uses a multi-scale hashgrid to store 3D features, a small MLP (1 layer, width 64) to decode these features into density, and a larger MLP (3 layers, width 256) to decode these features into color. This means that querying the density and feature for samples along rays is cheap relative to evaluating color. Considering these constraints, we propose the following procedure to render specular appearance:
+
+- (1) Query volume density along each camera ray to compute the ray's expected termination point and surface normal.
+- (2) Cast a reflected cone through the expected termination point in the reflection direction.
+- (3) Use a small MLP to combine the accumulated reflection feature with other sampled quantities (such as the diffuse color features and per-sample blending weights) to produce a color value for each sample along the ray.
+- (4) Alpha composite these samples and densities into the final color.
+
+These steps are illustrated in Figure 2 and explained in more detail below.
+
+Section 4.1 describes how our method estimates the cone of reflection rays to be traced. Section 4.2 details how our model traces a
+
+
+
+Fig. 2. Our model architecture for rendering a single ray with origin o and direction d. We sample �� points x along the ray and use a spatial encoder based on Zip-NeRF to encode each point into density �� (��) , roughness �� (��) , and surface normal n . These are alpha composited to compute a single expected termination point x¯, a von Mises-Fisher distribution (vMF) width ��¯, and surface normal n¯. Then d is reflected around that surface to construct a vMF distribution over reflected rays vMF(d ′ ,��¯). We sample �� reflected rays (�� = 5) with location o ′ and directions d ′ �� (as in Figure 3\). These �� rays are then cast, and points along them are encoded with the same model as the initial ray into �� ′ densities �� (��) �� and features f (��) �� . These features are alpha composited along each ray to get per-ray features ¯f�� , and the composited features are averaged into a single reflection feature f. This feature is broadcast over the original ray's samples and passed, along with bottleneck features b , mixing coefficients �� , and viewing direction d, to the color decoder to produce RGB colors c (��) for each point along the ray. These colors are alpha composited to render a pixel color c¯.
+
+
+
+o : camera center d : camera view direction n¯ : surface normal o0 : reflection "camera" center {rj} : sampled reflection directions {x¯j} : reflected ray terminations Fig. 3. We visualize the reflection cone tracing procedure described in Section 4.1. (a) A basic model for reflections: a ray cast from a camera ray origin o along view direction d that terminates at a coordinate x¯ with a surface normal n¯ is "mirrored" around the surface tangent to yield a reflected "camera ray origin" o ′ and direction d ′ . This model does not consider that Zip-NeRF traces pixel cones instead of camera rays, which we address by (b) casting a reflection cone with radius ��¤ instead of a ray, and parameterizing not just a single reflected ray direction but a von Mises-Fisher distribution over reflected rays vMF(d ′ ,��¯), where ��¯ is the inverse-roughness of the surface. We approximate this distribution with a small set of rays {d ′ }. (c) When the surface is not a perfect mirror, the reflection cone widens and the origin of the reflected ray cone must be pulled closer to the surface location to maintain the same intersection with the pixel cone.
+
+small set of rays within this cone and computes volume density and features at sampled points along these rays. Section 4.3 presents the complete appearance model that decodes the accumulated reflection feature into a specular color. Finally, Section 4.4 provides additional details describing how our model of 3D geometry and features differs from the standard Zip-NeRF architecture.
+
+#### 4.1 Reflection Cone Tracing
+
+For a given ray with origin o and direction d, we sample �� points {x �� ��=1 along it, and evaluate the NeRF to get a collection of 3D quantities such as the surface normal (and others to be defined shortly). We then alpha composite these quantities to get the expected surface termination point x¯, and the ray's associated surface normal n¯, by applying the volume rendering typically used for color {c (��) } �� ��=1 in Equation 1 to the sample points {x (��) } �� ��=1 and normals {n (��) �� ��=1 :
+
+
+$$\bar{\mathbf{x}} = \sum_{i=1}^N \mathbf{w}^{(i)} \mathbf{x}^{(i)}, \quad \bar{\mathbf{n}} = \sum_{i=1}^N \mathbf{w}^{(i)} \mathbf{n}^{(i)}. \quad (4)$$
+
+We then construct a new reflected ray with direction d ′ by reflecting the initial ray about the surface normal:
+
+
+$$\mathbf{d}' = \mathbf{d} - 2(\bar{\mathbf{n}} \cdot \mathbf{d})\bar{\mathbf{n}}. \quad (5)$$
+
+Tracing a single reflection ray cannot be used to render materials that are not perfect mirrors, and it ignores the fact that Zip-NeRF traces cones instead of rays for each pixel. Accordingly, we model a cone-like distribution of reflected rays. The shape of this distribution is affected by two factors: the radius of the original pixel cone cast from the camera, and the roughness of the surface at the expected termination point of the camera ray, as visualized in Figure 3. We start by modeling both the cone-like distribution of reflected rays and the distribution of reflection directions due to surface roughness as von Mises-Fisher (vMF, i.e. a normalized spherical Gaussian) distributions centered at the mirror reflection direction d ′ . The vMF width (reciprocal of its concentration parameter ��) for the pixel cone distribution is the pixel radius ��¤, and the vMF width for the surface roughness is a quantity �� that we parameterize at any point in space. The reflected ray cone at the camera ray's expected termination point is modeled as a vMF distribution vMF(d ′ , ��¯), whose width ��¯ −1 is the sum of the pixel ray cone's radius ��¤ and the composited roughness ��¯ along the primary ray:
+
+$$\bar{\kappa}^{-1} = \dot{r} + \bar{\rho}. \quad (6)$$
+
+In order to ensure that the cross-section of the reflected ray cone at the surface matches that of the incident ray, we apply a roughnessdependent shift to the reflected ray cone's origin so that it intersects x¯ while having the incident ray's radius ��¤∥o − x¯ ∥ (see Figure 3\(c) and Appendix A for more details):
+
+
+$$\mathbf{o}' = \bar{\mathbf{x}} - \|\mathbf{o} - \bar{\mathbf{x}}\| \frac{\dot{\mathbf{r}}}{\dot{\mathbf{r}} + \bar{\rho}} \mathbf{d}'. \quad (7)$$
+
+Note that when the accumulated roughness ��¯is zero, o ′ is not shifted towards the surface, and is instead perfectly mirrored to the other side of the surface.
+
+# 4.2 Conical Reflected Features
+
+Now that we have defined a vMF distribution over reflected rays, our goal is to estimate the expected volume-rendered feature over the vMF distribution, which we can then decode to a reflected color. This expected feature can be written as:
+
+
+$$\bar{f}^\star = \mathbb{E}_{\omega \sim \text{vMF}(\mathbf{d}', \bar{\kappa})} [\bar{f}(\omega)] = \int_{\mathbb{S}^2} \bar{f}(\omega) \text{vMF}(\omega; \mathbf{d}', \bar{\kappa}) d\omega, \quad (8)$$
+
+where ¯f(��) is the feature vector accumulated in the direction ��.
+
+Estimating this integral using Monte Carlo over randomly-sampled rays is prohibitively expensive since each sample requires volumetric rendering along the ray. Inspired by Zip-NeRF, we approximate this integral using a small set of representative samples combined with feature downweighting. However, unlike Zip-NeRF, we perform both of these operations in the 2D directional domain rather than in 3D Euclidean space.
+
+Directional Sampling. Instead of sampling a large number of random reflection rays, we select a representative set of rays using unscented directional sampling [Kurz et al. 2016]. We evaluate �� rays {(o ′ �� , d ′ �� )}�� ��=1 (in our experiments we set �� = 5) selected to maintain the mean d ′ and concentration ��¯, by setting d ′ 1 = d ′ and {d ′ �� } �� ��=2 placed on a circle around d ′ whose radius depends on ��¯. During optimization we randomly rotate the samples rigidly on the circle and during evaluation we fix them. A more detailed description of this procedure is provided in Appendix B.
+
+For each of the �� sampled rays (o ′ �� , d ′ �� ), we evaluate the volume density and appearance features at �� ′ sample points along the ray, and volume render them into the feature ¯f(d ′ �� ). In order to generate these �� ′ samples we use the same procedure as sampling the �� rays on the camera rays (see supplement for more details). The �� features are then averaged to yield a single feature vector for the reflected cone:
+
+
+$$\bar{f}(\mathbf{d}'_j) = \sum_{j=1}^{N'} w_j^{-1} \mathbf{f}(\mathbf{x}_j^{-1}), \quad \bar{f} = \frac{1}{K} \sum_{j=1}^K \bar{f}(\mathbf{d}'_j), \quad (9)$$
+
+where �� (��) �� and x (��) �� are the ��th reflected ray's ��th sample weight and 3D location, respectively, and f(x) is the feature at x.
+
+Reflection Feature Downweighting. The directional sampling described above helps select a small representative set of rays to average. However, for surfaces with high roughness, the sampled rays can be distant from one another relative to the underlying 3D grid cells. This means that the feature from Equation 9 may be aliased, and small variations in the reflected ray directions can cause large variations in appearance.
+
+In order to prevent this, we adapt the "feature downweighting" technique from Zip-NeRF to our directional setting. We do this by multiplying features corresponding to voxels that are small relative to the vMF cone by a small multiplier, reducing their effect on the rendering color. Following Zip-NeRF, we define the downweighted feature at a point x as:
+
+$$\mathbf{f}_{\text{aa}}(\mathbf{x}) = \text{erf}\left(\left(\sqrt{8}\nu\sigma(\mathbf{x})\right)^{-1}\right) \odot \mathbf{f}(\mathbf{x}), \quad (10)$$
+
+where ��(x) is the (scalar) scale of the cone at the point x (defined below), �� is a vector of the same dimension as f containing the scale of NGP grid resolution corresponding to every entry of f, ⊙ denotes elementwise multiplication, and the reciprocal and erf(·) are taken elementwise. The downweighted feature faa (x) is used in Equation 9 in place of the original feature f(x).
+
+Since we focus on large scenes, which require using a contraction function C (Equation 2\), it is particularly important to consider the behavior of ��(x) in the nonlinear region of the contraction. Zip-NeRF scales ��(x) by the geometric mean of the contraction function's 3D Jacobian's eigenvalues (Equation 3\). This has the unfortunate effect of causing ��(x) to approach 0 (i.e., applying no downweighting) for points x far from the origin, because C strongly contracts distant points towards the origin. As a result, using Zip-NeRF's downweighting function would result in significant aliasing in reflections of distant content. We instead use the Jacobian determinant restricted to the (2D) directional domain, and define:
+
+
+$$\sigma(\mathbf{x}) = \gamma \cdot (\dot{r} + \bar{\rho}) \|\mathbf{x} - \mathbf{o}'\| \sqrt{\det \mathbf{J}_C^{\text{dir}}(\mathbf{x})}, \quad (11)$$
+
+where �� is a fixed scale multiplier which we set to 16 in all experiments, and:
+
+$$\det \mathbf{J}_C^{\text{dir}}(\mathbf{x}) = \det \mathbf{J}_C(\mathbf{x}) \cdot \left( \frac{\partial}{\partial \|\mathbf{x}\|} \left( C(\mathbf{x}) \cdot \frac{\mathbf{x}}{\|\mathbf{x}\|} \right) \right)^{-1} \quad (12)$$
+
+$$= \left( \frac{2 \max(1, \|\mathbf{x}\|) - 1}{\max(1, \|\mathbf{x}\|^2)} \right)^2. \quad (13)$$
+
+Note that when the point x is far from the origin, the scale in Equation 11 approaches a constant, �� ∥x∥→∞ −−−−−−−→ 2�� ( ¤�� + ��¯), in contrast to Zip-NeRF's scale, which approaches zero and therefore does not downweight distant content. While this may be less noticeable in Zip-NeRF, properly downweighting distant content is crucial for us to prevent aliasing in reflections of distant illumination.
+
+### 4.3 Color Decoder
+
+The role of the color decoder is to assign a color to every sample point along a ray. Inspired by UniSDF [Wang et al. 2023], our color decoder uses a convex combination of two color components:
+
+$$\mathbf{c}(\mathbf{x}^{(i)}, \mathbf{d}) = \beta^{(i)} \mathbf{c}_0(\mathbf{x}^{(i)}, \mathbf{d}) + (1 - \beta^{(i)}) \mathbf{c}_r(\mathbf{x}^{(i)}, \mathbf{d}'), \quad (14)$$
+
+where �� (��) ∈ [0, 1] is a weighting coefficient output by the geometry encoder followed by a sigmoid nonlinearity. The first color component c�� is similar to the typical NeRF view-dependent appearance model:
+
+
+$$\mathbf{c}_{\mathbf{v}}(\mathbf{x}^{(i)}, \mathbf{d}) = g(\mathbf{x}^{(i)}, \mathbf{b}^{(i)}, \mathbf{n}^{(i)}, \mathbf{d}), \quad (15)$$
+
+and the second component c��, designed to model glossy appearance, is computed as:
+
+
+$$\mathbf{c}_r\left(\mathbf{x}^{(i)}, \mathbf{d}'\right) = h\left(\mathbf{x}^{(i)}, \mathbf{b}^{(i)}, \mathbf{n}^{(i)}, \mathbf{d} \cdot \mathbf{n}^{(i)}, \mathbf{d}', \bar{\mathbf{f}}\right), \quad (16)$$
+
+where �� and ℎ are small MLPs (see supplement for more details), and ¯f is the reflection feature introduced in Section 4.2. The bottleneck vector b, similar to ��, is also output by a small MLP applied to geometry features. Note that unlike UniSDF, we apply �� in 3D space rather than in image space, and therefore the reflected features ¯f are fed into the color decoder at every sample along the camera ray. We find that this is useful for convergence since early in optimization, when geometry is still fuzzy, every point along the ray can make use of the reflected feature. See full description of the color decoder in the supplement.
+
+# 4.4 Geometry Representation and Regularization
+
+Our geometry representation is based on that of Zip-NeRF [Barron et al. 2023]. See its full description in Appendix C.1. Like Ref-NeRF [Verbin et al. 2022], we apply orientation loss to the normals,
+
+
+
+
+
+Fig. 4. An ablation study showing the effect of different design choices on our recovered normals. Replacing (a) our model's asymmetric predicted normal loss (Equation 17\) with the standard symmetric one tends to (b) oversmooth or (c) underconstrain geometry, preventing the normal vectors from converging to the correct solution. (d) Using reflected features ¯f which are also used for other appearance components such as the bottleneck vector b, or (e) using a single cone instead of �� directional sampling cones also often result in poor recovery of surface normals.
+
+and we make use of predicted normals n˜ output by a small MLP applied to the NGP features. Unlike Ref-NeRF, we use an asymmetric predicted normal loss which allows separate multipliers for the gradients flowing from the geometry normals n (i.e. the normalized negative gradient of density) and rendering weights �� along the ray to the predicted normals n˜, and vice versa:
+
+
+$$\mathcal{L}_{\text{pred}} = \lambda_n \mathcal{L}_p(w, \mathbf{n}, \text{sg}(\tilde{\mathbf{n}})) + \lambda_{\tilde{n}} \mathcal{L}_p(\text{sg}(w), \text{sg}(\mathbf{n}), \tilde{\mathbf{n}}), \quad (17)$$
+
+$$\text{where } \mathcal{L}_p(w, \mathbf{n}, \tilde{\mathbf{n}}) = \sum_{i=1}^N w^{(i)} \left\| \mathbf{n}^{(i)} - \tilde{\mathbf{n}}^{(i)} \right\|^2. \quad (18)$$
+
+Where sg(·) is a stop-gradient operator, which prevents gradients from flowing to its input.
+
+In all of our experiments we use the asymmetric predicted normal loss with ���� = 10−3 and ����˜ = 0.3. This strongly ties the predicted normals to the ones corresponding to the NeRF's density, while not oversmoothing geometry. This allows the predicted normals to resemble the geometry normals while being significantly smoother, which makes them useful for computing the reflection directions and creating accurate specular highlights.
+
+
+
+|                                     | PSNR ↑ | SSIM ↑ | LPIPS ↓ |
+|-------------------------------------|--------|--------|---------|
+| UniSDF                              | 33.38  | 0.961  | 0.042   |
+| Zip-NeRF                            | 33.09  | 0.960  | 0.041   |
+| Ref-NeRF*                           | 32.59  | 0.957  | 0.042   |
+| Ours with single downweighted cone  | 33.63  | 0.964  | 0.038   |
+| Ours with single dilated cone       | 33.72  | 0.964  | 0.038   |
+| Ours without downweighting          | 33.63  | 0.964  | 0.038   |
+| Ours with 3D Jacobian               | 33.65  | 0.963  | 0.039   |
+| Ours without near-field reflections | 33.30  | 0.962  | 0.040   |
+| Ours                                | 33.91  | 0.965  | 0.036   |
+
+Table 1. Average results across the three real scenes from Ref-NeRF [Verbin et al. 2022] and four new real scenes we captured ourselves. Metrics only report performance on shiny image regions. The "Ref-NeRF\*" baseline is an improved version of Ref-NeRF that uses Zip-NeRF's geometry model, sampling and optimization procedure, but with Ref-NeRF's appearance model. See the supplement for many more quantitative results.
+
+#### 5 EXPERIMENTS AND RESULTS
+
+We evaluate our method on four datasets. First, we use the three real scenes from Ref-NeRF [Verbin et al. 2022] to demonstrate that our method decisively outperforms baselines for reconstructing and rendering highly reflective objects. Second, we use the nine scenes from mip-NeRF 360 [Barron et al. 2022] to show that our method's performance is not limited to shiny scenes and that we are on par with state-of-the-art techniques for rendering novel views of large-scale mostly-diffuse scenes. Third, we use four newly-captured scenes to demonstrate specific effects and capabilities of our method, such as its ability to accurately capture near-field reflections. Finally, we show results on the synthetic Shiny Blender dataset from Ref-NeRF [Verbin et al. 2022].
+
+Throughout this section we provide quantitative and qualitative results showing the benefit of our methods and the effects of its components. However, image error metrics are frequently dominated by effects prevalent in real data, such as camera miscalibration, and illumination and appearance changes, and because the smooth motion of the reflections is a key benefit of our method, we supplement our paper with an interactive project page containing many video results demonstrating these effects, and encourage the reader to view it.
+
+We implement our method in JAX [Bradbury et al. 2018]. Optimization is done using 8 V100 GPUs, which takes our method approximately 100 minutes to optimize for a single scene, compared with 50 minutes for Zip-NeRF and 200 minutes for UniSDF. All of our experiments are performed using the same set of hyperparameters (see supplement).
+
+### 5.1 Evaluation Details
+
+We evaluate all results using the three metrics commonly used for view synthesis: PSNR, SSIM [Wang et al. 2004], and LPIPS [Zhang et al. 2018]. In addition to these metrics, which are computed over entire images, we compute "masked" PSNR, SSIM, and LPIPS. These masked metrics are computed by compositing the shiny regions (in both the rendered and ground truth images) onto a white background, and then computing the standard metrics. We compute the
+
+masked metrics for all of our newly-captured scenes as well as the three scenes from the Ref-NeRF real dataset. The masked metrics are used to highlight the benefit of our method by focusing on shiny regions of the captured scenes. See supplement for examples of these masks.
+
+#### 5.2 Baseline Comparisons
+
+We compare our method with prior work designed for photorealistic view synthesis for general scenes without significant reflective surfaces [Barron et al. 2023; Kerbl et al. 2023], as well as methods specially-designed for scenes with shiny objects [Liang et al. 2023; Verbin et al. 2022; Wang et al. 2023], as well as concurrent work such as NDE [Wu et al. 2024] and SpecNeRF [Ma et al. 2023]. All baseline experiments were done with the gracious help of the original authors, or otherwise using the official codebases.
+
+Table 1 shows a comparison of our results with prior work, using the masked metrics, showing that our method is indeed more accurate than prior work in regions featuring shiny surfaces. This is further exemplified qualitatively by our results in Figures 1, 4, 5, 6, 7, and 8. Our supplemental webpage also shows an interactive comparison of our results with those obtained by prior work.
+
+Our supplemental tables also show per-scene breakdowns of the metrics in Table 1, as well as their unmasked counterparts, metrics on the standard mip-NeRF 360 dataset [Barron et al. 2022] featuring mostly-diffuse scenes, and the Shiny Blender dataset from Ref-NeRF [Verbin et al. 2022], on top of two additional shiny scenes from the standard Blender dataset [Mildenhall et al. 2020]).
+
+### 5.3 Ablation Studies
+
+In this section we carefully ablate the key components of our method to justify our design decisions. Table 1, and Tables 2 and 3 in the supplement contain quantitative results for these ablation studies, and the supplemental webpage contains video comparisons for them.
+
+Tracing cones through the recovered scene synthesizes more accurate reflections. Figure 6 shows that replacing the cone tracing operation with simply gathering reflection features at infinity (which depends only on the reflection direction) still recovers far-field reflections, but cannot accurately reproduce near-field reflections.
+
+Asymmetric predicted normal loss, separate reflection features, and multiple cones are all crucial for recovering accurate geometry. Figure 4\(b,c) demonstrates the importance of our asymmetric normal loss (Equation 17\). Using Ref-NeRF's normal loss can oversmooth geometry when its weight is too high. It can also result in incorrect geometry when turned too low, since the predicted normals can greatly deviate from the ones corresponding to geometry, which lets them overfit to each image's specular highlights without properly generalizing to unseen views.
+
+Figure 4\(d) shows that using the same NGP components for both the reflected features ¯f and the appearance bottleneck vector b may also result in poorly-recovered geometry, due to the strong dependence of the reflection features on the surface normals. Additionally, in Figure 4\(e) we show that using a single Zip-NeRF cone with radius ��¤ ′ = ��¤ + ��¯ instead of our directional sampling can lead to inaccurate
+
+
+
+Fig. 5. Ablation of our reflection anti-aliasing components. Using (a) a single reflection ray instead of five, (b) not downweighting reflection features, or (c) using Zip-NeRF's 3D Jacobian instead of restricting it to the 2D directional Jacobian, all result in inaccurate reflections. Even for low-roughness objects such as the shiny spheres shown here, aliasing in the reflections during optimization prevents the model from accurately reconstructing both the reflective surface geometry as well as the reflected content.
+
+geometry. This is because the model is only supervised at cone radii corresponding to the pixel footprints ��¤, and therefore evaluating it with dilated radii ��¤ ′ may not correspond to the true underlying geometry, adversely affecting reconstruction.
+
+Anti-aliasing methods improve recovered geometry and reflections. Figure 5 visualizes the impact of our reflection anti-aliasing strategies on rendered specularities. Using only a single reflection ray, omitting the reflection feature downweighting, or using Zip-NeRF's 3D Jacobian instead of our 2D directional Jacobian for downweighting, all decrease the accuracy of rendered reflections. Intuitively, if reflections are aliased during optimization, the model is unable to recover accurate surface geometry or accurate geometry and features for the reflected content.
+
+## 5.4 Discussion
+
+Our method quantitatively outperforms existing view synthesis techniques, particularly for shiny surfaces that display detailed specular reflections. However, we believe that the qualitative visual improvement substantially outweighs the quantitative improvement in image metrics and we strongly urge readers to view our supplementary videos. Most notably, the smooth and consistent motion of reflections synthesized by our method is strikingly more realistic than the view-dependent appearance rendered by baseline methods. This suggests that standard image error metrics (PSNR, SSIM, etc.) are not adequate for evaluating the quality of view-dependent appearance.
+
+# 5.5 Limitations
+
+While our method is successful in its goal of accurately reconstructing and rendering reflective surfaces, it is not able to fully model certain effects. Because we only reflect from the expected termination point of each camera ray, our method struggles to render semi-transparent surfaces. Additionally, the camera operator is frequently visible in reflective surfaces and our model does not consider this potential source of error.
+
+# 6 CONCLUSION
+
+We have presented a method for rendering scenes containing highly specular objects, by using a neural radiance field. Our method relies on reflecting cones off of surfaces in the scene and tracing them through the NeRF, and on a novel set of techniques designed to antialias these reflections, and is able to synthesize accurate detailed reflections of both distant and near-field content that consistently and smoothly moves across surfaces. We demonstrate that our approach quantitatively outperforms prior view synthesis models, and that it provides great qualitative improvement over prior work's realism in rendering novel views.
+
+# ACKNOWLEDGMENTS
+
+We wish to thank Georgios Kopanas, Christian Richardt, Li Ma, and Liwen Wu for helping with comparison results and figures. We would also like to thank Cassidy Curtis, Janne Kontkanen, Aleksander Hołyński, Alex Trevithick, and Georgios Kopanas for ideas and comments on our work.
+
+# REFERENCES
+
+Jonathan T. Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo Martin-Brualla, and Pratul P. Srinivasan. 2021. Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields. ICCV (2021). Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. 2022. Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields. CVPR (2022). Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. 2023. Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields. ICCV (2023). Sai Bi, Zexiang Xu, Pratul P. Srinivasan, Ben Mildenhall, Kalyan Sunkavalli, Milos Hasan, Yannick Hold-Geoffroy, David Kriegman, and Ravi Ramamoorthi. 2020. Neural Reflectance Fields for Appearance Acquisition. arXiv (2020). James Bradbury, Roy Frostig, Peter Hawkins, Matthew James Johnson, Chris Leary, Dougal Maclaurin, George Necula, Adam Paszke, Jake VanderPlas, Skye Wanderman-Milne, and Qiao Zhang. 2018. JAX: composable transformations of Python+NumPy programs. [http://github.com/google/jax.](http://github.com/google/jax) Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. 2022. TensoRF: Tensorial Radiance Fields. ECCV (2022). Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo Kanazawa. 2022. Plenoxels: Radiance fields without neural networks. CVPR (2022). Haian Jin, Isabella Liu, Peijia Xu, Xiaoshuai Zhang, Songfang Han, Sai Bi, Xiaowei Zhou, Zexiang Xu, and Hao Su. 2023. TensoIR: Tensorial Inverse Rendering. CVPR (2023). Animesh Karnewar, Tobias Ritschel, Oliver Wang, and Niloy Mitra. 2022. ReLU Fields: The Little Non-linearity That Could. SIGGRAPH (2022). Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 2023. 3D Gaussian Splatting for Real-Time Radiance Field Rendering. SIGGRAPH (2023).
+
+Diederik P. Kingma and Jimmy Ba. 2015. Adam: A method for stochastic optimization. ICLR (2015). Gerhard Kurz, Igor Gilitschenski, and Uwe D Hanebeck. 2016. Unscented von Mises– Fisher Filtering. IEEE Signal Processing Letters (2016). Ruofan Liang, Huiting Chen, Chunlin Li, Fan Chen, Selvakumar Panneer, and Nandita Vijaykumar. 2023. ENVIDR: Implicit Differentiable Renderer with Neural Environment Lighting. ICCV (2023). Li Ma, Vasu Agrawal, Haithem Turki, Changil Kim, Chen Gao, Pedro Sander, Michael Zollhöfer, and Christian Richardt. 2023. SpecNeRF: Gaussian Directional Encoding for Specular Reflections. arXiv 2312.13102 (2023). Alexander Mai, Dor Verbin, Falko Kuester, and Sara Fridovich-Keil. 2023. Neural microfacet fields for inverse rendering. ICCV (2023). Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. 2020. NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis. ECCV (2020). Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. 2022. Instant Neural Graphics Primitives with a Multiresolution Hash Encoding. SIGGRAPH (2022). Keunhong Park, Utkarsh Sinha, Jonathan T. Barron, Sofien Bouaziz, Dan B. Goldman, Steven M. Seitz, and Ricardo Martin-Brualla. 2021. Nerfies: Deformable Neural Radiance Fields. ICCV (2021). Pratul P. Srinivasan, Boyang Deng, Xiuming Zhang, Matthew Tancik, Ben Mildenhall, and Jonathan T. Barron. 2021. NeRV: Neural reflectance and visibility fields for relighting and view synthesis. CVPR (2021). Cheng Sun, Min Sun, and Hwann-Tzong Chen. 2022. Direct Voxel Grid Optimization: Super-fast Convergence for Radiance Fields Reconstruction. CVPR (2022). Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler, Jonathan T. Barron, and Pratul P. Srinivasan. 2022. Ref-NeRF: Structured View-Dependent Appearance for Neural Radiance Fields. CVPR (2022). Fangjinhua Wang, Marie-Julie Rakotosaona, Michael Niemeyer, Richard Szeliski, Marc Pollefeys, and Federico Tombari. 2023. UniSDF: Unifying Neural Representations for High-Fidelity 3D Reconstruction of Complex Scenes with Reflections. arXiv:2312.13285 (2023). Zhou Wang, Alan C. Bovik, Hamid R. Sheikh, and Eero P. Simoncelli. 2004. Image quality assessment: from error visibility to structural similarity. IEEE TIP (2004). Liwen Wu, Sai Bi, Zexiang Xu, Fujun Luan, Kai Zhang, Iliyan Georgiev, Kalyan Sunkavalli, and Ravi Ramamoorthi. 2024. Neural Directional Encoding for Efficient and Accurate View-Dependent Appearance Modeling. CVPR (2024). Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, and Oliver Wang. 2018. The Unreasonable Effectiveness of Deep Features as a Perceptual Metric. CVPR (2018). Yiyu Zhuang, Qi Zhang, Xuan Wang, Hao Zhu, Ying Feng, Xiaoyu Li, Ying Shan, and Xun Cao. 2024. NeAI: A Pre-convoluted Representation for Plug-and-Play Neural Ambient Illumination. AAAI (2024).
+
+
+
+Fig. 6. Two examples showing that (a) tracing cones and intersecting them with the geometry of the NeRF allows our model to recover and render near-field reflections such as the statue head and cone reflected in the balls, and the cord and artwork reflected in the toaster. This is in contrast to (b) our model with the feature grid only queried infinitely-far away, or (c) UniSDF, both of which only use the reflection direction. Note that both our model in (a) and our ablated model in (b) are capable of rendering accurate far-field reflections, while UniSDF renders blurry reflections even for far-field content.
+
+
+
+
+
+Fig. 7. By reflecting rays into the geometry of the model, our method (e) is able to render specular reflections that are more accurate than those rendered by existing techniques (a-d), which tend to be limited by the capacity of their representation of view-dependent appearance. Notice the high-frequency reflections rendered by our model, including sharp details in the tree branches and building reflected in the sphere on the right of the image.
+
+
+
+Fig. 8. Our model represents detailed and accurate reflections of nearby content. Other baselines that do not explicitly trace reflection rays are unable to render reflections of the window, bowl, and painting in this example. Furthermore, notice how our method accurately models how these near-field reflections move across the toaster as the camera viewpoint changes.
+
+# Supplementary material: NeRF-Casting: Improved View-Dependent Appearance with Consistent Reflections
+
+A major benefit of our method is the visual quality of results and reflections as the camera moves around the scene. This is best visualized in the set of comparisons included in our interactive supplemental webpage at .
+
+### A REFLECTED CONE DERIVATION
+
+In Section 4.2 we describe our approach of shifting the ray's origin away from the surface point in order to match the reflected ray's radius with the incident radius. Denote the incident camera ray as r(��) = o +��d, where its origin and direction are o and d respectively, and denote its radius by ��¤. Similarly, denote the reflected ray from the point x¯ as r ′ (��) = o ′ + ��d ′ , with origin and direction o ′ and d ′ respectively, and denote its radius by ��¤ ′ . As described in mip-NeRF [Barron et al. 2021], the radius of the primary ray at x¯ is ��¤∥x¯ − o∥, and the radius of the reflected ray is ��¤ ′ ∥x¯ − o ′ ∥. In order to equate the two radii at the intersection point we must satisfy:
+
+$$\dot{r}\|\bar{\mathbf{x}} - \mathbf{o}\| = \dot{r}'\|\bar{\mathbf{x}} - \mathbf{o}'\|, \quad (19)$$
+
+which along with the fact that o ′ must be on the ray r ′ (��), and with Equation 8 can be solved to yield Equation 7.
+
+# B DIRECTIONAL SAMPLING
+
+As described in [Kurz et al. 2016], we choose �� directions on the sphere {d ′ �� �� ��=1 such that the mean d ′ and concentration parameter ��¯ of the vMF distribution are maintained:
+
+| $d_1' = d'_1$ | and for $j \in \{0, \dots, K-2\}$ : | (20) |
+|---------------|-------------------------------------|------|
+|---------------|-------------------------------------|------|
+
+$$\mathbf{d}'_{j+2} = \cos(\psi)\mathbf{d}' + \sin(\psi) \left( \cos\left(\frac{2j\pi}{K-1}\right) \mathbf{t}_1 + \sin\left(\frac{2j\pi}{K-1}\right) \mathbf{t}_2 \right),$$
+
+where (t1, t2, d ′ ) form an orthonormal basis, and the angle �� between the mean reflection direction d ′ and the other �� − 1 offset reflections {d ′ �� �� ��=2 is chosen such that:
+
+$$\cos(\psi) = \frac{K(\coth(\bar{\kappa}) - 1/\bar{\kappa}) - 1}{K - 1}. \quad (21)$$
+
+Note that there is rotational symmetry in how the tangent vectors t1 and t2 are defined. During optimization we randomly rotate them in the tangent plane, and during evaluation we set a deterministic orientation. See the supplement for specific details.
+
+In Section 4.2 we define an orthonormal basis (t1, t2, d ′ ) around the reflection direction d ′ defined in Equation 5. The two tangent vectors t1 and t2 are symmetric and may be rotated arbitrarily about the normal vector, and we do that during optimization. During evaluation, however, we use a deterministic basis by first defining:
+
+$$\mathbf{u} = \begin{cases} \hat{\mathbf{z}} & \text{if } |\mathbf{d}' - \hat{\mathbf{z}}| < 0.9 \\ \hat{\mathbf{y}} & \text{otherwise} \end{cases} \quad (22)$$
+
+where (xˆ, yˆ, zˆ) are the standard basis for R 3 . We then set the tangent vectors to:
+
+$$t_1 = \frac{u \times d'}{\|u \times d'\|}, \quad t_2 = d' \times t_1. \quad (23)$$
+
+This approach is numerically stable for any reflection direction d ′ , since the denominator when normalizing t1 is bounded from below.
+
+#### C OPTIMIZATION AND REPRESENTATION SPECIFICATIONS
+
+In this section we specify our method's architecture and parameterizations, as well as the optimization procedure used to fit it to a collection of images.
+
+#### C.1 Parameterization
+
+We use the three-round proposal sampling procedure used by mip-NeRF 360 and Zip-NeRF [Barron et al. 2022, 2023]. Our ��th sampling round uses a hash grid with resolution 2 5 , ..., 2 ���� , with ��1 = 9, ��2 = 11, and ��3 = 13, each having a maximum number of 2 2 1 elements. For camera rays, the first two rounds of sampling use 64 samples each, and the third uses 32 samples. For reflected rays, we only use the first two rounds, and generate 64 samples in each one. Our appearance model uses a hash grid with resolutions 2 0 , ..., 2 9 with two dimensions each.
+
+We find that using separate feature grids for the predicted normals and for roughness is beneficial in our experiments. Therefore, the final round of sampling queries three separate NGP features with eight total dimensions: one for roughness, three for predicted normals, and four for the density, bottleneck vector, and mixing coefficients ��. The roughness values are obtained by applying to the raw NGP feature ˜ f�� a two-layer MLP with hidden dimension 64, followed by a softplus activation. We also apply a bias of −1 to the features:
+
+$$\rho = \text{softplus}\left(\text{MLP}(\tilde{\mathbf{f}}_\rho) - 1\right). \quad (24)$$
+
+The predicted normals are obtained from the raw NGP features ˜ f�� by applying another two-layer MLP with hidden dimension 64, the output of which is normalized:
+
+$$\tilde{\mathbf{n}} = \text{normalize}(\text{MLP}(\tilde{\mathbf{f}}_n)), \quad (25)$$
+
+where normalize(x) = x/∥x∥.
+
+Finally, the remaining features ˜ f�� are used to output density using another two-layer MLP, followed by an exponential nonlinearity (with a bias of 2):
+
+$$\tau = \exp\left(\text{MLP}\left(\hat{\mathbf{f}}_b\right) + 2\right), \quad (26)$$
+
+and to output the mixing coefficients:
+
+$$\beta = \text{sigmoid}\left(\text{MLP}\left(\tilde{\mathbf{f}}_b\right)\right), \quad (27)$$
+
+The view-dependent color MLP�� from Equation 15 takes as inputs the position x, bottleneck vector b, normal n, and view direction d. The reflection-dependent color MLP ℎ from Equation 16 takes as input the position x, bottleneck b, normal n, the dot product between the normal and view direction n · d, the reflected ray direction d ′ , and the feature vector ¯f. Additionally, we feed into both �� and �� the camera position with a low-degree positional encoding of 2, i.e., we input (cos(o),sin(o), cos(2o),sin(o)). This is designed to enable the MLP to account for spatial variations in appearance due to transient effects like shadowing and illumination changes—something that
+
+can be encoded into view-dependent appearance by models relying on a large-capacity MLP like Zip-NeRF. Both of our MLPs �� and ℎ are two-layer MLPs with hidden dimension 128, followed by a logistic sigmoid nonlinearity.
+
+We apply a coarse-to-fine schedule to all NGP grids corresponding to ˜ f��, ˜ f�� , and ˜ ���� , similar to UniSDF [Wang et al. 2023]. Unlike UniSDF, we use an approach more similar to Nerfies [Park et al. 2021], which uses a cosine-shaped windowing function. Every feature f gets multiplied by a cosine window:
+
+$$\mathbf{f}' = \mathbf{f} \odot \mathbf{w}(\mathbf{v}, t), \quad (28)$$
+
+where ⊙ denotes elementwise multiplication, �� is a vector of resolutions corresponding to the levels of the hash grid (as also used in the main paper), �� ∈ [0, 1] is a scalar which grows linearly from 0 to 1 during optimization, and the windowing function is defined as:
+
+$$\mathbf{w}(\mathbf{v}, t) = \frac{1 - \cos(\pi \xi(\mathbf{v}, t))}{2}, \quad (29)$$
+
+where 
+$$\xi(\mathbf{v}, t) = \text{clip}(\log_2(m) - \log_2(\mathbf{v}) - 1 + st)$$
+, (30)
+
+where �� and �� are hyperparameters controling the rate of introduction of new scales and the initial scale, respectively, and clip is a function that clips its input to [0, 1]. In our experiments we set �� = 16√ 2 and �� = 25.
+
+### C.2 Optimization
+
+We inherit Zip-NeRF's optimization schedule. However, due to the increased peak memory consumption of having both primary and reflected rays, we halve our batch size from 2 16 to 2 15, and run optimization for 50k iterations instead of 25��. Like Zip-NeRF, we use the Adam optimizer [Kingma and Ba 2015] with ��1 = 0.9, ��2 = 0.99, and �� = 10−15, and our learning rate is decayed logarithmically from 10−2 to 10−3 for the first 25k iterations after a 5k cosine warmup. Unlike Zip-NeRF we continue training for an additional 25k iterations with a constant learning rate of 10−3 . Because we double the number of iterations while halving the batch size, our model "sees" roughly as many rays/pixels as Zip-NeRF during training.
+
+Zip-NeRF performed proposal supervision using a spline-based loss that encouraged proposal distributions along each ray to resemble the final NeRF distribution along the ray. This loss requires a hyperparameter �� for each proposal level, which is the radius of a rectangular pulse that the NeRF distribution is blurred by when computing this spline-based loss. Correctly setting this hyperparameter is critical to avoid aliasing along rays, and in Zip-NeRF the radii are manually set to 0.03 and 0.003 for the two proposal levels respectively. In our model we use the proposal network not just for rendering pixels using ray intervals of constant length, but also for rendering reflections using ray intervals of variable length, so using manually-tuned hyperparameters for these blur radii is challenging. We therefore modify Zip-NeRF's proposal supervision procedure to avoid the need for a manually-set �� value, and instead blur each interval of the NeRF distribution by a rectangular pulse whose radius is the weighted geometric mean of the intervals of the proposal distribution that overlap with each NeRF interval. This not only avoids the need to manually specify the �� hyperparameter individually for each primary and reflected proposal level, but also
+
+generally reduces aliasing by allowing �� to be determined adaptively during training and independently for each interval (rather than a single value being used across all intervals). Computing this adaptive radius is straightforward: we compute the logarithm of the width of each interval in the proposal distribution, then use Zip-NeRF's resampling functionality to interpolate into a step function whose values are those log-widths, then exponentiate the average log-width for each NeRF interval to yield a geometric mean.
+
+Like in Zip-NeRF, we regularize the density field using the distortion loss from mip-NeRF 360 [Barron et al. 2022]. Critically, we apply the distortion loss to both camera rays and reflected rays. This prevents the gradients of the reflected ray densities from creating "floater" artifacts in regions that are unobserved or observed by a small number of cameras.
+
+We also use the orientation loss from Ref-NeRF [Verbin et al. 2022], applied directly to the normal vectors corresponding to the density field, with weight 10−3 .
+
+Finally, we apply stop-gradient operators to prevent gradients from affecting the weights when accumulating the normal vectors and intersection points according to Equation 4 of the main paper.
+
+### C.3 Dataset and Masks
+
+Our newly-captured dataset contains four new scenes with between 231 and 348 images each, all with resolution 3504 × 2336 (which we downsample by a factor of 4, as done in the mip-NeRF 360 outdoor dataset). Like the mip-NeRF 360 and real Ref-NeRF datasets, we use every 8th frame as a test images, and use the rest for training. The per-scene breakdown is as follows:
+
+- (1) toaster contains 348 images, out of which 44 are used for testing.
+- (2) hatchback contains 308 images, 38 used for testing.
+- (3) grinder contains 231 images, 28 used for testing.
+- (4) compact contains 332 images, 41 used for testing.
+
+See Figure 9 for examples of images captured from these four scenes.
+
+Additionally, in order to focus on the appearance of reflections in these scenes as well as the captured scenes from the Ref-NeRF dataset, we calculate masked metrics which only take into account foreground pixels belonging to shiny objects. The masks are computed by defining a 3D bounding box for the foreground reflective objects, rendering the opacity within the bounding box for each test view, binarizing the resulting accumulated opacity, and filling small holes. Figure 9 also shows examples of images and their corresponding masks from all seven scenes.
+
+# D PER-SCENE RESULTS
+
+Table 2 presents our per-scene results for Table 1 of the main paper. Additionally, Table 3 presents the same results for the full, unmasked images.
+
+### E SYNTHETIC RESULTS
+
+Table 5 shows synthetic results on the materials and hotdog scenes from the Blender dataset [Mildenhall et al. 2020], which contain strong specularities, and the six shiny scenes from Ref-NeRF [Verbin et al. 2022]. The results demonstrate that despite being designed for
+
+
+
+Fig. 9. Images showing our new four scenes (top) along with their per-image masks, and the masks obtained for the real Ref-NeRF data [Verbin et al. 2022].
+
+
+
+| Masked PSNR                         | Ref-NeRF sedan | Real toycar | Scenes spheres | hatchback | Our Shiny toaster | Scenes compact | grinder |
+|-------------------------------------|----------------|-------------|----------------|-----------|-------------------|----------------|---------|
+| UniSDF                              | 31.58          | 28.09       | 32.33          | 30.98     | 37.66             | 33.95          | 39.07   |
+| Zip-NeRF                            | 30.83          | 28.04       | 29.38          | 31.30     | 36.85             | 35.04          | 40.19   |
+| Ref-NeRF*                           | 30.74          | 28.13       | 29.08          | 29.51     | 37.02             | 34.42          | 39.20   |
+| Ours with single downweighted cone  | 33.01          | 28.87       | 31.68          | 31.37     | 37.41             | 34.15          | 38.89   |
+| Ours with single dilated cone       | 32.59          | 28.88       | 31.93          | 32.22     | 36.90             | 34.58          | 38.91   |
+| Ours without downweighting          | 32.77          | 28.87       | 31.79          | 31.57     | 37.54             | 33.97          | 38.93   |
+| Ours with 3D Jacobian               | 33.06          | 28.77       | 30.86          | 31.81     | 37.61             | 34.55          | 38.87   |
+| Ours without near-field reflections | 31.89          | 28.91       | 32.32          | 31.19     | 36.69             | 33.41          | 38.70   |
+| Ours                                | 33.30          | 28.87       | 32.80          | 31.97     | 37.87             | 33.55          | 38.99   |
+| Masked SSIM                         | Ref-NeRF       | Real        | Scenes         |           | Our Shiny         | Scenes         |         |
+|                                     | sedan          | toycar      | spheres        | hatchback | toaster           | compact        | grinder |
+| UniSDF                              | 0.941          | 0.930       | 0.955          | 0.952     | 0.986             | 0.968          | 0.994   |
+| Zip-NeRF                            | 0.936          | 0.934       | 0.944          | 0.953     | 0.985             | 0.972          | 0.994   |
+| Ref-NeRF*                           | 0.936          | 0.932       | 0.941          | 0.943     | 0.983             | 0.970          | 0.994   |
+| Ours with single downweighted cone  | 0.949          | 0.937       | 0.952          | 0.955     | 0.986             | 0.972          | 0.994   |
+| Ours with single dilated cone       | 0.947          | 0.937       | 0.956          | 0.961     | 0.984             | 0.972          | 0.994   |
+| Ours without downweighting          | 0.948          | 0.937       | 0.954          | 0.956     | 0.986             | 0.970          | 0.994   |
+| Ours with 3D Jacobian               | 0.949          | 0.936       | 0.946          | 0.957     | 0.987             | 0.972          | 0.994   |
+| Ours without near-field reflections | 0.943          | 0.937       | 0.956          | 0.952     | 0.984             | 0.967          | 0.993   |
+| Ours                                | 0.950          | 0.936       | 0.962          | 0.959     | 0.988             | 0.969          | 0.994   |
+| Masked LPIPS                        | Ref-NeRF       | Real        | Scenes         |           | Our Shiny         | Scenes         |         |
+|                                     | sedan          | toycar      | spheres        | hatchback | toaster           | compact        | grinder |
+| UniSDF                              | 0.083          | 0.064       | 0.040          | 0.046     | 0.022             | 0.033          | 0.007   |
+| Zip-NeRF                            | 0.082          | 0.062       | 0.045          | 0.045     | 0.022             | 0.027          | 0.006   |
+| Ref-NeRF*                           | 0.082          | 0.066       | 0.046          | 0.052     | 0.024             | 0.029          | 0.006   |
+| Ours with single downweighted cone  | 0.071          | 0.060       | 0.039          | 0.044     | 0.021             | 0.027          | 0.006   |
+| Ours with single dilated cone       | 0.073          | 0.061       | 0.037          | 0.039     | 0.023             | 0.027          | 0.006   |
+| Ours without downweighting          | 0.072          | 0.060       | 0.037          | 0.044     | 0.021             | 0.029          | 0.006   |
+| Ours with 3D Jacobian               | 0.071          | 0.061       | 0.045          | 0.043     | 0.019             | 0.027          | 0.006   |
+| Ours without near-field reflections | 0.075          | 0.060       | 0.036          | 0.047     | 0.024             | 0.032          | 0.007   |
+| Ours                                | 0.070          | 0.061       | 0.030          | 0.040     | 0.018             | 0.030          | 0.006   |
+
+Table 2. Ablation study of our method as well as comparison to prior work, using masked images. The metrics are computed only taking into account pixels belonging to the foreground objects. See Section C.3 for more information and examples.
+
+
+
+| PSNR                                | Ref-NeRF sedan | Real toycar | Scenes spheres | hatchback | Our Shiny toaster | Scenes compact | grinder |
+|-------------------------------------|----------------|-------------|----------------|-----------|-------------------|----------------|---------|
+| UniSDF                              | 24.68          | 24.15       | 22.27          | 27.01     | 32.90             | 29.72          | 33.72   |
+| Zip-NeRF                            | 25.85          | 23.41       | 21.77          | 27.78     | 33.41             | 31.10          | 34.67   |
+| Ref-NeRF*                           | 25.39          | 22.75       | 21.12          | 25.21     | 32.66             | 30.55          | 33.91   |
+| Ours with single downweighted cone  | 26.73          | 24.22       | 22.85          | 27.35     | 32.89             | 30.01          | 33.94   |
+| Ours with single dilated cone       | 26.25          | 24.26       | 22.94          | 27.57     | 32.51             | 29.91          | 33.98   |
+| Ours without downweighting          | 26.59          | 24.28       | 22.89          | 27.29     | 33.07             | 29.87          | 33.95   |
+| Ours with 3D Jacobian               | 26.77          | 24.18       | 22.62          | 27.39     | 32.92             | 29.98          | 33.93   |
+| Ours without near-field reflections | 26.28          | 24.27       | 22.97          | 27.19     | 32.54             | 29.54          | 33.89   |
+| Ours                                | 26.77          | 24.20       | 23.04          | 27.49     | 32.87             | 29.73          | 34.00   |
+| SSIM                                | Ref-NeRF       | Real        | Scenes         |           | Our Shiny         | Scenes         |         |
+|                                     | sedan          | toycar      | spheres        | hatchback | toaster           | compact        | grinder |
+| UniSDF                              | 0.700          | 0.639       | 0.567          | 0.845     | 0.937             | 0.895          | 0.879   |
+| Zip-NeRF                            | 0.733          | 0.626       | 0.545          | 0.870     | 0.944             | 0.913          | 0.887   |
+| Ref-NeRF*                           | 0.721          | 0.612       | 0.542          | 0.842     | 0.932             | 0.907          | 0.880   |
+| Ours with single downweighted cone  | 0.741          | 0.643       | 0.590          | 0.841     | 0.936             | 0.889          | 0.881   |
+| Ours with single dilated cone       | 0.722          | 0.644       | 0.595          | 0.834     | 0.934             | 0.879          | 0.881   |
+| Ours without downweighting          | 0.735          | 0.643       | 0.591          | 0.842     | 0.937             | 0.884          | 0.881   |
+| Ours with 3D Jacobian               | 0.741          | 0.640       | 0.581          | 0.834     | 0.937             | 0.884          | 0.881   |
+| Ours without near-field reflections | 0.731          | 0.644       | 0.593          | 0.843     | 0.935             | 0.877          | 0.881   |
+| Ours                                | 0.739          | 0.641       | 0.597          | 0.853     | 0.938             | 0.884          | 0.882   |
+| LPIPS                               | Ref-NeRF       | Real        | Scenes         |           | Our Shiny         | Scenes         |         |
+|                                     | sedan          | toycar      | balls          | hatchback | toaster           | compact        | grinder |
+| UniSDF                              | 0.309          | 0.245       | 0.243          | 0.160     | 0.107             | 0.122          | 0.132   |
+| Zip-NeRF                            | 0.260          | 0.243       | 0.238          | 0.130     | 0.082             | 0.096          | 0.111   |
+| Ref-NeRF*                           | 0.270          | 0.257       | 0.257          | 0.156     | 0.111             | 0.105          | 0.123   |
+| Ours with single downweighted cone  | 0.256          | 0.245       | 0.242          | 0.165     | 0.102             | 0.142          | 0.114   |
+| Ours with single dilated cone       | 0.271          | 0.246       | 0.240          | 0.172     | 0.102             | 0.155          | 0.115   |
+| Ours without downweighting          | 0.260          | 0.246       | 0.242          | 0.166     | 0.098             | 0.151          | 0.114   |
+| Ours with 3D Jacobian               | 0.255          | 0.247       | 0.251          | 0.179     | 0.100             | 0.155          | 0.115   |
+| Ours without near-field reflections | 0.261          | 0.246       | 0.243          | 0.164     | 0.101             | 0.161          | 0.115   |
+| Ours                                | 0.254          | 0.246       | 0.238          | 0.155     | 0.096             | 0.148          | 0.114   |
+
+Table 3. Ablation study of our method as well as comparison to prior work, using unmasked images.
+
+| PSNR      | bicycle | Mip-NeRF flowers | 360 garden  | Outdoor stump | Scenes treehill | room     | Mip-NeRF counter | 360 Indoor kitchen | Scenes bonsai | sedan    | Ref-NeRF Real toycar | Scenes spheres |
+|-----------|---------|------------------|-------------|---------------|-----------------|----------|------------------|--------------------|---------------|----------|----------------------|----------------|
+| 3DGS      | 25.25   | 21.52            | 27.41       | 26.55         | 22.49           | 30.63    | 28.70            | 30.32              | 31.98         | 25.24    | 23.91                | 21.95          |
+| UniSDF    | 24.67   | 21.83            | 27.46       | 26.39         | 23.51           | 31.25    | 29.26            | 31.73              | 32.86         | 24.68    | 24.15                | 22.27          |
+| Zip-NeRF  | 25.80   | 22.40            | 28.20       | 27.55         | 23.89           | 32.65    | 29.38            | 32.50              | 34.46         | 25.85    | 23.41                | 21.77          |
+| Ref-NeRF* | 24.91   | 21.63            | 27.45       | 25.91         | 21.79           | 31.68    | 26.02            | 31.61              | 32.29         | 25.40    | 22.75                | 21.13          |
+| Ours      | 24.92   | 21.75            | 27.31       | 25.64         | 23.22           | 31.66    | 28.84            | 32.26              | 33.81         | 26.77    | 24.20                | 23.04          |
+| SSIM      |         | Mip-NeRF         | 360 Outdoor | Scenes        |                 | Mip-NeRF | 360              | Indoor             | Scenes        | Ref-NeRF | Real                 | Scenes         |
+|           | bicycle | flowers          | garden      | stump         | treehill        | room     | counter          | kitchen            | bonsai        | sedan    | toycar               | spheres        |
+| 3DGS      | 0.771   | 0.605            | 0.868       | 0.775         | 0.638           | 0.914    | 0.905            | 0.922              | 0.938         | 0.713    | 0.636                | 0.573          |
+| UniSDF    | 0.737   | 0.606            | 0.844       | 0.759         | 0.670           | 0.914    | 0.888            | 0.919              | 0.939         | 0.700    | 0.639                | 0.567          |
+| Zip-NeRF  | 0.769   | 0.642            | 0.860       | 0.800         | 0.681           | 0.925    | 0.902            | 0.928              | 0.949         | 0.733    | 0.626                | 0.545          |
+| Ref-NeRF* | 0.723   | 0.592            | 0.845       | 0.731         | 0.634           | 0.914    | 0.875            | 0.922              | 0.935         | 0.722    | 0.612                | 0.542          |
+| Ours      | 0.747   | 0.605            | 0.836       | 0.749         | 0.653           | 0.911    | 0.887            | 0.924              | 0.945         | 0.739    | 0.641                | 0.597          |
+| LPIPS     |         | Mip-NeRF         | 360 Outdoor | Scenes        |                 | Mip-NeRF | 360              | Indoor             | Scenes        | Ref-NeRF | Real                 | Scenes         |
+|           | bicycle | flowers          | garden      | stump         | treehill        | room     | counter          | kitchen            | bonsai        | sedan    | toycar               | spheres        |
+| 3DGS      | 0.205   | 0.336            | 0.103       | 0.210         | 0.317           | 0.220    | 0.204            | 0.129              | 0.205         | 0.301    | 0.237                | 0.248          |
+| UniSDF    | 0.243   | 0.320            | 0.136       | 0.242         | 0.265           | 0.206    | 0.206            | 0.124              | 0.184         | 0.309    | 0.245                | 0.243          |
+| Zip-NeRF  | 0.208   | 0.273            | 0.118       | 0.193         | 0.242           | 0.196    | 0.185            | 0.116              | 0.173         | 0.260    | 0.243                | 0.238          |
+| Ref-NeRF* | 0.256   | 0.317            | 0.132       | 0.261         | 0.294           | 0.206    | 0.213            | 0.121              | 0.182         | 0.270    | 0.257                | 0.257          |
+| Ours      | 0.231   | 0.312            | 0.142       | 0.244         | 0.273           | 0.216    | 0.203            | 0.118              | 0.176         | 0.254    | 0.246                | 0.238          |
+
+Table 4. A comparison on the real captures from mip-NeRF 360 [Barron et al. 2022] and the three shiny real captures from Ref-NeRF [Verbin et al. 2022]. The "Ref-NeRF\*" baseline is an improved version of Ref-NeRF that uses Zip-NeRF's geometry model, sampling and optimization procedure, but with Ref-NeRF's appearance model.
+
+| PSNR     | Blender hotdog | Scenes materials | teapot | toaster | Shiny car | Blender ball | Scenes coffee | helmet | mean  |
+|----------|----------------|------------------|--------|---------|-----------|--------------|---------------|--------|-------|
+| Ref-NeRF | 37.72          | 35.41            | 47.90  | 25.70   | 30.82     | 47.46        | 34.21         | 29.68  | 35.96 |
+| ENVIDR   | —              | 29.51            | 46.14  | 26.63   | 29.88     | 41.03        | 34.45         | 36.98  | 35.85 |
+| Zip-NeRF | 37.16          | 31.64            | 45.66  | 24.84   | 27.60     | 25.30        | 31.05         | 27.50  | 30.33 |
+| UniSDF   | —              | —                | 48.76  | 26.18   | 29.86     | 44.10        | 33.17         | 38.84  | 36.82 |
+| Ours     | 38.61          | 32.02            | 49.98  | 26.19   | 30.45     | 45.46        | 33.18         | 39.10  | 37.39 |
+| SSIM     | Blender        | Scenes           |        |         | Shiny     | Blender      | Scenes        |        |       |
+|          | hotdog         | materials        | teapot | toaster | car       | ball         | coffee        | helmet | mean  |
+| Ref-NeRF | 0.984          | 0.983            | 0.998  | 0.922   | 0.955     | 0.995        | 0.974         | 0.958  | 0.967 |
+| ENVIDR   | —              | 0.971            | 0.999  | 0.955   | 0.972     | 0.997        | 0.984         | 0.993  | 0.983 |
+| Zip-NeRF | 0.984          | 0.969            | 0.997  | 0.920   | 0.934     | 0.928        | 0.967         | 0.950  | 0.949 |
+| UniSDF   | —              | —                | 0.998  | 0.945   | 0.954     | 0.993        | 0.973         | 0.990  | 0.976 |
+| Ours     | 0.988          | 0.975            | 0.999  | 0.950   | 0.964     | 0.994        | 0.973         | 0.988  | 0.977 |
+| LPIPS    | Blender        | Scenes           |        |         | Shiny     | Blender      | Scenes        |        |       |
+|          | hotdog         | materials        | teapot | toaster | car       | ball         | coffee        | helmet | mean  |
+| Ref-NeRF | 0.022          | 0.022            | 0.004  | 0.095   | 0.041     | 0.059        | 0.078         | 0.075  | 0.059 |
+| ENVIDR   | —              | 0.026            | 0.003  | 0.097   | 0.031     | 0.020        | 0.044         | 0.022  | 0.036 |
+| Zip-NeRF | 0.020          | 0.032            | 0.007  | 0.092   | 0.055     | 0.190        | 0.088         | 0.081  | 0.086 |
+| UniSDF   | —              | —                | 0.004  | 0.072   | 0.047     | 0.039        | 0.078         | 0.021  | 0.044 |
+| Ours     | 0.014          | 0.027            | 0.002  | 0.073   | 0.033     | 0.044        | 0.074         | 0.018  | 0.041 |
+
+Table 5. The per-scene and average metrics over the two scenes from the Blender dataset [Mildenhall et al. 2020] which contain strong specular effects, and the six shiny scenes from the Shiny Blender dataset [Verbin et al. 2022]. The average is taken only over the six Shiny Blender scenes.

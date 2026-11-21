@@ -1,0 +1,97 @@
+Met.3D can render volumetric data using direct-volume rendering. The volume raycaster actor renders up to three actor variables directly from their 3-D data texture in a fragment shader. The thickn...
+
+Direct-volume raycasting — Met.3D 2.0.0 documentation
+Implementation details
+Actors
+Visualization algorithms
+Direct-volume raycasting
+View page source
+Direct-volume raycasting
+Met.3D can render volumetric data using direct-volume rendering.
+The volume raycaster actor renders up to three actor variables directly from their 3-D data texture in a fragment shader.
+The thickness and colour of the volume is determined by using a transfer function or colour map.
+An alternative rendering path calculates the thickness directly from physical properties.
+Currently, supported are cloud ice water content (CIWC) and cloud liquid water content (CLWC).
+Additionally, direct-volume rendering supports volumetric lighting, for increased detail.
+Most of the core rendering logic is shared with the iso-surface raycaster.
+Source code: src/actors/nwpvolumeraycasteractor.cpp,
+src/glsl/volume_raycaster.fx.glsl, src/glsl/volume_sample_utils.glsl,
+src/glsl/volume_render_utils.glsl, src/glsl/volume_acceleration_utils.glsl,
+src/glsl/volume_lighting_utils.glsl, src/glsl/volume_sample_cloud_utils.glsl
+The basic loop
+For every fragment covered by the data volume, a ray is cast from the camera
+through the volume and traversed front to back:
+Compute the entry and exit parameters of the ray for the data volume.
+Check if ray should traverse data section or skip it, because it is empty. (volumeHasEmptySpace())
+Traverse data section of non-empty brick (traverseSectionOfDataVolume_DVR())
+Step along the ray with a fixed step size, sampling the scalar fields at each
+position (see
+Sampling NWP grids on the GPU for what a “sample”
+costs).
+Calculate extinction coefficient for all enabled variables at the given sample (blendEnabledVariableColors()),
+combining them into a single color + extinction coefficient.
+Apply volumetric lighting, if enabled, and scene shadows.
+Accumulate total fragment color and extinction using front-to-back blending.
+If total extinction was achieved, terminate ray.
+Extinction coefficients
+The direct-volume renderer uses extinction coefficients instead of simple alpha or opacity values.
+This allows us to combine the physically calculated ice and water cloud extinction with the transfer function provided alpha values.
+Alpha-to-extinction
+Alpha values are not inherently compatible with extinction coefficients.
+We have to convert them.
+The helper convertToExtinctionCoeff() in volume_sample_cloud_utils.glsl allows us to convert from alpha values to raw extinction coefficients.
+We provide two different implementations, toggled via shader defines:
+Visual conversion to achieve the same visual look as if we would base our algorithm directly on alpha values.
+It provides several parameters to the user to control the conversion, and therefore the perceived optical thickness.
+A physical conversion. It inversely applies Beer’s law (\(1-e^{-\tau\cdot d}\)) to convert the alpha value to an extinction coefficient.
+The argument here is, that applying Beer’s law using an extinction coefficient yields the amount of light still able to reach the observer.
+This value can be treated as an alpha value, therefor inverting it yields a usable extinction coefficient.
+CIWC / CLWC extinction coefficient
+CIWC and CLWC extinction coefficients are calculated directly from their scalar values.
+The implementation is found in volume_sample_cloud_utils.glsl.
+The CLWC calculation in calculateLwcExtCoeff() is based on the method described by Hu and Stamnes (1993).
+Meanwhile, CIWC is calculated in calculateIwcExtCoeff and is based on Fu (1996).
+Volumetric lighting
+Volumetric lighting is calculated once in a dedicated compute shader pass.
+It is only updated if either the lighting or volume changes.
+That means, if a light’s properties, location or direction changes, or if the rendered volume changes optically.
+This keeps performance high when moving the camera, as we can re-use the pre-computed lightmap.
+The volumetric lightmap is a 3-D texture of format RGBA8.
+It stores the received lighting of each cell inside the RGB channels.
+This is used to apply the lighting to the volume, including the light colors.
+The A channel contains the total light intensity received by the cell.
+It is used to project volumetric shadows onto scene geometry.
+The compute-shader, CSOpticalThickness in volume_raycaster.fx.glsl is executed once per cell of the lightmap.
+It traverses a ray towards each light source and calculates the optical thickness between the light source and the cell.
+Then, the lighting in the resulting cell is attenuated by the optical thickness.
+The result is stored in the volume lightmap, after accumulating all lights.
+Volumetric lighting also has a step size that is used to calculate the optical thickness.
+Reducing it yields better results, but has diminishing returns beyond the lightmap cell size.
+Increasing it will reduce the computation time, but will skip small features.
+Calculating the lightmap is rather expensive.
+It depends on the amount of lights, the structure of the volume, the resolution of the lightmap and the step size of the ray during lightmap calculation.
+Performance levers
+Raycasting cost scales with the number of samples taken, so all optimisations
+reduce that number:
+Empty-space skipping. A per-field min/max acceleration structure of
+32 x 32 x 32 bricks lets the ray jump over regions that do not contain visible data.
+Explained in Sampling NWP grids on the GPU.
+Interaction step size. The actor exposes a second, coarser step size that is
+used while the camera moves or a handle is being dragged. Image quality drops
+temporarily, frame rate rises. This is the single most effective setting for
+keeping a heavy scene interactive.
+Level type. Raycasting a hybrid sigma-pressure grid or an auxiliary pressure
+grid is several times more expensive than raycasting a pressure level grid,
+because far more sampling takes place, see
+Sampling NWP grids on the GPU. Furthermore, depending
+on the level type, the interpolation cannot be done in hardware alone.
+Shadows
+The original implementation projected each actor’s geometry onto the ground
+surface to imitate a shadow. This has been replaced by a scene-wide shadow
+mechanism: isosurfaces participate in the SHADOW_MAPPING pass and are shadowed
+by, and cast shadows onto, all other actors. With DVR enabled the raycaster
+additionally computes a volumetric light map in the VOLUMETRIC_SHADOW_MAPPING
+pass. See Shadow mapping.
+References
+Fu (1996): An accurate parameterization of the solar radiative properties of cirrus clouds for climate models.
+Hu and Stamnes (1993): An accurate parameterization of the radiative properties of water clouds suitable for use in climate models.

@@ -1,0 +1,251 @@
+--- v002.md
++++ v003.md
+@@ -4,174 +4,104 @@
+ 
+ ## Overview
+-WebGL Gaussian Splatting is a real-time rendering technique for 3D Gaussian Splatting (3DGS) scenes in web browsers, typically implemented using WebGL 1.0 and libraries like Three.js [S1, S2, unofficial]. It solves the problem of displaying large-scale, photorealistic radiance field reconstructions on standard client hardware without requiring neural network inference or heavy server-side processing [S1, unofficial]. Unlike parent method [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md), which relies on a pre-sorted order buffer and view-space projection data, this method performs depth sorting in a JavaScript Web Worker and projects 3D Gaussians into screen-space quads using custom vertex and fragment shaders [S2, unofficial]. It sets itself apart from sibling [Gaussian Splat Fragment Shader](3258-gaussian-splat-fragment-shader.md) by providing the complete pipeline, including data parsing, instance matrix construction, and CPU-side sorting, rather than just the shading logic [S2, unofficial].
++WebGL Gaussian Splatting is a real-time rendering technique for 3D Gaussian Splatting (3DGS) implemented in web browsers using WebGL 1.0 and the Three.js library [S1, S2, unofficial]. It solves the problem of displaying large-scale, photorealistic 3D scenes reconstructed via Gaussian Splatting on client-side hardware without requiring neural network inference or server-side ray tracing [S1, unofficial]. It sets itself apart from its siblings by utilizing a CPU-side depth sorting algorithm (often offloaded to a Web Worker) to resolve the non-commutative nature of alpha blending, whereas the parent [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md) describes the general projection and quad-drawing mechanism without specifying the sorting implementation [S2, unofficial]. Unlike [Animated 3D Gaussian Splatting (Splatv rendering)](7758-animated-3d-gaussian-splatting-splatv-rendering.md), this method typically omits spherical harmonics to reduce file size and memory footprint for web delivery [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A binary `.splat` file containing Gaussian parameters (position, scale, quaternion, color, opacity) [S2, unofficial].
+-*   **Output:** A rendered image of the Gaussian splats composited via alpha blending [S1, S2, unofficial].
++*   **Input:** A binary `.splat` file containing $N$ Gaussian primitives. Each primitive consists of a 3D center, 3D scale, quaternion rotation, and color/alpha data [S2, unofficial].
++*   **Output:** A 2D screen image rendered via WebGL 1.0 `drawElements` or `drawArrays` with instanced rendering, using custom vertex and fragment shaders [S1, S2, unofficial].
+ 
+ **Data Structures:**
+-The implementation uses `InstancedBufferGeometry` with the following attributes [S2, unofficial]:
+-1.  `position`: A `Float32Array` of size 18 (6 vertices * 3 components) defining a hardcoded quad with vertices at $(2,2,0), (-2,2,0), (-2,-2,0), (2,-2,0)$ and their duplicates for triangle indexing [S2, unofficial].
+-2.  `splatColor`: A `Float32Array` of size $4 \times N$, where $N$ is the vertex count. Stores RGBA values normalized to $[0,1]$ [S2, unofficial].
+-3.  `splatCenterCovariance`: A `Float32Array` of size $9 \times N$. Stores the upper-triangular 3x3 covariance matrix components. Layout per splat: `[center_x, center_y, center_z, M11, M12, M13, M22, M23, M33]` [S2, unofficial].
++The implementation typically uses `InstancedBufferGeometry` in Three.js. The layout per vertex in the raw `.splat` file is 32 bytes [S2, unofficial]:
++1.  `center`: 3 `Float32` (12 bytes, offset 0).
++2.  `scale`: 3 `Float32` (12 bytes, offset 12).
++3.  `color`: 3 `Uint8` (R, G, B, offset 24).
++4.  `alpha`: 1 `Uint8` (offset 27).
++5.  `quaternion`: 4 `Uint8` (x, y, z, w, offset 28) [S2, unofficial].
+ 
+-**Binary File Layout (.splat):**
+-Each vertex occupies 32 bytes [S2, unofficial]:
+-*   Offset 0-11: `Float32` center (3 floats) [S2, unofficial].
+-*   Offset 12-23: `Float32` scale (3 floats) [S2, unofficial].
+-*   Offset 24-27: `Uint8` color (R, G, B, A) [S2, unofficial].
+-*   Offset 28-31: `Uint8` quaternion (x, y, z, w) [S2, unofficial]. The quaternion is stored as integers 0-255 and must be normalized by subtracting 128 and dividing by 128.0, with the z-component negated [S2, unofficial].
++In the GPU buffers, these are unpacked into:
++*   `splatColor`: `Float32Array` of size $4N$ (RGBA, normalized to [0,1]) [S2, unofficial].
++*   `splatCenterCovariance`: `Float32Array` of size $9N$. The covariance matrix $\mathbf{V}_{rk}$ is stored as 3 `vec3`s: `[0]` is the center, `[1]` is $(M_{11}, M_{12}, M_{13})$, `[2]` is $(M_{22}, M_{23}, M_{33})$ [S2, unofficial].
++*   `position`: `Float32Array` of size $12$ (4 vertices $\times$ 3 components) defining a quad with corners $(2,2,0), (-2,2,0), (-2,-2,0), (2,-2,0)$ [S2, unofficial].
+ 
+ **Numbered Steps:**
+ 
+-1.  **Data Parsing:**
+-    *   Read the binary file into a `Uint8Array` [S2, unofficial].
+-    *   Calculate $N = \lfloor \text{byteLength} / 32 \rfloor$ [S2, unofficial].
+-    *   For each vertex $i$:
+-        *   Extract center from `f_buffer[8*i + 0..2]` [S2, unofficial].
+-        *   Extract scale from `f_buffer[8*i + 3..5]` [S2, unofficial].
+-        *   Extract quaternion bytes from `u_buffer[32*i + 28..31]` [S2, unofficial]. Normalize: $q = (\text{byte} - 128) / 128.0$. Negate $q_z$ [S2, unofficial].
+-        *   Extract color bytes from `u_buffer[32*i + 24..27]` [S2, unofficial]. Normalize to $[0,1]$ [S2, unofficial].
+-        *   Construct a 4x4 instance matrix $M_i$:
+-            *   Create rotation matrix $R$ from quaternion $q$ [S2, unofficial].
+-            *   Create scale matrix $S$ from scale vector [S2, unofficial].
+-            *   $M_i = R \cdot S \cdot R^T$ (transposes and premultiplication form the transformation matrix) [S2, unofficial].
+-            *   Set position components of $M_i$ to center [S2, unofficial].
+-            *   Set color/alpha components of $M_i$ (elements 3, 7, 11, 15) to normalized RGBA [S2, unofficial].
++1.  **Data Parsing and Matrix Construction:**
++    Parse the `.splat` file. For each vertex $i$:
++    *   Extract `center`, `scale`, `quaternion` (bytes 28-31), and `color`/`alpha` (bytes 24-27) [S2, unofficial].
++    *   Normalize quaternion: $q = \frac{1}{128}(\text{bytes}[28..31] - 128)$, negate $z$ component [S2, unofficial].
++    *   Construct a $4 \times 4$ instance matrix $\mathbf{M}_i$. Compute rotation matrix $\mathbf{R}$ from $q$. Scale by `scale` vector. The matrix is constructed as $\mathbf{M}_i = \mathbf{R}^T \cdot \text{Scale} \cdot \mathbf{R} \cdot \text{Translate}(\text{center})$ [S2, unofficial].
++    *   Encode color/alpha into matrix elements 3, 7, 11, 15 [S2, unofficial].
+ 
+-2.  **Depth Sorting (Web Worker):**
+-    *   Pass the array of $N$ instance matrices and the camera view vector (from `camera.matrixWorld` elements 2, 6, 10) to a sorting function [S2, unofficial].
+-    *   Calculate depth for each splat $i$: $d_i = \text{view}_x \cdot M_i[12] + \text{view}_y \cdot M_i[13] + \text{view}_z \cdot M_i[14]$ [S2, unofficial].
+-    *   The notes describe a 16-bit single-pass counting sort, but the provided implementation uses JavaScript's native `.sort()` method, yielding $O(N \log N)$ complexity [S2, unofficial].
+-    *   Reorder matrices: $M_{sorted}[j] = M_{original}[depthIndex[j]]$ [S2, unofficial].
+-    *   Transfer sorted matrices back to the main thread via `postMessage` with transferable objects to avoid blocking [S2, unofficial].
++2.  **Depth Sorting (CPU):**
++    *   Calculate depth for each splat using the view vector $\mathbf{v}_{view}$ (camera forward direction from `camera.matrixWorld` elements 2, 6, 10) [S2, unofficial]:
++        $$ \text{depth}_i = \mathbf{v}_{view}[0] \cdot \mathbf{M}_i[12] - \mathbf{v}_{view}[1] \cdot \mathbf{M}_i[13] - \mathbf{v}_{view}[2] \cdot \mathbf{M}_i[14] $$
++    *   Perform a 16-bit single-pass counting sort to reorder indices based on `depth` [S2, unofficial].
++    *   Reorder the instance matrices and attributes into `sortedMatrices` and `sortedAttributes` [S2, unofficial].
++    *   *Note:* This step is often offloaded to a Web Worker to prevent blocking the main thread [S2, unofficial].
+ 
+-3.  **Vertex Shader Execution (Per Instance):**
+-    *   **Projection:**
+-        *   Extract splat center $C$ and instance matrix $M$ [S2, unofficial].
+-        *   Compute camera-space position: $C_{cam} = V \cdot C$, where $V$ is the view matrix [S2, unofficial].
+-        *   Compute focal length: $f = \frac{h}{2 \tan(\frac{fov \cdot \pi}{360})}$, where $h$ is viewport height and $fov$ is vertical FOV in degrees [S2, unofficial].
+-        *   Compute Jacobian $J$ of the projection:
+-            $$
+-            J = \begin{bmatrix}
+-            \frac{f_x}{z} & 0 & -\frac{f_x x}{z^2} \\
+-            0 & \frac{f_y}{z} & -\frac{f_y y}{z^2}
+-            \end{bmatrix}
+-            $$
+-            where $(x,y,z) = C_{cam}$ and $f_x, f_y$ are focal lengths [S2, unofficial].
+-        *   Compute transformation matrix $T = W \cdot J$, where $W$ is the rotation part of the view matrix (transpose of view matrix rotation) [S2, unofficial].
+-        *   Compute 2D covariance: $\mathbf{cov}_{2D} = T^T \mathbf{M}_{instance} T$ [S2, unofficial].
+-        *   Regularize: Add 0.3 to $\mathbf{cov}_{2D}[0][0]$ and $\mathbf{cov}_{2D}[1][1]$ to prevent singularities [S2, unofficial].
+-    *   **Eigen Decomposition:**
+-        *   $d_1 = \mathbf{cov}_{2D}[0][0]$, $d_2 = \mathbf{cov}_{2D}[1][1]$, $o = \mathbf{cov}_{2D}[0][1]$ [S2, unofficial].
+-        *   $mid = 0.5(d_1 + d_2)$ [S2, unofficial].
+-        *   $radius = \sqrt{(\frac{d_1 - d_2}{2})^2 + o^2}$ [S2, unofficial].
+-        *   $\lambda_1 = mid + radius$ [S2, unofficial].
++3.  **Vertex Shader Execution:**
++    For each instance (splat) and each vertex of the quad:
++    *   **Frustum Culling:** Compute clip-space position $\mathbf{pos}_{2d} = \text{realProjectionMatrix} \cdot \text{viewMatrix} \cdot \text{vec4}(\text{splatCenter}, 1)$. Let $w = \mathbf{pos}_{2d}.w$. If $\mathbf{pos}_{2d}.z < -w$ or $|\mathbf{pos}_{2d}.x| > 1.2w$ or $|\mathbf{pos}_{2d}.y| > 1.2w$, discard the primitive by setting `gl_Position` to $(0,0,2,1)$ [S2, unofficial].
++    *   **Covariance Projection:**
++        *   Compute focal length: $focal = \frac{\text{size}.y}{2.0 \cdot \tan(\frac{\text{camera.fov} \cdot \pi}{360.0})}$ [S2, unofficial].
++        *   Compute Jacobian $\mathbf{J}$ of the projection at the splat center $\mathbf{c}$ in camera space $\mathbf{c}_{cam}$:
++            $$ \mathbf{J} = \begin{bmatrix} \frac{f_x}{c_z} & 0 & -\frac{f_x c_x}{c_z^2} \\ 0 & \frac{f_y}{c_z} & -\frac{f_y c_y}{c_z^2} \end{bmatrix} $$
++        *   Compute transformation $\mathbf{T} = \mathbf{W} \mathbf{J}$, where $\mathbf{W}$ is the rotation part of the view matrix (transpose of the upper-left 3x3 of `viewMatrix`) [S2, unofficial].
++        *   Compute 2D covariance $\mathbf{cov}_{2D} = \mathbf{T}^T \mathbf{V}_{rk} \mathbf{T}$ [S2, unofficial].
++        *   Regularize: $\mathbf{cov}_{00} \leftarrow \mathbf{cov}_{00} + 0.3$, $\mathbf{cov}_{11} \leftarrow \mathbf{cov}_{11} + 0.3$ [S2, unofficial].
++    *   **Eigenvalue Decomposition:**
++        *   $diagonal1 = \mathbf{cov}_{00}$, $diagonal2 = \mathbf{cov}_{11}$, $offDiagonal = \mathbf{cov}_{01}$ [S2, unofficial].
++        *   $mid = 0.5(diagonal1 + diagonal2)$
++        *   $radius = \sqrt{(\frac{diagonal1 - diagonal2}{2})^2 + offDiagonal^2}$
++        *   $\lambda_1 = mid + radius$
+         *   $\lambda_2 = \max(mid - radius, 0.1)$ [S2, unofficial].
+     *   **Basis Vectors:**
+-        *   $d = \text{normalize}(o, \lambda_1 - d_1)$ [S2, unofficial].
+-        *   $v_1 = \min(\sqrt{2\lambda_1}, 1024.0) \cdot d$ [S2, unofficial].
+-        *   $v_2 = \min(\sqrt{2\lambda_2}, 1024.0) \cdot d^\perp$ (where $d^\perp = (d_y, -d_x)$) [S2, unofficial].
+-    *   **Positioning and Culling:**
+-        *   Compute screen center: $v_{Center} = \frac{pos_{2d}}{w}$, where $pos_{2d}$ is the projected center [S2, unofficial].
+-        *   Compute final position for quad vertex $(x,y)$:
+-            $$
+-            p_{screen} = v_{Center} + \frac{x \cdot v_2 + y \cdot v_1}{viewport} \cdot 2.0
+-            $$
+-            Set $gl\_Position = (p_{screen}, 0.0, 1.0)$ [S2, unofficial].
+-        *   **Frustum Culling:**
+-            *   $bounds = 1.2 \cdot w$ [S2, unofficial].
+-            *   If $pos_{2d}.z < -pos_{2d}.w$ or $|pos_{2d}.x| > bounds$ or $|pos_{2d}.y| > bounds$, set $gl\_Position = (0,0,2,1)$ and return [S2, unofficial].
++        *   $\mathbf{d} = \text{normalize}(offDiagonal, \lambda_1 - diagonal1)$
++        *   $\mathbf{v}_1 = \min(\sqrt{2\lambda_1}, 1024.0) \cdot \mathbf{d}$
++        *   $\mathbf{v}_2 = \min(\sqrt{2\lambda_2}, 1024.0) \cdot \text{vec2}(\mathbf{d}.y, -\mathbf{d}.x)$ [S2, unofficial].
++    *   **Position Output:**
++        *   $\mathbf{v}_{Center} = \frac{\mathbf{pos}_{2d}}{w}$
++        *   $\mathbf{p}_{screen} = \mathbf{v}_{Center} + \frac{x \cdot \mathbf{v}_2 + y \cdot \mathbf{v}_1}{\text{viewport}} \cdot 2.0$
++        *   `gl_Position` = $\text{vec4}(\mathbf{p}_{screen}, 0.0, 1.0)$ [S2, unofficial].
+ 
+ 4.  **Fragment Shader Execution:**
+-    *   Compute squared distance from pixel to splat center: $A = -\mathbf{v}_{Position} \cdot \mathbf{v}_{Position}$ [S2, unofficial].
+-    *   If $A < -4.0$ (i.e., distance squared $> 4.0$), discard fragment [S2, unofficial].
++    *   Compute distance from fragment center to splat center in local quad space: $A = -\mathbf{v}_{Position} \cdot \mathbf{v}_{Position}$ [S2, unofficial].
++    *   If $A < -4.0$, discard fragment [S2, unofficial].
+     *   Compute alpha: $B = e^A \cdot v_{Color}.a$ [S2, unofficial].
+-    *   Output color: $gl\_FragColor = (B \cdot v_{Color}.rgb, B)$ [S2, unofficial].
++    *   Output color: $\text{gl\_FragColor} = \text{vec4}(B \cdot v_{Color}.rgb, B)$ [S2, unofficial].
+ 
+ 5.  **Blending:**
+-    *   Use custom blending: `blendSrc = OneMinusDstAlphaFactor`, `blendDst = OneFactor`, `blendSrcAlpha = OneMinusDstAlphaFactor`, `blendDstAlpha = OneFactor` [S2, unofficial].
+-    *   Disable depth test and depth write [S2, unofficial].
++    *   Render with `depthTest=false`, `depthWrite=false`.
++    *   Blending function: `blendSrc=OneMinusDstAlphaFactor`, `blendDst=OneFactor`, `blendSrcAlpha=OneMinusDstAlphaFactor`, `blendDstAlpha=OneFactor` [S2, unofficial].
+ 
+-**Pseudocode:**
++**Parameters:**
++*   **WebGL Version:** 1.0 [S1, unofficial].
++*   **Culling Bound:** $1.2 \cdot w$ [S2, unofficial].
++*   **Covariance Regularization:** $0.3$ added to diagonal elements [S2, unofficial].
++*   **Minimum Eigenvalue:** $0.1$ for $\lambda_2$ [S2, unofficial].
++*   **Maximum Axis Length:** $1024.0$ for $\mathbf{v}_1, \mathbf{v}_2$ [S2, unofficial].
++*   **Gaussian Cutoff:** Discard if squared distance $> 4.0$ [S2, unofficial].
+ 
+-```python
+-import math
++**Edge Cases and Pitfalls:**
++*   **Coordinate System:** The view matrix may require specific sign flips on elements $[0][1], [1][0], [1][2], [2][1], [3][1]$ before inversion to adjust for coordinate system differences between the renderer and the camera model [S2, unofficial].
++*   **Precision:** Floating-point precision in WebGL 1.0 may affect large scenes; however, the method is designed to work within standard constraints [S1, unofficial].
++*   **Sorting:** Incorrect sorting order leads to visual artifacts due to non-commutative alpha blending. The sorting must be updated every frame as the camera moves [S2, unofficial].
+ 
+-def vertex_shader(instance_matrix, view_matrix, projection_matrix, viewport, fov, quad_vertex):
+-    # 1. Extract center and compute camera space
+-    center = instance_matrix.position
+-    center_cam = view_matrix * vec4(center, 1.0)
+-    x, y, z = center_cam.xyz
++## Subtopics
+ 
+-    # 2. Compute Jacobian
+-    fx = viewport.y / (2.0 * math.tan(fov * math.pi / 360.0))
+-    fy = fx  # Assuming square pixels or similar scaling
+-    J = mat3(
+-        fx / z, 0, -(fx * x) / (z * z),
+-        0, fy / z, -(fy * y) / (z * z),
+-        0, 0, 0
+-    )
+-
+-    # 3. Compute 2D Covariance
+-    # Extract 3x3 rotation matrix from view_matrix
+-    W = mat3(view_matrix[0][0], view_matrix[0][1], view_matrix[0][2],
+-             view_matrix[1][0], view_matrix[1][1], view_matrix[1][2],
+-             view_matrix[2][0], view_matrix[2][1], view_matrix[2][2])
+-    T = transpose(W) * J
+-    cov_2d = transpose(T) * instance_matrix.covariance_3x3 * T
+-
+-    # 4. Regularize
+-    cov_2d[0][0] += 0.3
+-    cov_2d[1][1] += 0.3
+-
+-    # 5. Eigen Decomposition
+-    d1 = cov_2d[0][0]
+-    d2 = cov_2d[1][1]
+-    off = cov_2d[0][1]
+-    mid = 0.5 * (d1 + d2)
+-    radius = math.sqrt(((d1 - d2) / 2.0)**2 + off**2)
+-    lambda1 = mid + radius
+-    lambda2 = max(mid - radius, 0.1)
+-
+-    # 6. Basis Vectors
+-    diag_vec = normalize(vec2(off, lambda1 - d1))
+-    v1 = min(math.sqrt(2.0 * lambda1), 1024.0) * diag_vec
+-    v2 = min(math.sqrt(2.0 * lambda2), 1024.0) * vec2(diag_vec.y, -diag_vec.x)
+-
+-    # 7. Project Center
+-    pos_2d = projection_matrix * vec4(center, 1.0)
+-    v_center = pos_2d.xy / pos_2d.w
+-
+-    # 8. Final Position
+-    projected_cov = v_center + (quad_vertex.x * v2 + quad_vertex.y * v1) / viewport * 2.0
+-    gl_Position = vec4(projected_cov, 0.0, 1.0)
+-
+-    # 9. Culling
+-    bounds = 1.2 * pos_2d.w
+-    if pos_2d.z < -pos_2d.w or abs(pos_2d.x) > bounds or abs(pos_2d.y) > bounds:
+-        gl_Position = vec4(0, 0, 2, 1)
+-        return
+-
+-def fragment_shader(v_position, v_color):
+-    A = -dot(v_position, v_position)
+-    if A < -4.0:
+-        return  # Discard fragment
+-    B = math.exp(A) * v_color.a
+-    return vec4(B * v_color.rgb, B)
+-```
++### [Isotropic Gaussian Point-Sprite Rendering](6949-isotropic-gaussian-point-sprite-rendering.md)
++A simpler variant using isotropic point sprites with CPU-side back-to-front sorting to correct blending order, lacking anisotropic covariance and spherical harmonics.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Sorting is $O(N \log N)$ using JavaScript's native `.sort()` method, performed in a Web Worker to avoid blocking the main thread [S2, unofficial]. Rendering is $O(N \cdot P)$ where $P$ is the number of pixels covered by quads.
+-*   **Memory Complexity:** $O(N)$ for storing splat data and instance matrices [S2, unofficial].
+-*   **Performance:** Real-time on ordinary graphics hardware, significantly faster than NeRFs for inference [S1, unofficial]. Performance depends on vertex count and viewport resolution.
+-*   **Strengths:** No external dependencies beyond WebGL 1.0 and Three.js; works in standard web browsers; supports progressive loading [S1, S2, unofficial].
+-*   **Limitations:** Does not support view-dependent shading (spherical harmonics) in this basic implementation to reduce file size [S1, unofficial]. Precision issues may arise with very large scenes or extreme aspect ratios if not handled by the culling bounds [S2, unofficial].
+-*   **When to use:** Web-based visualization of 3DGS scenes where server-side rendering is not feasible.
+-*   **When not to use:** When view-dependent effects are required or when higher precision is needed than WebGL 1.0 provides [S1, unofficial].
++*   **Time Complexity:** Sorting is $O(N)$ with counting sort, but dominated by the constant factor of memory access and worker communication. Rendering is $O(N)$ for draw calls.
++*   **Memory Complexity:** $O(N)$ for storing splat data and sorted indices.
++*   **Performance:** Real-time on modern desktop GPUs via WebGL 1.0. Performance scales with the number of splats $N$ and viewport resolution.
++*   **Strengths:** No external dependencies beyond Three.js; works on standard web browsers; efficient on ordinary graphics hardware compared to NeRFs [S1, unofficial].
++*   **Limitations:** No view-dependent shading (spherical harmonics omitted for file size); limited to WebGL 1.0 features; sorting on CPU can block main thread if not offloaded [S1, S2, unofficial].
++*   **When to use:** Web-based visualization of static or slowly moving 3DGS scenes.
++*   **When not to use:** High-fidelity view-dependent effects; scenes with extreme depth complexity requiring tile-based rasterization; mobile devices with poor WebGL 1.0 support.
+ 
+ ## Background
+-The technique was popularized by the "3D Gaussian Splatting for Real-Time Radiance Field Rendering" paper, which introduced the method for generating photorealistic 3D scenes from images [S1, unofficial]. The specific WebGL implementation by antimatter15 demonstrated that 3DGS could be rendered efficiently on ordinary graphics hardware by extending point cloud rendering techniques, avoiding the neural network inference required by NeRFs [S1, unofficial]. It was implemented in JavaScript with WebGL 1.0 to ensure broad compatibility [S1, unofficial].
++3D Gaussian Splatting was introduced by Kerbl et al. in 2023 as a real-time radiance field rendering technique [S1, unofficial]. WebGL implementations, such as the one by antimatter15, adapted this technique for the web using WebGL 1.0 and Three.js, focusing on efficient point-cloud-like rendering without neural network inference [S1, unofficial]. The method was developed to allow interactive viewing of 3DGS models in browsers without heavy dependencies [S1, unofficial].
+ 
+ ## Sources

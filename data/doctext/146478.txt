@@ -1,0 +1,1084 @@
+VTK: dox/Rendering/vtkVolumeShearWarpDataStructure.h Source File
+Main Page | Directories | Class Hierarchy | Alphabetical List | Class List | File List | Class Members | File Members | Related Pages
+dox / Rendering
+vtkVolumeShearWarpDataStructure.h
+Go to the documentation of this file.
+```
+00001 /*=========================================================================
+00002 
+00003   Program:   Visualization Toolkit
+00004   Module:    $RCSfile: vtkVolumeShearWarpDataStructure.h,v $
+00005 
+00006   Copyright (c) Ken Martin, Will Schroeder, Bill Lorensen
+00007   All rights reserved.
+00008   See Copyright.txt or http://www.kitware.com/Copyright.htm for details.
+00009 
+00010      This software is distributed WITHOUT ANY WARRANTY; without even
+00011      the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+00012      PURPOSE.  See the above copyright notice for more information.
+00013 
+00014 =========================================================================*/
+00015 //#include "vtkShearWarpBase.h"
+00016 
+00017 #define VTK_X_AXIS  0
+00018 #define VTK_Y_AXIS  1
+00019 #define VTK_Z_AXIS  2
+00020 #define VTK_SHEAR_WARP_COMPOSITE_FUNCTION      0
+00021 #define VTK_SHEAR_WARP_MIP_FUNCTION            1
+00022 #define VTK_SHEAR_WARP_ISOSURFACE_FUNCTION     2
+00023 
+00024 #define VTK_SHEAR_WARP_OCTREE_TRANSPARENT      0
+00025 #define VTK_SHEAR_WARP_OCTREE_NONTRANSPARENT   1
+00026 #define VTK_SHEAR_WARP_OCTREE_COMBINATION      2
+00027 #define VTK_SHEAR_WARP_OCTREE_MINIMUM_SIZE     16
+00028                                                
+00029 // Intermediate image pixel data for early ray termination
+00030 class vtkShearWarpPixelData
+00031 {
+00032 public:
+00033   float Red;
+00034   float Green;
+00035   float Blue;
+00036   float Opacity;
+00037   float Value;
+00038   int Offset;
+00039 };
+00040 
+00041 
+00042 // Runlength encoded intermediate image
+00043 class vtkShearWarpRLEImage
+00044 {
+00045 public:
+00046   vtkShearWarpRLEImage(int size)
+00047   {
+00048     this->PixelData = new vtkShearWarpPixelData[size];
+00049     this->ImageSize = size;
+00050     this->Clear();      
+00051   };
+00052 
+00053   ~vtkShearWarpRLEImage()
+00054   {
+00055     if (this->PixelData != NULL)
+00056       delete[] this->PixelData;
+00057   };
+00058 
+00059   // Reset all pixels to default values
+00060   void Clear()
+00061   {
+00062     for (int i = 0; i < this->ImageSize; i++)
+00063     {
+00064       this->PixelData[i].Red = 0.0f;
+00065       this->PixelData[i].Green = 0.0f;
+00066       this->PixelData[i].Blue = 0.0f;
+00067       this->PixelData[i].Opacity = 0.0f;
+00068       this->PixelData[i].Value = 0.0f;
+00069       this->PixelData[i].Offset = 0;
+00070     }
+00071   };
+00072 
+00073   // Reset the current pixel pointer to the first pixel
+00074   void First(vtkShearWarpPixelData * &ptr)
+00075   {
+00076     ptr = this->PixelData;
+00077   };
+00078 
+00079   // Sets the current pixel pointer to the specified position
+00080   void Position (vtkShearWarpPixelData * &ptr, int position)
+00081   {
+00082     ptr = this->PixelData + position;
+00083   }; 
+00084 
+00085   // Advances the current pixel pointer by the specified increment
+00086   void Advance(vtkShearWarpPixelData * &ptr, int count)
+00087   {
+00088     ptr = ptr + count;
+00089   };
+00090 
+00091   // Skip over transparent voxels and returns the count of skipped voxels
+00092   int Skip(vtkShearWarpPixelData * &ptr)
+00093   {
+00094     vtkShearWarpPixelData *data = ptr;
+00095     int runLength = 0;
+00096     int pathLength = 0;
+00097     int offset = 0;
+00098     
+00099     while (ptr->Offset > 0)
+00100     {
+00101       runLength += ptr->Offset;
+00102       ptr += ptr->Offset;
+00103     }
+00104 
+00105     data->Offset = runLength;
+00106 
+00107     while  (data->Offset > 0)
+00108     {
+00109       offset = data->Offset;
+00110       data->Offset = runLength - pathLength;
+00111       pathLength += offset;
+00112       data += offset;
+00113     }
+00114       
+00115     return runLength;
+00116   };
+00117         
+00118   // Retrieves a pointer to the first pixel
+00119   vtkShearWarpPixelData * GetPixelData()
+00120   {
+00121     return this->PixelData;
+00122   };
+00123 
+00124   // Retrieves the allocated image size
+00125   int GetSize()
+00126   {
+00127     return this->ImageSize;
+00128   };
+00129 
+00130 private:
+00131   // the pixel data
+00132   vtkShearWarpPixelData *PixelData;
+00133 
+00134   // the allocated image size
+00135   int ImageSize;
+00136 
+00137 };
+00138 
+00139 
+00140 // Voxel data for runlength encoding, contains the scalar value and shading information
+00141 template <class T>
+00142 struct vtkShearWarpVoxelData
+00143 {
+00144 public:
+00145   T Value;
+00146   unsigned short EncodedNormal;
+00147   unsigned char GradientMagnitude;  
+00148 };
+00149 
+00150 
+00151 
+00152 // An RLE run. It has a length and a pointer to the first voxel.
+00153 template <class T>
+00154 class vtkShearWarpRLERun
+00155 {
+00156 public:
+00157   unsigned char Length;
+00158   vtkShearWarpVoxelData<T> *VoxelData;
+00159 };
+00160 
+00161 
+00162 // A runlength encoded voxel slice which provides scanline-wise access to the data
+00163 template <class T>
+00164 class vtkShearWarpRLESlice
+00165 {
+00166 public:
+00167   vtkShearWarpRLESlice()
+00168   {
+00169     this->SliceRuns = NULL;
+00170     this->VoxelData = NULL;
+00171     this->LineRuns = NULL;
+00172   };
+00173 
+00174   ~vtkShearWarpRLESlice()
+00175   {
+00176     if (this->LineRuns != NULL)
+00177       delete[] this->LineRuns;
+00178 
+00179     if (this->SliceRuns != NULL)
+00180       delete[] this->SliceRuns;
+00181 
+00182     if (this->VoxelData != NULL)
+00183       delete[] this->VoxelData;
+00184   };
+00185   
+00186   
+00187   // Encodes the data by opacity (for alpha compositing)
+00188   void encodeOpacity (vtkImageData* data, vtkVolume *volume, vtkEncodedGradientEstimator *gradest, int axis, int k, float opacityThreshold)
+00189   {
+00190     if (data == NULL || volume == NULL)
+00191       return;
+00192 
+00193     T voxelScalar = 0;
+00194     float voxelOpacity = 0.0f;
+00195     unsigned char currentIndex = 0;
+00196     int currentRun = 0;
+00197     int location = 0;
+00198     bool transparentRun = false;
+00199 
+00200     float *SOTF = volume->GetCorrectedScalarOpacityArray();
+00201 
+00202     T *dptr = (T*) data->GetScalarPointer();
+00203     unsigned short *nptr = gradest->GetEncodedNormals();
+00204     unsigned char *gptr = gradest->GetGradientMagnitudes();
+00205 
+00206     int i,j;
+00207     
+00208     int jCount = 0;
+00209     int iCount = 0;
+00210     int voxelIndex = 0;
+00211 
+00212     int *dimensions = data->GetDimensions();
+00213     int plane = dimensions[0] * dimensions[1];
+00214     int iIncrement,jIncrement;
+00215     int vi,vj,vk;
+00216 
+00217     switch (axis)
+00218     {
+00219       case VTK_X_AXIS:
+00220         iCount = dimensions[1];
+00221         jCount = dimensions[2];
+00222         vk = k;
+00223         iIncrement = dimensions[0];
+00224         jIncrement = plane;
+00225         break;
+00226 
+00227       case VTK_Y_AXIS:
+00228         iCount = dimensions[2];
+00229         jCount = dimensions[0];
+00230         vk = k*dimensions[0];
+00231         iIncrement = plane;
+00232         jIncrement = 1;
+00233         break;
+00234 
+00235       case VTK_Z_AXIS:
+00236       default:
+00237         iCount = dimensions[0];
+00238         jCount = dimensions[1];
+00239         vk = k*plane;
+00240         iIncrement = 1;
+00241         jIncrement = dimensions[0];
+00242         break;
+00243     }
+00244  
+00245     // First we determine the number of runs in the slice
+00246     for (j=0,vj=0; j<jCount;j++, vj += jIncrement)
+00247     {
+00248       for (i=0,vi=0; i<iCount;i++, vi += iIncrement)
+00249       {
+00250         location = vi + vj + vk;
+00251         voxelScalar = dptr[location];        
+00252         voxelOpacity = SOTF[voxelScalar];
+00253 
+00254         if (voxelOpacity > opacityThreshold)
+00255         {
+00256           if (!transparentRun && i > 0 && currentIndex < 254)
+00257           {
+00258             currentIndex++;
+00259           }
+00260           else
+00261           {
+00262             currentIndex = 0;
+00263             currentRun++;
+00264             transparentRun = false;
+00265           }
+00266 
+00267           voxelIndex++;
+00268           
+00269         }
+00270         else
+00271         {
+00272           if (transparentRun && i > 0 && currentIndex < 254)
+00273           {
+00274             currentIndex++;
+00275           }
+00276           else
+00277           {
+00278             currentIndex = 0;
+00279             currentRun++;
+00280             transparentRun = true;
+00281           }
+00282         }
+00283       }
+00284     }
+00285 
+00286     this->LineRuns = new vtkShearWarpRLERun<T>*[jCount];
+00287     this->SliceRuns = new vtkShearWarpRLERun<T>[currentRun];
+00288     this->VoxelData = new vtkShearWarpVoxelData<T>[voxelIndex];
+00289 
+00290     vtkShearWarpRLERun<T> *activeRun = &this->SliceRuns[0];
+00291 
+00292     voxelIndex = 0;
+00293     currentRun = 0;
+00294 
+00295     // Now we run-length-encode the slice
+00296     for (j=0,vj=0; j<jCount;j++, vj += jIncrement)
+00297     {
+00298       this->LineRuns[j] = activeRun;
+00299       currentIndex = 0;
+00300 
+00301       for (i=0,vi=0; i<iCount;i++, vi += iIncrement)
+00302       {
+00303         location = vi + vj + vk;        
+00304         voxelScalar = dptr[location];        
+00305         voxelOpacity = SOTF[voxelScalar];
+00306 
+00307         if (voxelOpacity > opacityThreshold)
+00308         {
+00309          
+00310           if (!transparentRun && i > 0 && currentIndex < 254)
+00311           {
+00312             currentIndex++;
+00313           }
+00314           else
+00315           {
+00316             if (i > 0)
+00317             {
+00318               activeRun->Length = currentIndex + 1;
+00319               activeRun++;
+00320               currentRun++;
+00321               currentIndex = 0;
+00322             }
+00323                                                  
+00324             activeRun->VoxelData = &this->VoxelData[voxelIndex];
+00325             transparentRun = false;
+00326           }
+00327 
+00328           // Set voxel data
+00329           this->VoxelData[voxelIndex].Value = voxelScalar;
+00330           this->VoxelData[voxelIndex].EncodedNormal = nptr[location];
+00331           this->VoxelData[voxelIndex].GradientMagnitude = gptr[location];
+00332           
+00333           voxelIndex++;
+00334         }
+00335         else
+00336         {
+00337           if (transparentRun && i > 0 && currentIndex < 254)
+00338           {
+00339             currentIndex++;
+00340           }
+00341           else
+00342           {
+00343             if (i > 0)
+00344             {
+00345               activeRun->Length = currentIndex + 1;
+00346               activeRun++;
+00347               currentRun++;
+00348               currentIndex = 0;
+00349             }
+00350               
+00351             activeRun->VoxelData = NULL;
+00352             transparentRun = true;
+00353           }
+00354         }
+00355       }
+00356 
+00357       activeRun->Length = currentIndex + 1;
+00358       activeRun++;
+00359       currentRun++;
+00360 
+00361     }                                                                                                  
+00362   };
+00363 
+00364   // Encodes the data by scalar value (for isosurface display)
+00365   void encodeScalar (vtkImageData* data, vtkVolume *volume, vtkEncodedGradientEstimator *gradest, int axis, int k, float isoValue)
+00366   {
+00367     if (data == NULL || volume == NULL)
+00368       return;
+00369     
+00370     T voxelScalar = 0;
+00371     unsigned char currentIndex = 0;
+00372     int currentRun = 0;
+00373     int location = 0;
+00374     bool transparentRun = false;
+00375 
+00376     T *dptr = (T*) data->GetScalarPointer();
+00377     unsigned short *nptr = gradest->GetEncodedNormals();
+00378     unsigned char *gptr = gradest->GetGradientMagnitudes();
+00379 
+00380     int i,j;
+00381 
+00382     int jCount = 0;
+00383     int iCount = 0;
+00384     int voxelIndex = 0;
+00385 
+00386     int *dimensions = data->GetDimensions();
+00387     int plane = dimensions[0] * dimensions[1];
+00388     int iIncrement,jIncrement;
+00389     int vi,vj,vk;
+00390 
+00391     switch (axis)
+00392     {
+00393       case VTK_X_AXIS:
+00394         iCount = dimensions[1];
+00395         jCount = dimensions[2];
+00396         vk = k;
+00397         iIncrement = dimensions[0];
+00398         jIncrement = plane;
+00399         break;
+00400 
+00401       case VTK_Y_AXIS:
+00402         iCount = dimensions[2];
+00403         jCount = dimensions[0];
+00404         vk = k*dimensions[0];
+00405         iIncrement = plane;
+00406         jIncrement = 1;
+00407         break;
+00408 
+00409       case VTK_Z_AXIS:
+00410       default:
+00411         iCount = dimensions[0];
+00412         jCount = dimensions[1];
+00413         vk = k*plane;
+00414         iIncrement = 1;
+00415         jIncrement = dimensions[0];        
+00416         break;
+00417     }
+00418 
+00419     // First we determine the number of runs in the slice
+00420     for (j=0,vj=0; j<jCount;j++, vj += jIncrement)
+00421     {
+00422       for (i=0,vi=0; i<iCount;i++, vi += iIncrement)
+00423       {
+00424         location = vi + vj + vk;
+00425         voxelScalar = dptr[location];
+00426 
+00427         if (voxelScalar >= isoValue)
+00428         {
+00429           if (!transparentRun && i > 0 && currentIndex < 254)
+00430           {
+00431             currentIndex++;
+00432           }
+00433           else
+00434           {
+00435             currentIndex = 0;
+00436             currentRun++;
+00437             transparentRun = false;
+00438           }
+00439 
+00440           voxelIndex++;
+00441 
+00442         }
+00443         else
+00444         {
+00445           if (transparentRun && i > 0 && currentIndex < 254)
+00446           {
+00447             currentIndex++;
+00448           }
+00449           else
+00450           {
+00451             currentIndex = 0;
+00452             currentRun++;
+00453             transparentRun = true;
+00454           }
+00455         }
+00456       }
+00457     }
+00458 
+00459     this->LineRuns = new vtkShearWarpRLERun<T>*[jCount];
+00460     this->SliceRuns = new vtkShearWarpRLERun<T>[currentRun];
+00461     this->VoxelData = new vtkShearWarpVoxelData<T>[voxelIndex];
+00462 
+00463     vtkShearWarpRLERun<T> *activeRun = this->SliceRuns;
+00464 
+00465     voxelIndex = 0;
+00466     currentRun = 0;
+00467 
+00468     // Now we run-length-encode the slice
+00469     for (j=0,vj=0; j<jCount;j++, vj += jIncrement)
+00470     {
+00471       this->LineRuns[j] = activeRun;
+00472       currentIndex = 0;
+00473 
+00474       for (i=0,vi=0; i<iCount;i++, vi += iIncrement)
+00475       {
+00476         location = vi + vj + vk;
+00477         voxelScalar = dptr[location];
+00478 
+00479         if (voxelScalar >= isoValue)
+00480         {
+00481           if (!transparentRun && i > 0 && currentIndex < 254)
+00482           {
+00483             currentIndex++;
+00484           }
+00485           else
+00486           {
+00487             if (i > 0)
+00488             {
+00489               activeRun->Length = currentIndex + 1;
+00490               activeRun++;
+00491               currentRun++;
+00492               currentIndex = 0;
+00493             }
+00494 
+00495             activeRun->VoxelData = &this->VoxelData[voxelIndex];
+00496             transparentRun = false;
+00497           }
+00498 
+00499           // Set voxel data
+00500           this->VoxelData[voxelIndex].Value = voxelScalar;
+00501           this->VoxelData[voxelIndex].EncodedNormal = nptr[location];
+00502           this->VoxelData[voxelIndex].GradientMagnitude = gptr[location];
+00503 
+00504           voxelIndex++;
+00505         }
+00506         else
+00507         {
+00508           if (transparentRun && i > 0 && currentIndex < 254)
+00509           {
+00510             currentIndex++;
+00511           }
+00512           else
+00513           {
+00514             if (i > 0)
+00515             {
+00516               activeRun->Length = currentIndex + 1;
+00517               activeRun++;
+00518               currentRun++;
+00519               currentIndex = 0;
+00520             }
+00521 
+00522             activeRun->VoxelData = NULL;
+00523             transparentRun = true;
+00524           }
+00525         }
+00526       }
+00527 
+00528       activeRun->Length = currentIndex + 1;
+00529       activeRun++;
+00530       currentRun++;
+00531     }
+00532   };
+00533 
+00534   // Returns a pointer to the first run of a specified scanline
+00535   vtkShearWarpRLERun<T> * GetLineRuns(int line)
+00536   {
+00537     return this->LineRuns[line];
+00538   }
+00539   
+00540 private:
+00541   // pointers to the first run for every scanline
+00542   vtkShearWarpRLERun<T> **LineRuns;
+00543 
+00544   // all runs of the slice
+00545   vtkShearWarpRLERun<T> *SliceRuns;
+00546 
+00547   // the voxel data of the slice
+00548   vtkShearWarpVoxelData<T> *VoxelData;
+00549           
+00550 };
+00551 
+00552 // Base class for encoded volume
+00553 class vtkShearWarpBase : public vtkObjectBase
+00554 {
+00555 public:
+00556   vtkShearWarpBase()
+00557   {
+00558     this->VolumeDimensions[0] = 0;
+00559     this->VolumeDimensions[1] = 0;
+00560     this->VolumeDimensions[2] = 0;
+00561   };
+00562   
+00563   virtual ~vtkShearWarpBase()
+00564   {
+00565   };
+00566   vtkTypeRevisionMacro(vtkShearWarpBase,vtkObjectBase);
+00567   
+00568   // Returns the volume dimensions
+00569   int * GetDimensions()
+00570   {
+00571     return this->VolumeDimensions;
+00572   };
+00573 
+00574   // Returns the encoded isovalue, if the volume is scalar encoded
+00575   float GetIsoValue()
+00576   {
+00577     return this->IsoValue;
+00578   };
+00579 
+00580   // Returns true if the volume is opacity encoded
+00581   bool IsOpacityEncoded()
+00582   {
+00583     return (this->OpacityEncoded == 1);
+00584   };
+00585   
+00586   // Returns true if the volume is scalar encoded
+00587   bool IsScalarEncoded()
+00588   {
+00589     return (!this->OpacityEncoded && this->IsoValue >= 0.0);
+00590   }          
+00591 
+00592 protected:
+00593   // the volume dimensions
+00594   int VolumeDimensions[3];
+00595 
+00596   // the encoded isovalue
+00597   float IsoValue;
+00598 
+00599   // encoding type flag
+00600   int OpacityEncoded;    
+00601 };
+00602 
+00603 
+00604 // A runlength encoded volume. It contains voxel data encoded for each major viewing direction.
+00605 template <class T>
+00606 class VTK_RENDERING_EXPORT vtkShearWarpRLEVolume : public vtkShearWarpBase
+00607 {
+00608 public:
+00609   vtkShearWarpRLEVolume()
+00610   {
+00611     for (int l=0;l<3;l++)
+00612       this->EncodedSlices[l] = NULL;
+00613 
+00614     this->OpacityEncoded = 0;
+00615     this->IsoValue = -1.0f;
+00616   };
+00617 
+00618   virtual ~vtkShearWarpRLEVolume()
+00619   {
+00620     for (int l=0;l<3;l++)
+00621       if (this->EncodedSlices[l] != NULL)
+00622         delete[] this->EncodedSlices[l];
+00623   };
+00624 
+00625   // Encodes the volume by opacity (for alpha-compositing)
+00626   void encodeOpacity(vtkImageData *data, vtkVolume *volume, vtkEncodedGradientEstimator* gradest, float opacityThreshold)
+00627   {
+00628     int l;
+00629     this->IsoValue = -1.0f;
+00630     this->OpacityEncoded = 1;
+00631     
+00632     for (l=0;l<3;l++)
+00633       {
+00634       if (this->EncodedSlices[l] != NULL)
+00635         {
+00636         delete[] this->EncodedSlices[l];
+00637         }
+00638       }
+00639     
+00640     int *dimensions = data->GetDimensions();    
+00641     this->Volume = volume;
+00642     this->VolumeDimensions[0] = dimensions[0];
+00643     this->VolumeDimensions[1] = dimensions[1];
+00644     this->VolumeDimensions[2] = dimensions[2];
+00645 
+00646     for (l=0; l<3; l++)
+00647     {
+00648       this->EncodedSlices[l] = new vtkShearWarpRLESlice<T>[dimensions[l]];
+00649       
+00650       for (int k = 0; k < dimensions[l]; k++)
+00651         {
+00652         this->EncodedSlices[l][k].encodeOpacity(data,volume,gradest,l,k,opacityThreshold);
+00653         }
+00654     }
+00655   };
+00656 
+00657   // Encodes the volume by scalar (for isosurface display)
+00658   void encodeScalar(vtkImageData *data, vtkVolume *volume, vtkEncodedGradientEstimator* gradest, float isoValue)
+00659   {
+00660     int l;
+00661     this->IsoValue = isoValue;
+00662     this->OpacityEncoded = 0;    
+00663     
+00664     for (l=0;l<3;l++)
+00665       {
+00666       if (this->EncodedSlices[l] != NULL)
+00667         {
+00668         delete[] this->EncodedSlices[l];
+00669         }
+00670       }
+00671 
+00672     int *dimensions = data->GetDimensions();
+00673     this->Volume = volume;
+00674     this->VolumeDimensions[0] = dimensions[0];
+00675     this->VolumeDimensions[1] = dimensions[1];
+00676     this->VolumeDimensions[2] = dimensions[2];
+00677 
+00678     for (l=0; l<3; l++)
+00679     {
+00680       this->EncodedSlices[l] = new vtkShearWarpRLESlice<T>[dimensions[l]];
+00681 
+00682       for (int k = 0; k < dimensions[l]; k++)
+00683         {
+00684         this->EncodedSlices[l][k].encodeScalar(data,volume,gradest,l,k,isoValue);
+00685         }
+00686     }
+00687   };
+00688 
+00689   // Returns the slice
+00690   vtkShearWarpRLESlice<T> * GetSlice(int axis, int slice)
+00691   {
+00692     return &this->EncodedSlices[axis][slice];
+00693   };
+00694 
+00695   // Returns a pointer to the source volume
+00696   vtkVolume * GetVolume()
+00697   {
+00698     return this->Volume;
+00699   };
+00700 
+00701 
+00702 private:
+00703   // the encoded slices for all three principal axes
+00704   vtkShearWarpRLESlice<T> *EncodedSlices[3];
+00705 
+00706   // the source volume
+00707   vtkVolume *Volume;
+00708 
+00709 };
+00710 
+00711 template <class T>
+00712 class vtkShearWarpSummedAreaTable
+00713 {
+00714 public:
+00715   vtkShearWarpSummedAreaTable()
+00716   {
+00717     this->Table = new float[2 << ((sizeof(T)*8)-1)];
+00718     this->Opacity = NULL;
+00719   };
+00720 
+00721   ~vtkShearWarpSummedAreaTable()
+00722   {
+00723     if (this->Table)
+00724       delete[] this->Table;
+00725   };
+00726 
+00727   void build(float *SOTF, T upper)
+00728   {
+00729     this->Table[0] = SOTF[0];
+00730     this->Opacity = SOTF;
+00731 
+00732     for (int i=1;i<=upper;i++)
+00733     {
+00734       this->Table[i] = this->Table[i-1] + SOTF[i];
+00735     }    
+00736   };
+00737 
+00738   float integrate(T min, T max)
+00739   {
+00740     if (min != max)
+00741       return this->Table[max] - this->Table[min];
+00742     else
+00743       return this->Opacity[min];
+00744     
+00745   };
+00746 
+00747 private:
+00748   float *Table;
+00749   float *Opacity;
+00750 };
+00751 
+00752 struct vtkShearWarpOctreeRun
+00753 {
+00754   unsigned short Length;
+00755   unsigned char Type;
+00756 };
+00757 
+00758 template <class T>
+00759 class vtkShearWarpOctreeNode
+00760 {
+00761 public:
+00762   vtkShearWarpOctreeNode()
+00763   {
+00764     this->Children = NULL;
+00765   };
+00766   
+00767   ~vtkShearWarpOctreeNode()
+00768   {
+00769     if (this->Children != NULL)
+00770       delete[] this->Children;
+00771   };
+00772 
+00773   T GetMinimum()
+00774   {
+00775     return this->Minimum;
+00776   };
+00777 
+00778   T GetMaximum()
+00779   {
+00780     return this->Maximum;
+00781   };
+00782 
+00783   void build(vtkImageData *data, int min[3], int max[3], int level)
+00784   {
+00785 //    cout << "minX: " << min[0] << " - minY: " << min[1] << " - minZ: " << min[2] << "\n";
+00786 //    cout << "maxX: " << max[0] << " - maxY: " << max[1] << " - maxZ: " << max[2] << "\n\n";
+00787     
+00788     if (this->Children != NULL)
+00789     {
+00790       delete[] this->Children;
+00791       this->Children = NULL;
+00792     }
+00793     
+00794     if (max[0] <= min[0] && max[1] <= min[1] && max[2] <= min[2])
+00795     {
+00796       this->Minimum = *((T*) data->GetScalarPointer(max[0],max[1],max[2]));
+00797       this->Maximum = this->Minimum;
+00798     }
+00799     else
+00800     {
+00801       int center[3] = {(max[0]+min[0]) / 2, (max[1]+min[1]) / 2, (max[2]+min[2]) / 2};
+00802       int newMin[3];
+00803       int newMax[3];
+00804       this->Children = new vtkShearWarpOctreeNode<T>[8];
+00805 
+00806       newMin[0] = min[0];
+00807       newMin[1] = min[1];
+00808       newMin[2] = min[2];
+00809       newMax[0] = center[0];
+00810       newMax[1] = center[1];
+00811       newMax[2] = center[2];
+00812       this->Children[0].build(data,newMin,newMax,level+1);
+00813       
+00814       newMin[0] = center[0]+1;
+00815       newMin[1] = min[1];
+00816       newMin[2] = min[2];
+00817       newMax[0] = max[0];
+00818       newMax[1] = center[1];
+00819       newMax[2] = center[2];
+00820       this->Children[1].build(data,newMin,newMax,level+1);
+00821 
+00822       newMin[0] = min[0];
+00823       newMin[1] = center[1]+1;
+00824       newMin[2] = min[2];
+00825       newMax[0] = center[0];
+00826       newMax[1] = max[1];
+00827       newMax[2] = center[2];
+00828       this->Children[2].build(data,newMin,newMax,level+1);
+00829       
+00830       newMin[0] = center[0]+1;
+00831       newMin[1] = center[1]+1;
+00832       newMin[2] = min[2];
+00833       newMax[0] = max[0];
+00834       newMax[1] = max[1];
+00835       newMax[2] = center[2];
+00836       this->Children[3].build(data,newMin,newMax,level+1);
+00837     
+00838       newMin[0] = min[0];
+00839       newMin[1] = min[1];
+00840       newMin[2] = center[2]+1;
+00841       newMax[0] = center[0];
+00842       newMax[1] = center[1];
+00843       newMax[2] = max[2];
+00844       this->Children[4].build(data,newMin,newMax,level+1);
+00845 
+00846       newMin[0] = center[0]+1;
+00847       newMin[1] = min[1];
+00848       newMin[2] = center[2]+1;
+00849       newMax[0] = max[0];
+00850       newMax[1] = center[1];
+00851       newMax[2] = max[2];
+00852       this->Children[5].build(data,newMin,newMax,level+1);
+00853 
+00854       newMin[0] = min[0];
+00855       newMin[1] = center[1]+1;
+00856       newMin[2] = center[2]+1;
+00857       newMax[0] = center[0];
+00858       newMax[1] = max[1];
+00859       newMax[2] = max[2];
+00860       this->Children[6].build(data,newMin,newMax,level+1);
+00861 
+00862       newMin[0] = center[0]+1;
+00863       newMin[1] = center[1]+1;
+00864       newMin[2] = center[2]+1;
+00865       newMax[0] = max[0];
+00866       newMax[1] = max[1];
+00867       newMax[2] = max[2];
+00868       this->Children[7].build(data,newMin,newMax,level+1);
+00869 
+00870       this->Minimum = this->Children[0].Minimum;
+00871       this->Maximum = this->Children[0].Maximum;
+00872 
+00873       bool equalMinimum = true;
+00874       bool equalMaximum = true;
+00875       
+00876       for (int i=1; i < 8; i++)
+00877       {
+00878         if (this->Minimum != this->Children[i].Minimum)
+00879         {        
+00880           if (this->Children[i].Minimum < this->Minimum)
+00881             this->Minimum = this->Children[i].Minimum;
+00882 
+00883           equalMinimum = false;
+00884         }
+00885 
+00886         if (this->Maximum != this->Children[i].Maximum)
+00887         {
+00888           if (this->Children[i].Maximum > this->Maximum)
+00889             this->Maximum = this->Children[i].Maximum;
+00890 
+00891           equalMaximum = false;
+00892         }
+00893       }
+00894 
+00895       // If minimum and maximum of all children are equal, we can remove them
+00896       if (equalMinimum && equalMaximum)
+00897       {
+00898         delete[] this->Children;
+00899         this->Children = NULL;
+00900       }
+00901       else
+00902       {
+00903         // Remove children if node already is at the lowest level
+00904 /*        if ((max[0] - min[0] + 1) <= VTK_SHEAR_WARP_OCTREE_MINIMUM_SIZE &&
+00905             (max[1] - min[1] + 1) <= VTK_SHEAR_WARP_OCTREE_MINIMUM_SIZE &&
+00906             (max[2] - min[2] + 1) <= VTK_SHEAR_WARP_OCTREE_MINIMUM_SIZE)*/
+00907         if (level >= 4)
+00908         {
+00909           delete[] this->Children;
+00910           this->Children = NULL;
+00911         }
+00912       }
+00913     }
+00914   };
+00915 
+00916   void classifyOpacity(vtkShearWarpSummedAreaTable<T> *table)
+00917   {
+00918     float integral = table->integrate(this->Minimum,this->Maximum);
+00919 
+00920     if (integral == 0.0f)
+00921     {
+00922       this->Status = VTK_SHEAR_WARP_OCTREE_TRANSPARENT;
+00923     }
+00924     else if (this->Children == NULL)
+00925     {
+00926       this->Status = VTK_SHEAR_WARP_OCTREE_NONTRANSPARENT;
+00927     }
+00928     else
+00929     {
+00930       this->Status = VTK_SHEAR_WARP_OCTREE_COMBINATION;
+00931 
+00932       for (int i = 0; i < 8; i++)
+00933         this->Children[i].classifyOpacity(table);
+00934     }
+00935   };  
+00936 
+00937   void classifyScalar(T value)
+00938   {
+00939     if (this->Minimum >= value || this->Maximum >= value)
+00940     {
+00941       if (this->Children == NULL)
+00942       {
+00943         this->Status = VTK_SHEAR_WARP_OCTREE_NONTRANSPARENT;      
+00944       }
+00945       else
+00946       {
+00947         this->Status = VTK_SHEAR_WARP_OCTREE_COMBINATION;
+00948 
+00949         for (int i = 0; i < 8; i++)
+00950           this->Children[i].classifyScalar(value);
+00951       }
+00952     }
+00953     else
+00954     {
+00955       this->Status = VTK_SHEAR_WARP_OCTREE_TRANSPARENT;
+00956     }
+00957   };
+00958 
+00959   int computeRuns(vtkShearWarpOctreeRun *& runs, int axis, int slices, int lines, int voxels, int slice, int line)
+00960   {
+00961     static const int increments[3][3] = {{2,4,1},{4,1,2},{1,2,4}};
+00962             
+00963     if (this->Status == VTK_SHEAR_WARP_OCTREE_COMBINATION)
+00964     {
+00965       int child = 0;
+00966 //      int half = size / 2;
+00967       int halfSlices = slices / 2;
+00968       int halfLines = lines / 2;
+00969       int halfVoxels = voxels / 2;
+00970 
+00971       if (slice > halfSlices)
+00972       {
+00973         child += increments[axis][2];
+00974         slice -= halfSlices;
+00975 
+00976         halfSlices = slices - halfSlices;
+00977       }
+00978         
+00979       if (line > halfLines)
+00980       {
+00981         child += increments[axis][1];
+00982         line -= halfLines;
+00983 
+00984         halfLines = lines - halfLines;
+00985       }
+00986 
+00987       int a = this->Children[child].computeRuns(runs, axis, halfSlices, halfLines, halfVoxels, slice,line);
+00988       int b = this->Children[child + increments[axis][0]].computeRuns(runs, axis, halfSlices, halfLines, voxels-halfVoxels, slice,line);
+00989 
+00990       if (a < b)
+00991         return a;
+00992       else
+00993         return b;
+00994     }
+00995     else
+00996     {
+00997       if (runs->Type == this->Status)
+00998       {
+00999         runs->Length += voxels;//size;
+01000       }
+01001       else
+01002       {
+01003         if (runs[0].Type != 255)          
+01004           runs++;
+01005 
+01006         runs->Type = this->Status;
+01007         runs->Length = voxels;//size;        
+01008       }
+01009 
+01010       return voxels;//size;
+01011       
+01012     }
+01013   }
+01014 
+01015 private:  
+01016   vtkShearWarpOctreeNode<T> *Children;
+01017   unsigned char Status;
+01018   T Minimum;
+01019   T Maximum;
+01020 };
+01021 
+01022 template <class T>
+01023 class VTK_RENDERING_EXPORT vtkShearWarpOctree : public vtkShearWarpBase
+01024 {
+01025 public:
+01026   vtkTypeRevisionMacro(vtkShearWarpOctree,vtkShearWarpBase);
+01027 
+01028   vtkShearWarpOctree()
+01029   {
+01030   };
+01031 
+01032   virtual ~vtkShearWarpOctree()
+01033   {
+01034     
+01035   };
+01036 
+01037   void build(vtkImageData* data)
+01038   {
+01039     int min[3],max[3];
+01040     data->GetDimensions(this->Dimensions);
+01041     data->GetExtent(min[0],max[0],min[1],max[1],min[2],max[2]);
+01042     this->Root.build(data,min,max,0);
+01043   };
+01044 
+01045   void classifyOpacity(vtkVolume* volume)
+01046   {
+01047     this->Table.build(volume->GetCorrectedScalarOpacityArray(),this->Root.GetMaximum());
+01048     this->Root.classifyOpacity(&this->Table);
+01049     this->OpacityEncoded = 1;
+01050   };
+01051 
+01052   void classifyScalar(T value)
+01053   {
+01054     this->Root.classifyScalar(value);
+01055     this->OpacityEncoded = 0;
+01056   };
+01057 
+01058   int GetLineRuns(vtkShearWarpOctreeRun *runs, int axis, int slice, int line)
+01059   {
+01060     static const int sizes[3][3] = {{this->Dimensions[1],this->Dimensions[2],this->Dimensions[0]},
+01061                                     {this->Dimensions[2],this->Dimensions[0],this->Dimensions[1]},
+01062                                     {this->Dimensions[0],this->Dimensions[1],this->Dimensions[2]}};
+01063         
+01064     runs[0].Type = 255;
+01065     runs[0].Length = 0;
+01066     return this->Root.computeRuns(runs,axis,/*this->Dimensions[axis],*/sizes[axis][2],sizes[axis][1],sizes[axis][0],slice,line);
+01067   };
+01068   
+01069 private:
+01070   vtkShearWarpOctreeNode<T> Root;
+01071   vtkShearWarpSummedAreaTable<T> Table;
+01072   int Dimensions[3];
+01073   
+01074   vtkShearWarpOctree(const vtkShearWarpOctree&);  // Not implemented.
+01075   void operator=(const vtkShearWarpOctree&);  // Not implemented.
+01076 };
+```
+Generated on Tue Oct 5 08:39:18 2004 for VTK by Doxygen 1.3.8-20040913

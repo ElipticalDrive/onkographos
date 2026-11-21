@@ -1,0 +1,176 @@
+# Real-time rendering via mesh extraction and feature aggregation
+
+Also called: MetaNLR++ rendering pipeline
+
+## Overview
+This method accelerates neural volume rendering by replacing slow volumetric integration with a mesh-based approach that pre-computes appearance features and uses a compact shape model for real-time frame generation [S1, unofficial]. Unlike standard neural volume rendering methods which cannot generate frames at nearly a real-time rate, this surface-based method achieves real-time performance by extracting a mesh from a Signed Distance Field (SDF) and aggregating stored radiance features via hardware rasterization and a lightweight CNN [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A trained neural duplex radiance field consisting of an inner mesh and an outer mesh (extracted from SDFs), per-vertex radiance features computed from input images, associated depth maps, and a target viewing direction $\mathbf{d}$.
+*   **Outputs:** A view-dependent RGB color image.
+
+**Data Structures:**
+1.  **Meshes:** Two triangle meshes (inner and outer) representing the iso-surfaces of the SDF. Each vertex stores a feature vector.
+    *   *Inner Mesh Features:* Dimension 20 in the CUDA implementation; reduced to 8 in the WebGL implementation [S2].
+    *   *Outer Mesh Features:* Same dimension as inner mesh features [S2].
+2.  **Feature Buffers:** Two buffers at the output image resolution, storing interpolated radiance features from the inner and outer meshes respectively, generated via hardware rasterization [S2].
+3.  **View Direction Buffer:** A buffer storing the per-pixel view direction vector $\mathbf{d}$ [S2].
+
+**Steps:**
+1.  **Mesh Extraction:** Use the marching cubes algorithm to extract a mesh as an iso-surface of the SDF [S1, unofficial]. This produces the inner and outer meshes.
+2.  **Feature Storage:** Store the features computed from the set of input images by the encoder $E$ as well as their associated depth maps [S1, unofficial]. These features are attached to the vertices of the extracted meshes.
+3.  **Rasterization (Feature Buffer Generation):** Use hardware rasterization to render the inner and outer meshes. For each pixel, interpolate the per-vertex features from the visible triangles to populate two feature buffers (one for inner, one for outer) at the output image resolution [S2].
+4.  **Feature Aggregation:** Send the feature buffers and the per-pixel view direction $\mathbf{d}$ into a Convolutional Neural Network (CNN) implemented as GLSL shaders. The CNN aggregates the local radiance features from the inner and outer buffers based on the target viewing direction [S1, unofficial][S2].
+    *   The aggregation is performed in two rendering passes, one for each convolution layer, executed in a pixel-parallel way [S2].
+5.  **Decoder Evaluation:** Evaluate the decoder on the aggregated features for each frame to produce the final view-dependent RGB colors [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_frame(meshes, features, view_direction, image_resolution):
+    """
+    Render a single frame using the MetaNLR++ pipeline.
+    
+    Args:
+        meshes: Tuple of (inner_mesh, outer_mesh). Each mesh contains vertices and faces.
+        features: Tuple of (inner_features, outer_features). 
+                  Each feature array has shape (num_vertices, feature_dim).
+                  feature_dim is 20 for CUDA, 8 for WebGL.
+        view_direction: 3D vector (x, y, z) representing the camera viewing direction.
+        image_resolution: Tuple (width, height) of the output image.
+        
+    Returns:
+        rgb_image: 2D array of shape (height, width, 3) with final colors.
+    """
+    
+    # Step 1 & 2: Meshes and features are pre-computed during training.
+    # At render time, we assume meshes and per-vertex features are available.
+    
+    # Step 3: Hardware Rasterization to generate feature buffers
+    # Render inner mesh to get inner feature buffer
+    inner_feature_buffer = hardware_rasterize_interpolation(
+        mesh=meshes[0], 
+        vertex_features=features[0], 
+        resolution=image_resolution
+    )
+    
+    # Render outer mesh to get outer feature buffer
+    outer_feature_buffer = hardware_rasterize_interpolation(
+        mesh=meshes[1], 
+        vertex_features=features[1], 
+        resolution=image_resolution
+    )
+    
+    # Create view direction buffer (same resolution as output)
+    # Each pixel stores the view direction vector
+    view_direction_buffer = create_view_direction_buffer(
+        view_direction=view_direction, 
+        resolution=image_resolution
+    )
+    
+    # Step 4: Feature Aggregation via CNN (implemented as GLSL shaders)
+    # The CNN aggregates local radiance features from inner and outer buffers
+    # based on the viewing direction.
+    # In WebGL implementation, this is done in two passes (one per layer).
+    aggregated_features = cnn_aggregate(
+        inner_features=inner_feature_buffer,
+        outer_features=outer_feature_buffer,
+        view_direction=view_direction_buffer,
+        # Note: WebGL version removes final conv layer and reduces feature dim
+        # to 8. CUDA version uses feature dim 20 and includes final conv layer.
+        is_webgl=False # Set to True for WebGL implementation
+    )
+    
+    # Step 5: Decoder Evaluation
+    # Evaluate the decoder on the aggregated features to produce RGB colors
+    rgb_image = decoder_evaluate(aggregated_features)
+    
+    return rgb_image
+
+def hardware_rasterize_interpolation(mesh, vertex_features, resolution):
+    """
+    Simulates hardware rasterization to interpolate vertex features to pixel space.
+    """
+    width, height = resolution
+    buffer = np.zeros((height, width, vertex_features.shape[1]))
+    
+    # For each pixel, find the visible triangle and interpolate features
+    for y in range(height):
+        for x in range(width):
+            # Ray casting to find intersection with mesh
+            hit, triangle = ray_intersect_mesh((x, y), mesh)
+            if hit:
+                # Barycentric interpolation of vertex features
+                u, v, w = barycentric_coords(hit, triangle)
+                feat = u * vertex_features[triangle.v0] + \
+                       v * vertex_features[triangle.v1] + \
+                       w * vertex_features[triangle.v2]
+                buffer[y, x] = feat
+    return buffer
+
+def create_view_direction_buffer(view_direction, resolution):
+    """
+    Create a buffer where each pixel stores the view direction.
+    """
+    width, height = resolution
+    buffer = np.zeros((height, width, 3))
+    buffer[:, :] = view_direction
+    return buffer
+
+def cnn_aggregate(inner_features, outer_features, view_direction, is_webgl):
+    """
+    Aggregate features using a shallow CNN.
+    """
+    # Combine inner and outer features
+    combined = np.concatenate([inner_features, outer_features], axis=-1)
+    
+    # Apply convolution layers
+    # WebGL version: feature dim reduced to 8, no final conv layer
+    # CUDA version: feature dim 20, includes final conv layer
+    if is_webgl:
+        # Simplified aggregation for WebGL
+        aggregated = apply_conv_layer(combined)
+    else:
+        aggregated = apply_conv_layer(combined)
+        aggregated = apply_final_conv_layer(aggregated)
+        
+    return aggregated
+
+def decoder_evaluate(aggregated_features):
+    """
+    Evaluate the decoder network to produce final RGB colors.
+    """
+    # MLP or small network to map aggregated features to RGB
+    rgb = apply_decoder(aggregated_features)
+    return rgb
+```
+
+**Parameters:**
+*   **Feature Dimension:** 20 for CUDA implementation; 8 for WebGL implementation [S2].
+*   **CNN Layers:** Two rendering passes, one for each layer [S2]. WebGL version removes the final convolution layer [S2].
+*   **Optimizer (Training):** Adam optimizer with $\beta_1 = 0.9$ and $\beta_2 = 0.999$ [S2].
+*   **Training Iterations:** 200,000 iterations total; first half optimized on distillation views, second half on original training images [S2].
+
+**Edge Cases and Pitfalls:**
+*   **WebGL Performance Trade-off:** The WebGL implementation sacrifices some performance (by removing the final conv layer and reducing feature dimension) for cross-platform compatibility and no CUDA requirement [S2]. This results in some performance degradation on both datasets compared with the CUDA version [S2].
+*   **Precision:** Hardware rasterization and shader-based CNN execution may introduce precision differences compared to CPU/GPU-based training [S2].
+
+## Operating characteristics
+*   **Time Complexity:** The rendering time is dominated by hardware rasterization and the CNN aggregation. For the DTU images and network architecture, the decoder takes 8.7ms and the aggregation takes 22.3ms [S1, unofficial].
+*   **Memory Complexity:** Memory usage is proportional to the number of vertices in the inner and outer meshes and the feature dimension per vertex [S2]. The feature buffers are stored at the output image resolution [S2].
+*   **Measured Performance:** Total rendering time per frame is approximately 31ms (8.7ms + 22.3ms), enabling real-time rates [S1, unofficial]. The WebGL version achieves higher FPS than the CUDA version on some metrics but lower than desktop CUDA on others, due to the performance trade-offs [S2].
+*   **Strengths:** Real-time rendering capability; cross-platform compatibility (WebGL); no CUDA requirement for WebGL version [S1, unofficial][S2].
+*   **Limitations:** WebGL version has lower performance than CUDA version; requires pre-computation of meshes and features [S1, unofficial][S2].
+*   **When to Use:** When real-time view synthesis is required and cross-platform compatibility is desired [S1, unofficial][S2].
+*   **When Not to Use:** When maximum possible performance is required and CUDA hardware is available [S2].
+
+## Background
+*   **Origin:** The method is part of the MetaNLR++ framework, which uses meta-learning to speed up the training of neural lumigraph representations [S1, unofficial].
+*   **History:** The method was developed to address the slow rendering speed of neural volume rendering methods [S1, unofficial]. It was presented in "Learning Neural Duplex Radiance Fields for Real-Time View Synthesis" (CVPR 2023) [S2] and "Fast Training of Neural Lumigraph Representations using Meta Learning" (arXiv 2021) [S1, unofficial].
+*   **Usage:** Used for real-time view synthesis in computer graphics and vision applications [S1, unofficial][S2].
+
+## Sources
+[S1] Fast Training of Neural Lumigraph Representations using Meta Learning, https://doi.org/10.48550/arxiv.2106.14942, fetched 2026-10-26 (unofficial)
+[S2] Learning Neural Duplex Radiance Fields for Real-Time View Synthesis, https://doi.org/10.1109/cvpr52729.2023.00803, fetched 2026-10-26

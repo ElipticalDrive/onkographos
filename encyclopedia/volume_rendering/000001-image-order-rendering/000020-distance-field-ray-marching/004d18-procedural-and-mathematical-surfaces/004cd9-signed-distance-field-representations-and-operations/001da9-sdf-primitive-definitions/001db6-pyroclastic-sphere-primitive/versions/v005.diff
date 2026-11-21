@@ -1,0 +1,193 @@
+--- v004.md
++++ v005.md
+@@ -4,90 +4,104 @@
+ 
+ ## Overview
+-The Pyroclastic Sphere Primitive generates volumetric density for organic, turbulent shapes resembling volcanic plumes or smoke clouds by displacing a base sphere's signed distance field with procedural noise. It solves the problem of creating complex, overhanging surface topologies from simple primitives, distinguishing itself from static SDF primitives by adding a noise-driven displacement term to the distance function [S1, unofficial]. Unlike standard noise volume rendering which samples noise directly in space, this method modifies the geometric distance, allowing for sharp, disconnected "overhangs" in the density field when 3D displacement is used [S1, unofficial].
++The Pyroclastic Sphere Primitive is a procedural signed distance field (SDF) primitive that generates organic, cloud-like or volcanic shapes by perturbing a base sphere's distance function with procedural noise [S1, unofficial]. It solves the problem of creating complex, non-convex volumetric structures with overhangs and disconnected density regions that cannot be achieved with simple analytical spheres [S1, unofficial]. It distinguishes itself from standard SDF primitives by adding a noise displacement term to the distance value, and from pure noise volumes by maintaining a coherent spherical base shape [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   World-space position $\mathbf{p}_{world}$ (from ray intersection or voxel center).
+-*   Primitive attributes: center $\mathbf{c}$, radius $r$, density scale $D$, noise amplitude $A$, noise gamma $\gamma$, displacement mode flag $b_{2D}$, and a procedural noise evaluator $N(\cdot)$ (typically fractal Brownian motion).
+-*   Rasterization state: world-space voxel size $v_{size}$ (used for antialiasing threshold).
+-
+-**Outputs:**
+-*   Sample density value $d_{sample}$.
++**Inputs and Outputs:**
++*   **Input:** World-space query point $\mathbf{p}$, sphere center $\mathbf{c}$, sphere radius $r$, noise function $m(\cdot)$, noise amplitude $A$, noise gamma $\gamma$, 2D displacement flag $d_{2D}$, voxel size $\mathbf{v}$, base density $\rho_0$.
++*   **Output:** Density value $\rho(\mathbf{p})$.
+ 
+ **Data Structures:**
+-*   The primitive stores attributes in a struct or class. Key fields are `radius` (float), `wsCenter` (Vector3), `density` (float), `amplitude` (float), `gamma` (float), `displace2D` (bool), and `fractal` (reference to noise function object).
++The primitive stores attributes: `radius` (float), `wsCenter` (Vector3), `fractal` (NoiseFunction object), `amplitude` (float), `gamma` (float), `density` (float), `displace2D` (bool).
+ 
+ **Steps:**
+-1.  **Local Transformation**: Transform the world-space point $\mathbf{p}_{world}$ into the primitive's local coordinate system $\mathbf{p}_{local}$ by normalizing with the radius:
+-    $$ \mathbf{p}_{local} = \frac{\mathbf{p}_{world} - \mathbf{c}}{r} $$
+-2.  **Noise Sample Point Selection**: Determine the point $\mathbf{p}_{noise}$ at which to evaluate the noise function based on the displacement mode:
+-    *   If $b_{2D}$ is true (projected displacement), $\mathbf{p}_{noise} = \frac{\mathbf{p}_{local}}{\|\mathbf{p}_{local}\|}$. This projects the sample point onto the unit sphere surface, ensuring displacement is constant along the radial normal [S1, unofficial].
+-    *   If $b_{2D}$ is false (3D displacement), $\mathbf{p}_{noise} = \mathbf{p}_{local}$.
+-3.  **Noise Evaluation**: Evaluate the procedural noise function at $\mathbf{p}_{noise}$, apply gamma correction, and scale by amplitude:
+-    $$ n_{val} = N(\mathbf{p}_{noise}) $$
+-    $$ n_{corrected} = \gamma(n_{val}) $$
+-    $$ n_{scaled} = A \cdot n_{corrected} $$
+-    *Note: The source code example applies gamma to the raw noise output before scaling [S1, unofficial].*
+-4.  **Base Distance Calculation**: Compute the signed distance of the point from the unit sphere surface in local space:
+-    $$ d_{sphere} = \|\mathbf{p}_{local}\| - 1.0 $$
+-5.  **Pyroclastic Value Calculation**: Combine the sphere distance and the noise displacement. The source code uses a subtraction ($d_{sphere} - n_{scaled}$) while the formula section uses an addition with absolute noise ($|m(P)|$). The code implementation is preferred for exact reproduction:
+-    $$ v_{raw} = d_{sphere} - n_{scaled} $$
+-    Apply a smoothstep-like fitting function (often called `fit` or `smoothstep`) to map the raw value to a density contribution, using a threshold width derived from the voxel size for antialiasing:
+-    $$ w_{filter} = \| \mathbf{v}_{size} \| $$
++1.  **Transform to Local Space:** Map the world-space query point $\mathbf{p}$ to the sphere's local coordinate system, normalized by the radius:
++    $$ \mathbf{lsP} = \frac{\mathbf{p} - \mathbf{c}}{r} $$
++2.  **Determine Noise Sample Point:** Decide whether to use 3D or 2D displacement based on the flag $d_{2D}$:
++    $$ \mathbf{nsP} = \begin{cases} \frac{\mathbf{lsP}}{\|\mathbf{lsP}\|} & \text{if } d_{2D} \text{ is true} \\ \mathbf{lsP} & \text{if } d_{2D} \text{ is false} \end{cases} $$
++    *Note: If $\mathbf{lsP}$ is near zero, handle division by zero by clamping or returning a default normal [G].*
++3.  **Evaluate Noise:** Compute the raw fractal noise value at $\mathbf{nsP}$:
++    $$ n = m(\mathbf{nsP}) $$
++4.  **Apply Gamma and Amplitude:** Scale and gamma-correct the noise value:
++    $$ f = A \cdot n^{\gamma} $$
++5.  **Compute Base Sphere Distance:** Calculate the signed distance from the origin in local space:
++    $$ s = \|\mathbf{lsP}\| - 1.0 $$
++6.  **Compute Filter Width:** Determine the antialiasing threshold based on the voxel size:
++    $$ w_{filter} = \|\mathbf{v}\| $$
+     $$ w_{thresh} = \frac{w_{filter} \cdot 0.5}{r} $$
+-    $$ v_{pyro} = \text{smoothstep}(v_{raw}, -w_{thresh}, w_{thresh}) $$
+-    *Note: The formula section defines `pyroclasticDensity` as $\max(r - \|\mathbf{p}/r\| + |m(\mathbf{p})|, 0)$ and then applies `smoothStep` with a fixed width of 0.05. The code uses a dynamic threshold based on voxel size. The code's dynamic threshold is more robust for varying resolutions [S1, unofficial].*
+-6.  **Final Density**: Scale the pyroclastic value by the base density:
+-    $$ d_{sample} = D \cdot v_{pyro} $$
++7.  **Compute Pyroclastic Value:** Combine the sphere distance and noise, then apply a smoothstep-like fit to create a gradual transition:
++    $$ v_{pyro} = \text{fit}(s - f, -w_{thresh}, w_{thresh}, 1.0, 0.0) $$
++    Where $\text{fit}(x, a, b, c, d)$ maps $x$ from range $[a, b]$ to $[c, d]$. This is equivalent to $\text{smoothstep}(a, b, x)$ mapped to output range.
++8.  **Compute Final Density:** Scale by the base density:
++    $$ \rho(\mathbf{p}) = \rho_0 \cdot v_{pyro} $$
++
++**Formulas:**
++The core density calculation can be summarized as:
++$$ \rho(\mathbf{p}) = \rho_0 \cdot \text{smoothstep}(-w_{thresh}, w_{thresh}, \|\frac{\mathbf{p}-\mathbf{c}}{r}\| - 1.0 - A \cdot m(\mathbf{nsP})^\gamma) $$
++
++**Parameters:**
++*   `radius`: Radius of the base sphere.
++*   `amplitude`: Scaling factor for the noise displacement.
++*   `gamma`: Gamma correction exponent for the noise function (typically $>1$ to darken shadows in noise).
++*   `displace2D`: Boolean flag. If true, noise is evaluated on the sphere surface (2D displacement), preventing overhangs. If false, noise is evaluated in 3D space, allowing overhangs and disconnected density [S1, unofficial].
++*   `density`: Base density multiplier.
++
++**Edge Cases and Pitfalls:**
++*   **Overhangs:** Using 3D displacement ($d_{2D} = \text{false}$) allows the noise to push the surface inward or outward independently along the ray, potentially creating disconnected density islands (overhangs) that may not be visible from the camera or may cause rendering artifacts [S1, unofficial]. Use 2D displacement ($d_{2D} = \text{true}$) to project the noise sample onto the sphere surface, ensuring displacement is constant along the normal vector and preventing disconnection [S1, unofficial].
++*   **Singularity:** When $\mathbf{lsP}$ is near zero, normalization for 2D displacement fails. Clamp or handle this case [G].
++*   **Antialiasing:** The `filterWidth` and `thresholdWidth` are crucial for smooth transitions. Ignoring them results in aliased, hard-edged noise artifacts [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def evaluate_pyroclastic_sphere(ws_p, center, radius, density, amplitude, gamma, displace_2d, noise_func, voxel_size):
+-    # 1. Transform to local space
+-    ls_p = (ws_p - center) / radius
++def pyroclastic_sphere_sample(p, c, radius, noise_func, amplitude, gamma, displace2d, voxel_size, base_density):
++    # Step 1: Transform to local space
++    ls_p = (p - c) / radius
+     
+-    # 2. Determine noise sample point
+-    if displace_2d:
+-        # Project onto sphere surface to prevent disconnected overhangs
+-        ns_p = ls_p / length(ls_p)
++    # Step 2: Determine noise sample point
++    if displace2d:
++        length = ls_p.length()
++        if length < 1e-6:
++            # Handle singularity: default to (1,0,0) or similar
++            ns_p = Vector(1.0, 0.0, 0.0)
++        else:
++            ns_p = ls_p / length
+     else:
+         ns_p = ls_p
+         
+-    # 3. Evaluate noise with gamma and amplitude
+-    noise_val = noise_func(ns_p)
+-    noise_gamma = gamma_correction(noise_val, gamma)
+-    fractal_func = amplitude * noise_gamma
++    # Step 3: Evaluate noise
++    raw_noise = noise_func.eval(ns_p)
+     
+-    # 4. Compute sphere distance
+-    sphere_func = length(ls_p) - 1.0
++    # Step 4: Apply gamma and amplitude
++    # Clamp raw_noise to [0, 1] if noise function can return negative values before gamma
++    # Assuming noise_func returns [0,1] or similar positive range for gamma to work correctly
++    fractal_func = amplitude * (raw_noise ** gamma)
+     
+-    # 5. Compute filter/threshold width for antialiasing
+-    filter_width = length(voxel_size)
++    # Step 5: Compute sphere distance
++    sphere_func = ls_p.length() - 1.0
++    
++    # Step 6: Compute filter width
++    filter_width = voxel_size.length()
+     threshold_width = (filter_width * 0.5) / radius
+     
+-    # 6. Compute final pyroclastic value
+-    # Note: Source code uses sphere_func - fractal_func
+-    raw_value = sphere_func - fractal_func
++    # Step 7: Compute pyroclastic value using smoothstep-like fit
++    # fit(x, a, b, c, d) maps x from [a,b] to [c,d]
++    # Equivalent to: c + (d - c) * smoothstep(a, b, x)
++    # Here c=1.0, d=0.0, so it's 1.0 - smoothstep(-threshold_width, threshold_width, sphere_func - fractal_func)
++    val = sphere_func - fractal_func
++    pyro_value = 1.0 - smoothstep(-threshold_width, threshold_width, val)
+     
+-    # Smoothstep-like fitting
+-    pyro_value = smoothstep(raw_value, -threshold_width, threshold_width)
++    # Step 8: Final density
++    density = base_density * pyro_value
+     
+-    # 7. Set sample density
+-    sample_value = density * pyro_value
+-    
+-    return sample_value
++    return density
++
++def smoothstep(edge0, edge1, x):
++    t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0)
++    return t * t * (3.0 - 2.0 * t)
++
++def clamp(v, min_val, max_val):
++    if v < min_val: return min_val
++    if v > max_val: return max_val
++    return v
+ ```
+-
+-**Parameters:**
+-*   `radius`: Radius of the base sphere. Typical values depend on scene scale.
+-*   `amplitude`: Scaling factor for the noise displacement. Must be $< radius$ to avoid self-intersection artifacts in the distance field logic if not handled by the smoothstep [S1, unofficial].
+-*   `gamma`: Gamma correction exponent applied to the noise function output. Typical value: 1.0 to 2.0.
+-*   `displace2D`: Boolean flag. True for surface-projected noise (smoother, no disconnected bits); False for 3D noise (allows overhangs) [S1, unofficial].
+-*   `density`: Base density multiplier.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Overhangs**: In 3D displacement mode, high noise amplitude can cause the density to disconnect from the main body, creating floating artifacts. Use 2D displacement (`displace2D = true`) to project noise onto the sphere surface, making displacement constant along the normal vector [S1, unofficial].
+-*   **Precision**: The division by radius in local space transformation requires careful handling if radius is very small.
+-*   **Threshold Width**: If `voxel_size` is zero or undefined, `threshold_width` becomes zero, resulting in a hard step instead of smooth antialiasing.
+ 
+ ## Subtopics
+@@ -97,13 +111,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(1)$ per sample, dominated by the noise function evaluation (typically fractal Brownian motion with multiple octaves).
+-*   **Memory Complexity**: $O(1)$, storing only primitive attributes.
+-*   **Strengths**: Efficiently generates complex, organic shapes from a single primitive. The smoothstep antialiasing reduces jagged edges. 2D displacement mode prevents visual artifacts from disconnected density bits.
+-*   **Limitations**: The distance field is only valid for the specific pyroclastic shape; it does not represent a true geometric distance for arbitrary points if noise amplitude is large. 3D displacement can produce non-manifold or disconnected density regions.
+-*   **When to use**: Ideal for volumetric effects like smoke, fire, clouds, or volcanic plumes where organic, turbulent detail is required.
+-*   **When not to use**: When precise geometric distance is needed for boolean operations or ray marching with strict step size guarantees, as the noise displacement breaks the pure SDF property unless carefully bounded.
++*   **Time Complexity:** $O(1)$ per sample, dominated by the noise function evaluation.
++*   **Memory Complexity:** $O(1)$, storing only primitive attributes.
++*   **Strengths:** Generates complex, organic shapes with minimal parameters; supports antialiasing via smoothstep; 2D displacement prevents visual artifacts from overhangs.
++*   **Limitations:** Limited to sphere-like base shapes; noise artifacts if parameters are not tuned; 3D displacement can cause disconnected density.
++*   **When to use:** When organic, cloud-like, or volcanic volumetric shapes are needed within a sphere-like bounding volume.
++*   **When not to use:** When precise control over non-spherical base geometry is required, or when disconnected density islands are undesirable and 2D displacement is too restrictive.
+ 
+ ## Background
+-The Pyroclastic Sphere Primitive originates from production volume rendering techniques, specifically detailed in "Production Volume Rendering" (2011) by the University of Freiburg CG department [S1, unofficial]. It builds on the concept of using noise as a displacement field on top of distance functions, a technique popularized in texturing and modeling literature such as Ebert et al.'s "Texturing & Modeling" [S1, unofficial]. The method allows for the creation of "pyroclastic" (volcanic/plume-like) appearances by thresholding the combined distance-noise function.
++The Pyroclastic Sphere Primitive was introduced in the context of production volume rendering, specifically in the "Production Volume Rendering" seminar notes from the University of Freiburg [S1, unofficial]. It is designed to create "pyroclastic" looks, resembling volcanic clouds or dense smoke, by using noise as a displacement on a distance field [S1, unofficial]. The method builds on the principles of Signed Distance Field Representations and Operations [1578-sdf-primitive-definitions.md], using Boolean operations and transformations as defined in the parent article.
+ 
+ ## Sources

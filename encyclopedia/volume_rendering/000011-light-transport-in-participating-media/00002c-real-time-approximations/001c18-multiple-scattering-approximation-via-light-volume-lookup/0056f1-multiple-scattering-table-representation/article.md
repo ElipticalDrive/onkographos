@@ -1,0 +1,62 @@
+# Multiple Scattering Table Representation
+
+Also called: 4D Look-up Table, Radiance table
+
+## Overview
+This method stores precomputed double and multiple scattering radiance in a regularly sampled 4D structure to serve as an intermediate representation for neural network-based light transport [S1]. It solves the problem of expensive per-sample neural network queries by allowing fast table lookups and accumulation [S1]. It differs from its siblings by explicitly discretizing the spatial ($z, \rho$) and angular ($\theta, \phi$) domains into a fixed grid with specific culling and accumulation steps, whereas variants like [Precomputed Multiple Scattering Table](3324-precomputed-multiple-scattering-table.md) may use different discretizations or [Variation Along and Across Light Rays (SVD Approximation)](6391-variation-along-and-across-light-rays-svd-approximation.md) use low-rank decompositions.
+
+## How it works
+**Inputs:**
+*   Material properties (scattering coefficients, phase function parameters).
+*   Precomputed neural network model for radiance estimation [S1].
+
+**Outputs:**
+*   A 1D GPU buffer containing the 4D radiance table [S1].
+*   A culling mask indicating valid lobes [S1].
+
+**Data Structures:**
+The table is a 4D structure indexed by $(z, \rho, \theta, \phi)$, stored as a 1D buffer on the GPU [S1].
+*   **Spatial Domain:** $z$ (axial distance) and $\rho$ (radial distance) are sampled per mean-free path (mfp). The maximum spatial distance is 32 mfp [S1].
+*   **Angular Domain:** $\theta$ and $\phi$ are sampled every 10 degrees [S1].
+*   **Storage:** The 4D array is flattened into a 1D buffer. Indices are mapped linearly [S1].
+
+**Steps:**
+1.  **Extraction:** Extract precomputed table data from the neural network model for the given material [S1]. This involves computing the double and multiple scattering radiance for each grid point [S1].
+2.  **Summation:** Sum the double and multiple scattering tables to form the total scattering radiance table [S1].
+3.  **Culling:** For each cell (lobe) in the table, check the precomputed radiance values. If 90% of the directions in the lobe have low radiance values, discard the lobe (mark it as invalid/culled) to reduce memory and access costs [S1].
+4.  **Accumulation (Segment-to-Segment):** To encode camera ray length, accumulate the contribution along the direction $(\theta_i, \phi_i)$ with a length of $5 \times \text{mfp}$ [S1]. This transforms the segment-to-point table into a segment-to-segment table [S1]. This step is accelerated using the GPU [S1].
+5.  **Rendering Query:** During rendering, query the table for the current ray's parameters. Interpolate the multiple scattering radiance from the table and add it to direct illumination and single scattering [S1].
+
+**Formulas:**
+*   **Culling Condition:** Let $L(\theta, \phi)$ be the radiance for a given lobe. If $\frac{\text{count}(\theta, \phi : L(\theta, \phi) < \epsilon)}{\text{total directions}} \ge 0.9$, the lobe is discarded [S1].
+*   **Accumulation Length:** $L_{acc} = 5 \times \text{mfp}$ [S1].
+
+**Parameters:**
+*   Max spatial distance: 32 mfp [S1].
+*   Angular sampling: 10 degrees [S1].
+*   Culling threshold: 90% of directions in lobe must have low radiance [S1].
+*   Accumulation length: $5 \times \text{mfp}$ [S1].
+
+**Pitfalls:**
+*   Training the Segment-to-Segment contribution directly with a neural network tends to overestimate contributions [S1].
+*   Precision issues may arise if the 1D buffer indexing is not carefully managed for the 4D structure [G].
+
+## Subtopics
+
+### Segment-to-Segment Table Accumulation
+A table representing multiple scattering from a point $(z_i, \rho_i)$ with direction $(\theta_i, \phi_i)$ and length $5 \times \text{mfp}$, created by accumulating contributions along the direction [S1]. It is chosen when the camera ray length needs to be encoded into the scattering approximation [S1]. The accumulation is performed by summing contributions along the direction $(\theta_i, \phi_i)$ with length $5 \times \text{mfp}$ [S1]. A key pitfall is that training this table directly with a neural network tends to overestimate contributions [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Query time is $O(1)$ for table lookup, but requires interpolation [S1]. Precomputation involves neural network inference and GPU accumulation [S1].
+*   **Memory Complexity:** Proportional to the 4D grid size ($32 \times \text{mfp}$ spatial, $36 \times 36$ angular) [S1]. Culling reduces effective memory usage [S1].
+*   **Performance:** Reduces the cost of per-sample neural network computations (3 matrix multiplications and trigonometric evaluations per query) [S1].
+*   **Strengths:** Fast rendering queries; reduces expensive neural network calls [S1].
+*   **Limitations:** Fixed resolution limits accuracy; culling may remove valid data if thresholds are too aggressive [S1].
+*   **When to use:** When real-time performance is critical and material properties are fixed [S1].
+*   **When not to use:** When dynamic materials or varying mfp are required without recomputing the table [G].
+
+## Background
+Originated in the work on Interactive Simulation of Scattering Effects in Participating Media Using a Neural Network Model [S1]. It builds on Virtual Ray Lights (VRL) [S1]. The method was developed to address the high computational cost of neural network-based light transport simulation by precomputing and storing scattering data in a structured format [S1].
+
+## Sources
+[S1] Interactive Simulation of Scattering Effects in Participating Media Using a Neural Network Model, https://doi.org/10.1109/TVCG.2019.2963015, fetched 2026-10-26

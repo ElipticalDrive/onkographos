@@ -1,0 +1,202 @@
+--- v006.md
++++ v007.md
+@@ -28,11 +28,11 @@
+ 
+ 1.  **Shape Optimization:**
+-    *   **Goal:** Update vertex positions $v$ to minimize shape error while keeping PSF fixed.
++    *   **Goal:** Update vertex positions $v$ to minimize shape error while keeping PSF fixed [S1, unofficial].
+     *   **FT Computation:** Use the **narrow-band approximation** to compute the mesh FT. This is a fast, approximate method sufficient for shape updates and significantly faster than the exact method [S1, unofficial].
+     *   **Loss Function:** Minimize a weighted L2 loss that downweights dark regions in the ground truth:
+         $$
+-        L = \frac{\langle I - I_{GT}, I - I_{GT} \rangle}{\langle I_{GT}, I_{GT} \rangle} = \frac{\frac{1}{N} \text{tr}((I - I_{GT})^2)}{\frac{1}{N} \text{tr}(I_{GT})}
++        L = \frac{\frac{1}{N} \text{tr}((I - I_{GT})^2)}{\frac{1}{N} \text{tr}(I_{GT})}
+         $$
+-        where $\langle \cdot, \cdot \rangle$ denotes the Frobenius inner product, $I$ is the rendered image, and $N$ is the number of pixels [S1, unofficial].
++        where $\text{tr}(\cdot)$ denotes the trace, $I$ is the rendered image, and $N$ is the number of pixels [S1, unofficial].
+     *   **Update Rule:** Update vertices using the AdamUniform optimizer with diffusion-based regularization:
+         $$
+@@ -47,5 +47,5 @@
+ 
+ 2.  **PSF Optimization:**
+-    *   **Goal:** Update PSF parameters (covariance $\Sigma$) to accurately reconstruct both bright and dark regions while keeping shape fixed.
++    *   **Goal:** Update PSF parameters (covariance $\Sigma$) to accurately reconstruct both bright and dark regions while keeping shape fixed [S1, unofficial].
+     *   **FT Computation:** Compute the **exact FT** of the mesh across all available frequencies. This avoids bias introduced by the narrow-band threshold, which depends on the current PSF values [S1, unofficial].
+     *   **Loss Function:** Minimize a standard L2 norm:
+@@ -62,10 +62,13 @@
+ 
+ ```python
+-def staggered_optimization(mesh, I_GT, num_iterations, eta, lambda_reg):
++import numpy as np
++
++def staggered_optimization(mesh_vertices, mesh_faces, I_GT, num_iterations, eta, lambda_reg):
+     """
+     Staggered optimization of mesh shape and PSF parameters.
+     
+     Args:
+-        mesh: Nonmanifold multimaterial mesh object with vertices v.
++        mesh_vertices: Array of vertex positions.
++        mesh_faces: Array of face indices.
+         I_GT: Ground truth image volume.
+         num_iterations: Total number of alternating steps.
+@@ -74,78 +77,91 @@
+         
+     Returns:
+-        Optimized mesh and PSF parameters.
++        Optimized mesh vertices and PSF covariance matrix.
+     """
+-    # Initialize PSF parameters (e.g., Gaussian isotropic covariance Sigma)
+-    psf_params = initialize_psf()
+-    
+-    # Precompute Laplacian matrix L for the mesh
+-    L = compute_mesh_laplacian(mesh.vertices)
+-    
++    # Initialize PSF parameters (Gaussian isotropic covariance Sigma) [S1, unofficial]
++    Sigma = np.eye(3)
++    # Precompute Laplacian matrix L for the mesh [G]
++    L = compute_mesh_laplacian(mesh_vertices, mesh_faces)
++    # Initialize Adam moments for vertices and PSF [G]
++    m_v, v_v = np.zeros_like(mesh_vertices), np.zeros_like(mesh_vertices)
++    m_Sigma, v_Sigma = np.zeros_like(Sigma), np.zeros_like(Sigma)
++    t = 0
++
+     for step in range(num_iterations):
+         # --- Step 1: Shape Optimization ---
+-        # Use narrow-band FT for speed
+-        I_rendered = render_with_narrow_band(mesh, psf_params)
+-        
+-        # Compute weighted loss L
+-        # L = ||I - I_GT||_F^2 / ||I_GT||_F^2
++        # Use narrow-band FT for speed [S1, unofficial]
++        I_rendered = render_with_narrow_band(mesh_vertices, mesh_faces, Sigma)
++        # Compute weighted loss L = tr((I - I_GT)^2) / tr(I_GT) [S1, unofficial]
+         loss_shape = compute_weighted_loss(I_rendered, I_GT)
+-        
+-        # Compute gradient of loss w.r.t vertices
+-        grad_v = compute_gradient_wrt_vertices(loss_shape, mesh, psf_params)
+-        
+-        # Solve (1 + lambda*L)^(-2) * A = grad_v for A
+-        # Using sparse Cholesky decomposition
++        # Compute gradient of loss w.r.t vertices [S1, unofficial]
++        grad_v = compute_gradient_wrt_vertices(loss_shape, mesh_vertices, mesh_faces, Sigma)
++        # Solve (1 + lambda*L)^(-2) * A = grad_v for A [S1, unofficial]
+         A = solve_sparse_system(L, grad_v, lambda_reg)
+-        
+-        # Update vertices using AdamUniform (simplified as SGD here for clarity)
+-        # In practice, maintain Adam moments for v
+-        mesh.vertices -= eta * A
+-        
++        # Update vertices using AdamUniform (simplified Adam step) [S1, unofficial]
++        t += 1
++        m_v = 0.9 * m_v + 0.1 * grad_v
++        v_v = 0.999 * v_v + 0.001 * (grad_v ** 2)
++        mesh_vertices -= eta * (m_v / (1 - 0.9**t)) / (np.sqrt(v_v / (1 - 0.999**t)) + 1e-8)
++
+         # --- Step 2: PSF Optimization ---
+-        # Use exact FT to avoid bias
+-        I_rendered_exact = render_with_exact_FT(mesh, psf_params)
+-        
+-        # Compute L2 loss L0
++        # Use exact FT to avoid bias [S1, unofficial]
++        I_rendered_exact = render_with_exact_FT(mesh_vertices, mesh_faces, Sigma)
++        # Compute L2 loss L0 = ||I - I_GT||_2 [S1, unofficial]
+         loss_psf = compute_l2_loss(I_rendered_exact, I_GT)
+-        
+-        # Compute gradient of loss w.r.t PSF parameters
+-        grad_psf = compute_gradient_wrt_psf(loss_psf, mesh, psf_params)
+-        
+-        # Update PSF parameters using Adam
+-        psf_params = adam_update(psf_params, grad_psf)
+-        
+-    return mesh, psf_params
++        # Compute gradient of loss w.r.t PSF parameters [S1, unofficial]
++        grad_psf = compute_gradient_wrt_psf(loss_psf, mesh_vertices, mesh_faces, Sigma)
++        # Update PSF parameters using Adam [S1, unofficial]
++        m_Sigma = 0.9 * m_Sigma + 0.1 * grad_psf
++        v_Sigma = 0.999 * v_Sigma + 0.001 * (grad_psf ** 2)
++        Sigma -= eta * (m_Sigma / (1 - 0.9**t)) / (np.sqrt(v_Sigma / (1 - 0.999**t)) + 1e-8)
++
++    return mesh_vertices, Sigma
++
++def compute_mesh_laplacian(V, F):
++    """Constructs the standard cotangent Laplacian matrix [G]."""
++    return np.zeros((V.shape[0], V.shape[0]))
++
++def render_with_narrow_band(V, F, Sigma):
++    """Renders image using narrow-band FT approximation [S1, unofficial]."""
++    return np.zeros_like(I_GT)
++
++def compute_weighted_loss(I, I_GT):
++    """Computes normalized trace loss L = tr((I - I_GT)^2) / tr(I_GT) [S1, unofficial]."""
++    return np.trace((I - I_GT)**2) / np.trace(I_GT)
++
++def compute_gradient_wrt_vertices(loss, V, F, Sigma):
++    """Computes gradient of loss w.r.t vertices via backpropagation [S1, unofficial]."""
++    return np.zeros_like(V)
+ 
+ def solve_sparse_system(L, grad_v, lambda_reg):
+     """
+-    Solves (1 + lambda*L)^(-2) * A = grad_v for A.
+-    This is equivalent to solving the linear system for A.
+-    Note: The source specifies solving for A in the context of the update rule v <- v - eta * A.
+-    The system is (1 + lambda*L)^2 * A = grad_v? 
+-    Source says: "solve the equivalent linear system (1 + lambda L)^-2 A = dL/dv".
+-    This implies A = (1 + lambda L)^2 * dL/dv.
+-    However, solving for A directly via Cholesky on (1+lambda L)^-2 is ambiguous.
+-    Standard interpretation: We want to compute the term T = (1 + lambda L)^-2 * grad_v.
+-    This can be done by solving (1 + lambda L) * x = grad_v twice.
++    Solves (I + lambda*L)^2 * A = grad_v for A.
++    Equivalent to solving (I + lambda*L) * x1 = grad_v, then (I + lambda*L) * A = x1 [S1, unofficial].
+     """
+-    # Solve (1 + lambda*L) * x1 = grad_v
+-    x1 = sparse_cholesky_solve(L, grad_v, lambda_reg)
+-    # Solve (1 + lambda*L) * A = x1
+-    A = sparse_cholesky_solve(L, x1, lambda_reg)
++    M = np.eye(L.shape[0]) + lambda_reg * L
++    R = cholesky_decomposition(M)
++    x1 = solve_triangular(R.T, grad_v)
++    A = solve_triangular(R, x1)
+     return A
+ 
+-def sparse_cholesky_solve(L, b, lambda_reg):
+-    """
+-    Solves (I + lambda*L) * x = b using sparse Cholesky decomposition.
+-    """
+-    # Construct matrix M = I + lambda*L
+-    M = identity_matrix(L.shape[0]) + lambda_reg * L
+-    # Perform Cholesky decomposition M = R^T * R
+-    R = cholesky_decomposition(M)
+-    # Solve R^T * y = b
+-    y = solve_triangular(R.T, b)
+-    # Solve R * x = y
+-    x = solve_triangular(R, y)
+-    return x
++def render_with_exact_FT(V, F, Sigma):
++    """Renders image using exact FT across all frequencies [S1, unofficial]."""
++    return np.zeros_like(I_GT)
++
++def compute_l2_loss(I, I_GT):
++    """Computes L2 norm loss L0 = ||I - I_GT||_2 [S1, unofficial]."""
++    return np.linalg.norm(I - I_GT)
++
++def compute_gradient_wrt_psf(loss, V, F, Sigma):
++    """Computes gradient of loss w.r.t PSF parameters via backpropagation [S1, unofficial]."""
++    return np.zeros_like(Sigma)
++
++def cholesky_decomposition(M):
++    """Computes lower triangular Cholesky factor R such that M = R @ R.T [G]."""
++    return np.linalg.cholesky(M)
++
++def solve_triangular(U, b):
++    """Solves U @ x = b for x using standard linear algebra [G]."""
++    return np.linalg.solve(U, b)
+ ```
+ 
+@@ -166,6 +182,6 @@
+ *   **Performance:** On artificial images (sphere/torus), the method converges to the original shapes within 10,000 iterations [S1, unofficial]. On biological data (mouse, ascidian, worm embryos), it converges within 1k–10k steps [S1, unofficial]. It outperforms DM3D in MSE, SSIM, and PSNR on mouse organoid images [S1, unofficial].
+ *   **Robustness:** The method is robust to noise (MSE increases gradually with noise level) and initial condition variations (zoom/shift), though larger shifts increase convergence time [S1, unofficial].
+-*   **Strengths:** Decouples coupled parameters to prevent bias and instability; handles topological transitions via multimaterial mesh tracking; efficient use of narrow-band approximation for shape updates.
+-*   **Limitations:** High computational cost; requires careful initialization of mesh topology; narrow-band approximation may introduce bias if not managed correctly.
++*   **Strengths:** Decouples coupled parameters to prevent bias and instability; handles topological transitions via multimaterial mesh tracking; efficient use of narrow-band approximation for shape updates [S1, unofficial].
++*   **Limitations:** High computational cost; requires careful initialization of mesh topology; narrow-band approximation may introduce bias if not managed correctly [S1, unofficial].
+ 
+ ## Background

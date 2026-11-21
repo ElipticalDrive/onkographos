@@ -1,0 +1,391 @@
+--- v007.md
++++ v008.md
+@@ -3,166 +3,204 @@
+ 
+ ## Overview
+-The Hierarchical Digital Differential Analyzer (HDDA) is a ray traversal algorithm for sparse, multi-resolution volume grids (specifically VDB structures) that performs multi-resolution leapfrogging to skip empty space efficiently [S1, unofficial][S4][S5, S7, unofficial]. Unlike standard voxel DDA which steps one voxel at a time, HDDA adapts its step size to the tree level, jumping between nodes of varying resolutions (e.g., $32^3$, $16^3$, $8^3$) to reach leaf voxels [S2, S3, S6, unofficial]. It sets itself apart from siblings like [Sparse Voxel Octree Ray Traversal](2451-sparse-voxel-octree-ray-traversal.md) by using a grid-based hierarchical structure (B+tree) with fixed compile-time dimensions, allowing template meta-programming to inline and collapse the traversal overhead [S1, unofficial][S4].
++The Hierarchical Digital Differential Analyzer (HDDA) is a ray traversal algorithm that performs multi-resolution leapfrogging through sparse volume data structures, specifically OpenVDB and NanoVDB grids [S1, S3, unofficial]. It adapts the Digital Differential Analyzer (DDA) to step through nodes or voxels of varying power-of-two dimensions, skipping empty space by jumping between grid nodes of different resolutions [S2, S6, unofficial]. Unlike standard voxel DDA which checks every voxel, HDDA leverages the hierarchical tree structure (B+tree) to traverse coarse tiles first and only descend into occupied children, significantly accelerating ray-marching for sparse volumes [S1, unofficial][S4]. It is distinct from [Hierarchical Grid Traversal](2560-hierarchical-grid-traversal.md) in its specific implementation for VDB structures using compile-time template meta-programming to inline the hierarchy, and from [Hierarchical Trilinear Ray Casting](851-hierarchical-trilinear-ray-casting.md) by focusing on traversal efficiency rather than shading interpolation [S1, S5, unofficial].
+ 
+ ## How it works
+-The HDDA extends the Digital Differential Analyzer (DDA) principle [Parent](17-ray-grid-traversal.md) to a hierarchical grid. It maintains a state for the current ray parameter $t$, the current voxel/node index, and the distance to the next boundary for each axis. The algorithm traverses the tree from root to leaf, using DDA at each internal node level to skip non-intersected children, and finally stepping through leaf voxels [S5, unofficial].
+-
+-### Inputs and Outputs
+-**Inputs:**
+-- Ray: Origin $\mathbf{o}$, direction $\mathbf{d}$ (normalized or unnormalized), inverse direction $\mathbf{d}^{-1}$, start time $t_{min}$, end time $t_{max}$ [S3, S7, unofficial].
+-- Grid: A VDB tree structure with levels (e.g., InternalNode2, InternalNode1, Leaf) [S5, unofficial]. Each level has a fixed dimension size $dim$ (power of 2, e.g., 8, 16, 32) [S3, S6, unofficial].
+-- Accessor: To query node occupancy (mask) and leaf values [S7, unofficial].
+-
+-**Outputs:**
+-- A sequence of intersections: either leaf node indices (for traversal) or interval $[t_{entry}, t_{exit}]$ with associated data (density, SDF) [S5, S7, unofficial].
+-
+-### Data Structures
+-The core state is held in the `HDDA` class [S3, unofficial]:
+-- `mDim`: Integer dimension size of the current tree level (e.g., 1 for voxel, 8 for node) [S3, S6, unofficial].
+-- `mT0`: Current ray parameter (time) [S3, S6, unofficial].
+-- `mT1`: Maximum ray parameter (max time) [S3, S6, unofficial].
+-- `mVoxel`: Current voxel/node index (3D coordinate) [S3, S6, unofficial].
+-- `mStep`: Step direction per axis (+1 or -1) [S3, S6, unofficial].
+-- `mDelta`: Time delta to traverse one `mDim` unit per axis [S3, S6, unofficial].
+-- `mNext`: Time to the next boundary crossing per axis [S3, S6, unofficial].
+-
+-For hierarchical traversal, a `NodeDDA` struct is used at each internal level [S5, unofficial]:
+-- `state`: Underlying DDA with `voxel_size = child_size` [S5, unofficial].
+-- `origin`: Node origin in index space [S5, unofficial].
+-- `dim`: Number of children per axis (e.g., 8, 16, 32) [S5, unofficial].
+-- `child_size`: Child coverage in voxels (e.g., 1, 8, 128) [S5, unofficial].
+-- `log2cs`: $\log_2(\text{child\_size})$ for bit-shift index computation [S5, unofficial].
+-
+-### Initialization
+-For a given level with dimension $dim$:
+-1. Set `mDim = dim`, `mT0 = t_min`, `mT1 = t_max` [S3, S6, unofficial].
+-2. Compute current voxel index: `mVoxel = RoundDown(pos) & (~(dim - 1))`, where `pos = ray(t_min)` [S3, S6, unofficial]. This aligns the position to the grid boundary of the current level.
+-3. For each axis $i \in \{x, y, z\}$:
+-   - If $d_i = 0$: Set `mStep[i] = 0`, `mNext[i] = \infty` (disabled) [S3, S6, unofficial].
+-   - If $d_i > 0$: Set `mStep[i] = 1`, `mDelta[i] = d_i^{-1}`, `mNext[i] = mT0 + (mVoxel[i] + dim - pos[i]) \cdot d_i^{-1}` [S3, S6, unofficial].
+-   - If $d_i < 0$: Set `mStep[i] = -1`, `mDelta[i] = -d_i^{-1}`, `mNext[i] = mT0 + (mVoxel[i] - pos[i]) \cdot d_i^{-1}` [S3, S6, unofficial].
+-
+-### Traversal Loop
+-The traversal proceeds level-by-level from root to leaf [S5, unofficial].
+-
+-1. **Root/Node Traversal:**
+-   - For each internal node level (e.g., InternalNode2, InternalNode1):
+-     - Check AABB hit of the ray against the node's bounding box [S5, unofficial].
+-     - Initialize `NodeDDA` with `dim` and `child_size` [S5, unofficial].
+-     - Loop:
+-       - Query `NodeDDA` to get local coordinates and child index `idx` [S5, unofficial].
+-       - Check if child `idx` is active (occupancy mask bit set) [S5, unofficial].
+-       - If active, recursively call HDDA on the child node with updated `t_min` and `t_max` [S5, unofficial].
+-       - Step `NodeDDA`: Find axis $k$ with minimum `mNext[k]`. Update `mT0`, `mNext[k]`, `mVoxel[k]` [S3, S5, unofficial].
+-       - If `mT0 > mT1`, break [S3, unofficial].
+-
+-2. **Leaf Traversal:**
+-   - At the leaf level, `dim = 1`.
+-   - Loop while `mT0 <= mT1`:
+-     - Record intersection at `mT0` with voxel `mVoxel` [S5, unofficial].
+-     - Step DDA: Find axis $k$ with minimum `mNext[k]`.
+-     - **Round-off Correction:** If `mNext[k] <= mT0`, apply correction: `mNext[k] += mT0 - 0.999999f * mNext[k] + 1.0e-6f` [S3, S6, unofficial]. This prevents infinite loops due to floating-point drift [S3, unofficial].
+-     - Update: `mT0 = mNext[k]`, `mNext[k] += mDim * mDelta[k]`, `mVoxel[k] += mDim * mStep[k]` [S3, S6, unofficial].
+-     - Return `mT0 <= mT1` [S3, unofficial].
+-
+-### Pseudocode
++**Inputs and Outputs:**
++*   **Input:** A ray defined by origin $\mathbf{o}$, direction $\mathbf{d}$, inverse direction $\mathbf{i} = 1/\mathbf{d}$, and time bounds $[t_{min}, t_{max}]$; a hierarchical grid (e.g., VDB/NanoVDB) with fixed tree configuration at compile-time; current tree level dimension $dim$ (where $dim = 2^{Log2Dim}$).
++*   **Output:** A sequence of intersected voxel/node indices and their corresponding ray parameters $t$, in front-to-back order [S5, unofficial].
++
++**Data Structures:**
++The core state is held in the `HDDA` class [S3, S6, unofficial]:
++*   `mDim` (`int32_t`): The dimension size of the current node/voxel being traversed.
++*   `mT0` (`RealT`): Current ray parameter (time) at the start of the current step.
++*   `mT1` (`RealT`): Maximum ray parameter (end of ray).
++*   `mVoxel` (`CoordT`): 3D integer coordinate of the current node/voxel origin.
++*   `mStep` (`CoordT`): Step direction per axis ($+1, -1, 0$).
++*   `mDelta` (`Vec3T`): Time delta per step per axis ($\Delta t$).
++*   `mNext` (`Vec3T`): Time of the next boundary crossing per axis.
++
++For hierarchical traversal, a `NodeDDA` struct is used for internal nodes [S5, unofficial]:
++*   `state`: Underlying DDA with `voxel_size = child_size`.
++*   `origin`: Node origin in index space.
++*   `dim`: Children per axis (e.g., 8, 16, 32).
++*   `child_size`: Child coverage in voxels (e.g., 1, 8, 128).
++*   `log2cs`: $\log_2(child\_size)$ for bit-shift index computation.
++
++**Algorithm Steps:**
++
++1.  **Initialization (`init`):**
++    Given ray $\mathbf{o}, \mathbf{d}, \mathbf{i}$, bounds $t_{min}, t_{max}$, and dimension $dim$:
++    1.  Set `mDim = dim`, `mT0 = t_min`, `mT1 = t_max`.
++    2.  Compute current position $\mathbf{p} = \mathbf{o} + t_{min} \mathbf{d}$.
++    3.  Compute aligned voxel origin: $\mathbf{mVoxel} = \lfloor \mathbf{p} \rfloor \ \& \ \sim(dim - 1)$ [S3, S6, unofficial].
++    4.  For each axis $a \in \{0, 1, 2\}$:
++        *   If $d[a] == 0$:
++            *   `mStep[a] = 0`
++            *   `mNext[a] = +\infty` (disabled)
++        *   Else if $i[a] > 0$ (ray moving in positive direction):
++            *   `mStep[a] = 1`
++            *   `mNext[a] = t_{min} + (mVoxel[a] + dim - p[a]) \times i[a]`
++            *   `mDelta[a] = i[a]`
++        *   Else ($i[a] < 0$, ray moving in negative direction):
++            *   `mStep[a] = -1`
++            *   `mNext[a] = t_{min} + (mVoxel[a] - p[a]) \times i[a]`
++            *   `mDelta[a] = -i[a]`
++
++2.  **Step (`step`):**
++    1.  Find axis $a = \text{argmin}_k(mNext[k])$ [S3, S6, unofficial].
++    2.  **Round-off Correction:** If `ENFORCE_FORWARD_STEPPING` is defined and `mNext[a] <= mT0`:
++        *   `mNext[a] += mT0 - 0.999999f * mNext[a] + 1.0e-6f` [S3, S6, unofficial].
++    3.  Update time: `mT0 = mNext[a]`.
++    4.  Update next hit time for axis $a$: `mNext[a] += mDim * mDelta[a]`.
++    5.  Update voxel index: `mVoxel[a] += mDim * mStep[a]`.
++    6.  Return `mT0 <= mT1`.
++
++3.  **Update (`update`):**
++    Used when descending to a child level with dimension $dim_{child}$ [S3, S6, unofficial]:
++    1.  If `mDim == dim_{child}`, return `false` (no change needed).
++    2.  Compute valid voxel range for the parent dimension:
++        *   $\mathbf{voxelMax} = (\mathbf{mVoxel} + (mDim - 1)) \ \& \ \sim(dim_{child} - 1)$
++        *   $\mathbf{voxelMin} = \mathbf{mVoxel} \ \& \ \sim(dim_{child} - 1)$
++    3.  Set `mDim = dim_{child}`.
++    4.  Compute new position $\mathbf{p} = \mathbf{o} + mT0 \mathbf{d}$.
++    5.  Compute new aligned voxel: $\mathbf{mVoxel} = \lfloor \mathbf{p} \rfloor \ \& \ \sim(dim_{child} - 1)$.
++    6.  Clamp $\mathbf{mVoxel}$ to $[\mathbf{voxelMin}, \mathbf{voxelMax}]$.
++    7.  For each axis $a$ where `mStep[a] != 0`:
++        *   `mNext[a] = mT0 + (mVoxel[a] - p[a]) \times i[a]`
++        *   If `mStep[a] > 0`, `mNext[a] += dim_{child} \times i[a]`.
++    8.  Return `true`.
++
++4.  **Hierarchical Traversal Logic:**
++    *   Start at root level (e.g., $32^3$ or $16^3$ nodes).
++    *   Initialize `NodeDDA` for the current level with `dim` and `child_size`.
++    *   Loop:
++        1.  Query `NodeDDA` to get local coordinates and child index.
++        2.  Check if child is inside bounds and active (mask bit set).
++        3.  If active:
++            *   If child is a leaf: Perform leaf traversal or return intersection.
++            *   If child is internal: Recursively call HDDA for the child level, updating `mDim` and `mT0` [S5, unofficial].
++        4.  Step `NodeDDA` to next child.
++
++**Pseudocode:**
++
+ ```python
+-class HDDA:
+-    def __init__(self):
+-        self.mDim = 0
+-        self.mT0 = 0.0
+-        self.mT1 = 0.0
+-        self.mVoxel = [0, 0, 0]
+-        self.mStep = [0, 0, 0]
+-        self.mDelta = [0.0, 0.0, 0.0]
+-        self.mNext = [0.0, 0.0, 0.0]
+-
+-    def init(self, ray_origin, ray_dir, ray_inv_dir, t_min, t_max, dim):
+-        self.mDim = dim
+-        self.mT0 = t_min
+-        self.mT1 = t_max
+-        pos = ray_origin + ray_dir * t_min
++def hdda_init(ray, t_min, t_max, dim):
++    """
++    Initialize HDDA state.
++    ray: object with .origin(), .dir(), .invDir(), .operator(t)
++    """
++    mDim = dim
++    mT0 = t_min
++    mT1 = t_max
++    pos = ray(t_min)
++    dir = ray.dir()
++    inv = ray.invDir()
++    
++    # Align voxel origin to grid
++    mVoxel = floor(pos) & ~(dim - 1)
++    
++    mStep = [0, 0, 0]
++    mDelta = [0.0, 0.0, 0.0]
++    mNext = [0.0, 0.0, 0.0]
++    
++    for axis in range(3):
++        if dir[axis] == 0.0:
++            mStep[axis] = 0
++            mNext[axis] = float('inf')
++        elif inv[axis] > 0:
++            mStep[axis] = 1
++            mNext[axis] = mT0 + (mVoxel[axis] + dim - pos[axis]) * inv[axis]
++            mDelta[axis] = inv[axis]
++        else:
++            mStep[axis] = -1
++            mNext[axis] = mT0 + (mVoxel[axis] - pos[axis]) * inv[axis]
++            mDelta[axis] = -inv[axis]
++            
++    return {
++        'mDim': mDim, 'mT0': mT0, 'mT1': mT1,
++        'mVoxel': mVoxel, 'mStep': mStep,
++        'mDelta': mDelta, 'mNext': mNext
++    }
++
++def hdda_step(state):
++    """
++    Advance HDDA to next voxel/node.
++    Returns True if within bounds, False otherwise.
++    """
++    mDim = state['mDim']
++    mT0 = state['mT0']
++    mT1 = state['mT1']
++    mVoxel = state['mVoxel']
++    mStep = state['mStep']
++    mDelta = state['mDelta']
++    mNext = state['mNext']
++    
++    # Find axis with smallest next hit
++    axis = argmin(mNext)
++    
++    # Round-off correction to prevent infinite loops/backtracking
++    if mNext[axis] <= mT0:
++        mNext[axis] += mT0 - 0.999999 * mNext[axis] + 1.0e-6
+         
+-        # Align to grid boundary
+-        self.mVoxel = [floor(pos[i]) & ~(dim - 1) for i in range(3)]
++    mT0 = mNext[axis]
++    mNext[axis] += mDim * mDelta[axis]
++    mVoxel[axis] += mDim * mStep[axis]
++    
++    state['mT0'] = mT0
++    state['mNext'] = mNext
++    state['mVoxel'] = mVoxel
++    
++    return mT0 <= mT1
++
++def hdda_update(state, ray, dim):
++    """
++    Update HDDA for a new dimension (child level).
++    """
++    if state['mDim'] == dim:
++        return False
+         
+-        for i in range(3):
+-            if ray_dir[i] == 0.0:
+-                self.mStep[i] = 0
+-                self.mNext[i] = float('inf')
+-                self.mDelta[i] = 0.0
+-            elif ray_inv_dir[i] > 0:
+-                self.mStep[i] = 1
+-                self.mDelta[i] = ray_inv_dir[i]
+-                self.mNext[i] = self.mT0 + (self.mVoxel[i] + dim - pos[i]) * ray_inv_dir[i]
+-            else:
+-                self.mStep[i] = -1
+-                self.mDelta[i] = -ray_inv_dir[i]
+-                self.mNext[i] = self.mT0 + (self.mVoxel[i] - pos[i]) * ray_inv_dir[i]
+-
+-    def step(self):
+-        # Find axis with minimum next time
+-        axis = argmin(self.mNext)
++    mDim = state['mDim']
++    mT0 = state['mT0']
++    mVoxel = state['mVoxel']
++    mStep = state['mStep']
++    mNext = state['mNext']
++    mDelta = state['mDelta']
++    
++    # Compute valid range for new dim
++    voxelMax = (mVoxel + (mDim - 1)) & ~(dim - 1)
++    voxelMin = mVoxel & ~(dim - 1)
++    
++    mDim = dim
++    pos = ray(mT0)
++    inv = ray.invDir()
++    
++    mVoxel = floor(pos) & ~(dim - 1)
++    
++    # Clamp to valid range
++    for axis in range(3):
++        mVoxel[axis] = max(voxelMin[axis], min(voxelMax[axis], mVoxel[axis]))
+         
+-        # Round-off correction to prevent backward stepping
+-        if self.mNext[axis] <= self.mT0:
+-            self.mNext[axis] += self.mT0 - 0.999999 * self.mNext[axis] + 1.0e-6
+-        
+-        self.mT0 = self.mNext[axis]
+-        self.mNext[axis] += self.mDim * self.mDelta[axis]
+-        self.mVoxel[axis] += self.mDim * self.mStep[axis]
+-        
+-        return self.mT0 <= self.mT1
+-
+-    def update(self, ray_origin, ray_inv_dir, t_min, dim):
+-        if self.mDim == dim:
+-            return False
+-        
+-        # Clamp voxel to valid range for new dim
+-        voxel_max = [(self.mVoxel[i] + self.mDim - 1) & ~(dim - 1) for i in range(3)]
+-        voxel_min = [self.mVoxel[i] & ~(dim - 1) for i in range(3)]
+-        
+-        self.mDim = dim
+-        pos = ray_origin + ray_dir * t_min
+-        self.mVoxel = [floor(pos[i]) & ~(dim - 1) for i in range(3)]
+-        
+-        for i in range(3):
+-            self.mVoxel[i] = max(voxel_min[i], min(voxel_max[i], self.mVoxel[i]))
++    for axis in range(3):
++        if mStep[axis] == 0:
++            continue
++        mNext[axis] = mT0 + (mVoxel[axis] - pos[axis]) * inv[axis]
++        if mStep[axis] > 0:
++            mNext[axis] += dim * inv[axis]
+             
+-        for i in range(3):
+-            if self.mStep[i] == 0:
+-                continue
+-            self.mNext[i] = self.mT0 + (self.mVoxel[i] - pos[i]) * ray_inv_dir[i]
+-            if self.mStep[i] > 0:
+-                self.mNext[i] += dim * ray_inv_dir[i]
+-        
+-        return True
+-
+-def traverse_hdda(ray, grid, accessor):
+-    # Simplified hierarchical traversal
+-    # 1. Traverse InternalNode2 (32^3)
+-    # 2. Traverse InternalNode1 (16^3)
+-    # 3. Traverse Leaf (1^1)
+-    
+-    # Example: Leaf traversal
+-    hdda = HDDA()
+-    hdda.init(ray.origin, ray.dir, ray.inv_dir, ray.t_min, ray.t_max, dim=1)
+-    
+-    while hdda.step():
+-        voxel = hdda.mVoxel
+-        if accessor.is_active(voxel):
+-            yield (voxel, hdda.mT0)
++    state['mDim'] = mDim
++    state['mVoxel'] = mVoxel
++    state['mNext'] = mNext
++    
++    return True
+ ```
+ 
+-### Parameters
+-- `dim`: Dimension size of the current tree level. Log2Dim=0 corresponds to a voxel, Log2Dim>0 to a node of size $2^{\text{Log2Dim}}$ [S3, S6, unofficial].
+-- `ENFORCE_FORWARD_STEPPING`: Macro enabling round-off correction [S3, unofficial].
+-- `HDDA_MAX_RAY_STEPS`: Maximum steps to prevent infinite loops (e.g., 1000) [S2, unofficial].
+-
+-### Edge Cases and Pitfalls
+-- **Zero Direction Components:** If $d_i = 0$, the axis is disabled (`mNext[i] = \infty`, `mStep[i] = 0`) to avoid division by zero [S6, unofficial].
+-- **Round-off Errors:** Floating-point inaccuracies can cause `mNext[i] <= mT0`, leading to infinite loops. A correction term is applied if `ENFORCE_FORWARD_STEPPING` is defined [S3, S6, unofficial].
+-- **Non-linear Transforms:** HDDA assumes rays are linear in index space. For grids with non-linear transforms (e.g., frustum warping), an auxiliary VDB with a linear transform is used as a mask [S1, unofficial][S4].
+-- **Self-Intersection:** A small offset may be added to the position after each step to prevent hitting the same voxel [S2, unofficial].
++**Parameters:**
++*   `ENFORCE_FORWARD_STEPPING`: Macro/flag to enable round-off correction [S3, unofficial].
++*   `dim`: Integer dimension size for the current tree level. $Log2Dim=0$ is a voxel, $Log2Dim>0$ is a node [S6, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Zero Direction:** If $d[axis] == 0$, the axis is disabled (`mNext` = $\infty$, `mStep` = 0) to prevent division by zero [S6, unofficial].
++*   **Round-off Error:** Floating point inaccuracies can cause `mNext[axis] <= mT0`, leading to infinite loops. The correction term `mNext[axis] += mT0 - 0.999999f * mNext[axis] + 1.0e-6f` is required [S3, S6, unofficial].
++*   **Non-linear Transforms:** HDDA assumes rays are linear in index space. For grids with non-linear transforms (e.g., frustum warping), an auxiliary binary VDB with a linear transform is used as a mask [S1, unofficial][S4].
+ 
+ ## Subtopics
+@@ -178,20 +216,20 @@
+ 
+ ### HDDA Branch
+-A ray traversal algorithm using HDDA that samples every tile/voxel, branching based on occupancy [S8, unofficial]. It initializes ray bounds and HDDA, then loops: if the current voxel is active, it records samples and advances; if not, it skips time [S8, unofficial]. It updates the HDDA state and repeats [S8, unofficial].
++A ray traversal algorithm using HDDA that samples every tile/voxel, branching based on occupancy [S8, unofficial]. It initializes ray bounds and HDDA, then loops: if the current voxel is active, it records samples and advances; if not, it skips time. It steps the HDDA and updates the dimension dynamically based on the accessor [S8, unofficial].
+ 
+ ### Distance LOD
+-Reduces traversal granularity for distant objects to save performance while maintaining surface color [S9, unofficial]. Beyond 400 voxels, the DDA terminates at brick granularity, and shading uses the brick's topmost solid material [S9, unofficial].
++Reduces traversal granularity for distant objects to save performance while maintaining surface color [S9, unofficial]. Beyond 400 voxels, the DDA terminates at brick granularity, and shading uses the brick's topmost solid material to keep distant terrain surface color [S9, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of active voxels/leaves intersected by the ray, but with a significantly smaller constant factor than standard DDA due to hierarchical skipping [S1, S5, unofficial].
+-- **Memory Complexity:** $O(1)$ auxiliary memory for the traversal state, plus the grid structure itself [S1, S5, unofficial].
+-- **Performance:** Tested on RTX 3080 rendering WDAS cloud dataset at 1920x1080 in 6 ms [S7, unofficial].
+-- **Strengths:** Efficiently skips empty space in sparse volumes; leverages compile-time template meta-programming for low overhead [S1, unofficial][S4].
+-- **Limitations:** Requires VDB-like hierarchical grid structure; not directly applicable to non-linear transforms without auxiliary grids [S1, unofficial][S4].
+-- **When to Use:** Volume rendering of sparse, multi-resolution grids (e.g., clouds, smoke) [S1, S7, unofficial].
+-- **When Not to Use:** Dense uniform grids (standard DDA is simpler and comparable) or non-linear transforms without auxiliary structures [S1, unofficial][S4].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of active nodes/voxels intersected by the ray, but with a significantly smaller constant factor than standard DDA due to empty space skipping [S1, unofficial][S4].
++*   **Memory Complexity:** $O(1)$ auxiliary memory for the DDA state, plus the grid storage [S1, unofficial].
++*   **Performance:** Tested on RTX 3080 rendering WDAS cloud dataset at 1920x1080 in 6 ms [S7, unofficial].
++*   **Strengths:** Highly efficient for sparse volumes; leverages compile-time template meta-programming to reduce overhead [S1, unofficial]; handles multi-resolution leapfrogging [S1, unofficial].
++*   **Limitations:** Requires linear transforms for direct use; non-linear transforms require auxiliary grids [S1, unofficial][S4]; precision issues require round-off correction [S3, unofficial].
++*   **When to use:** Sparse volume rendering, level set intersection, grids with linear transforms [S1, unofficial][S4][S7, unofficial].
++*   **When not to use:** Dense volumes where skipping provides little benefit; grids with non-linear transforms without auxiliary mask generation [S1, unofficial][S4].
+ 
+ ## Background
+-The HDDA was introduced by Ken Museth in the context of the VDB (Volume Data Base) library, specifically for efficient ray-marching of sparse volumes and level sets [S1, unofficial][S4]. It was presented in a SIGGRAPH 2014 paper [S1, unofficial][S4]. The algorithm takes advantage of the B+tree structure of VDB, using template meta-programming to inline and collapse the hierarchical traversal, reducing vertical navigation overhead [S1, unofficial][S4]. It has been implemented in OpenVDB and NanoVDB, and is used in various graphics applications, including volume rendering and level-set intersection [S1, unofficial][S4][S7, unofficial].
++The HDDA was introduced by Ken Museth in the context of the VDB (Volume Database) structure, specifically for OpenVDB [S1, unofficial][S4]. It was developed to accelerate ray-marching through sparse volumes and narrow-band level sets, taking advantage of the B+tree structure of VDB [S1, unofficial]. The algorithm uses template meta-programming to inline the hierarchical traversal, reducing the overhead of vertical tree navigation [S1, unofficial]. It is implemented in OpenVDB v2 and later versions, and has been adapted for NanoVDB for GPU rendering [S3, S7, unofficial].
+ 
+ ## Sources

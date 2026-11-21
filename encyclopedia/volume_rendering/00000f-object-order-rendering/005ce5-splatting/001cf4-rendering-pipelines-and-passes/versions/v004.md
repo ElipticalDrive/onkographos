@@ -1,0 +1,66 @@
+# Rendering Pipelines and Passes
+
+Also called: Render Forward Pass
+
+## Overview
+Rendering Pipelines and Passes define the structural organization and execution sequence of volume rendering algorithms, decomposing image formation into logical, sequential stages such as data traversal, interpolation, shading, and compositing [S1, S3, unofficial]. This family solves the problem of managing complex visual effects and geometric projections by isolating computational requirements into distinct passes, enabling optimized memory access and flexible appearance control [S3, unofficial]. It differs from monolithic rendering approaches by explicitly separating geometric projection (e.g., depth testing, splatting) from visual appearance (e.g., shading, classification), allowing for techniques like deferred shading or multi-pass accumulation [S3, unofficial].
+
+## Shared principles
+The rendering pipeline family operates on the principle of stage separation, where each stage performs a specific transformation on the data or image state. Common mechanisms include:
+
+1.  **Stage Decomposition:** The rendering process is divided into logical stages such as Data Traversal, Interpolation, Gradient Computation, Classification, Shading, and Compositing [S1, S3, unofficial]. This allows for independent optimization of visual appearance (shading/classification) and geometric projection (compositing) [S3, unofficial].
+2.  **Intermediate Storage:** Pipelines utilize intermediate framebuffers or data structures (e.g., fragment lists, G-buffers) to store per-pixel or per-voxel attributes (color, normal, depth, opacity) between stages [S1, S2, unofficial]. For example, [Custom Pass Rendering](3629-custom-pass-rendering.md) uses multiple FBOs to store hit positions, normals, and material IDs [S1, unofficial].
+3.  **Sequential Execution:** Stages are executed in a defined order. For instance, [Fragment List-Based Rendering](3488-fragment-list-based-rendering-pipeline.md) follows a Clear, Construction, Insertion, and Evaluation sequence [S1, unofficial].
+4.  **Accumulation and Blending:** Final image generation involves accumulating contributions from multiple samples or primitives, often using alpha blending or weighted summation [S1, S3, unofficial].
+
+## Subtopics
+
+### [Plug-and-Play Ray Marching and Rendering](981-plug-and-play-ray-marching-and-rendering.md)
+This method provides a modular interface for efficient ray marching and differentiable volumetric rendering, allowing users to plug any user-defined radiance field into a standardized acceleration pipeline. It distinguishes itself from specialized implementations like Instant-NGP by offering a Python API built on PyTorch, which facilitates easier extension to dynamic and unbounded scenes while maintaining high performance.
+
+### [Volume Rendering Pipeline](1318-volume-rendering-pipeline.md)
+The Volume Rendering Pipeline is a standard implementation structure for direct volume rendering that decomposes the image formation process into logical, sequential stages: data traversal, interpolation, gradient computation, classification, shading, and compositing. Unlike methods that fit geometric primitives to the data, this pipeline forms images by directly shading each sample and projecting it onto the picture plane, using local gradient vectors as surface normals for shading and separate classification operators for opacity. It treats each volume sample as a reflective, light-emitting, semi-transparent cloud, assuming every sample point acts as both an absorber and an emitter.
+
+### [Time-Sliced Pipelined Architecture](1435-time-sliced-pipelined-architecture.md)
+The Time-Sliced Pipelined Architecture is a hardware design methodology for volume rendering that achieves real-time performance by time-slicing functional blocks to allow simultaneous processing of multiple tasks. It solves the bottleneck of sequential pipeline execution by overlapping stages, enabling continuous hardware-software communication and interactive user interfaces. It distinguishes itself from standard pipelining by emphasizing component reusability and sub-core replication, where independent vertical cores are configured or replicated based on specific processing requirements rather than fixed linear stages.
+
+### [Batched Ray Rendering](1547-batched-ray-rendering.md)
+Batched Ray Rendering is a memory-management pipeline for volume rendering that splits large ray batches into fixed-size chunks to prevent GPU Out-Of-Memory (OOM) errors. It orchestrates the sequential execution of coarse and fine network passes per chunk, distinguishing itself from full pipeline descriptions by isolating the batching mechanism (`batchify_rays`) and per-chunk rendering logic (`render_rays`).
+
+### [GPU Implementation Pipeline](2385-gpu-implementation-pipeline.md)
+A GPU-accelerated rendering technique that traces rays from the camera through each pixel into a 3D volume to compute color and opacity, implemented in a single pass using fragment shaders. It solves the problem of visualizing volumetric data directly on the GPU without generating intermediate polygonal meshes. It differs from isosurface extraction (e.g., [Marching Cubes](53-marching-cubes.md)) by preserving internal volume information, and from splatting ([Splatting](10-splatting.md)) by avoiding sorting and blending overheads for dense volumes, though it is computationally heavier per pixel than texture-based splatting [G].
+
+### [Screen Quad Rendering](2435-screen-quad-rendering.md)
+Screen Quad Rendering is the final presentation stage in a volume rendering pipeline, responsible for transferring computed volume data from off-screen render targets to the default framebuffer or current context texture for display. It differs from standard blits by explicitly managing multiple draw buffers and allowing fragment shaders to sample intermediate textures for final compositing or debugging overlays.
+
+### [Rendering Pipeline Architecture](3059-rendering-pipeline-architecture.md)
+Rendering Pipeline Architecture defines the structural organization of rendering stages, decomposing the image generation process into sequential, independent phases such as data traversal, interpolation, shading, and compositing. It solves the problem of managing complex visual effects and geometric projections by isolating their computational requirements into distinct passes, allowing for optimized memory access patterns and flexible appearance control. It differs from monolithic rendering approaches by explicitly separating geometric projection (e.g., depth testing, splatting) from visual appearance (e.g., shading, classification), enabling techniques like deferred shading or multi-pass accumulation.
+
+### [Fragment List-Based Rendering Pipeline](3488-fragment-list-based-rendering-pipeline.md)
+The Fragment List-Based Rendering Pipeline is a four-stage object-order rendering method designed for real-time smoke volume visualization. It processes geometry through Clear, Construction, Insertion, and Evaluation stages to maintain high accuracy while circumventing the self-intersection and global intersection artifacts common in raytracing approaches. It is distinguished from sibling pipelines by its explicit separation of fragment storage (Insertion) from final image synthesis (Evaluation), using fragment lists to accumulate per-pixel data before compositing.
+
+### [Custom Pass Rendering](3629-custom-pass-rendering.md)
+Custom Pass Rendering is a multi-pass, object-order rendering pipeline designed for high-performance visualization of large-scale volumetric data (specifically NanoVDB) and octree-based geometry within a modern graphics API context. It solves the problem of efficiently computing surface attributes (position, normal, material ID) and lighting effects (SSAO, shadows) for sparse volumetric datasets by decoupling geometric traversal from shading. Unlike monolithic ray-marching shaders, this method uses a sequence of specialized FullScreenPass stages to build intermediate G-buffers (hit position, filtered normals, ambient occlusion) before a final shading pass. It is distinct from [Plug-and-Play Ray Marching and Rendering](981-plug-and-play-ray-marching-and-rendering.md) by its explicit separation of traversal and lighting into discrete render passes, and from [Fragment List-Based Rendering Pipeline](3488-fragment-list-based-rendering-pipeline.md) by its reliance on screen-space fragment buffers rather than explicit primitive lists.
+
+### Eye/Light/Composite Pass Pipeline
+*   **Definition:** Renders volumetric data in three sequential passes: eye pass (direct lighting/color), light pass (opacity accumulation for shadows), and composite pass (blends results) [S2, unofficial].
+*   **Steps:**
+    1.  **Eye Pass:** Render volume to `m_eyeBuffer` with direct lighting, using `m_eyePipeline` and `m_eyeSet` [S2, unofficial].
+    2.  **Light Pass:** Accumulate opacity into `m_lightBuffer` using `m_lightPipeline` and `m_volSet`, transitioning layout from `ColorAttachmentOptimal` to `ShaderReadOnlyOptimal` [S2, unofficial].
+    3.  **Composite Pass:** Bind `m_compositePipeline` and `m_compSet`, draw 3 triangles (full-screen quad) using `m_eyeBuffer` as a sampled texture [S2, unofficial].
+*   **Layout:** Buffers: `m_eyeBuffer` (eye pass output), `m_lightBuffer` (light pass opacity accumulation), `m_volumeTex` (3D volume data, R8G8Unorm), `m_tfTex` (transfer function) [S2, unofficial].
+
+### OptiX Volume Rendering Pipeline
+*   **Definition:** A volume rendering method implemented using NVIDIA OptiX. It uses a Ray Generation shader, Miss shaders for radiance and shadow, and Hit/Any-Hit/Intersection shaders for volume traversal and shading [S3, unofficial].
+*   **Steps:**
+    1.  **Initialize Shaders:** Set `shader_raygen` to `__raygen__default`. Add miss shaders `__miss__radiance` and `__miss__shadow` [S3, unofficial].
+    2.  **Configure Volume Object Group:** Set `group.type = VOLUME_STRUCTURED_REGULAR`. Assign hit group shaders: Closest Hit `__closesthit__volume_radiance` and `__closesthit__volume_shadow`, Any Hit `__anyhit__volume_radiance` and `__anyhit__volume_shadow`, and Intersection `__intersection__volume` [S3, unofficial].
+*   **Layout:** Shader assignments: Ray Gen: `__raygen__default`. Miss: `__miss__radiance`, `__miss__shadow`. Volume Closest Hit: `__closesthit__volume_radiance`, `__closesthit__volume_shadow`. Volume Any Hit: `__anyhit__volume_radiance`, `__anyhit__volume_shadow`. Volume Intersection: `__intersection__volume` [S3, unofficial].
+
+## Background
+The concept of decomposing rendering into stages originates from early direct volume rendering implementations that separated data preparation, shading, and compositing to allow for flexible transfer function application [S2, unofficial][S3, unofficial]. The specific "msplat_render" alias and "Render Forward Pass" terminology are associated with modern 3D Gaussian Splatting training pipelines, specifically the `msplat` implementation which utilizes native Metal for high-performance training [S1, unofficial]. Hardware-oriented approaches like the Time-Sliced Pipelined Architecture emerged to address the limitations of fixed-function pipelines, enabling real-time performance through sub-core replication and time-slicing [S1, unofficial]. Modern implementations increasingly rely on multi-pass architectures (e.g., Custom Pass Rendering) to decouple geometric traversal from complex lighting calculations like SSAO and shadows, particularly for sparse volumetric datasets like NanoVDB [S1, S2, unofficial].
+
+## Sources
+[S1] Show HN: Msplat – 3D Gaussian Splatting training in ~90s on M4 Max, native Metal, https://github.com/rayanht/msplat, fetched 2026-10-26 (unofficial)
+[S2] sho3la/GPUGemsVolumeRendering, https://github.com/sho3la/GPUGemsVolumeRendering, fetched 2026-10-26 (unofficial)
+[S3] GitHub - VIDILabs/open-volume-renderer: Open source modular multi ..., https://github.com/VIDILabs/open-volume-renderer, fetched 2026-10-29 (unofficial)

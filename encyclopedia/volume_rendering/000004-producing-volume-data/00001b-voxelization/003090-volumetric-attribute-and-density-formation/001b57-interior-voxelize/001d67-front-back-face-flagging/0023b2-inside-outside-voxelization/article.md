@@ -1,0 +1,87 @@
+# Inside-Outside Voxelization
+Also called: Stencil Shadow Volume Voxelization, Stencil-based Interior Voxelize
+
+## Overview
+Inside-Outside Voxelization determines whether a grid cell lies inside or outside a solid obstacle by leveraging stencil buffer operations, inspired by stencil shadow volume algorithms [S1, unofficial]. It distinguishes interior cells (nonzero stencil value) from exterior cells (zero stencil value), serving as a preprocessing step for volumetric attribute and density formation. Unlike methods that project all geometry for boundary occlusion, this approach relies on the topological property of closed meshes to fill interiors, making it distinct from boundary-only classification techniques like [Outer/Inner Shell Classification](16087-outer-inner-shell-classification.md).
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A watertight closed triangle mesh; a 3D destination texture (voxel grid) of dimensions $W \times H \times D$.
+*   **Output:** A 3D texture where each voxel contains a stencil-derived integer indicating interiority.
+
+**Data Structures:**
+*   **Stencil Buffer:** A 2D buffer of integer values, initialized to zero, with dimensions matching the current slice ($W \times H$).
+*   **Obstacle Texture:** The destination 3D texture storing the final inside/outside flags.
+
+**Parameters:**
+*   **Near Clip Plane:** Set to the depth of the current slice being processed.
+*   **Far Clip Plane:** Set to infinity.
+*   **Stencil Operations:** Increment on back face, decrement on front face, with wrapping in both cases.
+
+**Steps:**
+1.  Iterate through each slice $z$ of the 3D destination texture from $0$ to $D-1$.
+2.  Initialize the stencil buffer for the current slice to zero.
+3.  Configure the rasterization state:
+    *   Set the near clip plane to the depth of slice $z$.
+    *   Set the far clip plane to infinity.
+    *   Enable stencil testing.
+    *   Set the stencil operation for front faces to decrement (with wrapping).
+    *   Set the stencil operation for back faces to increment (with wrapping).
+4.  Render the input triangle mesh into the current slice using an orthogonal projection aligned with the slice normal.
+5.  Perform a final pass to copy the stencil buffer values into the corresponding 2D slice of the obstacle texture.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def inside_outside_voxelization(mesh, texture_dimensions):
+    W, H, D = texture_dimensions
+    obstacle_texture = allocate_3d_texture(W, H, D)
+    
+    # Stencil buffer is managed by the graphics API, but logically:
+    # stencil_buffer = zeros(W, H)
+    
+    for z in range(D):
+        # Initialize stencil buffer to zero for this slice
+        clear_stencil_buffer()
+        
+        # Set projection parameters
+        set_near_clip_plane(depth=z)
+        set_far_clip_plane(depth=INFINITY)
+        
+        # Configure stencil operations
+        # Increment for back faces, decrement for front faces, with wrapping
+        set_stencil_op(front_face=DECREMENT_WRAP, back_face=INCREMENT_WRAP)
+        
+        # Render mesh into current slice using orthogonal projection
+        render_mesh_orthogonal(mesh, slice_z=z)
+        
+        # Copy stencil values to obstacle texture
+        copy_stencil_to_texture(obstacle_texture, slice_z=z)
+        
+    return obstacle_texture
+```
+
+**Edge Cases and Pitfalls:**
+*   **Watertight Requirement:** The method depends on having one back face for every front face. It is best suited to watertight closed meshes [S1, unofficial]. Non-watertight meshes may result in incorrect interior/exterior classification.
+*   **Boundary Cells:** Cells interior but next to the boundary are not tagged by this algorithm; they are handled by the velocity voxelization algorithm [S1, unofficial].
+*   **Precision:** Stencil buffer precision limits the maximum depth of nested shells or complex topology that can be correctly resolved.
+
+## Subtopics
+
+### [Outer/Inner Shell Classification](16087-outer-inner-shell-classification.md)
+Partitions geometry into boundary-aligned outer shells and internal inner shells to optimize occlusion culling. It restricts 2D boundary masks to polygons coplanar with voxel grid boundaries, preventing interior polygons from incorrectly occluding the shell. Choose this when boundary occlusion optimization is critical and geometry can be grouped by coplanarity.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot D)$, where $N$ is the number of triangles and $D$ is the depth of the voxel grid, as each slice requires a full render pass.
+*   **Memory Complexity:** $O(W \cdot H \cdot D)$ for the obstacle texture, plus $O(W \cdot H)$ for the stencil buffer.
+*   **Strengths:** Simple to implement using standard graphics APIs; robust for watertight meshes.
+*   **Limitations:** Requires watertight geometry; does not handle boundary-adjacent interior cells; performance scales linearly with grid depth.
+*   **When to Use:** When voxelizing solid obstacles for fluid simulation or collision detection where the mesh is guaranteed to be watertight.
+*   **When Not to Use:** For non-watertight meshes or when boundary-adjacent cells need explicit tagging by this specific algorithm.
+
+## Background
+This method was introduced in the context of real-time simulation and rendering of 3D fluids, specifically for voxelizing solid obstacles [S1, unofficial]. It draws inspiration from stencil shadow volume algorithms, adapting the technique of counting front/back face intersections to determine volumetric interiority.
+
+## Sources
+[S1] Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)

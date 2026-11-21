@@ -1,0 +1,111 @@
+# Sur2f
+
+
+## Overview
+Sur$$^{2}$$f is a hybrid representation for multi-view surface reconstruction that learns two parallel streams: an implicit signed distance field (SDF) and an explicit surrogate surface mesh [S1]. It unifies volume rendering of the implicit SDF and surface rendering of the surrogate mesh with a shared neural shader to promote convergence to the same underlying surface [S1]. Unlike sibling methods that may use discrete tetrahedra or separate rendering pipelines, Sur$$^{2}$$f maintains a continuously defined implicit field synchronized with an explicit mesh via SDF-induced deformation, leveraging the mesh to guide volume sampling for improved efficiency [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $M$ multi-view images $\{I_m\}_{m=1}^M$ with known camera poses.
+*   **Outputs:** An implicit SDF function $f(\boldsymbol{x}; \theta)$ and an explicit surrogate mesh $\hat{\mathcal{S}} = \{\hat{\mathcal{V}}, \hat{\mathcal{F}}\}$ [S1]. At inference, a final mesh $\mathcal{S}$ is extracted from $f$ using marching cubes [S1].
+
+**Data Structures:**
+1.  **Implicit SDF ($f$):** A neural network parameterized by $\theta$ that outputs a scalar value for any point $\boldsymbol{x} \in \mathbb{R}^3$. The surface is defined as the zero-level set $\mathcal{S} = \{\boldsymbol{x} \in \mathbb{R}^3 \mid f(\boldsymbol{x}) = 0\}$ [S1]. Convention: $f(\boldsymbol{x}) < 0$ inside, $f(\boldsymbol{x}) > 0$ outside [S1].
+2.  **Surrogate Mesh ($\hat{\mathcal{S}}$):** Defined by vertices $\hat{\mathcal{V}}$ and faces $\hat{\mathcal{F}}$. The vertex positions are deformed during training [S1].
+3.  **Neural Shader:** A shared parameterized function that computes photorealistic appearance (color, shading) for both the volume and surface streams [S1].
+
+**Algorithm Steps:**
+1.  **Initialize:** Initialize the implicit SDF network $f$ and the surrogate mesh $\hat{\mathcal{S}}$ (typically with a coarse initial geometry) [S1].
+2.  **Synchronize Deformation:** Drive the deformation of the surrogate mesh vertices $\hat{\mathcal{V}}$ using functions induced from the current implicit SDF $f$ [S1]. This ensures the explicit mesh stays synchronized with the implicit field [S1].
+3.  **Implicit Stream Rendering (Volume):** Perform SDF-induced volume rendering on the implicit field $f$ [S1].
+    *   Sample points along rays.
+    *   Use the synchronized surrogate mesh $\hat{\mathcal{S}}$ to guide volume sampling, improving sampling efficiency per ray [S1].
+    *   Render the view using the shared neural shader [S1].
+4.  **Explicit Stream Rendering (Surface):** Perform differentiable surface rendering on the surrogate mesh $\hat{\mathcal{S}}$ [S1].
+    *   Render the view using the same shared neural shader [S1].
+5.  **Supervision and Update:**
+    *   Compute loss against observed multi-view images $\{I_m\}$ for both rendered views [S1].
+    *   Update parameters $\theta$ of the SDF and the vertex positions $\hat{\mathcal{V}}$ of the mesh to minimize the loss [S1].
+    *   The shared neural shader ensures both streams converge to the same surface appearance and geometry [S1].
+6.  **Inference:** Extract the final mesh $\mathcal{S}$ from the converged implicit SDF $f$ using marching cubes [S1]. Render in real-time using the learned neural shader [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+theta = initialize_sdf_parameters()
+V_hat = initialize_surrogate_vertices()
+F = fixed_topology_faces() # Surrogate mesh topology is fixed; only vertices deform
+shader = initialize_neural_shader()
+
+for iteration in range(max_iterations):
+    # 1. Synchronize Surrogate Mesh with Implicit SDF
+    # Deform vertices V_hat based on functions induced from f(x; theta)
+    # This step enforces synchronization between the explicit and implicit representations
+    V_hat = deform_vertices(V_hat, f, theta)
+
+    # 2. Render Implicit Stream (Volume Rendering)
+    # Sample points along rays, guided by the surrogate mesh for efficiency
+    # Use marching cubes or similar logic to determine sampling bounds if needed
+    # However, Sur2f uses SDF-induced volume rendering directly
+    color_vol, alpha_vol = render_volume(
+        ray_origins, ray_directions, 
+        sdf_function=f, 
+        sdf_params=theta,
+        surrogate_mesh=(V_hat, F), # Used for sampling guidance
+        shader=shader
+    )
+
+    # 3. Render Explicit Stream (Surface Rendering)
+    # Differentiable rasterization or ray-marching of the mesh
+    color_surf, alpha_surf = render_surface(
+        ray_origins, ray_directions,
+        vertices=V_hat,
+        faces=F,
+        shader=shader
+    )
+
+    # 4. Compute Loss and Update
+    # Supervision from multi-view images {I_m}
+    loss_vol = compute_loss(color_vol, observed_images)
+    loss_surf = compute_loss(color_surf, observed_images)
+    total_loss = loss_vol + loss_surf
+
+    # Update SDF parameters and Mesh vertices
+    theta = update_parameters(theta, gradient_of_loss_wrt_theta)
+    V_hat = update_vertices(V_hat, gradient_of_loss_wrt_vertices)
+
+# Inference
+final_mesh = marching_cubes(f, theta)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Synchronization Failure:** If the deformation functions induced from $f$ do not accurately reflect the surface geometry, the surrogate mesh may drift, reducing the effectiveness of surface-guided sampling [S1].
+*   **Sampling Efficiency:** The benefit of surface-guided volume sampling relies on the surrogate mesh being a good approximation of the true surface [S1]. Poor synchronization leads to inefficient sampling or artifacts.
+*   **Topology:** The surrogate mesh topology is fixed during deformation [S1]. Topological changes in the target surface may require careful initialization or topology-adaptive strategies not detailed in the core method [G].
+
+## Subtopics
+
+### SDF-Induced Volume Rendering
+Uses the implicit SDF for rendering, allowing continuous representation and easy extraction of meshes via marching cubes [S1].
+
+### Differentiable Surface Rendering
+Renders the explicit surrogate mesh, providing efficient and sharp surface supervision [S1].
+
+### Shared Neural Shader
+A single neural network parameterizes the appearance for both volume and surface rendering, ensuring photorealistic consistency and promoting convergence to the same surface [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. However, the method claims improved sampling efficiency per ray in volume rendering due to surface-guided sampling [S1].
+*   **Memory Complexity:** Not given in the sources. Requires storing the SDF network parameters, the surrogate mesh vertices, and the neural shader parameters [S1].
+*   **Performance:** Sur$$^{2}$$f outperforms existing reconstruction methods and surface representations, including hybrid ones, in terms of both recovery quality and recovery efficiency [S1].
+*   **Strengths:** Combines the merits of implicit fields (continuous, easy mesh extraction) and explicit meshes (efficient rendering, surface-guided sampling) [S1]. The shared shader promotes convergence to the same surface [S1].
+*   **Limitations:** Requires maintaining and synchronizing two representations [S1]. The surrogate mesh topology is fixed [S1].
+*   **When to use:** Multi-view surface reconstruction where high quality and efficiency are required, and photorealistic rendering is desired [S1].
+
+## Background
+Sur$$^{2}$$f was proposed in the paper "Sur$$^{2}$$f: A Hybrid Representation for High-Quality and Efficient Surface Reconstruction from Multi-view Images" [S1]. It addresses the ill-posed nature of surface reconstruction from multi-view images by leveraging the complementary merits of implicit and explicit representations [S1]. The method builds on principles of isosurface detection and volume rendering [Parent].
+
+## Sources
+[S1] Sur$$^{2}$$f: A Hybrid Representation for High-Quality and Efficient Surface Reconstruction from Multi-view Images, https://doi.org/10.1007/978-3-031-73027-6_1, fetched 2026-10-26

@@ -1,0 +1,228 @@
+# Ambiguous Face Interpolant (Red Path)
+Also called: Red Path Interpolant, Red Path Case Transition
+## Overview
+The Ambiguous Face Interpolant (Red Path) is a piecewise continuous surface interpolant constructed for Marching Squares cells containing an ambiguous face. It resolves the topological ambiguity by defining a specific sequence of contour transitions (the "red path") that generates a continuous surface composed of triangular patches and a central flat sheet. It is distinguished from sibling methods like the Cyclic Face Interpolant (Blue Path) by its reliance on the specific case sequence 0-4-6-14-15 and its construction of a flat central region rather than a cyclic sweep.
+## How it works
+### Inputs and outputs
+**Inputs:**
+*   A 2D cell (Marching Squares square) with four vertices $v_0, v_1, v_2, v_3$.
+*   Scalar field values $f_i$ at each vertex $v_i$.
+*   Target isovalue $h$.
+*   Cell configuration indicating an ambiguous face, specifically requiring diagonally opposing vertices to be on opposite sides of the isovalue (e.g., black and white vertices for Case 6).
+
+**Outputs:**
+*   A continuous surface representation within the cell, defined by a set of triangles and a central flat sheet.
+
+### Data structures
+The output is a geometric primitive set:
+*   **Triangles:** A list of triangular polygons defined by three vertices each.
+*   **Flat Sheet:** A single quadrilateral or two triangles representing the central region where the isovalue is set to the vertex isovalue.
+
+### Steps
+1.  **Identify Case Sequence:** Determine that the cell follows the red path sequence of cases: 0, 4, 6, 14, 15. Cases 0 and 15 have no contours and are ignored for surface generation. The active cases are 4, 6, and 14.
+2.  **Case 4 Sweep:**
+    *   Identify the two edge points where the isovalue $h$ is crossed. These points move linearly along the edges.
+    *   These two points define a contour that sweeps out a triangular surface.
+    *   Continue this sweep until the isovalue of the opposite corner vertex is reached. Let this vertex be $v_{opp}$.
+3.  **Dual Contour Initiation:**
+    *   At the moment the isovalue of $v_{opp}$ is reached, a new separate contour starts at $v_{opp}$.
+    *   This new contour sweeps out a second triangular surface.
+    *   Simultaneously, the original contour from the upper-left corner (in the standard orientation) continues to sweep out its triangular surface.
+4.  **Case 14 Sweep:**
+    *   Continue sweeping until the isovalue of the third vertex (distinct from the start and $v_{opp}$) is reached.
+    *   At this point, the previous two contours disappear.
+    *   A new contour is swept towards the lower-left corner, sweeping a final triangular surface. This step is described as the exact opposite of Case 2.
+5.  **Central Region Filling:**
+    *   Observe that the three swept triangles meet only at edge points, leaving a large central region of the cell unused by any contour.
+    *   Set the isovalue of all points in this central region to the vertex isovalue (effectively making it a flat sheet).
+    *   This flat sheet connects the three swept triangles, ensuring the surface is continuous over the entire cell.
+
+### Formulas
+*   **Linear Edge Interpolation:** The position of an edge point $p$ at isovalue $h$ between vertices $v_a$ and $v_b$ with values $f_a$ and $f_b$ is:
+    $$ p = v_a + \frac{h - f_a}{f_b - f_a} (v_b - v_a) $$
+*   **Central Region Value:** For any point $x$ in the central unused region:
+    $$ f(x) = h $$
+    This creates a flat sheet.
+
+### Parameters
+*   **Isovalue ($h$):** The threshold value for surface extraction.
+*   **Vertex Values ($f_i$):** Scalar field values at cell corners.
+
+### Edge cases and pitfalls
+*   **Data Dependence:** The resulting surface is data-dependent and not uniform across cells. This poses problems for frequency domain analysis [S1, book].
+*   **Topology Ambiguity:** The method specifically addresses cells with ambiguous faces where standard linear interpolation fails due to topology ambiguity [S1, book].
+*   **Degenerate Input:** If vertex values are exactly equal to $h$, edge interpolation may result in division by zero or undefined points. Guard against this by handling exact matches explicitly (e.g., treating the vertex as part of the surface).
+*   **Boundary Conditions:** Ensure that the "upper left" and "lower left" references in Step 3 and 4 are mapped correctly to the specific vertex indices of the cell, as the description assumes a specific orientation.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def red_path_interpolant(cell_vertices, cell_values, isovalue):
+    """
+    Constructs the Red Path interpolant for a Marching Squares cell.
+    
+    Args:
+        cell_vertices: List of 4 vertices [v0, v1, v2, v3] in counter-clockwise order.
+        cell_values: List of 4 scalar values [f0, f1, f2, f3] corresponding to vertices.
+        isovalue: The target isovalue h.
+        
+    Returns:
+        List of triangles (each triangle is a list of 3 vertices) and a central flat sheet.
+    """
+    triangles = []
+    
+    # Check for ambiguous face condition (diagonally opposing vertices on opposite sides)
+    # Assuming standard labeling: v0, v1, v2, v3. Ambiguous face often involves v0-v2 or v1-v3.
+    # The red path requires specific case transitions. We assume the caller has verified
+    # the cell is in the red path configuration (Cases 4, 6, 14 active).
+    
+    # Step 2: Case 4 Sweep
+    # Identify edge points for Case 4. 
+    # Case 4 typically involves edges between (v0,v1) and (v3,v2) or similar depending on labeling.
+    # For the sake of implementation, we need to identify the two edges where sign changes occur.
+    # Let's assume a standard configuration where v0 and v2 are the diagonals.
+    # If v0 < h and v2 > h (or vice versa), and v1, v3 are on one side, it's ambiguous.
+    
+    # Find edge points for the initial sweep (Case 4)
+    # Assume edges (v0, v1) and (v3, v2) are the active edges for Case 4 in this specific path
+    # This mapping depends on the exact vertex ordering and case definition.
+    # We will use a generic helper to find edge points.
+    
+    edge_points_case4 = []
+    # Check edges for sign change relative to isovalue
+    edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+    for i, j in edges:
+        if (cell_values[i] - isovalue) * (cell_values[j] - isovalue) < 0:
+            p = interpolate_edge(cell_vertices[i], cell_vertices[j], cell_values[i], cell_values[j], isovalue)
+            edge_points_case4.append(p)
+            
+    # Case 4 defines a contour by two edge points.
+    # These sweep out a triangular surface until the isovalue of the opposite corner is reached.
+    # Let the opposite corner be v_opp.
+    # In Case 4, the two edge points are on adjacent edges to a vertex, or opposite?
+    # The text says "two edge points which move linearly... sweep out a triangular surface".
+    # This implies the triangle is formed by the two edge points and the vertex between them?
+    # Or the two edge points and a point on the diagonal?
+    # The text says "until the isovalue of the opposite corner is reached".
+    # This implies the sweep is dynamic. However, for a static interpolant, we define the geometry.
+    
+    # The red path constructs a surface composed of triangles.
+    # Let's identify the three triangles and the central sheet.
+    
+    # Triangle 1: Formed by the initial sweep.
+    # Triangle 2: Formed by the new contour starting at v_opp.
+    # Triangle 3: Formed by the final sweep towards the lower left.
+    
+    # Central Sheet: Flat region connecting them.
+    
+    # Since the exact vertex indices for "upper left" and "lower left" depend on orientation,
+    # we will define the triangles based on the edge points and vertices involved.
+    
+    # Let's assume v0 is the "upper left" and v2 is the "opposite corner" (diagonal).
+    # And v3 is the "lower left".
+    
+    # Edge points for Case 4:
+    # Assume edges (v0, v1) and (v0, v3) are the ones crossing the isovalue? 
+    # No, Case 4 usually has 2 edges crossing.
+    # Let's find the two crossing edges.
+    crossing_edges = []
+    for i, j in edges:
+        if (cell_values[i] - isovalue) * (cell_values[j] - isovalue) < 0:
+            crossing_edges.append((i, j))
+            
+    if len(crossing_edges) != 2:
+        # This should not happen for a valid red path cell
+        return []
+        
+    e1, e2 = crossing_edges
+    p1 = interpolate_edge(cell_vertices[e1[0]], cell_vertices[e1[1]], cell_values[e1[0]], cell_values[e1[1]], isovalue)
+    p2 = interpolate_edge(cell_vertices[e2[0]], cell_vertices[e2[1]], cell_values[e2[0]], cell_values[e2[1]], isovalue)
+    
+    # The vertex between the two crossing edges is the "pivot" for Case 4.
+    # Let's find the common vertex.
+    common_v_idx = None
+    if e1[0] == e2[0]: common_v_idx = e1[0]
+    elif e1[0] == e2[1]: common_v_idx = e1[0]
+    elif e1[1] == e2[0]: common_v_idx = e1[1]
+    elif e1[1] == e2[1]: common_v_idx = e1[1]
+    
+    common_v = cell_vertices[common_v_idx]
+    
+    # Triangle 1: common_v, p1, p2
+    triangles.append([common_v, p1, p2])
+    
+    # Step 3: New contour starts at v_opp.
+    # v_opp is the vertex diagonally opposite to common_v.
+    v_opp_idx = 3 - common_v_idx # Assuming 0-3 mapping for square
+    v_opp = cell_vertices[v_opp_idx]
+    
+    # The new contour sweeps out a triangular surface.
+    # It likely connects v_opp to the edge points of the next phase.
+    # The text says "contour in the upper left corner continues to sweep".
+    # This implies the surface is built from multiple triangles.
+    
+    # Step 4: Third vertex isovalue reached.
+    # The third vertex is one of the remaining two.
+    # Let's identify the third vertex involved in the final sweep.
+    # The final sweep is towards the "lower left".
+    
+    # This geometric construction is complex to map to indices without a diagram.
+    # However, the key is the central flat sheet.
+    
+    # Central Region:
+    # The central region is the area not covered by the three triangles.
+    # We set the isovalue to h, forming a flat sheet.
+    # This sheet connects the three triangles.
+    # Geometrically, this is often a quadrilateral in the center.
+    
+    # To implement the flat sheet, we need its boundary vertices.
+    # The boundary is formed by the inner edges of the three triangles.
+    # Let's assume the three triangles meet at a central point or edge.
+    # The text says "triangles meet only at edge points".
+    
+    # For a complete implementation, one would calculate the intersection of the swept surfaces.
+    # Here, we define the flat sheet as a polygon connecting the inner vertices of the triangles.
+    
+    # Let's assume the three triangles are T1, T2, T3.
+    # T1: [common_v, p1, p2]
+    # T2: [v_opp, p2, p3] (hypothetical)
+    # T3: [v_lower_left, p3, p1] (hypothetical)
+    
+    # The central sheet would be [p1, p2, p3, p4] or similar.
+    # Since the exact indices are ambiguous without the figure, we note that the central region
+    # is filled with a flat sheet connecting the swept triangles.
+    
+    # For the purpose of this article, we define the central sheet as a placeholder
+    # that connects the inner vertices of the swept triangles.
+    
+    # In practice, the "flat sheet" is often implemented by setting the scalar field
+    # to h in the central region, and the renderer extracts the isosurface there.
+    # Or, explicitly, a polygon is added.
+    
+    # Let's add a central quadrilateral if we can determine its vertices.
+    # Without the figure, we cannot determine p3, p4.
+    # So we return the triangles and note the central sheet.
+    
+    return triangles, "central_flat_sheet"
+
+def interpolate_edge(v1, v2, f1, f2, h):
+    t = (h - f1) / (f2 - f1)
+    return v1 + t * (v2 - v1)
+```
+## Subtopics
+
+### [Cyclic Face Interpolant (Blue Path)](14169-cyclic-face-interpolant-blue-path.md)
+An interpolant for Marching Squares cells where vertices are swept in cyclic order around the face (path 8 to 11). It involves non-polynomial behavior due to edge points moving on opposite edges. Choose this when the cell configuration matches the blue path cases.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per cell, as it involves a fixed number of edge interpolations and triangle constructions.
+*   **Memory Complexity:** $O(1)$ per cell, storing a few triangles and a central sheet.
+*   **Strengths:** Provides a continuous surface for ambiguous faces; composed of triangles, preserving tidy polynomial geometric properties.
+*   **Limitations:** The interpolant is data-dependent and not uniform across cells, which poses problems for frequency domain analysis [S1, book].
+*   **When to use:** When extracting isosurfaces from Marching Squares cells with ambiguous faces and the red path case sequence (0, 4, 6, 14, 15) is identified.
+*   **When not to use:** When frequency domain analysis is required, or when the cell does not match the red path configuration.
+## Background
+The Ambiguous Face Interpolant (Red Path) is described in the book "Interpolants Induced by Marching Cases" [S1, book]. It is part of a series of interpolants constructed to resolve topological ambiguities in Marching Squares by defining specific paths of case transitions. The red path is noted as the easiest case to analyze among the three possible paths (red, blue, green) because it only occurs in cells with an ambiguous face requiring diagonally opposing black and white vertices for Case 6.
+## Sources
+[S1] Interpolants Induced by Marching Cases, https://doi.org/10.4230/dfu.vol2.sciviz.2011.48, fetched 2026-10-26 (book)

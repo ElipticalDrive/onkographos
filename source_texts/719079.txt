@@ -1,0 +1,461 @@
+Contribute to ovr/farcry1-raymaster development by creating an account on GitHub.
+
+feat(XRenderD3D12): path tracing of the main view's lighting by ovr · Pull Request #17 · ovr/farcry1-raymaster · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ovr
+commented
+Nov 1, 2026
+Copy link
+Copy Markdown
+Owner
+Path tracing of the main view's lighting in XRenderD3D12 (d3d12_PathTracing): the opaque surfaces are lit by paths instead of the game's baked light (light maps, the ambient constant, the pre-lit terrain and vegetation). The light comes from the sun, the lamps (the frame's and the level's static ones, the bake-only DLF_LM lamps too), the sky, the emissive surfaces and the bounces between them. The raster keeps the primary surfaces (a G-buffer from the forward pass); water, glass, particles and the weapon are drawn over it as before.
+d3d12_PathTracing 0 (the default) leaves the frames as they were, bit for bit; 1 is real time, 2 the reference, which adds up its frames while the view stays. It needs DXR 1.1 and r_HDRRendering 1, and is in the game's menu (Advanced Video Options, Path Tracing: None / Real Time / Reference).
+Measured on a Radeon RX 7900 XTX at 3840 x 2160, very high, with d3d12_HDROutput 0 and r_VSync 0.
+Steps
+Infrastructure (0b62817): the cvars, the frame's lamps on the GPU (SPTLight, root SRV t2 space5), motion vectors and depth without an upscaler. Fix: no AO worked under an upscaler, since the AO target was made before the scene's targets were bound.
+Materials and direct light (beff516): PathShade.hlsli, the path material in SRayInstance (lit, terrain, vegetation, unlit). The terrain's sector texture is divided by the light baked into it (d3d12_PTTerrainDelight), the vegetation's vertex colours are baked again without light. The level's static lamps within d3d12_PTLightDistance, at most 128. d3d12_RTDebug 8-10.
+G-buffer (3a63125): the general program's XR_PT permutation writes the albedo, the normal, the fog's share and the material; the light, projector and terrain shadow passes, the screen space AO and the rays' GI are not drawn. d3d12_PTDebug 1-4.
+The path tracer (1a8220a): CSTrace (a lamp of 16 candidates by RIS, cosine bounces, the sky on a miss), CSTemporal, CSFilter, the composite before the blended surfaces; the reference with Russian roulette (d3d12_PTReferenceBounces). d3d12_PTDebug 5-7.
+The game's ambient light in the paths (41d9b61): rooms lit through a window were near black, the reference too. A ray that finds nothing within d3d12_PTAmbientRange (2 m) brings the raster's ambient of the point it leaves: the raster's ambient times its occlusion, with the near bounces physical.
+Highlights (26655d6): the raster's highlight colour in a fifth G-buffer target; CSSpecular makes the sun's and the lamps' highlights as the raster does, with rays towards the lamps.
+NVIDIA NRD (5698417): REBLUR_DIFFUSE through our own host (NrdHost.cpp, no NRI). NRD, ShaderMake and MathLib are git submodules in third_party: the repository has their links, not their files (NRD's license lets it be distributed only built into an application); LICENSE-EXCEPTION.md gives the matching permission. Without the submodules the renderer is built without it and d3d12_PTDenoiser simple is used.
+AMD FidelityFX Denoiser 1.2 (509e02a): its shadows denoiser for the sun's ray mask (d3d12_RTSunDenoise 2); third_party/fidelityfx-denoiser is a submodule (MIT).
+Radiance cache (025b47f): a hash grid over the world (2^20 entries, 0.25 m cells near the camera growing with the distance, one per axis a face leans along), updated by a path of 3 bounces from a pixel of each 8 x 8 and blended over 32 frames; the paths' last bounce takes its light. Rooms and tunnels come closer to the reference for about 0.6 ms at 2560 x 1440. d3d12_PTDebug 11.
+What is behind the camera (16df7c9): the sun's cascades give the scene for rays only what is towards the sun, so the light changed as the view turned. The static objects and entities behind the camera within d3d12_PTBehind (40 m) are noted for the scene for rays without being drawn; Research's hall has 259 instances instead of 42.
+Performance (4adae7a): the cache holds all the light that comes to a point (the sun's and a lamp's too), so the paths' last hit traces no rays towards them; d3d12_PTCheckerboard traces half the pixels each frame, the others take their four neighbours' light by plane and normal before the denoiser (NRD's own checkerboard made the hut 4 % darker).
+Menu and statistics (d7a62d8): assets/scripts/07-video-path-tracing.patch, a Path tracing line in r_DisplayInfo, the module README's own section.
+Debug views (5e4d2dc): d3d12_RTDebug 1 colours the instances by their mesh and their place to 0.25 m instead of the index in the frame's TLAS, which moves with the frame's list; 11 colours the material the rays take of the hit's instance. Checked with them: the static instances keep their mesh, place and material from frame to frame, standing and walking; only the moving creatures change place.
+Checks
+Bit for bit: with d3d12_PathTracing 0 the PerfSweep frames 181 (the r_DisplayInfo panel masked) are equal to the build before at each path tracer step (the debug views' commit changes only what d3d12_RTDebug draws).
+Debug layer (XRENDERD3D12_DEBUG=2): only the two earlier warnings about buffers' initial state.
+Frame rate, the flights over Pier, River and Swamp at 3840 x 2160 with FSR Quality (the path tracer at 2560 x 1440): 107, 99 and 93 FPS, 1 % lows 77, 60 and 64; the goal was 60 FPS or more. NRD costs about 0.3-0.4 ms against simple.
+Not done yet
+The water's and glass's ray hits, the weapon in the hands and the particles are still lit the raster's way.
+The leaves pass no light: the crowns are dark from below where the raster has fBackSideLevel.
+Research's hall is darker than the raster: the lamps' falloff and brightness against the light maps.
+Some surfaces shimmer while walking in real time; their instances and materials hold still (above), the cause is being looked for.
+ovr
+added 22 commits
+November 1, 2026 01:58
+feat(XRenderD3D12): the path tracer's infrastructure; AO under an ups…
+…
+0b62817
+```
+…caler
+
+d3d12_PathTracing (only the infrastructure for now) and d3d12_PTFillLights,
+registered with rays only. Once a frame the scene's lights besides the sun
+become SPTLight in per frame memory, bound to the kernels with rays as the
+root SRV t2 space5 (point, directional, projector with its cube; at most 64),
+with "pt lights:" lines in the frame dump. With the path tracer and no
+upscaler the scene gets targets of the display's size (velocity and depth,
+no jitter, no mip bias), drawn 1:1.
+
+Fix: with an upscaler no AO worked (CACAO, XeGTAO, rays, GI by rays): the AO
+target and UpdateAO came before the scene's targets were bound, lazily in
+DrawItems, and took the back buffer's depth, empty with an upscaler. The
+scene's targets are now bound before the opaque list's passes.
+```
+feat(XRenderD3D12): the path tracer's materials and direct light
+…
+beff516
+```
+PathShade.hlsli: a point of the scene as the path tracer takes it, its
+linear albedo and emission (PathSurface) and the light of the sun and the
+lamps on it, each by a ray (PathDirect). SRayInstance carries the draw's
+path material (lit, terrain, vegetation, unlit; albedo, specular), set by
+Draw3D while the scene for rays is captured; the terrain also gets the
+instance mask bit XR_RAY_TERRAIN, which the other rays leave out.
+
+The terrain's sector texture is divided by the light baked into it,
+fBakeLight * (1 + (r - 1) N.L V) / r, V the sun seen over the terrain
+alone, r = d3d12_PTTerrainDelight. With the path tracer the vegetation's
+vertex colours are baked without light (LeafBuffer.cpp keeps the custom
+lighting's parameters and bakes the buffers again on a switch).
+
+The lamps: besides the frame's, all the level's static lights
+(I3DEngine::GetStaticLightSources) within d3d12_PTLightDistance, nearest
+first, at most 128; the frame has only 1-5 of them, and the bake-only
+DLF_FAKE | DLF_LM lamps not at all. The graphics root signature also gets
+the lamps' SRV t2 space5.
+
+New: d3d12_PTLightDistance, d3d12_PTSun, d3d12_PTLamps, d3d12_PTEmission,
+d3d12_PTTerrainDelight; d3d12_RTDebug 8, 9, 10 show the camera rays' hits'
+albedo, emission and direct light. With d3d12_PathTracing 0 the picture
+is the same.
+```
+feat(XRenderD3D12): the path tracer's G-buffer
+…
+3a63125
+```
+The main view's opaque list writes the path tracer's G-buffer with the
+general program's XR_PT permutation: the colour keeps what the path
+tracer does not light (glow, the unlit templates, the fog), a second
+target the albedo (the game's colour without its light, unfogged,
+decals and terrain layers blended in), a third the normal (octahedral),
+the fog's share and the path material. The lit draws lose their light
+(light maps, sun, lamps, ambient, baked AO); the light, projector and
+terrain shadow passes, the screen space AO and the rays' GI are not
+drawn. d3d12_PTDebug 1-4 shows the albedo, the normal, the fog and the
+material. The path tracer now waits for r_HDRRendering 1.
+
+With d3d12_PathTracing 0 the frames are the same as before.
+```
+feat(XRenderD3D12): the path tracer lights the main view
+…
+1a8220a
+```
+d3d12_PathTracing 1 lights the opaque list by paths in real time. After
+the G-buffer the kernels of Shaders/PathTrace.hlsl run with rays:
+CSTrace a path from each pixel (a lamp among 16 candidates by
+resampled importance sampling with a ray towards it, then
+d3d12_PTBounces cosine bounces, the sky on a miss), CSTemporal its
+history where the surface was a frame before, CSFilter a filter on the
+pixel's plane and normal (d3d12_PTDenoiser simple or none). The
+composite (Shaders/PathComposite.hlsl) adds the albedo times the sun's
+light and the paths' to the colour before the blended surfaces, the
+weapon, the water and the particles.
+
+A fourth G-buffer target keeps the sun's visibility as the raster has
+it (its maps, the cascades and their mask by rays from all casters).
+d3d12_PathTracing 2 is the reference: it adds up its frames while the
+view and the settings stay, d3d12_PTReferenceBounces bounces with
+Russian roulette, no clamp or filter. The game's light multipliers are
+light to the power 2.2; the terrain's albedo is divided by its baked
+light in linear light. Where the frame has no sun there is no sky
+either. The grass that fades is alpha tested among the opaque surfaces
+while the path tracer is on. d3d12_PTDebug 5-7 show the paths' light,
+one frame's paths and the sun's visibility.
+
+With d3d12_PathTracing 0 the frames are the same as before.
+```
+feat(XRenderD3D12): the game's ambient light in the paths
+…
+41d9b61
+```
+Rooms lit through a window or a door were near black under the path
+tracer, its reference too: the raster has the light maps' ambient
+there, the paths only the sky through the opening. The game's ambient
+light on a surface (what the object's ambient colour adds to its light
+maps or lights; the outdoor ambient on the terrain) goes into the
+G-buffer, whose sun target becomes RGBA8, and into the instances' path
+material. A path's ray that finds nothing within d3d12_PTAmbientRange
+(2 m) brings the ambient light of the point it leaves, times
+d3d12_PTAmbient (1), besides what it finds: the raster's ambient times
+its occlusion, with the near bounces as before; one that finds nothing
+the brighter of that and the sky. d3d12_PTDebug 8 shows the ambient.
+
+With d3d12_PathTracing 0 the frames are the same as before.
+```
+feat(XRenderD3D12): the highlights in the path tracer
+…
+26655d6
+```
+The path tracer's surfaces had no highlights: the G-buffer took the
+specular flags off with the rest of the light. Its fifth target (RGBA8,
+SV_Target6) now has the raster's highlight colour (2 x the specular
+colour x gloss of the specular templates, the fixed function's material
+light about as much) / 2, blended as the albedo. A new kernel,
+CSSpecular, makes the highlights as the raster does, in the game's
+colour: that colour times the sun's specular colour times the visibility
+the raster found, and each lamp's (SPTLight::vSpecular, m_SpecColor)
+times its falloff, times saturate(R.V)^32; a lamp's where a ray towards
+it reaches it, 4 rays a pixel at most, only for a highlight of 1/512 or
+more. They are not noisy, so they need no history or filter, and the
+reference has them as they are. The composite adds them times the fog's
+share. d3d12_PTSpecular (1) scales them, d3d12_PTDebug 9 shows the
+highlight colour and 10 the highlights.
+
+With d3d12_PathTracing 0 the frames are the same as before.
+```
+feat(XRenderD3D12): NVIDIA NRD denoises the path tracer
+…
+5698417
+```
+NVIDIA's NRD (v4.18.0) with ShaderMake and MathLib are git submodules
+in third_party: the repository has their links, not their files, as
+NRD's license lets it be distributed only built into an application.
+LICENSE-EXCEPTION.md gives the matching permission; README.md and
+AGENTS.md say how to fetch them (git submodule update --init).
+
+CMake builds NRD as a static library with its DXIL shaders (ShaderMake
+with the Windows SDK's dxc, nothing downloaded, the MultiThreaded
+runtime); without the submodules or with CMake older than 3.30 the
+renderer is built without it. NrdHost.cpp runs its passes on the
+renderer's device without NRI: root signatures and pipeline states from
+its pipeline descriptions, its textures as compute targets, cached
+descriptor tables and the barriers each dispatch needs.
+
+d3d12_PTDenoiser nrd, the default where NRD is built in, puts its
+REBLUR_DIFFUSE in CSTemporal's place. CSTrace writes the first bounce's
+distance; CSPack (Shaders/PathNrd.hlsl) gives NRD the paths' light with
+it, the normal, the linear depth and the scene's motion vectors (without
+them the camera's); CSResolve makes its output the history that
+CSFilter takes without its spatial filter. The frame dump has a pt nrd
+line. It costs about 0.3 to 0.4 ms at 2560x1440: the flights over Pier,
+River and Swamp at 3840x2160 with FSR Quality run at 93, 85 and 78 FPS
+against 97, 88 and 81 with simple.
+
+With d3d12_PathTracing 0 the frames are the same as before.
+```
+feat(XRenderD3D12): AMD FidelityFX Denoiser for the sun's shadow by rays
+…
+509e02a
+```
+d3d12_RTSunDenoise 2 denoises the sun's ray mask (the path tracer's sun
+and the raster's RT sun shadows) with the shadows denoiser of AMD
+FidelityFX Denoiser 1.2: a ray for each pixel, its bit masks, its tile
+classification and history, its three filter passes, for all the casters
+and again for the live ones, packed into the mask. Our kernels round its
+headers (Shaders/RaySunFfx.hlsl).
+
+third_party/fidelityfx-denoiser is a git submodule of AMD's repository at
+the tag v1.2 (MIT); without it the renderer is built without it and 2
+falls back to its own denoiser (1, the default).
+```
+feat(XRenderD3D12): the path tracer's radiance cache
+…
+025b47f
+```
+d3d12_PTCache (1): a hash grid over the world (Shaders/PathCache.hlsli,
+2^20 entries) of the light that comes to a point by its bounces, cells
+of 0.25 m near the camera growing with the distance, one for each axis a
+face leans along. CSCacheUpdate keeps it up to date with a path of 3
+bounces from a pixel of each 8 x 8, the cache's light at its end, each
+point's light a sample of its cell; CSCacheResolve blends them in over
+32 frames. CSTrace's last bounce takes the cell's light (picked across
+the face at random) for the bounces after it: rooms and tunnels come
+closer to the reference for about 0.6 ms at 2560x1440.
+
+d3d12_PTDebug 11 shows the cache's light at the surfaces.
+```
+feat(XRenderD3D12): what is behind the camera in the path tracer's rays
+…
+16df7c9
+```
+The sun's cascades give the scene for rays only what is towards the sun,
+and a room without the sun none of it, so the paths' light changed as the
+view turned. UpdateRayBehind asks the 3D engine for its static objects and
+entities with a camera at the view looking back (170 degrees wide, as far
+as d3d12_PTBehind, 40 m by default) and notes their parts for the scene for
+rays as the cascades' parts, without drawing them; the frame's state is
+kept as UpdateSunCascades keeps it. Research's hall has 259 instances
+instead of 42; it costs 0.1 to 0.2 ms of the GPU's builds and 0.1 to 0.3
+ms of the CPU on the sweeps. With the path tracer off the frames are the
+same.
+```
+perf(XRenderD3D12): the path tracer's paths for half the pixels and a…
+…
+4adae7a
+```
+…ll the light in its cache
+
+The radiance cache now holds all the light that comes to a point: its
+update traces the sun's and a lamp's rays at each point of its paths, so
+the paths' last hit takes the cache's light as it is, with no rays towards
+the sun and a lamp where its cell has some (the paths 0.4 to 0.5 ms less).
+With d3d12_PTCheckerboard (1) CSTrace traces half the pixels each frame in
+a checkerboard; a pixel it leaves out takes the light of its four
+neighbours, weighed by their plane and normal, before the denoiser, so
+NRD and simple both have it (NRD's own checkerboard made the hut 4 %
+darker). The flights over Pier, River and Swamp at 3840x2160 with FSR
+Quality run at 107, 99 and 93 FPS instead of 88, 81 and 74. With the path
+tracer off the frames are the same.
+```
+feat(XRenderD3D12): path tracing in the game's menu and in r_DisplayInfo
+…
+d7a62d8
+```
+07-video-path-tracing.patch adds Path Tracing to Advanced Video Options,
+in the last row of the right column under HDR output: None, Real Time or
+Reference, which sets d3d12_PathTracing; choosing it while HDR is None
+sets HDR to Soft, and it is greyed out with another renderer or a
+graphics card without DXR 1.1. r_DisplayInfo gets a Path tracing line
+(waits for HDR, the denoiser, the bounces, the radiance cache and the
+checkerboard of the last frame traced, or the reference's bounces and
+frames), and its ambient occlusion reads none under the path tracer. The
+module's README has the path tracer in a section of its own. With the
+path tracer off the frames are the same.
+```
+feat(XRenderD3D12): d3d12_RTDebug 1 in colours of the mesh and its pl…
+…
+5e4d2dc
+```
+…ace, 11 of the material
+
+The instances' colours were the index in the frame's TLAS, which moves with the
+frame's list: a colour of the mesh (SRayInstance::nPath.z: the static buffers
+and the part of them, this frame's geometry by its counts) and of where it is
+to 0.25 m stays from frame to frame. 11 colours the material the rays take of
+the hit's instance (its record but where its geometry is), to see that the
+path tracer's materials hold still as the camera moves.
+```
+fix(XRenderD3D12): the path tracer's normals on the side of the trian…
+…
+5309feb
+```
+…gle the camera sees
+
+The path tracer's G-buffer and its kernels turned a surface's normal
+towards the camera by the view's direction. The vegetation's normals
+point up and out, so a crown's turned over where the view passes their
+perpendicular, at the eyes' height: the leaves above it took a normal
+pointing down and went dark, and the line moved over them as the camera
+did (a shadow over a tree's leaves as one walks up to it). The G-buffer
+now turns the normal to the side of its triangle the camera sees (the
+face's normal of the world position's derivatives), as the rays' hits
+already did, and the kernels take it as it is. Walking up to a tree, the
+band of flicker at the eyes' height is gone. With the path tracer off the
+frames are the same.
+```
+fix(XRenderD3D12): the vegetation's normals in the path tracer's G-bu…
+…
+fc306a7
+```
+…ffer as the raster lights them
+
+Turned to the side of its triangle the camera sees, a leaf's normal (the
+crown's, most of them up) went down on every leaf whose face the camera
+sees from below: every other leaf of a crown went dark, speckle over the
+trees. The vegetation's normals now stay as they are, as the raster
+lights both sides of a leaf by them; a path from a leaf whose direction
+is under the leaf's face goes on through it from its other side, and the
+radiance cache's sun ray from a leaf leaves it on the sun's side. Other
+surfaces keep the normal on the side the camera sees. The normal view
+shows the crowns' normals up with neither the band at the eyes' height
+nor the speckle, the flicker walking up to a tree is the same as before
+the speckle, and the leaves' light is nearer the raster's. With the path
+tracer off the frames are the same.
+```
+test(XRenderD3D12): unit tests of the path tracer's shader code witho…
+…
+7c5e2f9
+```
+…ut the game
+
+XRenderD3D12Tests (mod/XRenderD3D12/Tests, ctest --preset x64-release)
+runs the renderer's shader headers and PathTrace.hlsl as they are on a
+D3D12 device of its own: the GPU, and the same again on WARP. It checks
+the G-buffer's octahedral normal over 20145 directions (within the 10
+bits' own limit), the side the normal is turned to and the vegetation's
+left as it is, the fog and material fields, the HDR light curve, the
+radiance cache's cells and keys, insertion from many threads, the
+samples' sum and the renderer's own CSCacheResolve, PathLeafSide, the
+cosine directions (mean cos 2/3, cos^2 1/2), the checkerboard (half the
+pixels, complementary frames) and SRayInstance, SPTLight and
+SPathTraceConstants word for word between C++ and HLSL. The target
+compiles its kernels with the same dxc and options as the renderer's and
+does not depend on the renderer's target, so building it neither builds
+nor deploys the DLL. 16 tests pass on the RX 7900 XTX, on WARP and with
+the debug layer.
+```
+fix(XRenderD3D12): the path tracer's scene for rays above and below t…
+…
+62215d6
+```
+…he camera
+
+The view's frustum and the camera looking back (pitch mirrored) left out
+what is above and below the view: in front of the camera, from the top
+of its frustum to 95 degrees less the pitch. In a ruin's room on
+Training the roof's parts dropped out of the scene for rays as the
+camera looked down a little (steps at 1.5 and 25 degrees in one frame's
+paths), the paths went out of the room through it and lit its walls,
+and the history held that light some 20 frames after the camera looked
+level again. UpdateRayBehind now has the 3D engine's cameras looking up
+and down too, as wide and as far as the one looking back. The room's
+light no longer changes with the pitch; of the 12 render tests the
+spot's flashes go from 56 to 0 and its light after a turn there and
+back from 49 % to 3 % off. The three cameras take 0.1 to 0.3 ms of the
+CPU, the sweeps' FPS is the same. With the path tracer off the frames
+are the same.
+```
+fix(XRenderD3D12): alpha test of every material with an alpha ref
+…
+0f30d9a
+```
+The material's m_AlphaRef was taken only with the Cry shader flag. The SDK's
+loader fills it from the CGF material's alpharef with the flag, else from
+Dyn_SlidingFriction, and the original tests by it either way: the manhole of
+Training's ruin (0.09, no flag) showed its texture's black corners, the camo
+nets of Pier (0.64) were solid. The raster, the scene for rays and the shadows
+all take it through GetAlphaRef.
+```
+fix(XRenderD3D12): the terrain's detail layers lifted as the original's
+…
+2d85c33
+```
+The engine builds the detail layers' vertices a few centimetres off the
+sectors' grid (2.6 cm along -x and -y, 1 cm up), so wherever the ground falls
+towards +x and +y a layer lost the depth test to its own sector in whole
+triangles that came and went as the camera moved (Pier's trail: the detail
+texture in one quad, the rest the sector's smooth texture). The original's
+layer vertex program moves the position 5 cm out along the normal and its clip
+w 0.005 further (the position script PosTerrainLayerOverlay of the game's
+shaders); DF_DETAIL_LAYER does the same now.
+```
+fix(XRenderD3D12): lit objects in the cascades' shadow as dark as the…
+…
+e1b70cb
+```
+… terrain's, a longer sun history for the path tracer
+
+A lit object in the full set's shadow was lit by its ambient alone, nearly black under a roof
+(the papers on the floor of Training's hut 7 of 255, the original without such shadows 46).
+DF2_SHADOW_TINT now goes to lit draws too: their light in the shadow is at least their light in
+the sun times the colour of the engine's shadows on the terrain (about 0.5), raster and rays;
+under the path tracer the G-buffer's ambient light so where the sun is hidden. The papers 15.
+
+With the path tracer the sun's mask by rays holds d3d12_PTSunHistory (64) frames and, where the
+shadow moves, keeps a quarter of them half a step off the rays round the pixel, against the
+flicker of the crowns' shadows in the wind (Pier's walk: 2 % less).
+```
+fix(XRenderD3D12): the far land's texture and the far sprites' mip al…
+…
+59e0cae
+```
+…pha as the original's
+
+The low detail terrain beyond the sectors (terrainlowlod) has the cover texture of the whole terrain
+with u and v one whole texture further (an offset of 1). The original's sampler wraps; ours clamps
+the terrain, so all the far land took the texture's corner, one flat colour that the fog made the
+colour of the far mountains, and the trees on the hills stood on nothing (Pier). The integer part of
+a whole-terrain offset is dropped.
+
+A far sprite's mip level had its alpha scaled to keep level 0's alpha test coverage: the vines of
+Pier's ancient trees (anc_tree_vines_a, 600 m away) became short dark lines in the air. A level's
+alpha is now its texels' average, as the original's; the crowns look the same.
+
+The frame dump names each sprite array's object and its distances, and the terrain draws' texgen.
+```
+fix(XRenderD3D12): TemplDecalGlowSelfIllumAnimatedSLOW's slow glow pulse
+…
+26b1dbd
+```
+The template was not in our tables: its material was drawn as the not-found default, lit by 2
+without its glow. As the game's FixedPipeline.csl, its gloss layer is added times the wave of
+level 0.95, amplitude 0.75 and frequency 0.1 (a pulse of 10 s, clamped to 0 to 1), where
+TemplDecalGlowSelfIllumAnimated's is 0.75, 0.75 and 0.5. Only the material library's swatch uses
+it; on the glow swatches the pulse matches the original's in phase and shape.
+```
+ovr
+merged commit b45f93c
+into
+master
+Nov 1, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

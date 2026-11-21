@@ -1,0 +1,113 @@
+# Checkpointing for Reverse-Mode Memory Optimization
+
+Also called: Checkpointing, Griewank checkpointing, Logarithmic checkpointing, re-evaluation from checkpoints
+
+## Overview
+Checkpointing is an optimization technique for reverse-mode automatic differentiation (AD) that reduces the memory complexity of computing gradients by storing only a sparse subset of intermediate variables (checkpoints) and recomputing the loop segments between them during the backward pass [S1, S2]. It addresses the scalability issue of exhaustive storage, where memory usage is proportional to the number of instructions or loop length, by trading increased time complexity for logarithmic memory usage [S1, S2]. Unlike [Inversion Trick](964-inversion-trick.md) or [Path Replay Backpropagation](6780-path-replay-backpropagation.md), which exploit problem-specific structures to avoid differentiation entirely, checkpointing is a general-purpose mechanism applicable to any traced computation [S2].
+
+## How it works
+**Inputs:** A primal computation consisting of $N$ sequential operations (or a loop of length $N$) and a set of checkpoint indices [G].
+**Outputs:** Gradients of the scalar loss with respect to the input parameters [G].
+
+**Data Structures:**
+1. **Checkpoint storage:** A dictionary or array mapping step indices to saved intermediate states, sized $O(\log N)$ [G].
+2. **Current state:** The variable holding the active primal values during recomputation [G].
+
+**Algorithm:**
+The method divides the sequence of $N$ operations into segments bounded by checkpoints [G]. During the forward pass, the state is saved at predefined checkpoint indices [G]. During the backward pass, the algorithm iterates backwards through the segments [G]. For each segment, it restores the state from the nearest preceding checkpoint and re-executes the forward operations of that segment to reconstruct the intermediate values required for gradient computation [G].
+
+1. **Forward Pass with Checkpointing:**
+   * Initialize the primal state $x_0$.
+   * Iterate $i$ from $0$ to $N-1$.
+   * Compute $x_{i+1} = f_i(x_i)$.
+   * If $i+1$ is a checkpoint index, save $x_{i+1}$ to the checkpoint storage.
+   * *Note:* Checkpoint indices are selected to balance memory and time, often via recursive doubling or tree structures, achieving $O(\log N)$ total checkpoints [S1, S2].
+
+2. **Backward Pass with Recomputation:**
+   * Initialize gradient accumulator $\bar{x}_N$ (typically $\partial L / \partial x_N$) [G].
+   * Iterate backwards through the segments defined by the checkpoints. Let the checkpoints be at indices $c_0, c_1, \dots, c_k$ where $c_k = N$ [G].
+   * For each segment from $c_j$ to $c_{j+1}$:
+     * Restore the primal state $x_{c_j}$ from the checkpoint storage.
+     * Recompute the forward operations for indices $i$ from $c_j$ to $c_{j+1}-1$:
+       * $x_{i+1} = f_i(x_i)$.
+     * Compute gradients for this segment in reverse order ($i$ from $c_{j+1}-1$ down to $c_j$):
+       * $\bar{x}_i = \bar{x}_{i+1} \cdot \frac{\partial f_i}{\partial x_i}$.
+       * Accumulate $\bar{x}_i$ into the global gradient accumulator.
+   * *Note:* If the computation involves recursive function calls, a tree structure may replace a linear stack to store intermediate results [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def checkpointed_adjoint(N, f, f_adj, checkpoints, x0, grad_N):
+    """
+    N: Total number of operations.
+    f: Forward function f(x) -> x_next.
+    f_adj: Adjoint function f_adj(x, x_next, grad_out) -> grad_in.
+    checkpoints: Sorted list of indices where state is saved.
+    x0: Initial state.
+    grad_N: Gradient of loss with respect to final state.
+    """
+    # Forward pass: save checkpoints
+    states = {0: x0}
+    x = x0
+    for i in range(N):
+        x = f(x)
+        if i + 1 in checkpoints:
+            states[i + 1] = x
+
+    # Backward pass
+    grad = grad_N
+    # Ensure N is in checkpoints for the final segment
+    if N not in checkpoints:
+        checkpoints.append(N)
+        checkpoints.sort()
+
+    # Process segments in reverse order
+    for j in range(len(checkpoints) - 1, 0, -1):
+        end = checkpoints[j]
+        start = checkpoints[j - 1]
+        
+        # Restore state at segment start
+        x = states[start]
+        
+        # Recompute forward and compute adjoints for this segment
+        for i in range(start, end):
+            x_next = f(x)
+            grad = f_adj(x, x_next, grad)
+            x = x_next
+            
+    return grad
+```
+
+**Parameters:**
+* **Checkpoint Frequency:** The number of checkpoints $K$. To achieve $O(\log N)$ memory, $K \approx \log_2 N$ [S1].
+* **Checkpoint Indices:** Indices are selected to balance memory and time, often via recursive doubling or tree structures, achieving $O(\log N)$ total checkpoints [S1, S2].
+
+**Edge Cases and Pitfalls:**
+* **Recursive Calls:** If the function $f$ calls itself, a tree structure may replace a linear stack to store intermediate results [S1].
+* **Memory vs. Time Trade-off:** While memory is reduced to $O(\log N)$, time complexity increases to $O(N \log N)$ [S1].
+
+## Subtopics
+
+### Custom Adjoint Method
+Differentiation techniques that exploit problem-specific traits to reduce storage and reevaluation overheads, generally preferable to checkpointing when available [S2]. For Newton's method, the implicit function theorem provides the answer directly from the iteration's fixed point instead of differentiating through all steps [S2]. For ordinary differential equations, reverse time integration provides an efficient adjoint [S2].
+
+### Checkpointing via JIT Layer
+A checkpointing mechanism that arises naturally from the combined AD/JIT system without intentional implementation effort. The JIT layer recomputes intermediate steps and temporaries from the last evaluation point [S2]. In systems like Dr.Jit, calling `dr.backward(data)` causes the AD layer to reference intermediate steps produced by `f`, which the JIT layer recomputes from the last `dr.eval` checkpoint [S2]. Checkpointing is not ideal for Path Replay Backpropagation (PBDR) workloads due to the large size of even a small number of checkpoints [S2].
+
+## Operating characteristics
+* **Time Complexity:** $O(N \log N)$, where $N$ is the number of operations or loop length [S1, S2]. This is higher than the $O(N)$ time of exhaustive storage but acceptable for large $N$.
+* **Memory Complexity:** $O(\log N)$, where $N$ is the number of operations [S1, S2]. This is a significant reduction from the $O(N)$ memory of exhaustive storage.
+* **Scaling:** Memory scales logarithmically with $N$, addressing the terabyte-scale intermediate state generation of modern processors that exhausts exhaustive storage [S2].
+* **Strengths:** General applicability to any traced computation; significant memory savings for long sequences of operations.
+* **Limitations:** Increased computational overhead due to recomputation; not ideal for workloads with large checkpoint footprints like PBDR [S2].
+* **When to Use:** When memory is the bottleneck and the computation is too large for exhaustive storage, and no custom adjoint is available.
+* **When Not to Use:** When custom adjoints are available (e.g., [Inversion Trick](964-inversion-trick.md), [Path Replay Backpropagation](6780-path-replay-backpropagation.md)), or when $N$ is small enough that exhaustive storage fits in memory.
+
+## Background
+Checkpointing for reverse-mode automatic differentiation was introduced by Andreas Griewank in 1992 [S1]. The technique addresses the "age-old question" of how to manage intermediate state in reversed program references, where exhaustive storage does not scale due to the volume of data generated by modern processors [S2]. The concept of storing state at sparse checkpoints and recovering it via reevaluation was previously noted by Volin and Ostrovskii in 1985 [S2]. Automatic recursive usage of this pattern was further analyzed by Siskind and Pearlmutter in 2018, formalizing the $O(\log t)$ overhead for a program with $t$ operations [S2]. In the context of differentiable rendering, checkpointing is a key component of general-purpose AD systems like Dr.Jit, enabling the differentiation of complex rendering programs without requiring custom adjoints for every operation [S2].
+
+## Sources
+[S1] Physics-based differentiable rendering, https://doi.org/10.1145/3388769.3407454, fetched 2026-10-29
+[S2] DR.JIT, https://doi.org/10.1145/3528223.3530099, fetched 2026-10-26

@@ -1,0 +1,214 @@
+The goal of this topic is to track the feasibility and interest for implementing SSAO for volume rendering in VTK / 3DSlicer. 
+As highlighted by @lassoan in this post, SSAO for volumes could be a game-changer especially …
+
+Screen-space ambient occlusion for volume rendering - Page 2 - Development - 3D Slicer Community
+Screen-space ambient occlusion for volume rendering
+Development
+volume-rendering
+LucasGandel
+(Lucas Gandel)
+October 25, 2023, 1:35pm
+21
+Thanks for the clarification, I now understand that you need SSAO for semi-transparent surface actors, not volumes. This is yet another story which can be partially solved with the information in this topic.
+Similar to what is required for volumes, you will indeed need to change the SSAO pass in the Lights.py script (or VTK later) so that it uses vtkRenderStepPass instead of the opaque pass. As long as you don’t render volume, you don’t need/are not impacted by the VTK hack.
+However, similar hack/commit might be required to fully support SSAO for transparent surface actors: semi-transparent actors do not write to the depth buffer, this must be changed in a similar way as it was done for volumes here.
+For now I will focus on implementing the proper fix for volumes in VTK. I’ll see to give a try to transparent actors in the meantime
+cpinter
+(Csaba Pinter)
+October 25, 2023, 1:39pm
+22
+Thank you so much @LucasGandel for bearing with me and answering corner case questions I understand now, that it is about the depth buffer, and profound changes would be needed to do this fix. OK let’s put this aside for now, I appreciate you helping me understand the root cause!
+lassoan
+(Andras Lasso)
+October 25, 2023, 2:48pm
+23
+Yay, with the Lights module change it all works in Slicer:
+image1372×1638 191 KB
+image1372×1638 206 KB
+@LucasGandel a few things about the shader:
+We need to make the opacity threshold (originally 0.5, here 0.25) configurable here, as >0.0 makes very transparent pieces to cast shadow that is not optimal:
+```
+if(!g_skip && g_srcColor.a > 0.25 && l_updateDepth)
+```
+This line looks suspicious:
+```
+gl_FragData[1] = gl_FragData[1];
+```
+lassoan
+(Andras Lasso)
+October 25, 2023, 3:50pm
+24
+I’ve submitted a pull request for the Lights module that takes care of setting up everything (enable SSAO rendering pass for transparent rendering, applies shader replacements, allows customizing the opacity threshold):
+I’ll wait for a proper VTK fix from @LucasGandel that we can merge into Slicer’s VTK and then I’ll merge the pull request and the feature will be available for everyone.
+Until then the feature is only available for developers who apply the VTK fix locally and use this branch of the Sandbox.
+LucasGandel
+(Lucas Gandel)
+October 25, 2023, 4:12pm
+25
+This is fantastic @lassoan, thank you for trying and for creating the branch.
+So I understand that there is interest for it, and that it should be finalized at some point. If yes, I will now focus on the fix for volume occlusion, the rest of the change can be integrated with mapper options or volume properties.
+I completely agree with your points:
+A configurable threshold makes sense as it can highlights different structures (in addition to prevent weird effect with almost fully transparent pixels when 0.0 is used as you said). I started work in this direction and I think g_fragColor.a must be used to take the opacity transfer function instead of g_srcColor.a (at least it makes a difference for RGBA columes I think)
+Right, this line is non-sense. I just added it because the RenderDoc frame debugger needs anything to be written to the texture, but those fragments are not used in the final blending as no depth is associated to them. This needs to be fixed when mixing volumes and surface to ensure existing fragments are not overridden
+lassoan
+(Andras Lasso)
+October 25, 2023, 4:17pm
+26
+An overview of how much improvement we achieved compared to the baseline (what was possible a few weeks ago) in Slicer’s volume rendering with introducing colorized rendering and SSAO:
+image1920×772 180 KB
+With more opaque rendering:
+image1920×1161 217 KB
+VTK multivolume/cinematic volume rendering
+Create 3d volumetric data from plane images (Axial, Coronal, Sagittal)
+VTK multivolume/cinematic volume rendering
+LucasGandel
+(Lucas Gandel)
+October 25, 2023, 4:22pm
+27
+This is amazing, thanks for sharing!
+lassoan
+(Andras Lasso)
+October 25, 2023, 6:25pm
+28
+Here is a video, that shows details of muscles:
+3D modeling pathway for printing
+jay1987
+(jiazeyu)
+October 26, 2023, 3:02am
+29
+it’s amazing lassoan,can you give us a simple tutorial on how to use slicer to achieve the effect you have?
+lassoan
+(Andras Lasso)
+October 26, 2023, 3:06am
+30
+@LucasGandel needs to do some cleanup of a VTK fix, which may take some time (hopefully not more than a few days?) and then we can make the ambient shading available for everyone. We’ll post updates on this thread.
+If you want to access this feature earlier then you ned to build Slicer from source code and apply the VTK fix locally.
+jay1987
+(jiazeyu)
+October 26, 2023, 3:13am
+31
+thank you lassoan , I will try to hack into vtk follow @LucasGandel vtk’s thread commit ,the rendering looks amazing!
+LucasGandel
+(Lucas Gandel)
+October 27, 2023, 6:30am
+32
+Yesterday I could find the fix to bring back volume depth occlusion. The required change will be done in the coming days. I have a project to handle the integration of the depth mask change in VTK so I will start with that. For this we will use the vtkOpenActor::DepthMaskOverride information key.
+@lassoan Is it possible to set the information key from python? like this
+lassoan
+(Andras Lasso)
+October 27, 2023, 10:38pm
+33
+You can set those information keys in Slicer in Python like this:
+```
+threeDViewWidget = slicer.app.layoutManager().threeDWidget(0)
+vrDisplayableManager = threeDViewWidget.threeDView().displayableManagerByClassName("vtkMRMLVolumeRenderingDisplayableManager")
+
+volumeNode = slicer.mrmlScene.GetFirstNodeByClass('vtkMRMLVolumeNode')
+
+volumeActor = vrDisplayableManager.GetVolumeActor(volumeNode)
+info = volumeActor.GetPropertyKeys()
+if not info:
+    info = vtk.vtkInformation()
+    volumeActor.SetPropertyKeys(info)
+info.Set(vtk.vtkOpenGLActor.GLDepthMaskOverride(), 1)
+```
+Would it be possible to set enable depth mask override by default to avoid the need for such low-level manipulations? None of the other volume rendering techniques require such calls.
+If there are some negative side-effects of enabling depth mask override in some cases then making it optional could make sense, but then there should be more convenient API, for example a method in vtkVolume.
+LucasGandel
+(Lucas Gandel)
+October 30, 2023, 7:14am
+34
+Perfect, thanks. Eventually it will be enabled by default by the ssao pass so it won’t be required anymore. Same for the shaders replacement and modification of the ssao pass detp texture format. But for now, all the VTK hack from my volume-ssao branch can be replaced with:
+VTK!10642 makes it possible to use the GLDepthMaskOverride key to write to the depth buffer.
+VTK!10644 allows for calling ssaoPass->SetDepthFormat(vtkTextureObject::Fixed32); to fix the issue with volume depth occlusion
+VTK!10645 allows to add the following shader replacement to fix the previously hardcoded one:
+```
+  volume->GetShaderProperty()->AddFragmentShaderReplacement("//VTK::ComputeLighting::Exit", false,
+    "\n  //VTK::ComputeLighting::Exit\
+     \n  g_dataNormal = -shading_gradient.xyz;",
+    false);
+```
+I will follow up as soon as I can, but the change in the ssao pass to make this automatic should be ready by next week
+lassoan
+(Andras Lasso)
+October 30, 2023, 11:48am
+35
+Thank you for working on this and for clarifying the roadmap. When I reviewed the VTK merge requests I was not sure if we’ll need all the low-level API calls to activate this feature, but it’s great to hear that it’ll be all seamlessly integrated into the existing SSAO feature! I’ll test this and let you know if it all works the same way as before.
+lassoan
+(Andras Lasso)
+November 17, 2023, 6:15am
+36
+I’ve tried to apply all the VTK changes, enabled GLDepthMaskOverride, changed depth format, and added the shader replacement. Unfortunately, the volume disappears and this message is displayed:
+```
+[VTK] 0(350) : error C1503: undefined variable "g_dataNormal"
+[VTK] Shader failed to compile
+```
+Where g_dataNormal is defined?
+LucasGandel
+(Lucas Gandel)
+November 17, 2023, 5:03pm
+37
+Thanks a lot for following up on this. To answer your question, this is defined in the shader replacement that you must add on the application side for now. See the following code from previous comments:
+```
+vtkShaderProgram::Substitute(fragmentShader, "//VTK::ComputeLighting::Dec",
+      "vec3 g_dataNormal; \n"
+      "//VTK::ComputeLighting::Dec\n",
+      false);
+```
+However, this won’t be required anymore when everything gets moved to the SSAO pass. I am almost done with that, still need to write a test and open an MR on VTK, but you can access the code on my updated volume-ssao branch.
+The branch has been rebased on master and only VTK!10644 has been cherry-picked because it did not make it yet into VTK ( VTK!10642 and VTK!10645 have been merged).
+The only thing that is still required on the application side if using my volume-ssao branch is to set the depth format on the ssao pass: ssao->SetDepthFormat(vtkTextureObject::Fixed32);.
+Let me know if something is still missing after that, setting the vtkRenderStepPass as a delegate of the SSAO pass is still required on the application too as I did not change the vtkRenderer SSAO pass.
+LucasGandel
+(Lucas Gandel)
+November 24, 2023, 12:45pm
+38
+All the low level pending MRs have been merged into VTK and VTK!10725 handles shader replacements in the SSAO pass and is ready for reviews
+I plan to write a post on the Kitware blog to present the approach. If anyone wants to provide data or screenshots, that would be much appreciated. Maybe a second blog post presenting the same at an higher level, with the colorized volume approach, also makes sense, if anyone wants to co-author that. I really think we should communicate more on this now that it is kind of ready. @lassoan WDYT?
+lassoan
+(Andras Lasso)
+November 24, 2023, 2:33pm
+39
+Great, thank you very much for all your work on this. I’ll test this and provide data and screenshots. I would also be happy to help with a blog post and probably write a short paper that can be cited, because I think this (along with colorizing volume using segmentation) may be a breakthrough in utilizing data that all the new “AI” segmentation tools provide.
+rbumm
+(Rudolf Bumm)
+November 24, 2023, 4:07pm
+40
+This is fascinating. Is there a way to test this feature ?
+← previous page
+next page →
+Related topics
+Topic
+Replies
+Views
+Activity
+VTK multivolume/cinematic volume rendering
+Support
+56
+5427
+September 3, 2024
+Improve ambient occlusion in volume rendering
+Development
+volume-rendering
+10
+1229
+January 22, 2024
+Volume rendering colorized with segmentation
+Development
+segmentation
+,
+volume-rendering
+26
+2702
+October 16, 2023
+Highlighted VTK changes associated with Slicer 4.10: Virtual Reality, Rendering, Volume Rendering, Python Wraping, OpenGL performance and threading management
+Development
+0
+1893
+October 29, 2018
+Viewing a volume with two different volume rendering properties at same time
+Support
+volume-rendering
+9
+1748
+March 8, 2021

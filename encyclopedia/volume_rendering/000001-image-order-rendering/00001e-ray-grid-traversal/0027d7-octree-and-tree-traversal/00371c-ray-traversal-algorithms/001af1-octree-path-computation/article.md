@@ -1,0 +1,157 @@
+# Octree Path Computation
+
+
+## Overview
+Octree Path Computation determines the sequence of child nodes traversed by a ray or frustum as it descends from the root of an octree to a target node [S1, S2, unofficial]. It identifies spatial subdivisions without redundant geometric intersection tests at every level [G]. It sets itself apart from sibling methods like [Sparse Voxel Octree Ray Traversal](2451-sparse-voxel-octree-ray-traversal.md) by focusing on the explicit encoding and decoding of the traversal sequence for neighbor finding, path caching, or coordinate reconstruction [S1, S2, unofficial].
+
+## How it works
+### Inputs and Outputs
+- **Inputs**: Target grid coordinates $(rx, ry, rz)$ or ray parameters (origin $\mathbf{o}$, direction $\mathbf{d}$) [S1, G, unofficial]. Octree metadata: maximum depth $D$, current level $lv$, and bounding box [S1, S3, unofficial]. Optional: Pre-computed path from root to a reference node (e.g., u,v-minimal ray) [S2, unofficial].
+- **Outputs**: A path vector or integer representing the sequence of octant indices from root to leaf [S1, S3, unofficial]. Voxel coordinates $(i, j, k)$ at a specific level [S3, unofficial].
+
+### Data Structures
+- **Path Vector**: A list or array of integers, where each element $p_l \in \{0, \dots, 7\}$ represents the octant index at level $l$ [S1, unofficial].
+- **Bit-Path Integer**: A single integer where 3 bits are allocated per level, totaling $3 \times D$ bits [S3, unofficial].
+- **Voxel Coordinates**: 3D integer vector $(i, j, k)$ representing the position within the voxel grid at level $lv$ [S3, unofficial].
+
+### Steps
+1. **Path Encoding (Forward Computation)**: To compute the path for a point or ray:
+   a. Initialize an empty path vector $P$ and a scale variable $s = 2^{D-1}$ [S1, unofficial].
+   b. For each depth level $l$ from $0$ to $D-1$:
+      i. Determine the octant bits by comparing the current grid coordinates $(rx, ry, rz)$ against the scale $s$ [S1, unofficial].
+      ii. Calculate the octant index $k$ using the child selection formula: $k = 4 \cdot \mathbb{I}(rx \ge s) + 2 \cdot \mathbb{I}(ry \ge s) + 1 \cdot \mathbb{I}(rz \ge s)$ [G].
+      iii. Subtract $s$ from the coordinate if the bit is set: $rx \leftarrow rx - s \cdot \mathbb{I}(rx \ge s)$, $ry \leftarrow ry - s \cdot \mathbb{I}(ry \ge s)$, $rz \leftarrow rz - s \cdot \mathbb{I}(rz \ge s)$ [S1, unofficial].
+      iv. Append $k$ to $P$.
+      v. Right-shift the scale: $s \leftarrow s / 2$ [S1, unofficial].
+2. **Path Decoding (Coordinate Reconstruction)**: To reconstruct voxel coordinates from a stored path integer or vector:
+   a. Let $lv$ be the target level and $MAX\_NUM\_LEVELS$ be the maximum depth [S3, unofficial].
+   b. Shift the octpath right by $3 \times (MAX\_NUM\_LEVELS - lv)$ bits to remove irrelevant higher-level bits [S3, unofficial].
+   c. Iterate $l$ from $0$ to $lv-1$:
+      i. Extract the lowest 3 bits of the current path to get the octant index.
+      ii. Decode the octant into local coordinates $(dx, dy, dz)$ using bit masks: $dx = (idx \gg 2) \& 1$, $dy = (idx \gg 1) \& 1$, $dz = idx \& 1$ [S3, unofficial].
+      iii. Accumulate the global coordinates: $i = (i \ll 1) + dx$, $j = (j \ll 1) + dy$, $k = (k \ll 1) + dz$ [S3, unofficial].
+      iv. Shift the path right by 3 bits [S3, unofficial].
+
+### Formulas
+- **Voxel Size**: The physical size of a voxel at level $lv$ is computed as: $s = \text{scene\_extent} \times 2^{-lv}$ [S3, unofficial].
+
+### Parameters
+- $MAX\_NUM\_LEVELS$: Maximum depth of the octree, typically 16 [S3, unofficial].
+- $D$: The depth of the current node or target leaf.
+
+### Edge Cases and Pitfalls
+Not given in the sources.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_octree_path(rx, ry, rz, max_depth):
+    """
+    Computes the octree path for a given grid coordinate.
+    rx, ry, rz: Integer grid coordinates.
+    max_depth: Maximum depth of the octree.
+    Returns: List of octant indices [k_0, k_1, ..., k_{max_depth-1}]
+    """
+    path = []
+    scale = 1 << (max_depth - 1)  # 2^(max_depth - 1)
+    
+    for _ in range(max_depth):
+        k = 0
+        if rx >= scale:
+            k += 4
+            rx -= scale
+        if ry >= scale:
+            k += 2
+            ry -= scale
+        if rz >= scale:
+            k += 1
+            rz -= scale
+        
+        path.append(k)
+        scale >>= 1  # Right shift by 1
+        
+    return path
+
+def decode_voxel_from_path(path_int, lv, max_num_levels=16):
+    """
+    Decodes voxel coordinates from a bit-packed path integer.
+    path_int: Integer containing the path bits.
+    lv: Target level to decode to.
+    max_num_levels: Maximum depth of the octree.
+    Returns: Tuple (i, j, k)
+    """
+    shift = 3 * (max_num_levels - lv)
+    path_int >>= shift
+    
+    i, j, k = 0, 0, 0
+    
+    for _ in range(lv):
+        idx = path_int & 0x7
+        path_int >>= 3
+        
+        dx = (idx >> 2) & 1
+        dy = (idx >> 1) & 1
+        dz = idx & 1
+        
+        i = (i << 1) + dx
+        j = (j << 1) + dy
+        k = (k << 1) + dz
+        
+    return (i, j, k)
+```
+
+## Subtopics
+
+### [Octree Neighbor Search](7782-octree-neighbor-search.md)
+An algorithm to find the adjacent cell $a$ sharing a specific face $f$ with a given cell $c$ in a generalized octree, handling cases where the neighbor might be at a different subdivision level.
+
+### [SVO Pathfinder with Lazy Theta* and LOS Recovery](7910-svo-pathfinder-with-lazy-theta-and-los-recovery.md)
+This method performs 3D pathfinding on a Sparse Voxel Octree (SVO) by combining A* search with Lazy Theta* logic, where line-of-sight (LOS) checks are performed optimistically during neighbor expansion to allow straight-line shortcuts, with a recovery step if LOS fails. It differs from standard A* on octrees by reducing path length and node visits through direct parent-to-current-node connections when possible, and differs from pure ray-casting pathfinding by caching collision results to avoid expensive per-step ray-marching. It builds on [Octree Path Computation](897-octree-path-computation.md) and operates alongside [Octree Neighbor Search](7782-octree-neighbor-search.md) and [Access Path Predictor](11650-access-path-predictor.md).
+
+### [Access Path Predictor](11650-access-path-predictor.md)
+The Access Path Predictor (APP) is a knowledge-based out-of-core data management algorithm designed to predict and pre-cache the next octree node required for sampling. It solves the problem of inefficient random access patterns in large datasets by learning local access traffic, specifically the frequent appearance of predecessor-current-successor node sequences. Unlike the Ray Driven Predictor (RDP), which assumes spatial continuity along a ray, APP does not require nodes to be on the same line or in the same neighborhood, allowing it to accommodate diverse rendering features such as refraction and space leaping.
+
+### Mapping Macrocells to Octree Nodes
+#### Definition
+A method to map implicit macrocell coordinates to the deepest corresponding octree child node to perform isovalue culling using the parent's min/max pair [S2, unofficial].
+
+#### Steps
+1. Store the path from the octree root to the current node along the u,v-minimal ray of the frustum to avoid costly lookups [S2, unofficial].
+2. Use neighbor-finding to traverse inexpensively from one node to the next [S2, unofficial].
+3. Hierarchically recurse from a parent node to a child with a single lookup step in the octree [S2, unofficial].
+
+### Octree Path Decoding & Voxel Coordinate Calculation
+#### Steps
+1. Shift the octpath right by $3 \times (MAX\_NUM\_LEVELS - lv)$ to remove irrelevant higher-level bits [S3, unofficial].
+2. Iterate $l$ from $0$ to $lv-1$: extract the lowest 3 bits of the current path, decode them into $i, j, k$ coordinates using bit masks and shifts, then shift the path right by 3 bits [S3, unofficial].
+
+#### Formula
+Voxel size at level $lv$ is computed as: $s = \text{scene\_extent} \times 2^{-lv}$ [S3, unofficial].
+
+#### Parameter
+$MAX\_NUM\_LEVELS = 16$, the maximum depth of the octree used for bit shifting and coordinate scaling [S3, unofficial].
+
+### 5D Octree for Rays
+#### Definition
+An octree constructed over a set of rays (point + direction = 5D object) to precompute visibility, where each node represents a beam in 3D [S4, unofficial].
+
+#### Steps
+1. Construct a bijective mapping between directions and the direction cube $S^2 \times D := [-1, +1]^2 \times \{\pm x, \pm y, \pm z\}$ [S4, unofficial].
+2. Define the universe of rays $R = U \times D$ where $U = [0, 1]^3$ [S4, unofficial].
+3. Associate an object with an octree node if the object intersects the beam represented by that node [S4, unofficial].
+4. Start with root $U \times [-1, +1]^2$ and the set of all objects [S4, unofficial].
+5. Subdivide a node into 32 children if too many objects are associated with it or the cell is too large. Associate objects with one or more children [S4, unofficial].
+6. To test a ray: map the ray to a 5D point, find the leaf in the 5D octree, and intersect the ray with its associated objects [S4, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] narnia-ai-mason/isomesh, https://github.com/narnia-ai-mason/isomesh, fetched 2026-10-27 (unofficial)
+[S2] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)
+[S3] Gaussian Splatting Alternative: WebGL Implementation of Nvidia's SVRaster, https://github.com/samuelm2/svraster-webgl, fetched 2026-10-26 (unofficial)
+[S4] Advanced Computer Graphics, https://cgvr.cs.uni-bremen.de/teaching/cg2_13/folien/03%20-%20Acceleration%20data%20structures.pdf, fetched 2026-10-24 (unofficial)

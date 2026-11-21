@@ -1,0 +1,2279 @@
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+1
+Mobile-4DGS: Unified Static-Dynamic Real-time
+Mobile Gaussian Splatting
+arXiv:2610.05289v2 [cs.CV] 10 Oct 2026
+Xiaobiao Du
+Zhen Fang
+Tianqing Zhu
+Richard Hartley
+Abstract—Recent advances in 3D Gaussian Splatting (3DGS)
+have achieved remarkable performance in novel view synthesis,
+yet deploying both static and dynamic Gaussian representations
+on resource-constrained mobile devices remains challenging due
+to heavy storage, redundant primitives, and costly per-frame
+computation. We present Mobile-4DGS, a unified lightweight
+framework for high-fidelity real-time static and dynamic Gaussian rendering on mobile platforms. For compact appearance
+modeling, we introduce a Monte Carlo Specular Energy Aggregator that compresses high-order radiance residuals into
+the first-order Spherical Harmonics (SH), together with an
+Attribute-Conditioned SH Enhancement module whose predicted
+offsets are pre-baked before inference. We further propose
+a Multi-View Alpha-Based Densification and Pruning strategy
+to suppress redundant primitives while maintaining multi-view
+consistency. For dynamic scenes, we develop a compact explicit 4D representation by constructing second-order Gaussian motion, learnable temporal support, and a binary staticdynamic partition, enabling continuous-time modeling without
+runtime deformation networks. Based on this partition, a DepthOrder Certificate selectively reuses previously committed depth
+orders to reduce re-projection, sorting, merging, and indexbuffer updates during playback. Extensive experiments on static
+and dynamic scenes demonstrate that Mobile-4DGS substantially reduces storage and rendering overhead while maintaining competitive visual quality, enabling real-time 3D and 4D
+Gaussian Splatting on mobile devices. Code has been released:
+https://xiaobiaodu.github.io/mobile-4dgs-project/.
+I. I NTRODUCTION
+Recent advancements in 3D scene reconstruction [3]–[8]
+and novel view synthesis [9]–[14] have been driven by 3D
+Gaussian Splatting (3DGS) [1]. By representing scenes as
+millions of explicit and differentiable 3D Gaussians, 3DGS
+delivers high-fidelity, real-time rendering on desktop hardware. This capability has enabled diverse applications across
+autonomous driving [15]–[17], navigation [18]–[20], and virtual reality [21]–[24]. Despite these successes, efficiently
+deploying static and dynamic Gaussian Splatting on resourceconstrained mobile devices remains a critical bottleneck.
+This research is funded in part by ARC-Discovery grant (DP220100800 to
+XY), ARC-DECRA grant (DE230100477 to XY), NVIDIA academic grant
+program, and Google Research Scholar Program. We thank all anonymous
+reviewers and editors for their constructive suggestions.
+Xiaobiao Du and Zhen Fang are with the University of Technology Sydney,
+Sydney 2009, Australia.
+Tianqing Zhu is with City University of Macau, Macau, 999078, China.
+Richard Hartley is with the Australian National University, Canberra, 2600,
+Australia.
+Xin Yu is with Adelaide University, Adelaide, 5005, Australia. (email:
+xin.yu@adelaide.edu.au)
+a.
+IEEE Fellow Xin Yu
+Our Mobile-4DGS: 1.9 MB
+Senior Member
+b.
+3DGS
+30.47
+30.31
+30.14
+Mobile-GS
+Mobile-4DGS
+1.85
+0.45
+144
+137
+0.18 11
+Mobile-GS: 4.2 MB
+PSNR
+#Point x106
+FPS
+c.
+Time
+Static and Dynamic Rendering
+Cross-Platform Rendering
+Fig. 1.
+(a)(b) Mobile-4DGS achieves rendering quality comparable to
+both 3DGS [1] and Mobile-GS [2], while reducing the number of Gaussian
+primitives and achieving significantly higher FPS on a mobile device with a
+Snapdragon 8 Gen 3 GPU. (c) The proposed Mobile-4DGS utilizes WebGL to
+enable seamless cross-platform rendering and support both static and dynamic
+novel view rendering.
+Mobile-GS [2] is the first to deploy 3DGS on mobile devices
+and achieves real-time rendering. It identifies the sorting process in the original volume rendering as causing slow rendering for mobiles. Therefore, it proposes an order-independent
+rendering pipeline to replace the traditional volume rendering
+so as to achieve fast rendering on mobiles. However, removing
+the sorting process causes Gaussian rendering in an arbitrary
+order, causing transparency artifacts in regions with overlapping geometry. Although Flux-GS [25] maintains the original
+sorting process and achieves faster rendering, it cannot support
+dynamic rendering [26] in our daily 4D space. The two lines
+of work therefore leave the same tension unresolved: giving up
+the sort buys throughput at the price of correct compositing,
+whereas keeping it means paying for a depth order that a 4D
+scene has to rebuild at every playback frame, together with
+the upload of the resulting index buffer.
+In our experiments, we identified four primary bottlenecks
+that hinder the efficient deployment of Gaussian Splatting
+(3DGS) on mobile devices: (1) Third-Order Spherical Harmonics Overhead: Prior methods [27]–[31] commonly rely
+on third-order Spherical Harmonics (SH) to model complex,
+view-dependent radiance. However, third-order SH requires
+48 floating-point parameters per Gaussian primitive. Scaled
+across millions of Gaussians, this creates prohibitive storage
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+a.
+Scale
+5%
+Rotation
+7%
+Opacity
+2%
+2
+Position
+5%
+Rotation
+18%
+Scale
+13%
+SH
+81%
+Third-order SH
+Rotation
+23%
+SH
+52%
+Scale
+18%
+Position
+13%
+61%↓
+b.
+Opacity
+6%
+Opacity
+4%
+First-order SH
+26%↓
+SH
+35%
+3DGS
+Third-order
+SH Rest
+Position
+18%
+Mobile-4DGS
+Ground Truth
+First-order
+Mobile-4DGS SH Rest
+Fig. 2. Gaussian parameter distribution and Spherical Harmonic fidelity analysis. (a) Per Gaussian memory footprint across 3DGS variants. Mobile4DGS achieves significant compression (61% and 26% reductions) by optimizing Spherical Harmonics (SH) coefficients and decoupling SH into the base and
+view-independent components. (b) Qualitative comparison demonstrates that Mobile-4DGS with only first-order SH can render high-fidelity high-frequency
+details comparable to 3DGS.
+overhead and heavy memory bandwidth consumption during rasterization. (2) Redundant Primitive Densification:
+Lightweight 3DGS variants, such as Mobile-GS [2] and
+MEGS2 [32], typically adopt standard single-view gradientbased densification [1]. This approach aggressively spawns
+excess primitives, leading to overfitting and inflated point
+counts. The resulting primitive redundancy severely impacts
+training efficiency, storage footprint, and inference latency
+on the resource-constrained edge devices. (3) MLP-based
+Dynamic Representation: Previous works [26], [33], [34]
+leverage neural networks to model temporal variation, introducing non-trivial per-frame deformation inference and
+limiting rendering efficiency on resource-constrained devices.
+(4) Per-Frame Depth Ordering under Motion: Primitive
+motion continuously changes the relative depth of Gaussians,
+invalidating previously cached depth orders. As a result, the
+renderer must repeatedly re-project primitives, recompute their
+ordering, and update the draw list during playback, introducing
+additional runtime and data-transfer overhead.
+In this work, we present Mobile-4DGS, a mobile real-time
+Gaussian Splatting method designed to deliver high-fidelity
+rendering with significantly fewer parameters. As illustrated
+in Fig. 1, our proposed Mobile-4DGS achieves rendering
+quality comparable to existing baselines while utilizing fewer
+Gaussian primitives, thereby outperforming Mobile-GS [2] in
+inference speed. Our framework is built upon four technical
+innovations: (1) Unified Mobile Static-Dynamic Representation: We extend the static Mobile-GS/Flux-GS foundations
+to a compact continuous-time representation in which each
+dynamic Gaussian requires only eight additional temporal
+scalars. Static scenes are represented as the zero-motion special case, allowing both modes to share the same appearance, compression, density-control, and rendering pipeline. (2)
+Monte Carlo Specular Energy Aggregator: As shown in
+Fig. 2, our approach is motivated by the observation that
+substantial radiance information can be compressed into a
+lower-order subspace without compromising view-dependent
+specular features. We propose a Monte Carlo Specular Energy
+Aggregator that aggregates high-order specular energy into
+a compact representation, effectively preserving the complex
+lighting characteristics. Furthermore, we decouple the SH representation into a view-independent base component and direc-
+tional view-dependent components, allowing for a substantial
+reduction in SH memory overhead compared to traditional
+third-order baselines without the need for expensive offline
+distillation or pre-training. To recover the fine detail lost during
+this compression, we introduce an Attribute-Conditioned SH
+Enhancement module. This module utilizes a lightweight
+Multi-Layer Perceptron (MLP) to model contextual offsets
+based on intrinsic Gaussian properties. More importantly,
+these offsets are statically baked into the explicit Gaussian
+parameters prior to inference, ensuring that this enhanced
+view-dependent modeling does not introduce additional computational overhead during inference. (3) Multi-view Alphabased Densification and Pruning strategy: We further
+address the inefficiency inherent in the standard single-view
+gradient-based densification strategy, which often lacks multiview structure consistency. We propose a Multi-view Alphabased Densification and Pruning strategy that employs stratified camera sampling and alpha-weighted error accumulation
+across multiple viewpoints. With multi-view guidance, this
+strategy ensures a more compact representation by accurately
+pruning redundant primitives while focusing densification on
+regions with high multi-view reconstruction error. (4) DepthOrder Certificate for 4D Playback: The learned partition is
+exactly binary, so the depth order of the static subset depends
+on the camera alone and is cached for the whole clip, while a
+closed-form bound on the travel of the animated subset yields
+a per-frame depth-order certificate (DOC) that decides whether
+the committed draw list is still the sorted one. A frame that
+passes the certificate skips re-projection, sorting, merging and
+the index upload.
+Extensive experiments demonstrate that Mobile-4DGS offers a robust and scalable solution for mobile real-time rendering. By achieving powerful first-order SH representation
+while maintaining competitive visual quality, our framework
+paves the way for the deployment of high-fidelity 3DGS on
+mobile devices. The same framework also keeps 4D playback
+affordable on the device: the exact certificate leaves the
+rendered image untouched on every frame it reuses, and the
+budget branch confines the reordering it admits to primitives
+whose footprints already overlap.
+Relationship to Prior Conference Versions. This paper
+substantially extends our previous Mobile-GS [2] and FluxGS [25] papers. Mobile-GS established a mobile-oriented
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+Gaussian rendering pipeline together with a distillationbased appearance representation, whereas Flux-GS investigated Monte Carlo aggregation for compact static Gaussian
+Splatting. The present journal version unifies these foundations
+under a single deployment-oriented framework and extends
+them to dynamic scenes through explicit second-order motion,
+learnable temporal support, temporally stratified optimization,
+and quantized temporal attributes. It further incorporates a
+shared cross-platform rendering pipeline for both static and
+dynamic scenes. Importantly, static rendering is treated as a
+zero-motion special case of the same explicit representation.
+We extend the sorting pipeline of Flux-GS [25]: because the
+learned gate is exactly the partition the renderer consumes,
+the per-camera cache of the static depth order and the depthorder certificate that licenses reuse of the committed draw
+list follow from the representation itself rather than from a
+separate engineering effort. We summarize our contributions
+as follows:
+• We extend the framework to 4D by incorporating nonlinear temporal modeling and dynamic opacity lifespans,
+enabling real-time, high-quality 4D scene rendering on
+mobile platforms.
+• We propose a Monte Carlo aggregation strategy that
+decouples SH components to compress high-order viewdependent energy into a lower-order subspace, paired
+with an Attribute-Conditioned SH Enhancement module
+whose offsets are statically baked in before deployment
+to eliminate runtime inference overhead.
+• We propose a multi-view densification and pruning strategy using stratified camera sampling and alpha-weighted
+error accumulation, ensuring structural consistency across
+views while reducing redundant Gaussians.
+• We propose a depth-order certificate (DOC) for mobile
+4D playback, which caches the depth order of the static
+subset per camera and decides with a closed-form travel
+bound whether a committed draw list is still valid, so that
+certified frames skip re-projection, sorting, merging, and
+the index upload.
+II. R ELATED WORK
+Neural Radiance Fields. Recent advances in novel view synthesis have been heavily driven by 3D neural representations.
+Initial approaches associated neural features with underlying
+geometric structures such as volumes [35], textures [36], or
+point clouds [37]. A major paradigm shift occurred with
+Neural Radiance Fields (NeRF) [10], which utilize multi-layer
+perceptrons (MLPs) to directly query 3D density and color,
+enabling photorealistic rendering from 2D images without
+explicit proxy geometry. Subsequent research has focused on
+enhancing the rendering quality and computational efficiency
+of NeRF through optimized sampling [38], tensor decomposition [39], compact representations [40], and mobile-friendly
+pipelines [11]. Despite these improvements, the heavy computational and memory footprints of NeRF-based models remain
+prohibitive for real-time deployment on resource-constrained
+edge devices.
+3D Gaussian Splatting. 3D Gaussian Splatting (3DGS) [1]
+has emerged as a powerful alternative, representing scenes
+3
+via anisotropic 3D Gaussians and utilizing a tile-based rasterizer for real-time rendering. To scale this approach, recent
+works focus on accelerating training and managing memory.
+Scaffold-GS [41] introduces a hierarchical scaffold structure
+to reduce the number of Gaussians for high-quality rendering,
+while maintaining visual fidelity. Octree-GS [42] proposes a
+Level-of-Detail (LOD) structure for 3D Gaussian supporting
+level-of-detail decomposition. 3D-HGS [43] introduces a 3DHalf Gaussian as a novel reconstruction kernel to better learn
+the surface normal in 3D scenes. 3DGS-MCMC [44] formulates the training dynamics as a Markov Chain Monte Carlo
+process, while Revisiting Densification [45] proposes a lossdriven densification scheme. 3DGS-LM [46] utilizes a tailored
+Levenberg–Marquardt method [47] to replace the traditional
+Adam optimizer [48], while Taming 3DGS [49] enforces
+a strict user-defined Gaussian budget during optimization.
+MVGS [50] is the first to propose multi-view learning to
+enhance the multi-view constraint of 3DGS in the optimization
+stage, which significantly improves the holistic rendering performance. Furthermore, techniques like StopThePop [51] and
+FlashGS [52] tackle tile-intersection bottlenecks and depthsorting challenges to mitigate popping artifacts and reduce
+computation complexity.
+Gaussian Pruning. Due to the inherent redundancy in dense
+3D Gaussian representations [53]–[55], pruning has become a
+key strategy to boost rendering efficiency [56]–[59]. Common
+pruning strategies rely on importance scores derived from
+accumulated transmittance [60], [61], Hessian-based sensitivity [62], or gradient-opacity combinations [63], [64]. While
+Mobile-GS [2] compresses the scene using opacity- and scalebased pruning, it struggles to preserve fine-grained details.
+Furthermore, standard single-view gradient-based densification
+tends to produce an excessive number of Gaussians. To address
+this, our proposed Mobile-4DGS introduces a multi-view
+alpha-based densification and pruning strategy, significantly
+minimizing the primitive budget while maintaining high rendering quality.
+Gaussian Compression. Early compression methods utilized
+vector quantization (VQ) [28], [65]–[67] and entropy coding [68], [69] to lower storage requirements. While highly
+effective, large codebooks in VQ-based methods lead to
+long training times. Although residual vector quantization (RVQ) [63] mitigates this overhead, it incurs additional index
+storage costs. Recent work has shifted toward structured
+representations, combining anchor-based structures [41], [63],
+[70] or tensor factorization [71] with grid hierarchies [42],
+[68]. Contextual modeling [68]–[70], [72] has also been introduced to maximize rate-distortion performance, though at the
+cost of high rendering latency due to multiple MLP passes.
+Alternatively, neural field representations capture local continuity among neighboring Gaussians [28], [73]. For instance,
+Mobile-GS [2] distills spherical harmonics (SH) from a highorder teacher, but this process is computationally expensive.
+In contrast, our Mobile-4DGS introduces a Monte Carlo
+Specular Energy Aggregator that directly compresses thirdorder SH energy into a compact, low-order representation,
+bypassing costly distillation while preserving high-fidelity
+view-dependent details.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+4
+4D Gaussian Splatting. To reconstruct dynamic scenes, recent
+methods extend static representations into the temporal domain
+by modeling time-dependent geometry and appearance [26].
+Early attempts directly integrated time as a fourth coordinate
+or used dynamic multi-layer perceptrons (MLPs) to deform
+standard 3D Gaussians over time [74]. However, relying
+heavily on neural networks for deformation often introduces
+a significant computational bottleneck, hindering real-time
+rendering speeds during inference. To address this, subsequent
+architectures have introduced explicit temporal structures, such
+as hexplane [75] or 4D grid decompositions [74], to separate
+spatial and temporal features efficiently. Other approaches
+leverage physical constraints or motion trajectories to track
+individual Gaussian primitives across frames, preserving finegrained temporal consistency [76]. Despite these innovations,
+existing 4D architectures typically suffer from slow rendering
+speed on mobiles due to the volume of temporal tracking
+coefficients [77], [78]. In contrast, our approach optimizes
+temporal feature aggregation to maintain high-fidelity dynamic
+rendering without compromising efficiency on mobile devices.
+III. P RELIMINARY
+Gaussian Splatting: 3D Gaussian Splatting (3DGS) [1] is
+an explicit Gaussian-based rendering method that represents
+a scene using a collection of anisotropic 3D Gaussians,
+enabling high-quality novel view synthesis. Each 3D Gaussian Gi contains 3D geometry and appearance parameters,
+as (µi , Σi , oi , ci ). For the geometry representation, µi ∈ R3
+defines the 3D position of the 3D Gaussian in its world
+coordinates, while the covariance matrix Σi ∈ R3×3 , which
+is always positive semi-definite and symmetric, characterizes
+the spatial extent and orientation of the anisotropic Gaussian
+ellipsoid. In terms of geometric modeling, Σi is decomposed
+into a scale component si and a rotation component ri , where
+si controls the size of the Gaussian and ri specifies its
+orientation. As for appearance, each Gaussian leverages a color
+ci (ω) and an opacity value oi ∈ [0, 1], where Gaussian color
+ci is represented using the spherical harmonic coefficients ci .
+To render an image, all 3D Gaussians are projected onto the
+image space using a standard perspective camera model. After
+that, a depth-sorting procedure is then applied to ensure that
+N Gaussians are rendered in a near-to-far order. Following
+this ordering, the final color of a pixel is computed via the
+alpha blending:
+N
+X
+C=
+ci (ω)αi Ti ,
+(1)
+Ti =
+(1 − αj ),
+(2)
+j=1
+
+1
+2D −1
+2D ⊤
+2D
+αi (x) = oi exp − (x − µi ) (Σi ) (x − µi ) .
+2
+(3)
+where Ti denotes the accumulated transmittance before the i-th
+Gaussian. N is the total number of Gaussians contributing to
+the pixel. Overall, Gaussian Splatting provides a differentiable,
+
+c(ω) =
+L
+ℓ
+X
+X
+cℓm Yℓm (ω),
+(4)
+ℓ=0 m=−ℓ
+where Yℓm denotes the real spherical harmonics basis functions, and cℓm are the corresponding SH coefficients. In
+practice, the expansion is truncated to a finite maximum degree
+L, yielding (L + 1)2 coefficients. In modern neural rendering
+systems, low-order SH (e.g., L ≤ 2) are often preferred due
+to their compactness and numerical stability, while higherorder SH are sometimes used during training to capture highfrequency view-dependent effects.
+IV. M ETHODOLOGY
+Vanilla 3D Gaussian Splatting (3DGS) leverages explicit
+3D Gaussians with volume rendering to represent a whole
+scene or object. Each 3D Gaussian Gi is defined by a set
+of geometry and appearance parameters: (µi , si , ri , oi , ci ).
+Specifically, µi , si , and ri represent spatial position, scale, and
+rotation, while oi and ci denote opacity and spherical harmonic
+coefficients for appearance modeling. To capture complex and
+view-dependent effects, standard 3DGS methods typically utilize third-order spherical harmonics (SH). While effective for
+modeling specular and intricate lighting, this approach incurs
+significant storage costs, as each Gaussian primitive requires
+48 SH coefficients (16 coefficients × 3 channels). As scene
+complexity grows into the millions of primitives, the resulting
+storage footprint and memory bandwidth requirements become
+prohibitive for mobiles.
+In this work, we propose Mobile-4DGS, which constrains
+the Gaussian appearance modeling to first-order spherical harmonics (requiring only 4 coefficients per channel). To ensure
+rendering fidelity, we propose a Monte Carlo Specular Energy
+Aggregator method to compress high-order radiance energy
+into a compact and lower-order subspace without pretraining
+or distillation. By bridging the gap between high-fidelity radiance modeling and hardware-efficient representation, Mobile4DGS enables high-quality and efficient novel view synthesis
+performance on edge devices.
+A. Monte Carlo Specular Energy Aggregator
+i=1
+i−1
+Y
+efficient, and compact representation for complex scenes,
+making it well suited for real-time rendering.
+Spherical Harmonics: Spherical harmonics provide an orthonormal basis for square-integrable functions defined on the
+unit sphere S2 . Any sufficiently smooth directional function
+c(ω) : S2 → R3 can be expanded as
+▶ “Insight 1”: Extracting Monte Carlo directional moments
+of specular residuals into pre-baked first-order parameters preserves complex lighting with zero runtime inference overhead.
+High-order SH polynomials in 3DGS are inherently inefficient
+for representing sharp, highly localized specular lobes due to
+their dense and global nature. Fitting a sparse specular peak
+requires numerous high-order SH merely to cancel out nonspecular ringing artifacts. We observe that view-dependent
+energy is highly sparse in the angular domain, yet its directional phase is critical for accurate reconstruction. Rather than
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+High-Order SH Training <3k iterations
+Training
+5
+MC Specular Energy Aggregator
+Low-Order SH Training >3k iterations
+Step 1: Spherical Sampling
+𝑐 "#
+𝐸$%&
+Sample K points
+Multi-view Images
+Normalized Points
+3D Gaussian
+𝑐!
+First-order SH
+𝑐!"# 𝐝$ = 𝑐% 𝐝$ − 𝑐%& 𝐝$
+Decode once
+Step 2: Monte Carlo Aggregation
+𝐸!"# = max(0, 𝑐$%& 𝐝' )
+*
++
+𝐸()$ = ∑+
+',* 𝐝' ⊗ 𝐸!"#
+SfM Points
+Mobile-4DGS
+Training
+Mobile Rendering
+Third-order SH
+Fig. 3. Overview of the Mobile-4DGS framework. Our method optimizes third-order SH for the initial 3k iterations, then transitions via Monte Carlo
+Specular Energy Aggregator for high-frequency representation. With the first-order direction moments inherited from the original third-order SH, we leverage
+a neural network to aggregate these latents into first-order SH c′ for rendering. During inference, the model requires only a one-time decoding step to obtain
+the first-order SH coefficients, significantly reducing storage while introducing no per-frame decoding overhead.
+aggregating absolute photometric residuals, which destroys
+this vital angular gradient, we propose to extract the firstorder directional moments of the specular residual via Monte
+Carlo projection. It projects the extracted directional energy
+into the 1st-order SH space. Consequently, this insight allows
+us to discard the redundant high-order SH while explicitly
+preserving both the magnitude and spatial direction of the
+view-dependent signal.
+an RGB-valued directional function ci (ω) =
+PConsider
+Lo Pℓ
+2
+ℓ=0
+m=−ℓ cℓm Yℓm (ω) defined over the sphere S . This
+function is initially represented by spherical harmonics of
+an original degree Lo , with a coefficient tensor: c ∈
+2
+RN ×(Lo +1) ×3 where N represents the number of Gaussian
+primitives. Our objective is to compress this high-fidelity
+representation into a lower-order SH space of degree Lt
+(where Lt ≤ Lo ), resulting in a reduced coefficient set:
+2
+c′ ∈ RN ×(Lt +1) ×3 . For each primitive i, we formulate this
+as a least-squares optimization problem:
+c′∗ = arg min
+′
+c
+Z
+ci (ω) −
+S2
+Lt X
+ℓ
+X
+ℓ=0 m=−ℓ
+2
+c′ℓm Yℓm (ω)
+dω,
+2
+(5)
+where Yℓm (ω) denotes a spherical harmonic basis function.
+To obtain a low-order representation, the optimal projection
+coefficients c′n,k that minimize the reconstruction error are
+given analytically by the inner product:
+Z
+′
+ci,ℓm = ⟨ci (ω), Yℓm ⟩ =
+ci (ω)Yℓm (ω)dω,
+(6)
+S2
+where it defines the optimal orthogonal projection within
+the strict low-order SH subspace. However, this projection
+cannot retain information that lies exclusively in the discarded
+higher-order bands. Our Monte Carlo module is therefore
+not introduced to approximate the same projection. Instead,
+it estimates compact directional statistics from the discarded
+residual and uses them to reparameterize the first-order coefficients before deployment. To retain these high-frequency
+characteristics without incurring the prohibitive high-order SH,
+we aim to compress the discarded specular information into
+a compact latent representation. The perceptual impact of
+specular is fundamentally characterized by its photometric
+energy magnitude and dominant direction. We instead propose
+to sample the high-frequency residual on a uniform sphere then
+extract its first-order directional moments.
+Uniform Spherical Sampling: To generate a set of directional
+vectors D = {dk }K
+k=1 , we uniformly sample K points on the
+unit sphere S2 using spherical coordinates. For each sample
+k, we draw two independent random variables θk and ϕk
+respectively representing the colatitude and longitude:
+ϕk ∼ U(0, 2π),
+θk = arccos(1 − 2ξk ),
+ξk ∼ U(0, 1),
+(7)
+where U denotes the uniform sampling. These spherical
+coordinates are subsequently transformed into the Cartesian
+domain to obtain the unit direction vectors dk =
+
+sin θk cos ϕk , sin θk sin ϕk , cos θk where each dk represents a unit vector such that ∥dk ∥2 = 1. This collection of
+vectors D ∈ RK×3 serves as the set of incident directions for
+subsequent spherical harmonic compression.
+Energy Aggregation: Subsequently, we evaluate the photometric residual between the third-order SH radiance ci (dk )
+and the second-order SH radiance c2i (dk ) via cres (dk ) =
+ci (dk ) − c2i (dk ). By aggregating these residuals, we formulate a compact, high-frequency dynamic energy and direction
+representation:
+Emag = max(0, cres (dk )),
+Edir =
+1
+K
+K
+X
+k=1
+dk ⊗ Emag ,
+(8)
+(9)
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+6
+where Emag and Edir effectively encapsulate the overall
+energy and direction of the view-dependent specular for each
+Gaussian primitive, compressing the bulky high-order parameters into a highly lightweight low-dimensional descriptor. To
+strictly minimize memory overhead, we only store these compact latents Edir and cdc , where cdc represents the base color
+SH, as the 0-th SH. We then employ a neural network to learn a
+non-linear mapping from this aggregated high-frequency latent
+space to the first-order SH parameters, conditioned on the
+normalized Gaussian position:
+c′ = Ψ(cdc , Edir , f (µ̂)),
+(
+µ̂
+if ∥µ̂∥2 ≤ 1,
+
+f (µ̂) = 
+µ̂
+1
+2 − ∥µ̂∥2 ∥µ̂∥2 if ∥µ̂∥2 > 1,
+(10)
+(11)
+where Ψ is a Multi-Layer Perceptron (MLP), and the result
+2
+c′ ∈ RN ×(Lt +1) ×3 represents the first-order SH coefficient
+(Lt = 1). We normalize the Gaussian position µ to reduce the
+impact of spatial outliers for better convergence. By performing this mapping, Mobile-4DGS can dynamically adjust the
+Gaussian geometry and low-order appearance simultaneously,
+ensuring that the restricted SH capacity is allocated to the
+most visually salient scene features. In particular, our approach
+eliminates the need for expensive distillation while achieving significant compression in SH storage memory overhead
+compared to third-order baselines. More importantly, the firstorder SH coefficients are decoded only once before inference,
+introducing no per-frame decoding overhead.
+Gaussian Attribute Awareness: Although the above process
+preserves the majority of radiance energy in an L2 sense,
+projecting higher-order bands inevitably degrades overall color
+fidelity and scene structure. We observe that this discarded
+residual energy is highly correlated with intrinsic Gaussian
+attributes, such as spatial position and anisotropic scale. This
+motivates us to design a lightweight geometry-conditioned
+residual module to contextually refine the base representation
+and preserve the efficiency of first-order SH. Specifically, we
+introduce an Attribute-Conditioned SH Enhancement module
+parameterized by a lightweight MLP, denoted as Φ, to predict
+a residual offset ∆c for the first-order SH coefficients c′ . The
+network aggregates the geometric and photometric properties
+by concatenating the normalized first-order SH ĉ′ , opacity α,
+normalized scales ŝ, spatial position µ, and rotation quaternion
+r. The enhanced SH coefficients cout are formulated as:
+∆ci = Φ([µi , ŝi , ri , oi , ĉ′i ]),
+cout
+= c′i + ∆ci ,
+i
+(12)
+where the final linear layer of Φ is strictly zero-initialized to
+ensure optimization stability, allowing the model to naturally
+fall back to the standard 3DGS representation at the beginning
+of training and smoothly learn the residuals. Crucially, because
+Φ relies strictly on intrinsic Gaussian attributes and is entirely
+independent of the camera viewing direction, the residual ∆c
+only needs to be decoded once for subsequent inference. Prior
+to rendering, the SH offset is pre-computed and statically
+baked into the explicit Gaussian parameters. This design
+guarantees that our contextual modeling facilitates higher
+performance while introducing absolutely zero computational
+overhead during inference.
+Training Curriculum: Initially, we optimize 3D Gaussians
+utilizing full third-order SH coefficients for the first 3k iterations to establish a high-frequency representation. Subsequently, we aggregate these third-order coefficients down to a
+first-order SH representation via our proposed Monte Carlo
+Specular Energy Aggregator. After this mapping step, we
+initialize the Attribute-Conditioned SH Enhancement module
+to continually refine the low-order representation. Note that the
+compression from third-order to first-order is executed only
+once. After that, we only maintain and update the lightweight
+first-order parameters.
+B. Multi-view Alpha-based Densification and Pruning
+▶ “Insight 2”: Stratified multi-view alpha-error accumulation
+maintains global structural consistency while pruning redundant primitives to prevent excessive Gaussian point inflation.
+To achieve a compact 3D Gaussian structure, we found that
+an accurate densification and pruning strategy is crucial. We
+observed previous methods [1], [57] using gradient-based or
+importance-based strategies in the single-view criterion to
+determine Gaussians’ densification and pruning. However, the
+single-view criteria lack a holistic understanding of the scene,
+as they account for geometry and appearance from only a
+single view. Therefore, we propose a multi-view alpha-based
+densification and pruning strategy in Fig. 4 to constrain the
+number of Gaussians based on multi-view evaluation so that
+ensure multi-view consistency.
+Stratified Camera Sampling: To ensure comprehensive geometric coverage and alleviate view redundancy within the
+training camera set, we adopt a Stratified Camera Sampling
+strategy. We partition the 3D scene into angular bins defined
+with respect to a focal point, enabling the selection of representative views that maximize view variation and angular
+dispersion. Prior to binning, we estimate the center of the
+scene, denoted as x∗ . Given Ncam cameras with the centers
+cam
+{ti }N
+and viewing directions {vi }N
+i=1 , we compute the
+i=1
+point that minimizes the total squared distance to all camera
+rays. Let Pi = I −vi vi⊤ be the projection matrix onto the subspace orthogonal to the i-th ray, where I is an identity matrix.
+The scene center x∗ is obtainedby solving the linear leastPNcam
+PNcam
+∗
+squares system via:
+i=1 Pi x =
+i=1 Pi ti , where
+each camera position is transformed into spherical coordinates
+(θ, ϕ, ρ). θ = arctan2(ry , rx ), ϕ = arcsin(rz /∥ri ∥), and
+ρ = ∥ri ∥, with ri = ti − x∗ . The angular space is discretized
+into Mθ azimuth and Mϕ elevation bins. Cameras are grouped
+according to their bin indices, and one representative is uniformly sampled from each non-empty bin. Finally, to satisfy a
+computational budget K, the selected candidates are randomly
+shuffled and truncated, yielding a camera subset C with broad
+and uniform angular coverage.
+Photometric Loss Guidance: To effectively optimize the
+Gaussian Splatting representation, we employ a multi-view
+consistency-driven strategy. This strategy identifies regions of
+high and low reconstruction error across multiple viewpoints
+and uses the accumulated contribution of each Gaussian to
+guide geometry and appearance refinement. For each viewpoint in a curated camera set C, we render the current Gaus-
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+a.
+7
+b.
+Loss
+𝜏$
+𝜏%
+ℒ(C, C"# )
+Densification
+Bad Fitting
+Render
+∥ ∇! ℒ ∥ 2 > 𝜏
+Single-view
+Gradient Determination
+Multi-view
+Loss Determination
+Loss Map
+Good Region
+Alpha-based Importance
+Moderate Pruning
+Fig. 4. Illustration of our proposed Multi-view Alpha-based Densification and Pruning strategy. (a) Traditional 3DGS leverages the single-view Gaussian
+position gradient determinist. (b) We propose to employ a multi-view loss-driven mechanism, coupled with alpha-based Gaussian evaluation to densify more
+Gaussians in the bad-reconstructed regions and moderately prune Gaussians for well-reconstructed areas.
+sian primitives and compute a pixel-wise photometric loss.
+Following standard 3DGS, we utilize the loss with a hybrid
+objective combining L1 distance and Structural Similarity
+(SSIM) through:
+L = (1 − λ)L1 (C, Cgt ) + λLDSSIM (C, Cgt ),
+(13)
+where C and Cgt represent the rendered image and Ground
+Truth. λ controls the weight for L1 and LDSSIM . Therefore, we
+can derive a binary Metric Map M ∈ {0, 1}H×W to identify
+areas of poor and high-quality reconstruction through:
+
+
++
+−
+Mu,v
+= I Lu,v > τ + , Mu,v
+= I Lu,v < τ − , (14)
+frequently results in excessive and redundant Gaussian densification. To mitigate this issue, we integrate our computed importance score into the traditional 3DGS gradient-based densification strategy. Our multi-view consistency-guided masks are
+formed by intersecting these base criteria with an importance
+quantile filter:
+
++
++
++
+Mclone = Mbase
+(16)
+clone ∧ S > Qτ (S ) ,
+
++
++
++
+Msplit = Mbase
+(17)
+split ∧ S > Qτ (S ) ,
+where Q+
+τ denotes the quantile of the importance score distribution. This ensures that Gaussians are only cloned or split if
+they consistently contribute to high-error regions across mulwhere I(·) is the indicator function and τ is the error threshold. tiple views. Consequently, these refined masks strictly govern
++
+= 1) if its error exceeds a the cloning and splitting operations, boosting Gaussians’ fitting
+A pixel (u, v) is flagged (Mu,v
++
+predefined threshold τ , marking it as a region of poor recon- capability while tightly controlling the primitive count.
+−
+= 1 means that the region is Moderate Pruning: Standard 3DGS defines a threshold omin
+struction. On the contrary, Mu,v
+to eliminate Gaussian points with low opacity, leading to
+well reconstructed, needed to prune redundant Gaussians.
+modMulti-view Alpha-Weighted Error Accumulation: To map aggressive pruning and performance slump. To achieve
+−
+erate
+pruning,
+we
+introduce
+the
+pruning
+score
+S
+based
+on
+2D image-space errors back to 3D Gaussian primitives, we
+−
+multi-view
+and
+loss-driven
+strategy.
+A
+larger
+S
+indicates
+customize the CUDA kernel for the rendering pipeline. For
+each Gaussian i, we compute the importance score Si+ and the Gaussian that impacts more to low-error pixel regions,
+pruning score Si− by summing its alpha contributions αi effectively flagging it as an artifact or redundant point. Our
+final pruning mask Mprune identifies Gaussians that fall
+across all flagged pixels in the metric map by:
+below the opacity threshold omin and exceed the pruning score
+C
+C
+quantile Q−
+X
+X
+X
+X
+τ via:
++
+−
+c,+
+c,−
+Si =
+αi ·Muv , Si =
+Luv ·αi ·Muv ,
+
+−
+Mprune = (oi < omin ) ∧ S − > Q−
+(18)
+τ (S ) ,
+c=0 (u,v)∈Ω
+c=0 (u,v)∈Ω
+(15)
+
+where we utilize Mprune to cull non-contributing or artifactwhere αi = oi exp − 12 ∆xTi Σ−1
+i ∆xi represents Gaussian
+inducing Gaussians while preserving essential scene geometry.
+alpha, indicating the Gaussian contribution to the pixel color.
+In this way, we achieve moderate pruning while maintaining
+Ω ⊂ Z2 denote the discrete image pixel domain. We aggregate
+overall reconstruction fidelity.
+these local metrics across the sampled views to compute these
+two primary scores. This multi-view aggregation effectively
+differentiates Gaussians that are important or redundant, al- C. Dynamic Modeling
+lowing for more accurate geometry modification. By averaging ▶ “Insight 3”: A learned binary static–dynamic partition
+across the sampling views, our Mobile-4DGS avoids over- allows each Gaussian to model continuous-time motion with
+fitting to single-view occlusions or transient artifacts. By using simple vector operations, while the static subset remains
+the alpha-based metric rather than the conventional gradient exactly unchanged over time and can therefore be cached for
+metric [1], we ensure that only the Gaussians with high mobile rendering.
+visibility and contributing to the error are modified.
+As illustrated in Fig. 5, we extend each static Gaussian with
+Accurate Densification: The vanilla 3DGS employs a a compact set of temporal parameters. We normalize the
+gradient-based strategy to identify underfitting Gaussians. We timestamp of each input frame to t ∈ [0, 1]. In addition to
+base
+define the vanilla clone mask Mbase
+its canonical center µi ∈ R3 , covariance Σi , base opacity
+clone and split mask Msplit
+based on standard positional gradient threshold ∥∇µi L∥2 > τ . oi , and appearance coefficients ci , each Gaussian Gi stores a
+However, relying solely on single-view positional gradients velocity vi ∈ R3 , an acceleration ai ∈ R3 , a canonical time
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+8
+Temporal Motion (Second-Order)
+Temporal Activation (Soft Support)
+Duration:
+For query time t ∈ [0, 1]
+σᵢ = clip(exp(ρᵢ), σₘᵢₙ, σₘₐₓ)
+µᵢ(t) = µᵢ + vᵢ Δtᵢ + 1⁄2 aᵢ Δtᵢ²,
+t′ᵢ
+Effective opacity:
+t = t′ᵢ
+Δtᵢ = 0
+≈ 2σᵢ
+Window:
+wᵢ(t) = exp [ − 1⁄2 ( (t − t′ᵢ) / (σᵢ + ε) )² ]
+Δtᵢ = t − t′ᵢ
+t < t′ᵢ
+Δtᵢ < 0
+1
+oᵢ(t) = oᵢ wᵢ(t)
+t > t′ᵢ
+Δtᵢ > 0
+0
+0
+0
+t′ᵢ
+1
+time t
+• Smooth appear / disappear
+• Handles occlusion & topology changes
+• Differentiable w.r.t. t′ᵢ and σᵢ
+1
+time t
+Fig. 5. Overview of the temporal modeling in Mobile-4DGS. Each Gaussian is equipped with an explicit second-order motion state (vi , ai , t′i , ρi ) and a
+learned binary static–dynamic gate gi . Given a query time t ∈ [0, 1], its center is updated from the canonical state by Eq. (19), so that the displacement of a
+primitive with gi = 0 is identically zero rather than merely small. A Gaussian temporal window, parameterized by the learnable duration σi , modulates its
+effective opacity through Eq. (22), enabling smooth appearance and disappearance while handling occlusions and topology changes. The entire formulation
+is differentiable with respect to the motion and temporal parameters, and the committed partition exposes an exactly time-invariant subset that can be cached
+and compressed separately.
+t′i ∈ [0, 1], and a log-duration ρi ∈ R. This adds only eight
+scalars per Gaussian. More importantly, all temporal states
+are explicit, so no deformation network needs to be evaluated
+during rendering. This avoids the per-frame neural inference
+required by implicit deformation-based methods.
+Gated Second-Order Trajectory: We model the position of
+each Gaussian at time t using a second-order motion model
+around its canonical time:
+
+
+1
+µi (t) = µi + gi vi ∆ti + ai ∆t2i ,
+∆ti = t − t′i ,
+2
+(19)
+where the velocity term models approximately constant motion, while the acceleration term captures changes in speed
+or direction. The binary gate gi ∈ {0, 1} determines whether
+the Gaussian is static or dynamic. When gi = 0, the entire
+displacement is exactly zero, and the Gaussian remains at
+its canonical position for all timestamps. When gi = 1, its
+position follows the learned trajectory. This gives a continuous
+trajectory over the whole sequence instead of predicting a
+separate state for every frame. We keep Σi and ci constant
+over time to further reduce temporal storage and computation.
+Soft Temporal Support: A dynamic Gaussian does not
+necessarily need to contribute to every frame. We therefore
+assign each Gaussian a positive temporal duration
+so that static Gaussians always keep their original opacity,
+while dynamic Gaussians smoothly appear and disappear
+around their canonical time t′i . During rendering, we simply
+replace oi with oi (t) in the standard alpha compositing process. This temporal window helps model visibility changes,
+occlusions, and topology changes while remaining differentiable with respect to vi , ai , t′i , and ρi .
+Learned Static–Dynamic Partition: Most Gaussians in a
+dynamic scene usually belong to static regions such as the
+background, floor, and stationary objects. Modeling temporal
+variation for these Gaussians is unnecessary. On the other
+hand, incorrectly treating a moving Gaussian as static can
+leave a frozen copy of the moving object in the scene. We
+therefore learn whether each Gaussian is static or dynamic
+instead of assigning all Gaussians to the same category.
+Specifically, we jointly optimize a binary gate gi and the
+motion parameters. We use a hard-concrete relaxation with a
+straight-through estimator, which gives a binary value in the
+forward pass while still allowing gradients to propagate during
+training. Given ui ∼ U(0, 1), we compute
+
+ui 
+ℓi + log 1−u
+i
+si = sigmoid
+,
+T
+(23)
+
+s̃i = clamp si (ζ − γ) + γ, 0, 1 ,
+followed by
+σi = clip (exp(ρi ), σmin , σmax ) ,
+and define its temporal weight as
+"
+
+2 #
+1 t − t′i
+wi (t) = exp −
+,
+2 σi + ε
+(20)
+(21)
+where ε prevents division by zero. We then define the effective
+opacity as
+
+
+oi (t) = (1 − gi ) + gi wi (t) oi ,
+(22)
+gi = I[s̃i ≥ 0.5] ,
+gbi = sg(gi ) − sg(s̃i ) + s̃i ,
+(24)
+where ℓi is the learnable gate logit, T is the temperature,
+(γ, ζ) define the relaxed range [−0.1, 1.1], I[·] is the indicator
+function, and sg(·) denotes stop-gradient. Thus, gbi is exactly
+equal to the binary gate gi in the forward pass, while its relaxed
+value provides gradients in the backward pass. During training,
+gbi is used in Eqs. (19) and (22).
+We gradually anneal the temperature from Tinit = 2.0
+to Tfinal = 0.1, allowing the gates to start with a smooth
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+relaxation and gradually become binary. The partition is also
+preserved during densification. When a Gaussian is cloned or
+split, its new copies inherit the gate logit, forced-dynamic flag,
+committed label, and promotion evidence from the parent.
+Logistic noise is used only during the first 5k iterations.
+The gates are then evaluated deterministically, and the static–
+dynamic partition is committed and frozen at iteration 25k.
+The renderer and compression stage therefore operate on a
+fixed binary partition.
+Motion Evidence and Promotion: The static–dynamic assignment is not determined by the sparsity prior alone. We
+additionally use motion evidence to prevent moving Gaussians
+from being incorrectly classified as static. First, a Gaussian is
+forced to be dynamic when its initialized velocity satisfies
+∥vi ∥2 > τm . Once a Gaussian is forced or promoted to
+dynamic, it cannot later be changed back to static. This
+avoids a common failure case in which a moving Gaussian
+is turned static and leaves a frozen copy of the object at its
+canonical position. When velocity initialization is available,
+free Gaussians start with a strong static prior and become
+dynamic only when supported by motion evidence. When no
+velocity initialization is available, they instead start with a
+strong dynamic prior, because an entirely static initialization
+would provide little learning signal to the temporal parameters.
+To recover Gaussians that are incorrectly classified as static,
+we maintain an exponential moving average of their reconstruction evidence:
+
+
+∂L
+,
+(25)
+ei ← η ei + (1 − η) ReLU −
+∂ℓi
+where a negative gate gradient indicates that increasing the
+gate would reduce the photometric reconstruction loss and
+therefore provides evidence that the Gaussian should move.
+Before computing this evidence, we remove the gradient
+contribution from the gate regularizers, so that the sparsity
+prior itself cannot trigger a promotion. After a 2k warmup, we
+check the static population every 500 iterations and promote
+Gaussians whose evidence is above the 0.995 quantile. To
+avoid unstable changes, at most 1% of all Gaussians can be
+promoted at each step.
+Gate Regularization: Without additional constraints, the optimization may assign every Gaussian to the dynamic set.
+We therefore encourage a sparse dynamic partition using the
+closed-form hard-concrete relaxation of the ℓ0 penalty:
+
+
+1 X
+−γ
+Lsparse =
+sigmoid ℓi − T log
+,
+|F|
+ζ
+i∈F
+(26)
+1 X
+pi (1 − pi ), pi = sigmoid(ℓi ),
+Lbin =
+|F|
+i∈F
+where F contains only free Gaussians, excluding those that
+have already been forced or promoted to dynamic. The sparsity
+loss is gradually introduced from iterations 5k to 20k, while
+the binary loss is activated from iteration 22k until the partition
+is committed at 25k. The two mechanisms play complementary roles: the sparsity loss encourages unnecessary dynamic
+Gaussians to become static, while the promotion mechanism
+recovers static Gaussians that still require motion to explain
+the observations.
+9
+Temporal Regularization: Unconstrained motion can produce unstable trajectories, duplicated edges, and long motion
+trails. We therefore regularize the temporal parameters of
+dynamic Gaussians:
+P
+gi ∥ai ∥22
+,
+(27)
+Lacc = iP
+i gi
+
+P
+soft 2
+i gi ReLU σi − σmax
+P
+Ldur =
+,
+(28)
+i gi
+2
+P
+1
+2
+i gi ReLU ∥vi ∥2 σi + 2 ∥ai ∥2 σi − dmax
+P
+. (29)
+Lext =
+i gi
+Because these losses are multiplied by gi , they affect only
+dynamic Gaussians and do not alter the canonical geometry
+of the static subset. Lacc discourages unnecessarily large
+acceleration, while Ldur prevents the temporal support from
+becoming too broad. The motion-extent loss Lext constrains
+the displacement reached within one temporal standard deviation, ∥vi ∥2 σi + 21 ∥ai ∥2 σi2 , which directly reduces motion trails
+without globally forcing all velocities to be small. Therefore,
+the complete objective is
+L4D = L + λacc Lacc + λdur Ldur
++ λext Lext + λsparse Lsparse + λbin Lbin .
+(30)
+Staged Optimization: We jointly optimize the spatial, temporal, and appearance parameters from multi-view videos.
+Different temporal parameters follow different learning-rate
+schedules. The learning rates of acceleration, canonical time,
+and log-duration are cosine-decayed to zero between iterations
+25k and 30k to prevent the temporal support from drifting late
+in training. The velocity instead follows its own exponential
+decay toward a small final learning rate. Canonical times
+are randomly initialized over the sequence, while the initial
+temporal durations are set to a small fraction of the clip and
+constrained to [σmin , σmax ] throughout optimization.
+After the binary partition is committed, we do not freeze
+the complete static Gaussian. Instead, we freeze only its
+four time-varying parameters. Its canonical position, scale,
+rotation, opacity, and appearance remain trainable during the
+final refinement stage. This allows the static geometry and
+appearance to continue improving even after its temporal state
+has been fixed.
+Temporal-Aware Density Control: For dynamic scenes, the
+multi-view densification and pruning procedure is also extended to the temporal dimension. We divide the sequence
+into temporal bins, sample one camera from each non-empty
+bin, and then subsample these candidates to match the camera
+budget. In this way, short-lived Gaussians are observed during
+density control even if they are visible in only a small part
+of the sequence. This prevents such Gaussians from being
+incorrectly densified or pruned simply because they are rarely
+observed.
+Compression of the Motion State: Each dynamic Gaussian
+stores the eight-dimensional temporal vector [vi , ai , t′i , ρi ] ∈
+R8 . We compress this vector using the same sub-vector codebook mechanism used for the static attributes, while fitting the
+temporal codebooks only on dynamic Gaussians. Because the
+partition is already binary, static Gaussians do not consume
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+10
+temporal codebook capacity and instead share an index that
+decodes to an exact zero-motion state.
+Only compact codebook indices are stored for each Gaussian, and the resulting index streams are entropy coded. We
+also store the committed binary partition as a packed bitmask
+so that decoding exactly reproduces the static–dynamic assignment used by the renderer. For backward compatibility,
+a checkpoint without explicit gate bits is treated as fully
+dynamic. Temporal quantization is performed after static
+quantization, followed by a separate refinement stage for
+the temporal codebooks. This prevents static and temporal
+compression errors from interfering with each other.
+At inference time, the temporal parameters are recovered
+through simple codebook lookups. Equations (19) and (22)
+then require only a quadratic motion evaluation and a
+temporal-window evaluation for each dynamic Gaussian. No
+deformation network is required, and the appearance and
+covariance parameters are decoded only once rather than once
+per frame.
+The binary static–dynamic partition also directly benefits
+rendering. For gi = 0, the Gaussian position does not change
+with time, so its depth order depends only on the camera and
+can be cached across the sequence. For gi = 1, the explicit
+motion model allows us to bound how far a Gaussian can move
+along the camera depth axis. As described in Sec. IV-D, this
+bound allows the renderer to determine whether an existing
+draw list can safely be reused, avoiding repeated depth sorting
+on many playback frames.
+D. Mobile Rendering of the Gated Representation
+▶ Insight 4. The binary partition separates static and dynamic
+Gaussians into two streams. The static depth order can be
+cached for a fixed camera, while a motion bound determines
+when the previously computed global draw order is still valid.
+Frames that pass this test require no re-projection, sorting,
+merging, or index upload.
+Two-Stream Depth Order. We divide the Gaussians into a
+static set S = {i : gi = 0} and a dynamic set D = {i : gi =
+1}, with NS +ND = N . The two sets are sorted independently.
+Let n ∈ R3 be the depth row of the camera transform. The
+view-space depth of Gaussian i is zi (t) = n⊤ µi (t). For a fixed
+camera, both streams use the same depth range [zmin , zmax ].
+We quantize each depth into a 16-bit key:
+
+
+
+qi (t) = clip κ zi (t) − zmin , 0, B − 1 ,
+(31)
+B−1
+16
+where κ = zmax
+−zmin and B = 2 . A smaller key indicates
+a Gaussian that is closer to the camera. For either stream
+A ∈ {S, D}, we use one stable counting-sort pass over the
+B possible depth keys. Since the input indices are initially
+ordered by row id, the stable sort also preserves the row-id
+order when multiple Gaussians have the same key. Thus, each
+stream is ordered exactly according to
+πA (t) = argsort(qi (t), i) A.
+(32)
+The two sorted streams are then merged with a standard twopointer procedure using the same pair (qi , i), producing
+
+π(t) = argsort(qi (t), i) S ∪ D .
+(33)
+Algorithm 1 Adaptive depth-order reuse (worker thread, one
+playback frame at time t).
+Require: committed list πc and its time tc , streams S, D,
+bounds V, A, t′min , t′max , mean radius s̄, budget r
+1: M ← Eq. (37)
+2: if the camera depth mapping changed then
+3:
+re-project and sort S;
+▷ refresh static cache
+4:
+re-project and sort D; merge; post π
+5:
+πc ← π; tc ← t
+6:
+recompute gmin if r = 0
+7: else if r = 0 and 2M < gmin then
+8:
+acknowledge reuse; ▷ certified for quantized ordering
+9: else if r > 0 and M ≤ ⌈κrs̄∥n∥2 ⌉ then
+10:
+acknowledge reuse;
+▷ budget branch
+11: else
+12:
+re-project and sort D; merge; post π
+13:
+πc ← π; tc ← t
+14:
+recompute gmin if r = 0
+15: end if
+Therefore, independently sorting the static and dynamic
+streams and then merging them gives exactly the same result
+as globally sorting all Gaussians. Here, “exact” refers to the
+16-bit quantized depth ordering of Eq. (31). The key advantage
+of this separation is that the static stream can be cached. For
+gi = 0, Eq. (19) gives µi (t) = µi , so its depth key does
+not change with time. For a fixed camera, the static stream
+therefore needs to be projected and sorted only once. If the
+camera depth mapping changes, i.e., either n or [zmin , zmax ]
+changes, both the static cache and the committed global draw
+list are invalidated and recomputed. A tolerance-based camerachange test may be used in the relaxed interactive mode, but
+it is not part of the exact reuse guarantee described below.
+Depth Travel Bound. For a fixed camera, only Gaussians in
+the dynamic set D change position over time. The static set S
+keeps the same depth keys. Therefore, to determine whether
+the current draw order can be reused, we only need to bound
+how far the dynamic Gaussians can move in depth. From
+Eq. (19), the depth change of a dynamic Gaussian between
+a committed time tc and a query time t is
+zi (t) − zi (tc ) = (t − tc ) n⊤ vi
+ (34)
+1
++ (t − tc ) n⊤ ai ∆ti (t) + ∆ti (tc ) ,
+2
+
+2
+where we use ∆ti (t) −∆ti (tc )2 = (t−tc ) ∆ti (t)+∆ti (tc ) .
+Computing this displacement for every dynamic Gaussian each
+frame would remove the benefit of the certificate. We therefore
+precompute a few global bounds:
+V = max∥vi ∥2 ,
+i∈D
+A = max∥ai ∥2 ,
+i∈D
+t′min = min t′i ,
+t′max = max t′i ,
+i∈D
+ (35)
+τ (t) = max |t − t′min |, |t − t′max | .
+i∈D
+Here, V and A are the maximum velocity and acceleration
+magnitudes among all dynamic Gaussians, while τ (t) bounds
+their temporal offsets. These quantities can be collected once
+from the decoded dynamic Gaussians and do not depend on
+the camera or query time. Using the Cauchy–Schwarz and
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+11
+TABLE I
+C OST OF ONE PLAYBACK FRAME . T HE B = 216 COUNTING - SORT SCRATCH SPACE IS REUSED ACROSS FRAMES , WHILE THE STATIC STREAM IS
+RE - PROJECTED AND RE - SORTED ONLY WHEN THE CAMERA DEPTH MAPPING CHANGES .
+frame
+committed, Eq. (33)
+reused, Eq. (41)
+worker
+main thread
+payload
+O(N + B): projection, sorts, merge
+O(1) certificate
+O(N ) index upload
+—
+4N bytes
+O(1)
+triangle inequalities gives a common depth-motion bound for
+every i ∈ D:
+∆z (t) = |t − tc | ∥n∥2
+
+
+1
+× V + A τ (t) + τ (tc ) ,
+2
+(36)
+such that
+|zi (t) − zi (tc )| ≤ ∆z (t).
+We then convert this depth bound into the quantized key space.
+Since |⌊x⌋ − ⌊y⌋| ≤ ⌈|x − y|⌉ and clipping cannot increase the
+difference, every dynamic Gaussian satisfies
+
+
+|qi (t) − qi (tc )| ≤ M (t),
+M (t) = κ ∆z (t) .
+(37)
+Static Gaussians have zero key change. Importantly, M (t) is
+computed only from a few precomputed scalars and therefore
+has constant per-frame cost, independent of the number of
+dynamic Gaussians.
+Exact Reuse. We now use the motion bound to determine
+whether the committed draw list can be reused exactly. Let πc
+be the draw list computed at time tc , and let π(t) be the draw
+list that would be obtained by sorting again at time t. Only
+neighboring pairs involving at least one dynamic Gaussian can
+change their relative order. We therefore define
+
+Kc = k : πc (k) ∈ D or πc (k + 1) ∈ D ,
+
+(38)
+gmin = min qπc (k+1) (tc ) − qπc (k) (tc ) .
+k∈Kc
+Thus, gmin is the smallest depth-key gap between neighboring
+Gaussians for which at least one Gaussian can move. Static–
+static pairs are ignored because their relative order cannot
+change for a fixed camera. If two relevant Gaussians already
+share the same key, then gmin = 0 and reuse is conservatively
+rejected. Because every dynamic key can move by at most
+M (t), the committed order is guaranteed to remain unchanged
+whenever
+2M (t) < gmin .
+(39)
+When this condition holds,
+πc = π(t),
+so reusing πc produces exactly the same 16-bit quantized
+draw order as sorting the scene again. This can be shown
+by contradiction. Assume that two adjacent Gaussians (u, v)
+in πc reverse their order at time t, such that qu (tc ) < qv (tc )
+but qv (t) < qu (t). At least one of them must be dynamic,
+because the keys of a static–static pair do not change. Since
+each movable key can change by at most M (t),
+qv (tc ) ≤ qv (t) + M (t) < qu (t) + M (t)
+≤ qu (tc ) + 2M (t).
+(40)
+Therefore, qv (tc ) − qu (tc ) < 2M (t), which contradicts
+Eq. (39). Hence no relevant adjacent pair can reverse its order,
+and the committed draw list remains identical to the newly
+sorted list. The strict inequality also prevents a moving pair
+from collapsing to the same key, preserving the row-id tiebreaking rule used by the renderer.
+Budget Reuse. The exact test can be conservative for dense
+scenes because it depends on the smallest relevant depthkey gap. We therefore provide an optional relaxed mode
+that measures the allowed depth motion relative to the mean
+Gaussian radius s̄. The complete reuse policy is
+(
+[ 2M (t) < gmin ] ,
+r = 0 (certified),
+reuse(t) =
+[ M (t) ≤ ⌈κ r s̄ ∥n∥2 ⌉ ] , r > 0 (budget).
+(41)
+Here, s̄ is the mean Gaussian radius computed once from the
+decoded scales, and r specifies the tolerated depth motion in
+units of this radius. The r = 0 case gives the exact certificate
+of Eq. (39). For r > 0, the test is a practical relaxation and
+may allow small local ordering changes. We use r = 0.5 mean
+radii as the default setting in our mobile viewer.
+When a frame is reused, the worker directly keeps the
+committed draw list. It performs no primitive re-projection,
+counting sort, or stream merge, and returns only a constantsize acknowledgement. The main thread consequently keeps
+the existing GPU index buffer and skips the index upload.
+Since a newly committed draw list contains one 32-bit index
+per Gaussian, it requires 4N bytes of transfer, whereas a
+reused frame requires only O(1) communication. Table I
+summarizes the two cases.
+E. Implementation
+Deployment on Mobiles: To enable cross-platform real-time
+rendering, we introduce a WebGL-based rendering framework
+for our Mobile-4DGS. Unlike traditional CUDA-dependent
+pipelines, our approach leverages the ubiquitous WebGL API
+to achieve real-time rendering directly within browsers, without external dependencies. To address the non-commutative
+nature of alpha-compositing, we implement a decoupled sorting strategy. By offloading the depth-sorting of millions of
+Gaussians to an asynchronous WebWorker and using the CPU
+for the visibility order update, we can break through the 120
+display FPS limit in the rendering loop. This framework significantly reduces the barrier for navigable 3D environments,
+providing a cross-platform solution for real-time rendering.
+V. E XPERIMENTS
+A. Implementation Details
+We train our proposed Mobile-4DGS with 30k iterations,
+following the vanilla 3DGS, without pretraining or distilla-
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+12
+TABLE II
+C OMPREHENSIVE EVALUATION ON THE MOBILE DEVICE WITH S NAPDRAGON 8 G EN 3 GPU ON THE M IP -N E RF 360 DATASET [79]. T O FACILITATE
+A COMPREHENSIVE ANALYSIS OF F LUX -GS, SCENES ARE CATEGORIZED INTO INDOOR AND OUTDOOR SUBSETS . #G DENOTES THE NUMBER OF
+G AUSSIAN PRIMITIVES . 3DGS* REPRESENTS THE QUANTIZED VERSION THROUGH H UFFMAN ENCODING FOR MOBILE RENDERING . M OBILE -GS*
+DENOTES THE VERSION OF M OBILE -GS [2] WITHOUT MLP IN THE INFERENCE STAGE . W E COMPARE WITH THIS VERSION WITHOUT MLP FOR
+FAIRNESS . T HE BEST AND SECOND - BEST RESULTS ARE HIGHLIGHTED .
+Category
+Method & Metrics
+PSNR↑
+#G ×106 ↓
+Indoor
+Storage (MB)↓
+FPS↑
+Train (min)↓
+PSNR↑
+#G ×106 ↓
+Outdoor
+Storage (MB)↓
+3DGS [1]
+30.41
+1.45
+3DGS*
+Speedy-Splat [27]
+C3DGS [28]
+LocoGS-S [73]
+30.04
+30.11
+30.01
+30.08
+1.45
+0.37
+0.75
+0.82
+478
+-
+27
+24.61
+3.14
+46
+64
+21
+6.1
+11
+21
+18
+13
+27
+14
+31
+46
+24.39
+24.41
+24.38
+24.31
+3.14
+0.56
+0.91
+1.41
+Mobile-GS [2]
+30.37
+0.38
+3.5
+Mobile-GS*
+29.58
+0.38
+3.4
+131
+86
+24.51
+142
+64
+23.74
+Flux-GS
+30.22
+0.22
+2.1
+147
+11
+Mobile-4DGS (Ours)
+30.47
+0.27
+2.8
+143
+12
+FPS↑
+Train (min)↓
+1361
+-
+36
+85
+88
+34
+10
+5
+14
+13
+19
+36
+13
+45
+61
+0.58
+5.5
+114
+136
+0.58
+5.4
+128
+114
+24.45
+0.48
+4.6
+132
+11
+24.42
+0.46
+4.3
+130
+12
+TABLE III
+Q UANTITATIVE EVALUATION OF STATE - OF - THE - ART LIGHT- WEIGHT G AUSSIAN - BASED METHODS ON THE REAL - WORLD DATASETS . W E REPORT
+PERFORMANCE ON THE TANK &T EMPLES [80] AND D EEP B LENDING [81] DATASETS .
+Dataset
+Method & Metrics
+PSNR↑
+SSIM↑
+Tanks&Temples
+LPIPS↓
+Storage (MB) ↓
+3DGS [1]
+23.14
+0.841
+0.183
+Speedy-Splat [27]
+23.08
+0.821
+0.241
+C3DGS [28]
+23.32
+0.831
+LocoGS-S [73]
+23.23
+Mobile-GS [2]
+23.09
+Mobile-GS*
+22.41
+Flux-GS
+23.27
+Mobile-4DGS (Ours)
+23.83
+FPS↑
+Train (min)↓
+PSNR↑
+SSIM↑
+LPIPS↓
+358.7
+-
+34
+29.41
+0.903
+0.243
+62.4
+16
+34
+29.11
+0.864
+0.309
+0.202
+21.8
+15
+49
+29.73
+0.900
+0.837
+0.204
+6.8
+21
+65
+29.76
+0.831
+0.208
+2.5
+124
+82
+29.93
+0.825
+0.227
+2.5
+129
+71
+0.827
+0.221
+2.4
+137
+11
+0.836
+0.216
+3.2
+132
+12
+tion. In the initial 3k iterations, we train with the thirdorder Spherical Harmonics. Then, we employ our proposed
+Monte Carlo Specular Energy Aggregator to obtain the firstorder SH representation from the previous third-order SH. For
+our proposed Monte Carlo Specular Energy Aggregator, we
+sample K = 2048 uniform points on a unit sphere. We only
+exert it once to obtain low-order SH representation. To obtain
+the first-order SH, we employ two MLPs initialized with one
+hidden layer (64 neurons) for the mapping. As to our proposed
+Attribute-Conditioned SH Enhancement module, this module
+is parameterized by 4 layers of MLPs with ReLU activation.
+The hidden neurons for these MLPs are (128, 64, 32, 12),
+respectively. As for our proposed Multi-view Alpha-based
+Densification and Pruning strategy. We sample 6 cameras for
+this strategy to make sure multi-view consistency. For the
+loss thresholds, we set τ + = 0.1 and τ − = 0.01 to identify
+regions of well-reconstructed and poorly-reconstructed. As for
+the quantile for importance and pruning, we set Q+
+τ = 0.6 and
+Q−
+=
+0.1.
+For
+the
+quantization,
+we
+leverage
+the
+same
+method
+τ
+as the previous Mobile-GS [2]. We train our proposed Mobile4DGS on an RTX 4090 GPU.
+Hardware Platform: We conduct all mobile-centric rendering
+experiments on a commercial smartphone equipped with the
+Qualcomm Snapdragon 8 Gen 3 GPU for static scenes and
+Deep Blending
+Storage (MB) ↓
+FPS↑
+Train (min)↓
+697.3
+-
+24
+71.2
+24
+16
+0.258
+24.7
+16
+35
+0.903
+0.251
+7.8
+14
+47
+0.906
+0.243
+4.6
+135
+75
+29.14
+0.895
+0.281
+4.5
+146
+63
+29.73
+0.898
+0.275
+1.9
+158
+10
+29.92
+0.902
+0.272
+2.2
+151
+12
+TABLE IV
+Q UANTITATIVE PERFORMANCE ON N3DV [82] DATASET. W E REPORT
+FPS RESULTS ON AN I P HONE 14 SMARTPHONE WITH THE A15 B IONIC
+CHIP. T HE BEST , SECOND BEST , AND THIRD BEST RESULTS ARE
+HIGHLIGHTED , RESPECTIVELY.
+Method
+SSIM↑
+SH ↓
+FPS↑
+#Gaussian ↓
+Storage (MB)↓
+Train (min) ↓
+Real-Time4DGS [83]
+0.949
+OMG4 [78]
+0.942
+3
+3
+2,770,350
+1701
+374
+3
+12
+283,297
+5.8
+Mobile-4DGS (Ours)
+0.945
+417
+1
+47
+285,707
+3.8
+62
+an iPhone 14/A15 for dynamic scenes. To ensure fair and
+reproducible evaluation, we measure rendering performance
+utilizing an offscreen benchmarking protocol, which breaks the
+screen display 120 FPS limit and UI overhead. Specifically,
+frames are rendered to an offscreen frame buffer, and the
+average FPS is computed over multiple consecutive runs after
+a short warm-up period to mitigate thermal and initialization
+effects. As for the desktop GPU, we use a single RTX 4090.
+B. Qualitative and Quantitative Results
+Static Evaluation and Mobile Performance: As detailed in
+Tables II and III, we evaluate Mobile-4DGS against stateof-the-art lightweight Gaussian Splatting variants, including
+3DGS [1], Speedy-Splat [27], C3DGS [28], LocoGS [73],
+and Mobile-GS [2] across the Mip-NeRF 360 [79], Tanks and
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+3DGS
+13
+Mobile-GS
+Mobile-4DGS (Ours)
+GT
+1.25 M Gaussians
+296 MB
+0.37 M Gaussians
+3.5 MB
+0.21M Gaussians
+2.3 MB
+Gaussians Points
+Storage
+2.05 M Gaussians
+485 MB
+0.27 M Gaussians
+2.6 MB
+0.26M Gaussians
+2.4 MB
+Gaussians Points
+Storage
+Fig. 6. Qualitative and efficiency comparison with previous state-of-the-art methods. We compare rendering quality, Gaussian number, and storage
+costs across 3DGS, Mobile-GS, and our Mobile-4DGS. Zoomed-in regions highlight details and structural consistency for clearer differentiation. Our method
+achieves comparable or superior visual fidelity while using significantly fewer Gaussians and substantially lower storage for real-time rendering on mobiles.
+The number of Gaussians and total model size are reported below each result, demonstrating the improved efficiency–quality trade-off of our approach.
+Temples [80], and Deep Blending [81] datasets. To ensure a
+fair evaluation of baseline rendering efficiency, we compare
+against a variant of Mobile-GS that omits the Multi-Layer
+Perceptron (MLP) during inference, as the MLP introduces
+significant computational overhead. Notably, our proposed
+method achieves a significant breakthrough in the trade-off
+between rendering fidelity and computational efficiency. The
+original 3DGS and its quantized counterpart 3DGS* incur
+substantial storage costs and exhibit slow rendering speed
+on the mobile platform. Mobile-4DGS maintains competitive
+image quality metrics while delivering fast FPS across all
+tested indoor and outdoor environments. Furthermore, by optimizing the Gaussian distribution and utilizing our proposed
+compressed first-order SH representation, our method achieves
+a low memory footprint, compressing entire scenes to very
+low storage costs. This minimal storage requirement makes it
+particularly well-suited for resource-constrained edge devices.
+Beyond inference efficiency, a key advantage of Mobile4DGS is its drastically reduced training time. Our model
+achieves convergence several times faster than prior state-ofthe-art methods, including Speedy-Splat and Mobile-GS. This
+accelerated convergence is directly attributed to our proposed
+multi-view alpha-based densification and pruning strategy,
+which minimizes the number of Gaussian primitives during
+optimization. Mobile-4DGS achieves state-of-the-art rendering
+efficiency, offering rapid training and minimal storage.
+Dynamic Assessment and Mobile Results: As shown in
+Table IV, Mobile-4DGS achieves a favorable balance between
+rendering quality and computational efficiency on the N3DV
+dataset [82] when evaluated on an iPhone 14 equipped with
+the A15 Bionic chip. Although Real-Time4DGS provides the
+highest overall reconstruction fidelity, it requires substantially
+greater storage and computational resources, resulting in limited rendering performance on the mobile platform. In contrast, Mobile-4DGS delivers the highest rendering throughput,
+the smallest storage footprint, and the shortest training time
+while maintaining competitive SSIM performance. Compared
+with OMG4, our method significantly improves rendering and
+training efficiency with a comparable number of Gaussian
+primitives. Overall, these results demonstrate the suitability
+of Mobile-4DGS for resource-constrained mobile deployment,
+offering an effective trade-off among visual quality, rendering
+speed, storage cost, and training efficiency.
+Qualitative Results: Fig. 6 provides a qualitative compar-
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+Real-Time4DGS
+14
+OMG4
+Mobile-4DGS (Ours)
+GT
+4.6 M Gaussians
+2852 MB
+0.37 M Gaussians
+7.5 MB
+0.33M Gaussians
+3.7 MB
+Gaussians Points
+Storage
+2.9 M Gaussians
+1836MB
+0.27 M Gaussians
+5.6 MB
+0.26M Gaussians
+3.2 MB
+Gaussians Points
+Storage
+Fig. 7. Qualitative and efficiency comparison with previous state-of-the-art methods for dynamic scenes on the N3DV dataset [82]. We compare
+rendering quality, Gaussian count, and storage overhead across Real-Time4DGS, OMG4, and Mobile-4DGS.
+ison of Mobile-4DGS against advanced methods, including
+3DGS [1], Speedy-Splat [27], and Mobile-GS [2]. While
+3DGS achieves high fidelity, its massive Gaussian count
+prohibits mobile deployment. Conversely, Speedy-Splat reduces primitives but introduces significant blurring in complex
+regions. Mobile-4DGS effectively bridges this gap. By optimizing the Gaussian distribution, our method preserves highfrequency details and sharp structural edges, such as mechanical components and textures, with greater clarity than previous methods. The rendered results of Real-Time4DGS [83],
+OMG4 [78], and our proposed Mobile-4DGS are compared
+with the corresponding ground-truth images, as depicted
+in Fig. 7. Enlarged regions highlight challenging dynamic
+content, including rapid hand motion, object interactions,
+and fine structural details. Mobile-4DGS produces visually
+faithful results with sharper boundaries and fewer motionrelated artifacts, while closely preserving the appearance of
+the ground truth. Moreover, it achieves this rendering quality
+using substantially fewer Gaussian primitives and considerably
+less storage than Real-Time4DGS, while also providing a
+more compact representation than OMG4. Across all of these
+scenarios, Mobile-4DGS consistently utilizes fewer primitives
+to approximate Ground Truth, yielding minimal storage requirements and enabling high-quality mobile rendering.
+C. Ablation Study
+We analyze the contribution of each component in Mobile4DGS by progressively disabling these components, including Monte Carlo Specular Energy Aggregator (MC-SEA),
+enhanced SH offset ∆c , and Multi-view Alpha-based Densification and Pruning strategy. The full model achieves the best
+trade-off between reconstruction quality and efficiency, attaining competitive PSNR while requiring lower storage costs,
+fewer Gaussian points, and delivering the fastest FPS on mobile hardware. Removing MC-SEA or the SH offset degrades
+reconstruction quality while maintaining similar efficiency,
+indicating their positive and complementary contributions.
+To ablate the proposed multi-view densification, we adopt
+the original single-view gradient-based densification [1] for
+replacement. Disabling multi-view densification substantially
+increases the number of Gaussians, memory usage, and storage
+cost. It significantly reduces FPS, demonstrating the critical
+role of our proposed multi-view densification for compact
+Gaussian structure. Similarly, removing multi-view pruning
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+15
+TABLE V
+A BLATION STUDY OF OUR M OBILE -4DGS ON THE M IP -N E RF 360 DATASET. MC-SEA DENOTES THE PROPOSED M ONTE C ARLO S PECULAR
+E NERGY AGGREGATOR . ∆c REPRESENTS THE SH OFFSET PREDICTED BY OUR ATTRIBUTE -C ONDITIONED SH E NHANCEMENT MODULE . W E ALSO
+ABLATE THE PROPOSED M ULTI - VIEW A LPHA - BASED D ENSIFICATION AND P RUNING .
+Method
+PSNR ↑
+Storage (MB) ↓
+Peak VRAM↓
+FPS↑
+#Points ×106 ↓
+Train (min) ↓
+Mobile-4DGS
+27.16
+3.9
+416
+132
+0.36
+12
+w/o MC-SEA
+26.72
+3.9
+416
+132
+0.36
+12
+w/o ∆c
+26.86
+3.9
+416
+132
+0.36
+10
+w/o Multi-view densify
+27.21
+18
+1725
+21
+1.37
+21
+w/o Multi-view prune
+27.19
+6.2
+641
+104
+0.59
+15
+Ground Truth
+Mobile-4DGS
+0th-order SH
+1st-order SH Rest
+∆c 1st-order SH offset
+Fig. 8. Decomposition of the spherical harmonic components. The visual results are rendered using Mobile-4DGS under different spherical harmonic (SH)
+configurations. The comparison illustrates the contribution of different SH components to view-dependent appearance modeling and highlights their effects
+on color fidelity, fine-grained details, and overall rendering quality.
+increases model size and reduces rendering speed, highlighting
+its importance in eliminating redundant primitives. Overall,
+these results demonstrate that our proposed components contribute to achieving an improved trade-off between quality and
+efficiency, and their combination is essential for high-quality
+real-time mobile rendering.
+Analysis of Spherical Harmonic Decomposition: Fig. 8
+illustrates the decomposition of our Spherical Harmonic (SH)
+components, validating the efficacy of our enhanced firstorder SH representation. We can find that the 0th-order SH
+in Mobile-4DGS primarily reconstructs the base diffuse color
+and global illumination of the scene, while the 1st-order and
+∆1st-order SH components are specialized to capture highfrequency structural variations and refine local context. These
+results demonstrate that our proposed first-order SH strategy
+effectively captures intricate textures and complex specular,
+enabling high-quality rendering that closely approximates the
+ground truth, even under mobile hardware.
+Ablation of the Depth-Order Certificate. Table VI evaluates
+the proposed depth-order certificate (DOC) under different
+reuse budgets. Separating static and dynamic primitives already reduces the ordering overhead compared with monolithic
+processing, while DOC further exploits temporal coherence by
+reusing previously committed depth orders. The exact setting
+(r = 0) provides strict order preservation but is conservative,
+whereas increasing r substantially improves the reuse rate
+and reduces both worker-side computation and index-buffer
+communication at the cost of a bounded depth-order deviation. Moreover, the higher reuse rate observed under denser
+frame requests demonstrates that DOC benefits naturally from
+stronger inter-frame temporal coherence. Overall, these results
+show that DOC provides a controllable trade-off between
+depth-order accuracy and rendering efficiency for dynamic
+mobile Gaussian Splatting.
+TABLE VI
+A BLATION OF THE DEPTH - ORDER CERTIFICATE (200 K G AUSSIANS , 8.1%
+ANIMATED , 6 S CLIP, 60 H Z PLAYBACK ). ms/s IS WORKER TIME SPENT ON
+PROJECTION , SORTING AND MERGING . MB/s IS INDEX - BUFFER UPLOAD .
+drift IS THE WORST DEPTH VIOLATION OF THE PRESENTED ORDER IN
+MEAN G AUSSIAN RADII .
+Policy
+reuse ↑
+ms/s ↓
+MB/s ↓
+∆ms/s ↓
+drift (r)
+Monolithic
+Two-stream (separation)
+DOC certified (r=0)
+DOC r=0.25
+0.0%
+0.0%
+0.6%
+65.5%
+124.7
+81.3
+104.1
+25.8
+23.2
+23.2
+23.1
+8.0
++53%
+—
++28%
+−68%
+0.01
+0.01
+0.01
+0.26
+DOC r=0.5
+81.0%
+13.9
+4.4
+−83%
+0.44
+DOC r=1
+90.2%
+7.2
+2.3
+−91%
+1.28
+DOC r=0.5 @60 Hz req.
+90.2%
+14.7
+4.5
+−82%
+0.64
+Fig. 9. Impact of Monte Carlo Sampling Points K on Reconstruction
+Quality. We evaluate PSNR across varying sampling densities on the MipNeRF 360 dataset. Performance follows an upward trend as K increases,
+with a notable saturation point appearing at K = 2048, indicating an optimal
+reconstruction fidelity.
+D. Monte Carlo K Sampling Point Analysis
+For sampling Density K, we investigate the sensitivity of
+our proposed method to the number of Monte Carlo sampling points K ∈ {64, . . . , 4096}. As illustrated in Fig. 9,
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+16
+special case of the same representation. Mobile-4DGS does not
+aim to dominate every unconstrained reconstruction metric;
+instead, it provides a favorable trade-off among visual fidelity,
+model size, training cost, and real-device throughput. The
+results demonstrate that continuous-time dynamic rendering
+can be deployed on mobile hardware using a model of only a
+few megabytes, while static scenes retain competitive quality
+and high rendering speed. We believe this unified design
+provides a practical basis for mobile novel-view rendering and
+volumetric video playback.
+R EFERENCES
+Fig. 10. Impact of the number of cameras in multi-view alpha-based
+densification. We analyze the scaling impact of varying camera counts in our
+multi-view densification strategy on the Mip-NeRF 360 dataset. While PSNR
+steadily improves and stabilizes with additional views, the total number of
+Gaussian primitives decreases significantly, demonstrating the effectiveness
+of our densification in avoiding aggressive densification while maintaining
+high-fidelity reconstruction.
+the reconstruction quality PSNR demonstrates a monotonic
+improvement as K increases from 64 to 2048. Specifically,
+we observe that increasing the density significantly reduces the
+variance inherent in the Monte Carlo estimator. In particular,
+lower sampling rates (K < 2048) result in sub-optimal
+approximations of the integral. Beyond this point (K = 4096),
+the gain in PSNR plateaus, suggesting that the estimator
+has converged. Given the linear increase in computational
+overhead associated with larger K, we adopt K = 2048 as the
+default configuration in our subsequent experiments to achieve
+a favorable rendering quality.
+E. Camera Count in Multi-view Alpha-based Densification
+To evaluate the robustness and efficiency of our multiview densification module, we conduct an ablation study by
+varying the number of input camera views from 2 to 12. As
+illustrated in Fig. 10, we observe a synergistic relationship
+between viewpoint coverage and representation efficiency.
+Specifically, increasing the camera count from 2 to 6 yields
+a significant PSNR improvement. Crucially, as the number of
+views increases, the total Gaussian count drops significantly.
+This suggests that stronger multi-view constraints allow our
+densification strategy to more accurately localize geometric
+primitives for densification, effectively avoiding overfitting
+and redundancy. Therefore, we choose to sample 6 views for
+our multi-view densification, resulting in a superior trade-off
+between rendering performance and training burden.
+VI. C ONCLUSION
+In this work, we presented Mobile-4DGS, a substantial journal extension of Mobile-GS and Flux-GS that unifies compact
+static and dynamic Gaussian Splatting within a deploymentoriented explicit representation. The framework follows a
+common design principle: appearance corrections are decoded
+and baked before deployment, primitive growth is controlled
+through multi-view guidance, and temporal variation is evaluated using elementary per-Gaussian operations rather than
+a deformation network. Static scenes arise as the zero-motion
+[1] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis, “3d gaussian
+splatting for real-time radiance field rendering,” ACM Transactions on
+Graphics (ToG), vol. 42, no. 4, pp. 1–14, 2023.
+[2] X. Du, Y. Wang, K. Zhan, and X. Yu, “Mobile-gs: Real-time gaussian
+splatting for mobile devices,” in The Fourteenth International Conference on Learning Representations, 2026.
+[3] X. Huang, Q. Zhang, Y. Feng, H. Li, and Q. Wang, “Ltm-nerf:
+Embedding 3d local tone mapping in hdr neural radiance field,” IEEE
+Transactions on Pattern Analysis and Machine Intelligence, vol. 46,
+no. 12, pp. 10944–10959, 2024.
+[4] X. Gao, J. Yang, J. Kim, S. Peng, Z. Liu, and X. Tong, “Mpsnerf: Generalizable 3d human rendering from multiview images,” IEEE
+Transactions on Pattern Analysis and Machine Intelligence, pp. 1–12,
+2022.
+[5] Z. Qu, O. Vengurlekar, M. Qadri, K. Zhang, M. Kaess, C. Metzler,
+S. Jayasuriya, and A. Pediredla, “Z-splat: Z-axis gaussian splatting
+for camera-sonar fusion,” IEEE Transactions on Pattern Analysis and
+Machine Intelligence, pp. 1–12, 2024.
+[6] Z. Chen, C. Wang, Y.-C. Guo, and S.-H. Zhang, “Structnerf: Neural
+radiance fields for indoor scenes with structural hints,” IEEE Transactions on Pattern Analysis and Machine Intelligence, vol. 45, no. 12,
+pp. 15694–15705, 2023.
+[7] W. Yifan, F. Serena, S. Wu, C. Öztireli, and O. Sorkine-Hornung,
+“Differentiable surface splatting for point-based geometry processing,”
+ACM Transactions on Graphics (TOG), vol. 38, no. 6, pp. 1–14, 2019.
+[8] G. Kopanas, T. Leimkühler, G. Rainer, C. Jambon, and G. Drettakis,
+“Neural point catacaustics for novel-view synthesis of reflections,” ACM
+Transactions on Graphics (TOG), vol. 41, no. 6, pp. 1–15, 2022.
+[9] M. Tancik, E. Weber, E. Ng, R. Li, B. Yi, J. Kerr, T. Wang, A. Kristoffersen, J. Austin, K. Salahi, A. Ahuja, D. McAllister, and A. Kanazawa,
+“Nerfstudio: A modular framework for neural radiance field development,” in ACM SIGGRAPH 2023 Conference Proceedings, SIGGRAPH
+’23, 2023.
+[10] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi,
+and R. Ng, “Nerf: Representing scenes as neural radiance fields for view
+synthesis,” Communications of the ACM, vol. 65, no. 1, pp. 99–106,
+2021.
+[11] Z. Chen, T. Funkhouser, P. Hedman, and A. Tagliasacchi, “Mobilenerf:
+Exploiting the polygon rasterization pipeline for efficient neural field
+rendering on mobile architectures,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pp. 16569–
+16578, 2023.
+[12] K. Zhou, W. Li, N. Jiang, X. Han, and J. Lu, “From nerflix to nerflix++:
+A general nerf-agnostic restorer paradigm,” IEEE Transactions on Pattern Analysis and Machine Intelligence, vol. 46, no. 5, pp. 3422–3437,
+2024.
+[13] Y.-J. Yuan, Y.-K. Lai, Y.-H. Huang, L. Kobbelt, and L. Gao, “Neural
+radiance fields from sparse rgb-d images for high-quality view synthesis,” IEEE Transactions on Pattern Analysis and Machine Intelligence,
+vol. 45, no. 7, pp. 8713–8728, 2023.
+[14] P. Hedman, P. P. Srinivasan, B. Mildenhall, C. Reiser, J. T. Barron, and
+P. Debevec, “Baking neural radiance fields for real-time view synthesis,”
+IEEE Transactions on Pattern Analysis and Machine Intelligence, pp. 1–
+12, 2024.
+[15] Y. Yan, H. Lin, C. Zhou, W. Wang, H. Sun, K. Zhan, X. Lang, X. Zhou,
+and S. Peng, “Street gaussians for modeling dynamic urban scenes,”
+arXiv preprint arXiv:2401.01339, 2024.
+[16] X. Du, H. Sun, M. Lu, T. Zhu, and X. Yu, “Dreamcar: Leveraging
+car-specific prior for in-the-wild 3d car reconstruction,” arXiv preprint
+arXiv:2407.16988, 2024.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+[17] X. Du, H. Sun, S. Wang, Z. Wu, H. Sheng, J. Ying, M. Lu, T. Zhu,
+K. Zhan, and X. Yu, “3drealcar: An in-the-wild rgb-d car dataset with
+360-degree views,” arXiv preprint arXiv:2406.04875, 2024.
+[18] H. Du, X. Yu, and L. Zheng, “Learning object relation graph and
+tentative policy for visual navigation,” in European Conference on
+Computer Vision, pp. 19–34, Springer, 2020.
+[19] H. Du, L. Li, Z. Huang, and X. Yu, “Object-goal visual navigation via
+effective exploration of relations among historical navigation states,”
+in Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pp. 2563–2573, 2023.
+[20] H. Du, X. Yu, and L. Zheng, “Vtnet: Visual transformer network for
+object goal navigation,” arXiv preprint arXiv:2105.09447, 2021.
+[21] Y. Jiang, C. Yu, T. Xie, X. Li, Y. Feng, H. Wang, M. Li, H. Lau, F. Gao,
+Y. Yang, et al., “Vr-gs: A physical dynamics-aware interactive gaussian
+splatting system in virtual reality,” in ACM SIGGRAPH 2024 Conference
+Papers, pp. 1–1, 2024.
+[22] X. Long, Y.-C. Guo, C. Lin, Y. Liu, Z. Dou, L. Liu, Y. Ma, S.-H. Zhang,
+M. Habermann, C. Theobalt, et al., “Wonder3d: Single image to 3d using
+cross-domain diffusion,” arXiv preprint arXiv:2310.15008, 2023.
+[23] M. Liu, C. Xu, H. Jin, L. Chen, Z. Xu, H. Su, et al., “One-2-3-45: Any
+single image to 3d mesh in 45 seconds without per-shape optimization,”
+arXiv preprint arXiv:2306.16928, 2023.
+[24] Q. Shen, X. Yang, and X. Wang, “Anything-3d: Towards single-view
+anything reconstruction in the wild,” arXiv preprint arXiv:2304.10261,
+2023.
+[25] X. Du, Y. Wang, H. Li, B. Wang, X. Sun, and X. Yu, “Monte carlo
+energy aggregation for mobile 3d gaussian splatting,” in Proceedings of
+the European conference on computer vision (ECCV), pp. 1–1, 2026.
+[26] G. Wu, T. Yi, J. Fang, L. Xie, X. Zhang, W. Wei, W. Liu, Q. Tian, and
+X. Wang, “4d gaussian splatting for real-time dynamic scene rendering,”
+in Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pp. 20310–20320, 2024.
+[27] A. Hanson, A. Tu, G. Lin, V. Singla, M. Zwicker, and T. Goldstein,
+“Speedy-splat: Fast 3d gaussian splatting with sparse pixels and sparse
+primitives,” in Proceedings of the Computer Vision and Pattern Recognition Conference, pp. 21537–21546, 2025.
+[28] J. C. Lee, D. Rho, X. Sun, J. H. Ko, and E. Park, “Compact 3d gaussian
+representation for radiance field,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pp. 21719–
+21728, 2024.
+[29] Y. Zhang, W. Jia, W. Niu, and M. Yin, “Gaussianspa: An” optimizingsparsifying” simplification framework for compact and high-quality 3d
+gaussian splatting,” in Proceedings of the Computer Vision and Pattern
+Recognition Conference, pp. 26673–26682, 2025.
+[30] Y. Liu, Z. Zhong, Y. Zhan, S. Xu, and X. Sun, “Maskgaussian: Adaptive
+3d gaussian representation from probabilistic masks,” in Proceedings of
+the Computer Vision and Pattern Recognition Conference, pp. 681–690,
+2025.
+[31] Q. Hou, R. Rauwendaal, Z. Li, H. Le, F. Farhadzadeh, F. Porikli,
+A. Bourd, and A. Said, “Sort-free gaussian splatting via weighted sum
+rendering,” in The Thirteenth International Conference on Learning
+Representations, 2025.
+[32] J. Chen, Y. Chen, Y. Zou, Y. Huang, P. Wang, Y. Liu, Y. Sun, and
+W. Wang, “Megs²: Memory-efficient gaussian splatting via spherical
+gaussians and unified pruning,” 2025.
+[33] Y.-H. Huang, Y.-T. Sun, Z. Yang, X. Lyu, Y.-P. Cao, and X. Qi, “Scgs: Sparse-controlled gaussian splatting for editable dynamic scenes,” in
+2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp. 4220–4230, IEEE, 2024.
+[34] Z. Yang, X. Gao, W. Zhou, S. Jiao, Y. Zhang, and X. Jin, “Deformable
+3d gaussians for high-fidelity monocular dynamic scene reconstruction,”
+in 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp. 20331–20341, IEEE, 2024.
+[35] V. Sitzmann, J. Thies, F. Heide, M. Nießner, G. Wetzstein, and M. Zollhofer, “Deepvoxels: Learning persistent 3d feature embeddings,” in
+Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pp. 2437–2446, 2019.
+[36] Z. Chen, A. Chen, G. Zhang, C. Wang, Y. Ji, K. N. Kutulakos, and
+J. Yu, “A neural rendering framework for free-viewpoint relighting,”
+in Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pp. 5599–5610, 2020.
+[37] G. Kopanas, J. Philip, T. Leimkühler, and G. Drettakis, “Point-based
+neural rendering with per-view optimization,” in Computer Graphics
+Forum, vol. 40, pp. 29–43, Wiley Online Library, 2021.
+[38] T. Müller, A. Evans, C. Schied, and A. Keller, “Instant neural graphics
+primitives with a multiresolution hash encoding,” arXiv:2201.05989,
+Jan. 2022.
+17
+[39] A. Chen, Z. Xu, A. Geiger, J. Yu, and H. Su, “Tensorf: Tensorial radiance
+fields,” arXiv preprint arXiv:2203.09517, 2022.
+[40] K. Zhang, G. Riegler, N. Snavely, and V. Koltun, “Nerf++: Analyzing
+and improving neural radiance fields,” arXiv preprint arXiv:2010.07492,
+2020.
+[41] T. Lu, M. Yu, L. Xu, Y. Xiangli, L. Wang, D. Lin, and B. Dai,
+“Scaffold-gs: Structured 3d gaussians for view-adaptive rendering,” in
+Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pp. 20654–20664, 2024.
+[42] K. Ren, L. Jiang, T. Lu, M. Yu, L. Xu, Z. Ni, and B. Dai, “Octree-gs: Towards consistent real-time rendering with lod-structured 3d gaussians,”
+arXiv preprint arXiv:2403.17898, 2024.
+[43] H. Li, J. Liu, M. Sznaier, and O. Camps, “3d-hgs: 3d half-gaussian splatting,” in Proceedings of the Computer Vision and Pattern Recognition
+Conference, pp. 10996–11005, 2025.
+[44] S. Kheradmand, D. Rebain, G. Sharma, W. Sun, J. Tseng, H. Isack,
+A. Kar, A. Tagliasacchi, and K. M. Yi, “3d gaussian splatting as markov
+chain monte carlo,” arXiv preprint arXiv:2404.09591, 2024.
+[45] S. Rota Bulò, L. Porzi, and P. Kontschieder, “Revising densification
+in gaussian splatting,” in European Conference on Computer Vision,
+pp. 347–362, Springer, 2024.
+[46] L. Höllein, A. Božič, M. Zollhöfer, and M. Nießner, “3dgs-lm: Faster
+gaussian-splatting optimization with levenberg-marquardt,” in Proceedings of the IEEE/CVF International Conference on Computer Vision,
+pp. 26740–26750, 2025.
+[47] A. Ranganathan, “The levenberg-marquardt algorithm,” Tutoral on LM
+algorithm, vol. 11, no. 1, pp. 101–110, 2004.
+[48] Z. Zhang, “Improved adam optimizer for deep neural networks,” in 2018
+IEEE/ACM 26th international symposium on quality of service (IWQoS),
+pp. 1–2, Ieee, 2018.
+[49] S. S. Mallick, R. Goel, B. Kerbl, M. Steinberger, F. V. Carrasco, and
+F. De La Torre, “Taming 3dgs: High-quality radiance fields with limited
+resources,” in SIGGRAPH Asia 2024 Conference Papers, pp. 1–11, 2024.
+[50] X. Du, Y. Wang, and X. Yu, “Mvgs: Multi-view-regulated gaussian
+splatting for novel view synthesis,” arXiv preprint arXiv:2410.02103,
+2024.
+[51] L. Radl, M. Steiner, M. Parger, A. Weinrauch, B. Kerbl, and M. Steinberger, “Stopthepop: Sorted gaussian splatting for view-consistent realtime rendering,” ACM Transactions on Graphics (TOG), vol. 43, no. 4,
+pp. 1–17, 2024.
+[52] G. Feng, S. Chen, R. Fu, Z. Liao, Y. Wang, T. Liu, B. Hu, L. Xu, Z. Pei,
+H. Li, et al., “Flashgs: Efficient 3d gaussian splatting for large-scale and
+high-resolution rendering,” in Proceedings of the Computer Vision and
+Pattern Recognition Conference, pp. 26652–26662, 2025.
+[53] M. Niemeyer, F. Manhardt, M.-J. Rakotosaona, M. Oechsle, D. Duckworth, R. Gosula, K. Tateno, J. Bates, D. Kaeser, and F. Tombari,
+“Radsplat: Radiance field-informed gaussian splatting for robust realtime rendering with 900+ fps,” in 2025 International Conference on 3D
+Vision (3DV), pp. 134–144, IEEE, 2025.
+[54] K. Ye, Q. Hou, and K. Zhou, “3d gaussian splatting with deferred
+reflection,” arXiv preprint arXiv:2404.18454, 2024.
+[55] B. Huang, Z. Yu, A. Chen, A. Geiger, and S. Gao, “2d gaussian splatting
+for geometrically accurate radiance fields,” in ACM SIGGRAPH 2024
+Conference Papers, pp. 1–11, 2024.
+[56] Z. Fan, K. Wang, K. Wen, Z. Zhu, D. Xu, Z. Wang, et al., “Lightgaussian: Unbounded 3d gaussian compression with 15x reduction and
+200+ fps,” Advances in neural information processing systems, vol. 37,
+pp. 140138–140158, 2024.
+[57] G. Fang and B. Wang, “Mini-splatting: Representing scenes with a
+constrained number of gaussians,” in European Conference on Computer
+Vision, pp. 165–181, Springer, 2024.
+[58] Z. Zhang, W. Hu, Y. Lao, T. He, and H. Zhao, “Pixel-gs: Density control
+with pixel-aware gradient for 3d gaussian splatting,” arXiv preprint
+arXiv:2403.15530, 2024.
+[59] Y. Chen, M. Li, Q. Wu, W. Lin, M. Harandi, and J. Cai, “Pcgs:
+Progressive compression of 3d gaussian splatting,” arXiv preprint
+arXiv:2503.08511, 2025.
+[60] S. Girish, K. Gupta, and A. Shrivastava, “Eagles: Efficient accelerated
+3d gaussians with lightweight encodings,” in European Conference on
+Computer Vision, pp. 54–71, Springer, 2024.
+[61] S. Ren, T. Wen, Y. Fang, and B. Lu, “Fastgs: Training 3d gaussian
+splatting in 100 seconds,” in Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pp. 26094–26103, 2026.
+[62] A. Hanson, A. Tu, V. Singla, M. Jayawardhana, M. Zwicker, and
+T. Goldstein, “Pup 3d-gs: Principled uncertainty pruning for 3d gaussian
+splatting,” in Proceedings of the Computer Vision and Pattern Recognition Conference, pp. 5949–5958, 2025.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2026
+[63] X. Liu, X. Wu, P. Zhang, S. Wang, Z. Li, and S. Kwong, “Compgs:
+Efficient 3d scene representation via compressed gaussian splatting,” in
+Proceedings of the 32nd ACM International Conference on Multimedia,
+pp. 2936–2944, 2024.
+[64] M. S. Ali, S.-H. Bae, and E. Tartaglione, “Elmgs: Enhancing memory and computation scalability through compression for 3d gaussian
+splatting,” in 2025 IEEE/CVF Winter Conference on Applications of
+Computer Vision (WACV), pp. 2591–2600, IEEE, 2025.
+[65] P. Papantonakis, G. Kopanas, B. Kerbl, A. Lanvin, and G. Drettakis,
+“Reducing the memory footprint of 3d gaussian splatting,” Proceedings
+of the ACM on Computer Graphics and Interactive Techniques, vol. 7,
+no. 1, pp. 1–17, 2024.
+[66] S. Xie, W. Zhang, C. Tang, Y. Bai, R. Lu, S. Ge, and Z. Wang, “Mesongs:
+Post-training compression of 3d gaussians via efficient attribute transformation,” in European Conference on Computer Vision, pp. 434–452,
+Springer, 2024.
+[67] J. C. Lee, J. H. Ko, and E. Park, “Optimized minimal 3d gaussian
+splatting,” arXiv preprint arXiv:2503.16924, 2025.
+[68] Y. Chen, Q. Wu, W. Lin, M. Harandi, and J. Cai, “Hac: Hash-grid
+assisted context for 3d gaussian splatting compression,” in European
+Conference on Computer Vision, pp. 422–438, Springer, 2024.
+[69] Y. Chen, Q. Wu, W. Lin, M. Harandi, and J. Cai, “Hac++: Towards 100x
+compression of 3d gaussian splatting,” arXiv preprint arXiv:2501.12255,
+2025.
+[70] Y. Wang, Z. Li, L. Guo, W. Yang, A. Kot, and B. Wen, “Contextgs: Compact 3d gaussian splatting with anchor level context model,” Advances in
+neural information processing systems, vol. 37, pp. 51532–51551, 2024.
+[71] X. Sun, J. C. Lee, D. Rho, J. H. Ko, U. Ali, and E. Park, “F-3dgs:
+Factorized coordinates and representations for 3d gaussian splatting,” in
+Proceedings of the 32nd ACM International Conference on Multimedia,
+pp. 7957–7965, 2024.
+[72] S. Li, C. Wu, H. Li, X. Gao, Y. Liao, and L. Yu, “Gscodec studio: A
+modular framework for gaussian splat compression,” IEEE Transactions
+on Circuits and Systems for Video Technology, 2026.
+[73] S. Shin, J. Park, and S. Cho, “Locality-aware gaussian compression for
+fast and high-quality rendering,” arXiv preprint arXiv:2501.05757, 2025.
+[74] W. Gan, H. Xu, Y. Huang, S. Chen, and N. Yokoya, “V4d: Voxel
+for 4d novel view synthesis,” IEEE Transactions on Visualization and
+Computer Graphics, vol. 30, no. 2, pp. 1579–1591, 2023.
+[75] A. Cao and J. Johnson, “Hexplane: A fast representation for dynamic
+scenes,” in Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pp. 130–141, 2023.
+[76] Y. Duan, F. Wei, Q. Dai, Y. He, W. Chen, and B. Chen, “4d-rotor
+gaussian splatting: towards efficient novel view synthesis for dynamic
+scenes,” in ACM SIGGRAPH 2024 Conference Papers, pp. 1–11, 2024.
+[77] X. Zhang, Z. Liu, Y. Zhang, X. Ge, D. He, T. Xu, Y. Wang, Z. Lin,
+S. Yan, and J. Zhang, “Mega: Memory-efficient 4d gaussian splatting
+for dynamic scenes,” in Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pp. 27828–27838, 2025.
+[78] M. Lee, B. Lee, L. Y. Lee, E. Lee, S. Kim, S. Song, J. C. Lee, J. H. Ko,
+J. Park, and E. Park, “Optimized minimal 4d gaussian splatting,” 2025.
+[79] J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and P. Hedman,
+“Mip-nerf 360: Unbounded anti-aliased neural radiance fields,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pp. 5470–5479, 2022.
+[80] A. Knapitsch, J. Park, Q.-Y. Zhou, and V. Koltun, “Tanks and temples:
+Benchmarking large-scale scene reconstruction,” ACM Transactions on
+Graphics, vol. 36, no. 4, 2017.
+[81] P. Hedman, J. Philip, T. Price, J.-M. Frahm, G. Drettakis, and G. Brostow, “Deep blending for free-viewpoint image-based rendering,” ACM
+Transactions on Graphics (ToG), vol. 37, no. 6, pp. 1–15, 2018.
+[82] T. Li, M. Slavcheva, M. Zollhoefer, S. Green, C. Lassner, C. Kim,
+T. Schmidt, S. Lovegrove, M. Goesele, R. Newcombe, et al., “Neural 3d
+video synthesis from multi-view video,” in 2022 IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), pp. 5511–5521,
+IEEE, 2022.
+[83] Z. Yang, H. Yang, Z. Pan, and L. Zhang, “Real-time photorealistic
+dynamic scene representation and rendering with 4d gaussian splatting,”
+in International Conference on Learning Representations, vol. 2024,
+pp. 9142–9159, 2024.
+Xiaobiao Du is currently pursuing a Ph.D degree at the University of
+Technology Sydney, Australia. His research interests include static 3D re-
+18
+construction, 4D reconstruction, 3D object generation, and video generation.
+He is particularly interested in improving few-shot 3D reconstruction with
+generative prior.
+Zhen Fang is the Australian DECRA Fellow, and he received the PhD
+degree in the Faculty of Engineering and Information Technology, University
+of Technology Sydney, Ultimo, Australia. He is a member of the Decision
+Systems and e-Service Intelligence (DeSI) Research Laboratory, Australian
+Artificial Intelligence Institute, University of Technology Sydney (UTS).
+Currently, he is the lecturer at UTS. His research interests include transfer
+learning and out-of-distribution learning. He has published over 60 papers
+in top-tier conferences and journals, e.g., IEEE TPAMI, IEEE TNNLS,
+IEEE TCYB, ICML, NeurIPS, and ICLR. He received the NeurIPS 2022
+Outstanding Paper Award, the 2023 Australasian AI Emerging Researcher
+Award and NeurIPS 2025 Top Area Chair.
+Tianqing Zhu received the B.Eng. and M.Eng. degrees from Wuhan University, Wuhan, China in 2000 and 2004 respectively, and the Ph.D. degree in
+computer science from Deakin University, Australia, in 2014. She is currently
+a Professor and the Dean with the Faculty of Data Science at the City
+University of Macau. Before that, she was an Associate Professor with the
+School of Computer Science, University of Technology Sydney, and a Lecturer
+with the School of Information Technology, Deakin University, from 2014
+to 2018. Her research interests include privacy-preserving and AI security.
+She has published more than 400 papers in refereed international journals
+and refereed international conferences proceedings, including many articles
+in IEEE Transactions and journals.
+Richard Hartley (Fellow, IEEE) is a member of the computer vision group
+with the Research School of Engineering, ANU, where he has been since
+January, 2001. He is also a member of the computer vision research group in
+NICTA. He worked with the GE Research and Development Center from 1985
+to 2001, working first in VLSI design, and later in computer vision. He became
+involved with Image Understanding and Scene Reconstruction working with
+GE’s Simulation and Control Systems Division. He is an author (with A.
+Zisserman) of the book Multiple View Geometry in Computer Vision.
+Xin Yu received the BS degree in electronic engineering from the University
+of Electronic Science and Technology of China, Chengdu, China, in 2009,
+the PhD degree from the Department of Electronic Engineering, Tsinghua
+University, Beijing, China, in 2015, and the PhD degree from the College of
+Engineering and Computer Science, Australian National University, Canberra,
+Australia, in 2019. He is currently a senior lecturer with the University
+of Queensland. His research interests include computer vision and image
+processing.

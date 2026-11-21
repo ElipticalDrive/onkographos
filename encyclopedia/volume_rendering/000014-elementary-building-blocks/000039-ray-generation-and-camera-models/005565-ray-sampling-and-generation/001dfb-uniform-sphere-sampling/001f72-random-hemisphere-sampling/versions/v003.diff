@@ -1,0 +1,236 @@
+--- v002.md
++++ v003.md
+@@ -4,97 +4,125 @@
+ 
+ ## Overview
+-Random Hemisphere Sampling generates a random unit vector uniformly distributed within a hemisphere oriented around a given normal vector [S2, S4, unofficial]. It is primarily used to compute indirect lighting contributions at a surface point by sampling the hemisphere above the surface normal and recursively tracing rays [S2, unofficial]. It sets itself apart from its parent [Uniform Sphere Sampling](1669-uniform-sphere-sampling.md) by restricting the sample space to a half-sphere, which is essential for surface-based shading models where light only interacts with one side of a surface [G]. Unlike [Rejection Sampling for Uniform Sphere Sampling](3286-rejection-sampling-for-uniform-sphere-sampling.md), which discards samples falling outside the hemisphere, this method directly constructs valid hemisphere directions, ensuring 100% efficiency per sample generation attempt [G].
++Random Hemisphere Sampling generates a random direction uniformly distributed over the upper hemisphere oriented around a given surface normal vector $\mathbf{n}$ [S2, S4, unofficial]. It solves the problem of scattering rays diffusely from a surface or volume boundary, ensuring that all generated directions point into the visible half-space defined by the normal [S1, unofficial]. It sets itself apart from its parent [Uniform Sphere Sampling](1669-uniform-sphere-sampling.md) by restricting the domain to a hemisphere, and from [Cosine-Weighted Hemisphere Sampling](2283-cosine-weighted-hemisphere-sampling.md) by maintaining a uniform probability density function (PDF) rather than biasing samples toward the normal [S2, S4, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `normal`: The surface normal vector $\mathbf{n}$, assumed to be normalized ($|\mathbf{n}| = 1$) [S2, S4, unofficial].
+-- `rng`: A source of pseudo-random numbers, typically providing two independent uniform random values in $[0, 1)$ [G].
++*   $\mathbf{n}$: The surface normal vector (unit length).
++*   $r_1, r_2$: Two independent uniform random numbers in the range $[0, 1)$ [S2, unofficial].
++*   $i$: An integer index for hash-based generation (optional, used in some implementations) [S4, unofficial].
+ 
+ **Outputs:**
+-- `direction`: A unit vector $\mathbf{d}$ uniformly distributed in the hemisphere defined by $\mathbf{n}$ (i.e., $\mathbf{d} \cdot \mathbf{n} \ge 0$) [S4, unofficial].
++*   $\mathbf{d}$: A unit vector representing the sampled direction on the upper hemisphere relative to $\mathbf{n}$.
+ 
+ **Data Structures:**
+-- The method operates on 3D vectors. No persistent data structures are required; the output is a single vector [G].
++*   No complex data structures are required. The method operates on 3D vectors and scalar random values.
+ 
+ **Steps:**
+-1. Generate two independent uniform random numbers $u_1, u_2 \in [0, 1)$ from the random number generator [G].
+-2. Compute the polar angle $\phi$ and the radius $r$ in the local tangent plane:
+-   $$ \phi = 2\pi u_1 $$
+-   $$ r = \sqrt{1 - u_2^2} $$
+-   [S2, unofficial]
+-3. Construct the direction vector in a local coordinate system where the z-axis aligns with the normal:
+-   $$ \mathbf{d}_{local} = (\cos(\phi) \cdot r, \sin(\phi) \cdot r, u_2) $$
+-   [S2, unofficial]
+-4. Transform $\mathbf{d}_{local}$ to world space using a basis constructed from `normal`. Let $\mathbf{t}$ and $\mathbf{b}$ be two orthogonal vectors perpendicular to $\mathbf{n}$ such that $(\mathbf{t}, \mathbf{b}, \mathbf{n})$ forms a right-handed orthonormal basis [G].
+-   $$ \mathbf{d} = \mathbf{t} \cdot d_{local,x} + \mathbf{b} \cdot d_{local,y} + \mathbf{n} \cdot d_{local,z} $$
+-   [G]
+-5. Return $\mathbf{d}$.
++There are two primary algorithmic approaches found in the sources: cylindrical coordinate conversion and reflection-based rejection.
+ 
+-**Alternative Implementation (Reflection-based):**
+-Some sources describe generating a random direction on the full sphere and reflecting it [S4, unofficial].
+-1. Generate a random direction $\mathbf{r}$ on the unit sphere [G].
+-2. Compute the reflection of $\mathbf{r}$ across the plane defined by $\mathbf{n}$:
+-   $$ \mathbf{d} = \mathbf{r} - 2(\mathbf{r} \cdot \mathbf{n})\mathbf{n} $$
+-   [S4, unofficial]
+-This method ensures the resulting vector points into the hemisphere defined by $\mathbf{n}$ if $\mathbf{r}$ was uniformly distributed on the sphere [G].
++### Method 1: Cylindrical Coordinate Conversion [S2, unofficial]
++This method constructs the vector directly in a local coordinate system where the normal aligns with the Z-axis, then rotates it.
+ 
+-**PDF:**
+-The probability density function (PDF) for a uniform distribution over the hemisphere of solid angle $2\pi$ is:
+-$$ p(\mathbf{d}) = \frac{1}{2\pi} \quad \text{for } \mathbf{d} \cdot \mathbf{n} \ge 0 $$
+-[G] Source [S3, unofficial] calculates PDF as $1/(4\pi)$ and uses `sample_mul = pdf * (config::hemisphere_u * config::hemisphere_t)` [S3, unofficial].
++1.  Generate two random numbers $r_1, r_2 \in [0, 1)$.
++2.  Compute the radius $r$ in the XY plane:
++    $$ r = \sqrt{1.0 - r_1^2} $$
++3.  Compute the azimuthal angle $\phi$:
++    $$ \phi = 2\pi r_2 $$
++4.  Construct the direction vector $\mathbf{d}_{local}$ in the local frame (where $\mathbf{n} = (0,0,1)$):
++    $$ \mathbf{d}_{local} = (\cos(\phi) \cdot r, \sin(\phi) \cdot r, r_1) $$
++5.  Rotate $\mathbf{d}_{local}$ to align with the world-space normal $\mathbf{n}$. This requires constructing an orthonormal basis $\{\mathbf{T}, \mathbf{B}, \mathbf{N}\}$ where $\mathbf{N}=\mathbf{n}$, and computing:
++    $$ \mathbf{d} = \mathbf{T} \cdot (\cos(\phi) \cdot r) + \mathbf{B} \cdot (\sin(\phi) \cdot r) + \mathbf{N} \cdot r_1 $$
++    *Note: The sources [S2, unofficial] provide the local vector construction but assume the rotation is handled by the caller or a helper function not detailed in the snippet. The general implementation of this rotation is standard [G].*
++
++### Method 2: Reflection / Rejection [S1, S4, unofficial]
++This method generates a random direction on the full sphere and reflects it if it points below the horizon.
++
++1.  Generate a random direction $\mathbf{v}$ uniformly distributed on the unit sphere.
++    *   *Implementation A (Rejection):* Generate a random unit vector. If $\mathbf{v} \cdot \mathbf{n} < 0$, return $-\mathbf{v}$. Otherwise, return $\mathbf{v}$ [S1, unofficial].
++    *   *Implementation B (Hash/Reflection):* Compute a hash-based random vector $\mathbf{v} = \text{normalize}(\text{Hash33}(\mathbf{n} + i) - \mathbf{0.5})$. Reflect $\mathbf{v}$ across the plane defined by $\mathbf{n}$ using the reflection formula $\mathbf{d} = \mathbf{v} - 2(\mathbf{v} \cdot \mathbf{n})\mathbf{n}$ [S4, unofficial].
++2.  Return $\mathbf{d}$.
++
++**PDF Calculation:**
++For uniform hemisphere sampling, the probability density function is constant over the hemisphere area $2\pi$:
++$$ p(\omega) = \frac{1}{2\pi} $$
++Some implementations calculate a combined PDF for multiple samples or specific configurations as $\frac{1}{4\pi}$ if treating the hemisphere as half of a sphere in a specific context, but the standard uniform density is $1/(2\pi)$ [S3, unofficial].
+ 
+ **Parameters:**
+-- `config::hemisphere_u`: Number of U samples for hemisphere sampling [S3, unofficial].
+-- `config::hemisphere_t`: Number of T samples for hemisphere sampling [S3, unofficial].
+-- `config::ambience`: Enum controlling ambient shading mode; `AMBIENT_FULL` triggers hemisphere sampling [S3, unofficial].
++*   `config::hemisphere_u`: Number of U samples for hemisphere sampling [S3, unofficial].
++*   `config::hemisphere_t`: Number of T samples for hemisphere sampling [S3, unofficial].
++*   `config::ambience`: Enum controlling ambient shading mode; `AMBIENT_FULL` triggers hemisphere sampling [S3, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision Errors:** When computing the local basis, if the normal is aligned with the world up vector, standard cross-product methods for generating tangent vectors may fail [G].
+-- **Self-Intersection:** The ray origin must be offset from the surface along the normal to prevent self-intersection [G]. Source [S3, unofficial] offsets the ray origin by `smpl * 0.0` to prevent self-intersection or precision errors at the surface [S3, unofficial].
+-- **Degenerate Normal:** If the normal is a zero vector, the method is undefined [G]. Guard against this by returning a default direction or the normal itself if it is near-zero [S1, unofficial].
++*   **Self-Intersection:** When tracing rays from the sampled direction, the ray origin must be offset slightly along the normal to prevent self-intersection or precision errors. A common offset is `hit.point + normal * epsilon` or `hit.point + sample * 0.0` (where 0.0 implies a minimal epsilon offset) [S3, S5, unofficial].
++*   **Degenerate Normals:** If the normal's z-component $|n_z|$ is close to 1 (e.g., $\ge 0.999$), the cross product used to build the tangent basis becomes degenerate. The code should handle this by using a different reference vector (e.g., $\{1,0,0\}$) for the cross product [S7, unofficial].
++*   **Zero Vector:** If the computed scatter direction is near zero (magnitude $< 10^{-8}$), it should be reset to the normal vector [S1, unofficial].
+ 
+-**Pseudocode:**
++**Pseudocode (Method 1 - Cylindrical):**
++
+ ```python
+ import math
++import random
+ 
+-def random_hemisphere_sampling(normal, rng):
++def random_hemisphere_sampling(normal, r1, r2):
+     """
+-    Generates a random direction uniformly distributed in the hemisphere
+-    defined by the normal vector.
++    Generates a random direction uniformly distributed on the hemisphere
++    defined by 'normal'.
+     
+     Args:
+-        normal (vec3): The surface normal vector.
+-        rng (function): A function that returns two independent uniform random floats in [0, 1).
++        normal (Vector3): The surface normal (assumed unit length).
++        r1 (float): Random number in [0, 1).
++        r2 (float): Random number in [0, 1).
+         
+     Returns:
+-        vec3: A unit direction vector in the hemisphere.
++        Vector3: The sampled direction vector.
+     """
+-    # 1. Generate random numbers
+-    u1, u2 = rng()
++    # 1. Compute local coordinates
++    r = math.sqrt(1.0 - r1 * r1)
++    phi = 2.0 * math.pi * r2
+     
+-    # 2. Compute polar angle and radius
+-    phi = 2.0 * math.pi * u1
+-    z = u2
+-    r = math.sqrt(1.0 - z * z)
+-    
+-    # 3. Construct local direction
++    # Local direction where normal is (0,0,1)
+     local_x = math.cos(phi) * r
+     local_y = math.sin(phi) * r
+-    local_z = z
++    local_z = r1
+     
+-    # 4. Transform to world space
+-    # Construct orthonormal basis (t, b, n)
+-    # If normal is close to (0, 1, 0), use a different reference vector
+-    if abs(normal.y) > 0.999:
+-        ref = vec3(1, 0, 0)
++    # 2. Construct orthonormal basis (T, B, N)
++    # N is the input normal
++    n = normal
++    
++    # Handle degenerate case where normal is parallel to world Z
++    if abs(n.z) < 0.999:
++        t = cross_product(Vector3(0, 0, 1), n)
+     else:
+-        ref = vec3(0, 1, 0)
++        t = cross_product(Vector3(1, 0, 0), n)
+         
+-    tangent = normalize(cross(normal, ref))
+-    bitangent = cross(normal, tangent)
++    t = normalize(t)
++    b = cross_product(n, t)
+     
+-    direction = tangent * local_x + bitangent * local_y + normal * local_z
++    # 3. Transform local direction to world space
++    # d = local_x * T + local_y * B + local_z * N
++    world_x = t.x * local_x + b.x * local_y + n.x * local_z
++    world_y = t.y * local_x + b.y * local_y + n.y * local_z
++    world_z = t.z * local_x + b.z * local_y + n.z * local_z
+     
+-    return direction
++    return Vector3(world_x, world_y, world_z)
++
++def cross_product(v1, v2):
++    return Vector3(
++        v1.y * v2.z - v1.z * v2.y,
++        v1.z * v2.x - v1.x * v2.z,
++        v1.x * v2.y - v1.y * v2.x
++    )
++
++def normalize(v):
++    length = math.sqrt(v.x**2 + v.y**2 + v.z**2)
++    if length == 0:
++        return Vector3(0, 0, 1) # Fallback
++    return Vector3(v.x / length, v.y / length, v.z / length)
++
++class Vector3:
++    def __init__(self, x, y, z):
++        self.x = x
++        self.y = y
++        self.z = z
+ ```
+ 
+@@ -104,24 +132,28 @@
+ Cosine-Weighted Hemisphere Sampling generates a random direction on a hemisphere oriented around a normal vector $\mathbf{n}$, weighted by the cosine of the polar angle. It is used to compute the indirect lighting contribution at a surface point by sampling the hemisphere above the surface normal and recursively tracing rays. It sets itself apart from its parent [Random Hemisphere Sampling](2034-random-hemisphere-sampling.md) by biasing samples toward the normal, which matches the cosine lobe of a Lambertian BRDF.
+ 
++### [Quadratic Scale Hemisphere Sampling](3988-quadratic-scale-hemisphere-sampling.md)
++Quadratic Scale Hemisphere Sampling generates a set of 3D sample vectors for screen-space ambient occlusion (SSAO) by mapping a 3D Halton sequence to a hemisphere and applying a quadratic scale distribution. It differs from its parent, [Random Hemisphere Sampling](2034-random-hemisphere-sampling.md), by using a deterministic low-discrepancy sequence (Halton) rather than independent random numbers, and from its sibling, [Cosine-Weighted Hemisphere Sampling](2283-cosine-weighted-hemisphere-sampling.md), by applying a specific quadratic bias to the sample radius to concentrate samples near the origin while maintaining uniform angular coverage.
++
+ ### Hemisphere Assembling with Normal Modulation
+-A technique to create a hemisphere of sampling directions on a surface by modulating precomputed random sphere points with the surface normal to reduce banding artifacts from discrete points [S5, unofficial]. It reflects the surface normal against a random point on a sphere to get a random point on a sphere with variance added by the normal vector [S5, unofficial]. It checks if the resulting cone direction is below the horizon by computing the dot product of the surface normal and the cone direction; if negative, it flips the cone direction [S5, unofficial].
+-
+-### Quadratic Scale Hemisphere Sampling
+-Generates a set of 3D sample vectors for screen-space ambient occlusion (SSAO) using a Halton sequence, mapping them to a hemisphere and applying a quadratic scale distribution [S6, unofficial]. It initializes a Halton sequence of dimension 3, maps the values to $[-1, 1]$, forces the Z component to be non-negative, normalizes the vector, and applies a quadratic scale mixing between 0.1 and 1.0 based on the linear index [S6, unofficial]. The output is a vector of unit directions in the upper hemisphere, scaled between 0.1 and 1.0 [S6, unofficial]. A key pitfall is forgetting to force Z >= 0, which would sample the full sphere instead of the hemisphere required for SSAO occlusion calculations [S6, unofficial].
++A technique to create a hemisphere of sampling directions on a surface by modulating precomputed random sphere points with the surface normal to reduce banding artifacts from discrete points [S5, unofficial]. It works by reflecting the surface normal against a random point on a sphere to get a random point on a sphere with variance added by the normal vector [S5, unofficial]. It checks if the resulting cone direction is below the horizon by computing the dot product of the surface normal and the cone direction; if negative, it flips the cone direction [S5, unofficial].
+ 
+ ### Uniform Hemisphere Solid Angle Sampling
+-This variant generates a direction on the full sphere and then flips it to the upper hemisphere if it points below the horizon [S7, unofficial]. It calls `getSampleUniformSolidAngle` to generate a direction on the full sphere, checks if the dot product of the sample direction and the normal is less than 0, and if so, negates the sample direction to flip it to the upper hemisphere [S7, unofficial].
++This variant calls `getSampleUniformSolidAngle` to generate a direction on the full sphere [S6, unofficial]. If the dot product of the sample direction and the normal is less than 0 (pointing below the hemisphere), it negates the sample direction to flip it to the upper hemisphere [S6, unofficial]. It returns the resulting hemisphere direction [S6, unofficial].
++
++### Temporal Hemisphere Sampling for Diffuse GI
++A technique to sample the upper hemisphere for diffuse global illumination using two temporal coordinates (`temporalx`, `temporaly`) to generate a sample direction, enabling accurate lighting with few samples per frame via temporal anti-aliasing [S7, unofficial]. The sample direction $\omega_i$ is obtained as $\omega_i = \{T, B, N\} \cdot H$, where $H = \{\cos\phi\sin\theta, \sin\phi\sin\theta, \cos\theta\}$, $\phi = 2\pi \cdot \text{temporalx}$, and $\theta = 0.5\pi \cdot \text{temporaly}$ [S7, unofficial]. The tangent $T$ is computed as $\{0,0,1\} \times N$ if $|n_z| < 0.999$, otherwise $\{1,0,0\} \times N$, and $B = N \times T$ [S7, unofficial]. A pitfall occurs when $|n_z| \ge 0.999$, where the cross product becomes degenerate, handled by switching the reference vector [S7, unofficial]. Using only one sample per frame creates a checkerboard pattern without temporal AA, but with temporal AA enabled, it produces an accurate image within a few frames via Monte Carlo integration over time [S7, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per sample [G]. The computation involves basic arithmetic operations and trigonometric functions [G].
+-- **Memory Complexity:** $O(1)$. No additional memory is required beyond the input and output vectors [G].
+-- **Performance:** Highly efficient due to the lack of rejection steps [G]. It is suitable for real-time rendering and high-sample-count path tracing [G].
+-- **Strengths:** Unbiased (for uniform sampling), efficient, and simple to implement [G]. It correctly handles the geometry of surface shading [G].
+-- **Limitations:** The quality of the samples depends on the pseudo-random number generator [G]. Poor RNGs may exhibit patterns or correlations [G]. The method assumes a smooth surface normal; for rough surfaces, the normal distribution function (NDF) should be used instead [G].
+-- **When to Use:** Surface shading, diffuse reflection, ambient occlusion calculations where uniform sampling over the hemisphere is required [G].
+-- **When Not to Use:** When cosine-weighted sampling is more appropriate (e.g., diffuse BRDF integration) or when the surface is highly anisotropic [G].
++*   **Time Complexity:** $O(1)$ per sample. The cylindrical method requires a square root, trigonometric functions, and vector operations. The reflection method requires a hash, a dot product, and a reflection calculation.
++*   **Memory Complexity:** $O(1)$. No additional memory is required beyond the random number state.
++*   **Measured Performance:** Not given in the sources.
++*   **Scaling:** Linear with the number of samples.
++*   **Strengths:** Simple to implement; provides uniform coverage of the hemisphere; unbiased estimator for diffuse lighting integration.
++*   **Limitations:** High variance compared to importance sampling methods (like cosine-weighted) for Lambertian surfaces; requires many samples for noise-free results.
++*   **When to use:** When uniform distribution is required, or as a base for other sampling techniques.
++*   **When not to use:** When computing diffuse lighting on Lambertian surfaces, where cosine-weighted sampling is more efficient.
+ 
+ ## Background
+-Random Hemisphere Sampling is a fundamental technique in computer graphics, particularly in path tracing and global illumination algorithms [G]. It originates from the need to simulate light scattering from surfaces, where light only interacts with the side of the surface facing the incoming ray [G]. The method is closely related to the concept of Lambertian reflection, where the reflected radiance is proportional to the cosine of the angle between the outgoing direction and the surface normal [G]. The technique is widely used in both offline renderers and real-time engines for computing indirect lighting [G].
++Random Hemisphere Sampling is a fundamental technique in computer graphics for diffuse shading and global illumination. It is widely used in path tracing, voxel-based global illumination, and real-time rendering pipelines. The method is often implemented using either cylindrical coordinate conversion or reflection-based rejection. Variants such as temporal hemisphere sampling have been developed for real-time applications to reduce noise with limited samples per frame [S7, unofficial].
+ 
+ ## Sources
+@@ -131,4 +163,4 @@
+ [S4] cahekp/Raymarching, https://github.com/cahekp/Raymarching, fetched 2026-10-27 (unofficial)
+ [S5] Voxel-based Global Illumination – Wicked Engine, https://turanszkij.wordpress.com/2017/08/30/voxel-based-global-illumination/, fetched 2026-10-28 (unofficial)
+-[S6] ajaspe/ssvdag, https://github.com/ajaspe/ssvdag, fetched 2026-10-24 (unofficial)
+-[S7] wangyuehi/VolumeSingleScattering, https://github.com/wangyuehi/VolumeSingleScattering, fetched 2026-10-26 (unofficial)+[S6] wangyuehi/VolumeSingleScattering, https://github.com/wangyuehi/VolumeSingleScattering, fetched 2026-10-26 (unofficial)
++[S7] (PDF) Raymarching Distance Fields with CUDA - ResearchGate, https://www.researchgate.net/publication/356081826_Raymarching_Distance_Fields_with_CUDA, fetched 2026-10-27 (unofficial)

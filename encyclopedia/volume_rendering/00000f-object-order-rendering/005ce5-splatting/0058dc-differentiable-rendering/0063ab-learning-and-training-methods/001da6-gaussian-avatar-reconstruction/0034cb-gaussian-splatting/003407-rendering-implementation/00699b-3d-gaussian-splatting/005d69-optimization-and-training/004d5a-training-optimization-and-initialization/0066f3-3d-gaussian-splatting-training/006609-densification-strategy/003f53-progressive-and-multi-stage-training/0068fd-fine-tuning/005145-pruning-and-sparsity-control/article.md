@@ -1,0 +1,28 @@
+# Pruning and Sparsity Control
+## Overview
+Pruning and Sparsity Control methods reduce the number of active 3D Gaussians in a radiance field to lower memory and storage costs while preserving rendering quality [G]. Unlike standard 3D Gaussian Splatting (3DGS), which relies on fixed opacity thresholds and halts densification mid-training, these techniques actively eliminate redundant primitives throughout optimization using learnable masks, geometric occlusion checks, or quadratic selection [S1, unofficial][S2].
+## Shared principles
+The family shares a four-step mechanism to control sparsity [G]:
+1. **Selection Criterion:** A scalar value or binary flag is computed per Gaussian $n$ based on attributes like scale, opacity, or visibility [G].
+2. **Elimination:** Gaussians failing the criterion are removed from the scene representation [G].
+3. **Integration:** Pruning is integrated into the training loop, either periodically at densification intervals or as a post-training refinement step [G].
+4. **Loss Regularization:** Methods introduce a regularization term to the loss function to encourage sparsity or guide the optimizer to shrink unneeded Gaussians before pruning [S1, unofficial][S2].
+## Subtopics
+
+### [Gaussian Volume Mask](12710-gaussian-volume-mask.md)
+Reduces active Gaussians by applying binary masks to scale and opacity attributes based on a learnable parameter. It addresses excessive memory requirements by masking out unessential Gaussians throughout the entire training process, considering both geometric volume and transparency. Unlike standard 3DGS, it does not stop densifying in the middle of training. Choose this method when consistent sparsity control via learnable parameters is desired.
+
+### [Visibility-Based Pruning for 3D Gaussian Splatting](14019-visibility-based-pruning-for-3d-gaussian-splatting.md)
+Removes occluded 3D Gaussian kernels during optimization to create a compact, "hard" geometry representation by concentrating alpha values into remaining kernels. It distinguishes itself by using explicit geometric occlusion checks (depth sorting) rather than gradient magnitude thresholds. Choose this method when geometric accuracy and removal of truly occluded primitives is prioritized.
+
+### Fine-Tuning and Iterative Pruning
+A post-training refinement technique that combines binary masks from blockwise quadratic unconstrained binary optimization (QUBO) solvers to retain a specific number of Gaussians [S1, unofficial]. It fine-tunes the retained Gaussians with densification disabled using a weighted loss of $L_{refine} = 0.8 L_1(I, I_{gt}) + 0.2 (1 - \text{SSIM}(I, I_{gt}))$ [S1, unofficial]. For iterative pruning, the process of partitioning, opacity response computation, budget allocation, and quadratic selection is repeated on the refined model until the target retention ratio is reached [S1, unofficial]. Choose this method when a strict, pre-defined number of Gaussians is required for deployment [G].
+
+### Spatial Opacity Pruning
+Performs exactly 12 iterations of cloning and splitting during training, followed by over 50 iterations of pruning [S2]. After densification and guided sampling steps, it gradually prunes Gaussians that exhibit small spatial opacity values to keep the most representative primitives [S2].
+
+## Background
+The proliferation of Gaussians in 3D Gaussian Splatting (3DGS) leads to high memory and storage costs, often including redundant primitives with negligible volume or transparency [G]. Standard 3DGS uses opacity-based pruning which may leave many redundant Gaussians [G]. Recent works like SplatQ [S1, unofficial] and Spacetime Gaussian Feature Splatting [S2] address these inefficiencies. SplatQ evaluates performance on 27 scenes from 5 benchmarks (Mip-NeRF 360, Deep Blending, Tanks and Temples, NeRF Synthetic, Ref-NeRF/Shiny Blender) [S1, unofficial]. Spacetime Gaussian Feature Splatting applies pruning to dynamic view synthesis datasets like Technicolor and Neural 3D Video [S2].
+## Sources
+[S1] SplatQ: Interaction-Aware Pruning of 3D Gaussian Splatting via Quadratic Selection, https://arxiv.org/abs/2610.13503, fetched 2026-10-29 (unofficial)
+[S2] Spacetime Gaussian Feature Splatting for Real-Time Dynamic View Synthesis, https://huggingface.co/papers/2312.16812, fetched 2026-10-30

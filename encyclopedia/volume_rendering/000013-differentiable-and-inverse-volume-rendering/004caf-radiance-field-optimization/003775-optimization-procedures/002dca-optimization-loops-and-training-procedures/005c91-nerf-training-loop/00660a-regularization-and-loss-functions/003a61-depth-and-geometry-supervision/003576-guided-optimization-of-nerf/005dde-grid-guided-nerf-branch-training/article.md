@@ -1,0 +1,248 @@
+# Grid-Guided NeRF Branch Training
+
+Also called: Grid Pretrain, Grid branch, Grid-guided Neural Radiance Fields, NeRF Branch, Ours, Stage 2 Joint Learning
+
+## Overview
+Grid-Guided NeRF Branch Training is a two-stage optimization procedure for Neural Radiance Fields (NeRF) that integrates a discrete feature grid with a continuous MLP branch to resolve the shape-radiance ambiguity inherent in large-scale urban scene reconstruction [S1]. Unlike pure grid-based methods (e.g., TensoRF) that suffer from noise in continuous regions or pure NeRF methods that struggle with high-frequency details, this method uses a pre-trained grid to guide NeRF sampling toward the scene surface while the NeRF branch provides high-frequency regularization and detail recovery [S1]. It sets itself apart from siblings like [ENeRF with Guided Sampling Training](7580-enerf-with-guided-sampling-training.md) by explicitly coupling the grid's density/appearance features with the NeRF's positional encoding in a joint optimization loop, rather than using the grid solely for sampling density [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   A set of calibrated camera poses and corresponding RGB images for a large-scale scene [S1].
+*   A pre-trained multi-resolution feature grid (see Data Structures) [S1].
+
+**Outputs:**
+*   A refined feature grid and a NeRF branch network (MLP) that jointly predict volume density and color for any 3D point and viewing direction [S1].
+
+### Data Structures
+
+**Multi-Resolution Feature Grid:**
+The 3D feature grid is stored as a plane-vector representation to reduce memory usage compared to a full 3D voxel grid [S1]. It consists of:
+1.  **Ground Feature Planes:** 2D planes representing the $xy$-plane. For each resolution level $r$, there are separate planes for density ($R_{\sigma}$) and appearance ($R_{c}$) [S1].
+2.  **Z-Axis Encoding:** Globally encoded feature vectors for the $z$-axis [S1].
+3.  **Resolution Levels:** The grid uses multiple resolutions. The highest resolution is denoted as $H^2$ (e.g., $4096^2$). Additional lower resolutions are included at downsampled scales of $\times 4$ and $\times 16$ relative to the highest resolution [S1].
+4.  **Channel Allocation:** The highest resolution plane uses 8 components for density and 8 for appearance. Lower resolutions follow similar allocations scaled by the resolution factor [S1].
+5.  **Parameter Count:** The total parameter count for this representation is approximately $3 \times 10^8$, which is fewer than TensoRF's $4 \times 10^8$ parameters [S1].
+
+**NeRF Branch Network:**
+*   A Multi-Layer Perceptron (MLP) with $D=4$ layers (3 hidden layers + 1 output layer) and no skip connections [S1].
+*   Hidden width $W=256$ [S1].
+*   Input dimension depends on the concatenation of grid features and positional encodings [S1].
+
+### Numbered Steps
+
+1.  **Stage 1: Grid Pretraining**
+    *   Train the feature grid branch independently for the first 10,000 iterations [S1].
+    *   Sample $N$ points along each ray using a coarse sampling strategy (e.g., uniform or stratified sampling) [S1].
+    *   For each sampled point $X$, retrieve grid features $\mathcal{G}_\sigma(X)$ and $\mathcal{G}_c(X)$ via bilinear interpolation on the multi-resolution feature planes [S1].
+    *   Predict volume density $\sigma$ and color $c$ using a small MLP head (same architecture as TensoRF's renderer) [S1].
+    *   Render pixel colors via volumetric integration [S1].
+    *   Optimize the grid parameters using the Mean Squared Error (MSE) loss between rendered and ground truth pixel colors [S1].
+
+2.  **Stage 2: Joint Optimization**
+    *   Initialize the NeRF branch network [S1].
+    *   Optimize both the grid branch and the NeRF branch jointly for 100,000 iterations [S1].
+    *   **Sampling Guidance:** Use the density predictions from the pre-trained grid branch to guide the sampling of points along camera rays. The sampling concentrates on the scene surface approximated by the grid, allowing for denser sampling in relevant regions [S1].
+    *   **Feature Extraction:** For each sampled point $X$, infer grid features $\mathcal{G}_\sigma(X)$ and $\mathcal{G}_c(X)$ by bilinear interpolation on the multi-resolution feature planes [S1].
+    *   **NeRF Input Construction:** Concatenate the inferred grid features with positional encodings of the point coordinates $X$ and viewing direction $d$ [S1].
+        $$ \text{Input} = [\mathcal{G}_\sigma(X), \mathcal{G}_c(X), \operatorname{PE}(X), \operatorname{PE}(d)] $$
+    *   **NeRF Prediction:** Feed the concatenated input into the NeRF branch network $F'$ to predict refined volume density $\sigma'$ and color $c'$ [S1]:
+        $$ (\sigma', c') = F'(\mathcal{G}_\sigma(X), \mathcal{G}_c(X), \operatorname{PE}(X), \operatorname{PE}(d)) $$
+    *   **Rendering:** Render fine-resolution pixel colors using the NeRF branch's density and color predictions via volumetric integration [S1].
+    *   **Loss Calculation:** Compute the reconstruction loss (MSE) for both the grid branch outputs and the NeRF branch outputs [S1].
+    *   **Joint Update:** Update both the grid parameters and the NeRF branch parameters using the combined loss. The loss weighting between the two branches is set to 1:1 [S1].
+
+### Formulas
+
+**Grid Feature Interpolation:**
+For a point $X = (x, y, z)$, the grid features are obtained by projecting $X$ onto the ground feature planes and interpolating. Let $P_{xy}$ be the 2D coordinates on the ground plane. The feature $F(X)$ at resolution $r$ is:
+$$ F(X) = \text{BilinearInterpolate}(P_{xy}, \text{Plane}_r) $$
+This is performed for each resolution level and combined (e.g., via summation or concatenation as per the specific implementation, though the text implies retrieval from the multi-resolution set) [S1].
+
+**NeRF Branch Forward Pass:**
+$$ (\sigma', c') = F'(\mathcal{G}_\sigma(X), \mathcal{G}_c(X), \operatorname{PE}(X), \operatorname{PE}(d)) $$
+Where:
+*   $\sigma'$ is the predicted volume density.
+*   $c'$ is the predicted view-dependent color.
+*   $F'$ is the 4-layer MLP without skip connections.
+*   $\operatorname{PE}(\cdot)$ is the positional encoding function [S1].
+
+**Loss Function:**
+$$ \mathcal{L} = \mathcal{L}_{\text{grid}} + \mathcal{L}_{\text{nerf}} $$
+Where $\mathcal{L}_{\text{grid}}$ is the MSE loss between the grid branch's rendered image and the ground truth, and $\mathcal{L}_{\text{nerf}}$ is the MSE loss between the NeRF branch's rendered image and the ground truth. The weights are equal (1:1) [S1].
+
+### Parameters
+
+*   **Pretraining Iterations:** 10,000 [S1].
+*   **Joint Optimization Iterations:** 100,000 [S1].
+*   **Time Fraction:** Roughly 1:4 between pretraining and joint optimization stages [S1].
+*   **Loss Weighting:** 1:1 between grid branch and NeRF branch during joint training [S1].
+*   **Optimizer:** Adam [S1].
+*   **Learning Rate:** 0.02 for tensor factors (grid parameters), 0.01 for MLP layers (NeRF branch) [S1].
+*   **Batch Size:** 4096 rays [S1].
+*   **NeRF MLP Architecture:** Depth $D=4$ (3 hidden layers), Width $W=256$, no skip connections [S1].
+*   **Positional Encoding (PE) Frequency:** Standard configuration bandwidth ranges from 20 to 22. Ablation tests used up to 216 [S1].
+*   **Grid Resolutions:** Tested at $512^2$, $2048^2$, and $4096^2$ [S1].
+
+### Edge Cases and Pitfalls
+
+*   **Low-Resolution Grids:** Using a low-resolution grid (e.g., $512^2$) during pretraining results in blurry artifacts. While the NeRF branch can recover some details, the overall result lacks sharpness [S1].
+*   **High-Resolution Grids without NeRF:** High-resolution grids (e.g., $2048^2$) pre-trained without NeRF supervision produce fuzzy and noisy results in continuous regions (e.g., roads, walls) due to grid variation artifacts [S1].
+*   **Small NeRF Capacity:** A NeRF branch with insufficient capacity (e.g., $D=3, W=32$) is unable to effectively translate grid features, leading to inaccurate geometry and scene contents [S1].
+*   **Training Speed:** The joint optimization stage suffers from slow training times. Shuffled ray batch sampling is highly ineffective for large scenes without distributed training infrastructure [S1].
+*   **PE Frequency:** Increasing PE frequency bandwidth beyond the standard range (20-22) provides little benefit if the NeRF model capacity is not sufficiently large (e.g., $W=256$) [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def grid_guided_nerf_training(scene_data, grid_config, nerf_config):
+    """
+    Main training loop for Grid-Guided NeRF Branch Training.
+    
+    Args:
+        scene_data: Object containing camera poses and RGB images.
+        grid_config: Configuration for the feature grid (resolutions, channels).
+        nerf_config: Configuration for the NeRF branch (MLP layers, PE frequency).
+        
+    Returns:
+        Trained grid parameters and NeRF branch weights.
+    """
+    
+    # Initialize Grid Branch
+    grid = FeatureGrid(grid_config)
+    grid_optimizer = Adam(grid.parameters(), lr=0.02)
+    
+    # Initialize NeRF Branch
+    nerf_mlp = MLP(nerf_config) # 4 layers, W=256, no skip connections
+    nerf_optimizer = Adam(nerf_mlp.parameters(), lr=0.01)
+    
+    # Stage 1: Grid Pretraining (10,000 iterations)
+    for iteration in range(10000):
+        rays = sample_rays(scene_data, batch_size=4096)
+        
+        # Coarse sampling guided by nothing yet, or uniform
+        points = sample_points_uniform(rays, num_samples=64)
+        
+        # Get grid features
+        grid_features_sigma = grid.interpolate_density(points)
+        grid_features_color = grid.interpolate_appearance(points)
+        
+        # Predict density and color using small MLP head (TensoRF style)
+        # Note: The text implies a small MLP head for the grid branch during pretraining
+        sigma, color = grid_renderer(grid_features_sigma, grid_features_color)
+        
+        # Render image
+        rendered_image = volume_render(points, sigma, color, rays)
+        gt_image = get_ground_truth(rays, scene_data)
+        
+        # Compute Loss
+        loss = mse_loss(rendered_image, gt_image)
+        
+        # Update Grid
+        grid_optimizer.zero_grad()
+        loss.backward()
+        grid_optimizer.step()
+        
+    # Stage 2: Joint Optimization (100,000 iterations)
+    for iteration in range(100000):
+        rays = sample_rays(scene_data, batch_size=4096)
+        
+        # Guide sampling using grid density
+        # 1. Get initial coarse density from grid to guide sampling
+        coarse_points = sample_points_uniform(rays, num_samples=32)
+        coarse_grid_sigma = grid.interpolate_density(coarse_points)
+        coarse_sigma, _ = grid_renderer(coarse_grid_sigma, grid.interpolate_appearance(coarse_points))
+        
+        # 2. Use coarse_sigma to guide finer sampling (concentrate on surface)
+        # Implementation detail: Use inverse CDF of coarse_sigma to sample more points near surfaces
+        fine_points = sample_points_guided(rays, coarse_sigma, num_samples=128)
+        
+        # Get grid features for fine points
+        fine_grid_sigma = grid.interpolate_density(fine_points)
+        fine_grid_color = grid.interpolate_appearance(fine_points)
+        
+        # Get Positional Encodings
+        pe_points = positional_encoding(fine_points, freq_min=20, freq_max=22)
+        pe_dirs = positional_encoding(rays.directions, freq_min=20, freq_max=22)
+        
+        # Concatenate features
+        nerf_input = concatenate([fine_grid_sigma, fine_grid_color, pe_points, pe_dirs])
+        
+        # Predict density and color using NeRF branch
+        sigma_nerf, color_nerf = nerf_mlp(nerf_input)
+        
+        # Render image using NeRF branch
+        rendered_image_nerf = volume_render(fine_points, sigma_nerf, color_nerf, rays)
+        gt_image = get_ground_truth(rays, scene_data)
+        
+        # Compute Loss for NeRF branch
+        loss_nerf = mse_loss(rendered_image_nerf, gt_image)
+        
+        # Also compute loss for Grid branch to maintain its quality
+        # Re-render grid output for the same points or use a separate coarse render
+        # The text says "grid branch outputs maintain being supervised... along with fine-rendering results"
+        # We assume we render the grid branch output for the same points or a standard coarse set
+        grid_sigma, grid_color = grid_renderer(fine_grid_sigma, fine_grid_color)
+        rendered_image_grid = volume_render(fine_points, grid_sigma, grid_color, rays)
+        loss_grid = mse_loss(rendered_image_grid, gt_image)
+        
+        # Total Loss (1:1 weighting)
+        total_loss = loss_nerf + loss_grid
+        
+        # Update both branches
+        grid_optimizer.zero_grad()
+        nerf_optimizer.zero_grad()
+        total_loss.backward()
+        grid_optimizer.step()
+        nerf_optimizer.step()
+
+    return grid, nerf_mlp
+
+def positional_encoding(x, freq_min, freq_max):
+    """
+    Standard positional encoding.
+    """
+    # x is (N, 3)
+    scales = np.array([2**i for i in range(freq_min, freq_max)])
+    scaled_x = np.outer(x.flatten(), scales)
+    encoded = np.sin(scaled_x)
+    return encoded.reshape(-1, 3 * 2 * (freq_max - freq_min))
+```
+
+## Subtopics
+
+### Grid Pretrain
+The initial phase where only the feature grid is trained using coarse sampling and a small renderer. It provides a coarse approximation of the scene density and appearance. It is chosen when a strong geometric prior is needed before refining with a complex MLP. Link: [Grid Pretrain](7496-guided-optimization-of-nerf.md#grid-pretrain) (conceptual link within the parent article).
+
+### NeRF Branch
+The continuous MLP component that takes grid features and positional encodings as input. It is chosen for its ability to recover high-frequency details and regularize the grid features. Link: [NeRF Branch](7496-guided-optimization-of-nerf.md#nerf-branch).
+
+## Operating characteristics
+
+*   **Time Complexity:** The joint optimization stage is computationally expensive. Training time is dominated by the 100,000 iterations of joint optimization, with a time fraction of roughly 1:4 compared to the pretraining stage [S1].
+*   **Memory Complexity:** The plane-vector representation uses approximately $3 \times 10^8$ parameters, which is memory-efficient compared to full 3D voxel grids and slightly better than TensoRF's $4 \times 10^8$ parameters [S1].
+*   **Measured Performance:** On large urban scenes, the method achieves a PSNR of 20.915, comparable to TensoRF's 21.075, but with fewer parameters [S1].
+*   **Scaling:** The method is designed for extremely large-scale environments (e.g., urban scenes). However, shuffled ray batch sampling is ineffective for large scenes without distributed training, limiting scalability on single machines [S1].
+*   **Strengths:**
+    *   Mitigates shape-radiance ambiguity by guiding sampling to the scene surface [S1].
+    *   Reduces noise in continuous regions (roads, walls) through NeRF's implicit regularization [S1].
+    *   Achieves photorealistic quality with high visual fidelity [S1].
+*   **Limitations:**
+    *   Slow training times in the joint optimization stage [S1].
+    *   Ineffective batch sampling for large scenes without distributed training [S1].
+    *   Sensitive to grid resolution; low resolution causes blurriness, high resolution causes noise without NeRF supervision [S1].
+*   **When to Use:** Large urban scene rendering where high visual fidelity is required and computational resources allow for long training times [S1].
+*   **When Not to Use:** Real-time applications or scenarios with limited computational resources due to slow training [S1].
+
+## Background
+
+Grid-Guided NeRF Branch Training was proposed in the paper "Grid-guided Neural Radiance Fields for Large Urban Scenes" [S1]. The work addresses the limitations of existing NeRF and grid-based methods when applied to large-scale urban environments. Pure NeRF methods suffer from blurry artifacts and slow convergence due to the difficulty of learning low-frequency functions in large scenes [S1]. Grid-based methods like TensoRF offer better performance but can produce noisy appearance and inaccurate shapes in continuous regions [S1]. The authors introduced this two-branch framework to combine the global structure capture of feature grids with the local detail recovery of NeRF, specifically targeting large urban scene rendering [S1].
+
+## Sources
+
+[S1] Grid-guided Neural Radiance Fields for Large Urban Scenes, https://doi.org/10.1109/cvpr52729.2023.00802, fetched 2026-10-26

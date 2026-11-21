@@ -1,0 +1,78 @@
+# Attenuation Field
+
+Also called: Beer-Lambert NeRF, X-ray NeRF
+
+## Overview
+The Attenuation Field method replaces the standard color-based radiance representation with a volumetric attenuation coefficient field, mapping 3D coordinates to physical absorption properties rather than emitted light. It solves the problem of modeling X-ray or transmission-based imaging data where the observed intensity is determined by the integral of material density along the ray path, adhering to the Beer–Lambert Law [S1]. Unlike natural image NeRFs that model emitted radiance, this approach models the decay of an incident beam as it traverses diverse structures to a detector [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D spatial coordinates $\mathbf{X}$, initial beam intensity $I_0$, and sampling step size $\delta$.
+*   **Output:** Attenuated intensity $I$ at the detector plane, or the attenuation coefficient $\mu$ for a given coordinate.
+
+**Data Structures:**
+*   **Neural Network:** A multi-layer perceptron (MLP) or coordinate-based network that takes $\mathbf{X}$ as input and outputs a scalar attenuation coefficient $\mu$.
+*   **Sampling:** Uniform sampling is used along the ray. Stratified or importance sampling is explicitly avoided because, in medical volume reconstruction, every region contributes equally to the reconstruction, and uniform distribution ensures no regions are overlooked or over-represented [S1].
+
+**Formulas:**
+The rendering equation is derived from the Beer–Lambert Law [S1]:
+
+$$
+I = I_0 e^{-\sum_i \mu_i \delta_i}
+$$
+
+Where:
+*   $I$: Resultant attenuated intensity at the detector.
+*   $I_0$: Initial intensity of the X-ray source.
+*   $\mu_i$: Attenuation coefficient at the $i$-th sample point.
+*   $\delta_i$: Sampling step size (distance between samples).
+
+**Steps:**
+1.  **Ray Casting:** For each pixel, cast a ray from the X-ray source through the volume to the flat-panel detector.
+2.  **Uniform Sampling:** Sample points $\mathbf{X}_i$ uniformly along the ray path within the volume bounds [S1].
+3.  **Query Attenuation:** Pass each $\mathbf{X}_i$ through the neural network to obtain the local attenuation coefficient $\mu_i$.
+4.  **Integration:** Compute the total optical depth $\tau = \sum_i \mu_i \delta_i$.
+5.  **Attenuation:** Calculate the final intensity $I = I_0 e^{-\tau}$.
+
+**Parameters:**
+*   **Sampling Strategy:** Uniform sampling is the standard configuration for this method [S1].
+*   **Initial Intensity ($I_0$):** Treated as a known constant or calibrated parameter of the X-ray source.
+
+**Edge Cases and Pitfalls:**
+*   **Negative Attenuation:** Attenuation coefficients must be non-negative. If the network outputs negative values, physical interpretation fails. This is often handled via truncation or activation functions (see *Trainable Flat Field*).
+*   **Empty Space:** Rays passing through air (empty space) should ideally not contribute to attenuation. Standard networks may predict false density in empty regions if not regularized or decoupled [S2, unofficial].
+
+## Subtopics
+
+### Trainable Flat Field
+A technique to decouple the attenuation path into material and air components using a trainable parameter for background attenuation, preventing false density in empty space [S2, unofficial]. It addresses the issue where rays passing through empty space (air) get incorrectly attenuated, leading to false density fields [S2, unofficial].
+
+**Definition:**
+The method introduces a trainable scalar parameter $f_f$ representing the flat field (background) attenuation [S2, unofficial].
+
+**Steps:**
+1.  Define a trainable parameter $f_f$.
+2.  Derive the air attenuation coefficient $\mu_A$ using truncation to ensure non-negativity: $\mu_A = \max(0, f_f)$ [S2, unofficial].
+3.  Assume the path through air is approximately constant for all rays.
+4.  Compute intensity by separating the integral into material ($M$) and air ($A$) components [S2, unofficial]:
+
+$$
+I = I_0 \exp \left( - \int_M \mu(s) ds - \int_A \mu(s) ds \right) = I_0 \exp(-\mu_A) \exp \left( - \int_M \mu(s) ds \right)
+$$
+
+**When to choose:**
+Use this variant when training on data with significant empty space or when a "white background" assumption (no air attenuation) leads to inaccurate density representations. It allows the network to learn the true material density by decoupling it from the background air attenuation [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of samples per ray, similar to standard volume rendering. However, the reliance on uniform sampling may require more samples than importance sampling to achieve comparable accuracy in complex volumes [S1].
+*   **Memory Complexity:** Depends on the neural network size storing the attenuation field.
+*   **Strengths:** Physically grounded for transmission imaging (X-ray, CT); handles diverse structures by modeling absorption directly [S1].
+*   **Limitations:** Uniform sampling is computationally inefficient compared to importance sampling used in natural images; sensitive to background attenuation assumptions without variants like Trainable Flat Field [S1][S2, unofficial].
+*   **When to use:** Specifically for medical imaging, X-ray, or any scenario where the input data represents beam attenuation rather than emitted radiance [S1].
+
+## Background
+The Attenuation Field formulation was introduced to adapt Neural Radiance Fields (NeRF) for high-fidelity volume reconstruction in medical images, specifically X-ray modalities [S1]. It maps 3D coordinates to attenuation coefficients $\mu$ rather than color values, based on the Beer–Lambert Law [S1]. The approach recognizes that X-ray sources emit cone-shaped beams that undergo attenuation as they pass through diverse structures before being received by a flat-panel detector [S1]. The use of uniform sampling was specifically justified for medical volumes where every region equally contributes to reconstruction, unlike natural images where surface regions are prioritized [S1].
+
+## Sources
+[S1] The Adaption of Recent New Concepts in Neural Radiance Fields and Their Role for High-Fidelity Volume Reconstruction in Medical Images., https://doi.org/10.3390/s24185923, fetched 2026-10-26
+[S2] Neural rendering enables dynamic tomography, https://doi.org/10.48550/arxiv.2410.20558, fetched 2026-10-26 (unofficial)

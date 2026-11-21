@@ -1,0 +1,145 @@
+# Sparse Voxel Octree Memory Management
+
+Also called: Flat Array SVO Memory Management, Free List Octree Allocation
+
+## Overview
+This method manages the memory of a Sparse Voxel Octree (SVO) using a flat array and free lists to handle dynamic allocation and deallocation of branch nodes and attributes [S1, unofficial]. It solves the problem of efficient memory reuse in dynamic octrees where nodes are frequently created and destroyed during refinement and coarsening operations. Unlike pointer-based trees, this approach minimizes fragmentation and cache misses by reusing contiguous memory blocks, distinguishing it from pointer-free index-based layouts [S2, unofficial].
+
+## How it works
+The method operates on two primary data structures: a contiguous data array for node storage and free lists for tracking available memory slots.
+
+**Inputs and Outputs:**
+*   **Input:** A request to allocate or free a branch node or attribute.
+*   **Output:** A valid memory pointer (or index) to the allocated resource, or a deallocated state.
+
+**Data Structures:**
+1.  **Data Array:** A contiguous block of memory storing branch nodes and attributes.
+2.  **Free Structure Memory List:** A list (e.g., stack or linked list) of available pointers/indices for branch nodes.
+3.  **Free Attribute Memory List:** A list of available pointers/indices for attribute data.
+
+**Steps:**
+
+1.  **Allocate Branch Node:**
+    *   Check the **Free Structure Memory List**.
+    *   If the list is not empty:
+        *   Pop the last pointer from the list.
+        *   Reuse this pointer for the new branch node.
+    *   If the list is empty:
+        *   Append a new block to the end of the **Data Array**.
+        *   Use the new block's pointer.
+    *   Record the update for the branch pointer and the last element of the branch (typically `ptr + 7` for an 8-child octree node) to maintain structural integrity [S1, unofficial].
+
+2.  **Free Branch Node:**
+    *   Add the node's pointer to the **Free Structure Memory List**.
+    *   Recursively free all children of this branch node. This ensures that the entire subtree is deallocated and its memory is returned to the free lists [S1, unofficial].
+
+3.  **Free Attribute:**
+    *   Add the attribute's pointer to the **Free Attribute Memory List**.
+    *   This allows subsequent attribute allocations to reuse the freed memory [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class SVOAllocator:
+    def __init__(self):
+        self.data_array = []  # Contiguous memory for nodes/attributes
+        self.free_branches = []  # Stack of available branch pointers
+        self.free_attributes = []  # Stack of available attribute pointers
+
+    def allocate_branch(self) -> int:
+        """
+        Allocates a branch node. Returns the index/pointer in data_array.
+        """
+        if self.free_branches:
+            # Reuse last free pointer
+            ptr = self.free_branches.pop()
+        else:
+            # Append to data array
+            ptr = len(self.data_array)
+            # Initialize new branch node structure here
+            self.data_array.append({
+                'children': [None] * 8,
+                'attributes': None
+            })
+        
+        # Record updates for branch pointer and last element (ptr + 7)
+        # This step ensures structural consistency in the flat array
+        self._update_branch_structure(ptr)
+        return ptr
+
+    def free_branch(self, ptr: int):
+        """
+        Frees a branch node and recursively frees its children.
+        """
+        # Recursively free children
+        node = self.data_array[ptr]
+        for child_ptr in node['children']:
+            if child_ptr is not None:
+                self.free_branch(child_ptr)
+        
+        # Add pointer to free structure memory list
+        self.free_branches.append(ptr)
+
+    def allocate_attribute(self) -> int:
+        """
+        Allocates an attribute block.
+        """
+        if self.free_attributes:
+            return self.free_attributes.pop()
+        else:
+            ptr = len(self.data_array)
+            self.data_array.append({'data': None})
+            return ptr
+
+    def free_attribute(self, ptr: int):
+        """
+        Frees an attribute block.
+        """
+        self.free_attributes.append(ptr)
+
+    def _update_branch_structure(self, ptr: int):
+        """
+        Placeholder for specific structural updates required by the SVO format.
+        In a flat array, this might involve updating sibling pointers or 
+        maintaining a linked list of free nodes if the free list is not a stack.
+        """
+        pass
+```
+
+**Parameters and Edge Cases:**
+*   **Branch Size:** Typically 8 children per node. The "last element" reference (`ptr + 7`) implies a fixed-size node layout in the flat array [S1, unofficial].
+*   **Precision:** Not given in the sources.
+*   **Boundaries:** The data array must handle dynamic resizing. If the free list is a stack, allocation is $O(1)$, but fragmentation may occur if large contiguous blocks are needed [S1, unofficial].
+*   **Degenerate Input:** Empty octrees or single-node trees are handled naturally by the allocation logic [S1, unofficial].
+
+## Subtopics
+
+### CPU Memory Layout
+A variant that uses a pointer-free memory management system with linear memory pools indexed by unique cell indices $I$, supporting dynamic refinement and coarsening via linked-list based allocation [S2, unofficial].
+*   **Definition:** Uses linear memory pools indexed by $I$ instead of pointers. When a cell is refined, eight children are always created [S2, unofficial].
+*   **Layout:**
+    *   **Field Pools:** Separate linear memory pools for properties like color, density, and temporary variables. Properties accessed together (e.g., color and alpha) are packed into a single pool per cell [S2, unofficial].
+    *   **Allocation Unit:** Fixed size of 8 cells. Allocations and frees return to the beginning of the pool [S2, unofficial].
+    *   **Root Array:** Uniform, located at the beginning of the pool, cannot be freed [S2, unofficial].
+    *   **Flag Pool:** Separate pool for cell depth and other bit field flags [S2, unofficial].
+*   **Tree Structure:** The tree is defined by parents and children pools storing indices of parents and the first child. Remaining seven children are consecutively numbered and need not be stored explicitly [S2, unofficial].
+*   **When to Choose:** Use when dynamic refinement/coarsening is frequent and cache locality for attribute access is critical. Avoid if pointer overhead is acceptable and simpler implementation is preferred [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Allocation and deallocation are $O(1)$ for the free list operations. Recursive freeing is proportional to the number of nodes in the subtree [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ where $N$ is the number of nodes. The flat array minimizes overhead compared to pointer-based trees. The CPU Memory Layout variant uses fixed-size allocation units, which may lead to internal fragmentation if the number of cells is not a multiple of 8 [S2, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales well with dynamic scenes due to efficient memory reuse. The CPU Memory Layout variant may suffer from poor ray-casting performance if tree depth increases significantly, as neighbor traversal in the primal tree graph $G_p$ can become distant [S2, unofficial].
+*   **Strengths:** Low memory overhead, no pointer chasing, efficient reuse of memory blocks.
+*   **Limitations:** Potential fragmentation in flat arrays. Recursive freeing can be costly for deep subtrees. The CPU Memory Layout variant requires careful management of pool sizes and may have poor performance for deep trees without additional neighbor graphs [S2, unofficial].
+*   **When to Use:** Suitable for applications requiring frequent dynamic updates to the SVO structure, such as real-time volumetric painting or adaptive mesh refinement.
+*   **When Not to Use:** Not ideal for static scenes where a simpler, pre-allocated structure would suffice. Avoid if deep tree traversal performance is critical without additional optimization (e.g., neighbor graphs) [S2, unofficial].
+
+## Background
+The concept of using flat arrays and free lists for SVO memory management is described in the context of Unity-based implementations [S1, unofficial]. The CPU Memory Layout variant is described in the CanvoX paper for high-resolution VR painting in large volumetric canvases [S2, unofficial].
+
+## Sources
+[S1] xandergos/unity-sparse-voxel-octrees, https://github.com/xandergos/unity-sparse-voxel-octrees, fetched 2026-10-26 (unofficial)
+[S2] CanvoX: High-resolution VR Painting in Large Volumetric Canvas, https://archive.org/details/arxiv-1704.02724, fetched 2026-10-29 (unofficial)

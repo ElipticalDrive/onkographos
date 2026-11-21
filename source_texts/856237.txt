@@ -1,0 +1,126 @@
+Python implementation of the Maximum Likelihood Expectation Maximization (ML-EM) approach of emission tomography image reconstruction. - New Reconstruction Algorithm - MAP TV - Compressing sensing by Siddharthm10 · Pull Request #3 · spebt/pyrecon
+
+New Reconstruction Algorithm - MAP TV - Compressing sensing by Siddharthm10 · Pull Request #3 · spebt/pyrecon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Siddharthm10
+commented
+Apr 5, 2026
+Copy link
+Copy Markdown
+MAP-TV Reconstruction for SPECT (Compressive Sensing Formulation)
+1. Overview & Compressive Sensing Context
+This document specifies the implementation of a Maximum A Posteriori (MAP) reconstruction algorithm utilizing a Total Variation (TV) prior for Single Photon Emission Computed Tomography (SPECT).
+Compressive Sensing (CS) Connection: Compressive sensing theory dictates that a signal can be accurately recovered from undersampled measurements if it is sparse in some domain. Medical images are typically not sparse in the pixel domain, but their gradients are (they consist of relatively uniform regions separated by sharp edges). By applying an isotropic Total Variation prior ($L_1$ norm of the gradient), this algorithm enforces sparsity in the gradient domain, allowing it to act as a robust CS solver. This is highly effective for reducing dose, shortening scan times, or handling sparse angular sampling without severe artifact degradation.
+Goal: Reconstruct the image $x \ge 0$ by minimizing the objective function:
+$$\Phi(x) = \text{Poisson Negative Log-Likelihood} + \beta \cdot \text{TV}(x)$$
+2. Forward Model
+The measured projection data follows a Poisson distribution:
+$$y_i \sim \operatorname{Poisson}(\lambda_i)$$
+with the expected counts defined by the physics model:
+$$\lambda = A x + r$$
+Where:
+$y$: Measured projection data (counts)
+$x$: Image volume to reconstruct
+$A$: System matrix (forward projector accounting for geometry, collimator, and attenuation)
+$r$: Additive background term (scatter and randoms)
+3. The MAP-TV Objective
+We seek to minimize:
+$$\Phi(x) = \sum_i \left[ (Ax + r)_i - y_i \log((Ax + r)_i) \right] + \beta \operatorname{TV}(x)$$
+subject to $x \ge 0$.
+For edge-preservation without grid-alignment artifacts, Isotropic TV is used:
+$$\operatorname{TV}(x) = \sum_j \sqrt{(D_x x)_j^2 + (D_y x)_j^2 + (D_z x)_j^2 + \epsilon^2}$$
+Where $D_x, D_y, D_z$ are finite difference operators and $\epsilon$ is a small constant to ensure differentiability near zero.
+4. Algorithm: EM-TV Operator Splitting
+Due to the non-differentiable nature of the exact TV penalty, standard gradient descent or One-Step-Late (OSL) EM can become unstable. We use an alternating operator splitting scheme:
+Step 1: ML-EM Likelihood Update
+Handles the Poisson physics model.
+$$\lambda = Ax^{(k)} + r$$
+$$\text{ratio} = \frac{y}{\max(\lambda, \epsilon)}$$
+$$x_{em} = x^{(k)} \odot \frac{A^T(\text{ratio})}{\max(A^T \mathbf{1}, \epsilon)}$$
+Step 2: TV Proximal Denoising Step
+Acts as the Compressive Sensing regularizer. We solve for the proximal operator of the TV norm:
+$$x^{(k+1)} = \arg\min_{x \ge 0} \frac{1}{2} |x - x_{em}|_2^2 + \alpha \operatorname{TV}(x)$$
+(Note: $\alpha$ is a scaled version of $\beta$, dependent on the step sizes).
+5. TV Proximal Solver (Chambolle-Pock)
+The proximal step is solved using the Chambolle-Pock Primal-Dual algorithm.
+Initialize:
+$x^0 = x_{em}$
+$\bar{x}^0 = x^0$
+$p^0 = \mathbf{0}$ (Dual variable vector field with 3 components)
+Iterate for $n = 1 \dots N_{inner}$:
+1. Dual Update (Gradient Ascent):
+$$q = p^n + \sigma \nabla \bar{x}^n$$
+$$p^{n+1}_{j} = \frac{q_j}{\max(1, |q_j|_2 / \alpha)}$$
+2. Primal Update (Gradient Descent & Data Fidelity):
+$$x^{n+1} = \frac{x^n + \tau \operatorname{div}(p^{n+1}) + \tau x_{em}}{1 + \tau}$$
+$$x^{n+1} = \max(x^{n+1}, 0) \quad \text{(Non-negativity constraint)}$$
+3. Extrapolation (Over-relaxation):
+$$\bar{x}^{n+1} = x^{n+1} + \theta (x^{n+1} - x^n)$$
+6. Mathematical Operators
+To ensure algorithm stability, the divergence operator must be the exact negative adjoint of the gradient operator: $\langle \nabla x, p \rangle = - \langle x, \operatorname{div}(p) \rangle$.
+Gradient (Forward Difference):
+$(D_x x){i,j,k} = x{i+1,j,k} - x_{i,j,k}$
+$(D_y x){i,j,k} = x{i,j+1,k} - x_{i,j,k}$
+$(D_z x){i,j,k} = x{i,j,k+1} - x_{i,j,k}$
+(Boundary handling: Assume Neumann (replicate) or zero-padding at the volume edges).
+Divergence (Negative Adjoint / Backward Difference):
+$$\operatorname{div}(p) = D_x^T(p_x) + D_y^T(p_y) + D_z^T(p_z)$$
+7. Parameter Guide (Choices & Ideal Values)
+Parameter
+Name
+Description & Effect
+Ideal / Default Value
+$\beta$ (or $\alpha$)
+Regularization Weight
+The most critical tuning parameter. Controls the CS sparsity constraint.
+• Too high: Image becomes "blocky" or cartoon-like; small medical features (lesions) are erased.
+• Too low: Algorithm behaves like standard ML-EM, yielding noisy/grainy images.
+Must be tuned empirically based on total counts. Start at 0.01 to 0.1 relative to the max intensity of the unregularized image.
+$\tau$
+Primal Step Size
+Controls how aggressively the image ($x$) updates during the inner TV loop.
+0.25
+$\sigma$
+Dual Step Size
+Controls how aggressively the edge-field ($p$) updates.
+Constraint: For stability in 3D finite differences, you MUST satisfy $\tau \sigma &lt; \frac{1}{12}$.
+0.25 (Since $0.25 \times 0.25 = 0.0625 &lt; 0.0833$)
+$\theta$
+Extrapolation Factor
+Accelerates convergence of the Primal-Dual algorithm.
+1.0 (Standard for Chambolle-Pock)
+$N_{outer}$
+Outer EM Iterations
+Number of times the physics model matches the data.
+20 – 60 (More iterations recover higher frequency details, kept in check by TV).
+$N_{inner}$
+Inner TV Iterations
+Number of steps to solve the proximal denoising problem. Does not need to be perfectly solved every outer loop.
+10 – 30 (Diminishing returns beyond 30).
+$\epsilon$
+Numerical Floor
+Prevents division by zero in likelihood ratios and gradient normalizations.
+$10^{-6}$
+recon map TV algorithm
+ba6f0c4
+harshtripathi6
+merged commit e74e175
+into
+spebt:dev
+Apr 5, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

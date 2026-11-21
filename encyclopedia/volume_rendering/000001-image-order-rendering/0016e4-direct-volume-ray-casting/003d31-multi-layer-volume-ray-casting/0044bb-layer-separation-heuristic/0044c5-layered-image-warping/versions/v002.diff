@@ -1,0 +1,177 @@
+--- v001.md
++++ v002.md
+@@ -7,10 +7,10 @@
+ 
+ ## How it works
+-**Inputs:** A volume dataset, a ray path through the volume, and a smoothing kernel for opacity.
+-**Outputs:** A set of layer images, each associated with a depth value for warping.
++**Inputs:** A volume dataset, a ray path through the volume, and a smoothing kernel for opacity [S1].
++**Outputs:** A set of layer images, each associated with a depth value for warping [S1].
+ 
+ **Data Structures:**
+-*   **Layer:** A 2D image buffer storing color and depth values for a specific subset of the volume.
+-*   **Ray Profile:** A 1D array of opacity values sampled along the ray, smoothed to detect features.
++*   **Layer:** A 2D image buffer storing color and depth values for a specific subset of the volume [S1].
++*   **Ray Profile:** A 1D array of opacity values sampled along the ray, smoothed to detect features [S1].
+ 
+ **Algorithm Steps:**
+@@ -32,5 +32,5 @@
+     """
+     ray_samples: list of tuples (depth, opacity, color) along the ray.
+-    smoothing_kernel: function to smooth opacity values.
++    smoothing_kernel: function returning smoothed list of opacities.
+     min_opacity_threshold: minimum opacity for a layer to be valid (default 0.1).
+     """
+@@ -38,93 +38,81 @@
+     opacities = [s[1] for s in ray_samples]
+     smoothed_opacities = smoothing_kernel(opacities)
+-    
++
+     # Step 2: Detect local minima and maxima
+     extrema_indices = find_local_extrema(smoothed_opacities)
+-    
+-    # Step 3: Separate layers
++
++    # Step 3: Separate layers using extrema
+     layers = []
+-    current_layer_start = 0
+-    
++    current_start = 0
+     for idx in extrema_indices:
+-        # Define potential layer segment
+-        layer_segment = ray_samples[current_layer_start:idx+1]
+-        
+-        # Calculate total opacity of the segment
+-        total_opacity = sum(s[1] for s in layer_segment)
+-        
+-        # Check noise suppression
+-        if total_opacity >= min_opacity_threshold:
+-            # Check feature preservation (avoid splitting highly opaque connected regions)
+-            # This is a heuristic check; if the segment is highly opaque and connected,
+-            # it might be merged with the next segment. For simplicity, we assume
+-            # the extrema detection already handles major features, and we just
+-            # filter by opacity.
+-            
+-            # Step 4: Depth Value Selection (Method B: Max Color Impact)
+-            # Calculate remaining opacity for each sample in the segment
+-            # Remaining opacity is the product of opacities from the start of the ray
+-            # up to the current sample.
+-            remaining_opacities = []
+-            cumulative_opacity = 1.0
+-            for s in ray_samples:
+-                remaining_opacities.append(cumulative_opacity)
+-                cumulative_opacity *= (1.0 - s[1])
+-            
++        segment = ray_samples[current_start:idx + 1]
++        segment_opacity = sum(s[1] for s in segment)
++
++        # Noise suppression: require at least 10% opacity
++        if segment_opacity < min_opacity_threshold:
++            current_start = idx + 1
++            continue
++
++        # Feature preservation: avoid splitting connected, highly opaque regions
++        # [G] The sources do not specify the exact heuristic for connected opaque regions.
++        # A typical implementation would check if segment_opacity > 0.9 and merge with the next segment.
++
++        # Step 4: Depth Value Selection (Method B: Max Color Impact)
++        # Calculate transmittance (remaining opacity) before each sample in segment
++        transmittance = 1.0
++        max_impact = -1.0
++        best_depth = segment[0][0]
++        for s in segment:
++            impact = s[1] * transmittance
++            if impact > max_impact:
++                max_impact = impact
++                best_depth = s[0]
++            transmittance *= (1.0 - s[1])
++
++        layers.append({
++            'segment': segment,
++            'depth': best_depth,
++            'color': compute_layer_color(segment)
++        })
++        current_start = idx + 1
++
++    # Handle last segment
++    if current_start < len(ray_samples):
++        segment = ray_samples[current_start:]
++        segment_opacity = sum(s[1] for s in segment)
++        if segment_opacity >= min_opacity_threshold:
++            transmittance = 1.0
+             max_impact = -1.0
+-            best_depth = None
+-            
+-            for i, s in enumerate(layer_segment):
+-                # Impact = voxel opacity * remaining opacity
+-                # Note: remaining opacity should be calculated relative to the segment start
+-                # or global ray start? The source says "remaining opacity along the ray segment".
+-                # Assuming it means the attenuation *before* this voxel in the segment.
+-                # Let's use global remaining opacity for consistency with "light attenuation".
+-                impact = s[1] * remaining_opacities[ray_samples.index(s)]
+-                
++            best_depth = segment[0][0]
++            for s in segment:
++                impact = s[1] * transmittance
+                 if impact > max_impact:
+                     max_impact = impact
+                     best_depth = s[0]
+-            
+-            if best_depth is None:
+-                best_depth = layer_segment[0][0] # Fallback
+-            
++                transmittance *= (1.0 - s[1])
+             layers.append({
+-                'segment': layer_segment,
++                'segment': segment,
+                 'depth': best_depth,
+-                'color': compute_layer_color(layer_segment)
++                'color': compute_layer_color(segment)
+             })
+-        
+-        current_layer_start = idx + 1
+-    
+-    # Handle the last segment
+-    if current_layer_start < len(ray_samples):
+-        layer_segment = ray_samples[current_layer_start:]
+-        total_opacity = sum(s[1] for s in layer_segment)
+-        if total_opacity >= min_opacity_threshold:
+-            # Same depth selection logic
+-            max_impact = -1.0
+-            best_depth = None
+-            for s in layer_segment:
+-                impact = s[1] * remaining_opacities[ray_samples.index(s)]
+-                if impact > max_impact:
+-                    max_impact = impact
+-                    best_depth = s[0]
+-            if best_depth is None:
+-                best_depth = layer_segment[0][0]
+-            layers.append({
+-                'segment': layer_segment,
+-                'depth': best_depth,
+-                'color': compute_layer_color(layer_segment)
+-            })
+-            
++
+     return layers
+ 
++def find_local_extrema(values):
++    """Returns indices of local minima and maxima."""
++    indices = []
++    for i in range(1, len(values) - 1):
++        if (values[i] > values[i - 1] and values[i] > values[i + 1]) or \
++           (values[i] < values[i - 1] and values[i] < values[i + 1]):
++            indices.append(i)
++    return indices
++
+ def compute_layer_color(segment):
+-    # Standard volume rendering integration for the segment
++    """Standard front-to-back volume rendering integration."""
+     color = [0.0, 0.0, 0.0]
+     alpha = 0.0
+     for s in segment:
+         c, o = s[2], s[1]
+-        color = color + c * o * (1.0 - alpha)
++        color = [color[j] + c[j] * o * (1.0 - alpha) for j in range(3)]
+         alpha = alpha + o * (1.0 - alpha)
+     return color

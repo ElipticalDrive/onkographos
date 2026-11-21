@@ -1,0 +1,415 @@
+--- v001.md
++++ v002.md
+@@ -3,144 +3,72 @@
+ 
+ ## Overview
+-Adaptive Sampling with Uniform Fallback is a ray-marching strategy for volume rendering (specifically NeRF) that combines non-uniform sampling guided by a 3D occupancy grid with a deterministic uniform sampling fallback [S1, S2, unofficial]. It solves the problem of rays receiving insufficient samples due to aggressive skipping of empty space, which can lead to visual artifacts or training instability [S2, unofficial]. It is distinguished from its sibling [Adaptive Sampling](1385-adaptive-sampling.md) by the explicit inclusion of a uniform sampling pass for rays that fall below a minimum sample count threshold [S2, unofficial].
++Adaptive Sampling with Uniform Fallback is a ray-marching strategy that combines importance-driven adaptive sampling with a deterministic uniform sampling backup. It addresses the problem of insufficient sample coverage in sparse or empty regions of a volume, where adaptive estimators may return too few points, leading to visual artifacts or incomplete rendering. It distinguishes itself from pure adaptive methods by guaranteeing a minimum sampling density through a fallback mechanism, ensuring robustness at the cost of increased computation in empty space.
+ 
+ ## How it works
+-The method operates in two phases: an adaptive phase using a cascaded density grid to skip empty space, and a fallback phase that ensures every ray has a minimum number of samples via uniform distribution [S1, S2, unofficial].
++The method operates in two phases: an adaptive sampling phase using an estimator (e.g., `nerfacc`), followed by a uniform fallback phase for rays that did not receive sufficient samples.
+ 
+-### Inputs and Outputs
+ **Inputs:**
+-*   Ray origins $O$ and directions $D$.
+-*   Scene bounding box (AABB) for ray intersection.
+-*   Cascaded density grid (occupancy grid) storing density values.
+-*   MLP model for density and color evaluation.
+-*   Parameters: `NERF_CASCADES`, `NERF_GRIDSIZE`, `MAX_STEP`, `fallback_when_samples`, `enable_fallback` [S1, S2, unofficial].
++*   Ray origins $\mathbf{o}$ and directions $\mathbf{d}$ for $N$ rays.
++*   Volume bounds defined by intersection intervals $[t_{near}, t_{far}]$ for each ray.
++*   Adaptive sampling parameters: `step_size` (or max step size), `fallback_when_samples` (minimum sample count threshold).
++*   Fallback parameters: `enable_fallback` (boolean), $K$ (number of uniform samples for fallback).
+ 
+ **Outputs:**
+-*   Sample positions and indices for the adaptive pass.
+-*   Sample positions and indices for the fallback pass (if triggered).
+-*   Final concatenated sample set per ray.
++*   Sample start positions $t_s$ and end positions $t_e$ for all accepted samples.
++*   Ray indices $ray\_idx$ mapping each sample to its source ray.
++*   Validity mask for rays.
+ 
+-### Data Structures
+-1.  **Density Grid (`density_grid`)**:
+-    *   Layout: 1D `float32` array.
+-    *   Size: `NERF_CASCADES` $\times$ `NERF_GRIDSIZE`$^3$ [S1, unofficial].
+-    *   Content: Density values for each voxel in the cascaded grids [S1, unofficial].
+-2.  **Density Grid Bitfield (`density_grid_bitfield`)**:
+-    *   Layout: 1D `uint8` array.
+-    *   Size: `NERF_GRIDSIZE`$^3$ $\times$ `NERF_CASCADES` / 8 [S1, unofficial].
+-    *   Content: Occupancy bits (1 if occupied, 0 if empty) for fast ray traversal [S1, unofficial].
+-3.  **Sample Buffers**:
+-    *   `_density_grid_positions`: 1D array of shape `(-1, 3)` storing 3D coordinates of all generated samples [S1, unofficial].
+-    *   `_density_grid_indices`: 1D array storing the index of the grid cell for each position [S1, unofficial].
+-    *   `_mlp_out`: Concatenated MLP outputs (density, features) for all positions [S1, unofficial].
++**Data Structures:**
++*   Tensors for $t_s, t_e, ray\_idx$ of shape $(N_{samples},)$ and $(N_{rays},)$ respectively.
++*   Integer counters for samples per ray.
+ 
+-### Parameters
+-*   `NERF_CASCADES`: Number of cascaded grids. Default 5. Calculated as $\lceil \log_2(\text{aabb\_scale}) \rceil + 1$ if `aabb_scale` $> 2^{\text{NERF\_CASCADES}-1}$ [S1, unofficial].
+-*   `NERF_GRIDSIZE`: Resolution of each density grid. Fixed at 128 [S1, unofficial].
+-*   `MAX_STEP`: Maximum number of steps per ray. Fixed at 1024 [S1, unofficial].
+-*   `NERF_RENDERING_NEAR_DISTANCE`: Minimum distance for rendering. Fixed at 0.05 [S1, unofficial].
+-*   `NERF_MIN_OPTICAL_THICKNESS`: Minimum optical thickness threshold for non-uniform sampling. Fixed at 0.01 [S1, unofficial].
+-*   `density_grid_decay`: Exponential moving average decay factor for density grid updates. Fixed at 0.95 [S1, unofficial].
+-*   `update_den_freq`: Frequency (in training steps) to update the density grid. Default 16 [S1, unofficial].
+-*   `update_block_size`: Batch size for processing density grid samples during update. Default 5,000,000 [S1, unofficial].
+-*   `fallback_when_samples`: Minimum sample count threshold. If a ray has fewer samples than this, uniform fallback is triggered [S2, unofficial].
+-*   `enable_fallback`: Boolean flag to enable/disable the fallback mechanism [S2, unofficial].
++**Steps:**
+ 
+-### Algorithm Steps
++1.  **Ray-Volume Intersection:**
++    Compute $t_{near}$ and $t_{far}$ for each ray against the volume bounding box (AABB). Filter rays where $t_{far} > t_{near}$. If no valid rays exist, return empty tensors.
+ 
+-1.  **Initialize Density Grid**:
+-    *   If training step is 0 and dataset does not contain ray data, call `mark_untrained_density_grid` with focal lengths and transforms [S1, unofficial].
+-    *   Otherwise, zero-initialize the density grid [S1, unofficial].
++2.  **Adaptive Sampling:**
++    Pass valid ray origins, directions, $t_{near}$, $t_{far}$, and `step_size` to the adaptive estimator. The estimator returns indices $ray\_idx_{adv}$ and sample intervals $t_{s, adv}, t_{e, adv}$. Convert $ray\_idx_{adv}$ to long integers.
+ 
+-2.  **Ray-AABB Intersection**:
+-    *   Compute $t_{near}$ and $t_{far}$ for each ray using `ray_aabb_intersect` [S2, unofficial].
+-    *   Filter valid rays where $t_{far} > t_{near}$ [S2, unofficial].
+-    *   If no valid rays, return empty tensors for $t_s, t_e, \text{ray\_idx}, \text{valid}$ [S2, unofficial].
++3.  **Sample Counting:**
++    Count the number of adaptive samples assigned to each ray using binning:
++    $$
++    counts[i] = \text{bincount}(ray\_idx_{adv}, \text{minlength}=N_{valid})
++    $$
++    where $counts[i]$ is the number of samples for the $i$-th valid ray.
+ 
+-3.  **Generate Uniform Grid Samples**:
+-    *   Call `generate_grid_grid_samples_nerf_nonuniform` with `density_grid`, `n_uniform_density_grid_samples`, `ema_step`, `max_cascade`, and `-0.01` [S1, unofficial].
+-    *   Obtain positions and indices for uniform grid sampling [S1, unofficial].
++4.  **Fallback Identification:**
++    Identify rays with sample counts below the threshold:
++    $$
++    low\_ids = \{ i \mid counts[i] < \text{fallback\_when\_samples} \}
++    $$
+ 
+-4.  **Generate Non-Uniform Grid Samples**:
+-    *   Call `generate_grid_samples_nerf_nonuniform` with `density_grid`, `n_nonuniform_density_grid_samples`, `ema_step`, `max_cascade`, and `NERF_MIN_OPTICAL_THICKNESS` [S1, unofficial].
+-    *   Obtain positions and indices for non-uniform sampling [S1, unofficial].
++5.  **Uniform Fallback Generation:**
++    For each ray in $low\_ids$:
++    *   Compute uniform step size: $\Delta t = \frac{t_{far} - t_{near}}{K}$.
++    *   Generate sample start times: $t_{s, fb}[k] = t_{near} + k \cdot \Delta t$ for $k \in \{0, \dots, K-1\}$.
++    *   Generate sample end times: $t_{e, fb}[k] = t_{s, fb}[k] + \Delta t$.
++    *   Clamp the final $t_{e, fb}$ to $t_{far}$ to prevent overflow.
++    *   Assign ray indices $ray\_idx_{fb}$ corresponding to the fallback ray.
+ 
+-5.  **Concatenate Samples**:
+-    *   Combine uniform and non-uniform positions and indices into `_density_grid_positions` and `_density_grid_indices` [S1, unofficial].
+-    *   Reshape positions to `(-1, 3)` [S1, unofficial].
++6.  **Concatenation:**
++    Combine the adaptive and fallback samples:
++    $$
++    t_s = \text{concat}(t_{s, adv}, t_{s, fb})
++    $$
++    $$
++    t_e = \text{concat}(t_{e, adv}, t_{e, fb})
++    $$
++    $$
++    ray\_idx = \text{concat}(ray\_idx_{adv}, ray\_idx_{fb})
++    $$
+ 
+-6.  **Evaluate MLP**:
+-    *   Iterate over `_density_grid_positions` in blocks of `update_block_size` [S1, unofficial].
+-    *   Call `model.density` on each block [S1, unofficial].
+-    *   Concatenate results into `_mlp_out` [S1, unofficial].
+-
+-7.  **Splat to Grid**:
+-    *   Call `splat_grid_samples_nerf_max_nearest_neighbor` with indices, MLP outputs, `density_grid_tmp`, and total sample count [S1, unofficial].
+-    *   Update `density_grid_tmp` [S1, unofficial].
+-
+-8.  **Adaptive Ray Sampling**:
+-    *   Call `rays_sampler` with `rays_o`, `rays_d`, `density_grid_bitfield`, `metadata`, `img_ids`, and `transforms` [S1, unofficial].
+-    *   Obtain `coords`, `rays_index`, `rays_numsteps`, and `rays_numsteps_counter` [S1, unofficial].
+-
+-9.  **Compact Coordinates**:
+-    *   If using FP16 or not, call `model(coords_pos, coords_dir)` to get `nerf_outputs` [S1, unofficial].
+-    *   Call `compacted_coords` to get `coords_compacted`, `rays_numsteps_compacted`, and `compacted_numstep_counter` [S1, unofficial].
+-
+-10. **RGB Calculation**:
+-    *   Call `calc_rgb` with `network_outputs`, `coords`, `rays_numsteps`, `density_grid_mean`, and optionally `rays_numsteps_compacted` and `background_color` [S1, unofficial].
+-    *   Obtain `rgb` and `alpha` [S1, unofficial].
+-
+-11. **Fallback Check and Generation**:
+-    *   If `enable_fallback` is True:
+-        *   Count samples per ray using `torch.bincount(ray_idx, minlength=Nv)` [S2, unofficial].
+-        *   Identify rays with counts $<$ `fallback_when_samples` as `low_ids` [S2, unofficial].
+-        *   For low rays, compute uniform samples:
+-            *   $t_{s\_fb} = t_0[:, \text{None}] + k \cdot dt$
+-            *   $t_{e\_fb} = t_{s\_fb} + dt$
+-            *   Where $k$ is range($K$), $dt = (t_1 - t_0) / K$, and clamp final $t_{e\_fb}$ to $t_1$ [S2, unofficial].
+-        *   Construct `ray_idx_fb` for the fallback samples [S2, unofficial].
+-        *   Concatenate `nerfacc` samples with fallback samples (implementation detail: combine $t_s, t_e, \text{ray\_idx}$ with $t_{s\_fb}, t_{e\_fb}, \text{ray\_idx\_fb}$) [S2, unofficial].
+-
+-### Pseudocode
++**Pseudocode:**
+ 
+ ```python
+-def adaptive_sampling_with_uniform_fallback(rays_o, rays_d, aabb_min, aabb_max, 
+-                                            density_grid, density_grid_bitfield, 
+-                                            model, params):
+-    """
+-    Implements adaptive sampling with uniform fallback for volume rendering.
+-    
+-    Args:
+-        rays_o: Ray origins (N, 3)
+-        rays_d: Ray directions (N, 3)
+-        aabb_min: AABB minimum corner (3,)
+-        aabb_max: AABB maximum corner (3,)
+-        density_grid: 1D float32 array of size NERF_CASCADES * NERF_GRIDSIZE^3
+-        density_grid_bitfield: 1D uint8 array of size NERF_GRIDSIZE^3 * NERF_CASCADES / 8
+-        model: MLP model with density method
+-        params: Dictionary of parameters
+-        
+-    Returns:
+-        samples: Concatenated sample positions and indices
+-        ray_indices: Ray indices for each sample
+-    """
+-    # Constants
+-    NERF_CASCADES = params['NERF_CASCADES']
+-    NERF_GRIDSIZE = params['NERF_GRIDSIZE']
+-    MAX_STEP = params['MAX_STEP']
+-    NERF_RENDERING_NEAR_DISTANCE = params['NERF_RENDERING_NEAR_DISTANCE']
+-    NERF_MIN_OPTICAL_THICKNESS = params['NERF_MIN_OPTICAL_THICKNESS']
+-    fallback_when_samples = params['fallback_when_samples']
+-    enable_fallback = params['enable_fallback']
+-    
+-    # Step 1: Initialize Density Grid (if needed)
+-    # This is typically handled outside the per-frame sampling function
+-    # if training_step == 0 and not dataset_has_ray_data:
+-    #     mark_untrained_density_grid(focal_lengths, transforms)
+-    # else:
+-    #     density_grid.zero_()
+-    
+-    # Step 2: Ray-AABB Intersection
+-    t_near, t_far = ray_aabb_intersect(rays_o, rays_d, aabb_min, aabb_max)
++def adaptive_sampling_with_uniform_fallback(rays_o, rays_d, t_near, t_far, 
++                                            step_size, fallback_when_samples, 
++                                            K, enable_fallback):
++    # Step 1: Filter valid rays
+     valid_mask = t_far > t_near
+     rays_o_valid = rays_o[valid_mask]
+@@ -150,165 +78,74 @@
+     
+     if len(rays_o_valid) == 0:
+-        return empty_samples(), empty_ray_indices()
+-    
+-    # Step 3: Generate Uniform Grid Samples
+-    uniform_positions, uniform_indices = generate_grid_grid_samples_nerf_nonuniform(
+-        density_grid, 
+-        n_uniform_density_grid_samples=params['n_uniform_density_grid_samples'],
+-        ema_step=params['ema_step'],
+-        max_cascade=NERF_CASCADES,
+-        offset=-0.01
++        return empty_tensors()
++
++    # Step 2: Adaptive Sampling
++    ray_idx_adv, t_s_adv, t_e_adv = nerfacc_estimator.sample(
++        rays_o_valid, rays_d_valid, t_near_valid, t_far_valid, step_size
+     )
+-    
+-    # Step 4: Generate Non-Uniform Grid Samples
+-    nonuniform_positions, nonuniform_indices = generate_grid_samples_nerf_nonuniform(
+-        density_grid,
+-        n_nonuniform_density_grid_samples=params['n_nonuniform_density_grid_samples'],
+-        ema_step=params['ema_step'],
+-        max_cascade=NERF_CASCADES,
+-        min_optical_thickness=NERF_MIN_OPTICAL_THICKNESS
+-    )
+-    
+-    # Step 5: Concatenate Samples
+-    all_positions = torch.cat([uniform_positions, nonuniform_positions], dim=0)
+-    all_indices = torch.cat([uniform_indices, nonuniform_indices], dim=0)
+-    all_positions = all_positions.view(-1, 3)
+-    
+-    # Step 6: Evaluate MLP
+-    mlp_out = []
+-    update_block_size = params['update_block_size']
+-    for i in range(0, len(all_positions), update_block_size):
+-        block = all_positions[i:i+update_block_size]
+-        mlp_out.append(model.density(block))
+-    mlp_out = torch.cat(mlp_out, dim=0)
+-    
+-    # Step 7: Splat to Grid (Update Density Grid)
+-    # This updates the density grid based on the samples
+-    splat_grid_samples_nerf_max_nearest_neighbor(
+-        all_indices, 
+-        mlp_out, 
+-        density_grid_tmp, 
+-        total_sample_count=len(all_positions)
+-    )
+-    
+-    # Step 8: Adaptive Ray Sampling
+-    coords, rays_index, rays_numsteps, rays_numsteps_counter = rays_sampler.execute(
+-        rays_o_valid, 
+-        rays_d_valid, 
+-        density_grid_bitfield, 
+-        metadata=params['metadata'],
+-        img_ids=params['img_ids'],
+-        transforms=params['transforms']
+-    )
+-    
+-    # Step 9: Compact Coordinates
+-    nerf_outputs = model(coords[:, :3], coords[:, 3:])
+-    coords_compacted, rays_numsteps_compacted, compacted_numstep_counter = compacted_coords(
+-        nerf_outputs, 
+-        coords, 
+-        rays_numsteps
+-    )
+-    
+-    # Step 10: RGB Calculation
+-    rgb, alpha = calc_rgb(
+-        network_outputs=nerf_outputs,
+-        coords=coords,
+-        rays_numsteps=rays_numsteps,
+-        density_grid_mean=params['density_grid_mean'],
+-        rays_numsteps_compacted=rays_numsteps_compacted,
+-        background_color=params['background_color']
+-    )
+-    
+-    # Step 11: Fallback Check and Generation
+-    adaptive_samples = []
+-    adaptive_ray_indices = []
+-    
++    ray_idx_adv = ray_idx_adv.long()
++
++    # Step 3: Count samples per ray
++    N_valid = len(rays_o_valid)
++    counts = torch.bincount(ray_idx_adv, minlength=N_valid)
++
++    # Step 4: Identify low-sample rays
+     if enable_fallback:
+-        # Count samples per ray
+-        sample_counts = torch.bincount(rays_index, minlength=len(rays_o_valid))
+-        low_ids = torch.where(sample_counts < fallback_when_samples)[0]
++        low_ids = torch.where(counts < fallback_when_samples)[0]
+         
+         if len(low_ids) > 0:
+-            # Generate uniform fallback samples for low rays
+-            t0 = t_near_valid[low_ids]
+-            t1 = t_far_valid[low_ids]
+-            K = params['fallback_samples_per_ray'] # Assumed parameter
+-            dt = (t1 - t0) / K
++            # Step 5: Uniform Fallback
++            t_near_fb = t_near_valid[low_ids]
++            t_far_fb = t_far_valid[low_ids]
+             
+-            k = torch.arange(K).to(t0.device)
+-            t_s_fb = t0[:, None] + k * dt
+-            t_e_fb = t_s_fb + dt
+-            t_e_fb[:, -1] = torch.clamp(t_e_fb[:, -1], max=t1)
++            # Compute uniform steps
++            dt = (t_far_fb - t_near_fb) / K
+             
+-            # Convert to 3D positions
+-            # Assuming rays_d_valid is normalized or needs normalization
+-            rays_d_valid_norm = rays_d_valid[low_ids] / torch.norm(rays_d_valid[low_ids], dim=1, keepdim=True)
+-            fallback_positions = rays_o_valid[low_ids][:, None, :] + t_s_fb[:, :, None] * rays_d_valid_norm[:, None, :]
+-            fallback_positions = fallback_positions.view(-1, 3)
++            # Generate K samples per low ray
++            k_indices = torch.arange(K).to(rays_o.device)
++            # Broadcast: (N_low, 1) + (1, K) -> (N_low, K)
++            t_s_fb = t_near_fb[:, None] + k_indices[None, :] * dt[:, None]
++            t_e_fb = t_s_fb + dt[:, None]
+             
+-            # Construct ray indices for fallback samples
+-            fallback_ray_indices = torch.repeat_interleave(low_ids, K)
++            # Clamp last sample end to t_far
++            t_e_fb[:, -1] = t_far_fb
+             
+-            # Add fallback samples to adaptive samples
+-            adaptive_samples.append(fallback_positions)
+-            adaptive_ray_indices.append(fallback_ray_indices)
++            # Reshape to 1D for concatenation
++            t_s_fb = t_s_fb.flatten()
++            t_e_fb = t_e_fb.flatten()
+             
+-            # Concatenate adaptive samples with fallback samples
+-            # Note: The original code implies combining nerfacc samples with fallback samples
+-            # Here we assume adaptive_samples contains the nerfacc samples from Step 8/9
+-            # and we are appending the fallback samples
+-            pass
+-    
+-    # Combine all samples
+-    if len(adaptive_samples) > 0:
+-        final_samples = torch.cat(adaptive_samples, dim=0)
+-        final_ray_indices = torch.cat(adaptive_ray_indices, dim=0)
++            # Create ray indices for fallback
++            ray_idx_fb = low_ids[:, None].expand(-1, K).flatten()
++            
++            # Step 6: Concatenate
++            t_s = torch.cat([t_s_adv, t_s_fb])
++            t_e = torch.cat([t_e_adv, t_e_fb])
++            ray_idx = torch.cat([ray_idx_adv, ray_idx_fb])
++        else:
++            t_s, t_e, ray_idx = t_s_adv, t_e_adv, ray_idx_adv
+     else:
+-        final_samples = all_positions
+-        final_ray_indices = all_indices
+-        
+-    return final_samples, final_ray_indices
++        t_s, t_e, ray_idx = t_s_adv, t_e_adv, ray_idx_adv
++
++    return t_s, t_e, ray_idx
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Precision**: Use FP16 for coordinates if memory is constrained, but be aware of potential precision loss in density evaluation [S1, unofficial].
+-*   **Boundaries**: Clamp $t_{e\_fb}$ to $t_1$ to ensure fallback samples stay within the AABB [S2, unofficial].
+-*   **Degenerate Input**: If no valid rays are found ($t_{far} \le t_{near}$), return empty tensors to avoid errors in subsequent steps [S2, unofficial].
+-*   **Grid Update Frequency**: The density grid is updated every `update_den_freq` steps. Updating too frequently can be computationally expensive, while updating too infrequently can lead to stale occupancy information [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Precision:** Clamping $t_{e, fb}$ to $t_{far}$ is critical to avoid sampling outside the volume bounds, which may cause out-of-bounds memory access or invalid density queries.
++*   **Degenerate Input:** If $t_{near} \approx t_{far}$, $\Delta t$ becomes negligible. The fallback should handle this by ensuring $K \ge 1$ and checking for zero-length intervals.
++*   **Performance:** The fallback adds overhead for rays that are already well-sampled if not properly gated by `enable_fallback` and `low_ids`.
+ 
+ ## Subtopics
+ 
+-### Adaptive Sampling
+-Uses a metric to adjust sampling rate without a uniform fallback. Choose when memory is extremely constrained and some rays can have zero samples. [Adaptive Sampling](1385-adaptive-sampling.md)
+-
+-### Adaptive Sampling Step with Early Ray Termination
+-Combines adaptive step size with early termination. Choose when rays can be terminated early due to transparency. [Adaptive Sampling Step with Early Ray Termination](4573-adaptive-sampling-step-with-early-ray-termination.md)
+-
+-### Adaptive Sampling for Interaction
+-Optimizes sampling for interactive frame rates. Choose when real-time performance is critical. [Adaptive Sampling for Interaction](5643-adaptive-sampling-for-interaction.md)
+-
+-### Loss-based Adaptive Sampling
+-Uses loss gradients to guide sampling. Choose when training stability is more important than inference speed. [Loss-based Adaptive Sampling](6928-loss-based-adaptive-sampling.md)
+-
+-### Adaptive Sampling Rate Control
+-Controls sampling rate based on temporal or spatial variance. Choose when temporal coherence is important. [Adaptive Sampling Rate Control](8896-adaptive-sampling-rate-control.md)
+-
+-### Adaptive Preintegration Termination Criteria
+-Adapts preintegration termination. Choose when using preintegration techniques. [Adaptive Preintegration Termination Criteria](9804-adaptive-preintegration-termination-criteria.md)
+-
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \cdot S)$, where $N$ is the number of rays and $S$ is the average number of samples per ray. The fallback adds $O(N_{low} \cdot K)$, where $N_{low}$ is the number of rays with insufficient samples and $K$ is the number of fallback samples [S1, S2, unofficial].
+-*   **Memory Complexity**: $O(\text{NERF\_CASCADES} \cdot \text{NERF\_GRIDSIZE}^3)$ for the density grid and bitfield [S1, unofficial].
+-*   **Measured Performance**: Not given in the sources.
+-*   **Scaling**: Scales with the number of cascades and grid resolution. Larger grids provide better occupancy information but consume more memory [S1, unofficial].
+-*   **Strengths**: Ensures every ray has a minimum number of samples, reducing artifacts from aggressive skipping [S2, unofficial]. Efficiently skips empty space using the occupancy grid [S1, unofficial].
+-*   **Limitations**: The fallback adds computational overhead for rays that would otherwise be skipped [S2, unofficial]. The density grid update can be expensive if done frequently [S1, unofficial].
+-*   **When to Use**: When visual fidelity is critical and some rays may receive too few samples due to aggressive empty space skipping [S2, unofficial].
+-*   **When Not to Use**: When memory is extremely constrained and the overhead of the density grid and fallback is unacceptable [S1, unofficial].
++*   **Time Complexity:** $O(N_{rays} + N_{samples})$. The adaptive phase depends on the estimator's efficiency. The fallback phase is $O(N_{low} \cdot K)$, where $N_{low}$ is the number of rays needing fallback.
++*   **Memory Complexity:** $O(N_{samples} + N_{low} \cdot K)$ to store the combined sample set.
++*   **Strengths:** Guarantees minimum coverage; robust against estimator failures or sparse regions; simple to implement.
++*   **Limitations:** Increased computational cost in empty space compared to pure adaptive methods; potential redundancy if adaptive samples already cover the ray well.
++*   **When to Use:** When visual completeness is critical and adaptive estimators may miss sparse structures; in scenes with large empty regions where uniform sampling is cheap.
++*   **When Not to Use:** When computational budget is extremely tight and empty space can be skipped entirely; when adaptive sampling is known to be highly accurate and consistent.
+ 
+ ## Background
+-The method originates from the Jittor/JNeRF implementation, which uses a 3D density grid to accelerate ray marching in NeRF by skipping empty space, using cascaded grids and non-uniform sampling [S1, unofficial]. The uniform fallback mechanism was introduced in the CoroNeRF_public implementation to handle rays that receive too few samples during adaptive sampling [S2, unofficial].
++This method is implemented in the CoroNeRF project [S1, unofficial], leveraging the `nerfacc` library for adaptive sampling. It addresses the need for robust sampling in neural radiance fields where adaptive strategies might under-sample certain rays.
+ 
+ ## Sources
+-[S1] Jittor/JNeRF, https://github.com/Jittor/JNeRF, fetched 2026-10-27 (unofficial)
+-[S2] AlanHsu314/CoroNeRF_public, https://github.com/AlanHsu314/CoroNeRF_public, fetched 2026-10-27 (unofficial)+[S1] AlanHsu314/CoroNeRF_public, https://github.com/AlanHsu314/CoroNeRF_public, fetched 2026-10-27 (unofficial)

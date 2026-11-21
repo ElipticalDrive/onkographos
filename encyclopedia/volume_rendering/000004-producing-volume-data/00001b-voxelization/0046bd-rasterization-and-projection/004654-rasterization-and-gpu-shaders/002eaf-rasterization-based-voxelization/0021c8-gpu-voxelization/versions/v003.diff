@@ -1,0 +1,269 @@
+--- v002.md
++++ v003.md
+@@ -1,162 +1,142 @@
+ # GPU Voxelization
+ Also called: GPU-based Voxelization, GPU Rasterization-based Voxelization, Voxelization via GPU Rasterization, GPU Voxelization via GPU Rasterization
++
+ ## Overview
+-GPU Voxelization maps 3D triangle meshes to a voxel grid by leveraging the GPU's hardware rasterization pipeline, projecting triangles onto a 2D plane and using shaders to write occupied voxel indices into a buffer [S1, S4, unofficial]. It solves the performance bottleneck of CPU-based ray-tracing voxelization by parallelizing the rasterization process across thousands of GPU cores [S4, unofficial]. It differs from its parent [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by specifically utilizing the GPU rendering pipeline (vertex, geometry, fragment shaders) and atomic operations for concurrent writes, distinguishing it from CPU-based or compute-shader-only approaches [S2, S4, unofficial].
++GPU Voxelization converts a 3D triangle mesh into a voxel grid by leveraging the GPU's hardware rasterization pipeline to project triangles onto a 3D volume [S1, S4, unofficial]. It solves the performance bottleneck of CPU-based ray-tracing voxelization by parallelizing the fragment generation process across the GPU [S4, unofficial]. Unlike [3D Grid Rasterization](903-3d-grid-rasterization.md) which may use explicit grid traversal, this method relies on standard graphics primitives and fragment shaders to mark occupied cells, and differs from [GPU Voxelization via Compute Shaders](2549-gpu-voxelization-via-compute-shaders.md) by utilizing the fixed-function rasterizer rather than manual thread dispatch [S1, S4, unofficial].
++
+ ## How it works
+-### Inputs and Outputs
+-- **Inputs**: A set of triangle meshes (vertices, normals), a voxel grid resolution (or step size), and an Axis-Aligned Bounding Box (AABB) defining the scene bounds [S4, unofficial].
+-- **Outputs**: A list of occupied voxel coordinates (or a dense grid representation) and optionally per-voxel data (e.g., color, normal) stored in a buffer [S4, unofficial].
++**Inputs and Outputs:**
++- Input: A triangle mesh (vertices, indices), voxel grid resolution ($W, H, D$), and voxel step size (edge length).
++- Output: A list of occupied voxel coordinates or a boolean/integer grid indicating occupancy.
+ 
+-### Data Structures
+-1.  **Voxel Grid Buffer**: A 1D Shader Storage Buffer Object (SSBO) of type `int` [S4, unofficial].
+-    -   **Layout**: `int cnts[]` bound at binding point 0 [S4, unofficial].
+-    -   **Size**: $N = \text{resolution}.x \times \text{resolution}.y \times \text{resolution}.z$ [S4, unofficial].
+-    -   **Initialization**: All values set to 0 [S4, unofficial].
+-    -   **Content**: Each index $i$ corresponds to a voxel. The value at `cnts[i]` is incremented atomically for each fragment covering that voxel [S4, unofficial].
+-2.  **Camera/Projection Uniforms**:
+-    -   For single-view: View and Projection matrices mapping world space to clip space, then to voxel space [S1, S4, unofficial].
+-    -   For multi-view: An array of 3 View-Projection matrices `viewProject[3]` [S4, unofficial].
+-3.  **Scene Parameters**:
+-    -   `boxMin`: `vec3` containing the minimum x, y, z coordinates of the mesh AABB [S4, unofficial].
+-    -   `step`: `float` representing the edge length of a voxel cube [S4, unofficial].
+-    -   `resolution`: `vec3` containing the integer dimensions of the voxel grid [S4, unofficial].
++**Data Structures:**
++- **SSBO (Shader Storage Buffer Object):** A 1D array of integers `int cnts[]` bound at binding point 0. Size is $W \times H \times D$. Initialized to 0. [S4, unofficial]
++- **Voxel Fragment Queue (Optional):** In some implementations, a buffer storing 16-byte fragments (4 bytes for XYZ position, max 512 range) is used before final grid accumulation [S3, unofficial].
+ 
+-### Numbered Steps
+-1.  **Compute AABB**: Iterate over all mesh vertices to find the minimum ($min_x, min_y, min_z$) and maximum ($max_x, max_y, max_z$) coordinates [S4, unofficial].
+-2.  **Calculate Resolution**: Determine the voxel grid dimensions based on the AABB range and the desired voxel step size:
+-    $$ \text{resolution}.x = \lfloor (max_x - min_x) / \text{step} \rfloor + 1 $$
+-    $$ \text{resolution}.y = \lfloor (max_y - min_y) / \text{step} \rfloor + 1 $$
+-    $$ \text{resolution}.z = \lfloor (max_z - min_z) / \text{step} \rfloor + 1 $$
++**Steps:**
++
++1.  **Compute Bounding Box:** Iterate over all mesh vertices to find the minimum ($min$) and maximum ($max$) coordinates along X, Y, and Z axes [S4, unofficial].
++2.  **Calculate Resolution:** Determine the voxel grid dimensions based on the bounding box range ($range = max - min$) and the fixed step size ($step$):
++    $$ W = \lfloor range.x / step \rfloor + 1 $$
++    $$ H = \lfloor range.y / step \rfloor + 1 $$
++    $$ D = \lfloor range.z / step \rfloor + 1 $$
+     [S4, unofficial]
+-3.  **Setup Camera and Projection**:
+-    -   **Single View**: Position an orthographic camera outside the AABB along the projection axis (e.g., Z-axis). Set the orthographic frustum slightly larger than the AABB range (e.g., $\pm 0.51 \times \text{range}$) [S4, unofficial].
+-    -   **Multi-View**: Create three orthographic cameras looking along the negative X, negative Y, and negative Z axes, positioned outside the respective AABB extents [S4, unofficial].
+-4.  **Configure Rasterization State**:
+-    -   Disable depth testing (`glDisable(GL_DEPTH_TEST)`) [S4, unofficial].
+-    -   Disable backface culling (`glDisable(GL_CULL_FACE)`) to ensure all triangle orientations are processed [S1, S4, unofficial].
+-    -   Set polygon mode to fill [S4, unofficial].
+-5.  **Allocate and Initialize Buffer**: Create an SSBO of size $\text{resolution}.x \times \text{resolution}.y \times \text{resolution}.z \times 4$ bytes. Initialize all integers to 0 [S4, unofficial].
+-6.  **Render Pass (Shader Execution)**:
+-    -   Bind the mesh and the SSBO.
+-    -   **Vertex Shader**: Pass world-space positions to the next stage. In multi-view, pass raw positions; in single-view, apply view-projection [S4, unofficial].
+-    -   **Geometry Shader (Optional/Multi-View)**:
+-        -   Compute the triangle face normal using the cross product of two edge vectors: $\vec{n} = (\vec{v_1} - \vec{v_0}) \times (\vec{v_2} - \vec{v_0})$ [S4, unofficial].
+-        -   Select the optimal camera index by comparing the absolute values of the normal components: $n_{DX} = |n_x|, n_{DY} = |n_y|, n_{DZ} = |n_z|$. Return index 0 if $n_{DX}$ is max, 1 if $n_{DY}$ is max, 2 if $n_{DZ}$ is max [S4, unofficial].
+-        -   Transform vertices using the selected View-Projection matrix and emit them [S4, unofficial].
+-    -   **Fragment Shader**:
+-        -   Receive the world-space position of the fragment ($FragPos$) [S4, unofficial].
+-        -   Calculate voxel coordinates:
+-            $$ x = \lfloor (FragPos.x - boxMin.x) / \text{step} \rfloor $$
+-            $$ y = \lfloor (FragPos.y - boxMin.y) / \text{step} \rfloor $$
+-            $$ z = \lfloor (FragPos.z - boxMin.z) / \text{step} \rfloor $$
+-        -   Calculate linear index:
+-            $$ index = y \times (\text{resolution}.z \times \text{resolution}.x) + z \times \text{resolution}.x + x $$
+-        -   Atomically increment the counter: `atomicAdd(cnts[index], 1)` [S4, unofficial].
+-7.  **Read Back Results**:
+-    -   Map the SSBO on the CPU [S4, unofficial].
+-    -   Iterate through the buffer. For each index where `cnts[i] > 0`:
+-        -   Decode 3D coordinates from the linear index $i$:
+-            $$ iy = i / (\text{resolution}.x \times \text{resolution}.z) $$
+-            $$ iz = (i - iy \times \text{resolution}.x \times \text{resolution}.z) / \text{resolution}.x $$
+-            $$ ix = i - iy \times \text{resolution}.x \times \text{resolution}.z - iz \times \text{resolution}.x $$
+-        -   Compute world position: $P = min + (ix \cdot \text{step}, iy \cdot \text{step}, iz \cdot \text{step})$ [S4, unofficial].
+-        -   Add $P$ to the result list [S4, unofficial].
++3.  **Setup Camera and Projection:**
++    - Disable depth testing and back-face culling to ensure all triangles are processed regardless of orientation [S4, unofficial].
++    - Create an orthographic projection matrix. The camera is positioned outside the AABB along the projection axis (e.g., Z-axis) with a frustum slightly larger than the AABB range (e.g., $range \times 0.51$) [S4, unofficial].
++    - Alternatively, for multi-view approaches, create three orthographic cameras along the X, Y, and Z axes [S4, unofficial].
++4.  **Render Pass (Rasterization):**
++    - Bind the SSBO.
++    - Execute the vertex shader, which passes world-space positions to the fragment shader [S4, unofficial].
++    - The fragment shader calculates the voxel index for each rasterized fragment and atomically increments the SSBO value at that index [S4, unofficial].
++5.  **Readback:** Read the SSBO on the CPU. For each index with a value $> 0$, calculate the 3D voxel coordinates and add them to the result list [S4, unofficial].
+ 
+-### Pseudocode
++**Formulas:**
++
++*Voxel Index Calculation in Fragment Shader:*
++Given fragment world position $FragPos$, bounding box minimum $boxMin$, and step size $step$:
++$$ x = \lfloor (FragPos.x - boxMin.x) / step \rfloor $$
++$$ y = \lfloor (FragPos.y - boxMin.y) / step \rfloor $$
++$$ z = \lfloor (FragPos.z - boxMin.z) / step \rfloor $$
++$$ index = y \times (D \times W) + z \times W + x $$
++[S4, unofficial]
++
++*Voxel Index to Coordinates on CPU:*
++Given linear index $idx$, resolution $W, H, D$:
++$$ iy = idx / (W \times D) $$
++$$ iz = (idx - iy \times W \times D) / W $$
++$$ ix = idx - iy \times W \times D - iz \times W $$
++[S4, unofficial]
++
++**Pseudocode:**
++
+ ```python
+-import math
+-
+ def gpu_voxelization(mesh, step):
+     # 1. Compute AABB
+-    min_x = min(v.x for v in mesh.vertices)
+-    max_x = max(v.x for v in mesh.vertices)
+-    min_y = min(v.y for v in mesh.vertices)
+-    max_y = max(v.y for v in mesh.vertices)
+-    min_z = min(v.z for v in mesh.vertices)
+-    max_z = max(v.z for v in mesh.vertices)
+-    
+-    box_min = (min_x, min_y, min_z)
+-    range_vec = (max_x - min_x, max_y - min_y, max_z - min_z)
++    min_coord = min(mesh.vertices, key=lambda v: v.x) # Simplified logic
++    max_coord = max(mesh.vertices, key=lambda v: v.x)
++    # Note: In practice, iterate all components x,y,z for min/max
+     
+     # 2. Calculate Resolution
+-    res_x = math.floor(range_vec[0] / step) + 1
+-    res_y = math.floor(range_vec[1] / step) + 1
+-    res_z = math.floor(range_vec[2] / step) + 1
++    range_vec = max_coord - min_coord
++    W = floor(range_vec.x / step) + 1
++    H = floor(range_vec.y / step) + 1
++    D = floor(range_vec.z / step) + 1
+     
+-    # 3. Setup Camera (Single View Example: Z-axis)
+-    # Camera position: centered in XY, outside in Z
+-    cam_pos = ((min_x + max_x) * 0.5, (min_y + max_y) * 0.5, max_z + 0.2)
+-    # Standard orthographic projection matrix construction
+-    # proj = ortho(-range_vec.x * 0.51, range_vec.x * 0.51, -range_vec.y * 0.51, range_vec.y * 0.51, 0.1, range_vec.z * 1.2 + 0.2)
+-    # Standard look-at view matrix construction
+-    # view = look_at(cam_pos, (0, 0, -1), (0, 1, 0))
+-    vp_matrix = proj_matrix * view_matrix  # Combined View-Projection
++    # 3. Allocate SSBO
++    ssbo_size = W * H * D
++    ssbo = allocate_buffer(ssbo_size, type=int)
++    fill(ssbo, 0)
+     
+-    # 4. Allocate SSBO
+-    buffer_size = int(res_x * res_y * res_z)
+-    ssbo = [0] * buffer_size
++    # 4. Setup Render State
++    disable_depth_test()
++    disable_backface_culling()
+     
+     # 5. Render Pass
+-    # Standard API calls: disable_depth_test(), disable_cull_face()
+-    # Standard API calls: bind_ssbo(ssbo, binding=0), set_uniforms(box_min, step, resolution, vp)
++    bind_ssbo(ssbo, binding=0)
++    set_uniform("boxMin", min_coord)
++    set_uniform("step", step)
++    set_uniform("resolution", vec3(W, H, D))
+     
+-    # Vertex Shader: gl_Position = vp * vec4(position, 1.0)
++    # Vertex Shader: Pass position
+     # Fragment Shader:
+-    #   x = int((FragPos.x - box_min[0]) / step)
+-    #   y = int((FragPos.y - box_min[1]) / step)
+-    #   z = int((FragPos.z - box_min[2]) / step)
+-    #   idx = y * (res_z * res_x) + z * res_x + x
+-    #   ssbo[idx] += 1  # atomicAdd
++    #   x = int((FragPos.x - boxMin.x) / step)
++    #   y = int((FragPos.y - boxMin.y) / step)
++    #   z = int((FragPos.z - boxMin.z) / step)
++    #   index = y * (D * W) + z * W + x
++    #   atomicAdd(ssbo[index], 1)
+     
+-    # Standard API call: draw_triangles(mesh)
+-    # Standard API call: memory_barrier_ssbo()
++    draw_mesh(mesh)
++    memory_barrier(GL_SHADER_STORAGE_BARRIER_BIT)
+     
+-    # 6. Read Back
+-    result_voxels = []
+-    for i in range(buffer_size):
+-        if ssbo[i] > 0:
+-            iy = i // (res_x * res_z)
+-            iz = (i - iy * res_x * res_z) // res_x
+-            ix = i - iy * res_x * res_z - iz * res_x
+-            voxel_pos = (box_min[0] + ix * step, box_min[1] + iy * step, box_min[2] + iz * step)
+-            result_voxels.append(voxel_pos)
++    # 6. Readback and Convert
++    result_list = []
++    data = read_ssbo(ssbo)
++    for idx in range(ssbo_size):
++        if data[idx] > 0:
++            iy = idx // (W * D)
++            iz = (idx - iy * W * D) // W
++            ix = idx - iy * W * D - iz * W
++            voxel_pos = min_coord + vec3(ix * step, iy * step, iz * step)
++            result_list.append(voxel_pos)
+             
+-    return result_voxels
++    return result_list
+ ```
+ 
+-### Parameters
+--   **step**: The edge length of the voxel cube. Determines the resolution. Typical value depends on scene scale and required detail [S4, unofficial].
+--   **Projection Matrices**: Orthographic matrices mapping world coordinates to the voxel grid space [S1, S4, unofficial].
+--   **Scene Normalization Matrix**: Optional matrix to scale the scene to fit in a 1x1x1 cube centered at the origin before voxelization [S2, unofficial].
+-
+-### Edge Cases and Pitfalls
+--   **Cracks**: Single-view voxelization causes cracks when triangles are parallel to the projection plane, as they project to lines/zero area and are not rasterized [S4, unofficial]. Use Multi-View Voxelization with Normal-Based Selection to mitigate this [S4, unofficial].
+--   **Holes**: Even with multi-view, adjacent triangles may select different projection cameras, leading to gaps where no fragment covers a pixel center [S4, unofficial]. Conservative rasterization or post-processing may be needed [S3, S4, unofficial].
+--   **Atomic Contention**: High triangle density can lead to atomic contention on the SSBO. Performance may degrade with very high resolutions or dense meshes [S2, S4, unofficial].
+--   **Precision**: Floating-point precision in the fragment shader when calculating voxel indices can lead to off-by-one errors at boundaries. Using `int()` truncation as shown is standard [S4, unofficial].
++**Edge Cases and Pitfalls:**
++- **Cracks:** Single projection direction causes cracks when triangles are parallel to the projection plane, as they project to lines/zero area and are not rasterized [S4, unofficial].
++- **Holes:** Even with multi-view, adjacent triangles selecting different views can cause holes if the rasterization center test fails for one view but not the other [S4, unofficial].
++- **Precision:** Integer division in fragment shaders truncates towards zero; ensure floor behavior is consistent with grid alignment [S4, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [VoxelPipe](2797-voxelpipe.md)
+-A highly flexible and efficient software pipeline for programmable triangle voxelization, written in CUDA. It supports fully conservative and thin voxelizations, multiple boolean, floating point, vector-typed render targets, user-defined vertex and fragment shaders, and a bucketing mode (A-buffer) generating the full list of fragments per voxel.
++VoxelPipe is a highly flexible, programmable software pipeline for triangle voxelization implemented in CUDA. It solves the problem of converting triangle meshes into voxel grids with support for fully conservative and thin voxelizations, arbitrary render targets (boolean, floating-point, vector), and user-defined shaders. It distinguishes itself from prior binary voxelizers by supporting arbitrary framebuffer types and programmability via vertex and fragment shaders, tackling load balancing via a tile-based algorithm instead of assigning individual triangles to single threads with global memory atomics, and optimizing the triangle/box overlap test. [VoxelPipe](2797-voxelpipe.md)
+ 
+ ### [Conservative Rasterization](2936-conservative-rasterization.md)
+-A technique used during voxelization to rasterize all fragments that 'touch' the triangle being rendered. This prevents artifacts where small triangles (smaller than the voxel grid resolution) are ignored completely, resulting in holes in the voxelized geometry.
++This method prevents holes in voxelized geometry caused by triangles smaller than the voxel grid resolution by rasterizing all fragments that "touch" the triangle. It achieves this by analytically expanding the triangle in clip space before rasterization, ensuring that any voxel potentially intersected by the triangle is covered. Unlike hardware conservative rasterization (limited to NVIDIA) or Multi-Sample Anti-Aliasing (MSAA) activation, this geometric approach is hardware-agnostic but computationally more intensive, requiring a geometry shader for the expansion logic. [Conservative Rasterization](2936-conservative-rasterization.md)
+ 
+ ### Multi-View Voxelization with Normal-Based Selection
+-An extension of single-view voxelization that uses three orthographic cameras (along X, Y, Z axes) and selects the best view for each triangle based on its normal vector to prevent cracks caused by degenerate projections. It computes the triangle face normal and selects the camera index by comparing the absolute values of the normal's components ($n_{DX} = |n_x|, n_{DY} = |n_y|, n_{DZ} = |n_z|$), choosing the axis with the maximum absolute component [S4, unofficial].
++An extension of single-view voxelization that uses three orthographic cameras (along X, Y, Z axes) and selects the best view for each triangle based on its normal vector to prevent cracks caused by degenerate projections [S4, unofficial].
++**Steps:**
++1. Create three orthographic cameras looking along the negative X, negative Y, and negative Z axes, positioned outside the AABB [S4, unofficial].
++2. Pass the combined View-Projection matrices for all three cameras as a uniform array `viewProject[3]` to the geometry shader [S4, unofficial].
++3. In the Geometry Shader, compute the triangle face normal using the cross product of two edge vectors derived from input vertices [S4, unofficial].
++4. Select the camera index by comparing the absolute values of the normal's components. Return 0 if $|n_x|$ is max, 1 if $|n_y|$ is max, 2 if $|n_z|$ is max [S4, unofficial].
++5. Transform the triangle vertices using the selected View-Projection matrix and emit them [S4, unofficial].
++**Formula:**
++Normal Component Comparison: $n_{DX} = |n_x|, n_{DY} = |n_y|, n_{DZ} = |n_z|$. Selection is based on $\text{argmax}(n_{DX}, n_{DY}, n_{DZ})$ [S4, unofficial].
+ 
+ ## Operating characteristics
+--   **Time Complexity**: $O(N \cdot T)$, where $N$ is the number of triangles and $T$ is the average number of fragments generated per triangle. The rasterization hardware performs the heavy lifting in parallel [G].
+--   **Memory Complexity**: $O(V)$, where $V$ is the number of voxels in the grid ($res_x \cdot res_y \cdot res_z$). The SSBO size grows cubically with resolution [S4, unofficial].
+--   **Measured Performance**: Significantly faster than CPU-based ray-tracing methods, especially for high-resolution grids and complex meshes. The algorithm is very fast but has the disadvantage of high memory usage [S4, unofficial].
+--   **Scaling**: Performance scales well with GPU parallelism but degrades if the voxel grid becomes too large for GPU memory or if atomic contention becomes severe [S2, S4, unofficial].
+--   **Strengths**: High speed, leverages existing GPU hardware, simple implementation using standard graphics APIs [S4, unofficial].
+--   **Limitations**: High memory usage for dense grids, prone to cracks and holes without multi-view or conservative rasterization, requires careful handling of atomic operations [S1, S4, unofficial].
+--   **When to Use**: Real-time applications requiring fast voxelization of static or semi-static meshes, such as voxel cone tracing or physics simulations [S2, S4, unofficial].
+--   **When Not to Use**: When memory is extremely constrained, or when exact boundary representation is required without post-processing (consider conservative voxelization or compute-shader approaches) [S3, S4, unofficial].
++- **Time Complexity:** $O(N \cdot F)$, where $N$ is the number of triangles and $F$ is the average number of fragments generated per triangle. The complexity is dominated by the rasterization cost, which is generally faster than CPU ray-tracing for high-poly models [S4, unofficial].
++- **Memory Complexity:** $O(W \cdot H \cdot D)$ for the SSBO grid. This can be significant for high-resolution grids [S4, unofficial].
++- **Performance:** Extremely fast due to GPU parallelism, leveraging existing rasterization hardware [S4, unofficial].
++- **Strengths:** High throughput, simple implementation using standard graphics APIs, parallelizable [S4, unofficial].
++- **Limitations:** Memory intensive for large volumes; prone to cracks if single-view is used; requires careful handling of atomic operations for dense grids [S4, unofficial].
++- **When to use:** Real-time applications, physics simulations requiring dense voxel data, when GPU resources are available [S4, unofficial].
++- **When not to use:** Memory-constrained environments, extremely sparse large-scale scenes where sparse structures (like Octrees) are more efficient [S4, unofficial].
+ 
+ ## Background
+-GPU Voxelization was popularized by Michael Schwarz and NVIDIA, leveraging the GPU's rasterization pipeline to convert triangle meshes into voxels [S1, unofficial]. It emerged as a solution to the slow performance of CPU-based ray-tracing voxelization methods, which required iterating over all triangles for each voxel or ray [S4, unofficial]. It is widely used in real-time global illumination techniques like Voxel Cone Tracing [S3, unofficial] and in physics simulations like Position Based Dynamics [S4, unofficial].
++GPU Voxelization was popularized by NVIDIA and Michael Schwarz, who demonstrated the use of the GPU rasterizer for voxelization tasks [S1, unofficial]. It emerged as a solution to the slow performance of CPU-based ray-tracing voxelization methods, particularly for real-time applications like voxel cone tracing and position-based dynamics [S3, S4, unofficial].
+ 
+ ## Sources

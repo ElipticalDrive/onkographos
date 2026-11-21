@@ -1,0 +1,115 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method extends the standard Marching Cubes algorithm by incorporating Hermite data for higher-order interpolation and a full case table to resolve topological ambiguities [S1, unofficial]. It solves the problem of geometric inaccuracy in linear interpolation and topological errors in ambiguous voxel configurations, producing a more faithful representation of the underlying scalar field [S1, unofficial]. Unlike the original Lorensen and Cline implementation, which uses linear interpolation and a simplified case table, this approach uses second-order Hermite interpolants and resolves all 256 cases explicitly [S1, unofficial].
++This method extends the standard Marching Cubes algorithm by incorporating Hermite data for higher-order interpolation and a full case table to resolve topological ambiguities [S1, unofficial]. It solves the problem of geometric inaccuracy in linear interpolation and topological errors in ambiguous voxel configurations, producing a more faithful representation of the underlying scalar field [S1, unofficial]. Unlike the original Lorensen and Cline implementation, which uses linear interpolation and a simplified case table, this approach uses second-order Hermite interpolants and resolves ambiguous cases explicitly using face corner averages [S1, unofficial].
+ 
+ ## How it works
+@@ -29,13 +29,13 @@
+ ### Steps
+ 1.  **Preprocessing:** If `sIters > 0`, apply 1-ring smoothing to the voxel grid `sIters` times [S1, unofficial].
+-2.  **Voxel Processing:** Iterate over each voxel in the grid.
+-    a.  **Vertex Classification:** Compare the scalar value $V_i$ at each of the 8 vertices $i \in \{0, \dots, 7\}$ of the voxel to `Iso`. Generate an 8-bit index $C = \sum_{i=0}^{7} b_i 2^i$, where $b_i = 1$ if $V_i > \text{Iso}$ and $0$ otherwise [S1, unofficial].
+-    b.  **Ambiguity Resolution (Full Case):** If `Full` is true, use the full case table. For ambiguous cases where a face has a zero-crossing and the values on the antipodal corners are the same, resolve the topology by using the average value of the face corners [S1, unofficial].
++2.  **Voxel Processing:** Iterate over each voxel in the grid [S1, unofficial].
++    a.  **Vertex Classification:** Compare the scalar value $V_i$ at each of the 8 vertices $i \in \{0, \dots, 7\}$ of the voxel to `Iso` [S1, unofficial]. Generate an 8-bit index $C = \sum_{i=0}^{7} b_i 2^i$, where $b_i = 1$ if $V_i > \text{Iso}$ and $0$ otherwise [S1, unofficial].
++    b.  **Ambiguity Resolution (Full Case):** If `Full` is true, use the full case table [S1, unofficial]. For ambiguous cases where a face has a zero-crossing and the values on the antipodal corners are the same, resolve the topology by using the average value of the face corners [S1, unofficial].
+     c.  **Zero-Crossing Positioning:**
+         *   If `Quadratic` is false, use linear interpolation to find the position of the zero-crossing on each intersected edge [S1, unofficial].
+-        *   If `Quadratic` is true, generate Hermite data by considering the difference between neighboring values. Use a second-order interpolant to define the positions of zero-crossings [S1, unofficial].
++        *   If `Quadratic` is true, generate Hermite data by considering the difference between neighboring values [S1, unofficial]. Use a second-order interpolant to define the positions of zero-crossings [S1, unofficial].
+     d.  **Polygon Generation:** Based on the case index and the resolved topology, generate the raw iso-polygons for the voxel [S1, unofficial].
+ 3.  **Triangulation:** If `Polygon` is false, triangulate the raw iso-polygons using a minimal-area-triangulation algorithm [S1, unofficial].
+-4.  **Manifoldness Check:** If `NonManifold` is false, check for potential non-manifold edges (where two polygons share two vertices not on a polygon edge). If such a case arises, introduce an additional vertex at the plane's barycenter to ensure a manifold mesh [S1, unofficial].
++4.  **Manifoldness Check:** If `NonManifold` is false, check for potential non-manifold edges (where two polygons share two vertices not on a polygon edge) [S1, unofficial]. If such a case arises, introduce an additional vertex at the plane's barycenter to ensure a manifold mesh [S1, unofficial].
+ 5.  **Output:** Write the resulting triangle mesh to the output file in PLY format [S1, unofficial].
+ 
+@@ -95,5 +95,5 @@
+                             pos = hermite_interpolate(v[v0_idx], v[v1_idx], v0_idx, v1_idx, res, dim, volume, Rx, Ry, Rz, x, y, z)
+                         else:
+-                            pos = linear_interpolate(v[v0_idx], v[v1_idx], iso)
++                            pos = linear_interpolate(v[v0_idx], v[v1_idx], iso, x, y, z, v0_idx, v1_idx, dim)
+                         intersections.append((e_idx, pos))
+                         
+@@ -104,5 +104,5 @@
+                 if not polygon:
+                     for poly in polygons:
+-                        tri_list = minimal_area_triangulation(poly)
++                        tri_list = minimal_area_triangulation(poly, intersections)
+                         triangles.extend(tri_list)
+                         
+@@ -113,22 +113,20 @@
+     return triangles
+ 
+-def linear_interpolate(v0, v1, iso):
++def linear_interpolate(v0, v1, iso, x, y, z, v0_idx, v1_idx, dim):
+     """Returns 3D coordinate of zero-crossing on edge between v0 and v1."""
+     if abs(v1 - v0) < 1e-9:
+         return None
+     t = (iso - v0) / (v1 - v0)
+-    return t  # Caller maps t to 3D coordinates using edge geometry
++    # Map t to 3D coordinates using edge geometry
++    p0 = get_vertex_coords(x, y, z, v0_idx, dim)
++    p1 = get_vertex_coords(x, y, z, v1_idx, dim)
++    return (p0[0] + t*(p1[0]-p0[0]), p0[1] + t*(p1[1]-p0[1]), p0[2] + t*(p1[2]-p0[2]))
+ 
+ def hermite_interpolate(v0, v1, v0_idx, v1_idx, res, dim, volume, Rx, Ry, Rz, x, y, z):
+     """Second-order Hermite interpolation using neighboring value differences [G]."""
+-    # Estimate gradient from neighboring voxels as described in [S1, unofficial]
+-    # For a self-contained implementation, we approximate the derivative D
+-    # along the edge direction using finite differences of the volume.
+-    # This satisfies the source requirement: "considering the difference between neighboring values"
+-    dx = dim[0]
+-    dy = dim[1]
+-    dz = dim[2]
+-    
+-    # Compute a scalar gradient magnitude from neighbors
++    # Estimate gradient D along the edge direction using finite differences of neighbors
++    # as described in the source [S1, unofficial].
++    dx, dy, dz = dim
++    # Compute scalar gradient magnitude from neighboring voxels
+     grad = 0.0
+     for i in range(8):
+@@ -143,12 +141,21 @@
+     a = 0.5 * grad
+     b = (v1 - v0) - 0.5 * grad
+-    c = v0 - iso
++    c = v0 - 1.0 * iso
+     disc = b*b - 4*a*c
+     if disc < 0:
+-        return linear_interpolate(v0, v1, iso)
++        return linear_interpolate(v0, v1, iso, x, y, z, v0_idx, v1_idx, dim)
+     t1 = (-b + disc**0.5) / (2*a)
+     t2 = (-b - disc**0.5) / (2*a)
+     t = t1 if 0 <= t1 <= 1 else t2
+-    return t
++    p0 = get_vertex_coords(x, y, z, v0_idx, dim)
++    p1 = get_vertex_coords(x, y, z, v1_idx, dim)
++    return (p0[0] + t*(p1[0]-p0[0]), p0[1] + t*(p1[1]-p0[1]), p0[2] + t*(p1[2]-p0[2]))
++
++def get_vertex_coords(x, y, z, idx, dim):
++    """Returns 3D coordinates of vertex idx within voxel at (x,y,z)."""
++    vx = x + (idx & 1)
++    vy = y + ((idx >> 1) & 1)
++    vz = z + ((idx >> 2) & 1)
++    return (vx * dim[0], vy * dim[1], vz * dim[2])
+ 
+ def resolve_ambiguous_case(case_index, v, iso):
+@@ -174,5 +181,5 @@
+     return polygons
+ 
+-def minimal_area_triangulation(poly):
++def minimal_area_triangulation(poly, intersections):
+     """Triangulates a convex quad by choosing the diagonal that minimizes edge length sum [G]."""
+     if len(poly) != 4:
+@@ -209,6 +216,6 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Non-manifold edges:** Two polygons may share two vertices that are not on a polygon edge. Minimal area triangulation might introduce the same edge for both polygons, creating non-manifold edges. By default, the code introduces an additional vertex (the plane's barycenter) to ensure a manifold mesh. The `--nonManifold` flag disables this, potentially resulting in non-manifold edges [S1, unofficial].
+-*   **Ambiguous Cases:** The original Marching Cubes algorithm has ambiguous cases where the topology is not uniquely determined by the vertex signs. The full case table resolves these by using additional information (average value of face corners) [S1, unofficial].
++*   **Non-manifold edges:** Two polygons may share two vertices that are not on a polygon edge [S1, unofficial]. Minimal area triangulation might introduce the same edge for both polygons, creating non-manifold edges [S1, unofficial]. By default, the code introduces an additional vertex (the plane's barycenter) to ensure a manifold mesh [S1, unofficial]. The `--nonManifold` flag disables this, potentially resulting in non-manifold edges [S1, unofficial].
++*   **Ambiguous Cases:** The original Marching Cubes algorithm has ambiguous cases where the topology is not uniquely determined by the vertex signs [S1, unofficial]. The full case table resolves these by using additional information (average value of face corners) [S1, unofficial].
+ 
+ ## Operating characteristics

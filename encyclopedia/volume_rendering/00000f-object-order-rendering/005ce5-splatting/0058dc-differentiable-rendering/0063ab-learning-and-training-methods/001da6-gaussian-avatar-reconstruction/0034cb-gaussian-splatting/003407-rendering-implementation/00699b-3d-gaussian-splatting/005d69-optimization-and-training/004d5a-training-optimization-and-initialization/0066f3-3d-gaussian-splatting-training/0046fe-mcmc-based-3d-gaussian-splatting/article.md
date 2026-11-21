@@ -1,0 +1,134 @@
+# MCMC-based 3D Gaussian Splatting
+
+Also called: Hybrid MCMC re-formulation, Ours
+
+## Overview
+This method reformulates 3D Gaussian Splatting (3DGS) training as a Markov Chain Monte Carlo (MCMC) process, replacing the heuristic-based densification and pruning of [Base 3DGS Optimization](7549-base-3dgs-optimization.md) with a stochastic exploration mechanism. It solves the problem of sensitivity to initialization and local minima by allowing Gaussians to explore the scene space via noise injection and relocation, rather than relying on fixed thresholds for cloning and splitting. Unlike [Base 3DGS Optimization](7549-base-3dgs-optimization.md), which uses deterministic heuristics, this approach is robust to random initialization and prevents "stray" Gaussians from diverging into empty space through specific regularizers.
+
+## How it works
+The method treats the set of 3D Gaussians as samples from a posterior distribution, optimized via MCMC steps. It integrates with the training loop of [3D Gaussian Splatting Training](3761-3d-gaussian-splatting-training.md) but modifies the population management and parameter updates.
+
+### Inputs and Outputs
+*   **Inputs:** Camera poses, images, initial Gaussian parameters (position $\mathbf{p}$, scale $\mathbf{s}$, rotation $\mathbf{q}$, opacity $\alpha$, spherical harmonics coefficients $\mathbf{c}$), and hyperparameters.
+*   **Outputs:** Optimized Gaussian parameters representing the scene.
+
+### Data Structures
+The Gaussian population is managed as a list of active Gaussians. Each Gaussian $i$ stores:
+*   $\mathbf{p}_i \in \mathbb{R}^3$: Position.
+*   $\mathbf{s}_i \in \mathbb{R}^3$: Scale (log-space or linear, depending on implementation; typically log-space for optimization stability).
+*   $\mathbf{q}_i \in \mathbb{R}^4$: Rotation (quaternion).
+*   $\alpha_i \in \mathbb{R}$: Opacity.
+*   $\mathbf{c}_i$: SH coefficients.
+
+### Initialization
+1.  **Random Initialization:** Uniformly sample 100,000 Gaussians within a bounding box defined as $3\times$ the extent of the camera bounding box [S1].
+2.  **SfM Initialization:** Alternatively, initialize from Structure-from-Motion (SfM) point clouds [S1].
+3.  **Warmup:** Perform 500 iterations of standard gradient descent without relocation or population increase [S1].
+
+### Noise Scheduling
+Noise is injected into parameters to facilitate exploration. The noise magnitude decays exponentially with a decay rate of $\gamma = 0.9995$ per iteration [S1].
+*   **Location:** Noise is applied according to Equation 8 of the source [S1]. (Note: The exact formula for Eq. 8 is not provided in the text, but it is distinct from the other noise terms).
+*   **Scale and Rotation:** Add noise $\mathcal{N}(0, I)$ [S1].
+*   **Opacity:** Add noise $\mathcal{N}(0, 0.1 \times I)$ [S1].
+
+### Relocation/Expansion
+During training, the number of live Gaussians is gradually increased by 5% per step until the maximum desired number is reached [S1]. This replaces the heuristic cloning/splitting of [Base 3DGS Optimization](7549-base-3dgs-optimization.md).
+
+### Regularization
+Two regularizers are essential to prevent Gaussians from diverging into unobserved regions (stray Gaussians) [S1]:
+1.  **Noise Regularizer:** Weight $\lambda_{noise} = 5 \times 10^5$ [S1].
+2.  **Opacity Regularizer:** Weight $\lambda_{o} = 0.01$ (or $0.001$ for Deep Blending dataset) [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_mcmc_3dgs(cameras, images, max_gaussians=100000, warmup_steps=500):
+    # 1. Initialization
+    # Random initialization: 100k Gaussians in 3x camera extent
+    gaussians = initialize_random_gaussians(count=100000, extent_multiplier=3.0)
+    
+    # Hyperparameters
+    lr_pos = 1.6e-4
+    lr_pos_min = 1.6e-6
+    decay_lr = 0.9995
+    decay_noise = 0.9995
+    lambda_noise = 5e5
+    lambda_opacity = 0.01
+    
+    current_lr = lr_pos
+    current_noise_scale = 1.0
+    
+    for step in range(total_training_steps):
+        # Learning rate decay
+        current_lr *= decay_lr
+        if current_lr < lr_pos_min:
+            current_lr = lr_pos_min
+            
+        # Noise scale decay
+        current_noise_scale *= decay_noise
+        
+        # Warmup phase: no relocation, no noise injection for exploration
+        if step < warmup_steps:
+            render_loss = compute_render_loss(gaussians, cameras, images)
+            render_loss.backward()
+            update_gaussians(gaussians, lr=current_lr)
+            continue
+            
+        # 2. Noise Injection (Exploration)
+        # Apply noise to location (Eq. 8 from source)
+        noise_pos = apply_location_noise(gaussians, scale=current_noise_scale)
+        
+        # Apply noise to scale and rotation: N(0, I)
+        noise_scale = torch.randn_like(gaussians.scale) * current_noise_scale
+        noise_rot = torch.randn_like(gaussians.rotation) * current_noise_scale
+        
+        # Apply noise to opacity: N(0, 0.1 * I)
+        noise_opacity = torch.randn_like(gaussians.opacity) * current_noise_scale * 0.1
+        
+        # 3. Gradient Step with Regularization
+        # Compute render loss
+        render_loss = compute_render_loss(gaussians, cameras, images)
+        
+        # Compute regularization losses
+        # Note: Exact formulation of noise regularizer is not detailed in text, 
+        # but it penalizes the injected noise to keep Gaussians in place when not needed.
+        noise_reg = lambda_noise * (noise_pos.norm() + noise_scale.norm() + noise_rot.norm())
+        opacity_reg = lambda_opacity * gaussians.opacity.sum()
+        
+        total_loss = render_loss + noise_reg + opacity_reg
+        total_loss.backward()
+        
+        # Update parameters
+        update_gaussians(gaussians, lr=current_lr)
+        
+        # 4. Relocation/Expansion
+        # Gradually increase number of live Gaussians by 5%
+        if step % expansion_interval == 0:
+            current_count = len(gaussians)
+            new_count = int(current_count * 1.05)
+            if new_count <= max_gaussians:
+                gaussians = relocate_and_add_gaussians(gaussians, new_count)
+            else:
+                gaussians = gaussians[:max_gaussians]
+                
+    return gaussians
+```
+
+### Edge Cases and Pitfalls
+*   **Opacity Term Removal:** If the opacity term is removed from the noise scheduler, $\lambda_{noise}$ must be set to $0.05$; otherwise, the model fails to train (PSNR < 7) [S1].
+*   **Incompatibility with Classical Heuristics:** The regularizers used in this method are harmful if applied to classical 3DGS [19], as they are incompatible with its heuristic-based densification [S1].
+
+## Operating characteristics
+*   **Performance:** On MipNeRF 360 with random initialization, the method achieves PSNR 29.72, SSIM 0.89, LPIPS 0.19, compared to 3DGS [19] PSNR 27.89, SSIM 0.84, LPIPS 0.26 [S1].
+*   **Robustness:** The method is robust to initialization, performing similarly with random and SfM initialization, whereas classical 3DGS performance drops significantly with random initialization [S1].
+*   **Noise Scheduling Impact:** On Tank & Temples, an exponential noise scheduler yields PSNR 24.21, while a linear scheduler yields 17.64 and the scheduler from [30] yields 22.46 [S1].
+*   **Strengths:** Eliminates sensitivity to initialization; prevents stray Gaussians in empty space; robust reconstruction quality.
+*   **Limitations:** Requires careful tuning of noise regularizers; potentially slower convergence due to stochastic exploration compared to deterministic heuristics.
+
+## Background
+The method was introduced in "3D Gaussian Splatting as Markov Chain Monte Carlo" [S1]. It addresses the limitations of the original 3DGS [19] training procedure, which relies on heuristic-based densification and pruning that are sensitive to initialization and can lead to suboptimal local minima. By framing the optimization as an MCMC process, it allows for a more thorough exploration of the parameter space.
+
+## Sources
+[S1] 3D Gaussian Splatting as Markov Chain Monte Carlo, https://ubc-vision.github.io/3dgs-mcmc/, fetched 2026-10-26

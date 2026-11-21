@@ -1,0 +1,71 @@
+# Volumetric Photon Mapping with Radiance Transfer
+
+
+## Overview
+Volumetric Photon Mapping with Radiance Transfer is a rendering technique that integrates volumetric photon mapping into a pre-designed radiance transfer procedure to achieve real-time, realistic volume rendering [S1]. It distinguishes itself from standard volumetric photon mapping by explicitly separating direct and indirect lighting computations within a radiance transfer framework, allowing for effective updates to the photon map when transfer functions change [S1]. Unlike [Beam Radiance Estimate](1283-beam-radiance-estimate.md) which focuses on density estimation via beam kernels, this method prioritizes the structural integration of photon data into a transfer-based rendering pipeline to handle wide intensity ranges [S1].
+
+## How it works
+The method operates in two main phases: photon map construction and radiance transfer rendering.
+
+**Inputs:**
+*   Scene geometry and participating media properties (scattering coefficient $\sigma_s$, absorption coefficient $\sigma_a$, phase function $p$).
+*   Light source positions and intensities.
+*   Camera parameters.
+*   Transfer function for volume visualization.
+
+**Outputs:**
+*   Rendered image with direct and indirect illumination.
+
+**Data Structures:**
+*   **Photon Map:** A spatial data structure (e.g., k-d tree) storing photons emitted from light sources. Each photon record typically contains:
+    *   Position $(x, y, z)$
+    *   Direction $(\omega_i, \omega_o)$
+    *   Power $P$
+    *   [G] Additional metadata for radiance transfer weighting, such as local density or path length, if required by the specific transfer function implementation.
+
+**Steps:**
+1.  **Photon Emission and Storage:**
+    *   Emit photons from light sources into the volume.
+    *   Ray march through the participating media, simulating scattering events.
+    *   Store photon interactions (positions, directions, power) in the photon map.
+    *   [S1] The storage format is designed to allow effective updates to the photon map when scene areas affected by altering the transfer function are assessed.
+
+2.  **Direct Illumination Computation:**
+    *   Cast rays from the camera into the scene.
+    *   Compute direct lighting contributions along the ray path using standard volume rendering integration techniques.
+
+3.  **Indirect Illumination Computation (Radiance Transfer):**
+    *   For each pixel/ray, query the photon map for nearby photons.
+    *   Use the stored photon data to estimate indirect illumination.
+    *   Integrate this indirect contribution into the radiance transfer procedure.
+    *   [S1] The volumetric photon mapping algorithm is incorporated into the customary predesigned radiance transfer procedure. This allows the method to tackle the wide range of intensities resulting from varying light conditions by leveraging the transfer function's ability to map radiance to color/opacity.
+
+4.  **Final Image Assembly:**
+    *   Combine direct and indirect illumination results.
+    *   Apply the transfer function to produce the final visual output.
+
+**Parameters:**
+*   Number of photons: Not given in the sources.
+*   Search radius for photon map queries: Not given in the sources.
+*   Transfer function parameters: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Intensity Range:** The method is designed to handle wide ranges of intensities, but improper scaling of the radiance transfer function may lead to loss of detail in bright or dark regions [S1].
+*   **Transfer Function Updates:** Changing the transfer function requires assessing affected scene areas to update the photon map effectively; failure to do so may result in visual artifacts or incorrect lighting [S1].
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** The method is designed to produce an interactive character for real-time realistic volume rendering [S1].
+*   **Strengths:** Real-time capability; effective handling of wide intensity ranges; modular integration of photon mapping into radiance transfer.
+*   **Limitations:** Dependence on the pre-designed radiance transfer procedure; potential complexity in updating the photon map when transfer functions change.
+*   **When to use:** Real-time volume rendering applications, such as medical imaging (e.g., fetal ultrasound), where interactive performance is critical and lighting conditions vary [S1].
+*   **When not to use:** Offline rendering where higher accuracy is prioritized over speed, or when the scene does not benefit from the specific radiance transfer framework.
+
+## Background
+The method was proposed by Zhang et al. [S1]. It builds upon the foundational work of Daniel et al. [35] in creating data formats for assessing scene areas affected by altering transfer functions, and incorporates the volumetric photon mapping algorithm into a customary radiance transfer procedure [S1]. The primary application cited is real-time volume rendering for three-dimensional fetal ultrasound [S1].
+
+## Sources
+[S1] Real-time volume rendering for three-dimensional fetal ultrasound using volumetric photon mapping., https://doi.org/10.1186/s42492-024-00177-4, fetched 2026-10-26

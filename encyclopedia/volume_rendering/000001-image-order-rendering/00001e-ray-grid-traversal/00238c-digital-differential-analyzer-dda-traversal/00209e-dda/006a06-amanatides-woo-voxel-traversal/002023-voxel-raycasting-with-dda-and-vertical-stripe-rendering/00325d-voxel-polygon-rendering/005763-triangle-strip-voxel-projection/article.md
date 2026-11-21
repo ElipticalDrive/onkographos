@@ -1,0 +1,112 @@
+# Triangle Strip Voxel Projection
+
+Also called: Hardware Accelerated Voxel Rendering, Structure Rendering Algorithm
+
+## Overview
+A hardware-accelerated rendering method for voxel landscapes that replaces software span rendering with triangle strips [S1, unofficial]. It projects voxels onto the screen in columns and constructs geometry based on the visibility of adjacent columns to minimize polygon count and utilize hardware interpolation [S1, unofficial]. Unlike software span rendering which draws spans immediately, this method buffers column projections to construct triangle strips, reducing draw calls and leveraging hardware interpolation for texture coordinates, lightmap colors, and heights [S1, unofficial].
+
+## How it works
+**Inputs:** A voxel map representing a landscape; a camera view; a configurable step size for column sampling (default 32 pixels) [S1, unofficial].
+**Outputs:** A sequence of OpenGL draw calls using triangle strips [S1, unofficial].
+
+**Data Structures:**
+The algorithm processes the landscape by scanning along depth lines (columns) rather than processing individual rays [S1, unofficial]. For each sampled column, the visible voxels are projected onto the screen to determine their vertical span (Y-coordinates) [S1, unofficial]. The algorithm maintains state for the "current strip portion" defined by two columns:
+- $A$: The left-most point (column) of the current strip portion.
+- $B$: The right-most point (column) of the next column to be processed [S1, unofficial].
+
+**Steps:**
+1.  **Scan Columns:** Iterate through the landscape depth lines. Sample columns at intervals defined by the step size (default 32 pixels). Smaller steps generate more polygons [S1, unofficial].
+2.  **Project Voxels:** For each sampled column, project the visible voxels onto the screen to determine their vertical extent [S1, unofficial].
+3.  **Evaluate Visibility:** Determine the visibility status of column $A$ (previous column) and column $B$ (current column). A column is "visible" if it contains at least one voxel that contributes to the screen image [S1, unofficial].
+4.  **Construct Geometry:** Based on the visibility of $A$ and $B$, execute one of four cases:
+    -   **Case 1 ($A$ not visible, $B$ visible):** Start a new triangle strip. Send the vertices of column $A$ followed by the vertices of column $B$ to the graphics library (GL) [S1, unofficial].
+    -   **Case 2 ($A$ visible, $B$ visible):** Continue the currently active triangle strip. Send only the vertices of column $B$ to the GL [S1, unofficial].
+    -   **Case 3 ($A$ visible, $B$ not visible):** Send the coordinates of column $B$ to the GL and stop the current triangle strip [S1, unofficial].
+    -   **Case 4 ($A$ not visible, $B$ not visible):** Usually do nothing. However, handle a special sub-case for holes [S1, unofficial].
+5.  **Handle Holes (Case 4 Sub-case):** If a triangle strip was started or finished at the location of column $A$ during a previous pass, a single triangle must be drawn to close the gap [S1, unofficial]. To determine if this triangle must be drawn, check the condition:
+    $$ (Y_1 > pY_1) \text{ and } (Y_2 > pY_2) $$
+    Where $Y_1, Y_2$ and $pY_1, pY_2$ are the relevant Y-coordinates of the projected spans [S1, unofficial]. If true, draw the triangle. This approximation may draw triangles that are not strictly visible but is more efficient than performing line intersections [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialize state
+current_strip_active = False
+previous_column_A = None
+previous_column_A_visible = False
+
+# Configuration
+step_size = 32  # pixels
+
+# Iterate through depth lines (columns)
+for column_index in range(0, width, step_size):
+    # Project voxels for the current column
+    current_column_B = project_voxels(column_index)
+    current_column_B_visible = is_visible(current_column_B)
+    
+    if previous_column_A is not None:
+        if previous_column_A_visible and current_column_B_visible:
+            # Case 2: Continue active strip
+            send_vertices_to_gl(current_column_B)
+        elif not previous_column_A_visible and current_column_B_visible:
+            # Case 1: Start new strip
+            start_triangle_strip()
+            send_vertices_to_gl(previous_column_A)
+            send_vertices_to_gl(current_column_B)
+            current_strip_active = True
+        elif previous_column_A_visible and not current_column_B_visible:
+            # Case 3: End active strip
+            send_vertices_to_gl(current_column_B)
+            end_triangle_strip()
+            current_strip_active = False
+        else:
+            # Case 4: Both not visible
+            # Check for hole closure if strip was started/finished at A
+            if current_strip_active or strip_started_at_A:
+                if (Y1 > pY1) and (Y2 > pY2):
+                    draw_hole_closing_triangle()
+            
+            # Reset strip state if it ended at A
+            if not current_strip_active:
+                strip_started_at_A = False
+                
+    # Update state for next iteration
+    previous_column_A = current_column_B
+    previous_column_A_visible = current_column_B_visible
+    
+    # Note: Logic for tracking 'strip_started_at_A' requires maintaining
+    # history of strip start/end events relative to column indices.
+    # If a strip started at previous_column_A, mark it.
+    if previous_column_A_visible and not current_column_B_visible:
+        # Strip ended at A (which is now previous)
+        strip_started_at_A = False # Or track specifically if A was a start point
+    elif not previous_column_A_visible and current_column_B_visible:
+        # Strip started at A (which is now previous)
+        strip_started_at_A = True
+```
+
+**Parameters:**
+-   **Step Size:** The distance between scanned columns. Default is 32 pixels. Smaller steps generate more polygons [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+-   **Holes:** In Case 4, if a triangle strip was started or finished at the previous column during the previous pass, a single triangle must be drawn to close the gap [S1, unofficial].
+-   **Mesh Density:** The triangle mesh can become too dense at the bottom of valleys. A span reduction technique is ideally needed to mitigate this [S1, unofficial].
+-   **Approximation:** The hole-closing condition may draw triangles that are not quite visible, but this is accepted for efficiency over line intersections [S1, unofficial].
+
+## Operating characteristics
+-   **Time Complexity:** Linear with respect to the number of sampled columns and visible voxels. The efficiency comes from batching draw calls into strips.
+-   **Memory Complexity:** Low, as it processes columns sequentially and does not store the entire mesh in memory [S1, unofficial].
+-   **Measured Performance:** In the terraVoxGL demo scene, it rendered 8664 triangles (across 4 passes) in 925 strips [S1, unofficial].
+-   **Strengths:** Extremely efficient due to the use of triangle strips; leverages hardware interpolation for texture coordinates, lightmap colors, and heights; reduces draw calls compared to software span rendering [S1, unofficial].
+-   **Limitations:** Can produce dense meshes in valleys; texturing scheme described in the source (4 single passes with alpha coefficients) is inefficient [S1, unofficial].
+-   **When to use:** When rendering voxel landscapes on hardware that supports triangle strips and interpolation, and when software span rendering is too slow [S1, unofficial].
+-   **When not to use:** When high-quality procedural shading is required (the described texturing is a simple emulation of software) or when valley density is a critical issue without span reduction [S1, unofficial].
+
+## Background
+-   **Origin:** Developed by an anonymous author for the "Realtime Voxel Landscape Engines" series, specifically Part 6 on Hardware Acceleration [S1, unofficial].
+-   **History:** Presented on Flipcode in February 2000 as a response to the slowness of software span rendering for voxel landscapes [S1, unofficial]. It was implemented in the terraVoxGL demo using OpenGL [S1, unofficial].
+-   **Usage:** Used in the terraVoxGL demo to accelerate voxel landscape rendering by utilizing the video card as a "huge interpolating machine" [S1, unofficial].
+
+## Sources
+[S1] Realtime Voxel Landscape Engines - Part 6 - Hardware Acceleration, https://www.flipcode.com/archives/Realtime_Voxel_Landscape_Engines-Part_6_Hardware_Acceleration.shtml, fetched 2026-10-30 (unofficial)

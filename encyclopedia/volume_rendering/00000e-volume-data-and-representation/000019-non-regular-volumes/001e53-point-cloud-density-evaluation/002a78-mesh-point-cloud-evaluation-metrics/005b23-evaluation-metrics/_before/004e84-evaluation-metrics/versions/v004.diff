@@ -1,0 +1,237 @@
+--- v003.md
++++ v004.md
+@@ -4,93 +4,130 @@
+ 
+ ## Overview
+-Computes quantitative assessment of rendering quality against ground truth using Peak Signal-to-Noise Ratio (PSNR) and Structural Similarity Index Measure (SSIM) [S2, unofficial]. Additionally, it assesses mesh quality using Chamfer Distance (CD), F1 score, and Normal Consistency (NC) to evaluate geometric fidelity [S1]. It focuses on the mathematical computation of these scalar metrics rather than the orchestration of data loading and training loops [G].
++Evaluation Metrics computes quantitative assessments of rendering and reconstruction quality by comparing generated outputs against ground truth data [S2, unofficial][S3][S5, unofficial]. It addresses the problem of objectively measuring fidelity in 3D graphics, covering data-level, image-level, and geometric-level errors [S3]. Unlike its sibling [Evaluation Pipeline](9358-evaluation-pipeline.md), which orchestrates the workflow, this method defines the specific mathematical functions for quality calculation [S2, S5, unofficial]. It differs from [Cloud-to-Mesh Accuracy Metrics](10560-cloud-to-mesh-accuracy-metrics.md) by focusing on image and volume data metrics (PSNR, LPIPS) rather than purely geometric point-cloud distances, though it shares the Chamfer Distance metric for isosurface evaluation [S1, S3].
+ 
+ ## How it works
+-**Inputs:**
+-1.  Rendered image tensor and Ground Truth image tensor [S2, unofficial].
+-2.  Reconstructed mesh surface and input point cloud for mesh evaluation [S1].
++The method calculates three primary metrics: Peak Signal-to-Noise Ratio (PSNR), Learned Perceptual Image Patch Similarity (LPIPS), and Chamfer Distance (CD) [S3]. PSNR and SSIM assess image-level fidelity, while LPIPS measures perceptual similarity using deep features, and CD measures geometric alignment of isosurfaces [S3][S5, unofficial].
+ 
+-**Outputs:**
+-1.  Scalar values for PSNR, SSIM, CD, F1, and NC [S1][S2, unofficial].
++**Inputs and Outputs:**
++*   **Inputs:** Reconstructed/Rendered image or volume ($I_{rec}$), Ground Truth image or volume ($I_{gt}$). For geometric metrics, two point clouds or meshes representing the reconstructed and ground truth surfaces.
++*   **Outputs:** Scalar scores for PSNR, SSIM, LPIPS, and/or CD.
+ 
+ **Data Structures:**
+-*   Image tensors: Shape $(H, W, C)$ or $(B, H, W, C)$, values normalized to $[0, 1]$ [S2, unofficial].
+-*   Point cloud: Set of 3D coordinates $\{p_i\}$ [S1].
+-*   Mesh: Represented by sampled surface points [S1].
++*   Images: Tensor of shape $(H, W, C)$ or $(B, H, W, C)$, normalized to $[0, 1]$ [S2, unofficial].
++*   Volumes: 3D grid or implicit representation.
++*   Points/Meshes: Set of 3D coordinates or triangle lists.
++
++**Formulas and Steps:**
++
++1.  **PSNR Calculation:**
++    Compute the Mean Squared Error (MSE) between $I_{rec}$ and $I_{gt}$:
++    $$ MSE = \frac{1}{N} \sum_{i=1}^{N} (I_{rec}(i) - I_{gt}(i))^2 $$
++    where $N$ is the total number of pixels/voxels.
++    Calculate PSNR:
++    $$ PSNR = 10 \cdot \log_{10} \left( \frac{MAX_I^2}{MSE} \right) $$
++    where $MAX_I$ is the maximum possible pixel value (typically 1.0 for normalized data) [S3][S5, unofficial]. Higher PSNR indicates superior quality [S3].
++
++2.  **LPIPS Calculation:**
++    Extract deep features from both images using a pre-trained convolutional neural network (e.g., AlexNet) [S3]. Let $\phi(I)$ be the feature map.
++    Compute the weighted $L_2$ distance between normalized feature maps:
++    $$ LPIPS = \sum_{l} w_l \| \frac{\phi(I_{rec})_l - \phi(I_{gt})_l}{\sigma_l} \|^2_2 $$
++    where $l$ indexes layers, $w_l$ are learned weights, and $\sigma_l$ are normalization factors [S3]. Lower LPIPS indicates superior quality [S3].
++
++3.  **Chamfer Distance (CD) Calculation:**
++    For isosurfaces extracted from decompressed and ground truth volumes, or for mesh/point cloud comparison:
++    Sample $N$ points from the reconstructed surface ($P_{rec}$) and $M$ points from the ground truth surface ($P_{gt}$) [S1, S3].
++    Compute the minimum distance from each point in one set to the other set using the $L_2$ norm:
++    $$ CD = \frac{1}{N} \sum_{p \in P_{rec}} \min_{q \in P_{gt}} \| p - q \|_2^2 + \frac{1}{M} \sum_{q \in P_{gt}} \min_{p \in P_{rec}} \| q - p \|_2^2 $$
++    Note: Some implementations use squared CD for stability [S1]. Lower CD indicates superior quality [S3]. For mesh evaluation, points are sampled (e.g., 1M points) and projected to faces [S1]. Reported CD values are often scaled by $10^5$ for readability [S1].
++
++4.  **F1 Score Calculation (for Mesh/Point Cloud):**
++    Compute precision and recall based on a distance threshold $\tau$ (typically 0.003) [S1].
++    $$ Precision = \frac{|\{p \in P_{rec} : \min_{q \in P_{gt}} \| p - q \|_2 \le \tau\}|}{|P_{rec}|} $$
++    $$ Recall = \frac{|\{q \in P_{gt} : \min_{p \in P_{rec}} \| q - p \|_2 \le \tau\}|}{|P_{gt}|} $$
++    $$ F1 = 2 \cdot \frac{Precision \cdot Recall}{Precision + Recall} $$
++    Higher F1 indicates better shape capture [S1].
++
++5.  **Normal Consistency (NC):**
++    Compare surface normals of projected points. Average the dot product of corresponding normals after alignment [S1].
+ 
+ **Parameters:**
+-*   `channel_axis`: Set to $-1$ for RGB channels in the last dimension [S2, unofficial].
+-*   `data_range`: Set to $1.0$ for normalized $[0,1]$ image data [S2, unofficial].
+-*   F1 threshold $\tau$: Set to $0.003$ to ensure sensitivity to fine details [S1].
+-*   CD scaling factor: All reported Chamfer distances are scaled by $10^5$ [S1].
+-*   Sampling count: $1,000,000$ points sampled for mesh evaluation [S1].
+-
+-**Steps:**
+-
+-1.  **Image Quality Assessment (PSNR/SSIM):**
+-    *   Ensure rendered and ground truth tensors are aligned in shape and data type [S2, unofficial].
+-    *   Compute Mean Squared Error (MSE) between corresponding pixels:
+-        $$ \text{MSE} = \frac{1}{N} \sum_{i=1}^{N} (I_{render, i} - I_{gt, i})^2 $$
+-        where $N$ is the total number of pixels.
+-    *   Compute PSNR:
+-        $$ \text{PSNR} = 10 \cdot \log_{10} \left( \frac{\text{MAX}_I^2}{\text{MSE}} \right) $$
+-        where $\text{MAX}_I = 1.0$ for normalized data [G].
+-    *   Compute SSIM using a sliding window approach (typically $11 \times 11$) comparing luminance, contrast, and structure between local windows [G].
+-
+-2.  **Mesh Quality Assessment (CD, F1, NC):**
+-    *   Sample $N_{sample} = 1,000,000$ points $P_{sample}$ uniformly from the surface of the reconstructed mesh [S1].
+-    *   Apply face-to-point projection using the Fast Closest Point with Weights (FCPW) method [G].
+-    *   Compute Chamfer Distance (CD) as the sum of mean squared distances from sampled points to the input cloud and vice versa, using the L2 norm [S3]. Scale the final CD value by $10^5$ [S1].
+-    *   Compute F1 Score by calculating distances between $P_{sample}$ and $P$, counting points within $\tau = 0.003$ as True Positives for both directions, and computing Precision and Recall [S1].
+-    *   Compute Normal Consistency (NC) by averaging the dot product of corresponding mesh face normals and point cloud normals [G].
++*   `channel_axis`: Set to -1 for RGB channels in the last dimension [S2, unofficial].
++*   `data_range`: Set to 1.0 for normalized $[0,1]$ image data [S2, unofficial].
++*   `F1_threshold`: Set to 0.003 to ensure sensitivity to fine details [S1].
++*   `CD_scale`: Factor of $10^5$ for reporting [S1].
++*   `network`: AlexNet for LPIPS feature extraction [S3].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import numpy as np
++import torch
++import torch.nn.functional as F
+ 
+-def compute_psnr_ssim(rendered: np.ndarray, ground_truth: np.ndarray) -> tuple:
+-    # Inputs: (H, W, C) or (B, H, W, C), values in [0, 1] [S2, unofficial]
+-    mse = np.mean((rendered - ground_truth) ** 2)
+-    psnr = 10 * np.log10(1.0 / mse)  # MAX_I = 1.0 for normalized data [G]
+-    ssim_val = _compute_ssim(rendered, ground_truth, window_size=11)
+-    return psnr, ssim_val
++def calculate_psnr(rec_img, gt_img, data_range=1.0):
++    """
++    Calculate PSNR between reconstructed and ground truth images.
++    rec_img, gt_img: Tensor of shape (..., C) or (B, H, W, C), values in [0, 1].
++    """
++    # Ensure same shape and device
++    assert rec_img.shape == gt_img.shape
++    mse = torch.mean((rec_img - gt_img) ** 2)
++    if mse == 0:
++        return float('inf')
++    psnr = 10 * torch.log10((data_range ** 2) / mse)
++    return psnr
+ 
+-def _compute_ssim(img1: np.ndarray, img2: np.ndarray, window_size: int = 11) -> float:
+-    # Standard SSIM: sliding window comparing luminance, contrast, structure [G]
+-    # 1. Create Gaussian window W of size window_size x window_size [G]
+-    # 2. Compute local means mu1, mu2 via convolution with W [G]
+-    # 3. Compute local variances sigma1^2, sigma2^2 and covariance sigma12 [G]
+-    # 4. Apply constants C1 = (0.01*255)^2, C2 = (0.03*255)^2 [G]
+-    # 5. SSIM = ((2*mu1*mu2 + C1) * (2*sigma12 + C2)) / ((mu1^2 + mu2^2 + C1) * (sigma1^2 + sigma2^2 + C2)) [G]
+-    # 6. Return mean of SSIM over all windows
+-    return 0.95  # Standard SSIM computation [G]
++def calculate_lpips(rec_img, gt_img, net='alexnet'):
++    """
++    Calculate LPIPS using AlexNet features.
++    rec_img, gt_img: Tensor of shape (B, H, W, C) or (H, W, C), values in [0, 1].
++    """
++    # Note: Actual LPIPS requires a pre-trained network and specific layer weights.
++    # This pseudocode represents the conceptual flow.
++    # 1. Extract features from AlexNet for rec_img and gt_img.
++    # 2. Normalize features.
++    # 3. Compute weighted L2 distance.
++    # Placeholder for actual network forward pass and distance calculation.
++    # features_rec = alexnet(rec_img)
++    # features_gt = alexnet(gt_img)
++    # lpips_score = weighted_l2_distance(features_rec, features_gt)
++    return 0.0 # Placeholder
+ 
+-def compute_mesh_metrics(mesh_points: np.ndarray, input_points: np.ndarray, normals_mesh: np.ndarray, normals_gt: np.ndarray) -> dict:
+-    # Inputs: mesh_points (1M points), input_points (ground truth cloud) [S1]
+-    threshold = 0.003
+-    scale_factor = 1e5
++def calculate_chamfer_distance(points_rec, points_gt):
++    """
++    Calculate Chamfer Distance between two point clouds.
++    points_rec, points_gt: Tensor of shape (N, 3) and (M, 3).
++    """
++    # Compute pairwise distances
++    # dist_matrix = torch.cdist(points_rec, points_gt, p=2) # Shape (N, M)
++    
++    # Minimum distance from rec to gt
++    min_dist_rec_to_gt = torch.min(dist_matrix, dim=1)[0]
++    # Minimum distance from gt to rec
++    min_dist_gt_to_rec = torch.min(dist_matrix, dim=0)[0]
++    
++    # Mean squared distances
++    cd_rec = torch.mean(min_dist_rec_to_gt ** 2)
++    cd_gt = torch.mean(min_dist_gt_to_rec ** 2)
++    
++    # Symmetric Chamfer Distance
++    cd = cd_rec + cd_gt
++    return cd
+ 
+-    # 1. Chamfer Distance (CD)
+-    # Compute pairwise distances or use efficient nearest neighbor search [G]
+-    # dist_mesh_to_gt: min distance from each mesh point to input_points
+-    # dist_gt_to_mesh: min distance from each input point to mesh_points
+-    dist_mesh_to_gt = np.min(np.linalg.norm(mesh_points[:, None, :] - input_points[None, :, :], axis=2), axis=1)
+-    dist_gt_to_mesh = np.min(np.linalg.norm(input_points[:, None, :] - mesh_points[None, :, :], axis=2), axis=1)
+-    cd = np.mean(dist_mesh_to_gt**2) + np.mean(dist_gt_to_mesh**2)
+-    cd_scaled = cd * scale_factor
+-
+-    # 2. F1 Score
+-    precision_mask = dist_mesh_to_gt < threshold
+-    precision = np.sum(precision_mask) / len(precision_mask)
+-    recall_mask = dist_gt_to_mesh < threshold
+-    recall = np.sum(recall_mask) / len(recall_mask)
+-    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+-
+-    # 3. Normal Consistency (NC)
+-    # Average dot product of corresponding normals [G]
+-    nc = np.mean(np.sum(normals_mesh * normals_gt, axis=1))
+-
+-    return {"cd_scaled": cd_scaled, "f1": f1, "nc": nc}
++def calculate_f1_score(points_rec, points_gt, threshold=0.003):
++    """
++    Calculate F1 score for mesh/point cloud alignment.
++    """
++    dist_matrix = torch.cdist(points_rec, points_gt, p=2)
++    
++    # Precision: fraction of rec points close to gt
++    precision = torch.mean((torch.min(dist_matrix, dim=1)[0] <= threshold).float())
++    
++    # Recall: fraction of gt points close to rec
++    recall = torch.mean((torch.min(dist_matrix, dim=0)[0] <= threshold).float())
++    
++    if precision + recall == 0:
++        return 0.0
++    f1 = 2 * (precision * recall) / (precision + recall)
++    return f1
+ ```
+ 
+@@ -98,14 +135,18 @@
+ 
+ ### Real-world Dataset Evaluation
+-Evaluates the method on real-world scenes from the BlendedMVS and Bag of Chips datasets, which provide images and depth maps reconstructed by MVS methods or RGBD cameras [S4]. For BlendedMVS, the last ten images are used as the test set; for Bag of Chips, the last 1/5 of the images are used [S4]. Performance degrades on this data due to varying exposures, rough geometry, and insufficient background in original images for ambient illumination reconstruction [S4].
++Evaluates methods on real-world scenes from BlendedMVS and Bag of Chips datasets, which provide images and depth maps reconstructed by MVS methods or RGBD cameras [S4]. The BlendedMVS test set consists of the last ten images, and the Bag of Chips test set consists of the last 1/5 of the images [S4]. Performance degrades on real-world data due to varying exposures, rough geometry, and insufficient background for ambient illumination reconstruction [S4].
++
++### Pearson's Correlation Coefficient (PCC)
++An image fidelity score used to evaluate the quality of 3D reconstructions and novel 2D views [S5, unofficial]. It measures the linear correlation between the reconstructed and ground truth pixel values [S5, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Image metrics (PSNR/SSIM) are $O(N)$ where $N$ is the number of pixels [G]. Mesh metrics (CD/F1/NC) depend on the efficiency of the nearest neighbor search between the sampled points and the input cloud, typically $O(N \log N)$ with spatial indexing [G].
+-*   **Memory Complexity:** Requires storing the sampled points ($10^6$ points) and the input point cloud [S1].
+-*   **Strengths:** Provides standardized, quantitative comparison for both rendering quality (PSNR/SSIM) and geometric accuracy (CD/F1/NC) [S1][S2, unofficial].
+-*   **Limitations:** Sensitive to fine details via the F1 threshold ($0.003$) [S1]. Real-world evaluation is limited by dataset artifacts like exposure variation and lack of background information [S4].
++*   **Time Complexity:** PSNR and SSIM are $O(N)$ where $N$ is the number of pixels/voxels. LPIPS is dominated by the forward pass of the CNN (AlexNet), which is $O(H \cdot W \cdot C)$ but involves significant constant factors due to multiple layers. CD is $O(N \cdot M)$ for naive point cloud comparison, but can be optimized with spatial indexing (e.g., KD-trees) to near $O(N \log M)$.
++*   **Memory Complexity:** PSNR/SSIM require storing the input images. LPIPS requires storing the intermediate feature maps of the CNN, which can be memory-intensive for high-resolution images. CD requires storing the point clouds or meshes.
++*   **Strengths:** PSNR and SSIM are standard, easy to compute, and correlate with human perception to some extent. LPIPS correlates better with human perceptual quality than PSNR/SSIM. CD provides a geometric measure independent of rendering artifacts.
++*   **Limitations:** PSNR/SSIM do not always correlate well with human perception, especially for textured or high-frequency details. LPIPS requires a pre-trained network and is computationally expensive. CD is sensitive to sampling density and noise. Real-world evaluation is challenging due to dataset-specific artifacts [S4].
++*   **When to use:** Use PSNR/SSIM for quick, standard comparisons. Use LPIPS for perceptual quality assessment. Use CD for geometric accuracy of isosurfaces or meshes. Use PCC for linear correlation analysis [S5, unofficial].
+ 
+ ## Background
+-The mesh evaluation metrics (CD, F1, NC) are described in the context of DCCVT (Differentiable Clipped Centroidal Voronoi Tessellation) [S1]. The image quality metrics (PSNR, SSIM) are standard in 3D Gaussian Splatting evaluation pipelines [S2, unofficial]. Real-world dataset evaluation is discussed in the context of Neural Illumination Fields (NeIF) [S4]. LPIPS measures perceptual distance using AlexNet deep features, while CD measures isosurface distance using the L2 norm [S3].
++The metrics were introduced in various computer vision and graphics papers. PSNR and SSIM are standard image quality metrics [S5, unofficial]. LPIPS was introduced by Zhang et al. (AlexNet-based) [S3]. Chamfer Distance is a standard geometric metric [S3, S4]. The specific combination and application to volume rendering and 3D reconstruction are detailed in recent works on neural implicit representations and Gaussian splatting [S1][S2, unofficial][S3, S4][S5, unofficial].
+ 
+ ## Sources
+@@ -113,3 +154,4 @@
+ [S2] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)
+ [S3] PDF MoE-INR: Implicit Neural Representation with Mixture-of-Experts for ..., https://academicweb.nd.edu/~cwang11/papers/vis25-moeinr.pdf, fetched 2026-10-29
+-[S4] A Pre-convolved Representation for Plug-and-Play Neural Illumination Fields, https://doi.org/10.1609/aaai.v38i7.28618, fetched 2026-10-29+[S4] A Pre-convolved Representation for Plug-and-Play Neural Illumination Fields, https://doi.org/10.1609/aaai.v38i7.28618, fetched 2026-10-29
++[S5] Differentiable Voxel-based X-ray Rendering Improves Sparse-View 3D CBCT Reconstruction, https://doi.org/10.48550/arxiv.2411.19224, fetched 2026-10-26 (unofficial)

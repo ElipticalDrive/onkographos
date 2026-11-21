@@ -1,0 +1,346 @@
+--- v010.md
++++ v011.md
+@@ -4,183 +4,198 @@
+ 
+ ## Overview
+-Procedural Volumetric Cloud Rendering is a real-time technique that renders planetary-scale cloud layers as spherical shells using ray marching and procedural noise, distinct from local volumetrics or ground fog [S1, S2, S3, S4, unofficial]. It solves the problem of generating organic, large-scale cloud formations without pre-baked textures by combining atmospheric lighting models (Hillaire 2016/2020) with noise-based density shaping (Nubis) and temporal reprojection for performance [S1, S2, S3, unofficial]. Unlike [Mr-Voxel Volume Rendering](3874-mr-voxel-volume-rendering.md) which relies on voxel grids, or [Ray-marched Volumetric Fog](4248-ray-marched-volumetric-fog.md) which typically uses simple exponential density, this method uses multi-resolution noise fields and adaptive stepping to simulate complex cloud physics and lighting [S2, S3, unofficial].
++Procedural Volumetric Cloud Rendering is a real-time technique that renders planetary-scale cloud layers using ray marching through 3D noise fields, combining atmospheric lighting models with adaptive density shaping. It solves the problem of rendering large, physically plausible cloudscapes that conform to a planet's curvature, supporting cameras inside, outside, or between cloud shells. It sets itself apart from local volumetrics (like [Ray-marched Volumetric Fog](4248-ray-marched-volumetric-fog.md)) by treating clouds as a global spherical shell rather than a local box, and from grid-based methods (like [Mr-Voxel Volume Rendering](3874-mr-voxel-volume-rendering.md)) by using procedural noise for density rather than sampled voxel data.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Camera position, view-projection matrices, sun direction, sun color, cloud layer parameters (base height, thickness, coverage, wind speed), and procedural noise textures (shape, detail, weather map).
+-*   **Outputs:** Radiance (color), transmittance, and transmittance-weighted mean depth per pixel [S3, unofficial].
++*   **Inputs:** Camera position, view-projection matrix, sun direction, sun color, cloud layer parameters (base height, thickness, coverage, wind speed/direction), and noise textures (shape, detail, weather map).
++*   **Outputs:** In-scattered radiance, transmittance, and transmittance-weighted mean depth.
+ 
+ **Data Structures:**
+-*   **Shape Texture:** A 3D texture (typically $128^3$) containing Perlin FBM dilated by Worley noise, plus three Worley octaves [S3, unofficial].
+-*   **Detail Texture:** A 3D texture (typically $32^3$) containing Worley noise for edge erosion [S3, unofficial].
+-*   **Weather Map:** A 2D texture (typically $512^2$) storing coverage and cloud type (stratus, cumulus, cumulonimbus) per region [S3, unofficial].
++*   **Shape Texture:** 3D texture (e.g., $128^3$) containing Perlin fBm dilated by Worley noise plus Worley octaves. Tileable.
++*   **Detail Texture:** 3D texture (e.g., $32^3$) containing Worley noise. Tileable.
++*   **Weather Map:** 2D texture (e.g., $512^2$) storing coverage and cloud type (stratus, cumulus, cumulonimbus) per region.
+ *   **Framebuffers:**
+-    *   Cloud FBO: Two color attachments (RGBA16F for radiance/transmittance, R32F for depth) [S3, unofficial].
+-    *   Resolve FBO: Array of two RGBA16F textures for temporal history ping-ponging [S3, unofficial].
+-    *   Output FBO: Single RGBA8 texture for final composite [S3, unofficial].
++    *   Cloud FBO: Two color attachments (RGBA16F for radiance/transmittance, R32F for depth).
++    *   Resolve FBO: Two ping-pong framebuffers (RGBA16F) for temporal history.
++    *   Output FBO: Single color attachment (RGBA8) for final composite.
+ 
+ **Numbered Steps:**
+ 
+ 1.  **Ray Setup:**
+-    *   Convert vertex UV to ray direction based on frustum corners (BL, TL, BR, TR) [S4, unofficial].
+-    *   Intersect the ray with the spherical cloud shell defined by inner radius $R_{inner}$ and outer radius $R_{outer}$ [S3, unofficial].
+-        *   Let $O$ be ray origin, $D$ be ray direction, $C$ be planet center.
++    *   Convert vertex UV to ray direction based on frustum corners.
++    *   Normalize ray direction in world space.
++    *   Intersect ray with the spherical cloud shell defined by inner radius $R_{inner}$ and outer radius $R_{outer}$.
++        *   Let $O$ be camera position, $C$ be planet center (e.g., $(0, -R_{Earth}, 0)$).
+         *   $oc = O - C$.
+-        *   $b = dot(oc, D)$.
+-        *   $c = dot(oc, oc) - R^2$.
+-        *   Discriminant $d = b^2 - c$. If $d < 0$, no intersection.
+-        *   $s = \sqrt{d}$.
+-        *   $t_{near} = -b - s$, $t_{far} = -b + s$.
+-        *   Clamp $t_{near}$ to $\max(0, t_{near})$ and $t_{far}$ to $\min(t_{far}, t_{solid})$ if solid geometry is present [S2, S3, unofficial].
+-
+-2.  **Step Size Calculation:**
+-    *   Calculate step size $dt$ based on the ray's span through the layer and a maximum step count $N_{max}$ [S3, unofficial].
+-    *   Apply jitter using interleaved gradient noise or Halton sequence to vary sub-pixel position per frame [S3, unofficial].
+-
+-3.  **Density Sampling:**
+-    *   Transform world position to noise space using wind offset and scale [S2, S3, unofficial].
+-    *   Sample the shape texture to get base density [S3, unofficial].
+-    *   Apply vertical density profile based on cloud type (stratus, cumulus, etc.) and height above base [S1, S3, unofficial].
+-    *   Sample the detail texture to erode edges; erosion weight is higher where base density is lower [S2, S3, unofficial].
+-    *   Combine densities: $density = base\_density - erosion\_weight \times detail\_density$ [S2, unofficial].
+-    *   Apply XZ and Y falloffs to fade density at the edges of the volume box [S2, unofficial].
+-
+-4.  **Lighting and Integration:**
+-    *   **Optical Depth:** For each step, take 6 samples toward the sun to calculate optical depth $\tau$ [S3, unofficial].
+-        *   $\tau = \sum density \times step\_size$ [S2, unofficial].
+-    *   **In-Scattering:** Integrate in-scattered light analytically over the step [S3, unofficial].
+-        *   Use a multiple-scattering approximation (4 octaves) with attenuated extinction and phase eccentricity [S3, unofficial].
+-        *   Apply Henyey-Greenstein phase function for scattering angle [S2, S3, unofficial].
+-        *   Apply Mie phase for cloud droplets [S1, unofficial].
+-    *   **Powder Term:** Darken back-lit edges [S3, unofficial].
+-    *   **Ambient Term:** Fade from blue (top) to grey (bottom) [S3, unofficial].
+-    *   **Sun/Sky Color:** Shift warm as sun nears horizon [S3, unofficial].
+-
+-5.  **Termination:**
+-    *   Stop marching if transmittance drops below 0.5% (or log threshold -4.6) [S2, S3, unofficial].
+-
+-6.  **Temporal Reprojection:**
+-    *   Render cloud pass at reduced resolution (e.g., 0.5x) with jitter [S3, unofficial].
+-    *   Reconstruct world position from depth [S3, unofficial].
+-    *   Project previous frame's position using previous view-projection matrix [S3, unofficial].
+-    *   Blend history sample (e.g., 92% current, 8% history) [S3, unofficial].
+-    *   Clamp history to 3x3 neighborhood to prevent ghosting [S3, unofficial].
++        *   $r_{cam} = length(oc)$.
++        *   $b = dot(oc, rd)$.
++        *   $c = dot(oc, oc)$.
++        *   $h_{outer} = b^2 - (c - R_{outer}^2)$. If $h_{outer} < 0$, no intersection.
++        *   $s_{outer} = \sqrt{h_{outer}}$.
++        *   $t_{outer\_near} = -b - s_{outer}$.
++        *   $t_{outer\_far} = -b + s_{outer}$.
++        *   $h_{inner} = b^2 - (c - R_{inner}^2)$. If $h_{inner} > 0$, $s_{inner} = \sqrt{h_{inner}}$, else $s_{inner} = 0$.
++        *   Determine entry $t_n$ and exit $t_f$ within the shell.
++
++2.  **Density Sampling:**
++    *   Calculate world position $P$ at current step.
++    *   Transform $P$ for high-res noise sampling: $hiResPosition = outerProduct(P, hiResS) + outerProduct(hiResT, vec4(1.f))$, where $hiResT = 0.1f \times hiResNoiseTranslate$ and $hiResS = 0.1f \times hiResNoiseScaling$.
++    *   Sample 4 textures from `volumeHighRes` at `hiResPosition[0..3]`.
++    *   Compute `hiResDensity = dot(hiResNoise, normalizeL1(hiResChannelWeights))`.
++    *   Apply falloff: $falloff = yFalloff(P) \times xzFalloff(P)$.
++    *   $hiResDensity *= falloff$.
++    *   Add offset: $hiResDensityWithOffset = hiResDensity + hiResDensityOffset$.
++    *   If $hiResDensityWithOffset \le 0$, return 0.
++    *   Sample low-res noise: $loResPosition = P \times loResNoiseScaling \times 0.1f + loResNoiseTranslate$.
++    *   $loResDensity = dot(texture(volumeLowRes, loResPosition), normalizeL1(loResChannelWeights))$.
++    *   Compute erosion weight: $erosionWeight = pow(1.f - hiResDensity, 6)$ (quintic).
++    *   Final density: $density = hiResDensityWithOffset - erosionWeight \times loResDensityWeight \times loResDensity$.
++    *   Return $\max(density \times densityMult \times 5.f, 0.f)$.
++
++3.  **Lighting and Integration:**
++    *   For each step, calculate optical depth to the sun by taking 6 samples toward the sun direction.
++    *   Compute light transmittance: $lightTransmittance = \exp(\tau)$, where $\tau$ is accumulated optical depth scaled by absorption.
++    *   Evaluate multiple-scattering approximation (4 octaves) using attenuated extinction, contribution, and phase eccentricity.
++    *   Apply phase function (e.g., two-lobe Henyey-Greenstein or Mie).
++    *   Calculate in-scattered radiance analytically over the step size.
++    *   Apply powder term (darkens back-lit edges) and ambient term (fades from blue at top to grey at bottom).
++    *   Update transmittance: $T_{new} = T_{old} \times \exp(-density \times stepSize)$.
++
++4.  **Termination:**
++    *   Stop marching if transmittance drops below 0.5% (or log threshold -4.6).
++    *   Accumulate radiance and transmittance.
++
++5.  **Temporal Reprojection (Optional but common in real-time implementations):**
++    *   Render cloud pass at reduced resolution (e.g., 0.5x) with sub-pixel jitter (Halton sequence).
++    *   Reconstruct world position from depth.
++    *   Project previous frame's position using previous view-projection matrix.
++    *   Blend history sample (e.g., 92% current, 8% history).
++    *   Clamp history to 3x3 neighborhood to prevent ghosting.
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def ray_march_clouds(ray_origin, ray_direction, cloud_params, noise_textures, sun_dir, sun_color):
+-    # 1. Intersect with spherical shell
+-    oc = ray_origin - cloud_params.planet_center
+-    b = dot(oc, ray_direction)
+-    c = dot(oc, oc) - cloud_params.outer_radius ** 2
+-    discriminant = b ** 2 - c
+-    
+-    if discriminant < 0:
++def raymarch_clouds(camera_pos, camera_dir, sun_dir, sun_color, cloud_params, shape_tex, detail_tex, weather_tex):
++    # 1. Ray-Sphere Intersection
++    oc = camera_pos - cloud_params.planet_center
++    b = dot(oc, camera_dir)
++    c = dot(oc, oc)
++    h_outer = b*b - (c - cloud_params.r_outer**2)
++    if h_outer < 0:
+         return vec3(0.0), 1.0, 0.0 # No intersection
+-
+-    s = sqrt(discriminant)
+-    t_near = -b - s
+-    t_far = -b + s
+-    
+-    # Clamp to solid geometry if present
+-    if cloud_params.has_solid_geometry:
+-        t_near = max(0.0, t_near)
+-        t_far = min(t_far, cloud_params.solid_hit_distance)
++    
++    s_outer = sqrt(h_outer)
++    t_near = -b - s_outer
++    t_far = -b + s_outer
++    
++    # Check inner shell
++    h_inner = b*b - (c - cloud_params.r_inner**2)
++    if h_inner > 0:
++        s_inner = sqrt(h_inner)
++        t_inner_near = -b - s_inner
++        t_inner_far = -b + s_inner
++        # Adjust t_near/t_far to be within shell
++        t_start = max(t_near, t_inner_near)
++        t_end = min(t_far, t_inner_far)
+     else:
+-        t_near = max(0.0, t_near)
+-
+-    if t_far <= t_near:
++        t_start = t_near
++        t_end = t_far
++        
++    if t_start > t_end:
+         return vec3(0.0), 1.0, 0.0
+ 
+-    # 2. Step size
+-    step_size = (t_far - t_near) / cloud_params.max_steps
+-    jitter = get_jitter(cloud_params.frame) # Halton or gradient noise
+-
+-    # 3. Integration
+-    accumulated_radiance = vec3(0.0)
+-    accumulated_transmittance = 1.0
+-    weighted_depth = 0.0
+-    current_pos = ray_origin + ray_direction * t_near
++    # 2. Adaptive Step Size
++    step_size = (t_end - t_start) / cloud_params.max_steps
++    jitter = get_jitter(camera_pos, camera_dir) # Halton sequence based
++    
++    radiance = vec3(0.0)
++    transmittance = 1.0
++    depth_accum = 0.0
++    transmittance_weighted_depth = 0.0
++    
++    pos = camera_pos + t_start * camera_dir + jitter * step_size
+     
+     for i in range(cloud_params.max_steps):
+-        if accumulated_transmittance < 0.005: # Early stop
++        if transmittance < 0.005: # Early stop
+             break
+             
+-        # Sample density
+-        wind_offset = cloud_params.wind_speed * cloud_params.time
+-        noise_pos = (current_pos - cloud_params.planet_center) * cloud_params.shape_scale + wind_offset
+-        base_density = sample_shape_texture(noise_textures.shape, noise_pos)
++        # 3. Density Sampling
++        density = sample_density(pos, shape_tex, detail_tex, weather_tex, cloud_params)
+         
+-        # Apply vertical profile and weather map
+-        height = length(current_pos - cloud_params.planet_center) - cloud_params.planet_radius
+-        cloud_type = sample_weather_map(noise_textures.weather, current_pos)
+-        profile_density = get_vertical_profile(cloud_type, height, cloud_params.base_height)
+-        density = base_density * profile_density
++        if density > 0.0:
++            # 4. Lighting
++            # Optical depth to sun
++            tau = 0.0
++            sun_pos = pos
++            for j in range(6):
++                sun_pos += sun_dir * step_size
++                tau += sample_density(sun_pos, shape_tex, detail_tex, weather_tex, cloud_params) * step_size
++            
++            light_trans = exp(-tau * cloud_params.absorption_coeff)
++            
++            # Phase function
++            cos_angle = dot(normalize(camera_dir), normalize(sun_dir))
++            phase = henyey_greenstein(cos_angle, cloud_params.anisotropy)
++            
++            # Multiple scattering approximation
++            ms = multiple_scattering_approximation(density, step_size, cloud_params)
++            
++            # In-scattering
++            in_scatter = sun_color * light_trans * phase * ms * cloud_params.sun_intensity
++            
++            # Ambient
++            height_ratio = (length(pos - cloud_params.planet_center) - cloud_params.r_inner) / (cloud_params.r_outer - cloud_params.r_inner)
++            ambient = mix(cloud_params.ambient_top, cloud_params.ambient_bottom, height_ratio)
++            
++            # Powder term
++            powder = 1.0 - exp(-cloud_params.powder_strength * (1.0 - cos_angle))
++            
++            total_light = in_scatter * powder + ambient * cloud_params.ambient_intensity
++            
++            # Integration
++            radiance += total_light * transmittance * (1.0 - exp(-density * step_size))
++            transmittance *= exp(-density * step_size)
++            
++            depth_accum += step_size
++            transmittance_weighted_depth += step_size * transmittance
++            
++        pos += camera_dir * step_size
+         
+-        # Detail erosion
+-        detail_pos = noise_pos * cloud_params.detail_scale
+-        detail_density = sample_detail_texture(noise_textures.detail, detail_pos)
+-        erosion_weight = pow(1.0 - density, 6) # Quintic
+-        density = max(density - erosion_weight * detail_density, 0.0)
+-        
+-        # Falloff
+-        density *= get_xz_falloff(current_pos, cloud_params.volume_scaling)
+-        density *= get_y_falloff(current_pos, cloud_params.volume_scaling)
+-        
+-        if density <= 0.0:
+-            current_pos += ray_direction * step_size
+-            continue
+-            
+-        # Lighting
+-        # Optical depth towards sun
+-        tau = 0.0
+-        for j in range(6):
+-            sun_sample_pos = current_pos + sun_dir * (j + 1) * step_size
+-            sun_noise_pos = (sun_sample_pos - cloud_params.planet_center) * cloud_params.shape_scale + wind_offset
+-            sun_density = sample_shape_texture(noise_textures.shape, sun_noise_pos)
+-            tau += sun_density * step_size
+-            
+-        light_transmittance = exp(-tau * cloud_params.extinction)
+-        
+-        # In-scattering
+-        phase_val = get_phase_function(dot(ray_direction, sun_dir), cloud_params.anisotropy)
+-        in_scatter = sun_color * light_transmittance * phase_val * density * step_size
+-        
+-        # Multiple scattering approximation (simplified)
+-        in_scatter *= cloud_params.multiple_scattering_factor
+-        
+-        # Accumulate
+-        accumulated_radiance += in_scatter * accumulated_transmittance
+-        accumulated_transmittance *= exp(-density * cloud_params.extinction * step_size)
+-        weighted_depth += current_pos.z * density * step_size # Simplified depth
+-        
+-        current_pos += ray_direction * step_size
+-
+-    # Normalize weighted depth
+-    if accumulated_transmittance < 1.0:
+-        mean_depth = weighted_depth / (1.0 - accumulated_transmittance)
+-    else:
+-        mean_depth = 0.0
+-        
+-    return accumulated_radiance, accumulated_transmittance, mean_depth
++    mean_depth = transmittance_weighted_depth / (1.0 - transmittance) if transmittance < 1.0 else 0.0
++    
++    return radiance, transmittance, mean_depth
+ ```
+ 
++**Parameters:**
++*   `shape_noise_scale`: Default 6.4 km. Controls cloud size.
++*   `coverage`: Scales weather coverage.
++*   `densityThreshold`: Minimum noise value for density.
++*   `absorptionCoefficient`: Default 1.0.
++*   `scatterFactor`: Forward scattering strength [0.0, 1.0].
++*   `windSpeed`: Controls noise scroll speed.
++*   `maxSteps`: Default 128.
++*   `EARLY_STOP_THRESHOLD`: 1e-2f.
++*   `EARLY_STOP_LOG_THRESHOLD`: -4.6f.
++
++**Edge Cases and Pitfalls:**
++*   **Texture History Validity:** History textures must be checked for identity; reallocation or resize invalidates history [S1, unofficial].
++*   **Shadow Map Basis Error:** Cloud shadow maps are traced along the first directional light. Using them for non-parallel lights causes displaced shadows [S1, unofficial].
++*   **Viewport Depth Mismatch:** Depth reads must be offset by viewport origin to avoid tracing wrong parts of the view [S1, unofficial].
++*   **Reprojection Depth Compromise:** Mean cloud depth is used for reprojection; overlapping thin/far clouds cause depth ambiguity, mitigated by history clamping [S3, unofficial].
++
+ ## Subtopics
+ 
+ ### [Volumetric Clouds from Base Shape (Nubis/Frostbite Hybrid)](9609-volumetric-clouds-from-base-shape-nubis-frostbite-hybrid.md)
+-Renders clouds as a spherical shell using raymarching and 3D noise, combining Nubis density with Frostbite light transport. Choose for planetary-scale clouds.
++Renders clouds as a spherical shell using 3D noise, combining Nubis density with Frostbite light transport. Choose for planetary-scale clouds.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of pixels and $M$ is the number of marching steps per ray. Adaptive stepping reduces $M$ in empty space [S2, unofficial].
+-*   **Memory Complexity:** $O(T_{shape} + T_{detail} + T_{weather})$ for noise textures, plus $O(W \cdot H)$ for framebuffers [S3, unofficial].
+-*   **Performance:** On Mesa llvmpipe at 640x360, full-res 128 steps takes 927 ms; half-res with temporal reprojection takes 266 ms (29% of full-res) [S3, unofficial].
+-*   **Strengths:** Organic shapes, no texture seams (tileable noise), supports camera inside/outside layer, physically based lighting [S2, S3, unofficial].
+-*   **Limitations:** Approximate multiple scattering (flatter lit side than path tracing), temporal ghosting if history clamp fails, single layer limitation in some implementations [S3, unofficial].
+-*   **When to use:** Planetary skies, open-world games, VR.
+-*   **When not to use:** Localized fog, indoor scenes, strict real-time constraints without temporal reprojection.
++*   **Time Complexity:** $O(N \cdot M)$ where $N$ is number of steps and $M$ is samples per step for lighting.
++*   **Memory Complexity:** $O(T_{shape} + T_{detail} + T_{weather})$ for noise textures.
++*   **Performance:** On Mesa llvmpipe at 640x360, full-res 128 steps takes 927 ms. Half-res with temporal reprojection takes 266 ms (29% of full-res) [S3, unofficial].
++*   **Strengths:** Physically plausible, supports arbitrary camera positions, efficient with temporal reprojection.
++*   **Limitations:** Approximate multiple scattering, hand-tuned sun color at low elevation, single cloud layer limit in some implementations [S3, unofficial].
+ 
+ ## Background
+-Originated from Andrew Schneider's "Real-time Volumetric Cloudscapes of Horizon: Zero Dawn" (SIGGRAPH 2015) and S. Hillaire's work on Frostbite and Unreal Engine (SIGGRAPH 2016, 2020) [S1, S2, S3, unofficial]. The technique combines Nubis Evolved (Schneider 2022) for shaping and Nubis Cubed (2023) for detail with Hillaire's atmospheric scattering models [S1, unofficial]. It is widely used in modern game engines and real-time rendering frameworks like Bevy and Unity [S1, S4, unofficial].
++Originated from techniques described in "The Real-time Volumetric Cloudscapes of Horizon: Zero Dawn" (Schneider, 2015) and "Physically Based Sky, Atmosphere and Cloud Rendering in Frostbite" (Hillaire, 2016). Implemented in various open-source projects like Bevy atmosphere plugin [S1, unofficial], Depersonalizc/volumetric-clouds [S2, unofficial], and harkawataryan/Volumetric-Cloud-Renderer [S3, unofficial].
+ 
+ ## Sources

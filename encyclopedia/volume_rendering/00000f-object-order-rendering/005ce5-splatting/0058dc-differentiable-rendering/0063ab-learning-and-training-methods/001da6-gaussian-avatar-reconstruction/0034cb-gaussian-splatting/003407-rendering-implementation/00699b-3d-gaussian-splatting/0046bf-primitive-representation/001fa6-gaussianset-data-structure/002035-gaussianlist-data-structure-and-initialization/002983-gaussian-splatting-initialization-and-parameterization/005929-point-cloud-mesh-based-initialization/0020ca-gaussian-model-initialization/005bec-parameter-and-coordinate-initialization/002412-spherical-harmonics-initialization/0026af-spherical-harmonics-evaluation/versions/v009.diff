@@ -1,0 +1,162 @@
+--- v008.md
++++ v009.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-Spherical Harmonics (SH) Evaluation computes the view-dependent RGB color of a 3D Gaussian splat by evaluating real spherical harmonic basis functions against a viewing direction vector and dotting the result with stored SH coefficients. It solves the problem of compactly representing complex lighting effects (such as specular highlights and ambient occlusion) within the Gaussian representation without requiring explicit light sources or ray tracing [S10][S7, unofficial]. It differs from [Spherical Harmonics Decoding](7901-spherical-harmonics-decoding.md) by focusing on the mathematical evaluation of the basis functions rather than the unpacking of raw coefficient storage formats, and from [Spherical Harmonics Rotation](3985-spherical-harmonics-rotation.md) which handles the transformation of coefficients to camera space [S1, unofficial].
++Spherical Harmonics (SH) Evaluation computes the view-dependent RGB color of a 3D Gaussian splat by evaluating real spherical harmonic basis functions against a viewing direction vector and dotting the result with stored SH coefficients [S2, unofficial]. It solves the problem of compactly representing complex lighting effects within the Gaussian representation without requiring explicit light sources or ray tracing [S10].
+ 
+ ## How it works
+ **Inputs:**
+-- `shs`: Tensor of SH coefficients. Shape is typically $(N, 3, (D+1)^2)$ or flattened as $(N, 3 \times (D+1)^2)$, where $N$ is the number of Gaussians and $D$ is the active SH degree [S1, S8, unofficial].
++- `shs`: Tensor of SH coefficients. Shape is typically $(N, 3, (D+1)^2)$ or flattened as $(N, 3 \times (D+1)^2)$, where $N$ is the number of Gaussians and $D$ is the active SH degree [S1, S2, S7, S8, unofficial].
+ - `viewdirs`: Tensor of normalized viewing direction vectors $(x, y, z)$ for each Gaussian. Shape $(N, 3)$ [S7, unofficial].
+ - `active_sh_degree`: Integer specifying the maximum degree of spherical harmonics to evaluate (typically 0, 1, 2, or 3) [S2, unofficial].
+@@ -16,13 +16,13 @@
+ 
+ **Data Structures:**
+-The SH coefficients are stored per Gaussian, per color channel (R, G, B), and per SH basis function. For degree $D$, there are $(D+1)^2$ coefficients per channel. The coefficients are real-valued floats.
++The SH coefficients are stored per Gaussian, per color channel (R, G, B), and per SH basis function [S2, unofficial]. For degree $D$, there are $(D+1)^2$ coefficients per channel [G]. The coefficients are real-valued floats.
+ 
+ **Constants:**
+-The following constants are derived from the normalization of real spherical harmonics (Condon-Shortley phase convention) [S4, S7, unofficial]:
++The following constants are derived from the normalization of real spherical harmonics (Condon-Shortley phase convention) [S4, unofficial]:
+ - $C_0 = \frac{1}{\sqrt{4\pi}} \approx 0.28209479177387814$
+ - $C_1 = \sqrt{\frac{3}{4\pi}} \approx 0.48860251190291987$
+ - $C_2 = \sqrt{\frac{15}{4\pi}} \approx 1.0925484305920792$
+-- $C_{2,0} = \sqrt{\frac{5}{16\pi}} \approx 0.94617469575755997$ (coefficient for $Y_0^2$ term scaling)
+-- $C_{2,2} = \sqrt{\frac{15}{16\pi}} \approx 0.54627421529603959$ (coefficient for $Y_2^2$ term scaling)
++- $C_{2,0} = \sqrt{\frac{5}{16\pi}} \approx 0.94617469575755997$
++- $C_{2,2} = \sqrt{\frac{15}{16\pi}} \approx 0.54627421529603959$
+ - $C_3 = \sqrt{\frac{7}{16\pi}} \approx 0.59004358992664352$
+ - $C_{3,2} = \sqrt{\frac{105}{32\pi}} \approx 2.8906114426405538$
+@@ -31,14 +31,11 @@
+ 
+ **Basis Functions:**
+-The real spherical harmonic basis functions $Y_l^m$ are evaluated based on the direction components $x, y, z$. Note that $x = \sin\theta \cos\phi$, $y = \sin\theta \sin\phi$, $z = \cos\theta$ [S4, S9, unofficial].
+-
++The real spherical harmonic basis functions $Y_l^m$ are evaluated based on the direction components $x, y, z$ [S9, unofficial].
+ Degree 0 ($l=0$):
+ $$ Y_0^0 = C_0 $$
+-
+ Degree 1 ($l=1$):
+ $$ Y_{-1}^1 = -C_1 y $$
+ $$ Y_0^1 = C_1 z $$
+ $$ Y_1^1 = -C_1 x $$
+-
+ Degree 2 ($l=2$):
+ $$ Y_{-2}^2 = C_2 xy $$
+@@ -47,5 +44,4 @@
+ $$ Y_1^2 = -C_2 xz $$
+ $$ Y_2^2 = C_{2,2} (x^2 - y^2) $$
+-
+ Degree 3 ($l=3$):
+ $$ Y_{-3}^3 = C_3 y (3x^2 - y^2) $$
+@@ -57,28 +53,16 @@
+ $$ Y_3^3 = C_3 x (3y^2 - x^2) $$
+ 
+-*Note: Signs of odd-$m$ terms may vary depending on the specific Condon-Shortley implementation. The sources [S4, S7, unofficial] use the signs listed above. Source [S9, unofficial] uses a different indexing/ordering but equivalent polynomial forms.*
+-
+ **Algorithm Steps:**
+-1. **Input Validation:** If gradients are required for `viewdirs` or `shs`, proceed with differentiable operations. If `viewdirs` is not provided but `vox_centers` and `cam_pos` are, compute `viewdirs = normalize(vox_centers - cam_pos)` [S2, unofficial].
+-2. **Initialize Color:** Extract the zeroth-order (DC) coefficients $c_0, c_1, c_2$ (indices 0, 1, 2 for R, G, B respectively) from `shs`. Initialize the output color tensor `rgb` with these DC terms:
+-   $$ \text{rgb} = C_0 \cdot \text{shs}[:, :, 0] $$
+-   This represents the average color of the splat [S5, S7, unofficial].
++1. **Input Validation:** If gradients are required for `viewdirs`, `vox_centers`, or `cam_pos`, raise `NotImplementedError` [S2, unofficial]. If `viewdirs` is not provided but `vox_centers` and `cam_pos` are, compute `viewdirs = normalize(vox_centers - cam_pos)` [S2, unofficial].
++2. **Initialize Color:** Extract the zeroth-order (DC) coefficients $c_0, c_1, c_2$ (indices 0, 1, 2 for R, G, B respectively) from `shs` [S7, unofficial]. Initialize the output color tensor `rgb` with these DC terms: $\text{rgb} = C_0 \cdot \text{shs}[:, :, 0]$ [S7, unofficial].
+ 3. **Evaluate Higher Orders:** Depending on `active_sh_degree`, add contributions from higher-order coefficients:
+-   - **Degree 1:** Extract coefficients $c_3, c_4, c_5$ (indices 3, 4, 5). Update color:
+-     $$ \text{rgb} \leftarrow \text{rgb} - C_1 y c_3 + C_1 z c_4 - C_1 x c_5 $$
+-     (Note: The sign of the $x$ term depends on the coefficient indexing. Source [S7, unofficial] uses $-C_1 x c_3$ for the first-order x-term if $c_3$ corresponds to $Y_1^1$. We follow the polynomial expansion directly: $Y_1^1 = -C_1 x$) [S7, unofficial].
+-   - **Degree 2:** Extract coefficients $c_4 \dots c_8$ (indices 6..10). Compute squared/cross terms: $xx=x^2, yy=y^2, zz=z^2, xy=xy, yz=yz, xz=xz$. Update color:
+-     $$ \text{rgb} \leftarrow \text{rgb} + C_2 xy c_4 - C_2 yz c_5 + C_{2,0}(2zz - xx - yy) c_6 - C_2 xz c_7 + C_{2,2}(xx - yy) c_8 $$
+-     (Mapping coefficients to $Y_{-2}^2 \dots Y_2^2$) [S5, S7, unofficial].
+-   - **Degree 3:** Extract coefficients $c_9 \dots c_{15}$ (indices 11..17). Update color with cubic terms:
+-     $$ \text{rgb} \leftarrow \text{rgb} + C_3 y(3xx - yy) c_9 + C_{3,2} xyz c_{10} + C_{3,1} y(1 - 5zz) c_{11} + C_{3,0} z(5zz - 3) c_{12} + C_{3,1} x(1 - 5zz) c_{13} + C_{3,2} z(xx - yy) c_{14} + C_3 x(3yy - xx) c_{15} $$
+-     (Mapping coefficients to $Y_{-3}^3 \dots Y_3^3$) [S5, S7, unofficial].
+-4. **Bias and Clamping:** Add a bias of 0.5 to the resulting color vector to shift the range from $[-1, 1]$ (or similar normalized range) to $[0.5, 1.5]$ or similar, then apply ReLU or clamp to $[0.0, 1.0]$ to ensure valid RGB values [S3, S7, S8, unofficial].
+-   $$ \text{rgb} = \text{clamp}(\text{rgb} + 0.5, 0.0, 1.0) $$
++   - **Degree 1:** Extract coefficients $c_3, c_4, c_5$ (indices 3, 4, 5) [S5, unofficial]. Update color: $\text{rgb} \leftarrow \text{rgb} - C_1 y c_3 + C_1 z c_4 - C_1 x c_5$ [S7, unofficial].
++   - **Degree 2:** Extract coefficients $c_4 \dots c_8$ (indices 6..10) [S5, unofficial]. Compute squared/cross terms: $xx=x^2, yy=y^2, zz=z^2, xy=xy, yz=yz, xz=xz$ [S5, unofficial]. Update color: $\text{rgb} \leftarrow \text{rgb} + C_2 xy c_4 - C_2 yz c_5 + C_{2,0}(2zz - xx - yy) c_6 - C_2 xz c_7 + C_{2,2}(xx - yy) c_8$ [S5, unofficial].
++   - **Degree 3:** Extract coefficients $c_9 \dots c_{15}$ (indices 11..17) [S5, unofficial]. Update color with cubic terms: $\text{rgb} \leftarrow \text{rgb} + C_3 y(3xx - yy) c_9 + C_{3,2} xyz c_{10} + C_{3,1} y(1 - 5zz) c_{11} + C_{3,0} z(5zz - 3) c_{12} + C_{3,1} x(1 - 5zz) c_{13} + C_{3,2} z(xx - yy) c_{14} + C_3 x(3yy - xx) c_{15}$ [S5, unofficial].
++4. **Bias and Clamping:** Add a bias of 0.5 to the resulting color vector to shift the range, then apply ReLU or clamp to $[0.0, 1.0]$ to ensure valid RGB values [S3, S7, S8, unofficial]. $\text{rgb} = \text{clamp}(\text{rgb} + 0.5, 0.0, 1.0)$ [S8, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ import torch
+-import math
+ 
+ def eval_sh_bases(degree, viewdirs):
+@@ -90,5 +74,4 @@
+     y = viewdirs[:, 1]
+     z = viewdirs[:, 2]
+-    
+     bases = []
+     
+@@ -99,5 +82,4 @@
+     if degree >= 1:
+         C1 = 0.48860251190291987
+-        # Y_-1^1, Y_0^1, Y_1^1
+         bases.append(-C1 * y)
+         bases.append(C1 * z)
+@@ -110,5 +92,4 @@
+         xx, yy, zz = x*x, y*y, z*z
+         xy, yz, xz = x*y, y*z, x*z
+-        # Y_-2^2, Y_-1^2, Y_0^2, Y_1^2, Y_2^2
+         bases.append(C2 * xy)
+         bases.append(-C2 * yz)
+@@ -122,5 +103,4 @@
+         C3_1 = 0.45704579946446572
+         C3_0 = 0.3731763325901154
+-        # Y_-3^3, Y_-2^3, Y_-1^3, Y_0^3, Y_1^3, Y_2^3, Y_3^3
+         bases.append(C3 * y * (3*xx - yy))
+         bases.append(C3_2 * x * y * z)
+@@ -149,12 +129,18 @@
+         num_bases = (active_sh_degree + 1) ** 2
+         shs = shs.view(shs.shape[0], 3, num_bases)
++        
++    # Note: Sources [S2, unofficial] specify raising NotImplementedError if gradients are required 
++    # for viewdirs, vox_centers, or cam_pos.
++    
++    # Note: Sources [S2, unofficial] specify computing viewdirs = normalize(vox_centers - cam_pos) 
++    # if viewdirs is not provided.
++    
++    # Note: Sources [S10] specify transforming coefficients by the rotation component 
++    # of the global transformation matrix using Wigner-D matrices before evaluation.
+     
+     # Evaluate bases
+-    # sh_mult shape: (N, num_bases)
+     sh_mult = eval_sh_bases(active_sh_degree, viewdirs)
+     
+     # Dot product: sum over basis dimension
+-    # shs shape: (N, 3, num_bases)
+-    # sh_mult shape: (N, num_bases) -> expand to (N, 1, num_bases) for broadcasting
+     rgb_sh = torch.sum(shs * sh_mult[:, None, :], dim=-1)
+     
+@@ -166,8 +152,8 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** The polynomial terms for higher degrees (e.g., $z^3$) can suffer from precision loss if $z$ is close to 1 or -1. Using normalized vectors is critical [S7, unofficial].
+-- **Boundary Conditions:** If `viewdirs` is not normalized, the SH evaluation will produce incorrect colors. Always normalize `viewdirs` before evaluation [S7, unofficial].
+-- **Coefficient Indexing:** Different implementations may store SH coefficients in different orders (e.g., $m$ vs $l$ ordering). The pseudocode assumes the standard ordering $Y_{-l}^l \dots Y_l^l$ for each $l$ [S4, S7, unofficial].
+-- **Performance:** Implementations may ignore higher-degree coefficients (e.g., degree 3) for performance reasons, especially on mobile or low-end hardware [S10].
++- **Precision:** The polynomial terms for higher degrees can suffer from precision loss if $z$ is close to 1 or -1.
++- **Boundary Conditions:** If `viewdirs` is not normalized, the SH evaluation will produce incorrect colors. Always normalize `viewdirs` before evaluation.
++- **Coefficient Indexing:** Different implementations may store SH coefficients in different orders. The pseudocode assumes the standard ordering $Y_{-l}^l \dots Y_l^l$ for each $l$ [S4, unofficial].
++- **Performance:** Implementations may ignore higher-degree coefficients (e.g., degree 3) for performance reasons [S10].
+ 
+ ## Subtopics
+@@ -186,5 +172,5 @@
+ 
+ ### [Spherical Harmonics Lighting Calculation](11516-spherical-harmonics-lighting-calculation.md)
+-This method computes the RGB color contribution of a 3D Gaussian splat by evaluating real spherical harmonics (SH) against a viewing direction vector. It solves the problem of representing view-dependent lighting effects (such as specular highlights and ambient occlusion) compactly within the Gaussian representation. It differs from [Spherical Harmonics Evaluation](3848-spherical-harmonics-evaluation.md) by explicitly defining the lighting calculation pipeline, including the specific Condon–Shortley phase conventions, the mandatory 0.5 bias for numeric stability, and the exact polynomial expansions for degrees 0 through 3.
++This method computes the RGB color contribution of a 3D Gaussian splat by evaluating real spherical harmonics (SH) against a viewing direction vector. It represents view-dependent lighting effects compactly within the Gaussian representation. It differs from [Spherical Harmonics Evaluation](3848-spherical-harmonics-evaluation.md) by explicitly defining the lighting calculation pipeline, including the Condon–Shortley phase conventions, the mandatory 0.5 bias for numeric stability, and the exact polynomial expansions for degrees 0 through 3.
+ 
+ ### Spherical Harmonics Evaluation with Tone Mapping
+@@ -202,5 +188,5 @@
+ 
+ ## Background
+-Spherical Harmonics have been used in computer graphics for decades to represent lighting and reflectance. In the context of 3D Gaussian Splatting, they were adopted to provide a compact, differentiable way to model view-dependent appearance without the need for explicit light sources or complex BRDFs [S10]. The specific implementation details (polynomial expansions, constants) are derived from standard mathematical definitions of real spherical harmonics [S4, S9, unofficial]. The use of SH in Gaussian Splatting was popularized by the original 3D Gaussian Splatting paper and subsequent implementations [S1, S7, unofficial].
++Spherical Harmonics have been used in computer graphics for decades to represent lighting and reflectance. In the context of 3D Gaussian Splatting, they are adopted to provide a compact, differentiable way to model view-dependent appearance without the need for explicit light sources or complex BRDFs [S10]. The specific implementation details (polynomial expansions, constants) are derived from standard mathematical definitions of real spherical harmonics [S4, S9, unofficial].
+ 
+ ## Sources

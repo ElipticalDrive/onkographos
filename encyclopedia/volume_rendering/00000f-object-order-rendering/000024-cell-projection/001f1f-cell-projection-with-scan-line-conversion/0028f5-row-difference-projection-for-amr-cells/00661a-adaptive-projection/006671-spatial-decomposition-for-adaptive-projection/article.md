@@ -1,0 +1,107 @@
+# Spatial Decomposition for Adaptive Projection
+
+Also called: AMRRegion decomposition, Image plane decomposition
+
+## Overview
+Spatial Decomposition for Adaptive Projection is a parallelization strategy for inherently spatial volume rendering tasks, specifically designed to distribute the computational load of adaptive mesh refinement (AMR) projection across multiple processors. It solves the problem of efficiently generating line integrals in parallel by decomposing the image plane rather than the data domain, ensuring that each processor handles a distinct spatial region of the final output. Unlike methods that require frequent synchronization or complex data redistribution, this approach guarantees non-overlapping results, minimizing communication overhead to a single final merge step.
+
+## How it works
+The method decomposes the computational domain into subdomains realized as individual data containers for independent processing [S1]. The core mechanism involves distributing the image plane equally among processors, with each processor responsible for a specific rectangular prism of the volume along the line of sight.
+
+### Inputs and Outputs
+*   **Input:** The full AMR dataset (grids and field values), the projection direction (line of sight), and the total number of processors $P$.
+*   **Output:** A global set of unique points $(x_p, dx_p, y_p, dy_p, v)$ representing the adaptive projection, constructed by merging local results from all processors.
+
+### Data Structures
+The primary data structure for a processor's workload is the `AMRRegion`, defined as a rectangular prism.
+*   **Dimensions:** $(L_i, L_j, L_d)$.
+*   **Coordinate System:** Axes are rotated such that the line of sight corresponds to the third dimension ($L_d$).
+*   **Constraints:**
+    *   $L_i \times L_j$ is constant across all processors, representing the fixed area of the image plane assigned to each processor.
+    *   $L_d$ spans the entire computational domain along the axis of projection.
+*   **Local Result:** Each processor maintains a list of points $(x_p, dx_p, y_p, dy_p, v)$ constrained to lie within its assigned `AMRRegion`.
+
+### Steps
+1.  **Domain Decomposition:** Divide the computational domain such that the image plane is distributed equally among the $P$ processors [S1].
+2.  **Prism Allocation:** For each processor $k$ (where $k \in [0, P-1]$), allocate a rectangular prism `AMRRegion` with dimensions $(L_i, L_j, L_d)$. Ensure the axes are rotated so the projection axis aligns with $L_d$. The area $L_i \times L_j$ must be identical for all $k$ [S1].
+3.  **Local Projection:** Each processor independently executes the Adaptive Projection algorithm on the AMR data.
+    *   The algorithm computes line integrals along the sight-line.
+    *   **Constraint:** Only points $(x_p, dx_p, y_p, dy_p, v)$ that fall within the processor's allocated `AMRRegion` are included in the local result set [S1].
+4.  **Result Merging:** After all processors complete their local projections, they join their image arrays. Since the `AMRRegions` are spatially disjoint in the image plane, the resulting sets of points are guaranteed to be unique, requiring no deduplication logic beyond simple concatenation [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def spatial_decomposition_adaptive_projection(amr_data, num_processors, projection_axis):
+    """
+    Performs adaptive projection using spatial decomposition.
+    
+    Args:
+        amr_data: The full AMR dataset.
+        num_processors: Total number of MPI ranks.
+        projection_axis: The direction of projection (used to define L_d).
+        
+    Returns:
+        Global list of unique points (xp, dxp, yp, dyp, v).
+    """
+    # 1. Determine image plane dimensions and split
+    # Let total image plane area be A_total.
+    # Each processor gets area A_proc = A_total / num_processors.
+    # Dimensions Li, Lj are chosen such that Li * Lj = A_proc.
+    # Ld spans the entire domain along the projection axis.
+    
+    Li, Lj = calculate_image_plane_dims(num_processors)
+    Ld = get_domain_extent_along_axis(projection_axis)
+    
+    local_results = []
+    
+    # 2. Each processor determines its specific region in the image plane
+    # The image plane is divided into a grid of Li x Lj blocks.
+    # Processor rank 'rank' is assigned a specific offset (ox, oy) in the image plane.
+    ox, oy = get_processor_image_offset(rank, num_processors, Li, Lj)
+    
+    # Define the bounding box for this processor's AMRRegion
+    # In the rotated coordinate system where projection axis is z:
+    region_min = (ox, oy, 0)
+    region_max = (ox + Li, oy + Lj, Ld)
+    
+    # 3. Perform local adaptive projection
+    # The adaptive projection algorithm generates line integrals.
+    # We filter results to only include points within the region.
+    for grid in amr_data.grids:
+        # Project grid data along the line of sight
+        # This returns a list of points (xp, dxp, yp, dyp, v)
+        # Note: xp, yp are coordinates in the image plane (rotated frame)
+        local_points = adaptive_projection_single_grid(grid, projection_axis)
+        
+        # Filter points based on the allocated rectangular prism
+        for point in local_points:
+            xp, dxp, yp, dyp, v = point
+            if (region_min[0] <= xp < region_max[0] and
+                region_min[1] <= yp < region_max[1]):
+                local_results.append(point)
+                
+    # 4. Merge results
+    # In a real MPI implementation, this would involve MPI_Gather or similar.
+    # Since regions are non-overlapping, simple concatenation suffices.
+    global_results = merge_local_results(local_results)
+    
+    return global_results
+```
+
+### Edge Cases and Pitfalls
+*   **File Format Compatibility:** Enzo and Orion output formats store one file per processor with unordered grids. This lack of spatial decomposition in the input files causes poor scaling, as processors must read grid datasets from many files to find relevant data [S1].
+*   **Scaling Limit:** Strong scaling holds well between 4 and 64 processors for the Santa Fe Light Cone dataset. At 128 processors, algorithmic overhead dominates disk I/O cost, causing deviation from ideal scaling [S1].
+
+## Operating characteristics
+*   **Communication Overhead:** Negligible. Processors only communicate at the end of the projection to share non-overlapping final results, avoiding frequent synchronization [S1].
+*   **Scaling:** Strong scaling is effective up to 64 processors for the Santa Fe Light Cone dataset ($512^3$ resolution, 5.5 $\times 10^8$ elements). Beyond this, algorithmic overhead becomes the dominant cost, surpassing disk I/O [S1].
+*   **Strengths:** Minimal communication; simple merge logic due to spatial disjointness.
+*   **Limitations:** Performance degrades significantly if the input data format is not spatially decomposed (e.g., Enzo/Orion formats), leading to excessive I/O.
+
+## Background
+This method is implemented within the `yt` analysis toolkit, which provides a `ParallelAnalysisInterface` for spatially-aware decomposition [S1]. It was developed to address the parallelization needs of adaptive projection in astrophysical simulation data, where data is inherently spatial and often stored in formats that do not align with processor boundaries.
+
+## Sources
+[S1] YT: A Multi-Code Analysis Toolkit for Astrophysical Simulation Data, https://digital.library.unt.edu/ark:/67531/metadc834104/?q=fluid simulation volume rendering, fetched 2026-10-28

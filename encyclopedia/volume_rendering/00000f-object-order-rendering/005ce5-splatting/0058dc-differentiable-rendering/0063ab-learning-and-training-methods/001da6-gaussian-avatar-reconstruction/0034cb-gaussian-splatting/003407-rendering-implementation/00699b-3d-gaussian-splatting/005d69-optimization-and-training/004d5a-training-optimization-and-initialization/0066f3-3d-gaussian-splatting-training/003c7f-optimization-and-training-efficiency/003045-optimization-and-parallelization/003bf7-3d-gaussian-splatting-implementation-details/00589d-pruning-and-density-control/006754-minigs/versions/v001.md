@@ -1,0 +1,78 @@
+# MiniGS
+
+Also called: MiniGS: Efficient 3D Gaussian Splatting With Full Factors Weighted Pruning For Scene Representation
+
+## Overview
+MiniGS is a memory-efficient compression method for 3D Gaussian Splatting that reduces the number of Gaussian primitives by up to 90% while maintaining rendering quality comparable to the vanilla algorithm [S1]. It achieves this by combining Full Factors Weighted (FFW) Importance Score Pruning to remove redundant primitives with a Variational Densify Threshold (VDT) component to recover fine details lost during pruning [S1]. Unlike standard pruning methods that may degrade visual fidelity, MiniGS specifically targets the preservation of highly contributive primitives and uses gradient-based densification to compensate for quality loss [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 3D Gaussians $\{G_i\}$ optimized from a scene, where each Gaussian $G_i$ is defined by mean position $\mu_i$, covariance matrix $\Sigma_i$, opacity $\alpha_i$, and spherical harmonics coefficients for view-dependent color $c_i$.
+*   **Output:** A pruned set of Gaussian primitives $\{G'_i\}$ with significantly reduced count, and the corresponding scene representation optimized via VDT.
+
+**Data Structures:**
+The core data structure is the list of Gaussian primitives. Each primitive stores:
+*   $\mu \in \mathbb{R}^3$: Mean position.
+*   $\Sigma \in \mathbb{R}^{3 \times 3}$: Covariance matrix, decomposed into rotation $R$ and scaling $S$ such that $\Sigma = R S S^T R^T$ to ensure positive semi-definiteness [S1].
+*   $\alpha \in [0, 1]$: Opacity.
+*   $c$: View-dependent color, typically represented by spherical harmonics coefficients [S1].
+
+**Method Steps:**
+
+1.  **Compute Importance Scores (FFW Pruning):**
+    Calculate an importance score for each Gaussian primitive to determine its contribution to the final image. The score combines multiple factors:
+    *   Pixel coordinates: The spatial location of the Gaussian's projection on the image plane.
+    *   Gaussian position distances: The distance between the Gaussian center and the camera or relevant viewing rays.
+    *   Opacity: The intrinsic transparency of the Gaussian.
+    *   Transparency: Derived from opacity ($1 - \alpha$).
+    
+    Gaussians with low importance scores are identified as redundant. The method aims to prune these while preserving a small number of highly contributive primitives [S1]. The target compression ratio is 90% [S1].
+
+2.  **Prune Redundant Primitives:**
+    Remove the Gaussians identified in Step 1. This reduces the total number of primitives, directly lowering memory usage and rendering computation cost [S1].
+
+3.  **Apply Variational Densify Threshold (VDT):**
+    To compensate for the quality loss incurred by pruning, apply the VDT component during the backward pass of the optimization process [S1].
+    *   VDT acts as a gradient optimization mechanism [S1].
+    *   It enhances the preservation of fine-grained details that might have been lost or blurred due to the reduction in primitive count [S1].
+    *   This is a plug-and-play component that can be integrated into the standard training loop [S1].
+
+**Formulas:**
+
+The Gaussian function for a primitive $i$ at position $x$ is:
+$$ G_i(x) = e^{-\frac{1}{2} (x-\mu_i)^T \Sigma_i^{-1} (x-\mu_i)} $$
+where $x$ is an arbitrary position, $\mu_i$ is the mean, and $\Sigma_i$ is the covariance matrix [S1].
+
+The covariance matrix $\Sigma_i$ is decomposed into rotation $R_i$ and scaling $S_i$ matrices:
+$$ \Sigma_i = R_i S_i S_i^T R_i^T $$
+This decomposition ensures $\Sigma_i$ remains positive semi-definite during optimization [S1].
+
+During rendering, the 3D covariance matrix is projected to the 2D image plane using the world-to-camera matrix $W$ and the Jacobian $J$ of the projective transform:
+$$ \Sigma'_{i} = J W \Sigma_i W^T J^T $$
+where $\Sigma'_{i}$ is the 2D covariance matrix [S1].
+
+The color $C$ of a pixel $p$ is calculated by alpha-blending the contributions of $N_p$ overlapping Gaussians, sorted by depth:
+$$ C = \sum_{i \in N_p} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+where $c_i$ is the view-dependent color of the $i$-th Gaussian, $\alpha_i$ is its opacity, and $N_p$ is the ordered set of Gaussians overlapping pixel $p$ [S1].
+
+**Parameters:**
+*   **Compression Ratio:** MiniGS targets a 90% compression ratio [S1].
+*   **VDT Threshold:** A gradient optimization threshold applied during backpropagation. The specific numerical value is not given in the sources [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Over-pruning:** Aggressive pruning without VDT may lead to significant quality degradation, particularly in fine details [S1].
+*   **Redundancy:** Standard 3DGS implementations contain inherent redundancy in primitive allocation (overlapping or non-essential elements) which MiniGS specifically addresses [S1].
+
+## Operating characteristics
+*   **Compression:** MiniGS achieves a 90% compression ratio [S1].
+*   **Performance:** On the DeepBlending dataset, MiniGS achieves a PSNR of 29.63 with 303.271 thousand Gaussian primitives. In comparison, vanilla 3DGS achieves a similar PSNR of 29.73 with one order of magnitude more primitives [S1].
+*   **Memory:** Significantly reduced memory footprint due to the reduced number of primitives [S1].
+*   **Rendering Speed:** Implied improvement due to fewer primitives to rasterize, though specific frame rates are not provided in the sources [S1].
+*   **Strengths:** High compression ratio with minimal quality loss; effective recovery of fine details via VDT [S1].
+*   **Limitations:** Requires additional optimization step (VDT) during training; effectiveness depends on the quality of the importance score calculation [S1].
+
+## Background
+MiniGS was proposed by Qing Yang, Xiaonuo Dongye, Hanzhi Guo, Dongdong Weng, and Le Luo from the Beijing Institute of Technology and Pengcheng Laboratory [S1]. The work addresses the inefficiency of 3D Gaussian Splatting, where the number of primitives can exceed 1 GB of storage due to inherent redundancy in primitive allocation [S1]. The method was published as a preprint in June 2025 and later appeared in *Multimedia Systems* in January 2026 [S1].
+
+## Sources
+[S1] Minigs: efficient 3D Gaussian splatting with full factors weighted pruning for scene representation, https://doi.org/10.1007/s00530-025-02104-w, fetched 2026-10-26

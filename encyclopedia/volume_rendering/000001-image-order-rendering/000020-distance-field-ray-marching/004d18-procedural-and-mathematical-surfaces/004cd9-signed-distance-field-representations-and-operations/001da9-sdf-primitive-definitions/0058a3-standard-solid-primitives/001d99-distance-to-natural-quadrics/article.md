@@ -1,0 +1,160 @@
+# Distance to Natural Quadrics
+
+Also called: Natural Quadrics SDF, SDF for Natural Quadrics
+
+## Overview
+Distance to Natural Quadrics provides closed-form Signed Distance Functions (SDFs) for standard solid modeling primitives, including the plane, sphere, cylinder, cone, and torus [S2]. These functions compute the exact Euclidean distance from a query point to the surface of the primitive, enabling valid sphere tracing in volume rendering and constructive solid geometry (CSG) [S2][S4, unofficial]. Unlike general implicit surface solvers, these methods offer high efficiency and analytical precision, serving as the foundational building blocks for complex scene composition [S2].
+
+## How it works
+The method evaluates the scalar field $f(\mathbf{p})$ for a specific primitive type. The input is the query point $\mathbf{p}$ in world or local coordinates, and primitive-specific parameters (e.g., radius, height, normal). The output is a signed distance value: positive outside, negative inside, and zero on the surface [S3, unofficial].
+
+### Data Structures
+*   **Point $\mathbf{p}$**: A 3D vector $(p_x, p_y, p_z)$.
+*   **Parameters**:
+    *   Sphere: Center $\mathbf{c}$, radius $r$.
+    *   Plane: Point $\mathbf{p}_0$ on plane, unit normal $\mathbf{n}$.
+    *   Cylinder: Radius $r$, half-height $h$ (for capped), or infinite.
+    *   Cone: Apex, axis direction, divergence angle $\theta$ or sin/cos components.
+    *   Torus: Major radius $R$, minor radius $r$.
+
+### Formulas and Steps
+
+**1. Sphere**
+The distance is the Euclidean distance to the center minus the radius [S2][S4, unofficial].
+$$ d(\mathbf{p}) = \|\mathbf{p} - \mathbf{c}\| - r $$
+For a unit sphere at the origin: $d(\mathbf{p}) = \|\mathbf{p}\| - 1$ [S2].
+
+**2. Plane**
+The distance is the dot product of the vector from a point on the plane to the query point and the plane's normal [S2].
+$$ d(\mathbf{p}) = \mathbf{n} \cdot (\mathbf{p} - \mathbf{p}_0) $$
+where $\mathbf{n}$ is the unit normal and $\mathbf{p}_0$ is a point on the plane [S2].
+
+**3. Cylinder (Infinite)**
+For a cylinder aligned with the Y-axis, the distance is calculated by projecting the point onto the XZ plane and measuring the distance to the circle of radius $r$ [S2][S3, unofficial].
+$$ d(\mathbf{p}) = \sqrt{p_x^2 + p_z^2} - r $$
+Note: This formula applies to infinite cylinders. For capped cylinders, see the Capped Cylinder section below [S1, S3, unofficial].
+
+**4. Cone**
+For a cone centered at the origin oriented along the Z-axis with divergence angle $\theta$ [S2]:
+$$ d(\mathbf{p}) = \text{dist}_{2D}((p_x, p_z), \text{cone profile}) $$
+The derivation involves the geometry of the cone's cross-section [S2]. A robust GLSL implementation uses the following logic [S1, unofficial]:
+Let $q = h \cdot (\frac{c_x}{c_y}, -1)$ where $c = (\cos \theta, \sin \theta)$ and $h$ is height.
+Let $w = (\sqrt{p_x^2 + p_z^2}, p_y)$.
+Calculate vectors $a$ and $b$ based on clamped projections of $w$ onto $q$.
+$$ d = \text{sign}(s) \sqrt{\min(\|a\|^2, \|b\|^2)} $$
+where $s$ determines the sign based on the position relative to the cone's axis and base [S1, unofficial].
+
+**5. Torus**
+The torus is defined as the product of two circles. Let $R$ be the major radius and $r$ be the minor radius [S2][S4, unofficial].
+$$ q = (\sqrt{p_x^2 + p_z^2} - R, p_y) $$
+$$ d(\mathbf{p}) = \|q\| - r $$
+Typical values for a torus might be $R=0.8$ and $r=0.3$ [S4, unofficial].
+
+**6. Capped Cylinder (Y-axis aligned)**
+This combines the infinite cylinder distance with cap distances [S1, unofficial].
+Let $d = (\sqrt{p_x^2 + p_z^2} - r, |p_y| - h)$, where $r$ is radius and $h$ is half-height [S1, unofficial].
+$$ d_{final} = \min(\max(d_x, d_y), 0) + \|\max(d, 0)\| $$
+If the clamped Y component differs from the original Y (indicating the point is outside the height bounds), the distance to the nearest cap is added [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def sdf_sphere(p, center, radius):
+    """
+    Signed distance to a sphere.
+    p: (x, y, z)
+    center: (cx, cy, cz)
+    radius: float
+    """
+    dx = p[0] - center[0]
+    dy = p[1] - center[1]
+    dz = p[2] - center[2]
+    return math.sqrt(dx*dx + dy*dy + dz*dz) - radius
+
+def sdf_plane(p, p0, normal):
+    """
+    Signed distance to a plane.
+    p: (x, y, z)
+    p0: (x0, y0, z0) point on plane
+    normal: (nx, ny, nz) unit normal
+    """
+    dx = p[0] - p0[0]
+    dy = p[1] - p0[1]
+    dz = p[2] - p0[2]
+    return dx*normal[0] + dy*normal[1] + dz*normal[2]
+
+def sdf_cylinder_infinite(p, radius):
+    """
+    Signed distance to an infinite cylinder aligned with Y-axis.
+    p: (x, y, z)
+    radius: float
+    """
+    return math.sqrt(p[0]**2 + p[2]**2) - radius
+
+def sdf_torus(p, major_radius, minor_radius):
+    """
+    Signed distance to a torus aligned with Y-axis.
+    p: (x, y, z)
+    major_radius: R
+    minor_radius: r
+    """
+    q_x = math.sqrt(p[0]**2 + p[2]**2) - major_radius
+    q_y = p[1]
+    return math.sqrt(q_x**2 + q_y**2) - minor_radius
+
+def sdf_cylinder_capped(p, radius, half_height):
+    """
+    Signed distance to a capped cylinder aligned with Y-axis.
+    p: (x, y, z)
+    radius: float
+    half_height: float
+    """
+    # Calculate distance to infinite cylinder and height bounds
+    d_x = math.sqrt(p[0]**2 + p[2]**2) - radius
+    d_y = abs(p[1]) - half_height
+    
+    # Combine distances
+    # If inside height bounds (d_y <= 0), we only care about radial distance
+    # If outside, we add the distance to the cap
+    min_d = min(max(d_x, d_y), 0)
+    max_d = max(d_x, 0)
+    max_d_y = max(d_y, 0)
+    
+    return min_d + math.sqrt(max_d**2 + max_d_y**2)
+```
+
+### Edge Cases and Pitfalls
+*   **Precision**: Near the surface ($d \approx 0$), floating-point precision errors can cause jitter in ray marching. A small epsilon threshold should be used to terminate marching [S3, unofficial].
+*   **Transformations**: When using these primitives in a scene, points must be transformed into the primitive's local space using the inverse transformation matrix $M^{-1}$ before evaluation [Parent].
+*   **Lipschitz Condition**: These functions satisfy the Lipschitz condition with constant 1, ensuring they are safe lower bounds for sphere tracing [Parent].
+
+## Subtopics
+
+### [Distance to Superquadrics](1561-distance-to-superquadrics.md)
+Generalizes natural quadrics using $L_p$ norms for rounded or pinched shapes. Choose when non-Euclidean cross-sections are needed.
+
+### [Cylinder Signed Distance Function](2739-cylinder-signed-distance-function.md)
+Computes exact distance to finite cylinders with caps. Choose for standard capped cylindrical geometry.
+
+### [Torus Signed Distance Function](2864-torus-signed-distance-function.md)
+Specific implementation for tori. Choose for ring-like topologies.
+
+## Operating characteristics
+*   **Time Complexity**: $O(1)$ per primitive evaluation. The operations involve basic arithmetic and square roots.
+*   **Memory Complexity**: $O(1)$. No auxiliary data structures are required.
+*   **Performance**: Highly efficient, suitable for real-time rendering and dense ray marching [S3, unofficial].
+*   **Strengths**: Analytical precision, no discretization error, smooth gradients (where differentiable).
+*   **Limitations**: Limited to specific geometric shapes. Complex blends or deformations may require more general SDF techniques [S2].
+
+## Background
+The concept of sphere tracing using signed distance fields was introduced by Hart in 1989 [S2]. The specific closed-form solutions for natural quadrics (plane, sphere, cylinder, cone, torus) are detailed in the appendices of Hart's work and subsequent tutorials [S2]. These primitives form the basis of Constructive Solid Geometry (CSG) in ray marching [S2][S3, unofficial].
+
+## Sources
+[S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
+[S2] (PDF) Sphere Tracing: A Geometric Method for the Antialiased Ray ..., https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27
+[S3] Ray Marching with Signed Distance Fields - Scribd, https://www.scribd.com/document/831412915/1-Ray-Marching-and-Signed-Distance-Fields, fetched 2026-10-27 (unofficial)
+[S4] Introduction to Raymarching Distance Functions, https://observablehq.com/@gre/introduction-to-raymarching-distance-functions, fetched 2026-10-29 (unofficial)

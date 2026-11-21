@@ -1,0 +1,2784 @@
+# Reinventing tomography
+
+![Original image to sinogram to approximation of original
+image](./header.png)
+
+I knew nothing about Radon transforms beyond the name, and the vague
+idea of how tomography works, by piecing together the original structure
+from scans through it. However, it's always fascinated me, and since
+having a CAT scan for the first time a few months ago, the idea's
+returned to me:
+
+*Wouldn't it be interesting to implement this, and create my own tool
+that can bcak out a structure from scans?*
+
+My initial thought was that I'd read up on the maths, and implement
+it. However, it seems more fun to try to work it out for myself from
+scratch, and then check my workings afterwards, so this is what I
+intend to do here.
+
+This doc is more-or-less a log of how I've reinvented tomography,
+using the code in this repo, with my ideas and lessons learnt along
+the way. In many places I'm playing fast and loose, since I didn't
+want to take up too much time with this (despite having taken a bunch
+of wall time to work on it - nearly 2 months end-to-end!).
+
+*Knowledge gained in retrospect that's useful to know as we go along
+will be in italics.*
+
+## My starting point: A problem statement
+
+The idea is that we're shooting a beam through an object at a bunch of
+angles from a bunch of starting locations (in our case, in a 2D
+plane), noting how much of the beam makes it through, and using that
+to infer the amount of absorption at each point within that object.
+
+What we're actually going to do here is take an image, pretend it's an
+object, work out what the beams would do, and then take that data and
+feed it through our own transform to try to infer the image that we
+just fired beams through.
+
+A bonus would be to see how stable the algorithms are - add noise to
+the beam data, and see how much noise it adds to the inferred picture.
+
+Somewhere near the end, I'll probably look up the actual theory for
+these transforms and see how it compares.
+
+## How to scan an object
+
+In order to reconstruct an image from the scan data, we must first
+generate the scan data. So, the first step is to write some code that
+will "scan" an image.
+
+In my project, I'll assume we'll be firing a set of parallel rays
+through the object from all different angles. We could also assume the
+rays are being fired in all directions from a point that moves around
+the circumference of a circle. In the end we collect the same data,
+being a set of rays at all different angles and different nearest
+approaches to the origin. Using parallel rays seemed to simplify the
+algorithms.
+
+I'll assume we're scanning the object from all directions in a 180
+degree arc (beyond that point we're just scanning the same rays from
+the other side).
+
+I'm assuming that in the real world, when you fire a beam through a
+uniform medium, for every distance it travels through the material, a
+certain percentage of the beam is knocked out. I don't know if this is
+precisely physically true, but I'm going to pretend it is. In other
+words, the medium exponentially attenuates the beam.
+
+So, let's take the log of that, converting the product of attenuation
+factors into a sum of log attenuation factors. In other words, we can
+integrate the (log'd) factors along the path to get the numbers we
+need. As it simplifies things and I don't want to chuck in extra
+exponential/log calculations, we'll do everything with straightforward
+integration over the ray paths.
+
+This scan generates an image showing the amount of material along a
+path for a given angle and distance the ray passes from the origin.
+
+*What I have reinvented here is the "sinogram", and generating a
+sinogram is the Radon transform. I'd been assuming that "Radon
+transform" was the complicated reconstruction bit, but apparently it's
+just the scanning algorithm. Where you see a "Scan" in my code, that's
+a sinogram.*
+
+## Reconstruction with a cheap trick
+
+In the discrete image domain, each beam, being an integral along a
+path, is just a weighted sum of pixels. Transforming from input image
+to the set of ray values is just a linear transform!
+
+The Radon transform is simply a matrix multiplication, and assuming
+that the matrix is of the right shape and non-singular, we can invert
+it! This means that we don't need to develop any clever algebraic
+theory for the transform - we can just throw a computer at it and see
+what the result is. Wow, wasn't that easy?!
+
+## An interlude: Looking ahead, how might we do things "right"?
+
+Note that the above approach would also work for Fourier transforms -
+to do an inverse Fourier transform, we could "just" work out a forward
+transform matrix, and then invert it. Of course, in practice we don't
+because algebra tells us it's self-inverting.
+
+My plan is to not throw any algebra at the problem yet, since matrix
+inversion is a simple numeric method I can get immediately started on,
+but it's still fun to think how I might approach it algebraically.
+
+The problem is fundamentally inversion of the Radon transform. To make
+use of symmetry, I'd probably use polar coordinates for the space
+domain, so that the inverse function can be calculated in terms of
+radius with a fixed angle, without loss of generality (being
+rotationally symmetric).
+
+Actually, scratch that. Assuming we've got the full set of paths
+available, we can solve just for the origin, and translate the data so
+that any point of interest moves to the origin. Duh.
+
+At this point, I'd try to find ways of understanding the differentials
+in density caused by differentials in the integral with respect to the
+path. For example, if you move the path orthogonal to its direction,
+you'll get the integral of the differential in density orthogonal to
+the path, equally weighted. On the other hand, if you get the
+differential of the path as you rotate the path around a point, it'll
+now be weighted by distance from the center of rotation. We just need
+to find a clever way of finding a version where the weighting along
+the path is a Dirac delta function! Easy, I'm sure.
+
+*In the end, the "we can just solve for the origin" solution worked
+ nicely - I found an algorithm that could be applied for any point by
+ translation. I never did make use of finding the differential in the
+ sinogram value as we alter radius/angle, though.*
+
+## Implementating the matrix inversion cheap trick
+
+This section talks about the implementation of the algorithm used by
+`--algorithm=matrix-inversion`.
+
+As mentioned above, we're working with rays being simple line
+integrals - no exponential attenuation.
+
+I should have perhaps mentioned that most of the coding I'm doing
+nowadays is also an excuse to learn Rust. I'm using the `nalgebra`
+crate to do the matrix inversion, and the `image` crate to load and
+save the (png) images being transformed.
+
+To calculate the weights along the paths as they traverse the image,
+I'm doing something akin to old-school scan conversion (in
+`tomo_scan::calculate_weights_inner`). I'm making my own vectors for
+this, as using a full 2D vector class just feels like overkill. The
+model is that the pixels are solid squares, and the line is of zero
+width, and we want to know how long the line segment that crosses each
+pixel is.
+
+I then use that to build the data for sets of parallel rays at a bunch
+of different angles (*a sinogram*), in the function `tomo_scan::scan`.
+Plotting this 2D data as an image reveals a nice pattern of
+overlapping sinusoids that represent a chunk of matter rotating round.
+The phase and amplitude represent the angle and radius of that piece
+of mass. (Perhaps this implies a smarter algorithm for inverting the
+transform?)
+
+*(I never made use of this for my reconstruction algorithms, but
+sinograms do look neat!)*
+
+Finding the pseudo-inverse of the matrix and applying it... works!
+Hurrah.
+
+Interestingly, the size of the error seems to vary quite a lot with
+the number of rays sampled, I'll follow this up with an investigation
+into size of the error with count of parallel rays and angles.
+
+`make demo` should exercise the image-to-transform-and-back cycle.
+
+It's pretty darn slow, since it performs a matrix inverse on a matrix
+whose dimensions are the width-height product of the image, and
+rays-angles product of the scan, respectively. A naive implementation
+is *O((wh)^3)*, where *w* and *h* are the dimensions of the image in
+pixels. Images much bigger than 30x30 get pretty slow on my laptop.
+
+## Convergence of the matrix inversion approach
+
+Back in a previous life, I worked in a quant team at a bank, where
+there were a lot of numerical methods going on, and ocasionally I'd be
+interested in convergence of those methods (as well as trying to
+remember what I learnt on the subject as an undergrad).
+
+My memory was that doing this stuff could quite happily turn into a
+huge time sink, but it's useful enough to do a bit of and then move
+on...
+
+What I did was run the conversion for various numbers of rays and
+angles to see how quickly the reconstruction converges on the
+original. Empirical studies of algorithmic convergence are fun!
+
+The `Makefile` targets `error_data` and `error_data2` generate the
+data needed (two targets were used to avoid trying to calculate the
+error for a bunch of slow-to-calculate, uninteresting cases. The
+results are in [this
+sheet](https://docs.google.com/spreadsheets/d/1mdHI4n2HNloAuYGf7aMaZISQnpawe0drygIFAd0lKsA/edit).
+
+Interesting things to note are:
+
+ * For my test image, of size 32x32 (1024 pixels), convergence
+   (stabilising at roughly an error of 0.6 per pixel on an 8-bit image
+   - approximately 0.25%) seems to happen when rays * angles ~= 1300.
+   Slight oversampling seems needed, I've no idea what the theoretical
+   basis might be!
+ * In the region where angles ~= rays, error seems to decrease in a
+   straight line with angles * rays.
+ * It looks like when rays << angles, or angles << rays, the smaller
+   number constrains convergence above the minimal error, but I can't
+   tell if this is a genuine asymptote or just much slower
+   convergence.
+ * As this is a small image, you can see discretisation effects,
+   particularly with odd/even ray count.
+
+It's all very intriguing, but probably best not to get too distracted
+by it.
+
+*I later discovered that the lower bound on the error comes from the
+discretisation applied when generating an 8-bit image, and convergence
+is much better if not discretised! One of the lessons I'd forgotten is
+if you numerical method seems to converge on some non-zero error as
+you tweak parameters, there's probably a source of error that isn't
+associated with the parameters you're tweaking, and you may want to
+investigate! At this stage, I was working out average per-pixel
+absolute error. Later I switched to RMS per-pixel error.*
+
+## In search of a more efficient algorithm
+
+An algorithm that's *O(n^6)* in the length of the image side is... not
+very attractive in the real world. While I'd proven to myself that I
+could reconstruct a scan (what I'd originally set out to achieve),
+could I do it in a way that's practical in the real world?
+
+The next period of this project involved a fair amount of starting
+into space and thinking about the problem in my spare time. It did,
+admittedly, also involve writing out and manipulating a bunch of
+integrals, but that turned out to be much less effective!
+
+My key insight was that if we integrate over all the rays passing
+through a point, we get a weighted sum of pixel values from the
+original image, symmetric around the point, with the weights
+increasing towards the centre. In other words, we've managed to get
+the value of the original image passed through a blurring filter.
+Moreover, this same-shaped filtered-value can be found for all points
+in the image by integrating over the rays passing through that point.
+
+Put another way, taking the Radon transform and, for each point in
+image space, integrating over all the rays going through that point,
+is equivalent to convolving the original image with a *1/r* weighted
+filter.
+
+*I later found out that this reconstruction approach by integrating
+over all the rays through the point is known as "back propagation".*
+
+To get this blurred reconstruction, you can use the
+`--algorithm=convolution` mode on the binary.
+
+Once we have a convolved image, we can apply deconvolution techniques
+to get back to the original image!
+
+## On deconvolution
+
+**Disclaimer:** Convolution of two signals officially involves
+flipping one of the signals over before integrating them against each
+other, but the filters I'm looking at are symmetrical, so I'm skipping
+over that bit. Generally, I'm playing fast and loose on the maths,
+doing just enough to make things work...
+
+I'd been aware of deconvolution for a while, and been looking for an
+excuse to play around with it. The idea is that a convolution in the
+frequency domain is achieved by performing a point-wise multiplication
+of the image with the filter. Therefore, inverting the convolution is
+simply a matter of doing a point-wise division by the filter instead.
+Easy, eh?
+
+In practice, this turned out to be the fiddliest, most "learn how to
+do numerical methods less badly" part of the whole exercise, and I've
+got to admit I never achieved absolutely awesome convergence. Read on
+to learn more. ;)
+
+*I found this deconvolution filter by building the convolution filter
+and then numerically converting it to a deconvolution filter in
+frequency space. I could have algebraically attempted to find the
+deconvolution filter instead. The standard algorithm is to use a
+"ramp" high-pass filter. This makes intuitive sense, since the
+blurring performed by back-propagation is effectively a low-pass
+filter, so to "balance the frequency response" back we want to apply a
+high-pass filter. But no, I took the numerical route...*
+
+I picked up the `rustfft` crate and hacked away. It's easy to use, but
+getting good deconvolution results needs more than that:
+
+### Building the filter
+
+In order to build a deconvolution filter by inverting the convolution
+filter, you need to build the convolution filter! This turned out to
+be trickier than I expected, and is what the code in
+`convolution_solver::build_convolution_filter` is about.
+
+The filter applies a weight proportional to *1/r* to each pixel.
+Unfortunately, that means... infinite weight at the origin?! We need
+*some* value there, which is likely to be a really large weight to
+behave correctly, but it certainly can't be infinite! We need some way
+of discretising this appropriately. What I ended up doing is having a
+minimal *r* that is half the radius of a pixel, and it seems to do the
+trick. I can't say it's mathematically well-founded, though!
+
+Various tests in `convolution_solver` then exercise the filter.
+Because of the behaviour at small radii, it behaves somewhat
+differently for odd (filter centred in the middle of a pixel) and even
+(centre between pixels) filter size. The tests include building a
+sinogram of a point and back-propagating it, and checking that it
+roughly matches the filter we generate
+(`test_convolution_comparison`). It roughly does, but it leaves me
+wondering if it's a non-trivial source of error.
+
+### Frequency response
+
+A convolution filter might highly attenuate some frequencies - the
+filter requires you to multiply by a very small number. The
+deconvolution filter would then have you multiply by a very large
+number, introducing noise into the reconstruction. This is indeed what
+happened when I naively tried deconvolution, resulting in images with
+highly visible high-frequency artefacts.
+
+What do we do? Well, those frequencies are basically lost, there's no
+way to reconstruct them, so let's not try. If a transform coefficient
+is small, I just set the inverse coefficient to zero, instead of a
+huge number. Yes, some component of the original image is lost, but it
+was already lost, and adding noise doesn't bring it back.
+
+### How big should the filter be?
+
+Performing back-propagation is like using a *1/r* convolution filter,
+and *1/r* dies off pretty slowly with radius. For perfect
+reconstruction, we'd want an infinitely large image. How wide do we
+need the convolved image to be in order to get a decent
+reconstruction?
+
+I'm all for the empirical approach, rather than hard work with
+algebra. We can find out how the deconvolution filter works by taking
+the convolution filter, FFTing it, inverting it in frequency space,
+and FFTing it back. This will give us an image space deconvolution
+filter that we can inspect.
+
+If you do this, what you find is that most of the weight is right at
+the centre of the filter kernel. This is what I did in
+`deconvolution_solver::test_generate_decon_filter`.
+
+Hmmm. If most of the weight is in a small filter kernel, maybe we can
+just apply that small kernel (perhaps in image space), and get the
+results we want quite cheaply? Let's try it!
+
+### A dead-end: trying a small deconvolution filter kernel
+
+So, we've just found out most of the weights in the deconvolution
+filter are in the centre. Using a FFT to represent a tiny little
+kernel seems both inefficient and unlikely to be accurate (a tiny
+kernel having a lot of high-frequency components), so the next step is
+to try to apply the kernel in the image domain and see how well it
+performs.
+
+In `deconvolution_solver::test_decon_kernel`, I snip a 9x9
+deconvolution filter out of the FFT-based deconvolution filter (yes,
+not a very scientific approach, I know), and try applying it as a
+naive convolution...
+
+It turns out the per-pixel RMS error is pretty much the same as that
+from the unfiltered back-propagation approach in
+`convolution_solver::test_reconstruct`. Looking at the reconstructed
+images, the filtered images are sharper, but the bits that should be
+totally black are dark grey because the filter fails to take account
+of the more distant parts of the image that should be subtracted. In
+other words, it looks like the low-weighted parts of the filter do
+still have value, and we'd be best off using a large kernel and an
+FFT-based deconvolution.
+
+An interesting dead end, but it's time to get back to the main track.
+
+### An Aside: Checking quality of fit
+
+Actually, first a quick aside on checking how well an algorithm
+performs. I'd been using per-pixel error calculations - initially with
+absolute error, later switching to RMS. That's not the important bit.
+The important bit was that I forgot to set a baseline. So, when
+back-propagation gave me an error number, it didn't mean much to me,
+but it looked plausible. What I'd failed to realise until rather later
+is that because my test image is mostly black, a completely black
+image doesn't have a huge per-pixel error. Only by finding out what
+the base error was (in
+`convolution_solver::test_null_reconstruction`), did I realise quite
+how badly the basic algorithms scored!
+
+The other lesson I learnt was that it's useful to not just look at a
+summary number, but look at an image diffing the source and
+reconstruction. This makes it much clearer when you've made a mistake,
+in a way that a single number doesn't. For example, if the
+reconstruction is misaligned with the original image by a pixel, the
+error number might not be huge, but it's very clear in the image.
+
+### Another aside: Mysteriously reduced error
+
+Having decided a small deconvolution kernel was a dead end, I decided
+to go back to full FFT-based deconvolution, and see if I could improve
+on the error in the simple `test_basic_image_deconvolve`
+implementation.
+
+When I see some coding that I think might be a bit tricky, I tend to
+procrastinate with a little bit of refactoring. This often works
+well - the code is neater and my thoughts are fairly coherent before I
+start laying down the new code. Unfortunately, at the end of my
+refactoring I discovered that the error on the matrix-inversion based
+tests had now massively reduced and I didn't know why! Time for
+investigation.
+
+A little bit of git-bisection made me realise that switching from
+internally representing images-to-be-saved as `u8` to `f64` removed
+discretisation error that had artificially raised the error in all
+those results. This is the bit I described earlier where I then re-did
+all the error calculations, putting the results in a [new
+sheet](https://docs.google.com/spreadsheets/d/1I7ISM7KZHVbOBcUQOYR43Fx0JnAHdvksXe5aa2Dl9FE/edit#gid=0)
+(the raw data is stored in `analysis/errors.csv`).
+
+It's interesting to note that the error no longer gets floored around
+0.05 per-pixel, but goes all the way to zero for sufficient rays and
+angles - we get a fully-accurate reconstruction with matrix-inversion,
+which makes sense when the inverse matrix is fully determined, but I
+still find it an impressive result.
+
+### Really, back to FFT-based deconvolution: Improving alignment
+
+Having got that out of they way, I really dug into tweaks that would
+help reduce the error in deconvolution-based reconstruction.
+
+At this point, I found the most useful tool was to generate a diff
+between the source image and the reconstructed image. Misalignment
+between the input image and the reconstruction shows up nicely as
+positive diff on one edge, and negative on the other.
+
+My first discovery is that the reconstruction I was generating on an
+even-sized image was off by *half a pixel*. This was because the
+filter was even in size, and thus had its centre not pixel-aligned. I
+adjusted the filter to always be centred on a pixel, and that fixed
+the alignment for even-sized images.
+
+This also reminded me to do the tests and play about with the imgaes
+with both odd- and even-sized images, as pixel-perfect alignment
+requires correct rounding. I did find a case where I was off by one
+pixel in one case. As far as I can tell, this was because the
+convolution code shifts the image compared to the original in a
+slightly odd way, and FFT treats the sample points as being at one
+side of the "pixel" rather than in the middle (i.e. the left-most
+sample point is exactly zero, and the right-most point is a pixel
+under 2 pi). These effects seemed to combine, but a quick tweak fixed
+it, aligning the image as I expected.
+
+### Enlarging the filter
+
+Way back, I tried to investigate how big the filter needed to be
+approximate the infinite filter. That lead to the whole "small kernel"
+side track, but I'm facing that problem again. Making the filter
+several times larger than the image (more precisely, 5x in
+`test_image_deconvolve`) seemed to reduce the error - between aligning
+the filter correctly and using a larger filter, I managed to halve RMS
+error. Yay.
+
+### The remaining sources of error
+
+My hypothesis is that remaining error might come down to a few
+sources:
+
+ * Number of rays/angles needed to get a good reconstruction
+ * Size of filter compared to original image
+ * Any inaccuracy in the deconvolution filter, largely from inaccuracy
+   in the generated convolution filter (remember the fudge at the
+   origin?).
+
+As before, my way to investigate the sources of error is to tweak the
+parameters. Deconvolution filter problems aren't quite so easy to
+investigate by tweaking a number, so I didn't tweak that.
+
+I put deconvolution into the command line with
+`--algorithm=deconvolution`, and ran through a number of ray/angles
+and reconstruction image sizd in in the `Makefile` target
+`recon_error_data`. The results are in `analysis/recon_errors.csv`,
+and the
+[sheet](https://docs.google.com/spreadsheets/d/1I7ISM7KZHVbOBcUQOYR43Fx0JnAHdvksXe5aa2Dl9FE/edit#gid=0).
+
+Looking at the error as we vary the rays/angles count and the size of
+the reconstruction image, we can see that the error flattens off
+around a `--recon-multiplier` of 2.0, and the error bottoms out when
+the number of rays and angles is roughly twice the image size (for a
+32x32 image, 80 rays and 80 angles actually minimises error, on this
+relatively sparse set of test cases).
+
+As error does not asymptotically head to zero, or even close to that,
+it seems like there's some other source of error. Looking at the diff
+images on the reconstruction of the test image, it's not noise, it's
+the whole of the central question mark image being slightly the wrong
+level, even at many rays/angles and a large reconstruction image. So,
+it feels like some normalisation step isn't quite right, or there's
+just some other source of error (like incorrect weights in the
+deconvolution filter).
+
+However, my previous experience with numerical methods is that
+gettting into this in detail is a poatential huge time sink, and I've
+already gone way beyond my original goals, as I think I've got an
+efficient algorithm that works, and the rest is optimisation, right?
+;)
+
+Maybe it's just time to read about the existing algorithms and see how
+I did!
+
+## The effects of noise on the sinogram
+
+*(This is slightly anarchronistic - I actually did this after the next
+section, but I think it makes more sense presented this way.)*
+
+Adding the ability to add noise to the intermediate scan, and varying
+the noise, I investigated how noise in the one generated noise in the
+other. Quantitative results were generated with `make
+noise_error_data`, with the results stored in
+`analysis/noise_errors.csv` and [the
+sheet](https://docs.google.com/spreadsheets/d/1I7ISM7KZHVbOBcUQOYR43Fx0JnAHdvksXe5aa2Dl9FE/edit#gid=1342061078).
+We can see that for large errors being added, the RMS error out is
+proportional to the noise added in to the scan. As there is some base
+level error in my reconstruction (darn it), asymptotically it then
+goes to that base error as the added noise goes to zero.
+
+Interestingly, taking the qualitative approach and looking at the kind
+of noise we see in the resulting image, having added noise into the
+scan, it does just look like fairly uniform noise in the image. I was
+expecting perhaps artefacts like streaky lines or blobby errors or
+something, but saw none.
+
+This could be because the noise was added uniformly to the scan, and
+if we applied a big impulse of noise in one place to the scan we might
+expect to see weird artefacts in the reconstructed image. However, I'm
+*still* trying to limit my time spent on these investigations, so I'm
+not following up. :)
+
+## Catching up on history
+
+Around the time I was thinking about playing with tomography, there
+were a few tweets on the subject, so I bookmarked them to avoid
+spoilers. Finally, it's time to come back to them.
+
+### What I learnt from YouTube
+
+I watched https://www.youtube.com/watch?v=f0sxjhGHRPo , linked from
+https://twitter.com/sigfpe/status/1441455463439110148 . While I'm not
+going to get a rigorous understanding from a quick YouTube video, it
+does look suspiciously like there's a filter in the frequency domain
+and a reconstruction across all angles. In the video, the filter is
+applied before the summing across all angles. I haven't thought about
+it too hard, but given everything's linear I would expect you could do
+the integration and filter in either order.
+
+It's nice to see that the removal of the high frequencies to avoid
+noise is included, given the fun I had with finding the deconvolution
+due to attenuated frequencies, mostly in the high-frequency part.
+
+It's nice to see how you can build the deconvolution filter (the
+"ramp") algebraically, rather than by numerically inverting an
+approximation to a filter with a singularity in it. I assume this
+significantly reduces the error involved.
+
+### What I learnt from Wikipedia
+
+I then headed over to Wikpedia to pretty much cover the same material
+at my leisure. https://en.wikipedia.org/wiki/Tomography, it looks like
+I've reinvented "filtered back projection" as described in
+https://en.wikipedia.org/wiki/Tomographic_reconstruction. It's
+interesting to see it's a relatively noisy approach compared to
+https://en.wikipedia.org/wiki/Iterative_reconstruction. The
+statistical methods look really cool, but I'm done on this project for
+now!
+
+Much of the same content seems to appear on
+https://en.wikipedia.org/wiki/Radon_transform.
+
+## Conclusions and follow-up
+
+All docs need a good conclusions section, right? While I've never been
+deeply into numerical methods, it's been a reminder of how important
+getting corner cases are, and how much faff a "simple" thing can be in
+practice. It was also quite a lot of fun to reinvent an algorithm from
+scratch, knowing little more than the fact it can be done, even if you
+don't know how.
+
+### Follow-ups
+
+I am pretty much out of energy on this project, at least for now, but
+there are several obvious things that would be cool to play with,
+given infinite time and patience.
+
+In particular, it would be nice to:
+
+ * Work out the maths behind building the deconvolution filter
+   algebraically.
+ * Work out the precise relationship between doing the filter before
+   and after the back-projection.
+ * Implement the textbook filtered back-projection algorithm.
+ * Find the errors on the different algorithms for the standard
+   "phantom" test cases.
+ * Look at the effect of highly localised noise in scans on the
+   reconstructed image.
+ * Learn about and implement iterative reconstruction algorithms.
+
+### Library thanks
+
+Coding this project in Rust has been fun. I like the safe,
+strongly-typed, expressive language. I'm sure I'm supposed to do this
+stuff in Python, but there you go. The project has been made a lot
+easier by a few neat libraries:
+
+ * **nalgebra** Linear algebra, like matrix (pseudo)inversion.
+ * **rustfft** Fourier transforms for convolution and deconvolution.
+ * **image** Loading and saving images.
+ * **clap** You wouldn't believe how annoying I find command-line
+   processing without a decent library like this. Pretty much, I'd
+   rather just hard-code the options in the source.
+ * **anyhow** A simple and well-structured way to have reasonable
+   error-handling in my binary.
+
+### A random thought
+
+The "See also" section of https://en.wikipedia.org/wiki/Tomography
+mentions "Nonogram, a type of puzzle based on a discrete model of
+tomography", which just happens to be the last little toy project
+project I worked on -
+https://github.com/simon-frankau/nonogram-solver. Perhaps tomography
+had been playing on my mind subconsciously.
+
+### src/convolution_solver.rs
+```
+//
+// Generate a convoluted image from a scan
+//
+// This is not a full reconstruction algorithm - it generates a
+// blurred image from a scan, and works on the observation that if you
+// integrate over all the rays passing through a point, you get the value
+// of the image at that point filtered through a 1/r-weighted filter.
+//
+// A full reconstruction algorithm can then be made by deconvolving
+// this image.
+//
+
+use crate::tomo_image::Image;
+use crate::tomo_scan::Scan;
+
+#[cfg(test)]
+use crate::tomo_scan::scan;
+#[cfg(test)]
+use std::path::Path;
+
+// Integrate across all the rays that pass through a given point.
+// Given point is in (-1..1, -1..1) coordinates.
+fn circular_integral(scan: &Scan, x: f64, y: f64) -> f64 {
+    let mut total = 0.0;
+
+    // Consistent with generate_forwards_matrix, from which much of
+    // the code was copied (*sigh* - so much for DRY).
+    let angle_step = std::f64::consts::PI / scan.angles as f64;
+    // Image is inside an axis-aligned square -1..1, so max radius is sqrt(2).
+    let ray_offset = 2_f64.sqrt();
+    let ray_step_inv = (scan.rays - 1) as f64 / (2.0 * ray_offset);
+    for angle_num in 0..scan.angles {
+        let angle = angle_num as f64 * angle_step;
+
+        // 1. For each angle, find the ray numbers closest to our point:
+
+        // a) Generate a unit vector normal to the direction of the rays.
+        let normal = (-angle.sin(), angle.cos());
+
+        // b) Dot product it with the vector to the point to get the
+        // (signed) size of the component normal to the ray direction,
+        // which represents the distace of closest approach.
+        let dist = normal.0 * x + normal.1 * y;
+
+        // c) Convert this distance to a ray number - a floating point
+        // verison of the index into the range of rays.
+        let ray_num = (dist + ray_offset) * ray_step_inv;
+
+        // 2. Then we interpolate between those rays to approximate
+        // the contribution of the ray at that angle passing through
+        // the point.
+        let r0 = ray_num.floor() as isize;
+        let r1 = r0 + 1;
+        let fract = ray_num - (r0 as f64);
+        // fract is in [0.0, 1.0).
+        // We linearly interpolate by adding (1.0 - fract) * w(r0) + fract * w(r1).
+        for (wt, ray_num) in [((1.0 - fract), r0), (fract, r1)].iter() {
+            if 0 <= *ray_num && (*ray_num as usize) < scan.rays {
+                let idx = angle_num * scan.rays + *ray_num as usize;
+                total += wt * scan.data[idx];
+            }
+        }
+    }
+
+    total / scan.angles as f64
+}
+
+// Helper function that, given a size and amount of overscan, and a
+// function that goes from -1..1 coordinates to value, will generate an
+// image.
+fn build_image<F: Fn(f64, f64) -> f64>(
+    width: usize,
+    height: usize,
+    width_overscan: usize,
+    height_overscan: usize,
+    value_fn: F,
+) -> Image {
+    // Overscan is applied on both edges
+    let w_full = width + 2 * width_overscan;
+    let h_full = height + 2 * height_overscan;
+
+    let y_step = 2.0 / height as f64;
+    let x_step = 2.0 / width as f64;
+
+    // Sample at the centre of the pixels - add 0.5.
+    let y_offset = (h_full as f64 - 1.0) / 2.0;
+    let x_offset = (w_full as f64 - 1.0) / 2.0;
+
+    let mut data = Vec::new();
+
+    for y in (0..h_full).map(|idx| (idx as f64 - y_offset) * y_step) {
+        for x in (0..w_full).map(|idx| (idx as f64 - x_offset) * x_step) {
+            data.push(value_fn(x, y));
+        }
+    }
+
+    Image {
+        width: w_full,
+        height: h_full,
+        data,
+    }
+}
+
+// Generate the circular integrals of all points in a grid from a
+// Scan. The result is a convolved image. The x_overscan and y_overscan
+// are the number of pixels added onto the left and right, and top and
+// bottom margins respectively, since the convoluted image is still
+// non-zero outside the original image, and this can be used in
+// reconstruction. Image::trim can be used to trim it back to a
+// width x height image at the right scale.
+pub fn reconstruct_overscan(
+    scan: &Scan,
+    width: usize,
+    height: usize,
+    x_overscan: usize,
+    y_overscan: usize,
+) -> Image {
+    build_image(width, height, x_overscan, y_overscan, |x, y| {
+        circular_integral(scan, x, y)
+    })
+}
+
+// Generate the circular integrals of all points in a grid from a
+// Scan. The result is a convolved image. No overscan.
+//
+// Not a real attempt at reconstruction, we just do the
+// convolution-generation step and return it without attempting to
+// deconvolve. It does give a nice blurry version of the original!
+pub fn reconstruct(scan: &Scan, width: usize, height: usize) -> Image {
+    reconstruct_overscan(scan, width, height, 0, 0)
+}
+
+// Build an image that represents the convolution filter applied by
+// converting an image and then running generate_convolved_tomo on it.
+//
+// Not an actual Image as we want to stay in the f64 domain.
+//
+// Width and height are the width and height of the area representing
+// (-1..1, -1..1). Overscan is in pixels-per-side, like for
+// reconstruct_overscan. It's useful because the filter doesn't ever
+// drop off to zero, so our calculations may extend beyond the core
+// image.
+//
+// Weights are set such that integrating over a unit disc should
+// produce 1.0.
+pub fn build_convolution_filter(
+    width: usize,
+    height: usize,
+    x_overscan: usize,
+    y_overscan: usize,
+) -> Image {
+    // "Fudge" boosts the radius by a tiny amount to avoid a
+    // singularity at the origin, since we're really trying to
+    // sample areas rather than points.
+    //
+    // We make the radius bump half the "radius" of a pixel.
+    let y_step = 2.0 / height as f64;
+    let x_step = 2.0 / width as f64;
+    let fudge = (x_step * x_step + y_step * y_step).sqrt() / 4.0;
+
+    build_image(width, height, x_overscan, y_overscan, |x, y| {
+        let r = (x * x + y * y).sqrt().max(fudge);
+        let r_frac = r * 2.0 * std::f64::consts::PI;
+        (x_step * y_step) / r_frac
+    })
+
+    // We could normalise the image, so that the integral inside the
+    // unit disc is precisely 1.0, but we're within 0.5% with a
+    // decent-sized grid, which is good enough for what we're doing
+    // here.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Find the baseline RMS error when the "reconstruction" is an
+    // empty image.
+    #[test]
+    fn test_null_reconstruction() {
+        let src_img = Image::load(Path::new("images/test.png"));
+        let dst_img = Image {
+            data: vec![0.0; src_img.data.len()],
+            ..src_img
+        };
+
+        let rms_error = src_img.rms_diff(&dst_img);
+        // We know the baseline "no image" error is around 71.6.
+        assert!(71.0 < rms_error && rms_error < 72.0);
+    }
+
+    #[test]
+    fn test_reconstruct() {
+        // Choose numbers different from the image dimensions, to
+        // avoid missing bugs.
+        let (rays, angles) = (35, 40);
+
+        let src_img = Image::load(Path::new("images/test.png"));
+        let scan = scan(&src_img, angles, rays);
+
+        let (width, height) = (src_img.width, src_img.height);
+
+        let dst_img = reconstruct(&scan, width, height);
+
+        // Fairly chunky error, but this is to be expected when we
+        // don't have a real reconstruction, but a blurry-filtered
+        // version of the original. It's mildly better than
+        // the baseline blank image!
+        let rms_error = src_img.rms_diff(&dst_img);
+        assert!(59.0 < rms_error && rms_error < 61.0);
+    }
+
+    #[test]
+    fn test_reconstruct_overscan() {
+        // Choose numbers different from the image dimensions, to
+        // avoid missing bugs.
+        let (rays, angles) = (35, 40);
+
+        let src_img = Image::load(Path::new("images/test.png"));
+        let scan = scan(&src_img, angles, rays);
+
+        let (width, height) = (src_img.width, src_img.height);
+
+        let dst_img = reconstruct(&scan, width, height);
+
+        let (x_over, y_over) = (5, 7);
+        let dst_img_overscan = reconstruct_overscan(&scan, width, height, x_over, y_over);
+
+        let dst_img_trimmed = dst_img_overscan.trim(x_over, y_over, width, height);
+
+        for (p1, p2) in dst_img.data.iter().zip(dst_img_trimmed.data.iter()) {
+            assert_eq!(p1, p2);
+        }
+    }
+
+    // Most of the tests exercise overscan, since we want to make sure
+    // the full functionality works. This helper adds 30% extra pixels
+    // all around the border.
+    fn build_convolution_filter_overscan(w: usize, h: usize) -> Image {
+        let overscan = 0.3;
+        let w_over = (w as f64 * overscan).ceil() as usize;
+        let h_over = (h as f64 * overscan).ceil() as usize;
+        let filter = build_convolution_filter(w, h, w_over, h_over);
+
+        // Since our tests want to exercise the centre being pixel-aligned
+        // or not, check the parity is preserved when adding a border.
+        assert!(filter.width % 2 == w % 2);
+        assert!(filter.height % 2 == h % 2);
+
+        filter
+    }
+
+    // Helper function, like build_image, except it passes over
+    // an existing image, calling a closure with coordinates and
+    // value at a point. Pass in the non-overscanned width and height.
+    fn scan_image<F: FnMut(f64, f64, f64)>(
+        image: &Image,
+        base_width: usize,
+        base_height: usize,
+        mut value_fn: F,
+    ) {
+        let y_step = 2.0 / base_width as f64;
+        let x_step = 2.0 / base_height as f64;
+
+        // Sample at the centre of the pixels - add 0.5.
+        let y_offset = (image.height as f64 - 1.0) / 2.0;
+        let x_offset = (image.width as f64 - 1.0) / 2.0;
+
+        for y_idx in 0..image.height {
+            let y = (y_idx as f64 - y_offset) * y_step;
+            for x_idx in 0..image.width {
+                let x = (x_idx as f64 - x_offset) * x_step;
+                value_fn(x, y, image[(x_idx, y_idx)]);
+            }
+        }
+    }
+
+    // Check that the integral over the convolution filter is what we expect
+    // (integral = r).
+    #[test]
+    fn test_convolution_integral_even() {
+        let (base_w, base_h) = (128, 128);
+        let filter = build_convolution_filter_overscan(base_w, base_h);
+
+        let mut integral_120 = 0.0;
+        let mut integral_100 = 0.0;
+        let mut integral_070 = 0.0;
+        let mut integral_050 = 0.0;
+
+        scan_image(&filter, base_w, base_h, |x, y, p| {
+            let r = (x * x + y * y).sqrt();
+            if r <= 1.2 {
+                integral_120 += p;
+            }
+            if r <= 1.0 {
+                integral_100 += p;
+            }
+            if r <= 0.7 {
+                integral_070 += p;
+            }
+            if r <= 0.5 {
+                integral_050 += p;
+            }
+        });
+
+        assert!((integral_120 - 1.2).abs() < 0.005);
+        assert!((integral_100 - 1.0).abs() < 0.005);
+        assert!((integral_070 - 0.7).abs() < 0.005);
+        assert!((integral_050 - 0.5).abs() < 0.005);
+    }
+
+    // Like test_convolution_integral_even, but for an odd grid size,
+    // which means we sample on the singularity at r = 0.
+    #[test]
+    fn test_convolution_integral_odd() {
+        let (base_w, base_h) = (129, 129);
+        let filter = build_convolution_filter_overscan(base_w, base_h);
+
+        let mut integral_120 = 0.0;
+        let mut integral_100 = 0.0;
+        let mut integral_070 = 0.0;
+        let mut integral_050 = 0.0;
+
+        scan_image(&filter, base_w, base_h, |x, y, p| {
+            let r = (x * x + y * y).sqrt();
+            if r <= 1.2 {
+                integral_120 += p;
+            }
+            if r <= 1.0 {
+                integral_100 += p;
+            }
+            if r <= 0.7 {
+                integral_070 += p;
+            }
+            if r <= 0.5 {
+                integral_050 += p;
+            }
+        });
+
+        assert!((integral_120 - 1.2).abs() < 0.005);
+        assert!((integral_100 - 1.0).abs() < 0.005);
+        assert!((integral_070 - 0.7).abs() < 0.005);
+        assert!((integral_050 - 0.5).abs() < 0.005);
+    }
+
+    // Check that the convolution filter is symmetric.
+    #[test]
+    fn test_convolution_symmetric() {
+        let (base_w, base_h) = (128, 129);
+        let filter = build_convolution_filter_overscan(base_w, base_h);
+
+        for y1 in 0..filter.height {
+            let y2 = filter.height - 1 - y1;
+
+            for x1 in 0..filter.width {
+                let x2 = filter.width - 1 - x1;
+
+                let p11 = filter[(x1, y1)];
+                let p12 = filter[(x2, y1)];
+                let p21 = filter[(x1, y2)];
+                let p22 = filter[(x2, y2)];
+
+                assert_eq!(p11, p12);
+                assert_eq!(p11, p21);
+                assert_eq!(p11, p22);
+            }
+        }
+    }
+
+    // Check that the core region of the overscan is the same as the
+    // non-overscanned version.
+    #[test]
+    fn test_convolution_overscan() {
+        let (base_w, base_h) = (128, 129);
+        let filter = build_convolution_filter_overscan(base_w, base_h);
+        let filter_no_over = build_convolution_filter(base_w, base_h, 0, 0);
+        assert_eq!(filter_no_over.width, base_w);
+        assert_eq!(filter_no_over.height, base_h);
+
+        let w_adj = (filter.width - base_w) / 2;
+        let h_adj = (filter.height - base_h) / 2;
+
+        for y in 0..filter_no_over.height {
+            let y2 = y + h_adj;
+            for x in 0..filter_no_over.width {
+                let x2 = x + w_adj;
+
+                let p1 = filter_no_over[(x, y)];
+                let p2 = filter[(x2, y2)];
+
+                assert_eq!(p1, p2);
+            }
+        }
+    }
+
+    // Test that the convolution filter we generate is more-or-less
+    // the same as what we get by scanning a point and convoluting it.
+    #[test]
+    fn test_convolution_comparison() {
+        let (width, height) = (65, 65);
+        let oversample_factor = 5;
+
+        // Generate a convolution filter, no overscan. Integral up to
+        // radius 1.0 is 1.0
+        let generated = build_convolution_filter(width, height, 0, 0);
+
+        // Generate an image with a circle at the centre. We will later
+        // scale it down to a circle one pixel in diameter, to be close
+        // to what the convolution filter is generating.
+        let o_width = width * oversample_factor;
+        let o_height = height * oversample_factor;
+        let radius = oversample_factor as f64 / 2.0;
+        let radius2 = radius * radius;
+
+        let src_img = build_image(o_width, o_height, 0, 0, |x, y| {
+            // Convert -1..1 coordinates to pixel coordinates.
+            let px = x * o_width as f64 / 2.0;
+            let py = y * o_height as f64 / 2.0;
+
+            // Calculate the square of distance from the centre in pixel units.
+            let r2 = px * px + py * py;
+            // Fill in if within the central circle.
+            if r2 <= radius2 {
+                1.0
+            } else {
+                0.0
+            }
+        });
+
+        let circle_area = src_img.data.iter().sum::<f64>();
+
+        // Make sure we don't lose precision in the scan.
+        let rays = o_width * 2;
+        let angles = o_height * 2;
+        let scan = scan(&src_img, angles, rays);
+        let reconstructed = reconstruct(&scan, o_width, o_height);
+
+        // The resulting image's integral up to radius 1.0 is circle_area.
+
+        // Downscaling the image reduces the integral by oversample_factor^2.
+        let downscaled = reconstructed.downscale(oversample_factor);
+
+        // Then normalise to the same scale as the generated filter by
+        // dividing through by circle_area / oversample_factor^2
+        let scale_factor = (4.0 * radius2) / circle_area;
+        let normalised = downscaled.scale_values(scale_factor);
+
+        // Calculate the total error, and normalise over the full
+        // image, so that this would be the RMS per-pixel error
+        // if the average value was 1.0.
+        let rms_error = generated.rms_diff(&normalised);
+        let normalised_error = rms_error * (generated.width * generated.height) as f64;
+
+        // Average absolute difference is around 1%, using RMS makes
+        // it look a lot larger, but this still seems a good enough
+        // match.
+        assert!(0.10 < normalised_error && normalised_error < 0.12);
+    }
+}
+```
+
+### src/deconvolution_solver.rs
+```
+//
+// Generate a more accurate reconstruction by deconvolution
+//
+// This file takes the convolved reconstruction, and then
+// deconvolves it to obtain a better approximation of the original.
+//
+
+use rustfft::{num_complex::Complex64, FftDirection, FftPlanner};
+use std::ops::{Index, IndexMut};
+
+use crate::tomo_image::Image;
+use crate::tomo_scan::Scan;
+
+use crate::convolution_solver::build_convolution_filter;
+
+#[cfg(test)]
+use crate::tomo_scan::scan;
+#[cfg(test)]
+use itertools::iproduct;
+#[cfg(test)]
+use std::path::Path;
+
+////////////////////////////////////////////////////////////////////////
+// Utilities
+//
+
+// We're not going to do any fancy real-valued optimisations for the
+// FFT, we simply convert to and from complex numbers.
+fn to_complex(v: &[f64]) -> Vec<Complex64> {
+    v.iter().map(|re| Complex64::new(*re, 0.0)).collect()
+}
+
+// Doing a clever real-to-complex conversion for the FFTs would allow
+// us to define away the error case of the complex component being
+// non-trivial, but we're keeping things simple.
+fn from_complex(v: &[Complex64]) -> Vec<f64> {
+    const EPSILON: f64 = 1e-5;
+    assert!(
+        v.iter()
+            .map(|z| z.im.abs())
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap()
+            < EPSILON
+    );
+    v.iter().map(|z| z.re).collect()
+}
+
+////////////////////////////////////////////////////////////////////////
+// FFT of an Image
+//
+
+#[derive(Clone, Debug)]
+struct FFTImage {
+    width: usize,
+    height: usize,
+    data: Vec<Complex64>,
+}
+
+impl Index<(usize, usize)> for FFTImage {
+    type Output = Complex64;
+    fn index(&self, (x, y): (usize, usize)) -> &Complex64 {
+        &self.data[y * self.width + x]
+    }
+}
+
+impl IndexMut<(usize, usize)> for FFTImage {
+    fn index_mut(&mut self, (x, y): (usize, usize)) -> &mut Complex64 {
+        &mut self.data[y * self.width + x]
+    }
+}
+
+impl FFTImage {
+    // Transpose, mutating self. Used by fourier_transform.
+    fn transpose(&mut self) {
+        let mut new_data = Vec::with_capacity(self.width * self.height);
+        for y in 0..self.width {
+            for x in 0..self.height {
+                new_data.push(self[(y, x)]);
+            }
+        }
+        self.data = new_data;
+        std::mem::swap(&mut self.width, &mut self.height);
+    }
+
+    // Perform a 1d FFT, in place. Used by fourier_transform.
+    fn fft_pass_1d(&mut self, dir: FftDirection) {
+        const ZERO: Complex64 = Complex64::new(0.0, 0.0);
+
+        let mut planner = FftPlanner::new();
+        let fft = planner.plan_fft(self.width, dir);
+        let mut scratch = vec![ZERO; self.width];
+        fft.process_with_scratch(&mut self.data, &mut scratch);
+    }
+
+    // Core of 2D FFT, used by from_image and to_image.
+    fn fourier_transform(self, dir: FftDirection) -> FFTImage {
+        let mut tmp = FFTImage {
+            width: self.width,
+            height: self.height,
+            data: self.data,
+        };
+
+        tmp.fft_pass_1d(dir);
+        tmp.transpose();
+        tmp.fft_pass_1d(dir);
+        tmp.transpose();
+
+        tmp
+    }
+
+    // Construct an FFT from an image.
+    fn from_image(img: &Image) -> FFTImage {
+        let input = FFTImage {
+            width: img.width,
+            height: img.height,
+            data: to_complex(&img.data),
+        };
+        input.fourier_transform(FftDirection::Forward)
+    }
+
+    // Create an image from the FFT.
+    fn to_image(&self) -> Image {
+        let output = self.clone().fourier_transform(FftDirection::Inverse);
+        Image {
+            width: self.width,
+            height: self.height,
+            data: from_complex(&output.data),
+        }
+    }
+
+    // Create the inverse of an FFT. Undoes a convolution.
+    fn invert(&mut self, threshold: f64) {
+        // Square to match the norm.
+        let t = threshold * threshold;
+        self.data = self
+            .data
+            .iter()
+            .map(|z| {
+                // If a coefficient is tiny, this means a frequency
+                // component is basically killed. Rather than take
+                // the reciprocal and produce a huge number that will
+                // produce a noisy inverse, we just live with that
+                // frequency being killed off.
+                if z.norm_sqr() < t {
+                    Complex64::new(0.0, 0.0)
+                } else {
+                    z.inv()
+                }
+            })
+            .collect::<Vec<_>>();
+    }
+
+    // Apply a convolution, which is a pointwise multiplication in the
+    // frequency domain.
+    fn convolve(&mut self, filter: &FFTImage) {
+        assert_eq!(self.width, filter.width);
+        assert_eq!(self.height, filter.height);
+
+        self.data = self
+            .data
+            .iter()
+            .zip(filter.data.iter())
+            .map(|(z1, z2)| z1 * z2)
+            .collect::<Vec<_>>();
+    }
+}
+
+////////////////////////////////////////////////////////////////////////
+// Deconvolution-based reconstruction entry point
+//
+
+pub fn reconstruct(scan: &Scan, width: usize, height: usize, recon_multiplier: f64) -> Image {
+    // FFT assumes we're convolving repeating patterns, when actually we're
+    // convolving a finite approximation of an infinite filter with a
+    // bounded scan image. As we increase the space around the image,
+    // in the limit it should converge on what we want.
+    //
+    // "recon_multiplier" is how many times the image used during
+    // reconstruction is wider than the base image. Minimum 1.0.
+    assert!(recon_multiplier >= 1.0);
+
+    // Add half the extra amount on each side.
+    let per_side_factor = (recon_multiplier - 1.0) / 2.0;
+    let w_overscan = (width as f64 * per_side_factor) as usize;
+    let h_overscan = (height as f64 * per_side_factor) as usize;
+
+    // 1. Create the convolved image.
+    let convolved_img = crate::convolution_solver::reconstruct_overscan(
+        scan, width, height, w_overscan, h_overscan,
+    );
+
+    // 2. Build the deconvolution filter in frequency space.
+    //
+    // Make the filter centred at the centre of a pixel, by being
+    // odd-sized.
+    let filter = build_convolution_filter(width | 1, height | 1, w_overscan, h_overscan).trim(
+        0,
+        0,
+        2 * w_overscan + width,
+        2 * h_overscan + height,
+    );
+
+    let mut filter_fft = FFTImage::from_image(&filter);
+    filter_fft.invert(1e-2);
+
+    // 3. Perform the deconvolution.
+    let mut fft = FFTImage::from_image(&convolved_img);
+    fft.convolve(&filter_fft);
+    let res = fft.to_image();
+
+    let norm_res = res.scale_values(1.0 / (res.width * res.height) as f64);
+
+    // 4. Shift image to centre, trim around it, and return the result.
+    norm_res
+        .shift((norm_res.width + 1) / 2, (norm_res.height + 1) / 2)
+        .trim(w_overscan, h_overscan, width, height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_transpose() {
+        let width = 5;
+        let height = 7;
+        let data = (0..(height * width))
+            .map(|re| Complex64::new(re as f64, 0.0))
+            .collect::<Vec<_>>();
+
+        let v = FFTImage {
+            width,
+            height,
+            data,
+        };
+
+        let mut vt = v.clone();
+        vt.transpose();
+
+        assert_eq!(v.width, vt.height);
+        assert_eq!(v.height, vt.width);
+
+        for y in 0..height {
+            for x in 0..width {
+                assert_eq!(v[(x, y)], vt[(y, x)]);
+            }
+        }
+    }
+
+    // Test that doing an FFT and then inverting it gets us back to
+    // the starting image.
+    #[test]
+    fn test_double_fft() {
+        // Give it some awkward sizes. :)
+        let width = 13;
+        let height = 17;
+        let data = (0..(height * width)).map(|p| p as f64).collect::<Vec<_>>();
+
+        let input = Image {
+            width,
+            height,
+            data,
+        };
+
+        let fft = FFTImage::from_image(&input);
+        let inv = fft.to_image();
+        let output = inv.scale_values(1.0 / (inv.width * inv.height) as f64);
+
+        assert_eq!(input.data.len(), output.data.len());
+        for (in_val, out_val) in input.data.iter().zip(output.data.iter()) {
+            assert!((in_val - out_val).abs() < 1e-10);
+        }
+    }
+
+    // Test that deconvolving the filter returns an impulse function.
+    #[test]
+    fn test_filter_deconvolve() {
+        let (width, height) = (65, 65);
+
+        // Generate the forward filter, and the inversion of the FFT
+        // of the filter, to undo it.
+        let filter = build_convolution_filter(width, height, 0, 0);
+        let mut filter_fft = FFTImage::from_image(&filter);
+        filter_fft.invert(1e-7);
+
+        // Apply the deconvolution to the filter and convert back to
+        // image domain - should produce a 1.0 at (0, 0), and 0.0
+        // otherwise.
+        let mut fftimage = FFTImage::from_image(&filter);
+        fftimage.convolve(&filter_fft);
+        let res = fftimage.to_image();
+        let norm_res = res.scale_values(1.0 / (res.width * res.height) as f64);
+
+        // Check this!
+        for (i, actual) in norm_res.data.iter().enumerate() {
+            let expected = if i == 0 { 1.0 } else { 0.0 };
+            assert!((actual - expected).abs() <= 1e-10);
+        }
+    }
+
+    // Test that performing a basic deconvolution, without paying
+    // attention to any details, gets a rough reconstruction.
+    #[test]
+    fn test_basic_image_deconvolve() {
+        // 1. Scan and generate the convolved image.
+
+        // Choose numbers different from the image dimensions, to
+        // avoid missing bugs.
+        let (rays, angles) = (35, 40);
+
+        let src_img = Image::load(Path::new("images/test.png"));
+        let scan = scan(&src_img, angles, rays);
+
+        let (width, height) = (src_img.width, src_img.height);
+
+        let convolved_img = crate::convolution_solver::reconstruct(&scan, width, height);
+
+        // 2. Build the deconvolution filter in frequency space.
+        let filter = build_convolution_filter(width, height, 0, 0);
+
+        let mut filter_fft = FFTImage::from_image(&filter);
+        filter_fft.invert(1e-2);
+
+        // 3. Perform the deconvolution.
+        let mut fft = FFTImage::from_image(&convolved_img);
+        fft.convolve(&filter_fft);
+        let res = fft.to_image();
+
+        let norm_res = res.scale_values(1.0 / (res.width * res.height) as f64);
+        let dst_img = norm_res.shift(width / 2, height / 2);
+
+        // This error is pretty huge, but small enough to mean the
+        // image is roughly right.
+        //
+        // Note the error is smaller than in
+        // convolution_solver::test::test_reconstruct - we're doing
+        // something right!
+        let rms_error = src_img.rms_diff(&dst_img);
+        assert!(40.0 < rms_error && rms_error < 45.0);
+    }
+
+    // This test documents how the majority of the weight of the
+    // deconvolution filter is right in the centre.
+    #[test]
+    fn test_generate_decon_filter() {
+        // 1. First we build a reasonably large deconvolution filter...
+        let (width, height) = (65, 65);
+        let overscan = 5;
+        let (w_over, h_over) = (overscan * width, overscan * height);
+        let filter = build_convolution_filter(width, height, w_over, h_over);
+        let mut filter_fft = FFTImage::from_image(&filter);
+        filter_fft.invert(1e-5);
+        let inv_filter = filter_fft.to_image();
+
+        // 2. Then we show that the biggest weights are at the centre.
+
+        // Get a sorted list of all the weights...
+        let mut sorted_weights = inv_filter.data.iter().map(|p| p.abs()).collect::<Vec<_>>();
+        sorted_weights.sort_by(|a, b| b.partial_cmp(&a).unwrap());
+
+        // And then a sorted list of the weights in the centre.
+        let centre_radius = 6;
+        // Centre is off-by-one from where you might expect -
+        // see comment on test_decon_kernel
+        let centre_x = inv_filter.width as isize / 2 + 1;
+        let centre_y = inv_filter.height as isize / 2 + 1;
+        let mut centre_sorted_weights = iproduct!(0..(inv_filter.width), 0..(inv_filter.height))
+            .filter(|(x, y)| {
+                let dx = *x as isize - centre_x;
+                let dy = *y as isize - centre_y;
+                dx * dx + dy * dy < centre_radius * centre_radius
+            })
+            .map(|p| inv_filter[p].abs())
+            .collect::<Vec<_>>();
+        centre_sorted_weights.sort_by(|a, b| b.partial_cmp(&a).unwrap());
+
+        // And show that the biggest weights in the centre are the
+        // biggest weights.
+        let last_centre_idx = centre_sorted_weights.len() - 1;
+        assert_eq!(
+            sorted_weights[last_centre_idx],
+            centre_sorted_weights[last_centre_idx]
+        );
+
+        // 3. Show that the weights fall off quickly - the 21st element
+        // is a tiny fraction of the biggest weight.
+        let weight_ratio = sorted_weights[21] / sorted_weights[0];
+        assert!(0.001 < weight_ratio && weight_ratio < 0.002);
+
+        // 4. Show that the vast majority of the overall weight is
+        // in the centre.
+        let centre_weight = centre_sorted_weights.iter().sum::<f64>();
+        let total_weight = sorted_weights.iter().sum::<f64>();
+        let centre_fraction = centre_weight / total_weight;
+        assert!(0.97 < centre_fraction && centre_fraction < 0.98);
+    }
+
+    // I've observed that the largest weights are towards the centre of
+    // the convolution filter (see test_generate_decon_filter), so this
+    // test attempts to perform a deconvolution with just a small kernel,
+    // and see how well it performs.
+    #[test]
+    fn test_decon_kernel() {
+        // Size of the filter kernel we will construct.
+        // Use odd values to have a central point.
+        let (k_width, k_height) = (9, 9);
+
+        // 1. Create the convoluted image to deconvolve.
+
+        // Choose numbers different from the image dimensions, to
+        // avoid missing bugs.
+        let (rays, angles) = (35, 40);
+
+        let src_img = Image::load(Path::new("images/test.png"));
+        let scan = scan(&src_img, angles, rays);
+
+        let (width, height) = (src_img.width, src_img.height);
+
+        // Generate a convolved image with overscan. The size of
+        // the image will be reduced when we perform the convolution.
+        let convolved = crate::convolution_solver::reconstruct_overscan(
+            &scan,
+            width,
+            height,
+            k_width / 2,
+            k_height / 2,
+        );
+
+        // 2. Generate the image-space deconvolution kernel.
+
+        // Make it odd in size, so that the filter is centred in the
+        // middle of a pixel.
+        let filter = build_convolution_filter(width | 1, height | 1, 0, 0);
+        let mut filter_fft = FFTImage::from_image(&filter);
+        filter_fft.invert(1e-5);
+        let inv_filter = filter_fft.to_image();
+
+        // Cut out the core of the filter, to create a small kernel
+        // filter that contains the biggest coefficients.
+        //
+        // The extra "+ 1" is because the centre of the inverse filter
+        // is moved over by 1 pixel. It's not entirely clear to me
+        // exactly why this is, but I suspect it's because the sample
+        // points are at the start of the discretisation intervals, and
+        // so when things are flipped in the "time" domain as part of it
+        // being a convolution, the points align with the end of the
+        // discretisation intervals, pushing everything along by 1 pixel.
+        // This is horrific hand-waving around maths I don't fully get, but
+        // suffice to say the shift is necessary.
+        let k_x_offset = (inv_filter.width - k_width + 1) / 2;
+        let k_y_offset = (inv_filter.height - k_height + 1) / 2;
+        let mut kernel_img = inv_filter.trim(k_x_offset + 1, k_y_offset + 1, k_width, k_height);
+
+        // To get the appropriate weighting, we need to find what
+        // applying this new deconvolution filter to the original
+        // convolution filter gives - we need to normalise this
+        // to 1.0 to make it work.
+        let weight = filter
+            .trim(k_x_offset, k_y_offset, k_width, k_height)
+            .naive_convolve(&kernel_img)[(0, 0)];
+        kernel_img = kernel_img.scale_values(1.0 / weight);
+
+        // 3. Apply the kernel to get a reconstruction.
+
+        // The convolution shrinks the overscanned image back to its
+        // original size.
+        let res = convolved.naive_convolve(&kernel_img);
+
+        // 4. Quantify the error in this reconstruction.
+
+        let rms_diff = res.rms_diff(&src_img);
+
+        // The RMS per-pixel difference is quite high, a lot of
+        // which comes from the black parts coming out dark grey
+        // because the small kernel filter doesn't remove the
+        // contribution from far-away bright areas.
+        assert!(60.0 < rms_diff && rms_diff < 65.0);
+    }
+
+    // Exercise a deconvolution where we use an overscan to take account
+    // of the way the filter (and its inverse) is not limited to the size
+    // of the original image.
+    #[test]
+    fn test_image_deconvolve() {
+        let overscan_factor = 2;
+
+        // 1. Scan and generate the convolved image.
+
+        // Choose numbers different from the image dimensions, to
+        // avoid missing bugs.
+        let (rays, angles) = (35, 40);
+
+        let src_img = Image::load(Path::new("images/test.png"));
+        let scan = scan(&src_img, angles, rays);
+
+        let (width, height) = (src_img.width, src_img.height);
+
+        let convolved_img = crate::convolution_solver::reconstruct_overscan(
+            &scan,
+            width,
+            height,
+            width * overscan_factor,
+            height * overscan_factor,
+        );
+
+        // 2. Build the deconvolution filter in frequency space.
+
+        // Make the filter centred at the centre of a pixel, by being
+        // odd-sized.
+        let filter = build_convolution_filter(
+            width | 1,
+            height | 1,
+            width * overscan_factor,
+            height * overscan_factor,
+        )
+        .trim(
+            0,
+            0,
+            width * (2 * overscan_factor + 1),
+            height * (2 * overscan_factor + 1),
+        );
+
+        let mut filter_fft = FFTImage::from_image(&filter);
+        filter_fft.invert(1e-2);
+
+        // 3. Perform the deconvolution.
+        let mut fft = FFTImage::from_image(&convolved_img);
+        fft.convolve(&filter_fft);
+        let res = fft.to_image();
+
+        let norm_res = res.scale_values(1.0 / (res.width * res.height) as f64);
+        // Shift image to centre, and trim around it.
+        let dst_img = norm_res
+            .shift((norm_res.width + 1) / 2, (norm_res.height + 1) / 2)
+            .trim(
+                width * overscan_factor,
+                height * overscan_factor,
+                width,
+                height,
+            );
+
+        // Pretty decent improvement on test_basic_image_deconvolve.
+        //
+        // Having a pixel-centred filter (rather than between-pixel-centred)
+        // filter reduces the error from around 38-39.
+        let rms_error = src_img.rms_diff(&dst_img);
+        assert!(17.0 < rms_error && rms_error < 18.0);
+    }
+}
+```
+
+### src/main.rs
+```
+use anyhow::{bail, ensure, Result};
+use clap::{AppSettings, ArgEnum, Clap};
+use std::path::Path;
+use rand::prelude::*;
+use rand_pcg::Pcg64;
+
+mod tomo_image;
+mod tomo_scan;
+
+mod convolution_solver;
+mod deconvolution_solver;
+mod matrix_inversion_solver;
+
+use tomo_image::Image;
+use tomo_scan::{scan, Scan};
+
+////////////////////////////////////////////////////////////////////////
+// Main entry point
+//
+
+#[derive(ArgEnum)]
+pub enum Algorithm {
+    MatrixInversion,
+    Convolution,
+    Deconvolution,
+}
+
+/// This doc string acts as a help message when the user runs '--help'
+/// as do all doc strings on fields
+#[derive(Clap)]
+#[clap(version = "0.1", author = "Simon Frankau <sgf@arbitrary.name>")]
+#[clap(about = "Simple test of tomography algorithms")]
+#[clap(setting = AppSettings::ColoredHelp)]
+struct Opts {
+    /// Input image file, which will be scanned.
+    #[clap(long)]
+    input_image: Option<String>,
+    /// Number of angles to scan from.
+    #[clap(long)]
+    angles: Option<usize>,
+    /// Number of parallel rays fired from each angle.
+    #[clap(long)]
+    rays: Option<usize>,
+    /// Alternatively, read a scan file directly. Incompatible with --input-image.
+    #[clap(long)]
+    input_scan: Option<String>,
+    /// File to write the intermediate scan to.
+    #[clap(long)]
+    output_scan: Option<String>,
+    /// File to write the reconstructed image to.
+    #[clap(long)]
+    output_image: Option<String>,
+    /// Width of reconstructed image
+    #[clap(long)]
+    width: Option<usize>,
+    /// Height of reconstructed image
+    #[clap(long)]
+    height: Option<usize>,
+    /// Where to write the diff between input and reconstructed image to.
+    #[clap(long)]
+    diff_image: Option<String>,
+    #[clap(arg_enum, long, default_value = "matrix-inversion")]
+    algorithm: Algorithm,
+    #[clap(long)]
+    /// How many times bigger the reconstruction image should be than
+    /// the original. Should be at least 1.0, and only used in
+    /// deconvolution mode.
+    recon_multiplier: Option<f64>,
+    #[clap(long)]
+    /// How much uniform noise to add to the scan, as fraction of maximum scan value.
+    noise: Option<f64>,
+    #[clap(long)]
+    /// Seed for the random noise (for reproducibility)
+    seed: Option<u64>,
+}
+
+// Generate a scan, and return the image it was generated from, if available.
+fn generate_scan(opts: &Opts) -> Result<(Option<Image>, Scan)> {
+    if let Some(name) = &opts.input_image {
+        ensure!(
+            opts.input_scan.is_none(),
+            "Please specify only one of --input-image and --input-scan"
+        );
+
+        let image = Image::load(Path::new(&name));
+        let resolution = image.width.max(image.height);
+        let angles = opts.angles.unwrap_or_else(|| {
+            eprintln!("--angles not specified, using {}.", resolution);
+            resolution
+        });
+        let rays = opts.rays.unwrap_or_else(|| {
+            eprintln!("--rays not specified, using {}.", resolution);
+            resolution
+        });
+        let scanned = scan(&image, angles, rays);
+        Ok((Some(image), scanned))
+    } else if let Some(name) = &opts.input_scan {
+        ensure!(
+            opts.angles.is_none(),
+            "--angles cannot be used with --input-scan"
+        );
+        ensure!(
+            opts.rays.is_none(),
+            "--rays cannot be used with --input-scan"
+        );
+        ensure!(
+            opts.diff_image.is_none(),
+            "--diff-image cannot be used with --input-scan"
+        );
+
+        Ok((None, Scan::load(Path::new(&name))))
+    } else {
+        bail!("One of --input-image and --input-scan must be specified");
+    }
+}
+
+fn add_noise(scan: &Scan, opts: &Opts) -> Scan {
+    const DEFAULT_SEED: u64 = 42;
+    const DEFAULT_NOISE: f64 = 0.0;
+
+    let seed = opts.seed.unwrap_or(DEFAULT_SEED);
+    let noise = opts.noise.unwrap_or(DEFAULT_NOISE);
+
+    let mut rng = Pcg64::seed_from_u64(seed);
+    scan.add_noise(&mut rng, noise)
+}
+
+fn generate_reconstruction(opts: &Opts, original: &Option<Image>, scan: &Scan) -> Result<Image> {
+    const DEFAULT_RECON_MULTIPLIER: f64 = 2.0;
+
+    // When choosing image size, prefer the command-line flag,
+    // otherwise infer from original size, otherwise guess based on
+    // scan size.
+    let resolution = scan.angles.max(scan.rays);
+    let width = opts
+        .width
+        .or_else(|| original.as_ref().map(|x| x.width))
+        .unwrap_or_else(|| {
+            eprintln!("No --width or --input-image, using width of {}", resolution);
+            resolution
+        });
+    let height = opts
+        .height
+        .or_else(|| original.as_ref().map(|x| x.height))
+        .unwrap_or_else(|| {
+            eprintln!(
+                "No --height or --input-image, using height of {}",
+                resolution
+            );
+            resolution
+        });
+    if let Algorithm::Deconvolution = opts.algorithm {
+        ensure!(
+            opts.recon_multiplier.unwrap_or(1.0) >= 1.0,
+            "--recon-multiplier must be greater than or equal to 1.0"
+        )
+    } else {
+        ensure!(
+            opts.recon_multiplier.is_none(),
+            "--recon-multiplier can only be used with --algorithm=deconvolution"
+        );
+    }
+
+    Ok(match opts.algorithm {
+        Algorithm::MatrixInversion => matrix_inversion_solver::reconstruct(scan, width, height),
+        Algorithm::Convolution => convolution_solver::reconstruct(scan, width, height),
+        Algorithm::Deconvolution => deconvolution_solver::reconstruct(
+            scan,
+            width,
+            height,
+            opts.recon_multiplier.unwrap_or(DEFAULT_RECON_MULTIPLIER),
+        ),
+    })
+}
+
+fn calculate_error(base_image: &Image, new_image: &Image) {
+    if base_image.width != new_image.width {
+        eprintln!("Base image width does not match reconstructed image width ({} vs. {}). Not calculating error.",
+            base_image.width, new_image.width);
+        return;
+    }
+
+    if base_image.height != new_image.height {
+        eprintln!("Base image height does not match reconstructed image height ({} vs. {}). Not calculating error.",
+            base_image.height, new_image.height);
+        return;
+    }
+
+    let rms_error = base_image.rms_diff(new_image);
+    println!("RMS of per-pixel error: {}", rms_error);
+}
+
+fn main() -> Result<()> {
+    let opts: Opts = Opts::parse();
+
+    let (input_image, mut scan) = generate_scan(&opts)?;
+
+    if opts.noise.is_some() {
+        scan = add_noise(&scan, &opts);
+    } else {
+        ensure!(
+            opts.seed.is_none(),
+            "--seed can only be used with --noise"
+        );
+    }
+
+    eprint!("Processing... ");
+    let reconstruction = generate_reconstruction(&opts, &input_image, &scan)?;
+    eprintln!("done!");
+
+    if let Some(ref image) = input_image {
+        calculate_error(image, &reconstruction);
+    } else {
+        eprintln!("No --input-image supplied, not calculating transformation error vs. base image");
+    }
+
+    if let Some(name) = opts.output_scan {
+        scan.save(Path::new(&name));
+    }
+
+    if let Some(name) = opts.output_image {
+        reconstruction.save(Path::new(&name));
+    }
+
+    if let Some(name) = opts.diff_image {
+        // Technically, the potential range of diff-then-offset_values
+        // is -127..383, but almost all diffs will be in 0..255, and
+        // "save" will apply a u8 cap/floor anyway, so we don't bother
+        // to scale.
+        input_image
+            .unwrap()
+            .diff(&reconstruction)
+            .offset_values(128.0)
+            .save(Path::new(&name));
+    }
+
+    Ok(())
+}
+```
+
+### src/matrix_inversion_solver.rs
+```
+//
+// Image reconstruction via matrix inversion
+//
+// The idea here is that scanning an object is really just a linear
+// transform, so if we take the inverse of that, we will be able to
+// reconstruct the image from the scan. This is a very computationally
+// expensive approach - O(n^3) with the basic algorithm, where n is the
+// number of pixels - so roughly O(n^6) in image edge length!
+//
+
+use nalgebra::base::{DMatrix, DVector};
+
+use crate::tomo_image::Image;
+use crate::tomo_scan::{calculate_scan_weights, Scan};
+
+#[cfg(test)]
+use crate::tomo_scan::scan;
+#[cfg(test)]
+use std::path::Path;
+
+// Generate the matrix that goes from the image to the scan of the
+// image. This matrix is what we'll invert.
+fn generate_forwards_matrix(
+    width: usize,
+    height: usize,
+    angles: usize,
+    rays: usize,
+) -> DMatrix<f64> {
+    let src_dim = width * height;
+    let dst_dim = angles * rays;
+
+    let mut res = DMatrix::from_element(dst_dim, src_dim, 0.0f64);
+
+    // Construction of rays is copy-and-pasted from "scan"...
+    assert!(angles > 0);
+    assert!(rays > 1);
+    // Avoid 180 degree case, as it's same as 0.
+    let angle_step = std::f64::consts::PI / angles as f64;
+    // Image is inside an axis-aligned square -1..1, so max radius is sqrt(2).
+    let ray_offset = 2_f64.sqrt();
+    let ray_step = 2.0 * ray_offset / (rays - 1) as f64;
+    for angle_num in 0..angles {
+        let angle = angle_num as f64 * angle_step;
+
+        let axis_start = (angle.cos(), angle.sin());
+        let axis_end = (-axis_start.0, -axis_start.1);
+        for ray_num in 0..rays {
+            let ray = ray_num as f64 * ray_step - ray_offset;
+
+            // Rays are parallel, so move end points at a normal.
+            let parallel_offset = (ray * -axis_start.1, ray * axis_start.0);
+            let ray_start = (
+                axis_start.0 + parallel_offset.0,
+                axis_start.1 + parallel_offset.1,
+            );
+            let ray_end = (
+                axis_end.0 + parallel_offset.0,
+                axis_end.1 + parallel_offset.1,
+            );
+
+            let dst_row = angle_num * rays + ray_num;
+            for (x, y, wt) in calculate_scan_weights(ray_start, ray_end, width, height) {
+                let src_col = y * width + x;
+                res[(dst_row, src_col)] += wt;
+            }
+        }
+    }
+
+    res
+}
+
+// We actually generate the pseudo-inverse, so that the matrix doesn't
+// need to be precisely square - we don't require that width * height =
+// rays * angles. nalgebra does all the heavy lifting.
+fn generate_inverse_matrix(
+    width: usize,
+    height: usize,
+    angles: usize,
+    rays: usize,
+) -> DMatrix<f64> {
+    let forwards = generate_forwards_matrix(width, height, angles, rays);
+    forwards.pseudo_inverse(1e-6).unwrap()
+}
+
+// And then wrap it up with an easy-to-use function!
+pub fn reconstruct(scan: &Scan, width: usize, height: usize) -> Image {
+    let matrix = generate_inverse_matrix(width, height, scan.angles, scan.rays);
+    let input: DVector<f64> =
+        DVector::from_iterator(scan.angles * scan.rays, scan.data.iter().copied());
+    let reconstruction = matrix * input;
+    Image {
+        width,
+        height,
+        data: reconstruction.iter().copied().collect::<Vec<_>>(),
+    }
+}
+
+// TODO: See what effect adding noise and changing rays/angles has on
+// accuracy.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_forwards_matrix_construction() {
+        let rays = 75;
+        let angles = 50;
+
+        let src_img = Image::load(Path::new("images/test.png"));
+        let src_data =
+            DVector::from_iterator(src_img.width * src_img.height, src_img.data.iter().copied());
+
+        let matrix = generate_forwards_matrix(src_img.width, src_img.height, angles, rays);
+
+        let matrixed = (matrix * src_data).iter().copied().collect::<Vec<_>>();
+        let scanned = scan(&src_img, angles, rays).data;
+
+        assert_eq!(scanned.len(), matrixed.len());
+        for (s1, s2) in scanned.iter().zip(matrixed.iter()) {
+            // Slightly larger epsilon for this one, since more operations are applied.
+            assert!((s1 - s2).abs() < 1e-10);
+        }
+    }
+
+    // This test takes 20s on my old Macbook, so let's not run by default.
+    #[ignore]
+    #[test]
+    fn test_end_to_end_expensive() {
+        // Choose numbers different from the image dimensions, to
+        // avoid missing bugs.
+        let rays = 35;
+        let angles = 40;
+
+        let src_img = Image::load(Path::new("images/test.png"));
+        let scan = scan(&src_img, angles, rays);
+        let dst_img = reconstruct(&scan, src_img.width, src_img.height);
+
+        // Tiny error! Very nice.
+        let rms_error = src_img.rms_diff(&dst_img);
+        println!("{}", rms_error);
+        assert!(rms_error < 1.0e-7);
+    }
+
+    #[test]
+    fn test_end_to_end_cheap() {
+        let rays = 10;
+        let angles = 10;
+
+        let width = 8;
+        let height = 8;
+        let data = (0..8 * 8)
+            .map(|p| {
+                let (x, y) = (p % 8, p / 8);
+                x as f64 * 8.0 + if y >= 4 { 64.0 } else { 0.0 }
+            })
+            .collect::<Vec<_>>();
+
+        let src_img = Image {
+            width,
+            height,
+            data,
+        };
+        let scan = scan(&src_img, angles, rays);
+        let dst_img = reconstruct(&scan, src_img.width, src_img.height);
+
+        //  Wow, the reconstruction here seems extremely precise!
+        let rms_error = src_img.rms_diff(&dst_img);
+        assert!(rms_error < 1.0e-10);
+    }
+}
+```
+
+### src/tomo_image.rs
+```
+///
+// Image management
+//
+// Load and save into a vector of floats, plus basic image manipulation.
+//
+use image::{GrayImage, Pixel};
+use std::ops::{Index, IndexMut};
+use std::path::Path;
+
+#[derive(Clone, Debug)]
+pub struct Image {
+    pub width: usize,
+    pub height: usize,
+    pub data: Vec<f64>,
+}
+
+impl Index<(usize, usize)> for Image {
+    type Output = f64;
+    fn index(&self, (x, y): (usize, usize)) -> &f64 {
+        &self.data[y * self.width + x]
+    }
+}
+
+impl IndexMut<(usize, usize)> for Image {
+    fn index_mut(&mut self, (x, y): (usize, usize)) -> &mut f64 {
+        &mut self.data[y * self.width + x]
+    }
+}
+
+impl Image {
+    pub fn load(path: &Path) -> Image {
+        let orig_img = image::open(path).unwrap();
+        let grey_img = orig_img.into_luma8();
+
+        let width = grey_img.width() as usize;
+        let height = grey_img.height() as usize;
+
+        // Do anything that returns a vector.
+        Image {
+            width,
+            height,
+            data: grey_img.pixels().map(|p| p.channels()[0] as f64).collect(),
+        }
+    }
+
+    pub fn save(&self, path: &Path) {
+        let data_as_u8: Vec<u8> = self
+            .data
+            .iter()
+            .map(|p| p.max(0.0).min(255.0) as u8)
+            .collect::<Vec<_>>();
+        let img = GrayImage::from_vec(self.width as u32, self.height as u32, data_as_u8).unwrap();
+        img.save(path).unwrap();
+    }
+
+    // Scales down the image by the given factor, which must divide
+    // width and height. Useful for oversampling.
+    #[cfg(test)]
+    pub fn downscale(&self, factor: usize) -> Image {
+        assert!(self.width % factor == 0);
+        assert!(self.height % factor == 0);
+
+        let new_w = self.width / factor;
+        let new_h = self.height / factor;
+
+        let mut data = Vec::new();
+        for y in (0..new_h).map(|y| y * factor) {
+            for x in (0..new_w).map(|x| x * factor) {
+                let mut pixel: f64 = 0.0;
+                for sub_y in 0..factor {
+                    for sub_x in 0..factor {
+                        pixel += self[(x + sub_x, y + sub_y)];
+                    }
+                }
+                data.push(pixel / (factor as f64 * factor as f64));
+            }
+        }
+
+        Image {
+            width: new_w,
+            height: new_h,
+            data,
+        }
+    }
+
+    // The way FFT convolution works means the deconvolved image is shifted by
+    // an amount equivalent to the coordinates of the centre of the filter.
+    // "shift" can undo this.
+    pub fn shift(&self, x_shift: usize, y_shift: usize) -> Image {
+        let (width, height) = (self.width, self.height);
+
+        let mut data = Vec::with_capacity(width * height);
+        for y in 0..height {
+            for x in 0..width {
+                let src_y = (y + y_shift) % height;
+                let src_x = (x + x_shift) % width;
+                data.push(self[(src_x, src_y)]);
+            }
+        }
+
+        Image { data, ..*self }
+    }
+
+    // Trim an image down to a sub-image, size (w, h), starting at
+    // (x_off, y_off) in the original image.
+    pub fn trim(&self, x_off: usize, y_off: usize, w: usize, h: usize) -> Image {
+        assert!(x_off + w <= self.width);
+        assert!(y_off + h <= self.height);
+
+        let mut data = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                data.push(self[(x + x_off, y + y_off)]);
+            }
+        }
+
+        Image {
+            width: w,
+            height: h,
+            data,
+        }
+    }
+
+    // Expand an image by adding a border of zeros, placing the
+    // original image at (x_off, y_off), and resizing the image to
+    // (w, h).
+    //
+    // Useful debugging/testing function, even if not used right now.
+    #[allow(dead_code)]
+    pub fn expand(&self, x_off: usize, y_off: usize, w: usize, h: usize) -> Image {
+        assert!(x_off + self.width <= w);
+        assert!(y_off + self.height <= h);
+
+        let mut img = Image {
+            width: w,
+            height: h,
+            data: vec![0.0; w * h],
+        };
+
+        for y in 0..self.height {
+            for x in 0..self.width {
+                img[(x + x_off, y + y_off)] = self[(x, y)];
+            }
+        }
+
+        img
+    }
+
+    // Perform a naive convolution by applying a filter on a per-pixel
+    // basis, no FFT. Ok for small filter kernels. Technically there's
+    // supposed to be some mirroring going on in a convolution, but
+    // our filters are symmetric so it makes no difference here.
+    // Rather than doing anything clever at the edges, we just produce
+    // a smaller output image than the input.
+    #[cfg(test)]
+    pub fn naive_convolve(&self, filter: &Image) -> Image {
+        let mut data = Vec::new();
+        for y in 0..(self.height - filter.height + 1) {
+            for x in 0..(self.width - filter.width + 1) {
+                let mut pixel = 0.0;
+                for y2 in 0..filter.height {
+                    for x2 in 0..filter.width {
+                        pixel += filter[(x2, y2)] * self[(x + x2, y + y2)];
+                    }
+                }
+                data.push(pixel);
+            }
+        }
+
+        Image {
+            width: self.width - filter.width + 1,
+            height: self.height - filter.height + 1,
+            data,
+        }
+    }
+
+    // Find the difference between two images.
+    pub fn diff(&self, other: &Image) -> Image {
+        assert_eq!(self.width, other.width);
+        assert_eq!(self.height, other.height);
+
+        let data = self
+            .data
+            .iter()
+            .zip(other.data.iter())
+            .map(|(a, b)| a - b)
+            .collect::<Vec<_>>();
+
+        Image { data, ..*self }
+    }
+
+    // Calculate the RMS of per-pixel difference between two images
+    pub fn rms_diff(&self, other: &Image) -> f64 {
+        assert_eq!(self.width, other.width);
+        assert_eq!(self.height, other.height);
+
+        let sum_squares_diff: f64 = self
+            .data
+            .iter()
+            .zip(other.data.iter())
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum();
+
+        (sum_squares_diff / (self.width * self.height) as f64).sqrt()
+    }
+
+    // Multiply all the points by the given value.
+    pub fn scale_values(&self, a: f64) -> Image {
+        let data = self.data.iter().map(|b| a * b).collect::<Vec<_>>();
+        Image { data, ..*self }
+    }
+
+    // Add an offset to all values.
+    pub fn offset_values(&self, a: f64) -> Image {
+        let data = self.data.iter().map(|b| a + b).collect::<Vec<_>>();
+        Image { data, ..*self }
+    }
+
+    // Normalise the data between 0 and the given value. Useful for
+    // making random test data into an image that can be viewed.
+    //
+    // It takes two percentiles, representing the points we want to
+    // map to 0 and the given value. Well, not percentiles, but values
+    // 0-1, but I'm not quite sure what to call that. Values outside
+    // the range are *not* clamped.
+    //
+    // Useful debugging/testing function, even if not used right now.
+    #[allow(dead_code)]
+    pub fn normalise(&self, scale: f64, lower: f64, upper: f64) -> Image {
+        let mut sorted_data = self.data.clone();
+        sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let max_idx = sorted_data.len() - 1;
+        let lower_val = sorted_data[(lower * max_idx as f64).round() as usize];
+        let upper_val = sorted_data[(upper * max_idx as f64).round() as usize];
+
+        let data = self
+            .data
+            .iter()
+            .map(|p| (p - lower_val) * scale / (upper_val - lower_val))
+            .collect::<Vec<_>>();
+
+        Image { data, ..*self }
+    }
+}
+```
+
+### src/tomo_scan.rs
+```
+///
+// Scan generation
+//
+// Given an image, generate a scan of it, integrating along paths at
+// different angles and offsets.
+//
+use rand::distributions::Uniform;
+use rand::prelude::*;
+use std::path::Path;
+
+use crate::tomo_image::Image;
+
+///////////////////////////////////////////////////////////////////////
+// Weight calculation
+//
+// Integrating along a particular line through the image is simply a
+// weighted sum of elements from the image. Code in this section
+// generates these weights.
+//
+
+// Calculate the weights along a line with |dy/dx| <= 1, using
+// something very much like Bresenham's algorithm. We pass in the
+// y-value of the x-intercept, and calculate all the weights for
+// unit pixels in (0..w, 0..h), as a vector of (x, y, weight).
+fn calculate_weights_inner(y_0: f64, dy_dx: f64, w: usize, h: usize) -> Vec<(usize, usize, f64)> {
+    assert!(dy_dx.abs() <= 1.0);
+
+    // Crossing a single pixel, left-to-right, without crossing a vertical
+    // pixel boundary, has a basic distance. Boundary-crossing path lengths
+    // can be derived from this.
+    //
+    // This is chosen so that crossing the whole pixel area, either
+    // vertically or horizontally, is 1 unit.
+    let (wf64, hf64) = (w as f64, h as f64);
+    let (y_scale, x_scale) = ((1.0 / (hf64 * hf64)), (1.0 / (wf64 * wf64)));
+    let base_weight = (x_scale + dy_dx * dy_dx * y_scale).sqrt();
+
+    let mut weights: Vec<(usize, usize, f64)> = Vec::new();
+
+    // Y value is y_int + y_frac, 0 <= y_frac < 1.
+    let y_round = y_0.floor();
+    let mut y_int: isize = y_round as isize;
+    let mut y_fract = y_0 - y_round;
+
+    for x in 0..w {
+        let mut add_pixel = |x: usize, y: isize, w: f64| {
+            if 0 <= y && y < h as isize {
+                weights.push((x, y as usize, w));
+            }
+        };
+
+        y_fract += dy_dx;
+        if y_fract >= 1.0 {
+            y_fract -= 1.0;
+            let rhs = y_fract / dy_dx;
+            let lhs = 1.0 - rhs;
+            add_pixel(x, y_int, lhs * base_weight);
+            y_int += 1;
+            add_pixel(x, y_int, rhs * base_weight);
+        } else if y_fract < 0.0 {
+            let rhs = y_fract / dy_dx;
+            let lhs = 1.0 - rhs;
+            y_fract += 1.0;
+            add_pixel(x, y_int, lhs * base_weight);
+            y_int -= 1;
+            add_pixel(x, y_int, rhs * base_weight);
+        } else {
+            add_pixel(x, y_int, base_weight);
+        }
+    }
+
+    weights
+}
+
+// Calculate the weights along the infinite line passing through (x1,
+// y1) and (x2, y2), with |dy/dx| <= 1. The pixel grid is at (0..w,
+// 0..h) ("pixel space").
+fn calculate_weights_horiz(
+    (x1, y1): (f64, f64),
+    (x2, y2): (f64, f64),
+    w: usize,
+    h: usize,
+) -> Vec<(usize, usize, f64)> {
+    // Safe as | dy/dx | <= 1.0.
+    let dy_dx = (y2 - y1) / (x2 - x1);
+
+    let y_0 = y1 - x1 * dy_dx;
+
+    calculate_weights_inner(y_0, dy_dx, w, h)
+}
+
+// Calculate the weights along the infinite line passing through (x1,
+// y1) and (x2, y2). The pixel grid is at (0..w, 0..h) ("pixel
+// space").
+fn calculate_pixel_weights(
+    (x1, y1): (f64, f64),
+    (x2, y2): (f64, f64),
+    w: usize,
+    h: usize,
+) -> Vec<(usize, usize, f64)> {
+    let dx = (x2 - x1).abs();
+    let dy = (y2 - y1).abs();
+
+    if dy > dx {
+        // Would result in | dy/dx | > 1, so flip axes.
+        let flipped_results = calculate_weights_horiz((y1, x1), (y2, x2), h, w);
+        flipped_results
+            .iter()
+            .map(|(y, x, wt)| (*x, *y, *wt))
+            .collect()
+    } else {
+        calculate_weights_horiz((x1, y1), (x2, y2), w, h)
+    }
+}
+
+// Calculate the weights along the infinite line passing through (x1,
+// y1) and (x2, y2). The pixel grid is at (-1.0..1.0, -1.0..1.0)
+// ("scan space").
+//
+// Public as used by generate_forwards_matrix.
+pub fn calculate_scan_weights(
+    (x1, y1): (f64, f64),
+    (x2, y2): (f64, f64),
+    w: usize,
+    h: usize,
+) -> Vec<(usize, usize, f64)> {
+    // This is a simple matter of coordinate transforms. We move (-1, -1)
+    // to the origin, and then scale (0.0..2.0, 0.0..2.0) to (0.0..w,
+    // 0.0..h).
+    let x1p = (x1 + 1.0) * (w as f64 / 2.0);
+    let y1p = (y1 + 1.0) * (h as f64 / 2.0);
+    let x2p = (x2 + 1.0) * (w as f64 / 2.0);
+    let y2p = (y2 + 1.0) * (h as f64 / 2.0);
+
+    // The resulting weights, based on pixel coordinates, don't need
+    // to be transformed back, as that's the format we want.
+    calculate_pixel_weights((x1p, y1p), (x2p, y2p), w, h)
+}
+
+////////////////////////////////////////////////////////////////////////
+// Image transformation
+//
+
+// Only real difference from Image is that the axes are labelled
+// "angles" and "rays". Seems worth separating them so that there's no
+// confusion.
+#[derive(Clone, Debug)]
+pub struct Scan {
+    pub angles: usize,
+    pub rays: usize,
+    pub data: Vec<f64>,
+}
+
+// Convert the image into a transformed version, where the returned vector
+// is a flattened array of (outer layer) different angles with (inner layer)
+// parallel rays.
+//
+// 'angles' returns how many angles are scanned, over a 180 degree range
+// (only 180 degrees is needed due to symmetry)
+// 'rays' counts how many parallel rays will be spread over the object.
+pub fn scan(image: &Image, angles: usize, rays: usize) -> Scan {
+    // We could just construct a great big matrix and apply that to
+    // image.data, but given the inverse transformation is going to be
+    // an inverse of that matrix, that feels a bit cheaty. So we'll
+    // do the forwards transformation by hand.
+    assert!(angles > 0);
+    assert!(rays > 1);
+    let mut data = Vec::new();
+    let angle_step = std::f64::consts::PI / angles as f64;
+    // Image is inside an axis-aligned square -1..1, so max radius is sqrt(2).
+    let ray_offset = 2_f64.sqrt();
+    let ray_step = 2.0 * ray_offset / (rays - 1) as f64;
+    for angle in (0..angles).map(|idx| idx as f64 * angle_step) {
+        let axis_start = (angle.cos(), angle.sin());
+        let axis_end = (-axis_start.0, -axis_start.1);
+        for ray in (0..rays).map(|idx| idx as f64 * ray_step - ray_offset) {
+            // Rays are parallel, so move end points at a normal.
+            let parallel_offset = (ray * -axis_start.1, ray * axis_start.0);
+            let ray_start = (
+                axis_start.0 + parallel_offset.0,
+                axis_start.1 + parallel_offset.1,
+            );
+            let ray_end = (
+                axis_end.0 + parallel_offset.0,
+                axis_end.1 + parallel_offset.1,
+            );
+
+            let weights = calculate_scan_weights(ray_start, ray_end, image.width, image.height);
+            let integral = weights.iter().map(|(x, y, wt)| image[(*x, *y)] * wt).sum();
+            data.push(integral);
+        }
+    }
+
+    Scan { angles, rays, data }
+}
+
+impl Scan {
+    // Add noise to an image. Add a uniformly-distributed random number
+    // up to +/- r * m to each pixel in the image, where m is the largest
+    // value in the image (for normalisation).
+    pub fn add_noise<R: Rng + ?Sized>(&self, rng: &mut R, r: f64) -> Scan {
+        let m = self.data.iter().cloned().fold(0.0, f64::max);
+        let norm_r = r * m;
+        let between = Uniform::new(-norm_r, norm_r);
+        let data = self
+            .data
+            .iter()
+            .zip(between.sample_iter(rng))
+            .map(|(p, r)| p + r)
+            .collect::<Vec<_>>();
+        Scan { data, ..*self }
+    }
+
+    // Converts a scan to an image and saves it, perhaps useful for
+    // understanding the transform.
+    pub fn save(&self, path: &Path) {
+        let image = Image {
+            width: self.rays,
+            height: self.angles,
+            data: self.data.iter().map(|p| p / 2_f64.sqrt()).collect(),
+        };
+
+        image.save(path);
+    }
+
+    // If we're supporting saving, let's support loading.
+    pub fn load(path: &Path) -> Scan {
+        let image = Image::load(path);
+        Scan {
+            rays: image.width,
+            angles: image.height,
+            data: image
+                .data
+                .iter()
+                .map(|p| *p as f64 * 2_f64.sqrt())
+                .collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // We may sometimes *just* touch the corner of a pixel. Skip them.
+    fn assert_eq_pixels(expected: &[(usize, usize, f64)], actual: &[(usize, usize, f64)]) {
+        let filtered_actual: Vec<_> = actual.into_iter().filter(|(_, _, w)| *w > 1e-14).collect();
+
+        assert_eq!(expected.len(), filtered_actual.len());
+        for ((x1, y1, w1), (x2, y2, w2)) in expected.iter().zip(filtered_actual.iter()) {
+            assert_eq!((x1, y1), (x2, y2));
+            assert!((w1 - w2).abs() < 1.0e-14);
+        }
+    }
+
+    #[test]
+    fn test_calc_weights_inner_horizontal() {
+        let expected = (0..10).map(|x| (x, 2, 0.1)).collect::<Vec<_>>();
+        let actual = calculate_weights_inner(2.5, 0.0, 10, 5);
+        assert_eq_pixels(&expected, &actual);
+    }
+
+    #[test]
+    fn test_calc_weights_inner_up() {
+        // 'base' = length travelled as we move 1 unit in X direction.
+        let base = (0.1f64 * 0.1 + 0.2 * 0.2).sqrt();
+        let expected = vec![
+            (0, 2, base * 0.5),
+            (0, 3, base * 0.5),
+            (1, 3, base * 0.5),
+            (1, 4, base * 0.5),
+            (2, 4, base * 0.5),
+        ];
+        let actual = calculate_weights_inner(2.5, 1.0, 10, 5);
+        assert_eq_pixels(&expected, &actual);
+    }
+
+    #[test]
+    fn test_calc_weights_inner_down() {
+        // 'base' = length travelled as we move 1 unit in X direction.
+        let base = (0.1f64 * 0.1 + 0.2 * 0.2).sqrt();
+        let expected = vec![
+            (2, 4, base * 0.5),
+            (3, 4, base * 0.5),
+            (3, 3, base * 0.5),
+            (4, 3, base * 0.5),
+            (4, 2, base * 0.5),
+            (5, 2, base * 0.5),
+            (5, 1, base * 0.5),
+            (6, 1, base * 0.5),
+            (6, 0, base * 0.5),
+            (7, 0, base * 0.5),
+        ];
+        let actual = calculate_weights_inner(7.5, -1.0, 10, 5);
+        assert_eq_pixels(&expected, &actual);
+    }
+
+    #[test]
+    fn test_calc_weights_inner_out_of_bounds() {
+        assert!(calculate_weights_inner(-1.0, -1.0, 20, 20).is_empty());
+    }
+
+    #[test]
+    fn test_calc_weights_inner_non_diagonal_up() {
+        // 'base' = length travelled as we move 1 unit in X direction.
+        let base = (0.2f64 * 0.2 + 0.15 * 0.15).sqrt();
+        let expected = vec![
+            (0, 2, base * 2.0 / 3.0),
+            (0, 3, base / 3.0),
+            (1, 3, base),
+            (2, 4, base),
+            (3, 4, base / 3.0),
+        ];
+        let actual = calculate_weights_inner(2.5, 0.75, 5, 5);
+        assert_eq_pixels(&expected, &actual);
+    }
+
+    #[test]
+    fn test_calc_weights_inner_non_diagonal_down() {
+        // 'base' = length travelled as we move 1 unit in X direction.
+        let base = (0.2f64 * 0.2 + 0.15 * 0.15).sqrt();
+        let expected = vec![
+            (0, 2, base * 2.0 / 3.0),
+            (0, 1, base / 3.0),
+            (1, 1, base),
+            (2, 0, base),
+            (3, 0, base / 3.0),
+        ];
+        let actual = calculate_weights_inner(2.5, -0.75, 5, 5);
+        assert_eq_pixels(&expected, &actual);
+    }
+
+    #[test]
+    fn test_scan_weights_h() {
+        let base = (1.0f64 * 1.0 + 0.5 * 0.5).sqrt() / 10.0;
+        let expected = vec![
+            (0, 1, base),
+            (1, 1, base),
+            (2, 1, base),
+            (3, 2, base),
+            (4, 2, base),
+            (5, 2, base),
+            (6, 2, base),
+            (7, 3, base),
+            (8, 3, base),
+            (9, 3, base),
+        ];
+        let actual = calculate_scan_weights((-2.0, -1.0), (2.0, 1.0), 10, 5);
+        assert_eq_pixels(&expected, &actual);
+    }
+
+    #[test]
+    fn test_scan_weights_v() {
+        let base = (1.0f64 * 1.0 + 0.5 * 0.5).sqrt() / 10.0;
+        let expected = vec![
+            (2, 0, base),
+            (3, 0, base),
+            (3, 1, base),
+            (4, 1, base),
+            (4, 2, base),
+            (5, 2, base),
+            (5, 3, base),
+            (6, 3, base),
+            (6, 4, base),
+            (7, 4, base),
+        ];
+        let actual = calculate_scan_weights((-1.0, -2.0), (1.0, 2.0), 10, 5);
+        assert_eq_pixels(&expected, &actual);
+    }
+
+    #[test]
+    fn test_scan_weights_commutes() {
+        let p1 = (0.2, 0.9);
+        let p2 = (0.5, 0.1);
+        let res1 = calculate_scan_weights(p1, p2, 10, 5);
+        let res2 = calculate_scan_weights(p2, p1, 10, 5);
+        assert_eq!(res1, res2);
+    }
+
+    #[test]
+    fn test_scan_blank() {
+        let image = Image {
+            width: 1,
+            height: 1,
+            data: vec![0.0],
+        };
+        let scanned = scan(&image, 4, 7).data;
+        assert_eq!(scanned.len(), 4 * 7);
+        assert!(scanned.iter().all(|p| *p == 0.0))
+    }
+
+    #[test]
+    fn test_scan_full() {
+        let image = Image {
+            width: 1,
+            height: 1,
+            data: vec![1.0],
+        };
+        let expected = vec![
+            // Horizontal
+            0.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            0.0,
+            // Diagonal
+            0.0,
+            2_f64.sqrt() / 3.0,
+            2_f64.sqrt() * 2.0 / 3.0,
+            2_f64.sqrt(),
+            2_f64.sqrt() * 2.0 / 3.0,
+            2_f64.sqrt() / 3.0,
+            0.0,
+            // Vertical
+            0.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            0.0,
+            // Diagonal
+            0.0,
+            2_f64.sqrt() / 3.0,
+            2_f64.sqrt() * 2.0 / 3.0,
+            2_f64.sqrt(),
+            2_f64.sqrt() * 2.0 / 3.0,
+            2_f64.sqrt() / 3.0,
+            0.0,
+        ];
+        let actual = scan(&image, 4, 7).data;
+        assert_eq!(expected.len(), actual.len());
+        for (e, a) in expected.iter().zip(actual.iter()) {
+            assert!((e - a).abs() < 1e-14);
+        }
+    }
+
+    #[test]
+    fn test_scan_scales() {
+        let image1 = Image {
+            width: 1,
+            height: 1,
+            data: vec![1.0],
+        };
+        let scan1 = scan(&image1, 4, 7).data;
+
+        let image2 = Image {
+            width: 8,
+            height: 8,
+            data: vec![1.0; 8 * 8],
+        };
+        let scan2 = scan(&image2, 4, 7).data;
+
+        assert_eq!(scan1.len(), scan2.len());
+        for (s1, s2) in scan1.iter().zip(scan2.iter()) {
+            assert!((s1 - s2).abs() < 1e-14);
+        }
+    }
+}
+```

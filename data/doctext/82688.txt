@@ -1,0 +1,5126 @@
+# Voxelize point clouds
+
+ Tool to voxelize annotated point clouds. 
+ 
+ ![](assets/voxelizer.png)
+ 
+## Dependencies
+
+* Eigen >= 3.2
+* boost >= 1.54
+* QT >= 5.2
+ 
+## Build
+  
+On Ubuntu 22.04/20.04, most of the dependencies can be installed from the package manager:
+```bash
+sudo apt install build-essential cmake libeigen3-dev libboost-all-dev qtbase5-dev libglew-dev
+```
+
+Use the usual cmake out-of-source build process:
+```bash
+mkdir build && cd build
+cmake ..
+```
+Now the project root directory should contain a `bin` directory containing the voxelizer.
+
+## Usage
+
+
+In the `bin` directory, just run `./voxelizer` to start the voxelizer. 
+
+
+In the `settings.cfg` files you can change the followings options:
+
+<pre>
+max scans: 500    # number of scans to load for a tile. (should be maybe 1000), but this currently very memory consuming.
+min range: 2.5    # minimum distance of points to consider.
+max range: 50.0   # maximum distance of points in the point cloud.
+ignore: 0,250,251,252,253,254  # label ids of labels that should be ignored when building a voxelgrid.
+</pre>
+
+To generate the data by iterating over a sequence directory, call `./gen_data` in the `bin` directory.
+
+
+ 
+## Folder structure
+
+When loading a dataset, the data must be organized as follows:
+
+<pre>
+point cloud folder
+├── velodyne/             -- directory containing ".bin" files with Velodyne point clouds.   
+├── labels/               -- label directory, will be generated if not present.    
+├── calib.txt             -- calibration of velodyne vs. camera. needed for projection of point cloud into camera.  
+└── poses.txt             -- file containing the poses of every scan.
+</pre>
+
+### src/gen_data.cpp
+```
+#include <stdint.h>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+
+#include <QtCore/QDir>
+#include "data/voxelize_utils.h"
+#include "rv/Stopwatch.h"
+#include "rv/string_utils.h"
+#include "widget/KittiReader.h"
+
+using namespace rv;
+
+float poseDistance(const Eigen::Matrix4f& A, const Eigen::Matrix4f& B) {
+  return (A.col(3).head(3) - B.col(3).head(3)).norm();
+}
+
+int32_t main(int32_t argc, char** argv) {
+  if (argc < 4) {
+    std::cout << "Too few arguments" << std::endl;
+    std::cout << "Usage: ./gen_data <config> <sequence-dirname> <input-label-dirname> <output-voxel-dirname>"
+              << std::endl;
+    std::cout << "  <config>: config file, containing spatial extent of volume and resolution" << std::endl;
+    std::cout << "  <sequence-dirname>: folder containing velodyne, labels, calib.txt, poses.txt, e.g. path/to/00 or "
+                 "path/to/01"
+              << std::endl;
+    std::cout << "  <output-voxel-dirname>: output folder containing voxelized input and target volumes" << std::endl;
+    return 1;
+  }
+
+  Config config = parseConfiguration(argv[1]);
+  std::string sequences_dirname = argv[2];
+  std::string output_voxel_dirname = argv[3];
+
+  QDir output_voxel_dir(QString::fromStdString(output_voxel_dirname));
+  if (!output_voxel_dir.exists()) {
+    std::cout << "Creating output directory: " << output_voxel_dir.absolutePath().toStdString() << std::endl;
+    if (!output_voxel_dir.mkpath(output_voxel_dir.absolutePath())) {
+      throw std::runtime_error("Unable to create output directory.");
+    }
+  }
+
+  QDir sequences_dir(QString::fromStdString(sequences_dirname));
+
+  KittiReader reader;
+  reader.initialize(QString::fromStdString(sequences_dirname));
+
+  reader.setNumPriorScans(config.priorScans);
+  reader.setNumPastScans(config.pastScans);
+
+  VoxelGrid priorGrid;
+  VoxelGrid pastGrid;
+
+  priorGrid.initialize(config.voxelSize, config.minExtent, config.maxExtent);
+  pastGrid.initialize(config.voxelSize, config.minExtent, config.maxExtent);
+
+  std::vector<Eigen::Matrix4f> poses = reader.poses();
+
+  uint32_t current = 0;
+
+  while (current < reader.count()) {
+    //    std::cout << current << std::endl;
+    std::stringstream outname;
+    outname << std::setfill('0') << std::setw(6) << current;
+
+    std::vector<PointcloudPtr> priorPoints;
+    std::vector<LabelsPtr> priorLabels;
+    std::vector<PointcloudPtr> pastPoints;
+    std::vector<LabelsPtr> pastLabels;
+
+    reader.retrieve(current, priorPoints, priorLabels, pastPoints, pastLabels);
+
+    // ensure that labels are present, only then store data.
+    uint32_t labelCount = 0;
+    uint32_t pointCount = 0;
+
+    for (uint32_t i = 0; i < pastLabels.size(); ++i) {
+      pointCount += pastLabels[i]->size();
+      for (uint32_t j = 0; j < pastLabels[i]->size(); ++j) {
+        uint32_t label = (*pastLabels[i])[j];
+        if (label > 0) labelCount += 1;
+      }
+    }
+
+    float percentageLabeled = 100.0f * labelCount / pointCount;
+//    std::cout << percentageLabeled << "% points labeled." << std::endl;
+
+    priorGrid.clear();
+    pastGrid.clear();
+
+    if (percentageLabeled > 0.0f) {
+      Eigen::Matrix4f anchor_pose = priorPoints.back()->pose;
+
+//      Stopwatch::tic();
+      fillVoxelGrid(anchor_pose, priorPoints, priorLabels, priorGrid, config);
+      fillVoxelGrid(anchor_pose, priorPoints, priorLabels, pastGrid, config);
+      fillVoxelGrid(anchor_pose, pastPoints, pastLabels, pastGrid, config);
+//      std::cout << "fill voxelgrid took " << Stopwatch::toc() << std::endl;
+
+//      Stopwatch::tic();
+      priorGrid.updateOcclusions();
+      pastGrid.updateOcclusions();
+//      std::cout << "update occlusions took " << Stopwatch::toc() << std::endl;
+
+      //# Fill voxels from ground
+      // Stopwatch::tic();
+      // priorGrid.insertOcclusionLabels();
+      // pastGrid.insertOcclusionLabels();
+      // std::cout << "occlusion labels took " << Stopwatch::toc() << std::endl;
+
+//      Stopwatch::tic();
+      for (uint32_t i = 0; i < pastPoints.size(); ++i) {
+        Eigen::Vector3f endpoint = (anchor_pose.inverse() * pastPoints[i]->pose).col(3).head(3);
+        pastGrid.updateInvalid(endpoint);
+      }
+//      std::cout << "update invalid took " << Stopwatch::toc() << std::endl;
+
+      // store grid in mat file.
+      saveVoxelGrid(priorGrid, output_voxel_dirname, outname.str(), "input");
+      saveVoxelGrid(pastGrid, output_voxel_dirname, outname.str(), "target");
+
+
+    } else {
+      std::cout << "skipped." << std::endl;
+    }
+
+    // get index of next scan.
+    float distance = 0.0f;
+    uint32_t count = 0;
+    while ((count < config.stride_num || distance < config.stride_distance || count == 0) &&
+           current + 1 < poses.size()) {
+      distance += poseDistance(poses[current], poses[current + 1]);
+      count += 1;
+      current += 1;
+    }
+
+    if ((count < config.stride_num || distance < config.stride_distance || count == 0) && current + 1 >= poses.size()) {
+      // no further scan can be extracted possible.
+      break;
+    }
+  }
+
+  return 0;
+}
+```
+
+### src/voxelizer.cpp
+```
+#include <QtWidgets/QApplication>
+#include "widget/Mainframe.h"
+
+int main(int argc, char** argv) {
+  QApplication app(argc, argv);
+
+  Mainframe frame;
+  frame.show();
+
+  return app.exec();
+}
+```
+
+### src/data/Pointcloud.h
+```
+#ifndef SRC_DATA_POINTCLOUD_H_
+#define SRC_DATA_POINTCLOUD_H_
+
+#include <eigen3/Eigen/Dense>
+#include "geometry.h"
+#include <vector>
+
+/** \brief a laserscan with possibly remission.
+ *
+ *  \author behley
+ */
+
+class Laserscan {
+ public:
+  void clear() {
+    points.clear();
+    remissions.clear();
+  }
+  uint32_t size() const { return points.size(); }
+  bool hasRemissions() const { return (points.size() > 0) && (points.size() == remissions.size()); }
+
+  Eigen::Matrix4f pose;
+  std::vector<Point3f> points;
+  std::vector<float> remissions;
+};
+
+#endif /* SRC_DATA_POINTCLOUD_H_ */
+```
+
+### src/data/VoxelGrid.cpp
+```
+#include <data/VoxelGrid.h>
+
+#include <iostream>
+
+void VoxelGrid::initialize(float resolution, const Eigen::Vector4f& min, const Eigen::Vector4f& max) {
+  clear();
+
+  resolution_ = resolution;
+  sizex_ = std::ceil((max.x() - min.x()) / resolution_);
+  sizey_ = std::ceil((max.y() - min.y()) / resolution_);
+  sizez_ = std::ceil((max.z() - min.z()) / resolution_);
+
+  voxels_.resize(sizex_ * sizey_ * sizez_);
+  // ensure that min, max are always inside the voxel grid.
+  float ox = min.x() - 0.5 * (sizex_ * resolution - (max.x() - min.x()));
+  float oy = min.y() - 0.5 * (sizey_ * resolution - (max.y() - min.y()));
+  float oz = min.z() - 0.5 * (sizez_ * resolution - (max.z() - min.z()));
+  offset_ = Eigen::Vector4f(ox, oy, oz, 1);
+
+  //    center_.head(3) = 0.5 * (max - min) + min;
+  //    center_[3] = 0;
+
+  occlusions_.resize(sizex_ * sizey_ * sizez_);
+  occludedBy_.resize(sizex_ * sizey_ * sizez_);
+
+  std::cout << "[Voxelgrid::initialize] " << resolution_ << "; num. voxels = [" << sizex_ << ", " << sizey_ << ", "
+            << sizez_ << "], maxExtent = " << max.transpose() << ", minExtent" << min.transpose() << std::endl;
+}
+
+void VoxelGrid::clear() {
+  for (auto idx : occupied_) {
+    voxels_[idx].count = 0;
+    voxels_[idx].labels.clear();
+  }
+
+  //  for (auto idx : occluded_) {
+  //    voxels_[idx].count = 0;
+  //    voxels_[idx].labels.clear();
+  //  }
+
+  occupied_.clear();
+  //  occluded_.clear();
+}
+
+void VoxelGrid::insert(const Eigen::Vector4f& p, uint32_t label) {
+  Eigen::Vector4f tp = p - offset_;
+  int32_t i = std::floor(tp.x() / resolution_);
+  int32_t j = std::floor(tp.y() / resolution_);
+  int32_t k = std::floor(tp.z() / resolution_);
+
+  if ((i >= int32_t(sizex_)) || (j >= int32_t(sizey_)) || (k >= int32_t(sizez_))) return;
+  if ((i < 0) || (j < 0) || (k < 0)) return;
+
+  int32_t gidx = index(i, j, k);
+  if (gidx < 0 || gidx >= int32_t(voxels_.size())) return;
+
+  if (voxels_[gidx].count == 0) occupied_.push_back(gidx);
+
+  //    float n = voxels_[gidx].count;
+  voxels_[gidx].labels[label] += 1;  //(1. / (n + 1)) * (n * voxels_[gidx].point + p);
+  voxels_[gidx].count += 1;
+  occlusionsValid_ = false;
+}
+
+bool VoxelGrid::isOccluded(int32_t i, int32_t j, int32_t k) const { return occlusions_[index(i, j, k)] > -1; }
+
+bool VoxelGrid::isFree(int32_t i, int32_t j, int32_t k) const { return occlusions_[index(i, j, k)] == -1; }
+
+bool VoxelGrid::isInvalid(int32_t i, int32_t j, int32_t k) const {
+  if (int32_t(invalid_.size()) <= index(i, j, k)) return true;
+
+  return (invalid_[index(i, j, k)] > -1) && (invalid_[index(i, j, k)] != index(i, j, k));
+}
+
+void VoxelGrid::insertOcclusionLabels() {
+  if (!occlusionsValid_) updateOcclusions();
+
+  for (uint32_t i = 0; i < sizex_; ++i) {
+    for (uint32_t j = 0; j < sizey_; ++j) {
+      for (uint32_t k = 0; k < sizez_; ++k) {
+        // heuristic: find label from above.
+        if (occlusions_[index(i, j, k)] != index(i, j, k)) {
+          int32_t n = 1;
+          while ((k + n < sizez_) && isOccluded(i, j, k + n) && voxels_[index(i, j, k + n)].count == 0) n += 1;
+          if (k + n < sizez_ && voxels_[index(i, j, k + n)].count > 0) {
+            int32_t gidx = index(i, j, k);
+            if (voxels_[gidx].count == 0) occupied_.push_back(gidx);
+
+            voxels_[gidx].count = voxels_[index(i, j, k + n)].count;
+            voxels_[gidx].labels = voxels_[index(i, j, k + n)].labels;
+          }
+        }
+      }
+    }
+  }
+}
+
+void VoxelGrid::updateOcclusions() {
+  std::fill(occludedBy_.begin(), occludedBy_.end(), -2);
+  std::fill(occlusions_.begin(), occlusions_.end(), -1);
+  uint32_t occludedByCalls = 0;
+
+  // move from outer to inner voxels.
+  uint32_t num_shells = std::min<uint32_t>(sizex_, std::ceil(0.5 * sizey_));
+
+  for (uint32_t o = 0; o < num_shells; ++o) {
+    uint32_t i = sizex_ - o - 1;
+
+    for (uint32_t j = 0; j < sizey_; ++j) {
+      for (uint32_t k = 0; k < sizez_; ++k) {
+        int32_t idx = index(i, j, k);
+        if (occludedBy_[idx] == -2) {
+          occludedByCalls += 1;
+          occludedBy_[idx] = occludedBy(i, j, k);
+        }
+        occlusions_[idx] = occludedBy_[idx];
+        //        if (occlusions_[idx] != idx) occluded_.push_back(idx);
+      }
+    }
+
+    uint32_t j = o;
+    for (uint32_t i = 0; i < sizex_ - o - 1; ++i) {
+      for (uint32_t k = 0; k < sizez_; ++k) {
+        int32_t idx = index(i, j, k);
+        if (occludedBy_[idx] == -2) {
+          occludedByCalls += 1;
+          occludedBy_[idx] = occludedBy(i, j, k);
+        }
+        occlusions_[idx] = occludedBy_[idx];
+        //          if (occlusions_[idx] != idx) occluded_.push_back(idx);
+      }
+    }
+
+    j = sizey_ - o - 1;
+    for (uint32_t i = 0; i < sizex_ - o - 1; ++i) {
+      for (uint32_t k = 0; k < sizez_; ++k) {
+        int32_t idx = index(i, j, k);
+        if (occludedBy_[idx] == -2) {
+          occludedByCalls += 1;
+          occludedBy_[idx] = occludedBy(i, j, k);
+        }
+        occlusions_[idx] = occludedBy_[idx];
+        //          if (occlusions_[idx] != idx) occluded_.push_back(idx);
+      }
+    }
+  }
+
+  // sanity check:
+//  for (uint32_t i = 0; i < occludedBy_.size(); ++i) {
+//    if (occludedBy_[i] == -2) std::cout << "occludedBy == -2" << std::endl;
+//  }
+
+  //  for (uint32_t i = 0; i < sizex_; ++i) {
+  //    for (uint32_t j = 0; j < sizey_; ++j) {
+  //      for (uint32_t k = 0; k < sizez_; ++k) {
+  //        int32_t idx = index(i, j, k);
+  //        if (occludedBy_[idx] == -2) {
+  //          occludedByCalls += 1;
+  //          occludedBy_[idx] = occludedBy(i, j, k);
+  //        }
+  //        occlusions_[idx] = occludedBy_[idx];
+  //        if (occlusions_[idx] != idx) occluded_.push_back(idx);
+  //      }
+  //    }
+  //  }
+
+  //  std::cout << "occludedBy called " << occludedByCalls << " times." << std::endl;
+
+  invalid_ = occlusions_;
+  occlusionsValid_ = true;
+}
+
+void VoxelGrid::updateInvalid(const Eigen::Vector3f& position) {
+  if (!occlusionsValid_) updateOcclusions();
+
+  std::fill(occludedBy_.begin(), occludedBy_.end(), -2);
+
+  // move from outer to inner voxels.
+  uint32_t num_shells = std::min<uint32_t>(sizex_, std::ceil(0.5 * sizey_));
+
+  for (uint32_t o = 0; o < num_shells; ++o) {
+    uint32_t i = sizex_ - o - 1;
+
+    for (uint32_t j = 0; j < sizey_; ++j) {
+      for (uint32_t k = 0; k < sizez_; ++k) {
+        int32_t idx = index(i, j, k);
+        if (invalid_[idx] == -1) continue;  // just skip. invalid cannot be less then -1.
+
+        if (occludedBy_[idx] == -2) {
+          occludedBy_[idx] = occludedBy(i, j, k, position);
+        }
+        invalid_[idx] = std::min<int32_t>(invalid_[idx], occludedBy_[idx]);
+      }
+    }
+
+    uint32_t j = o;
+    for (uint32_t i = 0; i < sizex_ - o - 1; ++i) {
+      for (uint32_t k = 0; k < sizez_; ++k) {
+        int32_t idx = index(i, j, k);
+        if (invalid_[idx] == -1) continue;  // just skip. invalid cannot be less then -1.
+
+        if (occludedBy_[idx] == -2) {
+          occludedBy_[idx] = occludedBy(i, j, k, position);
+        }
+        invalid_[idx] = std::min<int32_t>(invalid_[idx], occludedBy_[idx]);
+      }
+    }
+
+    j = sizey_ - o - 1;
+    for (uint32_t i = 0; i < sizex_ - o - 1; ++i) {
+      for (uint32_t k = 0; k < sizez_; ++k) {
+        int32_t idx = index(i, j, k);
+        if (invalid_[idx] == -1) continue;  // just skip. invalid cannot be less then -1.
+
+        if (occludedBy_[idx] == -2) {
+          occludedBy_[idx] = occludedBy(i, j, k, position);
+        }
+        invalid_[idx] = std::min<int32_t>(invalid_[idx], occludedBy_[idx]);
+      }
+    }
+  }
+
+  //  for (uint32_t x = 0; x < sizex_; ++x) {
+  //    for (uint32_t y = 0; y < sizey_; ++y) {
+  //      for (uint32_t z = 0; z < sizez_; ++z) {
+  //        int32_t idx = index(x, y, z);
+  //        // idea: if voxel is not occluded, the value should be -1.
+  //        if (occludedBy_[idx] == -2) occludedBy_[idx] = occludedBy(x, y, z, position);
+  //        invalid_[idx] = std::min<int32_t>(invalid_[idx], occludedBy_[idx]);
+  //      }
+  //    }
+  //  }
+}
+
+int32_t VoxelGrid::occludedBy(int32_t i, int32_t j, int32_t k, const Eigen::Vector3f& endpoint,
+                              std::vector<Eigen::Vector3i>* visited) {
+  float NextCrossingT[3], DeltaT[3]; /** t for next intersection with voxel boundary of axis, t increment for axis
+  **/
+  int32_t Step[3], Out[3], Pos[3];   /** voxel increment for axis, index of of outside voxels, current position **/
+  float dir[3];                      /** ray direction **/
+
+  if (visited != nullptr) visited->clear();
+
+  Pos[0] = i;
+  Pos[1] = j;
+  Pos[2] = k;
+
+  /** calculate direction vector assuming sensor at (0,0,_heightOffset) **/
+  Eigen::Vector3f startpoint = voxel2position(Pos[0], Pos[1], Pos[2]);
+
+  double halfResolution = 0.5 * resolution_;
+
+  dir[0] = endpoint[0] - startpoint[0];
+  dir[1] = endpoint[1] - startpoint[1];
+  dir[2] = endpoint[2] - startpoint[2];
+
+  /** initialize variables for traversal **/
+  for (uint32_t axis = 0; axis < 3; ++axis) {
+    if (dir[axis] < 0) {
+      NextCrossingT[axis] = -halfResolution / dir[axis];
+      DeltaT[axis] = -resolution_ / dir[axis];
+      Step[axis] = -1;
+      Out[axis] = 0;
+    } else {
+      NextCrossingT[axis] = halfResolution / dir[axis];
+      DeltaT[axis] = resolution_ / dir[axis];
+      Step[axis] = 1;
+      Out[axis] = size(axis);
+    }
+  }
+
+  Eigen::Vector3i endindexes = position2voxel(endpoint);
+  int32_t i_end = endindexes[0];
+  int32_t j_end = endindexes[1];
+  int32_t k_end = endindexes[2];
+
+  const int32_t cmpToAxis[8] = {2, 1, 2, 1, 2, 2, 0, 0};
+  int32_t iteration = 0;
+
+  std::vector<uint32_t> traversed;
+  traversed.reserve(std::max(sizex_, std::max(sizey_, sizez_)));
+
+  for (;;)  // loop infinitely...
+  {
+    if (Pos[0] < 0 || Pos[1] < 0 || Pos[2] < 0) break;
+    if (Pos[0] >= int32_t(sizex_) || Pos[1] >= int32_t(sizey_) || Pos[2] >= int32_t(sizez_)) break;
+
+    int32_t idx = index(Pos[0], Pos[1], Pos[2]);
+    bool occupied = voxels_[idx].count > 0;
+    if (visited != nullptr) visited->push_back(Eigen::Vector3i(Pos[0], Pos[1], Pos[2]));
+
+    if (occupied) {
+      for (auto i : traversed) occludedBy_[i] = idx;
+      return idx;
+    }
+
+    traversed.push_back(idx);
+
+    int32_t bits = ((NextCrossingT[0] < NextCrossingT[1]) << 2) + ((NextCrossingT[0] < NextCrossingT[2]) << 1) +
+                   ((NextCrossingT[1] < NextCrossingT[2]));
+    int32_t stepAxis = cmpToAxis[bits]; /* branch-free looping */
+
+    Pos[stepAxis] += Step[stepAxis];
+    NextCrossingT[stepAxis] += DeltaT[stepAxis];
+
+    /** note the first condition should never happen, since we want to reach a point inside the grid **/
+    if (Pos[stepAxis] == Out[stepAxis]) break;                         //... until outside, and leaving the loop here!
+    if (Pos[0] == i_end && Pos[1] == j_end && Pos[2] == k_end) break;  // .. or the sensor origin is reached.
+
+    ++iteration;
+  }
+
+  for (auto i : traversed) occludedBy_[i] = -1;
+
+  return -1;
+}
+```
+
+### src/data/VoxelGrid.h
+```
+#ifndef SRC_DATA_VOXELGRID_H_
+#define SRC_DATA_VOXELGRID_H_
+
+#include <eigen3/Eigen/Dense>
+#include <iostream>
+#include <map>
+#include <vector>
+
+/** \brief simple Voxelgrid data structure with a label historgram per voxel.
+ *
+ *  Instead of averaging of points per voxel, we simply record the label of the point.
+ *
+ *
+ *  \author behley
+ */
+
+class VoxelGrid {
+ public:
+  class Voxel {
+   public:
+    std::map<uint32_t, uint32_t> labels;
+    uint32_t count{0};
+  };
+
+  /** \brief set parameters of voxel grid and compute internal offsets,  etc. **/
+  void initialize(float resolution, const Eigen::Vector4f& min, const Eigen::Vector4f& max);
+
+  Voxel& operator()(uint32_t i, uint32_t j, uint32_t k) { return voxels_[index(i, j, k)]; }
+  const Voxel& operator()(uint32_t i, uint32_t j, uint32_t k) const { return voxels_[index(i, j, k)]; }
+
+  /** \brief cleanup voxelgrid. **/
+  void clear();
+
+  /** \brief add label for specific point to voxel grid **/
+  void insert(const Eigen::Vector4f& p, uint32_t label);
+  /** \brief get  all voxels. **/
+  const std::vector<Voxel>& voxels() const { return voxels_; }
+
+  const Eigen::Vector4f& offset() const { return offset_; }
+
+  uint32_t num_elements() const { return sizex_ * sizey_ * sizez_; }
+
+  /** \brief get size in specific dimension **/
+  uint32_t size(uint32_t dim) const { return (&sizex_)[std::max<uint32_t>(std::min<uint32_t>(dim, 2), 0)]; }
+
+  /** \brief resolutions aka sidelength of a voxel **/
+  float resolution() const { return resolution_; }
+
+  /** \brief check for each voxel if  there is voxel occluding the voxel. **/
+  void updateOcclusions();
+
+  /** \brief update invalid flags with given position to cast rays for occlusion check. **/
+  void updateInvalid(const Eigen::Vector3f& position);
+
+  /** \brief fill occluded areas with labels. **/
+  void insertOcclusionLabels();
+
+  /** \brief get if voxel at (i,j,k) is occluded.
+   *  Assumes that updateOcclusions has been called before,
+   *
+   *  \see updateOcclusions
+   **/
+  bool isOccluded(int32_t i, int32_t j, int32_t k) const;
+
+  /** \brief get if voxel at (i,j,k) is free.
+   *  Assumes that updateOcclusions has been called before,
+   *
+   *  \see updateOcclusions
+   **/
+  bool isFree(int32_t i, int32_t j, int32_t k) const;
+
+  /** \brief get if voxel at (i,j,k) is invalid.
+   *  Assumes that updateInvalid was called with all observation positions.
+   *
+   *  \see updateInvalid.
+   **/
+  bool isInvalid(int32_t i, int32_t j, int32_t k) const;
+
+  /** \brief check if given voxel is occluded.
+   *
+   *  \param i,j,k        voxel indexes
+   *  \param endpoint     end point of ray (optional)
+   *  \param visited      visited voxel indexes.
+   *
+   *  traces a ray from the voxel to the given endpoint.
+   *
+   *  \return index of voxel that occludes given voxel, -1  if voxel is not occluded.
+   **/
+  int32_t occludedBy(int32_t i, int32_t j, int32_t k, const Eigen::Vector3f& endpoint = Eigen::Vector3f::Zero(),
+                     std::vector<Eigen::Vector3i>* visited = nullptr);
+
+  /** \brief get position of voxel center. **/
+  inline Eigen::Vector3f voxel2position(int32_t i, int32_t j, int32_t k) const {
+    return Eigen::Vector3f(offset_[0] + i * resolution_ + 0.5 * resolution_,
+                           offset_[1] + j * resolution_ + 0.5 * resolution_,
+                           offset_[2] + k * resolution_ + 0.5 * resolution_);
+  }
+
+  inline Eigen::Vector3i position2voxel(const Eigen::Vector3f& pos) const {
+    return Eigen::Vector3i((pos[0] - offset_[0]) / resolution_, (pos[1] - offset_[1]) / resolution_,
+                           (pos[2] - offset_[2]) / resolution_);
+  }
+
+  inline int32_t index(int32_t i, int32_t j, int32_t k) const {
+    //    if (i >= sizex_ || j >= sizey_ || k >= sizez_) {
+    //      std::cout << sizex_ << ", " << sizey_ << ", " << sizez_ << std::endl;
+    //      std::cout << i << ", " << j << ", " << k << std::endl;
+    //
+    //      std::cout << "indexes to large." << std::endl;
+    //    }
+    //    if (i < 0 || j < 0 || k < 0) {
+    //
+    //      std::cout << i << ", " << j << ", " << k << std::endl;
+    //
+    //      std::cout << "indexes too small" << std::endl;
+    //    }
+    return i + j * sizex_ + k * sizex_ * sizey_;
+  }
+
+ protected:
+  float resolution_;
+
+  uint32_t sizex_, sizey_, sizez_;
+  std::vector<Voxel> voxels_;
+  std::vector<uint32_t> occupied_;
+
+  Eigen::Vector4f offset_;
+
+  std::vector<int32_t> occlusions_;  // filled by updateOcclusions.
+  std::vector<int32_t> invalid_;
+  bool occlusionsValid_{false};
+//  std::vector<uint32_t> occluded_;  // filled by updateOcclusions.
+
+  std::vector<int32_t> occludedBy_;
+};
+
+#endif /* SRC_DATA_VOXELGRID_H_ */
+```
+
+### src/data/common.h
+```
+#ifndef SRC_WIDGET_COMMON_H_
+#define SRC_WIDGET_COMMON_H_
+
+#include <data/Pointcloud.h>
+#include <memory>
+#include "data/geometry.h"
+#include <glow/glutil.h>
+
+typedef std::shared_ptr<Laserscan> PointcloudPtr;
+typedef std::shared_ptr<std::vector<uint32_t>> LabelsPtr;
+typedef std::shared_ptr<std::vector<float>> ColorsPtr;
+
+
+struct LabeledVoxel{
+  public:
+    glow::vec3 position;  // lower left corner
+    uint32_t label;       // majority voted label.
+};
+
+#endif /* SRC_WIDGET_COMMON_H_ */
+```
+
+### src/data/geometry.h
+```
+/*
+ pbrt source code Copyright(c) 1998-2010 Matt Pharr and Greg Humphreys.
+
+ This file is part of pbrt.
+
+ pbrt is free software; you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation; either version 2 of the License, or
+ (at your option) any later version.  Note that the text contents of
+ the book "Physically Based Rendering" are *not* licensed under the
+ GNU GPL.
+
+ pbrt is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+ */
+
+/**
+ * Distinguish between points, vectors, and normals. Especially, normals need
+ * other implementation of transformations.
+ *
+ * For further information:
+ *    Matt Pharr, Greg Humphreys.
+ *    Physically Based Rendering - From Theory to Implementation.
+ *    Morgan Kaufmann, 2010.
+ */
+
+#ifndef GEOMETRY_H
+#define GEOMETRY_H
+
+#include <stdint.h>
+#include <cassert>
+#include <cmath>
+#include <iostream>
+
+// Global Inline Functions
+inline float Lerp(float t, float v1, float v2) {
+  return (1.f - t) * v1 + t * v2;
+}
+
+inline float Clamp(float val, float low, float high) {
+  if (val < low)
+    return low;
+  else if (val > high)
+    return high;
+  else
+    return val;
+}
+
+inline int Clamp(int val, int low, int high) {
+  if (val < low)
+    return low;
+  else if (val > high)
+    return high;
+  else
+    return val;
+}
+
+inline int Mod(int a, int b) {
+  int n = int(a / b);
+  a -= n * b;
+  if (a < 0) a += b;
+  return a;
+}
+
+inline float Radians(float deg) {
+  return ((float)M_PI / 180.f) * deg;
+}
+
+inline float Degrees(float rad) {
+  return (180.f / (float)M_PI) * rad;
+}
+
+inline float Log2(float x) {
+  static float invLog2 = 1.f / logf(2.f);
+  return logf(x) * invLog2;
+}
+
+inline int Floor2Int(float val);
+inline int Log2Int(float v) {
+  return Floor2Int(Log2(v));
+}
+
+inline bool IsPowerOf2(int v) {
+  return (v & (v - 1)) == 0;
+}
+
+inline uint32_t RoundUpPow2(uint32_t v) {
+  v--;
+  v |= v >> 1;
+  v |= v >> 2;
+  v |= v >> 4;
+  v |= v >> 8;
+  v |= v >> 16;
+  return v + 1;
+}
+
+inline int Floor2Int(float val) {
+  return (int)floorf(val);
+}
+
+inline int Round2Int(float val) {
+  return Floor2Int(val + 0.5f);
+}
+
+inline int Float2Int(float val) {
+  return (int)val;
+}
+
+inline int Ceil2Int(float val) {
+  return (int)ceilf(val);
+}
+
+struct Vector3f;
+struct Point3f;
+struct Normal3f;
+
+// Geometry Declarations
+struct Vector3f {
+ public:
+  // Vector3f Public Methods
+  Vector3f() { x = y = z = 0.f; }
+  Vector3f(float xx, float yy, float zz) : x(xx), y(yy), z(zz) { assert(!HasNaNs()); }
+  bool HasNaNs() const { return std::isnan(x) || std::isnan(y) || std::isnan(z); }
+  explicit Vector3f(const Point3f &p);
+#ifndef NDEBUG
+  // The default versions of these are fine for release builds; for debug
+  // we define them so that we can add the assert checks.
+  Vector3f(const Vector3f &v) {
+    assert(!v.HasNaNs());
+    x = v.x;
+    y = v.y;
+    z = v.z;
+  }
+
+  Vector3f &operator=(const Vector3f &v) {
+    assert(!v.HasNaNs());
+    x = v.x;
+    y = v.y;
+    z = v.z;
+    return *this;
+  }
+#endif  // !NDEBUG
+  Vector3f operator+(const Vector3f &v) const {
+    assert(!v.HasNaNs());
+    return Vector3f(x + v.x, y + v.y, z + v.z);
+  }
+
+  Vector3f &operator+=(const Vector3f &v) {
+    assert(!v.HasNaNs());
+    x += v.x;
+    y += v.y;
+    z += v.z;
+    return *this;
+  }
+  Vector3f operator-(const Vector3f &v) const {
+    assert(!v.HasNaNs());
+    return Vector3f(x - v.x, y - v.y, z - v.z);
+  }
+
+  Vector3f &operator-=(const Vector3f &v) {
+    assert(!v.HasNaNs());
+    x -= v.x;
+    y -= v.y;
+    z -= v.z;
+    return *this;
+  }
+  Vector3f operator*(float f) const { return Vector3f(f * x, f * y, f * z); }
+
+  Vector3f &operator*=(float f) {
+    assert(!std::isnan(f));
+    x *= f;
+    y *= f;
+    z *= f;
+    return *this;
+  }
+  Vector3f operator/(float f) const {
+    assert(f != 0);
+    float inv = 1.f / f;
+    return Vector3f(x * inv, y * inv, z * inv);
+  }
+
+  Vector3f &operator/=(float f) {
+    assert(f != 0);
+    float inv = 1.f / f;
+    x *= inv;
+    y *= inv;
+    z *= inv;
+    return *this;
+  }
+  Vector3f operator-() const { return Vector3f(-x, -y, -z); }
+  float operator[](int i) const {
+    assert(i >= 0 && i <= 2);
+    return (&x)[i];
+  }
+
+  float &operator[](int i) {
+    assert(i >= 0 && i <= 2);
+    return (&x)[i];
+  }
+  float LengthSquared() const { return x * x + y * y + z * z; }
+  float Length() const { return sqrtf(LengthSquared()); }
+  explicit Vector3f(const Normal3f &n);
+
+  bool operator==(const Vector3f &v) const { return x == v.x && y == v.y && z == v.z; }
+  bool operator!=(const Vector3f &v) const { return x != v.x || y != v.y || z != v.z; }
+
+  friend std::ostream &operator<<(std::ostream &out, const Vector3f &v) {
+    out.width(4);
+    out.precision(3);
+    out << v.x << ", " << v.y << ", " << v.z;
+    return out;
+  }
+
+  // Vector3f Public Data
+  float x, y, z;
+};
+
+struct Point3f {
+ public:
+  // Point3f Public Methods
+  Point3f() { x = y = z = 0.f; }
+  Point3f(float xx, float yy, float zz) : x(xx), y(yy), z(zz) {
+    if (HasNaNs()) std::cerr << *this << std::endl;
+    assert(!HasNaNs());
+  }
+  explicit Point3f(const Vector3f &v) : x(v.x), y(v.y), z(v.z) {}
+
+#ifndef NDEBUG
+  Point3f(const Point3f &p) {
+    if (p.HasNaNs()) std::cerr << p << std::endl;
+    assert(!p.HasNaNs());
+    x = p.x;
+    y = p.y;
+    z = p.z;
+  }
+
+  Point3f &operator=(const Point3f &p) {
+    if (p.HasNaNs()) std::cerr << p << std::endl;
+    assert(!p.HasNaNs());
+    x = p.x;
+    y = p.y;
+    z = p.z;
+    return *this;
+  }
+#endif  // !NDEBUG
+  Point3f operator+(const Vector3f &v) const {
+    assert(!v.HasNaNs());
+    return Point3f(x + v.x, y + v.y, z + v.z);
+  }
+
+  Point3f &operator+=(const Vector3f &v) {
+    assert(!v.HasNaNs());
+    x += v.x;
+    y += v.y;
+    z += v.z;
+    return *this;
+  }
+  Vector3f operator-(const Point3f &p) const {
+    assert(!p.HasNaNs());
+    return Vector3f(x - p.x, y - p.y, z - p.z);
+  }
+
+  Point3f operator-(const Vector3f &v) const {
+    assert(!v.HasNaNs());
+    return Point3f(x - v.x, y - v.y, z - v.z);
+  }
+
+  Point3f &operator-=(const Vector3f &v) {
+    assert(!v.HasNaNs());
+    x -= v.x;
+    y -= v.y;
+    z -= v.z;
+    return *this;
+  }
+  Point3f &operator+=(const Point3f &p) {
+    assert(!p.HasNaNs());
+    x += p.x;
+    y += p.y;
+    z += p.z;
+    return *this;
+  }
+  Point3f operator+(const Point3f &p) const {
+    assert(!p.HasNaNs());
+    return Point3f(x + p.x, y + p.y, z + p.z);
+  }
+  Point3f operator*(float f) const { return Point3f(f * x, f * y, f * z); }
+  Point3f &operator*=(float f) {
+    x *= f;
+    y *= f;
+    z *= f;
+    return *this;
+  }
+  Point3f operator/(float f) const {
+    float inv = 1.f / f;
+    return Point3f(inv * x, inv * y, inv * z);
+  }
+  Point3f &operator/=(float f) {
+    float inv = 1.f / f;
+    x *= inv;
+    y *= inv;
+    z *= inv;
+    return *this;
+  }
+  float operator[](int i) const {
+    //      assert(i >= 0 && i <= 2); ** CUDA doesn't allow assertion in kernels **
+    return (&x)[i];
+  }
+
+  float &operator[](int i) {
+    //      assert(i >= 0 && i <= 2); ** CUDA doesn't allow assertion in kernels **
+    return (&x)[i];
+  }
+  bool HasNaNs() const { return std::isnan(x) || std::isnan(y) || std::isnan(z); }
+
+  bool operator==(const Point3f &p) const { /** todo: epsilon tests? **/
+    return x == p.x && y == p.y && z == p.z;
+  }
+
+  bool operator!=(const Point3f &p) const { /** todo: epsilon tests? **/
+    return x != p.x || y != p.y || z != p.z;
+  }
+
+  friend std::ostream &operator<<(std::ostream &out, const Point3f &p) {
+    out.width(4);
+    out.precision(3);
+    out << p.x << ", " << p.y << ", " << p.z;
+    return out;
+  }
+  // Point3f Public Data
+  float x, y, z;
+};
+
+struct Normal3f {
+ public:
+  // Normal3f Public Methods
+  Normal3f() { x = y = z = 0.f; }
+  Normal3f(float xx, float yy, float zz) : x(xx), y(yy), z(zz) { assert(!HasNaNs()); }
+  Normal3f operator-() const { return Normal3f(-x, -y, -z); }
+  Normal3f operator+(const Normal3f &n) const {
+    assert(!n.HasNaNs());
+    return Normal3f(x + n.x, y + n.y, z + n.z);
+  }
+
+  Normal3f &operator+=(const Normal3f &n) {
+    assert(!n.HasNaNs());
+    x += n.x;
+    y += n.y;
+    z += n.z;
+    return *this;
+  }
+  Normal3f operator-(const Normal3f &n) const {
+    assert(!n.HasNaNs());
+    return Normal3f(x - n.x, y - n.y, z - n.z);
+  }
+
+  Normal3f &operator-=(const Normal3f &n) {
+    assert(!n.HasNaNs());
+    x -= n.x;
+    y -= n.y;
+    z -= n.z;
+    return *this;
+  }
+  bool HasNaNs() const { return std::isnan(x) || std::isnan(y) || std::isnan(z); }
+  Normal3f operator*(float f) const { return Normal3f(f * x, f * y, f * z); }
+
+  Normal3f &operator*=(float f) {
+    x *= f;
+    y *= f;
+    z *= f;
+    return *this;
+  }
+  Normal3f operator/(float f) const {
+    assert(f != 0);
+    float inv = 1.f / f;
+    return Normal3f(x * inv, y * inv, z * inv);
+  }
+
+  Normal3f &operator/=(float f) {
+    assert(f != 0);
+    float inv = 1.f / f;
+    x *= inv;
+    y *= inv;
+    z *= inv;
+    return *this;
+  }
+  float LengthSquared() const { return x * x + y * y + z * z; }
+  float Length() const { return sqrtf(LengthSquared()); }
+
+#ifndef NDEBUG
+  Normal3f(const Normal3f &n) {
+    assert(!n.HasNaNs());
+    x = n.x;
+    y = n.y;
+    z = n.z;
+  }
+
+  Normal3f &operator=(const Normal3f &n) {
+    assert(!n.HasNaNs());
+    x = n.x;
+    y = n.y;
+    z = n.z;
+    return *this;
+  }
+#endif  // !NDEBUG
+  explicit Normal3f(const Vector3f &v) : x(v.x), y(v.y), z(v.z) { assert(!v.HasNaNs()); }
+  float operator[](int i) const {
+    assert(i >= 0 && i <= 2);
+    return (&x)[i];
+  }
+
+  float &operator[](int i) {
+    assert(i >= 0 && i <= 2);
+    return (&x)[i];
+  }
+
+  bool operator==(const Normal3f &n) const { return x == n.x && y == n.y && z == n.z; }
+  bool operator!=(const Normal3f &n) const { return x != n.x || y != n.y || z != n.z; }
+
+  // Normal3f Public Data
+  float x, y, z;
+};
+
+struct Ray {
+ public:
+  // Ray Public Methods
+  Ray() : mint(0.f), maxt(INFINITY), time(0.f), depth(0) {}
+  Ray(const Point3f &origin, const Vector3f &direction, float start, float end = INFINITY, float t = 0.f, int d = 0)
+      : o(origin), d(direction), mint(start), maxt(end), time(t), depth(d) {}
+  Ray(const Point3f &origin, const Vector3f &direction, const Ray &parent, float start, float end = INFINITY)
+      : o(origin), d(direction), mint(start), maxt(end), time(parent.time), depth(parent.depth + 1) {}
+  Point3f operator()(float t) const { return o + d * t; }
+  bool HasNaNs() const { return (o.HasNaNs() || d.HasNaNs() || std::isnan(mint) || std::isnan(maxt)); }
+
+  // Ray Public Data
+  Point3f o;
+  Vector3f d;
+  mutable float mint, maxt;
+  float time;
+  int depth;
+};
+
+// Geometry Inline Functions
+inline Vector3f::Vector3f(const Point3f &p) : x(p.x), y(p.y), z(p.z) {
+  assert(!HasNaNs());
+}
+
+inline Vector3f operator*(float f, const Vector3f &v) {
+  return v * f;
+}
+inline float Dot(const Vector3f &v1, const Vector3f &v2) {
+  assert(!v1.HasNaNs() && !v2.HasNaNs());
+  return v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
+}
+
+inline float AbsDot(const Vector3f &v1, const Vector3f &v2) {
+  assert(!v1.HasNaNs() && !v2.HasNaNs());
+  return fabsf(Dot(v1, v2));
+}
+
+inline Vector3f Cross(const Vector3f &v1, const Vector3f &v2) {
+  assert(!v1.HasNaNs() && !v2.HasNaNs());
+  double v1x = v1.x, v1y = v1.y, v1z = v1.z;
+  double v2x = v2.x, v2y = v2.y, v2z = v2.z;
+  return Vector3f((v1y * v2z) - (v1z * v2y), (v1z * v2x) - (v1x * v2z), (v1x * v2y) - (v1y * v2x));
+}
+
+inline Vector3f Cross(const Vector3f &v1, const Normal3f &v2) {
+  assert(!v1.HasNaNs() && !v2.HasNaNs());
+  double v1x = v1.x, v1y = v1.y, v1z = v1.z;
+  double v2x = v2.x, v2y = v2.y, v2z = v2.z;
+  return Vector3f((v1y * v2z) - (v1z * v2y), (v1z * v2x) - (v1x * v2z), (v1x * v2y) - (v1y * v2x));
+}
+
+inline Vector3f Cross(const Normal3f &v1, const Vector3f &v2) {
+  assert(!v1.HasNaNs() && !v2.HasNaNs());
+  double v1x = v1.x, v1y = v1.y, v1z = v1.z;
+  double v2x = v2.x, v2y = v2.y, v2z = v2.z;
+  return Vector3f((v1y * v2z) - (v1z * v2y), (v1z * v2x) - (v1x * v2z), (v1x * v2y) - (v1y * v2x));
+}
+
+inline Vector3f Normalize(const Vector3f &v) {
+  return v / v.Length();
+}
+
+// inline void CoordinateSystem(const Vector3f &v1, Vector3f *v2, Vector3f *v3)
+//{
+//  if (fabsf(v1.x) > fabsf(v1.y))
+//  {
+//    float invLen = 1.f / sqrtf(v1.x * v1.x + v1.z * v1.z);
+//    *v2 = Vector3f(-v1.z * invLen, 0.f, v1.x * invLen);
+//  }
+//  else
+//  {
+//    float invLen = 1.f / sqrtf(v1.y * v1.y + v1.z * v1.z);
+//    *v2 = Vector3f(0.f, v1.z * invLen, -v1.y * invLen);
+//  }
+//  *v3 = Cross(v1, *v2);
+//}
+
+inline float Distance(const Point3f &p1, const Point3f &p2) {
+  return (p1 - p2).Length();
+}
+
+inline float DistanceSquared(const Point3f &p1, const Point3f &p2) {
+  return (p1 - p2).LengthSquared();
+}
+
+inline Point3f operator*(float f, const Point3f &p) {
+  assert(!p.HasNaNs());
+  return p * f;
+}
+
+inline Normal3f operator*(float f, const Normal3f &n) {
+  return Normal3f(f * n.x, f * n.y, f * n.z);
+}
+
+inline Normal3f Normalize(const Normal3f &n) {
+  return n / n.Length();
+}
+
+inline Vector3f::Vector3f(const Normal3f &n) : x(n.x), y(n.y), z(n.z) {
+  assert(!n.HasNaNs());
+}
+
+inline float Dot(const Normal3f &n1, const Vector3f &v2) {
+  assert(!n1.HasNaNs() && !v2.HasNaNs());
+  return n1.x * v2.x + n1.y * v2.y + n1.z * v2.z;
+}
+
+inline float Dot(const Vector3f &v1, const Normal3f &n2) {
+  assert(!v1.HasNaNs() && !n2.HasNaNs());
+  return v1.x * n2.x + v1.y * n2.y + v1.z * n2.z;
+}
+
+inline float Dot(const Normal3f &n1, const Normal3f &n2) {
+  assert(!n1.HasNaNs() && !n2.HasNaNs());
+  return n1.x * n2.x + n1.y * n2.y + n1.z * n2.z;
+}
+
+inline float AbsDot(const Normal3f &n1, const Vector3f &v2) {
+  assert(!n1.HasNaNs() && !v2.HasNaNs());
+  return fabsf(n1.x * v2.x + n1.y * v2.y + n1.z * v2.z);
+}
+
+inline float AbsDot(const Vector3f &v1, const Normal3f &n2) {
+  assert(!v1.HasNaNs() && !n2.HasNaNs());
+  return fabsf(v1.x * n2.x + v1.y * n2.y + v1.z * n2.z);
+}
+
+inline float AbsDot(const Normal3f &n1, const Normal3f &n2) {
+  assert(!n1.HasNaNs() && !n2.HasNaNs());
+  return fabsf(n1.x * n2.x + n1.y * n2.y + n1.z * n2.z);
+}
+
+inline Normal3f Faceforward(const Normal3f &n, const Vector3f &v) {
+  return (Dot(n, v) < 0.f) ? -n : n;
+}
+
+inline Normal3f Faceforward(const Normal3f &n, const Normal3f &n2) {
+  return (Dot(n, n2) < 0.f) ? -n : n;
+}
+
+inline Vector3f Faceforward(const Vector3f &v, const Vector3f &v2) {
+  return (Dot(v, v2) < 0.f) ? -v : v;
+}
+
+inline Vector3f Faceforward(const Vector3f &v, const Normal3f &n2) {
+  return (Dot(v, n2) < 0.f) ? -v : v;
+}
+
+inline Vector3f SphericalDirection(float sintheta, float costheta, float phi) {
+  return Vector3f(sintheta * cosf(phi), sintheta * sinf(phi), costheta);
+}
+
+inline Vector3f SphericalDirection(float sintheta, float costheta, float phi, const Vector3f &x, const Vector3f &y,
+                                   const Vector3f &z) {
+  return sintheta * cosf(phi) * x + sintheta * sinf(phi) * y + costheta * z;
+}
+
+inline float SphericalTheta(const Vector3f &v) {
+  return acosf(Clamp(v.z, -1.f, 1.f));
+}
+
+inline float SphericalPhi(const Vector3f &v) {
+  float p = atan2f(v.y, v.x);
+  return (p < 0.f) ? p + 2.f * M_PI : p;
+}
+#endif  // GEOMETRY_H
+```
+
+### src/data/kitti_utils.cpp
+```
+#include "kitti_utils.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <boost/lexical_cast.hpp>
+#include <fstream>
+#include <iostream>
+#include <vector>
+#include "rv/string_utils.h"
+
+using namespace rv;
+
+#define SAFE_COMMAND(cmd)                        \
+  if (!system(cmd)) {                            \
+    std::cerr << cmd << " failed." << std::endl; \
+    exit(1);                                     \
+  }
+
+KITTICalibration::KITTICalibration() {}
+
+KITTICalibration::KITTICalibration(const std::string& filename) { initialize(filename); }
+
+const Eigen::Matrix4f& KITTICalibration::operator[](const std::string& name) const {
+  if (m_.find(name) == m_.end()) throw std::runtime_error("Unknown name for calibration matrix.");
+
+  return m_.find(name)->second;
+}
+
+void KITTICalibration::initialize(const std::string& filename) {
+  m_.clear();
+  std::ifstream cin(filename.c_str());
+  if (!cin.is_open()) {
+    throw std::runtime_error(std::string("Unable to open calibration file: ") + filename);
+  }
+  std::string line;
+
+  cin.peek();
+  while (!cin.eof()) {
+    std::getline(cin, line);
+    std::vector<std::string> tokens = rv::split(line, ":");
+
+    if (tokens.size() == 2) {
+      std::string name = rv::trim(tokens[0]);
+      std::vector<std::string> entries = rv::split(rv::trim(tokens[1]), " ");
+      if (entries.size() == 12) {
+        Eigen::Matrix4f m = Eigen::Matrix4f::Identity();
+        for (uint32_t i = 0; i < 12; ++i) {
+          m(i / 4, i - int(i / 4) * 4) = boost::lexical_cast<float>(rv::trim(entries[i]));
+        }
+
+        m_[name] = m;
+      }
+    }
+    cin.peek();
+  }
+
+  cin.close();
+}
+
+void KITTICalibration::clear() { m_.clear(); }
+
+bool KITTICalibration::exists(const std::string& name) const { return (m_.find(name) != m_.end()); }
+
+namespace KITTI {
+
+namespace Odometry {
+
+float lengths[] = {100, 200, 300, 400, 500, 600, 700, 800};
+int32_t num_lengths = 8;
+
+std::vector<Eigen::Matrix4f> loadPoses(const std::string& file_name) {
+  std::vector<Eigen::Matrix4f> poses;
+  std::ifstream fp(file_name.c_str());
+  std::string line;
+
+  if (!fp.is_open()) throw std::runtime_error("Unable to open pose file :" + file_name);
+
+  fp.peek();
+
+  while (fp.good()) {
+    Eigen::Matrix4f P = Eigen::Matrix4f::Identity();
+
+    std::getline(fp, line);
+    std::vector<std::string> entries = rv::split(line, " ");
+
+    if (entries.size() < 12) {
+      fp.peek();
+      continue;
+    }
+
+    for (uint32_t i = 0; i < 12; ++i) {
+      std::string txt = rv::trim(entries[i]);
+      float value = boost::lexical_cast<float>(txt);
+      P(i / 4, i - int(i / 4) * 4) = value;
+    }
+
+    poses.push_back(P);
+
+    fp.peek();
+  }
+
+  fp.close();
+
+  return poses;
+}
+
+std::vector<float> trajectoryDistances(const std::vector<Eigen::Matrix4f>& poses) {
+  std::vector<float> dist;
+  dist.push_back(0);
+  for (uint32_t i = 1; i < poses.size(); i++) {
+    const Eigen::Matrix4f& P1 = poses[i - 1];
+    const Eigen::Matrix4f& P2 = poses[i];
+
+    float dx = P1(0, 3) - P2(0, 3);
+    float dy = P1(1, 3) - P2(1, 3);
+    float dz = P1(2, 3) - P2(2, 3);
+
+    dist.push_back(dist[i - 1] + sqrt(dx * dx + dy * dy + dz * dz));
+  }
+
+  return dist;
+}
+
+int32_t lastFrameFromSegmentLength(const std::vector<float>& dist, int32_t first_frame, float len) {
+  for (uint32_t i = first_frame; i < dist.size(); i++)
+    if (dist[i] > dist[first_frame] + len) return i;
+  return -1;
+}
+
+float rotationError(const Eigen::Matrix4f& pose_error) {
+  float a = pose_error(0, 0);
+  float b = pose_error(1, 1);
+  float c = pose_error(2, 2);
+  float d = 0.5 * (a + b + c - 1.0);
+  return std::acos(std::max(std::min(d, 1.0f), -1.0f));
+}
+
+float translationError(const Eigen::Matrix4f& pose_error) {
+  float dx = pose_error(0, 3);
+  float dy = pose_error(1, 3);
+  float dz = pose_error(2, 3);
+  return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+std::vector<errors> calcSequenceErrors(const std::vector<Eigen::Matrix4f>& poses_gt,
+                                       const std::vector<Eigen::Matrix4f>& poses_result) {
+  // error vector
+  std::vector<errors> err;
+
+  // parameters
+  int32_t step_size = 10;  // every second
+
+  // pre-compute distances (from ground truth as reference)
+  std::vector<float> dist = trajectoryDistances(poses_gt);
+
+  // for all start positions do
+  for (uint32_t first_frame = 0; first_frame < poses_gt.size(); first_frame += step_size) {
+    // for all segment lengths do
+    for (int32_t i = 0; i < num_lengths; i++) {
+      // current length
+      float len = lengths[i];
+
+      // compute last frame
+      int32_t last_frame = lastFrameFromSegmentLength(dist, first_frame, len);
+
+      // continue, if sequence not long enough
+      if (last_frame == -1) continue;
+
+      // compute rotational and translational errors
+      Eigen::Matrix4f pose_delta_gt = poses_gt[first_frame].inverse() * poses_gt[last_frame];
+      Eigen::Matrix4f pose_delta_result = poses_result[first_frame].inverse() * poses_result[last_frame];
+      Eigen::Matrix4f pose_error = pose_delta_result.inverse() * pose_delta_gt;
+      float r_err = rotationError(pose_error);
+      float t_err = translationError(pose_error);
+
+      // compute speed
+      float num_frames = (float)(last_frame - first_frame + 1);
+      float speed = len / (0.1 * num_frames);
+
+      // write to file
+      err.push_back(errors(first_frame, r_err / len, t_err / len, len, speed));
+    }
+  }
+
+  // return error vector
+  return err;
+}
+
+void saveSequenceErrors(const std::vector<errors>& err, const std::string& file_name) {
+  // open file
+  //  FILE *fp;
+  //  fp = fopen(file_name.c_str(), "w");
+  std::ofstream out(file_name.c_str());
+
+  // write to file
+  for (std::vector<errors>::const_iterator it = err.begin(); it != err.end(); it++) {
+    // fprintf(fp, "%d %f %f %f %f\n", it->first_frame, it->r_err, it->t_err, it->len, it->speed);
+    out << it->first_frame << " " << it->r_err << " " << it->t_err << " " << it->len << " " << it->speed << std::endl;
+  }
+
+  // close file
+  //  fclose (fp);
+  out.close();
+}
+
+void savePathPlot(const std::vector<Eigen::Matrix4f>& poses_gt, const std::vector<Eigen::Matrix4f>& poses_result,
+                  const std::string& file_name) {
+  // parameters
+  int32_t step_size = 3;
+
+  // open file
+  //  FILE *fp = fopen(file_name.c_str(), "w");
+  std::ofstream out(file_name.c_str());
+
+  // save x/z coordinates of all frames to file
+  for (uint32_t i = 0; i < poses_gt.size(); i += step_size) {
+    out << poses_gt[i](0, 3) << " " << poses_gt[i](2, 3) << " ";
+    out << poses_result[i](0, 3) << " " << poses_result[i](2, 3) << std::endl;
+  }
+  // close file
+  //  fclose(fp);
+  out.close();
+}
+
+std::vector<int32_t> computeRoi(const std::vector<Eigen::Matrix4f>& poses_gt,
+                                const std::vector<Eigen::Matrix4f>& poses_result) {
+  float x_min = std::numeric_limits<int32_t>::max();
+  float x_max = std::numeric_limits<int32_t>::min();
+  float z_min = std::numeric_limits<int32_t>::max();
+  float z_max = std::numeric_limits<int32_t>::min();
+
+  for (std::vector<Eigen::Matrix4f>::const_iterator it = poses_gt.begin(); it != poses_gt.end(); it++) {
+    float x = (*it)(0, 3);
+    float z = (*it)(2, 3);
+    if (x < x_min) x_min = x;
+    if (x > x_max) x_max = x;
+    if (z < z_min) z_min = z;
+    if (z > z_max) z_max = z;
+  }
+
+  for (std::vector<Eigen::Matrix4f>::const_iterator it = poses_result.begin(); it != poses_result.end(); it++) {
+    float x = (*it)(0, 3);
+    float z = (*it)(2, 3);
+    if (x < x_min) x_min = x;
+    if (x > x_max) x_max = x;
+    if (z < z_min) z_min = z;
+    if (z > z_max) z_max = z;
+  }
+
+  float dx = 1.1 * (x_max - x_min);
+  float dz = 1.1 * (z_max - z_min);
+  float mx = 0.5 * (x_max + x_min);
+  float mz = 0.5 * (z_max + z_min);
+  float r = 0.5 * std::max(dx, dz);
+
+  std::vector<int32_t> roi;
+  roi.push_back((int32_t)(mx - r));
+  roi.push_back((int32_t)(mx + r));
+  roi.push_back((int32_t)(mz - r));
+  roi.push_back((int32_t)(mz + r));
+
+  return roi;
+}
+
+void plotPathPlot(const std::string& dir, const std::vector<int32_t>& roi, int32_t idx) {
+  // gnuplot file name
+  char command[1024];
+  char file_name[256];
+  sprintf(file_name, "%02d.gp", idx);
+  std::string full_name = dir + "/" + file_name;
+
+  // create png + eps
+  for (int32_t i = 0; i < 2; i++) {
+    // open file
+    FILE* fp = fopen(full_name.c_str(), "w");
+
+    // save gnuplot instructions
+    if (i == 0) {
+      fprintf(fp, "set term png size 900,900\n");
+      fprintf(fp, "set output \"%02d.png\"\n", idx);
+    } else {
+      fprintf(fp, "set term postscript eps enhanced color\n");
+      fprintf(fp, "set output \"%02d.eps\"\n", idx);
+    }
+
+    fprintf(fp, "set size ratio -1\n");
+    fprintf(fp, "set xrange [%d:%d]\n", roi[0], roi[1]);
+    fprintf(fp, "set yrange [%d:%d]\n", roi[2], roi[3]);
+    fprintf(fp, "set xlabel \"x [m]\"\n");
+    fprintf(fp, "set ylabel \"z [m]\"\n");
+    fprintf(fp, "plot \"%02d.txt\" using 1:2 lc rgb \"#FF0000\" title 'Ground Truth' w lines,", idx);
+    fprintf(fp, "\"%02d.txt\" using 3:4 lc rgb \"#0000FF\" title 'Visual Odometry' w lines,", idx);
+    fprintf(fp, "\"< head -1 %02d.txt\" using 1:2 lc rgb \"#000000\" pt 4 ps 1 lw 2 title 'Sequence Start' w points\n",
+            idx);
+
+    // close file
+    fclose(fp);
+
+    // run gnuplot => create png + eps
+    sprintf(command, "cd %s; gnuplot %s", dir.c_str(), file_name);
+    if (!system(command)) exit(1);
+  }
+
+  // create pdf and crop
+  sprintf(command, "cd %s; ps2pdf %02d.eps %02d_large.pdf", dir.c_str(), idx, idx);
+  SAFE_COMMAND(command);
+  sprintf(command, "cd %s; pdfcrop %02d_large.pdf %02d.pdf", dir.c_str(), idx, idx);
+  SAFE_COMMAND(command);
+  sprintf(command, "cd %s; rm %02d_large.pdf", dir.c_str(), idx);
+  SAFE_COMMAND(command);
+}
+
+void saveErrorPlots(const std::vector<errors>& seq_err, const std::string& plot_error_dir, const std::string& prefix) {
+  // file names
+  char file_name_tl[1024];
+  sprintf(file_name_tl, "%s/%s_tl.txt", plot_error_dir.c_str(), prefix.c_str());
+  char file_name_rl[1024];
+  sprintf(file_name_rl, "%s/%s_rl.txt", plot_error_dir.c_str(), prefix.c_str());
+  char file_name_ts[1024];
+  sprintf(file_name_ts, "%s/%s_ts.txt", plot_error_dir.c_str(), prefix.c_str());
+  char file_name_rs[1024];
+  sprintf(file_name_rs, "%s/%s_rs.txt", plot_error_dir.c_str(), prefix.c_str());
+
+  // open files
+  FILE* fp_tl = fopen(file_name_tl, "w");
+  FILE* fp_rl = fopen(file_name_rl, "w");
+  FILE* fp_ts = fopen(file_name_ts, "w");
+  FILE* fp_rs = fopen(file_name_rs, "w");
+
+  // for each segment length do
+  for (int32_t i = 0; i < num_lengths; i++) {
+    float t_err = 0;
+    float r_err = 0;
+    float num = 0;
+
+    // for all errors do
+    for (std::vector<errors>::const_iterator it = seq_err.begin(); it != seq_err.end(); it++) {
+      if (fabs(it->len - lengths[i]) < 1.0) {
+        t_err += it->t_err;
+        r_err += it->r_err;
+        num++;
+      }
+    }
+
+    // we require at least 3 values
+    if (num > 2.5) {
+      fprintf(fp_tl, "%f %f\n", lengths[i], t_err / num);
+      fprintf(fp_rl, "%f %f\n", lengths[i], r_err / num);
+    }
+  }
+
+  // for each driving speed do (in m/s)
+  for (float speed = 2; speed < 25; speed += 2) {
+    float t_err = 0;
+    float r_err = 0;
+    float num = 0;
+
+    // for all errors do
+    for (std::vector<errors>::const_iterator it = seq_err.begin(); it != seq_err.end(); it++) {
+      if (fabs(it->speed - speed) < 2.0) {
+        t_err += it->t_err;
+        r_err += it->r_err;
+        num++;
+      }
+    }
+
+    // we require at least 3 values
+    if (num > 2.5) {
+      fprintf(fp_ts, "%f %f\n", speed, t_err / num);
+      fprintf(fp_rs, "%f %f\n", speed, r_err / num);
+    }
+  }
+
+  // close files
+  fclose(fp_tl);
+  fclose(fp_rl);
+  fclose(fp_ts);
+  fclose(fp_rs);
+}
+
+void plotErrorPlots(const std::string& dir, char* prefix) {
+  char command[1024];
+
+  // for all four error plots do
+  for (int32_t i = 0; i < 4; i++) {
+    // create suffix
+    char suffix[16];
+    switch (i) {
+      case 0:
+        sprintf(suffix, "tl");
+        break;
+      case 1:
+        sprintf(suffix, "rl");
+        break;
+      case 2:
+        sprintf(suffix, "ts");
+        break;
+      case 3:
+        sprintf(suffix, "rs");
+        break;
+    }
+
+    // gnuplot file name
+    char file_name[1024];
+    char full_name[1024];
+    sprintf(file_name, "%s_%s.gp", prefix, suffix);
+    sprintf(full_name, "%s/%s", dir.c_str(), file_name);
+
+    // create png + eps
+    for (int32_t j = 0; j < 2; j++) {
+      // open file
+      FILE* fp = fopen(full_name, "w");
+
+      // save gnuplot instructions
+      if (j == 0) {
+        fprintf(fp, "set term png size 500,250 font \"Helvetica\" 11\n");
+        fprintf(fp, "set output \"%s_%s.png\"\n", prefix, suffix);
+      } else {
+        fprintf(fp, "set term postscript eps enhanced color\n");
+        fprintf(fp, "set output \"%s_%s.eps\"\n", prefix, suffix);
+      }
+
+      // start plot at 0
+      fprintf(fp, "set size ratio 0.5\n");
+      fprintf(fp, "set yrange [0:*]\n");
+
+      // x label
+      if (i <= 1)
+        fprintf(fp, "set xlabel \"Path Length [m]\"\n");
+      else
+        fprintf(fp, "set xlabel \"Speed [km/h]\"\n");
+
+      // y label
+      if (i == 0 || i == 2)
+        fprintf(fp, "set ylabel \"Translation Error [%%]\"\n");
+      else
+        fprintf(fp, "set ylabel \"Rotation Error [deg/m]\"\n");
+
+      // plot error curve
+      fprintf(fp, "plot \"%s_%s.txt\" using ", prefix, suffix);
+      switch (i) {
+        case 0:
+          fprintf(fp, "1:($2*100) title 'Translation Error'");
+          break;
+        case 1:
+          fprintf(fp, "1:($2*57.3) title 'Rotation Error'");
+          break;
+        case 2:
+          fprintf(fp, "($1*3.6):($2*100) title 'Translation Error'");
+          break;
+        case 3:
+          fprintf(fp, "($1*3.6):($2*57.3) title 'Rotation Error'");
+          break;
+      }
+      fprintf(fp, " lc rgb \"#0000FF\" pt 4 w linespoints\n");
+
+      // close file
+      fclose(fp);
+
+      // run gnuplot => create png + eps
+      sprintf(command, "cd %s; gnuplot %s", dir.c_str(), file_name);
+      SAFE_COMMAND(command);
+    }
+
+    // create pdf and crop
+    sprintf(command, "cd %s; ps2pdf %s_%s.eps %s_%s_large.pdf", dir.c_str(), prefix, suffix, prefix, suffix);
+    SAFE_COMMAND(command);
+    sprintf(command, "cd %s; pdfcrop %s_%s_large.pdf %s_%s.pdf", dir.c_str(), prefix, suffix, prefix, suffix);
+    SAFE_COMMAND(command);
+    sprintf(command, "cd %s; rm %s_%s_large.pdf", dir.c_str(), prefix, suffix);
+    SAFE_COMMAND(command);
+  }
+}
+
+void saveStats(const std::vector<errors>& err, const std::string& dir) {
+  float t_err = 0;
+  float r_err = 0;
+
+  // for all errors do => compute sum of t_err, r_err
+  for (std::vector<errors>::const_iterator it = err.begin(); it != err.end(); it++) {
+    t_err += it->t_err;
+    r_err += it->r_err;
+  }
+
+  // open file
+  FILE* fp = fopen((dir + "/stats.txt").c_str(), "w");
+
+  // save errors
+  float num = err.size();
+  fprintf(fp, "%f %f\n", t_err / num, r_err / num);
+
+  // close file
+  fclose(fp);
+}
+
+/** \brief evaluating the odometry results for given result_dir and gt_dir.
+ *
+ *  \param gt_dir groundtruth directory containing XX.txt files.
+ *  \param result_dir directory where the estimated trajectory is stored. This is also the directory
+ *      where all files are written.
+ **/
+bool eval(const std::string& gt_dir, const std::string& result_dir) {
+  // ground truth and result directories
+  //  string gt_dir = "data/odometry/poses";
+  //  string result_dir = "results/" + result_sha;
+  std::string error_dir = result_dir + "/errors";
+  std::string plot_path_dir = result_dir + "/plot_path";
+  std::string plot_error_dir = result_dir + "/plot_error";
+
+  // create output directories
+  SAFE_COMMAND(("mkdir " + error_dir).c_str());
+  SAFE_COMMAND(("mkdir " + plot_path_dir).c_str());
+  SAFE_COMMAND(("mkdir " + plot_error_dir).c_str());
+
+  // total errors
+  std::vector<errors> total_err;
+
+  // for all sequences do
+  for (int32_t i = 11; i < 22; i++) {
+    // file name
+    char file_name[256];
+    sprintf(file_name, "%02d.txt", i);
+
+    // read ground truth and result poses
+    std::vector<Eigen::Matrix4f> poses_gt = loadPoses(gt_dir + "/" + file_name);
+    std::vector<Eigen::Matrix4f> poses_result = loadPoses(result_dir + "/data/" + file_name);
+
+    // plot status
+    std::cout << "Processing: " << file_name << ", poses: " << poses_result.size() << "/" << poses_gt.size()
+              << std::endl;
+
+    // check for errors
+    if (poses_gt.size() == 0 || poses_result.size() != poses_gt.size()) {
+      std::cout << "ERROR: Couldn't read (all) poses of: " << file_name << std::endl;
+      return false;
+    }
+
+    // compute sequence errors
+    std::vector<errors> seq_err = calcSequenceErrors(poses_gt, poses_result);
+    saveSequenceErrors(seq_err, error_dir + "/" + file_name);
+
+    // add to total errors
+    total_err.insert(total_err.end(), seq_err.begin(), seq_err.end());
+
+    // for first half => plot trajectory and compute individual stats
+    if (i <= 15) {
+      // save + plot bird's eye view trajectories
+      savePathPlot(poses_gt, poses_result, plot_path_dir + "/" + file_name);
+      std::vector<int32_t> roi = computeRoi(poses_gt, poses_result);
+      plotPathPlot(plot_path_dir, roi, i);
+
+      // save + plot individual errors
+      char prefix[16];
+      sprintf(prefix, "%02d", i);
+      saveErrorPlots(seq_err, plot_error_dir, prefix);
+      plotErrorPlots(plot_error_dir, prefix);
+    }
+  }
+
+  // save + plot total errors + summary statistics
+  if (total_err.size() > 0) {
+    char prefix[16];
+    sprintf(prefix, "avg");
+    saveErrorPlots(total_err, plot_error_dir, prefix);
+    plotErrorPlots(plot_error_dir, prefix);
+    saveStats(total_err, result_dir);
+  }
+
+  // success
+  return true;
+}
+}
+}
+```
+
+### src/data/kitti_utils.h
+```
+#ifndef INCLUDE_CORE_KITTI_UTILS_H_
+#define INCLUDE_CORE_KITTI_UTILS_H_
+
+#include <string>
+#include <map>
+#include <vector>
+#include <eigen3/Eigen/Dense>
+
+/** \brief parse calibration file given in KITTI file format
+ *  \author behley
+ */
+class KITTICalibration {
+ public:
+  KITTICalibration();
+  KITTICalibration(const std::string& filename);
+
+  /** \brief initialize calibration matrices from given file in KITTI format. **/
+  void initialize(const std::string& filename);
+
+  /** \brief remove all matrices. **/
+  void clear();
+
+  /** \brief get calibration matrix with given name. **/
+  const Eigen::Matrix4f& operator[](const std::string& name) const;
+
+  /** \brief does the calibration matrix with given name exists? **/
+  bool exists(const std::string& name) const;
+
+ protected:
+  std::map<std::string, Eigen::Matrix4f> m_;
+};
+
+namespace KITTI {
+
+/** \brief  helper functions from devkit for visual odometry evaluation.
+ *
+ *  Uses Eigen:Matrix4f instead of Matrix.
+ */
+namespace Odometry {
+
+struct errors {
+  int32_t first_frame;
+  float r_err;
+  float t_err;
+  float len;
+  float speed;
+  errors(int32_t first_frame, float r_err, float t_err, float len, float speed)
+      : first_frame(first_frame), r_err(r_err), t_err(t_err), len(len), speed(speed) {}
+};
+
+/** \brief load poses from text file. **/
+std::vector<Eigen::Matrix4f> loadPoses(const std::string& file_name);
+
+std::vector<float> trajectoryDistances(const std::vector<Eigen::Matrix4f>& poses);
+
+int32_t lastFrameFromSegmentLength(const std::vector<float>& dist, int32_t first_frame, float len);
+
+float rotationError(const Eigen::Matrix4f& pose_error);
+
+float translationError(const Eigen::Matrix4f& pose_error);
+
+std::vector<errors> calcSequenceErrors(const std::vector<Eigen::Matrix4f>& poses_gt,
+                                       const std::vector<Eigen::Matrix4f>& poses_result);
+
+void saveSequenceErrors(const std::vector<errors>& err, const std::string& file_name);
+
+void savePathPlot(const std::vector<Eigen::Matrix4f>& poses_gt, const std::vector<Eigen::Matrix4f>& poses_result,
+                  const std::string& file_name);
+
+std::vector<int32_t> computeRoi(const std::vector<Eigen::Matrix4f>& poses_gt,
+                                const std::vector<Eigen::Matrix4f>& poses_result);
+
+void plotPathPlot(const std::string& dir, const std::vector<int32_t>& roi, int32_t idx);
+
+void saveErrorPlots(const std::vector<errors>& seq_err, const std::string& plot_error_dir, const std::string& prefix);
+
+void plotErrorPlots(const std::string& dir, char* prefix);
+
+void saveStats(const std::vector<errors>& err, const std::string& dir);
+
+/** \brief evaluating the odometry results for given result_dir and gt_dir.
+ *
+ *  \param gt_dir groundtruth directory containing XX.txt files.
+ *  \param result_dir directory where the estimated trajectory is stored. This is also the directory
+ *      where all files are written.
+ **/
+bool eval(const std::string& gt_dir, const std::string& result_dir);
+}
+}
+
+#endif /* INCLUDE_CORE_KITTI_UTILS_H_ */
+```
+
+### src/data/label_utils.cpp
+```
+#include "label_utils.h"
+
+#include <QtXml/QDomDocument>
+#include <QtCore/QFile>
+#include <QtCore/QStringList>
+#include <QtCore/QString>
+
+void getLabelNames(const std::string& filename,
+    std::map<uint32_t, std::string>& label_names)
+{
+  QDomDocument doc("mydocument");
+  QFile file(QString::fromStdString(filename));
+  if (!file.open(QIODevice::ReadOnly)) return;
+
+  if (!doc.setContent(&file))
+  {
+    file.close();
+    return;
+  }
+
+  file.close();
+
+  QDomElement docElem = doc.documentElement();
+  QDomElement rootNode = doc.firstChildElement("config");
+
+  QDomElement n = rootNode.firstChildElement("label");
+  for (; !n.isNull(); n = n.nextSiblingElement("label"))
+  {
+    std::string name = n.firstChildElement("name").text().toStdString();
+    uint32_t id = n.firstChildElement("id").text().toInt();
+
+    label_names[id] = name;
+  }
+}
+
+void getLabelColors(const std::string& filename,
+    std::map<uint32_t, glow::GlColor>& label_colors)
+{
+  QDomDocument doc("mydocument");
+  QFile file(QString::fromStdString(filename));
+  if (!file.open(QIODevice::ReadOnly)) return;
+
+  if (!doc.setContent(&file))
+  {
+    file.close();
+    return;
+  }
+
+  file.close();
+
+  QDomElement docElem = doc.documentElement();
+  QDomElement rootNode = doc.firstChildElement("config");
+
+  QDomElement n = rootNode.firstChildElement("label");
+  for (; !n.isNull(); n = n.nextSiblingElement("label"))
+  {
+    std::string name = n.firstChildElement("name").text().toStdString();
+    uint32_t id = n.firstChildElement("id").text().toInt();
+    QString color_string = n.firstChildElement("color").text();
+    QStringList tokens = color_string.split(" ");
+
+    int32_t R = tokens.at(0).toInt();
+    int32_t G = tokens.at(1).toInt();
+    int32_t B = tokens.at(2).toInt();
+
+    label_colors[id] = glow::GlColor::FromRGB(R, G, B);
+  }
+}
+```
+
+### src/data/label_utils.h
+```
+#ifndef LABEL_UTILS_H_
+#define LABEL_UTILS_H_
+
+/**
+ * \brief Tools for processing of label description files.
+ *
+ * A label description file consists of names and colors for labels represented by a numerical id. The xml
+ * structure is defined as follows:
+ *
+ * <config>
+ *   <label>
+ *     <id>0</id>
+ *     <name>no label</name>
+ *     <description>all points with no special label.</description>
+ *     <color>255 255 255</color>
+ *   </label>
+ *   <label>
+ *     [...]
+ *   </label>
+ * </config>
+ */
+
+#include <map>
+#include <string>
+
+#include <glow/GlColor.h>
+
+/** \brief retrieve label names from given xml file.
+ *  \brief param[in]    filename of the description file
+ *  \brief param[out]   map of label ids to names.
+ */
+void getLabelNames(const std::string& filename, std::map<uint32_t, std::string>& label_names);
+
+/** \brief retrieve label colors from given xml file.
+ *  \brief param[in]    filename of the description file.
+ *  \brief param[out]   map of labels to colors.
+ */
+void getLabelColors(const std::string& filename, std::map<uint32_t, glow::GlColor>& label_colors);
+
+#endif /* LABEL_UTILS_H_ */
+```
+
+### src/data/misc.cpp
+```
+#include "misc.h"
+
+#include <stdint.h>
+#include <QtCore/QString>
+#include <QtCore/QStringList>
+#include <iostream>
+
+std::string trim(const std::string& str, const std::string& whitespaces) {
+  int32_t beg = 0;
+  int32_t end = 0;
+
+  /** find the beginning **/
+  for (beg = 0; beg < (int32_t)str.size(); ++beg) {
+    bool found = false;
+    for (uint32_t i = 0; i < whitespaces.size(); ++i) {
+      if (str[beg] == whitespaces[i]) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) break;
+  }
+
+  /** find the end **/
+  for (end = int32_t(str.size()) - 1; end > beg; --end) {
+    bool found = false;
+    for (uint32_t i = 0; i < whitespaces.size(); ++i) {
+      if (str[end] == whitespaces[i]) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) break;
+  }
+
+  return str.substr(beg, end - beg + 1);
+}
+
+std::vector<std::string> split(const std::string& line, const std::string& delim) {
+  QString string = QString::fromStdString(line);
+
+  QStringList list = string.split(QString::fromStdString(delim));
+  std::vector<std::string> tokens;
+
+  QStringListIterator it(list);
+
+  while (it.hasNext()) tokens.push_back(it.next().toStdString());
+
+  return tokens;
+}
+
+bool insideTriangle(const glow::vec2& p, const glow::vec2& v1, const glow::vec2& v2, const glow::vec2& v3) {
+  float b0 = ((v2.x - v1.x) * (v3.y - v1.y) - (v3.x - v1.x) * (v2.y - v1.y));
+
+  if (std::abs(b0) > 0) {
+    // compute barycentric coordinates.
+    float b1 = (((v2.x - p.x) * (v3.y - p.y) - (v3.x - p.x) * (v2.y - p.y)) / b0);
+
+    float b2 = (((v3.x - p.x) * (v1.y - p.y) - (v1.x - p.x) * (v3.y - p.y)) / b0);
+    float b3 = 1.0f - b1 - b2;
+
+    // only if all are greater equal 0, the point can be inside.
+    return (b1 > 0) && (b2 > 0) && (b3 > 0);
+  }
+
+  return false;
+}
+
+bool triangulate(const std::vector<glow::vec2>& points, std::vector<Triangle>& triangles) {
+  int32_t i = 0;
+  int32_t lastear = -1;
+  std::vector<glow::vec2> lst = points;
+
+  glow::vec2 p1, p, p2;
+  do {
+    lastear = lastear + 1;
+
+    // check next ear.
+    p1 = lst[((i - 1) + lst.size()) % lst.size()];
+    p = lst[(i + lst.size()) % lst.size()];
+    p2 = lst[((i + 1) + lst.size()) % lst.size()];
+
+    // is corner convex or concave?
+    //    float l = ((p1.x - p.x) * (p2.y - p.y) - (p1.y - p.y) * (p2.x - p.x));
+
+    float g = (p.y - p1.y) * (p2.x - p1.x) + (p1.x - p.x) * (p2.y - p1.y);
+    // signed triangle area:
+    //    float c = (p2.x - p1.x) * (p2.y + p1.y) + (p.x - p2.x) * (p.y + p2.y) + (p1.x - p.x) * (p1.y + p.y);
+
+    if (g < 0) {
+      // check for other point inside triangle.
+      bool intriangle = false;
+      for (int32_t j = 2; j < int32_t(lst.size()) - 2; ++j) {
+        glow::vec2 pt = lst[(i + j + lst.size()) % lst.size()];
+
+        if (insideTriangle(pt, p1, p, p2)) {
+          intriangle = true;
+          break;
+        }
+      }
+
+      // found an ear, remove vertex.
+      if (!intriangle) {
+        Triangle tri;
+        tri.i = p1;
+        tri.j = p;
+        tri.k = p2;
+
+        triangles.push_back(tri);
+        lst.erase(lst.begin() + i);
+
+        lastear = 0;
+
+        i = i - 1;
+      }
+    }
+
+    i = (i + 1) % lst.size();
+  } while ((lastear < int32_t(lst.size()) * 2) && (int32_t(lst.size()) != 3));
+
+  if (lst.size() == 3) {
+    Triangle tri;
+    tri.i = lst[0];
+    tri.j = lst[1];
+    tri.k = lst[2];
+
+    triangles.push_back(tri);
+  }
+
+  return (lst.size() == 3);
+}
+```
+
+### src/data/misc.h
+```
+/**
+ * \headerfile misc.h
+ *
+ * \brief some functions.
+ *
+ * \author behley
+ */
+
+#ifndef MISC_H_
+#define MISC_H_
+
+#include <algorithm>
+#include <string>
+#include <vector>
+
+#include <glow/glutil.h>
+
+/** \brief remove whitespaces at the beginning and end of a string. **/
+std::string trim(const std::string& str, const std::string& whitespaces = " \0\t\n\r\x0B");
+
+/** \brief splits a string in tokens, which are seperated by delim. **/
+std::vector<std::string> split(const std::string& line, const std::string& delim = " ");
+
+template <typename T>
+class IndexValue {
+ public:
+  IndexValue() : index(-1), value(nullptr) {}
+  IndexValue(int32_t i, const T* v) : index(i), value(v) {}
+
+  int32_t index;
+  const T* value;
+
+  friend bool operator<(const IndexValue<T>& l, const IndexValue<T>& r) { return (*l.value < *r.value); }
+  friend bool operator==(const IndexValue<T>& l, const IndexValue<T>& r) { return (*l.value == *r.value); }
+};
+
+/** \brief determine indexes of set_difference between a and b. **/
+template <typename T, typename A>
+void index_difference(const std::vector<T, A>& a, const std::vector<T, A>& b, std::vector<uint32_t>& result) {
+  std::vector<IndexValue<T>> proxy_a;
+  std::vector<IndexValue<T>> proxy_b;
+  std::vector<IndexValue<T>> proxy_result(a.size());
+
+  for (int32_t i = 0; i < int32_t(a.size()); ++i) proxy_a.push_back(IndexValue<T>(i, &a[i]));
+  for (int32_t i = 0; i < int32_t(b.size()); ++i) proxy_b.push_back(IndexValue<T>(i, &b[i]));
+
+  std::sort(proxy_a.begin(), proxy_a.end());
+  std::sort(proxy_b.begin(), proxy_b.end());
+
+  auto end = std::set_difference(proxy_a.begin(), proxy_a.end(), proxy_b.begin(), proxy_b.end(), proxy_result.begin());
+
+  result.clear();
+  for (auto it = proxy_result.begin(); it != end; ++it) result.push_back(it->index);
+}
+
+struct Triangle {
+  glow::vec2 i, j, k;
+};
+
+bool insideTriangle(const glow::vec2& p, const glow::vec2& v1, const glow::vec2& v2, const glow::vec2& v3);
+
+bool triangulate(const std::vector<glow::vec2>& points, std::vector<Triangle>& triangles);
+
+#endif /* MISC_H_ */
+```
+
+### src/data/voxelize_utils.cpp
+```
+#include "voxelize_utils.h"
+
+#include <rv/string_utils.h>
+#include <boost/lexical_cast.hpp>
+#include <fstream>
+
+using namespace rv;
+
+std::vector<std::string> parseDictionary(std::string str) {
+  std::vector<std::string> tokens;
+  str = trim(str);
+  if (str[0] != '{' || str[str.size() - 1] != '}') {
+    std::cerr << "Parser Error: " << str << " is not a valid dictionary token!" << std::endl;
+    return tokens;
+  }
+
+  tokens = split(str.substr(1, str.size() - 2), ":");
+
+  return tokens;
+}
+
+template <class T>
+std::vector<T> parseList(std::string str) {
+  str = trim(str);
+  std::vector<T> list;
+
+  str = trim(str);
+  if (str[0] != '[' || str[str.size() - 1] != ']') {
+    std::cerr << "Parser Error: " << str << " is not a valid list token!" << std::endl;
+    return list;
+  }
+
+  auto entry_tokens = split(str.substr(1, str.size() - 2), ",");
+
+  for (const auto& token : entry_tokens) {
+    T value = boost::lexical_cast<T>(trim(token));
+    list.push_back(value);
+  }
+
+  return list;
+}
+
+template <>
+std::vector<std::string> parseList(std::string str) {
+  str = trim(str);
+  if (str[0] != '[' || str[str.size() - 1] != ']') {
+    std::cerr << "Parser Error: " << str << " is not a valid list token!" << std::endl;
+  }
+
+  std::vector<std::string> list;
+  auto entry_tokens = split(str.substr(1, str.size() - 2), ",");
+
+  for (uint32_t i = 0; i < entry_tokens.size(); ++i) {
+    std::string token = entry_tokens[i];
+
+    if (token.find("[") != std::string::npos) {
+      if (token.find("]", token.find("[")) == std::string::npos) {
+        // found a nested unterminated list token
+        std::string next_token;
+        do {
+          if (i >= entry_tokens.size()) break;
+          next_token = entry_tokens[i + 1];
+          token += "," + next_token;
+          ++i;
+        } while (next_token.find("]") == std::string::npos);
+      }
+    }
+    list.push_back(token);
+  }
+
+  return list;
+}
+
+Config parseConfiguration(const std::string& filename) {
+  Config config;
+  std::ifstream in(filename);
+
+  if (!in.is_open()) return config;
+
+  std::string line;
+  in.peek();
+  while (in.good() && !in.eof()) {
+    std::getline(in, line);
+
+    if (trim(line)[0] == '#') continue;  // ignore comments.
+
+    auto tokens = split(line, ":");
+    if (tokens.size() < 2) continue;
+    if (tokens.size() > 2) {
+      for (uint32_t i = 2; i < tokens.size(); ++i) {
+        tokens[1] += ":" + tokens[i];
+      }
+      tokens.resize(2);
+    }
+
+    if (tokens[0] == "max scans") {
+      config.maxNumScans = boost::lexical_cast<uint32_t>(trim(tokens[1]));
+      continue;
+    }
+    if (tokens[0] == "max range") {
+      config.maxRange = boost::lexical_cast<float>(trim(tokens[1]));
+      continue;
+    }
+    if (tokens[0] == "voxel size") {
+      config.voxelSize = boost::lexical_cast<float>(trim(tokens[1]));
+      continue;
+    }
+    if (tokens[0] == "min range") {
+      config.minRange = boost::lexical_cast<float>(trim(tokens[1]));
+      continue;
+    }
+    if (tokens[0] == "prior scans") {
+      config.priorScans = boost::lexical_cast<uint32_t>(trim(tokens[1]));
+      continue;
+    }
+    if (tokens[0] == "past scans") {
+      config.pastScans = boost::lexical_cast<uint32_t>(trim(tokens[1]));
+      continue;
+    }
+    if (tokens[0] == "past distance") {
+      config.pastScans = boost::lexical_cast<float>(trim(tokens[1]));
+      continue;
+    }
+
+    if (tokens[0] == "stride num") {
+      config.stride_num = boost::lexical_cast<uint32_t>(trim(tokens[1]));
+      continue;
+    }
+    if (tokens[0] == "stride distance") {
+      config.stride_distance = boost::lexical_cast<float>(trim(tokens[1]));
+      continue;
+    }
+
+    if (tokens[0] == "min extent") {
+      auto coords = parseList<float>(tokens[1]);
+      config.minExtent = Eigen::Vector4f(coords[0], coords[1], coords[2], 1.0f);
+      continue;
+    }
+
+    if (tokens[0] == "max extent") {
+      auto coords = parseList<float>(tokens[1]);
+      config.maxExtent = Eigen::Vector4f(coords[0], coords[1], coords[2], 1.0f);
+
+      continue;
+    }
+
+    if (tokens[0] == "ignore") {
+      config.filteredLabels = parseList<uint32_t>(tokens[1]);
+
+      continue;
+    }
+
+    if (tokens[0] == "join") {
+      auto join_tokens = parseList<std::string>(trim(tokens[1]));
+
+      for (const auto& token : join_tokens) {
+        auto mapping = parseDictionary(token);
+        uint32_t label = boost::lexical_cast<uint32_t>(trim(mapping[0]));
+        config.joinedLabels[label] = parseList<uint32_t>(trim(mapping[1]));
+      }
+
+      continue;
+    }
+
+    std::cout << "unknown parameter: " << tokens[0] << std::endl;
+  }
+
+  in.close();
+
+  return config;
+}
+
+void fillVoxelGrid(const Eigen::Matrix4f& anchor_pose, const std::vector<PointcloudPtr>& points,
+                   const std::vector<LabelsPtr>& labels, VoxelGrid& grid, const Config& config) {
+  std::map<uint32_t, uint32_t> mappedLabels;  // replace key with value.
+  for (auto joins : config.joinedLabels) {
+    for (auto label : joins.second) {
+      mappedLabels[label] = joins.first;
+    }
+  }
+
+  for (uint32_t t = 0; t < points.size(); ++t) {
+    Eigen::Matrix4f ap = anchor_pose.inverse() * points[t]->pose;
+
+    for (uint32_t i = 0; i < points[t]->points.size(); ++i) {
+      const Point3f& pp = points[t]->points[i];
+
+      float range = Eigen::Vector3f(pp.x, pp.y, pp.z).norm();
+      if (range < config.minRange || range > config.maxRange) continue;
+      bool is_car_point = (config.hidecar && pp.x < 3.0 && pp.x > -2.0 && std::abs(pp.y) < 2.0);
+      if (is_car_point) continue;
+
+      Eigen::Vector4f p = ap * Eigen::Vector4f(pp.x, pp.y, pp.z, 1);
+
+      uint32_t label = (*labels[t])[i];
+      if (mappedLabels.find(label) != mappedLabels.end()) label = mappedLabels[label];
+
+      if (std::find(config.filteredLabels.begin(), config.filteredLabels.end(), label) == config.filteredLabels.end()) {
+        grid.insert(p, (*labels[t])[i]);
+      }
+    }
+  }
+}
+
+template <typename T>
+std::vector<uint8_t> pack(const std::vector<T>& vec) {
+  std::vector<uint8_t> packed(vec.size() / 8);
+
+  for (uint32_t i = 0; i < vec.size(); i += 8) {
+    packed[i / 8] = (vec[i] > 0) << 7 | (vec[i + 1] > 0) << 6 | (vec[i + 2] > 0) << 5 | (vec[i + 3] > 0) << 4 |
+                    (vec[i + 4] > 0) << 3 | (vec[i + 5] > 0) << 2 | (vec[i + 6] > 0) << 1 | (vec[i + 7] > 0);
+    ;
+  }
+
+  return packed;
+}
+
+void saveVoxelGrid(const VoxelGrid& grid, const std::string& directory, const std::string& basename,
+                   const std::string& mode) {
+  uint32_t Nx = grid.size(0);
+  uint32_t Ny = grid.size(1);
+  uint32_t Nz = grid.size(2);
+
+  size_t numElements = grid.num_elements();
+  std::vector<uint16_t> outputLabels(numElements, 0);
+  std::vector<uint32_t> outputTensorOccluded(numElements, 0);
+  std::vector<uint32_t> outputTensorInvalid(numElements, 0);
+
+  int32_t counter = 0;
+  for (uint32_t x = 0; x < Nx; ++x) {
+    for (uint32_t y = 0; y < Ny; ++y) {
+      for (uint32_t z = 0; z < Nz; ++z) {
+        const VoxelGrid::Voxel& v = grid(x, y, z);
+
+        uint32_t isOccluded = (uint32_t)grid.isOccluded(x, y, z);
+
+        uint32_t maxCount = 0;
+        uint32_t maxLabel = 0;
+
+        for (auto it = v.labels.begin(); it != v.labels.end(); ++it) {
+          if (it->second > maxCount) {
+            maxCount = it->second;
+            maxLabel = it->first;
+          }
+        }
+
+        // Write maxLabel appropriately to file.
+        assert(counter < numElements);
+        outputLabels[counter] = maxLabel;
+        outputTensorOccluded[counter] = isOccluded;
+        outputTensorInvalid[counter] = (uint32_t)grid.isInvalid(x, y, z);
+        counter = counter + 1;
+      }
+    }
+  }
+
+  if (mode == "target") {
+    // for target we just generate label, invalid, occluded.
+    {
+      std::string output_filename = directory + "/" + basename + ".label";
+
+      std::ofstream out(output_filename.c_str());
+      out.write((const char*)&outputLabels[0], outputLabels.size() * sizeof(uint16_t));
+      out.close();
+    }
+
+    {
+      std::string output_filename = directory + "/" + basename + ".occluded";
+
+      std::ofstream out(output_filename.c_str());
+      std::vector<uint8_t> packed = pack(outputTensorOccluded);
+      out.write((const char*)&packed[0], packed.size() * sizeof(uint8_t));
+      out.close();
+    }
+
+    {
+      std::string output_filename = directory + "/" + basename + ".invalid";
+
+      std::ofstream out(output_filename.c_str());
+      std::vector<uint8_t> packed = pack(outputTensorInvalid);
+      out.write((const char*)&packed[0], packed.size() * sizeof(uint8_t));
+      out.close();
+    }
+
+  } else {
+    // for input we just generate the ".bin" file.
+    {
+      std::string output_filename = directory + "/" + basename + ".bin";
+
+      std::ofstream out(output_filename.c_str());
+      std::vector<uint8_t> packed = pack(outputLabels);
+      out.write((const char*)&packed[0], packed.size() * sizeof(uint8_t));
+      out.close();
+    }
+  }
+}
+```
+
+### src/data/voxelize_utils.h
+```
+#ifndef SRC_DATA_VOXELIZE_UTILS_H_
+#define SRC_DATA_VOXELIZE_UTILS_H_
+
+#include "Pointcloud.h"
+#include "VoxelGrid.h"
+#include "common.h"
+
+class Config {
+ public:
+  float voxelSize{0.5};                                       // size of a voxel
+  Eigen::Vector4f minExtent{Eigen::Vector4f(0, -20, -2, 1)};  // minimum coordinate to consider for voxelgrid creation
+  Eigen::Vector4f maxExtent{Eigen::Vector4f(40, 20, 1, 1)};   // maximum coordinate to consider for voxelgrid creation
+
+  uint32_t maxNumScans{100};
+  uint32_t priorScans{0};    // number of scans before the current scan to consider.
+  uint32_t pastScans{10};    // number of scans after the current scan to consider.
+  float pastDistance{0.0f};  // ensure this distance of past scans to the current scan. (might imply that more then past
+                             // scans are used.)
+  float minRange{2.5f};      // minimum distance of laser points to consider.
+  float maxRange{25.0f};     // maximum distance of laser points to consider.
+  std::vector<uint32_t> filteredLabels;                    // ignored labels
+  std::map<uint32_t, std::vector<uint32_t>> joinedLabels;  // labels that get joined into a specific class.
+
+  // gen_data specific values.
+  uint32_t stride_num{0};       // number of scans between generated voxel grids
+  float stride_distance{0.0f};  // trajectory distance between generated voxel grids.
+  bool hidecar{true};           // remove scan points which are probably generated by the scanning car itself
+};
+
+/** \brief parse a given filename and fill configuration. **/
+Config parseConfiguration(const std::string& filename);
+
+/** \brief use given anchor_pose to insert all point clouds into the given VoxelGrid
+ *
+ *  Iterates over all point clouds and inserts label into the label histogram of the respective voxel.
+ *  However, only points inside max_range/min_range and outside the bounding box of the car are inserted.
+ *
+ *  \author behley
+ **/
+void fillVoxelGrid(const Eigen::Matrix4f& anchor_pose, const std::vector<PointcloudPtr>& points,
+                   const std::vector<LabelsPtr>& labels, VoxelGrid& grid, const Config& config);
+
+/** \brief save given voxelgrid as .mat file.
+ *
+ *  \author mgarbade
+ **/
+void saveVoxelGrid(const VoxelGrid& grid, const std::string& directory, const std::string& basename,
+                   const std::string& mode = "input");
+
+#endif /* SRC_DATA_VOXELIZE_UTILS_H_ */
+```
+
+### src/rv/Stopwatch.cpp
+```
+#include "rv/Stopwatch.h"
+#include <cassert>
+
+namespace rv
+{
+
+std::vector<std::chrono::system_clock::time_point> Stopwatch::stimes =
+    std::vector<std::chrono::system_clock::time_point>();
+
+void Stopwatch::tic()
+{
+  stimes.push_back(std::chrono::high_resolution_clock::now());
+}
+
+/** \brief stops the last timer started and outputs \a msg, if given.
+ *
+ *  \return elapsed time in seconds.
+ **/
+double Stopwatch::toc()
+{
+  assert(stimes.begin() != stimes.end());
+
+  std::chrono::system_clock::time_point endtime = std::chrono::high_resolution_clock::now();
+  std::chrono::system_clock::time_point starttime = stimes.back();
+  stimes.pop_back();
+
+  std::chrono::duration<double> elapsed_seconds = endtime - starttime;
+
+  return elapsed_seconds.count();
+}
+
+}
+```
+
+### src/rv/Stopwatch.h
+```
+/**
+ * \headerfile Stopwatch.h
+ *
+ * \brief simple timing of function calls.
+ *
+ * Mimics the behavior of tic/toc of Matlab and throws an error if toc() is called without starting a timer before.
+ *
+ * Example:
+ *   Stopwatch::tic(); starts timer A
+ *
+ *   Stopwatch::tic(); starts timer B
+ *   method1();
+ *   double time1 = Stopwatch::toc(); stops timer B and returns time elapsed since timer B started
+ *
+ *   Stopwatch::tic(); starts timer C
+ *   method2();
+ *   double time2 = Stopwatch::toc(); stops  timer C
+ *
+ *   Stopwatch::toc("finished"); stops timer A, thus this is approx. time1 + time2. and outputs a message.
+ *
+ * \author behley
+ */
+
+#ifndef STOPWATCH_H_
+#define STOPWATCH_H_
+
+#include <chrono>
+#include <string>
+#include <vector>
+
+namespace rv {
+
+class Stopwatch {
+ public:
+  /** \brief starts a timer. **/
+  static void tic();
+  /** \brief stops the last timer started and outputs \a msg **/
+  static double toc();
+  /** \brief number of active stopwatches. **/
+  static size_t active() { return stimes.size(); }
+
+ protected:
+  static std::vector<std::chrono::system_clock::time_point> stimes;
+};
+}
+
+#endif /* STOPWATCH_H_ */
+```
+
+### src/rv/string_utils.cpp
+```
+#include "rv/string_utils.h"
+
+#include <stdint.h>
+#include <boost/tokenizer.hpp>
+#include <iostream>
+#include <sstream>
+
+namespace rv {
+
+std::string trim(const std::string& str, const std::string& whitespaces) {
+  int32_t beg = 0;
+  int32_t end = 0;
+
+  /** find the beginning **/
+  for (beg = 0; beg < (int32_t)str.size(); ++beg) {
+    bool found = false;
+    for (uint32_t i = 0; i < whitespaces.size(); ++i) {
+      if (str[beg] == whitespaces[i]) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) break;
+  }
+
+  /** find the end **/
+  for (end = int32_t(str.size()) - 1; end > beg; --end) {
+    bool found = false;
+    for (uint32_t i = 0; i < whitespaces.size(); ++i) {
+      if (str[end] == whitespaces[i]) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) break;
+  }
+
+  return str.substr(beg, end - beg + 1);
+}
+
+std::vector<std::string> split(const std::string& line, const std::string& delim, bool skipEmpty) {
+  std::vector<std::string> tokens;
+
+  boost::char_separator<char> sep(delim.c_str(), "", (skipEmpty ? boost::drop_empty_tokens : boost::keep_empty_tokens));
+  boost::tokenizer<boost::char_separator<char>> tokenizer(line, sep);
+
+  for (auto it = tokenizer.begin(); it != tokenizer.end(); ++it) {
+    tokens.push_back(*it);
+  }
+  return tokens;
+}
+}
+
+// std::string operator+(const std::string& string, const uint32_t& other)
+//{
+//  std::stringstream stream;
+//  stream << string << other;
+//  return stream.str();
+//}
+//
+// std::string operator+(const std::string& string, const int32_t& other)
+//{
+//  std::stringstream stream;
+//  stream << string << other;
+//  return stream.str();
+//}
+//
+// std::string operator+(const std::string& string, const float& other)
+//{
+//  std::stringstream stream;
+//  stream << string << other;
+//  return stream.str();
+//}
+//
+// std::string operator+(const std::string& string, const double& other)
+//{
+//  std::stringstream stream;
+//  stream << string << other;
+//  return stream.str();
+//}
+```
+
+### src/rv/string_utils.h
+```
+/**
+ * \headerfile misc.h
+ *
+ * \brief some utility functions for std::strings.
+ *
+ * \author behley
+ */
+
+#ifndef MISC_H_
+#define MISC_H_
+
+#include <stdint.h>
+#include <vector>
+#include <string>
+#include <map>
+#include <list>
+#include <sstream>
+
+namespace rv
+{
+
+/** \brief remove whitespaces at the beginning and end of a string. **/
+std::string trim(const std::string& str, const std::string& whitespaces =
+    " \0\t\n\r\x0B");
+
+/** \brief splits a string in tokens, which are seperated by delim. **/
+std::vector<std::string> split(const std::string& line,
+    const std::string& delim = " ", bool skipEmpty = false);
+
+/** \brief generate a string from a map.
+ *  \return stringified version of a map. **/
+template<class K, class V>
+std::string stringify(const std::map<K, V>& map)
+{
+  std::stringstream str;
+
+  typename std::map<K, V>::const_iterator it;
+  str << "{";
+  for (it = map.begin(); it != map.end(); ++it)
+    str << (it == map.begin() ? "" : ", ") << it->first << ": " << it->second;
+  str << "}";
+
+  return str.str();
+}
+
+/** \brief generate a string from a vector
+ *  \return stringified version of a vector. **/
+template<class T>
+std::string stringify(const std::vector<T>& vec)
+{
+  std::stringstream str;
+
+  str << "[";
+  for (uint32_t i = 0; i < vec.size(); ++i)
+    str << (i == 0 ? "" : ", ") << vec[i];
+  str << "]";
+
+  return str.str();
+}
+
+/** \brief generate a string from a list
+ *  \return stringified version of a list. **/
+template<class T>
+std::string stringify(const std::list<T>& list)
+{
+  std::stringstream str;
+  typename std::list<T>::const_iterator it;
+  str << "[";
+  for (it = list.begin(); it != list.end(); ++it)
+    str << (it == list.begin() ? "" : ", ") << *it;
+  str << "]";
+
+  return str.str();
+}
+
+/** \brief generate a string from a value using stringstream
+ *
+ *  \param value stringifiable value (e.g., int, double, string,)
+ *  \return stringified version of the value
+ */
+template<class T>
+std::string stringify(const T& value)
+{
+  std::stringstream str;
+  str << value;
+  return str.str();
+}
+
+}
+
+/** some useful concatenation operators for std::strings. **/
+//std::string operator+(const std::string& string, const uint32_t& other);
+//std::string operator+(const std::string& string, const int32_t& other);
+//std::string operator+(const std::string& string, const float& other);
+//std::string operator+(const std::string& string, const double& other);
+
+#endif /* MISC_H_ */
+```
+
+### src/shaders/blinnphong.frag
+```
+#version 330 core
+
+// simple Blinn-Phong Shading.
+
+out vec4 out_color;
+
+in vec4 color;
+in vec3 position;
+in vec3 normal;
+
+
+uniform vec3 lightPos;
+uniform vec3 viewPos;
+
+
+void main()
+{
+  vec3 ambient = 0.05 * color.xyz;
+  
+  vec3 lightDir = normalize(lightPos - position);
+  vec3 normal1 = normalize(normal);
+  float diff = max(dot(lightDir, normal1), 0.0);
+  vec3 diffuse = diff * color.xyz;
+  
+  vec3 viewDir = normalize(viewPos - position);
+  vec3 reflectDir = reflect(-lightDir, normal);
+  vec3 halfwayDir = normalize(lightDir + viewDir);
+  
+  float spec = pow(max(dot(normal, halfwayDir), 0.0), 32.0);
+  vec3 specular = vec3(0.3) * spec;
+  
+  out_color = vec4(ambient + diffuse + specular, 1.0);
+}
+```
+
+### src/shaders/color.glsl
+```
+const vec4 RED = vec4(1.0, 0.0, 0.0, 1.0);
+const vec4 GREEN = vec4(0.0, 1.0, 0.0, 1.0);
+const vec4 BLUE = vec4(0.0, 0.0, 1.0, 1.0);
+
+// source: http://lolengine.net/blog/2013/07/27/rgb-to-hsv-in-glsl
+vec3 hsv2rgb(vec3 c)
+{
+    vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+// http://stackoverflow.com/questions/15095909/from-rgb-to-hsv-in-opengl-glsl
+vec3 rgb2hsv(vec3 c)
+{
+    vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+    vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+    vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+
+    float d = q.x - min(q.w, q.y);
+    float e = 1.0e-10;
+    return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+}
+
+
+// source: elastic fusion https://github.com/mp3guy/ElasticFusion  & 
+// http://stackoverflow.com/questions/6893302/decode-rgb-value-to-single-float-without-bit-shift-in-glsl
+float pack(vec3 c)
+{
+    int rgb = int(round(c.x * 255.0f));
+    rgb = (rgb << 8) + int(round(c.y * 255.0f));
+    rgb = (rgb << 8) + int(round(c.z * 255.0f));
+    return float(rgb);
+}
+
+vec3 unpack(float c)
+{
+    vec3 col;
+    col.x = float(int(c) >> 16 & 0xFF) / 255.0f;
+    col.y = float(int(c) >> 8 & 0xFF) / 255.0f;
+    col.z = float(int(c) & 0xFF) / 255.0f;
+    return col;
+}
+```
+
+### src/shaders/draw_points.vert
+```
+#version 330 core
+
+layout (location = 0) in vec3  in_vertex;
+layout (location = 1) in float in_remission;
+layout (location = 2) in uint  in_label;
+layout (location = 3) in uint  in_visible;
+
+uniform sampler2DRect label_colors;
+uniform sampler2D heightMap;
+
+#include "shaders/color.glsl"
+
+// materials.
+uniform mat4 mvp;
+uniform mat4 pose;
+uniform bool useRemission;
+uniform bool useColor;
+
+uniform float minRange;
+uniform float maxRange;
+
+uniform bool removeGround;
+uniform float groundThreshold;
+
+uniform vec2 tilePos;
+uniform float tileSize;
+uniform bool showAllPoints;
+
+out vec4 color;
+
+void main()
+{
+  vec4 in_color = texture(label_colors, vec2(in_label, 0));
+  
+  float range = length(in_vertex);
+  gl_Position = mvp * vec4(in_vertex, 1.0);
+  
+  vec4 v_global = pose * vec4(in_vertex, 1.0);
+  vec2 v = (pose * vec4(in_vertex, 1.0)).xy - tilePos;
+  
+    
+  bool visible = (in_visible > uint(0)); 
+  
+  if(!visible || range < minRange || range > maxRange) gl_Position = vec4(-10, -10, -10, 1);
+  
+  
+  if(useRemission)
+  { 
+    float r = in_remission * 0.7 + 0.3; // ensure r in [0.3, 1.0]
+    vec3 hsv = rgb2hsv(in_color.rgb);
+    hsv.b = max(hsv.b, 0.8);
+    
+    color = vec4(hsv2rgb(vec3(1, 1, r) * hsv), 1.0);
+  }
+  else 
+  {
+    color = vec4(in_color.rgb, 1.0);
+  }
+}
+```
+
+### src/shaders/draw_pose.geom
+```
+#version 330 core
+
+layout(points) in;
+layout(line_strip, max_vertices = 6) out;
+
+uniform mat4 mvp;
+uniform mat4 pose;
+uniform float size;
+
+out vec4 color;
+
+void main()
+{
+    color = vec4(1, 0, 0, 1);
+    gl_Position = mvp * pose * vec4(0, 0, 0, 1);
+    EmitVertex();
+    gl_Position = mvp * pose * vec4(size, 0, 0, 1);
+    EmitVertex();
+    EndPrimitive();
+    
+    color = vec4(0, 1, 0, 1);
+    gl_Position = mvp * pose * vec4(0, 0, 0, 1);
+    EmitVertex();
+    gl_Position = mvp * pose *  vec4(0, size, 0, 1);
+    EmitVertex();
+    EndPrimitive();
+    
+    color = vec4(0, 0, 1, 1);
+    gl_Position = mvp * pose * vec4(0, 0, 0, 1);
+    EmitVertex();
+    gl_Position = mvp * pose * vec4(0, 0, size, 1);
+    EmitVertex();
+    EndPrimitive();
+
+}
+```
+
+### src/shaders/draw_voxels.geom
+```
+#version 330 core
+
+layout(points) in;
+layout(triangle_strip, max_vertices = 36) out;
+
+
+in VOXEL {
+  vec3 pos;
+  vec4 color;
+} gs_in[];
+
+uniform mat4 mvp;
+uniform vec4 voxelOffset;
+uniform float voxelSize;
+
+out vec4 color;
+out vec3 position;
+out vec3 normal;
+
+void main()
+{
+   // see https://stackoverflow.com/questions/28375338/cube-using-single-gl-triangle-strip for order.
+   // 4 3 7 8 5 3 1 4 2 7 6 5 2 1
+   // only 14 vertices instead  of 36! However, I really don't know how to handle there the normals for the lighting.
+   
+   
+    vec4 p = vec4(gs_in[0].pos.xyz, 1);
+    color = gs_in[0].color; 
+    
+    vec4 p1 = p + vec4(voxelSize,0,0,0);
+    vec4 p2 = p + vec4(0,0,0,0);
+    vec4 p3 = p + vec4(voxelSize,voxelSize,0,0);
+    vec4 p4 = p + vec4(0,voxelSize,0,0);
+    vec4 p5 = p + vec4(voxelSize,0,voxelSize,0);
+    vec4 p6 = p + vec4(0,0,voxelSize,0);
+    vec4 p7 = p + vec4(0, voxelSize,voxelSize,0);
+    vec4 p8 = p + vec4(voxelSize,voxelSize,voxelSize,0);
+    
+    normal = vec3(0,1,0);
+    position = p4.xyz;
+    gl_Position = mvp * p4;
+    EmitVertex();   
+    position = p3.xyz;
+    gl_Position = mvp * p3;
+    EmitVertex();  
+    position = p7.xyz;
+    gl_Position = mvp * p7;
+    EmitVertex();
+    EndPrimitive();
+    
+    position = p3.xyz;
+    gl_Position = mvp * p3;
+    EmitVertex();  
+    position = p7.xyz;
+    gl_Position = mvp * p7;
+    EmitVertex();
+    position = p8.xyz;
+    gl_Position = mvp * p8;
+    EmitVertex();  
+    EndPrimitive();
+    
+    
+    normal = vec3(0,0,1);
+    position = p7.xyz;
+    gl_Position = mvp * p7;
+    EmitVertex();
+    position = p8.xyz;
+    gl_Position = mvp * p8;
+    EmitVertex(); 
+    position = p5.xyz; 
+    gl_Position = mvp * p5;
+    EmitVertex();
+    EndPrimitive();
+    
+    position = p7.xyz; 
+    gl_Position = mvp * p7;
+    EmitVertex();
+    position = p6.xyz; 
+    gl_Position = mvp * p6;
+    EmitVertex();
+    position = p5.xyz; 
+    gl_Position = mvp * p5;
+    EmitVertex();
+    EndPrimitive();
+    
+    
+    normal = vec3(1,0,0);
+    position = p8.xyz;
+    gl_Position = mvp * p8;
+    EmitVertex();
+    position = p5.xyz;
+    gl_Position = mvp * p5;
+    EmitVertex();
+    position = p3.xyz;
+    gl_Position = mvp * p3;
+    EmitVertex();
+    EndPrimitive();
+    
+    position = p5.xyz;
+    gl_Position = mvp * p5;
+    EmitVertex();
+    position = p3.xyz;
+    gl_Position = mvp * p3;
+    EmitVertex();
+    position = p1.xyz;
+    gl_Position = mvp * p1;
+    EmitVertex();
+    EndPrimitive();
+    
+    normal = vec3(0,0,-1);
+    position = p3.xyz;
+    gl_Position = mvp * p3;
+    EmitVertex();
+    position = p1.xyz;
+    gl_Position = mvp * p1;
+    EmitVertex();
+    position = p4.xyz;
+    gl_Position = mvp * p4;
+    EmitVertex(); 
+    EndPrimitive();
+    
+    position = p1.xyz;
+    gl_Position = mvp * p1;
+    EmitVertex();
+    position = p4.xyz;
+    gl_Position = mvp * p4;
+    EmitVertex();
+    position = p2.xyz; 
+    gl_Position = mvp * p2;
+    EmitVertex(); 
+    EndPrimitive();
+      
+    normal = vec3(-1,0,0);  
+    position = p4.xyz; 
+    gl_Position = mvp * p4;
+    EmitVertex();
+    position = p2.xyz; 
+    gl_Position = mvp * p2;
+    EmitVertex(); 
+    position = p7.xyz; 
+    gl_Position = mvp * p7;
+    EmitVertex();
+    EndPrimitive();
+    
+    position = p2.xyz; 
+    gl_Position = mvp * p2;
+    EmitVertex(); 
+    position = p7.xyz; 
+    gl_Position = mvp * p7;
+    EmitVertex();
+    position = p6.xyz; 
+    gl_Position = mvp * p6;
+    EmitVertex();
+    EndPrimitive();
+    
+    
+    normal = vec3(0,-1,0);
+    position = p6.xyz;
+    gl_Position = mvp * p6;
+    EmitVertex();
+    position = p5.xyz;
+    gl_Position = mvp * p5;
+    EmitVertex();
+    position = p2.xyz;
+    gl_Position = mvp * p2;
+    EmitVertex(); 
+    EndPrimitive();
+    
+    position = p5.xyz;
+    gl_Position = mvp * p5;
+    EmitVertex();
+    position = p2.xyz;
+    gl_Position = mvp * p2;
+    EmitVertex();
+    position = p1.xyz; 
+    gl_Position = mvp * p1;
+    EmitVertex(); 
+    EndPrimitive();
+ 
+}
+```
+
+### src/shaders/draw_voxels.vert
+```
+#version 330 core
+
+layout (location = 0) in vec3  in_position;
+layout (location = 1) in uint in_label;
+
+uniform sampler2DRect label_colors;
+uniform vec4 custom_color;
+uniform bool use_custom_color;
+
+#include "shaders/color.glsl"
+
+
+out VOXEL {
+  vec3 pos;
+  vec4 color;
+} vs_out;
+
+
+void main()
+{
+  vec4 in_color = texture(label_colors, vec2(in_label, 0));
+  if (use_custom_color)  in_color = custom_color;
+  
+  vs_out.pos = in_position;
+  vs_out.color = in_color;
+}
+```
+
+### src/shaders/empty.frag
+```
+#version 330 core
+
+
+void main()
+{
+
+}
+```
+
+### src/shaders/empty.vert
+```
+#version 330 core
+
+
+void main()
+{
+
+}
+```
+
+### src/shaders/passthrough.frag
+```
+#version 330 core
+
+in vec4 color;
+out vec4 out_color;
+
+void main()
+{
+  out_color = color;
+}
+```
+
+### src/shaders/quad.geom
+```
+#version 330 core
+
+layout(points) in;
+layout(triangle_strip, max_vertices = 4) out;
+
+out vec2 texCoords;
+
+void main() 
+{
+    gl_Position = vec4(1.0, 1.0, 0.0, 1.0);
+    texCoords = vec2(1.0, 1.0);
+    EmitVertex();
+
+    gl_Position = vec4(-1.0, 1.0, 0.0, 1.0);
+    texCoords = vec2(0.0, 1.0); 
+    EmitVertex();
+
+    gl_Position = vec4(1.0,-1.0, 0.0, 1.0);
+    texCoords = vec2(1.0, 0.0); 
+    EmitVertex();
+
+    gl_Position = vec4(-1.0,-1.0, 0.0, 1.0);
+    texCoords = vec2(0.0, 0.0); 
+    EmitVertex();
+
+    EndPrimitive(); 
+}
+```
+
+### src/widget/KittiReader.cpp
+```
+#include <stdint.h>
+#include <widget/KittiReader.h>
+#include <QtCore/QDir>
+#include <algorithm>
+#include <boost/lexical_cast.hpp>
+#include <boost/tokenizer.hpp>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include "rv/string_utils.h"
+
+void KittiReader::initialize(const QString& directory) {
+  velodyne_filenames_.clear();
+
+  QDir base_dir(directory);
+  QDir velodyne_dir(base_dir.filePath("velodyne"));
+  if (!velodyne_dir.exists()) throw std::runtime_error("Missing velodyne files.");
+  QStringList entries = velodyne_dir.entryList(QDir::Files, QDir::Name);
+  for (int32_t i = 0; i < entries.size(); ++i) {
+    velodyne_filenames_.push_back(velodyne_dir.filePath(entries.at(i)).toStdString());
+  }
+
+  if (!base_dir.exists("calib.txt"))
+    throw std::runtime_error("Missing calibration file: " + base_dir.filePath("calib.txt").toStdString());
+
+  calib_.initialize(base_dir.filePath("calib.txt").toStdString());
+
+  readPoses(base_dir.filePath("poses.txt").toStdString(), poses_);
+
+  // create label dir, etc.
+  QDir labels_dir(base_dir.filePath("labels"));
+
+  // find corresponding label files.
+  if (!labels_dir.exists()) base_dir.mkdir("labels");
+
+  for (uint32_t i = 0; i < velodyne_filenames_.size(); ++i) {
+    std::ifstream in(velodyne_filenames_[i].c_str());
+    in.seekg(0, std::ios::end);
+    uint32_t num_points = in.tellg() / (4 * sizeof(float));
+    in.close();
+
+    QString filename = QFileInfo(QString::fromStdString(velodyne_filenames_[i])).baseName() + ".label";
+    if (!labels_dir.exists(filename)) {
+      std::ofstream out(labels_dir.filePath(filename).toStdString().c_str());
+
+      std::vector<uint32_t> labels(num_points, 0);
+      out.write(reinterpret_cast<const char*>(labels.data()), num_points * sizeof(uint32_t));
+
+      out.close();
+    }
+
+    label_filenames_.push_back(labels_dir.filePath(filename).toStdString());
+  }
+}
+
+void KittiReader::retrieve(int32_t idx, std::vector<PointcloudPtr>& priorPoints, std::vector<LabelsPtr>& priorLabels,
+                           std::vector<PointcloudPtr>& pastPoints, std::vector<LabelsPtr>& pastLabels) {
+  priorPoints.clear();
+  priorLabels.clear();
+  pastPoints.clear();
+  pastLabels.clear();
+
+  if (idx >= int32_t(velodyne_filenames_.size()) || idx < 0) return;
+
+  std::vector<int32_t> indexesBefore;
+  for (auto it = pointsCache_.begin(); it != pointsCache_.end(); ++it) indexesBefore.push_back(it->first);
+  std::vector<int32_t> indexesAfter;
+
+  uint32_t scansRead = 0;
+
+  for (int32_t t = std::max<int32_t>(0, idx - numPriorScans_); t <= idx; ++t) {
+    indexesAfter.push_back(t);
+    if (pointsCache_.find(t) == pointsCache_.end()) {
+      scansRead += 1;
+
+      priorPoints.push_back(std::shared_ptr<Laserscan>(new Laserscan));
+      readPoints(velodyne_filenames_[t], *priorPoints.back());
+      pointsCache_[t] = priorPoints.back();
+      priorPoints.back()->pose = poses_[t];
+
+      priorLabels.push_back(std::shared_ptr<std::vector<uint32_t>>(new std::vector<uint32_t>()));
+      readLabels(label_filenames_[t], *priorLabels.back());
+      labelCache_[t] = priorLabels.back();
+
+      if (priorPoints.back()->size() != priorLabels.back()->size()) {
+        std::cout << "Filename: " << velodyne_filenames_[t] << std::endl;
+        std::cout << "Filename: " << label_filenames_[t] << std::endl;
+        std::cout << "num. points = " << priorPoints.back()->size()
+                  << " vs. num. labels = " << priorLabels.back()->size() << std::endl;
+        throw std::runtime_error("Inconsistent number of labels.");
+      }
+
+    } else {
+      priorPoints.push_back(pointsCache_[t]);
+      priorLabels.push_back(labelCache_[t]);
+    }
+  }
+
+  for (int32_t t = int32_t(std::min<int32_t>(velodyne_filenames_.size() - 1, idx + 1));
+       t < int32_t(std::min<int32_t>(velodyne_filenames_.size(), idx + numPastScans_ + 1)); ++t) {
+    indexesAfter.push_back(t);
+    if (pointsCache_.find(t) == pointsCache_.end()) {
+      scansRead += 1;
+
+      pastPoints.push_back(std::shared_ptr<Laserscan>(new Laserscan));
+      readPoints(velodyne_filenames_[t], *pastPoints.back());
+      pointsCache_[t] = pastPoints.back();
+      pastPoints.back()->pose = poses_[t];
+
+      pastLabels.push_back(std::shared_ptr<std::vector<uint32_t>>(new std::vector<uint32_t>()));
+      readLabels(label_filenames_[t], *pastLabels.back());
+      labelCache_[t] = pastLabels.back();
+
+      if (pastPoints.back()->size() != pastLabels.back()->size()) {
+        std::cout << "Filename: " << velodyne_filenames_[t] << std::endl;
+        std::cout << "Filename: " << label_filenames_[t] << std::endl;
+        std::cout << "num. points = " << pastPoints.back()->size() << " vs. num. labels = " << pastLabels.back()->size()
+                  << std::endl;
+        throw std::runtime_error("Inconsistent number of labels.");
+      }
+
+    } else {
+      pastPoints.push_back(pointsCache_[t]);
+      pastLabels.push_back(labelCache_[t]);
+    }
+  }
+
+  std::cout << scansRead << " point clouds read." << std::endl;
+
+  // FIXME: keep more scans in cache. not only remove unloaded scans.
+
+  std::sort(indexesBefore.begin(), indexesBefore.end());
+  std::sort(indexesAfter.begin(), indexesAfter.end());
+
+  std::vector<int32_t> needsDelete(indexesBefore.size());
+  std::vector<int32_t>::iterator end = std::set_difference(
+      indexesBefore.begin(), indexesBefore.end(), indexesAfter.begin(), indexesAfter.end(), needsDelete.begin());
+
+  for (auto it = needsDelete.begin(); it != end; ++it) {
+    pointsCache_.erase(*it);
+    labelCache_.erase(*it);
+  }
+}
+
+void KittiReader::readPoints(const std::string& filename, Laserscan& scan) {
+  std::ifstream in(filename.c_str(), std::ios::binary);
+  if (!in.is_open()) return;
+
+  scan.clear();
+
+  in.seekg(0, std::ios::end);
+  uint32_t num_points = in.tellg() / (4 * sizeof(float));
+  in.seekg(0, std::ios::beg);
+
+  std::vector<float> values(4 * num_points);
+  in.read((char*)&values[0], 4 * num_points * sizeof(float));
+
+  in.close();
+  std::vector<Point3f>& points = scan.points;
+  std::vector<float>& remissions = scan.remissions;
+
+  points.resize(num_points);
+  remissions.resize(num_points);
+
+  for (uint32_t i = 0; i < num_points; ++i) {
+    points[i].x = values[4 * i];
+    points[i].y = values[4 * i + 1];
+    points[i].z = values[4 * i + 2];
+    remissions[i] = values[4 * i + 3];
+  }
+}
+
+void KittiReader::readLabels(const std::string& filename, std::vector<uint32_t>& labels) {
+  std::ifstream in(filename.c_str(), std::ios::binary);
+  if (!in.is_open()) {
+    std::cerr << "Unable to open label file. " << std::endl;
+    return;
+  }
+
+  labels.clear();
+
+  in.seekg(0, std::ios::end);
+  uint32_t num_points = in.tellg() / (sizeof(uint32_t));
+  in.seekg(0, std::ios::beg);
+
+  labels.resize(num_points);
+  in.read((char*)&labels[0], num_points * sizeof(uint32_t));
+
+  std::for_each(labels.begin(), labels.end(), [](uint32_t& value) { value = value & 0xFFFF; });
+
+  in.close();
+}
+
+void KittiReader::readPoses(const std::string& filename, std::vector<Eigen::Matrix4f>& poses) {
+  poses = KITTI::Odometry::loadPoses(filename);
+
+  // convert from camera to velodyne coordinate system.
+  Eigen::Matrix4f Tr = calib_["Tr"];
+  Eigen::Matrix4f Tr_inv = Tr.inverse();
+  for (uint32_t i = 0; i < poses.size(); ++i) {
+    poses[i] = Tr_inv * poses[i] * Tr;
+  }
+}
+```
+
+### src/widget/KittiReader.h
+```
+#ifndef SRC_WIDGET_KITTIREADER_H_
+#define SRC_WIDGET_KITTIREADER_H_
+
+#include <stdint.h>
+#include <QtCore/QString>
+#include <eigen3/Eigen/Dense>
+#include <string>
+#include <vector>
+#include "data/common.h"
+#include "data/kitti_utils.h"
+
+/** \brief
+ *
+ *
+ *
+ *  \author behley
+ */
+
+class KittiReader {
+ public:
+  void initialize(const QString& directory);
+
+  uint32_t count() const { return velodyne_filenames_.size(); }
+
+  void setNumPriorScans(int32_t count) { numPriorScans_ = count; }
+  void setNumPastScans(int32_t count) { numPastScans_ = count; }
+
+  /** \brief get points and labels for given index. **/
+  //  void retrieve(uint32_t index, std::vector<uint32_t>& indexes, std::vector<PointcloudPtr>& points,
+  //                std::vector<LabelsPtr>& labels);
+
+  void retrieve(int32_t idx, std::vector<PointcloudPtr>& priorPoints, std::vector<LabelsPtr>& pirorLabels,
+                std::vector<PointcloudPtr>& pastPoints, std::vector<LabelsPtr>& pastLabels);
+
+  std::vector<Eigen::Matrix4f> poses() const { return poses_; }
+
+ protected:
+  void readPoints(const std::string& filename, Laserscan& scan);
+  void readLabels(const std::string& filename, std::vector<uint32_t>& labels);
+  void readPoses(const std::string& filename, std::vector<Eigen::Matrix4f>& poses);
+
+  KITTICalibration calib_;
+  std::vector<Eigen::Matrix4f> poses_;
+  std::vector<std::string> velodyne_filenames_;
+  std::vector<std::string> label_filenames_;
+
+  // cache reads from before.
+  std::map<uint32_t, PointcloudPtr> pointsCache_;
+  std::map<uint32_t, LabelsPtr> labelCache_;
+
+  float maxDistance_{15.0f};
+  int32_t numPriorScans_{0};
+  int32_t numPastScans_{10};
+};
+
+#endif /* SRC_WIDGET_KITTIREADER_H_ */
+```
+
+### src/widget/Mainframe.cpp
+```
+#include "Mainframe.h"
+
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <map>
+
+#include <QtCore/QDir>
+#include <QtCore/QFile>
+#include <QtCore/QFileInfo>
+#include <QtWidgets/QFileDialog>
+
+#include "../data/label_utils.h"
+#include "../data/misc.h"
+
+#include <QtWidgets/QMessageBox>
+
+#include "../data/voxelize_utils.h"
+
+using namespace glow;
+
+Mainframe::Mainframe() : mChangesSinceLastSave(false) {
+  ui.setupUi(this);
+
+  connect(ui.actionOpen, SIGNAL(triggered()), this, SLOT(open()));
+  connect(ui.actionSave, SIGNAL(triggered()), this, SLOT(save()));
+
+  /** initialize the paint button mapping **/
+
+  connect(ui.spinPointSize, SIGNAL(valueChanged(int)), ui.mViewportXYZ, SLOT(setPointSize(int)));
+
+  connect(ui.sldTimeline, &QSlider::valueChanged, [this](int value) { setCurrentScanIdx(value); });
+  connect(ui.btnForward, &QToolButton::released, [this]() { forward(); });
+
+  connect(ui.btnBackward, &QToolButton::released, [this]() { backward(); });
+
+  connect(ui.chkShowPoints, &QCheckBox::toggled,
+          [this](bool value) { ui.mViewportXYZ->setDrawingOption("show points", value); });
+
+  connect(ui.chkShowVoxels, &QCheckBox::toggled,
+          [this](bool value) { ui.mViewportXYZ->setDrawingOption("show voxels", value); });
+
+  connect(this, &Mainframe::readerFinshed, this, &Mainframe::updateScans);
+  connect(this, &Mainframe::readerStarted, this, &Mainframe::activateSpinner);
+  connect(this, &Mainframe::buildVoxelgridFinished, this, &Mainframe::updateVoxelGrids);
+
+  connect(ui.rdoTrainVoxels, &QRadioButton::toggled,
+          [this](bool value) { ui.mViewportXYZ->setDrawingOption("show train", value); });
+
+  connect(ui.spinVoxelSize, static_cast<void (QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+          [this](double value) {
+            config.voxelSize = value;
+            updateVoxelSize(value);
+          });
+
+  connect(this, &Mainframe::buildVoxelgridStarted, this, &Mainframe::disableGui);
+  connect(this, &Mainframe::buildVoxelgridFinished, this, &Mainframe::enableGui);
+
+  connect(ui.spinPriorScans, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), [this](int32_t value) {
+    reader_.setNumPriorScans(value);
+    setCurrentScanIdx(ui.sldTimeline->value());
+  });
+
+  connect(ui.spinPastScans, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), [this](int32_t value) {
+    reader_.setNumPastScans(value);
+    setCurrentScanIdx(ui.sldTimeline->value());
+  });
+
+  connect(ui.spinMaxRange, static_cast<void (QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+          [this](double value) {
+            config.maxRange = value;
+            ui.mViewportXYZ->setMaxRange(value);
+            setCurrentScanIdx(ui.sldTimeline->value());
+          });
+
+  connect(ui.chkShowOccluded, &QCheckBox::toggled,
+          [this](bool value) { ui.mViewportXYZ->setDrawingOption("show occluded", value); });
+  connect(ui.chkShowInvalid, &QCheckBox::toggled,
+          [this](bool value) { ui.mViewportXYZ->setDrawingOption("show invalid", value); });
+
+  /** load labels and colors **/
+  std::map<uint32_t, std::string> label_names;
+  std::map<uint32_t, glow::GlColor> label_colors;
+
+  getLabelNames("labels.xml", label_names);
+  getLabelColors("labels.xml", label_colors);
+
+  ui.mViewportXYZ->setLabelColors(label_colors);
+
+  config = parseConfiguration("settings.cfg");
+
+  ui.mViewportXYZ->setFilteredLabels(config.filteredLabels);
+  ui.mViewportXYZ->setDrawingOption("highlight voxels", false);
+
+  ui.spinPriorScans->setValue(config.priorScans);
+  ui.spinPastScans->setValue(config.pastScans);
+
+  reader_.setNumPastScans(ui.spinPastScans->value());
+  reader_.setNumPriorScans(ui.spinPriorScans->value());
+
+  //  float voxelSize = ui.spinVoxelSize->value();
+  ui.spinVoxelSize->setValue(config.voxelSize);
+  ui.mViewportXYZ->setMaximumScans(config.maxNumScans);
+  ui.mViewportXYZ->setMaxRange(config.maxRange);
+  ui.spinMaxRange->setValue(config.maxRange);
+  ui.mViewportXYZ->setMinRange(config.minRange);
+
+  ui.spinMinExtentX->setValue(config.minExtent.x());
+  ui.spinMinExtentY->setValue(config.minExtent.y());
+  ui.spinMinExtentZ->setValue(config.minExtent.z());
+  ui.spinMaxExtentX->setValue(config.maxExtent.x());
+  ui.spinMaxExtentY->setValue(config.maxExtent.y());
+  ui.spinMaxExtentZ->setValue(config.maxExtent.z());
+
+  // extent update.
+
+  connect(ui.spinMaxExtentX, static_cast<void (QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+          [this](int32_t value) {
+            config.maxExtent.x() = value;
+            updateExtent();
+          });
+
+  connect(ui.spinMaxExtentY, static_cast<void (QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+          [this](int32_t value) {
+            config.maxExtent.y() = value;
+            updateExtent();
+          });
+
+  connect(ui.spinMaxExtentZ, static_cast<void (QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+          [this](int32_t value) {
+            config.maxExtent.z() = value;
+            updateExtent();
+          });
+
+  connect(ui.spinMinExtentX, static_cast<void (QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+          [this](int32_t value) {
+            config.minExtent.x() = value;
+            updateExtent();
+          });
+
+  connect(ui.spinMinExtentY, static_cast<void (QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+          [this](int32_t value) {
+            config.minExtent.y() = value;
+            updateExtent();
+          });
+
+  connect(ui.spinMinExtentZ, static_cast<void (QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+          [this](int32_t value) {
+            config.minExtent.z() = value;
+            updateExtent();
+          });
+
+  priorVoxelGrid_.initialize(config.voxelSize, config.minExtent, config.maxExtent);
+  pastVoxelGrid_.initialize(config.voxelSize, config.minExtent, config.maxExtent);
+
+  ui.mViewportXYZ->setVoxelGridProperties(config.voxelSize, priorVoxelGrid_.offset());
+
+  connect(ui.actionRecord, &QAction::triggered, [this]() { startRecording(); });
+  connect(ui.actionSnapshot, &QAction::triggered, [this]() { snap(); });
+
+  QStringList screenshotFiles = QDir(".").entryList();
+
+  for (auto entry : screenshotFiles) {
+    if (entry.startsWith("screenshot")) {
+      nextScreenshot_ += 1;
+    }
+  }
+}
+
+Mainframe::~Mainframe() {}
+
+void Mainframe::open() {
+  QString retValue =
+      QFileDialog::getExistingDirectory(this, "Select scan directory", lastDirectory, QFileDialog::ShowDirsOnly);
+
+  if (!retValue.isNull()) {
+    QDir base_dir(retValue);
+
+    if (!base_dir.exists("velodyne") || !base_dir.exists("poses.txt")) {
+      std::cout << "[ERROR] velodyne or poses.txt missing." << std::endl;
+      return;
+    }
+
+    reader_.initialize(retValue);
+
+    ui.btnBackward->setEnabled(false);
+    ui.btnForward->setEnabled(false);
+    if (reader_.count() > 0) ui.btnForward->setEnabled(true);
+
+    readerFuture_ = std::async(std::launch::async, &Mainframe::readAsync, this, 0);
+
+    ui.sldTimeline->setEnabled(false);
+    ui.sldTimeline->setMaximum(reader_.count());
+    ui.sldTimeline->setValue(0);
+
+    lastDirectory = base_dir.absolutePath();
+
+    QString title = "Voxelizer - ";
+    title += QFileInfo(retValue).completeBaseName();
+    setWindowTitle(title);
+
+    mChangesSinceLastSave = false;
+  }
+}
+
+void Mainframe::save() {
+  std::stringstream outname;
+  outname << std::setfill('0') << std::setw(6) << ui.sldTimeline->value();
+
+  saveVoxelGrid(priorVoxelGrid_, ".", outname.str(), "input");
+  saveVoxelGrid(pastVoxelGrid_, ".", outname.str(), "target");
+}
+
+void Mainframe::unsavedChanges() { mChangesSinceLastSave = true; }
+
+void Mainframe::setCurrentScanIdx(int32_t idx) {
+  //  std::cout << "setCurrentScanIdx(" << idx << ")" << std::endl;
+  if (reader_.count() == 0) return;
+  readerFuture_ = std::async(std::launch::async, &Mainframe::readAsync, this, idx);
+
+  ui.sldTimeline->setEnabled(false);
+}
+
+void Mainframe::readAsync(int32_t idx) {
+  // TODO progress indicator.
+  emit readerStarted();
+
+  ui.sldTimeline->setEnabled(false);
+
+  std::vector<PointcloudPtr> priorPoints;
+  std::vector<LabelsPtr> priorLabels;
+  std::vector<PointcloudPtr> pastPoints;
+  std::vector<LabelsPtr> pastLabels;
+
+  reader_.retrieve(idx, priorPoints, priorLabels, pastPoints, pastLabels);
+
+  priorPoints_ = priorPoints;
+  priorLabels_ = priorLabels;
+  pastPoints_ = pastPoints;
+  pastLabels_ = pastLabels;
+
+  emit readerFinshed();
+
+  buildVoxelGrids();
+
+  ui.sldTimeline->setEnabled(true);
+}
+
+void Mainframe::disableGui() {
+  ui.spinVoxelSize->setEnabled(false);
+  ui.spinPastScans->setEnabled(false);
+  ui.spinPriorScans->setEnabled(false);
+  ui.sldTimeline->setEnabled(false);
+  ui.spinMaxRange->setEnabled(false);
+
+  ui.spinMaxExtentX->setEnabled(false);
+  ui.spinMaxExtentY->setEnabled(false);
+  ui.spinMaxExtentZ->setEnabled(false);
+  ui.spinMinExtentX->setEnabled(false);
+  ui.spinMinExtentY->setEnabled(false);
+  ui.spinMinExtentZ->setEnabled(false);
+}
+
+void Mainframe::enableGui() {
+  ui.spinVoxelSize->setEnabled(true);
+  ui.spinPastScans->setEnabled(true);
+  ui.spinPriorScans->setEnabled(true);
+  ui.sldTimeline->setEnabled(true);
+  ui.spinMaxRange->setEnabled(true);
+
+  ui.spinMaxExtentX->setEnabled(true);
+  ui.spinMaxExtentY->setEnabled(true);
+  ui.spinMaxExtentZ->setEnabled(true);
+  ui.spinMinExtentX->setEnabled(true);
+  ui.spinMinExtentY->setEnabled(true);
+  ui.spinMinExtentZ->setEnabled(true);
+}
+
+void Mainframe::buildVoxelGrids() {
+  emit buildVoxelgridStarted();
+
+  priorVoxelGrid_.clear();
+  pastVoxelGrid_.clear();
+
+  if (priorPoints_.size() > 0) {
+    Eigen::Matrix4f anchor_pose = priorPoints_.back()->pose;
+
+    std::cout << "fill grids..." << std::flush;
+    fillVoxelGrid(anchor_pose, priorPoints_, priorLabels_, priorVoxelGrid_, config);
+
+    // fill test Grid
+    fillVoxelGrid(anchor_pose, priorPoints_, priorLabels_, pastVoxelGrid_, config);
+    fillVoxelGrid(anchor_pose, pastPoints_, pastLabels_, pastVoxelGrid_, config);
+    std::cout << "finished." << std::endl;
+
+    // updating occlusions.
+    std::cout << "updating occlusions..." << std::flush;
+    priorVoxelGrid_.updateOcclusions();
+    pastVoxelGrid_.updateOcclusions();
+    std::cout << "finished." << std::endl;
+
+//    std::cout << "insert occlusion labels..." << std::flush;
+//    priorVoxelGrid_.insertOcclusionLabels();
+//    pastVoxelGrid_.insertOcclusionLabels();
+//    std::cout << std::endl;
+
+    std::cout << "update invalid..." << std::flush;
+    for (uint32_t i = 0; i < pastPoints_.size(); ++i) {
+      Eigen::Vector3f endpoint = (anchor_pose.inverse() * pastPoints_[i]->pose).col(3).head(3);
+      pastVoxelGrid_.updateInvalid(endpoint);
+    }
+    std::cout << "finished." << std::endl;
+
+    std::cout << "Updating visualized voxels..." << std::flush;
+    // only visualization code.
+    priorVoxels_.clear();
+    pastVoxels_.clear();
+    // extract voxels and labels.
+    extractLabeledVoxels(priorVoxelGrid_, priorVoxels_);
+    extractLabeledVoxels(pastVoxelGrid_, pastVoxels_);
+    std::cout << "finished." << std::endl;
+
+    std::cout << "Used " << (priorVoxelGrid_.voxels().size() * sizeof(LabeledVoxel)) / (1000 * 1000)
+              << " MB for visualization." << std::endl;
+    std::cout << "Used " << (pastVoxelGrid_.voxels().size() * sizeof(LabeledVoxel)) / (1000 * 1000)
+              << " MB for visualization." << std::endl;
+
+    //    std::cout << "end" << std::endl;
+  }
+
+  emit buildVoxelgridFinished();
+}
+
+void Mainframe::updateVoxelGrids() {
+  ui.mViewportXYZ->setVoxelGridProperties(std::max<float>(0.01, ui.spinVoxelSize->value()), priorVoxelGrid_.offset());
+  ui.mViewportXYZ->setVoxels(priorVoxels_, pastVoxels_);
+
+  if (visited_.size() > 0) {
+    std::vector<LabeledVoxel> voxels;
+    float voxelSize = priorVoxelGrid_.resolution();
+    Eigen::Vector4f offset = priorVoxelGrid_.offset();
+
+    for (uint32_t i = 0; i < visited_.size(); ++i) {
+      LabeledVoxel lv;
+      Eigen::Vector4f pos = offset + Eigen::Vector4f(visited_[i].x() * voxelSize, visited_[i].y() * voxelSize,
+                                                     visited_[i].z() * voxelSize, 0.0f);
+      lv.position = vec3(pos.x(), pos.y(), pos.z());
+      lv.label = 11;
+      voxels.push_back(lv);
+    }
+
+    ui.mViewportXYZ->highlightVoxels(voxels);
+  }
+
+  updateOccludedVoxels();
+  updateInvalidVoxels();
+
+  if (recording_) {
+    std::string out_filename = outputDirectory_;
+    out_filename += QString("/%1.png").arg((int)ui.sldTimeline->value(), 5, 10, (QChar)'0').toStdString();
+
+    ui.mViewportXYZ->grabFrameBuffer().save(QString::fromStdString(out_filename));
+    std::cout << "Writing to " << out_filename << std::endl;
+
+    forward();
+  }
+}
+
+void Mainframe::updateOccludedVoxels() {
+  VoxelGrid& grid = (ui.rdoTrainVoxels->isChecked()) ? priorVoxelGrid_ : pastVoxelGrid_;
+  std::vector<LabeledVoxel> voxels;
+  float voxelSize = grid.resolution();
+  Eigen::Vector4f offset = grid.offset();
+
+  for (uint32_t x = 0; x < grid.size(0); ++x) {
+    for (uint32_t y = 0; y < grid.size(1); ++y) {
+      for (uint32_t z = 0; z < grid.size(2); ++z) {
+        if (!grid.isOccluded(x, y, z)) continue;
+        LabeledVoxel lv;
+        Eigen::Vector4f pos =
+            offset + Eigen::Vector4f(x * voxelSize + 0.1, y * voxelSize + 0.1, z * voxelSize + 0.1, 0.0f);
+        lv.position = vec3(pos.x(), pos.y(), pos.z());
+        lv.label = 11;
+        voxels.push_back(lv);
+      }
+    }
+  }
+
+  ui.mViewportXYZ->setOcclusionVoxels(voxels);
+}
+
+void Mainframe::updateInvalidVoxels() {
+  std::vector<LabeledVoxel> voxels;
+
+  float voxelSize = pastVoxelGrid_.resolution();
+  Eigen::Vector4f offset = pastVoxelGrid_.offset();
+
+  for (uint32_t x = 0; x < pastVoxelGrid_.size(0); ++x) {
+    for (uint32_t y = 0; y < pastVoxelGrid_.size(1); ++y) {
+      for (uint32_t z = 0; z < pastVoxelGrid_.size(2); ++z) {
+        if (!pastVoxelGrid_.isInvalid(x, y, z)) continue;
+
+        LabeledVoxel lv;
+        Eigen::Vector4f pos =
+            offset + Eigen::Vector4f(x * voxelSize + 0.1, y * voxelSize + 0.1, z * voxelSize + 0.1, 0.0f);
+        lv.position = vec3(pos.x(), pos.y(), pos.z());
+        lv.label = 11;
+        voxels.push_back(lv);
+      }
+    }
+  }
+
+  ui.mViewportXYZ->setInvalidVoxels(voxels);
+}
+
+void Mainframe::extractLabeledVoxels(const VoxelGrid& grid, std::vector<LabeledVoxel>& labeledVoxels) {
+  labeledVoxels.clear();
+  // fixme: iterate only over occuppied voxels.
+  Eigen::Vector4f offset = grid.offset();
+  float voxelSize = grid.resolution();
+
+  for (uint32_t x = 0; x < grid.size(0); ++x) {
+    for (uint32_t y = 0; y < grid.size(1); ++y) {
+      for (uint32_t z = 0; z < grid.size(2); ++z) {
+        const VoxelGrid::Voxel& v = grid(x, y, z);
+        if (v.count > 0) {
+          LabeledVoxel lv;
+          Eigen::Vector4f pos = offset + Eigen::Vector4f(x * voxelSize, y * voxelSize, z * voxelSize, 0.0f);
+          lv.position = vec3(pos.x(), pos.y(), pos.z());
+
+          uint32_t maxCount = 0;
+          uint32_t maxLabel = 0;
+
+          for (auto it = v.labels.begin(); it != v.labels.end(); ++it) {
+            if (it->second > maxCount) {
+              maxCount = it->second;
+              maxLabel = it->first;
+            }
+          }
+
+          lv.label = maxLabel;
+          labeledVoxels.push_back(lv);
+        }
+      }
+    }
+  }
+}
+
+void Mainframe::activateSpinner() { statusBar()->showMessage("     Reading scans..."); }
+
+void Mainframe::updateScans() {
+  statusBar()->clearMessage();
+  glow::_CheckGlError(__FILE__, __LINE__);
+  ui.mViewportXYZ->setPoints(priorPoints_, priorLabels_, pastPoints_, pastLabels_);
+  glow::_CheckGlError(__FILE__, __LINE__);
+}
+
+void Mainframe::updateVoxelSize(float voxelSize) {
+  voxelSize = std::max<float>(0.01, voxelSize);
+  priorVoxelGrid_.initialize(voxelSize, config.minExtent, config.maxExtent);
+  pastVoxelGrid_.initialize(voxelSize, config.minExtent, config.maxExtent);
+
+  readerFuture_ = std::async(std::launch::async, &Mainframe::buildVoxelGrids, this);
+}
+
+void Mainframe::updateExtent() {
+  priorVoxelGrid_.initialize(config.voxelSize, config.minExtent, config.maxExtent);
+  pastVoxelGrid_.initialize(config.voxelSize, config.minExtent, config.maxExtent);
+
+  readerFuture_ = std::async(std::launch::async, &Mainframe::buildVoxelGrids, this);
+}
+
+void Mainframe::forward() {
+  int32_t value = ui.sldTimeline->value() + 1;
+  if (value < int32_t(reader_.count())) ui.sldTimeline->setValue(value);
+  ui.btnBackward->setEnabled(true);
+  if (value == int32_t(reader_.count()) - 1) ui.btnForward->setEnabled(false);
+}
+
+void Mainframe::backward() {
+  int32_t value = ui.sldTimeline->value() - 1;
+  if (value >= 0) ui.sldTimeline->setValue(value);
+  ui.btnForward->setEnabled(true);
+  if (value == 0) ui.btnBackward->setEnabled(false);
+}
+void Mainframe::readConfig() {}
+
+void Mainframe::keyPressEvent(QKeyEvent* event) {
+  if (event->key() == Qt::Key_D || event->key() == Qt::Key_Right) {
+    if (ui.btnForward->isEnabled() && ui.sldTimeline->isEnabled()) forward();
+
+  } else if (event->key() == Qt::Key_A || event->key() == Qt::Key_Left) {
+    if (ui.btnBackward->isEnabled() && ui.sldTimeline->isEnabled()) backward();
+  }
+}
+
+void Mainframe::startRecording() {
+  if (!ui.actionRecord->isChecked()) {
+    recording_ = false;
+  } else {
+    QString retValue = QFileDialog::getExistingDirectory(this, "Select output directory", "");
+    if (!retValue.isNull()) {
+      outputDirectory_ = retValue.toStdString();
+      recording_ = true;
+    }
+  }
+}
+
+void Mainframe::snap() {
+  std::string out_filename = "./";
+  out_filename += QString("screenshot%1.png").arg((int)nextScreenshot_++, 5, 10, (QChar)'0').toStdString();
+
+  ui.mViewportXYZ->grabFrameBuffer().save(QString::fromStdString(out_filename));
+  std::cout << "Writing to " << out_filename << std::endl;
+}
+```
+
+### src/widget/Mainframe.h
+```
+#ifndef MAINFRAME_H_
+#define MAINFRAME_H_
+
+#include <stdint.h>
+#include <QtCore/QSignalMapper>
+#include <QtWidgets/QMainWindow>
+#include <future>
+#include "KittiReader.h"
+#include "data/common.h"
+#include "data/geometry.h"
+#include "ui_VoxelizerMainFrame.h"
+
+#include "data/VoxelGrid.h"
+#include "data/voxelize_utils.h"
+
+
+/** \brief main widget showing the point cloud and tools to label a point cloud/multiple point clouds. **/
+class Mainframe : public QMainWindow {
+  Q_OBJECT
+ public:
+  Mainframe();
+  ~Mainframe();
+
+ public slots:
+  void open();
+  void save();
+
+ signals:
+  void readerStarted();
+  void readerFinshed();
+
+  void buildVoxelgridStarted();
+  void buildVoxelgridFinished();
+
+ protected:
+  void readAsync(int32_t idx);
+
+  void buildVoxelGrids();
+
+  /** \brief update scans in the viewport.
+   *  note: must happen in the thread the OpenGL context resides.
+   **/
+  void updateScans();
+
+  void disableGui();
+  void enableGui();
+
+  /** \brief update voxelgrid in the viewport.
+   *  note: must happen in the thread the OpenGL context resides.
+   **/
+  void updateVoxelGrids();
+
+  /** \brief update voxel size / resolution of voxel grid. **/
+  void updateVoxelSize(float value);
+
+  void updateExtent();
+
+  void updateOccludedVoxels();
+
+  /** \brief determine invalid voxels. **/
+  void updateInvalidVoxels();
+
+  //  void saveVoxelGrid(const VoxelGrid& grid, const std::string& filename);
+
+  void activateSpinner();
+
+  void forward();
+  void backward();
+
+  void setCurrentScanIdx(int32_t idx);
+
+
+  void readConfig();
+
+  void extractLabeledVoxels(const VoxelGrid& grid, std::vector<LabeledVoxel>& voxels);
+
+  void startRecording();
+
+  void snap();
+
+  std::vector<PointcloudPtr> priorPoints_;
+  std::vector<LabelsPtr> priorLabels_;
+
+  std::vector<PointcloudPtr> pastPoints_;
+  std::vector<LabelsPtr> pastLabels_;
+
+
+//  std::vector<uint32_t> filteredLabels;
+  std::string filename;
+
+  void keyPressEvent(QKeyEvent* event);
+
+ protected slots:
+  void unsavedChanges();
+
+ private:
+  Ui::MainWindow ui;
+
+  std::map<uint32_t, std::string> label_names;
+  bool mChangesSinceLastSave;
+  QString lastDirectory;
+
+  Point3f midpoint;
+
+  KittiReader reader_;
+  std::future<void> readerFuture_;
+
+  VoxelGrid priorVoxelGrid_;
+  VoxelGrid pastVoxelGrid_;
+
+  std::vector<LabeledVoxel> priorVoxels_;
+  std::vector<LabeledVoxel> pastVoxels_;
+  std::vector<Eigen::Vector3i> visited_;
+
+  std::vector<int32_t> invalidVoxels_;
+
+//  Eigen::Vector4f minExtent;
+//  Eigen::Vector4f maxExtent;
+
+  Config config;
+
+  bool recording_{false};
+  std::string outputDirectory_;
+
+  uint32_t nextScreenshot_{0};
+};
+
+#endif /* MAINFRAME_H_ */
+```
+
+### src/widget/Viewport.cpp
+```
+#include "Viewport.h"
+
+#include "data/misc.h"
+
+#include <glow/ScopedBinder.h>
+#include <glow/glutil.h>
+#include <algorithm>
+#include <chrono>
+#include <fstream>
+#include "rv/Stopwatch.h"
+
+using namespace glow;
+using namespace rv;
+
+Viewport::Viewport(QWidget* parent, Qt::WindowFlags f)
+    : QGLWidget(parent, 0, f),
+      contextInitialized_(initContext()),
+      mAxis(XYZ),
+      mMode(NONE),
+      mFlags(FLAG_OVERWRITE),
+      buttonPressed(false),
+      texLabelColors_(256, 1, TextureFormat::RGB) {
+  connect(&timer_, &QTimer::timeout, [this]() { this->updateGL(); });
+
+  //  setMouseTracking(true);
+
+  drawingOption_["coordinate axis"] = true;
+
+  conversion_ = RoSe2GL::matrix;
+
+  uint32_t max_size = maxScans_ * maxPointsPerScan_;
+
+  bufPoses_.resize(maxScans_);
+  bufPoints_.resize(max_size);
+  bufRemissions_.resize(max_size);
+  bufVisible_.resize(max_size);
+  bufLabels_.resize(max_size);
+
+  initPrograms();
+  initVertexBuffers();
+
+  drawingOption_["remission"] = true;
+  drawingOption_["color"] = false;
+  drawingOption_["single scan"] = false;
+  drawingOption_["show all points"] = false;
+  drawingOption_["show points"] = true;
+  drawingOption_["show train"] = true;
+  drawingOption_["show points"] = true;
+  drawingOption_["show voxels"] = false;
+
+  texLabelColors_.setMinifyingOperation(TexRectMinOp::NEAREST);
+  texLabelColors_.setMagnifyingOperation(TexRectMagOp::NEAREST);
+
+  setAutoFillBackground(false);
+
+  glow::_CheckGlError(__FILE__, __LINE__);
+}
+
+Viewport::~Viewport() {}
+
+void Viewport::initPrograms() {
+  prgDrawPoints_.attach(GlShader::fromCache(ShaderType::VERTEX_SHADER, "shaders/draw_points.vert"));
+  prgDrawPoints_.attach(GlShader::fromCache(ShaderType::FRAGMENT_SHADER, "shaders/passthrough.frag"));
+  prgDrawPoints_.link();
+
+  prgDrawPose_.attach(GlShader::fromCache(ShaderType::VERTEX_SHADER, "shaders/empty.vert"));
+  prgDrawPose_.attach(GlShader::fromCache(ShaderType::GEOMETRY_SHADER, "shaders/draw_pose.geom"));
+  prgDrawPose_.attach(GlShader::fromCache(ShaderType::FRAGMENT_SHADER, "shaders/passthrough.frag"));
+  prgDrawPose_.link();
+
+  prgDrawVoxels_.attach(GlShader::fromCache(ShaderType::VERTEX_SHADER, "shaders/draw_voxels.vert"));
+  prgDrawVoxels_.attach(GlShader::fromCache(ShaderType::GEOMETRY_SHADER, "shaders/draw_voxels.geom"));
+  prgDrawVoxels_.attach(GlShader::fromCache(ShaderType::FRAGMENT_SHADER, "shaders/blinnphong.frag"));
+  prgDrawVoxels_.link();
+}
+
+void Viewport::initVertexBuffers() {
+  vao_points_.setVertexAttribute(0, bufPoints_, 3, AttributeType::FLOAT, false, sizeof(Point3f), nullptr);
+  vao_points_.setVertexAttribute(1, bufRemissions_, 1, AttributeType::FLOAT, false, sizeof(float), nullptr);
+  vao_points_.setVertexAttribute(2, bufLabels_, 1, AttributeType::UNSIGNED_INT, false, sizeof(uint32_t), nullptr);
+  vao_points_.setVertexAttribute(3, bufVisible_, 1, AttributeType::UNSIGNED_INT, false, sizeof(uint32_t), nullptr);
+
+  vao_prior_voxels_.setVertexAttribute(0, bufPriorVoxels_, 3, AttributeType::FLOAT, false, sizeof(LabeledVoxel),
+                                       reinterpret_cast<GLvoid*>(0));
+  vao_prior_voxels_.setVertexAttribute(1, bufPriorVoxels_, 1, AttributeType::UNSIGNED_INT, false, sizeof(LabeledVoxel),
+                                       reinterpret_cast<GLvoid*>(sizeof(glow::vec3)));
+
+  vao_past_voxels_.setVertexAttribute(0, bufPastVoxels_, 3, AttributeType::FLOAT, false, sizeof(LabeledVoxel),
+                                      reinterpret_cast<GLvoid*>(0));
+  vao_past_voxels_.setVertexAttribute(1, bufPastVoxels_, 1, AttributeType::UNSIGNED_INT, false, sizeof(LabeledVoxel),
+                                      reinterpret_cast<GLvoid*>(sizeof(glow::vec3)));
+
+  vao_highlighted_voxels_.setVertexAttribute(0, bufHighlightedVoxels_, 3, AttributeType::FLOAT, false,
+                                             sizeof(LabeledVoxel), reinterpret_cast<GLvoid*>(0));
+  vao_highlighted_voxels_.setVertexAttribute(1, bufHighlightedVoxels_, 1, AttributeType::UNSIGNED_INT, false,
+                                             sizeof(LabeledVoxel), reinterpret_cast<GLvoid*>(sizeof(glow::vec3)));
+
+  vao_occluded_voxels_.setVertexAttribute(0, bufOccludedVoxels_, 3, AttributeType::FLOAT, false, sizeof(LabeledVoxel),
+                                          reinterpret_cast<GLvoid*>(0));
+  vao_occluded_voxels_.setVertexAttribute(1, bufOccludedVoxels_, 1, AttributeType::UNSIGNED_INT, false,
+                                          sizeof(LabeledVoxel), reinterpret_cast<GLvoid*>(sizeof(glow::vec3)));
+
+  vao_invalid_voxels_.setVertexAttribute(0, bufInvalidVoxels_, 3, AttributeType::FLOAT, false, sizeof(LabeledVoxel),
+                                         reinterpret_cast<GLvoid*>(0));
+  vao_invalid_voxels_.setVertexAttribute(1, bufInvalidVoxels_, 1, AttributeType::UNSIGNED_INT, false,
+                                         sizeof(LabeledVoxel), reinterpret_cast<GLvoid*>(sizeof(glow::vec3)));
+}
+
+void Viewport::setMaximumScans(uint32_t numScans) {
+  maxScans_ = numScans;
+
+  uint32_t max_size = maxScans_ * maxPointsPerScan_;
+
+  bufPoses_.resize(maxScans_);
+  bufPoints_.resize(max_size);
+  bufRemissions_.resize(max_size);
+  bufVisible_.resize(max_size);
+  bufLabels_.resize(max_size);
+}
+
+void Viewport::setVoxels(const std::vector<LabeledVoxel>& priorVoxels, const std::vector<LabeledVoxel>& pastVoxels) {
+  bufPriorVoxels_.resize(priorVoxels.size());
+  bufPastVoxels_.resize(pastVoxels.size());
+
+  bufPriorVoxels_.assign(priorVoxels);
+  bufPastVoxels_.assign(pastVoxels);
+
+  updateGL();
+}
+
+void Viewport::setVoxelGridProperties(float voxelSize, const Eigen::Vector4f& offset) {
+  prgDrawVoxels_.setUniform(GlUniform<float>("voxelSize", voxelSize));
+  prgDrawVoxels_.setUniform(GlUniform<Eigen::Vector4f>("voxelOffset", offset));
+  voxelSize_ = voxelSize;
+
+  updateGL();
+}
+
+void Viewport::setPoints(const std::vector<PointcloudPtr>& priorPoints, std::vector<LabelsPtr>& priorLabels,
+                         const std::vector<PointcloudPtr>& pastPoints, std::vector<LabelsPtr>& pastLabels) {
+  std::cout << "Setting points..." << std::flush;
+
+  glow::_CheckGlError(__FILE__, __LINE__);
+
+  // FIXME: improve usage of resources:
+  //   Use transform feedback to get points inside the tile.
+
+  priorPoints_ = priorPoints;
+  priorLabels_ = priorLabels;
+  priorIndexes_.clear();
+
+  pastPoints_ = pastPoints;
+  pastLabels_ = pastLabels;
+  pastIndexes_.clear();
+
+  glow::_CheckGlError(__FILE__, __LINE__);
+
+  {
+    // first remove entries using a set_difference
+    std::vector<Laserscan*> before;
+    std::vector<Laserscan*> after;
+    for (auto it = bufferContent_.begin(); it != bufferContent_.end(); ++it) before.push_back(it->first);
+    for (auto it = priorPoints.begin(); it != priorPoints.end(); ++it) after.push_back(it->get());
+    for (auto it = pastPoints.begin(); it != pastPoints.end(); ++it) after.push_back(it->get());
+
+    std::sort(before.begin(), before.end());
+    std::sort(after.begin(), after.end());
+
+    std::vector<Laserscan*> needsDelete(before.size());
+    std::vector<Laserscan*>::iterator end =
+        std::set_difference(before.begin(), before.end(), after.begin(), after.end(), needsDelete.begin());
+
+    for (auto it = needsDelete.begin(); it != end; ++it) {
+      bufferContent_.erase(*it);
+    }
+  }
+
+  // reset free indexes.
+  freeIndexes.clear();
+  nextFree = 0;
+
+  // get already used/occupied indexes.
+
+  std::vector<int32_t> usedIndexes;
+  for (auto it = bufferContent_.begin(); it != bufferContent_.end(); ++it) usedIndexes.push_back(it->second.index);
+
+  std::sort(usedIndexes.begin(), usedIndexes.end());
+  usedIndexes.push_back(maxScans_);
+
+  for (int32_t j = 0; j < usedIndexes[0]; ++j) freeIndexes.push_back(j);
+  for (uint32_t i = 0; i < usedIndexes.size() - 1; ++i) {
+    for (int32_t j = usedIndexes[i] + 1; j < usedIndexes[i + 1]; ++j) freeIndexes.push_back(j);
+  }
+
+  loadedScans = 0;
+
+  fillBuffers(priorPoints, priorLabels, priorIndexes_);
+  fillBuffers(pastPoints, pastLabels, pastIndexes_);
+
+  glow::_CheckGlError(__FILE__, __LINE__);
+
+  std::cout << "Loaded " << loadedScans << " of total " << priorPoints_.size() + pastPoints_.size() << " scans."
+            << std::endl;
+  //  std::cout << "memcpy: " << memcpy_time << " s / " << total_time << " s." << std::endl;
+
+  updateGL();
+}
+
+void Viewport::fillBuffers(const std::vector<PointcloudPtr>& points, const std::vector<LabelsPtr>& labels,
+                           std::vector<BufferInfo>& indexes) {
+  for (uint32_t i = 0; i < points.size(); ++i) {
+    if (bufferContent_.find(points[i].get()) == bufferContent_.end()) {
+      if (nextFree == freeIndexes.size()) {
+        std::cerr << "Warning: insufficient memory for scan." << std::endl;
+        break;
+      }
+
+      int32_t index = freeIndexes[nextFree++];
+      //      std::cout << index << std::endl;
+
+      // not already loaded to buffer, need to transfer data to next free spot.
+      uint32_t num_points = std::min(maxPointsPerScan_, points[i]->size());
+      if (points[i]->size() >= maxPointsPerScan_) std::cerr << "warning: losing some points" << std::endl;
+
+      std::vector<uint32_t> visible(num_points, 1);
+
+      for (uint32_t j = 0; j < num_points; ++j) {
+        if (std::find(mFilteredLabels.begin(), mFilteredLabels.end(), (*labels[i])[j]) != mFilteredLabels.end()) {
+          visible[j] = 0;
+        }
+      }
+
+      //      Stopwatch::tsic();
+
+      BufferInfo info;
+      info.index = index;
+      info.size = num_points;
+      info.scan = points[i].get();
+
+      bufferContent_[points[i].get()] = info;
+      bufPoses_[index] = points[i]->pose;
+      bufPoints_.replace(index * maxPointsPerScan_, &points[i]->points[0], num_points);
+      if (points[i]->hasRemissions())
+        bufRemissions_.replace(index * maxPointsPerScan_, &points[i]->remissions[0], num_points);
+      bufLabels_.replace(index * maxPointsPerScan_, &(*labels[i])[0], num_points);
+      bufVisible_.replace(index * maxPointsPerScan_, &visible[0], num_points);
+
+      //      memcpy_time += Stopwatch::toc();
+
+      indexes.push_back(info);
+
+      loadedScans += 1;
+    } else {
+      indexes.push_back(bufferContent_[points[i].get()]);
+      //      indexes.back().scan = points[i].get();
+    }
+  }
+
+  //  for (uint32_t i = 0; i < indexes.size(); ++i) {
+  //    std::cout << indexes[i].index << ", " << indexes[i].scan << std::endl;
+  //  }
+}
+
+void Viewport::highlightVoxels(const std::vector<LabeledVoxel>& voxels) {
+  bufHighlightedVoxels_.assign(voxels);
+  updateGL();
+}
+
+void Viewport::setOcclusionVoxels(const std::vector<LabeledVoxel>& voxels) {
+  bufOccludedVoxels_.assign(voxels);
+  updateGL();
+}
+
+void Viewport::setLabelColors(const std::map<uint32_t, glow::GlColor>& colors) {
+  mLabelColors = colors;
+
+  std::vector<uint8_t> label_colors(3 * 256);
+  for (auto it = mLabelColors.begin(); it != mLabelColors.end(); ++it) {
+    label_colors[3 * it->first] = it->second.R * 255;
+    label_colors[3 * it->first + 1] = it->second.G * 255;
+    label_colors[3 * it->first + 2] = it->second.B * 255;
+  }
+  texLabelColors_.assign(PixelFormat::RGB, PixelType::UNSIGNED_BYTE, &label_colors[0]);
+}
+
+void Viewport::setPointSize(int value) {
+  pointSize_ = value;
+  updateGL();
+}
+
+void Viewport::setMode(MODE mode) {
+  mMode = mode;
+
+  updateGL();
+}
+
+void Viewport::setFlags(int32_t flags) { mFlags = flags; }
+
+void Viewport::setDrawingOption(const std::string& name, bool value) {
+  drawingOption_[name] = value;
+  updateGL();
+}
+
+void Viewport::setMinRange(float range) { minRange_ = range; }
+
+void Viewport::setMaxRange(float range) { maxRange_ = range; }
+
+void Viewport::setFilteredLabels(const std::vector<uint32_t>& labels) {
+  std::vector<uint32_t> labels_before = mFilteredLabels;
+  mFilteredLabels = labels;
+  std::sort(mFilteredLabels.begin(), mFilteredLabels.end());
+
+  updateGL();
+}
+
+void Viewport::setScanIndex(uint32_t idx) {
+  singleScanIdx_ = idx;
+  updateGL();
+}
+
+void Viewport::initializeGL() {
+  glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+  glEnable(GL_DEPTH_TEST);
+  glDepthFunc(GL_LEQUAL);
+  glEnable(GL_LINE_SMOOTH);
+
+  mCamera.lookAt(5.0f, 5.0f, 5.0f, 0.0f, 0.0f, 0.0f);
+}
+
+void Viewport::resizeGL(int w, int h) {
+  glViewport(0, 0, w, h);
+
+  // set projection matrix
+  float fov = radians(45.0f);
+  float aspect = float(w) / float(h);
+
+  projection_ = glPerspective(fov, aspect, 0.1f, 2000.0f);
+}
+
+void Viewport::paintGL() {
+  glow::_CheckGlError(__FILE__, __LINE__);
+
+  glEnable(GL_DEPTH_TEST);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  glPointSize(pointSize_);
+
+  model_ = Eigen::Matrix4f::Identity();
+  view_ = mCamera.matrix();
+
+  mvp_ = projection_ * view_ * conversion_;
+
+  if (drawingOption_["coordinate axis"]) {
+    // coordinateSytem_->pose = Eigen::Matrix4f::Identity();
+    ScopedBinder<GlProgram> program_binder(prgDrawPose_);
+    ScopedBinder<GlVertexArray> vao_binder(vao_no_points_);
+
+    prgDrawPose_.setUniform(mvp_);
+    prgDrawPose_.setUniform(GlUniform<Eigen::Matrix4f>("pose", Eigen::Matrix4f::Identity()));
+    prgDrawPose_.setUniform(GlUniform<float>("size", 1.0f));
+
+    glDrawArrays(GL_POINTS, 0, 1);
+  }
+
+  if (drawingOption_["show points"]) {
+    glPointSize(pointSize_);
+
+    ScopedBinder<GlProgram> program_binder(prgDrawPoints_);
+    ScopedBinder<GlVertexArray> vao_binder(vao_points_);
+
+    prgDrawPoints_.setUniform(GlUniform<bool>("useRemission", drawingOption_["remission"]));
+    prgDrawPoints_.setUniform(GlUniform<bool>("useColor", drawingOption_["color"]));
+    prgDrawPoints_.setUniform(GlUniform<float>("maxRange", maxRange_));
+    prgDrawPoints_.setUniform(GlUniform<float>("minRange", minRange_));
+
+    //    bool showSingleScan = drawingOption_["single scan"];
+
+    glActiveTexture(GL_TEXTURE0);
+    texLabelColors_.bind();
+
+    if (priorPoints_.size() > 0) {
+      Eigen::Matrix4f anchor_pose = priorPoints_.back()->pose;
+      //      Eigen::Matrix4f anchor_pose = Eigen::Matrix4f::Identity();
+      if (drawingOption_["show train"]) {
+        drawPoints(anchor_pose, priorIndexes_);
+      } else {
+        drawPoints(anchor_pose, priorIndexes_);
+        drawPoints(anchor_pose, pastIndexes_);
+      }
+    }
+    glActiveTexture(GL_TEXTURE0);
+    texLabelColors_.release();
+  }
+
+  if (drawingOption_["show voxels"]) {
+    ScopedBinder<GlProgram> program_binder(prgDrawVoxels_);
+
+    if (drawingOption_["show train"])
+      vao_prior_voxels_.bind();
+    else
+      vao_past_voxels_.bind();
+
+    //    bool showSingleScan = drawingOption_["single scan"];
+
+    glActiveTexture(GL_TEXTURE0);
+    texLabelColors_.bind();
+
+    mvp_ = projection_ * view_ * conversion_;
+    prgDrawVoxels_.setUniform(mvp_);
+    prgDrawVoxels_.setUniform(GlUniform<vec3>("lightPos", vec3(-10, 0, 10)));
+    prgDrawVoxels_.setUniform(GlUniform<bool>("use_custom_color", false));
+    prgDrawVoxels_.setUniform(GlUniform<float>("voxelSize", 0.9 * voxelSize_));
+
+    Eigen::Vector4f viewpos_rose = conversion_.inverse() * mCamera.getPosition();
+
+    prgDrawVoxels_.setUniform(GlUniform<vec3>("viewPos", vec3(viewpos_rose.x(), viewpos_rose.y(), viewpos_rose.z())));
+
+    if (drawingOption_["show train"])
+      glDrawArrays(GL_POINTS, 0, bufPriorVoxels_.size());
+    else
+      glDrawArrays(GL_POINTS, 0, bufPastVoxels_.size());
+
+    if (drawingOption_["show train"])
+      vao_prior_voxels_.release();
+    else
+      vao_past_voxels_.release();
+
+    if (drawingOption_["highlight voxels"]) {
+      vao_highlighted_voxels_.bind();
+
+      glDrawArrays(GL_POINTS, 0, bufHighlightedVoxels_.size());
+
+      vao_highlighted_voxels_.release();
+    }
+
+    glActiveTexture(GL_TEXTURE0);
+    texLabelColors_.release();
+  }
+
+  if (drawingOption_["show occluded"]) {
+    ScopedBinder<GlProgram> program_binder(prgDrawVoxels_);
+
+    mvp_ = projection_ * view_ * conversion_;
+    prgDrawVoxels_.setUniform(mvp_);
+    prgDrawVoxels_.setUniform(GlUniform<vec3>("lightPos", vec3(-10, 0, 10)));
+    Eigen::Vector4f viewpos_rose = conversion_.inverse() * mCamera.getPosition();
+    prgDrawVoxels_.setUniform(GlUniform<bool>("use_custom_color", true));
+
+    prgDrawVoxels_.setUniform(GlUniform<float>("voxelSize", std::max(voxelSize_ - 0.2, 0.05)));
+    prgDrawVoxels_.setUniform(GlUniform<vec3>("viewPos", vec3(viewpos_rose.x(), viewpos_rose.y(), viewpos_rose.z())));
+    prgDrawVoxels_.setUniform(GlUniform<vec4>("custom_color", vec4(0.3, 0.3, 0.3, 1.0f)));
+
+    vao_occluded_voxels_.bind();
+
+    glDrawArrays(GL_POINTS, 0, bufOccludedVoxels_.size());
+
+    vao_occluded_voxels_.release();
+  }
+
+  if (drawingOption_["show invalid"]) {
+    ScopedBinder<GlProgram> program_binder(prgDrawVoxels_);
+
+    mvp_ = projection_ * view_ * conversion_;
+    prgDrawVoxels_.setUniform(mvp_);
+    prgDrawVoxels_.setUniform(GlUniform<vec3>("lightPos", vec3(-10, 0, 10)));
+    Eigen::Vector4f viewpos_rose = conversion_.inverse() * mCamera.getPosition();
+    prgDrawVoxels_.setUniform(GlUniform<bool>("use_custom_color", true));
+    prgDrawVoxels_.setUniform(GlUniform<float>("voxelSize", std::max(voxelSize_ - 0.2, 0.05)));
+    prgDrawVoxels_.setUniform(GlUniform<vec3>("viewPos", vec3(viewpos_rose.x(), viewpos_rose.y(), viewpos_rose.z())));
+    prgDrawVoxels_.setUniform(GlUniform<vec4>("custom_color", vec4(0.3, 0.3, 0.3, 1.0f)));
+
+    vao_invalid_voxels_.bind();
+
+    glDrawArrays(GL_POINTS, 0, bufInvalidVoxels_.size());
+
+    vao_invalid_voxels_.release();
+  }
+
+  glow::_CheckGlError(__FILE__, __LINE__);
+}
+
+void Viewport::drawPoints(const Eigen::Matrix4f& anchor_pose, const std::vector<BufferInfo>& indexes) {
+  for (auto it = indexes.begin(); it != indexes.end(); ++it) {
+    //      if (showSingleScan && (it->first != points_[singleScanIdx_].get())) continue;
+
+    Eigen::Matrix4f pose = anchor_pose.inverse() * it->scan->pose;
+    //    pose = it->scan->pose;
+
+    prgDrawPoints_.setUniform(GlUniform<Eigen::Matrix4f>("pose", pose));
+    mvp_ = projection_ * view_ * conversion_ * pose;
+
+    prgDrawPoints_.setUniform(mvp_);
+
+    glDrawArrays(GL_POINTS, it->index * maxPointsPerScan_, it->size);
+  }
+}
+
+// std::ostream& operator<<(std::ostream& os, const vec2& v) {
+//  os << "(" << v.x << ", " << v.y << ")";
+//  return os;
+//}
+
+void Viewport::mousePressEvent(QMouseEvent* event) {
+  // if camera consumes the signal, simply return. // here we could also include some remapping.
+
+  mChangeCamera = false;
+
+  if (mCamera.mousePressed(event->windowPos().x(), event->windowPos().y(), resolveMouseButton(event->buttons()),
+                           resolveKeyboardModifier(event->modifiers()))) {
+    timer_.start(1. / 30.);
+    mChangeCamera = true;
+
+    return;
+  }
+}
+
+void Viewport::mouseReleaseEvent(QMouseEvent* event) {
+  // if camera consumes the signal, simply return. // here we could also include some remapping.
+  if (mChangeCamera) {
+    timer_.stop();
+    updateGL();
+    if (mCamera.mouseReleased(event->windowPos().x(), event->windowPos().y(), resolveMouseButton(event->buttons()),
+                              resolveKeyboardModifier(event->modifiers()))) {
+      timer_.stop();
+      updateGL();  // get the last action.
+
+      return;
+    }
+  }
+}
+
+void Viewport::mouseMoveEvent(QMouseEvent* event) {
+  // if camera consumes the signal, simply return. // here we could also include some remapping.
+  if (mChangeCamera) {
+    if (mCamera.mouseMoved(event->windowPos().x(), event->windowPos().y(), resolveMouseButton(event->buttons()),
+                           resolveKeyboardModifier(event->modifiers()))) {
+      return;
+    }
+  }
+}
+
+void Viewport::keyPressEvent(QKeyEvent* event) { event->ignore(); }
+
+glow::GlCamera::KeyboardModifier Viewport::resolveKeyboardModifier(Qt::KeyboardModifiers modifiers) {
+  // currently only single button presses are supported.
+  GlCamera::KeyboardModifier modifier = GlCamera::KeyboardModifier::None;
+
+  if (modifiers & Qt::ControlModifier)
+    modifier = GlCamera::KeyboardModifier::CtrlDown;
+  else if (modifiers & Qt::ShiftModifier)
+    modifier = GlCamera::KeyboardModifier::ShiftDown;
+  else if (modifiers & Qt::AltModifier)
+    modifier = GlCamera::KeyboardModifier::AltDown;
+
+  return modifier;
+}
+
+glow::GlCamera::MouseButton Viewport::resolveMouseButton(Qt::MouseButtons button) {
+  // currently only single button presses are supported.
+  GlCamera::MouseButton btn = GlCamera::MouseButton::NoButton;
+
+  if (button & Qt::LeftButton)
+    btn = GlCamera::MouseButton::LeftButton;
+  else if (button & Qt::RightButton)
+    btn = GlCamera::MouseButton::RightButton;
+  else if (button & Qt::MiddleButton)
+    btn = GlCamera::MouseButton::MiddleButton;
+
+  return btn;
+}
+
+void Viewport::setInvalidVoxels(const std::vector<LabeledVoxel>& voxels) {
+  bufInvalidVoxels_.assign(voxels);
+  updateGL();
+}
+```
+
+### src/widget/Viewport.h
+```
+/* \brief a view, which can be used to label points.
+ *
+ *
+ */
+#ifndef POINTVIEW_H_
+#define POINTVIEW_H_
+
+#include <stdint.h>
+#include <list>
+#include <vector>
+
+#include <glow/glbase.h>
+
+#include <QtCore/QTime>
+#include <QtCore/QTimer>
+#include <QtGui/QMouseEvent>
+#include <QtOpenGL/QGLWidget>
+
+#include <GL/gl.h>
+#include <GL/glu.h>
+
+#include <glow/GlBuffer.h>
+#include <glow/GlColor.h>
+#include <glow/GlFramebuffer.h>
+#include <glow/GlProgram.h>
+#include <glow/GlRenderbuffer.h>
+#include <glow/GlShaderCache.h>
+#include <glow/GlTexture.h>
+#include <glow/GlVertexArray.h>
+#include <glow/util/RoSeCamera.h>
+
+#include "data/common.h"
+#include "data/geometry.h"
+
+class Viewport : public QGLWidget {
+  Q_OBJECT
+ public:
+  enum AXIS { XYZ, X, Y, Z };
+
+  enum MODE { NONE, PAINT, POLYGON };
+
+  enum FLAGS { FLAG_OVERWRITE = 1, FLAG_OTHER = 2 };
+
+  Viewport(QWidget* parent = 0, Qt::WindowFlags f = 0);
+  virtual ~Viewport();
+
+  void setMaximumScans(uint32_t numScans);
+
+  void setPoints(const std::vector<PointcloudPtr>& priorPoints, std::vector<LabelsPtr>& priorLabels,
+                 const std::vector<PointcloudPtr>& pastPoints, std::vector<LabelsPtr>& pastLabels);
+
+  void setDrawingOption(const std::string& name, bool value);
+
+  void setMinRange(float range);
+  void setMaxRange(float range);
+
+  void setScanIndex(uint32_t idx);
+
+  void setLabelColors(const std::map<uint32_t, glow::GlColor>& colors);
+
+  void setVoxels(const std::vector<LabeledVoxel>& priorVoxels, const std::vector<LabeledVoxel>& pastVoxels);
+
+  void setVoxelGridProperties(float voxelSize, const Eigen::Vector4f& offset);
+
+  void highlightVoxels(const std::vector<LabeledVoxel>& voxels);
+
+  void setOcclusionVoxels(const std::vector<LabeledVoxel>& voxels);
+  void setInvalidVoxels(const std::vector<LabeledVoxel>& voxels);
+
+ public slots:
+  void setPointSize(int value);
+
+  void setMode(MODE mode);
+  void setFlags(int32_t flags);
+
+  void setFilteredLabels(const std::vector<uint32_t>& labels);
+
+ protected:
+  struct BufferInfo {
+    uint32_t index;
+    uint32_t size;
+    Laserscan* scan;
+  };
+
+  bool initContext() {
+    // enabling core profile
+    QGLFormat corefmt;
+    corefmt.setVersion(5, 0);  // getting highest compatible format...
+    corefmt.setProfile(QGLFormat::CoreProfile);
+    setFormat(corefmt);
+
+    // version info.
+    QGLFormat fmt = this->format();
+    std::cout << "OpenGL Context Version " << fmt.majorVersion() << "." << fmt.minorVersion() << " "
+              << ((fmt.profile() == QGLFormat::CoreProfile) ? "core profile" : "compatibility profile") << std::endl;
+
+    makeCurrent();
+    glow::inititializeGLEW();
+
+    return true;
+  }
+
+  void initPrograms();
+  void initVertexBuffers();
+
+  void initializeGL();
+  void resizeGL(int width, int height);
+  void paintGL();
+
+  void drawPoints(const Eigen::Matrix4f& anchor_pose, const std::vector<BufferInfo>& indexes);
+
+  void mousePressEvent(QMouseEvent*);
+  void mouseReleaseEvent(QMouseEvent*);
+  void mouseMoveEvent(QMouseEvent*);
+  void keyPressEvent(QKeyEvent*);
+
+  glow::GlCamera::KeyboardModifier resolveKeyboardModifier(Qt::KeyboardModifiers modifiers);
+
+  glow::GlCamera::MouseButton resolveMouseButton(Qt::MouseButtons button);
+
+  //  void drawPoints(const std::vector<Point3f>& points, const std::vector<uint32_t>& labels);
+  //  void labelPoints(int32_t x, int32_t y, float radius, uint32_t label);
+
+  void fillBuffers(const std::vector<PointcloudPtr>& points, const std::vector<LabelsPtr>& labels,
+                   std::vector<BufferInfo>& indexes);
+
+  bool contextInitialized_;
+  std::map<uint32_t, glow::GlColor> mLabelColors;
+
+  std::vector<PointcloudPtr> priorPoints_;
+  std::vector<LabelsPtr> priorLabels_;
+  std::vector<BufferInfo> priorIndexes_;
+
+  std::vector<PointcloudPtr> pastPoints_;
+  std::vector<LabelsPtr> pastLabels_;
+  std::vector<BufferInfo> pastIndexes_;
+
+  glow::RoSeCamera mCamera;
+  bool mChangeCamera{false};
+
+  AXIS mAxis;
+  MODE mMode;
+  int32_t mFlags;
+
+  std::vector<uint32_t> mFilteredLabels;
+
+  /** selected endpoint **/
+
+  bool buttonPressed;
+  QTimer timer_;
+
+  // shaders, etc.
+  uint32_t maxScans_{50};
+  uint32_t maxPointsPerScan_{150000};
+  std::vector<Eigen::Matrix4f> bufPoses_;
+  glow::GlBuffer<Point3f> bufPoints_{glow::BufferTarget::ARRAY_BUFFER, glow::BufferUsage::DYNAMIC_DRAW};
+  glow::GlBuffer<float> bufRemissions_{glow::BufferTarget::ARRAY_BUFFER, glow::BufferUsage::DYNAMIC_DRAW};
+  glow::GlBuffer<uint32_t> bufLabels_{glow::BufferTarget::ARRAY_BUFFER, glow::BufferUsage::DYNAMIC_DRAW};
+  glow::GlBuffer<uint32_t> bufVisible_{glow::BufferTarget::ARRAY_BUFFER, glow::BufferUsage::DYNAMIC_DRAW};
+
+  glow::GlBuffer<LabeledVoxel> bufPriorVoxels_{glow::BufferTarget::ARRAY_BUFFER, glow::BufferUsage::DYNAMIC_DRAW};
+  glow::GlBuffer<LabeledVoxel> bufPastVoxels_{glow::BufferTarget::ARRAY_BUFFER, glow::BufferUsage::DYNAMIC_DRAW};
+  glow::GlBuffer<LabeledVoxel> bufHighlightedVoxels_{glow::BufferTarget::ARRAY_BUFFER, glow::BufferUsage::DYNAMIC_DRAW};
+  glow::GlBuffer<LabeledVoxel> bufOccludedVoxels_{glow::BufferTarget::ARRAY_BUFFER, glow::BufferUsage::DYNAMIC_DRAW};
+  glow::GlBuffer<LabeledVoxel> bufInvalidVoxels_{glow::BufferTarget::ARRAY_BUFFER, glow::BufferUsage::DYNAMIC_DRAW};
+
+  glow::GlTextureRectangle texLabelColors_;
+
+  glow::GlVertexArray vao_no_points_;
+  glow::GlVertexArray vao_points_;
+  glow::GlVertexArray vao_prior_voxels_;
+  glow::GlVertexArray vao_past_voxels_;
+  glow::GlVertexArray vao_highlighted_voxels_;
+  glow::GlVertexArray vao_occluded_voxels_;
+  glow::GlVertexArray vao_invalid_voxels_;
+
+  glow::GlProgram prgDrawPose_;
+  glow::GlProgram prgDrawPoints_;
+  glow::GlProgram prgDrawVoxels_;
+
+  int32_t pointSize_{1};
+
+  glow::GlUniform<Eigen::Matrix4f> mvp_{"mvp", Eigen::Matrix4f::Identity()};
+  glow::GlUniform<Eigen::Matrix4f> mvp_inv_t_{"mvp_inv_t", Eigen::Matrix4f::Identity()};
+
+  Eigen::Matrix4f model_{Eigen::Matrix4f::Identity()};
+  Eigen::Matrix4f view_{Eigen::Matrix4f::Identity()};
+  Eigen::Matrix4f projection_{Eigen::Matrix4f::Identity()};
+  Eigen::Matrix4f conversion_{glow::RoSe2GL::matrix};
+
+  std::map<Laserscan*, BufferInfo> bufferContent_;
+
+  std::map<std::string, bool> drawingOption_;
+
+  float minRange_{0.0f}, maxRange_{100.0f};
+
+  bool removeGround_{false};
+  float groundThreshold_{-1.6f};
+
+  uint32_t singleScanIdx_{0};
+
+  std::vector<int32_t> freeIndexes;
+  uint32_t nextFree{0};
+  uint32_t loadedScans{0};
+
+  float voxelSize_;
+};
+
+#endif /* POINTVIEW_H_ */
+```

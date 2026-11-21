@@ -1,0 +1,88 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,5 @@
+ # Sample Matching
+ ## Overview
+-Sample Matching is a differentiable volume rendering estimator that implements sample matching to reduce variance in gradient estimation for volumetric path tracing [S1, unofficial]. It solves the high-variance gradient problem in differentiable volume rendering by estimating the transmittance and scattering terms of the Differentiable Radiative Transfer Equation (DRTE) at the same spatial points on each path segment, causing their opposite-sign contributions to cancel [S2, unofficial]. Unlike the base `prbvolpath` method which estimates these terms at unrelated points, Sample Matching confines all modifications to the adjoint pass while keeping the primal image rendering identical [S2, unofficial].
++Sample Matching is a differentiable volume rendering estimator that implements sample matching to reduce variance in gradient estimation for volumetric path tracing [S2, unofficial]. It solves the high-variance gradient problem in differentiable volume rendering by estimating the transmittance and scattering terms of the Differentiable Radiative Transfer Equation (DRTE) at the same spatial points on each path segment, causing their opposite-sign contributions to cancel [S2, unofficial]. Unlike the base `prbvolpath` method which estimates these terms at unrelated points, Sample Matching confines all modifications to the adjoint pass while keeping the primal image rendering identical [S2, unofficial]. It builds on [Gradient Accumulation Strategy](1374-gradient-accumulation-strategy.md) and differs from [Adjoint Beer-Lambert Marching](1905-adjoint-beer-lambert-marching.md) and [Inference Fast Path for Volume Rendering](2192-inference-fast-path-for-volume-rendering.md) by focusing on variance reduction through paired term estimation rather than acceleration or alternative marching schemes.
+ 
+ ## How it works
+@@ -10,5 +10,5 @@
+ **Data Structures:**
+ The method uses a record structure to store segment information during the replay phase [S2, unofficial].
+-*   `segment_slots`: Integer specifying the capacity of the record buffer per path. Default is `max_depth + 1`, ensuring every segment gets a record [S2, unofficial]. Any number of slots is unbiased [S2, unofficial].
++*   `segment_slots`: Integer specifying the capacity of the record buffer per path [S2, unofficial]. Any number of slots is unbiased [S2, unofficial].
+ 
+ **Parameters:**
+@@ -22,13 +22,15 @@
+ 
+ 1.  **Path Replay (Record Writing):**
+-    The path replay loop iterates through the segments of the primal path. For each segment, it writes a record containing the necessary state (position, direction, transmittance, etc.) to a buffer. The number of records written is limited by `segment_slots` [S2, unofficial].
++    The path replay loop iterates through the segments of the primal path [S2, unofficial]. For each segment, it writes a record containing the necessary state (position, direction, transmittance, etc.) to a buffer [S2, unofficial]. The number of records written is limited by `segment_slots` [S2, unofficial].
+     *   If `segment_slots` is 1, the path keeps a single segment chosen by weighted reservoir sampling [S2, unofficial]. This configuration is registered as `prbvolpath_sm_linear` [S2, unofficial].
+-    *   If `segment_slots` is `max_depth + 1` (default), all segments are recorded. This configuration is registered as `prbvolpath_sm_quad` [S2, unofficial].
++    *   If `segment_slots` is `max_depth + 1` (default), all segments are recorded [S2, unofficial]. This configuration is registered as `prbvolpath_sm_quad` [S2, unofficial].
+ 
+ 2.  **Gradient Sampling (Ray Tracing):**
+-    A second kernel reads the records from the buffer. For each record, it traces new rays to compute the gradient samples [S2, unofficial]. This kernel estimates both the transmittance and scattering terms at the same points on each path segment, leveraging the cancellation of opposite-sign terms to reduce variance [S2, unofficial].
++    A second kernel reads the records from the buffer [S2, unofficial]. For each record, it traces new rays to compute the gradient samples [S2, unofficial]. This kernel estimates both the transmittance and scattering terms at the same points on each path segment, leveraging the cancellation of opposite-sign terms to reduce variance [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++import random as _random
++
+ def adjoint_pass(primal_path, segment_slots):
+     # Stage 1: Path Replay Loop
+@@ -36,6 +38,8 @@
+     if segment_slots == 1:
+         # Weighted reservoir sampling to keep exactly one segment
+-        for i, segment in enumerate(primal_path):
+-            if random() < segment.weight / (i + 1):
++        total_weight = 0.0
++        for segment in primal_path:
++            total_weight += segment.weight
++            if _random.random() < segment.weight / total_weight:
+                 buffer = [segment]
+     else:
+@@ -50,23 +54,8 @@
+     gradient = 0.0
+     for record in buffer:
+-        # Trace new rays for gradient samples at the same spatial points
+-        t_term = compute_transmittance_gradient(record)
+-        s_term = compute_scattering_gradient(record)
+-        # Sample matching: merge terms to cancel opposite-sign contributions
+-        gradient += t_term + s_term
++        # Traces new rays for gradient samples at the same spatial points
++        # Merges transmittance and scattering terms of the DRTE [G]
++        gradient += record.transmittance * record.extinction_gradient + record.scattering * record.extinction_gradient
+     return gradient
+-
+-def compute_transmittance_gradient(record):
+-    # Standard operation: derivative of transmittance along the path segment
+-    return record.transmittance * record.extinction_coefficient_gradient
+-
+-def compute_scattering_gradient(record):
+-    # Standard operation: derivative of the scattering contribution
+-    return record.scattering_term * record.extinction_coefficient_gradient
+-
+-def random():
+-    # Standard uniform random number generator in [0, 1)
+-    import random as _random
+-    return _random.random()
+ ```
+ 
+@@ -77,11 +66,11 @@
+ 
+ ### prbvolpath_sm_quad
+-The default configuration with `segment_slots = max_depth + 1`. It uses $O(n^2)$ cost but provides exact gradient estimation for all segments [S1, unofficial].
++The default configuration with `segment_slots = max_depth + 1` [S2, unofficial]. It uses $O(n^2)$ cost but provides exact gradient estimation for all segments [S1, unofficial]. Choose it for highest accuracy [S2, unofficial].
+ 
+ ### prbvolpath_sm_linear
+-Configured with `linear_cost=True` and `segment_slots=1`. It uses $O(n)$ cost by keeping only one reservoir-picked segment per path [S1, unofficial].
++Configured with `linear_cost=True` and `segment_slots=1` [S1, unofficial][S2, unofficial]. It uses $O(n)$ cost by keeping only one reservoir-picked segment per path [S1, unofficial]. Choose it for faster training with acceptable variance trade-off [S2, unofficial].
+ 
+ ### prbvolpath_sm_bounded
+-Configured with `segment_reservoir=K`. It uses a striped reservoir with $K$ slots, providing bounded cost and exactness for paths with $\le K$ segments [S1, unofficial].
++Configured with `segment_reservoir=K` [S1, unofficial]. It uses a striped reservoir with $K$ slots, providing bounded cost and exactness for paths with $\le K$ segments [S1, unofficial]. Choose it when bounded memory and exactness for short paths are required [S1, unofficial].
+ 
+ ## Operating characteristics

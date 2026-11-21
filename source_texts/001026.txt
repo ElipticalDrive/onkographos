@@ -1,0 +1,288 @@
+# Hybrid Voxel Formats for Efficient Ray Tracing
+
+Russel Arbore1 , Jeffrey Liu1 , Aidan Wefel1 , Steven Gao1 , and Eric Shaffer1
+
+University of Illinois Urbana-Champaign, Urbana IL 61801, USA {rarbore2,jliu179,awefel2,hongyig3,shaffer1}@illinois.edu
+
+Abstract. Voxels are a geometric representation used for rendering volumes, multi-resolution models, and indirect lighting effects. Since the memory consumption of uncompressed voxel volumes scales cubically with resolution, past works have introduced data structures for exploiting spatial sparsity and homogeneity to compress volumes and accelerate ray tracing. However, these works don't systematically evaluate the trade-off between compression and ray intersection performance for a variety of storage formats. We show that a hierarchical combination of voxel formats can achieve Pareto optimal trade-offs between memory consumption and rendering speed. We present a formulation of "hybrid" voxel formats, where each level of a hierarchical format can have a different structure. For evaluation, we implement a metaprogramming system to automatically generate construction and ray intersection code for arbitrary hybrid formats. We also identify transformations on these formats that can improve compression and rendering performance. We evaluate this system with several models and hybrid formats, demonstrating that compared to standalone base formats, hybrid formats achieve a new Pareto frontier in ray intersection performance and storage cost.
+
+Keywords: voxels · ray tracing · compression · metaprogramming
+
+# 1 Introduction
+
+Voxels are a type of geometric primitive that explicitly represent volumes as grids of discrete cubes with associated data. Volume representations enable several applications, including volumetric rendering [3,19], medical visualization [24], and fluid simulation [15]. However, the use of voxels has been limited by the large amount of memory required to store volumetric data at high resolutions.
+
+Several hierarchical formats have been proposed to tackle this problem [13,12,22,3,17,9,18,10,23,8]. These formats identify regions of homogeneous voxels and cull empty regions, providing significant compression while serving as ray tracing acceleration structures. However, there is no single best format that simultaneously minimizes both storage size and rendering cost. Our key observation is that each voxel storage format presents specific trade-offs between compression and rendering performance. However, to the best of our knowledge, there has been no systematic study that effectively explores this search space.
+
+We present a formulation for this search space by hierarchically composing multiple "base" formats to form "hybrid" voxel formats. We discuss the implementation of construction and rendering algorithms for arbitrary hybrid voxel formats. We present an evaluation that illuminates many of the trade-offs involved in choosing a format for storing and rendering a particular volume.
+
+Our primary contributions are:
+
+- A general compositional formulation of hybrid voxel formats for rapid exploration of complex voxel formats (Section 3\).
+- A metaprogramming system for automatically generating construction and intersection code for arbitrary hybrid voxel formats, including transformations that present optimization opportunities (Section 4\).
+- An out-of-core CPU construction algorithm for arbitrary hybrid voxel formats based on Morton order, which generalizes the SVO construction algorithm presented by [2] (Section 5\).
+- An evaluation of a large number of hybrid voxel formats, demonstrating that such formats are able to achieve Pareto optimal memory-performance profiles compared to standalone base formats (Section 6\).
+
+# 2 Related Work
+
+We focus on lossless storage formats for voxel volumes and briefly discuss algorithms for converting triangle models into voxel volumes.
+
+Amanatides and Woo [1] describe the first modern work on voxel ray tracing they ray march through a uniform grid of voxels by finding the minimum distance needed to reach the next voxel at each step. Due to the algorithm's simplicity and the regular data layout of raw grids, this method can ray march through lower resolutions models quickly. However, this structure requires occupancy information for each individual voxel, so memory usage scales cubically with resolution. Furthermore, at higher resolutions, the algorithm may spend many iterations marching through empty voxels before finding an intersection.
+
+Laine and Karras [13] address the memory usage and intersection scalability of raw voxel grids with Sparse Voxel Octrees (SVOs), where voxel volumes are recursively subdivided into 8 child nodes. Nodes that do not contain any voxels can be culled—this saves memory and allows for rays to jump over large empty spaces. However, the intersection code becomes more complex—the code must perform a pre-order traversal of the octree, requiring a per-thread stack.
+
+Kämpe et al. [12] observe that some non-empty regions are identical across SVO nodes. Identical SVO nodes can be de-duplicated, producing Sparse Voxel Directed Acyclic Graphs (SVDAGs). Villanueva et al. [22] propose de-duplicating nodes that are equivalent under a symmetric transform. They achieve further compression while sacrificing some ray-intersection performance.
+
+Crassin et al. [3] generalize SVOs as N3 -trees. The choice of N affects the breadth and depth of the tree, which affects rendering performance and memory usage. SVO nodes are streamed onto the GPU, so that models larger than GPU memory can be rendered interactively. Wingerden [23] also presents a streaming approach for rendering, but uses a fixed hierarchy of two raw grids.
+
+Previous works have proposed the VDB data structure, which is a hierarchical format similar to B+ trees [17,9,18]. This format is similar to our hybrid format formulation, because each level of the VDB structure is configured with a separate resolution. This enables memory-performance exploitation within the domain of VDB formats. Yuanming et al. [10] present a language for describing computations on spatial data structures. They focus on nested raw grids for dense volumes and hash maps for unbounded volumes. To the best of our knowledge, no previous work has presented how different voxel formats can be combined to form a format space or a systematic evaluation of many such formats.
+
+A common method of obtaining voxel models is voxelizing a triangle mesh [11,6,21,5]. To support higher-resolution models, Baert et al. [2] present an outof-core algorithm to construct SVOs for volumes which can't fit in main memory. By iterating over voxels in Morton order, SVOs can be constructed in a bottomup manner. Pätzold and Kolb [20] extend this method to support out-of-core voxelization on the GPU.
+
+# 3 Hybrid Voxel Formats
+
+We introduce a generalization of previously proposed voxel formats, called "hybrid" voxel formats. A hybrid format consists of a list of "base" formats, called "levels". These base formats are schemes for storing volumetric data as described in previous work. Base formats are composed to build hybrid formats.
+
+In our implementation, each rendered voxel stores a red, green, blue, and opacity value. A voxel is "empty" if all of its 32 bits are 0 - this implies its opacity is 0, meaning it has no impact on the rendering of the volume. Although we make these assumptions in our experiments, none of the techniques we describe preclude storing more or fewer bits per voxel.
+
+#### 3.1 The Base Formats
+
+We use four base formats: uniform voxel grids (Raw), distance fields (DF), sparse voxel octrees (SVO), and sparse voxel directed acyclic graphs (SVDAG). Raw stores voxel data as one array, providing no compression or intersection acceleration. DF also stores the L1 norm distance to the nearest non-empty voxel per voxel, which is used to accelerate ray intersection. We formulate this as a separate format because the L1 distance is additional information used to accelerate rendering while not affecting the semantic content of the underlying volume. SVO uses SVOs to prune large empty spaces in a volume. This also accelerates ray intersection, as ray steps can skip over large chunks of empty space [13]. SVDAG is a format similar to SVO, except that nodes are deduplicated to increase compression [12].
+
+These base formats have trade-offs—DFs provide acceleration for ray marching but have high storage cost. SVDAGs provide excellent compression but less acceleration for ray marching. Additionally, while SVDAGs can effectively compress large voxel volumes, this requires higher per-node overhead. For models where compression via de-duplication is ineffective, either because they are small or are highly heterogeneous, SVOs may provide better compression.
+
+#### 3.2 Composing Formats
+
+Hybrid formats are built by composing base formats, which are listed in Table 1. We call a voxel in an "upper" level format a "sub-volume", and a voxel in the lowest level format a "single voxel"—the geometry inside a sub-volume at some level is stored in the sub-volumes of the next level. Previous work applies this idea to voxel grids [17,10]. An example of such a format is R(1, 0, 2) R(2, 2, 2)—each voxel in the upper level 2 × 1 × 4 grid points to a sub-volume grid of size 4×4×4. We extend this idea to support DF, SVO, and SVDAG levels as well. For example, R(1, 0, 2) D(2, 2, 2, 4) is a format consisting of a Raw grid, where each voxel contains a pointer to a DF volume.
+
+
+
+| Format Signature                 | Description |                        |
+|----------------------------------|-------------|------------------------|
+| Raw R(W, H, D) Raw grid of       | (2 W        | × 2                    |
+|                                  |             | H × 2                  |
+|                                  |             | D ) voxels             |
+| DF D(W, H, D, M) (2 W × 2        |             |                        |
+| H × 2                            |             |                        |
+| D ) voxel                        | grid        | with max L1 distance M |
+| SVO S(L) Sparse Voxel            | Octree      | with max depth L       |
+| SVDAG G(L) Sparse Voxel Directed | Acyclic     | Graph with max depth L |
+
+Table 1: Description of Implemented Formats.
+
+#### 3.3 Memory Layout
+
+We store all hybrid voxel formats as word-addressable buffers of 32-bit integers. The largest offset that can be stored in one word is 2 32, so the largest volume size our implementation supports is 16 GiB—this limitation could be addressed by using multiple buffers with indirection. We define a "terminating integer" in a voxel format as either a pointer to a sub-volume in the next level's format or an RGBA color for single voxels.
+
+We store Raw sub-volumes as arrays of integers. Each integer is a terminating integer. If all of the voxels in a subvolume at the next level are empty, the corresponding voxel pointer is 0 (and thus is itself considered empty). DF sub-volumes are stored similarly. Two integers are stored per voxel—one is a terminating integer, and the other is the L1 distance to the nearest non-empty voxel. The terminating integers and distances are interleaved in memory. SVO sub-volumes are stored as a collection of SVO nodes in the volume buffer. Each SVO node consists of two integers—the first is either a pointer to the beginning of a memory contiguous list of child SVO nodes or is a terminating integer (if the SVO node is an internal or leaf node, respectively), and the second contains valid and leaf masks describing the spatial layout of the octree. The valid mask contains a bit per child describing if that child contains any non-empty voxels, and the leaf mask describes if each child contains a pointer to more SVO nodes, or a terminating integer. SVO nodes contain only a single child pointer because all children nodes are laid out sequentially in memory. We can calculate the union TermInt { uint32\_t o f f s e t ; uint32\_t rgba ; } ; struct Raw { TermInt v o x el s [ ] ; } ; struct DF { struct DFEntry { TermInt v o x el ; uint32\_t l 1\_ di s t ; } v o x el s [ ] ; } ; struct SVMasks { uint8\_t valid\_mask ; uint8\_t lea f\_mask ; } ; struct SVONode { union SVOPointer { uint32\_t child\_ s v o ; TermInt l e a f ; } c h i l d r e n ; SVMasks masks ; } ; struct SVDAGNode { union SVDAGFirst { SVMasks masks ; TermInt l e a f ; } f i r s t ; uint32\_t c h i l d r e n [ ] ; } ;
+
+Fig. 1: Pseudo-C++ types describing the memory layout of base formats.
+
+
+
+Fig. 2: An example usage of the metaprogramming system to compile the R(4, 4, 4) G(8) format with whole level de-duplication.
+
+pointer to an arbitrary child SVO node using the pointer to the first child node and the valid mask. We store SVDAG sub-volumes similarly to SVO nodes. SVDAG nodes can contain between 1 to 9 integers depending on how many children the node has. The first integer either contains the valid and leaf masks (in internal nodes), or is a terminating integer (in leaf nodes). The next 0 to 8 integers are pointers to children SVDAG nodes. Nodes contain multiple child pointers because there is no guarantee that the children nodes will be laid out sequentially in memory. Figure 1 describes these layouts concretely.
+
+## 4 The Metaprogramming System
+
+Any combination of base formats can be composed to create a hybrid voxel format. Each format needs construction and ray intersection code for creating and rendering a volume in the format, respectively. We describe a metaprogramming system to automatically generate C++ construction and GLSL ray intersection code for arbitrary hybrid formats. Figure 2 shows an example usage of our system, and Figure 3 shows pseudo-code of the generated construction and intersection functions.
+
+c o n s t r u c t ( l owe r ) : this\_volume = EMPTY, is\_empty = True for c hil d\_l ow e r in morton\_next\_level\_sub\_volumes ( ) : ( sub\_volume , sub\_is\_empty ) = ne x t\_c on s t ruc t ( c hil d\_l ow e r ) c hil d\_ p oi n t e r = sub\_is\_empty ? 0 : w ri te\_ to\_disk ( sub\_volume ) this\_volume . s t o r e ( c hil d\_ p oi n t e r , c hil d\_l ow e r − l owe r ) is\_empty = is\_empty and sub\_is\_empty return ( this\_volume , is\_empty ) i n t e r s e c t ( node\_id , ray , low ) : for c h i l d in o r d e r e d\_ hi t\_ c hil d r e n ( node\_id , ray ) : i f c h i l d and n e x t \_i n t e r s e c t ( c hil d , ray , low + c h i l d . pos ) : return True return F al s e
+
+Fig. 3: Pseudo-code for generated level construction and intersection functions. Functions, methods, and fields abstract format specific behavior.
+
+#### 4.1 Hybrid Format Construction
+
+We build volumes using two tools: the voxelizer, which converts a triangle model into a voxel grid, and the hybrid format construction code, which converts the voxel grid into the target hybrid format. The metaprogramming system generates one construction function per level. We call the smallest coordinates of a voxel in a sub-volume as the "lower indices" of that sub-volume. Each construction function maps the lower indices of a sub-volume to a constructed sub-volume.
+
+For Raw levels, the construction function calls the next level's construction function on each sub-volume. Each non-empty sub-volume from the next level are written to the output file—their positions in the file are stored in a flat array, which is the data for this sub-volume. Once all of the sub-volumes for the next level have been constructed, pushed, and recorded, the flat array is returned. DF levels are constructed similarly—once all of the next level's sub-volumes are recorded, the L1 distance to the nearest non-empty sub-volume is calculated per voxel. For SVO levels, we implement the queue-based algorithm described in [2]. The root SVO node is returned as the sub-volume data. SVDAG levels are constructed similarly, except that we maintain a node de-duplication map. When creating SVDAG nodes, we check if each child node is mapped. If one isn't, then we push the child to the file, record its pointer, and add a map entry from the child to its pointer. If one is, then we don't push the child, and use its pointer from the de-duplication map.
+
+The "highest" level is level 1, and the function for level N calls the function for level N + 1. The function for the final level constructs a single voxel by passing the lower indices to the voxelizer and returns the voxel's data. A root construction function is generated, which calls the first construction function and writes the root sub-volume and its pointer to the output file.
+
+#### 4.2 Hybrid Format Intersection
+
+We generate one intersection function per level in a format. These functions compute the non-empty sub-volumes hit by a ray; in order of hit time, the next level's function is called on those sub-volumes. Each function maps a sub-volume pointer, a ray, and lower indices to whether the ray hits a single voxel.
+
+We intersect Raw levels using a branchless version of the DDA algorithm [1]. We intersect DF similarly—the stored L1 distance indicates how many voxels can be marched through before checking occupancy. The intersection functions for SVO and SVDAG levels traverse nodes in pre-order using a per-thread stack. For every hit internal child node, the children nodes are pushed on the stack—the next iteration corresponds to recursing on a child node. For every non-empty hit leaf node, the next level's intersection function is called.
+
+The metaprogramming system also generates a unit intersection function for single voxels and a root intersection function. The root function first reads the pointer to the root volume from the beginning of the voxel buffer. Next, it checks if the ray intersects the root volume. If so, it calls the first intersection function.
+
+#### 4.3 Optimizations
+
+Our metaprogramming system implements two optimizations on hybrid formats, one for volume compression and one for ray intersection. The metaprogramming system supports combinations of these optimizations.
+
+By default, each SVDAG sub-volume uses its own de-duplication map. With whole level de-duplication, every sub-volume in a SVDAG level shares the same map, improving compression by de-duplicating nodes across sub-volumes.
+
+The per-thread stacks in the intersection functions for the SVO and SVDAG formats are expensive. With restarting sparse voxel intersection, we elide this cost by traversing the SVO or SVDAG from the root for every lookup—the downside is the introduction of redundant accesses to the structure.
+
+# 5 Out-of-Core Construction
+
+Constructing compressed voxel representations can be challenging, since the input voxel grid may be too large to fit in memory. We implement an out-of-core voxelizer that lazily voxelizes chunks of a triangle model. Like previous work, we convert triangle meshes into voxel volumes in two steps [2]. First, we voxelize a triangle model into a raw voxel grid. Second, we compress the raw grid into a hybrid format. Our metaprogramming system implements the second step and
+
+| 0  | 1  |    |    |
+|----|----|----|----|
+| 2  | 3  |    |    |
+|    |    | 4  | 5  |
+|    |    | 6  | 7  |
+| 8  | 9  |    |    |
+| 10 | 11 |    |    |
+|    |    | 12 | 13 |
+|    |    | 14 | 15 |
+
+Fig. 4: A depiction of the Morton order of a 4 × 4 grid. The upper left 2 × 2 subgrid (light gray) is traversed before the grid cells in the gray region are visited.
+
+our lazy voxelizer implements the first step. Converting triangles into voxels has been well studied previously [11,6,21,5]. The voxelizer lazily creates a new chunk of voxels when the construction code requests a voxel in a new chunk.
+
+Morton order is a linear ordering of points in higher dimensional spaces. Baert et al. [2] observe that Morton order corresponds to post-order traversals of octrees and uses that fact to construct SVOs out-of-core. We arrange all accesses to the voxelizer in Morton order. In particular, we modify the Raw and DF construction functions to iterate over child sub-volumes in Morton order. By iterating over single voxels in Morton order, the voxelizer can guarantee that all of the individual voxels in a chunk will be visited before other chunks. The only requirement on the used format is that each level but the highest have cubic power-of-two dimensions, since Morton order is hierarchical with respect to sub-volumes of power-of-two size. Figure 4 visualizes a Morton order traversal.
+
+
+
+Fig. 5: Screenshots of the tested models from the camera positions used in experiments. The experiments are run without shading from bounces.
+
+# 6 Evaluation
+
+We evaluate 40 formats (Table 2\) on four models: San Miguel, Hairball, Buddha, and Sponza [16,14,4]. We observe new Pareto optimal formats, shown in Figures 6 and 7. We evaluate our two optimizations, realizing up to 2.1x increased rendering performance and 4.7x smaller storage sizes.
+
+We implement the metaprogramming system and out-of-core voxelizer as tools for the Illinois Voxel Sandbox, a general purpose voxel volume rendering engine written in C++ and using the Vulkan graphics API. We use custom intersection and closest-hit shaders to integrate hybrid voxel formats. Our implementation is open source1 . All of our experiments were run on a machine with an AMD Ryzen 7 2700X CPU, 64 GiB of main memory, and a NVIDIA RTX 2060 Super GPU. We measure frame time using an in-engine counter.
+
+
+
+| Label | 2048 3 | 3 Formats Label 512 3 Formats 3 3 3 |
+|-------|--------|-------------------------------------|
+| 1 D(  | 4      |                                     |
+|       | , 6)   | D( 3                                |
+|       |        | , 6) G(4) 21 D( 3                   |
+|       |        | , 6) D( 3                           |
+|       |        | , 6) G(3)                           |
+| 2     | D( 4   |                                     |
+|       | ,      | 6) R( 3                             |
+|       |        | ) G(4) 22 D( 3                      |
+|       |        | , 6) R( 3                           |
+|       |        | ) G(3)                              |
+| 3     | R( 4   |                                     |
+|       |        | ) R( 3                              |
+|       |        | ) G(4) 23 R( 3                      |
+|       |        | ) R( 3                              |
+|       |        | ) G(3)                              |
+| 4     | R( 4   |                                     |
+|       |        | ) S(3) G(4) 24 R( 3                 |
+|       |        | ) R( 3                              |
+|       |        | ) R( 3 )                            |
+| 5     | R( 4   |                                     |
+|       | )      | R( 4                                |
+|       |        | ) R( 3                              |
+|       |        | ) 25 R( 4                           |
+|       |        | ) R( 1                              |
+|       |        | ) R( 4 )                            |
+| 6     | D(     | 4                                   |
+|       |        | , 6) S(7) 26 D( 4                   |
+|       |        | , 6) S(5)                           |
+| 7     | D( 4   |                                     |
+|       |        | , 6) G(7) 27 D( 4                   |
+|       |        | , 6) G(5)                           |
+| 8     | D(     | 6                                   |
+|       |        | , 6) S(5) 28 R( 4                   |
+|       |        | ) S(5)                              |
+| 9     | D( 6   |                                     |
+|       |        | , 6) G(5) 29 R( 4                   |
+|       |        | ) G(5)                              |
+| 10    | R(     | 4                                   |
+|       |        | ) S(7) 30 R( 2                      |
+|       |        | ) G(7)                              |
+| 11    | R(     | 4                                   |
+|       |        | ) G(7) 31 R( 7                      |
+|       |        | ) G(2)                              |
+| 12    | R(     | 6                                   |
+|       |        | ) S(5) 32 S(5) R( 4 )               |
+| 13    | R(     | 6                                   |
+|       |        | ) G(5) 33 G(5) R( 4 )               |
+| 14    | R(     | 3                                   |
+|       |        | ) G(8) 34 D( 5                      |
+|       |        | , 6) D( 4                           |
+|       |        | , 6)                                |
+| 15    | R(     | 8                                   |
+|       |        | ) G(3) 35 D( 5                      |
+|       |        | , 6) R( 4 )                         |
+| 16    | S(7)   | G(4) 36 R( 5                        |
+|       |        | ) R( 4 )                            |
+| 17    | S(5)   | G(6) 37 R( 9 )                      |
+| 18    | S(3)   | G(8) 38 D( 9                        |
+|       |        | , 6)                                |
+| 19    |        | S(11) 39 S(9)                       |
+| 20    |        | G(11) 40 G(9)                       |
+
+Table 2: Hybrid formats we evaluate. Formats 1-20 represent a 20483 grid, and formats 21-40 represent a 5123 grid.
+
+#### 6.1 Evaluating Hybrid Formats
+
+We selected formats using Raw and DF upper levels and SVO and SVDAG lower levels—the number of sub-volumes grows exponentially in lower levels, so less compact lower levels explode storage size. We constructed and rendered each model in each format with whole level de-duplication enabled. Figures 6 and 7 show the trade-off between memory usage and rendering performance.
+
+Two 20483 formats always lie on the Pareto frontier: R(3 3 ) G(8) and R(4 3 ) G(7). Both of these formats balance culling space, de-duplicating homogeneous regions, and intersection complexity. For three models, the D(6 3 , 6) G(5) and R(6 3 ) G(5) formats achieve better rendering performance at competitive model sizes. For the Buddha model, these formats are slower, likely because Buddha contains lots of empty space, which isn't accelerated by uncompressed voxel
+
+
+
+
+
+Fig. 6: Graphs of rendering performance vs. storage size for 4 models and 20 20483 formats. The Pareto frontier is emphasized. Models too large to fit on the GPU are omitted. Lower on both axes is better.
+
+
+
+Fig. 7: Graphs of rendering performance vs. storage size for 4 models and 20 5123 formats. The Pareto frontier is emphasized. Lower on both axes is better.
+
+grids. The tested base formats, S(11) and G(11), show worse rendering performance than the hybrid formats. G(11) produces very compact models, while S(11) provides poor compression in comparison. We didn't test Raw or DF base formats, since the models would be too large to render.
+
+Four 5123 formats always lie on the Pareto frontier: R(3 3 ) R(3 3 ) R(3 3 ), D(4 3 , 6) G(5), R(4 3 ) G(5), and R(2 3 ) G(7). R(3 3 ) R(3 3 ) R(3 3 ) achieves the best intersection performance for three of the models, but is an order of magnitude larger than the smallest formats. Both D(4 3 , 6) G(5) and R(4 3 ) G(5) achieve nearly the best compression, while having good intersection speed.
+
+We observe several patterns in the performance and size of hybrid voxel formats. Although SVO levels can theoretically be smaller than SVDAG levels due to having smaller nodes, we observe that SVDAG levels are often more compact in practice. We observe that using voxel grids (either Raw or DF levels) that are too granular for models with lots of empty space can be detrimental to performance, since voxel grids cannot compress empty space within a single voxel grid level. We suggest a good default format for most models is a format of the form R(N3 ) G(M)—formats of this form consistently perform well in our experiments. However, we emphasize that the best format for a particular model depends on the sparsity and homogeneity of the volume, the resolution, and the desired trade-off between intersection performance and storage cost.
+
+#### 6.2 Evaluating Optimizations
+
+
+
+Fig. 8: Normalized decrease in model size after -whole-level-dedup. Fig. 9: Normalized decrease in frame time after -restart-sv.
+
+We evaluate whole level de-duplication on formats with at least one SVDAG lower level. Shown in Figure 8, we observe consistent reductions in model size performing node de-duplication across sub-volumes doesn't add any storage overhead. The highest compression factor achieved is 4.74x, when storing the Hairball model in the R(8 3 ) G(3) format—this is because all voxels in Hairball are the same color. Shown in Figure 9, restarting sparse voxel intersection provides rendering performance improvements on 3 out of 8 tested formats. These formats all have a shallow SVDAG lowest level, meaning the intersection code re-traverses fewer SVDAG nodes per lookup. The G(11) format performs poorly with restarting intersection because the intersection code must traverse every layer in the SVDAG for every access to an individual voxel.
+
+#### 6.3 Hybrid Format Construction
+
+
+
+Fig. 10: Maximum memory used per model, per format. Bars are ordered by maximum memory used. Voxelization uses a 4 GiB scratchpad.
+
+We show that our method can construct compressed voxel models in an out-of-core fashion by measuring the maximum amount of memory used while constructing each model in each format—these amounts are shown in Figure 10. We set the voxel chunking size to 4 GiB. The variance across models mostly corresponds to the size of each models' triangle mesh (we don't pre-chunk triangles to perform out-of-core construction for the input triangle model). The D(9 3 , 6) format requires the most memory across all models because the entire 5123 grid is needed in memory to compute the distance field. However, the amount of memory used is always significantly lower than the 32 GiB required to store an intermediate 20483 grid.
+
+# 7 Future Work
+
+We have presented a formulation of hybrid voxel formats and a system to evaluate these formats. Our system is flexible enough to support alternative implementations of various aspects of hybrid formats, and supports out-of-core construction. We present an extensive evaluation of hybrid formats using our system, providing insight into many of the trade-offs involved in selecting a voxel format.
+
+Our experiments were limited by the set of manually-selected formats—there are potentially model-specific outlier hybrid formats that optimally take advantage of each model's sparsity and homogeneity patterns. An avenue for future work could be automatically exploring the search space of hybrid formats [7]. It could also be fruitful to employ deep learning models to generate hybrid format proposals for different voxel models. This work describes an infrastructure capable of generating the dataset for training such a model.
+
+# References
+
+- 1. Amanatides, J., Woo, A.: A fast voxel traversal algorithm for ray tracing. Proceedings of EuroGraphics 87 (08 1987)
+- 2. Baert, J., Lagae, A., Dutré, P.: Out-of-core construction of sparse voxel octrees.
+  - p. 27–32. HPG '13, Association for Computing Machinery, New York, NY, USA (2013). 
+- 3. Crassin, C., Neyret, F., Lefebvre, S., Eisemann, E.: Gigavoxels : Ray-guided streaming for efficient and detailed voxel rendering. In: ACM SIGGRAPH Symposium on Interactive 3D Graphics and Games (I3D). ACM Press, Boston, MA, Etats-Unis (feb 2009), 
+- 4. Curless, B., Levoy, M.: A volumetric method for building complex models from range images. In: Proceedings of the 23rd Annual Conference on Computer Graphics and Interactive Techniques. p. 303–312. SIGGRAPH '96, Association for Computing Machinery, New York, NY, USA (1996). [https://doi.org/10.1145/](https://doi.org/10.1145/237170.237269) [237170.237269](https://doi.org/10.1145/237170.237269)
+- 5. Eisemann, E., Décoret, X.: Fast scene voxelization and applications. In: Proceedings of the 2006 Symposium on Interactive 3D Graphics and Games. p. 71–78. I3D '06, Association for Computing Machinery, New York, NY, USA (2006). 
+- 6. Fang, S., Chen, H.: Hardware accelerated voxelization. Computers & Graphics 24(3), 433–442 (2000). [https://doi.org/10.1016/S0097-8493\(00\)00038-8](https://doi.org/10.1016/S0097-8493(00)00038-8)
+- 7. He, Y., Foley, T., Fatahalian, K.: A system for rapid exploration of shader optimization choices. ACM Trans. Graph. 35(4) (jul 2016). [https://doi.org/10.](https://doi.org/10.1145/2897824.2925923) [1145/2897824.2925923](https://doi.org/10.1145/2897824.2925923)
+- 8. Herzberger, L., Hadwiger, M., Krüger, R., Sorger, P., Pfister, H., Gröller, E., Beyer, J.: Residency octree: A hybrid approach for scalable web-based multi-volume rendering. IEEE Transactions on Visualization and Computer Graphics (Proceedings IEEE VIS 2023) 30(1), 1380–1390 (2024). [https://doi.org/10.1109/TVCG.2023.](https://doi.org/10.1109/TVCG.2023.3327193) [3327193](https://doi.org/10.1109/TVCG.2023.3327193)
+- 9. Hoetzlein, R.K.: Gvdb: raytracing sparse voxel database structures on the gpu. In: Proceedings of High Performance Graphics. p. 109–117. HPG '16, Eurographics Association, Goslar, DEU (2016)
+- 10. Hu, Y., Li, T.M., Anderson, L., Ragan-Kelley, J., Durand, F.: Taichi: a language for high-performance computation on spatially sparse data structures. ACM Trans. Graph. 38(6) (nov 2019). 
+- 11. Huang, J., Yagel, R., Filippov, V., Kurzion, Y.: An accurate method for voxelizing polygon meshes. In: Proceedings of the 1998 IEEE Symposium on Volume Visualization. p. 119–126. VVS '98, Association for Computing Machinery, New York, NY, USA (1998). 
+- 12. Kämpe, V., Sintorn, E., Assarsson, U.: High resolution sparse voxel dags. ACM Trans. Graph. 32(4) (jul 2013). 
+- 13. Laine, S., Karras, T.: Efficient sparse voxel octrees. In: Proceedings of the 2010 ACM SIGGRAPH Symposium on Interactive 3D Graphics and Games. p. 55–63. I3D '10, Association for Computing Machinery, New York, NY, USA (2010). 
+- 14. Laine, S., Karras, T.: Two methods for fast ray-cast ambient occlusion. In: Proceedings of the 21st Eurographics Conference on Rendering. p. 1325–1333. EGSR'10, Eurographics Association, Goslar, DEU (2010). [https://doi.org/10.1111/j.](https://doi.org/10.1111/j.1467-8659.2010.01728.x) [1467-8659.2010.01728.x](https://doi.org/10.1111/j.1467-8659.2010.01728.x)
+
+- 15. McAdams, A., Sifakis, E., Teran, J.: A parallel multigrid poisson solver for fluids simulation on large grids. In: Proceedings of the 2010 ACM SIGGRAPH/Eurographics Symposium on Computer Animation. p. 65–74. SCA '10, Eurographics Association, Goslar, DEU (2010)
+- 16. McGuire, M.: Computer graphics archive (July 2017), [https://casual-effects.](https://casual-effects.com/data) [com/data](https://casual-effects.com/data)
+- 17. Museth, K.: Vdb: High-resolution sparse volumes with dynamic topology. ACM Trans. Graph. 32(3) (jul 2013). 
+- 18. Museth, K.: Nanovdb: A gpu-friendly and portable vdb data structure for realtime rendering and simulation. In: ACM SIGGRAPH 2021 Talks. Association for Computing Machinery, New York, NY, USA (2021). [https://doi.org/10.1145/](https://doi.org/10.1145/3450623.3464653) [3450623.3464653](https://doi.org/10.1145/3450623.3464653)
+- 19. Jiménez de Parga, C., Gómez Palomo, S.R.: Efficient algorithms for real-time gpu volumetric cloud rendering with enhanced geometry. Symmetry 10(4) (2018). 
+- 20. Pätzold, M., Kolb, A.: Grid-free out-of-core voxelization to sparse voxel octrees on gpu. In: Proceedings of the 7th Conference on High-Performance Graphics. p. 95–103. HPG '15, Association for Computing Machinery, New York, NY, USA (2015). 
+- 21. Schwarz, M., Seidel, H.P.: Fast parallel surface and solid voxelization on gpus. ACM Trans. Graph. 29(6) (dec 2010). 
+- 22. Villanueva, A.J., Marton, F., Gobbetti, E.: Ssvdags: symmetry-aware sparse voxel dags. In: Proceedings of the 20th ACM SIGGRAPH Symposium on Interactive 3D Graphics and Games. p. 7–14. I3D '16, Association for Computing Machinery, New York, NY, USA (2016). 
+- 23. van Wingerden, T.: Real-time ray tracing and editing of large voxel scenes (2015), 
+- 24. Zhou, L., Fan, M., Hansen, C., Johnson, C.R., Weiskopf, D.: A review of threedimensional medical image visualization. Health Data Science 2022, 9840519 (2022). 

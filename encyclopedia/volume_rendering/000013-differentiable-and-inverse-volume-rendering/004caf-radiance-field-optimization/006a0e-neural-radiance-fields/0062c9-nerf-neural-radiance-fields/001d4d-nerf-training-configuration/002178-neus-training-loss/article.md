@@ -1,0 +1,183 @@
+# NeuS Training Loss
+
+Also called: NeUDF loss, NeuS / VolSDF / NeuralAngelo, NeuS loss, Neural Implicit Surface Reconstruction Training Loss, Neural Implicit Surface training objective, Overall Loss, optimization objective
+
+## Overview
+The NeuS training loss is a composite objective function used to optimize neural implicit surface representations (specifically Signed Distance Fields or Unsigned Distance Fields) from multi-view images without 3D ground-truth supervision. It solves the problem of recovering sharp, high-fidelity geometry by replacing the standard NeRF density field with an SDF/UDF and regularizing it via volume rendering constraints. It differs from standard NeRF training by enforcing the Eikonal equation (gradient norm = 1) to ensure the field represents a true distance function, and by incorporating mask and sparsity losses to resolve the ambiguity between surface location and opacity in unobserved regions.
+
+## How it works
+The method optimizes a neural network that outputs a scalar field value (SDF or UDF) and, optionally, color. The training process minimizes a weighted sum of photometric, geometric, and regularization losses.
+
+### Inputs and Outputs
+**Inputs:**
+*   Ground truth RGB images $I_{gt}$ for a set of camera poses.
+*   (Optional) Binary foreground masks $M_{gt}$ for the images.
+*   Ray origins $\mathbf{o}$ and directions $\mathbf{d}$ sampled from the camera frustum.
+*   Sample points $\mathbf{x}$ along the rays, typically stratified or importance-sampled.
+
+**Outputs:**
+*   Network predictions: SDF/UDF values $f(\mathbf{x})$ and RGB colors $\mathbf{c}(\mathbf{x})$ for each sample point.
+*   Rendered RGB images $\hat{I}$ and opacity masks $\hat{M}$ via volume rendering.
+*   Loss values $\mathcal{L}_c, \mathcal{L}_e, \mathcal{L}_m$, etc.
+
+### Data Structures
+The implementation relies on tensors representing the batch of rays and their associated samples.
+*   `rays_valid`: Boolean mask indicating which rays have valid ground truth data (e.g., not masked out background).
+*   `sdf_grad_samples`: Tensor of shape `(N, 3)` containing the computed gradients $\nabla f(\mathbf{x})$ for the $N$ sampled points.
+*   `opacity`: Tensor of shape `(N,)` containing the accumulated or per-sample opacity values derived from the SDF/UDF and a mapping function (e.g., sigmoid or CDF).
+
+### Numbered Steps
+
+1.  **Ray Sampling and Network Forward Pass:**
+    For each ray, sample points $\mathbf{x}_i$. Query the network to get $f(\mathbf{x}_i)$ and $\mathbf{c}_i$. Compute the gradient $\nabla f(\mathbf{x}_i)$ using automatic differentiation.
+
+2.  **Volume Rendering (Implicit):**
+    Convert SDF/UDF values to opacity $\alpha_i$ and transmittance $T_i$ using a mapping function (e.g., $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ where $\sigma$ is derived from $f$). Render the image $\hat{I}$ and mask $\hat{M}$ using standard volume rendering equations. *Note: The specific mapping from SDF to density is handled by the parent NeRF configuration or the specific NeuS variant's rendering engine.*
+
+3.  **Compute Color Loss ($\mathcal{L}_c$):**
+    Calculate the difference between the rendered RGB image and the ground truth RGB image. Sources indicate both L1 and MSE variants are used.
+    *   L1 variant [S1][S4, unofficial]:
+        $$ \mathcal{L}_c = \frac{1}{m} \sum_{i=1}^m | C_i - \hat{C}_i | $$
+        where $m$ is the number of valid pixels, $C_i$ is ground truth RGB, and $\hat{C}_i$ is rendered RGB.
+    *   MSE variant [S2, unofficial]:
+        $$ \mathcal{L}_{rgb\_mse} = \text{MSE}(\hat{I}_{valid}, I_{gt, valid}) $$
+
+4.  **Compute Eikonal Loss ($\mathcal{L}_e$):**
+    Regularize the gradient of the scalar field to have unit norm, enforcing the distance field property.
+    $$ \mathcal{L}_e = \frac{1}{|\mathbb{P}|} \sum_{\mathbf{x} \in \mathbb{P}} (\|\nabla f(\mathbf{x})\|_2 - 1)^2 $$
+    where $\mathbb{P}$ is the set of all sampled points in the batch.
+
+5.  **Compute Mask Loss ($\mathcal{L}_m$):**
+    If foreground masks are provided, encourage the rendered opacity to match the binary mask.
+    *   Clamp opacity $\alpha$ to $[10^{-3}, 1-10^{-3}]$ to avoid numerical instability in BCE [S2, unofficial].
+    *   Compute Binary Cross Entropy (BCE) between clamped opacity and $M_{gt}$.
+
+6.  **Compute Additional Regularization Losses (Optional/Variant Dependent):**
+    *   **Opaque Loss ($\mathcal{L}_{opaque}$):** BCE between opacity and itself (or a target binary mask) to push opacity to 0 or 1 [S2, unofficial].
+    *   **Sparsity Loss ($\mathcal{L}_{sparsity}$):** Encourages the SDF to be positive (empty) outside the surface.
+        $$ \mathcal{L}_{sparsity} = \text{mean}(\exp(-\lambda_{sparsity} \cdot |SDF|)) $$
+        *Note: The formula in [S2, unofficial] uses `exp(-lambda * |SDF|)`. If SDF is positive outside, this term is small. If SDF is negative (inside), it is large. This encourages the field to be positive in empty space.* [S2, unofficial].
+    *   **Curvature Loss ($\mathcal{L}_{curvature}$):** Uses the Laplace of the SDF. Requires `geometry.grad_type` set to 'finite_difference' to provide `sdf_laplace_samples` [S2, unofficial].
+    *   **Distortion Loss ($\mathcal{L}_{distortion}$):** Based on MipNeRF360, penalizes the expected squared distance between the rendered depth and the true depth along the ray. Requires weights, points, intervals, and ray indices [S2, unofficial].
+    *   **Feature/Bias Loss ($\mathcal{L}_{feat}, \mathcal{L}_{bias}$):** Used in variants like [S4, unofficial] to align with feature spaces or correct geometric bias.
+
+7.  **Aggregate Loss:**
+    Combine the terms with weights $\alpha, \beta, \gamma, \dots$.
+    *   Standard NeuS [S1]:
+        $$ \mathcal{L} = \mathcal{L}_c + \alpha \mathcal{L}_e + \beta \mathcal{L}_m $$
+    *   Extended NeuS [S4, unofficial]:
+        $$ \mathcal{L} = \mathcal{L}_{color} + \alpha \mathcal{L}_{eik} + \beta \mathcal{L}_{bias} + \gamma \mathcal{L}_{feat} $$
+    *   Implementation-specific [S2, unofficial]:
+        $$ \mathcal{L} = \lambda_{rgb\_mse} \mathcal{L}_{rgb\_mse} + \lambda_{eikonal} \mathcal{L}_e + \lambda_{mask} \mathcal{L}_m + \lambda_{opaque} \mathcal{L}_{opaque} + \lambda_{sparsity} \mathcal{L}_{sparsity} + \dots $$
+
+### Parameters and Typical Values
+*   $\alpha$ (Eikonal weight): Typically $1.0$ or similar magnitude to balance gradient regularization [S1][S4, unofficial].
+*   $\beta$ (Mask weight): Used if masks are available [S1].
+*   $\lambda_{eikonal}$: Weight for Eikonal loss [S2, unofficial].
+*   $\lambda_{rgb\_mse}$: Weight for MSE color loss [S2, unofficial].
+*   $\lambda_{mask}$: Weight for mask loss [S2, unofficial].
+*   $\lambda_{sparsity}$: Scaling factor for sparsity loss exponent [S2, unofficial].
+*   $\lambda_{curvature}$: Weight for curvature loss [S2, unofficial].
+*   $\lambda_{distortion}$: Weight for distortion loss [S2, unofficial].
+*   Optimizer: Adam [S3, unofficial].
+*   Learning Rate: $5 \times 10^{-4}$ decaying to $10^{-5}$ [S3, unofficial].
+*   Iterations: 150k [S3, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_neus_loss(out, batch, config):
+    """
+    out: dict containing 'comp_rgb_full', 'rays_valid_full', 'sdf_grad_samples', 'opacity', 'sdf_laplace_samples'
+    batch: dict containing 'rgb', 'mask' (optional)
+    config: object containing loss weights
+    """
+    loss = 0.0
+    
+    # 1. Color Loss (MSE variant from [S2, unofficial])
+    # Mask valid rays
+    valid_rays = out['rays_valid_full'][..., 0]
+    pred_rgb = out['comp_rgb_full'][valid_rays]
+    gt_rgb = batch['rgb'][valid_rays]
+    
+    loss_rgb_mse = F.mse_loss(pred_rgb, gt_rgb)
+    loss += loss_rgb_mse * config.lambda_rgb_mse
+    
+    # 2. Eikonal Loss
+    # Gradient norm is already computed as 'sdf_grad_samples'
+    grad_norms = torch.linalg.norm(out['sdf_grad_samples'], ord=2, dim=-1)
+    loss_eikonal = ((grad_norms - 1.0) ** 2).mean()
+    loss += loss_eikonal * config.lambda_eikonal
+    
+    # 3. Mask Loss (if available)
+    if config.has_mask:
+        # Clamp opacity to avoid log(0)
+        opacity_clamped = torch.clamp(out['opacity'], 1e-3, 1 - 1e-3)
+        # BCE between clamped opacity and ground truth mask
+        # Note: 'mask' in batch is typically (H, W) or (N,) depending on batching
+        # Assuming batch['mask'] is aligned with rays_valid
+        gt_mask = batch['mask'][valid_rays]
+        loss_mask = F.binary_cross_entropy(opacity_clamped, gt_mask)
+        loss += loss_mask * config.lambda_mask
+        
+        # 4. Opaque Loss (encourage 0 or 1)
+        loss_opaque = F.binary_cross_entropy(opacity_clamped, opacity_clamped)
+        loss += loss_opaque * config.lambda_opaque
+        
+    # 5. Sparsity Loss (encourage positive SDF in empty space)
+    # SDF values are in out['sdf_samples'] or similar, assumed available
+    sdf_values = out['sdf_samples'] # Placeholder for actual SDF tensor
+    loss_sparsity = torch.exp(-config.lambda_sparsity * torch.abs(sdf_values)).mean()
+    loss += loss_sparsity * config.lambda_sparsity
+    
+    # 6. Curvature Loss (if enabled)
+    if config.enable_curvature:
+        # Requires geometry.grad_type == 'finite_difference'
+        assert 'sdf_laplace_samples' in out
+        laplace = out['sdf_laplace_samples']
+        loss_curvature = torch.abs(laplace).mean()
+        loss += loss_curvature * config.lambda_curvature
+        
+    # 7. Distortion Loss (if enabled)
+    if config.enable_distortion:
+        # Requires MipNeRF360 style implementation
+        # Inputs: weights, points, intervals, ray_indices
+        loss_distortion = compute_distortion_loss(out['weights'], out['points'], out['intervals'], out['ray_indices'])
+        loss += loss_distortion * config.lambda_distortion
+        
+    return loss
+```
+
+### Edge Cases and Pitfalls
+*   **Numerical Instability in BCE:** Opacity values must be clamped away from 0 and 1 (e.g., $[10^{-3}, 1-10^{-3}]$) before computing Binary Cross Entropy to prevent $\log(0)$ errors [S2, unofficial].
+*   **Curvature Loss Requirements:** The curvature loss requires the geometry model to compute SDF Laplace samples. The code must assert that `geometry.grad_type` is set to 'finite_difference' to provide `out['sdf_laplace_samples']` [S2, unofficial].
+*   **Mask Availability:** Mask loss is only applied if `self.dataset.has_mask` is true [S2, unofficial].
+*   **Dynamic Ray Sampling:** Some implementations use a dynamic ray sampling update rule: $N_{rays}^{new} = \min(0.9 N_{rays}^{old} + 0.1 \lfloor N_{rays}^{old} \cdot \frac{N_{samples}}{\sum N_{samples}^{pred}} \rfloor, N_{rays}^{max})$ [S2, unofficial].
+
+## Subtopics
+
+### [PG-NeuS](4251-pg-neus.md)
+PG-NeuS is a point-guided neural implicit surface reconstruction method that enhances the base NeuS framework by modeling aleatoric uncertainty to capture point cloud noise distribution, using a Neural Projection module for geometric constraints, and employing a Bias Network to compensate for geometric bias between volume rendering and point modeling. It distinguishes itself from siblings like RegSDF and TUVR by estimating point reliability during geometry optimization via uncertainty modeling rather than using uniform smoothing or external MVS confidence maps, enabling robust handling of noisy and sparse point data.
+
+### [Joint Optimization with NeuS](16062-joint-optimization-with-neus.md)
+A framework for neural surface reconstruction using NeuS, incorporating photometric loss, Eikonal regularization, IoU loss, and re-projection loss.
+
+## Operating characteristics
+*   **Time Complexity:** Training is iterative and depends on the number of rays, samples per ray, and network depth. Typical training takes 150k iterations [S3, unofficial].
+*   **Memory Complexity:** Depends on the number of sampled points and the size of the neural network. Gradient computation for the Eikonal loss requires storing intermediate activations for backpropagation through the SDF gradient.
+*   **Performance:** NeuS achieves high-fidelity surface reconstruction with sharp details compared to standard NeRF, which produces blurry surfaces due to the density field's ambiguity [S3, unofficial].
+*   **Strengths:** Sharp surface recovery, no 3D supervision required, robust to open boundaries (with UDF variants) [S1].
+*   **Limitations:** Sensitive to hyperparameters (loss weights), requires careful tuning of the Eikonal weight, can be slow to converge compared to hash-grid based methods [S3, unofficial].
+*   **When to use:** When sharp geometry is required and 3D ground truth is unavailable.
+*   **When not to use:** When speed is critical (consider Instant-NGP) or when texture/detail is more important than precise geometry (standard NeRF or 3DGS).
+
+## Background
+The NeuS training loss originates from the "NeuS: Learning Neural Implicit Surfaces by Volume Rendering for Freeform Objects" paper [S1][S2, unofficial]. It was introduced to address the limitations of NeRF, which uses a density field that does not explicitly represent a surface, leading to blurry reconstructions. By replacing density with a Signed Distance Field (SDF) and adding Eikonal regularization, NeuS enables the extraction of high-quality meshes. The method has been extended in various works, such as NeUDF [S1] (using Unsigned Distance Fields) and NeuralAngelo [S3, unofficial], and is a foundational component in many subsequent neural implicit surface reconstruction methods.
+
+## Sources
+[S1] NeUDF: Leaning Neural Unsigned Distance Fields with Volume Rendering, https://doi.org/10.1109/cvpr52729.2023.00031, fetched 2026-10-26
+[S2] bennyguo/instant-nsr-pl, https://github.com/bennyguo/instant-nsr-pl, fetched 2026-10-27 (unofficial)
+[S3] NeRF — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-NeRF_SOTA_Updated.html, fetched 2026-10-29 (unofficial)
+[S4] WACV 2023 Open Access Repository, https://openaccess.thecvf.com/content/WACV2023/html/Chen_Recovering_Fine_Details_for_Neural_Implicit_Surface_Reconstruction_WACV_2023_paper.html, fetched 2026-10-29 (unofficial)

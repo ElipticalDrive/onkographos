@@ -1,0 +1,143 @@
+# GPU-accelerated Marching Cubes Pipeline
+
+Also called: Six-stage GPU-accelerated Marching Cubes methodology
+
+## Overview
+This method is a six-stage hybrid CPU-GPU pipeline for isosurface extraction that maximizes performance by balancing memory hierarchy usage and parallelizing the Marching Cubes algorithm [S1]. It differs from sibling methods like [Capacity-Safe Marching Cubes Pipeline](4596-capacity-safe-marching-cubes-pipeline.md) by offloading the spatial traversal and active cell identification to the CPU using pre-constructed spatial data structures, while the GPU handles the exact buffer allocation and triangle generation in parallel [S1]. Unlike [GPU Marching Cubes with Scan-Based Compaction](6632-gpu-marching-cubes-with-scan-based-compaction.md), which typically handles all active cells on the GPU, this approach reduces GPU memory pressure and bandwidth by transferring only the necessary active cell indices from CPU to GPU [S1].
+
+## How it works
+**Inputs:**
+*   Volume dataset $V$ of dimensions $N_x \times N_y \times N_z$.
+*   Isovalue $h$.
+*   Spatial data structure type (k-d tree, interval tree, quadtree, or octree) [S1].
+
+**Outputs:**
+*   Vertex buffer $P$ containing 3D positions of isosurface vertices.
+*   Normal buffer $N$ containing surface normals.
+*   Rendered isosurface [S1].
+
+**Data Structures:**
+*   **Volume Data:** Stored in Video Memory (VRAM) for GPU access. A copy may exist in RAM during preprocessing [S1].
+*   **Spatial Structure:** Stored in Main Memory (RAM). Used for CPU-side traversal [S1].
+*   **Active Cell List:** A list of indices corresponding to voxels intersecting the isosurface, transferred from CPU to GPU [S1].
+*   **Vertex Buffers ($P, N$):** Allocated in VRAM with exact sizes determined in Stage 4 [S1].
+*   **Lookup Tables:** Stored in Texture Memory for fast read-only access by GPU kernels [S1].
+
+**Parameters:**
+*   **Block Size:** The number of threads per block. Chosen to balance workload: not too low (to avoid underutilization) and not too high (to avoid thread launch/termination overhead) [S1].
+*   **Memory Types:**
+    *   *Texture Memory:* Used for lookup tables and volume data [S1].
+    *   *Shared Memory:* Used for computing edge intersections within a thread block [S1].
+
+**Steps:**
+
+1.  **CPU: Data Loading and Allocation.** Read volume dataset $V$ ($N_x \times N_y \times N_z$). Allocate memory for $V$ in both RAM and VRAM. Allocate extra memory for span-space related to volume data (if not using an octree) [S1].
+2.  **CPU: Spatial Structure Construction.** Construct the chosen spatial data structure from $V$. Store this structure in RAM. Free $V$ from RAM, keeping it only in VRAM [S1].
+3.  **CPU: Active Cell Identification.** Given isovalue $h$, traverse the spatial data structure to identify nodes corresponding to active volume cells (cells where the isosurface intersects). Create a list of these active cell indices. Transfer this list to the GPU via the communication bus [S1].
+4.  **GPU: Buffer Allocation.** For each active cell in the list:
+    *   Classify the cell into one of the 15 Marching Cubes cases by comparing $h$ to the eight cell vertices.
+    *   Determine the cell index.
+    *   Calculate the number of vertices required for the isosurface in this cell.
+    *   Sum the required vertices across all active cells to determine the total vertex count.
+    *   Allocate exact sizes for vertex buffer $P$ and normal buffer $N$ in VRAM [S1].
+5.  **GPU: Triangle Generation.** Traverse the list of active cells again. For each cell:
+    *   Calculate intersections with the 12 edges of the cell by interpolating vertex values and normals from the volume data stored in VRAM.
+    *   Use the cell index and intersections to determine the specific vertex and normal list for the isosurface.
+    *   Write the vertices to buffer $P$ and normals to buffer $N$ [S1].
+6.  **GPU: Rendering.** Render the volume data using the populated vertex buffers $P$ and $N$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Stage 1 & 2: CPU Preprocessing
+def cpu_preprocessing(volume_data, dimensions, structure_type):
+    # Allocate volume data in RAM and VRAM
+    ram_volume = allocate(volume_data)
+    vram_volume = allocate_in_vram(volume_data)
+    
+    # Construct spatial structure in RAM
+    spatial_structure = construct_structure(ram_volume, structure_type)
+    
+    # Free RAM volume, keep VRAM volume
+    free(ram_volume)
+    return spatial_structure, vram_volume
+
+# Stage 3: CPU Active Cell Search
+def cpu_find_active_cells(spatial_structure, isovalue):
+    active_cells = []
+    # Traverse structure to find nodes intersecting isovalue
+    for node in traverse(spatial_structure, isovalue):
+        active_cells.append(node.index)
+    return active_cells
+
+# Stage 4: GPU Buffer Allocation
+def gpu_allocate_buffers(active_cells, vram_volume, isovalue):
+    total_vertices = 0
+    # Pre-pass to count vertices
+    for cell_index in active_cells:
+        # Get 8 vertex values from vram_volume
+        vertex_values = get_cell_vertices(vram_volume, cell_index)
+        # Classify cell into one of 15 cases
+        cell_index_mc = classify_marching_cubes(vertex_values, isovalue)
+        # Determine vertex count for this case
+        vertices_needed = get_vertex_count(cell_index_mc)
+        total_vertices += vertices_needed
+    
+    # Allocate exact buffers
+    buffer_P = allocate_vram(total_vertices * 3) # Assuming 3 floats per vertex
+    buffer_N = allocate_vram(total_vertices * 3) # Assuming 3 floats per normal
+    return buffer_P, buffer_N
+
+# Stage 5: GPU Triangle Generation
+def gpu_generate_triangles(active_cells, vram_volume, buffer_P, buffer_N, isovalue):
+    # Shared memory for edge intersections within a block
+    shared_mem = allocate_shared_memory()
+    
+    for cell_index in active_cells:
+        # Re-calculate cell index (faster than storing/retrieving)
+        vertex_values = get_cell_vertices(vram_volume, cell_index)
+        cell_index_mc = classify_marching_cubes(vertex_values, isovalue)
+        
+        # Compute intersections using shared memory for data sharing
+        intersections = compute_edge_intersections(
+            vertex_values, 
+            isovalue, 
+            shared_mem
+        )
+        
+        # Get vertices and normals from lookup tables (texture memory)
+        vertices, normals = get_vertices_normals(cell_index_mc, intersections)
+        
+        # Write to buffers
+        write_to_buffer(buffer_P, vertices)
+        write_to_buffer(buffer_N, normals)
+
+# Stage 6: Rendering
+def gpu_render(buffer_P, buffer_N):
+    render_geometry(buffer_P, buffer_N)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Block Size Selection:** Choosing a block size that is too low underutilizes threads, while a size that is too high causes overhead in thread management [S1].
+*   **Redundant Calculation:** The cell index calculation is performed in both Stage 4 and Stage 5. This is intentional as it is faster on the GPU to recompute than to store and retrieve from an array [S1].
+*   **Memory Hierarchy:** Failure to use Texture Memory for read-only data (lookup tables, volume data) and Shared Memory for intra-block data sharing (edge intersections) will result in suboptimal performance [S1].
+
+## Subtopics
+
+### [Marching Cubes with Spatial Acceleration Structures](14738-marching-cubes-with-spatial-acceleration-structures.md)
+A variant that accelerates the search for active cells using spatial data structures (k-d tree, interval tree, quadtree, octree) implemented on the GPU, but where the search itself is performed on the CPU.
+
+## Operating characteristics
+*   **Complexity:** The CPU handles the spatial traversal ($O(N)$ in worst case, but optimized by structure) and the GPU handles the parallel classification and interpolation ($O(A)$ where $A$ is the number of active cells).
+*   **Performance:** The method balances CPU and GPU tasks to maximize performance [S1]. It relies on the parallelization of the active cell list processing on the GPU [S1].
+*   **Memory:** Requires allocation for volume data in VRAM, spatial structure in RAM, and exact-sized vertex buffers in VRAM. Extra memory for span-space is needed for non-octree structures [S1].
+*   **Strengths:** Avoids buffer overflow by exact allocation; leverages CPU for spatial traversal which can be more efficient for sparse data; uses GPU memory hierarchy (Texture/Shared) for speed [S1].
+*   **Limitations:** Requires data transfer between CPU and GPU for the active cell list; dependent on the efficiency of the spatial structure construction and traversal [S1].
+
+## Background
+The methodology was proposed to accelerate the Marching Cubes technique for volumetric visualization by properly utilizing the GPU memory hierarchy and parallel processing capabilities [S1]. It builds upon earlier proposals by Buatois et al., Johansson, Martin et al., Pascucci, Reck et al., and Tatarchuk et al. [S1]. The specific implementation details, including the six-stage scheme and CUDA kernel optimizations, are described in the source [S1].
+
+## Sources
+[S1] Marching cubes technique for volumetric visualization accelerated with graphics processing units, https://doi.org/10.1007/s13173-012-0097-z, fetched 2026-10-26

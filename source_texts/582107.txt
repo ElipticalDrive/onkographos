@@ -1,0 +1,539 @@
+PaNTr (Polynomial And NURBS Toolkit)  is a pure Python library for geometric modeling and numerical analysis - feat(bezier): port the root-finding block to C++ behind the dual-backend dispatch by pantolin · Pull Request #353 · FELIGN/pantr
+
+feat(bezier): port the root-finding block to C++ behind the dual-backend dispatch by pantolin · Pull Request #353 · FELIGN/pantr · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+pantolin
+commented
+Aug 24, 2026
+Copy link
+Copy Markdown
+Collaborator
+Context
+The second of pantr.bezier's three ports: root finding. Sixteen Numba kernels across
+_root_finding_core.py, _clipping_core.py, _yuksel_core.py and _batch_core.py, about
+1900 lines, reached through six dispatch points.
+Two things make this block different from the four ports before it. Every kernel is
+iterative, so a result carries a discrete verdict as well as a value: how many roots there
+are. And the block was the one carrying an open question from the arithmetic port, namely what
+to do about _de_casteljau_eval_scalar, which a downstream consumer imports by its private
+path in the module this port reorganises.
+That question dissolved on inspection. All kernel-to-kernel calls here happen inside
+nopython, so no catalogue can be inserted between two of them and the dispatch boundary is
+forced up to _find_roots.py. _root_finding_core.py is not touched by this PR: its seven
+kernels stay at their own module path, still imported by the two kernel modules above them, and
+the consumer's import survives without anything being decided about it.
+Specification
+Transliterate rather than reimplement, branch for branch and expression for expression. A
+cleaner C++ would have to be graded by a set distance over a discrete verdict with the Numba
+side as the only available reference, which is the weakest parity claim in the tree.
+Reproducing the arithmetic buys an equality instead, and an equality is checked rather than
+argued.
+Acceptance criteria
+AC1: PANTR_BACKEND=cpp reaches find_roots and find_monotone_root, single and
+batched, at both dtypes.
+AC2: The two backends are bit-identical on the shipped build. Verified end to end
+through the public API, each backend in its own process: 732 of 732 results identical
+over 244 polynomials.
+AC3: The parity claim on a build that fuses is derived and exercised, not merely
+stated. The extension was built at -march=native and the suite run against it.
+AC4: Root counts are asserted separately from values, since no tolerance bounds a verdict.
+AC5: The arithmetic widths are measured rather than read, with a committed script and a
+discrimination count per site.
+AC6: C++ property tests check the algorithm against mathematics and against a second
+algorithm, not against the other backend.
+AC7: Full local suite green: 37/37 in scripts/ci_local.sh, plus ruff, ruff format, mypy,
+import-linter, 82 doctests and the docs build under -W.
+What is worth a reviewer's attention
+The widths, and why a script rather than a reading. Numba's float() does not widen a
+float32: float(coeff[0]) reads as a promotion and is a no-op, and what widens is type
+unification across assignments. Three of the five widths in this block are therefore narrower
+than the source looks. The sharpest is the degree-1 base case c0 / (c0 - c1), where the
+float64 model reproduced none of 20000 pairs, so the obvious C++ breaks parity on every
+float32 input and the difference reads as round-off. Two further sites look identical to those
+and behave the opposite way. scripts/measure_root_finding_widths.py is the specification.
+The fused branch shipped broken, and that is the finding. It called bounded_parity with an
+argument that function does not take, and 133 tests passed over it because the shipped build
+never reaches that branch. Building the fusing variant is cheap and found it in one run. The
+same run refuted the first bound: 732 float64-heavy results gave a worst displacement of
+4.951e-13 against a param_tol of 1e-12, tight enough to look like a correct derivation,
+while at float32 a degree-5 case moved by 2e-8. The residual term the bound omitted is
+invisible at float64.
+Two pre-existing defects are reproduced on purpose, filed as #351 and #352 and asserted by
+name in the parity suite. Neither is introduced here and the three files are byte-identical to
+main. Fixing either means fixing both backends and those tests in one change; correcting one
+side alone breaks the equality.
+A third parity kind in the harness. A bound that comes from an algorithm's termination
+criterion cannot be spelled with bounded_parity, which builds its bound from a rounding budget
+times an amplification; reaching a given number that way would mean choosing an amplification to
+produce it. ParityKind.CONVERGED carries an absolute bound and the scale its quantity lives on
+— the second being needed because the vacuity guard's premise fails for a parameter confined to
+[0, 1]: a root at 3.6e-13 is next to an endpoint, not a quantity without digits.
+Non-goals
+Performance. Nothing here has been profiled, and the C++ batch kernels are serial where the
+Numba ones carry parallel=True. Each polynomial writes only its own row and no reduction
+crosses them, so the answer cannot move with the thread count either way.
+Fixing fix(bezier): the float32 sign tests underflow, so one root is invented and another is lost #351 or fix(bezier): an absolute 1e-30 floor inside a scale-relative tolerance makes find_roots scale-dependent #352.
+_bezier_interpolate, which is the third and last bezier port.
+Related
+Follows the arithmetic port and its FMA bound.
+Adds Rule 11 to design/backend_parity.md and a section to Rule 9.
+Surfaced fix(bezier): the float32 sign tests underflow, so one root is invented and another is lost #351 and fix(bezier): an absolute 1e-30 floor inside a scale-relative tolerance makes find_roots scale-dependent #352, which this PR deliberately does not fix.
+pantolin
+and others
+added 10 commits
+August 24, 2026 10:27
+test(bezier): measure the root-finding widths before transliterating …
+…
+312d4e4
+```
+…them
+
+Rule 9 of design/backend_parity.md says an oracle's accumulation width is a
+per-kernel fact and that getting it wrong is invisible at float64. This measures
+the widths of the root-finding block behaviourally: two rival models per site, run
+against the kernel and compared bit for bit, plus a count of how often the two
+models disagree, so a match cannot come from a check that could not fail. Each
+measurement draws from its own generator, so adding a site does not silently move
+every figure below it.
+
+The finding the rest rests on is that Numba's `float()` does not widen a float32.
+`float(coeff[0])` is a no-op and so is `float(np.min(coeff))`; what widens is type
+unification across assignments, so a variable seeded with `0.0` and later given a
+float32 is float64 throughout. Six sites in the block carry a `float()` that reads
+as a promotion and is not one.
+
+Five widths follow, three of them not what a C++ author would write by default. The
+worst is the degree-1 base case, where the float64 model matched none of 20000
+pairs: `double root = c0 / (c0 - c1);` breaks parity on every float32 input and
+reads as round-off rather than as a defect. Every Yuksel recursion bottoms out
+there. Two further sites look identical to those and behave the opposite way, so
+the table is not a per-kernel rule and the transliteration has to go expression by
+expression.
+
+It also settles two library questions and one hazard that is not about width.
+`std::pow(x, 1.0/3.0)` reproduces the one non-arithmetic call in the block while
+`std::cbrt` differs on 49659 of 50000 tolerances. `std::min`/`std::max` agree with
+Numba's builtins on NaN, signed zero and infinities where `fmin`/`fmax` would not.
+
+And the hazard: the convex-hull orientation predicate is `a*b - c*d`, which on an
+exactly collinear control polygon evaluates to exactly zero, so the tie-break pops
+the vertex. Under contraction that exact tie becomes a signed residue and the
+tie-break turns into a coin toss, changing which vertices survive. Measured against
+the kernel: unfused agrees on all 4800 collinear cases, fused on 3789. A collinear
+control polygon is not exotic, being what a degree-elevated linear polynomial or an
+affine segment gives. The shipped build carries no -march and so no FMA, which is
+why this is a conditional branch rather than a defect.
+
+The fused reference is exact rational arithmetic rather than math.fma, which
+arrived in 3.13 while this project supports 3.11.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(bezier): transliterate the sixteen root-finding kernels to C++
+…
+082601a
+```
+Branch for branch and expression for expression, which is a decision rather than
+laziness. Every verdict this block reaches is discrete: how many roots, which
+intervals survive, which hull vertices are kept. A cleaner reimplementation would
+have to be graded by a set distance over a discrete verdict with the Numba side as
+the only available reference, which is the weakest parity claim in the tree.
+Reproducing the arithmetic buys an equality instead, and an equality is checked
+rather than argued.
+
+Cross-checked against the oracle before any binding exists: 198 cases over both
+dtypes and degrees 1 to 17, including straight control polygons, wide dynamic
+ranges and the two filed defects, run through all four single-polynomial seam
+kernels. 792 of 792 output lines are bit-identical. Built at -O2 with
+-ffp-contract=on and no -march, which is the shipped configuration.
+
+The widths are the substance. Numba's float() does not widen a float32, so three
+of the five are narrower than the source reads: d1 - d0 in the derivative, the
+hull predicate's coefficient differences, the Yuksel forward difference. The
+degree-1 base case divides entirely at coefficient width, and dividing at
+accumulator width instead reproduced none of 20000 float32 pairs. Two further
+sites look identical to those and behave the opposite way, because a variable
+seeded with a double is unified wider, so none of this is a per-kernel rule.
+scripts/measure_root_finding_widths.py is the specification and the thing to
+re-run.
+
+Two library spellings, both measured: std::pow(x, 1.0/3.0) rather than std::cbrt
+for the dedup radius cap, and the std::min/std::max ternary rather than fmin/fmax,
+which differ on NaN.
+
+The two pre-existing defects filed as #351 and #352 are reproduced deliberately
+and marked at their three sites, because the port's contract is parity and not
+correction. Fixing either means fixing both backends and the parity tests in one
+change.
+
+No bindings and no dispatch yet, so nothing in this commit is reachable from
+Python and the shipped behaviour is unchanged.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(bezier): dispatch the root-finding seam between the two backends
+…
+12476c9
+```
+Six bindings and a catalogue, which is the whole seam. The other ten kernels are
+unreachable from Python and that is structural: inside the Numba backend they call
+each other from within nopython code, and no dispatch can be inserted between two
+Numba kernels, so the boundary is forced up to the five places _find_roots.py
+reaches for a kernel plus the merge it reaches for straight after clipping.
+
+One consequence is worth stating because it was the open question this block began
+with: _root_finding_core.py is not touched. Its seven kernels stay at their own
+module path, still imported by _clipping_core and _yuksel_core at nopython call
+sites that cannot route through a catalogue, so the private path a downstream
+consumer imports survives without anything being decided about it.
+
+The C++ side is adapted to the oracle's shape rather than the other way round. The
+Numba kernels return (array, count); the bindings fill a caller buffer and return
+the count, because a root set's size is not a function of the input. Those are
+reconciled in three lines per kernel in the catalogue. Reshaping the oracle instead
+would move the thing parity is measured against, and would change kernels the tests
+call directly.
+
+Measured end to end through the public API, both backends in their own processes:
+732 of 732 results bit-identical, over find_roots and find_monotone_root, single
+and batch, both dtypes, 244 polynomials including straight control polygons, wide
+dynamic ranges and the two coefficient scales that trigger #351. Full suite 7131
+passed on each backend, with identical skip and xfail counts.
+
+_clipping_core._dedup_roots is gone. Its production caller now routes through the
+catalogue, and its two remaining callers were test helpers, so the three-line
+prefix copy moved into the two test files that wanted it. The module docstring that
+named it is corrected in the same commit rather than left to a later reader.
+
+The batch kernels are imported inside their accessors, not at module scope,
+preserving a deferral _find_roots.py already had: _batch_core is the only module in
+the block whose kernels carry parallel=True.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+test(bezier): claim the root-finding parity, and exercise the branch …
+…
+dea7a4e
+```
+…that fuses
+
+Bitwise on the shipped build, where baseline x86-64 has no fused multiply-add. On a
+fusing build the values move and the sets do not, which is measured rather than
+assumed: the extension was built at -march=native and run against the oracle, and
+the suite passes there too.
+
+Exercising that branch is the point, and it is what block A's review said was
+missing. It found the branch broken: it called bounded_parity with an argument that
+function does not take, and 133 tests passed over it because none of them reached
+it. An unexercised claim is not a weak claim, it is an unevaluated one.
+
+It also refuted the first bound. Measured over 732 float64-heavy results, the worst
+displacement was 4.951e-13 against a param_tol of 1e-12, which looked like the
+bracketing tolerance was the bound. At float32 a degree-5 case moved by 2e-8, four
+orders past it. The bracketing term had been hiding a larger one: a root is located
+only to within the interval where the computed residual is indistinguishable from
+zero, of half-width eps_f / |f'|, and at float64 that term is around 1e-15 and never
+shows. The bound is now the larger of the two, with eps_f taken at the coefficient
+width and the half-width capped at the multiplicity-three cluster width, which is
+the same cap and the same reasoning _dedup_roots_core already uses for its merge
+radius.
+
+The harness gains a third parity kind. A bound that comes from an algorithm's
+termination criterion cannot be spelled with bounded_parity, which builds its bound
+from a rounding budget times an amplification; reaching a given number that way
+would mean choosing an amplification to produce it, which is the fitted constant the
+harness exists to make unsayable. CONVERGED carries an absolute bound and the scale
+the quantity lives on.
+
+The scale is the second correction. The vacuity guard compares a bound against the
+values it is applied to, which is right for a coefficient and wrong for a parameter
+confined to [0, 1]: a root at 3.6e-13 is not a quantity with no digits, it is a
+parameter next to an endpoint. With the root's own magnitude as the scale, two cases
+of the seeded sweep were refused as vacuous while the two backends agreed bit for
+bit.
+
+What is genuinely outside the parity domain is named and reported with its number,
+per Rule 8: eight decades of coefficient range at float32 reach a tenth of the
+domain at degree 8, which is weak but still refutable and so is asserted, and 9.5 at
+degree 17, which covers the whole interval and is skipped. Both are bit-identical on
+the shipped build.
+
+Root counts are asserted separately throughout. No tolerance bounds a verdict, and
+contraction can flip the convex-hull tie-break, so the two are never folded together.
+
+The two filed defects are asserted rather than worked around, and both tests say in
+their docstring that the assertion is deliberate and that a fix lands in both
+backends and here at once.
+
+Four probes, because a claim nothing exercises is the failure this file just met:
+the count check fires, the converged bound admits a displacement inside itself and
+refuses one past it, and the vacuity guard still rejects a bound covering the whole
+domain while accepting one under it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+test(bezier): check the root finder against mathematics rather than a…
+…
+d814c93
+```
+…gainst itself
+
+Parity compares the two backends bit for bit and cannot catch a bug the oracle
+shares, which matters more here than usual: this block was transliterated
+deliberately, so a wrong algorithm would be reproduced faithfully and pass. Nothing
+in this file compares the backends.
+
+Five exact checks, each with a reason it can be exact. A convex combination of
+positive coefficients cannot vanish, so an all-positive control polygon admits no
+root and the count is an integer. Every root lies in [0, 1] structurally. The count
+never exceeds the sign changes, by the variation-diminishing property. The merged
+roots come back ascending. A degree-1 root is one correctly rounded division against
+the same expression written out.
+
+Two bounded checks carry the file's weight. The residual at each returned root is
+measured with an independent evaluation, the explicit sum rather than de Casteljau,
+so a wrong triangle cannot hide behind itself; the bound is the bracket's
+contribution plus the sum's own error, and a vanishing derivative is excluded by
+name rather than absorbed. And Yuksel's decomposition is compared against Bezier
+clipping, which share only the evaluation kernel: that is the check that would catch
+a wrong algorithm rather than a wrong endpoint.
+
+The hull-containment check found an error in its own premise before it found
+anything else. The convex hull contains every root in exact arithmetic, but the root
+being compared is a bracket midpoint sitting within param_tol / 2 of the true one,
+and the first margin carried only the hull's rounding: it failed by 5e-13 against
+2.7e-15, which is exactly the term it had left out.
+
+Non-vacuity is pinned rather than assumed. Every property has the form "each root
+satisfies X", so a sample set that found no roots would satisfy all of them in
+silence; the sample count is asserted.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+docs(parity): add Rule 11, and record the mechanism under Rule 9's wi…
+…
+c7b42fb
+```
+…dths
+
+Rule 11 is the first here about a discrete verdict rather than a displacement. The
+convex-hull orientation predicate is `a*b - c*d`, which on an exactly collinear
+control polygon is exactly zero, so the tie-break pops the vertex; under contraction
+that tie becomes a signed residue and the tie-break is a coin toss. Measured on
+200000 constructed collinear triples, fusing flips the branch on 130538. Downstream
+of a flipped branch the two backends are computing different things, so no tolerance
+covers it and the count is asserted separately from any value.
+
+It also carries the bound that applies where contraction is live, and the two
+corrections it needed, because both are the kind that pass everything until the
+branch is forced to run. The first bound was fitted where one term dominated: 732
+float64-heavy results gave a worst displacement of 4.951e-13 against a param_tol of
+1e-12, tight enough to look right, while the residual term it omitted is around
+1e-15 at float64 and four orders larger at float32. And Rule 3's vacuity premise
+fails for a quantity on a bounded domain: a root at 3.6e-13 is a parameter next to
+an endpoint, not a quantity with no digits, and grading the bound against the root's
+own magnitude refused two cases where the backends agreed bit for bit.
+
+The last section is the operational one. A conditional claim's other branch never
+runs on the shipped build, and this port's shipped broken: it called bounded_parity
+with an argument that function does not take, and 133 tests passed over it. Building
+the fusing variant is cheap and should be part of finishing any port that carries
+one.
+
+Rule 9 gains the mechanism underneath its widths, which is worse than an unwritten
+convention: numba's `float()` does not widen a float32. `float(coeff[0])` reads as a
+promotion and is a no-op, and what widens is type unification across assignments. So
+a width cannot be read off the source and cannot be inferred per kernel or per
+module, and the destination array's dtype says nothing about the width the operation
+ran at.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(bezier): call the math functions the way the scalar concept requires
+…
+887d391
+```
+`ci_local.sh` refuses a qualified `std::abs(x)` in the library headers, and the new
+root-finding header carried 35 of them. The rule is not cosmetic: naming the
+overload directly suppresses ADL, which is exactly how a Tier B scalar's own
+overload gets excluded, and `cpp/include/pantr/core/scalar.hpp` promises the guard
+exists. Nine functions gain a `using std::abs;` and one also a `using std::pow;`,
+and the calls are unqualified.
+
+Verified rather than assumed, because an unqualified call resolves differently: the
+732-result end-to-end comparison is still bit-identical across the backends, the
+parity suite still passes, and the ten C++ tests still pass. Between the strip and
+the using-declarations the header briefly resolved `abs` to C's `abs(int)`, which
+`-Wfloat-conversion` caught at compile time; that is the failure this idiom would
+otherwise hide behind a silent truncation for a scalar type that has no exact
+overload.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+fix(bezier): close two review findings the tests could not have caught
+…
+8f3ebcc
+```
+An API audit and a line-by-line verification of the transliteration found one
+defect each, and both survived every test in the PR for the same reason: nothing
+reached them.
+
+**The batch binding checked the wrong axis.** `find_roots_batch`'s capacity check
+tested `out_roots.shape(0)`, which the two lines above it had already forced equal
+to the polynomial count, while the row width the kernel indexes went unchecked. The
+kernel clamps its per-row count to whatever fits, so an undersized buffer reported
+fewer roots than exist with no error: a two-root polynomial came back with one, and
+a zero-width row came back claiming none. Every sibling single-call binding refused
+the equivalent case. Reproduced, then fixed by making the axis an explicit argument,
+which is what made the mistake possible to state.
+
+No test reached it because the only in-tree caller is `pantr.bezier.find_roots`,
+which always allocates correctly. `tests/parity/test_bezier_binding_contract.py`
+gains four tests covering the batch capacity, the single-call worst cases, the
+tolerance guards including NaN, and the keyword-only tolerances.
+
+**The hull's edge-crossing quotient was widened.** The oracle reads both endpoints
+out of the coefficient array and divides them, so the sign test and the quotient run
+at the coefficient width and only the multiplication by the span promotes; the C++
+cast both to double first. Measured over 10143 sign-changing float32 edges, the
+widened model reproduces none of them. Inert today, since the kernel is only ever
+reached with the float64 subdivision buffer, but the header claims a float
+instantiation and would have been wrong the day one existed.
+
+That one is also a gap in the measurement script, which is supposed to be the
+specification the transliteration is written against and measured the orientation
+predicate's width while missing the quotient's, three lines below it. The script now
+covers both; six widths, and the new site discriminates on all 10077 cases.
+
+Two signature traps closed rather than commented. `param_tol` and `geom_tol` are
+adjacent, same-typed, and nothing orders them, so the ordering check `bezier.cpp`
+uses for `lower`/`upper` has no analogue; they are keyword-only now. And
+`dedup_roots` takes the coefficients first, as every sibling does: `raw_roots` is
+always float64 and `coeff` frequently is, so a transposed call type-checked, ran and
+merged against the wrong data.
+
+Smaller: one name for the bracket-width tolerance across all six bindings;
+`converged_parity`'s argument now matches the field it fills; the Newton budget's
+third exit is documented as unreachable rather than left out of an otherwise
+exhaustive list; the count alias says what the binding says; and both catalogues in
+the package now state why one hoists its adapters and the other does not.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+test(bezier): certify the fused bound instead of predicting it
+…
+4f83674
+```
+An adversarial review refuted the predicted bound on four independent counts, and
+none of the four was visible from inside the PR. All four are verified here before
+being acted on.
+
+`eps_f = (degree + 1) u max|c|` is false at float64: an exact-rational counterexample
+at degree 1 exceeds it by 1.126x. The literature constant is Mainar and Pena's
+gamma_2n, corrected by Hermes because the original does not charge the rounding of
+`1 - t`, which this kernel commits.
+
+The derivation used the wrong epsilon entirely. The kernel accepts on
+`abs(f_final) <= zero_tol` and computes zero_tol itself; for `f(t) = t - 1/2`, the
+simplest polynomial in the matrix, the acceptance band is exactly twice what was
+claimed. Deriving a forward error when the code states its own threshold was the
+root mistake, and the other three follow from it.
+
+The linearisation needs a curvature hypothesis nobody stated, with a measured window
+at |f'| ~ 2 sqrt(eps) where it fails by 2.75x while the cap is still three decades
+away. And the cap is dimensionally wrong: `eps^(1/3)` has units of `[f]^(1/3)` and
+was compared against `[t]`. Verified by the scaling check CLAUDE.md names first: a
+triple root comes back bit-identical over 2^60 of coefficient scaling while the cap
+moves by a factor of a million.
+
+Certifying answers all four and is less code. Restrict the Bernstein net to each
+flanking interval and apply the convex-hull property: coefficients all above the band
+or all below it prove no point of that flank is acceptable, so the component cannot
+reach past the half-width under test. Binary search it; certification is monotone.
+Scale-invariant, dimensionally correct, multiplicity-agnostic, and no derivative
+appears.
+
+The restriction is exact rational arithmetic, which makes the hull bound a proof
+rather than an estimate needing its own error term, and it is written out rather than
+borrowed from `_subdivide_scalar` so that a bug in the kernels cannot certify itself.
+18 ms per root at degree 17, and it runs only where contraction is live.
+
+It bounds 83 of 86 cases below the parameter interval, against the predicted bound's
+4 exclusions for a reason that was itself wrong. The three it does not are float32
+polynomials spanning eight decades whose roots have no digits, named per Rule 8 with
+their numbers. `test_the_certificate_bounds_most_of_the_matrix` pins the rate, so a
+bound going slack cannot hide behind those skips.
+
+Two other findings. The `double_root` family had no root: `(i/n - 1/2)^2` is the
+Bernstein form of `(1 - 1/n)(t - 1/2)^2 + 1/(4n)`, strictly positive with minimum
+1/(4n), so it found zero roots at every degree while its docstring claimed it reached
+the bisection branch. It is now the Bernstein form of `(t - 1/2)^2`. And the skip's
+guard asserted the dtype was float32, a proxy that the #352 regime falsifies at
+float64 for reasons unrelated to the derivation; the rate test replaces it.
+
+Rule 11 loses a sentence that was wrong. It said that downstream of a flipped
+tie-break the backends compute different things; measured, the hull is the same
+polyline and the interval moves by one to two ulp. The rule's conclusion stands via a
+mechanism it did not name: fusion displaces the subdivided net and three threshold
+comparisons read it, so a count can change without any exact tie being involved,
+which also means a collinear adversary is aimed at the wrong target.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+test(parity): diagnose a changed root set as one, and refuse an oracl…
+…
+7b64199
+```
+…e that is not one
+
+Two more from the same review, neither a soundness problem and both worth closing.
+
+Equal root counts do not mean the same roots. Measured: one ulp on a coefficient
+turned [0.5, 0.828] into [0.1715, 0.5] at the same count, and the elementwise
+comparison then pairs 0.5 against 0.1715 and fails on the value bound, blaming a
+displacement for what is a changed set. The test failed either way; what was wrong
+was the diagnosis. A nearest-neighbour check on the pairing now says so directly,
+restricted to sorted root sets of one polynomial because the batch results correspond
+by row and a proximity test there compares one polynomial's root against another's.
+
+And the parity suite now refuses to run under SVML. `_dedup_roots_core` calls `pow`
+and is reached both serially and from the `parallel=True` batch kernel; SVML's `pow`
+is not bit-identical to glibc's, so with SVML present those two paths could disagree
+**inside the Numba backend**, and every figure measured against it would be measuring
+two different oracles. It is one `pip install icc_rt` away and numba enables it
+automatically when the runtime is importable, so nothing else in the suite would
+notice.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Hide details
+View details
+pantolin
+merged commit 03df9d2
+into
+proto/cpp
+Aug 24, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+pantolin
+deleted the
+feat/cpp-bezier-roots
+branch
+August 24, 2026 12:05
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,163 @@
+--- v002.md
++++ v003.md
+@@ -7,9 +7,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of $M$ multi-view images $\{I_m\}_{m=1}^M$ with known camera poses and intrinsics.
+-*   **Output:** Optimized tensor factors (global mode vectors and matrices) representing the density $\sigma$ and color $\mathbf{c}$ fields.
++*   **Input:** A set of $M$ multi-view images $\{I_m\}_{m=1}^M$ with known camera poses and intrinsics [S1, unofficial].
++*   **Output:** Optimized tensor factors (global mode vectors and matrices) representing the density $\sigma$ and color $\mathbf{c}$ fields [S1, unofficial].
+ 
+ **Data Structures:**
+-The radiance field is represented using Vector-Matrix (VM) or Canonical Polyadic (CP) decomposition. For a component $r$, the field is approximated by summing rank-1 components. The density $\sigma$ and appearance features $\mathbf{c}$ are computed by interpolating mode vectors and matrices. Specifically, for a component $r$, the density contribution involves terms like $\mathbf{v}_X(x) \cdot \mathbf{M}_{YZ}(y,z)$, where $\mathbf{v}$ is a vector and $\mathbf{M}$ is a matrix [3026-tensorf.md]. The implementation uses a feature grid with $N^3$ voxels, where the resolution per dimension is derived from the bounding box shape [S1, unofficial].
++The radiance field uses Vector-Matrix (VM) or Canonical Polyadic (CP) decomposition, building on the shared principles of low-rank tensor factorization [11617-tensorial-and-low-rank-representations.md]. The implementation uses a feature grid with $N^3$ voxels, where the resolution per dimension is derived from the bounding box shape [S1, unofficial].
+ 
+ **Parameters:**
+@@ -30,71 +30,84 @@
+ 1.  Initialize tensor factors (global vectors and matrices) at resolution $N_0^3$ [S1, unofficial].
+ 2.  For each optimization step $t$:
+-    a.  If $t$ is in $\{2000, 3000, 4000, 5500, 7000\}$, upsample the XYZ-mode vector and matrix factors linearly and bilinearly to the current target resolution [S1, unofficial].
++    a.  If $t \in \{2000, 3000, 4000, 5500, 7000\}$, upsample the XYZ-mode vector and matrix factors linearly and bilinearly to the current target resolution [S1, unofficial].
+     b.  Sample rays and compute rendered pixel colors using the current tensor factors and feature decoding function [S1, unofficial].
+-    c.  Compute L2 rendering loss: $\mathcal{L}_{render} = \sum \| \mathbf{C}_{rendered} - \mathbf{C}_{GT} \|^2$, where $\mathbf{C}_{rendered}$ are the rendered colors and $\mathbf{C}_{GT}$ are ground truth colors [S1, unofficial].
+-    d.  Compute regularization loss $\mathcal{L}_{reg}$ based on L1 norm and/or TV loss on the factors [S1, unofficial].
+-    e.  Compute total loss $\mathcal{L} = \mathcal{L}_{render} + \lambda \mathcal{L}_{reg}$ [S1, unofficial].
+-    f.  Update tensor factors using Adam optimizer [S1, unofficial].
++    c.  Compute L2 rendering loss: $\mathcal{L}_{\text{render}} = \sum \| \mathbf{C}_{\text{rendered}} - \mathbf{C}_{\text{GT}} \|^2$, where $\mathbf{C}_{\text{rendered}}$ are the rendered colors and $\mathbf{C}_{\text{GT}}$ are ground truth colors [S1, unofficial].
++    d.  Compute regularization loss $\mathcal{L}_{\text{reg}} = \lambda_1 \mathcal{L}_{\text{L1}} + \lambda_{\text{TV}} \mathcal{L}_{\text{TV}}$ on the factors [S1, unofficial].
++    e.  Compute total loss $\mathcal{L} = \mathcal{L}_{\text{render}} + \mathcal{L}_{\text{reg}}$ [S1, unofficial].
++    f.  Update tensor factors using the Adam optimizer [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ import torch
+-import torch.nn as nn
+-import torch.optim as optim
++import torch.nn.functional as F
+ 
+ def compute_tv_loss(factors):
+     """Compute Total Variation loss on tensor factors."""
+     loss = 0.0
+-    for factor in factors:
+-        # Compute differences along each dimension
+-        diff_x = factor[:, 1:, :] - factor[:, :-1, :]
+-        diff_y = factor[:, :, 1:] - factor[:, :, :-1]
+-        diff_z = factor[1:, :, :] - factor[:-1, :, :]
+-        loss += torch.mean(torch.abs(diff_x)) + \
+-                torch.mean(torch.abs(diff_y)) + \
+-                torch.mean(torch.abs(diff_z))
++    for f in factors:
++        if f.dim() == 3:  # Vector factor
++            loss += torch.mean(torch.abs(f[:, 1:, :] - f[:, :-1, :]))
++        elif f.dim() == 4:  # Matrix factor
++            loss += torch.mean(torch.abs(f[:, :, 1:, :] - f[:, :, :-1, :]))
++            loss += torch.mean(torch.abs(f[:, 1:, :, :] - f[:-1, :, :, :]))
+     return loss
+ 
++def get_current_resolution(t, N0, N_final, steps):
++    """Compute target resolution via linear interpolation in log space."""
++    log_N0, log_Nf = torch.log(torch.tensor(N0)), torch.log(torch.tensor(N_final))
++    if t <= steps[0]:
++        progress = 0.0
++    elif t >= steps[-1]:
++        progress = 1.0
++    else:
++        idx = next(i for i, s in enumerate(steps) if s > t)
++        prev_s = steps[idx-1] if idx > 0 else 0
++        progress = (t - prev_s) / (steps[idx] - prev_s)
++    return int(torch.exp(log_N0 + progress * (log_Nf - log_N0)).item())
++
++def upsample_factors(factors, t, N0, N_final, steps):
++    """Upsample vectors (trilinear) and matrices (bilinear) to target resolution."""
++    new_res = get_current_resolution(t, N0, N_final, steps)
++    new_factors = []
++    for f in factors:
++        if f.dim() == 3:
++            new_factors.append(F.interpolate(f.unsqueeze(0).unsqueeze(0), size=(new_res, new_res, new_res), mode='trilinear', align_corners=False).squeeze(0).squeeze(0))
++        elif f.dim() == 4:
++            new_factors.append(F.interpolate(f.unsqueeze(0), size=(new_res, new_res), mode='bilinear', align_corners=False).squeeze(0))
++    return new_factors
++
+ def render_ray(ray_origins, ray_directions, factors, resolution):
+-    """
+-    Render a batch of rays using tensor factors.
+-    Simplified for demonstration; actual implementation involves
+-    trilinear interpolation and volume rendering integration.
+-    """
+-    # Sample points along rays
+-    # Interpolate factors at sample points using trilinear interpolation
+-    # Compute density sigma and color c
+-    # Perform volume rendering (alpha compositing)
++    """Render a batch of rays using tensor factors."""
++    # Sample points along rays [G]
++    t_vals = torch.linspace(0.0, 1.0, 128).to(ray_origins.device)
++    z_vals = 0.2 + 0.8 * t_vals
++    points = ray_origins.unsqueeze(1) + ray_directions.unsqueeze(1) * z_vals.unsqueeze(2)
++    # Interpolate tensor factors at sample points using trilinear interpolation [G]
++    # Compute density sigma and color c from interpolated factors and feature decoder [G]
++    # Perform volume rendering (alpha compositing) [G]
+     # Return rendered colors
+-    pass
++    return torch.zeros_like(ray_origins)  # Placeholder for standard compositing [G]
+ 
+ def optimize_tensorf(images, poses, N0=128, N_final=256, steps=[2000, 3000, 4000, 5500, 7000], 
+                      use_tv_loss=False, l1_lambda=1e-4, tv_lambda=1e-4):
+-    """
+-    Optimize TensoRF factors.
+-    """
+-    # Initialize factors at N0^3
+-    # Vectors and Matrices initialization [G]
+-    factors = initialize_factors(N0)
++    """Optimize TensoRF factors."""
++    # Initialize factors at N0^3 [G]
++    factors = [torch.randn(3, N0, N0, N0, requires_grad=True), torch.randn(3, N0, N0, N0, requires_grad=True)]
+     
+-    optimizer = optim.Adam(factors, lr=0.001) # [G] Typical LR
++    optimizer = torch.optim.Adam(factors, lr=0.001)  # [G] Typical LR
+     
+-    total_steps = 8000 # [G] Example total steps
++    total_steps = 8000  # [G] Example total steps
+     
+     for t in range(total_steps):
+         # Coarse-to-fine upsampling
+         if t in steps:
+-            # Calculate target resolution linearly in log space
+-            # Upsample vectors (linear) and matrices (bilinear)
+             factors = upsample_factors(factors, t, N0, N_final, steps)
+         
+-        # Sample rays
+-        ray_origins, ray_directions = sample_rays(images, poses, batch_size=4096)
++        # Sample rays and get ground truth colors [G]
++        ray_origins, ray_directions = torch.randn(4096, 3), torch.randn(4096, 3)
++        gt_colors = torch.randn(4096, 3)
+         
+         # Render
+-        rendered_colors = render_ray(ray_origins, ray_directions, factors, get_current_resolution(factors))
+-        
+-        # Get ground truth colors
+-        gt_colors = get_gt_colors(ray_origins, ray_directions, images)
++        rendered_colors = render_ray(ray_origins, ray_directions, factors, get_current_resolution(t, N0, N_final, steps))
+         
+         # Compute L2 loss
+@@ -125,14 +138,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of optimization steps and the resolution. The coarse-to-fine strategy reduces initial computation cost.
+-*   **Memory Complexity:** Scales with the number of tensor factors, which is significantly lower than dense voxel grids or large MLPs for equivalent resolution.
++*   **Time Complexity:** Not given in the sources. The coarse-to-fine strategy reduces initial computation cost [G].
++*   **Memory Complexity:** Scales with the number of tensor factors, which is significantly lower than dense voxel grids or large MLPs for equivalent resolution [G].
+ *   **Performance:** Evaluated on a single Tesla V100 GPU (16GB) with a batch size of 4096 pixel rays [S1, unofficial].
+-*   **Strengths:** Effective regularization prevents overfitting and local minima. Coarse-to-fine upsampling improves quality.
+-*   **Limitations:** Requires careful tuning of regularization parameters and upsampling steps. May struggle with very few input images without TV loss.
+-*   **When to use:** Suitable for multi-view reconstruction where memory efficiency and structural regularization are beneficial.
+-*   **When not to use:** Not ideal for real-time inference without further optimization (e.g., pruning) or for scenes with extreme view-dependent effects not captured by the low-rank assumption.
++*   **Strengths:** Effective regularization prevents overfitting and local minima. Coarse-to-fine upsampling improves quality [S1, unofficial].
++*   **Limitations:** Requires careful tuning of regularization parameters and upsampling steps. May struggle with very few input images without TV loss [S1, unofficial].
++*   **When to use:** Suitable for multi-view reconstruction where memory efficiency and structural regularization are beneficial [G].
++*   **When not to use:** Not ideal for real-time inference without further optimization (e.g., pruning) or for scenes with extreme view-dependent effects not captured by the low-rank assumption [G].
+ 
+ ## Background
+-TensoRF was introduced in the paper "TensoRF: Tensorial Radiance Fields" [S1, unofficial]. The method leverages tensor factorization to represent radiance fields, building on the principles of low-rank representations. It addresses issues of overfitting and local minima common in gradient-based optimization of implicit fields by introducing specific regularization terms and a dynamic resolution update strategy.
++TensoRF was introduced in the paper "TensoRF: Tensorial Radiance Fields" [S1, unofficial]. The method leverages tensor factorization to represent radiance fields, building on the principles of low-rank representations [11617-tensorial-and-low-rank-representations.md]. It addresses issues of overfitting and local minima common in gradient-based optimization of implicit fields by introducing specific regularization terms and a dynamic resolution update strategy [S1, unofficial].
+ 
+ ## Sources

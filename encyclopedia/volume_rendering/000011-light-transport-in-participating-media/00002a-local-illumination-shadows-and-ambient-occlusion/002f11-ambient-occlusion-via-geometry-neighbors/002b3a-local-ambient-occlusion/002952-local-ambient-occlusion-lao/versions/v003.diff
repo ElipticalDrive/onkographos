@@ -1,0 +1,222 @@
+--- v002.md
++++ v003.md
+@@ -1,133 +1,104 @@
+ # Local Ambient Occlusion (LAO)
+ 
+-Also called: LAO Renderer, Volumetric Ambient Occlusion
++Also called: LAO Renderer, Local Ambient Occlusion (LAO) in DVR, Volumetric Ambient Occlusion
+ 
+ ## Overview
+-Local Ambient Occlusion (LAO) is a technique to estimate local occlusion in volume rendering by sampling the volume along random directions around the light vector, weighted by distance, to simulate ambient occlusion effects [S1, unofficial]. It differs from standard shadow mapping by integrating density along stochastic rays to approximate the blocking of indirect light, providing a softer, more volumetric shadow appearance compared to hard geometric shadows.
++Local Ambient Occlusion (LAO) is a technique for estimating local occlusion in volume rendering by sampling the volume along random directions around the light vector, weighted by distance, to simulate ambient occlusion effects [S1, unofficial]. It differs from global shadowing methods by approximating indirect illumination through incremental, per-pixel accumulation of visibility samples, allowing for dynamic interaction with the volume's internal density structure without precomputed global buffers [S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Volume density field $V(\mathbf{x})$, light direction $\mathbf{l}$, light radius $R_{light}$, current position $\mathbf{p}$, and parameters $N_{samples}$, $step\_size$, $weight$.
+-*   **Output:** A scalar occlusion factor $AO \in [0, 1]$ representing the fraction of ambient light blocked by local volume density.
++The method operates in two main phases: an incremental LAO map computation and a final ray-casting pass that utilizes the precomputed occlusion data.
+ 
+-**Data Structures:**
+-*   **Accumulator:** A floating-point value (or vector if color is tracked) initialized to zero.
+-*   **Random Number Generator:** A pseudo-random function returning values in $[0, 1]$.
++### Inputs and Outputs
++*   **Inputs:** Volume data (scalar field), light direction $\mathbf{l}$, camera parameters, and LAO configuration parameters (see Parameters).
++*   **Outputs:** A final rendered image with ambient occlusion applied, and optionally a LAO map stored in a Frame Buffer Object (FBO) [S2, unofficial].
+ 
+-**Parameters:**
+-*   $N_{samples}$: Number of LAO samples per pixel. Default: 1 [S1, unofficial].
+-*   $step\_size$: Step size for LAO ray marching. Default: 0.05 [S1, unofficial].
+-*   $R_{light}$: Radius of the light source used for LAO sampling. Default: 0.19 [S1, unofficial].
+-*   $weight$: Weight applied to the LAO contribution when mixing into the final color. Default: 0.69 [S1, unofficial].
+-*   $coef$: Coefficient used to normalize LAO accumulation. Default: 1.0 [S1, unofficial].
+-*   $enable$: Boolean flag to enable/disable LAO calculation. Default: true [S1, unofficial].
++### Data Structures
++1.  **LAO Map:** Stored in a Frame Buffer Object (FBO). The FBO planes correspond to screen coordinates $(x, y)$ and store intensity/light computation results [S2, unofficial].
++2.  **Accumulator:** A temporary buffer (`accumuLAOContribution`) used to accumulate LAO contributions during the sampling loop [S1, unofficial].
++3.  **Packed Coordinates:** For multiresolution volumes, indices map between Volume-to-Pixel ($V \to P$) and Pixel-to-Volume ($P \to V$) to efficiently access data in packed textures [S2, unofficial].
+ 
+-**Algorithm Steps:**
+-1.  Initialize `accumuLAOContribution` to 0.
+-2.  Loop $i$ from 0 to $N_{samples} - 1$:
+-    a.  Initialize `inner_accum` to 0.
+-    b.  Loop $t$ from 0.001 to 1.0 with increment $step\_size$:
+-        i.  Generate a random direction $\mathbf{d}_{rand}$:
+-            $$ \mathbf{d}_{rand} = \text{normalize}((-1.0 + 2.0 \cdot \mathbf{u}_1) \cdot u_2) $$
+-            where $\mathbf{u}_1$ is a 3D vector of random numbers in $[0,1]$ and $u_2$ is a scalar random number in $[0,1]$.
+-        ii. Compute the LAO half vector $\mathbf{h}$:
+-            $$ \mathbf{h} = \text{normalize}(\mathbf{l} + \mathbf{d}_{rand} \cdot \text{mix}(0.0, R_{light}, t) - \mathbf{p}) $$
+-            Note: The term $\text{mix}(0.0, R_{light}, t)$ interpolates between 0 and $R_{light}$ based on $t$.
+-        iii. Sample the volume at $\mathbf{p} + \mathbf{h} \cdot t$. Let this sample be $S$.
+-        iv. Add to `inner_accum` weighted by $(1.0 - t)^2$:
+-            $$ \text{inner\_accum} \leftarrow \text{inner\_accum} + S \cdot (1.0 - t)^2 $$
+-    c.  Divide `inner_accum` by $coef$.
+-    d.  Clamp the result to $[0, 1]$ and add to `accumuLAOContribution`.
+-3.  Divide `accumuLAOContribution` by $N_{samples}$ to get the final $AO$ factor.
++### Parameters
++*   `uLocalAmbientOcclusion`: Boolean flag to enable/disable LAO calculation. Default: `true` [S1, unofficial].
++*   `uNumLAOSamples`: Number of LAO samples per pixel (directions). Default: `1` [S1, unofficial].
++*   `uLAOStepSize`: Step size for LAO ray marching. Default: `0.05` [S1, unofficial].
++*   `uLightRadious`: Radius of the light source used for LAO sampling. Default: `0.19` [S1, unofficial].
++*   `uLightCoeficient`: Coefficient used to normalize LAO accumulation. Default: `1.0` [S1, unofficial].
++*   `uLAOWeight`: Weight applied to the LAO contribution when mixing into the final color. Default: `0.69` [S1, unofficial].
++*   `K`: Number of directions for LAO computation (e.g., 1 or 8) [S2, unofficial].
+ 
+-**Pseudocode:**
+-```python
+-def compute_lao(position, light_direction, volume_sampler, params):
+-    """
+-    Computes Local Ambient Occlusion for a given position.
+-    
+-    Args:
+-        position: vec3, current shading position.
+-        light_direction: vec3, normalized direction to the light source.
+-        volume_sampler: function, samples volume density at a given position.
+-        params: dict containing uNumLAOSamples, uLAOStepSize, uLightRadious, 
+-                uLightCoeficient, uLAOWeight.
+-                
+-    Returns:
+-        float: The LAO contribution factor.
+-    """
+-    n_samples = params.get('uNumLAOSamples', 1)
+-    step_size = params.get('uLAOStepSize', 0.05)
+-    light_radius = params.get('uLightRadious', 0.19)
+-    coef = params.get('uLightCoeficient', 1.0)
+-    
+-    accumu_lao_contribution = 0.0
+-    
+-    for _ in range(n_samples):
+-        inner_accum = 0.0
+-        t = 0.001
+-        while t <= 1.0:
+-            # Generate random direction
+-            # rand_vec returns vec3 of random numbers in [0, 1]
+-            # rand_scalar returns a scalar random number in [0, 1]
+-            rand_vec = rand_vec3()
+-            rand_scalar = rand_scalar()
+-            
+-            # randomDirection = normalize(-1.0 + 2.0 * vec3(rand(...))) * rand(...)
+-            # Note: The source code implies the scalar rand() multiplies the normalized vector
+-            # or is part of the direction generation. Based on "normalize(-1.0 + 2.0 * vec3(rand(...))) * rand(...)"
+-            # it seems the scalar is a magnitude factor.
+-            raw_dir = -1.0 + 2.0 * rand_vec
+-            normalized_dir = normalize(raw_dir)
+-            random_direction = normalized_dir * rand_scalar
+-            
+-            # laoHalfVector = normalize(vLight + randomDirection * mix(0.0, uLightRadious, t) - position)
+-            # Note: The source code subtracts 'position' inside the normalize, which is unusual for a direction vector 
+-            # unless 'position' is treated as an offset or the light is at origin. 
+-            # Assuming 'vLight' is the light direction vector and 'position' is the current point.
+-            # The formula in source: normalize(vLight + randomDirection * mix(0.0, uLightRadious, t) - position)
+-            # This implies the vector being normalized is (LightDir + Perturbation - Position).
+-            # This is likely a specific implementation detail where the light is considered to be at the origin 
+-            # or 'position' is relative. We follow the source exactly.
+-            
+-            mix_val = mix(0.0, light_radius, t)
+-            lao_half_vector = normalize(light_direction + random_direction * mix_val - position)
+-            
+-            # Sample volume at position + laoHalfVector * t
+-            lao_sample = volume_sampler(position + lao_half_vector * t)
+-            
+-            # Add to accumulator weighted by (1.0 - t)^2
+-            weight = pow(1.0 - t, 2.0)
+-            inner_accum += lao_sample * weight
+-            
+-            t += step_size
+-            
+-        # Divide by uLightCoeficient, clamp to [0,1], and add to LAOContribution
+-        lao_val = inner_accum / coef
+-        lao_val = clamp(lao_val, 0.0, 1.0)
+-        accumu_lao_contribution += lao_val
+-        
+-    # After outer loop, divide LAOContribution by uNumLAOSamples
+-    final_lao = accumu_lao_contribution / n_samples
+-    
+-    return final_lao
+-```
++### Algorithm Steps
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** The use of `mix(0.0, uLightRadious, t)` and subtraction of `position` inside the normalization vector can lead to numerical instability if `position` is large. [G] Ensure coordinates are normalized or relative to the light source if necessary.
+-*   **Boundaries:** Sampling outside the volume bounds should return 0 density.
+-*   **Degenerate Input:** If $N_{samples} = 0$, the result is undefined. Default to 1.0 (no occlusion).
++#### Phase 1: Incremental LAO Map Computation
++This phase updates the LAO map incrementally, typically adding one ray direction per frame to converge on the final occlusion value [S2, unofficial].
++
++1.  **Initialize Accumulator:** Reset the LAO accumulator for the current pixel to zero.
++    ```python
++    accumuLAOContribution = vec4(0.0)
++    ```
++2.  **Loop over Directions:** Iterate $K$ times (or `uNumLAOSamples` times) to sample different directions [S1, unofficial][S2, unofficial].
++    *   **Generate Random Direction:** Create a random direction vector.
++        ```python
++        # Generate random vector in [-1, 1]^3 and normalize
++        random_dir_raw = normalize(vec3(rand(), rand(), rand()) * 2.0 - 1.0)
++        # Apply additional random scaling if required by specific implementation
++        randomDirection = random_dir_raw * rand()
++        ```
++    *   **Ray Marching:** Loop through the sampling distance $t$ from `0.001` to `1.0` with step `uLAOStepSize` [S1, unofficial].
++        *   **Compute Half Vector:** Calculate the sampling position relative to the light and random direction.
++            ```python
++            # vLight is the light direction vector
++            # position is the current surface/volume point
++            laoHalfVector = normalize(vLight + randomDirection * mix(0.0, uLightRadious, t) - position)
++            ```
++        *   **Sample Volume:** Sample the volume density at `position + laoHalfVector * t` [S1, unofficial].
++        *   **Accumulate Contribution:** Add the sample value to the accumulator, weighted by distance. The weight is $(1.0 - t)^2$ [S1, unofficial].
++            ```python
++            laoSample = sample_volume(position + laoHalfVector * t)
++            accumuLAOContribution += laoSample * pow(1.0 - t, 2.0)
++            ```
++    *   **Normalize Accumulator:** After the inner loop, divide the accumulator by `uLightCoeficient` and clamp the result to $[0, 1]$ [S1, unofficial].
++        ```python
++        LAOContribution = clamp(accumuLAOContribution / uLightCoeficient, 0.0, 1.0)
++        ```
++3.  **Finalize Direction Average:** After all $K$ directions are processed, divide the total `LAOContribution` by `uNumLAOSamples` [S1, unofficial].
++    ```python
++    LAOContribution = LAOContribution / uNumLAOSamples
++    ```
++4.  **Store Result:** Write `LAOContribution` to the LAO map in the FBO [S2, unofficial].
++
++#### Phase 2: Final Ray Casting
++The final rendering pass uses the LAO map to modulate the volume's appearance.
++
++1.  **Map Coordinates:** Convert screen coordinates to volume coordinates using $P \to V$ and $V \to P$ indices [S2, unofficial].
++2.  **Ray Cast:** Perform standard volume ray casting.
++3.  **Apply LAO:** Retrieve the LAO value from the FBO for the current pixel.
++4.  **Shading:** Compute the final color using Transfer Functions for Color ($TF_c$) and Emission ($TF_E$). The ambient occlusion factor modulates the diffuse and emissive components [S2, unofficial].
++    *   If emission is enabled, add the emissive color $C_E$ to the integral [S2, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Empty Space:** In multiresolution volumes, empty space skipping is used. If a volume block is smaller than $4^3$ voxels, it may be skipped to reduce computation [S2, unofficial].
++*   **Low Resolution:** For low-resolution blocks, the sampling distance should be increased to maintain visual consistency [S2, unofficial].
++*   **Precision:** The incremental update requires multiple frames to converge. Stopping early results in noisy or incomplete occlusion [S2, unofficial].
++
++## Subtopics
++
++### In-scattering / Emittance Integral
++A discretized compositing scheme for computing in-scattered light using an emittance integral, implemented via progressive refinement with one direction per pass [S2, unofficial]. It is similar to LAO but applied to in-scattered/emissive light contributions rather than just shadowing [S2, unofficial].
++*   **Steps:** Discretize the emittance integral into a compositing scheme and apply progressive refinement, computing one light direction per rendering pass [S2, unofficial].
++*   **Parameters:** `Ibias` (Minimum light value clamped for a volume sample to prevent dark artifacts). Typical value: $0.0$ to $0.2$ [S2, unofficial].
++*   **Performance:** Translucency effect parameters include Ray Count ($R_\Omega$) of 16 or 48. Higher $R_\Omega$ and `Ibias` increase brightness and reduce noise [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N_{samples} \cdot \frac{1.0}{step\_size})$. With default values ($N_{samples}=1, step\_size=0.05$), this is approximately 20 volume samples per pixel.
+-*   **Memory Complexity:** $O(1)$ auxiliary memory per pixel.
+-*   **Strengths:** Provides soft, volumetric shadows that react to local density variations. Simple to implement in shaders.
+-*   **Limitations:** Stochastic noise due to random sampling. Performance scales linearly with sample count. The specific vector arithmetic in the half-vector calculation is non-standard and may not generalize to all lighting setups.
+-*   **When to use:** When soft, ambient occlusion-like shadows are desired in volumetric scenes and performance allows for multiple volume samples per pixel.
+-*   **When not to use:** For hard shadows or when performance is critical.
++*   **Time Complexity:** The method is incremental. Updating one ray in the LAO map takes approximately 51 ms on an NVIDIA GF8800 Ultra with 768 MB graphics texture memory, resulting in 27 FPS for a single direction [S2, unofficial]. Using 8 directions would proportionally increase the time per frame if updated simultaneously, but incremental updates allow for smoother convergence over time.
++*   **Memory Complexity:** Requires an FBO for the LAO map. For multiresolution volumes, memory usage is optimized by storing packed textures with varying resolutions (High, Middle, Low) and skipping empty blocks [S2, unofficial].
++*   **Strengths:** Allows for dynamic lighting and occlusion in real-time volume rendering without expensive global precomputation. Multiresolution support provides super-linear performance increases for large volumes (e.g., $512^3$ voxels) by reducing the number of voxels to compute [S2, unofficial].
++*   **Limitations:** Convergence is slow due to incremental updates. Noise may be visible in early frames. Performance is sensitive to volume density and resolution [S2, unofficial].
++*   **When to use:** When real-time or near-real-time ambient occlusion is needed for volumes with complex internal structures, and global shadowing is too expensive.
++*   **When not to use:** When high-quality, noise-free global illumination is required immediately, or when the volume is static and precomputed lighting is feasible.
+ 
+ ## Background
+-Local Ambient Occlusion in this specific context originates from the `terier/vpt` project, an unofficial volume rendering toolkit [S1, unofficial]. It is designed to enhance the visual quality of volume rendering by approximating the occlusion of ambient light by the volume itself.
++Local Ambient Occlusion for volume rendering was developed by Patric Ljung at Siemens Corporate Research, Princeton, USA, as part of his work on "Advanced Illumination Techniques for GPU-Based Volume Raycasting" [S2, unofficial]. The technique was presented in 2008 [S2, unofficial]. It builds upon earlier work on multiresolution volume rendering and local shading models, aiming to provide a practical solution for ambient occlusion in interactive volume visualization [S2, unofficial].
+ 
+ ## Sources
+-[S1] terier/vpt, https://github.com/terier/vpt, fetched 2026-10-26 (unofficial)+[S1] terier/vpt, https://github.com/terier/vpt, fetched 2026-10-26 (unofficial)
++[S2] GPU-Based Volume Ray-Casting with Advanced Illumination, https://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/viscom/2008/advanced_illumination.pdf, fetched 2026-10-29 (unofficial)

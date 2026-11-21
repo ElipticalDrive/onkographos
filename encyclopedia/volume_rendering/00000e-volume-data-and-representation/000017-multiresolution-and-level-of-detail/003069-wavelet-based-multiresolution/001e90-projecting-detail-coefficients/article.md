@@ -1,0 +1,106 @@
+# Projecting Detail Coefficients
+
+Also called: Multi-level Detail Coefficient Projection, Wavelet MIP Projection
+
+## Overview
+Projecting Detail Coefficients is a rendering technique that accelerates Maximum Intensity Projection (MIP) by decomposing volumetric data into a wavelet-based multiresolution hierarchy and projecting the resulting detail coefficients directly to the screen [S1]. It solves the problem of high memory bandwidth consumption and rendering latency in large volumes by separating high-frequency details from low-frequency approximations, allowing the renderer to skip empty or low-intensity regions efficiently [S1]. Unlike standard ray-casting MIP which processes every voxel along the ray, this method projects discrete point primitives representing coefficient magnitudes, leveraging graphics hardware for parallel projection [S1]. It differs from sibling methods like the [Wavelet Tree](5390-wavelet-tree.md) by explicitly utilizing the spatial projection of detail levels $d_0 \dots d_{L-1}$ and approximation $f_L$ rather than traversing a tree structure for traversal-based culling [S1].
+
+## How it works
+**Inputs:**
+*   Volumetric dataset decomposed into $L+1$ levels: detail levels $d_0, \dots, d_{L-1}$ and approximation level $f_L$ [S1].
+*   Volume orientation (quaternion) and zoom factor (default 1 voxel per pixel) [S1].
+*   Intensity thresholds: lower threshold (background cutoff) and optional upper threshold (maximum intensity cutoff) [S1].
+
+**Outputs:**
+*   A 2D projection image (MIP) on the viewport [S1].
+
+**Data Structures:**
+*   **Level Volumes:** $L+1$ separate 3D arrays storing voxels for each decomposition level. Level $k$ contains detail coefficients $d_k$ for $k < L$ and approximation $f_L$ for $k=L$ [S1].
+*   **Model-View-Projection (MVP) Matrix:** A $4 \times 4$ matrix combining the projection matrix, model-view matrix (derived from quaternion and zoom), and view transformation [S1].
+
+**Steps:**
+1.  **Matrix Construction:** Construct the model-view matrix from the volume orientation quaternion and zoom factor. Combine with the projection matrix to form the MVP matrix. Pass this to the vertex shader [S1].
+2.  **Intensity Iteration:** Iterate through the unique intensity values present in the volume, starting from the lowest intensity (or user-defined lower threshold) up to the highest [S1].
+3.  **Upper Threshold Optimization:** If an upper intensity threshold is defined, identify all voxels with intensity above this threshold. Project these voxels in a single draw call using point primitives via `glDrawArrays` [S1].
+4.  **Level Rendering:** Render each level of the multiresolution hierarchy to a quad of specific size:
+    *   Level 0 (finest detail) is rendered to a quad with dimensions equal to the viewport [S1].
+    *   Level 1 is rendered to a quad with half the viewport dimensions [S1].
+    *   Level $k$ is rendered to a quad with dimensions scaled by $1/2^k$ relative to the viewport [S1].
+5.  **Projection:** The vertex shader projects the voxel positions from each level volume onto the corresponding sized quad using the MVP matrix. The fragment shader computes the maximum intensity for each pixel [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def project_detail_coefficients(volume_levels, orientation_quaternion, zoom_factor, 
+                                lower_threshold, upper_threshold, viewport_size):
+    """
+    volume_levels: List of 3D arrays [d0, d1, ..., dL-1, fL]
+    orientation_quaternion: Quaternion representing volume orientation
+    zoom_factor: Float, default 1.0 (1 voxel per pixel)
+    lower_threshold: Intensity value below which voxels are ignored
+    upper_threshold: Intensity value above which voxels are drawn as max intensity
+    viewport_size: Tuple (width, height)
+    """
+    # Step 1: Construct MVP Matrix
+    model_view_matrix = build_model_view_matrix(orientation_quaternion, zoom_factor)
+    projection_matrix = build_projection_matrix()
+    mvp_matrix = multiply_matrices(projection_matrix, model_view_matrix)
+    
+    # Pass mvp_matrix to vertex shader context
+    
+    # Step 3: Handle upper threshold optimization
+    if upper_threshold is not None:
+        max_intensity_voxels = get_voxels_above_threshold(volume_levels, upper_threshold)
+        if max_intensity_voxels:
+            draw_point_primitives(max_intensity_voxels, mvp_matrix, viewport_size)
+            
+    # Step 2 & 4: Iterate levels and render
+    for level_index in range(len(volume_levels)):
+        level_data = volume_levels[level_index]
+        
+        # Determine quad size: Level 0 is viewport size, Level 1 is half, etc.
+        scale_factor = 1.0 / (2 ** level_index)
+        quad_width = int(viewport_size[0] * scale_factor)
+        quad_height = int(viewport_size[1] * scale_factor)
+        quad_size = (quad_width, quad_height)
+        
+        # Filter voxels based on lower threshold
+        active_voxels = get_voxels_above_threshold(level_data, lower_threshold)
+        
+        if active_voxels:
+            # Render level to specific sized quad
+            render_level_to_quad(active_voxels, mvp_matrix, quad_size, level_index)
+```
+
+**Parameters:**
+*   **Zoom Factor:** Default 1.0 (1 voxel on 1 pixel) [S1].
+*   **Lower Threshold:** User-defined or minimum intensity in volume [S1].
+*   **Upper Threshold:** Optional, for maximum intensity culling [S1].
+
+**Edge Cases:**
+*   **Empty Levels:** If a detail level contains no voxels above the lower threshold, it should be skipped to save bandwidth [S1].
+*   **Precision:** The method uses orthogonal projection in examples, but supports interactive adjustment via quaternion [S1].
+*   **Boundary:** No anti-aliasing or rounding is applied to point primitives in the basic implementation [S1].
+
+## Subtopics
+
+### [Coefficient Quantization Error Estimate](3334-coefficient-quantization-error-estimate.md)
+Calculates the $L^2$ error from rounding detail coefficients, balancing value quantum $\varsigma$ against positional quantum $\tau$.
+
+### [Quantized Knot Position and Coefficient Computation](4958-quantized-knot-position-and-coefficient-computation.md)
+Computes quantized knot positions and coefficients to enable integer-only arithmetic and prevent boundary error propagation.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of non-zero voxels across all levels, $O(N_{non-zero})$, as only active voxels are projected [S1].
+*   **Memory Complexity:** Requires storage for $L+1$ volumes, increasing memory usage compared to single-resolution rendering [S1].
+*   **Performance:** Offers significant gain in the ratio of memory bandwidth to voxel count by reducing the number of processed voxels [S1].
+*   **Scalability:** Supports load balancing across multiple graphics cards by splitting the dataset and rendering to separate screens, then combining results [S1].
+*   **Strengths:** High speed for large volumes due to hardware acceleration of point projection and multiresolution culling [S1].
+*   **Limitations:** Requires pre-computation of wavelet decomposition; orthogonal projection assumption in basic examples may limit perspective accuracy without modification [S1].
+
+## Background
+The method was introduced in the context of multiresolution MIP rendering of large volumetric data accelerated on graphics hardware [S1]. It builds on the principles of wavelet-based multiresolution decomposition, specifically leveraging the separation of detail coefficients to optimize rendering pipelines [S1]. The approach was developed to address the memory bandwidth bottleneck in volume rendering by reducing the effective voxel count processed per frame [S1].
+
+## Sources
+[S1] Multiresolution MIP Rendering of Large Volumetric Data Accelerated on Graphics Hardware, https://doi.org/10.2312/vissym/eurovis07/243-250, fetched 2026-10-26

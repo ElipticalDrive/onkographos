@@ -1,0 +1,149 @@
+# Neural Feature Fusion Fields (N3F)
+
+Also called: Neural Distillation of Self-Supervised 2D Image Representations
+
+## Overview
+Neural Feature Fusion Fields (N3F) is a method that distills dense 2D image features from a pre-trained teacher network into a 3D neural field (student) via differentiable volumetric rendering, enabling 3D-aware feature representation [S1]. Unlike Semantic NeRF or Panoptic NeRF which fuse discrete semantic labels, N3F fuses continuous dense feature vectors, allowing for open-world applications without manual labels [S1]. It differs from standard feature distillation because the student operates in 3D world space (ensuring spatial consistency) while the teacher operates in 2D image space [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of input images $I_t \in \mathbb{R}^{3 \times H \times W}$ defined on lattice $\Omega = \{1, \dots, H\} \times \{1, \dots, W\}$ for $t=1 \dots T$, with known camera parameters. A pre-trained 2D feature extractor (teacher) $\Phi$ [S1].
+*   **Outputs:** A 3D neural feature field defined by occupancy $\sigma: \mathbb{R}^3 \to \mathbb{R}^+$ and a color/feature function $c: \mathbb{R}^3 \times \mathbb{R}^3 \to \mathbb{R}^{3+C}$, where $C$ is the number of feature channels [S1]. The rendered outputs are color images $\hat{I}_t$ and feature images $\hat{\Phi}_t \in \mathbb{R}^{C \times H \times W}$ [S1].
+
+**Data Structures:**
+The student network implements the pair $(\sigma, c)$. The function $c$ is decomposed into $c = (c_{rgb}, c_{\Phi})$, where $c_{rgb}$ outputs 3 color values and $c_{\Phi}$ outputs $C$ feature values [S1]. For dynamic scenes (e.g., using NeuralDiff), the architecture decomposes the scene into static, dynamic (time-dependent), and actor (camera-anchored) fields, each with its own feature prediction head (MLP followed by tanh) [S1].
+
+**Preprocessing:**
+1.  Teacher features $\Phi(I_t)$ are pre-computed using public weights (e.g., DINO, MoCo-v3, DeiT) [S1].
+2.  Features are L2-normalized and reduced to 64 dimensions via Principal Component Analysis (PCA) before distillation [S1].
+3.  Images are down-sampled to $480 \times 270$ pixels; 2D features are up-sampled to match using nearest-neighbor interpolation [S1].
+
+**Numbered Steps:**
+1.  **Teacher Forward Pass:** Compute 2D feature maps $\Phi(I_t)$ for each input image $I_t$ using the frozen teacher network $\Phi$. Apply stop-gradient (`sg`) to prevent teacher updates [S1].
+2.  **Ray Casting:** For each pixel $u$ in image $I_t$, cast a ray $r$ through the scene. Sample points $X_{tu}(r)$ along the ray [S1].
+3.  **Student Forward Pass:** Query the student network for each point $X$ to obtain occupancy $\sigma(X)$ and the concatenated vector $(c_{rgb}(X), c_{\Phi}(X))$ [S1].
+4.  **Volumetric Rendering:** Compute the rendered feature vector $\hat{\Phi}_t^u$ for pixel $u$ by accumulating feature outputs weighted by density and transmittance, analogous to color accumulation [S1]:
+    $$ \hat{\Phi}_t^u = \sum_{i=1}^{N} c_{\Phi}(X_{tu}(r_i)) \alpha_i $$
+    where $\alpha_i$ is the weight derived from density $\sigma$ and transmittance $T_i = e^{-\sum_{j=1}^{i-1} \sigma(X_{tu}(r_j)) \delta_j}$ [S1].
+5.  **Loss Computation:** Calculate the total training loss $\mathcal{L}$ as the sum of image reconstruction loss and feature reconstruction loss [S1]:
+    $$ \mathcal{L} = \sum_t \| \hat{I}_t - I_t \|_2^2 + \lambda \| \hat{\Phi}_t - \Phi(I_t) \|_2^2 $$
+    where $\lambda$ is the feature distillation loss weight [S1].
+6.  **Optimization:** Update student parameters using Adam optimizer with cosine annealing schedule [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class N3FStudent(nn.Module):
+    def __init__(self, feature_dim=64):
+        super().__init__()
+        # Student network implementing sigma and c = (c_rgb, c_phi)
+        # c_rgb outputs 3 channels, c_phi outputs feature_dim channels
+        self.network = NeuralFieldNetwork() 
+        self.feature_dim = feature_dim
+
+    def forward(self, rays_o, rays_d, t_near, t_far, num_samples):
+        """
+        rays_o: (B, 3) ray origins
+        rays_d: (B, 3) ray directions (normalized)
+        t_near, t_far: (B,) near and far clip distances
+        num_samples: int, number of points per ray
+        """
+        # Sample points along rays
+        t_vals = torch.linspace(0, 1, num_samples).to(rays_o.device)
+        t_samples = t_near + t_vals * (t_far - t_near)
+        points = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t_samples.unsqueeze(2)
+        
+        # Query student network
+        # points shape: (B, num_samples, 3)
+        # directions shape: (B, num_samples, 3)
+        sigma, color_and_features = self.network(points, rays_d.unsqueeze(1).expand_as(points))
+        
+        # Split output
+        color = color_and_features[..., :3]
+        features = color_and_features[..., 3:]
+        
+        # Compute weights for volume rendering
+        # delta = t_samples[i+1] - t_samples[i]
+        deltas = t_samples[:, 1:] - t_samples[:, :-1]
+        # Add infinite delta for last point
+        deltas = torch.cat([deltas, torch.tensor([1e10]).to(rays_o.device)], dim=1)
+        
+        alpha = 1.0 - torch.exp(-sigma * deltas)
+        transmittance = torch.cumprod(torch.exp(-alpha), dim=1)
+        transmittance = torch.cat([torch.ones_like(transmittance[:, :1]), 1.0 - transmittance[:, :-1]], dim=1)
+        
+        weights = alpha * transmittance
+        
+        # Render color and features
+        rendered_color = torch.sum(weights.unsqueeze(-1) * color, dim=1)
+        rendered_features = torch.sum(weights.unsqueeze(-1) * features, dim=1)
+        
+        return rendered_color, rendered_features, sigma
+
+def compute_loss(rendered_color, rendered_features, target_image, target_features, lambda_feat):
+    """
+    target_image: (B, 3, H, W)
+    target_features: (B, C, H, W)
+    """
+    # Image reconstruction loss
+    color_loss = F.mse_loss(rendered_color, target_image)
+    
+    # Feature reconstruction loss
+    feature_loss = F.mse_loss(rendered_features, target_features)
+    
+    total_loss = color_loss + lambda_feat * feature_loss
+    return total_loss
+
+# Training Loop Snippet
+# 1. Pre-compute teacher features Phi(I_t) and apply PCA normalization
+# 2. Initialize student network
+# 3. For each batch of images I_t:
+#    - Get camera rays for I_t
+#    - rendered_color, rendered_features, sigma = student(rays)
+#    - loss = compute_loss(rendered_color, rendered_features, I_t, Phi(I_t), lambda=0.001)
+#    - loss.backward()
+#    - optimizer.step()
+```
+
+**Parameters:**
+*   $\lambda$: Weight for feature reconstruction loss. Typical values: 0.001 for NeRF/LLFF experiments; 1.0 for NeuralDiff/EPIC-KITCHENS experiments [S1].
+*   $C$: Number of feature channels. Depends on teacher (e.g., reduced to 64 via PCA) [S1].
+*   Learning Rate: $5 \times 10^{-4}$ with cosine annealing [S1].
+*   Batch Size: 1024 [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Teacher Freezing:** The teacher network weights must be frozen (stop gradient) during student training [S1].
+*   **Feature Normalization:** Features should be L2-normalized and PCA-reduced before distillation to stabilize training [S1].
+*   **Dynamic Scenes:** For egocentric videos, standard NeRF is insufficient; NeuralDiff architecture is required to handle static, dynamic foreground, and actor components [S1].
+
+## Subtopics
+
+### 2D Object Retrieval
+Finds occurrences of an object across views using feature similarity. Uses mean feature descriptor of a query region $R_t$ and matches against rendered features $\hat{\Phi}_t$ using threshold $\tau$ [S1].
+
+### 3D Object Segmentation
+Localizes objects in 3D space by querying the student field for points $X$ where feature similarity to a query descriptor is high and density $\sigma(X)$ exceeds threshold $\tau_\sigma$ [S1].
+
+### Scene Editing (Object Removal)
+Removes objects by setting occupancy $\sigma(X)=0$ for 3D points matching the object's feature descriptor [S1].
+
+### Amodal Segmentation
+Renders features through occluders by disabling occupancy $\sigma$ for regions dissimilar to the query descriptor, revealing the full extent of occluded objects [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training time depends on the base neural rendering architecture. For NeuralDiff on EPIC-KITCHENS, single scene training takes ~24 hours for RGB reconstruction and ~2 hours for feature distillation (20 epochs, 500 iterations) on an NVIDIA Tesla P40 [S1].
+*   **Memory Complexity:** Requires storing the 3D neural field parameters and pre-computed 2D teacher features for all views [S1].
+*   **Performance:** N3F consistently improves over 2D self-supervised baselines. On LLFF dataset, N3F with DINO [ViT-B/8] achieved mAP 76.26 vs teacher 64.35 (+11.91); with DINO [ViT-B/16] 78.84 vs 60.15 (+18.69); with MoCo-v3 76.15 vs 57.51 (+18.64); with DeiT 74.53 vs 47.51 (+26.82) [S1].
+*   **Strengths:** Enables 3D-aware feature representation, viewpoint independence, and occlusion awareness. Improves generalization compared to 2D teachers [S1].
+*   **Limitations:** Requires pre-computation of teacher features. Performance depends on the quality of the 2D teacher network (SSL models generalize better than supervised ones like DeiT) [S1].
+
+## Background
+N3F was introduced in the paper "Neural Feature Fusion Fields: 3D Distillation of Self-Supervised 2D Image Representations" [S1]. It builds on the student-teacher distillation paradigm (Hinton et al.) but applies it to 3D neural fields via differentiable rendering [S1]. It is evaluated on static scenes (LLFF dataset with vanilla NeRF) and egocentric videos (EPIC-KITCHENS dataset with NeuralDiff) [S1].
+
+## Sources
+[S1] Neural Feature Fusion Fields: 3D Distillation of Self-Supervised 2D Image Representations, https://doi.org/10.1109/3DV57658.2022.00056, fetched 2026-10-30

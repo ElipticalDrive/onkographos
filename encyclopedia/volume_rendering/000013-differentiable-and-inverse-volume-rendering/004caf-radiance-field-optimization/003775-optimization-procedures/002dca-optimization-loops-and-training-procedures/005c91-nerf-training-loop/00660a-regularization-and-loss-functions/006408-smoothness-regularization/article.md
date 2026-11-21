@@ -1,0 +1,165 @@
+# Smoothness Regularization
+
+Also called: neighbor loss
+
+## Overview
+Smoothness Regularization is a training-time loss term applied to 3D Gaussian Splatting (3DGS) to enforce local smoothness on the 2D attribute grids of sorted Gaussians, thereby improving compressibility without significantly degrading rendering quality [S1]. Unlike post-processing compression methods that apply sorting and encoding after training, this method integrates smoothing during the optimization process, encouraging the renderer to prefer Gaussian configurations that exhibit spatial coherence in their 2D grid representation [S1]. It distinguishes itself from sibling methods like Adaptive Gaussian Refinement and Selective Densification by focusing on the statistical properties of the attribute distribution rather than geometric density or pruning thresholds [S1].
+
+## How it works
+The method operates on the 2D grid of Gaussians, which are sorted based on their depth or spatial proximity to form a structured representation [S1]. The goal is to minimize the deviation between the original attribute values and a smoothed version of these attributes, using a loss function that is robust to outliers to facilitate better compression [S1].
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   The current 2D attribute grids for all active Gaussians. The grids contain five attribute channels: position, color (spherical harmonics coefficients), opacity, scaling, and rotation [S1].
+    *   Hyperparameters: Overall multiplier $\lambda$, per-grid multipliers, blur kernel size $K$, and blur standard deviation $\sigma$ [S1].
+*   **Outputs**:
+    *   A scalar loss value $L_{smooth}$ added to the total training loss.
+    *   Gradients propagated back through the Gaussian renderer to update the 3D Gaussian parameters [S1].
+
+### Data Structures
+The method assumes the existence of 2D grids for each attribute type. Let $G_{attr}$ denote the 2D grid for a specific attribute (e.g., color). The grid dimensions are determined by the number of Gaussians and their sorting order [S1]. The exact layout is a 2D array where each cell corresponds to a Gaussian's attribute value at its sorted position [S1].
+
+### Steps
+1.  **Blurring**: Apply a 2D Gaussian filter to each of the five attribute grids ($G_{pos}, G_{color}, G_{opacity}, G_{scale}, G_{rot}$) to create smoothed versions $G'_{attr}$ [S1].
+2.  **Error Calculation**: Compute the element-wise difference between the original grid $G_{attr}$ and the smoothed grid $G'_{attr}$ for each attribute channel [S1].
+3.  **Loss Computation**: Calculate the Huber loss for the error term of each attribute grid [S1].
+4.  **Aggregation**: Scale the Huber loss for each grid by its respective separate multiplier and sum them up. Scale the total by the overall multiplier $\lambda$ [S1].
+5.  **Integration**: Add the resulting smoothness loss to the standard 3DGS training loss (typically a combination of L1 and DSSIM losses) [S1].
+6.  **Backpropagation**: Propagate the gradient of the smoothness loss through the Gaussian renderer to update the 3D Gaussian parameters during optimization [S1].
+
+### Formulas
+Let $A$ be an attribute grid (e.g., color). Let $A'$ be the blurred version of $A$. The error term $E$ is:
+$$ E = A - A' $$
+The Huber loss $L_{Huber}(E, \delta)$ for a given error $E$ and threshold $\delta$ is:
+$$ L_{Huber}(E, \delta) = \begin{cases} \frac{1}{2}E^2 & \text{if } |E| \le \delta \\ \delta(|E| - \frac{1}{2}\delta) & \text{otherwise} \end{cases} $$
+The total smoothness loss $L_{smooth}$ is:
+$$ L_{smooth} = \lambda \sum_{i \in \{pos, color, opacity, scale, rot\}} w_i \cdot \text{Mean}(L_{Huber}(E_i, \delta)) $$
+Where:
+*   $\lambda$ is the overall multiplier [S1].
+*   $w_i$ is the separate multiplier for attribute $i$ [S1].
+*   $\text{Mean}(\cdot)$ computes the average loss over all elements in the grid [S1].
+*   $\delta$ is the Huber threshold (not explicitly defined in sources, but standard for Huber loss) [G].
+
+### Parameters
+*   **$\lambda$ (Overall Multiplier)**: Scales the entire smoothness regularization loss. Typical values range from 0.01 to 1.5 [S1]. Higher $\lambda$ results in smaller storage size but potentially lower rendering quality (PSNR) [S1].
+*   **Separate Multipliers**: Individual scalars applied to each of the five 2D attribute grids (position, color, opacity, scaling, rotation) [S1].
+*   **Kernel Size ($K$)**: Integer size of the Gaussian blur filter. Higher values produce smoother target images [S1].
+*   **Sigma ($\sigma$)**: Standard deviation of the Gaussian blur filter [S1].
+*   **Huber Threshold ($\delta$)**: Not given in the sources.
+
+### Edge Cases and Pitfalls
+*   **Precision**: The method relies on the differentiability of the Gaussian blur and the Huber loss. Standard automatic differentiation frameworks handle this [S1].
+*   **Boundaries**: The 2D grid may have empty cells or boundaries where sorting is incomplete. The sources do not specify handling for these cases [G].
+*   **Degenerate Input**: If the grid is too small or the blur kernel is too large relative to the grid size, the smoothing may over-smooth, leading to significant loss of detail [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def smoothness_regularization_loss(
+    grids: Dict[str, Tensor], 
+    lambda_val: float, 
+    multipliers: Dict[str, float], 
+    kernel_size: int, 
+    sigma: float
+) -> Tensor:
+    """
+    Computes the smoothness regularization loss for 3D Gaussian Splatting.
+    
+    Args:
+        grids: Dictionary mapping attribute names ('pos', 'color', 'opacity', 'scale', 'rot') 
+               to 2D Tensor grids of shape (H, W, C).
+        lambda_val: Overall multiplier for the smoothness loss.
+        multipliers: Dictionary mapping attribute names to their specific loss multipliers.
+        kernel_size: Integer size of the Gaussian blur filter.
+        sigma: Standard deviation of the Gaussian blur filter.
+        
+    Returns:
+        Scalar Tensor representing the smoothness loss.
+    """
+    total_loss = 0.0
+    
+    for attr_name, grid in grids.items():
+        # Step 1: Apply 2D Gaussian filter to blur the grid
+        # Note: In practice, this might be done per-channel or on the whole grid depending on implementation.
+        # Assuming grid is (H, W, C), we apply blur to each channel.
+        blurred_grid = gaussian_blur_2d(grid, kernel_size, sigma)
+        
+        # Step 2: Compute error term
+        error = grid - blurred_grid
+        
+        # Step 3: Calculate Huber loss
+        # Huber loss threshold delta is not specified in sources, using a standard default or [G]
+        # Here we assume a standard implementation of Huber loss
+        huber_loss = huber_loss(error, delta=1.0) # delta is a hyperparameter not given in sources
+        
+        # Step 4: Average the loss over the grid
+        mean_loss = torch.mean(huber_loss)
+        
+        # Step 5: Scale by separate multiplier
+        scaled_loss = mean_loss * multipliers.get(attr_name, 1.0)
+        
+        total_loss += scaled_loss
+        
+    # Step 6: Scale by overall multiplier lambda
+    final_loss = lambda_val * total_loss
+    
+    return final_loss
+
+def gaussian_blur_2d(input_tensor: Tensor, kernel_size: int, sigma: float) -> Tensor:
+    """
+    Applies a 2D Gaussian blur to a tensor.
+    """
+    # Create Gaussian kernel
+    # Kernel size is odd, centered at 0
+    coords = torch.arange(kernel_size) - kernel_size // 2
+    x, y = torch.meshgrid(coords, coords, indexing='ij')
+    kernel = torch.exp(-(x**2 + y**2) / (2 * sigma**2))
+    kernel = kernel / kernel.sum()
+    
+    # Apply convolution
+    # Assuming input_tensor is (H, W, C)
+    # We need to convolve each channel
+    output = torch.zeros_like(input_tensor)
+    for c in range(input_tensor.shape[2]):
+        channel = input_tensor[:, :, c]
+        # Pad for convolution
+        padded = torch.nn.functional.pad(channel, (kernel_size//2, kernel_size//2, kernel_size//2, kernel_size//2))
+        # Convolve
+        blurred_channel = torch.nn.functional.conv2d(padded.unsqueeze(0).unsqueeze(0), kernel.unsqueeze(0).unsqueeze(0), padding=0).squeeze()
+        output[:, :, c] = blurred_channel
+    return output
+
+def huber_loss(error: Tensor, delta: float) -> Tensor:
+    """
+    Computes Huber loss.
+    """
+    abs_error = torch.abs(error)
+    quadratic = torch.min(abs_error, torch.tensor(delta))
+    linear = abs_error - quadratic
+    loss = 0.5 * quadratic**2 + delta * linear
+    return loss
+```
+
+## Subtopics
+
+### Sorting
+The prerequisite step that organizes Gaussians into 2D grids, enabling the smoothness regularization to be effective. It differs from smoothness regularization by being a structural organization step rather than a loss term. [Sorting](16385-sorting.md)
+
+### Coordinate Space Contraction
+An additional exponential activation for coordinates used during training to allow for more relative precision, often used in conjunction with sorting and smoothing. [Coordinate Space Contraction](16385-coordinate-space-contraction.md)
+
+## Operating characteristics
+*   **Time Complexity**: The blurring step adds a convolutional cost proportional to the number of Gaussians and the kernel size. Sorting is performed periodically (e.g., after densification), and smoothing is applied every training step. The sources do not provide exact time complexity formulas [S1].
+*   **Memory Complexity**: Requires storing the 2D attribute grids and their blurred versions during the forward pass. The grid size depends on the number of Gaussians, which can be up to millions (e.g., 4.37M Gaussians for the Garden scene) [S1].
+*   **Measured Performance**: On the Truck dataset, $\lambda=0.01$ yields PSNR 24.39 and Size 18.02 MB, while $\lambda=1.5$ yields PSNR 24.02 and Size 10.73 MB [S1]. The method achieves significantly higher PSNR compared to compressing vanilla 3DGS after training (e.g., 25.37 PSNR vs 21.98 PSNR for compressed vanilla 3DGS on the Truck scene) [S1].
+*   **Strengths**: Improves compressibility by creating local smoothness in attribute grids, allowing for better performance with standard image compression algorithms [S1].
+*   **Limitations**: Higher $\lambda$ values reduce rendering quality (PSNR) [S1]. The method requires careful tuning of hyperparameters ($\lambda$, kernel size, sigma) [S1].
+*   **When to Use**: When the goal is to reduce the storage size of 3DGS models while maintaining high visual quality, especially when combined with sorting and compression [S1].
+*   **When Not to Use**: When maximum rendering quality is prioritized over storage size, or when computational resources for the additional loss computation are limited [S1].
+
+## Background
+The concept of self-organizing grids relates to Self-Organizing Maps (SOM) introduced by Kohonen in 1982 and 2013 [S1]. The method was introduced in the paper "Compact 3D Scene Representation via Self-Organizing Gaussian Grids" [S1]. It differentiates from previous compression methods by integrating smoothing during training rather than as a post-processing step [S1].
+
+## Sources
+[S1] Compact 3D Scene Representation via Self-Organizing Gaussian Grids, https://doi.org/10.1007/978-3-031-73013-9_2, fetched 2026-10-26

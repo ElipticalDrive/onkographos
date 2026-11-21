@@ -1,0 +1,327 @@
+# Camera Ray Projection
+
+Also called: Inverse Projection with Distortion, Pixel to Ray Conversion with Distortion
+
+## Overview
+Camera Ray Projection converts 2D pixel coordinates into 3D world-space rays by applying inverse intrinsic mapping, radial/tangential distortion correction, and extrinsic transformation. It solves the inverse camera distortion equations to map distorted normalized coordinates to undistorted ones using Newton-Raphson iteration, then constructs normalized ray directions. It differs from its sibling [Camera Model with Radial/Tangential Distortion](11842-camera-model-with-radial-tangential-distortion.md) by explicitly handling the iterative inversion of the distortion model and providing the final world-space ray geometry (origins, directions, and optional radii) required for volume rendering sampling.
+
+## How it works
+**Inputs:**
+- Pixel coordinates: $P = (u, v)$, shape $(H, W)$ or batched.
+- Intrinsics: Focal length $f_x, f_y$, principal point $(c_x, c_y)$, skew $s$, pixel aspect ratio $r$.
+- Distortion parameters: Radial $k_1, k_2, k_3$ (and optionally $k_4$), Tangential $p_1, p_2$.
+- Extrinsics: Camera orientation matrix $R \in \mathbb{R}^{3 \times 3}$ and position $T \in \mathbb{R}^3$ (or camera-to-world matrix $C2W$).
+- Optional: Camera type (Perspective/Fisheye), NDC inverse intrinsic matrix.
+
+**Outputs:**
+- `Rays` dataclass containing:
+  - `origins`: Camera positions in world space, shape $(..., 3)$.
+  - `directions`: Unnormalized ray directions in world space, shape $(..., 3)$.
+  - `viewdirs`: Normalized ray directions, shape $(..., 3)$.
+  - `radii`: Optional cone radii for mip-NeRF, shape $(..., 1)$.
+  - `imageplane`: Original pixel coordinates, shape $(..., 2)$.
+
+**Data Structures:**
+- Distortion coefficients are stored as floats. Default values are $0.0$ for all $k_i, p_i$.
+- Camera orientation is a $3 \times 3$ orthonormal matrix.
+- Pixel coordinates are typically integer indices; half-pixel offset is applied to target pixel centers.
+
+**Steps:**
+
+1. **Pixel to Normalized Coordinates:**
+   Compute pixel centers by adding $0.5$ to integer indices. Convert to normalized image plane coordinates $(x_{raw}, y_{raw})$ using intrinsics:
+   $$
+   x_{raw} = \frac{u - c_x - s \cdot y_{raw}}{f_x} \quad \text{(Note: } y_{raw} \text{ is computed first)}
+   $$
+   $$
+   y_{raw} = \frac{v - c_y}{f_y \cdot r}
+   $$
+   [S3, S4, unofficial]
+
+2. **Inverse Distortion (Undistortion):**
+   Solve for undistorted normalized coordinates $(x, y)$ from distorted $(x_d, y_d) = (x_{raw}, y_{raw})$ using Newton-Raphson.
+   
+   **Distortion Model:**
+   The forward distortion maps undistorted $(x, y)$ to distorted $(x_d, y_d)$:
+   $$
+   r^2 = x^2 + y^2
+   $$
+   $$
+   d(x, y) = 1 + k_1 r^2 + k_2 r^4 + k_3 r^6 \quad (\text{or } 1 + k_4 r^8 \text{ if } k_4 \text{ is present})
+   $$
+   $$
+   x_d = x \cdot d(x, y) + 2 p_1 x y + p_2 (r^2 + 2 x^2)
+   $$
+   $$
+   y_d = y \cdot d(x, y) + 2 p_2 x y + p_1 (r^2 + 2 y^2)
+   $$
+   [S2, S3, unofficial]
+
+   **Newton-Raphson Iteration:**
+   Initialize $x = x_d, y = y_d$. Iterate up to `max_iterations` (default 10 or 100 [S1, S3, unofficial]):
+   
+   a. Compute residuals $f_x, f_y$:
+   $$
+   f_x = x \cdot d(x, y) + 2 p_1 x y + p_2 (r^2 + 2 x^2) - x_d
+   $$
+   $$
+   f_y = y \cdot d(x, y) + 2 p_2 x y + p_1 (r^2 + 2 y^2) - y_d
+   $$
+   [S2, S3, unofficial]
+
+   b. Compute Jacobian elements $J_{xx}, J_{xy}, J_{yx}, J_{yy}$:
+   Let $d' = \frac{d(r^2)}{d(r^2)} = k_1 + 2 k_2 r^2 + 3 k_3 r^4$.
+   $$
+   J_{xx} = d + 2 x^2 d' + 2 p_1 y + 6 p_2 x
+   $$
+   $$
+   J_{xy} = 2 x y d' + 2 p_1 x + 2 p_2 y
+   $$
+   $$
+   J_{yx} = J_{xy}
+   $$
+   $$
+   J_{yy} = d + 2 y^2 d' + 6 p_1 y + 2 p_2 x
+   $$
+   [S1, S3, unofficial]
+   
+   *Note: Some implementations approximate or simplify the Jacobian. [S3, unofficial] uses a simplified Jacobian calculation in code comments but the logic follows the derivative of the distortion function.*
+
+   c. Compute Newton step using Cramer's rule:
+   $$
+   \text{det} = J_{xx} J_{yy} - J_{xy} J_{yx}
+   $$
+   $$
+   \Delta x = \frac{f_x J_{yy} - f_y J_{xy}}{\text{det}}
+   $$
+   $$
+   \Delta y = \frac{f_y J_{xx} - f_x J_{yx}}{\text{det}}
+   $$
+   [S1, S3, unofficial]
+
+   d. Handle singular Jacobian: If $|\text{det}| < \epsilon$ (default $10^{-9}$ [S2, S3, unofficial]), set $\Delta x = 0, \Delta y = 0$.
+
+   e. Trust Region (Optional [S1, unofficial]):
+   Compute step norm squared $S = \Delta x^2 + \Delta y^2$.
+   If $S > \max(r^2 \cdot k_{RelStepRadius}^2, k_{StepRadius}^2)$ (defaults $0.1$ [S1, unofficial]), scale step:
+   $$
+   \text{scale} = \sqrt{\frac{\text{radiusSqr}}{S}}
+   $$
+   $$
+   \Delta x \leftarrow \Delta x \cdot \text{scale}, \quad \Delta y \leftarrow \Delta y \cdot \text{scale}
+   $$
+
+   f. Update:
+   $$
+   x \leftarrow x + \Delta x
+   $$
+   $$
+   y \leftarrow y + \Delta y
+   $$
+   [S2, S3, unofficial]
+
+   g. Convergence: If step norm squared $< 10^{-10}$ [S1, unofficial] or max iterations reached, break.
+
+3. **Local Ray Direction Construction:**
+   Stack undistorted coordinates with $z=1$:
+   $$
+   \mathbf{v}_{local} = [x, y, 1]^T
+   $$
+   Normalize:
+   $$
+   \mathbf{v}_{local} \leftarrow \frac{\mathbf{v}_{local}}{\|\mathbf{v}_{local}\|}
+   $$
+   [S2, S3, S4, unofficial]
+
+4. **Fisheye Correction (Optional):**
+   If camera type is FISHEYE [S2, unofficial]:
+   $$
+   \theta = \sqrt{x^2 + y^2}
+   $$
+   Clamp $\theta$ to $\pi$.
+   $$
+   \text{scale} = \frac{\sin(\theta)}{\theta}
+   $$
+   $$
+   x \leftarrow x \cdot \text{scale}, \quad y \leftarrow y \cdot \text{scale}
+   $$
+   $$
+   z = \cos(\theta)
+   $$
+   Reconstruct and normalize $\mathbf{v}_{local} = [x, y, z]^T$.
+
+5. **Coordinate System Flip:**
+   Flip from OpenCV to OpenGL convention if necessary:
+   $$
+   \mathbf{v}_{local} \leftarrow \text{diag}(1, -1, -1) \cdot \mathbf{v}_{local}
+   $$
+   [S2, unofficial]
+
+6. **World Space Transformation:**
+   Apply camera rotation $R$ (orientation matrix):
+   $$
+   \mathbf{v}_{world} = R \cdot \mathbf{v}_{local}
+   $$
+   [S2, S3, unofficial]
+   Normalize:
+   $$
+   \mathbf{v}_{world} \leftarrow \frac{\mathbf{v}_{world}}{\|\mathbf{v}_{world}\|}
+   $$
+   [S2, S3, unofficial]
+
+7. **Ray Origins:**
+   Set origins to camera position $T$ (from extrinsics).
+   [S2, unofficial]
+
+8. **Ray Radii (Optional):**
+   For mip-NeRF, compute radii using neighbor rays.
+   Compute directions for right neighbor $(u+1, v)$ and bottom neighbor $(u, v+1)$.
+   $$
+   dx_{norm} = \|\mathbf{v}_{right} - \mathbf{v}_{current}\|
+   $$
+   $$
+   dy_{norm} = \|\mathbf{v}_{bottom} - \mathbf{v}_{current}\|
+   $$
+   $$
+   \text{radii} = 0.5 \cdot (dx_{norm} + dy_{norm}) \cdot \frac{2}{\sqrt{12}}
+   $$
+   [S2, unofficial]
+   If NDC space is used, compute radii from NDC origin differences.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def camera_ray_projection(
+    pixels: np.ndarray,       # Shape (H, W, 2) or (N, 2), integer pixel coords
+    fx: float,                # Focal length x
+    fy: float,                # Focal length y
+    cx: float,                # Principal point x
+    cy: float,                # Principal point y
+    skew: float = 0.0,        # Skew
+    aspect_ratio: float = 1.0,# Pixel aspect ratio
+    k1: float = 0.0,          # Radial distortion k1
+    k2: float = 0.0,          # Radial distortion k2
+    k3: float = 0.0,          # Radial distortion k3
+    p1: float = 0.0,          # Tangential distortion p1
+    p2: float = 0.0,          # Tangential distortion p2
+    R: np.ndarray = None,     # 3x3 Rotation matrix (world from camera)
+    T: np.ndarray = None,     # 3x1 Translation vector (camera position in world)
+    max_iterations: int = 10, # Max Newton iterations
+    eps: float = 1e-9         # Epsilon for Jacobian check
+):
+    """
+    Projects pixel coordinates to world-space rays with distortion correction.
+    Returns origins, directions, viewdirs.
+    """
+    # 1. Pixel to Normalized Coordinates
+    # Add half-pixel offset
+    u = pixels[..., 0] + 0.5
+    v = pixels[..., 1] + 0.5
+    
+    # Compute y first to handle skew
+    y_raw = (v - cy) / (fy * aspect_ratio)
+    x_raw = (u - cx - skew * y_raw) / fx
+    
+    # 2. Inverse Distortion
+    x = x_raw.copy()
+    y = y_raw.copy()
+    
+    for _ in range(max_iterations):
+        r2 = x*x + y*y
+        
+        # Distortion factor d
+        d = 1.0 + r2 * (k1 + r2 * (k2 + r2 * k3))
+        
+        # Residuals
+        fx = x * d + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x*x) - x_raw
+        fy = y * d + 2.0 * p2 * x * y + p1 * (r2 + 2.0 * y*y) - y_raw
+        
+        # Jacobian derivative of d w.r.t r2
+        dd_dr2 = k1 + r2 * (2.0 * k2 + 3.0 * r2 * k3)
+        
+        # Jacobian elements
+        jxx = d + 2.0 * x*x * dd_dr2 + 2.0 * p1 * y + 6.0 * p2 * x
+        jxy = 2.0 * x * y * dd_dr2 + 2.0 * p1 * x + 2.0 * p2 * y
+        jyx = jxy
+        jyy = d + 2.0 * y*y * dd_dr2 + 6.0 * p1 * y + 2.0 * p2 * x
+        
+        # Determinant
+        det = jxx * jyy - jxy * jyx
+        
+        # Newton Step
+        if np.abs(det) > eps:
+            dx = (fx * jyy - fy * jxy) / det
+            dy = (fy * jxx - fx * jyx) / det
+        else:
+            dx = 0.0
+            dy = 0.0
+            
+        x = x + dx
+        y = y + dy
+        
+        # Convergence check (optional, based on step size)
+        if dx*dx + dy*dy < 1e-10:
+            break
+            
+    # 3. Local Ray Direction
+    # Stack with z=1
+    dirs_local = np.stack([x, y, np.ones_like(x)], axis=-1)
+    # Normalize
+    norms = np.linalg.norm(dirs_local, axis=-1, keepdims=True)
+    dirs_local = dirs_local / norms
+    
+    # 4. World Space Transformation
+    if R is not None:
+        # Rotate: R is 3x3, dirs_local is (..., 3)
+        # matmul: (..., 3) @ (3, 3).T or np.dot
+        # Standard: v_world = R @ v_local
+        # If R is stored as rows, v_world = v_local @ R.T
+        dirs_world = np.matmul(dirs_local, R.T)
+    else:
+        dirs_world = dirs_local
+        
+    # Normalize again (numerical stability)
+    norms_world = np.linalg.norm(dirs_world, axis=-1, keepdims=True)
+    viewdirs = dirs_world / norms_world
+    
+    # 5. Origins
+    if T is not None:
+        origins = np.broadcast_to(T, (*dirs_world.shape[:-1], 3))
+    else:
+        origins = np.zeros_like(dirs_world)
+        
+    return origins, dirs_world, viewdirs
+```
+
+## Subtopics
+
+### Inverse Projection with Distortion
+The core iterative solver. Use when lens distortion parameters are non-zero. Sets it apart by solving the non-linear inverse problem rather than applying forward distortion.
+
+### Fisheye Ray Projection
+Variant for fisheye cameras. Use when `camtype` is FISHEYE. Applies $\theta$-based scaling instead of polynomial radial distortion.
+
+### NDC Ray Projection
+Variant for Normalized Device Coordinates. Use when rendering to NDC space (e.g., for neural radiance fields in NDC). Maps origins to NDC space for radius calculation.
+
+## Operating characteristics
+- **Time Complexity**: $O(N \cdot I)$ where $N$ is number of pixels and $I$ is number of Newton iterations (typically 10-100). The Jacobian computation is constant time per iteration.
+- **Memory Complexity**: $O(N)$ for storing ray origins, directions, and residuals.
+- **Performance**: Newton-Raphson converges quadratically near the solution. For small distortions, 5-10 iterations are sufficient. For large distortions (e.g., wide-angle lenses), up to 100 iterations may be needed.
+- **Strengths**: Handles arbitrary radial/tangential distortion models. Provides accurate ray directions for volume rendering.
+- **Limitations**: Iterative solver can be slow on CPU. Singular Jacobians (rare, near optical center with high distortion) require fallback.
+- **When to use**: When camera calibration includes non-zero distortion coefficients.
+- **When not to use**: For pinhole cameras with negligible distortion, skip undistortion for performance.
+
+## Background
+Originating from computer vision camera calibration models (Brown [S1, S3, unofficial]), the inverse distortion method is widely used in photogrammetry and SLAM. In volume rendering, it was popularized by NeRF and its variants (NeRF-W, Mip-NeRF) to handle real-world camera distortions [S2, S3, unofficial]. The Newton-Raphson approach is standard for inverting the polynomial distortion model.
+
+## Sources
+[S1] OpenSplat – 3D gaussian splatting in C++ with CPU and GPU support, https://github.com/pierotofy/OpenSplat, fetched 2026-10-26 (unofficial)
+[S2] google-research/multinerf, https://github.com/google-research/multinerf, fetched 2026-10-26 (unofficial)
+[S3] google/nerfies, https://github.com/google/nerfies, fetched 2026-10-26 (unofficial)
+[S4] ElenaViewSynthesis/4dgs, https://github.com/ElenaViewSynthesis/4dgs, fetched 2026-10-28 (unofficial)

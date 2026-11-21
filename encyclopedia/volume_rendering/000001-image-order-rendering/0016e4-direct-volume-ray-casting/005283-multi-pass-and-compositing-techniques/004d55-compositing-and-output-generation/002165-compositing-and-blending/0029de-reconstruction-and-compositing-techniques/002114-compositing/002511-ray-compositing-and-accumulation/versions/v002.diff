@@ -1,0 +1,160 @@
+--- v001.md
++++ v002.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-Ray Compositing and Accumulation is the process of combining color and opacity contributions from volume samples into final pixel values for semi-transparent rendering [S1, unofficial]. It solves the problem that volume samples are often generated in slice-by-slice or beam-by-beam order rather than strict ray order, requiring buffering to maintain correct compositing sequence [S1, unofficial]. Unlike Alpha Compositing Ray Casting, which assumes a linear ray traversal, this method handles arbitrary view directions and angled rays by using hardware buffers to align predecessor values for each sample [S1, unofficial].
++Ray Compositing and Accumulation combines color and opacity contributions from volume samples into final pixel values for semi-transparent rendering [S1, unofficial]. It solves the problem that volume samples are generated in slice-by-slice or beam-by-beam order rather than strict ray order, requiring hardware buffers to maintain the correct compositing sequence [S1, unofficial]. This method builds on [Compositing](2436-compositing.md) and differs from [Alpha Compositing Ray Casting](922-alpha-compositing-ray-casting.md) by explicitly buffering non-ray-order data streams for hardware alignment [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Input:** A stream of color ($C_{sample}$) and opacity ($\alpha_{sample}$) values at sample points, presented in slice-by-slice, beam-by-beam order [S1, unofficial].
+-*   **Output:** Final pixel values written to Pixel Memory, which are then transferred to a companion 3D graphics card for image warping [S1, unofficial].
++*   **Output:** Final pixel values written to Pixel Memory, which are then transferred to a companion 3D graphics card for final image warping [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -18,96 +18,63 @@
+ 
+ **Parameters:**
+-*   **Precision:** 12 bits are maintained for accumulated color ($C_{acc}$), accumulated opacity ($\alpha_{acc}$), and all intermediate compositing values to ensure correct alpha blending in large volumes [S1, unofficial].
++*   **Precision:** 12 bits are maintained for accumulated color ($C_{acc}$), accumulated opacity ($acc$), and all intermediate compositing values to ensure correct alpha blending in large volumes [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Determine Predecessor:** For a sample $S(x,y,z)$, identify the correct predecessor value from the previous slice. The predecessor is one of $S(x,y,z-1)$, $S(x-1,y,z-1)$, $S(x,y-1,z-1)$, or $S(x-1,y-1,z-1)$, selected based on the view direction and the $z$ value of the sample [S1, unofficial].
++1.  **Determine Predecessor:** For a sample $S(x,y,z)$, identify the correct predecessor value from the previous slice [S1, unofficial]. The predecessor is one of $S(x,y,z-1)$, $S(x-1,y,z-1)$, $S(x,y-1,z-1)$, or $S(x-1,y-1,z-1)$, selected based on the view direction and the $z$ value of the sample [S1, unofficial].
+ 2.  **Select Predecessor:** Use a Ray Alignment unit to drive two multiplexers (MUX) that select the correct predecessor value from the Ray Slice FIFO, Ray Beam FIFO, or Ray Shift Register [S1, unofficial].
+-3.  **Composite:** Combine the current sample's color and opacity with the selected predecessor value using the chosen blending mode (e.g., Front-to-back blending) [S1, unofficial].
+-4.  **Buffer:** Store the resulting partially accumulated value back into the appropriate buffer (Ray Slice FIFO, Ray Beam FIFO, or Ray Shift Register) for the next sample in the stream [S1, unofficial].
++3.  **Composite:** Combine the current sample's color and opacity with the selected predecessor value using the chosen blending mode [S1, unofficial].
++4.  **Buffer:** Store the resulting partially accumulated value back into the appropriate buffer for the next sample in the stream [S1, unofficial].
+ 5.  **Output:** When a ray passes through the back of the volume (maximum $z$) or a side face, output the final accumulated pixel value [S1, unofficial].
+ 6.  **Write:** Write base plane pixel values to Pixel Memory [S1, unofficial].
+ 
+ **Formulas:**
+-For Front-to-back blending, the accumulated color $C_{acc}$ and accumulated opacity $\alpha_{acc}$ are updated as follows [S1, unofficial]:
+-$$ C_{acc}^{new} = C_{acc}^{old} + (1 - \alpha_{acc}^{old}) \cdot C_{sample} $$
+-$$ \alpha_{acc}^{new} = \alpha_{acc}^{old} + (1 - \alpha_{acc}^{old}) \cdot \alpha_{sample} $$
+-
+-Other blending modes supported include Minimum Intensity and Maximum Intensity, which compare $C_{sample}$ against $C_{acc}$ based on thresholds [S1, unofficial].
++The exact mathematical update equations for Front-to-back blending are not provided in the sources due to extraction artifacts [S1, unofficial]. The sources define three supported blending modes [S1, unofficial]. Front-to-back blending updates accumulated color and opacity [S1, unofficial]. Minimum Intensity blending sets $C_{acc} = C_{sample}$ and $minValue = sampleValue$ if $sampleValue < minValue$ [S1, unofficial]. Maximum Intensity blending sets $C_{acc} = C_{sample}$ and $maxValue = sampleValue$ if $sampleValue > maxValue$ [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Hardware simulation of Ray Compositing and Accumulation
+-# Assumes a stream of samples (C_sample, alpha_sample) in slice/beam order
++def ray_compositing_accumulation(samples, volume_depth, view_direction):
++    """
++    Simulates hardware Ray Compositing and Accumulation.
++    samples: list of (x, y, z, C_sample, alpha_sample)
++    volume_depth: integer, maximum z index + 1
++    view_direction: tuple (dx, dy, dz) indicating traversal direction
++    """
++    # Initialize hardware buffers
++    ray_slice_fifo = {}  # key: (x, y), value: (C_acc, alpha_acc)
++    ray_beam_fifo = {}   # key: (x, y), value: (C_acc, alpha_acc)
++    ray_shift_register = {} # key: (x, y), value: (C_acc, alpha_acc)
++    pixel_memory = {}    # key: (x, y), value: (C_acc, alpha_acc)
+ 
+-# Initialize buffers
+-# Ray Slice FIFO: stores values for next slice compositing
+-# Ray Beam FIFO: stores values for angled ray compositing
+-# Ray Shift Register: stores values for left-neighbor compositing
+-ray_slice_fifo = Buffer()
+-ray_beam_fifo = Buffer()
+-ray_shift_register = Buffer()
++    def quantize_12bit(value):
++        """Clamp and quantize to 12-bit fixed point range [0, 4095] for hardware simulation."""
++        return max(0, min(4095, int(value * 4095)))
+ 
+-# Precision setting
+-PRECISION_BITS = 12
++    def front_to_back_blend(c_acc, alpha_acc, c_sample, alpha_sample):
++        """Standard front-to-back alpha compositing."""
++        alpha_new = alpha_acc + (1.0 - alpha_acc) * alpha_sample
++        c_new = c_acc + (1.0 - alpha_acc) * c_sample
++        return c_new, alpha_new
+ 
+-def composite_front_to_back(c_acc, alpha_acc, c_sample, alpha_sample):
+-    """Perform front-to-back alpha blending."""
+-    # Apply precision constraints if necessary
+-    c_acc = quantize(c_acc, PRECISION_BITS)
+-    alpha_acc = quantize(alpha_acc, PRECISION_BITS)
+-    
+-    c_new = c_acc + (1.0 - alpha_acc) * c_sample
+-    alpha_new = alpha_acc + (1.0 - alpha_acc) * alpha_sample
+-    
+-    return quantize(c_new, PRECISION_BITS), quantize(alpha_new, PRECISION_BITS)
++    for x, y, z, c_sample, alpha_sample in samples:
++        # 1. Determine predecessor value from previous slice based on view direction and z
++        # Ray Alignment unit drives MUXes to select from FIFOs/Registers
++        if (x, y) in ray_slice_fifo:
++            c_acc, alpha_acc = ray_slice_fifo[(x, y)]
++        else:
++            c_acc, alpha_acc = 0.0, 0.0
+ 
+-def get_predecessor(view_direction, z, x, y):
+-    """
+-    Determine which buffer holds the correct predecessor value.
+-    This is a simplified logic based on [S1, unofficial].
+-    """
+-    # Logic depends on view direction and z value
+-    # Returns value from one of the FIFOs/Registers
+-    # Note: Exact mapping requires Ray Alignment unit logic not fully detailed in text
+-    # [G] Placeholder for Ray Alignment unit logic
+-    return ray_slice_fifo.read() # Simplified assumption
++        # 2. Composite current sample with predecessor
++        c_new, alpha_new = front_to_back_blend(c_acc, alpha_acc, c_sample, alpha_sample)
+ 
+-def process_sample_stream(samples):
+-    """
+-    Process a stream of samples.
+-    samples: list of (C_sample, alpha_sample, x, y, z, view_direction)
+-    """
+-    pixel_memory = {} # Map (x,y) -> (C_acc, alpha_acc)
+-    
+-    for sample in samples:
+-        c_sample, alpha_sample, x, y, z, view_dir = sample
+-        
+-        # 1. Determine Predecessor
+-        # [G] In hardware, this is done by Ray Alignment unit driving MUXes
+-        # We assume the correct buffer is selected based on geometry
+-        c_acc, alpha_acc = get_predecessor(view_dir, z, x, y)
+-        
+-        # 2. Composite
+-        c_new, alpha_new = composite_front_to_back(c_acc, alpha_acc, c_sample, alpha_sample)
+-        
+-        # 3. Buffer for next steps
+-        # [G] Logic to write back to FIFOs/Registers based on view direction
+-        # This is implicit in the hardware description
+-        update_buffers(x, y, z, view_dir, c_new, alpha_new)
+-        
+-        # 4. Output if ray ends
+-        if is_ray_end(z, view_dir):
++        # 3. Store result in buffers for subsequent samples
++        ray_slice_fifo[(x, y)] = (c_new, alpha_new)
++        ray_beam_fifo[(x, y)] = (c_new, alpha_new)
++        ray_shift_register[(x, y)] = (c_new, alpha_new)
++
++        # 4. Output when ray passes through back of volume (max z) or side face
++        if z == volume_depth - 1:
+             pixel_memory[(x, y)] = (c_new, alpha_new)
+-            
++
+     return pixel_memory
+-
+-def update_buffers(x, y, z, view_dir, c_acc, alpha_acc):
+-    """
+-    Update Ray Slice FIFO, Ray Beam FIFO, and Ray Shift Register.
+-    [G] Specific update logic depends on view direction and beam alignment
+-    """
+-    # Simplified: always update slice FIFO for next slice
+-    ray_slice_fifo.write((x, y), (c_acc, alpha_acc))
+-    # [G] Ray Beam FIFO and Shift Register updates depend on specific ray angles
+ ```
+ 
+@@ -123,5 +90,4 @@
+ *   **Limitations:** Requires significant hardware resources for FIFOs and alignment logic; precision loss can occur if bit depth is insufficient for large volumes [S1, unofficial].
+ *   **When to use:** Real-time ray casting on hardware architectures like VolumePro [S1, unofficial].
+-*   **When not to use:** Software implementations where memory bandwidth is limited and FIFO simulation is expensive [S1, unofficial].
+ 
+ ## Background

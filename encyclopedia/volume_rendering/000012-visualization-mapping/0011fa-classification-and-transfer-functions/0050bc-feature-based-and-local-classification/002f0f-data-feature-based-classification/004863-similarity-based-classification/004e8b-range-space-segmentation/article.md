@@ -1,0 +1,140 @@
+# Range-Space Segmentation
+
+Also called: Function Field Visualization via Range-Space Segmentation, Function-space distance segmentation, Range-Space Segmentation Visualization
+
+## Overview
+Range-Space Segmentation is a method for visualizing and analyzing function field data by projecting high-dimensional function samples into scalar fields based on their distance to a set of user-defined exemplar functions [S1, unofficial]. It solves the problem of intelligently segmenting complex datasets (such as hyperspectral imagery or time-varying pollution data) by creating a classification field that assigns each spatial point to the nearest exemplar, thereby enabling feature-based visualization and surface extraction [S1, unofficial]. Unlike multidimensional scaling (MDS) techniques which lose spatial layout, this method preserves the original spatial structure of the data while reducing the functional dimensionality to a scalar distance field and an integer label field [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A function field $F$ defined over a spatial domain $\mathbb{R}^n$, where each point $\mathbf{p}$ has an associated function $f_\mathbf{p}$. A set of $m$ exemplar functions $M = (f_1, f_2, \dots, f_m)$ selected by the user (via probes, analytic definitions, or statistics). A similarity metric $\|\cdot\|$.
+*   **Output:** Two scalar fields defined on $\mathbb{R}^n$:
+    1.  A multi-function scalar distance field $S^*$, where $S^*(\mathbf{p})$ is the minimum distance from $f_\mathbf{p}$ to any exemplar in $M$.
+    2.  An integer-valued classification field $L$, where $L(\mathbf{p})$ is the index $i$ of the exemplar $f_i \in M$ that minimizes the distance.
+
+**Data Structures:**
+*   **Distance Field ($S^*$):** A scalar grid of size $N$ (number of spatial points). Each element stores a floating-point value representing the minimal function-space distance.
+*   **Classification Field ($L$):** An integer grid of size $N$. Each element stores an integer index $i \in \{1, \dots, m\}$.
+*   **Exemplar Set ($M$):** A list of $m$ function samples. Each sample $f_i$ is typically represented as a discrete vector of $k$ values (e.g., spectral bands).
+
+**Similarity Metric:**
+The distance between two functions $f$ and $g$ is computed using a weighted norm. For a function $f$ defined over a closed interval $I$ with weight function $w(x)$:
+$$ \|f\| = \left( \int_I w(x) f(x)^2 dx \right)^{1/2} $$
+For discrete functions represented by a sequence of $k$ points $(f_1, \dots, f_k)$ with weights $(w_1, \dots, w_k)$:
+$$ \|f\| = \left( \sum_{j=1}^k w_j f_j^2 \right)^{1/2} $$
+The distance between two functions $f$ and $g$ is $\|f - g\|$. If weights are constant, this corresponds to a Voronoi tessellation in range-space [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Define Metric:** Select the similarity metric $\|\cdot\|$ (e.g., weighted Euclidean, Earth Mover’s Distance) [S1, unofficial].
+2.  **Select Exemplars:** Define the ordered set $M = (f_1, \dots, f_m)$. Exemplars can be user-probed points $f_\mathbf{p}$, analytic functions, or derived statistics [S1, unofficial].
+3.  **Compute Single-Function Distance Fields:** For each exemplar $f_i \in M$ and for each spatial point $\mathbf{p}$, compute the scalar distance field $S_{f_i}$:
+    $$ S_{f_i}(\mathbf{p}) = \| f_i - f_\mathbf{p} \| $$
+4.  **Compute Multi-Function Distance Field ($S^*$):** For each point $\mathbf{p}$, find the minimum distance across all exemplars:
+    $$ S^*(\mathbf{p}) = \min_{i \in \{1, \dots, m\}} S_{f_i}(\mathbf{p}) = \min_{i \in \{1, \dots, m\}} \| f_i - f_\mathbf{p} \| $$
+5.  **Compute Classification Field ($L$):** For each point $\mathbf{p}$, store the index of the exemplar that achieved the minimum distance:
+    $$ L(\mathbf{p}) = \arg \min_{i \in \{1, \dots, m\}} \| f_i - f_\mathbf{p} \| $$
+6.  **Visualization:**
+    *   **Single Exemplar ($m=1$):** Map $S^*$ directly to color/opacity using a 1D transfer function.
+    *   **Multiple Exemplars ($m>1$):** Associate a transfer function $t_i$ with each exemplar $f_i$. The color at $\mathbf{p}$ is determined by applying the transfer function corresponding to the classification label:
+        $$ \text{color}(\mathbf{p}) = t_{L(\mathbf{p})}(S^*(\mathbf{p})) $$
+7.  **Feature Segmentation (Optional):** Extract surfaces separating features by isosurfacing the classification field $L$. For $m=2$, use an isovalue of 0.5 with Marching Cubes. For $m>2$, use multi-label segmentation algorithms (e.g., multi-label Marching Cubes, Dual Contouring) [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def range_space_segmentation(volume_functions, exemplars, metric_func):
+    """
+    volume_functions: List of functions f_p for each spatial point p.
+                      Each f_p is a vector/array of values.
+    exemplars: List of m exemplar functions M = [f_1, ..., f_m].
+    metric_func: Function that computes ||f - g||.
+    
+    Returns:
+    S_star: 2D array (num_points, 1) of minimal distances.
+    L: 2D array (num_points, 1) of integer labels (0-indexed).
+    """
+    num_points = len(volume_functions)
+    num_exemplars = len(exemplars)
+    
+    # Initialize fields
+    S_star = [None] * num_points
+    L = [None] * num_points
+    
+    # Precompute distances for all exemplars to optimize min/argmin
+    # Distances[i][p] = distance from exemplar i to point p
+    distances = [[0.0] * num_points for _ in range(num_exemplars)]
+    
+    for i in range(num_exemplars):
+        f_i = exemplars[i]
+        for p in range(num_points):
+            f_p = volume_functions[p]
+            distances[i][p] = metric_func(f_i, f_p)
+            
+    # Compute S* and L
+    for p in range(num_points):
+        min_dist = float('inf')
+        min_idx = -1
+        
+        for i in range(num_exemplars):
+            d = distances[i][p]
+            if d < min_dist:
+                min_dist = d
+                min_idx = i
+                
+        S_star[p] = min_dist
+        L[p] = min_idx
+        
+    return S_star, L
+
+def visualize_range_space(S_star, L, transfer_functions, num_exemplars):
+    """
+    S_star: Minimal distance field.
+    L: Classification field (integer labels).
+    transfer_functions: List of m transfer functions [t_0, ..., t_{m-1}].
+    """
+    result_colors = []
+    for p in range(len(S_star)):
+        label = L[p]
+        # Ensure label is within bounds
+        if label < 0 or label >= num_exemplars:
+            label = 0
+            
+        t = transfer_functions[label]
+        distance_val = S_star[p]
+        color = t(distance_val)
+        result_colors.append(color)
+    return result_colors
+```
+
+**Parameters:**
+*   $m$: Number of exemplar functions. Typically large, leading to tens or hundreds of samples per data point [S1, unofficial].
+*   Transfer Functions: 1D transfer functions are standard for volume rendering, but 2D, multidimensional, or local transfer functions may be applied to emphasize local structures [S1, unofficial].
+*   Probes: User-specified points in the data domain $\mathbf{p} \in \mathbb{R}^n$ used to define exemplars $f_\mathbf{p}$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Voronoi Tessellation:** If the weight function/vector is constant, the segmentation corresponds to a Voronoi tessellation of the range-space [S1, unofficial].
+*   **Interactive Latency:** When modifying a single function sample (e.g., repositioning a probe), only one of the $m$ distance fields changes. The remaining $m-1$ fields remain unchanged. The latency experienced is $S + S^*$, where $S$ is the time to compute one single-function distance field and $S^*$ is the time to combine all fields [S1, unofficial].
+*   **Metric Choice:** The choice of distance metric (e.g., weighted Euclidean, Earth Mover’s Distance, Chang’s spectral distance) significantly affects segmentation results [S1, unofficial].
+
+## Subtopics
+
+### [Feature Query](13751-feature-query.md)
+Feature Query is a method for identifying spatial regions in a function fields where 1-dimensional functions are similar to a user-defined exemplar. It solves the problem of intelligently paring down large scientific datasets by identifying regions of interest based on user-specified selection queries, allowing for the analysis of smaller, more meaningful subsets rather than processing the entire dataset. Unlike traditional visualization which processes the whole dataset, this approach constrains computational complexity to the number of items returned by a query.
+
+## Operating characteristics
+*   **Time Complexity:** Computing the distance field for one exemplar takes time $S$. Combining $m$ fields to produce $S^*$ and $L$ takes time $S^*$. Total generation time is proportional to $m \times S + S^*$.
+*   **Memory Complexity:** Requires storing $m$ distance fields temporarily or computing them on the fly, plus the final $S^*$ and $L$ fields.
+*   **Measured Performance:** On an Apple MacBook Pro (2.33 GHz Intel Core 2 Duo, 2 GB memory, ATI Radeon X1600):
+    *   Hyperspectral Imagery segmentation: 336 ms total (80 ms for $S$, 16 ms for $S^*$) [S1, unofficial].
+    *   H2O Aerosol (National): 51 ms total (20 ms for $S$, 11 ms for $S^*$) [S1, unofficial].
+    *   SO4 Aerosol (CRPAQS): 104 ms total (27 ms for $S$, 23 ms for $S^*$) [S1, unofficial].
+*   **Strengths:** Preserves original spatial layout (unlike MDS); allows interactive exploration via probes; supports time-varying fields by treating probes as points in $\mathbb{R}^n \times T$ [S1, unofficial].
+*   **Limitations:** Performance scales with the number of exemplars $m$; requires careful selection of distance metric and exemplars [S1, unofficial].
+*   **When to Use:** Ideal for hyperspectral imagery and particulate pollution data where functional similarity is more important than spatial proximity [S1, unofficial].
+
+## Background
+Range-Space Segmentation was introduced in the context of scientific visualization for function field data, specifically for hyperspectral imagery and time-varying particulate pollution data (CRPAQS) [S1, unofficial]. The method was developed to address the limitations of dimension reduction and clustering techniques that either lose spatial information or require fragile high-dimensional queries [S1, unofficial]. It builds on the concept of function-space distance metrics and Voronoi tessellations in range-space [S1, unofficial].
+
+## Sources
+[S1] Scientific visualization techniques for volume fraction data and function fields, https://escholarship.org/uc/item/41x9x1gm, fetched 2026-10-27 (unofficial)

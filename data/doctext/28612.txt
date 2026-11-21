@@ -1,0 +1,1227 @@
+# Torch Sphere Tracer
+
+PyTorch implementation of differentiable Sphere Tracing / Ray Marching with SDFs (Signed Distance Function) and CSG (Constructive Solid Geometry).
+
+## Rendering Results of Constructive Solid Geometry
+![Constructive Solid Geometry](csg.png)
+
+### __init__.py
+```
+from . import renderers
+from . import functional
+from . import signed_distance_functions
+from . import constructive_solid_geometry
+```
+
+### csg.py
+```
+import torch
+import torch.nn as nn
+import numpy as np
+
+from .functional import *
+
+
+# ---------------- CSG (Constructive Solid Geometry) ---------------- #
+
+
+def union(sdf1, sdf2):
+    """ GLSL
+    float opUnion( float d1, float d2 ) { return min(d1,d2); }
+    """
+    def wrapper(p):
+        d1 = sdf1(p)
+        d2 = sdf2(p)
+        d = minimum(d1, d2)
+        return d
+    return wrapper
+
+
+def subtraction(sdf1, sdf2):
+    """ GLSL
+    float opSubtraction( float d1, float d2 ) { return max(-d1,d2); }
+    """
+    def wrapper(p):
+        d1 = sdf1(p)
+        d2 = sdf2(p)
+        d = maximum(-d1, d2)
+        return d
+    return wrapper
+
+
+def intersection(sdf1, sdf2):
+    """ GLSL
+    float opIntersection( float d1, float d2 ) { return max(d1,d2); }
+    """
+    def wrapper(p):
+        d1 = sdf1(p)
+        d2 = sdf2(p)
+        d = maximum(d1, d2)
+        return d
+    return wrapper
+
+
+def smooth_union(sdf1, sdf2, k):
+    """ GLSL
+    float opSmoothUnion( float d1, float d2, float k ) 
+    {
+        float h = clamp( 0.5 + 0.5*(d2-d1)/k, 0.0, 1.0 );
+        return mix( d2, d1, h ) - k*h*(1.0-h); 
+    }
+    """
+    def wrapper(p):
+        d1 = sdf1(p)
+        d2 = sdf2(p)
+        h = clamp(0.5 + 0.5 * (d2 - d1) / k, 0.0, 1.0)
+        d = mix(d2, d1, h) - k * h * (1.0 - h)
+        return d
+    return wrapper
+
+
+def smooth_subtraction(sdf1, sdf2, k):
+    """" GLSL
+    float opSmoothSubtraction( float d1, float d2, float k ) 
+    {
+        float h = clamp( 0.5 - 0.5*(d2+d1)/k, 0.0, 1.0 );
+        return mix( d2, -d1, h ) + k*h*(1.0-h); 
+    }
+    """
+    def wrapper(p):
+        d1 = sdf1(p)
+        d2 = sdf2(p)
+        h = clamp(0.5 - 0.5 * (d2 + d1) / k, 0.0, 1.0)
+        d = mix(d2, -d1, h) + k * h * (1.0 - h)
+        return d
+    return wrapper
+
+
+def smooth_intersection(sdf1, sdf2, k):
+    """ GLSL
+    float opSmoothIntersection( float d1, float d2, float k ) 
+    {
+        float h = clamp( 0.5 - 0.5*(d2-d1)/k, 0.0, 1.0 );
+        return mix( d2, d1, h ) + k*h*(1.0-h); 
+    }
+    """
+    def wrapper(p):
+        d1 = sdf1(p)
+        d2 = sdf2(p)
+        h = clamp(0.5 - 0.5 * (d2 - d1) / k, 0.0, 1.0)
+        d = mix(d2, d1, h) + k * h * (1.0 - h)
+        return d
+    return wrapper
+```
+
+### functional.py
+```
+import torch
+import torch.nn as nn
+import numpy as np
+
+
+# ---------------- GLSL-like helper functions ---------------- #
+
+def length(x):
+    return torch.norm(x, dim=-1, keepdim=True)
+
+
+def maximum(x, y, *z):
+    y = y if isinstance(y, torch.Tensor) else full(x, y)
+    m = torch.max(x, y)
+    return maximum(m, *z) if z else m
+
+
+def minimum(x, y, *z):
+    y = y if isinstance(y, torch.Tensor) else full(x, y)
+    m = torch.min(x, y)
+    return minimum(m, *z) if z else m
+
+
+def clamp(x, a, b):
+    return minimum(maximum(x, a), b)
+
+
+def mix(x, y, a):
+    return x * (1.0 - a) + y * a
+
+
+def stack(*x):
+    return torch.stack(x, dim=-2)
+
+
+def unstack(x):
+    return torch.unbind(x, dim=-2)
+
+
+def concat(*x):
+    return torch.cat(x, dim=-1)
+
+
+def unconcat(x):
+    return torch.unbind(unsqueeze(x), dim=-2)
+
+
+def squeeze(x):
+    return torch.squeeze(x, dim=-1)
+
+
+def unsqueeze(x):
+    return torch.unsqueeze(x, dim=-1)
+
+
+def matmul(A, x):
+    return squeeze(A @ unsqueeze(x))
+
+
+def dot(x, y):
+    return torch.sum(x * y, dim=-1, keepdim=True)
+
+
+def ndot(x, y):
+    x, y = unconcat(x * y)
+    return x - y
+
+
+def transpose(A):
+    return torch.transpose(A, -2, -1)
+
+
+def abs(x):
+    return torch.abs(x)
+
+
+def sqrt(x):
+    return torch.sqrt(x + 1e-6)
+
+
+def sign(x):
+    return torch.sign(x)
+
+
+def cos(x):
+    return torch.cos(x)
+
+
+def sin(x):
+    return torch.sin(x)
+
+
+def relu(x):
+    return nn.functional.relu(x)
+
+
+def mod(x, y):
+    return torch.fmod(x, y)
+
+
+def round(x):
+    return torch.round(x)
+
+
+def zero(x):
+    return torch.zeros_like(x)
+
+
+def one(x):
+    return torch.ones_like(x)
+
+
+def full(x, y):
+    return torch.full_like(x, y)
+
+
+def expand(x, y):
+    while x.dim() < y.dim():
+        x = torch.unsqueeze(x, dim=0)
+    x = x.expand_as(y)
+    return x
+
+
+def tensor(x, y):
+    return x.new_tensor(y)
+```
+
+### main.py
+```
+import torch
+import torch.nn as nn
+import torchvision
+import numpy as np
+import argparse
+
+import renderers
+import sdf
+import csg
+
+
+def main(args):
+
+    device = torch.device("cuda")
+
+    num_iterations = 2000
+    convergence_threshold = 1e-3
+
+    # ---------------- camera matrix ---------------- #
+
+    fx = fy = 1024
+    cx = cy = 512
+    camera_matrix = torch.tensor([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], device=device)
+
+    # ---------------- camera position ---------------- #
+
+    distance = 5.0
+    azimuth = np.pi / 4.0
+    elevation = np.pi / 4.0
+
+    camera_position = torch.tensor([
+        +np.cos(elevation) * np.sin(azimuth), 
+        -np.sin(elevation), 
+        -np.cos(elevation) * np.cos(azimuth)
+    ], device=device) * distance
+
+    # ---------------- camera rotation ---------------- #
+
+    target_position = torch.tensor([0.0, -1.0, 0.0], device=device)
+    up_direction = torch.tensor([0.0, 1.0, 0.0], device=device)
+
+    camera_z_axis = target_position - camera_position
+    camera_x_axis = torch.cross(up_direction, camera_z_axis, dim=-1)
+    camera_y_axis = torch.cross(camera_z_axis, camera_x_axis, dim=-1)
+    camera_rotation = torch.stack((camera_x_axis, camera_y_axis, camera_z_axis), dim=-1)
+    camera_rotation = nn.functional.normalize(camera_rotation, dim=-2)
+
+    # ---------------- directional light ---------------- #
+
+    light_directions = torch.tensor([1.0, -0.5, 0.0], device=device)
+
+    # ---------------- ray marching ---------------- #
+    
+    y_positions = torch.arange(cy * 2, dtype=camera_matrix.dtype, device=device)
+    x_positions = torch.arange(cx * 2, dtype=camera_matrix.dtype, device=device)
+    y_positions, x_positions = torch.meshgrid(y_positions, x_positions)
+    z_positions = torch.ones_like(y_positions)
+    ray_positions = torch.stack((x_positions, y_positions, z_positions), dim=-1)
+    ray_positions = torch.einsum("mn,...n->...m", torch.inverse(camera_matrix),  ray_positions)
+    ray_positions = torch.einsum("mn,...n->...m", camera_rotation, ray_positions) + camera_position
+    ray_directions = nn.functional.normalize(ray_positions - camera_position, dim=-1)
+
+    # ---------------- rendering ---------------- #
+
+    def compute_rotation_matrix(axes, angles):
+        nx, ny, nz = torch.unbind(axes, dim=-1)
+        c, s = torch.cos(angles), torch.sin(angles)
+        rotation_matrices = torch.stack([
+            torch.stack([nx * nx * (1.0 - c) + 1. * c, ny * nx * (1.0 - c) - nz * s, nz * nx * (1.0 - c) + ny * s], dim=-1),
+            torch.stack([nx * ny * (1.0 - c) + nz * s, ny * ny * (1.0 - c) + 1. * c, nz * ny * (1.0 - c) - nx * s], dim=-1),
+            torch.stack([nx * nz * (1.0 - c) - ny * s, ny * nz * (1.0 - c) + nx * s, nz * nz * (1.0 - c) + 1. * c], dim=-1),
+        ], dim=-2)
+        return rotation_matrices
+
+    signed_distance_functions = [
+        sdf.translation(sdf.sphere(1.0), torch.tensor([0.0, -1.0, 0.0], device=device)),
+        sdf.translation(sdf.rounding(sdf.box(0.7), 0.1), torch.tensor([0.0, -0.7, 0.0], device=device)),
+        sdf.translation(csg.smooth_union(sdf.sphere(1.0), sdf.rounding(sdf.box(0.7), 0.1), 0.05), torch.tensor([0.0, -0.7, 0.0], device=device)),
+        sdf.translation(csg.smooth_intersection(sdf.sphere(1.0), sdf.rounding(sdf.box(0.7), 0.1), 0.05), torch.tensor([0.0, -0.7, 0.0], device=device)),
+        sdf.translation(csg.smooth_subtraction(sdf.sphere(1.0), sdf.rounding(sdf.box(0.7), 0.1), 0.05), torch.tensor([0.0, -0.7, 0.0], device=device)),
+        sdf.translation(sdf.twist(sdf.torus(1.2, 0.4), 0.5), torch.tensor([0.0, -0.5, 0.0], device=device)), 
+        sdf.translation(csg.intersection(sdf.onion(sdf.onion(sdf.sphere(1.0), 0.2), 0.1), sdf.plane(torch.tensor([0.0, -1.0, 0.0], device=device), 0.0)), torch.tensor([0.0, -1.0, 0.0], device=device)),
+        csg.union(
+            csg.smooth_subtraction(
+                sdf.translation(sdf.sphere(0.5), torch.tensor([0.0, -1.1, 0.0], device=device)), 
+                sdf.translation(sdf.rounding(sdf.box(torch.tensor([0.7, 0.35, 0.7], device=device)), 0.1), torch.tensor([0.0, -0.35, 0.0], device=device)),
+                0.1,
+            ),
+            sdf.translation(sdf.sphere(0.5), torch.tensor([0.0, -2.1, 0.0], device=device)), 
+        ),
+        sdf.translation(
+            csg.union(
+                csg.union(
+                    sdf.rotation(sdf.link(0.5, 0.5, 0.25), compute_rotation_matrix(torch.tensor([1.0, 0.0, 0.0], device=device), torch.tensor(np.pi / 2.0, device=device))),
+                    sdf.translation(sdf.rotation(
+                        sdf.rotation(sdf.link(0.5, 0.5, 0.25), compute_rotation_matrix(torch.tensor([1.0, 0.0, 0.0], device=device), torch.tensor(np.pi / 2.0, device=device))), 
+                        compute_rotation_matrix(torch.tensor([0.0, 0.0, 1.0], device=device), torch.tensor(np.pi / 2.0, device=device)),
+                    ), torch.tensor([0.0, 0.0, 1.25], device=device)),
+                ),
+                sdf.translation(sdf.rotation(
+                    sdf.translation(sdf.rotation(
+                        sdf.rotation(sdf.link(0.5, 0.5, 0.25), compute_rotation_matrix(torch.tensor([1.0, 0.0, 0.0], device=device), torch.tensor(np.pi / 2.0, device=device))), 
+                        compute_rotation_matrix(torch.tensor([0.0, 0.0, 1.0], device=device), torch.tensor(np.pi / 2.0, device=device)),
+                    ), torch.tensor([0.0, 0.0, 1.25], device=device)),
+                    compute_rotation_matrix(torch.tensor([0.0, 0.0, 1.0], device=device), torch.tensor(np.pi / 2.0, device=device)),
+                ), torch.tensor([0.0, 0.0, 1.25], device=device)),
+            ),
+            torch.tensor([0.0, -0.5, 0.0], device=device),
+        ),
+    ]
+
+    ground = sdf.plane(torch.tensor([0.0, -1.0, 0.0], device=device), 0.0)
+
+    def generator():
+
+        for signed_distance_function in signed_distance_functions:
+
+            signed_distance_function = csg.union(signed_distance_function, ground)
+
+            surface_positions, converged = renderers.sphere_tracing(
+                signed_distance_function=signed_distance_function, 
+                ray_positions=ray_positions, 
+                ray_directions=ray_directions, 
+                num_iterations=num_iterations, 
+                convergence_threshold=convergence_threshold,
+            )
+            surface_positions = torch.where(converged, surface_positions, torch.zeros_like(surface_positions))
+
+            surface_normals = renderers.compute_normal(
+                signed_distance_function=signed_distance_function, 
+                surface_positions=surface_positions,
+            )
+            surface_normals = torch.where(converged, surface_normals, torch.zeros_like(surface_normals))
+
+            image = renderers.phong_shading(
+                surface_normals=surface_normals, 
+                view_directions=camera_position - surface_positions, 
+                light_directions=light_directions, 
+                light_ambient_color=torch.ones(1, 1, 3, device=device),
+                light_diffuse_color=torch.ones(1, 1, 3, device=device), 
+                light_specular_color=torch.ones(1, 1, 3, device=device), 
+                material_ambient_color=torch.full((1, 1, 3), 0.2, device=device) + (torch.rand(1, 1, 3, device=device) * 2 - 1) * 0.1,
+                material_diffuse_color=torch.full((1, 1, 3), 0.7, device=device) + (torch.rand(1, 1, 3, device=device) * 2 - 1) * 0.1,
+                material_specular_color=torch.full((1, 1, 3), 0.1, device=device),
+                material_emission_color=torch.zeros(1, 1, 3, device=device),
+                material_shininess=64.0,
+            )
+
+            grounded = torch.abs(ground(surface_positions)) < convergence_threshold
+            image = torch.where(grounded, torch.full_like(image, 0.9), image)
+
+            shadowed = renderers.compute_shadows(
+                signed_distance_function=signed_distance_function, 
+                surface_positions=surface_positions, 
+                surface_normals=surface_normals,
+                light_directions=light_directions, 
+                num_iterations=num_iterations, 
+                convergence_threshold=convergence_threshold,
+                foreground_masks=converged,
+            )
+            image = torch.where(shadowed, image * 0.5, image)
+            
+            image = torch.where(converged, image, torch.zeros_like(image))
+
+            yield image
+
+    images = torch.stack(list(generator())).permute(0, 3, 1, 2)
+    torchvision.utils.save_image(images, "csg.png", nrow=3)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Sphere Tracing")
+    parser.add_argument("--width", type=str, default=512)
+    parser.add_argument("--height", type=int, default=512)
+    parser.add_argument("--device", type=str, default="cuda")
+    args = parser.parse_args()
+    main(args)
+```
+
+### renderers.py
+```
+import torch
+import torch.nn as nn
+
+
+class SphereTracing(torch.autograd.Function):
+
+    @staticmethod
+    def forward(
+        ctx, 
+        signed_distance_function, 
+        ray_positions, 
+        ray_directions, 
+        num_iterations, 
+        convergence_threshold,
+        foreground_masks=None,
+        bounding_radius=None,
+        *parameters,
+    ):
+        if foreground_masks is None:
+            foreground_masks = torch.all(torch.isfinite(ray_positions), dim=-1, keepdim=True)
+
+        if bounding_radius:
+            a = torch.sum(ray_directions * ray_directions, dim=-1, keepdim=True)
+            b = 2 * torch.sum(ray_directions * ray_positions, dim=-1, keepdim=True)
+            c = torch.sum(ray_positions * ray_positions, dim=-1, keepdim=True) - bounding_radius ** 2
+            d = b ** 2 - 4 * a * c
+            t = (-b - torch.sqrt(d)) / (2 * a) 
+            bounded = d >= 0
+            ray_positions = torch.where(bounded, ray_positions + ray_directions * t, ray_positions)
+            foreground_masks = foreground_masks & bounded
+
+        # vanilla sphere tracing
+        with torch.no_grad():
+            for i in range(num_iterations):
+                signed_distances = signed_distance_function(ray_positions)
+                if i:
+                    ray_positions = torch.where(foreground_masks & ~converged, ray_positions + ray_directions * signed_distances, ray_positions)
+                else:
+                    ray_positions = torch.where(foreground_masks, ray_positions + ray_directions * signed_distances, ray_positions)
+                if bounding_radius:
+                    bounded = torch.norm(ray_positions, dim=-1, keepdim=True) < bounding_radius
+                    foreground_masks = foreground_masks & bounded
+                converged = torch.abs(signed_distances) < convergence_threshold
+                if torch.all(~foreground_masks | converged):
+                    break
+
+        # save tensors for backward pass
+        ctx.save_for_backward(ray_positions, ray_directions, foreground_masks, converged)
+        ctx.signed_distance_function = signed_distance_function
+        ctx.parameters = parameters
+
+        return ray_positions, converged
+
+    @staticmethod
+    def backward(ctx, grad_outputs, _):
+        
+        # restore tensors from forward pass
+        ray_positions, ray_directions, foreground_masks, converged = ctx.saved_tensors
+        signed_distance_function = ctx.signed_distance_function
+        parameters = ctx.parameters
+
+        # compute gradients using implicit differentiation
+        # NOTE: Differentiable Volumetric Rendering: https://arxiv.org/abs/1912.07372
+        with torch.enable_grad():
+            ray_positions = ray_positions.detach()
+            ray_positions.requires_grad_(True)
+            signed_distances = signed_distance_function(ray_positions)
+            grad_positions, = torch.autograd.grad(
+                outputs=signed_distances, 
+                inputs=ray_positions, 
+                grad_outputs=torch.ones_like(signed_distances), 
+                retain_graph=True,
+            )
+            grad_outputs_dot_directions = torch.sum(grad_outputs * ray_directions, dim=-1, keepdim=True)
+            grad_positions_dot_directions = torch.sum(grad_positions * ray_directions, dim=-1, keepdim=True)
+            # NOTE: avoid division by zero
+            grad_positions_dot_directions = torch.where(
+                grad_positions_dot_directions > 0,
+                torch.max(grad_positions_dot_directions, torch.full_like(grad_positions_dot_directions, +1e-6)),
+                torch.min(grad_positions_dot_directions, torch.full_like(grad_positions_dot_directions, -1e-6)),
+            )
+            grad_outputs = -grad_outputs_dot_directions / grad_positions_dot_directions
+            # NOTE: zero gradients of unconverged points 
+            grad_outputs = torch.where(converged, grad_outputs, torch.zeros_like(grad_outputs))
+            grad_parameters = torch.autograd.grad(
+                outputs=signed_distances, 
+                inputs=parameters, 
+                grad_outputs=grad_outputs, 
+                retain_graph=True,
+            )
+
+        return (None, None, None, None, None, None, None, *grad_parameters)
+
+
+def sphere_tracing(
+    signed_distance_function, 
+    ray_positions, 
+    ray_directions, 
+    num_iterations, 
+    convergence_threshold,
+    foreground_masks=None,
+    bounding_radius=None,
+):
+    return SphereTracing.apply(
+        signed_distance_function, 
+        ray_positions, 
+        ray_directions, 
+        num_iterations, 
+        convergence_threshold,
+        foreground_masks,
+        bounding_radius,
+    )
+
+
+def compute_shadows(
+    signed_distance_function, 
+    surface_positions, 
+    surface_normals,
+    light_directions, 
+    num_iterations, 
+    convergence_threshold,
+    foreground_masks=None,
+    bounding_radius=None,
+):
+    surface_positions, converged = sphere_tracing(
+        signed_distance_function=signed_distance_function, 
+        ray_positions=surface_positions + surface_normals * 1e-3, 
+        ray_directions=light_directions, 
+        num_iterations=num_iterations, 
+        convergence_threshold=convergence_threshold,
+        foreground_masks=foreground_masks,
+        bounding_radius=bounding_radius,
+    )
+    return foreground_masks & converged
+
+
+def compute_normal(
+    signed_distance_function, 
+    surface_positions, 
+    finite_difference_epsilon=None,
+):
+    if finite_difference_epsilon:
+        finite_difference_epsilon_x = surface_positions.new_tensor([finite_difference_epsilon, 0.0, 0.0])
+        finite_difference_epsilon_y = surface_positions.new_tensor([0.0, finite_difference_epsilon, 0.0])
+        finite_difference_epsilon_z = surface_positions.new_tensor([0.0, 0.0, finite_difference_epsilon])
+        surface_normals_x = signed_distance_function(surface_positions + finite_difference_epsilon_x) - signed_distance_function(surface_positions - finite_difference_epsilon_x)
+        surface_normals_y = signed_distance_function(surface_positions + finite_difference_epsilon_y) - signed_distance_function(surface_positions - finite_difference_epsilon_y)
+        surface_normals_z = signed_distance_function(surface_positions + finite_difference_epsilon_z) - signed_distance_function(surface_positions - finite_difference_epsilon_z)
+        surface_normals = torch.cat((surface_normals_x, surface_normals_y, surface_normals_z), dim=-1)
+
+    else:
+        create_graph = surface_positions.requires_grad
+        surface_positions.requires_grad_(True)
+        with torch.enable_grad():
+            signed_distances = signed_distance_function(surface_positions)
+            surface_normals, = torch.autograd.grad(
+                outputs=signed_distances, 
+                inputs=surface_positions, 
+                grad_outputs=torch.ones_like(signed_distances),
+                create_graph=create_graph,
+            )
+
+    surface_normals = nn.functional.normalize(surface_normals, dim=-1)
+    return surface_normals
+
+
+def phong_shading(
+    surface_normals, 
+    view_directions, 
+    light_directions,
+    light_ambient_color, 
+    light_diffuse_color, 
+    light_specular_color, 
+    material_ambient_color,
+    material_diffuse_color,
+    material_specular_color,
+    material_emission_color,
+    material_shininess,
+):
+    surface_normals = nn.functional.normalize(surface_normals, dim=-1)
+    view_directions = nn.functional.normalize(view_directions, dim=-1)
+    light_directions = nn.functional.normalize(light_directions, dim=-1)
+
+    reflected_directions = 2 * surface_normals * torch.sum(light_directions * surface_normals, dim=-1, keepdim=True) - light_directions
+
+    diffuse_coefficients = nn.functional.relu(torch.sum(light_directions * surface_normals, dim=-1, keepdim=True))
+    specular_coefficients = nn.functional.relu(torch.sum(reflected_directions * view_directions, dim=-1, keepdim=True)) ** material_shininess
+
+    images = torch.clamp(
+        material_emission_color + 
+        material_ambient_color * light_ambient_color + 
+        material_diffuse_color * light_diffuse_color * diffuse_coefficients + 
+        material_specular_color * light_specular_color * specular_coefficients,
+        0.0, 1.0
+    )
+
+    return images
+
+
+def cube_mapping(
+    surface_normals, 
+    view_directions, 
+    positive_x_images,
+    negative_x_images,
+    positive_y_images,
+    negative_y_images,
+    positive_z_images,
+    negative_z_images,
+):
+    surface_normals = nn.functional.normalize(surface_normals, dim=-1)
+    view_directions = nn.functional.normalize(view_directions, dim=-1)
+
+    reflected_directions = 2 * surface_normals * torch.sum(view_directions * surface_normals, dim=-1, keepdim=True) - view_directions
+
+    max_indices = torch.argmax(torch.abs(reflected_directions), dim=-1, keepdim=True)
+    max_values = torch.gather(reflected_directions, -1, max_indices)
+
+    texcoords_x, texcoords_y, texcoords_z = torch.unbind(reflected_directions / torch.abs(max_values), dim=-1)
+
+    # OpenGL specifications
+    # Chapter 8.13: Cube Map Texture Selection
+    # https://www.khronos.org/registry/OpenGL/specs/gl/glspec46.core.pdf
+
+    images = torch.stack((
+        positive_x_images,
+        negative_x_images,
+        positive_y_images,
+        negative_y_images,
+        positive_z_images,
+        negative_z_images,
+    ), dim=-3)
+
+    def linear_mapping(inputs, in_min, in_max, out_min, out_max):
+        inputs = (inputs - in_min) / (in_max - in_min) * (out_max - out_min) + out_min
+        return inputs
+
+    grids = torch.where(
+        max_indices == 0,
+        torch.where(
+            max_values > 0,
+            torch.stack((-texcoords_z, texcoords_y, linear_mapping(torch.full_like(texcoords_x, 0), 0, 5, -1, 1)), dim=-1),
+            torch.stack(( texcoords_z, texcoords_y, linear_mapping(torch.full_like(texcoords_x, 1), 0, 5, -1, 1)), dim=-1),
+        ),
+        torch.where(
+            max_indices == 1,
+            torch.where(
+                max_values > 0,
+                torch.stack((texcoords_x, -texcoords_z, linear_mapping(torch.full_like(texcoords_y, 2), 0, 5, -1, 1)), dim=-1),
+                torch.stack((texcoords_x,  texcoords_z, linear_mapping(torch.full_like(texcoords_y, 3), 0, 5, -1, 1)), dim=-1),
+            ),
+            torch.where(
+                max_values > 0,
+                torch.stack(( texcoords_x, texcoords_y, linear_mapping(torch.full_like(texcoords_z, 4), 0, 5, -1, 1)), dim=-1),
+                torch.stack((-texcoords_x, texcoords_y, linear_mapping(torch.full_like(texcoords_z, 5), 0, 5, -1, 1)), dim=-1),
+            ),
+        )
+    )
+
+    images = nn.functional.grid_sample(images, grids.unsqueeze(-4)).squeeze(-3)
+    images = images.permute(0, 2, 3, 1)
+    
+    return images
+```
+
+### sdf.py
+```
+import torch
+import torch.nn as nn
+import numpy as np
+
+from .functional import *
+
+
+""" SDF: Signed Distance Functions
+Re-implementations of SDFs based on the following Inigo Quilez's excellent article.
+https://iquilezles.org/www/articles/distfunctions/distfunctions.htm
+"""
+
+
+# ---------------- Primitives ---------------- #
+
+def sphere(r):
+    """ GLSL
+    float sdSphere( vec3 p, float s )
+    {
+        return length(p)-s;
+    }
+    """
+    def sdf(p):
+        d = length(p) - r
+        return d
+    return sdf
+
+
+def box(s):
+    """ GLSL
+    float sdBox( vec3 p, vec3 b )
+    {
+        vec3 q = abs(p) - b;
+        return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0);
+    }
+    """
+    def sdf(p):
+        q = abs(p) - s
+        d = length(relu(q)) - relu(-maximum(*unconcat(q)))
+        return d
+    return sdf
+
+
+def torus(r1, r2):
+    """ GLSL
+    float sdTorus( vec3 p, vec2 t )
+    {
+        vec2 q = vec2(length(p.xz)-t.x,p.y);
+        return length(q)-t.y;
+    }
+    """
+    def sdf(p):
+        px, py, pz = unconcat(p)
+        q = concat(length(concat(px, pz)) - r1, py)
+        d = length(q) - r2
+        return d
+    return sdf
+
+
+def link(l, r1, r2):
+    """ GLSL
+    float sdLink( vec3 p, float le, float r1, float r2 )
+    {
+        vec3 q = vec3( p.x, max(abs(p.y)-le,0.0), p.z );
+        return length(vec2(length(q.xy)-r1,q.z)) - r2;
+    }
+    """
+    def sdf(p):
+        px, py, pz = unconcat(p)
+        q = concat(px, relu(abs(py) - l), pz)
+        qx, qy, qz = unconcat(q)
+        d = length(concat(length(concat(qx, qy)) - r1, qz)) - r2
+        return d
+    return sdf
+
+
+def cylinder(r, h):
+    """ GLSL
+    float sdCappedCylinder( vec3 p, float h, float r )
+    {
+        vec2 d = abs(vec2(length(p.xz),p.y)) - vec2(h,r);
+        return min(max(d.x,d.y),0.0) + length(max(d,0.0));
+    }
+    """
+    def sdf(p):
+        px, py, pz = unconcat(p)
+        d = abs(concat(length(concat(px, pz)), py)) - concat(r, h)
+        d = -relu(-maximum(*unconcat(d))) + length(relu(d))
+        return d
+    return sdf
+
+
+def cone(r, h):
+    """ GLSL
+    float sdCone( in vec3 p, in vec2 c, float h )
+    {
+        // c is the sin/cos of the angle, h is height
+        // Alternatively pass q instead of (c,h),
+        // which is the point at the base in 2D
+        vec2 q = h*vec2(c.x/c.y,-1.0);
+            
+        vec2 w = vec2( length(p.xz), p.y );
+        vec2 a = w - q*clamp( dot(w,q)/dot(q,q), 0.0, 1.0 );
+        vec2 b = w - q*vec2( clamp( w.x/q.x, 0.0, 1.0 ), 1.0 );
+        float k = sign( q.y );
+        float d = min(dot( a, a ),dot(b, b));
+        float s = max( k*(w.x*q.y-w.y*q.x),k*(w.y-q.y)  );
+        return sqrt(d)*sign(s);
+    }
+    """
+    def sdf(p):
+        # cx, cy = unconcat(c)
+        # q = h * concat(cx / cy, -one(cx))
+        q = concat(r, -h)
+        px, py, pz = unconcat(p)
+        qx, qy = unconcat(q)
+        w = concat(length(concat(px, pz)), py)
+        wx, wy = unconcat(w)
+        a = w - q * clamp(dot(w, q) / dot(q, q), 0.0, 1.0)
+        b = w - q * concat(clamp(wx / qx, 0.0, 1.0), one(wx))
+        k = sign(qy)
+        d = minimum(dot(a, a), dot(b, b))
+        s = maximum(k * (wx * qy - wy * qx), k * (wy - qy))
+        d = sqrt(d) * sign(s)
+        return d
+    return sdf
+
+
+def capsule(r, h):
+    """ GLSL
+    float sdVerticalCapsule( vec3 p, float h, float r )
+    {
+        p.y -= clamp( p.y, 0.0, h );
+        return length( p ) - r;
+    }
+    """
+    def sdf(p):
+        px, py, pz = unconcat(p)
+        py = py - clamp(py, 0.0, h)
+        d = length(concat(px, py, pz)) - r
+        return d
+    return sdf
+
+
+def ellipsoid(r):
+    """ GLSL
+    float sdbEllipsoidV1( in vec3 p, in vec3 r )
+    {
+        float k1 = length(p/r);
+        return (k1-1.0)*min(min(r.x,r.y),r.z);
+    }
+    float sdbEllipsoidV2( in vec3 p, in vec3 r )
+    {
+        float k1 = length(p/r);
+        float k2 = length(p/(r*r));
+        return k1*(k1-1.0)/k2;
+    }
+    """
+    def sdf(p):
+
+        k1 = length(p / r)
+        d = (k1 - 1.0) * minimum(*unconcat(r))
+        return d
+
+        # NOTE: The improved version does not work well
+        # https://www.iquilezles.org/www/articles/ellipsoids/ellipsoids.htm
+        k1 = length(p / r)
+        k2 = length(p / (r ** 2))
+        d = k1 * (k1 - 1.0) / k2
+        return d
+
+    return sdf
+
+
+def rhombus(s, h):
+    """ GLSL
+    float sdRhombus(vec3 p, float la, float lb, float h, float ra)
+    {
+        p = abs(p);
+        vec2 b = vec2(la,lb);
+        float f = clamp( (ndot(b,b-2.0*p.xz))/dot(b,b), -1.0, 1.0 );
+        vec2 q = vec2(length(p.xz-0.5*b*vec2(1.0-f,1.0+f))*sign(p.x*b.y+p.z*b.x-b.x*b.y)-ra, p.y-h);
+        return min(max(q.x,q.y),0.0) + length(max(q,0.0));
+    }
+    """
+    def sdf(p):
+        p = abs(p)
+        px, py, pz = unconcat(p)
+        sx, sy = unconcat(s)
+        f = clamp(ndot(s, s - 2.0 * concat(px, pz)) / dot(s, s), -1.0, 1.0)
+        q = concat(length(concat(px, pz) - 0.5 * s * concat(1.0 - f, 1.0 + f)) * sign(px * sy + pz * sx - sx * sy), py - h)
+        return -relu(-maximum(*unconcat(q))) + length(relu(q))
+    return sdf
+
+
+def triprism(s, h):
+    """ GLSL
+    float sdTriPrism( vec3 p, vec2 h )
+    {
+        vec3 q = abs(p);
+        return max(q.z-h.y,max(q.x*0.866025+p.y*0.5,-p.y)-h.x*0.5);
+    }
+    """
+    def sdf(p):
+        q = abs(p)
+        px, py, pz = unconcat(p)
+        qx, qy, qz = unconcat(q)
+        d = maximum(qz - h, maximum(qx * np.cos(np.pi / 6.0) + py * np.sin(np.pi / 6.0), -py) - s * 0.5)
+        return d
+    return sdf
+
+
+def hexprism(s, h):
+    """ GLSL
+    float sdHexPrism( vec3 p, vec2 h )
+    {
+        const vec3 k = vec3(-0.8660254, 0.5, 0.57735);
+        p = abs(p);
+        p.xy -= 2.0*min(dot(k.xy, p.xy), 0.0)*k.xy;
+        vec2 d = vec2(
+            length(p.xy-vec2(clamp(p.x,-k.z*h.x,k.z*h.x), h.x))*sign(p.y-h.x),
+            p.z-h.y );
+        return min(max(d.x,d.y),0.0) + length(max(d,0.0));
+    }
+    """
+    def sdf(p):
+        k = tensor(p, [-np.cos(np.pi / 6.0), np.sin(np.pi / 6.0), np.tan(np.pi / 6.0)])
+        kx, ky, kz = unconcat(k)
+        q = abs(p)
+        qx, qy, qz = unconcat(q)
+        t = 2.0 * relu(-dot(concat(kx, ky), concat(qx, qy)))
+        qx = qx + t * kx
+        qy = qy + t * ky
+        d = concat(length(concat(qx, qy) - concat(clamp(qx, -kz * s, kz * s), expand(s, qx))) * sign(qy - s), qz - h)
+        d = -relu(-maximum(*unconcat(d))) + length(relu(d))
+        return d
+    return sdf
+
+
+def octahedron(s):
+    """GLSL
+    float sdOctahedron( vec3 p, float s)
+    {
+        p = abs(p);
+        float m = p.x+p.y+p.z-s;
+        vec3 q;
+            if( 3.0*p.x < m ) q = p.xyz;
+        else if( 3.0*p.y < m ) q = p.yzx;
+        else if( 3.0*p.z < m ) q = p.zxy;
+        else return m*0.57735027;
+            
+        float k = clamp(0.5*(q.z-q.y+s),0.0,s); 
+        return length(vec3(q.x,q.y-s+k,q.z-k)); 
+    }
+    """
+    def sdf(p):
+        p = abs(p)
+        px, py, pz = unconcat(p)
+        m = px + py + pz - s
+        q = torch.where(
+            3.0 * px < m,
+            concat(px, py, pz),
+            torch.where(
+                3.0 * py < m,
+                concat(py, pz, px),
+                concat(pz, px, py),
+            ),
+        )
+        qx, qy, qz = unconcat(q)
+        k = clamp(0.5 * (qz - qy + s), 0.0, s); 
+        d = length(concat(qx, qy - s + k, qz - k))
+        d = torch.where((3.0 * px < m) | (3.0 * py < m) | (3.0 * pz < m), d, m * np.tan(np.pi / 6.0))
+        return d
+    return sdf
+
+
+def pyramid(h):
+    """ GLSL
+    float sdPyramid( vec3 p, float h)
+    {
+        float m2 = h*h + 0.25;
+            
+        p.xz = abs(p.xz);
+        p.xz = (p.z>p.x) ? p.zx : p.xz;
+        p.xz -= 0.5;
+
+        vec3 q = vec3( p.z, h*p.y - 0.5*p.x, h*p.x + 0.5*p.y);
+        
+        float s = max(-q.x,0.0);
+        float t = clamp( (q.y-0.5*p.z)/(m2+0.25), 0.0, 1.0 );
+            
+        float a = m2*(q.x+s)*(q.x+s) + q.y*q.y;
+        float b = m2*(q.x+0.5*t)*(q.x+0.5*t) + (q.y-m2*t)*(q.y-m2*t);
+            
+        float d2 = min(q.y,-q.x*m2-q.y*0.5) > 0.0 ? 0.0 : min(a,b);
+            
+        return sqrt( (d2+q.z*q.z)/m2 ) * sign(max(q.z,-p.y));
+    }
+    """
+    def sdf(p):
+        m = h ** 2 + 0.25
+        px, py, pz = unconcat(p)
+        px, pz = abs(px), abs(pz)
+        px, pz = maximum(px, pz), minimum(pz, px)
+        px, pz = px - 0.5, pz - 0.5
+        q = concat(pz, h * py - 0.5 * px, h * px + 0.5 * py)
+        qx, qy, qz = unconcat(q)
+        s = relu(-qx)
+        t = clamp((qy - 0.5 * pz) / (m + 0.25), 0.0, 1.0)
+        a = m * (qx + s) ** 2 + qy ** 2
+        b = m * (qx + 0.5 * t) ** 2 + (qy - m * t) ** 2
+        d = torch.where(minimum(qy, -qx * m - qy * 0.5) > 0.0, zero(a), minimum(a, b))
+        d = sqrt((d + qz ** 2) / m) * sign(maximum(qz, -py))
+        return d
+    return sdf
+
+
+def plane(n, h):
+    """ GLSL
+    float sdPlane( vec3 p, vec3 n, float h )
+    {
+        // n must be normalized
+        return dot(p,n) + h;
+    }
+    """
+    def sdf(p):
+        d = dot(p, n) + h
+        return d
+    return sdf
+
+
+# ---------------- Geometric Transformations ---------------- #
+
+
+def translation(sdf, t):
+    """ GLSL
+    vec3 opTx( in vec3 p, in transform t, in sdf3d primitive )
+    {
+        return primitive( invert(t)*p );
+    }
+    """
+    def wrapper(p):
+        d = sdf(p - t)
+        return d
+    return wrapper
+
+
+def rotation(sdf, R):
+    """ GLSL
+    vec3 opTx( in vec3 p, in transform t, in sdf3d primitive )
+    {
+        return primitive( invert(t)*p );
+    }
+    """
+    def wrapper(p):
+        d = sdf(matmul(transpose(R), p))
+        return d
+    return wrapper
+
+
+def scaling(sdf, s):
+    """ GLSL
+    float opScale( in vec3 p, in float s, in sdf3d primitive )
+    {
+        return primitive(p/s)*s;
+    }
+    """
+    def wrapper(p):
+        d = sdf(p / s) * s
+        return d
+    return wrapper
+
+
+def elongation(sdf, s):
+    """ GLSL
+    float opElongate( in sdf3d primitive, in vec3 p, in vec3 h )
+    {
+        vec3 q = abs(p)-h;
+        return primitive( max(q,0.0) ) + min(max(q.x,max(q.y,q.z)),0.0);
+    }
+    """
+    def wrapper(p):
+        q = abs(p) - s
+        d = sdf(relu(q)) - relu(-maximum(*unconcat(q)))
+        return d
+    return wrapper
+
+
+def rounding(sdf, r):
+    """  GLSL
+    float opRound( in sdf3d primitive, float rad )
+    {
+        return primitive(p) - rad
+    }
+    """
+    def wrapper(p):
+        d = sdf(p) - r
+        return d
+    return wrapper
+
+
+def onion(sdf, t):
+    """ GLSL
+    float opOnion( in float sdf, in float thickness )
+    {
+        return abs(sdf)-thickness;
+    }
+    """
+    def wrapper(p):
+        d = abs(sdf(p)) - t
+        return d
+    return wrapper
+
+
+def infinite_repetition(sdf, c):
+    """ GLSL
+    float opRep( in vec3 p, in vec3 c, in sdf3d primitive )
+    {
+        vec3 q = mod(p+0.5*c,c)-0.5*c;
+        return primitive( q );
+    }
+    """
+    def wrapper(p):
+        q = mod(p + 0.5 * c, c) - 0.5 * c
+        d = sdf(q)
+        return d
+    return wrapper
+
+
+def finite_repetition(sdf, c, l):
+    """ GLSL
+    vec3 opRepLim( in vec3 p, in float c, in vec3 l, in sdf3d primitive )
+    {
+        vec3 q = p-c*clamp(round(p/c),-l,l);
+        return primitive( q );
+    }
+    """
+    def wrapper(p):
+        q = p - c * clamp(round(p / c), -l, l)
+        d = sdf(q)
+        return d
+    return wrapper
+
+
+def twist(sdf, k):
+    """ GLSL
+    float opTwist( in sdf3d primitive, in vec3 p )
+    {
+        const float k = 10.0; // or some other amount
+        float c = cos(k*p.y);
+        float s = sin(k*p.y);
+        mat2  m = mat2(c,-s,s,c);
+        vec3  q = vec3(m*p.xz,p.y);
+        return primitive(q);
+    }
+    """
+    def wrapper(p):
+        px, py, pz = unconcat(p)
+        c = cos(k * py)
+        s = sin(k * py)
+        m = stack(concat(c, -s), concat(s, c))
+        p = concat(px, pz)
+        q = concat(matmul(m, p), py)
+        d = sdf(q)
+        return d
+    return wrapper
+
+
+def bend(sdf, k):
+    """ GLSL
+    float opCheapBend( in sdf3d primitive, in vec3 p )
+    {
+        const float k = 10.0; // or some other amount
+        float c = cos(k*p.x);
+        float s = sin(k*p.x);
+        mat2  m = mat2(c,-s,s,c);
+        vec3  q = vec3(m*p.xy,p.z);
+        return primitive(q);
+    }
+    """
+    def wrapper(p):
+        px, py, pz = unconcat(p)
+        c = cos(k * px)
+        s = sin(k * px)
+        m = stack(concat(c, -s), concat(s, c))
+        q = concat(matmul(m, concat(px, py)), pz)
+        d = sdf(q)
+        return d
+    return wrapper
+
+
+def symmetry_x(sdf):
+    """ GLSL
+    float opSymX( in vec3 p, in sdf3d primitive )
+    {
+        p.x = abs(p.x);
+        return primitive(p);
+    }
+    """
+    def wrapper(p):
+        px, py, pz = unconcat(p)
+        d = sdf(concat(abs(px), py, pz))
+        return d
+    return wrapper
+
+
+def symmetry_y(sdf):
+    """ GLSL
+    float opSymX( in vec3 p, in sdf3d primitive )
+    {
+        p.x = abs(p.x);
+        return primitive(p);
+    }
+    """
+    def wrapper(p):
+        px, py, pz = unconcat(p)
+        d = sdf(concat(px, abs(py), pz))
+        return d
+    return wrapper
+
+
+def symmetry_z(sdf):
+    """ GLSL
+    float opSymX( in vec3 p, in sdf3d primitive )
+    {
+        p.x = abs(p.x);
+        return primitive(p);
+    }
+    """
+    def wrapper(p):
+        px, py, pz = unconcat(p)
+        d = sdf(concat(px, py, abs(pz)))
+        return d
+    return wrapper
+```

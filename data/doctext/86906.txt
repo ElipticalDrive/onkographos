@@ -1,0 +1,1267 @@
+# Voxel Terrain Demo 
+A  procedural chunk based voxel terrain generation demo built using threejs custom shaders and textures. 
+Noise functions derived from [open-simplex-noise](https://github.com/joshforisha/open-simplex-noise-js). 
+- runs entirely in webgl compatible web browsers. 
+
+## Note
+Needs a lot of optimizations, and would like to eventually add a Level-Of-Detail system to enable further render distances.
+
+### src/main.ts
+```
+import { Vector3 } from "three";
+import { ChunkGenerator } from "./generation/world";
+
+import { initWGLScene } from "./helpers/webGLScene";
+
+const FPS = 144;
+const FRAME_DELAY = 1000/FPS
+
+//init the scene
+const { scene, camera, renderer, d_controls } = initWGLScene()
+document.body.appendChild(renderer.domElement)
+
+camera.position.set(50,80,100)
+camera.lookAt(new Vector3(60,75,100,))
+
+
+//create a generator
+const generator = new ChunkGenerator({
+  seed: Date.now(),
+  equator_temp: 1,
+  temp_decay_coeff: .1,
+  max_elevation: 255,
+  world_size: 1000,
+  water_level: 40
+})
+
+
+
+
+//really shitty way of adding shader uniform updates
+let updatePipeline:(()=>void)[] = [] 
+let doUpdate = () => {
+  for(const update of updatePipeline){
+    update()
+  } 
+  d_controls.update()
+}
+
+
+
+function animate(){
+  renderer.render(scene,camera);
+  doUpdate();
+  setTimeout(()=>{
+    requestAnimationFrame(animate)
+  },FRAME_DELAY)
+}
+requestAnimationFrame(animate)
+
+const sleep = (ms:number) => new Promise(resolve=>setTimeout(resolve,ms))
+
+async function generate(n=20){
+  const center = camera.position.clone()
+  center.x = Math.floor(center.x/8)
+  center.y = Math.floor(center.y/8)
+  center.z = Math.floor(center.z/8)
+  let half = n/2
+  const current = center.clone();
+  for(let x = -half; x <= half; x++){
+    for(let z = -half; z <= half; z++){
+      for(let y = -n; y <= n; y++){
+        current.copy(center).add(new Vector3(x,y,z))
+        const chunk = await generator.get_chunk(current)
+        scene.add(chunk.mesh)
+        updatePipeline.push(chunk.update)
+        if(x == 0 && z == 0 && y == n){
+          camera.position.copy(current.multiplyScalar(8))
+        }
+      }
+      await sleep(0.1)
+  
+    }
+    
+  }
+
+
+  
+}
+
+generate(20)
+```
+
+### src/vite-env.d.ts
+```
+/// <reference types="vite/client" />
+```
+
+### src/generation/terrain_constants.ts
+```
+export const CHUNK_SIZE = 8 // 8 x 8 x 8 chunks
+export const VOXEL_SIZE = 1 //in meters
+export const CHUNK_WORLD_SIZE = CHUNK_SIZE*VOXEL_SIZE; //length of a side of a chunk in world units (meters)
+export const CHUNK_LENGTH = CHUNK_SIZE**3 // the size of a "flattened" chunk array
+
+export const VOXEL_TYPES = { 
+    AIR: 0 ,
+    GRASS: 1, 
+    DIRT: 2,
+    PACKED_DIRT:3,
+    SAND:4,
+    WATER: 5, 
+    STONE: 6, 
+    MUD: 7,
+    SANDSTONE: 8,
+    SNOW: 9, 
+    MYCELIUM: 10,
+    FERTILE_DIRT: 11,
+    GNEISS: 12, 
+    MARBLE: 13,
+    GABBRO: 14,
+    ANDESITE: 15,
+    BASALT: 17,
+    LAVA: 18, 
+    RED_SAND: 19,
+    RED_SANDSTONE: 20,
+    __END__: 20
+}
+export const FACE_DIRECTIONS = [
+    [0,1,0],//top
+    [0,-1,0],//bottom
+    [1,0,0], //right
+    [-1,0,0], //left
+    [0,0,1], //front
+    [0,0,-1], //back
+]
+```
+
+### src/generation/world.ts
+```
+/**
+ --------------------------------------------------------
+    Created by Andrew Bloese on Jan 27, 2025 
+ --------------------------------------------------------
+  Utilizes multiple different octaved noise functions 
+  in order to procedurally generate terrain from a given 
+  client seed. 
+
+  - Chunk Based Rendering: 8x8x8 chunks of voxels
+  - Only visible/ chunk edge faces are rendererd 
+    To-Do: 
+    ======
+    -> prevent rendering non-visible chunk borders. 
+    -> implement frustum culling 
+    -> decouple generation and rendering logic
+*/
+
+//threejs
+import { 
+    Box3, BufferAttribute, BufferGeometry, Clock, 
+    Frustum, Matrix4, Mesh, PerspectiveCamera, 
+    ShaderMaterial, Vector3
+} from "three";
+
+//noise utils
+import { make2dNoise, n_shuffle_seed } from "../noise-util/open-simplex-noise-2d";
+import { OctavedNoise2d } from "../noise-util/noise";
+
+//encoder/decoder
+import { RunLengthEncoder } from "../helpers/rle";
+import { packFaceData } from "../helpers/voxel_pack";
+
+//misc utilities
+import { getTextureAtlas } from "../helpers/textureLoader";
+import { sqDist, clamp } from "../helpers/math";
+
+//game constants
+import { 
+    CHUNK_SIZE, VOXEL_SIZE, CHUNK_WORLD_SIZE,
+    CHUNK_LENGTH, VOXEL_TYPES, FACE_DIRECTIONS
+} from "./terrain_constants"
+
+//shaders
+import voxel_vert_shader from '../shaders/voxel.vert'
+import voxel_frag_shader from '../shaders/voxel.frag'
+
+type WorldConfig = { 
+    seed:number, 
+    equator_temp: number // 0 ≤ equator_temp ≤ 1
+    temp_decay_coeff:number //scales the falloff of temperature from equator
+    max_elevation: number // 0 ≤ y ≤ max_elevation
+    world_size: number // 0 ≤ x,z ≤ world_size
+    water_level: number //at or below this elevation is considered water on initial generation  
+}
+
+//"semantic" type names 
+type ChunkKeyType = string 
+type VoxelID = number; 
+
+interface WorldGeneratorFunctions { 
+    moisture: OctavedNoise2d,
+    height: OctavedNoise2d,
+    wackiness: OctavedNoise2d,
+    temperature: (z:number)=>number
+}
+
+
+//an update function for updating uniforms, and the chunk's actual mesh (cached)
+type ChunkMesh = {
+    mesh: Mesh,
+    update: ()=>void
+
+}
+
+//cache the visible faces, as well as the rle voxel data
+type ChunkCacheItem = {
+    enc: Uint16Array
+    faces: Map<VoxelID,number[]>,
+    n: number,
+    is_empty: boolean
+}
+
+export class ChunkGenerator{ 
+    #noises:WorldGeneratorFunctions
+    #config:WorldConfig
+    #c_cache:Map<ChunkKeyType,ChunkCacheItem> 
+    #m_cache:Map<ChunkKeyType,ChunkMesh>
+
+    #frustum:Frustum
+    #projScreenMatrix:Matrix4
+    
+    static CLOCK = new Clock(true);
+
+    constructor(config:WorldConfig){
+        const hnoise = make2dNoise(config.seed)
+        const mseed = n_shuffle_seed(config.seed,10)
+        const wseed = n_shuffle_seed(mseed, 10) //seed for "wackiness" noise value
+        const mnoise = make2dNoise(mseed)
+        const wnoise = make2dNoise(wseed)
+        
+        const eq = config.world_size/2
+
+        this.#config = config
+        this.#noises = {
+            moisture: new OctavedNoise2d(mnoise,1.0,200),
+            height: new OctavedNoise2d(hnoise,1.2,400),
+            wackiness: new OctavedNoise2d(wnoise,1,20),    
+            temperature(z){
+                const eq_dist = Math.abs(z-eq)
+                return clamp(config.equator_temp - eq_dist*config.temp_decay_coeff, 0, 1)   
+            }
+        }
+        this.#c_cache = new Map<ChunkKeyType,ChunkCacheItem>();
+        this.#m_cache = new Map<ChunkKeyType,ChunkMesh>();
+        this.#frustum = new Frustum()
+        this.#projScreenMatrix = new Matrix4()
+    }
+
+    #determineGeneratedVoxel(genHeight:number,wackiness:number, worldPos:Vector3){
+        //UNDERWATER -> pos.y < genHeight
+        if(worldPos.y < this.#config.water_level){
+            //top is water
+            if(worldPos.y >= genHeight) return VOXEL_TYPES.WATER
+            // 2 meter deep of sand
+            if(worldPos.y + 2 >= genHeight) return VOXEL_TYPES.SAND
+            // 2(sand) + 6(mud) = 8
+            if(worldPos.y + 8 >= genHeight) return VOXEL_TYPES.MUD
+            // 2(sand) + 6(mud) + 6(sandstone)
+            if(worldPos.y + 14 >= genHeight ) return VOXEL_TYPES.SANDSTONE
+            return VOXEL_TYPES.STONE
+        }
+        //empty voxel, return without determining biome
+        if(worldPos.y > genHeight) return VOXEL_TYPES.AIR
+        //assume these are both between 0..1 
+        const moisture = this.#noises.moisture.eval(worldPos.x,worldPos.z)
+        const temperature = this.#noises.temperature(worldPos.z)
+
+
+        // DESERT -> dry and hot
+        if(moisture <= .3 && temperature >= .7){
+            // 3 sand , 4 sandstone, stone
+            if(worldPos.y + 3 >= genHeight) return VOXEL_TYPES.SAND
+            if(worldPos.y + 7 >= genHeight) return VOXEL_TYPES.SANDSTONE
+            return VOXEL_TYPES.STONE
+        }
+
+        // TUNDRA -> dry and cold 
+        if(moisture <=.4 && temperature <= .3){
+            //1 snow, 5 packed dirt, stone
+            if(worldPos.y + 1 >= genHeight) return VOXEL_TYPES.SNOW
+            if(worldPos.y + 6 >= genHeight) return VOXEL_TYPES.PACKED_DIRT
+            return VOXEL_TYPES.STONE; 
+        }
+
+
+        //super moist (ohhh yeahh ^o^)
+        if(moisture > .7 && wackiness){
+            //hot and wacky -> mushrooms
+            if(wackiness > .7 && temperature > .7){
+                //1 mycelium -> 6 dirt -> stone
+                if(worldPos.y+1 >= genHeight) return VOXEL_TYPES.MYCELIUM
+                if(worldPos.y + 7 >= genHeight) return VOXEL_TYPES.DIRT
+                return VOXEL_TYPES.STONE
+            }
+            
+            //jungle
+            //1 grass | fertile dirt ->  6 dirt -> stone
+            if(worldPos.y + 1 >= genHeight) return VOXEL_TYPES.GRASS
+            if(worldPos.y + 3 >= genHeight ) return VOXEL_TYPES.FERTILE_DIRT
+            if(worldPos.y + 7 >= genHeight) return VOXEL_TYPES.DIRT
+            return VOXEL_TYPES.STONE
+
+        }
+
+
+        //default generation = grass -> 5 dirt -> stone
+        if(worldPos.y + 1 >= genHeight) return VOXEL_TYPES.GRASS
+        if(worldPos.y + 6 >= genHeight) return VOXEL_TYPES.DIRT
+        return VOXEL_TYPES.STONE
+    }
+
+    #generateChunk(chunk_coords:Vector3){
+        const world = new Vector3()
+        const cacheKey = `${chunk_coords.x},${chunk_coords.y},${chunk_coords.z}`
+   
+
+        const c_cache_hit = this.#c_cache.get(cacheKey)
+        if(c_cache_hit) return c_cache_hit
+
+
+        const voxelData = new Uint8Array(CHUNK_LENGTH)
+        //wackiness is per chunk 
+        const chunk_wackiness_factor = this.#noises.wackiness.eval(chunk_coords.x/100,chunk_coords.z/100, 10);
+        let chunk_exp = 1
+        if(chunk_wackiness_factor < .2) //flatlands
+            chunk_exp = 16
+        else if(chunk_wackiness_factor < .4){
+            chunk_exp = 8
+        } else if(chunk_wackiness_factor < .6){
+            chunk_exp = 2
+        }
+        else if (chunk_wackiness_factor > .8){
+            chunk_exp = 0.5
+        } else chunk_exp  = chunk_wackiness_factor
+
+        //populate voxel data
+        
+        for(let x = 0; x < CHUNK_SIZE; x++){
+            world.x = chunk_coords.x * CHUNK_WORLD_SIZE + x * VOXEL_SIZE
+            for(let z = 0; z < CHUNK_SIZE; z++){
+                world.z = chunk_coords.z * CHUNK_WORLD_SIZE + z * VOXEL_SIZE
+                const e = Math.pow(this.#noises.height.eval(world.x,world.z), chunk_exp)
+                const genHeight = e * this.#config.max_elevation; 
+                for(let y = 0; y < CHUNK_SIZE; y++){
+                    world.y = chunk_coords.y * CHUNK_WORLD_SIZE + y * VOXEL_SIZE
+                    const voxel_type = this.#determineGeneratedVoxel(genHeight,chunk_wackiness_factor, world); 
+                    const i = x + y*CHUNK_SIZE + z *CHUNK_SIZE*CHUNK_SIZE
+                    voxelData[i] = voxel_type;
+                }
+            }
+        }
+        const encVoxels = RunLengthEncoder.encode(voxelData)
+
+        
+        
+        //construct list of only visible faces
+        const visible = new Map<VoxelID,number[]>
+        const entry = { 
+            enc: encVoxels,
+            faces: visible,
+            n: 0,
+            is_empty: false
+        }
+        
+        //empty chunk,  skip 
+        if(encVoxels.length == 2 && encVoxels[1] === VOXEL_TYPES.AIR) {
+            entry.is_empty = true; //flag empty 
+            this.#c_cache.set(cacheKey,entry)
+            return entry; 
+        }
+        
+
+        
+
+
+        let nidx = 0, sz = 0;
+        for(let x = 0; x < CHUNK_SIZE; x++){
+            for(let z = 0; z < CHUNK_SIZE; z++){
+                for(let y = 0; y < CHUNK_SIZE; y++){
+                    const idx = x + y * CHUNK_SIZE + z * CHUNK_SIZE*CHUNK_SIZE
+                    if(!voxelData[idx]) continue //undefined or air block... skip that shit
+                    for(let d = 0; d < FACE_DIRECTIONS.length;d++ ){
+                        const [ox,oy,oz] = FACE_DIRECTIONS[d]
+                        //neighbor voxel x,y,z
+                        const [nx, ny, nz] = [x + ox , y + oy, z + oz] 
+                        //only compute buffer index if not out of bounds... 
+                        const oob = nx < 0 || nx >= CHUNK_SIZE || ny < 0 || ny >= CHUNK_SIZE || nz < 0 || nz >= CHUNK_SIZE
+                        if(!oob) nidx = nx + ny * CHUNK_SIZE + nz *CHUNK_SIZE*CHUNK_SIZE;
+                        //neighbor is outside of chunk or empty -> current face is visible
+                        if(oob || voxelData[nidx]==VOXEL_TYPES.AIR || voxelData[nidx] == VOXEL_TYPES.WATER){
+                            const packed_face = packFaceData(x,y,z,voxelData[idx],d);
+                            const list = visible.get(voxelData[idx])
+                            if(!list) visible.set(voxelData[idx], [packed_face])
+                            else list.push(packed_face)
+                            sz++
+                        }
+                    }
+                }
+            }
+        }
+
+
+        //cache the encoded voxels, # of faces, and the "packed" faces themselves
+        entry.n = sz
+        this.#c_cache.set(cacheKey,entry)
+        
+        return entry
+    }
+    
+    async get_chunk(chunk_coords:Vector3){
+
+        const cacheKey = `${chunk_coords.x},${chunk_coords.y},${chunk_coords.z}`
+
+        //avoid rebuilding meshes if possible
+        const meshCacheHit = this.#m_cache.get(cacheKey);
+        if(meshCacheHit){
+            return meshCacheHit
+        }
+        
+        //avoid regenerating / recalculating visible blocks in a chunk if possible
+        let num_faces:number = 0, faces:Map<VoxelID,number[]>;
+        const chunkCacheHit = this.#c_cache.get(cacheKey);
+
+        if(chunkCacheHit){
+            num_faces = chunkCacheHit.n
+            faces = chunkCacheHit.faces
+        } else { 
+            const chunk = this.#generateChunk(chunk_coords);
+            num_faces = chunk.n
+            faces = chunk.faces
+        }
+
+        
+        //2 triangles per face and 3 vertices per triangle = x6
+        const num_vertices = num_faces * 6; 
+
+        const total_indices_per_face = 6; 
+
+        const indices = new Uint16Array(num_faces * total_indices_per_face);
+        
+        const atlas = await getTextureAtlas()
+        if(!atlas) throw new Error("failed to load atlas, cannot continue...")
+
+
+        const uniforms = {
+            u_chunk_size: {value: CHUNK_SIZE },
+            u_voxel_size: { value: VOXEL_SIZE},
+            u_chunk_indices: {value: chunk_coords.clone()},
+            u_time: { value: ChunkGenerator.CLOCK.getElapsedTime()},
+            textureAtlas: { value: atlas}
+        }
+
+
+        const packed_buffer = new Float32Array(num_vertices);
+        const position_buffer = new Float32Array(num_vertices*3);//x,y,z for each
+        const vert_id_buffer = new Float32Array(num_vertices);
+        
+        let idx = 0, iidx = 0
+        for(const [_,instances] of faces){
+            for(const packedPoint of instances){
+                // unpackChunkCoords(packedPoint,faceView);//reuse 'face view' for packed data
+                //
+                /* face consists of...
+                    A-----B 
+                    |    /|
+                    |   / |
+                    |  *  | 
+                    | /   |
+                    |/    |
+                    C-----D
+                    NOTE: * is the packed point current position and is (VOXEL_SIZE/2) away from each face in all directions
+                 */
+                //make 4 'copies' to be passed as attribute, to be interpreted by shader
+                //also 4 new entries to the vertices
+                for(let i = 0; i < 4; i++){
+                    position_buffer[3*(idx)]= 0
+                    position_buffer[3*(idx)+1]= 0
+                    position_buffer[3*(idx)+2]= 0
+                    vert_id_buffer[idx] = i
+                    packed_buffer[idx] = packedPoint
+                    idx++
+                   
+                }
+                const baseIndex = idx - 4;
+                indices[iidx++] = baseIndex;
+                indices[iidx++] = baseIndex + 1;
+                indices[iidx++] = baseIndex + 2;
+                indices[iidx++] = baseIndex + 1;
+                indices[iidx++] = baseIndex + 3;
+                indices[iidx++] = baseIndex + 2;
+            }
+        }
+        const faceMaterial = new ShaderMaterial({
+            vertexShader: voxel_vert_shader,
+            fragmentShader: voxel_frag_shader,
+            uniforms,
+        })
+
+        
+
+        const geo = new BufferGeometry()
+        const packed_attribute = new BufferAttribute(packed_buffer,1)
+        const idAttribute = new BufferAttribute(vert_id_buffer, 1)
+        const positionAttribute = new BufferAttribute(position_buffer,3)
+        geo.setAttribute("position",positionAttribute)
+        geo.setAttribute("packedData",packed_attribute)
+        geo.setAttribute("vertexID", idAttribute);
+        geo.setIndex(new BufferAttribute(indices,1))
+        positionAttribute.needsUpdate = true
+        const mesh = new Mesh(geo,faceMaterial)
+        const update = () =>{
+             uniforms.u_time.value = ChunkGenerator.CLOCK.getElapsedTime()
+        }
+        const chunkmesh:ChunkMesh = { 
+            mesh, update
+        }
+        this.#m_cache.set(cacheKey,chunkmesh);
+
+        return chunkmesh
+
+    } 
+
+    //!broken
+    getVisibleChunksList(camera:PerspectiveCamera, renderRadius:number){
+        const center_chunk_coords = new Vector3(
+            Math.floor(camera.position.x/CHUNK_WORLD_SIZE),
+            Math.floor(camera.position.y/CHUNK_WORLD_SIZE),
+            Math.floor(camera.position.z/CHUNK_WORLD_SIZE),
+        )
+
+        this.#projScreenMatrix.multiplyMatrices(camera.projectionMatrix,camera.matrixWorldInverse);
+        this.#frustum.setFromProjectionMatrix(this.#projScreenMatrix)
+        
+        const visible:Vector3[] = [center_chunk_coords] 
+        const checked = new Set<string>();
+
+        let currentRadius = renderRadius
+            for(let x = -currentRadius; x <= currentRadius; x++){
+                for(let z = -currentRadius;z <= currentRadius; z++){
+                    for(let y = -currentRadius; y <= currentRadius; y++){
+                        const currentPos = new Vector3(x,y,z).add(center_chunk_coords);
+                        const key = `${currentPos.x},${currentPos.y},${currentPos.z}`
+                        if(checked.has(key)){
+                            continue; 
+                        }
+                        checked.add(key)
+                        const chunkWorldStart = currentPos.clone().multiplyScalar(CHUNK_WORLD_SIZE);
+                        const bounds = new Box3(
+                            chunkWorldStart.clone(),
+                            chunkWorldStart.clone().addScalar(CHUNK_WORLD_SIZE)
+                        );
+                        if(this.#frustum.intersectsBox(bounds)){
+                            console.log(bounds)
+                            visible.push(currentPos);
+                        }
+                    }
+                }
+            }
+        return visible.sort((a,b)=>sqDist(center_chunk_coords,a) - sqDist(center_chunk_coords,b))
+    }
+
+
+}
+```
+
+### src/helpers/math.ts
+```
+import { Vector3 } from "three"
+
+export const sqDist = (u:Vector3,v:Vector3) => {
+    const dx = u.x - v.x
+    const dy = u.y - v.y
+    const dz = u.z - v.z
+    return dx * dx + dy * dy + dz * dz
+} 
+
+
+export const clamp = (x:number,min:number,max:number) => {
+    if(x < min) return min;
+    if(x > max) return max
+    return x
+}
+```
+
+### src/helpers/rle.ts
+```
+/*---
+  Created by Andrew Bloese
+  Jan 27, 2025
+  ---
+  created to enable run length encoding/decoding of voxel_data (int in range 0-255)
+
+ */
+
+export const RunLengthEncoder = {
+    encode(voxel_data:Uint8Array){
+
+        let count = 1, current = voxel_data[0], n_pairs  = 0 
+        for(let i = 1; i < voxel_data.length; i++){
+          if(voxel_data[i] == current) count++
+          else {
+              n_pairs++;
+              current = voxel_data[i]
+              count = 1
+          }
+        }
+        n_pairs++
+  
+        const e = new Uint16Array(n_pairs*2);
+        let idx = 0; 
+        current = voxel_data[0];
+        count = 1; 
+  
+        for(let i = 1; i < voxel_data.length; i++){
+            if(voxel_data[i] == current) count++
+            else { 
+              e[idx++] = count
+              e[idx++] = current
+              current = voxel_data[i]
+              count = 1
+            }
+        }
+        e[idx++] = count
+        e[idx++] = current
+  
+
+        return e
+        
+  
+    },
+    decode(e:Uint16Array,sz:number){
+        const data = new Uint8Array(sz)
+        let p = 0
+        for(let i = 0; i < e.length; i+=2){ // for [count,type] of encoded
+            for(let j = 0; j < e[i]; j++){
+                data[p++] = e[i+1]
+            }
+        }
+        return data
+    }
+
+
+}
+```
+
+### src/helpers/textureLoader.ts
+```
+import { NearestFilter, Texture, TextureLoader } from "three";
+
+import atlasPath from "../shaders/textures.png"
+
+let atlas:Texture|undefined; 
+export async function getTextureAtlas(){
+    if(atlas) return atlas
+    try {
+        const loader = new TextureLoader();
+        atlas = await loader.loadAsync(atlasPath)
+        atlas.magFilter = NearestFilter;
+        atlas.minFilter = NearestFilter;
+        atlas.generateMipmaps = false; 
+        console.log(atlas)
+        return atlas
+
+        
+    } catch (error) {
+        console.error("failed to load textures...\n",error)
+        return null;
+    }
+
+    
+}
+```
+
+### src/helpers/voxel_pack.ts
+```
+/* Packing Strategy
+=====================
+FIELD   |   Bits
+ x      |     4
+ y      |     4
+ z      |     4
+ type   |     8
+ dir    |     3
+
+ * fits in uint32 or float32
+*/
+/**
+ * 
+ * @param x the local x [0..15] of the voxel center
+ * @param y the local y [0..15] of the voxel center
+ * @param z the local z [0..15] of the voxel center
+ * @param type the voxel type [0..255] (8 bit)
+ * @param direction the direction the voxel is facing [0..5] => game constant "FACE_DIRECTIONS.length"
+ * @returns the bit packed value
+ */
+export function packFaceData(x:number,y:number,z:number,type:number, direction:number){
+    const packed = (x << 20) | (y << 16) | (z << 12) | (type<<4) | (direction&0b111)
+    return packed
+}
+
+export type UnpackedFace = { x: number, y:number, z:number, type: number, direction: number}
+
+/**
+ * 
+ * @param packed some 32 bit int or float
+ * @param container the location to unpack the values to
+ * @example ```typescript
+    const faceView:UnpackedFace = { x: 0, y:0, z:0, type: 0, direction: 0}
+    unpackFaceData(packedValue,faceView);
+    console.log(faceView); 
+ * ```
+ */
+export function unpackFaceData(packed:number,container:UnpackedFace){
+    container.x = (packed >> 20) & 0b1111
+    container.y = (packed >> 16) & 0b1111
+    container.z = (packed >> 12) & 0b1111
+    container.type = (packed>>4) & 0xFF
+    container.direction = packed & 0b111
+}
+```
+
+### src/helpers/webGLScene.ts
+```
+import { Scene, WebGLRenderer, PerspectiveCamera } from 'three'
+import { OrbitControls } from 'three/examples/jsm/Addons.js'
+
+const FOV = 75
+const ASPECT = 1
+const NEAR = 0.01
+const FAR = 2000
+
+export function initWGLScene(){
+    const camera = new PerspectiveCamera(FOV,ASPECT, NEAR,FAR)
+    const renderer = new WebGLRenderer()
+    const scene = new Scene()
+    
+    //!Orbit Controls, DEBUG ONLY
+    const d_controls = new OrbitControls(camera,renderer.domElement)
+    
+
+    function _update_size(){
+        renderer.setSize(window.innerWidth,window.innerHeight)
+        camera.updateProjectionMatrix()
+        d_controls.update()
+    }
+
+    _update_size()
+    window.addEventListener("resize",_update_size)
+    
+    function cleanup(){
+        window.removeEventListener("resize",_update_size)
+    }
+
+    return { 
+        scene, camera, renderer, cleanup,
+        d_controls
+    }
+
+}
+```
+
+### src/noise-util/noise.ts
+```
+/*---
+  Created by Andrew Bloese
+  Jan 27, 2025
+  ---
+  custom implementation of 2d octaved noise using 2d noise derived from: 
+   -> https://github.com/joshforisha/open-simplex-noise-js
+  
+  memoizes evaluations of the noise function on each call in attempt to skip calculations later. 
+  
+*/
+import { NoiseFn2d, make2dNoise } from "./open-simplex-noise-2d"
+
+export class OctavedNoise2d { 
+    #evals :Map<string,number>
+    wavelength:number
+    amp:number
+    noise:NoiseFn2d
+
+    constructor(noiseFn:NoiseFn2d,amp:number,wavelength:number){
+      this.wavelength = wavelength
+      this.amp = amp
+      this.noise = noiseFn
+      this.#evals = new Map(); 
+    } 
+    eval(a:number,b:number,n_octaves=3){
+      const key = `${a},${b},${n_octaves}` 
+      const cache_hit = this.#evals.get(key)
+      if(cache_hit) return cache_hit; 
+      let oct = 1, res = 0, sum_amp = 0
+      for(let o = 0; o < n_octaves; o++){
+        let amp_local = (1/oct)*this.amp
+        sum_amp += amp_local
+        res += amp_local * this.noise(oct*(a/this.wavelength), oct * (b/this.wavelength))
+        oct *= 2
+      }
+      const ans = res/sum_amp
+      this.#evals.set(key,ans)
+      return ans
+    }
+}
+
+
+export function makeOctavedNoise2d(seed:number,wavelength:number,amp:number){
+    const n2d = make2dNoise(seed,true);//normalized 2d noise
+    return new OctavedNoise2d(n2d,amp,wavelength);
+}
+```
+
+### src/noise-util/open-simplex-noise-2d.ts
+```
+// Code derived from the following repo: 
+// https://github.com/joshforisha/open-simplex-noise-js
+
+
+export type NoiseFn2d = (x:number,y:number)=>number
+export type __2dContribution__ = {
+    dx: number
+    dy: number
+    xsb:number
+    ysb: number
+    next?: __2dContribution__
+}
+
+export function _shuffle_seed(seed:Uint32Array) {
+    var newSeed = new Uint32Array(1);
+    newSeed[0] = seed[0] * 1664525 + 1013904223;
+    return newSeed;
+}
+
+export function n_shuffle_seed(seed:number, n:number){
+    let s = new Uint32Array(1)
+    s[0] = seed
+    for(let i = 0; i < n; i++){
+        s = _shuffle_seed(s)
+    }
+    return s[0]
+}
+
+const NORM_2D = 1.0 / 47.0;
+const SQUISH_2D = (Math.sqrt(2 + 1) - 1) / 2;
+const STRETCH_2D = (1 / Math.sqrt(2 + 1) - 1) / 2;
+const base2D = [
+    [1, 1, 0, 1, 0, 1, 0, 0, 0],
+    [1, 1, 0, 1, 0, 1, 2, 1, 1],
+];
+const gradients2D = [
+    5,
+    2,
+    2,
+    5,
+    -5,
+    2,
+    -2,
+    5,
+    5,
+    -2,
+    2,
+    -5,
+    -5,
+    -2,
+    -2,
+    -5,
+];
+const lookupPairs2D = [
+    0,
+    1,
+    1,
+    0,
+    4,
+    1,
+    17,
+    0,
+    20,
+    2,
+    21,
+    2,
+    22,
+    5,
+    23,
+    5,
+    26,
+    4,
+    39,
+    3,
+    42,
+    4,
+    43,
+    3,
+];
+const p2D = [
+    0,
+    0,
+    1,
+    -1,
+    0,
+    0,
+    -1,
+    1,
+    0,
+    2,
+    1,
+    1,
+    1,
+    2,
+    2,
+    0,
+    1,
+    2,
+    0,
+    2,
+    1,
+    0,
+    0,
+    0,
+];
+
+function contribution2D(multiplier:number, xsb:number, ysb:number) {
+    
+    const c :__2dContribution__=  {
+        dx: -xsb - multiplier * SQUISH_2D,
+        dy: -ysb - multiplier * SQUISH_2D,
+        xsb: xsb,
+        ysb: ysb,
+        
+    };
+    return c
+}
+export function make2dNoise(clientSeed:number,normalize=true):NoiseFn2d {
+    var contributions:__2dContribution__[] = [];
+    for (var i = 0; i < p2D.length; i += 4) {
+        var baseSet = base2D[p2D[i]];
+        var previous = null;
+        var current = null;
+        for (var k = 0; k < baseSet.length; k += 3) {
+            current = contribution2D(baseSet[k], baseSet[k + 1], baseSet[k + 2]);
+            if (previous === null)
+                contributions[i / 4] = current;
+            else
+                previous.next = current;
+            previous = current;
+        }
+        if(current) current.next = contribution2D(p2D[i + 1], p2D[i + 2], p2D[i + 3]);
+    }
+    const lookup:(__2dContribution__|undefined)[] = [];
+    for (var i = 0; i < lookupPairs2D.length; i += 2) {
+        lookup[lookupPairs2D[i]] = contributions[lookupPairs2D[i + 1]];
+    }
+    const perm = new Uint8Array(256);
+    const perm2D = new Uint8Array(256);
+    const source = new Uint8Array(256);
+    for (var i = 0; i < 256; i++)
+        source[i] = i;
+    let seed = new Uint32Array(1);
+    seed[0] = clientSeed;
+    seed = _shuffle_seed(_shuffle_seed(_shuffle_seed(seed)));
+    for (var i = 255; i >= 0; i--) {
+        seed = _shuffle_seed(seed);
+        var r = new Uint32Array(1);
+        r[0] = (seed[0] + 31) % (i + 1);
+        if (r[0] < 0)
+            r[0] += i + 1;
+        perm[i] = source[r[0]];
+        perm2D[i] = perm[i] & 0x0e;
+        source[r[0]] = source[i];
+    }
+    return function (x:number, y:number) {
+        let stretchOffset = (x + y) * STRETCH_2D;
+        let xs = x + stretchOffset;
+        let ys = y + stretchOffset;
+        let xsb = Math.floor(xs);
+        let ysb = Math.floor(ys);
+        let squishOffset = (xsb + ysb) * SQUISH_2D;
+        let dx0 = x - (xsb + squishOffset);
+        let dy0 = y - (ysb + squishOffset);
+        let xins = xs - xsb;
+        let yins = ys - ysb;
+        let inSum = xins + yins;
+        let hash = (xins - yins + 1) |
+            (inSum << 1) |
+            ((inSum + yins) << 2) |
+            ((inSum + xins) << 4);
+        let value = 0;
+
+
+        for (let c = lookup[hash]; c !== undefined; c = c.next) {
+            const dx = dx0 + c.dx;
+            const dy = dy0 + c.dy;
+            const attn = 2 - dx * dx - dy * dy;
+            if (attn > 0) {
+                const px = xsb + c.xsb;
+                const py = ysb + c.ysb;
+                const indexPartA = perm[px & 0xff];
+                const index = perm2D[(indexPartA + py) & 0xff];
+                const valuePart = gradients2D[index] * dx + gradients2D[index + 1] * dy;
+                value += attn * attn * attn * attn * valuePart;
+            }
+        }
+        const raw = value * NORM_2D
+        return normalize 
+            ? (raw + 1.0)*0.5
+            : raw
+
+    };
+}
+```
+
+### src/shaders/voxel.frag.ts
+```
+/*
+---------------------------------------------------------
+    Created by Andrew Bloese on Feb 13, 2025 
+---------------------------------------------------------
+ This fragment shader utilizes textures found in the file
+ './textures.png'  (a 512x512 texture atlas) to properly
+ color in voxel faces. 
+ 
+*/
+
+
+
+const src = `
+uniform vec3 chunk_indices;
+uniform float u_time;
+uniform sampler2D textureAtlas;
+
+varying vec2 v_TexCoord;
+varying float v_Direction;
+varying float v_Type;
+
+float random(vec2 st) {
+    return fract(sin(dot(st.xy, vec2(12.9898,78.233))) * 43758.5453123);
+}
+
+// Atlas constants based on the actual texture layout
+const float ATLAS_WIDTH = 512.0;
+const float ATLAS_HEIGHT = 512.0;
+const float TILE_SIZE = 16.0;        // Base tile size
+const float BORDER_SIZE = 1.0;       // Border size in pixels
+const float TOTAL_TILE_SIZE = 17.0;  // Including border (16 + 1)
+const float TILES_PER_ROW = 30.0;    // Accounting for borders (512/17 ≈ 30)
+const float TOTAL_ROWS = 30.0;
+
+// UV safety margin to stay away from borders
+const float SAFE_MARGIN = 0.002; // Adjusted margin to avoid borders
+
+vec2 getVoxelUV(float voxelType, float faceIndex) {
+    // Calculate tile index based on type and face
+    float tileIdx = (voxelType - 1.0) * 6.0 + faceIndex;
+    
+    // Calculate row and column in atlas
+    float row = floor(tileIdx / TILES_PER_ROW);
+    float col = mod(tileIdx, TILES_PER_ROW);
+    
+    // Calculate base UV position
+    vec2 baseUV = vec2(
+        (col * TOTAL_TILE_SIZE + BORDER_SIZE) / ATLAS_WIDTH,
+        1.0 - ((row * TOTAL_TILE_SIZE + TOTAL_TILE_SIZE - BORDER_SIZE) / ATLAS_HEIGHT)
+    );
+    
+    return baseUV;
+}
+
+void main() {
+    // Get the base UV for current tile
+    vec2 tileBaseUV = getVoxelUV(v_Type, v_Direction);
+    
+    
+
+
+    
+    // Calculate the safe UV range within the tile
+    vec2 safeTileSize = vec2(
+        (TILE_SIZE - 2.0 * BORDER_SIZE) / ATLAS_WIDTH,
+        (TILE_SIZE - 2.0 * BORDER_SIZE) / ATLAS_HEIGHT
+    );
+    
+    // Scale and offset UVs to stay within safe area
+    vec2 withinTileUV = vec2(
+        v_TexCoord.x * safeTileSize.x + SAFE_MARGIN,
+        v_TexCoord.y * safeTileSize.y + SAFE_MARGIN
+    );
+    
+    // Combine base tile position with position within tile
+    vec2 finalUV = tileBaseUV + withinTileUV;
+    
+
+
+
+    // Sample texture
+    vec4 color = texture2D(textureAtlas, finalUV);
+    
+    // apply water effect
+    if(v_Type == 5.0) {
+        color.a = 0.5;
+    }
+
+
+    // Add directional shadows
+    float shadowFactor = max(0.5, dot(normalize(vec3(v_Direction, 0.5, 1.0)), vec3(0.0, 1.0, 1.0)));
+    color.rgb *= shadowFactor;
+    
+   
+
+
+    gl_FragColor = color;
+    
+    // Debug output options (commented out)
+    // gl_FragColor = vec4(finalUV, 0.0, 1.0);
+    // gl_FragColor = vec4(tileBaseUV, 0.0, 1.0);
+    // gl_FragColor = vec4(withinTileUV, 0.0, 1.0);
+    // gl_FragColor = vec4(v_Type/30.0, v_Direction/6.0, 0.0, 1.0);
+}
+`
+export default src
+```
+
+### src/shaders/voxel.vert.ts
+```
+/*
+--------------------------------------------------------
+    Created by Andrew Bloese on Feb 7, 2025 
+--------------------------------------------------------
+ This vertex shader unpacks the data in its "packedData" 
+ attribute along with its "vertexID" attribute in order to
+ position voxel vertices, and determine the texture coords
+ (to pass to fragment shader). 
+
+ - hopefully i did this ok? 
+*/
+
+const src = `
+uniform float u_time; 
+uniform float u_voxel_size; 
+uniform float u_chunk_size;
+uniform vec3 u_chunk_indices;
+
+attribute float vertexID; 
+attribute float packedData;
+
+varying float v_Type; 
+varying float v_Direction;
+varying vec2 v_TexCoord;
+
+// Unpack the data into position, type, and direction
+void unpackData(float packed, out vec3 position, out float type, out int direction) {
+    float x = floor(mod(packed / pow(2.0, 20.0), 16.0));
+    float y = floor(mod(packed / pow(2.0, 16.0), 16.0));
+    float z = floor(mod(packed / pow(2.0, 12.0), 16.0));
+    type = floor(mod(packed / pow(2.0, 4.0), 256.0));
+    v_Direction = mod(packed, 8.0);
+    direction = int(v_Direction);
+    
+    position = vec3(x, y, z);
+}
+
+vec2 getTextureCoordinates(float vertID) {
+    // Match your vertex quad layout
+    // WebGL UV coordinate system (0,0 at bottom-left)
+    if(vertID == 0.0) return vec2(0.0, 1.0); // Bottom left
+    if(vertID == 1.0) return vec2(1.0, 1.0); // Bottom right
+    if(vertID == 2.0) return vec2(0.0, 0.0); // Top left
+    if(vertID == 3.0) return vec2(1.0, 0.0); // Top right
+    return vec2(0.0); // Fallback
+}
+
+
+
+vec3 applyWaterRipple(vec3 position, vec3 worldPos, float voxelType) {
+    if (voxelType == 5.0) { // Water type
+        // Only apply to top faces for better effect
+        if (position.y > 0.0) {
+            // Create waves using world position for variation
+            float wave1 = sin(worldPos.x * 2.0 + u_time * 1.5) * 0.05;
+            float wave2 = cos(worldPos.z * 2.0 + u_time * 2.0) * 0.06;
+            
+            // Apply vertical displacement
+            position.y += wave1 + wave2;
+            
+            // Add subtle horizontal movement
+            position.x += sin(u_time + worldPos.z) * 0.0;
+            position.z += cos(u_time + worldPos.x) * 0.0;
+        }
+    }
+    return position;
+}
+
+
+// Get the base quad vertices based on face direction
+vec3 getFaceVertexPosition(int faceDirection, float vertID, float size) {
+    vec3 pos = vec3(0.0);
+    float halfSize = size * 0.5;
+    
+    // Create base quad vertices
+    vec2 quadPos = vec2(0.0);
+    if(vertID == 0.0) quadPos = vec2(halfSize, halfSize);    // Top right
+    if(vertID == 1.0) quadPos = vec2(-halfSize, halfSize);   // Top left
+    if(vertID == 2.0) quadPos = vec2(halfSize, -halfSize);   // Bottom right
+    if(vertID == 3.0) quadPos = vec2(-halfSize, -halfSize);  // Bottom left
+
+    switch(faceDirection) {
+        case 0: // TOP [0,1,0]
+            pos = vec3(quadPos.x, halfSize, -quadPos.y);
+            break;
+        
+        case 1: // BOTTOM [0,-1,0]
+            pos = vec3(-quadPos.x, -halfSize, -quadPos.y);
+            break;
+        
+        case 2: // RIGHT [1,0,0]
+            pos = vec3(halfSize, quadPos.y, -quadPos.x);
+            break;
+        
+        case 3: // LEFT [-1,0,0]
+            pos = vec3(-halfSize, quadPos.y, quadPos.x);
+            break;
+        
+        case 4: // FRONT [0,0,1]
+            pos = vec3(quadPos.x, quadPos.y, halfSize);
+            break;
+        
+        case 5: // BACK [0,0,-1]
+            pos = vec3(-quadPos.x, quadPos.y, -halfSize);
+            break;
+    }
+    
+    return pos;
+}
+
+void main() {
+    vec3 voxelPosition;
+    float voxelType;
+    int faceDirection;
+    
+    unpackData(packedData, voxelPosition, voxelType, faceDirection);
+    v_Type = voxelType;
+    v_TexCoord = getTextureCoordinates(vertexID); 
+
+    // Get the vertex position for this face
+    vec3 vertexOffset = getFaceVertexPosition(faceDirection, vertexID, u_voxel_size);
+    
+    // Calculate final position
+    float chunk_size = u_chunk_size * u_voxel_size;
+    vec3 chunk_offset = u_chunk_indices * chunk_size;
+    vec3 local_offset = voxelPosition * u_voxel_size;
+    vec3 wp = chunk_offset + local_offset; 
+    vertexOffset = applyWaterRipple(vertexOffset,wp,voxelType);
+    vec3 final_position = chunk_offset + local_offset + vertexOffset;
+
+    
+
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(final_position, 1.0);
+}
+`
+export default src
+```

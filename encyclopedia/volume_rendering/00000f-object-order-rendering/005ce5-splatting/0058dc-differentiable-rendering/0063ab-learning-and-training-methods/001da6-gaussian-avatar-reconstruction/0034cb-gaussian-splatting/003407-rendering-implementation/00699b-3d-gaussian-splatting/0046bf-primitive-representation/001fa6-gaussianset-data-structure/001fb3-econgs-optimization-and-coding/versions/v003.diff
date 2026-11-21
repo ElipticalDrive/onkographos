@@ -1,0 +1,128 @@
+--- v002.md
++++ v003.md
+@@ -20,5 +20,5 @@
+ 
+ ### Data Structures
+-The method relies on the **GaussianSet Data Structure** [Parent], which stores means, orientations, scales, opacities, and spherical harmonics coefficients. ECoNGS introduces:
++The method relies on the [GaussianSet Data Structure](2074-gaussianset-data-structure.md), which stores means, orientations, scales, opacities, and spherical harmonics coefficients [S1, unofficial]. ECoNGS introduces:
+ - **Anchor Points:** A subset of Gaussians whose attributes are optimized and compressed [S1, unofficial].
+ - **Neural Editable Gaussians:** Derived from anchor points; $K=10$ editable Gaussians are generated per anchor [S1, unofficial].
+@@ -59,14 +59,17 @@
+     # Sources do not specify the geometric similarity grouping algorithm [G].
+     grouped_scenes = scenes
+-
++    num_anchors = len(grouped_scenes)
++    
+     # Initialize anchor attributes and lightweight MLPs
+-    anchors = {
+-        'means': [[0.0, 0.0, 0.0] for _ in grouped_scenes],
+-        'quaternions': [[1.0, 0.0, 0.0, 0.0] for _ in grouped_scenes],
+-        'scales': [[1.0, 1.0, 1.0] for _ in grouped_scenes],
+-        'opacities': [[1.0] for _ in grouped_scenes],
+-        'sh_coeffs': [[0.0]*16*3 for _ in grouped_scenes],
+-        'mlp_params': [[0.0]*100]
+-    }
++    anchors = []
++    for _ in range(num_anchors):
++        anchors.append({
++            'means': [0.0, 0.0, 0.0],
++            'quaternions': [1.0, 0.0, 0.0, 0.0],
++            'scales': [1.0, 1.0, 1.0],
++            'opacities': [1.0],
++            'sh_coeffs': [0.0] * 48,
++            'mlp_params': [0.0] * 100
++        })
+ 
+     # Step 2: Stage 1 Optimization (10,000 iterations)
+@@ -78,12 +81,13 @@
+     for iteration in range(iterations):
+         # Turn off uniform noise for first 3,000 iterations
+-        use_noise = iteration > 3000
++        use_noise = iteration >= 3000
+ 
+         # Forward pass: EWA projection and alpha blending
++        # Sources do not specify the exact EWA projection implementation [G]
+         rendered_images = []
+-        for scene_idx, scene in enumerate(grouped_scenes):
+-            cov2d = compute_cov2d(anchors['means'][scene_idx], anchors['quaternions'][scene_idx], anchors['scales'][scene_idx])
+-            alpha = anchors['opacities'][scene_idx][0] * gaussian_2d_eval(cov2d, scene.camera_positions)
+-            color = alpha_blend(alpha, anchors['sh_coeffs'][scene_idx], scene.camera_viewdirs)
++        for scene_idx in range(num_anchors):
++            cov2d = compute_cov2d(anchors[scene_idx]['means'], anchors[scene_idx]['quaternions'], anchors[scene_idx]['scales'])
++            alpha = anchors[scene_idx]['opacities'][0] * gaussian_2d_eval(cov2d, scene.camera_positions)
++            color = alpha_blend(alpha, anchors[scene_idx]['sh_coeffs'], scene.camera_viewdirs)
+             rendered_images.append(color)
+ 
+@@ -92,16 +96,16 @@
+ 
+         # Compute scaling regularization term
+-        scaling_reg = sum(product(s) for s in anchors['scales'])
++        scaling_reg = sum(product(s) for s in [a['scales'] for a in anchors])
+ 
+         # Compute L_stage1
+         loss_stage1 = loss_rec + lambda_s * scaling_reg
+ 
+-        # Backward pass & Parameter update (simplified gradient descent)
++        # Backward pass & Parameter update (Adam optimizer)
++        # Sources do not specify the exact gradient computation and Adam state update [G]
+         gradients = compute_gradients(loss_stage1, anchors)
+-        for key in anchors:
+-            if isinstance(anchors[key][0], list):
+-                for i in range(len(anchors[key])):
+-                    for j in range(len(anchors[key][i])):
+-                        anchors[key][i][j] -= lr_anchor * gradients[key][i][j]
++        for scene_idx in range(num_anchors):
++            for key in anchors[scene_idx]:
++                for i in range(len(anchors[scene_idx][key])):
++                    anchors[scene_idx][key][i] -= lr_anchor * gradients[scene_idx][key][i]
+ 
+         # Exponential decay for anchor feature, opacity, scaling, rotation, and TF embeddings
+@@ -120,35 +124,36 @@
+         # Compute L_stage1 components
+         loss_rec = compute_l1_loss(rendered_images, ground_truth_images) + compute_ssim_loss(rendered_images, ground_truth_images)
+-        scaling_reg = sum(product(s) for s in anchors['scales'])
++        scaling_reg = sum(product(s) for s in [a['scales'] for a in anchors])
+         loss_stage1 = loss_rec + lambda_s * scaling_reg
+ 
+         # Compute L_entropy and L_hash
+         # Sources do not provide exact formulas for L_entropy and L_hash [G]
+-        loss_entropy = compute_entropy_loss(anchors.attributes)
+-        loss_hash = compute_hash_loss(anchors.hash_grids)
++        loss_entropy = compute_entropy_loss(anchors)
++        loss_hash = compute_hash_loss(anchors)
+ 
+         # Compute L_stage2
+         N_a = len(anchors)
+-        d_A = sum(dim for dim in anchors.attribute_dimensions)
++        d_A = sum(dim for dim in [len(a['means']) + len(a['quaternions']) + len(a['scales']) + len(a['opacities']) + len(a['sh_coeffs']) for a in anchors])
+         loss_stage2 = loss_stage1 + lambda_e * (loss_entropy + loss_hash) / (N_a * d_A)
+ 
+         # Backward pass & update
+         gradients = compute_gradients(loss_stage2, anchors)
+-        for key in anchors:
+-            if isinstance(anchors[key][0], list):
+-                for i in range(len(anchors[key])):
+-                    for j in range(len(anchors[key][i])):
+-                        anchors[key][i][j] -= lr_anchor * gradients[key][i][j]
++        for scene_idx in range(num_anchors):
++            for key in anchors[scene_idx]:
++                for i in range(len(anchors[scene_idx][key])):
++                    anchors[scene_idx][key][i] -= lr_anchor * gradients[scene_idx][key][i]
+         lr_anchor *= decay_rate
+ 
+     # Step 4: Encoding
+     # Encode context model first
+-    context_model_bitstream = encode_context_model(anchors.mlp_params)
++    # Sources do not provide exact encoding algorithm [G]
++    context_model_bitstream = encode_context_model(anchors)
+ 
+     # Encode anchor attributes using arithmetic encoder based on context model probabilities
+-    anchor_bitstream = encode_anchor_attributes(anchors.attributes, context_model_bitstream)
++    # Sources do not provide exact encoding algorithm [G]
++    anchor_bitstream = encode_anchor_attributes(anchors, context_model_bitstream)
+ 
+     # Store MLP parameters as 32-bit floats
+-    mlp_parameters = [[float(x) for x in row] for row in anchors.mlp_params]
++    mlp_parameters = [[float(x) for x in row] for row in anchors]
+ 
+     return context_model_bitstream, anchor_bitstream, mlp_parameters

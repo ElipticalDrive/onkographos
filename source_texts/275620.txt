@@ -1,0 +1,189 @@
+SDF and Voxel sculpting library. Contribute to CyberdyneCorp/ClayCore development by creating an account on GitHub.
+
+Mesh a voxel sculpt as a form, not as boxes by leonardoaraujosantos · Pull Request #110 · CyberdyneCorp/ClayCore · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+leonardoaraujosantos
+commented
+Aug 13, 2026
+Copy link
+Copy Markdown
+Contributor
+Closes #108. The gallery found it and the gallery checks it:
+mesh() | mesh_smooth() | mesh_smooth(blur=1) — the same cells, three pictures (examples/output/41_voxel_smooth_display.png)
+What it is
+mesh/surface_nets.h already meshes any lattice — mesh_lattice_nets takes a std::function<float(int,int,int)> sampler rather than a tape — so what was missing was a sampler over the grid, not a mesher.
+The centroid is the mechanism, not a filter. Surface nets places one vertex per surface cell at the centroid of that cell's edge crossings, which rounds a corner on its own. Nothing is filtered by default, and nothing can be erased: a lone voxel has a sign change on each of its six edges. That property is what decides the default.
+Two things the picture corrected once it existed
+I predicted both wrongly in the issue, so they are recorded in the spec and the header rather than quietly fixed:
+1. The default is not the good-looking one. Unblurred, the surface rounds corners but still terraces — every crossing over binary occupancy interpolates to the same midpoint. blur=1 is what reads as clay. The default stays 0 regardless: a default that silently deletes a sculptor's thin detail is the wrong default however good it looks. A lone voxel survives blur=0 and is erased by blur=1, and there is a test asserting exactly that in both directions. The header says which to pick and why.
+2. It costs ~10× greedy. Measured, on one desktop, over an identical 8,082-cell blob:
+time
+BM_VoxelMeshGreedyBlob
+2.79 ms
+BM_VoxelMeshSmoothBlob
+26.9 ms
+Scaling the device's 4.72 ms whole-grid greedy figure by 9.6× puts a smooth whole-grid mesh near 45 ms on the reference iPad — an operation, not a frame. So this is the display a host uses on a settled sculpt, and interactive smooth display needs the per-chunk half, which is deliberately not in this change.
+A limitation recorded now rather than discovered later
+The sampler materialises a dense span of floats over the occupied bounding box, because the mesher reads each lattice point up to eight times and a blur pass reads twenty-seven. That is the shape #86 part 1 removed from the greedy sweep, reintroduced here in a smaller way: two voxels far apart on two axes make the box enormous while the material stays small.
+Bounded rather than solved — the span is checked in 64-bit and a grid whose box exceeds ~256M samples returns an empty mesh instead of asking for an allocation nothing can satisfy. The per-chunk path is what fixes it properly, which is one more reason it is the next step.
+Why per-chunk is a separate change
+The seam argument does not carry over. Greedy quads are axis-aligned and exact, so clamping the merge to a chunk boundary splits a quad — never a crack, which is what made #86 part 2 tractable. A surface-nets vertex is the centroid of its cell's crossings, so two sides agree only if both compute it from the same global sampler. That is arrangeable and it is exactly what has to be specified and tested rather than assumed.
+Unchanged
+clay_voxel_mesh and mesh_greedy are untouched, and the existing golden fixtures still pass byte-for-byte. The blocky mesh is not deprecated: it is correct for hard-surface voxel work and it is what export guarantees.
+Surface
+VoxelGrid::mesh_smooth(level, SmoothOptions{blur})
+clay_voxel_mesh_smooth(grid, blur, out_mesh) — blur is an argument, not grid state, so two hosts sharing a document cannot disagree about what it looks like and one host can show both pictures without mutating anything. blur outside 0..8 is refused rather than clamped.
+pyclay: VoxelGrid.mesh_smooth(blur=0)
+Verification
+```
+ctest --preset cpu-only     5/5 passed
+ctest --preset asan-ubsan   4/4 passed, no ASan/UBSan reports
+examples/run_all.py         42/42 succeeded
+check_c_abi.py              OK
+check_binding_parity.py     OK (304 capabilities, 26 exempt)
+openspec validate --strict  valid
+```
+Nine unit tests: a box rounds at the corners while reaching the same extent on each axis (asserting a shrink would have been asserting the wrong thing — face crossings land on greedy's plane); a lone voxel survives; blur erases it; colour blends between two palette regions and never leaves the palette; the grid is byte-identical after meshing either way; an empty grid meshes empty both ways; the smooth mesh is centred where the blocky one is (the half-cell origin — without it a host toggling the display would see the model jump); and a level meshes at its own cell size.
+Mesh a voxel sculpt as a form, not as boxes
+…
+ed8c7df
+```
+Issue #108, found by running the gallery at v0.30.0 and looking at it:
+every voxel render was Minecraft while every SDF render was clay. The
+verbs were never the problem — mesh_greedy emits axis-aligned quads,
+which is what greedy meshing IS, and it is the wrong picture of an
+organic sculpt.
+
+mesh_smooth() is surface nets over the same occupancy sampled at voxel
+centres. mesh_lattice_nets already took a sampler rather than a tape, so
+what was missing was something to sample, not a mesher.
+
+The centroid is the mechanism, not a filter. Surface nets puts one
+vertex per surface cell at the centroid of that cell's edge crossings,
+which rounds a corner on its own — and cannot erase anything, because a
+lone voxel has a sign change on each of its six edges. That is why the
+default filters nothing.
+
+Two things the picture corrected once it existed:
+
+  - the unblurred surface rounds corners but still TERRACES, since every
+    crossing over binary occupancy interpolates to the same midpoint.
+    blur=1 is what reads as clay. The default stays 0 anyway: a default
+    that silently deletes a sculptor's thin detail is the wrong default
+    however good it looks, and the header now says which to pick.
+  - it costs ~10x greedy. Measured on one desktop over an identical
+    8,082-cell blob: 2.79 ms greedy against 26.9 ms smooth. Scaling the
+    device's 4.72 ms whole-grid figure by that puts smooth near 45 ms on
+    the reference iPad — an operation, not a frame. So this is the
+    display a host uses on a settled sculpt, and interactive smooth
+    display needs the per-chunk half, which is deliberately not here.
+
+Also recorded rather than discovered later: the sampler materialises a
+dense span over the occupied BOUNDING BOX, which is the shape #86 part 1
+removed from the greedy sweep and is reintroduced here in a smaller way.
+Bounded rather than solved — the span is checked in 64-bit and an
+enormous box returns an empty mesh instead of asking for an allocation
+nothing can satisfy. The per-chunk path fixes it properly.
+
+clay_voxel_mesh and mesh_greedy are untouched and remain the export
+path. The blocky mesh is not deprecated: it is correct for hard-surface
+voxel work and it is what export guarantees.
+
+examples/41_voxel_smooth_display.py renders all three side by side,
+because the gallery is how this was found and it is how the fix is
+checked.
+
+Closes #108
+```
+Hide details
+View details
+leonardoaraujosantos
+merged commit 7304fd7
+into
+main
+Aug 13, 2026
+11 of 12 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+leonardoaraujosantos
+deleted the
+feat/issue-108-smooth-voxel-display
+branch
+August 13, 2026 12:41
+leonardoaraujosantos
+mentioned this pull request
+Aug 13, 2026
+Fix the openspec gate, which is red on main, and pin the validator
+#114
+Merged
+This was referenced Sep 12, 2026
+Every SDF brush stroke is 4-13x over interactive budget, and meshing is where it goes
+#531
+Open
+Measure what a deep chain costs each mesher
+#554
+Merged
+SummerTree
+pushed a commit
+to SummerTree/ClayCore
+that referenced
+this pull request
+Sep 16, 2026
+Measure what a deep chain costs each mesher, and find the pits cost t…
+…
+24ff7af
+```
+…he cull
+
+ClaySpaceDesktop's CyberdyneCorp#110 counters landed and split their settle. clay_document_
+mesh went 14.59 -> 57.48 ms across 48 dabs while the mesh it produced grew
+47,024 -> 49,250 vertices -- 3.9x the time for 4.7% more output. So the
+document mesher's cost is not its output size; it is what each sample costs,
+and a sample costs more when more grabs reach it.
+
+Reproduced here independently, same dab counts, voxel 0.05:
+
+  dabs  bricks  brick mesh ms  document ms   ratio
+     0    1728          4.260        2.791   0.66x
+     8    1728          4.522        4.954   1.10x
+    24    1728          5.325       12.198   2.29x
+    48    1728          6.328       26.247   4.15x
+
+The brick mesher degrades 1.49x across 48 dabs. The document mesher degrades
+9.40x. The mechanism is structural rather than incidental: clay_brick_cache_
+mesh marches the CACHED lattice, which was evaluated once at refill and is just
+numbers by the time it is meshed, while clay_document_mesh evaluates the field
+densely at every grid point with no cull, so every sample walks every deformer.
+
+WHICH REFRAMES CyberdyneCorp#549. A host is forced onto clay_document_mesh after every
+completed stroke because the brick mesher leaves slivers. That is not merely a
+second pass -- it is the pass that pays the chain per sample. At 48 dabs the
+host could mesh in 6.3 ms instead of 26.2 if the pits did not exist. The
+slivers are costing a host THE CULL.
+
+CyberdyneCorp#549 was filed as a cosmetic defect whose visibility nobody had established,
+and on that basis its expensive fix was not worth a goldens refresh and a
+device gate. This measures a performance cost that does not depend on whether
+the specks are visible at all.
+
+The arm asserts its own preconditions: a mesher that produced nothing, or a
+refill that produced no bricks, prints MEASURED NOTHING rather than a ratio.
+
+Refs CyberdyneCorp#549, CyberdyneCorp#531
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,253 @@
+--- v002.md
++++ v003.md
+@@ -4,110 +4,179 @@
+ 
+ ## Overview
+-This method selects a cache-resident resolution level for a volume rendering brick when the desired resolution is not available in memory [S1, unofficial]. It leverages a bitmap of partially mapped resolutions stored in each residency-octree node to efficiently identify candidate levels without random searching [S1, unofficial]. The approach prioritizes lower resolutions before attempting higher ones, iterating through candidates until a mapped page is found or all options are exhausted [S1, unofficial].
++This method selects a valid, cache-resident resolution level for volume rendering when the desired resolution is not available in the cache [S1, unofficial]. It operates on the principle that a node in a spatial hierarchy (such as an octree) may be partially mapped across multiple resolution levels [S1, unofficial]. By consulting a bitmap of these partially mapped resolutions, the algorithm efficiently identifies an alternative resolution to render, prioritizing lower resolutions before higher ones to minimize memory bandwidth and computation [S1, unofficial]. It differs from sibling methods like [LoD Selection via Projected Width](7837-lod-selection-via-projected-width.md) by relying on residency status rather than geometric projection, and from [Finding Higher Resolution Levels](5315-finding-higher-resolution-levels.md) by its specific fallback strategy and bit-manipulation focus.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** `node.bitmap` (a bitmask where each bit $i$ indicates if resolution level $i$ is partially mapped in the node) and `resolutionLevel` (the index of the desired, currently unmapped resolution) [S1, unofficial].
+-*   **Output:** The index of a resolution level that is both partially mapped in the node and cache-resident for the current ray, or `NONE` if no such level exists [S1, unofficial].
++*   **Input:** `node.bitmap`: A bitmask representing the resolution levels for which the node is partially mapped in the cache. `resolutionLevel`: The index of the desired resolution level (which is currently unmapped or invalid).
++*   **Output:** The index of the next valid resolution level to attempt rendering, or a special value `NONE` if no valid alternative exists.
+ 
+ **Data Structures:**
+-*   **Resolution Ordering:** Resolution levels are indexed from $0$ (highest resolution) to $k$ (lowest resolution) [S1, unofficial].
+-*   **Bitmap:** An integer or bit-vector where the $i$-th bit corresponds to resolution level $i$ [S1, unofficial].
++*   **Resolution Ordering:** Resolution levels are indexed such that $0$ is the highest resolution and $k$ is the lowest resolution [S1, unofficial].
++*   **Bitmap:** An integer or bit-field where the $i$-th bit is set to $1$ if the node is partially mapped at resolution level $i$, and $0$ otherwise [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Attempt Lower Resolutions:** Compute the next candidate resolution by calling `nextLower(node.bitmap, resolutionLevel)` [S1, unofficial]. Retrieve the page for this resolution using `getPage(node, ray, resolutionLevel)` [S1, unofficial]. While the candidate resolution is valid (`!= NONE`) and the page is unmapped (`page.unmapped` is true), update the candidate to the next lower resolution and retrieve the new page [S1, unofficial]. If the loop terminates because `page.unmapped` is false, the current `nextResolution` is the result [S1, unofficial].
+-2.  **Attempt Higher Resolutions (if lower failed):** If the previous step resulted in an unmapped page, compute the next candidate resolution by calling `nextHigher(node.bitmap, resolutionLevel)` [S1, unofficial]. Retrieve the page for this resolution [S1, unofficial]. While the candidate resolution is valid and the page is unmapped, update the candidate to the next higher resolution and retrieve the new page [S1, unofficial]. If the loop terminates because `page.unmapped` is false, the current `nextResolution` is the result [S1, unofficial]. If no valid resolution is found, return `NONE` [S1, unofficial].
++The primary strategy attempts to find a lower resolution first, then a higher resolution [S1, unofficial].
+ 
+-**Helper Functions:**
+-*   `nextLower(partiallyMapped, resolution)`: Compute a mask of all resolution levels strictly lower than `resolution` using `getLowerResolutionsMask(resolution)`, which returns a constant mask with bits set for all indices $j > resolution$ [S1, unofficial]. Compute `lower = partiallyMapped & getLowerResolutionsMask(resolution)` to isolate bits for resolutions that are both partially mapped and lower than the current level [S1, unofficial]. If `lower == 0`, return `NONE` [S1, unofficial]. Return the index of the first trailing one-bit of `lower` [S1, unofficial]. Since resolution $0$ is highest and $k$ is lowest, the least significant bit set corresponds to the next lower resolution in terms of detail (coarser) [S1, unofficial]. If `firstTrailingBit` is unavailable, compute the index as the number of consecutive trailing zero-bits from the least significant bit (LSB) [S1, unofficial].
+-*   `nextHigher(partiallyMapped, resolution)`: Similar to `nextLower`, but uses `getHigherResolutionsMask(resolution)` to mask bits for indices $j < resolution$ [S1, unofficial]. The result is the index of the first trailing one-bit of the masked value, which corresponds to the next higher resolution (finer) [S1, unofficial].
++1.  **Attempt Lower Resolution:**
++    a.  Compute a mask of resolutions that are strictly lower than the `resolutionLevel` and are partially mapped in the node. This is done by performing a logical AND between `node.bitmap` and a precomputed constant mask `getLowerResolutionsMask(resolutionLevel)` [S1, unofficial].
++    b.  If the resulting mask is zero, no lower resolution is available. Return `NONE` for this phase.
++    c.  Otherwise, identify the index of the first trailing one-bit in the mask. This index corresponds to the next lower resolution level [S1, unofficial].
++    d.  Attempt to retrieve the page/brick for this resolution. If the specific ray sample falls into an unmapped region within that brick (despite the node being partially mapped), iterate to the next lower resolution by repeating steps a-c with the new candidate as the reference, or until a valid page is found or `NONE` is returned.
++
++2.  **Attempt Higher Resolution (Fallback):**
++    a.  If the lower resolution search fails (returns `NONE`) or the retrieved page is still unmapped for the current ray, switch to searching for higher resolutions [S1, unofficial].
++    b.  Compute a mask of resolutions that are strictly higher than the `resolutionLevel` and are partially mapped. This involves a logical AND with a `getHigherResolutionsMask` [S1, unofficial].
++    c.  Identify the index of the first trailing one-bit (or appropriate bit position depending on ordering) in this mask.
++    d.  Iterate through candidates, retrieving pages and checking for unmapped regions, until a valid page is found or `NONE` is returned.
+ 
+ **Pseudocode:**
++The following pseudocode implements the logic described in [S1, unofficial], specifically Algorithms 7.2 and 7.3. It assumes helper functions `getLowerResolutionsMask`, `getHigherResolutionsMask`, `firstTrailingBit`, and `getPage` are available.
++
+ ```python
+-def choose_alternative_resolution(node_bitmap, resolution_level):
+-    # Step 1: Try lower resolutions (coarser)
+-    next_res = next_lower(node_bitmap, resolution_level)
+-    page = get_page(node_bitmap, resolution_level)  # Not given in the sources
++def choose_alternate_resolution(node_bitmap, resolution_level):
++    """
++    Chooses an alternative resolution given a node's bitmap of partially 
++    mapped resolutions and the index of a resolution level.
++    
++    Args:
++        node_bitmap (int): Bitmask of partially mapped resolutions.
++        resolution_level (int): The index of the desired resolution level.
++        
++    Returns:
++        int: The index of the next valid resolution level, or -1 (NONE).
++    """
++    
++    # Helper: Get mask of resolutions strictly lower than given level
++    def get_lower_mask(res_level):
++        # Returns a bitmask with 1s for all indices i where i < res_level
++        # Implementation detail: (1 << res_level) - 1
++        return (1 << res_level) - 1
+ 
+-    while next_res is not None and page.unmapped:
+-        next_res = next_lower(node_bitmap, resolution_level)
+-        page = get_page(node_bitmap, next_res)  # Fixed bug from source: uses next_res
++    # Helper: Get mask of resolutions strictly higher than given level
++    def get_higher_mask(res_level):
++        # Returns a bitmask with 1s for all indices i where i > res_level
++        # Implementation detail: Assuming max resolution is K, 
++        # this would be ((1 << (K+1)) - 1) ^ get_lower_mask(res_level) ^ (1 << res_level)
++        # For this example, we assume a generic high mask function exists.
++        return get_higher_resolutions_mask(res_level)
+ 
+-    if not page.unmapped:
+-        return next_res
++    # Helper: Find index of first trailing one-bit
++    def first_trailing_bit(value):
++        if value == 0:
++            return -1
++        # Count trailing zeros. 
++        # If hardware instruction not available, use loop or bit manipulation.
++        # Example: value & -value gives lowest set bit. 
++        # We need the index.
++        index = 0
++        while (value & 1) == 0:
++            value >>= 1
++            index += 1
++        return index
+ 
+-    # Step 2: Try higher resolutions (finer) if lower failed
+-    next_res = next_higher(node_bitmap, resolution_level)
+-    page = get_page(node_bitmap, resolution_level)  # Not given in the sources
++    # Helper: Get page for node, ray, and resolution
++    # Returns an object with attribute 'unmapped' (bool)
++    def get_page(node, ray, res_level):
++        # Placeholder for actual memory lookup logic
++        # [G] In a real implementation, this checks if the specific voxel 
++        # block for the ray's intersection is resident.
++        return PageObject(unmapped=False) 
+ 
+-    while next_res is not None and page.unmapped:
+-        next_res = next_higher(node_bitmap, resolution_level)
+-        page = get_page(node_bitmap, next_res)  # Fixed bug from source: uses next_res
++    # Step 1: Try lower resolutions first
++    lower_mask = node_bitmap & get_lower_mask(resolution_level)
++    
++    current_resolution = first_trailing_bit(lower_mask)
++    
++    while current_resolution != -1:
++        page = get_page(node, None, current_resolution) # Ray context implied
++        if not page.unmapped:
++            return current_resolution
++        # If unmapped, try next lower resolution
++        # Clear the current bit and find next trailing bit
++        lower_mask &= ~(1 << current_resolution)
++        current_resolution = first_trailing_bit(lower_mask)
+ 
+-    if not page.unmapped:
+-        return next_res
++    # Step 2: If lower failed, try higher resolutions
++    higher_mask = node_bitmap & get_higher_mask(resolution_level)
++    
++    # Note: Algorithm 7.4 (not fully detailed in notes but implied) 
++    # would find the next HIGHER resolution. 
++    # Since resolution 0 is highest, "higher" means lower index.
++    # The logic mirrors the lower search but iterates towards 0.
++    
++    # Simplified iteration for higher resolutions (lower indices)
++    # We need to find the smallest index > resolution_level that is set.
++    # This requires a different mask or iteration direction.
++    # Based on [S1, unofficial] Algorithm 7.2 line 8-12:
++    
++    current_resolution = find_next_higher(node_bitmap, resolution_level)
++    
++    while current_resolution != -1:
++        page = get_page(node, None, current_resolution)
++        if not page.unmapped:
++            return current_resolution
++        # Try next higher resolution
++        current_resolution = find_next_higher(node_bitmap, current_resolution)
++        
++    return -1 # NONE
+ 
+-    return None
+-
+-def next_lower(partially_mapped, resolution):
+-    lower_mask = get_lower_resolutions_mask(resolution)  # Constant mask for indices > resolution
+-    lower = partially_mapped & lower_mask
+-    if lower == 0:
+-        return None
+-    return first_trailing_bit(lower)
+-
+-def next_higher(partially_mapped, resolution):
+-    higher_mask = get_higher_resolutions_mask(resolution)  # Constant mask for indices < resolution
+-    higher = partially_mapped & higher_mask
+-    if higher == 0:
+-        return None
+-    return first_trailing_bit(higher)
+-
+-def first_trailing_bit(value):
+-    if value == 0:
+-        return None
+-    return (value & -value).bit_length() - 1  # Number of trailing zeros [G]
+-
+-def get_lower_resolutions_mask(resolution):
+-    # Not given in the sources: typically a precomputed constant or ((1 << (k+1)) - 1) ^ ((1 << (resolution+1)) - 1)
+-    pass
+-
+-def get_higher_resolutions_mask(resolution):
+-    # Not given in the sources: typically (1 << resolution) - 1
+-    return (1 << resolution) - 1
+-
+-def get_page(node_bitmap, resolution):
+-    # Not given in the sources: retrieves page object for node at resolution
+-    pass
++def find_next_higher(node_bitmap, current_level):
++    """
++    Finds the next resolution level with a lower index (higher resolution)
++    that is set in the bitmap.
++    """
++    # Mask out current level and all lower resolutions (higher indices)
++    # We want bits > current_level (indices < current_level)
++    # Mask for indices < current_level is (1 << current_level) - 1
++    relevant_mask = node_bitmap & ((1 << current_level) - 1)
++    
++    if relevant_mask == 0:
++        return -1
++    
++    # Find the highest set bit in relevant_mask (which is the smallest index)
++    # This is equivalent to finding the first trailing bit of the reversed bits,
++    # or simply the most significant bit of the relevant mask.
++    # However, standard firstTrailingBit finds LSB.
++    # To find MSB:
++    index = 0
++    temp = relevant_mask
++    while temp > 1:
++        temp >>= 1
++        index += 1
++    return index
+ ```
+ 
+ **Parameters:**
+-*   **Resolution Ordering:** $0$ is the highest resolution, $k$ is the lowest [S1, unofficial].
+-*   **Mask Generation:** The mask for lower resolutions is derived from a constant array or bit shifts based on the maximum resolution $k$ [S1, unofficial]. The algorithm for higher resolutions uses a similar mask generation approach [S1, unofficial].
++*   **Resolution Indexing:** $0$ is the highest resolution, $k$ is the lowest [S1, unofficial].
++*   **Fallback Strategy:** The default strategy is "Lower then Higher" [S1, unofficial]. Alternatives include "Higher then Lower" or alternating, but the cited implementation uses Lower first [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **No Mapped Resolutions:** If the bitmap is zero or no bits correspond to valid resolutions relative to the current level, the function returns `NONE` [S1, unofficial].
+-*   **Unmapped Regions:** The bitmap only indicates if a node is *partially* mapped, meaning a ray sample may still fall into an unmapped region within a partially mapped brick, necessitating iteration through candidates [S1, unofficial].
+-*   **Bit Manipulation:** If `firstTrailingBit` is not available, the index must be computed as the number of consecutive trailing zero-bits from the LSB [S1, unofficial].
++*   **Unmapped Regions:** A node being "partially mapped" means *some* bricks are in cache, but not necessarily the specific brick intersected by the current ray [S1, unofficial]. The algorithm must iterate through candidates and check `page.unmapped` [S1, unofficial].
++*   **Bit Manipulation:** If `firstTrailingBit` is not available, compute the index as the number of consecutive trailing zero-bits from the Least Significant Bit (LSB) [S1, unofficial].
++*   **No Candidates:** If the mask is zero, return `NONE` [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Screen-Space Adaptive Resolution
+-Techniques that adaptively render depending on screen resolution, rendering display-aware resolutions potentially lower than data resolution to reduce computation and texture memory requirements [S2, unofficial]. Deeper level values (higher resolution) are used for areas closer to regions of interest and lower resolution for other areas [S2, unofficial].
++Techniques that adaptively render depending on screen resolution, rendering display-aware resolutions potentially lower than data resolution to reduce computation and texture memory requirements [S2, unofficial]. It uses deeper level values (higher resolution) for areas closer to regions of interest and lower resolution for other areas [S2, unofficial].
+ 
+ ### Multiresolution AMR Rendering for Interactivity
+-To render lower-resolution approximations, some of the more refined levels are ignored during grid homogenization, as coarser-resolution cells overlaid by finer-resolution cells contain valid data, gracefully decreasing image quality and rendering time [S3, unofficial]. Image resolution is reduced during interaction and enlarged using OpenGL’s pixel zoom feature [S3, unofficial]. Two user-adjustable settings control the resolution level for rendering still images and the resolution level for rendering transient images during interactive viewpoint changes [S3, unofficial]. Combining these techniques achieves interactive rendering rates of at least five frames per second for all tested data sets [S3, unofficial].
++To render lower-resolution approximations, this method ignores some of the more refined levels during grid homogenization. Coarser-resolution cells overlaid by finer-resolution cells contain valid data, so ignoring finer levels gracefully decreases image quality and rendering time [S3, unofficial]. It may also reduce image resolution during interaction and enlarge the resulting image using OpenGL’s pixel zoom feature [S3, unofficial]. Two user-adjustable settings control the resolution level for still images and transient images during interactive viewpoint changes [S3, unofficial]. This approach achieved interactive rendering rates of at least five frames per second for tested datasets [S3, unofficial].
++
++### Level-of-detail texture mapping
++A method to reduce fragment shader load by rasterizing lower-resolution texture blocks when local volume detail or projected resolution allows [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The bitmap operations (`AND`, `firstTrailingBit`) are $O(1)$ or $O(\log k)$ depending on implementation [S1, unofficial]. The iteration depends on the number of unmapped resolutions, which is typically small [S1, unofficial].
+-*   **Memory Complexity:** $O(1)$ auxiliary space per node, as it relies on the existing bitmap [S1, unofficial].
+-*   **Strengths:** Efficiently finds a suitable resolution without searching all levels and uses existing residency information [S1, unofficial].
+-*   **Limitations:** May still fail if no resolution is mapped for the specific ray sample [S1, unofficial]. The strategy of trying lower then higher is arbitrary; other strategies (higher then lower, alternating, closest) exist [S1, unofficial].
++*   **Time Complexity:** The bitmap operations (AND, bit scanning) are $O(1)$ or $O(\log k)$ depending on the bit-scan implementation, where $k$ is the number of resolution levels. The iteration depends on the number of unmapped candidates, which is typically small.
++*   **Memory Complexity:** Requires storing a bitmap per node in the spatial hierarchy [S1, unofficial].
++*   **Strengths:** Efficiently utilizes cache residency information without random searches through all resolution levels [S1, unofficial]. Reduces memory bandwidth by selecting the lowest valid resolution that is available [S1, unofficial].
++*   **Limitations:** Does not account for geometric detail or projected size directly; relies on the assumption that lower resolutions are acceptable when the target is missing [S1, unofficial]. Performance depends on the distribution of mapped bricks.
+ 
+ ## Background
+-This method is part of mixed-resolution multi-volume rendering, specifically within the context of residency-octrees and cache-aware rendering [S1, unofficial]. It was described in the work by Faludi et al. [S1, unofficial].
++This method originates from mixed-resolution multi-volume rendering systems, specifically those using residency-octrees to manage cache [S1, unofficial]. It addresses the problem of cache misses in hierarchical volume data structures by providing a deterministic fallback mechanism based on partial residency [S1, unofficial].
+ 
+ ## Sources
+ [S1] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)
+ [S2] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)
+-[S3] Remote Interactive Direct Volume Rendering of AMR Data, https://www.osti.gov/servlets/purl/799586, fetched 2026-10-26 (unofficial)+[S3] Remote Interactive Direct Volume Rendering of AMR Data, https://www.osti.gov/servlets/purl/799586, fetched 2026-10-26 (unofficial)
++[S4] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)

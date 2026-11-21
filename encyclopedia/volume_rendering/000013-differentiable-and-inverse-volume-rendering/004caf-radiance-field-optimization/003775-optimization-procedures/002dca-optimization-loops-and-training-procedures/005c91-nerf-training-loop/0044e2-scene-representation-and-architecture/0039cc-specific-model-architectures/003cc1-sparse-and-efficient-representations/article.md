@@ -1,0 +1,36 @@
+# Sparse and Efficient Representations
+
+## Overview
+Sparse and Efficient Representations address the computational and memory bottlenecks of dense, monolithic Neural Radiance Fields (NeRFs) by decomposing the scene representation into smaller, localized, or structured components [G]. This family enables scalable training for large-scale scenes and faster inference through spatial partitioning, explicit sparse grids, or generalized 2D projections [G]. Unlike the canonical NeRF which uses a single deep MLP for all queries, these methods distribute the representational capacity across multiple sub-networks, voxel structures, or planar features to reduce redundancy and accelerate convergence [G].
+
+## Shared principles
+Builds on [Specific Model Architectures](8585-specific-model-architectures.md).
+
+## Subtopics
+
+### [Mega-NeRF Spatial Partitioning](8776-mega-nerf-spatial-partitioning.md)
+Decomposes large-scale scenes into spatial cells with independent MLP submodules, enabling parallel training and data pruning based on visibility. Choose this method for virtual fly-throughs of large-scale environments where standard NeRFs suffer from memory limits and slow convergence.
+
+### [MultiPlaneNeRF](8875-multiplanenerf.md)
+Replaces implicit encoding with a non-trainable 2D image-based representation, allowing generalization to new objects without decoder retraining. Choose this method when training on multiple objects or when rapid generalization to unseen data is required.
+
+### [Sparse Radiance Field (SRF) Representation](8876-sparse-radiance-field-srf-representation.md)
+Uses an explicit, sparse 3D grid in COO format to store non-empty voxels, avoiding hierarchical tree structures. Choose this method for scenes with irregular volumetric data where dense grids waste memory and computation.
+
+### [KiloNeRF](8942-kilonerf.md)
+Replaces a single large MLP with thousands of small, independent MLPs on a regular 3D grid, accelerated by an occupancy grid and empty space skipping. Choose this method when rendering speed is critical and visual quality must remain comparable to dense NeRFs.
+
+### [ProNeRF](9673-pronerf.md)
+A few-point volumetric rendering method using a Projection-Aware Sampling network to predict sparse 3D points, reducing sample count while maintaining quality. Choose this method when inference speed is prioritized and a fixed subset of reference views is available.
+
+### [Quadri-Plane Radiance Fields](11128-quadri-plane-radiance-fields.md)
+Represents scenes using four 2D feature planes (three spatial, one directional) coupled with a lightweight decoder, decoupling spatial and directional information. Choose this method for computationally efficient volumetric super-resolution and fast training on general scenes.
+
+### NeRF-XL Multi-GPU Representation Strategy
+A parameter distribution strategy for multi-GPU NeRF training where each GPU handles a distinct 3D tiled region with independent hash encoding and density MLP, but shares the color MLP and appearance/camera embeddings across all GPUs [S1]. Hash Encoding is independent per GPU, confined within a non-overlapping bounding box. Density MLP is independent per GPU. Color MLP is shared across all GPUs using Distributed Data Parallel (DDP) to ensure consistent color prediction for novel views. Appearance Embedding is shared across GPUs; set to zero during novel-view rendering if enabled during training. Camera Pose Embedding is shared across GPUs if camera optimization is enabled [S1]. Unlike independent training where each GPU has its own full NeRF, this method unifies instantiations as a 'single NeRF' with spatially partitioned parameters, increasing model capacity without redundancy [S1].
+
+## Background
+The concept of decomposing NeRF representations for efficiency originated with [KiloNeRF](8942-kilonerf.md), which demonstrated that replacing a single large MLP with thousands of small MLPs could accelerate rendering by three orders of magnitude without sacrificing visual quality. Subsequent work introduced [Sparse Radiance Field (SRF) Representation](8876-sparse-radiance-field-srf-representation.md) to handle irregular volumetric data more efficiently than dense grids. [Mega-NeRF Spatial Partitioning](8776-mega-nerf-spatial-partitioning.md) extended spatial partitioning to large-scale scenes by assigning distinct MLP weights to geometric regions. [MultiPlaneNeRF](8875-multiplanenerf.md) shifted focus from implicit encoding to explicit 2D image projections to improve generalization. [ProNeRF](9673-pronerf.md) introduced projection-aware sampling to reduce the number of required samples. [Quadri-Plane Radiance Fields](11128-quadri-plane-radiance-fields.md) leveraged 2D feature planes to enable efficient super-resolution. [NeRF-XL](https://doi.org/10.1007/978-3-031-73195-2_6) provided a framework for scaling these representations across multiple GPUs by sharing specific components like the color MLP while partitioning others [S1].
+
+## Sources
+[S1] NeRF-XL: Scaling NeRFs with Multiple GPUs, https://doi.org/10.1007/978-3-031-73195-2_6, fetched 2026-10-26

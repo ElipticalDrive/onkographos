@@ -1,0 +1,211 @@
+--- v003.md
++++ v004.md
+@@ -3,95 +3,124 @@
+ 
+ ## Overview
+-The VCP Ray-Casting Algorithm renders a smooth surface approximation from a dense point cloud by storing vector-valued data in a grid structure, rather than rendering discrete points or scalar distance fields directly [S1, unofficial]. It solves the problem of noisy rendering caused by sensor noise and calibration errors in real-world LiDAR data, where points do not strictly lie on the scene surface [S2]. Unlike standard closest-point ray casting which selects the single nearest point (z-buffer), VCP uses the length of an interpolated vector to determine step sizes and the vector direction as the surface normal, allowing for adaptive marching and smooth shading [S1, unofficial].
++The VCP Ray-Casting Algorithm renders a smooth surface approximation from a dense point cloud by storing vector-valued data in a grid structure [S1, unofficial]. It solves the problem of noisy rendering caused by sensor noise and calibration errors in real-world LiDAR data, where points do not strictly lie on the scene surface [S2]. Unlike standard closest-point ray casting which selects the single nearest point (z-buffer), VCP uses the length of an interpolated vector to determine step sizes and the vector direction as the surface normal, allowing for adaptive marching and smooth shading [S1, unofficial]. The method is typically implemented as a parallel GPU ray-casting kernel [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A VCP grid where each block stores either a scalar distance $d_{empty}$ (empty block) or a 3D vector $\vec{V}$ (non-empty block) [S1, unofficial].
+-*   **Input:** Camera ray $r(t) = \mathbf{o} + t\mathbf{d}$ and threshold $\epsilon > 0$ [S1, unofficial].
+-*   **Output:** Pixel color and surface normal at the intersection point [S1, unofficial].
++*   **Input:** A VCP grid where each cell stores either a scalar distance value (for empty blocks) or a 3D vector $\vec{V}$ (for non-empty blocks) [S1, unofficial].
++*   **Input:** Camera origin $\mathbf{o}$, viewing direction $\mathbf{d}$, and intersection bounds $t_{\text{start}}$, $t_{\text{end}}$ with the volume bounding box [G].
++*   **Input:** Threshold $\epsilon > 0$ [S1, unofficial].
++*   **Output:** Pixel color $\mathbf{C}$ and surface normal $\mathbf{n}$ at the intersection point [S1, unofficial].
+ 
+ **Data Structures**
+-The VCP grid stores per block:
+-1.  **Empty Block:** Stores a scalar distance $d_{empty}$ representing the distance from the block center to the nearest surface point [S1, unofficial].
+-2.  **Non-Empty Block:** Stores a 3D vector $\vec{V} = (V_x, V_y, V_z)$ pointing from the block center to the closest surface point; its length $|\vec{V}|$ is the distance to the surface [S1, unofficial].
++The VCP grid organizes space into blocks. Each block contains:
++1.  **Empty Block:** A scalar distance $d_{\text{empty}}$ representing the distance from the block center to the nearest surface point [S1, unofficial].
++2.  **Non-Empty Block:** A 3D vector $\vec{V} = (V_x, V_y, V_z)$ pointing from the block center to the closest surface point. Its magnitude $|\vec{V}|$ represents the distance to the surface [S1, unofficial].
+ 
+ **Algorithm Steps**
+-1.  **Ray-AABB Intersection:** Compute entry $t_{near}$ and exit $t_{far}$ where the ray intersects the volume bounding box [S1, unofficial].
+-2.  **Adaptive Marching:** Initialize $t = t_{near}$ [S1, unofficial]. At each sampling position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$, query the grid [S1, unofficial]. If the block is empty, read $d = d_{empty}$ [S1, unofficial]. If non-empty, interpolate $\vec{V}$ from neighboring blocks and compute $d = |\vec{V}|$ [S1, unofficial].
+-3.  **Step & Termination:** If $d < \epsilon$, assume a ray-surface intersection [S1, unofficial]. Otherwise, use $d$ as the step size $\Delta t = d / |\mathbf{d}|$ (assuming unit direction, $\Delta t = d$) and advance $t \leftarrow t + \Delta t$ [S1, unofficial].
+-4.  **Intersection Refinement:** When $d < \epsilon$, interpolate linearly between the previous sampling position $\mathbf{p}_{prev}$ (where distance was $d_{prev} \ge \epsilon$) and the current position $\mathbf{p}_{curr}$ to find $\mathbf{p}_{hit}$ where the distance equals exactly $\epsilon$ [S1, unofficial].
+-5.  **Normal & Lighting:** The surface normal $\mathbf{n}$ at $\mathbf{p}_{hit}$ is the normalized interpolated VCP vector $\vec{V} / |\vec{V}|$ [S1, unofficial]. Evaluate a local lighting model using $\mathbf{n}$ to compute the final pixel color [S1, unofficial].
++1.  **Ray Setup:** For each pixel, define ray $r(t) = \mathbf{o} + t\mathbf{d}$. Compute the first and last intersection points with the object's bounding box to obtain $t_{\text{start}}$ and $t_{\text{end}}$ [S1, unofficial].
++2.  **Marching Loop:** March the ray from $t_{\text{start}}$ to $t_{\text{end}}$ using varying step sizes [S1, unofficial].
++    *   Let $P_{\text{curr}}$ be the current sampling position.
++    *   Determine the block containing $P_{\text{curr}}$.
++    *   **Step Size Determination:** If the block is empty, read the scalar distance $d_{\text{empty}}$. If the block is non-empty, interpolate the VCP vector $\vec{V}$ from neighboring blocks and compute its length $|\vec{V}|$ [S1, unofficial].
++    *   Let $d_{\text{next}}$ be the obtained distance value.
++    *   **Termination Check:** If $d_{\text{next}} < \epsilon$, assume a ray-surface intersection [S1, unofficial].
++    *   **Advance:** If $d_{\text{next}} \ge \epsilon$, set the step size for the next iteration to $s = d_{\text{next}}$ and advance the ray: $P_{\text{next}} = P_{\text{curr}} + s \cdot \mathbf{d}$ [S1, unofficial].
++3.  **Intersection Refinement:** When $d_{\text{next}} < \epsilon$, the exact intersection point $P_{\text{hit}}$ lies between the previous sampling point $P_{\text{prev}}$ and the current point $P_{\text{curr}}$ [S1, unofficial]. Interpolate linearly to find the location where the distance is exactly $\epsilon$ [S1, unofficial].
++    *   Let $d_{\text{prev}}$ be the distance value at $P_{\text{prev}}$ and $d_{\text{curr}}$ be the value at $P_{\text{curr}}$ (which is $< \epsilon$).
++    *   Compute interpolation factor $\lambda = \frac{d_{\text{prev}} - \epsilon}{d_{\text{prev}} - d_{\text{curr}}}$ [G].
++    *   Calculate $P_{\text{hit}} = P_{\text{prev}} + \lambda (P_{\text{curr}} - P_{\text{prev}})$ [G].
++4.  **Normal Estimation:** At $P_{\text{hit}}$, the surface normal $\mathbf{n}$ is the normalized VCP vector $\vec{V}$ interpolated at that location, as the vector is always perpendicular to the surface [S1, unofficial].
++    *   $\mathbf{n} = \frac{\vec{V}}{|\vec{V}|}$ [S1, unofficial].
++5.  **Lighting:** Evaluate a local lighting model (e.g., Phong or Lambertian) using $\mathbf{n}$ and the light direction to compute the pixel color [S1, unofficial].
+ 
+ **Pseudocode**
+ ```python
++import math
++
+ def vcp_ray_casting(ray_origin, ray_dir, vcp_grid, epsilon):
+-    # Normalize direction to ensure t matches world distance [G]
+-    ray_dir = normalize(ray_dir)
+-    # 1. Intersect ray with AABB [G]
+-    t_near, t_far = intersect_aabb(ray_origin, ray_dir, vcp_grid.bbox_min, vcp_grid.bbox_max)
+-    if t_near > t_far:
++    # 1. Intersect ray with AABB (robust slab method)
++    t_start, t_end = intersect_aabb(ray_origin, ray_dir, vcp_grid.bbox)
++    if t_start > t_end:
+         return None
+ 
+-    t = t_near
+-    p_prev = ray_origin + ray_dir * t
+-    # Sample at initial position [S1, unofficial]
+-    d_prev, v_prev = sample_vcp_grid(p_prev, vcp_grid)
++    # 2. Initialize marching
++    t = t_start
++    p_prev = ray_origin + t * ray_dir
++    d_prev = get_distance_at(vcp_grid, p_prev)
+ 
+-    while t < t_far:
+-        p_curr = ray_origin + ray_dir * t
+-        # Query block containing p_curr. If empty, return scalar distance d_empty.
+-        # If non-empty, return length |V| and vector V from trilinear interpolation. [S1, unofficial]
+-        d_curr, v_curr = sample_vcp_grid(p_curr, vcp_grid)
++    while t < t_end:
++        p_curr = ray_origin + t * ray_dir
++        d_curr = get_distance_at(vcp_grid, p_curr)
+ 
++        # 3. Check for intersection
+         if d_curr < epsilon:
+-            # 4. Refine intersection [S1, unofficial]
+-            if d_prev == d_curr:
++            # 4. Refine intersection point
++            if abs(d_prev - d_curr) < 1e-9:
+                 p_hit = p_curr
+             else:
+                 lam = (d_prev - epsilon) / (d_prev - d_curr)
+-                p_hit = p_prev + (p_curr - p_prev) * lam
+-            # Normal is normalized VCP vector at hit point [S1, unofficial]
+-            _, v_hit = sample_vcp_grid(p_hit, vcp_grid)
+-            normal = normalize(v_hit)
+-            # Lighting model [G]
+-            light_dir = normalize(vec(0.0, 1.0, 0.0))
+-            color = max(0.0, dot(normal, light_dir))
++                p_hit = p_prev + lam * (p_curr - p_prev)
++
++            # 5. Get Normal
++            vcp_vec = interpolate_vcp_vector(vcp_grid, p_hit)
++            normal = vcp_vec / math.sqrt(sum(v**2 for v in vcp_vec))
++
++            # 6. Lighting (simple diffuse model) [G]
++            light_dir = (1.0, 1.0, 1.0)
++            light_dir = light_dir / math.sqrt(sum(l**2 for l in light_dir))
++            diff = max(0.0, sum(n*l for n,l in zip(normal, light_dir)))
++            color = (diff, diff, diff)
+             return color
+ 
+-        # 3. Advance using distance as step size [S1, unofficial]
+-        step = d_curr
+-        # Prevent overshooting t_far [G]
+-        if t + step > t_far:
+-            step = t_far - t
++        # 7. Advance
++        step_size = d_curr
+         p_prev = p_curr
+         d_prev = d_curr
+-        t += step
++        t += step_size
+ 
+     return None
+ 
+-# Helper functions [G]
+-def intersect_aabb(origin, direction, bbox_min, bbox_max):
+-    t_min = (bbox_min - origin) / direction
+-    t_max = (bbox_max - origin) / direction
+-    t1 = comp_min(t_min, t_max)
+-    t2 = comp_max(t_min, t_max)
+-    return max(t1), min(t2)
++def intersect_aabb(origin, direction, bbox):
++    t_min = [(bbox.min[i] - origin[i]) / direction[i] if direction[i] != 0 else float('inf') for i in range(3)]
++    t_max = [(bbox.max[i] - origin[i]) / direction[i] if direction[i] != 0 else float('-inf') for i in range(3)]
++    t_start = max(min(t_min), min(t_max))
++    t_end = min(max(t_min), max(t_max))
++    return t_start, t_end
+ 
+-def sample_vcp_grid(p, grid):
+-    # Sources do not specify exact block lookup or interpolation implementation [G]
+-    # Placeholder for grid query logic
+-    return 0.0, vec(0.0, 0.0, 0.0)
++def get_distance_at(grid, point):
++    block = grid.get_block_at(point)
++    if block.is_empty:
++        return block.scalar_distance
++    else:
++        vec = interpolate_vcp_vector(grid, point)
++        return math.sqrt(sum(v**2 for v in vec))
+ 
+-def vec(x, y, z): return (x, y, z)
+-def add(a, b): return (a[0]+b[0], a[1]+b[1], a[2]+b[2])
+-def sub(a, b): return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
+-def scale(v, s): return (v[0]*s, v[1]*s, v[2]*s)
+-def dot(a, b): return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+-def norm(v): return (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+-def normalize(v): n = norm(v); return (v[0]/n, v[1]/n, v[2]/n)
+-def comp_min(a, b): return tuple(min(x, y) for x, y in zip(a, b))
+-def comp_max(a, b): return tuple(max(x, y) for x, y in zip(a, b))
+-def max(a, b): return a if a > b else b
+-def min(a, b): return a if a < b else b
++def interpolate_vcp_vector(grid, point):
++    # Trilinear interpolation of vectors from 8 surrounding blocks [G]
++    # Returns a 3D vector
++    coords = grid.world_to_cell(point)
++    ix, iy, iz = int(coords[0]), int(coords[1]), int(coords[2])
++    fx, fy, fz = coords[0] - ix, coords[1] - iy, coords[2] - iz
++    # Fetch 8 corner vectors (handle boundary clamping)
++    def get_vec(x, y, z):
++        return grid.get_vector_at(x, y, z)
++    v000 = get_vec(ix, iy, iz)
++    v100 = get_vec(ix+1, iy, iz)
++    v010 = get_vec(ix, iy+1, iz)
++    v110 = get_vec(ix+1, iy+1, iz)
++    v001 = get_vec(ix, iy, iz+1)
++    v101 = get_vec(ix+1, iy, iz+1)
++    v011 = get_vec(ix, iy+1, iz+1)
++    v111 = get_vec(ix+1, iy+1, iz+1)
++    # Interpolate x
++    v00 = (v100-v000)*fx + v000
++    v01 = (v110-v010)*fx + v010
++    v10 = (v101-v001)*fx + v001
++    v11 = (v111-v011)*fx + v011
++    # Interpolate y
++    v0 = (v01-v00)*fy + v00
++    v1 = (v11-v10)*fy + v10
++    # Interpolate z
++    return (v1-v0)*fz + v0
+ ```
+ 
+@@ -102,16 +131,14 @@
+ 
+ ### First Peak Averaging (FPA) Raycasting
+-FPA is a variant used in LiDAR rendering (e.g., PCGen) to handle noise where points do not strictly lie on the surface [S2]. Instead of selecting the single closest point (standard CP ray-casting), FPA averages multiple points within a certain distance threshold near the closest point, weighting them by their inverse distance [S2]. This reduces noise in the rendered range image [S2]. It is often combined with a Ray-drop MLP to model return probability $p = MLP(\theta', d, i)$, where $\theta'$ is the viewing direction, $d$ is distance, and $i$ is intensity [S2]. The MLP has 4 layers, width 128, trained with Adam (lr 5e-3) for 10k iterations [S2].
++FPA is a variant used in LiDAR rendering (e.g., PCGen) to handle noise where points do not strictly lie on the surface [S2]. Instead of selecting the single closest point (standard CP ray-casting), FPA averages multiple points within a certain distance threshold near the closest point, weighting them by their inverse distance [S2]. This reduces noise in the rendered range image [S2]. It is often combined with a Ray-drop MLP to model return probability $p = \text{MLP}(\theta', d, i)$, where $\theta'$ is the viewing direction, $d$ is distance, and $i$ is intensity [S2]. The MLP has 4 layers, width 128, trained with Adam (lr 5e-3) for 10k iterations [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the density of the point cloud and the step size; adaptive stepping can skip empty space, potentially speeding up rendering compared to fixed-step ray casting [S1, unofficial].
+-*   **Memory Complexity:** Requires storing the VCP grid [S1, unofficial].
++*   **Time Complexity:** Adaptive stepping using VCP vector lengths skips empty space efficiently, reducing the number of samples compared to fixed-step ray casting [S1, unofficial].
++*   **Memory Complexity:** Requires storing the VCP grid, scaling with grid resolution and point cloud density [S1, unofficial].
+ *   **Strengths:** Produces smooth surfaces from noisy point clouds; provides explicit surface normals for lighting; adaptive stepping allows efficient traversal of empty space [S1, unofficial].
+ *   **Limitations:** Accuracy depends on the choice of $\epsilon$ [S1, unofficial].
+-*   **When to use:** When rendering surfaces from dense, noisy LiDAR point clouds where smooth shading and normals are required [S1, unofficial][S2].
+-*   **When not to use:** Not given in the sources [S1, unofficial].
+ 
+ ## Background
+-The VCP (Vector-to-Closest-Point) method was introduced in the paper "Vector-to-Closest-Point Octree for Surface Ray-Casting" [S1, unofficial]. It addresses the limitations of standard closest-point ray casting, which is sensitive to noise and produces jagged surfaces [S1, unofficial]. The method uses a grid structure to store vector data, allowing for efficient ray traversal and smooth surface reconstruction [S1, unofficial]. It has been applied in computer graphics for surface rendering from point clouds [S1, unofficial].
++The VCP method was introduced in the paper "Vector-to-Closest-Point Octree for Surface Ray-Casting" [S1, unofficial]. It addresses the limitations of standard closest-point ray casting, which is sensitive to noise and produces jagged surfaces [S1, unofficial]. The method uses a VCP grid structure to store vector data, allowing for efficient ray traversal and smooth surface reconstruction [S1, unofficial]. It has been applied in computer graphics for surface rendering from point clouds [S1, unofficial].
+ 
+ ## Sources

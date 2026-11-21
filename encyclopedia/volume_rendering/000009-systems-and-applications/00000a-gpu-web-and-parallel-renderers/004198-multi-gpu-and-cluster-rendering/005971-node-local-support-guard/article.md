@@ -1,0 +1,126 @@
+# Node-Local Support Guard
+
+Also called: Guard, Parallel Support Guard, Support Guard, node-local guard
+
+## Overview
+The Node-Local Support Guard is a defense mechanism for distributed 3D Gaussian Splatting (3DGS) renderers that clamps stored 3D Gaussian parameters into precomputed per-field coordinate boxes to prevent catastrophic corruption from single-bit upsets (SBUs) [S1, unofficial]. It ensures that no primitive's projected scale exceeds the largest trained scale, making frame-covering corruption impossible [S1, unofficial]. Unlike error-correcting codes (ECC) which operate on memory words, the guard operates on the semantic range of parameters, catching errors that survive or bypass ECC, including those introduced after correction in registers or caches [S1, unofficial].
+
+## How it works
+The method consists of a one-time precomputation phase after training and a per-frame parallel clamping phase applied independently on each node before rendering [S1, unofficial].
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   $\theta$: The set of stored 3D Gaussian parameters for $N$ primitives. Each primitive $i$ has parameters $\theta_i$ organized into fields $f$ and components $c$.
+    *   $S_p$: The subset of primitives assigned to node $p$.
+    *   $M$: The scrub interval (number of frames between guard re-applications) [S1, unofficial].
+*   **Outputs:**
+    *   Clamped parameters $\theta'$ ready for rendering.
+    *   A clamp count $C_p$ for health monitoring [S1, unofficial].
+
+### Data Structures
+*   **Support Box ($B_f$):** For each field $f$, a pair of bounds $(\ell_{f,c}, h_{f,c})$ for each component $c$.
+    *   $\ell_{f,c} = \min_i \theta_{i,f,c}$
+    *   $h_{f,c} = \max_i \theta_{i,f,c}$
+    *   These bounds are computed once over all $N$ primitives after training [S1, unofficial].
+*   **Clamp Counter:** A local integer $clamp_{sp}$ initialized to 0 for each node $p$ per frame [S1, unofficial].
+
+### Parameters
+*   $\lambda$: The bit flip rate per stored bit per frame [S1, unofficial].
+*   $b$: The total number of stored bits, scaling with the number of primitives $N$ ($b = \Theta(N)$) [S1, unofficial].
+*   $M$: The scrub interval. Derived from Corollary 2, the maximum interval to keep the expected dose below the catastrophic threshold $\tau$ is $M \le \Theta(N \alpha^{-1} \tau / \lambda)$ [S1, unofficial].
+*   **Selective Clamp Variant:** Clamps only the scale and opacity fields. Cost: 1× memory, <0.1 ms/frame [S1, unofficial].
+
+### Algorithm Steps
+1.  **Precompute Support Box (One-time, post-training):**
+    For each field $f$ and component $c$, compute the minimum and maximum values across all $N$ primitives:
+    $$ \ell_{f,c} \leftarrow \min_i \theta_{i,f,c} $$
+    $$ h_{f,c} \leftarrow \max_i \theta_{i,f,c} $$
+    [S1, unofficial]
+
+2.  **Per-Frame Guard Application (Node $p$):**
+    For each frame, on node $p$ holding primitive subset $S_p$:
+    a. Initialize local clamp counter: $clamp_{sp} \leftarrow 0$.
+    b. Iterate over each primitive $i \in S_p$ in parallel.
+    c. For each field $f$ and component $c$:
+        i. Check if the value is out of bounds or non-finite:
+           If $\theta_{i,f,c} \notin [\ell_{f,c}, h_{f,c}]$ or $\theta_{i,f,c}$ is non-finite:
+           - Clamp the value: $\theta_{i,f,c} \leftarrow \text{clamp}(\theta_{i,f,c}, \ell_{f,c}, h_{f,c})$
+           - Increment counter: $clamp_{sp} \leftarrow clamp_{sp} + 1$
+    d. Render the subset $S_p$ to the node's tile.
+    e. Composite tiles across nodes.
+    f. Check if the total clamp count across all nodes exceeds a health threshold. If so, raise a host parity/scrub alert to signal silent-data-corruption rather than masking the degrading device [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Precomputation (One-time, after training)
+# Input: theta (N primitives, fields f, components c)
+# Output: bounds (dict mapping (f, c) to (min_val, max_val))
+
+bounds = {}
+for f in fields:
+    for c in components:
+        # Extract all values for this field/component across all primitives
+        values = [theta[i][f][c] for i in range(N)]
+        bounds[(f, c)] = (min(values), max(values))
+
+# Per-Frame Execution (Node p)
+# Input: theta_p (subset of primitives owned by node p), bounds, health_threshold
+# Output: rendered_tile, alert_signal
+
+def node_local_support_guard(theta_p, bounds, health_threshold):
+    clamp_count = 0
+    
+    # Parallel map over primitives owned by this node
+    for i in range(len(theta_p)):
+        for f in fields:
+            for c in components:
+                val = theta_p[i][f][c]
+                min_val, max_val = bounds[(f, c)]
+                
+                # Check for out-of-bounds or non-finite values
+                if not (min_val <= val <= max_val) or not is_finite(val):
+                    # Clamp to the trained support box
+                    theta_p[i][f][c] = clamp(val, min_val, max_val)
+                    clamp_count += 1
+    
+    # Render the clamped primitives
+    tile = render_primitives(theta_p)
+    
+    # Composite tiles from all nodes (implementation specific to renderer)
+    # composite_tiles(tile)
+    
+    # Health check: surface errors rather than silently masking them
+    # Note: In a distributed system, clamp_counts from all nodes are aggregated
+    # if clamp_count > health_threshold:
+    #     raise_alert("Silent Data Corruption Detected")
+    
+    return tile
+```
+[G] `is_finite` checks for NaN and Inf. `clamp` restricts a value to a range. The aggregation of `clamp_count` across nodes is implied by the text's mention of "total clamp count across all nodes" [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Residual Error:** The guard does not bound the worst-case in-support residual error, only out-of-range flips. The residual error is bounded by the in-box spread and is measured to be perceptually negligible [S1, unofficial].
+*   **Aggressive Optimization:** If optimization grows very large primitives, the support box widens, admitting a larger guarded footprint and weakening primitive-locality assumptions [S1, unofficial].
+*   **Inert Components:** The guard skips inert higher-order spherical-harmonic coefficients, touching only a quarter of the parameter memory (14 of 59 components per primitive) [S1, unofficial].
+
+## Subtopics
+
+### Selective Clamp
+A mitigation technique that clamps only the scale and opacity fields to prevent catastrophic upsets, relying on the fact that these fields carry almost all catastrophic mass [S1, unofficial]. It is cheaper than the full support guard, with a cost of 1× memory and <0.1 ms/frame [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Per node, $O(N/P)$ per frame, where $N$ is total primitives and $P$ is number of nodes [S1, unofficial].
+*   **Steady-State Overhead:** $O(N/(P M))$, amortized over the scrub interval $M$ [S1, unofficial].
+*   **Performance:** On a system with 66 million primitives, the guard cost is 9.66 ms per frame (18.3% of render time), sustaining 5 megapixels per second and an effective parameter-read bandwidth of 763 GB/s [S1, unofficial].
+*   **Memory Overhead:** 1× memory (stores the bounds, which is negligible compared to primitive data) [S1, unofficial].
+*   **Strengths:** Eliminates catastrophic failure mode (frame-covering corruption) requiring only one flip; no cross-node traffic or synchronization points; complementary to ECC [S1, unofficial].
+*   **Limitations:** Does not correct in-box errors; effectiveness depends on the tightness of the trained support box [S1, unofficial].
+*   **When to Use:** In distributed 3DGS rendering environments susceptible to single-bit upsets (e.g., high-altitude or space applications) where ECC is insufficient or too costly [S1, unofficial].
+
+## Background
+The Node-Local Support Guard was introduced in the context of analyzing single-event upsets in 3D Gaussian Splatting rendering [S1, unofficial]. It addresses the finding that while most single-bit upsets in 3DGS are localized, a few critical bits can cause frame-covering corruption [S1, unofficial]. The method was developed to provide a low-overhead, semantic-range defense that complements hardware ECC [S1, unofficial].
+
+## Sources
+[S1] Single-Event Upsets in 3D Gaussian Splatting Rendering: Bit-Level Criticality, Spatial Extent, and a Parallel Support Guard, https://doi.org/10.48550/arxiv.2606.21791, fetched 2026-10-26 (unofficial)

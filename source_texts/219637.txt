@@ -1,0 +1,387 @@
+Hi, this is a great tool, thanks so much for developing it! I'm trying to convert my segmentations into a label image for further analysis, but am really struggling with the conversion. My current approach is to convert the mesh/surface ...
+
+Converting pointcloud to binary mask · Issue #15 · NicoKiaru/LimeSeg · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Converting pointcloud to binary mask #15
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Converting pointcloud to binary mask#15
+Copy link
+Description
+Shannon-E-Taylor
+opened on Mar 10, 2022
+Issue body actions
+Hi, this is a great tool, thanks so much for developing it!
+I'm trying to convert my segmentations into a label image for further analysis, but am really struggling with the conversion. My current approach is to convert the mesh/surface to voxels using open3d and fill in the middle, but this fails if there are any gaps in the mesh. Do you have any other suggestions for how to achieve this? (Or for tools to analyse the pointclouds directly)?
+Thanks heaps :)
+Activity
+NicoKiaru commented on Mar 11, 2022
+NicoKiaru
+on Mar 11, 2022
+Owner
+More actions
+Hello, unfortunately there is no easy way to convert a LimeSeg segmentation to a label image. I've had several requests, so maybe one day I'll find the time to do it.
+but this fails if there are any gaps in the mesh
+Yep, that's unfortunate. Checking the euler characteristic and discard the object if the reconstruction was bad is one way to overcome this. Even if I make an exporter to a label image, this will not be solved.
+Do you have any other suggestions for how to achieve this ?
+There are a few examples scripts in here:
+https://github.com/NicoKiaru/LimeSeg/tree/master/src/main/resources/script-templates/LimeSeg
+Maybe you will find one that suits you. One way to make a label image could be to draw in 3D, for each point, a small cube of a radius large enough that it would fill the gaps between points, leading a border image. Then, with a 3d flood filling, you may be able to get a label image. Sorry I have no time resourse to work on this.
+Shannon-E-Taylor commented on Mar 15, 2022
+Shannon-E-Taylor
+on Mar 15, 2022
+Author
+More actions
+Hi, thank you very much for this, I'll give all this a go :)
+If I manage to solve this I'll put the code here so others can benefit?
+👍React with 👍1Reacted by Nicolas Chiaruttini
+NicoKiaru commented on Mar 16, 2022
+NicoKiaru
+on Mar 16, 2022
+Owner
+More actions
+If I manage to solve this I'll put the code here so others can benefit?
+This would be awesome!
+Shannon-E-Taylor commented on Mar 24, 2022
+Shannon-E-Taylor
+on Mar 24, 2022
+Author
+More actions
+OK, I have two partial solutions.
+One uses vedo to convert each individual object into a numpy array and save it. This means we can use e.g. skimage.measure.regionprops to get object properties, and runs quickly. But this method doens't save the object position, or allow us to combine objects into one image. (Yet -- I may fix this at some point.)
+The other uses open3d to convert the mesh into voxels. For reasons I don't understand, this leaves tiny holes in the object outlines that mean we can't fill them with the binary flood tool- so half your cells are still just outlines and can't be processed using regionprops. But it does give you an idea of where object outlines are, so you can validate segmentation quality.
+Vedo code
+This method is straightforward and fast (15 mins for my dataset of 600x600x165 pixels; 300 objects)
+```
+import vedo 
+import napari 
+import skimage
+
+def to_voxels(path): 
+    mesh = vedo.load(path)
+    vol = mesh.binarize()
+    np.save(path + '_.npy', vol.tonumpy()) # just save the object in the original directory 
+
+def show_voxels(path): 
+    '''
+    code to visualize using napari 
+    '''
+    # get the indices of the cell 
+    pointcloud = o3d.io.read_point_cloud(path)
+    x_shift, y_shift, z_shift = pointcloud.get_min_bound()
+
+    vol = np.load(path + '_.npy')
+    viewer.add_labels(vol, translate=[x_shift, y_shift, z_shift])
+
+img = skimage.io.imread('path/to/image')
+results = pd.read_csv('path/to/limeseg/results')
+
+# filter results with a successful mesh 
+# and Euler characteristic of an enclosed object 
+results = results[
+    (results['Mesh ?'] == 'YES') & 
+    (results['Euler characteristic'] == 2)
+    ]
+
+viewer = napari.Viewer() 
+viewer.add_image(img)
+
+for cell in results['Cell Name']: 
+    path = '../limeseg/tb_near_noto_subset_2/' + cell + '/T_1.ply'
+    to_voxels(path)
+    show_voxels(path)
+```
+Sucessful image filling may rely on having run the ply files through the make_watertight and close_holes functions below; haven't tested this.
+open3d code
+The other method uses open3d and pymeshfix to open a mesh, voxelize it, then add those voxels to an empty image to create a label image. Interiors of that image can then be filled using the scipy binary_fill_holes command. For some reason, ~50% of these cells have tiny gaps in their boundaries, so the binary_fill_holes command leaves them empty. I've tried to fix this in many ways: opening and closing the image; ensuring the original meshes are watertight, expanding cell boundaries slighty; and nothing seems to work robustly. So this method doesn't guarantee filled cells, but is still useful for visually validating segmentation quality. Unfortunately this takes a long time to run: 3hrs on my test dataset (600x600x165 pixels, ~200 cells)
+(I spent days optimizing this code before discovering vedo, so am including it here just in case it is useful for others!)
+```
+import open3d as o3d
+import pymeshfix
+from pymeshfix._meshfix import PyTMesh
+
+import numpy as np
+import pandas as pd
+
+import skimage
+
+def add_mesh_to_mask(path, masks, anisotropy): 
+    '''
+    This code takes as input a path to a .ply file defining the object shape,  
+    Converts that mesh to voxels 
+    And adds it to a mask layer 
+
+    path: path to the ply file containing the object shape 
+    masks: numpy array of the same shape as the original image, to put objects on to. 
+    anisotropy: the anisotropy of the original image. Will be greater than zero for most confocal image types. 
+
+    returns `mask` , the input mask with the new object added. 
+
+    It takes 10-30s per pointcloud to run, most of this comes from the voxel_grid creation step. 
+    
+    '''
+
+    bpa_mesh = o3d.io.read_triangle_mesh(path) 
+    # first, ensure our mesh is watertight 
+    if not bpa_mesh.is_watertight(): 
+        make_watertight(path)
+        close_holes(path)
+        bpa_mesh = o3d.io.read_triangle_mesh(path)
+
+
+    voxel_grid = o3d.geometry.VoxelGrid.create_from_triangle_mesh(bpa_mesh, voxel_size=1) # increasing voxel_size makes the entire cell larger 
+    # get the positions of each voxel in the mesh  
+    voxels = voxel_grid.get_voxels()  
+    indices = np.stack(list(vx.grid_index for vx in voxels))
+
+    # get the indices of the cell 
+    pointcloud = o3d.io.read_point_cloud(path)
+    x_shift, y_shift, z_shift = pointcloud.get_min_bound()
+       
+    for vox in indices: 
+        x_put, y_put = vox[0] + round(x_shift), vox[1] + round(y_shift)
+        z_put = round((vox[2] + z_shift)/anisotropy)
+        masks[
+            x_put, y_put, z_put # you can close some masks by using eg. xput-1:xput+1 instead 
+            ] = int(cell.split('_')[1]) 
+
+    return(masks)
+
+    
+def make_watertight(path): 
+    '''
+    This code reads and cleans the existing mesh using the pymeshfix library
+    There is a simpler command to achieve this : 
+    pymeshfix.clean_from_file(infile, outfile)      
+    But this crashes for me so I'm using the longer method from the docs 
+    '''
+    bpa_mesh = o3d.io.read_triangle_mesh(path)
+    faces = np.asarray(bpa_mesh.triangles) 
+    vertices = np.asarray(bpa_mesh.vertices) 
+
+    # Create object from vertex and face arrays
+    meshfix = pymeshfix.MeshFix(vertices, faces)
+    # Repair input mesh
+    meshfix.repair()
+    # Save the mesh
+    meshfix.save(path)
+
+
+def close_holes(path): 
+    mfix = PyTMesh(False)  # False removes extra verbose output
+    mfix.load_file(path)
+
+    # Fills all the holes having at at most 'nbe' boundary edges. If
+    # 'refine' is true, adds inner vertices to reproduce the sampling
+    # density of the surroundings. Returns number of holes patched.  If
+    # 'nbe' is 0 (default), all the holes are patched.
+    mfix.fill_small_boundaries(refine=True)
+    mfix.save_file(path)
+
+
+results = pd.read_csv('path/to/limeseg/results')
+
+# filter results with a successful mesh 
+# and Euler characteristic of an enclosed object 
+results = results[
+    (results['Mesh ?'] == 'YES') & 
+    (results['Euler characteristic'] == 2)
+    ]
+
+img = skimge.io.imread('path/to/original/image')
+img_reshape = np.swapaxes(img[:, :, :, 0], 0, 2) # may need to swap image axes 
+
+masks = img_reshape * 0
+
+anisotropy  = 3.2 # use your own value for this! 
+
+for cell in results['Cell Name'][0:10]: 
+    path = '../limeseg/tb_near_noto_subset_2/' + cell + '/T_1.ply'
+    masks = add_mesh_to_mask(path, masks, anisotropy)
+```
+👍React with 👍2Reacted by Nicolas Chiaruttini and Kaabir
+parsazarei commented on Oct 21, 2023
+parsazarei
+on Oct 21, 2023
+More actions
+Hi, @Shannon-E-Taylor
+Everytime I run the open3d code the Kernel dies after a few seconds. I have tried reinstalling Anaconda and jupitper notebook, as well as running the code in a different environment, but all have been unsuccessful. do you have any recommendations?
+Shannon-E-Taylor commented on Oct 21, 2023
+Shannon-E-Taylor
+on Oct 21, 2023
+Author
+More actions
+Hi @parsazarei --
+These are the scripts I use for this now
+```
+import open3d as o3d 
+import pymeshfix 
+import numpy as np 
+import os 
+import vedo # to voxelise 
+
+def to_voxels(path): 
+    if not os.path.exists(path + '_npy'): # dont overwrite 
+        pointcloud = o3d.io.read_point_cloud(path)
+        if pointcloud.has_points(): 
+            mesh = vedo.load(path)
+            vol = mesh.binarize()
+            np.save(path + '_.npy', vol.tonumpy())
+
+
+def make_watertight(path): 
+    '''
+    This code reads and cleans the existing mesh using the pymeshfix library
+    There is a simpler command to achieve this : 
+    pymeshfix.clean_from_file(infile, outfile)      
+    But this crashes for me so I'm using the longer method from the docs 
+    '''
+    bpa_mesh = o3d.io.read_triangle_mesh(path)
+    faces = np.asarray(bpa_mesh.triangles) 
+    vertices = np.asarray(bpa_mesh.vertices) 
+
+    # Create object from vertex and face arrays
+    meshfix = pymeshfix.MeshFix(vertices, faces)
+    # Repair input mesh
+    meshfix.repair()
+    # Save the mesh
+    meshfix.save(path)
+
+
+import sys
+path_to_dir = sys.argv[1] #change me to the relative path to the folder containing the LimeSeg output
+
+print(path_to_dir)
+
+print(os.listdir(path_to_dir))
+
+cell_list = next(os.walk(path_to_dir))[1]  
+
+for idx, cell in enumerate(cell_list): 
+    path = path_to_dir + cell + '/T_1.ply'
+    make_watertight(path)
+    to_voxels(path)
+    if idx%100==0: 
+        print(idx)
+```
+and
+```
+import vedo 
+import os
+import open3d as o3d
+import numpy as np
+import sys
+from skimage.io import imread 
+
+f_out = sys.argv[1] # path to where you want to save your segmented image 
+path_to_image = sys.argv[2] #path to the original image you segmented; this is only needed for image dimensions 
+f_in = sys.argv[3] # path to the folder where all of your cells are
+
+cell_list = os.listdir(f_in)
+
+img_zeros = imread(path_to_image).astype(np.int) * 0 
+
+print('inputs ok')
+
+img_zeros = img_zeros * 0 
+
+cell_list = os.listdir(f_in)
+
+for cell in cell_list: 
+    path = f_in + '/' + cell + '/T_1.ply'
+    if os.path.exists(path + '_.npy'): 
+        print(cell)
+        cell_mask = np.load(path + '_.npy')
+        x, y, z = np.nonzero(cell_mask)
+        pointcloud = o3d.io.read_point_cloud(path)
+        x_shift, y_shift, z_shift = pointcloud.get_min_bound()
+        x_put, y_put = x + round(x_shift), y + round(y_shift)
+        z_put = (z + z_shift)
+        img_zeros[
+            z_put.astype(int), y_put, x_put 
+            ] = int(cell.split('_')[-1])
+
+print(np.max(img_zeros))
+
+np.savez_compressed(f_out, seg=img_zeros)
+```
+The first script will create a .npy version of each of your cells, and save it in the same folder as the original .ply file. This is useful for analysis of cell shape using skimage etc. The second script will make label image of the segmentation, like what you'd get from cellpose etc.
+The new scripts are probably a bit cleaner and more likely to work?
+If they don't, some ideas -
+how large is your image? if it is too large to fit in your RAM would cause issues.
+Can you open the image in open3d? (pointcloud = o3d.io.read_point_cloud(path)).
+Is the cell OK? Can you open it in Windows 3d viewer (if you have that)? Sometimes the limeseg cells are a bit wacky for me and I can imagine open3d having issues with these.
+what version of open3d are you using, I was using open3d 0.17.0
+More info on where the script crashes would also be helpful.
+parsazarei commented on Oct 23, 2023
+parsazarei
+on Oct 23, 2023
+More actions
+Thanks for your prompt response! This was very helpful. The problem was that some of the limeseg files were empty so when they were sent to the watertight function, it would kill the kernel. I added an if statement to solve that. I also see that you have addressed that in your current version of the code. Thanks again for sharing this!
+Shannon-E-Taylor commented on Oct 23, 2023
+Shannon-E-Taylor
+on Oct 23, 2023 via email
+Author
+More actions
+Aha, that would make sense.
+I also have some scripts for morphometric analysis of cell shape for
+limeseg outputs (using skimage regionprops), would it be helpful if I
+shared those?
+…
+On Mon, 23 Oct 2023, 16:19 parsazarei, ***@***.***> wrote:
+Thanks for your prompt response! This was very helpful. The problem was
+that some of the limeseg files were empty so when they were sent to the
+watertight function, it would kill the kernel. I added an if statement to
+solve that. I also see that you have addressed that in your current version
+of the code. Thanks again for sharing this!
+—
+Reply to this email directly, view it on GitHub
+<#15 (comment)>,
+or unsubscribe
+<https://github.com/notifications/unsubscribe-auth/AELPG2MKIC7SJ3A63VMRHODYA2DGJAVCNFSM5QNTBMP2U5DIOJSWCZC7NNSXTN2JONZXKZKDN5WW2ZLOOQ5TCNZXGU2DIMZVGQ2A>
+.
+You are receiving this because you were mentioned.Message ID:
+***@***.***>
+👍React with 👍1Reacted by Nicolas Chiaruttini
+parsazarei commented on Oct 23, 2023
+parsazarei
+on Oct 23, 2023
+More actions
+Depends on the parameters measured. I am interested in inferring the mechanical properties of my cell population. Currently, I can measure, cell-cell contact area, curvature, etc. I think it would be helpful to see what other parameters you can measure. Thank!
+👍React with 👍1Reacted by Nicolas Chiaruttini
+Shannon-E-Taylor commented on Jan 4, 2024
+Shannon-E-Taylor
+on Jan 4, 2024
+Author
+More actions
+Hi,
+super late but the scripts are here https://github.com/Shannon-E-Taylor/Limeseg_cell_analysis
+It assumes isotropic data unfortunately
+I really only measure relevant stuff from skimage.regionprops - your work sounds super interesting!
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

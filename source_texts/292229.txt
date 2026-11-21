@@ -1,0 +1,115 @@
+Contribute to Dynacharting/DynaCharting development by creating an account on GitHub.
+
+[ENC-617b/c/d] GPU compute transforms: parallel-reduction aggregate + atomic bin + prefix-scan stack + 2D KDE by ndrandal · Pull Request #81 · Dynacharting/DynaCharting · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ndrandal
+commented
+Jun 12, 2026
+Copy link
+Copy Markdown
+Collaborator
+What
+The GPU compute fast paths of Epic ENC-617 (RESEARCH §5.1), each mirroring its CPU transform byte-identically and reusing the ENC-617a ComputeStage (upload columns → dispatch a kernel → read back):
+617b aggregate — GPU parallel reduction over a dense integer group-key column + a non-negative integer measure (sum/mean/min/max/count) via u32 atomics. Integer-exact, so bit-equal to AggregateTransform's f64 accumulation.
+617b bin — GPU atomic-u32 histogram using the same floor((v-firstEdge)/step) clamp BinTransform uses (fuses bin → aggregate(count) into one atomic pass). WebGPU has integer atomics but no float atomics, so counts accumulate in u32.
+617c stack — GPU work-efficient (Blelloch) single-workgroup prefix-sum scan → cumulative y0/y1 band, bit-equal to StackTransform::Zero's running sum. (Decoupled-lookback is the multi-workgroup generalization; the bounded row counts this fast path targets fit one workgroup, ≤ 2·256 rows.)
+617d kde — a 2D splat-accumulate compute pass: each point scatters a gaussian kernel exp(-r²/2σ²) over a (2·radius+1)² cell window into a density grid. Float atomics absent → density accumulates as a fixed-point u32 (round(w·scale)), the host divides back, and a SequentialColorScale tone-maps the field to color (the density-heatmap sink).
+GPU == CPU, byte-identical
+Each Dawn test compares the GPU result cell-for-cell (memcmp) to a CPU reference that mirrors the reducer / splat with the identical fixed-point quantization. Inputs are chosen exactly representable in f32 (integer measures, exactly-representable coords) so an exact compare is the correct bar — the same discipline as ENC-617a.
+The bind-group keep-alive lesson (ENC-617a)
+Dawn's AUTO bind-group layout prunes any @group(0) binding the WGSL doesn't statically reference, which then mismatches a bind group that binds all uploaded buffers → CreateBindGroup fails → the dispatch silently writes all-zeros. Every kernel here references every declared binding — the params/measure buffers get an arrayLength() or a no-op atomicAdd(..., 0u) touch even on branches that wouldn't otherwise read them.
+Layering
+WGSL kernel builders live in pure dc (ComputeWgsl.{hpp,cpp}, GPU-free, C++17) so they are fast-unit-testable without a GPU; the dispatch/readback ComputeStage methods live in dc_gpu (C++20, Dawn).
+Fast evidence
+cmake -B build && cmake --build build && ctest --test-dir build → 172/172 green (171 prior + dc_enc617bcd_compute_wgsl, 23 checks).
+Dawn tests (kicked, GPU==CPU byte-identical)
+dc_enc617b_dawn_aggregate_bin
+dc_enc617c_dawn_scan_stack
+dc_enc617d_dawn_kde
+Part of epic ENC-617.
+🤖 Generated with Claude Code
+Nicholas Randall
+and others
+added 2 commits
+June 12, 2026 09:44
+[ENC-617b/c/d] GPU compute transforms: parallel-reduction aggregate +…
+…
+188ff92
+```
+… atomic bin + prefix-scan stack + 2D KDE
+
+Implements the GPU compute fast paths of Epic ENC-617 (RESEARCH §5.1),
+mirroring the existing CPU transforms BYTE-IDENTICALLY and reusing the
+ENC-617a ComputeStage (upload columns -> dispatch -> readback):
+
+- 617b aggregate: GPU PARALLEL REDUCTION over a dense integer group-key
+  column + non-negative integer measure (sum/mean/min/max/count) via u32
+  atomics — exact, so bit-equal to AggregateTransform's f64 path.
+- 617b bin: GPU ATOMIC-u32 HISTOGRAM using the same floor/clamp bin
+  assignment BinTransform uses (fuses bin -> aggregate(count)).
+- 617c stack: GPU work-efficient (Blelloch) single-workgroup PREFIX-SUM
+  SCAN -> cumulative y0/y1 band, bit-equal to StackTransform::Zero's
+  running sum (decoupled-lookback is the multi-workgroup generalization).
+- 617d kde: a 2D SPLAT-ACCUMULATE pass scattering points into a grid with
+  a gaussian kernel; float atomics are absent so density accumulates as a
+  fixed-point u32 (round(w*scale)) and the host divides back. Tone-mapped
+  to color via SequentialColorScale (the density-heatmap sink).
+
+The bind-group keep-alive lesson (ENC-617a): every @group(0) binding is
+statically referenced in each kernel (params/measure get an arrayLength
+or no-op atomic touch) so Dawn's AUTO layout does not prune a binding and
+silently produce all-zeros.
+
+WGSL kernel builders live in pure dc (ComputeWgsl.{hpp,cpp}), GPU-free and
+fast-unit-tested (dc_enc617bcd_compute_wgsl). The byte-identical GPU==CPU
+proofs are the Dawn tests dc_enc617{b,c,d}_dawn_*.
+
+Fast build + full ctest green (172 tests). Part of epic ENC-617.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+ENC-617b: fix bin histogram WGSL compile bug (f32 max literal -> inf)
+…
+fb7b22b
+```
+The bin/histogram kernel emitted `abs(v) <= 3.4028235e38f` as its finite
+guard. Tint rejects that literal ("value cannot be represented as 'f32'")
+because 3.4028235e38 rounds UP past FLT_MAX (3.40282347e38) to +inf at
+compile-time constant-eval, so createComputePipeline failed and runBin
+returned false.
+
+Replace it with a literal-free finite test that's byte-identical to the
+CPU BinTransform's std::isfinite guard:
+  v == v && (v - v) == 0.0   // NaN fails v==v; +/-inf fails (inf-inf==NaN)
+
+Update the fast WGSL-string assertion to match. All 3 Dawn compute tests
+(617b/c/d) pass under lavapipe; fast suite stays green (172).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+ndrandal
+merged commit f771be1
+into
+main
+Jun 12, 2026
+ndrandal
+deleted the
+enc-617bcd
+branch
+September 23, 2026 09:52
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

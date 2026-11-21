@@ -1,0 +1,1019 @@
+# GoTracer - Volumetric Path Tracing in Go
+GoTracer is a Go implementation of the ray tracer in [Ray Tracing in One Weekend](https://raytracing.github.io/).
+
+See ```/images``` for example images rendered using the ray tracer.
+
+```example.go``` uses the package [pb](https://github.com/cheggaaa/pb) to display a progress bar but isn't required for the raytracer.
+
+![Example Render Showcasing the Ray Tracer's Features](https://github.com/hexhowells/GoTracer/blob/main/images/GithubExampleImage.png)
+
+Features / Notes
+-----
+- Includes multiple surfaces (lambertian, metallic, dielectric, isotropic)
+- Includes emissive materials
+- Can output in PPM or PNG format
+- Supports Spheres, Rectangles, and Boxes
+- Supports instance rotation around the Y axis (shouldn't be hard to impliment rotation around X and Z)
+- Adjustable depth of field and viewing angle
+- Has ambient occlusion, soft shadows, colour bleeding, global illumination
+- Anti-Aliasing by taking multiple samples per pixel
+- Images are gamma corrected before being saved
+
+
+Future Additions / Improvements
+-----
+- Support for cylinders and triangle meshes
+- Motion blur
+- Procedural textures and image texture mapping
+- Importance sampling
+- Bidirectional path tracing
+- Add parallelism via goroutines
+
+### example.go
+```
+package main
+
+import (
+	"math"
+	"runtime"
+	"sync"
+	"gotracer/raytracer"
+	pb "github.com/cheggaaa/pb/v3"
+)
+
+
+func rayColour(r raytracer.Ray, scene raytracer.Scene, depth int) raytracer.Colour {
+	rec := raytracer.HitRecord{}
+
+	if depth <= 0 {
+		return raytracer.Colour{0.0, 0.0, 0.0}
+	}
+
+	if scene.Hit(r, 0.001, math.Inf(1), &rec) {
+		scattered := raytracer.Ray{}
+		attenuation := raytracer.Vector{}
+		if rec.Mat.Scatter(r, &rec, &attenuation, &scattered, rec.Mat) {
+			return attenuation.Multiply(rayColour(scattered, scene, depth-1))
+		}
+		if rec.Mat.Light {
+			return rec.Mat.Colour
+		}
+	}
+	return raytracer.Colour{0.0, 0.0, 0.0}	
+}
+
+
+func createScene() raytracer.Scene {
+	scene := raytracer.Scene{}
+	
+	// Materials
+	red := raytracer.Material{raytracer.LambertianScatter, raytracer.Colour{0.65, 0.05, 0.05}, 0.0, false}
+	white := raytracer.Material{raytracer.LambertianScatter, raytracer.Colour{0.73, 0.73, 0.73}, 0.0, false}
+	green := raytracer.Material{raytracer.LambertianScatter, raytracer.Colour{0.12, 0.45, 0.15}, 0.0, false}
+	light := raytracer.Material{raytracer.LightScatter, raytracer.Colour{20, 20, 20}, 0.0, true}
+	glass := raytracer.Material{raytracer.DielectricScatter, raytracer.Colour{0.0, 0.0, 0.0}, 0.0, false}
+	metal := raytracer.Material{raytracer.MetalScatter, raytracer.Colour{1, 1, 1}, 0.0, false}
+
+	// Room
+	scene.AddObject(raytracer.YZRect{0, 555, 0, 555, 705, green})  // left wall
+	scene.AddObject(raytracer.YZRect{0, 555, 0, 555, -150, red})  // right wall
+	scene.AddObject(raytracer.XZRect{193, 363, 207, 352, 554, light})  // light
+	scene.AddObject(raytracer.XZRect{-150, 705, 0, 555, 0, white})  // floor
+	scene.AddObject(raytracer.XZRect{-150, 705, 0, 555, 555, white})  // ceiling
+	scene.AddObject(raytracer.XYRect{-150, 705, 0, 555, 555, white})  // back wall
+
+	// Objects in the Cornell Box
+	newBox1 := raytracer.NewBox(raytracer.Vector{265, 0, 295}, raytracer.Vector{430, 330, 460}, white)
+	rotatedBox1 := raytracer.NewRotateY(newBox1, 15)
+	translatedBox1 := raytracer.Translate{rotatedBox1, raytracer.Vector{-60, 0, 70}}
+	scene.AddObject(translatedBox1)
+	
+	newBox2 := raytracer.NewBox(raytracer.Vector{130, 0, 65}, raytracer.Vector{295, 165, 230}, white)
+	rotatedBox2 := raytracer.NewRotateY(newBox2, -18)
+	translatedBox2 := raytracer.Translate{rotatedBox2, raytracer.Vector{25, 0, -30}}
+	scene.AddObject(raytracer.ConstantMedium{translatedBox2, 0.01, raytracer.Colour{1,1,1}})
+
+	scene.AddObject(raytracer.Sphere{raytracer.Vector{30, 340, 160}, 90, glass})
+	scene.AddObject(raytracer.Sphere{raytracer.Vector{550, 90, 220}, 90, metal})
+
+	return scene
+}
+
+
+func renderRow(j int, imageWidth int, imageHeight int, samplesPerPixel int, maxDepth int, invWidth float64, invHeight float64, cam raytracer.Camera, scene raytracer.Scene, img *raytracer.Image) {
+		y := -j + imageHeight
+
+		for i := 0; i < imageWidth; i++ {
+			pixel := raytracer.Colour{0.0, 0.0, 0.0}
+
+			for s := 0; s < samplesPerPixel; s++ {
+				u := (float64(i) + raytracer.RandomFloat64()) * invWidth
+				v := (float64(j) + raytracer.RandomFloat64()) * invHeight
+				r := cam.GetRay(u, v)
+				pixel = pixel.Add(rayColour(r, scene, maxDepth))
+			}
+			img.WriteColour(i, y, pixel)
+		}
+}
+
+
+func main() {
+	// Image
+	aspectRatio := 3.0 / 2.0
+	imageWidth := 800
+	imageHeight := int(float64(imageWidth) / aspectRatio)
+	samplesPerPixel := 300
+	maxDepth := 50
+	img := raytracer.NewImage(imageWidth, imageHeight, samplesPerPixel)
+
+	// Scene
+	scene := createScene()
+
+	// Camera
+	lookFrom := raytracer.Vector{278, 278, -800}
+	lookAt := raytracer.Vector{278, 278, 0}
+	viewUp := raytracer.Vector{0.0, 1.0, 0.0}
+	distToFocus := (lookFrom.Minus(lookAt)).Length()
+	aperture := 0.0
+	vfov := 40.0
+
+	cam := raytracer.NewCamera(lookFrom, lookAt, viewUp, vfov, aspectRatio, aperture, distToFocus)
+
+	// Render
+	invWidth := 1.0 / float64(imageWidth-1)
+	invHeight := 1.0 / float64(imageHeight-1)
+
+	numWorkers := runtime.NumCPU()
+	rowChannel := make(chan int, numWorkers*2)
+	var wg sync.WaitGroup
+
+	progressBar := pb.StartNew(imageHeight)
+
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for j := range rowChannel {
+				renderRow(j, imageWidth, imageHeight, samplesPerPixel, maxDepth, invWidth, invHeight, cam, scene, &img)
+				progressBar.Increment()
+			}
+		}(w)
+	}
+
+	for j := imageHeight - 1; j >= 0; j-- {
+		rowChannel <- j
+	}
+	close(rowChannel)
+	wg.Wait()
+	
+	progressBar.Finish()
+	img.SaveAsPng("render.png")
+}
+```
+
+### raytracer/box.go
+```
+package raytracer
+
+
+type Box struct {
+	Sides []Object
+	Min Vector
+	Max Vector
+}
+
+
+func NewBox(p0 Vector, p1 Vector, mat Material) Box {
+	box := Box{}
+	box.Min = p0
+	box.Max = p1
+
+	box.Sides = append(box.Sides, XYRect{p0.X, p1.X, p0.Y, p1.Y, p1.Z, mat})
+	box.Sides = append(box.Sides, XYRect{p0.X, p1.X, p0.Y, p1.Y, p0.Z, mat})
+
+	box.Sides = append(box.Sides, XZRect{p0.X, p1.X, p0.Z, p1.Z, p1.Y, mat})
+	box.Sides = append(box.Sides, XZRect{p0.X, p1.X, p0.Z, p1.Z, p0.Y, mat})
+
+	box.Sides = append(box.Sides, YZRect{p0.Y, p1.Y, p0.Z, p1.Z, p1.X, mat})
+	box.Sides = append(box.Sides, YZRect{p0.Y, p1.Y, p0.Z, p1.Z, p0.X, mat})
+
+	return box
+}
+
+
+func (b Box) hit(r Ray, tMin float64, tMax float64, rec *HitRecord) bool {
+	tempRec := HitRecord{}
+	hitAnything := false
+	closestSoFar := tMax
+
+	for _, side := range b.Sides {
+		if side.hit(r, tMin, closestSoFar, &tempRec) {
+			hitAnything = true
+			closestSoFar = tempRec.T
+			*rec = tempRec
+		}
+	}
+
+	return hitAnything
+}
+```
+
+### raytracer/camera.go
+```
+package raytracer
+
+import (
+	"math"
+)
+
+type Camera struct {
+	AspectRatio float64
+	ViewportHeight float64
+	ViewportWidth float64
+	FocalLength float64
+	Origin Vector
+	Horizontal Vector
+	Vertical Vector
+	LowerLeftCorner Vector
+	LensRadius float64
+	U Vector
+	V Vector
+	W Vector
+}
+
+
+func NewCamera(lookFrom Vector, lookAt Vector, viewUp Vector, vFov float64, aspectRatio float64, aperture float64, focusDist float64) Camera {
+	cam := Camera{}
+
+	theta := DegreesToRadians(vFov)
+	h := math.Tan(theta / 2.0)
+
+	cam.AspectRatio = aspectRatio
+	cam.ViewportHeight = h * 2.0
+	cam.ViewportWidth = cam.AspectRatio * cam.ViewportHeight
+	
+	cam.W = lookFrom.Minus(lookAt).UnitVector()
+	cam.U = viewUp.Cross(cam.W).UnitVector()
+	cam.V = cam.W.Cross(cam.U)
+
+	cam.Origin = lookFrom
+	cam.Horizontal = cam.U.MultiplyN(cam.ViewportWidth).MultiplyN(focusDist)
+	cam.Vertical = cam.V.MultiplyN(cam.ViewportHeight).MultiplyN(focusDist)
+	cam.LowerLeftCorner = cam.Origin.Minus(cam.Horizontal.DivideN(2.0)).Minus(cam.Vertical.DivideN(2)).Minus(cam.W.MultiplyN(focusDist))
+
+	cam.LensRadius = aperture / 2.0
+
+	return cam
+}
+
+
+func (cam Camera) GetRay(u float64, v float64) Ray {
+	rd := RandomInUnitDisk().MultiplyN(cam.LensRadius)
+	offset := cam.U.MultiplyN(rd.X).Add(cam.V.MultiplyN(rd.Y))
+
+	direction := cam.LowerLeftCorner.Add(cam.Horizontal.MultiplyN(u)).Add(cam.Vertical.MultiplyN(v)).Minus(cam.Origin).Minus(offset)
+
+	return Ray{cam.Origin.Add(offset), direction}
+}
+```
+
+### raytracer/constantMedium.go
+```
+package raytracer
+
+
+import (
+	"math"
+)
+
+
+type ConstantMedium struct {
+	Obj Object
+	Density float64
+	Colour Colour
+}
+
+
+func (cm ConstantMedium) hit(r Ray, tMin float64, tMax float64, rec *HitRecord) bool {
+	rec1 := HitRecord{}
+	rec2 := HitRecord{}
+
+	if !cm.Obj.hit(r, math.Inf(-1), math.Inf(1), &rec1) {
+		return false
+	}
+
+	if !cm.Obj.hit(r, rec1.T+0.0001, math.Inf(1), &rec2) {
+		return false
+	}
+
+	if rec1.T < tMin {
+		rec1.T = tMin
+	}
+	if rec2.T > tMax {
+		rec2.T = tMax
+	}
+
+	if rec1.T >= rec2.T {
+		return false
+	}
+
+	if rec1.T < 0 {
+		rec1.T = 0
+	}
+
+	rayLength := r.Direction.Length()
+	distanceInsideBoundary := (rec2.T - rec1.T) * rayLength
+	negInvDensity := -1 / cm.Density
+	hitDistance := negInvDensity * math.Log(RandomFloat64())
+
+	if hitDistance > distanceInsideBoundary {
+		return false
+	}
+
+	rec.T = rec1.T + hitDistance / rayLength
+	rec.P = r.At(rec.T)
+	rec.Normal = Vector{1, 0, 0}
+	rec.FrontFace = true
+	rec.Mat = Material{IsotropicScatter, cm.Colour, 0.0, false}
+
+	return true
+}
+```
+
+### raytracer/hittable.go
+```
+package raytracer
+
+type HitRecord struct {
+	P Vector
+	Normal Vector
+	T float64
+	FrontFace bool
+	Mat Material
+}
+
+
+func (h *HitRecord) SetFaceNormal(r Ray, outwardNormal Vector) {
+	h.FrontFace = outwardNormal.Dot(r.Direction) < 0
+	if h.FrontFace {
+		h.Normal = outwardNormal
+	} else {
+		h.Normal = outwardNormal.MultiplyN(-1.0)
+	}
+}
+```
+
+### raytracer/image.go
+```
+package raytracer
+
+import (
+	"image"
+	"image/png"
+	"image/color"
+	"os"
+	"math"
+)
+
+
+type Image struct {
+	Img *image.RGBA
+	samplesPerPixel int
+}
+
+
+func NewImage(width int, height int, samplesPerPixel int) Image {
+	img := Image{}
+	img.Img = image.NewRGBA(image.Rect(0, 0, width, height))
+	img.samplesPerPixel = samplesPerPixel
+
+	return img
+}
+
+
+func (img *Image) WriteColour(x int, y int, pixel Colour) {
+	samples := 1.0 / float64(img.samplesPerPixel)
+
+	// sqrt -> gamma correction
+	rPixel := math.Sqrt(pixel.X * samples)
+	gPixel := math.Sqrt(pixel.Y * samples)
+	bPixel := math.Sqrt(pixel.Z * samples)
+
+	r := uint8(256 * Clamp(rPixel, 0.0, 0.999))
+	g := uint8(256 * Clamp(gPixel, 0.0, 0.999))
+	b := uint8(256 * Clamp(bPixel, 0.0, 0.999))
+
+	c := color.RGBA{r, g, b,  255}
+
+	img.Img.Set(x, y, c)
+}
+
+
+func (img *Image) SaveAsPng(filename string) {
+	f, _ := os.Create(filename)
+	png.Encode(f, img.Img)
+}
+```
+
+### raytracer/material.go
+```
+package raytracer
+
+import ( "math" )
+
+type ScatterFunc func(rIn Ray, rec *HitRecord, attenuation *Vector, scattered *Ray, mat Material) bool
+
+
+type Material struct {
+ 	Scatter ScatterFunc
+ 	Colour Colour
+    Fuzz float64
+    Light bool
+}
+
+
+func LambertianScatter(rIn Ray, rec *HitRecord, attenuation *Vector, scattered *Ray, mat Material) bool {
+ 	scatterDirection := rec.Normal.Add(RandomUnitVector())
+
+ 	if scatterDirection.NearZero() {
+ 		scatterDirection = rec.Normal
+ 	}
+
+ 	*scattered = Ray{rec.P, scatterDirection}
+ 	*attenuation = mat.Colour
+
+ 	return true
+}
+
+
+func MetalScatter(rIn Ray, rec *HitRecord, attenuation *Vector, scattered *Ray, mat Material) bool {
+    reflected := Reflect(rIn.Direction.UnitVector(), rec.Normal)
+
+    fuzzedReflection := RandomInUnitSphere().MultiplyN(mat.Fuzz)
+    *scattered = Ray{rec.P, reflected.Add(fuzzedReflection)}
+    *attenuation = mat.Colour
+
+    return rec.Normal.Dot(scattered.Direction) > 0
+}
+
+
+func LightScatter(rIn Ray, rec *HitRecord, attenuation *Vector, scattered *Ray, mat Material) bool {
+    return false
+}
+
+
+func DielectricScatter(rIn Ray, rec *HitRecord, attenuation *Vector, scattered *Ray, mat Material) bool {
+    *attenuation = Vector{1.0, 1.0, 1.0}
+    refractionIndex := 1.5
+    var refractionRatio float64
+    
+    if rec.FrontFace {
+        refractionRatio = 1.0 / refractionIndex
+    } else {
+        refractionRatio = refractionIndex
+    }
+
+    unitDirection := rIn.Direction.UnitVector()
+    cosTheta := Min(rec.Normal.Dot(unitDirection.MultiplyN(-1.0)), 1.0)
+    sinTheta := math.Sqrt(1.0 - cosTheta*cosTheta)
+
+    cannotRefract := refractionRatio * sinTheta > 1.0
+    var direction Vector
+
+    if cannotRefract || (Reflectance(cosTheta, refractionRatio) > RandomFloat64()) {
+        direction = Reflect(unitDirection, rec.Normal)
+    } else {
+        direction = Refract(unitDirection, rec.Normal, refractionRatio)
+    }
+
+    *scattered = Ray{rec.P, direction}
+
+    return true
+}
+
+
+func IsotropicScatter(rIn Ray, rec *HitRecord, attenuation *Vector, scattered *Ray, mat Material) bool {
+    *scattered = Ray{rec.P, RandomInUnitSphere()}
+    *attenuation = mat.Colour
+    return true
+}
+
+
+func Reflectance(cosine float64, refIdx float64) float64 {
+    // Schlick's approximation for reflectance
+    r0 := (1.0 - refIdx) / (1.0 + refIdx)
+    r0 = r0 * r0
+    return r0 + (1.0-r0) * math.Pow((1.0 - cosine), 5)
+}
+```
+
+### raytracer/object.go
+```
+package raytracer
+
+type Object interface {
+	hit(r Ray, tMin float64, tMax float64, rec *HitRecord) bool
+}
+```
+
+### raytracer/ray.go
+```
+package raytracer
+
+
+type Ray struct {
+	Origin Vector
+	Direction Vector
+}
+
+
+func (r *Ray) At(t float64) Vector {
+	return r.Origin.Add(r.Direction.MultiplyN(t))
+}
+```
+
+### raytracer/rect.go
+```
+package raytracer
+
+type XYRect struct {
+	X0 float64
+	X1 float64
+	Y0 float64
+	Y1 float64
+	K float64
+	Mat Material
+}
+
+
+type XZRect struct {
+	X0 float64
+	X1 float64
+	Z0 float64
+	Z1 float64
+	K float64
+	Mat Material
+}
+
+
+type YZRect struct {
+	Y0 float64
+	Y1 float64
+	Z0 float64
+	Z1 float64
+	K float64
+	Mat Material
+}
+
+
+func (rect XYRect) hit(r Ray, tMin float64, tMax float64, rec *HitRecord) bool {
+	t := (rect.K-r.Origin.Z) / (r.Direction.Z)
+
+	if t < tMin || t > tMax {
+		return false
+	}
+
+	x := r.Origin.X + t*r.Direction.X
+	y := r.Origin.Y + t*r.Direction.Y
+
+	if x < rect.X0 || x > rect.X1 || y < rect.Y0 || y > rect.Y1 {
+		return false
+	}
+
+	rec.T = t
+	outwardNormal := Vector{0.0, 0.0, 1.0}
+	rec.SetFaceNormal(r, outwardNormal)
+	rec.Mat = rect.Mat
+	rec.P = r.At(t)
+
+	return true
+}
+
+
+func (rect XZRect) hit(r Ray, tMin float64, tMax float64, rec *HitRecord) bool {
+	t := (rect.K-r.Origin.Y) / (r.Direction.Y)
+
+	if t < tMin || t > tMax {
+		return false
+	}
+
+	x := r.Origin.X + t*r.Direction.X
+	z := r.Origin.Z + t*r.Direction.Z
+
+	if x < rect.X0 || x > rect.X1 || z < rect.Z0 || z > rect.Z1 {
+		return false
+	}
+
+	rec.T = t
+	outwardNormal := Vector{0.0, 1.0, 0.0}
+	rec.SetFaceNormal(r, outwardNormal)
+	rec.Mat = rect.Mat
+	rec.P = r.At(t)
+
+	return true
+}
+
+
+func (rect YZRect) hit(r Ray, tMin float64, tMax float64, rec *HitRecord) bool {
+	t := (rect.K-r.Origin.X) / (r.Direction.X)
+
+	if t < tMin || t > tMax {
+		return false
+	}
+
+	y := r.Origin.Y + t*r.Direction.Y
+	z := r.Origin.Z + t*r.Direction.Z
+
+	if y < rect.Y0 || y > rect.Y1 || z < rect.Z0 || z > rect.Z1 {
+		return false
+	}
+
+	rec.T = t
+	outwardNormal := Vector{1.0, 0.0, 0.0}
+	rec.SetFaceNormal(r, outwardNormal)
+	rec.Mat = rect.Mat
+	rec.P = r.At(t)
+
+	return true
+}
+```
+
+### raytracer/scene.go
+```
+package raytracer
+
+
+type Scene struct {
+	Objects []Object
+}
+
+
+func (s *Scene) AddObject(obj Object) {
+	s.Objects = append(s.Objects, obj)
+}
+
+
+func (s Scene) Hit(r Ray, tMin float64, tMax float64, rec *HitRecord) bool {
+	tempRec := HitRecord{}
+	hitAnything := false
+	closestSoFar := tMax
+
+	for _, object := range s.Objects {
+		if object.hit(r, tMin, closestSoFar, &tempRec) {
+			hitAnything = true
+			closestSoFar = tempRec.T
+			*rec = tempRec
+		}
+	}
+
+	return hitAnything
+}
+```
+
+### raytracer/sphere.go
+```
+package raytracer
+
+import (
+	"math"
+)
+
+type Sphere struct {
+	Center Vector
+	Radius float64
+	Mat Material
+}
+
+
+func (s Sphere) hit(r Ray, tMin float64, tMax float64, rec *HitRecord) bool {
+	oc := r.Origin.Minus(s.Center)
+
+	a := r.Direction.LengthSquared()
+	half_b := oc.Dot(r.Direction)
+	c := oc.LengthSquared() - s.Radius*s.Radius
+	discriminant := half_b*half_b - a*c
+
+	if discriminant < 0 {
+		return false
+	}
+
+	sqrtd := math.Sqrt(discriminant)
+
+	root := (-half_b - sqrtd) / a
+	if root < tMin || tMax < root {
+		root = (-half_b + sqrtd) / a
+		if root < tMin || tMax < root {
+			return false
+		}
+	}
+
+	rec.T = root
+	rec.P = r.At(rec.T)
+	rec.Normal = rec.P.Minus(s.Center).DivideN(s.Radius)
+	outwardNormal := rec.P.Minus(s.Center).DivideN(s.Radius)
+	rec.SetFaceNormal(r, outwardNormal)
+	rec.Mat = s.Mat
+
+	return true
+}
+```
+
+### raytracer/translate.go
+```
+package raytracer
+
+import(
+	"math"
+)
+
+type Translate struct {
+	P Object
+	Offset Vector
+}
+
+
+type RotateY struct {
+	P Object
+	Angle float64
+	CosTheta float64
+	SinTheta float64
+}
+
+
+func (t Translate) hit(r Ray, tMin float64, tMax float64, rec *HitRecord) bool {
+	movedRay := Ray{r.Origin.Minus(t.Offset), r.Direction}
+
+	if !t.P.hit(movedRay, tMin, tMax, rec) {
+		return false
+	}
+
+	rec.P = rec.P.Add(t.Offset)
+	rec.SetFaceNormal(movedRay, rec.Normal)
+
+	return true
+}
+
+
+func NewRotateY(p Object, angle float64) RotateY {
+	rt := RotateY{}
+
+	rt.P = p
+	rt.Angle = angle
+	radians := DegreesToRadians(angle)
+	rt.SinTheta = math.Sin(radians)
+	rt.CosTheta = math.Cos(radians)
+
+	return rt
+}
+
+
+func (ry RotateY) hit(r Ray, tMin float64, tMax float64, rec *HitRecord) bool {
+	origin := r.Origin
+	direction := r.Direction
+
+	origin.X = ry.CosTheta*r.Origin.X - ry.SinTheta*r.Origin.Z
+	origin.Z = ry.SinTheta*r.Origin.X + ry.CosTheta*r.Origin.Z
+
+	direction.X = ry.CosTheta*r.Direction.X - ry.SinTheta*r.Direction.Z
+	direction.Z = ry.SinTheta*r.Direction.X + ry.CosTheta*r.Direction.Z
+
+	rotatedRay := Ray{origin, direction}
+
+	if !ry.P.hit(rotatedRay, tMin, tMax, rec) {
+		return false
+	}
+
+	p := rec.P
+	normal := rec.Normal
+
+	p.X = ry.CosTheta*rec.P.X + ry.SinTheta*rec.P.Z
+	p.Z = -ry.SinTheta*rec.P.X + ry.CosTheta*rec.P.Z
+
+	normal.X = ry.CosTheta*rec.Normal.X + ry.SinTheta*rec.Normal.Z
+	normal.Z = -ry.SinTheta*rec.Normal.X + ry.CosTheta*rec.Normal.Z
+
+	rec.P = p
+	rec.SetFaceNormal(rotatedRay, normal)
+
+	return true
+}
+```
+
+### raytracer/utility.go
+```
+package raytracer
+
+import (
+	"math"
+	"math/rand/v2"
+	"fmt"
+)
+
+
+func RandomFloat64() float64 {
+	return rand.Float64()
+}
+
+
+func RandomFloat64Range(min float64, max float64) float64 {
+	return min + rand.Float64() * (max - min)
+}
+
+
+func DegreesToRadians(degrees float64) float64 {
+	return degrees * math.Pi / 180.0
+}
+
+
+func Clamp(x float64, min float64, max float64) float64 {
+	if x < min {
+		return min
+	} else if x > max {
+		return max
+	} else {
+		return x
+	}
+}
+
+func RandomVector(min float64, max float64) Vector {
+	return Vector{RandomFloat64Range(min, max), RandomFloat64Range(min, max), RandomFloat64Range(min, max)}
+}
+
+
+func RandomInUnitSphere() Vector {
+	for {
+		p := RandomVector(-1.0, 1.0)
+		if p.LengthSquared() >= 1 {
+			continue
+		}
+		return p.UnitVector()
+	}
+}
+
+
+func WritePPMHeader(imageWidth int, imageHeight int) {
+	fmt.Printf("P3\n%d %d\n255\n", imageWidth, imageHeight)
+}
+
+
+func WriteColourPPM(pixel Vector, samplesPerPixel int) {
+	samples := 1.0 / float64(samplesPerPixel)
+
+	rPixel := math.Sqrt(pixel.X * samples)
+	gPixel := math.Sqrt(pixel.Y * samples)
+	bPixel := math.Sqrt(pixel.Z * samples)
+
+	fmt.Printf("%d %d %d\n", 
+		int(256 * Clamp(rPixel, 0.0, 0.999)),
+		int(256 * Clamp(gPixel, 0.0, 0.999)),
+		int(256 * Clamp(bPixel, 0.0, 0.999)) )
+}
+
+
+func Min(a float64, b float64) float64 {
+	if a > b {
+		return b
+	} else {
+		return a
+	}
+}
+
+
+func RandomColour() Colour {
+	return Colour{RandomFloat64(), RandomFloat64(), RandomFloat64()}
+}
+
+
+func Reflect(v Vector, n Vector) Vector {
+	a := n.MultiplyN( (2.0 * v.Dot(n)) )
+	return v.Minus(a)
+}
+
+
+func Refract(uv Vector, n Vector, etaiOverEtat float64) Vector {
+	cosTheta := Min(-uv.Dot(n), 1.0)
+	rOutPerp := (uv.Add(n.MultiplyN(cosTheta))).MultiplyN(etaiOverEtat)
+	rOutPara := n.MultiplyN( -math.Sqrt(math.Abs(1.0 - rOutPerp.LengthSquared())) )
+
+	return rOutPerp.Add(rOutPara)
+}
+
+
+func RandomInUnitDisk() Vector {
+	for {
+		p := Vector{RandomFloat64Range(-1.0, 1.0), RandomFloat64Range(-1.0, 1.0), 0.0}
+		if p.LengthSquared() >= 1.0 {
+			continue
+		}
+		return p
+	}
+}
+```
+
+### raytracer/vec.go
+```
+package raytracer
+
+import (
+	"math"
+)
+
+
+type Vector struct {
+	X float64
+	Y float64
+	Z float64
+}
+
+// type alias
+type Colour = Vector
+
+
+func (v Vector) Minus(v2 Vector) Vector {
+	return Vector {
+		X: v.X - v2.X,
+		Y: v.Y - v2.Y,
+		Z: v.Z - v2.Z,
+	}
+}
+
+
+func (v Vector) Add(v2 Vector) Vector {
+	return Vector {
+		X: v.X + v2.X,
+		Y: v.Y + v2.Y,
+		Z: v.Z + v2.Z,
+	}
+}
+
+
+func (v Vector) Multiply(v2 Vector) Vector {
+	return Vector {
+		X: v.X * v2.X,
+		Y: v.Y * v2.Y,
+		Z: v.Z * v2.Z,
+	}
+}
+
+
+func (v Vector) Divide(v2 Vector) Vector {
+	return Vector {
+		X: v.X / v2.X,
+		Y: v.Y / v2.Y,
+		Z: v.Z / v2.Z,
+	}
+}
+
+
+func (v Vector) DivideN(n float64) Vector {
+	return Vector{X: v.X / n, Y: v.Y / n, Z: v.Z / n}
+}
+
+
+func (v Vector) MultiplyN(n float64) Vector {
+	return Vector{X: v.X * n, Y: v.Y * n, Z: v.Z * n}
+}
+
+
+func (v Vector) MinusN(n float64) Vector {
+	return Vector{X: v.X - n, Y: v.Y - n, Z: v.Z - n}
+}
+
+
+func (v Vector) LengthSquared() float64 {
+	return (v.X*v.X) + (v.Y*v.Y) + (v.Z*v.Z)
+}
+
+
+func (v Vector) Length() float64 {
+	return math.Sqrt(v.LengthSquared())
+}
+
+
+func (v Vector) UnitVector() Vector {
+	return v.DivideN(v.Length())
+}
+
+
+func RandomUnitVector() Vector {
+	return RandomInUnitSphere().UnitVector()
+}
+
+
+func (v Vector) Dot(v2 Vector) float64 {
+	return (v.X * v2.X) + (v.Y * v2.Y) + (v.Z * v2.Z)
+}
+
+
+func (v Vector) Cross(v2 Vector) Vector {
+	return Vector{v.Y * v2.Z - v.Z * v2.Y,
+				  v.Z * v2.X - v.X * v2.Z ,
+				  v.X * v2.Y - v.Y * v2.X}
+}
+
+
+func (v Vector) NearZero() bool {
+	s := 1e-8
+	return (math.Abs(v.X) < s) && (math.Abs(v.Y) < s) && (math.Abs(v.Z) < s)
+}
+```

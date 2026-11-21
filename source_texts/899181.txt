@@ -1,0 +1,309 @@
+Contribute to arbobendik/FlexLight development by creating an account on GitHub.
+
+fix(pathtracer): take the full weight of emission met after rays sampled to the wrong side of the face, which no light sample competes with by arbobendik · Pull Request #120 · arbobendik/FlexLight · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+arbobendik
+commented
+Oct 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Rays sampled to the wrong side of the face are sampled again against the geometry normal on transmitting surfaces,
+or mirrored on opaque ones (84504d7's design). Either way no lobe's density reaches the new direction, so light
+sampling covers none of it. Until now that vertex still recorded a light sample at density 0, so emission met after
+such a ray took power-heuristic weight 0 and its energy was lost. Escapes from the same rays already counted in full
+(escape_pdf = 0). This makes emission do the same: one commit, +25/−8 on main e08ecbe. It merges together with flex-cuda-pt's #24,
+the same v2 rule there.
+Change
+WebGPU path tracer (lightTrace): only a correct-side, non-delta sample records a competing light sample
+(nee && !delta && expected == aligned). A wrong-side sample leaves the vertex without one, as delta lobes do, so the
+emission it meets counts in full.
+ReSTIR walk: the same condition, nee && !delta && !wrong_side.
+WebGL2 path tracer: its next event estimation is all-or-nothing (direct_light_emission). A wrong-side ray now
+sets it, so the emission it meets counts. (Spotted by flexlight-mis.)
+FlexLight has no light leak below opaque faces (unlike flex-cuda-pt's smoother filtering #24): its shadow rays start on the shading
+normal's front, and lightBSDF gates light directions by the geometry normal. So the change is the weighting alone.
+Regression test
+test/furnace.mjs gains lit: the faceted smooth-normal prism in lossless white diffuse (ior 1, no specular), inside
+a closed box whose faces emit white inward, with no ambient light. Its exact answer is one everywhere. npm test
+appends lit pt and lit restir to main's six scenes. Lit ReSTIR alone catches the walk's change (found by
+flexlight-mis).
+Test changes beside the new scene, all on main's version of the file (e08ecbe):
+Two-sided mean bound for the scenes main bounds by mean > 0.98 (glass and mirror): now |mean − 1| < 0.02.
+Their exact answer is one, so a gain is as wrong as a loss. Every existing scene still passes it (table below). Metal
+and dielectric keep main's four-standard-error bounds around their derived albedos.
+Lit is exempt from brightest < 1.05. In the ambient scenes every sample's weight is exactly one, so no pixel can
+exceed one. In the lit box, light sampling and BSDF sampling are combined by MIS weights, so a single pixel's 64-frame
+mean scatters around one (up to 1.12 here). That is noise around the right answer, not a gain, and the mean bound
+still catches any gain.
+Lit ReSTIR is exempt from the black-pixel bound. ReSTIR's reuse lets a single pixel's mean fall below a half (one
+of 4096 on Intel) while the image's mean is 1.0006. v1, which loses the energy, still fails on the mean (0.9686), so
+the exemption does not admit it.
+Node 24, NVIDIA, 64 frames, npm test's eight scenes on this PR and the lit cases on main e08ecbe (v1):
+Build
+glass PT
+mirror PT
+mirror ReSTIR
+metal PT
+dielectric PT
+raster PT
+lit PT
+lit ReSTIR
+this PR
+1.0000
+1.0000
+1.0000
+0.8558 (0.8551 ± 4 SE)
+0.9991 (0.9990 ± 4 SE)
+pass
+0.9997, 0% black
+1.0005
+main e08ecbe (v1)
+–
+–
+–
+–
+–
+–
+0.9687, 2.44% black: fails
+0.9687: fails
+Every scene of this PR passes with no black pixel. The lit box's brightest pixel is 1.13 (PT) and 2.63 (ReSTIR), the
+noise the exemptions allow for.
+The WebGL2 change has no runtime test yet: a headless WebGL2 run needs a browser, which waits for Bendik's permission.
+arbobendik
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Verdict: PASS, with one line requested, lit restir in npm test to cover the walk's change (3bce66f)
+Gates: single-line subject, Bendik Arbogast as author and committer, no trailers, +30/−15. The tree is byte-identical to evict/v2 8156213.
+Change:
+lightTrace records a competing light sample only for a correct-side, non-delta sample; the ReSTIR walk does the same with !wrong_side.
+GLSL sets direct_light_emission = true in the wrong-side branch, covering both the resample and mirror cases.
+This is consistent: light sampling covers only correct-side directions, so a ray that took no light sample counts its emission in full, as escapes already did.
+No-leak reading: confirmed in code. Shadow rays start at origin + geometry_offset · smooth_n (sampleLightTree). lightBSDF gates light directions by the geometry normal: when competing, refracted comes from the signs of Ng·(−in) and Ng·l; otherwise BSDF() makes its same-side test on g_n, and an opaque surface's refraction has density 0. Sky NEE gates by wrongSide(…, geometry_n).
+Test: restored to the reviewed shape, with brightest < 1.05 kept for the ambient-lit scenes and |mean − 1| < 0.02.
+Runtime, node 24, identical on NVIDIA and Intel, and on lavapipe for the path-traced scenes:
+Build
+glass PT
+mirror PT
+mirror ReSTIR
+lit PT
+lit ReSTIR (NVIDIA)
+this PR
+1.0000
+1.0000
+1.0000
+1.0000 (lavapipe 0.9999)
+1.0005, pass
+main 84504d7 (v1)
+1.0000
+1.0000
+1.0000
+0.9688, fail
+0.9687, fail
+57d568e
+0.9693, fail
+0.9673, fail
+0.9673, fail
+0.9667, fail
+0.9670, fail
+this PR with only the walk's !wrong_side reverted
+0.9687, fail
+npm test (NVIDIA): exit 0, 4 scenes.
+Requested: the walk's change is covered only by lit restir, which npm test doesn't run. The mutant above passes all four npm test scenes and fails only lit restir. Adding && node test/furnace.mjs lit restir to npm test (one line) gives it the regression test it needs. The test has no per-pixel bound for lit, so ReSTIR's brightest pixel of 2.63 doesn't matter.
+Pending: the WebGL2 runtime test waits on Bendik's permission for browser tests.
+arbobendik
+force-pushed
+the
+fix/emission-weight
+branch
+from
+3bce66f to
+5236e88
+Compare
+October 23, 2026 14:12
+arbobendik
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Re-verification, 5236e88: one more change needed; the lit restir line I asked for fails on Intel
+The diff from 3bce66f is only package.json's test line, and the gates hold.
+Run
+Mean
+Black share
+Exit
+NVIDIA, npm test (5 scenes)
+0
+Intel, lit restir, this PR
+1.0006
+0.02% (1 pixel of 4096 averages below 0.5)
+1
+Intel, lit restir, v1 84504d7
+0.9686
+2.42%
+1
+Intel, lit restir, walk-only revert
+0.9686
+2.42%
+1
+The mean is right. The single dark pixel is ReSTIR's per-pixel noise at 64 frames; the brightest pixel is 2.10 on Intel and 2.63 on NVIDIA. That's the same reason the test already exempts lit from the brightest-pixel bound. v1 and the walk revert fail on the mean (0.9686), so the dark-pixel bound isn't needed to tell them apart.
+Requested: exempt lit restir from the dark-pixel bound, keeping |mean − 1| < 0.02. For example, (MODE === "restir" && MATERIAL === "lit" || dark === 0). Then npm test passes on both GPUs and still fails v1 and the revert.
+Also settled: test-wgsl case 166, column 90 (FlexKernels) comes from Intel Mesa (anv, Mesa 26.2.4). With every ICD visible, Dawn picks the Intel adapter. NVIDIA alone gives 288/288.
+arbobendik
+force-pushed
+the
+fix/emission-weight
+branch
+from
+5236e88 to
+74a6a1b
+Compare
+October 23, 2026 14:21
+arbobendik
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Verdict: PASS (74a6a1b)
+Base: the merge base is main 84504d7, and the PR holds 1 commit, its own. Single-line subject, Bendik Arbogast as author and committer, no trailers, +32/−15.
+Since 5236e88, the only change is the exit condition: lit restir is exempt from the dark-pixel bound and keeps |mean − 1| < 0.02. The comment says why. src is unchanged.
+Runtime, node 24, one GPU hold:
+Run
+NVIDIA
+Intel
+npm test, all 5 scenes
+exit 0
+exit 0
+↳ lit restir
+1.0005
+1.0006 (one noisy pixel, now exempt)
+v1 84504d7, lit restir
+0.9687, fail
+0.9686, fail
+walk-only revert, lit restir
+0.9687, fail
+0.9686, fail
+Earlier results stand: glass, mirror and lit PT on both GPUs and lavapipe; 57d568e fails all of them. The no-leak reading is confirmed in code.
+Pending: the WebGL2 runtime test waits on Bendik's permission for browser tests.
+arbobendik
+force-pushed
+the
+fix/emission-weight
+branch
+2 times, most recently
+from
+f0102be to
+8544eb9
+Compare
+October 23, 2026 19:14
+arbobendik
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Verdict: PASS (8544eb9), rebased onto main 398ac26, to merge together with flex-cuda-pt#24
+Base: merge base main 398ac26, 1 own commit. Single-line subject, Bendik Arbogast as author and committer, no trailers; stable patch-id unchanged from the verified head (74a6a1b, 2fcfc9e1953f).
+npm test (5 scenes): exit 0 on NVIDIA and Intel; lit restir 1.0005 / 1.0006; lit PT 1.0000.
+Control: main 398ac26 (v1) with this test, lit restir: 0.9687 / 0.9686, exit 1.
+Lavapipe (PT scenes) unchanged: glass and mirror 1.0000, lit 0.9999. ReSTIR segfaults under Dawn + lavapipe on every head and on old main alike, so it's verified on the GPUs only.
+Pending: the WebGL2 runtime test waits on Bendik's permission for browser tests.
+Evidence: FlexLight-mis/.agent/bsdf-verify/rebase/ (gpu-stack.txt, npm-<head>-<gpu>.log), one 87 s GPU hold, node 24.
+fix(pathtracer): take the full weight of emission met after rays samp…
+…
+527d33c
+```
+…led to the wrong side of the face, which no light sample competes with
+```
+arbobendik
+force-pushed
+the
+fix/emission-weight
+branch
+from
+8544eb9 to
+527d33c
+Compare
+October 23, 2026 20:47
+arbobendik
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Verdict: PASS (527d33c), full re-verify after the conflicted rebase onto main e08ecbe; merges together with flex-cuda-pt#24
+Base: merge base main e08ecbe, 1 own commit, +25/−8. Single-line subject, Bendik Arbogast as author and committer, no trailers.
+Shaders: the patch-id changed (c43a77d0343d) only through the test conflict. The WGSL and GLSL hunks are byte-identical to the verified 8544eb9's, and glslang compiles common + pathtracer with 0 errors.
+Test edits reviewed:
+Two-sided |mean − 1| < 0.02 for glass, mirror and lit is stricter than main's mean > 0.98, and exact, since each has expectation 1.
+lit exempt from brightest < 1.05 is justified: its MIS-weighted light samples can exceed 1 per sample, so a per-pixel cap isn't a truth there. The ambient-only scenes have weight ≤ 1 by construction and keep the cap, and a gain would still breach the two-sided mean.
+lit restir exempt from the dark-pixel bound is justified: ReSTIR's per-pixel noise lets one pixel of 4096 fall below 0.5 on Intel. The regressions are caught by the mean, and lit pt keeps the bound.
+Metal, dielectric and raster are unchanged from main.
+npm test, all 8 scenes, node 24, exit 0 on NVIDIA and on Intel:
+glass PT
+mirror PT
+mirror ReSTIR
+metal
+dielectric
+raster
+lit PT
+lit ReSTIR
+1.0000
+1.0000
+1.0000
+0.8558
+0.9991
+1.5389, pixel 0 varies
+0.9997 / 0.9996
+1.0005 / 1.0006
+Controls, both GPUs, all exit 1:
+main e08ecbe with this test: lit pt 0.9687, 2.44% black; lit restir 0.9687 / 0.9686.
+This PR with only the walk's !wrong_side reverted: lit restir 0.9687 / 0.9686.
+Pending: the WebGL2 runtime test waits on Bendik's permission for browser tests.
+Evidence: FlexLight-mis/.agent/bsdf-verify/rebase/ (gpu-527.txt, npm-t527-<gpu>.log), one 60 s GPU hold.
+Hide details
+View details
+arbobendik
+merged commit 527d33c
+into
+main
+Oct 24, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+arbobendik
+deleted the
+fix/emission-weight
+branch
+October 24, 2026 03:11
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

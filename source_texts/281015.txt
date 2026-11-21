@@ -1,0 +1,88 @@
+Part of #71 Question Which conservative visibility tests can cut client work in BhayanakVoxel without changing a pixel, and what does each actually save in a radiance-cached voxel path tracer? Cover at least Frustum culling at brick, reg...
+
+Research: conservative visibility and culling · Issue #72 · theHimanshuShekhar/BhayanakVoxel · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Research: conservative visibility and culling #72
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Research: conservative visibility and culling#72
+Copy link
+Assignees
+Labels
+wayfinder:researchWayfinder research ticketWayfinder research ticket
+Description
+theHimanshuShekhar
+opened on Oct 30, 2026
+Issue body actions
+Part of #71
+Question
+Which conservative visibility tests can cut client work in BhayanakVoxel without changing a pixel, and what does each actually save in a radiance-cached voxel path tracer?
+Cover at least
+Frustum culling at brick, region and LOD-node granularity: test cost, false-positive rate on a sphere, and whether it belongs on the CPU scene selection, the GPU traversal, or both.
+Horizon capping on the 16 km Planet: visible-cap half-angle as a function of camera height, from the ground to 20–50 R; how to intersect it with the frustum; how it behaves in caves and under overhangs; how it interacts with the continuous Zoom.
+Occlusion: Hi-Z or depth-prepass, portal/cell for caves, coarse-occupancy tests. Does it pay for primary rays when the tracer already DDA-steps empty bricks? Does it pay for shadow and GI rays, given the radiance cache? Is the real win in tracing, generation, upload, VRAM or BVH updates?
+Conservative correctness: what bounds make each test exact (never removes a surface that could contribute a pixel), and how to prove it — culling-on vs culling-off image equality, plus a no-hole camera path.
+Contract impact: what each test needs from LOD rings on the GPU #48's ring layout and the scene tree, and what it would change in LOD rings on the GPU #48, Streaming generation #49, Hardware RT trace() #50 and Half-res tracing and TAAU upscale #51.
+Output
+A ranked shortlist. Per technique: what it buys (ms / bytes / hitches, as a range with confidence), implementation cost, risk, fidelity impact, dependencies, and the cheapest experiment that would validate it on the 4090.
+Cite primary sources for external claims. This ticket is evidence for the catalogue; do not design the final architecture.
+Activity
+theHimanshuShekhar
+added
+wayfinder:researchWayfinder research ticketWayfinder research ticket
+on Oct 30, 2026
+theHimanshuShekhar
+added a parent issue on Oct 30, 2026
+Wayfinder: extreme optimization without losing fidelity #71
+theHimanshuShekhar
+marked this as blocking on Oct 30, 2026
+Task: synthesize and rank the technique catalogue #78
+theHimanshuShekhar
+self-assigned this
+on Oct 30, 2026
+theHimanshuShekhar commented on Oct 30, 2026
+theHimanshuShekhar
+on Oct 30, 2026
+OwnerAuthor
+More actions
+Resolution
+Findings: https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/visibility-and-culling/docs/research/visibility-and-culling.md
+Culling cannot cut rays here, and that reframes the whole ticket. trace() is a DDA that only visits what a ray crosses, a depth prepass would duplicate the primary pass, and a cull cannot remove a camera ray. Only about 2.0 of the 8.6 ms is even addressable (primary 1.0, edits/BVH 1.0), so the realistic frame-time win is 0.05–0.25 ms (1–3 %). The wins are hitches (2–3.5× fewer new bricks/s) and VRAM (2–8×); generation > upload > VRAM > BVH size > tracing.
+A frustum test without the horizon test is close to useless on a sphere. Measured (40 M sampled nodes/camera): at ground level the cone keeps 7.7 % of all surface bricks while 1.7 × 10⁻⁵ are visible — 4,650× waste, and 1.7 × 10⁷× looking 60° down, because the cone passes through the Planet and takes the far side. Frustum-only is 8.5× at 1 km, 27× looking 30° down.
+The horizon cap is the one must-have, and the only cull with no look-around risk. One dot product per node (3.7 ns measured), view-independent, exact for a convex Planet: 2.0–2.1× of the coarse set at 20–50 R (the visible fraction never passes ½), 4× at 1 R, 30–3,000× between 10 m and 1 km. Combined with the frustum it leaves 1.0–2.1× of the truly visible bricks. Cap geometry table, Zoom behaviour and the cave gating are in §2.
+Frustum culling belongs on the CPU as scene selection on a camera change, at ring-tile/region granularity — never per ray. 12.5 ns/node measured: 10⁵–10⁶ bricks is 1.3–13 ms (too slow), 10³–10⁴ regions is 13–125 µs, 10²–10³ tiles is 1–13 µs. Selection is a property of the camera, not the frame, so it costs ~0 µs on still frames.
+Occlusion does not pay. Hi-Z is circular for camera rays, faces the wrong way for shadow rays (a shadow ray leaves away from the depth buffer), and is non-conservative for GI rays — Lumen's screen traces are an accelerator with a fallback, not a cull. Coarse occupancy mips can't be conservative: "any-solid" over-culls, "all-solid" just reproduces Core. Portals/cells for caves stay on the watchlist.
+Two cheap wins hide in the existing trace(). It clips to the occupied-region AABB; a corner ray walks 0.73 R ≈ 11.7 km of empty space (1,828 region probes at level 0) before reaching the Planet, so a bounding-sphere clip is free and exact — but Scene has no per-node bounds and one global AABB, which is the real contract gap.
+Proof is three gates, not one: bit-exact culling-on vs culling-off PNGs (the tracer is already deterministic), a CPU ray-incidence oracle (visited ⊆ retained over millions of rays — the only test that finds the cave case), and a no-hole path (180° turn, cave dive, ground↔50 R Zoom, teleport).
+Contract asks: LOD rings on the GPU #48 — per-tile bounds, a per-level origin/extent, an angular tile index (makes the horizon a dot-product threshold and the frustum a per-face range), a visible/instance list, and bound_centre/bound_radius in SceneHeader. Streaming generation #49 — priority visible ∩ horizon, prefetch at h(t+1–2 s), "no holes" asserted with culling on. Hardware RT trace() #50 — TLAS built from the visible list, rebuilt on cull change. Half-res tracing and TAAU upscale #51 — conservative over the jittered frustum and the history window; a cull change must not invalidate TAA history.
+Confidence: high on the geometry, the test costs and the kept fractions (computed/measured here); medium on the byte and hitch ranges; low–medium on the frame-time numbers, which no one can know without the GPU.
+Open questions: the cave width and lateral reach (#46) are the one blocker for the horizon cap; whether #48's rings are 4π shells or a tangent-plane clipmap changes every denominator; nothing measures region probes per ray yet, so the sphere clip's value is an estimate; and #54's cache-update policy decides whether view-scoped cache updates are a real second-order win.
+Five experiments for the 4090 are in §7, each with a pass/fail that does not need a human to squint. The gating one is a --cull on|off flag plus a cave-orbit-v1 path: byte-identical PNGs or the technique is out.
+theHimanshuShekhar
+closed this as completedon Oct 30, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+theHimanshuShekhar
+Labels
+wayfinder:researchWayfinder research ticketWayfinder research ticket
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

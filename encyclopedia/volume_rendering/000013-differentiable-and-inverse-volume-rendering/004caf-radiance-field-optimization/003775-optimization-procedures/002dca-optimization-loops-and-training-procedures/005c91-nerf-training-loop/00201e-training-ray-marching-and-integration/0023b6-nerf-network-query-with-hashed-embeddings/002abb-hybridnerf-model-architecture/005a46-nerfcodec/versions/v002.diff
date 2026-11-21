@@ -1,0 +1,388 @@
+--- v001.md
++++ v002.md
+@@ -1,148 +1,181 @@
+ # NeRFCodec
+ 
+-Also called: Neural Feature Compression for Hybrid NeRF
++Also called: Neural Feature Compression Meets Neural Radiance Fields for Memory-Efficient Scene Representation
+ 
+ ## Overview
+-NeRFCodec is an end-to-end compression framework for plane-based hybrid Neural Radiance Fields (NeRF) that integrates non-linear transform, quantization, and entropy coding to achieve memory-efficient scene representation [S1]. It solves the high storage requirements of hybrid representations by leveraging a pre-trained 2D neural image codec, adapted with content-specific parameters for each scene, to compress feature planes while maintaining high visual fidelity [S1]. Unlike methods that apply generic image codecs directly or use wavelet transforms, NeRFCodec modifies the encoder and decoder heads of the 2D codec to exploit inter-channel information in feature planes, achieving superior rate-distortion performance with a memory budget of approximately 0.5 MB per scene [S1].
++NeRFCodec is an end-to-end compression framework for plane-based hybrid Neural Radiance Fields (NeRF) that integrates non-linear transform, quantization, and entropy coding to achieve memory-efficient scene representation [S1]. It solves the high storage footprint of hybrid NeRF representations by compressing feature planes using a pre-trained 2D neural image codec backbone, adapted with content-specific parameters [S1]. Unlike raw parameter counting or generic image codecs, NeRFCodec exploits inter-channel information in feature planes through a specialized encoder-decoder adaptation, achieving superior rate-distortion performance compared to methods like Masked Wavelet NeRF and VQ-TensoRF [S1]. It enables high-quality novel view synthesis within a strict memory budget of approximately 0.5 MB per scene [S1].
+ 
+ ## How it works
+-**Inputs:** Pre-trained hybrid NeRF feature planes (orthogonal planes from a representation like TensoRF-VM or HexPlane), a pre-trained 2D neural image codec backbone (e.g., Cheng et al. [10]), and a target memory budget (e.g., 0.5 MB).
+-**Outputs:** A multiplexed bitstream containing quantized latent codes, quantized hyperprior latent codes, content-specific decoder head parameters, residual vectors, tiny MLP parameters, and metadata.
++**Inputs and Outputs:**
++*   **Input:** A pre-trained hybrid NeRF model (specifically plane-based variants like TensoRF-VM or HexPlane) for a specific scene, consisting of orthogonal feature planes and a small attribute regression MLP [S1].
++*   **Output:** A compressed bitstream containing quantized latent codes, quantized hyperprior latent codes, content-specific decoder head parameters, feature residual vectors, tiny MLP parameters, and metadata [S1].
+ 
+ **Data Structures:**
+-The final bitstream consists of the following components [S1]:
+-1.  Quantized latent code $\hat{y}$: The compressed representation of the feature planes.
+-2.  Quantized hyperprior latent code $\hat{z}$: Side information for the entropy model.
+-3.  Feature decoder head $D_{\phi_2}$: Content-specific network parameters for the neural feature decoder.
+-4.  Feature residual vectors $v_{\Delta x}$: Residuals for feature reconstruction.
+-5.  Tiny MLPs $f$: Small multi-layer perceptrons for attribute regression (color/density).
+-6.  Metadata: Scene-specific configuration data.
+-
+-**Algorithm Steps:**
+-
+-1.  **Pre-training:** Pre-train the hybrid NeRF on a specific scene for 100,000 iterations to obtain the initial feature planes $x$ and tiny MLPs $f$ [S1].
+-2.  **Codec Initialization:** Take a well-trained 2D neural image codec. Replace its encoder head (first layer) and decoder head (last layer) to adjust to the target channel dimension of the NeRF feature planes [S1].
+-3.  **Warm-up:** Perform a warm-up phase using only the feature plane reconstruction loss to establish a better starting point for the neural feature codec [S1].
+-4.  **Joint Training:** Train the full pipeline (neural feature codec and neural radiance field) jointly for 100,000 iterations. The loss function $L_{total}$ combines rendering loss (supervision of image quality) and entropy loss (supervision of bitrate) [S1].
+-    *   The encoder and the new decoder head are updated.
+-    *   The remaining parts of the pre-trained decoder are frozen [S1].
+-    *   Note: A feature reconstruction loss between the reconstructed feature plane and the pre-trained feature plane is *not* used, as it degrades performance [S1].
+-5.  **Quantization-Aware Training (QAT):** Perform QAT on the network parameters to be transmitted (decoder head and MLP in renderer) for 10,000 iterations to prepare for discrete entropy coding [S1].
+-6.  **Test-Time Encoding:**
+-    *   Feed orthogonal feature planes into the codec one by one [S1].
+-    *   Encode the latent code $\hat{y}$ and hyperprior $\hat{z}$ using the entropy model [S1].
+-    *   Quantize and entropy-encode the content-specific decoder head parameters $D_{\phi_2}$, residual vectors $v_{\Delta x}$, and tiny MLPs $f$ [S1].
+-    *   Multiplex all substreams into a total bitstream [S1].
+-7.  **Test-Time Decoding:**
+-    *   Demultiplex the total bitstream into substreams [S1].
+-    *   Independently entropy-decode each substream [S1].
+-    *   Reassemble the content-specific decoder head and residual vectors to reconstruct the feature planes [S1].
+-    *   Reconstruct feature planes once; subsequent querying operations for volume rendering are executed on these reconstructed planes [S1].
++The framework modifies a pre-trained 2D neural image codec (backbone: Cheng et al. [10], implementation: CompressAI [4]) [S1].
++*   **Encoder Head ($E_{\phi1}$):** The first layer of the 2D codec, modified to accept the channel dimension of the NeRF feature planes [S1].
++*   **Frozen Decoder Body:** The intermediate layers of the pre-trained 2D decoder remain frozen [S1].
++*   **Decoder Head ($D_{\phi2}$):** The last layer of the 2D codec, modified to output the target channel dimension [S1]. This head contains content-specific learnable parameters [S1].
++*   **Feature Planes ($x$):** Orthogonal feature planes extracted from the pre-trained hybrid NeRF [S1].
++*   **Tiny MLP ($f$):** The small MLP used for attribute regression (color/density) in the renderer [S1].
++*   **Bitstream Components:**
++    1.  Quantized latent code $\hat{y}$ [S1].
++    2.  Quantized hyperprior latent code $\hat{z}$ [S1].
++    3.  Feature decoder head parameters $D_{\phi2}$ [S1].
++    4.  Feature residual vectors $v_{\Delta x}$ [S1].
++    5.  Tiny MLP parameters $f$ [S1].
++    6.  Metadata [S1].
++
++**Training Procedure:**
++The training occurs in three phases [S1]:
++
++1.  **Pre-training:** Pre-train the hybrid NeRF on the target scene for 100,000 iterations to obtain feature planes $x$ and tiny MLP $f$ [S1].
++2.  **Warm-up:** Perform a warm-up of the neural feature codec using only the feature plane reconstruction loss to establish a better starting point [S1].
++3.  **Joint Training:** Jointly train the neural feature codec and the neural radiance field for 100,000 iterations [S1]. The loss function $L_{total}$ combines rendering loss and entropy loss [S1]. During this phase, the full encoder and the decoder head are adapted to fit the specific scene, while the remaining parts of the decoder are frozen [S1].
++4.  **Quantization-Aware Training (QAT):** Perform QAT on the network parameters to be transmitted (decoder head and MLP in renderer) for 10,000 iterations [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def train_nerf_codec(scene_data, pre_trained_2d_codec, num_iterations=100000, qat_iterations=10000):
+-    """
+-    Trains the NeRFCodec for a specific scene.
+-    """
+-    # Step 1: Pre-train Hybrid NeRF
+-    nerf_model = HybridNeRF(scene_data)
+-    nerf_model.train(100000) # Standard NeRF training
+-    feature_planes, tiny_mlp = nerf_model.get_feature_planes_and_mlp()
+-    
+-    # Step 2: Initialize Codec
+-    # Replace first and last layers of pre_trained_2d_codec to match feature plane channels
++def train_nerf_codec(scene_data, pre_trained_neurf, pre_trained_2d_codec):
++    """
++    Trains the NeRFCodec framework for a specific scene.
++    """
++    # 1. Pre-train Hybrid NeRF
++    # Obtain feature planes x and tiny MLP f
++    nerf_model = pre_trained_neurf
++    for i in range(100000):
++        render_loss = compute_rendering_loss(nerf_model, scene_data)
++        render_loss.backward()
++        optimizer_neurf.step()
++    
++    feature_planes = nerf_model.get_feature_planes()
++    tiny_mlp = nerf_model.get_mlp()
++
++    # 2. Initialize Neural Feature Codec
++    # Modify encoder and decoder heads of pre-trained 2D codec
+     codec = pre_trained_2d_codec
+-    codec.encoder_head = LinearLayer(in_channels=feature_planes.channels, out_channels=latent_channels)
+-    codec.decoder_head = LinearLayer(in_channels=latent_channels, out_channels=feature_planes.channels)
+-    
+-    # Freeze the middle parts of the decoder (pre-trained weights)
+-    for param in codec.decoder_middle.parameters():
++    codec.encoder_head = modify_layer(codec.encoder_head, target_channels=feature_planes.shape[1])
++    codec.decoder_head = modify_layer(codec.decoder_head, target_channels=feature_planes.shape[1])
++    
++    # Freeze intermediate decoder layers
++    for param in codec.decoder_body.parameters():
+         param.requires_grad = False
+-        
+-    # Step 3: Warm-up
+-    # Optimize codec encoder/decoder_head with feature reconstruction loss only
+-    warmup_loss = reconstruction_loss(codec.decode(codec.encode(feature_planes)), feature_planes)
+-    optimize(warmup_loss, params=[codec.encoder_head, codec.decoder_head])
+-    
+-    # Step 4: Joint Training
+-    # Loss = Rendering Loss + Entropy Loss
+-    for i in range(num_iterations):
+-        # Sample rays and render images using current feature planes and tiny_mlp
+-        rendered_images = render(nerf_model, feature_planes, tiny_mlp)
+-        rendering_loss = compute_rendering_loss(rendered_images, ground_truth_images)
+-        
+-        # Encode feature planes to get latent code y
+-        y = codec.encode(feature_planes)
+-        
+-        # Compute entropy loss based on the probability model of y
+-        entropy_loss = compute_entropy_loss(y, codec.probability_model)
+-        
+-        total_loss = rendering_loss + entropy_loss
+-        optimize(total_loss, params=[codec.encoder_head, codec.decoder_head, tiny_mlp])
+-        
+-    # Step 5: Quantization-Aware Training
+-    for i in range(qat_iterations):
+-        # Quantize parameters to be transmitted (decoder_head, tiny_mlp)
+-        quantized_decoder_head = quantize(codec.decoder_head)
+-        quantized_mlp = quantize(tiny_mlp)
+-        
+-        # Forward pass with quantized parameters
+-        y = codec.encode(feature_planes)
+-        reconstructed_planes = codec.decode(y, quantized_decoder_head)
+-        rendered_images = render(nerf_model, reconstructed_planes, quantized_mlp)
+-        
+-        loss = compute_rendering_loss(rendered_images, ground_truth_images)
+-        optimize(loss, params=[codec.encoder_head, quantized_decoder_head, quantized_mlp])
+-        
+-    return codec, tiny_mlp, feature_planes
+-
+-def encode_scene(codec, feature_planes, tiny_mlp):
+-    """
+-    Encodes the scene into a bitstream.
++
++    # 3. Warm-up Phase
++    # Optimize codec only with feature plane reconstruction loss
++    optimizer_codec = torch.optim.Adam(codec.parameters())
++    for i in range(warmup_iterations): # Iteration count not specified in sources
++        latent = codec.encode(feature_planes)
++        reconstructed_planes = codec.decode(latent)
++        rec_loss = mse_loss(reconstructed_planes, feature_planes)
++        rec_loss.backward()
++        optimizer_codec.step()
++
++    # 4. Joint Training Phase
++    # Supervised by rendering loss and entropy loss
++    optimizer_joint = torch.optim.Adam(list(codec.parameters()) + list(tiny_mlp.parameters()))
++    for i in range(100000):
++        # Encode feature planes
++        latent = codec.encode(feature_planes)
++        
++        # Decode feature planes
++        reconstructed_planes = codec.decode(latent)
++        
++        # Render image using reconstructed planes and tiny MLP
++        rendered_image = render_scene(reconstructed_planes, tiny_mlp, scene_data)
++        
++        # Compute losses
++        rendering_loss = compute_rendering_loss(rendered_image, scene_data.gt_image)
++        entropy_loss = compute_entropy_loss(latent, codec.probability_model)
++        
++        L_total = rendering_loss + entropy_loss
++        L_total.backward()
++        optimizer_joint.step()
++
++    # 5. Quantization-Aware Training Phase
++    # Quantize parameters to be transmitted: decoder head and MLP
++    optimizer_qat = torch.optim.Adam(list(codec.decoder_head.parameters()) + list(tiny_mlp.parameters()))
++    for i in range(10000):
++        latent = codec.encode(feature_planes)
++        reconstructed_planes = codec.decode(latent)
++        rendered_image = render_scene(reconstructed_planes, tiny_mlp, scene_data)
++        
++        rendering_loss = compute_rendering_loss(rendered_image, scene_data.gt_image)
++        entropy_loss = compute_entropy_loss(latent, codec.probability_model)
++        
++        L_total = rendering_loss + entropy_loss
++        L_total.backward()
++        optimizer_qat.step()
++
++    return codec, tiny_mlp
++
++def encode_scene(codec, tiny_mlp, feature_planes):
++    """
++    Encodes the scene into a bitstream at test time.
+     """
+     bitstreams = []
+     
+-    # Encode latent codes for each orthogonal plane
++    # 1. Encode Feature Planes
++    # Orthogonal feature planes are fed into the codec one by one
+     for plane in feature_planes:
+-        y = codec.encode(plane)
+-        z = codec.get_hyperprior(y)
+-        bitstreams.append(entropy_encode(y))
+-        bitstreams.append(entropy_encode(z))
+-        
+-    # Encode content-specific parameters
+-    bitstreams.append(entropy_encode(quantize(codec.decoder_head)))
+-    bitstreams.append(entropy_encode(quantize(tiny_mlp)))
+-    
+-    # Multiplex
++        latent = codec.encode(plane)
++        quantized_latent = quantize(latent)
++        bitstream_latent = entropy_encode(quantized_latent)
++        bitstreams.append(bitstream_latent)
++        
++        # Encode hyperprior if applicable
++        hyperprior = codec.get_hyperprior(latent)
++        quantized_hyperprior = quantize(hyperprior)
++        bitstream_hyperprior = entropy_encode(quantized_hyperprior)
++        bitstreams.append(bitstream_hyperprior)
++
++    # 2. Encode Content-Specific Parameters
++    # Compress decoder head parameters
++    quantized_decoder_head = quantize(codec.decoder_head.parameters())
++    bitstream_decoder_head = entropy_encode(quantized_decoder_head)
++    bitstreams.append(bitstream_decoder_head)
++    
++    # Compress feature residual vectors (if used)
++    # Note: Sources mention residual vectors v_delta_x in bitstream
++    # Assuming these are derived or stored separately
++    bitstreams.append(encode_residuals()) 
++
++    # 3. Encode Tiny MLP
++    quantized_mlp = quantize(tiny_mlp.parameters())
++    bitstream_mlp = entropy_encode(quantized_mlp)
++    bitstreams.append(bitstream_mlp)
++
++    # 4. Multiplex
+     total_bitstream = multiplex(bitstreams)
+     return total_bitstream
+ 
+-def decode_scene(total_bitstream, codec):
+-    """
+-    Decodes the bitstream and reconstructs the NeRF for rendering.
+-    """
+-    # Demultiplex
++def decode_scene(codec, tiny_mlp, total_bitstream):
++    """
++    Decodes the bitstream and reconstructs the scene for rendering.
++    """
++    # 1. Demultiplex
+     substreams = demultiplex(total_bitstream)
+     
+-    # Decode latent codes and reconstruct planes
+-    reconstructed_planes = []
+-    for substream in substreams:
+-        y = entropy_decode(substream)
+-        z = entropy_decode(substream) # Assuming z is separate or interleaved
+-        plane = codec.decode(y)
+-        reconstructed_planes.append(plane)
+-        
+-    # Decode parameters
+-    decoder_head = entropy_decode(substream) # Content-specific head
+-    tiny_mlp = entropy_decode(substream)     # Tiny MLP
+-    
+-    # Reassemble
+-    codec.decoder_head = decoder_head
+-    nerf_model.tiny_mlp = tiny_mlp
+-    
+-    # Return reconstructed planes and model for rendering
+-    return reconstructed_planes, nerf_model
++    # 2. Decode Feature Planes
++    # Reconstruct feature planes once
++    reconstructed_feature_planes = []
++    for i, plane_substream in enumerate(substreams['latent_streams']):
++        quantized_latent = entropy_decode(plane_substream)
++        # Decode using the adapted decoder head
++        # Note: The decoder head parameters must also be decoded first
++        reconstructed_plane = codec.decode(quantized_latent)
++        reconstructed_feature_planes.append(reconstructed_plane)
++        
++    # 3. Decode Parameters
++    quantized_decoder_head = entropy_decode(substreams['decoder_head_stream'])
++    codec.decoder_head.set_parameters(quantized_decoder_head)
++    
++    quantized_mlp = entropy_decode(substreams['mlp_stream'])
++    tiny_mlp.set_parameters(quantized_mlp)
++    
++    # 4. Render
++    # Subsequent querying operations are executed on the reconstructed planes
++    rendered_image = render_scene(reconstructed_feature_planes, tiny_mlp, query_points)
++    return rendered_image
+ ```
+ 
+@@ -150,35 +183,57 @@
+ *   **Memory Budget:** 0.5 MB per scene [S1].
+ *   **Joint Training Iterations:** 100,000 [S1].
+-*   **QAT Iterations:** 10,000 [S1].
+-*   **Backbone:** Neural image codec by Cheng et al. [10] [S1].
+-*   **Implementation Base:** CompressAI library [4] [S1].
++*   **Quantization-Aware Training Iterations:** 10,000 [S1].
++*   **Pre-training Iterations:** 100,000 [S1].
++*   **Implementation Base:** CompressAI library [4].
++*   **Backbone:** Neural image codec proposed by Cheng et al. [10].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Direct Reuse Failure:** Using a pre-trained 2D neural image codec without architecture modification (splitting planes into three channels, normalizing, and feeding) results in significantly higher bitrate consumption because it does not fully exploit inter-channel information [S1].
+-*   **Generalization Failure:** A neural feature codec trained on a small-scale feature dataset (e.g., 8 scenes from NeRF-Synthetic) fails to generalize to unseen objects from other datasets (e.g., NSVF-Synthetic) without test-time optimization, producing unreasonable rendering results [S1].
+-*   **Feature Reconstruction Loss:** Adding a reconstruction loss between the reconstructed feature plane and the pre-trained feature plane degrades performance (lower PSNR/SSIM) and increases size [S1].
++*   **Architecture Modification:** Using a pre-trained 2D neural image codec without modifying the encoder/decoder heads (e.g., splitting planes into three channels and normalizing) results in significantly higher bitrate consumption because it fails to fully exploit inter-channel information [S1].
++*   **Generalization:** A neural feature codec trained on a small-scale feature dataset (e.g., 8 scenes from NeRF-Synthetic) fails to generalize to unseen objects from other datasets (e.g., NSVF-Synthetic) without test-time optimization, producing unreasonable rendering results [S1].
+ *   **Training Time:** Training the non-linear transform is time-consuming [S1].
+ *   **Scene Specificity:** A specialized neural feature codec must be trained for each scene individually [S1].
++*   **Feature Reconstruction Loss:** Adding a feature plane reconstruction loss during joint training degrades performance (PSNR 32.81 dB vs 35.08 dB) compared to relying solely on rendering loss [S1].
++
++## Subtopics
++
++### [NeRFCodec Decoder Payload Estimation](17943-nerfcodec-decoder-payload-estimation.md)
++This method estimates the compressed bitrate budget for the decoder-side parameters of the NeRFCodec framework, which must be transmitted alongside encoded Neural Radiance Fields. It differs from raw parameter counting by applying per-tensor quantization and entropy estimation to approximate the actual payload size in a streaming application. It serves as a proxy for memory footprint when NeRFCodec is used as a 3D representation for content delivery.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is time-consuming due to the joint optimization of the neural feature codec and the neural radiance field, as well as the non-linear transform training [S1].
+-*   **Memory Complexity:** The method achieves a memory budget of approximately 0.5 MB per scene [S1].
+-*   **Measured Performance:**
+-    *   On NeRF-Synthetic Dataset: 36.60 dB PSNR at 0.91 MB and 36.21 dB PSNR at 0.46 MB [S1].
+-    *   Compression Ratio: Over 1000 times for feature planes via non-linear transform [S1].
+-    *   Memory Breakdown (TensoRF-VM variant):
+-        *   Compressed Feature planes: 0.052 MB (Original 69.953 MB, Ratio x1345.3) [S1].
+-        *   Compressed Decoder head: 0.269 MB (Original 1.761 MB, Ratio x6.5) [S1].
+-        *   Compressed MLP in renderer: 0.042 MB (Original 0.160 MB, Ratio x3.8) [S1].
+-        *   Feature vectors: 0.049 MB (Original 0.234 MB, Ratio x4.8) [S1].
+-        *   Residual vectors: 0.041 MB (Original 0.234 MB, Ratio x5.7) [S1].
+-        *   Total Compressed: 0.453 MB (Original 72.342 MB, Ratio x159.7) [S1].
+-*   **Strengths:** Superior rate-distortion performance compared to Masked Wavelet NeRF, Binary Radiance Fields, and VQ-TensoRF [S1]. The use of a non-linear transform instead of a wavelet transform improves performance [S1]. Decoding incurs only a short waiting time as feature planes are reconstructed once [S1].
+-*   **Limitations:** Requires training a specialized codec for each scene [S1]. Training is time-consuming [S1].
+-*   **When to Use:** When high-quality novel view synthesis is required with strict memory constraints (e.g., < 0.5 MB per scene) and per-scene optimization is feasible [S1].
+-*   **When Not to Use:** When real-time generalization to unseen scenes without per-scene training is required, or when computational resources for joint training are limited [S1].
++**Time and Memory Complexity:**
++*   **Memory:** NeRFCodec achieves a total compressed size of 0.453 MB for the TensoRF-VM variant, compared to an original size of 72.342 MB (compression ratio x159.7) [S1].
++    *   Compressed Feature planes: 0.052 MB (Original 69.953 MB, Ratio x1345.3) [S1].
++    *   Compressed Decoder head: 0.269 MB (Original 1.761 MB, Ratio x6.5) [S1].
++    *   Compressed MLP in renderer: 0.042 MB (Original 0.160 MB, Ratio x3.8) [S1].
++    *   Feature vectors: 0.049 MB (Original 0.234 MB, Ratio x4.8) [S1].
++    *   Residual vectors: 0.041 MB (Original 0.234 MB, Ratio x5.7) [S1].
++*   **Compression Ratio:** The non-linear transform allows for a compression ratio over 1000 times for feature planes [S1].
++
++**Measured Performance:**
++*   **NeRF-Synthetic Dataset:**
++    *   36.60 dB PSNR at 0.91 MB [S1].
++    *   36.21 dB PSNR at 0.46 MB [S1].
++*   **Ablation (Chair Scene, NeRF-Synthetic):**
++    *   Auto-encoder Size: 0.453 MB, PSNR: 35.08 dB, SSIM: 0.981 [S1].
++    *   Auto-decoder Size: 0.461 MB, PSNR: 34.41 dB, SSIM: 0.973 [S1].
++    *   Without Entropy Loss: Size 0.701 MB, PSNR 34.98 dB, SSIM 0.980 [S1].
++    *   With Feature Reconstruction Loss: Size 0.479 MB, PSNR 32.81 dB, SSIM 0.965 [S1].
++    *   Re-using unmodified Image Codec: Size 1.786 MB, PSNR 29.96 dB, SSIM 0.923 [S1].
++    *   Re-using Tuned Image Codec: Size 1.150 MB, PSNR 33.25 dB, SSIM 0.961 [S1].
++
++**Strengths and Limitations:**
++*   **Strengths:** Superior rate-distortion performance compared to Masked Wavelet NeRF, Binary Radiance Fields, and VQ-TensoRF across three datasets (NeRF-Synthetic, NSVF-Synthetic, Tanks and Temples) [S1]. The use of a non-linear transform instead of a wavelet transform improves upon Masked Wavelet NeRF [S1]. Compatible with different plane-based NeRF approaches (validated on TensoRF-VM and HexPlane) [S1].
++*   **Limitations:** Training the non-linear transform is time-consuming [S1]. Requires training a specialized neural feature codec for each scene individually [S1]. Does not generalize well to unseen objects without test-time optimization if trained on limited data [S1].
++
++**When to Use:**
++*   Use when high-quality novel view synthesis is required with a strict memory budget (e.g., < 0.5 MB per scene) [S1].
++*   Use when compressing plane-based hybrid NeRF representations [S1].
++
++**When Not to Use:**
++*   Do not use if real-time training of a generalized codec for unseen objects is required without per-scene adaptation [S1].
++*   Do not use if computational resources for the time-consuming non-linear transform training are limited [S1].
+ 
+ ## Background
+-NeRFCodec was proposed by researchers from Zhejiang University and published in CVPR 2024 [S1]. It addresses the significant storage requirements of hybrid NeRF representations, which combine feature grids and small MLPs for high reconstruction quality and fast training [S1]. The method is validated on TensoRF-VM and HexPlane as representative implementations of neural fields, and evaluated on NeRF-Synthetic, NSVF-Synthetic, and Tanks and Temples datasets [S1]. It builds on advances in neural compression and neural field representation, specifically reusing pre-trained neural 2D image codecs [S1].
++NeRFCodec was proposed by researchers from Zhejiang University, published in CVPR 2024 [S1]. It addresses the significant storage requirements of hybrid NeRF representations, which combine feature grids and small MLPs for high reconstruction quality and fast training [S1]. The method leverages advances in neural compression and neural field representation, specifically reusing pre-trained neural 2D image codecs (such as the one by Cheng et al.) by adapting their encoder and decoder heads to the specific channel dimensions of NeRF feature planes [S1]. It was validated on the NeRF-Synthetic, NSVF-Synthetic, and Tanks and Temples datasets [S1].
+ 
+ ## Sources

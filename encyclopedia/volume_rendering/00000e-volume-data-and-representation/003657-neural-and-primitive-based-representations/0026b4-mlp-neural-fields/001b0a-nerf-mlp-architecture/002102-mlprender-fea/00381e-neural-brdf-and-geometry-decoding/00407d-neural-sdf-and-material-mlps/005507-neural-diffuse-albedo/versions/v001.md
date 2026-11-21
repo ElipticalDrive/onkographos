@@ -1,0 +1,53 @@
+# Neural diffuse albedo
+
+
+## Overview
+Neural diffuse albedo is a method for predicting the spatially-varying diffuse reflectance ($\rho_d$) of a surface point using a multi-layer perceptron (MLP). It solves the problem of recovering physically-based material properties from inverse rendering pipelines by mapping 3D geometry and local features to albedo values. It is distinguished from sibling material decoders by its specific input composition, which includes surface normals and geometric features, and its higher-frequency positional encoding for coordinates compared to specular or roughness predictors.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D point coordinate $\mathbf{x} \in \mathbb{R}^3$, a surface normal $\mathbf{n} \in \mathbb{R}^3$, and a geometric feature vector $\mathbf{f}$.
+*   **Output:** The diffuse albedo $\rho_d \in \mathbb{R}^3$ (RGB).
+
+**Data Structures:**
+The method uses an 8-layer MLP.
+*   **Hidden Dimension:** 256.
+*   **Skip Connections:** A skip connection is added from the input to the 4th hidden layer.
+*   **Positional Encoding:** The input coordinate $\mathbf{x}$ is encoded using 10 frequencies. The normal $\mathbf{n}$ and geometric features $\mathbf{f}$ are concatenated directly or processed as specified by the pipeline's feature aggregation (typically concatenated with the encoded $\mathbf{x}$).
+
+**Algorithm:**
+1.  **Encode Coordinates:** Apply positional encoding $\gamma(\mathbf{x})$ to $\mathbf{x}$ using 10 frequencies. This expands $\mathbf{x}$ into a higher-dimensional vector.
+2.  **Prepare Input Vector:** Concatenate the encoded coordinates $\gamma(\mathbf{x})$, the surface normal $\mathbf{n}$, and the geometric features $\mathbf{f}$ to form the input vector $\mathbf{v}_{in}$.
+3.  **Forward Pass:** Pass $\mathbf{v}_{in}$ through the 8-layer MLP.
+    *   Let $W_i, b_i$ be the weights and biases for layer $i$.
+    *   For layers $i=1$ to $3$: $h_i = \text{ReLU}(W_i h_{i-1} + b_i)$, where $h_0 = \mathbf{v}_{in}$.
+    *   For layer $i=4$: $h_4 = \text{ReLU}(W_4 h_3 + b_i + h_0)$ (Skip connection).
+    *   For layers $i=5$ to $8$: $h_i = \text{ReLU}(W_i h_{i-1} + b_i)$.
+4.  **Output:** The final layer outputs $\rho_d$. Depending on the activation function of the final layer (often linear or sigmoid depending on normalization), $\rho_d$ represents the diffuse albedo.
+
+**Parameters:**
+*   Hidden dimension: 256 [S1].
+*   Network depth: 8 layers [S1].
+*   Skip connection: After 4th layer [S1].
+*   Coordinate encoding frequency: 10 [S1].
+
+**Edge Cases:**
+*   **Normal Definition:** The method requires a valid surface normal $\mathbf{n}$. In the IRON pipeline, normals are typically derived from the gradient of the Neural SDF. Degenerate SDF regions may produce unstable normals.
+*   **Feature Availability:** The geometric features $\mathbf{f}$ are output by the Neural SDF network. If the SDF is not initialized or trained, these features may be meaningless.
+
+## Subtopics
+
+### Roughplastic Material Representation
+This variant integrates the neural diffuse albedo into a broader roughplastic BRDF model. It decomposes the scene's BRDF into diffuse ($\rho_d$), specular ($\rho_s$), and roughness ($\rho_r$) components. The diffuse albedo is still predicted by an MLP (often sharing the same architectural principles), but it is used in conjunction with $\rho_s$ and $\rho_r$ (predicted by separate MLPs) to compute microfacet specular reflection. The inputs to the material MLPs include the positional encoded point $\mathbf{x}$ and optimizable parameters $\Theta_d, \Theta_s, \Theta_r$. This approach allows for spatially-varying rough plastic materials where diffuse and specular properties are decoupled but co-located [S1].
+
+## Operating characteristics
+*   **Complexity:** The computational cost is dominated by the forward pass of an 8-layer MLP with 256 hidden units. This is lightweight compared to full rasterization but adds overhead to ray marching steps.
+*   **Memory:** The MLP weights are stored in memory. With 8 layers, 256 hidden units, and inputs of size (encoded $\mathbf{x}$ + $\mathbf{n}$ + $\mathbf{f}$), the parameter count is moderate.
+*   **Performance:** The use of 10 frequencies for coordinate encoding allows for high-frequency detail recovery in albedo but increases the input dimension significantly, requiring more computation per sample than lower-frequency encodings.
+*   **Limitations:** The method assumes the existence of a surface normal and geometric features. It does not predict albedo in free space or non-surface regions directly; it is a surface property predictor.
+
+## Background
+The neural diffuse albedo decoder is part of the IRON (Inverse Rendering with Neural Fields) pipeline, introduced in "PIR: Photometric Inverse Rendering with Shading Cues Modeling and Surface Reflectance Regularization" [S1]. It builds upon the Neural SDF architecture, which uses an 8-layer MLP with 256 hidden units and a skip connection at the 4th layer [S1]. The specific design choices (8 layers, 256 width, 10 frequencies for albedo vs 6 for SDF/specular) are tailored to capture the spatial variations of diffuse color while maintaining consistency with the underlying geometry.
+
+## Sources
+[S1] PIR: Photometric Inverse Rendering with Shading Cues Modeling and Surface Reflectance Regularization, https://doi.org/10.1109/3dv66043.2025.00055, fetched 2026-10-26

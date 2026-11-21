@@ -1,0 +1,112 @@
+# Initial Upper Bound Estimation
+
+Also called: Heuristic Sampling for BVH Pruning
+
+## Overview
+Initial Upper Bound Estimation computes a tight initial upper bound to prune BVH-tree traversal during distance field computation for isosurface approximation [S1]. It differs from standard hierarchical traversal by proactively sampling the approximated surface to establish a pruning threshold before traversal begins, rather than waiting for the first leaf encounter [S1]. This allows for more aggressive pruning at the beginning of the traversal, reducing the total number of nodes visited [S1].
+
+## How it works
+**Inputs:**
+- A Bounding Volume Hierarchy (BVH) tree representing the voxel grid or surface approximation [S1].
+- A target isosurface to approximate [S1].
+- A sample count $N$ [S1].
+
+**Outputs:**
+- An initial upper bound value $U_{init}$ used to prune BVH traversal [S1].
+
+**Data Structures:**
+- The BVH tree structure is assumed to be standard (nodes containing bounding volumes and children) [S1].
+- A set of sample points $P = \{p_1, p_2, ..., p_N\}$ representing locations on the approximated surface [S1].
+
+**Steps:**
+1. **Sample Surface Points:** Generate $N$ evenly distributed points on the approximated isosurface [S1].
+2. **Compute Initial Upper Bound:** Calculate the upper bound $U_{init}$ based on the distances or spatial extents of the sampled points relative to the BVH structure [S1]. The specific geometric formula for deriving the bound from the points is not explicitly detailed in the source, but it serves as a threshold for pruning [S1].
+3. **Prune Traversal:** Use $U_{init}$ during the BVH traversal. If $N=0$ (no samples), the traversal proceeds without this heuristic, examining nodes until the first leaf is reached [S1].
+4. **Evaluate Performance:** As $N$ increases, the estimation time rises linearly, while traversal time decreases rapidly then plateaus [S1].
+
+**Parameters:**
+- **Number of sample points ($N$):** Recommended range is 1000 to 1500 for reasonable-sized datasets [S1]. A value of 1500 was selected in the evaluation to yield swift traversal across all datasets [S1].
+
+**Pitfalls:**
+- **High Point Count Variables:** For variables with high point counts and even spatial distribution (e.g., CHI, vorticity), increasing samples beyond 1500 causes rapid runtime increases due to convergence toward brute-force, outweighing traversal gains [S1].
+- **Zero Samples:** Without samples, traversal takes the longest time as the tree must be examined until the first leaf is reached [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_initial_upper_bound(bvh_tree, isosurface, num_samples):
+    """
+    Computes an initial upper bound for BVH traversal pruning.
+    
+    Args:
+        bvh_tree: The BVH tree structure.
+        isosurface: The approximated isosurface geometry.
+        num_samples: Number of points to sample (1000-1500 recommended).
+        
+    Returns:
+        float: The initial upper bound value.
+    """
+    if num_samples == 0:
+        # No initial bound; traversal will proceed until first leaf
+        return None
+    
+    # Step 1: Sample a fixed number of points from the approximated surface
+    # The source specifies "evenly sampled points" but does not provide the 
+    # specific sampling algorithm for the isosurface.
+    sample_points = evenly_sample_surface(isosurface, num_samples)
+    
+    # Step 2: Compute an initial upper bound from these points
+    # The source states the bound is computed from the points but does not 
+    # provide the exact formula. It implies a calculation based on spatial 
+    # distribution or distance metrics.
+    initial_upper_bound = calculate_bound_from_samples(sample_points)
+    
+    return initial_upper_bound
+
+def evenly_sample_surface(surface, count):
+    """
+    [G] Placeholder for surface sampling logic.
+    The source [S1] mentions "evenly sampled points" but does not define 
+    the mathematical method for generating them from the isosurface.
+    """
+    # Implementation depends on the specific isosurface representation.
+    # Common approaches include uniform sampling on parametric domains 
+    # or stratified sampling.
+    pass
+
+def calculate_bound_from_samples(points):
+    """
+    [G] Placeholder for bound calculation.
+    The source [S1] states the bound is computed from the points to enable 
+    pruning, but the exact aggregation function (e.g., max distance, 
+    bounding box expansion) is not specified.
+    """
+    # Implementation depends on the specific pruning metric used in the BVH.
+    pass
+```
+
+## Subtopics
+
+### [BVH-Based Distance Field Computation with Heuristic Initialization](15459-bvh-based-distance-field-computation-with-heuristic-initiali.md)
+This method computes a distance field for an isosurface approximation by finding the closest point of the isosurface for every voxel in the volume using a Bounding Volume Hierarchy (BVH) tree. It differs from existing approaches by initializing the upper bound before traversal using evenly sampled points, rather than waiting for the first leaf encounter, which allows for more aggressive pruning at the beginning of the traversal.
+
+## Operating characteristics
+- **Time Complexity:** Estimation time increases linearly with the sample count $N$ [S1]. Traversal time decreases rapidly as $N$ increases from 0, then slowly approaches a minimum [S1].
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** 
+  - Most datasets reach minimum traversal time between 2000 and 2300 points, fluctuating by 1 ms [S1].
+  - For variables with high point counts (CHI, vorticity), minimums are reached earlier (1200 and 1500 points respectively) [S1].
+  - Beyond these minima, running times increase rapidly (e.g., CHI: 94.58 to 380.36; vorticity: 69.25 to 248.82) [S1].
+- **Strengths:** Performance gained by using a tighter upper bound usually outweighs the costs during traversal for less than 1500 sample points [S1].
+- **Limitations:** For variables with high point counts and even spatial distribution, increasing samples beyond 1500 leads to rapid runtime increases due to convergence toward brute-force [S1].
+- **When to Use:** Use when BVH traversal for distance field computation is a bottleneck and the dataset is of reasonable size. A sample count between 1000 and 1500 is generally preferable [S1].
+- **When Not to Use:** Avoid for variables with very high point counts and even spatial distribution if sample counts exceed 1500, as the cost of estimation and convergence to brute-force outweighs traversal gains [S1].
+
+## Background
+- **Origin:** The method is described in the context of efficient GPU-accelerated computation of isosurface similarity maps [S1].
+- **History:** The approach was evaluated to demonstrate the quality of isosurface similarity maps, following the work of Bruckner and Möller [S1].
+- **Usage:** Used in the computation of distance fields for isosurface approximation within scientific visualization, specifically for combustion, hurricane, and ionization datasets [S1].
+
+## Sources
+[S1] Efficient GPU-Accelerated Computation of Isosurface ..., https://academicweb.nd.edu/~cwang11/papers/pvis17-ism.pdf, fetched 2026-10-30

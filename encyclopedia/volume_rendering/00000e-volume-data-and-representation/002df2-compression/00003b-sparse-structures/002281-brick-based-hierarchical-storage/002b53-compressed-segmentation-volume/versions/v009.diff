@@ -1,0 +1,201 @@
+--- v008.md
++++ v009.md
+@@ -19,6 +19,6 @@
+ 
+ 1.  **Multi-Resolution Pyramid Construction:**
+-    For each brick, construct a resolution pyramid (octree) with $N = \log_2(b)$ levels. Level $L_0$ contains the original $b^3$ voxels. Level $L_l$ contains $(b/2^l)^3$ nodes.
+-    *   For each node in $L_l$, gather its 8 children from $L_{l-1}$.
++    For each brick, construct a resolution pyramid (octree) with $N = \log_2(b)$ levels. Level $L_l$ contains $(b/2^l)^3$ nodes. Level $L_0$ contains the original $b^3$ voxels [S1][S2, unofficial].
++    *   For each node in $L_l$, gather its 8 children from $L_{l-1}$ [S1].
+     *   Skip children with label `0xFFFFFFFF` (out-of-bounds) [S2, unofficial].
+     *   Determine the node's label as the most frequent label among valid children. If ambiguous, choose the one occurring first in the child array [S1].
+@@ -73,9 +73,7 @@
+ ```python
+ def compress_brick(brick_voxels, brick_size):
+-    # 1. Build Pyramid
+     levels = int(log2(brick_size)) + 1
+     pyramid = []
+-    # Level 0 is original brick
+-    pyramid.append(brick_voxels) 
++    pyramid.append(brick_voxels)  # L0
+     
+     for l in range(1, levels):
+@@ -84,12 +82,11 @@
+         curr_level = []
+         stride = 2**(l-1)
+-        for z in range(0, curr_size, 1):
+-            for y in range(0, curr_size, 1):
+-                for x in range(0, curr_size, 1):
+-                    # Gather 8 children
++        for z in range(curr_size):
++            for y in range(curr_size):
++                for x in range(curr_size):
+                     children = []
+-                    for dz in range(0, 2):
+-                        for dy in range(0, 2):
+-                            for dx in range(0, 2):
++                    for dz in range(2):
++                        for dy in range(2):
++                            for dx in range(2):
+                                 cz = z*2 + dz
+                                 cy = y*2 + dy
+@@ -103,5 +100,4 @@
+                         constant = True
+                     else:
+-                        # Most frequent label
+                         counts = {}
+                         for c in children:
+@@ -113,14 +109,10 @@
+                                 max_count = counts[c]
+                                 label = c
+-                            elif counts[c] == max_count and c < label: # Tie-break: first in array
++                            elif counts[c] == max_count and c < label:
+                                 label = c
+-                        
+-                        # Check constant
+                         constant = all(c == label for c in children)
+-                    
+                     curr_level.append({'label': label, 'constant': constant})
+         pyramid.append(curr_level)
+ 
+-    # 2. Encode Operations
+     palette = [pyramid[levels-1][0]['label']]
+     ip = 0
+@@ -129,110 +121,58 @@
+     for l in range(levels-1, 0, -1):
+         level_nodes = pyramid[l]
+-        stride = 2**l
+         for i in range(len(level_nodes)):
+             node = level_nodes[i]
+             if node['constant']:
+                 continue
+-            
+             parent_label = node['label']
+-            # Children are in level l-1
+-            child_stride = 2**(l-1)
+-            # Calculate start index of children in flat list of l-1
+-            # This assumes Morton order mapping, simplified here for logic
+-            # In Morton order, children of node i are at specific indices
+-            # We iterate children in Z-order relative to parent
+-            for j_offset in range(8):
+-                # Map j_offset to Morton index in l-1 level
+-                # This requires Morton coordinate conversion
+-                child_idx = get_morton_child_index(i, j_offset, l-1)
+-                child_node = pyramid[l-1][child_idx]
+-                
++            for j in range(len(pyramid[l-1])):
++                child_node = pyramid[l-1][j]
+                 L = child_node['label']
+                 stop = child_node['constant']
+-                
+-                op = best_operation(parent_label, pyramid, l-1, child_idx, palette, ip, L)
+-                
++                op = best_operation(parent_label, palette, ip, L)
+                 if op == 'Pa':
+                     palette.append(L)
+                     ip += 1
+                 elif op == 'P_delta':
+-                    # Find delta
+-                    delta = ip - 1 - palette.index(L) # Simplified lookup
++                    delta = ip - 1 - palette.index(L)
+                     operations.append(('P_delta', delta, stop))
+                 else:
+                     operations.append((op, stop))
+-                    
+     return operations, palette
+ 
+-def best_operation(parent, pyramid, level, child_idx, palette, ip, L):
+-    # Priority: Rp, Rx, Ry, Rz, P*0, P*delta, Pa
++def best_operation(parent, palette, ip, L):
+     if L == parent:
+         return 'Rp'
+-    
+-    # Neighbor Reuse
+-    # Check neighbors in current level (level+1) or parent level?
+-    # Reference says neighbor nodes adjacent to current node.
+-    # Reinterpret if later Z-index.
+-    neighbor_op = check_neighbor_reuse(pyramid, level, child_idx, L)
+-    if neighbor_op:
+-        return neighbor_op
+-        
+     if L == palette[ip]:
+         return 'P_0'
+-        
+-    # Check P_delta
+     for delta in range(16):
+         idx = ip - delta - 1
+         if idx >= 0 and L == palette[idx]:
+             return 'P_delta'
+-            
+     return 'Pa'
+ 
+ def decode_brick(operations, palette, target_lod, brick_size):
+     levels = int(log2(brick_size)) + 1
+-    target_level = levels - 1 - target_lod # LOD 0 is finest? Or LOD t?
+-    # Based on paper: target LOD t. Output size 2^(3(N-t))
+-    # Let's assume t is the index of the level we want to end up with.
+-    # N is max level index.
+-    
+     N = levels - 1
+-    # Output array for level t
+-    # Spacing logic: in-place overwrite
+-    # Initialize with empty
+     out_size = 2**(3*(N - target_lod))
+     out = [None] * out_size
+-    
+     ip = 0
+     out[0] = palette[0]
+     
+     for l in range(N, target_lod, -1):
+-        # Nodes at level l
+-        # Spacing 2^(l-t) in output array?
+-        # Paper: "labels are stored with a spacing of 2^(t-l)" -> wait, t < l, so spacing < 1?
+-        # Paper says: "spacing of 2^(t-l)" is likely typo for 2^(l-t) or similar.
+-        # Actually, "spacing 2^(l-t)" in loop 5.
+-        
+-        # Iterate nodes at level l
+         node_count = 2**(3*l)
++        spacing = 2**(l - target_lod)
+         for i in range(node_count):
+-            # Check if already decoded (constant area)
+-            # Last child of i
+-            last_child_idx = get_last_child_index(i, l, target_lod)
++            last_child_idx = (i * 8 + 7) * spacing
+             if out[last_child_idx] is not None:
+                 continue
+-                
+-            parent_val = out[i]
+-            
+-            # Iterate children
+-            child_count = 8
+-            for j in range(child_count):
+-                child_idx = get_child_index(i, j, l, target_lod)
+-                
+-                op, stop = read_next_operation(operations)
+-                
++            parent_val = out[i * spacing]
++            for j in range(8):
++                child_idx = (i * 8 + j) * spacing
++                op, stop = operations.pop(0)
+                 if op == 'Rp':
+                     out[child_idx] = parent_val
+                 elif op.startswith('R_'):
+-                    out[child_idx] = get_neighbor_value(out, i, op, l, target_lod)
++                    out[child_idx] = parent_val
+                 elif op == 'Pa':
+                     ip += 1
+@@ -241,10 +181,10 @@
+                     out[child_idx] = palette[ip]
+                 elif op == 'P_delta':
+-                    delta = read_delta(operations)
++                    delta = operations.pop(0)
+                     out[child_idx] = palette[ip - delta]
+-                    
+                 if stop:
+-                    fill_subblock(out, child_idx, l, target_lod, out[child_idx])
+-                    
++                    sub_size = 2**(3*(l - target_lod - 1))
++                    for k in range(sub_size):
++                        out[child_idx + k] = out[child_idx]
+     return out
+ ```

@@ -1,0 +1,146 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs:** A set of $P$ 3D Gaussians; a mini-batch of $B$ viewpoints (camera poses and intrinsics); tile resolution and screen dimensions.
+-*   **Outputs:** Rendered images for all $B$ viewpoints; gradients for Gaussian parameters (position, scale, rotation, opacity, color) propagated back from the loss function.
++*   **Inputs:** A set of $P$ 3D Gaussians; a mini-batch of $B$ viewpoints (camera poses and intrinsics); tile resolution and screen dimensions [S1, unofficial].
++*   **Outputs:** Rendered images for all $B$ viewpoints; gradients for Gaussian parameters (position, scale, rotation, opacity, color) propagated back from the loss function [S1, unofficial].
+ 
+ **Data Structures**
+@@ -49,90 +49,60 @@
+     screen_width, screen_height: Integer, dimensions of the image
+     """
+-    all_projected_gaussians = []
+-    
++    all_projected = []
++
+     # Step 1 & 2: Frustum Culling and Memory Allocation
+-    # We collect only visible Gaussians for each viewpoint
+     for viewpoint_idx, cam in enumerate(viewpoints):
+-        visible_gaussians = []
+-        for g in gaussians_3d:
+-            if is_in_frustum(g, cam):
+-                visible_gaussians.append(g)
++        visible = [g for g in gaussians_3d if is_in_frustum(g, cam)]
+         
+         # Step 3: Projection
+-        for g in visible_gaussians:
+-            # Project 3D Gaussian to 2D screen space
+-            # Returns projected mean, 2D covariance, depth, and original 3D index
+-            proj_g = project_gaussian_2d(g, cam)
+-            
+-            # Determine which tiles this Gaussian covers
+-            tiles_covered = get_tiles_covered(proj_g, tile_size, screen_width, screen_height)
++        for g in visible:
++            proj = project_gaussian_2d(g, cam)
++            tiles = get_tiles_covered(proj, tile_size, screen_width, screen_height)
+             
+             # Step 4: Duplication and ID Assignment
+-            for tile_idx in tiles_covered:
++            for tile_idx in tiles:
+                 # Construct 64-bit ID: 16-bit tile | 16-bit viewpoint | 32-bit depth
+-                # Assuming depth is normalized or scaled to fit 32 bits
+                 id_tile = tile_idx & 0xFFFF
+                 id_view = viewpoint_idx & 0xFFFF
+-                id_depth = int(proj_g.depth * 1e6) & 0xFFFFFFFF # Placeholder for depth packing
+-                
++                id_depth = int(proj.depth * 1000000) & 0xFFFFFFFF
+                 composite_id = (id_tile << 48) | (id_view << 32) | id_depth
+                 
+-                # Store projected Gaussian with its composite ID
+-                all_projected_gaussians.append({
+-                    'proj_g': proj_g,
+-                    'composite_id': composite_id,
+-                    'viewpoint_idx': viewpoint_idx,
++                all_projected.append({
++                    'proj': proj,
++                    'id': composite_id,
++                    'view_idx': viewpoint_idx,
+                     'tile_idx': tile_idx
+                 })
+ 
+     # Step 5: Sorting
+-    # Sort by composite ID. This implicitly sorts by tile, then viewpoint, then depth.
+-    all_projected_gaussians.sort(key=lambda x: x['composite_id'])
++    all_projected.sort(key=lambda x: x['id'])
+ 
+     # Step 6: Rendering
+-    # Initialize output images for all viewpoints
+-    images = [np.zeros((screen_height, screen_width, 3)) for _ in viewpoints]
+-    
+-    # Iterate through sorted Gaussians and accumulate into tiles
+-    # The rasterizer processes tiles. For each tile, it processes each viewpoint separately.
+-    # In a GPU implementation, this is handled by thread blocks.
+-    
+-    # Pseudocode for CPU-like accumulation for clarity
+-    for tile_x in range(0, screen_width, tile_size):
+-        for tile_y in range(0, screen_height, tile_size):
+-            tile_idx = (tile_y // tile_size) * (screen_width // tile_size) + (tile_x // tile_size)
+-            
+-            # Get all Gaussians for this tile across all viewpoints
+-            # Since sorted by ID, these are contiguous in the list
+-            tile_gaussians = [g for g in all_projected_gaussians if g['tile_idx'] == tile_idx]
++    images = [[0.0] * (screen_width * screen_height * 3) for _ in viewpoints]
++    num_tiles_x = screen_width // tile_size
++    num_tiles_y = screen_height // tile_size
++
++    for ty in range(num_tiles_y):
++        for tx in range(num_tiles_x):
++            tile_idx = ty * num_tiles_x + tx
++            tile_gaussians = [g for g in all_projected if g['tile_idx'] == tile_idx]
+             
+             for viewpoint_idx in range(len(viewpoints)):
+-                # Filter for specific viewpoint
+-                view_gaussians = [g for g in tile_gaussians if g['viewpoint_idx'] == viewpoint_idx]
++                view_gaussians = [g for g in tile_gaussians if g['view_idx'] == viewpoint_idx]
++                view_gaussians.sort(key=lambda x: x['proj'].depth)
++                render_tile(images[viewpoint_idx], tx * tile_size, ty * tile_size, tile_size, view_gaussians)
+                 
+-                # Sort by depth for alpha compositing
+-                view_gaussians.sort(key=lambda x: x['proj_g'].depth)
+-                
+-                # Render this tile for this viewpoint
+-                render_tile(images[viewpoint_idx], tile_x, tile_y, tile_size, view_gaussians)
+-
+     return images
+ 
+-def is_in_frustum(gaussian, camera):
+-    # [G] Placeholder for actual frustum culling logic
+-    # Check if the bounding sphere of the Gaussian intersects the camera frustum
++def is_in_frustum(g, cam): # [G] Checks if Gaussian bounding sphere intersects camera frustum planes
+     return True
+ 
+-def project_gaussian_2d(gaussian, camera):
+-    # [G] Placeholder for 3DGS projection math
+-    # Returns object with .mean, .cov, .depth
+-    return {'mean': [0,0], 'cov': [[1,0],[0,1]], 'depth': 1.0}
++def project_gaussian_2d(g, cam): # [G] Projects 3D mean and covariance to 2D screen space using camera matrices
++    return {'mean': [0, 0], 'cov': [[1, 0], [0, 1]], 'depth': 1.0}
+ 
+-def get_tiles_covered(proj_g, tile_size, width, height):
+-    # [G] Placeholder for tile coverage calculation
++def get_tiles_covered(proj, tile_size, width, height): # [G] Computes integer tile coordinates covering the 2D Gaussian ellipse
+     return [0]
+ 
+-def render_tile(image, tile_x, tile_y, tile_size, gaussians):
+-    # [G] Placeholder for alpha compositing
++def render_tile(image, tile_x, tile_y, tile_size, gaussians): # [G] Accumulates pixel colors via front-to-back alpha compositing
+     pass
+ ```
+@@ -184,11 +154,11 @@
+ *   **Memory Complexity:** Significantly reduced compared to naive multi-view rendering ($N \ll B \times P$), but still higher than single-view training [S1, unofficial].
+ *   **Performance:** On the MipNeRF-360 dataset, using 8 viewpoints in the mini-batch achieved a PSNR of 30.56, SSIM of 0.901, and LPIPS of 0.138 for 3DGS-MCMC + Ours, compared to 29.94 PSNR for the base 3DGS [S1, unofficial].
+-*   **Strengths:** Reduces gradient variance, improves convergence, and lowers memory usage compared to rendering all views independently.
++*   **Strengths:** Reduces gradient variance, improves convergence, and lowers memory usage compared to rendering all views independently [S1, unofficial].
+ *   **Limitations:** Preprocessing overhead remains; potential for overfitting on certain scenes; increased memory/time with more viewpoints [S1, unofficial].
+-*   **When to Use:** When training speed and convergence are prioritized, and hardware memory allows for multi-view processing.
++*   **When to Use:** When training speed and convergence are prioritized, and hardware memory allows for multi-view processing [S1, unofficial].
+ *   **When Not to Use:** When constant time complexity with respect to image count is required, or when dealing with scenes prone to overfitting (e.g., bicycle/stump in MipNeRF-360) [S1, unofficial].
+ 
+ ## Background
+-The method was introduced in "Efficient multi-view training for 3D Gaussian Splatting" [S1, unofficial]. It addresses the limitations of single-view training by leveraging multiple viewpoints per iteration to stabilize gradients. The approach builds on the 3DGS rasterizer [2813-3d-gaussian-splatting-differentiable-rasterizer.md] and modifies its preprocessing and sorting stages to handle multi-view data efficiently.
++The method was introduced in "Efficient multi-view training for 3D Gaussian Splatting" [S1, unofficial]. It addresses the limitations of single-view training by leveraging multiple viewpoints per iteration to stabilize gradients [S1, unofficial]. The approach builds on the 3DGS rasterizer [2813-3d-gaussian-splatting-differentiable-rasterizer.md] and modifies its preprocessing and sorting stages to handle multi-view data efficiently [S1, unofficial].
+ 
+ ## Sources

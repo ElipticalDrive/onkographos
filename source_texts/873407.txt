@@ -1,0 +1,460 @@
+Background MRPT/mrpt#1490 fixes two problems in the MRPT-GTSAM covariance conversions: mrpt::gtsam_wrappers::to_gtsam_se3_cov6() (MRPT (x,y,z,yaw,pitch,roll) covariance to GTSAM Pose3 tangent (rx,ry,rz,tx,ty,tz)) was wrong: It reordered ...
+
+Smoother/georeferencing: use exact MRPT-GTSAM pose covariance conversions (to_mrpt_se3_pdf), after MRPT/mrpt#1490 · Issue #97 · MOLAorg/mola_state_estimation · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Smoother/georeferencing: use exact MRPT-GTSAM pose covariance conversions (to_mrpt_se3_pdf), after MRPT/mrpt#1490 #97
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Smoother/georeferencing: use exact MRPT-GTSAM pose covariance conversions (to_mrpt_se3_pdf), after MRPT/mrpt#1490#97
+Copy link
+Description
+jlblancoc
+opened on Nov 5, 2026
+Issue body actions
+Background
+MRPT/mrpt#1490 fixes two problems in the MRPT-GTSAM covariance conversions:
+mrpt::gtsam_wrappers::to_gtsam_se3_cov6() (MRPT (x,y,z,yaw,pitch,roll) covariance to GTSAM Pose3 tangent (rx,ry,rz,tx,ty,tz)) was wrong:
+It reordered the rotation block as if it were still (yaw,pitch,roll) after converting it into a rotation vector, so the x and z rotation axes were swapped, even at the identity pose. A roll-only variance ended up in GTSAM RZ.
+It did not express the translation block in the body frame.
+It now uses the exact first-order Jacobian of xi = Logmap(mean^-1 * pose), validated against GTSAM 4.2.
+mrpt::gtsam_wrappers::to_mrpt_se3_cov6() (GTSAM marginal to MRPT covariance) only reorders entries, so it is exact only at the identity rotation. Elsewhere it leaves the translation block in the body frame and the rotation block as a rotation vector instead of yaw/pitch/roll. In the test poses, the reordered and exact covariances differ by up to 0.15. The PR adds mrpt::gtsam_wrappers::to_mrpt_se3_pdf(pose, cov), the exact inverse of to_gtsam_se3_cov6().
+Changes needed in this repo
+Behavior change, no code change needed: all GTSAM noise models built with to_gtsam_se3_cov6() will change once MRPT includes MRPT/mrpt#1490. Re-validate the tuning (sigma floors, gates) that depends on them:
+StateEstimationSmoother.cpp#L671: T_enu_to_map prior.
+StateEstimationSmoother.cpp#L1271: wheel-odometry anchor.
+StateEstimationSmoother.cpp#L1328: odometry increments.
+StateEstimationSmoother.cpp#L2043: pose observations.
+StateEstimationSmoother.cpp#L2145: relative pose increments.
+Code changes: convert GTSAM marginals with to_mrpt_se3_pdf() instead of to_mrpt_se3_cov6():
+StateEstimationSmoother.cpp#L3528: T_enu_to_map covariance.
+StateEstimationSmoother.cpp#L3538: latest pose covariance, used to check the MAP to BASE_LINK position uncertainty. Its diagonal entries 0..2 are currently body-frame tx,ty,tz, not global x,y,z. A trace-based check is unaffected; per-axis checks are.
+StateEstimationSmoother.cpp#L3669: T_map2_odom_i covariance. Note that the mean may come from liveRelativeFrame() instead of T_map2_odom_i. Use the pose the covariance refers to.
+StateEstimationSmoother.cpp#L4351: ns.pose.cov_inv. Convert first, then invert. Also note that inverse_LLt() does not check positive-definiteness; the determinant check above it is the only guard.
+mola_georeferencing/src/simplemap_georeference.cpp#L529: T_enu_to_map covariance of the georeferencing result.
+These need MRPT with MRPT/mrpt#1490 merged.
+Activity
+jlblancoc commented on Nov 5, 2026
+jlblancoc
+on Nov 5, 2026
+MemberAuthor
+More actions
+A follow-up audit of how MOLA uses the MRPT pose and covariance APIs found the additional items below. Each one was reproduced with a standalone numerical check before writing its patch. All patches apply cleanly, in the listed order, on the current develop.
+MRPT dependency: to_mrpt_se3_pdf() is new (MRPT/mrpt#1490, merged into MRPT develop). Add an MRPT_VERSION guard if this repo must keep building against older MRPT 3.x releases.
+1. The conversions listed above
+Proposed patch: mola_state_estimation-se3-covariance-conversions.patch
+```
+diff -ruN a/mola_georeferencing/src/simplemap_georeference.cpp c/mola_georeferencing/src/simplemap_georeference.cpp
+--- a/mola_georeferencing/src/simplemap_georeference.cpp	2026-11-05 14:17:44.879548696 +0100
++++ b/mola_georeferencing/src/simplemap_georeference.cpp	2026-11-05 14:19:24.166301201 +0100
+@@ -524,9 +524,7 @@
+     ret.geo_ref.emplace();
+ 
+     // We will always have this T, using IMU or GNSS:
+-    ret.geo_ref->T_enu_to_map = {
+-        mrpt::poses::CPose3D(mrpt::gtsam_wrappers::toTPose3D(T0)),
+-        mrpt::gtsam_wrappers::to_mrpt_se3_cov6(T0_cov)};
++    ret.geo_ref->T_enu_to_map = mrpt::gtsam_wrappers::to_mrpt_se3_pdf(T0, T0_cov);
+ 
+     // We may not have geodetics reference if using IMU only. Leave lat=lon=h=0
+     if (smFrames.refCoord.has_value())
+diff -ruN a/mola_state_estimation_smoother/src/StateEstimationSmoother.cpp c/mola_state_estimation_smoother/src/StateEstimationSmoother.cpp
+--- a/mola_state_estimation_smoother/src/StateEstimationSmoother.cpp	2026-11-05 14:17:44.867167954 +0100
++++ b/mola_state_estimation_smoother/src/StateEstimationSmoother.cpp	2026-11-05 14:19:24.142720684 +0100
+@@ -2110,8 +2110,8 @@
+             }
+             else
+             {
+-                mrpt::poses::CPose3DPDFGaussian increment;
+-                increment.mean = poseSanitized.mean - chain.last_pose_in_odom->mean;
++                const mrpt::poses::CPose3D increment =
++                    poseSanitized.mean - chain.last_pose_in_odom->mean;
+ 
+                 // A drifting source publishes the covariance of its absolute
+                 // dead-reckoned pose, which says nothing about one increment,
+@@ -2123,9 +2123,9 @@
+                 // path is split into increments, i.e. whatever the keyframe
+                 // rate or pose_min_sample_period. The flat value is the floor
+                 // asserted while standing still.
+-                const double dL = increment.mean.translation().norm();
++                const double dL = increment.translation().norm();
+                 const double dA =
+-                    mrpt::poses::Lie::SO<3>::log(increment.mean.getRotationMatrix()).norm();
++                    mrpt::poses::Lie::SO<3>::log(increment.getRotationMatrix()).norm();
+ 
+                 const double varLin =
+                     mrpt::square(params_.relative_pose_increment_sigma_lin) +
+@@ -2133,16 +2133,15 @@
+                 const double varAng =
+                     mrpt::square(params_.relative_pose_increment_sigma_ang) +
+                     mrpt::square(params_.relative_pose_increment_sigma_per_sqrt_rad) * dA;
+-                increment.cov.setZero();
++
++                // Isotropic in the GTSAM tangent (rx,ry,rz,tx,ty,tz) of the increment:
++                const gtsam::Pose3 incr_out = mrpt::gtsam_wrappers::toPose3(increment);
++                gtsam::Matrix6     incrCov_out = gtsam::Matrix6::Zero();
+                 for (int i = 0; i < 3; i++)
+                 {
+-                    increment.cov(i, i)         = varLin;
+-                    increment.cov(i + 3, i + 3) = varAng;
++                    incrCov_out(i, i)         = varAng;
++                    incrCov_out(i + 3, i + 3) = varLin;
+                 }
+-
+-                gtsam::Pose3   incr_out;
+-                gtsam::Matrix6 incrCov_out;
+-                mrpt::gtsam_wrappers::to_gtsam_se3_cov6(increment, incr_out, incrCov_out);
+                 if (params_.relative_pose_increment_from_source_covariance)
+                 {
+                     // The covariance of the reading, in the right tangent of the
+@@ -3524,8 +3523,7 @@
+ 
+         auto& pdf = state_.last_estimated_frames[REFERENCE_FRAME_ID];
+ 
+-        pdf.mean = mrpt::poses::CPose3D(mrpt::gtsam_wrappers::toTPose3D(T_enu_to_map));
+-        pdf.cov  = mrpt::gtsam_wrappers::to_mrpt_se3_cov6(T_enu_to_map_cov);
++        pdf = mrpt::gtsam_wrappers::to_mrpt_se3_pdf(T_enu_to_map, T_enu_to_map_cov);
+ 
+         // Convert info matrix to covariance
+         if (!state_.stamp2frame_index.empty())
+@@ -3535,7 +3533,10 @@
+ 
+             const auto poseCov =
+                 gtsam::Matrix6(state_.gtsam->smoother->marginalCovariance(T(latestFrameIdx)));
+-            mrpt::math::CMatrixDouble66 cov = mrpt::gtsam_wrappers::to_mrpt_se3_cov6(poseCov);
++            const mrpt::math::CMatrixDouble66 cov =
++                mrpt::gtsam_wrappers::to_mrpt_se3_pdf(
++                    optValues.at<gtsam::Pose3>(T(latestFrameIdx)), poseCov)
++                    .cov;
+ 
+             // Check MAP->BASE_LINK position uncertainty (diagonal elements 0,1,2 are x,y,z)
+             const double pos_sigma_x   = std::sqrt(cov(0, 0));
+@@ -3664,9 +3665,11 @@
+             auto& pdf = state_.last_estimated_frames[odomFrameIdx];
+ 
+             const auto live = liveRelativeFrame(odomFrameIdx);
+-            pdf.mean =
+-                live ? *live : mrpt::poses::CPose3D(mrpt::gtsam_wrappers::toTPose3D(T_map2_odom_i));
+-            pdf.cov = mrpt::gtsam_wrappers::to_mrpt_se3_cov6(T_map2_odom_i_cov);
++            pdf = mrpt::gtsam_wrappers::to_mrpt_se3_pdf(T_map2_odom_i, T_map2_odom_i_cov);
++            if (live)
++            {
++                pdf.mean = *live;
++            }
+         }
+     }
+ 
+@@ -4348,7 +4351,9 @@
+             "numerically degenerate (det=%g). The factor graph may be under-constrained.",
+             static_cast<unsigned>(idx), poseCov.determinant());
+     }
+-    ns.pose.cov_inv = mrpt::gtsam_wrappers::to_mrpt_se3_cov6(poseCov).inverse_LLt();
++    ns.pose.cov_inv =
++        mrpt::gtsam_wrappers::to_mrpt_se3_pdf(mrpt::gtsam_wrappers::toPose3(frame.pose), poseCov)
++            .cov.inverse_LLt();
+ 
+     // Twist:
+     ns.twist        = frame.twist;
+```
+It also builds the isotropic increment at StateEstimationSmoother.cpp L2145 directly in GTSAM order, which is optional. The old result was off by 7e-4 (relative) at pitch 5 deg.
+2. recenter_georeference() uses the inverse of the T_enu_to_map convention
+simplemap_georeference.cpp L570 computes map to ENU as T_enu_to_map^-1, i.e. p_enu = T^-1 * p_map. The rest of the code uses p_enu = T_enu_to_map * p_map: FactorGnssMapEnu, sm2mm, mm2las, mm-viewer, BridgeROS2, and the other georeferencing tests (T_enu_to_sensor = T_enu_to_map + T_map_to_veh + ...).
+Re-datuming moves the map's geodetic placement by 16 m, 8.8 m and 196 m in three test cases.
+test_recenter_georeference.cpp encodes the same inverse convention (inverseComposePoint), so it passes.
+The patch fixes the function, its header doc and the test property. It is exact to 5e-9 m.
+Proposed patch: mola_state_estimation-recenter-georeference-convention.patch
+```
+diff -ruN c/mola_georeferencing/include/mola_georeferencing/simplemap_georeference.h b/mola_georeferencing/include/mola_georeferencing/simplemap_georeference.h
+--- a/mola_georeferencing/include/mola_georeferencing/simplemap_georeference.h	2026-11-05 14:19:24.139835567 +0100
++++ b/mola_georeferencing/include/mola_georeferencing/simplemap_georeference.h	2026-11-05 14:18:58.510881886 +0100
+@@ -127,9 +127,9 @@
+  *  `T_enu_to_map` is only approximately preserved (exactly so for small datum
+  *  shifts); the 6D covariance is propagated accordingly, not just copied.
+  *
+- *  The ENU frame origin (datum) ends up placed at the map point located at
+- *  \a desiredEnuToMapTranslation (since `T_enu_to_map` maps ENU (0,0,0) to its
+- *  own translation).
++ *  `T_enu_to_map` maps map coordinates into ENU ones, so the map origin ends up
++ *  at the ENU coordinates \a desiredEnuToMapTranslation of the new datum (for
++ *  {0,0,0}, the datum is the map origin).
+  *
+  *  This is useful to force the ENU origin to a chosen map location (e.g. the map
+  *  origin, passing {0,0,0}) instead of the arbitrary first-GNSS position, which
+diff -ruN c/mola_georeferencing/src/simplemap_georeference.cpp b/mola_georeferencing/src/simplemap_georeference.cpp
+--- a/mola_georeferencing/src/simplemap_georeference.cpp	2026-11-05 14:19:24.166301201 +0100
++++ b/mola_georeferencing/src/simplemap_georeference.cpp	2026-11-05 14:18:58.510691636 +0100
+@@ -563,32 +563,37 @@
+     mrpt::topography::ENU_axes_from_WGS84(in.geo_coord, e0, /*only_angles=*/false);
+     const CPose3DPDFGaussian E0{CPose3D(e0)};
+ 
+-    // Physical placement of the map in ECEF (invariant): map -> ECEF.
+-    //   map -> ENU is T_enu_to_map^{-1}; ENU -> ECEF is E0.
++    // Physical placement of the map in ECEF (invariant), as T_enu_to_map maps
++    // map coordinates into ENU ones (p_enu = T_enu_to_map (+) p_map):
++    //   map -> ENU is T_enu_to_map; ENU -> ECEF is E0.
+     // Using the Gaussian PDF composition operators propagates the input
+     // covariance through this transformation (instead of just its mean).
+-    const CPose3DPDFGaussian A = E0 + (-in.T_enu_to_map);
++    const CPose3DPDFGaussian A = E0 + in.T_enu_to_map;
+ 
+-    // The new ENU datum is placed at the map point `t1` (T_enu_to_map maps the
+-    // ENU origin to its own translation). Its ECEF position (mean only, `t1` is
+-    // a fixed user input with no uncertainty):
+-    const mrpt::math::TPoint3D X1 = A.mean.composePoint(t1);
+-
+-    // New datum in geodetic coordinates (ECEF -> geodetic):
++    // The new datum X1 must see the map origin at ENU coordinates `t1`:
++    //   A.origin = X1 + R_enu1(X1) * t1.
++    // The ENU axes rotate very slowly with X1, so a few fixed-point iterations
++    // converge to machine precision (`t1` is a fixed input, mean only).
++    const mrpt::math::TPoint3D        mapOrigin = A.mean.translation();
++    CPose3D                           E1mean    = E0.mean;
+     mrpt::topography::TGeodeticCoords newDatum;
+-    mrpt::topography::geocentricToGeodetic(
+-        X1, newDatum, mrpt::topography::TEllipsoid::Ellipsoid_WGS84());
+-
+-    // ENU frame of the new datum in ECEF (deterministic):
+-    mrpt::math::TPose3D e1;
+-    mrpt::topography::ENU_axes_from_WGS84(newDatum, e1, /*only_angles=*/false);
+-    const CPose3DPDFGaussian E1{CPose3D(e1)};
++    for (int iter = 0; iter < 4; iter++)
++    {
++        const mrpt::math::TPoint3D X1 = mapOrigin - E1mean.rotateVector(t1);
++        mrpt::topography::geocentricToGeodetic(
++            X1, newDatum, mrpt::topography::TEllipsoid::Ellipsoid_WGS84());
++
++        mrpt::math::TPose3D e1;
++        mrpt::topography::ENU_axes_from_WGS84(newDatum, e1, /*only_angles=*/false);
++        E1mean = CPose3D(e1);
++    }
++    const CPose3DPDFGaussian E1{E1mean};
+ 
+     // New T_enu_to_map preserving the exact map<->ECEF placement:
+-    //   map -> ECEF = E1 o T1^{-1} = A   =>   T1 = A^{-1} o E1.
++    //   map -> ECEF = E1 o T1 = A   =>   T1 = E1^{-1} o A.
+     // By construction its mean translation equals `t1`; its covariance is the
+     // propagation of the input T_enu_to_map covariance through this chain.
+-    const CPose3DPDFGaussian T1 = (-A) + E1;
++    const CPose3DPDFGaussian T1 = (-E1) + A;
+ 
+     out.geo_coord    = newDatum;
+     out.T_enu_to_map = T1;
+diff -ruN c/mola_georeferencing/tests/test_recenter_georeference.cpp b/mola_georeferencing/tests/test_recenter_georeference.cpp
+--- a/mola_georeferencing/tests/test_recenter_georeference.cpp	2026-11-05 14:19:24.139982094 +0100
++++ b/mola_georeferencing/tests/test_recenter_georeference.cpp	2026-11-05 14:19:06.244378438 +0100
+@@ -40,9 +40,9 @@
+ mrpt::topography::TGeodeticCoords geodetic_of_map_point(
+     const mp2p_icp::metric_map_t::Georeferencing& g, const mrpt::math::TPoint3D& p_map)
+ {
+-    // p_enu = T_enu_to_map^{-1}(p_map), relative to the datum:
++    // p_enu = T_enu_to_map (+) p_map, relative to the datum:
+     mrpt::math::TPoint3D p_enu;
+-    g.T_enu_to_map.mean.inverseComposePoint(p_map.x, p_map.y, p_map.z, p_enu.x, p_enu.y, p_enu.z);
++    g.T_enu_to_map.mean.composePoint(p_map.x, p_map.y, p_map.z, p_enu.x, p_enu.y, p_enu.z);
+ 
+     // ENU -> geocentric via the datum's ENU frame (ellipsoid-normal Up):
+     mrpt::math::TPose3D enuPose;
+@@ -125,9 +125,12 @@
+         expect_geodetic_near(before[i], after, "probe " + std::to_string(i));
+     }
+ 
+-    // (4) the new datum equals the geodetic of the map point at `target`:
++    // (4) the new datum is the geodetic of the map point at the new ENU origin:
++    const auto newEnuOriginInMap =
++        g1.T_enu_to_map.mean.inverseComposePoint(mrpt::math::TPoint3D(0, 0, 0));
+     expect_geodetic_near(
+-        g1.geo_coord, geodetic_of_map_point(g0, target), "datum == geodetic(target)");
++        g1.geo_coord, geodetic_of_map_point(g0, newEnuOriginInMap),
++        "datum == geodetic(new ENU origin)");
+ }
+ 
+ // Placing the ENU origin at the map origin (0,0,0) makes the datum equal to the
+```
+3. Georeferencing attitude sigmas applied in the sensor frame
+At simplemap_georeference.cpp L1003, the attitude noise is applied in the sensor frame. As a result, the 15 deg azimuth sigma becomes 7.7 deg on a 20 deg slope, and 3.0 deg with an x-up IMU.
+Proposed patch: mola_state_estimation-georef-attitude-noise-frame.patch
+```
+--- a/mola_georeferencing/src/simplemap_georeference.cpp
++++ b/mola_georeferencing/src/simplemap_georeference.cpp
+@@ -997,12 +997,10 @@
+ 
+     auto noisePoses = gtsam::noiseModel::Isotropic::Sigma(6, 1e-2);
+ 
+-    // Roll, pitch, yaw sigmas (approximate correspondence to the Rot3 tangent-space
+-    // residual near the optimum). Yaw is independently weighted since IMU-fused yaw
++    // Tilt and azimuth sigmas. Yaw is independently weighted since IMU-fused yaw
+     // (often magnetometer-based) is typically much noisier than roll/pitch:
+-    auto attitudeNoise = gtsam::noiseModel::Diagonal::Sigmas(gtsam::Vector3(
+-        mrpt::DEG2RAD(params.imuAttitudeSigmaDeg), mrpt::DEG2RAD(params.imuAttitudeSigmaDeg),
+-        mrpt::DEG2RAD(params.imuAttitudeYawSigmaDeg)));
++    const double sigmaTilt = mrpt::DEG2RAD(params.imuAttitudeSigmaDeg);
++    const double sigmaYaw  = mrpt::DEG2RAD(params.imuAttitudeYawSigmaDeg);
+ 
+     // If there were no GNSS frames, T(0) still exists in `v` (add_gnss_factors()
+     // always inserts it unconditionally), but with no prior tying down its
+@@ -1048,6 +1046,14 @@
+         const auto correctedAttitude = mola::factors::imu_apply_enu_azimuth_correction(
+             *frame.rawAttitude, params.azimuthOffsetDeg);
+ 
++        // The residual lives in the frame of the measured sensor attitude, so the
++        // azimuth sigma goes along the {enu} vertical axis, as seen from that frame:
++        const gtsam::Vector3 up = correctedAttitude.unrotate(gtsam::Vector3::UnitZ());
++        const gtsam::Matrix3 cov =
++            mrpt::square(sigmaTilt) * gtsam::I_3x3 +
++            (mrpt::square(sigmaYaw) - mrpt::square(sigmaTilt)) * up * up.transpose();
++        auto attitudeNoise = gtsam::noiseModel::Gaussian::Covariance(cov);
++
+         fg.emplace_shared<mola::factors::Pose3RotationFactor>(
+             T(0), key, sensorOnVehicle, correctedAttitude, attitudeNoise);
+     }
+```
+4. FactorTricycleKinematic arc-branch Jacobians are wrong
+At FactorTricycleKinematic.cpp L116/L118, the Jacobians have a relative error of up to 2.1 against numerical derivatives. The patch adds a regression test.
+Proposed patch: mola_state_estimation-tricycle-jacobians.patch
+```
+--- a/mola_gtsam_factors/src/FactorTricycleKinematic.cpp
++++ b/mola_gtsam_factors/src/FactorTricycleKinematic.cpp
+@@ -112,10 +112,11 @@
+         const double dy = R * (1.0 - c);
+         delta_pose      = gtsam::Pose3(gtsam::Rot3::Rz(theta), gtsam::Point3(dx, dy, 0.0));
+ 
+-        // Analytical derivatives in delta_pose's local tangent space
+-        J_v << 0, 0, 0, s / w, (1.0 - c) / w, 0;
++        // Analytical derivatives in delta_pose's local tangent space (right
++        // perturbations), so the translation part is d(dx,dy) rotated by Rz(theta)^T:
++        J_v << 0, 0, 0, s / w, (c - 1.0) / w, 0;
+ 
+-        J_w << 0, 0, dt_, v * (theta * c - s) / (w * w), v * (theta * s + c - 1) / (w * w), 0;
++        J_w << 0, 0, dt_, v * (theta - s) / (w * w), v * (1.0 - c) / (w * w), 0;
+     }
+ 
+     // 1. Prediction: T_pred = Ti * delta_pose
+--- a/mola_gtsam_factors/tests/CMakeLists.txt
++++ b/mola_gtsam_factors/tests/CMakeLists.txt
+@@ -19,3 +19,10 @@
+   LINK_LIBRARIES
+     mola::mola_gtsam_factors
+ )
++
++mola_add_test(
++  TARGET  test_tricycle_kinematic_factor
++  SOURCES test_tricycle_kinematic_factor.cpp
++  LINK_LIBRARIES
++    mola::mola_gtsam_factors
++)
+--- /dev/null
++++ b/mola_gtsam_factors/tests/test_tricycle_kinematic_factor.cpp
+@@ -0,0 +1,84 @@
++/*               _
++ _ __ ___   ___ | | __ _
++| '_ ` _ \ / _ \| |/ _` | Modular Optimization framework for
++| | | | | | (_) | | (_| | Localization and mApping (MOLA)
++|_| |_| |_|\___/|_|\__,_| https://github.com/MOLAorg/mola
++
++ Copyright (C) 2018-2026 Jose Luis Blanco, University of Almeria,
++                         and individual contributors.
++ SPDX-License-Identifier: GPL-3.0
++ See LICENSE for full license information.
++ Closed-source licenses available upon request, for this package
++ alone or in combination with the complete SLAM system.
++*/
++
++#include <gtsam/inference/Symbol.h>
++#include <gtsam/nonlinear/factorTesting.h>
++#include <mola_gtsam_factors/FactorTricycleKinematic.h>
++
++#include <iostream>
++#include <stdexcept>
++#include <string>
++
++namespace
++{
++void expect(bool cond, const std::string& msg)
++{
++    if (!cond)
++    {
++        throw std::runtime_error("Test assertion failed: " + msg);
++    }
++}
++
++using gtsam::symbol_shorthand::T;
++using gtsam::symbol_shorthand::V;
++using gtsam::symbol_shorthand::W;
++
++// Analytic Jacobians vs numerical ones, in the circular-arc branch, at large
++// turn angles and with a non-zero residual.
++void test_jacobians_arc()
++{
++    const auto noise = gtsam::noiseModel::Isotropic::Sigma(6, 1.0);
++    for (const double w : {0.5, -1.0, 3.0})
++    {
++        for (const double dt : {0.1, 0.5, 1.0})
++        {
++            const mola::factors::FactorTricycleKinematic f(T(0), V(0), W(0), T(1), dt, noise);
++
++            const gtsam::Pose3  Ti(gtsam::Rot3::Ypr(2.5, 0.3, -0.4), gtsam::Point3(1, 2, 3));
++            const gtsam::Point3 bV(2.0, 0.1, -0.2);
++            const gtsam::Point3 bW(0.05, -0.03, w);
++            const gtsam::Pose3  Tj =
++                mola::factors::FactorTricycleKinematic::tricycleKinematicModel(
++                    Ti, bV, bW, dt, 1e-4) *
++                gtsam::Pose3(gtsam::Rot3::Ypr(0.02, -0.01, 0.03), gtsam::Point3(0.03, -0.02, 0.01));
++
++            gtsam::Values vals;
++            vals.insert(T(0), Ti);
++            vals.insert(V(0), bV);
++            vals.insert(W(0), bW);
++            vals.insert(T(1), Tj);
++            expect(
++                gtsam::internal::testFactorJacobians(
++                    "FactorTricycleKinematic", f, vals, 1e-6, 1e-6),
++                "analytic Jacobians match numerical ones for w=" + std::to_string(w) +
++                    " dt=" + std::to_string(dt));
++        }
++    }
++    std::cout << "[Test Passed] Jacobians (arc branch)\n";
++}
++}  // namespace
++
++int main()
++{
++    try
++    {
++        test_jacobians_arc();
++        return 0;
++    }
++    catch (const std::exception& e)
++    {
++        std::cerr << e.what() << "\n";
++        return 1;
++    }
++}
+```
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

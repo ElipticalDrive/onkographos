@@ -1,0 +1,197 @@
+Reported by the maintainer: random(x) and Math.random() behave differently and one of them returns number. Measuring that report turned up four defects and one design, all of which are below with what was measured. Everything here was me...
+
+random: `Math.random()` becomes a real seedless draw (host-seeded, per invocation) and `random(seed)` becomes an exact integer hash · Issue #181 · typeshade/typeshade · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+random: Math.random() becomes a real seedless draw (host-seeded, per invocation) and random(seed) becomes an exact integer hash #181
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+random: Math.random() becomes a real seedless draw (host-seeded, per invocation) and random(seed) becomes an exact integer hash#181
+Copy link
+Description
+Seungup
+opened on Sep 22, 2026
+Issue body actions
+Reported by the maintainer: random(x) and Math.random() behave differently and one of them returns number. Measuring that report turned up four defects and one design, all of which are below with what was measured. Everything here was measured on main (c54170e/ae6b504) through createTypeshadeLanguageService for the editor half and compile() for the compiler half, and on Chromium 141 (chromium_headless_shell-1194) and Chromium 153 (chromium_headless_shell-1243) for the target half, with the broken-shader instrument check reporting first on every browser run.
+What an author writes after this change
+```
+'use typeshade'
+
+@fragment
+export function fs(v: VsOut): FsOut {
+  const grain = Math.random()        // a fresh f32 in [0, 1) on every call
+  const cell = random(floor(v.uv * 8.))   // the same value for the same seed, every frame
+  return { color: vec4(grain, cell, 0., 1.) }
+}
+```
+Two names, two operations, no overlap: Math.random() advances a per-invocation state, random(seed) is a pure function of its seed. The author never writes a seed for the first one.
+The four defects this closes
+1. Math.random is a dead name. Six spellings measured, none accepted by both halves: Math.random() is TS8019 random(seed) needs one seed (f32 | vec2 | vec3). from the compiler (plus a TS8022 Unknown identifier cascade), while Math.random(x), Math.random(0.5) and Math.random(vec2(…)) are typescript 2554 Expected 0 arguments, but got 1 from TypeScript and are accepted by the compiler, emitting the same hash as random(x). A declared member no program can call.
+2. The return type the report names. getHover on Math.random gives (method) MathObject.random(): number; on the free random it gives function random(seed: number | vec2 | vec3): f32. The f32 is the right one and is unusual for a good reason: of 63 free declarations in dist/shade.d.ts, 58 return number and 5 return f32. The fix is to delete the number half, not to weaken the f32 half. The parameter has the same disease in reverse: the declaration says number while the compiler refuses u32, i32 and f64 with TS8003 random(seed) seed must be f32, vec2, or vec3, and because every branded scalar is a number, TypeScript is silent on all three — the author learns at compile time what the declaration could have said while they typed.
+3. random has no source, and the conformance test only appears to say otherwise. There is no §9.3 row and no TYPESHADE_EXTENSIONS entry (61 of each, measured), no mention in docs/use-typeshade-surface.md (0 hits in 3,887 lines), none in AUTHORING.md, README.md or CHANGELOG.md. The name clears surface-names.test.ts only because unaccounted() classifies by BARE NAME: declaredNames() records a kind for every declaration and the classifier throws it away, so the free top-level declare function random(seed) is credited to the ECMAScript member Math.random. Fixing the classifier is a prerequisite, not a follow-up — adding the missing row while the hole is open turns it('no row keeps a name WGSL or ECMAScript now covers') red.
+4. fract(sin(x) * 43758.5453123) is not deterministic, and this is the strongest result. WGSL bounds sin to 2⁻¹¹ absolute error on [-π, π] and does not bound it at all outside that range. Measured: perturbing sin by 2⁻¹¹ moves the result from 0.9642 to 0.3306 for seed 0.5, and from 0.3497 to 0.7161 for seed 12.0. Across the four legs the integer candidates are bit-exact and this one is not — Tint and ANGLE agree with each other but differ from the f64 oracle by up to 0.8078 on a [0, 1) range. The hover text's "the same seed always gives the same value" is true of the IR and false of a GPU. This is a correctness bug in the shipped surface, independent of everything else here.
+The design, settled with the maintainer
+Math.random() survives and becomes implementable. The host uploads one u32 per frame; the compiler installs a per-invocation state at the top of every entry that reaches a call, mixed from (that seed, a stage builtin the pipeline already supplies — position, vertex_index or global_invocation_id); each call advances it. That is ECMAScript's own contract for the name (a fresh value each call) and Rule 9.2 already admits "the ECMAScript arity of the Math members" as a signature exception, so the nullary form needs no new exception.
+random(seed) stays and is reimplemented as an integer hash, sharing the mixer with the state machine. The two are different operations, not two spellings of one: a stream that advances, and a pure function of a seed. It gets the §9.3 row it never had.
+The seed is a compiler-injected uniform — struct TsRandom { seed: u32 } appended after the author's bindings — reported by reflect() so a host can fill it, with the package's own runtime filling it by default. The precedent is in the tree: fp64Lower injects the _fp64 guard binding and reflect() reports it through bindingsIncludingInjected (src/core/reflect.ts:706) for exactly this reason. It must be a struct, not a scalar: measured, declare const seed: uniform<u32> is TS8015 … glsl-es300: uniform binding 'seed' must be a struct (a std140 UBO block). Why not an author-declared seed: it would not be a seedless spelling at all, which is the thing being asked for. Why "like V8" is not available: V8 does not create entropy either — it reads it from the OS once and keeps state in memory across calls, and a shader has neither an entropy source nor memory that survives an invocation, so every value is a pure function of its inputs. What we can reproduce exactly is the author's experience of V8: no seed in the source.
+No seed means a still picture, and that is the honest fallback. Mixing only the stage builtin decorrelates invocations but not frames, so a host that never writes the seed draws the same noise every frame. reflect() says where to write it.
+The algorithm
+A bake-off is running over mulberry32, V8's xorshift128+ (through emulated 64-bit, since neither WGSL nor GLSL ES 3.00 has a 64-bit integer), xorshift32, PCG32, the LCG examples/private-state.shade.ts hand-writes today, and a counter-hash, judged on bit-exactness across the four legs, on neighbouring-seed decorrelation (invocations take seeds one apart, so a generator that correlates across nearby seeds draws stripes — this matters more here than a long single stream), and on cost. Measured so far: all four 32-bit integer candidates are bit-exact across WGSL, GLSL ES 3.00, the oracle and the CPU codegen; lcg32 has a period-2 low bit; xorshift32 has an absorbing zero state; pcg32 and a lowbias32-over-counter both cost 9 ops, and the counter form makes the k-th draw a pure function of (seed, invocation, k), which is what the determinism gate compares and what the step debugger can jump to. The choice lands in the implementing PR with the numbers and the rendered images beside it.
+Immediate data is deferred, and here is the measurement
+The maintainer asked about WebGPU immediates. They are in the specification — @webgpu/types@0.1.74, already a dependency of this repository, declares GPUPipelineLayoutDescriptor.immediateSize, GPUBindingCommandsMixin.setImmediates and GPUSupportedLimits.maxImmediateSize — and they work end to end on Chromium 153: var<immediate> seed: u32; with no enable, immediateSize: 4 validated (999999 is rejected with "not a multiple of 4 bytes"), setImmediates(0, new Uint32Array([seed])), maxImmediateSize 64, and a compute dispatch that reads back a reproducible stream — same seed, same numbers; different seed, different numbers; one pipeline, no rebuild.
+On Chromium 141, which this repository's compile gate runs, it fails at every layer at once: maxImmediateSize is not a limit, immediateSize is silently dropped by WebIDL (a bogus member is accepted too, so the "ok" is vacuous), no encoder has setImmediates, and the pipeline dies with immediateSize (4) is larger than the maximum allowed (0). --enable-dawn-features=allow_unsafe_apis, --enable-webgpu-developer-features and --enable-features=WebGPUExperimentalFeatures change nothing. The two builds also disagree about the WGSL spelling: 141 requires enable chromium_experimental_immediate; and 153 refuses that enable and takes the bare address space (requires immediate_address_space; is the spec-level name and is accepted only on 153).
+So a uniform is the floor — WebGL2 has no immediates at all and needs one regardless — and immediates are a later optimization, gated on the language feature and the limit, when the floor moves.
+What changes, by rule
+Rule 2.1(c) and §9.3: a row for random, which has none today, once the classifier hole is closed. Math.random needs no row (Rule 2.1(b), a genuine Math member) and its nullary signature is already covered by Rule 9.2's recorded ECMAScript-arity exception.
+Rule 2.2: the lowering marker for a zero-argument draw is a PRE_EMIT_INTRINSICS id a pass rewrites away, declared nowhere in SHADE_DTS — internal, not authorable, like _cse0 and df64_add.
+Rule 12.6 and Rule 13.3: the generator must be bit-exact on all four legs, measured on both compilers, which is what retires fract(sin()).
+Rule 13.2 and 13.8: surface §55 (the next unspent number in the §50–61 block; lane D spent §50–§54), a CHANGELOG entry, and the surface document's first-ever text for either name.
+Diagnostic code claimed: TS8054, for a draw in a module with no entry point to install the state in — the alternative is a module that silently returns the same sequence for every invocation of every frame, which is the Appendix B shape this change should not add. Everything else reuses TS8003 (a bad seed type) and TS8019 (arity).
+Rule 9.7 / 13.6: the surface-names classifier gains the declaration kind, so a free function can never again be credited to a member of the same name. That test change stands alone and could land first.
+Acceptance
+The four legs produce identical values for the same (seed, invocation, k) — the determinism gate's bar, with the table in the PR body.
+A shader that never draws costs nothing: no state, no injected binding, no builtin added, and every one of the 66 examples/*.shade.ts emits byte-identical WGSL, GLSL and reflection (measured that way in the prototype: 66/66/66).
+if (Math.random() > 0.5) { textureSample(…) } is refused with §54's uniformity sentence naming textureSampleLevel as the way through — Tint refuses the same module ('textureSample' must only be called from uniform control flow, note reading from module-scope private variable … may result in a non-uniform value), and a drawn value used as a sample coordinate rather than a condition stays accepted.
+An entry that already declares the stage builtin reuses it: a second @builtin(position) is error: '@builtin(position)' appears multiple times as pipeline input.
+Every refusal names a line that itself compiles, in both halves.
+Blocked behind the storage-access change, which rewrites the same ambient declarations.
+Activity
+Seungup commented on Sep 22, 2026
+Seungup
+on Sep 22, 2026 – with Claude
+ContributorAuthor
+More actions
+The generator is decided: a counter-hash (murmur3 fmix32 over a per-invocation counter)
+Eight candidates were written out three times each — WGSL, GLSL ES 3.00 and JavaScript — and run for real: a compute dispatch reading values back on Chromium 141/SwiftShader for the WGSL leg, a render-and-readPixels for the GLSL leg, with the broken-shader instrument check reporting first. 96 values per candidate (16 outputs for seed 0x12345678, 16 for seed 1, and the first output of each of 64 consecutive seeds).
+The result nobody expected: the seeding was the lattice, not the generator
+Under a naive seeding (state = gid.x, which is what an implementation reaches for first), measured over seeds 0..65535 and drawn as a 256×256 image, one value per invocation:
+candidate
+picture
+measurement
+xorshift128+ (V8's)
+solid black
+the first draw is 0 for every invocation
+PCG32, 64-bit XSH-RR
+flat cyan, no red
+first draw 0 for every invocation
+xorshift32
+a bright repeating plaid, ~32 px blocks
+adjacent-seed correlation 0.9997
+LCG32 (what examples/private-state.shade.ts writes today)
+strong diagonal stripes
+correlation 0.9977; dropping the low 8 bits changes nothing
+pcg32 RXS-M-XS (32-bit state)
+noise
+correlation 0.401, 56 863 of 65 536 scatter cells empty
+mulberry32
+noise
+777 collisions among 65 536 neighbouring first draws against 0.5 expected, recurring at 26 of 64 calls
+counter-hash, fmix32
+uniform noise
+passes at all five seedings tested, 64 of 64 calls
+fract(sin(x)*43758.5453123)
+coarse, quantized
+bit-0 bias 0.5 — and it fails even under a hashed seeding (a flat grey field)
+A warm-up does not repair any of them: the xorshift family's step is linear, so the difference between neighbouring states is preserved forever (all 64 calls fail), and mulberry32's failures are scattered across the 64 calls rather than clustered at the start. Under an fmix32 seeding every candidate except fract(sin()) becomes clean — which is the finding: the seeding decides, and only the counter-hash is robust to getting it wrong.
+Cost, measured at 1M invocations × 8 calls
+candidate
+ops/call
+state
+ns/call (WGSL)
+LCG32
+2
+1 word
+0.02
+xorshift32
+6
+1 word
+0.77
+pcg32-from-32
+9
+1 word
+0.92
+counter-hash (fmix32)
+10
+2 words
+0.92
+mulberry32
+13
+1 word
+1.09
+xorshift128+
+20
+4 words
+2.80
+PCG32 64-bit
+44
+2 words
+4.57
+Seeding is the hidden cost of a wide state: xorshift128+ needs 128 non-zero bits per invocation, which is four hashes and 36 more ops, measured at 4.0 ms/1M against mulberry32's 1.6 ms. Storage class is free — a function local, a var<private> and a var<private> read through a helper measure equal within noise on both backends, and Tint and ANGLE both keep the state in registers.
+Why this one
+It is the only candidate that is clean without a seeding hash, which removes a whole class of future defect: a later change to the seeding cannot put stripes on the screen.
+The k-th draw is a pure function of (frame seed, invocation identity, k). That is what the determinism gate compares, what a step debugger can jump to, and — decisive here — it is the same code that answers random(seed), which stays as an exact integer hash. Two spellings, one mixer, no second implementation to keep in step.
+10 ops and 0.92 ns/call, faster than mulberry32 and a third of xorshift128+.
+Bit-exact across WGSL, GLSL ES 3.00 and JavaScript, like every integer candidate.
+V8's xorshift128+ was measured fairly and loses on its own terms: it is built to run one long stream from a well-mixed seed, and this design runs a million parallel streams seeded one apart.
+A second defect the bake-off found, which any choice must fix
+The u32 → f32 conversion is where the legs actually diverge. f32(v) / 4294967296.0 disagrees with JavaScript on 28 of 768 measured values (3.6%, and 13.5% of values ≥ 2³¹); WGSL and GLSL agree with each other and both disagree with JS. Isolating bitcast<u32>(f32(v)) reproduces it exactly, so the division is fine and the conversion is the cause — the shader converts 31 bits and rounds a second time when 2³¹ is added back, a worst measured error of 0.7148 ULP where round-to-nearest cannot exceed 0.5.
+Two exact forms, both measured bit-exact on all 96 values in all three legs:
+```
+f32(v >> 8u) / 16777216.0                       // 24-bit numerator, 2^24 — nothing rounds
+bitcast<f32>((v >> 9u) | 0x3F800000u) - 1.0     // 23 bits, no conversion at all
+```
+examples/private-state.shade.ts already writes the first one, which is why its oracle parity holds today.
+One thing the implementation will hit
+Node.bitBin (src/core/ir/node.ts:537) throws SD0005 unless the left operand is a scalar u32/i32, so componentwise ^ on a vec2<u32> is unavailable even though both targets have it natively. It does not block the counter-hash (everything is scalar), but it is why an emulated 64-bit candidate would have had to be spelled lane by lane.
+Also measured, for the PCG variants: pcg32's own C rotate (-rot) & 31 does not compile — Tint rejects operator - (u32) — and must be written (32u - rot) & 31u.
+Generated by Claude Code
+Seungup
+added a commit that references this issue on Sep 22, 2026
+fix: a name's source is read at the site it is declared — twelve name…
+...
+c5a134e
+Seungup commented on Sep 23, 2026
+Seungup
+on Sep 23, 2026 – with Claude
+ContributorAuthor
+More actions
+Triage 2026-09-23: c5a134e (PR #185) fixed defect 3. The surface-names check now uses the declaration kind, random has its §9.3 row, and surface §55 documents it. The seed type was also narrowed to f32 | vec2 | vec3.
+Still to do:
+Defect 1: Math.random() does not compile.
+Defect 4: the hash is still fract(sin(h) * 43758.5453123) (src/compiler/ts/random-hash.ts:8).
+The fmix32 counter hash, the TsRandom seed uniform and TS8054 from the design comment.
+Keeping this open.
+Generated by Claude Code
+Seungup
+added a commit that references this issue on Oct 5, 2026
+fix(editor): the Math object declares the members the compiler resolv…
+...
+ce5a818
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

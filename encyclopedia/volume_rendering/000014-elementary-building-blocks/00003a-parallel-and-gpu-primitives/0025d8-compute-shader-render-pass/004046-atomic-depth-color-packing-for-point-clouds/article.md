@@ -1,0 +1,159 @@
+# Atomic Depth-Color Packing for Point Clouds
+
+Also called: Atomic point rendering, Basic Compute Shader Point Cloud Rendering, Basic Compute Shader Point Rendering, Compute-based point rendering, Single-pass atomicMin rendering
+
+## Overview
+This method renders point clouds by replacing the standard graphics pipeline's `GL_POINTS` primitive with a compute shader that writes directly into a custom interleaved depth and color buffer using 64-bit atomic operations [S1]. It resolves visibility and color simultaneously by packing linear depth and RGB color into a single 64-bit integer, allowing a single `atomicMin` instruction to select the closest point for each pixel [S1]. Unlike hardware pipelines that suffer from depth precision loss due to hyperbolic transformations, this approach uses linear depth directly, and unlike previous compute-based methods that use busy-loops or lack thread safety, it provides a robust, high-performance alternative [S1].
+
+## How it works
+The method consists of two main passes: a render pass and a resolve pass [S1].
+
+**Inputs and Outputs:**
+*   **Input:** Point cloud data (positions, colors) in world space; a projection matrix ($M_{vp}$); image dimensions ($W \times H$).
+*   **Output:** An OpenGL texture containing the final rendered image.
+*   **Data Structure:** A storage buffer acting as a custom framebuffer. Each pixel corresponds to one 64-bit integer.
+    *   **Layout:**
+        *   Bits 0–23 (Lower 24 bits): RGB color (8 bits per channel).
+        *   Bits 24–55 (Upper 32 bits): Linear depth value (32-bit integer representation of float).
+        *   Bits 56–63: Unused/Reserved.
+
+**Parameters:**
+*   **Depth Representation:** Linear depth ($pos.w$) is used directly. This avoids the precision loss associated with standard hardware depth buffers which use hyperbolic transformations [S1].
+*   **Atomic Operation:** `atomicMin` on 64-bit integers. Since depth is stored in the upper bits and color in the lower bits, minimizing the integer value effectively selects the point with the smallest depth. If depths are equal, the color value influences the result, but typically depth equality is rare or handled by the specific packing order [S1].
+
+**Steps:**
+
+1.  **Render Pass:** For each point in the cloud, a compute shader thread executes the following:
+    a.  Transform the point's world position to clip space:
+        $$ pos = M_{vp} \times position $$
+    b.  Calculate the pixel ID from the screen-space position. Assuming normalized device coordinates (NDC) where $x, y \in [-1, 1]$, the pixel ID is derived from the rasterized coordinates [S1]:
+        $$ pixelID = \text{toPixelID}(pos) $$
+        *Note: `toPixelID` maps the clip-space coordinates to the integer index in the framebuffer array. Typically, this involves converting NDC to window coordinates and then to a linear index.*
+    c.  Extract the linear depth from the $w$-component of the clip-space position. Convert the floating-point depth to an integer representation for packing. In GLSL, `floatBitsToInt` provides a bit-cast [S1]:
+        $$ depth = \text{floatBitsToInt}(pos.w) $$
+    d.  Pack the depth and color into a 64-bit integer. The color ($rgb$) is assumed to be in the range [0, 1] and converted to 8-bit integers. The formula is [S1]:
+        $$ point = (depth \ll 24) \mid rgb $$
+        Here, $rgb$ is the 24-bit integer formed by $(R \ll 16) \mid (G \ll 8) \mid B$.
+    e.  Perform an atomic minimum update on the framebuffer storage buffer at the calculated pixel ID:
+        $$ \text{atomicMin}(\text{framebuffer}[pixelID], point) $$
+
+2.  **Resolve Pass:** After all points are processed, transfer the results from the storage buffer to an OpenGL texture for display. For each pixel $(x, y)$:
+    a.  Calculate the linear index in the storage buffer:
+        $$ pixelID = x + y \times W $$
+    b.  Read the packed integer from the framebuffer.
+    c.  Extract the RGB component. The color is in the lower 24 bits [S1]:
+        $$ icolor = \text{colorAt}(pixelID) $$
+        *Note: `colorAt` extracts the lower 24 bits and converts them back to floating-point RGB values.*
+    d.  Write the color to the output texture:
+        $$ \text{imageStore}(\text{texture}, \text{ivec2}(x, y), icolor) $$
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Render Pass (Compute Shader)
+# Input: point_position (vec4), point_color (vec3), M_vp (mat4), framebuffer (atomic_uint64[])
+# Output: framebuffer
+
+def render_pass(point_position, point_color, M_vp, framebuffer, width, height):
+    # 1. Transform to clip space
+    pos = M_vp * point_position
+    
+    # 2. Calculate pixel ID
+    # Assuming standard NDC to pixel mapping
+    # x_ndc, y_ndc are in [-1, 1]
+    x_ndc = pos.x / pos.w
+    y_ndc = pos.y / pos.w
+    
+    # Map to pixel coordinates [0, width-1], [0, height-1]
+    # Note: OpenGL y-axis is typically bottom-up, but pixel IDs are often top-down.
+    # Adjust based on specific coordinate system conventions.
+    x_pixel = int((x_ndc + 1.0) * 0.5 * width)
+    y_pixel = int((1.0 - y_ndc) * 0.5 * height) # Flipping Y for top-down index
+    
+    # Boundary check
+    if x_pixel < 0 or x_pixel >= width or y_pixel < 0 or y_pixel >= height:
+        return
+
+    pixel_id = y_pixel * width + x_pixel
+    
+    # 3. Extract linear depth and convert to int
+    # floatBitsToInt is a bit-cast operation
+    depth_int = float_bits_to_int(pos.w)
+    
+    # 4. Pack depth and color
+    # Convert color to 8-bit integers
+    r = int(point_color.r * 255)
+    g = int(point_color.g * 255)
+    b = int(point_color.b * 255)
+    
+    rgb_int = (r << 16) | (g << 8) | b
+    
+    # Pack: depth in upper 32 bits (shifted left by 24), color in lower 24 bits
+    # Note: The source specifies depth << 24. This implies depth occupies bits 24-55.
+    # We must ensure depth_int is treated as a 32-bit value before shifting.
+    packed_point = (depth_int << 24) | rgb_int
+    
+    # 5. Atomic Min
+    atomic_min(framebuffer, pixel_id, packed_point)
+
+# Resolve Pass (Compute Shader or CPU)
+# Input: framebuffer (uint64[]), width, height
+# Output: texture (vec4[])
+
+def resolve_pass(framebuffer, width, height, texture):
+    for y in range(height):
+        for x in range(width):
+            pixel_id = y * width + x
+            
+            # Read packed value
+            packed_value = framebuffer[pixel_id]
+            
+            # Extract RGB (lower 24 bits)
+            rgb_int = packed_value & 0xFFFFFF
+            
+            # Convert back to float [0, 1]
+            r = (rgb_int >> 16) / 255.0
+            g = (rgb_int >> 8) / 255.0
+            b = (rgb_int >> 0) / 255.0
+            
+            # Write to texture
+            texture[x, y] = vec4(r, g, b, 1.0)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Using linear depth avoids the precision issues of standard hardware depth buffers, but the conversion from float to int for packing must be consistent across all threads [S1].
+*   **Holes:** The method renders at most one pixel per point. If the point density is not high enough, holes may appear in the rendered image [S1].
+*   **Thread Safety:** The use of `atomicMin` ensures thread safety, unlike earlier hybrid methods that were not thread-safe and led to artifacts with dense point clouds [S1].
+*   **Depth Equality:** If two points have the exact same depth, the `atomicMin` will pick the one with the smaller packed value (i.e., smaller color value). This is generally acceptable as depth equality is rare, but it means the result is not strictly deterministic based on depth alone in degenerate cases [S1].
+
+## Subtopics
+
+### [Discrete Volume Rendering for Point Clouds](15875-discrete-volume-rendering-for-point-clouds.md)
+Discrete volume rendering for point clouds is a technique that renders point cloud data by assigning opacity and color to each point and computing ray colors via a discrete volume rendering equation using a fixed number of points per pixel buffer. It builds on Atomic Depth-Color Packing for Point Clouds by resolving visibility and color simultaneously, but extends the representation to support differentiable opacity parameters and color prediction via MLPs, enabling end-to-end optimization with sparse regularization.
+
+### Compute Shader with Early-Z and Local Reduction
+An optimization of the basic compute shader that incorporates early-z testing and group-wide reduction of points using warp-level primitives to reduce contention in global GPU memory [S1]. The method performs early-z testing to discard fragments that are occluded before writing to memory. It uses warp-level primitives to perform group-wide reduction of points, minimizing global memory contention. This method outperforms the hardware pipeline by up to an order of magnitude and achieves significantly better frame times than previous compute-based methods [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ for the render pass, where $N$ is the number of points. $O(W \times H)$ for the resolve pass, where $W \times H$ is the image resolution.
+*   **Memory Complexity:** $O(W \times H)$ for the storage buffer (one 64-bit integer per pixel).
+*   **Performance:** The method outperforms the hardware pipeline by up to an order of magnitude and achieves significantly better frame times than previous compute-based methods [S1]. Peak performance observed was rendering 796 million points (12.7GB) at rates of 62 to 64 frames per second (50 billion points per second) [S1].
+*   **Strengths:**
+    *   Avoids the overhead of the standard graphics pipeline.
+    *   Uses linear depth, avoiding precision loss.
+    *   Thread-safe and robust for dense point clouds.
+    *   High performance on modern GPUs with 64-bit atomic support.
+*   **Limitations:**
+    *   Requires a storage buffer configured as an interleaved depth and color buffer.
+    *   May produce holes if point density is insufficient.
+    *   Requires a resolve pass to transfer data to a displayable texture.
+*   **When to use:** When rendering large point clouds on hardware with compute shader support and 64-bit atomic operations, especially when performance is critical and the standard pipeline is too slow or lacks precision.
+*   **When not to use:** When the point density is very low and holes are unacceptable without additional hole-filling techniques, or on hardware lacking 64-bit atomic support.
+
+## Background
+The method was introduced in the paper "Rendering Point Clouds with Compute Shaders and Vertex Order Optimization" [S1]. It addresses the limitations of existing point cloud rendering solutions that rely on standard graphics API primitives like `GL_POINTS` [S1]. Previous compute-based methods, such as those by Günther et al. [GKLR13], used busy-loops and atomic compare-and-swap, which were less efficient. Lukac et al. [Lpa14] used a similar `atomicMin`-based algorithm but it was not thread-safe. Marrs et al. [MWH18] used compute-based rendering for depth reprojection but did not handle colors. This method improves upon these by using a single atomic instruction to update an interleaved depth and color buffer, providing both thread safety and high performance [S1].
+
+## Sources
+[S1] Rendering Point Clouds with Compute Shaders and Vertex Order Optimization, https://doi.org/10.1111/cgf.14345, fetched 2026-10-26

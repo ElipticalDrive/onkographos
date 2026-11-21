@@ -1,0 +1,494 @@
+--- v004.md
++++ v005.md
+@@ -1,392 +1,128 @@
+ # Solid Voxelization based on Octree
+ 
+-Also called: RFVoxelOctreeBuilder
++Also called: Polygon-to-Octree Rasterization, RFVoxelOctreeBuilder, voxelization via bounding box overlap
+ 
+ ## Overview
+-Solid Voxelization based on Octree converts a triangular mesh (specifically OBJ files) into an adaptive octree representation where each leaf node stores its solid/empty status and signed distance to the surface [S1, unofficial]. It differs from fixed-grid voxelization by using recursive spatial subdivision to achieve adaptive resolution, and from sibling octree methods by relying on ray casting with precomputed spherical samples to determine the inside/outside status of empty internal nodes [S1, unofficial].
++Solid Voxelization based on Octree converts a polygon mesh (specifically OBJ format) into a hierarchical octree representation to determine the solid/empty status and distance to surface for each leaf node [S1, S2, unofficial]. It differs from fixed-grid voxelization by using an octree structure for adaptive resolution and from ray-casting-only methods by combining spatial partitioning with ray casting for sign determination [S2, unofficial]. It builds on [Mesh Voxelization](6514-mesh-voxelization.md) by providing the specific octree-based implementation for mesh inputs.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A triangular mesh in OBJ format (vertices and faces), a requested voxelization dimension $D_{req}$, and an optional border size (unused in logic).
+-*   **Output:** An octree structure (`RFVoxelOctree`) where leaf nodes contain the signed distance to the closest surface point. The octree can be traversed to extract a voxelized mesh representation.
++**Inputs:** A triangular mesh in OBJ format (vertices, faces) and a target dimension $D$ (default 64) [S2, unofficial].
++**Outputs:** An octree structure where leaf nodes store distance to surface and solid/empty classification [S2, unofficial].
+ 
+ **Data Structures:**
+-*   `RFVoxelOctree`:
+-    *   `m_uiOctreeDim`: `uint`, the final power-of-two dimension of the octree.
+-    *   `m_fVoxelSize`: `double`, the physical size of a leaf voxel.
+-    *   `m_kOctreeOrigin`: `RFVector3d`, the world-space origin of the octree.
+-    *   `m_kDataDimension`: `RFVector3i`, dimensions of the voxel grid.
+-    *   `m_pkRoot`: Pointer to the root `RFVoxelOctreeNode`.
++*   **Octree Node (`RFVoxelOctreeNode`):**
++    *   `m_kWorldAabb`: World-space axis-aligned bounding box (`RFAABB3d`).
++    *   `m_kBuildAabb`: Build-space axis-aligned bounding box with integer min/max (`RFAABB3d` with integer coordinates).
++    *   `m_pkChildren`: Array of 8 pointers to child nodes.
++    *   `m_eNodeType`: Enum indicating `NT_EMPTY_LEAF`, `NT_LEAF`, or `NT_INTERNAL`.
++    *   `m_fDistanceToSurface`: Double precision distance to the closest triangle surface.
++*   **Octree (`RFVoxelOctree`):**
++    *   `m_uiOctreeDim`: Dimension of the voxelization grid (power of two).
++    *   `m_fVoxelSize`: Size of a single voxel.
++    *   `m_kOctreeOrigin`: Origin of the octree in world space.
++    *   `m_pkRoot`: Pointer to the root node.
+     *   `m_uiNumberOfLeafs`, `m_uiNumberOfEmptyLeafs`, `m_uiNumberOfInternalNodes`: Counters.
+-*   `RFVoxelOctreeNode`:
+-    *   `m_kWorldAabb`: `RFAABB3d`, world-space axis-aligned bounding box.
+-    *   `m_kBuildAabb`: `RFAABB3d` (integer min/max), build-space bounding box.
+-    *   `m_pkChildren`: Array of 8 pointers to child nodes.
+-    *   `m_eNodeType`: Enum (`NT_EMPTY_LEAF`, `NT_LEAF`, `NT_INTERNAL`).
+-    *   `m_fDistanceToSurface`: `double`, signed distance to surface (negative if inside, positive if outside).
+-*   `RFAABB3d`:
+-    *   `kMin`: `RFVector3d`, minimum corner.
+-    *   `kMax`: `RFVector3d`, maximum corner.
++*   **Voxel (`vx_voxel`):** (Used in alternative implementation [S1, unofficial])
++    *   `normals[3]`: `int8_t`.
++    *   `colors[4]`: `uint8_t`.
++    *   Padding and padding2 fields.
++*   **Node Header (`vx_node`):** (Used in alternative implementation [S1, unofficial])
++    *   `child_pointers[8]`: `uint32_t`.
++    *   `valid_masks`: `uint8_t`.
++    *   `leaf_mask`: `uint8_t`.
++
++**Steps:**
++
++1.  **Parse Mesh:** Read the OBJ file. Count vertices, UVs, normals, and faces. Track the bounding box min/max coordinates. Convert 1-based face indices to 0-based by decrementing by 1 [S1, S2, unofficial].
++2.  **Calculate Dimensions:**
++    *   Determine the next power of two for the octree dimension $D$. If input is 0, return 2; otherwise, decrement, then bitwise OR with right shifts of 16, 8, 4, 2, and 1 bits, then increment [S2, unofficial].
++    *   Find the longest axis of the mesh AABB: $kDim = kMax - kMin$.
++    *   Set $m\_uiOctreeDim$ to the next power of two of $kOctreeDim$ [S2, unofficial].
++    *   Calculate voxel size: $m\_fVoxelSize = fMaxDim / m\_uiOctreeDim$.
++    *   Calculate world size: $fOctreeWorldSize = m\_uiOctreeDim \times m\_fVoxelSize$.
++    *   Set origin: $m\_kOctreeOrigin = kMeshAabb.GetCenter() - RFVector3d(fOctreeWorldSize / 2.0f)$ [S2, unofficial].
++    *   Alternatively, normalize model into unit cube $[0,1]^3$: $offset = -min$, $scale = 1.0 / max(width, height, depth)$ [S1, unofficial].
++3.  **Initialize Root:**
++    *   Create root node.
++    *   Set `m_kWorldAabb` from `m_kOctreeOrigin` to `m_kOctreeOrigin + RFVector3d(fOctreeWorldSize)`.
++    *   Set `m_kBuildAabb.kMin` to $(0,0,0)$ and `kMax` to $(m\_uiOctreeDim, m\_uiOctreeDim, m\_uiOctreeDim)$.
++    *   Set `m_kDataDimension` to `RFVector3i(m_uiOctreeDim)` [S2, unofficial].
++    *   In the alternative implementation, initialize with allocated size 4096, size 1, and masks set to 0 [S1, unofficial].
++4.  **Subdivide Recursively:** For a parent node, create 8 children. For each child $(x,y,z)$ where $x,y,z \in \{0,1\}$:
++    *   Set `m_kBuildAabb.kMin` = `parent.kMin` + $(iAabbDim \cdot x, iAabbDim \cdot y, iAabbDim \cdot z)$.
++    *   Set `kMax` = `kMin` + $iAabbDim$.
++    *   Calculate world AABB for the child using `m_kOctreeOrigin` and `m_fVoxelSize` [S2, unofficial].
++5.  **Assign Triangles:** For each triangle in the parent's list:
++    *   Check if `TriangleAabbIntersects(kTriangleVerts, kWorldAabb)`.
++    *   If true, add the triangle index to the child's list [S2, unofficial].
++    *   In the alternative implementation, expand the triangle bounding box by one step size ($1.0 / (1 \ll detail)$) to handle edge cases, then check for overlap using `triBoxOverlap` [S1, unofficial].
++6.  **Classify Node:**
++    *   If child triangle list is empty, set type to `NT_EMPTY_LEAF` [S2, unofficial].
++    *   If `iAabbDim == 1`, set type to `NT_LEAF` and call `UpdateLeafNodeDistanceValue` [S2, unofficial].
++    *   Otherwise, set type to `NT_INTERNAL` and recursively call `Subdivide` [S2, unofficial].
++7.  **Update Leaf Distance (Solid/Empty Determination):**
++    *   For `NT_LEAF` nodes:
++        *   Initialize $fMinDist$ to max double.
++        *   For each triangle, compute normal $kNormal = VectorCross(kTriangleVerts[2] - kTriangleVerts[0], kTriangleVerts[1] - kTriangleVerts[0])$.
++        *   Find $kClosestPoint = ClosestPointOnTriangle(kTriangleVerts, leaf\_center)$.
++        *   Compute $kDelta = kClosestPoint - leaf\_center$.
++        *   Compute $fSign = (VectorDot(kDelta, kNormal) < 0.0f) ? -1.0f : 1.0f$.
++        *   Compute $fDist = VectorLength(kDelta)$.
++        *   If $fDist < abs(fMinDist)$, set $fMinDist = fDist \times fSign$.
++        *   Store in `m_fDistanceToSurface` [S2, unofficial].
++    *   For `NT_INTERNAL` nodes (treated as empty leaves for classification purposes in some contexts, or recursively processed):
++        *   Cast rays from node center using precomputed sample directions (200 directions generated via Hammersley2D and UniformSphericalSampling).
++        *   Count $uiCoverage$ (hits) and $uiMisses$.
++        *   Stop if $uiMisses \ge uiMaxMisses$ (size/4).
++        *   If $fCoverage = uiCoverage / size \ge fMinCoverage$ (default 0.8-0.9), set `m_fDistanceToSurface` = -1.0f (solid), else 1.0f (empty) [S2, unofficial].
++8.  **Generate Sample Directions:**
++    *   Loop $i$ from 0 to 199.
++    *   Compute $kRand = Hammersley2D(i, 200)$.
++    *   Compute direction = `UniformSphericalSampling(kRand.tX, kRand.tY)` [S2, unofficial].
++
++**Formulas:**
++*   **Hammersley2D:** $x = i/N$, $y = RadicalInverseVdC(i)$.
++    *   $RadicalInverseVdC$ performs bit reversal on $uiBits$: swap 16-bit halves, swap 8-bit halves, swap 4-bit nibbles, swap 2-bit pairs, swap 1-bit pairs, then multiply by $2.3283064365386963e-10$ [S2, unofficial].
++*   **UniformSphericalSampling:** $\phi = v \cdot 2\pi$, $\cos\theta = 1 - u$, $\sin\theta = \sqrt{1 - \cos^2\theta}$. Result: $(\cos\phi \sin\theta, \sin\phi \sin\theta, \cos\theta)$ [S2, unofficial].
+ 
+ **Parameters:**
+-*   `kOctreeDim`: Requested dimension. Default: 64 [S1, unofficial].
+-*   `fMinCoverage`: Threshold for classifying an internal empty leaf as solid based on ray coverage. Default: 0.9 in header, 0.8 in implementation call [S1, unofficial].
+-*   `fBorderSize`: Passed to constructor but not used in logic. Default: 0.0 [S1, unofficial].
++*   `kOctreeDim`: Requested dimension (default 64) [S2, unofficial].
++*   `detail`: Logarithmic resolution (alternative implementation, default 8) [S1, unofficial].
++*   `fMinCoverage`: Threshold for ray coverage (default 0.8-0.9) [S2, unofficial].
++*   `fBorderSize`: Default 0.0, not used [S2, unofficial].
+ 
+-**Algorithm Steps:**
+-
+-1.  **Calculate Octree Dimension:**
+-    Compute the next power of two for the requested dimension $D_{req}$. If $D_{req} == 0$, result is 2. Otherwise, decrement $D_{req}$, then perform bitwise OR with right shifts of 16, 8, 4, 2, and 1 bits, then increment the result [S1, unofficial].
+-
+-2.  **Initialize Root Node:**
+-    *   Compute mesh AABB ($kMin, kMax$).
+-    *   Find longest axis dimension $fMaxDim = \max(kMax - kMin)$.
+-    *   Set $m\_uiOctreeDim$ to the calculated power of two.
+-    *   Set $m\_fVoxelSize = fMaxDim / m\_uiOctreeDim$.
+-    *   Set $fOctreeWorldSize = m\_uiOctreeDim \times m\_fVoxelSize$.
+-    *   Set $m\_kOctreeOrigin = \text{MeshAABB.Center} - \text{RFVector3d}(fOctreeWorldSize / 2.0)$.
+-    *   Create root `RFVoxelOctreeNode`.
+-    *   Set root `m_kWorldAabb` from $m\_kOctreeOrigin$ to $m\_kOctreeOrigin + \text{RFVector3d}(fOctreeWorldSize)$.
+-    *   Set root `m_kBuildAabb.kMin` to $(0,0,0)$ and `kMax` to $(m\_uiOctreeDim, m\_uiOctreeDim, m\_uiOctreeDim)$.
+-    *   Set `m_kDataDimension` to $\text{RFVector3i}(m\_uiOctreeDim)$.
+-    *   Assign all mesh triangles to the root node.
+-
+-3.  **Recursive Subdivision and Classification:**
+-    For a given parent node with a list of triangles:
+-    *   **Subdivide:** Create 8 children. For each child $(x,y,z)$ where $x,y,z \in \{0,1\}$:
+-        *   Calculate child build AABB:
+-            $$kMin_{child} = kMin_{parent} + (iAabbDim \cdot x, iAabbDim \cdot y, iAabbDim \cdot z)$$
+-            $$kMax_{child} = kMin_{child} + iAabbDim$$
+-            where $iAabbDim$ is the side length of the parent's build AABB.
+-        *   Calculate child world AABB using $m\_kOctreeOrigin$ and $m\_fVoxelSize$.
+-        *   **Assign Triangles:** For each triangle in parent's list, check if `TriangleAabbIntersects(triangle_verts, child_world_aabb)`. If true, add triangle index to child's list.
+-    *   **Classify Child:**
+-        *   If child triangle list is empty: Set type to `NT_EMPTY_LEAF`.
+-        *   If `iAabbDim == 1`: Set type to `NT_LEAF`. Call `UpdateLeafNodeDistanceValue`.
+-        *   Otherwise: Set type to `NT_INTERNAL`. Recursively call Subdivide on the child.
+-
+-4.  **Update Leaf Distance Value (for `NT_LEAF`):**
+-    *   Initialize $fMinDist$ to max double.
+-    *   For each triangle in the leaf's list:
+-        *   Compute normal: $kNormal = \text{Cross}(v_2 - v_0, v_1 - v_0)$.
+-        *   Find closest point on triangle to leaf center: $kClosestPoint = \text{ClosestPointOnTriangle}(verts, leaf\_center)$.
+-        *   Compute delta: $kDelta = kClosestPoint - leaf\_center$.
+-        *   Compute sign: $fSign = (\text{Dot}(kDelta, kNormal) < 0.0) ? -1.0 : 1.0$.
+-        *   Compute distance: $fDist = \text{Length}(kDelta)$.
+-        *   If $fDist < |fMinDist|$, set $fMinDist = fDist \times fSign$.
+-    *   Store $fMinDist$ in `m_fDistanceToSurface`.
+-
+-5.  **Update Internal Empty Leaf Signs (for `NT_INTERNAL` nodes with empty children):**
+-    *   Recurse to children.
+-    *   For any child classified as `NT_EMPTY_LEAF`:
+-        *   Cast rays from node center using precomputed `m_kSampleDirections` (200 directions).
+-        *   Count hits ($uiCoverage$) and misses ($uiMisses$).
+-        *   Stop if $uiMisses \ge size/4$ (where $size$ is total samples, i.e., 200).
+-        *   Calculate coverage: $fCoverage = uiCoverage / size$.
+-        *   If $fCoverage \ge fMinCoverage$, set `m_fDistanceToSurface` = -1.0 (inside).
+-        *   Else, set `m_fDistanceToSurface` = 1.0 (outside).
+-
+-6.  **Generate Sample Directions (Constructor):**
+-    *   Loop $i$ from 0 to 199.
+-    *   Compute $kRand = \text{Hammersley2D}(i, 200)$.
+-    *   Compute direction = $\text{UniformSphericalSampling}(kRand.tX, kRand.tY)$.
+-    *   Store in `m_kSampleDirections`.
+-
+-**Formulas:**
+-
+-*   **Hammersley2D:**
+-    $$x = i/N$$
+-    $$y = \text{RadicalInverseVdC}(i)$$
+-    $\text{RadicalInverseVdC}$ performs bit reversal on $uiBits$: swap 16-bit halves, swap 8-bit halves, swap 4-bit nibbles, swap 2-bit pairs, swap 1-bit pairs, then multiply by $2.3283064365386963e-10$.
+-
+-*   **UniformSphericalSampling:**
+-    $$\phi = v \cdot 2\pi$$
+-    $$\cos\theta = 1 - u$$
+-    $$\sin\theta = \sqrt{1 - \cos^2\theta}$$
+-    Result: $(\cos\phi \sin\theta, \sin\phi \sin\theta, \cos\theta)$.
+-
+-**Pseudocode:**
+-
+-```python
+-import math
+-
+-def next_power_of_two(n: int) -> int:
+-    if n == 0:
+-        return 2
+-    n -= 1
+-    n |= n >> 16
+-    n |= n >> 8
+-    n |= n >> 4
+-    n |= n >> 2
+-    n |= n >> 1
+-    return n + 1
+-
+-def radical_inverse_vdc(n: int, bits: int = 32) -> float:
+-    # Bit reversal
+-    n = ((n & 0xFFFF0000) >> 16) | ((n & 0x0000FFFF) << 16)
+-    n = ((n & 0xFF00FF00) >> 8) | ((n & 0x00FF00FF) << 8)
+-    n = ((n & 0xF0F0F0F0) >> 4) | ((n & 0x0F0F0F0F) << 4)
+-    n = ((n & 0xCCCCCCCC) >> 2) | ((n & 0x33333333) << 2)
+-    n = ((n & 0xAAAAAAAA) >> 1) | ((n & 0x55555555) << 1)
+-    return n * 2.3283064365386963e-10
+-
+-def hammersley2d(i: int, N: int) -> tuple:
+-    x = i / N
+-    y = radical_inverse_vdc(i)
+-    return (x, y)
+-
+-def uniform_spherical_sampling(u: float, v: float) -> tuple:
+-    phi = v * 2.0 * math.pi
+-    cos_theta = 1.0 - u
+-    sin_theta = math.sqrt(1.0 - cos_theta * cos_theta)
+-    return (math.cos(phi) * sin_theta, math.sin(phi) * sin_theta, cos_theta)
+-
+-def generate_sample_directions(num_samples: int = 200) -> list:
+-    directions = []
+-    for i in range(num_samples):
+-        u, v = hammersley2d(i, num_samples)
+-        directions.append(uniform_spherical_sampling(u, v))
+-    return directions
+-
+-def closest_point_on_triangle(p: tuple, v0: tuple, v1: tuple, v2: tuple) -> tuple:
+-    # Placeholder for standard closest point algorithm
+-    # [G] Implementation of ClosestPointOnTriangle is not provided in sources.
+-    # Standard implementation involves barycentric coordinates and clamping.
+-    pass
+-
+-def triangle_aabb_intersects(triangle_verts: list, aabb_min: tuple, aabb_max: tuple) -> bool:
+-    # Placeholder for AABB-Triangle intersection test
+-    # [G] Implementation details not provided in sources.
+-    pass
+-
+-class RFVoxelOctreeNode:
+-    def __init__(self):
+-        self.kWorldAabb = None # (min, max)
+-        self.kBuildAabb = None # (min, max) integers
+-        self.pkChildren = [None] * 8
+-        self.eNodeType = None # NT_EMPTY_LEAF, NT_LEAF, NT_INTERNAL
+-        self.fDistanceToSurface = 0.0
+-        self.triangle_indices = []
+-
+-class RFVoxelOctree:
+-    def __init__(self):
+-        self.uiOctreeDim = 0
+-        self.fVoxelSize = 0.0
+-        self.kOctreeOrigin = (0.0, 0.0, 0.0)
+-        self.kDataDimension = (0, 0, 0)
+-        self.pkRoot = None
+-        self.uiNumberOfLeafs = 0
+-        self.uiNumberOfEmptyLeafs = 0
+-        self.uiNumberOfInternalNodes = 0
+-        self.kSampleDirections = generate_sample_directions()
+-
+-def update_leaf_distance_value(node: RFVoxelOctreeNode, mesh_vertices: list, mesh_faces: list):
+-    f_min_dist = float('inf')
+-    leaf_center = get_leaf_center(node) # [G] Helper to compute center from WorldAabb
+-    
+-    for idx in node.triangle_indices:
+-        v0 = mesh_vertices[mesh_faces[idx][0]]
+-        v1 = mesh_vertices[mesh_faces[idx][1]]
+-        v2 = mesh_vertices[mesh_faces[idx][2]]
+-        
+-        normal = cross(v2 - v0, v1 - v0)
+-        closest_point = closest_point_on_triangle(leaf_center, v0, v1, v2)
+-        delta = closest_point - leaf_center
+-        sign = -1.0 if dot(delta, normal) < 0.0 else 1.0
+-        dist = length(delta)
+-        
+-        if dist < abs(f_min_dist):
+-            f_min_dist = dist * sign
+-            
+-    node.fDistanceToSurface = f_min_dist
+-
+-def update_internal_empty_leaf_signs(node: RFVoxelOctreeNode, f_min_coverage: float):
+-    # Recurse first
+-    for child in node.pkChildren:
+-        if child is not None:
+-            if child.eNodeType == NT_INTERNAL:
+-                update_internal_empty_leaf_signs(child, f_min_coverage)
+-            elif child.eNodeType == NT_EMPTY_LEAF:
+-                # Ray casting
+-                ui_coverage = 0
+-                ui_misses = 0
+-                size = len(node.kSampleDirections) # 200
+-                
+-                for dir in node.kSampleDirections:
+-                    # [G] Ray-mesh intersection logic not provided.
+-                    # Assume hit if ray intersects any triangle in the original mesh
+-                    # or potentially triangles assigned to this node's ancestors.
+-                    # The source notes say "cast rays from node center".
+-                    if ray_intersects_mesh(leaf_center, dir): # [G] Placeholder
+-                        ui_coverage += 1
+-                    else:
+-                        ui_misses += 1
+-                    
+-                    if ui_misses >= size / 4:
+-                        break
+-                
+-                f_coverage = ui_coverage / size
+-                if f_coverage >= f_min_coverage:
+-                    node.fDistanceToSurface = -1.0
+-                else:
+-                    node.fDistanceToSurface = 1.0
+-
+-def create_octree(mesh_vertices: list, mesh_faces: list, aabb: tuple, dim_req: int) -> RFVoxelOctree:
+-    octree = RFVoxelOctree()
+-    
+-    # 1. Calculate Dimension
+-    octree.uiOctreeDim = next_power_of_two(dim_req)
+-    
+-    # 2. Initialize Root
+-    k_min, k_max = aabb
+-    f_max_dim = max(k_max[0]-k_min[0], k_max[1]-k_min[1], k_max[2]-k_min[2])
+-    octree.fVoxelSize = f_max_dim / octree.uiOctreeDim
+-    f_octree_world_size = octree.uiOctreeDim * octree.fVoxelSize
+-    
+-    center = ((k_min[0]+k_max[0])/2, (k_min[1]+k_max[1])/2, (k_min[2]+k_max[2])/2)
+-    octree.kOctreeOrigin = (center[0] - f_octree_world_size/2, center[1] - f_octree_world_size/2, center[2] - f_octree_world_size/2)
+-    
+-    root = RFVoxelOctreeNode()
+-    root.kWorldAabb = (octree.kOctreeOrigin, (octree.kOctreeOrigin[0]+f_octree_world_size, octree.kOctreeOrigin[1]+f_octree_world_size, octree.kOctreeOrigin[2]+f_octree_world_size))
+-    root.kBuildAabb = ((0,0,0), (octree.uiOctreeDim, octree.uiOctreeDim, octree.uiOctreeDim))
+-    octree.kDataDimension = (octree.uiOctreeDim, octree.uiOctreeDim, octree.uiOctreeDim)
+-    
+-    # Assign all triangles to root
+-    root.triangle_indices = list(range(len(mesh_faces)))
+-    
+-    octree.pkRoot = root
+-    
+-    # 3. Subdivide
+-    subdivide(root, octree.uiOctreeDim, mesh_vertices, mesh_faces, 0.9) # fMinCoverage default
+-    
+-    return octree
+-
+-def subdivide(node: RFVoxelOctreeNode, i_aabb_dim: int, mesh_vertices: list, mesh_faces: list, f_min_coverage: float):
+-    if i_aabb_dim == 1:
+-        node.eNodeType = NT_LEAF
+-        update_leaf_distance_value(node, mesh_vertices, mesh_faces)
+-        return
+-
+-    # Subdivide
+-    for x in range(2):
+-        for y in range(2):
+-            for z in range(2):
+-                child = RFVoxelOctreeNode()
+-                
+-                # Build AABB
+-                child_min = (node.kBuildAabb[0][0] + i_aabb_dim//2 * x, 
+-                             node.kBuildAabb[0][1] + i_aabb_dim//2 * y, 
+-                             node.kBuildAabb[0][2] + i_aabb_dim//2 * z)
+-                child_max = (child_min[0] + i_aabb_dim//2, 
+-                             child_min[1] + i_aabb_dim//2, 
+-                             child_min[2] + i_aabb_dim//2)
+-                child.kBuildAabb = (child_min, child_max)
+-                
+-                # World AABB
+-                # [G] Conversion from Build AABB to World AABB using OctreeOrigin and VoxelSize
+-                # WorldMin = OctreeOrigin + BuildMin * VoxelSize
+-                child_min_world = (octree.kOctreeOrigin[0] + child_min[0] * octree.fVoxelSize,
+-                                   octree.kOctreeOrigin[1] + child_min[1] * octree.fVoxelSize,
+-                                   octree.kOctreeOrigin[2] + child_min[2] * octree.fVoxelSize)
+-                child_max_world = (octree.kOctreeOrigin[0] + child_max[0] * octree.fVoxelSize,
+-                                   octree.kOctreeOrigin[1] + child_max[1] * octree.fVoxelSize,
+-                                   octree.kOctreeOrigin[2] + child_max[2] * octree.fVoxelSize)
+-                child.kWorldAabb = (child_min_world, child_max_world)
+-                
+-                # Assign Triangles
+-                for idx in node.triangle_indices:
+-                    v0 = mesh_vertices[mesh_faces[idx][0]]
+-                    v1 = mesh_vertices[mesh_faces[idx][1]]
+-                    v2 = mesh_vertices[mesh_faces[idx][2]]
+-                    if triangle_aabb_intersects([v0, v1, v2], child_min_world, child_max_world):
+-                        child.triangle_indices.append(idx)
+-                
+-                node.pkChildren[x*4 + y*2 + z] = child
+-                
+-                # Classify
+-                if not child.triangle_indices:
+-                    child.eNodeType = NT_EMPTY_LEAF
+-                else:
+-                    subdivide(child, i_aabb_dim // 2, mesh_vertices, mesh_faces, f_min_coverage)
+-                    
+-    # Update internal empty leaf signs for children
+-    for child in node.pkChildren:
+-        if child is not None and child.eNodeType == NT_EMPTY_LEAF:
+-            # This logic in source is applied to NT_INTERNAL nodes' empty children
+-            # The source says: "For NT_INTERNAL nodes, recurse to children. For NT_EMPTY_LEAF nodes, cast rays..."
+-            # This implies the sign update happens after recursion or as part of the parent's processing.
+-            # However, the pseudocode structure suggests updating the sign of the empty leaf itself.
+-            # The source code snippet `update_internal_empty_leaf_signs` is called on NT_INTERNAL nodes.
+-            # It recurses, then processes NT_EMPTY_LEAF children.
+-            pass
+-
+-    # The source logic for sign determination of empty leaves is embedded in the traversal or a separate pass.
+-    # Based on "Update internal empty leaf signs":
+-    # We need to ensure empty leaves have a sign.
+-    for child in node.pkChildren:
+-        if child is not None and child.eNodeType == NT_EMPTY_LEAF:
+-            ui_coverage = 0
+-            ui_misses = 0
+-            size = 200
+-            leaf_center = get_leaf_center(child) # [G]
+-            
+-            for dir in octree.kSampleDirections:
+-                if ray_intersects_mesh(leaf_center, dir): # [G]
+-                    ui_coverage += 1
+-                else:
+-                    ui_misses += 1
+-                if ui_misses >= size / 4:
+-                    break
+-            
+-            f_coverage = ui_coverage / size
+-            if f_coverage >= f_min_coverage:
+-                child.fDistanceToSurface = -1.0
+-            else:
+-                child.fDistanceToSurface = 1.0
+-
+-def ray_intersects_mesh(point: tuple, direction: tuple) -> bool:
+-    # [G] Placeholder for ray-mesh intersection
+-    pass
+-
+-def get_leaf_center(node: RFVoxelOctreeNode) -> tuple:
+-    min_w = node.kWorldAabb[0]
+-    max_w = node.kWorldAabb[1]
+-    return ((min_w[0]+max_w[0])/2, (min_w[1]+max_w[1])/2, (min_w[2]+max_w[2])/2)
+-
+-def cross(v1: tuple, v2: tuple) -> tuple:
+-    return (v1[1]*v2[2] - v1[2]*v2[1], v1[2]*v2[0] - v1[0]*v2[2], v1[0]*v2[1] - v1[1]*v2[0])
+-
+-def dot(v1: tuple, v2: tuple) -> float:
+-    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
+-
+-def length(v: tuple) -> float:
+-    return math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+-```
++**Pitfalls:**
++*   OBJ face indices are 1-based; must be decremented by 1 [S1, S2, unofficial].
++*   Bounding box expansion by 'step' ensures triangles touching voxel edges are not missed [S1, unofficial].
++*   Empty leaf classification stopping heuristic (misses > 25%) may lead to inaccurate coverage for nodes near the surface [S2, unofficial].
++*   Method only supports OBJ files with vertices ordered in triangles [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Octree-based 3D Voxelization with SAT Pruning](2588-octree-based-3d-voxelization-with-sat-pruning.md)
+-This method converts arbitrary 3D triangular surface meshes into uniform voxel representations by recursively partitioning space into an octree and using the Separating Axis Theorem (SAT) to prune empty bounding volumes. It builds on [Solid Voxelization based on Octree](2062-solid-voxelization-based-on-octree.md) by replacing ray casting with exact geometric intersection tests for robustness and performance.
++Uses Separating Axis Theorem (SAT) for pruning empty bounding volumes instead of ray casting. Choose for robustness and performance with arbitrary meshes.
+ 
+ ### [Robust Inside and Outside Solid Voxelization](3376-robust-inside-and-outside-solid-voxelization.md)
+-Robust Inside and Outside Solid Voxelization is a method for determining the solid/empty status of octree cells in a voxelized mesh, specifically designed to handle non-watertight meshes with holes and intersecting geometry. Unlike ray casting methods which require watertight meshes, this technique uses a heuristic model based on cube map rendering and visibility propagation to classify cells. It sets itself apart by allowing "seed" cells to propagate their status to visible neighbors, overcoming the topological restrictions of traditional ray casting. It builds on [Solid Voxelization based on Octree](2062-solid-voxelization-based-on-octree.md) by replacing the ray-casting sign test with a GPU-accelerated cube map heuristic.
++Uses cube map rendering and visibility propagation for inside/outside status, handling non-watertight meshes. Choose for meshes with holes or intersecting geometry.
+ 
+ ### [Solid Voxelization via Ray Casting](6829-solid-voxelization-via-ray-casting.md)
+-A method to convert a triangle mesh into a solid voxel representation (octree) by casting rays through the mesh to determine occupied voxel intervals along the Z-axis. It differs from sibling methods by explicitly computing solid intervals per pixel via ray-mesh intersection rather than relying solely on spatial partitioning pruning or robust topological checks for inside/outside status.
++Computes solid intervals per pixel via ray-mesh intersection. Choose when explicit interval computation is required.
+ 
+ ### [Hierarchical Inside/Outside Propagation](9772-hierarchical-inside-outside-propagation.md)
+-A level-$i$ node without children is inside the solid object if its inside flag is set, and outside otherwise.
++Post-processing step correcting inside/outside status by propagating boundary crossings. Choose to fix inconsistent solid status in octree structures.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources. The source provides empirical timing for an Armadillo mesh on Apple M1 Pro: BuildOctree took 483.902ms before optimization and presumably less after (outputOBJ was 133.618ms before, 77.343ms after) [S1, unofficial].
+-*   **Memory Complexity:** Adaptive, depending on the octree depth and mesh complexity. Uses an octree structure instead of a fixed grid, allowing adaptive resolution and potentially fewer nodes for sparse scenes [S1, unofficial].
+-*   **Strengths:** Adaptive resolution; fast build time for small dependencies; supports OBJ files [S1, unofficial].
+-*   **Limitations:** Only supports OBJ files with vertices ordered in triangles [v0,v1,v2]; empty leaf classification uses a stopping heuristic (misses > 25% of samples) which may lead to inaccurate coverage calculation for nodes near the surface [S1, unofficial].
+-*   **When to use:** When adaptive resolution is needed and input is a clean OBJ mesh.
+-*   **When not to use:** For non-OBJ formats, non-watertight meshes (may fail ray casting), or when exact geometric intersection is preferred over ray casting heuristics.
++*   **Time Complexity:** Depends on octree depth and triangle distribution. Recursive subdivision and ray casting for sign determination add overhead compared to fixed grids [S2, unofficial].
++*   **Memory Complexity:** Adaptive; fewer nodes for sparse scenes, but requires storing pointers and metadata for each node [S2, unofficial].
++*   **Performance:** On Apple M1 Pro, building an octree for Armadillo.obj (64 dim) took ~484ms before optimization, ~77ms after optimization for output [S2, unofficial].
++*   **Strengths:** Adaptive resolution, handles sparse scenes efficiently, robust sign determination via ray casting [S2, unofficial].
++*   **Limitations:** Only supports OBJ format, recursive overhead, potential inaccuracies in coverage calculation near surfaces [S1, S2, unofficial].
++*   **When to use:** When adaptive resolution is needed and input is OBJ format.
++*   **When not to use:** For non-OBJ formats, or when fixed-grid performance is critical and adaptive resolution is not needed.
+ 
+ ## Background
+-The origin version is from Peter Trier Mikkelsen [S1, unofficial]. The video tutorial is available at https://www.youtube.com/watch?v=nK4GinCpEt8 and the tutorial at https://viscomp.alexandra.dk/index298d.html?p=3836 [S1, unofficial]. The implementation is from the repository `itsyouyi/Voxelizer` [S1, unofficial].
++Originated from Peter Trier Mikkelsen's work, presented in a tutorial and video [S2, unofficial]. Implemented in open-source projects like `voxl` and `Voxelizer` [S1, S2, unofficial]. Used in volume rendering pipelines to convert mesh models into voxel data for further processing.
+ 
+ ## Sources
+-[S1] itsyouyi/Voxelizer, https://github.com/itsyouyi/Voxelizer, fetched 2026-10-27 (unofficial)+[S1] rools/voxl, https://github.com/rools/voxl, fetched 2026-10-26 (unofficial)
++[S2] itsyouyi/Voxelizer, https://github.com/itsyouyi/Voxelizer, fetched 2026-10-27 (unofficial)

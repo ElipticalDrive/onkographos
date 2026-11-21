@@ -1,0 +1,764 @@
+3D & AR SDK for Android (Jetpack Compose + Filament), Apple (SwiftUI + RealityKit), Web, Flutter and React Native. Opens glTF/GLB, 3MF, STL, OBJ and PLY on Android and USDZ on Apple, at real size in AR. Assistant-ready: in-repo MCP server, AGENTS.md and llms.txt — no assistant-specific setup. - feat(samples): splat-preview demo — first on-device SplatNode render … · sceneview/sceneview@5682de6
+
+feat(samples): splat-preview demo — first on-device SplatNode render … · sceneview/sceneview@5682de6 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+File tree
+Expand file treeCollapse file tree
+Open diff view settings
+Filter options
+changelog.d
+2646-splat-preview-demo.md
+llms.txt
+samples/android-demo/src/main
+assets/splats
+rainbow_sphere.ply
+java/io/github/sceneview/demo
+demos
+SplatPreviewDemo.kt
+fragments
+SplatPreviewFragment.kt
+res/values
+strings_demo_splat_preview.xml
+tools
+generate-splat-sphere.py
+Expand file treeCollapse file tree
+Open diff view settings
+Collapse file
+‎changelog.d/2646-splat-preview-demo.md‎
+Copy file name to clipboard
++2Lines changed: 2 additions & 0 deletions
+Display the source diff
+Display the rich diff
+Original file line numberDiff line numberDiff line change
+@@ -0,0 +1,2 @@
+1+
+<!-- category: Added -->
+2+
+- **samples/android-demo**: new **Gaussian Splatting** demo (`splat-preview`, 3D Basics → Advanced) — decodes a bundled synthetic rainbow-sphere `.ply` (8 000 gaussians) with the shared `SplatParser` and renders it through `SplatNode`, with a gesture orbit that feeds the node's back-to-front painter's sort and a reveal slider driving `SplatNode.splatCount`. First on-device render of the SplatNode pipeline (P1c of #2646). Emulator QA confirmed the within-batch alpha-blend order is stable — no splat popping across a slow camera orbit (#2646).
+Collapse file
+‎llms.txt‎
+Copy file name to clipboardExpand all lines: llms.txt
++1Lines changed: 1 addition & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -4427,6 +4427,7 @@ by `samples/android-demo/scripts/collate-demos.sh` — never edit between the ma
+44274427
+- `materials` — Materials. PBR extension showcase, runtime material streaming, and occlusion material.
+44284428
+- `secondary-camera` — Secondary Camera (PiP). Picture-in-picture camera view.
+44294429
+- `spatial-audio` — Spatial Audio. 3D positional sound that pans as you orbit.
+4430+
+- `splat-preview` — Gaussian Splatting. Render a 3D Gaussian Splat radiance-field cloud.
+44304431
+- `video-recording` — Video Recording. Record the scene to MP4 in-app — no MediaProjection.
+44314432
+44324433
+### Augmented Reality
+Collapse file
+‎samples/android-demo/src/main/assets/splats/rainbow_sphere.ply‎
+Copy file name to clipboard
+438 KB
+Binary file not shown.
+Collapse file
+‎samples/android-demo/src/main/java/io/github/sceneview/demo/demos/SplatPreviewDemo.kt‎
+Copy file name to clipboard
++196Lines changed: 196 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -0,0 +1,196 @@
+1+
+package io.github.sceneview.demo.demos
+2+
+3+
+import androidx.compose.foundation.layout.Spacer
+4+
+import androidx.compose.foundation.layout.fillMaxSize
+5+
+import androidx.compose.foundation.layout.height
+6+
+import androidx.compose.foundation.layout.padding
+7+
+import androidx.compose.material3.MaterialTheme
+8+
+import androidx.compose.material3.Slider
+9+
+import androidx.compose.material3.Text
+10+
+import androidx.compose.runtime.Composable
+11+
+import androidx.compose.runtime.LaunchedEffect
+12+
+import androidx.compose.runtime.getValue
+13+
+import androidx.compose.runtime.mutableIntStateOf
+14+
+import androidx.compose.runtime.mutableStateOf
+15+
+import androidx.compose.runtime.remember
+16+
+import androidx.compose.runtime.setValue
+17+
+import androidx.compose.ui.Modifier
+18+
+import androidx.compose.ui.platform.LocalContext
+19+
+import androidx.compose.ui.platform.LocalInspectionMode
+20+
+import androidx.compose.ui.res.stringResource
+21+
+import androidx.compose.ui.tooling.preview.Preview
+22+
+import androidx.compose.ui.unit.dp
+23+
+import io.github.sceneview.SceneView
+24+
+import io.github.sceneview.core.splat.SplatCloud
+25+
+import io.github.sceneview.core.splat.SplatParser
+26+
+import io.github.sceneview.demo.DemoPreviewPlaceholder
+27+
+import io.github.sceneview.demo.DemoScaffold
+28+
+import io.github.sceneview.demo.R
+29+
+import io.github.sceneview.demo.rememberFirstFrameState
+30+
+import io.github.sceneview.demo.theme.SceneViewDemoTheme
+31+
+import io.github.sceneview.math.Position
+32+
+import io.github.sceneview.rememberCameraManipulator
+33+
+import io.github.sceneview.rememberCameraNode
+34+
+import io.github.sceneview.rememberEngine
+35+
+import io.github.sceneview.rememberMaterialLoader
+36+
+import kotlinx.coroutines.Dispatchers
+37+
+import kotlinx.coroutines.withContext
+38+
+39+
+/** Bundled synthetic 3D Gaussian Splatting scene — a dense rainbow sphere shell (8 000 splats). */
+40+
+private const val SPLAT_ASSET = "splats/rainbow_sphere.ply"
+41+
+42+
+/**
+43+
+* Renders a **3D Gaussian Splatting** scene with [io.github.sceneview.node.SplatNode] (#2646) —
+44+
+* the radiance-field capture format produced by Scaniverse, Polycam, Luma and every INRIA-style
+45+
+* trainer.
+46+
+*
+47+
+* The bundled asset ([SPLAT_ASSET]) is a synthetic rainbow sphere: ~8 000 overlapping, translucent
+48+
+* gaussians decoded by the shared `SplatParser` (P1a) and rendered as hardware-instanced,
+49+
+* camera-facing quads (P1b). The overlapping translucent shell is deliberately a stress case for
+50+
+* the CPU painter's sort — drag to orbit and the node re-sorts the splats back-to-front so the
+51+
+* far side composites correctly behind the near side.
+52+
+*
+53+
+* Controls:
+54+
+* - **Orbit** — drag to rotate the camera; `cameraPositionProvider` feeds the live camera world
+55+
+* position to the node so it re-sorts on motion.
+56+
+* - **Visible splats** — a reveal slider driving `SplatNode.splatCount` (LOD / reveal hook).
+57+
+*/
+58+
+@Composable
+59+
+fun SplatPreviewDemo(onBack: () -> Unit) {
+60+
+// Inspection mode (AS @Preview pane, Roborazzi): bypass the Filament-backed body BEFORE any
+61+
+// rememberEngine() call — LayoutLib does not ship the native .so files. See GeometryDemo.
+62+
+if (LocalInspectionMode.current) {
+63+
+DemoPreviewPlaceholder(title = "Gaussian Splatting", onBack = onBack)
+64+
+return
+65+
+}
+66+
+67+
+val context = LocalContext.current
+68+
+val engine = rememberEngine()
+69+
+val materialLoader = rememberMaterialLoader(engine)
+70+
+val cameraNode = rememberCameraNode(engine)
+71+
+val firstFrame = rememberFirstFrameState()
+72+
+73+
+// Decode the bundled .ply off the main thread (pure CPU, no Filament calls). Null while
+74+
+// loading — the SplatNode is only declared once the cloud is ready, mirroring the SDK's
+75+
+// "returns null while loading, always handle the null case" resource-loading contract.
+76+
+var splatCloud by remember { mutableStateOf<SplatCloud?>(null) }
+77+
+LaunchedEffect(Unit) {
+78+
+val bytes = withContext(Dispatchers.IO) {
+79+
+context.assets.open(SPLAT_ASSET).use { it.readBytes() }
+80+
+}
+81+
+splatCloud = withContext(Dispatchers.Default) { SplatParser.fromPly(bytes) }
+82+
+}
+83+
+84+
+// Live camera world position, refreshed each frame and handed to the node's painter's sort.
+85+
+var cameraPosition by remember { mutableStateOf(HOME_CAMERA_POSITION) }
+86+
+// Reveal slider — number of splats drawn (0..count). Defaults to the whole cloud.
+87+
+var visibleSplats by remember { mutableIntStateOf(0) }
+88+
+val totalSplats = splatCloud?.count ?: 0
+89+
+90+
+// Snap the reveal slider to the full cloud as soon as it loads (it starts at 0 before we
+91+
+// know the count, so the scene is not momentarily empty once the splats are ready).
+92+
+LaunchedEffect(totalSplats) {
+93+
+if (totalSplats > 0) visibleSplats = totalSplats
+94+
+}
+95+
+96+
+val cameraManipulator = rememberCameraManipulator(
+97+
+orbitHomePosition = HOME_CAMERA_POSITION,
+98+
+targetPosition = Position(0f),
+99+
+)
+100+
+101+
+DemoScaffold(
+102+
+title = stringResource(R.string.demo_splat_preview_title),
+103+
+onBack = onBack,
+104+
+firstFrameRendered = firstFrame.rendered,
+105+
+controls = {
+106+
+SplatPreviewControls(
+107+
+visibleSplats = visibleSplats,
+108+
+totalSplats = totalSplats,
+109+
+onVisibleSplatsChange = { visibleSplats = it },
+110+
+)
+111+
+},
+112+
+) {
+113+
+SceneView(
+114+
+modifier = Modifier.fillMaxSize(),
+115+
+engine = engine,
+116+
+materialLoader = materialLoader,
+117+
+cameraNode = cameraNode,
+118+
+cameraManipulator = cameraManipulator,
+119+
+// Chain the first-frame signal with a per-frame camera-position read so the node's
+120+
+// painter's sort tracks the orbit.
+121+
+onFrame = { frameTimeNanos ->
+122+
+firstFrame.onFrame(frameTimeNanos)
+123+
+cameraPosition = cameraNode.worldPosition
+124+
+},
+125+
+) {
+126+
+splatCloud?.let { cloud ->
+127+
+SplatNode(
+128+
+splatCloud = cloud,
+129+
+cameraPositionProvider = { cameraPosition },
+130+
+splatCount = visibleSplats,
+131+
+)
+132+
+}
+133+
+}
+134+
+}
+135+
+}
+136+
+137+
+/**
+138+
+* Stateless controls panel for [SplatPreviewDemo] — a reveal slider over the splat count. Kept
+139+
+* separate so a Roborazzi snapshot test can capture it in pure JVM (no Filament). See GeometryDemo.
+140+
+*/
+141+
+@Composable
+142+
+internal fun SplatPreviewControls(
+143+
+visibleSplats: Int,
+144+
+totalSplats: Int,
+145+
+onVisibleSplatsChange: (Int) -> Unit,
+146+
+) {
+147+
+Text(
+148+
+text = "Visible splats: $visibleSplats / $totalSplats",
+149+
+style = MaterialTheme.typography.labelLarge,
+150+
+)
+151+
+Slider(
+152+
+value = visibleSplats.toFloat(),
+153+
+onValueChange = { onVisibleSplatsChange(it.toInt()) },
+154+
+valueRange = 0f..totalSplats.coerceAtLeast(1).toFloat(),
+155+
+enabled = totalSplats > 0,
+156+
+)
+157+
+Spacer(modifier = Modifier.height(8.dp))
+158+
+Text(
+159+
+text = "Drag the scene to orbit — the splats re-sort back-to-front so the translucent " +
+160+
+"shell composites correctly from every angle.",
+161+
+style = MaterialTheme.typography.bodySmall,
+162+
+)
+163+
+}
+164+
+165+
+/** Orbit home: pulled back on +Z so the 0.5 m-radius sphere frames comfortably in portrait. */
+166+
+private val HOME_CAMERA_POSITION = Position(x = 0f, y = 0.1f, z = 1.6f)
+167+
+168+
+// ── Android Studio @Preview support ────────────────────────────────────────────
+169+
+170+
+@Preview(name = "Demo (light)", showBackground = true)
+171+
+@Composable
+172+
+private fun SplatPreviewDemoPreview_Light() {
+173+
+SceneViewDemoTheme(darkTheme = false) {
+174+
+SplatPreviewDemo(onBack = {})
+175+
+}
+176+
+}
+177+
+178+
+@Preview(name = "Demo (dark)", showBackground = true, uiMode = android.content.res.Configuration.UI_MODE_NIGHT_YES)
+179+
+@Composable
+180+
+private fun SplatPreviewDemoPreview_Dark() {
+181+
+SceneViewDemoTheme(darkTheme = true) {
+182+
+SplatPreviewDemo(onBack = {})
+183+
+}
+184+
+}
+185+
+186+
+@Preview(name = "Controls only", showBackground = true)
+187+
+@Composable
+188+
+private fun SplatPreviewControlsPreview() {
+189+
+SceneViewDemoTheme(darkTheme = false) {
+190+
+androidx.compose.foundation.layout.Column(
+191+
+modifier = Modifier.padding(16.dp),
+192+
+) {
+193+
+SplatPreviewControls(visibleSplats = 6000, totalSplats = 8000, onVisibleSplatsChange = {})
+194+
+}
+195+
+}
+196+
+}
+Collapse file
+‎samples/android-demo/src/main/java/io/github/sceneview/demo/fragments/SplatPreviewFragment.kt‎
+Copy file name to clipboard
++25Lines changed: 25 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -0,0 +1,25 @@
+1+
+package io.github.sceneview.demo.fragments
+2+
+3+
+import androidx.compose.material.icons.Icons
+4+
+import androidx.compose.material.icons.filled.ScatterPlot
+5+
+import androidx.compose.runtime.Composable
+6+
+import io.github.sceneview.demo.DemoCategory
+7+
+import io.github.sceneview.demo.DemoEntry
+8+
+import io.github.sceneview.demo.R
+9+
+import io.github.sceneview.demo.demos.SplatPreviewDemo
+10+
+11+
+/** Append-only fragment for the `splat-preview` demo (3D Gaussian Splatting, #2646). See [DemoFragment]. */
+12+
+object SplatPreviewFragment : DemoFragment {
+13+
+override val entry: DemoEntry = DemoEntry(
+14+
+id = "splat-preview",
+15+
+titleRes = R.string.demo_splat_preview_title,
+16+
+subtitleRes = R.string.demo_splat_preview_subtitle,
+17+
+category = DemoCategory.ADVANCED,
+18+
+icon = Icons.Filled.ScatterPlot,
+19+
+)
+20+
+21+
+@Composable
+22+
+override fun Screen(onBack: () -> Unit) {
+23+
+SplatPreviewDemo(onBack)
+24+
+}
+25+
+}
+Collapse file
+‎samples/android-demo/src/main/res/values/strings_demo_splat_preview.xml‎
+Copy file name to clipboard
++12Lines changed: 12 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -0,0 +1,12 @@
+1+
+<?xml version="1.0" encoding="utf-8"?>
+2+
+<!-- Strings for the `splat-preview` demo (registered by
+3+
+`SplatPreviewFragment.kt`). Android's resource merger fans every
+4+
+`res/values/*.xml` file in, so `R.string.demo_splat_preview_title` etc.
+5+
+remains globally resolvable. Adding a new demo never needs to touch
+6+
+`strings.xml` — see #1870. -->
+7+
+<resources>
+8+
+<string name="demo_splat_preview_title">Gaussian Splatting</string>
+9+
+<string name="demo_splat_preview_subtitle">Render a 3D Gaussian Splat radiance-field cloud</string>
+10+
+<string name="demo_splat_preview">Gaussian Splatting</string>
+11+
+<string name="demo_splat_preview_desc">SplatNode renders a rainbow-sphere 3D Gaussian Splat cloud</string>
+12+
+</resources>
+Collapse file
+‎tools/generate-splat-sphere.py‎
+Copy file name to clipboard
++121Lines changed: 121 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -0,0 +1,121 @@
+1+
+#!/usr/bin/env python3
+2+
+"""Generate a small, visually recognizable 3D Gaussian Splatting PLY asset:
+3+
+a dense rainbow sphere shell. INRIA binary_little_endian 1.0 layout, exactly the
+4+
+properties SceneView's PlyParser (P1a) reads:
+5+
+6+
+x y z f_dc_0 f_dc_1 f_dc_2 opacity scale_0 scale_1 scale_2 rot_0 rot_1 rot_2 rot_3
+7+
+8+
+Activations are INVERTED here so the parser's forward activations reproduce the
+9+
+target values:
+10+
+- scale_i stored as ln(sigma) (parser applies exp)
+11+
+- f_dc_i stored as (c_lin - 0.5)/SH_C0 (parser applies 0.5 + SH_C0*f_dc)
+12+
+- opacity stored as logit(o) (parser applies sigmoid)
+13+
+- rot stored scalar-first w,x,y,z (parser reorders to xyzw, normalizes)
+14+
+15+
+Deterministic (no randomness, no external data) so the committed demo asset is
+16+
+fully reproducible. Regenerate the bundled splat-preview asset with:
+17+
+18+
+python3 tools/generate-splat-sphere.py \\
+19+
+samples/android-demo/src/main/assets/splats/rainbow_sphere.ply 8000
+20+
+"""
+21+
+import math
+22+
+import struct
+23+
+import sys
+24+
+import colorsys
+25+
+26+
+SH_C0 = 0.28209479177387814
+27+
+28+
+29+
+def srgb_to_linear(c: float) -> float:
+30+
+# Store LINEAR RGB (SplatCloud contract). Convert vivid sRGB hues to linear so
+31+
+# they survive Filament's linear->sRGB display transform close to intent.
+32+
+if c <= 0.04045:
+33+
+return c / 12.92
+34+
+return ((c + 0.055) / 1.055) ** 2.4
+35+
+36+
+37+
+def logit(p: float) -> float:
+38+
+p = min(max(p, 1e-4), 1.0 - 1e-4)
+39+
+return math.log(p / (1.0 - p))
+40+
+41+
+42+
+def fibonacci_sphere(n: int, radius: float):
+43+
+# Even point distribution on a sphere (golden-angle spiral).
+44+
+ga = math.pi * (3.0 - math.sqrt(5.0))
+45+
+pts = []
+46+
+for i in range(n):
+47+
+y = 1.0 - (i / float(n - 1)) * 2.0 # 1 .. -1
+48+
+r = math.sqrt(max(0.0, 1.0 - y * y))
+49+
+theta = ga * i
+50+
+x = math.cos(theta) * r
+51+
+z = math.sin(theta) * r
+52+
+pts.append((x * radius, y * radius, z * radius))
+53+
+return pts
+54+
+55+
+56+
+def main():
+57+
+out = sys.argv[1] if len(sys.argv) > 1 else "rainbow_sphere.ply"
+58+
+n = int(sys.argv[2]) if len(sys.argv) > 2 else 8000
+59+
+radius = 0.5
+60+
+sigma = 0.012 # linear gaussian scale -> billboard disc radius = 3*sigma = 0.036 m
+61+
+opacity = 0.80
+62+
+ln_sigma = math.log(sigma)
+63+
+64+
+pts = fibonacci_sphere(n, radius)
+65+
+66+
+# Vertex record: 14 float32 properties, little-endian.
+67+
+rec = struct.Struct("<14f")
+68+
+body = bytearray()
+69+
+for (x, y, z) in pts:
+70+
+# Hue wraps with azimuth around the Y axis -> full rainbow when orbiting.
+71+
+# A gentle lightness lift toward the top pole makes the shading readable.
+72+
+azimuth = math.atan2(z, x) # -pi..pi
+73+
+hue = (azimuth + math.pi) / (2.0 * math.pi)
+74+
+elevation = y / radius # -1..1
+75+
+val = 0.72 + 0.18 * elevation # 0.54 .. 0.90
+76+
+sat = 0.95
+77+
+sr, sg, sb = colorsys.hsv_to_rgb(hue, sat, val)
+78+
+r_lin = srgb_to_linear(sr)
+79+
+g_lin = srgb_to_linear(sg)
+80+
+b_lin = srgb_to_linear(sb)
+81+
+fdc0 = (r_lin - 0.5) / SH_C0
+82+
+fdc1 = (g_lin - 0.5) / SH_C0
+83+
+fdc2 = (b_lin - 0.5) / SH_C0
+84+
+body += rec.pack(
+85+
+x, y, z,
+86+
+fdc0, fdc1, fdc2,
+87+
+logit(opacity),
+88+
+ln_sigma, ln_sigma, ln_sigma,
+89+
+1.0, 0.0, 0.0, 0.0, # identity quaternion, scalar-first (w,x,y,z)
+90+
+)
+91+
+92+
+header = (
+93+
+"ply\n"
+94+
+"format binary_little_endian 1.0\n"
+95+
+f"comment SceneView synthetic rainbow-sphere splat ({n} gaussians) - demo asset, issue 2646\n"
+96+
+f"element vertex {n}\n"
+97+
+"property float x\n"
+98+
+"property float y\n"
+99+
+"property float z\n"
+100+
+"property float f_dc_0\n"
+101+
+"property float f_dc_1\n"
+102+
+"property float f_dc_2\n"
+103+
+"property float opacity\n"
+104+
+"property float scale_0\n"
+105+
+"property float scale_1\n"
+106+
+"property float scale_2\n"
+107+
+"property float rot_0\n"
+108+
+"property float rot_1\n"
+109+
+"property float rot_2\n"
+110+
+"property float rot_3\n"
+111+
+"end_header\n"
+112+
+).encode("ascii")
+113+
+114+
+with open(out, "wb") as f:
+115+
+f.write(header)
+116+
+f.write(body)
+117+
+print(f"wrote {out}: {n} splats, {len(header) + len(body)} bytes")
+118+
+119+
+120+
+if __name__ == "__main__":
+121+
+main()
+0 commit comments
+Comments
+0 (0)
+You can’t perform that action at this time.

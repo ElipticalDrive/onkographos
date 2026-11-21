@@ -1,0 +1,4175 @@
+Volume Rendering, NeRF, and 3D Gaussian Splatting
+==================================================
+Goals: In this assignment, you will set up a differentiable rendering pipeline and implement neural volume rendering techniques including NeRF, VolSDF, and 3D Gaussian Splatting.
+
+## Table of Contents
+ - [Setup](#setup)
+ - [A. Neural Volume Rendering (60 points)](#a-neural-volume-rendering-60-points)
+    - [1. Differentiable Volume Rendering](#1-differentiable-volume-rendering)
+    - [2. Optimizing a Basic Implicit Volume](#2-optimizing-a-basic-implicit-volume)
+    - [3. Optimizing a Neural Radiance Field (NeRF) (20 points)](#3-optimizing-a-neural-radiance-field-nerf-20-points)
+    - [4. NeRF Extensions](#4-nerf-extensions)
+ - [B. 3D Gaussian Splatting (60 points)](#b-3d-gaussian-splatting-60-points)
+    - [5. 3D Gaussian Rasterization (35 points)](#5-3d-gaussian-rasterization-35-points)
+    - [6. Training 3D Gaussian Representations (15 points)](#6-training-3d-gaussian-representations-15-points)
+    - [7. Extensions (Choose at least one! More than one is extra credit)](#7-extensions-choose-at-least-one-more-than-one-is-extra-credit)
+       - [7.1 Rendering Using Spherical Harmonics (10 points)](#71-rendering-using-spherical-harmonics-10-points)
+       - [7.2 Training On a Harder Scene (10 points)](#72-training-on-a-harder-scene-10-points)
+
+
+
+##  Setup
+
+### Environment Setup
+You can use the python environment you've set up for past assignments, but if you're starting fresh, please follow the instructions from Assignment 1 to get an environment with `torch` and `pytorch3d` up and running. This assignment needs a few additional packages, that can be installed with - 
+```bash
+pip install -r requirements.txt
+```
+
+### Data
+
+Most of the data for this assignment is provided under `nerf/data` and `GS/data`. The materials scene is large, so you can download and unzip it as follows -
+```bash
+sudo apt install git-lfs
+git lfs install
+
+git clone https://huggingface.co/datasets/learning3dvision/nerf_materials
+cd nerf_materials
+unzip materials.zip -d ../GS/data
+```
+# A. Neural Volume Rendering (60 points)
+
+Run all commands in this section from the `nerf` folder.
+
+##  1. Differentiable Volume Rendering
+
+In the emission-absorption (EA) model described in class, volumes are typically described by their *appearance* (e.g. emission) and *geometry* (absorption) at *every point* in 3D space. For part 1 of the assignment, you will implement a ***Differentiable Renderer*** for EA volumes, which you will use in parts 2 and 3. Differentiable renderers are extremely useful for 3D learning problems --- one reason is because they allow you to optimize scene parameters (i.e. perform inverse rendering) from image supervision only!
+
+##  1.1. Familiarize yourself with the code structure
+
+There are four major components of our differentiable volume rendering pipeline:
+
+* ***The camera***: `pytorch3d.CameraBase`
+* ***The scene***: `SDFVolume` in `implicit.py`
+* ***The sampling routine***: `StratifiedRaysampler` in `sampler.py`
+* ***The renderer***: `VolumeRenderer` in `renderer.py`
+
+`StratifiedRaysampler` provides a method for sampling multiple points along a ray traveling through the scene (also known as *raymarching*). Together, a sampler and a renderer describe a rendering pipeline. Like traditional graphics pipelines, this rendering procedure is independent of the scene and camera.
+
+The scene, sampler, and renderer are all packaged together under the `Model` class in `volume_rendering_main.py`. In particular the `Model`'s forward method invokes a `VolumeRenderer` instance with a sampling strategy and volume as input.
+
+Also, take a look at the `RayBundle` class in `ray_utils.py`, which provides a convenient wrapper around several inputs to the volume rendering procedure per ray.
+
+##  1.2. Outline of tasks
+
+In order to perform rendering, you will implement the following routines:
+
+1. **Ray sampling from cameras**: you will fill out methods in `ray_utils.py` to generate world space rays from a particular camera.
+2. **Point sampling along rays**: you will fill out the `StratifiedRaysampler` class to generate sample points along each world space ray
+3. **Rendering**: you will fill out the `VolumeRenderer` class to *evaluate* a volume function at each sample point along a ray, and aggregate these evaluations to perform rendering.
+
+##  1.3. Ray sampling (5 points)
+
+Take a look at the `render_images` function in `volume_rendering_main.py`. It loops through a set of cameras, generates rays for each pixel on a camera, and renders these rays using a `Model` instance.
+
+### Implementation
+
+Your first task is to implement:
+
+1. `get_pixels_from_image` in `ray_utils.py` and
+2. `get_rays_from_pixels` in `ray_utils.py`
+
+which are used in `render_images`:
+
+```python
+xy_grid = get_pixels_from_image(image_size, camera) # TODO: implement in ray_utils.py
+ray_bundle = get_rays_from_pixels(xy_grid, camera) # TODO: implement in ray_utils.py
+```
+
+The `get_pixels_from_image` method generates pixel coordinates, ranging from `[-1, 1]` for each pixel in an image. The `get_rays_from_pixels` method generates rays for each pixel, by mapping from a camera's *Normalized Device Coordinate (NDC) Space* into world space.
+
+### Visualization
+
+You can run the code for part 1 with:
+
+```bash
+# mkdir images (uncomment when running for the first time)
+python volume_rendering_main.py --config-name=box
+```
+
+Once you have implemented these methods, verify that your output matches the TA output by visualizing both `xy_grid` and `rays` with the `vis_grid` and `vis_rays` functions in the `render_images` function in `volume_rendering_main.py`. **By default, the above command will crash and return an error**. However, it should reach your visualization code before it does. The outputs of grid/ray visualization should look like this:
+
+![Grid](nerf/ta_images/grid.png)    ![Rays](nerf/ta_images/rays.png)
+
+##  1.4. Point sampling (5 points)
+
+### Implementation
+
+Your next task is to fill out `StratifiedRaysampler` in `sampler.py`. Implement the forward method, which:
+
+1. Generates a set of distances between `near` and `far` and
+2. Uses these distances to sample points offset from ray origins (`RayBundle.origins`) along ray directions (`RayBundle.directions`).
+3. Stores the distances and sample points in `RayBundle.sample_points` and `RayBundle.sample_lengths`
+
+### Visualization
+
+Once you have done this, use the `render_points` method in `render_functions.py` in order to visualize the point samples from the first camera. They should look like this:
+
+![Sample points](nerf/ta_images/sample_points.png)
+
+##  1.5. Volume rendering (20 points)
+
+Finally, we can implement volume rendering! With the `configs/box.yaml` configuration, we provide you with an `SDFVolume` instance describing a box. You can check out the code for this function in `implicit.py`, which converts a signed distance function into a volume. If you want, you can even implement your own `SDFVolume` classes by creating new signed distance function class, and adding it to `sdf_dict` in `implicit.py`. Take a look at [this great web page](https://iquilezles.org/articles/distfunctions/) for formulas for some simple/complex SDFs.
+
+
+### Implementation
+
+You will implement
+
+1. `VolumeRenderer._compute_weights` and
+2. `VolumeRenderer._aggregate`.
+3. You will also modify the `VolumeRenderer.forward` method to render a depth map in addition to color from a volume
+
+From each volume evaluation you will get both volume density, and a color:
+
+```python
+# Call implicit function with sample points
+implicit_output = implicit_fn(cur_ray_bundle)
+density = implicit_output['density']
+feature = implicit_output['feature']
+```
+
+You'll then use the following equation to render color along a ray:
+
+![Equation](nerf/ta_images/color.PNG)
+
+where `σ` is density, `Δt` is the length of current ray segment, and `L_e` is color:
+
+![Transmittance](nerf/ta_images/transmittance.PNG)
+
+Compute the weights `T * (1 - exp(-σ * Δt))` in `VolumeRenderer._compute_weights`, and perform the summation in `VolumeRenderer._aggregate`. Note that for the first segment `T = 1`.
+
+Use weights, and aggregation function to render *color* and *depth* (stored in `RayBundle.sample_lengths`). 
+
+### Visualization
+
+By default, your results will be written out to `images/part_1.gif`. Provide a visualization of the depth in your write-up. Note that the depth should be normalized by its maximum value.
+
+![Spiral Rendering of Part 1](nerf/ta_images/part_1.gif) ![Depth](nerf/ta_images/depth.png)
+
+
+##  2. Optimizing a basic implicit volume
+
+##  2.1. Random ray sampling (5 points)
+
+Since you have now implemented a differentiable volume renderer, we can use it to optimize the parameters of a volume! We have provided a basic training loop in the `train` method in `volume_rendering_main.py`.
+
+Depending on how many sample points we take for each ray, volume rendering can consume a lot of memory on the GPU (especially during the backward pass of gradient descent). Because of this, it usually makes sense to sample a subset of rays from a full image for each training iteration. In order to do this, implement the `get_random_pixels_from_image` method in `ray_utils.py`, invoked here:
+
+```python
+xy_grid = get_random_pixels_from_image(cfg.training.batch_size, image_size, camera) # TODO: implement in ray_utils.py
+```
+
+##  2.2. Loss and training (5 points)
+Replace the loss in `train`
+
+```python
+loss = None
+```
+
+with mean squared error between the predicted colors and ground truth colors `rgb_gt`.
+
+Once you've done this, you can run train a model with
+
+```bash
+python volume_rendering_main.py --config-name=train_box
+```
+
+This will optimize the position and side lengths of a box, given a few ground truth images with known camera poses (in the `data` folder). Report the center of the box, and the side lengths of the box after training, rounded to the nearest `1/100` decimal place.
+
+##  2.3. Visualization
+
+The code renders a spiral sequence of the optimized volume in `images/part_2.gif`. Compare this gif to the one below, and attach it in your write-up:
+
+![Spiral Rendering of Part 2](nerf/ta_images/part_2.gif)
+
+
+##  3. Optimizing a Neural Radiance Field (NeRF) (20 points)
+In this part, you will implement an implicit volume as a Multi-Layer Perceptron (MLP) in the `NeuralRadianceField` class in `implicit.py`. This MLP should map 3D position to volume density and color. Specifically:
+
+1. Your MLP should take in a `RayBundle` object in its forward method, and produce color and density for each sample point in the RayBundle.
+2. You should also fill out the loss in `train_nerf` in the `volume_rendering_main.py` file.
+
+You will then use this implicit volume to optimize a scene from a set of RGB images. We have implemented data loading, training, checkpointing for you, but this part will still require you to do a bit more legwork than for Parts 1 and 2. You will have to write the code for the MLP yourself --- feel free to reference the NeRF paper, though you should not directly copy code from an external repository.
+
+## Implementation
+
+Here are a few things to note:
+
+1. For now, your NeRF MLP does not need to handle *view dependence*, and can solely depend on 3D position.
+2. You should use the `ReLU` activation to map the first network output to density (to ensure that density is non-negative)
+3. You should use the `Sigmoid` activation to map the remaining raw network outputs to color
+4. You can use *Positional Encoding* of the input to the network to achieve higher quality. We provide an implementation of positional encoding in the `HarmonicEmbedding` class in `implicit.py`.
+
+## Visualization
+You can train a NeRF on the lego bulldozer dataset with
+
+```bash
+python volume_rendering_main.py --config-name=nerf_lego
+```
+
+This will create a NeRF with the `NeuralRadianceField` class in `implicit.py`, and use it as the `implicit_fn` in `VolumeRenderer`. It will also train a NeRF for 250 epochs on 128x128 images.
+
+Feel free to modify the experimental settings in `configs/nerf_lego.yaml` --- though the current settings should allow you to train a NeRF on low-resolution inputs in a reasonable amount of time. After training, a spiral rendering will be written to `images/part_3.gif`. Report your results. It should look something like this:
+
+![Spiral Rendering of Part 3](nerf/ta_images/part_3.gif)
+
+##  4. NeRF Extras (CHOOSE ONE! More than one is extra credit)
+
+###  4.1 View Dependence (10 bonus points)
+
+Add view dependence to your NeRF model! Specifically, make it so that emission can vary with viewing direction. You can read NeRF or other papers for how to do this effectively --- if you're not careful, your network may overfit to the training images. Discuss the trade-offs between increased view dependence and generalization quality. 
+
+While you may use the lego scene to test your code, please employ the materials scene to show the results of your method on your webpage (experimental settings can be found in `nerf_materials.yaml` and `nerf_materials_highres.yaml`).
+
+If you haven't done so already, make sure to download and unzip the `nerf_materials` dataset as described in the setup section.
+
+###  4.2 Coarse/Fine Sampling (10 bonus points)
+
+NeRF employs two networks: a coarse network and a fine network. During the coarse pass, it uses the coarse network to get an estimate of geometry, and during fine pass uses these geometry estimates for better point sampling for the fine network. Implement this strategy and discuss trade-offs (speed / quality).
+
+###  4.3 VolSDF (10 bonus points)
+
+In this part, you will implement a function converting SDF -> volume density and extend the `NeuralSurface` class to predict color. 
+
+* **Implement a MLP to predict distance**: You should populate the `NeuralSurface` class in `implicit.py`. For this part, you need to define a MLP that helps you predict a distance for any input point. More concretely, you would need to define some MLP(s) in  `__init__` function, and use these to implement the `get_distance` function for this class. Hint: you can use a similar MLP to what you used to predict density in Part A, but remember that density and distance have different possible ranges!
+
+* **Implement Eikonal Constraint as a Loss**: Define the `eikonal_loss` in `losses.py`.
+
+* **Color Prediction**: Extend the `NeuralSurface` class to predict per-point color. You may need to define a new MLP (just a few new layers, depending on how you implemented the earlier neural field). You should then implement the `get_color` and `get_distance_color` functions.
+
+* **SDF to Density**: Read section 3.1 of the [VolSDF Paper](https://arxiv.org/pdf/2106.12052.pdf) and implement their formula converting signed distance to density in the `sdf_to_density` function in `renderer.py`. In your write-up, give an intuitive explanation of what the parameters `alpha` and `beta` are doing here. Also, answer the following questions:
+1. How does high `beta` bias your learned SDF? What about low `beta`?
+2. Would an SDF be easier to train with volume rendering and low `beta` or high `beta`? Why?
+3. Would you be more likely to learn an accurate surface with high `beta` or low `beta`? Why?
+
+After implementing these, train an SDF on the lego bulldozer model with
+
+```bash
+python -m volume_rendering_main --config-name=volsdf_surface
+```
+
+This will save `part_4_3_geometry.gif` and `part_4_3.gif`. Experiment with hyper-parameters to and attach your best results on your webpage. Comment on the settings you chose, and why they seem to work well.
+
+![Bulldozer geometry](nerf/ta_images/part_4_3_geometry.gif) ![Bulldozer color](nerf/ta_images/part_4_3.gif)
+
+
+
+---
+
+## B. 3D Gaussian Splatting (60 points)
+
+In the first part of this assignment, we will explore 3D Gaussian Splatting by building a simplified version of the 3D Gaussian rasterization pipeline introduced by the [original paper](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/3d_gaussian_splatting_low.pdf). Once we create the rasterizer, we will first use it to render pre-trained 3D Gaussians provided by the authors of the original paper. Then, we will create training code which leverages the renderer to optimize 3D Gaussians to represent custom scenes.
+
+Notes:
+
+- Run all code for this section from the `GS` folder.
+- Search for `"### YOUR CODE HERE ###"` for areas where code should be written.
+- Please remember to follow the deliverables specified in the **Submission** section in each question.
+
+## 5. 3D Gaussian Rasterization (35 points)
+
+In this section, we will implement a 3D Gaussian rasterization pipeline in PyTorch. The official implementation uses custom CUDA code and several optimizations to make the rendering very fast. For simplicity, our implementation avoids many of the tricks and optimizations used by the official implementation and hence would be much slower. Additionally, instead of using all the spherical harmonic coefficients to model view dependent effects, we will only use the view independent compoenents.
+
+Inspite of these limitations, once you complete this section successfully, you will find that our simplified 3D Gaussian rasterizer can still produce renderings of pre-trained 3D Gaussians that were trained using the original codebase reaonsably well!
+
+For this section, you will have to complete the code in the files `model.py` and `render.py`. The file `model.py` contains code that manipulates and renders Gaussians. The file `render.py` uses functionality from `model.py` to render a pre-trained 3D Gaussian representation of an object.
+
+In sections `5.1` to `5.4`, you will have to complete the code in the classes `Gaussians` and `Scene` in the file `model.py`. In section `5.5`, you will have to complete the code in the file `render.py`. It might be helpful to first skim both the files before starting the assignment to get a rough idea of the workflow.
+
+> **Note**: All the functions in `model.py` perform operations on a batch of N Gaussians instead of 1 Gaussian at a time. As such, it is recommended to write loopless vectorized code to maximize performance. However, a solution with loops will also be accepted as long as it works and produces the desired output.
+
+### 5.1 Project 3D Gaussians to Obtain 2D Gaussians
+
+We will begin our implementation of a 3D Gaussian rasterizer by first creating functionality to project 3D Gaussians in the world space to 2D Gaussians that lie on the image plane of a camera. 
+
+A 3D Gaussian is parameterized by its mean (a 3 dimensional vector) and covariance (a 3x3 matrix). Following equations (5) and (6) of the [original paper](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/3d_gaussian_splatting_low.pdf), we can obtain a 2D Gaussian (parameterized by a 2D mean vector and 2x2 covariance matrix) that represents an approximation of the projection of a 3D Gaussian to the image plane of a camera.
+
+For this section, you will need to complete the code in the functions `compute_cov_3D`, `compute_cov_2D` and `compute_means_2D` of the class `Gaussians`. 
+
+### 5.2 Evaluate 2D Gaussians
+
+In the previous section, we had implemented code to project 3D Gaussians to obtain 2D Gaussians. Now, we will write code to evaluate the 2D Gaussian at a particular 2D pixel location.
+
+A 2D Gaussian is represented by the following expression:
+
+$$
+  f(\mathbf{x}; \boldsymbol{\mu}\_{i}, \boldsymbol{\Sigma}\_{i}) = \frac{1}{2 \pi \sqrt{ | \boldsymbol{\Sigma}\_{i} |}} \exp \left ( {-\frac{1}{2}} (\mathbf{x} - \boldsymbol{\mu}\_{i})^T \boldsymbol{\Sigma}\_{i}^{-1} (\mathbf{x} - \boldsymbol{\mu}\_{i}) \right ) = \frac{1}{2 \pi \sqrt{ | \boldsymbol{\Sigma}\_{i} |}} \exp \left ( P_{(\mathbf{x}, i)} \right )
+$$
+
+Here, $\mathbf{x}$ is a 2D vector that represents the pixel location, $\boldsymbol{\mu}$ represents is a 2D vector representing the mean of the $i$-th 2D Gaussian, and $\boldsymbol{\Sigma}$ represents the covariance of the 2D Gaussian. The exponent part $P_{(\mathbf{x}, i)}$ is referred to as **power** in the code.
+
+$$
+  P_{(\mathbf{x}, i)} = {-\frac{1}{2}} (\mathbf{x} - \boldsymbol{\mu}\_{i})^T \mathbf{\Sigma}\_{i}^{-1} (\mathbf{x} - \boldsymbol{\mu}\_{i})
+$$
+
+The function `evaluate_gaussian_2D` of the class `Gaussians` is used to compute the power. In this section, you will have to complete this function.
+
+**Unit Test**: To check if your implementation is correct so far, we have provided a unit test. Run `python unit_test_gaussians.py` to see if you pass all 4 test cases.
+
+### 5.3 Filter and Sort Gaussians
+
+Now that we have implemented functionality to project 3D Gaussians, we can start implementing the rasterizer!
+
+Before starting the rasterization procedure, we should first sort the 3D Gaussians in increasing order by their depth value. We should also discard 3D Gaussians whose depth value is less than 0 (we only want to project 3D Gaussians that lie in front on the image plane).
+
+Complete the functions `compute_depth_values` and `get_idxs_to_filter_and_sort` of the class `Scene` in `model.py`. You can refer to the function `render` in class `Scene` to see how these functions will be used.
+
+### 5.4 Compute Alphas and Transmittance
+
+Using these `N` ordered and filtered 2D Gaussians, we can compute their alpha and transmittance values at each pixel location in an image.
+
+The alpha value of a 2D Gaussian $i$ at a single pixel location $\mathbf{x}$ can be calculated using:
+
+$$
+  \alpha_{(\mathbf{x}, i)} = o_i \exp(P_{(\mathbf{x}, i)})
+$$
+
+Here, $o_i$ is the opacity of each Gaussian, which is a learnable parameter.
+
+Given `N` ordered 2D Gaussians, the transmittance value of a 2D Gaussian $i$ at a single pixel location $\mathbf{x}$ can be calculated using:
+
+$$
+  T_{(\mathbf{x}, i)} = \prod_{j \lt i} (1 - \alpha_{(\mathbf{x}, j)})
+$$
+
+In this section, you will need to complete the functions `compute_alphas` and `compute_transmittance` of the class `Scene` in `model.py` so that alpha and transmittance values can be computed.
+
+> Note: In practice, when `N` is large and when the image dimensions are large, we may not be able to compute all alphas and transmittance in one shot since the intermediate values may not fit within GPU memory limits. In such a scenario, it might be beneficial to compute the alphas and transmittance in **mini-batches**. In our codebase, we provide the user the option to perform splatting `num_mini_batches` times, where we splat `K` Gaussians at a time (except at the last iteration, where we could possibly splat less than `K` Gaussians). Please refer to the functions `splat` and `render` of class `Scene` in `model.py` to see how splatting and mini-batching is performed.
+
+### 5.5 Perform Splatting
+
+Finally, using the computed alpha and transmittance values, we can blend the colour value of each 2D Gaussian to compute the colour at each pixel. The equation for computing the colour of a single pixel is (which is the same as equation (3) from the [original paper](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/3d_gaussian_splatting_low.pdf)).
+
+More formally, given `N` ordered 2D Gaussians, we can compute the colour value at a single pixel location $\mathbf{x}$ by:
+
+$$
+  C_{\mathbf{x}} = \sum_{i = 1}^{N} c_i \alpha_{(\mathbf{x}, i)} T_{(\mathbf{x}, i)}
+$$
+
+Here, $c_i$ is the colour contribution of each Gaussian, which is a learnable parameter. Instead of using the colour contribution of each Gaussian, we can also use other attributes to compute the depth and silhouette mask at each pixel as well!
+
+In this section, you will need to complete the function `splat` of the class `Scene` in `model.py` and return the colour, depth and silhouette (mask) maps. While the equation for colour is given in this section, you will have to think and implement similar equations for computing the depth and silhouette (mask) maps as well. You can refer to the function `render` in the same class to see how the function `splat` will be used.
+
+Once you have finished implementing the functions, you can open the file `render.py` and complete the rendering code in the function `create_renders` (this task is very simple, you just have to call the `render` function of the object of the class `Scene`)
+
+After completing `render.py`, you can test the rendering code by running `python render.py`. This script will take a few minutes to render views of a scene represented by pre-trained 3D Gaussians!
+
+For reference, here is one frame of the GIF that you can expect to see:
+
+<p align="center">
+  <img src="GS/ref_output/part_5_render_example.png" alt="Part_5_Render" width=60%/>
+</p>
+
+Do note that while the reference we have provided is a still frame, we expect you to submit the GIF that is output by the rendering code.
+
+**GPU Memory Usage**: This task (with default paramter settings) may use approximately 6GB GPU memory. You can decrease/increase GPU memory utilization for performance by using the `--gaussians_per_splat` argument.
+
+> **Submission:** In your webpage, attach the **GIF** that you obtained by running `render.py`
+
+## 6 Training 3D Gaussian Representations (15 points)
+
+Now, we will use our 3D Gaussian rasterizer to train a 3D representation of a scene given posed multi-view data. 
+
+More specifically, we will train a 3D representation of a toy truck given multi-view data and a point cloud. The folder `./data/truck` contains images, poses and a point cloud of a toy truck. The point cloud is used to initialize the means of the 3D Gaussians. 
+
+In this section, for ease of implementation and because the scene is simple, we will perform training using **isotropic** Gaussians. Do recall that you had already implemented all the necessary functionality for this in the previous section! In the training code, we just simply set `isotropic` to True while initializing `Gaussians` so that we deal with isotropic Gaussians.
+
+For all questions in this section, you will have to complete the code in `train.py`
+
+### 6.1 Setting Up Parameters and Optimizer
+
+First, we must make our 3D Gaussian parameters trainable. You can do this by setting `requires_grad` to True on all necessary parameters in the function `make_trainable` in `train.py` (you will have to implement this function). 
+
+Next, you will have to setup the optimizer. It is recommended to provide different learning rates for each type of parameter (for example, it might be preferable to use a much smaller learning rate for the means as compared to opacities or colours). You can refer to pytorch documentation on how to set different learning rates for different sets of parameters. 
+
+Your task is to complete the function `setup_optimizer` in `train.py` by passing all trainable parameters and setting appropriate learning rates. Feel free to experiment with different settings of learning rates.
+
+### 6.2 Perform Forward Pass and Compute Loss
+
+We are almost ready to start training. All that is left is to complete the function `run_training`. Here, you are required to call the relevant function to render the 3D Gaussians to predict an image rendering viewed from a given camera. Also, you are required to implement a loss function that compared the predicted image rendering to the ground truth image. Standard L1 loss should work fine for this question, but you are free to experiment with other loss functions as well.
+
+Finally, we can now start training. You can do so by running `python train.py`. This script would save two GIFs (`part_6_training_progress.gif` and `part_6_training_final_renders.gif`).
+
+For reference, here is one frame from the training progress GIF from our reference implementation. The top row displays renderings obtained from Gaussians that are being trained and the bottom row displayes the ground truth. The top row looks good in this reference because this frame is from near the end of the optimization procedure. You can expect the top row to look bad during the start of the optimization procedure.
+
+<p align="center">
+  <img src="GS/ref_output/part_6_training_example_1.png" alt="Part_6_Training_1" width=60%/>
+</p>
+
+Also, for reference, here is one frame from the final rendering GIF created after training is complete
+
+<p align="center">
+  <img src="GS/ref_output/part_6_training_example_2.png" alt="Part_6_Training_2" width=15%/>
+</p>
+
+Do note that while the reference we have provided is a still frame, we expect you to submit the GIFs output by the rendering code. 
+
+Feel free to experiment with different learning rate values and number of iterations. After training is completed, the script will save the trained gaussians and compute the PSNR and SSIM on some held out views. 
+
+**GPU Memory Usage**: This task (with default paramter settings) may use approximately 15.5GB GPU memory. You can decrease/increase GPU memory utilization for performance by using the `--gaussians_per_splat` argument.
+
+> **Submission:** In your webpage, include the following details:
+> - Learning rates that you used for each parameter. If you had experimented with multiple sets of learning rates, just mention the set that obtains the best performance in the next question.
+> - Number of iterations that you trained the model for.
+> - The PSNR and SSIM.
+> - Both the GIFs output by `train.py`.
+
+## 7 Extensions **(Choose at least one! More than one is extra credit)**
+
+### 7.1 Rendering Using Spherical Harmonics (10 points)
+
+In the previous sections, we implemented a 3D Gaussian rasterizer that is view independent. However, scenes often contain elements whose apperance looks different when viewed from a different direction (for example, reflections on a shiny surface). To model these view dependent effects, the authors of the 3D Gaussian Splatting paper use spherical harmonics.
+
+The 3D Gaussians trained using the original codebase often come with learnt spherical harmonics components as well. Infact, for the scene used in section 5. we do have access to the spherical harmonic components! For simplicity, we had extracted only the view independent part of the spherical harmonics (the 0th order coefficients) and returned that as colour. As a result, the renderings we obtained in the previous section can only represent view independent information, and might also have lesser visual quality.
+
+In this section, we will explore rendering 3D Gaussians with associated spherical harmonic components. We will add support for spherical harmonics such that we can run inference on 3D Gaussians that are already pre-trained using the original repository (we will **not** focus on training spherical harmonic coefficients).
+
+In this section, you will complete code in `model.py` and `data_utils.py` to enable the utilization of spherical harmonics. You will also have to modify parts of `model.py`. Please lookout for the tag `[Q 7.1]` in the code to find parts of the code that need to be modified and/or completed.
+
+In particular, the function `colours_from_spherical_harmonics` requires you to compute colour given spherical harmonic components and directions. You can refer to function `get_color` in this [implementation](https://github.com/thomasantony/splat/blob/0d856a6accd60099dd9518a51b77a7bc9fd9ff6b/notes/00_Gaussian_Projection.ipynb) and create a vectorized version of the same for your implementation.
+
+Once you have completed the above tasks, run `render.py` (use the same command that you used for question 5.5). This script will take a few minutes to render views of a scene represented by pre-trained 3D Gaussians.
+
+For reference, here is one frame of the rendering obtained when we use all spherical harmonic components:
+
+<p align="center">
+  <img src="GS/ref_output/part_7_1_with_sh.png" alt="Part_7_1_With_SH" width=60%/>
+</p>
+
+For comparison, here is one frame of the rendering obtained when we used only the DC spherical harmonic component (i.e., what we had done for question 5.5):
+
+<p align="center">
+  <img src="GS/ref_output/part_7_1_without_sh.png" alt="Part_7_1_Without_SH" width=60%/>
+</p>
+
+> **Submission:** In your webpage, include the following details:
+> - Attach the GIF you obtained using `render.py` for questions 7.1 (this question) and 5.5 (older question).
+> - Attach 2 or 3 side by side RGB image comparisons of the renderings obtained from both the cases. The images that are being compared should correspond to the same view/frame.
+> - For each of the side by side comparisons that are attached, provide some explanation of differences (if any) that you notice.
+
+### 7.2 Training On a Harder Scene (10 Points)
+
+In question 6, we explored training 3D Gaussians to represent a scene. However, that scene is relatively simple. Furthermore, the Gaussians benefitted from being initialized using many high-quality noise free points (which we had already setup for you). Hence, we were able to get reasonably good performance by just using isotropic Gaussians and by adjusting the learning rate.
+
+However, real scenes are much more complex. For instance, the scene may comprise of thin structures that might be hard to model using isotropic Gaussians. Furthermore, the points that are used to initialize the means of the 3D Gaussians might be noisy (since the points themselves might be estimated using algorithms that might produce noisy/incorrect predictions).
+
+In this section, we will try training 3D Gaussians on harder data and initialization conditions. For this task, we will start with randomly initialized points for the 3D Gaussian means (which makes convergence hard). Also, we will use a scene that is more challenging than the toy truck data that you used for question 6. We will use the materials dataset from the NeRF synthetic dataset. While this dataset does not have thin structures, it has many objects in one scene. This makes convergence challenging due to the type of random intialization we do internally (we sample points from a single sphere centered at the origin). Download the materials dataset using the [Data setup instructions](#data), which places it in `GS/data/materials`.
+
+You will have to complete the code in `train_harder_scene.py` for this question. You can start this question by reusing your solutions from question 6. But you may quickly realize that this may not give good results. Your task is to experiment with techniques to improve performance as much as possible.
+
+Here are a few possible ideas to try and improve performance:
+- You can start by experimenting with different learning rates and training for much longer duration.
+- You can consider using learning rate scheduling strategies (and these can be different for each parameter).
+- The original paper uses SSIM loss as well to encourage performance. You can consider using similar loss functions as well.
+- The original paper uses adaptive density control to add or reduce Gaussians based on some conditions. You can experiment with a simplified variant of such schemes to improve performance.
+- You can experiment with the initialization parameters in the `Gaussians` class.
+- You can experiment with using anisotropic Gaussians instead of isotropic Gaussians. 
+
+> **Submission:** In your webpage, include the following details:
+> - Follow the submission instructions for question 6.2 for this question as well.
+> - As a baseline, use the training setup that you used for question 6.2 (isotropic Gaussians, learning rates, loss etc.) for this dataset (make sure `Gaussians` have `init_type="random"`). Save the training progress GIF and PSNR, SSIM metrics.
+> - Compare the training progress GIFs and PSNR, SSIM metrics for both the baseline and your improved approach on this new dataset.
+> - For your best performing method, explain all the modifications that you made to your approach compared to question 1.2 to improve performance.
+
+---
+
+### GS/data_utils.py
+```
+import os
+import torch
+import imageio
+import numpy as np
+import matplotlib.pyplot as plt
+
+from PIL import Image
+from plyfile import PlyData
+from torch.utils.data import Dataset
+from pytorch3d.renderer.cameras import PerspectiveCameras, look_at_view_transform
+
+SH_C0 = 0.28209479177387814
+CMAP_JET = plt.get_cmap("jet")
+CMAP_MIN_NORM, CMAP_MAX_NORM = 5.0, 7.0
+
+class TruckDataset(Dataset):
+
+    def __init__(self, root, split):
+        super().__init__()
+        self.root = root
+        self.split = split
+        if self.split not in ("train", "test"):
+            raise ValueError(f"Invalid split: {self.split}")
+
+        self.masks = []
+        self.points = []
+        self.images = []
+        self.cameras = []
+
+        imgs_root = os.path.join(root, "imgs")
+        poses_root = os.path.join(root, "poses")
+        points_root = os.path.join(root, "points")
+        self.points_path = os.path.join(points_root, "points_10000.npy")
+
+        data_img_size = None
+        num_files = len(os.listdir(imgs_root))
+        test_idxs = np.linspace(0, num_files, 7).astype(np.int32)[1:-1]
+        test_idxs_set = set(test_idxs.tolist())
+        train_idxs = [i for i in range(num_files) if i not in test_idxs_set]
+        idxs = train_idxs if self.split == "train" else test_idxs
+
+        for i in idxs:
+            img_path = os.path.join(imgs_root, f"frame{i+1:06d}.jpg")
+            npy_path = os.path.join(poses_root, f"frame{i+1:06d}.npy")
+
+            img_ = imageio.v3.imread(img_path).astype(np.float32) / 255.0
+
+            mask = None
+            if img_.shape[-1] == 3:
+                img = torch.tensor(img_)  # (H, W, 3)
+            else:
+                img = torch.tensor(img_[..., :3])  # (H, W, 3)
+                mask = torch.tensor(img_[..., 3:4])  # (H, W, 1)
+                
+            img_size = img.shape[:2]
+            h, w = img_size
+            
+            # Checking if all data samples have the same image size
+            if data_img_size is None:
+                data_img_size = (w,h) 
+            else:
+                if data_img_size[0] != img_size[1] or data_img_size[1] != img_size[0]:
+                    raise RuntimeError
+
+            pose = np.load(npy_path)
+            R, T, F, C = pose[:9].reshape((3,3)), pose[9:12], pose[12:14], pose[14:16]
+            
+            # Screen space camera
+            F = F * min(img_size) / 2 
+            C = w / 2 - C[0] * min(img_size) / 2, h / 2 - C[1] * min(img_size) / 2  
+
+            camera = PerspectiveCameras(
+                focal_length=torch.tensor(F, dtype=torch.float)[None], 
+                principal_point=torch.tensor(C, dtype=torch.float)[None],
+                R=torch.tensor(R, dtype=torch.float)[None], 
+                T=torch.tensor(T, dtype=torch.float)[None],
+                in_ndc=False,
+                image_size=((h,w),)
+            )
+
+            self.images.append(img)
+            self.cameras.append(camera)
+            if mask is not None:
+                self.masks.append(mask)
+
+        self.img_size = data_img_size
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        masks = None
+        if len(self.masks) > 0:
+            masks = self.masks[idx]
+        return self.images[idx], self.cameras[idx], masks
+
+    @staticmethod
+    def collate_fn(batch):
+        images = torch.stack([x[0] for x in batch], dim=0)
+        cameras = [x[1] for x in batch]
+
+        masks = [x[2] for x in batch if x[2] is not None]
+        if len(masks) == 0:
+            masks = None
+        else:
+            masks = torch.stack(masks, dim=0)
+
+        return images, cameras, masks
+
+
+def colour_depth_render(depth):
+    normalized_depth = (depth - CMAP_MIN_NORM) / (CMAP_MAX_NORM - CMAP_MIN_NORM + 1e-8)
+    coloured_depth = CMAP_JET(normalized_depth)[:, :, :3]  # (H, W, 3)
+    coloured_depth = (np.clip(coloured_depth, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+    return coloured_depth
+
+def visualize_renders(scene, gt_viz_img, cameras, img_size):
+
+    imgs = []
+    viz_size = (256, 256)
+    with torch.no_grad():
+        for cam in cameras:
+            pred_img, _, _ = scene.render(
+                cam, img_size=img_size,
+                bg_colour=(0.0, 0.0, 0.0),
+                per_splat=-1,
+            )
+            img = torch.clamp(pred_img, 0.0, 1.0) * 255.0
+            img = img.clone().detach().cpu().numpy().astype(np.uint8)
+
+            if img_size[0] != viz_size[0] or img_size[1] != viz_size[1]:
+                img = np.array(Image.fromarray(img).resize(viz_size))
+
+            imgs.append(img)
+
+    pred_viz_img = np.concatenate(imgs, axis=1)
+    viz_frame = np.concatenate((pred_viz_img, gt_viz_img), axis=0)
+    return viz_frame
+
+def load_gaussians_from_ply(path):
+    # Modified from https://github.com/thomasantony/splat
+    max_sh_degree = 3
+    plydata = PlyData.read(path)
+    xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
+                    np.asarray(plydata.elements[0]["y"]),
+                    np.asarray(plydata.elements[0]["z"])),  axis=1)
+    opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+
+    features_dc = np.zeros((xyz.shape[0], 3, 1))
+    features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
+    features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
+    features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
+
+    extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
+    extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
+    assert len(extra_f_names) == 3 * (max_sh_degree + 1) ** 2 - 3
+    features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
+    for idx, attr_name in enumerate(extra_f_names):
+        features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
+    # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
+    features_extra = features_extra.reshape((features_extra.shape[0], 3, (max_sh_degree + 1) ** 2 - 1))
+    features_extra = np.transpose(features_extra, [0, 2, 1])
+
+    scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
+    scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
+    scales = np.zeros((xyz.shape[0], len(scale_names)))
+    for idx, attr_name in enumerate(scale_names):
+        scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
+
+    rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")]
+    rot_names = sorted(rot_names, key = lambda x: int(x.split('_')[-1]))
+    rots = np.zeros((xyz.shape[0], len(rot_names)))
+    for idx, attr_name in enumerate(rot_names):
+        rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
+
+    xyz = xyz.astype(np.float32)
+    rots = rots.astype(np.float32)
+    scales = scales.astype(np.float32)
+    opacities = opacities.astype(np.float32)
+    shs = np.concatenate([
+        features_dc.reshape(-1, 3),
+        features_extra.reshape(len(features_dc), -1)
+    ], axis=-1).astype(np.float32)
+    shs = shs.astype(np.float32)
+
+    dc_vals = shs[:, :3]
+    dc_colours = np.maximum(dc_vals * SH_C0 + 0.5, np.zeros_like(dc_vals))
+
+    output = {
+        "xyz": xyz, "rot": rots, "scale": scales,
+        "sh": shs, "opacity": opacities, "dc_colours": dc_colours
+    }
+    return output
+
+def colours_from_spherical_harmonics(spherical_harmonics, gaussian_dirs):
+    """
+    [Q 7.1] Computes view-dependent colour given spherical harmonic coefficients
+    and direction vectors for each gaussian.
+
+    Args:
+        spherical_harmonics     :   A torch.Tensor of shape (N, 48) representing the
+                                    spherical harmonic coefficients.
+        gaussian_dirs           :   A torch.Tensor of shape (N, 3) representing the
+                                    direction vectors pointing from the camera origin
+                                    to each Gaussian.
+
+    Returns:
+        colours                 :   A torch.Tensor of shape (N, 3) representing the view dependent
+                                    RGB colour.
+    """
+    ### YOUR CODE HERE ###
+    colours = None
+    return colours
+```
+
+### GS/data_utils_harder_scene.py
+```
+# Copyright (c) Facebook, Inc. and its affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+import os
+from typing import List, Optional, Tuple
+
+import numpy as np
+import requests
+import torch
+from PIL import Image
+from pytorch3d.renderer import PerspectiveCameras
+from torch.utils.data import Dataset
+
+import matplotlib.pyplot as plt
+
+
+DEFAULT_DATA_ROOT = os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "data"
+)
+
+DEFAULT_URL_ROOT = "https://dl.fbaipublicfiles.com/pytorch3d_nerf_data"
+
+def trivial_collate(batch):
+    """
+    A trivial collate function that merely returns the uncollated batch.
+    """
+    return batch
+
+
+class ListDataset(Dataset):
+    """
+    A simple dataset made of a list of entries.
+    """
+
+    def __init__(self, entries: List) -> None:
+        """
+        Args:
+            entries: The list of dataset entries.
+        """
+        self._entries = entries
+
+    def __len__(
+        self,
+    ) -> int:
+        return len(self._entries)
+
+    def __getitem__(self, index):
+        return self._entries[index]
+
+
+def get_nerf_datasets(
+    dataset_name: str,  # 'lego | fern'
+    image_size: Tuple[int, int],
+    data_root: str = DEFAULT_DATA_ROOT,
+    autodownload: bool = True,
+) -> Tuple[Dataset, Dataset, Dataset]:
+    """
+    Obtains the training and validation dataset object for a dataset specified
+    with the `dataset_name` argument.
+
+    Args:
+        dataset_name: The name of the dataset to load.
+        image_size: A tuple (height, width) denoting the sizes of the loaded dataset images.
+        data_root: The root folder at which the data is stored.
+        autodownload: Auto-download the dataset files in case they are missing.
+
+    Returns:
+        train_dataset: The training dataset object.
+        val_dataset: The validation dataset object.
+        test_dataset: The testing dataset object.
+    """
+
+    # if dataset_name not in ALL_DATASETS:
+    #     raise ValueError(f"'{dataset_name}'' does not refer to a known dataset.")
+
+    print(f"Loading dataset {dataset_name}, image size={str(image_size)} ...")
+
+    cameras_path = os.path.join(data_root, dataset_name + ".pth")
+    image_path = cameras_path.replace(".pth", ".png")
+
+    train_data = torch.load(cameras_path)
+    n_cameras = train_data["cameras"]["R"].shape[0]
+
+    _image_max_image_pixels = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = None  # The dataset image is very large ...
+    images = torch.FloatTensor(np.array(Image.open(image_path))) / 255.0
+    images = torch.stack(torch.chunk(images, n_cameras, dim=0))[..., :3]
+    Image.MAX_IMAGE_PIXELS = _image_max_image_pixels
+
+    scale_factors = [s_new / s for s, s_new in zip(images.shape[1:3], image_size)]
+
+    if abs(scale_factors[0] - scale_factors[1]) > 1e-3:
+        raise ValueError(
+            "Non-isotropic scaling is not allowed. Consider changing the 'image_size' argument."
+        )
+    scale_factor = sum(scale_factors) * 0.5
+
+    if scale_factor != 1.0:
+        print(f"Rescaling dataset (factor={scale_factor})")
+        images = torch.nn.functional.interpolate(
+            images.permute(0, 3, 1, 2),
+            size=tuple(image_size),
+            mode="bilinear",
+        ).permute(0, 2, 3, 1)
+
+    cameras = [
+        PerspectiveCameras(
+            **{k: v[cami][None] for k, v in train_data["cameras"].items()}
+        ).to("cpu")
+        for cami in range(n_cameras)
+    ]
+
+    train_idx, val_idx, test_idx = train_data["split"]
+
+    train_dataset, val_dataset, test_dataset = [
+        ListDataset(
+            [
+                {"image": images[i], "camera": cameras[i], "camera_idx": int(i)}
+                for i in idx
+            ]
+        )
+        for idx in [train_idx, val_idx, test_idx]
+    ]
+
+    return train_dataset, val_dataset, test_dataset
+
+
+def download_data(
+    dataset_names: Optional[List[str]] = None,
+    data_root: str = DEFAULT_DATA_ROOT,
+    url_root: str = DEFAULT_URL_ROOT,
+) -> None:
+    """
+    Downloads the relevant dataset files.
+    """
+
+    if dataset_names is None:
+        raise RuntimeError
+
+    os.makedirs(data_root, exist_ok=True)
+
+    for dataset_name in dataset_names:
+        cameras_file = dataset_name + ".pth"
+        images_file = cameras_file.replace(".pth", ".png")
+        license_file = cameras_file.replace(".pth", "_license.txt")
+
+        for fl in (cameras_file, images_file, license_file):
+            local_fl = os.path.join(data_root, fl)
+            remote_fl = os.path.join(url_root, fl)
+
+            print(f"Downloading dataset {dataset_name} from {remote_fl} to {local_fl}.")
+
+            r = requests.get(remote_fl)
+
+            with open(local_fl, "wb") as f:
+                f.write(r.content)
+```
+
+### GS/model.py
+```
+import math
+import torch
+import numpy as np
+
+from typing import Tuple, Optional
+from pytorch3d.ops.knn import knn_points
+from pytorch3d.renderer.cameras import PerspectiveCameras
+from data_utils import load_gaussians_from_ply, colours_from_spherical_harmonics
+
+class Gaussians:
+
+    def __init__(
+        self, init_type: str, device: str, load_path: Optional[str] = None,
+        num_points: Optional[int] = None, isotropic: Optional[bool] = None
+    ):
+
+        self.device = device
+        if self.device not in ("cpu", "cuda"):
+            raise ValueError(f"Unsupported device: {self.device}")
+
+        if init_type == "gaussians":
+            if isotropic is not None:
+                raise ValueError((
+                    "Isotropy/Anisotropy will be determined from pre-trained gaussians. "
+                    "Please set isotropic to None."
+                ))
+            if load_path is None:
+                raise ValueError
+
+            data, is_isotropic = self._load_gaussians(load_path)
+            self.is_isotropic = is_isotropic
+
+        elif init_type == "points":
+            if isotropic is not None and type(isotropic) is not bool:
+                raise TypeError("isotropic must be either None or True or False.")
+            if load_path is None:
+                raise ValueError
+
+            if isotropic is None:
+                self.is_isotropic = False
+            else:
+                self.is_isotropic = isotropic
+
+            data = self._load_points(load_path)
+
+        elif init_type == "random":
+            if isotropic is not None and type(isotropic) is not bool:
+                raise TypeError("isotropic must be either None or True or False.")
+            if num_points is None:
+                raise ValueError
+
+            if isotropic is None:
+                self.is_isotropic = False
+            else:
+                self.is_isotropic = isotropic
+
+            data = self._load_random(num_points)
+
+        else:
+            raise ValueError(f"Invalid init_type: {init_type}")
+
+        self.pre_act_quats = data["pre_act_quats"]
+        self.means = data["means"]
+        self.pre_act_scales = data["pre_act_scales"]
+        self.colours = data["colours"]
+        self.pre_act_opacities = data["pre_act_opacities"]
+
+        # [Q 7.1] NOTE: Uncomment spherical harmonics code for question 7.1
+        # if data.get("spherical_harmonics") is not None:
+        #     self.spherical_harmonics = data["spherical_harmonics"]
+
+        if self.device == "cuda":
+            self.to_cuda()
+
+    def __len__(self):
+        return len(self.means)
+
+    def _load_gaussians(self, ply_path: str):
+
+        data = dict()
+        ply_gaussians = load_gaussians_from_ply(ply_path)
+
+        data["means"] = torch.tensor(ply_gaussians["xyz"])
+        data["pre_act_quats"] = torch.tensor(ply_gaussians["rot"])
+        data["pre_act_scales"] = torch.tensor(ply_gaussians["scale"])
+        data["pre_act_opacities"] = torch.tensor(ply_gaussians["opacity"]).squeeze()
+        data["colours"] = torch.tensor(ply_gaussians["dc_colours"])
+
+        # [Q 7.1] NOTE: Uncomment spherical harmonics code for question 7.1
+        # data["spherical_harmonics"] = torch.tensor(ply_gaussians["sh"])
+
+        if data["pre_act_scales"].shape[1] != 3:
+            raise NotImplementedError("Currently does not support isotropic")
+
+        is_isotropic = False
+
+        return data, is_isotropic
+
+    def _load_points(self, path: str):
+
+        data = dict()
+        means = np.load(path)
+
+        # Initializing means using the provided point cloud
+        data["means"] = torch.tensor(means.astype(np.float32))  # (N, 3)
+
+        # Initializing opacities such that all when sigmoid is applied to pre_act_opacities,
+        # we will have a opacity value close to (but less than) 1.0
+        data["pre_act_opacities"] = 8.0 * torch.ones((len(means),), dtype=torch.float32)  # (N,)
+
+        # Initializing colors randomly
+        data["colours"] = torch.rand((len(means), 3), dtype=torch.float32)  # (N, 3)
+
+        # Initializing quaternions to be the identity quaternion
+        quats = torch.zeros((len(means), 4), dtype=torch.float32)  # (N, 4)
+        quats[:, 0] = 1.0
+        data["pre_act_quats"] = quats  # (N, 4)
+
+        # Initializing scales using the mean distance of each point to its 50 nearest points
+        dists, _, _ = knn_points(data["means"].unsqueeze(0), data["means"].unsqueeze(0), K=50)
+        data["pre_act_scales"] = torch.log(torch.mean(dists[0], dim=1)).unsqueeze(1)  # (N, 1)
+
+        if not self.is_isotropic:
+            data["pre_act_scales"] = data["pre_act_scales"].repeat(1, 3)  # (N, 3)
+
+        return data
+
+    def _load_random(self, num_points: int):
+
+        data = dict()
+
+        # Initializing means randomly
+        data["means"] = torch.randn((num_points, 3)).to(torch.float32) * 0.2  # (N, 3)
+
+        # Initializing opacities such that all when sigmoid is applied to pre_act_opacities,
+        # we will have a opacity value close to (but less than) 1.0
+        data["pre_act_opacities"] = 8.0 * torch.ones((num_points,), dtype=torch.float32)  # (N,)
+
+        # Initializing colors randomly
+        data["colours"] = torch.rand((num_points, 3), dtype=torch.float32)  # (N, 3)
+
+        # Initializing quaternions to be the identity quaternion
+        quats = torch.zeros((num_points, 4), dtype=torch.float32)  # (N, 4)
+        quats[:, 0] = 1.0
+        data["pre_act_quats"] = quats  # (N, 4)
+
+        # Initializing scales randomly
+        data["pre_act_scales"] = torch.log((torch.rand((num_points, 1), dtype=torch.float32) + 1e-6) * 0.01)
+
+        if not self.is_isotropic:
+            data["pre_act_scales"] = data["pre_act_scales"].repeat(1, 3)  # (N, 3)
+
+        return data
+
+    def _compute_jacobian(self, means_3D: torch.Tensor, camera: PerspectiveCameras, img_size: Tuple):
+
+        if camera.in_ndc():
+            raise RuntimeError
+
+        fx, fy = camera.focal_length.flatten()
+        W, H = img_size
+
+        half_tan_fov_x = 0.5 * W / fx
+        half_tan_fov_y = 0.5 * H / fy
+
+        view_transform = camera.get_world_to_view_transform()
+        means_view_space = view_transform.transform_points(means_3D)
+
+        tx = means_view_space[:, 0]
+        ty = means_view_space[:, 1]
+        tz = means_view_space[:, 2]
+        tz2 = tz*tz
+
+        lim_x = 1.3 * half_tan_fov_x
+        lim_y = 1.3 * half_tan_fov_y
+
+        tx = torch.clamp(tx/tz, -lim_x, lim_x) * tz
+        ty = torch.clamp(ty/tz, -lim_y, lim_y) * tz
+
+        J = torch.zeros((len(tx), 2, 3))  # (N, 2, 3)
+        J = J.to(self.device)
+
+        J[:, 0, 0] = fx / tz
+        J[:, 1, 1] = fy / tz
+        J[:, 0, 2] = -(fx * tx) / tz2
+        J[:, 1, 2] = -(fy * ty) / tz2
+
+        return J  # (N, 2, 3)
+
+    def check_if_trainable(self):
+
+        attrs = ["means", "pre_act_scales", "colours", "pre_act_opacities"]
+        if not self.is_isotropic:
+            attrs += ["pre_act_quats"]
+
+        for attr in attrs:
+            param = getattr(self, attr)
+            if not getattr(param, "requires_grad", False):
+                raise Exception("Please use function make_trainable to make parameters trainable")
+
+        if self.is_isotropic and self.pre_act_quats.requires_grad:
+            raise RuntimeError("You do not need to optimize quaternions in isotropic mode.")
+
+    def to_cuda(self):
+
+        self.pre_act_quats = self.pre_act_quats.cuda()
+        self.means = self.means.cuda()
+        self.pre_act_scales = self.pre_act_scales.cuda()
+        self.colours = self.colours.cuda()
+        self.pre_act_opacities = self.pre_act_opacities.cuda()
+
+        # [Q 7.1] NOTE: Uncomment spherical harmonics code for question 7.1
+        # self.spherical_harmonics = self.spherical_harmonics.cuda()
+
+    def compute_cov_3D(self, quats: torch.Tensor, scales: torch.Tensor):
+        """
+        Computes the covariance matrices of 3D Gaussians using equation (6) of the 3D
+        Gaussian Splatting paper.
+
+        Link: https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/3d_gaussian_splatting_low.pdf
+
+        Args:
+            quats   :   A torch.Tensor of shape (N, 4) representing the rotation
+                        components of 3D Gaussians in quaternion form.
+            scales  :   If self.is_isotropic is True, scales is will be a torch.Tensor of shape (N, 1)
+                        If self.is_isotropic is False, scales is will be a torch.Tensor of shape (N, 3).
+                        Represents the scaling components of the 3D Gaussians.
+
+        Returns:
+            cov_3D  :   A torch.Tensor of shape (N, 3, 3)
+        """
+        # NOTE: While technically you can use (almost) the same code for the
+        # isotropic and anisotropic case, can you think of a more efficient
+        # code for the isotropic case?
+
+        # HINT: Are quats ever used or optimized for isotropic gaussians? What will their value be?
+        # Based on your answers, can you write a more efficient code for the isotropic case?
+        if self.is_isotropic:
+
+            ### YOUR CODE HERE ###
+            cov_3D = None  # (N, 3, 3)
+
+        # HINT: You can use a function from pytorch3d to convert quaternions to rotation matrices.
+        else:
+
+            ### YOUR CODE HERE ###
+            cov_3D = None  # (N, 3, 3)
+
+        return cov_3D
+
+    def compute_cov_2D(
+        self, means_3D: torch.Tensor, quats: torch.Tensor, scales: torch.Tensor,
+        camera: PerspectiveCameras, img_size: Tuple
+    ):
+        """
+        Computes the covariance matrices of 2D Gaussians using equation (5) of the 3D
+        Gaussian Splatting paper.
+
+        Link: https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/3d_gaussian_splatting_low.pdf
+
+        Args:
+            quats       :   A torch.Tensor of shape (N, 4) representing the rotation
+                            components of 3D Gaussians in quaternion form.
+            scales      :   If self.is_isotropic is True, scales is will be a torch.Tensor of shape (N, 1)
+                            If self.is_isotropic is False, scales is will be a torch.Tensor of shape (N, 3)
+            camera      :   A pytorch3d PerspectiveCameras object
+            img_size    :   A tuple representing the (width, height) of the image
+
+        Returns:
+            cov_3D  :   A torch.Tensor of shape (N, 3, 3)
+        """
+        ### YOUR CODE HERE ###
+        # HINT: For computing the jacobian J, can you find a function in this file that can help?
+        J = None  # (N, 2, 3)
+
+        ### YOUR CODE HERE ###
+        # HINT: Can you extract the world to camera rotation matrix (W) from one of the inputs
+        # of this function?
+        W = None  # (N, 3, 3)
+
+        ### YOUR CODE HERE ###
+        # HINT: Can you find a function in this file that can help?
+        cov_3D = None  # (N, 3, 3)
+
+        ### YOUR CODE HERE ###
+        # HINT: Use the above three variables to compute cov_2D
+        cov_2D = None  # (N, 2, 2)
+
+        # Post processing to make sure that each 2D Gaussian covers atleast approximately 1 pixel
+        cov_2D[:, 0, 0] += 0.3
+        cov_2D[:, 1, 1] += 0.3
+
+        return cov_2D
+
+    @staticmethod
+    def compute_means_2D(means_3D: torch.Tensor, camera: PerspectiveCameras):
+        """
+        Computes the means of the projected 2D Gaussians given the means of the 3D Gaussians.
+
+        Args:
+            means_3D    :   A torch.Tensor of shape (N, 3) representing the means of
+                            3D Gaussians.
+            camera      :   A pytorch3d PerspectiveCameras object.
+
+        Returns:
+            means_2D    :   A torch.Tensor of shape (N, 2) representing the means of
+                            2D Gaussians.
+        """
+        ### YOUR CODE HERE ###
+        # HINT: Do note that means_2D have units of pixels. Hence, you must apply a
+        # transformation that moves points in the world space to screen space.
+        means_2D = None  # (N, 2)
+        return means_2D
+
+    @staticmethod
+    def invert_cov_2D(cov_2D: torch.Tensor):
+        """
+        Using the formula for inverse of a 2D matrix to invert the cov_2D matrix
+
+        Args:
+            cov_2D          :   A torch.Tensor of shape (N, 2, 2)
+
+        Returns:
+            cov_2D_inverse  :   A torch.Tensor of shape (N, 2, 2)
+        """
+        determinants = cov_2D[:, 0, 0] * cov_2D[:, 1, 1] - cov_2D[:, 1, 0] * cov_2D[:, 0, 1]
+        determinants = determinants[:, None, None]  # (N, 1, 1)
+
+        cov_2D_inverse = torch.zeros_like(cov_2D)  # (N, 2, 2)
+        cov_2D_inverse[:, 0, 0] = cov_2D[:, 1, 1]
+        cov_2D_inverse[:, 1, 1] = cov_2D[:, 0, 0]
+        cov_2D_inverse[:, 0, 1] = -1.0 * cov_2D[:, 0, 1]
+        cov_2D_inverse[:, 1, 0] = -1.0 * cov_2D[:, 1, 0]
+
+        cov_2D_inverse = (1.0 / determinants) * cov_2D_inverse
+
+        return cov_2D_inverse
+
+    @staticmethod
+    def evaluate_gaussian_2D(points_2D: torch.Tensor, means_2D: torch.Tensor, cov_2D_inverse: torch.Tensor):
+        """
+        Computes the exponent (power) of 2D Gaussians.
+
+        Args:
+            points_2D       :   A torch.Tensor of shape (1, H*W, 2) containing the x, y points
+                                corresponding to every pixel in an image. See function
+                                compute_alphas in the class Scene to get more information
+                                about how points_2D is created.
+            means_2D        :   A torch.Tensor of shape (N, 1, 2) representing the means of
+                                N 2D Gaussians.
+            cov_2D_inverse  :   A torch.Tensor of shape (N, 2, 2) representing the
+                                inverse of the covariance matrices of N 2D Gaussians.
+
+        Returns:
+            power           :   A torch.Tensor of shape (N, H*W) representing the computed
+                                power of the N 2D Gaussians at every pixel location in an image.
+        """
+        ### YOUR CODE HERE ###
+        # HINT: Refer to README for a relevant equation
+        power = None  # (N, H*W)
+
+        return power
+
+    @staticmethod
+    def apply_activations(pre_act_quats, pre_act_scales, pre_act_opacities):
+
+        # Convert logscales to scales
+        scales = torch.exp(pre_act_scales)
+
+        # Normalize quaternions
+        quats = torch.nn.functional.normalize(pre_act_quats)
+
+        # Bound opacities between (0, 1)
+        opacities = torch.sigmoid(pre_act_opacities)
+
+        return quats, scales, opacities
+
+class Scene:
+
+    def __init__(self, gaussians: Gaussians):
+        self.gaussians = gaussians
+        self.device = self.gaussians.device
+
+    def __repr__(self):
+        return f"<Scene with {len(self.gaussians)} Gaussians>"
+
+    def compute_depth_values(self, camera: PerspectiveCameras):
+        """
+        Computes the depth value of each 3D Gaussian.
+
+        Args:
+            camera  :   A pytorch3d PerspectiveCameras object.
+
+        Returns:
+            z_vals  :   A torch.Tensor of shape (N,) with the depth of each 3D Gaussian.
+        """
+        ### YOUR CODE HERE ###
+        # HINT: You can use get the means of 3D Gaussians self.gaussians and calculate
+        # the depth using the means and the camera
+        z_vals = None  # (N,)
+
+        return z_vals
+
+    def get_idxs_to_filter_and_sort(self, z_vals: torch.Tensor):
+        """
+        Given depth values of Gaussians, return the indices to depth-wise sort
+        Gaussians and at the same time remove invalid Gaussians.
+
+        You can see the function render to see how the returned indices will be used.
+        You are required to create a torch.Tensor idxs such that by using them in the
+        function render we can arrange Gaussians (or equivalently their attributes such as
+        the mean) in ascending order of depth. You should also make sure to not include indices
+        that correspond to Gaussians with depth value less than 0.
+
+        idxs should be torch.Tensor of dtype int64 with length N (N <= M, where M is the
+        total number of Gaussians before filtering)
+
+        Please refer to the README file for more details.
+        """
+        ### YOUR CODE HERE ###
+        idxs = None  # (N,)
+
+        return idxs
+
+    def compute_alphas(self, opacities, means_2D, cov_2D, img_size):
+        """
+        Given some parameters of N ordered Gaussians, this function computes
+        the alpha values.
+
+        Args:
+            opacities   :   A torch.Tensor of shape (N,) with the opacity value
+                            of each Gaussian.
+            means_2D    :   A torch.Tensor of shape (N, 2) with the means
+                            of the 2D Gaussians.
+            cov_2D      :   A torch.Tensor of shape (N, 2, 2) with the covariances
+                            of the 2D Gaussians.
+            img_size    :   The (width, height) of the image to be rendered.
+
+
+        Returns:
+            alphas      :   A torch.Tensor of shape (N, H, W) with the computed alpha
+                            values for each of the N ordered Gaussians at every
+                            pixel location.
+        """
+        W, H = img_size
+
+        # point_2D contains all possible pixel locations in an image
+        xs, ys = torch.meshgrid(torch.arange(W), torch.arange(H), indexing="xy")
+        points_2D = torch.stack((xs.flatten(), ys.flatten()), dim = 1)  # (H*W, 2)
+        points_2D = points_2D.to(self.device)
+
+        points_2D = points_2D.unsqueeze(0)  # (1, H*W, 2)
+        means_2D = means_2D.unsqueeze(1)  # (N, 1, 2)
+
+        ### YOUR CODE HERE ###
+        # HINT: Can you find a function in this file that can help?
+        cov_2D_inverse = None  # (N, 2, 2) TODO: Verify shape
+
+        ### YOUR CODE HERE ###
+        # HINT: Can you find a function in this file that can help?
+        power = None  # (N, H*W)
+
+        # Computing exp(power) with some post processing for numerical stability
+        exp_power = torch.where(power > 0.0, 0.0, torch.exp(power))
+
+        ### YOUR CODE HERE ###
+        # HINT: Refer to README for a relevant equation.
+        alphas = None  # (N, H*W)
+        alphas = torch.reshape(alphas, (-1, H, W))  # (N, H, W)
+
+        # Post processing for numerical stability
+        alphas = torch.minimum(alphas, torch.full_like(alphas, 0.99))
+        alphas = torch.where(alphas < 1/255.0, 0.0, alphas)
+
+        return alphas
+
+    def compute_transmittance(
+        self, alphas: torch.Tensor,
+        start_transmittance: Optional[torch.Tensor] = None
+    ):
+        """
+        Given the alpha values of N ordered Gaussians, this function computes
+        the transmittance.
+
+        The variable start_transmittance contains information about the transmittance
+        at each pixel location BEFORE encountering the first Gaussian in the input.
+        This variable is useful when computing transmittance in mini-batches because
+        we would require information about the transmittance accumulated until the
+        previous mini-batch to begin computing the transmittance for the current mini-batch.
+
+        In case there were no previous mini-batches (or we are splatting in one-shot
+        without using mini-batches), then start_transmittance will be None (since no Gaussians
+        have been encountered so far). In this case, the code will use a starting
+        transmittance value of 1.
+
+        Args:
+            alphas                  :   A torch.Tensor of shape (N, H, W) with the computed alpha
+                                        values for each of the N ordered Gaussians at every
+                                        pixel location.
+            start_transmittance     :   Can be None or a torch.Tensor of shape (1, H, W). Please
+                                        see the docstring for more information.
+
+        Returns:
+            transmittance           :   A torch.Tensor of shape (N, H, W) with the computed transmittance
+                                        values for each of the N ordered Gaussians at every
+                                        pixel location.
+        """
+        _, H, W = alphas.shape
+
+        if start_transmittance is None:
+            S = torch.ones((1, H, W), device=alphas.device, dtype=alphas.dtype)
+        else:
+            S = start_transmittance
+
+        one_minus_alphas = 1.0 - alphas
+        one_minus_alphas = torch.concat((S, one_minus_alphas), dim=0)  # (N+1, H, W)
+
+        ### YOUR CODE HERE ###
+        # HINT: Refer to README for a relevant equation.
+        transmittance = None  # (N, H, W)
+
+        # Post processing for numerical stability
+        transmittance = torch.where(transmittance < 1e-4, 0.0, transmittance)  # (N, H, W)
+
+        return transmittance
+
+    def splat(
+        self, camera: PerspectiveCameras, means_3D: torch.tensor, z_vals: torch.Tensor,
+        quats: torch.Tensor, scales: torch.Tensor, colours: torch.Tensor,
+        opacities: torch.Tensor, img_size: Tuple = (256, 256),
+        start_transmittance: Optional[torch.Tensor] = None,
+    ):
+        """
+        Given N ordered (depth-sorted) 3D Gaussians (or equivalently in our case,
+        the parameters of the 3D Gaussians like means, quats etc.), this function splats
+        them to the image plane to render an RGB image, depth map and a silhouette map.
+
+        Args:
+            camera                  :   A pytorch3d PerspectiveCameras object.
+            means_3D                :   A torch.Tensor of shape (N, 3) with the means
+                                        of the 3D Gaussians.
+            z_vals                  :   A torch.Tensor of shape (N,) with the depths
+                                        of the 3D Gaussians. # TODO: Verify shape
+            quats                   :   A torch.Tensor of shape (N, 4) representing the rotation
+                                        components of 3D Gaussians in quaternion form.
+            scales                  :   A torch.Tensor of shape (N, 1) (if isotropic) or
+                                        (N, 3) (if anisotropic) representing the scaling
+                                        components of 3D Gaussians.
+            colours                 :   A torch.Tensor of shape (N, 3) with the colour contribution
+                                        of each Gaussian.
+            opacities               :   A torch.Tensor of shape (N,) with the opacity of each Gaussian.
+            img_size                :   The (width, height) of the image.
+            start_transmittance     :   Please see the docstring of the function compute_transmittance
+                                        for information about this argument.
+
+        Returns:
+            image                   :   A torch.Tensor of shape (H, W, 3) with the rendered RGB colour image.
+            depth                   :   A torch.Tensor of shape (H, W, 1) with the rendered depth map.
+            mask                    :   A torch.Tensor of shape (H, W, 1) with the rendered silhouette map.
+            final_transmittance     :   A torch.Tensor of shape (1, H, W) representing the transmittance at
+                                        each pixel computed using the N ordered Gaussians. This will be useful
+                                        for mini-batch splatting in the next iteration.
+        """
+        # Step 1: Compute 2D gaussian parameters
+
+        ### YOUR CODE HERE ###
+        # HINT: Can you find a function in this file that can help?
+        means_2D = None  # (N, 2)
+
+        ### YOUR CODE HERE ###
+        # HINT: Can you find a function in this file that can help?
+        cov_2D = None  # (N, 2, 2)
+
+        # Step 2: Compute alpha maps for each gaussian
+
+        ### YOUR CODE HERE ###
+        # HINT: Can you find a function in this file that can help?
+        alphas = None  # (N, H, W)
+
+        # Step 3: Compute transmittance maps for each gaussian
+
+        ### YOUR CODE HERE ###
+        # HINT: Can you find a function in this file that can help?
+        transmittance = None  # (N, H, W)
+
+        # Some unsqueezing to set up broadcasting for vectorized implementation.
+        # You can selectively comment these out if you want to compute things
+        # in a diferent way.
+        z_vals = z_vals[:, None, None, None]  # (N, 1, 1, 1)
+        alphas = alphas[..., None]  # (N, H, W, 1)
+        colours = colours[:, None, None, :]  # (N, 1, 1, 3)
+        transmittance = transmittance[..., None]  # (N, H, W, 1)
+
+        # Step 4: Create image, depth and mask by computing the colours for each pixel.
+
+        ### YOUR CODE HERE ###
+        # HINT: Refer to README for a relevant equation
+        image = None  # (H, W, 3)
+
+        ### YOUR CODE HERE ###
+        # HINT: Can you implement an equation inspired by the equation for colour?
+        depth = None  # (H, W, 1)
+
+        ### YOUR CODE HERE ###
+        # HINT: Can you implement an equation inspired by the equation for colour?
+        mask = None  # (H, W, 1)
+
+        final_transmittance = transmittance[-1, ..., 0].unsqueeze(0)  # (1, H, W)
+        return image, depth, mask, final_transmittance
+
+    def render(
+        self, camera: PerspectiveCameras,
+        per_splat: int = -1, img_size: Tuple = (256, 256),
+        bg_colour: Tuple = (0.0, 0.0, 0.0),
+    ):
+        """
+        Given a scene represented by N 3D Gaussians, this function renders the RGB
+        colour image, the depth map and the silhouette map that can be observed
+        from a given pytorch 3D camera.
+
+        Args:
+            camera      :   A pytorch3d PerspectiveCameras object.
+            per_splat   :   Number of gaussians to splat in one function call. If set to -1,
+                            then all gaussians in the scene are splat in a single function call.
+                            If set to any other positive interger, then it determines the number of
+                            gaussians to splat per function call (the last function call might splat
+                            lesser number of gaussians). In general, the algorithm can run faster
+                            if more gaussians are splat per function call, but at the cost of higher GPU
+                            memory consumption.
+            img_size    :   The (width, height) of the image to be rendered.
+            bg_color    :   A tuple indicating the RGB colour that the background should have.
+
+        Returns:
+            image       :   A torch.Tensor of shape (H, W, 3) with the rendered RGB colour image.
+            depth       :   A torch.Tensor of shape (H, W, 1) with the rendered depth map.
+            mask        :   A torch.Tensor of shape (H, W, 1) with the rendered silhouette map.
+        """
+        bg_colour_ = torch.tensor(bg_colour)[None, None, :]  # (1, 1, 3)
+        bg_colour_ = bg_colour_.to(self.device)
+
+        # Globally sort gaussians according to their depth value
+        z_vals = self.compute_depth_values(camera)
+        idxs = self.get_idxs_to_filter_and_sort(z_vals)
+
+        pre_act_quats = self.gaussians.pre_act_quats[idxs]
+        pre_act_scales = self.gaussians.pre_act_scales[idxs]
+        pre_act_opacities = self.gaussians.pre_act_opacities[idxs]
+        z_vals = z_vals[idxs]
+        means_3D = self.gaussians.means[idxs]
+
+        # For questions 5, 6, and 7.2, use the below line of code for colours.
+        colours = self.gaussians.colours[idxs]
+
+        # [Q 7.1] For question 7.1, uncomment the below three lines to calculate the
+        # colours instead of using self.gaussians.colours[idxs]. You may also comment
+        # out the above line of code since it will be overwritten anyway.
+
+        # spherical_harmonics = self.gaussians.spherical_harmonics[idxs]
+        # gaussian_dirs = self.calculate_gaussian_directions(means_3D, camera)
+        # colours = colours_from_spherical_harmonics(spherical_harmonics, gaussian_dirs)
+
+        # Apply activations
+        quats, scales, opacities = self.gaussians.apply_activations(
+            pre_act_quats, pre_act_scales, pre_act_opacities
+        )
+
+        if per_splat == -1:
+            num_mini_batches = 1
+        elif per_splat > 0:
+            num_mini_batches = math.ceil(len(means_3D) / per_splat)
+        else:
+            raise ValueError("Invalid setting of per_splat")
+
+        # In this case we can directly splat all gaussians onto the image
+        if num_mini_batches == 1:
+
+            # Get image, depth and mask via splatting
+            image, depth, mask, _ = self.splat(
+                camera, means_3D, z_vals, quats, scales,
+                colours, opacities, img_size
+            )
+
+        # In this case we splat per_splat number of gaussians per iteration. This makes
+        # the implementation more memory efficient but at the same time makes it slower.
+        else:
+
+            W, H = img_size
+            D = means_3D.device
+            start_transmittance = torch.ones((1, H, W), dtype=torch.float32).to(D)
+            image = torch.zeros((H, W, 3), dtype=torch.float32).to(D)
+            depth = torch.zeros((H, W, 1), dtype=torch.float32).to(D)
+            mask = torch.zeros((H, W, 1), dtype=torch.float32).to(D)
+
+            for b_idx in range(num_mini_batches):
+
+                quats_ = quats[b_idx * per_splat: (b_idx+1) * per_splat]
+                scales_ = scales[b_idx * per_splat: (b_idx+1) * per_splat]
+                z_vals_ = z_vals[b_idx * per_splat: (b_idx+1) * per_splat]
+                colours_ = colours[b_idx * per_splat: (b_idx+1) * per_splat]
+                means_3D_ = means_3D[b_idx * per_splat: (b_idx+1) * per_splat]
+                opacities_ = opacities[b_idx * per_splat: (b_idx+1) * per_splat]
+
+                # Get image, depth and mask via splatting
+                image_, depth_, mask_, start_transmittance = self.splat(
+                    camera, means_3D_, z_vals_, quats_, scales_, colours_,
+                    opacities_, img_size, start_transmittance
+                )
+
+                image = image + image_
+                depth = depth + depth_
+                mask = mask + mask_
+
+        image = mask * image + (1.0 - mask) * bg_colour_
+
+        return image, depth, mask
+
+    def calculate_gaussian_directions(self, means_3D, camera):
+        """
+        [Q 7.1] Calculates the world frame direction vectors that point from the
+        camera's origin to each 3D Gaussian.
+
+        Args:
+            means_3D        :   A torch.Tensor of shape (N, 3) with the means
+                                of the 3D Gaussians.
+            camera          :   A pytorch3d PerspectiveCameras object.
+
+        Returns:
+            gaussian_dirs   :   A torch.Tensor of shape (N, 3) representing the direction vector
+                                that points from the camera's origin to each 3D Gaussian.
+        """
+        ### YOUR CODE HERE ###
+        # HINT: Think about how to get the camera origin in the world frame.
+        # HINT: Do not forget to normalize the computed directions.
+        gaussian_dirs = None  # (N, 3)
+        return gaussian_dirs
+```
+
+### GS/render.py
+```
+import os
+import torch
+import imageio
+import argparse
+import numpy as np
+
+from PIL import Image
+from tqdm import tqdm
+from model import Gaussians, Scene
+from data_utils import colour_depth_render
+from pytorch3d.renderer.cameras import PerspectiveCameras, look_at_view_transform
+
+def create_renders(args):
+
+    dim = args.img_dim
+    img_size = (dim, dim)
+
+    num_views = 32
+    azims = np.linspace(-180, 180, num_views)
+    elevs = np.linspace(-180, 180, num_views)
+
+    debug_root = os.path.join(args.out_path, "part_5_render")
+    if not os.path.exists(debug_root):
+        os.makedirs(debug_root, exist_ok=True)
+
+    # Loading pre-trained gaussians
+    gaussians = Gaussians(
+        load_path=args.data_path, init_type="gaussians",
+        device=args.device
+    )
+
+    # Preprocessing for ease of rendering
+    new_points = gaussians.means - gaussians.means.mean(dim=0, keepdims=True)
+    gaussians.means = new_points
+
+    # Creating the scene with the loaded gaussians
+    scene = Scene(gaussians)
+
+    imgs = []
+    for i in tqdm(range(num_views), desc="Rendering"):
+
+        dist = 6.0
+        R, T = look_at_view_transform(dist = dist, azim=azims[i], elev=elevs[i], up=((0, -1, 0),))
+        camera = PerspectiveCameras(
+            focal_length=5.0 * dim/2.0, in_ndc=False,
+            principal_point=((dim/2, dim/2),),
+            R=R, T=T, image_size=(img_size,),
+        ).to(args.device)
+
+        with torch.no_grad():
+            # Rendering scene using gaussian splatting
+            ### YOUR CODE HERE ###
+            # HINT: Can any function from the Scene class help?
+            # HINT: Set bg_colour to (1.0, 1.0, 1.0)
+            # HINT: Get per_splat from args.gaussians_per_splat
+            # HINT: img_size and camera are available above
+            img, depth, mask = None
+
+        debug_path = os.path.join(debug_root, f"{i:03d}.png")
+        img = img.detach().cpu().numpy()
+        mask = mask.repeat(1, 1, 3).detach().cpu().numpy()
+        depth = depth.detach().cpu().numpy()
+
+        img = (np.clip(img, 0.0, 1.0) * 255.0).astype(np.uint8)
+        mask = np.where(mask > 0.5, 255.0, 0.0).astype(np.uint8)  # (H, W, 3)
+
+        # Colouring the depth map
+        depth = depth[:, :, 0].astype(np.float32)  # (H, W)
+        coloured_depth = colour_depth_render(depth)  # (H, W, 3)
+
+        concat = np.concatenate([img, coloured_depth, mask], axis = 1)
+        resized = Image.fromarray(concat).resize((256*3, 256))
+        resized.save(debug_path)
+
+        imgs.append(np.array(resized))
+
+    gif_path = os.path.join(args.out_path, "part_5_render.gif")
+    imageio.mimwrite(gif_path, imgs, duration=1000.0*(1/10.0), loop=0)
+
+def get_args():
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--out_path", default="./output", type=str,
+        help="Path to the directory where output should be saved to."
+    )
+    parser.add_argument(
+        "--data_path", default="./data/chair.ply", type=str,
+        help="Path to the pre-trained gaussian data to be rendered."
+    )
+    parser.add_argument(
+        "--img_dim", default=256, type=int,
+        help=(
+            "Spatial dimension of the rendered image. "
+            "The rendered image will have img_dim as its height and width."
+        )
+    )
+    parser.add_argument(
+        "--gaussians_per_splat", default=2048, type=int,
+        help=(
+            "Number of gaussians to splat in one function call. If set to -1, "
+            "then all gaussians in the scene are splat in a single function call. "
+            "If set to any other positive interger, then it determines the number of "
+            "gaussians to splat per function call (the last function call might splat "
+            "lesser number of gaussians). In general, the algorithm can run faster "
+            "if more gaussians are splat per function call, but at the cost of higher GPU "
+            "memory consumption."
+        )
+    )
+    parser.add_argument("--device", default="cuda", type=str, choices=["cuda", "cpu"])
+    args = parser.parse_args()
+    return args
+
+if __name__ == "__main__":
+
+    args = get_args()
+    create_renders(args)
+```
+
+### GS/train.py
+```
+import os
+import torch
+import imageio
+import argparse
+import numpy as np
+
+from PIL import Image
+from tqdm import tqdm
+from model import Scene, Gaussians
+from torch.utils.data import DataLoader
+from data_utils import TruckDataset, visualize_renders
+from skimage.metrics import peak_signal_noise_ratio, structural_similarity
+
+def make_trainable(gaussians):
+
+    ### YOUR CODE HERE ###
+    # HINT: You can access and modify parameters from gaussians
+    pass
+
+def setup_optimizer(gaussians):
+
+    gaussians.check_if_trainable()
+
+    ### YOUR CODE HERE ###
+    # HINT: Modify the learning rates to reasonable values. We have intentionally
+    # set very high learning rates for all parameters.
+    # HINT: Consider reducing the learning rates for parameters that seem to vary too
+    # fast with the default settings.
+    # HINT: Consider setting different learning rates for different sets of parameters.
+    parameters = [
+        {'params': [gaussians.pre_act_opacities], 'lr': 0.05, "name": "opacities"},
+        {'params': [gaussians.pre_act_scales], 'lr': 0.05, "name": "scales"},
+        {'params': [gaussians.colours], 'lr': 0.05, "name": "colours"},
+        {'params': [gaussians.means], 'lr': 0.05, "name": "means"},
+    ]
+    optimizer = torch.optim.Adam(parameters, lr=0.0, eps=1e-15)
+    optimizer = None
+
+    return optimizer
+
+def run_training(args):
+
+    if not os.path.exists(args.out_path):
+        os.makedirs(args.out_path, exist_ok=True)
+
+    # Setting up dataset
+    train_dataset = TruckDataset(root=args.data_path, split="train")
+    test_dataset = TruckDataset(root=args.data_path, split="test")
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=1, shuffle=True, num_workers=0,
+        drop_last=True, collate_fn=TruckDataset.collate_fn
+    )
+    test_loader = DataLoader(
+        test_dataset, batch_size=1, shuffle=False, num_workers=0,
+        drop_last=True, collate_fn=TruckDataset.collate_fn
+    )
+    train_itr = iter(train_loader)
+
+    # Preparing some code for visualization
+    viz_gif_path_1 = os.path.join(args.out_path, "part_6_training_progress.gif")
+    viz_gif_path_2 = os.path.join(args.out_path, "part_6_training_final_renders.gif")
+    viz_idxs = np.linspace(0, len(train_dataset)-1, 5).astype(np.int32)[:4]
+
+    gt_viz_imgs = [(train_dataset[i][0]*255.0).numpy().astype(np.uint8) for i in viz_idxs]
+    gt_viz_imgs = [np.array(Image.fromarray(x).resize((256, 256))) for x in gt_viz_imgs]
+    gt_viz_img = np.concatenate(gt_viz_imgs, axis=1)
+
+    viz_cameras = [train_dataset[i][1].cuda() for i in viz_idxs]
+
+    # Init gaussians and scene. Do note that we are setting isotropic to True
+    gaussians = Gaussians(
+        load_path=train_dataset.points_path, init_type="points",
+        device=args.device, isotropic=True
+    )
+    scene = Scene(gaussians)
+
+    # Making gaussians trainable and setting up optimizer
+    make_trainable(gaussians)
+    optimizer = setup_optimizer(gaussians)
+
+    # Training loop
+    viz_frames = []
+    for itr in range(args.num_itrs):
+
+        # Fetching data
+        try:
+            data = next(train_itr)
+        except StopIteration:
+            train_itr = iter(train_loader)
+            data = next(train_itr)
+
+        gt_img, camera, gt_mask = data
+
+        gt_img = gt_img[0].cuda()
+        camera = camera[0].cuda()
+        if gt_mask is not None:
+            gt_mask = gt_mask[0].cuda()
+
+        # Rendering scene using gaussian splatting
+        ### YOUR CODE HERE ###
+        # HINT: Can any function from the Scene class help?
+        # HINT: Set bg_colour to (0.0, 0.0, 0.0)
+        # HINT: Get img_size from train_dataset
+        # HINT: Get per_splat from args.gaussians_per_splat
+        # HINT: camera is available above
+        pred_img = None
+
+        # Compute loss
+        ### YOUR CODE HERE ###
+        # HINT: A simple standard loss function should work.
+        loss = None
+
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        print(f"[*] Itr: {itr:07d} | Loss: {loss:0.3f}")
+
+        if itr % args.viz_freq == 0:
+            viz_frame = visualize_renders(
+                scene, gt_viz_img,
+                viz_cameras, train_dataset.img_size
+            )
+            viz_frames.append(viz_frame)
+
+    print("[*] Training Completed.")
+
+    # Saving training progess GIF
+    imageio.mimwrite(viz_gif_path_1, viz_frames, loop=0, duration=(1/10.0)*1000)
+
+    # Creating renderings of the training views after training is completed.
+    frames = []
+    viz_loader = DataLoader(
+        train_dataset, batch_size=1, shuffle=False, num_workers=0,
+        drop_last=True, collate_fn=TruckDataset.collate_fn
+    )
+    for viz_data in tqdm(viz_loader, desc="Creating Visualization"):
+        gt_img, camera, gt_mask = viz_data
+        gt_img = gt_img[0].cuda()
+        camera = camera[0].cuda()
+        if gt_mask is not None:
+            gt_mask = gt_mask[0].cuda()
+
+        with torch.no_grad():
+
+            # Rendering scene using gaussian splatting
+            ### YOUR CODE HERE ###
+            # HINT: Can any function from the Scene class help?
+            # HINT: Set bg_colour to (0.0, 0.0, 0.0)
+            # HINT: Get img_size from train_dataset
+            # HINT: Get per_splat from args.gaussians_per_splat
+            # HINT: camera is available above
+            pred_img = None
+
+        pred_npy = pred_img.detach().cpu().numpy()
+        pred_npy = (np.clip(pred_npy, 0.0, 1.0) * 255.0).astype(np.uint8)
+        frames.append(pred_npy)
+
+    # Saving renderings
+    imageio.mimwrite(viz_gif_path_2, frames, loop=0, duration=(1/10.0)*1000)
+
+    # Running evaluation using the test dataset
+    psnr_vals, ssim_vals = [], []
+    for test_data in tqdm(test_loader, desc="Running Evaluation"):
+
+        gt_img, camera, gt_mask = test_data
+        gt_img = gt_img[0].cuda()
+        camera = camera[0].cuda()
+        if gt_mask is not None:
+            gt_mask = gt_mask[0].cuda()
+
+        with torch.no_grad():
+
+            # Rendering scene using gaussian splatting
+            ### YOUR CODE HERE ###
+            # HINT: Can any function from the Scene class help?
+            # HINT: Set bg_colour to (0.0, 0.0, 0.0)
+            # HINT: Get img_size from test_dataset
+            # HINT: Get per_splat from args.gaussians_per_splat
+            # HINT: camera is available above
+            pred_img = None
+
+            gt_npy = gt_img.detach().cpu().numpy()
+            pred_npy = pred_img.detach().cpu().numpy()
+            psnr = peak_signal_noise_ratio(gt_npy, pred_npy)
+            ssim = structural_similarity(gt_npy, pred_npy, channel_axis=-1, data_range=1.0)
+
+            psnr_vals.append(psnr)
+            ssim_vals.append(ssim)
+
+    mean_psnr = np.mean(psnr_vals)
+    mean_ssim = np.mean(ssim_vals)
+    print(f"[*] Evaluation --- Mean PSNR: {mean_psnr:.3f}")
+    print(f"[*] Evaluation --- Mean SSIM: {mean_ssim:.3f}")
+
+def get_args():
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--out_path", default="./output", type=str,
+        help="Path to the directory where output should be saved to."
+    )
+    parser.add_argument(
+        "--data_path", default="./data/truck", type=str,
+        help="Path to the dataset."
+    )
+    parser.add_argument(
+        "--gaussians_per_splat", default=-1, type=int,
+        help=(
+            "Number of gaussians to splat in one function call. If set to -1, "
+            "then all gaussians in the scene are splat in a single function call. "
+            "If set to any other positive interger, then it determines the number of "
+            "gaussians to splat per function call (the last function call might splat "
+            "lesser number of gaussians). In general, the algorithm can run faster "
+            "if more gaussians are splat per function call, but at the cost of higher GPU "
+            "memory consumption."
+        )
+    )
+    parser.add_argument(
+        "--num_itrs", default=1000, type=int,
+        help="Number of iterations to train the model."
+    )
+    parser.add_argument(
+        "--viz_freq", default=20, type=int,
+        help="Frequency with which visualization should be performed."
+    )
+    parser.add_argument("--device", default="cuda", type=str, choices=["cuda", "cpu"])
+    args = parser.parse_args()
+    return args
+
+if __name__ == "__main__":
+
+    args = get_args()
+    run_training(args)
+```
+
+### GS/train_harder_scene.py
+```
+import os
+import torch
+import imageio
+import argparse
+import numpy as np
+
+from PIL import Image
+from tqdm import tqdm
+from model import Scene, Gaussians
+from torch.utils.data import DataLoader
+from data_utils import visualize_renders
+from data_utils_harder_scene import get_nerf_datasets, trivial_collate
+
+from pytorch3d.renderer import PerspectiveCameras
+from skimage.metrics import peak_signal_noise_ratio, structural_similarity
+
+def make_trainable(gaussians):
+
+    ### YOUR CODE HERE ###
+    # HINT: You can access and modify parameters from gaussians
+    pass
+
+def setup_optimizer(gaussians):
+
+    gaussians.check_if_trainable()
+
+    ### YOUR CODE HERE ###
+    # HINT: Modify the learning rates to reasonable values. We have intentionally
+    # set very high learning rates for all parameters.
+    # HINT: Consider reducing the learning rates for parameters that seem to vary too
+    # fast with the default settings.
+    # HINT: Consider setting different learning rates for different sets of parameters.
+    parameters = [
+        {'params': [gaussians.pre_act_opacities], 'lr': 0.05, "name": "opacities"},
+        {'params': [gaussians.pre_act_scales], 'lr': 0.05, "name": "scales"},
+        {'params': [gaussians.colours], 'lr': 0.05, "name": "colours"},
+        {'params': [gaussians.means], 'lr': 0.05, "name": "means"},
+    ]
+    optimizer = torch.optim.Adam(parameters, lr=0.0, eps=1e-15)
+    optimizer = None
+
+    return optimizer
+
+def ndc_to_screen_camera(camera, img_size = (128, 128)):
+
+    min_size = min(img_size[0], img_size[1])
+
+    screen_focal = camera.focal_length * min_size / 2.0
+    screen_principal = torch.tensor([[img_size[0]/2, img_size[1]/2]]).to(torch.float32)
+
+    return PerspectiveCameras(
+        R=camera.R, T=camera.T, in_ndc=False,
+        focal_length=screen_focal, principal_point=screen_principal,
+        image_size=(img_size,),
+    )
+
+def run_training(args):
+
+    if not os.path.exists(args.out_path):
+        os.makedirs(args.out_path, exist_ok=True)
+
+    train_dataset, val_dataset, _ = get_nerf_datasets(
+        dataset_name="materials", data_root=args.data_path,
+        image_size=[128, 128],
+    )
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=1, shuffle=True, num_workers=0,
+        drop_last=True, collate_fn=trivial_collate
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=1, shuffle=False, num_workers=0,
+        drop_last=True, collate_fn=trivial_collate
+    )
+    train_itr = iter(train_loader)
+
+    # Preparing some code for visualization
+    viz_gif_path_1 = os.path.join(args.out_path, "part_7_2_training_progress.gif")
+    viz_gif_path_2 = os.path.join(args.out_path, "part_7_2_training_final_renders.gif")
+    viz_idxs = np.linspace(0, len(train_dataset)-1, 5).astype(np.int32)[:4]
+
+    gt_viz_imgs = [(train_dataset[i]["image"]*255.0).numpy().astype(np.uint8) for i in viz_idxs]
+    gt_viz_imgs = [np.array(Image.fromarray(x).resize((256, 256))) for x in gt_viz_imgs]
+    gt_viz_img = np.concatenate(gt_viz_imgs, axis=1)
+
+    viz_cameras = [ndc_to_screen_camera(train_dataset[i]["camera"]).cuda() for i in viz_idxs]
+
+    # Init gaussians and scene
+    gaussians = Gaussians(
+        num_points=10000, init_type="random",
+        device=args.device, isotropic=True
+    )
+    scene = Scene(gaussians)
+
+    # Making gaussians trainable and setting up optimizer
+    make_trainable(gaussians)
+    optimizer = setup_optimizer(gaussians)
+
+    # Training loop
+    viz_frames = []
+    for itr in range(args.num_itrs):
+
+        # Fetching data
+        try:
+            data = next(train_itr)
+        except StopIteration:
+            train_itr = iter(train_loader)
+            data = next(train_itr)
+
+        gt_img = data[0]["image"].cuda()
+        camera = ndc_to_screen_camera(data[0]["camera"]).cuda()
+
+        # Rendering scene using gaussian splatting
+        ### YOUR CODE HERE ###
+        # HINT: Can any function from the Scene class help?
+        # HINT: Set bg_colour to (0.0, 0.0, 0.0)
+        # HINT: Set img_size to (128, 128)
+        # HINT: Get per_splat from args.gaussians_per_splat
+        # HINT: camera is available above
+        pred_img = None
+
+        # Compute loss
+        ### YOUR CODE HERE ###
+        loss = None
+
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        print(f"[*] Itr: {itr:07d} | Loss: {loss:0.3f}")
+
+        if itr % args.viz_freq == 0:
+            viz_frame = visualize_renders(
+                scene, gt_viz_img,
+                viz_cameras, (128, 128)
+            )
+            viz_frames.append(viz_frame)
+
+    print("[*] Training Completed.")
+
+    # Saving training progess GIF
+    imageio.mimwrite(viz_gif_path_1, viz_frames, loop=0, duration=(1/10.0)*1000)
+
+    # Creating renderings of the training views after training is completed.
+    frames = []
+    viz_loader = DataLoader(
+        train_dataset, batch_size=1, shuffle=False, num_workers=0,
+        drop_last=True, collate_fn=trivial_collate
+    )
+    for viz_data in tqdm(viz_loader, desc="Creating Visualization"):
+        gt_img = viz_data[0]["image"].cuda()
+        camera = ndc_to_screen_camera(viz_data[0]["camera"]).cuda()
+
+        with torch.no_grad():
+
+            # Rendering scene using gaussian splatting
+            ### YOUR CODE HERE ###
+            # HINT: Can any function from the Scene class help?
+            # HINT: Set bg_colour to (0.0, 0.0, 0.0)
+            # HINT: Set img_size to (128, 128)
+            # HINT: Get per_splat from args.gaussians_per_splat
+            # HINT: camera is available above
+            pred_img = None
+
+        pred_npy = pred_img.detach().cpu().numpy()
+        pred_npy = (np.clip(pred_npy, 0.0, 1.0) * 255.0).astype(np.uint8)
+        frames.append(pred_npy)
+
+    # Saving renderings
+    imageio.mimwrite(viz_gif_path_2, frames, loop=0, duration=(1/10.0)*1000)
+
+    # Running evaluation using the test dataset
+    psnr_vals, ssim_vals = [], []
+    for val_data in tqdm(val_loader, desc="Running Evaluation"):
+
+        gt_img = val_data[0]["image"].cuda()
+        camera = ndc_to_screen_camera(val_data[0]["camera"]).cuda()
+
+        with torch.no_grad():
+
+            # Rendering scene using gaussian splatting
+            # Rendering scene using gaussian splatting
+            ### YOUR CODE HERE ###
+            # HINT: Can any function from the Scene class help?
+            # HINT: Set bg_colour to (0.0, 0.0, 0.0)
+            # HINT: Set img_size to (128, 128)
+            # HINT: Get per_splat from args.gaussians_per_splat
+            # HINT: camera is available above
+            pred_img = None
+
+            gt_npy = gt_img.detach().cpu().numpy()
+            pred_npy = pred_img.detach().cpu().numpy()
+            psnr = peak_signal_noise_ratio(gt_npy, pred_npy)
+            ssim = structural_similarity(gt_npy, pred_npy, channel_axis=-1, data_range=1.0)
+
+            psnr_vals.append(psnr)
+            ssim_vals.append(ssim)
+
+    mean_psnr = np.mean(psnr_vals)
+    mean_ssim = np.mean(ssim_vals)
+    print(f"[*] Evaluation --- Mean PSNR: {mean_psnr:.3f}")
+    print(f"[*] Evaluation --- Mean SSIM: {mean_ssim:.3f}")
+
+def get_args():
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--out_path", default="./output", type=str,
+        help="Path to the directory where output should be saved to."
+    )
+    parser.add_argument(
+        "--data_path", default="./data/materials", type=str,
+        help="Path to the dataset."
+    )
+    parser.add_argument(
+        "--gaussians_per_splat", default=-1, type=int,
+        help=(
+            "Number of gaussians to splat in one function call. If set to -1, "
+            "then all gaussians in the scene are splat in a single function call. "
+            "If set to any other positive interger, then it determines the number of "
+            "gaussians to splat per function call (the last function call might splat "
+            "lesser number of gaussians). In general, the algorithm can run faster "
+            "if more gaussians are splat per function call, but at the cost of higher GPU "
+            "memory consumption."
+        )
+    )
+    parser.add_argument(
+        "--num_itrs", default=1000, type=int,
+        help="Number of iterations to train the model."
+    )
+    parser.add_argument(
+        "--viz_freq", default=20, type=int,
+        help="Frequency with which visualization should be performed."
+    )
+    parser.add_argument("--device", default="cuda", type=str, choices=["cuda", "cpu"])
+    args = parser.parse_args()
+    return args
+
+if __name__ == "__main__":
+
+    args = get_args()
+    run_training(args)
+```
+
+### GS/unit_test_gaussians.py
+```
+import os
+import torch
+import imageio
+import argparse
+import numpy as np
+
+from PIL import Image
+from tqdm import tqdm
+from model import Scene, Gaussians
+
+from pytorch3d.renderer.cameras import PerspectiveCameras, look_at_view_transform
+
+def run_test_1():
+    """
+    Tests cov_3D computation for isotropic Gaussians
+    """
+    gaussians = Gaussians(
+        num_points=10000, init_type="random",
+        device="cpu", isotropic=True
+    )
+
+    scales = torch.tensor([
+        [ 1.0057],
+        [ 0.5317],
+        [ 1.2069],
+        [ 2.0091],
+        [-1.0004]
+    ]).to(torch.float32)
+
+    quats = torch.tensor([
+        [ 0.3243, -0.3977,  0.7983, -0.3153],
+        [ 0.5657,  0.2395, -0.5910,  0.5228],
+        [ 0.2598, -0.7521, -0.3487,  0.4951],
+        [ 0.3730,  0.7351, -0.5261,  0.2089],
+        [ 0.4079,  0.4792,  0.0567,  0.7751]
+    ]).to(torch.float32)
+
+    gt_answer = torch.tensor([
+        [[1.0114, 0.0000, 0.0000],
+         [0.0000, 1.0114, 0.0000],
+         [0.0000, 0.0000, 1.0114]],
+
+        [[0.2827, 0.0000, 0.0000],
+         [0.0000, 0.2827, 0.0000],
+         [0.0000, 0.0000, 0.2827]],
+
+        [[1.4566, 0.0000, 0.0000],
+         [0.0000, 1.4566, 0.0000],
+         [0.0000, 0.0000, 1.4566]],
+
+        [[4.0365, 0.0000, 0.0000],
+         [0.0000, 4.0365, 0.0000],
+         [0.0000, 0.0000, 4.0365]],
+
+        [[1.0008, 0.0000, 0.0000],
+         [0.0000, 1.0008, 0.0000],
+         [0.0000, 0.0000, 1.0008]]
+    ]).to(torch.float32)
+
+    your_answer = gaussians.compute_cov_3D(quats, scales)
+
+    return torch.all(torch.isclose(your_answer, gt_answer, rtol=0.0, atol=1e-3))
+
+def run_test_2():
+    """
+    Tests cov_2D computation for anisotropic Gaussians
+    """
+    gaussians = Gaussians(
+        num_points=10000, init_type="random",
+        device="cpu", isotropic=False
+    )
+
+    means_3D = torch.tensor([
+        [ 0.4123, -0.0350,  1.0627],
+        [ 0.1975, -0.5187, -0.0357],
+        [ 0.2168, -1.2460,  0.7319],
+        [ 0.4533,  0.5670, -0.3811],
+        [-1.1483, -2.0718, -0.7977]
+    ]).to(torch.float32)
+
+    scales = torch.tensor([
+        [ 0.1642,  2.4228, -0.0908],
+        [ 0.9635,  1.1696,  0.3278],
+        [-0.6131,  1.0911, -0.9228],
+        [-0.1720, -0.5747, -0.6813],
+        [ 0.1222,  1.7187, -1.5246]
+    ]).to(torch.float32)
+
+    quats = torch.tensor([
+        [ 0.3243, -0.3977,  0.7983, -0.3153],
+        [ 0.5657,  0.2395, -0.5910,  0.5228],
+        [ 0.2598, -0.7521, -0.3487,  0.4951],
+        [ 0.3730,  0.7351, -0.5261,  0.2089],
+        [ 0.4079,  0.4792,  0.0567,  0.7751]
+    ]).to(torch.float32)
+
+    dist = 6.0
+    dim = 128
+    img_size = (dim, dim)
+    R, T = look_at_view_transform(dist = dist, azim=75.0, elev=45.0)
+    camera = PerspectiveCameras(
+        focal_length=5.0 * dim/2.0, in_ndc=False,
+        principal_point=((dim/2, dim/2),),
+        R=R, T=T, image_size=(img_size,),
+    ).to("cpu")
+
+    gt_answer = torch.tensor([
+        [[ 2618.8611,  5941.3306],
+         [ 5941.3301, 14066.5830]],
+
+        [[ 1762.7010,  1096.4006],
+         [ 1096.4005,  1337.9269]],
+
+        [[ 2478.8181,   339.9595],
+         [  339.9595,   992.3395]],
+
+        [[ 1645.8475,  -170.6580],
+         [ -170.6579,   233.4286]],
+
+        [[  623.9609,  -285.9298],
+         [ -285.9297,  4030.9944]]
+    ]).to(torch.float32)
+
+    your_answer = gaussians.compute_cov_2D(means_3D, quats, scales, camera, img_size)
+
+    return torch.all(torch.isclose(your_answer, gt_answer, rtol=1e-4, atol=1e-8))
+
+def run_test_3():
+    """
+    Tests means_2D computation for isotropic Gaussians
+    """
+    gaussians = Gaussians(
+        num_points=10000, init_type="random",
+        device="cpu", isotropic=True
+    )
+
+    means_3D = torch.tensor([
+        [ 1.0226,  1.3136, -1.1826],
+        [-0.7536, -0.5747, -0.5632],
+        [-0.4628, -0.9475,  0.4862],
+        [-0.2915,  3.0803,  0.1183],
+        [-0.9359,  1.7944, -0.5683]
+    ]).to(torch.float32)
+
+    dist = 6.0
+    dim = 128
+    img_size = (dim, dim)
+    R, T = look_at_view_transform(dist = dist, azim=75.0, elev=45.0)
+    camera = PerspectiveCameras(
+        focal_length=5.0 * dim/2.0, in_ndc=False,
+        principal_point=((dim/2, dim/2),),
+        R=R, T=T, image_size=(img_size,),
+    ).to("cpu")
+
+    gt_answer = torch.tensor([
+        [ 162.1082,   32.8420],
+        [  79.8977,   54.3685],
+        [  36.6533,   84.5473],
+        [  48.8203, -124.4747],
+        [  81.9282,  -53.6132]
+    ]).to(torch.float32)
+
+    your_answer = gaussians.compute_means_2D(means_3D, camera)
+
+    return torch.all(torch.isclose(your_answer, gt_answer, rtol=1e-4, atol=1e-8))
+
+def run_test_4():
+    """
+    Tests evaluate_gaussian_2D computation for anisotropic Gaussians
+    """
+    gaussians = Gaussians(
+        num_points=10000, init_type="random",
+        device="cpu", isotropic=False
+    )
+
+    means_3D = torch.tensor([
+        [ 0.4123, -0.0350,  1.0627],
+        [ 0.1975, -0.5187, -0.0357],
+        [ 0.2168, -1.2460,  0.7319],
+        [ 0.4533,  0.5670, -0.3811],
+        [-1.1483, -2.0718, -0.7977]
+    ]).to(torch.float32)
+
+    scales = torch.tensor([
+        [ 0.1642,  2.4228, -0.0908],
+        [ 0.9635,  1.1696,  0.3278],
+        [-0.6131,  1.0911, -0.9228],
+        [-0.1720, -0.5747, -0.6813],
+        [ 0.1222,  1.7187, -1.5246]
+    ]).to(torch.float32)
+
+    quats = torch.tensor([
+        [ 0.3243, -0.3977,  0.7983, -0.3153],
+        [ 0.5657,  0.2395, -0.5910,  0.5228],
+        [ 0.2598, -0.7521, -0.3487,  0.4951],
+        [ 0.3730,  0.7351, -0.5261,  0.2089],
+        [ 0.4079,  0.4792,  0.0567,  0.7751]
+    ]).to(torch.float32)
+
+    dist = 6.0
+    dim = 128
+    img_size = (dim, dim)
+    R, T = look_at_view_transform(dist = dist, azim=75.0, elev=45.0)
+    camera = PerspectiveCameras(
+        focal_length=5.0 * dim/2.0, in_ndc=False,
+        principal_point=((dim/2, dim/2),),
+        R=R, T=T, image_size=(img_size,),
+    ).to("cpu")
+
+    gt_answer = torch.tensor([
+        [ -3.9607,  -4.2238,  -4.4959],
+        [ -3.0004,  -3.0066,  -3.0140],
+        [ -7.3205,  -7.3244,  -7.3288],
+        [-12.1272, -12.0402, -11.9539],
+        [ -7.3011,  -7.1561,  -7.0127]
+    ]).to(torch.float32)
+
+    cov_2D = gaussians.compute_cov_2D(means_3D, quats, scales, camera, img_size)
+    means_2D = gaussians.compute_means_2D(means_3D, camera)
+
+    W, H = img_size
+    xs, ys = torch.meshgrid(torch.arange(W), torch.arange(H), indexing="xy")
+    points_2D = torch.stack((xs.flatten(), ys.flatten()), dim = 1)  # (H*W, 2)
+    points_2D = points_2D[:3].to("cpu")
+
+    points_2D = points_2D.unsqueeze(0)
+    means_2D = means_2D.unsqueeze(1)
+
+    cov_2D_inverse = Gaussians.invert_cov_2D(cov_2D)
+    your_answer = Gaussians.evaluate_gaussian_2D(points_2D, means_2D, cov_2D_inverse)
+
+    return torch.all(torch.isclose(your_answer, gt_answer, rtol=1e-4, atol=1e-8))
+
+def run_tests():
+
+    counter = 0
+    total = 4
+
+    if run_test_1():
+        counter += 1
+    else:
+        print("Test 1 Fail!")
+
+    if run_test_2():
+        counter += 1
+    else:
+        print("Test 2 Fail!")
+
+    if run_test_3():
+        counter += 1
+    else:
+        print("Test 3 Fail!")
+
+    if run_test_4():
+        counter += 1
+    else:
+        print("Test 4 Fail!")
+
+    print(f"[{counter}/{total}] Tests Passed")
+
+if __name__ == "__main__":
+
+    run_tests()
+```
+
+### nerf/__init__.py
+```
+# Copyright (c) Facebook, Inc. and its affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+```
+
+### nerf/data_utils.py
+```
+from pytorch3d.renderer import (
+    PerspectiveCameras,
+    look_at_view_transform
+)
+
+import numpy as np
+import torch
+
+
+# Basic data loading
+def dataset_from_config(
+    cfg,
+    ):
+    dataset = []
+
+    for cam_idx, cam_key in enumerate(cfg.cameras.keys()):
+        cam_cfg = cfg.cameras[cam_key]
+
+        # Create camera parameters
+        R, T = look_at_view_transform(
+            eye=(cam_cfg.eye,),
+            at=(cam_cfg.scene_center,),
+            up=(cam_cfg.up,),
+        )
+        focal = torch.tensor([cam_cfg.focal])[None]
+        principal_point = torch.tensor(cam_cfg.principal_point)[None]
+
+        # Assemble the dataset
+        image = None
+        if 'image' in cam_cfg and cam_cfg.image is not None:
+            image = torch.tensor(np.load(cam_cfg.image))[None]
+
+        dataset.append(
+            {
+                "image": image,
+                "camera": PerspectiveCameras(
+                    focal_length=focal,
+                    principal_point=principal_point,
+                    R=R,
+                    T=T,
+                ),
+                "camera_idx": cam_idx,
+            }
+        )
+
+    return dataset
+
+
+# Spiral cameras looking at the origin
+def create_surround_cameras(radius, n_poses=20, up=(0.0, 1.0, 0.0), focal_length=1.0):
+    cameras = []
+
+    for theta in np.linspace(0, 2 * np.pi, n_poses + 1)[:-1]:
+
+        if np.abs(up[1]) > 0:
+            eye = [np.cos(theta + np.pi / 2) * radius, 0, -np.sin(theta + np.pi / 2) * radius]
+        else:
+            eye = [np.cos(theta + np.pi / 2) * radius, np.sin(theta + np.pi / 2) * radius, 2.0]
+
+        R, T = look_at_view_transform(
+            eye=(eye,),
+            at=([0.0, 0.0, 0.0],),
+            up=(up,),
+        )
+
+        cameras.append(
+            PerspectiveCameras(
+                focal_length=torch.tensor([focal_length])[None],
+                principal_point=torch.tensor([0.0, 0.0])[None],
+                R=R,
+                T=T,
+            )
+        )
+    
+    return cameras
+
+
+def vis_grid(xy_grid, image_size):
+    xy_vis = (xy_grid + 1) / 2.001
+    xy_vis = torch.cat([xy_vis, torch.zeros_like(xy_vis[..., :1])], -1)
+    xy_vis = xy_vis.view(image_size[1], image_size[0], 3)
+    xy_vis = np.array(xy_vis.detach().cpu())
+
+    return xy_vis
+
+
+def vis_rays(ray_bundle, image_size):
+    rays = torch.abs(ray_bundle.directions)
+    rays = rays.view(image_size[1], image_size[0], 3)
+    rays = np.array(rays.detach().cpu())
+
+    return rays
+```
+
+### nerf/dataset.py
+```
+# Copyright (c) Facebook, Inc. and its affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+import os
+from typing import List, Optional, Tuple
+
+import numpy as np
+import requests
+import torch
+from PIL import Image
+from pytorch3d.renderer import PerspectiveCameras
+from torch.utils.data import Dataset
+
+import matplotlib.pyplot as plt
+
+
+DEFAULT_DATA_ROOT = os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "data"
+)
+
+DEFAULT_URL_ROOT = "https://dl.fbaipublicfiles.com/pytorch3d_nerf_data"
+
+ALL_DATASETS = ("lego", "fern", "pt3logo", "materials")
+
+
+def trivial_collate(batch):
+    """
+    A trivial collate function that merely returns the uncollated batch.
+    """
+    return batch
+
+
+class ListDataset(Dataset):
+    """
+    A simple dataset made of a list of entries.
+    """
+
+    def __init__(self, entries: List) -> None:
+        """
+        Args:
+            entries: The list of dataset entries.
+        """
+        self._entries = entries
+
+    def __len__(
+        self,
+    ) -> int:
+        return len(self._entries)
+
+    def __getitem__(self, index):
+        return self._entries[index]
+
+
+def get_nerf_datasets(
+    dataset_name: str,  # 'lego | fern'
+    image_size: Tuple[int, int],
+    data_root: str = DEFAULT_DATA_ROOT,
+    autodownload: bool = True,
+) -> Tuple[Dataset, Dataset, Dataset]:
+    """
+    Obtains the training and validation dataset object for a dataset specified
+    with the `dataset_name` argument.
+
+    Args:
+        dataset_name: The name of the dataset to load.
+        image_size: A tuple (height, width) denoting the sizes of the loaded dataset images.
+        data_root: The root folder at which the data is stored.
+        autodownload: Auto-download the dataset files in case they are missing.
+
+    Returns:
+        train_dataset: The training dataset object.
+        val_dataset: The validation dataset object.
+        test_dataset: The testing dataset object.
+    """
+
+    if dataset_name not in ALL_DATASETS:
+        raise ValueError(f"'{dataset_name}'' does not refer to a known dataset.")
+
+    print(f"Loading dataset {dataset_name}, image size={str(image_size)} ...")
+
+    cameras_path = os.path.join(data_root, dataset_name + ".pth")
+    image_path = cameras_path.replace(".pth", ".png")
+
+    if autodownload and any(not os.path.isfile(p) for p in (cameras_path, image_path)):
+        # Automatically download the data files if missing.
+        download_data((dataset_name,), data_root=data_root)
+
+    train_data = torch.load(cameras_path)
+    n_cameras = train_data["cameras"]["R"].shape[0]
+
+    _image_max_image_pixels = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = None  # The dataset image is very large ...
+    images = torch.FloatTensor(np.array(Image.open(image_path))) / 255.0
+    images = torch.stack(torch.chunk(images, n_cameras, dim=0))[..., :3]
+    Image.MAX_IMAGE_PIXELS = _image_max_image_pixels
+
+    scale_factors = [s_new / s for s, s_new in zip(images.shape[1:3], image_size)]
+
+    if abs(scale_factors[0] - scale_factors[1]) > 1e-3:
+        raise ValueError(
+            "Non-isotropic scaling is not allowed. Consider changing the 'image_size' argument."
+        )
+    scale_factor = sum(scale_factors) * 0.5
+
+    if scale_factor != 1.0:
+        print(f"Rescaling dataset (factor={scale_factor})")
+        images = torch.nn.functional.interpolate(
+            images.permute(0, 3, 1, 2),
+            size=tuple(image_size),
+            mode="bilinear",
+        ).permute(0, 2, 3, 1)
+
+    cameras = [
+        PerspectiveCameras(
+            **{k: v[cami][None] for k, v in train_data["cameras"].items()}
+        ).to("cpu")
+        for cami in range(n_cameras)
+    ]
+
+    train_idx, val_idx, test_idx = train_data["split"]
+
+    train_dataset, val_dataset, test_dataset = [
+        ListDataset(
+            [
+                {"image": images[i], "camera": cameras[i], "camera_idx": int(i)}
+                for i in idx
+            ]
+        )
+        for idx in [train_idx, val_idx, test_idx]
+    ]
+
+    return train_dataset, val_dataset, test_dataset
+
+
+def download_data(
+    dataset_names: Optional[List[str]] = None,
+    data_root: str = DEFAULT_DATA_ROOT,
+    url_root: str = DEFAULT_URL_ROOT,
+) -> None:
+    """
+    Downloads the relevant dataset files.
+
+    Args:
+        dataset_names: A list of the names of datasets to download. If `None`,
+            downloads all available datasets.
+    """
+
+    if dataset_names is None:
+        dataset_names = ALL_DATASETS
+
+    os.makedirs(data_root, exist_ok=True)
+
+    for dataset_name in dataset_names:
+        cameras_file = dataset_name + ".pth"
+        images_file = cameras_file.replace(".pth", ".png")
+        license_file = cameras_file.replace(".pth", "_license.txt")
+
+        for fl in (cameras_file, images_file, license_file):
+            local_fl = os.path.join(data_root, fl)
+            remote_fl = os.path.join(url_root, fl)
+
+            print(f"Downloading dataset {dataset_name} from {remote_fl} to {local_fl}.")
+
+            r = requests.get(remote_fl)
+
+            with open(local_fl, "wb") as f:
+                f.write(r.content)
+```
+
+### nerf/implicit.py
+```
+import torch
+import torch.nn.functional as F
+from torch import autograd
+
+from ray_utils import RayBundle
+
+
+# Sphere SDF class
+class SphereSDF(torch.nn.Module):
+    def __init__(
+        self,
+        cfg
+    ):
+        super().__init__()
+
+        self.radius = torch.nn.Parameter(
+            torch.tensor(cfg.radius.val).float(), requires_grad=cfg.radius.opt
+        )
+        self.center = torch.nn.Parameter(
+            torch.tensor(cfg.center.val).float().unsqueeze(0), requires_grad=cfg.center.opt
+        )
+
+    def forward(self, points):
+        points = points.view(-1, 3)
+
+        return torch.linalg.norm(
+            points - self.center,
+            dim=-1,
+            keepdim=True
+        ) - self.radius
+
+
+# Box SDF class
+class BoxSDF(torch.nn.Module):
+    def __init__(
+        self,
+        cfg
+    ):
+        super().__init__()
+
+        self.center = torch.nn.Parameter(
+            torch.tensor(cfg.center.val).float().unsqueeze(0), requires_grad=cfg.center.opt
+        )
+        self.side_lengths = torch.nn.Parameter(
+            torch.tensor(cfg.side_lengths.val).float().unsqueeze(0), requires_grad=cfg.side_lengths.opt
+        )
+
+    def forward(self, points):
+        points = points.view(-1, 3)
+        diff = torch.abs(points - self.center) - self.side_lengths / 2.0
+
+        signed_distance = torch.linalg.norm(
+            torch.maximum(diff, torch.zeros_like(diff)),
+            dim=-1
+        ) + torch.minimum(torch.max(diff, dim=-1)[0], torch.zeros_like(diff[..., 0]))
+
+        return signed_distance.unsqueeze(-1)
+
+# Torus SDF class
+class TorusSDF(torch.nn.Module):
+    def __init__(
+        self,
+        cfg
+    ):
+        super().__init__()
+
+        self.center = torch.nn.Parameter(
+            torch.tensor(cfg.center.val).float().unsqueeze(0), requires_grad=cfg.center.opt
+        )
+        self.radii = torch.nn.Parameter(
+            torch.tensor(cfg.radii.val).float().unsqueeze(0), requires_grad=cfg.radii.opt
+        )
+
+    def forward(self, points):
+        points = points.view(-1, 3)
+        diff = points - self.center
+        q = torch.stack(
+            [
+                torch.linalg.norm(diff[..., :2], dim=-1) - self.radii[..., 0],
+                diff[..., -1],
+            ],
+            dim=-1
+        )
+        return (torch.linalg.norm(q, dim=-1) - self.radii[..., 1]).unsqueeze(-1)
+
+sdf_dict = {
+    'sphere': SphereSDF,
+    'box': BoxSDF,
+    'torus': TorusSDF,
+}
+
+
+# Converts SDF into density/feature volume
+class SDFVolume(torch.nn.Module):
+    def __init__(
+        self,
+        cfg
+    ):
+        super().__init__()
+
+        self.sdf = sdf_dict[cfg.sdf.type](
+            cfg.sdf
+        )
+
+        self.rainbow = cfg.feature.rainbow if 'rainbow' in cfg.feature else False
+        self.feature = torch.nn.Parameter(
+            torch.ones_like(torch.tensor(cfg.feature.val).float().unsqueeze(0)), requires_grad=cfg.feature.opt
+        )
+
+        self.alpha = torch.nn.Parameter(
+            torch.tensor(cfg.alpha.val).float(), requires_grad=cfg.alpha.opt
+        )
+        self.beta = torch.nn.Parameter(
+            torch.tensor(cfg.beta.val).float(), requires_grad=cfg.beta.opt
+        )
+
+    def _sdf_to_density(self, signed_distance):
+        # Convert signed distance to density with alpha, beta parameters
+        return torch.where(
+            signed_distance > 0,
+            0.5 * torch.exp(-signed_distance / self.beta),
+            1 - 0.5 * torch.exp(signed_distance / self.beta),
+        ) * self.alpha
+
+    def forward(self, ray_bundle):
+        sample_points = ray_bundle.sample_points.view(-1, 3)
+        depth_values = ray_bundle.sample_lengths[..., 0]
+        deltas = torch.cat(
+            (
+                depth_values[..., 1:] - depth_values[..., :-1],
+                1e10 * torch.ones_like(depth_values[..., :1]),
+            ),
+            dim=-1,
+        ).view(-1, 1)
+
+        # Transform SDF to density
+        signed_distance = self.sdf(ray_bundle.sample_points)
+        density = self._sdf_to_density(signed_distance)
+
+        # Outputs
+        if self.rainbow:
+            base_color = torch.clamp(
+                torch.abs(sample_points - self.sdf.center),
+                0.02,
+                0.98
+            )
+        else:
+            base_color = 1.0
+
+        out = {
+            'density': -torch.log(1.0 - density) / deltas,
+            'feature': base_color * self.feature * density.new_ones(sample_points.shape[0], 1)
+        }
+
+        return out
+
+
+class HarmonicEmbedding(torch.nn.Module):
+    def __init__(
+        self,
+        in_channels: int = 3,
+        n_harmonic_functions: int = 6,
+        omega0: float = 1.0,
+        logspace: bool = True,
+        include_input: bool = True,
+    ) -> None:
+        super().__init__()
+
+        if logspace:
+            frequencies = 2.0 ** torch.arange(
+                n_harmonic_functions,
+                dtype=torch.float32,
+            )
+        else:
+            frequencies = torch.linspace(
+                1.0,
+                2.0 ** (n_harmonic_functions - 1),
+                n_harmonic_functions,
+                dtype=torch.float32,
+            )
+
+        self.register_buffer("_frequencies", omega0 * frequencies, persistent=False)
+        self.include_input = include_input
+        self.output_dim = n_harmonic_functions * 2 * in_channels
+
+        if self.include_input:
+            self.output_dim += in_channels
+
+    def forward(self, x: torch.Tensor):
+        embed = (x[..., None] * self._frequencies).view(*x.shape[:-1], -1)
+
+        if self.include_input:
+            return torch.cat((embed.sin(), embed.cos(), x), dim=-1)
+        else:
+            return torch.cat((embed.sin(), embed.cos()), dim=-1)
+
+
+class LinearWithRepeat(torch.nn.Linear):
+    def forward(self, input):
+        n1 = input[0].shape[-1]
+        output1 = F.linear(input[0], self.weight[:, :n1], self.bias)
+        output2 = F.linear(input[1], self.weight[:, n1:], None)
+        return output1 + output2.unsqueeze(-2)
+
+
+class MLPWithInputSkips(torch.nn.Module):
+    def __init__(
+        self,
+        n_layers: int,
+        input_dim: int,
+        output_dim: int,
+        skip_dim: int,
+        hidden_dim: int,
+        input_skips,
+    ):
+        super().__init__()
+
+        layers = []
+
+        for layeri in range(n_layers - 1):
+            if layeri == 0:
+                dimin = input_dim
+                dimout = hidden_dim
+            elif layeri in input_skips:
+                dimin = hidden_dim + skip_dim
+                dimout = hidden_dim
+            else:
+                dimin = hidden_dim
+                dimout = hidden_dim
+
+            linear = torch.nn.Linear(dimin, dimout)
+            layers.append(torch.nn.Sequential(linear, torch.nn.ReLU(True)))
+            
+        layers.append(torch.nn.Linear(hidden_dim, output_dim))
+
+        self.mlp = torch.nn.ModuleList(layers)
+        self._input_skips = set(input_skips)
+
+    def forward(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        y = x
+
+        for li, layer in enumerate(self.mlp):
+            if li in self._input_skips:
+                y = torch.cat((y, z), dim=-1)
+
+            y = layer(y)
+
+        return y
+
+
+# TODO (Q3.1): Implement NeRF MLP
+class NeuralRadianceField(torch.nn.Module):
+    def __init__(
+        self,
+        cfg,
+    ):
+        super().__init__()
+
+        self.harmonic_embedding_xyz = HarmonicEmbedding(3, cfg.n_harmonic_functions_xyz)
+        self.harmonic_embedding_dir = HarmonicEmbedding(3, cfg.n_harmonic_functions_dir)
+
+        embedding_dim_xyz = self.harmonic_embedding_xyz.output_dim
+        embedding_dim_dir = self.harmonic_embedding_dir.output_dim
+
+        pass
+
+
+class NeuralSurface(torch.nn.Module):
+    def __init__(
+        self,
+        cfg,
+    ):
+        super().__init__()
+        # TODO (Q4.3): Implement Neural Surface MLP to output per-point SDF
+        # TODO (Q4.3): Implement Neural Surface MLP to output per-point color
+
+    def get_distance(
+        self,
+        points
+    ):
+        '''
+        TODO: Q4.3
+        Output:
+            distance: N X 1 Tensor, where N is number of input points
+        '''
+        points = points.view(-1, 3)
+        pass
+    
+    def get_color(
+        self,
+        points
+    ):
+        '''
+        TODO: Q4.3
+        Output:
+            distance: N X 3 Tensor, where N is number of input points
+        '''
+        points = points.view(-1, 3)
+        pass
+    
+    def get_distance_color(
+        self,
+        points
+    ):
+        '''
+        TODO: Q4.3
+        Output:
+            distance, points: N X 1, N X 3 Tensors, where N is number of input points
+        You may just implement this by independent calls to get_distance, get_color
+            but, depending on your MLP implementation, it maybe more efficient to share some computation
+        '''
+        
+    def forward(self, points):
+        return self.get_distance(points)
+
+    def get_distance_and_gradient(
+        self,
+        points
+    ):
+        has_grad = torch.is_grad_enabled()
+        points = points.view(-1, 3)
+
+        # Calculate gradient with respect to points
+        with torch.enable_grad():
+            points = points.requires_grad_(True)
+            distance = self.get_distance(points)
+            gradient = autograd.grad(
+                distance,
+                points,
+                torch.ones_like(distance, device=points.device),
+                create_graph=has_grad,
+                retain_graph=has_grad,
+                only_inputs=True
+            )[0]
+        
+        return distance, gradient
+
+
+implicit_dict = {
+    'sdf_volume': SDFVolume,
+    'nerf': NeuralRadianceField,
+    'neural_surface': NeuralSurface,
+}
+```
+
+### nerf/losses.py
+```
+import torch
+import torch.nn.functional as F
+
+def eikonal_loss(gradients):
+    # TODO (Q4.3): Implement eikonal loss
+    pass
+
+def get_eikonal_loss(implicit_fn, batch_size, bounds, device):
+    points = get_random_points(batch_size, bounds, device)
+    _, gradients = implicit_fn.get_distance_and_gradient(points)
+    return eikonal_loss(gradients)
+
+def sphere_loss(signed_distance, points, radius=1.0):
+    return torch.square(signed_distance[..., 0] - (torch.norm(points, dim=-1) - radius)).mean()
+
+def get_random_points(num_points, bounds, device):
+    min_bound = torch.tensor(bounds[0], device=device).unsqueeze(0)
+    max_bound = torch.tensor(bounds[1], device=device).unsqueeze(0)
+
+    return torch.rand((num_points, 3), device=device) * (max_bound - min_bound) + min_bound
+
+def select_random_points(points, n_points):
+    points_sub = points[torch.randperm(points.shape[0])]
+    return points_sub.reshape(-1, 3)[:n_points]
+```
+
+### nerf/ray_utils.py
+```
+import math
+from typing import List, NamedTuple
+
+import torch
+import torch.nn.functional as F
+from pytorch3d.renderer.cameras import CamerasBase
+
+
+# Convenience class wrapping several ray inputs:
+#   1) Origins -- ray origins
+#   2) Directions -- ray directions
+#   3) Sample points -- sample points along ray direction from ray origin
+#   4) Sample lengths -- distance of sample points from ray origin
+
+class RayBundle(object):
+    def __init__(
+        self,
+        origins,
+        directions,
+        sample_points,
+        sample_lengths,
+    ):
+        self.origins = origins
+        self.directions = directions
+        self.sample_points = sample_points
+        self.sample_lengths = sample_lengths
+
+    def __getitem__(self, idx):
+        return RayBundle(
+            self.origins[idx],
+            self.directions[idx],
+            self.sample_points[idx],
+            self.sample_lengths[idx],
+        )
+
+    @property
+    def shape(self):
+        return self.origins.shape[:-1]
+
+    @property
+    def sample_shape(self):
+        return self.sample_points.shape[:-1]
+
+    def reshape(self, *args):
+        return RayBundle(
+            self.origins.reshape(*args, 3),
+            self.directions.reshape(*args, 3),
+            self.sample_points.reshape(*args, self.sample_points.shape[-2], 3),
+            self.sample_lengths.reshape(*args, self.sample_lengths.shape[-2], 3),
+        )
+
+    def view(self, *args):
+        return RayBundle(
+            self.origins.view(*args, 3),
+            self.directions.view(*args, 3),
+            self.sample_points.view(*args, self.sample_points.shape[-2], 3),
+            self.sample_lengths.view(*args, self.sample_lengths.shape[-2], 3),
+        )
+
+    def _replace(self, **kwargs):
+        for key in kwargs.keys():
+            setattr(self, key, kwargs[key])
+        
+        return self
+
+
+# Sample image colors from pixel values
+def sample_images_at_xy(
+    images: torch.Tensor,
+    xy_grid: torch.Tensor,
+):
+    batch_size = images.shape[0]
+    spatial_size = images.shape[1:-1]
+
+    xy_grid = -xy_grid.view(batch_size, -1, 1, 2)
+
+    images_sampled = torch.nn.functional.grid_sample(
+        images.permute(0, 3, 1, 2),
+        xy_grid,
+        align_corners=True,
+        mode="bilinear",
+    )
+
+    return images_sampled.permute(0, 2, 3, 1).view(-1, images.shape[-1])
+
+
+# Generate pixel coordinates from in NDC space (from [-1, 1])
+def get_pixels_from_image(image_size, camera):
+    W, H = image_size[0], image_size[1]
+
+    # TODO (Q1.3): Generate pixel coordinates from [0, W] in x and [0, H] in y
+    pass
+
+    # TODO (Q1.3): Convert to the range [-1, 1] in both x and y
+    pass
+
+    # Create grid of coordinates
+    xy_grid = torch.stack(
+        tuple( reversed( torch.meshgrid(y, x) ) ),
+        dim=-1,
+    ).view(W * H, 2)
+
+    return -xy_grid
+
+
+# Random subsampling of pixels from an image
+def get_random_pixels_from_image(n_pixels, image_size, camera):
+    xy_grid = get_pixels_from_image(image_size, camera)
+    
+    # TODO (Q2.1): Random subsampling of pixel coordinaters
+    pass
+
+    # Return
+    return xy_grid_sub.reshape(-1, 2)[:n_pixels]
+
+
+# Get rays from pixel values
+def get_rays_from_pixels(xy_grid, image_size, camera):
+    W, H = image_size[0], image_size[1]
+
+    # TODO (Q1.3): Map pixels to points on the image plane at Z=1
+    pass
+
+    ndc_points = torch.cat(
+        [
+            ndc_points,
+            torch.ones_like(ndc_points[..., -1:])
+        ],
+        dim=-1
+    )
+
+    # TODO (Q1.3): Use camera.unproject to get world space points from NDC space points
+    pass
+
+    # TODO (Q1.3): Get ray origins from camera center
+    pass
+
+    # TODO (Q1.3): Get ray directions as image_plane_points - rays_o
+    pass
+
+    # Create and return RayBundle
+    return RayBundle(
+        rays_o,
+        rays_d,
+        torch.zeros_like(rays_o).unsqueeze(1),
+        torch.zeros_like(rays_o).unsqueeze(1),
+    )
+```
+
+### nerf/render_functions.py
+```
+import argparse
+import os
+import sys
+import datetime
+import time
+import math
+import json
+import torch
+
+import numpy as np
+from PIL import Image
+
+import matplotlib.pyplot as plt
+import pytorch3d
+import torch
+
+from pytorch3d.renderer import look_at_view_transform
+from pytorch3d.renderer import OpenGLPerspectiveCameras
+from pytorch3d.renderer import (
+    AlphaCompositor,
+    RasterizationSettings,
+    MeshRenderer,
+    MeshRasterizer,
+    PointsRasterizationSettings,
+    PointsRenderer,
+    PointsRasterizer,
+    HardPhongShader,
+)
+
+import mcubes
+
+def get_device():
+    """
+    Checks if GPU is available and returns device accordingly.
+    """
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")
+    else:
+        device = torch.device("cpu")
+    return device
+
+def get_points_renderer(
+    image_size=512, device=None, radius=0.01, background_color=(1, 1, 1)
+):
+    """
+    Returns a Pytorch3D renderer for point clouds.
+
+    Args:
+        image_size (int): The rendered image size.
+        device (torch.device): The torch device to use (CPU or GPU). If not specified,
+            will automatically use GPU if available, otherwise CPU.
+        radius (float): The radius of the rendered point in NDC.
+        background_color (tuple): The background color of the rendered image.
+    
+    Returns:
+        PointsRenderer.
+    """
+    if device is None:
+        if torch.cuda.is_available():
+            device = torch.device("cuda:0")
+        else:
+            device = torch.device("cpu")
+    raster_settings = PointsRasterizationSettings(image_size=image_size, radius=radius,)
+    renderer = PointsRenderer(
+        rasterizer=PointsRasterizer(raster_settings=raster_settings),
+        compositor=AlphaCompositor(background_color=background_color),
+    )
+    return renderer
+
+
+def render_points(filename, points, image_size=256, color=[0.7, 0.7, 1], device=None):
+    # The device tells us whether we are rendering with GPU or CPU. The rendering will
+    # be *much* faster if you have a CUDA-enabled NVIDIA GPU. However, your code will
+    # still run fine on a CPU.
+    # The default is to run on CPU, so if you do not have a GPU, you do not need to
+    # worry about specifying the device in all of these functions.
+    if device is None:
+        device = get_device()
+
+    # Get the renderer.
+    points_renderer = get_points_renderer(image_size=256,radius=0.01)
+
+    # Get the vertices, faces, and textures.
+    # vertices, faces = load_cow_mesh(cow_path)
+    # vertices = vertices.unsqueeze(0)  # (N_v, 3) -> (1, N_v, 3)
+    # faces = faces.unsqueeze(0)  # (N_f, 3) -> (1, N_f, 3)
+    textures = torch.ones(points.size()).to(device)*0.5   # (1, N_v, 3)
+    rgb = textures * torch.tensor(color).to(device)  # (1, N_v, 3)
+
+    point_cloud = pytorch3d.structures.pointclouds.Pointclouds(
+        points=points, features=rgb
+    )
+
+    R, T = look_at_view_transform(10.0, 10.0, 96)
+
+
+    # Prepare the camera:
+    cameras = OpenGLPerspectiveCameras(
+        R=R,T=T, device=device
+    )
+
+    rend = points_renderer(point_cloud.extend(2), cameras=cameras)
+
+
+    # Place a point light in front of the cow.
+    # lights = pytorch3d.renderer.PointLights(location=[[0.0, 1.0, -2.0]], device=device)
+
+    # rend = renderer(mesh, cameras=cameras, lights=lights)
+    rend = rend.detach().cpu().numpy()[0, ..., :3]  # (B, H, W, 4) -> (H, W, 3)
+    plt.imsave(filename, rend)
+
+    # The .cpu moves the tensor to GPU (if needed).
+    return rend
+
+def render_points_with_save(
+    points,
+    cameras,
+    image_size,
+    save=False,
+    file_prefix='',
+    color=[0.7, 0.7, 1]
+):
+    device = points.device
+    if device is None:
+        device = get_device()
+
+    # Get the renderer.
+    points_renderer = get_points_renderer(image_size=image_size[0], radius=0.01)
+
+    textures = torch.ones(points.size()).to(device)   # (1, N_v, 3)
+    rgb = textures * torch.tensor(color).to(device)  # (1, N_v, 3)
+
+    point_cloud = pytorch3d.structures.pointclouds.Pointclouds(
+        points=points, features=rgb
+    )
+    
+    all_images = []
+    with torch.no_grad():
+        torch.cuda.empty_cache()
+        for cam_idx in range(len(cameras)):
+            image = points_renderer(point_cloud, cameras=cameras[cam_idx].to(device))
+            image = image[0,:,:,:3].detach().cpu().numpy()
+            all_images.append(image)
+
+            # Save
+            if save:
+                plt.imsave(
+                    f'{file_prefix}_{cam_idx}.png',
+                    image
+                )
+    
+    return all_images
+
+def get_mesh_renderer(image_size=512, lights=None, device=None):
+    """
+    Returns a Pytorch3D Mesh Renderer.
+    Args:
+        image_size (int): The rendered image size.
+        lights: A default Pytorch3D lights object.
+        device (torch.device): The torch device to use (CPU or GPU). If not specified,
+            will automatically use GPU if available, otherwise CPU.
+    """
+    if device is None:
+        if torch.cuda.is_available():
+            device = torch.device("cuda:0")
+        else:
+            device = torch.device("cpu")
+    raster_settings = RasterizationSettings(
+        image_size=image_size, blur_radius=0.0, faces_per_pixel=1,
+    )
+    renderer = MeshRenderer(
+        rasterizer=MeshRasterizer(raster_settings=raster_settings),
+        shader=HardPhongShader(device=device, lights=lights),
+    )
+    return renderer
+
+
+def implicit_to_mesh(implicit_fn, scale=0.5, grid_size=128, device='cpu', color=[0.7, 0.7, 1], chunk_size=262144, thresh=0):
+    Xs = torch.linspace(-1*scale, scale, grid_size+1).to(device)
+    Ys = torch.linspace(-1*scale, scale, grid_size+1).to(device)
+    Zs = torch.linspace(-1*scale, scale, grid_size+1).to(device)
+    grid = torch.stack(torch.meshgrid(Xs, Ys, Zs), dim=-1)
+
+    grid = grid.view(-1, 3)
+    num_points = grid.shape[0]
+    sdfs = torch.zeros(num_points)
+    
+    with torch.no_grad():
+        for chunk_start in range(0, num_points, chunk_size):
+            torch.cuda.empty_cache()
+            chunk_end = min(num_points, chunk_start+chunk_size)
+            sdfs[chunk_start:chunk_end] = implicit_fn.get_distance(grid[chunk_start:chunk_end,:]).view(-1)
+
+        sdfs = sdfs.view(grid_size+1, grid_size+1, grid_size+1)
+
+    vertices, triangles = mcubes.marching_cubes(sdfs.cpu().numpy(), thresh)
+    # normalize to [-scale, scale]
+    vertices = (vertices/grid_size - 0.5)*2*scale
+
+    vertices = torch.from_numpy(vertices).unsqueeze(0).float()
+    faces = torch.from_numpy(triangles.astype(np.int64)).unsqueeze(0)
+    
+    textures = torch.ones_like(vertices)  # (1, N_v, 3)
+    textures = textures * torch.tensor(color)  # (1, N_v, 3)
+    mesh = pytorch3d.structures.Meshes(
+        verts=vertices,
+        faces=faces,
+        textures=pytorch3d.renderer.TexturesVertex(textures),
+    )
+    mesh = mesh.to(device)
+    return mesh
+    
+
+def render_geometry(
+    model,
+    cameras,
+    image_size,
+    save=False,
+    thresh=0.,
+    file_prefix=''    
+):
+    device = list(model.parameters())[0].device
+    lights = pytorch3d.renderer.PointLights(location=[[0, 0, -3]], device=device)
+    mesh_renderer = get_mesh_renderer(image_size=image_size[0], lights=lights, device=device)
+
+    mesh = implicit_to_mesh(model.implicit_fn, scale=3, device=device, thresh=thresh)
+    all_images = []
+    with torch.no_grad():
+        torch.cuda.empty_cache()
+        for cam_idx in range(len(cameras)):
+            image = mesh_renderer(mesh, cameras=cameras[cam_idx].to(device))
+            image = image[0,:,:,:3].detach().cpu().numpy()
+            all_images.append(image)
+
+            # Save
+            if save:
+                plt.imsave(
+                    f'{file_prefix}_{cam_idx}.png',
+                    image
+                )
+    
+    return all_images
+```
+
+### nerf/renderer.py
+```
+import torch
+
+from typing import List, Optional, Tuple
+from pytorch3d.renderer.cameras import CamerasBase
+
+
+# Volume renderer which integrates color and density along rays
+# according to the equations defined in [Mildenhall et al. 2020]
+class VolumeRenderer(torch.nn.Module):
+    def __init__(
+        self,
+        cfg
+    ):
+        super().__init__()
+
+        self._chunk_size = cfg.chunk_size
+        self._white_background = cfg.white_background if 'white_background' in cfg else False
+
+    def _compute_weights(
+        self,
+        deltas,
+        rays_density: torch.Tensor,
+        eps: float = 1e-10
+    ):
+        # TODO (1.5): Compute transmittance using the equation described in the README
+        pass
+
+        # TODO (1.5): Compute weight used for rendering from transmittance and alpha
+        return weights
+    
+    def _aggregate(
+        self,
+        weights: torch.Tensor,
+        rays_feature: torch.Tensor
+    ):
+        # TODO (1.5): Aggregate (weighted sum of) features using weights
+        pass
+
+        return feature
+
+    def forward(
+        self,
+        sampler,
+        implicit_fn,
+        ray_bundle,
+    ):
+        B = ray_bundle.shape[0]
+
+        # Process the chunks of rays.
+        chunk_outputs = []
+
+        for chunk_start in range(0, B, self._chunk_size):
+            cur_ray_bundle = ray_bundle[chunk_start:chunk_start+self._chunk_size]
+
+            # Sample points along the ray
+            cur_ray_bundle = sampler(cur_ray_bundle)
+            n_pts = cur_ray_bundle.sample_shape[1]
+
+            # Call implicit function with sample points
+            implicit_output = implicit_fn(cur_ray_bundle)
+            density = implicit_output['density']
+            feature = implicit_output['feature']
+
+            # Compute length of each ray segment
+            depth_values = cur_ray_bundle.sample_lengths[..., 0]
+            deltas = torch.cat(
+                (
+                    depth_values[..., 1:] - depth_values[..., :-1],
+                    1e10 * torch.ones_like(depth_values[..., :1]),
+                ),
+                dim=-1,
+            )[..., None]
+
+            # Compute aggregation weights
+            weights = self._compute_weights(
+                deltas.view(-1, n_pts, 1),
+                density.view(-1, n_pts, 1)
+            ) 
+
+            # TODO (1.5): Render (color) features using weights
+            pass
+
+            # TODO (1.5): Render depth map
+            pass
+
+            # Return
+            cur_out = {
+                'feature': feature,
+                'depth': depth,
+            }
+
+            chunk_outputs.append(cur_out)
+
+        # Concatenate chunk outputs
+        out = {
+            k: torch.cat(
+              [chunk_out[k] for chunk_out in chunk_outputs],
+              dim=0
+            ) for k in chunk_outputs[0].keys()
+        }
+
+        return out
+
+
+def sdf_to_density(signed_distance, alpha, beta):
+    # TODO (Q4.3): Convert signed distance to density with alpha, beta parameters
+    pass
+
+class VolumeSDFRenderer(VolumeRenderer):
+    def __init__(
+        self,
+        cfg
+    ):
+        super().__init__(cfg)
+
+        self._chunk_size = cfg.chunk_size
+        self._white_background = cfg.white_background if 'white_background' in cfg else False
+        self.alpha = cfg.alpha
+        self.beta = cfg.beta
+
+        self.cfg = cfg
+
+    def forward(
+        self,
+        sampler,
+        implicit_fn,
+        ray_bundle,
+        light_dir=None
+    ):
+        B = ray_bundle.shape[0]
+
+        # Process the chunks of rays.
+        chunk_outputs = []
+
+        for chunk_start in range(0, B, self._chunk_size):
+            cur_ray_bundle = ray_bundle[chunk_start:chunk_start+self._chunk_size]
+
+            # Sample points along the ray
+            cur_ray_bundle = sampler(cur_ray_bundle)
+            n_pts = cur_ray_bundle.sample_shape[1]
+
+            # Call implicit function with sample points
+            distance, color = implicit_fn.get_distance_color(cur_ray_bundle.sample_points)
+            density = None # TODO (Q4.3): convert SDF to density
+
+            # Compute length of each ray segment
+            depth_values = cur_ray_bundle.sample_lengths[..., 0]
+            deltas = torch.cat(
+                (
+                    depth_values[..., 1:] - depth_values[..., :-1],
+                    1e10 * torch.ones_like(depth_values[..., :1]),
+                ),
+                dim=-1,
+            )[..., None]
+
+            # Compute aggregation weights
+            weights = self._compute_weights(
+                deltas.view(-1, n_pts, 1),
+                density.view(-1, n_pts, 1)
+            ) 
+
+            geometry_color = torch.zeros_like(color)
+
+            # Compute color
+            color = self._aggregate(
+                weights,
+                color.view(-1, n_pts, color.shape[-1])
+            )
+
+            # Return
+            cur_out = {
+                'feature': color,
+                "geometry": geometry_color
+            }
+
+            chunk_outputs.append(cur_out)
+
+        # Concatenate chunk outputs
+        out = {
+            k: torch.cat(
+              [chunk_out[k] for chunk_out in chunk_outputs],
+              dim=0
+            ) for k in chunk_outputs[0].keys()
+        }
+
+        return out
+
+
+renderer_dict = {
+    'volume': VolumeRenderer,
+    'volume_sdf': VolumeSDFRenderer
+}
+```
+
+### nerf/sampler.py
+```
+import math
+from typing import List
+
+import torch
+from ray_utils import RayBundle
+from pytorch3d.renderer.cameras import CamerasBase
+
+
+# Sampler which implements stratified (uniform) point sampling along rays
+class StratifiedRaysampler(torch.nn.Module):
+    def __init__(
+        self,
+        cfg
+    ):
+        super().__init__()
+
+        self.n_pts_per_ray = cfg.n_pts_per_ray
+        self.min_depth = cfg.min_depth
+        self.max_depth = cfg.max_depth
+
+    def forward(
+        self,
+        ray_bundle,
+    ):
+        # TODO (Q1.4): Compute z values for self.n_pts_per_ray points uniformly sampled between [near, far]
+        z_vals = None
+
+        # TODO (Q1.4): Sample points from z values
+        sample_points = None
+
+        # Return
+        return ray_bundle._replace(
+            sample_points=sample_points,
+            sample_lengths=z_vals * torch.ones_like(sample_points[..., :1]),
+        )
+
+
+sampler_dict = {
+    'stratified': StratifiedRaysampler
+}
+```
+
+### nerf/volume_rendering_main.py
+```
+import os
+import warnings
+
+import hydra
+import numpy as np
+import torch
+import tqdm
+import imageio
+
+from omegaconf import DictConfig
+from PIL import Image
+from pytorch3d.renderer import (
+    PerspectiveCameras,
+    look_at_view_transform
+)
+import matplotlib.pyplot as plt
+
+from implicit import implicit_dict
+from sampler import sampler_dict
+from renderer import renderer_dict
+from losses import get_eikonal_loss
+from ray_utils import (
+    sample_images_at_xy,
+    get_pixels_from_image,
+    get_random_pixels_from_image,
+    get_rays_from_pixels
+)
+from data_utils import (
+    dataset_from_config,
+    create_surround_cameras,
+    vis_grid,
+    vis_rays,
+)
+from dataset import (
+    get_nerf_datasets,
+    trivial_collate,
+)
+from render_functions import render_geometry
+
+
+# Model class containing:
+#   1) Implicit volume defining the scene
+#   2) Sampling scheme which generates sample points along rays
+#   3) Renderer which can render an implicit volume given a sampling scheme
+
+class Model(torch.nn.Module):
+    def __init__(
+        self,
+        cfg
+    ):
+        super().__init__()
+
+        # Get implicit function from config
+        self.implicit_fn = implicit_dict[cfg.implicit_function.type](
+            cfg.implicit_function
+        )
+
+        # Point sampling (raymarching) scheme
+        self.sampler = sampler_dict[cfg.sampler.type](
+            cfg.sampler
+        )
+
+        # Initialize volume renderer
+        self.renderer = renderer_dict[cfg.renderer.type](
+            cfg.renderer
+        )
+    
+    def forward(
+        self,
+        ray_bundle
+    ):
+        # Call renderer with
+        #  a) Implicit volume
+        #  b) Sampling routine
+
+        return self.renderer(
+            self.sampler,
+            self.implicit_fn,
+            ray_bundle
+        )
+
+
+def render_images(
+    model,
+    cameras,
+    image_size,
+    save=False,
+    file_prefix=''
+):
+    all_images = []
+    device = list(model.parameters())[0].device
+
+    for cam_idx, camera in enumerate(cameras):
+        print(f'Rendering image {cam_idx}')
+
+        torch.cuda.empty_cache()
+        camera = camera.to(device)
+        xy_grid = get_pixels_from_image(image_size, camera) # TODO (Q1.3): implement in ray_utils.py
+        ray_bundle = get_rays_from_pixels(xy_grid, image_size, camera) # TODO (Q1.3): implement in ray_utils.py
+
+        # TODO (Q1.3): Visualize xy grid using vis_grid
+        if cam_idx == 0 and file_prefix == '':
+            pass
+
+        # TODO (Q1.3): Visualize rays using vis_rays
+        if cam_idx == 0 and file_prefix == '':
+            pass
+        
+        # TODO (Q1.4): Implement point sampling along rays in sampler.py
+        pass
+
+        # TODO (Q1.4): Visualize sample points as point cloud
+        if cam_idx == 0 and file_prefix == '':
+            pass
+
+        # TODO (Q1.5): Implement rendering in renderer.py
+        out = model(ray_bundle)
+
+        # Return rendered features (colors)
+        image = np.array(
+            out['feature'].view(
+                image_size[1], image_size[0], 3
+            ).detach().cpu()
+        )
+        all_images.append(image)
+
+        # TODO (Q1.5): Visualize depth
+        if cam_idx == 2 and file_prefix == '':
+            pass
+
+        # Save
+        if save:
+            plt.imsave(
+                f'{file_prefix}_{cam_idx}.png',
+                image
+            )
+    
+    return all_images
+
+
+def render(
+    cfg,
+):
+    # Create model
+    model = Model(cfg)
+    model = model.cuda(); model.eval()
+
+    # Render spiral
+    cameras = create_surround_cameras(3.0, n_poses=20)
+    all_images = render_images(
+        model, cameras, cfg.data.image_size
+    )
+    imageio.mimsave('images/part_1.gif', [np.uint8(im * 255) for im in all_images], loop=0)
+
+
+def train(
+    cfg
+):
+    # Create model
+    model = Model(cfg)
+    model = model.cuda(); model.train()
+
+    # Create dataset 
+    train_dataset = dataset_from_config(cfg.data)
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=1,
+        shuffle=True,
+        num_workers=0,
+        collate_fn=lambda batch: batch,
+    )
+    image_size = cfg.data.image_size
+
+    # Create optimizer 
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=cfg.training.lr
+    )
+
+    # Render images before training
+    cameras = [item['camera'] for item in train_dataset]
+    render_images(
+        model, cameras, image_size,
+        save=True, file_prefix='images/part_2_before_training'
+    )
+
+    # Train
+    t_range = tqdm.tqdm(range(cfg.training.num_epochs))
+
+    for epoch in t_range:
+        for iteration, batch in enumerate(train_dataloader):
+            image, camera, camera_idx = batch[0].values()
+            image = image.cuda()
+            camera = camera.cuda()
+
+            # Sample rays
+            xy_grid = get_random_pixels_from_image(cfg.training.batch_size, image_size, camera) # TODO (Q2.1): implement in ray_utils.py
+            ray_bundle = get_rays_from_pixels(xy_grid, image_size, camera)
+            rgb_gt = sample_images_at_xy(image, xy_grid)
+
+            # Run model forward
+            out = model(ray_bundle)
+
+            # TODO (Q2.2): Calculate loss
+            loss = None
+
+            # Backprop
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        if (epoch % 10) == 0:
+            t_range.set_description(f'Epoch: {epoch:04d}, Loss: {loss:.06f}')
+            t_range.refresh()
+
+    # Print center and side lengths
+    print("Box center:", tuple(np.array(model.implicit_fn.sdf.center.data.detach().cpu()).tolist()[0]))
+    print("Box side lengths:", tuple(np.array(model.implicit_fn.sdf.side_lengths.data.detach().cpu()).tolist()[0]))
+
+    # Render images after training
+    render_images(
+        model, cameras, image_size,
+        save=True, file_prefix='images/part_2_after_training'
+    )
+    all_images = render_images(
+        model, create_surround_cameras(3.0, n_poses=20), image_size, file_prefix='part_2'
+    )
+    imageio.mimsave('images/part_2.gif', [np.uint8(im * 255) for im in all_images], loop=0)
+
+
+def create_model(cfg):
+    # Create model
+    model = Model(cfg)
+    model.cuda(); model.train()
+
+    # Load checkpoints
+    optimizer_state_dict = None
+    start_epoch = 0
+
+    checkpoint_path = os.path.join(
+        hydra.utils.get_original_cwd(),
+        cfg.training.checkpoint_path
+    )
+
+    if len(cfg.training.checkpoint_path) > 0:
+        # Make the root of the experiment directory.
+        checkpoint_dir = os.path.split(checkpoint_path)[0]
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Resume training if requested.
+        if cfg.training.resume and os.path.isfile(checkpoint_path):
+            print(f"Resuming from checkpoint {checkpoint_path}.")
+            loaded_data = torch.load(checkpoint_path)
+            model.load_state_dict(loaded_data["model"])
+            start_epoch = loaded_data["epoch"]
+
+            print(f"   => resuming from epoch {start_epoch}.")
+            optimizer_state_dict = loaded_data["optimizer"]
+
+    # Initialize the optimizer.
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=cfg.training.lr,
+    )
+
+    # Load the optimizer state dict in case we are resuming.
+    if optimizer_state_dict is not None:
+        optimizer.load_state_dict(optimizer_state_dict)
+        optimizer.last_epoch = start_epoch
+
+    # The learning rate scheduling is implemented with LambdaLR PyTorch scheduler.
+    def lr_lambda(epoch):
+        return cfg.training.lr_scheduler_gamma ** (
+            epoch / cfg.training.lr_scheduler_step_size
+        )
+
+    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lr_lambda, last_epoch=start_epoch - 1, verbose=False
+    )
+
+    return model, optimizer, lr_scheduler, start_epoch, checkpoint_path
+
+def train_nerf(
+    cfg
+):
+    # Create model
+    model, optimizer, lr_scheduler, start_epoch, checkpoint_path = create_model(cfg)
+
+    # Load the training/validation data.
+    train_dataset, val_dataset, _ = get_nerf_datasets(
+        dataset_name=cfg.data.dataset_name,
+        image_size=[cfg.data.image_size[1], cfg.data.image_size[0]],
+    )
+
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=1,
+        shuffle=True,
+        num_workers=0,
+        collate_fn=trivial_collate,
+    )
+
+    # Run the main training loop.
+    for epoch in range(start_epoch, cfg.training.num_epochs):
+        t_range = tqdm.tqdm(enumerate(train_dataloader))
+
+        for iteration, batch in t_range:
+            image, camera, camera_idx = batch[0].values()
+            image = image.cuda().unsqueeze(0)
+            camera = camera.cuda()
+
+            # Sample rays
+            xy_grid = get_random_pixels_from_image(
+                cfg.training.batch_size, cfg.data.image_size, camera
+            )
+            ray_bundle = get_rays_from_pixels(
+                xy_grid, cfg.data.image_size, camera
+            )
+            rgb_gt = sample_images_at_xy(image, xy_grid)
+
+            # Run model forward
+            out = model(ray_bundle)
+
+            # TODO (Q3.1): Calculate loss
+            loss = None
+
+            if cfg.renderer.type == 'volume_sdf':
+                loss += cfg.training.eikonal_weight * get_eikonal_loss(
+                    model.implicit_fn,
+                    cfg.training.batch_size,
+                    cfg.training.bounds,
+                    rgb_gt.device,
+                )
+
+            # Take the training step.
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            t_range.set_description(f'Epoch: {epoch:04d}, Loss: {loss:.06f}')
+            t_range.refresh()
+
+        # Adjust the learning rate.
+        lr_scheduler.step()
+
+        # Checkpoint.
+        if (
+            epoch % cfg.training.checkpoint_interval == 0
+            and len(cfg.training.checkpoint_path) > 0
+            and epoch > 0
+        ):
+            print(f"Storing checkpoint {checkpoint_path}.")
+
+            data_to_store = {
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "epoch": epoch,
+            }
+
+            torch.save(data_to_store, checkpoint_path)
+
+        # Render
+        if (
+            epoch % cfg.training.render_interval == 0
+            and epoch > 0
+        ):
+            with torch.no_grad():
+                test_images = render_images(
+                    model, create_surround_cameras(4.0, n_poses=20, up=(0.0, 0.0, 1.0), focal_length=2.0),
+                    cfg.data.image_size,
+                    file_prefix='volsdf' if cfg.renderer.type == 'volume_sdf' else 'nerf',
+                )
+                output_path = 'images/part_4_3.gif' if cfg.renderer.type == 'volume_sdf' else 'images/part_3.gif'
+                imageio.mimsave(output_path, [np.uint8(im * 255) for im in test_images], loop=0)
+
+                if cfg.renderer.type == 'volume_sdf':
+                    try:
+                        geometry_images = render_geometry(
+                            model,
+                            create_surround_cameras(4.0, n_poses=20, up=(0.0, 0.0, 1.0), focal_length=2.0),
+                            cfg.data.image_size,
+                            file_prefix='volsdf_geometry',
+                        )
+                        imageio.mimsave('images/part_4_3_geometry.gif', [np.uint8(im * 255) for im in geometry_images], loop=0)
+                    except Exception:
+                        print("Empty mesh")
+
+
+@hydra.main(config_path='./configs', config_name='sphere')
+def main(cfg: DictConfig):
+    os.chdir(hydra.utils.get_original_cwd())
+
+    if cfg.type == 'render':
+        render(cfg)
+    elif cfg.type == 'train':
+        train(cfg)
+    elif cfg.type == 'train_nerf':
+        train_nerf(cfg)
+
+
+if __name__ == "__main__":
+    main()
+```

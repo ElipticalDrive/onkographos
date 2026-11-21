@@ -1,0 +1,128 @@
+# Fire Profile Texture Mapping with Noise
+
+Also called: Noise-perturbed Fire Profile Texture Mapping
+
+## Overview
+This method extends [Fire Profile Texture Mapping](15057-fire-profile-texture-mapping.md) by perturbing the vertical texture coordinate using procedural noise turbulence, creating animated, organic fire details without pre-computed 3D noise volumes [S1, unofficial]. It differs from static volume rendering by integrating noise directly into the texture coordinate lookup to simulate rising flames and micro-level details [S1, unofficial].
+
+## How it works
+**Inputs:**
+- 2D Fire Profile Texture: A texture mapping radial distance to color/intensity.
+- Noise Function: A procedural noise generator (e.g., Perlin, M-Noise) [S1, unofficial].
+- Parameters: `frequency` (noise scale), `time` (animation), `offset` (instance uniqueness), `stability` (kernel factor), `lacunarity` and `gain` (noise octaves) [S1, unofficial].
+
+**Outputs:**
+- Color value for a given 3D position in the unit fire volume.
+
+**Data Structures:**
+- `noise_pos`: 4D vector $(x, y, z, w)$ representing the position in noise space.
+- `u`: Horizontal texture coordinate (scalar).
+- `texz`: Vertical texture coordinate (scalar).
+- `turb`: Turbulence value (scalar).
+
+**Steps:**
+1. **Calculate Noise Position:** Compute the position in noise space based on the texture coordinates, time, and instance offset.
+   - $noise\_pos = (texx, texy, texz - time, time) \cdot noisescale$
+   - $noisescale = \frac{1}{(radius, radius, length, 1) \cdot frequency}$
+   - Here, $texx$ and $texy$ are derived from the horizontal texture coordinates, $texz$ is the vertical coordinate, and $time$ is the animation time [S1, unofficial].
+2. **Compute Turbulence:** Calculate the turbulence value using the noise position and octaves.
+   - $turb = \sum_{i=0}^{octaves} gain_i \cdot noise(position \cdot lacunarity_i)$
+   - The noise function is evaluated at `noise_pos + offset`, where `offset` is a constant unique to each fire instance [S1, unofficial].
+3. **Apply Kernel:** Calculate the kernel function $f(texz)$ to scale the turbulence based on height.
+   - $f(texz) = stability \cdot \sqrt{height}$
+   - Here, $height$ corresponds to $texz$ [S1, unofficial].
+4. **Offset Vertical Coordinate:** Add the scaled turbulence to the vertical texture coordinate.
+   - $v = texz + f(texz) \cdot turb$
+5. **Lookup Color:** Sample the fire profile texture using the horizontal coordinate $u$ and the modified vertical coordinate $v$.
+   - $color = FireProfileTexture(u, v)$
+
+**Formulas:**
+- Horizontal coordinate derivation: $v_{coord} = \sqrt{texx^2 + texy^2}$ (Note: The source uses $v$ for this radial component in Eq 12, but $v$ is also used for the final vertical coordinate in Eq 13. Context implies $u$ is the horizontal coordinate derived from the mesh deformation, and $v_{coord}$ is the radial distance used to index the texture's vertical axis before perturbation. The final vertical coordinate is $texz + f(texz) \cdot turb$ [S1, unofficial]).
+- Final Vertical Coordinate: $v_{final} = texz + f(texz) \cdot turb(noise\_pos + offset)$ [S1, unofficial].
+- Kernel: $f(texz) = stability \cdot \sqrt{texz}$ [S1, unofficial].
+
+**Parameters:**
+- `frequency`: Scales noise space to world coordinates to prevent stretching artifacts [S1, unofficial].
+- `time`: Offsets the vertical axis to create upward flow [S1, unofficial].
+- `offset`: Instance-specific constant to ensure uniqueness [S1, unofficial].
+- `stability`: Customizable factor for the kernel [S1, unofficial].
+- `octaves`, `lacunarity`, `gain`: Noise generation parameters [S1, unofficial].
+
+**Edge Cases:**
+- **Stretching Artifacts:** If the fire is enlarged (elongating central curve or adjusting radius), the noise space must be dynamically scaled to prevent visual artifacts across frames [S1, unofficial].
+- **Precision:** The method relies on pixel shader versions 2.0 and 3.0, with performance varying by noise type and octaves [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_fire_color(texx, texy, texz, time, offset, frequency, stability, noise_func, lacunarity, gains):
+    # 1. Calculate noise scale
+    # Assuming radius and length are known constants for the unit fire volume
+    # noisescale = 1.0 / (radius * frequency, radius * frequency, length * frequency, frequency)
+    # For simplicity, assume noisescale is precomputed or passed as a vector
+    noisescale = (1.0 / (radius * frequency), 1.0 / (radius * frequency), 1.0 / (length * frequency), 1.0 / frequency)
+    
+    # 2. Calculate noise position
+    # noise_pos = (texx, texy, texz - time, time) * noisescale
+    noise_pos = (
+        texx * noisescale[0],
+        texy * noisescale[1],
+        (texz - time) * noisescale[2],
+        time * noisescale[3]
+    )
+    
+    # 3. Compute turbulence
+    turb = 0.0
+    current_pos = noise_pos
+    for i in range(len(gains)):
+        turb += gains[i] * noise_func(current_pos)
+        current_pos = (p * lacunarity for p in current_pos)
+        
+    # 4. Apply kernel
+    # f(texz) = stability * sqrt(texz)
+    kernel = stability * math.sqrt(texz)
+    
+    # 5. Offset vertical coordinate
+    # v = texz + f(texz) * turb(noise_pos + offset)
+    # Note: offset is added to noise_pos before turbulence calculation in source Eq 13 context
+    # Re-evaluating turbulence with offset
+    noise_pos_with_offset = (p + o for p, o in zip(noise_pos, offset))
+    turb_with_offset = 0.0
+    current_pos = noise_pos_with_offset
+    for i in range(len(gains)):
+        turb_with_offset += gains[i] * noise_func(current_pos)
+        current_pos = (p * lacunarity for p in current_pos)
+        
+    v_final = texz + kernel * turb_with_offset
+    
+    # 6. Lookup color
+    # u is the horizontal coordinate, derived from mesh deformation (not detailed in noise section)
+    # Assuming u is passed or computed externally
+    color = fire_profile_texture.lookup(u, v_final)
+    
+    return color
+```
+
+## Subtopics
+
+### [Procedural Fire Sampling](18038-procedural-fire-sampling.md)
+Procedural Fire Sampling generates a volumetric fire appearance by mapping a 3D location to a 2D fire profile texture, applying time-based vertical scrolling and turbulence-driven vertical offsets to simulate rising flames. It differs from static volume rendering by integrating noise turbulence directly into the texture coordinate lookup to create animated, organic fire behavior without requiring pre-computed 3D noise volumes.
+
+## Operating characteristics
+- **Performance:** On a nVidia GeForce 7800 GT, a unit-radius fire with slice spacing 0.2 (approx. 90,000 pixels) achieves:
+  - 197 FPS with 0 octaves (No Fire) [S1, unofficial].
+  - 157 FPS with 1 octave M-Noise (Lattice Resolution 35) [S1, unofficial].
+  - 141 FPS with 1 octave M-Noise (Lattice Resolution 135) [S1, unofficial].
+  - 94 FPS with 3 octaves Improved Perlin (Lattice Resolution 35) [S1, unofficial].
+  - 66 FPS with 3 octaves Improved Perlin (Lattice Resolution 135) [S1, unofficial].
+  - 45 FPS with 3 octaves 4D Improved Perlin (Lattice Resolution 35) [S1, unofficial].
+  - 30 FPS with 3 octaves 4D Improved Perlin (Lattice Resolution 135) [S1, unofficial] [S1, unofficial].
+- **Strengths:** Real-time performance, customizable animation, unique instances per fire [S1, unofficial].
+- **Limitations:** Performance degrades with higher octaves and lattice resolutions; requires careful scaling of noise space to avoid artifacts when fire geometry changes [S1, unofficial].
+
+## Background
+Originated in the paper "Real-time Procedural Volumetric Fire" by Fuller, Krishnan, Mahrous, Hamann, and Joy from the IDAV Research Group at UC Davis, presented at I3D 2007 [S1, unofficial]. The method addresses the need for visually impressive, animated, and fully 3D volumetric fire in real-time applications, allowing content artists to customize fire appearance and animation [S1, unofficial].
+
+## Sources
+[S1] Real-time Procedural Volumetric Fire, https://web.cs.ucdavis.edu/~hamann/FullerKrishnanMahrousHamannJoyFirePaperFor_I3D2007AsSubmitted11012006.pdf, fetched 2026-10-27 (unofficial)

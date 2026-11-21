@@ -1,0 +1,197 @@
+--- v001.md
++++ v002.md
+@@ -4,20 +4,20 @@
+ 
+ ## Overview
+-Spherify Poses reorients a set of input camera poses into a uniform spherical arrangement centered around the scene's centroid, ensuring consistent scale and distribution for novel view synthesis [S1, unofficial]. It differs from [Circular Camera Path Generation](2734-circular-camera-path-generation.md) by computing a 3D center from ray intersections rather than assuming a 2D circular path, and from [Spiral Camera Path Generation](1635-spiral-camera-path-generation.md) by enforcing a strict spherical radius rather than a spiral trajectory with vertical offset.
++Spherify Poses reorients a set of input camera poses into a uniform spherical arrangement centered around the scene's centroid, ensuring consistent scale and distribution for novel view synthesis [S1, unofficial]. It differs from [Circular Camera Path Generation](2734-circular-camera-path-generation.md) by computing a 3D center from ray intersections rather than assuming a 2D circular path, and from [Spiral Camera Path Generation](1635-spiral-camera-path-generation.md) by enforcing a strict spherical radius rather than a spiral trajectory with vertical offset [G].
+ 
+ ## How it works
+ **Inputs:**
+-- `poses`: Array of shape $[N, 4, 4]$ representing input camera poses in world coordinates (column-major or row-major consistent with source, treated as $4 \times 4$ matrices where the first 3 rows contain rotation and translation).
++- `poses`: Array of shape $[N, 4, 4]$ representing input camera poses in world coordinates, where `poses[:,:3,2:3]` stores ray directions and `poses[:,:3,3]` stores camera positions [S1, unofficial].
+ - `bds`: Bounding box data (optional, used for scaling reference) [S1, unofficial].
+-- `N`: Integer, the number of new poses to generate.
++- `N`: Integer, the number of new poses to generate [S1, unofficial].
+ 
+ **Outputs:**
+-- `poses_spherical`: Array of shape $[N, 4, 4]$ containing the new camera poses arranged on a sphere.
++- `poses_spherical`: Array of shape $[N, 4, 4]$ containing the new camera poses arranged on a sphere [S1, unofficial].
+ 
+ **Data Structures:**
+-- `rays_d`: Array of shape $[N, 3, 1]$ containing unit ray directions extracted from poses.
+-- `rays_o`: Array of shape $[N, 3, 1]$ containing ray origins (camera positions) extracted from poses.
+-- `A_i`: Matrix of shape $[3, 3]$ for each ray $i$, defined as $I - \mathbf{d}_i \mathbf{d}_i^T$.
+-- `b_i`: Vector of shape $[3, 1]$ for each ray $i$, defined as $-A_i \mathbf{o}_i$.
++- `rays_d`: Array of shape $[N, 3, 1]$ containing unit ray directions extracted from poses [S1, unofficial].
++- `rays_o`: Array of shape $[N, 3, 1]$ containing ray origins (camera positions) extracted from poses [S1, unofficial].
++- `A_i`: Matrix of shape $[3, 3]$ for each ray $i$, defined as $I - \mathbf{d}_i \mathbf{d}_i^T$ [S1, unofficial].
++- `b_i`: Vector of shape $[3, 1]$ for each ray $i$, defined as $-A_i \mathbf{o}_i$ [S1, unofficial].
+ 
+ **Steps:**
+@@ -52,5 +52,4 @@
+     Construct a transformation matrix $T$ using the basis vectors and the center. Apply this transformation to all input poses to get `poses_reset`.
+     $$ T = \begin{bmatrix} \mathbf{vec}_1 & \mathbf{vec}_2 & \mathbf{vec}_0 & \mathbf{c} \\ 0 & 0 & 0 & 1 \end{bmatrix} $$
+-    *Note: The source constructs `c2w` from `[vec1, vec2, vec0, pos=center]`. This implies the rotation matrix columns are vec1, vec2, vec0. The translation is `center`. The poses are transformed by this matrix.*
+     [S1, unofficial]
+ 
+@@ -80,5 +79,5 @@
+ 
+ 9.  **Append Homogeneous Row:**
+-    Append the original pose's w-row (typically `[0, 0, 0, 1]`) to the new poses to maintain homogeneous coordinate structure.
++    Append the original pose's w-row (typically `poses[0,:3,-1:]`) to the new poses to maintain homogeneous coordinate structure.
+     [S1, unofficial]
+ 
+@@ -100,32 +99,21 @@
+     """
+     # 1. Extract rays
+-    # poses[:,:3,2:3] -> direction, poses[:,:3,3:4] -> origin
+     rays_d = poses[:, :3, 2:3]  # Shape (N_orig, 3, 1)
+     rays_o = poses[:, :3, 3:4]  # Shape (N_orig, 3, 1)
+     
+     # 2. Compute sphere center
++    I = np.eye(3)
+     # A_i = I - d_i d_i^T
++    A_i = I - (rays_d @ rays_d.transpose(0, 2, 1))
+     # b_i = -A_i o_i
+-    # pt_mindist = -inv(mean(A_i^T A_i)) @ mean(b_i)
+-    
+-    I = np.eye(3)
+-    # Compute A_i for all rays
+-    # rays_d is (N_orig, 3, 1). rays_d @ rays_d.T is (N_orig, 3, 3)
+-    A_i = I - (rays_d @ rays_d.transpose(0, 2, 1))
+     b_i = -A_i @ rays_o
+     
+-    # Mean of A_i^T A_i and b_i
+-    # A_i is symmetric, so A_i^T = A_i
++    # pt_mindist = -inv(mean(A_i^T @ A_i)) @ mean(b_i)
+     mean_A = np.mean(A_i.transpose(0, 2, 1) @ A_i, axis=0)
+     mean_b = np.mean(b_i, axis=0)
+-    
+-    # Solve for pt_mindist
+-    # pt_mindist = -inv(mean_A) @ mean_b
+     pt_mindist = -np.linalg.inv(mean_A) @ mean_b.flatten()
+-    
+     center = pt_mindist
+     
+     # 3. Compute up vector
+-    # up = mean(poses[:,:3,3] - center)
+     cam_positions = poses[:, :3, 3]
+     up = np.mean(cam_positions - center, axis=0)
+@@ -140,13 +128,5 @@
+     
+     # 5. Reset poses
+-    # Construct transformation matrix c2w
+-    # c2w = [vec1, vec2, vec0, center]
+-    # Note: The source says "Construct the transformation matrix c2w from [vec1, vec2, vec0, pos=center]"
+-    # This usually means the rotation matrix columns are vec1, vec2, vec0.
+-    # The translation is center.
+-    # We need to apply this to all input poses.
+-    # If poses are c2w matrices, we transform them by T.
+-    # T = [[vec1, vec2, vec0, center], [0,0,0,1]]
+-    
++    # c2w = [vec1, vec2, vec0, pos=center]
+     R = np.column_stack((vec1, vec2, vec0))
+     T = np.eye(4)
+@@ -154,46 +134,8 @@
+     T[:3, 3] = center
+     
+-    # Apply T to all poses
+-    # poses_reset = T @ poses
+-    # But poses are (N, 4, 4). We need to apply T to each pose.
+-    # Actually, the source says "apply it to all input poses to get poses_reset".
+-    # This implies a coordinate system change.
+-    # If we want to express the old poses in the new coordinate system defined by T,
+-    # we would do T^{-1} @ poses. However, the source says "Set center = pt_mindist ... Construct c2w ... apply it".
+-    # Let's assume it means transforming the poses into the new frame.
+-    # But wait, if we are centering the scene, we usually move the cameras relative to the center.
+-    # The source code in NerfingMVS likely does:
+-    # poses_reset = np.einsum('ij,njk->nik', T, poses) ? Or T @ poses?
+-    # Let's look at the next step: "Compute radius rad = sqrt(mean(sum(poses_reset[:,:3,3]^2, axis=-1)))"
+-    # This suggests poses_reset are in the new coordinate system where the center is origin?
+-    # No, center is pt_mindist. If we apply T, the new origin is center.
+-    # So poses_reset should have positions relative to center?
+-    # Let's assume T transforms the world such that the new origin is at 'center' and axes are vec1, vec2, vec0.
+-    # So we need to transform the camera poses into this new frame.
+-    # T is the matrix that maps new basis to old basis? Or old to new?
+-    # If vec1, vec2, vec0 are the new axes in old coordinates, then T is the rotation from new to old.
+-    # To get coordinates in new frame, we need T^{-1}.
+-    # However, the source says "apply it to all input poses".
+-    # Let's stick to the literal instruction: "Construct the transformation matrix c2w from [vec1, vec2, vec0, pos=center] and apply it to all input poses".
+-    # This is ambiguous. In many graphics contexts, "apply transformation M to point p" means M @ p.
+-    # If we apply T to the pose matrix P, we get T @ P.
+-    # Let's assume the source means: The new coordinate system is defined by T.
+-    # We want to express the old poses in this new system.
+-    # So we should compute T^{-1} @ P.
+-    # But the source says "apply it".
+-    # Let's look at the radius calculation: "rad = sqrt(mean(sum(poses_reset[:,:3,3]^2, axis=-1)))"
+-    # If poses_reset are in the new frame, and the center is at the origin of the new frame,
+-    # then the positions should be centered around 0.
+-    # If we did T @ P, the positions would be transformed by T.
+-    # If T maps new->old, then T @ P maps new->old.
+-    # If we want old->new, we need T^{-1}.
+-    # Given the ambiguity, and the fact that the next step computes radius from positions,
+-    # it is highly likely that poses_reset are in a coordinate system where the center is at the origin.
+-    # So we should invert T.
+-    
+-    T_inv = np.linalg.inv(T)
++    # Apply transformation to all input poses
+     poses_reset = np.zeros_like(poses)
+     for i in range(poses.shape[0]):
+-        poses_reset[i] = T_inv @ poses[i]
++        poses_reset[i] = T @ poses[i]
+         
+     # 6. Compute radius and scale
+@@ -201,17 +143,10 @@
+     rad = np.sqrt(np.mean(np.sum(positions**2, axis=-1)))
+     sc = 1.0 / rad
+-    
+-    # Apply scale to poses_reset
+-    poses_reset[:, :3, 3] *= sc
++    poses_reset[:, :3, 3] *= sc  # Apply scale to poses_reset
+     
+     # 7. Compute spherical parameters
+     centroid = np.mean(poses_reset[:, :3, 3], axis=0)
+     zh = centroid[2]
+-    radcircle = np.sqrt(rad**2 - zh**2) # Note: rad here is the original radius before scaling? 
+-    # The source says "Compute radius rad ... and scale factor sc = 1/rad. Apply scale ... Calculate centroid of scaled poses ... compute radcircle = sqrt(rad^2 - zh^2)"
+-    # This implies rad in the radcircle formula is the original radius, not the scaled one.
+-    # But zh is from scaled poses.
+-    # This is a potential inconsistency in the source description.
+-    # Let's assume radcircle uses the original rad.
++    radcircle = np.sqrt(rad**2 - zh**2)
+     
+     # 8. Generate new poses
+@@ -222,5 +157,4 @@
+         camorigin = np.array([radcircle * np.cos(th), radcircle * np.sin(th), zh])
+         
+-        # Construct basis
+         vec2_prime = camorigin / np.linalg.norm(camorigin)
+         vec0_prime = np.cross(vec2_prime, np.array([0, 0, -1]))
+@@ -229,11 +163,9 @@
+         vec1_prime = vec1_prime / np.linalg.norm(vec1_prime)
+         
+-        # Set pos
+-        # Stack into p=[vec0, vec1, vec2, pos]
+         poses_spherical[i, :3, 0] = vec0_prime
+         poses_spherical[i, :3, 1] = vec1_prime
+         poses_spherical[i, :3, 2] = vec2_prime
+         poses_spherical[i, :3, 3] = camorigin
+-        poses_spherical[i, 3, :] = [0, 0, 0, 1]
++        poses_spherical[i, 3, :] = poses[0, :3, -1]  # Append original w-row
+         
+     return poses_spherical
+@@ -241,5 +173,5 @@
+ 
+ **Parameters:**
+-- `N`: Number of poses to generate. Typical values depend on the desired resolution of the novel view synthesis, often 100-300 for smooth interpolation [S1, unofficial].
++- `N`: Number of poses to generate [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -263,5 +195,5 @@
+ 
+ ## Background
+-The method originates from the NerfingMVS project, an unofficial implementation or extension of NeRF and MVS techniques [S1, unofficial]. It is used in the context of novel view synthesis, specifically for reorganizing camera poses from arbitrary viewpoints into a structured spherical path to facilitate training and rendering.
++The method originates from the NerfingMVS project [S1, unofficial]. It is used in the context of novel view synthesis, specifically for reorganizing camera poses from arbitrary viewpoints into a structured spherical path to facilitate training and rendering.
+ 
+ ## Sources

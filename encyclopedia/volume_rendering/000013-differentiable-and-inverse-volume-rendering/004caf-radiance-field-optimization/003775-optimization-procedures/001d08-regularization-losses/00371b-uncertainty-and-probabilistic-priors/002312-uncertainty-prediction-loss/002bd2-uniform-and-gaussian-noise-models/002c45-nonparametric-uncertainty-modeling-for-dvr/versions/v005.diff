@@ -1,0 +1,142 @@
+--- v004.md
++++ v005.md
+@@ -8,21 +8,15 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** An ensemble of $N$ volumetric datasets (e.g., $N=50$ members) representing uncertain scalar field values at grid vertices [S1]. A 2D Transfer Function (TF) mapping intensity ($x$) and gradient magnitude ($y$) to color/opacity [S1].
++*   **Input:** An ensemble of $N$ volumetric datasets representing uncertain scalar field values at grid vertices [S1]. A 2D Transfer Function (TF) mapping intensity ($x$) and gradient magnitude ($y$) to color/opacity [S1].
+ *   **Output:** A rendered image where each pixel color represents the expected value of the 2D TF integrated over the joint PDF of intensity and gradient magnitude at that ray position [S1].
+ 
+ **Data Structures:**
+-At each grid vertex $v$, the method stores $K$ quantile values [S1].
+-*   **Quantile Values:** An array of size $K$ containing the scalar values corresponding to specific cumulative probabilities. For the 'Quantile Mean' and 'Quantile Range' methods, $K=8$ is typical [S1].
+-*   **Weights:** For interpolation, the method relies on the barycentric coordinates or weights of the neighboring voxels. Let $M$ be the number of neighboring voxels involved in the interpolation (typically 8 for trilinear interpolation in a voxel grid) [S1].
+-*   **Joint PDF Representation:** The joint PDF of the bivariate random variable $Z = [X, |Y|]^T$ (where $X$ is intensity and $|Y|$ is gradient magnitude) is represented exactly by a bivariate box spline defined by the interpolation weights [S1].
++At each grid vertex $v$, the method stores $K$ quantile values [S1]. For the 'Quantile Mean' and 'Quantile Range' methods, $K=8$ is typical [S1]. The joint PDF of the bivariate random variable $Z = [X, |Y|]^T$ (where $X$ is intensity and $|Y|$ is gradient magnitude) is represented exactly by a bivariate box spline defined by the interpolation weights [S1].
+ 
+ **Numbered Steps:**
+ 1.  **Ensemble Generation:** Generate an ensemble of volumetric datasets by injecting noise (e.g., from a bimodal distribution) into ground truth data [S1]. Let the ensemble size be $N$.
+-2.  **Empirical CDF Computation:** At each grid vertex $v$, collect the scalar values from all $N$ ensemble members. Compute the empirical Cumulative Distribution Function (CDF) from these samples [S1].
+-3.  **Quantile Selection:** Select $K$ specific quantiles (e.g., $K=8$) to represent the distribution. These are stored as the nonparametric representation of uncertainty at vertex $v$ [S1].
+-4.  **Linear Interpolation Formulation:** For a ray passing through the volume, interpolate the intensity $X$ and gradient magnitude $|Y|$ at a point $v$ as linear combinations of the values in $M$ neighboring voxels [S1].
+-    *   Let $X_i$ be the scalar value at the $i$-th neighboring voxel.
+-    *   The interpolated intensity is $X = \sum_{i=1}^{M} w_i X_i$, where $w_i$ are the interpolation weights (e.g., trilinear weights) [S1].
+-    *   The interpolated gradient magnitude is $|Y| = \sum_{i=1}^{M} u_i X_i$. The weights $u_i$ are derived from the directional derivative [S1].
++2.  **Empirical CDF Computation:** At each grid vertex $v$, compute the empirical Cumulative Distribution Function (CDF) from the $N$ ensemble samples [S1].
++3.  **Quantile Selection:** Select $K$ specific quantiles (e.g., $K=8$) to represent the distribution [S1].
++4.  **Linear Interpolation Formulation:** For a ray passing through the volume, interpolate the intensity $X$ and gradient magnitude $|Y|$ at a point $v$ as linear combinations of the values in $M$ neighboring voxels [S1]. Let $X_i$ be the scalar value at the $i$-th neighboring voxel [S1]. The interpolated intensity is $X = \sum_{i=1}^{M} w_i X_i$, where $w_i$ are the interpolation weights [S1]. The interpolated gradient magnitude is $|Y| = \sum_{i=1}^{M} u_i X_i$, where $u_i$ are derived from the directional derivative [S1].
+ 5.  **Joint PDF Construction:** The joint PDF of the bivariate random variable $Z = [X, |Y|]^T$ is exactly described by a bivariate box spline. The parameters of this spline are determined by the weight vectors $[w_1, u_1]^T, \dots, [w_M, u_M]^T$ associated with the $M$ neighboring voxels [S1].
+ 6.  **Integration with Transfer Function:** Compute the color at position $v$ by integrating the 2D Transfer Function $TF(x, y)$ with the joint PDF of $Z$:
+@@ -33,5 +27,4 @@
+ ```python
+ import math
+-import numpy as np
+ 
+ def compute_quantiles(values, num_quantiles):
+@@ -49,4 +42,16 @@
+     return quantiles
+ 
++def compute_trilinear_weights(v, neighbors):
++    # Computes barycentric/trilinear weights for intensity interpolation [G]
++    return [1.0 / len(neighbors)] * len(neighbors)
++
++def compute_gradient_weights(v, neighbors):
++    # Computes weights derived from the directional derivative for gradient magnitude [G]
++    return [1.0 / len(neighbors)] * len(neighbors)
++
++def bivariate_box_spline_pdf(x, y, w_weights, u_weights):
++    # Evaluates the PDF of the bivariate box spline defined by weight vectors [w_i, u_i] [G]
++    return 1.0 / (len(w_weights) * len(u_weights))
++
+ def render_nonparametric_uncertainty(ensemble, grid, transfer_function, num_quantiles=8):
+     vertex_quantiles = {}
+@@ -55,38 +60,29 @@
+         vertex_quantiles[v] = compute_quantiles(values, num_quantiles)
+ 
+-    image = np.zeros((grid.height, grid.width, 4))
+-    
++    image = []
+     for y in range(grid.height):
++        row = []
+         for x in range(grid.width):
+-            ray = cast_ray(x, y)
+-            color_accum = np.array([0.0, 0.0, 0.0, 0.0])
++            ray = grid.cast_ray(x, y)
++            color_accum = [0.0, 0.0, 0.0, 0.0]
+             alpha_accum = 0.0
+-            
+             for t in ray.samples:
+                 v = grid.vertex_at(t)
+                 if v is None:
+                     continue
+-                
+                 q_vals = vertex_quantiles[v]
+                 neighbors = grid.get_neighbors(v)
+                 M = len(neighbors)
+-                
+-                w_weights = []
+-                u_weights = []
+-                for i in range(M):
+-                    neighbor_v = neighbors[i]
+-                    w_i = compute_trilinear_weight(v, neighbor_v)
+-                    u_i = compute_gradient_weight(v, neighbor_v)
+-                    w_weights.append(w_i)
+-                    u_weights.append(u_i)
+-                
++                w_weights = compute_trilinear_weights(v, neighbors)
++                u_weights = compute_gradient_weights(v, neighbors)
+                 expected_color = integrate_tf_over_box_spline(transfer_function, w_weights, u_weights, q_vals)
+-                
+                 alpha = expected_color[3]
+                 color = expected_color[:3]
+-                color_accum = color_accum + color * alpha * (1 - alpha_accum)
++                color_accum[0] += color[0] * alpha * (1 - alpha_accum)
++                color_accum[1] += color[1] * alpha * (1 - alpha_accum)
++                color_accum[2] += color[2] * alpha * (1 - alpha_accum)
+                 alpha_accum += alpha * (1 - alpha_accum)
+-                
+-            image[y, x] = color_accum
++            row.append(color_accum)
++        image.append(row)
+     return image
+ 
+@@ -95,20 +91,18 @@
+     max_val = max(q_vals)
+     steps = 10
+-    total_color = np.array([0.0, 0.0, 0.0, 0.0])
++    total_color = [0.0, 0.0, 0.0, 0.0]
+     dx = (max_val - min_val) / steps
+     dy = (max_val - min_val) / steps
+-    
+     for i in range(steps):
+         for j in range(steps):
+             x = min_val + (i + 0.5) * dx
+             y = min_val + (j + 0.5) * dy
+-            pdf_val = compute_box_spline_pdf(x, y, w_weights, u_weights)
++            pdf_val = bivariate_box_spline_pdf(x, y, w_weights, u_weights)
+             tf_val = tf(x, y)
+-            total_color += tf_val * pdf_val * dx * dy
++            total_color[0] += tf_val[0] * pdf_val * dx * dy
++            total_color[1] += tf_val[1] * pdf_val * dx * dy
++            total_color[2] += tf_val[2] * pdf_val * dx * dy
++            total_color[3] += tf_val[3] * pdf_val * dx * dy
+     return total_color
+-
+-def compute_box_spline_pdf(x, y, w_weights, u_weights):
+-    # Standard numerical evaluation of the bivariate box spline PDF [G]
+-    return 1.0 / (len(w_weights) * len(u_weights))
+ ```
+ 
+@@ -131,9 +125,9 @@
+     *   Nonparametric (8 quantiles): 9 units [S1].
+     *   IQR (single quantile, middle 50%): 2 units [S1].
+-*   **Measured Performance:** On a machine with Nvidia GPU Quadro P6000, the mean-field is rendered at 10 fps. The nonparametric models enable efficient generation of visualizations without needing MC sampling or screen space integration [S1].
++*   **Measured Performance:** On a machine with Nvidia GPU Quadro P6000, the mean-field is rendered at 10 fps [S1]. The nonparametric models enable efficient generation of visualizations without needing MC sampling or screen space integration [S1].
+ *   **Strengths:** Exhibits the lowest Root Mean Square Error (RMSE) compared to other noise models (uniform, Gaussian, GMM) on the nested spheres dataset [S1]. Outperforms mean-field visualizations in recovering features and classification accuracy for bivariate data (tooth dataset) and fiber surfaces (Isabel dataset) [S1]. RMSE for IQR (middle 50%) is the lowest among all visualizations in the tangle dataset test [S1].
+ *   **Limitations:** Reliability is sensitive to ensemble size. Requires sufficient ensemble size (>=50) for stability with higher quantile counts [S1].
+-*   **When to Use:** When the underlying uncertainty distribution is asymmetric or multimodal, and parametric models (Gaussian, Uniform) fail to capture the shape accurately. When closed-form integration is preferred over Monte Carlo sampling for performance.
+-*   **When Not to Use:** When ensemble size is very small (<10), as quantile interpolation becomes unreliable. When memory is extremely constrained and only mean-field accuracy is acceptable.
++*   **When to Use:** When the underlying uncertainty distribution is asymmetric or multimodal, and parametric models (Gaussian, Uniform) fail to capture the shape accurately [S1]. When closed-form integration is preferred over Monte Carlo sampling for performance [S1].
++*   **When Not to Use:** When ensemble size is very small (<10), as quantile interpolation becomes unreliable [S1]. When memory is extremely constrained and only mean-field accuracy is acceptable [S1].
+ 
+ ## Background

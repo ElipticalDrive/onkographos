@@ -1,0 +1,352 @@
+--- v004.md
++++ v005.md
+@@ -1,198 +1,183 @@
+ # Cubic Interpolation
+-
+-Also called: 3D Cubic Interpolation, Tri-cubic Interpolation
+-
++Also called: 3D Cubic Interpolation, Tri-cubic Interpolation, Cubic Convolution
+ ## Overview
+-Cubic interpolation is a higher-order polynomial sampling technique used in volume rendering to approximate scalar field values at arbitrary locations with greater smoothness than linear methods [S1, S2, S3, unofficial]. It solves the artifact-prone nature of nearest-neighbor and linear interpolation by utilizing a wider support kernel, resulting in visually smoother surfaces and reduced high-frequency leakage [S1, S2, unofficial]. Unlike its parent [Cubic Interpolation (Mitchell-Netravali)](2073-cubic-interpolation-mitchell-netravali.md), which defines a general family of filters parameterized by $B$ and $C$, this article focuses on the specific implementation characteristics of standard tri-cubic sampling, particularly the computationally optimized "on-the-fly" approach and the specific Catmull-Rom variant often used as the default cubic filter.
++Cubic interpolation is a higher-order polynomial reconstruction method used in volume rendering to approximate scalar field values at arbitrary positions with greater smoothness than linear methods [S1, S2, S3, unofficial]. It solves the problem of banding and aliasing artifacts inherent in nearest-neighbor and trilinear interpolation by utilizing a wider support kernel [S1, S3, unofficial]. It is distinguished from its sibling [General Cubic Spline Interpolation](2073-cubic-interpolation-mitchell-netravali.md) by its specific implementation as a standard tri-cubic filter (often corresponding to the Catmull-Rom variant) that requires sampling 64 neighboring voxels to compute a single value [S2, unofficial][S4].
+ 
+ ## How it works
+-### Inputs and Outputs
+-- **Input**: A 3D volume texture (voxel grid) with dimensions $R \times S \times T$, and a query point $\mathbf{p} = (x, y, z)$ in texture space.
+-- **Output**: A single interpolated scalar value $V(\mathbf{p})$.
++**Inputs and Outputs:**
++- Input: A 3D volume texture (voxel grid) $V$ with dimensions $R_x \times R_y \times R_z$, and a query position $\mathbf{p} = (x, y, z)$ in voxel coordinates.
++- Output: A scalar value $f(\mathbf{p})$ representing the interpolated density or intensity at $\mathbf{p}$.
+ 
+-### Data Structures
+-The volume is typically stored as a 3D array or a 3D texture object. For hardware-accelerated sampling, the data is often packed into a contiguous memory block or GPU texture format (e.g., `GL_RGBA32F` or similar, depending on precision requirements). The coordinates are normalized to $[0, 1]$ for texture lookup or kept in voxel indices for software implementation.
++**Data Structures:**
++- The volume data is stored as a 3D array of floating-point values.
++- In hardware-accelerated implementations (e.g., GPU texture units), the data is often stored in a texture object with specific filtering modes enabled.
+ 
+-### Number of Samples
+-In 3D, standard cubic interpolation requires sampling $4 \times 4 \times 4 = 64$ neighboring voxels [S1, S2, S5, unofficial]. This is derived from the fact that a 1D cubic kernel spans 4 points (2 on each side of the query point), and the 3D kernel is the separable product of three 1D kernels [S3, unofficial].
++**Number of Samples:**
++- In 3D, cubic interpolation requires sampling $2^4 = 64$ voxels [S1, S2, unofficial]. This corresponds to a $4 \times 4 \times 4$ grid of neighbors centered around the query point.
+ 
+-### The Tri-Cubic Filter Function
+-The 3D tri-cubic filter $h(u, v, w)$ is separable:
+-$$ h(u, v, w) = h(u)h(v)h(w) $$
+-where $u, v, w$ are the distances from the query point to the grid points along each axis [S6, unofficial].
++**Mathematical Formulation:**
++The tri-cubic interpolation is the tensor product of three 1D cubic interpolation functions. For a single dimension, let the query coordinate be $x$, and let the four surrounding integer grid points be $x_{-1}, x_0, x_1, x_2$ with corresponding values $v_{-1}, v_0, v_1, v_2$. Let $t = x - x_0$ be the fractional offset ($0 \le t < 1$).
+ 
+-The most common specific cubic filter used in this context is the **Catmull-Rom spline**, which is a special case of the cubic convolution filter [S6, unofficial]. The 1D filter function $h(u)$ for Catmull-Rom is defined piecewise based on the distance $u$ from the nearest grid point:
+-
++The standard cubic interpolation (Catmull-Rom) uses the basis function:
+ $$
+-h(u) = 
+-\begin{cases} 
+-2u^3 - 3u^2 + 1 & 0 \le u < 1 \\
+--2u^3 + 3u^2 & 1 \le u \le 2 \\
+-0 & u > 2 
++B(t) = \begin{cases} 
++2t^3 - 3t^2 + 1 & \text{if } 0 \le t < 1 \\
++-2t^3 + 3t^2 & \text{if } 1 \le t < 2 \\
++0 & \text{otherwise}
+ \end{cases}
+ $$
++However, in the context of volume rendering hardware and the specific "tri-cubic" implementation described in the sources, the interpolation is often performed via embedded bi-linear texture filtering to optimize performance [S6, unofficial].
+ 
+-This corresponds to the general cubic convolution formula with parameter $a = -0.5$ [S6, unofficial]:
+-$$
+-h(u) = 
+-\begin{cases} 
+-(a+2)u^3 - (a+3)u^2 + 1 & 0 \le u < 1 \\
+-au^3 - 5au^2 + 8au - 4a + 1 & 1 \le u \le 2 \\
+-0 & u > 2 
+-\end{cases}
+-$$
+-With $a = -0.5$, the coefficients become $1.5$ and $-0.5$ respectively, yielding the Catmull-Rom form above [S6, unofficial].
++**Algorithm (On-the-fly Tri-cubic Filtering):**
++This method leverages the hardware's bi-linear filtering capability to approximate tri-cubic filtering with reduced sampling overhead [S6, unofficial].
+ 
+-### Implementation: On-the-Fly Tri-Cubic Filtering
+-A common optimization for implementing tri-cubic interpolation on hardware that supports only tri-linear filtering is "on-the-fly" filtering [S5, unofficial]. This method leverages the embedded bi-linear texture filtering ability to reduce the number of explicit texture fetches required to compute the bi-cubic values.
++1.  **Bi-cubic Approximation:** Calculate bi-cubic interpolated values using only four samplings by leveraging embedded bi-linear texture filtering. This implies that the hardware texture unit performs the interpolation of the 4 nearest texels in a 2D plane automatically when `GL_LINEAR` or equivalent is used, but the "tri-cubic" claim in [S6, unofficial] suggests a specific optimization where 8 basic tri-linear samplings are used to effectively calculate the value determined by 64 nearest voxels.
++2.  **Tri-linear Samplings:** Perform a single tri-cubic sampling by making 8 basic tri-linear samplings.
++3.  **Result:** The final value is determined by the 64 nearest voxels [S6, unofficial].
+ 
+-1.  **Bi-cubic Optimization**: To calculate a bi-cubic interpolated value, only four bi-linear texture samplings are required. This is achieved by arranging the texture coordinates such that the hardware's internal bi-linear interpolation performs part of the cubic weighting [S5, unofficial].
+-2.  **Tri-cubic Assembly**: A single tri-cubic sampling is performed by making 8 basic tri-linear samplings. These 8 samples correspond to the 8 corners of the cube surrounding the query point in the "coarse" grid, but each corner's value is itself a bi-cubic interpolation derived from the 8 surrounding voxels. Effectively, this calculates the value determined by 64 nearest voxels [S5, unofficial].
+-
+-### Pseudocode: Software Tri-Cubic Interpolation
+-The following pseudocode implements standard tri-cubic interpolation using the Catmull-Rom kernel. It assumes a volume array `V` and handles boundary conditions by clamping or wrapping (implementation detail [G]).
++**Pseudocode (General Tri-cubic Convolution):**
++If not using hardware-specific optimizations, the general tri-cubic convolution is implemented as follows. This uses the Catmull-Rom spline coefficients which correspond to $B=0, C=0.5$ in the Mitchell-Netravali family [S4].
+ 
+ ```python
+-def cubic_kernel(u):
++def cubic_interpolation_1d(v_minus1, v0, v1, v2, t):
+     """
+-    Catmull-Rom cubic kernel.
+-    u is the absolute distance from the grid point.
++    Performs 1D cubic interpolation (Catmull-Rom) at offset t.
++    v_minus1, v0, v1, v2: Values at grid points x-1, x, x+1, x+2.
++    t: Fractional distance from x (0 <= t < 1).
+     """
+-    if u < 0:
+-        u = -u
+-    if u < 1:
+-        return 2.0 * u**3 - 3.0 * u**2 + 1.0
+-    elif u < 2:
+-        return -2.0 * u**3 + 3.0 * u**2
+-    else:
+-        return 0.0
++    # Catmull-Rom basis function coefficients
++    # P(t) = 0.5 * [ -v_minus1 + 3*v0 - 3*v1 + v2 ] * t^3
++    #        + [ 2*v_minus1 - 5*v0 + 4*v1 - v2 ] * t^2
++    #        + [ -v_minus1 + v1 ] * t
++    #        + v0
++    
++    t2 = t * t
++    t3 = t2 * t
++    
++    c3 = 0.5 * (-v_minus1 + 3.0 * v0 - 3.0 * v1 + v2)
++    c2 = 0.5 * (2.0 * v_minus1 - 5.0 * v0 + 4.0 * v1 - v2)
++    c1 = 0.5 * (-v_minus1 + v1)
++    c0 = v0
++    
++    return c3 * t3 + c2 * t2 + c1 * t + c0
+ 
+-def tri_cubic_interpolate(volume, x, y, z, width, height, depth):
++def tri_cubic_interpolation(volume, x, y, z):
+     """
+-    Interpolate value at (x, y, z) in volume.
+-    volume: 3D array [depth][height][width]
+-    x, y, z: float coordinates in voxel space
++    Performs 3D tri-cubic interpolation.
++    volume: 3D array of voxel values.
++    x, y, z: Query coordinates in voxel space.
+     """
+-    # Determine the 4x4x4 grid of indices
+-    # x is between floor(x) and ceil(x)
+-    x0 = floor(x)
+-    x1 = x0 + 1
+-    x2 = x0 + 2
+-    x3 = x0 + 3
++    # Determine integer indices
++    ix = int(floor(x))
++    iy = int(floor(y))
++    iz = int(floor(z))
+     
+-    y0 = floor(y)
+-    y1 = y0 + 1
+-    y2 = y0 + 2
+-    y3 = y0 + 3
++    # Determine fractional offsets
++    fx = x - ix
++    fy = y - iy
++    fz = z - iz
+     
+-    z0 = floor(z)
+-    z1 = z0 + 1
+-    z2 = z0 + 2
+-    z3 = z0 + 3
++    # Retrieve 64 neighboring voxels
++    # We need indices from i-1 to i+2 for each dimension
++    # Handle boundary conditions by clamping or wrapping as per volume definition
++    def get_voxel(i, j, k):
++        # Clamp indices to valid range [0, R-1]
++        i = clamp(i, 0, volume.R - 1)
++        j = clamp(j, 0, volume.R - 1)
++        k = clamp(k, 0, volume.R - 1)
++        return volume[i, j, k]
++
++    # Extract the 4x4x4 grid of values
++    # v[i][j][k] corresponds to offset i,j,k from the base index (ix-1, iy-1, iz-1)
++    # Actually, easier to index directly relative to ix, iy, iz
++    # v_minus1 is at ix-1, v0 is at ix, v1 is at ix+1, v2 is at ix+2
+     
+-    # Calculate fractional distances for kernel evaluation
+-    dx0 = x - x0
+-    dx1 = 1.0 - dx0 # distance to x1
+-    dx2 = dx0 - 1.0 # distance to x2
+-    dx3 = dx0 - 2.0 # distance to x3
++    # Pre-fetch all 64 values to avoid repeated boundary checks in loops
++    # This is a simplified representation; in practice, loop over dimensions
+     
+-    dy0 = y - y0
+-    dy1 = 1.0 - dy0
+-    dy2 = dy0 - 1.0
+-    dy3 = dy0 - 2.0
++    # Interpolate along X
++    # For each (y, z) slice, we interpolate 4 points along X
++    interp_x = []
++    for dy in range(-1, 3):
++        for dz in range(-1, 3):
++            v_m1 = get_voxel(ix - 1, iy + dy, iz + dz)
++            v_0  = get_voxel(ix,     iy + dy, iz + dz)
++            v_1  = get_voxel(ix + 1, iy + dy, iz + dz)
++            v_2  = get_voxel(ix + 2, iy + dy, iz + dz)
++            interp_x.append(cubic_interpolation_1d(v_m1, v_0, v_1, v_2, fx))
++            
++    # Now interp_x has 16 values (4 y * 4 z)
++    # Interpolate along Y
++    interp_y = []
++    for dz in range(-1, 3):
++        # We have 4 values for this dz slice, corresponding to y indices iy-1 to iy+2
++        v_m1 = interp_x[dz * 4 + 0] # y = iy - 1
++        v_0  = interp_x[dz * 4 + 1] # y = iy
++        v_1  = interp_x[dz * 4 + 2] # y = iy + 1
++        v_2  = interp_x[dz * 4 + 3] # y = iy + 2
++        interp_y.append(cubic_interpolation_1d(v_m1, v_0, v_1, v_2, fy))
++        
++    # Now interp_y has 4 values (for z indices iz-1 to iz+2)
++    # Interpolate along Z
++    v_m1 = interp_y[0]
++    v_0  = interp_y[1]
++    v_1  = interp_y[2]
++    v_2  = interp_y[3]
+     
+-    dz0 = z - z0
+-    dz1 = 1.0 - dz0
+-    dz2 = dz0 - 1.0
+-    dz3 = dz0 - 2.0
+-    
+-    # Evaluate 1D kernels
+-    kx0 = cubic_kernel(dx0)
+-    kx1 = cubic_kernel(dx1)
+-    kx2 = cubic_kernel(dx2)
+-    kx3 = cubic_kernel(dx3)
+-    
+-    ky0 = cubic_kernel(dy0)
+-    ky1 = cubic_kernel(dy1)
+-    ky2 = cubic_kernel(dy2)
+-    ky3 = cubic_kernel(dy3)
+-    
+-    kz0 = cubic_kernel(dz0)
+-    kz1 = cubic_kernel(dz1)
+-    kz2 = cubic_kernel(dz2)
+-    kz3 = cubic_kernel(dz3)
+-    
+-    # Sum contributions
+-    result = 0.0
+-    
+-    # Iterate over the 4x4x4 neighborhood
+-    # Indices must be clamped to volume bounds [G]
+-    indices_x = [x0, x1, x2, x3]
+-    indices_y = [y0, y1, y2, y3]
+-    indices_z = [z0, z1, z2, z3]
+-    
+-    weights_x = [kx0, kx1, kx2, kx3]
+-    weights_y = [ky0, ky1, ky2, ky3]
+-    weights_z = [kz0, kz1, kz2, kz3]
+-    
+-    for i in range(4):
+-        xi = indices_x[i]
+-        wx = weights_x[i]
+-        # Clamp xi
+-        xi = max(0, min(xi, width - 1))
+-        
+-        for j in range(4):
+-            yj = indices_y[j]
+-            wy = weights_y[j]
+-            # Clamp yj
+-            yj = max(0, min(yj, height - 1))
+-            
+-            for k in range(4):
+-                zk = indices_z[k]
+-                wz = weights_z[k]
+-                # Clamp zk
+-                zk = max(0, min(zk, depth - 1))
+-                
+-                voxel_val = volume[zk][yj][xi]
+-                result += voxel_val * wx * wy * wz
+-                
+-    return result
++    return cubic_interpolation_1d(v_m1, v_0, v_1, v_2, fz)
+ ```
+ 
+-### Edge Cases and Pitfalls
+-- **Boundary Conditions**: The kernel extends 2 units beyond the query point. At volume boundaries, indices may go out of bounds. Common strategies include clamping (repeating the edge value), wrapping (toroidal topology), or zero-padding [G]. Clamping is most common for medical volumes to avoid artifacts from outside the body.
+-- **Precision**: The summation of 64 terms can lead to floating-point precision issues if not handled carefully, though standard `float32` is usually sufficient for visualization [S3, unofficial].
+-- **Degenerate Input**: If the volume has zero dimensions, the method is undefined.
++**Edge Cases and Pitfalls:**
++- **Boundary Conditions:** The method requires 2 voxels on either side of the query point. At volume boundaries, values must be clamped, mirrored, or wrapped. Clamping is common but can introduce artifacts at edges [G].
++- **Precision:** High computational cost can lead to precision issues if not using double precision for intermediate calculations, though single precision is standard for real-time rendering [S3, unofficial].
++- **Artifacts:** While smoother, cubic interpolation can introduce ringing artifacts (overshoot/undershoot) near sharp discontinuities if the underlying data is not smooth [S4].
+ 
+ ## Subtopics
+ 
++### [Catmull-Rom Interpolation](13562-catmull-rom-interpolation.md)
++Catmull-Rom interpolation is a specific interpolating cubic-spline scheme used in volume rendering to reconstruct continuous scalar fields from discrete voxel data. It solves the problem of banding artifacts inherent in linear interpolation by providing a continuous first derivative, while uniquely satisfying the condition for accurate straight-line reconstruction among all interpolating cubic splines. It is distinguished from its sibling [General Cubic Spline Interpolation](15870-general-cubic-spline-interpolation.md) by its fixed parameter values ($B=0, C=1/2$ or $a=-0.5$), which minimize third-order error for discrete functions.
++
++### [General Cubic Spline Interpolation](15870-general-cubic-spline-interpolation.md)
++General cubic spline interpolation is a family of piecewise cubic reconstruction filters parameterized by coefficients $B$ and $C$, used to sample volume data with higher continuity than linear methods. It distinguishes itself from its siblings by offering a tunable trade-off between interpolation accuracy and smoothing, governed by linear constraints on its parameters.
++
+ ### Quasi-Cubic Sampling
+-A texture sampling technique that applies a quasi-cubic filter kernel to 3D volume textures to reduce aliasing and improve interpolation quality compared to standard linear/trilinear filtering [S4, unofficial]. It approximates cubic behavior using a specific polynomial on the fractional part of the coordinate.
+-- **Step**: Scale the normalized texture coordinate $u$ by the volume dimension $R$ and add 0.5 to center the texels: $U_{scaled} = u \times R + 0.5$. Extract the fractional part $F = fract(U_{scaled})$ and the integer part. Apply the quasi-cubic kernel to the fractional part: $U_{filtered} = floor(U_{scaled}) + F \times F \times (3.0 - 2.0 \times F)$. Sample the volume texture using the filtered coordinate normalized back to $[0,1]$: $sample = texture(volume, (U_{filtered} - 0.5) / R)$ [S4, unofficial].
+-- **When to choose**: When hardware supports custom fragment shaders or specific texture filtering modes that allow this polynomial approximation, offering a middle ground between linear and full tri-cubic cost.
++Quasi-cubic sampling is a texture sampling technique that applies a quasi-cubic filter kernel to 3D volume textures to reduce aliasing and improve interpolation quality compared to standard linear/trilinear filtering [S5, unofficial].
++**Steps:**
++1. Scale the normalized texture coordinate $u$ by the volume dimensions $R$ and add 0.5 to center the texels: $U_{scaled} = u \times R + 0.5$ [S5, unofficial].
++2. Extract the fractional part $F = fract(U_{scaled})$ and the integer part. Apply the quasi-cubic kernel to the fractional part: $U_{filtered} = floor(U_{scaled}) + F \times F \times (3.0 - 2.0 \times F)$ [S5, unofficial].
++3. Sample the volume texture using the filtered coordinate normalized back to $[0,1]$: $sample = texture(volume, (U_{filtered} - 0.5) / R)$ [S5, unofficial].
+ 
+ ### On-the-fly Tri-cubic Filtering
+-An interpolation method using tri-cubic filtering to improve visualization quality over tri-linear filtering, calculated on-the-fly during ray casting by leveraging embedded bi-linear texture filtering [S5, unofficial].
+-- **Step**: Calculate bi-cubic interpolated values using only four samplings by leveraging embedded bi-linear texture filtering. Perform a single tri-cubic sampling by making 8 basic tri-linear samplings, effectively calculating the data value determined by 64 nearest voxels [S5, unofficial].
+-- **Pitfall**: High computational cost. Interactive performance (>20-30 fps) is only guaranteed for small datasets ($\le 256^3$ voxels) or simple techniques (DVR, opaque iso-surface) [S5, unofficial].
+-- **When to choose**: When running on hardware with efficient tri-linear texture units but no native tri-cubic support, and dataset sizes are manageable.
++On-the-fly tri-cubic filtering is an interpolation method using tri-cubic filtering to improve visualization quality over tri-linear filtering, calculated on-the-fly during ray casting [S6, unofficial].
++**Steps:**
++1. Calculate bi-cubic interpolated values using only four samplings by leveraging embedded bi-linear texture filtering [S6, unofficial].
++2. Perform a single tri-cubic sampling by making 8 basic tri-linear samplings, effectively calculating the data value determined by 64 nearest voxels [S6, unofficial].
++**Pitfalls:** High computational cost. Interactive performance (>20-30 fps) is only guaranteed for small datasets ($\le 256^3$ voxels) or simple techniques (DVR, opaque iso-surface) [S6, unofficial].
+ 
+-### Catmull-Rom Interpolation
+-A second-order interpolation filter that yields a function with a continuous first derivative, reducing banding artifacts compared to linear filters [S6, unofficial]. It is the specific instance of cubic convolution with parameter $a = -0.5$ [S6, unofficial].
+-- **Formula**: The 1D filter function $h(u)$ is defined piecewise: $h(u) = 2u^3 - 3u^2 + 1$ for $0 \le u < 1$; $h(u) = -2u^3 + 3u^2$ for $1 \le u \le 2$; $h(u) = 0$ for $u > 2$ [S6, unofficial].
+-- **Step**: Compute the 3D filter value using separability: $h(u,v,w) = h(u)h(v)h(w)$. Implement interpolation as a 3-stage nested loop corresponding to the three separable dimensions [S6, unofficial].
+-- **Comparison**: Higher filter quality (like cubic) comes at the price of wider spatial extent and larger computational effort compared to linear filters [S6, unofficial]. It interpolates a discrete function with the lowest third-order error among cubic splines [S6, unofficial].
++### WENO Interpolation
++WENO (Weighted Essentially Non-Oscillatory) interpolation is a high-order polynomial reconstruction method for solving hyperbolic and convection-diffusion equations, achieving high-order accuracy in smooth regions and better representation of sharp gradients [S7].
++**Steps:**
++1. For an edge $E_i$ where isovalue $k$ lies between $f_i$ and $f_{i+1}$, construct a high-order polynomial $p_i(x)$ to approximate the function in the interval [S7].
++2. Solve $p_i(x) = k$ for $x$. This is a root-finding problem for a cubic polynomial, solved using the cubic formula. If multiple valid roots exist, select the median solution [S7].
++**Formula:**
++$p_i(x) = w_1 p^{(1)}(x) + w_2 p^{(2)}(x) + w_3 p^{(3)}(x)$, where $p^{(1)}, p^{(2)}, p^{(3)}$ are third-order polynomials and $w_1, w_2, w_3$ are nonlinear weights summing to 1 [S7].
++Smoothness indicators $\beta_j$ are calculated as:
++$\beta_1 = \frac{13}{12}(f_{i-2} - 2f_{i-1} + f_i)^2 + \frac{1}{4}(f_{i-2} - 4f_{i-1} + 3f_i)^2$
++$\beta_2 = \frac{13}{12}(f_{i-1} - 2f_i + f_{i+1})^2 + \frac{1}{4}(f_{i-1} - f_{i+1})^2$
++$\beta_3 = \frac{13}{12}(f_i - 2f_{i+1} + f_{i+2})^2 + \frac{1}{4}(3f_i - 4f_{i+1} + f_{i+2})^2$ [S7].
++Nonlinear weights $w_j = \alpha_j / (\alpha_1 + \alpha_2 + \alpha_3)$, where $\alpha_j = \gamma_j / (\epsilon + \beta_j)^2$, with constants $\gamma_1=1/10, \gamma_2=3/5, \gamma_3=3/10$ [S7].
++**Parameter:** $\epsilon$: A small constant to avoid division by zero, typically set to $10^{-6}$ [S7].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Considerably high computational costs. In 3D, it requires sampling 64 voxels, compared to 8 for tri-linear [S1, S2, S3, unofficial]. It requires two more multiplications per dimension compared to linear interpolation, leading to a considerable amount of instructions [S3, unofficial].
+-- **Memory Complexity**: No additional memory storage is required for the kernel itself (it is computed on the fly), but the cache footprint is larger due to the 64-sample access pattern, which may cause cache misses in software implementations [S3, unofficial].
+-- **Measured Performance**: Interactive performance (>20-30 fps) is only guaranteed for small datasets ($\le 256^3$ voxels) or simple rendering techniques when using on-the-fly filtering [S5, unofficial]. For larger datasets, pre-filtering or lower-order interpolation is typically required [S3, unofficial].
+-- **Strengths**: Produces significantly smoother results than linear interpolation, reducing the "blocky" appearance and high-frequency leakage artifacts [S1, S2, unofficial]. Allows for smoothing or sharpening via parameter adjustment (in the general cubic convolution family) [S3, unofficial].
+-- **Limitations**: High computational cost makes it unsuitable for real-time rendering of large volumes without optimization or hardware support [S3, S5, unofficial]. The wider spatial extent can cause blurring of fine details compared to sharper filters like the sinc filter (though sinc has ringing) [S6, unofficial].
+-- **When to use**: When visual quality is prioritized over performance, or when rendering small-to-medium volumes where smoothness is critical [S3, unofficial].
+-- **When not to use**: For large-scale medical datasets requiring real-time interaction, or when hardware does not support efficient tri-linear sampling tricks [S5, unofficial].
++- **Time Complexity:** Considerably high computational costs. In 3D, it requires two more multiplications per dimension compared to linear interpolation, leading to a considerable amount of instructions [S3, unofficial].
++- **Performance Impact:** Increases total surface extraction time by about 3% compared to linear methods in some implementations [S4].
++- **Memory:** Requires access to 64 neighboring voxels per sample, increasing memory bandwidth requirements compared to trilinear (8 voxels) [S2, S3, unofficial].
++- **Strengths:** Produces significantly smoother results than linear interpolation, reducing banding and aliasing artifacts [S1, S2, S3, unofficial].
++- **Limitations:** High computational cost makes it less suitable for very large datasets or complex rendering techniques in real-time applications without hardware acceleration or optimization (like on-the-fly filtering) [S3, S6, unofficial].
++- **When to Use:** When visual quality is prioritized over performance, or when using hardware-accelerated tri-cubic filtering on moderate-sized datasets ($\le 256^3$) [S6, unofficial].
++- **When Not to Use:** For very large datasets where interactive frame rates are critical and linear interpolation provides sufficient quality, or when sharp discontinuities are present and ringing artifacts are unacceptable [S3, unofficial][S4].
+ 
+ ## Background
+-Cubic interpolation in volume rendering originates from the broader field of signal processing and image reconstruction, where higher-order polynomials are used to reconstruct continuous signals from discrete samples. The specific application to volume rendering was explored in the early 2000s as hardware capabilities improved. The Catmull-Rom spline, widely used as the default cubic filter, is a classic cardinal spline from computer graphics [S6, unofficial]. The "on-the-fly" tri-cubic optimization was developed to leverage existing GPU texture hardware (bi-linear filtering) to approximate tri-cubic results without dedicated hardware support, as described in implementation aspects of GPU-based volume rendering [S5, unofficial]. The trade-offs between quality and cost were systematically analyzed in various overviews of volume rendering techniques [S1, S3, S6, unofficial].
++Cubic interpolation in volume rendering originated from the need to improve the visual quality of rendered volumes beyond the blocky appearance of nearest-neighbor and the slightly smoother but still aliased appearance of trilinear interpolation. The method is based on cubic polynomial fits, which correspond to the standard Catmull-Rom interpolant when using finite differences for gradients [S4]. The specific "tri-cubic" implementation leveraging embedded bi-linear texture filtering was extended from 2D cases for GPU-based volume rendering to reduce wood-like artifacts and improve visualization quality [S6, unofficial]. The WENO variant was adapted from computational fluid dynamics to improve isosurface accuracy in medical visualization [S7].
+ 
+ ## Sources
+@@ -200,5 +185,6 @@
+ [S2] GPU-based Compressive Volume Rendering, https://doi.org/10.11575/prism/5366, fetched 2026-10-26 (unofficial)
+ [S3] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
+-[S4] terier/vpt, https://github.com/terier/vpt, fetched 2026-10-26 (unofficial)
+-[S5] GENERAL IMPLEMENTATION ASPECTS OF THE GPU- ..., http://sv-journal.org/2011-1/02/, fetched 2026-10-30 (unofficial)
+-[S6] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)+[S4] Accurate Isosurface Interpolation with Hermite Data, https://ieeexplore.ieee.org/document/7335492/, fetched 2026-11-05
++[S5] terier/vpt, https://github.com/terier/vpt, fetched 2026-10-26 (unofficial)
++[S6] GENERAL IMPLEMENTATION ASPECTS OF THE GPU- ..., http://sv-journal.org/2011-1/02/, fetched 2026-10-30 (unofficial)
++[S7] Estimation and Visualization of Isosurface Uncertainty from Linear and High-Order Interpolation Methods, https://arxiv.org/abs/2409.00043v1, fetched 2026-10-26

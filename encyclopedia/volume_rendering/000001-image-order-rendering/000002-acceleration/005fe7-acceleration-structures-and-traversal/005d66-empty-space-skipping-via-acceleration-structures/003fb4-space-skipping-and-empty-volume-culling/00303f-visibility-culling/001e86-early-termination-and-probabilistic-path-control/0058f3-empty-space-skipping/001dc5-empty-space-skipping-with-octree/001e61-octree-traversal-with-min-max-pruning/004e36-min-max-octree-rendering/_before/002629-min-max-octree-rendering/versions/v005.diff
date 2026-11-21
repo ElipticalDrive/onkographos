@@ -1,0 +1,176 @@
+--- v004.md
++++ v005.md
+@@ -17,19 +17,46 @@
+ **Algorithm Steps:**
+ 1.  **Define Volume:** Initialize the unclassified volume context using `vpSetVolumeSize()`, `vpSetVoxelSize()`, `vpSetVoxelField()`, and `vpSetRawVoxels()` [S1]. Ensure the voxel data array is populated [S1].
+-2.  **Configure Octree Resolution:** Set the `base_node_size` parameter. This defines the side length (in voxels) of the smallest octree nodes. A typical value is 4 [S1]. Smaller values increase resolution (better pruning) but increase memory usage [S1].
++2.  **Configure Octree Resolution:** Set the `base_node_size` parameter, which defines the side length (in voxels) of the smallest octree nodes. A typical value is 4; smaller values increase resolution at the expense of increased size [S1].
+ 3.  **Compute Min-Max Octree:** Call `vpCreateMinMaxOctree(vpc, root_node_size, base_node_size)` [S1]. This routine reads the raw voxel data, computes the min/max bounds for each node, and stores the octree in the rendering context [S1].
+     *   *Note:* `root_node_size` is reserved and currently unused [S1].
+ 4.  **Set Rendering Parameters:**
+     *   Set view and shading parameters [S1].
+-    *   Set the maximum opacity threshold (`VP_MAX_RAY_OPACITY`). This is the opacity value at which ray compositing stops. A typical value is 0.95 [S2].
++    *   Set the maximum opacity threshold (`VP_MAX_RAY_OPACITY`), the opacity value at which ray compositing stops. A typical value is 0.95 [S2].
+     *   (Optional) Set intermediate image size hints (`VP_INT_WIDTH_HINT`, `VP_INT_HEIGHT_HINT`) to pre-allocate work buffers and avoid reallocation overhead [S2].
+ 5.  **Render:** Call `vpRenderRawVolume(vpc)` [S1].
+     *   The renderer traverses the ray through the min-max octree [S2].
+     *   Voxels within active nodes are classified on-the-fly using the current transfer function and composited [S1].
+-6.  **Update:** If the raw voxel data changes, step 3 must be repeated. If the transfer function changes, only step 5 is needed (the octree remains valid) [S1].
++6.  **Update:** If the raw voxel data changes, step 3 must be repeated to recompute the octree, otherwise renderings will be incorrect. If the transfer function changes, only step 5 is needed [S1].
+ 
+ **Pseudocode:**
+ ```python
+ import numpy as np
++
++class MinMaxNode:
++    def __init__(self, min_val, max_val, size, children=None):
++        self.min = min_val
++        self.max = max_val
++        self.size = size
++        self.children = children if children else []
++
++def build_min_max_octree(data, base_node_size):
++    """Recursively builds a min-max octree from a 3D scalar array."""
++    def recurse(arr, current_size):
++        if current_size <= base_node_size:
++            return MinMaxNode(arr.min(), arr.max(), current_size)
++        mid = current_size // 2
++        children = []
++        for i in range(2):
++            for j in range(2):
++                for k in range(2):
++                    slice_arr = arr[i*mid:(i+1)*mid, j*mid:(j+1)*mid, k*mid:(k+1)*mid]
++                    children.append(recurse(slice_arr, mid))
++        return MinMaxNode(
++            min(c.min for c in children),
++            max(c.max for c in children),
++            current_size,
++            children
++        )
++    return recurse(data, data.shape[0])
+ 
+ class Context:
+@@ -40,68 +67,56 @@
+         self.octree = None
+         self.view_params = None
+-        self.shading_params = None
+         self.max_opacity = 1.0
+-        self.intermediate_width_hint = 0
+-        self.intermediate_height_hint = 0
++        self.transfer_function = None
+ 
+-class MinMaxNode:
+-    def __init__(self, min_val, max_val, size, children=None):
+-        self.min = min_val
+-        self.max = max_val
+-        self.size = size
+-        self.children = children or []
++class TransferFunction:
++    def __init__(self, min_active, max_active):
++        self.min_active = min_active
++        self.max_active = max_active
++    def classify(self, val):
++        # Standard transfer function lookup and compositing weights [G]
++        return np.array([0.0, 0.0, 0.0]), 0.0
+ 
+-def build_min_max_octree(data, base_node_size):
+-    """Recursively builds a min-max octree from a 3D scalar array."""
+-    def recurse(arr, current_size):
+-        if current_size <= 1:
+-            return MinMaxNode(arr.min(), arr.max(), 1)
+-        mid = current_size // 2
+-        children = []
+-        for i in range(2):
+-            for j in range(2):
+-                for k in range(2):
+-                    slice_arr = arr[i*mid:(i+1)*mid, j*mid:(j+1)*mid, k*mid:(k+1)*mid]
+-                    children.append(recurse(slice_arr, mid))
+-        return MinMaxNode(min(c.min for c in children), max(c.max for c in children), current_size, children)
+-    return recurse(data, data.shape[0])
++def vpRenderRawVolume(context):
++    """Complete rendering loop using min-max octree culling and front-to-back compositing."""
++    width, height, depth = context.volume_size
++    dx, dy, dz = context.voxel_size
++    origin, direction = context.view_params.ray_setup()
++    image = np.zeros((height, width, 3))
++    max_opacity = context.max_opacity
++    transfer = context.transfer_function
+ 
+-def vpRenderRawVolume(vpc):
+-    """Complete rendering loop using min-max octree culling and front-to-back compositing."""
+-    width, height, depth = vpc.volume_size
+-    dx, dy, dz = vpc.voxel_size
+-    origin, direction, step = vpc.view_params.ray_setup()
+-    image = np.zeros((height, width, 3))
+-    
+     for y in range(height):
+         for x in range(width):
+-            ray_origin = origin + x * direction.x + y * direction.y
+-            ray_dir = direction.z
++            ray_origin = origin + x * direction * dx + y * direction * dy
++            ray_dir = direction
+             accum_color = np.array([0.0, 0.0, 0.0])
+             accum_opacity = 0.0
+-            
+             t = 0.0
+-            while t < depth * step:
++            step = 1.0 / depth
++
++            while t < 1.0:
+                 voxel_pos = ray_origin + t * ray_dir
+-                if not vpc.volume_bounds.contains(voxel_pos):
++                if not (0 <= voxel_pos.x < width and 0 <= voxel_pos.y < height and 0 <= voxel_pos.z < depth):
+                     break
+-                
+-                node = vpc.octree.get_node_at(voxel_pos)
+-                if node.min > vpc.transfer_function.max_active or node.max < vpc.transfer_function.min_active:
++
++                node = context.octree.traverse(voxel_pos)
++                if node.min > transfer.max_active or node.max < transfer.min_active:
+                     t += node.size * step
+                     continue
+-                
+-                voxel_val = vpc.raw_voxels[voxel_pos]
+-                color, opacity = vpc.transfer_function.classify(voxel_val)
+-                
++
++                idx = (int(voxel_pos.x), int(voxel_pos.y), int(voxel_pos.z))
++                voxel_val = context.raw_voxels[idx]
++                color, opacity = transfer.classify(voxel_val)
++
+                 alpha = opacity * (1.0 - accum_opacity)
+                 accum_color += color * alpha
+                 accum_opacity += alpha
+-                
+-                if accum_opacity >= vpc.max_opacity:
++
++                if accum_opacity >= max_opacity:
+                     break
+-                    
++
+                 t += step
+-            
++
+             image[y, x] = accum_color
+     return image
+@@ -129,14 +144,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the sparsity of the volume and the effectiveness of the min-max pruning. In the worst case (dense volume, poor pruning), it approaches $O(N)$ where $N$ is the number of voxels, but with a higher constant factor than classified rendering due to on-the-fly classification. In sparse volumes, it approaches $O(K)$ where $K$ is the number of visible voxels.
+-*   **Memory Complexity:** $O(N / \text{base\_node\_size}^3)$ for the octree nodes, plus $O(N)$ for the raw voxel data. The octree adds overhead compared to raw rendering but enables significant speedups.
+-*   **Measured Performance:** Rendering with an octree is "significantly faster" than without, but still slower than `vpRenderClassifiedVolume` [S2].
+-*   **Strengths:** Ideal for interactive applications where the opacity transfer function (classification) changes frequently, as it avoids the $O(N)$ reclassification cost.
+-*   **Limitations:** Slower than classified rendering for static transfer functions. Memory overhead for the octree.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** Rendering with an octree is significantly faster than without, but still slower than rendering with `vpRenderClassifiedVolume` [S2].
++*   **Strengths:** Should be used when the volume data or the opacity transfer function changes in between renderings [S2].
++*   **Limitations:** Slower than classified rendering for static transfer functions.
+ *   **When to Use:** When volume data is static but classification/transfer functions change often, or when the volume is sparse enough that min-max pruning provides significant culling [S1, S2].
+ *   **When Not to Use:** When the transfer function is static (use Classified Volume Rendering) or when a single rendering is needed with no precomputation allowed (use raw rendering without octree) [S1].
+ 
+ ## Background
+-Min-Max Octree Rendering was introduced as part of the VolPack library by Mark Levoy and others at Stanford University. It was designed to address the limitations of pre-classified rendering in interactive visualization scenarios where users need to adjust opacity transfer functions in real-time. The technique leverages the spatial coherence of volume data by summarizing voxel values in octree nodes, allowing for efficient empty-space skipping and isovalue range culling. It is implemented in the `vpRenderRawVolume` routine of VolPack [S1, S2].
++Min-Max Octree Rendering was introduced as part of the VolPack library [S1, S2]. It was designed to address the limitations of pre-classified rendering in interactive visualization scenarios where users need to adjust opacity transfer functions in real-time [S1, S2]. The technique leverages the spatial coherence of volume data by summarizing voxel values in octree nodes, allowing for efficient empty-space skipping and isovalue range culling [S1]. It is implemented in the `vpRenderRawVolume` routine of VolPack [S1, S2].
+ 
+ ## Sources

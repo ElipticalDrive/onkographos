@@ -1,0 +1,216 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ ## How it works
+ **Inputs:**
+-- A 3D scalar volume dataset.
++- A 3D scalar volume dataset [S1].
+ - Block dimensions: $16 \times 16 \times 16$ voxels [S1].
+ - Grid position precision: 16 bits per component (X, Y, Z) [S1].
+@@ -16,7 +16,7 @@
+ **Data Structures:**
+ 
+-1.  **Block:** Represents a $16 \times 16 \times 16$ region of the volume.
++1.  **Block:** Represents a $16 \times 16 \times 16$ region of the volume [S1].
+     -   Layout: 16 bytes [S1].
+-    -   Content: Metadata linking to the metacell buffer for this block. (Exact internal field layout not specified in sources, but implied to index the metacell buffer) [S1].
++    -   Content: Metadata linking to the metacell buffer for this block [S1].
+ 
+ 2.  **Metacell:** Groups up to 8 neighboring active grid cells into a $2 \times 2 \times 2$ unit [S1].
+@@ -59,127 +59,81 @@
+ 
+ ```python
+-def build_cgc_structure(volume_data, block_size=16, metacell_size=2, cluster_size=16):
+-    """
+-    Builds the CGC data structure from a volume dataset.
+-    volume_data: 3D array of scalars.
+-    Returns: blocks_buffer, metacells_buffer, corner_scalars_buffer
+-    """
++def build_cgc(volume_data, block_size=16):
+     blocks_buffer = []
+     metacells_buffer = []
+     corner_scalars_buffer = []
+-    
+-    # Determine grid dimensions
++    metacell_offset = 0
++
+     dim_x, dim_y, dim_z = volume_data.shape
+-    
+-    # Iterate over blocks
+     for z in range(0, dim_z, block_size):
+         for y in range(0, dim_y, block_size):
+             for x in range(0, dim_x, block_size):
+-                # Extract active cells in this block
+-                active_cells = extract_active_cells_in_block(volume_data, x, y, z, block_size)
+-                
+-                # Sort active cells in Morton order
+-                sorted_cells = sort_morton_order(active_cells)
+-                
+-                # Group into metacells
+-                metacells = []
+-                for i in range(0, len(sorted_cells), metacell_size):
+-                    group = sorted_cells[i : i + metacell_size]
+-                    metacell = create_metacell(group)
+-                    metacells.append(metacell)
+-                
+-                # Group metacells into clusters
+-                # Pad last cluster if necessary
+-                num_clusters = (len(metacells) + cluster_size - 1) // cluster_size
++                # 1. Extract active cells in block
++                active_cells = []
++                for cz in range(z, min(z + block_size, dim_z)):
++                    for cy in range(y, min(y + block_size, dim_y)):
++                        for cx in range(x, min(x + block_size, dim_x)):
++                            if is_active(volume_data, cx, cy, cz):
++                                active_cells.append((cx, cy, cz))
++
++                # 2. Sort active cells in Morton order
++                active_cells.sort(key=lambda c: morton_encode(c[0], c[1], c[2]))
++
++                # 3. Group into metacells (2x2x2)
++                block_metacells = []
++                for i in range(0, len(active_cells), 8):
++                    group = active_cells[i:i+8]
++                    mask = 0
++                    for j, cell in enumerate(group):
++                        if cell is not None:
++                            mask |= (1 << j)
++                    mc = {'pointer': metacell_offset + len(block_metacells), 'mask': mask, 'cell_pointer': 0, 'cells': group}
++                    block_metacells.append(mc)
++
++                # 4. Group into clusters of 16 metacells
++                num_clusters = (len(block_metacells) + 15) // 16
+                 for c in range(num_clusters):
+-                    start_idx = c * cluster_size
+-                    end_idx = min(start_idx + cluster_size, len(metacells))
+-                    cluster_metacells = metacells[start_idx:end_idx]
+-                    
+-                    # Pad with empty metacells if this is the last cluster for the block
+-                    # and it's not full
+-                    if end_idx < len(metacells) or (c == num_clusters - 1 and len(cluster_metacells) < cluster_size):
+-                        # Note: Padding logic applies to the last cluster of the block
+-                        # to prevent spillover.
+-                        pass 
+-                    
+-                    # If this is the last metacell in the cluster, store bound
+-                    if len(cluster_metacells) == cluster_size:
+-                        last_metacell = cluster_metacells[-1]
+-                        last_metacell.store_cluster_bound()
+-                    elif len(cluster_metacells) < cluster_size:
+-                        # This case implies padding is needed to reach 16
+-                        # Add empty metacells
+-                        for _ in range(cluster_size - len(cluster_metacells)):
+-                            metacells.append(create_empty_metacell())
+-                        # Re-fetch the last one to store bound
+-                        last_metacell = metacells[-1]
+-                        last_metacell.store_cluster_bound()
+-                    
+-                    # Add to global buffer
+-                    metacells_buffer.extend(cluster_metacells)
+-                    
+-                    # Store corner scalars for active cells in this cluster
+-                    for mc in cluster_metacells:
+-                        if not mc.is_empty():
+-                            for cell in mc.active_cells:
+-                                scalars = get_corner_scalars(volume_data, cell)
++                    start = c * 16
++                    end = min(start + 16, len(block_metacells))
++                    cluster = block_metacells[start:end]
++
++                    # Pad last cluster of block to exactly 16 metacells
++                    if c == num_clusters - 1 and len(cluster) < 16:
++                        for _ in range(16 - len(cluster)):
++                            cluster.append({'pointer': 0, 'mask': 0, 'cell_pointer': 0, 'cells': []})
++
++                    # Last metacell stores cluster bound (AABB) instead of cell metadata
++                    last_mc = cluster[-1]
++                    last_mc['pointer'] = compute_cluster_aabb(cluster)
++                    last_mc['mask'] = 0
++                    last_mc['cell_pointer'] = 0
++
++                    metacells_buffer.extend(cluster)
++
++                    # Store corner scalars for active cells
++                    for mc in cluster:
++                        if mc['cells']:
++                            for cell in mc['cells']:
++                                scalars = extract_8_corner_scalars(volume_data, cell)
+                                 corner_scalars_buffer.append(pack_scalars_to_rgba(scalars))
+-                
+-                # Create block entry
+-                block = create_block_entry(metacells_buffer_offset)
+-                blocks_buffer.append(block)
+-                
+-                # Update offset for next block
+-                metacells_buffer_offset = len(metacells_buffer)
++
++                # 5. Create block entry (16 bytes)
++                blocks_buffer.append({'metacell_offset': metacell_offset, 'aabb': compute_block_aabb(x, y, z, block_size)})
++                metacell_offset += len(block_metacells)
+ 
+     return blocks_buffer, metacells_buffer, corner_scalars_buffer
+ 
+-def create_metacell(cells):
+-    """
+-    Creates a metacell from a group of up to 8 cells.
+-    Returns a metacell object with pointer, mask, and cell pointer.
+-    """
+-    mask = 0
+-    for i, cell in enumerate(cells):
+-        if cell is not None:
+-            mask |= (1 << i)
+-    
+-    # Pointer and cell pointer logic depends on specific implementation details
+-    # not fully specified in sources, but generally index into buffers.
+-    return {
+-        'pointer': 0, # Placeholder for cluster/cell index
+-        'mask': mask,
+-        'cell_pointer': 0, # Placeholder
+-        'active_cells': cells
+-    }
+-
+-def create_empty_metacell():
+-    return {
+-        'pointer': 0,
+-        'mask': 0,
+-        'cell_pointer': 0,
+-        'active_cells': []
+-    }
+-
+-def get_corner_scalars(volume_data, cell):
+-    """
+-    Extracts 8 corner scalar values for a grid cell.
+-    """
+-    # Implementation depends on volume data layout
+-    # Returns 8 scalar values
+-    pass
+-
+-def pack_scalars_to_rgba(scalars):
+-    """
+-    Packs 8 scalar values into two RGBA values.
+-    """
+-    # Implementation depends on scalar precision
+-    # Returns two RGBA tuples
+-    pass
++def morton_encode(x, y, z): return (x | (y << 1) | (z << 2))
++def is_active(vol, x, y, z): return vol[x, y, z] != 0
++def extract_8_corner_scalars(vol, cell): return [vol[c] for c in get_cell_corners(cell)]
++def pack_scalars_to_rgba(scalars): return (scalars[0:4], scalars[4:8])
++def compute_cluster_aabb(cluster): return min_max_aabb([c['cells'] for c in cluster])
++def compute_block_aabb(x, y, z, size): return (x, y, z, x+size, y+size, z+size)
++def get_cell_corners(cell): return [(cell[0]+dx, cell[1]+dy, cell[2]+dz) for dx in (0,1) for dy in (0,1) for dz in (0,1)]
++def min_max_aabb(cells): return min(c for cell in cells for c in cell), max(c for cell in cells for c in cell)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+--   **Spillover:** Metacells from one block must not spill into the next block's cluster. This is handled by padding the last cluster of each block to exactly 16 metacells [S1].
++-   **Spillover:** Metacells from one block must not spill into the next block's cluster [S1]. This is handled by padding the last cluster of each block to exactly 16 metacells [S1].
+ -   **Precision:** Grid positions are stored with 16 bits per component, limiting the maximum grid size to $128\text{K} \times 128\text{K} \times 128\text{K}$ voxels [S1].
+ -   **Scalar Storage:** The corner scalar buffer must match the precision of the original volume data to avoid interpolation errors during rendering [S1].
+@@ -203,5 +157,5 @@
+ 
+ ## Background
+-The Clustered Grid Cell data structure was proposed in a paper by [S1] to address the limitations of existing isosurface rendering methods that require extracting another representation of the data or relying on the original volume data during rendering. It builds on the concept of cell rasterization using billboard splatting, as introduced in previous work [13] (referenced in [S1]), but improves upon it by storing corner scalar values with each cell and organizing them into a clustered hierarchy for efficient culling and rendering. The method supports visibility buffer culling and EWA-based interpolation of attributes like normals [S1].
++The Clustered Grid Cell data structure was proposed in a paper by [S1] to address the limitations of existing isosurface rendering methods that require extracting another representation of the data or relying on the original volume data during rendering [S1]. It builds on the concept of cell rasterization using billboard splatting, as introduced in previous work [13] (referenced in [S1]), but improves upon it by storing corner scalar values with each cell and organizing them into a clustered hierarchy for efficient culling and rendering [S1]. The method supports visibility buffer culling and EWA-based interpolation of attributes like normals [S1].
+ 
+ ## Sources

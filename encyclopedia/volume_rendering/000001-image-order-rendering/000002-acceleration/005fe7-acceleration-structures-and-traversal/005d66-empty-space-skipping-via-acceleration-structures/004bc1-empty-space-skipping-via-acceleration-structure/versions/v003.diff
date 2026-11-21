@@ -1,0 +1,321 @@
+--- v002.md
++++ v003.md
+@@ -4,250 +4,95 @@
+ 
+ ## Overview
+-This method accelerates direct volume rendering by using a hierarchical min/max acceleration structure to skip transparent regions of the volume data. It reduces the number of ray samples taken by allowing rays to jump over blocks that do not contain visible data, typically achieving a 1.5–2x speedup [S2, unofficial]. It differs from sibling methods like [Hierarchical Bounding Box Tree for Empty-Space Skipping](8182-hierarchical-bounding-box-tree-for-empty-space-skipping.md) by using a fixed-grid brick structure rather than a tree of bounding boxes, and from [SparseLeap](5152-sparseleap.md) by relying on scalar min/max values rather than occupancy or sparse data structures.
++This method accelerates direct volume rendering by using a hierarchical min/max acceleration structure to skip transparent regions of the volume data [S1][S2, unofficial]. It reduces the number of samples taken per ray by jumping over blocks that contain no visible data, distinct from sibling methods that may use sparse voxel grids or hierarchical bounding box trees [S1][S2, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Source volume dataset $V$ of resolution $N_x \times N_y \times N_z$ (e.g., $512 \times 512 \times 512$) [S2, unofficial].
+-- Ray parameters: origin $O$ and direction $D$ [G].
+-- Brick dimensions: $B_x \times B_y \times B_z$ (typically $32 \times 32 \times 32$) [S1][S2, unofficial].
+-
+-**Outputs:**
+-- Rendered image with skipped transparent regions.
++**Inputs and Outputs:**
++*   **Input:** A source volumetric dataset (e.g., $512 \times 512 \times 512$) and a pre-computed acceleration structure [S2, unofficial].
++*   **Output:** A rendered image with reduced computational cost [S2, unofficial].
+ 
+ **Data Structures:**
+-1. **Acceleration Structure ($A$):** A volumetric dataset of size $M_x \times M_y \times M_z$.
+-   - Dimensions: $M_x = \lceil N_x / B_x \rceil$, $M_y = \lceil N_y / B_y \rceil$, $M_z = \lceil N_z / B_z \rceil$ [S2, unofficial].
+-   - Layout: Each cell $A[i][j][k]$ stores two scalar values: $min_{ijk}$ and $max_{ijk}$.
+-   - Content: $min_{ijk}$ is the minimum value in the source block $V$ corresponding to brick $(i,j,k)$; $max_{ijk}$ is the maximum value in that block [S2, unofficial].
+-   - Implementation: Stored as a two-channel volumetric texture or array [S2, unofficial].
++The acceleration structure is a small two-channel volumetric dataset [S2, unofficial].
++*   **Dimensions:** $16 \times 16 \times 16$ cells [S2, unofficial].
++*   **Layout:** Each cell corresponds to a $32 \times 32 \times 32$ block in the source dataset [S2, unofficial].
++*   **Content:** Each cell stores the minimum and maximum values found within its corresponding source block [S2, unofficial].
++*   **Alternative Layout:** Some implementations use a per-field min/max structure organized in $32 \times 32 \times 32$ bricks [S1].
+ 
+ **Algorithm Steps:**
+-1. **Build Acceleration Structure:**
+-   - Iterate over the source volume $V$ in blocks of size $B_x \times B_y \times B_z$.
+-   - For each block, compute the minimum and maximum scalar values.
+-   - Store these values in the corresponding cell of $A$.
+-   - *Note:* If the source resolution is not a multiple of the brick size, handle boundary blocks by computing min/max only over valid voxels [G].
++1.  For each ray, determine the intersection with the acceleration structure grid.
++2.  Traverse the acceleration structure cells along the ray path.
++3.  For each cell, retrieve the stored minimum and maximum values [S2, unofficial].
++4.  Check if the space corresponding to the cell is transparent. This is determined by comparing the min/max values against the transfer function's opacity threshold or visibility criteria [S2, unofficial].
++5.  If the cell is transparent (i.e., contains no visible data), skip the entire $32 \times 32 \times 32$ block and advance the ray to the next cell [S2, unofficial].
++6.  If the cell is not transparent, sample the source data within that block and perform standard front-to-back compositing [S2, unofficial].
+ 
+-2. **Ray Casting with Skipping:**
+-   - For each pixel, cast a ray $R(t) = O + tD$.
+-   - Determine the entry and exit points of the ray into the volume bounding box.
+-   - Iterate through the acceleration structure cells intersected by the ray.
+-   - For each cell $(i,j,k)$ intersected by the ray:
+-     - Retrieve $min_{ijk}$ and $max_{ijk}$ from $A[i][j][k]$.
+-     - Check if the cell is transparent: if $max_{ijk}$ is below the transfer function's opacity threshold (or effectively zero opacity), skip the entire block [S2, unofficial].
+-     - If the cell is not transparent, sample the source volume $V$ within the corresponding brick and perform standard volume integration for the samples within that brick.
+-   - Continue until the ray exits the volume or is fully opaque.
++**Pseudocode:**
++```python
++def render_ray(ray_origin, ray_direction, volume_data, accel_structure):
++    # Determine initial entry point into the acceleration structure grid
++    t_min, t_max = intersect_accel_grid(ray_origin, ray_direction)
++    
++    # Traverse acceleration structure cells
++    while t_min < t_max:
++        # Get current cell coordinates in the 16x16x16 structure
++        cell_coords = get_cell_coords(ray_origin, ray_direction, t_min)
++        
++        # Retrieve min/max values for this cell
++        min_val, max_val = accel_structure[cell_coords]
++        
++        # Check if the block is transparent
++        if is_transparent(min_val, max_val):
++            # Skip this 32x32x32 block
++            t_min += step_size_accel_cell(ray_direction)
++        else:
++            # Process the block in the source volume
++            block_origin = get_block_origin(cell_coords)
++            block_samples = sample_block(block_origin, ray_origin, ray_direction, volume_data)
++            composite(block_samples)
++            
++            # Advance ray past this block
++            t_min += step_size_accel_cell(ray_direction)
++            
++    return accumulated_color
++
++def is_transparent(min_val, max_val):
++    # Implementation depends on transfer function; 
++    # typically true if max_val < opacity_threshold
++    return max_val < OPACITY_THRESHOLD
++```
+ 
+ **Parameters:**
+-- Brick size: $32 \times 32 \times 32$ is typical [S1][S2, unofficial].
+-- Acceleration structure resolution: Derived from source resolution and brick size (e.g., $16 \times 16 \times 16$ for $512^3$ source) [S2, unofficial].
++*   **Block Size:** $32 \times 32 \times 32$ voxels [S2, unofficial].
++*   **Acceleration Structure Resolution:** $16 \times 16 \times 16$ cells [S2, unofficial].
++*   **Source Resolution Example:** $512 \times 512 \times 512$ [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Boundary Handling:** If the volume dimensions are not divisible by the brick size, the last bricks are smaller. The acceleration structure must still store min/max for these partial bricks.
+-- **Precision:** Min/max values should be computed with sufficient precision to avoid false negatives (skipping visible data) or false positives (skipping transparent data) [G].
+-- **Transfer Function:** The transparency check depends on the transfer function. A simple threshold on $max_{ijk}$ is an approximation; more complex transfer functions may require additional checks [G].
+-
+-**Pseudocode:**
+-
+-```python
+-def build_acceleration_structure(source_volume, brick_size):
+-    """
+-    Builds the min/max acceleration structure from the source volume.
+-    
+-    Args:
+-        source_volume: 3D array of shape (Nx, Ny, Nz)
+-        brick_size: tuple (Bx, By, Bz)
+-        
+-    Returns:
+-        accel_structure: 3D array of shape (Mx, My, Mz, 2)
+-                         where the last dimension stores (min, max)
+-    """
+-    Nx, Ny, Nz = source_volume.shape
+-    Bx, By, Bz = brick_size
+-    
+-    Mx = (Nx + Bx - 1) // Bx
+-    My = (Ny + By - 1) // By
+-    Mz = (Nz + Bz - 1) // Bz
+-    
+-    accel_structure = np.empty((Mx, My, Mz, 2))
+-    
+-    for i in range(Mx):
+-        for j in range(My):
+-            for k in range(Mz):
+-                # Determine the bounds of the brick in the source volume
+-                x_start = i * Bx
+-                y_start = j * By
+-                z_start = k * Bz
+-                
+-                x_end = min(x_start + Bx, Nx)
+-                y_end = min(y_start + By, Ny)
+-                z_end = min(z_start + Bz, Nz)
+-                
+-                # Extract the brick from the source volume
+-                brick = source_volume[x_start:x_end, y_start:y_end, z_start:z_end]
+-                
+-                # Compute min and max
+-                min_val = np.min(brick)
+-                max_val = np.max(brick)
+-                
+-                accel_structure[i, j, k, 0] = min_val
+-                accel_structure[i, j, k, 1] = max_val
+-                
+-    return accel_structure
+-
+-def ray_cast_with_skipping(ray_origin, ray_direction, volume, accel_structure, brick_size, opacity_threshold):
+-    """
+-    Casts a ray through the volume, skipping transparent bricks.
+-    
+-    Args:
+-        ray_origin: 3D vector (ox, oy, oz)
+-        ray_direction: 3D vector (dx, dy, dz)
+-        volume: 3D array of shape (Nx, Ny, Nz)
+-        accel_structure: 3D array of shape (Mx, My, Mz, 2)
+-        brick_size: tuple (Bx, By, Bz)
+-        opacity_threshold: scalar value; if max_val < threshold, brick is skipped
+-        
+-    Returns:
+-        color: rendered color for the ray
+-    """
+-    Nx, Ny, Nz = volume.shape
+-    Bx, By, Bz = brick_size
+-    
+-    Mx = (Nx + Bx - 1) // Bx
+-    My = (Ny + By - 1) // By
+-    Mz = (Nz + Bz - 1) // Bz
+-    
+-    # Compute ray entry and exit t values for the volume bounding box
+-    # Assuming volume is axis-aligned and starts at (0,0,0)
+-    t_min = 0.0
+-    t_max = 0.0
+-    
+-    # Compute t_min
+-    t_min = max(t_min, -ray_origin[0] / ray_direction[0] if ray_direction[0] != 0 else float('-inf'))
+-    t_min = max(t_min, -ray_origin[1] / ray_direction[1] if ray_direction[1] != 0 else float('-inf'))
+-    t_min = max(t_min, -ray_origin[2] / ray_direction[2] if ray_direction[2] != 0 else float('-inf'))
+-    
+-    # Compute t_max
+-    t_max = min(t_max, (Nx - ray_origin[0]) / ray_direction[0] if ray_direction[0] != 0 else float('inf'))
+-    t_max = min(t_max, (Ny - ray_origin[1]) / ray_direction[1] if ray_direction[1] != 0 else float('inf'))
+-    t_max = min(t_max, (Nz - ray_origin[2]) / ray_direction[2] if ray_direction[2] != 0 else float('inf'))
+-    
+-    if t_min > t_max:
+-        return (0.0, 0.0, 0.0)  # Ray misses volume
+-    
+-    # Iterate through acceleration structure cells
+-    # Determine the range of cells intersected by the ray
+-    # This requires computing the entry and exit t values for each cell
+-    # For simplicity, we iterate through all cells and check intersection
+-    
+-    color = (0.0, 0.0, 0.0)
+-    alpha = 0.0
+-    
+-    # Step through the ray in t
+-    # A more efficient approach would be to iterate through cells in order
+-    # Here we use a simplified approach: iterate through cells and check if they are intersected
+-    
+-    # Compute the step size in t for one brick
+-    # This is an approximation; a more precise method would compute exact cell intersections
+-    
+-    t_step = 1.0 / max(abs(ray_direction[0]), abs(ray_direction[1]), abs(ray_direction[2]))
+-    
+-    t = t_min
+-    while t <= t_max:
+-        # Compute the current position in the volume
+-        x = ray_origin[0] + t * ray_direction[0]
+-        y = ray_origin[1] + t * ray_direction[1]
+-        z = ray_origin[2] + t * ray_direction[2]
+-        
+-        # Determine the brick index
+-        i = int(x) // Bx
+-        j = int(y) // By
+-        k = int(z) // Bz
+-        
+-        # Check bounds
+-        if i < 0 or i >= Mx or j < 0 or j >= My or k < 0 or k >= Mz:
+-            t += t_step
+-            continue
+-            
+-        # Get min/max from acceleration structure
+-        min_val = accel_structure[i, j, k, 0]
+-        max_val = accel_structure[i, j, k, 1]
+-        
+-        # Check if brick is transparent
+-        if max_val < opacity_threshold:
+-            # Skip this brick
+-            # Advance t to the end of the brick
+-            # Compute the exit t for the current brick
+-            # This is an approximation; a more precise method would compute exact cell exit
+-            brick_x_end = (i + 1) * Bx
+-            brick_y_end = (j + 1) * By
+-            brick_z_end = (k + 1) * Bz
+-            
+-            # Compute t for the exit of the brick
+-            t_exit = float('inf')
+-            if ray_direction[0] != 0:
+-                t_exit = min(t_exit, (brick_x_end - ray_origin[0]) / ray_direction[0])
+-            if ray_direction[1] != 0:
+-                t_exit = min(t_exit, (brick_y_end - ray_origin[1]) / ray_direction[1])
+-            if ray_direction[2] != 0:
+-                t_exit = min(t_exit, (brick_z_end - ray_origin[2]) / ray_direction[2])
+-                
+-            t = max(t, t_exit)
+-            continue
+-        
+-        # Sample the volume within the brick
+-        # This is a simplified sampling; a real implementation would sample multiple points
+-        sample_val = volume[int(x), int(y), int(z)]
+-        
+-        # Compute color and alpha (simplified)
+-        # In practice, use a transfer function
+-        opacity = 1.0 if sample_val >= opacity_threshold else 0.0
+-        color_sample = (sample_val, sample_val, sample_val)
+-        
+-        # Composite
+-        alpha_new = alpha + (1.0 - alpha) * opacity
+-        color = color + (1.0 - alpha) * opacity * color_sample
+-        alpha = alpha_new
+-        
+-        if alpha >= 1.0:
+-            break
+-            
+-        t += t_step
+-        
+-    return color
+-```
++*   **Precision:** Min/max values must accurately represent the range of the source block to avoid false negatives (skipping visible data) or false positives (skipping empty data) [S2, unofficial].
++*   **Boundary Conditions:** Ray traversal must correctly handle entry and exit from the acceleration structure grid [S2, unofficial].
+ 
+ ## Subtopics
+ 
+-### [Parallel Ray Casting with Segment Lists](2565-parallel-ray-casting-with-segment-lists.md)
+-Uses segment lists to manage ray segments, suitable for parallel execution. Choose when parallelism is a priority.
+-
+ ### [SparseLeap](5152-sparseleap.md)
+-Uses sparse data structures for efficient traversal. Choose when the volume is highly sparse.
+-
+-### [Visibility Culling](6226-visibility-culling.md)
+-Culls invisible parts of the volume. Choose when occlusion is significant.
++Uses sparse voxel octrees for skipping; chosen for highly sparse data.
+ 
+ ### [Hierarchical Bounding Box Tree for Empty-Space Skipping](8182-hierarchical-bounding-box-tree-for-empty-space-skipping.md)
+-Uses a tree of bounding boxes. Choose when a more flexible hierarchy is needed.
+-
+-### [Efficient Space Skipping & Adaptive Sampling of Unstructured Volumes Using H.W. Accel. Ray Tracing](8217-efficient-space-skipping-adaptive-sampling-of-unstructured-v.md)
+-Uses hardware-accelerated ray tracing for unstructured volumes. Choose for unstructured data.
++Uses AABB trees; chosen for complex geometry integration.
+ 
+ ### [SparseLeap Ray-Casting with Occupancy Misses](9818-sparseleap-ray-casting-with-occupancy-misses.md)
+-Extends SparseLeap with occupancy misses. Choose for highly sparse volumes with many misses.
++Extends SparseLeap with occupancy misses; chosen for dynamic scenes.
++
++### [Space Skipping and Empty Volume Culling](10063-space-skipping-and-empty-volume-culling.md)
++Uses bounding volumes; chosen for static volumes with large empty regions.
++
++### [Progressive Ray Casting for Mobile](16346-progressive-ray-casting-for-mobile-devices.md)
++Adaptive sampling; chosen for mobile performance.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, but with a reduced constant factor due to skipping. The actual complexity depends on the sparsity of the volume.
+-- **Memory Complexity:** $O(N / B^3)$ for the acceleration structure, where $B$ is the brick size. For $B=32$, this is $1/32768$ of the source volume size.
+-- **Measured Performance:** 1.5–2x speedup on GPU implementations [S2, unofficial].
+-- **Scaling:** Scales well with volume resolution, as the acceleration structure size grows linearly with the number of bricks.
+-- **Strengths:** Simple to implement, effective for volumes with large transparent regions.
+-- **Limitations:** Less effective for dense volumes or volumes with small transparent regions. The fixed brick size may not be optimal for all volumes.
+-- **When to Use:** When the volume has large transparent regions and the overhead of building the acceleration structure is justified.
+-- **When Not to Use:** For dense volumes or when memory is constrained.
++*   **Performance:** Accelerates visualization by 1.5-2 times compared to non-skipping methods [S2, unofficial].
++*   **Complexity:** Time complexity is reduced proportional to the fraction of empty space skipped [S2, unofficial]. Memory complexity is dominated by the acceleration structure, which is significantly smaller than the source volume ($16^3$ vs $512^3$) [S2, unofficial].
++*   **Strengths:** Simple to implement on GPU; effective for volumes with large transparent regions [S2, unofficial].
++*   **Limitations:** Requires pre-computation of the acceleration structure; less effective for dense volumes [S2, unofficial].
+ 
+ ## Background
+-This method is an extension of CPU-based empty space skipping techniques to GPU implementations [S2, unofficial]. It is used in direct volume rendering to accelerate visualization by reducing the number of ray samples. The approach is described in the context of GPU-extended optimizations for volume rendering [S2, unofficial] and is part of the performance levers in direct volume raycasting [S1].
++This technique is an extension of CPU-based empty space skipping methods to GPU implementations [S2, unofficial]. It is used in direct volume rendering to optimize ray casting by avoiding unnecessary sampling of transparent regions [S1][S2, unofficial].
+ 
+ ## Sources

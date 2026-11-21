@@ -1,0 +1,636 @@
+# 概要
+
+https://qiita.com/maxima_hikky/items/58bbb384aa7021f6804d
+
+# はじめに
+
+前回の記事では、SDF（Signed Distance Field）は、**空間上のある位置から形状の表面までの距離を、符号付きの数値で表現する仕組み**だと説明しました。
+
+では、ここで一つ疑問が生まれます。
+
+**空間には無数の位置が存在しますが、SDFはそのすべての位置について、表面までの距離を格納しているのでしょうか？**
+
+もしそうだとしたら、膨大な量のデータが必要になりそうです。
+
+実は、HoudiniのVDBでは、すべての位置の距離を保存しているわけではありません。
+
+そこで今回は、まず馴染みのあるSOPの `VDB from Polygons` ノードを使い、**Narrow Band（ナローバンド**)という仕組みを説明します。
+
+その仕組みを理解したうえで、Copernicus（COP）でVDBを扱う方法について解説していきます。
+
+また、以下にそもそもVDBとは何かをまとめています。
+必要に応じて展開してください。
+
+<details><summary>そもそもVDBとは？ 名前の由来と開発の歴史</summary>
+
+## VDBとは？ 名前の由来と開発の歴史
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4289681/52121ffe-733f-4e2c-8415-9d40d20d5fa6.png)
+
+
+VDBは、3D空間のボリュームデータを効率よく格納・処理するために開発されたデータ構造です。
+
+VDBという名前は、開発当初の論文で次の特徴に由来すると説明されています。
+
+- **V：Volumetric**（ボリュームデータ）
+- **D：Dynamic**（動的に変化する構造）
+- **B：B+tree**（データを階層的に管理する木構造）
+
+ただし、公式FAQによると、厳密に決められた略語ではなく、これらの特徴に由来する名称として扱われています。
+
+
+### VDBはどこで開発されたのか？
+
+VDBは、**DreamWorks Animation（ドリームワークス・アニメーション）**で、Ken Museth氏を中心に開発されました。
+
+開発が始まったのは2009年頃です。
+
+映画制作では、煙・炎・雲などの膨大な3Dボリュームデータを扱います。
+
+従来の密なVolumeでは、煙が存在しない空間にも格子データを確保するため、広い空間を高解像度で扱おうとすると大量のメモリが必要になります。
+
+そこで開発されたのがVDBです。
+
+VDBは **Sparse（疎）なデータ構造**を採用しています。
+
+簡単にいうと、空間全体を均一に格納するのではなく、必要な領域を中心にデータを保持する仕組みです。
+
+これによって、大規模なボリュームデータを効率よく扱えるようになりました。
+
+### OpenVDBとして公開
+
+2012年8月3日、DreamWorks Animationは、それまで社内で使用していたVDB技術を **OpenVDB** としてオープンソース化しました。
+
+2013年には、Ken Museth氏による技術論文『VDB: High-Resolution Sparse Volumes with Dynamic Topology』も発表されています。
+
+現在はAcademy Software Foundation（ASWF）によって管理・開発されています。
+
+HoudiniでもOpenVDBの技術が利用されており、VDBを使ったSDF、煙、密度フィールドなどを扱えます。
+
+### つまりVolumeとVDBの違いは？
+
+- **Volume（通常の密なグリッド）**：空間全体に格子データを持つ
+- **VDB（疎なグリッド）**：必要な部分を中心に効率よく格納する
+
+重要なのは、VDBが特定の形状を表現するものではなく、**3D空間の数値データを効率よく保持するためのデータ構造**だということです。
+
+そのため、VDBにはSDFだけでなく、煙の密度や速度など、さまざまな情報を保存できます。
+
+**参考資料**
+
+- [OpenVDB公式サイト](https://www.openvdb.org/)
+- [OpenVDB FAQ：What does VDB stand for?](https://www.openvdb.org/documentation/doxygen/faq.html)
+- [VDBの開発論文（Ken Museth, 2013）](https://ken.museth.org/OpenVDB_files/Museth_TOG13.pdf)
+
+
+</details>
+
+# 1. VDB from PolygonsのNarrow Bandとは？
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4289681/a863b71a-5dd8-44a1-82a4-cf2afc4e6df6.png)
+
+
+まず、SOPで `Sphere` ノードと `VDB from Polygons` ノードを作成します。
+
+`VDB from Polygons` の `Distance VDB` を有効にすると、ポリゴンの表面を基準としたSDFが生成されます。
+
+ここで、次のパラメータに注目してください。
+
+- `Voxel Size`
+- `Exterior Band Voxels`
+- `Interior Band Voxels`
+
+このうち、Exterior BandとInterior Bandが今回の重要なポイントです。
+
+## Narrow Bandとは？
+
+Narrow Bandとは、**形状の表面付近の一定範囲だけに、正確な距離情報を保持する仕組み**です。
+
+SDFは本来、任意の位置から表面までの距離を求められるものですが、VDBでは必要な領域を中心に値を保存することでメモリの使用量を抑えています。
+
+具体的には、形状の表面を基準に、内側と外側に一定の幅を設けます。
+
+この範囲がNarrow Bandです。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4289681/81823935-7541-418f-b2b8-ecb20698f166.png)
+
+
+例えば、表面の外側に3ボクセル分、内側に3ボクセル分のNarrow Bandを設定したとします。
+
+この場合、表面から外側に3ボクセル、内側に3ボクセルの範囲を中心に、実際の距離情報が格納されます。
+
+それより離れた領域では、正確な距離を個別に保持する代わりに、一定の値などを利用します。
+
+つまり、**形状の表面から遠く離れた場所について、すべての距離を正確に記録する必要はない**という考え方です。
+
+## Exterior BandとInterior Band
+
+`VDB from Polygons` には、Narrow Bandの幅を指定するパラメータが2つあります。
+
+| パラメータ | 役割 |
+|---|---|
+| Exterior Band Voxels | 表面から外側へ何ボクセル分の距離情報を保持するか |
+| Interior Band Voxels | 表面から内側へ何ボクセル分の距離情報を保持するか |
+
+例えば、Exterior Band Voxelsを増やすと、表面の外側で正確な距離を保持する範囲が広がります。
+
+逆に小さくすると、表面付近の限られた範囲だけを保持するようになります。
+
+なお、`Use World Space for Band` が有効な場合は、ボクセル数ではなくHoudiniの距離単位でバンド幅を指定します。
+
+# 2. Active VoxelとBackground Value（BG）
+
+Narrow Bandの仕組みを理解するために、次に知っておきたいのが **Active Voxel（アクティブボクセル）** です。
+
+VDBには、値を保持する場所をアクティブ・非アクティブとして管理する仕組みがあります。
+
+## Active Voxelとは？
+
+Active Voxelとは、VDBの中でアクティブ状態になっているボクセルのことです。
+
+Distance VDBの場合、一般的にはNarrow Band内のボクセルがアクティブになり、そこに表面までの距離が格納されます。
+
+一方、Narrow Bandの外側は非アクティブな領域として扱えます。
+
+ただし、**非アクティブだからといって値が存在しないわけではありません。**
+
+VDBでは、非アクティブな領域についても、一定の値を持つタイルやBackground Valueを使用して数値を表現できます。
+
+この仕組みによって、すべてのボクセルを個別に保存しなくても、3D空間の値を管理できます。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4289681/425c720d-d387-49f0-996f-21cc4a8e0d76.png)
+
+
+ここで注意したいのは、**アクティブなボクセルと形状の内側にあるボクセルは、同じ意味ではない**ということです。
+
+Distance VDBでは、形状の外側にも正の距離が必要なので、表面の外側にもアクティブなボクセルが存在します。
+
+## BG（Background Value）とは？
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4289681/c97673d1-5625-481f-9aa0-eae7879514f0.png)
+
+
+`VDB from Polygons` ノードの情報を確認すると、次のような項目があります。
+
+- Resolution
+- Active
+- Voxel Size
+- BG
+- Band
+
+このうち `BG` は **Background Value（バックグラウンド値）** の略です。
+
+VDBでは、明示的なデータがない空間に対して、Background Valueという値を使用できます。
+
+Distance VDBの場合、一般的なNarrow Band Level Setでは、次のように領域を扱います。
+
+| 領域 | 値の扱い |
+|---|---|
+| 表面付近 | 正確な符号付き距離 |
+| Narrow Bandより外側 | 正の一定値 |
+| Narrow Bandより内側 | 負の一定値 |
+
+OpenVDBでは、表面の外側に対する正のBackground Valueと、内側の非アクティブ領域を表す負の値を使い分けられます。
+
+これによって、Narrow Bandから離れた場所でも、形状の内側なのか外側なのかという情報を維持できます。
+
+## BGの値はどのように決まる？
+
+`VDB from Polygons` でDistance VDBを作成した場合、BGはExterior Bandの幅に対応した値になります。
+
+`Use World Space for Band` がOFFの場合、基本的には次の関係です。
+
+`BG ≒ Exterior Band Voxels × Voxel Size`
+
+例えば、
+
+| Exterior Band Voxels | Voxel Size | BGの目安 |
+|---|---|---|
+| 3 | 1.0 | 3.0 |
+| 3 | 0.1 | 0.3 |
+| 5 | 0.2 | 1.0 |
+
+※BGはワールド空間の距離に対応する値です。実際の境界の離散化や生成条件によって、表示値には差が生じる場合があります。
+
+例えば、BGが `0.3` の場合、表面から1.0離れた外側の位置でも、保存されていない領域では `0.3` が返されることがあります。
+
+これは、実際の距離が0.3であるという意味ではありません。
+
+**Narrow Bandの外側では、正確な距離の代わりに一定の値を使っている**ということです。
+
+ここまでが、VDBが大量のデータを効率よく扱える理由の一つです。
+
+# 3. Voxel SizeとNarrow Bandの関係
+
+次に、`Voxel Size` について説明します。
+
+Voxel Sizeとは、**ボクセル1個の一辺の長さ**です。
+
+Houdiniのデフォルトの単位設定では、一般に1 Houdini Unitが1mに相当します。
+
+例えば、
+
+| Voxel Size | ボクセルの一辺 |
+|---|---|
+| 1.0 | 1m |
+| 0.5 | 50cm |
+| 0.1 | 10cm |
+| 0.01 | 1cm |
+
+Voxel Sizeを小さくすると、より細かい形状を表現できるようになります。
+
+ただし、解像度が高くなるほど、必要なボクセル数や処理量も増えます。
+
+## Voxel Sizeを変えるとNarrow Bandも変わる
+
+ここで重要なのは、Exterior Band VoxelsやInterior Band Voxelsをボクセル数で指定している場合、**Voxel Sizeを変更するとNarrow Bandの実際の幅も変化する**ということです。
+
+例えば、
+
+`Exterior Band Voxels = 3`
+
+という設定で、Voxel Sizeだけ変更してみます。
+
+| Voxel Size | 外側のBand幅 |
+|---|---|
+| 1.0 | 3.0 |
+| 0.5 | 1.5 |
+| 0.1 | 0.3 |
+
+つまり、同じ3ボクセルでも、Voxel Sizeによって距離情報を保持する範囲が変わります。
+
+形状の精度を上げるためにVoxel Sizeを小さくしたとき、Narrow Bandの幅も小さくなってしまう点には注意が必要です。
+
+同じワールド空間の距離を維持したい場合は、`Use World Space for Band` を利用できます。
+
+## VDBはボクセルをまとめて管理している
+
+もう一つ知っておきたいのが、VDBの **Leaf（リーフ）** という仕組みです。
+
+VDBは1ボクセルずつを完全に独立して管理しているわけではありません。
+
+OpenVDBでは、ボクセルを階層的な木構造で管理しています。
+
+その最下層にあるデータブロックがLeafです。
+
+一般的なOpenVDBの<a href="#float-gridの補足" title="なぜFloat Gridと呼ぶのか？&#10;&#10;Gridとは格子のことです。&#10;&#10;2D画像ではピクセルがX・Y方向に並びますが、VDBではX・Y・Zの3D格子座標に数値を対応させます。&#10;&#10;FloatGridは、その各位置にFloat型の値を持つVDBグリッドです。&#10;&#10;ただし、実際にはすべてのボクセルを保存しているわけではなく、Tree構造を利用して必要な領域だけを効率よく管理しています。">Floatグリッド</a>では、Leafは `8×8×8` のボクセルを格納できます。
+
+
+つまり、1つのLeafには512個分のボクセル領域があります。
+
+ただし、Leaf内の512個すべてが必ずアクティブとは限りません。
+
+Leaf単位で領域を確保しながら、ボクセルごとのアクティブ状態を管理することもできます。
+
+**このLeafの考え方が、次に説明するCopernicusでのVDBのアクティブ化につながります。**
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4289681/1fcab079-bc1a-43d9-8053-98a17e54d9e6.png)
+
+# 4. CopernicusでVDBを扱う
+
+ここまで、SOPの `VDB from Polygons` を使って、Narrow Bandとボクセルのアクティブ化について説明しました。
+
+では、Copernicusで作成した2DのSDFを3DのVDBで扱うには、どうすればよいのでしょうか？
+
+前回の記事では、`SDF Shape` ノードによって2DのSDFを作成しました。
+
+このSDFは、画像上の各ピクセルに形状の境界までの距離を格納しています。
+
+一方、3DのVDBでは、3D空間上のボクセルに数値を格納します。
+
+つまり、**2DのSDFが持つ距離情報を、3D空間のボクセルへ転写する必要があります。**
+
+ただし、その前に一つ問題があります。
+
+**どの位置のボクセルに値を書き込めばよいのでしょうか？**
+
+そこで、先ほど説明したアクティブ化の仕組みを利用します。
+
+## 4-1. VDBの基準となるグリッドを用意する
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4289681/b392e132-a47d-48f3-bd12-79db8376b1a5.png)
+
+まず、ボクセルの大きさや3D空間での配置を決めるために、**参照用VDB（Reference VDB）** を用意します。
+
+Copernicusの `Layer to VDB Leaf Points` ノードには、`refvdb` という入力があります。
+
+この入力にはVDBを接続する必要がありますが、**完成した形状やSDFの距離情報が入っている必要はありません。**
+
+なぜなら、`refvdb` は形状を取得するためではなく、これから生成するボクセルの大きさや配置を決めるために使用するものだからです。
+
+具体的には、次の情報を参照します。
+
+| 情報 | 役割 |
+|---|---|
+| Voxel Size | ボクセル1個の大きさ |
+| Transform | 3D空間でのボクセルの配置や座標変換 |
+
+つまり、参照用VDBは**ボクセルをどのような大きさ・位置に並べるかを決める定規のようなもの**です。
+
+ここでいう「空のVDB」とは、アクティブなボクセルを持たないVDBグリッドのことです。VDBグリッド自体が存在しない状態とは異なります。
+
+### 方法① Pyro Configureを使う
+
+今回は、COP内で完結する `Pyro Configure` ノードを使用します。
+
+`Pyro Configure` は本来Pyroシミュレーションの初期設定に使用するノードですが、ボクセルサイズなどを指定した参照用VDBを生成できます。
+
+例えば、以下のように設定します。
+
+| パラメータ | 設定例 |
+|---|---|
+| Divisions | Resolution |
+| Voxel Size | 128 |
+
+これによって、ボクセル1個の一辺が 2/128 =0.015625 Houdini Unitとなる参照用VDBを用意できます。
+
+Copernicusの Pyro Configureでは Voxel Size = 2/Resolution 
+だと以下で説明があります。
+
+https://www.sidefx.com/docs/houdini/nodes/cop/pyro_configure.html?utm_source=chatgpt.com
+
+Houdiniのバージョンによって出力名が異なります。
+
+- **Houdini 21.0**：`density` などのFloat VDB出力を使用
+- **Houdini 22.0**：`vdb_ref` 出力を使用
+
+これらを `Layer to VDB Leaf Points` の `refvdb` に接続します。
+
+今回はPyroシミュレーションを行うわけではありません。
+
+**ボクセルの大きさと配置を定義するためだけに `Pyro Configure` を使用しています。**
+
+※COPのPyro ConfigureはDOPレベルのライセンス権限が必要なため、Houdini Coreでは使用できません。
+
+### 方法② SOPで空のVDBを作成する
+
+もう一つの方法として、SOPの `VDB` ノードから参照用VDBを作ることもできます。
+
+`VDB` ノードはポリゴンを入力しなくてもVDBグリッドを生成できます。
+
+例えば、次のように設定します。
+
+| パラメータ | 設定例 |
+|---|---|
+| Name | reference |
+| Class | Other |
+| Storage Type | Float |
+| Voxel Size | 0.015625 |
+| Background Value | 0 |
+
+作成したVDBを `SOP Import` または `SOP Geometry` でCopernicusに読み込み、`Geometry to VDB` でVDBプリミティブを取り出します。
+
+※Houdiniのバージョンによっては、`Geometry to Layer 2.0` でVDBを取り出します。
+
+これを `Layer to VDB Leaf Points` の `refvdb` に接続すれば、SOPで用意したVDBも参照用として利用できます。
+
+### 参照VDBのVoxel SizeとLeafの関係
+
+ここで、前半で説明したLeafの仕組みを思い出してください。
+
+一般的なFloat VDBでは、1つのLeafが `8×8×8` のボクセルで構成されています。
+
+例えば、
+
+`Voxel Size = 0.1`
+
+の場合、1つのLeafの一辺は、
+
+`8 × 0.1 = 0.8 Houdini Unit`
+
+になります。
+
+つまり、Voxel Sizeを小さくすると、Leafが占める空間も小さくなります。
+
+同じ大きさの形状を扱う場合でも、Voxel Sizeが小さいほど、より多くのLeafが必要になります。
+
+このように、**参照VDBのVoxel SizeとTransformによって、これから生成するLeafの大きさと配置が決まる**わけです。
+
+## 4-2. Layer to VDB Leaf Pointsで必要な領域を調べる
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4289681/c669ce74-f883-4122-adec-1f30e2e4b612.png)
+
+参照用VDBが用意できたので、次に `Layer to VDB Leaf Points` ノードを使用します。
+
+このノードは、**2Dレイヤから3D空間に必要な領域を定義し、その領域と交差するVDBのLeafに対応したポイントを生成するノード**です。
+
+主な入力は次のとおりです。
+
+| 入力 | 役割 |
+|---|---|
+| `refvdb` | ボクセルサイズや配置の基準となるVDB |
+| `thickness` | Z方向の厚み |
+| `height` | レイヤ平面からの中心位置のオフセット |
+| `density` | 領域の有無を指定するMonoレイヤ |
+
+例えば、円のSDFを `SDF to Mono` で白黒マスクに変換し、`density` に接続します。
+
+さらに、`thickness` に値を与えることで、円の領域にZ方向の厚みを指定できます。
+
+`height` を変更すれば、厚みを持った領域の中心位置を移動できます。
+
+これらの情報と、先ほど用意した `refvdb` を組み合わせることで、どのLeafが必要になるかを計算します。
+
+![2Dの円からZ方向に厚みを持つLeaf Pointsが生成される様子](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4289681/f11fe6a5-09c1-4f0a-846e-73255496d98e.png)
+
+### ここで生成されるのはボクセルではなくポイント
+
+`Layer to VDB Leaf Points` が出力するのは、VDBそのものではなく、**必要なLeafの中心位置を表すポイント**です。
+
+例えば、円から作った厚みのある領域と、10個のLeafが交差する可能性があるなら、それらに対応する10個のポイントが生成されます。
+
+この時点では、まだボクセルのアクティブ化もSDFの距離情報の転写も行われていません。
+
+あくまで、**どのLeafをアクティブ化する必要があるのかを調べている段階**です。
+
+次の `VDB Activate from Points` ノードでは、このポイントを利用してLeafをアクティブ化します。
+
+そして、アクティブ化したVDBに対して `VDB from Layer` を使用することで、2DのSDFが持つ距離情報を転写していきます。
+
+## 4-3. VDB Activate from PointsでLeafをアクティブ化する
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4289681/a7482a9e-07bc-4ea5-b3b8-26a14eac1481.png)
+
+次に、`VDB Activate from Points` ノードを使用します。
+
+先ほどの `Layer to VDB Leaf Points` で生成したポイントを使い、VDBの必要なLeafをアクティブ化します。
+
+主な入力は次のとおりです。
+
+| 入力 | 役割 |
+|---|---|
+| `refvdb` | ボクセルサイズや配置の基準となるVDB |
+| `activate_pts1` | アクティブ化するLeafの位置を示すポイント |
+
+`refvdb` には、4-1で用意した参照用VDBを接続します。
+
+`activate_pts1` には、`Layer to VDB Leaf Points` の `points` 出力を接続します。
+
+これによって、ポイントが含まれるLeafがアクティブ化されます。
+
+### Leaf Dilationでアクティブ領域を拡張する
+
+ここで注目したいのが、`Leaf Dilation` パラメータです。
+
+今回は、**デフォルトの `0` から `1` に変更します。**
+
+| Leaf Dilation | アクティブ化する範囲 |
+|---|---|
+| 0 | ポイントが含まれるLeaf |
+| 1 | 対象Leafと、その周囲1Leaf分 |
+| 2 | 対象Leafと、その周囲2Leaf分 |
+
+つまり、`Leaf Dilation = 1` にすることで、アクティブ領域を周囲に1Leaf分拡張できます。
+
+以前説明したとおり、一般的なFloat VDBでは、1つのLeafは `8×8×8` ボクセルです。
+
+今回の参照用VDBでは、
+
+`Voxel Size = 0.015625`
+
+なので、1つのLeafの一辺は、
+
+`8 × 0.015625 = 0.125 Houdini Unit`
+
+となります。
+
+そのため、`Leaf Dilation = 1` は、各方向に隣接する1Leaf分、つまり約0.125 Houdini Unitの追加領域を確保する設定です。
+
+※実際のアクティブ領域はLeaf単位の格子状になるため、形状の表面から正確に0.125だけ広がるという意味ではありません。
+
+### Narrow Bandとの関係
+
+ここで、前半で説明したNarrow Bandを思い出してください。
+
+SOPの `VDB from Polygons` では、形状の表面付近に距離情報を保持する範囲を設けていました。
+
+今回の `Leaf Dilation` も、必要な領域の周囲に余裕を持たせるという点では似た考え方です。
+
+例えば、形状の境界付近で距離計算や変形などを行う場合、最初にアクティブ化した領域だけでは、処理に必要な範囲が不足する可能性があります。
+
+そこで `Leaf Dilation = 1` にして、周囲のLeafもアクティブ化しておきます。
+
+ただし、**Leaf DilationはNarrow Bandそのものを生成する機能ではありません。**
+
+- **Narrow Band**：形状の表面付近で正確なSDFの距離値を保持する範囲
+- **Leaf Dilation**：VDBで値を書き込んだり処理したりできるアクティブ領域を広げる機能
+
+Leaf Dilationを変更しただけでは、SDFの距離情報は生成されません。
+
+あくまで、後の処理で数値を格納できる領域を追加で確保している段階です。
+
+また、アクティブ領域を広げるほどメモリ使用量や処理負荷も増えるため、必要以上に大きくする必要はありません。
+
+### 次はSDFの距離情報を転写する
+
+これで、2Dの形状を基準にして、3D空間に必要なボクセル領域を確保できました。
+
+しかし、**この段階ではまだSDFの距離情報を転写していません。**
+
+次の `VDB from Layer` ノードで、アクティブ化したVDBに2DのSDFレイヤから距離情報を書き込んでいきます。
+
+## 4-4. VDB from LayerでSDFの値を転写する
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4289681/c0b8af1d-7382-4211-8a51-4a3368b390f1.png)
+
+
+必要なボクセル領域を用意できたら、次に数値を格納します。
+
+ここで使用するのが `VDB from Layer` ノードです。
+
+このノードは、参照VDBのアクティブな構造を利用して、入力したレイヤの値をVDBへサンプリングします。
+
+例えば、
+
+- `vdb_ref`：アクティブ化したVDB
+- `layer`：SDF Shapeで作成した2DのSDF
+
+という接続にします。
+
+すると、VDBの各ボクセル位置に対応する2Dレイヤの値が読み取られ、VDB側へ書き込まれます。
+
+ここで使うのは、`SDF to Mono` で作った白黒マスクではなく、**距離情報が残っている元のSDFレイヤ**です。
+
+これによって、形状の境界までの距離を3D空間のボクセル上で扱えるようになります。
+
+なお、レイヤの値はカメラ投影によって対応付けられるため、レイヤとVDBの位置・スケールにも注意が必要です。
+
+## 4-5. 2DのSDFを転写するだけで立体になる？
+
+ここまでで、2DのSDFを3DのVDBへ転写できるようになりました。
+
+しかし、**2DのSDFを3D空間に転写しただけでは、厚みのある閉じた立体のSDFが完成するとは限りません。**
+
+例えば、円の2D SDFをZ方向へ同じ値で転写すると、基本的には円柱を奥行き方向へ延長したような距離フィールドになります。
+
+この状態では、円柱の側面までの距離は表現できても、上面と下面までの距離は考慮されていません。
+
+立体として押し出すには、Z方向の境界も定義する必要があります。
+
+例えば、2D SDFの距離を `d2`、Z方向の中心を `centerZ`、厚みの半分を `h` とすると、
+
+`dz = abs(z - centerZ) - h`
+
+という式で、Z方向の範囲を定義できます。
+
+そして、
+
+`d = max(d2, dz)`
+
+とすれば、2D形状の内側かつZ方向の厚みの内側にある領域を、負の値として表現できます。
+
+※この式は押し出した形状の内外判定と境界を表すものです。角付近の値は厳密な最短距離とは限らないため、正確なSDFが必要な場合は距離の再計算が必要です。
+
+このように、XY方向のSDFとZ方向の距離情報を組み合わせることで、3Dの立体形状を構築できます。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4289681/e3654230-6cf2-46d2-9bdd-ef5ed0036762.png)
+
+
+
+## 4-6. ここまでの流れを整理する
+
+今回の処理をまとめると、次のようになります。
+
+| 手順 | ノード | 役割 |
+|---|---|---|
+| 1 | SDF Shape | 2Dの距離フィールドを生成 |
+| 2 | SOPのVDB / Geometry to VDBなど | 参照用VDBを用意 |
+| 3 | Layer to VDB Leaf Points | 必要なLeafの位置を取得 |
+| 4 | VDB Activate from Points | VDBの必要な領域をアクティブ化 |
+| 5 | VDB from Layer | SDFの距離情報を転写 |
+| 6 | VDB上での距離計算 | Z方向の厚みと境界を定義 |
+| 7 | ポリゴン化 | 値が0となる表面をメッシュ化 |
+
+最初に説明したNarrow Bandと考え方は共通しています。
+
+つまり、**VDBでは空間全体にすべての数値を格納するのではなく、必要な領域を確保し、その領域に値を保存して処理する**ということです。
+
+この仕組みを理解しておくと、CopernicusのVDB関連ノードが何を行っているのか分かりやすくなります。
+
+# まとめ
+
+今回は、SDFの距離情報がVDBにどのように格納されているかを説明しました。
+
+特に重要なのは次の点です。
+
+- **Narrow Band**：表面付近を中心に正確な距離情報を保存する仕組み
+- **Active Voxel**：アクティブな状態で管理されるボクセル
+- **Background Value（BG）**：明示的なデータがない領域で使用される値
+- **Voxel Size**：ボクセル1個の大きさ
+- **Leaf**：VDBのボクセルをまとめて管理するデータブロック
+
+そして、Copernicusでは、必要な領域をアクティブ化してから2DのSDFを転写することで、3D空間のVDBとして処理できます。
+
+**VDBは無数のボクセルをすべて実体化しているのではなく、必要な部分を効率よく管理するデータ構造です。**
+
+この考え方を理解することが、CopernicusでVDBを扱ううえで重要なポイントになります。
+
+次は、作成したVDBを使って実際に押し出し形状を生成し、移動や回転などの操作を行っていきます。
+
+# 参考資料
+
+- [SideFX公式：VDB from Polygons](https://www.sidefx.com/docs/houdini/nodes/sop/vdbfrompolygons.html)
+- [SideFX公式：CopernicusでVDBを扱う](https://www.sidefx.com/docs/houdini/copernicus/vdb.html)
+- [SideFX公式：Layer to VDB Leaf Points](https://www.sidefx.com/docs/houdini/nodes/cop/layertovdbleafpoints.html)
+- [SideFX公式：VDB Activate from Points](https://www.sidefx.com/docs/houdini/nodes/cop/vdbactivatefrompoints.html)
+- [SideFX公式：VDB from Layer](https://www.sidefx.com/docs/houdini/nodes/cop/vdbfromlayer.html)
+- [OpenVDB公式：データ構造とActive Voxel](https://www.openvdb.org/documentation/doxygen/overview.html)

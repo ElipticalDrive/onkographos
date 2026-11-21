@@ -1,0 +1,195 @@
+--- v001.md
++++ v002.md
+@@ -8,83 +8,63 @@
+ ## How it works
+ **Inputs:**
+-- `volume`: 3D density tensor of shape $(D, H, W)$ or $(C, D, H, W)$.
+-- `camera_matrix`: $4 \times 4$ matrix defining camera pose.
+-- `ijk2ras`: $4 \times 4$ transformation matrix from volume grid (IJK) to physical space (RAS).
+-- `ray_samples`: Number of samples per ray.
+-- `tile_h`, `tile_w`: Tile dimensions for memory management.
+-- `use_beer_lambert`: Boolean flag for attenuation model.
+-- `density_factor`: Scaling factor for non-Beer-Lambert mode.
+-- `margin`: Safety margin for near/far clipping.
++- `volume`: 3D density tensor of shape $(D, H, W)$ or $(C, D, H, W)$ [S1, unofficial].
++- `camera_matrix`: $4 \times 4$ matrix defining camera pose [S1, unofficial].
++- `ijk2ras`: $4 \times 4$ transformation matrix from volume grid (IJK) to physical space (RAS) [S1, unofficial].
++- `ray_samples`: Number of samples per ray [S1, unofficial].
++- `tile_h`, `tile_w`: Tile dimensions used to bound peak memory [S1, unofficial].
++- `use_beer_lambert`: Boolean flag for attenuation model [S1, unofficial].
++- `density_factor`: Scaling factor for non-Beer-Lambert mode [S1, unofficial].
++- `margin`: Safety margin for near/far clipping [S1, unofficial].
+ 
+ **Outputs:**
+-- Rendered image tensor.
+-- Optional transmittance or optical depth (`tau`).
++- Rendered image tensor [S1, unofficial].
++- Optional transmittance or optical depth (`tau`) [S1, unofficial].
+ 
+ **Data Structures:**
+-- `dirs_cam`: Buffer of shape $(H, W, 3)$ storing normalized camera-space view directions.
+-- `dirs_world`: Tensor of shape $(H, W, 3)$ storing world-space view directions.
+-- `origin_ijk`: Tensor of shape $(3,)$ storing the camera origin in IJK space.
+-- `dirs_ijk`: Tensor of shape $(H, W, 3)$ storing ray directions in IJK space.
+-- `ijk`: Tensor of shape $(ray\_samples, H, W, 3)$ storing sample coordinates in IJK space.
+-- `density_b`: Tensor of shape $(1, C, W, H, D)$ prepared for `grid_sample`.
++- `dirs_cam`: Buffer of shape $(H, W, 3)$ storing normalized camera-space view directions [S1, unofficial].
++- `dirs_world`: Tensor of shape $(H, W, 3)$ storing world-space view directions [S1, unofficial].
++- `origin_ijk`: Tensor of shape $(3,)$ storing the camera origin in IJK space [S1, unofficial].
++- `dirs_ijk`: Tensor of shape $(H, W, 3)$ storing ray directions in IJK space [S1, unofficial].
++- `ijk`: Tensor of shape $(ray\_samples, H, W, 3)$ (noted as $(D, H, W, 3)$ in the source) storing sample coordinates in IJK space [S1, unofficial].
++- `density_b`: Tensor of shape $(1, C, W, H, D)$ prepared for `grid_sample` [S1, unofficial].
+ 
+ **Steps:**
+ 
+-1. **Initialize Camera Directions:**
+-   Compute the vertical field of view (FOV) to populate `dirs_cam`. Generate a grid of directions in camera space, normalize them, and store in `dirs_cam` [S1, unofficial].
+-
+-2. **Extract Camera Pose:**
+-   Extract the camera-to-world rotation (`cam2world`) and position (`cam_pos`) from the `camera_matrix`. If the matrix represents world-to-camera (indicated by small translation norm), invert it to get camera-to-world [S1, unofficial].
+-
+-3. **Transform Directions to World Space:**
+-   Transform camera-space directions to world space:
++1. **Initialize Camera Directions:** Compute the vertical field of view (FOV) to populate `dirs_cam` [S1, unofficial]. Generate a grid of directions in camera space, normalize them, and store in `dirs_cam` [S1, unofficial].
++2. **Extract Camera Pose:** Extract the camera-to-world rotation (`cam2world`) and position (`cam_pos`) from the `camera_matrix` [S1, unofficial]. If the matrix represents world-to-camera (indicated by small translation norm), invert it to get camera-to-world [S1, unofficial].
++3. **Transform Directions to World Space:** Transform camera-space directions to world space:
+    $$ \text{dirs\_world} = \text{einsum}('ij,hwj->hwi', \text{cam2world}, \text{dirs\_cam}) $$
+    This results in shape $(H, W, 3)$ [S1, unofficial].
+-
+-4. **Extract Volume Transformation:**
+-   Extract the RAS-to-IJK rotation ($R$) and translation ($t$) from `ijk2ras`. Compute the scale factor:
++4. **Extract Volume Transformation:** Extract the RAS-to-IJK rotation ($R$) and translation ($t$) from `ijk2ras` [S1, unofficial]. Compute the scale factor:
+    $$ s = \frac{2.0}{\text{vol\_shape} - 1} $$
+    where `vol_shape` is $(D, H, W)$ [S1, unofficial].
+-
+-5. **Transform to IJK Space:**
+-   Transform world-space directions to IJK space:
++5. **Transform to IJK Space:** Transform world-space directions to IJK space:
+    $$ \text{dirs\_ijk} = \text{dirs\_world} @ R^T $$
+    Transform camera position to IJK space:
+    $$ \text{origin\_ijk} = \text{cam\_pos} @ R^T + t $$
+    Resulting shapes: `dirs_ijk` is $(H, W, 3)$, `origin_ijk` is $(3,)$ [S1, unofficial].
+-
+-6. **Compute Near and Far Clipping:**
+-   Calculate near and far clipping distances by projecting the 8 corners of the volume bounding box (in IJK space, transformed to RAS) onto the view direction from the camera position. Add the `margin` to expand the range [S1, unofficial].
+-
+-7. **Generate Sample Depths:**
+-   Compute sample depths along the ray:
++6. **Compute Near and Far Clipping:** Calculate near and far clipping distances by projecting the 8 corners of the volume bounding box (in IJK space, transformed to RAS) onto the view direction from the camera position [S1, unofficial]. Add the `margin` to expand the range [S1, unofficial].
++7. **Generate Sample Depths:** Compute sample depths along the ray:
+    $$ \text{depths} = \text{near} + (\text{far} - \text{near}) \times \text{linspace}(0, 1, \text{ray\_samples}) $$
+    Shape: $(ray\_samples,)$ [S1, unofficial].
+-
+-8. **Compute IJK Coordinates:**
+-   Compute IJK coordinates for all samples:
++8. **Compute IJK Coordinates:** Compute IJK coordinates for all samples:
+    $$ \text{ijk} = s \times (\text{origin\_ijk} + \text{dirs\_ijk} \times \text{depths}[:, \text{None}, \text{None}, \text{None}]) - 1 $$
+-   This results in shape $(ray\_samples, H, W, 3)$ [S1, unofficial].
+-
+-9. **Prepare Density Tensor:**
+-   Prepare the density tensor for `grid_sample` by unsqueezing to shape $(1, C, W, H, D)$ [S1, unofficial].
+-
+-10. **Render Tile:**
+-    Define a function `render_tile` that:
+-    - Samples density using `F.grid_sample(density_b, coords_tile, align_corners=False)`.
++   This results in shape $(ray\_samples, H, W, 3)$ (noted as $(D, H, W, 3)$ in the source) [S1, unofficial].
++9. **Prepare Density Tensor:** Prepare the density tensor for `grid_sample` by unsqueezing to shape $(1, C, W, H, D)$ [S1, unofficial].
++10. **Render Tile:** Define a function `render_tile` that:
++    - Samples density using `F.grid_sample(density_b, coords_tile, align_corners=False)` [S1, unofficial].
+     - If `use_beer_lambert` is True:
+-      - Compute optical depth: $\tau = \sum (\text{dens\_tile} \times \text{step\_size}, \text{dim}=2)$.
+-      - If `return_tau` is True, apply Poisson noise to $\tau$.
++      - Compute optical depth: $\tau = \sum (\text{dens\_tile} \times \text{step\_size}, \text{dim}=2)$ [S1, unofficial].
++      - If `return_tau` is True, apply Poisson noise to $\tau$ [S1, unofficial].
+       - Otherwise, apply Poisson noise to $\exp(-\tau)$ and return $1 - \text{noisy\_transmission}$ [S1, unofficial].
+     - If `use_beer_lambert` is False:
+-      - Compute $d = \text{density\_factor} \times \text{dens\_tile} / \text{ray\_samples}$.
+-      - Compute transmission: $\text{transmission} = \text{cumprod}(1.0 - d, \text{dim}=2)$.
+-      - Compute weight: $\text{weight} = d \times \text{transmission}$.
+-      - Compute alpha: $\alpha = 1 - \prod (1.0 - d, \text{dim}=2)$.
++      - Compute $d = \text{density\_factor} \times \text{dens\_tile} / \text{ray\_samples}$ [S1, unofficial].
++      - Compute transmission: $\text{transmission} = \text{cumprod}(1.0 - d, \text{dim}=2)$ [S1, unofficial].
++      - Compute weight: $\text{weight} = d \times \text{transmission}$ [S1, unofficial].
++      - Compute alpha: $\alpha = 1 - \prod (1.0 - d, \text{dim}=2)$ [S1, unofficial].
+       - Return $(\text{weight.sum(dim=2)} / (w\_sum + 10^{-6})) \times \alpha$ [S1, unofficial].
+-
+ 11. **Tiling Execution:**
+     - If the image is smaller than $2 \times \text{tile\_h} \times 2 \times \text{tile\_w}$, call `render_tile` with the full grid [S1, unofficial].
+-    - Otherwise, iterate over $H$ and $W$ in steps of `tile_h` and `tile_w`. For each tile, extract the corresponding grid coordinates, call `render_tile`, and collect outputs. Concatenate outputs along $W$ and $H$ axes [S1, unofficial].
++    - Otherwise, iterate over $H$ and $W$ in steps of `tile_h` and `tile_w` [S1, unofficial]. For each tile, extract the corresponding grid coordinates, call `render_tile`, and collect outputs [S1, unofficial]. Concatenate outputs along $W$ and $H$ axes [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -102,10 +82,11 @@
+     # 1. Initialize Camera Directions
+     h, w = volume.shape[-2], volume.shape[-1]
++    # Generate normalized camera-space view directions (placeholder for FOV logic)
+     dirs_cam = torch.empty(h, w, 3)
+     # ... (populate dirs_cam based on FOV, normalized) ...
+     
+     # 2. Extract Camera Pose
+-    cam_matrix = torch.tensor(camera_matrix, dtype=torch.float32)
+-    ijk2ras_tensor = torch.tensor(ijk2ras, dtype=torch.float32)
++    cam_matrix = torch.as_tensor(camera_matrix, dtype=torch.float32)
++    ijk2ras_tensor = torch.as_tensor(ijk2ras, dtype=torch.float32)
+     
+     # Handle batched or single matrix
+@@ -190,33 +171,41 @@
+                 out = render_tile(tile_coords)
+                 outputs.append(out)
+-        # Concatenate outputs
+-        # ... (concatenate along H and W axes) ...
+-        return torch.cat(outputs, dim=1) # Simplified concatenation
++        # Reconstruct full image by concatenating along H and W axes
++        full_h = ((h + tile_h - 1) // tile_h) * tile_h
++        full_w = ((w + tile_w - 1) // tile_w) * tile_w
++        full_image = torch.zeros(full_h, full_w, device=outputs[0].device)
++        idx = 0
++        for i in range(0, full_h, tile_h):
++            for j in range(0, full_w, tile_w):
++                if idx < len(outputs):
++                    full_image[i:i+tile_h, j:j+tile_w] = outputs[idx]
++                    idx += 1
++        return full_image[:h, :w]
+ ```
+ 
+ **Parameters:**
+-- `tile_h`, `tile_w`: Tile dimensions used to bound peak memory. Default 256x256. Ignored if image is smaller than $2 \times \text{tile\_h} \times 2 \times \text{tile\_w}$ [S1, unofficial].
+-- `use_checkpointing`: Boolean flag. If True and training, use `torch.utils.checkpoint.checkpoint` to save memory during backprop [S1, unofficial].
+-- `use_beer_lambert`: Boolean flag. If True, use Beer-Lambert law (exponential attenuation). If False, use a different accumulation model (cumulative product of $(1-d)$) [S1, unofficial].
+-- `scatter`: Optional scatter function. If present, scatter channels are processed separately and concatenated with non-scatter channels [S1, unofficial].
++- `tile_h`, `tile_w`: Tile dimensions used to bound peak memory [S1, unofficial]. Default 256x256 [S1, unofficial]. Ignored if image is smaller than $2 \times \text{tile\_h} \times 2 \times \text{tile\_w}$ [S1, unofficial].
++- `use_checkpointing`: Boolean flag [S1, unofficial]. If True and training, use `torch.utils.checkpoint.checkpoint` to save memory during backprop [S1, unofficial].
++- `use_beer_lambert`: Boolean flag [S1, unofficial]. If True, use Beer-Lambert law (exponential attenuation) [S1, unofficial]. If False, use a different accumulation model (cumulative product of $(1-d)$) [S1, unofficial].
++- `scatter`: Optional scatter function [S1, unofficial]. If present, scatter channels are processed separately and concatenated with non-scatter channels [S1, unofficial].
+ - `density_factor`: Scaling factor applied to density in the non-Beer-Lambert mode [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- Precision issues may arise when computing `ijk` coordinates if the volume is very large or the camera is very close.
+-- Boundary conditions: `grid_sample` with `align_corners=False` handles out-of-bounds coordinates by returning zero or padding values, which may affect edge pixels.
+-- Degenerate input: If `near` equals `far`, step size becomes zero, leading to division by zero or no sampling. The code clamps `near` to a minimum of 0.1 [S1, unofficial].
++- Precision issues may arise when computing `ijk` coordinates if the volume is very large or the camera is very close [S1, unofficial].
++- Boundary conditions: `grid_sample` with `align_corners=False` handles out-of-bounds coordinates by returning zero or padding values, which may affect edge pixels [S1, unofficial].
++- Degenerate input: If `near` equals `far`, step size becomes zero, leading to division by zero or no sampling [S1, unofficial]. The code clamps `near` to a minimum of 0.1 [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot H \cdot W \cdot \text{ray\_samples})$ where $N$ is the number of tiles. Tiling does not change the total number of samples but may introduce overhead from tile management.
+-- **Memory Complexity:** $O(\text{tile\_h} \cdot \text{tile\_w} \cdot \text{ray\_samples})$ for the intermediate tensors during rendering. This allows rendering of large images that would otherwise exceed GPU memory.
++- **Time Complexity:** $O(N \cdot H \cdot W \cdot \text{ray\_samples})$ where $N$ is the number of tiles [S1, unofficial]. Tiling does not change the total number of samples but may introduce overhead from tile management [S1, unofficial].
++- **Memory Complexity:** $O(\text{tile\_h} \cdot \text{tile\_w} \cdot \text{ray\_samples})$ for the intermediate tensors during rendering [S1, unofficial]. This allows rendering of large images that would otherwise exceed GPU memory [S1, unofficial].
+ - **Measured Performance:** Not given in the sources.
+-- **Scaling:** Scales well with image resolution due to tiling. Performance is limited by memory bandwidth and tensor operation efficiency.
+-- **Strengths:** Memory efficient for large images; leverages GPU-accelerated `grid_sample` for fast density lookup.
+-- **Limitations:** Tiling introduces overhead; may not be optimal for very small images where full-grid rendering is faster.
+-- **When to use:** When rendering high-resolution volumes that exceed available GPU memory.
+-- **When not to use:** For small images or when memory is not a constraint, full-grid rendering may be simpler and faster.
++- **Scaling:** Scales well with image resolution due to tiling [S1, unofficial]. Performance is limited by memory bandwidth and tensor operation efficiency [S1, unofficial].
++- **Strengths:** Memory efficient for large images [S1, unofficial]. Leverages GPU-accelerated `grid_sample` for fast density lookup [S1, unofficial].
++- **Limitations:** Tiling introduces overhead [S1, unofficial]. May not be optimal for very small images where full-grid rendering is faster [S1, unofficial].
++- **When to use:** When rendering high-resolution volumes that exceed available GPU memory [S1, unofficial].
++- **When not to use:** For small images or when memory is not a constraint, full-grid rendering may be simpler and faster [S1, unofficial].
+ 
+ ## Background
+-Originated in the context of deep learning-based volume rendering, specifically in the `flashdrr` repository [S1, unofficial]. It is designed to integrate with PyTorch's automatic differentiation and GPU acceleration capabilities.
++Originated in the context of deep learning-based volume rendering, specifically in the `flashdrr` repository [S1, unofficial]. It is designed to integrate with PyTorch's automatic differentiation and GPU acceleration capabilities [S1, unofficial].
+ 
+ ## Sources

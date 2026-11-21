@@ -1,0 +1,193 @@
+--- v005.md
++++ v006.md
+@@ -4,122 +4,50 @@
+ 
+ ## Overview
+-Inpainting SDS Loss is a modification of the Score Distillation Sampling (SDS) objective that uses a diffusion inpainting model to generate 3D content conditioned on existing scene context, ensuring that newly generated objects or textures harmonize with the established environment [S2]. Unlike vanilla SDS, which often generates incomplete or floating objects that fail to composite correctly, Inpainting SDS Loss leverages a binary mask and a masked version of the rendered image to guide the diffusion model, producing complete geometry and proper poses that integrate seamlessly with the scene [S2]. It is primarily used for inserting new objects into existing NeRF scenes or inpainting missing regions in multi-view consistent NeRFs [S1, unofficial][S2].
++Inpainting SDS Loss (LiSDS) is a modification of the Score Distillation Sampling (SDS) loss that uses a pre-trained or fine-tuned 2D inpainting diffusion model to generate 3D content conditioned on existing scene context [S1, unofficial][S2]. It solves the problem of incomplete geometry and poor compositional harmony when inserting objects into existing scenes, which vanilla SDS often fails to achieve by generating isolated parts (e.g., only a head) that do not align with the background [S2]. Unlike vanilla SDS, which conditions only on a text prompt, LiSDS conditions the diffusion model on a masked version of the rendered image and a binary mask, ensuring the generated object seamlessly integrates with the established scene [S2].
+ 
+ ## How it works
+-The method replaces the standard SDS loss with an inpainting-specific variant during the optimization loop. It requires a fine-tuned or pre-trained 2D diffusion inpainting model $\epsilon_\phi$ [S1, unofficial][S2]. The core mechanism involves conditioning the noise prediction on both the text prompt and the visual context provided by the current render masked by a region of interest.
++The method operates within the standard differentiable rendering loop [Parent](18224-score-distillation-loss-modifications.md). It replaces the standard noise prediction $\epsilon_\theta(x_t; y, t)$ with an inpainting-aware noise prediction $\epsilon_\phi(x_t; y, I_M, M, t)$, where the model predicts noise for the masked region while preserving the unmasked region $I_M$ [S2].
+ 
+-### Inputs and Outputs
+-*   **Inputs:**
+-    *   Radiance field parameters $\Theta$ (e.g., NeRF MLP weights, voxel grid).
+-    *   Camera pose $C$ and intrinsics.
+-    *   Text prompt embedding $y$.
+-    *   Binary mask $M$ defining the region to be inpainted or generated.
+-    *   Masked image $I_M$ (the rendered image with the target region zeroed out or blurred, providing context).
+-    *   Diffusion timestep $t$ and noise $\epsilon$.
+-*   **Outputs:**
+-    *   Gradient $\nabla_\Theta L_{iSDS}$ used to update $\Theta$.
++**Inputs and Outputs:**
++*   **Input:** Current radiance field parameters $\Theta$, camera pose, text prompt $y$, binary mask $M$, and the rendered image $I$ (or latent $z_0$).
++*   **Output:** Gradient $\nabla_\Theta L$ to update $\Theta$.
+ 
+-### Data Structures
+-*   **Mask $M$:** A binary image of the same resolution as the rendered image $I$. For object insertion, $M$ is derived by projecting a 3D bounding box into the camera viewpoint [S2]. For scene completion, $M$ may be derived from missing view data or user input [S1, unofficial].
+-*   **Masked Image $I_M$:** The rendered image $I$ where pixels corresponding to $M=1$ are replaced with a background value (e.g., black, white, or blurred context) to provide the inpainting model with the "known" regions [S2].
++**Data Structures:**
++*   **Mask $M$:** A binary mask of the same spatial dimensions as the rendered image. It is derived by projecting the 3D bounding box of the target object into the current camera viewpoint [S2]. Pixels inside the box are 1 (masked/inpainting region), and pixels outside are 0 (context region) [S2].
++*   **Masked Image $I_M$:** The rendered image $I$ where pixels outside the mask $M$ are preserved, and pixels inside $M$ are typically zeroed out or replaced with a neutral value before adding noise, depending on the specific inpainting model implementation [S2].
+ 
+-### Formulas
+-The Inpainting SDS Loss is defined as the expected squared difference between the actual noise $\epsilon$ and the noise predicted by the inpainting model $\epsilon_\phi$, conditioned on the text, timestep, mask, and masked image [S1, unofficial][S2]:
++**Steps:**
++1.  **Render:** Render the current image $I$ from $\Theta$ using the current camera pose.
++2.  **Mask Generation:** Compute the binary mask $M$ by projecting the 3D bounding box of the object being optimized onto the image plane [S2].
++3.  **Masked Input Preparation:** Create the masked image $I_M$ by applying $M$ to $I$. The specific handling of the masked region (e.g., zeroing) depends on the diffusion model's requirements [S2].
++4.  **Noise Addition:** Sample a timestep $t$ and Gaussian noise $\epsilon$. Add noise to $I_M$ to obtain the noisy sample $x_t$ [S2].
++5.  **Inpainting Noise Prediction:** Query the frozen inpainting diffusion model $\epsilon_\phi$ with inputs: noisy image $x_t$, text embedding $y$, masked image $I_M$, mask $M$, and timestep $t$. The model outputs the predicted noise $\hat{\epsilon} = \epsilon_\phi(x_t; y, I_M, M, t)$ [S2].
++6.  **Gradient Computation:** Compute the SDS gradient using the residual between the predicted noise and the actual noise, weighted by $\omega(t)$, and backpropagate through the renderer [S2].
+ 
+-$$ L_{iSDS}(\phi, g(\theta)) = \mathbb{E}_{t,\epsilon} \left[ \| \epsilon_\phi(x_t; y, t, M) - \epsilon_t \|_2^2 \right] $$
++**Formula:**
++The gradient for the radiance field parameters $\Theta$ is:
++$$ \nabla_\Theta L_{SDS} = \mathbb{E}_{t,\epsilon,C} \left[ \omega(t) \cdot (\epsilon_\phi(I_t; y, I_M, M, t) - \epsilon) \frac{\partial I_t}{\partial \Theta} \right] $$
++where:
++*   $\epsilon_\phi$ is the inpainting diffusion model [S2].
++*   $I_t$ is the noise-perturbed masked image at timestep $t$ [S2].
++*   $y$ is the text prompt embedding [S2].
++*   $I_M$ is the masked image (context) [S2].
++*   $M$ is the binary mask derived from the projected 3D bounding box [S2].
++*   $\epsilon$ is the sampled Gaussian noise [S2].
++*   $\omega(t)$ is the weighting function [Parent](18224-score-distillation-loss-modifications.md).
+ 
+-Where:
+-*   $x_t$ is the noisy image at timestep $t$, derived from the rendered image $I$ via the forward diffusion process: $x_t = \sqrt{\bar{\alpha}_t} I + \sqrt{1-\bar{\alpha}_t} \epsilon$.
+-*   $\epsilon_\phi$ is the inpainting diffusion model.
+-*   $y$ is the text embedding.
+-*   $M$ is the binary mask.
+-*   $\epsilon_t$ is the actual noise added at timestep $t$.
++**Alternative Formulation (LiSDS):**
++In some implementations (e.g., DITTO-NeRF), the loss is formulated as a mean squared error between the predicted noise and the actual noise, used to optimize latent vectors or rendered latents [S1, unofficial]:
++$$ L_{iSDS}(\phi, g(\theta)) = \mathbb{E}_{t,\epsilon} \left[ ||\epsilon_\phi(x_t; y, t, M) - \epsilon_t||^2_2 \right] $$
++where $x_t$ is the noise image, $\epsilon_t$ is the actual noise, and $M$ is the binary mask [S1, unofficial]. This is often combined with a Reliability-guided loss $L_R$ for in-boundary regions and sparsity loss $L_{sp}$ [S1, unofficial].
+ 
+-The gradient with respect to the radiance field parameters $\Theta$ is computed using the chain rule [S2]:
++**Parameters:**
++*   **Mask $M$:** Derived from projecting the 3D bounding box [S2].
++*   **Training Schedule:** In some variants, a refinement step is applied during the last 10% of training, where random foreground patches are masked and optimized with LiSDS to improve texture continuity [S1, unofficial].
+ 
+-$$ \nabla_\Theta L_{SDS} = \mathbb{E}_{t,\epsilon,C} \left[ \omega(t) \cdot \left( \epsilon_\phi(I_t; y, I_M, M, t) - \epsilon \right) \frac{\partial I_t}{\partial \Theta} \right] $$
+-
+-Where:
+-*   $\omega(t)$ is the weighting function (typically derived from the variance of the diffusion process).
+-*   $I_t$ is the noisy image at timestep $t$.
+-*   $\frac{\partial I_t}{\partial \Theta}$ is the gradient of the noisy rendered image with respect to the NeRF parameters, obtained via differentiable volume rendering.
+-
+-### Parameters
+-*   **Mask $M$:** Critical for defining the generation region. In object insertion, it is the projection of a 3D bounding box [S2].
+-*   **Text Prompt $y$:** Describes the object or content to be generated.
+-*   **Weighting $\omega(t)$:** Standard SDS weighting (e.g., $\frac{\partial x_t}{\partial \epsilon}$ or similar variance-based weights) [S2].
+-
+-### Pseudocode
+-The following pseudocode implements the gradient computation for Inpainting SDS Loss within a training step. It assumes access to a differentiable renderer `render()` and a diffusion inpainting model `inpaint_model()`.
+-
+-```python
+-def compute_inpainting_sds_gradient(theta, camera_pose, text_embedding, mask, diffusion_model, timestep_t, noise):
+-    """
+-    Computes the gradient for Inpainting SDS Loss.
+-    
+-    Args:
+-        theta: Radiance field parameters (e.g., NeRF weights).
+-        camera_pose: Camera extrinsics and intrinsics.
+-        text_embedding: Text prompt embedding y.
+-        mask: Binary mask M for the region of interest.
+-        diffusion_model: Pre-trained inpainting diffusion model epsilon_phi.
+-        timestep_t: Diffusion timestep t.
+-        noise: Gaussian noise epsilon.
+-        
+-    Returns:
+-        grad_theta: Gradient with respect to theta.
+-    """
+-    # 1. Render the clean image from the current radiance field
+-    # I is the rendered image at the given camera pose
+-    I = render(theta, camera_pose)
+-    
+-    # 2. Create the masked image I_M for conditioning
+-    # Replace masked regions with a neutral value (e.g., 0.5 or black)
+-    # This provides the "context" for the inpainting model
+-    I_M = I.clone()
+-    I_M[mask == 1] = 0.5  # [G] Common practice for inpainting conditioning; value may vary by model
+-    
+-    # 3. Add noise to the rendered image to get x_t
+-    # Using the standard diffusion forward process
+-    # alpha_t_bar is the cumulative product of alpha schedule up to t
+-    alpha_t_bar = get_alpha_bar(timestep_t)
+-    sqrt_alpha_t = sqrt(alpha_t_bar)
+-    sqrt_one_minus_alpha_t = sqrt(1 - alpha_t_bar)
+-    
+-    x_t = sqrt_alpha_t * I + sqrt_one_minus_alpha_t * noise
+-    
+-    # 4. Predict noise using the inpainting model
+-    # The model conditions on the masked image I_M, the text y, the mask M, and timestep t
+-    predicted_noise = diffusion_model(x_t, t=timestep_t, text_cond=text_embedding, image_cond=I_M, mask=M)
+-    
+-    # 5. Compute the SDS gradient
+-    # The residual is the difference between predicted noise and actual noise
+-    residual = predicted_noise - noise
+-    
+-    # 6. Apply weighting function omega(t)
+-    # omega(t) is typically derived from the diffusion schedule
+-    omega_t = get_weighting(timestep_t)
+-    
+-    weighted_residual = omega_t * residual
+-    
+-    # 7. Compute the gradient of the noisy image with respect to theta
+-    # This requires backpropagating through the noise addition and the renderer
+-    # Note: I_t is x_t, but we need d(x_t)/d(theta). Since noise is independent of theta,
+-    # d(x_t)/d(theta) = sqrt_alpha_t * d(I)/d(theta)
+-    dI_dtheta = compute_gradient_of_rendered_image(theta, camera_pose)
+-    dx_t_dtheta = sqrt_alpha_t * dI_dtheta
+-    
+-    # 8. Chain rule: grad_theta = E[weighted_residual * dx_t_dtheta]
+-    # In practice, this is a single sample Monte Carlo estimate
+-    grad_theta = weighted_residual * dx_t_dtheta
+-    
+-    return grad_theta
+-```
+-
+-### Edge Cases and Pitfalls
+-*   **Mask Precision:** If the mask $M$ is inaccurate (e.g., does not align with the projected 3D box), the inpainting model may generate artifacts at the boundaries or fail to integrate with the scene [S2].
+-*   **Context Leakage:** If the masked image $I_M$ does not provide sufficient context (e.g., if the masked region is too large or the background is complex), the generated object may not harmonize with the scene [S2].
+-*   **Inpainting Model Capability:** The method relies on a fine-tuned or pre-trained inpainting model. Using a standard text-to-image model without inpainting capabilities will not condition on the scene context, leading to the same issues as vanilla SDS [S1, unofficial].
+-*   **Reliability-Guided Loss Interaction:** In some implementations (e.g., DITTO-NeRF), Inpainting SDS Loss is combined with a Reliability-guided Loss ($L_R$) and sparsity loss. The mask determines whether $L_R$ is applied (in-boundary) or not (out-of-boundary) [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Mask Precision:** The accuracy of the projected 3D bounding box directly affects the quality of the inpainting. Incorrect projection leads to misaligned generation [S2].
++*   **Context Leakage:** If the mask $M$ is too small or the inpainting model does not properly condition on $I_M$, the generated object may not harmonize with the scene [S2].
++*   **Incomplete Generation:** Vanilla SDS may generate incomplete objects; LiSDS mitigates this by conditioning on the scene context [S2].
+ 
+ ## Subtopics
+@@ -129,20 +57,20 @@
+ 
+ ### RefFusion
+-RefFusion is a method that inpaints one reference image using an inpainting LDM on both global and locally cropped versions of the reference view [S3]. It utilizes SDS loss to distill learned priors from the adapted LDM into the scene, incorporating a discriminator loss and depth loss to improve the quality of inpainting results [S3]. Quantitatively, RefFusion surpassed all baselines in LPIPSdir (0.4283) compared to NeRF-In (0.4884), SPIn-NeRF (SD) (0.5701), SPIn-NeRF (LaMa) (0.4654), Inpaint3D (0.5150), Reference-guided inpainting (SDV2) (0.4532), and Reference-guided inpainting (SDXL) (0.4453) [S3].
++RefFusion inpaints one reference image using an inpainting Latent Diffusion Model (LDM) on both global and locally cropped versions of the reference view [S3]. It utilizes SDS loss to distill learned priors from the adapted LDM into the scene, incorporating a discriminator loss and depth loss to improve quality [S3]. Quantitatively, RefFusion surpassed all baselines in LPIPSdir (0.4283) compared to NeRF-In (0.4884), SPIn-NeRF (SD) (0.5701), SPIn-NeRF (LaMa) (0.4654), Inpaint3D (0.5150), Reference-guided inpainting (SDV2) (0.4532), and Reference-guided inpainting (SDXL) (0.4453) [S3].
+ 
+ ### Random Patch Refinement
+-Random Patch Refinement is a refinement step applied during the last 10% of training to improve texture and color continuity by masking foreground patches and optimizing them with LiSDS, excluding the Reliability-guided loss ($L_R$) [S1, unofficial]. During the final 10% of training, if an in-boundary view is sampled, the Reliability-guided loss is excluded, and a random patch mask is applied to the foreground to refine the corresponding part using the Inpainting SDS Loss ($L_{iSDS}$) [S1, unofficial]. This process results in the color and texture of the generated 3D object becoming more similar to the part generated by the LiSDS, while maintaining the overall shape and content of the image prior [S1, unofficial].
++A refinement step applied during the last 10% of training to improve texture and color continuity by masking foreground patches and optimizing them with LiSDS, excluding the Reliability-guided loss ($L_R$) [S1, unofficial]. During this phase, if an in-boundary view is sampled, $L_R$ is excluded, and a random patch mask is applied to the foreground to refine the corresponding part using LiSDS [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Similar to vanilla SDS, as it involves one forward pass through the diffusion model and one differentiable rendering pass per optimization step. However, the need to condition on $I_M$ and $M$ may add minor overhead for mask creation and image manipulation [S2].
+-*   **Memory Complexity:** Requires storing the mask $M$ and the masked image $I_M$ for each view, which is negligible compared to the NeRF parameters and diffusion model weights [S2].
+-*   **Performance:** Inpainting SDS Loss generates complete objects with proper poses that seamlessly integrate with the scene, whereas vanilla SDS often generates incomplete parts (e.g., only a cat's head) that fail to composite [S2]. It achieves higher CLIP scores (e.g., 74.6 for GO-NeRF) compared to baselines like Blended-NeRF (63.0) and Spin-NeRF (60.8) [S2].
+-*   **Strengths:** Ensures harmonized composition with existing scene context; generates complete geometry; reduces floating artifacts.
+-*   **Limitations:** Requires a high-quality inpainting model; sensitive to mask accuracy; may struggle with complex scene contexts if the masked image does not provide sufficient cues [S2].
+-*   **When to use:** When inserting new objects into an existing NeRF scene or inpainting missing regions in a multi-view consistent NeRF [S1, unofficial][S2].
+-*   **When not to use:** When generating a standalone object from text without scene context (vanilla SDS is sufficient); when the scene context is too complex or ambiguous for the inpainting model to handle [S2].
++*   **Time Complexity:** Similar to vanilla SDS, as it involves one forward pass through the diffusion model per gradient step. However, the need to project 3D bounding boxes to generate masks adds a small overhead [S2].
++*   **Memory Complexity:** Requires storing the mask $M$ and potentially the masked image $I_M$ [S2].
++*   **Performance:** Generates complete objects with proper poses that seamlessly integrate with the scene, outperforming vanilla SDS which often generates incomplete parts [S2].
++*   **Strengths:** Ensures harmonized composition and complete geometry by leveraging scene context [S2].
++*   **Limitations:** Requires accurate 3D bounding box estimation for mask generation [S2]. May require fine-tuning of the diffusion model for specific inpainting tasks [S1, unofficial].
++*   **When to use:** When inserting objects into existing scenes or inpainting missing regions in NeRFs [S1, unofficial][S2].
++*   **When not to use:** When generating objects from scratch without scene context, vanilla SDS may be sufficient [S2].
+ 
+ ## Background
+-Inpainting SDS Loss was introduced to address the limitations of vanilla SDS in generating 3D content that integrates with existing scenes. Vanilla SDS often produces incomplete or floating objects because it lacks scene context [S2]. The method draws inspiration from 2D image inpainting, which generates content conditioned on known regions of images [S2]. It was first proposed in the context of DITTO-NeRF, which uses a fine-tuned diffusion model for inpainting to generate 3D objects that resemble desired images while maintaining continuity [S1, unofficial]. It was further developed in GO-NeRF, which uses a pre-trained 2D diffusion inpainting model to provide generative priors, conditioning on text and scene information to ensure harmonized composition [S2]. The method is part of the broader family of Diffusion-Based Guidance for Radiance Field Optimization, which uses frozen Stable Diffusion models to optimize radiance fields [Parent].
++Inpainting SDS Loss was introduced to address the limitations of vanilla SDS in scene composition tasks. Vanilla SDS often generates incomplete objects that fail to composite well with the background [S2]. By conditioning the diffusion model on masked images and masks, LiSDS leverages the generative priors of 2D inpainting models to guide 3D optimization [S2]. The concept has been explored in works such as DITTO-NeRF [S1, unofficial] and GO-NeRF [S2], and is related to methods like RefFusion [S3] and MVIP-NeRF [S1, unofficial][S2].
+ 
+ ## Sources

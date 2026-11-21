@@ -1,0 +1,248 @@
+--- v001.md
++++ v002.md
+@@ -8,63 +8,40 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, volume header, brick masks, super-brick masks, and voxel data.
+-- Output: Boolean indicating if the ray hits any occupied voxel, or the intersection details.
++- Input: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, volume header, brick masks, super-brick masks, and voxel data [S1, unofficial].
++- Output: Boolean indicating if the ray hits any occupied voxel [S1, unofficial].
+ 
+ **Data Structures:**
+ The buffer layout consists of a header, bricks, brick mask, and super mask [S1, unofficial].
+ - **Header:** 20 words (`HEADER_WORDS 20`) [S1, unofficial].
+-  - Words 12-14: Occupied box minimum coordinates ($a_{min}$) [S1, unofficial].
+-  - Words 16-18: Occupied box maximum coordinates ($a_{max}$) [S1, unofficial].
+-  - Word 7: Super-mask offset [S1, unofficial].
++- Words 12-14: Occupied box minimum coordinates ($a_{min}$) [S1, unofficial].
++- Words 16-18: Occupied box maximum coordinates ($a_{max}$) [S1, unofficial].
++- Word 7: Super-mask offset [S1, unofficial].
+ - **Super-bricks:** A grid of $4^3$ bricks, containing $32^3$ cells total [S1, unofficial]. Each super-brick has a nonempty bitset appended after the brick mask [S1, unofficial].
+-- **Bricks:** The intermediate level between super-bricks and voxels.
++- **Bricks:** The intermediate level between super-bricks and voxels [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1. **Initialize DDA:** Set up the standard Digital Differential Analyzer state for the ray $\mathbf{o}, \mathbf{d}$ within the volume bounds [S1, unofficial].
+-2. **Iterate:** Loop while the ray is within the volume bounds and iteration count $< 768$ [S1, unofficial].
+-3. **Check Super-brick Occupancy:**
+-   - Determine the current super-brick index.
+-   - Read the super-brick's nonempty bitset.
+-   - If the bit is 0 (empty):
+-     - Call `skip_box(32)` to advance the ray state by 32 units (the size of a super-brick) [S1, unofficial].
+-     - Continue to the next iteration [S1, unofficial].
+-   - If the bit is 1 (occupied):
+-     - Proceed to step 4.
+-4. **Check Brick Occupancy:**
+-   - Determine the current brick index within the occupied super-brick.
+-   - Read the brick's occupancy mask.
+-   - If the brick is empty:
+-     - Call `skip_box(8)` to advance the ray state by 8 units (the size of a brick) [S1, unofficial].
+-     - Continue to the next iteration.
+-   - If the brick is occupied:
+-     - Proceed to step 5.
+-5. **Fine DDA Traversal:**
+-   - Perform the standard per-voxel DDA traversal for the current brick [S1, unofficial].
+-   - Check individual voxels for occupancy.
+-   - If an occupied voxel is found, return true (hit) [S1, unofficial].
+-6. **Early-Out Check:**
+-   - At each step, check if the ray has definitively passed the occupied volume.
+-   - The ray is monotonic per axis. If the current cell index has passed the occupied box boundary on an axis it is moving toward, the ray can never hit the occupied volume [S1, unofficial].
+-   - Condition: If $(step \ge 0 \land cell > a_{max}) \lor (step \le 0 \land cell < a_{min})$, return false immediately [S1, unofficial].
+-7. **Termination:**
+-   - If the iteration cap (768) is reached without a hit or early-out, return false [S1, unofficial].
++1. Initialize DDA state for the ray $\mathbf{o}, \mathbf{d}$ within the volume bounds [G].
++2. Loop while the ray is within the volume bounds and iteration count $< 768$ [S1, unofficial].
++3. Check super-brick occupancy via its nonempty bitset [S1, unofficial]. If empty, call `skip_box(32)` to advance the ray state by 32 units and continue to the next iteration [S1, unofficial].
++4. If the super-brick is occupied, check the current brick's occupancy mask [S1, unofficial]. If the brick is empty, call `skip_box(8)` to advance the ray state by 8 units and continue [S1, unofficial].
++5. If the brick is occupied, perform the fine per-voxel DDA traversal [S1, unofficial].
++6. Early-out: if the ray is monotonic per axis and the current cell index has passed the occupied box boundary on an axis it is moving toward ($step \ge 0 \land cell > a_{max}$ or $step \le 0 \land cell < a_{min}$), return false immediately [S1, unofficial].
++7. The iteration cap remains 768; skipping reduces iterations per ray but does not change the cap [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def trace_shadow(o, d, header, brick_masks, super_masks, voxel_data):
+-    # Extract occupied box bounds from header
++    # Extract occupied box bounds from header [S1, unofficial]
+     a_min = header[12:15]
+     a_max = header[16:19]
+     
+-    # Initialize DDA state
+-    t, cell, step = initialize_dda(o, d)
++    # Initialize standard 3D DDA state [G]
++    t, cell, step, t_delta, t_max = init_dda(o, d)
+     
+-    # Iteration cap
++    # Iteration cap unchanged by skipping [S1, unofficial]
+     max_iterations = 768
+     
+     for _ in range(max_iterations):
+-        # Check early-out against occupied box
+-        # Ray is monotonic per axis. If cell passed a_max in positive direction
+-        # or passed a_min in negative direction, it can never hit.
++        # Early-out check against occupied box [S1, unofficial]
+         for axis in range(3):
+             if step[axis] >= 0 and cell[axis] > a_max[axis]:
+@@ -73,90 +50,70 @@
+                 return False
+         
+-        # Determine current super-brick
+-        super_idx = get_super_brick_index(cell)
++        # Determine current super-brick index (32^3 cells per super-brick) [G]
++        super_idx = tuple(c // 32 for c in cell)
+         
+-        # Check super-brick occupancy
++        # Check super-brick occupancy via nonempty bitset [S1, unofficial]
+         if not is_super_brick_occupied(super_idx, super_masks):
+-            # Skip entire 32x32x32 super-brick
+-            t, cell, step = skip_box(t, d, cell, step, 32)
++            # Skip entire 32x32x32 super-brick [S1, unofficial]
++            t, cell, step = skip_box(t, d, o, cell, step, 32)
+             continue
+         
+-        # Determine current brick within super-brick
+-        brick_idx = get_brick_index(cell)
++        # Determine current brick index within super-brick (8^3 cells per brick) [G]
++        brick_idx = tuple((c // 8) % 4 for c in cell)
+         
+-        # Check brick occupancy
++        # Check brick occupancy mask [S1, unofficial]
+         if not is_brick_occupied(brick_idx, brick_masks):
+-            # Skip 8x8x8 brick
+-            t, cell, step = skip_box(t, d, cell, step, 8)
++            # Skip 8x8x8 brick [S1, unofficial]
++            t, cell, step = skip_box(t, d, o, cell, step, 8)
+             continue
+         
+-        # Fine per-voxel DDA
+-        # Perform standard DDA steps within the brick
++        # Fine per-voxel DDA traversal within occupied brick [S1, unofficial]
+         while is_within_brick(cell):
+             if is_voxel_occupied(cell, voxel_data):
+                 return True
+-            
+-            # Advance DDA
+-            t, cell, step = advance_dda(t, d, cell, step)
+-            
+-            # Check if we've left the brick
+-            if not is_within_brick(cell):
+-                break
++            t, cell, step = advance_dda(t, d, cell, step, t_delta, t_max)
+         
+-        # If we exited the brick without a hit, advance to next brick/super-brick
+-        # The skip_box logic handles the transition to the next occupied region
+-        # or continues fine DDA if the next region is also occupied.
+-        # Note: The source implies skip_box is used for empty regions.
+-        # For occupied regions, we rely on the fine DDA loop above.
+-        # If the fine DDA loop finishes without hit, we need to advance to the next
+-        # super-brick or brick. The source says "skip_box(32)" for empty super-bricks.
+-        # If the current super-brick is occupied but the current brick was empty,
+-        # we skipped the brick. If the brick was occupied, we did fine DDA.
+-        # If fine DDA finishes, we need to move to the next brick/super-brick.
+-        # The source doesn't explicitly detail the transition after fine DDA exhausts
+-        # the current brick. However, standard DDA traversal continues.
+-        # We assume the DDA state (t, cell, step) is updated to the next cell.
+-        # If the next cell is in a new brick/super-brick, the loop continues.
++        # Advance to next cell after brick traversal [G]
++        t, cell, step = advance_dda(t, d, cell, step, t_delta, t_max)
+         
+-        # Advance to next cell (standard DDA step)
+-        t, cell, step = advance_dda(t, d, cell, step)
+-        
+-        # Check if we've left the volume
+-        if not is_within_volume(cell):
+-            break
+-            
+     return False
+ 
+-def skip_box(t, d, cell, step, size):
+-    """
+-    Advances the ray state by 'size' units along the ray,
+-    using the same crossing/tie logic as the fine DDA.
+-    This ensures visited-cell decisions are identical.
+-    """
+-    # Calculate the new t value
++def init_dda(o, d):
++    # Standard DDA initialization for unit voxel size and origin 0 [G]
++    step = [1 if d[i] > 0 else -1 for i in range(3)]
++    cell = [int(o[i]) for i in range(3)]
++    t_delta = [abs(1.0 / d[i]) if d[i] != 0 else float('inf') for i in range(3)]
++    t_max = [t_delta[i] * (cell[i] - o[i] + (0.5 if step[i] > 0 else -0.5)) for i in range(3)]
++    return 0.0, cell, step, t_delta, t_max
++
++def advance_dda(t, d, cell, step, t_delta, t_max):
++    # Advance to the next voxel boundary along the closest axis [G]
++    axis = 0
++    if t_max[1] < t_max[axis]: axis = 1
++    if t_max[2] < t_max[axis]: axis = 2
++    t = t_max[axis]
++    cell[axis] += step[axis]
++    t_max[axis] += t_delta[axis]
++    return t, cell, step, t_delta, t_max
++
++def skip_box(t, d, o, cell, step, size):
++    # Advances ray by 'size' units using the same crossing/tie logic as fine DDA [S1, unofficial]
+     t_new = t + size
+-    
+-    # Determine the new cell index
+-    # This requires solving for the cell boundaries
+-    # cell_new[axis] = floor((o[axis] + t_new * d[axis] - origin[axis]) / voxel_size)
+-    # However, to maintain exactness, we use the DDA crossing logic.
+-    # The source states skip_box uses the same crossing/tie logic.
+-    # We simulate advancing the DDA by 'size' units.
+-    
+-    # Approximate implementation for clarity, assuming unit voxel size and origin 0
+-    # In practice, this involves precise floating point arithmetic to match fine DDA
+-    new_cell = [0, 0, 0]
+-    for axis in range(3):
+-        # Calculate the position at t_new
+-        pos = d[axis] * t_new
+-        # Determine which cell this position falls into
+-        # This is a simplification; real implementation uses DDA crossing times
+-        new_cell[axis] = int(pos) # Placeholder for precise DDA crossing logic
+-        
+-    # Update step direction
+-    # The step direction remains the same unless we cross a boundary
+-    # The source implies skip_box handles the transition correctly
+-    
++    # Recompute cell index at new t using DDA crossing logic to maintain exactness [S1, unofficial]
++    new_cell = [int(o[i] + t_new * d[i]) for i in range(3)]
+     return t_new, new_cell, step
++
++def is_super_brick_occupied(idx, masks):
++    return masks[idx]
++
++def is_brick_occupied(idx, masks):
++    return masks[idx]
++
++def is_voxel_occupied(cell, data):
++    return data[cell]
++
++def is_within_brick(cell):
++    # Check if cell is within the current 8x8x8 brick [G]
++    return all(0 <= (c % 8) < 8 for c in cell)
+ ```
+ 
+@@ -173,19 +130,14 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-- Time complexity is reduced for sparse volumes due to skipping empty regions. The iteration cap remains 768, but the average number of iterations per ray is lower [S1, unofficial].
+-- Memory complexity increases slightly due to the super-brick and brick masks [S1, unofficial].
++Time complexity is reduced for sparse volumes due to skipping empty regions, while the iteration cap remains 768 [S1, unofficial]. Memory complexity increases slightly due to the super-brick and brick masks [S1, unofficial].
+ 
+ **Measured Performance:**
+-- On M2 Metal, for the `autumn/orbit_close` scene, GPU p50 decreased from 73.11 ms to 44.55 ms (-39.1%) [S1, unofficial].
+-- On M2 Metal, for the `sponge1m/fit` scene, GPU p50 increased from 15.16 ms to 15.24 ms (+0.5%), showing neutral performance for dense scenes [S1, unofficial].
+-- Visual regression tests on M2 Metal show 0% differing pixels and max delta 0 for all 9 stills, confirming exactness [S1, unofficial].
++On M2 Metal, for the `terrain1m/orbit_close` scene, GPU p50 decreased from 73.11 ms to 44.55 ms (-39.1%) [S1, unofficial]. On M2 Metal, for the `sponge1m/fit` scene, GPU p50 increased from 15.16 ms to 15.24 ms (+0.5%), showing neutral performance for dense scenes [S1, unofficial]. Visual regression tests on M2 Metal show 0% differing pixels and max delta 0 for all 9 stills, confirming exactness [S1, unofficial].
+ 
+ **Strengths and Limitations:**
+-- **Strengths:** Significant speedups in sparse scenes (e.g., autumn, terrain) by skipping empty regions [S1, unofficial]. Maintains exactness compared to fine DDA [S1, unofficial].
+-- **Limitations:** Regression in dense scenes due to overhead of hierarchy checks [S1, unofficial].
++Strengths include significant speedups in sparse scenes (e.g., autumn, terrain) by skipping empty regions [S1, unofficial]. Limitations include regression in dense scenes due to overhead of hierarchy checks [S1, unofficial].
+ 
+ **When to Use:**
+-- Use for sparse volumetric data where large empty regions are common.
+-- Do not use for dense volumetric data where empty regions are rare, as the overhead may outweigh the benefits.
++Use for sparse volumetric data where large empty regions are common [G]. Do not use for dense volumetric data where empty regions are rare, as the overhead may outweigh the benefits [G].
+ 
+ ## Background

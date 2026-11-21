@@ -1,0 +1,186 @@
+--- v003.md
++++ v004.md
+@@ -4,83 +4,92 @@
+ 
+ ## Overview
+-KFD-NeRF is a dynamic neural radiance field method that models the 4D radiance field as a dynamic system with temporally varying states, estimated using a Kalman filter to combine observations from input data and predictions based on local linear motion equations [S1]. It differs from sibling methods like [Gear-NeRF](13848-gear-nerf.md) or [NeRF with Time Parameter](14705-nerf-with-time-parameter.md) by explicitly separating motion estimation into an observer branch (shallow MLP) and a predictor branch (linear motion model), fusing them via a learnable Kalman gain [S1]. Unlike feature-interpolation approaches, it uses deformation fields warped to a canonical space represented by tri-planes, enabling smoother learning and faster convergence [S1].
++KFD-NeRF is a dynamic neural radiance field method that models the 4D radiance field as a dynamic system with temporally varying states, estimated using a Kalman filter to combine observations from input data and predictions based on local linear motion equations [S1]. It differs from sibling methods like [Gear-NeRF](13848-gear-nerf.md) and [NeRF with Time Parameter](14705-nerf-with-time-parameter.md) by explicitly separating motion estimation into an observer branch (direct observation via a shallow MLP) and a predictor branch (history-based prediction), fusing them via a learnable Kalman gain [S1]. Unlike feature-interpolation approaches, it uses deformation fields to warp points to a canonical space, leveraging a tri-plane representation for efficient spatial encoding [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** 3D point coordinates $\mathbf{x}$, viewing direction $\mathbf{d}$, and timestamp $t_i$.
+-*   **Output:** Radiance color $\mathbf{c}$ and density $\sigma$ in the canonical space, after warping $\mathbf{x}$ using the estimated deformation $\hat{d\mathbf{x}}_{t_i}$.
++*   **Inputs:** 3D spatial coordinates $\mathbf{x}$, view direction $\mathbf{d}$, and timestamp $t_i$. Training data consists of multi-view images at discrete timestamps.
++*   **Outputs:** Deformation field $\hat{d\mathbf{x}}_{t_i}$ (warping $\mathbf{x}$ to canonical space), density $\sigma$, and color $\mathbf{c}$.
+ 
+ **Data Structures:**
+-1.  **Tri-Plane Representation:** Three mutually orthogonal 2D planes encoding the canonical space. Features are concatenated with raw coordinate inputs to handle coordinate shift errors [S1].
+-2.  **Observer MLP:** A two-layer shallow MLP that takes $\mathbf{x}$ and $t_i$ as input, outputting mean observation $y_{t_i}$ and noise-related terms $\varepsilon_{t_i}$ [S1].
+-3.  **Kalman Gain Network:** A linear layer $f$ that takes $\varepsilon_{t_i}, \varepsilon_{t_{i-1}}$ and $t_i, t_{i-1}$ as inputs to compute the Kalman gain $K_{t_i}$ [S1].
++*   **Tri-Plane Representation:** Three mutually orthogonal 2D planes encode the canonical space. Features from these planes are concatenated with raw coordinate inputs to handle coordinate shift errors [S1].
++*   **Observer MLP:** A two-layer shallow MLP takes $\mathbf{x}$ and $t_i$ as input [S1].
++*   **Kalman Gain Network:** A linear layer $f$ takes noise terms and timestamps to compute the Kalman gain [S1].
+ 
+-**Numbered Steps:**
+-1.  **Observer Query:** For the current timestamp $t_i$, query the observer MLP with $\mathbf{x}$ and $t_i$ to obtain the observation $y_{t_i}$ and noise terms $\varepsilon_{t_i}$ [S1].
+-2.  **Velocity Approximation:** Calculate the velocity $v_{t_i}$ using deformations from the previous two frames:
+-    $$ v_{t_i} = (d\mathbf{x}_{t_{i-1}} - d\mathbf{x}_{t_{i-2}}) / \Delta t_i $$
+-    where $d\mathbf{x}_{t}$ is the deformation at time $t$ [S1].
+-3.  **Prediction:** Compute the predicted deformation state $\hat{d\mathbf{x}}_{t_i}^{-}$ using the local linear motion model:
+-    $$ \hat{d\mathbf{x}}_{t_i}^{-} = 2d\mathbf{x}_{t_{i-1}} - d\mathbf{x}_{t_{i-2}} $$
+-    This is equivalent to $d\mathbf{x}_{t_{i-1}} + \Delta t_i \cdot v_{t_i}$ assuming uniform time steps or appropriate scaling [S1].
+-4.  **Kalman Gain Calculation:** Compute $K_{t_i}$ using the linear layer $f$:
++**Algorithm:**
++The method estimates the deformation state $d\mathbf{x}_{t_i}$ for each point $\mathbf{x}$ at time $t_i$. The process follows these steps:
++
++1.  **Observer Step:** Query the observer MLP with $\mathbf{x}$ and $t_i$ to obtain the mean observation $y_{t_i}$ and noise-related terms $\varepsilon_{t_i}$ [S1].
++    $$ y_{t_i}, \varepsilon_{t_i} = \text{Observer}(\mathbf{x}, t_i) $$
++2.  **Prediction Step:** Calculate the velocity $v_{t_i}$ using deformations from the previous two frames ($t_{i-1}$ and $t_{i-2}$) [S1]:
++    $$ v_{t_i} = \frac{d\mathbf{x}_{t_{i-1}} - d\mathbf{x}_{t_{i-2}}}{\Delta t_i} $$
++    Compute the predicted deformation $\hat{d\mathbf{x}}_{t_i}^{-}$ using local linear motion [S1]:
++    $$ \hat{d\mathbf{x}}_{t_i}^{-} = d\mathbf{x}_{t_{i-1}} + \Delta t_i \cdot v_{t_i} = 2d\mathbf{x}_{t_{i-1}} - d\mathbf{x}_{t_{i-2}} $$
++3.  **Kalman Gain Calculation:** Compute the Kalman gain $K_{t_i}$ using a linear layer $f$ that takes noise-related terms $\varepsilon_{t_i}, \varepsilon_{t_{i-1}}$ and timestamps $t_i, t_{i-1}$ as inputs [S1]:
+     $$ K_{t_i} = f(\varepsilon_{t_i}, \varepsilon_{t_{i-1}}, t_i, t_{i-1}) $$
+-    [S1].
+-5.  **Deformation Estimation:** Combine the observation and prediction:
++4.  **Update Step:** Combine the observation $y_{t_i}$ and prediction $\hat{d\mathbf{x}}_{t_i}^{-}$ using the Kalman gain to produce the final deformation estimation $\hat{d\mathbf{x}}_{t_i}$ [S1]:
+     $$ \hat{d\mathbf{x}}_{t_i} = \hat{d\mathbf{x}}_{t_i}^{-} + K_{t_i} (y_{t_i} - \hat{d\mathbf{x}}_{t_i}^{-}) $$
+-    [S1].
+-6.  **Warping:** Warp the 3D point $\mathbf{x}$ from real space to the canonical space using $\hat{d\mathbf{x}}_{t_i}$ [S1].
+-7.  **Rendering:** Query the tri-plane representation with the warped point and direction $\mathbf{d}$ to obtain density and color, then render using standard volume rendering [S1].
++5.  **Warping and Rendering:** Warp all points in real space to a time-independent canonical space according to $\hat{d\mathbf{x}}_{t_i}$. Query the tri-plane representation and color/density networks in the canonical space to render the image [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def kfd_nerf_forward(x, d, t_i, t_prev, t_prev_prev, observer_mlp, kalman_gain_net, tri_plane):
+-    # Step 1: Observer for current frame
+-    y_ti, eps_ti = observer_mlp(x, t_i)
++def kfd_nerf_deformation(x, t_i, t_prev, t_prev_prev, observer_mlp, kalman_gain_net, deform_prev, deform_prev_prev):
++    """
++    Computes the deformation for point x at time t_i using Kalman Filter logic.
+     
+-    # Step 2 & 3: Prediction using previous frames
+-    # Retrieve previous deformations (assumed to be stored or computed in previous steps)
+-    dx_prev = get_deformation(t_prev) 
+-    dx_prev_prev = get_deformation(t_prev_prev)
++    Args:
++        x: 3D point coordinates (tensor)
++        t_i: Current timestamp
++        t_prev: Previous timestamp
++        t_prev_prev: Timestamp before previous
++        observer_mlp: Two-layer MLP for observation
++        kalman_gain_net: Linear layer for Kalman gain
++        deform_prev: Deformation d_x_{t_{i-1}}
++        deform_prev_prev: Deformation d_x_{t_{i-2}}
++        
++    Returns:
++        final_deformation: Estimated deformation d_x_{t_i}
++    """
++    # Step 1: Observer Step
++    # Observer MLP outputs mean observation y and noise-related terms epsilon
++    y_t, epsilon_t = observer_mlp(x, t_i)
+     
+-    # Velocity calculation
++    # Step 2: Prediction Step
++    # Calculate velocity from previous two frames
+     delta_t = t_i - t_prev
+-    v_ti = (dx_prev - dx_prev_prev) / delta_t
++    velocity = (deform_prev - deform_prev_prev) / delta_t
+     
+-    # Prediction: linear extrapolation
+-    dx_pred = dx_prev + delta_t * v_ti
++    # Predict deformation using local linear motion
++    # d_x_{t_i}^- = d_x_{t_{i-1}} + delta_t * v_{t_i}
++    predicted_deformation = deform_prev + delta_t * velocity
+     
+-    # Step 4: Kalman Gain
+-    # Need eps_prev from previous frame's observer call
+-    eps_prev = get_noise_terms(t_prev)
+-    K_ti = kalman_gain_net(eps_ti, eps_prev, t_i, t_prev)
++    # Step 3: Kalman Gain Calculation
++    # Get noise terms from previous step (assumed available from previous iteration)
++    # epsilon_prev is epsilon_{t_{i-1}}
++    epsilon_prev = get_epsilon_from_prev_step() 
+     
+-    # Step 5: Update
+-    dx_est = dx_pred + K_ti * (y_ti - dx_pred)
++    # Compute Kalman gain K_{t_i}
++    kalman_gain = kalman_gain_net(epsilon_t, epsilon_prev, t_i, t_prev)
+     
+-    # Step 6: Warp
+-    x_canonical = x + dx_est
++    # Step 4: Update Step
++    # Combine observation and prediction
++    final_deformation = predicted_deformation + kalman_gain * (y_t - predicted_deformation)
+     
+-    # Step 7: Render
+-    sigma, color = tri_plane.query(x_canonical, d)
+-    return color, sigma, dx_est
++    return final_deformation
+ ```
+ 
+-**Formulas:**
+-*   **Rendering Equation:**
+-    $$ C(\mathbf{r}, t) = \int_{s_n}^{s_f} T(s, t) \sigma(\mathbf{r}(s), t) \mathbf{c}(\mathbf{r}(s), \mathbf{d}, t) ds $$
+-    where $\mathbf{r}(s) = \mathbf{o} + s\mathbf{d}$ [Parent].
+-*   **Kalman Loss:**
++**Loss Functions:**
++The total loss $\mathcal{L}$ is a weighted sum of five components [S1]:
++$$ \mathcal{L} = \mathcal{L}_{image} + \mathcal{L}_{kf} + \mathcal{L}_{co} + \mathcal{L}_{prop} + \lambda_{tv} \mathcal{L}_{tv} $$
++
++1.  **Image Loss ($\mathcal{L}_{image}$):** Standard photometric reconstruction loss [S1].
++2.  **Kalman Loss ($\mathcal{L}_{kf}$):** Minimizes the error between the observation $y_{t_i}$ and the estimated deformation $\hat{d\mathbf{x}}_{t_i}$ [S1]:
+     $$ \mathcal{L}_{kf} = \frac{1}{\mathcal{N}} \sum_{\mathbf{x} \in \mathcal{N}} \| y_{t_i} - \hat{d\mathbf{x}}_{t_i} \|_2^2 $$
+-    [S1].
+-*   **Canonical Observation Loss:**
++3.  **Canonical Observation Loss ($\mathcal{L}_{co}$):** Soft regularization for frame $t_0$ to normalize the difference between the canonical space and the real world at $t=0$ [S1]:
+     $$ \mathcal{L}_{co} = \frac{1}{\mathcal{N}} \sum_{\mathbf{x} \in \mathcal{N}} \mathbb{1}(t) d\mathbf{x} $$
+-    where $\mathbb{1}(t) = 1$ if $t=0$ and $0$ otherwise [S1].
+-*   **Total Variation Loss:**
++    where $\mathbb{1}(t) = 1$ if $t=0$ and $0$ otherwise.
++4.  **Proposal Loss ($\mathcal{L}_{prop}$):** Ensures consistency between the proposal network (for occupancy estimation) and the learned model, following Mip-NeRF 360 [S1].
++5.  **Total Variation Loss ($\mathcal{L}_{tv}$):** Applied to each tri-plane to encourage sparse edges in the canonical space [S1]:
+     $$ \mathcal{L}_{tv}(\mathbf{x}) = \frac{1}{|C|} \sum_{c, i, j} (\| \mathbf{x}_c^{i,j} - \mathbf{x}_c^{i-1,j} \|_2^2 + \| \mathbf{x}_c^{i,j} - \mathbf{x}_c^{i,j-1} \|_2^2) $$
+-    where $c$ is a plane from collection $C$ [S1].
+-*   **Total Loss:**
+-    $$ \mathcal{L} = \mathcal{L}_{image} + \mathcal{L}_{kf} + \mathcal{L}_{co} + \mathcal{L}_{prop} + \lambda_{tv} \mathcal{L}_{tv} $$
+-    [S1].
++    where $c$ is a plane from the tri-plane collection $C$, and $i, j$ are indices on the plane’s resolution.
+ 
+ **Parameters:**
+@@ -90,27 +99,18 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Initial Training:** Predictions primarily influence the process to facilitate convergence for frames with substantial motion [S1].
+-*   **Late Training:** Observations take precedence to recover precise and fine-grained motion details [S1].
+-*   **Coordinate Shift:** Tri-plane encoding introduces errors due to finite resolution; concatenating raw coordinates mitigates this [S1].
+-*   **Canonical Space Regularization:** Hard masking (setting deformation to 0 at $t=0$) is avoided; soft regularization is used instead to allow learning of deformation at $t=0$ [S1].
+-
+-## Subtopics
+-
+-### Tri-Plane Representation
+-A low-rank spatial representation using three orthogonal 2D planes, enabling faster convergence and lower memory usage compared to MLP-based backbones [S1].
+-
+-### Deformation Field vs. Feature Interpolation
+-Deformation fields $D(\mathbf{x}, t) \to \Delta \mathbf{x}$ are smoother and easier to fit with MLPs than time-conditioned feature interpolation $F(\mathbf{x}, t) \to \mathbf{f}$, which exhibits high-frequency signals during abrupt radiance changes [S1].
++*   **Training Strategy:** Images are released in chronological order to ensure previous frames offer ample priors for current frame learning [S1].
++*   **Early vs. Late Training:** In initial stages, predictions primarily influence the process to facilitate convergence for frames with substantial motion. In later stages, observations take precedence to recover precise, fine-grained motion details [S1].
++*   **Coordinate Shift Errors:** Finite resolution tri-planes introduce coordinate shift errors; concatenating encoded tri-plane features with raw coordinate inputs mitigates this [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is comparable to other dynamic NeRF methods. On synthetic data, KFD-NeRF-S takes 30 mins and KFD-NeRF-L takes 3 hours, compared to D-NeRF's 48 hours [S1].
+-*   **Memory Complexity:** Uses tri-plane representation, reducing memory footprint compared to deep MLP-based spatial representations [S1]. Parameter size is 175 MB for KFD-NeRF-L [S1].
+ *   **Performance (Synthetic):** PSNR 35.73 dB, SSIM 0.984, LPIPS 0.045, Average 0.0131 [S1].
+ *   **Performance (Real):** PSNR 28.75 dB, SSIM 0.891, LPIPS 0.115, Average 0.0389 [S1].
+-*   **Strengths:** Accurate deformation estimation, fast convergence, high-quality view synthesis [S1].
+-*   **Limitations:** Relies on local linear motion assumption, which may not capture complex non-linear motions perfectly [S1].
++*   **Training Time:** 30 minutes for KFD-NeRF-S, 3 hours for KFD-NeRF-L (on Nvidia Real Dynamic Scenes Dataset) [S1].
++*   **Parameters:** 175 MB [S1].
++*   **Strengths:** Faster convergence and lower memory footprint compared to MLP-based backbones (e.g., D-NeRF) due to the tri-plane representation. Deformation fields are smoother and easier to fit with MLPs than feature interpolation [S1].
++*   **Limitations:** Relies on the assumption of locally linear motion for prediction, which may degrade if motion is highly non-linear or abrupt [S1].
+ 
+ ## Background
+-KFD-NeRF was introduced by Li et al. in 2024, drawing inspiration from control theory to model 4D radiance fields as dynamic systems [S1]. It builds on the principles of dynamic NeRFs [Parent] by using deformation fields and temporal modeling [14428-sparse-view-and-few-shot-optimization.md].
++KFD-NeRF was introduced by Li, Niu, Zhong, Nobuhara, Nishino, and Zheng in 2024 [S1]. It draws inspiration from control theory, modeling the 4D radiance field as a dynamic system. It improves upon previous dynamic NeRF methods like D-NeRF [36] and TiNeuVox [10] by integrating a Kalman filter module to optimize state estimations from both observations and predictions [S1].
+ 
+ ## Sources

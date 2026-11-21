@@ -1,0 +1,189 @@
+The 1987 iso-surface extraction algorithm — how it works, what breaks, and what to reach for when it does.
+
+Marching Cubes · ./jerome{m}Skip to content
+~/Notes/Marching Cubes.md · note · budding · 6 min · updated 2026-10-16
+Marching Cubes
+// status: budding
+The canonical way to turn a scalar field into a triangle mesh. Published by Lorensen & Cline in 1987 for medical imaging, it became the default iso-surface extractor for voxel worlds, fluid surfaces, and CAD tools. I used it in Raym and wanted to write down the parts I always forget.
+The algorithm in one paragraph
+Walk every cell of a 3D grid. Each cell has 8 corners with scalar values. For a given iso-level, each corner is either inside (value < iso) or outside. That's 8 bits — 256 possible sign configurations. Precompute which edges of the cube the surface crosses for each case, and which triangles connect those edges. At runtime: compute the 8-bit index, look up the triangulation, linearly interpolate each edge to place a vertex where the value equals iso. Emit triangles. Repeat.
+ccopy
+```
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22int cubeIndex = 0;
+for (int i = 0; i < 8; i++) {
+    if (corner[i].value < isoLevel) cubeIndex |= (1 << i);
+}
+
+int edgeMask = edgeTable[cubeIndex];       // which edges are crossed
+if (edgeMask == 0) continue;                // cell fully in or fully out
+
+vec3 verts[12];
+for (int e = 0; e < 12; e++) {
+    if (edgeMask & (1 << e)) {
+        int a = edgeCorners[e][0], b = edgeCorners[e][1];
+        float t = (isoLevel - corner[a].value) / (corner[b].value - corner[a].value);
+        verts[e] = mix(corner[a].pos, corner[b].pos, t);
+    }
+}
+
+for (int i = 0; triTable[cubeIndex][i] != -1; i += 3) {
+    emitTriangle(verts[triTable[cubeIndex][i]],
+                 verts[triTable[cubeIndex][i+1]],
+                 verts[triTable[cubeIndex][i+2]]);
+}
+```
+Paul Bourke's polygonise page has the lookup tables copy-pasteable in C. Every implementation I've seen starts from there.
+click to interact
+field · liveThe same idea one dimension down: marching squares over a field you can sculpt. Left adds density, right carves.copy linkopen ↗
+click to interact
+cubes3d · liveAnd in three dimensions: the 256-case tables over a 20³ grid. Drag to orbit, scroll to zoom, drag the bar on the left to move the iso-level, hover a case to light the cubes that use it.copy linkopen ↗
+Why linear interpolation is fine
+The surface is defined as the iso-contour, so "where on this edge does the value cross iso?" has a unique answer given the two endpoints. Linear interpolation assumes the field is linear along the edge, which it isn't in general — but it's a first-order approximation and the error is bounded by cell size. Make cells smaller, surface gets closer to truth.
+Normals from the gradient
+Don't compute normals from the triangles — you'll get faceted terrain and ugly seams across cells. Compute the gradient of the scalar field and interpolate that to the vertex:
+ccopy
+```
+1
+2
+3
+4
+5
+6
+7vec3 gradient(ivec3 p) {
+    return normalize(vec3(
+        field(p + ivec3(1,0,0)) - field(p - ivec3(1,0,0)),
+        field(p + ivec3(0,1,0)) - field(p - ivec3(0,1,0)),
+        field(p + ivec3(0,0,1)) - field(p - ivec3(0,0,1))
+    ));
+}
+```
+This gives smooth shading that continues cleanly across cell and chunk boundaries.
+The ambiguity problem
+Marching Cubes has a well-known failure: certain sign configurations are topologically ambiguous — multiple valid triangulations are possible and the original table sometimes picks one that creates holes between adjacent cells. Cases 3, 6, 7, 10, 12, 13 are the usual suspects.
+Common remedies:
+Marching Tetrahedra — split each cube into 5 or 6 tetrahedra. No ambiguity because a tetrahedron has only 16 sign cases, all unambiguous. Trade: more triangles, less regular mesh.
+Asymptotic Decider (Nielson & Hamann, 1991) — resolve ambiguous faces by checking the bilinear interpolant on the face. Fixes the holes, preserves the cube structure.
+Extended Marching Cubes (Kobbelt et al.) — also tries to preserve sharp features by inserting extra vertices.
+If you need sharp features (cube edges, 90° corners), MC will always round them. That's Dual Contouring's job.
+click to interact
+cases · liveMarching squares has 16 cases instead of 256, and the same saddle ambiguity. Flip corners, drag their values.copy linkopen ↗
+Chunking and seams
+Naively running MC over chunks independently creates cracks at chunk boundaries because:
+Corner values at the boundary need to be shared (each chunk must read one cell past its edge).
+Gradients for normals need the same extended read, or normals diverge.
+I overlap chunks by one cell on the positive sides. It means some redundant work but the code stays simple and seams disappear.
+LOD
+Different chunks at different cell sizes is the hard case — MC at two resolutions don't line up. Solutions:
+Transvoxel (Eric Lengyel) — adds transition cells between LODs with a special triangulation table.
+Skirts — extrude a little geometry down at boundaries to hide cracks. Ugly but cheap.
+Vertex sharing & mesh quality
+The naive emitter writes 3 vertices per triangle. A good emitter shares vertices across neighbouring cells, because every cell-edge crossing produces one vertex and neighbouring cells share edges:
+ccopy
+```
+1
+2
+3
+4
+5
+6
+7
+8
+9struct EdgeKey { ivec3 cell; int axis; };  // axis in {0,1,2} for +x/+y/+z edges
+HashMap<EdgeKey, int> vertexIndex;
+
+int getOrCreateVertex(EdgeKey key, vec3 pos, vec3 normal) {
+    if (vertexIndex.contains(key)) return vertexIndex[key];
+    int i = appendVertex(pos, normal);
+    vertexIndex[key] = i;
+    return i;
+}
+```
+Vertex counts can drop substantially. Smooth shading also becomes easier to keep consistent, because a shared vertex has one normal instead of several independently emitted copies.
+Mesh quality — triangles from MC are often slivers (near-degenerate long thin ones) when the iso crossing lands near a corner. Clamping the interpolation parameter t ∈ [ε, 1-ε] can avoid exact endpoint degeneracies, but it also moves the extracted surface and needs visual testing. A later simplification pass can improve a raw MC mesh when cleaner topology matters.
+On the GPU
+The whole algorithm parallelises per cell; the challenge is variable-length output — each cell emits between 0 and 5 triangles depending on its case. Standard pattern:
+Count pass: each thread computes its cell's case index and looks up the triangle count. Write counts to a buffer.
+Prefix sum / scan: turn counts into output offsets.
+Emit pass: each cell writes its triangles starting at its offset.
+This count–scan–emit pattern is a common way to make variable-length GPU output manageable; histogram-pyramid approaches are another option. Modern compute-shader implementations can process large grids interactively; see Compute shaders for the underlying scan primitives.
+An alternative for simplicity: a single pass with an atomic-counter append buffer. Easier, but contends badly at very high cell counts and wastes work on cells with zero output.
+Picking the iso-level & authoring the field
+The iso-level is part of authoring. f(p) = 0 is the natural surface, but shifting to f(p) - 0.1 grows the surface outward — useful for tuning "thickness" of a noise-based terrain.
+For procedural worlds:
+ccopy
+```
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10// Heightfield-ish terrain
+float density(vec3 p) {
+    return -p.y + fBm(p * 0.05);
+}
+
+// Overhangs and caves via domain warping
+float density_warped(vec3 p) {
+    vec3 w = vec3(fBm(p*0.1), fBm(p*0.1 + 13.0), fBm(p*0.1 + 37.0));
+    return -p.y + fBm(p * 0.05 + w);
+}
+```
+CSG composes at the field level — min for union, max(a, -b) for subtraction. A brush modifies the field additively:
+ccopy
+```
+1
+2
+3for each voxel in brush AABB:
+    float falloff = smoothstep(outer, inner, distToCentre);
+    field[voxel] += strength * falloff;
+```
+Then flag the touched chunks dirty and re-mesh them.
+LOD — Transvoxel in practice
+Naive chunk LOD has visible cracks at boundaries. Transvoxel is the principled fix:
+Between a chunk at resolution r and one at 2r, add a one-cell-thick layer of transition cells on the higher-resolution chunk's face.
+These have 13 corners (4 extra on the low-res face) and use a separate 512-entry lookup table.
+Lengyel's reference includes all the tables; implementing it is a few days' work, but it stitches LODs perfectly.
+Without Transvoxel you end up with skirts — strips of extra geometry that hide cracks by hanging down behind the seam. Ugly but cheap, and fine for prototypes.
+Variants worth knowing
+Surface Nets — place one vertex per active cell near the centroid of its edge crossings, then connect vertices across sign-changing edges. Simpler and often lower-poly, but the basic form does not preserve sharp features.
+Marching Tetrahedra — mentioned above.
+FlyingEdges (Schroeder et al.) — a parallel-friendly MC that streams over the data with separate passes for edge detection and triangulation. Much better on modern hardware.
+Things that tripped me up
+Table orientation — there are multiple conventions for corner numbering (0..7) and edge numbering (0..11). Pick one and stay there. Using a table from one source with a corner order from another is a debugging nightmare.
+Iso-level sign convention — is "inside" positive or negative? Entirely arbitrary but has to be consistent end-to-end.
+Degenerate triangles — when a corner value is exactly iso, t becomes 0 or 1 and you emit zero-area triangles. Clamp or nudge the value by an epsilon.
+Vertex deduplication — a naive emitter produces three vertices per triangle. Hashing by edge index gives ~4× fewer vertices, often much more. Worth doing before uploading to GPU.
+GPU vs CPU — cells can be classified in parallel, but output allocation, memory bandwidth, readback, and update frequency determine whether a GPU path is actually faster.
+References
+Lorensen, W. E., & Cline, H. E. — Marching Cubes: A High Resolution 3D Surface Construction Algorithm (SIGGRAPH 1987)
+Paul Bourke — Polygonising a scalar field
+Wikipedia — Marching cubes
+Lengyel, E. — Transvoxel Algorithm
+Back to Notes · see also Dual Contouring · GPU Marching Cubes · Normals for Implicit Surfaces · Transvoxel in Practice · Raym
+›Jump to a page
+enter openup/down moveesc close

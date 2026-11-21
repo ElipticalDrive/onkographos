@@ -1,0 +1,126 @@
+# Material Smoothness Loss
+
+Also called: Lmat
+
+## Overview
+Material Smoothness Loss is a regularization term applied during the optimization of material fields to enforce spatial coherence by penalizing color differences between neighboring surface points [S1, S2]. It addresses the problem of noisy or high-frequency artifacts in decomposed material properties by assuming that homogeneous areas should exhibit smooth BRDF variations [S1, S2]. It differs from standard L1/L2 smoothness by incorporating edge-aware weighting based on pseudo-albedo differences, ensuring that smoothness is enforced primarily within homogeneous regions rather than across material boundaries [S1, S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of surface points $\mathbf{x}_{surf}$ reconstructed from the scene (e.g., via ray-surface intersection or depth estimation); the material field values (specifically diffuse color $\mathbf{b}_d$) at these points; a displacement vector $\Delta \mathbf{x}$ defining the neighborhood.
+*   **Outputs:** A scalar loss value $L_{mat}$ used to update the material field parameters via gradient descent.
+
+**Data Structures:**
+*   **Surface Points:** A list or tensor of 3D coordinates $\mathbf{x}_{surf}$.
+*   **Material Field:** A function or lookup table mapping 3D coordinates to color vectors $\mathbf{b}_d \in \mathbb{R}^3$.
+
+**Steps:**
+1.  For each surface point $\mathbf{x}_{surf}$ in the set:
+2.  Identify the neighboring point $\mathbf{x}_{neighbor} = \mathbf{x}_{surf} + \Delta \mathbf{x}$.
+3.  Retrieve the diffuse color values $\mathbf{b}_d(\mathbf{x}_{surf})$ and $\mathbf{b}_d(\mathbf{x}_{neighbor})$ from the material field.
+4.  Compute the squared Euclidean distance between the colors.
+5.  Sum these distances over all surface points.
+
+**Formula:**
+The loss is defined as [S1]:
+
+$$
+L_{mat} = \sum_{\mathbf{x}_{surf}} \left\| \mathbf{b}_d(\mathbf{x}_{surf}) - \mathbf{b}_d(\mathbf{x}_{surf} + \Delta \mathbf{x}) \right\|^2
+$$
+
+Where:
+*   $\mathbf{x}_{surf}$ represents the surface points.
+*   $\mathbf{b}_d(\cdot)$ is the diffuse color component of the material at the given location.
+*   $\Delta \mathbf{x}$ is the spatial offset to the neighbor.
+*   $\|\cdot\|$ denotes the Euclidean norm.
+
+**Parameters:**
+*   $\Delta \mathbf{x}$: The neighborhood distance. Not given in the sources.
+*   Weighting: The sources mention edge-aware weighting based on pseudo-albedo differences [S1, S2], but the explicit formula for the weighting term is not provided in the cited passages. The base formula above represents the core smoothness penalty.
+
+**Edge Cases and Pitfalls:**
+*   **Material Boundaries:** Standard smoothness can blur material boundaries. The method mitigates this by using edge-aware weighting (details not fully specified in the provided text) [S1, S2].
+*   **Unconstrained Optimization:** Without regularization, optimization can lead to implausible results, such as materials being highly glossy only where highlights were observed [S2]. This is handled by combining smoothness with constancy assumptions (see Subtopics).
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def material_smoothness_loss(surface_points, material_field, delta_x):
+    """
+    Computes the Material Smoothness Loss (Lmat).
+    
+    Args:
+        surface_points: List of 3D coordinates [N, 3].
+        material_field: Function or object that returns diffuse color [3] for a 3D coordinate.
+        delta_x: 3D vector defining the neighbor offset.
+        
+    Returns:
+        Scalar loss value.
+    """
+    total_loss = 0.0
+    for x in surface_points:
+        # Determine neighbor coordinate
+        x_neighbor = x + delta_x
+        
+        # Retrieve diffuse colors
+        # Note: In practice, interpolation or nearest-neighbor lookup is used if x_neighbor 
+        # is not exactly a stored point. This is marked as [G] implementation detail.
+        color_current = material_field(x)
+        color_neighbor = material_field(x_neighbor)
+        
+        # Compute squared Euclidean distance
+        diff = color_current - color_neighbor
+        loss_term = dot(diff, diff)
+        
+        total_loss += loss_term
+        
+    return total_loss
+```
+
+## Subtopics
+
+### [BRDF Smoothness Loss](9573-brdf-smoothness-loss.md)
+BRDF Smoothness Loss is a regularization term applied during the optimization of material fields (specifically BRDF parameters like roughness, albedo, and normals) to enforce spatial coherence. It addresses the problem of noisy or high-frequency artifacts in decomposed material properties by penalizing drastic changes between neighboring surface points, under the assumption that homogeneous areas should exhibit smooth BRDF variations. It differs from standard L1/L2 smoothness by incorporating edge-aware weighting based on pseudo-albedo differences, ensuring that smoothness is enforced primarily within homogeneous regions rather than across material boundaries. See [BRDF Smoothness Loss](9573-brdf-smoothness-loss.md).
+
+### [Bilateral Smoothness Regularization](10915-bilateral-smoothness-regularization.md)
+Bilateral Smoothness Regularization is a geometric and normal alignment loss applied to material fields to enforce spatial smoothness of BRDF parameters (such as roughness and specular tint) weighted by image gradients. It alleviates the ambiguity between material and illumination by constraining material gradients to correspond with image edges, preventing noisy, inconsistent material reconstructions. It differs from standard smoothness losses by using the image gradient as a bilateral weight, preserving material boundaries where the image shows sharp transitions. See [Bilateral Smoothness Regularization](10915-bilateral-smoothness-regularization.md).
+
+### Roughness and Specularity Constancy
+**Definition:** An assumption that roughness and specularity remain constant within a class of the surface segmentation, optimizing a single roughness & specularity value per object. This addresses the ambiguity that roughness can only be judged where an actual highlight is observed [S2].
+
+**Pitfall:** Unconstrained optimization leads to implausible results, such as materials being highly glossy only where highlights were observed. This is handled by enforcing constancy per object [S2].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Not given in the sources.
+
+**Measured Performance:**
+Not given in the sources.
+
+**Scaling:**
+Not given in the sources.
+
+**Strengths and Limitations:**
+*   **Strengths:** Reduces high-frequency noise in material fields; enforces physical plausibility by preventing isolated glossy spots [S1, S2].
+*   **Limitations:** Requires careful handling of material boundaries to avoid blurring; relies on the availability of surface points and material field evaluations [S1, S2].
+
+**When to Use:**
+Use when optimizing spatially-varying material fields (BRDFs) to prevent noise and artifacts, particularly in homogeneous regions [S1, S2].
+
+**When Not to Use:**
+Avoid if the scene contains high-frequency material details that should not be smoothed, or if computational resources are extremely limited and the overhead of evaluating neighbors is prohibitive (though specific costs are not given).
+
+## Background
+**Origin:**
+The term $L_{mat}$ and the specific formulation using squared color differences between neighbors are cited from [S1] (IRCasTRF) and [S2] (Material and Lighting Reconstruction for Complex Indoor Scenes).
+
+**History and Development:**
+The method is part of the broader effort in inverse rendering to decouple material properties from illumination and geometry. The constancy assumption for roughness/specularity is noted as a common case in real-world scenarios that also reduces the number of parameters to optimize, speeding up convergence [S2].
+
+**Where it is used:**
+Used in inverse rendering pipelines that optimize cascaded tensorial radiance fields, lighting, and materials from multi-view images [S1], and in texture-space differentiable rendering for complex indoor scenes [S2].
+
+## Sources
+[S1] IRCasTRF: Inverse Rendering by Optimizing Cascaded Tensorial Radiance Fields, Lighting, and Materials From Multi-view Images, https://doi.org/10.1145/3581783.3612010, fetched 2026-10-27
+[S2] Material and Lighting Reconstruction for Complex Indoor Scenes with Texture-space Differentiable Rendering, https://doi.org/10.2312/sr.20211292, fetched 2026-10-29

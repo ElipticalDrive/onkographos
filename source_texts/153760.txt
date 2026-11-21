@@ -1,0 +1,882 @@
+The Thirty-Eighth AAAI Conference on Artificial Intelligence (AAAI-24)
+A General Implicit Framework for Fast NeRF Composition and Rendering
+Xinyu Gao1 , Ziyi Yang1 , Yunlu Zhao1 , Yuxiang Sun2 , Xiaogang Jin1 * , Changqing Zou1,2
+1
+State Key Lab of CAD&CG, Zhejiang University
+2
+Zhejiang Lab
+{22121052, Ingram14, yunlu.zhao}@zju.edu.cn, sunyuxiangyx@gmail.com
+jin@cad.zju.edu.cn, changqing.zou@zju.edu.cn
+Abstract
+The development of virtual worlds has revealed a strong
+preference for neural techniques. Neural Radiance Fields
+(NeRF), an image-based rendering method (Mildenhall et al.
+2020), has shown its proficiency in rendering with high fidelity while also offering the added advantage of compression capabilities, resulting in a low storage footprint. As a
+result, NeRF has been extensively studied in human face
+editing (Wang et al. 2022a; Jiang et al. 2022), autonomous
+driving (Tancik et al. 2022; Kundu et al. 2022), stylization
+(Gu et al. 2022), mesh reconstruction (Wang et al. 2021; Sun
+et al. 2022), inverse rendering (Boss et al. 2021a,b; Zhang
+et al. 2021), and so on.
+Although a number of NeRF composition methods (Ma
+et al. 2023; Yang et al. 2021; Wu et al. 2022; Shuai et al.
+2022; Ost et al. 2021) have achieved impressive results and
+improved the flexibility by modeling a scene as multiple semantic parts rather than as whole, compositing neural radiance fields in real-time still remains under-explored. Existing acceleration methods, such as implicit methods (Kurz
+et al. 2022; Neff et al. 2021) that rely on a limited scope
+of camera activity, hybrid methods (Liu et al. 2020; Müller
+et al. 2022) that require a complex spatial structure for
+querying, or pre-computing methods (Hedman et al. 2021;
+Chen et al. 2023) that incur significant storage costs, are far
+from straightforward in this task due to various challenges,
+let alone forming a general pipeline. First, it is difficult to
+satisfy low memory-storage cost and real-time speed while
+maintaining arbitrary affine transformations for implicit objects. Second, as the number of objects to be composed
+grows (e.g., a simple duplicate of 1k balls), rendering the
+entire scene (especially considering shadows among implicit
+objects) takes long, and the cost of hybrid or pre-computing
+methods becomes prohibitively expensive.
+To address the aforementioned issues, we present a general implicit framework that can quickly perform compositing and shadow casting of NeRF objects without querying any complex structure, thereby avoiding the excessive memory-storage costs. Meanwhile, we propose Neural
+Depth Fields (NeDF), a novel implicit representation for implicit surface that aims for fast and precise depth estimation
+under a flexible camera activity scope and arbitrary affine
+transformations of objects, overcoming critical issues associated with previous implicit acceleration methods while
+retaining the benefits of implicit methods with a low storage cost. When working with a single object in a composed
+scene, manipulation speeds can even reach real-time in our
+CUDA implementation. Notably, we use the classic concept
+of shadow mapping based on NeDF for efficient rendering
+of dynamic shadows cast by either point light or parallel
+light sources, which represents a significant advancement
+over previous NeRF works aimed at acceleration.
+Our work is able to provide users a fast NeRF scene composition tool allowing a quick preview of the composited
+results, as users may prefer interactive-level speed over perfect quality when manipulating each NeRF object. The key
+technical contributions are summarized below:
+* Corresponding author.
+Copyright © 2024, Association for the Advancement of Artificial
+Intelligence (www.aaai.org). All rights reserved.
+• A novel framework that enables interactive previewing
+of the NeRF composition process at a low storage cost,
+thereby providing a new interactive way to create novel
+A variety of Neural Radiance Fields (NeRF) methods have
+recently achieved remarkable success in high render speed.
+However, current accelerating methods are specialized and
+incompatible with various implicit methods, preventing realtime composition over various types of NeRF works. Because
+NeRF relies on sampling along rays, it is possible to provide general guidance for acceleration. To that end, we propose a general implicit pipeline for composing NeRF objects
+quickly. Our method enables the casting of dynamic shadows
+within or between objects using analytical light sources while
+allowing multiple NeRF objects to be seamlessly placed and
+rendered together with any arbitrary rigid transformations.
+Mainly, our work introduces a new surface representation
+known as Neural Depth Fields (NeDF) that quickly determines the spatial relationship between objects by allowing
+direct intersection computation between rays and implicit surfaces. It leverages an intersection neural network to query
+NeRF for acceleration instead of depending on an explicit
+spatial structure.Our proposed method is the first to enable
+both the progressive and interactive composition of NeRF objects. Additionally, it also serves as a previewing plugin for a
+range of existing NeRF works.
+Introduction
+1833
+The Thirty-Eighth AAAI Conference on Artificial Intelligence (AAAI-24)
+local space
+local space
+}
+Color Buffer
+supervise
+affine transform
+information
+Shadow Buffer (in shadow)
+estimate depth
+output frame
+Deferred
+Shading
+{ Pre-trained NeRF
+Shadow
+Mapping
+Pre-trained NeRF
+… }N
+Light Source
+Shadow Rays
+Shadow Map
+{…
+Shadow Step
+shadow ray
+Pre-trained NeRF
+Neural Depth Fields
+Depth Buffer
+Deferred Shading Step
+moving objects
+local space
+ID Buffer
+NeDF
+Intersection Network
+NeDF Generation Step
+{…
+The whole frame
+Rendering
+Training
+}
+N
+Camera Rays
+Figure 1: An overview of our framework (left) and data flow (right). In terms of framework, we use Neural Depth Fields (NeDF)
+as the representation of the implicit surface within each object’s local space during training, under the supervision of pre-trained
+NeRF. There are three main steps in render time: 1) Step1 is ”NeDFs generation step”, depth buffer and ID buffer are created
+by a collection of NeDFs; 2) Step2 is ”Deferred shading step”, those 2 buffers are then used by a collection of NeRFs to fill a
+color buffer with no shadows; 3) Step3 is ”Shadow step”, shadow rays are generated based on the depth buffer and NeDFs are
+used again to provide a shadow map. Finally, the color buffer and shadow buffer are multiplied to produce the results.
+realistic scenes from real-world scenes.
+• A quick and efficient method for generating intra and
+inter-object dynamic shadows cast by either point light
+or parallel light sources.
+• A new geometry representation for NeRF objects that
+aids intersecting/depth estimation during arbitrary manipulation.
+speeds in implicit methods, which can negatively affect the
+ease with which users can manipulate objects in an interactive preview and loading speed. This limitation contradicts
+the goal of enabling real-time scene editing and rendering.
+Unlike these methods, we attempt to composite NeRF objects interactively and progressively for a quick preview.
+Accelerating Rendering of NeRF-modeled Scenes Realtime rendering has been a long-standing goal in the field of
+computer graphics, and this objective extends to the realm of
+NeRF. The explicit (pre-computed) methods achieved realtime by pre-computing radiance color as spherical Harmonics coefficients (Yu et al. 2021) or feature vectors (Hedman
+et al. 2021; Chen et al. 2023), and then storing them in spatial structures like octree for quick inference, thereby reducing the computational overhead at render time. Among
+these explicit methods, the state-of-the-art method (Yariv
+et al. 2023) converts NeRF scenes into a combination of
+meshes and spherical Gaussians, resulting in fast rendering
+speed on modern mobile graphics pipelines. However, the
+explicit method can result in high storage costs for even a
+single scene. In contrast, implicit (MLP-based) methods that
+mainly focus on importance sampling (Piala and Clark 2021;
+Neff et al. 2021; Kurz et al. 2022; Niemeyer et al. 2022) significantly reduce storage overhead and computational burden. But these methods can limit the activity scope of the
+camera to a specific view cell. The hybrid method (Liu et al.
+2020) incorporates a neural component within the explicit
+grid to achieve a cost-effective solution. All of these methods are highly specialized, designed to address their own accelerating path. Our goal, on the other hand, is to investigate
+a general pipeline that enables rapid composition across various NeRF works.
+Related Work
+Compositing Neural Radiance Fields. Modeling a scene
+as a single NeRF remains generally limited in functionality.
+In many scenarios, the ability to isolate individual objects
+and manipulate them under controlled constraints is necessary (e.g., driving scenes (Krishnan et al. 2023)). In order
+to enhance the controllability and editability of the NeRFbased virtual scenes, one straightforward idea is to model
+scenes as multiple semantic parts rather than a whole at the
+beginning. This can be achieved by separately compressing background and foreground objects into two branches
+represented by neural voxels (Yang et al. 2021) or a set of
+neural SDFs (Wu et al. 2022). In order to enable a better
+perception for foreground objects, clues such as 3D motion (Shuai et al. 2022) or segmentation mask (Kundu et al.
+2022; Tancik et al. 2022) in 2D image space may be required as a preprocessing step. Another idea is compositing pre-trained NeRF models together to form a more complex and controllable scene. To achieve this, explicit spatial structures like multi-granularity voxels (Liu et al. 2020)
+and 3D bounding box (Ost et al. 2021; Shuai et al. 2022)
+are employed to indicate the sampling range for each nerf
+model in global space. By manipulating these voxels/boxes,
+NeRF objects are transformed from their local space coordinates to the global world space. Additionally, techniques
+that pre-compute radiance in explicit structures have shown
+promise for scene compositing. Despite the benefits of utilizing multiple neural fields, doing so may result in significant computational requirements, leading to notable storage
+overhead in the pre-compute methods or reduced rendering
+Neural Light Fields (NeLF) The representation of Light
+Fields has been widely utilized in computer graphics to
+model a scene as a 4D representation, enabling fast imagebased rendering. The emergence of deep learning in recent
+years has led to the investigation of Neural Light Fields
+1834
+The Thirty-Eighth AAAI Conference on Artificial Intelligence (AAAI-24)
+𝝁𝝁
+𝒑𝒑⊥
+Surface
+𝑶𝑶
+each composed object, which are essential for scene composition and rendering.
+The continuous function FΦ is implemented with a Multilayer Perceptron network, termed as intersection network.
+FΦ does not directly infer the depth between the starting
+point of the ray r and the ray-object intersection point. It instead infers the distance between the ray-object intersection
+point and the tangency point at which the ray r is tangent
+to a sphere centered at the origin in the local space of the
+object (i.e., FΦ is used to compute µ, and µ is the distance
+between the tangency point p⊥ of the ray r to the ray-object
+intersection point, as shown in Fig. 2a). We choose to learn
+µ rather than D(r) is because it’s impossible to learn an infinite space. µ is defined in the local space and has a limited
+range of values.
+Specifically, for a given ray r, we mathematically define
+FΦ as:
+FΦ : r 7→ (µ, α̂),
+(1)
+where α̂ is a binary indicator that signifies whether the ray
+intersects the object’s surface.
+Once the µ is predicted by the intersection network, the
+depth D(r) between the starting point of the ray r and the
+ray-object intersection point can be calculated as:
+2𝑙𝑙
+𝒅𝒅
+Bounding Box
+𝑙𝑙
+2𝑙𝑙
+Relaxed Bounding Box
+(a)
+(b)
+Unstable Regularize
+Stable Regularize
+Figure 2: (a) Given a ray traveling through an object’s local
+space, the first intersection on the surface can be obtained by
+the distance between the intersection and the tangency point
+p⊥ (The sphere is in the center of local space). Since p⊥
+can be quickly and uniquely determined, this representation
+leads to a direct intersection computation. (b) To improve
+the stability of NeDF, we regularize the main body of each
+ray, approximated by a tuple of points sampled along the
+ray, within the relaxed bounding box before fedding it into
+the intersection network.
+(NeLF) as an extension of this concept (Meng et al. 2019;
+Wizadwongsa et al. 2021; Attal et al. 2022; Sitzmann et al.
+2021; Suhail et al. 2022). Recently, R2L (Cao et al. 2022;
+Wang et al. 2022b) successfully obtained NeLF with a comparable quality to NeRF, which provides a straightforward
+insight into the capability of light fields’ representation to
+generate high-quality results under 360◦ cases. In comparison to NeRF, NeLF has the distinct advantage of requiring only a single evaluation per ray, thereby eliminating
+the need for time-consuming ray marching. However, the
+composition task is unsuitable for NeLF due to its lack of
+precise depth information, though several past approaches
+(Dansereau and Bruton 2004; Tosic and Berkner 2014; Kim
+et al. 2013) have tried to leverage light fields to extract
+geometry information for depth estimation. Nevertheless,
+NeLF has inspired us to efficiently composite NeRF in a
+geometry-aware manner.
+D(r) = |o − p⊥ | − µ,
+(2)
+where o is the starting point of the ray and p⊥ is the tangency point. We adopt a set of points sampled along rays to
+represent an oriented ray to improve the stable performance
+of the intersection network. Specifically, we regularize the
+sampling within a specific local range along rays and sample 16 points in total (see Fig. 2b).
+Intersection Network
+Directly implementing the intersection network as a regression problem of the distance µ is not a good choice and
+tends to produce an inaccurate estimation because of the
+depth discontinuity issue (Neff et al. 2021) during composition, as illustrated in Fig. 3(a). This inaccurate estimation
+around edges can lead to floating artifacts during rendering
+as shown in Fig. 3(c).
+To address this problem, we instead build the intersection
+network as a multi-level classifier. As shown in Fig. 3(b),
+we first regularize µ in a limited range [−l, l] with symmetric center as p⊥ . We then divide the limited range into two
+levels using a segment operator S, namely the coarse level
+with Nc bins and the fine level with Nf bins. The intersection network then is formulated as:
+Methodology
+Given a set of objects represented by NeRF, our approach
+provides a quick preview of the resulting scene in which all
+of the NeRF objects are manipulated with arbitrary affine
+transformations and rendered together. The overview and
+data flow of our render framework is shown in Fig. 1, which
+is also described by the algorithm pseudo-codes in appendix.
+FΦ : r 7→ (υ̂c , υ̂f , α̂),
+Neural Depth Fields (NeDF)
+(3)
+where υ̂c , υ̂f are 1D vectors representing the coarse- and
+fine-level target bins to which the surface belongs, respectively. The resolution of the two-level classifier is Nc × Nf (
+where Nc and Nf are set to 64 and 128, respectively). Then,
+µ is calculated as follows:
+Neural Depth Field is defined on a 5-dimensional continuous
+function FΦ that represents a scene. This function maps an
+arbitrary ray (represented by a starting point and a direction)
+to the distance/depth between the starting point of the ray
+r to the ray-object intersection point in a 3D virtual world
+space as shown in Fig. 2a. Assuming that each object used
+for scene composition is opaque, this output distance can enable the computation of the surface point color of composed
+NeRF, as well as the relative spatial occlusion relationship of
+µ = S −1 ◦ FΦ = λ1 pc (υ̂c ) + λ2 pf (υ̂f ) − l,
+−1
+(4)
+where S
+is the inverse operator of S, pc (υ̂c ) =
+argmax(υ̂c )/Nc , pf (υ̂f ) = argmax(υ̂f )/Nf , λ1 is 2l and
+1835
+The Thirty-Eighth AAAI Conference on Artificial Intelligence (AAAI-24)
+𝑟𝑎
+previous NeDF Generation step and the rays r as an input. Then, it outputs a color buffer that holds the raw color
+(without shadow) information about the pixels. Lasty, the
+Shadow step uses the shadow rays, D(r), and r to generate
+the shadow information in a shadow buffer output. The final
+rendering result is produced by multiplying the color buffer
+and shadow buffer. Next, we first describe how the method
+handles the affine transformation of each NeRF object, as
+well as the necessary details for rendering acceleration.
+Level 𝜐ෝ𝑓
+𝐷(𝒓)
+surface-a
+𝑖
+𝒋
+𝑖−1
+𝒋−𝟏
+Level 𝜐ෝ𝑐
+𝑟𝑏
+surface-b
++𝑙
+𝒊
+ray space
+surface
+(a)
+(b)
+𝒊−𝟏
+−𝑙
+(c)
+Manipulating Objects. Given a 3D vector v in world
+space and a corresponding 3D vector q in canonical space,
+we define the rigid transformation of a NeRF object as a
+mapping function G : q(R, T, s) 7→ v where R, T, s specify the rotation, translation, and scale, respectively. Previous
+NeRF works focusing on deformation such as (Pumarola
+et al. 2021; Park et al. 2021a,b; Ost et al. 2021) transform
+the sampling points to canonical space to achieve the transformation. We instead directly transform the starting point
+and direction of rays to local canonical space and use this
+transformed rays to query the implicit field. As the intersection network takes rays r as input, the depth D̂(r) in global
+space can be computed using the inverse of the affine transformation function G:
+
+
+D̂(r) = |o − p⊥ | − s S −1 ◦ FΦ G −1 (r) .
+(7)
+Deferred Shading. We term the step generating the raw
+color information as Deferred Shading step because each
+pixel only requires one NeRF network FΘ to shade in our
+framework. As the intersection network can accurately estimate the depth information, we are able to replace the
+ray marching step in previous NeRF works with a degenerated ray casting form, i.e., a pixel color can be acquired
+by a single evaluation of FΘ . To further shade all objects
+in a lighting-aware manner, it is necessary to handle different lighting conditions in the original space from which the
+objects are collected, which is a non-trivial task. We simplify this processing by only shading with the primary color.
+Specifically, we obtain each ray’s color by:
+
+
+c, σ = FΘ G −1 (o + D̂(r)d), G −1 (d) ,
+(8)
+Figure 3: Directly regressing µ may result in significant errors in the discontinuity area (a) during composition (see the
+top row of c). We address this problem by replacing the regression of µ with a multi-level classifier (b), which yields a
+better result (see the bottom row of c).
+λ2 is 2l/Nc . Because the target bin’s indicator operation is a
+non-differentiable operation, we choose to use binary crossentropy (BCE) loss (see Eq. 6) during training. We use the
+argmax function to pick out the target bin during testing.
+In our implementation, the intersection network is an
+MLP. The MLP’s head is a single linear layer; the MLP’s
+body is made up of 16 residual blocks, each of which is
+made up of two fully connected layers followed by ReLU
+activation; the MLP’s tail has two branches to produces α̂,
+υ̂c and υ̂f (see Appendix for more details). We supervise
+this intersection network with the pre-trained NeRF models.
+Specifically, the distance from the camera to the first rayobject intersection can be measured by:
+D(r) =
+N
+X
+wi (ti |d|) , ti ∈ [tn , tf ],
+(5)
+i=1
+where wi is the weight of i-th sample along rays in NeRF’s
+render equation, d is the direction of ray r, tn and tf are
+the near and far clip ranges of the camera, respectively. This
+depth is then converted to µ using the inverse of Eq. 2 for
+supervision.
+The total training loss for the intersection network can be
+formulated as:
+where color c at the ray-object intersection point is directly
+used to approximate the ray’s color Ĉ(r). Density σ is employed to check whether the estimated D̂ is convincible. An
+extremely small σ indicates that D̂ does not reach the object
+surface. In this situation, we set a threshold that optionally
+assists in resampling these outliers using primary volume
+render equation in NeRF for better quality but a slight speed
+penalty (see our experimental results in Table 2). Although
+replacing the raymarching step with a single sample limits
+its usefulness, it is adequate for previewing. Users may prefer interactive-level speed over perfect quality when manipulating each object. In addition, once the adjustment is confirmed, the pipeline can re-render the scene and generate a
+set of high-quality results using only the NeRF models.
+LN eDF = BCE(υ̂c , υc ) + BCE(υ̂f , υf ) + 0.1 × BCE(α̂, α),
+(6)
+where υc , υf are one-hot vectors of the same dimension as
+υ̂c , υ̂f . They can be obtained by applying segment operator
+S on µ generated by NeRF. α is the ground truth mask generated by NeRF.
+Fast NeRF Composition with NeDF
+Built on NeDF, we are able to achieve a fast composition and
+rendering framework. We illustrate the structure and data
+processing flow of this framework on the figure in the right
+of Fig. 1. It generally consists of three steps. First, the NeDF
+generation step takes all of the rays cast from the camera
+(eye position) through each pixel of the frame as input to
+output a depth, D(r), and object ID buffers. It saves the corresponding depth and object identification information for
+each element of D(r). Deferred Shading step, as the second step, takes the ID and depth buffers outputted by the
+Fast Dynamic Shadows Casting
+Shadows for NeRF models can be generated using the traditional volume rendering technique developed by (Max
+1836
+The Thirty-Eighth AAAI Conference on Artificial Intelligence (AAAI-24)
+(a) NeDF+Mip-NeRF
+(b) NeDF+SNeRF
+(c) NeDF+Neus
+Figure 4: Visual quality illustration of the general plugin. For each method, the left column shows the previewing result, the
+middle column shows the naive result, and the right column visualizes the flip errors (Andersson et al. 2020).
+Outlier Processing (rs)
+w/o Outlier Processing (wo rs)
+NeDF+Mip-NeRF vs. Mip-NeRF
+time (s)
+s-time(%)↑
+0.417/15.677
+97.34
+0.234/15.677
+98.51
+NeDF+SNeRF vs. SNeRF
+time (s)
+s-time(%)
+0.519/15.528
+96.66
+0.225/15.528
+98.55
+NeDF+Neus vs. Neus
+time (s)
+s-time(%)
+2.11/21.72
+90.29
+0.202/21.72
+99.07
+Table 1: Our proposed framework serves as a plugin for three representative NeRF models: Mip-NeRF, SNeRF, and Neus. Term
+”s-time” refers to the percentage of time that our method saves. The optional outlier processing in Eq. 8 provides better quality
+but a slight speed penalty. The resolution is set to 800 × 800.
+1995). It, however, requires an additional volumetric evaluation for each sample point along a ray to determine whether
+the point is in shadows, which significantly increases the
+time consumption. Given that target objects have opaque
+in our cases, we generate the dynamic shadows based on
+the fundamental concept of shadow mapping (Williams
+1978) with NeDF for quick preview. We detail this dynamic
+shadow casting as an additional step (Shadow Step, also
+named step 3) in appendix.
+vision for each NeDF model of a single object, and train the
+intersection network over 60W iterations until convergence.
+The batchsize of training rays is set to 4,096 during each
+iteration.
+General Acceleration Plugin
+To evaluate the efficacy of the proposed framework acting
+as a general pipepline, we conduct experiments on the pretrained models of certain classic implicit NeRFs. Three representative implicit neural representation based NeRF methods, i.e., Mip-NeRF (Barron et al. 2021), SNeRF (NguyenPhuoc, Liu, and Xiao 2022), and Neus (Wang et al. 2021),
+are employed for this set of experiments. Mip-NeRF represents the kind of NeRF methods that focus on novel view
+synthesis and rendering. SNeRF is a typical NeRF method
+that supports appearance style transfer, while Neus is a representative for NeRF methods designed for task of geometry reconstruction. We integrate these three representative
+NeRF techniques on our dataset and show their corresponding quantitative performance results in Table 1 and visual
+results in Fig. 4. Evidently, we can see that these representative NeRF methods, when used in conjunction with our proposed framework, significantly reduce rendering time while
+maintaining an acceptable level of quality degradation.
+Experiments
+In this section, we first demonstrate that our pipeline indeed takes effect for various NeRF works. Following that,
+we show how our framework can assemble a large number
+of neural objects to form a virtual 3D world. Furthermore,
+we show our approach can be combined with traditional rendering techniques to create a mixed rendering pipeline. We
+implement our framework in two versions: Pytorch version
+for a convenient reproduction and CUDA version for testing performance limitation. We conduct experiments on our
+new N -object dataset which has been described in section
+’N -object dataset testing’.
+Training Details. A single Nvidia A100 GPU is used to
+train NeDF for each scene from our N -object dataset. We
+employ Adam as the optimizer and set the learning rate to
+5e-4. We use the pre-trained NeRF models to generate 500
+random views (more random views, less artifacts) for super-
+Storage and Speed
+As shown in SNeRF (the same architecture with vanilla
+NeRF) column in Table 1, our framework can speed up ren-
+1837
+1
+1
+1
+1
+1
+1
+ground2
+1
+1
+2
+2
+ground1
+wood_floor
+football
+basketball
+plant
+ferrise-bin
+wood_table
+2
+1
+3
+2 10 3
+wood_chair
+5
+8
+ferrise-wheel
+1
+1
+1
+1
+2
+ms
+ferrise-base
+carousel_hors
+echerryBlosso
+1
+1
+1
+1
+1
+carousel
+lego4pi
+2
+1
+1
+1
+car
+nerf_chair
+b3
+b10
+b20
+b50 3
+idr_chair
+air_baloons
+The Thirty-Eighth AAAI Conference on Artificial Intelligence (AAAI-24)
+4
+4
+4
+6
+Figure 5: Number of objects contained in b3,b10,b20,b50
+scene. The number in two ball cases is empty, which is because we use them for the capability pressure test and repeated basketballs and footballs (sharing fifty-fifty) in the
+100-ball and 1k-ball scenes.
+dering more than 30 ∼ 40 times over the vanilla NeRF.
+Comparision with Other Solutions. Although there’s no
+general pipeline for NeRF composition, we force a comparsion with NSVF (Liu et al. 2020), the closest competitor for
+NeRF fast composition, and some other works focus on storage in compositing. In terms of speed, it has demonstrated
+that our framework can save more than twice as much time
+as NSVF (∼ 20×, see Figure 2 in the supplementary appendix). In terms of storage, our models (NeDF+NeRF) requires 13MB (3MB for NeRF), NSVF (grid+NeRF) requires
+3.2∼16MB, DONeRF requires 3.6MB, and CC-NeRF requires 1.5MB. It should be noted that CC-NeRF is not intended for fast composition, and DONeRF is incapable of
+handling arbitrary composition with affine transformation.
+By comparing our method to these, we demonstrate that our
+method does not require excessive storage and is sufficiently
+fast. What’s more, our framework has several significant advantages that the other approaches (NSVF and CC-NeRF)
+lack, including: 1) unlike to our framework, neither NSVF
+nor CC-NeRF can be used as a general acceleration plugin
+and 2) NSVF and CC-NeRF cannot achieve interactive-level
+manipulation speeds or generate shadows like our method
+and 3) both of CC-NeRF and NSVF incur additional memory cost when rendering repeated objects while our framework avoids this issue.
+Figure 6: Results on our N -object dataset. Each 4-image pair
+shows: ID map, depth map, results with shadows using our
+previewing framework, and results with only naive NeRFs
+(shadowless). The Rightside of last two rows is the flip error (Andersson et al. 2020) between previewing and NeRF’s
+naive composition results). From top to bottom: b3 and b10,
+b20 and b50, 100-ball and 1k-ball virtual scenes. Scenes b20
+and b50 are both dynamic, with carousels and ferris wheels
+moving through user control settings; scenes 100-ball and
+1k-ball have 100 and 1,000 balls (half basketballs and half
+footballs), respectively.
+camera views (such as the views in Fig. 6) and render 120
+frames to evaluate the average performance. Table 2 shows
+the consumed time and quality of each composition. Figure 8 depicts the time consumption ratio of each rendering
+step (see appendix) in rendering a single frame. As complexity increases the resampling ratio increases, which results in
+significant differences in computational time across different
+scenes in the Deferred Shading step. To test the capability
+upper bound of our framework, we also conduct a pressure
+test on virtual scenes with 100 and 1k balls to see how stable
+the proposed approach is for scene composition and shadow
+casting (see Fig. 6). Despite taking a longer time (see Tab.
+2), our pipeline delivers stable performance and does not incur additional memory cost for those repeated balls.
+Capbility Evalution
+N -object Dataset Testing. First, we collected an N object dataset consisting of 22 distinct NeRF objects: 7 objects were chosen from previous work (3 from Neus’ dataset
+of real-world objects, 4 from synthesis dataset (Mildenhall
+et al. 2020; Zhang et al. 2022; Verbin et al. 2022)), and
+the remaining 15 objects were newly created by Blender
+3D. To evaluate the framework’s ability to composite complex virtual scenes (see Fig. 6), we conduct a set of virtual
+scene compositions with four-level increasing complexity:
+b3, b10, b20, b50. The b3 and b10 are two static scenes with
+lower complexity, and the b20 and b50 are dynamic scenes
+where some objects move according to user-defined transformation settings. We allow to insert the same NeRF object instances repeatedly into the scene to increase the complexity of the virtual scene. For each scene, we set different
+CUDA Implementation. CUDA version of the proposed
+framework is built with Vulkan, TensorRT, and a customized
+CUDA kernel to enable real-time manipulation on Nvidia
+RTX 4090 GPU. With this, we enable the user to construct a
+virtual scene in a progressive and interactive manner. The
+real-time manipulation benefits from a buffer reuse technique to accelerate the performance during manipulation.
+Specifically, when the user manipulates an object, the other
+1838
+The Thirty-Eighth AAAI Conference on Artificial Intelligence (AAAI-24)
+wo s
+shadow
+rs
+wo rs
+rs
+wo rs
+b3-scene
+time(s) PSNR
+0.240
+25.78
+0.209
+23.97
+0.398
+\
+0.367
+b10-scene
+time
+PSNR
+0.658 23.32
+0.443 19.92
+1.040
+\
+0.813
+b20-scene
+time
+PSNR
+1.678 20.02
+0.873 15.26
+2.441
+\
+1.628
+b50-scene
+time
+PSNR
+1.881 18.67
+1.209 15.43
+2.943
+\
+2.286
+100-ball
+time
+PSNR
+1.887 26.54
+1.741 24.19
+3.073
+\
+3.002
+1k-ball
+time
+PSNR
+16.63 25.26
+16.34 22.58
+28.97
+\
+27.66
+Table 2: Performance of the implemented Pytorch framework on an N -object dataset (’wo s’ means no shadow is calculated;
+’rs’ stands for resampling, i.e., outlier processing in Table 1). The resolution is set to 900 × 600. We use the naive composition
+(right side in Fig. 6) by NeRF as ground truth for composition without shadows. We only test the average time (in seconds)
+in each frame for shadow composition. It should be noted that the quality of the 1K-ball pressure testing was superior to the
+former due to the simpler geometry of the objects. Nonetheless, due to excessive overlapping between balls, the time increases
+rapidly.
+Blender Buffer
+RGB
+Depth
+objects’ rendering processes are frozen, and their buffers are
+reused to decrease the computational load.
+Shadow
+Light position
+Mapping
+Compatibility with Traditional Graphics Pipelines
+The proposed framework is also suitable for integration with
+traditional rendering pipelines to build a mixed pipeline that
+supports dynamic shadow casting across meshes and neural
+objects in a single scene (see Fig. 7). Specifically, we first
+use a shared camera & light settings across mesh and neural
+scene to generate rendering buffers. Subsequently, these two
+scenes are seamlessly integrated using depth-based composition. Finally, shadow mapping is applied to produced a
+mixed result.
+Mixed Depth
+NN Buffer
+RGB
+Depth
+Neural Objects
+ID Buffer
+Figure 7: Given the information of camera view and light
+position, the buffer produced by the proposed framework
+(NN Buffer) and the Cycles engine of Blender 3D can be
+combined to form a mixed render result (see our video for a
+dynamic result). The Bathroom scene is from (Huang et al.
+2022).
+1.0
+Conclusions and Limitations
+We present a general framework for a fast composition of
+NeRF objects with dynamic shadows. The core technical
+contribution is the use of Neural Depth Fields to allow
+for the direct intersection of rays and implicit surfaces to
+quickly determine the spatial relationship between objects
+as well as surface color computation of NeRF objects. To
+the best of our knowledge, this is the first framework that allows for the rapid creation of a virtual scene composed of a
+large number of NeRF objects with dynamic shadows. Our
+method can also be combined with traditional renderers to
+form a mixed pipeline, increasing its versatility and applicability.
+The proposed framework is currently limited to solid
+surface objects, and predicting weight distribution in local
+space rather than a single depth may be a better option. In
+the future, this compositing framework can be further enhanced with more powerful editable NeRF works (MartinBrualla et al. 2021; Tancik et al. 2022; Nguyen-Phuoc, Liu,
+and Xiao 2022; Tojo and Umetani 2022; Zhang et al. 2021,
+2022; Verbin et al. 2022) to achieve global illumination and
+improved visual quality.
+Op-OBJ
+step1
+step2
+step3
+0.8
+0.6
+0.4
+0.2
+b3
+b10
+b20
+b50
+ball-100
+ball-1k
+Figure 8: The time consumption ratio of our framework for
+the main steps. Green and Red bars represent the results with
+and without outliers resampling, respectively. Regarding the
+green bar, refer to this figure in conjunction with Fig. 6,
+when the camera view varies, certain objects which occupy
+a larger portion of the frame, e.g., the trees, have a higher
+resampling ratio and thus increase the processing time. Focusing attention on the red bar, the Step 2 (deferred shading
+step) consistently assumes a relatively minor temporal allocation across all scenarios. This is because, regardless of the
+number of objects in the scene, a pixel will be shaded only
+once with a single NeRF object.
+Acknowledgments
+This work was supported by Key R&D Program of Zhejiang (No. 2023C01047) and the National Natural Science
+Foundation of China (Grant No. 62036010). The authors acknowledge the support of Bytedance’s MM Lab’s GPU cluster, as well as Yanzhen Chen’s early assistance in searching
+1839
+The Thirty-Eighth AAAI Conference on Artificial Intelligence (AAAI-24)
+Kim, C.; Zimmer, H.; Pritch, Y.; Sorkine-Hornung, A.; and
+Gross, M. 2013. Scene reconstruction from high spatioangular resolution light fields. ACM Transactions on Graphics (Proceedings of ACM SIGGRAPH), 32(4): 73:1–73:12.
+Krishnan, A.; Raj, A.; Zhang, X.; Carlson, A.; Tseng,
+N.; Sridhar, S.; Jaipuria, N.; and Hays, J. 2023. LANe:
+Lighting-aware neural fields for compositional scene synthesis. arXiv:2304.03280.
+Kundu, A.; Genova, K.; Yin, X.; Fathi, A.; Pantofaru, C.;
+Guibas, L. J.; Tagliasacchi, A.; Dellaert, F.; and Funkhouser,
+T. 2022.
+Panoptic neural fields: A semantic objectaware neural scene representation. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, 12871–12881.
+Kurz, A.; Neff, T.; Lv, Z.; Zollhöfer, M.; and Steinberger,
+M. 2022. AdaNeRF: Adaptive sampling for real-Time rendering of neural radiance fields. In European Conference on
+Computer Vision, 254–270. Springer.
+Liu, L.; Gu, J.; Zaw Lin, K.; Chua, T.-S.; and Theobalt, C.
+2020. Neural sparse voxel fields. Advances in Neural Information Processing Systems, 33: 15651–15663.
+Ma, T.; Li, B.; He, Q.; Dong, J.; and Tan, T. 2023. Semantic 3D-Aware Portrait Synthesis and Manipulation Based on
+Compositional Neural Radiance Field. Proceedings of the
+AAAI Conference on Artificial Intelligence, 37(2): 1878–
+1886.
+Martin-Brualla, R.; Radwan, N.; Sajjadi, M. S.; Barron, J. T.;
+Dosovitskiy, A.; and Duckworth, D. 2021. Nerf in the wild:
+Neural radiance fields for unconstrained photo collections.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, 7210–7219.
+Max, N. 1995. Optical models for direct volume rendering.
+IEEE Transactions on Visualization and Computer Graphics, 1(2): 99–108.
+Meng, N.; So, H. K.-H.; Sun, X.; and Lam, E. Y. 2019.
+High-dimensional dense residual convolutional neural network for light field reconstruction. IEEE Transactions on
+Pattern Analysis and Machine Intelligence, 43(3): 873–886.
+Mildenhall, B.; Srinivasan, P. P.; Tancik, M.; Barron, J. T.;
+Ramamoorthi, R.; and Ng, R. 2020. NeRF: Representing
+scenes as neural radiance fields for view synthesis. In ECCV,
+405–421.
+Müller, T.; Evans, A.; Schied, C.; and Keller, A. 2022. Instant neural graphics primitives with a multiresolution hash
+encoding. ACM Transactions on Graphics, 41(4): 102:1–
+102:15.
+Neff, T.; Stadlbauer, P.; Parger, M.; Kurz, A.; Mueller, J. H.;
+Chaitanya, C. R. A.; Kaplanyan, A.; and Steinberger, M.
+2021. DONeRF: Towards real-time rendering of compact
+neural radiance fields using depth oracle networks. Computer Graphics Forum, 40(4): 45–59.
+Nguyen-Phuoc, T.; Liu, F.; and Xiao, L. 2022. SNeRF: Stylized Neural Implicit Representations for 3D Scenes. ACM
+Transactions on Graphics, 41(4).
+Niemeyer, M.; Barron, J. T.; Mildenhall, B.; Sajjadi, M.
+S. M.; Geiger, A.; and Radwan, N. 2022. RegNeRF: Regularizing Neural Radiance Fields for View Synthesis from
+for various works.
+References
+Andersson, P.; Nilsson, J.; Akenine-Möller, T.; Oskarsson,
+M.; Åström, K.; and Fairchild, M. D. 2020. FLIP: A difference evaluator for alternating images. Proceedings of
+the ACM on Computer Graphics and Interactive Techniques,
+3(2): 15:1–15:23.
+Attal, B.; Huang, J.-B.; Zollhöfer, M.; Kopf, J.; and Kim, C.
+2022. Learning neural light fields with ray-space embedding
+networks. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), 19819–
+19829.
+Barron, J. T.; Mildenhall, B.; Tancik, M.; Hedman, P.;
+Martin-Brualla, R.; and Srinivasan, P. P. 2021. Mip-nerf:
+A multiscale representation for anti-aliasing neural radiance
+fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision, 5855–5864.
+Boss, M.; Braun, R.; Jampani, V.; Barron, J. T.; Liu, C.; and
+Lensch, H. 2021a. Nerd: Neural reflectance decomposition
+from image collections. In Proceedings of the IEEE/CVF International Conference on Computer Vision, 12684–12694.
+Boss, M.; Jampani, V.; Braun, R.; Liu, C.; Barron, J.; and
+Lensch, H. 2021b. Neural-pil: Neural pre-integrated lighting for reflectance decomposition. Advances in Neural Information Processing Systems, 34: 10691–10704.
+Cao, J.; Wang, H.; Chemerys, P.; Shakhrai, V.; Hu, J.; Fu,
+Y.; Makoviichuk, D.; Tulyakov, S.; and Ren, J. 2022. Realtime neural light field on mobile devices. arXiv preprint
+arXiv:2212.08057.
+Chen, Z.; Funkhouser, T.; Hedman, P.; and Tagliasacchi, A.
+2023. MobileNeRF: Exploiting the Polygon Rasterization
+Pipeline for Efficient Neural Field Rendering on Mobile Architectures. In The Conference on Computer Vision and Pattern Recognition (CVPR).
+Dansereau, D.; and Bruton, L. 2004. Gradient-based depth
+estimation from 4D light fields. In 2004 IEEE International Symposium on Circuits and Systems (IEEE Cat.
+No.04CH37512), volume 3, III–549.
+Gu, J.; Liu, L.; Wang, P.; and Theobalt, C. 2022. StyleNeRF: A style-based 3D aware generator for high-resolution
+image synthesis. In International Conference on Learning
+Representations.
+Hedman, P.; Srinivasan, P. P.; Mildenhall, B.; Barron, J. T.;
+and Debevec, P. 2021. Baking neural radiance fields for realtime view synthesis. In Proceedings of the IEEE/CVF International Conference on Computer Vision, 5875–5884.
+Huang, X.; Zhang, Q.; Feng, Y.; Li, H.; Wang, X.; and Wang,
+Q. 2022. Hdr-nerf: High dynamic range neural radiance
+fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 18398–18408.
+Jiang, K.; Chen, S.-Y.; Liu, F.-L.; Fu, H.; and Gao, L. 2022.
+NeRFFaceEditing: Disentangled face editing in neural radiance fields. In SIGGRAPH Asia 2022 Conference Papers,
+1–9.
+1840
+The Thirty-Eighth AAAI Conference on Artificial Intelligence (AAAI-24)
+Wang, D.; Chandran, P.; Zoss, G.; Bradley, D.; and Gotardo,
+P. 2022a. Morf: Morphable radiance fields for multiview
+neural head modeling. In ACM SIGGRAPH 2022 Conference Proceedings, 1–9.
+Wang, H.; Ren, J.; Huang, Z.; Olszewski, K.; Chai, M.; Fu,
+Y.; and Tulyakov, S. 2022b. R2l: Distilling neural radiance
+field to neural light field for efficient novel view synthesis.
+In Computer Vision–ECCV 2022: 17th European Conference, Tel Aviv, Israel, October 23–27, 2022, Proceedings,
+Part XXXI, 612–629. Springer.
+Wang, P.; Liu, L.; Liu, Y.; Theobalt, C.; Komura, T.; and
+Wang, W. 2021. NeuS: Learning neural implicit surfaces by
+volume rendering for multi-view reconstruction. NeurIPS,
+27171–27183.
+Williams, L. 1978. Casting curved shadows on curved surfaces. In Proceedings of the 5th Annual Conference on Computer Graphics and Interactive Techniques, 270–274.
+Wizadwongsa, S.; Phongthawee, P.; Yenphraphai, J.; and
+Suwajanakorn, S. 2021. Nex: Real-time view synthesis with
+neural basis expansion. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+8534–8543.
+Wu, Q.; Liu, X.; Chen, Y.; Li, K.; Zheng, C.; Cai, J.; and
+Zheng, J. 2022. Object-compositional neural implicit surfaces. In Computer Vision–ECCV 2022: 17th European
+Conference, Tel Aviv, Israel, October 23–27, 2022, Proceedings, Part XXVII, 197–213. Springer.
+Yang, B.; Zhang, Y.; Xu, Y.; Li, Y.; Zhou, H.; Bao, H.;
+Zhang, G.; and Cui, Z. 2021. Learning object-compositional
+neural radiance field for editable scene rendering. In Proceedings of the IEEE/CVF International Conference on
+Computer Vision, 13779–13788.
+Yariv, L.; Hedman, P.; Reiser, C.; Verbin, D.; Srinivasan,
+P. P.; Szeliski, R.; Barron, J. T.; and Mildenhall, B. 2023.
+BakedSDF: Meshing Neural SDFs for Real-Time View Synthesis. In ACM SIGGRAPH 2023 Conference Proceedings, SIGGRAPH ’23. New York, NY, USA: Association for
+Computing Machinery. ISBN 9798400701597.
+Yu, A.; Li, R.; Tancik, M.; Li, H.; Ng, R.; and Kanazawa,
+A. 2021. Plenoctrees for real-time rendering of neural radiance fields. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, 5752–5761.
+Zhang, X.; Srinivasan, P. P.; Deng, B.; Debevec, P.; Freeman,
+W. T.; and Barron, J. T. 2021. Nerfactor: Neural factorization of shape and reflectance under an unknown illumination. ACM Transactions on Graphics (TOG), 40(6): 1–18.
+Zhang, Y.; Sun, J.; He, X.; Fu, H.; Jia, R.; and Zhou, X.
+2022. Modeling indirect illumination for inverse rendering.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, 18643–18652.
+Sparse Inputs. In Proc. IEEE Conf. on Computer Vision and
+Pattern Recognition (CVPR), 5480–5490.
+Ost, J.; Mannan, F.; Thuerey, N.; Knodt, J.; and Heide, F.
+2021. Neural scene graphs for dynamic scenes. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2856–2865.
+Park, K.; Sinha, U.; Barron, J. T.; Bouaziz, S.; Goldman,
+D. B.; Seitz, S. M.; and Martin-Brualla, R. 2021a. Nerfies:
+Deformable neural radiance fields. ICCV, 5865–5874.
+Park, K.; Sinha, U.; Hedman, P.; Barron, J. T.; Bouaziz, S.;
+Goldman, D. B.; Martin-Brualla, R.; and Seitz, S. M. 2021b.
+HyperNeRF: A higher-dimensional representation for topologically varying neural radiance fields. ACM Transactions
+on Graphics, 40(6).
+Piala, M.; and Clark, R. 2021. Terminerf: Ray termination
+prediction for efficient neural rendering. In 2021 International Conference on 3D Vision (3DV), 1106–1114. IEEE.
+Pumarola, A.; Corona, E.; Pons-Moll, G.; and MorenoNoguer, F. 2021. D-NeRF: Neural Radiance Fields for Dynamic Scenes. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR),
+10318–10327.
+Shuai, Q.; Geng, C.; Fang, Q.; Peng, S.; Shen, W.; Zhou,
+X.; and Bao, H. 2022. Novel view synthesis of human interactions from sparse multi-view videos. In SIGGRAPH
+Conference Proceedings, 1–10.
+Sitzmann, V.; Rezchikov, S.; Freeman, B.; Tenenbaum, J.;
+and Durand, F. 2021. Light field networks: Neural scene representations with single-evaluation rendering. Advances in
+Neural Information Processing Systems, 34: 19313–19325.
+Suhail, M.; Esteves, C.; Sigal, L.; and Makadia, A. 2022.
+Light field neural rendering.
+In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, 8269–8279.
+Sun, J.; Chen, X.; Wang, Q.; Li, Z.; Averbuch-Elor, H.;
+Zhou, X.; and Snavely, N. 2022. Neural 3D reconstruction
+in the wild. In ACM SIGGRAPH 2022 Conference Proceedings, 1–9.
+Tancik, M.; Casser, V.; Yan, X.; Pradhan, S.; Mildenhall, B.;
+Srinivasan, P. P.; Barron, J. T.; and Kretzschmar, H. 2022.
+Block-nerf: Scalable large scene neural view synthesis. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 8248–8258.
+Tojo, K.; and Umetani, N. 2022. Recolorable posterization of volumetric radiance fields using visibility-weighted
+palette extraction. Computer Graphics Forum, 41(4): 149–
+160.
+Tosic, I.; and Berkner, K. 2014. Light field scale-depth space
+transform for dense depth estimation. In 2014 IEEE Conference on Computer Vision and Pattern Recognition Workshops, 441–448.
+Verbin, D.; Hedman, P.; Mildenhall, B.; Zickler, T.; Barron, J. T.; and Srinivasan, P. P. 2022. Ref-NeRF: structured
+view-dependent appearance for neural radiance fields. In
+2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 5481–5490. IEEE.
+1841

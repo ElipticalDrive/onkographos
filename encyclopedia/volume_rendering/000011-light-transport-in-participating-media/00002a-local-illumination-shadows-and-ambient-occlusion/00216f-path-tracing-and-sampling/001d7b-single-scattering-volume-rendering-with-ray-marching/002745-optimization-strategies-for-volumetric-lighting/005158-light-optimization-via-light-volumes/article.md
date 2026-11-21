@@ -1,0 +1,180 @@
+# Light Optimization via Light Volumes
+
+Also called: Light coefficient optimization, Light volume method
+
+## Overview
+Light Optimization via Light Volumes is a technique for optimizing light source coefficients in participating media by storing light transport residuals in dedicated volumetric structures rather than directly updating the coefficient vector. It solves the problem of atomic contention and serialization that occurs when multiple GPU threads attempt to write to the same light coefficient memory locations during ray traversal. Unlike direct residual accumulation, this method uses a gather-based approach via mipmapping to aggregate contributions, trading increased memory consumption for significantly higher performance and parallel efficiency.
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   $V_{ext}$: The extinction volume (voxel grid).
+*   $L_{init}$: Initial light coefficient vector of size $N_{coeffs}$.
+*   $T$: The transmission matrix (or ray traversal operator) representing light transport from light sources to constraint pixels.
+*   $I_{target}$: Target images (constraint pixels) for optimization.
+*   $N_{views}$: Number of constraint views.
+*   $N_{coeffs}$: Number of light basis functions (typically low, e.g., 16).
+*   $R_{vol}$: Resolution of the light volumes (e.g., $128^3$).
+
+**Outputs:**
+*   $L_{opt}$: Optimized light coefficient vector.
+*   $V_{li}$: Light volumes (one per coefficient or group) storing the influence of each coefficient.
+
+### Data Structures
+1.  **Light Volume ($V_{li}$)**: A 3D voxel grid of resolution $R_{vol} \times R_{vol} \times R_{vol}$.
+    *   For an isotropic phase function, the memory consumption is proportional to $N_{coeffs} \times R_{vol}^3$.
+    *   Each voxel stores the accumulated light transport contribution for a specific coefficient.
+2.  **Mipmap Pyramid**: A hierarchical structure built over the light volume or the residual accumulation buffer to facilitate the gather operation. The highest level contains the aggregated values for the light coefficients.
+
+### Algorithm Steps
+
+1.  **Pre-computation of Light Volumes**:
+    For each light coefficient $i$ (where $i \in [0, N_{coeffs}-1]$):
+    *   Treat the $i$-th light basis function as an emission source.
+    *   Shoot rays through the volume $V_{ext}$ for all relevant directions.
+    *   Compute the light transport result for each voxel.
+    *   Store the result in the corresponding light volume $V_{li}$.
+    *   *Note*: This step is equivalent to lighting the volume with the $i$-th light source and storing the resulting lit volume.
+
+2.  **Forward Pass (Gathering Influence)**:
+    For each constraint pixel $p$ in the target images:
+    *   Shoot the corresponding ray through the volume $V_{ext}$.
+    *   For each light coefficient $i$, gather values from the pre-computed light volume $V_{li}$ along the ray path.
+    *   Multiply the gathered values by the transmission $T$ along the ray.
+    *   Accumulate the influence of all coefficients to compute the current rendered pixel value $I_{current}(p)$.
+    *   Compute the residual $R(p) = I_{target}(p) - I_{current}(p)$.
+
+3.  **Backward Pass (Distributing Residuals)**:
+    *   Instead of adding residuals directly to $L$ (which causes atomic contention), store the residuals with each ray.
+    *   Perform a **mipmapping procedure** to gather all ray contributions.
+    *   The multiplication with $T^T$ (transpose of transmission) distributes the residuals to the light coefficients.
+    *   Values are stored in the light volumes but targeted at the light coefficient vector.
+    *   The highest level of the mipmap pyramid contains the aggregated values for $L$.
+
+4.  **Update Light Coefficients**:
+    *   Extract the aggregated residuals from the highest level of the mipmap pyramid.
+    *   Update $L_{init}$ to $L_{opt}$ using the aggregated residuals (e.g., via Conjugate Gradient or simple gradient descent).
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def optimize_light_coefficients(volume_ext, target_images, num_coeffs, vol_resolution, num_views):
+    """
+    Optimizes light coefficients using light volumes to avoid atomic contention.
+    """
+    # 1. Pre-compute Light Volumes
+    # V_li[i] stores the transport result for the i-th light basis function
+    V_li = [create_zero_volume(vol_resolution) for _ in range(num_coeffs)]
+    
+    for i in range(num_coeffs):
+        # Treat i-th light basis function as emission
+        # Shoot rays through volume_ext for all directions relevant to this basis
+        # Store the lit result in V_li[i]
+        V_li[i] = light_volume_precompute(volume_ext, light_basis_function(i))
+
+    # 2. Initialize Light Coefficients
+    L = [0.0] * num_coeffs
+    
+    # 3. Optimization Loop (e.g., Conjugate Gradient)
+    # Typically converges in 3-5 steps
+    for iteration in range(max_iterations):
+        
+        # Forward Pass: Compute current render and residuals
+        current_render = [0.0] * len(target_images)
+        residuals = [0.0] * len(target_images)
+        
+        for view_idx, target_img in enumerate(target_images):
+            for pixel in target_img:
+                ray = get_ray_for_pixel(pixel, view_idx)
+                
+                # Gather influence from all light volumes
+                accumulated_light = 0.0
+                for i in range(num_coeffs):
+                    # Gather values from V_li[i] along the ray
+                    # Multiply by transmission T along the ray
+                    influence = gather_from_light_volume(V_li[i], ray)
+                    accumulated_light += L[i] * influence
+                
+                current_render[view_idx] += accumulated_light
+                residuals[view_idx] = target_img[pixel] - accumulated_light
+
+        # Backward Pass: Distribute residuals using Mipmapping
+        # Instead of atomic adds to L, use gather-based aggregation
+        
+        # Initialize mipmap pyramid for aggregation
+        mipmap_levels = build_mipmap_pyramid(residuals, num_coeffs)
+        
+        # The highest level contains aggregated residuals for each coefficient
+        aggregated_residuals = get_highest_level(mipmap_levels)
+        
+        # Update Light Coefficients
+        # L_new = L_old + aggregated_residuals (scaled by step size if necessary)
+        for i in range(num_coeffs):
+            L[i] += aggregated_residuals[i]
+            
+    return L
+
+def gather_from_light_volume(light_vol, ray):
+    """
+    Shoots a ray through a light volume and accumulates values.
+    Equivalent to multiplying with T (ray traversal).
+    """
+    total = 0.0
+    for voxel in ray_intersections(light_vol):
+        total += voxel.value * ray.transmission_to(voxel)
+    return total
+```
+
+### Parameters
+*   **Number of Light Coefficients ($N_{coeffs}$)**: Typically low numbers (e.g., 16) are sufficient for acceptable computation times and good results. The flexibility of environmental lighting allows for low-frequency representation.
+*   **Light Volume Resolution ($R_{vol}$)**: Affects memory consumption significantly ($N_{coeffs} \times R_{vol}^3$ for isotropic phase function). Has minor impact on performance compared to ray marching steps.
+*   **Light Basis Functions**: In the cited work, 128 uniformly-distributed disc lights restricted to the upper hemisphere covering a constant solid angle with soft falloff were used for environment map stylization. However, only 16 coefficients were found sufficient for the final optimization.
+*   **Ray Marching Steps**: Twice the number of ray marching steps for the length of the diagonal as the number of voxels along an axis is a good choice for accurate integral estimation.
+
+### Edge Cases and Pitfalls
+*   **Atomic Contention**: Directly adding residuals to $L$ during ray traversal causes serialization and low performance because multiple threads write to the same memory location. This is especially severe with few light coefficients. The light volume method avoids this by using a gather-based mipmapping approach.
+*   **Isotropic Volume Filtering**: An isotropic volume acts as a low-pass filter from the light source to the camera and vice versa. Consequently, high-frequency information (e.g., logos) in target images cannot be perfectly matched. The resulting environmental lighting is also low-frequency, justifying the use of a low number of light coefficients.
+*   **Memory Usage**: Memory consumption is significant ($N_{coeffs} \times R_{vol}^3$). If GPU memory is constrained, multiple ray traversals can be performed, keeping only a subset of $V_{li}$ in memory at once, though exchanging the set is costly.
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time Complexity**: Scales linearly with the number of light coefficients ($N_{coeffs}$). The pre-computation time for light volumes also scales with $N_{coeffs}$ and resolution.
+*   **Memory Complexity**: Proportional to $N_{coeffs} \times R_{vol}^3$ for isotropic phase functions.
+
+### Measured Performance
+*   **Hardware**: Intel X5650 CPU, nVidia 560Ti GPU.
+*   **Volume Optimization**: For $128^3$ voxels, 256 ray marching steps, 460K constraint pixels (2 views), computation takes less than two seconds. With 2.3M constraint pixels (10 views), it takes seven seconds.
+*   **Light Optimization**: Optimizing for 16 light coefficients on a $128^3$ volume with 2.3M constraint pixels (10 views) takes around three seconds.
+*   **Pre-computation**: For 256 coefficients and $128^3$ resolution, pre-computation is ~5.39 seconds.
+
+### Strengths and Limitations
+*   **Strengths**: Avoids atomic operations and serialization, leading to high performance on GPUs. Preferred over direct residual accumulation despite higher memory usage.
+*   **Limitations**: High memory consumption. Cannot reproduce high-frequency details due to the low-pass filtering nature of isotropic volumes.
+
+### When to Use
+*   Use when optimizing light source coefficients (e.g., environment maps) for volumetric scenes.
+*   Use when atomic contention is a bottleneck in direct coefficient updates.
+*   Use for stylizing environmental lighting, such as modifying environment maps for cloud scenes.
+
+### When Not to Use
+*   Do not use if high-frequency detail reconstruction is required (e.g., matching logos).
+*   Do not use if GPU memory is extremely constrained and cannot accommodate the light volumes.
+
+## Background
+
+### Origin
+The method was introduced in the paper "Property and Lighting Manipulations for Static Volume Stylization Using a Painting Metaphor" [S1].
+
+### History and Development
+The technique was developed to address performance issues in volume stylization where artists modify renderings to reflect desired outputs. It was preferred over direct residual accumulation because it avoids atomic operations, despite higher memory usage. The method is particularly useful for modifying environmental illumination, such as in cloud scenes, where low-frequency lighting changes are sufficient.
+
+### Usage
+The method is used for stylizing environmental lighting, such as modifying environment maps for cloud scenes. It allows artists to produce desired target images using tools like Adobe Photoshop, and the optimization adjusts the light coefficients to match these targets.
+
+## Sources
+
+[S1] Property and Lighting Manipulations for Static Volume Stylization Using a Painting Metaphor, https://doi.org/10.1109/TVCG.2014.13, fetched 2026-10-26

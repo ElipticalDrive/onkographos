@@ -1,0 +1,217 @@
+# DITTO-NeRF
+
+Also called: Diffusion-based Iterative Text To Omni-directional 3D Model
+
+## Overview
+DITTO-NeRF is a pipeline for generating high-quality 3D Neural Radiance Fields (NeRF) from a single text prompt or a reference image [S1, unofficial]. It solves the trade-off between fidelity and diversity in text-to-3D generation by constructing a high-quality partial 3D object for limited "in-boundary" (IB) angles and iteratively reconstructing the remaining "outer-boundary" (OB) angles using an inpainting latent diffusion model [S1, unofficial]. Unlike DreamFusion, which uses a proprietary diffusion model (Imagen), DITTO-NeRF leverages Stable Diffusion via a Latent NeRF representation, achieving higher fidelity and computation-efficient diversity within reasonable training times [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Text prompt $y$; optional reference image $I$. If $I$ is absent, it is synthesized from $y$ and a background prompt $y_{bg}$ [S1, unofficial].
+- **Outputs:** A video $V_{out}$ of rendered views of the 3D object, derived from the trained NeRF model $\mathcal{N}$ [S1, unofficial].
+
+**Data Structures:**
+- **NeRF Model $\mathcal{N}$:** A latent NeRF that outputs a 4-channel latent vector $z_r$ and weight values $P_{ws}$ for each point on a ray, rather than direct RGB [S1, unofficial].
+- **IB Pre-rendered Data:** A set of $N$ pre-rendered latent vectors $Z_p$ and masks $M$ corresponding to uniform angles within the IB region [S1, unofficial].
+- **Camera Parameters:** Principal points $c_x, c_y = 256$; focal lengths $f_x, f_y \approx 45\text{mm}$ (assumed equivalent); image dimensions $512 \times 512$ [S1, unofficial].
+
+**Parameters:**
+- $t_{total}$: Total iterations. Typical value: 5000 [S1, unofficial].
+- $t_u$: End of PGVS beta decrease. Value: $0.3 \times t_{total}$ (1500) [S1, unofficial].
+- $i_{refine}$: Iteration threshold for refinement. Value: 1500 [S1, unofficial].
+- $N$: Number of pre-rendered IB views. Value: 64 [S1, unofficial].
+- $\alpha_0, \beta_0$: Initial beta distribution parameters. Values: 2, 8 [S1, unofficial].
+- $\lambda_{iSDS}$: Weight for iSDS loss [S1, unofficial].
+- $\lambda_{sp}$: Weight for sparsity loss. Value: $5 \cdot 10^{-5}$ [S1, unofficial].
+- $\zeta$: Reliability guide parameter. Value: 2 [S1, unofficial].
+- $\lambda_\eta$: Decay rate for reliability guide. Value: 8 [S1, unofficial].
+- $N_{patch}$: Number of patches in refinement. Value: 256 [S1, unofficial].
+- $k$ (or $S_{patch}$): Patch size. Value: 16 [S1, unofficial].
+- $\epsilon$: Clipping bound for sparsity loss. Value: $10^{-5}$ [S1, unofficial].
+
+**Step 1: IB 3D Object Construction**
+If no reference image $I$ is provided, generate one:
+1. Concatenate text $y$ and background text $y_{bg}$ to form $y_{image}$.
+2. Pass $y_{image}$ through CLIP to get text embedding.
+3. Generate latent $z_{image}$ using Inpainting-LDM.
+4. Decode $z_{image}$ using decoder $D$ to create image $I$ [S1, unofficial].
+
+Generate IB 3D object from $I$:
+1. Extract relative depth map from $I$ using MiDaS monocular depth estimation [S1, unofficial].
+2. Compose a point cloud from the depth map using camera intrinsics ($c_x, c_y, f_x, f_y$) [S1, unofficial].
+3. Remove outlier vertices based on proximity to other vertices using a predetermined standard deviation [S1, unofficial].
+4. Apply Poisson surface reconstruction to generate a mesh [S1, unofficial].
+5. Remove mesh parts with density less than a certain quantile [S1, unofficial].
+6. Render $N$ views (uniformly distributed within IB angles) to obtain RGB images, depth, and latent vectors $Z_p$ using the VAE encoder of the LDM. Store corresponding masks $M$ [S1, unofficial].
+
+**Step 2: Training Loop**
+For iteration $i = 1$ to $t_{total}$:
+
+1. **View Sampling:** Determine camera angles $\theta, \phi$ using Progressive Global View Sampling (PGVS) [S1, unofficial].
+2. **Ray Casting:** Obtain ray origin $o$ and direction $d$ via `Render-ray($\theta, \phi$)` [S1, unofficial].
+3. **NeRF Rendering:** Render latent $z_r$ and weights $P_{ws}$ from $\mathcal{N}(o, d)$ [S1, unofficial].
+4. **IB Handling:** If the angle is in the IB region:
+   - Use `Find-closest` to retrieve pre-rendered $z_p$ and $M$ [S1, unofficial].
+   - Else (OB region), no pre-rendered data is used directly in the loss calculation for IB, but $z_r$ is used for OB [S1, unofficial].
+5. **Phase Selection:**
+   - If $i \le i_{refine}$, execute **Training** [S1, unofficial].
+   - If $i > i_{refine}$, execute **Refinement** [S1, unofficial].
+
+**Training Procedure ($i \le i_{refine}$):**
+1. Create training text embedding $y_{train} = \text{CLIP}(y, y_{dir})$, where $y_{dir}$ is direction info [S1, unofficial].
+2. Calculate Inpainting SDS Loss ($L_{iSDS}$):
+   - If IB: $L_{iSDS} = \text{inpainting-LDM}(z_p, y_{train}, M)$ [S1, unofficial].
+   - If OB: Define mask $M_0 = J / (H \cdot f_{scale})$ (where $J$ is likely a constant or identity, $f_{scale}$ is a scaling factor). $L_{iSDS} = \text{inpainting-LDM}(z_r, y_{train}, M_0)$ [S1, unofficial].
+3. Calculate Reliability Guidance ($L_R$):
+   - $L_R = [\zeta \cdot M + \eta(t) \cdot (1 - M)] \|z_r - z_p\|_1$, where $\eta(t) = e^{-t/\lambda_\eta}$ [S1, unofficial].
+   - Note: $L_R$ is applied to correct $z_r$ towards $z_p$ in IB regions, with reliability increasing over time [S1, unofficial].
+4. Calculate Sparsity Loss ($L_{sp}$):
+   - $\alpha$ is the weighted sum of a ray clipped to $[\epsilon, 1-\epsilon]$.
+   - $L_{sp} = -\mathbb{E}[\alpha \log(\alpha) + (1-\alpha) \log(1-\alpha)]$ [S1, unofficial].
+5. Total Loss: $L_{total} = \lambda_{iSDS} L_{iSDS} + \delta_R(\theta, \phi) L_R + \lambda_{sp} L_{sp}$ [S1, unofficial].
+6. Update $\mathcal{N}$ with $L_{total}$ [S1, unofficial].
+
+**Refinement Procedure ($i > i_{refine}$):**
+1. Create refinement text embedding $y_{refine} = \text{CLIP}(y, y_{dir})$ [S1, unofficial].
+2. Calculate dimensions $H, W$ using `Dimension-Refine(i)`:
+   - $\text{rate} = \frac{i - t_{total} \cdot f_{ref}}{t_{total} \cdot (1 - f_{ref})}$
+   - $H = 64 \times (1 + \text{rate})$, $W = 64 \times (1 + \text{rate})$ [S1, unofficial].
+3. Resize $M$ and $z_p$ to $H \times W$ if IB [S1, unofficial].
+4. Apply `Add-Patch(M)`:
+   - For $j = 1$ to $N_{patch}$:
+     - Pick random coordinates $P_x, P_y$ within mask size $S_{mask}$.
+     - Set $M[P_x : P_x + k, P_y : P_y + k] = 1$ [S1, unofficial].
+5. Calculate $L_{iSDS}$:
+   - If IB: $L_{iSDS} = \text{inpainting-LDM}(z_p, y_{refine}, M)$ [S1, unofficial].
+   - If OB: $L_{iSDS} = \text{inpainting-LDM}(z_r, y_{refine}, M_0)$ [S1, unofficial].
+6. Calculate $L_{sp}$ [S1, unofficial].
+7. Total Loss: $L_{total} = \lambda_{iSDS} L_{iSDS} + \lambda_{sp} L_{sp}$ (Reliability guidance omitted) [S1, unofficial].
+8. Update $\mathcal{N}$ with $L_{total}$ [S1, unofficial].
+
+**Rendering Output:**
+For each rendering angle:
+1. Get $o, d$ via `Render-ray`.
+2. Get $z_r$ from $\mathcal{N}(o, d)$.
+3. Decode $I_{out} = D(z_r)$ [S1, unofficial].
+4. Append $I_{out}$ to $V_{out}$ [S1, unofficial].
+
+**PGVS Formula:**
+Sampling viewing position $x$ at time $t$:
+$$
+f(x; t) = 
+\begin{cases} 
+\frac{x^{\alpha(t)-1} (1-x)^{\beta(t)-1}}{B(\alpha(t), \beta(t))} & \text{if } t < t_u \\
+U(0, 1) & \text{if } t \ge t_u
+\end{cases}
+$$
+Where $\alpha(t) = \alpha_0 + (1 - \alpha_0) \frac{t}{t_u}$ and $\beta(t) = \beta_0 + (1 - \beta_0) \frac{t}{t_u}$ [S1, unofficial].
+Angles are sampled via inverse CDF: $\theta, \phi = ( \int f(x; t) dx )^{-1} (U_{\theta,\phi}(0, 1)) \cdot \text{range}(\theta, \phi)$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def DITTO_NeRF(y, I=None):
+    # Step 1: Generate IB 3D Object
+    if I is None:
+        y_image = CLIP(y + y_bg)
+        z_image = Inpainting_LDM(y_image)
+        I = Decoder(z_image)
+    
+    Zp, M = Generate_IB_3D(I) # Uses MiDaS, Poisson Reconstruction
+    
+    # Step 2: Training Loop
+    for i in range(1, t_total + 1):
+        theta, phi = PGVS(i, alpha_0, beta_0, t_u, t_total)
+        
+        if IB_Check(theta, phi):
+            zp, M = Find_Closest(Zp, M, theta, phi)
+            IB_Flag = True
+        else:
+            IB_Flag = False
+            
+        o, d = Render_Ray(theta, phi)
+        zr, Pws = NeRF_N(o, d)
+        
+        if i <= i_refine:
+            Training_Step(NeRF_N, zp, M, zr, Pws, y, theta, phi, IB_Flag)
+        else:
+            Refinement_Step(NeRF_N, zp, M, zr, Pws, y, theta, phi, IB_Flag, i)
+            
+    # Step 3: Rendering
+    Vout = []
+    for theta, phi in Rendering_Angles:
+        o, d = Render_Ray(theta, phi)
+        zr = NeRF_N(o, d)
+        Iout = Decoder(zr)
+        Vout.append(Iout)
+        
+    return Vout
+
+def Training_Step(N, zp, M, zr, Pws, y, theta, phi, IB):
+    y_train = CLIP(y, Direction_Info(theta, phi))
+    
+    if IB:
+        LiSDS = Inpainting_LDM(zp, y_train, M)
+        LR = Reliability_Guide(zp, zr, M, t=i)
+    else:
+        M0 = J / (H * fscale) # H, fscale not fully defined in source for training phase, assumed constant or derived
+        LiSDS = Inpainting_LDM(zr, y_train, M0)
+        
+    Lsp = Sparsity_Loss(Pws)
+    Ltotal = lambda_iSDS * LiSDS + delta_R(theta, phi) * LR + lambda_sp * Lsp
+    N.Update(Ltotal)
+
+def Refinement_Step(N, zp, M, zr, Pws, y, theta, phi, IB, i):
+    y_refine = CLIP(y, Direction_Info(theta, phi))
+    H, W = Dimension_Refine(i, t_total, f_ref)
+    
+    if IB:
+        M = Resize(M, H, W)
+        M = Add_Patch(M, N_patch, k, S_mask)
+        zp = Resize(zp, H, W)
+        LiSDS = Inpainting_LDM(zp, y_refine, M)
+    else:
+        M0 = J / (H * fscale)
+        LiSDS = Inpainting_LDM(zr, y_refine, M0)
+        
+    Lsp = Sparsity_Loss(Pws)
+    Ltotal = lambda_iSDS * LiSDS + lambda_sp * Lsp
+    N.Update(Ltotal)
+
+def Reliability_Guide(zp, zr, M, t):
+    eta_t = exp(-t / lambda_eta)
+    return (zeta * M + eta_t * (1 - M)) * L1_Norm(zr - zp)
+
+def Dimension_Refine(iter, t_total, f_ref):
+    rate = (iter - t_total * f_ref) / (t_total * (1 - f_ref))
+    H = 64 * (1 + rate)
+    W = 64 * (1 + rate)
+    return H, W
+
+def Add_Patch(M, N_patch, k, S_mask):
+    for _ in range(N_patch):
+        Px = Random(S_mask)
+        Py = Random(S_mask)
+        M[Px : Px + k, Py : Py + k] = 1
+    return M
+```
+
+**Edge Cases and Pitfalls:**
+- **Depth Estimation:** MiDaS relies on shadows and model priors. Images with minimal shadows or out-of-distribution inputs lead to inaccurate depth, causing inadequate IB 3D objects [S1, unofficial].
+- **Diffusion Quality:** Poor quality or low-probability images from the diffusion model may not follow image priors, causing convergence issues and discontinuity between the image prior and diffusion-generated parts [S1, unofficial].
+- **IB Angle Width:** If the IB angle is too narrow, matching between IB and OB is insufficient. If too wide, the `Find-closest` process becomes a bottleneck [S1, unofficial].
+- **Pre-rendering Count ($N$):** Too small $N$ leads to insufficient IB training; too large increases computational burden. $N=64$ is optimal [S1, unofficial].
+- **Patch Refinement:** Insufficient $N_{patch}$ fails to produce appropriate refinement; excessive $N_{patch}$ may disrupt existing IB structures [S1, unofficial].
+
+## Operating characteristics
+- **Time and Memory Complexity:** The method uses Latent NeRF, which is more computation-efficient than standard NeRF. It achieves satisfactory quality within reasonable training time compared to Stable-DreamFusion [S1, unofficial].
+- **Scaling:** The refinement stage linearly increases resolution from $64 \times 64$ to $128 \times 128$ [S1, unofficial].
+- **Strengths:** Higher fidelity and quality in image-to-3D correspondence; higher fidelity and computation-efficient diversity in text-to-3D generation compared to Stable Diffusion-based studies [S1, unofficial].
+- **Limitations:** Dependent on the quality of the monocular depth estimation and the diffusion model's ability to generate high-quality images. Convergence issues may arise with low-probability diffusion outputs [S1, unofficial].
+
+## Background
+DITTO-NeRF was introduced in the paper "DITTO-NeRF: Diffusion-based Iterative Text To Omni-directional 3D Model" [S1, unofficial]. It builds on the DreamFusion approach but replaces the proprietary Imagen model with Stable Diffusion via Latent NeRF [S1, unofficial]. The sparsity loss used in the method was introduced in Dreamfields and employed in Latent-NeRF [S1, unofficial]. The method is supported by NRF grants [S1, unofficial].
+
+## Sources
+[S1] DITTO-NeRF: Diffusion-based Iterative Text To Omni-directional 3D Model, https://arxiv.org/abs/2304.02827v1, fetched 2026-10-26 (unofficial)

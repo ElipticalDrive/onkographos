@@ -1,0 +1,265 @@
+--- v004.md
++++ v005.md
+@@ -1,160 +1,128 @@
+ # Bounding Box Raymarching
+ 
+-Also called: Fragment shader raycasting, GPU-based Volume Raycasting with Texture Space Traversal, Raycasting via Bounding Box Rendering, Single-Pass GPU Raycasting, Single-pass volume raycasting, Volume Ray Marching with WebGL, WebGL2 Bounding Box Raymarching
++Also called: Back-face ray casting, Raycasting via Bounding Box Rendering, Two-pass ray casting, WebGL Two-Pass Volume Ray Casting with Back-Face Culling
+ 
+ ## Overview
+-Bounding Box Raymarching is a GPU-accelerated volume rendering technique that renders a 3D voxel grid by casting rays through the volume's bounding box geometry [S1, unofficial][S2, unofficial][S3, unofficial]. It solves the problem of efficiently determining ray entry and exit points for volume traversal without performing expensive ray-cube intersection calculations in the final rendering pass [S2, unofficial][S3, unofficial]. It differs from [Back-face rasterized volume rendering](1296-back-face-rasterized-volume-rendering.md) by explicitly utilizing a two-pass approach where the first pass captures back-face coordinates into a texture, and the second pass uses these coordinates to define ray endpoints for front-to-back compositing [S1, unofficial][S2, unofficial][S3, unofficial]. Unlike [Volume Ray Casting with RayData Texture](3077-volume-ray-casting-with-raydata-texture.md), which stores ray data in a dedicated texture, this method computes ray directions from geometry attributes or camera matrices directly in the fragment shader [S5, unofficial].
++Bounding Box Raymarching is a GPU-accelerated volume rendering technique that determines ray segment endpoints by rasterizing the back faces of the volume's bounding box into a texture, then performing front-to-back ray marching in a second pass using those endpoints [S1, S2, S4, unofficial]. It solves the problem of efficiently identifying which pixels correspond to rays intersecting the volume and correctly defining the ray start and end positions in world or texture space, thereby avoiding the computational waste of marching rays through empty space outside the volume [S1, S2, S3, S8, unofficial]. It sets itself apart from standard texture slicing by performing integration along rays completely inside a fragment shader rather than in the vertex stage, and from [Entry Point Buffer with Back-to-Front Projection](13565-entry-point-buffer-with-back-to-front-projection.md) by explicitly storing the back-face coordinates in a dedicated texture buffer during a pre-pass rather than relying solely on depth buffer comparisons or entry-point buffers [S1, S2, unofficial][S6][S8, unofficial].
+ 
+ ## How it works
+-The method employs a two-pass rendering pipeline using a unit cube (or bounding box) geometry [S1, unofficial][S2, unofficial][S3, unofficial]. The first pass renders the back faces of the cube to a framebuffer texture to store the ray exit coordinates (or entry coordinates in object space) [S1, unofficial][S3, unofficial]. The second pass renders the front faces to the screen, using the stored back coordinates and the current front coordinates to define the ray, then samples the volume texture along this ray [S1, unofficial][S3, unofficial].
++**Inputs and Outputs:**
++*   **Inputs:** A 3D volume dataset (stored as a 3D texture or 2D texture atlas), a bounding box geometry (typically a unit cube or axis-aligned box), camera matrices (Model-View-Projection), and rendering parameters (number of steps, transfer function).
++*   **Outputs:** A 2D color buffer containing the rendered volume image with front-to-back compositing.
+ 
+-### Inputs and Outputs
+-*   **Inputs**:
+-    *   Volume data: Stored in a 3D texture (`sampler3D`) or a 2D texture atlas of slices (`sampler2D` array) [S2, unofficial][S3, unofficial][S5, unofficial].
+-    *   Transfer function: Stored in a 1D texture (`sampler1D`) mapping scalar density to RGBA color/opacity [S2, unofficial][S5, unofficial].
+-    *   Camera matrices: Model-View-Projection (MVP) and their inverses for coordinate transformation [S4].
+-    *   Bounding Box Geometry: A cube defined by 8 vertices and 12 triangles [S2, unofficial].
+-*   **Outputs**:
+-    *   Final image: Rendered to the screen or a target framebuffer with front-to-back compositing [S1, unofficial][S5, unofficial].
++**Data Structures:**
++1.  **Bounding Box Geometry:** Defined by 8 vertices and 12 triangles (6 faces). For a unit cube, vertices are at coordinates $(0,0,0)$ to $(1,1,1)$ [S4, S8, unofficial]. Indices define the triangles in counter-clockwise order [S4, unofficial].
++2.  **Back-Face Texture (Exit Points):** A 2D texture (e.g., 512x512 RGBA) attached to a Framebuffer Object (FBO). It stores the world-space or texture-space coordinates of the back-face intersection points [S1, S2, S4, S3, unofficial]. Internal format is often `GL_RGBA16F` or `GL_RGBA` [S4, S1, unofficial].
++3.  **Volume Texture:** A 3D texture (`sampler3D`) or a 2D texture atlas acting as a 3D volume [S2, S4, S5, S8, unofficial]. If a 2D atlas is used, it maps 3D coordinates to 2D UVs using tile indices [S2, S5, unofficial].
++4.  **Transfer Function:** A 1D texture (`sampler1D`) mapping scalar density values to RGBA color and opacity [S4, S8, unofficial].
+ 
+-### Data Structures
+-1.  **Cube Geometry**:
+-    *   **Vertices**: 8 vertices defining a unit cube in object space (0 to 1).
+-        *   Layout: `(0,0,0), (0,0,1), (0,1,0), (0,1,1), (1,0,0), (1,0,1), (1,1,0), (1,1,1)` [S2, unofficial].
+-        *   Indices: 36 indices forming 12 triangles (6 faces), drawn counter-clockwise [S2, unofficial].
+-    *   **Texture Coordinates**: Vary from 0 to 1, representing the entry points of rays into the volume in texture space [S5, unofficial].
+-2.  **Frame Buffer (Pass 1)**:
+-    *   Color Attachment: 2D texture (e.g., `RGBA16F` or `RGBA`) storing world/object space coordinates of the back face [S1, unofficial][S2, unofficial].
+-    *   Depth Attachment: Depth buffer (e.g., `DEPTH_COMPONENT16`) to ensure correct back-face rasterization [S1, unofficial][S2, unofficial].
+-3.  **Textures**:
+-    *   **Volume Texture**: 3D texture (`GL_INTENSITY` or `RGBA`) with linear filtering and repeat wrapping [S2, unofficial][S5, unofficial]. If using a 2D atlas, it requires slice mapping logic [S3, unofficial].
+-    *   **Transfer Function**: 1D texture (`GL_RGBA8`) with nearest filtering and repeat wrapping [S2, unofficial].
+-    *   **Back-Coord Texture**: 2D texture sampled in Pass 2 to retrieve ray endpoints [S3, unofficial].
++**Numbered Steps:**
+ 
+-### Numbered Steps
++1.  **Initialization:**
++    *   Create a Framebuffer Object (FBO) with a 2D color attachment texture (for back-face coordinates) and a depth buffer [S1, S4, unofficial].
++    *   Load the volume data into a 3D texture or 2D texture atlas [S1, S2, S4, S5, unofficial].
++    *   Load the transfer function into a 1D texture [S4, S8, unofficial].
++    *   Define the bounding box geometry (vertices and indices) [S4, S8, unofficial].
+ 
+-**Pass 1: Capture Back-Face Coordinates**
+-1.  Bind the framebuffer object (FBO) with the back-coordinate texture as color attachment [S2, unofficial].
+-2.  Enable front-face culling (`gl.CULL_FACE` with `gl.FRONT`) to render only the back faces of the cube [S1, unofficial][S3, unofficial].
+-3.  Render the cube geometry.
+-4.  In the fragment shader, output the world-space (or object-space) coordinates of the fragment as the color [S1, unofficial][S3, unofficial].
++2.  **Pass 1: Back-Face Rasterization (Coordinate Generation):**
++    *   Bind the FBO [S1, S4, unofficial].
++    *   Enable depth testing and back-face culling [S1, S3, S8, unofficial].
++    *   Configure culling to discard **front-facing** polygons (`gl.CULL_FACE` with `gl.FRONT`) so that only the back faces of the bounding box are rendered [S1, S3, S5, S8, unofficial]. This ensures that for each pixel, we capture the entry point of the ray into the volume (from the camera's perspective, the "back" of the box is the far boundary) [S1, S3, S8, unofficial]. *Note: Terminology varies; some sources call the first pass "back-face" rendering to get the exit point, while the second pass renders the front face to get the entry point. The key is capturing the two boundaries.*
++    *   Render the bounding box geometry. The fragment shader outputs the world-space (or texture-space) coordinates of the back-facing fragments [S1, S2, S3, S8, unofficial].
++    *   Store these coordinates in the FBO's color texture [S1, S2, S3, S5, unofficial].
+ 
+-**Pass 2: Ray Marching and Compositing**
+-1.  Bind the default framebuffer (screen).
+-2.  Disable face culling or enable back-face culling to render the front faces of the cube [S1, unofficial][S3, unofficial].
+-3.  In the fragment shader:
+-    a.  **Retrieve Ray Endpoints**:
+-        *   Get the front position (`frontColor`) from the vertex shader varying (current fragment position in world/object space) [S3, unofficial].
+-        *   Get the back position (`backColor`) by sampling the texture from Pass 1 using the current screen coordinates (`texC = ((pos.xy/pos.w) + 1.0) / 2.0`) [S3, unofficial].
+-    b.  **Compute Ray Direction**:
+-        *   Calculate direction: $dir = backColor.rgb - frontColor.rgb$ [S3, unofficial].
+-    c.  **Initialize Accumulators**:
+-        *   Set accumulated color/opacity `accum = (0, 0, 0, 0)` [S3, unofficial][S5, unofficial].
+-        *   Set current position `vpos = frontColor` [S3, unofficial].
+-    d.  **Marching Loop**:
+-        *   Iterate for a fixed number of steps (`uSteps`) or until transmittance is negligible [S3, unofficial][S4].
+-        *   **Step Size**: $Step = dir / uSteps$ [S3, unofficial]. Alternatively, a fixed step size (e.g., 0.001 or 0.01) may be used [S2, unofficial][S5, unofficial].
+-        *   **Sample Volume**:
+-            *   If using 3D texture: `value = texture3D(volumeTex, vpos.xyz)` [S5, unofficial].
+-            *   If using 2D Atlas: Map 3D position to 2D slice coordinates using $s1Original = floor(volpos.z \times uNumberOfSlices)$, then interpolate between slices [S3, unofficial].
+-            *   Extract scalar value (e.g., from alpha channel `value.a`) [S5, unofficial].
+-        *   **Transfer Function**:
+-            *   Normalize scalar: $tf\_pos.x = (scalar - uMinGrayVal) / (uMaxGrayVal - uMinGrayVal)$ [S3, unofficial].
+-            *   Sample transfer function: `src = texture1D(tfTex, tf_pos.x)` [S5, unofficial].
+-        *   **Compositing**:
+-            *   Apply opacity factor: $sample.a = src.a \times uOpacityVal$ [S3, unofficial].
+-            *   Apply color factor: $sample.rgb = src.rgb \times uColorVal$ [S3, unofficial].
+-            *   Update accumulation (Standard Absorption):
+-                $$accum.rgb += (1.0 - accum.a) \times sample.rgb$$
+-                $$accum.a += sample.a \times (1.0 - accum.a)$$
+-            *   Break if $accum.a \ge 1.0$ [S3, unofficial].
+-        *   **Advance Position**:
+-            *   $vpos.xyz += Step$ [S3, unofficial].
+-            *   Check bounds: If using explicit bounds, break if $vpos$ exceeds cube limits ($x,y,z > 1.0$ or $< 0.0$) [S3, unofficial].
+-            *   Alternatively, check if inside volume extent using $inside = dot(sign(position - volExtentMin), sign(volExtentMax - position))$; break if $inside < 3.0$ [S5, unofficial].
+-4.  Output `accum` as the final fragment color [S3, unofficial][S5, unofficial].
++3.  **Pass 2: Ray Marching and Compositing:**
++    *   Bind the default framebuffer (screen) [S1, S4, unofficial].
++    *   Disable back-face culling or enable front-face culling (`gl.FRONT`) to render only the front faces of the bounding box [S1, S2, S5, S8, unofficial]. This triggers the fragment shader for pixels inside the volume projection [S1, S8, unofficial].
++    *   **Vertex Shader:** Pass the current fragment's world-space (or texture-space) coordinates as a varying attribute. This represents the **ray origin** (entry point) [S1, S2, S5, S8, unofficial].
++    *   **Fragment Shader:**
++        a.  **Retrieve Endpoints:** Sample the back-face texture using the current pixel's screen coordinates (or projected texture coordinates) to get the **ray destination** (exit point) [S1, S2, S5, S8, unofficial].
++            *   *Formula:* $backPos = texture2D(backFaceTexture, texCoord).xyz$ [S2, S5, unofficial].
++            *   *Front Position:* $frontPos = varyingWorldCoords$ [S2, S5, unofficial].
++        b.  **Compute Ray Parameters:**
++            *   Calculate ray direction: $dir = backPos - frontPos$ [S2, S5, S8, unofficial].
++            *   Calculate ray length: $rayLength = length(dir)$ [S2, S5, unofficial].
++            *   Calculate step size: $delta = 1.0 / steps$ (if using normalized texture space) or $stepSize = rayLength / steps$ [S2, S4, S5, S8, unofficial].
++            *   Calculate direction vector per step: $deltaDirection = normalize(dir) * delta$ [S2, S5, S8, unofficial].
++        c.  **Initialize Accumulators:**
++            *   $accumulatedColor = vec4(0.0)$ [S2, S8, unofficial].
++            *   $accumulatedAlpha = 0.0$ [S2, S8, unofficial].
++            *   $currentPosition = frontPos$ [S2, S8, unofficial].
++        d.  **Ray Marching Loop:** Iterate for a fixed number of steps ($MAX\_STEPS$) or until the ray exits the volume [S2, S5, S8, unofficial].
++            *   Sample the volume at $currentPosition$: $dataSample = sampleVolume(currentPosition)$ [S2, S5, S8, unofficial].
++            *   Extract color and alpha from the sample (using transfer function if necessary) [S2, S5, S8, unofficial].
++            *   **Front-to-Back Compositing:**
++                *   *Standard/Absorption Mode:*
++                    $$sample.a = dataSample.a \times uOpacityVal$$
++                    $$sample.rgb = dataSample.rgb \times uColorVal$$
++                    $$accumulatedColor += (1.0 - accumulatedAlpha) * sample.rgb$$
++                    $$accumulatedAlpha += sample.a$$
++                *   *MIP Mode:* Track the maximum density value and replace accumulation [S5, unofficial].
++            *   **Termination Conditions:** Break if:
++                *   $accumulatedAlpha \ge 1.0$ (opaque) [S2, S5, S8, unofficial].
++                *   $accumulatedLength \ge rayLength$ (reached back face) [S2, S5, unofficial].
++                *   $currentPosition$ is outside volume bounds (if not using bounding box endpoints) [S5, S8, unofficial].
++            *   **Advance Ray:** $currentPosition += deltaDirection$ [S2, S5, S8, unofficial].
++        e.  **Output:** Write $accumulatedColor$ to the screen [S2, S8, unofficial].
+ 
+-### Pseudocode
+-```python
+-def bounding_box_raymarch(back_color: vec4, front_color: vec4, u_steps: int, 
+-                          u_min_gray: float, u_max_gray: float, 
+-                          u_opacity_val: float, u_color_val: float) -> vec4:
+-    accum = vec4(0.0, 0.0, 0.0, 0.0)
+-    vpos = front_color
+-    dir = back_color.rgb - front_color.rgb
+-    step = dir / u_steps
+-    
+-    for i in range(u_steps):
+-        gray_val = get_volume_value(vpos.xyz)
+-        
+-        if gray_val < u_min_gray or gray_val > u_max_gray:
+-            color_value = vec4(0.0)
+-        else:
+-            tf_pos = (gray_val - u_min_gray) / (u_max_gray - u_min_gray)
+-            color_value = texture(u_transfer_function, vec2(tf_pos, 0.5))
+-            
+-        sample = vec4(color_value.rgb * u_color_val, color_value.a * u_opacity_val)
+-        accum.rgb += (1.0 - accum.a) * sample.rgb
+-        accum.a += sample.a * (1.0 - accum.a)
+-        
+-        if accum.a >= 1.0:
+-            break
+-            
+-        vpos.xyz += step
+-        
+-    return accum
+-```
++**Formulas:**
++*   Ray Direction: $dir = backPos - frontPos$ [S2, S5, unofficial].
++*   Step Size (Normalized): $delta = 1.0 / steps$ [S2, S8, unofficial].
++*   Step Size (World/Texture Space): $stepSize = length(dir) / steps$ [S4, S7, unofficial].
++*   Compositing (Front-to-Back): $C_{out} = C_{in} + (1 - \alpha_{in}) \times C_{sample} \times \alpha_{sample}$ [S2, S8, unofficial].
++*   Texture Atlas Mapping (if applicable):
++    $$nTiles = dataDims.z$$
++    $$tileWidth = 1.0 / nTiles$$
++    $$p = pos.y \times tileWidth + pos.x / nTiles$$
++    $$q = pos.z$$
++    $$sample = texture2D(tex, vec2(p, q))$$ [S2, S5, unofficial].
+ 
+-### Formulas
+-*   **Ray Direction**: $dir = backColor.rgb - frontColor.rgb$ [S3, unofficial].
+-*   **Step Vector**: $Step = dir / uSteps$ [S3, unofficial].
+-*   **Volume Value (2D Atlas)**:
+-    $$s1Original = floor(volpos.z \times uNumberOfSlices)$$
+-    $$tex1Index = floor(s1Original / (uSlicesOverX \times uSlicesOverY))$$
+-    $$s1 = mod(s1Original, uSlicesOverX \times uSlicesOverY)$$
+-    $$dx1 = fract(s1/uSlicesOverX)$$
+-    $$dy1 = floor(s1/uSlicesOverY)/uSlicesOverY$$
+-    $$texpos1.x = dx1 + (volpos.x/uSlicesOverX)$$
+-    $$texpos1.y = dy1 + (volpos.y/uSlicesOverY)$$
+-    $$value1 = texture2D(uSliceMaps[tex1Index], texpos1).x$$ [S3, unofficial].
+-*   **Transfer Function Normalization**: $tf\_pos.x = (gray\_val - uMinGrayVal) / (uMaxGrayVal - uMinGrayVal)$ [S3, unofficial].
+-*   **Inside Check**: $inside = dot(sign(position - volExtentMin), sign(volExtentMax - position))$ [S5, unofficial].
++**Parameters:**
++*   `steps` / `uSteps`: Number of samples per ray. Default/Typical: 256 [S1, S4, S8, unofficial] or 512 [S2, unofficial].
++*   `alphaCorrection` / `uOpacityVal`: Opacity multiplier per sample. Default: 0.08 [S1, S2, unofficial].
++*   `MAX_STEPS`: Hard limit for loop iterations. Value: 512 [S2, unofficial] or 4095 [S5, unofficial].
++*   `g_stepSize`: Fixed step size for marching. Value: 0.001f [S4, unofficial].
++*   `volExtentMin` / `volExtentMax`: Volume bounds in texture space. Typically [0,0,0] to [1,1,1] or [-1,-1,-1] to [1,1,1] [S8, unofficial].
++*   `camera`: Camera position in texture space. Calculated as $(worldCameraPosition - volExtentMin) / (volExtentMax - volExtentMin)$ [S8, unofficial].
+ 
+-### Parameters
+-*   `steps`: Number of voxel samples per ray. Default: 256 [S1, unofficial].
+-*   `alphaCorrection` / `uOpacityVal`: Opacity factor applied to each sample. Default: 0.08 [S1, unofficial].
+-*   `stepSize`: Fixed step size for marching. Typical: 0.001 to 0.01 [S2, unofficial][S5, unofficial].
+-*   `uMinGrayVal`, `uMaxGrayVal`: Range for transfer function normalization [S3, unofficial].
+-*   `camera`: Camera position in texture space (normalized 0-1) [S5, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Texture Loading**: If the volume texture is not loaded when rendering begins, the pass may return early [S1, unofficial].
+-*   **Depth Texture Support**: Requires `WEBGL_depth_texture` extension for the back-coordinate pass in WebGL [S1, unofficial].
+-*   **Warping Artifacts**: Occur if volume texture wrapping is not set to `GL_CLAMP` with a one-pixel empty margin, especially during rotation [S5, unofficial].
+-*   **Camera Space**: Camera position must be provided in texture space (normalized), not world space, to avoid incorrect ray directions [S5, unofficial].
+-*   **Loop Limits**: In some GLSL implementations, direct comparison `i > uSteps` is avoided due to precision issues; instead, a large constant (e.g., 4095) is used with an equality check `i == uSteps` [S3, unofficial].
+-*   **Out-of-Bounds Values**: Gray values outside `[uMinGrayVal, uMaxGrayVal]` should be handled (e.g., set to transparent) [S3, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Texture Loading:** If the voxel texture is not loaded before the render pass, the render function may return early [S1, unofficial].
++*   **Accumulator Type:** Using `vec4` for `accumulatedColor` and multiplying by `alphaSample` (which includes the alpha channel) causes incorrect blending because the alpha channel is treated as color data. Use `vec3` for color accumulation [S2, unofficial].
++*   **Camera Clipping:** If the camera is inside the volume, the near plane can clip the view. Minimize by using a smaller near plane value, but avoid excessive smallness due to floating-point precision artifacts [S2, S7, unofficial].
++*   **Warping Artifacts:** If the volume texture wrapping mode is not set correctly (e.g., `GL_CLAMP`), warping artifacts can occur at corners during rotation. A one-pixel empty margin should be present in the volume texture [S8, unofficial].
++*   **Matrix Order:** Transformation order must be Identity -> Rotate -> Translate. Applying translation before rotation causes the object to orbit the origin instead of rotating in place [S3, unofficial].
++*   **Depth Texture Support:** Requires `WEBGL_depth_texture` extension for some implementations [S1, unofficial].
++*   **Ray Direction Logic:** If only the front or back surface is rendered incorrectly, check the ray direction and start point relative to the camera [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Volume Ray Casting with RayData Texture](3077-volume-ray-casting-with-raydata-texture.md)
+-Uses a pre-pass to store ray entry/exit bounds in a dedicated texture, allowing the final pass to sample these values directly instead of computing them from geometry. Choose this when you need to decouple ray intersection logic from the volume sampling shader or support complex ray origins not easily derived from a simple cube.
++Precomputes ray entry points and marching distances into a 2D "RayData" texture during a geometry prepass, allowing the fragment shader to sample these values directly rather than recalculating intersections. Chosen when explicit ray segment encoding is needed for early termination or occlusion checks.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Not given in the sources.
+-*   **Memory Complexity**: Not given in the sources.
+-*   **Performance**: Highly parallel on GPU due to per-pixel ray execution. Performance is limited by memory bandwidth (volume texture sampling) and fragment shader arithmetic [S5, unofficial].
+-*   **Strengths**: Simple geometry (unit cube), easy to implement in WebGL/OpenGL, handles zooming correctly by re-rasterizing the bounding box [S1, unofficial][S2, unofficial].
+-*   **Limitations**: Fixed step size may lead to aliasing or slow convergence; requires full volume texture in memory; single-pass variants may suffer from warping artifacts if wrapping is not handled [S5, unofficial].
+-*   **When to Use**: Real-time volume visualization in web browsers (WebGL) or embedded systems where simplicity and compatibility are prioritized over advanced optimization techniques like hierarchical ray marching [S1, unofficial][S3, unofficial].
++*   **Time Complexity:** $O(P \times S)$, where $P$ is the number of pixels inside the volume projection and $S$ is the number of steps per ray. The two-pass approach adds a constant overhead for the back-face rasterization.
++*   **Memory Complexity:** $O(W \times H)$ for the back-face coordinate texture, plus memory for the volume texture and transfer function.
++*   **Performance:** Performance is heavily dependent on the number of steps and the density of the volume. Early termination (when alpha reaches 1.0) can significantly reduce average step count for opaque volumes [S2, S5, S8, unofficial].
++*   **Strengths:**
++    *   Efficiently culls pixels outside the volume by only rendering the bounding box faces [S1, S3, S8, unofficial].
++    *   Handles zooming and rotation correctly by recalculating ray endpoints per frame [S1, S2, S8, unofficial].
++    *   Simple implementation using standard GPU rasterization and fragment shaders [S1, S4, S8, unofficial].
++*   **Limitations:**
++    *   Fixed step size may lead to aliasing or slow convergence if not adaptive [S4, S7, unofficial].
++    *   Requires two render passes, increasing overhead compared to single-pass methods if the volume is small or sparse [S1, S2, S8, unofficial].
++    *   Precision issues can arise with very small near planes or large view distances [S2, S7, unofficial].
++*   **When to Use:** Suitable for real-time volume rendering on GPUs where the volume is dense and fits within a bounding box, and when hardware acceleration for ray-cube intersection is desired without complex ray-tracing cores [S1, S2, S4, S8, unofficial].
++*   **When Not to Use:** Not ideal for highly sparse volumes where most rays do not intersect, or for scenes requiring complex lighting interactions that cannot be approximated by simple front-to-back compositing [S3, S7, unofficial].
+ 
+ ## Background
+-Key implementations include the WebGL volume rendering demo by Chloe Arluck [S1, unofficial], the GLSL raycasting tutorial by ToolchainX [S2, unofficial], and community discussions on Three.js and Khronos forums [S3, unofficial][S5, unofficial].
++Bounding Box Raymarching, also known as back-face ray casting, originated as a method to leverage the GPU's rasterization pipeline for volume rendering, avoiding the need for explicit ray-triangle intersection calculations in shaders [S1, S4, S8, unofficial]. It was popularized in WebGL implementations for browser-based volume visualization, where hardware acceleration is critical [S1, S2, S5, unofficial]. The technique builds on the concept of using the depth buffer and back-face culling to determine ray boundaries, a principle also used in [Entry Point Buffer with Back-to-Front Projection](13565-entry-point-buffer-with-back-to-front-projection.md) [S1, S2, S8, unofficial]. It is widely used in educational demos and lightweight web-based medical imaging viewers [S1, S2, S3, S4, S5, S8, unofficial].
+ 
+ ## Sources
+ [S1] chloearluck/volume_rendering, https://github.com/chloearluck/volume_rendering, fetched 2026-10-24 (unofficial)
+-[S2] Volume_Rendering_Using_GLSL, https://github.com/toolchainX/Volume_Rendering_Using_GLSL, fetched 2026-10-26 (unofficial)
+-[S3] Volume rendering in WebGL, https://stackoverflow.com/questions/26588568/volume-rendering-in-webgl, fetched 2026-10-27 (unofficial)
+-[S4] Optimized volume raycasting for graphics-hardware-based cluster systems, https://doi.org/10.2312/EGPGV/EGPGV06/059-066, fetched 2026-10-27
+-[S5] OKaluza/sharevol, https://github.com/OKaluza/sharevol, fetched 2026-10-27 (unofficial)
+-[S6] volume renderer - gpu raycast - OpenGL: Advanced Coding, https://community.khronos.org/t/volume-renderer-gpu-raycast/39262, fetched 2026-10-27 (unofficial)+[S2] Volume rendering is more transparent from one direction that another, https://stackoverflow.com/questions/28369626/volume-rendering-is-more-transparent-from-one-direction-that-another, fetched 2026-10-26 (unofficial)
++[S3] WebGL for Numerical PDEs (Session 11): Volume Ray Casting, https://www.youtube.com/watch?v=X095f9QzSBo, fetched 2026-10-27 (unofficial)
++[S4] Volume_Rendering_Using_GLSL, https://github.com/toolchainX/Volume_Rendering_Using_GLSL, fetched 2026-10-26 (unofficial)
++[S5] Volume rendering in WebGL, https://stackoverflow.com/questions/26588568/volume-rendering-in-webgl, fetched 2026-10-27 (unofficial)
++[S6] Optimized volume raycasting for graphics-hardware-based cluster systems, https://doi.org/10.2312/EGPGV/EGPGV06/059-066, fetched 2026-10-27
++[S7] OKaluza/sharevol, https://github.com/OKaluza/sharevol, fetched 2026-10-27 (unofficial)
++[S8] volume renderer - gpu raycast - OpenGL: Advanced Coding, https://community.khronos.org/t/volume-renderer-gpu-raycast/39262, fetched 2026-10-27 (unofficial)

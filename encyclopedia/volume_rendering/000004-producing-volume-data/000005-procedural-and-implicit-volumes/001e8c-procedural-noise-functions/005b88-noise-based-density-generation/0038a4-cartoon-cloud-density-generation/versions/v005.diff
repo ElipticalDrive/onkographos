@@ -1,0 +1,234 @@
+--- v004.md
++++ v005.md
+@@ -4,145 +4,110 @@
+ 
+ ## Overview
+-Cartoon Cloud Density Generation is a procedural method for generating cartoon-style cloud densities by combining independent multi-octave noise sets with geometric envelopes specific to cloud types [S1, unofficial]. It solves the problem of generating stylized volumetric cloud structures with distinct macro, body, and edge layers [S1, unofficial]. It differs from its sibling [Blocky Volumetric Clouds](12303-blocky-volumetric-clouds.md) by using independent noise sets for the base structure rather than a static 2D density map [S1, unofficial].
++Cartoon Cloud Density Generation is a procedural method for generating stylized, cartoon-style cloud densities by combining independent noise sets for macro structure, body puffs, edge details, and flow, combined with geometric envelopes for specific cloud types [S1, unofficial]. It differs from its sibling [Perlin-Worley Noise for Cloud Density](7139-perlin-worley-noise-for-cloud-density.md) by relying on a multi-layered noise composition and explicit geometric shapes (lobes, clusters) rather than a single unified noise field, allowing for distinct "blocky" or stylized appearances consistent with voxel-based games [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- `x, y, z`: Normalized 3D coordinates in the cloud volume.
+-- `type_id`: Integer identifier for the cloud type (1–9) [S1, unofficial].
+-- `variation`: Seed or parameter controlling shape variation [S1, unofficial].
+-- `strength`, `disturbance`, `detail`: Float multipliers, typically in $[0.0, 2.0]$ [S1, unofficial].
+-- `finite_boundary`: Boolean indicating if the cloud is within a finite weather region [S1, unofficial].
+-- `macro_lattices`, `body_lattices`, `edge_lattices`, `flow_lattices`: Four independent noise lattice sets [S1, unofficial].
+-
+-**Outputs:**
+-- `density`: A scalar value in $[0.0, 1.0]$ representing the final cartoon cloud density [S1, unofficial].
++**Inputs and Outputs:**
++*   **Inputs:** 3D query point $\mathbf{P} = (x, y, z)$, cloud type identifier `type_id` (integer 1-9), resolution parameters, and strength/detail/disturbance multipliers.
++*   **Outputs:** A scalar density value in $[0.0, 1.0]$.
+ 
+ **Data Structures:**
+-- `_CartoonNoiseSet`: Contains four independent noise lattice sets: `macro_lattices`, `body_lattices`, `edge_lattices`, `flow_lattices` [S1, unofficial].
+-- `_CloudShapeVariation`: Contains parameters for lobe clusters, wisp clusters, and footprint shapes [S1, unofficial].
++*   `_CartoonNoiseSet`: Contains four independent sets of lattice gradient vectors: `macro_lattices`, `body_lattices`, `edge_lattices`, and `flow_lattices`. These are pre-generated and stored for reuse.
++*   `VolumeResult`: Contains the resulting `density` and `disturbance` arrays (8-bit linear data).
+ 
+ **Steps:**
+-1. **Generate Noise Fields:** Compute four noise fields using fractal value noise with specific frequency multipliers: `macro = fractal_value_noise(macro_lattices, detail * 0.10)`, `body = fractal_value_noise(body_lattices, detail * 0.30)`, `edge = fractal_value_noise(edge_lattices, detail * 0.55)`, `flow = fractal_value_noise(flow_lattices, disturbance * 0.25)` [S1, unofficial].
+-2. **Compute Base Shapes:** Derive three intermediate shapes: `broad = smoothstep((macro - 0.27) / 0.52)`, `puffs = smoothstep((0.56 * macro + 0.44 * body - 0.37) / 0.38)`, `rim = smoothstep((edge - 0.33) / 0.48)` [S1, unofficial].
+-3. **Compute Fluffy Composite:** Combine base shapes: `fluffy = clip(0.62 * puffs + 0.23 * broad + 0.15 * rim, 0.0, 1.0)` [S1, unofficial].
+-4. **Compute Vertical Profiles:** Define Gaussian profiles: `thin = exp(-((z + 0.04) / 0.13) ** 2)`, `middle = exp(-((z + 0.10) / 0.30) ** 2)`, `low = exp(-((z + 0.28) / 0.23) ** 2)` [S1, unofficial].
+-5. **Compute Footprint and Clusters:** `footprint = broad_footprint(x, y, variation) if not finite_boundary else ones`, `cluster = lobe_cluster(x, y, z, variation)`, `wisps = wisp_cluster(x, y, z, variation)` [S1, unofficial].
+-6. **Combine Based on Cloud Type:** Calculate base `density` based on `type_id`:
+-   - Type 1 (Cirrus): `density = thin * wisps * smoothstep((0.72 * body + 0.28 * edge - 0.56) / 0.30)` [S1, unofficial].
+-   - Type 9 (Cumulus): `base = cumulus_base(x, y, z, variation)`, `surface = smoothstep((0.58 * fluffy + 0.42 * broad - 0.20) / 0.70)`, `density = soft_union(cluster * (0.22 + 0.78 * fluffy), 0.68 * base * (0.30 + 0.70 * surface))` [S1, unofficial].
+-   - Cumulonimbus (else): `anvil = footprint * exp(-((z - 0.48) / 0.16) ** 2)`, `density = soft_union(cluster, 0.82 * anvil) * (0.40 + 0.60 * fluffy)` [S1, unofficial].
+-7. **Final Shaping and Quantization:** `shaped = smoothstep((density - 0.07) / 0.62)`, `stepped = floor(clip(shaped, 0.0, 1.0) * 4.0 + 0.20) / 4.0`, `return clip((0.12 * stepped + 0.88 * shaped) * strength * (0.94 + 0.06 * detail * rim), 0.0, 1.0)` [S1, unofficial].
++
++1.  **Generate Noise Fields:**
++    Compute four fractal value noise fields using the independent lattice sets. The frequencies are scaled by multipliers:
++    *   `macro`: Frequency multiplier $0.10$.
++    *   `body`: Frequency multiplier $0.30$.
++    *   `edge`: Frequency multiplier $0.55$.
++    *   `flow`: Frequency multiplier $0.25 \times \text{disturbance}$.
++    
++    $$ \text{macro} = \text{FractalValueNoise}(\mathbf{P}, \text{macro\_lattices}, 0.10) $$
++    $$ \text{body} = \text{FractalValueNoise}(\mathbf{P}, \text{body\_lattices}, 0.30) $$
++    $$ \text{edge} = \text{FractalValueNoise}(\mathbf{P}, \text{edge\_lattices}, 0.55) $$
++    $$ \text{flow} = \text{FractalValueNoise}(\mathbf{P}, \text{flow\_lattices}, 0.25 \times \text{disturbance}) $$
++
++2.  **Compute Base Shapes:**
++    Apply `smoothstep` to normalize and threshold the noise fields. `smoothstep(t)` is defined as $3t^2 - 2t^3$ for $t \in [0,1]$, clamped to $[0,1]$.
++    *   Broad structure:
++        $$ \text{broad} = \text{smoothstep}\left(\frac{\text{macro} - 0.27}{0.52}\right) $$
++    *   Puffs (body + macro mix):
++        $$ \text{puffs} = \text{smoothstep}\left(\frac{0.56 \times \text{macro} + 0.44 \times \text{body} - 0.37}{0.38}\right) $$
++    *   Rim/Edge detail:
++        $$ \text{rim} = \text{smoothstep}\left(\frac{\text{edge} - 0.33}{0.48}\right) $$
++
++3.  **Compute Fluffy Composite:**
++    Combine the base shapes into a unified "fluffy" density field.
++    $$ \text{fluffy} = \text{clip}(0.62 \times \text{puffs} + 0.23 \times \text{broad} + 0.15 \times \text{rim}, 0.0, 1.0) $$
++
++4.  **Compute Vertical Profiles:**
++    Define Gaussian vertical profiles based on the $z$ coordinate. These determine the thickness and height of different cloud layers.
++    *   Thin (high altitude):
++        $$ \text{thin} = \exp\left(-\left(\frac{z + 0.04}{0.13}\right)^2\right) $$
++    *   Middle:
++        $$ \text{middle} = \exp\left(-\left(\frac{z + 0.10}{0.30}\right)^2\right) $$
++    *   Low:
++        $$ \text{low} = \exp\left(-\left(\frac{z + 0.28}{0.23}\right)^2\right) $$
++
++5.  **Compute Horizontal Footprint and Clusters:**
++    *   **Footprint:** A 2D shape mask based on $x, y$. If the cloud has a finite boundary, use `_broad_footprint(x, y, variation)`; otherwise, use ones (infinite).
++    *   **Clusters:** Generate 3D lobe clusters using `_lobe_cluster(x, y, z, variation)` and wisp clusters using `_wisp_cluster(x, y, z, variation)`. These use the Soft Union function (see Formulas).
++
++6.  **Combine Based on Cloud Type (`type_id`):**
++    The density is assembled differently for each of the 9 cloud types. Examples:
++    *   **Type 1 (Cirrus):**
++        $$ \text{density} = \text{thin} \times \text{wisps} \times \text{smoothstep}\left(\frac{0.72 \times \text{body} + 0.28 \times \text{edge} - 0.56}{0.30}\right) $$
++    *   **Type 9 (Cumulus):**
++        $$ \text{base} = \text{CumulusBaseShape}(x, y, z) $$
++        $$ \text{surface} = \text{smoothstep}\left(\frac{0.58 \times \text{fluffy} + 0.42 \times \text{broad} - 0.20}{0.70}\right) $$
++        $$ \text{density} = \text{SoftUnion}(\text{cluster} \times (0.22 + 0.78 \times \text{fluffy}), 0.68 \times \text{base} \times (0.30 + 0.70 \times \text{surface})) $$
++    *   **Cumulonimbus (Else branch):**
++        Calculate anvil shape:
++        $$ \text{anvil} = \text{footprint} \times \exp\left(-\left(\frac{z - 0.48}{0.16}\right)^2\right) $$
++        Combine cluster and anvil:
++        $$ \text{density} = \text{SoftUnion}(\text{cluster}, 0.82 \times \text{anvil}) \times (0.40 + 0.60 \times \text{fluffy}) $$
++
++7.  **Final Shaping and Quantization:**
++    *   Apply smoothstep to maintain continuous density and avoid concentric shell artifacts:
++        $$ \text{shaped} = \text{smoothstep}\left(\frac{\text{density} - 0.07}{0.62}\right) $$
++    *   Quantize into 5 discrete cartoon levels (mapped to 0-1 range):
++        $$ \text{stepped} = \frac{\text{floor}(\text{clip}(\text{shaped}, 0.0, 1.0) \times 4.0 + 0.20)}{4.0} $$
++    *   Blend stepped and shaped densities, apply strength and rim/detail modulation:
++        $$ \text{result} = \text{clip}\left((0.12 \times \text{stepped} + 0.88 \times \text{shaped}) \times \text{strength} \times (0.94 + 0.06 \times \text{detail} \times \text{rim}), 0.0, 1.0\right) $$
+ 
+ **Formulas:**
+-- **Soft Union:** $S(F_1, F_2, \dots) = \text{clip}(1 - \exp(-1.12 \times \text{clip}(\sum F_i, 0, 1)), 0, 1)$ [S1, unofficial].
+-- **Lobe Cluster:** $L = \text{clip}(1 - \exp(-1.18 \times \sum (w_i \times \exp(-\text{dist}_i^2))), 0, 1)$ [S1, unofficial].
++
++*   **Soft Union:** Used to merge multiple density fields smoothly.
++    $$ S(F_1, F_2, \dots) = \text{clip}\left(1 - \exp\left(-1.12 \times \text{clip}\left(\sum F_i, 0, 1\right)\right), 0, 1\right) $$
++    Implementation: `np.clip(1.0 - np.exp(-total * 1.12), 0.0, 1.0)` where `total` is the sum of clipped fields.
++
++*   **Lobe Cluster:** A specific instance of soft union for geometric lobes.
++    $$ L = \text{clip}\left(1 - \exp\left(-1.18 \times \sum (w_i \times \exp(-\text{dist}_i^2))\right), 0, 1\right) $$
++    Implementation: `np.clip(1.0 - np.exp(-field_sum * 1.18), 0.0, 1.0)`.
+ 
+ **Parameters:**
+-- `detail`: Controls noise frequency. Multipliers: macro 0.10, body 0.30, edge 0.55 [S1, unofficial].
+-- `disturbance`: Controls flow noise frequency. Multiplier: 0.25 [S1, unofficial].
+-- `strength`, `detail`, `disturbance`: Global multipliers. Typical range $[0.0, 2.0]$ [S1, unofficial].
++*   **Detail Multiplier:** 0.10 (macro), 0.30 (body), 0.55 (edge), 0.25 * disturbance (flow).
++*   **Strength:** Typically in range $[0.0, 2.0]$.
++*   **Disturbance:** Typically in range $[0.0, 2.0]$.
+ 
+ **Edge Cases and Pitfalls:**
+-- **Concentric Shells:** Avoid artifacts in volume rendering by keeping the texture body continuous density and applying quantization only in the final stage [S1, unofficial].
+-- **Finite Boundaries:** Ensure `footprint` is correctly computed for finite weather regions to avoid infinite cloud columns [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-import numpy as np
+-
+-def smoothstep(edge0, edge1, x):
+-    """Standard smoothstep interpolation [G]."""
+-    t = np.clip((x - edge0) / (edge1 - edge0), 0.0, 1.0)
+-    return t * t * (3.0 - 2.0 * t)
+-
+-def soft_union(fields):
+-    """Soft union formula from evidence [S1, unofficial]."""
+-    total = np.clip(np.sum(fields, axis=0), 0.0, 1.0)
+-    return np.clip(1.0 - np.exp(-total * 1.12), 0.0, 1.0)
+-
+-def lobe_cluster(x, y, z, variation):
+-    """Lobe cluster formula from evidence [S1, unofficial].
+-    Sources do not provide w_i or dist_i computation details [G]."""
+-    # Placeholder for lobe generation logic based on variation
+-    # Returns field_sum for the formula
+-    field_sum = 0.0 
+-    return np.clip(1.0 - np.exp(-field_sum * 1.18), 0.0, 1.0)
+-
+-def wisp_cluster(x, y, z, variation):
+-    """Wisp cluster computation. Sources do not provide implementation details [G]."""
+-    return 0.0 # Placeholder
+-
+-def broad_footprint(x, y, variation):
+-    """Footprint mask computation. Sources do not provide implementation details [G]."""
+-    return 1.0 # Placeholder
+-
+-def cumulus_base(x, y, z, variation):
+-    """Cumulus base shape computation. Sources do not provide implementation details [G]."""
+-    return 1.0 # Placeholder
+-
+-def cartoon_cloud_density(x, y, z, type_id, variation, strength, disturbance, detail, finite_boundary, 
+-                          macro_lattices, body_lattices, edge_lattices, flow_lattices):
+-    # 1. Generate Noise Fields
+-    macro = fractal_value_noise(macro_lattices, detail * 0.10)
+-    body = fractal_value_noise(body_lattices, detail * 0.30)
+-    edge = fractal_value_noise(edge_lattices, detail * 0.55)
+-    flow = fractal_value_noise(flow_lattices, disturbance * 0.25)
+-    
+-    # 2. Compute Base Shapes
+-    broad = smoothstep((macro - 0.27) / 0.52)
+-    puffs = smoothstep((0.56 * macro + 0.44 * body - 0.37) / 0.38)
+-    rim = smoothstep((edge - 0.33) / 0.48)
+-    
+-    # 3. Compute Fluffy Composite
+-    fluffy = np.clip(0.62 * puffs + 0.23 * broad + 0.15 * rim, 0.0, 1.0)
+-    
+-    # 4. Compute Vertical Profiles
+-    thin = np.exp(-((z + 0.04) / 0.13) ** 2)
+-    middle = np.exp(-((z + 0.10) / 0.30) ** 2)
+-    low = np.exp(-((z + 0.28) / 0.23) ** 2)
+-    
+-    # 5. Compute Footprint and Clusters
+-    footprint = broad_footprint(x, y, variation) if not finite_boundary else np.ones_like(x)
+-    cluster = lobe_cluster(x, y, z, variation)
+-    wisps = wisp_cluster(x, y, z, variation)
+-    
+-    # 6. Combine Based on Cloud Type
+-    if type_id == 1:
+-        density = thin * wisps * smoothstep((0.72 * body + 0.28 * edge - 0.56) / 0.30)
+-    elif type_id == 9:
+-        base = cumulus_base(x, y, z, variation)
+-        surface = smoothstep((0.58 * fluffy + 0.42 * broad - 0.20) / 0.70)
+-        density = soft_union([cluster * (0.22 + 0.78 * fluffy), 0.68 * base * (0.30 + 0.70 * surface)])
+-    else:
+-        anvil = footprint * np.exp(-((z - 0.48) / 0.16) ** 2)
+-        density = soft_union([cluster, 0.82 * anvil]) * (0.40 + 0.60 * fluffy)
+-        
+-    # 7. Final Shaping and Quantization
+-    shaped = smoothstep((density - 0.07) / 0.62)
+-    stepped = np.floor(np.clip(shaped, 0.0, 1.0) * 4.0 + 0.20) / 4.0
+-    return np.clip((0.12 * stepped + 0.88 * shaped) * strength * (0.94 + 0.06 * detail * rim), 0.0, 1.0)
+-
+-def fractal_value_noise(lattices, scale):
+-    """Fractal Brownian motion evaluation. Standard noise implementation [G]."""
+-    # Implementation depends on underlying noise primitive
+-    return 0.0 # Placeholder
+-```
++*   **Concentric Shells:** To avoid artifacts in volume rendering, the texture body must maintain continuous density. Quantization should only be applied in the final shading stage if needed [S1, unofficial].
++*   **Boundary Conditions:** For finite cloud regions, the footprint function must handle boundaries to prevent infinite column artifacts along the Z-axis [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Blocky Volumetric Clouds](12303-blocky-volumetric-clouds.md)
+-A procedural rendering technique that generates cartoon-style cloud densities by sampling a 2D texture at the cloud layer's Y-coordinate, creating a distinct "blocky" appearance compared to noise-based realistic clouds. It solves the problem of rendering volumetric clouds in a stylized manner while providing simplified lighting calculations. It differs from its sibling [Cartoon Cloud Density Generation](8309-cartoon-cloud-density-generation.md) by relying on a static 2D density map rather than multi-octave noise functions for the base structure.
++Uses a static 2D density map for a blocky appearance, differing from Cartoon Cloud Density Generation which uses multi-octave noise and geometric shapes.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel requires independent noise evaluations and arithmetic operations [G].
+-- **Memory Complexity:** $O(N)$ for the output density field. Noise lattices are small and constant size [G].
+-- **Performance:** Efficient on modern CPUs/GPUs due to simple arithmetic and lack of complex ray marching. Performance scales linearly with resolution [G].
+-- **Strengths:** Stylized appearance, computationally inexpensive, easy to tune via parameters [G].
+-- **Limitations:** Less realistic than noise-based methods, requires careful tuning for different cloud types [G].
+-- **When to Use:** Stylized games, real-time applications where performance is critical [G].
+-- **When Not to Use:** Photorealistic rendering, scientific visualization [G].
++*   **Time Complexity:** Depends on the number of noise octaves and the complexity of the geometric clusters. Each query point requires evaluating multiple noise fields and geometric functions.
++*   **Memory Complexity:** Requires storing the pre-generated lattice gradients for the four noise sets and the cloud type parameters.
++*   **Strengths:** Produces distinct, stylized cloud shapes suitable for non-photorealistic rendering. The separation of macro, body, and edge noise allows for fine-tuned artistic control.
++*   **Limitations:** More complex to implement than single-noise methods. The geometric clusters require careful tuning of parameters for different cloud types.
++*   **When to Use:** Stylized games, voxel-based environments, or any application requiring non-realistic, cartoon-like clouds.
+ 
+ ## Background
+-The method is a procedural technique for generating cartoon-style cloud densities using independent noise sets and geometric envelopes [S1, unofficial]. It is used in contexts requiring stylized volumetric cloud rendering [S1, unofficial].
++Originated from procedural generation techniques in game development, specifically for creating consistent cloud shapes in voxel-based games like Minecraft. The method is documented in unofficial sources related to noise cloud generation libraries [S1, unofficial].
+ 
+ ## Sources

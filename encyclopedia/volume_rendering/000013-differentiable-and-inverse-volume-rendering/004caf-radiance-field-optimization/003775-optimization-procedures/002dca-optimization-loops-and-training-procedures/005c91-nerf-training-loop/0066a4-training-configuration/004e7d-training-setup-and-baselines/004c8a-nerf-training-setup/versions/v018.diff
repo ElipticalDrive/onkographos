@@ -1,0 +1,283 @@
+--- v017.md
++++ v018.md
+@@ -4,70 +4,237 @@
+ 
+ ## Overview
+-This method defines the training configuration for NeRF-based models using the Nerfstudio library, specifically leveraging NerfAcc and Instant-NGP for fast convergence on static scenes [S2]. It differs from standard NeRF implementations by replacing the positionally encoded 3D position input with a pre-sampled 64-dimensional feature vector, thereby omitting positional encoding for the spatial coordinates while retaining it for view directions [S1]. This setup is designed for static scenes with minimal dynamic elements, such as surgical environments [S2].
++This method defines the training configuration for Neural Radiance Fields (NeRFs) using feature volumes instead of raw 3D coordinates, specifically implemented via the Nerfstudio library with NerfAcc and Instant-NGP backends [S2]. It solves the problem of efficient scene representation and manipulation by replacing the standard positional encoding of 3D positions with sampled feature vectors from a pre-computed volume [S1]. Unlike standard NeRF baselines that encode the 3D position $\mathbf{p}$ directly, this setup uses a 64-dimensional feature vector $\mathbf{v}_s$ as the primary spatial input, enabling editable feature volumes while maintaining fast convergence on static scenes [S1, S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A dataset of multi-view images (e.g., LLFF or laparoscopic video frames), estimated camera poses, and a pre-computed feature volume $V_s$ [S1, S2].
+-*   **Outputs:** Optimized network parameters for the coarse and fine radiance fields, resulting in a renderable implicit representation [S1, S2].
++*   **Input:** A set of multi-view images (e.g., LLFF dataset) and corresponding camera poses. A pre-computed 3D feature volume $V_s$ (typically $64 \times H \times W \times D$ or similar voxel grid) is required.
++*   **Output:** Optimized network weights for the coarse and fine radiance fields, and rendered images matching the input views.
+ 
+ **Data Structures:**
+-*   **Feature Volume ($V_s$):** A 3D grid storing 64-dimensional feature vectors. Each vector $\mathbf{v}_s$ at position $\mathbf{p}$ is obtained via trilinear sampling $S(V_s, \mathbf{p})$ [S1].
+-*   **Ray Bundle:** A batch of rays, each defined by origin and direction, sampled from the input images [S2].
+-*   **Network Input:** The radiance function $F_\Theta$ receives the concatenated feature vector $\mathbf{v}_s$ and the directionally encoded vector $\gamma(\mathbf{d})$ [S1].
++1.  **Feature Volume ($V_s$):** A 3D voxel grid storing 64-dimensional feature vectors. Accessed via trilinear sampling $S(V_s, \mathbf{p})$ [S1].
++2.  **Coarse Network ($\hat{C}_c$):** MLP taking direction $\mathbf{d}$ and feature vector $\mathbf{v}_s$ as input. Outputs density $\sigma$ and color $\mathbf{c}$ for coarse samples.
++3.  **Fine Network ($\hat{C}_f$):** MLP taking direction $\mathbf{d}$ and feature vector $\mathbf{v}_s$ as input. Outputs density $\sigma$ and color $\mathbf{c}$ for fine samples.
++4.  **Direction Encoding:** A fixed positional encoding function $\gamma(\mathbf{d})$ applied to the view direction [S1].
+ 
+ **Numbered Steps:**
+-1.  **Ray Sampling:** Sample 1024 rays per batch from the input images, scaled to a resolution of $504 \times 378$ [S1]. For surgical video applications, rays are sampled from extracted video frames, excluding specific regions to prevent artifacts [S2].
+-2.  **Coarse Network Query ($\hat{C}_c$):**
+-    *   Sample 64 points from evenly spaced bins along the ray length [S1].
+-    *   For each point $\mathbf{p}$, retrieve the feature vector $\mathbf{v}_s = S(V_s, \mathbf{p})$ [S1].
+-    *   Encode the ray direction $\mathbf{d}$ using positional encoding $\gamma(\mathbf{d})$ [S1].
+-    *   Query the coarse network $F_\Theta(\mathbf{v}_s, \gamma(\mathbf{d}))$ to predict density $\sigma$ and color $\mathbf{c}$ [S1].
+-3.  **Fine Network Sampling:**
+-    *   Use the opacity results from the coarse network to sample 64 additional points, concentrating samples in relevant portions of the scene volume (e.g., near surfaces) [S1].
+-4.  **Fine Network Query ($\hat{C}_f$):**
+-    *   Query the fine network with the newly sampled points and their corresponding feature vectors and direction encodings to predict final density and color [S1].
+-5.  **Differentiable Volume Rendering:**
+-    *   Compute the pixel color $\mathbf{C}(\mathbf{r})$ using the discretized volume rendering integral [S1]:
+-        $$ \mathbf{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
+-        where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance, $\sigma_i$ is the density, $\delta_i$ is the segment length, and $\mathbf{c}_i$ is the color at sample $i$ [S1].
+-6.  **Loss Computation and Optimization:**
+-    *   Compute the Mean Squared Error (MSE) between the rendered pixel colors and the ground truth images [S1, S2].
+-    *   Update network parameters using stochastic gradient descent [S2].
++1.  **Ray Sampling:** For each training batch, sample 1024 rays from the input images [S1]. The images are scaled to a resolution of $504 \times 378$ [S1].
++2.  **Coarse Sampling:** For each ray, sample 64 points using evenly spaced bins along the ray length [S1].
++3.  **Feature Extraction:** For each sampled point $\mathbf{p}$, retrieve the 64-dimensional feature vector $\mathbf{v}_s = S(V_s, \mathbf{p})$ from the volume $V_s$ using trilinear sampling [S1]. No positional encoding is applied to $\mathbf{v}_s$ [S1].
++4.  **Direction Encoding:** Apply positional encoding $\gamma(\mathbf{d})$ to the ray direction $\mathbf{d} \in \mathbb{R}^3$ [S1].
++5.  **Coarse Network Query:** Pass $(\mathbf{v}_s, \gamma(\mathbf{d}))$ to the coarse network $\hat{C}_c$ to obtain density $\sigma_c$ and color $\mathbf{c}_c$ [S1].
++6.  **Fine Sampling:** Use the opacity (density) results from the coarse network to sample 64 additional points for the fine network, focusing on relevant portions of the scene volume (importance sampling) [S1].
++7.  **Fine Network Query:** For the fine samples, retrieve $\mathbf{v}_s$ and apply $\gamma(\mathbf{d})$, then pass to the fine network $\hat{C}_f$ to obtain $\sigma_f$ and $\mathbf{c}_f$ [S1].
++8.  **Rendering:** Compute the pixel color $\mathbf{C}(\mathbf{r})$ using the discretized volume rendering equation combining coarse and fine samples [S1].
++9.  **Loss Computation:** Calculate the photometric loss (e.g., MSE) between rendered images and ground truth [S1][S3, unofficial].
++10. **Optimization:** Update network weights using an optimizer (typically Adam) [S1][S3, unofficial].
+ 
+ **Formulas:**
+-*   **Directional Positional Encoding:**
++*   **Direction Positional Encoding:**
+     $$ \gamma(\mathbf{p}) = [\sin(2^0\pi\mathbf{p}), \cos(2^0\pi\mathbf{p}), \dots, \sin(2^{L-1}\pi\mathbf{p}), \cos(2^{L-1}\pi\mathbf{p})] $$
+-    where $\mathbf{p}$ is each dimension of the direction vector $\mathbf{d} \in \mathbb{R}^3$ and $L=4$ [S1].
+-*   **Transmittance:**
+-    $$ T(t) = \exp \left( -\int_{t_n}^{t} \sigma(\mathbf{v}_s) ds \right) $$
+-    approximated discretely in the rendering step [S1].
++    where $\mathbf{p}$ is each dimension of the direction vector $\mathbf{d}$, and $L=4$ [S1].
++*   **Volume Rendering Integral (Discretized):**
++    $$ \mathbf{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
++    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance, $\sigma_i$ is the density, $\delta_i$ is the segment length, and $\mathbf{c}_i$ is the color [S1][S3, unofficial].
++*   **Feature Sampling:**
++    $$ \mathbf{v}_s = S(V_s, \mathbf{p}) $$
++    where $S$ is trilinear sampling [S1].
+ 
+ **Parameters:**
+-*   **Positional Encoding Depth ($L$):** 4 for direction vectors [S1].
++*   **Direction Encoding Depth ($L$):** 4 [S1].
++*   **Feature Vector Dimension:** 64 [S1].
++*   **Coarse Samples:** 64 points per ray [S1].
++*   **Fine Samples:** 64 points per ray [S1].
+ *   **Batch Size:** 1024 rays [S1].
+-*   **Image Resolution:** $504 \times 378$ for LLFF datasets [S1].
+-*   **Coarse Samples:** 64 points [S1].
+-*   **Fine Samples:** 64 points [S1].
+-*   **Feature Vector Dimension:** 64 [S1].
++*   **Image Resolution:** $504 \times 378$ [S1].
++*   **Library:** Nerfstudio [S2].
++*   **Models:** NerfAcc and Instant-NGP [S2].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Dynamic Content:** The method assumes static scenes. Significant movement (e.g., moving organs) may degrade quality unless handled by specific dynamic variants [S2].
+-*   **Ray Exclusion:** In surgical video contexts, rays passing through specific artifacts (e.g., red lines from tools) must be excluded to prevent training artifacts [S2].
+-*   **Feature Sampling:** The method relies on accurate trilinear sampling from the feature volume; errors in pose estimation or volume alignment will propagate directly to the network input [S1].
++*   **Feature Volume Alignment:** The feature volume $V_s$ must be correctly aligned with the camera poses and scene geometry. Misalignment leads to incorrect feature sampling [S1].
++*   **Static Scenes:** This setup is designed for static scenes. Dynamic elements (surgical tools, moving organs) should be minimal or handled separately to avoid artifacts [S2].
++*   **Precision:** Trilinear sampling assumes continuous feature fields. Discrete voxel boundaries may introduce artifacts if the resolution is too low [S1].
++
++**Pseudocode:**
++```python
++import torch
++import torch.nn as nn
++import numpy as np
++
++def directional_encoding(d, L=4):
++    """
++    Applies positional encoding to direction vector d.
++    d: (B, 3) tensor
++    Returns: (B, 2 * 3 * L) tensor
++    """
++    # d is (B, 3). We need to apply encoding to each dimension.
++    # Expand d to (B, 3, 1) to compute powers
++    freq_bands = 2.0 ** torch.arange(L, device=d.device).float() # (L,)
++    # d has shape (B, 3). We want to compute sin(2^i * pi * d_j) for all i, j.
++    # Reshape d to (B, 1, 3) and freq_bands to (1, L, 1)
++    d_expanded = d.unsqueeze(1) # (B, 1, 3)
++    freq_bands = freq_bands.unsqueeze(0).unsqueeze(2) # (1, L, 1)
++    
++    # Compute 2^i * pi * d_j
++    scaled_d = d_expanded * freq_bands * np.pi # (B, L, 3)
++    
++    # Compute sin and cos
++    sin_vals = torch.sin(scaled_d) # (B, L, 3)
++    cos_vals = torch.cos(scaled_d) # (B, L, 3)
++    
++    # Concatenate and reshape to (B, 2 * 3 * L)
++    encoded = torch.cat([sin_vals, cos_vals], dim=-1) # (B, L, 6)
++    encoded = encoded.view(d.shape[0], -1) # (B, 6*L)
++    return encoded
++
++def trilinear_sample(volume, points):
++    """
++    Samples feature vectors from a 3D volume at given 3D points.
++    volume: (D, H, W, C) tensor, where C=64
++    points: (B, N, 3) tensor, normalized to [-1, 1] or [0, 1] depending on volume definition.
++            Assuming points are in the same coordinate system as the volume.
++    Returns: (B, N, C) tensor
++    """
++    # Note: PyTorch's grid_sample expects (N, C, H, W) or (N, C, D, H, W)
++    # and points in (N, H_out, W_out, 2) or (N, D_out, H_out, W_out, 3) format.
++    # This is a simplified placeholder for the actual grid_sample call.
++    # In practice, one would use torch.nn.functional.grid_sample with align_corners=False.
++    # Assuming points are normalized to [-1, 1] for grid_sample.
++    
++    # Reshape points to (B*N, 1, 1, 3) for 3D grid_sample
++    B, N, _ = points.shape
++    points_flat = points.view(-1, 1, 1, 3)
++    
++    # Volume needs to be (1, C, D, H, W) for grid_sample
++    # Assuming volume is (D, H, W, C), we permute to (1, C, D, H, W)
++    volume_perm = volume.permute(3, 0, 1, 2).unsqueeze(0) # (1, C, D, H, W)
++    
++    # Sample
++    # grid_sample expects grid of shape (N, H_out, W_out, 2) for 2D
++    # For 3D, it expects (N, D_out, H_out, W_out, 3)
++    # We need to reshape points_flat to (B*N, 1, 1, 3) which is correct for 3D grid_sample
++    # However, grid_sample in PyTorch for 3D takes input (N, C, D, H, W) and grid (N, D_out, H_out, W_out, 3)
++    
++    features = torch.nn.functional.grid_sample(
++        volume_perm, 
++        points_flat, 
++        mode='bilinear', # Trilinear is not directly supported in older PyTorch, use 'bilinear' on 2D slices or 'trilinear' if available
++        padding_mode='zeros', 
++        align_corners=False
++    )
++    
++    # features shape: (B*N, C, 1, 1)
++    features = features.view(B, N, -1) # (B, N, C)
++    return features
++
++def nerf_training_step(batch, coarse_net, fine_net, volume, L=4):
++    """
++    One step of NeRF training.
++    batch: dict containing 'rays' (B, 3, 2) [origin, direction] and 'gt_colors' (B, 3)
++    coarse_net: nn.Module
++    fine_net: nn.Module
++    volume: torch.Tensor (D, H, W, 64)
++    L: int, encoding depth
++    """
++    rays = batch['rays'] # (B, 3, 2) -> (B, 2, 3) if we swap last dim? Let's assume (B, 2, 3) [origin, dir]
++    B = rays.shape[0]
++    
++    # 1. Coarse Sampling
++    # Sample 64 evenly spaced points along each ray
++    # rays: (B, 2, 3) -> origins (B, 3), dirs (B, 3)
++    origins = rays[:, 0, :] # (B, 3)
++    dirs = rays[:, 1, :] # (B, 3)
++    
++    t_vals = torch.linspace(0., 1., 64, device=origins.device) # (64,)
++    # Assuming near=0, far=1 for simplicity, or use actual ray bounds
++    # z_vals = near * (1-t_vals) + far * t_vals
++    z_vals = t_vals # (64,)
++    
++    # points_coarse: (B, 64, 3)
++    points_coarse = origins.unsqueeze(1) + dirs.unsqueeze(1) * z_vals.unsqueeze(0).unsqueeze(-1)
++    
++    # 2. Feature Sampling for Coarse
++    v_s_coarse = trilinear_sample(volume, points_coarse) # (B, 64, 64)
++    
++    # 3. Direction Encoding for Coarse
++    d_enc_coarse = directional_encoding(dirs, L) # (B, 24)
++    
++    # 4. Coarse Network Query
++    # Concatenate v_s and d_enc along feature dim
++    # v_s_coarse: (B, 64, 64), d_enc_coarse: (B, 24) -> need to broadcast d_enc to (B, 64, 24)
++    d_enc_coarse_expanded = d_enc_coarse.unsqueeze(1).expand(-1, 64, -1) # (B, 64, 24)
++    input_coarse = torch.cat([v_s_coarse, d_enc_coarse_expanded], dim=-1) # (B, 64, 88)
++    
++    # Reshape to (B*64, 88) for MLP
++    input_coarse_flat = input_coarse.view(-1, input_coarse.shape[-1])
++    sigma_coarse, color_coarse = coarse_net(input_coarse_flat) # (B*64, 1), (B*64, 3)
++    sigma_coarse = sigma_coarse.view(B, 64, 1)
++    color_coarse = color_coarse.view(B, 64, 3)
++    
++    # 5. Fine Sampling (Importance Sampling based on Coarse Opacity)
++    # Compute weights for importance sampling
++    # alpha = 1 - exp(-sigma * delta)
++    # delta = z_vals[i+1] - z_vals[i]
++    deltas = z_vals[1:] - z_vals[:-1] # (63,)
++    delta_inf = torch.tensor(1e10, device=origins.device) # (1,)
++    deltas = torch.cat([deltas, delta_inf], dim=0) # (64,)
++    
++    alphas_coarse = 1.0 - torch.exp(-sigma_coarse.squeeze(-1) * deltas) # (B, 64)
++    transmittance_coarse = torch.cumprod(1.0 - alphas_coarse + 1e-10, dim=1) # (B, 64)
++    weights_coarse = alphas_coarse * transmittance_coarse # (B, 64)
++    
++    # Sample 64 points based on weights_coarse
++    # This is a simplified placeholder for importance sampling
++    # In practice, use torch.multinomial or similar
++    indices = torch.multinomial(weights_coarse, 64, replacement=True) # (B, 64)
++    # Gather z_vals based on indices
++    z_vals_fine = z_vals[indices] # (B, 64)
++    points_fine = origins.unsqueeze(1) + dirs.unsqueeze(1) * z_vals_fine.unsqueeze(-1) # (B, 64, 3)
++    
++    # 6. Feature Sampling for Fine
++    v_s_fine = trilinear_sample(volume, points_fine) # (B, 64, 64)
++    
++    # 7. Direction Encoding for Fine
++    d_enc_fine = directional_encoding(dirs, L) # (B, 24)
++    d_enc_fine_expanded = d_enc_fine.unsqueeze(1).expand(-1, 64, -1) # (B, 64, 24)
++    input_fine = torch.cat([v_s_fine, d_enc_fine_expanded], dim=-1) # (B, 64, 88)
++    
++    # 8. Fine Network Query
++    input_fine_flat = input_fine.view(-1, input_fine.shape[-1])
++    sigma_fine, color_fine = fine_net(input_fine_flat) # (B*64, 1), (B*64, 3)
++    sigma_fine = sigma_fine.view(B, 64, 1)
++    color_fine = color_fine.view(B, 64, 3)
++    
++    # 9. Rendering
++    # Combine coarse and fine samples
++    # For simplicity, assume we only use fine samples for final color, or combine them
++    # Standard NeRF combines them. Here we just use fine for demonstration
++    alphas_fine = 1.0 - torch.exp(-sigma_fine.squeeze(-1) * deltas)
++    transmittance_fine = torch.cumprod(1.0 - alphas_fine + 1e-10, dim=1)
++    weights_fine = alphas_fine * transmittance_fine
++    rendered_color = torch.sum(weights_fine.unsqueeze(-1) * color_fine, dim=1) # (B, 3)
++    
++    # 10. Loss
++    gt_color = batch['gt_colors'] # (B, 3)
++    loss = torch.mean((rendered_color - gt_color) ** 2)
++    
++    return loss
++```
+ 
+ ## Subtopics
+ 
+ ### Image-Based NeRF Training
+-Trains a NeRF using RGB images as ground truth, optimizing both geometry and appearance [S3, unofficial]. It differs from the main setup by explicitly adding an Eikonal loss for geometry regularization alongside the color loss [S3, unofficial]. It uses the `get_nerf_datasets` utility for data loading and ray bundle construction [S3, unofficial]. Typical configuration involves 250 epochs on $128 \times 128$ images [S3, unofficial].
++Trains a NeRF using RGB images as ground truth, optimizing both geometry (via Eikonal loss) and appearance (via color loss) [S3, unofficial]. It differs from the main setup by explicitly adding an Eikonal loss for geometry regularization, similar to SDF training, and uses a standard dataset loading pipeline (`get_nerf_datasets`) [S3, unofficial]. It is chosen when explicit geometric regularization is desired alongside photometric accuracy [S3, unofficial]. Typical parameters include 250 epochs on 128x128 images for the lego dataset [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Hardware:** Tested on a single NVIDIA RTX A6000 GPU with 128 GB RAM [S2].
+-*   **Performance:** Utilizes NerfAcc and Instant-NGP for fast convergence [S2].
+-*   **Scalability:** Designed for static scenes; performance may degrade with high dynamic content [S2].
+-*   **Strengths:** Fast convergence, efficient use of pre-computed feature volumes, compatibility with Nerfstudio ecosystem [S1, S2].
+-*   **Limitations:** Requires pre-computed feature volumes and accurate camera poses; not inherently suited for highly dynamic scenes without modification [S1, S2].
++*   **Time Complexity:** Depends on the number of samples per ray (128 total: 64 coarse + 64 fine) and the batch size (1024 rays) [S1]. The use of Instant-NGP and NerfAcc accelerates convergence compared to standard NeRF [S2].
++*   **Memory Complexity:** Requires storing the 3D feature volume $V_s$ and the network weights. The feature volume size depends on the scene resolution [S1].
++*   **Measured Performance:** Tested on a single RTX A6000 GPU with 128 GB RAM [S2].
++*   **Strengths:** Fast convergence on static scenes; enables scene manipulation via feature volume editing [S1, S2].
++*   **Limitations:** Requires a pre-computed feature volume; less effective for highly dynamic scenes [S2].
++*   **When to Use:** Static scenes where fast training and potential editing are required [S1, S2].
++*   **When Not to Use:** Highly dynamic scenes or scenes without a pre-computed feature volume [S2].
+ 
+ ## Background
+-Originated from the Control-NeRF paper, which introduced editable feature volumes for scene rendering [S1]. The training setup was adapted for laparoscopic surgical video rendering using the Nerfstudio library and Instant-NGP to handle static abdominal environments [S2]. The approach modifies the standard NeRF architecture by replacing positional encoding of 3D positions with sampled feature vectors [S1].
++Originated from Control-NeRF, which introduced editable feature volumes for scene rendering and manipulation [S1]. The training setup was adapted for laparoscopic surgical video rendering using the Nerfstudio library, leveraging NerfAcc and Instant-NGP for fast convergence on static abdominal environments [S2]. It builds on the standard NeRF framework but replaces positional encoding of 3D positions with sampled feature vectors [S1].
+ 
+ ## Sources

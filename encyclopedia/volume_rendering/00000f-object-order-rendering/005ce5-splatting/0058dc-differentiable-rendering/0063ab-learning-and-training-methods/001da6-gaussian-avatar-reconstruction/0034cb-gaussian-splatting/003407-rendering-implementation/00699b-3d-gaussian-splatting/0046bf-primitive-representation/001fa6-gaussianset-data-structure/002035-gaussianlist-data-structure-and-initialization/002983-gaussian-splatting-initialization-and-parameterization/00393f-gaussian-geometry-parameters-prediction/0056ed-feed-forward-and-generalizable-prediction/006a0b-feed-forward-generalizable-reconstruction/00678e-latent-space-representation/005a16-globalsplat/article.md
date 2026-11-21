@@ -1,0 +1,193 @@
+# GlobalSplat
+
+Also called: GlobalSplat: Efficient Feed-Forward 3D Gaussian Splatting via Global Scene Tokens
+
+## Overview
+GlobalSplat is a feed-forward framework for 3D Gaussian Splatting that aligns multi-view inputs into a fixed set of global latent scene tokens before decoding explicit 3D geometry, preventing representation bloat and ensuring global consistency [S1]. Unlike sibling methods such as [C3G](12847-anysplat-pipeline.md) which rely on full self-attention and single-Gaussian decoding, GlobalSplat uses an iterative, disentangled dual-branch architecture and a coarse-to-fine capacity curriculum to achieve a superior quality-efficiency trade-off in large-context settings [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $C$ RGB images $I \in \mathbb{R}^{H \times W \times 3}$ with known camera poses $T_i$ (rotation $R_i$, translation $t_i$) and intrinsics $K_i$.
+*   **Output:** A set of $N$ 3D Gaussians $\mathcal{G} = \{g_n\}_{n=1}^N$, where each Gaussian $g_n$ is defined by mean $\mu_n$, covariance $\Sigma_n$ (parameterized by scale $s_n$ and rotation $r_n$), opacity $\alpha_n$, and spherical harmonics coefficients $c_n$.
+
+**Data Structures:**
+*   **Latent Tokens:** A fixed set of $M=2048$ learnable latent tokens $l_j \in \mathbb{R}^{512}$ and learnable register tokens.
+*   **Gaussian Candidates:** For each latent token, the decoder predicts $K_s=16$ candidates.
+    *   Geometry: $\mathbf{X}_p \in \mathbb{R}^{16 \times 3}$ (means), $\mathbf{S}_p \in \mathbb{R}^{16 \times 3}$ (log-scales), $\mathbf{R}_p \in \mathbb{R}^{16 \times 6}$ (6D rotations), $\mathbf{O}_p \in \mathbb{R}^{16 \times 1}$ (opacity logits), $\boldsymbol{\ell}_p \in \mathbb{R}^{16 \times 1}$ (importance scores).
+    *   Appearance: $\mathbf{C}_p \in \mathbb{R}^{16 \times (3 D_{\text{SH}})}$ (SH coefficients), where $D_{\text{SH}} = 16$.
+*   **Merged Gaussians:** At stage $s$, candidates are grouped into $G=2^s$ groups of size $b_s = 16/G$. The merged attributes $\bar{\mathbf{z}}_{p,g}$ are computed via weighted aggregation.
+
+**Preprocessing:**
+1.  **Scene Normalization:**
+    *   Compute canonical frame origin: $\bar{o} = \frac{1}{C} \sum_{i=1}^C o_i$.
+    *   Compute axes by averaging camera viewing directions and re-orthonormalizing. Let $T_{\text{avg}}$ be the resulting average pose.
+    *   Transform all cameras: $\hat{T}_i = T_{\text{avg}}^{-1} T_i$.
+    *   Compute scene scale: $s = \max_{a,b} \|\hat{o}_a - \hat{o}_b\|_2$.
+    *   Scale translations: $\tilde{o}_i = \frac{\hat{o}_i}{s}$.
+2.  **Image Preprocessing:**
+    *   Resize image to height 256 preserving aspect ratio.
+    *   Round width to a multiple of patch size 8.
+    *   Update intrinsics accordingly.
+    *   Apply centered square crop.
+    *   Final resize to $256 \times 256$.
+3.  **Input Context Construction:**
+    *   Extract patchified RGB tokens $u_{i,p}^{\text{rgb}}$ from input view $i$ and patch $p$.
+    *   Compute dense Plücker-ray features $r_{i,p}$ and patchify.
+    *   Map rays: $\hat{r}_{i,p} = W_{\text{ray}} r_{i,p}$.
+    *   Compute per-view code $e_i$ from absolute camera center $o_i$ and intrinsics $\kappa_i$:
+        $$e_i = W_{\text{proj}}\Big ([\text{MLP}_{K}(\phi (\kappa _i));\ \text{PE}(o_i)]\Big )$$
+        where $\phi$ uses resolution-normalized intrinsics and PE is Fourier positional encoding.
+    *   Combine: $u_{i,p}^{\text{cam}} = \hat{r}_{i,p} + e_i$.
+    *   Concatenate: $u_{i,p} = [u_{i,p}^{\text{cam}} ; u_{i,p}^{\text{rgb}}]$.
+
+**Algorithm:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def GlobalSplat(input_images, camera_poses, intrinsics):
+    # 1. Preprocessing
+    normalized_poses = normalize_scene(camera_poses)
+    processed_images = preprocess_images(input_images)
+    
+    # 2. Feature Extraction
+    # Extract RGB features and Plücker rays for each view
+    rgb_features = extract_rgb_features(processed_images) # Patchified
+    plucker_rays = compute_plucker_rays(normalized_poses, intrinsics) # Dense, then patchified
+    
+    # Construct input context tokens
+    # W_ray is a learned linear layer
+    ray_embeddings = apply_linear(plucker_rays, W_ray)
+    
+    # Compute per-view camera codes
+    camera_codes = []
+    for pose, intr in zip(normalized_poses, intrinsics):
+        # Fourier encoding of center, MLP of intrinsics
+        center_pe = fourier_encoding(pose.translation)
+        intr_mlp = mlp(intr)
+        # Projected combination
+        code = project_linear(concat(intr_mlp, center_pe))
+        camera_codes.append(code)
+        
+    # Broadcast camera code to all patches and add to ray features
+    input_context = []
+    for i, view in enumerate(processed_images):
+        patches = patchify(view)
+        view_ray_emb = ray_embeddings[i] # Shape: [num_patches, 256]
+        view_cam_code = camera_codes[i]  # Shape: [256]
+        
+        # Add camera code to every patch
+        cam_tokens = view_ray_emb + view_cam_code
+        
+        # Concatenate with RGB features
+        # rgb_features[i] shape: [num_patches, 512]
+        context_tokens = concat(cam_tokens, rgb_features[i], dim=-1)
+        input_context.append(context_tokens)
+        
+    # 3. Dual-Branch Encoder
+    # Initialize M=2048 latent tokens of dim 512
+    latent_tokens = initialize_latent_tokens(M=2048, dim=512)
+    
+    # B=4 encoder blocks
+    for b in range(B):
+        # Project latent tokens to geometry and appearance streams
+        f_geo = project_geo(latent_tokens)
+        f_app = project_app(latent_tokens)
+        
+        # Cross-attention with input context
+        # Input context is flattened across views and patches
+        x = flatten_context(input_context)
+        
+        f_geo = cross_attention(x, f_geo)
+        f_app = cross_attention(x, f_app)
+        
+        # Self-attention blocks (L=2)
+        for l in range(L):
+            f_geo = self_attention(f_geo)
+            f_app = self_attention(f_app)
+            
+        # Fuse streams
+        fused = concat(f_geo, f_app, dim=-1)
+        latent_tokens = mixer_mlp(fused)
+        
+    # 4. Dual-Branch Decoder
+    # Project final latent tokens
+    geo_tokens = project_geo_decoder(latent_tokens)
+    app_tokens = project_app_decoder(latent_tokens)
+    
+    # Predict 16 candidates per latent token
+    # geo_tokens predicts X, S, R, O, l
+    # app_tokens predicts C
+    candidates = predict_candidates(geo_tokens, app_tokens)
+    
+    # 5. Coarse-to-Fine Merging (Stage s=3 for final model)
+    # G = 2^s = 8 groups, b_s = 16/8 = 2 candidates per group
+    G = 8
+    b_s = 16 // G
+    
+    gaussians = []
+    for p in range(M):
+        for g in range(G):
+            # Get candidates for this group
+            group_candidates = candidates[p, g*b_s : (g+1)*b_s]
+            
+            # Compute importance weights using temperature-scaled softmax on logits l
+            logits = group_candidates['l'] # Shape: [b_s]
+            weights = softmax(logits / tau)
+            
+            # Weighted aggregation of attributes
+            mean = weighted_sum(group_candidates['X'], weights)
+            scale = weighted_sum(group_candidates['S'], weights)
+            rotation = weighted_sum(group_candidates['R'], weights)
+            opacity = weighted_sum(group_candidates['O'], weights)
+            color = weighted_sum(group_candidates['C'], weights)
+            
+            # Convert parameters to final Gaussian representation
+            # Mean: offset from 1.5? No, mean is predicted directly or as offset?
+            # Source says "Means initialized with fixed forward offset of 1.5"
+            # and "Scale predicted in log space as offset from -2"
+            # "Opacity predicted in logit space as offset from -5"
+            # "Rotations use continuous 6D parameterization as residual offsets"
+            
+            final_mean = mean + 1.5 # [G]
+            final_scale = exp(scale - 2) # [G]
+            final_opacity = sigmoid(opacity - 5) # [G]
+            final_rotation = residual_to_rotation(rotation) # [G]
+            
+            gaussians.append(Gaussian(final_mean, final_scale, final_rotation, final_opacity, color))
+            
+    return gaussians
+```
+
+**Gaussian Parameterization Details:**
+*   **Means:** Predicted values are treated as offsets from a fixed forward offset of 1.5.
+*   **Scales:** Predicted in log space as an offset from -2. Final scale $s = \exp(\text{pred} - 2)$.
+*   **Opacity:** Predicted in logit space as an offset from -5. Final opacity $\alpha = \sigma(\text{pred} - 5)$.
+*   **Rotations:** Continuous 6D parameterization as residual offsets from a static rotation.
+
+**Training Objectives:**
+The total loss is $\mathcal{L} = \lambda_{\text{ren}}\mathcal{L}_{\text{ren}} + \lambda_{\text{con}}\mathcal{L}_{\text{con}} + \lambda_{\text{reg}}\mathcal{L}_{\text{reg}}$.
+*   **Rendering Loss:** $\mathcal{L}_{\text{ren}} = \|I_t - \hat{I}_t\|_2^2 + \lambda_{\text{perc}}\mathcal{L}_{\text{perc}}(I_t, \hat{I}_t)$.
+*   **Self-Supervised Consistency Loss:** Partition views into $I_a, I_b$. $\mathcal{L}_{\text{con}} = \|O(I_a) - \text{sg}(O(I_b))\|_2^2 + \|D(I_a) - \text{sg}(D(I_b))\|_2^2$, where $O, D$ are rendered opacity and depth maps.
+*   **Regularization:** $\mathcal{L}_{\text{reg}} = \lambda_{\text{thr}}\mathcal{L}_{\text{thr}} + \lambda_{\text{fru}}\mathcal{L}_{\text{fru}}$ (soft thresholding and frustum constraint).
+
+**Coarse-to-Fine Curriculum:**
+Training starts with stage $s=0$ ($G=1$, all 16 candidates merged into 1 Gaussian). Capacity increments to $G \in \{2, 4, 8\}$. The final model uses $G=8$, resulting in $N = 2048 \times 8 = 16,384$ Gaussians.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Log-space predictions for scale and opacity require careful handling of numerical stability during exponentiation and sigmoid application.
+*   **Boundaries:** Scene normalization relies on the diameter of the camera constellation; scenes with widely dispersed cameras may require robust outlier handling in the scale computation $s$.
+*   **Degenerate Input:** If input views have insufficient overlap, the cross-attention mechanism may fail to align features correctly, leading to poor latent token refinement.
+
+## Operating characteristics
+*   **Time Complexity:** Inference is a single forward pass through the encoder-decoder network. On RealEstate10K with 24 input views, inference takes <78 ms [S1].
+*   **Memory Complexity:** Peak GPU memory is 1.79 GB for 24 views on RealEstate10K [S1]. Disk size is ~4 MB for the 16K Gaussian representation [S1].
+*   **Performance:** On RealEstate10K with 12 views, GlobalSplat16K achieves PSNR 28.57, SSIM 0.885, LPIPS 0.138 [S1]. GlobalSplat32K achieves PSNR 29.54, SSIM 0.903, LPIPS 0.121 [S1]. GlobalSplat2K achieves PSNR 26.83, SSIM 0.838, LPIPS 0.198 [S1].
+*   **Strengths:** Compact representation (16K Gaussians) regardless of input view count; fast inference; low memory footprint; global consistency.
+*   **Limitations:** Fixed number of Gaussians may limit detail in very complex scenes compared to dense methods; relies on known camera poses (unlike [Splatt3R](16423-splatt3r.md) or [ZeroGS](16425-zerogs.md)).
+
+## Background
+GlobalSplat was introduced by R. Itkin et al. in 2025 [S1]. It addresses the limitation of existing feed-forward 3DGS pipelines that form primitives in dense view-aligned spaces, leading to representation bloat and fragile global consistency as more views are added. By aligning first and decoding later, it provides a more efficient operating point for large-context novel view synthesis.
+
+## Sources
+[S1] GlobalSplat: Efficient Feed-Forward 3D Gaussian Splatting via Global Scene Tokens, https://doi.org/10.1007/978-3-032-37595-7_10, fetched 2026-10-29

@@ -1,0 +1,192 @@
+# Coordinate Grid Generation
+
+Also called: Meshgrid Setup, Pixel coordinate grid, Pixel Coordinate Generation, NDC Pixel Coordinate Generation
+
+## Overview
+Coordinate Grid Generation constructs a regular lattice of sample points within a specified spatial domain, typically mapping pixel indices or voxel coordinates to Normalized Device Coordinates (NDC) or physical space. It solves the problem of providing consistent, differentiable input coordinates for neural fields, implicit surface evaluation, and volume rendering pipelines. It differs from [3D Coordinate Grid Generation](2333-3d-coordinate-grid-generation.md) by focusing on 2D image-plane or flattened grid layouts rather than explicit 3D volumetric bounds, and from [CT Slice Voxel Construction](8351-ct-slice-voxel-construction.md) by generating continuous coordinate tensors rather than discrete voxel vertices from medical metadata.
+
+## How it works
+The method generates coordinate tensors that map discrete grid indices to continuous coordinate spaces. The most common variant maps 2D pixel indices to NDC space $[-1, 1]$ for neural radiance field (NeRF) training, while other variants generate 3D grids for implicit function evaluation.
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   `image_size` or `shape`: Tuple $(W, H)$ for 2D or $(S_x, S_y, S_z)$ for 3D.
+    *   `device`: Computation device (e.g., 'cuda', 'cpu') [S6, S7, unofficial].
+    *   `dim`: Dimensionality of the output coordinates (2 for 2D, 3 for 3D) [S2, unofficial].
+    *   `scale` (optional): Physical extent of the grid (default 0.5) [S3][S6, unofficial].
+    *   `points_distance` (optional): Physical spacing between grid points (default 0.5) [S6, unofficial].
+*   **Outputs:**
+    *   `grid_coords`: Tensor of shape $[N, D]$ where $N$ is the total number of points ($W \times H$ or $S_x S_y S_z$) and $D$ is the dimensionality. Values are typically in NDC $[-1, 1]$ or physical units [S2, S6, unofficial].
+    *   `grid_cells` (optional): Learnable tensor of shape $[S_x, S_y, S_z, \text{info\_size}]$ storing attributes like RGB/Alpha [S6, unofficial].
+
+### Data Structures
+*   **Coordinate Tensor:** A float32 tensor. For 2D, shape is $[W \cdot H, 2]$. For 3D, shape is $[S_x \cdot S_y \cdot S_z, 3]$ [S2, S6, unofficial].
+*   **Grid Cells (Learnable):** A tensor of shape $[S_x, S_y, S_z, \text{info\_size}]$ where `info_size` is typically 4 (RGB + Alpha). This tensor requires gradients for optimization [S6, unofficial].
+
+### Steps and Formulas
+
+#### 2D NDC Pixel Coordinate Generation
+This variant generates coordinates for image pixels, commonly used in NeRF and differentiable rendering.
+
+1.  **Extract Dimensions:** Get width $W$ and height $H$ from `image_size` [S1, unofficial][S3][S4, S5, unofficial].
+2.  **Generate Integer Indices:** Create 1D tensors for x and y indices.
+    *   $x_{idx} = [0, 1, \dots, W-1]$
+    *   $y_{idx} = [0, 1, \dots, H-1]$ [S4, S12, unofficial].
+3.  **Normalize to NDC:** Convert indices to NDC space $[-1, 1]$. The center of the pixel is used to avoid boundary bias.
+    $$ x_{ndc} = \frac{x_{idx} - \frac{W-1}{2}}{\frac{W-1}{2}} $$
+    $$ y_{ndc} = \frac{y_{idx} - \frac{H-1}{2}}{\frac{H-1}{2}} $$
+    Alternatively, some implementations use:
+    $$ x_{ndc} = \frac{x_{idx}}{W} \cdot 2 - 1 $$
+    $$ y_{ndc} = \frac{y_{idx}}{H} \cdot 2 - 1 $$
+    [S1, S4, unofficial]. Note: The center-based normalization maps the center of the first pixel to -1 and the last to 1, while the linear mapping maps the center of the first to $-1 + 1/W$ and the last to $1 - 1/W$. Sources [S4, unofficial] and [S1, unofficial] use different conventions; [S4, unofficial] uses the center-based formula explicitly [S4, unofficial].
+4.  **Meshgrid:** Create a 2D grid from the 1D tensors.
+    *   Use `torch.meshgrid(y_ndc, x_ndc, indexing='ij')` or `indexing='xy'` depending on the desired layout [S2, S4, S12, unofficial].
+    *   Standard image layout often requires stacking as $(x, y)$ [S3][S4, unofficial].
+5.  **Flatten and Negate:** Reshape the grid to $[W \cdot H, 2]$ and negate the result to match camera coordinate conventions (where NDC x is often flipped) [S1, unofficial][S3][S4, S5, unofficial].
+
+#### 3D Coordinate Grid Generation
+This variant generates a 3D lattice for implicit fields or voxel grids.
+
+1.  **Generate Indices:** Create 1D tensors for x, y, z using `torch.arange` or `torch.linspace` [S6, S12, unofficial].
+2.  **Normalize:**
+    *   **NDC Mode:** Map indices to $[-1, 1]$ using the same center-based or linear formula as 2D [S2, unofficial].
+    *   **Physical Mode:** Center the grid by subtracting $\lceil S/2 \rceil - 1$ from each coordinate index, then scale by `points_distance` [S6, unofficial].
+3.  **Meshgrid:** Stack the 1D tensors using `torch.meshgrid` with `indexing='ij'` to preserve axis alignment [S2, S6, S12, unofficial].
+4.  **Stack and Flatten:** Stack the meshgrid components along the last dimension to form shape $[S_x, S_y, S_z, 3]$, then reshape to $[S_x S_y S_z, 3]$ [S6, unofficial].
+5.  **Initialize Grid Cells (Optional):** If learnable attributes are required, initialize a tensor `grid_cells` of shape $[S_x, S_y, S_z, \text{info\_size}]$ with `requires_grad=True` [S6, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+
+def generate_2d_ndc_grid(width: int, height: int, device: str = 'cuda') -> torch.Tensor:
+    """
+    Generates a 2D coordinate grid in NDC space [-1, 1] for image pixels.
+    Returns shape [width * height, 2].
+    """
+    # 1. Generate integer indices
+    x_idx = torch.arange(0, width, device=device, dtype=torch.float32)
+    y_idx = torch.arange(0, height, device=device, dtype=torch.float32)
+    
+    # 2. Normalize to NDC [-1, 1] using center-based formula [S4, unofficial]
+    # Center of pixel (0,0) is at -1, center of (W-1, H-1) is at 1
+    x_ndc = (x_idx - (width - 1) / 2.0) / ((width - 1) / 2.0)
+    y_ndc = (y_idx - (height - 1) / 2.0) / ((height - 1) / 2.0)
+    
+    # 3. Create meshgrid. Note: meshgrid returns (Y, X) if passed (y, x) with 'ij'
+    # We want (x, y) layout for the final grid [S3][S4, unofficial]
+    y_grid, x_grid = torch.meshgrid(y_ndc, x_ndc, indexing='ij')
+    
+    # 4. Stack as (x, y) and flatten
+    # Stack at dim=-1: shape [H, W, 2]
+    grid = torch.stack((x_grid, y_grid), dim=-1)
+    
+    # 5. Flatten to [W*H, 2]
+    grid_flat = grid.view(-1, 2)
+    
+    # 6. Negate to match camera convention [S1, unofficial][S3][S4, unofficial]
+    return -grid_flat
+
+def generate_3d_grid(sx: int, sy: int, sz: int, 
+                     points_distance: float = 0.5, 
+                     device: str = 'cuda') -> tuple:
+    """
+    Generates a 3D coordinate grid and optional learnable cell tensor.
+    Returns (grid_coords, grid_cells).
+    """
+    # 1. Create index arrays [S6, unofficial]
+    x_idx = torch.arange(0, sx, device=device)
+    y_idx = torch.arange(0, sy, device=device)
+    z_idx = torch.arange(0, sz, device=device)
+    
+    # 2. Generate meshgrid with 'ij' indexing [S6, S12, unofficial]
+    x_grid, y_grid, z_grid = torch.meshgrid(x_idx, y_idx, z_idx, indexing='ij')
+    
+    # 3. Stack to form normalized coordinate tensor [S6, unofficial]
+    # Shape: [sx, sy, sz, 3]
+    coords_tensor = torch.stack((x_grid, y_grid, z_grid), dim=-1)
+    
+    # 4. Center the grid [S6, unofficial]
+    # Subtract ceil(dim/2) - 1 from each coordinate
+    center_x = torch.ceil(torch.tensor(sx / 2, device=device)).int() - 1
+    center_y = torch.ceil(torch.tensor(sy / 2, device=device)).int() - 1
+    center_z = torch.ceil(torch.tensor(sz / 2, device=device)).int() - 1
+    
+    coords_tensor = coords_tensor.float() - torch.tensor([center_x, center_y, center_z], device=device)
+    
+    # 5. Scale by points_distance [S6, unofficial]
+    coords_tensor = coords_tensor * points_distance
+    
+    # 6. Reshape to flat list of coordinates [S6, unofficial]
+    grid_coords = coords_tensor.view(-1, 3)
+    
+    # 7. Initialize grid_cells (learnable) [S6, unofficial]
+    # info_size = 4 (RGB + Alpha)
+    info_size = 4
+    grid_cells = torch.zeros((sx, sy, sz, info_size), device=device, requires_grad=True)
+    
+    return grid_coords, grid_cells
+```
+
+### Parameters and Edge Cases
+*   **Parameters:**
+    *   `width`, `height`: Image dimensions. Must be $> 0$.
+    *   `points_distance`: Physical spacing. Default 0.5 [S6, unofficial].
+    *   `device`: 'cuda' or 'cpu'. Default 'cuda' [S6, S7, unofficial].
+*   **Edge Cases:**
+    *   **Resolution 1:** If $W=1$ or $H=1$, the denominator in NDC normalization becomes 0. Guard against division by zero or handle as a special case where the single point is at 0 [S4, unofficial].
+    *   **Precision:** Use float32 for coordinates to ensure compatibility with neural network inputs. Float64 may be used for high-precision physical coordinates but increases memory [S6, unofficial].
+    *   **Indexing Convention:** `torch.meshgrid` defaults to 'xy' indexing in some versions or libraries, but 'ij' is standard for array-like indexing. Explicitly specify `indexing='ij'` to avoid axis swapping errors [S2, S9, S12, unofficial].
+
+## Subtopics
+
+### [3D Coordinate Grid Generation](2333-3d-coordinate-grid-generation.md)
+Constructs a regular lattice of 3D sample points within a specified spatial volume, typically defined by bounds and step sizes or a resolution within a canonical unit cube. It serves as the foundational sampling mechanism for evaluating implicit functions (such as Signed Distance Fields) or density fields across a volumetric domain. It differs from [Coordinate Grid Generation](1273-coordinate-grid-generation.md) by explicitly handling 3D spatial bounds and voxel center calculations rather than just generating flattened 2D image-like coordinate arrays, and from [CT Slice Voxel Construction](8351-ct-slice-voxel-construction.md) by generating a full 3D volume rather than processing 2D slices independently.
+
+### [CT Slice Voxel Construction](8351-ct-slice-voxel-construction.md)
+Constructs a 3D grid cell (voxel) from two adjacent 2D CT slices by calculating the 3D coordinates of its 8 vertices and retrieving the scalar values (Hounsfield units) for each vertex. It differs from [3D Coordinate Grid Generation](2333-3d-coordinate-grid-generation.md) by explicitly handling the discrete nature of medical imaging data, using slice-specific metadata (pixel spacing, origin) rather than a normalized [-1, 1] domain, and mapping values directly from the source image arrays.
+
+### [Affine Grid Generator](17142-affine-grid-generator.md)
+The Affine Grid Generator produces a transformed coordinate grid by applying an affine transformation to a base grid of normalized coordinates. It solves the problem of spatially warping input data (such as images or voxel grids) for tasks like spatial transformer networks or deformable voxelization. It differs from its sibling [3D Coordinate Grid Generation](2333-3d-coordinate-grid-generation.md) by explicitly applying a learnable or provided affine matrix $\theta$ to the coordinates, whereas the sibling generates static normalized grids. It differs from [CT Slice Voxel Construction](8351-ct-slice-voxel-construction.md) by operating on continuous coordinate spaces rather than discrete voxel indices derived from projection geometry.
+
+### Meshgrid XY
+Mimics `np.meshgrid(..., indexing="xy")` in PyTorch, as `torch.meshgrid` only allows "ij" indexing by default. It is used when the coordinate system requires x to vary along the first axis and y along the second, contrary to the default array indexing.(Note: This is a minor variant of the meshgrid step).
+
+### Create Pixel Coordinate Grid
+Creates a grid of pixel coordinates (x, y) and frame indices for a sequence of frames, returning arrays for all frames and individual coordinate components. It extends the 2D grid generation to handle temporal sequences by broadcasting x, y, and frame indices across a 3D volume (frames, height, width).(Note: This is a minor variant for video/sequence data).
+
+### Field to Grid Evaluation
+A method to convert a field (a function evaluated at arbitrary positions) into a grid (a data container) by evaluating the field for each voxel and tile and storing the results. It uses the generated coordinate grid as input positions to sample the field.(Note: This is a minor variant describing the usage of the grid).
+
+### Image Grid Sampling
+Generates integer indices and normalized coordinates for image grids. It computes normalized coordinates by adding 0.5 to integer indices and dividing by length, then stacks them with 'xy' indexing. This variant ensures that the center of each pixel is sampled, which is critical for accurate interpolation.(Note: This is a minor variant focusing on center-based sampling).
+
+## Operating characteristics
+*   **Time Complexity:** $O(W \cdot H)$ for 2D and $O(S_x \cdot S_y \cdot S_z)$ for 3D, as every grid point must be generated. The operation is highly parallelizable on GPU [S2, S6, unofficial].
+*   **Memory Complexity:** $O(W \cdot H \cdot D)$ for coordinates and $O(S_x \cdot S_y \cdot S_z \cdot \text{info\_size})$ for grid cells. For high-resolution volumes, this can be significant [S6, unofficial].
+*   **Performance:** Generation is typically instantaneous on modern GPUs for resolutions up to $1024^2$ or $256^3$. The bottleneck is usually the subsequent neural network evaluation, not the grid generation [S2, S6, unofficial].
+*   **Strengths:** Simple, differentiable, and consistent. Provides a standard coordinate system for neural fields.
+*   **Limitations:** Does not account for scene geometry (empty space is still sampled). For sparse scenes, this leads to wasted computation. [Spatial Culling](4131-voxel-grid-optimization.md) methods can mitigate this.
+*   **When to Use:** When training neural radiance fields, implicit surfaces, or when a regular sampling grid is required for volume rendering.
+*   **When Not to Use:** When memory is constrained and the scene is sparse; use sparse voxel structures instead. When adaptive sampling is needed; use stratified or importance sampling [S5, unofficial].
+
+## Background
+Coordinate Grid Generation is a fundamental step in neural rendering and volume visualization. It originated with the introduction of Neural Radiance Fields (NeRF) by Mildenhall et al. (2020), which required sampling points along rays in NDC space [S3][S4, unofficial]. The method has since been adopted in various forms for differentiable rendering, implicit surface reconstruction, and 3D deep learning frameworks. The specific NDC normalization formulas and meshgrid indexing conventions have been standardized in popular libraries like PyTorch and PyTorch3D [S1, S2, S7, unofficial].
+
+## Sources
+[S1] omkarchittar/Neural_Surfaces, https://github.com/omkarchittar/Neural_Surfaces, fetched 2026-10-26 (unofficial)
+[S2] Yonghao-Lee/differentiable-rendering, https://github.com/Yonghao-Lee/differentiable-rendering, fetched 2026-10-26 (unofficial)
+[S3] learning3d/assignment3, https://github.com/learning3d/assignment3, fetched 2026-10-26
+[S4] samirangode/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/samirangode/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+[S5] Shreyas120/l3d_assignment3, https://github.com/Shreyas120/l3d_assignment3, fetched 2026-10-26 (unofficial)
+[S6] DanJbk/Plenoxels, https://github.com/DanJbk/Plenoxels, fetched 2026-10-27 (unofficial)
+[S7] cvg/depthsplat, https://github.com/cvg/depthsplat, fetched 2026-10-27 (unofficial)
+[S8] cilix-ai/gs-embedding, https://github.com/cilix-ai/gs-embedding, fetched 2026-10-27 (unofficial)
+[S9] rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, https://github.com/rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, fetched 2026-10-27 (unofficial)
+[S10] Zhaoyibinn/VGVGGT, https://github.com/Zhaoyibinn/VGVGGT, fetched 2026-10-27 (unofficial)
+[S11] Volume Grids in Geometry Nodes — Blender Developers Blog, https://code.blender.org/2025/10/volume-grids-in-geometry-nodes/, fetched 2026-10-27 (unofficial)
+[S12] cvg/NoPoSplat, https://github.com/cvg/NoPoSplat, fetched 2026-10-27 (unofficial)

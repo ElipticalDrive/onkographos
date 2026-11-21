@@ -1,0 +1,208 @@
+--- v003.md
++++ v004.md
+@@ -4,106 +4,139 @@
+ 
+ ## Overview
+-Dynamic Chunk Generation with Radius manages chunk instantiation and removal based on a spherical render distance around the player, using set difference operations to determine which chunks to load or unload [S1, unofficial]. It builds on [Chunk Lifecycle Management](3987-chunk-lifecycle-management.md) by replacing static or scanner-based triggers with a continuous distance check against the player's current position [G]. Unlike [Chunk Loading/Unloading Scanner](4404-chunk-loading-unloading-scanner.md), which scans discrete regions, this method evaluates every chunk within a calculated bounding box relative to the player to maintain a consistent spherical visibility volume [G].
++Dynamic Chunk Generation with Radius manages the instantiation and removal of voxel chunks based on a spherical render distance around the player or camera [S1, unofficial][S2, unofficial][S3, unofficial]. It solves the problem of maintaining a contiguous, procedurally generated world in memory by loading new chunks as the player approaches and unloading distant ones to free resources [S1, unofficial][S2, unofficial][S3, unofficial]. Unlike [Chunk Loading/Unloading Scanner](4404-chunk-loading-unloading-scanner.md), which typically scans a fixed grid or uses a queue-based approach, this method explicitly calculates the set difference between a spherical volume of interest and the currently loaded chunks to determine load/unload actions [S1, unofficial]. It differs from [Budget Plans](5497-budget-plans.md) by focusing on spatial radius and lifecycle states (KEEP, DRAW, DONE) for creation/deletion rather than computational cost limits [S1, unofficial][S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Player position ($P$), render radius ($R$), chunk size ($S$), and the current set of loaded chunks [S1, unofficial].
+-*   **Outputs:** Updated set of loaded chunks (instantiated or destroyed) [S1, S3, unofficial].
++*   **Inputs:** Player/Camera position ($P$), render radius ($R$), chunk size ($C_{size}$), currently loaded chunks map ($M_{loaded}$).
++*   **Outputs:** Sets of chunks to load ($S_{load}$) and chunks to unload ($S_{unload}$).
+ 
+ **Data Structures:**
+-*   **Loaded Chunks Dictionary:** A hash map (dictionary) mapping chunk coordinates to chunk state or object references [S2, unofficial]. Keys are integer tuples $(x, y, z)$ representing the chunk grid index [G]. This structure provides fast access for existence checks [S3, unofficial].
+-*   **Chunk States:** Chunks are assigned one of three labels during the update cycle: **KEEP** (exists and within radius), **DRAW** (does not exist but within radius), or **DONE** (exists but outside radius) [S3, unofficial].
++*   **Chunk Map ($M_{loaded}$):** A dictionary/hash map where keys are chunk coordinates (e.g., $(x, y, z)$ or a flattened integer) and values are chunk objects or states [S1, unofficial][S3, unofficial].
++*   **Chunk State Labels:** Each chunk in the map is associated with a state:
++    *   `KEEP`: Chunk is within radius and must remain loaded [S3, unofficial].
++    *   `DRAW`: Chunk is within radius and ready for rendering [S3, unofficial].
++    *   `DONE`: Chunk is outside radius and marked for destruction [S3, unofficial].
+ 
+-**Algorithm Steps:**
+-1.  **Calculate Bounding Sphere Diameter:** Determine the diameter of the render sphere in chunk units [S1, unofficial].
+-    $$ \text{render\_diameter} = \left\lfloor \frac{\text{radius} \times 2}{\text{chunk\_size}} \right\rfloor $$
+-    [S1, unofficial].
+-2.  **Determine Grid Range:** Calculate the minimum and maximum chunk indices ($x, y, z$) that could possibly intersect the render sphere [S1, unofficial].
+-    $$ \text{chunk\_range\_start} = \left\lfloor \frac{\text{render\_diameter}}{2} \right\rfloor \times -1 $$
+-    $$ \text{chunk\_range\_end} = \text{render\_diameter} + \text{chunk\_range\_start} $$
+-    [S1, unofficial].
+-3.  **Identify Target Chunks:** Iterate through all integer coordinates $(x, y, z)$ within the range $[\text{chunk\_range\_start}, \text{chunk\_range\_end}]$ [S1, unofficial]. Compute chunk position: $\text{chunk\_possibly\_in\_radius} = (x, y, z) + \text{get\_chunk\_from\_point}(P, \text{chunk\_size})$ [S1, unofficial]. Compute world location: $\text{chunk\_location} = \text{chunk\_possibly\_in\_radius} \times \text{chunk\_size}$ [S1, unofficial]. If $\text{chunk\_location.distance\_to}(P) < \text{radius}$, add the chunk key $(x, y, z)$ to a temporary set `surrounding_chunks` [S1, unofficial].
+-4.  **Compute Set Differences:** Compare `surrounding_chunks` with the keys of the currently loaded chunks dictionary (`loaded_chunks`) to find load/remove sets [S1, unofficial].
+-5.  **Execute Lifecycle Actions:** If a chunk exists in `loaded_chunks` and is in `surrounding_chunks`, keep it for the next frame [S3, unofficial]. If it does not exist in `loaded_chunks` but is in `surrounding_chunks`, create it [S3, unofficial]. If it exists in `loaded_chunks` but not in `surrounding_chunks`, mark it as DONE and destroy it [S3, unofficial].
++**Steps:**
++1.  **Calculate Bounding Sphere/Grid Range:**
++    Determine the grid range of chunk coordinates that could potentially fall within the render radius [S1, unofficial].
++    $$ R_{diam} = \lfloor \frac{R \times 2}{C_{size}} \rfloor $$
++    $$ Start = \lfloor \frac{R_{diam}}{2} \rfloor \times -1 $$
++    $$ End = R_{diam} + Start $$
++    [S1, unofficial]
++
++2.  **Iterate Potential Chunks:**
++    Iterate through all integer coordinates $(x, y, z)$ within the range $[Start, End]$ [S1, unofficial][S2, unofficial].
++    *   For each $(x, y, z)$, compute the chunk's world position $L$ [S1, unofficial].
++        $$ L = (Vector3(x, y, z) + \text{offset}) \times C_{size} $$
++        [S1, unofficial]
++    *   Calculate the distance from the player position $P$ to $L$: $d = \| L - P \|$ [S1, unofficial].
++    *   If $d < R$, add the chunk coordinate to a temporary set $S_{surrounding}$ [S1, unofficial].
++
++    *Alternative 2D Approach (for terrain-only):*
++    Calculate chunk coordinates from camera position:
++    $$ ChunkX = \lfloor \frac{CameraX}{C_{size}} \rfloor, \quad ChunkZ = \lfloor \frac{CameraZ}{C_{size}} \rfloor $$
++    [S2, unofficial]
++    Iterate radius $[-R_{chunks}, R_{chunks}]$, skipping corners where $dx^2 + dz^2 > R_{chunks}^2$ [S2, unofficial].
++
++3.  **Determine Load/Unload Sets:**
++    Compare $S_{surrounding}$ with $M_{loaded}$ [S1, unofficial].
++    *   **Unload:** If a chunk key exists in $M_{loaded}$ but not in $S_{surrounding}$, add it to $S_{unload}$ [S1, unofficial][S3, unofficial].
++    *   **Load:** If a chunk key exists in $S_{surrounding}$ but not in $M_{loaded}$, add it to $S_{load}$ [S1, unofficial][S3, unofficial].
++
++4.  **Execute Lifecycle Actions:**
++    *   **Unload:** For each chunk in $S_{unload}$, mark it as `DONE` and destroy/remove it from $M_{loaded}$ [S3, unofficial].
++    *   **Load:** For each chunk in $S_{load}$, create the chunk, add it to $M_{loaded}$, and set a `NeedGeneration` flag if procedural generation is required [S2, unofficial][S3, unofficial].
++    *   **Keep:** Chunks in both $S_{surrounding}$ and $M_{loaded}$ retain their `KEEP` or `DRAW` state [S3, unofficial].
++
++5.  **State Update:**
++    Clear the temporary dictionary/set used for $S_{surrounding}$ before the next frame to avoid stale data [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def get_chunk_from_point(point, chunk_size):
+-    return (int(point[0] // chunk_size), int(point[1] // chunk_size), int(point[2] // chunk_size))
+-
+-def distance(p1, p2):
+-    return ((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2)**0.5
+-
+-def update_chunks(player_pos, render_radius, chunk_size, loaded_chunks_dict):
+-    # 1. Calculate bounds
+-    render_diameter = int(render_radius * 2) // chunk_size
+-    range_start = (render_diameter // 2) * -1
+-    range_end = render_diameter + range_start
++def update_chunk_lifecycle(player_pos, render_radius, chunk_size, loaded_chunks_map):
++    # 1. Calculate grid range
++    render_diameter = int(render_radius * 2) / chunk_size
++    chunk_range_start = (render_diameter / 2) * -1
++    chunk_range_end = render_diameter + chunk_range_start
+     
+     surrounding_chunks = {}
+     
+-    # 2. Iterate and filter by distance
+-    for x in range(range_start, range_end + 1):
+-        for y in range(range_start, range_end + 1):
+-            for z in range(range_start, range_end + 1):
++    # 2. Iterate potential chunks
++    for x in range(chunk_range_start, chunk_range_end + 1):
++        for y in range(chunk_range_start, chunk_range_end + 1): # 3D case
++            for z in range(chunk_range_start, chunk_range_end + 1):
+                 # Compute chunk world position
+-                chunk_possibly_in_radius = (x, y, z) + get_chunk_from_point(player_pos, chunk_size)
+-                chunk_location = tuple(v * chunk_size for v in chunk_possibly_in_radius)
++                # Note: _get_chunk_from_point is a helper to align grid to world origin
++                chunk_possibly_in_radius = Vector3(x, y, z) + _get_chunk_from_point(player_pos, chunk_size)
++                chunk_location = chunk_possibly_in_radius * chunk_size
+                 
+-                # Distance check
+-                if distance(chunk_location, player_pos) < render_radius:
+-                    surrounding_chunks[(x, y, z)] = True
++                # Check distance
++                if chunk_location.distance_to(player_pos) < render_radius:
++                    surrounding_chunks[chunk_location] = True
+ 
+     # 3. Determine load/unload sets
+-    loaded_keys = set(loaded_chunks_dict.keys())
+-    target_keys = set(surrounding_chunks.keys())
++    load_set = []
++    unload_set = []
+     
+-    chunks_to_load = target_keys - loaded_keys
+-    chunks_to_unload = loaded_keys - target_keys
+-    
++    # Find chunks to load (in surrounding but not loaded)
++    for chunk_pos in surrounding_chunks:
++        if chunk_pos not in loaded_chunks_map:
++            load_set.append(chunk_pos)
++            
++    # Find chunks to unload (in loaded but not surrounding)
++    for chunk_pos in loaded_chunks_map:
++        if chunk_pos not in surrounding_chunks:
++            unload_set.append(chunk_pos)
++            
+     # 4. Execute actions
+-    for key in chunks_to_load:
+-        # Instantiate chunk and add to loaded_chunks_dict [G]
+-        pass
++    for chunk_pos in unload_set:
++        chunk = loaded_chunks_map[chunk_pos]
++        chunk.state = "DONE"
++        chunk.destroy()
++        del loaded_chunks_map[chunk_pos]
+         
+-    for key in chunks_to_unload:
+-        # Mark chunk as DONE and remove from loaded_chunks_dict [G]
+-        del loaded_chunks_dict[key]
++    for chunk_pos in load_set:
++        new_chunk = create_chunk(chunk_pos)
++        new_chunk.state = "DRAW"
++        new_chunk.need_generation = True
++        loaded_chunks_map[chunk_pos] = new_chunk
+         
+-    # Keys in both sets are implicitly kept; no action needed
++    # 5. Clear temporary data
++    surrounding_chunks.clear()
+ ```
+ 
+ **Parameters:**
+-*   **Render Radius ($R$):** The distance from the player within which chunks are generated [S1, unofficial].
+-*   **Chunk Size ($S$):** The physical dimension of a chunk [S1, unofficial].
+-*   **m_RenderDistance:** Radius in chunks for loading/unloading [S2, unofficial].
+-*   **m_MaxRemeshPerFrame:** Maximum remesh jobs pushed per frame [S2, unofficial].
++*   `render_radius` ($R$): The spherical distance from the player within which chunks are loaded [S1, unofficial][S2, unofficial][S3, unofficial].
++*   `chunk_size` ($C_{size}$): The physical size of a single chunk [S1, unofficial][S2, unofficial].
++*   `m_RenderDistance`: Radius in chunks for loading/unloading [S2, unofficial].
++*   `m_MaxRemeshPerFrame`: Maximum number of remesh jobs pushed per frame (used to limit generation load) [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Stale Data:** Dictionary keys must be cleared before population to avoid retaining stale data from previous frames [S1, unofficial].
+-*   **Performance:** A naive single-threaded implementation checking every chunk in the radius is extremely slow and inefficient for open worlds [S3, unofficial].
+-*   **Generation Latency:** On older CPUs with fewer cores, the player might run out of the generated world and fall; a solution is to slow down the player to give the CPU more time to generate new chunks [S3, unofficial].
++*   **Stale Data:** Dictionary keys must be cleared before population to avoid stale data from previous frames [S1, unofficial].
++*   **Initial Performance:** The initial single-threaded dictionary approach was extremely slow and inefficient for an open world, requiring multithreading [S3, unofficial].
++*   **CPU Bottleneck:** On older CPUs with fewer cores/threads, the player might run out of the generated world and fall if generation cannot keep up with movement [S3, unofficial]. Solution: Slow down the player to give the CPU more time to generate new chunks [S3, unofficial].
+ 
+ ## Subtopics
+ 
++### [World and Chunk Caching](4901-world-and-chunk-caching.md)
++World and Chunk Caching manages the state of a procedurally generated voxel world by maintaining a cache of chunk generation statuses and their associated data. It solves the problem of coordinating asynchronous chunk generation with rendering and network synchronization, ensuring that clients or renderers only access fully generated or currently generating chunks. Unlike its parent method, Dynamic Chunk Generation with Radius, which focuses on the spatial radius and lifecycle states (KEEP, DRAW, DONE) for creation/deletion, this method specifically handles the data structure mapping positions to generation states and the serialization of chunk data for snapshots.
++
+ ### Multithreaded Recursive Flood Fill Generation
+-A multithreaded generation technique that uses a recursive flood fill algorithm to build chunks simultaneously around the player, significantly reducing loading and deletion time compared to the single-threaded radius check [S3, unofficial]. Instead of iterating a bounding box, it initiates a search in 4 directions from the player's position, recursively calling the generation algorithm until the radius limit is reached [S3, unofficial]. It employs concurrent dictionaries and queues to allow multiple threads to access chunks without deadlocks [S3, unofficial]. On older CPUs with fewer cores, the player might outrun the generation; a mitigation is to slow down the player to allow the CPU time to generate chunks [S3, unofficial]. Custom concurrency primitives were required in Unity 5.4 (.NET 4.6) because built-in `ConcurrentQueue` and `ConcurrentDictionary` were unavailable, though newer .NET versions provide these [S3, unofficial].
+-
+-### World and Chunk Caching
+-A management approach that maintains the world state, including the chunk generator and a cache for chunk generation status and data [S4, unofficial]. The `World` object contains an `Arc<dyn WorldGen>` trait object for chunk generation and an `AHashMap` mapping `(ChunkPosition, ZoomLevel)` to `ChunkStatus` [S4, unofficial]. The `ChunkStatus` enum tracks whether a chunk is `Generating`, `Generated` (holding an `Arc<ChunkInfo>`), or `Empty` [S4, unofficial]. `ChunkInfo` contains opaque geometry (`Box<Array3Chunk>`), translucent geometry (`Vec<Array3Chunk>`), and face data (`StaticCopyMap<Direction, ChunkFace>`) [S4, unofficial].
++A multithreaded generation technique using a recursive flood fill algorithm to build chunks simultaneously around the player, reducing loading and deletion time [S3, unofficial]. It presents a top-down grid of the terrain with the player in the middle and initiates a search in 4 directions, recursively calling the algorithm until the radius limit is reached [S3, unofficial]. It uses a concurrent dictionary and a concurrent queue to allow multiple threads to access chunks simultaneously without deadlocks [S3, unofficial]. On older CPUs, the player might run out of the generated world; a solution is to slow down the player [S3, unofficial]. Custom concurrency primitives were needed in Unity 5.4 (.NET 4.6), whereas newer versions (.NET 4.7.2) have built-in `ConcurrentQueue` and `ConcurrentDictionary` [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources [S1, S2, S3, S4, unofficial].
+-*   **Memory Complexity:** Not given in the sources [S1, S2, S3, S4, unofficial].
+-*   **Strengths:** Simple to implement; guarantees a spherical visibility volume; efficient lookups with hash maps [S1, S3, unofficial].
+-*   **Limitations:** Single-threaded version is inefficient for large radii; requires careful handling of generation latency to prevent players from outpacing world generation; bounding box iteration includes chunks outside the radius that are quickly discarded, wasting CPU cycles if the radius is large [S3, unofficial].
+-*   **When to use:** Suitable for moderate render distances and when generation is fast or pre-cached [S3, unofficial]. Requires multithreading or asynchronous generation for large open worlds to avoid stuttering [S3, unofficial].
++*   **Time Complexity:** $O(R^3)$ for 3D or $O(R^2)$ for 2D terrain, where $R$ is the render radius in chunks, due to iterating the bounding box of the sphere [S1, unofficial][S2, unofficial].
++*   **Memory Complexity:** Proportional to the number of chunks within the render radius [S1, unofficial].
++*   **Strengths:** Simple to implement; ensures the player is always surrounded by loaded chunks; efficient for static or slowly changing worlds [S3, unofficial].
++*   **Limitations:** Single-threaded implementation is inefficient for large open worlds [S3, unofficial]; requires careful handling of concurrency primitives to avoid deadlocks [S3, unofficial]; can cause stuttering if generation is not asynchronous [S3, unofficial].
++*   **When to Use:** Suitable for games with moderate render distances and where chunk generation is fast or asynchronous [S3, unofficial].
++*   **When Not to Use:** Unsuitable for very large open worlds with high render distances without multithreading or advanced caching [S3, unofficial].
+ 
+ ## Background
+-The method originated in voxel-based procedural terrain generation systems for open-world games where static generation was insufficient [S3, unofficial]. The initial implementation used a simple radius value updated as the player moved, labeling chunks as KEEP, DRAW, or DONE [S3, unofficial]. This approach was found too slow for open worlds, leading to the development of multithreaded variants [S3, unofficial]. The concept is implemented in various voxel engines, including Godot-based plugins and Rust-based generators like Infinigen [S1, S4, unofficial].
++The method originated from the need to create "never-ending" worlds in voxel-based games, moving beyond static generation [S3, unofficial]. Early implementations used a simple radius value updated as the player moved, using a dictionary to manage chunk states (KEEP, DRAW, DONE) [S3, unofficial]. This initial single-threaded approach was found to be extremely slow for open worlds, leading to the adoption of multithreaded recursive flood fill generation [S3, unofficial]. The technique is widely used in voxel engines and procedural terrain generation systems, such as those found in Godot voxel plugins and custom C++ voxel engines [S1, unofficial][S2, unofficial].
+ 
+ ## Sources
+ [S1] Ry645/voxel-terrain-plugin, https://github.com/Ry645/voxel-terrain-plugin, fetched 2026-10-27 (unofficial)
+ [S2] adrienlabayle/VoxelEngine, https://github.com/adrienlabayle/VoxelEngine, fetched 2026-10-27 (unofficial)
+-[S3] Voxel-Based Procedural Terrain Generation | PDF | Voxel | Rendering ..., https://www.scribd.com/document/840779393/Procedural-Terrain-Generation-Using-Voxels, fetched 2026-10-29 (unofficial)
+-[S4] jameshiew/infinigen, https://github.com/jameshiew/infinigen, fetched 2026-10-27 (unofficial)+[S3] Voxel-Based Procedural Terrain Generation | PDF | Voxel | Rendering ..., https://www.scribd.com/document/840779393/Procedural-Terrain-Generation-Using-Voxels, fetched 2026-10-29 (unofficial)

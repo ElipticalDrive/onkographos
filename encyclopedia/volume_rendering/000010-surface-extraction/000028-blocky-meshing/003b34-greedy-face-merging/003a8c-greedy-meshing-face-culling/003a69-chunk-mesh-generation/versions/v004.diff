@@ -1,0 +1,396 @@
+--- v003.md
++++ v004.md
+@@ -4,21 +4,21 @@
+ 
+ ## Overview
+-Chunk Mesh Generation creates a single vertex buffer for a voxel chunk by iterating through its voxels and generating geometry only for faces exposed to air or transparent blocks [S1, S2, S4, S6, unofficial]. It reduces draw calls by batching all visible faces of a chunk into one mesh, differing from instancing which draws individual block instances [S4, unofficial].
++Chunk Mesh Generation creates a single vertex buffer for a voxel chunk by iterating through its voxels and generating geometry only for faces exposed to air or transparent blocks [S1, S2, S4, S6, S7, S10, unofficial]. It reduces draw calls by batching all visible faces of a chunk into one mesh, differing from instancing which draws individual block instances [S4, S9, unofficial]. It serves as the foundational geometry step before greedy face merging [Greedy Meshing / Face Culling](8783-greedy-meshing-face-culling.md).
+ 
+ ## How it works
+ ### Inputs and Outputs
+ **Inputs:**
+-*   Chunk dimensions: $WIDTH \times HEIGHT \times DEPTH$ (typically $16 \times 16 \times 16$ or $32 \times 32 \times 32$) [S4, S7, unofficial].
++*   Chunk dimensions: $WIDTH \times HEIGHT \times DEPTH$ (typically $16 \times 16 \times 16$ or $32 \times 32 \times 32$) [S4, S12, unofficial].
+ *   Block data: A dense array of block types or palette indices for the chunk [S7, S8, unofficial].
+-*   Neighbor access: A mechanism to query block types in adjacent chunks and the global world state (for sky light) [S7, unofficial].
+-*   Configuration: Leaf render mode ($Fast, Smart, Fancy$), sea level, and minimum mesh distance for dynamic updates [S7, S9, unofficial].
++*   Neighbor access: A mechanism to query block types in adjacent chunks and the global world state (for sky light) [S7, S11, unofficial].
++*   Configuration: Leaf render mode (`Fast`, `Smart`, `Fancy`), sea level, and minimum mesh distance for dynamic updates [S7, S9, unofficial].
+ 
+ **Outputs:**
+-*   A packed vertex buffer containing positions, normals, texture coordinates, and lighting values [S7, unofficial].
+-*   Optional separate buffers for water and special blocks (e.g., torches) [S7, unofficial].
++*   A packed vertex buffer containing positions, normals, texture coordinates, and lighting values [S7, S8, unofficial].
++*   Optional separate buffers for water and special blocks (e.g., torches) [S7, S10, unofficial].
+ 
+ ### Data Structures
+ **PackedVertex (8 bytes):**
+-*   `v0` (uint32): Encoded position. Uses 1/16 fixed-point precision for $x, y, z$ [S7, unofficial].
++*   `v0` (uint32): Encoded position. Uses 1/16 fixed-point precision for $x, y, z$.
+     *   Layout: `pos.x | pos.y | pos.z` packed into bits.
+ *   `v1` (uint32): Encoded attributes.
+@@ -32,11 +32,11 @@
+ ### Steps
+ 1.  **Initialization:**
+-    *   Calculate world-space offsets: $xOffset = chunkX \times WIDTH$, $yOffset = chunkY \times HEIGHT$, $zOffset = chunkZ \times DEPTH$ [S7, unofficial].
++    *   Calculate world-space offsets: $xOffset = chunkX \times WIDTH$, $yOffset = chunkY \times HEIGHT$, $zOffset = chunkZ \times DEPTH$ [S1, S7, unofficial].
+     *   Decode block types from palette indices into a flat `blockTypeVector` of size $WIDTH \times HEIGHT \times DEPTH$ [S7, unofficial].
+-    *   Initialize empty lists for positions, colors, normals, and triangle indices [S2, unofficial].
++    *   Initialize empty lists for positions, colors, normals, and triangle indices [S2, S7, unofficial].
+ 
+ 2.  **Neighbor Query Helper:**
+     *   Define `getBlockOrNeighbor(x, y, z, dx, dy, dz)`:
+-        *   If the target coordinate is within the current chunk bounds, return `blockTypeVector` at the local index [S7, unofficial].
++        *   If the target coordinate is within the current chunk bounds, return `blockTypeVector` at the local index $x + WIDTH \times (y + HEIGHT \times z)$ [S7, unofficial].
+         *   If the target is in an adjacent chunk (X or Z boundary):
+             *   Lock the neighbor chunk to prevent race conditions [S7, unofficial].
+@@ -45,206 +45,126 @@
+         *   If the target is out of world bounds (Y boundary), return `BlockType::AIR` [S7, unofficial].
+ 
+-3.  **Main Loop:**
+-    *   Iterate $x$ from $0$ to $WIDTH-1$, $y$ from $0$ to $HEIGHT-1$, $z$ from $0$ to $DEPTH-1$ [S7, unofficial].
+-    *   Calculate linear index: $idx = x + WIDTH \times (y + HEIGHT \times z)$ [S7, unofficial].
+-    *   Retrieve `currentBlock = blockTypeVector[idx]` [S7, unofficial].
+-    *   **Skip Non-Renderable:** If `currentBlock` is `AIR` or is vegetation (e.g., torch, sapling), skip to next voxel [S7, unofficial].
+-        *   *Note:* Torches are often excluded from the main mesh due to partial sprite support requirements and handled separately [S7, unofficial].
+-    *   **Face Culling:** Iterate over the 6 face directions defined by deltas $(dx, dy, dz) \in \{(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)\}$ [S7, unofficial].
+-        *   Get `neighborBlock` using `getBlockOrNeighbor` [S7, unofficial].
+-        *   Determine if the face is visible based on block properties:
+-            *   **Solid Blocks:** Emit face if `!isBlockSolid(neighborBlock)` OR `neighborTreatsAsTransparent` OR (`smartLeavesCullLikeFast` AND `neighborIsLeaf`) OR `neighborBlock == CACTUS` [S7, unofficial].
+-            *   **Leaves:** Emit face if `!isBlockSolid(neighborBlock)` OR `neighborTreatedTransparent` OR (`fancyLeaves` AND `neighborIsLeaf`) OR `neighborBlock == CACTUS` [S7, unofficial].
+-            *   **Cactus:** Emit face if it is a side face (not top/bottom) OR `!isBlockSolid(neighborBlock)` OR `neighborBlock != CACTUS` [S7, unofficial].
+-            *   *Transparency Logic:* `neighborTreatedTransparent` is true if `isBlockTransparent(neighborBlock)` AND (`leavesAreTransparentForMesh` OR `!isBlockLeaves(neighborBlock)`) [S7, unofficial]. `leavesAreTransparentForMesh` is true only in `Fancy` leaf mode [S7, unofficial].
+-        *   If the face is not visible, continue to the next face [S6, unofficial].
+-
+-4.  **Mesh Generation:**
+-    *   For each visible face, define the 4 vertices of the quad [S7, unofficial].
+-    *   **Vertex Position:** Calculate world coordinates: $worldX = x + xOffset$, etc. [S7, unofficial].
+-    *   **Winding Order:** Determine triangle winding based on the face normal to ensure correct back-face culling [S4, unofficial].
+-        *   Example for X-face: If $dx > 0$, vertices might be ordered differently than if $dx < 0$ [S4, unofficial].
+-    *   **Lighting:**
+-        *   Get sky light for the adjacent air block. If neighbor chunk not loaded, default to $15$ (sunlit) [S7, unofficial].
+-        *   Get block light for the adjacent air block. Default to $0$ if chunk not loaded [S7, unofficial].
+-    *   **Special Flags:**
+-        *   `waterAbove`: Set to true if the face is the top face ($dy=1$) and the neighbor is `WATER` [S7, unofficial]. Used for caustics [S7, unofficial].
+-    *   Add vertices and indices to the mesh buffers [S1, S2, unofficial].
++3.  **Face Culling & Greedy Merging:**
++    *   Iterate over all block coordinates $(x, y, z)$ within the chunk dimensions [S7, S10, unofficial].
++    *   For each of the 6 face directions, check neighbor block type using `getBlockOrNeighbor` [S7, S10, unofficial].
++    *   Determine face visibility: emit face if neighbor is `AIR`, `transparent`, or satisfies leaf/cactus rules (`sLeafRenderMode`, `sSeaLevel`) [S7, S10, unofficial].
++    *   Merge adjacent coplanar faces of identical block types into larger rectangles (quads) to reduce vertex count [S3, S8, S9, unofficial].
++    *   Mark merged blocks as consumed to avoid double-processing [S3, unofficial].
++
++4.  **Vertex Generation:**
++    *   For each merged quad, calculate world coordinates: $worldX = x + xOffset$, etc. [S1, S7, unofficial].
++    *   Define 4 vertices based on face normal and quad dimensions [S3, S7, unofficial].
++    *   Determine triangle winding order based on face normal sign for correct back-face culling [S4, S7, unofficial].
++    *   Retrieve sky and block light for the adjacent air block, defaulting to $15$ and $0$ respectively if chunk not loaded [S7, unofficial].
++    *   Set `waterAbove` flag if top face ($dy=1$) and neighbor is `WATER` [S7, unofficial].
+ 
+ 5.  **Upload:**
+-    *   Create/bind VAO and VBO [S4, unofficial].
+-    *   Upload data using `glBufferData` with `GL_STATIC_DRAW` [S4, unofficial].
+-    *   Set vertex attribute pointers for `v0` (position) and `v1` (attributes) [S4, unofficial].
+-    *   Store mesh vertex count and copy to staging buffer; update mesh handle and set state to `ChunkState::Meshed` [S5, unofficial].
++    *   Convert lists to arrays, scale vertices by `blockSize` [S2, unofficial].
++    *   Create `Mesh` object, set buffers (`Type.Position`, `Type.Index`, `Type.TexCoord`, `Type.Normal`) [S2, unofficial].
++    *   Upload to GPU staging buffer, update mesh handle, set state to `ChunkState::Meshed` [S5, unofficial].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def generate_chunk_mesh(chunk_x, chunk_y, chunk_z, chunk_width, chunk_height, chunk_depth, 
+-                        block_data, get_neighbor_block, get_sky_light, get_block_light, 
+-                        leaf_render_mode, sea_level):
++def generate_chunk_mesh(chunk_x, chunk_y, chunk_z, width, height, depth,
++                        block_grid, get_neighbor, leaf_mode, sea_level):
+     """
+-    Generates a mesh for a single voxel chunk.
++    Generates a greedy-meshed vertex buffer for a voxel chunk.
++    block_grid: 3D array [x][y][z] of block IDs.
++    get_neighbor(x, y, z, dx, dy, dz): returns block ID or AIR if out of bounds.
++    Returns list of quads: (center_x, center_y, center_z, size_x, size_y, size_z, normal, block_id)
++    """
++    AIR = 0
++    quads = []
+     
+-    Args:
+-        chunk_x, chunk_y, chunk_z: Chunk coordinates in world space.
+-        chunk_width, chunk_height, chunk_depth: Dimensions of the chunk.
+-        block_data: 1D array of block types for the chunk.
+-        get_neighbor_block: Function(x, y, z, dx, dy, dz) -> BlockType. Handles chunk boundaries.
+-        get_sky_light: Function(x, y, z) -> int (0-15).
+-        get_block_light: Function(x, y, z) -> int (0-15).
+-        leaf_render_mode: Enum (Fast, Smart, Fancy).
+-        sea_level: Integer Y coordinate for sea level.
++    # Directions: (dx, dy, dz, normal_x, normal_y, normal_z)
++    directions = [
++        (1, 0, 0, 1, 0, 0), (-1, 0, 0, -1, 0, 0),
++        (0, 1, 0, 0, 1, 0), (0, -1, 0, 0, -1, 0),
++        (0, 0, 1, 0, 0, 1), (0, 0, -1, 0, 0, -1)
++    ]
++    
++    for dx, dy, dz, nx, ny, nz in directions:
++        # Determine plane dimensions for greedy merge
++        if dx != 0:
++            p1_size, p2_size = height, depth
++            p1_iter, p2_iter = 'y', 'z'
++            iter_size = width
++            iter_iter = 'x'
++        elif dy != 0:
++            p1_size, p2_size = width, depth
++            p1_iter, p2_iter = 'x', 'z'
++            iter_size = height
++            iter_iter = 'y'
++        else:
++            p1_size, p2_size = width, height
++            p1_iter, p2_iter = 'x', 'y'
++            iter_size = depth
++            iter_iter = 'z'
++            
++        consumed = [[False] * p2_size for _ in range(p1_size)]
+         
+-    Returns:
+-        List of vertices and indices.
+-    """
+-    vertices = []
+-    indices = []
+-    
+-    # World offsets
+-    x_off = chunk_x * chunk_width
+-    y_off = chunk_y * chunk_height
+-    z_off = chunk_z * chunk_depth
+-    
+-    # Precompute leaf transparency setting
+-    leaves_are_transparent = (leaf_render_mode == "Fancy")
+-    smart_leaves_cull = (leaf_render_mode == "Smart")
+-    
+-    for z in range(chunk_depth):
+-        for y in range(chunk_height):
+-            for x in range(chunk_width):
+-                idx = x + chunk_width * (y + chunk_height * z)
+-                current_block = block_data[idx]
+-                
+-                # Skip air and non-renderable blocks (e.g., torches, vegetation)
+-                if current_block == "AIR" or current_block == "VEGETATION":
+-                    continue
+-                if current_block == "TORCH":
++        for p1 in range(p1_size):
++            for p2 in range(p2_size):
++                if consumed[p1][p2]:
+                     continue
+                 
+-                # Check 6 faces
+-                faces = [
+-                    (1, 0, 0, "EAST"), (-1, 0, 0, "WEST"),
+-                    (0, 1, 0, "TOP"), (0, -1, 0, "BOTTOM"),
+-                    (0, 0, 1, "SOUTH"), (0, 0, -1, "NORTH")
+-                ]
++                # Find start along iter dimension
++                start = 0
++                while start < iter_size and not is_face_visible(block_grid, start, p1, p2, dx, dy, dz, get_neighbor):
++                    start += 1
++                if start == iter_size:
++                    continue
++                    
++                # Find length along iter dimension
++                length = 0
++                while start + length < iter_size and is_face_visible(block_grid, start + length, p1, p2, dx, dy, dz, get_neighbor):
++                    length += 1
++                    
++                # Find height along p1 dimension
++                merge_height = 1
++                while start + merge_height < iter_size:
++                    can_extend = True
++                    for i in range(length):
++                        if not is_face_visible(block_grid, start + i, p1 + merge_height, p2, dx, dy, dz, get_neighbor):
++                            can_extend = False
++                            break
++                    if can_extend:
++                        merge_height += 1
++                    else:
++                        break
++                        
++                # Mark consumed
++                for i in range(length):
++                    for j in range(merge_height):
++                        consumed[p1 + j][p2] = True
++                        
++                # Calculate quad center and size
++                center_x = (chunk_x * width + start + length / 2.0)
++                center_y = (chunk_y * height + p1 + merge_height / 2.0)
++                center_z = (chunk_z * depth + p2 + 0.5)
++                size_x = length
++                size_y = merge_height
++                size_z = 1.0
+                 
+-                for dx, dy, dz, face_name in faces:
+-                    # Get neighbor block type
+-                    neighbor_block = get_neighbor_block(x, y, z, dx, dy, dz)
+-                    
+-                    # Determine if face should be rendered
+-                    if not should_render_face(current_block, neighbor_block, leaves_are_transparent, 
+-                                              smart_leaves_cull):
+-                        continue
+-                    
+-                    # Generate 4 vertices for the quad
+-                    # Voxel corner is (x, y, z). Face is at x+dx, y+dy, z+dz
+-                    # We generate the quad on the face plane.
+-                    # Example: EAST face (dx=1) is at x+1. Vertices: (x+1, y, z), (x+1, y+1, z), (x+1, y+1, z+1), (x+1, y, z+1)
+-                    # Winding order must be CCW when viewed from outside.
+-                    vx, vy, vz = x + x_off, y + y_off, z + z_off
+-                    quad = compute_face_vertices(vx, vy, vz, dx, dy, dz)
+-                    
+-                    # Get lighting for the face
+-                    # Light the air block adjacent to the face
+-                    light_x = x + dx
+-                    light_y = y + dy
+-                    light_z = z + dz
+-                    
+-                    sky_light = get_sky_light(light_x, light_y, light_z) / 15.0
+-                    block_light = get_block_light(light_x, light_y, light_z) / 15.0
+-                    
+-                    # Water above flag
+-                    water_above = (dy == 1 and neighbor_block == "WATER")
+-                    
+-                    # Add vertices to buffer
+-                    for i, (px, py, pz) in enumerate(quad):
+-                        vertex = {
+-                            'pos': (px, py, pz),
+-                            'normal': (dx, dy, dz),
+-                            'sky': sky_light,
+-                            'block': block_light,
+-                            'water_above': water_above
+-                        }
+-                        vertices.append(vertex)
+-                    
+-                    # Add indices (2 triangles per quad)
+-                    base_index = len(vertices) - 4
+-                    indices.extend([base_index, base_index + 1, base_index + 2])
+-                    indices.extend([base_index, base_index + 2, base_index + 3])
+-                    
+-    return vertices, indices
+-
+-def should_render_face(current_block, neighbor_block, leaves_are_transparent, smart_leaves_cull):
+-    """
+-    Determines if a face between current_block and neighbor_block should be rendered.
+-    Matches evidence: emit if neighbor is transparent or non-existent [S10, S7, unofficial].
+-    """
+-    # Special case: Cactus
+-    if current_block == "CACTUS":
+-        # Cactus emits side faces if neighbor is not solid or not cactus
+-        if dy != 0: # side face
+-            return not is_solid(neighbor_block) or neighbor_block != "CACTUS"
+-        return False
+-        
+-    # Special case: Leaves
+-    if is_leaf(current_block):
+-        if not is_solid(neighbor_block):
+-            return True
+-        if leaves_are_transparent and is_transparent(neighbor_block):
+-            return True
+-        if leaves_are_transparent and is_leaf(neighbor_block):
+-            return True
+-        if neighbor_block == "CACTUS":
+-            return True
+-        return False
+-        
+-    # Special case: Smart Leaves Culling
+-    if smart_leaves_cull and is_leaf(neighbor_block):
+-        return False
+-        
+-    # General solid block logic
+-    if not is_solid(neighbor_block):
++                quads.append((center_x, center_y, center_z, size_x, size_y, size_z, (nx, ny, nz)))
++                
++    return quads
++
++def is_face_visible(block_grid, x, y, z, dx, dy, dz, get_neighbor):
++    """Checks if the face in direction (dx, dy, dz) at (x,y,z) is exposed."""
++    neighbor = get_neighbor(x, y, z, dx, dy, dz)
++    if neighbor == 0: # AIR
+         return True
+-    
+-    # Neighbor treats current as transparent (e.g., water next to leaf in fancy mode)
+-    neighbor_treats_as_transparent = is_transparent(neighbor_block) and (leaves_are_transparent or not is_leaf(neighbor_block))
+-    if neighbor_treats_as_transparent:
++    # Simplified transparency check based on evidence
++    if neighbor == "WATER":
+         return True
+-        
++    if neighbor == "LEAVES":
++        return True
+     return False
+-
+-def compute_face_vertices(x, y, z, dx, dy, dz):
+-    """
+-    Computes 4 vertices for a quad on the face defined by normal (dx, dy, dz).
+-    Assumes voxel at (x,y,z) and face at (x+dx, y+dy, z+dz).
+-    Returns vertices in CCW order when viewed from outside.
+-    """
+-    # Base coordinates on the face plane
+-    fx, fy, fz = x + dx, y + dy, z + dz
+-    
+-    if dx == 1:  # EAST
+-        return [(fx, y, z), (fx, y+1, z), (fx, y+1, z+1), (fx, y, z+1)]
+-    elif dx == -1: # WEST
+-        return [(fx, y, z+1), (fx, y+1, z+1), (fx, y+1, z), (fx, y, z)]
+-    elif dy == 1:  # TOP
+-        return [(x, fy, z), (x+1, fy, z), (x+1, fy, z+1), (x, fy, z+1)]
+-    elif dy == -1: # BOTTOM
+-        return [(x+1, fy, z+1), (x, fy, z+1), (x, fy, z), (x+1, fy, z)]
+-    elif dz == 1:  # SOUTH
+-        return [(x, y, fz), (x+1, y, fz), (x+1, y+1, fz), (x, y+1, fz)]
+-    elif dz == -1: # NORTH
+-        return [(x+1, y+1, fz), (x, y+1, fz), (x, y, fz), (x+1, y, fz)]
+-    return []
+-
+-def is_solid(b): return b not in ("AIR", "WATER", "LEAVES", "GLASS")
+-def is_transparent(b): return b in ("AIR", "WATER", "LEAVES", "GLASS")
+-def is_leaf(b): return b == "LEAVES"
+ ```
+ 
+ ### Parameters
+-*   **Chunk Size:** Typically $16 \times 16 \times 16$ or $32 \times 32 \times 32$ [S4, S7, unofficial].
++*   **Chunk Size:** Typically $16 \times 16 \times 16$ or $32 \times 32 \times 32$ [S4, S12, unofficial].
+ *   **Leaf Render Mode:** `Fast` (leaves opaque), `Smart` (leaves cull like fast but check neighbors), `Fancy` (leaves transparent for meshing) [S7, unofficial].
+ *   **Sea Level:** Integer Y coordinate. Water blocks with top face at sea level use planar reflection; others use sky reflection [S7, unofficial].
+@@ -252,27 +172,28 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Boundary Conditions:** Neighbors outside the chunk must be queried from adjacent chunks. If a chunk is not loaded, default to `AIR` [S7, unofficial].
++*   **Boundary Conditions:** Neighbors outside the chunk must be queried from adjacent chunks. If a chunk is not loaded, default to `AIR` [S7, S11, unofficial].
+ *   **Lighting Consistency:** Sky light for unloaded chunks defaults to $15$ (sunlit), which may be incorrect if the chunk is underground. It is corrected on rebuild [S7, unofficial].
+-*   **Vertex Overlap:** Naive implementations may generate overlapping vertices, increasing triangle count. Tracking previously used vertices can mitigate this [S2, unofficial].
++*   **Vertex Overlap:** Naive implementations may generate overlapping vertices, increasing triangle count. Greedy merging reduces this by consolidating faces [S4, S7, unofficial].
+ *   **Torch Rendering:** Torches often cannot be rendered in the packed-vertex format due to partial sprite support. They are excluded from the main mesh and rendered separately [S7, unofficial].
+ *   **Visibility Buffer Mismatch:** Pushing visibility values twice per vertex may indicate a layout mismatch or bug in vertex count calculation [S1, unofficial].
++*   **Render Distance:** Sections outside render distance are not built; dirtying them aliases onto whichever loaded section currently occupies that render grid slot [S9, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Halo Padding
+-Generating chunks with a +1 block border (total +2 in each dimension) to ensure geometry continuity across chunk boundaries [S11, unofficial].
++Generates chunks with a +1 block border (total +2 in each dimension) to ensure geometry continuity across chunk boundaries [S11, unofficial].
+ 
+ ### Chunk Geometry
+-Using cubical $16 \times 16 \times 16$ chunks for display lists, unlike for load and save (which may use world-height chunks) [S12, unofficial]. Cubical chunks reduce the reason to frustum cull individual chunks compared to world-height chunks [S12, unofficial].
++Uses cubical $16 \times 16 \times 16$ chunks for display lists, unlike load/save which may use world-height chunks [S12, unofficial]. Cubical chunks reduce the reason to frustum cull individual chunks compared to world-height chunks [S12, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the chunk ($WIDTH \times HEIGHT \times DEPTH$) [S9, unofficial].
+-*   **Memory Complexity:** $O(F)$ where $F$ is the number of visible faces. The packed vertex format uses 8 bytes per vertex [S7, unofficial].
+-*   **Performance:** Reduces draw calls significantly by batching faces into a single mesh per chunk [S2, unofficial]. Scales better than instancing for large numbers of blocks [S4, unofficial].
+-*   **Limitations:** Modifying a single block requires regenerating the entire chunk mesh, which is computationally expensive [S4, unofficial].
+-*   **Dynamic Updates:** Can be optimized by only rebuilding chunks near the player or within a configurable distance [S9, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the chunk ($WIDTH \times HEIGHT \times DEPTH$) [S5, S9, unofficial].
++*   **Memory Complexity:** $O(F)$ where $F$ is the number of visible faces. The packed vertex format uses 8 bytes per vertex [S4, S7, unofficial].
++*   **Performance:** Reduces draw calls significantly by batching faces into a single mesh per chunk [S2, S4, unofficial]. Scales better than instancing for large numbers of blocks [S4, S9, unofficial].
++*   **Limitations:** Modifying a single block requires regenerating the entire chunk mesh, which is computationally expensive [S4, S9, unofficial].
++*   **Dynamic Updates:** Can be optimized by only rebuilding chunks near the player or within a configurable distance [S9, unofficial]. Zone update is $O(minDistance^2 \times verticalSections)$ per player movement event, bounded by render distance [S9, unofficial].
+ 
+ ## Background
+-Chunk mesh generation originated in Minecraft, which groups blocks into $16 \times 16 \times 16$ chunks and renders only visible faces as a single mesh per chunk [S4, unofficial]. This approach was adopted in various voxel engines and mods (e.g., Sodium, Greedy Meshing mod) to optimize rendering performance [S9, unofficial]. It is a precursor to more advanced greedy meshing techniques that merge adjacent faces into larger quads [S4, unofficial].
++Chunk mesh generation originated in Minecraft, which groups blocks into $16 \times 16 \times 16$ chunks and renders only visible faces as a single mesh per chunk [S4, S12, unofficial]. This approach was adopted in various voxel engines and mods (e.g., Sodium, Greedy Meshing mod) to optimize rendering performance [S5, S9, unofficial].
+ 
+ ## Sources

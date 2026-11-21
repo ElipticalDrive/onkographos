@@ -1,0 +1,161 @@
+--- v001.md
++++ v002.md
+@@ -1,98 +1,61 @@
+ # Node Subdivision
+-Also called: Octree Node Subdivision, Adaptive Octree Node Subdivision
+ 
+ ## Overview
+-Node Subdivision is the core mechanism for refining an adaptive octree during top-down construction, transforming coarse nodes into finer 2×2×2 tiles to resolve high-frequency geometry or irradiance gradients. It differs from static subdivision by dynamically determining which nodes require refinement based on a pre-computed list of voxel fragments, and from uniform grid approaches by allowing variable granularity [S1, unofficial]. This method enables efficient memory usage by only allocating child nodes where necessary, addressing the unwieldiness of uniform grids in large, complex scenes [S1, unofficial].
++Node Subdivision is the process of subdividing octree nodes into eight children by splitting the bounding box in half along each axis, redistributing existing surfels [Parent]. It executes in three distinct steps: flagging nodes, allocating subnode tiles, and initializing new nodes [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A list of voxel fragments (each containing position and data), the current octree structure, and a target subdivision level.
+-- **Output:** An updated octree where flagged nodes are split into 8 children, linked via a tile allocation, and initialized.
++- **Input:** A list of voxel fragments, the current octree structure, and a target subdivision level [S1, unofficial].
++- **Output:** An updated octree where flagged nodes are split into eight children, linked via a tile allocation, and initialized [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Octree Node:** Contains a pointer to its children. The children pointer is a 32-bit or 64-bit integer. The most significant bit (MSB) is used as a flag.
+-- **Voxel Fragment List:** An array of structures, each representing a sample or geometric primitive to be integrated into the octree.
+-- **Octree Pool:** A contiguous memory block (or pool) where new node tiles are allocated.
+-- **Atomic Counter:** A shared counter used to allocate indices within the Octree Pool.
++- **Octree Node:** Contains a pointer to its children [S1, unofficial].
++- **Voxel Fragment List:** An array of entries representing samples or geometric primitives to be integrated into the octree [S1, unofficial].
++- **Octree Pool:** A contiguous memory block where new node tiles are allocated [S1, unofficial].
++- **Atomic Counter:** A shared counter used to allocate indices within the Octree Pool [S1, unofficial].
+ 
+ **Steps:**
+ 1. **Flagging:** Determine which nodes need subdivision.
+-2. **Allocation:** Allocate memory for the 8 child nodes (a tile) for each flagged node.
+-3. **Initialization:** Initialize the new child nodes (e.g., setting pointers to null).
++2. **Allocation:** Allocate memory for the eight child nodes (a tile) for each flagged node.
++3. **Initialization:** Initialize the new child nodes by setting their child node pointers to null [S1, unofficial].
+ 
+ **Detailed Procedure:**
+-
+-1. **Flagging Nodes:**
+-   - Launch one thread per entry in the voxel-fragment list.
+-   - Each thread traverses the octree from the root down to the target level.
+-   - The traversal follows the path defined by the fragment's position.
+-   - At the target level, the thread identifies the node that contains the fragment.
+-   - The thread sets the most significant bit (MSB) of that node's children pointer to indicate it must be subdivided.
+-   - Since multiple threads may target the same node, this operation is idempotent regarding the flag state (once flagged, it stays flagged).
+-
+-2. **Allocating Subnode Tiles:**
+-   - Iterate through all nodes at the current level.
+-   - For each node where the MSB of the children pointer is set:
+-     - Use a shared atomic counter to allocate a contiguous block of memory for 8 new nodes (a tile) from the Octree Pool.
+-     - Update the node's children pointer to point to the base address of this new tile.
+-     - Clear the MSB flag in the children pointer to indicate the node is now subdivided and the pointer is valid.
+-
+-3. **Initializing New Nodes:**
+-   - Launch one thread per newly created node in the new octree level.
+-   - Each thread initializes its assigned node.
+-   - Primary initialization: Set the node's children pointer to `null` (or 0).
+-   - This ensures that leaf nodes or nodes not flagged for further subdivision in subsequent passes start with a clean state.
++1. **Flagging Nodes:** Launch one thread per entry in the voxel-fragment list [S1, unofficial]. Each thread traverses the octree from top to bottom to the current level and flags the node where it ends [S1, unofficial]. This flag is implemented by setting the most significant bit of the node's children pointer [S1, unofficial].
++2. **Allocating Subnode Tiles:** Whenever a node is flagged, a set of eight subnodes (a tile) is allocated inside the octree pool [S1, unofficial]. Allocation is performed using a shared atomic counter [S1, unofficial].
++3. **Initializing New Nodes:** A separate pass initializes the new nodes, primarily setting child node pointers to null [S1, unofficial]. One thread is associated with each node of the new octree level [S1, unofficial].
+ 
+ **Pseudocode:**
++```python
++def flag_nodes(voxel_fragments, octree_nodes, root_index, target_level):
++    # One thread per fragment
++    for fragment in voxel_fragments:
++        node_idx = root_index
++        for _ in range(target_level):
++            # Determine child index from fragment position relative to node bounds
++            child_idx = compute_child_index(octree_nodes[node_idx], fragment.position) # [G]
++            node_idx = octree_nodes[node_idx].children_ptr + child_idx
++        # Set MSB of children pointer to flag for subdivision
++        octree_nodes[node_idx].children_ptr |= (1 << 31)
+ 
+-```python
+-# Global state
+-octree_nodes: Array[OctreeNode]
+-voxel_fragments: Array[VoxelFragment]
+-octree_pool: Array[OctreeNode]
+-pool_counter: AtomicInt = 0
++def allocate_tiles(octree_nodes, pool_counter, nodes_at_current_level):
++    for node_idx in nodes_at_current_level:
++        if octree_nodes[node_idx].children_ptr & (1 << 31):
++            # Allocate tile of 8 nodes using shared atomic counter
++            base_idx = atomic_add(pool_counter, 8) # [G]
++            # Update children pointer to tile base, clear MSB
++            octree_nodes[node_idx].children_ptr = base_idx
+ 
+-def flag_nodes():
+-    # Launch one thread per fragment
+-    parallel_for i in range(len(voxel_fragments)):
+-        fragment = voxel_fragments[i]
+-        node = root_node
+-        # Traverse to the target level
+-        for level in range(target_level):
+-            child_index = get_child_index(node, fragment.position)
+-            node = octree_nodes[node.children_ptr + child_index]
+-        # Flag the node by setting MSB of children pointer
+-        # Assuming children_ptr is an integer index into octree_nodes
+-        node.children_ptr |= (1 << 31) # Set MSB
+-
+-def allocate_tiles():
+-    # Iterate over all nodes at the current level
+-    # Note: In practice, this might be done via a traversal or by iterating
+-    # a list of nodes at the specific level.
+-    for node in nodes_at_current_level:
+-        if node.children_ptr & (1 << 31): # Check MSB
+-            # Allocate tile of 8 nodes
+-            base_index = atomic_add(pool_counter, 8)
+-            # Update children pointer to point to the new tile
+-            # Clear the MSB flag
+-            node.children_ptr = base_index
+-
+-def initialize_nodes():
+-    # Launch one thread per new node
+-    # The number of new nodes is 8 * number_of_flagged_nodes
+-    parallel_for i in range(num_new_nodes):
+-        node_index = i
+-        octree_nodes[node_index].children_ptr = 0 # Null pointer
++def initialize_nodes(octree_nodes, num_new_nodes):
++    # One thread per new node
++    for i in range(num_new_nodes):
++        octree_nodes[i].children_ptr = 0
+ ```
+ 
+ **Parameters:**
+-- `target_level`: The depth in the octree to which fragments are projected for flagging. Typical values depend on scene scale and desired resolution.
+-- `pool_size`: Size of the Octree Pool. Must be large enough to hold all potential subdivisions.
++- `target_level`: The depth in the octree to which fragments are projected for flagging. Not given in the sources.
++- `pool_size`: Size of the Octree Pool. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** Floating-point position precision may cause fragments to be assigned to incorrect leaf nodes if not handled carefully.
+-- **Boundary Conditions:** Fragments on node boundaries must have a deterministic assignment rule (e.g., based on coordinate comparison).
+-- **Memory Exhaustion:** If the Octree Pool is too small, allocation will fail. Dynamic resizing or a larger initial pool is required.
+-- **Race Conditions:** The atomic counter for pool allocation must be thread-safe. The flagging step is safe because setting the MSB is idempotent.
++- Precision, boundary conditions, and memory exhaustion handling. Not given in the sources.
+ 
+ ## Subtopics
+@@ -102,14 +65,14 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot L)$ for flagging, where $N$ is the number of voxel fragments and $L$ is the depth of the octree. Allocation and initialization are $O(M)$, where $M$ is the number of newly created nodes.
+-- **Memory Complexity:** $O(M)$ for the new nodes, where $M$ is the number of subdivided nodes. The octree pool must be pre-allocated or dynamically managed.
+-- **Performance:** High performance on GPU due to parallel flagging and atomic operations. The use of atomic counters for pool allocation is efficient for static memory regions [S1, unofficial].
+-- **Strengths:** Efficient memory usage for sparse data; adaptive resolution; parallelizable.
+-- **Limitations:** Requires pre-computation of voxel fragments; atomic operations can become a bottleneck if contention is high; memory fragmentation if pool is not managed well.
+-- **When to Use:** When dealing with large, sparse scenes where uniform grids are too memory-intensive; when high-frequency details are localized.
+-- **When Not to Use:** When the scene is dense and uniform, or when memory allocation overhead is prohibitive.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Performance:** High performance on GPU when all threads operate on the same static memory region using atomic counters [S1, unofficial].
++- **Strengths:** Not given in the sources.
++- **Limitations:** Not given in the sources.
++- **When to Use:** Not given in the sources.
++- **When Not to Use:** Not given in the sources.
+ 
+ ## Background
+-Node Subdivision is a key component of adaptive octree construction methods, particularly in the context of sparse voxelization and irradiance volume rendering. It was described in the context of the Icare3D project, which focuses on real-time rendering techniques using OpenGL and GPU acceleration [S1, unofficial]. The method leverages GPU parallelism to efficiently manage the hierarchical structure of the octree, enabling real-time adaptive refinement.
++Node Subdivision is a component of top-down octree construction with thread scheduling [S1, unofficial]. It is used in sparse voxelization and irradiance volume rendering [S1, unofficial].
+ 
+ ## Sources

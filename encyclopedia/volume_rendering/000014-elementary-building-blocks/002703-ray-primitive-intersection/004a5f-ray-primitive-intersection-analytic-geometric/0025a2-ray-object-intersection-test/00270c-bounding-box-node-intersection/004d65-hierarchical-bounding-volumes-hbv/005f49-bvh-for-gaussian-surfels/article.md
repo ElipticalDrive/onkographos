@@ -1,0 +1,226 @@
+# BVH for Gaussian Surfels
+
+Also called: BVH over ellipses representing Gaussians, Gaussian Surfels BVH, Indirect illumination via BVH ray tracing, Physically-based Illumination with Raytracing
+
+## Overview
+This method accelerates the computation of physically-based indirect illumination for Gaussian splatting representations by treating Gaussians as ellipsoidal surfels and organizing them into a Bounding Volume Hierarchy (BVH) [S1]. It solves the problem of unnatural indirect lighting in unconstrained spherical harmonic (SH) methods by enforcing physical constraints via ray tracing [S1]. Unlike standard Gaussian splatting which uses screen-space rasterization, this approach explicitly traces rays through the 3D Gaussian field to calculate visibility and accumulated radiance, enabling true inverse rendering and relighting [S1].
+
+## How it works
+**Inputs:**
+- A set of $N$ Gaussians, each defined by center $\mathbf{x}$, covariance matrix (defining the ellipse shape/orientation), color $c$, and transparency $\alpha$.
+- A visibility threshold $\epsilon = 0.8$ [S1].
+- A sampling count $K$ for directions [S1].
+
+**Outputs:**
+- For each Gaussian vertex, the outgoing radiance $L_o(\mathbf{x}, \omega_o)$ computed via the rendering equation [S1].
+
+**Data Structures:**
+- **BVH:** A hierarchical tree where each node contains an axis-aligned bounding box (AABB) enclosing its children. The leaf nodes represent the Gaussians.
+- **Gaussian Representation:** Each Gaussian is treated as an ellipse (2D projection of a 3D ellipsoid) for intersection purposes. The axis lengths of these ellipses are scaled by a factor of three to ensure robust intersection testing [S1].
+
+**Steps:**
+
+1.  **BVH Construction:**
+    Construct a BVH over the set of Gaussians. To do this, represent each Gaussian as an ellipse. Scale the axis lengths of each Gaussian's ellipse by a factor of three. Insert these scaled ellipses into the BVH structure [S1].
+
+2.  **Ray Emission:**
+    For each Gaussian vertex $\mathbf{x}$ with geometry normal $\mathbf{n}$:
+    - Define the upper hemisphere $\Omega$ relative to $\mathbf{n}$.
+    - Uniformly sample $K$ directions $\{\omega_{ik}\}_{k=1}^K$ within $\Omega$ [S1].
+
+3.  **Ray Tracing and Accumulation:**
+    For each sampled direction $\omega_{ik}$:
+    - Emit a ray $R(t) = \mathbf{x} + t\omega_{ik}$ starting from the Gaussian center $\mathbf{x}$ [S1].
+    - Query the BVH to find intersecting Gaussians along the ray.
+    - Accumulate transmittance $T$ and indirect radiance $L_i^{ind}$ as the ray traverses the scene. The transmittance $T$ is calculated based on the opacity of the intersected Gaussians (referenced as Eqn. 3 in the source, typically $T = \prod (1 - \alpha_l)$) [S1].
+    - Compute visibility $V(\mathbf{x}, \omega_i)$:
+      $$
+      V(\mathbf{x}, \omega_i) = \begin{cases} 
+      0 & \text{if } T \le \epsilon \\
+      1 & \text{if } T > \epsilon 
+      \end{cases}
+      $$
+      where $\epsilon = 0.8$ [S1].
+    - Compute indirect incoming radiance $L_i^{ind}(\mathbf{x}, \omega_i)$ by summing the contributions of the intersected Gaussians:
+      $$
+      L_i^{ind}(\mathbf{x}, \omega_i) = \sum_{l=0}^{n} c_l \alpha_l T_l
+      $$
+      where $c_l$ is the color, $\alpha_l$ is the transparency, and $T_l$ is the transmittance up to Gaussian $l$ [S1].
+
+4.  **Final Radiance Computation:**
+    Compute the total incoming radiance $L_i(\mathbf{x}, \omega_i)$:
+    $$
+    L_i(\mathbf{x}, \omega_i) = L_i^{dir}(\mathbf{x}, \omega_i)V(\mathbf{x}, \omega_i) + L_i^{ind}(\mathbf{x}, \omega_i)
+    $$
+    where $L_i^{dir}$ is direct illumination from an environment map [S1].
+    
+    Finally, compute the outgoing radiance $L_o(\mathbf{x}, \omega_o)$ using the rendering equation:
+    $$
+    L_o(\mathbf{x}, \omega_o) = \int_{\Omega} f(\mathbf{x}, a, r, \omega_i, \omega_o) L_i(\mathbf{x}, \omega_i) (\omega_i \cdot \mathbf{n}) d\omega_i
+    $$
+    where $f$ is the Disney Principled BRDF, $a$ is albedo, $r$ is roughness, and $\omega_o$ is the view direction [S1]. This integral is approximated by the sum over the $K$ sampled directions.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def scale_gaussian_axes(gaussian, scale_factor=3.0):
+    """
+    Returns an ellipse representation with axis lengths scaled by scale_factor.
+    Gaussian is assumed to have a covariance matrix or axis lengths/orientation.
+    """
+    # Extract axis lengths from Gaussian covariance
+    # Eigen decomposition of covariance matrix Sigma gives axes and orientations
+    eigenvalues, eigenvectors = np.linalg.eigh(gaussian.covariance)
+    axis_lengths = 2.0 * np.sqrt(eigenvalues) # Standard convention for 2-sigma or similar
+    scaled_axis_lengths = axis_lengths * scale_factor
+    return Ellipse(axis_lengths=scaled_axis_lengths, orientation=eigenvectors, center=gaussian.center)
+
+def build_bvh(gaussians):
+    """
+    Constructs a BVH from a list of Gaussians.
+    Each Gaussian is converted to a scaled ellipse.
+    """
+    ellipses = [scale_gaussian_axes(g) for g in gaussians]
+    # Standard BVH construction algorithm (e.g., SAH or simple split)
+    # Returns root node of BVH
+    return BVH_Constructor(ellipses)
+
+def ray_ellipse_intersection(ray_origin, ray_dir, ellipse):
+    """
+    Computes intersection of a ray with an ellipse.
+    Returns distance t if intersected, else None.
+    """
+    # Analytic intersection of ray and ellipse
+    # Ellipse equation: (x-c)^T S (x-c) = 1 where S is shape matrix
+    # Ray: x = o + t*d
+    # Solve quadratic for t
+    c = ellipse.center
+    d = ray_dir
+    o = ray_origin
+    
+    # Shape matrix S from ellipse axes and orientation
+    S = ellipse.shape_matrix
+    
+    # Quadratic coefficients for (o + t*d - c)^T S (o + t*d - c) = 1
+    # t^2 (d^T S d) + 2t (d^T S (o-c)) + ((o-c)^T S (o-c) - 1) = 0
+    A = np.dot(d, np.dot(S, d))
+    B = 2.0 * np.dot(d, np.dot(S, o - c))
+    C = np.dot(o - c, np.dot(S, o - c)) - 1.0
+    
+    discriminant = B*B - 4*A*C
+    if discriminant < 0:
+        return None
+    
+    sqrt_d = math.sqrt(discriminant)
+    t1 = (-B - sqrt_d) / (2*A)
+    t2 = (-B + sqrt_d) / (2*A)
+    
+    # Return smallest positive t
+    if t1 > 0:
+        return t1
+    elif t2 > 0:
+        return t2
+    else:
+        return None
+
+def trace_ray(ray_origin, ray_dir, bvh_root, epsilon=0.8):
+    """
+    Traces a ray through the BVH.
+    Returns visibility V and indirect radiance L_ind.
+    """
+    t = 0.0
+    transmittance = 1.0
+    L_ind = 0.0
+    
+    # Query BVH for intersections
+    intersections = bvh_root.query(ray_origin, ray_dir)
+    
+    # Sort intersections by distance
+    intersections.sort(key=lambda x: x.t)
+    
+    for hit in intersections:
+        gaussian = hit.gaussian
+        # Update transmittance
+        # T_l is transmittance up to this Gaussian
+        # Contribution is c_l * alpha_l * T_l
+        L_ind += gaussian.color * gaussian.alpha * transmittance
+        
+        # Update transmittance for next Gaussian
+        transmittance *= (1.0 - gaussian.alpha)
+        
+        # Early exit if transmittance is too low? 
+        # The source defines V based on final T, so we continue or break if T is negligible
+        if transmittance < 1e-6:
+            break
+            
+    # Visibility
+    if transmittance <= epsilon:
+        V = 0.0
+    else:
+        V = 1.0
+        
+    return V, L_ind, transmittance
+
+def compute_global_illumination(gaussians, bvh_root, K=16, epsilon=0.8):
+    """
+    Computes global illumination for all Gaussian vertices.
+    """
+    results = []
+    
+    for gaussian in gaussians:
+        center = gaussian.center
+        normal = gaussian.normal # Geometry normal N_ig
+        
+        # Sample K directions on upper hemisphere
+        directions = sample_hemisphere(normal, K)
+        
+        L_o_sum = 0.0
+        
+        for omega_i in directions:
+            # Ray from Gaussian center
+            ray_origin = center
+            ray_dir = omega_i
+            
+            V, L_ind, T = trace_ray(ray_origin, ray_dir, bvh_root, epsilon)
+            
+            # Direct illumination (from environment map)
+            L_dir = get_environment_radiance(ray_dir)
+            
+            # Total incoming radiance
+            L_i = L_dir * V + L_ind
+            
+            # BRDF evaluation
+            # f is Disney Principled BRDF
+            # omega_o is view direction (assumed known or averaged)
+            # For simplicity, assuming we compute for a specific view direction or average
+            # The integral is approximated by sum/K
+            f = evaluate_disney_brdf(gaussian.albedo, gaussian.roughness, omega_i, omega_o, normal)
+            
+            # Rendering equation term: f * L_i * (omega_i . n)
+            dot_product = max(0.0, np.dot(omega_i, normal))
+            L_o_sum += f * L_i * dot_product
+            
+        L_o = L_o_sum / K
+        results.append(L_o)
+        
+    return results
+```
+
+## Operating characteristics
+- **Time Complexity:** BVH construction is typically $O(N \log N)$ or $O(N \log^2 N)$ depending on the build algorithm. Ray tracing is $O(N)$ in the worst case but typically $O(\log N)$ per ray for sparse scenes. The total cost is $O(N \cdot K \cdot \log N)$ for $N$ Gaussians and $K$ samples per Gaussian.
+- **Memory Complexity:** $O(N)$ to store the Gaussians and the BVH structure.
+- **Strengths:** Enables physically-based indirect illumination and relighting, which is not possible with standard SH-based Gaussian splatting [S1]. The BVH acceleration makes ray tracing through the Gaussian field feasible [S1].
+- **Limitations:** Computationally expensive due to ray tracing and sampling. The approximation of Gaussians as scaled ellipses may introduce intersection errors. The visibility threshold $\epsilon=0.8$ is a heuristic that may cause artifacts in transparent regions [S1].
+- **When to use:** When physically-based inverse rendering and relighting are required for Gaussian splatting scenes [S1].
+- **When not to use:** For real-time rendering where performance is critical, or when indirect lighting is not needed.
+
+## Background
+The method was introduced in "SVG-IR: Spatially-Varying Gaussian Splatting for Inverse Rendering" [S1]. It addresses the limitation of previous unconstrained SH-based methods which produce unnatural indirect lighting [S1]. By introducing physically-based illumination via ray tracing through a learned radiance field represented by Gaussians, it enforces physical constraints [S1]. The use of BVH over ellipses is a specific optimization for this ray tracing task [S1].
+
+## Sources
+[S1] SVG-IR: Spatially-Varying Gaussian Splatting for Inverse Rendering, https://doi.org/10.1109/cvpr52734.2025.01505, fetched 2026-10-29

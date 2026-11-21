@@ -1,0 +1,234 @@
+--- v002.md
++++ v003.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-WASM Data Packing manages WebAssembly memory allocation and data packing for 3D Gaussian splat attributes (positions, rotations, scales, colors, selection) to prepare them for GPU upload or WASM-side processing [S1, unofficial]. It differs from pure GPU-buffer management by handling the intermediate step of serializing JavaScript/TypeScript data structures into contiguous linear buffers within the WebAssembly heap, ensuring alignment and capacity constraints are met before the data leaves the JavaScript runtime [S1, unofficial].
++WASM Data Packing manages WebAssembly memory allocation and data packing for 3D Gaussian splat attributes (positions, rotations, scales, colors, selection) to prepare them for GPU upload or WASM-side processing [S1, unofficial]. It differs from pure GPU-side allocation by handling the initial serialization of JavaScript/TypeScript data structures into a contiguous linear buffer within the WebAssembly heap, ensuring cache coherency and minimizing transfer overhead before the data reaches the GPU [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A `Splat` object containing attribute arrays (positions, rotations, scales, colors, selection) and metadata (vertex count, offset).
+-- **Output:** Contiguous regions in the WebAssembly linear memory (`HEAPF32` and `HEAPU8`) populated with splat data, ready for consumption by WASM functions or GPU upload.
++- **Input:** A `Splat` object containing attribute arrays (positions, rotations, scales, colors, selection) and a `vertexCount`.
++- **Output:** A contiguous block of memory in the WebAssembly heap (`HEAPF32` and `HEAPU8`) organized in a Structure-of-Arrays (SoA) layout, ready for direct memory access by WASM functions or GPU buffers.
+ 
+ **Data Structures:**
+-The `Splat` class fields are defined as [S1, unofficial]:
++The `Splat` class fields include:
+ - `offset`: number
+ - `position`: `Float32Array[3]`
+@@ -19,39 +19,39 @@
+ - `selected`: boolean
+ - `vertexCount`: number
+-- `positions`: `Float32Array`
+-- `rotations`: `Float32Array`
+-- `scales`: `Float32Array`
+-- `colors`: `Uint8Array`
+-- `selection`: `Uint8Array`
++- `positions`: `Float32Array` (N x 3)
++- `rotations`: `Float32Array` (N x 4)
++- `scales`: `Float32Array` (N x 3)
++- `colors`: `Uint8Array` (N x 4)
++- `selection`: `Uint8Array` (N)
+ 
+-**Memory Layout and Allocation:**
+-The method allocates specific buffers in WASM memory based on the `allocatedVertexCount` (the next power of 2 greater than or equal to `splat.vertexCount`) [S1, unofficial]. The sizes are:
+-- `positionsPtr`: $3 \times \text{allocatedVertexCount} \times 4$ bytes
+-- `rotationsPtr`: $4 \times \text{allocatedVertexCount} \times 4$ bytes
+-- `scalesPtr`: $3 \times \text{allocatedVertexCount} \times 4$ bytes
+-- `colorsPtr$: $4 \times \text{allocatedVertexCount}$ bytes
+-- `selectionPtr`: $\text{allocatedVertexCount}$ bytes
+-- `dataPtr`: $8 \times \text{allocatedVertexCount} \times 4$ bytes
+-- `worldPositionsPtr`: $3 \times 4 \times 4$ bytes (fixed size)
+-- `worldRotationsPtr`: $4 \times 4 \times 4$ bytes (fixed size)
+-- `worldScalesPtr`: $3 \times 4 \times 4$ bytes (fixed size) [S1, unofficial]
++**Buffer Layout and Sizes:**
++The packed memory is divided into specific regions based on `allocatedVertexCount` (the next power of 2 greater than or equal to `vertexCount`). Each float occupies 4 bytes.
++
++1.  **positionsPtr**: Size = $3 \times \text{allocatedVertexCount} \times 4$ bytes.
++2.  **rotationsPtr**: Size = $4 \times \text{allocatedVertexCount} \times 4$ bytes.
++3.  **scalesPtr**: Size = $3 \times \text{allocatedVertexCount} \times 4$ bytes.
++4.  **colorsPtr**: Size = $4 \times \text{allocatedVertexCount}$ bytes.
++5.  **selectionPtr**: Size = $\text{allocatedVertexCount}$ bytes.
++6.  **dataPtr**: Size = $8 \times \text{allocatedVertexCount} \times 4$ bytes.
++7.  **worldPositionsPtr**: Size = $3 \times 4 \times 4 = 48$ bytes.
++8.  **worldRotationsPtr**: Size = $4 \times 4 \times 4 = 64$ bytes.
++9.  **worldScalesPtr**: Size = $3 \times 4 \times 4 = 48$ bytes.
+ 
+ **Numbered Steps:**
+-1. **Initialization:** Call `initWasm()` which loads the WASM module via `createDataModule()`. If the module is not loaded, `pack()` waits for loading to finish, initializes WASM, and proceeds [S1, unofficial].
+-2. **Capacity Calculation:** Calculate `targetAllocatedVertexCount` as the smallest power of 2 greater than or equal to `splat.vertexCount`:
+-   $$ \text{targetAllocatedVertexCount} = 2^{\lceil \log_2(\text{splat.vertexCount}) \rceil} $$
+-   [S1, unofficial].
+-3. **Reallocation Check:** If `targetAllocatedVertexCount` is greater than the current `allocatedVertexCount`:
+-   a. Free old WASM buffers using `wasmModule._free()`.
+-   b. Update `allocatedVertexCount` to `targetAllocatedVertexCount`.
+-   c. Allocate new buffers using `wasmModule._malloc()` for each pointer defined above [S1, unofficial].
+-4. **Data Copying:** Copy splat attribute arrays into the newly allocated WASM memory regions:
+-   - Use `wasmModule.HEAPF32.set()` for float arrays (`positions`, `rotations`, `scales`, `data`).
+-   - Use `wasmModule.HEAPU8.set()` for byte arrays (`colors`, `selection`) [S1, unofficial].
+-5. **Concurrency Handling:** Concurrent calls to `pack()` are serialized via a loading flag and a `while` loop with `setTimeout` to yield to the event loop, preventing race conditions during WASM initialization [S1, unofficial].
++1.  **Initialization:** Call `initWasm()`. This loads the WASM module via `createDataModule()`. If the module is not yet loaded, `pack()` waits for loading to finish, initializes WASM, and proceeds [S1, unofficial].
++2.  **Capacity Calculation:** Calculate `targetAllocatedVertexCount` as the next power of 2 greater than or equal to `splat.vertexCount`:
++    $$ \text{targetAllocatedVertexCount} = 2^{\lceil \log_2(\text{splat.vertexCount}) \rceil} $$
++    [S1, unofficial]
++3.  **Memory Reallocation:** If `targetAllocatedVertexCount` is larger than the current `allocatedVertexCount`:
++    a. Free old WASM buffers using `wasmModule._free()`.
++    b. Update `allocatedVertexCount` to `targetAllocatedVertexCount`.
++    c. Allocate new buffers using `wasmModule._malloc()` for each attribute region [S1, unofficial].
++4.  **Data Copying:** Copy splat attribute arrays into the newly allocated WASM memory regions:
++    a. Use `wasmModule.HEAPF32.set()` for float arrays (positions, rotations, scales).
++    b. Use `wasmModule.HEAPU8.set()` for byte arrays (colors, selection) [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-function pack(splat):
++def pack(splat):
+     # Ensure WASM module is loaded
+     if not wasm_module_loaded:
+@@ -59,24 +59,32 @@
+         wait_for_wasm_load()
+ 
+-    # Calculate required capacity (next power of 2)
+-    target_count = 1
+-    while target_count < splat.vertex_count:
+-        target_count *= 2
++    # Calculate next power of 2 capacity
++    vertex_count = splat.vertex_count
++    if vertex_count == 0:
++        target_capacity = 1
++    else:
++        # Math.ceil(Math.log2(vertex_count))
++        log2_val = math.log2(vertex_count)
++        ceil_log2 = math.ceil(log2_val)
++        target_capacity = 2 ** ceil_log2
+ 
+-    # Reallocate if capacity increased
+-    if target_count > allocated_vertex_count:
++    # Check if reallocation is needed
++    if target_capacity > allocated_vertex_count:
+         # Free old buffers
+-        wasm_module._free(positions_ptr)
+-        wasm_module._free(rotations_ptr)
+-        wasm_module._free(scales_ptr)
+-        wasm_module._free(colors_ptr)
+-        wasm_module._free(selection_ptr)
+-        wasm_module._free(data_ptr)
+-        wasm_module._free(world_positions_ptr)
+-        wasm_module._free(world_rotations_ptr)
+-        wasm_module._free(world_scales_ptr)
++        if allocated_vertex_count > 0:
++            wasm_module._free(positions_ptr)
++            wasm_module._free(rotations_ptr)
++            wasm_module._free(scales_ptr)
++            wasm_module._free(colors_ptr)
++            wasm_module._free(selection_ptr)
++            wasm_module._free(data_ptr)
++            wasm_module._free(world_positions_ptr)
++            wasm_module._free(world_rotations_ptr)
++            wasm_module._free(world_scales_ptr)
++
++        # Update capacity
++        allocated_vertex_count = target_capacity
+ 
+         # Allocate new buffers
+-        allocated_vertex_count = target_count
+         positions_ptr = wasm_module._malloc(3 * allocated_vertex_count * 4)
+         rotations_ptr = wasm_module._malloc(4 * allocated_vertex_count * 4)
+@@ -85,59 +93,53 @@
+         selection_ptr = wasm_module._malloc(allocated_vertex_count)
+         data_ptr = wasm_module._malloc(8 * allocated_vertex_count * 4)
+-        world_positions_ptr = wasm_module._malloc(3 * 4 * 4)
+-        world_rotations_ptr = wasm_module._malloc(4 * 4 * 4)
+-        world_scales_ptr = wasm_module._malloc(3 * 4 * 4)
++        world_positions_ptr = wasm_module._malloc(48)
++        world_rotations_ptr = wasm_module._malloc(64)
++        world_scales_ptr = wasm_module._malloc(48)
+ 
+-    # Copy data to WASM heap
+-    # Float32 arrays
+-    wasm_module.HEAPF32.set(splat.positions, positions_ptr / 4)
+-    wasm_module.HEAPF32.set(splat.rotations, rotations_ptr / 4)
+-    wasm_module.HEAPF32.set(splat.scales, scales_ptr / 4)
+-    # data_ptr copy implied by source but specific content not detailed [S1, unofficial]
++    # Copy data into WASM heap
++    # Positions: Float32Array
++    wasm_module.HEAPF32.set(splat.positions, positions_ptr // 4)
+     
+-    # Uint8 arrays
++    # Rotations: Float32Array
++    wasm_module.HEAPF32.set(splat.rotations, rotations_ptr // 4)
++    
++    # Scales: Float32Array
++    wasm_module.HEAPF32.set(splat.scales, scales_ptr // 4)
++    
++    # Colors: Uint8Array
+     wasm_module.HEAPU8.set(splat.colors, colors_ptr)
++    
++    # Selection: Uint8Array
+     wasm_module.HEAPU8.set(splat.selection, selection_ptr)
+ 
+-    # Handle concurrency serialization
+-    # In a real JS environment, this would involve async/await or event loop yielding
+-    # to prevent race conditions during initialization [S1, unofficial]
++    # Note: world_* pointers are allocated but their population logic is not specified in the source [G]
++    # Typically these would be populated with identity or current camera transforms if needed by WASM
+ ```
+ 
+-**Parameters and Typical Values:**
+-- `allocatedVertexCount`: Dynamic, determined by the next power of 2 of the input vertex count.
+-- `vertexCount`: The number of active splats in the current batch.
++**Parameters:**
++- `positionsPtr`: allocated size = $3 \times \text{allocatedVertexCount} \times 4$ bytes [S1, unofficial].
++- `rotationsPtr`: allocated size = $4 \times \text{allocatedVertexCount} \times 4$ bytes [S1, unofficial].
++- `scalesPtr`: allocated size = $3 \times \text{allocatedVertexCount} \times 4$ bytes [S1, unofficial].
++- `colorsPtr`: allocated size = $4 \times \text{allocatedVertexCount}$ bytes [S1, unofficial].
++- `selectionPtr`: allocated size = $\text{allocatedVertexCount}$ bytes [S1, unofficial].
++- `dataPtr`: allocated size = $8 \times \text{allocatedVertexCount} \times 4$ bytes [S1, unofficial].
++- `worldPositionsPtr`: allocated size = 48 bytes [S1, unofficial].
++- `worldRotationsPtr`: allocated size = 64 bytes [S1, unofficial].
++- `worldScalesPtr`: allocated size = 48 bytes [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Concurrent Calls:** Concurrent calls to `pack()` can cause race conditions during WASM initialization. The implementation uses a loading flag and `setTimeout` to serialize access [S1, unofficial].
+-- **Frequent Reallocation:** Memory is only freed and reallocated when the next power-of-2 capacity exceeds the current `allocatedVertexCount`. This prevents frequent reallocations for incremental vertex count changes [S1, unofficial].
+-- **Precision:** Float32 precision is used for positions, rotations, and scales. Log-scale storage for scales is handled by the caller before packing, as the packing method itself does not perform the log/exp transformation [S1, unofficial].
+-
+-## Subtopics
+-
+-### [Splat Data Buffer Layout](5568-splat-data-buffer-layout.md)
+-Defines the Structure-of-Arrays (SoA) layout on the GPU. Choose this when optimizing for GPU rendering performance.
+-
+-### [Spherical Harmonics Coefficient Layout](5570-spherical-harmonics-coefficient-layout.md)
+-Details the flat buffer indexing for SH coefficients. Choose this when handling color data with directional dependence.
+-
+-### [Covariance Splat Reading](6840-covariance-splat-reading.md)
+-Describes how to read covariance matrices from the packed data. Choose this when implementing the rasterization step.
+-
+-### [Dynamic Gaussian Splatting Scene Management](6907-dynamic-gaussian-splatting-scene-management.md)
+-Manages scene updates. Choose this when handling dynamic scenes with adding/removing splats.
++- **Concurrent Calls:** Concurrent calls to `pack()` are serialized via a loading flag and a `while` loop with `setTimeout` to yield to the event loop, preventing race conditions during WASM initialization [S1, unofficial].
++- **Memory Efficiency:** Memory is only freed and reallocated when the next power-of-2 capacity exceeds the current `allocatedVertexCount`, preventing frequent reallocations for incremental vertex count changes [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Allocation is $O(1)$ amortized due to power-of-2 growth. Data copying is $O(N)$ where $N$ is the number of splats.
+-- **Memory Complexity:** $O(N)$ for the WASM heap buffers, where $N$ is the next power of 2 greater than or equal to the number of splats.
+-- **Measured Performance:** Not given in the sources.
+-- **Scaling:** Scales linearly with the number of splats. The power-of-2 allocation strategy may waste up to 50% of the allocated memory for non-power-of-2 counts.
+-- **Strengths:** Simplifies data transfer from JavaScript to WebAssembly/GPU by handling memory management and alignment. Prevents frequent reallocations.
+-- **Limitations:** Memory overhead due to power-of-2 allocation. Serialization of `pack()` calls may introduce latency in highly concurrent scenarios.
+-- **When to use:** When using WebAssembly for Gaussian Splatting rendering and needing to transfer data from JavaScript to the WASM module.
+-- **When not to use:** When direct GPU buffer management is preferred without an intermediate WASM layer, or when memory efficiency is critical and power-of-2 waste is unacceptable.
++- **Time Complexity:** Allocation is $O(1)$ amortized due to power-of-2 growth, but reallocation is $O(N)$ where $N$ is the number of vertices. Copying is $O(N)$.
++- **Memory Complexity:** $O(N)$, where $N$ is the next power of 2 greater than or equal to the number of splats.
++- **Strengths:** Reduces JavaScript-to-GPU transfer overhead by pre-packaging data in a contiguous WASM heap. Power-of-2 allocation minimizes fragmentation and reallocation frequency.
++- **Limitations:** Requires WebAssembly environment. Power-of-2 allocation can lead to memory waste if the vertex count is not a power of 2.
++- **When to use:** When rendering 3D Gaussian Splats in a WebAssembly-based environment where data needs to be prepared for GPU upload or WASM-side processing.
++- **When not to use:** In pure CPU-based rendering or environments without WebAssembly support.
+ 
+ ## Background
+-WASM Data Packing is part of the `gsplat.js` library, an unofficial JavaScript/TypeScript implementation of 3D Gaussian Splatting for the web [S1, unofficial]. It was developed to facilitate the transfer of Gaussian splat data from JavaScript to WebAssembly for efficient rendering and processing in browser environments.
++WASM Data Packing is part of the `gsplat.js` library, which provides JavaScript/TypeScript bindings for 3D Gaussian Splatting. It was developed to enable efficient rendering of Gaussian Splats in web browsers using WebAssembly [S1, unofficial].
+ 
+ ## Sources

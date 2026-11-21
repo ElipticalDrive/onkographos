@@ -1,0 +1,95 @@
+# Perspective View Depth Map Generation
+
+Also called: Perspective View CGDM Calculation, Vanishing Point Depth Map Generation
+
+## Overview
+A method to generate a Cumulative Gradient Depth Map (CGDM) for perspective view images by calculating separate horizontal and vertical depth gradients based on the distance from a detected vanishing point [S1]. It distinguishes itself from [Close-Up Image Depth Map Generation](13992-close-up-image-depth-map-generation.md) by relying on global geometric convergence (vanishing points) rather than local occlusion cues, and from [Distant View Depth Map Generation](#distant-view-depth-map-generation) by handling moderate-distance scenes with obvious perspective distortion rather than infinite-distance sky/land horizons [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 2D RGB image $I$.
+- Output: A CGDM $D$ of the same dimensions as $I$, where pixel values represent depth gradients (0 for farthest, $2^{BD}-1$ for nearest) [S1].
+
+**Data Structures:**
+- $I$: Input image, dimensions $W \times H$.
+- $D$: Output depth map, dimensions $W \times H$, type unsigned integer (bit depth $BD$, typically 8-bit, range 0–255) [S1].
+- $(x_{vp}, y_{vp})$: Coordinates of the vanishing point [S1].
+- $M, N$: Number of pixels in the CGDM in the horizontal and vertical directions, respectively ($M=W, N=H$ for the final output) [S1].
+
+**Steps:**
+
+1. **Image Expansion (Padding):**
+   To mitigate depth errors caused by non-central vanishing points, expand the original image $I$ to twice its size by zero-padding [S1]. Let the padded image be $I_{pad}$ with dimensions $2W \times 2H$. [G] The padding is typically added symmetrically or such that the original image is centered, ensuring the vanishing point can be searched within a larger context.
+
+2. **Edge Extraction:**
+   Extract edges from the original image $I$ using the Canny algorithm [S1].
+
+3. **Line Detection:**
+   Detect straight lines from the extracted edges using the Hough transform [S1].
+
+4. **Vanishing Point Identification:**
+   Identify the vanishing point $(x_{vp}, y_{vp})$ as the intersection of the detected straight lines [S1].
+   - **Pitfall:** If the lines do not intersect at a single point, the image is not a perspective image (it may be a close-up or distant view) [S1].
+
+5. **Cropping for Calculation:**
+   To ensure the vanishing point is treated as the center for gradient calculation:
+   a. Search for the vanishing point $(x_{vp}, y_{vp})$ in the padded image $I_{pad}$ [S1].
+   b. Calculate the maximum distance from $(x_{vp}, y_{vp})$ to any edge of $I_{pad}$. Let this be $R_{max}$ [S1].
+   c. Crop $I_{pad}$ using $(x_{vp}, y_{vp})$ as the center and a square side length of $2 \times R_{max}$ (or sufficient to cover the relevant depth gradient range) to form a cropped image $I_{crop}$ [S1]. [G] In practice, this ensures the gradient calculation extends uniformly in all directions from the VP.
+
+6. **CGDM Calculation:**
+   Calculate the CGDM for $I_{crop}$ using separate gradients for horizontal and vertical planes [S1].
+   - **Horizontal Plane Content:** Assign depth gradient values along the columns (y-axis) from the vanishing point to the edge [S1].
+   - **Vertical Plane Content:** Assign depth gradient values along the rows (x-axis) from the vanishing point to the edge [S1].
+
+   The depth values are calculated using the following formulas [S1]:
+
+   $$
+   \text{depth}_h(x, y) = (2^{BD} - 1) \frac{y - y_{vp}}{N - y_{vp}}
+   $$
+
+   $$
+   \text{depth}_v(x, y) = (2^{BD} - 1) \frac{x - x_{vp}}{M - x_{vp}}
+   $$
+
+   Where:
+   - $\text{depth}_h$: Depth gradient on the horizontal plane.
+   - $\text{depth}_v$: Depth gradient on the vertical plane.
+   - $(x, y)$: Pixel coordinates in the cropped image relative to the cropped image's origin.
+   - $(x_{vp}, y_{vp})$: Vanishing point coordinates in the cropped image.
+   - $M, N$: Dimensions of the cropped CGDM in horizontal and vertical directions.
+   - $BD$: Bit depth of the CGDM (e.g., 8) [S1].
+
+   **Note on Coordinate Systems:** The formulas assume $y$ increases downwards and $x$ increases rightwards. The term $\frac{y - y_{vp}}{N - y_{vp}}$ implies a linear gradient from 0 at $y = y_{vp}$ to $2^{BD}-1$ at $y = N$. Similarly for $x$. [G] In implementation, one must clamp the numerator to ensure non-negative values if the VP is not at the top/left edge, or handle the directionality explicitly based on the specific plane definition. The source states "from the vanishing point to the edge," implying the gradient increases away from the VP.
+
+7. **Final Output:**
+   Obtain the CGDM of the original image by cutting (mapping back) the CGDM of the cropped image to the original image dimensions [S1].
+
+**Parameters:**
+- $BD$: Bit depth (e.g., 8) [S1].
+- $M, N$: Image dimensions [S1].
+- $(x_{vp}, y_{vp})$: Vanishing point coordinates [S1].
+
+**Edge Cases and Pitfalls:**
+- **Non-Central Vanishing Point:** If the vanishing point is not in the central area, depth error occurs in holographic reconstruction [S1]. The padding and cropping steps are specifically designed to avoid this [S1].
+- **No Single Intersection:** If straight lines do not intersect at one point, the method fails to identify a perspective view [S1].
+- **Plane Ambiguity:** The method assumes content belongs to either horizontal or vertical planes. The source mentions using vanishing lines to distinguish them [S1], but does not provide the algorithm for this distinction. [G] A common heuristic is to compare the gradient magnitude or use edge orientation, but this is not specified in the source.
+
+## Subtopics
+
+### Distant View Depth Map Generation
+A method to generate a CGDM for distant view images (outdoor scenes with sky, land, water) by assuming the sky is infinitely far and depth increases linearly from the sky-land borderline to the bottom of the image [S1]. It is chosen when the proportion $p$ of pixels satisfying specific HSI color ranges is greater than 0.5 [S1]. The vanishing point is located on the sky-land borderline, and depth is calculated using a cumulative horizontal edge histogram, avoiding the need for vanishing point detection [S1].
+
+## Operating characteristics
+- **Time Complexity:** Dominated by edge detection (Canny) and Hough transform, which are $O(W \cdot H)$ and $O(W \cdot H \cdot \theta)$ respectively, where $\theta$ is the number of angle bins. The gradient calculation is $O(W \cdot H)$.
+- **Memory Complexity:** $O(W \cdot H)$ for the input image, edge map, and output depth map. The padding step doubles the memory requirement temporarily.
+- **Strengths:** Handles perspective distortion effectively by explicitly modeling the vanishing point. The padding/cropping mechanism mitigates errors from off-center VPs.
+- **Limitations:** Requires clear straight lines and a single vanishing point. Fails for close-up or distant view images. The distinction between horizontal and vertical plane content is not algorithmically detailed in the source.
+- **When to Use:** Moderate-distance scenes with obvious perspective effects and a single vanishing point.
+- **When Not to Use:** Close-up images (no convergence) or distant views (sky/land horizon).
+
+## Background
+Originated in the context of holographic 3D display using depth maps generated by 2D-to-3D rendering approaches [S1]. The method is part of a broader framework that classifies 2D images into distant view, perspective view, and close-up types to generate appropriate CGDMs [S1].
+
+## Sources
+[S1] Holographic 3D Display Using Depth Maps Generated by 2D-to-3D Rendering Approach, https://doi.org/10.3390/app11219889, fetched 2026-10-26

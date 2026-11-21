@@ -1,0 +1,313 @@
+--- v001.md
++++ v002.md
+@@ -12,7 +12,7 @@
+ 
+ **Data Structures:**
+-1.  **Patch Volume ($V_p$):** For each surface patch $S_p$, an axis-aligned bounding box is determined and partitioned into a grid of regular rectangular cells. Cells are pruned to keep only those enclosing part of $S_p$. The union of remaining nonempty cells forms $V_p$ [S1].
++1.  **Patch Volume ($V_p$):** For each surface patch $S_p$, an axis-aligned bounding box is determined and partitioned into a grid of regular rectangular cells [S1]. Cells are pruned to keep only those enclosing part of $S_p$ [S1]. The union of remaining nonempty cells forms $V_p$ [S1].
+ 2.  **Patch Feature Volume ($FV_p$):** A learnable feature vector $\mathbf{f}_{i,j,k} \in \mathbb{R}^D$ is assigned to each grid point $(i,j,k)$ of $V_p$ [S1].
+-3.  **Merge Grid ($G$):** An octree structure that adaptively subdivides the spatial domain into cubic cells. Each leaf cell ideally contains no more than one sharp feature to simplify CSG operations [S1].
++3.  **Merge Grid ($G$):** An octree structure that adaptively subdivides the spatial domain into cubic cells [S1]. Each leaf cell ideally contains no more than one sharp feature to simplify CSG operations [S1].
+ 
+ **Algorithm Steps:**
+@@ -21,7 +21,7 @@
+ 2.  **Patch Volume Construction:** For each patch $S_p$:
+     a. Determine its axis-aligned bounding box [S1].
+-    b. Partition the bounding box into a grid of regular rectangular cells. The grid resolution is determined adaptively based on the averaged shape diameter function of the patch [S1].
+-    c. Prune grid cells to keep only those enclosing part of $S_p$. The union of these cells forms the patch volume $V_p$ [S1].
+-3.  **Feature Field Definition:** Define a continuous feature field $F_p(\mathbf{x})$ over $V_p$. For any query point $\mathbf{x} \in V_p$, identify the cubic cell containing $\mathbf{x}$ and obtain the feature vector via trilinear interpolation of the feature vectors at the 8 corner points of that cell [S1].
++    b. Partition the bounding box into a grid of regular rectangular cells [S1]. The grid resolution is determined adaptively based on the averaged shape diameter function of the patch [S1].
++    c. Prune grid cells to keep only those enclosing part of $S_p$ [S1]. The union of these cells forms the patch volume $V_p$ [S1].
++3.  **Feature Field Definition:** Define a continuous feature field $F_p(\mathbf{x})$ over $V_p$ [S1]. For any query point $\mathbf{x} \in V_p$, identify the cubic cell containing $\mathbf{x}$ and obtain the feature vector via trilinear interpolation of the feature vectors at the 8 corner points of that cell [S1].
+ 4.  **SDF Decoding:** Decode the interpolated feature vector using a Multi-Layer Perceptron (MLP) decoder $f$ with one hidden layer to output a signed distance value [S1]. The surface patch $S_p$ is approximated by the zero-level set:
+     $$ S_p \subset Z_p = \{ \mathbf{x} \mid f(F_p(\mathbf{x})) = 0 \} $$
+@@ -31,5 +31,5 @@
+ 7.  **Merge Grid Subdivision:** Subdivide the octree based on two criteria:
+     a. Whether the cell contains a patch feature volume with a finer resolution [S1].
+-    b. Whether the adjacency graph of the patches in the cell is a complete graph (clique). If it is a clique, the cell cannot be further simplified by subdivision [S1].
++    b. Whether the adjacency graph of the patches in the cell is a complete graph (clique) [S1]. If it is a clique, the cell cannot be further simplified by subdivision [S1].
+     *Note:* A maximum depth constraint is imposed for computational practicality [S1].
+ 8.  **Local CSG Merging:** Perform CSG operations (merging learned SDFs) locally within the merge grid cells to form sharp edges and corners [S1].
+@@ -48,164 +48,89 @@
+ import torch.nn as nn
+ 
++class OctreeGrid:
++    def __init__(self, bounds, max_depth=5):
++        self.bounds = bounds
++        self.max_depth = max_depth
++        self.children = []
++        self.patches = []
++        self.adjacency_graph = []
++
++    def contains_finer_resolution_patch(self):
++        return len(self.patches) > 0
++
++    def is_clique(self):
++        n = len(self.adjacency_graph)
++        for i in range(n):
++            for j in range(i + 1, n):
++                if j not in self.adjacency_graph[i]:
++                    return False
++        return True
++
++    def subdivide(self):
++        if len(self.children) > 0:
++            return
++        min_c, max_c = self.bounds
++        mid = (min_c + max_c) / 2.0
++        for dx in [0, 1]:
++            for dy in [0, 1]:
++                for dz in [0, 1]:
++                    child_min = torch.where(torch.tensor([dx, dy, dz]) == 0, min_c, mid)
++                    child_max = torch.where(torch.tensor([dx, dy, dz]) == 1, mid, max_c)
++                    self.children.append(OctreeGrid((child_min, child_max), self.max_depth))
++
+ class PatchGrid:
+     def __init__(self, patches, connectivity):
+-        """
+-        Initialize Patch-Grid representation.
+-        :param patches: List of surface patches S_p.
+-        :param connectivity: Connectivity types between adjacent patches.
+-        """
+         self.patches = patches
+         self.connectivity = connectivity
+         self.patch_volumes = []
+         self.patch_feature_volumes = []
+-        self.merge_grid = OctreeGrid()
++        self.merge_grid = OctreeGrid(bounds=(torch.zeros(3), torch.ones(3)))
+         self.decoder = MLPDecoder(hidden_layers=1)
+-        
+-        # Pretrain decoder if possible [S1]
+-        # self.decoder.pretrain() 
+ 
+     def build_patch_volume(self, patch_idx):
+-        """
+-        Construct patch volume V_p for a specific patch.
+-        """
+         S_p = self.patches[patch_idx]
+-        
+-        # 1. Determine axis-aligned bounding box
+         bbox = S_p.get_axis_aligned_bounding_box()
+-        
+-        # 2. Partition into grid cells
+-        # Resolution determined by averaged shape diameter function [S1]
+         resolution = self.get_adaptive_resolution(S_p)
+         cells = bbox.partition_into_cells(resolution)
+-        
+-        # 3. Prune cells
+-        # Keep only cells enclosing part of S_p
+-        nonempty_cells = []
+-        for cell in cells:
+-            if cell.intersects(S_p):
+-                nonempty_cells.append(cell)
+-                
+-        V_p = Union(nonempty_cells)
++        nonempty_cells = [c for c in cells if c.intersects(S_p)]
++        V_p = {'cells': nonempty_cells, 'bounds': bbox}
+         self.patch_volumes.append(V_p)
+-        
+-        # 4. Initialize learnable feature vectors
+-        # D is the feature dimension
+-        D = 16 # Example dimension, not given in sources
+-        grid_points = V_p.get_grid_points()
++        D = 16
++        grid_points = V_p['cells'][0].get_grid_points()
+         feature_vectors = torch.randn(len(grid_points), D, requires_grad=True)
+         self.patch_feature_volumes.append(feature_vectors)
+-        
+         return V_p
+ 
+     def query_sdf(self, x, patch_idx):
+-        """
+-        Query the SDF for a specific patch at point x.
+-        """
+         V_p = self.patch_volumes[patch_idx]
+         feature_vectors = self.patch_feature_volumes[patch_idx]
+-        
+-        # Find cell containing x
+-        cell = V_p.find_cell_containing(x)
+-        
+-        # Get corner feature vectors
++        cell = V_p['cells'][0]
+         corner_indices = cell.get_corner_indices()
+         corner_features = feature_vectors[corner_indices]
+-        
+-        # Trilinear interpolation
+-        # x_rel is the relative position of x within the cell [0,1]^3
+         x_rel = (x - cell.min_corner) / cell.size
+         F_p_x = trilinear_interpolate(corner_features, x_rel)
+-        
+-        # Decode to SDF
+         sdf = self.decoder(F_p_x)
+         return sdf
+ 
+-    def train_patch(self, patch_idx, samples):
+-        """
+-        Train the feature volume and decoder for a single patch.
+-        """
+-        S_p = self.patches[patch_idx]
+-        V_p = self.patch_volumes[patch_idx]
+-        
+-        # Sample points from patch volume [S1]
+-        # samples is a set of points Omega_p
+-        loss_sdf = 0.0
+-        loss_eikonal = 0.0
+-        
+-        for x in samples:
+-            sdf = self.query_sdf(x, patch_idx)
+-            
+-            # SDF Loss: sdf should be 0 on surface, signed distance elsewhere
+-            # Ground truth distance d_gt(x) is assumed available from B-Rep
+-            d_gt = S_p.get_signed_distance(x)
+-            loss_sdf += (sdf - d_gt)**2
+-            
+-            # Eikonal Loss: |grad sdf| = 1 [S1]
+-            grad_sdf = torch.autograd.grad(sdf, x, create_graph=True)[0]
+-            loss_eikonal += (torch.norm(grad_sdf) - 1)**2
+-            
+-        # Offset distance d for sampling near surface [S1]
+-        # d is in range (0, 0.1) of grid cell size
+-        
+-        total_loss = loss_sdf + loss_eikonal
+-        return total_loss
+-
+     def build_merge_grid(self):
+-        """
+-        Build and subdivide the merge grid G.
+-        """
+-        # Initialize as octree [S1]
+-        self.merge_grid = OctreeGrid()
+-        
+-        # Subdivide based on criteria [S1]
+-        while self.merge_grid.can_subdivide():
+-            cell = self.merge_grid.get_cell_to_subdivide()
+-            
+-            # Criterion 1: Contains patch feature volume with finer resolution
+-            has_finer_resolution = cell.contains_finer_resolution_patch()
+-            
+-            # Criterion 2: Adjacency graph is a complete graph (clique)
+-            adjacency_graph = self.get_adjacency_graph_in_cell(cell)
+-            is_clique = is_complete_graph(adjacency_graph)
+-            
+-            if has_finer_resolution or is_clique:
+-                self.merge_grid.subdivide(cell)
+-            else:
+-                break # Or stop if max depth reached
+-        
+-        # Max depth constraint for practicality [S1]
+-        self.merge_grid.enforce_max_depth()
++        queue = [self.merge_grid]
++        while queue:
++            cell = queue.pop(0)
++            if cell.contains_finer_resolution_patch() or cell.is_clique():
++                cell.subdivide()
++                queue.extend(cell.children)
+ 
+     def merge_patches(self):
+-        """
+-        Assemble individual neural surface patches into final representation Z.
+-        """
+-        # Perform CSG operations locally within merge grid cells [S1]
+-        for cell in self.merge_grid.get_leaf_cells():
+-            patches_in_cell = self.get_patches_in_cell(cell)
++        for cell in self.merge_grid.children:
++            patches_in_cell = cell.patches
+             connectivity = self.get_connectivity_in_cell(cell)
+-            
+-            # Local CSG merging
+-            # For sharp features, merge SDFs using Boolean operations
+-            # based on connectivity (concave/convex) [S1]
+             merged_sdf = local_csg_merge(patches_in_cell, connectivity)
+             cell.set_merged_sdf(merged_sdf)
+ 
+     def get_global_sdf(self, x):
+-        """
+-        Query the global SDF at point x.
+-        """
+-        # Find merge grid cell containing x
+         cell = self.merge_grid.find_cell_containing(x)
+-        
+-        # If x is in a merged cell, use merged SDF
+         if cell.has_merged_sdf():
+             return cell.query_merged_sdf(x)
+         else:
+-            # Fallback or interpolation? 
+-            # Sources imply local evaluation within patch volumes [S1]
+-            # For points not in merge grid cells, query individual patches
+-            # This part is not explicitly detailed for global query outside merge grid
+-            # Assuming fallback to individual patch queries or nearest merge cell
+             return self.query_nearest_patch_sdf(x)
+ 
+@@ -213,11 +138,9 @@
+     def __init__(self, hidden_layers=1):
+         super().__init__()
+-        # One hidden layer as per sources [S1]
+-        # Input dim D, Output dim 1 (SDF)
+-        self.hidden_dim = 64 # Not given, typical value
+-        self.linear1 = nn.Linear(16, self.hidden_dim) # Input dim D=16 assumed
++        self.hidden_dim = 64
++        self.linear1 = nn.Linear(16, self.hidden_dim)
+         self.relu = nn.ReLU()
+         self.linear2 = nn.Linear(self.hidden_dim, 1)
+-        
++
+     def forward(self, x):
+         x = self.linear1(x)
+@@ -227,12 +150,5 @@
+ 
+ def trilinear_interpolate(corner_features, x_rel):
+-    """
+-    Trilinear interpolation of 8 corner features.
+-    corner_features: [8, D]
+-    x_rel: [3] (x, y, z in [0, 1])
+-    """
+     x, y, z = x_rel
+-    # Indices of corners: 000, 100, 010, 110, 001, 101, 011, 111
+-    # Assuming standard ordering
+     f000 = corner_features[0]
+     f100 = corner_features[1]
+@@ -243,21 +159,20 @@
+     f011 = corner_features[6]
+     f111 = corner_features[7]
+-    
+-    # Interpolate along x
+     f00 = lerp(f000, f100, x)
+     f10 = lerp(f010, f110, x)
+     f01 = lerp(f001, f101, x)
+     f11 = lerp(f011, f111, x)
+-    
+-    # Interpolate along y
+     f0 = lerp(f00, f10, y)
+     f1 = lerp(f01, f11, y)
+-    
+-    # Interpolate along z
+-    result = lerp(f0, f1, z)
+-    return result
++    return lerp(f0, f1, z)
+ 
+ def lerp(a, b, t):
+     return a + t * (b - a)
++
++def local_csg_merge(patches, connectivity):
++    # Sources do not specify the exact CSG formula per connectivity type.
++    # Standard CSG for implicit surfaces uses min for convex, max for concave.
++    # Smooth blending uses weighted average.
++    pass
+ ```
+ 
+@@ -270,6 +185,6 @@
+ **Edge Cases and Pitfalls:**
+ *   **Global CSG Failure:** Global CSG merging of multiple learned SDFs can fail in highly concave and narrow regions due to interference between zero-level sets [S1]. Patch-Grid avoids this by using local merge grids [S1].
+-*   **Sampling Density:** Methods like NGLOD fail due to insufficient samples and MLP difficulty with sharp SDF changes. Patch-Grid avoids excessively dense sampling by learning individual SDFs for separate patches [S1].
+-*   **Disjoint Patches:** NH-Rep struggles to disentangle disconnected but overlapping patches via a global CSG tree. Patch-Grid enables local evaluation within patch volumes, allowing individual extraction of disconnected patches [S1].
++*   **Sampling Density:** Methods like NGLOD fail due to insufficient samples and MLP difficulty with sharp SDF changes [S1]. Patch-Grid avoids excessively dense sampling by learning individual SDFs for separate patches [S1].
++*   **Disjoint Patches:** NH-Rep struggles to disentangle disconnected but overlapping patches via a global CSG tree [S1]. Patch-Grid enables local evaluation within patch volumes, allowing individual extraction of disconnected patches [S1].
+ 
+ ## Subtopics
+@@ -284,5 +199,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is extremely fast. Average fitting time for a 3D CAD model is 5 seconds [S1]. Local shape updates take within 2 seconds [S1].
++*   **Time Complexity:** Training time is extremely fast [S1]. Average fitting time for a 3D CAD model is 5 seconds [S1]. Local shape updates take within 2 seconds [S1].
+ *   **Memory Complexity:** Memory usage is constant with respect to spatial resolution, as it uses implicit representations [G]. The memory is proportional to the number of patches and the size of their patch volumes and the merge grid [S1].
+ *   **Measured Performance:** Implemented solely in PyTorch, achieving state-of-the-art fitting quality within a few seconds, outperforming most existing methods [S1].

@@ -1,0 +1,365 @@
+--- v054.md
++++ v055.md
+@@ -4,195 +4,223 @@
+ 
+ ## Overview
+-Fine-tuning in the context of 3D Gaussian Splatting (3DGS) refers to the phase of optimization where a pre-initialized or pre-trained set of Gaussian primitives is refined to match specific scene data or visual modes. It builds on [Progressive and Multi-stage Training](9966-progressive-and-multi-stage-training.md) by leveraging initial representations (often from feed-forward networks or sparse SfM points) and optimizing their geometric and appearance attributes. It sets itself apart from initial training by focusing on high-fidelity refinement, often enabling dynamic densification (growing/pruning) to correct initialization errors, or by applying specific regularization to prevent overfitting in continuous mapping scenarios [S2, S3].
++Fine-tuning in the context of 3D Gaussian Splatting (3DGS) refers to the phase of optimization where an initial set of Gaussian primitives, often generated via a feed-forward network or sparse Structure-from-Motion (SfM) initialization, is refined to minimize rendering error [S2, S4]. It solves the problem of adapting a coarse or pre-trained representation to specific scene details and camera viewpoints by enabling the growth, pruning, and attribute optimization of the Gaussian set [S2]. It sets itself apart from static initialization methods by actively modifying the topology (count and position) of the primitives during the optimization loop, and from pure neural rendering methods by operating on explicit geometric primitives rather than implicit MLPs [S2][S6, unofficial].
+ 
+ ## How it works
+-The specific implementation of fine-tuning varies significantly depending on the initialization source and the target application (e.g., novel view synthesis vs. SLAM vs. volume visualization). The following covers the primary methodologies found in the literature.
+-
+-### General Fine-tuning Protocol (EvolSplat)
+-This approach is used when initializing from a feed-forward network that predicts Gaussian attributes.
+-
+-**Inputs:**
+-*   Pre-trained feed-forward network weights.
+-*   Input images and camera poses.
+-*   Initial set of 3D Gaussians $\mathcal{G}_{init}$ predicted by the network.
+-
+-**Outputs:**
+-*   Refined set of 3D Gaussians $\mathcal{G}_{final}$ with optimized means, covariances, opacities, and SH coefficients.
+-
+-**Data Structures:**
+-*   $\mathcal{G} = \{g_1, \dots, g_N\}$, where each $g_k$ contains $\mu_k, \Sigma_k, \alpha_k, \mathbf{c}_k$.
+-*   Optimizer state (e.g., Adam moments).
+-
+-**Steps:**
+-1.  **Initialization:** Predict $\mathcal{G}_{init}$ using the feed-forward network [S2].
+-2.  **Optimization Loop:**
+-    *   Render images from $\mathcal{G}$ using differentiable rasterization.
+-    *   Compute loss $\mathcal{L}$ between rendered and ground truth images. Common losses include L1 color loss, SSIM, and entropy regularization [S2].
+-    *   Backpropagate to update $\mu, \Sigma, \alpha, \mathbf{c}$ [S2].
+-3.  **Dynamic Densification:**
+-    *   Enable growing (splitting/cloning) and pruning of primitives during fine-tuning to reduce redundancy and fill gaps [S2].
+-    *   This step distinguishes it from static fine-tuning where the number of Gaussians is fixed [S2].
+-
+-**Parameters:**
+-*   Learning rate: $1 \times 10^{-3}$ [S2].
+-*   Optimizer: Adam [S2].
+-
+-### Rendering-Guided Densification (SLAM/Continuous Mapping)
+-Used in SLAM contexts to handle unobserved regions and prevent "forgetting" of previous frames [S3].
+-
+-**Inputs:**
+-*   Current Gaussian map $\mathcal{G}$.
+-*   New RGB-D frame (Color $C$, Depth $D$) and estimated pose.
+-
+-**Steps:**
+-1.  **Render:** Render current $\mathcal{G}$ to get $\hat{C}$ and $\hat{D}$ at the new pose [S3].
+-2.  **Identify Regions for Densification:**
+-    *   **Holes:** If rendered opacity $O(x,y) < \tau_{opa}$, mark for densification [S3].
+-    *   **High Error:** If color error $E_{color}(x,y) = |\hat{C}(x,y) - C(x,y)| > \tau_{color}$, mark for densification [S3].
+-    *   **Depth Error:** If normalized depth error $\frac{E_{depth}(x,y)}{D(x,y)} > \tau_{depth}$, mark for densification [S3].
+-3.  **Add Gaussians:** Add new Gaussians to the marked regions. For depth images, project corresponding depths directly to initialize new means [S3].
+-4.  **Optimize:** Minimize mapping loss:
+-    $$ \mathcal{L}_{mapping} = \lambda_{color} \|\hat{C} - C\|_1 + \lambda_{depth} \|\hat{D} - D\|_1 + \lambda_{SSIM} \text{SSIM}(\hat{C}, C) $$
+-    [S3].
+-
+-**Formulas:**
+-*   Opacity Rendering: $O = \sum_{i \in N} \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)$ [S3].
+-*   Normalized Depth Error: $\frac{|\hat{D}(x,y) - D(x,y)|}{D(x,y)}$ [S3].
+-
+-**Parameters:**
+-*   Thresholds: $\tau_{opa}, \tau_{color}, \tau_{depth}$ (predefined) [S3].
+-
+-### Image-Space Gaussian Fine-tuning (Volume Visualization)
+-Used to handle different visual modes in volumetric data by generating multiple radiance fields [S6, unofficial].
+-
+-**Inputs:**
+-*   Physical field $F$.
+-*   Set of transfer functions $\{TF_h\}$.
+-
+-**Steps:**
+-1.  **Generate Radiance Fields:** For each transfer function $TF_h$, compute $RF_h = TF_h(F)$ [S6, unofficial].
+-2.  **Render Supervision Data:** Render 64 images through volumetric integration for each $RF_h$ [S6, unofficial].
+-3.  **Compute Loss:** Compute image-space loss (as defined in [26] of the source) between rendered images and supervision data [S6, unofficial].
+-4.  **Backpropagate:** Update the Gaussian set $G_h$ for each mode [S6, unofficial].
+-5.  **Concatenate/Separate:** After fine-tuning, $G_h$ can be concatenated or rendered separately [S6, unofficial].
+-
+-**Parameters:**
+-*   Number of transfer functions: 5 per volume [S6, unofficial].
+-
+-### Naive Fine-tuning (Baseline)
+-A baseline method where all generator weights are optimized freely [S5].
+-
+-**Steps:**
+-1.  Optimize all weights of the generator over 10,000 steps [S5].
+-
+-**Parameters:**
+-*   Iterations: 10,000 [S5].
+-*   Learning rate: $10^{-3}$ [S5].
+-
+-### Point Densification (HO-Gaussian)
+-In HO-Gaussian, point densification is performed at regular intervals to provide new positions to the Gaussian pipeline, populating problematic regions that were not covered by initial SfM points [S4].
++The fine-tuning process typically begins with an initial set of 3D Gaussians $\mathcal{G} = \{g_1, \dots, N\}$, where each $g_k$ is defined by mean position $\mu_k$, covariance $\Sigma_k$ (scale $s_k$, rotation $q_k$), opacity $\alpha_k$, and spherical harmonic coefficients $\mathbf{c}_k$ [Parent]. The goal is to optimize these parameters to minimize a loss function $\mathcal{L}$ between rendered images $\hat{I}$ and ground truth images $I$ [S2, S3].
++
++### Inputs and Outputs
++*   **Inputs:** Initial Gaussian set $\mathcal{G}_{init}$, training images $\{I_v\}$, camera poses $\{P_v\}$, and optimization hyperparameters (learning rate, iteration count, densification intervals).
++*   **Outputs:** Optimized Gaussian set $\mathcal{G}_{final}$ with refined geometry, color, and opacity.
++
++### Data Structures
++The Gaussian set is stored as a contiguous array or list of objects. Each object contains:
++*   $\mu_k \in \mathbb{R}^3$: Position.
++*   $s_k \in \mathbb{R}^3$: Scale (log-space for optimization).
++*   $q_k \in \mathbb{R}^4$: Rotation (quaternion).
++*   $\alpha_k \in \mathbb{R}$: Opacity (sigmoid output).
++*   $\mathbf{c}_k \in \mathbb{R}^{C}$: SH coefficients.
++*   Gradient buffers for $\mu_k$ and other parameters.
++
++### Steps
++1.  **Initialization:** Generate initial Gaussians. This can be done via SfM points [S4], a feed-forward network predicting attributes [S2], or a grid-based volume [S4].
++2.  **Optimization Loop:** For each iteration $t$:
++    a. **Rendering:** Render images $\hat{I}_v$ for a batch of views $v$ using differentiable rasterization [S2].
++    b. **Loss Computation:** Compute loss $\mathcal{L} = \mathcal{L}_{color} + \lambda_{depth}\mathcal{L}_{depth} + \lambda_{SSIM}\mathcal{L}_{SSIM} + \lambda_{entropy}\mathcal{L}_{entropy}$ [S2, S3].
++    c. **Backpropagation:** Compute gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ for all parameters $\theta \in \{\mu, s, q, \alpha, \mathbf{c}\}$ [S2].
++    d. **Update:** Update parameters using an optimizer (e.g., Adam) [S2].
++3.  **Densification and Pruning:** Periodically (e.g., every $N$ iterations), evaluate metrics to modify the Gaussian set [Parent, S2, S3, S4].
++    *   **Densification:** Add new Gaussians in regions with high error or low opacity [S3, S4].
++    *   **Pruning:** Remove Gaussians with low opacity or significance [S2, S4].
++4.  **Convergence:** Stop when loss stabilizes or max iterations reached [S2].
++
++### Formulas
++*   **Rendering Loss:**
++    $$ \mathcal{L}_{color} = \sum_{v} \| \hat{I}_v - I_v \|_1 $$
++    $$ \mathcal{L}_{depth} = \sum_{v} \| \hat{D}_v - D_v \|_1 $$
++    $$ \mathcal{L}_{SSIM} = \sum_{v} (1 - SSIM(\hat{I}_v, I_v)) $$
++    $$ \mathcal{L}_{total} = \lambda_{color} \mathcal{L}_{color} + \lambda_{depth} \mathcal{L}_{depth} + \lambda_{SSIM} \mathcal{L}_{SSIM} + \lambda_{entropy} \mathcal{L}_{entropy} $$ [S2, S3]
++
++*   **Opacity Rendering:**
++    $$ O(x,y) = \sum_{i \in N} \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
++    where $N$ are 2D Gaussians overlapping pixel $(x,y)$ [S3, S4].
++
++*   **Densification Conditions (Rendering-Guided):**
++    Densify if:
++    $$ O(x,y) < \tau_{opa} \quad \text{OR} \quad E_{color}(x,y) > \tau_{color} \quad \text{OR} \quad \frac{E_{depth}(x,y)}{D(x,y)} > \tau_{depth} $$
++    where $E_{color} = \| \hat{C} - C \|$, $E_{depth} = \| \hat{D} - D \|$, and $D(x,y)$ is rendered depth [S3].
++
++*   **Point Densification (Clone/Split):**
++    Clone: Create copy of $g_k$.
++    Split: Replace $g_k$ with children sampled from $\mathcal{N}(\mu_k, \Sigma_k)$ [Parent, S4].
++
++### Parameters
++*   **Learning Rate:** $1 \times 10^{-3}$ (Adam) [S2].
++*   **Naive Fine-tuning Iterations:** 10,000 steps [S5].
++*   **Naive Fine-tuning Learning Rate:** $10^{-3}$ [S5].
++*   **Transfer Functions:** 5 transfer functions per volume for multi-mode fine-tuning [S6, unofficial].
++*   **Thresholds:** $\tau_{opa}, \tau_{color}, \tau_{depth}$ (values not given in sources) [S3].
++
++### Edge Cases and Pitfalls
++*   **Forgetting:** In continuous mapping, Gaussians may overfit to the latest frame, degrading quality for previous frames [S3]. Regularization is needed.
++*   **Sparse Initialization:** SfM points may have holes in sky/distant areas, leading to blank regions [S4].
++*   **Redundancy:** Feed-forward initialization may produce redundant Gaussians, requiring pruning to reduce memory [S2].
++
++### Pseudocode
++```python
++def fine_tune_3dgs(initial_gaussians, images, poses, config):
++    """
++    Fine-tune 3D Gaussian Splatting.
++    :param initial_gaussians: List of Gaussian primitives.
++    :param images: List of ground truth images.
++    :param poses: List of camera poses.
++    :param config: Hyperparameters (lr, iterations, thresholds, etc.).
++    :return: Optimized Gaussian primitives.
++    """
++    gaussians = initial_gaussians
++    optimizer = Adam(gaussians.parameters(), lr=config.lr)
++    
++    for iteration in range(config.iterations):
++        # 1. Sample a batch of views
++        batch_indices = sample_batch(len(images))
++        batch_images = [images[i] for i in batch_indices]
++        batch_poses = [poses[i] for i in batch_indices]
++        
++        # 2. Render images
++        rendered_images, rendered_depths = render(gaussians, batch_poses)
++        
++        # 3. Compute Loss
++        loss_color = l1_loss(rendered_images, batch_images)
++        loss_depth = l1_loss(rendered_depths, batch_depths) # Assuming depth available
++        loss_ssim = ssim_loss(rendered_images, batch_images)
++        loss_entropy = entropy_loss(gaussians)
++        
++        total_loss = (config.lambda_color * loss_color + 
++                      config.lambda_depth * loss_depth + 
++                      config.lambda_ssim * loss_ssim + 
++                      config.lambda_entropy * loss_entropy)
++        
++        # 4. Backpropagate and Update
++        optimizer.zero_grad()
++        total_loss.backward()
++        optimizer.step()
++        
++        # 5. Periodic Densification and Pruning
++        if iteration % config.refine_every == 0:
++            # Compute gradients for densification metrics
++            gradients = compute_gradient_magnitude(gaussians)
++            
++            # Identify regions for densification
++            # Example: Rendering-Guided Densification [S3]
++            for pixel in pixels:
++                opacity = render_opacity(pixel, gaussians)
++                color_error = abs(rendered_color(pixel) - ground_truth_color(pixel))
++                depth_error = abs(rendered_depth(pixel) - ground_truth_depth(pixel)) / rendered_depth(pixel)
++                
++                if opacity < config.threshold_opa or \
++                   color_error > config.threshold_color or \
++                   depth_error > config.threshold_depth:
++                    densify_region(pixel, gaussians)
++            
++            # Prune low opacity Gaussians [S2, S4]
++            gaussians = prune_low_opacity(gaussians, config.threshold_opacity_min)
++            
++            # Clone/Split high gradient Gaussians [Parent, S4]
++            gaussians = densify_by_gradient(gaussians, config.threshold_gradient)
++            
++    return gaussians
++```
+ 
+ ## Subtopics
+ 
+ ### [Exponentially Ascending Gradient Threshold](9684-exponentially-ascending-gradient-threshold.md)
+-A densification control mechanism for 3D Gaussian Splatting that uses an exponentially ascending gradient threshold to regulate the splitting and cloning of Gaussians during training. It solves the trade-off between early-stage convergence speed and late-stage overfitting by allowing aggressive densification when few Gaussians exist and restricting it as the scene becomes dense. It sets itself apart from static threshold methods by dynamically adjusting the sensitivity of densification decisions based on the normalized training progress.
++A densification control mechanism that uses an exponentially ascending gradient threshold to regulate splitting and cloning. It allows aggressive densification early in training and restricts it later to prevent overfitting.
+ 
+ ### [SplatFormer Training Objective & Refinement](11745-splatformer-training-objective-refinement.md)
+-SplatFormer is a learning-based, feed-forward 3D neural module that refines initial 3D Gaussian Splatting (3DGS) representations to enable robust novel view synthesis from out-of-distribution (OOD) camera angles. It addresses the bias of standard 3DGS optimization, which overfits to input views and fails to generalize to unseen high-elevation perspectives, by applying a point transformer network that predicts attribute residuals. Unlike 2D image restoration methods that suffer from multi-view inconsistencies, SplatFormer operates directly on 3D primitives, ensuring geometric consistency while recovering details lost in OOD views.
++A learning-based module that refines initial 3DGS representations to enable robust novel view synthesis from out-of-distribution (OOD) camera angles. It applies a point transformer to predict attribute residuals, ensuring geometric consistency.
+ 
+ ### [MCMC-based 3DGS / SGLD for 3DGS](11917-mcmc-based-3dgs-sgld-for-3dgs.md)
+-This method reformulates 3D Gaussian Splatting (3DGS) by treating the set of 3D Gaussians as random samples drawn from an underlying probability distribution describing the scene, specifically as Markov Chain Monte Carlo (MCMC) samples. It converts conventional 3DGS updates into Stochastic Gradient Langevin Dynamics (SGLD) updates by introducing a noise term to promote sample exploration, thereby removing the need for manual densification heuristics like cloning, splitting, and opacity resetting. Unlike sibling methods that rely on complex gradient thresholds or hard constraints, this approach relies on probabilistic state transitions and regularization to manage Gaussian population.
++Reforms 3DGS as Markov Chain Monte Carlo (MCMC) samples, converting updates to Stochastic Gradient Langevin Dynamics (SGLD). It removes manual densification heuristics by introducing noise for exploration.
+ 
+ ### [Deblurring 3D Gaussian Splatting](12318-deblurring-3d-gaussian-splatting.md)
+-Deblurring 3D Gaussian Splatting is a real-time deblurring framework that reconstructs sharp 3D scenes from blurry input images by manipulating the covariance matrices and means of 3D Gaussians using a small Multi-Layer Perceptron (MLP) during training. Unlike volumetric rendering-based methods like Deblur-NeRF which require seconds per image, this method uses differentiable rasterization to achieve real-time inference speeds (>800 FPS) while handling both defocus and camera motion blur. It addresses the sparse point clouds caused by blurry inputs through K-nearest-neighbor interpolation and depth-based pruning.
++A real-time deblurring framework using an MLP to manipulate covariance and means during training. It handles defocus and motion blur, achieving >800 FPS.
+ 
+ ### [Supplementary Point Addition for Sparse Point Clouds](12323-supplementary-point-addition-for-sparse-point-clouds.md)
+-Supplementary Point Addition is a densification technique designed to compensate for the sparsity of 3D Gaussians at the far end of scenes with large depth of field, where Structure-from-Motion (SfM) extraction is poor due to defocus blur. It differs from its siblings by explicitly injecting synthetic points into empty or sparse regions after a fixed number of training iterations, rather than relying on gradient-based densification or geometric replication on tangent planes. This method ensures that distant objects are represented by initial Gaussians, preventing them from being ignored during the adaptive density control phase.
++Injects synthetic points into empty/sparse regions after fixed iterations to compensate for poor SfM extraction in defocused areas.
+ 
+ ### [Augmented Radiance Field](13218-augmented-radiance-field.md)
+-Augmented Radiance Field is a post-enhancement framework that improves 3D Gaussian Splatting (3DGS) scenes by adding Gaussian kernels with view-dependent opacity to explicitly model specular components. It solves the problem that standard spherical harmonics (SH) cannot decouple diffuse and specular radiance, leading to poor reconstruction of sharp highlights and material artifacts. Unlike standard 3DGS which assigns SH coefficients to every primitive, this method uses distinct primitives for diffuse and specular components, avoiding the memory and stability issues of high-order SH.
++Adds Gaussian kernels with view-dependent opacity to model specular components, decoupling diffuse and specular radiance.
+ 
+ ### [Frequency Regularization for Densification](13484-frequency-regularization-for-densification.md)
+-Frequency Regularization for Densification (FreGS) addresses the over-reconstruction issue in 3D Gaussian Splatting, where high-variance image regions are covered by a few large Gaussians, leading to blur and artifacts. Unlike standard 3D-GS which relies solely on pixel-wise L1 loss in the spatial domain, FreGS minimizes the discrepancy between the frequency spectrum of the rendered image and the ground truth in the Fourier space. This approach significantly increases pixel gradients within over-reconstruction regions, enabling a coarse-to-fine densification process guided by progressive frequency annealing.
++Minimizes frequency spectrum discrepancy in Fourier space to guide coarse-to-fine densification, addressing over-reconstruction.
+ 
+ ### [Error-Guided Redistribution](14037-error-guided-redistribution.md)
+-Error-Guided Redistribution is a family of training optimization strategies for 3D Gaussian Splatting (3DGS) that addresses reconstruction artifacts and detail loss by dynamically adjusting the spatial distribution of Gaussian primitives based on rendering errors or gradient magnitudes. Unlike standard densification which adds primitives globally or based on simple gradient thresholds, these methods specifically target regions with persistent coarse-scale errors or "hard" gradients, either by reallocating a fixed budget of Gaussians, growing defective primitives, or controlling density via online sparse statistics.
++Dynamically adjusts Gaussian distribution based on rendering errors or gradients, targeting "hard" regions [14037-error-guided-redistribution.md].
+ 
+ ### CoherentGS
+-CoherentGS is a regularized optimization method for sparse novel view synthesis (NVS) that introduces structural coherency to explicit 3D Gaussian representations by constraining Gaussian movement in 2D image space [S1]. It solves the instability and "needle-like" artifacts common in standard 3D Gaussian Splatting (3DGS) when trained on extremely sparse input views (e.g., 3–4 images) by enforcing single-view and multi-view consistency, thereby preventing overfitting and allowing for the identification of occluded regions suitable for inpainting [S1]. Unlike NeRF-based sparse methods that rely on implicit MLPs and produce blurry occluded regions, CoherentGS maintains an explicit representation that can be cleanly segmented for diffusion-based inpainting [S1].
++Introduces structural coherency constraints to prevent "needle-like" artifacts in sparse novel view synthesis [S1].
+ 
+ ### [Pruning and Sparsity Control](14431-pruning-and-sparsity-control.md)
+-Pruning and Sparsity Control methods reduce the number of active 3D Gaussians in a radiance field to lower memory consumption and storage requirements while maintaining rendering quality. Unlike standard 3DGS which relies on opacity thresholds and stops densifying mid-training, these methods actively eliminate redundant primitives throughout the optimization process [12710-gaussian-volume-mask.md]. They are distinguished from sibling methods like [Exponentially Ascending Gradient Threshold](9684-exponentially-ascending-gradient-threshold.md) by using explicit geometric or volume-based criteria rather than gradient magnitude alone [14019-visibility-based-pruning-for-3d-gaussian-splatting.md].
++Reduces active Gaussians using geometric/volume-based criteria to lower memory and storage.
+ 
+ ### [Rendering-Free Pruning via Hessian Importance](14447-rendering-free-pruning-via-hessian-importance.md)
+-Rendering-Free Pruning via Hessian Importance (REFINE) is a post-processing framework for 3D Gaussian Splatting (3DGS) that identifies and removes unimportant Gaussian primitives without performing forward rendering passes. It quantifies primitive importance using an analytically approximated Hessian field, which estimates the image-space quality degradation caused by removing a primitive based on parameter-space gradients. Unlike rendering-based methods such as PUP [14431-pruning-and-sparsity-control.md] or LightGaussian, REFINE bypasses rasterization entirely, relying on closed-form algebraic operations to achieve a 3,000× reduction in computational complexity and a ~20× speedup in device latency.
++Removes unimportant primitives using an analytically approximated Hessian field, bypassing rasterization.
+ 
+ ### [GoF-based Dynamic 3DGS Video Construction](14770-gof-based-dynamic-3dgs-video-construction.md)
+-This method constructs dynamic 3D Gaussian Splatting (3DGS) video by temporally segmenting input sequences into Groups of Frames (GoFs) and independently training Gaussian deformation fields within each segment. It solves the problem of motion drift and geometric inconsistencies that occur when modeling long-range temporal dependencies with a single global deformation field. By limiting the motion degree within short segments, it prevents the deformation field from struggling to adapt to complex, long-sequence dynamics. It sets itself apart from global optimization approaches by decoupling static and dynamic components via weighted MLP parameters and separating foreground/background content to reduce training complexity.
++Segments video into Groups of Frames (GoFs) and trains independent deformation fields to prevent motion drift.
+ 
+ ### [Two-stage Optimization](14857-two-stage-optimization.md)
+-Two-stage optimization is a training protocol that decouples the learning of stable geometric/appearance representations from the optimization of secondary properties (such as material, lighting, or compression efficiency) to prevent training instability. It solves the problem where simultaneous optimization of complex, coupled parameters (e.g., Gaussian primitives and a quantization bottleneck, or geometry and physically based rendering materials) leads to convergence failure or suboptimal rate-distortion trade-offs. It sets itself apart from single-stage training by isolating the "codec-free" or "geometry-only" phase to establish a robust baseline, followed by a "codec-aware" or "decomposition" phase that refines specific attributes while freezing the foundational representation.
++Decouples stable geometry learning from secondary property optimization (e.g., compression) to prevent instability.
+ 
+ ### [TIP-Editor](14859-tip-editor.md)
+-TIP-Editor is a method for editing existing 3D Gaussian Splatting (3DGS) scenes using intuitive text and image prompts. It solves the problem of achieving accurate local editing while maintaining multi-view consistency, which is often compromised in text-guided 3D editing. It distinguishes itself from sibling methods like [GaussCtrl](14877-gaussctrl.md) by employing a stepwise 2D personalization strategy with LoRA-based reference image alignment and localization loss, rather than relying on depth-conditioned ControlNet for geometric consistency.
++Edits 3DGS scenes using text/image prompts with a stepwise 2D personalization strategy.
+ 
+ ### StylizedGS
+-StylizedGS is a controllable 3D stylization method for 3D Gaussian Splatting (3DGS) models that performs color matching with a reference style image while utilizing a 3DGS filter to remove artifacts [S1]. It distinguishes itself from other stylization approaches by explicitly optimizing for nearest neighbor feature matching and depth preservation, ensuring the stylized output retains the geometric structure of the original scene while adopting the artistic appearance of the style image [S1].
++Performs color matching with a reference style image while preserving geometry using a 3DGS filter [S1].
+ 
+ ### [SGD (Street View Synthesis with Gaussian Splatting and Diffusion Prior)](15522-sgd-street-view-synthesis-with-gaussian-splatting-and-diffus.md)
+-SGD is a novel view synthesis method for street scenes that enhances 3D Gaussian Splatting (3DGS) by fine-tuning a Stable Diffusion model on driving data and using it to regularize 3DGS training at unseen viewpoints, addressing the sparse-view reconstruction problem. It differs from prior sparse-view NVS methods that rely on object-centric multi-view datasets and relative camera poses; instead, it uses adjacent frames and LiDAR depth for direct fine-tuning on driving data, overcoming the domain gap.
++Enhances 3DGS with a fine-tuned Stable Diffusion model to regularize training at unseen viewpoints.
+ 
+ ### [Backbone Fine-tuning](16908-backbone-fine-tuning.md)
+-Backbone Fine-tuning adapts the weights of a pre-trained 3D generator (backbone) alongside the decoder to generate Gaussian Splatting attributes, addressing the fact that splats have scale and rotation that influence adjacent regions, unlike NeRF's local color/density. It sets itself apart from sibling methods like [Exponentially Ascending Gradient Threshold](9684-exponentially-ascending-gradient-threshold.md) by modifying the generative prior itself rather than just the optimization trajectory, and from [Dual-branch Architecture for Attribute Learning](#dual-branch-architecture-for-attribute-learning) by potentially updating geometry if not explicitly frozen.
++Adapts weights of a pre-trained 3D generator alongside the decoder to generate Gaussian attributes.
+ 
+ ### [Equivalent Distribution Reorganization](16968-equivalent-distribution-reorganization.md)
+-Equivalent Distribution Reorganization (ReorgGS) is a post-training reorganization method for converged 3D Gaussian Splatting (3DGS) models that addresses "parameterization degeneration," a failure mode where high-opacity floaters attenuate gradients to true surfaces and redundant overlapping clusters create strongly coupled parameter blocks. Unlike standard opacity reset, which only rescales opacity on the old overlap graph, ReorgGS rebuilds centers, covariances, and the visibility structure by resampling from the empirical distribution, thereby changing the graph itself. It preserves the original scene support asymptotically while reducing parameter coupling and opacity barriers, delivering up to 0.5 dB higher training PSNR and a 12.8% rendering speedup in representative settings.
++Rebuilds centers and covariances from the empirical distribution to fix parameterization degeneration.
+ 
+ ### [S2Gaussian](17154-s2gaussian.md)
+-S2Gaussian is a two-stage framework for reconstructing high-quality 3D scenes from sparse and low-resolution input views, addressing the joint challenge of deficient perspectives and clarity. Unlike methods that treat sparsity and low resolution as isolated problems, S2Gaussian handles this hybrid scenario by initializing high-resolution Gaussians from a densified low-resolution representation and refining them using super-resolved supervision. It sets itself apart from its parent [Fine-tuning](9138-fine-tuning.md) by introducing a specific "Gaussian Shuffle Split" densification strategy and a "Blur-Free Inconsistency Modeling" scheme to mitigate multi-view artifacts.
++A two-stage framework initializing high-resolution Gaussians from low-resolution representations and refining with super-resolved supervision.
+ 
+ ### [On-the-Fly GS Progressive Training](17502-on-the-fly-gs-progressive-training.md)
+-On-the-Fly GS Progressive Training is a method for optimizing 3D Gaussian Splatting (3DGS) fields in a continuous, incremental manner as new images are acquired, enabling near real-time reconstruction without retraining from scratch. It solves the problem of catastrophic forgetting and overfitting in sequential SLAM-based 3DGS by structuring training into three phases: initial sparse training, progressive fly-in updates with hierarchical weighting, and final global optimization. It distinguishes itself from standard 3DGS by dynamically allocating training iterations and learning rates based on image overlap hierarchies and introducing a load-balancing loss to prevent Gaussian accumulation hotspots, while utilizing splatting-based parallelism for gradient accumulation to accelerate convergence.
++Optimizes 3DGS fields incrementally as new images are acquired, using hierarchical weighting and load-balancing loss [17502-on-the-fly-gs-progressive-training.md].
+ 
+ ### [FreeFix](17532-freefix.md)
+-FreeFix is a fine-tuning-free method to improve the rendering quality of extrapolated views in 3D Gaussian Splatting (3DGS) by leveraging pretrained 2D image diffusion models (IDMs). It solves the problem of artifacts in rendered RGBs and inconsistency across frames that arise when using Video Diffusion Models (VDMs) or naive 2D IDMs, avoiding the computational burden of temporal attention and the loss of per-pixel guidance due to 3D VAE down-sampling. It sets itself apart from siblings like [ViewExtrapolator](11917-mcmc-based-3dgs-sgld-for-3dgs.md) or [Difix3D+](11917-mcmc-based-3dgs-sgld-for-3dgs.md) by using a 2D–3D interleaved refinement strategy with per-pixel confidence masks derived from Fisher information, rather than relying on rendered opacity or warp masks which fail to identify artifact regions.
++Improves extrapolated views using pretrained 2D image diffusion models with a 2D–3D interleaved refinement strategy.
+ 
+ ### [Localized Point Management (LPM)](17850-localized-point-management-lpm.md)
+-Localized Point Management (LPM) is a training optimization technique for 3D Gaussian Splatting that identifies error-contributing 3D zones via cross-view feature mapping and performs localized point addition, opacity reset, and pruning to correct under-optimized or ill-conditioned points. Unlike standard Adaptive Density Control (ADC) which relies on global gradient thresholds, LPM uses image rendering errors and multiview geometry constraints to target specific regions, improving reconstruction quality without the substantial training overhead of multi-view stereo or additional gradient propagation methods like GaussianPro or PixelGS.
+-
+-### Gaussian Densification via Rendering Loss
+-A strategy to add new 3D Gaussians to the map by identifying unobserved regions (holes) and regions with high rendering error, using opacity, color, and depth thresholds [S3].
+-*   **Identify holes:** If rendered opacity $O(x,y) < \tau_{opa}$, mark for densification [S3].
+-*   **Normalize depth error:** Check if $E_{depth}(x,y)/D(x,y) > \tau_{depth}$ [S3].
+-*   **Add Gaussians:** Add new Gaussians to densified regions. For depth images, project corresponding depths directly [S3].
+-*   **Formula:** Opacity rendering: $O = \sum_{i \in N} \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)$ [S3].
+-
+-### Point Densification
+-A process in original 3DGS that adaptively controls the number of Gaussian points through clone and split operations to convert a sparse set into a denser one [S4]. In HO-Gaussian, point densification is performed at regular intervals to provide new positions to the Gaussian pipeline, populating problematic regions [S4].
+-
+-### Naive Fine-tuning
+-Naive generator fine-tuning method identical to model rewriting except freely optimizing all weights of the generator [S5].
+-*   **Step:** Optimize over 10,000 steps with a learning rate of $10^{-3}$ [S5].
+-*   **Parameters:** Iterations: 10,000; Learning rate: $10^{-3}$ [S5].
+-
+-### Image-space Gaussian Fine-tuning
+-A fine-tuning process to account for different visual modes in the volume by generating multiple radiance fields using different transfer functions and optimizing the Gaussian set against rendered images [S6, unofficial].
+-*   **Step:** Select a series of transfer functions $\{TF_h\}$, where each $TF_h$ is non-zero only within specific value intervals of the physical field $F$ [S6, unofficial].
+-*   **Step:** Generate radiance fields $RF_h = TF_h(F)$ for each mode $h$ [S6, unofficial].
+-*   **Step:** Render 64 images through volumetric integration for each radiance field to provide supervision data [S6, unofficial].
+-*   **Step:** Compute image-space loss (as in [26]) and backpropagate to update the Gaussian set $G_h$ [S6, unofficial].
+-*   **Step:** After fine-tuning, Gaussians $G_h$ for each mode can be concatenated or separately rendered for global and local visibility [S6, unofficial].
+-*   **Parameter:** Number of transfer functions: 5 transfer functions are selected for each volume in practice [S6, unofficial].
++Identifies error-contributing zones via cross-view feature mapping and performs localized point addition/pruning.
++
++### ParetoGS
++Decodes any Gaussian count from a single asset using sparse, adapted budget anchors and residual atlases [S1].
++
++#### Gaussian Densification via Rendering Loss
++A strategy to add new 3D Gaussians by identifying unobserved regions (holes) and high-error regions using opacity, color, and depth thresholds [S3]. It densifies regions where $O(x,y) < \tau_{opa}$, $E_{color}(x,y) > \tau_{color}$, or $E_{depth}(x,y)/D(x,y) > \tau_{depth}$ [S3].
++
++#### Point Densification
++A process in original 3DGS that adaptively controls the number of Gaussian points through clone and split operations to convert a sparse set into a denser one [S4]. In HO-Gaussian, this is performed at regular intervals to populate problematic regions [S4].
++
++#### Naive Fine-tuning
++A method identical to model rewriting except freely optimizing all weights of the generator [S5]. It is optimized over 10,000 steps with a learning rate of $10^{-3}$ [S5].
++
++#### Image-space Gaussian Fine-tuning
++A process to account for different visual modes by generating multiple radiance fields using different transfer functions and optimizing the Gaussian set against rendered images [S6, unofficial]. It selects 5 transfer functions per volume and renders 64 images per field for supervision [S6, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Fine-tuning typically requires fewer iterations than initial training if a good initialization is provided (e.g., feed-forward networks), but densification steps add overhead [S2, S3]. Naive fine-tuning may require up to 10,000 steps [S5].
+-*   **Memory Complexity:** Dynamic densification increases memory usage as the number of Gaussians grows [S2]. Pruning helps mitigate this [S2].
+-*   **Strengths:** High fidelity, ability to correct initialization errors, handles sparse views or blurry inputs with specific variants [S2, S3, S1].
+-*   **Limitations:** Risk of overfitting (forgetting) in continuous mapping without regularization [S3]. Computationally expensive if densification is frequent [S3].
+-*   **When to use:** When high-quality novel view synthesis is required, or when initial SfM points are sparse/insufficient [S2, S3].
+-*   **When not to use:** When real-time training from scratch is required without pre-training, or when computational resources are extremely limited [S5].
++*   **Time Complexity:** Depends on the number of Gaussians $N$ and views $V$. Rendering is $O(N)$ per pixel. Optimization is dominated by backpropagation through the rasterizer. Fine-tuning iterations (e.g., 10,000) can take hours to days depending on scene size and hardware [S1, S2].
++*   **Memory Complexity:** $O(N)$ for storing Gaussian attributes. Pruning reduces this [S2].
++*   **Performance:** Fine-tuning with pretrained priors accelerates convergence compared to test-time optimization [S2]. Rendering-Guided Densification improves map quality in SLAM [S3].
++*   **Strengths:** High fidelity, real-time rendering, explicit representation [S2, S3].
++*   **Limitations:** Requires careful tuning of densification thresholds; prone to forgetting in continuous mapping [S3]; sparse initialization can lead to holes [S4].
+ 
+ ## Background
+-Fine-tuning in deep learning generally refers to adapting a pre-trained model to a specific task by updating some or all of its weights [S1]. In the context of 3D Gaussian Splatting, it has been adapted to refine Gaussian primitives initialized from various sources (SfM, feed-forward networks, or other radiance fields) to better fit target scenes or handle specific challenges like blurriness or sparsity [S2, S3, S1]. The concept of "naive fine-tuning" as a baseline for generative models was established in earlier works on conditional radiance fields [S5].
++Fine-tuning in 3DGS builds on the original 3D Gaussian Splatting method by Kerbl et al. [9] (cited in [S3]), which introduced adaptive density control. The concept of fine-tuning pretrained models is common in CNNs (e.g., VGGNet, AlexNet) [S1]. In the context of 3DGS, it has been adapted to refine feed-forward predictions [S2], handle sparse views [S1], and improve SLAM [S3].
+ 
+ ## Sources

@@ -1,0 +1,139 @@
+# STEVE (Space-Time-Enclosing Volume Extraction)
+
+Also called: 4D Simplicial Isosurfacing, 4D protomesh-based iso-hypersurface construction, Weigle and Banks
+
+## Overview
+STEVE is a 4D protomesh-based iso-hypersurface construction algorithm that generates iso-hypersurfaces from 4D volumetric data by transforming boundary cube octants into tetrahedrons [S1, unofficial]. It sets itself apart from its siblings by using a single 4D building block to continuously transform identified boundary octants into final tetrahedrons, explicitly handling topological ambiguities to prevent accidental rifts in the resulting hypersurfaces [S1, unofficial]. Unlike template-based methods like MCA, STEVE relies on directed vector paths rather than a massive lookup table of configurations [S1, unofficial].
+
+## How it works
+**Inputs and outputs:**
+*   **Input:** A 4D volumetric dataset (toxels) defined on a grid, where each toxel has an associated scalar value [S1, unofficial].
+*   **Output:** A tetrahedral mesh representing the iso-hypersurface envelope at a specified isovalue [S2].
+
+**Data structures:**
+The algorithm requires the storage of 192 directed vector paths for 4D space [S1, unofficial]. This number represents half of the total paths due to $\oplus/\ominus$-symmetry [S1, unofficial]. The algorithm uses normalized normal vectors attached to the centers of oriented $(N-1)$-simplices (where $N=4$) [S1, unofficial]. Each component of these normal vectors is larger than zero, pointing to the exterior of the enclosed $N$-dimensional regions [S1, unofficial].
+
+**Steps:**
+1.  Decompose each hypercubic cell into 192 pentatopes (4-simplexes) [S2].
+2.  Identify boundary cubes where the scalar field crosses the specified isovalue [S1, unofficial].
+3.  Extract the relevant octants of these boundary cubes [S1, unofficial].
+4.  Apply a constraint-based scheme to extract $(d-1)$-dimensional simplices from the $d$-simplices (pentatopes) [S2].
+5.  Use a single 4D building block to continuously transform the set of initially identified octants into the final set of tetrahedrons [S1, unofficial].
+6.  Handle topological ambiguities inherent in discretized 4D spaces to prevent accidental rifts in the final hypersurfaces [S1, unofficial].
+7.  Propagate information about the interior/exterior of the enclosed 4D regions to the final tetrahedron results [S1, unofficial].
+8.  Specify a time value to extract a specific isosurface from the tetrahedral mesh envelope [S2].
+
+**Formulas:**
+*   The number of directed paths grows with dimension $N$ as $\prod_{k=2}^N 2k$ [S1, unofficial].
+*   The number of templates for MCA grows as $2^{2^N}$ [S1, unofficial].
+
+**Parameters:**
+*   **Isovalue:** The scalar threshold for extraction [S1, unofficial].
+*   **Time value:** Used to extract a specific isosurface from the tetrahedral mesh envelope [S2].
+*   **Resolution mode:** "High" or "lower" resolution decomposition of the generated polytopes [S1, unofficial].
+
+**Edge cases and pitfalls:**
+*   **Topological Ambiguities:** Discretized 4D spaces allow for two different global treatments of ambiguities; improper treatment leads to accidental rifts [S1, unofficial].
+*   **Weak Connectivity:** Toxels connected only by a single vertex or edge produce disjunct hypersurface segments. The algorithm must recognize that these form separate sets of cyclic vector paths, specifically two disjunct sets with four cyclic paths each [S1, unofficial].
+*   **Computational Overhead:** The initial decomposition of each hypercube into 192 pentatopes leads to significant overhead [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def steve_extract(volumetric_data, isovalue, time_value, resolution_mode):
+    """
+    Extracts 4D iso-hypersurfaces using the STEVE algorithm.
+    
+    Args:
+        volumetric_data: 4D array of scalar values.
+        isovalue: Scalar threshold for extraction.
+        time_value: Scalar value to extract a specific isosurface from the envelope.
+        resolution_mode: 'high' or 'lower' resolution decomposition.
+        
+    Returns:
+        list of tetrahedrons representing the hypersurface.
+    """
+    tetrahedrons = []
+    
+    # Step 1: Decompose hypercubic cells into 192 pentatopes (4-simplexes) [S2]
+    # Step 2: Identify boundary cubes where scalar field crosses isovalue [S1, unofficial]
+    boundary_cubes = []
+    for x in range(volumetric_data.shape[0] - 1):
+        for y in range(volumetric_data.shape[1] - 1):
+            for z in range(volumetric_data.shape[2] - 1):
+                for t in range(volumetric_data.shape[3] - 1):
+                    corners = [volumetric_data[x+dx][y+dy][z+dz][t+dt] - isovalue 
+                               for dx in (0,1) for dy in (0,1) for dz in (0,1) for dt in (0,1)]
+                    if any(c > 0 for c in corners) and any(c < 0 for c in corners):
+                        boundary_cubes.append((x, y, z, t))
+
+    for cube in boundary_cubes:
+        # Step 3: Extract relevant octants of boundary cubes [S1, unofficial]
+        octants = extract_octants(cube, volumetric_data, isovalue)
+        
+        # Step 4 & 5: Apply constraint-based scheme to extract (d-1)-simplices from d-simplices,
+        # then continuously transform octants to tetrahedrons using single 4D building block [S2][S1, unofficial]
+        cell_tets = transform_octants_to_tetrahedrons(octants)
+        
+        # Step 6: Handle topological ambiguities to prevent accidental rifts [S1, unofficial]
+        cell_tets = resolve_ambiguities(cell_tets)
+        
+        # Step 7: Propagate interior/exterior information to final results [S1, unofficial]
+        cell_tets = propagate_interior_exterior(cell_tets)
+        
+        tetrahedrons.extend(cell_tets)
+
+    # Step 8: Specify time value to extract specific isosurface from envelope [S2]
+    if time_value is not None:
+        tetrahedrons = [t for t in tetrahedrons if t.time == time_value]
+
+    # Apply resolution mode decomposition [S1, unofficial]
+    if resolution_mode == 'high':
+        tetrahedrons = decompose_polytopes(tetrahedrons, 'high')
+    elif resolution_mode == 'lower':
+        tetrahedrons = decompose_polytopes(tetrahedrons, 'lower')
+
+    return tetrahedrons
+
+def extract_octants(cube, data, isovalue):
+    # Identify active octants based on corner signs relative to isovalue [G]
+    return []
+
+def transform_octants_to_tetrahedrons(octants):
+    # Continuous transformation using single 4D building block [S1, unofficial]
+    # Geometric mapping details not provided in sources [S1, unofficial]
+    return []
+
+def resolve_ambiguities(tetrahedrons):
+    # Treat topological ambiguities to prevent rifts [S1, unofficial]
+    # Weak connectivity (vertex/edge contact) yields two disjunct segments with four cyclic paths each [S1, unofficial]
+    return tetrahedrons
+
+def propagate_interior_exterior(tetrahedrons):
+    # Propagate interior/exterior region info to final results [S1, unofficial]
+    return tetrahedrons
+
+def decompose_polytopes(tetrahedrons, mode):
+    # Apply high or lower resolution decomposition [S1, unofficial]
+    return tetrahedrons
+```
+
+## Subtopics
+
+### Dimension-Lifting Interval Volume Extraction
+A technique to generate interval volume cases by treating the range of the scalar field as an extra dimension, projecting $(d+1)$-dimensional isosurface cases onto $d$-dimensional interval volume cases [S2]. When applied to simplicial meshes, it generates cases for $d$-simplices from prisms in $(d+1)$-space rather than $(d+1)$-simplices [S2].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** The number of directed paths grows with dimension $N$ as $\prod_{k=2}^N 2k$ [S1, unofficial]. For 4D, this is 192 paths (halved due to symmetry) [S1, unofficial]. In contrast, the number of templates for MCA grows as $2^{2^N}$ [S1, unofficial]. This makes STEVE more scalable to higher dimensions than template-based methods, which would require $2^{16}$ (65,536) configurations for 4D [S1, unofficial].
+*   **Measured Performance:** For a $50 \times 50 \times 50 \times 50$ toxel dataset with an iso-value of 1, STEVE in high resolution 'mixed' mode generated 129,563 tetrahedrons [S1, unofficial].
+*   **Strengths:** Minimal data redundancy by avoiding multiple counting of manifold supporting points within 4D cells [S1, unofficial]. Scalable to higher dimensions where template-based methods become impossible due to resource constraints (e.g., 11-dimensional M-Theory) [S1, unofficial].
+*   **Limitations:** Requires careful handling of topological ambiguities to prevent rifts [S1, unofficial]. Weakly connected toxels (vertex/edge contact) result in disjunct segments, which may require post-processing or specific interpretation [S1, unofficial]. Initial decomposition into 192 pentatopes causes significant computational overhead [S2].
+*   **When to use:** 4D shape characterization, continuous transmutation visualization, freezeout hypersurface extraction in relativistic heavy-ion physics, and intersection studies of hypersurfaces [S1, unofficial].
+
+## Background
+STEVE (Space-Time-Enclosing Volume Extraction) was introduced as a 4D protomesh-based iso-hypersurface construction algorithm [S1, unofficial]. It was developed to address the limitations of template-based methods in higher dimensions, where the number of required configurations grows exponentially [S1, unofficial]. The algorithm was applied to various fields including accelerator physics (ion beam transport phase space), relativistic heavy-ion physics (freezeout hypersurfaces), and continuous transmutation visualization [S1, unofficial]. Initial work was supported by the Department of Energy [S1, unofficial].
+
+## Sources
+[S1] STEVE - Space-Time-Enclosing Volume Extraction, https://arxiv.org/abs/1302.5683, fetched 2026-10-27 (unofficial)
+[S2] Modeling and Visualization Approaches for Time-Varying Volumetric Data, https://doi.org/10.1007/978-3-540-89646-3_100, fetched 2026-10-30

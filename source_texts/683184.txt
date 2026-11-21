@@ -1,0 +1,134 @@
+Description Overlay a set of paths on the stacked-field render, drawn as polylines through the volume and shaded by per-edge traffic density and by underlying field rate (the solid drawn translucent by rate). Makes herding, reachable-but...
+
+feat(mesh-viewer): trajectory and density overlay on a space-time field render · Issue #1870 · iamacoffeepot/aether · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+feat(mesh-viewer): trajectory and density overlay on a space-time field render #1870
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#1903
+Closed
+feat(mesh-viewer): trajectory and density overlay on a space-time field render#1870
+#1903
+Copy link
+Labels
+type:featNew featureNew feature
+Description
+iamacoffeepot
+opened on Jun 14, 2026
+Issue body actions
+Description
+Overlay a set of paths on the stacked-field render, drawn as polylines through the volume and shaded by per-edge traffic density and by underlying field rate (the solid drawn translucent by rate). Makes herding, reachable-but-untraveled regions, and through-boundary crossings read directly off the picture.
+Builds on the iso-surface mesh, the density aggregation, and a path source. Surfaces: crates/aether-mesh-viewer/. Mechanism only -- path/density overlay on a field render.
+Problem statement
+The mesh viewer can stack a scalar field into an iso-surface solid and replay it to aether.render through the view_proj camera (the .field arm, #1868), and there is a per-tick field V (#1857) plus a replayable path artifact (#1862), but nothing draws the concrete paths through that rendered volume. So the discrepancies the picture should make obvious — where traffic concentrates, which reachable regions no path travels, where paths cross a sub-budget boundary — are not visible: the solid renders, the paths exist as handle bytes, and no surface composes them. This issue adds that overlay: a viewer load arm that decodes a path set, draws each path as a polyline through the volume (cell (x, y, tick) placed at world (x, y, tick), time on the z axis exactly as #1868 stacks the solid), shades the polylines by traffic density and the solid by field rate, and replays the union every frame.
+It lands now because all three inputs are scoped: #1868 produces the solid and the .field load path the overlay extends, #1862 produces the path artifact, and #1857 produces the field rate. Done means: a viewer arm that decodes a TrajectorySet of paths plus the ScalarField, builds DrawTriangle ribbon polylines through the volume shaded by a viewer-computed per-grid-step traffic ramp, shades the iso-surface solid by a field-rate ramp, and re-emits both to aether.render every Render stage through the existing replay; with structural correctness asserted over DrawTriangle geometry (ribbon vertex counts and bounding boxes track the input paths; traffic-shared steps colour hotter; the solid recolours by rate) through the in-process TestBench, no GPU capture required.
+Design notes
+Chosen approach
+Viewer-side composition, additive, in aether-mesh-viewer alone — symmetric with #1868's .field arm. No new render mail, no render-cap change. The viewer gains a second load arm and a second triangle cache; on_render replays the solid cache and the overlay cache together through the existing send_many path (runtime.rs:130). Concretely:
+Polylines are DrawTriangle ribbon tubes, the existing world primitive — not a new render line type. The world render pass is PrimitiveTopology::TriangleList only (pipeline.rs:129), so there is no line topology to reach for, and the viewer already manufactures line-like geometry: outline_loop (runtime.rs:369) builds quad ribbons from polygon edges with a perpendicular offset. A path segment reuses exactly that — but a free 3D segment has no plane normal, and the viewer never receives view_proj (the camera is owned by the render cap / camera component), so a camera-facing ribbon is not available. The overlay builds each segment as a fixed-axis cross-section tube (two perpendicular ribbons in a + cross, perpendiculars derived from the segment direction crossed with a stable world axis), so the polyline reads from any camera angle and degenerates gracefully. Each path vertex maps (x, y, tick) → world (x, y, tick) (time → world-z), matching feat(mesh-viewer): space-time iso-surface mesh of a stacked scalar field (boundary extraction) #1868's stacking convention so paths sit inside the same volume as the solid.
+Field rate shades the solid; traffic density shades the polylines. feat(mesh-viewer): space-time iso-surface mesh of a stacked scalar field (boundary extraction) #1868's .field arm colours the iso-surface with a flat palette index; this issue extends it to sample V at each iso-vertex's cell and map it through a rate colour ramp (low → cool, high → warm, the u32::MAX sentinel a distinct tone), so "the solid drawn ... by rate" is realised as a per-vertex ramp. The decoded ScalarField is retained on the viewer so the overlay arm shares it. Path ribbons are coloured by a traffic ramp (cool → hot as more paths share a step), so traffic concentration reads off ribbon colour and a reachable region the solid shows but no ribbon covers reads as untraveled.
+Traffic density is viewer-computed per grid step, not feat(capabilities): per-edge trajectory-density aggregation over the corridor graph #1865's TrafficDensity directly. feat(capabilities): per-edge trajectory-density aggregation over the corridor graph #1865's TrafficDensity is a corridor-graph reduction — edge_traffic parallel to CorridorGraph.edges, keyed by per-tick component indices. Painting it onto a concrete world-space polyline requires snapping each path cell back to its corridor component, which is feat(capabilities): per-edge trajectory-density aggregation over the corridor graph #1865's native per-tick component labeler (lives in aether-capabilities, not compiled to wasm); the wasm viewer cannot run it. The viewer instead counts, over the decoded path set, how many paths share each grid step (cell_t → cell_{t+1}) and colours each path's segment by that count — the same traffic-concentration signal, computed directly in world space with no native snap. True corridor-edge colouring is a native pre-join (see Rejected options / Side findings), not a viewer capability.
+Decode is Kind::decode_from_bytes (the aether-data trait method the derives emit), reused for ScalarField and the TrajectorySet bundle exactly as feat(mesh-viewer): space-time iso-surface mesh of a stacked scalar field (boundary extraction) #1868 decodes the field; no new wire transport. The path-set file is a TrajectorySet { logs: Vec<TrajectoryLog> } (the bundle kind from feat(capabilities): per-edge trajectory-density aggregation over the corridor graph #1865), written by an agent via aether.fs.write or staged by a prior step and read through the existing aether.fs path the viewer already uses.
+The load-bearing limit, stated plainly: the world render pass has no translucency. It blends BlendState::REPLACE (pipeline.rs:124), Vertex carries r, g, b with no alpha (aether-kinds Vertex), and the fragment shader pins output alpha to 1.0 (shader.wgsl). So a filled translucent solid you see paths through is not reachable additively. v1 renders the solid filled and rate-shaded (opaque) with the path ribbons drawn in the same pass: surface-level traffic concentration, untraveled surface regions, and through-boundary crossings (paths threading the tunnels/gaps in the solid) all read off the picture, but a path embedded inside the filled solid is depth-occluded. Faithful through-volume translucency needs world-pass alpha — a render-cap change flagged below, recommended as the immediate follow-on rather than folded in (its blast radius is wide: Vertex derives Default, so a new a: f32 defaults to 0.0 = fully transparent and silently invisibilises every existing Vertex producer unless each is updated).
+Rejected options
+A new render line/polyline primitive (mail + GPU pipeline) — the world pass is TriangleList-only and the viewer already builds line ribbons for polygon outlines; ribbon tubes reuse that with zero render-cap change. A dedicated LineList pipeline buys nothing over ribbons and is a substrate render change.
+Drawing polylines through the alpha-blended overlay (quad) pass — that pass is alpha-blended and depth-free (quad.rs:243, quad.rs:260), but push_world_quad_vertices draws an axis-aligned billboard rect anchored at one world point with pixel offsets in clip space (quad.rs:415); it cannot draw a rotated quad between two arbitrary world points, so it can't render a polyline segment. Usable only for path dots (markers), which "polylines" rules out.
+Consuming feat(capabilities): per-edge trajectory-density aggregation over the corridor graph #1865's TrafficDensity in the viewer — infeasible without re-running feat(capabilities): per-edge trajectory-density aggregation over the corridor graph #1865's native per-tick component labeler (not wasm-built) to snap each path cell to its corridor component. The viewer-computed per-grid-step count is the same signal without the snap. If true corridor-edge colouring is wanted, the honest home is a native pre-join transform (TrajectorySet + CorridorGraph + ScalarField → coloured-path artifact, reusing feat(capabilities): per-edge trajectory-density aggregation over the corridor graph #1865's shared labeler) that the viewer then just draws — a follow-on, flagged below, not a viewer change.
+World-pass alpha translucency in v1 — the faithful "translucent solid" needs Vertex + alpha, a fragment alpha attribute, main-pass ALPHA_BLENDING, and opaque/translucent draw ordering. That is a render-cap + wire change touching every DrawTriangle producer (the Vertex Default-zero-alpha footgun above), not a viewer overlay. Kept out of v1, flagged as the recommended follow-on.
+A see-through wireframe iso-shell instead of a filled solid — would let paths read through the gaps with no alpha, but rendering the whole surface-net mesh as edge ribbons multiplies the triangle count ~6× over the already-cap-stressed filled solid (feat(mesh-viewer): space-time iso-surface mesh of a stacked scalar field (boundary extraction) #1868's vertex-buffer side finding), so it does not scale to the canonical field. Rejected for v1; mentioned as a small-volume option.
+New render mail / a render-cap overlay kind — composition belongs in the viewer (the actor that already owns the cache-and-replay path), symmetric with feat(mesh-viewer): space-time iso-surface mesh of a stacked scalar field (boundary extraction) #1868. A render-cap kind would duplicate that machinery.
+Affected surfaces
+crates/aether-mesh-viewer/src/runtime.rs — (a) extend load_bytes to dispatch a .paths arm; (b) extend the .field arm (from feat(mesh-viewer): space-time iso-surface mesh of a stacked scalar field (boundary extraction) #1868) to rate-shade the iso-surface by sampling V and to retain the decoded ScalarField; (c) a try_replace_paths that decodes a TrajectorySet, counts per-grid-step traffic, builds ribbon-tube DrawTriangles coloured by the traffic ramp (generalising outline_loop's perpendicular-ribbon technique to free 3D segments), and caches them in a second overlay: Vec<DrawTriangle>; (d) on_render replays triangles (solid) + overlay together; (e) ramp + ribbon-tube helpers.
+crates/aether-mesh-viewer/Cargo.toml — a decode dependency only if feat(mesh-viewer): space-time iso-surface mesh of a stacked scalar field (boundary extraction) #1868 has not already added one for ScalarField (the same Vec-bearing decode covers TrajectorySet); reuse feat(mesh-viewer): space-time iso-surface mesh of a stacked scalar field (boundary extraction) #1868's, none if Kind::decode_from_bytes suffices.
+Depends on feat(mesh-viewer): space-time iso-surface mesh of a stacked scalar field (boundary extraction) #1868 (the .field arm + the surface-net solid this extends), feat(capabilities): minimum-cost reachability solver over a discretized space-time scalar field #1857 (ScalarField), feat(capabilities): position-stream recorder actor emitting a per-tick sample log handle #1862 (TrajectoryLog), and feat(capabilities): per-edge trajectory-density aggregation over the corridor graph #1865 for the TrajectorySet bundle kind only — not feat(capabilities): per-edge trajectory-density aggregation over the corridor graph #1865's TrafficDensity / aggregate_traffic transform. None of these kinds are defined here.
+crates/aether-capabilities/src/render.rs, crates/aether-substrate/src/render/* — unchanged in v1; the existing aether.render DrawTriangle accumulate + view_proj camera renders the overlay as-is.
+No new ADR for v1 — additive viewer change under ADR-0041 (the aether.fs read path), ADR-0053 (the viewer replays triangles), ADR-0066 (shared ScalarField kind), with no trait, wire, dispatch, or lifecycle change. Soft flag: if the faithful through-volume translucency is pulled in (world-pass alpha), that is load-bearing-architectural (it changes the world render contract from opaque to alpha-capable and edits a wire kind) and would want a one-paragraph ADR — flagged, not opened.
+Implementation plan
+Model routing: model:opus — the geometry (free-3D-segment ribbon tubes without a camera, a stable cross-section), the two colour ramps, the viewer-side per-grid-step traffic aggregation, and the rate-shaded-solid / translucency-limit call are non-obvious judgment, not mechanical execution from a fixed spec.
+Ribbon-tube builder + ramps — in runtime.rs, add a fn segment_tube(a: Vec3, b: Vec3, half_width: f32, rgb) -> Vec<DrawTriangle> that emits a fixed-axis +-cross of two perpendicular ribbons (perpendiculars from dir.cross(world_axis) with a fallback axis when parallel), generalising outline_loop; and fn rate_ramp(v: u32) -> (f32,f32,f32) / fn traffic_ramp(count, max) -> (f32,f32,f32). — aether-mesh-viewer — unit tests: a single segment yields the expected ribbon triangle count and an Aabb::from_points spanning the two endpoints; a degenerate (zero-length) segment emits nothing; ramps are monotone and bound the sentinel distinctly.
+.paths arm + traffic count — add a .paths branch to load_bytes and a try_replace_paths(bytes) that Kind::decode_from_bytes-decodes a TrajectorySet, accumulates a per-(cell_t → cell_{t+1}) traffic count over all logs, builds each consecutive sample pair into a segment_tube coloured by the step's traffic ramp (cells mapped (x,y,tick) → world (x,y,tick)), and replaces self.overlay; reuse the LoadOutcome / MeshLoadResult reply path. — aether-mesh-viewer — unit tests: a TrajectorySet of two paths sharing a step → that step's ribbon colours hotter than an unshared step; a malformed buffer keeps the prior overlay and reports ok: false; an empty set clears to no overlay triangles.
+Rate-shade the solid + retain the field — extend the .field arm (feat(mesh-viewer): space-time iso-surface mesh of a stacked scalar field (boundary extraction) #1868) to sample V per iso-vertex and colour through rate_ramp instead of the flat palette, and stash the decoded ScalarField so the overlay can be re-shaded; on_render replays triangles + overlay. — aether-mesh-viewer — unit test: meshing a field with a low-rate and a high-rate region yields iso-vertices coloured on opposite ends of the ramp; after a .field then a .paths load, on_render emits both caches.
+Render-path smoke (structural, no GPU capture) — drive the viewer through the in-process aether-substrate-bundle TestBench (already a dev-dep): write a small ScalarField and a TrajectorySet, aether.mesh.load the .field then the .paths path, advance, and assert count_observed(DrawTriangle) > 0 and that the count rises after the paths load. Assert overlay structure/geometry (triangle counts, bounding boxes), not pixels — per the GPU-test split (crates/aether-capabilities/src/test_bench.rs has no GPU-capture host). — aether-mesh-viewer tests.
+One crate touched (aether-mesh-viewer) and one tightly-coupled feature (the path overlay and its single integration point on the existing replay), so this is a single PR — no sub-issues. It lands after #1868 (it extends that crate's .field arm) and after #1857/#1862/#1865's kinds exist.
+Sub-issues
+None — single PR, single crate. Hard ordering: land after #1868 (extends its .field arm and reuses its surface-net solid), #1857 (ScalarField), #1862 (TrajectoryLog), and #1865's TrajectorySet bundle kind. This issue deliberately does not consume #1865's TrafficDensity / aggregate_traffic (see Design notes); coordinate with the parent if literal corridor-edge colouring is required, in which case the native pre-join (Side findings) is the correct home, not the viewer.
+Side findings
+The world render pass has no translucency — BlendState::REPLACE (pipeline.rs:124), Vertex is r,g,b only (aether-kinds), fragment alpha pinned 1.0 (shader.wgsl). Faithful through-volume visibility (a filled solid you see paths inside of) needs world-pass alpha: a Vertex alpha attribute, a fragment alpha, main-pass ALPHA_BLENDING, and opaque/translucent draw ordering. Wide blast radius — Vertex derives Default, so a new a: f32 defaults to 0.0 (invisible) and every existing producer must set it. ADR-flaggable render-cap follow-on; recommended over folding into this PR. — crate:capabilities / crate:kinds
+feat(capabilities): per-edge trajectory-density aggregation over the corridor graph #1865's TrafficDensity is not viewer-paintable — it is a corridor-graph reduction keyed by per-tick component indices; mapping it onto a world-space polyline needs feat(capabilities): per-edge trajectory-density aggregation over the corridor graph #1865's native per-tick component labeler, which is not compiled to wasm. The clean way to get true corridor-edge colouring is a native pre-join transform (TrajectorySet + CorridorGraph + ScalarField → per-segment coloured-path artifact, reusing feat(capabilities): per-edge trajectory-density aggregation over the corridor graph #1865's shared labeler) that the viewer just draws — a follow-on, not a viewer change. — crate:capabilities / crate:mesh-viewer
+Ribbon tubes multiply the triangle budget — each path segment is ~4–8 triangles; a dense path set over ~1800 ticks can push the combined solid+overlay buffer past RenderConfig.vertex_buffer_bytes (crates/aether-capabilities/src/render.rs), compounding feat(mesh-viewer): space-time iso-surface mesh of a stacked scalar field (boundary extraction) #1868's filled-solid budget note. A segment stride / per-path decimation / max-paths clamp on the overlay would harden it; worth a clamp if the canonical field+path set stresses it. — crate:capabilities / crate:mesh-viewer
+Ribbons are fixed-axis, not camera-facing — the viewer never receives view_proj, so path tubes use a stable world cross-section rather than billboarding toward the camera (degrades to thin edge-on at one angle, mitigated by the +-cross). Camera-facing path tubes would need view_proj pushed to the viewer (a render→component feedback the engine has no path for today). — crate:mesh-viewer
+Activity
+iamacoffeepot
+added
+type:featNew featureNew feature
+crate:mesh-viewer
+on Jun 14, 2026
+iamacoffeepot
+added this to aether 0.4on Jun 14, 2026
+github-project-automation
+moved this to Todo in aether 0.4on Jun 14, 2026
+iamacoffeepot
+added
+phase:plan
+size:m
+model:opus
+phase:ready
+phase:executing
+and removed
+phase:plan
+phase:ready
+on Jun 14, 2026
+github-project-automation
+moved this from Todo to In Progress in aether 0.4on Jun 15, 2026
+iamacoffeepot
+closed this as completedin #1903on Jun 15, 2026
+iamacoffeepot
+removed
+phase:executing
+on Jun 15, 2026
+github-project-automation
+moved this from In Progress to Done in aether 0.4on Jun 15, 2026
+iamacoffeepot
+removed
+crate:mesh-viewer
+on Aug 11, 2026
+github-actions
+added
+crate:mesh-viewer
+on Aug 11, 2026
+iamacoffeepot
+removed
+crate:mesh-viewer
+on Aug 11, 2026
+github-actions
+added
+crate:mesh-viewer
+on Aug 11, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+type:featNew featureNew feature
+Projects
+aether 0.4
+Status
+Done
+Show more project fields
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

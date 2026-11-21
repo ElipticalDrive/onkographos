@@ -1,0 +1,37 @@
+# Scanline and Geometric Primitives
+
+
+## Overview
+This family defines methods for converting continuous geometric primitives (points, lines, planes, triangles) into discrete volumetric representations (voxel grids) suitable for volume rendering. It solves the problem of accurately representing sharp geometric boundaries within a scalar field without the aliasing artifacts inherent in binary voxelization. It sets itself apart from sibling methods like [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by focusing on analytic slab definitions, optimal scanline criteria, and priority-based clipping rather than GPU rasterization pipelines or geometry shaders.
+
+## Shared principles
+All methods in this family map a conceptual or physical source into a discrete or analytic volumetric representation suitable for rendering [G]. The core mechanism involves:
+1. **Domain Definition**: Establishing a spatial domain, typically a 3D grid with resolution $(N_x, N_y, N_z)$ and bounding box, or an infinite analytic space [G].
+2. **Value Assignment**: Determining the value (density, distance, color) for each point in the domain based on the source method (geometric intersection, function evaluation, or physical state) [G].
+3. **Storage/Access**: Either storing the result in a discrete array (voxelization, simulation) or providing an interface to compute it on-the-fly (procedural) [G].
+
+## Subtopics
+
+### [3D Scan-conversion](1895-3d-scan-conversion.md)
+Converts polygons into a volumetric dataset, combines them with existing data using volume matting, and renders the composite. Sets itself apart by pre-filtering geometry into the voxel grid to allow standard ray-casting while avoiding aliasing through analytic anti-aliasing. Choose when mixing explicit geometry with volumetric data.
+
+### [Voxelization of Lines and Planes](2472-voxelization-of-lines-and-planes.md)
+Generates topologically correct representations of lines and planes by defining a slab of voxels. Solves N-separability and N-minimality simultaneously. Sets itself apart by deriving thickness $t$ from surface normal and grid resolution. Choose when topological correctness (no holes) is critical for lines/planes.
+
+### [Distance-based Voxelization](3500-distance-based-voxelization.md)
+Maps objects into voxels where distance to surface $S$ is $< t$. Bypasses polygon conversion. Sets itself apart by using spatial proximity rather than scanline logic. Choose for regular shapes or surfaces where distance metrics are computable.
+
+### [Floating-Point Optimal Scanline](10225-floating-point-optimal-scanline.md)
+Triangle-based voxelization slicing along a dominant axis and performing 2D line voxelizations. Sets itself apart by using an "optimal" distance criterion for tighter fit than standard grid-aligned lines. Choose for high-quality triangle voxelization.
+
+### [Scan-line Clipping Algorithm](10945-scan-line-clipping-algorithm.md)
+3D generalization of scan-line algorithm for low-level processor implementation. Determines visible portions of primitives for the Compositing Frame Buffer (CFB). Sets itself apart by explicit priority-based occlusion culling during voxelization. Choose when writing to a priority-based CFB.
+
+#### 3D Scan-Conversion for Geometric/Volumetric Mixing
+Bandlimit the object to the Nyquist frequency in all three dimensions [S1, unofficial]. Sample the object in a manner that limits losses due to quantization [S1, unofficial]. Use volume rendering's partial opacity capability to handle the resulting voxel representation and avoid aliasing artifacts common in binary voxel representations [S1, unofficial].
+
+## Background
+The method originates from the need to hybridize ray tracing and volume rendering. Early hybrid ray tracers used binary voxel representations for polyhedra and parametric surfaces, resulting in aliasing [S1, unofficial]. To avoid these artifacts, Kaufman et al. proposed bandlimiting objects to the Nyquist frequency and using volume rendering's partial opacity to handle the resulting voxel representation [S1, unofficial]. This approach allows polygons to be shaded, filtered, sampled, and combined with volumetric data, which is then rendered using standard techniques without supersampling [S1, unofficial]. The work is documented in the DTIC report ADA208091 [S1, unofficial].
+
+## Sources
+[S1] DTIC ADA208091: Interactive Visualization of 3D Medical Data, https://archive.org/details/DTIC_ADA208091, fetched 2026-10-26 (unofficial)

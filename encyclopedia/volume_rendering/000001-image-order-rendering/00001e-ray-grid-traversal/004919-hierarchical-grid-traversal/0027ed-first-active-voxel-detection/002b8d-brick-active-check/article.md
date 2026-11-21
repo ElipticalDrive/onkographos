@@ -1,0 +1,89 @@
+# Brick Active Check
+
+
+## Overview
+Brick Active Check determines if a specific brick in a hierarchical volume grid contains active data by querying the world tile occupancy mask [S1, unofficial]. It serves as a filtering step in ray-grid traversal to skip stale or unloaded bricks during ray casting [S1, unofficial]. Unlike sibling methods that may traverse deeper into the hierarchy or compute intersection bounds, this check relies on a precomputed bit-mask structure to provide a fast, binary validity test [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `bi`: Linear brick index (integer).
+- `WORLD_BRICKS_X`: Number of bricks along the X-axis of the world tile grid (constant).
+
+**Outputs:**
+- Boolean indicating if the brick has active children in the current tile.
+
+**Data Structures:**
+- **Tile Occupancy Mask**: A bit-field structure where each bit represents the presence of a child brick within a tile. The specific layout is defined by the helper functions `world_tile_idx` and `tile_has_child` [S1, unofficial].
+
+**Steps:**
+1.  **Calculate Brick Coordinates**: Decompose the linear brick index `bi` into 3D coordinates `(bx, by, bz)` within the world tile grid [S1, unofficial]:
+    $$
+    bx = bi \pmod{\text{WORLD\_BRICKS\_X}}
+    $$
+    $$
+    by = \left\lfloor \frac{bi}{\text{WORLD\_BRICKS\_X}} \right\rfloor \pmod{\text{WORLD\_BRICKS\_Y}}
+    $$
+    $$
+    bz = \left\lfloor \frac{bi}{\text{WORLD\_BRICKS\_X} \times \text{WORLD\_BRICKS\_Y}} \right\rfloor
+    $$
+    *Note: `WORLD_BRICKS_Y` and `WORLD_BRICKS_Z` are implied constants for the grid dimensions [S1, unofficial].*
+
+2.  **Calculate Tile Index**: Determine the parent tile index `ti` containing the brick. Bricks are grouped into tiles of size $4 \times 4 \times 4$ (based on the shift `>> 2`) [S1, unofficial]:
+    $$
+    ti = \text{world\_tile\_idx}\left(\left\lfloor \frac{bx}{4} \right\rfloor, \left\lfloor \frac{by}{4} \right\rfloor, \left\lfloor \frac{bz}{4} \right\rfloor\right)
+    $$
+
+3.  **Calculate Linear Offset**: Compute the linear offset `lin` within the tile's occupancy mask. The offset is derived from the brick's position modulo 4 (the position within the $4 \times 4 \times 4$ tile) [S1, unofficial]:
+    $$
+    lin = (bx \ \& \ 3) + (bz \ \& \ 3) \times 4 + (by \ \& \ 3) \times 16
+    $$
+    Here, `&` denotes bitwise AND. The layout assumes a specific memory ordering where X varies fastest, then Z, then Y [S1, unofficial].
+
+4.  **Check Active Status**: Return the result of checking if the bit at `lin` is set in the tile `ti` [S1, unofficial]:
+    $$
+    \text{return } \text{tile\_has\_child}(ti, lin)
+    $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def brick_active_check(bi, WORLD_BRICKS_X, WORLD_BRICKS_Y, WORLD_BRICKS_Z):
+    # Step 1: Calculate brick coordinates
+    bx = bi % WORLD_BRICKS_X
+    by = (bi // WORLD_BRICKS_X) % WORLD_BRICKS_Y
+    bz = (bi // (WORLD_BRICKS_X * WORLD_BRICKS_Y)) % WORLD_BRICKS_Z
+
+    # Step 2: Calculate tile index
+    # Assuming world_tile_idx maps 3D tile coords to a linear tile ID
+    tile_x = bx >> 2
+    tile_y = by >> 2
+    tile_z = bz >> 2
+    ti = world_tile_idx(tile_x, tile_y, tile_z)
+
+    # Step 3: Calculate linear offset within the tile
+    # Offset layout: X is LSB, Z is middle, Y is MSB (scaled by 16)
+    lin = (bx & 3) + (bz & 3) * 4 + (by & 3) * 16
+
+    # Step 4: Return active status
+    return tile_has_child(ti, lin)
+```
+
+## Subtopics
+
+### Transparent Brick Culling
+Discards transparent bricks using bit-wise AND operations between encoded transfer functions and encoded brick histograms [S2]. This method allows for early culling of bricks that do not contribute to the final image based on opacity thresholds, optimizing rendering performance for large volumes [S2].
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ per brick check, involving basic arithmetic and bitwise operations [S1, unofficial].
+- **Memory Complexity**: Depends on the size of the world tile occupancy mask, which scales with the number of tiles in the world [S1, unofficial].
+- **Strengths**: Extremely fast filtering of invalid or unloaded bricks, reducing ray traversal overhead [S1, unofficial].
+- **Limitations**: Requires a precomputed occupancy mask; does not handle partial brick activity or internal brick structure [S1, unofficial].
+- **When to use**: In hierarchical grid traversal where bricks are dynamically loaded/unloaded or where stale data must be ignored [S1, unofficial].
+
+## Background
+The method originates from the voxelG implementation, an unofficial repository for voxel rendering techniques [S1, unofficial]. It is designed for real-time ray tracing of large volumes, specifically within the context of hierarchical grid traversal [S1, unofficial]. The transparent brick culling variant is described in the context of distributed shared memory systems for roaming large volumes, utilizing histogram-based encoding for transfer function evaluation [S2].
+
+## Sources
+[S1] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)
+[S2] Distributed Shared Memory for Roaming Large Volumes, https://doi.org/10.1109/tvcg.2006.135, fetched 2026-10-26

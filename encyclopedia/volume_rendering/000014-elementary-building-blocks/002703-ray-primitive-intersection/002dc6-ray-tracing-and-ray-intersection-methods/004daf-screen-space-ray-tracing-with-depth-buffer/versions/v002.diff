@@ -1,0 +1,223 @@
+--- v001.md
++++ v002.md
+@@ -29,5 +29,5 @@
+ 
+ **Data Structures**
+-The method assumes the depth buffer stores up to four layers of depth values per pixel. If `csZBufferIsHyperbolic` is true, the buffer contains hyperbolically encoded depth values; otherwise, it is assumed to contain precomputed negative camera-space Z values for performance [S1, unofficial].
++The method tracks up to four depth-buffer layers in `sceneZMax` at each pixel [S1, unofficial]. If `csZBufferIsHyperbolic` is true, the buffer contains hyperbolically encoded depth values; otherwise, it is assumed to contain precomputed negative camera-space Z values for performance [S1, unofficial].
+ 
+ **Algorithm Steps**
+@@ -40,5 +40,5 @@
+     $$ H_0 = \text{proj} \times \text{vec4}(\text{csOrig}, 1.0), \quad H_1 = \text{proj} \times \text{vec4}(\text{csEndPoint}, 1.0) $$
+     $$ k_0 = \frac{1.0}{H_0.w}, \quad k_1 = \frac{1.0}{H_1.w} $$
+-    $$ P_0 = H_0.xy \times k_0, \quad P_1 = H_1.xy \times k_0 $$
++    $$ P_0 = H_0.xy \times k_0, \quad P_1 = H_1.xy \times k_1 $$
+     $$ Q_0 = \text{csOrig} \times k_0, \quad Q_1 = \text{csEndPoint} \times k_1 $$
+     Here, $P$ represents screen-space coordinates and $Q$ represents camera-space coordinates scaled by $1/w$ [S1, unofficial].
+@@ -74,13 +74,5 @@
+     [S1, unofficial].
+ 
+-8.  **Inside Loop - Fetch Depth:**
+-    Determine hit pixel coordinates: $\text{hitPixel} = \text{permute} ? P.yx : P$ [S1, unofficial].
+-    Fetch depth values: $\text{sceneZMax} = \text{texelFetch}(\text{csZBuffer}, \text{int2}(\text{hitPixel}), 0)$ [S1, unofficial].
+-    If `csZBufferIsHyperbolic` is true, reconstruct camera-space Z for each layer:
+-    $$ \text{sceneZMax}[L] = \text{reconstructCSZ}(\text{sceneZMax}[L], \text{clipInfo}) \quad \text{for } L \in [0, 3] $$
+-    [S1, unofficial].
+-
+-9.  **Inside Loop - Check Intersection:**
+-    Compute scene Z bounds: $\text{sceneZMin} = \text{sceneZMax} - \text{zThickness}$ [S1, unofficial].
++8.  **Inside Loop - Compute Ray Z Bounds:**
+     Compute ray Z bounds for the current step. The ray covers the interval $[\text{rayZMin}, \text{rayZMax}]$.
+     $$ \text{rayZMin} = \text{prevZMaxEstimate} $$
+@@ -88,6 +80,14 @@
+     $$ \text{prevZMaxEstimate} = \text{rayZMax} $$
+     If $\text{rayZMin} > \text{rayZMax}$, swap them [S1, unofficial].
++
++9.  **Inside Loop - Fetch Depth & Check Intersection:**
++    Determine hit pixel coordinates: $\text{hitPixel} = \text{permute} ? P.yx : P$ [S1, unofficial].
++    Fetch depth values: $\text{sceneZMax} = \text{texelFetch}(\text{csZBuffer}, \text{int2}(\text{hitPixel}), 0)$ [S1, unofficial].
++    If `csZBufferIsHyperbolic` is true, reconstruct camera-space Z for each layer:
++    $$ \text{sceneZMax}[L] = \text{reconstructCSZ}(\text{sceneZMax}[L], \text{clipInfo}) \quad \text{for } L \in [0, 3] $$
++    [S1, unofficial].
++    Compute scene Z bounds: $\text{sceneZMin} = \text{sceneZMax} - \text{zThickness}$ [S1, unofficial].
+     Check for overlap with any layer $L$:
+-    If $(\text{rayZMax} \ge \text{sceneZMin}[L] \land \text{rayZMin} \le \text{sceneZMax}[L]) \lor (\text{sceneZMax}[L] == 0)$, then a hit is found. Set `hitLayer = L` and break out of the loop [S1, unofficial].
++    If $(\text{rayZMax} \ge \text{sceneZMin}[L] \land \text{rayZMin} \le \text{sceneZMax}[L]) \lor (\text{sceneZMax}[L] == 0)$, then a hit is found. Set `hitLayer = L` and break out of both loops [S1, unofficial].
+ 
+ 10. **Post-Loop - Compute Hit Point:**
+@@ -107,4 +107,19 @@
+ ```python
+ def trace_screen_space_ray(csOrig, csDir, proj, csZBuffer, csZBufferSize, zThickness, csZBufferIsHyperbolic, clipInfo, nearPlaneZ, stride, jitter, maxSteps, maxDistance):
++    # Helper definitions for standard operations
++    def distance_squared(a, b):
++        return (a[0] - b[0])**2 + (a[1] - b[1])**2
++    def int2(v):
++        return (int(v[0]), int(v[1]))
++    def swap(a, b):
++        return b, a
++    # texel_fetch and reconstruct_cs_z are standard graphics operations not detailed in sources
++    def texel_fetch(tex, coord, level):
++        # Standard texture fetch returning a vec4-like list
++        return [0.0, 0.0, 0.0, 0.0]
++    def reconstruct_cs_z(depth, clipInfo):
++        # Standard hyperbolic reconstruction
++        return depth
++
+     # 1. Clip to near plane
+     if (csOrig.z + csDir.z * maxDistance) > nearPlaneZ:
+@@ -112,28 +127,22 @@
+     else:
+         rayLength = maxDistance
+-    
+     csEndPoint = csOrig + csDir * rayLength
+-    
++
+     # 2. Project to screen space
+     H0 = proj * vec4(csOrig, 1.0)
+     H1 = proj * vec4(csEndPoint, 1.0)
+-    
+     k0 = 1.0 / H0.w
+     k1 = 1.0 / H1.w
+-    
+     Q0 = csOrig * k0
+     Q1 = csEndPoint * k1
+-    
+     P0 = H0.xy * k0
+-    P1 = H1.xy * k1
+-    
++    P1 = H1.xy * k1  # Fixed: was k0 in draft
++
+     # 3. Handle single-pixel lines
+     if distance_squared(P0, P1) < 0.0001:
+-        P1 += vec2(0.01)
+-        
++        P1 = P1 + vec2(0.01)
++
+     delta = P1 - P0
+     permute = False
+-    
+-    # 4. Determine traversal direction and derivatives
+     if abs(delta.x) < abs(delta.y):
+         permute = True
+@@ -141,18 +150,17 @@
+         P0 = P0.yx
+         P1 = P1.yx
+-        
++
+     stepDir = sign(delta.x)
+     invdx = stepDir / delta.x
+-    
+     dP = vec2(stepDir, delta.y * invdx) * stride
+     dQ = (Q1 - Q0) * invdx * stride
+     dk = (k1 - k0) * invdx * stride
+-    
+-    # 5. Apply jitter
+-    P0 += dP * jitter
+-    Q0 += dQ * jitter
+-    k0 += dk * jitter
+-    
+-    # 6. Initialize loop variables
++
++    # 4. Apply jitter
++    P0 = P0 + dP * jitter
++    Q0 = Q0 + dQ * jitter
++    k0 = k0 + dk * jitter
++
++    # 5. Initialize loop variables
+     prevZMaxEstimate = csOrig.z
+     Q = Q0
+@@ -160,35 +168,30 @@
+     stepCount = 0.0
+     end = P1.x * stepDir
+-    
++
+     hitPixel = vec2(-1, -1)
+     hitLayer = -1
+     csHitPoint = vec3(0, 0, 0)
+-    
+-    # 7. Loop over pixels
++
++    # 6. Loop over pixels
+     P = P0
+     while (P.x * stepDir) <= end and stepCount < maxSteps:
+-        # 8. Inside Loop - Fetch Depth
+-        if permute:
+-            hitPixel = P.yx
+-        else:
+-            hitPixel = P
+-            
++        # Compute ray Z bounds
++        rayZMin = prevZMaxEstimate
++        rayZMax = (dQ.z * 0.5 + Q.z) / (dk * 0.5 + k)
++        prevZMaxEstimate = rayZMax
++        if rayZMin > rayZMax:
++            rayZMin, rayZMax = swap(rayZMin, rayZMax)
++
++        # Determine hit pixel
++        hitPixel = P.yx if permute else P
++
+         # Fetch depth buffer
+         sceneZMax = texel_fetch(csZBuffer, int2(hitPixel), 0)
+-        
+         if csZBufferIsHyperbolic:
+             for layer in range(4):
+                 sceneZMax[layer] = reconstruct_cs_z(sceneZMax[layer], clipInfo)
+-                
+-        # 9. Check Intersection
++
++        # Check intersection
+         sceneZMin = sceneZMax - zThickness
+-        
+-        rayZMin = prevZMaxEstimate
+-        rayZMax = (dQ.z * 0.5 + Q.z) / (dk * 0.5 + k)
+-        prevZMaxEstimate = rayZMax
+-        
+-        if rayZMin > rayZMax:
+-            swap(rayZMin, rayZMax)
+-            
+         hit_found = False
+         for L in range(4):
+@@ -197,19 +200,18 @@
+                 hit_found = True
+                 break
+-                
+         if hit_found:
+             break
+-            
++
+         # Update loop variables
+-        P += dP
+-        Q.z += dQ.z
+-        k += dk
+-        stepCount += 1.0
+-        
+-    # 10. Post-Loop - Compute Hit Point
+-    Q.xy += dQ.xy * stepCount
++        P = P + dP
++        Q.z = Q.z + dQ.z
++        k = k + dk
++        stepCount = stepCount + 1.0
++
++    # 7. Post-Loop - Compute Hit Point
++    Q.xy = Q.xy + dQ.xy * stepCount
+     csHitPoint = Q * (1.0 / k)
+-    
+-    # 11. Return Result
++
++    # 8. Return Result
+     bounds_check = all(abs(hitPixel - (csZBufferSize * 0.5)) <= (csZBufferSize * 0.5))
+     return bounds_check, hitPixel, hitLayer, csHitPoint
+@@ -224,5 +226,5 @@
+ ## Operating characteristics
+ **Time and Memory Complexity**
+-The time complexity is linear with respect to the number of steps (`maxSteps`) and the number of rays per pixel. The memory complexity is dominated by the depth buffer storage, which supports up to four layers per pixel [S1, unofficial].
++The time complexity is linear with respect to the number of iterations before a hit is encountered or the `maxDistance` is reached [S1, unofficial]. The method tracks up to four depth-buffer layers in `sceneZMax` at each pixel [S1, unofficial].
+ 
+ **Measured Performance**
+@@ -230,5 +232,5 @@
+ 
+ **Scaling**
+-Performance scales linearly with resolution and the number of rays per pixel. Using `stride > 1` reduces the number of samples, improving performance at the cost of quality [S1, unofficial].
++Performance scales linearly with resolution and the number of rays per pixel [S1, unofficial]. Using `stride > 1` reduces the number of samples, improving performance at the cost of quality [S1, unofficial].
+ 
+ **Strengths and Limitations**

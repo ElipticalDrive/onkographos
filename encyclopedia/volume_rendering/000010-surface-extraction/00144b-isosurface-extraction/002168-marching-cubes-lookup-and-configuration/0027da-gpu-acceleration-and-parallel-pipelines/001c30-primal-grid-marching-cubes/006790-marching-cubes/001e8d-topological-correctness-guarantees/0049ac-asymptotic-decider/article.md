@@ -1,0 +1,133 @@
+# Asymptotic Decider
+
+Also called: Nielson and Hamann decider, Nielson-Hamann Asymptotic Decider, Nielson-Hamann Face Disambiguation
+
+## Overview
+The Asymptotic Decider (AD) is a geometric test used in Marching Cubes to resolve topological ambiguities on cube faces where the standard lookup table is insufficient [S1][S2]. It determines the correct connectivity of intersection points on "saddle" faces by comparing the isovalue against the saddle point value of the bilinear interpolant [S8]. Unlike arbitrary case selection, AD uses vertex scalar values to dictate edge connections on ambiguous faces [S7, unofficial][S8].
+
+## How it works
+The method operates on individual cube faces identified as ambiguous [S1]. It does not resolve interior ambiguities (tunnels) within the cube volume; those require extensions like Marching Cubes 33 or Natarajan's test [S2][S8].
+
+### Inputs and Outputs
+*   **Input:** Scalar values at the four corners of a cube face and an isovalue $I$ [S1][S7, unofficial].
+*   **Output:** A boolean or integer flag indicating which of the two possible triangulations to use for the ambiguous face [S7, unofficial].
+
+### Data Structures
+The algorithm requires access to the scalar values at the four vertices of the face [S7, unofficial]. Let the vertices be indexed $0, 1, 2, 3$ in counter-clockwise order around the face [G].
+*   $V_0$: Top-Left
+*   $V_1$: Top-Right
+*   $V_2$: Bottom-Right
+*   $V_3$: Bottom-Left
+
+*Note: Standard Marching Cubes numbering for a cube face (e.g., the front face $z=0$) typically maps vertices 0, 1, 5, 4. The relative geometric positions (Top-Left, etc.) must be mapped to these indices based on the face orientation [G].*
+
+### Steps
+1.  **Identify Ambiguous Faces:** A face is ambiguous if its four vertices have alternating signs relative to the isovalue $I$ [S1]. Specifically, two diagonally opposite vertices are on one side of the isovalue, and the other two are on the opposite side [S7, unofficial].
+    *   Condition: $(V_0 - I)(V_2 - I) > 0$ AND $(V_1 - I)(V_3 - I) > 0$ AND $(V_0 - I)(V_1 - I) < 0$.
+    *   If the face is not ambiguous, use the standard lookup table case [S5, unofficial].
+
+2.  **Compute the Decider Value ($Q$ or $V_{decider}$):** Calculate the value that determines the saddle point topology [S4]. The sources provide equivalent formulations depending on whether the input is normalized to $[0,1]$ or uses raw scalar values [S4][S7, unofficial].
+
+    **Formulation A (Raw Scalar Values, from [S4]):**
+    Let $T_{ij}$ be the scalar value at corner $(i,j)$ of the face [S4].
+    $$ Q = T_{00}T_{11} - T_{01}T_{10} - I(T_{00} + T_{11} - T_{01} - T_{10}) $$
+    Where:
+    *   $T_{00}$ is the value at Top-Left ($V_0$) [S4]
+    *   $T_{11}$ is the value at Bottom-Right ($V_2$) [S4]
+    *   $T_{01}$ is the value at Top-Right ($V_1$) [S4]
+    *   $T_{10}$ is the value at Bottom-Left ($V_3$) [S4]
+    *   $I$ is the isovalue.
+
+    **Formulation B (Simplified Product, from [S7, unofficial]):**
+    If the isovalue is $0$ (or if values are pre-shifted by subtracting $I$), the formula simplifies to:
+    $$ Q = V_0 V_2 - V_1 V_3 $$
+    Where $V_i$ are the values *relative to the isovalue* (i.e., $V_i = \text{Scalar}_i - I$) [S7, unofficial].
+
+3.  **Determine Connectivity:**
+    *   If $Q < 0$: The isocontour forms a hyperbola in the first and third quadrants (connecting Top-Left to Bottom-Right) [S4]. Use the triangulation that connects the vertices with the same sign (the "diagonal" connecting the positive corners) [S8].
+    *   If $Q > 0$: The isocontour forms a hyperbola in the second and fourth quadrants (connecting Top-Right to Bottom-Left) [S4]. Use the triangulation that connects the vertices with the same sign (the "diagonal" connecting the negative corners) [S8].
+    *   If $Q = 0$: The saddle point lies exactly on the isovalue. This is a degenerate case. [G] In practice, this is treated as $Q \ge 0$ or handled via a small epsilon tolerance to avoid undefined behavior in subsequent gradient calculations.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def asymptotic_decider(face_values, isovalue):
+    """
+    Resolves face ambiguity for Marching Cubes using the Nielson-Hamann test [S4].
+    
+    Args:
+        face_values: List of 4 scalar values [V0, V1, V2, V3] corresponding to 
+                     Top-Left, Top-Right, Bottom-Right, Bottom-Left vertices.
+        isovalue: The threshold scalar value.
+        
+    Returns:
+        int: 0 if connecting V0-V2 (Top-Left to Bottom-Right), 
+             1 if connecting V1-V3 (Top-Right to Bottom-Left).
+             Returns None if face is not ambiguous.
+    """
+    V0, V1, V2, V3 = face_values
+    
+    # Check for ambiguity: Alternating signs relative to isovalue [S7, unofficial]
+    s0 = 1 if V0 > isovalue else -1
+    s1 = 1 if V1 > isovalue else -1
+    s2 = 1 if V2 > isovalue else -1
+    s3 = 1 if V3 > isovalue else -1
+    
+    # Ambiguous if diagonals have same sign and adjacent have different signs [S7, unofficial]
+    if not (s0 == s2 and s1 == s3 and s0 != s1):
+        return None
+        
+    # Compute Q using raw values and isovalue (Formulation A from [S4])
+    Q = (V0 * V2) - (V1 * V3) - isovalue * (V0 + V2 - V1 - V3)
+    
+    # Determine connection [S4]
+    # Q < 0 -> Connect V0 and V2 (Top-Left to Bottom-Right)
+    # Q > 0 -> Connect V1 and V3 (Top-Right to Bottom-Left)
+    if Q < 0:
+        return 0 # Connect V0-V2
+    else:
+        return 1 # Connect V1-V3
+```
+
+### Parameters
+*   **Isovalue ($I$):** The scalar threshold defining the surface [S7, unofficial].
+*   **Face Vertices:** The four scalar values defining the face [S7, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Degenerate Saddle ($Q=0$):** If the saddle point value equals the isovalue, the topology is undefined locally. [G] Implementers should add a small epsilon ($\epsilon$) to the comparison or treat $Q=0$ as a specific case (e.g., default to $Q>0$) to maintain consistency.
+*   **Interior Ambiguity:** AD only resolves face ambiguities. It does not resolve the "tunnel" ambiguity inside the cube (where the surface passes through the cube center). Using AD alone with the standard 15-case table (or even the 23-case MC23) can still produce non-manifold geometry if interior ambiguities are present [S2][S8].
+*   **Precision:** Floating-point errors in $Q$ calculation can flip the sign incorrectly. [G] Standard practice recommends using double precision for intermediate calculations when inputs span large dynamic ranges.
+
+## Subtopics
+
+### [Ambiguous Face Triangulation for Regular Grid](10105-ambiguous-face-triangulation-for-regular-grid.md)
+Ambiguous Face Triangulation is a technique to resolve topological ambiguity in cell triangulation when a single face has sign changes along all four edges, resulting in four vertices on that face. It sets itself apart from the parent [Asymptotic Decider](790-asymptotic-decider.md) by using a geometric connectivity rule based on face orientation to determine the triangulation, ensuring that adjacent cells fit together topologically.
+
+### Lopes and Brodlie Extension
+An extension of Natarajan's tests to all ambiguous cases of Marching Cubes, including interior ambiguities [S1]. Proposed by Lopes and Brodlie in 2003 [S1].
+
+### Asymptotic Decider Interpolant
+An alternative interpolant for ambiguous faces using the Asymptotic Decider to resolve ambiguity [S9, book]. It produces four triangular sections and a flat diamond in the middle [S9, book].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per face. The test involves a constant number of arithmetic operations [G].
+*   **Memory Complexity:** $O(1)$ auxiliary memory. No additional data structures are required beyond the face vertex values [G].
+*   **Performance:** Adds negligible computational overhead compared to the table lookup. However, it increases implementation complexity [S6, unofficial].
+*   **Strengths:** Simple to implement; resolves the most common face-level topological errors; ensures continuity across shared faces between adjacent cubes [S1][S8].
+*   **Limitations:** Does not resolve interior ambiguities (tunnels). Requires scalar values at vertices (not just binary occupancy) [S2][S8].
+*   **When to use:** When generating manifolds from scalar fields where face-level continuity is critical and interior ambiguities are either rare or handled by a separate step (e.g., MC33) [G].
+
+## Background
+The Asymptotic Decider was proposed by Nielson and Hamann in 1991 [S1][S2][S5, unofficial]. It was introduced to address the ambiguities in the original Marching Cubes algorithm identified by Dürst and others, specifically regarding the behavior of the bilinear interpolant on cube faces [S1][S2]. The method was published in "The Asymptotic Decider: Resolving the Ambiguity in Marching Cubes" [S5, unofficial]. It was later observed by Natarajan (1994) that similar ambiguities exist in the interior of the cube, leading to further extensions like Marching Cubes 33 [S2][S8].
+
+## Sources
+[S1] A Evolucao do Algoritmo Marching Cubes, https://doi.org/10.5540/03.2017.005.01.0107, fetched 2026-10-26
+[S2] Marching Cubes algorithm, https://en.wikipedia.org/wiki/Marching_cubes, fetched 2026-10-26
+[S3] Isosurface, https://en.wikipedia.org/wiki/Isosurface, fetched 2026-10-26
+[S4] Topologically Accurate Dual Isosurfacing Using Ray Intersection, https://doi.org/10.20385/1860-2037/4.2007.4, fetched 2026-10-26
+[S5] RobertBoettcherSF/Ada-Marching-Cubes, https://github.com/RobertBoettcherSF/Ada-Marching-Cubes, fetched 2026-10-27 (unofficial)
+[S6] Procedural Generation of Voxel Worlds with Castles, https://researchcommons.waikato.ac.nz/entities/publication/70d98783-1629-43df-9d01-b973ddbb5d75, fetched 2026-10-28 (unofficial)
+[S7] Resolving Ambiguities in Marching Squares - BorisTheBrave.Com, https://www.boristhebrave.com/2022/01/03/resolving-ambiguities-in-marching-squares/, fetched 2026-10-28 (unofficial)
+[S8] New metric for evaluating the accuracy of marching isosurfacing algorithms, https://doi.org/10.1145/2638404.2638484, fetched 2026-11-05
+[S9] Interpolants Induced by Marching Cases, https://doi.org/10.4230/dfu.vol2.sciviz.2011.48, fetched 2026-10-26 (book)

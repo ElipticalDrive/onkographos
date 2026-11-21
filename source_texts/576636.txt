@@ -1,0 +1,247 @@
+WebGL-based viewer for volumetric data. Contribute to MetaCell/neuroglancer development by creating an account on GitHub.
+
+Feat/raycast skeleton by seankmartin · Pull Request #227 · MetaCell/neuroglancer · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+seankmartin
+commented
+Aug 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Summary:
+This PR adds two new modes to 3D skeleton rendering, cylinders, and cylinders and balls. These are based on a two step process, the first is in the vertex shader - to find the screen space quad which bounds the object. Then in the fragment shader, do an analytic raycast, so solve whether the ray hits and where it hits by regular geometry and algebra (as opposed to a ray march). This rendering mode will be more expensive than lines/lines and points but since each cylinder and each ball is represented by two triangles it still be performant enough in most cases. Here is a drawing of the cases:
+Sphere:
+Cylinder (non tapered) - unused, replaced by cone due to depth shrinking and needing to support nodes with variable radius, kept for illustration as likely easier to understand than the cone:
+Cone (we still do an axial test similar to the cylinder shown above, and a cheaper test before the quadratic - but this is to illustrate the core test for a hit):
+We needed more varyings in the shaders to allow this, and since user defined attributes also become varyings we packed the varyings where possible.
+Other changes
+Line clipping
+Cylinders and balls handle avoiding self intersections. But lines and points did not. To allow the rendering modes to be more consistent, this introduces a method for lines to be aware of points drawn at the end of the lines.
+old
+new
+Reorder skeleton drawing to reduce shader switching
+The drawing loop before this PR was for each skeleton:
+Set edge shader program
+Draw lines for a skeleton
+Set points shader program
+Draw points for a skeleton
+This causes a shader program switch every skeleton, and can be worse for cylinders and balls because the shaders are more complex and because the rendering takes longer overall so this potential hit from program switching is more noticeable since the leeway is reduced. This proposes to change the drawing loop to:
+Set edge shader program
+Loop over skeletons and draw lines/cylinders
+Set point shader program
+Loop over skeletons and draw points/balls
+Which is two program sets regardless of the number of skeletons. The skeletons are not depth sorted so drawing all the edges first wouldn't present any issues.
+seankmartin
+added 30 commits
+August 20, 2026 14:14
+feat: add line clipping at the ends
+…
+55533f6
+```
+This is to allow to avoid intersecting points at the ends of the lines
+```
+feat: allow to emit a custom depth
+…
+c8447d3
+```
+Old calls just pass gl fragcoord.z as this depth
+```
+feat: add raycast primitive generic contract and utils
+…
+a86efb9
+```
+These are screen space camera facing quads where geometry hit/miss, depth, and lighting
+contribution are determined via raycast (and generally intended to be an analytic
+raycast for speed not a raymarch)
+```
+refactor: simplify OBB to AABB in raycast
+…
+64bb759
+```
+The old cylinder used an OBB but the new one doesn't and AABB is faster and simpler
+```
+feat: add sphere raycast primitive
+…
+4936ba0
+```
+This is formed by:
+1. Find AABB of the sphere. Project the 8 corners of the AABB into screen space and then draw 6 verts (two tris)
+   to represent the quad in screen space which covers the AABB as the vertex shader. For now each invocation
+   redoes the projection, which could possibly be avoided but seems a small win. Rest happens in frag shader.
+2. Find the ray from the eye (camera) to the fragment, in model space.
+3. With this ray, see if a part of the ray forms a chord through the sphere. To do this,
+   get the shortest distance from the ray to the sphere center (which is the
+   perpendicular) and see if the right angled triangle that would be formed between a
+   radial line from the sphere center and the perpendicular could exist.
+4. If the above holds, so there is a chord, ensure that the ray doesn't need to travel
+   backwards behind the near plane to form the chord (which would be negative hit distance)
+5. If no hit, discard. If hit, continue with regular depth and lighting calculation
+   based on the hit distance.
+```
+feat: change inside sphere to a miss
+…
+1e300cf
+```
+the analogy here is similar to when a camera
+in a game goes behind a wall, often you
+then don't render the wall because you're inside the wall.
+We'd have the same issue of the camera getting trapped inside a sphere if the
+sphere was big enough.
+```
+feat: add OBB for objects with a long axis
+…
+7726525
+```
+Follows a very similar process to the AABB, where we provide the parameterization of the
+OBB to the vertex shader, and construct the projection to clip space of the model space
+OBB to find a screen space quad which covers the screen space (depth clipped) OBB.
+However the calculations are a bit more complex since we have a OBB instead of an AABB.
+```
+refactor: clarify reason for NDC bound > 1.0
+07501c5
+feat: add raycast cylinder
+…
+fef2d98
+```
+Adds a raycast cylinder building on the OBB form in the generic file.
+
+The vertex shader setup is quite small with the generic helper.
+For the fragment shader we split the problem into two parts. We start by
+considering
+the line that represents the primary axis going through the center of the cylinder, which we
+have from its two endpoints.
+Then for this axis line, we find the plane perpendicular to the axis line. We check in that
+plane in a very similar manner to whether in our sphere code the radial line and the
+perpendicular could form a right angled triangle or not to see if we have a hit with the
+cylinder in the plane. If we do, then we just need to check if the hit lies outside the
+ends of the cylinder when viewed along the main axis running through the center of the
+cylinder. If it is within a sufficient distance, we can consider the ray to be a
+hit. To split into the axial component and the planar component we use the dot
+product.
+The hit point is fairly simple from there in the plane, and for the normal, since we constructed the
+plane to be perpendicular to the axis line, we can use the information about the
+orientation of the plane to determine the normal as the normal will be in the
+same direction as the in-plane radial line starting from the cylinder central axis line.
+```
+fix: GLSL nan is not always like IEEE 754 floating pt definition nan
+c106e0a
+feat: add frontend control over new cylinder modes
+244de0e
+test(python): add new tests for cylinder rendering
+a48f508
+fix: restore usage of correct lines and circles draw APIs
+3acb3d3
+fix: properly cull based on depth in primitives
+7c9bb97
+refactor: clarify operations based on drawings of the problem
+efd932e
+perf: draw all edges then draw all nodes avoid program switch
+…
+575f515
+```
+Should but perf improvements, which is helpful with the cylinder rendering
+```
+refactor: clarify comments and namings
+…
+8852130
+```
+Also combines the rendering tests together
+```
+fix: correct anisotropic skeleton source viewing
+ac1cb27
+fix: cull 0 radius cylinders and balls
+34c5516
+fix: more accurate clipping on lines and pack varyings
+6901686
+fix: pack varyings for space and interpolate user attrs for cylinders
+aa982f6
+feat: draw cones not cylinders to avoid depth shrinking and per node …
+…
+0bf5986
+```
+…radius
+```
+refactor: update naming and split after change to cone
+35f8a5d
+feat: use sphere projection from Quilez for tighter bound
+03d176b
+fix: correct line attribution for user shader
+2650bed
+refactor: namings
+ef45cc1
+perf: reduce CPU work on skeleton draw passes
+f3153f5
+refactor: update comments
+02a10d6
+refactor: update tests, flow, and glsl for clarity
+4ec39e7
+test: clarify tests
+661c28b
+fix: correct lighting and rendering instabilities at large depth ranges
+71478b0
+seankmartin
+requested a review
+from afonsobspinto
+September 2, 2026 09:16
+afonsobspinto
+requested changes
+Sep 3, 2026
+View reviewed changes
+Comment thread
+src/skeleton/frontend.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/webgl/lines.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+seankmartin
+added 2 commits
+September 4, 2026 19:44
+fix: also gate line clipping on depth range
+d9b0767
+fix: correct color emission
+…
+4f56d6e
+```
+was accidentally double multiply alpha
+also fixes the fact that the edge shader had no emitRGBA, which caused both shaders to
+fail so you'd see nothing. The node and edge shaders now run independently so if either
+compile it works
+In the future we should likely allow some ability in skeleton shaders to easily indicate
+that something is targetted at lines, and something else at nodes - but this PR is
+already very large and I don't want to blow out the scope too far.
+```
+seankmartin
+requested a review
+from afonsobspinto
+September 4, 2026 18:46
+afonsobspinto
+approved these changes
+Sep 14, 2026
+View reviewed changes
+seankmartin
+closed this
+Sep 15, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

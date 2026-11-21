@@ -1,0 +1,142 @@
+# Dynamic Update Optimization
+
+Also called: Dynamic Voxel Update, Dynamic Octree Update, Dynamic Geometry Voxelization Optimization
+
+## Overview
+Dynamic Update Optimization refers to a set of techniques for accelerating the voxelization and indirect illumination calculation of dynamic geometry within a Sparse Voxel Octree (SVO) or similar hierarchical volume structure [S1, unofficial]. It solves the performance bottleneck of re-processing the entire scene every frame by isolating static and dynamic components, allowing the system to re-voxelize only dynamic objects and update only the affected nodes in the octree [S1, unofficial]. Unlike sibling methods that focus on memory layout or update scheduling, this approach specifically optimizes the computational pipeline for real-time dynamic scenes, including specialized atomic operations for normals and frustum culling for lighting injection [S1, unofficial].
+
+## How it works
+The method operates on a hybrid static/dynamic octree structure. Static geometry is voxelized once at initialization and stored in the octree, marked with a bit flag to prevent overwriting [S1, unofficial]. Dynamic geometry is voxelized every frame and appended to the end of the octree node buffer, which can be cleared each frame [S1, unofficial].
+
+### Inputs and Outputs
+- **Inputs**: Scene geometry (static and dynamic), camera position, camera frustum, maximum cone tracing distance, voxel size.
+- **Outputs**: Updated octree node buffer containing static nodes (unchanged) and dynamic voxel fragments; updated indirect illumination values for affected nodes.
+
+### Data Structures
+The octree node buffer stores nodes sequentially. Each node contains:
+- A bit flag indicating if the node is static or dynamic [S1, unofficial].
+- Normal data (stored with a 1-byte counter for dynamic nodes to support averaging or max operations) [S1, unofficial].
+- Diffuse color/intensity data [S1, unofficial].
+- Neighbor offsets pointing to adjacent nodes, including those in the dynamic buffer [S1, unofficial].
+
+### Steps
+1. **Initialization (Static)**:
+   - Voxelize all static geometry.
+   - Perform the full 5-step indirect illumination calculation pipeline for all static voxels [S1, unofficial].
+   - Store static nodes in the octree with the static bit flag set [S1, unofficial].
+
+2. **Dynamic Voxelization (Per Frame)**:
+   - Voxelize only dynamic geometry [S1, unofficial].
+   - Use `InterlockedMax()` to compute diffuse and normal values for octree voxels. This is faster than atomic average [S1, unofficial].
+   - **Pitfall**: Using `InterlockedMax()` for normals reduces lighting quality in small voxel volumes (e.g., 256x256x256), causing artifacts where light reflects incorrectly compared to average normals [S1, unofficial].
+   - **Mitigation**: Use `InterlockedMax()` for normals only in dynamic geometry; keep static geometry using average normals. This necessitates storing a 1-byte counter with the normal in dynamic nodes [S1, unofficial].
+   - Append dynamic voxel fragments to the end of the octree node buffer [S1, unofficial].
+
+3. **Neighbor Reset and Affected Node Identification**:
+   - Reset static octree node neighbor offsets that point to dynamic nodes [S1, unofficial].
+   - Identify static nodes affected by dynamic voxels from the previous and current frames [S1, unofficial].
+   - Dispatch threads for all nodes to queue affected node indices into a buffer [S1, unofficial].
+
+4. **Indirect Illumination Update (Per Frame)**:
+   - Re-calculate all 5 steps of the indirect illumination pipeline only for the queued affected nodes [S1, unofficial].
+   - Only changed values are recalculated [S1, unofficial].
+
+5. **Direct Lighting Injection with Frustum Culling**:
+   - Perform view-frustum culling when injecting direct lighting into the octree [S1, unofficial].
+   - Calculate an extended frustum by moving the camera backward and increasing the far plane using the same field of view [S1, unofficial].
+   - The extended distance is calculated as:
+     $$ D_{ext} = D_{max\_cone} + D_{voxel\_filter} $$
+     Where $D_{max\_cone}$ is the maximum cone tracing distance and $D_{voxel\_filter}$ is the filtered voxel size [S1, unofficial].
+   - Light far from this extended frustum is not filtered into the octree [S1, unofficial].
+
+6. **Cone Tracing Pass Optimization**:
+   - Perform the cone tracing pass at half screen resolution [S1, unofficial].
+   - **Artifact**: Visible artifacts appear when up-scaling to full resolution, especially at geometry edges [S1, unofficial].
+   - **Mitigation**: Blur the pixels with artifacts by averaging with neighbor pixels. This is faster than re-computing cone tracing at full resolution for edge pixels but yields lower quality [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+def init_static_geometry(scene):
+    octree = build_octree(scene.static_geometry)
+    for node in octree.nodes:
+        node.is_static = True
+        node.normal, node.diffuse = compute_average_normal_and_diffuse(node.voxels)
+        node.indirect_illumination = calculate_indirect_illumination(node)
+    return octree
+
+# Per Frame Update
+def update_dynamic_geometry(octree, scene, camera):
+    dynamic_buffer = []
+    
+    # 1. Voxelize Dynamic Geometry
+    for obj in scene.dynamic_geometry:
+        voxels = voxelize(obj)
+        for voxel in voxels:
+            # Use InterlockedMax for speed, accepting quality trade-off for normals
+            # Note: Normal quality degrades in small voxel volumes
+            voxel.normal = interlocked_max(voxel.normal, compute_normal(voxel))
+            voxel.diffuse = interlocked_max(voxel.diffuse, compute_diffuse(voxel))
+            voxel.is_static = False
+            dynamic_buffer.append(voxel)
+    
+    # Append to octree buffer
+    octree.nodes.extend(dynamic_buffer)
+    
+    # 2. Reset Neighbors and Find Affected Nodes
+    affected_nodes = []
+    for node in octree.static_nodes:
+        # Check if neighbor offsets point to dynamic nodes
+        if node.has_dynamic_neighbor():
+            affected_nodes.append(node)
+            # Reset neighbor offset to dynamic nodes
+            node.reset_dynamic_neighbor_offsets()
+            
+    # 3. Update Indirect Illumination for Affected Nodes
+    for node in affected_nodes:
+        node.indirect_illumination = calculate_indirect_illumination(node)
+        
+    # 4. Inject Direct Lighting with Frustum Culling
+    extended_far = calculate_extended_far_plane(camera, max_cone_distance, voxel_size)
+    extended_frustum = create_frustum(camera, extended_far)
+    
+    for node in octree.nodes:
+        if is_inside_frustum(node, extended_frustum):
+            node.direct_light = inject_direct_light(node, scene.lights)
+            
+    # 5. Cone Tracing Pass (Half Resolution)
+    half_res_buffer = render_cone_tracing_at_half_res(octree, camera)
+    full_res_buffer = upsample_and_blur_artifacts(half_res_buffer, camera.depth_buffer)
+    
+    return full_res_buffer
+```
+
+## Subtopics
+
+### Coarse-to-Fine Octree Update Strategy
+A strategy to accelerate octree updating and reduce noise impact by initially using down-sampled projections, then fixing the octree structure to optimize only density grids with original projections [S2]. It is chosen when dealing with high-noise data (e.g., cryo-ET) where standard update methods fail [S2]. Unlike standard dynamic updates that process full-resolution geometry, this method uses low-resolution projections to reduce noise impact during the initial epochs, then fixes the structure and optimizes densities with original projections [S2].
+
+### Standard Deviation-based Octree Update
+A method to determine the structure of an adaptive octree for volume rendering by using the standard deviation (SD) of densities within each node as the update loss, specifically designed to handle high noise in cryo-electron tomography (cryo-ET) projections where reprojection errors are unreliable [S2]. It is chosen when reprojection errors are too noisy to guide octree refinement [S2]. Unlike sibling methods that use reprojection error or fixed thresholds, this method computes the SD of densities inside each node uniformly sampled octant and uses it as the update loss in a mixed-integer program to decide if a node should be divided, merged, or kept the same [S2].
+
+### Hybrid Dense Array and SVDAG Modification
+A runtime modification strategy where the area near the player is maintained using a dense array (with meshes representing LOD 0 chunks and SVDAG representing chunks of LOD 1 and above) [S3]. It is chosen for open-world games requiring frequent local modifications [S3]. Unlike global octree updates, this method updates meshes at runtime and reconstructs SVDAG chunks of LOD 1 and above from the dense array during idle time when players leave the modified area [S3].
+
+## Operating characteristics
+- **Time Complexity**: Reduces per-frame cost from $O(N)$ for the whole scene to $O(N_{dynamic} + N_{affected})$, where $N_{dynamic}$ is the number of dynamic voxels and $N_{affected}$ is the number of static nodes impacted by dynamic changes [S1, unofficial].
+- **Memory Complexity**: Requires additional buffer space for dynamic voxel fragments appended to the octree node buffer and a 1-byte counter per dynamic normal [S1, unofficial].
+- **Measured Performance**: In the source demo, dynamic updates allow real-time frame rates by avoiding full scene re-voxelization [S1, unofficial]. The half-resolution cone tracing with blur mitigation provides a significant speedup over full-resolution edge-aware re-computation, though at the cost of visual quality at geometry edges [S1, unofficial].
+- **Strengths**: Enables real-time indirect illumination for dynamic scenes; efficient handling of sparse dynamic changes; reduced noise in high-noise volumetric data via coarse-to-fine strategies [S1, unofficial][S2].
+- **Limitations**: `InterlockedMax()` for normals causes lighting artifacts in small voxel volumes [S1, unofficial]; half-resolution cone tracing introduces up-scaling artifacts at geometry edges [S1, unofficial]; mixed-integer programming for SD-based updates may be computationally expensive for large octrees [S2].
+- **When to Use**: Real-time rendering with dynamic geometry; cryo-ET reconstruction with high noise; open-world games with local modifications [S1, unofficial][S2, S3].
+- **When Not to Use**: Scenes with fully static geometry (use static-only optimization); scenes requiring high-fidelity normal-based lighting in small voxels (avoid `InterlockedMax()` for normals) [S1, unofficial].
+
+## Background
+The concept of dynamic update optimization in voxel cone tracing was introduced by Simon Green in his blog series "Implementing Voxel Cone Tracing" [S1, S1, unofficial]. The coarse-to-fine and standard deviation-based update strategies were developed for cryo-electron tomography reconstruction by researchers publishing in *Bioinformatics Advances* [S2]. The hybrid dense array and SVDAG modification was proposed in the Aokana framework for GPU-driven voxel rendering in open-world games [S3].
+
+## Sources
+[S1] Implementing Voxel Cone Tracing, http://simonstechblog.blogspot.com/2013/01/implementing-voxel-cone-tracing.html, fetched 2026-10-27 (unofficial)
+[S2] Adaptive differentiable grids for cryo-electron tomography reconstruction and denoising, https://doi.org/10.1093/bioadv/vbad131, fetched 2026-10-27
+[S3] Aokana: A GPU-Driven Voxel Rendering Framework for Open World Games, https://doi.org/10.1145/3728299, fetched 2026-10-26

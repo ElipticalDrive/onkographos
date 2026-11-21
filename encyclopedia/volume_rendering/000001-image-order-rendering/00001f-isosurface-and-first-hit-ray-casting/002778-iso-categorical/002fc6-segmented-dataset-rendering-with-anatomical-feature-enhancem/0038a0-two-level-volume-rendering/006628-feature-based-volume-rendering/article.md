@@ -1,0 +1,181 @@
+# Feature-based Volume Rendering
+
+Also called: Feature-based volumetric visualization
+
+## Overview
+Feature-based Volume Rendering is a hybrid approach to volumetric flow visualization that reduces occlusion by applying volume rendering to data segmented via an interactive, implicit feature-based approach [S1, unofficial]. It sets itself apart from standard threshold-based methods by using a smooth Degree of Interest (DOI) function to map user-defined interest in n-dimensional attribute space to a continuous [0,1] range, allowing for the compositing of multiple distinct feature objects in a two-level rendering style [S1, unofficial].
+
+## How it works
+The method divides the visualization mapping from raw data to the resulting image into three distinct phases [S1, unofficial].
+
+**Inputs and Outputs**
+*   **Input:** Raw simulation data (e.g., flow data) with multiple attributes (e.g., velocity, pressure, TKE) and user selections in an n-dimensional attribute space.
+*   **Output:** A composited image where multiple feature objects are rendered with per-object appearance definitions.
+
+**Data Structures**
+*   **Degree of Interest (DOI) Function:** A smooth function that maps user interest to the $[0,1]$ range. For every sample point (voxel), a 1D DOI value is assigned.
+    *   $DOI = 1$: Object of interest (in focus).
+    *   $DOI = 0$: Context (not depicted).
+    *   Values between 0 and 1 represent the smooth boundary transition [S1, unofficial].
+
+**Steps**
+
+1.  **Interactive Segmentation (Phase 1):**
+    The user selects features from the raw data using interactive techniques (e.g., brushing in linked scatterplots or histograms) in the n-dimensional data attribute space. This results in the generation of a smooth DOI function for each selected feature [S1, unofficial].
+
+2.  **Feature Representation Selection (Phase 2):**
+    An appropriate volumetric representation model is chosen for the selected features from three available models [S1, unofficial]:
+    *   **Isosurface-triplets:** (Details not provided in sources).
+    *   **Feature Volume:** Voxels with non-zero DOI values belonging to a feature are depicted as a volumetric object.
+    *   **Feature Streamlines:** (Details not provided in sources).
+
+3.  **Rendering (Phase 3):**
+    The entire feature set is rendered using a two-level rendering style. Multiple feature objects are composited into one scene. The appearance of each object is defined on a per-object basis [S1, unofficial].
+
+**Formulas and Parameters**
+
+*   **DOI Value Assignment:**
+    Each sample point $p$ is assigned a DOI value $d(p)$ based on user interest.
+    $$ d(p) \in [0, 1] $$
+    Where $d(p)=1$ indicates full interest and $d(p)=0$ indicates no interest [S1, unofficial].
+
+*   **Opacity Computation (Feature Volume Model):**
+    For the feature volume representation, the opacity $\alpha$ of a voxel is computed by a linear ramp from its smooth DOI value $d$ [S1, unofficial]:
+    $$ \alpha = d $$
+    *(Note: The source states "linear ramp from its smooth DOI-value". In standard volume rendering, opacity is often directly mapped or scaled. Here, the DOI value itself serves as the opacity factor, creating semi-transparent boundaries where DOI < 1.)*
+
+*   **Color Mapping:**
+    Object color can be determined in two ways [S1, unofficial]:
+    1.  **Unique Color:** A unique color is assigned to each object to improve visual discrimination. Color intensity is used for shading or to depict another data attribute (e.g., velocity).
+    2.  **Attribute Mapping:** Color intensity depicts a specific data attribute (e.g., velocity), while the base color identifies the object.
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def feature_based_volume_rendering(raw_data, user_selections):
+    """
+    Implements the three-phase feature-based volume rendering pipeline.
+    
+    Args:
+        raw_data: 3D grid of simulation attributes (e.g., velocity, pressure).
+        user_selections: List of feature definitions derived from interactive brushing.
+        
+    Returns:
+        composited_image: The final rendered image.
+    """
+    
+    # Phase 1: Interactive Segmentation
+    # Generate a smooth DOI function for each selected feature.
+    # The DOI function maps user interest to [0, 1].
+    doi_functions = []
+    for selection in user_selections:
+        # The source describes interactive brushing in n-dimensional space.
+        # Implementation detail: This step is interactive and not algorithmic in the source.
+        # We assume a smooth interpolation or smoothing filter is applied to the 
+        # selected regions to create the continuous DOI field.
+        doi_field = compute_smooth_doi_field(raw_data, selection)
+        doi_functions.append(doi_field)
+
+    # Phase 2: Feature Representation Selection
+    # For each feature, choose a representation model.
+    # Here we assume the 'Feature Volume' model for demonstration.
+    feature_volumes = []
+    for i, doi_field in enumerate(doi_functions):
+        # Create a volume where voxels are active if DOI > 0
+        # The source specifies: "Voxels in areas with non-zero DOI function 
+        # belonging to one feature are depicted as a volumetric object."
+        volume_mask = doi_field > 0
+        feature_volumes.append({
+            'mask': volume_mask,
+            'doi_field': doi_field,
+            'color': assign_unique_color(i), # Unique color per object
+            'shading_attribute': 'velocity'  # Example: intensity maps to velocity
+        })
+
+    # Phase 3: Two-Level Rendering
+    # Composite all feature objects into one scene.
+    composited_image = render_two_level(feature_volumes)
+    
+    return composited_image
+
+def compute_smooth_doi_field(data, selection):
+    """
+    Computes the smooth DOI function for a given selection.
+    This is a placeholder for the interactive brushing logic described in the source.
+    The source states: "a smooth boundary along a selected feature... representing 
+    the continuous transition from objects in focus to the context."
+    """
+    # [G] Implementation note: Typically involves defining a region in attribute space,
+    # extracting corresponding spatial voxels, and applying a smoothing kernel 
+    # (e.g., Gaussian) to create the continuous DOI ramp.
+    # Since the source does not provide the exact smoothing algorithm, 
+    # we assume a standard smoothing operation on the binary selection mask.
+    binary_mask = extract_spatial_mask(data, selection)
+    smooth_doi = apply_smoothing(binary_mask, kernel_size=5)
+    # Normalize to [0, 1]
+    smooth_doi = smooth_doi / smooth_doi.max()
+    return smooth_doi
+
+def assign_unique_color(feature_index):
+    """
+    Assigns a unique color to each feature object to prevent ambiguous representation.
+    """
+    # [G] Standard color palette assignment.
+    colors = [
+        (1.0, 0.0, 0.0), # Red
+        (0.0, 1.0, 0.0), # Green
+        (0.0, 0.0, 1.0), # Blue
+        (1.0, 1.0, 0.0), # Yellow
+    ]
+    return colors[feature_index % len(colors)]
+
+def render_two_level(feature_volumes):
+    """
+    Renders the feature volumes using two-level rendering style.
+    Opacity is computed by a linear ramp from the DOI value.
+    """
+    # Initialize output buffer
+    output = np.zeros((height, width, 4))
+    
+    # For each feature volume, render and composite
+    for fv in feature_volumes:
+        # Ray casting or slice-based rendering for the volume
+        # Opacity alpha = DOI value
+        # Color = Unique Color * Intensity(Attribute)
+        
+        # [G] Standard volume rendering compositing loop.
+        # For each ray, iterate through voxels in the volume.
+        # alpha_voxel = fv['doi_field'][voxel]
+        # color_voxel = fv['color'] * intensity(fv['shading_attribute'][voxel])
+        # Composite using front-to-back or back-to-front alpha blending.
+        pass
+        
+    return output
+```
+
+**Edge Cases and Pitfalls**
+*   **Ambiguous Representation:** Using non-colored objects can lead to ambiguous representation of unequal features. Unique colors are recommended for object discrimination [S1, unofficial].
+*   **Smooth Boundaries:** The method relies on smooth DOI functions. Sharp, discrete thresholds are not used, which requires careful smoothing to avoid visual artifacts at feature boundaries [S1, unofficial].
+*   **Occlusion:** The primary motivation is to reduce occlusion problems inherent in raw flow data visualization [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:**
+    *   Reduces occlusion in complex flow data [S1, unofficial].
+    *   Interactive and intuitive feature specification via brushing [S1, unofficial].
+    *   Allows compositing of multiple distinct features with per-object appearance control [S1, unofficial].
+    *   Smooth boundaries provide better spatial perception and context [S1, unofficial].
+*   **Limitations:**
+    *   Requires user interaction for segmentation; non-interactive approaches may fail due to absence of sharp boundaries [S1, unofficial].
+    *   Performance depends on the complexity of the smoothing and rendering of multiple volumes.
+*   **When to use:** When visualizing complex flow simulation data where features lack sharp boundaries and occlusion is a significant problem.
+*   **When not to use:** When fully automatic, non-interactive segmentation is required.
+
+## Background
+The method was proposed by M. Mlejnek in 2003 in the paper "Feature-based Volume Rendering of Simulation Data" [S1, unofficial]. It is part of a hybrid approach to volumetric flow visualization, building on the concept of Degree of Interest (DOI) functions for separating data in focus from context [S1, unofficial]. The work is associated with the CESCG-2003 conference [S1, unofficial].
+
+## Sources
+[S1] Feature-based Volume Rendering of Simulation Data, https://old.cescg.org/CESCG-2003/MMlejnek/index.html, fetched 2026-10-27 (unofficial)

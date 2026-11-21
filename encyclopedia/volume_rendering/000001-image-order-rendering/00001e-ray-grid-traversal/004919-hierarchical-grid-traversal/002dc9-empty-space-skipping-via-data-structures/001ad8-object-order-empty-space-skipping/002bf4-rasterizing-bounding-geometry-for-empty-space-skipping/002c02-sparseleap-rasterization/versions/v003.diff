@@ -1,0 +1,128 @@
+--- v002.md
++++ v003.md
+@@ -14,6 +14,6 @@
+ 
+ **Data Structures:**
+-1.  **Occupancy-Histogram Tree:** A hierarchical structure where each node stores an occupancy class. Leaf nodes store the class directly; non-leaf nodes determine their class via a majority vote over their occupancy histogram (the class occurring most often in all leaf nodes of its sub-tree) [S3, unofficial].
+-2.  **Occupancy Geometry:** An array of bounding boxes extracted from the tree. Each emitted box stores:
++1.  **Occupancy-Histogram Tree:** A hierarchical structure where each node stores an occupancy class [S1, unofficial]. Leaf nodes store the class directly; non-leaf nodes determine their class via a majority vote over their occupancy histogram (the class occurring most often in all leaf nodes of its sub-tree) [S3, unofficial].
++2.  **Occupancy Geometry:** An array of bounding boxes extracted from the tree [S3, unofficial]. Each emitted box stores:
+     *   Center coordinates.
+     *   Size (dimensions).
+@@ -26,8 +26,8 @@
+ 1.  **Occupancy Geometry Generation:**
+     *   Traverse the occupancy-histogram tree in breadth-first order, visiting child nodes in a fixed order (not visibility order) [S3, unofficial].
+-    *   For the root node, set the parent occupancy class to invalid (not equal to any other class). The root always emits its bounding box [S3, unofficial].
++    *   For the root node, set the parent occupancy class to invalid (not equal to any other class) [S3, unofficial]. The root always emits its bounding box [S3, unofficial].
+     *   For each visited non-leaf node, determine its occupancy class by taking the majority vote over its occupancy histogram [S3, unofficial].
+     *   For leaf nodes, use the occupancy class already stored in the node [S3, unofficial].
+-    *   Compare the node's occupancy class with its parent's occupancy class.
++    *   Compare the node's occupancy class with its parent's occupancy class [S3, unofficial].
+         *   If they are the same, skip emission.
+         *   If they are different, emit a bounding box containing the node's center, size, its own occupancy class, and its parent's occupancy class [S3, unofficial].
+@@ -37,5 +37,5 @@
+     *   Rasterize the set of fine-grained, view-independent bounding boxes generated in Step 1 using hardware-accelerated rasterization [S2, unofficial].
+     *   For each pixel, compute an ordered list of stabbing boundary faces [S2, unofficial].
+-    *   Convert this into a ray segment list where consecutive ray segments of the same occupancy class are merged [S3, unofficial]. This creates singly-linked lists of ray events per pixel [S1, unofficial].
++    *   Convert this into a ray segment list where consecutive ray segments of the same occupancy class are merged [S3, unofficial]. This creates lists of ray events per pixel [S1, unofficial].
+     *   Exploit frame coherence by re-using the same bounding boxes unless the set of active objects changes [S2, unofficial].
+ 
+@@ -52,11 +52,11 @@
+ 
+ ```python
+-def sparse_leap_render(occupancy_tree, camera, volume_data):
++def sparse_leap_render(occupancy_tree, image_width, image_height, volume_data):
+     # Step 1: Generate Occupancy Geometry
+     bounding_boxes = []
+-    stack = [(occupancy_tree.root, None)] # (node, parent_class)
++    queue = [(occupancy_tree.root, None)]  # (node, parent_class)
+     
+-    while stack:
+-        node, parent_class = stack.pop(0) # Breadth-first traversal
++    while queue:
++        node, parent_class = queue.pop(0)  # Breadth-first traversal
+         
+         # Determine current node's class
+@@ -64,46 +64,51 @@
+             current_class = node.occupancy_class
+         else:
+-            current_class = get_majority_vote(node.occupancy_histogram)
++            histogram = node.occupancy_histogram
++            current_class = max(histogram, key=histogram.get)  # Majority vote
+             
+         # Geometry Emission Rule
+         if current_class != parent_class:
+-            box = {
++            bounding_boxes.append({
+                 'center': node.center,
+                 'size': node.size,
+                 'my_class': current_class,
+                 'parent_class': parent_class
+-            }
+-            bounding_boxes.append(box)
++            })
+             
+-        # Add children to stack
+         for child in node.children:
+-            stack.append((child, current_class))
++            queue.append((child, current_class))
+             
+     # Step 2: Rasterization
+-    # Hardware rasterization of bounding_boxes produces per-pixel ray segment lists
+-    # This step is typically handled by the GPU rasterizer, not explicit CPU code
+-    ray_segment_lists = hardware_rasterize(bounding_boxes, camera)
++    # Hardware rasterization of bounding_boxes produces per-pixel ray segment lists.
++    # This step is handled by the GPU rasterizer, not explicit CPU code.
++    ray_segment_lists = hardware_rasterize(bounding_boxes, image_width, image_height)
+     
+     # Step 3 & 4: Ray Casting and Color Calculation
+-    for pixel in pixels:
+-        segments = ray_segment_lists[pixel]
+-        color = vec3(0.0)
+-        
+-        for segment in segments:
+-            if segment.occupancy_class == 'empty':
+-                continue # Leap over empty space
++    for y in range(image_height):
++        for x in range(image_width):
++            segments = ray_segment_lists[y][x]
++            color = [0.0, 0.0, 0.0]
+             
+-            # Sample volume data in non-empty segment
+-            sample = sample_volume(segment.ray, volume_data)
+-            
+-            # Apply analytical lighting model
+-            light_color = calculate_lighting(sample, segment.ray)
+-            color += light_color
+-            
+-        pixel.color = color
++            for segment in segments:
++                if segment.occupancy_class == 'empty':
++                    continue  # Leap over empty space
++                
++                # Sample volume data in non-empty segment
++                ray_origin = camera.origin
++                ray_direction = normalize(camera.ray_direction(x, y))
++                for t in range(segment.start, segment.end, segment.step):
++                    sample = volume_data.sample(ray_origin + t * ray_direction)
++                    
++                    # Apply analytical lighting model
++                    light_color = analytical_lighting(sample, ray_direction)
++                    color[0] += light_color[0]
++                    color[1] += light_color[1]
++                    color[2] += light_color[2]
++                    
++            pixel_buffer[y][x] = color
+ ```
+ 
+ **Parameters:**
+-*   **Resource Limit:** An optional prespecified maximum number of bounding boxes. If exceeded, traversal stops [S3, unofficial]. Not given in the sources.
++*   **Resource Limit:** An optional prespecified maximum number of bounding boxes. If exceeded, traversal stops [S3, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -123,5 +128,4 @@
+ *   **Limitations:** Requires hardware rasterization capabilities [S2, unofficial]. Performance may degrade if the set of active objects changes frequently, requiring regeneration of bounding boxes [S2, unofficial].
+ *   **When to use:** Large, sparse volume data (e.g., terabyte-sized microscopy volumes) where empty space skipping is critical and the active regions change frequently [S2, unofficial].
+-*   **When not to use:** Small, dense volumes where standard traversal is sufficient, or hardware rasterization is not available [S2, unofficial].
+ 
+ ## Background

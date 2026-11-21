@@ -1,0 +1,234 @@
+# Adaptive Differentiable Grids for Cryo-ET
+
+Also called: Adaptive density grid optimization, Adaptive density grids based on an octree structure, Adaptive differentiable grids, Coordinate-based representation with adaptive octree
+
+## Overview
+Adaptive Differentiable Grids (ADG) is a learning-based representation for cryo-electron tomography (cryo-ET) reconstruction that replaces the fully connected MLPs of traditional neural fields with an adaptive octree structure, where each node stores a learnable 3D density grid [S1]. It solves the challenge of reconstructing high-noise, low-signal-to-noise ratio (SNR) cryo-ET data by jointly optimizing the grid structure and values to separate noise from signal, while preserving fine details in complex regions [S1]. Unlike standard neural fields that either learn noise or oversmooth features, ADG uses differentiable trilinear interpolation for faster querying and allows explicit regularization (TV, boundary consistency, non-local constraints) to handle the specific artifacts of tomography, such as missing wedges and fiducial marker interference [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of 2D projection images $b$ (intensity measurements), their corresponding projection angles (defining the Radon transform $A$), and a binary mask $M$ excluding rays intersecting fiducial markers or padded borders [S1].
+*   **Outputs:** A reconstructed 3D density volume $x$ (or $f_\phi(p)$) within the Region of Interest (ROI) [S1].
+
+**Data Structures:**
+*   **Octree Structure:** A hierarchical tree representing the 3D space. Each node represents a sub-volume. Nodes can be "enabled" (active) or "disabled" (empty/outside ROI) [S1].
+*   **Density Grid ($G$):** Attached to each enabled octree node. It is a 3D tensor of learnable density values. The dimensions are $\mathbb{R}^{N_x \times N_y \times N_z}$, where $N_x = N_y = N_z$ is a fixed hyperparameter for all nodes [S1].
+*   **Ray Sampling State:** For each ray, a list of 3D sample positions is generated based on the intersection with the octree nodes [S1].
+
+**Query Mechanism:**
+For a query point $p$ in world space:
+1.  Identify the octree node containing $p$.
+2.  Map $p$ to local coordinates within the voxel grid of that node.
+3.  Retrieve the 8 corner density values from the node's density grid $G$.
+4.  Perform trilinear interpolation to obtain the scalar density $\sigma(p)$ [S1].
+
+$$ \sigma(p) = \text{trilinear\_interp}(p, G) $$
+
+This operation is differentiable, allowing gradients to flow back to the grid values during optimization [S1].
+
+**Optimization Loop:**
+The method uses a two-stage optimization process to handle noise and structure adaptation:
+
+1.  **Initialization:** Initialize the octree from the ROI, disabling all nodes outside the ROI [S1].
+2.  **Stage 1: Octree Structure Update (Coarse):**
+    *   Use down-sampled projections to update the octree structure.
+    *   Uniformly sample each octant and compute the standard deviation (SD) of the densities inside each node.
+    *   If the SD is significant, the node has a higher chance of being divided into eight child octants.
+    *   Solve a mixed-integer program to divide, merge, or keep octants, ensuring the total number of nodes remains below a fixed limit $N_{max\_nodes}$ [S1].
+3.  **Stage 2: Density Grid Optimization (Fine):**
+    *   Freeze the octree structure.
+    *   Use the original noisy projections to update the density grid values in each enabled octree node.
+    *   Apply masks to exclude rays intersecting fiducial markers or padded gray regions [S1].
+
+**Loss Function:**
+The total loss $L_{total}$ is a weighted sum of a data-fidelity term and three regularization terms [S1]:
+
+$$ L_{total} = L_{data} + k_{tv} L_{tv} + k_{cnlc} L_{cnlc} + k_{bc} L_{bc} $$
+
+Where:
+*   $L_{data}$: Data-fidelity loss.
+*   $L_{tv}$: Total Variation loss.
+*   $L_{cnlc}$: Cross-nodes non-local constraint loss.
+*   $L_{bc}$: Boundary consistency loss.
+*   $k_{tv}, k_{cnlc}, k_{bc}$: Weighting hyperparameters [S1].
+
+**Loss Formulations:**
+
+1.  **Data-Fidelity Loss ($L_{data}$):**
+    Based on the discretized image formation model $b_i = A_i x_i + n_i$, where $b_i$ is measured intensity, $A_i$ is the Radon transform, and $n_i$ is noise [S1]. The loss is defined over a batch of $N$ sampling points:
+
+    $$ L_{data}(\phi) = \frac{1}{N} \sum_{i=1}^{N} || M (A f_\phi(p_i) - b_i) ||_2^2 $$
+
+    Where $f_\phi(p_i)$ is the density at point $p_i$ obtained via trilinear interpolation, and $M$ is a binary mask excluding rays intersecting fiducial markers [S1].
+
+2.  **Total Variation Loss ($L_{tv}$):**
+    A spatial regularizer to smooth the reconstruction. The specific formula is not provided in the sources, but it is applied to the density grid values [S1].
+
+3.  **Cross-nodes Non-local Constraint Loss ($L_{cnlc}$):**
+    To handle high noise and preserve long-range structures, this loss is computed by randomly selecting two enabled nodes $m$ and $n$ inside the ROI at each iteration. Densities $f_\phi(p_i^m)$ and $f_\phi(p_j^n)$ are sampled from their respective density grids. The loss estimates similarities between density vectors:
+
+    $$ L_{cnlc} = \sum || \text{softmax}(f_\phi(p_i^m)^T f_\phi(p_j^n)) f_\phi(p_j^n) - f_\phi(p_i^m) ||_2^2 $$
+
+    Where the softmax operation estimates similarities between density vectors in different nodes [S1].
+
+4.  **Boundary Consistency Loss ($L_{bc}$):**
+    To reduce discontinuity artifacts at grid edges caused by independent optimization of different octree nodes, this loss minimizes density differences between neighboring grids at their shared boundaries. The specific formula is not provided, but it operates on the boundary voxels of adjacent nodes [S1].
+
+**Ray Sampling Strategy:**
+For ray sampling, for each octree node $oc$ crossed by a ray, $N_{oc}$ 3D positions are selected using stratified random sampling. The number of samples per node is defined as:
+
+$$ N_{oc} = N_{max} \frac{loc}{doc} $$
+
+Where:
+*   $N_{max}$: Hyperparameter corresponding to the maximum number of samples per node.
+*   $loc$: Length of the ray inside the octree node $oc$.
+*   $doc$: Length of the diagonal of node $oc$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def initialize_octree(roi_bounds):
+    """
+    Initialize octree with nodes covering the ROI.
+    Disable nodes outside the ROI.
+    """
+    octree = Octree(root=roi_bounds)
+    octree.disable_outside_nodes()
+    return octree
+
+def compute_node_sd(node, grid, samples):
+    """
+    Compute standard deviation of densities in a node.
+    """
+    densities = []
+    for p in samples:
+        d = trilinear_interp(p, node.grid)
+        densities.append(d)
+    return np.std(densities)
+
+def update_octree_structure(octree, projections, num_iterations):
+    """
+    Stage 1: Update octree structure using down-sampled projections.
+    """
+    for iter in range(num_iterations):
+        # Solve mixed-integer program to divide, merge, or keep octants
+        # based on SD of densities to keep total nodes < N_max_nodes
+        octree.solve_mip_update()
+        
+        # Re-initialize grids for new nodes if divided
+        for node in octree.enabled_nodes:
+            if node.is_new:
+                node.grid = np.zeros((Nx, Ny, Nz))
+
+def optimize_density_grids(octree, projections, masks, num_iterations, 
+                           k_tv, k_cnlc, k_bc, N_max):
+    """
+    Stage 2: Optimize density grid values using original noisy projections.
+    """
+    for iter in range(num_iterations):
+        loss_data = 0.0
+        loss_tv = 0.0
+        loss_cnlc = 0.0
+        loss_bc = 0.0
+        
+        # Sample rays
+        rays = generate_rays(projections)
+        
+        for ray in rays:
+            # Stratified sampling based on octree intersection
+            samples = []
+            for node in ray.intersected_nodes:
+                loc = ray.length_in_node(node)
+                doc = node.diagonal_length
+                N_oc = N_max * (loc / doc)
+                samples.extend(stratified_sample(ray, node, N_oc))
+            
+            # Compute data fidelity
+            for p in samples:
+                density = trilinear_interp(p, p.node.grid)
+                projection_idx = ray.get_projection_index(p)
+                b = projections[projection_idx]
+                m = masks[projection_idx]
+                # A is Radon transform, approximated by integration along ray
+                # In practice, this is often implemented as a differentiable ray-marching step
+                # Here we assume a simplified batched operation
+                projected = integrate_along_ray(ray, samples) 
+                loss_data += np.sum((m * (projected - b))**2)
+            
+            # Compute TV loss on all enabled nodes
+            for node in octree.enabled_nodes:
+                loss_tv += total_variation(node.grid)
+                
+            # Compute CNLC loss
+            if iter % cnlc_frequency == 0:
+                node_m, node_n = random_select_two_enabled_nodes(octree)
+                samples_m = uniform_sample(node_m.grid, num_samples=10)
+                samples_n = uniform_sample(node_n.grid, num_samples=10)
+                for p_m in samples_m:
+                    for p_n in samples_n:
+                        d_m = trilinear_interp(p_m, node_m.grid)
+                        d_n = trilinear_interp(p_n, node_n.grid)
+                        # Softmax similarity
+                        sim = np.exp(d_m * d_n) / np.sum(np.exp(d_m * d_n)) # Simplified
+                        loss_cnlc += np.sum((sim * d_n - d_m)**2)
+                        
+            # Compute Boundary Consistency Loss
+            for node in octree.enabled_nodes:
+                loss_bc += boundary_consistency(node, octree.neighbors(node))
+                
+        # Backpropagate gradients to grid values
+        gradients = compute_gradients(loss_data + k_tv*loss_tv + k_cnlc*loss_cnlc + k_bc*loss_bc)
+        update_grids(octree, gradients)
+
+def trilinear_interp(p, grid):
+    """
+    Perform trilinear interpolation on the 3D grid.
+    """
+    # Map p to local coordinates in grid
+    local_p = map_to_local(p, grid.bounds)
+    # Get 8 corner values
+    corners = get_8_corners(local_p, grid.values)
+    # Interpolate
+    return interpolate_trilinear(local_p, corners)
+
+def integrate_along_ray(ray, samples):
+    """
+    Integrate densities along the ray to simulate projection.
+    """
+    # Simple Riemann sum approximation
+    density_sum = 0
+    for p in samples:
+        density_sum += trilinear_interp(p, p.node.grid) * ray.step_size
+    return density_sum
+```
+
+**Parameters:**
+*   $N_x, N_y, N_z$: Grid size in x, y, z dimensions for each density grid. Typically $N_x = N_y = N_z$ [S1].
+*   $N_{max}$: Maximum number of samples per node in ray sampling [S1].
+*   $k_{tv}, k_{cnlc}, k_{bc}$: Weighting parameters for TV, CNLC, and boundary consistency losses [S1].
+*   $N_{max\_nodes}$: Fixed limit on the total number of octree nodes [S1].
+
+**Edge Cases and Pitfalls:**
+*   **High Noise:** Standard neural fields fail on cryo-ET data by learning noise or oversmoothing. ADG handles this via regularization and adaptive structure [S1].
+*   **Discontinuity Artifacts:** Independent optimization of octree nodes causes discontinuities at grid edges. Mitigated by $L_{bc}$ [S1].
+*   **Fiducial Markers:** Rays intersecting fiducial markers or padded borders interfere with reconstruction. Mitigated by binary mask $M$ in $L_{data}$ [S1].
+*   **Noise Model:** Raw data follows Poisson noise, but preprocessing (motion/intensity correction) allows approximation as Gaussian noise for simplicity [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Faster than MLP-based neural fields because querying density uses trilinear interpolation instead of evaluating a neural network at each sample point [S1]. The octree structure accelerates computation by focusing on regions with features [S1].
+*   **Memory Complexity:** Lower than classical tomographic reconstruction techniques as it does not store the entire 3D volume during optimization, only the octree nodes and their grids [S1].
+*   **Performance:** Evaluated on datasets EMPIAR 10643, EMPIAR 10453, and EMPIAR 11462 [S1]. Outperforms SART+TV, Kniesel et al., and NeAT in reconstruction quality and denoising [S1].
+*   **Strengths:** Better detail preservation in complex regions, denoising in uniform regions, faster optimization and rendering than MLPs, explicit regularization for tomography-specific artifacts [S1].
+*   **Limitations:** Requires careful tuning of regularization weights ($k_{tv}, k_{cnlc}, k_{bc}$) and octree update parameters. The mixed-integer program for octree updates may be computationally expensive [S1].
+
+## Background
+*   **Origin:** Proposed by Wang et al. in "Adaptive differentiable grids for cryo-electron tomography reconstruction and denoising" (2023) [S1].
+*   **History:** Inspired by recent advances in neural representations (NeRF) and octree-based structures (ACORN, NeAT) to address the limitations of MLPs in cryo-ET, specifically high noise and slow training [S1].
+*   **Usage:** Used for cryo-electron tomography reconstruction and denoising [S1].
+
+## Sources
+[S1] Adaptive differentiable grids for cryo-electron tomography reconstruction and denoising, https://doi.org/10.1093/bioadv/vbad131, fetched 2026-10-27

@@ -1,0 +1,249 @@
+For a fixed rig, most of the scene is static yet pays full 4D cost. Split: pretrain background as pure 3D gaussians with 3D SH (16 vs 48 channels — SH is 89% of the 644 B/gaussian footprint), freeze or slow-update it, spend 4D capacity o...
+
+Static/dynamic decomposition with frozen 3D-SH background · Issue #20 · xuelongmu/4C4D · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Static/dynamic decomposition with frozen 3D-SH background #20
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Static/dynamic decomposition with frozen 3D-SH background#20
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+xuelongmu
+opened on Aug 8, 2026
+Issue body actions
+For a fixed rig, most of the scene is static yet pays full 4D cost. Split: pretrain background as pure 3D gaussians with 3D SH (16 vs 48 channels — SH is 89% of the 644 B/gaussian footprint), freeze or slow-update it, spend 4D capacity on the performer.
+Literature: Splatography (arXiv 2511.05152) reports up to +3 dB at half model size on sparse filmmaking rigs; Ex4DGS and QUEEN use similar splits. Natural hook: the temporal mask already built at gaussian_renderer/init.py:66-68 — cov_t spanning the whole clip ~= static. Also kills background flicker. Biggest combined speed+quality structural change available.
+Activity
+xuelongmu
+added
+enhancementNew feature or requestNew feature or request
+on Aug 8, 2026
+xuelongmu
+added a commit that references this issue on Aug 11, 2026
+Freeze temporal parameters of whole-clip static gaussians
+...
+958d98a
+xuelongmu commented on Aug 11, 2026
+xuelongmu
+on Aug 11, 2026
+OwnerAuthor
+More actions
+First slice measured (two-seed full A/B vs production profile): --freeze_static_temporal gives held-out 21.21/20.95 vs control 20.48/20.39 (+0.6-0.7 dB on both seeds, beyond the ±0.4 noise band), train +~1 dB, wall time unchanged. Adopted into the production config. The full split (3D-SH background subset, background pretraining) stays open — this result raises confidence in its larger ceiling. PR: #40.
+xuelongmu
+added 2 commits that reference this issue on Aug 11, 2026
+Adopt static-temporal freeze into production config
+...
+480ff5d
+Append seed-44 correction to static-freeze result
+...
+8ca3f9f
+xuelongmu commented on Aug 16, 2026
+xuelongmu
+on Aug 16, 2026
+OwnerAuthor
+More actions
+Correction — third seed puts this result in question. A seed-44 run of the adopted production+freeze config landed at held-out 20.15 dB, vs 21.21 (seed 42) and 20.95 (seed 43). That is a 1.06 dB spread across three seeds, and 20.15 sits below both control values (20.48 / 20.39) — so the two-seed "+0.6-0.7 dB" conclusion is not safe as stated.
+The ±0.4 dB noise band used to accept it was estimated from only two control runs (spread 0.09 dB) and was clearly too narrow.
+The paired seed-44 control (--no-freeze_static_temporal, same flags) is running now and decides it, with the rule fixed in advance: control@44 materially below 20.15 → freeze wins on all three seeds, adoption stands with a corrected noise band; control@44 at or above 20.15 → the win does not replicate and freeze_static_temporal reverts to a flag-only default, exactly as sqrt-batch LR (#16) was rejected.
+Until then treat the production-config default as provisional. Note that downstream A/Bs holding the freeze fixed in both arms (#19, #24, #17, and the full-split work) stay valid either way — they measure their own delta against a fixed base. Detail appended to docs/experiments/2026-08-10-enhancement-experiments.md.
+xuelongmu
+added a commit that references this issue on Aug 16, 2026
+Disable the static freeze default; record that its runs were invalid
+...
+bafea85
+xuelongmu commented on Aug 17, 2026
+xuelongmu
+on Aug 17, 2026
+OwnerAuthor
+More actions
+Full version measured. Negative on every arm — the lite freeze's +0.6–0.7 dB does not extend, and the evidence says it worked for the opposite reason to the one assumed. PR #41 (stacked on #40), write-up in docs/experiments/2026-08-16-issue-20-static-dynamic-split.md.
+Step 2 answered — why the frozen set was only 2.5%. Two structural causes, measured with a new scripts/temporal_stats.py:
+The whole-clip criterion is unreachable at init: scaling_t starts at duration/5, giving a half-width of 2.448 against the 2.500 a centred gaussian needs. The static set can only ever contain gaussians that grew their temporal extent.
+densify_and_split divides scaling_t by 0.8N per generation, so temporal support shrinks geometrically — median cov_t 1.0 → 0.022, median gaussian covering 7% of the clip. The logged 19% → 1% collapse spans exactly the densification window.
+Raising the static fraction works, and makes things worse. A persistent label carried through prune/clone/split takes it from 2.5% to ~30%. Held-out then falls monotonically with background share:
+configuration
+final bg share
+held-out
+Δ vs its seed control
+control (lite freeze)
+2.5%
+21.21 / 20.95
+—
+v1 + median pretrain (step 1)
+1.2%
+18.39
+−2.82
+v1 split
+2.3%
+17.81
+−3.14
+v2 split, frac 0.2
+28.5%
+16.88
+−4.33
+v2 split, frac 0.5
+29.8%
+15.89
+−5.32
+The split is not broken: background carries more weight than the dynamic layer (mean opacity 0.611 vs 0.326), train PSNR is within 1 dB of control, and background rows are bit-exactly frozen (302,970 rows, zero drift — the e52a797 Adam-drift bug does not reach this path). What moves is the train/held-out gap, 6.15 → 10.42 dB, with the best checkpoint at iteration 1,500 of 7,500.
+Reading: the lite freeze won because its set was small and self-selected. Freezing gaussians that already earned whole-clip support through the loss is a mild regulariser on genuinely static content; imposing whole-clip support makes broad temporally-constant primitives explain a 5 s clip from 8 viewpoints, and they fit the time-averaged training views in a way that does not transfer.
+Step 1 (background pretrain) tested as specified and also negative: −2.82 dB. After 1,500 iterations against per-camera medians, 28.4% of gaussians are already below the prune threshold — fitting 75k gaussians to 8 median images is badly under-constrained here, and the main run inherits that geometry. Since L1 already pulls a temporally constant gaussian toward the per-pixel temporal median, the pretrain buys a worse version of something the main objective does for free.
+bg_static_frac also does not control the background share (0.2 → 28.5%, 0.5 → 29.8%): background gaussians are temporally visible every frame and win densification consistently. So the approach cannot be rescued by tuning it down.
+Step 3 (3D SH for the static subset) not attempted, per the "only if 1–2 pan out" condition. Scoping note in the write-up: force_sh_3d exists but is global; per-gaussian routing needs a branch inside the rasterizer's SH evaluation plus a ragged feature buffer.
+Separate defect found on the way. readColmapSceneInfo normalises the frame index to [0, 10) regardless of clip length, so this config's time_duration: [0.0, 5.0] describes only the first half of its own 150-frame data — cameras span [0, 9.933]. Gaussian init, the rasterizer's temporal SH period and every whole-clip test read time_duration. Correcting the gaussian side costs 1.0–1.5 dB held-out on both seeds, so the accidental narrow init is acting as a regulariser. Worth its own issue, but explicitly not a naive fix — happy to file it if you want.
+Recommendation: close #20 as tested-negative and keep the lite --freeze_static_temporal as shipped. Three independent levers here all traded held-out for train fit, which is a capacity/regularisation signature rather than a representation one — that argues for Tier 2.2 (depth supervision) and 2.3 (pose deltas / colour affine) ahead of more structural work on the 4D representation.
+Caveat: all eight runs predate e52a797, so they are internally consistent but the control's absolute numbers were measured with a freeze that only partly held. Re-running the lite A/B on the fixed base is worth doing on its own.
+xuelongmu
+added a commit that references this issue on Aug 17, 2026
+Add regression tests for the static-freeze invariant
+...
+0a7d6d3
+xuelongmu commented on Aug 17, 2026
+xuelongmu
+on Aug 17, 2026
+OwnerAuthor
+More actions
+Status correction: #20-lite is not "a win that failed to replicate" — it was never validly measured. Paired per-seed results were +0.73 / +0.56 / −0.29 with the freeze arm spread at 1.06 dB against a 0.09 dB control spread, and code review (d8a7d29) then found that zeroed gradients never held the parameters under Adam and stale masks could pin unrelated gaussians after densification. All three runs measured that, not the feature.
+The production-config default is back to false. A clean six-run A/B (both arms, three seeds, same base revision) against the fixed implementation is in flight; I will post the result here. tests/test_static_freeze_invariant.py now guards the invariant.
+xuelongmu
+added 2 commits that reference this issue on Aug 17, 2026
+Fold the static-freeze retraction into the lessons and protocol
+...
+ec8ab8a
+Mark the invalid freeze runs in the experiment report
+...
+cbf325e
+xuelongmu commented on Aug 17, 2026
+xuelongmu
+on Aug 17, 2026
+OwnerAuthor
+More actions
+Final verdict: no effect, on any implementation. Re-scored on all 300 held-out images (the training metric was scoring 3):
+run
+300-image held-out
+ab8-nofreeze-s44 (control)
+20.35
+ab8-staticfreeze (s42)
+20.34
+ab8-staticfreeze-s43
+20.41
+ab8-staticfreeze-s44
+20.17
+The freeze arms bracket the control. The +0.6-0.7 dB I reported was 3-image measurement noise sitting on top of an implementation that did not freeze. This independently confirms the structural finding in #41: the whole-clip criterion is unreachable at initialization (scaling_t gives half-width 2.448 against the 2.500 required) and densification collapses temporal support geometrically, so almost nothing is ever classified static.
+Closing the loop on the lite variant: it stays flag-gated and off. tests/test_static_freeze_invariant.py guards the mechanism if anyone revisits it, and any future attempt needs a criterion that is reachable in the first place.
+xuelongmu
+added 2 commits that reference this issue on Aug 17, 2026
+Reframe the production profile as a speed/size trade
+...
+ab6f154
+Re-score issue-20 runs on the full held-out set and correct the write-up
+...
+4108140
+xuelongmu commented on Aug 17, 2026
+xuelongmu
+on Aug 17, 2026
+OwnerAuthor
+More actions
+Correction to the comment above — my held-out numbers were 3-image averages. Re-scored on the full set; one conclusion weakens, the main one holds, and a third thing turned up that matters for #40.
+Scene.getValidationCameras(num=100) takes test_cameras[::100] — 3 of 300 held-out images. Every number in my previous comment came from that estimator, including the controls. scripts/evaluate_full_heldout.py (on agent/quality-fixes) re-scores saved checkpoints against all 300 without retraining; its own docstring notes three same-config runs spread 1.68 dB on the 3-image version. I read the training logs instead of using it. Corrected numbers, chkpnt7000 on 300 images:
+run
+seed
+held-out
+Δ vs control mean
+SSIM
+3-img (what I reported)
+ab8-staticfreeze (control)
+42
+20.341
+—
+0.781
+21.21
+control
+43
+20.412
+—
+0.782
+20.95
+control
+44
+20.172
+—
+0.769
+—
+ab8-nofreeze-s44 (no freeze)
+44
+20.351
++0.04
+0.789
+—
+--fix_clip_bounds
+42
+19.885
+−0.42
+0.776
+20.16
+--fix_clip_bounds
+43
+19.485
+−0.82
+0.773
+19.45
+split v1
+43
+17.745
+−2.56
+0.697
+17.81
+split v1 + median pretrain
+42
+18.020
+−2.29
+0.730
+18.39
+split v2, frac 0.2
+42
+16.400
+−3.91
+0.639
+16.88
+split v2, frac 0.5
+42
+15.987
+−4.32
+0.612
+15.89
+Control mean 20.308 over seeds 42/43/44, spread 0.240 dB (sd 0.121) — the full-set estimator is roughly an order of magnitude tighter, so sub-dB effects become measurable. All ten runs verified to share identical config namespaces.
+Holds: the split is harmful, −2.29 to −4.32 dB, monotone in background share, 19σ or more against the control sd. Smaller magnitude than the 3-image numbers suggested (−4.32 rather than −5.32) but the same conclusion, and the mechanism checks are unaffected.
+Weakens: I said --fix_clip_bounds was "−1.05/−1.50 dB on both seeds, outside the noise band." On the full set it is −0.62 dB — about 3σ, but n=2 for the variant. Read as probably mildly harmful, not established. My earlier phrasing was overconfident.
+New, and it concerns #40 rather than this issue: ab8-staticfreeze-s44 and ab8-nofreeze-s44 are a matched pair (identical config namespaces except freeze_static_temporal), and the freeze loses — 20.172 vs 20.351 dB, 0.769 vs 0.789 SSIM. The three-seed freeze mean is likewise indistinguishable from that one no-freeze run. #40's +0.6–0.7 dB was measured on the 3-image estimator; on the full held-out set the gap does not appear.
+One no-freeze run cannot settle that, and both seed-44 runs predate e52a797 (so they measure the partly-holding freeze). But it should be resolved before #40 merges — two or three more --no-freeze_static_temporal runs re-scored on the full set would do it. I have not run those; flagging rather than acting since it is #40's scope, not this issue's.
+If it holds, the premise of this issue — "the lite freeze won +0.6–0.7 dB, so raising the static fraction should amplify it" — rests on a measurement artifact, which would also explain why every attempt to amplify it made things worse.
+Recommendation unchanged: close #20 as tested-negative. Raw scores are committed in PR #41 at docs/experiments/data/2026-08-16-issue-20-full-heldout.json.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

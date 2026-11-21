@@ -1,0 +1,452 @@
+--- v005.md
++++ v006.md
+@@ -4,266 +4,166 @@
+ 
+ ## Overview
+-Non-Linear Sphere Tracing (NLST) is a rendering method for directly visualizing deformed Signed Distance Fields (SDFs) without converting them to explicit meshes or requiring the analytic inverse of the deformation function [S1]. It solves the incompatibility between standard sphere tracing—which assumes straight rays in object space—and non-linear deformations that curve these rays in the undeformed domain [S1]. Unlike meshing approaches like Marching Cubes, NLST preserves infinite resolution and sharp features while avoiding the computational cost of high-resolution grid remeshing [S1].
++Non-Linear Sphere Tracing (NLST) is a ray marching method for rendering Signed Distance Fields (SDFs) that have been subjected to non-linear spatial deformations [S1]. It solves the problem that standard sphere tracing fails on deformed SDFs because the deformation invalidates the Euclidean distance metric required for conservative stepping, and computing the inverse deformation $D^{-1}$ along the ray is often impossible or expensive [S1]. Unlike standard sphere tracing, which steps linearly in world space, NLST traces rays in the undeformed (object) space by integrating an ordinary differential equation (ODE) that accounts for the deformation's Jacobian, allowing it to handle complex deformations like Linear Blend Skinning (LBS) and Free-Form Deformations (FFDs) without requiring analytic inverse transformations [S1].
+ 
+ ## How it works
+-NLST formulates the ray intersection problem in the undeformed (object) space as an Initial Value Problem (IVP) for an ordinary differential equation (ODE) [S1]. The core insight is that a straight ray in deformed space maps to a curved path in undeformed space. By integrating this curve, the algorithm steps through the SDF using the standard sphere tracing distance bound, but with a direction vector adjusted by the deformation's Jacobian [S1].
++NLST reformulates the ray intersection problem as an initial value problem (IVP) in undeformed space. The core insight is that while a straight ray in deformed space becomes a curve in undeformed space, the arc-length parameterization of this curve allows the use of sphere tracing step sizes derived from the undeformed SDF [S1].
+ 
+ ### Inputs and Outputs
+ *   **Inputs**:
+-    *   Ray origin $\mathbf{p}$ and normalized direction $\boldsymbol{\omega}$ in deformed (world) space.
++    *   Ray origin $\mathbf{p}$ in deformed (world) space.
++    *   Ray direction $\boldsymbol{\omega}$ in deformed space (normalized).
+     *   Deformation function $D: \mathbb{R}^3 \to \mathbb{R}^3$ mapping undeformed points to deformed points.
+-    *   SDF function $S: \mathbb{R}^3 \to \mathbb{R}$ defined in undeformed space.
+-    *   Parameters: `MAX_STEPS`, `MAX_DISTANCE`, `THRESHOLD` (epsilon), `NORMAL_DIFFERENTIAL` ($h$).
++    *   Undeformed SDF $S: \mathbb{R}^3 \to \mathbb{R}$.
++    *   Maximum steps $N_{max}$, maximum distance $t_{max}$, convergence threshold $\epsilon$.
+ *   **Outputs**:
+     *   Hit distance $t$ in deformed space.
+-    *   Hit position $\mathbf{x}'$ in deformed space.
+-    *   Corrected normal $\mathbf{n}'$ in deformed space.
++    *   Hit point $\mathbf{x}$ in deformed space.
++    *   Normal $\mathbf{n}$ in deformed space.
+ 
+ ### Data Structures
+-*   **SceneHit**: A struct containing:
+-    *   `position`: `float3` (current position in undeformed space during integration, deformed space for output).
+-    *   `normal`: `float3` (gradient of SDF, later transformed).
++*   **SceneHit**: A structure containing:
++    *   `position`: `float3` (deformed space position).
++    *   `normal`: `float3` (deformed space normal).
+     *   `distanceTravelled`: `float` (accumulated distance in deformed space).
+-    *   `hit`: `bool` (flag for convergence).
++    *   `hit`: `bool` (flag indicating surface intersection).
+ 
+ ### Algorithm Steps
+ 
+-1.  **Initialization**:
+-    *   Initialize `sceneHit.position` to the ray origin $\mathbf{p}$.
+-    *   Initialize `sceneHit.normal` to $(0,0,0)$.
+-    *   Initialize `sceneHit.distanceTravelled` to $0.0$.
+-    *   Initialize `sceneHit.hit` to `false`.
+-
+-2.  **Hull-Based Initialization (Seed Point)**:
+-    *   To avoid computing the global inverse deformation $D^{-1}(\mathbf{p})$, which may not exist or be expensive, generate a coarse hull mesh enclosing the implicit surface using Marching Cubes at a low resolution (e.g., $32^3$) [S1].
+-    *   Deform this hull using $D$.
+-    *   Rasterize the deformed hull.
+-    *   For the current pixel, retrieve the deformed-space position from the rasterization.
+-    *   Transform this position back to undeformed space via barycentric interpolation across the corresponding hull face to obtain the initial undeformed start point $\hat{\mathbf{x}}_0$ [S1].
+-    *   *Note*: If the ray does not intersect the hull, fall back to a naive estimate or discard [G].
+-
+-3.  **Ray Integration Loop**:
+-    *   Loop for $i$ from $0$ to `MAX_STEPS` - 1:
+-        *   Evaluate the SDF at the current undeformed position: $d = S(\text{sceneHit.position})$.
+-        *   **Termination Check**:
+-            *   If $d < \text{THRESHOLD}$, set `sceneHit.hit` = `true`, compute the standard normal $\mathbf{n} = \nabla S(\text{sceneHit.position})$ using finite differences, and break the loop.
+-            *   If `sceneHit.distanceTravelled` $\ge$ `MAX_DISTANCE`, break the loop.
+-        *   **Step Size**: Let $h = |d|$.
+-        *   **Compute Vector Field**:
+-            *   Compute the Jacobian matrix $J$ of the deformation $D$ at the current undeformed position $\hat{\mathbf{x}}$ using central finite differences with step size `NORMAL_DIFFERENTIAL` ($h_{diff}$) [S2, unofficial]:
+-                $$ J_{ij} = \frac{D_i(\hat{\mathbf{x}} + h_{diff}\mathbf{e}_j) - D_i(\hat{\mathbf{x}} - h_{diff}\mathbf{e}_j)}{2 h_{diff}} $$
+-            *   Compute the inverse Jacobian $J^{-1}$ [S2, unofficial].
+-            *   Compute the normalized tangent vector in undeformed space:
+-                $$ \boldsymbol{\omega}(\hat{\mathbf{x}}) = \frac{J^{-1} \boldsymbol{\omega}_0}{\| J^{-1} \boldsymbol{\omega}_0 \|} $$
+-                where $\boldsymbol{\omega}_0$ is the initial ray direction in deformed space [S1].
+-        *   **Integrate (Runge-Kutta 4)**:
+-            *   Perform a 4th-order Runge-Kutta step to advance the undeformed position $\hat{\mathbf{x}}$ by distance $h$ along the curved path defined by $\boldsymbol{\omega}(\hat{\mathbf{x}})$ [S2, unofficial]:
+-                $$ k_1 = \boldsymbol{\omega}(\hat{\mathbf{x}}) $$
+-                $$ k_2 = \boldsymbol{\omega}(\hat{\mathbf{x}} + 0.5 h k_1) $$
+-                $$ k_3 = \boldsymbol{\omega}(\hat{\mathbf{x}} + 0.5 h k_2) $$
+-                $$ k_4 = \boldsymbol{\omega}(\hat{\mathbf{x}} + h k_3) $$
+-                $$ \hat{\mathbf{x}}_{new} = \hat{\mathbf{x}} + \frac{h}{6} (k_1 + 2k_2 + 2k_3 + k_4) $$
+-            *   Update `sceneHit.position` to $\hat{\mathbf{x}}_{new}$.
+-        *   **Accumulate Distance**:
+-            *   `sceneHit.distanceTravelled` += $h$.
+-
+-4.  **Post-Processing**:
+-    *   If `sceneHit.hit` is true:
+-        *   Transform the hit position to deformed space: $\mathbf{x}' = D(\text{sceneHit.position})$.
+-        *   Transform the normal to deformed space using the inverse transpose of the Jacobian:
+-            $$ \mathbf{n}' = \frac{(J^{-1})^T \mathbf{n}}{\| (J^{-1})^T \mathbf{n} \|} $$
+-        *   Recompute the camera-space depth of $\mathbf{x}'$ for depth testing [S1].
+-    *   Return `sceneHit`.
++1.  **Hull-Based Initialization (Optional but Recommended)**:
++    To avoid computing $D^{-1}(\mathbf{p})$ for the ray origin (which may not exist), generate a coarse triangle mesh hull enclosing the implicit surface using marching cubes at a low resolution (e.g., $32^3$ grid) [S1]. Deform this hull using $D$ and rasterize it. For the current ray, retrieve the deformed-space position from the rasterized hull and transform it back to undeformed space via barycentric interpolation across the corresponding hull face [S1]. This provides an approximate undeformed start point $\hat{\mathbf{x}}_0$ close to the surface [S1]. If no hull is used, $\hat{\mathbf{x}}_0$ must be computed as $D^{-1}(\mathbf{p})$ [S1].
++
++2.  **Ray Integral Formulation**:
++    The ray in undeformed space $\hat{\mathbf{x}}(\hat{s})$ is parameterized by arc-length $\hat{s}$:
++    $$ \hat{\mathbf{x}}(\hat{s}) = \hat{\mathbf{x}}_0 + \int_0^{\hat{s}} \hat{\boldsymbol{\omega}}(\hat{\mathbf{x}}(t)) \, dt $$
++    where the unit tangent vector $\hat{\boldsymbol{\omega}}$ is:
++    $$ \hat{\boldsymbol{\omega}}(\hat{\mathbf{x}}) = \frac{J_D^{-1}(\hat{\mathbf{x}}) \boldsymbol{\omega}}{\| J_D^{-1}(\hat{\mathbf{x}}) \boldsymbol{\omega} \|} $$
++    Here, $J_D(\hat{\mathbf{x}})$ is the Jacobian matrix of the deformation $D$ evaluated at the undeformed point $\hat{\mathbf{x}}$ [S1].
++
++3.  **Marching Loop**:
++    For each step $i$ from 0 to $N_{max}-1$:
++    *   **Evaluate SDF**: Compute $d = S(\hat{\mathbf{x}}_i)$.
++    *   **Termination**:
++        *   If $d < \epsilon$, a hit is detected. Break loop.
++        *   If accumulated distance $> t_{max}$, escape. Break loop.
++    *   **Step Size**: Let $h = |d|$.
++    *   **Integration**: Advance the position using a numerical ODE solver (e.g., 4th-order Runge-Kutta) to find $\hat{\mathbf{x}}_{i+1}$. The vector field is $\boldsymbol{\omega}(\hat{\mathbf{x}}, \boldsymbol{\omega}_0) = \text{normalize}(J_D^{-1}(\hat{\mathbf{x}}) \boldsymbol{\omega}_0)$ [S2, unofficial].
++        $$ \begin{aligned} k_1 &= \boldsymbol{\omega}(\hat{\mathbf{x}}_i, \boldsymbol{\omega}_0) \\ k_2 &= \boldsymbol{\omega}(\hat{\mathbf{x}}_i + 0.5 h k_1, \boldsymbol{\omega}_0) \\ k_3 &= \boldsymbol{\omega}(\hat{\mathbf{x}}_i + 0.5 h k_2, \boldsymbol{\omega}_0) \\ k_4 &= \boldsymbol{\omega}(\hat{\mathbf{x}}_i + h k_3, \boldsymbol{\omega}_0) \\ \hat{\mathbf{x}}_{i+1} &= \hat{\mathbf{x}}_i + \frac{h}{6} (k_1 + 2k_2 + 2k_3 + k_4) \end{aligned} $$
++        [S2, unofficial]. This sub-stepping ensures accuracy along the curved ray path without requiring additional SDF evaluations [S1].
++
++4.  **Hit Processing**:
++    *   **Deformed Position**: Compute $\mathbf{x}_{hit} = D(\hat{\mathbf{x}}_{final})$ [S1].
++    *   **Normal Transformation**: Retrieve the undeformed normal $\mathbf{n}_{obj} = \nabla S(\hat{\mathbf{x}}_{final})$ (via finite differences). Transform it to deformed space:
++        $$ \mathbf{n}_{deformed} = \frac{(J_D^{-1}(\hat{\mathbf{x}}_{final}))^T \mathbf{n}_{obj}}{\| (J_D^{-1}(\hat{\mathbf{x}}_{final}))^T \mathbf{n}_{obj} \|} $$
++        [S1][S2, unofficial].
++    *   **Distance**: The hit distance in deformed space is the accumulated arc-length or computed via ray parameterization [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def compute_jacobian(deform_func, x, h_diff):
++import math
++
++def normalize(v):
++    length = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++    if length == 0: return (0,0,0)
++    return (v[0]/length, v[1]/length, v[2]/length)
++
++def matrix_vector_mul(M, v):
++    # M is 3x3, v is 3
++    return (
++        M[0][0]*v[0] + M[0][1]*v[1] + M[0][2]*v[2],
++        M[1][0]*v[0] + M[1][1]*v[1] + M[1][2]*v[2],
++        M[2][0]*v[0] + M[2][1]*v[1] + M[2][2]*v[2]
++    )
++
++def transpose_matrix(M):
++    return (
++        (M[0][0], M[1][0], M[2][0]),
++        (M[0][1], M[1][1], M[2][1]),
++        (M[0][2], M[1][2], M[2][2])
++    )
++
++def invert_matrix_3x3(M):
++    # Simple 3x3 inversion for Jacobian
++    # Not given in sources, standard linear algebra implementation required [G]
++    # Placeholder for implementation detail
++    pass
++
++def get_jacobian(deform_func, x, h=0.0001):
++    # Central finite differences
++    # h_vec = (h, 0, 0)
++    # dfdx = deform(x + h_vec) - deform(x - h_vec)
++    # ... similar for y, z
++    # Construct 3x3 matrix from gradients
++    # Not given in sources, standard finite difference implementation required [G]
++    pass
++
++def nlst(ray_origin_deformed, ray_direction_deformed, deform_func, sdf_func, max_steps=200, max_dist=400.0, epsilon=0.0001):
+     """
+-    Computes the Jacobian matrix of the deformation function at x
+-    using central finite differences.
++    Non-Linear Sphere Tracing
+     """
+-    # Basis vectors
+-    e1 = (h_diff, 0.0, 0.0)
+-    e2 = (0.0, h_diff, 0.0)
+-    e3 = (0.0, 0.0, h_diff)
++    # 1. Initialization
++    # In practice, use hull-based initialization to get x_hat_0 [S1]
++    # Here we assume x_hat_0 is provided or computed via D_inv(p) [S1]
++    x_hat = invert_deformation(ray_origin_deformed) # Requires D_inv, see pitfall [S1]
+     
+-    # Forward and backward differences
+-    dfdx = deform_func(x + e1) - deform_func(x - e1)
+-    dfdy = deform_func(x + e2) - deform_func(x - e2)
+-    dfdz = deform_func(x + e3) - deform_func(x - e3)
++    # Initial direction in deformed space
++    omega_0 = ray_direction_deformed
+     
+-    # Gradients for each component
+-    grad1 = (dfdx.x, dfdy.x, dfdz.x) / (2.0 * h_diff)
+-    grad2 = (dfdx.y, dfdy.y, dfdz.y) / (2.0 * h_diff)
+-    grad3 = (dfdx.z, dfdy.z, dfdz.z) / (2.0 * h_diff)
+-    
+-    # Construct Jacobian matrix (columns are gradients)
+-    # J = [grad1, grad2, grad3]
+-    J = (grad1, grad2, grad3)
+-    return J
+-
+-def invert_matrix_3x3(J):
+-    """
+-    Inverts a 3x3 matrix represented as a tuple of 3 vectors (rows or cols depending on convention).
+-    Here J is stored as (col1, col2, col3).
+-    """
+-    # Standard 3x3 inversion formula
+-    a, b, c = J[0]
+-    d, e, f = J[1]
+-    g, h, i = J[2]
+-    
+-    det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g)
+-    if abs(det) < 1e-10:
+-        return None # Singular
+-    
+-    inv_det = 1.0 / det
+-    inv = (
+-        ((e*i - f*h)*inv_det, (c*h - b*i)*inv_det, (b*f - c*e)*inv_det),
+-        ((f*g - d*i)*inv_det, (a*i - c*g)*inv_det, (c*d - a*f)*inv_det),
+-        ((d*h - e*g)*inv_det, (b*g - a*h)*inv_det, (a*e - b*d)*inv_det)
+-    )
+-    return inv
+-
+-def nlst(ray_origin, ray_direction, deform_func, sdf_func, max_steps, max_distance, threshold, normal_diff):
+-    """
+-    Non-Linear Sphere Tracing.
+-    Assumes hull-based initialization has provided a good starting point x0 in undeformed space.
+-    """
+-    # Initialize
+-    current_pos = ray_origin # Start in deformed space, but we need undeformed start point
+-    # Note: In practice, current_pos is set to the result of hull interpolation (undeformed space)
+-    # For this pseudocode, we assume x0_undeformed is passed or computed externally.
+-    # Here we simulate the loop starting from an undeformed position.
+-    
+-    # To make this self-contained, we assume x0_undeformed is known.
+-    # In the full pipeline, this comes from the hull rasterization step.
+-    # We will define a placeholder for the start point.
+-    x0_undeformed = ray_origin # Placeholder: Replace with hull-interpolated undeformed point
+-    
+-    current_pos = x0_undeformed
+     dist_travelled = 0.0
+-    hit = False
+-    hit_normal = (0.0, 0.0, 0.0)
+     
+     for _ in range(max_steps):
+-        if dist_travelled >= max_distance:
+-            break
+-            
+-        # Evaluate SDF
+-        sdf_val = sdf_func(current_pos)
+-        
+-        # Check hit
+-        if sdf_val < threshold:
+-            hit = True
+-            # Compute gradient for normal
+-            # Using same finite difference method as Jacobian but for SDF
+-            h = normal_diff
+-            e1 = (h, 0.0, 0.0)
+-            e2 = (0.0, h, 0.0)
+-            e3 = (0.0, 0.0, h)
+-            
+-            dfdx = sdf_func(current_pos + e1) - sdf_func(current_pos - e1)
+-            dfdy = sdf_func(current_pos + e2) - sdf_func(current_pos - e2)
+-            dfdz = sdf_func(current_pos + e3) - sdf_func(current_pos - e3)
+-            
+-            hit_normal = (dfdx/(2*h), dfdy/(2*h), dfdz/(2*h))
+-            break
++        if dist_travelled > max_dist:
++            return None, None, None
++            
++        # Evaluate SDF in undeformed space
++        sdf_val = sdf_func(x_hat)
++        
++        # Termination check
++        if sdf_val < epsilon:
++            # Hit detected
++            # Transform hit point to deformed space
++            x_deformed = deform_func(x_hat)
++            
++            # Compute normal
++            # 1. Get undeformed normal via finite differences on SDF [S1]
++            n_obj = get_sdf_normal(sdf_func, x_hat)
++            
++            # 2. Get Jacobian at hit point
++            J = get_jacobian(deform_func, x_hat)
++            J_inv = invert_matrix_3x3(J)
++            
++            # 3. Transform normal
++            # n_deformed = normalize((J_inv)^T * n_obj) [S1][S2, unofficial]
++            J_T = transpose_matrix(J_inv)
++            n_deformed_raw = matrix_vector_mul(J_T, n_obj)
++            n_deformed = normalize(n_deformed_raw)
++            
++            return dist_travelled, x_deformed, n_deformed
+             
+         # Step size
+-        h_step = abs(sdf_val)
+-        
+-        # Compute Jacobian and its inverse
+-        J = compute_jacobian(deform_func, current_pos, normal_diff)
+-        J_inv = invert_matrix_3x3(J)
+-        
+-        if J_inv is None:
+-            # Singular Jacobian, fallback or break
+-            break
+-            
+-        # Compute vector field omega
+-        # omega0 is the initial ray direction in deformed space
+-        # Transform omega0 by J_inv
+-        # J_inv is tuple of rows? No, our invert returned rows. 
+-        # Let's assume J_inv is rows. We need J_inv * omega0.
+-        
+-        omega0 = ray_direction # This is the direction in deformed space? 
+-        # Wait, the formula uses omega0 as the direction in deformed space.
+-        # But current_pos is in undeformed space.
+-        # The vector field is defined in undeformed space.
+-        
+-        # Multiply J_inv (3x3) by omega0 (vec3)
+-        # J_inv rows: r1, r2, r3
+-        r1, r2, r3 = J_inv
+-        transformed_dir = (
+-            r1[0]*omega0.x + r1[1]*omega0.y + r1[2]*omega0.z,
+-            r2[0]*omega0.x + r2[1]*omega0.y + r2[2]*omega0.z,
+-            r3[0]*omega0.x + r3[1]*omega0.y + r3[2]*omega0.z
++        h = abs(sdf_val)
++        
++        # Define vector field omega(x) = normalize(J_inv(x) * omega_0) [S2, unofficial]
++        def get_omega(x):
++            J = get_jacobian(deform_func, x)
++            J_inv = invert_matrix_3x3(J)
++            v = matrix_vector_mul(J_inv, omega_0)
++            return normalize(v)
++            
++        # Runge-Kutta 4th Order Step [S2, unofficial]
++        k1 = get_omega(x_hat)
++        k2 = get_omega((x_hat[0] + 0.5*h*k1[0], x_hat[1] + 0.5*h*k1[1], x_hat[2] + 0.5*h*k1[2]))
++        k3 = get_omega((x_hat[0] + 0.5*h*k2[0], x_hat[1] + 0.5*h*k2[1], x_hat[2] + 0.5*h*k2[2]))
++        k4 = get_omega((x_hat[0] + h*k3[0], x_hat[1] + h*k3[1], x_hat[2] + h*k3[2]))
++        
++        x_hat = (
++            x_hat[0] + (h/6.0)*(k1[0] + 2*k2[0] + 2*k3[0] + k4[0]),
++            x_hat[1] + (h/6.0)*(k1[1] + 2*k2[1] + 2*k3[1] + k4[1]),
++            x_hat[2] + (h/6.0)*(k1[2] + 2*k2[2] + 2*k3[2] + k4[2])
+         )
+         
+-        # Normalize
+-        norm = sqrt(transformed_dir.x**2 + transformed_dir.y**2 + transformed_dir.z**2)
+-        if norm < 1e-10:
+-            break
+-        omega = (transformed_dir.x/norm, transformed_dir.y/norm, transformed_dir.z/norm)
+-        
+-        # Runge-Kutta 4
+-        def get_omega(x):
+-            # Recompute J_inv for this x (expensive, but necessary for accuracy)
+-            J_x = compute_jacobian(deform_func, x, normal_diff)
+-            J_inv_x = invert_matrix_3x3(J_x)
+-            if J_inv_x is None:
+-                return omega # Fallback
+-            
+-            r1, r2, r3 = J_inv_x
+-            td = (
+-                r1[0]*omega0.x + r1[1]*omega0.y + r1[2]*omega0.z,
+-                r2[0]*omega0.x + r2[1]*omega0.y + r2[2]*omega0.z,
+-                r3[0]*omega0.x + r3[1]*omega0.y + r3[2]*omega0.z
+-            )
+-            n = sqrt(td.x**2 + td.y**2 + td.z**2)
+-            if n < 1e-10: return omega
+-            return (td.x/n, td.y/n, td.z/n)
+-
+-        k1 = omega
+-        k2 = get_omega((current_pos[0] + 0.5*h_step*k1[0], current_pos[1] + 0.5*h_step*k1[1], current_pos[2] + 0.5*h_step*k1[2]))
+-        k3 = get_omega((current_pos[0] + 0.5*h_step*k2[0], current_pos[1] + 0.5*h_step*k2[1], current_pos[2] + 0.5*h_step*k2[2]))
+-        k4 = get_omega((current_pos[0] + h_step*k3[0], current_pos[1] + h_step*k3[1], current_pos[2] + h_step*k3[2]))
+-        
+-        current_pos = (
+-            current_pos[0] + (h_step/6.0)*(k1[0] + 2*k2[0] + 2*k3[0] + k4[0]),
+-            current_pos[1] + (h_step/6.0)*(k1[1] + 2*k2[1] + 2*k3[1] + k4[1]),
+-            current_pos[2] + (h_step/6.0)*(k1[2] + 2*k2[2] + 2*k3[2] + k4[2])
+-        )
+-        
+-        dist_travelled += h_step
+-        
+-    if hit:
+-        # Transform hit point to deformed space
+-        hit_point_deformed = deform_func(current_pos)
+-        
+-        # Transform normal
+-        # Use J_inv at hit point
+-        J_hit = compute_jacobian(deform_func, current_pos, normal_diff)
+-        J_inv_hit = invert_matrix_3x3(J_hit)
+-        
+-        # Normal correction: (J^-1)^T * n
+-        # J_inv_hit is rows. Transpose means columns become rows.
+-        # (J^-1)^T * n
+-        r1, r2, r3 = J_inv_hit
+-        # n is hit_normal
+-        n = hit_normal
+-        corrected_n = (
+-            r1[0]*n.x + r2[0]*n.y + r3[0]*n.z,
+-            r1[1]*n.x + r2[1]*n.y + r3[1]*n.z,
+-            r1[2]*n.x + r2[2]*n.y + r3[2]*n.z
+-        )
+-        norm_n = sqrt(corrected_n[0]**2 + corrected_n[1]**2 + corrected_n[2]**2)
+-        if norm_n > 1e-10:
+-            corrected_n = (corrected_n[0]/norm_n, corrected_n[1]/norm_n, corrected_n[2]/norm_n)
+-            
+-        return hit_point_deformed, corrected_n, dist_travelled
+-    else:
+-        return None, None, None
++        dist_travelled += h
++        
++    return None, None, None
+ ```
+ 
+@@ -271,28 +171,34 @@
+ *   `MAX_STEPS`: Integer, default 200 [S2, unofficial].
+ *   `MAX_DISTANCE`: Float, default 400.0 [S2, unofficial].
+-*   `THRESHOLD`: Float, default 0.0001 [S2, unofficial].
+-*   `NORMAL_DIFFERENTIAL`: Float, default 0.0001 [S2, unofficial].
+-*   `DEFORMATION_PARAMETER`: Scalar `alpha` for specific deformations (e.g., sinusoidal twist), default 1.0 [S2, unofficial].
++*   `THRESHOLD` ($\epsilon$): Float, default 0.0001 [S2, unofficial].
++*   `NORMAL_DIFFERENTIAL` ($h$): Float, default 0.0001, used for Jacobian and SDF gradient finite differences [S2, unofficial].
++*   `DEFORMATION_PARAMETER` ($\alpha$): Float, default 1.0, used in specific deformation functions (e.g., sinusoidal twist) [S2, unofficial].
++*   **Hull Resolution**: Typically low, rarely higher than $32^3$, used for initialization [S1].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Singular Jacobian**: If the deformation causes folding or compression such that $J_D$ is singular, the inverse $J^{-1}$ is undefined or numerically unstable [S1][S2, unofficial].
+-*   **Inverse Deformation**: The method avoids computing $D^{-1}$ globally, but requires a local inverse via the Jacobian. If $D$ is not locally invertible (foldovers), the method fails [S1].
+-*   **Concave Objects**: Limited `MAX_STEPS` may cause the ray to escape before hitting the surface in concave regions [S1].
+-*   **Performance**: Computing the Jacobian and its inverse at every Runge-Kutta substep is expensive. Naive step reduction (reducing $h$) increases SDF evaluations and degrades performance to naive ray marching [S1].
++*   **Inverse Deformation**: The method requires $D^{-1}$ at least once to seed $\hat{\mathbf{x}}_0 = D^{-1}(\mathbf{p})$ if hull initialization is not used. This makes it incompatible with deformations where the inverse does not exist or is not unique (e.g., some smooth skinning cases) [S1]. Hull initialization avoids this [S1].
++*   **Jacobian Singularity**: The Jacobian $J_D$ must be invertible. If the deformation causes folding or singularities, the inverse is unstable [S1][S2, unofficial].
++*   **Concave Objects**: Limited max steps may cause premature termination on concave objects, missing the surface [S1].
++*   **Performance**: SDF evaluations are expensive. Naive step reduction improves accuracy but degrades performance [S1]. The Runge-Kutta integration requires multiple Jacobian evaluations per step, which is computationally heavy [S2, unofficial].
++*   **Gradient Bound**: Sphere tracing requires $\|\nabla S\| \approx 1$. If the gradient bound is violated, step sizes are no longer conservative [S1].
+ 
+ ## Subtopics
+ 
+-### Hull-based initialization for non-linear sphere tracing
+-A variant that avoids the need for a global inverse deformation $D^{-1}$. It generates a coarse triangle mesh hull enclosing the implicit surface via Marching Cubes at a low resolution (e.g., $32^3$), deforms this hull using the forward deformation $D$, and rasterizes it. The deformed-space position retrieved from rasterization is transformed back to undeformed space via barycentric interpolation across the hull face to provide the initial start point $\hat{\mathbf{x}}_0$ for the NLST integration [S1]. This allows the use of deformations where the analytic inverse does not exist or is not known [S1].
++### [Coarse-to-Fine Sphere Tracing](4615-coarse-to-fine-sphere-tracing.md)
++Coarse-to-Fine Sphere Tracing is an acceleration strategy that exploits spatial coherence by marching at low resolution first. It differs from NLST by operating in linear Euclidean space rather than deformed manifolds, serving as a general optimization for standard sphere tracing rather than a deformation-specific solver.
++
++### [Parabolic Sphere Tracing](14525-parabolic-sphere-tracing.md)
++Parabolic Sphere Tracing is a method for heterogeneous media where the squared refractive index varies linearly. It sets itself apart from NLST by replacing iterative distance-field stepping with closed-form polynomial evaluation, avoiding numerical integration (Runge-Kutta) in favor of exact algebraic solutions when the refractive index gradient is constant.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Dominated by SDF evaluations and Jacobian computations. The Runge-Kutta integration requires multiple Jacobian evaluations per step, but no additional SDF evaluations for the substeps [S1].
+-*   **Memory Complexity**: Low, requiring storage for the hull mesh (if used) and per-pixel state.
+-*   **Performance**: On an NVIDIA Titan RTX at 1080p, NLST runs at ~10-13ms for complex scenes (Dinosaur, Head, Elephant), significantly faster than high-resolution Marching Cubes (e.g., S=512 takes ~2000ms) [S1].
+-*   **Strengths**: Preserves thin and sharp features; handles non-linear deformations (LBS, FFDs, Kelvinlets) without meshing artifacts; supports deformations without analytic inverses [S1].
+-*   **Limitations**: Cannot handle self-intersecting geometry or foldovers; performance degrades at grazing angles; requires locally invertible deformations [S1].
++*   **Time Complexity**: Dominated by SDF evaluations and Jacobian computations per step. Frame times on NVIDIA Titan RTX at 1080p are comparable to low-resolution marching cubes (e.g., 10-13ms vs 6-9ms for S=32-64) but significantly faster than high-resolution meshing (e.g., 150ms+ for S=256) [S1].
++*   **Memory Complexity**: Low, as it does not require storing a dense mesh or voxel grid for the final render, only the SDF and deformation parameters [S1].
++*   **Strengths**: Preserves thin/sharp features, supports infinite resolution, handles complex forward deformations (LBS, FFDs) without inverse computation (with hull init), and allows real-time editing [S1].
++*   **Limitations**: Slower than rasterized explicit geometry, sensitive to Jacobian singularities, requires $\|\nabla S\| \approx 1$, and performance degrades at grazing angles [S1].
++*   **When to Use**: Interactive rendering of deformed implicit surfaces, character animation with LBS, volumetric modeling with deformation [S1].
++*   **When Not to Use**: When inverse deformation is available and simple, or when extreme performance is required and explicit meshes are acceptable [S1].
+ 
+ ## Background
+-NLST was introduced by Dario Seyb, Alec Jacobson, Derek Nowrouzezahrai, and Wojciech Jarosz in their 2020 paper "Non-linear sphere tracing for rendering deformed signed distance fields" [S1]. It addresses the limitation of standard sphere tracing, which assumes straight rays in object space, making it incompatible with non-linear deformations like Linear Blend Skinning (LBS) where the inverse deformation is often unknown or non-existent [S1]. The method builds on Barr's formulation for deforming parametric curves by casting the ray intersection as an ODE [S1].
++NLST was introduced by Dario Seyb, Alec Jacobson, Derek Nowrouzezahrai, and Wojciech Jarosz in 2020 [S1]. It builds on Barr's [1984] formulation for deforming parametric curves/surfaces [S1]. The method addresses the limitations of meshing-based deformation (loss of detail, recomputation cost) and inverse-deformation-based methods (non-existence of inverses) [S1]. It is implemented in prototype applications using Unity3D and supports various SDF representations including grids, procedural shaders, and analytic brushes [S1].
+ 
+ ## Sources

@@ -1,0 +1,190 @@
+# DashGaussian Primitive Growth Control
+
+Also called: Double-condition Densification, Primitive Scheduler
+
+## Overview
+DashGaussian Primitive Growth Control is a densification scheme that limits the final number of 3D Gaussian primitives ($N_{GS}$) by combining a threshold-based selection with a top-$k$ selection, preventing primitive explosion while maintaining reconstruction quality [S1]. It sets itself apart from standard 3D Gaussian Splatting densification by introducing a primitive budget upper-bound ($P_{fin}$) and a scheduler that dynamically constrains growth in both early low-resolution (LR) and late high-resolution (HR) optimization stages [S1].
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs:** Current set of 3D Gaussian primitives, densification scores for each primitive, current primitive count $N_{GS}$, target primitive budget upper-bound $P_{fin}$, hyper-parameters $\gamma$ and $\eta$, and initial resolution factor $a$.
+*   **Outputs:** A subset of primitives selected for densification (splitting or cloning), constrained such that the final primitive count does not exceed $P_{fin}$ significantly, and the optimization continues with Adam optimizer [S1].
+
+### Data Structures
+*   **Primitive List:** A collection of 3D Gaussians. Each Gaussian typically contains position, covariance (or scale/orientation), opacity, and spherical harmonic coefficients. The exact layout depends on the backbone (e.g., Taming-3DGS, Mip-Splatting) [S1].
+*   **Densification Scores:** A scalar value per primitive indicating its need for densification (e.g., based on gradient magnitude or view-space error) [S1].
+*   **Scheduler State:** Tracks the current primitive count $N_{GS}$ and the number of primitives added in the current step $P_{add}$ [S1].
+
+### Parameters
+*   **$P_{fin}$:** Primitive number upper-bound used in the scheduler [S1].
+*   **$\gamma$ (gamma):** Hyper-parameter controlling the primitive budget convergence. Larger $\gamma$ increases $P_{fin}$, leading to larger $N_{GS}$, higher quality, and longer optimization time. Typical value: 0.98 [S1].
+*   **$\eta$ (eta):** Hyper-parameter in the primitive scheduler equation. Combined with $\gamma$ as $\eta/(1-\gamma)$ to determine $P_{fin}$ relative to $P_{add}$ [S1].
+*   **$a$:** Hyper-parameter determining initial rendering resolution. Larger $a$ means smaller initial resolution. Typical value: 4 [S1].
+*   **$P_{add}$:** The number of primitives added in a specific densification step [S1].
+
+### Formulas
+The primitive budget upper-bound $P_{fin}$ is determined by the scheduler equation (Eq. 5 in [S1]). When stable, it converges to:
+
+$$
+P_{fin} = \frac{\eta}{1 - \gamma} P_{add} \quad \text{(Eq. 8 in [S1])}
+$$
+
+This implies that changing $\gamma$ and $\eta$ is equivalent to changing the ratio $\frac{\eta}{1-\gamma}$ [S1].
+
+### Numbered Steps
+1.  **Evaluate Densification:** For each primitive, compute its densification score based on the backbone's criteria (e.g., gradient-based) [S1].
+2.  **Threshold Selection:** Identify primitives that pass a predefined densification threshold. Let this set be $S_{thresh}$ [S1].
+3.  **Top-$k$ Selection:** From the union of primitives passing the threshold, select the top-$k$ primitives with the highest densification scores. Let this set be $S_{topk}$ [S1].
+4.  **Constraint Check (Late HR Stage):** In the late high-resolution optimization stage, ensure that the number of primitives passing the threshold is fewer than $P_{fin} - N_{GS}$. This ensures that the threshold-based densification and top-$k$ selection mutually constrain densification, preventing explosion [S1].
+5.  **Final Selection:** Select primitives from $S_{topk}$ for densification. If the number of candidates exceeds the allowed budget ($P_{fin} - N_{GS}$), randomly select $P_{fin} - N_{GS}$ primitives from the top candidates [S1].
+6.  **Densify:** Split or clone the selected primitives [S1].
+7.  **Update Count:** Update $N_{GS}$ and $P_{add}$ for the next step [S1].
+8.  **Optimize:** Update primitive parameters using the Adam optimizer [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dashgaussian_densification(primitives, scores, n_gs, p_fin, gamma, eta, a):
+    """
+    Perform densification with primitive growth control.
+    
+    Args:
+        primitives: List of Gaussian primitives.
+        scores: List of densification scores corresponding to primitives.
+        n_gs: Current number of Gaussian primitives.
+        p_fin: Primitive number upper-bound.
+        gamma: Hyper-parameter for budget convergence.
+        eta: Hyper-parameter for scheduler.
+        a: Hyper-parameter for initial resolution.
+        
+    Returns:
+        indices_to_densify: Indices of primitives selected for densification.
+    """
+    # Step 1: Threshold Selection
+    # Assume a threshold function exists or is defined by the backbone.
+    # For implementation, we assume a fixed threshold or dynamic one.
+    # The source mentions "densification threshold" but does not give the exact formula.
+    # We assume a standard thresholding operation.
+    threshold = get_threshold(primitives, scores) # [G] Placeholder for backbone-specific threshold logic
+    passing_indices = [i for i, s in enumerate(scores) if s > threshold]
+    
+    # Step 2: Top-k Selection
+    # Get scores for passing primitives
+    passing_scores = [(scores[i], i) for i in passing_indices]
+    # Sort by score descending
+    passing_scores.sort(key=lambda x: x[0], reverse=True)
+    
+    # Determine k. The source says "select the top-k primitives that pass the threshold".
+    # It also mentions "randomly select Pi - NGS primitives from them".
+    # This implies k is effectively the number of candidates, and we cap the final selection.
+    # However, the text says "select the top-k... for densification".
+    # And later: "ensure that fewer than Pi - NGS primitives pass the threshold".
+    # Let's assume k is large enough to cover the budget, or k is determined by the budget.
+    # The source says: "randomly select Pi - NGS primitives from them".
+    # This implies we first identify candidates (top-k or all passing), then cap.
+    
+    # Let's interpret "top-k" as selecting the best candidates up to the budget limit.
+    # If we strictly follow "select top-k... then randomly select Pi-NGS", 
+    # it implies k >= Pi-NGS.
+    
+    budget_remaining = p_fin - n_gs
+    
+    # If budget is non-positive, no densification
+    if budget_remaining <= 0:
+        return []
+    
+    # Select top candidates. The source says "top-k selection".
+    # It doesn't specify k explicitly, but implies it's related to the budget.
+    # "randomly select Pi - NGS primitives from them" suggests we have more candidates than budget.
+    # So we take all passing, or a large top-k, then sample.
+    # Let's take all passing as candidates for simplicity, or top-N where N is large.
+    # The source says "top-k selection to control the growth".
+    # Let's assume k is effectively infinite or large enough, and the cap is the budget.
+    
+    candidates = passing_scores # All passing primitives are candidates
+    
+    # Step 3: Constraint and Random Selection
+    # "randomly select Pi - NGS primitives from them"
+    num_to_select = min(len(candidates), budget_remaining)
+    
+    if num_to_select == 0:
+        return []
+        
+    # Randomly select from the top candidates
+    # Note: The source says "randomly select Pi - NGS primitives from them".
+    # "Them" refers to the primitives selected with the two densification scores as a whole set.
+    # This implies we might have two scores? The source says "densified primitives are selected 
+    # by the vanilla densification score together with a top-k selection".
+    # This likely means we filter by threshold, then rank by score, then cap.
+    
+    selected_indices = random.sample([idx for score, idx in candidates], num_to_select)
+    
+    return selected_indices
+
+def get_initial_resolution(a):
+    """
+    Determine initial rendering resolution based on hyper-parameter a.
+    Larger a means smaller initial resolution.
+    """
+    # [G] Specific formula for resolution based on a is not given in the source.
+    # Typically, resolution might be scaled by 1/a or similar.
+    # We return a placeholder.
+    return 1.0 / a
+```
+
+### Edge Cases and Pitfalls
+*   **Primitive Explosion:** Setting $P_{fin}$ too large can cause primitive explosion and Out-Of-Memory (OOM) errors. However, the double-condition densification scheme prevents this by capping growth via top-$k$ selection [S1].
+*   **Removing Threshold:** Removing the threshold condition and keeping only top-$k$ selection forces $N_{GS}$ to exactly equal $P_{fin}$ after optimization, which may be undesirable if $P_{fin}$ is too large [S1].
+*   **Scheduler Removal:** Setting $P_{fin}$ to infinity (removing the scheduler) still yields stable $N_{GS}$ approximating the backbone's primitive count, indicating the growth is stable and safe [S1].
+*   **Hyper-parameter Sensitivity:** A larger $\gamma$ increases $P_{fin}$, leading to larger $N_{GS}$, higher quality, and longer optimization time. A larger $a$ reduces initial resolution, significantly reducing optimization time with little impact on quality [S1].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time:** DashGaussian reduces training time compared to the backbone baseline. On the MatrixCity large-scale dataset, it reduces training time by 41.6% per block [S1]. On MipNeRF 360, it achieves 3.49 min training time with $\gamma=0.98$ [S1].
+*   **Memory:** By controlling $N_{GS}$, it prevents OOM errors that would occur with uncontrolled densification [S1].
+
+### Measured Performance
+*   **MipNeRF 360 (Taming-3DGS backbone, $\gamma=0.98$):**
+    *   $N_{GS}$: 2.17M
+    *   PSNR: 27.98
+    *   SSIM: 0.828
+    *   LPIPS: 0.204
+    *   Time: 3.49 min [S1]
+*   **MatrixCity (9 blocks, 1080P rendering, Taming-3DGS backbone):**
+    *   Training time reduction: 41.6% per block
+    *   Quality: Slightly improved [S1]
+*   **Deep Blending (Taming-3DGS backbone):**
+    *   Example: `drjohnson` scene, NGS reduced from 3.31M to 2.47M, PSNR 29.09 vs 28.75, Time 19.47 vs 2.32 min (Note: Time units likely seconds or minutes, source says "Time↓" and values like 19.47 vs 2.32 suggest significant speedup, possibly seconds vs minutes or just relative time. The MipNeRF time is 3.49 min. The Deep Blending time column header is "Time↓". 19.47 vs 2.32 is a large drop. Let's assume consistent units. If MipNeRF is 3.49 min, Deep Blending 19.47 might be minutes? Or seconds? 2.32 min is 139 seconds. 19.47 seconds is very fast. Given "Time↓", lower is better. The source says "accelerate... optimization". 41.6% reduction on MatrixCity. On Deep Blending, 19.47 to 2.32 is an ~88% reduction. This seems consistent with acceleration. Let's report the numbers as is [S1]).
+
+### Scaling
+*   DashGaussian scales from room-scale (MipNeRF 360, Deep Blending, Tanks&Temples) to large-scale reconstruction (MatrixCity) [S1].
+
+### Strengths and Limitations
+*   **Strengths:** Prevents primitive explosion, accelerates optimization, maintains or improves reconstruction quality, generalized plugin for various backbones [S1].
+*   **Limitations:** Requires tuning of $\gamma$ and $\eta$. Removing the scheduler or threshold can lead to undesirable primitive counts or OOM if not careful [S1].
+
+### When to Use
+*   Use when you need to accelerate 3D Gaussian Splatting optimization and control the final number of primitives to prevent OOM [S1].
+*   Use when applying to backbones like Taming-3DGS, Mip-Splatting, or Revising-3DGS [S1].
+
+### When Not to Use
+*   Avoid if you require exact control over the final primitive count equal to a specific $P_{fin}$ without the stochastic nature of the random selection (though removing threshold achieves this, it may be undesirable) [S1].
+
+## Background
+
+### Origin
+DashGaussian was introduced in the paper "DashGaussian: Optimizing 3D Gaussian Splatting in 200 Seconds" [S1].
+
+### History and Development
+The method builds on 3D Gaussian Splatting and its variants (Taming-3DGS, Mip-Splatting, Revising-3DGS) [S1]. It addresses the issue of primitive explosion and slow optimization in large-scale scenes [S1].
+
+### Usage
+It is used as a generalized plugin to accelerate 3D Gaussian Splatting backbones on datasets like MipNeRF 360, Deep Blending, Tanks&Temples, and MatrixCity [S1].
+
+## Sources
+
+[S1] DashGaussian: Optimizing 3D Gaussian Splatting in 200 Seconds, https://doi.org/10.1109/cvpr52734.2025.01041, fetched 2026-10-31

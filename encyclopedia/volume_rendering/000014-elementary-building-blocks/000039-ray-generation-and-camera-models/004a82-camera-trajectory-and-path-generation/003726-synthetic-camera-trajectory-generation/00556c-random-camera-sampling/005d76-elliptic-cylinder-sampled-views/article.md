@@ -1,0 +1,159 @@
+# Elliptic Cylinder Sampled Views
+
+Also called: Elliptic Cylinder View Sampling
+
+## Overview
+Elliptic Cylinder Sampled Views is a camera trajectory generation method that creates random viewpoints directed at a scene center for computing SDS (Score Distillation Sampling) loss, using an elliptical cylinder that fits the training view positions [S1]. It differs from its sibling [Active Learning Scene Sampling](15489-active-learning-scene-sampling.md) by relying on a geometric fit of existing views rather than an active learning loop, and from [Warped Views](#warped-views) by generating novel, uncorrelated positions rather than rotating existing ones [S1].
+
+## How it works
+**Inputs:** A set of $N$ training camera poses $\{P_i\}_{i=1}^N$, where each pose $P_i$ consists of a translation vector $t_i$ and a rotation matrix $R_i$.
+**Outputs:** A single new camera pose $P_{new} = (t_{new}, R_{new})$.
+
+**Data Structures:**
+*   Camera Pose: Struct containing `translation` (vec3) and `rotation` (3x3 matrix).
+*   Scene Center: vec3, typically the mean of all training camera positions.
+
+**Steps:**
+1.  **Coordinate Alignment:** Transform all training camera positions to align with a world coordinate system where the positive Z-axis is perpendicular to the ground. This is achieved using Principal Component Analysis (PCA) on the training camera positions [S1]. Let the transformed positions be $t'_i$.
+2.  **Ellipse Fitting:** Determine the scaling factors for the elliptical axes in the X-Y plane. Calculate the absolute displacements of each transformed position from the scene center: $d_i = \sqrt{(x'_i)^2 + (y'_i)^2}$. The scaling factors are the 90th percentile of these displacements [S1]. Let these factors be $a$ (semi-major axis) and $b$ (semi-minor axis).
+3.  **Vertical Bounds:** Set the vertical bounds for the Z-coordinate. The lower bound $z_{min}$ and upper bound $z_{max}$ are the 10th and 90th percentiles of the Z-coordinates of the transformed training views, respectively [S1].
+4.  **Random Translation Sampling:** Uniformly randomly select a camera translation vector $t_{new}$.
+    *   Select an angle $\phi \in [0, 2\pi)$.
+    *   Set $x_{new} = a \cos \phi$ and $y_{new} = b \sin \phi$.
+    *   Set $z_{new}$ uniformly at random within $[z_{min}, z_{max}]$.
+    *   $t_{new} = [x_{new}, y_{new}, z_{new}]^T$ in the aligned coordinate system.
+5.  **Rotation Computation:** Compute the camera’s rotation matrix $R_{new}$.
+    *   **Look-at Vector:** Direct the look-at vector towards the scene center. In the aligned system, if the scene center is at the origin (or known offset), the direction is $-\text{normalize}(t_{new} - \text{center})$.
+    *   **Up Vector:** Align the up vector with the average up vector of the input views. Compute the average up vector $\bar{u}$ from the training cameras' rotation matrices and normalize it [S1].
+    *   Construct $R_{new}$ such that its columns correspond to the right, up, and forward vectors derived from the look-at and up vectors.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def generate_elliptic_cylinder_view(training_poses, scene_center):
+    """
+    Generate a single random camera view using the Elliptic Cylinder method.
+    
+    Args:
+        training_poses: List of dicts with 'translation' (vec3) and 'rotation' (3x3).
+        scene_center: vec3 representing the center of the scene.
+        
+    Returns:
+        dict with 'translation' (vec3) and 'rotation' (3x3).
+    """
+    # Step 1: Coordinate Alignment via PCA
+    positions = np.array([p['translation'] for p in training_poses])
+    # Center positions for PCA
+    mean_pos = np.mean(positions, axis=0)
+    centered_pos = positions - mean_pos
+    
+    # Compute covariance matrix and eigenvectors
+    cov = np.cov(centered_pos.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+    
+    # Sort eigenvectors by eigenvalue (descending) to align Z with ground normal
+    # Assuming the smallest eigenvalue corresponds to the ground normal direction (Z)
+    # Reorder: Z axis is the eigenvector with the smallest eigenvalue
+    idx = np.argsort(eigenvalues)
+    z_axis = eigenvectors[:, idx[0]]
+    
+    # Construct rotation matrix to align world Z with z_axis
+    # We need a rotation matrix R_align such that R_align @ [0,0,1] = z_axis
+    # This is complex; simpler approach: rotate points so z_axis becomes [0,0,1]
+    # Let's define the alignment transform as rotating the space so z_axis aligns with world Z
+    # For simplicity in implementation, we assume we can compute a rotation matrix R_align
+    # that maps the principal component basis to the world basis.
+    # Here we assume z_axis is the normal to the ground.
+    
+    # Create a basis where the third column is z_axis
+    # We need two other orthogonal vectors.
+    # Let's pick an arbitrary vector not parallel to z_axis
+    arbitrary = np.array([0, 0, 1]) if abs(z_axis[2]) < 0.9 else np.array([1, 0, 0])
+    x_axis = np.cross(z_axis, arbitrary)
+    x_axis = x_axis / np.linalg.norm(x_axis)
+    y_axis = np.cross(x_axis, z_axis)
+    
+    R_align = np.column_stack((x_axis, y_axis, z_axis))
+    
+    # Transform positions to aligned system
+    aligned_positions = (R_align.T @ (positions - mean_pos).T).T
+    
+    # Step 2: Determine scaling factors (90th percentile of absolute displacements in XY)
+    xy_displacements = np.sqrt(aligned_positions[:, 0]**2 + aligned_positions[:, 1]**2)
+    scale_x = np.percentile(xy_displacements, 90)
+    scale_y = np.percentile(xy_displacements, 90)
+    
+    # Step 3: Set vertical bounds (10th and 90th percentiles of Z)
+    z_coords = aligned_positions[:, 2]
+    z_min = np.percentile(z_coords, 10)
+    z_max = np.percentile(z_coords, 90)
+    
+    # Step 4: Uniformly randomly select a camera translation vector
+    phi = np.random.uniform(0, 2 * np.pi)
+    x_new = scale_x * np.cos(phi)
+    y_new = scale_y * np.sin(phi)
+    z_new = np.random.uniform(z_min, z_max)
+    
+    t_aligned = np.array([x_new, y_new, z_new])
+    
+    # Step 5: Compute rotation matrix
+    # Look-at vector: towards scene center. 
+    # In aligned system, scene center is effectively at origin relative to the fit?
+    # The notes say "directing its look-at vector towards the scene center".
+    # Assuming scene_center is in original coordinates, we must transform it or assume it's the origin of the fit.
+    # Let's assume the scene center is the mean of the training positions, which is now at origin in aligned space?
+    # Actually, mean_pos was subtracted. So the center of the distribution is origin.
+    look_at_dir = -t_aligned # Looking back towards origin/center
+    look_at_dir = look_at_dir / np.linalg.norm(look_at_dir)
+    
+    # Average up vector of input views
+    up_vectors = np.array([p['rotation'][:, 1] for p in training_poses])
+    avg_up = np.mean(up_vectors, axis=0)
+    avg_up = avg_up / np.linalg.norm(avg_up)
+    
+    # Compute right vector
+    right = np.cross(avg_up, look_at_dir)
+    right = right / np.linalg.norm(right)
+    
+    # Recompute up to ensure orthogonality
+    up = np.cross(look_at_dir, right)
+    
+    R_aligned = np.column_stack((right, up, look_at_dir))
+    
+    # Transform back to original coordinate system
+    t_new = (R_align @ t_aligned) + mean_pos
+    R_new = (R_align @ R_aligned).T # Rotation matrices are orthogonal, inverse is transpose
+    
+    return {'translation': t_new, 'rotation': R_new}
+```
+
+**Parameters:**
+*   Percentile for ellipse scaling: 90th [S1].
+*   Percentile for vertical bounds: 10th and 90th [S1].
+*   Number of sampled views: Fixed number, as per [Random Camera Sampling](15470-random-camera-sampling.md).
+
+**Edge Cases:**
+*   **Degenerate Input:** If all training views are collinear or coplanar, PCA may fail to produce a stable ground normal. [G] Add a check for singular covariance matrix and fallback to a default up vector (e.g., [0,1,0]).
+*   **Precision:** Ensure numerical stability when computing cross products for near-parallel vectors.
+
+## Subtopics
+
+### Warped Views
+A view sampling strategy creating novel viewpoints by rotating training cameras around an estimated center axis to provide large view overlapping, unlike SDS sampled views [S1]. It extracts the up-vector of each camera as $Y = [R_{11}, R_{21}, R_{31}]^T$ where $R$ is the rotation matrix [S1]. It computes the normalized average up-vector across all cameras to serve as an estimate of the scene center and orientation: $\bar{Y} = \frac{1}{N} \sum Y_i$, normalized to $\frac{\bar{Y}}{||\bar{Y}||}$ [S1]. Novel viewpoints are created by rotating the training cameras around this estimated center axis by various angles using the Rodrigues’ rotation formula [S1]: $P' = P \cos \theta + (P \times \bar{Y}) \sin \theta + \bar{Y} (\bar{Y} \cdot P) (1 - \cos \theta)$, where $P$ represents the original camera pose [S1]. Angles $\theta$ selected are -3°, -1.5°, 1.5°, and 3°, resulting in four warped viewpoints for each training camera [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ for PCA and percentile calculations, where $N$ is the number of training views. Sampling a single view is $O(1)$.
+*   **Memory Complexity:** $O(N)$ to store training poses and intermediate statistics.
+*   **Strengths:** Ensures sampled views are geometrically consistent with the input data distribution, providing good coverage for SDS loss [S1].
+*   **Limitations:** Does not provide the large view overlapping required for depth warping losses, which is why [Warped Views](#warped-views) are used for those [S1].
+*   **When to use:** When computing SDS loss for 3D Gaussian Splatting from sparse input views [S1].
+*   **When not to use:** When large view overlapping is required for depth consistency losses [S1].
+
+## Background
+Originating from the SparseGS paper, this method is part of the UVR (Unsupervised View Regularization) framework designed to regularize 3DGS training from sampled views [S1]. It is specifically applied to compute the SDS loss, complementing other components like Pearson Depth Loss and Depth Warping Loss which use different sampling strategies [S1].
+
+## Sources
+[S1] Sparsegs: Sparse View Synthesis Using 3D Gaussian Splatting, https://doi.org/10.1109/3dv66043.2025.00100, fetched 2026-10-26

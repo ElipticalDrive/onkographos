@@ -1,0 +1,133 @@
+# Homogeneous Brick Optimization
+
+Also called: Homogeneous Bricks
+
+## Overview
+Homogeneous Brick Optimization reduces memory bandwidth and traversal overhead in brick-based volume rendering by replacing pointers to brick data with compact scalar values when a brick's content is uniform [S1, unofficial]. It sets itself apart from general brick caching methods by exploiting data redundancy at the node level, storing the average value directly in the traversal structure rather than fetching the full brick from cache [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: A brick-based volume dataset with $n$ channels (limited to 4 for standard GPU texture formats) [S1, unofficial].
+*   Output: A traversal structure (e.g., N³-tree or similar) where leaf nodes corresponding to homogeneous bricks store a scalar value instead of a memory pointer [S1, unofficial].
+
+**Data Structures:**
+*   **Brick Node:** A structure representing a brick in the traversal hierarchy.
+    *   Standard Node: Contains a pointer to the brick's location in the brick cache [S1, unofficial].
+    *   Homogeneous Node: Contains a single scalar value representing the average value of the brick [S1, unofficial].
+    *   *Note:* The specific bit-packing or field layout is not detailed in the sources, but the logical distinction is the replacement of the pointer field with a value field [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Analyze Brick Content:** For each brick in the dataset, determine if it is homogeneous.
+2.  **Homogeneity Check:** A brick is considered homogeneous if all voxels within it contain the same value, up to a user-defined threshold [S1, unofficial].
+3.  **Multi-Channel Validation:** For datasets with multiple channels, a brick node is marked homogeneous only if the corresponding bricks in *all* channels are homogeneous [S1, unofficial]. If any channel is non-homogeneous, the node must store a pointer [S1, unofficial].
+4.  **Compute Average Value:** If the brick is homogeneous, calculate the average value of the voxels in the brick [S1, unofficial].
+5.  **Store Value:** Replace the pointer to the brick cache location in the traversal node with the computed average value [S1, unofficial].
+6.  **Traversal:** During ray marching, if a homogeneous node is encountered, the ray can skip fetching the brick data and use the stored average value for shading/compositing [S1, unofficial].
+
+**Parameters:**
+*   **Homogeneity Threshold:** A user-defined threshold determining the maximum allowable variance between voxels for a brick to be considered homogeneous [S1, unofficial]. Value: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Multi-Channel Data:** A node cannot be marked homogeneous if even one channel's brick is non-homogeneous [S1, unofficial].
+*   **Precision:** The sources do not specify precision issues, but storing a single average value for a "homogeneous" brick implies a loss of detail if the threshold is too loose [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def is_homogeneous(brick_voxels, threshold):
+    """
+    Check if all voxels in a brick are within the threshold of the mean.
+    """
+    if not brick_voxels:
+        return False
+    
+    mean_val = sum(brick_voxels) / len(brick_voxels)
+    for voxel in brick_voxels:
+        if abs(voxel - mean_val) > threshold:
+            return False
+    return True
+
+def build_homogeneous_nodes(brick_data, channels, threshold):
+    """
+    brick_data: List of bricks, where each brick is a list of channel arrays.
+    channels: Number of channels (max 4 for standard GPU formats).
+    threshold: User-defined homogeneity threshold.
+    """
+    nodes = []
+    
+    for brick in brick_data:
+        # brick is a list of channel arrays, e.g., [channel_0_data, channel_1_data, ...]
+        
+        # Check homogeneity for all channels
+        all_channels_homogeneous = True
+        average_value = 0.0
+        
+        # For simplicity, assume we compute average across all channels if homogeneous
+        # In practice, this might be per-channel or a combined metric.
+        # The source says "store the average value", implying a single scalar.
+        
+        for ch_idx in range(channels):
+            ch_data = brick[ch_idx]
+            if not is_homogeneous(ch_data, threshold):
+                all_channels_homogeneous = False
+                break
+        
+        if all_channels_homogeneous:
+            # Compute average value across all voxels in all channels
+            all_voxels = []
+            for ch_idx in range(channels):
+                all_voxels.extend(brick[ch_idx])
+            
+            if all_voxels:
+                avg = sum(all_voxels) / len(all_voxels)
+            else:
+                avg = 0.0
+            
+            # Store average value instead of pointer
+            node = {
+                'type': 'HOMOGENEOUS',
+                'value': avg
+            }
+        else:
+            # Store pointer to brick cache
+            # The actual pointer logic depends on the parent brick cache implementation
+            node = {
+                'type': 'POINTER',
+                'pointer': get_brick_cache_pointer(brick) # Implementation detail of parent
+            }
+        
+        nodes.append(node)
+    
+    return nodes
+```
+
+## Subtopics
+
+### Brick Size Optimization Metrics
+*   **Definition:** Metrics $g_h$ and $g_v$ used to encourage the use of larger bricks (horizontal) and multi-height bricks (vertical) to reduce the total number of bricks [S2].
+*   **Formulas:**
+    *   Horizontal metric: $g_h = \frac{1}{n} \sum_{i=1}^{n} \frac{A_{MAX} - A_i}{A_{MAX} - A_{MIN}}$, where $A_i$ is the area of the $i$-th brick, $n$ is the number of bricks in a layer, $A_{MAX}$ is the area of the maximum-sized brick, and $A_{MIN}$ is the area of the minimum-sized brick [S2].
+    *   Vertical metric: $g_v = \frac{1}{k} \sum_{i=1}^{k} v(i)$, where $k$ is the number of bricks in a layer that can be merged into a multi-height brick, and $v(i)$ is 0 if the $i$-th brick is covered with a brick that can be merged, and 1 otherwise [S2].
+*   **Parameters:**
+    *   $A_{MAX}$: Area of maximum-sized brick (e.g., 16 for an 8x2 brick) [S2].
+    *   $A_{MIN}$: Area of minimum-sized brick (e.g., 1 for a 1x1 brick) [S2].
+*   **When to choose:** Use when optimizing brick tiling for efficiency in specific applications like LEGO model generation, where reducing the total number of bricks is the primary objective [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Reduces memory usage for homogeneous regions by storing a single scalar value instead of a pointer and potentially the brick data itself in the traversal structure [S1, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Reduces memory bandwidth requirements during ray marching by avoiding cache fetches for uniform regions [S1, unofficial].
+*   **Limitations:** Only effective if the volume data contains significant homogeneous regions [S1, unofficial]. Multi-channel data requires all channels to be homogeneous for the optimization to apply [S1, unofficial].
+*   **When to use:** When rendering volumes with large uniform regions (e.g., medical scans with background, simple synthetic volumes) [S1, unofficial].
+*   **When not:** When the volume is highly heterogeneous or when multi-channel data has non-homogeneous channels [S1, unofficial].
+
+## Background
+*   **Origin:** Introduced by Brix et al. [S1, unofficial].
+*   **History:** Implemented in the Voreen volume rendering framework [S1, unofficial].
+*   **Usage:** Used in web-based volume rendering and scalable web-based volume rendering of large biomedical datasets [S1, unofficial].
+
+## Sources
+[S1] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)
+[S2] Legorization from silhouette-fitted voxelization, https://doi.org/10.3837/tiis.2018.06.019, fetched 2026-10-27

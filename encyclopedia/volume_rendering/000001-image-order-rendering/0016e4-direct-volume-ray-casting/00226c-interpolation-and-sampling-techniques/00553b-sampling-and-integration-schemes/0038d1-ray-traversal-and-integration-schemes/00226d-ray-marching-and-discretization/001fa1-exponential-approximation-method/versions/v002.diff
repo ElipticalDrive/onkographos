@@ -1,0 +1,219 @@
+--- v001.md
++++ v002.md
+@@ -4,112 +4,78 @@
+ 
+ ## Overview
+-The Exponential Approximation Method (EAM) is a direct volume ray casting technique that approximates the continuous integral of light attenuation and emission along a ray using discrete steps and an exponential transmittance model [S1, S2, unofficial]. It differs from standard linear alpha compositing by scaling the sampled alpha values by a step-size-dependent correction factor, allowing for larger step sizes while maintaining visual fidelity to the exponential decay of light [S1, S2, unofficial]. It is typically chosen when performance is prioritized over exact physical accuracy, or when the volume data is sparse enough that early ray termination (stopping when accumulated alpha exceeds 0.99) provides significant speedup [S1, S2, unofficial].
++The Exponential Approximation Method (EAM) is a direct volume ray casting technique that approximates the continuous light attenuation integral using discrete steps and an exponential transmittance model [S1, S2, unofficial]. It differs from standard linear alpha compositing by scaling sampled alpha values by a step-size-dependent correction factor, allowing larger steps while approximating exponential decay [S1, S2, unofficial]. It is typically chosen when performance is prioritized over exact physical accuracy, or when the volume data is sparse enough that early ray termination provides significant speedup [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A 3D volume texture (scalar density field), a transfer function (mapping density to color and opacity), camera parameters (origin, direction, near/far planes or volume bounds), and rendering parameters (step size, extinction coefficient, offset).
+-*   **Output:** A 2D image pixel (RGBA color).
++*   **Input:** A 3D volume texture (scalar density field), a transfer function (mapping density to color and opacity), camera parameters (unprojected ray endpoints `vRayFrom` and `vRayTo`), and rendering parameters (`uStepSize`, `uAlphaCorrection` or `uExtinction`, `uOffset`) [S1, S2, unofficial].
++*   **Output:** A 2D image pixel (RGBA color) [S1, S2, unofficial].
+ 
+ **Data Structures**
+-*   **Volume Texture:** A 3D texture object storing scalar density values. Typically sampled using linear interpolation. The specific format (e.g., `R8`, `R16F`, `R32F`) depends on the implementation but must support red-channel sampling [S1, S2, unofficial].
+-*   **Transfer Function:** A 1D or 2D texture mapping density values to RGBA color. Typically sampled at `vec2(val, 0.5)` or similar fixed coordinate [S1, unofficial].
++*   **Volume Texture:** A 3D texture object storing scalar density values, sampled at the red channel (`.r`) [S1, unofficial].
++*   **Transfer Function:** A 1D or 2D texture mapping density values to RGBA color, sampled at `vec2(val, 0.5)` [S1, unofficial].
+ *   **Ray Parameters:**
+     *   `vRayFrom`, `vRayTo`: Unprojected ray endpoints in volume space [S1, unofficial].
+-    *   `tbounds`: Intersection interval $[t_{min}, t_{max}]$ of the ray with the unit cube (or volume bounds) [S1, unofficial].
++    *   `tbounds`: Intersection interval $[t_{min}, t_{max}]$ of the ray with the unit cube, normalized to $[0, 1]$ [S1, unofficial].
+     *   `uStepSize`: Normalized step size in the range $[0, 1]$ representing the fraction of the total ray length per step [S1, unofficial].
+-    *   `uAlphaCorrection` / `uExtinction`: Correction factor applied to alpha. In [S1, unofficial], this is `uAlphaCorrection`. In [S2, unofficial], this is `uExtinction`. They serve the same purpose: scaling the sampled alpha to approximate exponential attenuation over the step [S1, S2, unofficial].
+-    *   `uOffset`: Initial offset for the first sample, typically `uStepSize * uOffset` or just `uStepSize` [S2, unofficial].
++    *   `uAlphaCorrection` / `uExtinction`: Correction factor applied to alpha [S1, S2, unofficial]. In [S1, unofficial] it is `uAlphaCorrection`. In [S2, unofficial] it is `uExtinction` [S1, S2, unofficial].
++    *   `uOffset`: Initial offset parameter used in [S2, unofficial] [S2, unofficial].
+ 
+ **Numbered Steps**
+-1.  **Unproject and Intersect:**
+-    *   Unproject the screen coordinate to obtain the ray origin and direction in world/volume space [S1, S2, unofficial].
+-    *   Intersect the ray with the volume bounding box (often treated as a unit cube or normalized space) [S1, S2, unofficial].
+-    *   Calculate the intersection interval $[t_{min}, t_{max}]$ [S1, unofficial].
+-    *   If no intersection is found ($t_{min} \ge t_{max}$), output black (or transparent) [S1, S2, unofficial].
+-
+-2.  **Initialize Ray Segment:**
+-    *   Compute the start and end points of the ray segment within the volume:
+-        $$ \text{from} = \text{mix}(vRayFrom, vRayTo, t_{min}) $$
+-        $$ \text{to} = \text{mix}(vRayFrom, vRayTo, t_{max}) $$
+-    *   Compute the physical length of the ray segment:
+-        $$ L = \text{distance}(\text{from}, \text{to}) $$
+-    *   Compute the step length in world units:
+-        $$ \text{rayStepLength} = L \times uStepSize $$
+-    *   Initialize the accumulator color `acc` to $(0, 0, 0, 0)$ [S1, S2, unofficial].
+-    *   Initialize the normalized progress parameter $t$. In [S1, unofficial], $t$ starts at $0.0$. In [S2, unofficial], $t$ starts at $uStepSize \times uOffset$ [S1, S2, unofficial].
+-
+-3.  **Ray Marching Loop:**
+-    *   While $t < 1.0$ (or $t \times L < \text{segment length}$) AND `acc.a` < 0.99:
+-        1.  **Sample Position:**
+-            $$ \text{pos} = \text{mix}(\text{from}, \text{to}, t) $$
+-        2.  **Sample Volume:**
+-            $$ \text{val} = \text{texture}(uVolume, \text{pos}).r $$
+-        3.  **Sample Transfer Function:**
+-            $$ \text{colorSample} = \text{texture}(uTransferFunction, \text{vec2}(\text{val}, 0.5)) $$
+-            *(Note: The second coordinate of the transfer function lookup may vary by implementation, but 0.5 is common for 1D functions mapped to 2D textures) [S1, unofficial].*
+-        4.  **Compute Effective Alpha:**
+-            $$ \alpha = \text{colorSample}.a \times \text{rayStepLength} \times uAlphaCorrection $$
+-            *(In [S2, unofficial], `uAlphaCorrection` is replaced by `uExtinction`) [S1, S2, unofficial].*
+-        5.  **Composite:**
+-            $$ \text{acc}.rgb += (1.0 - \text{acc}.a) \times \text{colorSample}.rgb \times \alpha $$
+-            $$ \text{acc}.a += (1.0 - \text{acc}.a) \times \alpha $$
+-        6.  **Increment:**
+-            $$ t = t + uStepSize $$
+-
+-4.  **Post-Processing:**
+-    *   If `acc.a` > 1.0 (due to numerical precision or large steps), normalize the RGB components:
+-        $$ \text{acc}.rgb = \text{acc}.rgb / \text{acc}.a $$
+-    *   Set `acc.a` to 1.0.
+-    *   Output `acc.rgb` [S1, S2, unofficial].
++1.  **Unproject and Intersect:** Unproject the screen coordinate to obtain the ray endpoints `vRayFrom` and `vRayTo` [S1, S2, unofficial]. Intersect the ray with the unit cube [S1, S2, unofficial]. If no intersection is found ($t_{min} \ge t_{max}$), output black [S1, S2, unofficial].
++2.  **Initialize Ray Segment:** Compute the start and end points of the ray segment within the volume: $\text{from} = \text{mix}(vRayFrom, vRayTo, t_{min})$ and $\text{to} = \text{mix}(vRayFrom, vRayTo, t_{max})$ [S1, unofficial]. Compute the physical length of the ray segment: $L = \text{distance}(\text{from}, \text{to})$ [S1, unofficial]. Compute the step length in world units: $\text{rayStepLength} = L \times uStepSize$ [S1, unofficial].
++3.  **Initialize Accumulator and Progress:** Initialize the accumulator `acc` to $(0, 0, 0, 0)$ [S1, S2, unofficial]. Initialize the normalized progress parameter $t$. In [S1, unofficial], $t$ starts at $0.0$. In [S2, unofficial], $t$ starts at $uStepSize \times uOffset$ [S1, S2, unofficial].
++4.  **Ray Marching Loop:** While $t < 1.0$ and `acc.a` < 0.99:
++    1.  Compute position: $\text{pos} = \text{mix}(\text{from}, \text{to}, t)$ [S1, S2, unofficial].
++    2.  Sample volume: $\text{val} = \text{texture}(uVolume, \text{pos}).r$ [S1, S2, unofficial].
++    3.  Sample transfer function: $\text{colorSample} = \text{texture}(uTransferFunction, \text{vec2}(\text{val}, 0.5))$ [S1, S2, unofficial].
++    4.  Compute effective alpha: $\alpha = \text{colorSample}.a \times \text{rayStepLength} \times uAlphaCorrection$ (or `uExtinction` in [S2, unofficial]) [S1, S2, unofficial].
++    5.  Scale color and alpha: $\text{colorSample}.rgb \times= \alpha$ and $\text{colorSample}.a \times= \alpha$ [S1, S2, unofficial].
++    6.  Composite using front-to-back: $\text{acc}.rgb += (1.0 - \text{acc}.a) \times \text{colorSample}.rgb$ and $\text{acc}.a += (1.0 - \text{acc}.a) \times \text{colorSample}.a$ [S1, S2, unofficial].
++    7.  Increment progress: $t += uStepSize$ [S1, S2, unofficial].
++5.  **Post-Processing:** If `acc.a` > 1.0, divide `acc.rgb` by `acc.a` to correct over-saturation [S1, S2, unofficial]. Set `acc.a` to 1.0 [S1, S2, unofficial]. Output `acc.rgb` [S1, S2, unofficial].
+ 
+ **Pseudocode**
+ ```python
+-def render_exponential_approximation(screen_pos, camera, volume_texture, transfer_function_texture, u_step_size, u_alpha_correction, u_offset):
+-    # 1. Unproject and Intersect
+-    ray_origin, ray_direction = unproject(screen_pos, camera)
++def render_exponential_approximation(screen_uv, inv_proj_view, v_ray_from, v_ray_to, tbounds, u_step_size, u_alpha_correction, u_offset):
++    # 1. Unproject screen UV to ray endpoints in volume space
++    ray_origin = inv_proj_view @ vec4(screen_uv.x, screen_uv.y, 0.0, 1.0)
++    ray_origin /= ray_origin.w
++    ray_dir = inv_proj_view @ vec4(screen_uv.x, screen_uv.y, 1.0, 1.0)
++    ray_dir /= ray_dir.w
++    ray_dir = normalize(ray_dir - ray_origin)
+     
+-    # Intersect ray with volume bounds (assumed unit cube [0,1]^3 for simplicity, or explicit bounds)
+-    t_min, t_max = intersect_ray_cube(ray_origin, ray_direction)
+-    
++    # 2. Intersect ray with unit cube [0,1]^3, returning normalized bounds [0,1]
++    t_min, t_max = intersect_ray_cube_normalized(ray_origin, ray_dir)
+     if t_min >= t_max:
+         return vec4(0.0, 0.0, 0.0, 0.0)
+     
+-    # 2. Initialize
+-    ray_from = mix(camera.position, camera.position + ray_direction * t_min, 1.0) # Assuming ray_direction is normalized and t is distance
+-    # Correction: The source uses vRayFrom/vRayTo which are likely pre-unprojected endpoints.
+-    # Let's stick to the source's mix logic with t_bounds.
+-    # vRayFrom and vRayTo are the ray endpoints in volume space.
+-    # tbounds.x is t_min, tbounds.y is t_max.
+-    
+-    from_point = mix(camera.vRayFrom, camera.vRayTo, t_min)
+-    to_point = mix(camera.vRayFrom, camera.vRayTo, t_max)
+-    
++    # 3. Initialize ray segment
++    from_point = mix(v_ray_from, v_ray_to, t_min)
++    to_point = mix(v_ray_from, v_ray_to, t_max)
+     ray_length = distance(from_point, to_point)
+     ray_step_length = ray_length * u_step_size
+     
+     accumulator = vec4(0.0, 0.0, 0.0, 0.0)
+-    t = u_step_size * u_offset # Using S2's initialization logic as it's more general for offset
++    # Sources disagree on initial t: S1 uses 0.0, S2 uses u_step_size * u_offset [S1, S2, unofficial]
++    t = 0.0
+     
+-    # 3. Loop
++    # 4. Ray marching loop
+     while t < 1.0 and accumulator.a < 0.99:
+         pos = mix(from_point, to_point, t)
++        val = texture(u_volume, pos).r
++        color_sample = texture(u_transfer_function, vec2(val, 0.5))
+         
+-        # Sample volume
+-        val = texture(volume_texture, pos).r
++        # Scale alpha and RGB by step length and correction factor
++        alpha = color_sample.a * ray_step_length * u_alpha_correction
++        color_sample.rgb *= alpha
++        color_sample.a *= alpha
+         
+-        # Sample transfer function
+-        color_sample = texture(transfer_function_texture, vec2(val, 0.5))
+-        
+-        # Compute alpha
+-        alpha = color_sample.a * ray_step_length * u_alpha_correction
+-        
+-        # Composite
+-        weight = (1.0 - accumulator.a) * alpha
+-        accumulator.rgb += weight * color_sample.rgb
+-        accumulator.a += weight
++        # Front-to-back compositing
++        accumulator.rgb += (1.0 - accumulator.a) * color_sample.rgb
++        accumulator.a += (1.0 - accumulator.a) * color_sample.a
+         
+         t += u_step_size
+         
+-    # 4. Post-process
++    # 5. Post-processing
+     if accumulator.a > 1.0:
+         accumulator.rgb /= accumulator.a
+@@ -117,28 +83,43 @@
+         
+     return accumulator.rgb
++
++def intersect_ray_cube_normalized(origin, direction):
++    t_min = 0.0
++    t_max = 1.0
++    for i in range(3):
++        if direction[i] == 0.0:
++            if origin[i] < 0.0 or origin[i] > 1.0:
++                return 1.0, 0.0
++        else:
++            t1 = (0.0 - origin[i]) / direction[i]
++            t2 = (1.0 - origin[i]) / direction[i]
++            if t1 > t2: t1, t2 = t2, t1
++            t_min = max(t_min, t1)
++            t_max = min(t_max, t2)
++    return t_min, t_max
+ ```
+ 
+ **Parameters**
+-*   `uStepSize`: Normalized step size (0 to 1). Typical values depend on volume resolution and desired quality; smaller values yield higher accuracy but slower performance [S1, unofficial].
+-*   `uAlphaCorrection` / `uExtinction`: Correction factor. In [S1, unofficial], it is `uAlphaCorrection`. In [S2, unofficial], it is `uExtinction`. This value approximates the exponential decay $e^{-\sigma \Delta s}$ where $\sigma$ is the extinction coefficient and $\Delta s$ is the step size. For small steps, $\alpha \approx \sigma \Delta s$, so `uAlphaCorrection` might be set to 1.0 if the volume data is already scaled appropriately, or to the extinction coefficient if the volume data is raw density [S1, S2, unofficial].
+-*   `uOffset`: Initial offset for the first sample. In [S2, unofficial], it is used as `t = uStepSize * uOffset`. A value of 1.0 means the first sample is taken at the first step position [S2, unofficial].
++*   `uStepSize`: Normalized step size in the range $[0, 1]$ [S1, unofficial].
++*   `uAlphaCorrection` / `uExtinction`: Correction factor applied to alpha [S1, S2, unofficial]. In [S1, unofficial] it is `uAlphaCorrection`. In [S2, unofficial] it is `uExtinction` [S1, S2, unofficial].
++*   `uOffset`: Initial offset parameter used in [S2, unofficial] [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls**
+-*   **Over-saturation:** If the step size is too large or the correction factor is too high, `accumulator.a` can exceed 1.0, leading to incorrect color normalization. The method explicitly checks for this and normalizes [S1, S2, unofficial].
+-*   **Early Termination:** Stopping when `accumulator.a` > 0.99 is an optimization. If the volume has very high opacity, this can save significant computation. However, if the transfer function has high opacity at low density, this might clip details.
+-*   **Boundary Conditions:** If the ray does not intersect the volume, the method outputs black. This assumes a black background. If a different background is desired, the background color should be composited after the ray march [S1, S2, unofficial].
+-*   **Precision:** Using `float` for accumulation can lead to precision issues in very large volumes or with many steps. `R32F` volume textures are recommended for high dynamic range [S2, unofficial].
++*   **No Intersection:** If the ray does not intersect the volume cube, the method outputs black [S1, S2, unofficial].
++*   **Over-saturation:** If the step size or correction factor is too high, `accumulator.a` can exceed 1.0, requiring RGB normalization [S1, S2, unofficial].
++*   **Early Termination:** The loop stops when `accumulator.a` exceeds 0.99 [S1, S2, unofficial].
++*   **Precision:** Not given in the sources.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of steps per ray. $N$ is determined by the ray length and `uStepSize`. Early termination reduces the average $N$.
+-*   **Memory Complexity:** $O(1)$ per pixel for the accumulator, plus the memory for the volume and transfer function textures.
+-*   **Performance:** Generally faster than exact exponential integration because it allows larger step sizes with the correction factor. The early termination optimization (stopping at alpha 0.99) can significantly speed up rendering of opaque regions.
+-*   **Strengths:** Simple to implement, efficient on GPUs, good visual quality for sparse volumes, easy to parallelize.
+-*   **Limitations:** Approximation error increases with larger step sizes. Not physically accurate for dense volumes or complex scattering. The "exponential approximation" is a linearization of the exponential integral, which can lead to artifacts if not tuned correctly.
+-*   **When to Use:** Real-time volume rendering, sparse volumes, when performance is critical.
+-*   **When Not to Use:** When high physical accuracy is required, dense volumes with complex lighting, or when exact transmittance is needed.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Performance:** Not given in the sources.
++*   **Strengths:** Not given in the sources.
++*   **Limitations:** Not given in the sources.
++*   **When to Use:** Not given in the sources.
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background
+-The Exponential Approximation Method is a practical approach to direct volume rendering, often used in real-time applications. It is based on the principle of alpha compositing with an approximation of the transmittance integral. The method is implemented in various open-source projects, such as `rokcej/volumetric-ray-casting` and `terier/vpt` [S1, S2, unofficial]. The specific implementation details (e.g., `uAlphaCorrection` vs `uExtinction`) vary between projects, but the core algorithm remains consistent.
++The Exponential Approximation Method is a practical approach to direct volume rendering based on the principle of alpha compositing with an approximation of the transmittance integral [S1, S2, unofficial]. It is implemented in open-source projects such as `rokcej/volumetric-ray-casting` and `terier/vpt` [S1, S2, unofficial]. The specific implementation details (e.g., `uAlphaCorrection` vs `uExtinction` and initial $t$ offset) vary between projects, but the core algorithm remains consistent [S1, S2, unofficial].
+ 
+ ## Sources

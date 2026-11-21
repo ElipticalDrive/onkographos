@@ -1,0 +1,614 @@
+Endo-4DGS: Endoscopic Monocular Scene
+Reconstruction with 4D Gaussian Splatting
+Yiming Huang1 ⋆ , Beilei Cui1 ⋆ , Long Bai1 ⋆ , Ziqi Guo1 , Mengya Xu1 ,
+Mobarakol Islam3 , and Hongliang Ren1,2,4 ⋆⋆
+arXiv:2401.16416v4 [cs.CV] 2 Apr 2024
+1
+Department of Electronic Engineering, The Chinese University of Hong Kong
+(CUHK), Hong Kong SAR, China
+2
+Shun Hing Institute of Advanced Engineering, CUHK, Hong Kong SAR, China
+3
+Wellcome/EPSRC Centre for Interventional and Surgical Sciences (WEISS),
+University College London, UK
+4
+Shenzhen Research Institute, CUHK, Shenzhen, China
+{yhuangdl, beileicui, b.long, 1155199284}@link.cuhk.edu.hk,
+mengya@u.nus.edu, mobarakol.islam@ucl.ac.uk, hlren@ee.cuhk.edu.hk
+Abstract. In the realm of robot-assisted minimally invasive surgery, dynamic scene reconstruction can significantly enhance downstream tasks
+and improve surgical outcomes. Neural Radiance Fields (NeRF)-based
+methods have recently risen to prominence for their exceptional ability
+to reconstruct scenes but are hampered by slow inference speed, prolonged training, and inconsistent depth estimation. Some previous work
+utilizes ground truth depth for optimization but is hard to acquire in the
+surgical domain. To overcome these obstacles, we present Endo-4DGS, a
+real-time endoscopic dynamic reconstruction approach that utilizes 3D
+Gaussian Splatting (GS) for 3D representation. Specifically, we propose
+lightweight MLPs to capture temporal dynamics with Gaussian deformation fields. To obtain a satisfactory Gaussian Initialization, we exploit a
+powerful depth estimation foundation model, Depth-Anything, to generate pseudo-depth maps as a geometry prior. We additionally propose
+confidence-guided learning to tackle the ill-pose problems in monocular depth estimation and enhance the depth-guided reconstruction with
+surface normal constraints and depth regularization. Our approach has
+been validated on two surgical datasets, where it can effectively render in
+real-time, compute efficiently, and reconstruct with remarkable accuracy.
+Our code is available at https://github.com/lastbasket/Endo-4DGS.
+1
+Introduction
+Endoscopic procedures have become a cornerstone in minimally invasive surgery,
+offering patients with reduced trauma and quicker recovery times [9, 16, 27]. In
+this case, accurate and dynamic 3D reconstruction of the endoscopic scene is
+critical to enhancing the surgeon’s spatial understanding and navigation, facilitating more precise and efficient interventions [13]. However, the complex and
+⋆
+⋆⋆
+Co-first authors.
+Corresponding author.
+Reference
+2
+Estimated depth
+Texture
+Rendered image
+Predicted depth
+Texture
+Rendered image
+Predicted depth
+Y. Huang et al.
+Reference
+Estimated depth
+Fig. 1. Ground truth reference, estimated depth from Depth-Anything; 3D textures,
+rendered image, and predicted depth of our proposed method.
+constrained nature of endoscopic scenes poses significant challenges for traditional 3D reconstruction techniques due to factors such as limited field-of-view,
+occlusions, and dynamic tissue deformation [21, 23, 26].
+Recent advancements in endoscopic 3D reconstruction have been boosted
+by the capabilities of Deep Neural Networks (DNNs) [18] and Neural Radiance
+Fields (NeRFs) [14]. Some studies have achieved strong performance in depth estimation and reconstruction under endoscopy, particularly through stereo reconstruction [1, 12], structure from motion [2], depth and pose estimation [15,17] or
+extensive visual pre-training [7]. EndoNeRF [21] is the first to leverage NeRF [14]
+in endoscopic scenes by dual neural fields approach to model tissue deformation
+and canonical density. EndoSurf [26] further employs signed distance functions
+to model tissue surfaces, imposing explicit self-consistency constraints on the
+neural field. To tackle the lengthy training time requirement, LerPlane [23] constructs a 4D volume by introducing 1D time to the existing 3D spatial space.
+This extension allows for the formulation of both static fields and dynamic fields
+by utilizing the spatial-temporal planes, respectively, which leads to a substantial
+decrease in computational resources. However, reconstructing high-dimensional
+deformable scenes in real-time remains a challenge.
+NeRF-based methods have revolutionized 3D scene reconstruction but face
+challenges such as slow rendering speeds and suboptimal localization accuracy [4].
+Addressing these issues, 3D Gaussian Splatting (GS) has emerged as an effective
+alternative, offering fast inference and superior 3D representation [11]. By optimizing anisotropic 3D Gaussians using a set of scene images, 3D GS successfully
+captures the spatial positioning, orientations, color properties, and alpha blending factors, reconstructing both the geometry and visual texture of the scene. The
+method’s tile-based rasterizer further guarantees fast rendering performance.
+To tackle the deformable tissue reconstruction challenges in endoscopic scenes,
+we further incorporate the temporal dimension as the fourth axis to model dynamic environments [22]. Moreover, current solutions for depth prior-assisted
+reconstruction depend on multi-view information and the static scene assumption [6,20], which are not always feasible in the surgical scenario. Meanwhile, the
+predictions of existing monocular depth estimation methods [24] also suffer from
+ill-posed problems. The predicted depth results in uncertain measurements even
+with little changes in the environment, e.g. small deformation on the tissues.
+Therefore, reconstruction using depth prior supervision remains a challenge in
+deformable surgery scenarios. To overcome these hurdles, we leverage Depth-
+Endo-4DGS
+3
+Anything [24], a cutting-edge method educated through extensive visual pretraining that has demonstrated remarkable depth estimation capabilities across
+various scenarios. By applying Depth-Anything, we project the pre-trained depth
+into 3D for more robust 4D Gaussian initialization. To address the challenges
+posed by inaccurate issues in estimating depth using a monocular camera, we
+introduce a confidence-guided learning approach that effectively reduces the influence of noisy or uncertain measurements in the pre-trained depth estimation.
+We additionally implement surface normal constraints and depth regularization to strengthen the pseudo-depth’s accuracy and geometry constraint. Fig. 1
+showcases our 3D textures, the rendered images, and the depth predictions for
+endoscopic views. Specifically, our contributions in this paper are threefold:
+– We present Endo-4DGS, an innovative technique that adapts Gaussian Splatting for endoscopic scene reconstruction. Utilizing pseudo-depth generated
+by Depth-Anything, Endo-4DGS achieves remarkable reconstruction outcomes without needing ground truth depth data.
+– We propose confidence-guided learning to tackle the ill-pose monocular depth
+adaption problems, and further employ depth regularization and surface normal constraints against the depth prior adaption challenge in the deformable
+surgical reconstruction task.
+– Our extensive validation on two real surgical datasets shows that Endo-4DGS
+attains high-quality reconstruction, excels in real-time performance, reduces
+training expenditures, and demands less GPU memory, which sets the stage
+for advancements in robot-assisted surgery.
+2
+Methodology
+In this section, we introduce the representation and rendering formula of 4D
+Gaussians [22] in Sec. 2.1 and demonstrate our motivation and detailed implementation of the depth prior-based reconstruction in Sec. 2.2.
+2.1
+Preliminaries
+3D GS [11] utilizes 3D differentiable Gaussians as the unstructured representation, allowing for a differentiable volumetric representation that can be rapidly
+rasterized and projected onto a 2D surface for swift rendering. With covariance matrix Σ and mean µ the 3D GS at position x is described as G(x) =
+T
+−1
+1
+e− 2 (x−µ) Σ (x−µ) , where the covariance Σ can be further decomposed into
+T T
+Σ = RSS R with the scaling S and rotation R. Introducing by [25], with
+the viewing transform W and the Jacobian of the affine approximation of the
+projective transformation J, covariance in the camera plane can be described as
+Σ′ = JWΣWT JT . The final rendering equation is:
+Ĉ =
+X
+i∈N
+ci αi
+i−1
+Y
+(1 − αi ),
+j=1
+(1)
+4
+Y. Huang et al.
+𝜇, 𝐑, 𝐒, 𝑜, 𝐒𝐇
+Static 3D
+Gaussian
+𝒢
+Confidenceguided Learning
+Rendered Image 𝐼መ
+Input Image 𝐼
+𝑥𝑡
+𝑦𝑡
+𝑧𝑡
+Estimated
+Depth 𝐷
+MLPs
+𝑥𝑦
+𝑦𝑧
+𝑥𝑧
+෡
+Rendered Depth 𝐷
+Gaussian Initialization
+Deformable ′
+𝒢
+4D Gaussian
+4D Gaussian Representation
+Depth
+Regularization
+Surface Normal
+Constraints
+𝜇 + Δ𝜇, 𝐑 + Δ𝐑
+𝐒 + Δ𝐒, 𝑜 + Δ𝑜
+𝐒𝐇 + Δ𝐒𝐇
+Mask 𝑀
++
+ℒ𝑐𝑜𝑛
+Confidence Weight 𝑊
+Monocular
+Input
+ℒ𝑐𝑜𝑙𝑜𝑟
++
+ℒ𝑑𝑒𝑝𝑡ℎ , ℒ𝑠𝑢𝑟𝑓
++
+ℒ𝑡𝑣
+෡
+Rendered Normal 𝑁
+Optimization
+Fig. 2. Illustration of our proposed Endo-4DGS framework. We utilize monocular
+images, estimated depths from Depth-Anything, and surgical tool masks for training. 3D Guassian is represented as G with position mean µ, rotation R, scaling S
+opacity o, and spherical harmonics SH. 4D Gaussian is described as G ′ = G + ∆G.
+Lcolor , Lcon , Ldepth , Lsurf , Ltv are the color loss, confidence loss, depth regularization
+loss, surface normal loss and total-variational loss, respectively.
+where Ĉ is the predicted pixel color from N points. ci , αi are the color defined
+by the spherical harmonics coefficients and the density calculated by multiplying
+the 2D covariance Σ′ with the learned opacity oi .
+2.2
+Proposed Methodology
+4D Gaussian Splatting for Deformable Scene Representation Inspired
+by [22], we represent the deformable surgical scene with the 4D Gaussian G ′ =
+∆G +G which includes a static 3D Gaussian G and its deformation ∆G = F(G, t),
+where F is the deformation network and t is the time. The spatial-temporal encoder H is defined with multi-resolution Hexplanes Rl (i, j) and a tiny MLP
+ϕd , H(G, t) = {Rl (i, j), ϕd |(i, j) ∈ {(x, y), (x, z), (y, z), (x, t), (y, t), (z, t)}, l ∈
+{1, 2}}, and the spatial-temporal feature is encoded as fd = H(G, t).
+A multi-head Gaussian deformation decoder D = {ϕµ , ϕr , ϕs , ϕo , ϕSH } is
+designed for decoding the deformation of position, rotation, scaling, opacity and
+spherical harmonics SH with five tiny MLPs. The final representation of 4D
+Gaussian can be expressed as:
+G ′ = {µ + ϕµ (fd ), r + ϕr (fd ), s + ϕs (fd ), o + ϕo (fd ), SH + ϕSH (fd )}
+= {µ + ∆µ, R + ∆R, S + ∆S, o + ∆o, SH + ∆SH}
+(2)
+Gaussians Initialization with Depth Prior. Retrieving accurate point clouds
+in surgical scenes is challenging since there is only monocular visual information
+from the consumer-level endoscopes. Therefore, we propose to use the pre-trained
+depth to implement the point cloud initialization for the 4D Gaussian. With the
+Endo-4DGS
+5
+pre-trained depth estimation model and the input image I, we estimate an inverse depth map Dinv . Then a scaling β is applied to recover the depth map
+D = Dβinv in the camera coordinate. Given the camera intrinsic matrix K1 , and
+the extrinsic matrix K2 , we project the point cloud P ∈ RN ×3 with size N from
+the given image I as follows:
+P = K2−1 K1−1 [(I ⊙ M ), D],
+(3)
+where M is the mask for the input image, ⊙ is the element-wise multiplication,
+and [·] indicates concatenation. With the point cloud from depth prior, We initialize µ, R, making the training process faster for convergence and more robust
+in terms of geometry.
+Confidence Guided Learning. Monocular reconstruction with estimated depth
+is an ill-pose problem since there is no access to the ground truth geometry information. Inspired by [6, 19], we formulate our solution with a probabilistic model
+to learn statistics for depth from Depth-Anything, which is defined as:
+D̂ =
+P
+i∈N di αi
+P
+Qi−1
+j=1 (1 − αi )
+i∈N Wi
+, Wi = αi
+i−1
+Y
+(1 − αi )
+(4)
+j=1
+where di is the depth of the center of the Gaussian obtained by projecting to
+the z-axis of the camera coordinate. Wi ∈ (0, 1) is defined as the confidence
+weight for the corresponding point, which is closer to 1 with higher confidence.
+Following the above definition, the confidence guidance loss can be expressed as:
+Lcon = E[
+1
+1
+||D̂norm − Dnorm ||22 + log(W )] + E[
+||Ĉ − C||22 + log(W )], (5)
+2W 2
+2W 2
+where E(·) is the expectation, Dnorm and D̂norm are the depth prior and rendered depth normalized to (0, 1). While we penalize the depth and color with
+less confidence, we also add the log(·) as a regularization term. The confidence
+weight, therefore, maximizes the error where the rendered depth is different from
+the depth prior while reducing the influence of the uncertain value of the pretrained depth estimation.
+Surface Normal Constraints and Depth Regularization. To utilize the
+pre-trained depth map more effectively as the pseudo-ground truth, we propose
+to utilize depth regularization loss and surface normal loss. Following [5], we
+approximate the surface normal n̂i ∈ N̂ with the shortest axis:
+n̂i = Ri [r :], r = argmin([s1 , s2 , s3 ]),
+(6)
+where r is the index of the shortest scaling in Si = diag(s1 , s2 , s3 ) selected by
+argmin(·). Then we calculate the gradient of the depth prior ∇D = (GW , GH ),
+6
+Y. Huang et al.
+and formulate the pseudo surface normal as:
+ni = [ p
+GW
+i
+H 2
+2
+(GW
+i ) + (Gi ) + 1
+,p
+GH
+i
+H 2
+2
+(GW
+i ) + (Gi ) + 1
+,p
+1
+H 2
+2
+(GW
+i ) + (Gi ) + 1
+],
+(7)
+where GW , GH are the gradients along the width and height of the depth map.
+The surface normal constraints is described as Lsurf = ∥N − N̂∥1 . We also
+regularize the predicted depth from 4D Gaussian with a normalized depth loss
+and gradient loss. The depth regularization term Ldepth is expressed as:
+Ldepth = λnorm ∥Dnorm − D̂norm ∥1 + λgrad (1 − Pcorr (∥∇D∥2 , ∥∇D̂∥2 )),
+(8)
+where Pcorr (·) is the Pearson Correlation Coefficient, λnorm , λgrad are the weights
+for the normalized depth loss and gradient loss.
+With the Lcolor color loss and a grid-based total-variational loss Ltv [3,8,11],
+our final loss for optimizing can be represented as:
+L = Lcolor + Ltv + Ldepth + λsurf Lsurf + λcon Lcon ,
+(9)
+where λsurf , λcon are the weights for the surface constraints and confidence loss.
+Following [22], we emit Ltv for the training of the static 3D Gaussians.
+3
+Experiments
+3.1
+Dataset
+We evaluate the performance based on two publicly available datasets, StereoMIS [10] and EndoNeRF [21]. The StereoMIS dataset [10] is a stereo video
+dataset captured by the da Vinci Xi surgical system, consisting of 11 surgical sequences by in-vivo porcine subjects, where we extract the 800 to 1000
+frames from the first scene. The EndoNeRF dataset [21] includes two samples of
+prostatectomy via stereo cameras and provides estimated depth maps based on
+stereo-matching techniques, they also include challenging scenes with tool occlusion and non-rigid deformation. The training and validation splitting follows
+the 7:1 strategy in [26]. We use PSNR, SSIM, and LPIPS to evaluate the 3D
+scene reconstruction performance. We also report the results of training time,
+inference speed, and GPU memory usage on one single RTX4090 GPU.
+3.2
+Implementation Details
+All experiments are conducted on the RTX4090 GPU with the Python PyTorch framework. We adopt the Adam optimizer with an initial learning rate of
+1.6 × 10−3 . We employ the Depth-Anything-Small model for pseudo-depth map
+generation with depth scale β = 1000 and λnorm = 0.01, λgrad = 0.001, λsurf =
+0.001, λcon = 0.0001. We use an encoding voxel size of [64, 64, 64, 75], where the
+four dimensions are length, width, height, and time, respectively.
+Endo-4DGS
+7
+Table 1. Comparison experiments on the EndoNeRF dataset [21] against EndoNeRF [21], EndoSurf [26], and LerPlane [23]. The best results are in bold.
+GPU
+EndoNeRF-Cutting
+EndoNeRF-Pulling
+Training
+FPS ↑
+Usage ↑
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ Time ↓
+EndoNeRF [21] 35.84 0.942
+0.057
+35.43 0.939
+0.064 6 hours 0.2
+4 GB
+EndoSurf [26]
+34.89 0.952
+0.107
+34.91 0.955
+0.120 7 hours 0.04 17 GB
+LerPlane-32k [23] 34.66 0.923
+0.071
+31.77 0.910
+0.071
+8 mins 1.5 20 GB
+Endo-4DGS
+36.56 0.955 0.032 37.85 0.959 0.043 4 mins 100 4GB
+Models
+Table 2. Comparison experiments on the StereoMIS [10], against EndoNeRF [21],
+EndoSurf [26], and LerPlane [23]. The best results are in bold.
+Training
+GPU
+FPS ↑
+PSNR ↑ SSIM ↑ LPIPS ↓
+Time ↓
+Usage ↓
+Models
+EndoNeRF [21] 21.49 0.622
+0.360 5 hours 0.2
+4 GB
+EndoSurf [26]
+29.87 0.809
+0.303 8 hours 0.04 14 GB
+0.174
+7 mins 1.7 19 GB
+LerPlane-32k [23] 30.80 0.826
+Endo-4DGS
+32.69 0.850 0.148 7 mins 100 4 GB
+3.3
+Results
+We conducted a comprehensive comparison of our proposed method with stateof-the-art approaches for surgical scene reconstruction. Specifically, we reproduce
+EndoNeRF [21], EndoSurf [26], and LerPlane [23] with the original implementation. The evaluation results on the EndoNeRF [21] and StereoMIS [10] datasets
+are presented in Table 1 and Table 2. Upon analysis, we observed that while
+EndoNeRF [21] and EndoSurf [26] achieved relatively high performance, they
+required hours of training, making them time-consuming. On the other hand,
+LerPlane [23] significantly reduced the training time to approximately 8 minutes
+but incurred a slight degradation in rendering performance. It is important to
+note that all of these state-of-the-art methods suffered from very low frames per
+second (FPS), which limited their practical application in real-time surgical scene
+reconstruction tasks. In contrast, our proposed method not only outperformed
+all evaluated metrics on both datasets but also achieved a real-time inference
+speed of 100 FPS, where the training was accomplished with only 4 minutes and
+4GB of GPU memory. The significant improvement in inference speed makes our
+method highly suitable for real-time endoscopic applications.
+We have provided qualitative results for EndoNeRF datasets [21] in Fig. 3.
+Notably, the visualizations demonstrate that our proposed method preserved a
+substantial amount of visible details with accurate geometry features. The aforementioned quantitative and qualitative results strongly support the effectiveness
+of our method in achieving high-quality 3D reconstruction scenes at real-time
+inference speeds. This highlights its potential for future real-time endoscopic applications. We provide more visualizations on StereoMIS in the supplementary.
+To further analyze the contributions of our designs, we conducted an ablation
+study on the EndoNeRF dataset [21] by removing (i) depth regularization, (ii)
+surface normal constraints, (iii) confidence-guided learning. The experimental
+8
+Y. Huang et al.
+Table 3. Ablation experiments of the proposed method on EndoNeRF dataset [21].
+To observe the performance changes, we remove (i) the depth regularization, (ii) the
+surface constraints, and (iii) the confidence guidance. The best results are in bold.
+Depth
+Surface Confidence
+EndoNeRF-Cutting
+Regularization Constraints Guidance PSNR ↑ SSIM ↑ LPIPS ↓
+%
+%
+%
+35.14
+0.938
+0.046
+!
+%
+%
+36.00
+0.949
+0.040
+%
+!
+%
+35.22
+0.940
+0.057
+%
+%
+!
+35.54
+0.941
+0.048
+!
+!
+%
+36.24
+0.951
+0.038
+!
+%
+!
+36.22
+0.951
+0.036
+%
+!
+!
+36.08
+0.946
+0.036
+!
+!
+!
+36.56
+0.955
+0.032
+EndoNeRF
+LerPlane
+Ours
+Reference
+t = 0.01
+pulling
+t=0
+EndoSurf
+EndoNeRF-Pulling
+PSNR ↑ SSIM ↑ LPIPS ↓
+35.39
+0.937
+0.082
+35.68
+0.942
+0.072
+35.97
+0.945
+0.066
+35.68
+0.942
+0.066
+36.35
+0.945
+0.062
+36.94
+0.952
+0.053
+36.15
+0.943
+0.064
+37.85
+0.959
+0.043
+t=4
+t = 0.52
+t = 0.90
+t=0
+t = 0.01
+cutting
+t=7
+t = 10
+t = 0.52
+t = 0.94
+t = 18
+Fig. 3. Qualitative comparison on the EndoNeRF dataset [21] against EndoNeRF [21],
+EndoSurf [26], and LerPlane [23].
+results in Table 3 unequivocally demonstrate that the absence of any of the
+components leads to a substantial degradation in performance. These results
+highlight the crucial role played by each component in enhancing the quality,
+accuracy, and overall performance of our method.
+4
+Conclusion
+In this paper, we propose Endo-4DGS, a real-time, high-fidelity reconstruction method of deformable tissues. Different from previous works, lightweight
+Endo-4DGS
+9
+MLPs are implemented to capture temporal dynamics with Gaussian deformation fields. We further propose to estimate the depth map by a foundation model
+Depth-Anything for Gaussian Initialization. The framework is additionally enhanced with confidence-guided strategy, surface normal constraints, and depth
+regularization to better utilize the depth prior constraint. Extensive experiments
+demonstrate the superior performance and fast inference speed of our proposed
+method against other state-of-the-art methods. These results underline the vast
+potential of Endo-4DGS to improve a variety of surgical applications, allowing
+for better decision-making and safety during operations.
+10
+Y. Huang et al.
+References
+1. Bae, G., Budvytis, I., Yeung, C.K., Cipolla, R.: Deep multi-view stereo for dense
+3d reconstruction from monocular endoscopic video. In: International Conference
+on Medical Image Computing and Computer-Assisted Intervention. pp. 774–783.
+Springer (2020)
+2. Barbed, O.L., Montiel, J.M., Fua, P., Murillo, A.C.: Tracking adaptation to improve superpoint for 3d reconstruction in endoscopy. In: International Conference
+on Medical Image Computing and Computer-Assisted Intervention. pp. 583–593.
+Springer (2023)
+3. Cao, A., Johnson, J.: Hexplane: A fast representation for dynamic scenes. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 130–141 (2023)
+4. Chen, G., Wang, W.: A survey on 3d gaussian splatting. arXiv preprint
+arXiv:2401.03890 (2024)
+5. Cheng, K., Long, X., Yang, K., Yao, Y., Yin, W., Ma, Y., Wang, W., Chen, X.:
+Gaussianpro: 3d gaussian splatting with progressive propagation. arXiv preprint
+arXiv: (2024)
+6. Chung, J., Oh, J., Lee, K.M.: Depth-regularized optimization for 3d gaussian splatting in few-shot images. arXiv preprint arXiv:2311.13398 (2023)
+7. Cui, B., Islam, M., Bai, L., Ren, H.: Surgical-dino: Adapter learning of foundation
+model for depth estimation in endoscopic surgery. arXiv preprint arXiv:2401.06013
+(2024)
+8. Fang, J., Yi, T., Wang, X., Xie, L., Zhang, X., Liu, W., Nießner, M., Tian, Q.:
+Fast dynamic radiance fields with time-aware neural voxels. In: SIGGRAPH Asia
+2022 Conference Papers. pp. 1–9 (2022)
+9. Gao, H., Yang, X., Xiao, X., Zhu, X., Zhang, T., Hou, C., Liu, H., Meng, M.Q.H.,
+Sun, L., Zuo, X., et al.: Transendoscopic flexible parallel continuum robotic mechanism for bimanual endoscopic submucosal dissection. The International Journal
+of Robotics Research p. 02783649231209338 (2023)
+10. Hayoz, M., Hahne, C., Gallardo, M., Candinas, D., Kurmann, T., Allan, M., Sznitman, R.: Learning how to robustly estimate camera pose in endoscopic videos.
+International Journal of Computer Assisted Radiology and Surgery pp. 1185—1192 (2023)
+11. Kerbl, B., Kopanas, G., Leimkühler, T., Drettakis, G.: 3d gaussian splatting for
+real-time radiance field rendering. ACM Transactions on Graphics 42(4) (2023)
+12. Long, Y., Li, Z., Yee, C.H., Ng, C.F., Taylor, R.H., Unberath, M., Dou, Q.: Edssr: efficient dynamic surgical scene reconstruction with transformer-based stereoscopic depth perception. In: Medical Image Computing and Computer Assisted
+Intervention–MICCAI 2021: 24th International Conference, Strasbourg, France,
+September 27–October 1, 2021, Proceedings, Part IV 24. pp. 415–425. Springer
+(2021)
+13. Mahmoud, N., Cirauqui, I., Hostettler, A., Doignon, C., Soler, L., Marescaux,
+J., Montiel, J.M.M.: Orbslam-based endoscope tracking and 3d reconstruction. In:
+Computer-Assisted and Robotic Endoscopy: Third International Workshop, CARE
+2016, Held in Conjunction with MICCAI 2016, Athens, Greece, October 17, 2016,
+Revised Selected Papers 3. pp. 72–83. Springer (2017)
+14. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: Nerf: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM 65(1), 99–106 (2021)
+Endo-4DGS
+11
+15. Ozyoruk, K.B., Gokceler, G.I., Bobrow, T.L., Coskun, G., Incetan, K., Almalioglu,
+Y., Mahmood, F., Curto, E., Perdigoto, L., Oliveira, M., et al.: Endoslam dataset
+and an unsupervised monocular visual odometry and depth estimation approach
+for endoscopic videos. Medical image analysis 71, 102058 (2021)
+16. Psychogyios, D., Colleoni, E., Van Amsterdam, B., Li, C.Y., Huang, S.Y., Li, Y.,
+Jia, F., Zou, B., Wang, G., Liu, Y., et al.: Sar-rarp50: Segmentation of surgical
+instrumentation and action recognition on robot-assisted radical prostatectomy
+challenge. arXiv preprint arXiv:2401.00496 (2023)
+17. Shao, S., Pei, Z., Chen, W., Zhu, W., Wu, X., Sun, D., Zhang, B.: Self-supervised
+monocular depth and ego-motion estimation in endoscopy: Appearance flow to the
+rescue. Medical image analysis 77, 102338 (2022)
+18. Stucker, C., Schindler, K.: Resdepth: Learned residual stereo reconstruction. In:
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops. pp. 184–185 (2020)
+19. Wang, F., Chen, Z., Wang, G., Song, Y., Liu, H.: Masked space-time hash encoding for efficient dynamic scene reconstruction. Advances in Neural Information
+Processing Systems 36 (2024)
+20. Wang, G., Chen, Z., Loy, C.C., Liu, Z.: Sparsenerf: Distilling depth ranking for
+few-shot novel view synthesis. IEEE/CVF International Conference on Computer
+Vision (ICCV) (2023)
+21. Wang, Y., Long, Y., Fan, S.H., Dou, Q.: Neural rendering for stereo 3d reconstruction of deformable tissues in robotic surgery. In: International Conference
+on Medical Image Computing and Computer-Assisted Intervention. pp. 431–441.
+Springer (2022)
+22. Wu, G., Yi, T., Fang, J., Xie, L., Zhang, X., Wei, W., Liu, W., Tian, Q., Xinggang,
+W.: 4d gaussian splatting for real-time dynamic scene rendering. arXiv preprint
+arXiv:2310.08528 (2023)
+23. Yang, C., Wang, K., Wang, Y., Yang, X., Shen, W.: Neural lerplane representations
+for fast 4d reconstruction of deformable tissues. arXiv preprint arXiv:2305.19906
+(2023)
+24. Yang, L., Kang, B., Huang, Z., Xu, X., Feng, J., Zhao, H.: Depth anything: Unleashing the power of large-scale unlabeled data. arXiv:2401.10891 (2024)
+25. Yifan, W., Serena, F., Wu, S., Öztireli, C., Sorkine-Hornung, O.: Differentiable surface splatting for point-based geometry processing. ACM Transactions on Graphics
+(TOG) 38(6), 1–14 (2019)
+26. Zha, R., Cheng, X., Li, H., Harandi, M., Ge, Z.: Endosurf: Neural surface reconstruction of deformable tissues with stereo endoscope videos. In: International
+Conference on Medical Image Computing and Computer-Assisted Intervention. pp.
+13–23. Springer (2023)
+27. Zia, A., Bhattacharyya, K., Liu, X., Berniker, M., Wang, Z., Nespolo, R., Kondo, S.,
+Kasai, S., Hirasawa, K., Liu, B., et al.: Surgical tool classification and localization:
+results and methods from the miccai 2022 surgtoolloc challenge. arXiv preprint
+arXiv:2305.07152 (2023)
+arXiv:2401.16416v4 [cs.CV] 2 Apr
+No Author Given
+No Institute Given
+t=0
+t=8
+t = 14
+t = 22
+t = 0.01
+t = 0.33
+t = 0.57
+t = 0.93
+Reference
+Ours
+EndoNeRF
+Supplementary Materials for “Endo-4DGS:
+Endoscopic Monocular Scene Reconstruction
+with 4D Gaussian Splatting”
+Fig. 1. Qualitative comparison on the StereoMIS dataset [?] against EndoNeRF [?].
+Table 1. Ablation experiments of the proposed method on EndoNeRF Dataset [?].
+We compare the performance by removing the depth initialization.
+EndoNeRF-Cutting
+EndoNeRF-Pulling
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓
+Without depth initialization 5.62
+0.606
+0.528
+7.08
+0.728
+0.416
+With depth initialization
+36.56 0.955 0.032 37.85 0.959 0.043
+Models

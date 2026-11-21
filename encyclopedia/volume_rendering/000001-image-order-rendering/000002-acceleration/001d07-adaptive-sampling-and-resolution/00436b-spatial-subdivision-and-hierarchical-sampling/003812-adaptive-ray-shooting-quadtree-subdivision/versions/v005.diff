@@ -1,0 +1,149 @@
+--- v004.md
++++ v005.md
+@@ -23,5 +23,5 @@
+ 3.  **Error Computation:** For each node in the quadtree, compute the average rendering error [S1]. The error is derived from the difference between the rendered color and the target pixel color [S1].
+ 4.  **Subdivision Decision:** Compare the average error $E_j$ of each node against a threshold [G]. If $E_j$ exceeds the threshold, subdivide the node into four children [G]. Repeat this process recursively until a maximum depth is reached or the error is below the threshold [G].
+-5.  **Adaptive Ray Shooting:** For leaf nodes in the final quadtree: if the node is in a "complex" region (high error), cast more rays (higher sampling density) [S1]. If the node is in a "simple" region (low error), cast fewer rays (lower sampling density) [S1]. Rays are shot primarily at pixels with dramatic color change [S1].
++5.  **Adaptive Ray Shooting:** For leaf nodes in the final quadtree, if the node is in a complex region with larger rendering error, dynamically shoot more rays [S1]. If the node is in a simple region, cast fewer rays [S1]. Rays are shot primarily at pixels with dramatic color change [S1].
+ 6.  **Volume Rendering:** For each selected ray $r_{ki}$, sample 5D points along the ray [G]. The network $F_\Theta$ predicts color $c$ and density $\sigma$ [S1]. Render the pixel color $\hat{c}_{ki}$ using standard volume rendering integration [G].
+ 7.  **Loss Calculation:** Compute the loss $L$ over all selected rays:
+@@ -41,53 +41,43 @@
+ ```python
+ def adaptive_ray_shooting_quadtree(images, radiance_field, max_depth, error_threshold, num_iterations):
+-    # Initialize quadtrees for each image
+     quadtrees = []
+-    for I_i in images:
+-        qt = Quadtree(root_node=Node(0, 0, I_i.width, I_i.height, 0))
++    for img in images:
++        qt = Quadtree(root=Node(0, 0, img.width, img.height, 0))
+         quadtrees.append(qt)
+ 
+     for iteration in range(num_iterations):
+         total_loss = 0.0
+-        total_rays = 0
++        rays_per_image = []
+ 
+-        for idx, I_i in enumerate(images):
++        for idx, img in enumerate(images):
+             qt = quadtrees[idx]
++            # Subdivide based on gradient (iteration 0) or rendering error (subsequent) [G]
++            if iteration == 0:
++                qt.subdivide_on_gradient(error_threshold, max_depth)
++            else:
++                qt.subdivide_on_error(error_threshold, max_depth, radiance_field)
+ 
+-            # Subdivide Quadtree based on previous error or initial gradient
+-            if iteration == 0:
+-                # Not given in the sources. Standard: subdivide nodes where gradient magnitude > threshold up to max_depth.
+-                qt.subdivide_based_on_gradient(error_threshold, max_depth)
+-            else:
+-                # Not given in the sources. Standard: subdivide nodes where average rendering error > threshold up to max_depth.
+-                qt.subdivide_based_on_rendering_error(error_threshold, max_depth, radiance_field)
++            rays = []
++            for leaf in qt.get_leaves():
++                # Higher error -> more rays [S1]
++                num_rays = int(leaf.error * 10) + 1  # [G] heuristic scaling
++                rays.extend(leaf.generate_rays(num_rays))
++            rays_per_image.append(len(rays))
+ 
+-            # Generate rays from leaf nodes
+-            rays_to_render = []
+-            for leaf in qt.get_leaf_nodes():
+-                # Not given in the sources. Standard: higher error -> more rays.
+-                num_rays = leaf.calculate_ray_count()
+-                rays_to_render.extend(leaf.generate_rays(num_rays))
++            rendered = []
++            for ray in rays:
++                pts = sample_5d_points(ray)  # [G]
++                c_hat = volume_render(ray, pts, radiance_field)  # [G]
++                rendered.append(c_hat)
+ 
+-            # Render rays
+-            rendered_colors = []
+-            for ray in rays_to_render:
+-                points_5d = sample_5d_points_along_ray(ray)
+-                c_hat = volume_render(ray, points_5d, radiance_field)
+-                rendered_colors.append(c_hat)
++            target = img.get_pixel_colors()
++            loss = sum((r - t)**2 for r, t in zip(rendered, target)) / len(rendered)  # [G]
++            total_loss += loss
++            qt.update_errors(rendered, rays)
+ 
+-            # Compute Loss and Update Quadtree Metrics
+-            target_colors = I_i.get_pixel_colors()
+-            loss = compute_l2_loss(rendered_colors, target_colors)
+-            total_loss += loss
+-            total_rays += len(rays_to_render)
+-            qt.update_node_errors(rendered_colors, rays_to_render)
+-
+-        # Normalize loss
+         N = len(images)
+-        M = total_rays
++        M = sum(rays_per_image) / N  # Average rays per image [G]
+         avg_loss = total_loss / (N * M)
+-
+-        # Update radiance field parameters
+-        radiance_field.update_parameters(avg_loss)
++        radiance_field.update(avg_loss)
+ 
+     return radiance_field
+@@ -99,30 +89,27 @@
+         self.error = 0.0
+     def is_leaf(self): return self.children is None
+-    def get_leaf_nodes(self):
++    def get_leaves(self):
+         if self.is_leaf(): return [self]
+-        return [n for c in self.children for n in c.get_leaf_nodes()]
++        return [n for c in self.children for n in c.get_leaves()]
+ 
+ class Quadtree:
+-    def __init__(self, root_node): self.root = root_node
+-    def subdivide_based_on_gradient(self, threshold, max_depth):
+-        # Not given in the sources. Standard: recursive subdivision based on image gradient.
++    def __init__(self, root): self.root = root
++    def subdivide_on_gradient(self, threshold, max_depth):
++        # [G] Recursive subdivision where gradient magnitude > threshold up to max_depth
+         pass
+-    def subdivide_based_on_rendering_error(self, threshold, max_depth, radiance_field):
+-        # Not given in the sources. Standard: recursive subdivision based on computed node error.
++    def subdivide_on_error(self, threshold, max_depth, radiance_field):
++        # [G] Recursive subdivision where average rendering error > threshold up to max_depth
+         pass
+-    def get_leaf_nodes(self): return self.root.get_leaf_nodes()
+-    def update_node_errors(self, rendered_colors, rays_to_render):
+-        # Not given in the sources. Standard: assign average error to each node.
++    def get_leaves(self): return self.root.get_leaves()
++    def update_errors(self, rendered, rays):
++        # [G] Assign average error to each node based on rendered vs target colors
+         pass
+ 
+-def compute_l2_loss(rendered, target):
+-    return sum((r - t) ** 2 for r, t in zip(rendered, target)) / len(rendered)
+-
+-def sample_5d_points_along_ray(ray):
+-    # Not given in the sources. Standard: sample points along ray origin and direction.
++def sample_5d_points(ray):
++    # [G] Sample points along ray origin and direction
+     pass
+ 
+ def volume_render(ray, points_5d, radiance_field):
+-    # Not given in the sources. Standard: integrate F_Theta predictions along ray.
++    # [G] Integrate F_Theta predictions along ray
+     pass
+ ```
+@@ -134,11 +121,11 @@
+ 
+ **Edge Cases and Pitfalls**
+-*   **Precision:** Rendering error computation must be stable to avoid oscillating subdivision patterns. Not given in the sources.
+-*   **Boundaries:** Quadtree nodes must align with pixel boundaries to ensure correct ray mapping. Not given in the sources.
+-*   **Degenerate Input:** If an image is uniform, the quadtree will remain at the root level, casting minimal rays. If an image is highly noisy, the quadtree may reach max depth everywhere, resulting in uniform sampling. Not given in the sources.
++*   **Precision:** Rendering error computation must be stable to avoid oscillating subdivision patterns [G].
++*   **Boundaries:** Quadtree nodes must align with pixel boundaries to ensure correct ray mapping [G].
++*   **Degenerate Input:** If an image is uniform, the quadtree will remain at the root level, casting minimal rays [G]. If an image is highly noisy, the quadtree may reach max depth everywhere, resulting in uniform sampling [G].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** The method reduces the total number of rays $M$ significantly compared to uniform sampling, thereby reducing the time spent in volume rendering per epoch [S1]. The overhead of quadtree management and error computation adds a small constant cost [G].
+-*   **Memory Complexity:** Requires storing the quadtree structure for each image. The size is proportional to the number of nodes, which is bounded by $4 \times \text{Image Resolution}$ in the worst case (full subdivision) [G].
++*   **Memory Complexity:** Requires storing the quadtree structure for each image [G]. The size is proportional to the number of nodes, which is bounded by $4 \times \text{Image Resolution}$ in the worst case (full subdivision) [G].
+ *   **Measured Performance:** Evaluated with NeRF and Plenoxels under widely used benchmarks, achieving comparable accuracy to state-of-the-art methods with much faster training [S1].
+ *   **Strengths:** General applicability to various radiance field methods; reduces training burden by focusing on complex regions; barely affects accuracy [S1].

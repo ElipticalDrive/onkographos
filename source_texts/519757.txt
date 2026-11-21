@@ -1,0 +1,132 @@
+The Irreden Engine. Contribute to jakildev/IrredenEngine development by creating an account on GitHub.
+
+demo(shape_debug): createVoxelPoolShape uses IRMath::SDF::evaluateGrid (#2120) by jakildev · Pull Request #2147 · jakildev/IrredenEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jakildev
+commented
+Jun 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+createVoxelPoolShape (shape_debug) hand-rolled a per-cell IRMath::SDF::evaluate loop over the voxel volume. Replaced it with the existing batched IRMath::SDF::evaluateGrid helper + a single threshold pass.
+Byte-identical: evaluateGrid samples each cell at vec3(x,y,z) - size*0.5 + 0.5 in index3DtoIndex1D order — bit-for-bit equal to the centered positions C_VoxelSetNew lays out for centerAroundOrigin (both reduce to exact multiples of 0.5), so every carve decision is preserved.
+Test plan
+fleet-build --target IRShapeDebug — clean
+render-verify (macos-debug / Metal): all 21 shape_debug shots PASS — 19 byte-identical (max_delta 0, PSNR inf); the only 2 with any delta are the non-cardinal-yaw shots (max_delta 22 / 7, threshold 64), the demo's known run-to-run scatter jitter, orthogonal to entity-creation-time SDF carving.
+Found by simplify-scan-render-leak during PR #2117 review; pre-existing before that PR.
+Closes #2120
+claim: shape_debug createVoxelPoolShape use IRMath::SDF::evaluateGrid (…
+…
+910058d
+```
+…#2120)
+```
+jakildev
+added
+the
+fleet:wip
+Work in progress — not ready for review
+label
+Jun 30, 2026
+demo(shape_debug): carve voxel-pool shape via SDF::evaluateGrid
+…
+f2eed15
+```
+createVoxelPoolShape hand-rolled a per-cell IRMath::SDF::evaluate loop
+over the voxel volume; the batched IRMath::SDF::evaluateGrid helper
+already covers this. Batch-evaluate once into a distances buffer, then
+threshold each cell.
+
+evaluateGrid recomputes each cell's sample position as
+vec3(x,y,z) - size*0.5 + 0.5 in index3DtoIndex1D order, which is
+bit-identical to the centered positions C_VoxelSetNew lays out for
+centerAroundOrigin — so distances[i] lines up one-for-one with voxel i
+and the carve is byte-identical. render-verify passes all 21
+shape_debug macos-debug shots (19 byte-identical, 2 non-cardinal-yaw
+shots within the existing sub-threshold scatter jitter).
+
+Found by simplify-scan-render-leak during PR #2117 review; pre-existing
+before that PR.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+jakildev
+added
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+fleet:reviewing-mac-sonnet-reviewer
+and removed
+fleet:wip
+Work in progress — not ready for review
+labels
+Jun 30, 2026
+jakildev
+commented
+Jun 30, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — demo(shape_debug): createVoxelPoolShape uses IRMath::SDF::evaluateGrid (#2120)
+Verdict: approve
+Summary
+Replaces createVoxelPoolShape's hand-rolled per-cell IRMath::SDF::evaluate loop with a single batched IRMath::SDF::evaluateGrid call into a distances buffer, then a threshold pass. Mechanical perf/reuse cleanup found during PR #2117 review (simplify-scan-render-leak); pre-existing before that PR, not introduced by it.
+Verification performed
+Confirmed the byte-identical claim algebraically. evaluateGrid samples each cell at vec3(x,y,z) - size*0.5 + 0.5; C_VoxelSetNew's centerAroundOrigin ctor (component_voxel_set.hpp:151-157) offsets by -(size-1)*0.5. Since size*0.5 - 0.5 == (size-1)*0.5 exactly (both reduce to a multiple of 0.5, exactly representable in float for the demo's size range), sdfPos == pos bit-for-bit — the claim holds, not just "close enough."
+Confirmed the loop-order claim. evaluateGrid iterates z outer, y, x inner, incrementing flat sequentially — flat = z*size.y*size.x + y*size.x + x for the n-th cell, which is exactly IRMath::index3DtoIndex1D (ir_math.hpp:1504: index.z*size.x*size.y + index.y*size.x + index.x). positions_/voxels_ are laid out via the same index3DtoIndex1D call in the ctor, so distances[i] lines up with vs.positions_[i]/vs.voxels_[i] one-for-one, matching the old per-cell loop that read vs.positions_[i].pos_ directly.
+Checked the allocation-failure edge case (C_VoxelSetNew ctor's span-mismatch branch zeroes size_/numVoxels_ on an out-of-voxels condition). The new code reads vs.size_/vs.numVoxels_ (not the local size parameter) for both the distances buffer size and the evaluateGrid call, so this degrades to a correct no-op exactly like the old for (i < vs.numVoxels_) loop did — no behavior change in the failure path.
+Confirmed the post-carve recomputeFaceOccupancy + syncActiveMask calls (required per voxel/CLAUDE.md whenever a carve bypasses C_VoxelSetNew mutators) are untouched by this diff and still present immediately after the loop.
+std::vector<float> distances allocation happens once per shape-entity creation (not a per-frame/tick path), so this isn't a hot-path allocation concern.
+No render/, system/, world/, ECS, GPU-buffer, or concurrency surface touched — this is a CPU-only refactor inside creations/demos/. Doesn't meet the cross-host smoke-tag criteria (no engine/render/, shader, engine/system/, or CMake changes).
+Test plan: author's fleet-build + render-verify (macOS/Metal, 21/21 shape_debug shots) is sufficient evidence given the verified-exact math above; the 2 shots with nonzero delta are explicitly the known non-cardinal-yaw scatter jitter (unrelated demo behavior), not attributable to this change.
+Praise
+The inline comment correctly states the non-obvious why (the exact offset-formula equivalence and ordering match) rather than restating what the diff does — exactly the kind of comment that earns its keep.
+Test plan the author should run before merge
+Already covered by the author's test plan (build + render-verify, 21/21 shots) — re-verified the underlying math claim independently above.
+🤖 Reviewed by Claude Sonnet 5 (review-pr skill)
+Escalation: none. Safe for merge.
+Opus recheck not required.
+jakildev
+added
+fleet:approved
+Fleet reviewer approved — ready for human merge
+and removed
+fleet:reviewing-mac-sonnet-reviewer
+labels
+Jun 30, 2026
+jakildev
+merged commit eece2f4
+into
+master
+Jun 30, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+fleet:approved
+Fleet reviewer approved — ready for human merge
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

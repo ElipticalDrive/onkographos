@@ -1,0 +1,299 @@
+--- v005.md
++++ v006.md
+@@ -4,97 +4,221 @@
+ 
+ ## Overview
+-NeRF in the Wild (NeRF-W) is an extension of Neural Radiance Fields designed to handle unconstrained, internet-scale photo collections where strict consistency assumptions fail due to variable illumination and transient occluders [S1, S4]. Unlike standard NeRF, which assumes a static scene and constant lighting, NeRF-W disentangles the scene into a shared static geometry and image-dependent components: a learned appearance embedding for photometric variations (lighting, exposure) and a transient head for moving objects [S1, S2]. It achieves this by optimizing per-image latent codes and using a data-dependent uncertainty field to discount transient regions during training, allowing for robust novel view synthesis of static structures [S1, 5].
++NeRF in the Wild (NeRF-W) is an extension of Neural Radiance Fields designed to handle unconstrained, "in-the-wild" photo collections where strict consistency assumptions fail due to variable illumination, auto-exposure, and transient occluders [S1, S4]. It disentangles the scene into a shared static geometry and image-dependent components: a learned low-dimensional appearance embedding for photometric variations and a secondary volumetric radiance field with uncertainty modeling for transient objects [S1, S2]. Unlike its siblings, NeRF-W explicitly models both appearance and transient geometry simultaneously, whereas [Aug-NeRF](10294-aug-nerf.md) focuses on robustness via perturbations, [NeRF Ensemble with Conjoint Pruning](12608-nerf-ensemble-with-conjoint-pruning.md) on compression, and [ContraNeRF](13659-contranerf.md) on cross-view consistency without per-scene optimization.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ images $\{I_i\}_{i=1}^N$ with known camera poses (estimated via COLMAP [S1]), and a 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ for ray sampling.
+-*   **Outputs:** Rendered color $\hat{C}_i(\mathbf{r})$ for each image $i$ along ray $\mathbf{r}$, decomposed into static and transient components.
++*   **Inputs:** A set of $N$ images $\{I_i\}$ of the same scene with known camera poses (estimated via COLMAP [S1]); 3D position $\mathbf{x}$, viewing direction $\mathbf{d}$, and image index $i$.
++*   **Outputs:** Rendered color $\hat{C}_i(\mathbf{r})$ for a ray $\mathbf{r}$; static density $\sigma(\mathbf{x})$, static color $\mathbf{c}(\mathbf{x}, \mathbf{d})$, transient density $\sigma_i^{(\tau)}(\mathbf{x})$, transient color $\mathbf{c}_i^{(\tau)}(\mathbf{x}, \mathbf{d})$, and uncertainty variance $\beta_i(\mathbf{x})^2$.
+ 
+ **Data Structures:**
+-1.  **Static Radiance Field ($F_\theta$):** A shared MLP (MLP$_{\theta_1}$ for density, MLP$_{\theta_2}$ for color) parameterized by $\theta$. It takes $\mathbf{x}$ and $\mathbf{d}$ as input.
+-    *   *Note:* The density prediction $\sigma(\mathbf{x})$ is generated *before* conditioning on appearance embeddings to ensure geometry is shared [S1].
+-2.  **Appearance Embeddings ($\mathbf{l}_i^{(a)}$):** A real-valued vector of length $n^{(a)}$ for each training image $i$. Optimized alongside $\theta$ [S1].
+-3.  **Transient Radiance Field ($F_\tau$):** A separate MLP (TransientNet) parameterized by $\theta_\tau$. It takes $\mathbf{x}$, $\mathbf{d}$, and a per-image transient embedding $\mathbf{l}_i^{(\tau)}$ (length $n^{(\tau)}$) as input [S1, S2].
+-4.  **Uncertainty Field ($\beta_i(\mathbf{r})$):** A scalar variance output by the transient head (or a shared uncertainty mechanism) for each ray, modeled via a softplus activation shifted by $\beta_{min}$ [S1].
++1.  **Static MLP ($MLP_{\theta_1}$):** Takes $\mathbf{x}$ and positional encoding $\gamma(\mathbf{x})$. Outputs static density $\sigma(\mathbf{x})$ and intermediate features $\mathbf{z}(\mathbf{x})$.
++2.  **Appearance Embedding ($\mathbf{l}_i^{(a)}$):** A learnable vector of length $n^{(a)}$ for each image $i$.
++3.  **Color MLP ($MLP_{\theta_2}$):** Takes $\mathbf{z}(\mathbf{x})$, viewing direction $\mathbf{d}$ (encoded), and $\mathbf{l}_i^{(a)}$. Outputs static color $\mathbf{c}_i(\mathbf{x}, \mathbf{d})$.
++4.  **Transient MLP ($MLP_{\theta_3}$):** Takes $\mathbf{x}$, $\mathbf{d}$, and a transient embedding $\mathbf{l}_i^{(\tau)}$ (length $n^{(\tau)}$). Outputs transient density $\sigma_i^{(\tau)}(\mathbf{x})$ and transient color $\mathbf{c}_i^{(\tau)}(\mathbf{x}, \mathbf{d})$.
++5.  **Uncertainty MLP ($MLP_{\theta_4}$):** Takes $\mathbf{x}$ and $\mathbf{d}$. Outputs variance $\beta_i(\mathbf{x})^2$.
+ 
+ **Numbered Steps:**
+ 
+-1.  **Initialization:**
+-    *   Initialize MLP weights $\theta$ randomly [S1].
+-    *   Initialize per-image appearance embeddings $\{\mathbf{l}_i^{(a)}\}_{i=1}^N$ and transient embeddings $\{\mathbf{l}_i^{(\tau)}\}_{i=1}^N$ [S1].
+-    *   Set hyperparameters: batch size 2048, training steps 300,000, $\beta_{min} > 0$, $\lambda_u$ [S1].
+-
+-2.  **Ray Sampling:**
+-    *   For each image $i$, sample rays $\mathbf{r}_{ij}$ passing through pixels.
+-    *   Sample $K$ points $\{t_k\}_{k=1}^K$ along each ray using stratified sampling or importance sampling (coarse/fine models as in standard NeRF) [S1].
+-
+-3.  **Static Component Forward Pass:**
+-    *   For each point $t_k$ on ray $\mathbf{r}$, compute static density $\sigma(t_k)$ using MLP$_{\theta_1}(\mathbf{x}_k, \mathbf{d}_k)$ [S1].
+-    *   Compute static color $\mathbf{c}(t_k)$ using MLP$_{\theta_2}(\mathbf{x}_k, \mathbf{d}_k, \mathbf{l}_i^{(a)})$. Note that $\mathbf{l}_i^{(a)}$ is concatenated or injected into the color MLP, but *not* the density MLP [S1].
+-
+-4.  **Transient Component Forward Pass:**
+-    *   Compute transient density $\sigma_i^{(\tau)}(t_k)$ using TransientNet$(\mathbf{x}_k, \mathbf{d}_k, \mathbf{l}_i^{(\tau)})$. Output activation: Sigmoid [S1].
+-    *   Compute transient color $\mathbf{c}_i^{(\tau)}(t_k)$ using TransientNet$(\mathbf{x}_k, \mathbf{d}_k, \mathbf{l}_i^{(\tau)})$. Output activation: Sigmoid [S1].
+-    *   Compute uncertainty variance $\beta_i(t_k)^2$ using TransientNet (or a dedicated branch). Output activation: Softplus shifted by $\beta_{min}$ [S1].
+-
+-5.  **Volumetric Rendering (Compositing):**
+-    *   Compute transmittance $T_i(t_k)$ accounting for *both* static and transient densities:
+-        $$ T_i(t_k) = \exp \left( -\sum_{k'=1}^{k-1} (\sigma(t_{k'}) + \sigma_i^{(\tau)}(t_{k'})) \delta_{k'} \right) $$
+-    *   Compute alpha weights for static and transient components:
+-        $$ \alpha(t_k) = 1 - \exp(-\sigma(t_k)\delta_k) $$
+-        $$ \alpha_i^{(\tau)}(t_k) = 1 - \exp(-\sigma_i^{(\tau)}(t_k)\delta_k) $$
+-    *   Render composite color $\hat{C}_i(\mathbf{r})$:
+-        $$ \hat{C}_i(\mathbf{r}) = \sum_{k=1}^K T_i(t_k) \left[ \alpha(t_k)\mathbf{c}(t_k) + \alpha_i^{(\tau)}(t_k)\mathbf{c}_i^{(\tau)}(t_k) \right] $$
+-        [S1, Eq. 8]
+-
+-6.  **Loss Calculation:**
+-    *   The total loss for ray $\mathbf{r}$ in image $i$ combines the coarse and fine model predictions [S1]:
+-        $$ \mathcal{L}_i(\mathbf{r}) = \mathcal{L}_i^{fine}(\mathbf{r}) + \frac{1}{2} \| \hat{C}_i^{coarse}(\mathbf{r}) - \hat{C}_i^{fine}(\mathbf{r}) \|^2 $$
+-    *   The fine model loss $\mathcal{L}_i^{fine}(\mathbf{r})$ consists of three terms [S1]:
+-        1.  **Negative Log-Likelihood (NLL):** Models the color difference weighted by uncertainty $\beta_i(\mathbf{r})$.
+-            $$ \text{NLL} = \frac{\| C_i(\mathbf{r}) - \hat{C}_i(\mathbf{r}) \|^2}{2\beta_i(\mathbf{r})^2} + \frac{1}{2} \log \beta_i(\mathbf{r})^2 $$
+-        2.  **Uncertainty Regularization:** The $\log \beta$ term prevents $\beta \to \infty$ (ignoring all pixels) by balancing the NLL [S1].
+-        3.  **Transient Density L1 Regularization:** Discourages the model from using transient density to explain static features.
+-            $$ \text{Reg}_{\tau} = \frac{\lambda_u}{2K} \sum_{k=1}^K \sigma_i^{(\tau)}(t_k) $$
+-    *   Total Ray Loss:
+-        $$ \mathcal{L}_i(\mathbf{r}) = \frac{\| C_i(\mathbf{r}) - \hat{C}_i(\mathbf{r}) \|^2}{2\beta_i(\mathbf{r})^2} + \frac{1}{2} \log \beta_i(\mathbf{r})^2 + \frac{\lambda_u}{2K} \sum_{k=1}^K \sigma_i^{(\tau)}(t_k) + \frac{1}{2} \| \hat{C}_i^{coarse}(\mathbf{r}) - \hat{C}_i^{fine}(\mathbf{r}) \|^2 $$
+-        [S1, Eq. 13, 14]
+-
+-7.  **Optimization:**
+-    *   Minimize the sum of losses over all rays in the batch using Adam optimizer ($\beta_1=0.9, \beta_2=0.999$) [S1].
+-    *   Update $\theta$, $\{\mathbf{l}_i^{(a)}\}$, and $\{\mathbf{l}_i^{(\tau)}\}$ [S1].
+-
+-8.  **Test-Time Evaluation:**
+-    *   Omit the transient head and uncertainty fields. Render only static $\sigma(t)$ and $\mathbf{c}(t)$ [S1].
+-    *   For test images, optimize a single appearance embedding $\mathbf{l}^{(a)}$ using only the left half of the image to avoid information leakage, then evaluate metrics on the right half [S1].
++1.  **Initialization:** Initialize MLPs with random weights. Initialize appearance embeddings $\{\mathbf{l}_i^{(a)}\}_{i=1}^N$ and transient embeddings $\{\mathbf{l}_i^{(\tau)}\}_{i=1}^N$ to zero or small random values [S1].
++2.  **Sampling:** For each training image $I_i$, sample rays $\mathbf{r}$. Sample $K$ points $\{t_k\}_{k=1}^K$ along each ray using stratified sampling or importance sampling based on a coarse model [S1].
++3.  **Static Query:** For each point $t_k$, query $MLP_{\theta_1}$ to get $\sigma(t_k)$ and $\mathbf{z}(t_k)$. Note: $\sigma(t_k)$ is shared across all images [S1, S2].
++4.  **Static Color Query:** Query $MLP_{\theta_2}$ with $\mathbf{z}(t_k)$, $\mathbf{d}$, and $\mathbf{l}_i^{(a)}$ to get static color $\mathbf{c}_i(t_k)$ [S1].
++5.  **Transient Query:** Query $MLP_{\theta_3}$ with $t_k$, $\mathbf{d}$, and $\mathbf{l}_i^{(\tau)}$ to get transient density $\sigma_i^{(\tau)}(t_k)$ and transient color $\mathbf{c}_i^{(\tau)}(t_k)$ [S1].
++6.  **Uncertainty Query:** Query $MLP_{\theta_4}$ with $t_k$ and $\mathbf{d}$ to get variance $\beta_i(t_k)^2$ [S1].
++7.  **Rendering (Composite):** Compute the expected color $\hat{C}_i(\mathbf{r})$ by alpha-compositing both static and transient components [S1]:
++    $$
++    \hat{C}_i(\mathbf{r}) = \sum_{k=1}^K \alpha_k \mathbf{c}_i(t_k) + \sum_{k=1}^K \alpha_k^{(\tau)} \mathbf{c}_i^{(\tau)}(t_k)
++    $$
++    where the transmittance $T_i(t_k)$ accounts for both static and transient densities:
++    $$
++    T_i(t_k) = \exp\left( -\sum_{k'=1}^{k-1} (\sigma(t_{k'}) + \sigma_i^{(\tau)}(t_{k'})) \delta_{k'} \right)
++    $$
++    and weights are $\alpha_k = T_i(t_k)(1 - \exp(-\sigma(t_k)\delta_k))$ and $\alpha_k^{(\tau)} = T_i(t_k)(1 - \exp(-\sigma_i^{(\tau)}(t_k)\delta_k))$ [S1].
++8.  **Loss Calculation:** Compute the loss $L_i(\mathbf{r})$ for the ray [S1]:
++    $$
++    L_i(\mathbf{r}) = \frac{(C_i(\mathbf{r}) - \hat{C}_i(\mathbf{r}))^2}{2\beta_i(\mathbf{r})^2} + \frac{\log \beta_i(\mathbf{r})^2}{2} + \frac{\lambda_u}{2K} \sum_{k=1}^K \sigma_i^{(\tau)}(t_k)
++    $$
++    The first two terms are the negative log-likelihood of the color difference assuming Gaussian noise with variance $\beta_i(\mathbf{r})^2$. The third term is an L1 regularization on transient density to prevent it from explaining static features [S1].
++9.  **Coarse Loss:** Additionally, compute a coarse rendering $\hat{C}_c^i(\mathbf{r})$ using only the static head and appearance embeddings, and add $\frac{1}{2} \| C_i(\mathbf{r}) - \hat{C}_c^i(\mathbf{r}) \|^2$ to the loss [S1].
++10. **Optimization:** Minimize the total loss over all rays and images using Adam optimizer [S1]. Optimize MLP parameters $\theta$ and embeddings $\{\mathbf{l}_i^{(a)}\}, \{\mathbf{l}_i^{(\tau)}\}$ [S1].
++11. **Test-Time Evaluation:** For a test image, optimize a single appearance embedding $\mathbf{l}^{(a)}$ using only the left half of the image to avoid leakage, then evaluate metrics on the right half [S1]. Render only static $\sigma(\mathbf{x})$ and $\mathbf{c}(\mathbf{x}, \mathbf{d})$ by omitting transient and uncertainty fields [S1].
+ 
+ **Parameters:**
+-*   $\beta_{min}$: Hyperparameter $>0$ for softplus shift [S1].
+-*   $\lambda_u$: Weight for transient density regularization [S1].
+-*   $n^{(a)}, n^{(\tau)}$: Dimensionalities of appearance and transient embeddings [S1].
+-*   Batch Size: 2048 [S1].
+-*   Training Steps: 300,000 [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Information Leakage:** When evaluating on test sets, using the whole image to optimize the appearance embedding leads to overfitting. The left-half/right-half split is required [S1].
+-*   **Transient vs. Static Confusion:** Without the L1 regularization on transient density ($\lambda_u$), the model may use transient density to explain away static high-frequency details or lighting variations, leading to "foggy" or inaccurate geometry [S1].
+-*   **Pose Estimation:** If camera poses are inaccurate (common in in-the-wild data), the static assumption breaks down more severely. NeRF-W assumes poses are provided (e.g., from COLMAP) [S1].
++*   $\lambda_u$: Regularization weight for transient density. Not given in the sources.
++*   $\beta_{min}$: Hyperparameter $>0$ added to the softplus activation for $\beta_i(\mathbf{x})^2$ to ensure minimum importance [S1].
++*   $n^{(a)}, n^{(\tau)}$: Dimensions of appearance and transient embeddings. Not given in the sources.
++*   Batch size: 2048 [S1].
++*   Training steps: 300,000 [S1].
++
++**Pseudocode:**
++
++```python
++import numpy as np
++
++def softplus(x, beta_min):
++    # Softplus activation shifted by beta_min
++    return np.log1p(np.exp(x)) + beta_min
++
++def positional_encoding(x, num_freqs):
++    # Standard NeRF positional encoding
++    # x: (..., 3)
++    # Returns: (..., 3 * 2 * num_freqs)
++    scales = 2.0 ** np.arange(num_freqs)
++    shaped = x.reshape(-1, 1, 3) * scales.reshape(1, -1, 1)
++    shaped = shaped.reshape(-1, 3 * num_freqs)
++    return np.concatenate([np.sin(shaped), np.cos(shaped)], axis=-1)
++
++def render_ray(x, d, l_a, l_tau, beta_min, lambda_u, 
++               mlp_static, mlp_color, mlp_transient, mlp_uncertainty, 
++               K, delta):
++    """
++    Renders a single ray and computes loss.
++    x: (K, 3) sampled points
++    d: (3,) viewing direction
++    l_a: (n_a,) appearance embedding
++    l_tau: (n_tau,) transient embedding
++    """
++    # 1. Static Query
++    # mlp_static takes x and returns sigma and z
++    sigma, z = mlp_static(x) # sigma: (K,), z: (K, feature_dim)
++    
++    # 2. Static Color Query
++    # mlp_color takes z, d, l_a
++    c_static = mlp_color(z, d, l_a) # (K, 3)
++    
++    # 3. Transient Query
++    # mlp_transient takes x, d, l_tau
++    sigma_tau, c_tau = mlp_transient(x, d, l_tau) # sigma_tau: (K,), c_tau: (K, 3)
++    
++    # 4. Uncertainty Query
++    # mlp_uncertainty takes x, d
++    beta_sq = softplus(mlp_uncertainty(x, d), beta_min) # (K,)
++    
++    # 5. Alpha Compositing
++    # Total density
++    sigma_total = sigma + sigma_tau
++    
++    # Transmittance
++    # T_k = exp(-sum_{j<k} sigma_total_j * delta_j)
++    # Using cumulative sum
++    cum_sum = np.cumsum(sigma_total * delta)
++    T = np.exp(-np.concatenate([[0], cum_sum[:-1]]))
++    
++    # Alpha weights
++    alpha = T * (1 - np.exp(-sigma * delta))
++    alpha_tau = T * (1 - np.exp(-sigma_tau * delta))
++    
++    # Composite Color
++    c_hat = np.sum(alpha[:, None] * c_static + alpha_tau[:, None] * c_tau, axis=0)
++    
++    # 6. Loss Calculation
++    # Assume true_color is passed or retrieved
++    # L = (C - C_hat)^2 / (2 * beta^2) + log(beta^2)/2 + lambda_u/2K * sum(sigma_tau)
++    # Note: beta_sq is per point, but loss is usually per pixel/ray. 
++    # The paper sums over K points for the regularization, but the likelihood term 
++    # is typically aggregated. The formula in S1 sums the likelihood terms? 
++    # Actually, S1 Eq 13 shows sum over k for the regularization, but the likelihood 
++    # is for the final pixel color C(r) vs C_hat(r). 
++    # However, the variance beta_i(r) is per ray (or per point?). 
++    # S1 says "variance beta_i(r)^2". In implementation, it's often per point or averaged.
++    # Let's follow the structure: The likelihood term compares the final rendered color.
++    # But beta is predicted per point. 
++    # Re-reading S1: "observed pixel intensities ... variance beta_i(r)^2".
++    # And "beta_i(t) ... activation for beta_i(t)".
++    # It seems beta is predicted per sample point, but the likelihood is on the pixel.
++    # Standard practice in NeRF-W: The likelihood term uses the variance associated with the ray.
++    # If beta is per point, we might average or use the last point. 
++    # S1 Eq 13: L_i(r) = ... + log beta_i(r)^2 / 2. 
++    # Let's assume beta_i(r) is the variance for the ray, approximated by the mean or last point.
++    # For implementation clarity, we will use the mean beta_sq over K points for the likelihood term.
++    
++    beta_ray_sq = np.mean(beta_sq)
++    
++    # Likelihood term
++    diff = true_color - c_hat
++    likelihood = np.sum(diff**2) / (2 * beta_ray_sq) + np.log(beta_ray_sq) / 2
++    
++    # Regularization term
++    reg = (lambda_u / (2 * K)) * np.sum(sigma_tau)
++    
++    total_loss = likelihood + reg
++    
++    return total_loss, c_hat, sigma, sigma_tau, beta_ray_sq
++
++def train_nerf_w(images, poses, mlp_static, mlp_color, mlp_transient, mlp_uncertainty, 
++                 l_a, l_tau, beta_min, lambda_u, batch_size, num_steps, K, delta):
++    """
++    Training loop for NeRF-W.
++    """
++    N = len(images)
++    
++    for step in range(num_steps):
++        # Sample batch of rays
++        batch_indices = np.random.choice(N, batch_size)
++        total_loss = 0
++        
++        for i in batch_indices:
++            # Sample rays for image i
++            rays = sample_rays(images[i], poses[i]) # Returns x, d, true_color
++            
++            # Get embeddings
++            emb_a = l_a[i]
++            emb_tau = l_tau[i]
++            
++            # Render and compute loss
++            loss, _, _, _, _ = render_ray(
++                rays.x, rays.d, emb_a, emb_tau, beta_min, lambda_u,
++                mlp_static, mlp_color, mlp_transient, mlp_uncertainty,
++                K, rays.delta
++            )
++            
++            # Add coarse loss if needed (omitted for brevity, see S1 Eq 14)
++            # coarse_loss = 0.5 * ||C_i - C_hat_c_i||^2
++            
++            total_loss += loss
++            
++        # Update parameters (Adam)
++        # gradients = compute_gradients(total_loss, [mlp_static, mlp_color, mlp_transient, mlp_uncertainty, l_a, l_tau])
++        # optimizer.step(gradients)
++        pass
++
++    return mlp_static, mlp_color, mlp_transient, mlp_uncertainty, l_a, l_tau
++
++def test_nerf_w(test_image, test_pose, mlp_static, mlp_color, beta_min):
++    """
++    Test-time rendering.
++    """
++    # Optimize appearance embedding for test image
++    # Use left half of image for optimization to avoid leakage
++    l_a_test = optimize_embedding(test_image, mlp_static, mlp_color, beta_min)
++    
++    # Render using only static components
++    rays = sample_rays(test_image, test_pose)
++    c_static = mlp_color(mlp_static(rays.x)[1], rays.d, l_a_test)
++    sigma = mlp_static(rays.x)[0]
++    
++    # Alpha composite static only
++    T = np.exp(-np.cumsum(sigma * rays.delta))
++    alpha = T * (1 - np.exp(-sigma * rays.delta))
++    c_hat = np.sum(alpha[:, None] * c_static, axis=0)
++    
++    return c_hat
++```
+ 
+ ## Subtopics
+ 
+ ### Transient Filtering via Candidate Head
+-An architectural variant (used in UP-NeRF) that isolates the transient network. It uses a "candidate head" to predict transient properties (color, density, beta) alongside static properties, enabling robust pose optimization by filtering out transient occluders [S6, unofficial]. It predicts transient color $\mathbf{c}_i^{(\tau)}$, density $\sigma_i^{(\tau)}$, and beta $\beta_i$ using predicted candidate features $\mathbf{f}_i$ and candidate embeddings $\mathbf{l}_i^{(c)}$ [S6, unofficial]. Merging transient and candidate heads degrades performance; separation is necessary to prevent failure in estimating correct poses and reducing rendering quality [S6, unofficial]. This differs from NeRF-W by isolating the transient network and using deep features (DINO) for candidate filtering, whereas NeRF-W does not isolate the transient network [S6, unofficial].
++An architectural variant (e.g., in UP-NeRF) that uses a candidate head to predict transient properties (color, density, beta) alongside static properties, enabling robust pose optimization by filtering out transient occluders [S6, unofficial]. It predicts transient color $\mathbf{c}_i^{(\tau)}$, transient density $\sigma_i^{(\tau)}$, and variance $\beta_i$ using predicted candidate features $\mathbf{f}_i$ and candidate embeddings $\mathbf{l}_i^{(c)}$ [S6, unofficial]. Unlike NeRF-W, which does not isolate the transient network and relies on different architecture assumptions, this method isolates the transient network and uses deep features (DINO) for candidate filtering [S6, unofficial]. Merging transient and candidate heads degrades performance, causing failures in pose estimation and rendering quality [S6, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training requires 300,000 steps with a batch size of 2048 on 8 GPUs [S1]. This is significantly longer than standard NeRF due to the additional MLPs and embeddings.
+-*   **Memory Complexity:** Increased memory usage due to storing per-image appearance and transient embeddings ($N \times (n^{(a)} + n^{(\tau)})$) and the additional transient MLP parameters [S1].
+-*   **Performance:** NeRF-W improves over the previous state-of-the-art (NRW) by an average margin of 4.4dB in PSNR across 6 scenes and up to 40% improvements in MS-SSIM [S1].
+-*   **Strengths:** Handles unconstrained internet photo collections; disentangles static geometry from transient objects and lighting variations; enables controllable appearance synthesis [S1, 4].
+-*   **Limitations:** Requires accurate camera poses (COLMAP); struggles with scenes undergoing major structural changes (e.g., construction) or significant seasonal changes not captured by appearance embeddings alone [S5, unofficial].
+-*   **When to use:** Novel view synthesis of cultural landmarks or tourist sites from internet photo collections where lighting and transient occluders vary [S1, 4].
+-*   **When not to use:** Controlled studio settings (standard NeRF is sufficient); scenes with major structural changes over time [S5, unofficial].
++*   **Time and Memory Complexity:** Training requires optimizing per-image embeddings ($N$ vectors) alongside MLP weights, increasing memory usage compared to standard NeRF. Training takes 300,000 steps [S1].
++*   **Measured Performance:** On 6 landmark scenes from the Phototourism dataset, NeRF-W improves over the previous state-of-the-art (NRW) by an average margin of 4.4dB in PSNR and up to 40% in MS-SSIM [S1].
++*   **Strengths:** Handles variable illumination, auto-exposure, and transient occluders (pedestrians) in unconstrained photo collections [S1, S4]. Enables controllable appearance by interpolating in the latent space [S1].
++*   **Limitations:** Cannot handle major appearance changes (e.g., seasonal changes) [S5, unofficial]. Requires known camera poses (COLMAP) [S1]. Test-time evaluation requires optimizing an appearance embedding for each test image, which can be slow [S1].
++*   **When to use:** Unconstrained internet photo collections of static landmarks with varying lighting and transient objects [S1, S4].
++*   **When not to use:** Scenes with significant structural changes over time or where camera poses are unknown/unreliable [S5, unofficial].
+ 
+ ## Background
+-NeRF in the Wild (NeRF-W) was introduced by Martin-Brualla et al. in 2021 [S4]. It was developed to address the limitations of the original NeRF, which assumed static scenes and constant lighting, making it unsuitable for unstructured internet photo collections [S1]. The method builds on the framework of Generative Latent Optimization (GLO) to learn appearance embeddings [S1]. It has been used to reconstruct famous landmarks such as the Trevi Fountain, Sacre Coeur, Brandenburg Gate, Taj Mahal, Prague Old Town Square, and Hagia Sophia from the Phototourism dataset [S1, 4]. Subsequent developments, such as those by Sun et al. (2022), applied appearance embedding concepts to mesh output rather than radiance fields [S4].
++NeRF in the Wild (NeRF-W) was introduced by Martin-Brualla et al. in 2021 [S4]. It was developed to address the limitations of NeRF in controlled settings, specifically its inability to model real-world phenomena like variable illumination and transient occluders in unstructured image collections [S1]. It was tested on large-scale image collections of tourist landmarks such as the Brandenburg Gate and the Trevi Fountain [S4]. A subsequent development by Sun et al. (2022) used appearance embeddings but sought output in meshes rather than radiance fields [S4].
+ 
+ ## Sources

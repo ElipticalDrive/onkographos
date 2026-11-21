@@ -1,0 +1,216 @@
+Port of a fix from driveclub-recomp #145. Not yet compiled or tested against DCport — please treat it as a reviewed proposal, not as a verified fix. Symptom Daytime tunnels can stay brightly lit, and some tunnels show a sharply bounded d...
+
+Tunnel lighting: conservative HTILE bounds for the local-light culling shader · Issue #7 · qnfn/Driveclub-Port · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Tunnel lighting: conservative HTILE bounds for the local-light culling shader #7
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Tunnel lighting: conservative HTILE bounds for the local-light culling shader#7
+Copy link
+Description
+dnfcf524-max
+opened on Oct 23, 2026
+Issue body actions
+Port of a fix from driveclub-recomp #145.
+Not yet compiled or tested against DCport — please treat it as a reviewed proposal, not as a verified fix.
+Symptom
+Daytime tunnels can stay brightly lit, and some tunnels show a sharply bounded dark rectangle.
+DCport does not document this; it is the same renderer generation as driveclub-recomp, where the
+same effect was reported as issue #34
+and fixed by #145.
+Cause
+DriveClub's local-light/probe culling compute shader (pgm_hash 0xbfce517c) reads guest-side
+HTILE metadata to reject light volumes before the ambient pass. Vulkan depth writes never update
+that guest buffer, so the captured tiles stay at 0x0000000f and valid volumes are rejected.
+The ambient shader (0x2c918c06) then only tests the volumes that survived, so the tunnel loses
+its local light.
+In that shader bits 18..31 are Zmin and bits 12..17 index a 64-entry Z-span table whose last entry
+expands to 16383, so the value 0x0003f00f covers the whole depth range [0, 1] conservatively.
+This is a DriveClub-specific workaround, not general HTILE emulation: it only widens culling, and
+the ambient pass still tests volumes against per-pixel positions.
+Patch (one file, +20 lines added, none removed)
+```
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -1,11 +1,12 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <xxhash.h>
+ #include <mutex>
++#include <cstdlib>
+ #include <unordered_map>
+ #include <unordered_set>
+ #include <set>
+ #include "video_core/renderer_vulkan/ui_composition.h"
+ #include "video_core/renderer_vulkan/vk_breadcrumbs.h"
+ #include "bbport_settings.h"
+@@ -2558,12 +2559,31 @@
+                 }
+                 if (desc.is_formatted) {
+                     flags |= VideoCore::ObtainBufferFlags::IsTexelBuffer;
+                 }
+                 const auto [buffer, offset] =
+                     buffer_cache.ObtainBuffer(vsharp.base_address, size, flags);
++                // DriveClub (from driveclub-recomp #145, HeyOkay): the local-light/probe culling
++                // shader reads guest HTILE metadata that Vulkan depth writes never update (the
++                // captured tiles stay 0x0000000f), so valid light volumes are rejected and
++                // daytime tunnels stay lit. Give that one binding conservative full-depth
++                // bounds: bits 18..31 are Zmin and bits 12..17 index a 64-entry Z-span table
++                // whose last entry expands to 16383, so 0x0003f00f covers [0,1]. The ambient
++                // shader (2c918c06) still tests volumes against per-pixel positions, so this
++                // only widens culling. BB_LIGHTING_CULL_FIX=0 restores the old result.
++                // Recording a command is only safe on the GPU thread: with the draw pipe on,
++                // BindBuffers runs on the recorder and the fill is skipped (SETUP > Threading
++                // Auto/Off, the default, keeps it on).
++                static const bool lighting_cull_fix = [] {
++                    const char* value = std::getenv("BB_LIGHTING_CULL_FIX");
++                    return value == nullptr || std::atoi(value) != 0;
++                }();
++                if (lighting_cull_fix && !UseDrawPipe() && stage.pgm_hash == 0xbfce517cull &&
++                    buffer_index == 1) {
++                    runtime.FillBuffer(buffer, offset, size, 0x0003f00fu);
++                }
+                 const u64 offset_aligned = Common::AlignDown(offset, alignment);
+                 const u64 adjust = offset - offset_aligned;
+                 if (adjust % 4 != 0) {
+                     LOG_WARNING(Render_Vulkan, "Buffer binding in shader {:#x} isn't dword aligned",
+                                 stage.pgm_hash);
+                 }
+```
+The diff above is the complete change; it applies with git apply to
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp in the runtime tree.
+Where it goes
+The runtime tree is Supermedo/bloodborne_pc at
+de2e38a (1.9.2) with windows/runtime/driveclub-runtime.patch applied (that patch does not touch
+BindBuffers, so this insertion point is unmodified upstream code). Verified here: the DCport patch
+applies 76/76 files to that commit, and this patch then applies 1/1 on top.
+Differences from the original #145
+Original (driveclub-recomp)
+Here
+Why
+buffer_cache.ObtainBuffer(addr, size, desc.is_written, desc.is_formatted)
+ObtainBuffer(addr, size, flags) with the ObtainBufferFlags already built above
+bbport's newer API
+No thread guard
+!UseDrawPipe()
+bbport can run BindBuffers on the recording thread (vk_draw_pipe); runtime.FillBuffer records a command and must stay on the GPU thread
+Host-side expansion of the lighting tile list + push_data.ud_regs[0] = tiles
+not included
+Shader::PushData in bbport has no ud_regs (it carries xoffset/yoffset/buf_offsets/scene_size); the record count cannot be raised from BindBuffers as-is
+The omitted half only matters above 1080p: at 1080p the guest tile list is exactly 816,000 bytes
+(8160 tiles × 100), the size #145 calls “the original”; 1440p needs 1,440,000. DCport's default and
+recommended render size is 1080p, and its own documentation already warns about 1440p/4K, so the
+1080p fix is the useful half. If you want the 1440p half too, the record count has to be found in
+bbport's user-data path first.
+Attribution
+The idea, the shader hashes and the 0x0003f00f value come from driveclub-recomp, which is
+GPL-2.0-or-later like DCport:
+Fix: HeyOkay, PR OverkillLabs3/driveclub-recomp#145
+("Fix tunnel lighting with conservative HTILE culling bounds"), merged as commit
+1ca7e68c10ca0e256cc0921e3276bd3ec5f122d7;
+branch commit 03d7f8b9.
+Original report: OverkillLabs3/driveclub-recomp#34.
+The recomp repository vendors shadPS4 at b4e7ae7 with bbport-local changes
+(gpu/VENDOR.txt), which is the same lineage as DCport's GPU layer.
+If this goes in, please keep the "from driveclub-recomp #145, HeyOkay" line in the code comment and
+credit HeyOkay in the release notes.
+Testing (not done yet)
+Build the runtime on top of de2e38a + driveclub-runtime.patch + this patch.
+Drive a daytime tunnel that currently stays lit (and one showing the dark rectangle), with
+SETUP > Threading on Auto/Off.
+A/B with BB_LIGHTING_CULL_FIX=0 in the environment: the old, wrong lighting should come back.
+Worth checking as a side effect: auto exposure when entering and leaving a tunnel.
+Known limits of this version: no effect with SETUP > Threading = On (the fill is skipped by
+design), and above 1080p the tile list is still the guest-sized one (see the table above).
+Suggested commit message
+```
+Fix tunnel lighting with conservative HTILE culling bounds
+
+DriveClub's local-light culling shader reads guest HTILE metadata that Vulkan
+depth writes never update, so valid light volumes are rejected and daytime
+tunnels stay lit. Fill that binding with 0x0003f00f (full depth range) for the
+culling shader only; the ambient pass still tests per-pixel positions.
+BB_LIGHTING_CULL_FIX=0 restores the old behaviour.
+
+Ported from driveclub-recomp #145 by HeyOkay (GPL-2.0-or-later):
+https://github.com/OverkillLabs3/driveclub-recomp/pull/145
+```
+Activity
+qnfn
+added a commit that references this issue on Oct 23, 2026
+windows: DCport 0.5.0 — event-load crash guarded, tunnel lighting, DL…
+...
+744a053
+qnfn commented on Oct 23, 2026
+qnfn
+on Oct 23, 2026
+Owner
+More actions
+Thank you @dnfcf524-max, this was a great write-up! It's in DCport 0.5.0: https://github.com/qnfn/Driveclub-Port/releases/tag/windows-v0.5.0
+We wrote it our own way rather than applying the diff as is, with two differences:
+It also runs with the draw pipe on. DCport records draws on its draw-recording thread by default, which already records buffer copies in BindBuffers, so the fill is safe there. With the !UseDrawPipe() guard it would never have run for most players.
+Checked against our own shader translation. Binding 1 of bfce517c is the buffer the shader decodes with bits 12–17 / 18–31 and the 16383 limit; binding 0 only holds constants. The log prints Light culling: depth tiles at ... span the whole depth range once per session. BB_DC_LIGHT_CULL=0 turns it off for comparison.
+Credit to HeyOkay (driveclub-recomp #145) and to you is in the code comment, the README and the release notes.
+darkresident commented on Oct 23, 2026
+darkresident
+on Oct 23, 2026
+Last edited by darkresident
+More actions
+Apologies if I should have created a separate thread; it seemed to me that this bug belongs in this issue.
+In the tunnel, the top half of the screen becomes significantly darker. Track Norway - Atlanterhavsvegen
+Ryzen 5 5600, RX 9070 XT
+DCport 0.5.0
+last_run.log
+qnfn commented on Oct 24, 2026
+qnfn
+on Oct 24, 2026
+Owner
+More actions
+Thanks @darkresident, the screenshot and log made it easy to find! It's fixed in DCport 0.5.1: https://github.com/qnfn/Driveclub-Port/releases/tag/windows-v0.5.1 (the launcher offers the update by itself: Restart to update).
+The cause was the 1440p render size (-resolutionscale 1.3333 in your log). The game makes its per-tile light lists for 1080p only, so at 1440p they ran out about 57% of the way down the screen, exactly where the edge was. They are now sized for the real render size, at 1440p and 4K alike. Idea from driveclub-recomp #145 by HeyOkay.
+Let me know if the Atlanterhavsvegen tunnel looks right now.
+👍React with 👍1Reacted by darkresident
+qnfn commented on Oct 24, 2026
+qnfn
+on Oct 24, 2026
+Owner
+More actions
+@darkresident, a follow-up on the tunnel edge at 1440p: the 0.5.1 fix only worked with threaded recording off. Your RX 9070 XT runs with it on (SETUP > Threading on Auto), so the hard edge most likely stayed for you. Sorry about that!
+DCport 0.5.2 fixes it: https://github.com/qnfn/Driveclub-Port/releases/tag/windows-v0.5.2 (the launcher offers the update by itself). The light lists were already sized for 1440p, but the count that tells the game how many to fill stayed at 1080p's. It's now raised either way. The log shows it as Light lists: record count 8160 -> ....
+If you get a chance, a run through the Atlanterhavsvegen tunnel would confirm it on your card.
+👍React with 👍1Reacted by darkresident
+darkresident commented on Oct 24, 2026
+darkresident
+on Oct 24, 2026
+More actions
+Yes, the top half of the screen does not darken. Thank you. However, if Threading is set to "on", the rearview mirror starts to glow when entering a tunnel. If Threading is set to "auto", the mirror displays correctly.
+last_run.log
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

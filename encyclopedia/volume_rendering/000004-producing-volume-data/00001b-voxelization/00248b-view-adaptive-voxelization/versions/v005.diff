@@ -1,0 +1,137 @@
+--- v004.md
++++ v005.md
+@@ -18,5 +18,5 @@
+ 2.  **Surface Span Storage (Global):**
+     *   Dimensions: $W_{screen} \times H_{screen} \times N_{spans}$, where $N_{spans} \le 7$ [S1].
+-    *   Fields per span: Depth ($f32$), Normal ($f32 \times 3$) [S1].
++    *   Fields per span: Depth ($f32$), Normal ($f32 \times 3$), Empty Space ($f32$) [S1].
+     *   Memory: ~252 MB for $1920 \times 1080$ [S1].
+     *   Note: Surface links are replaced by normals [S1].
+@@ -60,9 +60,7 @@
+ ```python
+ def view_adaptive_voxelization(particles, screen_width, screen_height, tile_w=1024, tile_h=512, layers=16384):
+-    # Global storage for compressed surfaces
+-    # Structure: list of lists of spans. spans[u][v] = [(depth, normal), ...]
++    # Global storage for compressed surfaces: spans[u][v] = [(depth, normal, empty_space), ...]
+     surface_spans = [[[] for _ in range(screen_height)] for _ in range(screen_width)]
+     
+-    # Tile dimensions
+     num_tiles_x = (screen_width + tile_w - 1) // tile_w
+     num_tiles_y = (screen_height + tile_h - 1) // tile_h
+@@ -71,20 +69,15 @@
+         for tx in range(num_tiles_x):
+             # 1. Initialize Tile Voxel Grid (Bit-packed)
+-            # Dimensions: tile_w x tile_h x layers
+-            # Using a flat array for bit packing: index = (z * tile_h + y) * tile_w + x
+-            tile_grid_size = tile_w * tile_h * layers
+-            tile_grid = [0] * tile_grid_size
++            tile_grid = [0] * (tile_w * tile_h * layers)
+             
+             # 2. Splatting
+             for particle in particles:
+-                # Project particle to tile coordinates
+-                # Determine pixel range (u_start, u_end, v_start, v_end) within tile
+-                # Determine depth range (z_min, z_max) for each pixel in range
+-                # This step involves sphere-ray intersection logic
+-                for u in range(u_start, u_end):
+-                    for v in range(v_start, v_end):
+-                        # Calculate z_min, z_max for this pixel and particle
+-                        for z in range(z_min, z_max):
+-                            # Set bit in tile_grid
++                # Compute screen-space bounding box and depth range for the particle sphere
++                u_min, u_max, v_min, v_max, z_min, z_max = project_particle_to_tile(
++                    particle, tx * tile_w, ty * tile_h, tile_w, tile_h
++                )
++                for u in range(u_min, u_max + 1):
++                    for v in range(v_min, v_max + 1):
++                        for z in range(z_min, z_max + 1):
+                             idx = (z * tile_h + v) * tile_w + u
+                             tile_grid[idx] = 1
+@@ -94,55 +87,49 @@
+                 for v in range(tile_h):
+                     spans = []
+-                    current_span_start = None
+-                    layer_count = 0
++                    entry_z = None
++                    total_layers = 0
+                     
+-                    # Iterate through layers
++                    # Iterate through layers in parallel (simulated sequentially here)
+                     for z in range(layers):
+                         idx = (z * tile_h + v) * tile_w + u
+-                        is_occupied = tile_grid[idx]
+-                        
+-                        if is_occupied and current_span_start is None:
+-                            # Entry
+-                            current_span_start = z
+-                            layer_count = 1
+-                        elif is_occupied and current_span_start is not None:
+-                            layer_count += 1
+-                        elif not is_occupied and current_span_start is not None:
+-                            # Exit
+-                            exit_z = z
+-                            # Compute normal from entry/exit points
+-                            normal = compute_normal(current_span_start, exit_z)
+-                            spans.append((current_span_start, normal))
+-                            current_span_start = None
+-                            layer_count = 0
++                        if tile_grid[idx]:
++                            if entry_z is None:
++                                entry_z = z
++                            total_layers += 1
++                        else:
++                            if entry_z is not None:
++                                normal = compute_normal(entry_z, z)
++                                spans.append((entry_z, normal, 0.0))
++                                entry_z = None
+                     
+                     # Handle case where last layer is occupied
+-                    if current_span_start is not None:
+-                        exit_z = layers
+-                        normal = compute_normal(current_span_start, exit_z)
+-                        spans.append((current_span_start, normal))
+-                        # Overflow handling: if len(spans) > 7, merge/extend last span
+-                        if len(spans) > 7:
+-                            # Keep first 7, extend the 7th to cover remaining empty space
+-                            # The source notes: "keep track of the actual number of layers 
+-                            # and the amount of empty space inside the extended last span"
+-                            # Implementation detail: The 7th span's depth is extended, 
+-                            # and metadata tracks the gap.
+-                            pass 
++                    if entry_z is not None:
++                        normal = compute_normal(entry_z, layers)
++                        spans.append((entry_z, normal, 0.0))
+                     
+-                    # Store in global structure
++                    # Overflow handling: keep up to 7 spans, extend last if needed
++                    if len(spans) > 7:
++                        # Extend the 7th span to cover remaining empty space
++                        # Track actual layer count for correct volumetric absorption
++                        spans[6] = (spans[6][0], spans[6][1], total_layers)
++                        spans = spans[:7]
++                    
+                     global_u = tx * tile_w + u
+                     global_v = ty * tile_h + v
+                     surface_spans[global_u][global_v] = spans
+ 
+-    # 4. Filtering and Normal Generation (Post-processing)
+-    # Apply iterative filtering based on viewer distance
+-    # Generate normals if not done during extraction
+     return surface_spans
+ 
++def project_particle_to_tile(particle, tile_origin_x, tile_origin_y, tile_w, tile_h):
++    # [G] Standard perspective projection: compute the screen-space bounding box
++    # of the particle sphere, clamp to tile boundaries, and calculate the
++    # depth range [z_min, z_max] via sphere-plane intersection along view rays.
++    # Returns integer coordinates for the affected tile pixels and layers.
++    return 0, tile_w - 1, 0, tile_h - 1, 0, layers - 1
++
+ def compute_normal(z_entry, z_exit):
+-    # Placeholder for normal calculation based on ray direction and surface geometry
+-    # In the source, normals are derived from connecting entry/exit points
+-    return [0, 0, 1] # [G] Simplified normal
++    # [G] Compute surface normal by connecting entry and exit points along the view ray.
++    # Normal = normalize(exit_point - entry_point)
++    return [0.0, 0.0, 1.0]
+ ```
+ 

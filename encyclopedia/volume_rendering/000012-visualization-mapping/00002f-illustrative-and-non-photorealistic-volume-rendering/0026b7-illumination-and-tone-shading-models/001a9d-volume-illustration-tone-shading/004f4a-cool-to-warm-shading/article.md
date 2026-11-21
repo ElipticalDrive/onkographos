@@ -1,0 +1,93 @@
+# Cool to Warm Shading
+
+Also called: Tone-based shading, Warm-to-cool Shading
+
+## Overview
+Cool to warm shading is a non-photorealistic illumination model that enhances the perception of 3D shape by mapping surface orientation relative to the viewer or light source to a color gradient, assigning warmer colors to facing regions and cooler colors to receding regions [S1, S2, unofficial]. Unlike physically based models like Phong, which may obscure shape information in shadowed areas, this method ensures that orientation cues are preserved across the entire visible surface [S1, unofficial]. It builds on [Volume Illustration Tone Shading](805-volume-illustration-tone-shading.md) by replacing the signed dot product illumination term with a direct view/light-dependent color mapping.
+
+## How it works
+**Inputs:**
+- Volume scalar field data.
+- Camera position and view direction.
+- Light direction (if using light-relative shading) or view direction (if using view-relative shading).
+- Two color endpoints: a "cool" color ($C_{cool}$) and a "warm" color ($C_{warm}$).
+
+**Outputs:**
+- Rendered pixel color.
+
+**Data Structures:**
+- Color vectors $C_{cool}$ and $C_{warm}$, typically RGB triplets.
+- Normal vector $\mathbf{n}$ at the sample point, derived from the volume gradient.
+- Direction vector $\mathbf{d}$, defined as the view direction (from sample to camera) or light direction (from sample to light), normalized.
+
+**Steps:**
+1. Compute the surface normal $\mathbf{n}$ at the current volume sample.
+2. Determine the direction vector $\mathbf{d}$. Sources differ on whether this is relative to the viewer or the light source. [S1, unofficial] describes it as relative to the light source ("regions facing away from the light"), while [S2, unofficial] describes it as relative to the observer ("surfaces facing the observer"). [G] The implementation should allow selection of the reference vector.
+3. Calculate the dot product $k = \mathbf{n} \cdot \mathbf{d}$.
+4. Map $k$ to a blending factor $\alpha$. Since $\mathbf{n}$ and $\mathbf{d}$ are unit vectors, $k \in [-1, 1]$. To map this to $[0, 1]$ for linear interpolation:
+   $$ \alpha = \frac{k + 1}{2} $$
+   If $k < -1$, clamp $\alpha$ to 0. If $k > 1$, clamp $\alpha$ to 1.
+5. Interpolate between the cool and warm colors:
+   $$ C_{final} = (1 - \alpha) C_{cool} + \alpha C_{warm} $$
+6. Combine $C_{final}$ with the volume's opacity and density information, typically by using $C_{final}$ as the base color in the standard volume rendering integration equation.
+
+**Parameters:**
+- $C_{cool}$: Typical values are blues or cyans (e.g., $(0.0, 0.0, 1.0)$).
+- $C_{warm}$: Typical values are reds, oranges, or yellows (e.g., $(1.0, 0.5, 0.0)$).
+- Reference vector: View direction or Light direction.
+
+**Edge Cases:**
+- **Degenerate Normals:** If the gradient is zero (flat region), $\mathbf{n}$ is undefined. [G] Default to a neutral color or the average scene color.
+- **Precision:** Dot product precision may affect subtle shading gradients in smooth volumes.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cool_to_warm_shading(normal, view_dir, light_dir, use_light_relative=True, color_cool, color_warm):
+    # Determine reference direction
+    if use_light_relative:
+        direction = light_dir
+    else:
+        direction = view_dir
+    
+    # Ensure vectors are normalized
+    direction = normalize(direction)
+    normal = normalize(normal)
+    
+    # Compute dot product
+    dot_product = dot(normal, direction)
+    
+    # Clamp to [-1, 1] to handle numerical errors
+    dot_product = clamp(dot_product, -1.0, 1.0)
+    
+    # Map to [0, 1]
+    alpha = (dot_product + 1.0) / 2.0
+    
+    # Interpolate colors
+    final_color = lerp(color_cool, color_warm, alpha)
+    
+    return final_color
+```
+
+## Subtopics
+
+### View-Relative Cool to Warm
+Uses the view direction as the reference. Best for emphasizing silhouette and depth perception independent of light position.
+
+### Light-Relative Cool to Warm
+Uses the light direction as the reference. Best for consistent shading relative to a fixed light source, similar to diffuse lighting but with color mapping.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per sample, same as standard shading.
+- **Memory Complexity:** $O(1)$ additional memory for color parameters.
+- **Strengths:** Enhances shape perception in regions that would otherwise be dark or featureless in physically based shading [S1, unofficial]. Simple to implement and tune.
+- **Limitations:** Does not simulate physical light interaction. Color choice is subjective and may not suit all data types.
+- **When to use:** When shape perception is critical and physical accuracy is not required. Often used with silhouette edges [S1, unofficial].
+
+## Background
+The cool to warm shading model was proposed by Gooch et al. in 1998 [S1, unofficial]. It is part of the broader field of illustrative rendering, which aims to enhance visual communication rather than photorealism. The technique is often compared to Gooch shading [1670-gooch-shading.md], with which it shares the goal of using color to convey orientation.
+
+## Sources
+[S1] Illustrative Rendering of Particle Systems, https://doi.org/10.2312/pe.vmv.vmv13.177-185, fetched 2026-10-26 (unofficial)
+[S2] Generalized Framework and Algorithms for Illustrative Visualization of Time-Varying Data on Unstructured Meshes, https://digital.library.unt.edu/ark:/67531/metadc838861/?q=illustrative volume rendering, fetched 2026-10-28 (unofficial)

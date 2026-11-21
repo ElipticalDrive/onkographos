@@ -1,0 +1,313 @@
+--- v004.md
++++ v005.md
+@@ -4,171 +4,166 @@
+ 
+ ## Overview
+-This method calculates the surface color of a terrain sample extracted by the Transvoxel algorithm based on block type, slope, and procedural noise, blending between grass, stone, and forest colors [S2, unofficial]. It differs from standard single-texture approaches by using triplanar mapping to avoid UV seams on complex geometry and blending multiple material types (e.g., grass, dirt, rock) dynamically based on vertex attributes and world position [S1, S2, unofficial].
++This method applies procedural and texture-based color blending to surfaces extracted by the Transvoxel algorithm, solving the visual discontinuity of flat shading on dynamically changing isosurfaces. It differs from standard single-texture approaches by using triplanar mapping to avoid UV seams and blending between top/side textures based on surface normal orientation [S1, unofficial]. It also supports multi-material blending via texture arrays and vertex weights for complex terrain features like grass, stone, and forest patches [S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** Vertex position (`VERTEX`), vertex normal (`NORMAL`), model matrix (`MODEL_MATRIX`), view matrix (`VIEW_MATRIX`), inverse view matrix (`INV_VIEW_MATRIX`), texture samplers (`u_texture_top`, `u_texture_sides` or `u_albedo_array`), and terrain generation parameters (seed, block types).
+-*   **Outputs:** Fragment albedo (`ALBEDO`).
++The method operates in two shader stages: vertex processing for position/normal transformation and fragment processing for color calculation. It supports two primary modes: simple top/side texture blending [S1, unofficial] and multi-material texture array blending [S1, S2, unofficial].
+ 
+-**Data Structures:**
+-*   **Vertex Attributes:**
+-    *   `v_world_pos`: `vec3` (World space position).
+-    *   `v_vertex_pos_model`: `vec3` (Model space vertex position).
+-    *   `v_material_indices`: `vec4` (Indices of materials to blend, used in texture array variant).
+-    *   `v_material_weights`: `vec4` (Weights for material blending, used in texture array variant).
+-*   **Uniforms:**
+-    *   `u_texture_top`: `sampler2D` (Top surface texture).
+-    *   `u_texture_sides`: `sampler2D` (Side surface texture).
+-    *   `u_albedo_array`: `sampler2DArray` (Texture array for multi-material texturing).
+-    *   `triplanar_sharpness`: `float` (Default 8.0).
+-    *   `topness_midlevel`: `float` (Default 0.5).
+-    *   `topness_smoothness`: `float` (Default 0.04).
++### Inputs and Outputs
++**Inputs:**
++- `VERTEX`: Local vertex position from Transvoxel geometry shader.
++- `NORMAL`: Local surface normal.
++- `MODEL_MATRIX`, `VIEW_MATRIX`, `INV_VIEW_MATRIX`: Transformation matrices.
++- `u_texture_top`, `u_texture_sides`: Sampler2D for top and side textures (Mode 1).
++- `u_albedo_array`: Sampler2DArray for multi-material textures (Mode 2).
++- `v_material_indices`: Vertex attribute storing material IDs (Mode 2).
++- `v_material_weights`: Vertex attribute storing blending weights (Mode 2).
++- Terrain parameters: `gen` (generator object), `slope`, `height` (`h`), world coordinates (`x`, `z`).
+ 
+-**Steps:**
++**Outputs:**
++- `ALBEDO`: Final fragment color.
++- `VERTEX`: Transformed vertex position.
++- `NORMAL`: Transformed normal.
+ 
+-1.  **Compute Vertex Position:**
+-    Call the Transvoxel position retrieval function to handle LOD transitions:
+-    ```python
+-    VERTEX = get_transvoxel_position(VERTEX, CUSTOM0)
+-    v_vertex_pos_model = VERTEX
+-    ```
+-    [S1, unofficial]
++### Data Structures
++- **Vertex Attributes:**
++  - `v_world_pos`: `vec3` (World space position).
++  - `v_vertex_pos_model`: `vec3` (Model space position, used for normal calculation).
++  - `v_material_indices`: `vec4` (Material IDs, one per channel).
++  - `v_material_weights`: `vec4` (Blending weights, one per channel).
+ 
+-2.  **Compute World Position:**
+-    Transform the vertex position to world space:
+-    ```python
+-    v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz
+-    ```
+-    [S1, unofficial]
++### Steps
+ 
+-3.  **Compute Surface Normal:**
+-    Calculate the surface normal in view space using the voxel normal function, then transform it to world space for triplanar mapping:
+-    ```python
+-    NORMAL = get_voxel_normal_view(v_vertex_pos_model, NORMAL, VIEW_MATRIX * MODEL_MATRIX)
+-    normal = (INV_VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz
+-    ```
+-    [S1, unofficial]
++1. **Vertex Position and World Position:**
++   Compute the final vertex position using the Transvoxel helper:
++   ```glsl
++   VERTEX = get_transvoxel_position(VERTEX, CUSTOM0);
++   ```
++   Transform to world space:
++   ```glsl
++   v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
++   ```
+ 
+-4.  **Calculate Topness Factor:**
+-    Determine how "flat" the surface is relative to the world Y-axis using a smoothstep function.
+-    Parameters:
+-    *   `topness_midlevel = 0.5`
+-    *   `topness_smoothness = 0.04`
+-    *   `topness_min = topness_midlevel - topness_smoothness = 0.46`
+-    *   `topness_max = topness_midlevel + topness_smoothness = 0.54`
+-    
+-    Formula:
+-    $$topness = \text{smoothstep}(0.46, 0.54, normal.y)$$
+-    [S1, unofficial]
++2. **Normal Calculation:**
++   Compute the surface normal in view space using the Transvoxel helper, then transform to world space for triplanar mapping:
++   ```glsl
++   NORMAL = get_voxel_normal_view(v_vertex_pos_model, NORMAL, VIEW_MATRIX * MODEL_MATRIX);
++   vec3 normal = (INV_VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz;
++   ```
+ 
+-5.  **Calculate Triplanar Blending Factors:**
+-    Compute blending weights for X, Y, and Z axes based on the normal and sharpness:
+-    ```python
+-    blending = get_triplanar_blend(normal, triplanar_sharpness)
+-    ```
+-    Where `triplanar_sharpness = 8.0`.
+-    [S1, unofficial]
++3. **Procedural Color Blending (Optional, based on [S2, unofficial]):**
++   If procedural blending is used, calculate base colors and blend modifiers based on block type, slope, and noise.
++   - **Base Color:**
++     ```glsl
++     int topBlock = gen.topBlock(x, z, floor(h), 0);
++     vec3 baseColor = srgb(topBlock); // Map block ID to SRGB color
++     ```
++   - **Grass Blending:**
++     - Dry grass patches:
++       ```glsl
++       float pa = smooth(fbm(x*0.07, z*0.07, 999, 2), 0.35, 0.7) * 0.6;
++       ```
++     - Forest blending:
++       ```glsl
++       float forest = fbm(x*0.05+100, z*0.05, gen.seed+3, 2);
++       float fk = smooth(forest, 0.5, 0.62) * 0.75 * (1 - smooth(h, 170, 190)) + 0.08;
++       vec3 leafColor = (forest > 0.6) ? LEAF_DARK : LEAF;
++       ```
++     - Slope blending:
++       ```glsl
++       float sk = smooth(slope, 0.5, 2.2) * 0.55;
++       ```
++     - Steep ground to stone:
++       ```glsl
++       float st = smooth(slope, 2.1, 3.3);
++       ```
++   - **Stone Blending:**
++     Blend side color based on slope:
++     ```glsl
++     float stoneBlend = smooth(slope, 1, 4) * 0.6;
++     ```
+ 
+-6.  **Sample Textures (Standard Variant):**
+-    Scale the world position for texture sampling:
+-    ```python
+-    wpos = v_world_pos * 0.2
+-    ```
+-    [S1, unofficial]
+-    
+-    Sample top and side textures using triplanar mapping:
+-    ```python
+-    top_col = texture_triplanar(u_texture_top, wpos, blending).rgb
+-    side_col = texture_triplanar(u_texture_sides, wpos, blending).rgb
+-    ```
+-    [S1, unofficial]
+-    
+-    Mix based on topness:
+-    ```python
+-    ALBEDO = mix(side_col, top_col, topness)
+-    ```
+-    [S1, unofficial]
++4. **Triplanar Mapping Setup:**
++   - Scale world position for texture sampling:
++     ```glsl
++     vec3 wpos = v_world_pos * 0.2;
++     ```
++   - Calculate "topness" factor from the Y component of the normal:
++     ```glsl
++     float topness_midlevel = 0.5;
++     float topness_smoothness = 0.04;
++     float topness_min = topness_midlevel - topness_smoothness;
++     float topness_max = topness_midlevel + topness_smoothness;
++     float topness = smoothstep(topness_min, topness_max, normal.y);
++     ```
++   - Calculate triplanar blending factors:
++     ```glsl
++     float triplanar_sharpness = 8.0;
++     vec3 blending = get_triplanar_blend(normal, triplanar_sharpness);
++     ```
+ 
+-7.  **Sample Textures (Texture Array Variant):**
+-    If using a texture array with material indices and weights:
+-    ```python
+-    weights = v_material_weights
+-    weights /= (weights.x + weights.y + weights.z + weights.w + 0.00001) # Normalize with safety margin
+-    
+-    col0 = texture_triplanar(u_albedo_array, wpos, blending, v_material_indices.x).rgb
+-    col1 = texture_triplanar(u_albedo_array, wpos, blending, v_material_indices.y).rgb
+-    col2 = texture_triplanar(u_albedo_array, wpos, blending, v_material_indices.z).rgb
+-    col3 = texture_triplanar(u_albedo_array, wpos, blending, v_material_indices.w).rgb
+-    
+-    ALBEDO = col0 * weights.r + col1 * weights.g + col2 * weights.b + col3 * weights.a
+-    ```
+-    [S1, unofficial]
++5. **Texture Sampling and Final Color:**
++   **Mode 1: Top/Side Texture Blending [S1, unofficial]**
++   - Sample top and side textures:
++     ```glsl
++     vec3 top_col = texture_triplanar(u_texture_top, wpos, blending).rgb;
++     vec3 side_col = texture_triplanar(u_texture_sides, wpos, blending).rgb;
++     ```
++   - Mix based on topness:
++     ```glsl
++     ALBEDO = mix(side_col, top_col, topness);
++     ```
+ 
+-8.  **LOD Fade Discard:**
+-    Discard fragments in LOD transition zones if necessary:
+-    ```python
+-    if (get_lod_fade_discard(SCREEN_UV)) {
+-        discard
+-    }
+-    ```
+-    [S1, unofficial]
++   **Mode 2: Multi-Material Texture Array [S1, S2, unofficial]**
++   - Sample each material from the texture array using its index and the triplanar blend:
++     ```glsl
++     vec3 col0 = texture_triplanar(u_albedo_array, wpos, blending, v_material_indices.x).rgb;
++     vec3 col1 = texture_triplanar(u_albedo_array, wpos, blending, v_material_indices.y).rgb;
++     vec3 col2 = texture_triplanar(u_albedo_array, wpos, blending, v_material_indices.z).rgb;
++     vec3 col3 = texture_triplanar(u_albedo_array, wpos, blending, v_material_indices.w).rgb;
++     ```
++   - Normalize weights and calculate final color:
++     ```glsl
++     vec4 weights = v_material_weights;
++     weights /= (weights.x + weights.y + weights.z + weights.w + 0.00001);
++     ALBEDO = col0 * weights.r + col1 * weights.g + col2 * weights.b + col3 * weights.a;
++     ```
+ 
+-**Procedural Noise Blending (Alternative/Extended Logic from [S2, unofficial]):**
+-In some implementations, the color is determined procedurally based on block type, slope, and noise rather than just texture sampling.
+-*   **Base Block Color:**
+-    ```python
+-    top = gen.topBlock(x, z, Math.floor(h), 0)
+-    out[k] = srgb(b.top, k) for k=0..2
+-    ```
+-    [S2, unofficial]
++6. **LOD Fade Discard:**
++   Discard fragment if LOD fade check fails:
++   ```glsl
++   if (get_lod_fade_discard(SCREEN_UV)) { discard; }
++   ```
+ 
+-*   **Grass Blending:**
+-    *   Dry-grass patches: `pa = smooth(fbm(x*0.07, z*0.07, 999, 2), 0.35, 0.7) * 0.6`
+-    *   Forest blending: `fk = smooth(forest, 0.5, 0.62) * 0.75 * (1 - smooth(h, 170, 190)) + 0.08`
+-        *   `forest = fbm(x*0.05+100, z*0.05, gen.seed+3, 2)`
+-    *   Leaf color: `LEAF_DARK` if `forest > 0.6`, else `LEAF`.
+-    *   Terraced slopes: `sk = smooth(slope, 0.5, 2.2) * 0.55` with `b.sideTop`.
+-    *   Steep ground: Blend to stone using `st = smooth(slope, 2.1, 3.3)` with mixed stone top/side color.
+-    [S2, unofficial]
++### Formulas
++- **Smoothstep:**
++  $$t = \min(1, \max(0, \frac{x-a}{b-a})); \quad result = t^2(3-2t)$$
++  Where $a$ is the lower bound and $b$ is the upper bound.
+ 
+-*   **Stone Blending:**
+-    *   Blend side color based on slope: `smooth(slope, 1, 4) * 0.6`.
+-    [S2, unofficial]
++- **FBM (Fractal Brownian Motion):**
++  Not explicitly defined in sources, but implied as a multi-octave noise function. Parameters include scale, seed, and number of octaves [S2, unofficial].
+ 
+-**Formulas:**
+-*   **Smoothstep:**
+-    $$t = \min(1, \max(0, \frac{x-a}{b-a}))$$
+-    $$result = t^2(3-2t)$$
+-    [S2, unofficial]
++### Parameters
++- **Grass Patch Noise:** Scale `0.07` for x and z, seed `999`, 2 octaves [S2, unofficial].
++- **Forest Noise:** Scale `0.05` for x and z, offset `100` for x, seed `gen.seed+3`, 2 octaves [S2, unofficial].
++- **Topness:** Midlevel `0.5`, Smoothness `0.04` (Min `0.46`, Max `0.54`) [S1, unofficial].
++- **Triplanar Sharpness:** `8.0` [S1, unofficial].
++- **Texture Scale:** `0.2` [S1, unofficial].
+ 
+-**Parameters:**
+-*   Grass patch noise scale: `x*0.07, z*0.07` with seed 999, 2 octaves.
+-*   Forest noise scale: `x*0.05+100, z*0.05` with seed `gen.seed+3`, 2 octaves.
+-*   Triplanar sharpness: 8.0.
+-*   Topness midlevel: 0.5.
+-*   Topness smoothness: 0.04.
+-*   World position scale: 0.2.
+-[ S1, S2 ]
+-
+-**Edge Cases and Pitfalls:**
+-*   **Normalization Error:** Material weights must be normalized with a small safety margin (e.g., `+ 0.00001`) to prevent division by zero or extreme values due to floating-point errors. [S1, unofficial]
+-*   **LOD Fade:** Fragments in LOD transition zones must be discarded to prevent visual artifacts where geometry resolution changes. [S1, unofficial]
+-*   **Precision:** Slope calculations and noise functions are sensitive to coordinate scaling; ensure world position scaling (`wpos * 0.2`) matches the texture resolution expectations. [S1, S2, unofficial]
++### Edge Cases and Pitfalls
++- **Weight Normalization:** Weights must be normalized to avoid color bleeding or darkening. A small epsilon (`0.00001`) is added to the denominator to prevent division by zero [S1, unofficial].
++- **LOD Fade:** The `get_lod_fade_discard` function must be implemented to handle transitions between different voxel resolutions, ensuring no visual artifacts at LOD boundaries [S1, unofficial].
++- **Normal Accuracy:** The normal calculation relies on `get_voxel_normal_view`, which must correctly handle the Transvoxel geometry's varying resolution [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### [Smooth Material Texturing with Texture Array](7282-smooth-material-texturing-with-texture-array.md)
+-This method applies multi-material texturing to surfaces extracted by the Transvoxel algorithm using a texture array and triplanar mapping. It solves the problem of seamlessly blending multiple material types (e.g., grass, dirt, rock) on a dynamically changing isosurface. It differs from standard single-texture approaches by supporting up to four distinct materials per vertex, blended via weights stored in vertex attributes, and uses triplanar projection to avoid UV seams on complex geometry.
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of fragments/pixels. Triplanar mapping requires 3 texture lookups per texture (or 1 if using a texture array with index), plus noise evaluation if procedural.
+-*   **Memory Complexity:** Depends on texture size. Texture array variant requires storing multiple textures in a single array.
+-*   **Strengths:** Seamless texturing on complex geometry without UV mapping; dynamic blending based on slope and position; supports LOD transitions.
+-*   **Limitations:** Requires normal vector accuracy; triplanar mapping can be computationally expensive if not optimized; procedural noise generation adds CPU/GPU load.
+-*   **When to Use:** Terrain rendering with complex slopes and multiple material types.
+-*   **When Not to Use:** Simple flat surfaces where UV mapping is sufficient; performance-critical scenarios with limited GPU texture units.
++- **Time Complexity:** Constant time per vertex/fragment, dependent on the number of texture samples (2 for Mode 1, 4 for Mode 2) and noise evaluations (if procedural).
++- **Memory Complexity:** Low, primarily storing texture samplers and vertex attributes.
++- **Performance:** Mode 1 is lighter as it uses fewer texture samples. Mode 2 allows for more complex material blending but requires a texture array and additional vertex attributes.
++- **Strengths:** Seamless texturing on complex geometry via triplanar mapping; supports dynamic LOD transitions; flexible procedural and texture-based blending.
++- **Limitations:** Procedural blending requires CPU-side noise generation or complex GPU-side noise functions; texture array mode requires more VRAM.
+ 
+ ## Background
+-This method is part of the Zylann Voxel Game project, an open-source voxel engine implementation. It builds on the Transvoxel algorithm for LOD management [S1, unofficial]. The procedural texturing approach is also seen in other voxel experiments, such as the 2.5D experiment by ck tang [S2, unofficial].
++This method is part of the Zylann Voxel Engine ecosystem, specifically designed for the Transvoxel algorithm to provide visually appealing terrain rendering. It addresses the limitations of flat shading in voxel-based terrain by introducing smooth, normal-based texturing [S1, unofficial]. The procedural blending approach is inspired by traditional terrain texturing techniques adapted for voxel environments [S2, unofficial].
+ 
+ ## Sources

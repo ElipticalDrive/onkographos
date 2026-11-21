@@ -1,0 +1,159 @@
+I’ve been working on volumetric clouds lately. It’s very exciting to do and pretty tricky to get right. I thought I’d share some tips and tricks I learned and other resources to render cloud-like volumes efficiently. 
+  
+…
+
+Efficient volumetric clouds - Resources - three.js forum
+Efficient volumetric clouds
+Resources
+Emeric_Beaufays
+May 27, 2024, 4:42pm
+1
+I’ve been working on volumetric clouds lately. It’s very exciting to do and pretty tricky to get right. I thought I’d share some tips and tricks I learned and other resources to render cloud-like volumes efficiently.
+image1920×876 50.6 KB
+https://www.youtube.com/watch?v=mJf5xJkHVK8
+The Basics
+Rendering volumes is done in Post. for each pixel, shoot a ray going forward, pick some samples, then shoot some rays towards the light. Compute how much light reaches the observer inferring a color.
+These can add up to many samples so the game is going to be limiting them as much as possible.
+Sampling density
+For each sample, you’ll need to compute its density. You’ll want to use a noise called perlin-worley. Here’s a wonderful resource: https://www.shadertoy.com/view/3dVXDc
+In practice, this will be a 3D texture and you’re going to want to keep it fairly small especially for web if you want the web-page to load fast. The texture will need to be tileable.
+I use a 128x128x128 texture which is too small to produce interesting features. It’s big enough to include 2 or 3 Fractal Brownian Motion (FBM) levels but no more. In the shader, since the texture is tileable, you can sample from it at different frequencies to get higher detail noise.
+Computing color and opacity
+As light travels through the clouds, it’s scattered in multiple directions. We need to compute how much light reaches the primary ray sample (along the secondary ray), how much of that light is scattered towards the observer, and how much of that light reaches the observer.
+Luckily, these functions are more or less well established. A tricky part is that you’re working in HDR so you can’t expect light to be properly normalized between 0 and 1, you’ll need to choose a light intensity for the sun and tune the function parameters to reach something visually pleasing.
+The tutorial from SimonDev is a great resource to get started and explains this in much more detail: How Big Budget AAA Games Render Clouds
+Optimization
+Now here are some more “advanced” topics that I experimented with. Limiting the number of samples AND texture lookups is the key to performance.
+Log Scale
+The Most important optimization for large scenes is picking samples on a logarithmic scale.
+A sample represents cloud density for an area in 3D space. When close to the camera, a sample will represent a very small 2D area in XY view-space. When far away, it will represent a very large area in XY view-space (assuming a perspective camera). The sampling along the z-axis needs to reflect that, so you need more samples up close and less samples far away. If the amount of samples between the x-y axis and z-axis is not balanced, you may reach acceptable renders when the camera is still but when the camera rotates around the cloud, lighting won’t make sense and it’ll look ugly.
+The frustum above is the sub-space covered by a single sample. Here, the frustum is more or less balanced, almost a cube. Over-sampling would result in a frustum that’s squashed and under-sampling in a frustum that’s very long.
+The scene will ultimately be under-sampled to get a good frame rate. I go with about 10 times less samples along the z-axis compared to the xy plane coverage. By using a logarithmic scale, at least the sampling is even for near and far samples.
+Jittering samples
+It’s not really an optimization but more of a necessity. Given that the volume will ultimately be under-sampled for performance, the volumes will suffer from banding patterns. By jittering the sample positions, we reduce banding artifacts at the cost of dither patterns.
+image827×759 84.9 KB
+Banding is obvious here in the threejs volumetric cloud example when purposely removing sample jitter.
+To limit the dither patterns, you’ll want to use “blue-noise” to jitter the sample positions. Blue noise is intrinsically tileable and easier to blur-out than white noise.
+This lib provides a bunch of pre-computed blue-noise textures: GitHub - Calinou/free-blue-noise-textures: Free 2D, 3D and 4D blue noise textures from the Moments in Graphics blog
+Limit number of samples
+For the samples towards the light, I use a linear scale. Perhaps one might want to compute the optimal frustum shape for those samples relative to the view direction and light vector, but it seems overly complex.
+Anyhow, it’s less important because we should limit the distance covered by the secondary ray. Depending on your scene size, you might want to cover only a 1000 meters towards the light or so. That means the clouds will only “self-shadow” for a limited distance.
+You may want to fade-out the importance of further away samples to avoid a hard margin.
+For further away “primary” samples, reducing the number of secondary samples is very effective and doesn’t affect quality much. Reducing the number of samples “logarithmically” with respect to the primary sample distance seems to make sense.
+When the accumulated density of primary samples reaches a threshold, just stop sampling along the ray and consider the cloud is fully opaque.
+Reduce the number of samples towards the light for primary samples with low density. The lighting of the sample will be less accurate but the sample is transparent so it matters less.
+Minimize texture lookups
+The “perlin-worley” noise texture, as discussed above, is only 128 x 128 x 128. That amounts to a 2 mb file so there’s room for larger resolution but the size in memory will grow quickly. So my approach has been to sample the same texture at different frequencies to get more fractal levels of detail. However, sampling the texture becomes a bottleneck, therefore, I limit the number of “levels” for far away samples. This definitely affects the quality of further away clouds but it helps a lot with performance. Blending between LODs to get a smooth transition is important.
+Edge preserving Kawase blur
+In order to limit the samples and avoid banding, blue noise is used to jitter the samples. This effectively removes banding but the dither patterns now need to be removed.
+Kawase Blur is a very cheap and effective blur with its drawbacks. It’s a kind of box-blur that also produces banding patterns. I use blue-noise again to jitter the Kawase blur samples which luckily doesn’t produce any more noticeable dither patterns.
+Further away “surfaces” receive a bit of extra blurring but not so much as to produce a depth of field effect.
+Each Kawase blur pass picks 4 diagonal samples per pixel. In order to blur while preserving edges (effectively blurring out the dither patterns but preserving the cloud details), the samples that have very different luminosity or “depth” relative to the center point are weighed less.
+SimonDev again gives a great explanation on how kawase blur works: How Big Budget AAA Games Render Bloom
+Temporal accumulation
+Instead of using kawase blur, Temporal accumulation or Temporal Anti Aliasing (TAA) can very effectively remove dither patterns when the camera and clouds are still. As soon as things are moving, the previous frame needs to be reprojected to match the new frame. TAA techniques work extremely well for hard surfaces but cloud surfaces are inherently fuzzy.
+I personally gave up on temporal accumulation. Although I didn’t do a very good implementation that would include a pass for computing velocity vectors etc.. I’m convinced that it will be very hard to apply to clouds.
+Multi resolution rendering
+In order to limit the number of samples, you may want to render the clouds at low resolution first which gives a quick indication of areas where less or no samples are necessary. You can accumulate the low resolution render with higher resolution passes with less overall samples. This is a complication I did not go for but I suspect it can be very effective.
+16 Likes
+How to recreate realistic snow-fog from example?
+sacred geometry and isotropic convolution filters
+PavelBoytchev
+May 27, 2024, 6:05pm
+2
+Thanks for posting this how-to article. Bookmarked for future reading, when I have more time.
+Attila_Schroeder
+May 27, 2024, 6:19pm
+3
+I have a repository for you here:
+I did it two years ago. I’ve wanted to improve this significantly for a long time, but my other projects have taken up too much of my time.
+The scattering mechanism is quite primitive, but there is still a lot that can be optimized for performance. There’s still a lot that can be done, but I’m really busy working with WebGPU at the moment.
+Maybe you can use some of it.
+5 Likes
+Attila_Schroeder
+May 27, 2024, 6:48pm
+4
+I initially generate the perlin-worley 3D texture myself. Since I do this with my own shaders, this gives me the option to let the clouds develop over time. That was my main idea to do this myself with shaders. The resolution is variable but exactly as you say it quickly becomes computationally intensive.
+I also do the dither myself so that its strength can also be parameterized
+This should also work more efficiently with WebGPU and the compute shaders.
+Since I already noticed at the time that WebGL2 was gradually reaching its limits, I was super happy when three.js released the WebGPURenderer. Last year, a lot has happened with compute shaders when it comes to texture generation. The developers have added a lot of extensions to the compute shader for my ocean project.
+Maybe I’ll make a separate repository for my perlin-worley-3D texture generator. The huge advantage of this is that you can change its resolution in no time.
+I’ll follow your cloud project and look forward to your progress
+1 Like
+Emeric_Beaufays
+May 27, 2024, 7:12pm
+5
+Cool, I started the project with webgl2 and the codebase is becoming big. I hope not too big to port to webgpu…
+I’m thinking to have a webgpu renderer just for compute shaders as a first step.
+I’m a bit scared of porting all my custom shader Materials, but it’s no excuse, webgpu is the way to go
+1 Like
+Attila_Schroeder
+September 6, 2025, 9:50pm
+6
+A while ago, I created a PR for WebGPU to allow the use of storage 3D textures in compute shaders. The weakness of WebGL has always been that Worley 3D textures have to be created on the CPU using data textures. This is now much more efficient with the GPU and storage 3D textures.
+Emeric_Beaufays
+September 6, 2025, 11:13pm
+7
+I think I make the different frequencies drift on the pre-rendered Worley at different speeds and with net 0 drift to get cloud evolution. Definitely hacky but cheap. I wonder how much better it looks with perlin Worley on the fly
+Attila_Schroeder
+September 8, 2025, 2:57am
+8
+You can now choose 3D grids for the workgroup, which is especially useful for cases where you work with 3D textures. If I had the time, I would rework the cloud repo and switch to WebGPU.
+1 Like
+Related topics
+Topic
+Replies
+Views
+Activity
+⛅ volumetric clouds - game ready
+Resources
+clouds
+,
+volumetric-clouds
+14
+5167
+September 11, 2025
+Volumetric lighting in WebGPU
+Showcase
+lighting
+,
+shaders
+,
+fog
+,
+webgpu
+,
+volumetric
+12
+2315
+November 28, 2025
+Best way to render volume
+Questions
+volume-rendering
+1
+438
+February 18, 2025
+Getting The Correct Depth In Ray March Cloud Example
+Questions
+shaders
+,
+depth
+,
+raymarch
+3
+605
+May 13, 2024
+High quality volume rendering with WebGPU
+Questions
+volume
+,
+volume-rendering
+,
+webgpu
+,
+volumetric
+,
+raytracing
+6
+1897
+January 27, 2025

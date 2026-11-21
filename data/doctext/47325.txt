@@ -1,0 +1,2051 @@
+## Visualization course 
+
+For this course we had to implement a volume rendering using Raycasting.
+First we used it on an MRI image of an orange and then we apply the raycasting on a real datataset published by the IEEE Scientific Visualization Contest. The dataset provides gene expressions in a mouse brain throughout 7 different stages of development in which region shapes and sizes can change. Regions have been annotated with IDs and there
+are 11 different gene categories. 
+Practically, we had to implement both **Maximum Intensity Projection(MIP)** and **Compositing raycasting** in order to visualize the volumes.
+
+By using volume rendering, data samples are projected onto the picture plane and this allows us to display more detailed images compared to geometric primitives approaches. 
+The main idea with raycasting is, as the name suggests, a ray which is cast and equidistant points are sampled. In order to get a better resolution, the voxel value is obtained by using trilinear interpolation.
+
+To get more information read the *report* in the repo.
+
+I must point out that all the code implemented by me and my colleague is in the **implementation.py** while the other *.py files have been made by the course organizers.
+
+
+
+<img src="images/image1.png" alt="drawing" style="width:90px;"/>
+
+<img src="images/image2.png" alt="drawing" style="width:90px;"/>
+
+### Volume_Rendering/implementation.py
+```
+import functools
+import math
+
+import numpy as np
+import matplotlib.pyplot  as plt
+
+from genevis.render import RaycastRenderer
+from genevis.transfer_function import TFColor
+from volume.volume import GradientVolume, Volume
+from itertools import permutations
+from genevis.transfer_function import TransferFunction
+
+def get_voxelInterpolated(volume: Volume, x: float, y: float, z: float):
+    """
+    Retrieves the value of a voxel for the given coordinates.
+    :param volume: Volume from which the voxel will be retrieved.
+    :param x: X coordinate of the voxel
+    :param y: Y coordinate of the voxel
+    :param z: Z coordinate of the voxel
+    :return: Voxel value
+    """
+    if x < 0 or y < 0 or z < 0 or x >= volume.dim_x or y >= volume.dim_y or z >= volume.dim_z:
+        return 0
+
+    x0 = int(np.floor(x))
+    y0 = int(np.floor(y))
+    z0 = int(np.floor(z))
+
+    x1 = int(np.floor(x) + 1)
+    y1 = int(np.floor(y) + 1)
+    z1 = int(np.floor(z) + 1)
+
+    alpha = x - x0 / (x1 - x0)
+    beta = y - y0 / (y1 - y0)
+    gamma = z - z0 / (z1 - z0)
+
+    vo = get_voxel(volume, x0, y0, z0)
+    v1 = get_voxel(volume, x1, y0, z0)
+    v2 = get_voxel(volume, x0, y1, z0)
+    v3 = get_voxel(volume, x1, y1, z0)
+    v4 = get_voxel(volume, x0, y0, z1)
+    v5 = get_voxel(volume, x1, y0, z1)
+    v6 = get_voxel(volume, x0, y1, z1)
+    v7 = get_voxel(volume, x1, y1, z1)
+
+    val = (1 - alpha) * (1 - beta) * (1 - gamma) * vo + \
+          alpha * (1 - beta) * (1 - gamma) * v1 + \
+          (1 - alpha) * beta * (1 - gamma) * v2 + \
+          (alpha) * (beta) * (1 - gamma) * v3 + \
+          (1 - alpha) * (1 - beta) * gamma * v4 + \
+          alpha * (1 - beta) * gamma * v5 + \
+          (1 - alpha) * beta * gamma * v6 + \
+          (alpha * gamma * beta) * v7
+
+    return val
+
+def get_voxel(volume: Volume, x: float, y: float, z: float):
+    """
+    Retrieves the value of a voxel for the given coordinates.
+    :param volume: Volume from which the voxel will be retrieved.
+    :param x: X coordinate of the               voxel
+    :param y: Y coordinate of the voxel
+    :param z: Z coordinate of the voxel
+    :return: Voxel value
+    """
+    if x < 0 or y < 0 or z < 0 or x >= volume.dim_x or y >= volume.dim_y or z >= volume.dim_z:
+        return 0
+    x = int(math.floor(x))
+    y = int(math.floor(y))
+    z = int(math.floor(z))
+    return volume.data[x, y, z]
+
+
+def compute_gradient(volume: Volume, x: float, y: float, z: float):
+    gradient = [0, 0, 0]
+    gradient[0] = (get_voxelInterpolated(volume, x + 1, y, z) - get_voxelInterpolated(volume, x - 1, y, z)) / 2
+    gradient[1] = (get_voxelInterpolated(volume, x, y + 1, z) - get_voxelInterpolated(volume, x, y - 1, z)) / 2
+    gradient[2] = (get_voxelInterpolated(volume, x, y, z + 1) - get_voxelInterpolated(volume, x, y, z - 1)) / 2
+    return gradient
+
+
+class RaycastRendererImplementation(RaycastRenderer):
+
+    def clear_image(self):
+        """Clears the image data"""
+        self.image.fill(0)
+
+    def render_slicer(self, view_matrix: np.ndarray, volume: Volume, image_size: int, image: np.ndarray):
+        # Clear the image
+        self.clear_image()
+
+        # U vector. See documentation in parent's class
+        u_vector = view_matrix[0:3]
+        # V vector. See documentation in parent's class
+        v_vector = view_matrix[4:7]
+        # View vector. See documentation in parent's class
+        view_vector = view_matrix[8:11]
+
+        # Center of the image. Image is squared
+        image_center = image_size / 2
+        # Center of the volume (3-dimensional)
+        volume_center = [volume.dim_x / 2, volume.dim_y / 2, volume.dim_z / 2]
+        volume_maximum = volume.get_maximum()
+
+        # Define a step size to make the loop faster
+        step = 2 if self.interactive_mode else 1
+
+        for i in range(0, image_size, step):
+            for j in range(0, image_size, step):
+                # Compute the new coordinates in a vectorized form
+                voxel_cords = np.dot(u_vector, i - image_center) + np.dot(v_vector, j - image_center) + volume_center
+
+                # Get voxel value
+                value = get_voxel(volume, voxel_cords[0], voxel_cords[1], voxel_cords[2])
+
+                # Normalize value to be between 0 and 1
+                red = value / volume_maximum
+                green = red
+                blue = red
+                alpha = 1.0 if red > 0 else 0.0
+
+                # Compute the color value (0...255)
+                red = math.floor(red * 255) if red < 255 else 255
+                green = math.floor(green * 255) if green < 255 else 255
+                blue = math.floor(blue * 255) if blue < 255 else 255
+                alpha = math.floor(alpha * 255) if alpha < 255 else 255
+
+                # Assign color to the pixel i, j
+                image[(j * image_size + i) * 4] = red
+                image[(j * image_size + i) * 4 + 1] = green
+                image[(j * image_size + i) * 4 + 2] = blue
+                image[(j * image_size + i) * 4 + 3] = alpha
+
+    def render_mip(self, view_matrix: np.ndarray, volume: Volume, image_size: int, image: np.ndarray):
+        # Clear the image
+        self.clear_image()
+
+        # U vector. See documentation in parent's class
+        u_vector = view_matrix[0:3].reshape(-1,1)
+        # V vector. See documentation in parent's class
+        v_vector = view_matrix[4:7].reshape(-1,1)
+        # View vector. See documentation in parent's class
+        view_vector = view_matrix[8:11].reshape(-1,1)
+
+        # Center of the image. Image is squared
+        image_center = image_size / 2
+        # Center of the volume (3-dimensional)
+        volume_center = np.asarray([volume.dim_x / 2, volume.dim_y / 2, volume.dim_z / 2]).reshape(-1,1)
+        volume_maximum = volume.get_maximum()
+
+        # Define a step size to make the loop faster
+        step = 10 if self.interactive_mode else 1
+
+        diagonal = (np.sqrt(3) * np.max([volume.dim_x,volume.dim_y,volume.dim_z]))/2
+        diagonal = int(math.floor(diagonal)+1)
+
+        for i in range(0, image_size, step):
+            for j in range(0, image_size, step):
+                max_voxel_value = []
+                for k in range(-diagonal, diagonal, 1):
+                    # Compute the new coordinates in a vectorized form
+                    voxel_cords = np.dot(u_vector, i-image_center) + np.dot(v_vector, j-image_center) \
+                                  + np.dot(view_vector, k) + volume_center
+
+                    max_voxel_value.append(get_voxelInterpolated(volume, voxel_cords[0], voxel_cords[1], voxel_cords[2]))
+
+                value = np.amax(max_voxel_value)
+
+                # Normalize value to be between 0 and 1
+                red = value / volume_maximum
+                green = red
+                blue = red
+                alpha = 1.0 if red > 0 else 0.0
+
+                # Compute the color value (0...255)
+                red = math.floor(red * 255) if red < 255 else 255
+                green = math.floor(green * 255) if green < 255 else 255
+                blue = math.floor(blue * 255) if blue < 255 else 255
+                alpha = math.floor(alpha * 255) if alpha < 255 else 255
+
+                # Assign color to the pixel i, j
+                image[(j * image_size + i) * 4] = red
+                image[(j * image_size + i) * 4 + 1] = green
+                image[(j * image_size + i) * 4 + 2] = blue
+                image[(j * image_size + i) * 4 + 3] = alpha
+
+    def render_compositing(self, view_matrix: np.ndarray, volume: Volume, image_size: int, image: np.ndarray,
+                           step=1):
+        # Clear the image
+        self.clear_image()
+
+        u_vector = view_matrix[0:3].reshape(-1, 1)
+        v_vector = view_matrix[4:7].reshape(-1, 1)
+        view_vector = view_matrix[8:11].reshape(-1, 1)
+
+        image_center = image_size / 2
+        volume_center = np.asarray([volume.dim_x / 2, volume.dim_y / 2, volume.dim_z / 2]).reshape(-1, 1)
+        volume_maximum = volume.get_maximum()
+
+        step = 10 if self.interactive_mode else 1
+
+        diagonal = np.sqrt(3) * np.max([volume.dim_x, volume.dim_y, volume.dim_z]) / 2
+        diagonal = int(math.floor(diagonal)) + 1
+
+        for i in range(0, int(image_size), step):
+            for j in range(0, int(image_size), step):
+                red, green, blue, alpha = [0, 0, 0, 1]
+                initial_color = TFColor(0, 0, 0, 0)
+                for k in range(diagonal, -diagonal, -1):
+                    # Compute the new coordinates in a vectorized form
+                    voxel_cords = np.dot(u_vector, i - image_center) \
+                                  + np.dot(v_vector, j - image_center) \
+                                  + np.dot(view_vector, k) + volume_center
+
+                    voxel = get_voxelInterpolated(volume, voxel_cords[0], voxel_cords[1], voxel_cords[2])
+
+                    color = self.tfunc.get_color(voxel)
+
+                    current_color = TFColor(color.a * color.r + (1 - color.a) * initial_color.r,
+                                            color.a * color.g + (1 - color.a) * initial_color.g,
+                                            color.a * color.b + (1 - color.a) * initial_color.b,
+                                            color.a)
+                    initial_color = current_color
+
+                red = math.floor(current_color.r * 255) if red < 255 else 255
+                green = math.floor(current_color.g * 255) if green < 255 else 255
+                blue = math.floor(current_color.b * 255) if blue < 255 else 255
+                alpha = math.floor(255) if alpha < 255 else 255
+
+                # Assign color to the pixel i, j
+                image[(j * image_size + i) * 4] = red
+                image[(j * image_size + i) * 4 + 1] = green
+                image[(j * image_size + i) * 4 + 2] = blue
+                image[(j * image_size + i) * 4 + 3] = alpha
+
+    def render_energy_compositing(self, view_matrix: np.ndarray, volume: Volume, image_size: int, image: np.ndarray, energy_volumes: dict):
+
+        # Clear the image
+        self.clear_image()
+
+        # Define color dictionary to associate a color to each energy
+        perm = np.asarray(list(permutations([1, 0, 0.5, 1], 3)))
+        ids = list(energy_volumes.keys())
+        colorDictionary = {0: [0, 0, 0]}
+        for i in range(len(ids)):
+            colorDictionary[ids[i]] = perm[i]
+
+        u_vector = view_matrix[0:3].reshape(-1, 1)
+        v_vector = view_matrix[4:7].reshape(-1, 1)
+        view_vector = view_matrix[8:11].reshape(-1, 1)
+
+        image_center = image_size / 2
+        volume_center = np.asarray([volume.dim_x / 2, volume.dim_y / 2, volume.dim_z / 2]).reshape(-1, 1)
+        diagonal = np.sqrt(3) * np.max([volume.dim_x, volume.dim_y, volume.dim_z]) / 2
+        diagonal = int(math.floor(diagonal)) + 1
+
+        step = 20 if self.interactive_mode else 1
+
+        for i in range(0, image_size, step):
+            for j in range(0, image_size, step):
+                red, green, blue, alpha = [0, 0, 0, 1]
+                initial_r, initial_g, initial_b = 0, 0, 0
+                for k in range(diagonal, -diagonal, -1):
+                    # Compute the new coordinates in a vectorized form
+                    voxel_cords = np.dot(u_vector, i - image_center) \
+                                  + np.dot(v_vector, j - image_center) \
+                                  + np.dot(view_vector, k) + volume_center
+
+                    color_voxel = np.asarray([0, 0, 0])
+                    for key, value in energy_volumes.items():
+                        intensity_max = value.get_maximum()
+                        energy_intensity = get_voxelInterpolated(value, voxel_cords[0], voxel_cords[1], voxel_cords[2])
+                        if energy_intensity/intensity_max > 0.3:
+                            # Show only energy with an intensity above a treshold (30%)
+                            color_voxel = np.add(np.multiply(color_voxel, 1-energy_intensity/intensity_max), np.multiply(colorDictionary[key], energy_intensity/intensity_max))
+                    color_a = np.max(color_voxel)
+
+                    current_r = color_a * color_voxel[0] + (1 - color_a) * initial_r
+                    current_g = color_a * color_voxel[1] + (1 - color_a) * initial_g
+                    current_b = color_a * color_voxel[2] + (1 - color_a) * initial_b
+
+                    initial_r, initial_g, initial_b = current_r, current_g, current_b
+
+                red = math.floor(current_r * 255) if red < 255 else 255
+                green = math.floor(current_g * 255) if green < 255 else 255
+                blue = math.floor(current_b * 255) if blue < 255 else 255
+                alpha = math.floor(255) if alpha < 255 else 255
+
+                # Assign color to the pixel i, j
+                image[(j * image_size + i) * 4] = red
+                image[(j * image_size + i) * 4 + 1] = green
+                image[(j * image_size + i) * 4 + 2] = blue
+                image[(j * image_size + i) * 4 + 3] = alpha
+
+    def render_energy_region_compositing(self, view_matrix: np.ndarray, volume: Volume, image_size: int, image: np.ndarray, energy_volumes: dict, magnitudeVolume: Volume):
+
+        # Clear the image
+        self.clear_image()
+
+        # Define color dictionary to associate a color to each energy
+        perm = np.asarray(list(permutations([1, 0, 0.5, 1], 3)))
+        ids = list(energy_volumes.keys())
+        colorDictionary = {0: [0, 0, 0]}
+        for i in range(len(ids)):
+            colorDictionary[ids[i]] = perm[i]
+
+        u_vector = view_matrix[0:3].reshape(-1, 1)
+        v_vector = view_matrix[4:7].reshape(-1, 1)
+        view_vector = view_matrix[8:11].reshape(-1, 1)
+
+        image_center = image_size / 2
+        volume_center = np.asarray([volume.dim_x / 2, volume.dim_y / 2, volume.dim_z / 2]).reshape(-1, 1)
+        diagonal = np.sqrt(3) * np.max([volume.dim_x, volume.dim_y, volume.dim_z]) / 2
+        diagonal = int(math.floor(diagonal)) + 1
+
+        step = 20 if self.interactive_mode else 1
+
+        for i in range(0, image_size, step):
+            for j in range(0, image_size, step):
+                red, green, blue, alpha = [0, 0, 0, 1]
+                initial_r, initial_g, initial_b = 0, 0, 0
+                for k in range(diagonal, -diagonal, -1):
+                    # Compute the new coordinates in a vectorized form
+                    voxel_cords = np.dot(u_vector, i - image_center) \
+                                  + np.dot(v_vector, j - image_center) \
+                                  + np.dot(view_vector, k) + volume_center
+
+                    g = get_voxelInterpolated(magnitudeVolume, voxel_cords[0], voxel_cords[1], voxel_cords[2])
+                    if g != 0:
+                        # Set a white shade to define the region edges
+                        color = self.tfunc.get_color(g)
+                        color_voxel = np.asarray([color.r, color.g, color.b])
+                    else:
+                        # Inside the region there is no shade
+                        color_voxel = np.asarray([0, 0, 0])
+
+                    if get_voxelInterpolated(volume, voxel_cords[0], voxel_cords[1], voxel_cords[2]) > 0:
+                        # Compute colors only inside the regions of interest
+                        for key, value in energy_volumes.items():
+                            intensity_max = value.get_maximum()
+                            energy_intensity = get_voxelInterpolated(value, voxel_cords[0], voxel_cords[1], voxel_cords[2])
+                            if energy_intensity/intensity_max > 0.3:
+                                # Show only energy with an intensity above a treshold (30%)
+                                color_voxel = np.add(np.multiply(color_voxel, 1-energy_intensity/intensity_max), np.multiply(colorDictionary[key], energy_intensity/intensity_max))
+                    color_a = np.max(color_voxel)
+
+                    current_r = color_a * color_voxel[0] + (1 - color_a) * initial_r
+                    current_g = color_a * color_voxel[1] + (1 - color_a) * initial_g
+                    current_b = color_a * color_voxel[2] + (1 - color_a) * initial_b
+
+                    initial_r, initial_g, initial_b = current_r, current_g, current_b
+
+                red = math.floor(current_r * 255) if red < 255 else 255
+                green = math.floor(current_g * 255) if green < 255 else 255
+                blue = math.floor(current_b * 255) if blue < 255 else 255
+                alpha = math.floor(255) if alpha < 255 else 255
+
+                # Assign color to the pixel i, j
+                image[(j * image_size + i) * 4] = red
+                image[(j * image_size + i) * 4 + 1] = green
+                image[(j * image_size + i) * 4 + 2] = blue
+                image[(j * image_size + i) * 4 + 3] = alpha
+
+    def render_mouse_brain(self, view_matrix: np.ndarray, annotation_volume: Volume, energy_volumes: dict,
+                           image_size: int, image: np.ndarray):
+
+        self.tfunc.init(0, math.ceil(self.annotation_gradient_volume.get_max_gradient_magnitude()))
+        magnitudeVolume = Volume(self.annotation_gradient_volume.magnitudeVolume)
+
+        # Chose the visulization mode
+        option = 1
+
+        if option == 0:
+            # Compositing rendering of the region specified in volume file
+            self.render_compositing(view_matrix, magnitudeVolume, image_size, image)
+        elif option == 1:
+            # Compositing rendering of multiple energy in the whole brain
+            self.render_energy_compositing(view_matrix, self.annotation_gradient_volume.volume, image_size, image, energy_volumes)
+        elif option == 2:
+            # Compositing rendering of multiple energy in the region specified in volume file
+            self.render_energy_region_compositing(view_matrix, self.annotation_gradient_volume.volume, image_size, image, energy_volumes, magnitudeVolume)
+        pass
+```
+
+### Volume_Rendering/main.py
+```
+import wx
+from gui.application import GLFrame
+import ctypes
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(True)
+except:
+    pass
+
+app = wx.App()
+frame = GLFrame(None, "Gene Visualization")
+frame.Show()
+
+app.MainLoop()
+app.Destroy()
+```
+
+### Volume_Rendering/genevis/__init__.py
+```
+
+```
+
+### Volume_Rendering/genevis/render.py
+```
+from abc import abstractmethod, ABC
+from enum import Enum
+import numpy as np
+import math
+from volume.volume import GradientVolume, Volume
+import time
+from .transfer_function import TransferFunction
+from typing import List
+from collections.abc import ValuesView
+
+try:
+    from OpenGL.GL import *
+    from OpenGL.GLUT import *
+    from OpenGL.GLU import *
+except ImportError:
+    raise Exception("PyOpenGL is not installed. Use pip install")
+
+
+def generate_texture(width: int, height: int) -> int:
+    # Generate one texture
+    texture_id = glGenTextures(1)
+    # Bind the following operations to the generated texture
+    glBindTexture(GL_TEXTURE_2D, texture_id)
+    # Set some parameters
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+    # Reserves space in memory for the given parameters. The space will be filled later on
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, None)
+
+    return texture_id
+
+
+def draw_bounding_box(volume: Volume):
+    """Draws a bounding box around the volume."""
+    glPushAttrib(GL_CURRENT_BIT)
+    glDisable(GL_LIGHTING)
+    glColor4d(1.0, 1.0, 1.0, 1.0)
+    glLineWidth(1.5)
+    glEnable(GL_LINE_SMOOTH)
+    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+    glBegin(GL_LINE_LOOP)
+    glVertex3d(-volume.dim_x / 2.0, -volume.dim_y / 2.0, volume.dim_z / 2.0)
+    glVertex3d(-volume.dim_x / 2.0, volume.dim_y / 2.0, volume.dim_z / 2.0)
+    glVertex3d(volume.dim_x / 2.0, volume.dim_y / 2.0, volume.dim_z / 2.0)
+    glVertex3d(volume.dim_x / 2.0, -volume.dim_y / 2.0, volume.dim_z / 2.0)
+    glEnd()
+
+    glBegin(GL_LINE_LOOP)
+    glVertex3d(-volume.dim_x / 2.0, -volume.dim_y / 2.0, -volume.dim_z / 2.0)
+    glVertex3d(-volume.dim_x / 2.0, volume.dim_y / 2.0, -volume.dim_z / 2.0)
+    glVertex3d(volume.dim_x / 2.0, volume.dim_y / 2.0, -volume.dim_z / 2.0)
+    glVertex3d(volume.dim_x / 2.0, -volume.dim_y / 2.0, -volume.dim_z / 2.0)
+    glEnd()
+
+    glBegin(GL_LINE_LOOP)
+    glVertex3d(volume.dim_x / 2.0, -volume.dim_y / 2.0, -volume.dim_z / 2.0)
+    glVertex3d(volume.dim_x / 2.0, -volume.dim_y / 2.0, volume.dim_z / 2.0)
+    glVertex3d(volume.dim_x / 2.0, volume.dim_y / 2.0, volume.dim_z / 2.0)
+    glVertex3d(volume.dim_x / 2.0, volume.dim_y / 2.0, -volume.dim_z / 2.0)
+    glEnd()
+
+    glBegin(GL_LINE_LOOP)
+    glVertex3d(-volume.dim_x / 2.0, -volume.dim_y / 2.0, -volume.dim_z / 2.0)
+    glVertex3d(-volume.dim_x / 2.0, -volume.dim_y / 2.0, volume.dim_z / 2.0)
+    glVertex3d(-volume.dim_x / 2.0, volume.dim_y / 2.0, volume.dim_z / 2.0)
+    glVertex3d(-volume.dim_x / 2.0, volume.dim_y / 2.0, -volume.dim_z / 2.0)
+    glEnd()
+
+    glBegin(GL_LINE_LOOP)
+    glVertex3d(-volume.dim_x / 2.0, volume.dim_y / 2.0, -volume.dim_z / 2.0)
+    glVertex3d(-volume.dim_x / 2.0, volume.dim_y / 2.0, volume.dim_z / 2.0)
+    glVertex3d(volume.dim_x / 2.0, volume.dim_y / 2.0, volume.dim_z / 2.0)
+    glVertex3d(volume.dim_x / 2.0, volume.dim_y / 2.0, -volume.dim_z / 2.0)
+    glEnd()
+
+    glBegin(GL_LINE_LOOP)
+    glVertex3d(-volume.dim_x / 2.0, -volume.dim_y / 2.0, -volume.dim_z / 2.0)
+    glVertex3d(-volume.dim_x / 2.0, -volume.dim_y / 2.0, volume.dim_z / 2.0)
+    glVertex3d(volume.dim_x / 2.0, -volume.dim_y / 2.0, volume.dim_z / 2.0)
+    glVertex3d(volume.dim_x / 2.0, -volume.dim_y / 2.0, -volume.dim_z / 2.0)
+    glEnd()
+
+    glDisable(GL_LINE_SMOOTH)
+    glDisable(GL_BLEND)
+    glEnable(GL_LIGHTING)
+    glPopAttrib()
+
+
+class RenderMode(Enum):
+    """Enumerate indicating the possible modes of the application."""
+    SLICER = 1
+    MIP = 2
+    COMPOSITING = 3
+    MULTI_VOLUME = 4
+
+
+class RaycastRenderer(ABC):
+    """
+    Abstract RaycastRenderer. It includes the logic needed to render a bounding box and convert image data into a
+    texture that can be displayed with OpenGL. Students will have to implement the abstract methods.
+
+    The class calls the appropriate render function based on the chosen mode.
+
+    Attributes:
+        volume: The volume that we want to render.
+        image_size: The size of the image that represents the volume and will be rendered.
+        image: A numpy array with shape (image_size, image_size, 4). Each element must be a ~`numpy.int8`. The last
+        dimension represents a 4 channels color (Red, Green, Blue, Alpha) with values between 0 and 255.
+        interactive_mode: Boolean indicating whether or not we are in the interactive (rotating) mode.
+        view_matrix: Numpy array that will contain the values of the ModelView matrix from OpenGL.
+        mode: Mode of the renderer. Can be one from `RendererMode`.
+        texture_id: ID of the texture for the Test Volume (Orange, Tomato, etc.)
+        tfunc: Transfer Function for the Test Volume (Orange, Tomato, etc.)
+        energy_volumes: Dictionary with the energy volumes that user has selected.
+        annotation_volume: Annotation volume that has been selected by the user.
+        annotation_gradient_volume: Gradient computed over the annotation volume.
+        challenge_image_size: Size of the texture for the challenge volume selected by the user.
+        challenge_image: Array containing the pixel data for the challenge volume selected by the user.
+        challenge_texture_id: Texture id for the challenge volume.
+    """
+
+    def __init__(self, tfunc: TransferFunction):
+        self.volume = None
+        self.image_size = 0
+        self.image = np.zeros(0, dtype=np.int8)
+
+        self.winWidth = self.winHeight = 0
+        self.interactive_mode = False
+        self.view_matrix = np.zeros(16)
+        self.mode = RenderMode.SLICER
+        self.texture_id = -1
+        self.tfunc = tfunc
+
+        self.energy_volumes = {}
+        self.annotation_volume = None
+        self.annotation_gradient_volume = None
+        self.challenge_image_size = 0
+        self.challenge_image = np.zeros(0, dtype=np.int8)
+        self.challenge_texture_id = -1
+
+    def set_volume(self, volume):
+        """Sets the volume to be rendered."""
+
+        self.volume = volume
+
+        self.image_size = math.floor(math.sqrt(
+            self.volume.dim_x * self.volume.dim_x + self.volume.dim_y * self.volume.dim_y + self.volume.dim_z * self.volume.dim_z))
+        if self.image_size % 2 != 0:
+            self.image_size = self.image_size + 1
+
+        self.image = np.zeros(self.image_size * self.image_size * 4, dtype=np.int8)  # image_size x image_size x RGBA
+
+        if self.texture_id != -1:
+            glDeleteTextures(1, [self.texture_id])
+            self.texture_id = -1
+
+        self.tfunc.set_test_function()
+
+    def add_energy_volume(self, key, volume):
+        self.energy_volumes[key] = volume
+
+    def remove_energy_volume(self, key):
+        del self.energy_volumes[key]
+
+    def clear_energy_volumes(self):
+        self.energy_volumes = {}
+
+    def set_annotation_volume(self, volume):
+        self.annotation_volume = volume
+        self.annotation_gradient_volume = GradientVolume(volume)
+        self.challenge_image_size = math.floor(math.sqrt(
+            volume.dim_x * volume.dim_x + volume.dim_y * volume.dim_y + volume.dim_z * volume.dim_z))
+        if self.challenge_image_size % 2 != 0:
+            self.challenge_image_size = self.challenge_image_size + 1
+
+        self.challenge_image = np.zeros(self.challenge_image_size * self.challenge_image_size * 4,
+                                        dtype=np.int8)  # image_size x image_size x RGBA
+
+        if self.challenge_texture_id != -1:
+            glDeleteTextures(1, [self.challenge_texture_id])
+            self.challenge_texture_id = -1
+
+    def set_mode(self, mode):
+        """Convenient method to set renderer's mode."""
+
+        self.mode = mode
+
+    @abstractmethod
+    def render_slicer(self, view_matrix: np.ndarray, volume: Volume, image_size: int, image: np.ndarray):
+        """
+        Slicer rendering method. It must be overridden in the subclass.
+        :param view_matrix: ModelView OpenGL matrix (`more information <http://www.songho.ca/opengl/gl_transform.html>`).
+        :param volume: The volume to be rendered.
+        :param image_size: The size of the image.
+        :param image: The resulting image. It will be a numpy array with shape (image_size * image_size * 4,)
+        representing the pixel RGBA values.
+        It represents the model and the view matrices of the current scene TRANSPOSED. It is a 4x4 matrix looking like:
+            m_0  m_1  m_2  m_3
+
+            m_4  m_5  m_6  m_7
+
+            m_8  m_9  m_10 m_11
+
+            m_12  m_13  m_14 m_15
+
+        where m_0, m_1 and m_2 represent the 3-dimensional coordinates of the X axis; m_4, m_5 and m_6 represent the
+        3-dimensional coordinates of the Y axis; and m_8, m_9 and m_10 represent the 3-dimensional coordinates of the
+        Z axis. The other numbers are not interesting for us.
+        """
+        pass
+
+    @abstractmethod
+    def render_mip(self, view_matrix: np.ndarray, volume: Volume, image_size: int, image: np.ndarray):
+        """
+        MIP rendering method. It must be overridden in the subclass.
+        :param view_matrix: ModelView OpenGL matrix (`more information <http://www.songho.ca/opengl/gl_transform.html>`).
+        :param volume: The volume to be rendered.
+        :param image_size: The size of the image.
+        :param image: The resulting image. It will be a numpy array with shape (image_size * image_size * 4,)
+        representing the pixel RGBA values.
+        It represents the model and the view matrices of the current scene TRANSPOSED. It is a 4x4 matrix looking like:
+            m_0  m_1  m_2  m_3
+
+            m_4  m_5  m_6  m_7
+
+            m_8  m_9  m_10 m_11
+
+            m_12  m_13  m_14 m_15
+
+        where m_0, m_1 and m_2 represent the 3-dimensional coordinates of the X axis; m_4, m_5 and m_6 represent the
+        3-dimensional coordinates of the Y axis; and m_8, m_9 and m_10 represent the 3-dimensional coordinates of the
+        Z axis. The other numbers are not interesting for us.
+        """
+        pass
+
+    @abstractmethod
+    def render_compositing(self, view_matrix: np.ndarray, volume: Volume, image_size: int, image: np.ndarray):
+        """Compositing rendering method. It must be overridden in the subclass.
+        :param view_matrix: ModelView OpenGL matrix (`more information <http://www.songho.ca/opengl/gl_transform.html>`).
+        :param volume: The volume to be rendered.
+        :param image_size: The size of the image.
+        :param image: The resulting image. It will be a numpy array with shape (image_size * image_size * 4,)
+        representing the pixel RGBA values.
+        It represents the model and the view matrices of the current scene TRANSPOSED. It is a 4x4 matrix looking like:
+            m_0  m_1  m_2  m_3
+
+            m_4  m_5  m_6  m_7
+
+            m_8  m_9  m_10 m_11
+
+            m_12  m_13  m_14 m_15
+
+        where m_0, m_1 and m_2 represent the 3-dimensional coordinates of the X axis; m_4, m_5 and m_6 represent the
+        3-dimensional coordinates of the Y axis; and m_8, m_9 and m_10 represent the 3-dimensional coordinates of the
+        Z axis. The other numbers are not interesting for us.
+        """
+        pass
+
+    @abstractmethod
+    def render_mouse_brain(self, view_matrix: np.ndarray, annotation_volume: Volume, energy_volumes: dict,
+                           image_size: int, image: np.ndarray):
+        """Method to render the mouse brain (challenge data). It must be overridden in the subclass.
+        :param view_matrix: ModelView OpenGL matrix (`more information <http://www.songho.ca/opengl/gl_transform.html>`).
+        :param annotation_volume: The annotation volume to be rendered.
+        :param energy_volumes: Dictionary containing additional volumes indicating the energy of some gene expessions within
+        the annotation volume. Those volumes will have the same shape. The keys of the dictonary are integers which
+        value depicts a region in the annotated volume. The values are the corresponding energy volumes. E.g.: if we
+        load file "100053243_energy.mhd" this dictionar will contain one element with key 100053243 and volume data from
+        the aforementioned file.
+        :param image_size: The size of the image.
+        :param image: The resulting image. It will be a numpy array with shape (image_size * image_size * 4,)
+        representing the pixel RGBA values.
+        It represents the model and the view matrices of the current scene TRANSPOSED. It is a 4x4 matrix looking like:
+            m_0  m_1  m_2  m_3
+
+            m_4  m_5  m_6  m_7
+
+            m_8  m_9  m_10 m_11
+
+            m_12  m_13  m_14 m_15
+
+        where m_0, m_1 and m_2 represent the 3-dimensional coordinates of the X axis; m_4, m_5 and m_6 represent the
+        3-dimensional coordinates of the Y axis; and m_8, m_9 and m_10 represent the 3-dimensional coordinates of the
+        Z axis. The other numbers are not interesting for us.
+        """
+        pass
+
+    def visualize(self):
+        """
+        Convenient method to visualize the volume. It renders the bounding box, retrieves the ViewMatrix from OpenGL,
+        and calls the corresponding rendering method (based on ~`self.mode` value), and converts the resulting image
+        data into an OpenGL Texture.
+        """
+
+        if self.mode == RenderMode.MULTI_VOLUME:
+            if not self.annotation_volume:
+                return
+
+            draw_bounding_box(self.annotation_volume)
+        else:
+            if not self.volume:
+                return
+            draw_bounding_box(self.volume)
+
+        glGetDoublev(GL_MODELVIEW_MATRIX, self.view_matrix, 0)
+        view_matrix_transposed = self.view_matrix.reshape((4, 4)).transpose().flatten()
+
+        start_time = time.time()
+
+        if self.mode == RenderMode.SLICER:
+            self.render_slicer(view_matrix_transposed, self.volume, self.image_size, self.image)
+        elif self.mode == RenderMode.MIP:
+            self.render_mip(view_matrix_transposed, self.volume, self.image_size, self.image)
+        elif self.mode == RenderMode.COMPOSITING:
+            self.render_compositing(view_matrix_transposed, self.volume, self.image_size, self.image)
+        elif self.mode == RenderMode.MULTI_VOLUME:
+            self.render_mouse_brain(view_matrix_transposed, self.annotation_volume, self.energy_volumes,
+                                    self.challenge_image_size, self.challenge_image)
+        else:
+            raise Error("Specified mode is not correct")
+
+        end_time = time.time()
+        print(f"Render took {end_time - start_time}s")
+
+        # TEXTURE
+        if self.mode == RenderMode.MULTI_VOLUME:
+            half_width = self.challenge_image_size / 2.0
+        else:
+            half_width = self.image_size / 2.0
+
+        if self.texture_id == -1:
+            self.texture_id = generate_texture(self.image_size, self.image_size)
+
+        if self.challenge_texture_id == -1:
+            self.challenge_texture_id = generate_texture(self.challenge_image_size, self.challenge_image_size)
+
+        glPushAttrib(GL_LIGHTING_BIT)
+        glDisable(GL_LIGHTING)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        glEnable(GL_TEXTURE_2D)  # Enable the GL_TEXTURE_2D
+
+        if self.mode == RenderMode.MULTI_VOLUME:
+            glBindTexture(GL_TEXTURE_2D, self.challenge_texture_id)  # Bind the following operation to the texture
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.challenge_image_size, self.challenge_image_size, GL_RGBA,
+                            GL_UNSIGNED_BYTE,
+                            self.challenge_image)  # Fill the reserved space with the final image data
+        else:
+            glBindTexture(GL_TEXTURE_2D, self.texture_id)  # Bind the following operation to the texture
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.image_size, self.image_size, GL_RGBA, GL_UNSIGNED_BYTE,
+                            self.image)  # Fill the reserved space with the final image data
+
+        # Actually draw the texture as a billboard texture.
+        glPushMatrix()
+        glLoadIdentity()
+        glBegin(GL_QUADS)
+        glColor4f(1.0, 1.0, 1.0, 1.0)
+        glTexCoord2d(0.0, 0.0)
+        glVertex3d(-half_width, -half_width, 0.0)
+        glTexCoord2d(0.0, 1.0)
+        glVertex3d(-half_width, half_width, 0.0)
+        glTexCoord2d(1.0, 1.0)
+        glVertex3d(half_width, half_width, 0.0)
+        glTexCoord2d(1.0, 0.0)
+        glVertex3d(half_width, -half_width, 0.0)
+        glEnd()
+        glDisable(GL_TEXTURE_2D)
+        glPopMatrix()
+
+        glPopAttrib()
+```
+
+### Volume_Rendering/genevis/transfer_function.py
+```
+import math
+from wx import Colour
+
+
+class TransferFunction:
+    sMin = 0
+    sMax = 0
+    sRange = 0
+    control_points = None
+    LUTsize = 0
+    LUT = None
+
+    def init(self, minimum: int, maximum: int):
+        self.sMin = minimum
+        self.sMax = maximum
+        self.sRange = self.sMax - self.sMin
+        self.control_points = []
+
+        self.control_points.append(ControlPoint(minimum, TFColor()))
+        self.control_points.append(ControlPoint(maximum, TFColor(1., 1., 1., 1.)))
+
+        self.LUTsize = self.sRange
+        self.LUT = [None] * self.LUTsize
+
+        self.buildLUT()
+
+    def add_control_point(self, value: int, r: float, g: float, b:float, a: float) -> int:
+        if value < self.sMin or value > self.sMax:
+            return -1
+
+        a = math.floor(a * 100) / 100.0
+
+        control_point = ControlPoint(value, TFColor(r, g, b, a))
+        idx = 0
+        while idx < len(self.control_points) and self.control_points[idx] < control_point:
+            idx = idx + 1
+
+        if self.control_points[idx] == control_point:
+            self.control_points[idx] = control_point
+        else:
+            self.control_points.insert(idx, control_point)
+
+        self.buildLUT()
+        return idx
+
+    def set_test_function(self):
+        self.add_control_point(0, .0, .0, .0, .0)
+        self.add_control_point(4, .0, .0, .0, .0)
+        self.add_control_point(12, 1., .58, .0, .9)
+        self.add_control_point(28, .0, .0, .0, .0)
+        self.add_control_point(205, .0, .0, .0, .0)
+
+
+    def get_color(self, value: int) -> 'TFColor':
+        return self.LUT[self.computeLUTindex(value)]
+
+    def remove_control_point(self, idx: int) -> None:
+        self.control_points.pop(idx)
+        self.buildLUT()
+
+    def update_control_point_scalar(self, index: int, s: int) -> None:
+        self.control_points[index].value = s
+        self.buildLUT()
+
+    def update_control_point_alpha(self, index: int, alpha: float) -> None:
+        alpha = math.floor(alpha * 100) / 100.0
+        self.control_points[index].color.a = alpha
+        self.buildLUT()
+
+    def update_control_point_color(self, idx: int, color: Colour):
+        control_point = self.control_points[idx]
+        control_point.color.r = color.red / 255.0
+        control_point.color.g = color.green / 255.0
+        control_point.color.b = color.blue / 255.0
+
+        self.buildLUT()
+
+    def computeLUTindex(self, value: int) -> int:
+        return int(((self.LUTsize - 1) * (value - self.sMin)) / self.sRange)
+
+    def buildLUT(self):
+        for i in range(1, len(self.control_points)):
+            prev_point = self.control_points[i - 1]
+            next_point = self.control_points[i]
+
+            value_range = next_point.value - prev_point.value
+            for k in range(prev_point.value, next_point.value + 1):
+                frac = (k - prev_point.value) / value_range
+
+                new_color = TFColor()
+                new_color.r = prev_point.color.r + frac * (next_point.color.r - prev_point.color.r)
+                new_color.g = prev_point.color.g + frac * (next_point.color.g - prev_point.color.g)
+                new_color.b = prev_point.color.b + frac * (next_point.color.b - prev_point.color.b)
+                new_color.a = prev_point.color.a + frac * (next_point.color.a - prev_point.color.a)
+
+                self.LUT[self.computeLUTindex(k)] = new_color
+
+
+class TFColor:
+    r: float
+    g: float
+    b: float
+    a: float
+
+    def __init__(self, red: float = .0, green: float = .0, blue: float = .0, alpha: float = .0):
+        self.r = red
+        self.g = green
+        self.b = blue
+        self.a = alpha
+
+    def __str__(self) -> str:
+        return f"({self.r}, {self.g}, {self.b}, {self.a})"
+
+
+class ControlPoint:
+    value: int
+    color: TFColor
+
+    def __init__(self, value: int, color: TFColor):
+        self.value = value
+        self.color = color
+
+    def __eq__(self, other: 'ControlPoint') -> bool:
+        return self.value == other.value
+
+    def __lt__(self, other: 'ControlPoint') -> bool:
+        return self.value < other.value
+
+    def __le__(self, other: 'ControlPoint') -> bool:
+        return self.value <= other.value
+
+    def __gt__(self, other: 'ControlPoint') -> bool:
+        return self.value > other.value
+
+    def __ge__(self, other: 'ControlPoint') -> bool:
+        return self.value >= other.value
+```
+
+### Volume_Rendering/genevis/visualization.py
+```
+from util import TrackballInteractor
+from implementation import RaycastRendererImplementation
+import wx
+
+try:
+    from wx import glcanvas
+except ImportError:
+    raise Exception("Problem when importing glcanvas. Is PyOpenGL available?")
+
+try:
+    from OpenGL.GL import *
+    from OpenGL.GLUT import *
+    from OpenGL.GLU import *
+except ImportError:
+    raise Exception("PyOpenGL is not installed. Use pip install")
+
+
+class Visualization(glcanvas.GLCanvas):
+    """ Visualization class that implements the necessary methods for painting in a OpenGL Canvas."""
+
+    def __init__(self, parent, tfunc):
+        """
+        Sets up the class with the right attributes.
+        :param parent: Parent WX component to be added to.
+        """
+
+        glcanvas.GLCanvas.__init__(self, parent, -1)
+        self.init = False
+        self.context = glcanvas.GLContext(self)
+
+        self.last_x = self.x = 30
+        self.last_y = self.y = 30
+        self.size = None
+        self.mouse_down = False
+        self.Bind(wx.EVT_ERASE_BACKGROUND, self.on_erase_background)
+        parent.Bind(wx.EVT_SIZE, self.on_reshape)
+        self.Bind(wx.EVT_PAINT, self.on_paint)
+        self.Bind(wx.EVT_LEFT_DOWN, self.on_mouse_down)
+        self.Bind(wx.EVT_LEFT_UP, self.on_mouse_up)
+        self.Bind(wx.EVT_MOTION, self.on_mouse_motion)
+        self.Bind(wx.EVT_MOUSEWHEEL, self.on_mouse_wheel)
+
+        self.winWidth = 800
+        self.winHeight = 600
+        self.fov = 7.0          #initial zoom setting
+        self.trackball = TrackballInteractor(self.winWidth, self.winHeight)
+        self.renderer = RaycastRendererImplementation(tfunc)
+
+        self.energy_volumes = {}
+        self.annotation_volume = None
+
+    def set_volume(self, volume):
+        """
+        Convenient method to set the volume that we want to render
+        :param volume: Volume to be set (see `~volume.Volume`)
+        """
+
+        self.renderer.set_volume(volume)
+        self.Refresh(False)
+
+    def add_energy_volume(self, key, volume):
+        self.renderer.add_energy_volume(key, volume)
+        self.Refresh(False)
+
+    def remove_energy_volume(self, key):
+        self.renderer.remove_energy_volume(key)
+        self.Refresh(False)
+
+    def clear_energy_volumes(self):
+        self.renderer.clear_energy_volumes()
+        self.Refresh(False)
+
+    def set_annotation_volume(self, volume):
+        self.renderer.set_annotation_volume(volume)
+        self.Refresh(False)
+
+    def set_mode(self, mode):
+        self.renderer.set_mode(mode)
+        self.Refresh(False)
+
+    def on_erase_background(self, event):
+        pass  # Do nothing, to avoid flashing on MSW.
+
+    def on_reshape(self, event):
+        """Handler for the reshape event"""
+
+        wx.CallAfter(self.do_set_viewport)
+        event.Skip()
+
+    def do_set_viewport(self):
+        """Set the viewport correctly"""
+
+        size = self.size = self.GetClientSize()
+        self.SetCurrent(self.context)
+        glViewport(0, 0, size.width, size.height)
+        self.renderer.winWidth = size.width
+        self.renderer.winHeight = size.height
+
+        self.winWidth = size.width
+        self.winHeight = size.height
+        self.trackball.set_dimensions(size.width, size.height)
+        self.Refresh(False)
+
+    def on_paint(self, event):
+        """
+        Handler for paint event. It includes the logic to deal with WX and the OpenGL logic to draw the visualization.
+        """
+        dc = wx.PaintDC(self)
+        self.SetCurrent(self.context)
+
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        gluPerspective(self.fov, self.winWidth / self.winHeight, 0.1, 5000)
+        glTranslated(0, 0, -1000)
+
+        # clear screen and set the view transform to the identity matrix
+        glClearColor(0, 0, .0, .0)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        glEnable(GL_DEPTH_TEST)
+        glDepthFunc(GL_LESS)
+
+        #initial rotation given to see the object
+        glRotate(-90, 0, 0, 1)
+        glRotate(80, 0, 1, 0)
+        glRotate(40, 1, 0, 0)
+
+        if self.trackball.rotating:
+            self.trackball.update_transform()
+
+        glMultMatrixd(self.trackball.get_transformation_matrix(), 0)
+
+        self.renderer.visualize()
+        glFlush()
+        self.SwapBuffers()
+
+    def on_mouse_down(self, evt):
+        """Handler for mouse down event"""
+
+        self.mouse_down = True
+        self.CaptureMouse()
+        x, y = evt.GetPosition()
+        self.trackball.set_mouse_position(x, y)
+        self.renderer.interactive_mode = True
+
+    def on_mouse_up(self, evt):
+        """Handler for mouse up event"""
+
+        self.mouse_down = False
+        self.ReleaseMouse()
+        self.renderer.interactive_mode = False
+        self.Refresh(False)
+
+    def on_mouse_motion(self, evt):
+        """Handler for mouse motion event"""
+
+        if evt.Dragging() and self.mouse_down:
+            x, y = evt.GetPosition()
+            self.trackball.drag(x, y)
+            self.trackball.rotating = True
+            self.Refresh(False)
+
+    def on_mouse_wheel(self, evt):
+        """Handler for mouse wheel event"""
+
+        if evt.GetWheelRotation() > 0:
+            self.fov = self.fov - 1
+            if self.fov < 2:
+                self.fov = 2
+        else:
+            self.fov = self.fov + 1
+        self.Refresh(False)
+```
+
+### Volume_Rendering/gui/__init__.py
+```
+
+```
+
+### Volume_Rendering/gui/application.py
+```
+try:
+    import wx
+    from wx import glcanvas
+except ImportError:
+    raise ImportError("Required dependency wx.glcanvas not present")
+from os.path import basename
+import os
+import sys
+import traceback
+from genevis.visualization import Visualization
+from volume.volume import Volume
+from volume.volumeIO import VolumeIO
+from genevis.render import RenderMode
+from genevis.transfer_function import TransferFunction, ControlPoint, TFColor
+from util import Ellipse2D
+import numpy as np
+import pickle
+
+RADIO_LABELS = {RenderMode.SLICER: "Slicer", RenderMode.MIP: "MIP", RenderMode.COMPOSITING: "Compositing", RenderMode.MULTI_VOLUME: "Challenge data"}
+
+DOT_SIZE = 8
+
+TFUNC = TransferFunction()
+
+ENERGY_TYPE = "ENERGY"
+ANNOTATION_TYPE = "ANNOTATION"
+
+try:
+    with open("mapping.pkl", "rb") as file:
+        ANNOTATION_2_ENERGY = pickle.load(file)
+except Exception:
+    print(f"File 'mapping.pkl' was not loaded. Check it is in the same base directory ({os.getcwd()}) as your python execution")
+    raise Exception()
+
+
+class TransferFunctionView(wx.Panel):
+    mouse_down = False
+    selected = 0
+    drag_start = None
+
+    def __init__(self, parent, tfunc: TransferFunction, histogram: np.ndarray, visualization: Visualization):
+        wx.Panel.__init__(self, parent)
+
+        self.tfunc = tfunc
+        self.editor = parent
+        self.histogram = histogram
+        self.visualization = visualization
+
+        self.SetBackgroundStyle(wx.BG_STYLE_CUSTOM)
+        self.Bind(wx.EVT_SIZE, self.on_size)
+        self.Bind(wx.EVT_PAINT, self.on_paint)
+        self.Bind(wx.EVT_MOTION, self.on_mouse_motion)
+        self.Bind(wx.EVT_LEFT_DOWN, self.on_mouse_down)
+        self.Bind(wx.EVT_LEFT_UP, self.on_mouse_up)
+
+    def on_size(self, event):
+        event.Skip()
+        self.Refresh()
+
+    def on_paint(self, event=None):
+        dc = wx.PaintDC(self)
+        w, h = self.GetSize()
+        h = h - 30
+        value_range = self.tfunc.sMax - self.tfunc.sMin
+        minimum = self.tfunc.sMin
+
+        dc.SetBackground(wx.Brush(wx.WHITE))
+        dc.Clear()
+
+        nrBins = len(self.histogram)
+        maxBinHeight = self.histogram.max()
+        binWidth = w / nrBins
+        scalingFactor = h / maxBinHeight
+
+        xs = np.arange(nrBins) * binWidth
+        ys = h - scalingFactor * self.histogram
+        widths = np.full(nrBins, binWidth)
+        heights = scalingFactor * self.histogram
+
+        dc.SetPen(wx.Pen(wx.Colour(125, 125, 125, 255), 4))
+        dc.DrawRectangleList(np.dstack((xs, ys, widths, heights)).squeeze())
+
+        control_points = self.tfunc.control_points
+        dc.SetPen(wx.Pen(wx.BLACK))
+        dc.SetBrush(wx.Brush(wx.BLACK))
+        xprev = -1
+        yprev = -1
+        currentcolor = wx.Colour()
+        prevcolor = wx.Colour()
+        rect = wx.Rect(0, h + 5, 0, 0)
+        for cp in control_points:
+            s = cp.value
+            color = cp.color
+            t = (s - minimum) / value_range
+            xpos = int(t * w)
+            ypos = h - int(color.a * h)
+            dc.DrawEllipse(xpos - DOT_SIZE / 2, ypos - DOT_SIZE / 2, DOT_SIZE, DOT_SIZE)
+            if xprev > -1:
+                currentcolor.Set(color.r * 255, color.g * 255, color.b * 255, 255)
+                dc.DrawLine(xpos, ypos, xprev, yprev)
+                rect.SetX(xprev)
+                rect.SetWidth(xpos - xprev)
+                rect.SetHeight(25)
+                dc.GradientFillLinear(rect, prevcolor, currentcolor)
+
+            xprev = xpos
+            yprev = ypos
+            prevcolor.Set(color.r * 255, color.g * 255, color.b * 255, 255)
+
+    def get_control_point_area(self, control_point: ControlPoint) -> Ellipse2D:
+        w, h = self.GetSize()
+        value_range = self.tfunc.sMax - self.tfunc.sMin
+        minimum = self.tfunc.sMin
+
+        s = control_point.value
+        color = control_point.color
+        t = (s - minimum) / value_range
+        xpos = int(t * w)
+        ypos = h - int(color.a * h)
+        bounds = Ellipse2D(xpos - DOT_SIZE / 2, ypos - DOT_SIZE / 2, DOT_SIZE, DOT_SIZE)
+        return bounds
+
+    def on_mouse_down(self, evt: wx.MouseEvent):
+        self.drag_start = None
+        control_points = self.tfunc.control_points
+        inside = False
+        idx = 0
+        x, y = evt.GetPosition()
+        while not inside and idx < len(control_points):
+            inside = inside | self.get_control_point_area(control_points[idx]).contains(x, y)
+            if inside:
+                break
+            else:
+                idx = idx + 1
+
+        if inside:
+            if evt.GetButton() == wx.MOUSE_BTN_LEFT:
+                self.selected = idx
+                control_point = control_points[self.selected]
+                self.editor.set_selected_info(self.selected, control_point.value, control_point.color.a,
+                                              control_point.color)
+                self.drag_start = (x, y)
+            elif evt.GetButton() == wx.MOUSE_BTN_RIGHT:
+                if 0 < idx < len(control_points) - 1:
+                    self.tfunc.remove_control_point(idx)
+                    self.selected = idx - 1
+                    control_point = control_points[self.selected]
+                    self.editor.set_selected_info(self.selected, control_point.value, control_point.color.a,
+                                                  control_point.color)
+                    self.drag_start = (x, y)
+        else:
+            w, h = self.GetSize()
+            if 0 <= x < w and 0 <= y < h - 30:
+                h = h - 30
+                value_range = self.tfunc.sMax - self.tfunc.sMin
+                minimum = self.tfunc.sMin
+                t = x / w
+                s = int((t * value_range) + minimum)
+                a = (h - y) / h
+                self.selected = self.tfunc.add_control_point(s, .0, .0, .0, a)
+                control_point = control_points[self.selected]
+                self.editor.set_selected_info(self.selected, control_point.value, control_point.color.a,
+                                              control_point.color)
+                self.drag_start = (x, y)
+                self.Refresh()
+
+    def on_mouse_up(self, evt: wx.MouseEvent):
+        self.Refresh()
+        self.visualization.Refresh()
+
+    def on_mouse_motion(self, evt: wx.MouseEvent):
+        # Dragging
+        if evt.Dragging() and evt.LeftIsDown():
+            if self.selected < 0:
+                return
+            drag_end_x, drag_end_y = evt.GetPosition()
+            control_points = self.tfunc.control_points
+            w, h = self.GetSize()
+            h = h - 30
+
+            if self.selected == 0 or self.selected == len(control_points) - 1:
+                cp = self.get_control_point_area(control_points[self.selected])
+                drag_end_x = cp.get_center_x()
+                if drag_end_y < 0:
+                    drag_end_y = 0
+                if drag_end_y > h:
+                    drag_end_y = h
+            else:
+                left_point = self.get_control_point_area(control_points[self.selected - 1])
+                right_point = self.get_control_point_area(control_points[self.selected + 1])
+
+                if drag_end_x <= left_point.get_center_x() + 1:
+                    drag_end_x = left_point.get_center_x() + 2
+                if drag_end_x >= right_point.get_center_x() - 1:
+                    drag_end_x = right_point.get_center_x() - 2
+                if drag_end_y < 0:
+                    drag_end_y = 0
+                if drag_end_y > h:
+                    drag_end_y = h
+
+            value_range = self.tfunc.sMax - self.tfunc.sMin
+            minimum = self.tfunc.sMin
+            t = drag_end_x / w
+            s = int((t * value_range) + minimum)
+            a = (h - drag_end_y) / h
+
+            self.tfunc.update_control_point_scalar(self.selected, s)
+            self.tfunc.update_control_point_alpha(self.selected, a)
+            self.editor.set_selected_info(self.selected, s, a, control_points[self.selected].color)
+            self.Refresh()
+        # Moving around
+        else:
+            x, y = evt.GetPosition()
+            control_points = self.tfunc.control_points
+            if any(self.get_control_point_area(cp).contains(x, y) for cp in control_points):
+                self.SetCursor(wx.Cursor(wx.CURSOR_HAND))
+            else:
+                self.SetCursor(wx.Cursor(wx.CURSOR_DEFAULT))
+
+
+class TransferFunctionTab(wx.Panel):
+    selected = 0
+
+    def __init__(self, parent, tfunc: TransferFunction, histogram: np.ndarray, visualization: Visualization):
+        wx.Panel.__init__(self, parent)
+
+        self.tfunc = tfunc
+        self.tfView = TransferFunctionView(self, tfunc, histogram, visualization)
+        self.visualization = visualization
+
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        hbox0 = wx.BoxSizer(wx.HORIZONTAL)
+        hbox0.Add(self.tfView, 2, wx.EXPAND | wx.ALIGN_LEFT | wx.ALL, 5)
+        sizer.Add(hbox0, 2, wx.EXPAND | wx.ALIGN_LEFT | wx.ALL, 5)
+
+        hbox1 = wx.BoxSizer(wx.HORIZONTAL)
+        scalar_value_label = wx.StaticText(self, -1, label="Scalar value")
+        hbox1.Add(scalar_value_label, 1, wx.EXPAND | wx.ALIGN_LEFT | wx.ALL, 5)
+        self.scalar_value_field = wx.TextCtrl(self)
+        hbox1.Add(self.scalar_value_field, 1, wx.EXPAND | wx.ALIGN_LEFT | wx.ALL, 5)
+        sizer.Add(hbox1)
+
+        hbox2 = wx.BoxSizer(wx.HORIZONTAL)
+        opacity_label = wx.StaticText(self, -1, label="Opacity")
+        hbox2.Add(opacity_label, 1, wx.EXPAND | wx.ALIGN_LEFT | wx.ALL, 5)
+        self.opacity_value_field = wx.TextCtrl(self)
+        hbox2.Add(self.opacity_value_field, 1, wx.EXPAND | wx.ALIGN_LEFT | wx.ALL, 5)
+        sizer.Add(hbox2)
+
+        hbox3 = wx.BoxSizer(wx.HORIZONTAL)
+        color_label = wx.StaticText(self, -1, label="Color")
+        hbox3.Add(color_label, 1, wx.EXPAND | wx.ALIGN_LEFT | wx.ALL, 5)
+        self.color_picker = wx.ColourPickerCtrl(self)
+        hbox3.Add(self.color_picker, 1, wx.EXPAND | wx.ALIGN_LEFT | wx.ALL, 5)
+        sizer.Add(hbox3)
+
+        self.Bind(wx.EVT_COLOURPICKER_CHANGED, self.on_color_changed)
+
+        self.SetSizer(sizer)
+
+    def set_selected_info(self, idx: int, s: int, a: float, color: TFColor) -> None:
+        self.selected = idx
+        self.scalar_value_field.SetValue(str(s))
+        self.opacity_value_field.SetValue(str(a)[:4])
+        self.color_picker.SetColour(wx.Colour(color.r * 255, color.g * 255, color.b * 255, 255))
+
+    def on_color_changed(self, evt: wx.ColourPickerEvent):
+        color = evt.GetColour()
+        self.tfunc.update_control_point_color(self.selected, color)
+        self.tfView.Refresh(False)
+        self.visualization.Refresh(False)
+
+
+class LoadDataTab(wx.Panel):
+    def __init__(self, parent, visualization, on_data_loaded, on_challenge_data_changed):
+        wx.Panel.__init__(self, parent)
+        #
+        # Create the load data dialog
+        self.load_dialog = wx.FileDialog(self, "Open", style=wx.FD_OPEN)
+        self.dir_dialog = wx.DirDialog(self, "Open folder", style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST)
+
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        font = wx.Font(15, wx.DECORATIVE, wx.NORMAL, wx.BOLD)
+
+        volume_data_label = wx.StaticText(self, -1, style=wx.ALIGN_CENTER, label="Test volume data")
+        volume_data_label.SetFont(font)
+        load_button = wx.Button(self, -1, "Load volume")
+        self.file_name_label = wx.StaticText(self, -1, style=wx.ALIGN_LEFT, label="File name: -")
+        self.dimensions_label = wx.StaticText(self, -1, style=wx.ALIGN_LEFT, label="Dimensions: -")
+        self.value_range_label = wx.StaticText(self, -1, style=wx.ALIGN_LEFT, label="Voxel value range: -")
+
+        challenge_data_label = wx.StaticText(self, -1, style=wx.ALIGN_CENTER, label="Challenge data")
+        challenge_data_label.SetFont(font)
+        load_annotations_button = wx.Button(self, -1, "Open annotations folder")
+        load_energies_button = wx.Button(self, -1, "Open energies folder")
+        sizer_challenge = wx.BoxSizer(wx.HORIZONTAL)
+        self.annotation_list = wx.ListBox(self, style=wx.LB_SINGLE)
+        self.energy_list = wx.ListBox(self, style=wx.LB_MULTIPLE)
+        self.energy_selected = set()
+        sizer_lists = wx.BoxSizer(wx.HORIZONTAL)
+
+        sizer.AddSpacer(5)
+        sizer.Add(volume_data_label, 0, wx.ALIGN_CENTER_HORIZONTAL, 0)
+        sizer.Add(load_button, 0, wx.ALIGN_CENTER_HORIZONTAL, 0)
+        sizer.AddSpacer(10)
+        sizer.Add(self.file_name_label)
+        sizer.Add(self.dimensions_label)
+        sizer.Add(self.value_range_label)
+        sizer.AddSpacer(50)
+        sizer.Add(challenge_data_label, 0, wx.ALIGN_CENTER_HORIZONTAL, 0)
+        sizer.AddSpacer(4)
+        sizer_challenge.Add(load_annotations_button, proportion=1)
+        sizer_challenge.Add(load_energies_button, proportion=1)
+        sizer.Add(sizer_challenge)
+        sizer_lists.Add(self.annotation_list, proportion=1, flag=wx.EXPAND)
+        sizer_lists.Add(self.energy_list, proportion=1, flag=wx.EXPAND)
+        sizer.Add(sizer_lists, proportion=2, flag=wx.EXPAND)
+
+        self.SetSizer(sizer)
+
+        load_button.Bind(wx.EVT_BUTTON, self.handle_click)
+        load_annotations_button.Bind(wx.EVT_BUTTON, self.handle_annotations_click)
+        load_energies_button.Bind(wx.EVT_BUTTON, self.handle_energies_click)
+        self.annotation_list.Bind(wx.EVT_LISTBOX, self.handle_annotation_selected)
+        self.energy_list.Bind(wx.EVT_LISTBOX, self.handle_energy_selected)
+
+        self.visualization = visualization
+        self.on_data_loaded = on_data_loaded
+        self.on_challenge_data_changed = on_challenge_data_changed
+        self.annotations_path = ""
+        self.energies_path = ""
+        self.available_energy_items = []
+        self.selection = -1
+
+    def handle_energy_selected(self, evt: wx.CommandEvent):
+        selection = evt.GetSelection()
+        file_name = self.available_energy_items[selection]
+        energy_number = int(file_name[:-11])
+        if energy_number in self.energy_selected:
+            self.energy_selected.remove(energy_number)
+            self.visualization.remove_energy_volume(energy_number)
+        else:
+            self.energy_selected.add(energy_number)
+            volumeio = VolumeIO(os.path.join(self.energies_path, file_name))
+            volume = Volume(volumeio.data, compute_histogram=False)
+            self.visualization.add_energy_volume(energy_number, volume)
+
+        self.on_challenge_data_changed(len(self.energy_selected) > 0)
+
+    def handle_annotation_selected(self, evt: wx.CommandEvent):
+        selection = evt.GetSelection()  # type: int
+        if self.selection != selection:
+            self.selection = selection
+            item = self.annotations_items[selection]
+            mhd_energies = ANNOTATION_2_ENERGY[item][:10]
+            intersection = set(self.energy_items) & set(mhd_energies)
+            self.available_energy_items = [file for file in mhd_energies if file in intersection]
+            self.energy_list.Clear()
+            self.energy_list.AppendItems(self.available_energy_items)
+            self.energy_selected.clear()
+            self.visualization.clear_energy_volumes()
+            volumeio = VolumeIO(os.path.join(self.annotations_path, self.annotations_items[selection]))
+            self.visualization.set_annotation_volume(Volume(volumeio.data, compute_histogram=False))
+
+            self.on_challenge_data_changed(False)
+
+    def handle_challenge_click(self, evt):
+        if self.dir_dialog.ShowModal() == wx.ID_CANCEL:
+            return "", None
+
+        path = self.dir_dialog.GetPath()
+        try:
+            challenge_files = [file for file in os.listdir(path) if os.path.isfile(os.path.join(path, file)) and file[-3:].lower() == "mhd"]
+            return path, challenge_files
+        except Exception:
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            traceback.print_exception(exc_type, exc_value, exc_traceback, limit=2, file=sys.stdout)
+            dialog = wx.MessageDialog(None, message="An error occurred while opening the folder",
+                                      style=wx.ICON_ERROR | wx.OK)
+            dialog.ShowModal()
+            dialog.Destroy()
+            return "", None
+
+    def handle_annotations_click(self, evt):
+        path, items = self.handle_challenge_click(evt)
+        self.annotations_path = path
+        self.annotations_items = items
+        if items is None:
+            self.annotation_list.Clear()
+        else:
+            self.annotation_list.AppendItems(items)
+
+    def handle_energies_click(self, evt):
+        path, items = self.handle_challenge_click(evt)
+        self.energies_path = path
+        self.energy_items = items
+
+    def handle_click(self, event):
+        """Show the load file dialog"""
+        if self.load_dialog.ShowModal() == wx.ID_CANCEL:
+            return
+
+        pathname = self.load_dialog.GetPath()
+        try:
+            volume_io = VolumeIO(pathname)
+            volume_data = volume_io.data
+            volume = Volume(volume_data)
+
+            TFUNC.init(volume.get_minimum(), volume.get_maximum())
+            self.file_name_label.SetLabel(f"File name: {basename(pathname)}")
+            self.dimensions_label.SetLabel(f"Dimensions: {volume_io.dim_x}x{volume_io.dim_y}x{volume_io.dim_z}")
+            self.value_range_label.SetLabel(f"Voxel value range: {volume.get_minimum():.3g}-{volume.get_maximum():.3g}")
+
+            self.visualization.set_volume(volume)
+            self.on_data_loaded(volume)
+        except Exception:
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            traceback.print_exception(exc_type, exc_value, exc_traceback, limit=2, file=sys.stdout)
+            dialog = wx.MessageDialog(None, message="An error occurred while reading the file",
+                                      style=wx.ICON_ERROR | wx.OK)
+            dialog.ShowModal()
+            dialog.Destroy()
+
+
+class RaycastTab(wx.Panel):
+    def __init__(self, parent, handle_event_radio_button):
+        wx.Panel.__init__(self, parent)
+
+        self.slicer_button = wx.RadioButton(self, label=RADIO_LABELS[RenderMode.SLICER])
+        self.mip_button = wx.RadioButton(self, label=RADIO_LABELS[RenderMode.MIP])
+        self.compositing_button = wx.RadioButton(self, label=RADIO_LABELS[RenderMode.COMPOSITING])
+        self.multivolume_button = wx.RadioButton(self, label=RADIO_LABELS[RenderMode.MULTI_VOLUME])
+        self.multivolume_button.Disable()
+
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(self.slicer_button)
+        sizer.Add(self.mip_button)
+        sizer.Add(self.compositing_button)
+        sizer.Add(self.multivolume_button)
+        self.SetSizer(sizer)
+
+        self.Bind(wx.EVT_RADIOBUTTON, self.on_radio_button)
+        self.handle_event_radio_button = handle_event_radio_button
+
+    def on_radio_button(self, event):
+        if self.slicer_button.GetValue():
+            mode = RenderMode.SLICER
+        elif self.mip_button.GetValue():
+            mode = RenderMode.MIP
+        elif self.compositing_button.GetValue():
+            mode = RenderMode.COMPOSITING
+        elif self.multivolume_button.GetValue():
+            mode = RenderMode.MULTI_VOLUME
+        else:
+            raise Exception("Mode not specified")
+
+        self.handle_event_radio_button(mode)
+
+    def enable_multivolume_mode(self, enable):
+        if enable:
+            self.multivolume_button.Enable()
+        else:
+            self.multivolume_button.Disable()
+
+class GLFrame(wx.Frame):
+    """A simple class for using OpenGL with wxPython."""
+
+    def __init__(self, parent, title):
+        super(GLFrame, self).__init__(parent, title=title, size=(800, 600))
+
+        #
+        # Create the load data dialog
+        self.load_dialog = wx.FileDialog(self, "Open", style=wx.FD_OPEN)
+
+        #
+        # Create the canvas
+        self.visualization = Visualization(self, TFUNC)
+        self.volume = None
+
+        panel = wx.Panel(self)
+        note_book = wx.Notebook(panel)
+
+        load_data_tab = LoadDataTab(note_book, self.visualization, self.on_data_loaded, self.on_challenge_data_changed)
+        self.raycast_tab = RaycastTab(note_book, self.handle_event_radio_button)
+
+        note_book.AddPage(load_data_tab, "Load Data")
+        note_book.AddPage(self.raycast_tab, "Raycaster")
+
+        note_book_sizer = wx.BoxSizer()
+        note_book_sizer.Add(note_book, 1, wx.EXPAND)
+        panel.SetSizer(note_book_sizer)
+
+        sizer = wx.BoxSizer(wx.HORIZONTAL)
+        sizer.Add(self.visualization, proportion=3, flag=wx.EXPAND)
+        sizer.Add(panel, proportion=2, flag=wx.EXPAND)
+        self.SetSizer(sizer)
+        sizer.Layout()
+        self.note_book = note_book
+
+    def on_data_loaded(self, volume):
+        transfer_function_tab = TransferFunctionTab(self.note_book, TFUNC, volume.histogram, self.visualization)
+        self.note_book.AddPage(transfer_function_tab, "Transfer function")
+
+    def handle_event_radio_button(self, mode):
+        self.visualization.set_mode(mode)
+
+    def on_challenge_data_changed(self, enable):
+        self.raycast_tab.enable_multivolume_mode(enable)
+```
+
+### Volume_Rendering/util/__init__.py
+```
+import math
+import numpy as np
+try:
+    # The Python OpenGL package can be found at
+    # http://PyOpenGL.sourceforge.net/
+    from OpenGL.GL import *
+    from OpenGL.GLUT import *
+    from OpenGL.GLU import *
+    haveOpenGL = True
+except ImportError:
+    haveOpenGL = False
+
+
+class TrackballInteractor:
+    def __init__(self, width, height):
+        self.width = width
+        self.height = height
+        self.lmx = self.lmy = 0
+        self.last_position = [0.0, 0.0, 0.0]
+        self.axis = [0.0, 0.0, 0.0]
+        self.angle = 0.0
+        self.rotating = False
+        self.trackball_x_form = np.zeros(16)
+        self.trackball_x_form[0] = 1.0
+        self.trackball_x_form[5] = 1.0
+        self.trackball_x_form[10] = 1.0
+        self.trackball_x_form[15] = 1.0
+
+    def set_dimensions(self, width, height):
+        self.width = width
+        self.height = height
+
+    def get_transformation_matrix(self):
+        return self.trackball_x_form
+
+    def set_mouse_position(self, x, y):
+        self.lmx = x
+        self.lmy = y
+        TrackballInteractor.trackball_ptov(self.lmx, self.lmy, self.width, self.height, self.last_position)
+
+    @staticmethod
+    def trackball_ptov(x, y, width, height, v):
+        radius = min(width, height) - 20
+        v[0] = (2.0 * x - width) / radius
+        v[1] = (height - 2.0 * y) / radius
+
+        d = math.sqrt(v[0] * v[0] + v[1] * v[1])
+        v[2] = math.cos((math.pi / 2.0) * (d if d < 1.0 else 1.0))
+        a = 1.0 / math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+        v[0] = v[0] * a
+        v[1] = v[1] * a
+        v[2] = v[2] * a
+
+    def drag(self, mx, my):
+        current_position = np.zeros(3)
+
+        TrackballInteractor.trackball_ptov(mx, my, self.width, self.height, current_position)
+
+        diff = current_position - self.last_position
+
+        if diff[diff != 0].size > 0:
+            self.angle = 90.0 * np.linalg.norm(diff)
+            self.axis[0] = self.last_position[1] * current_position[2] - self.last_position[2] * current_position[1]
+            self.axis[1] = self.last_position[2] * current_position[0] - self.last_position[0] * current_position[2]
+            self.axis[2] = self.last_position[0] * current_position[1] - self.last_position[1] * current_position[0]
+
+            self.last_position = current_position
+
+    def update_transform(self):
+        glPushMatrix()
+        glLoadIdentity()
+        glRotated(self.angle, self.axis[0], self.axis[1], self.axis[2])
+        glMultMatrixd(self.trackball_x_form, 0)
+        glGetDoublev(GL_MODELVIEW_MATRIX, self.trackball_x_form, 0)
+        glPopMatrix()
+        self.rotating = False
+
+
+class Ellipse2D:
+    x: float
+    y: float
+    width: float
+    height: float
+
+    def __init__(self, x: float = .0, y: float = .0, width: float = .0, height: float = .0):
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+
+    def contains(self, x: float, y: float) -> bool:
+        rx = self.width / 2
+        ry = self.height / 2
+        tx = (x - (self.x + rx)) / rx
+        ty = (y - (self.y + ry)) / ry
+        return tx * tx + ty * ty < 1.0
+
+    def get_center_x(self) -> float:
+        return self.get_center()[0]
+
+    def get_center_y(self) -> float:
+        return self.get_center()[1]
+
+    def get_center(self) -> (float, float):
+        return self.x + self.width / 2.0, self.y + self.height / 2.0
+```
+
+### Volume_Rendering/volume/__init__.py
+```
+
+```
+
+### Volume_Rendering/volume/volume.py
+```
+import numpy as np
+import math
+
+class Volume:
+    """
+    Volume data class.
+
+    Attributes:
+        data: Numpy array with the voxel data. Its shape will be (dim_x, dim_y, dim_z).
+        dim_x: Size of dimension X.
+        dim_y: Size of dimension Y.
+        dim_z: Size of dimension Z.
+    """
+
+    def __init__(self, array, compute_histogram=True):
+        """
+        Inits the volume data.
+        :param array: Numpy array with shape (dim_x, dim_y, dim_z).
+        """
+
+        self.data = array
+        self.histogram = np.array([])
+        self.dim_x = array.shape[0]
+        self.dim_y = array.shape[1]
+        self.dim_z = array.shape[2]
+
+        if compute_histogram:
+            self.compute_histogram()
+
+    def get_voxel(self, x, y, z):
+        """Retrieves the voxel for the """
+        return self.data[x, y, z]
+
+    def get_minimum(self):
+        return self.data.min()
+
+    def get_maximum(self):
+        return self.data.max()
+
+    def compute_histogram(self):
+        self.histogram = np.histogram(self.data, bins=np.arange(self.get_maximum() + 1))[0]
+
+
+class VoxelGradient:
+    def __init__(self, gx=0, gy=0, gz=0):
+        self.x = gx
+        self.y = gy
+        self.z = gz
+        self.magnitude = math.sqrt(gx * gx + gy * gy + gz * gz)
+
+ZERO_GRADIENT = VoxelGradient()
+
+
+class GradientVolume:
+    def __init__(self, volume):
+        self.volume = volume        #volume with id selected and -1 everywhere else
+        self.data = []              #array of object VoxelGradient
+        self.magnitudeVolume = []   #array of magnitude value
+        self.compute()
+        self.max_magnitude = -1.0
+
+    def get_gradient(self, x, y, z):
+        return self.data[x + self.volume.dim_x * (y + self.volume.dim_y * z)]
+
+    def set_gradient(self, x, y, z, value):
+        self.data[x + self.volume.dim_x * (y + self.volume.dim_y * z)] = value
+
+    def get_voxel(self, i):
+        return self.data[i]
+
+    def set_volume_voxel(selfs, volume, x, y, z, value):
+        if not(x < 0 or y < 0 or z < 0 or x >= volume.shape[0] or y >= volume.shape[1] or z >= volume.shape[2]):
+            x = int(math.floor(x))
+            y = int(math.floor(y))
+            z = int(math.floor(z))
+            volume[x, y, z]=value
+
+    def get_volume_voxel(self, volume, x, y, z):
+
+        if x < 0 or y < 0 or z < 0 or x >= volume.shape[0] or y >= volume.shape[1] or z >= volume.shape[2]:
+            return 0
+        x = int(math.floor(x))
+        y = int(math.floor(y))
+        z = int(math.floor(z))
+        return volume[x, y, z]
+
+    def compute(self):
+        """
+        Computes the gradient for the current volume
+        """
+        print("Volume size: ", self.volume.data.shape)
+
+        #define the region IDS we want to see
+        #Render the n_greatest region in the dataset
+        n_greatest = 5
+        unique, frequencies = np.unique(self.volume.data, return_counts=True)
+        indexes_feq = np.flip(np.argsort(frequencies))
+        regions = np.array([], dtype=int)
+        for l in range(n_greatest):
+            if unique[indexes_feq[l]]!=0:
+                regions = np.append(regions, unique[indexes_feq[l]]).astype(int)
+
+        # Render only region with id 15750 and 16001
+        regions = [15750, 16001]
+
+        print("regions: ", regions)
+
+        self.data = [ZERO_GRADIENT] * (self.volume.dim_x * self.volume.dim_y * self.volume.dim_z)
+        self.magnitudeVolume = np.zeros(self.volume.data.shape)
+        volume = np.copy(self.volume.data)
+        booleanMask = np.zeros(self.volume.data.shape)
+        booleanMask = np.isin(self.volume.data, regions)
+
+        for x in range(self.volume.dim_x):
+            for y in range(self.volume.dim_y):
+                for z in range(self.volume.dim_z):
+                    prev_gx, prev_gy, prev_gz = 0, 0, 0
+                    new_gx, new_gy, new_gz = 0, 0, 0
+                    n = 0
+                    for k, region in enumerate(regions):
+
+                        x_plus = 1000 if self.get_volume_voxel(volume, x + 1, y, z)==region else 0
+                        x_minus = 1000 if self.get_volume_voxel(volume, x - 1, y, z) == region else 0
+                        y_plus = 1000 if self.get_volume_voxel(volume, x, y + 1, z) == region else 0
+                        y_minus = 1000 if self.get_volume_voxel(volume, x, y - 1, z) == region else 0
+                        z_plus = 1000 if self.get_volume_voxel(volume, x, y, z + 1) == region else 0
+                        z_minus = 1000 if self.get_volume_voxel(volume, x, y, z - 1) == region else 0
+
+                        gx = (x_plus - x_minus) / 2
+                        gy = (y_plus - y_minus) / 2
+                        gz = (z_plus - z_minus) / 2
+                        if (gx!=0 or gy!=0 or gz!=0):
+                            new_gx = (prev_gx * n + gx) / (n + 1)
+                            new_gy = (prev_gy * n + gy) / (n + 1)
+                            new_gz = (prev_gz * n + gz) / (n + 1)
+                            prev_gx, prev_gy, prev_gz = new_gx, new_gy, new_gz
+                            n = n+1
+                    self.set_gradient(x, y, z, VoxelGradient(prev_gx, prev_gy, prev_gz))
+                    self.magnitudeVolume[x, y, z] = self.get_gradient(x, y, z).magnitude
+
+        self.volume = Volume(booleanMask.astype(int))
+
+    def get_max_gradient_magnitude(self):
+        if self.max_magnitude < 0:
+            gradient = max(self.data, key=lambda x: x.magnitude)
+            self.max_magnitude = gradient.magnitude
+
+        return self.max_magnitude
+```
+
+### Volume_Rendering/volume/volumeIO.py
+```
+import io
+import os
+import itk
+import re
+import struct
+import numpy as np
+from abc import ABC, abstractmethod
+
+
+class VolumeIO:
+    def __init__(self, path):
+        filename, file_extension = os.path.splitext(path)
+
+        if file_extension == ".fld":
+            reader = FLDReader(path)
+        else:
+            reader = ITKReader(path)
+
+        reader.read()
+
+        self.data = reader.data
+        self.dim_x = reader.dim_x
+        self.dim_y = reader.dim_y
+        self.dim_z = reader.dim_z
+
+
+class Reader(ABC):
+    def __init__(self, path):
+        self.path = path
+        self.dim_x = 0
+        self.dim_y = 0
+        self.dim_z = 0
+        self.data = None
+
+    def read(self):
+        dim_x, dim_y, dim_z, data = self.read_file(self.path)
+        self.dim_x = dim_x
+        self.dim_y = dim_y
+        self.dim_z = dim_z
+        self.data = data
+
+    @abstractmethod
+    def read_file(self, path):
+        pass
+
+
+class FLDReader(Reader):
+    def read_file(self, path):
+        dim_x = 0
+        dim_y = 0
+        dim_z = 0
+        data_type = -1
+        with open(path, "rb") as file:
+            magic_code = file.read(16)
+            if len(magic_code) == 16:
+                header_text = magic_code.decode()
+                if header_text != "# AVS field file":
+                    raise Exception("not a valid file")
+
+            file.seek(0)
+            header_length = 1
+            byte = file.read(1)
+            while byte != b'\f':
+                header_length = header_length + 1
+                byte = file.read(1)
+
+            # skip also next ^L
+            header_length = header_length + 1
+            file.seek(0)
+
+            h = file.read(header_length)
+            if len(h) == header_length:
+                header = h.decode()
+                dim_x, dim_y, dim_z, data_type = FLDReader.parse_header(header)
+
+            byte_count = dim_x * dim_y * dim_z * data_type
+            d = file.read(byte_count)
+
+            if data_type == 1:
+                count = len(d)
+                data = struct.unpack('B' * count, d)
+            elif data_type == 2:
+                count = int(len(d) / 2)
+                data = struct.unpack('H' * count, d)
+            else:
+                raise Exception("Only data types 1 and 2 supported")
+
+            return dim_x, dim_y, dim_z, np.array(data).reshape((dim_x, dim_y, dim_z), order="F")
+
+    @staticmethod
+    def parse_header(header):
+        avs_keys = ["ndim", "dim1", "dim2", "dim3", "nspace", "veclen",
+                    "data", "field", "min_ext", "max_ext", "variable", "#", "label", "unit",
+                    "min_val", "max_val"]
+
+        dim_x = 0
+        dim_y = 0
+        dim_z = 0
+        data_type = -1
+        for token in header.split('\n'):
+            if token.find("=") > 0:
+                tokens = re.compile("\s*=\s*|\s*#\s*").split(token)
+                for avs_index, avs_key in enumerate(avs_keys):
+                    if tokens[0] == avs_key:
+                        if avs_index == 0:
+                            if int(tokens[1]) != 3:
+                                raise Exception("Only 3D files supported")
+                        elif avs_index == 1:
+                            dim_x = int(tokens[1])
+                        elif avs_index == 2:
+                            dim_y = int(tokens[1])
+                        elif avs_index == 3:
+                            dim_z = int(tokens[1])
+                        elif avs_index == 5:
+                            if int(tokens[1]) != 1:
+                                raise Exception("Only scalar data are supported")
+                        elif avs_index == 6:
+                            if tokens[1] == "byte":
+                                data_type = 1
+                            elif tokens[1] == "short":
+                                data_type = 2
+
+                            if data_type < 0:
+                                raise Exception("Data type not recognized")
+                        elif avs_index == 7:
+                            if tokens[1] != "uniform":
+                                raise Exception("Only uniform data are supported")
+
+        return dim_x, dim_y, dim_z, data_type
+
+
+class ITKReader(Reader):
+    def read_file(self, path):
+        image = itk.imread(path, itk.F)
+        data = itk.array_from_image(image)  # type: np.ndarray
+        data = data.astype(np.int)
+        dim_x, dim_y, dim_z = data.shape
+
+        return dim_x, dim_y, dim_z, data
+```

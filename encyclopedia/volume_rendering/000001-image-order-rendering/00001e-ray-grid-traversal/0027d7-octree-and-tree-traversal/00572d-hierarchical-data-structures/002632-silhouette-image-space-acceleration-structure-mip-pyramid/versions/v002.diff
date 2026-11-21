@@ -1,0 +1,166 @@
+--- v001.md
++++ v002.md
+@@ -4,93 +4,94 @@
+ 
+ ## Overview
+-This method accelerates voxelization and culling queries by constructing a mip pyramid over silhouette images, inspired by the hierarchical z-buffer [S1]. It solves the problem of efficiently determining conservative bounds on silhouette coverage for arbitrary voxels in screen space. It differs from its siblings by operating directly on the image-space silhouette data rather than spatial voxel grids, allowing for fast, conservative culling decisions based on projected voxel extents [S1].
++This method accelerates voxelization culling by constructing a hierarchical mip pyramid over silhouette images, inspired by the hierarchical z-buffer [S1]. It solves the problem of efficiently determining whether a voxel intersects the visual hull surface defined by multiple camera views without sampling every point within the voxel volume [S1]. It is distinguished from sibling methods by operating in image space rather than world space, using conservative min/max bounds over 2x2 texel blocks to guarantee no small features are missed and no holes are created in the resulting voxelization [S1].
+ 
+ ## How it works
+ **Inputs:**
+-- A set of $n$ silhouette images, one per camera view, containing signed-distance-like values or binary occupancy indicators.
+-- A voxel $v$ defined by its 8 corners in Normalized Device Coordinates (NDC).
++- $N$ silhouette images, one per camera view $i \in \{0, \dots, N-1\}$.
++- A voxel $v$ defined by its 8 corners in Normalized Device Coordinate (NDC) space.
+ 
+ **Outputs:**
+-- A conservative lower and upper bound on the silhouette value $\mathcal{S}(\mathbf{p})$ for all points $\mathbf{p}$ within voxel $v$.
++- A conservative bound on the silhouette value $\mathcal{S}(\mathbf{p})$ for all $\mathbf{p} \in v$.
+ 
+ **Data Structures:**
+-- **Mip Pyramid:** For each of the $n$ silhouette images, a hierarchy of texture levels is constructed.
+-  - Level 0: The original smoothed silhouette image.
+-  - Level $k$: A texture where each texel stores two values: the minimum and maximum of the four corresponding texels from Level $k-1$.
+-  - The pyramid depth is determined by the image resolution.
++- **Mip Pyramid:** For each silhouette image $i$, a hierarchy of textures (pyramid levels).
++- **Level $k$ Texels:** Each texel at level $k$ stores two values: the minimum and maximum of the 4 corresponding texels at level $k+1$ (the next lower level, i.e., higher resolution). Level 0 is the highest resolution (original smoothed silhouette image).
+ 
+-**Steps:**
+-1. **Pyramid Construction:** Immediately after silhouette image smoothing, generate $n$ image pyramids using a GPU compute kernel [S1]. Each level $k > 0$ is computed from level $k-1$ by grouping texels into $2 \times 2$ blocks and storing the min and max values of those blocks.
+-2. **Voxel Projection:** For a given voxel $v$, project its 8 NDC corners into the silhouette image space of camera $i$.
+-3. **Bounding Rectangle:** Compute the axis-aligned bounding rectangle (AABB) of the projected corners in screen space: $(\text{minX}, \text{minY}, \text{maxX}, \text{maxY})$.
+-4. **Level Selection:** Determine the sampling level $L$ in the mip pyramid using the formula:
+-   $$ L = \lfloor \log_2(\max(\text{maxX} - \text{minX}, \text{maxY} - \text{minY})) \rfloor $$
+-   At this level $L$, the bounding rectangle covers at most a $2 \times 2$ block of texels [S1].
+-5. **Sampling:** Sample the texels at the corners of the bounding rectangle from the pyramid level $L$.
+-6. **Bound Calculation:** Return the minimum and maximum of these sampled values as the conservative bound on the silhouette value $\mathcal{I}_i(\mathcal{C}_i(\mathbf{p}))$ for all $\mathbf{p}$ within the voxel [S1].
+-7. **Aggregation:** To get the bound on the final silhouette function $\mathcal{S}(\mathbf{p})$, take the product of the minimums (and similarly maximums) over all $n$ images [S1].
++**Algorithm Steps:**
+ 
+-**Pseudocode:**
+-```python
+-def sample_silhouette_bound(voxel_corners, pyramid_levels, camera_index):
+-    """
+-    voxel_corners: list of 8 (x, y) tuples in screen space
+-    pyramid_levels: list of 2D arrays, where each array is a level of the mip pyramid
+-                   storing (min_val, max_val) per texel
+-    camera_index: index of the silhouette image
+-    """
+-    # 1. Project corners to screen space (assumed done before call)
+-    # 2. Find AABB
+-    min_x = min(c[0] for c in voxel_corners)
+-    min_y = min(c[1] for c in voxel_corners)
+-    max_x = max(c[0] for c in voxel_corners)
+-    max_y = max(c[1] for c in voxel_corners)
+-    
+-    # 3. Determine level
+-    width = max_x - min_x
+-    height = max_y - min_y
+-    level = floor(log2(max(width, height)))
+-    
+-    # 4. Sample corners at the determined level
+-    # Note: Coordinates must be clamped to valid texel range for the level
+-    texels = [
+-        pyramid_levels[level][clamp(min_y), clamp(min_x)],
+-        pyramid_levels[level][clamp(min_y), clamp(max_x)],
+-        pyramid_levels[level][clamp(max_y), clamp(min_x)],
+-        pyramid_levels[level][clamp(max_y), clamp(max_x)]
+-    ]
+-    
+-    # 5. Return conservative bounds
+-    min_val = min(t[0] for t in texels)
+-    max_val = max(t[1] for t in texels)
+-    
+-    return min_val, max_val
+-```
++1.  **Pyramid Construction:**
++    Generate $n$ image pyramids using a GPU compute kernel launched immediately after silhouette image smoothing [S1]. For each level $k > 0$, and for each texel position $(u, v)$, compute:
++    $$
++    \text{min}_{k}(u,v) = \min(\text{min}_{k+1}(2u, 2v), \text{min}_{k+1}(2u+1, 2v), \text{min}_{k+1}(2u, 2v+1), \text{min}_{k+1}(2u+1, 2v+1))
++    $$
++    $$
++    \text{max}_{k}(u,v) = \max(\text{max}_{k+1}(2u, 2v), \text{max}_{k+1}(2u+1, 2v), \text{max}_{k+1}(2u, 2v+1), \text{max}_{k+1}(2u+1, 2v+1))
++    $$
++    [S1]
+ 
+-**Parameters:**
+-- **Pyramid Depth:** Determined by image resolution. Not given in the sources.
+-- **Smoothing:** The silhouette images must be smoothed prior to pyramid construction. The specific smoothing kernel is defined in [Silhouette Image Acquisition and Filtering](3754-silhouette-image-acquisition-and-filtering.md).
++2.  **Voxel Projection and Bounding Box:**
++    For a voxel $v$, project its 8 NDC space corners into the silhouette image space of camera $i$. Compute the axis-aligned bounding rectangle (AABB) defined by:
++    $$
++    \text{minX} = \min(\text{projected } x \text{ coordinates})
++    $$
++    $$
++    \text{minY} = \min(\text{projected } y \text{ coordinates})
++    $$
++    $$
++    \text{maxX} = \max(\text{projected } x \text{ coordinates})
++    $$
++    $$
++    \text{maxY} = \max(\text{projected } y \text{ coordinates})
++    $$
++    [S1]
+ 
+-**Edge Cases and Pitfalls:**
+-- **Conservative Bounds:** The min/max aggregation ensures that no small features are missed and no holes are created in voxelization, as the bounds are conservatively correct [S1].
+-- **Precision:** Floating-point precision in projection and log2 calculation may affect level selection. Not given in the sources.
+-- **Boundary Conditions:** Texel sampling must handle cases where the bounding rectangle extends beyond the image boundaries. Not given in the sources.
++3.  **Level Selection:**
++    Determine the sampling level $L$ in the mip pyramid:
++    $$
++    L = \lfloor \log_2(\max(\text{maxX} - \text{minX}, \text{maxY} - \text{minY})) \rfloor
++    $$
++    [S1]
++    At this level $L$, the bounding rectangle covers at most a $2 \times 2$ block of texels.
++
++4.  **Sampling:**
++    Sample the texels at the corners of the AABB in the pyramid at level $L$. Let these sampled values be $(\text{min}_c, \text{max}_c)$ for corner $c \in \{\text{top-left, top-right, bottom-left, bottom-right}\}$.
++
++5.  **Conservative Bound Calculation:**
++    Compute the bound for silhouette image $i$:
++    $$
++    \text{bound}_i(v) = \min_c(\text{min}_c) \quad \text{and} \quad \text{upper}_i(v) = \max_c(\text{max}_c)
++    $$
++    [S1]
++    The value $\mathcal{I}_i(\mathcal{C}_i(\mathbf{p}))$ for any point $\mathbf{p}$ within voxel $v$ is bounded by these values.
++
++6.  **Global Voxel Bound:**
++    Combine bounds across all $N$ cameras to determine if the voxel intersects the visual hull. The conservative bound on the silhouette value $\mathcal{S}(\mathbf{p})$ is derived by taking the product of the minimums (and similarly maximums) over all images [S1]:
++    $$
++    \text{GlobalMin}(v) = \prod_{i=0}^{N-1} \text{bound}_i(v)
++    $$
++    $$
++    \text{GlobalMax}(v) = \prod_{i=0}^{N-1} \text{upper}_i(v)
++    $$
++    [S1]
++    If $\text{GlobalMin}(v) > 0.5$ (or appropriate threshold), the voxel is outside the visual hull and can be culled. If $\text{GlobalMax}(v) < 0.5$, it is inside. Otherwise, further processing is required.
++
++**Pitfalls:**
++- **Conservatism:** The bounds are conservative to ensure no small features are missed and no holes are created in voxelization [S1]. This may lead to overestimation of occupancy in some cases, requiring finer resolution or additional checks.
++- **Precision:** Floating-point precision in projection and log2 calculation must be handled carefully to avoid incorrect level selection.
+ 
+ ## Subtopics
+ 
+ ### [Silhouette Image Acquisition and Filtering](3754-silhouette-image-acquisition-and-filtering.md)
+-Generates the calibrated, smooth silhouette images required as input for this acceleration structure. It differs by handling lens distortion, demosaicing, and Gaussian smoothing to produce a consistent signed-distance-like field. Choose this when raw camera data needs to be converted into a usable silhouette representation.
++Generates calibrated binary silhouette images with lens distortion correction and Gaussian filtering to provide smooth, geometrically accurate occupancy masks for the pyramid base.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Pyramid construction is $O(N)$ where $N$ is the number of texels in the base image. Query time is $O(1)$ per camera view, involving projection, AABB calculation, log2, and 4 texture samples.
+-- **Memory Complexity:** $O(N \log R)$ where $R$ is the resolution, due to storing min/max pairs at each pyramid level.
++- **Time Complexity:** Pyramid construction is $O(N \cdot W \cdot H)$ where $W, H$ are image dimensions. Voxel query is $O(1)$ after projection, involving a few texture lookups.
++- **Memory Complexity:** $O(N \cdot W \cdot H)$ for storing the mip pyramids (approximately $4/3$ of the base image size per camera due to mip levels).
+ - **Performance:** Greatly reduces computation and data accesses needed by the oracle kernel for culling decisions [S1].
+-- **Strengths:** Conservative bounds prevent missing small features or creating holes. Fast culling in image space.
+-- **Limitations:** Requires pre-computed silhouette images. Performance depends on the number of camera views $n$.
+-- **When to Use:** When voxelizing from multi-view silhouette data and fast conservative culling is needed.
+-- **When Not to Use:** When silhouette data is not available or when spatial locality in voxel space is more critical than image-space coverage.
++- **Strengths:** Conservative bounds prevent holes in voxelization; efficient culling via image-space hierarchy.
++- **Limitations:** Requires pre-computed silhouette images; performance depends on number of cameras and image resolution.
+ 
+ ## Background
+-The method was introduced in "Real-time high-resolution sparse voxelization with application to image-based modeling" [S1]. It is inspired by the hierarchical z-buffer [Greene et al. 1993]. The structure is used to accelerate the voxelization process in image-based modeling by providing fast, conservative bounds on silhouette coverage.
++The method was introduced in "Real-time high-resolution sparse voxelization with application to image-based modeling" [S1]. It is inspired by the hierarchical z-buffer [Greene et al. 1993] and used to accelerate voxelization in image-based modeling applications.
+ 
+ ## Sources

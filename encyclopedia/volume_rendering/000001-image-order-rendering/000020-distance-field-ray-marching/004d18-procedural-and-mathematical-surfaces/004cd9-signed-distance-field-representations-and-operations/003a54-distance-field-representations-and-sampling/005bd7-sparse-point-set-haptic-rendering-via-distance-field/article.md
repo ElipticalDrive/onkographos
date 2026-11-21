@@ -1,0 +1,333 @@
+# Sparse Point Set Haptic Rendering via Distance Field
+
+Also called: Augmented Point Set Rendering, Distance Field based Haptic Rendering of Scattered Oriented Points
+
+## Overview
+This method provides haptic rendering for sparse, oriented point cloud data by constructing a 3D signed distance field (SDF) on a regular grid using embedded "packing spheres" [S1]. It solves the problem of generating stable collision forces from incomplete geometric data where traditional mesh-based or dense implicit function methods fail due to sparsity [S1]. Unlike sibling methods that rely on dense sampling or explicit surface reconstruction, this technique uses the local normal direction to define minimum-volume spheres that approximate the object's interior, allowing a proxy to be constrained to the zero-iso-surface via gradient descent [S1].
+
+## How it works
+
+### Inputs and Outputs
+*   **Input**: An augmented point set $s(P, n)$ consisting of $N$ points $P_i$ and their corresponding outward-facing unit normals $n_i$ [S1].
+*   **Output**: A 3D grid of distance values $\phi(x, y, z)$ representing the signed distance to the object surface, and a haptic force feedback loop [S1].
+
+### Data Structures
+1.  **Augmented Point Set**: A list of tuples $(P_i, n_i)$ where $P_i \in \mathbb{R}^3$ and $n_i \in \mathbb{R}^3$ with $\|n_i\|=1$ [S1].
+2.  **3D Grid**: A regular 3D grid of voxels. The grid dimensions are chosen to fit the haptic device's interaction space (e.g., $300 \times 300 \times 300$ for a 4-inch cube) [S1]. Each node stores a scalar distance value and a classification (inside/outside/boundary) [S1].
+
+### Algorithm Steps
+
+#### Step 1: Compute Packing Spheres
+For each point $P_i$ in the augmented point set, compute the minimum radius $r_i$ of a sphere centered along the inward normal direction $-n_i$ that contains at least one other point $P_j$ on its boundary [S1].
+
+1.  For every other point $P_j$ ($j \neq i$), calculate the vector $a_{ij} = P_j - P_i$ [S1].
+2.  Calculate the angle $\theta_{ij}$ between $a_{ij}$ and the inward normal $-n_i$ [S1].
+3.  If $\theta_{ij} < \pi/2$ (i.e., $-n_i \cdot a_{ij} > 0$), the point $P_j$ lies in the forward hemisphere of the normal. Compute the radius $r_{ij}$ and center $c_{ij}$ of the unique sphere passing through $P_i$ and $P_j$ with normal $n_i$ at $P_i$:
+    $$ r_{ij} = \frac{1}{2} |a_{ij}| \sec(\theta_{ij}) $$
+    $$ c_{ij} = P_i - r_{ij} n_i $$
+    [S1]
+4.  The packing radius $r_i$ for point $P_i$ is the minimum of all valid $r_{ij}$:
+    $$ r_i = \min_{j \neq i, \theta_{ij} < \pi/2} r_{ij} $$
+    The center $c_i$ is the $c_{ij}$ corresponding to the minimizing $j$ [S1].
+
+#### Step 2: Map Points to Grid
+Map each point $P_i$ to the nearest grid node. The grid nodes containing mapped points are marked as "inside" or "boundary" depending on their neighborhood status [S1].
+
+#### Step 3: Compute Distance Field via Erosion
+Compute the signed distance field $\phi$ on the grid using an iterative erosion process [S1].
+
+1.  Initialize all grid nodes. Nodes not mapped to any point are initially considered "outside" [S1].
+2.  Set the distance value of all "outside" nodes to $1$ [S1].
+3.  Identify "boundary" nodes as those inside nodes that have at least one outside neighbor [S1].
+4.  Perform iterative erosion using a structuring element $B$ of unit radius to erode the set of inside nodes $S$ [S1]:
+    *   **Level 0**: Set the distance value of current boundary nodes to $0$. Relabel these nodes as "outside" [S1].
+    *   **Level $k$**: Identify new boundary nodes (inside nodes with at least one outside neighbor). Set their distance values to $-(k-1)$ (or decreasing integer values: $-1, -2, \dots$). Relabel them as "outside" [S1].
+5.  Repeat until no inside nodes remain [S1].
+
+*Note: The sources describe this as an erosion process where distance values decrease into the object. The zero-level set represents the surface [S1].*
+
+#### Step 4: Haptic Rendering - Collision Detection
+At each haptic update cycle (targeting $>1$ kHz, i.e., $<1$ ms per update):
+
+1.  Let $X_h$ be the position of the Haptic Interface Point (HIP) and $X_p$ be the position of the haptic proxy [S1].
+2.  Compute the distance $\phi(X_p)$ at the proxy location by trilinear interpolation of the distance field values at the 8 nearest grid nodes [S1].
+3.  If $\phi(X_p) > 0$, the proxy is outside the object. No collision occurs. Set $X_p = X_h$ and no force is generated [S1].
+
+#### Step 5: Haptic Rendering - Proxy Constrained Motion
+If $\phi(X_p) < 0$, the proxy is inside the object (collision detected) [S1].
+
+1.  Minimize the objective function $\Psi(X_p)$ to find the new proxy position $X_p^{(k+1)}$ from current position $X_p^{(k)}$:
+    $$ \Psi(X_p) = \frac{1}{2} \|X_p - X_h\|^2 + \frac{\lambda}{2} |\phi(X_p)|^2 $$
+    [S1]
+2.  The gradient of the objective function is:
+    $$ \nabla \Psi(X_p) = (X_p - X_h) + \lambda \phi(X_p) \nabla \phi(X_p) $$
+    [S1]
+3.  Update the proxy position using gradient descent:
+    $$ X_p^{(k+1)} = X_p^{(k)} - \beta \phi(X_p^{(k)}) \nabla \phi(X_p^{(k)}) - \gamma (X_p^{(k)} - X_h) $$
+    where $\beta = \gamma \lambda$, and $\gamma$ is a step size parameter [S1].
+4.  The term $(X_p - X_h)$ pulls the proxy toward the HIP, while $\phi(X_p) \nabla \phi(X_p)$ pushes the proxy toward the zero-iso-surface (the object boundary) [S1].
+5.  Compute the reaction force $f$ using Hooke's Law:
+    $$ f = -k (X_h - X_p) $$
+    where $k$ is the stiffness constant and $(X_h - X_p)$ is the penetration depth vector [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def compute_packing_spheres(points, normals):
+    """
+    Computes the minimum packing sphere for each point in an augmented point set.
+    Args:
+        points: List of N points P_i (3D coordinates).
+        normals: List of N outward unit normals n_i.
+    Returns:
+        radii: List of minimum radii r_i.
+        centers: List of sphere centers c_i.
+    """
+    N = len(points)
+    radii = [float('inf')] * N
+    centers = [None] * N
+    
+    for i in range(N):
+        Pi = points[i]
+        ni = normals[i]
+        inward_ni = [-x for x in ni] # -n_i
+        
+        min_r = float('inf')
+        min_c = None
+        
+        for j in range(N):
+            if i == j:
+                continue
+            
+            Pj = points[j]
+            # Vector from i to j
+            a_ij = [Pj[k] - Pi[k] for k in range(3)]
+            a_ij_mag = math.sqrt(sum(x**2 for x in a_ij))
+            
+            # Dot product of inward normal and a_ij
+            dot_prod = sum(inward_ni[k] * a_ij[k] for k in range(3))
+            
+            # Check if theta_ij < pi/2 (dot product > 0)
+            if dot_prod > 0:
+                # cos(theta) = (a_ij . -n_i) / (|a_ij| * |-n_i|)
+                # Since n_i is unit, |-n_i| = 1
+                cos_theta = dot_prod / a_ij_mag
+                sec_theta = 1.0 / cos_theta
+                
+                # Radius r_ij = 0.5 * |a_ij| * sec(theta_ij)
+                r_ij = 0.5 * a_ij_mag * sec_theta
+                
+                # Center c_ij = P_i - r_ij * n_i
+                c_ij = [Pi[k] - r_ij * ni[k] for k in range(3)]
+                
+                if r_ij < min_r:
+                    min_r = r_ij
+                    min_c = c_ij
+        
+        radii[i] = min_r
+        centers[i] = min_c
+        
+    return radii, centers
+
+def compute_distance_field(grid_shape, points, normals, packing_centers, packing_radii):
+    """
+    Computes the signed distance field on a 3D grid using iterative erosion.
+    Args:
+        grid_shape: Tuple (D, H, W) of the 3D grid.
+        points: List of points P_i.
+        normals: List of normals n_i.
+        packing_centers: List of sphere centers c_i.
+        packing_radii: List of sphere radii r_i.
+    Returns:
+        dist_field: 3D numpy array of distance values.
+    """
+    # Initialize grid
+    # 1.0 for outside, 0.0 for inside/boundary (initially unknown)
+    # We use a special value for 'unvisited inside'
+    dist_field = np.ones(grid_shape)
+    inside_mask = np.zeros(grid_shape, dtype=bool)
+    
+    # Map points to grid nodes
+    # Note: In a real implementation, this requires voxelization.
+    # Here we assume a function `map_point_to_grid` exists or is trivial.
+    # For the sake of the algorithm description, we mark nodes near points as inside.
+    # The source says: "Map the points to the nearest nodes... all remaining processing is done only in the 3D grid."
+    # And: "Set all nodes with indicator value 0 to distance 1 (outside)."
+    # This implies an initial indicator function step.
+    
+    # Simplified mapping: Mark grid nodes within a small epsilon of any point as 'inside'
+    # This is a placeholder for the actual voxelization logic described in the source.
+    for i, P in enumerate(points):
+        # Find nearest grid node index (ix, iy, iz)
+        # This is a conceptual step; actual implementation needs grid coordinate conversion
+        ix, iy, iz = get_grid_coords(P, grid_shape)
+        inside_mask[ix, iy, iz] = True
+        
+    # Identify initial boundary nodes: inside nodes with at least one outside neighbor
+    # This requires checking neighbors.
+    
+    # Iterative erosion
+    current_boundary = find_boundary_nodes(inside_mask, dist_field)
+    level = 0
+    
+    while current_boundary.size > 0:
+        # Set distance for current boundary
+        # Level 0 -> 0, Level 1 -> -1, etc.
+        dist_val = -level if level > 0 else 0.0
+        
+        for node in current_boundary:
+            dist_field[node] = dist_val
+            
+        # Relabel current boundary as outside
+        for node in current_boundary:
+            inside_mask[node] = False
+            
+        # Find new boundary nodes (inside nodes with at least one outside neighbor)
+        current_boundary = find_boundary_nodes(inside_mask, dist_field)
+        level += 1
+        
+    return dist_field
+
+def find_boundary_nodes(inside_mask, dist_field):
+    """
+    Finds nodes that are inside but have at least one outside neighbor.
+    """
+    # This is a conceptual implementation of the erosion boundary detection
+    # In practice, this involves convolution or neighbor checks.
+    # We return a list of coordinates.
+    boundary_nodes = []
+    # Iterate over all inside nodes
+    inside_indices = np.where(inside_mask)
+    for i, j, k in zip(*inside_indices):
+        # Check 6-connected neighbors
+        neighbors = [
+            (i+1, j, k), (i-1, j, k),
+            (i, j+1, k), (i, j-1, k),
+            (i, j, k+1), (i, j, k-1)
+        ]
+        is_boundary = False
+        for ni, nj, nk in neighbors:
+            # Check bounds
+            if 0 <= ni < dist_field.shape[0] and \
+               0 <= nj < dist_field.shape[1] and \
+               0 <= nk < dist_field.shape[2]:
+                if not inside_mask[ni, nj, nk]:
+                    is_boundary = True
+                    break
+            else:
+                # Out of bounds is considered outside
+                is_boundary = True
+                break
+        if is_boundary:
+            boundary_nodes.append((i, j, k))
+            
+    return boundary_nodes
+
+def haptic_update(HIP, dist_field, grid_spacing, k_stiffness, gamma, lambda_param):
+    """
+    Performs one step of haptic rendering.
+    Args:
+        HIP: 3D position of the Haptic Interface Point (X_h).
+        dist_field: The precomputed 3D distance field.
+        grid_spacing: Physical size of one voxel.
+        k_stiffness: Hooke's constant k.
+        gamma: Step size parameter.
+        lambda_param: Weighting parameter lambda.
+    Returns:
+        proxy_pos: New proxy position (X_p).
+        force: Reaction force vector.
+    """
+    X_h = HIP
+    # Initial proxy position can be HIP or previous proxy position
+    X_p = X_h 
+    
+    # Compute distance at proxy
+    phi = trilinear_interpolate(X_p, dist_field, grid_spacing)
+    
+    if phi > 0:
+        # Outside object
+        proxy_pos = X_h
+        force = np.array([0.0, 0.0, 0.0])
+        return proxy_pos, force
+    
+    # Inside object: Minimize objective function
+    # X_p^(k+1) = X_p^(k) - beta * phi * grad_phi - gamma * (X_p - X_h)
+    # beta = gamma * lambda
+    
+    beta = gamma * lambda_param
+    
+    # Compute gradient of distance field at X_p
+    grad_phi = compute_gradient(X_p, dist_field, grid_spacing)
+    
+    # Gradient descent iteration (usually 1-2 iterations are sufficient for stability)
+    # The source implies a single update step per haptic cycle or a few iterations.
+    # We perform one update step here.
+    
+    displacement = X_p - X_h
+    force_term = -gamma * displacement
+    surface_term = -beta * phi * grad_phi
+    
+    X_p_new = X_p + force_term + surface_term
+    
+    # Compute reaction force
+    penetration_depth = X_h - X_p_new
+    force = -k_stiffness * penetration_depth
+    
+    return X_p_new, force
+
+def trilinear_interpolate(point, dist_field, grid_spacing):
+    """
+    Trilinear interpolation of the distance field at a given point.
+    """
+    # Convert world coordinates to grid indices
+    # This is a placeholder for the actual interpolation logic
+    pass
+
+def compute_gradient(point, dist_field, grid_spacing):
+    """
+    Computes the gradient of the distance field using finite differences.
+    """
+    # This is a placeholder for the actual gradient calculation
+    pass
+```
+
+### Parameters
+*   **Grid Resolution**: The grid size must fit the haptic device's interaction space. Example: $300 \times 300 \times 300$ for a 4-inch cube [S1].
+*   **Stiffness Constant ($k$)**: Hooke's constant for the reaction force [S1].
+*   **Step Size ($\gamma$)**: Parameter in the gradient descent update rule [S1].
+*   **Weighting ($\lambda$)**: Parameter balancing proxy-HIP distance and surface constraint [S1].
+
+### Edge Cases and Pitfalls
+*   **Sparse Sampling Leakage**: If the input point set is not dense enough, the embedded packing spheres may leak out of the actual object boundary, causing incorrect distance field values, particularly near corners or concave regions [S1].
+*   **Optimization of Distance Field Computation**: It is not necessary to compute the distance field for all inside grid nodes. The proxy rarely sinks more than 3-4 voxel lengths into the object. Calculating distances only up to 5 or 6 nodes inside the bounding surface is sufficient for stable haptic feedback [S1].
+
+## Operating characteristics
+
+*   **Time Complexity**: Pre-computation of the distance field is $O(N \cdot M)$ where $N$ is the number of points and $M$ is the number of grid nodes, dominated by the erosion process. Haptic update is $O(1)$ per frame (trilinear interpolation and gradient descent) [S1].
+*   **Memory Complexity**: $O(D \cdot H \cdot W)$ for the 3D grid storage [S1].
+*   **Measured Performance**:
+    *   Force calculation takes 0.02 ms on a CORE 2 QUAD CPU @ 2.66GHz with 2GB RAM, well below the 1 ms requirement for smooth haptic rendering (1 kHz update rate) [S1].
+    *   Pre-computation times vary by dataset size:
+        *   3,725 points (grid $186 \times 173 \times 87$): 38.09 seconds for 824,463 inside nodes [S1].
+        *   5,153 points (grid $126 \times 187 \times 72$): 26.25 seconds for 304,072 internal nodes [S1].
+        *   3,751 points: 110.82 seconds for 1,129,209 inside points [S1].
+        *   3,756 points (water hydrant): 30.86 seconds for 586,222 points [S1].
+*   **Strengths**: Optimized for sparse data sets; provides stable haptic feedback; allows combined hapto-visual rendering [S1].
+*   **Limitations**: Sensitive to point density (leakage); pre-computation can be slow for large grids; limited to regular grid structures [S1].
+*   **When to use**: When rendering haptic feedback for sparse, oriented point clouds where mesh reconstruction is difficult or unnecessary.
+*   **When not to use**: For dense point clouds (other methods may be more efficient) or when high-fidelity visual rendering of complex surfaces is required without haptics.
+
+## Background
+
+*   **Origin**: Proposed in 2013 by researchers publishing in the *International Journal of Computer Applications* [S1].
+*   **History**: The method addresses limitations of dense point cloud methods (like Leeper et al.'s implicit function) and point proxy methods by using a spherical volume proxy defined by a distance field [S1]. It builds on the concept of "augmented point sets" (points with normals) similar to point shells [S1].
+*   **Usage**: Used for haptic rendering of scattered oriented point cloud data and visual rendering of the zero iso-surface for combined hapto-visual experience [S1].
+
+## Sources
+
+[S1] Distance Field based Haptic Rendering of Scattered Oriented Points, https://doi.org/10.5120/9937-4581, fetched 2026-10-26

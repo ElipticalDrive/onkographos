@@ -1,0 +1,116 @@
+# Iterative CT Reconstruction — SART + Total Variation Regularization (C++)
+
+A from-scratch implementation of algebraic/iterative CT reconstruction, built in C++ on top of [Project 1's](../Project_1/ct_reconstruction) filtered back-projection (FBP) pipeline. Implements SART (Simultaneous Algebraic Reconstruction Technique), demonstrates its semi-convergence failure mode on noisy/low-dose data, then fixes it with Total Variation (TV) regularization — the same conceptual mechanism behind Siemens' shipped iterative reconstruction products, SAFIRE and ADMIRE.
+
+## What's here
+
+| Stage | Status |
+|---|---|
+| SART core update (row/col-sum normalization, per-angle forward/back-projection) | ✅ |
+| SART vs. FBP comparison on noisy (low-dose, Poisson) data | ✅ |
+| TV regularization (isotropic, explicit gradient descent) | ✅ |
+| SART+TV vs. plain SART comparison | ✅ |
+| Conceptual tie-back to SAFIRE/ADMIRE | ✅ |
+
+**Result:** on a 128×128 Shepp–Logan phantom, 180 projection angles, simulated low-dose Poisson noise (I₀=1e3), fixed RNG seed for reproducibility:
+
+| Method | NRMSE |
+|---|---|
+| FBP (noisy) | 0.158 |
+| SART (best, sweep 3) | 0.123 — beats FBP, then **degrades** back past FBP by sweep 13 (semi-convergence) |
+| SART + TV (best, sweep 14) | **0.097** — still improving at the last sweep, never degrades |
+
+SART alone outperforms FBP for a handful of sweeps, then degrades as it starts fitting noise instead of structure — a well-known failure mode of unregularized iterative methods called *semi-convergence*. Adding TV regularization breaks that degradation entirely. Reproduce these exact numbers with `cd cpp && make && ./build/iterative_recon`.
+
+![Comparison](figures/comparison.png)
+
+*Top row: ground truth, FBP, SART (15 sweeps), SART+TV (15 sweeps). Middle row: NRMSE vs. sweep for each method (dashed orange = FBP baseline, dotted line = best sweep). Bottom row: each iterative method's best (lowest-NRMSE) reconstruction, labeled with its sweep number.*
+
+## Repo structure
+
+```
+Project_2/
+├── cpp/
+│   ├── include/          # phantom, rotate, forward/back-projection, ramp filter,
+│   │                     # FFT/DFT, validation (reused from Project 1) + sart.h, tv.h, noise.h
+│   ├── src/               # implementations, incl. sart.cpp, tv.cpp, noise.cpp, main.cpp
+│   └── build/
+├── figures/
+│   ├── plot_comparison.py # Python plotting script (reads the .bin dumps below)
+│   ├── *.bin               # raw float64 image/NRMSE-history dumps from the C++ driver
+│   └── comparison.png
+```
+
+## Running it
+
+**C++** (no external dependencies, just a C++17 compiler):
+```bash
+cd cpp
+make
+./build/iterative_recon
+```
+This regenerates the phantom, simulates a low-dose noisy sinogram, runs FBP/SART/SART+TV, prints per-sweep NRMSE to stdout, and writes reconstructions + NRMSE history to `figures/`.
+
+**Visualization** (requires `numpy`, `matplotlib`):
+```bash
+cd figures
+python3 plot_comparison.py
+```
+
+## Why SART, then TV
+
+FBP is a closed-form analytic inversion of the Radon transform — fast and exact in the noiseless, complete-angle limit, but its ramp filter is a high-pass filter that amplifies noise exactly as much as real detail, since mathematically it can't distinguish the two. Algebraic/iterative methods sidestep this by treating reconstruction as solving `Ax = b` rather than inverting anything analytically, which opens up levers FBP doesn't have: weighting unreliable (noisy) rays down, and — the focus of this project — adding a regularization term that encodes a prior about what a good image should look like.
+
+TV was chosen specifically because it penalizes gradient *magnitude* (`|∇x|`) rather than squared gradient (`|∇x|²`, as in Tikhonov/L2 regularization): this suppresses the many small gradients noise creates without heavily punishing the handful of large gradients that correspond to real anatomical edges — matching a CT slice's actual structure of piecewise-smooth regions with sharp boundaries.
+
+## Math
+
+**The linear system.** Reconstruction is treated as solving $Ax = b$: $x$ is the unknown flattened $N \times N$ image, $b$ is the measured sinogram, and $A$ is the (never explicitly built) system matrix, where $A_{ij}$ is pixel $j$'s contribution to ray $i$. $A$ and its transpose $A^T$ are only ever *applied*, via `forward_project` (rotate the image, sum columns) and `back_project` (smear a sinogram row across rows, rotate back).
+
+**SART update**, for a single projection angle $\theta$ with rays indexed $i$ and pixels indexed $j$:
+
+$$
+x_j \leftarrow x_j + \lambda \cdot \frac{\sum_{i \in \theta} w_{ij} \cdot \dfrac{p_i - \sum_k w_{ik} x_k}{\sum_k w_{ik}}}{\sum_{i \in \theta} w_{ij}}
+$$
+
+Implemented per angle as four steps (`sart_iteration` in `sart.cpp`):
+
+$$
+\hat{p} = A_\theta x, \qquad
+r_i = \frac{p_i - \hat{p}_i}{\mathrm{rowsum}_i}, \qquad
+c = A_\theta^T r, \qquad
+x_j \leftarrow x_j + \lambda \cdot \frac{c_j}{\mathrm{colsum}_j}
+$$
+
+where $\mathrm{rowsum}_i = \sum_k w_{ik}$ and $\mathrm{colsum}_j = \sum_i w_{ij}$ are obtained by applying $A_\theta$ and $A_\theta^T$ to all-ones inputs, rather than building $w_{ij}$ explicitly.
+
+**Isotropic TV regularization.** With forward differences $dx_{i,j} = x_{i,j+1} - x_{i,j}$, $dy_{i,j} = x_{i+1,j} - x_{i,j}$, and local gradient magnitude $G_{i,j} = \sqrt{dx_{i,j}^2 + dy_{i,j}^2 + \varepsilon}$:
+
+$$
+\text{TV}(x) = \sum_{i,j} G_{i,j}
+$$
+
+One explicit steepest-descent step (`tv_denoise_step` in `tv.cpp`):
+
+$$
+\nabla_{i,j} = \frac{-dx_{i,j} - dy_{i,j}}{G_{i,j}} + \frac{dx_{i,j-1}}{G_{i,j-1}} + \frac{dy_{i-1,j}}{G_{i-1,j}}, \qquad x_{i,j} \leftarrow x_{i,j} - \alpha \cdot \nabla_{i,j}
+$$
+
+**Evaluation metric** (`compute_nrmse` in `validation.cpp`), after min-max rescaling the reconstruction to the phantom's value range:
+
+$$
+\text{NRMSE} = \frac{\sqrt{\frac{1}{N^2}\sum_{i,j} (\hat{x}_{i,j} - x_{i,j})^2}}{\max(x) - \min(x)}
+$$
+
+## Connection to Siemens SAFIRE/ADMIRE
+
+This project's SART+TV loop is a small, from-scratch version of the same idea behind Siemens' shipped iterative reconstruction products (architecture below is from public documentation, not proprietary detail):
+
+- **SAFIRE** applies statistical (Poisson) noise weighting in the raw sinogram domain — the same physics as this project's `add_poisson_noise` — plus a lighter image-domain edge-preserving regularization pass.
+- **ADMIRE** goes further, building the full acquisition physics (focal spot, detector response, system optics) into the forward model used inside the iterative loop itself — a physically accurate generalization of this project's simplified geometric forward/back-projection operators.
+
+Both exist to solve the same problem demonstrated here: FBP has no mechanism to trade a small amount of resolution for a large reduction in patient radiation dose, while iterative reconstruction does.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

@@ -1,0 +1,127 @@
+--- v002.md
++++ v003.md
+@@ -39,11 +39,9 @@
+     """
+     triangles = []
+-    # Pre-computed LUTs for transition cells
+     lut_9_corner = load_lut_9_corner()  # 512 entries
+     lut_13_corner = load_lut_13_corner()  # 8192 entries
+     
+     for cell in grid_cells:
+-        # Compute scalar values at corners
+-        corner_scalars = [interpolate_scalar(volume_data, corner) for corner in cell.corners]
++        corner_scalars = [volume_data[corner.grid_index] for corner in cell.corners]
+         signs = [1 if s > isovalue else -1 for s in corner_scalars]
+         sign_index = sign_to_index(signs)
+@@ -54,20 +52,13 @@
+             luts_entry = lut_9_corner[sign_index] if cell.type == '9_corner' else lut_13_corner[sign_index]
+             
+-            # Handle 13-corner degeneracy
+             perturbed_corners = cell.corners
+             if cell.type == '13_corner' and is_degenerate(cell):
+                 perturbed_corners = apply_perturbation(cell)
+             
+-            # Compute edge intersections on perturbed geometry
+-            edge_intersections = compute_edge_intersections(perturbed_corners, signs, isovalue)
++            edge_intersections = compute_edge_intersections(perturbed_corners, corner_scalars, isovalue, cell.edges)
+             
+-            # Apply decision tree to determine triangulation
+             triangles.extend(apply_decision_tree(luts_entry, edge_intersections, cell.corners))
+             
+     return triangles
+-
+-def interpolate_scalar(volume_data, corner):
+-    """Returns scalar value at a corner via direct lookup or trilinear interpolation."""
+-    return volume_data[corner.grid_index]
+ 
+ def sign_to_index(signs):
+@@ -79,12 +70,10 @@
+     return index
+ 
+-def compute_edge_intersections(corners, signs, isovalue):
++def compute_edge_intersections(corners, corner_scalars, isovalue, edges):
+     """Computes linear intersections on edges where signs differ."""
+     intersections = []
+-    n = len(corners)
+-    for i in range(n):
+-        j = (i + 1) % n
+-        if signs[i] != signs[j]:
+-            t = (isovalue - corners[i].scalar) / (corners[j].scalar - corners[i].scalar)
++    for i, j in edges:
++        if corner_scalars[i] * corner_scalars[j] <= isovalue * isovalue:
++            t = (isovalue - corner_scalars[i]) / (corner_scalars[j] - corner_scalars[i])
+             intersections.append(interpolate_point(corners[i], corners[j], t))
+     return intersections
+@@ -94,37 +83,12 @@
+     return Point3D(p1.x + t * (p2.x - p1.x), p1.y + t * (p2.y - p1.y), p1.z + t * (p2.z - p1.z))
+ 
+-def is_degenerate(cell):
+-    # [G] Check if the four faces adjacent to the fine cells are co-planar.
+-    # Compute normals for each face; if dot products are ~1.0, they are co-planar.
+-    return False
++# [G] is_degenerate: Check if the four faces adjacent to the fine cells are co-planar.
++# Compute normals for each face; if dot products are ~1.0, they are co-planar.
+ 
+-def apply_perturbation(cell):
+-    # [G] Identify co-planar faces, compute common normal, and shift corners slightly.
+-    return cell.corners
++# [G] apply_perturbation: Identify co-planar faces, compute common normal, and shift corners slightly.
+ 
+-def apply_decision_tree(luts_entry, edge_intersections, unperturbed_corners):
+-    """
+-    Applies pre-computed decision trees to determine triangulation.
+-    The decision tree consists of successive 4-point tests on edge intersections.
+-    Final triangles are mapped to unperturbed geometry.
+-    """
+-    # [G] The LUT entry contains a decision tree of 4-point tests.
+-    # Each test checks if 4 edge intersections form a convex quad.
+-    # We traverse the tree to select triangles, then map coordinates to unperturbed_corners.
+-    triangles = []
+-    # Standard 4-point test traversal (actual tree structure is pre-computed):
+-    for i in range(0, len(edge_intersections) - 2, 2):
+-        p1, p2, p3, p4 = edge_intersections[i], edge_intersections[i+1], edge_intersections[i+2], edge_intersections[i+3]
+-        if is_convex_quad(p1, p2, p3, p4):
+-            triangles.append((p1, p2, p3))
+-            triangles.append((p1, p3, p4))
+-        else:
+-            triangles.append((p1, p2, p4))
+-            triangles.append((p2, p3, p4))
+-    return triangles
+-
+-def is_convex_quad(p1, p2, p3, p4):
+-    # [G] Standard cross-product check for convexity
+-    return True
++# [G] apply_decision_tree: The LUT entry contains a decision tree of 4-point tests.
++# Each test checks if 4 edge intersections form a convex quad.
++# We traverse the tree to select triangles, then map coordinates to unperturbed_corners.
+ ```
+ 
+@@ -138,20 +102,20 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Degeneracy in 13-Corner Cells:** Four co-planar faces in a 13-corner cell can cause the convex hull of the negative space to degenerate onto a plane. This requires perturbation of the cell corners to perform the 4-point tests correctly. The perturbation must be small and perpendicular to the plane to ensure the convex hull structure is preserved, and the final triangulation must be mapped back to the unperturbed geometry to maintain topological consistency [S1].
++*   **Degeneracy in 13-Corner Cells:** Four co-planar faces in a 13-corner cell can cause the convex hull of the negative space to degenerate onto a plane [S1]. This requires perturbation of the cell corners to perform the 4-point tests correctly [S1]. The perturbation must be small and perpendicular to the plane to ensure the convex hull structure is preserved, and the final triangulation must be mapped back to the unperturbed geometry to maintain topological consistency [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The performance is dominated by the processing of regular cells, as the majority of cells in a multi-resolution grid are regular [S1]. Transition cells add overhead due to larger LUTs and more complex topology, but their count is relatively small.
+-*   **Memory Complexity:** Requires storage for LUTs for 9-corner ($2^9$ entries) and 13-corner ($2^{13}$ entries) cells. The size of these LUTs is larger than those for regular cells, but they are pre-computed and static.
++*   **Time Complexity:** The performance is dominated by the processing of regular cells, as the majority of cells in a multi-resolution grid are regular [S1]. Transition cells add overhead due to larger LUTs and more complex topology, but their count is relatively small [S1].
++*   **Memory Complexity:** Requires storage for LUTs for 9-corner ($2^9$ entries) and 13-corner ($2^{13}$ entries) cells [S1]. The size of these LUTs is larger than those for regular cells, but they are pre-computed and static [S1].
+ *   **Measured Performance:** On a Dragon model at $256^3$ resolution:
+     *   Uniform grid: 219ms, 269,392 triangles [S1].
+     *   2-level grid: 109ms, 137,558 triangles [S1].
+     *   3-level grid: 47ms, 50,792 triangles [S1].
+-*   **Strengths:** Significantly reduces triangle count and rendering time compared to uniform contouring while preserving visual details. It allows for interactive navigation if contours on uniform grids are pre-computed and only transition cells are processed in real-time [S1].
+-*   **Limitations:** Performance is still dominated by uniform contouring, limiting the speedup for very high-resolution data. The implementation is more complex due to the need to handle transition cells and perturbations [S1].
+-*   **When to Use:** When interactive rendering of large volumetric datasets is required and the viewer position changes frequently. It is suitable when visual detail can be sacrificed at a distance without noticeable quality loss.
+-*   **When Not to Use:** When the viewer is always close to the object (where uniform resolution is needed) or when the overhead of managing transition cells outweighs the benefits (e.g., very small datasets).
++*   **Strengths:** Significantly reduces triangle count and rendering time compared to uniform contouring while preserving visual details [S1]. It allows for interactive navigation if contours on uniform grids are pre-computed and only transition cells are processed in real-time [S1].
++*   **Limitations:** Performance is still dominated by uniform contouring, limiting the speedup for very high-resolution data [S1]. The implementation is more complex due to the need to handle transition cells and perturbations [S1].
++*   **When to Use:** When interactive rendering of large volumetric datasets is required and the viewer position changes frequently [S1]. It is suitable when visual detail can be sacrificed at a distance without noticeable quality loss [S1].
++*   **When Not to Use:** When the viewer is always close to the object (where uniform resolution is needed) or when the overhead of managing transition cells outweighs the benefits (e.g., very small datasets) [S1].
+ 
+ ## Background
+-Multi-resolution Convex Contouring was introduced by Jutao et al. in the paper "Convex contouring of volumetric data" [S1]. It builds upon the Convex Contouring with Decision Trees method to address the computational cost of rendering high-resolution volumetric data. The method leverages the view-dependent nature of rendering to adapt the grid resolution, providing a balance between performance and visual fidelity.
++Multi-resolution Convex Contouring was introduced by Jutao et al. in the paper "Convex contouring of volumetric data" [S1]. It builds upon the Convex Contouring with Decision Trees method to address the computational cost of rendering high-resolution volumetric data [S1]. The method leverages the view-dependent nature of rendering to adapt the grid resolution, providing a balance between performance and visual fidelity [S1].
+ 
+ ## Sources

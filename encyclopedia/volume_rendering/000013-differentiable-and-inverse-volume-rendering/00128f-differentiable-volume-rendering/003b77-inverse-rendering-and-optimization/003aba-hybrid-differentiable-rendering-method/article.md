@@ -1,0 +1,87 @@
+# Hybrid Differentiable Rendering Method
+
+Also called: Analysis-by-synthesis inverse rendering with SfM/MVS/Poisson initialization
+
+## Overview
+The Hybrid Differentiable Rendering Method is an analysis-by-synthesis inverse rendering technique that reconstructs 3D geometry and physically-based reflectance (PBR) materials from multi-view 2D images captured by conventional hand-held cameras under uncontrolled lighting [S1]. It solves the trade-off between efficiency and visual fidelity by combining approximate differentiable rendering for geometry optimization with physically-based differentiable rendering for reflectance optimization [S1]. Unlike pure approximate methods that yield poor visual effects due to simple material models, or pure physically-based methods that incur high computational costs, this hybrid approach achieves high-quality PBR reconstructions efficiently [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of RGB images captured from multiple viewpoints using conventional hand-held cameras. No additional information (e.g., depth maps) is required [S1].
+*   **Output:** Optimized 3D geometry (mesh) and physically-based reflectance parameters (material properties and environment map) [S1].
+
+**Data Structures:**
+*   **Geometry:** A triangular mesh with vertex positions and vertex colors [S1].
+*   **Lighting:** An environment map representing the lighting source, stored as a learnable parameter [S1].
+*   **Scene Parameters ($\Theta$):** Includes geometry parameters and reflection parameters [S1].
+
+**Initialization Phase:**
+The method begins by generating a rough initial reconstruction using traditional computer vision techniques [S1]:
+1.  **Sparse Reconstruction:** Use Structure-from-Motion (SfM) to generate sparse feature points in each image and match them across images to reconstruct a sparse point cloud and a rough mesh [S1].
+2.  **Dense Matching:** Use Multi-View Stereo (MVS) to generate dense pixel-level matching from the sparse point cloud/rough mesh [S1].
+3.  **Mesh Generation:** Apply Poisson surface reconstruction to the dense matching to obtain a dense mesh with vertex colors derived from the input images [S1].
+4.  **Lighting Initialization:** Initialize the environment map (lighting source) with white light, setting the three channels to $(0.5, 0.5, 0.5)$ [S1]. The environment map resolution is $512 \times 128$ [S1].
+
+**Optimization Phase:**
+The optimization follows an analysis-by-synthesis formulation:
+$$
+\Theta^* = \arg \min_{\Theta} L(I(\Theta), \Theta; \tilde{I})
+$$
+where $\Theta$ represents the scene parameters (geometry and reflection), $L$ is the loss function, $\tilde{I}$ is the ground truth image, and $I(\Theta)$ is the image rendered by the hybrid method using the same camera parameters as $\tilde{I}$ [S1].
+
+The optimization is split into two sequential steps:
+1.  **Geometry Optimization:** Optimize the geometry first using an approximate differentiable rendering method. This method uses simplified rendering processes for efficiency [S1].
+2.  **Reflectance Optimization:** Optimize the reflectance (and environment map) afterward using a physically-based differentiable rendering method. This method uses path tracing to reconstruct high-quality PBR materials [S1].
+
+Both steps iteratively minimize the loss between rendered images and ground truth images for the same camera pose [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybrid_inverse_rendering(input_images, camera_poses):
+    # Initialization Phase
+    # Step 1: SfM for sparse reconstruction
+    sparse_cloud, rough_mesh = structure_from_motion(input_images, camera_poses)
+    
+    # Step 2: MVS for dense matching
+    dense_matching = multi_view_stereo(sparse_cloud, input_images, camera_poses)
+    
+    # Step 3: Poisson Surface Reconstruction for dense mesh
+    mesh = poisson_surface_reconstruction(dense_matching)
+    
+    # Initialize lighting
+    environment_map = initialize_environment_map(resolution=(512, 128), value=(0.5, 0.5, 0.5))
+    
+    # Optimization Phase
+    # Step 4: Optimize Geometry
+    # Use approximate differentiable renderer
+    mesh = optimize_geometry(mesh, input_images, camera_poses, 
+                             renderer=approximate_differentiable_renderer, 
+                             loss_function=loss)
+    
+    # Step 5: Optimize Reflectance and Lighting
+    # Use physically-based differentiable renderer
+    mesh, environment_map = optimize_reflectance(mesh, environment_map, input_images, camera_poses,
+                                                renderer=physically_based_differentiable_renderer,
+                                                loss_function=loss)
+    
+    return mesh, environment_map
+```
+
+**Edge Cases and Pitfalls:**
+*   The method assumes the input images are captured by conventional hand-held cameras and do not contain additional information like depth [S1].
+*   The initialization relies on the success of SfM and MVS; failure in feature matching or dense reconstruction will propagate errors [S1].
+*   The environment map is a learnable parameter, so its initialization affects the convergence of the reflectance optimization [S1].
+
+## Operating characteristics
+*   **Efficiency:** The hybrid approach combines the efficiency of approximate methods with the quality of physically-based methods [S1]. Approximate methods are efficient but have simple material models, while physically-based methods are high-quality but computationally expensive [S1].
+*   **Quality:** The method produces reconstructions with similar or higher quality than state-of-the-art methods [S1].
+*   **Computational Cost:** While more efficient than pure physically-based methods, it is still resource-consuming compared to pure approximate methods [S1].
+*   **Use Cases:** Virtual reality, augmented reality, novel view synthesis, and relighting [S1].
+
+## Background
+Inverse rendering, which recovers 3D geometry, reflection properties, and illumination from 2D images, is a long-standing and challenging problem in computer graphics and vision [S1]. The development of multi-view inverse rendering tasks using triangular meshes as geometry representation has been promoted by the ability to back-propagate image loss along the rendering pipeline [S1]. Previous methods include approximate differentiable rendering methods [Loper and Black, 2014; Kato et al., 2018; Liu et al., 2019; Chen et al., 2019] and physically-based differentiable rendering methods [Li et al., 2018a; Li et al., 2021] [S1]. The hybrid method was introduced to address the limitations of both approaches [S1].
+
+## Sources
+[S1] Efficient Multi-View Inverse Rendering Using a Hybrid Differentiable Rendering Method, https://doi.org/10.24963/ijcai.2023/205, fetched 2026-10-26

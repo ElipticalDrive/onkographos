@@ -1,0 +1,272 @@
+Experimental PlayStation Vita emulator. Contribute to Vita3K/Vita3K development by creating an account on GitHub.
+
+renderer/vulkan: Emulate the GXM mask bit, make the region clip tile-granular by frangarcj · Pull Request #4175 · Vita3K/Vita3K · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+frangarcj
+commented
+Sep 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+This PR emulates the GXM mask bit in the Vulkan renderer, then makes the region clip tile-granular as on hardware. The second change depends on the first.
+Mask bit (first commit)
+Mask update fragment programs (sceGxmShaderPatcherCreateMaskUpdateFragmentProgram) write a per-pixel mask: 1 with the front stencil function ALWAYS, 0 with NEVER. Later draws only keep fragments where the mask is 1. Each scene starts from the depth-stencil surface's background mask. vitaGL builds glScissor on it, and some homebrew call it directly.
+Until now Vulkan compiled mask update programs as normal shaders. Their 0/1 output went into the colour surface and nothing was masked. One visible effect: vitaGL's mask pass at the start of each scene painted over its glClear.
+How it works:
+Storage: the mask is a second R8 colour attachment.
+Mask updates write it, with depth/stencil tests off and the colour attachment untouched.
+The other fragment shaders read it as input attachment 1 and discard where it is 0, before writing anything.
+No cost for games that never use the mask:
+The test sits behind a specialization constant. It turns on at the first mask update of a scene, and it is part of the pipeline key.
+The attachment is DONT_CARE until a render target uses the mask.
+Initialisation: the mask is cleared to the background mask in the pre-render command buffer, so the clear runs before the scene's draws.
+Visibility: the first draw that tests the mask after mask updates starts a new render pass.
+An in-pass barrier (ColorAttachmentWrite → InputAttachmentRead, by region) is valid Vulkan, but MoltenVK still returns the value loaded at the start of the pass. That is what I observed: writes only became visible after restarting the pass.
+The restart keeps the depth-stencil. Render targets that use the mask store it from then on.
+Shared fixes:
+Stencil functions set while a mask update program is bound now reach the stencil state. Before, they were dropped, and since SceGxm only resends changed values, the next draws kept a stale state.
+Vertex shaders are never compiled as mask updates.
+The mask update fragment stage is no longer dropped for having no colour output.
+The mask discard now runs before the colour is written, including the shader interlock storage write.
+Not covered: shader interlock (high accuracy). Its render pass has no colour attachment, so the mask is not emulated there (a warning is logged).
+Tile-granular region clip (second commit)
+GXM region clipping works on whole 32×32 tiles:
+OUTSIDE keeps every tile the region touches;
+INSIDE drops them.
+Both backends clipped at pixel precision, and INSIDE was a stub. The pixel-precise clip used to hide the missing mask, because vitaGL's glScissor relies on the mask for the pixels between the scissor edge and the tile edge. With the mask emulated, the clip can follow the hardware. INSIDE is drawn once per band around the dropped tiles, at most four scissors.
+Testing (macOS, Apple M1, MoltenVK)
+Raw GXM probe. It uses sceGxmShaderPatcherCreateMaskUpdateFragmentProgram with rectangles deliberately misaligned against the 32×32 tiles, and checks sample points just inside the edge, just outside it within the same tile, and far away:
+test
+before
+after
+no mask update: fill everywhere
+fails (screen painted white)
+ok
+mask 0 on the panel, 1 on a rectangle: only the rectangle, pixel-exact
+fails
+ok
+mask 0 on a rectangle: everything but the rectangle
+fails
+ok
+mask restored to 1: fill everywhere
+fails
+ok
+mask set to 0, then a new scene: filled again (background mask)
+fails
+ok
+region clip OUTSIDE: whole tiles around the region
+pixel-exact before the second commit
+ok
+region clip INSIDE: panel minus those tiles
+stub
+ok
+vitaGL-style mask plus region clip: exactly the rectangle
+fails
+ok
+depth written, mask update, then EQUAL at the same depth: depth survives the render pass restart
+—
+ok
+fragments removed by the mask do not write depth
+—
+ok
+vitaGL probe. glScissor misaligned against the tiles now clips pixel-exact.
+Real homebrew. A vitaGL arcade emulator renders correctly, and its glClear is visible again. The same app's raw GXM path, which uses no mask, is unchanged.
+Not tested:
+OpenGL renderer: on macOS Vita3K always runs Vulkan, and I could not run GL. The GL renderer already emulates the mask. It is affected by the shared stencil and recompiler changes above, which I believe are correct there too, but a run on Linux or Windows would be welcome.
+Real hardware: the semantics come from the SDK and from how vitaGL uses the API. The SDK's DF32M formats reserve "one bit for mask update", and sceGxmDepthStencilSurfaceSetBackgroundMask sets its initial value. The probes write their results to a file on a real Vita; I can share them.
+🤖 Generated with Claude Code
+frangarcj
+and others
+added 2 commits
+September 27, 2026 23:45
+renderer/vulkan: Emulate the GXM mask bit
+…
+ab2dfbf
+```
+Mask update fragment programs (sceGxmShaderPatcherCreateMaskUpdateFragmentProgram)
+write a per-pixel mask, 1 with the front stencil function ALWAYS and 0 with
+NEVER, and the fragments of the following draws are only kept where the mask
+is 1. Each scene starts from the background mask of the depth-stencil surface.
+vitaGL relies on it for pixel-exact glScissor, on top of the tile-granular
+region clip.
+
+The Vulkan renderer compiled mask update programs as normal shaders, so their
+0/1 value was written into the color surface (hiding for instance vitaGL's
+glClear), and nothing was masked.
+
+- The mask is a second color attachment (R8) of the render pass: mask updates
+  write it with depth/stencil tests off and the color attachment untouched,
+  the other fragment shaders read it as input attachment 1 and discard where
+  it is 0, before writing anything.
+- The test is behind a specialization constant enabled from the first mask
+  update of a scene (part of the pipeline key), and the attachment is only
+  loaded and stored for render targets that use the mask, so other games
+  keep their pipelines and bandwidth.
+- The mask is cleared to the background mask before the scene draws, in the
+  pre-render command buffer.
+- A draw testing the mask after mask updates starts a new render pass: a
+  barrier inside the render pass does not make attachment writes visible to
+  input attachment reads on MoltenVK. The depth-stencil is kept, and render
+  targets using the mask store it from then on.
+- Stencil functions set while the mask update program is bound now reach the
+  stencil state (they were dropped, leaving the next draws with a stale one),
+  vertex shaders are never compiled as mask updates, and the mask update
+  fragment stage is not dropped for having no color output.
+
+Not emulated with shader interlock, whose render pass has no color attachment.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+renderer: Make the region clip tile-granular, implement REGION_CLIP_I…
+…
+e671bbd
+```
+…NSIDE
+
+GXM region clipping works on whole 32x32 tiles: OUTSIDE keeps every tile
+touched by the region and INSIDE drops them. Both backends clipped at pixel
+precision, and INSIDE was a stub that clipped nothing.
+
+The pixel-precise clip hid the missing mask emulation: vitaGL builds
+glScissor from a tile-granular region clip plus a mask update, and relies on
+the mask for the pixels between the scissor and the tile edges. With the mask
+emulated, the region clip can follow the hardware.
+
+Snap the region to tiles for OUTSIDE, and implement INSIDE by issuing the
+draw once per band around the dropped tiles (at most four scissors).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+github-actions
+Bot
+added
+renderer
+Rendering related
+shader
+vulkan
+opengl
+labels
+Sep 27, 2026
+nishinji
+requested a balanced review from Copilot
+October 3, 2026 00:24
+Copilot started reviewing on behalf of
+nishinji
+October 3, 2026 00:24
+View session
+Copilot
+AI
+reviewed
+Oct 3, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot review overview
+🟡 Changes recommended
+Descriptor allocation, first-use depth preservation, and exact tile-boundary clipping have correctness issues.
+Review effort: Balanced
+Findings: 1 · 2
+Open (3)
+Duplicate input-attachment descriptor pool entries · New
+Tile-boundary region maximum is calculated incorrectly · New
+Mask restart can discard prior depth/stencil writes · New
+What changed in this PR
+Adds Vulkan GXM mask-bit emulation and tile-granular region clipping across both renderers.
+Changes:
+Adds a Vulkan mask attachment, shader testing, synchronization, and render-pass lifecycle.
+Implements tile-based OUTSIDE and INSIDE region clipping.
+Corrects mask-update shader and stencil-state handling.
+File
+Description
+vita3k/​shader/​src/​spirv_recompiler.cpp
+Generates mask attachment reads and writes.
+vita3k/​shader/​include/​shader/​usse_translator_types.h
+Tracks the mask specialization constant.
+vita3k/​shader/​include/​shader/​spirv_recompiler.h
+Defines mask specialization metadata.
+vita3k/​renderer/​src/​vulkan/​sync_state.cpp
+Applies tile-granular Vulkan clipping.
+vita3k/​renderer/​src/​vulkan/​surface_cache.cpp
+Adds mask views to framebuffers.
+vita3k/​renderer/​src/​vulkan/​scene.cpp
+Coordinates mask draws and inside clipping.
+vita3k/​renderer/​src/​vulkan/​renderer.cpp
+Enables mask support and cache features.
+vita3k/​renderer/​src/​vulkan/​pipeline_cache.cpp
+Creates mask-aware pipelines and render passes.
+vita3k/​renderer/​src/​vulkan/​creation.cpp
+Allocates mask images.
+vita3k/​renderer/​src/​vulkan/​context.cpp
+Initializes and synchronizes scene masks.
+vita3k/​renderer/​src/​state_set.cpp
+Preserves stencil state for mask updates.
+vita3k/​renderer/​src/​gl/​sync_state.cpp
+Applies tile-granular OpenGL clipping.
+vita3k/​renderer/​src/​gl/​draw.cpp
+Implements OpenGL inside clipping bands.
+vita3k/​renderer/​include/​renderer/​vulkan/​types.h
+Adds Vulkan mask state.
+vita3k/​renderer/​include/​renderer/​vulkan/​surface_cache.h
+Extends framebuffer cache keys.
+vita3k/​renderer/​include/​renderer/​vulkan/​pipeline_cache.h
+Extends render-pass and shader APIs.
+vita3k/​renderer/​include/​renderer/​types.h
+Tracks whether shaders read the mask.
+vita3k/​renderer/​include/​renderer/​gxm_types.h
+Defines tile-bound calculations.
+💡 Add a code-review agent skill or configure MCP servers for context-aware, tailored reviews. Learn more in the docs.
+Comment thread
+vita3k/renderer/src/vulkan/context.cpp
+Comment on lines
++301
+to
++305
+std::array<vk::DescriptorPoolSize, 2> pool_sizes{ {
+{
+.type = state.features.support_shader_interlock ? vk::DescriptorType::eStorageImage : vk::DescriptorType::eInputAttachment,
+.descriptorCount = DESCRIPTOR_PACK_SIZE * MAX_FRAMES_RENDERING,
+},
+Comment thread
+vita3k/renderer/include/renderer/gxm_types.h
+Comment on lines
++409
+to
++410
+((max.x >> tile_shift) + 1) << tile_shift,
+((max.y >> tile_shift) + 1) << tile_shift,
+Comment thread
+vita3k/renderer/src/vulkan/context.cpp
+Comment on lines
++484
+to
++486
+if (!current_pass_stores_ds)
+LOG_WARN_ONCE("First mask use of a render target after depth-stencil use, the depth-stencil is lost for this scene");
+current_render_pass = state.pipeline_cache.retrieve_render_pass(current_color_format, true, true, !record.color_surface.data, false, true);
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+opengl
+renderer
+Rendering related
+shader
+vulkan
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

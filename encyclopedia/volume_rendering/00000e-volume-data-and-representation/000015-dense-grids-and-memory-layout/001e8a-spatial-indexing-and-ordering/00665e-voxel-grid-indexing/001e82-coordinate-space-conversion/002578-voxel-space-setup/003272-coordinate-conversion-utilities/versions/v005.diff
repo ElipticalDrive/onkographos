@@ -1,0 +1,326 @@
+--- v004.md
++++ v005.md
+@@ -4,152 +4,195 @@
+ 
+ ## Overview
+-Coordinate Conversion Utilities provide the mathematical primitives for mapping between world-space positions, global voxel indices, and local chunk-relative coordinates in a voxel grid [S1, S2, unofficial]. They solve the problem of addressing data stored in spatially partitioned chunks by translating continuous world coordinates into discrete integer grid indices [S1, S2, unofficial]. Unlike [Spherical Voxel Grid Setup](3883-spherical-voxel-grid-setup.md) which handles angular domains, or [Incremental Back-Rotation for Voxel Mapping](6759-incremental-back-rotation-for-voxel-mapping.md) which handles orientation, these utilities assume an axis-aligned Cartesian grid [S1, S2, unofficial]. They differ from [Voxel Center Precomputation](10731-voxel-center-precomputation.md) by operating on indices rather than pre-calculated floating-point centers, and from [PixelGrid2D Construction](9430-pixelgrid2d-construction.md) by maintaining 3D spatial hierarchy rather than flattening to 2D [S1, S2, unofficial].
++Coordinate Conversion Utilities provide the mathematical and algorithmic primitives for mapping positions between world space, chunk space, and local voxel space within a hierarchical voxel grid system. They solve the problem of efficiently addressing volumetric data stored in discrete chunks by handling the translation of continuous world coordinates into discrete integer indices, while managing boundary conditions such as negative coordinates and chunk alignment. What sets these utilities apart from [Spherical Voxel Grid Setup](3883-spherical-voxel-grid-setup.md) is their reliance on Cartesian grid topology rather than spherical harmonics or polar coordinates, and from [Incremental Back-Rotation for Voxel Mapping](6759-incremental-back-rotation-for-voxel-mapping.md) by operating on static axis-aligned bounding boxes rather than dynamic camera-relative rotations.
+ 
+ ## How it works
+-The method consists of two primary conversion paths: World-to-Voxel (including chunking) and Local-to-Global. The inputs are a world-space position vector $\mathbf{P}_{world} = (x, y, z)$, a chunk size $C$, and a voxel size $V$. The outputs are global voxel coordinates $\mathbf{I}_{global} = (i, j, k)$, chunk coordinates $\mathbf{C}_{idx} = (c_x, c_y, c_z)$, and local voxel coordinates $\mathbf{L} = (l_x, l_y, l_z)$.
++The core functionality involves bidirectional conversion between world-space positions and voxel indices, often mediated by a chunking layer to support sparse or large-scale worlds. The implementation relies on floor division for coordinate-to-index mapping and modulo arithmetic for localizing coordinates within chunks.
++
++### Inputs and Outputs
++*   **Inputs:**
++    *   `WorldPos`: A 3D vector $(x, y, z)$ in continuous world units.
++    *   `VoxelSize`: The physical size of a single voxel (scalar or vector).
++    *   `ChunkSize`: The number of voxels along one axis in a chunk (scalar).
++    *   `ChunkCoord`: The integer coordinates of the chunk containing the point.
++    *   `LocalPos`: A 3D vector of integer voxel indices relative to the chunk origin.
++*   **Outputs:**
++    *   `ChunkCoord`: Integer 3D vector identifying the chunk.
++    *   `GlobalVoxelCoord`: Integer 3D vector identifying the voxel in the global grid.
++    *   `LocalVoxelCoord`: Integer 3D vector identifying the voxel within the chunk.
++    *   `WorldPos`: Continuous 3D vector reconstructed from voxel indices.
+ 
+ ### Data Structures
+-*   **World Position**: Floating-point vector $(x, y, z)$.
+-*   **Chunk Size**: Integer $C$ (typically a power of 2, e.g., 16 or 32) [S2, unofficial].
+-*   **Voxel Size**: Floating-point $V$ (world units per voxel) [S2, unofficial].
+-*   **Global Voxel Coordinate**: Integer vector $(i, j, k)$ [S2, unofficial].
+-*   **Local Voxel Coordinate**: Integer vector $(l_x, l_y, l_z)$ within $[0, C-1]$ [S2, unofficial].
+-
+-### Step 1: World to Global Voxel Coordinates
+-Convert world position to global voxel index using floor division.
+-$$ i = \lfloor x / V \rfloor $$
+-$$ j = \lfloor y / V \rfloor $$
+-$$ k = \lfloor z / V \rfloor $$
+-[G] If the world origin is not at $(0,0,0)$, subtract the world origin offset from $x, y, z$ before division.
+-
+-### Step 2: Global Voxel to Chunk and Local Coordinates
+-Determine which chunk contains the voxel and the position within that chunk.
+-$$ c_x = \lfloor i / C \rfloor $$
+-$$ c_y = \lfloor j / C \rfloor $$
+-$$ c_z = \lfloor k / C \rfloor $$
+-$$ l_x = i \pmod C $$
+-$$ l_y = j \pmod C $$
+-$$ l_z = k \pmod C $$
+-
+-**Handling Negative Coordinates**:
+-In many implementations, the modulo operator returns negative values for negative operands. To ensure local coordinates are always positive (within $[0, C-1]$), apply the following correction [S2, unofficial]:
+-If $l_x < 0$, then $l_x = l_x + C$.
+-If $l_y < 0$, then $l_y = l_y + C$.
+-If $l_z < 0$, then $l_z = l_z + C$.
+-
+-### Step 3: Local to Global Voxel Coordinates
+-Reconstruct global coordinates from chunk and local indices.
+-$$ i = c_x \times C + l_x $$
+-$$ j = c_y \times C + l_y $$
+-$$ k = c_z \times C + l_z $$
++*   **FIntVector / VoxelCoord:** A 3-element integer vector $(X, Y, Z)$.
++*   **FVector / WorldPos:** A 3-element floating-point vector $(x, y, z)$.
++*   **CoordinateSystem Enum:** A 32-bit unsigned integer (`uint32_t`) encoding axis directions and orientations [S4, unofficial].
++
++### Numbered Steps
++
++#### 1. World to Global Voxel Coordinates
++Convert a continuous world position to a global integer voxel index.
++1.  Normalize the world position by the voxel size: $V = \frac{WorldPos}{VoxelSize}$.
++2.  Apply floor division to obtain integer indices:
++    $$GlobalVoxelCoord.X = \lfloor V.X \rfloor$$
++    $$GlobalVoxelCoord.Y = \lfloor V.Y \rfloor$$
++    $$GlobalVoxelCoord.Z = \lfloor V.Z \rfloor$$
++    [S2, unofficial]
++
++#### 2. Global Voxel to Chunk and Local Coordinates
++Decompose the global voxel index into chunk and local components.
++1.  Calculate Chunk Coordinates using floor division:
++    $$ChunkCoord.X = \lfloor \frac{GlobalVoxelCoord.X}{ChunkSize} \rfloor$$
++    $$ChunkCoord.Y = \lfloor \frac{GlobalVoxelCoord.Y}{ChunkSize} \rfloor$$
++    $$ChunkCoord.Z = \lfloor \frac{GlobalVoxelCoord.Z}{ChunkSize} \rfloor$$
++    [S2, unofficial]
++2.  Calculate Local Voxel Coordinates using modulo arithmetic. To handle negative coordinates correctly (ensuring the result is always positive within the chunk range $[0, ChunkSize-1]$):
++    $$LocalPos.X = GlobalVoxelCoord.X \pmod{ChunkSize}$$
++    $$LocalPos.Y = GlobalVoxelCoord.Y \pmod{ChunkSize}$$
++    $$LocalPos.Z = GlobalVoxelCoord.Z \pmod{ChunkSize}$$
++    If $LocalPos.X < 0$, then $LocalPos.X \leftarrow LocalPos.X + ChunkSize$.
++    If $LocalPos.Y < 0$, then $LocalPos.Y \leftarrow LocalPos.Y + ChunkSize$.
++    If $LocalPos.Z < 0$, then $LocalPos.Z \leftarrow LocalPos.Z + ChunkSize$.
++    [S2, unofficial]
++
++#### 3. Local Voxel to Global Voxel Coordinates
++Reconstruct the global index from chunk and local components.
++1.  Calculate the global index:
++    $$GlobalVoxelCoord.X = ChunkCoord.X \times ChunkSize + LocalPos.X$$
++    $$GlobalVoxelCoord.Y = ChunkCoord.Y \times ChunkSize + LocalPos.Y$$
++    $$GlobalVoxelCoord.Z = ChunkCoord.Z \times ChunkSize + LocalPos.Z$$
++    [S2, unofficial]
++
++#### 4. Local Voxel to World Position
++Convert a local voxel index (and its chunk) back to a continuous world position, typically representing the voxel center.
++1.  Calculate the chunk's world-space origin (minimum corner):
++    $$ChunkOrigin.X = ChunkCoord.X \times ChunkSize \times VoxelSize$$
++    $$ChunkOrigin.Y = ChunkCoord.Y \times ChunkSize \times VoxelSize$$
++    $$ChunkOrigin.Z = ChunkCoord.Z \times ChunkSize \times VoxelSize$$
++    [S2, unofficial]
++2.  Calculate the voxel's offset within the chunk:
++    $$VoxelOffset.X = LocalPos.X \times VoxelSize$$
++    $$VoxelOffset.Y = LocalPos.Y \times VoxelSize$$
++    $$VoxelOffset.Z = LocalPos.Z \times VoxelSize$$
++    [S2, unofficial]
++3.  Add half a voxel size to center the coordinate:
++    $$WorldPos.X = ChunkOrigin.X + VoxelOffset.X + \frac{VoxelSize}{2}$$
++    $$WorldPos.Y = ChunkOrigin.Y + VoxelOffset.Y + \frac{VoxelSize}{2}$$
++    $$WorldPos.Z = ChunkOrigin.Z + VoxelOffset.Z + \frac{VoxelSize}{2}$$
++    [S2, unofficial]
+ 
+ ### Pseudocode
++
+ ```python
+-def world_to_global_voxel(world_pos, voxel_size):
+-    """
+-    Converts world-space position to global voxel coordinates.
+-    :param world_pos: tuple (x, y, z)
+-    :param voxel_size: float
+-    :return: tuple (i, j, k)
+-    """
+-    x, y, z = world_pos
+-    i = int(x // voxel_size)
+-    j = int(y // voxel_size)
+-    k = int(z // voxel_size)
+-    return (i, j, k)
+-
+-def global_voxel_to_chunk_and_local(global_voxel, chunk_size):
+-    """
+-    Converts global voxel coordinates to chunk index and local voxel coordinates.
+-    :param global_voxel: tuple (i, j, k)
+-    :param chunk_size: int
+-    :return: tuple (chunk_idx, local_voxel)
+-    """
+-    i, j, k = global_voxel
+-    
+-    # Calculate chunk indices
+-    cx = i // chunk_size
+-    cy = j // chunk_size
+-    cz = k // chunk_size
+-    
+-    # Calculate local indices with modulo
+-    lx = i % chunk_size
+-    ly = j % chunk_size
+-    lz = k % chunk_size
+-    
+-    # Handle negative modulo results
+-    if lx < 0:
+-        lx += chunk_size
+-    if ly < 0:
+-        ly += chunk_size
+-    if lz < 0:
+-        lz += chunk_size
++def world_to_global_voxel(world_pos: Vector3, voxel_size: float) -> IntVector3:
++    """
++    Converts a continuous world position to global integer voxel coordinates.
++    """
++    # Normalize by voxel size
++    normalized_x = world_pos.x / voxel_size
++    normalized_y = world_pos.y / voxel_size
++    normalized_z = world_pos.z / voxel_size
++    
++    # Floor division to get integer indices
++    return IntVector3(
++        floor(normalized_x),
++        floor(normalized_y),
++        floor(normalized_z)
++    )
++
++def global_voxel_to_chunk_and_local(global_voxel: IntVector3, chunk_size: int) -> Tuple[IntVector3, IntVector3]:
++    """
++    Decomposes a global voxel index into chunk coordinates and local voxel coordinates.
++    Handles negative coordinates by adjusting the modulo result.
++    """
++    # Calculate chunk coordinates
++    chunk_x = floor(global_voxel.x / chunk_size)
++    chunk_y = floor(global_voxel.y / chunk_size)
++    chunk_z = floor(global_voxel.z / chunk_size)
++    
++    # Calculate local coordinates using modulo
++    local_x = global_voxel.x % chunk_size
++    local_y = global_voxel.y % chunk_size
++    local_z = global_voxel.z % chunk_size
++    
++    # Handle negative modulo results (e.g., -1 % 8 = -1 in Python/C++, but we want 7)
++    if local_x < 0:
++        local_x += chunk_size
++    if local_y < 0:
++        local_y += chunk_size
++    if local_z < 0:
++        local_z += chunk_size
+         
+-    chunk_idx = (cx, cy, cz)
+-    local_voxel = (lx, ly, lz)
+-    
+-    return chunk_idx, local_voxel
+-
+-def local_to_global_voxel(chunk_idx, local_voxel, chunk_size):
+-    """
+-    Converts chunk index and local voxel coordinates to global voxel coordinates.
+-    :param chunk_idx: tuple (cx, cy, cz)
+-    :param local_voxel: tuple (lx, ly, lz)
+-    :param chunk_size: int
+-    :return: tuple (i, j, k)
+-    """
+-    cx, cy, cz = chunk_idx
+-    lx, ly, lz = local_voxel
+-    
+-    i = cx * chunk_size + lx
+-    j = cy * chunk_size + ly
+-    k = cz * chunk_size + lz
+-    
+-    return (i, j, k)
+-
+-def world_to_local_voxel(world_pos, voxel_size, chunk_size):
+-    """
+-    Convenience function: World -> Global -> Chunk + Local.
+-    :param world_pos: tuple (x, y, z)
+-    :param voxel_size: float
+-    :param chunk_size: int
+-    :return: tuple (chunk_idx, local_voxel)
+-    """
+-    global_v = world_to_global_voxel(world_pos, voxel_size)
+-    return global_voxel_to_chunk_and_local(global_v, chunk_size)
++    return (IntVector3(chunk_x, chunk_y, chunk_z), IntVector3(local_x, local_y, local_z))
++
++def local_voxel_to_global(chunk_coord: IntVector3, local_pos: IntVector3, chunk_size: int) -> IntVector3:
++    """
++    Reconstructs global voxel coordinates from chunk and local indices.
++    """
++    return IntVector3(
++        chunk_coord.x * chunk_size + local_pos.x,
++        chunk_coord.y * chunk_size + local_pos.y,
++        chunk_coord.z * chunk_size + local_pos.z
++    )
++
++def local_voxel_to_world(chunk_coord: IntVector3, local_pos: IntVector3, chunk_size: int, voxel_size: float) -> Vector3:
++    """
++    Converts local voxel coordinates to world-space position (voxel center).
++    """
++    # Calculate chunk origin (minimum corner)
++    chunk_origin_x = chunk_coord.x * chunk_size * voxel_size
++    chunk_origin_y = chunk_coord.y * chunk_size * voxel_size
++    chunk_origin_z = chunk_coord.z * chunk_size * voxel_size
++    
++    # Calculate voxel offset
++    voxel_offset_x = local_pos.x * voxel_size
++    voxel_offset_y = local_pos.y * voxel_size
++    voxel_offset_z = local_pos.z * voxel_size
++    
++    # Add half voxel size to center
++    return Vector3(
++        chunk_origin_x + voxel_offset_x + voxel_size / 2.0,
++        chunk_origin_y + voxel_offset_y + voxel_size / 2.0,
++        chunk_origin_z + voxel_offset_z + voxel_size / 2.0
++    )
+ ```
+ 
++### Parameters and Typical Values
++*   **VoxelSize:** Typically $1.0$ unit in world space, but varies by scene scale.
++*   **ChunkSize:** Commonly powers of 2 (e.g., 16, 32, 64) to optimize bitwise operations for division and modulo, though not strictly required by the formulas above.
++*   **CoordinateSystem Enum:** 16 valid values (1-16) representing axis directions. Bit 0: Left(0)/Right(1). Bit 1: Down(0)/Up(1). Bit 2: Back(0)/Front(1). Value 0 is UNSPECIFIED. Examples: LDB=1, RDB=2, LUB=3, RUB=4, LDF=5, RDF=6, LUF=7, RUF=8, LFD=9, RFD=10, LFU=11, RFU=12, LBD=13, RBD=14, LBU=15, RBU=16 [S4, unofficial].
++
+ ### Edge Cases and Pitfalls
+-*   **Negative Coordinates**: Standard integer division and modulo behavior varies by language. In Python, `-5 % 16` is `11`, but in C++/Java, `-5 % 16` is `-5`. The correction step (adding chunk size) is mandatory for C-style languages [S2, unofficial].
+-*   **Boundary Precision**: Floating-point division can suffer from precision errors near chunk boundaries. Using `floor` or integer division on scaled coordinates is preferred over `round` to avoid jitter [S2, unofficial].
+-*   **Chunk Size Alignment**: Chunk size $C$ is typically a power of 2 to allow bitwise optimization ($i \& (C-1)$ for modulo, $i >> \log_2 C$ for division) [S2, unofficial].
++*   **Negative Coordinates:** Standard modulo operators in many languages (C++, Python) return negative results for negative operands. The algorithm must explicitly add `ChunkSize` to negative local coordinates to ensure they fall within $[0, ChunkSize-1]$ [S2, unofficial].
++*   **Precision Loss:** Converting from world space to voxel space and back introduces quantization error. The reconstructed world position will be the center of the voxel, not the original input point.
++*   **Boundary Conditions:** Points exactly on chunk boundaries or voxel edges must be handled consistently with the floor function to ensure adjacent voxels/chunks do not overlap or leave gaps.
+ 
+ ## Subtopics
+ 
+ ### [Sliced Volume Coordinate Mapping](8287-sliced-volume-coordinate-mapping.md)
+-Sliced Volume Coordinate Mapping converts 3D voxel coordinates into 2D texture coordinates for volumetric data stored as a tiled grid of 2D slices within a single 2D image. It solves the problem of accessing 3D volumetric data in raster-based renderers that lack native 3D texture sampling support by flattening the volume into a 2D layout. It differs from standard 3D texture sampling by requiring explicit coordinate transformation logic to resolve 3D positions to 2D image pixels, and it uses linear interpolation between adjacent slices to reduce banding artifacts compared to nearest-neighbor sampling.
++Sliced Volume Coordinate Mapping converts 3D voxel coordinates into 2D texture coordinates for volumetric data stored as a tiled grid of 2D slices within a single 2D image. This technique enables GPU texture sampling of 3D data using standard 2D texture units, which is necessary when hardware 3D texture support is unavailable or inefficient. It differs from standard 3D texture sampling by flattening the volume into a 2D grid of slices, requiring specific coordinate mapping logic to resolve 3D coordinates to 2D image pixels.
+ 
+ ### [Voxel Index Computation](11238-voxel-index-computation.md)
+-Voxel Index Computation computes discrete voxel indices for a batch of 3D points by mapping their continuous coordinates into a structured grid defined by bounding boxes and voxel dimensions. It differs from [Sliced Volume Coordinate Mapping](8287-sliced-volume-coordinate-mapping.md) by operating on a unified 3D grid structure rather than slicing the volume into 2D planes, making it suitable for dense volumetric queries and ray marching initialization.
++Computes discrete voxel indices for a batch of 3D points by mapping their continuous coordinates into a structured grid defined by bounding boxes and voxel dimensions. It differs from [Sliced Volume Coordinate Mapping](8287-sliced-volume-coordinate-mapping.md) by operating on a unified 3D grid structure rather than slicing the volume into 2D planes, making it suitable for dense volumetric queries and ray marching initialization.
++
++### [Metric Coordinate Conversion](12960-metric-coordinate-conversion.md)
++Metric Coordinate Conversion decomposes a continuous world-space position into a discrete integer component (whole meters) and a continuous fractional component (sub-meter precision). This decomposition enables efficient spatial indexing and caching in voxel-based rendering systems by separating coarse grid alignment from fine-grained sampling offsets. It differs from [Sliced Volume Coordinate Mapping](8287-sliced-volume-coordinate-mapping.md) by operating on absolute metric units rather than slice indices, and from [Voxel Index Computation](11238-voxel-index-computation.md) by preserving sub-voxel precision rather than truncating to integer voxel coordinates.
+ 
+ ### Adaptive Coordinate Conversion
+-Adaptive Coordinate Conversion is a technique used by Lim et al. to visualize 3D ultrasound datasets, where points within the native pyramidal ultrasound coordinate system were adaptively converted on the fly to a Cartesian grid [S3]. This allows GPU-based raycasting to process non-Cartesian data formats without pre-resampling the entire dataset, adapting the conversion dynamically during rendering [S3].
++A technique used by Lim et al. to visualize 3D ultrasound datasets, where points within the native pyramidal ultrasound coordinate system were adaptively converted on the fly to a Cartesian grid [S3]. This allows for real-time visualization of non-Cartesian data sources without pre-processing the entire dataset into a regular grid.
+ 
+ ### Coordinate System Bit Encoding
+-Coordinate System Bit Encoding defines a `uint32_t` enum with 16 valid values (1-16) representing axis directions for coordinate system alignment [S4, unofficial]. The encoding uses 3 bits for axis direction: Bit 0: Left(0)/Right(1); Bit 1: Down(0)/Up(1); Bit 2: Back(0)/Front(1). Value 0 is UNSPECIFIED. Examples: LDB=1, RDB=2, LUB=3, RUB=4, LDF=5, RDF=6, LUF=7, RUF=8, LFD=9, RFD=10, LFU=11, RFU=12, LBD=13, RBD=14, LBU=15, RBU=16 [S4, unofficial].
+-*   `axesMatch(a, b)`: Determines if axes align by converting enums to 0-based indices ($aNum = a-1, bNum = b-1$). If either is UNSPECIFIED (<0), returns `{true, true, true}`. Otherwise, compares bit $i$ of $aNum$ and $bNum$ for $i=0,1,2$. Returns a 3-element bool array indicating match per axis [S4, unofficial].
+-*   `needRotation(a, b)`: Checks if a $\pm \pi/2$ rotation is required by comparing bit 3 of the 0-based indices. If either is UNSPECIFIED, returns false. Otherwise, returns true if bit 3 differs [S4, unofficial].
++A method for encoding axis directions and orientations into a single 32-bit integer to facilitate efficient coordinate system transformations. The `CoordinateSystem` enum uses bits 0-2 to define the primary axis directions (Left/Right, Down/Up, Back/Front) and bit 3 to indicate if a $\pm \pi/2$ rotation is required. The `axesMatch` function determines if two coordinate systems align by comparing the lower 3 bits of their 0-based indices, while `needRotation` checks bit 3 to determine if a rotation is necessary [S4, unofficial].
++
++### Coordinate System Conversion
++Conversion of normalized Cartesian data $(x, y, z, r, g, b)$ to system coordinates $(h, w, \theta, r, g, b)$ for swept-volume display. The implementation requires two steps: 1) conversion of data from Descartes coordinates to cylindrical coordinates $(\theta, \rho, z, r, g, b)$; 2) conversion of data from cylindrical coordinates to system coordinates $(h, w, \theta, r, g, b)$ [S5]. This is used in specialized volumetric displays where the data needs to be mapped to a specific scanning geometry.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(1)$ for single coordinate conversion. The operations involve basic arithmetic (division, modulo, multiplication, addition) [S2, unofficial].
+-*   **Memory Complexity**: $O(1)$ auxiliary space. No additional data structures are required for the conversion itself [S2, unofficial].
+-*   **Performance**: Highly efficient on modern CPUs and GPUs. Bitwise operations can replace division/modulo if chunk size is a power of 2 [S2, unofficial].
+-*   **Strengths**: Simple, deterministic, and fast. Essential for sparse voxel octrees and chunk-based world generation [S1, S2, unofficial].
+-*   **Limitations**: Assumes axis-aligned grids. Does not handle rotation or non-Cartesian coordinate systems without additional transformation matrices [S3][S4, unofficial].
+-*   **When to use**: When accessing voxel data in chunked grids, determining chunk ownership, or mapping world positions to grid indices [S1, S2, unofficial].
+-*   **When not to use**: For spherical voxel grids, rotated coordinate systems, or non-uniform voxel sizes [S3883, S6759, unofficial].
++*   **Time Complexity:** $O(1)$ for all conversion operations. The calculations involve basic arithmetic operations (addition, multiplication, division, modulo) which are constant time relative to the number of points.
++*   **Memory Complexity:** $O(1)$ auxiliary space. No additional data structures are required beyond the input and output vectors.
++*   **Performance:** Extremely fast, suitable for per-voxel operations in ray marching or per-pixel operations in fragment shaders. The use of integer arithmetic for indices minimizes precision issues and leverages CPU/GPU integer units.
++*   **Strengths:** Simple to implement, highly efficient, supports sparse data structures via chunking, handles negative coordinates correctly.
++*   **Limitations:** Assumes axis-aligned bounding boxes. Does not handle rotated or non-Cartesian coordinate systems without additional transformation matrices (see [Incremental Back-Rotation for Voxel Mapping](6759-incremental-back-rotation-for-voxel-mapping.md)). Precision is limited by the voxel size; sub-voxel details are lost during the integer conversion step unless fractional components are preserved separately (see [Metric Coordinate Conversion](12960-metric-coordinate-conversion.md)).
+ 
+ ## Background
+-Coordinate conversion utilities are fundamental to voxel-based game engines and volumetric rendering systems. Early implementations in voxel engines like `voxel-engine-stackgl` used simple modulo arithmetic for chunking [S1, unofficial]. In larger-scale procedural generation systems like `VoxelWorlds`, these utilities are extended to handle biome caching and GPU data preparation, ensuring that world-to-voxel mappings are consistent across CPU and GPU paths [S2, unofficial]. In medical visualization, adaptive coordinate conversion was introduced by Lim et al. to handle pyramidal ultrasound data, demonstrating the need for flexible coordinate transformations beyond simple Cartesian grids [S3]. The bit-encoding scheme for coordinate systems, as seen in `nianticlabs/spz`, provides a compact way to handle axis alignment in file formats and rendering pipelines [S4, unofficial].
++Coordinate conversion utilities are fundamental to voxel-based rendering and spatial data structures. The specific chunk-based approach described in [S2, unofficial] is common in procedural generation and large-scale voxel worlds (e.g., Minecraft-like engines) to manage memory and loading. The adaptive conversion for ultrasound data described in [S3] highlights the application of these utilities in medical imaging, where non-Cartesian data sources must be mapped to standard rendering pipelines. The bit-encoding scheme in [S4, unofficial] is used in file formats and coordinate system definitions to compactly store orientation information. The swept-volume conversion in [S5] represents a specialized application in volumetric display technology.
+ 
+ ## Sources
+@@ -157,3 +200,4 @@
+ [S2] draquel/VoxelWorlds, https://github.com/draquel/VoxelWorlds, fetched 2026-10-27 (unofficial)
+ [S3] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
+-[S4] nianticlabs/spz, https://github.com/nianticlabs/spz, fetched 2026-10-27 (unofficial)+[S4] nianticlabs/spz, https://github.com/nianticlabs/spz, fetched 2026-10-27 (unofficial)
++[S5] PDF An Improved Design of 3D Swept-Volume Volumetric Display, https://jcomputers.us/vol9/jcp0901-34.pdf, fetched 2026-10-28

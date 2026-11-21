@@ -1,0 +1,961 @@
+Eurographics Symposium on Rendering 2021
+A. Bousseau and M. McGuire
+(Guest Editors)
+Volume 40 (2021), Number 4
+Unified Shape and SVBRDF Recovery
+using Differentiable Monte Carlo Rendering
+arXiv:2103.15208v3 [cs.CV] 25 Jun 2021
+Fujun Luan1,3 , Shuang Zhao2 , Kavita Bala1 , Zhao Dong3
+1 Cornell University
+2 University of California, Irvine
+3 Facebook Reality Labs
+( A ) C APTURE
+( B ) P HOTOS
+( C ) I NIT. MODEL
+( D ) O PT. MODEL
+( E ) R ENDERING
+Figure 1: (a) Capture setup. Our method takes as input: multi-view photos (100 captured and 12 shown for this example) of an object (b) and
+a rough initial model with its geometry obtained using standard methods (c). Then, a novel analysis-by-synthesis optimization is performed
+to refine the model’s shape and reflectance in a unified fashion, yielding a high-quality 3D model (d). We show in (e) a re-rendering of the
+result under environmental lighting.
+Abstract
+Reconstructing the shape and appearance of real-world objects using measured 2D images has been a long-standing inverse
+rendering problem. In this paper, we introduce a new analysis-by-synthesis technique capable of producing high-quality reconstructions through robust coarse-to-fine optimization and physics-based differentiable rendering.
+Unlike most previous methods that handle geometry and reflectance largely separately, our method unifies the optimization of
+both by leveraging image gradients with respect to both object reflectance and geometry. To obtain physically accurate gradient
+estimates, we develop a new GPU-based Monte Carlo differentiable renderer leveraging recent advances in differentiable
+rendering theory to offer unbiased gradients while enjoying better performance than existing tools like PyTorch3D [RRN∗ 20]
+and redner [LADL18]. To further improve robustness, we utilize several shape and material priors as well as a coarse-to-fine
+optimization strategy to reconstruct geometry. Using both synthetic and real input images, we demonstrate that our technique
+can produce reconstructions with higher quality than previous methods.
+1. Introduction
+Reconstructing the shape and appearance of real-world objects
+from 2D images has been a long-standing problem in computer
+vision and graphics. Previously, the acquisition of object geometry and (spatially varying) reflectance has been studied largely in© 2021 The Author(s)
+Computer Graphics Forum © 2021 The Eurographics Association and John
+Wiley & Sons Ltd. Published by John Wiley & Sons Ltd.
+dependently. For instance, many techniques based on multiviewstereo (MVS) [GHP∗ 08, SSWK13, TFG∗ 13, NLW∗ 16, AWL∗ 15,
+HSL∗ 17, RPG16, RRFG17] and time-of-flight imaging [NIH∗ 11,
+IKH∗ 11] have been introduced for the reconstruction of 3D shapes.
+Although these methods can also provide rough estimations of surface reflectance, they usually rely on the assumption of simple
+Luan et al. / Unified Shape and SVBRDF Recovery using Differentiable Monte Carlo Rendering
+(e.g., diffuse-dominated) reflectance and can produce unsatisfactory results for glossy objects. On the other hand, previous approaches that specialized at recovering an object’s spatially varying
+reflectance [ZCD∗ 16, GLD∗ 19, GSH∗ 20] typically require object
+geometries to be predetermined, limiting their practical usage for
+many applications where such information is unavailable.
+Recently, great progress has been made in the area of Monte
+Carlo differentiable rendering. On the other hand, how this powerful tool can be applied to solve practical 3D reconstruction
+problems—a main application area of differentiable rendering—
+has remained largely overlooked. Prior works (e.g., [NLGK18])
+have mostly relied on alternative Poisson reconstruction steps during the optimization, leading to suboptimal geometry quality. Instead, by leveraging edge sampling that provides unbiased gradients of mesh vertex positions, we optimize object shape and
+SVBRDF in a unified fashion, achieving state-of-the-art reconstruction quality.
+In this paper, we demonstrate that detailed geometry and spatially varying reflectance of a real-world object can be recovered
+using a unified analysis-by-synthesis framework. To this end, we
+apply gradient-based optimization of the rendering loss (i.e., the
+difference between rendered and target images) that are affected by
+both object geometry and reflectance. Although such gradients with
+respect to appearance are relatively easy to compute, the geometric
+gradients are known to be much more challenging to compute and,
+therefore, have been mostly approximated in the past using techniques like soft rasterization [LLCL19] in computer vision. We,
+on the other hand, leverage recent advances in physics-based differentiable rendering to obtain unbiased and consistent geometric
+gradients that are crucial for obtaining high-quality reconstructions.
+Concretely, our contributions include:
+• A Monte Carlo differentiable renderer specialized for collocated
+configurations. Utilizing edge sampling [LADL18], our renderer
+produces unbiased and consistent gradient estimates.
+• A new analysis-by-synthesis pipeline that enables high-quality
+reconstruction of spatially varying reflectance and, more importantly, mesh-based object geometry.
+• A coarse-to-fine scheme as well as geometry and reflectance priors for ensuring robust reconstructions.
+• Thorough validations and evaluations of individual steps that
+come together allowing practical and high-quality 3D reconstruction using inexpensive handheld acquisition setups, which
+benefits applications in many areas like graphics and AR/VR.
+We demonstrate the effectiveness of our technique via several synthetic and real examples.
+2. Related work
+Shape reconstruction. Reconstructing object geometry has been
+a long-standing problem in computer vision.
+Multi-view Stereo (MVS) recovers the 3D geometry of sufficiently textured objects using multiple images of an object by
+matching feature correspondences across views and optimizing
+photo-consistency (e.g., [SD99, VTC05, FP09, SZPF16]).
+Shape from Shading (SfS) relates surface normals to image intensities [Hor70, IH81, QMC∗ 17, QMDC17, MKC∗ 17, HQMC18].
+Unfortunately, these methods have difficulties handling illumination changes, non-diffuse reflectance, and textureless surfaces.
+Photometric Stereo (PS) takes three or more images captured
+with a static camera and varying illumination or object pose, and
+directly estimate surface normals from measurements [Woo80,
+HLHZ08, ZT10, TFG∗ 13, PF14, QLD15, QMD16]. These methods typically do not recover reflectance properties beyond diffuse
+albedo.
+Reflectance reconstruction. Real-world objects exhibit richly
+diverse reflectance that can be described with spatially-varying
+bidirectional reflectance distribution functions (SVBRDFs).
+Traditional SVBRDF acquisition techniques rely on dense input images measured using light stages or gantry (e.g, [Mat03,
+LKG∗ 03, HLZ10, DWT∗ 10, CDP∗ 14, DWMG15, KCW∗ 18]). To
+democratize the acquisition, some recent works exploit the structure (e.g., sparsity) of SVBRDF parameter spaces to allow reconstructions using fewer input images (e.g., [YDMH99, DCP∗ 14,
+WWZ15, ZCD∗ 16, KGT∗ 17, PNS18]). Additionally, a few recent
+works have been introduced to produce plausible SVBRDF estimations for flat objects using a small number of input images
+(e.g., [AWL∗ 15, AAL16, HSL∗ 17, GLD∗ 19, DAD∗ 19, GSH∗ 20]).
+Despite their ease of use, these techniques cannot be easily generalized to handle more complex shapes.
+Joint estimation of shape and reflectance. Several prior works
+jointly estimate object shape and reflectance. Higo et al. [HMJI09]
+presented a plane-sweeping method for albedo, normal and depth
+estimation. Xia et al. [XDPT16] optimized an apparent normal
+field with corresponding reflectance. Nam et al. [NLGK18] proposed a technique that alternates between material-, normal-, and
+geometry-optimization stages. Schmitt et al. [SDR∗ 20] perform
+joint estimation using a hand-held sensor rig with and 12 point light
+sources. Bi et al. [BXS∗ 20] use six images and optimize object geometry and reflectance in two separate stages.
+All these methods either rely on MVS for geometry reconstruction or perform alternative optimization of shape and reflectance,
+offering little to no guarantee on qualities of the reconstruction results. We, in contrast, formulate the problem as a unified analysisby-synthesis optimization, ensuring locally optimal results.
+Differentiable rendering of meshes. We now briefly review
+differentiable rendering techniques closely related to our work.
+For a more comprehensive summary, please see the survey by
+Kato et al. [KBM∗ 20].
+Specialized differentiable renderers have long existed in computer graphics and vision [GZB∗ 13, GLZ16, TSG19, ALKN19,
+CLZ∗ 20]. Recently, several general-purpose ones [LADL18, NDVZJ19] have been developed.
+A key technical challenge in differentiable rendering is to estimate gradients with respect to object geometry (e.g., positions
+of mesh vertices). To this end, several approximated methods
+(e.g., [LHJ19, LLCL19, RRN∗ 20]) have been proposed. Unfortunately, inaccuracies introduced by these techniques can lead to
+© 2021 The Author(s)
+Computer Graphics Forum © 2021 The Eurographics Association and John Wiley & Sons Ltd.
+Luan et al. / Unified Shape and SVBRDF Recovery using Differentiable Monte Carlo Rendering
+degraded result quality. On the contrary, Monte Carlo edge sampling [LADL18,ZWZ∗ 19], which we use for our differentiable renderer, provides unbiased gradient estimates capable of producing
+higher-quality reconstructions.
+n(x0 )
+<latexit sha1_base64="6/WLBkLy/G7neqmCo5uWk4THmEk=">AAACF3icbVC7TsMwFHV4lvIKMDIQUSHKUiUIBGMFC2OR6ENqo8px3NaqH5HtIKooIx/BN7DCzIZYGRn5E5w2Qx8cyfLxOffqXp8gokRp1/2xlpZXVtfWCxvFza3tnV17b7+hRCwRriNBhWwFUGFKOK5roiluRRJDFlDcDIa3md98xFIRwR/0KMI+g31OegRBbaSufdQJBA3ViJkr4Wl5+vmUnp517ZJbccdwFomXkxLIUevav51QoJhhrhGFSrU9N9J+AqUmiOK02IkVjiAawj5uG8ohw8pPxh9JnROjhE5PSHO4dsbqdEcCmcqWM5UM6oGa9zLxP68d6961nxAexRpzNBnUi6mjhZOl4oREYqTpyBCIJDG7OmgAJUTaZDczJWCpycSbT2CRNM4r3mXFvb8oVW/ydArgEByDMvDAFaiCO1ADdYDAM3gFb+DderE+rE/ra1K6ZOU9B2AG1vcf/l2g7w==</latexit>
+Pj
+<latexit sha1_base64="duKmu/rnVZcZHChYF3JT604B7Pc=">AAACC3icdVDLSgMxFM34rPU12qWbYBFcDZnSWmcjBV24rGAf0BmGTJppYzMPkoxQhn6C3+BW1+7ErR/h0j8xfQhW9EDgcM693JMTpJxJhdCHsbK6tr6xWdgqbu/s7u2bB4dtmWSC0BZJeCK6AZaUs5i2FFOcdlNBcRRw2glGl1O/c0+FZEl8q8Yp9SI8iFnICFZa8s2Se0W5wm6E1ZBgnjcn/p1vlpHlVJyqXYHIqjrIds40sZ2KXatD20IzlMECTd/8dPsJySIaK8KxlD0bpcrLsVCMcDopupmkKSYjPKA9TWMcUenls/ATeKKVPgwToV+s4Ez9uZHjSMpxFOjJaUj525uKf3m9TIXnXs7iNFM0JvNDYcahSuC0CdhnghLFx5pgIpjOCskQC0yU7mvpShBNdCffH4f/k3bFsmsWuqmWGxeLdgrgCByDU2CDOmiAa9AELUDAGDyCJ/BsPBgvxqvxNh9dMRY7JbAE4/0LgwKb3Q==</latexit>
+x0
+<latexit sha1_base64="AT0Ctx9duQnXKakOhbQHXSU3r5Q=">AAACB3icbVC7TsMwFHV4lvJogJHFokIwVQkCwVjBwlgk+pDaqHIct7XqR2Q7iCrKB/ANrDCzIVY+g5E/wWkz0JYjWT46517doxPGjGrjed/Oyura+sZmaau8vbO7V3H3D1paJgqTJpZMqk6INGFUkKahhpFOrAjiISPtcHyb++1HojSV4sFMYhJwNBR0QDEyVuq7lV4oWaQn3H7pU3bad6tezZsCLhO/IFVQoNF3f3qRxAknwmCGtO76XmyCFClDMSNZuZdoEiM8RkPStVQgTnSQToNn8MQqERxIZZ8wcKr+3UgR13k2O8mRGelFLxf/87qJGVwHKRVxYojAs0ODhEEjYd4CjKgi2LCJJQgrarNCPEIKYWO7mrsS8sx24i82sExa5zX/subdX1TrN0U7JXAEjsEZ8MEVqIM70ABNgEECXsAreHOenXfnw/mcja44xc4hmIPz9QsvoJoF</latexit>
+<latexit sha1_base64="Kz7neMvcSC8mLG5piky8wPgob0U=">AAACA3icbVDLSsNAFJ3UV62vqks3g0VwFZJiqW6k4MZlBfuANpTJdNKOnZnEmYlQQpZ+g1tduxO3fohL/8RJG9BWD1w4nHMv93D8iFGlHefTKqysrq1vFDdLW9s7u3vl/YO2CmOJSQuHLJRdHynCqCAtTTUj3UgSxH1GOv7kKvM7D0QqGopbPY2Ix9FI0IBipI3k9TnSY4xY0kwHd4NyxbHrterFmQsd25nhh7g5qYAczUH5qz8MccyJ0JghpXquE2kvQVJTzEha6seKRAhP0Ij0DBWIE+Uls9ApPDHKEAahNCM0nKm/LxLElZpy32xmIdWyl4n/eb1YB+deQkUUayLw/FEQM6hDmDUAh1QSrNnUEIQlNVkhHiOJsDY9LXzxeWo6cZcb+EvaVdut2c7NWaVxmbdTBEfgGJwCF9RBA1yDJmgBDO7BE3gGL9aj9Wq9We/z1YKV3xyCBVgf3yRemPU=</latexit>
+3. Our method
+We formulate the problem of joint estimation of object geometry
+and reflectance as an analysis-by-synthesis (aka. inverse-rendering)
+optimization. Let ξ be some vector that depicts both the geometry
+and the reflectance of a real-world object. Taking as input a set of
+images Ĩ of this object, we estimate ξ by minimizing a predefined
+loss L:
+∗
+ξ = arg minξ L(I(ξ ), ξ ; Ĩ),
+(1)
+where I(ξ ) are a set of renderings of the object generated using the
+geometry and reflectance provided by ξ . We further allow the loss
+L to directly depend on the parameters ξ for regularization.
+Acquisition setup. Similar to recent works on reflectance capture [AWL∗ 15, ACGO18, HSL∗ 17, RPG16, AAL16, GLD∗ 19,
+DAD∗ 19, RWS∗ 11], we utilize an acquisition setup where the object is illuminated with a point light collocated with the camera.
+This collocated configuration significantly simplifies both forward
+and differentiable rendering processes, allowing the analysis-bysynthesis problem to be solved efficiently. Common collocated
+configurations include a smartphone’s flash and camera as well as
+a consumer-grade RGBD sensor mounted with an LED light.
+Overview of our method. Efficiently solving the optimization
+of Eq. (1) requires computing gradient dL/dξ of the loss L with
+respect to the geometry and reflectance parameters ξ . According to
+the chain rule, we know that
+∂L dI ∂L
+dL
+=
++
+,
+∂I dξ
+dξ
+∂ξ
+(2)
+where ∂L/∂I and ∂L/∂ξ can be computed using automatic differentiation [PGC∗ 17]. Further, estimating gradients dI/dξ of rendered
+images requires performing differentiable rendering. Despite being relatively easy when the parameters ξ only capture reflectance,
+differentiating the rendering function I becomes much more challenging when ξ also controls object geometry [LADL18]. To this
+end, we develop a new differentiable renderer that is specific to our
+acquisition setup and provides unbiased gradient estimates.
+In the rest of this section, we provide a detailed description of
+our technique that solves the analysis-by-synthesis optimization (1)
+in an efficient and robust fashion. In §3.1, we detail our forwardrendering model and explain how it can be differentiated. In §3.2,
+we discuss our choice of the loss L and optimization strategy.
+3.1. Forward and differentiable rendering
+In what follows, we describe (i) our representation of object geometry and reflectance; and (ii) how we render these representations
+in a differentiable fashion.
+© 2021 The Author(s)
+Computer Graphics Forum © 2021 The Eurographics Association and John Wiley & Sons Ltd.
+Pj
+<latexit sha1_base64="Kz7neMvcSC8mLG5piky8wPgob0U=">AAACA3icbVDLSsNAFJ3UV62vqks3g0VwFZJiqW6k4MZlBfuANpTJdNKOnZnEmYlQQpZ+g1tduxO3fohL/8RJG9BWD1w4nHMv93D8iFGlHefTKqysrq1vFDdLW9s7u3vl/YO2CmOJSQuHLJRdHynCqCAtTTUj3UgSxH1GOv7kKvM7D0QqGopbPY2Ix9FI0IBipI3k9TnSY4xY0kwHd4NyxbHrterFmQsd25nhh7g5qYAczUH5qz8MccyJ0JghpXquE2kvQVJTzEha6seKRAhP0Ij0DBWIE+Uls9ApPDHKEAahNCM0nKm/LxLElZpy32xmIdWyl4n/eb1YB+deQkUUayLw/FEQM6hDmDUAh1QSrNnUEIQlNVkhHiOJsDY9LXzxeWo6cZcb+EvaVdut2c7NWaVxmbdTBEfgGJwCF9RBA1yDJmgBDO7BE3gGL9aj9Wq9We/z1YKV3xyCBVgf3yRemPU=</latexit>
+P
+<latexit sha1_base64="8cjreN9Gb4btOrfpkT89/k07ST0=">AAACCXicbVDLSsNAFJ3UV62vVJdugkVwVRJRdFnQhcsK9gFNKDfTSTt0ZhJmJkoJ/QK/wa2u3Ylbv8Klf+KkzcK2HrhwOOde7uGECaNKu+63VVpb39jcKm9Xdnb39g/s6mFbxanEpIVjFstuCIowKkhLU81IN5EEeMhIJxzf5H7nkUhFY/GgJwkJOAwFjSgGbaS+XfVvCdPgc9AjDCxrTvt2za27MzirxCtIDRVo9u0ffxDjlBOhMQOlep6b6CADqSlmZFrxU0USwGMYkp6hAjhRQTaLPnVOjTJwoliaEdqZqX8vMuBKTXhoNvOIatnLxf+8Xqqj6yCjIkk1EXj+KEqZo2Mn78EZUEmwZhNDAEtqsjp4BBKwNm0tfAl53om33MAqaZ/Xvcu6e39RazSKdsroGJ2gM+ShK9RAd6iJWgijJ/SCXtGb9Wy9Wx/W53y1ZBU3R2gB1tcvdLOasQ==</latexit>
+(a)
+Pj
+<latexit sha1_base64="8cjreN9Gb4btOrfpkT89/k07ST0=">AAACCXicbVDLSsNAFJ3UV62vVJdugkVwVRJRdFnQhcsK9gFNKDfTSTt0ZhJmJkoJ/QK/wa2u3Ylbv8Klf+KkzcK2HrhwOOde7uGECaNKu+63VVpb39jcKm9Xdnb39g/s6mFbxanEpIVjFstuCIowKkhLU81IN5EEeMhIJxzf5H7nkUhFY/GgJwkJOAwFjSgGbaS+XfVvCdPgc9AjDCxrTvt2za27MzirxCtIDRVo9u0ffxDjlBOhMQOlep6b6CADqSlmZFrxU0USwGMYkp6hAjhRQTaLPnVOjTJwoliaEdqZqX8vMuBKTXhoNvOIatnLxf+8Xqqj6yCjIkk1EXj+KEqZo2Mn78EZUEmwZhNDAEtqsjp4BBKwNm0tfAl53om33MAqaZ/Xvcu6e39RazSKdsroGJ2gM+ShK9RAd6iJWgijJ/SCXtGb9Wy9Wx/W53y1ZBU3R2gB1tcvdLOasQ==</latexit>
+(b)
+P
+Figure 2: Differentiable rendering: (a) To properly differentiate
+the intensity I j of a pixel P j (illustrated as red squares) with respect
+to object geometry, a boundary integral over ∆P j (illustrated as the
+orange curve) needs to be calculated. (b) We perform Monte Carlo
+edge sampling [LADL18, ZWZ∗ 19] by (i) sampling points (illustrated as small discs) from pre-computed discontinuity curves ∆P,
+and (ii) accumulating their contributions in the corresponding pixels (e.g., the orange samples contribute to the pixel P j ).
+Object geometry and reflectance. We express object geometries using standard triangle meshes. Compared to other representations that are popular in 3D reconstruction, such as SDF volumes [PFS∗ 19,JJHZ20,ZLW∗ 21], occupancy networks [MON∗ 19]
+or sphere-based clouds [Las20], triangle meshes can be efficiently
+rendered and edited with many 3D digital content creation tools.
+Further, as a widely adopted format, triangle meshes can be easily
+imported into numerous applications in computer graphics, vision,
+and augmented/virtual reality (AR/VR).
+One of the biggest challenges when using meshes for 3D reconstruction is that topological changes are difficult. We show in the
+following sections that this can be addressed by using reasonable
+initial geometries and a coarse-to-fine optimization process.
+To depict an object’s spatially varying reflectance, we use the
+Disney BRDF [KG13], a parametric model offering a good balance between simplicity and flexibility. This model has also been
+used by many prior works (e.g., [LSC18, LSR∗ 20, BXS∗ 20]). Using this BRDF model, the spatially varying reflectance of an object
+is described using three 2D texture maps specifying, respectively,
+diffuse albedo ad , specular albedo as , surface roughness α. And
+surface normals n are computed from updated mesh vertex positions at every step. Thanks to the efficiency of our system (which
+we will present in the following), we directly use fine meshes to
+express detailed geometries and do not rely on approximations like
+bump/normal mapping.
+Forward rendering. Given a virtual object depicted using parameters ξ , we render one-bounce reflection (aka. direct illumination) of the object. Specifically, assume the point light and the
+camera are collocated at some o ∈ R3 . Then, the intensity I j of the
+j-pixel is given by an area integral over the pixel’s footprint P j ,
+which is typically a square on the image plane:
+Ij =
+1
+|P j |
+Z
+Pj
+Ie
+|
+fr (o → y → o )
+dA(x ),
+ky − o k2
+{z
+}
+=: I(x )
+(3)
+Luan et al. / Unified Shape and SVBRDF Recovery using Differentiable Monte Carlo Rendering
+I NIT. MESH
+S OFT R AS
+P YTORCH 3D
+M ITSUBA 2
+N VDIFFRAST
+O URS
+G ROUND TRUTH
+0.0411
+0.0051
+0.0072
+0.0071
+0.0013
+0.0004
+kettle
+0.0115
+0.0039
+0.0091
+0.0065
+0.0022
+0.0016
+head
+0.0878
+0.0053
+0.0066
+0.0071
+0.0023
+0.0010
+maneki
+Relative err: 0%
+30%
+Figure 3: Comparison with SoftRas [LLCL19], PyTorch3D [RRN∗ 20], Mitsuba 2 [NDVZJ19] and Nvdiffrast [LHK∗ 20]. We render all
+reconstructed geometries using Phong shading and visualize depth errors (wrt. the ground-truth geometry). Initialized with the same mesh
+(shown in the left column), optimizations using gradients obtained with SoftRas and PyTorch3D tend to converge to low-quality results
+due to gradient inaccuracies caused by soft rasterization. Mitsuba 2, a ray-tracing-based system, also produces visible artifacts due to
+biased gradients resulting from an approximated reparameterization [LHJ19]. Nvdiffrast is using multisample analytic antialiasing method
+to provide reliable visibility gradients, which yields better optimization result overall. When using gradients generated with our differentiable
+renderer, optimizations under identical configurations produce results closely resembling the targets. The number below each result indicates
+the average point-to-mesh distance capturing the Euclidean accuracy [JDV∗ 14] of the reconstructed geometry (normalized to have a unit
+bounding box).
+where y is the intersection between the object geometry M and a
+ray that originates at o and passes through x on the image plane.
+Further, Ie denotes the intensity of the point light; fr (o → y → o )
+indicates the cosine-weighted BRDF at y (evaluated with both the
+incident and the outgoing directions pointing toward o ); and A is the
+surface-area measure. We note that no visibility check is needed in
+Eq. (3) since, under the collocated configuration, any point y ∈ M
+visible to the camera must be also visible to the light source.
+We estimate Eq. (3) using Monte Carlo integration by uniformly sampling N locations x 1 , x 2 , . . . , x N ∈ P j and computing
+I j ≈ N1 ∑N
+i=1 I(x i ) where I is the integrand defined in Eq. (3).
+Differentiable rendering. Computing image gradients dI/dξ in
+Eq. (2) largely boils down to differentiating pixel intensities Eq. (3)
+with respect to ξ . Although this can sometimes be
+done by difR
+ferentiating the integrand I—that is, by estimating P j (dI/dξ ) dA—
+doing so is insufficient when computing gradients with respect to
+object geometry (e.g., vertex positions). Consequently, the gradient dI/dξ has usually been approximated using soft rasterization [LLCL19, RRN∗ 20] or reparameterized integrals [LHJ19]. Biased gradient estimates, unfortunately, can reduce the quality of
+optimization results, which we will demonstrate in §4.
+On the other hand, a few general-purpose unbiased techniques [LADL18, ZWZ∗ 19] have been introduced recently. Unfortunately, these methods focus on configurations without point light
+sources—which is not the case under our collocated configuration.
+We, therefore, derive the gradient dI j/dξ utilizing mathematical tools
+used by these works. Specifically, according to Reynolds transport
+theorem [Rey03], the gradient involves an interior and a boundary
+© 2021 The Author(s)
+Computer Graphics Forum © 2021 The Eurographics Association and John Wiley & Sons Ltd.
+Luan et al. / Unified Shape and SVBRDF Recovery using Differentiable Monte Carlo Rendering
+I NIT. MESH
+N O L APLACIAN
+N O NORMAL / EDGE LOSS
+N O COARSE - TO - FINE
+O URS
+G ROUND TRUTH
+0.0318
+0.0014
+0.0013
+0.0137
+0.0006
+pig
+0.0197
+0.0011
+0.0010
+0.0132
+0.0005
+bell
+Figure 4: Ablation study on our mesh loss of Eq. (9) and coarse-to-fine framework. Using the identical initializations and optimization
+settings, we show geometries (rendered under a novel view) optimized with (i) various components of the mesh loss; and (ii) the coarse-tofine process disabled. Similar to Figure 3, the number below each result indicates the average point-to-mesh distance.
+component independently for each pixel. In the second pass, we
+evaluate the boundary component for each x 0i in parallel and accumulate the results in the corresponding pixel (see Figure 2-b).
+integrals:
+dI j
+= |P1 |
+j
+dξ
+
+interior
+dI
+P j dξ (x ) dA(x )
+R
++
+(4)
+3.2. Analysis-by-synthesis optimization
+boundary
+
+
+
+R
+0 dx 0
+0
+0
+n
+x
+x
+x
+(x ) · dξξ ∆I(x ) d`(x ) ,
+∆P j
+We now present our analysis-by-synthesis optimization pipeline
+that minimizes Eq. (1).
+where the interior term is simply Eq. (3) with its integrand I differentiated. The boundary one, on the contrary, is over curves
+∆P j := ∆P ∩ P j with ∆P comprised of jump discontinuity points
+of I. In practice, ∆P consists of image-plane projections of the object’s silhouettes. Further, n (x ) is the curve normal within the image plane, ∆I(x ) denotes the difference in I across discontinuity
+boundaries, and ` is the curve-length measure (see Figure 2-a).
+Similar to the Monte Carlo estimation of Eq. (3), we estimate the
+interior integral in Eq. (4) by uniformly sampling x 1 , . . . , x N ∈ P j .
+To handle the boundary integral, we precompute the discontinuity
+curves ∆P (as polylines) by projecting the object’s silhouette onto
+the image plane at each iteration. At runtime, we draw x 01 , . . . , x 0M ∈
+∆P uniformly. Then,
+interior
+dI j
+≈
+dξ
+1 N dI x
+i)
+N ∑i=1 dξ (x
++
+(5)
+boundary
+0
+1 |∆P| M
+M |P j | ∑i=1 1[x i ∈ P j ]
+
+
+dx 0
+n (x 0i ) · dξi ∆I(x 0i ) ,
+where |∆P| denotes the total length of the discontinuity curves ∆P,
+and 1[·] is the indicator function.
+In practice, we estimate gradients of pixel intensities via Eq. (5)
+in two rendering passes. In the first pass, we evaluate the interior
+© 2021 The Author(s)
+Computer Graphics Forum © 2021 The Eurographics Association and John Wiley & Sons Ltd.
+Object parameters. As stated in §3.1, we depict object geometry using a triangle mesh (which is comprised of per-vertex positions p and UV coordinates u as well as per-triangle vertex indices)
+and reflectance using three 2D texture maps specifying the object’s
+spatially varying diffuse albedo ad , specular albedo as , and surface
+roughness α, respectively. In this way, our combined geometry and
+reflectance parameters are given by ξ = (p , u , ad , as , α). Note, we
+do not modify the connectivity of the triangle vertices and rely on
+additional re-meshing steps, which we will discuss in §3.4, to improve mesh topology.
+Loss. A key ingredient in our analysis-by-synthesis optimization
+is the loss L. Let Ĩ := (Ĩ 1 , Ĩ 2 , . . .) be a set of images of some object
+(with camera location and pose calibrated for each image Ĩ k ). Then,
+our loss takes the form:
+L(I(ξ ), ξ ; Ĩ) := Lrend (I(ξ ); Ĩ) + Lreg (ξ ),
+(6)
+where Lrend is the rendering loss that measures the difference between rendered and target object appearances. Specifically, we set
+Lrend (I(ξ ); Ĩ) := λrend ∑k Φk (I k (ξ )) − Φk (Ĩ k ) 1 ,
+(7)
+where λrend > 0 is a user-specified weight, I(ξ ) :=
+(I 1 (ξ ), I 2 (ξ ), . . .) denotes images rendered using our forwardrendering model of Eq. (3) with object geometry and reflectance
+Luan et al. / Unified Shape and SVBRDF Recovery using Differentiable Monte Carlo Rendering
+N O SPEC . CORRELATION
+N O ROUG . SMOOTHNESS
+O URS
+G ROUND TRUTH
+RMSE: 0.0472
+RMSE: 0.0636
+RMSE: 0.0177
+kitty
+Figure 5: Ablation study on our material loss of Eq. (10). Using identical initial reflectance maps and optimization configurations, models
+optimized with various components of the material loss neglected are rendered under a novel environmental illumination. On the right of
+each reconstruction result, we show the optimized reflectance maps (from top to bottom: diffuse albedo, specular albedo, and roughness).
+10 INPUTS
+30 INPUTS
+50 INPUTS
+100 INPUTS
+GT
+RMSE: 0.0494
+RMSE: 0.0141
+RMSE: 0.0072
+RMSE: 0.0065
+kitty
+RMSE: 0.0860
+RMSE: 0.0532
+RMSE: 0.0416
+RMSE: 0.0391
+pig
+Figure 6: Ablation study on number of input images. For each object, we show a novel-view rendering of our reconstruction under environmental lighting,
+given varying number of input images. The input images have viewing/lighting positions uniformly sampled around the object.
+specified by ξ (under identical camera configurations as the input
+images), and Φk captures pixel-wise post-processing operations
+such as tone-mapping and background-removing masking.
+We estimate gradients of the rendering loss of Eq. (7) with respect to the object parameters ξ using our differentiable rendering
+method described in §3.1. We will demonstrate in §4.1 that accurate
+gradients are crucial to obtain high-quality optimization results.
+In Eq. (6), Lreg (ξ ) is a regularization term for improving the
+robustness of the optimization, which we will discuss in §3.3. Gradients of this term can be obtained easily using automatic differentiation.
+Optimization process. Like any other analysis-by-synthesis
+method, our technique takes as input an initial configuration of an
+object’s geometry and reflectance. In practice, we initialize object
+geometry using MVS or Kinect Fusion. Our technique is capable of producing high-quality reconstructions using crude initializations (obtained using low-resolution and noisy inputs). For the
+reflectance maps, we simply initialize them as constant-valued textures.
+Provided an initial configuration of the object’s geometry and
+reflectance, we minimize the loss of Eq. (6) using the Adam algorithm [KB14].
+Further, to make the optimization more robust, we leverage a
+coarse-to-fine approach that periodically performs remeshing and
+upsamples the reflectance-describing textures. We will provide
+more details on this process in §3.4.
+3.3. Regularization
+Using only the rendering loss Lrend expressed in Eq. (7) can make
+the optimization unstable and/or converge to local minima. To address this problem, we regularize the optimization by introducing
+another loss Lreg that in turn consists of a material loss Lmat and a
+mesh one Lmesh :
+Lreg (ξ ) := Lmesh (M) + Lmat (ad , as , α),
+(8)
+© 2021 The Author(s)
+Computer Graphics Forum © 2021 The Eurographics Association and John Wiley & Sons Ltd.
+Luan et al. / Unified Shape and SVBRDF Recovery using Differentiable Monte Carlo Rendering
+( A ) I NPUT RGB IMG .
+( B ) I NPUT GT DEPTH
+( C ) C OLMAP
+( D 1) KF ( HIGH )
+( D 2) KF ( LOW )
+( E ) O URS
+( F ) G ROUND TRUTH
+0.0017
+0.0149
+0.0318
+0.0006
+pig
+0.0305
+0.0192
+0.0324
+0.0010
+kitty
+Figure 7: Comparison with COLMAP [SZPF16] and Kinect Fusion [NIH∗ 11] using synthetic inputs. The COLMAP results (c) are generated using 50 RGB images (a) with exact camera poses; the KF-High (d1) and KF-Low (d2) results are created using 50 ground-truth
+depth images (b) and low-resolution noisy ones, respectively. Our method (e), when initialized with KF-Low (d2) and using RGB inputs (a),
+produces much more accurate geometries than COLMAP and KF-High. Similar to Figure 3, the numbers indicate average point-to-mesh
+distances.
+which we will discuss in the following.
+Mesh loss. We encourage our optimization to return “smooth”
+object geometry by introducing a mesh loss:
+Lmesh (M) := Llap (M) + Lnormal (M) + Ledge (M),
+(9)
+where the mesh-Laplacian loss Llap of a mesh with n vertices is
+given by Llap (M) := λlap kLV k2 where V is an n × 3 matrix with
+its i-th row storing coordinates of the i-th vertex, and L ∈ Rn×n is
+the mesh’s Laplacian matrix [NISA06].
+Additionally, we use a normal-consistency loss Lnormal to encourage normals of adjacent faces to vary slowly by setting
+Lnormal (M) := λnormal ∑i, j [1 − (n i · n j )]2 , where the sum is over
+all pairs (i, j) such that the i-th and the j-th triangles share a common edge, and n i and n j denote the normals of these triangles.
+Lastly, we penalize the mesh for having long edges, which usually yield ill-shaped triangles, by utilizing an edge-length loss
+1
+Ledge := λedge (∑i e2i ) /2 , where ei denotes the length of the i-th face
+edge.
+Material loss. Our material loss Lmat regularizes the reflectance
+maps representing diffuse albedo ad , specular albedo as , and surface roughness α. Specifically, we set
+Lmat (ad , as , α) := Lspec (ad , as ) + Lroug (α),
+(10)
+where Lspec correlates diffuse and specular albedos [SDR∗ 20]:
+assuming nearby pixels with similar diffuse albedos to have
+similar specular ones, we set Lspec (as , ad ) := λspec ∑ p kas [p ] −
+kp −q k2
+(∑q as [q ] µ p ,q )/(∑q µ p ,q )k1 , where µ p ,q := exp − 2σ2 2 −
+1
+(ad [p ]−ad [q ])2 
+is
+the
+bilateral
+weight
+between
+pixels
+with
+indices
+2
+2σ
+to optimize even when the object geometry is known [GLD∗ 19].
+To regularize our optimization of surface roughness, we introduce
+a smoothness term that measures its total variation: Lroug (α) :=
+λroug ∑i, j (|α[i + 1, j] − α[i, j]| + |α[i, j + 1] − α[i, j]|), where α[i, j]
+indicate the value of the (i, j)-th pixel in the roughness map.
+3.4. Improving robustness
+As described in §3.2, when minimizing the loss of Eq. (6), we keep
+the mesh topology unchanged. This, unfortunately, can severely
+limit the flexibility of our optimization of object geometry, making
+the result highly sensitive to the quality of the initial mesh. Additionally, without taking precautions, updating vertex positions can
+introduce artifacts (e.g., self intersections) to the mesh that cannot
+be easily fixed by later iterations.
+To address these problems, we utilize a few extra steps.
+Coarse-to-fine optimization. Instead of performing the entire
+optimization at a single resolution, we utilize a coarse-to-fine process for improved robustness. Similar steps have been taken in
+several prior works, although typically limited to either geometry [SLS∗ 06,SY10,KH13,TSG19] or reflectance [DCP∗ 14,RPG16,
+HSL∗ 17].
+Specifically, we start the optimization by using low-resolution
+meshes and reflectance maps. If the input already has high resolutions, we simplify them via remeshing and image downsampling.
+Our optimization process then involves multiple stages. During
+each stage, we iteratively refine the object geometry and reflectance
+with fixed mesh topology. After each stage (except the final one),
+we upsample the mesh (using instant meshes [JTPSH15]) and the
+texture maps (using simple bilinear interpolation).
+2
+p , q ∈ Z2 .
+Spatially varying surface roughness is known to be challenging
+© 2021 The Author(s)
+Computer Graphics Forum © 2021 The Eurographics Association and John Wiley & Sons Ltd.
+Robust surface evolution. During optimization, if the vertex positions are updated naïvely (i.e., using simple gradient-based up-
+Luan et al. / Unified Shape and SVBRDF Recovery using Differentiable Monte Carlo Rendering
+Table 1: Rendering performance. We report the rendering cost in
+seconds (averaged across 100 times) of each differentiable renderer
+in resolution 512 × 512 and 4 samples per pixel on a Titan RTX
+graphics card.
+settings (e.g., learning rate), we ran multiple optimizations using
+Adam [KB14] with gradients produced by SoftRas, PyTorch3D,
+Mitsuba 2, Nvdiffrast, and our technique, respectively. As shown
+in Figure 3, using biased gradients yields various artifacts or blurry
+geometries in the optimized results.
+SoftRas PyTorch3D Mitsuba 2 Nvdiffrast Redner Ours
+0.0184
+0.0202
+0.0877
+0.0013 0.1196 0.0143
+0.0192
+0.0224
+0.0863
+0.0010 0.1029 0.0146
+0.0971
+0.0772
+0.0913
+0.0014 0.1336 0.0263
+0.0249
+0.0334
+0.0889
+0.0010 0.1190 0.0225
+Effectiveness of shape optimization. To ensure robustness when
+optimizing the shape of an object, our technique utilizes a mesh
+loss (§3.3) as well as a coarse-to-fine framework (§3.4). We conduct another experiment to evaluate the effectiveness of these steps.
+Specifically, we optimize the shape of the pig model using identical optimization configurations except for (i) having various components of the mesh loss turned off; and (ii) not using the coarseto-fine framework. As shown in Figure 4, with the mesh Laplacian
+loss Llap neglected (by setting λlap = 0), the resulting geometry becomes “bumpy”; without the normal and edge-length losses Lnormal
+and Ledge , the optimized geometry also has artifacts due to sharp
+normal changes and ill-shaped triangles. Additionally, without performing the optimization in a coarse-to-fine fashion (by directly
+starting with a subdivided version of the initial mesh), the optimization gets stuck in a local optimum (with all losses enabled).
+Kettle
+Maneki
+Pig
+Kitty
+dates with no validation checks), the mesh can have degraded quality and even become non-manifold (i.e., with artifacts like holes and
+self-intersections). Motivated by other optimization-driven mesh
+editing algorithms [SVJ15, LTJ18], we evolve a mesh using a
+pipeline implemented in the El Topo library [B∗ 09]: Given the initial positions of a set of vertices with associated displacements, El
+Topo moves each vertex along its displacement vector while ensuring no self-intersection is generated.
+4. Results
+We implement our differentiable renderer (§3.1) in C++ with
+CUDA 11 and OptiX 7.1. For vectorized and differentiable computations, we utilize the Enoki library [Jak19], which has been
+demonstrated to be more efficient than generic ones like Tensorflow and PyTorch for rendering [NDVZJ19].
+We implement the rest of our optimization pipeline, including
+the loss computations, in PyTorch. We use one set of weights for
+our optimizations: λrend = 1 for the rendering loss of Eq. (7);
+(λlap , λedge , λnormal ) = (0.1, 1, 0.01) for the mesh loss of Eq. (9)
+and (λspec , λroug ) = (0.01, 0.001) for the material loss of Eq. (10).
+In practice, our optimization involves 500–1000 iterations (for
+all coarse-to-fine stages) and takes 0.5–2 hours per example (see
+the supplement for more details).
+4.1. Evaluations and comparisons
+Please see the supplemental material for more results.
+Comparison with differentiable renderers. Our renderer enjoys high performance, thanks to its specialized nature (i.e., focused on the collocated configuration) and the combined efficiency
+of RTX ray tracing offered by OptiX and GPU-based differentiable computations by Enoki. As demonstrated in Table 1, our
+renderer is faster than SoftRas [LLCL19], PyTorch3D [RRN∗ 20],
+and Mitsuba 2 [NDVZJ19] without the need to introduce bias to
+the gradient estimates. Nvdiffrast [LHK∗ 20] is faster than our system but produces approximated gradients. Lastly, compared to Redner [LADL18], another differentiable renderer that produces unbiased gradients, our renderer offers better performance.
+To further demonstrate the importance for having accurate gradients, we conduct a synthetic experiment where the shape of an
+object is optimized (with known diffuse reflectance). Using identical input images, initial configurations, losses, and optimization
+Effectiveness of material loss. Our material loss of Eq. (10) is
+important for obtaining clean reflectance maps that generalize well
+to novel settings. As shown in Figure 5, without correlating diffuse and specular albedos (by having λspec = 0), diffuse colors
+are “baked” into specular albedo, leading to heavy artifacts under novel environmental illumination. With the roughness smoothness Lroug disabled, the resulting roughness map contains highfrequency noise that leads to artifacts in rendered specular highlights.
+Number of input images. We evaluate how the number of input
+images affects the reconstruction quality of our method in Figure 6.
+Using a small number (e.g., 10) of images, the optimization becomes highly under-constrained, making it difficult for our model
+to produce accurate appearance under novel viewing conditions.
+The accuracy our novel-view renderings improves quickly as the
+number of input images increases: With 50 or more input images,
+our renderings closely match the groundtruth.
+Comparison with previous methods. To further evaluate the
+effectiveness of our technique for recovering object geometry,
+we compare with several previous methods [SZPF16, NIH∗ 11,
+NLGK18].
+Figure 7 shows comparisons with COLMAP [SZPF16] and
+Kinect Fusion [NIH∗ 11] using synthetic inputs. Our technique,
+when using crude initial geometries (obtained using Kinect Fusion
+with low-resolution and noisy depth images), produces results with
+much higher quality than the baselines. COLMAP fails badly for
+the kitty example since the object contains insufficient textures for
+correspondences to be reliable established.
+Additionally, we compare our technique with the work from
+Nam et al. [NLGK18] using real inputs (i.e., photographs). As
+demonstrated in Figure 8, Nam et al.’s method does not explicitly
+optimizes object geometry based on image losses and returns geometries with heavy artifacts. Our technique, on the other hand, is
+© 2021 The Author(s)
+Computer Graphics Forum © 2021 The Eurographics Association and John Wiley & Sons Ltd.
+Luan et al. / Unified Shape and SVBRDF Recovery using Differentiable Monte Carlo Rendering
+Figure 8: Comparison with Nam et al. [NLGK18]: We render the reconstructed object under novel view. Nam et al.’s method produces
+bumpy geometry and inaccurate highlights. In contrast, our method produces much cleaner results that closely resemble the real object.
+I NIT MESH
+GT ( POINT- LIGHT )
+O URS ( POINT- LIGHT )
+GT ( ENV. MAP 1)
+O URS ( ENV. MAP 1)
+GT ( ENV. MAP 2)
+O URS ( ENV. MAP 2)
+kitty
+bell
+pig
+Figure 9: Reconstruction results using synthetic inputs: We obtain the initial meshes (in the left column) using Kinect Fusion [NIH∗ 11] with
+low-resolution (48 × 48) and noisy depths. Our analysis-by-synthesis pipeline successfully recovers both geometric and reflectance details,
+producing high-fidelity results under novel viewing and illumination conditions.
+much more robust and capable of reproducing the clean geometry
+and appearance of the physical model.
+© 2021 The Author(s)
+Computer Graphics Forum © 2021 The Eurographics Association and John Wiley & Sons Ltd.
+4.2. Reconstruction results
+Figure 9 shows reconstruction results obtained using synthetic input images and rendered under novel views and illuminations.
+The initial geometries are obtained using Kinect Fusion with lowresolution noisy depth inputs. Using 50 input images, our tech-
+Luan et al. / Unified Shape and SVBRDF Recovery using Differentiable Monte Carlo Rendering
+nique offers the robustness for recovering both smooth (e.g., the
+kitty example) and detailed (e.g., the pig example) geometries and
+reflectance.
+have difficulties in capturing materials exhibiting strong retroreflection. Generalization to other configurations would be useful in the
+future.
+We show in Figure 10 reconstruction results using as input 100
+real photographs per example. The initial geometries are obtained
+using COLMAP. Our analysis-by-synthesis technique manages to
+accurately recover the detailed geometry and reflectance of each
+model.
+To refine mesh topology, our technique relies on remeshing steps
+(between coarse-to-fine stages). How topology can be optimized in
+a robust and flexible fashion is an important problem for future
+investigation.
+Please note, in Figures 9 and 10, the detailed geometric structures (e.g., those in the bell, pig, chime, and buddha examples) fully
+emerge from the mesh-based object geometries: no normal or displacement mapping is used.
+Lastly, since our reconstructed models use standard mesh-based
+representations, they can be used in a broad range of applications
+(see Figure 11).
+4.3. Discussion and Analysis
+We believe the quality gain to be obtained for three main reasons:
+First, we use Monte Carlo edge sampling [LADL18] that provides
+accurate gradients with respect to vertex positions, allowing our
+method to provide more accurate reconstructions of object geometries (cf. Figure 8 against [NLGK18]); Second, we exploit robust
+surface evolution, e.g., elTopo, on top of gradient descent, which
+ensures a manifold mesh (i.e., without self-intersections or other
+degenerated cases) after every iteration; Third, our coarse-to-fine
+strategy and the other regularization terms have come together to
+make our pipeline more robust in practice.
+Failure cases. Despite our pipeline being robust for most cases
+in synthetic/real-world settings, failure cases still exist. Firstly, our
+method has difficulties handling complex changes of the mesh
+topology—which is a well-known limitation for mesh-based representations. Secondly, when modeling object appearance, our
+method relies on a simplified version of the Disney BRDF model
+only dealing with opaque materials, and thus is limited at reconstructing sophisticated surface appearances, such as anisotropic reflection or subsurface scattering.
+5. Conclusion
+We introduce a new approach to jointly recover the shape and reflectance of real-world objects. At the core of our technique is a
+unified analysis-by-synthesis pipeline that iteratively refines object
+geometry and reflectance. Our custom Monte Carlo differentiable
+renderer enjoys higher performance than many existing tools (such
+as SoftRas, PyTorch3D, and Mitsuba 2). More importantly, our renderer produces unbiased geometric gradients that are crucial for
+obtaining high-quality reconstructions. To further improve the robustness of our optimization, we leverage a coarse-to-fine framework regularized using a few geometric and reflectance priors. We
+conduct several ablation studies to evaluate the effectiveness of our
+differentiable renderer, losses, and optimization strategies.
+Limitations and future work. Our technique is specialized to
+using a collocated camera and point light. This configuration can
+Lastly, more advanced regularizations of geometry and/or appearance may enable high-quality reconstructions with fewer input
+images.
+Acknowledgements. We thank Chenglei Wu, Yujia Chen,
+Christoph lassner, Sai Bi, Zhengqin Li, Giljoo Nam, Yue Dong,
+Hongzhi Wu, Zhongshi Jiang as well as the anonymous reviewers for their valuable discussions. We thank the digital
+artist James Warren from Facebook Reality Labs for modeling
+and rendering the two table scenes, and Inseung Hwang from
+KAIST for making comparisons with Nam et al. [NLGK18].
+This work was supported in part by NSF grants 1900783 and
+1900927.
+References
+[AAL16] A ITTALA M., A ILA T., L EHTINEN J.: Reflectance modeling
+by neural texture synthesis. ACM Trans. Graph. 35, 4 (2016), 1–13. 2, 3
+[ACGO18] A LBERT R. A., C HAN D. Y., G OLDMAN D. B., O’B RIEN
+J. F.: Approximate svBRDF estimation from mobile phone video. In
+Proc. EGSR: Experimental Ideas & Implementations (2018), Eurographics Association, pp. 11–22. 3
+[ALKN19] A ZINOVIC D., L I T.-M., K APLANYAN A., N IESSNER M.:
+Inverse path tracing for joint material and lighting estimation. In Proc.
+IEEE/CVF CVPR (2019), pp. 2447–2456. 2
+[AWL∗ 15] A ITTALA M., W EYRICH T., L EHTINEN J., ET AL .: Twoshot SVBRDF capture for stationary materials. ACM Trans. Graph. 34,
+4 (2015), 110–1. 1, 2, 3
+[B∗ 09] B ROCHU T., ET AL .: El Topo: Robust topological operations for dynamic explicit surfaces, 2009. https://github.com/
+tysonbrochu/eltopo. 8
+[BXS∗ 20]
+B I S., X U Z., S UNKAVALLI K., K RIEGMAN D., R A MAMOORTHI R.: Deep 3D capture: Geometry and reflectance from
+sparse multi-view images. In Proc. IEEE/CVF CVPR (2020), pp. 5960–
+5969. 2, 3
+[CDP∗ 14] C HEN G., D ONG Y., P EERS P., Z HANG J., T ONG X.: Reflectance scanning: estimating shading frame and BRDF with generalized
+linear light sources. ACM Trans. Graph. 33, 4 (2014), 1–11. 2
+[CLZ∗ 20] C HE C., L UAN F., Z HAO S., BALA K., G KIOULEKAS I.: Towards learning-based inverse subsurface scattering. ICCP (2020), 1–12.
+2
+[DAD∗ 19] D ESCHAINTRE V., A ITTALA M., D URAND F., D RETTAKIS
+G., B OUSSEAU A.: Flexible SVBRDF capture with a multi-image deep
+network. In Computer Graphics Forum (2019), vol. 38, Wiley Online
+Library, pp. 1–13. 2, 3
+[DCP∗ 14] D ONG Y., C HEN G., P EERS P., Z HANG J., T ONG X.:
+Appearance-from-motion: Recovering spatially varying surface reflectance under unknown lighting. ACM Trans. Graph. 33, 6 (2014),
+1–12. 2, 7
+[DWMG15] D ONG Z., WALTER B., M ARSCHNER S., G REENBERG
+D. P.: Predicting appearance from measured microgeometry of metal
+surfaces. ACM Trans. Graph. 35, 1 (2015), 1–13. 2
+[DWT∗ 10] D ONG Y., WANG J., T ONG X., S NYDER J., L AN Y., B EN E ZRA M., G UO B.: Manifold bootstrapping for SVBRDF capture. ACM
+Trans. Graph. 29, 4 (2010), 1–10. 2
+© 2021 The Author(s)
+Computer Graphics Forum © 2021 The Eurographics Association and John Wiley & Sons Ltd.
+Luan et al. / Unified Shape and SVBRDF Recovery using Differentiable Monte Carlo Rendering
+P HOTO . ( NOVEL )
+O URS
+N ORMAL
+O URS ( ENV. MAP )
+P HOTO . ( NOVEL )
+chime
+nefertiti
+buddha
+pony
+O URS
+N ORMAL
+O URS ( ENV. MAP )
+Figure 10: Reconstruction results of real-world objects: Similar to the synthetic examples in Figure 9, our technique recovers detailed
+object geometries and reflectance details, producing high-quality results under novel viewing and illumination conditions.
+[GZB∗ 13] G KIOULEKAS I., Z HAO S., BALA K., Z ICKLER T., L EVIN
+A.: Inverse volume rendering with material dictionaries. ACM Trans.
+Graph. 32, 6 (2013), 1–13. 2
+[HLHZ08] H OLROYD M., L AWRENCE J., H UMPHREYS G., Z ICKLER
+T.: A photometric approach for estimating normals and tangents. ACM
+Trans. Graph. 27, 5 (2008), 1–9. 2
+[HLZ10] H OLROYD M., L AWRENCE J., Z ICKLER T.: A coaxial optical scanner for synchronous acquisition of 3D geometry and surface reflectance. ACM Trans. Graph. 29, 4 (2010), 1–12. 2
+[HMJI09] H IGO T., M ATSUSHITA Y., J OSHI N., I KEUCHI K.: A handheld photometric stereo camera for 3-d modeling. In Proc. ICCV (2009),
+IEEE, pp. 1234–1241. 2
+[Hor70] H ORN B. K.: Shape from shading: A method for obtaining the
+shape of a smooth opaque object from one view. 2
+[HQMC18] H AEFNER B., Q UÉAU Y., M ÖLLENHOFF T., C REMERS
+D.: Fight ill-posedness with ill-posedness: Single-shot variational depth
+super-resolution from shading. In Proc. IEEE/CVF CVPR (2018),
+pp. 164–174. 2
+Figure 11: Applications: The high-quality models generated by
+our technique can be used for 3D digital modeling (top) and object
+insertion in augmented reality (bottom).
+[HSL∗ 17] H UI Z., S UNKAVALLI K., L EE J.-Y., H ADAP S., WANG J.,
+S ANKARANARAYANAN A. C.: Reflectance capture using univariate
+sampling of BRDFs. In ICCV (2017), IEEE, pp. 5362–5370. 1, 2, 3,
+7
+[IH81] I KEUCHI K., H ORN B. K.: Numerical shape from shading and
+occluding boundaries. Artificial intelligence 17, 1-3 (1981), 141–184. 2
+[FP09] F URUKAWA Y., P ONCE J.: Accurate, dense, and robust multiview
+stereopsis. IEEE Trans. Pattern Anal. Mach. Intell. 32, 8 (2009), 1362–
+1376. 2
+[GHP∗ 08]
+G HOSH A., H AWKINS T., P EERS P., F REDERIKSEN S., D E Practical modeling and acquisition of layered facial reflectance. ACM Trans. Graph. 27, 5 (Dec. 2008). 1
+BEVEC P.:
+[GLD∗ 19] G AO D., L I X., D ONG Y., P EERS P., X U K., T ONG X.: Deep
+inverse rendering for high-resolution SVBRDF estimation from an arbitrary number of images. ACM Trans. Graph. 38, 4 (2019), 134–1. 2, 3,
+7
+[GLZ16] G KIOULEKAS I., L EVIN A., Z ICKLER T.: An evaluation of
+computational imaging techniques for heterogeneous inverse scattering.
+In ECCV (2016), Springer, pp. 685–701. 2
+[GSH∗ 20] G UO Y., S MITH C., H AŠAN M., S UNKAVALLI K., Z HAO S.:
+MaterialGAN: Reflectance capture using a generative SVBRDF model.
+ACM Trans. Graph. 39, 6 (2020), 254:1–254:13. 2
+© 2021 The Author(s)
+Computer Graphics Forum © 2021 The Eurographics Association and John Wiley & Sons Ltd.
+[IKH∗ 11]
+I ZADI S., K IM D., H ILLIGES O., M OLYNEAUX D., N EWCOMBE R., KOHLI P., S HOTTON J., H ODGES S., F REEMAN D., DAVI SON A., F ITZGIBBON A.: Kinectfusion: Real-time 3D reconstruction
+and interaction using a moving depth camera.
+(2011), pp. 559–568. 1
+In Proc. ACM UIST
+[Jak19] JAKOB W.: Enoki: structured vectorization and differentiation
+on modern processor architectures, 2019. https://github.com/mitsubarenderer/enoki. 8
+[JDV∗ 14] J ENSEN R., DAHL A., VOGIATZIS G., T OLA E., A ANÆS
+H.: Large scale multi-view stereopsis evaluation. In Proc. IEEE CVPR
+(2014), pp. 406–413. 4
+[JJHZ20] J IANG Y., J I D., H AN Z., Z WICKER M.: Sdfdiff: Differentiable rendering of signed distance fields for 3D shape optimization. In
+Proc. IEEE/CVF CVPR (2020), pp. 1251–1261. 3
+[JTPSH15] JAKOB W., TARINI M., PANOZZO D., S ORKINE -H ORNUNG
+O.: Instant field-aligned meshes. ACM Trans. Graph. 34, 6 (2015). 7
+Luan et al. / Unified Shape and SVBRDF Recovery using Differentiable Monte Carlo Rendering
+[KB14] K INGMA D. P., BA J.: Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980 (2014). 6, 8
+[KBM∗ 20] K ATO H., B EKER D., M ORARIU M., A NDO T., M ATSUOKA
+T., K EHL W., G AIDON A.: Differentiable rendering: A survey, 2020.
+arXiv:2006.12057. 2
+[KCW∗ 18] K ANG K., C HEN Z., WANG J., Z HOU K., W U H.: Efficient reflectance capture using an autoencoder. ACM Trans. Graph. 37, 4
+(2018), 127–1. 2
+[KG13] K ARIS B., G AMES E.: Real shading in unreal engine 4. Proc.
+Physically Based Shading Theory Practice 4 (2013), 3. 3
+[KGT∗ 17] K IM K., G U J., T YREE S., M OLCHANOV P., N IESSNER M.,
+K AUTZ J.: A lightweight approach for on-the-fly reflectance estimation.
+In ICCV (2017), IEEE, pp. 20–28. 2
+[KH13] K AZHDAN M., H OPPE H.: Screened poisson surface reconstruction. ACM Trans. Graph. 32, 3 (2013), 1–13. 7
+[LADL18] L I T.-M., A ITTALA M., D URAND F., L EHTINEN J.: Differentiable Monte Carlo ray tracing through edge sampling. ACM Trans.
+Graph. 37, 6 (2018), 1–11. 1, 2, 3, 4, 8, 10
+[Las20] L ASSNER C.: Fast differentiable raycasting for neural rendering using sphere-based representations. arXiv preprint arXiv:2004.07484
+(2020). 3
+[LHJ19] L OUBET G., H OLZSCHUCH N., JAKOB W.: Reparameterizing discontinuous integrands for differentiable rendering. ACM Trans.
+Graph. 38, 6 (2019), 1–14. 2, 4
+[LHK∗ 20] L AINE S., H ELLSTEN J., K ARRAS T., S EOL Y., L EHTINEN
+J., A ILA T.: Modular primitives for high-performance differentiable rendering. ACM Trans. Graph. 39, 6 (2020). 4, 8
+[LKG∗ 03] L ENSCH H. P., K AUTZ J., G OESELE M., H EIDRICH W., S EI DEL H.-P.: Image-based reconstruction of spatial appearance and geometric detail. ACM Trans. Graph. 22, 2 (2003), 234–257. 2
+[LLCL19] L IU S., L I T., C HEN W., L I H.: Soft rasterizer: A differentiable renderer for image-based 3D reasoning. In ICCV (2019), IEEE,
+pp. 7708–7717. 2, 4, 8
+[NLGK18] NAM G., L EE J. H., G UTIERREZ D., K IM M. H.: Practical
+SVBRDF acquisition of 3D objects with unstructured flash photography.
+ACM Trans. Graph. 37, 6 (2018), 1–12. 2, 8, 9, 10
+[NLW∗ 16] NAM G., L EE J. H., W U H., G UTIERREZ D., K IM M. H.:
+Simultaneous acquisition of microscale reflectance and normals. ACM
+Trans. Graph. 35, 6 (2016), 185–1. 1
+[PF14] PAPADHIMITRI T., FAVARO P.: Uncalibrated near-light photometric stereo. 2
+[PFS∗ 19] PARK J. J., F LORENCE P., S TRAUB J., N EWCOMBE R.,
+L OVEGROVE S.: Deepsdf: Learning continuous signed distance functions for shape representation. In Proc. IEEE/CVF CVPR (2019),
+pp. 165–174. 3
+[PGC∗ 17] PASZKE A., G ROSS S., C HINTALA S., C HANAN G., YANG
+E., D E V ITO Z., L IN Z., D ESMAISON A., A NTIGA L., L ERER A.: Automatic differentiation in pytorch. 3
+[PNS18] PARK J. J., N EWCOMBE R., S EITZ S.: Surface light field fusion. In 3DV (2018), IEEE, pp. 12–21. 2
+[QLD15] Q UÉAU Y., L AUZE F., D UROU J.-D.: Solving uncalibrated
+photometric stereo using total variation. Journal of Mathematical Imaging and Vision 52, 1 (2015), 87–107. 2
+[QMC∗ 17] Q UÉAU Y., M ÉLOU J., C ASTAN F., C REMERS D., D UROU
+J.-D.: A variational approach to shape-from-shading under natural illumination. In International Workshop on Energy Minimization Methods in
+Computer Vision and Pattern Recognition (2017), Springer, pp. 342–357.
+2
+[QMD16] Q UÉAU Y., M ECCA R., D UROU J.-D.: Unbiased photometric
+stereo for colored surfaces: A variational approach. In Proc. IEEE CVPR
+(2016), pp. 4359–4368. 2
+[QMDC17] Q UÉAU Y., M ÉLOU J., D UROU J.-D., C REMERS D.: Dense
+multi-view 3D-reconstruction without dense correspondences. arXiv
+preprint arXiv:1704.00337 (2017). 2
+[Rey03] R EYNOLDS O.: Papers on mechanical and physical subjects: the
+sub-mechanics of the universe, vol. 3. The University Press, 1903. 4
+[LSC18] L I Z., S UNKAVALLI K., C HANDRAKER M.: Materials for
+masses: SVBRDF acquisition with a single mobile phone image. In
+ECCV (2018), Springer, pp. 72–87. 3
+[RPG16] R IVIERE J., P EERS P., G HOSH A.: Mobile surface reflectometry. In Computer Graphics Forum (2016), vol. 35, Wiley Online Library,
+pp. 191–202. 1, 3, 7
+[LSR∗ 20] L I Z., S HAFIEI M., R AMAMOORTHI R., S UNKAVALLI K.,
+C HANDRAKER M.: Inverse rendering for complex indoor scenes: Shape,
+spatially-varying lighting and SVBRDF from a single image. In Proc.
+IEEE/CVF CVPR (2020), pp. 2475–2484. 3
+[RRFG17] R IVIERE J., R ESHETOUSKI I., F ILIPI L., G HOSH A.: Polarization imaging reflectometry in the wild. ACM Trans. Graph. 36, 6
+(2017), 1–14. 1
+[LTJ18] L IU H.-T. D., TAO M., JACOBSON A.: Paparazzi: surface editing by way of multi-view image processing. ACM Trans. Graph. 37, 6
+(2018), 221–1. 8
+[Mat03] M ATUSIK W.: A data-driven reflectance model. PhD thesis,
+Massachusetts Institute of Technology, 2003. 2
+[MKC∗ 17] M AIER R., K IM K., C REMERS D., K AUTZ J., N IESSNER
+M.: Intrinsic3d: High-quality 3D reconstruction by joint appearance and
+geometry optimization with spatially-varying lighting. In ICCV (2017),
+IEEE, pp. 3114–3122. 2
+[MON∗ 19] M ESCHEDER L., O ECHSLE M., N IEMEYER M., N OWOZIN
+S., G EIGER A.: Occupancy networks: Learning 3D reconstruction in
+function space. In Proc. IEEE/CVF CVPR (2019), pp. 4460–4470. 3
+[NDVZJ19] N IMIER -DAVID M., V ICINI D., Z ELTNER T., JAKOB W.:
+Mitsuba 2: A retargetable forward and inverse renderer. ACM Trans.
+Graph. 38, 6 (2019), 1–17. 2, 4, 8
+[NIH∗ 11] N EWCOMBE R. A., I ZADI S., H ILLIGES O., M OLYNEAUX
+D., K IM D., DAVISON A. J., KOHI P., S HOTTON J., H ODGES S.,
+F ITZGIBBON A.: Kinectfusion: Real-time dense surface mapping and
+tracking. In ISMAR (2011), IEEE, pp. 127–136. 1, 7, 8, 9
+[NISA06] N EALEN A., I GARASHI T., S ORKINE O., A LEXA M.: Laplacian mesh optimization. In Proc. the 4th international conference on
+Computer graphics and interactive techniques in Australasia and Southeast Asia (2006), pp. 381–389. 7
+[RRN∗ 20] R AVI N., R EIZENSTEIN J., N OVOTNY D., G ORDON T., L O
+W.-Y., J OHNSON J., G KIOXARI G.: Accelerating 3D deep learning with
+PyTorch3D. arXiv preprint arXiv:2007.08501 (2020). 1, 2, 4, 8
+[RWS∗ 11] R EN P., WANG J., S NYDER J., T ONG X., G UO B.: Pocket
+reflectometry. ACM Trans. Graph. 30, 4 (2011), 1–10. 3
+[SD99] S EITZ S. M., DYER C. R.: Photorealistic scene reconstruction by
+voxel coloring. International Journal of Computer Vision 35, 2 (1999),
+151–173. 2
+[SDR∗ 20] S CHMITT C., D ONNE S., R IEGLER G., KOLTUN V., G EIGER
+A.: On joint estimation of pose, geometry and svBRDF from a handheld
+scanner. In Proc. IEEE/CVF CVPR (2020), pp. 3493–3503. 2, 7
+[SLS∗ 06] S HARF A., L EWINER T., S HAMIR A., KOBBELT L., C OHEN O R D.: Competing fronts for coarse–to–fine surface reconstruction.
+In Computer Graphics Forum (2006), vol. 25, Wiley Online Library,
+pp. 389–398. 7
+[SSWK13] S CHWARTZ C., S ARLETTE R., W EINMANN M., K LEIN R.:
+Dome ii: A parallelized btf acquisition system. In Material Appearance
+Modeling (2013), pp. 25–31. 1
+[SVJ15] S ACHT L., VOUGA E., JACOBSON A.: Nested cages. ACM
+Trans. Graph. 34, 6 (2015), 1–14. 8
+[SY10] S AHILLIO ĞLU Y., Y EMEZ Y.: Coarse-to-fine surface reconstruction from silhouettes and range data using mesh deformation. Computer
+Vision and Image Understanding 114, 3 (2010), 334–348. 7
+© 2021 The Author(s)
+Computer Graphics Forum © 2021 The Eurographics Association and John Wiley & Sons Ltd.
+Luan et al. / Unified Shape and SVBRDF Recovery using Differentiable Monte Carlo Rendering
+[SZPF16] S CHÖNBERGER J. L., Z HENG E., P OLLEFEYS M., F RAHM
+J.-M.: Pixelwise view selection for unstructured multi-view stereo. In
+ECCV (2016), Springer. 2, 7, 8
+[TFG∗ 13] T UNWATTANAPONG B., F YFFE G., G RAHAM P., B USCH J.,
+Y U X., G HOSH A., D EBEVEC P.: Acquiring reflectance and shape from
+continuous spherical harmonic illumination. ACM Trans. Graph. 32, 4
+(2013), 1–12. 1, 2
+[TSG19] T SAI C.-Y., S ANKARANARAYANAN A. C., G KIOULEKAS I.:
+Beyond volumetric albedo–a surface optimization framework for nonline-of-sight imaging. In Proc. IEEE/CVF CVPR (2019), pp. 1545–1555.
+2, 7
+[VTC05] VOGIATZIS G., T ORR P. H., C IPOLLA R.: Multi-view stereo
+via volumetric graph-cuts. In Proc. IEEE CVPR (2005), vol. 2, pp. 391–
+398. 2
+[Woo80] W OODHAM R. J.: Photometric method for determining surface orientation from multiple images. Optical engineering 19, 1 (1980),
+191139. 2
+[WWZ15] W U H., WANG Z., Z HOU K.: Simultaneous localization and
+appearance estimation with a consumer rgb-d camera. IEEE TVCG 22, 8
+(2015), 2012–2023. 2
+[XDPT16] X IA R., D ONG Y., P EERS P., T ONG X.: Recovering shape
+and spatially-varying surface reflectance under unknown illumination.
+ACM Trans. Graph. 35, 6 (2016), 1–12. 2
+[YDMH99] Y U Y., D EBEVEC P., M ALIK J., H AWKINS T.: Inverse
+global illumination: Recovering reflectance models of real scenes from
+photographs. In Proc. Computer graphics and interactive techniques
+(1999), pp. 215–224. 2
+[ZCD∗ 16] Z HOU Z., C HEN G., D ONG Y., W IPF D., Y U Y., S NYDER J.,
+T ONG X.: Sparse-as-possible SVBRDF acquisition. ACM Trans. Graph.
+35, 6 (2016), 1–12. 2
+[ZLW∗ 21] Z HANG K., L UAN F., WANG Q., BALA K., S NAVELY N.:
+Physg: Inverse rendering with spherical gaussians for physics-based material editing and relighting. In Proc. IEEE CVPR (2021). 3
+[ZT10] Z HOU Z., TAN P.: Ring-light photometric stereo. In ECCV
+(2010), Springer, pp. 265–279. 2
+[ZWZ∗ 19]
+Z HANG C., W U
+MAMOORTHI R., Z HAO S.:
+L., Z HENG C., G KIOULEKAS I., R A A differential theory of radiative transfer.
+ACM Trans. Graph. 38, 6 (2019), 227:1–227:16. 3, 4
+© 2021 The Author(s)
+Computer Graphics Forum © 2021 The Eurographics Association and John Wiley & Sons Ltd.

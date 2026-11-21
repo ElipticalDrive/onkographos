@@ -1,0 +1,218 @@
+--- v001.md
++++ v002.md
+@@ -31,6 +31,6 @@
+ 3.  **Query:** For a query point $\chi \in \Omega$:
+     a. Identify the set of $M$ nearest tensors $\{\tau_{n_1}, \dots, \tau_{n_M}\}$ that cover or are nearest to $\chi$ [S1].
+-    b. For each selected tensor $\tau$, extract density features $\mathcal{G}^\sigma(\chi)$ and appearance features $\mathcal{G}^c(\chi)$ using the CP-decomposed tri-vectors [S1].
+-    c. Aggregate the extracted features from the $M$ tensors [S1].
++    b. For each selected tensor $\tau$, extract density features $\mathcal{G}^\sigma(\chi)$ using the CP-decomposed tri-vectors [S1].
++    c. Aggregate the extracted density features from the $M$ tensors [S1].
+ 4.  **Regression:**
+     a. Compute volume density $\sigma_\chi$ by aggregating density features: $\sigma_\chi = A_\sigma(\{\mathcal{G}^\sigma(\chi)\})$ [S1].
+@@ -47,5 +47,5 @@
+ import numpy as np
+ 
+-def strivec_query(chi, tensor_cloud, M, psi_mlp):
++def strivec_query(chi, d, tensor_cloud, M, psi_mlp):
+     """
+     Query the Strivec radiance field at location chi.
+@@ -53,15 +53,12 @@
+     Args:
+         chi: 3D coordinate (x, y, z)
++        d: viewing direction vector
+         tensor_cloud: List of N local tensors. Each tensor is a dict with keys:
+             'p': center position (3,)
+             'l': edge length (float)
+-            'v_sigma': Density tri-vectors, shape (R, I, J, K) -> actually stored as 
+-                       list of 3 vectors of shape (R, dim) or similar. 
+-                       Assuming CP factors: v0 (I, R), v1 (J, R), v2 (K, R) for density.
+-            'v_color': Appearance tri-vectors, shape (R, I, J, K, P). 
+-                       Stored as v0 (I, R), v1 (J, R), v2 (K, R), v3 (P, R).
++            'v_sigma': Density tri-vectors, list of 3 arrays of shape (dim, R)
+             'R': CP rank
+         M: Number of nearest tensors to select
+-        psi_mlp: MLP function taking aggregated features and direction
++        psi_mlp: MLP function taking (aggregated_density, direction) -> color
+         
+     Returns:
+@@ -69,107 +66,51 @@
+         c: View-dependent color
+     """
+-    # Step 1: Select M nearest tensors
+-    # Calculate distance from chi to center p of each tensor
+-    # Note: The source says "select M nearest tensors that cover chi". 
+-    # If chi is not covered by any, nearest neighbors are used.
+-    distances = []
+-    for n, tau in enumerate(tensor_cloud):
+-        p = tau['p']
+-        dist = np.linalg.norm(chi - p)
+-        distances.append((dist, n))
+-    
+-    distances.sort(key=lambda x: x[0])
+-    selected_indices = [idx for _, idx in distances[:M]]
+-    selected_tensors = [tensor_cloud[i] for i in selected_indices]
+-    
+-    # Step 2: Extract and Aggregate Features
+-    aggregated_density_features = []
+-    aggregated_appearance_features = []
+-    
++    if M <= 0 or len(tensor_cloud) == 0:
++        return 0.0, np.zeros_like(d)
++
++    # 1. Select M nearest tensors
++    centers = np.array([tau['p'] for tau in tensor_cloud])
++    distances = np.linalg.norm(centers - chi, axis=1)
++    nearest_indices = np.argsort(distances)[:M]
++    selected_tensors = [tensor_cloud[i] for i in nearest_indices]
++
++    # 2. Extract and aggregate density features
++    density_values = []
+     for tau in selected_tensors:
+-        # Extract density feature at chi using CP decomposition
+-        # tau['v_sigma'] contains factors for density tensor G^sigma
+-        # G^sigma is 3D: I x J x K
+-        # Factors: v0 (I, R), v1 (J, R), v2 (K, R)
+-        v0, v1, v2 = tau['v_sigma'] # Shapes: (I, R), (J, R), (K, R)
++        v0, v1, v2 = tau['v_sigma']
++        # Map global chi to local [0, 1] coordinates within the cuboid
++        local_coords = (chi - (tau['p'] - tau['l'] / 2.0)) / tau['l']
++        local_coords = np.clip(local_coords, 0.0, 1.0)
+         
+-        # Interpolate/evaluate CP tensor at chi relative to tensor bounds
+-        # This requires mapping chi to local coordinates within the cuboid omega
+-        # and interpolating along the vectors.
+-        # For simplicity, assuming a helper function 'cp_evaluate' exists
+-        # which handles the coordinate mapping and outer product summation.
+-        sigma_feat = cp_evaluate_density(chi, tau, v0, v1, v2)
+-        aggregated_density_features.append(sigma_feat)
+-        
+-        # Extract appearance feature at chi using CP decomposition
+-        # tau['v_color'] contains factors for appearance tensor G^c
+-        # G^c is 4D: I x J x K x P
+-        # Factors: v0 (I, R), v1 (J, R), v2 (K, R), v3 (P, R)
+-        v0_c, v1_c, v2_c, v3_c = tau['v_color']
+-        color_feat = cp_evaluate_color(chi, tau, v0_c, v1_c, v2_c, v3_c)
+-        aggregated_appearance_features.append(color_feat)
+-        
+-    # Step 3: Aggregate
+-    # A_sigma aggregates density features. Typically a sum or mean.
+-    # The source implies aggregation across the M tensors.
+-    agg_sigma = np.mean(aggregated_density_features, axis=0) # Example aggregation
+-    
+-    # Step 4: Regress Color
+-    # c = psi(agg_sigma, d)
+-    # Note: d (viewing direction) is not passed in this function signature 
+-    # but is required for the MLP.
+-    # We assume d is available in the context or passed separately.
+-    # Here we return the aggregated features for the caller to pass to psi.
+-    return agg_sigma, aggregated_appearance_features # Simplified return
++        # Evaluate CP tensor at local_coords
++        val = evaluate_cp_tensor(local_coords, v0, v1, v2)
++        density_values.append(val)
+ 
+-def cp_evaluate_density(chi, tau, v0, v1, v2):
++    # Aggregate density features (A_sigma)
++    agg_density = np.mean(density_values, axis=0)
++
++    # 3. Regress properties
++    sigma = agg_density
++    color = psi_mlp(agg_density, d)
++
++    return sigma, color
++
++def evaluate_cp_tensor(coords, v0, v1, v2):
+     """
+-    Evaluate the density tensor at chi using CP factors.
++    Evaluate a CP-decomposed tensor at normalized coordinates [0, 1].
+     """
+-    # Map global chi to local coordinates within the cuboid defined by tau['p'] and tau['l']
+-    # This involves normalization to [0,1] or [-1,1] range of the tensor dimensions
+-    local_coords = map_to_local(chi, tau['p'], tau['l'])
+-    
+-    # Interpolate each vector at the corresponding local coordinate
+-    # v0 corresponds to dimension 0 (x), v1 to 1 (y), v2 to 2 (z)
+-    val0 = interpolate_vector(v0, local_coords[0])
+-    val1 = interpolate_vector(v1, local_coords[1])
+-    val2 = interpolate_vector(v2, local_coords[2])
+-    
+-    # Sum over R components: sum_r (val0_r * val1_r * val2_r)
+-    # Assuming vectors are shape (R, dim) or (dim, R). 
+-    # Standard CP: tau = sum_r v_r^0 o v_r^1 o v_r^2
+-    # If v0 is (I, R), then v0[:, r] is the r-th vector for dim 0.
+-    # We need to interpolate the r-th vector at the specific coordinate.
+-    
+     R = v0.shape[1]
+-    density_val = 0.0
++    total = 0.0
+     for r in range(R):
+-        # Interpolate the r-th component of each vector
+-        # Note: Implementation of interpolate_vector depends on storage format
+-        # Assuming vectors are stored as (dim, R)
+-        comp0 = interpolate_vector(v0[:, r], local_coords[0])
+-        comp1 = interpolate_vector(v1[:, r], local_coords[1])
+-        comp2 = interpolate_vector(v2[:, r], local_coords[2])
+-        density_val += comp0 * comp1 * comp2
+-        
+-    return density_val
++        val0 = interpolate_1d(v0[:, r], coords[0])
++        val1 = interpolate_1d(v1[:, r], coords[1])
++        val2 = interpolate_1d(v2[:, r], coords[2])
++        total += val0 * val1 * val2
++    return total
+ 
+-def map_to_local(chi, p, l):
++def interpolate_1d(vector, coord):
+     """
+-    Map global coordinate chi to local [0, 1] coordinates within the cuboid.
++    Linear interpolation of a 1D vector at a normalized coordinate [0, 1].
+     """
+-    # Assuming the cuboid is axis-aligned and centered at p with edge length l
+-    # Local coord = (chi - (p - l/2)) / l
+-    return (chi - (p - l / 2.0)) / l
+-
+-def interpolate_vector(vector, coord):
+-    """
+-    Interpolate a 1D vector at a normalized coordinate [0, 1].
+-    Uses linear interpolation.
+-    """
+-    # vector shape: (size,)
+-    # coord in [0, 1]
+-    # Map to indices
+     size = len(vector)
+     idx = coord * (size - 1)
+@@ -179,29 +120,15 @@
+     j = np.clip(j, 0, size - 1)
+     w = idx - i
+-    return (1 - w) * vector[i] + w * vector[j]
++    return (1.0 - w) * vector[i] + w * vector[j]
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Empty Space:** If $\chi$ is not covered by any tensor, the nearest neighbor selection must handle distances gracefully. The source notes that tensors are distributed around the actual scene surface, so empty space is largely avoided [S1].
+-*   **Precision:** CP decomposition involves sums of outer products. Numerical stability should be considered when $R$ is large, though Strivec uses compact factors [S1].
+-*   **Boundary Conditions:** Interpolation at the boundaries of the local cuboid $\omega$ must be handled correctly to avoid discontinuities between adjacent tensors [S1].
+-
+-## Subtopics
+-
+-### Multi-scale Tensor Grids
+-Strivec uses multi-scale tensor grids to discover geometry and appearance commonalities and exploit spatial coherence at multiple local scales [S1]. This allows the representation to capture both fine details and coarse structures efficiently.
+-
+-### Comparison with TensoRF
+-TensoRF uses a global tensor and vector-matrix decomposition, while Strivec uses a cloud of local tensors and CP decomposition (triple vectors). Local tensors are less complex and lower rank, reducing the required number of CP components per tensor [S1].
+-
+-### Comparison with Global Representations
+-Unlike global representations (TensoRF, Instant-NGP), Strivec exploits scene sparsity directly by distributing tensors only where geometry exists [S1].
+-
+-### Comparison with Local Representations
+-Unlike local representations (Plenoxels, Point-NeRF), Strivec uses local smoothness and coherence via tensor factorization, correlating features inside a local box rather than optimizing them independently [S1].
++*   **Empty Space:** If $\chi$ is not covered by any tensor, the nearest neighbor selection handles distances gracefully [G]. The sources note that tensors are distributed around the actual scene surface to avoid empty space [S1].
++*   **Precision:** CP decomposition involves sums of outer products; numerical stability should be considered when $R$ is large, though Strivec uses compact factors [S1, G].
++*   **Boundary Conditions:** Interpolation at the boundaries of the local cuboid $\omega$ must be handled correctly to avoid discontinuities between adjacent tensors [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Query time depends on $M$ (number of nearest tensors) and $R$ (CP rank). For each query, $M$ tensors are evaluated, each requiring $O(R \cdot \text{dim})$ operations for interpolation and summation.
+-*   **Memory Complexity:** Memory usage is proportional to $N \cdot R \cdot (\text{spatial dims} + \text{appearance dims})$. Since $N$ is sparse and $R$ is small due to local compactness, memory usage is significantly lower than global tensor methods [S1].
++*   **Time Complexity:** Query time depends on $M$ (number of nearest tensors) and $R$ (CP rank) [G]. For each query, $M$ tensors are evaluated, each requiring $O(R \cdot \text{dim})$ operations for interpolation and summation [G].
++*   **Memory Complexity:** Memory usage is proportional to $N \cdot R \cdot (\text{spatial dims} + \text{appearance dims})$ [G]. Since $N$ is sparse and $R$ is small due to local compactness, memory usage is significantly lower than global tensor methods [S1].
+ *   **Performance:** Strivec achieves state-of-the-art rendering quality on synthetic and real datasets, outperforming TensoRF and Instant-NGP while using significantly fewer model parameters [S1].
+ *   **Strengths:** Efficient scene modeling, compact representation, exploitation of sparsity and local coherence [S1].

@@ -1,0 +1,136 @@
+--- v001.md
++++ v002.md
+@@ -4,89 +4,72 @@
+ 
+ ## Overview
+-Full-body Avatar Modeling anchors 3D Gaussians in a canonical space and deforms them via parametric body models (e.g., SMPL) or cage-based rigging to model dynamic human motions [S1]. It solves the problem of reconstructing animatable, high-fidelity human avatars from multi-view video by combining rigid skeletal transformations with non-rigid residual deformations [S1]. Unlike head-centric modeling which focuses on facial expressions and fine-grained geometry (e.g., wrinkles, hair) using FLAME models [S1], this method targets full-body dynamics, leveraging the speed and editability of Gaussian Splatting [S1]. It builds on [SMPL-based rigid/non-rigid deformation](8385-smpl-based-rigid-non-rigid-deformation.md).
++Full-body Avatar Modeling anchors 3D Gaussians in a canonical space and deforms them via parametric body models (e.g., SMPL) or cage-based rigging to model dynamic human motions [S1]. It employs a hybrid deformation strategy that combines linear blend skinning (LBS) for rigid skeletal transformations with pose-conditioned deformation fields for non-rigid secondary effects [S1]. This approach distinguishes itself from head-centric modeling by focusing on full-body structural integrity and large-scale articulation rather than fine-grained facial expressions [S1].
+ 
+ ## How it works
+-**Inputs:** Multi-view video frames of a human subject; a parametric body model (e.g., SMPL) providing skeleton and mesh topology; camera poses and intrinsics.
+-**Outputs:** A set of 3D Gaussians defined in canonical space, each with position $\mathbf{p}$, covariance $\Sigma$, opacity $\alpha$, spherical harmonics coefficients for color, and learnable parameters for deformation (skinning weights, MLP weights).
++The method builds on [SMPL-based rigid/non-rigid deformation](8385-smpl-based-rigid-non-rigid-deformation.md) by explicitly defining the hybrid strategy for full-body avatars.
++
++**Inputs and Outputs:**
++*   **Inputs:** Canonical 3D Gaussians (position $\mathbf{p}_i$, covariance $\Sigma_i$, opacity $\alpha_i$, spherical harmonics coefficients), SMPL model parameters (pose $\theta$, shape $\beta$), and training images with known camera poses.
++*   **Outputs:** Deformed 3D Gaussians ready for differentiable rasterization.
+ 
+ **Data Structures:**
+-1.  **Gaussian Attributes:**
+-    *   $\mathbf{p} \in \mathbb{R}^3$: Canonical position.
+-    *   $\Sigma \in \mathbb{R}^{3 \times 3}$: Covariance matrix.
+-    *   $\alpha \in \mathbb{R}$: Opacity.
+-    *   $\mathbf{c} \in \mathbb{R}^k$: Color coefficients (spherical harmonics).
+-    *   $\mathbf{w} \in \mathbb{R}^{N_{bones}}$: Learnable skinning weights vector.
+-    *   $\mathbf{l} \in \mathbb{R}^{d_l}$: Optional latent code for pose-dependent deformation [S2].
+-2.  **Deformation Network (MLP):**
+-    *   Input: Canonical position $\mathbf{p}$, pose parameters $\theta$, and optionally latent code $\mathbf{l}$ [S2].
+-    *   Output: Non-rigid residual offset $\Delta \mathbf{p} \in \mathbb{R}^3$.
+-3.  **Precomputed Joint Transforms:**
+-    *   $M_{j,t} \in \mathbb{R}^{4 \times 4}$: Rigid transformation matrix for joint $j$ at timestep $t$ [S2].
++*   **Canonical Gaussians:** Stored as arrays of position (3 floats), covariance (6 floats, symmetric positive definite), opacity (1 float), and SH coefficients (variable, typically 48 for degree 3).
++*   **Skinning Weights:** A learnable vector $\mathbf{w}_i \in \mathbb{R}^{N_{bones}}$ per Gaussian, where $N_{bones}$ is the number of bones in the SMPL model.
++*   **Deformation Network:** An MLP taking canonical position and pose as input to predict non-rigid offsets.
+ 
+ **Steps:**
+ 
+-1.  **Initialization:** Initialize 3D Gaussians on the surface of the parametric mesh (e.g., SMPL) in the canonical rest pose [S1, 1477-gaussian-avatars.md, 1482-relightable-gaussian-codec-avatars.md]. Initialize skinning weights $\mathbf{w}$ and MLP parameters.
++1.  **Precompute Rigid Transforms:** For each training timestep (or pose instance), compute the rigid transformation matrices $\mathbf{T}_j(\theta)$ for each bone $j$ based on the SMPL pose $\theta$ [S1, S2]. Note: Pose blend shapes are typically omitted to avoid inaccuracies in shape estimation; an MLP handles pose-dependent deformations instead [S2].
+ 
+-2.  **Precompute Rigid Transforms:** For each training timestep $t$ and target pose $\theta_t$, compute the rigid transformation matrices $M_{j,t}$ for each body joint $j$ based on the parametric model [S2]. This is done once per pose sequence to improve efficiency [S2].
++2.  **Compute Skinning Weights:** For each Gaussian $i$, optimize the raw skinning weight vector $\mathbf{w}_i$. Apply ReLU activation to each component $w_{i,j}$ to ensure non-negativity:
++    $$ \hat{w}_{i,j} = \max(0, w_{i,j}) $$
++    Normalize the vector so components sum to 1:
++    $$ w'_{i,j} = \frac{\hat{w}_{i,j}}{\sum_{k=1}^{N_{bones}} \hat{w}_{i,k}} $$
++    [S2]
+ 
+-3.  **Rigid Deformation (LBS):** For each Gaussian $i$ at canonical position $\mathbf{p}_i$:
+-    a. Apply ReLU activation to the skinning weights vector $\mathbf{w}_i$ to ensure non-negativity: $\mathbf{w}_i^+ = \text{ReLU}(\mathbf{w}_i)$ [S2].
+-    b. Normalize the weights to sum to 1: $\hat{\mathbf{w}}_i = \frac{\mathbf{w}_i^+}{\sum_k \mathbf{w}_{i,k}^+}$ [S2].
+-    c. Compute the rigidly transformed position $\mathbf{p}_{rigid}$ using Linear Blend Skinning (LBS) [S1, S2]:
+-       $$ \mathbf{p}_{rigid} = \sum_{j=1}^{N_{bones}} \hat{w}_{i,j} M_{j,t} \mathbf{p}_i $$
+-       Note: Pose blend shapes are explicitly excluded because shape estimation and obtained blend shapes may be inaccurate; the MLP handles pose-dependent deformations instead [S2].
++3.  **Rigid Deformation (LBS):** Compute the rigidly transformed position $\mathbf{p}_{rigid}$ using the normalized skinning weights and precomputed bone transforms:
++    $$ \mathbf{p}_{rigid} = \sum_{j=1}^{N_{bones}} w'_{i,j} \mathbf{T}_j(\theta) \mathbf{p}_i $$
++    [S1, S2]
+ 
+-4.  **Non-Rigid Deformation:** Pass the canonical position $\mathbf{p}_i$, pose parameters $\theta_t$, and optional latent code $\mathbf{l}_i$ into the deformation MLP to predict the residual offset $\Delta \mathbf{p}_i$ [S2].
+-    $$ \Delta \mathbf{p}_i = \text{MLP}(\mathbf{p}_i, \theta_t, \mathbf{l}_i) $$
++4.  **Non-Rigid Deformation:** Compute a residual offset $\Delta \mathbf{p}$ using a deformation network (MLP) conditioned on the canonical position $\mathbf{p}_i$ and the pose $\theta$:
++    $$ \Delta \mathbf{p} = \text{MLP}(\mathbf{p}_i, \theta) $$
++    [S1]
+ 
+-5.  **Final Position and Covariance Update:**
+-    a. Compute the final deformed position:
+-       $$ \mathbf{p}'_i = \mathbf{p}_{rigid} + \Delta \mathbf{p}_i $$
+-    b. Compute the Jacobian $J_i$ of the deformation map with respect to $\mathbf{p}_i$ via automatic differentiation through the MLP and LBS [G].
+-    c. Update the covariance matrix:
+-       $$ \Sigma'_i = J_i \Sigma_i J_i^T + \sigma^2 I $$
+-       where $\sigma^2 I$ is a small regularization term to ensure positive definiteness [G].
++5.  **Final Position:**
++    $$ \mathbf{p}'_i = \mathbf{p}_{rigid} + \Delta \mathbf{p} $$
++    [S1]
+ 
+-6.  **Differentiable Rendering:** Render the deformed Gaussians using 3D Gaussian Splatting [S1, 1479-gaussian-avatar.md, 1480-3dgs-avatar.md, 6157-animatable-gaussians.md]. The rendering process is differentiable with respect to Gaussian parameters and network weights [S1, 6136-instantsplat.md, 6464-pixelsplat.md].
++6.  **Covariance Update:** Transform the covariance matrix $\Sigma_i$ using the Jacobian $J$ of the deformation map with respect to the canonical position. The Jacobian $J$ is the derivative of the total deformation (LBS + MLP) with respect to $\mathbf{p}_i$:
++    $$ J = \frac{\partial \mathbf{p}'_i}{\partial \mathbf{p}_i} $$
++    $$ \Sigma'_i = J \Sigma_i J^T + \sigma^2 I $$
++    where $\sigma^2 I$ is a small regularization term to ensure positive definiteness [G].
+ 
+-7.  **Loss Computation and Optimization:** Minimize a combination of losses [6136-instantsplat.md, 6464-pixelsplat.md]:
+-    $$ \mathcal{L} = \lambda_{L1}\mathcal{L}_{L1} + \lambda_{ssim}\mathcal{L}_{MS-SSIM} + \lambda_{lpips}\mathcal{L}_{LPIPS} + \lambda_{trans}\mathcal{L}_{trans} + \lambda_{rot}\mathcal{L}_{rot} + \lambda_{s}\mathcal{L}_{s} + \lambda_{mesh}\mathcal{L}_{mesh} + \lambda_{skn}\mathcal{L}_{skn} $$
+-    Typical values for hyperparameters [S2]:
+-    *   $\lambda_{L1} = 0.8$
+-    *   $\lambda_{ssim} = 0.2$
+-    *   $\lambda_{lpips} = 0.05$
+-    *   $\lambda_{trans} = 0.01$
+-    *   $\lambda_{rot} = 0.001$
+-    *   $\lambda_{s} = 0.001$
+-    *   $\lambda_{mesh} = 0.1$
+-    *   $\lambda_{skn} = 0.001$
+-    *   Dimension of latent code $l = 16$
++7.  **Rendering and Loss:** Render the deformed Gaussians using differentiable splatting. Compute loss $\mathcal{L}$ combining photometric error ($\mathcal{L}_{L1}$), perceptual metrics ($\mathcal{L}_{MS-SSIM}$, $\mathcal{L}_{LPIPS}$), and potentially regularization terms for skinning weights or mesh consistency [S2].
+ 
+-    Optimization uses different learning rates [S2]:
+-    *   MLP and skinning weights $\mathbf{w}$: $1 \times 10^{-4}$
+-    *   Latent codes $\mathbf{l}$: $2.5 \times 10^{-3}$
+-    *   Original Gaussian parameters (position, orientation, scaling, colors, opacity): Unchanged from standard 3D-GS [S2].
++**Parameters:**
++*   Learning rate for MLP and skinning weights $\mathbf{w}$: $10^{-4}$ [S2].
++*   Learning rate for latent codes (if used): $2.5 \times 10^{-3}$ [S2].
++*   Loss weights (typical): $\lambda_{L1}=0.8$, $\lambda_{SSIM}=0.2$, $\lambda_{LPIPS}=0.05$ [S2].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Negative Weights:** Initial optimization of $\mathbf{w}$ can lead to negative values; ReLU activation is required before normalization [S2].
+-*   **Blend Shape Inaccuracy:** Using pose blend shapes from the parametric model is discouraged due to potential inaccuracies in shape estimation; rely on the MLP for pose-dependent deformations [S2].
+-*   **Template Vertex Deformation:** Not necessary as LBS is applied directly on canonical Gaussians [S2].
++*   **Negative Weights:** Raw optimized skinning weights can be negative; ReLU and normalization are required to prevent invalid blending [S2].
++*   **Pose Blend Shapes:** Using SMPL pose blend shapes before deformation can introduce inaccuracies; it is recommended to rely on the MLP for pose-dependent deformations instead [S2].
++*   **Jacobian Computation:** The Jacobian $J$ must include contributions from both the LBS term and the MLP term to correctly transform the covariance [G].
+ 
+ ## Subtopics
+ 
+ ### Linear Blend Skinning for Gaussian Splatting
+-A deformation technique applied to canonical 3D Gaussians to drive human avatars, using precomputed rigid joint transformations and learnable per-Gaussian skinning weights, avoiding pose blend shapes and template vertex deformation [S2]. It is chosen when high-fidelity rigid skeletal motion is required without relying on potentially inaccurate pre-computed blend shapes from the parametric model [S2].
++A specific implementation of the rigid deformation component where LBS is applied directly to canonical Gaussians using precomputed rigid joint transformations and learnable per-Gaussian skinning weights [S2]. It avoids pose blend shapes and template vertex deformation, relying on an MLP for pose-dependent deformations instead [S2]. It is chosen when computational efficiency in precomputing transforms is prioritized and when avoiding inaccuracies from SMPL blend shapes is critical [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering is $O(N)$ where $N$ is the number of Gaussians, similar to standard 3D Gaussian Splatting. Deformation computation is $O(N \cdot N_{bones})$ for LBS plus $O(N)$ for the MLP. Precomputing joint transforms is done once per pose [S2].
+-*   **Memory Complexity:** $O(N \cdot (d_p + d_\Sigma + d_c + d_w + d_l))$ where $d$ denotes dimensionality of attributes. Additional memory for MLP weights and latent codes [S2].
+-*   **Measured Performance:** Real-time rendering is achievable, as indicated by the use of "Real-Time Rendering" in related titles [S2]. Specific FPS numbers depend on hardware and resolution.
+-*   **Strengths:** High fidelity, real-time rendering capability, editability, handles complex non-rigid deformations via MLP [S1, S2].
+-*   **Limitations:** Requires careful tuning of learning rates and regularization terms; MLP inference adds computational overhead compared to pure LBS [S2].
+-*   **When to use:** Full-body avatar reconstruction from multi-view video where dynamic motion and high visual quality are required.
+-*   **When not to use:** Head-centric modeling with intricate facial expressions (use [Gaussian Avatar](1479-gaussian-avatar.md) or similar); static scene reconstruction.
++*   **Time Complexity:** Rendering is $O(N)$ where $N$ is the number of Gaussians. Deformation is $O(N \cdot N_{bones})$ for LBS plus $O(N)$ for the MLP. Precomputing transforms is $O(N_{poses} \cdot N_{bones})$.
++*   **Memory Complexity:** $O(N \cdot (D_{pos} + D_{cov} + D_{sh} + N_{bones}))$ for storing Gaussians and skinning weights.
++*   **Strengths:** Enables real-time rendering of animatable avatars; maintains structural integrity through parametric priors; handles large articulations via LBS [S1, S2].
++*   **Limitations:** Accuracy depends on the quality of the SMPL model and skinning weights; non-rigid details (muscle jiggles) require a capable deformation network [S1].
++*   **When to use:** Full-body human avatars requiring animation in novel poses [S1].
++*   **When not to use:** Head-centric avatars requiring fine facial details (use [Gaussian Avatar](1479-gaussian-avatar.md) or similar) [S1].
+ 
+ ## Background
+-Originated from the application of 3D Gaussian Splatting to human avatar reconstruction, advancing along two directions: full-body and head-centric modeling [S1]. Full-body methods typically anchor Gaussians in canonical space and deform them via parametric body models or cage-based rigging [S1]. The hybrid deformation strategy (LBS + MLP) is a key component in this approach [S1]. Related works include Gaussian Avatar [1479-gaussian-avatar.md], 3DGS-Avatar [1480-3dgs-avatar.md], Animatable Gaussians [6157-animatable-gaussians.md], and UV-based motion parameterization [11653-uv-based-motion-parameterization.md].
++Full-body avatar modeling using 3D Gaussians has emerged as a powerful tool for VR and social applications, advancing along two main directions: full-body and head-centric modeling [S1]. The hybrid deformation strategy, combining LBS and pose-conditioned fields, was introduced to handle the complex dynamics of full-body motion [S1]. Key works include "Human Gaussian Splatting" which details the LBS implementation for Gaussians [S2], and broader surveys categorizing these methods [S1].
+ 
+ ## Sources

@@ -1,0 +1,129 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-MLI-NeRF is a two-stage optimization procedure that learns an intrinsic-aware Neural Radiance Field (NeRF) capable of novel view synthesis, relighting, and intrinsic decomposition (separating reflectance and shading) without relying on statistical priors or ground-truth intrinsic labels [S1]. It differs from standard NeRF variants by explicitly modeling multiple light sources to generate physics-based pseudo-labels, and it differs from prior intrinsic NeRF methods (like [IntrinsicNeRF](10253-nerv-training.md)) by leveraging 3D geometric constraints and multi-light visibility rather than chromaticity or semantic statistical constraints [S1]. The method solves the ill-posed nature of inverse rendering by decoupling the geometry learning (Stage 1) from the intrinsic component separation (Stage 2), using pseudo-labels derived from the Stage 1 model to guide the decomposition [S1].
++MLI-NeRF is a two-stage optimization procedure that learns an intrinsic-aware Neural Radiance Field (NeRF) capable of novel view synthesis, relighting, and intrinsic decomposition (separating reflectance and shading) without relying on statistical priors or ground-truth intrinsic labels [S1]. It differs from standard NeRF variants by explicitly modeling multiple light sources to generate physics-based pseudo-labels, and it differs from prior intrinsic NeRF methods by leveraging 3D geometric constraints and multi-light visibility rather than chromaticity or semantic statistical constraints [S1]. The method solves the ill-posed nature of inverse rendering by decoupling the geometry learning (Stage 1) from the intrinsic component separation (Stage 2), using pseudo-labels derived from the Stage 1 model to guide the decomposition [S1].
+ 
+ ## How it works
+@@ -27,11 +27,11 @@
+     Where $L_{rgb}$ is the rendered image loss, $L_{eik}$ is the Eikonal loss, and $L_{curv}$ is the curvature loss [S1].
+ 3.  **Post-processing (Pseudo Label Generation):**
+-    *   **Step A (Normals and Visibility):** Derive normals $n$ from the gradient of the SDF network. Use geometry network depth and sphere tracing to estimate intersection points. Compute light visibility $V$ (whether a point is directly illuminated) by sphere tracing from the light position to the intersection point [S1].
++    *   **Step A (Normals and Visibility):** Derive normals $n$ from the gradient of the SDF network [S1]. Use geometry network depth and sphere tracing to estimate intersection points [S1]. Compute light visibility $V$ (whether a point is directly illuminated) by sphere tracing from the light position to the intersection point [S1].
+     *   **Step B (Pseudo Shading):** Compute pseudo-shading $S^*$ using the Lambertian cosine law and visibility, adjusted for gamma correction:
+-        $$ S^* = (\max(N \cdot L, 0) \otimes V)^\gamma $$
+-        Where $N$ is the normal ray, $L$ is the light ray, $\otimes$ is pixel-wise product, and $\gamma$ is the gamma correction exponent [S1].
+-    *   **Step C (Pseudo Reflectance):** Infer high-fidelity pseudo-reflectance $R^*$ using multiple lighting conditions. For each pixel, use the equation:
++        $$ S^* = (\max(\mathbf{N} \cdot \mathbf{L}, 0) \otimes V)^\gamma $$
++        Where $\mathbf{N}$ is the normal ray, $\mathbf{L}$ is the light ray, $\otimes$ is pixel-wise product, and $\gamma$ is the gamma correction exponent [S1].
++    *   **Step C (Pseudo Reflectance):** Infer high-fidelity pseudo-reflectance $R^*$ using multiple lighting conditions [S1]. For each pixel, use the equation:
+         $$ R^* = I \oslash S^* $$
+-        Where $I$ is the input image and $\oslash$ is pixel-wise division. This ignores the residual component $Re$ initially, assuming diffuse dominance [S1].
++        Where $I$ is the input image and $\oslash$ is pixel-wise division [S1]. This ignores the residual component $Re$ initially, assuming diffuse dominance [S1].
+ 
+ **Stage 2: Intrinsic-Aware NeRF**
+@@ -55,8 +55,8 @@
+ 
+ def normalize(v):
+-    return v / np.linalg.norm(v)
++    return v / np.linalg.norm(v, axis=-1, keepdims=True)
+ 
+ def compute_gradient(network, points):
+-    # [G] Standard automatic differentiation
++    # [G] Standard automatic differentiation to get SDF gradient
+     return network.gradient(points)
+ 
+@@ -74,8 +74,8 @@
+     return 0.0
+ 
+-def volume_render(positions, colors, alphas, rays):
++def volume_render(positions, colors, alphas, num_rays):
+     # [G] Standard alpha compositing along rays
+-    T = 1.0
+-    rendered = np.zeros_like(colors)
++    T = np.ones(num_rays)
++    rendered = np.zeros_like(colors[0])
+     for i in range(len(positions)):
+         alpha = alphas[i]
+@@ -84,9 +84,14 @@
+     return rendered
+ 
++def sample_rays(pose, image_shape):
++    # [G] Generate camera rays from pose and image dimensions
++    # Returns positions and directions
++    pass
++
+ def train_stage_1(geometry_net, color_net, dataset, lr=1e-4, w_rgb=1.0, w_eik=0.1, w_curv=5e-4):
+     optimizer_params = list(geometry_net.parameters()) + list(color_net.parameters())
+     for epoch in range(num_epochs):
+         for image, pose, light_pos in dataset:
+-            rays = sample_rays(pose)
++            rays = sample_rays(pose, image.shape)
+             positions, directions = rays
+             sdf = geometry_net(positions)
+@@ -94,11 +99,13 @@
+             normals = normalize(compute_gradient(geometry_net, positions))
+             colors = color_net(positions, normals, feat, directions, light_pos)
+-            rendered_image = volume_render(positions, colors, alphas, rays)
++            alphas = geometry_net.get_alphas(positions) # [G] Alpha prediction from NeRF
++            rendered_image = volume_render(positions, colors, alphas, len(rays))
+             loss_rgb = np.mean((rendered_image - image) ** 2)
+-            loss_eik = np.mean((np.linalg.norm(compute_gradient(geometry_net, positions)) - 1.0) ** 2)
+-            loss_curv = geometry_net.curvature(positions)
++            loss_eik = np.mean((np.linalg.norm(compute_gradient(geometry_net, positions), axis=-1) - 1.0) ** 2)
++            loss_curv = compute_curvature(geometry_net, positions) # [G] Curvature from SDF
+             total_loss = w_rgb * loss_rgb + w_eik * loss_eik + w_curv * loss_curv
+             for p in optimizer_params:
+-                p -= lr * p.grad
++                if p.grad is not None:
++                    p -= lr * p.grad
+     return geometry_net, color_net
+ 
+@@ -107,5 +114,5 @@
+     pseudo_reflectances = []
+     for image, pose, light_pos in dataset:
+-        rays = sample_rays(pose)
++        rays = sample_rays(pose, image.shape)
+         positions, directions = rays
+         normals = normalize(compute_gradient(geometry_net, positions))
+@@ -120,5 +127,5 @@
+ 
+ def train_stage_2(geometry_net, reflectance_net, shading_net, 
+-                  pseudo_shadings, pseudo_reflectances, dataset, 
++                  pseudo_shadings, pseudo_reflectances, W_R, W_S, dataset, 
+                   lr=1e-4, w_rgb=1.0, w_intrinsic=1.0, w_reg=1.0):
+     for param in geometry_net.parameters():
+@@ -127,5 +134,5 @@
+     for epoch in range(num_epochs):
+         for i, (image, pose, light_pos) in enumerate(dataset):
+-            rays = sample_rays(pose)
++            rays = sample_rays(pose, image.shape)
+             positions, directions = rays
+             feat = geometry_net.get_features(positions)
+@@ -133,5 +140,6 @@
+             pred_reflectance = reflectance_net(positions, normals, feat)
+             pred_shading = shading_net(positions, normals, feat, light_pos)
+-            rendered_image = volume_render(positions, pred_reflectance * pred_shading, alphas, rays)
++            alphas = geometry_net.get_alphas(positions) # [G] Alpha prediction
++            rendered_image = volume_render(positions, pred_reflectance * pred_shading, alphas, len(rays))
+             pred_residual = rendered_image - (pred_reflectance * pred_shading)
+             loss_rgb = np.mean((rendered_image - image) ** 2)
+@@ -141,5 +149,6 @@
+             total_loss = w_rgb * loss_rgb + w_intrinsic * loss_intrinsic + w_reg * loss_reg
+             for p in optimizer_params:
+-                p -= lr * p.grad
++                if p.grad is not None:
++                    p -= lr * p.grad
+     return reflectance_net, shading_net
+ ```
+@@ -164,6 +173,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Stage 1 training time follows Neuralangelo [24]. Stage 2 training takes approximately 19 hours on a single Nvidia RTX 3090 for the tested datasets [S1].
+-*   **Memory Complexity:** Uses 3D hashing encoding and SDF storage similar to Neuralangelo. The addition of two MLPs (reflectance and shading) increases parameter count slightly, but the geometry network is frozen in Stage 2 [S1].
++*   **Time Complexity:** Stage 1 training time follows Neuralangelo [S1]. Stage 2 training takes approximately 19 hours on a single Nvidia RTX 3090 for the tested datasets [S1].
++*   **Memory Complexity:** Uses 3D hashing encoding and SDF storage similar to Neuralangelo [S1]. The addition of two MLPs (reflectance and shading) increases parameter count slightly, but the geometry network is frozen in Stage 2 [S1].
+ *   **Strengths:** Does not require ground-truth intrinsic labels; leverages 3D geometric constraints for robustness; enables relighting and intrinsic editing [S1].
+ *   **Limitations:** Computationally intensive due to multi-light rendering and sphere tracing; limited to scenes where diffuse reflection dominates (Lambertian assumption); struggles with highly specular or complex non-diffuse effects without residual compensation [S1].

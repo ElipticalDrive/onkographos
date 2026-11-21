@@ -1,0 +1,153 @@
+# 3D Gaussian Splatting Optimization
+
+Also called: Original 3DGS Loss
+
+## Overview
+This method optimizes a set of 3D Gaussian primitives by rendering them to 2D images and comparing the result against ground truth views using a distortion loss, while dynamically modulating the Gaussian count via adaptive densification [S1][S2, unofficial]. It distinguishes itself from sibling methods by explicitly linking the optimization objective (loss scale) to the structural evolution of the scene representation, where gradient magnitudes drive both parameter updates and the addition/removal of primitives [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A collection of $N$ 3D Gaussian primitives $\mathcal{G} = \{G_i\}_{i=1}^N$, where each $G_i$ is defined by position $\mathbf{p}_i$, rotation $q_i$, scale $\mathbf{s}_i$, opacity $\alpha_i$, and spherical harmonic coefficients $c_i$ [3761-3d-gaussian-splatting-training.md]. A set of training views (camera poses and intrinsics) and corresponding ground truth images $\mathbf{x}$.
+*   **Output:** Optimized Gaussian parameters $\mathcal{G}^*$ and the final scene representation.
+
+**Data Structures**
+The Gaussian parameters are stored in contiguous arrays or structures of arrays (SoA) for efficient GPU access:
+*   $\mathbf{p}_i \in \mathbb{R}^3$: Center coordinates.
+*   $q_i \in \mathbb{R}^4$: Unit quaternion for rotation.
+*   $\mathbf{s}_i \in \mathbb{R}^3$: Scale factors (typically exponentiated during storage to ensure positivity).
+*   $\alpha_i \in [0, 1]$: Opacity.
+*   $c_i$: Spherical harmonic coefficients (e.g., $SH_0, SH_1, \dots$).
+
+**Numbered Steps**
+1.  **Random Camera Selection:** Select a single training view (camera pose and intrinsics) randomly from the dataset [S2, unofficial]. This provides the stochastic flavor of Stochastic Gradient Descent (SGD) [S2, unofficial].
+2.  **Differentiable Rendering:**
+    *   Project each 3D Gaussian $G_i$ to 2D screen space using the camera projection matrix and the Gaussian's covariance $\Sigma_i$ [3761-3d-gaussian-splatting-training.md].
+    *   Sort the projected Gaussians by depth (z-buffer) [3761-3d-gaussian-splatting-training.md].
+    *   Alpha-blend the Gaussians in depth order to produce the rendered image $\hat{\mathbf{x}}$ [3761-3d-gaussian-splatting-training.md].
+3.  **Loss Computation:** Compute the distortion loss $D(\mathbf{x}, \hat{\mathbf{x}})$ between the ground truth image $\mathbf{x}$ and the rendered image $\hat{\mathbf{x}}$ [S1]. The total loss is:
+    $$ \mathcal{L} = \gamma \, D(\mathbf{x}, \hat{\mathbf{x}}) $$
+    where $\gamma$ is a scalar weighting factor [S1]. Common choices for $D$ include L1 loss, Structural Similarity (SSIM), or perceptual loss (LPIPS) [S1].
+4.  **Backpropagation:** Propagate the pixel error backward through the alpha compositing and 2D projection operations to compute gradients for every parameter of every Gaussian $G_i$ that contributed to the rendered pixels [S2, unofficial]. This uses the chain rule [S2, unofficial].
+5.  **Parameter Update:** Update the Gaussian parameters using the Adam optimizer [3761-3d-gaussian-splatting-training.md]. Adam maintains running averages of gradients and squared gradients to adapt per-parameter step sizes [S2, unofficial]. Different parameter types (e.g., position vs. opacity) use different base learning rates [S2, unofficial].
+6.  **Adaptive Densification and Pruning:**
+    *   **Densification:** Analyze the gradient magnitudes of the position parameters $\mathbf{p}_i$ for each Gaussian [S1]. If the gradient magnitude exceeds a threshold, split the Gaussian into two new primitives (copying parameters and adjusting scales/opacities) [S1].
+    *   **Pruning:** Remove Gaussians with opacity $\alpha_i$ below a specified threshold [S1].
+    *   These decisions are driven by the gradients from the distortion loss, meaning the optimization objective influences the evolution of the Gaussian count [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+# Hyperparameters
+gamma = 1.0  # Scalar weighting factor for distortion loss [S1]
+optimizer = torch.optim.Adam(gaussian_params, lr=base_lr) # Adam optimizer [S2, unofficial]
+# base_lr varies per parameter type [S2, unofficial]
+
+def render(gaussians, camera):
+    """
+    Differentiable renderer.
+    Projects 3D Gaussians to 2D, sorts by depth, and alpha-blends.
+    Returns rendered image x_hat and intermediate data for backprop.
+    """
+    # 1. Project Gaussians to 2D screen space
+    # 2. Sort by depth
+    # 3. Alpha blend in depth order
+    # Returns: x_hat, render_context
+    pass
+
+def compute_loss(x_hat, x_gt, gamma):
+    """
+    Computes distortion loss D(x, x_hat) scaled by gamma.
+    D can be L1, SSIM, or LPIPS [S1].
+    """
+    distortion = L1Loss(x_hat, x_gt) # Example: L1 loss
+    return gamma * distortion
+
+def update_gaussians(gaussians, render_context, densification_threshold, pruning_threshold):
+    """
+    Adaptive densification and pruning based on gradients.
+    """
+    # 1. Compute gradient magnitudes for positions from render_context
+    pos_grad_mags = get_position_gradient_magnitude(render_context)
+    
+    # 2. Densification: Split Gaussians with high gradient magnitude
+    for i in range(len(gaussians)):
+        if pos_grad_mags[i] > densification_threshold:
+            split_gaussian(gaussians, i)
+            
+    # 3. Pruning: Remove Gaussians with low opacity
+    for i in range(len(gaussians) - 1, -1, -1):
+        if gaussians[i].opacity < pruning_threshold:
+            remove_gaussian(gaussians, i)
+
+# Training Loop
+for step in range(num_steps):
+    # 1. Randomly select a camera view [S2, unofficial]
+    camera = random_training_view()
+    x_gt = get_ground_truth_image(camera)
+    
+    # 2. Render
+    x_hat, render_context = render(gaussians, camera)
+    
+    # 3. Compute Loss
+    loss = compute_loss(x_hat, x_gt, gamma)
+    
+    # 4. Backpropagate
+    loss.backward()
+    
+    # 5. Update Parameters with Adam
+    optimizer.step()
+    optimizer.zero_grad()
+    
+    # 6. Adaptive Densification/Pruning
+    update_gaussians(gaussians, render_context, densification_threshold, pruning_threshold)
+```
+
+**Parameters**
+*   $\gamma$: Scalar weighting factor for the distortion loss. It varies across datasets to align Gaussian counts across methods, as adaptive densification relies on gradient magnitude [S1].
+*   Optimizer: Adam, which keeps a running sense of each parameter's recent gradients and adapts a per-parameter step size [S2, unofficial].
+*   Base Learning Rates: Different for position, rotation, scale, opacity, and SH coefficients [S2, unofficial].
+*   Densification Threshold: Gradient magnitude threshold for splitting Gaussians [S1].
+*   Pruning Threshold: Opacity threshold for removing Gaussians [S1].
+
+**Edge Cases and Pitfalls**
+*   **Precision:** Gradient magnitudes for position updates must be computed accurately to avoid over-splitting or under-splitting [S1].
+*   **Boundaries:** Pruning must handle the case where all Gaussians are removed (though unlikely with proper initialization) [G].
+*   **Degenerate Input:** If the initial Gaussian count is too low, densification may not recover the scene structure quickly enough [G].
+
+## Subtopics
+
+### [GS-SLAM](9192-gs-slam.md)
+GS-SLAM is a Simultaneous Localization and Mapping (SLAM) method that simultaneously estimates camera poses and reconstructs 3D scenes using 3D Gaussians. It distinguishes itself from other radiance-field SLAM approaches by employing an adaptive 3D Gaussian expanding strategy to dynamically add new Gaussians and delete unreliable ones based on captured depth and rendered opacity.
+
+### [SplaTAM](9193-splatam.md)
+SplaTAM is an RGB-D Simultaneous Localization and Mapping (SLAM) method that represents the world as a collection of 3D Gaussians. It solves the problem of online tracking and mapping by using depth and photometric Iterative Closest Point (ICP) for pose estimation and densification. It is distinguished from sibling methods like Gaussian-SLAM and Gaussian Splatting SLAM by its specific use of view-independent colors and a densification mask to prevent duplicate Gaussian creation.
+
+### [Gaussian-SLAM](9195-gaussian-slam.md)
+Gaussian-SLAM is a keyframe-based Simultaneous Localization and Mapping (SLAM) method that utilizes 3D Gaussian Splatting for dense scene representation. It solves the problem of real-time, photorealistic mapping and localization by fusing sub-maps derived from keyframes, addressing the drift and consistency issues common in online streaming approaches. It distinguishes itself from sibling methods like SplaTAM (which uses online densification and depth/photometric ICP) and MonoGS (which is monocular) by employing a sub-map fusion strategy to maintain global consistency.
+
+### [Gaussian Splatting SLAM](10078-gaussian-splatting-slam.md)
+Gaussian Splatting SLAM is a simultaneous localization and mapping (SLAM) method that reconstructs a scene as a collection of 3D Gaussians while estimating camera poses, building on [3D Gaussian Splatting Optimization](15143-3d-gaussian-splatting-optimization.md). It differs from siblings like [SplaTAM](9193-splatam.md) and [Gaussian-SLAM](9195-gaussian-slam.md) by explicitly minimizing a combined photometric and geometric residual for both tracking and mapping, and by applying isotropic scale regularization to stabilize localization.
+
+### [Differentiable Pose Estimation](12756-differentiable-pose-estimation.md)
+Differentiable Pose Estimation optimizes camera poses by backpropagating photometric loss gradients through a 3D Gaussian Splatting (3DGS) renderer. It solves the problem of recovering accurate camera extrinsics when initial poses are noisy or unknown, specifically enabling applications like motion deblurring where camera motion during exposure must be modeled. It distinguishes itself from SLAM-based siblings like [SplaTAM](9193-splatam.md) and [Gaussian-SLAM](9195-gaussian-slam.md) by focusing on batch optimization of poses for a static scene (or trajectory) rather than incremental online tracking, often leveraging the equivalence between camera transformation and Gaussian position transformation to simplify gradient computation.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot P)$ per step, where $N$ is the number of Gaussians and $P$ is the number of pixels, due to projection and blending [3761-3d-gaussian-splatting-training.md]. The number of Gaussians $N$ grows during training due to densification [S1].
+*   **Memory Complexity:** $O(N)$ to store Gaussian parameters [3761-3d-gaussian-splatting-training.md].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** The method scales to large scenes due to the efficiency of the splatting renderer, but the number of Gaussians can become very large, requiring compression or pruning [S1].
+*   **Strengths:** Differentiable rendering allows for end-to-end optimization of geometry and appearance [S1]. Adaptive densification allows the representation to adapt to scene complexity [S1].
+*   **Limitations:** The number of Gaussians is not fixed and can grow uncontrollably without proper pruning [S1]. The optimization is sensitive to the initial Gaussian distribution and hyperparameters like $\gamma$ [S1].
+*   **When to use:** When high-fidelity, photorealistic reconstruction is required and computational resources allow for a large number of primitives [S1].
+*   **When not to use:** When memory or rendering speed is strictly constrained and a compact representation is needed [S1].
+
+## Background
+The method originates from the 3D Gaussian Splatting paper [3761-3d-gaussian-splatting-training.md], which introduced the use of 3D Gaussians as a scene representation for real-time novel view synthesis. The optimization procedure leverages the differentiability of the splatting renderer to optimize Gaussian parameters using standard gradient-based optimizers like Adam [3761-3d-gaussian-splatting-training.md]. The adaptive densification strategy was introduced to address the limitation of fixed Gaussian counts, allowing the representation to evolve during training [S1].
+
+## Sources
+[S1] Drop-In Perceptual Optimization for 3D Gaussian Splatting, https://doi.org/10.1007/978-3-032-37350-2_25, fetched 2026-10-30
+[S2] Gaussian Splats Part 2: From Photos to a Trained Model, https://alphapixeldev.com/gaussian-splats-part-2-creating-gaussian-splats/, fetched 2026-10-29 (unofficial)

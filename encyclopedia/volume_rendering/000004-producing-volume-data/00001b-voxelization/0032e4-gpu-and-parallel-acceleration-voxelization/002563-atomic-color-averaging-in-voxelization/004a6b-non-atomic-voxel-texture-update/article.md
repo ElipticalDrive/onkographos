@@ -1,0 +1,97 @@
+# Non-Atomic Voxel Texture Update
+
+Also called: Voxel Texture Update (Non-Atomic)
+
+## Overview
+This method updates a voxel texture by averaging fragment colors to reduce flickering artifacts, specifically avoiding floating-point atomic operations which are not universally available for RGB textures [S1, unofficial]. It differs from [Atomic Color Averaging in Voxelization](3529-atomic-color-averaging-in-voxelization.md) by using a read-modify-write sequence instead of hardware atomics, accepting the risk of race conditions in exchange for broader compatibility [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `u_voxelTexture`: A 3D image texture (typically `RGBA32F` or similar) bound to the shader.
+- `posVoxelSpace`: The voxel coordinate in the texture space.
+- `val`: The incoming fragment color and accumulated alpha (`vec4`).
+- `dim`: The dimensions of the voxel grid (used to map space to texture coordinates).
+
+**Data Structures:**
+- The voxel texture is accessed via `imageLoad` and `imageStore` in GLSL. The layout is a 3D array of `vec4` values.
+
+**Steps:**
+1. Normalize the incoming alpha value: `val.a = val.a * (1.0f / 255.0f)`.
+2. Load the current voxel value: `prev = imageLoad(u_voxelTexture, ivec3(dim * posVoxelSpace))`.
+3. Compute the weighted average of the RGB components using the sum of alphas:
+   $$ \text{avg} = \frac{\text{prev.rgb} \times \text{prev.a} + \text{val.rgb} \times \text{val.a}}{\text{prev.a} + \text{val.a}} $$
+4. Update the value vector with the averaged RGB and the sum of alphas:
+   $$ \text{val} = \text{vec4}(\text{avg}, \text{prev.a} + \text{val.a}) $$
+5. Store the result back to the texture: `imageStore(u_voxelTexture, ivec3(dim * posVoxelSpace), val)`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_voxel_texture(u_voxelTexture, posVoxelSpace, val, dim):
+    # Step 1: Scale alpha
+    val_a = val.a * (1.0 / 255.0)
+    
+    # Step 2: Load previous value
+    # Note: In GLSL, imageLoad returns vec4. 
+    # We assume val is vec4(rgb, a)
+    prev = image_load(u_voxelTexture, int3(dim * posVoxelSpace))
+    
+    # Step 3: Calculate average
+    # Guard against division by zero if both alphas are 0
+    total_alpha = prev.a + val_a
+    if total_alpha > 0.0:
+        avg_rgb = (prev.rgb * prev.a + val.rgb * val_a) / total_alpha
+    else:
+        avg_rgb = val.rgb # Fallback if no previous data
+    
+    # Step 4: Update val
+    new_val = vec4(avg_rgb, total_alpha)
+    
+    # Step 5: Store result
+    image_store(u_voxelTexture, int3(dim * posVoxelSpace), new_val)
+```
+
+**Parameters:**
+- `dim`: Voxel grid dimensions. Typical values depend on scene scale and desired resolution.
+- `shadowBias`, `anisotropicVoxels`: Contextual parameters in the source implementation but not part of the core update formula [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Race Conditions:** Since this is non-atomic, concurrent writes from multiple threads to the same voxel will result in lost updates or incorrect averages [S1, unofficial]. This is the primary trade-off compared to atomic methods.
+- **Division by Zero:** If `prev.a + val.a` is zero, the average calculation is undefined. The pseudocode includes a guard [G].
+- **Precision:** Floating-point precision errors may accumulate over many updates.
+
+## Subtopics
+
+### Serial Point Loop
+A variant where the voxelization loop is executed serially because concurrent writes to a shared `AbstractDataStore` are not thread-safe [S2, unofficial]. This approach avoids race conditions entirely but sacrifices parallel performance [S2, unofficial]. It is chosen when thread safety is critical and the dataset size or hardware constraints do not allow for parallel atomic updates [S2, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time: $O(1)$ per fragment update, but potentially slower overall due to serialization in variants or lack of parallelism benefits if race conditions force serial fallbacks.
+- Memory: $O(N)$ for the voxel texture, where $N$ is the number of voxels.
+
+**Measured Performance:**
+- Specific performance metrics are not given in the sources [S1, S2, unofficial].
+
+**Scaling:**
+- Scales with the number of fragments and voxels. Performance degrades if race conditions cause excessive retries or if the serial variant is used for large point clouds [S2, unofficial].
+
+**Strengths and Limitations:**
+- **Strengths:** Works on hardware without floating-point atomic support for RGB textures [S1, unofficial]. Simple to implement [S1, unofficial].
+- **Limitations:** Not thread-safe for concurrent writes [S1, unofficial]. Potential for flickering if updates are not perfectly averaged due to race conditions [S1, unofficial].
+
+**When to Use:**
+- Use when floating-point atomics are unavailable and the scene allows for some race condition tolerance [S1, unofficial].
+- Use the serial variant when thread safety is mandatory and parallelism is not required [S2, unofficial].
+
+**When Not to Use:**
+- Do not use when high precision and consistency are required under heavy parallel load [S1, unofficial].
+- Do not use if hardware supports efficient floating-point atomics; prefer [Atomic Color Averaging in Voxelization](3529-atomic-color-averaging-in-voxelization.md) [S1, unofficial].
+
+## Background
+This method is part of a voxelization pipeline that includes cone tracing and shadow mapping [S1, unofficial]. It was implemented in the `gidemo` project to handle voxel texture updates without relying on advanced GPU features [S1, unofficial]. The serial variant is discussed in the context of point cloud voxelization in the `simplnx` project, highlighting thread safety concerns [S2, unofficial].
+
+## Sources
+[S1] righier/gidemo, https://github.com/righier/gidemo, fetched 2026-10-26 (unofficial)
+[S2] FILT: Voxelize Point Cloud, https://github.com/BlueQuartzSoftware/simplnx/pull/1724, fetched 2026-10-27 (unofficial)

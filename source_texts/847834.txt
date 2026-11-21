@@ -1,0 +1,251 @@
+Cecelia Feijoa. Contribute to schienstockd/cecelia development by creating an account on GitHub.
+
+perf(viewer): decoded-chunk cache under read_native (slab read perf Phase 2) by schienstockd · Pull Request #1581 · schienstockd/cecelia · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+schienstockd
+commented
+Oct 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Phase 2 of docs/todo/SLAB_READ_PERF_PLAN.md: a decoded-chunk cache under read_native.
+The viewer reads 128² bricks through all z. Every store is one z-plane per chunk (512² or 1024²), so one brick decodes 16–64x the bytes it keeps, and the 64 bricks of a timepoint all decode the same chunks. The cache keeps the decoded chunks, so after the first brick, the rest of a timepoint are copies.
+How it works (api/src/chunk_cache.jl)
+Same results: read_native assembles the block from cached chunks and applies the byte-order swap afterwards, exactly as before. Shapes, dropped integer dimensions and BoundsError all match arr[idx...], which the tests check.
+Single-flight, claim-first: each chunk is decoded once even under 16 concurrent bricks (measured: exactly 124 decodes per raw timepoint). A read decodes chunks nobody else holds first, starting at a random offset, and only then waits on the rest. Walking chunks in one shared order made a cold scrub slower than no cache.
+Only partial-chunk reads: a read that uses every chunk it touches in full (whole volumes, 2D planes, aligned tiles) bypasses the cache. Through the cache, those were 1.4–2.7x slower cold and no faster on a revisit.
+No stale reads: the key is the level directory's (path, inode, mtime). Writers stage and promote, so a rewrite arrives as a new directory. .partial stores, which are read while being written, are never cached.
+Bounded: LRU by bytes. Settings → Storage → Server read cache (not "viewer cache", which is already the browser's VRAM budget): auto = 1/16 of RAM, clamped to 256 MiB–4 GiB; or Off, or 512 MB–32 GB. It applies to the running server, no restart. Counters are in /api/diagnostics → chunkCache.
+Off until the server starts it: start() sets the budget, so spike scripts and tests keep measuring real decodes.
+Measured, without HTTP (Dml3RG, 32 threads, every brick of 4 timepoints, 16 in flight; slab_cache_scrub.jl):
+Store
+No cache
+First visit
+Revisit
+Raw (1024² chunks)
+4.78 s
+0.62 s
+0.34 s
+Derived (512² chunks)
+1.10 s
+0.51 s
+0.25 s
+Whole-movie sweep (181 timepoints, 1 GB budget): the cache peaks exactly at budget, each chunk is decoded once, and it takes 26.5 s.
+Flat volumes: unchanged, within run-to-run noise.
+Reservations
+Through the server, the response path is now the limit. Raw scrub 4.9–6.3 → 2.3 s (1.9 s revisit), derived 1.72 → 1.57 / 1.02 s; server read per brick about 300 → 21 ms. Each brick now spends about 110 ms in transfer against about 20 ms reading: HTTP.jl buffers a Content-Length body whole before writing it. That's the next bottleneck for bricks and flat volumes alike, and it's outside this plan.
+One-off JIT cost: the first slab request after start pays about 1 s compiling the cache path.
+Carve-out widened (plan Decision 11): the cache is included by image_render.jl, still the only file with using Zarr, and reads chunks only.
+No prefetch: the claim-first cold pass already lands close to the revisit times, so I didn't build it.
+Python suite: one unrelated failure locally, a denoise-trainer smoke test that hit the free-VRAM guard because the GPU was in use. This branch touches no Python.
+🤖 Generated with Claude Code
+schienstockd
+and others
+added 3 commits
+October 10, 2026 18:10
+perf(viewer): decoded-chunk cache under read_native (slab read perf P…
+…
+e2f7767
+```
+…hase 2)
+
+The viewer reads 128^2 bricks through all z; stores are one z-plane per
+chunk, so a brick decodes 16-64x what it keeps and the 64 bricks of a
+timepoint decode the same chunks. api/src/chunk_cache.jl keeps decoded
+chunks; read_native assembles from them, byte order applied as before.
+
+- Single-flight, claim-first (decode unclaimed chunks first, from a random
+  start): exactly 124 decodes per raw timepoint.
+- Only partial-chunk reads go through it; whole-volume / plane / aligned
+  tile reads bypass (through the cache they were 1.4-2.7x slower cold).
+- Keyed on the level directory (path, inode, mtime): a promoted rewrite is
+  a new directory. .partial (live) stores are never cached.
+- LRU by bytes. Settings -> Storage -> Viewer cache ([viewer].chunkCache,
+  auto = RAM/16 in 256 MiB-4 GiB), applied live; stats in /api/diagnostics.
+- Off until start() sets the budget, so scripts/tests measure decodes.
+
+Scrub (every brick of 4 timepoints, 16 in flight, no HTTP): raw 4.78 ->
+0.62 s cold, 0.34 s revisit; derived 1.10 -> 0.51 / 0.25 s. Whole-movie
+sweep at 1 GB stays on budget, each chunk decoded once.
+
+Fanout note (no finding): .partial spelled out rather than
+STORE_STAGING_SUFFIX — the file loads without Cecelia; comment names it.
+
+_Fanout audit (evidence):_
+
+- `read_native` (`api/src/image_geometry.jl:79`): it now reads through `cached_read`. no findings
+
+**Evidence:**
+- **Only one hunk changes behaviour.** In `read_native`, `arr[idx...]` became `cached_read(arr, idx...)`, so reads are routed through the new cache. Everything else in the diff is new code, routes, settings or docs.
+- **Every pixel read already goes through `read_native`, so none is left on the old path.** The callers are `api/src/image_render.jl:281` (preview render), `api/src/viewer_api.jl:127` (`read_slab`) and `api/src/viewer_api.jl:197`. The landscape reader at `api/src/landscape_api.jl:645` uses `open_level` and the shared helpers. Outside `chunk_cache.jl`, grep finds no `zopen` and no direct `arr[...]` pixel read in `api/src`. Checked: no problems.
+- **The `.partial` check covers the only store that is read while it is being written.**
+  - The live segmentation store comes from `live_labels_store_path` (`api/src/viewer_api.jl:713`), which builds its path with `Cecelia.staging_store_path`. That path carries the `.partial` suffix, so the cache skips it.
+  - The preview label store (`preview_labels_store_path`, `viewer_api.jl:691`) is written by `preview/preview_worker.py:795-797`. The AF preview stores (`preview_af_ch{N}`, `viewer_api.jl:524`) are written at `preview_worker.py:828-830`. Both writers delete the old store and then use `zarr_utils.staged_store`, so a rewrite shows up as a new directory with a new cache key.
+  - Checked: no problems.
+- **Two places spell the staging suffix.** `api/src/preview_api.jl:556` uses `Cecelia.STORE_STAGING_SUFFIX` (its comment calls it "the one spelling of `.partial`"), while `chunk_cache.jl:129` writes `".partial"` out by hand. Today both give the same string, so nothing is broken. Whether to share the constant is a convention-check question, not drift.
+
+_Fanout audit: run_
+
+_Convention check (evidence):_
+
+Checked everything I needed; here are the convention-check findings.
+
+no findings
+
+**Evidence**
+
+Ground-truth files read:
+- `docs/ai-assist/CONVENTION_CHECK.md` → *Reviewer prompt*
+- `docs/inventory/JULIA_API.md` L17 (`image_render.jl`, `cached_render!`), L18 (new chunk-cache row) and L45 (behaviour-card `CardMemo` / mtime stamp discipline)
+- `docs/inventory/JULIA_APP.md` L71 (new row), plus the TLS / threads / storage config rows
+- `docs/ui/PRIMITIVES.md` L21–22 (`ChipSelect` is the canonical chip picker)
+- `docs/ui/COPY.md` L20, L43, L67 (tooltip is one line, has no trailing period, and stays under 90 characters)
+- The *Image / OME-ZARR access* rule in root `CLAUDE.md` (only `image_render.jl` may use `using Zarr`)
+
+Grep terms: `LRU`, `single.?flight`, `Base.Event()`, `_inflight|in_flight`, `_RENDER_CACHE|mtime`, `function set_(keep_previous_version|store_layout|api_multithreaded|tls_desired)!`, `set_custom|write_custom|update_custom|set_conf`, `apiGet|apiPost|postJson|getJson|fetchJson`, `ChipSelect|segmented`.
+
+Additions checked and found clean:
+- **`api/src/chunk_cache.jl` (`cached_read`, `chunk_cache_budget!`, `chunk_cache_stats`)**: The nearest existing thing is `cached_render!` (`api/src/image_render.jl:335`). It is a FIFO cache of rendered PNG bytes, capped by entry count, with no single-flight. That is a different unit and a different eviction policy, so this is not a duplicate. There is no LRU or single-flight helper anywhere in `app/src` or `api/src`. The pool `in_flight` in `scheduler/pools.jl` is a slot limiter, not a cache. The file is included from `image_render.jl`, so it stays inside the Zarr carve-out, and it opens no store and parses no metadata.
+- **`app/src/config/viewer_cache.jl`**: The setter follows the same pattern as `set_keep_previous_version!` (`image_format.jl:467`), `set_api_multithreaded!` (`server_threads.jl:31`) and `set_tls_desired!` (`tls.jl:49`). There is no shared custom-toml writer to reuse. `VIEWER_CACHE_CHOICES` is a list of strings, the same as the compressor choices. It isn't a status field, so an `@enum` doesn't apply.
+- **`api_viewer_chunk_cache_get` / `api_viewer_chunk_cache_set`**: The sibling Settings handlers live in `api/src/routes.jl:696`. These sit in `viewer_api.jl`, which is defensible for the viewer domain. Both routes are in the *Route index* in `API.md`.
+- **`fetchChunkCache` / `setChunkCache` / `chunkCacheOptions` (`storage.ts`)**: These match the `fetchKeepPrevVersion` / `setKeepPrevVersion` pattern. There is no shared fetch wrapper in `frontend/src`. `chunkCacheOptions` reuses `formatBytes`.
+- **The `SettingsModule.vue` block**: It uses `ChipSelect` and the same `field` / `svc-name` / `cc-muted-error` structure as the keep-previous block. The tooltip is 46 characters with no trailing period.
+
+Comment pass:
+- The two "Measured on …" comments in `chunk_cache.jl` (the full-chunk bypass and the claim-first ordering) explain why the adjacent code is shaped the way it is. The same reasoning is also recorded in Plan Decisions 5 and 7. I kept them as source comments that explain the code, not misplaced narrative.
+- `viewer_cache.jl` has a docstring defending the RAM/16 constant. That records where the number came from, so it is exempt.
+- No comment cites code outside this repo.
+
+Not a convention finding, mentioned in case it's useful: in `api/src/viewer_api.jl` the new block was inserted between `_slab_json_error`'s comment ("A slab refusal as a JSON `{error}`…") and its function. That comment now sits above the chunk-cache section header instead of its own function.
+
+_Convention check: run_
+
+_Inventory check: run — every new shared file and route is documented_
+
+_Maintainability lint: run — nothing flagged_
+
+_Recital stamp: perf/slab-chunk-cache@ea1dbf3c9650_
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(settings): name the server chunk cache "Server read cache"
+…
+851e7e8
+```
+The viewer already has a "viewer cache" (the browser VRAM budget,
+viewerCacheMB, in the Viewer Advanced popover); the same name on the
+server RAM cache would read as the same knob.
+
+_Fanout audit (evidence):_
+
+no fanout audit needed
+
+Evidence: every hunk is a label or copy rename ("Viewer cache" → "Server read cache") in `SettingsModule.vue`, `JULIA_API.md` and `SLAB_READ_PERF_PLAN.md`. None of them changes behaviour, so there are no fix-shaped hunks. I still grepped for the old label to check for missed copies (excluding archive):
+- `frontend/src/modules/ViewerWindow.vue:5492` `aria-label="Viewer cache size"` refers to the browser VRAM budget (`viewerCacheMB`), the other cache the rename is meant to tell apart. Checked, not affected.
+- `frontend/src/modules/SettingsModule.vue:987` code comment "Viewer chunk cache" and `app/test/suite/viewer_cache.jl:8` testset name: internal names only, not user-facing. Not a sibling of the change.
+
+_Fanout audit: run_
+
+_Convention check (evidence):_
+
+No findings.
+
+**Evidence**
+
+What was checked: the diff is a copy rename. The Settings → Storage label goes from "Viewer cache" to "Server read cache", along with its `aria-label` and two error strings. The same label is updated in the inventory line and in the plan doc. It adds no function, component, endpoint, accessor, h5ad/JSON/zarr reader or writer, enum, or typed-boundary shape, so nothing is addition-shaped.
+
+- **`frontend/src/modules/SettingsModule.vue:445,451,990,992`**: only strings change, inside existing handlers and the existing `ChipSelect` field. There is no new component or bespoke control, so the primitive catalog wasn't needed. For terminology I grepped `docs/ui/COPY.md` for `cache` and got no entry, so no house term for this setting conflicts with the new label.
+- **`docs/inventory/JULIA_API.md:18`**: changes the label text only. The same entry stays in the same place, so no new inventory row is involved.
+- **`docs/todo/SLAB_READ_PERF_PLAN.md:71-75` (Decision 8)**:
+  - *Placement pass:* the hunk names no new home for a future helper, accessor or endpoint. It only renames the UI label and cites existing counters (`/api/diagnostics` → `chunkCache`). Nothing to check against the `CLAUDE.md` access rules.
+  - *Wrong-home pass on the added sentence* ("Named *server read cache* because the viewer already has a *viewer cache* — the browser's VRAM budget (`viewerCacheMB`)"): this is a naming rationale, and it sits in the plan's own decisions list, which is the right home. It is not in source. It cites nothing outside the repo and tells no incident story.
+  - I confirmed that `viewerCacheMB` exists: `frontend/src/stores/settings.ts:269` and `frontend/src/utils/volumeViewer.ts:382`.
+- **The rename resolves a name collision rather than creating one.** I grepped `viewer cache|server read cache` across `docs`, `frontend/src`, `api/src` and `app/src`, excluding archive and todo. "Viewer cache size" is still the `aria-label` of the browser VRAM control at `frontend/src/modules/ViewerWindow.vue:5492`, which is a different setting. After this diff the two labels are distinct.
+
+**Grep terms:** `viewerCacheMB`, `viewer cache`, `server read cache`, `cache` (in `docs/ui/COPY.md`).
+
+**Ground truth read:**
+- `docs/ai-assist/CONVENTION_CHECK.md` → *Reviewer prompt*
+- `docs/ui/COPY.md` (cache grep)
+- `docs/inventory/JULIA_API.md:18`
+
+**Near-equivalents considered and rejected:** `ViewerWindow.vue:5492` "Viewer cache size". It is the browser VRAM budget, not the server chunk cache, so it is not a duplicate.
+
+_Convention check: run_
+
+_Inventory check: skipped — no new shared files or routes_
+
+_Maintainability lint: run — nothing flagged_
+
+_Recital stamp: perf/slab-chunk-cache@e2f77672b8bc_
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs(webgpu): slab read perf Phase 2 — through-server numbers
+…
+937383e
+```
+Raw scrub 4.9-6.3 -> 2.3 s cold / 1.9 s revisit; server-read per brick
+~300 -> 21 ms. The run wall is now set by the response path (HTTP.jl
+buffers Content-Length bodies), not the read.
+
+_Fanout audit: no fanout audit needed_
+
+_no convention check needed_
+
+_Inventory check: skipped — no new shared files or routes_
+
+_Maintainability lint: skipped — no source files_
+
+_Recital stamp: perf/slab-chunk-cache@851e7e8992f1_
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+schienstockd
+mentioned this pull request
+Oct 10, 2026
+docs(viewer): slab read perf Phase 4 — architecture rules, outcome notes
+#1582
+Merged
+Hide details
+View details
+schienstockd
+merged commit 4c3deb9
+into
+main
+Oct 10, 2026
+9 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+schienstockd
+deleted the
+perf/slab-chunk-cache
+branch
+October 10, 2026 07:43
+schienstockd
+mentioned this pull request
+Oct 10, 2026
+perf(viewer): write slab responses from the pool, as a plain Vector (slab read perf Phase 5)
+#1586
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

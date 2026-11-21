@@ -1,0 +1,232 @@
+# SGD (Street View Synthesis with Gaussian Splatting and Diffusion Prior)
+
+
+## Overview
+SGD is a novel view synthesis method for street scenes that enhances 3D Gaussian Splatting (3DGS) by fine-tuning a Stable Diffusion model on driving data and using it to regularize 3DGS training at unseen viewpoints, addressing the sparse-view reconstruction problem [S1]. It differs from prior sparse-view NVS methods that rely on object-centric multi-view datasets and relative camera poses; instead, it uses adjacent frames and LiDAR depth for direct fine-tuning on driving data, overcoming the domain gap [S1].
+
+## How it works
+SGD consists of two main stages: fine-tuning a Diffusion Model with reference images and LiDAR depth, and integrating this model into the 3DGS pipeline to regularize training via pseudo views [S1].
+
+### Inputs and Outputs
+**Inputs:**
+*   A set of training images $\{I_i\}$ and corresponding camera poses $\{p_i\}$ captured by a vehicle [S1].
+*   360° LiDAR point clouds to derive depth maps for reference and target views [S1].
+*   A fixed text prompt: “A photo a of driving scene.” [S1].
+
+**Outputs:**
+*   A fine-tuned Diffusion Model (Stable Diffusion 1.5 with injected U-Net features and a trained ControlNet) [S1].
+*   A 3D Gaussian Splatting model optimized with diffusion-based regularization [S1].
+
+### Data Structures
+The method relies on standard 3DGS data structures (Gaussian positions, covariances, opacities, spherical harmonics coefficients) and Diffusion Model components:
+*   **U-Net:** The backbone of Stable Diffusion, modified to accept concatenated CLIP features [S1].
+*   **ControlNet:** A trainable branch initialized with original Stable Diffusion 1.5 weights, conditioned on depth maps [S1].
+*   **CLIP Encoder:** Used to extract image and text features [S1].
+
+### Steps
+
+#### Stage 1: Fine-tuning the Diffusion Model
+This stage prepares the prior by conditioning the diffusion model on adjacent frames and depth [S1].
+
+1.  **Reference Selection:** For a target view, identify the closest preceding and succeeding frames as reference images [S1].
+2.  **Feature Extraction:**
+    *   Extract patchwise CLIP image features from the reference images [S1].
+    *   Extract CLIP text features from the fixed prompt “A photo a of driving scene.” [S1].
+    *   Compute depth maps from LiDAR point clouds for both reference and target views [S1].
+3.  **U-Net Injection:** Inject the concatenated CLIP image features (from reference images) and CLIP text features into the U-Net during fine-tuning [S1].
+4.  **ControlNet Training:** Train a ControlNet branch using the depth map of the target image as the control signal [S1].
+5.  **Training Strategy:** Use a two-phase training strategy where the U-Net is fine-tuned and the ControlNet is trained separately. Jointly fine-tuning the U-Net and training the ControlNet simultaneously is avoided because the ControlNet must be initialized with original Stable Diffusion 1.5 weights rather than fine-tuned weights, which produces less authentic outputs [S1].
+
+#### Stage 2: 3DGS Training with Diffusion Regularization
+This stage integrates the fine-tuned model into 3DGS to guide synthesis at unseen views [S1].
+
+1.  **Initialization:** Initialize 3D Gaussian models from the training views [S1].
+2.  **Pseudo View Generation:**
+    *   Project and rasterize the current 3D Gaussian models to generate pseudo views [S1].
+    *   Create novel evaluation views by interpolating the position of training/testing views and adding positional perturbations [S1].
+    *   Adjust rotation of novel views by offsetting angle $\pm\delta, \pm2\delta$ along the z-axis, where $\delta$ is randomly sampled from $[15^\circ, 30^\circ]$ [S1].
+3.  **Regularization Loss:** Use the fine-tuned Diffusion Model to provide regularization loss on these pseudo views [S1].
+4.  **Loss Functions:** The total loss includes standard 3DGS losses plus regularization losses:
+    *   $L_{L1}$: L1 loss between pseudo view and reference/target.
+    *   $L_{LPIPS}$: LPIPS loss for perceptual similarity.
+    *   $L_{depth}$: Depth loss.
+    *   *Note:* Applying $L_{L1}$ to pseudo views marginally reduces test view PSNR because pixel-level comparison amplifies inherent minor differences between diffusion-generated and real images [S1].
+5.  **Optimization:** Update 3D Gaussian parameters using the combined loss [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+
+# Assume standard 3DGS structures and Diffusion Model components are available
+# SD_Model: Fine-tuned Stable Diffusion 1.5 with injected U-Net and ControlNet
+# CLIP_Encoder: Pre-trained CLIP model
+# Gaussian_Model: 3DGS representation (positions, covariances, opacities, SHs)
+
+def extract_clip_features(images, text_prompt):
+    """Extract patchwise CLIP image features and text features."""
+    # Implementation details of CLIP extraction omitted for brevity
+    # Returns: image_features (patchwise), text_features
+    pass
+
+def get_depth_from_lidar(lidar_points, camera_pose):
+    """Compute depth map from LiDAR point cloud given camera pose."""
+    # Project LiDAR points to image plane and compute depth
+    pass
+
+def generate_pseudo_views(gaussian_model, camera_poses):
+    """Rasterize 3D Gaussians to generate pseudo views."""
+    # Standard 3DGS rasterization
+    pass
+
+def compute_diffusion_loss(sd_model, pseudo_view, reference_images, reference_depth, target_depth, text_prompt):
+    """Compute regularization loss using the fine-tuned Diffusion Model."""
+    # 1. Extract features
+    img_features, txt_features = extract_clip_features(reference_images, text_prompt)
+    
+    # 2. Condition Diffusion Model
+    # The SD model uses injected CLIP features and ControlNet (depth)
+    # This step typically involves the denoising process conditioned on these inputs
+    # The loss is derived from the difference between the generated prior and the pseudo view
+    # or the consistency of the pseudo view with the diffusion prior.
+    # Specific loss formulation from source: L1, LPIPS, Ldepth are applied to pseudo views.
+    # The "regularization" implies comparing pseudo views against the diffusion prior.
+    
+    # Note: The source describes using the model to "provide regularization loss".
+    # In practice, this often means computing a perceptual or feature-space loss
+    # between the pseudo view and a diffusion-generated counterpart, or using the
+    # diffusion model's output as a target.
+    # Based on ablation, L1, LPIPS, Ldepth are used.
+    
+    # Re-generate a "prior" view using the diffusion model conditioned on reference + depth
+    # This step is computationally expensive.
+    prior_view = sd_model.generate(reference_images, reference_depth, target_depth, text_prompt)
+    
+    loss_l1 = torch.nn.functional.l1_loss(pseudo_view, prior_view)
+    loss_lpips = lpips_loss(pseudo_view, prior_view) # Assuming lpips_loss is defined
+    loss_depth = torch.nn.functional.l1_loss(pseudo_view_depth, prior_view_depth)
+    
+    return loss_l1, loss_lpips, loss_depth
+
+def train_sgd(gaussian_model, training_data, sd_model, num_iterations):
+    """
+    Train 3DGS with diffusion regularization.
+    """
+    text_prompt = "A photo a of driving scene."
+    
+    for iteration in range(num_iterations):
+        # 1. Sample a training view and its adjacent reference frames
+        target_view, target_pose = training_data.sample()
+        ref_images, ref_depths = training_data.get_adjacent_frames(target_view)
+        target_depth = get_depth_from_lidar(training_data.lidar, target_pose)
+        
+        # 2. Generate Pseudo Views
+        # Interpolate positions and perturb rotations
+        pseudo_poses = []
+        for _ in range(num_pseudo_views):
+            pos = interpolate_pose(training_data.training_poses)
+            pos += positional_perturbation()
+            # Offset rotation along z-axis
+            delta = np.random.uniform(15, 30) # degrees
+            rot_offset = np.random.choice([-1, 1]) * delta
+            pos.rotation.z += rot_offset
+            pseudo_poses.append(pos)
+            
+        pseudo_views = generate_pseudo_views(gaussian_model, pseudo_poses)
+        
+        # 3. Compute Losses
+        # Standard 3DGS loss (image reconstruction)
+        loss_standard = compute_standard_3dgs_loss(gaussian_model, target_view, target_pose)
+        
+        # Diffusion Regularization Loss
+        # Note: Applying L1_pseudo marginally reduces PSNR [S1]
+        l1_p, lpips_p, depth_p = compute_diffusion_loss(
+            sd_model, 
+            pseudo_views, 
+            ref_images, 
+            ref_depths, 
+            target_depth, 
+            text_prompt
+        )
+        
+        # Combine losses
+        # Weights are not specified in the source notes, assume standard weighting or 1.0
+        total_loss = loss_standard + l1_p + lpips_p + depth_p
+        
+        # 4. Backpropagate and Update
+        total_loss.backward()
+        gaussian_model.step()
+
+# Stage 1 Pseudocode (Simplified)
+def fine_tune_diffusion(sd_model, driving_dataset, num_iterations):
+    """
+    Fine-tune Stable Diffusion on driving data.
+    """
+    text_prompt = "A photo a of driving scene."
+    
+    # Phase 1: U-Net Injection
+    for iteration in range(num_iterations_u_net):
+        target_view, ref_images, ref_depth, target_depth = driving_dataset.sample()
+        
+        img_features, txt_features = extract_clip_features(ref_images, text_prompt)
+        
+        # Inject features into U-Net
+        # This modifies the U-Net weights
+        loss_u_net = train_u_net_with_injection(sd_model, target_view, img_features, txt_features)
+        
+        loss_u_net.backward()
+        sd_model.u_net.step()
+        
+    # Phase 2: ControlNet Training
+    # ControlNet initialized with original SD 1.5 weights
+    control_net = ControlNet()
+    
+    for iteration in range(num_iterations_control_net):
+        target_view, ref_images, ref_depth, target_depth = driving_dataset.sample()
+        
+        # Train ControlNet with depth as control signal
+        loss_control = train_control_net(control_net, sd_model, target_view, target_depth)
+        
+        loss_control.backward()
+        control_net.step()
+        
+    return sd_model, control_net
+```
+
+### Parameters
+*   **Text Prompt:** “A photo a of driving scene.” [S1].
+*   **Rotation Offset $\delta$:** Randomly sampled from $[15^\circ, 30^\circ]$ [S1].
+*   **Rotation Adjustment:** $\pm\delta, \pm2\delta$ along the z-axis [S1].
+
+### Edge Cases and Pitfalls
+*   **Depth-only ControlNet:** Using only depth ControlNet without reference images causes the text prompt to dominate semantics, yielding high diversity but significant deviation from original scenes [S1].
+*   **Joint Fine-tuning:** Jointly fine-tuning U-Net and training ControlNet simultaneously produces less authentic outputs because ControlNet must be initialized with original Stable Diffusion 1.5 weights rather than fine-tuned weights [S1].
+*   **L1 Loss on Pseudo Views:** Applying L1 loss to pseudo views marginally reduces test view PSNR because pixel-level comparison amplifies inherent minor differences between diffusion-generated and real images [S1].
+*   **Training Time:** Integration of the Diffusion Model increases training time due to the computationally expensive denoising operation [S1].
+
+## Operating characteristics
+*   **Training Speed:** Training speed (iterations/second) drops substantially when introducing pseudo views (from 0 to 1) [S1].
+*   **Rendering Speed:** Rendering speed (FPS) remains unaffected by the introduction of pseudo views [S1].
+*   **Performance (KITTI-75%):** PSNR: 23.85, SSIM: 0.837, LPIPS: 0.154 [S1].
+*   **Performance (KITTI-50%):** PSNR: 23.62, SSIM: 0.799, LPIPS: 0.158 [S1].
+*   **Performance (KITTI-25%):** PSNR: 23.44, SSIM: 0.793, LPIPS: 0.167 [S1].
+*   **Performance (KITTI-360 50%):** PSNR: 23.81, SSIM: 0.832, LPIPS: 0.155 [S1].
+*   **Novel View Quality:** BRISQUE score: 24.53, FID score: 73.36 [S1].
+*   **Ablation Results:**
+    *   Complete model: PSNR 23.81, SSIM 0.832, LPIPS 0.155 [S1].
+    *   w/o LPIPS_pseudo: PSNR 23.11, SSIM 0.818, LPIPS 0.159 [S1].
+    *   w/o L1_pseudo: PSNR 23.83, SSIM 0.820, LPIPS 0.163 [S1].
+    *   w/o Ldepth_pseudo: PSNR 23.29, SSIM 0.801, LPIPS 0.169 [S1].
+    *   w/o pseudo views (standard 3DGS): PSNR 22.78, SSIM 0.793, LPIPS 0.176 [S1].
+*   **Strengths:** Enhances rendering quality from broader views, smoother road surfaces, distinct lane markings, and clearer distant vehicles [S1].
+*   **Limitations:** Longer training time due to diffusion denoising [S1].
+
+## Background
+SGD was proposed to address the challenge of maintaining rendering quality at viewpoints that deviate significantly from training viewpoints in street scenes, a problem stemming from sparse training views captured by a fixed camera on a moving vehicle [S1]. It is designed for autonomous driving simulation and street view synthesis, evaluated on KITTI and KITTI-360 datasets [S1]. The method leverages prior from a Diffusion Model along with complementary multi-modal data (LiDAR depth) to enhance the capacity of 3DGS [S1].
+
+## Sources
+[S1] SGD: Street View Synthesis with Gaussian Splatting and Diffusion Prior, https://doi.org/10.1109/wacv61041.2025.00375, fetched 2026-10-27

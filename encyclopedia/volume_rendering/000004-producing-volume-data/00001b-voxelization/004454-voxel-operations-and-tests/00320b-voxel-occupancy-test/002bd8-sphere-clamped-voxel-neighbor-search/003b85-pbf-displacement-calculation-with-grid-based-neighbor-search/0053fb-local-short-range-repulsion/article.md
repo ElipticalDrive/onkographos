@@ -1,0 +1,182 @@
+# Local Short-Range Repulsion
+
+Also called: Particle repulsion optimization, Tangential repulsive force iteration
+
+## Overview
+Local Short-Range Repulsion is a particle distribution optimization step used in adaptive voxel-based volume rendering to resolve particle clustering and improve surface extraction quality. It operates by applying short-range repulsive forces between neighboring particles to spread them out, ensuring a more uniform sampling density. Unlike the parent PBF Displacement Calculation which enforces incompressibility via density constraints, this method focuses on geometric distribution regularity through tangential force projection.
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   Particle positions $\mathbf{p}_i$ and $\mathbf{p}_j$.
+    *   Particle normal vectors $\mathbf{n}_i$.
+    *   Voxel pyramid structure defining scale levels $l$ and voxel sizes $\sigma_l$.
+    *   Base cell size $h_{base}$ and maximum scale level $L$.
+*   **Outputs**:
+    *   Updated particle positions $\mathbf{p}_i'$.
+
+### Data Structures
+The method relies on an **Adaptively Subdivided Voxel Pyramid**.
+*   **Voxel Unit**: Defined by scale level $l$.
+*   **Voxel Size**: $\sigma_l$ at level $l$.
+*   **Repulsion Cutoff Radius**: $h_{cutof f}$ is numerically equal to the voxel size $\sigma_l$ at the scale level $l$ to which the target particle belongs [S1, unofficial].
+    *   Formula: $h_{cutof f} = h_{base} \cdot 2^{i-1-i}$ where $i$ is the current scale index and $L$ is the max scale level [S1, unofficial]. Note: The source text contains a likely typo in the exponent ($i-1-i$); standard adaptive grid scaling implies $h_{base} \cdot 2^{L-l}$ or similar, but the source explicitly states equality to voxel size $\sigma_i$ [S1, unofficial].
+
+### Steps
+
+1.  **Neighbor Search**:
+    *   Identify the voxel unit containing the target particle $i$.
+    *   Traverse all voxels within this unit and its 26-neighborhood (adjacent voxels sharing faces, edges, or corners) [S1, unofficial].
+    *   Collect all other particles located in these voxels as the neighboring particle set $N_i$ [S1, unofficial].
+    *   **Scale Mapping**: Map the coordinates of activated particles and their repulsion radii to the current scale to ensure consistency during force calculation [S1, unofficial].
+
+2.  **Repulsive Force Calculation**:
+    *   For each neighbor $j \in N_i, j \neq i$:
+        *   Calculate relative position vector: $\mathbf{d}_{ij} = \mathbf{p}_i - \mathbf{p}_j$ [S1, unofficial].
+        *   Calculate radial distance: $r = \|\mathbf{d}_{ij}\|$ [S1, unofficial].
+        *   Compute repulsion weight factor $\omega$ based on $r$ and cutoff $h_{cutof f}$:
+            $$ \omega = \left(1 - \frac{r}{h_{cutof f}}\right)^2 $$
+            This ensures the force is strong at close range and tends to zero as $r \to h_{cutof f}$ [S1, unofficial].
+        *   Normalize relative position to get unit vector: $\hat{\mathbf{d}}_{ij} = \frac{\mathbf{d}_{ij}}{\|\mathbf{d}_{ij}\|}$ [S1, unofficial].
+        *   Calculate individual repulsive force contribution:
+            $$ \mathbf{f}_j = \hat{\mathbf{d}}_{ij} \cdot \omega $$
+            Note: The source uses scalar multiplication notation $\hat{\mathbf{d}}_{ij} \cdot \omega$, implying $\omega$ scales the magnitude of the direction vector [S1, unofficial].
+
+3.  **Tangential Force Iteration**:
+    *   Compute total repulsive force on particle $i$:
+        $$ \mathbf{f}_g = \sum_{j \in N_i, j \neq i} \mathbf{f}_j $$
+        [S1, unofficial]
+    *   Project $\mathbf{f}_g$ onto the normal direction $\mathbf{n}_i$ of particle $i$ to obtain the tangential component $\mathbf{f}_v^T$. The source defines this projection as:
+        $$ \mathbf{f}_v^T = \mathbf{f}_v - \mathbf{n}_i (\mathbf{n}_i \cdot \mathbf{n}_i) $$
+        *Correction/Interpretation*: The source text states "projected onto the normal direction... to obtain the tangential component" but the formula $\mathbf{f}_v - \mathbf{n}_i (\mathbf{n}_i \cdot \mathbf{n}_i)$ appears to subtract the normal component if $\mathbf{f}_v$ was the total force, or contains a typo where $\mathbf{f}_v$ should be $\mathbf{f}_g$. Standard vector projection for tangential component is $\mathbf{f}_{tan} = \mathbf{f} - (\mathbf{f} \cdot \mathbf{n})\mathbf{n}$ (assuming $\mathbf{n}$ is unit). The source formula $\mathbf{n}_i (\mathbf{n}_i \cdot \mathbf{n}_i)$ suggests $\mathbf{n}_i$ might not be normalized in the source's notation, or it is a specific implementation detail. We follow the source's explicit formula for $\mathbf{f}_v^T$ using $\mathbf{f}_v$ (likely referring to the total force $\mathbf{f}_g$) [S1, unofficial].
+    *   Use $\mathbf{f}_g^T$ (the tangential component) as the actual acting repulsive force to reduce impact on projection accuracy [S1, unofficial].
+
+4.  **Displacement Update**:
+    *   Calculate displacement $\Delta \mathbf{p}_i$ using an iteration step size $s = 0.02$:
+        $$ \Delta \mathbf{p}_i = \mathbf{f}_g^T \cdot s $$
+        [S1, unofficial]
+    *   Update position: $\mathbf{p}_i \leftarrow \mathbf{p}_i + \Delta \mathbf{p}_i$ [S1, unofficial].
+    *   Repeat iterations until equilibrium or a fixed number of steps. Equilibrium is defined as the state where the energy gradient is zero ($\frac{d\mathbf{p}_i}{dt} - \nabla E_{total} = 0$) [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def local_short_range_repulsion(particles, voxel_grid, h_base, L):
+    """
+    particles: List of dicts with keys 'pos' (vec3), 'normal' (vec3)
+    voxel_grid: Spatial hash or grid structure mapping voxel coords to particle indices
+    h_base: Base cell size at finest scale
+    L: Maximum scale level
+    """
+    step_size = 0.02
+    
+    for i, particle in enumerate(particles):
+        pos_i = particle['pos']
+        normal_i = particle['normal']
+        
+        # Determine scale level l for particle i
+        # [G] Implementation detail: Find voxel containing pos_i to get level l
+        level_l = get_voxel_level(pos_i, voxel_grid)
+        
+        # Calculate cutoff radius equal to voxel size at level l
+        # Source formula: h_base * 2^(i-1-i) is likely a typo for standard scaling.
+        # We use the definition: h_cutoff = voxel_size at level l.
+        # Assuming voxel_size(l) = h_base * 2^(L - l) or similar standard adaptive scaling.
+        # If source strictly means h_base * 2^(i-1-i) = h_base * 2^(-1), it is constant.
+        # Given "numerically equal to voxel size", we compute voxel size.
+        h_cutoff = get_voxel_size(level_l, h_base, L)
+        
+        total_force = vec3(0, 0, 0)
+        
+        # Search neighbors in 26-neighborhood of current voxel
+        neighbor_indices = get_particles_in_26_neighborhood(pos_i, voxel_grid, level_l)
+        
+        for j in neighbor_indices:
+            if i == j:
+                continue
+            
+            pos_j = particles[j]['pos']
+            
+            # Map coordinates to current scale [S1, unofficial]
+            # [G] Implementation detail: Scale positions if necessary for consistency
+            pos_i_scaled = scale_to_level(pos_i, level_l)
+            pos_j_scaled = scale_to_level(pos_j, level_l)
+            
+            d_ij = pos_i_scaled - pos_j_scaled
+            r = length(d_ij)
+            
+            if r >= h_cutoff:
+                continue
+                
+            # Weight factor
+            omega = (1 - r / h_cutoff) ** 2
+            
+            # Unit vector
+            if r == 0:
+                continue # Avoid division by zero
+            
+            d_hat_ij = normalize(d_ij)
+            
+            # Individual force
+            f_j = d_hat_ij * omega
+            
+            total_force += f_j
+            
+        # Tangential projection
+        # Source: f_vT = f_v - n_i (n_i . n_i)
+        # Interpreting f_v as total_force (f_g)
+        # Note: Source formula implies n_i might not be unit length in the dot product term
+        # or it's a specific projection variant. Standard tangential is f - (f.n)n.
+        # We follow source literal structure:
+        normal_dot_normal = dot(normal_i, normal_i)
+        normal_component = normal_i * normal_dot_normal # This seems to assume f_v was aligned or is a typo in source
+        
+        # Correct interpretation of "project onto normal... to obtain tangential":
+        # Tangential = Total - Normal_Component
+        # Normal_Component = (Total . Normal) * Normal (if Normal is unit)
+        # Source formula: f_v - n(n.n). If n is unit, n.n=1, so f_v - n. This subtracts the normal vector itself, not the projection.
+        # This suggests a potential error in the source text or specific normalization.
+        # However, "reduce impact on projection accuracy" suggests standard tangential filtering.
+        # We implement standard tangential projection to be physically correct, noting source ambiguity.
+        # [G] Using standard tangential projection: f_tan = f - (f . n_hat) * n_hat
+        
+        n_hat = normalize(normal_i)
+        normal_proj_magnitude = dot(total_force, n_hat)
+        normal_proj_vec = n_hat * normal_proj_magnitude
+        f_tangential = total_force - normal_proj_vec
+        
+        # Displacement
+        displacement = f_tangential * step_size
+        particle['pos'] += displacement
+```
+
+### Parameters
+*   **Iteration Step Size**: $0.02$. Chosen to balance iteration accuracy and efficiency [S1, unofficial].
+*   **Cutoff Radius**: Equal to the voxel size $\sigma_l$ at the particle's scale level [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Zero Distance**: If $r=0$, normalization fails. Skip or handle as degenerate [S1, unofficial].
+*   **Scale Consistency**: Coordinates and radii must be mapped to the current scale before calculation [S1, unofficial].
+*   **Projection Formula Ambiguity**: The source formula $\mathbf{f}_v^T = \mathbf{f}_v - \mathbf{n}_i (\mathbf{n}_i \cdot \mathbf{n}_i)$ is mathematically ambiguous if $\mathbf{n}_i$ is not unit length or if $\mathbf{f}_v$ is not defined. Standard tangential projection is used in implementation [S1, unofficial].
+
+## Operating characteristics
+
+*   **Time Complexity**: $O(N \cdot K)$ where $N$ is the number of particles and $K$ is the average number of neighbors in the 26-voxel neighborhood. The search is bounded by the voxel grid structure.
+*   **Memory Complexity**: $O(N)$ for particle storage and grid overhead.
+*   **Strengths**: Improves particle distribution uniformity, reducing clustering artifacts in surface extraction. Local nature makes it efficient.
+*   **Limitations**: Iterative process requires multiple passes. Sensitive to step size and cutoff radius definition.
+*   **When to Use**: After initial particle placement or PBF simulation to refine density before surface extraction.
+*   **When Not to Use**: When real-time performance is critical and distribution is already uniform, or for very sparse datasets where neighbor search overhead dominates.
+
+## Background
+
+*   **Origin**: Introduced in the context of Surface Extraction for Industrial CT based on Adaptive Particle Systems [S1, unofficial].
+*   **Purpose**: To optimize particle distribution by treating repulsive interactions as local short-range forces, addressing the weakness of repulsive forces at long distances [S1, unofficial].
+*   **Development**: Part of a pipeline involving adaptive voxel pyramids, neighbor search, and energy minimization for equilibrium [S1, unofficial].
+
+## Sources
+
+[S1] Surface Extraction for Industrial CT Based On Adaptive Particle System, https://doi.org/10.21203/rs.3.rs-9502773/v1, fetched 2026-10-26 (unofficial)

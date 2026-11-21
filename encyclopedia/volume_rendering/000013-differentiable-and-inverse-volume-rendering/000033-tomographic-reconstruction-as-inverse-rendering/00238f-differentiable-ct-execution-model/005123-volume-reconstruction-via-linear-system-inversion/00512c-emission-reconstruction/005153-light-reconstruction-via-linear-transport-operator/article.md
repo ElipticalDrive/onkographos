@@ -1,0 +1,146 @@
+# Light Reconstruction via Linear Transport Operator
+
+Also called: Environmental Illumination Optimization, Light Source Coefficient Optimization
+
+## Overview
+This method optimizes environmental illumination (outgoing radiance from the environment) to match a desired volume appearance, assuming the volume's intrinsic properties (emission, albedo, extinction) are spatially varying but fixed during the optimization process [S1]. It differs from sibling methods like [Emission Reconstruction](14424-emission-reconstruction.md) by treating the light source coefficients as the unknown variables rather than the volume properties, solving for the lighting that best explains the observed pixel values through a linear transport operator [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ constraint pixels (desired observations $o$), a volume with fixed properties, and $M$ basis functions modeling the light sources (e.g., directional lights sampled from an environment map) [S1].
+*   **Outputs:** An $M$-dimensional coefficient vector $\tilde{L}_o$ representing the optimized outgoing radiance from the environment [S1].
+
+**Data Structures:**
+*   **Transport Operator $T$:** A dense matrix of size $N \times M$. Unlike the sparse weight matrices used in volume parameter reconstruction, $T$ is dense because it encodes complete light scattering in the scene [S1].
+*   **Light Volumes ($vol_i$):** For Strategy 2, $M$ precomputed volumes are stored. Each $vol_i$ contains the radiance contribution of the $i$-th light basis function at every voxel in the scene [S1].
+
+**Formulas:**
+The problem is formulated as a least-squares minimization:
+$$ \min_{\tilde{L}_o} ||T \tilde{L}_o - o||^2 $$
+where:
+*   $o$ is the vector of desired observation values for $N$ pixels [S1].
+*   $T$ is the linear light transport operator matrix of size $N \times M$ [S1].
+*   $\tilde{L}_o$ is the $M$-dimensional vector of light source coefficients [S1].
+
+**Parameters:**
+*   $M$: Number of basis functions. Typical value: ~16 coefficients are sufficient to capture light influence [S1].
+*   $N$: Number of constraint pixels [S1].
+
+**Steps:**
+1.  **Precomputation:** Construct the operator $T$ or the intermediate light volumes. Two strategies are available:
+    *   *Strategy 1 (Store T):* Compute the full $N \times M$ matrix $T$. For each light coefficient $i$, render the scene with only that coefficient active (value 1, others 0) to fill the $i$-th column of $T$ [S1].
+    *   *Strategy 2 (Light Volumes):* For each light coefficient $i$, light the entire volume with that coefficient active to create a "light volume" $vol_i$. Store these $M$ volumes [S1].
+2.  **Optimization Loop:** Solve the linear system using an iterative solver (e.g., Conjugate Gradient) [S1]. Each iteration requires two matrix-vector multiplications:
+    *   **Forward Pass ($T \tilde{L}_o$):** Compute the predicted observation.
+        *   *If using Strategy 1:* Perform standard matrix-vector multiplication [S1].
+        *   *If using Strategy 2:* For each constraint pixel, shoot a ray through the volume. Gather values from all precomputed light volumes $vol_i$ along the ray path and sum them weighted by $\tilde{L}_o$ [S1].
+    *   **Backward Pass ($T^T r$):** Distribute the residual $r = o - T \tilde{L}_o$ back to the light coefficients.
+        *   *If using Strategy 1:* Perform standard matrix-vector multiplication with the transpose [S1].
+        *   *If using Strategy 2:* For each constraint pixel, distribute its residual value to the light coefficients. This is analogous to volume optimization back-projection, but the values are accumulated into the light coefficient vector $\tilde{L}_o$ rather than voxel properties [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def light_reconstruction(constraint_pixels, volume, num_basis_functions=16):
+    """
+    Optimizes light source coefficients to match constraint pixels.
+    Uses Strategy 2 (Light Volumes) for memory efficiency.
+    """
+    M = num_basis_functions
+    N = len(constraint_pixels)
+    
+    # Precomputation: Generate light volumes
+    # vol[i] is a 3D array representing the radiance contribution 
+    # of the i-th basis function at every voxel.
+    light_volumes = precompute_light_volumes(volume, M)
+    
+    # Initialize coefficients
+    L_o = zeros(M)
+    
+    # Optimization loop (e.g., Conjugate Gradient)
+    # Note: Standard CG requires T^T * T, but we implement the 
+    # matrix-vector products directly to avoid forming T explicitly.
+    
+    # Simplified gradient descent for clarity of the T/T^T operations
+    # In practice, use CG or similar solver.
+    for iteration in range(max_iterations):
+        # Forward Pass: y = T * L_o
+        predicted_obs = zeros(N)
+        for p_idx, ray in enumerate(constraint_pixels):
+            accumulated = 0.0
+            # Gather values from all light volumes along the ray
+            for i in range(M):
+                # Sample light_volumes[i] along ray and integrate
+                # This is equivalent to the column i of T multiplied by L_o[i]
+                contribution = integrate_light_volume(light_volumes[i], ray)
+                accumulated += L_o[i] * contribution
+            predicted_obs[p_idx] = accumulated
+            
+        # Compute residual
+        residual = constraint_pixels - predicted_obs
+        
+        # Backward Pass: grad = T^T * residual
+        # Distribute residuals to light coefficients
+        grad = zeros(M)
+        for p_idx, ray in enumerate(constraint_pixels):
+            r = residual[p_idx]
+            if abs(r) < epsilon:
+                continue
+            # Distribute residual to each light coefficient based on 
+            # the light volume's contribution at this pixel
+            for i in range(M):
+                # The sensitivity of the pixel to light coefficient i
+                # is the value of light_volumes[i] along the ray
+                sensitivity = integrate_light_volume(light_volumes[i], ray)
+                grad[i] += r * sensitivity
+                
+        # Update coefficients (simplified update rule)
+        # L_o = L_o - alpha * grad
+        # (Full implementation requires line search or CG update steps)
+        L_o = L_o - learning_rate * grad
+        
+    return L_o
+
+def precompute_light_volumes(volume, M):
+    """
+    For each of the M basis functions, render the volume 
+    with that light source active to create a light volume.
+    """
+    volumes = []
+    for i in range(M):
+        # Create a temporary environment map with only the i-th direction active
+        temp_env = create_single_directional_light(i)
+        # Render the volume with this lighting to get the contribution
+        # This is stored as an emission-like volume
+        vol = render_volume_with_lighting(volume, temp_env)
+        volumes.append(vol)
+    return volumes
+
+def integrate_light_volume(light_vol, ray):
+    """
+    Integrates the light volume along a ray.
+    Equivalent to the transport of the specific light basis function.
+    """
+    # Standard volume rendering integral along the ray
+    # sum(light_vol(ray(t)) * transmittance(t))
+    return standard_volume_rendering(light_vol, ray)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Sparsity:** The operator $T$ is not sparse; it encodes complete light scattering. On-the-fly evaluation is too slow, requiring precomputation [S1].
+*   **Memory:** Strategy 1 (storing $T$) has memory linear in $N$ (pixels). Strategy 2 (light volumes) has memory linear in $VolumeSize \times M$ [S1].
+*   **Constant Volume Properties:** The method assumes volume properties are constant during optimization. If they vary, the operator $T$ is no longer constant, and this linear approach fails [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the precomputation strategy. Strategy 1 requires $M$ full volume renders for precomputation. Strategy 2 requires $M$ full volume renders for precomputation. Optimization iterations require $O(N \cdot M)$ work per iteration for Strategy 2 (ray traversal through $M$ volumes) or $O(N \cdot M)$ for Strategy 1 (matrix-vector multiply) [S1].
+*   **Memory Complexity:** Strategy 1: $O(N \cdot M)$ to store $T$. Strategy 2: $O(V \cdot M)$ where $V$ is the number of voxels, to store light volumes [S1].
+*   **Strengths:** Allows independent optimization of lighting without altering volume geometry or material properties. Efficient if $M$ is small (~16) [S1].
+*   **Limitations:** Requires precomputation. Cannot handle dynamic volume properties. Dense matrix operations can be memory-intensive for high-resolution constraints [S1].
+*   **When to use:** When the volume structure is known and fixed, but the lighting needs to be adjusted to match a target appearance (e.g., stylization) [S1].
+
+## Background
+This method was introduced in the context of static volume stylization using a painting metaphor [S1]. It builds on the linearity of light transport in participating media, allowing the transport operator to be separated from the source terms [S1]. The approach is analogous to tomographic reconstruction but applied to the light source coefficients rather than the volume density [S1].
+
+## Sources
+[S1] Property and Lighting Manipulations for Static Volume Stylization Using a Painting Metaphor, https://doi.org/10.1109/TVCG.2014.13, fetched 2026-10-26

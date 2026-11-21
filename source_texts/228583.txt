@@ -1,0 +1,1533 @@
+The Irreden Engine. Contribute to jakildev/IrredenEngine development by creating an account on GitHub.
+
+render: preserve lower raster-only sun blockers behind a distant nearest-depth sample (#4799) by jakildev · Pull Request #4830 · jakildev/IrredenEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jakildev
+commented
+Oct 31, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Native fixture for the raster-only sun bake: IRCanvasStress --probe-particle-raster registers the stateless particle pass (selecting the legacy primary bake), --probe-ray-casters <count> <distance> <step> stacks GRID boxes on the shadowbox sun ray, --sun-primary-probe reads the floor ray's primary/fallback sun words per cascade and counts each caster's canvas pixels; --probe-hidden-box now also covers the GRID shadowbox and --probe-floor-span reaches 120.
+IRPrefab::SunShadow::readPrimaryDepthProbe (engine probe) and a CPU unpackSunDepth twin.
+c_bake_sun_shadow_map becomes a thin wrapper over c_bake_sun_shadow_map_body in both dialects; c_bake_sun_shadow_map_second_depth compiles the body with IR_SUN_SECOND_DEPTH (two-slot distinct-depth atomic min into the otherwise empty indexed fallback layer). BAKE_SUN_SHADOW_MAP::retainSecondPrimaryDepth_ selects it lazily (opt-in diagnostic, default path unchanged); ir_sun_shadow_sample reads the fallback layer for raster receivers when sunBasisV.w is set (new secondPrimaryDepth parameter).
+Tests: two-slot bake adapter + production/second-depth controls (test_render_legacy_shadow_bake.py), second-depth receiver controls with bias/throw endpoint sweeps (test_render_shadow_layer_union.py), new test_render_sun_depth_slab.py (slab extrema exactness proof, provenance counterexample, storage arithmetic); registered in VALIDATION.md.
+Decision published in docs/design/sun-face-index-capacity.md § "Raster-only primary layer: measured decision"; evidence under docs/pr-screenshots/claude/4799-raster-sun-depth-preservation/.
+Test plan
+fleet-build --target IRCanvasStress, fleet-build --target IRPerfGrid clean; fleet-build --target format-changed applied.
+python3 scripts/tests/test_render_legacy_shadow_bake.py (3 tests), test_render_shadow_layer_union.py (4), test_render_sun_depth_slab.py (2), test_render_source_face_overflow.py, test_render_source_face_basis.py, test_render_sun_cascade_routing.py, test_render_shape_pcf_bias.py, test_sun_query_probe.py: all OK in both dialects.
+python3 scripts/shader_parity_audit.py: clean (142 GLSL / 132 Metal, 5 allowlisted). cmake --build build --target header-checks (Metal kernel registry, scratch consumer, GLSL reserved words): built. python3 scripts/lint_comment_refs.py: ok.
+ir-acquire gpu -- python3 docs/pr-screenshots/claude/4799-raster-sun-depth-preservation/capture.py --output …: 165 captures CLEAN on the final binary; every head frame byte-identical to its parent frame, every second frame to its head frame; grades identical to the pre-fix run.
+python3 scripts/render-verify.py --target IRCanvasStress --no-build: 57 PASS / 2 FAIL, both inherited (render: attribute the IRCanvasStress compare_yaw0 / compare_yaw_q red on master (max delta 240, unowned) #4806) with metrics equal to the same-session master control. --target IRPerfGrid --no-build: all 21 PASS. python3 scripts/light-verify.py --if-changed: all checks PASS.
+ir-acquire benchmark -- python3 …/timing.py --output … --pairs 5: guarded window held; default path within noise, diagnostic +16 % bake.
+Acceptance evidence
+Criterion
+Check run
+Observed
+1. Positive-fire native fixture: CLEAN exits, primary-only collision with zero finite records, missing-shadow pixels > 0 outside a 2-px band, full frames/crops/dimensions/transforms/counts/subdivision/hashes/commands retained, unlit pairs unchanged, bake-input witness
+ir-acquire gpu -- python3 docs/pr-screenshots/claude/4799-raster-sun-depth-preservation/capture.py --output /tmp/pool5-4799-final (43 cases × parent/head/second)
+165 captures RESULT=CLEAN; every stacked case logs route=raster face_records=0 with the floor ray's nearest word −15 (lower only) → −87 (stacked) in both cascades; missing outside band: stacked 4,939 (cardinal), 5,408 (oblique), 4,308 (cascade 0, far-), excess 0; unlit-stacked vs unlit-lower 0/0; census 600 canvas pixels for the lower box and each ray caster; captures.json keeps commands, 2560×1440 native size, binary + shader hashes, frame + crop hashes and per-shot probe lines; run.log.gz keeps CaptureCamera, LIGHTING-PROBE, Voxel render mode … effective_subdivisions=1, RAY-CASTER, PARTICLE-RASTER
+2. Recovery or measured rejection; distant-only lit; distant caster crossing the throw in one running scene vs static-pose controls; no stale-frame shadow; runnable witness + quantified residual per family
+same capture run; --sun-second-depth variant; python3 scripts/tests/test_render_sun_depth_slab.py; census lines
+Rejection outcome. Second retained depth: second crops equal head crops in all 43 cases (residual unchanged 4,939 / 5,408 / 4,308 missing); probe shows the fallback slot holding the distant box's own neighbour (−86.667 under −87) because a flat raster top spans three quantized depths (−15, −14.667, −14.333). Depth slab: 3,884,100 exhaustive queries exact at width ≤ window, 6,968 mismatches when wider, extrema both coplanar-rejected while the interior direct write blocks (both dialects); 256 MiB for 16 min/max slabs. Finite-index routing: 31,320 occupied canvas pixels in the three-object fixture = 48 % of the 65,536-record pool, 34,376 default scene, 7.1 pools for a covered canvas. distant stays lit (only brighter pixels vs lower). Moving track (1 unit/tick, shots at 29…89 units): moving shot = static pose control 0/0 on all 14 shots in all variants; loss opens between 39 (nearest −54, 0 missing) and 49 units (nearest −64, full loss)
+3. Query and publication correctness in both dialects: bias/throw/slab endpoints, adjacent quantized depths, both receiver modes, provenance, mixed layers, empty/reused storage, capacity boundaries; mutations fail
+python3 scripts/tests/test_render_legacy_shadow_bake.py; python3 scripts/tests/test_render_shadow_layer_union.py; python3 scripts/tests/test_render_sun_depth_slab.py; existing test_render_source_face_overflow.py, _basis.py, test_render_sun_cascade_routing.py, test_render_shape_pcf_bias.py, test_sun_query_probe.py
+all OK, GLSL and Metal. Bake slots: production build writes no second word, second-depth build keeps min + nearest distinct loser over every permutation of 6 word sets × 2 cascades (incl. duplicate-depth words), out-of-bounds guard; mutations same_depth_pushed, push_new_word_only, wrong_layer, production_switch fail. Receiver: 250 second-depth comparisons per dialect at bias / bias+throw endpoints ±1–2 quanta, duplicate, two-distant residual, surface-receiver and weighted-union controls; mutations drop_second_depth_layer, always_read_fallback, unbounded_second_depth fail. Slab: endpoint proof + provenance counterexample; mutations >= endpoint and skip_same_plane_test fail
+4. Measured cost: matched baseline/candidate under ir-acquire benchmark, warmup, ≥ 5 interleaved pairs, raster fixture + IRPerfGrid zoom 1/4; CPU frame mean/p99, GPU rows, bytes cleared, reads, submissions; adoption ≤ 1.10×
+ir-acquire benchmark -- python3 docs/pr-screenshots/claude/4799-raster-sun-depth-preservation/timing.py --output … --pairs 5
+Five interleaved pairs per scene under the benchmark guard (window held, four panes parked), 360-frame raster runs and 60-frame IRPerfGrid runs, warmup excluded. Default path head/parent: raster-stacked steady frame avg 1.044 (parent spread 15.6–21.5 vs head 18.2–22.3), p99 1.019, GPU frame envelope 1.004, bakeSunShadowMap 0.998 (2.816 → 2.809 ms), computeSunShadow 1.042 (0.053 → 0.055), canvasClear 1.007; IRPerfGrid zoom 1 frame 0.974 / envelope 0.969, zoom 4 frame 1.021 / envelope 0.971; every head GPU row inside the parent spread. Diagnostic second/head: bake 1.164 (+0.45 ms, every pair above the parent max), computeSunShadow 1.174, GPU frame 1.120, frame avg 1.149 — not adopted. Bytes cleared, allocations and dispatch count unchanged in both variants (the fallback layer is already cleared); candidate reads +1 per raster tap in the diagnostic only. An earlier in-kernel runtime switch cost the default bake +10 % in all five pairs and was replaced by the compile-time wrapper. Tables: docs/pr-screenshots/claude/4799-raster-sun-depth-preservation/timing/timing.md
+5. render-verify.py --target IRCanvasStress, --target IRPerfGrid, light-verify.py --if-changed, shader_parity_audit.py; inherited failures attributed with matched baseline runs; native Metal vs Windows/OpenGL kept distinct; decision table
+the four commands
+IRPerfGrid: all 21 checks PASS. light-verify: all checks PASS. shader_parity_audit: clean (142 GLSL / 132 Metal, 5 allowlisted). IRCanvasStress: 41 PASS, 18 FAIL — after the ray-caster guard fix 57 PASS, 2 FAIL: compare_yaw0 and compare_yaw_q fail with match 99.9992 % / max delta 240 on the head and identically on a same-session origin/master control build (/tmp/pool5-4799-parent-wt, --build-dir control run: 57 PASS, the same 2 FAIL); both are tracked by open #4806 (inherited, not moved). Decision table: docs/design/sun-face-index-capacity.md § "Raster-only primary layer: measured decision" (shipped repair: none; measured rejection: three families; redesign to escalate: far-anchored second slot). Windows/OpenGL: unverifiable on macos: no native OpenGL run on this host; the CPU adapters execute the GLSL sources, fleet:authored-on-macos routes the cross-host smoke
+Plan departures
+Decision 3's second-retained-depth prototype ships as a compile-time bake variant (c_bake_sun_shadow_map_second_depth over a shared body) rather than a runtime switch: the switch measured +10 % on the production bake row, and the GPU stage timing cost model requires specialization for hot-kernel modes.
+The plan's Phase 0 predicted a loss only from a caster beyond the throw; the fixture also showed the nearest-two family failing on a single flat caster, because a flat raster top spans three quantized sun depths per texel, so the three-depth counterexample is the natural case rather than a contrived one.
+The fixture flag --probe-hidden-box now also hides the GRID shadowbox and --probe-floor-span clamps to 120 so the cascade-0 placement keeps a receiver under the ray; neither changes a manifest run.
+Notes for reviewer
+fleet-pr-overlap --base master reads VERDICT: overlap against #4829 (the PR for issue #4798): shared creations/demos/canvas_stress/main.cpp, docs/agents/VALIDATION.md, docs/design/sun-face-index-capacity.md, engine/prefabs/irreden/render/sun_shadow_probe.hpp, engine/prefabs/irreden/render/systems/system_bake_sun_shadow_map.hpp, engine/render/src/shaders/ir_sun_shadow_sample.{glsl,metal}, scripts/perf/sun_query_probe.py, scripts/tests/test_render_source_face_overflow.py, every trial merge clean after this branch moved its three adjacent hunks (ray-caster spawn after the record-pool filler, validator row under the native query probe row, the capacity doc's remaining-work sentence left untouched). The two design-doc additions are different sections; please read them together for consistency once both land.
+The runtime claim on #4799 was swept by a harness restart and re-dispatched to pool-2 while this PR was being opened; the issue comment asks pool-2 to decline. Windows/OpenGL native runs were not possible on this host; the CPU adapters execute the GLSL sources and fleet:authored-on-macos routes the cross-host smoke.
+Closes #4799
+🤖 Generated with Claude Code
+render: witness raster-only sun-depth loss and reject the bounded can…
+…
+68f9bd0
+```
+…didates
+
+Reproduce the primary-layer nearest-depth loss on the raster-only route
+with a native IRCanvasStress fixture (particle pass, GRID casters stacked
+on the shadowbox sun ray, a capture-frame primary-texel probe and caster
+census), publish the measured rejection of the second-retained-depth,
+depth-slab and finite-index-routing families, and keep the second-depth
+diagnostic as a compile-time bake variant so the production bake is
+unchanged.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+jakildev
+added
+the
+fleet:wip
+Work in progress — not ready for review
+label
+Oct 31, 2026
+jakildev
+mentioned this pull request
+Oct 31, 2026
+render: preserve lower raster-only sun blockers behind a distant nearest-depth sample
+#4799
+Open
+jakildev
+added
+fleet:author-claude
+Implementation last authored by Claude; route review to Codex
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+labels
+Oct 31, 2026
+canvas_stress: spawn ray casters only when the flag is provided
+…
+580105d
+```
+An unprovided numbers flag reads back as zeros, so the empty-vector guard
+placed a coincident GRID box in every run and intersected the analytic
+cylinder rows.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+github-actions
+Bot
+commented
+Oct 31, 2026
+Copy link
+Copy Markdown
+Perf gate
+Head host slug: linux-x86_64-epyc-7763-64-unknown
+perf comparison: 685c44b → 1a6a1cb-ci
+baseline: /home/runner/work/_temp/perf-baseline/history/linux-x86_64-epyc-7763-64-unknown/685c44bded236d08efa3072bec1eeae93810d605
+head: /home/runner/work/IrredenEngine/IrredenEngine/save_files/perf/1a6a1cba2-ci
+host calibration
+host: linux-x86_64-epyc-7763-64-unknown (matches baseline)
+ref_ms: head 103.43 vs baseline 104.36 (load_factor 0.99×)
+calibration target: 50.00 ms (informational)
+baseline capture: perf-baseline@685c44bde (branch tip); master 71829165a, finished 2026-10-30T06:49:28Z, 1.5 d before the head run, ref_ms 104.36
+weighting: raw (class-matched capture; load_factor 0.99×; no calibration-scaling entry)
+attribution: no measured master improvement between capture master 71829165a and merge base a6b9953c3 (8 commits)
+thresholds: regress ≥ 10%, improve ≥ 5%
+voxel cull effectiveness
+cell
+ratio (base→head)
+avg visible
+total
+avg feeder
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+1.000 → 1.000 (+0.0pp)
+262144 → 262144
+262144 → 262144
+0 → 0
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+0.788 → 0.788 (+0.0pp)
+156630 → 156630
+262144 → 262144
+50080 → 50080 (1.000×)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+1.000 → 1.000 (+0.0pp)
+262144 → 262144
+262144 → 262144
+0 → 0
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+0.990 → 0.990 (+0.0pp)
+255592 → 255592
+262144 → 262144
+3862 → 3862 (1.000×)
+frame timing (ms)
+cell
+avg
+p99
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+473.49 → 481.91 (+1.8%)
+1855.01 → 1724.05 (-7.1%) ↓
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+1258.88 → 1259.28 (+0.0%)
+2564.94 → 2546.73 (-0.7%)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+633.72 → 637.69 (+0.6%)
+11671.39 → 11496.00 (-1.5%)
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+1716.62 → 1711.95 (-0.3%)
+3024.89 → 2992.27 (-1.1%)
+GPU frame timing (ms; separate from stage samples)
+cell
+envelope (base→head)
+buffer spans (base→head)
+coverage (base→head)
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+GPU stage timing (avg ms per sampled invocation)
+cell
+canvasClear
+voxelCompact
+voxelStage1
+voxelCardinalElect
+voxelStage2
+voxelSunFaces
+textToTrixel
+buildLightOcclusionGrid
+computeVoxelAO
+bakeSunShadowMap
+computeSunShadow
+computeLightVolume
+lightingToTrixel
+fogToTrixel
+trixelToFb
+resolvePerAxisScreenDepth
+fbToScreen
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+63.79→65.45
+65.64→67.12
+57.57→59.14
+1.28→0.95 ↓
+53.34→54.96
+5.52→5.70
+—
+0.00→0.00
+1.40→1.42
+6.32→6.32
+11.71→12.29
+22.20→23.34
+3.59→3.69
+1.24→1.29
+0.19→0.18
+—
+7.89→7.95
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+106.55→106.31
+415.77→416.65
+262.30→263.37
+4.03→4.04
+231.96→231.87
+4.93→4.90
+—
+0.00→0.00
+1.18→1.20
+16.52→16.60
+10.21→10.21
+19.39→19.06
+7.98→8.08
+1.53→1.30 ↓
+0.18→0.16 ↓
+—
+7.45→7.41
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+57.48→58.08
+80.94→81.92
+66.01→66.26
+12.77→12.82
+47.92→47.78
+8.62→8.45
+1.10→1.10
+0.00→0.00
+0.90→0.93
+54.04→54.26
+10.41→10.44
+56.66→55.36
+7.93→7.85
+1.79→1.78
+0.18→0.17 ↓
+0.00→0.00
+8.87→8.95
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+117.55→117.01
+536.06→534.82
+426.77→424.46
+6.34→6.32
+366.90→364.84
+5.62→5.56
+1.12→1.10
+0.00→0.00
+0.70→0.64 ↓
+12.41→12.19
+10.47→11.66 ⚠
+19.20→19.47
+6.56→6.62
+1.55→1.36 ↓
+0.17→0.16
+0.00→0.00
+7.33→7.38
+top CPU systems by avg ms (head)
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+249.511 → 255.283 (+2.3%)
+RENDER
+ComputeLightVolume
+33.442 → 35.155 (+5.1%)
+RENDER
+CanvasToFramebuffer
+17.436 → 17.289 (-0.8%)
+RENDER
+ComputeSunShadow
+6.241 → 6.205 (-0.6%)
+UPDATE
+PropagateTransform
+4.823 → 4.828 (+0.1%)
+UPDATE
+FogRevealEval
+4.340 → 4.276 (-1.5%)
+RENDER
+ComputeVoxelAO
+3.919 → 3.959 (+1.0%)
+RENDER
+LightingToTrixel
+3.710 → 3.823 (+3.0%)
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+1022.960 → 1024.414 (+0.1%)
+RENDER
+ComputeLightVolume
+29.239 → 28.866 (-1.3%)
+RENDER
+ComputeSunShadow
+16.462 → 16.532 (+0.4%)
+RENDER
+CanvasToFramebuffer
+16.013 → 15.839 (-1.1%)
+RENDER
+ComputeVoxelAO
+9.355 → 9.398 (+0.5%)
+RENDER
+LightingToTrixel
+8.197 → 8.299 (+1.2%)
+UPDATE
+PropagateTransform
+4.651 → 4.510 (-3.0%)
+UPDATE
+FogRevealEval
+4.327 → 4.252 (-1.7%)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+289.936 → 288.650 (-0.4%)
+RENDER
+ComputeSunShadow
+53.119 → 53.329 (+0.4%)
+RENDER
+LightingToTrixel
+35.405 → 34.590 (-2.3%)
+RENDER
+ComputeLightVolume
+32.729 → 32.252 (-1.5%)
+RENDER
+CanvasToFramebuffer
+17.364 → 17.314 (-0.3%)
+RENDER
+FogToTrixel
+7.056 → 7.028 (-0.4%)
+UPDATE
+PropagateTransform
+6.416 → 6.540 (+1.9%)
+RENDER
+BakeSunShadowMap
+4.825 → 4.957 (+2.7%)
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+1458.223 → 1452.220 (-0.4%)
+RENDER
+ComputeLightVolume
+29.281 → 30.706 (+4.9%)
+RENDER
+CanvasToFramebuffer
+16.088 → 16.079 (-0.1%)
+RENDER
+ComputeSunShadow
+12.325 → 12.112 (-1.7%)
+RENDER
+ComputeVoxelAO
+7.759 → 7.712 (-0.6%)
+RENDER
+LightingToTrixel
+6.730 → 6.791 (+0.9%)
+UPDATE
+PropagateTransform
+6.303 → 6.273 (-0.5%)
+UPDATE
+FogRevealEval
+4.397 → 4.275 (-2.8%)
+github-actions
+Bot
+commented
+Oct 31, 2026
+Copy link
+Copy Markdown
+Perf gate
+Head host slug: linux-x86_64-epyc-9v45-96-unknown
+perf comparison: ec70f10 → 523c842-ci
+baseline: /home/runner/work/_temp/perf-baseline/history/linux-x86_64-epyc-9v45-96-unknown/ec70f10c01d23624051e8c800651a24d365eb254
+head: /home/runner/work/IrredenEngine/IrredenEngine/save_files/perf/523c8424d-ci
+host calibration
+host: linux-x86_64-epyc-9v45-96-unknown (matches baseline)
+ref_ms: head 60.81 vs baseline 57.81 (load_factor 1.05×)
+calibration target: 50.00 ms (informational)
+baseline capture: perf-baseline@ec70f10c0 (branch tip); master ef578cf13, finished 2026-10-30T06:47:02Z, 1.5 d before the head run, ref_ms 57.81
+weighting: raw (class-matched capture; load_factor 1.05×; no calibration-scaling entry)
+attribution: no measured master improvement between capture master ef578cf13 and merge base a6b9953c3 (6 commits)
+thresholds: regress ≥ 10%, improve ≥ 5%
+voxel cull effectiveness
+cell
+ratio (base→head)
+avg visible
+total
+avg feeder
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+1.000 → 1.000 (+0.0pp)
+262144 → 262144
+262144 → 262144
+0 → 0
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+0.788 → 0.788 (+0.0pp)
+156630 → 156630
+262144 → 262144
+50080 → 50080 (1.000×)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+1.000 → 1.000 (+0.0pp)
+262144 → 262144
+262144 → 262144
+0 → 0
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+0.990 → 0.990 (+0.0pp)
+255592 → 255592
+262144 → 262144
+3862 → 3862 (1.000×)
+frame timing (ms)
+cell
+avg
+p99
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+316.79 → 292.24 (-7.7%) ↓
+1066.40 → 960.10 (-10.0%) ↓
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+789.82 → 727.11 (-7.9%) ↓
+1545.76 → 1411.75 (-8.7%) ↓
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+374.51 → 371.35 (-0.8%)
+5352.30 → 5225.08 (-2.4%)
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+1038.25 → 981.86 (-5.4%) ↓
+1765.57 → 1697.40 (-3.9%)
+GPU frame timing (ms; separate from stage samples)
+cell
+envelope (base→head)
+buffer spans (base→head)
+coverage (base→head)
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+GPU stage timing (avg ms per sampled invocation)
+cell
+canvasClear
+voxelCompact
+voxelStage1
+voxelCardinalElect
+voxelStage2
+voxelSunFaces
+textToTrixel
+buildLightOcclusionGrid
+computeVoxelAO
+bakeSunShadowMap
+computeSunShadow
+computeLightVolume
+lightingToTrixel
+fogToTrixel
+trixelToFb
+resolvePerAxisScreenDepth
+fbToScreen
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+41.55→38.52 ↓
+41.33→38.66 ↓
+36.55→34.34 ↓
+0.67→0.58 ↓
+36.45→33.93 ↓
+4.99→4.52 ↓
+—
+0.00→0.00
+1.25→1.14 ↓
+4.76→3.75 ↓
+14.71→12.44 ↓
+12.88→11.77 ↓
+3.28→2.45 ↓
+1.13→0.85 ↓
+0.18→0.13 ↓
+—
+6.27→5.06 ↓
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+79.40→71.07 ↓
+244.57→230.13 ↓
+156.41→146.01 ↓
+4.78→2.26 ↓
+138.90→129.87 ↓
+4.74→4.10 ↓
+—
+0.00→0.00
+1.10→0.94 ↓
+11.51→9.39 ↓
+13.01→10.78 ↓
+11.18→10.05 ↓
+6.15→4.86 ↓
+1.43→0.85 ↓
+0.18→0.12 ↓
+—
+5.95→4.68 ↓
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+34.41→34.84
+46.16→44.98
+37.51→36.73
+5.65→5.16 ↓
+29.86→29.47
+5.64→6.23 ⚠
+0.72→0.71
+0.00→0.00
+0.76→0.59 ↓
+25.80→23.49 ↓
+11.84→11.46
+24.91→23.85
+4.17→3.95 ↓
+1.20→1.14
+0.13→0.12 ↓
+0.00→0.00
+6.09→5.74 ↓
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+81.24→75.74 ↓
+301.09→288.11
+248.74→237.10
+3.77→3.73
+217.66→206.85
+5.05→4.76 ↓
+0.77→0.69 ↓
+0.00→0.00
+0.69→0.48 ↓
+7.89→6.92 ↓
+12.22→11.20 ↓
+10.81→10.05 ↓
+4.76→3.82 ↓
+1.32→0.90 ↓
+0.15→0.11 ↓
+0.00→0.00
+5.63→4.69 ↓
+top CPU systems by avg ms (head)
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+164.152 → 153.162 (-6.7%) ↓
+RENDER
+ComputeLightVolume
+27.204 → 23.907 (-12.1%) ↓
+RENDER
+CanvasToFramebuffer
+12.842 → 10.866 (-15.4%) ↓
+RENDER
+ComputeSunShadow
+4.687 → 3.688 (-21.3%) ↓
+UPDATE
+PropagateTransform
+2.792 → 2.762 (-1.1%)
+RENDER
+LightingToTrixel
+3.394 → 2.531 (-25.4%) ↓
+UPDATE
+FogRevealEval
+2.312 → 2.478 (+7.2%)
+RENDER
+ComputeVoxelAO
+2.647 → 2.067 (-21.9%) ↓
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+630.881 → 584.311 (-7.4%) ↓
+RENDER
+ComputeLightVolume
+23.692 → 20.536 (-13.3%) ↓
+RENDER
+CanvasToFramebuffer
+12.352 → 9.823 (-20.5%) ↓
+RENDER
+ComputeSunShadow
+11.466 → 9.346 (-18.5%) ↓
+RENDER
+LightingToTrixel
+6.399 → 4.983 (-22.1%) ↓
+RENDER
+ComputeVoxelAO
+5.526 → 4.561 (-17.5%) ↓
+UPDATE
+PropagateTransform
+2.609 → 2.698 (+3.4%)
+UPDATE
+FogRevealEval
+2.228 → 2.414 (+8.3%)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+167.005 → 167.806 (+0.5%)
+RENDER
+ComputeSunShadow
+25.352 → 23.077 (-9.0%) ↓
+RENDER
+ComputeLightVolume
+23.052 → 22.347 (-3.1%)
+RENDER
+LightingToTrixel
+14.689 → 13.861 (-5.6%) ↓
+RENDER
+CanvasToFramebuffer
+11.851 → 11.536 (-2.7%)
+UPDATE
+PropagateTransform
+3.727 → 3.711 (-0.4%)
+RENDER
+FogToTrixel
+3.556 → 3.466 (-2.5%)
+UPDATE
+PeriodicIdle
+3.289 → 3.258 (-0.9%)
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+859.274 → 817.856 (-4.8%)
+RENDER
+ComputeLightVolume
+22.681 → 20.984 (-7.5%) ↓
+RENDER
+CanvasToFramebuffer
+11.706 → 9.995 (-14.6%) ↓
+RENDER
+ComputeSunShadow
+7.820 → 6.859 (-12.3%) ↓
+RENDER
+LightingToTrixel
+4.901 → 3.933 (-19.8%) ↓
+RENDER
+ComputeVoxelAO
+4.129 → 3.791 (-8.2%) ↓
+UPDATE
+PropagateTransform
+3.837 → 3.713 (-3.2%)
+UPDATE
+FogRevealEval
+2.326 → 2.491 (+7.1%)
+github-actions
+Bot
+added
+the
+perf:improved
+Performance comparison detected an improvement
+label
+Oct 31, 2026
+render: publish the raster-only sun-depth evidence and hoist its prob…
+…
+00ce5ea
+```
+…e helpers
+
+Refresh the capture set from the fixed binary, add the guarded timing
+table and the decision table's measured cost, and point the bake-coverage
+design at the shared bake body.
+
+The capture census moves from the demo into the sun-shadow probe header so
+the creation only logs, the CPU sun-depth decode lives in IRMath beside
+sunSpaceProject with named constants, and the capture driver's staging,
+hashing and crop grading share one scripts module with a unit test.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+github-actions
+Bot
+removed
+the
+perf:improved
+Performance comparison detected an improvement
+label
+Oct 31, 2026
+render: keep the raster-depth edits clear of the record-pool growth h…
+…
+db39f2b
+```
+…unks
+
+The ray casters spawn after the record-pool filler, the validator row sits
+under the native query probe row, and the capacity doc's remaining-work
+sentence is left as it was.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+jakildev
+removed
+the
+fleet:wip
+Work in progress — not ready for review
+label
+Oct 31, 2026
+jakildev
+changed the title
+render: preserve lower raster-only sun blockers behind a distant nearest-depth sample (#4799) [WIP]
+render: preserve lower raster-only sun blockers behind a distant nearest-depth sample (#4799)
+Oct 31, 2026
+evin-mac-claude-app
+Bot
+added
+the
+fleet:reviewing-mac-pool-4
+label
+Oct 31, 2026
+jakildev
+commented
+Oct 31, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — render: preserve lower raster-only sun blockers behind a distant nearest-depth sample (#4799)
+Verdict: needs-fix
+Needs-fix
+PR body, Notes for reviewer — the current Closes #4798 wording is parsed as an undeclared close reference. The head's closes-lint job fails for that reason, so reword it to describe the overlap without a closing keyword (or declare #4798 if closure is intended), then rerun the check.
+Acceptance (issue #4799)
+The PR supplies the required native raster witness, diagnostic comparisons for each proposed representation, dual-dialect adapter coverage, measured cost data, and a documented rejection decision. The shipped default remains the single-depth path; the retained second-depth path is explicitly diagnostic rather than presented as a repair. Criteria 1–5 are established by the submitted evidence, subject to the failing required CI check above.
+Verification
+python3 scripts/tests/test_render_legacy_shadow_bake.py — passed (3 tests).
+python3 scripts/tests/test_render_shadow_layer_union.py — passed (4 tests; GLSL and Metal controls).
+python3 scripts/tests/test_render_sun_depth_slab.py — passed (2 tests; GLSL and Metal provenance controls).
+python3 scripts/shader_parity_audit.py — clean (142 GLSL / 132 Metal, 5 allowlisted).
+git diff --check origin/master...HEAD — clean.
+The closes-lint failure is PR-owned; the remaining Linux, perf-gate, render-harness, and fleet-tests checks were still in progress when reviewed.
+🤖 Reviewed by Codex (GPT-5), runtime codex (review-pr skill)
+Opus recheck required: touches the shared sun-shadow bake and sampling pipeline.
+jakildev
+added
+fleet:needs-fix
+Fleet reviewer found issues — author must address
+and removed
+fleet:reviewing-mac-pool-4
+labels
+Oct 31, 2026
+evin-mac-claude-app
+Bot
+added
+the
+fleet:amending-mac-pool-4
+label
+Oct 31, 2026
+jakildev
+added
+fleet:changes-made
+Agent addressed human feedback — ready for human re-review
+and removed
+fleet:needs-fix
+Fleet reviewer found issues — author must address
+fleet:amending-mac-pool-4
+labels
+Oct 31, 2026
+jakildev
+commented
+Oct 31, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Addressed feedback:
+PR body Notes for reviewer: reworded #4829 (Closes #4798) → #4829 (the PR for issue #4798) so it is no longer a would-close ref. Commit messages carried no stray refs (closes-lint scanned 4 messages; the only undeclared hit was body line 31).
+closes-lint re-ran on the body edit and passes (run 41233871313).
+No code change, so no push; head stays at db39f2b. — worker
+github-actions
+Bot
+commented
+Oct 31, 2026
+Copy link
+Copy Markdown
+Perf gate
+Head host slug: linux-x86_64-epyc-9v74-80-unknown
+perf comparison: 87f61d5 → cb52882-ci
+baseline: /home/runner/work/_temp/perf-baseline/history/linux-x86_64-epyc-9v74-80-unknown/87f61d593edbae2bfca1090b55cbc953ab599ced
+head: /home/runner/work/IrredenEngine/IrredenEngine/save_files/perf/cb528822a-ci
+host calibration
+host: linux-x86_64-epyc-9v74-80-unknown (matches baseline)
+ref_ms: head 92.17 vs baseline 91.64 (load_factor 1.01×)
+calibration target: 50.00 ms (informational)
+baseline capture: perf-baseline@87f61d593 (branch tip); master 0bc5397e8, finished 2026-10-31T05:03:51Z, 0.6 d before the head run, ref_ms 91.64
+weighting: raw (class-matched capture; load_factor 1.01×; no calibration-scaling entry)
+attribution: no measured master improvement between capture master 0bc5397e8 and merge base a6b9953c3 (1 commits)
+thresholds: regress ≥ 10%, improve ≥ 5%
+voxel cull effectiveness
+cell
+ratio (base→head)
+avg visible
+total
+avg feeder
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+1.000 → 1.000 (+0.0pp)
+262144 → 262144
+262144 → 262144
+0 → 0
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+0.788 → 0.788 (+0.0pp)
+156630 → 156630
+262144 → 262144
+50080 → 50080 (1.000×)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+1.000 → 1.000 (+0.0pp)
+262144 → 262144
+262144 → 262144
+0 → 0
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+0.990 → 0.990 (+0.0pp)
+255592 → 255592
+262144 → 262144
+3862 → 3862 (1.000×)
+frame timing (ms)
+cell
+avg
+p99
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+374.18 → 375.17 (+0.3%)
+1353.69 → 1399.59 (+3.4%)
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+921.22 → 918.78 (-0.3%)
+1942.53 → 1943.65 (+0.1%)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+469.79 → 475.72 (+1.3%)
+6950.62 → 7242.74 (+4.2%)
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+1220.23 → 1222.95 (+0.2%)
+2249.31 → 2229.48 (-0.9%)
+GPU frame timing (ms; separate from stage samples)
+cell
+envelope (base→head)
+buffer spans (base→head)
+coverage (base→head)
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+GPU stage timing (avg ms per sampled invocation)
+cell
+canvasClear
+voxelCompact
+voxelStage1
+voxelCardinalElect
+voxelStage2
+voxelSunFaces
+textToTrixel
+buildLightOcclusionGrid
+computeVoxelAO
+bakeSunShadowMap
+computeSunShadow
+computeLightVolume
+lightingToTrixel
+fogToTrixel
+trixelToFb
+resolvePerAxisScreenDepth
+fbToScreen
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+45.84→46.50
+47.97→47.78
+43.54→43.47
+0.77→0.77
+41.64→42.13
+4.78→4.95
+—
+0.00→0.00
+1.21→1.25
+5.03→5.24
+16.93→16.38
+15.28→15.24
+3.15→3.12
+1.01→1.04
+0.17→0.17
+—
+6.37→6.29
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+83.66→83.81
+293.23→292.18
+180.22→180.21
+2.89→2.85
+161.19→160.52
+4.39→4.28
+—
+0.00→0.00
+1.10→1.05
+13.01→13.07
+15.59→15.99
+13.21→13.07
+6.68→6.47
+1.20→1.21
+0.16→0.16
+—
+5.87→5.89
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+41.32→40.91
+57.03→56.92
+47.67→47.45
+7.17→7.19
+37.18→37.22
+6.08→6.30
+0.74→0.76
+0.00→0.00
+0.79→0.83
+32.59→33.16
+16.00→15.60
+31.51→32.17
+5.27→5.37
+1.39→1.41
+0.16→0.16
+0.00→0.00
+6.99→7.18
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+89.33→90.07
+359.78→359.15
+291.97→292.56
+4.42→4.42
+252.38→252.49
+4.95→4.97
+0.72→0.78
+0.00→0.00
+0.60→0.65
+9.43→9.55
+15.73→15.79
+12.86→12.79
+5.24→5.14
+1.15→1.20
+0.15→0.15
+0.00→0.00
+5.80→5.89
+top CPU systems by avg ms (head)
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+187.558 → 188.775 (+0.6%)
+RENDER
+ComputeLightVolume
+31.818 → 31.228 (-1.9%)
+RENDER
+CanvasToFramebuffer
+15.241 → 14.923 (-2.1%)
+RENDER
+ComputeSunShadow
+4.963 → 5.159 (+3.9%)
+UPDATE
+PropagateTransform
+4.059 → 4.065 (+0.1%)
+RENDER
+LightingToTrixel
+3.287 → 3.233 (-1.6%)
+UPDATE
+FogRevealEval
+3.151 → 3.134 (-0.5%)
+RENDER
+ComputeVoxelAO
+2.737 → 2.700 (-1.4%)
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+726.217 → 724.826 (-0.2%)
+RENDER
+ComputeLightVolume
+28.389 → 28.676 (+1.0%)
+RENDER
+CanvasToFramebuffer
+13.955 → 13.824 (-0.9%)
+RENDER
+ComputeSunShadow
+12.976 → 13.000 (+0.2%)
+RENDER
+LightingToTrixel
+6.857 → 6.626 (-3.4%)
+RENDER
+ComputeVoxelAO
+5.770 → 5.714 (-1.0%)
+UPDATE
+PropagateTransform
+3.878 → 3.804 (-1.9%)
+UPDATE
+FogRevealEval
+3.137 → 3.154 (+0.5%)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+205.336 → 208.686 (+1.6%)
+RENDER
+ComputeSunShadow
+32.020 → 32.597 (+1.8%)
+RENDER
+ComputeLightVolume
+30.090 → 29.619 (-1.6%)
+RENDER
+LightingToTrixel
+18.536 → 19.245 (+3.8%)
+RENDER
+CanvasToFramebuffer
+14.781 → 14.912 (+0.9%)
+UPDATE
+PropagateTransform
+5.341 → 5.275 (-1.2%)
+RENDER
+FogToTrixel
+4.577 → 4.683 (+2.3%)
+UPDATE
+PeriodicIdle
+3.381 → 3.489 (+3.2%)
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+1004.723 → 1005.551 (+0.1%)
+RENDER
+ComputeLightVolume
+28.218 → 28.230 (+0.0%)
+RENDER
+CanvasToFramebuffer
+13.638 → 13.998 (+2.6%)
+RENDER
+ComputeSunShadow
+9.368 → 9.481 (+1.2%)
+UPDATE
+PropagateTransform
+5.260 → 5.386 (+2.4%)
+RENDER
+LightingToTrixel
+5.396 → 5.278 (-2.2%)
+RENDER
+ComputeVoxelAO
+4.817 → 4.844 (+0.6%)
+UPDATE
+FogRevealEval
+3.121 → 3.151 (+1.0%)
+evin-mac-claude-app
+Bot
+added
+the
+fleet:reviewing-mac-pool-1
+label
+Oct 31, 2026
+github-actions
+Bot
+commented
+Oct 31, 2026
+Copy link
+Copy Markdown
+Perf gate
+Head host slug: linux-x86_64-epyc-7763-64-unknown
+perf comparison: 685c44b → 101f645-ci
+baseline: /home/runner/work/_temp/perf-baseline/history/linux-x86_64-epyc-7763-64-unknown/685c44bded236d08efa3072bec1eeae93810d605
+head: /home/runner/work/IrredenEngine/IrredenEngine/save_files/perf/101f64570-ci
+host calibration
+host: linux-x86_64-epyc-7763-64-unknown (matches baseline)
+ref_ms: head 103.45 vs baseline 104.36 (load_factor 0.99×)
+calibration target: 50.00 ms (informational)
+baseline capture: perf-baseline@685c44bde (branch tip); master 71829165a, finished 2026-10-30T06:49:28Z, 1.5 d before the head run, ref_ms 104.36
+weighting: raw (class-matched capture; load_factor 0.99×; no calibration-scaling entry)
+attribution: no measured master improvement between capture master 71829165a and merge base a6b9953c3 (8 commits)
+thresholds: regress ≥ 10%, improve ≥ 5%
+voxel cull effectiveness
+cell
+ratio (base→head)
+avg visible
+total
+avg feeder
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+1.000 → 1.000 (+0.0pp)
+262144 → 262144
+262144 → 262144
+0 → 0
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+0.788 → 0.788 (+0.0pp)
+156630 → 156630
+262144 → 262144
+50080 → 50080 (1.000×)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+1.000 → 1.000 (+0.0pp)
+262144 → 262144
+262144 → 262144
+0 → 0
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+0.990 → 0.990 (+0.0pp)
+255592 → 255592
+262144 → 262144
+3862 → 3862 (1.000×)
+frame timing (ms)
+cell
+avg
+p99
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+473.49 → 488.88 (+3.3%)
+1855.01 → 1911.16 (+3.0%)
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+1258.88 → 1269.79 (+0.9%)
+2564.94 → 2592.11 (+1.1%)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+633.72 → 652.09 (+2.9%)
+11671.39 → 12153.41 (+4.1%)
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+1716.62 → 1722.65 (+0.4%)
+3024.89 → 3077.71 (+1.7%)
+GPU frame timing (ms; separate from stage samples)
+cell
+envelope (base→head)
+buffer spans (base→head)
+coverage (base→head)
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+GPU stage timing (avg ms per sampled invocation)
+cell
+canvasClear
+voxelCompact
+voxelStage1
+voxelCardinalElect
+voxelStage2
+voxelSunFaces
+textToTrixel
+buildLightOcclusionGrid
+computeVoxelAO
+bakeSunShadowMap
+computeSunShadow
+computeLightVolume
+lightingToTrixel
+fogToTrixel
+trixelToFb
+resolvePerAxisScreenDepth
+fbToScreen
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+63.79→65.80
+65.64→66.35
+57.57→58.77
+1.28→1.39
+53.34→55.59
+5.52→5.71
+—
+0.00→0.00
+1.40→1.46
+6.32→6.65
+11.71→12.24
+22.20→23.21
+3.59→3.99 ⚠
+1.24→1.36
+0.19→0.20
+—
+7.89→8.17
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+106.55→106.87
+415.77→417.68
+262.30→261.25
+4.03→4.05
+231.96→234.96
+4.93→4.93
+—
+0.00→0.00
+1.18→1.25
+16.52→16.75
+10.21→10.30
+19.39→19.37
+7.98→8.21
+1.53→1.56
+0.18→0.18
+—
+7.45→7.52
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+57.48→58.56
+80.94→82.29
+66.01→66.21
+12.77→13.67
+47.92→48.27
+8.62→8.98
+1.10→1.14
+0.00→0.00
+0.90→0.96
+54.04→55.99
+10.41→10.69
+56.66→58.25
+7.93→8.17
+1.79→1.83
+0.18→0.19
+0.00→0.00
+8.87→9.11
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+117.55→118.16
+536.06→536.59
+426.77→425.14
+6.34→6.34
+366.90→366.26
+5.62→5.78
+1.12→1.13
+0.00→0.00
+0.70→0.68
+12.41→12.31
+10.47→10.27
+19.20→18.99
+6.56→6.61
+1.55→1.49
+0.17→0.18
+0.00→0.00
+7.33→7.68
+top CPU systems by avg ms (head)
+target=IRLuaPerfGrid,zoom=1,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+249.511 → 255.847 (+2.5%)
+RENDER
+ComputeLightVolume
+33.442 → 34.994 (+4.6%)
+RENDER
+CanvasToFramebuffer
+17.436 → 17.777 (+2.0%)
+RENDER
+ComputeSunShadow
+6.241 → 6.536 (+4.7%)
+UPDATE
+PropagateTransform
+4.823 → 4.895 (+1.5%)
+UPDATE
+FogRevealEval
+4.340 → 4.314 (-0.6%)
+RENDER
+ComputeVoxelAO
+3.919 → 4.172 (+6.5%)
+RENDER
+LightingToTrixel
+3.710 → 4.153 (+11.9%) ⚠
+target=IRLuaPerfGrid,zoom=4,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+1022.960 → 1026.977 (+0.4%)
+RENDER
+ComputeLightVolume
+29.239 → 29.195 (-0.2%)
+RENDER
+ComputeSunShadow
+16.462 → 16.687 (+1.4%)
+RENDER
+CanvasToFramebuffer
+16.013 → 16.368 (+2.2%)
+RENDER
+ComputeVoxelAO
+9.355 → 9.723 (+3.9%)
+RENDER
+LightingToTrixel
+8.197 → 8.425 (+2.8%)
+UPDATE
+PropagateTransform
+4.651 → 4.744 (+2.0%)
+UPDATE
+FogRevealEval
+4.327 → 4.280 (-1.1%)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+289.936 → 294.283 (+1.5%)
+RENDER
+ComputeSunShadow
+53.119 → 55.027 (+3.6%)
+RENDER
+LightingToTrixel
+35.405 → 37.274 (+5.3%)
+RENDER
+ComputeLightVolume
+32.729 → 32.764 (+0.1%)
+RENDER
+CanvasToFramebuffer
+17.364 → 17.635 (+1.6%)
+RENDER
+FogToTrixel
+7.056 → 7.237 (+2.6%)
+UPDATE
+PropagateTransform
+6.416 → 6.241 (-2.7%)
+RENDER
+BakeSunShadowMap
+4.825 → 4.963 (+2.9%)
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+1458.223 → 1457.564 (-0.0%)
+RENDER
+ComputeLightVolume
+29.281 → 28.883 (-1.4%)
+RENDER
+CanvasToFramebuffer
+16.088 → 16.514 (+2.6%)
+RENDER
+ComputeSunShadow
+12.325 → 12.220 (-0.9%)
+RENDER
+ComputeVoxelAO
+7.759 → 7.694 (-0.8%)
+RENDER
+LightingToTrixel
+6.730 → 6.841 (+1.6%)
+UPDATE
+PropagateTransform
+6.303 → 6.251 (-0.8%)
+UPDATE
+FogRevealEval
+4.397 → 4.345 (-1.2%)
+jakildev
+commented
+Oct 31, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — render: preserve lower raster-only sun blockers behind a distant nearest-depth sample (#4799)
+Verdict: approve (first pass; Opus recheck required)
+The raster-only diagnostic is deliberately opt-in: the production bake retains its one-depth path, while the retained-second-depth experiment is compile-time-specialized and explicitly rejected as an incomplete repair. The fixture, proof tests, and retained evidence support that scope.
+Acceptance (issue #4799)
+Criterion
+Assessment
+Native raster fixture
+Met: retained captures show the raster route with zero finite records, caster census, and the required outside-band loss.
+Recovery or measured rejection
+Met: the second-depth, slab, and finite-index families have runnable residual/cost evidence and documented rejection reasons.
+Query and publication correctness
+Met: both dialects exercise endpoint, provenance, layer, storage, and mutation controls.
+Measured cost
+Met: the retained five-pair measurements cover the raster fixture and IRPerfGrid; the diagnostic cost is not adopted.
+Regression, parity, and decision
+Met on the authored Metal path; Windows/OpenGL is deferred as cross-host smoke debt, not treated as local proof.
+Verification
+python3 scripts/tests/test_render_legacy_shadow_bake.py — passed (3 tests).
+python3 scripts/tests/test_render_shadow_layer_union.py — passed (4 tests; both GLSL and Metal adapter controls).
+python3 scripts/tests/test_render_sun_depth_slab.py — passed (2 tests; exhaustive slab and provenance controls).
+The earlier PR-owned closes-lint failure was superseded by successful run 41233871313 after the body correction.
+linux-build, perf-gate, render-harness-tests, and fleet-tests were still in progress at review time; they are unread, not asserted green.
+🤖 Reviewed by Codex (GPT-5), runtime codex (review-pr skill)
+Opus recheck required: shared sun-shadow bake and sampling pipeline changes.
+jakildev
+added
+fleet:needs-opus-recheck
+Sonnet flagged this PR for Opus recheck before merge
+fleet:needs-windows-smoke
+PR needs windows-debug build + smoke-run validation
+and removed
+fleet:changes-made
+Agent addressed human feedback — ready for human re-review
+labels
+Oct 31, 2026
+jakildev
+removed
+the
+fleet:reviewing-mac-pool-1
+label
+Oct 31, 2026
+evin-mac-claude-app
+Bot
+added
+the
+fleet:reviewing-mac-pool-1
+label
+Oct 31, 2026
+jakildev
+commented
+Oct 31, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — render: preserve lower raster-only sun blockers behind a distant nearest-depth sample (#4799)
+Verdict: needs-fix
+Sonnet flagged the shared sun-shadow bake and sampling pipeline for a closer pass. On closer read, I confirm that the compile-time production/diagnostic specialization, distinct-loser atomic publication, finite-route guard, and surface-receiver fallback gating are sound. The remaining blocker is evidence provenance, not the shader design.
+Needs-fix
+The required native capture and matched-cost evidence was not produced from the code this PR would merge. docs/pr-screenshots/claude/4799-raster-sun-depth-preservation/captures.json:2 and every timing manifest I checked (for example timing/raster-stacked/second/pair-0/manifest.json:2) record head 580105d80491d7c6fc5a1b5ef04e65c0de2c6b08, while the reviewed head is db39f2b375f8baeae876085c8baee80a20d18654. The intervening commits changed the executable probe/capture path: logSunPrimaryProbe now uses the hoisted readCasterPixelCensus, the spawn order changed, and scripts/pr_capture_common.py was added. Consequently the recorded positive-fire fixture, residual census, and five-pair timings do not establish acceptance criteria 1, 2, or 4 for the shipped tree. Please rerun capture.py and timing.py at db39f2b37 (or the eventual final head), refresh the capture/timing manifests and summaries, and update the PR evidence hashes. If the resulting binary hash is intentionally unchanged, record and explain that explicitly while still pinning the artifacts to the reviewed head.
+Acceptance
+Criterion
+Grade
+Basis
+Positive-fire native fixture
+unmet
+The artifact records the pre-head commit, so its CLEAN result, zero finite records, and missing-pixel count are not evidence for the reviewed tree.
+Recovery or measured rejection
+unmet
+The second-depth residual and caster census are likewise from the stale native capture; final-head shader proofs alone do not replace the required moving-scene native evidence.
+Query and publication correctness
+met
+Both shader dialects pass the focused union/slab/legacy tests and the source/mutation checks cover publication and query behavior.
+Matched cost
+unmet
+The five-pair timing manifests are all pinned to 580105d80, not the reviewed head.
+Regression/parity/decision
+unverifiable
+The Metal decision record is present; Windows/OpenGL remains correctly assigned to the existing cross-host smoke label, while final acceptance still depends on refreshed native evidence.
+Verification
+python3 scripts/tests/test_render_legacy_shadow_bake.py — 3 passed
+python3 scripts/tests/test_render_shadow_layer_union.py — 4 passed
+python3 scripts/tests/test_render_sun_depth_slab.py — 2 passed
+python3 scripts/tests/test_pr_capture_common.py — 2 passed
+Current linux-build and fleet-tests failures reproduce identically on merge-base a6b9953c: the former expects the pre-#4822 sun-probe row width, and the latter expects the missing OUT_OF_TREE_SUBJECTS fixture. I treated both as inherited, not PR blockers.
+🤖 Reviewed by Codex (GPT-5), runtime codex (review-pr skill)
+jakildev
+added
+fleet:needs-fix
+Fleet reviewer found issues — author must address
+and removed
+fleet:needs-opus-recheck
+Sonnet flagged this PR for Opus recheck before merge
+fleet:reviewing-mac-pool-1
+labels
+Oct 31, 2026
+evin-mac-claude-app
+Bot
+added
+the
+fleet:amending-mac-pool-1
+label
+Oct 31, 2026
+jakildev
+removed
+the
+fleet:needs-fix
+Fleet reviewer found issues — author must address
+label
+Oct 31, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+fleet:amending-mac-pool-1
+fleet:author-claude
+Implementation last authored by Claude; route review to Codex
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+fleet:needs-windows-smoke
+PR needs windows-debug build + smoke-run validation
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

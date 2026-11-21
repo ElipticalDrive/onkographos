@@ -1,0 +1,186 @@
+--- v003.md
++++ v004.md
+@@ -1,94 +1,122 @@
+ # Frustum Culling (Sphere vs Frustum)
+ 
+-Also called: Chunk Frustum Culling, SIMD Sphere/Frustum Culling, Sphere vs Frustum Culling
++Also called: Chunk Frustum Culling, Global Frustum Culling, Sphere vs Frustum Culling
+ 
+ ## Overview
+-Frustum culling for spheres is a geometric rejection technique used to discard bounding volumes that do not intersect the camera's view frustum, thereby avoiding expensive ray-sphere intersection tests during volume rendering traversal [S1]. Unlike SIMD shaft culling, which is restricted to primitives with planar edges such as triangles, this method is specifically designed for spherical bounding volumes and operates by comparing the signed distance from a sphere's center to the frustum planes against the sphere's radius [S1]. It serves as an optimization within the Bounding Spheres Optimization framework, building on [Bounding Spheres Optimization](1567-bounding-spheres-optimization.md) to eliminate unnecessary distance computations for spheres that lie outside the view volume [S1].
++Frustum culling for spheres is a visibility test that rejects bounding spheres lying outside the camera's view frustum, preventing unnecessary ray-sphere intersection computations during volume rendering traversal [S1]. Unlike SIMD shaft culling, which is restricted to primitives with planar edges like triangles, this method works directly for spherical bounding volumes by testing if the signed distance from a sphere's center to any frustum plane exceeds the sphere's radius [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A list of spheres (or chunks), each defined by a center position $\mathbf{c}$ and a radius $r$. The camera frustum is defined by its origin (camera position $\mathbf{p}$), forward vector $\mathbf{f}$, up vector $\mathbf{u}$, right vector $\mathbf{r}$, and clipping distances $d_{near}$ and $d_{far}$ [G].
+-*   **Output:** A subset of spheres that potentially intersect the frustum [S1].
++**Inputs:**
++- Camera frustum defined by near/far clipping planes and view direction vectors (right, up, forward) [S3, unofficial].
++- A set of entities, each represented by a bounding sphere defined by center position $C$ and radius $r$ [S2, unofficial].
++- Optional: Chunk parameters if culling is applied to voxel chunks, specifically chunk size $H_{CHUNK\_SIZE}$ and derived sphere radius $R_{CHUNK}$ [S3, unofficial].
++
++**Outputs:**
++- A boolean visibility flag for each entity or chunk [S2, unofficial].
+ 
+ **Data Structures:**
+-The sphere is represented as a structure containing:
+-*   `center`: A 3D vector $(x, y, z)$ [G].
+-*   `radius`: A scalar float [G].
+-
+-The camera frustum is represented by:
+-*   `position`: The camera origin $\mathbf{p}$ [G].
+-*   `forward`: Unit vector $\mathbf{f}$ pointing along the viewing axis [G].
+-*   `up`: Unit vector $\mathbf{u}$ perpendicular to $\mathbf{f}$ [G].
+-*   `right`: Unit vector $\mathbf{r}$ perpendicular to $\mathbf{f}$ and $\mathbf{u}$, computed as $\mathbf{f} \times \mathbf{u}$ (normalized) [G].
+-*   `tan_x`: Tangent of the horizontal field of view angle or derived value [S2, unofficial].
+-*   `tan_y`: Tangent of the vertical field of view angle [S2, unofficial].
+-*   `factor_x`: Scaling factor for the horizontal frustum width [S2, unofficial].
+-*   `factor_y`: Scaling factor for the vertical frustum height [S2, unofficial].
+-*   `near`: Near clipping plane distance $d_{near}$ [S2, unofficial].
+-*   `far`: Far clipping plane distance $d_{far}$ [S2, unofficial].
++- **Sphere:** Defined by center coordinates $(x, y, z)$ and radius $r$. In implementation, often stored as a vector and a scalar [S2, unofficial].
++- **Camera Frustum:** Implicitly defined by the camera's position, orientation (quaternion or rotation matrix), and projection parameters (field of view, aspect ratio, near, far) [S2, S3, unofficial]. The frustum planes are derived from these parameters.
+ 
+ **Parameters:**
+-*   $d_{near}$: Near clipping plane distance. Typical value: $0.1$ [S2, unofficial].
+-*   $d_{far}$: Far clipping plane distance. Typical value: $2000.0$ [S2, unofficial].
+-*   $R_{max}$: Maximum radius of spheres considered for the "enlarged frustum" test. Spheres with $r < R_{max}$ may pass the enlarged frustum test but fail the original frustum test [S1]. In chunk-based culling, $R_{max}$ corresponds to the chunk bounding sphere radius [S2, unofficial]. For a chunk of size $CHUNK\_SIZE$, the half-size is $H\_CHUNK\_SIZE = CHUNK\_SIZE // 2$ [S2, unofficial]. The chunk bounding sphere radius is $R = H\_CHUNK\_SIZE \times \sqrt{3}$ [S2, unofficial]. For $CHUNK\_SIZE = 48$, $R \approx 41.57$ [S2, unofficial].
++- $r_{max}$: The maximum radius used to define an "enlarged" frustum for coarse culling. If a sphere's radius is smaller than $r_{max}$, it may overlap the enlarged frustum but not the original one, requiring a more precise test [S1].
++- $NEAR, FAR$: Clipping plane distances along the forward axis. Typical values: $NEAR = 0.1$, $FAR = 2000.0$ [S3, unofficial].
++- $CHUNK\_SIZE$: Grid dimension for voxel chunks. Typical value: $48$ [S3, unofficial].
++- $H_{CHUNK\_SIZE} = CHUNK\_SIZE // 2$. Typical value: $24$ [S3, unofficial].
++- $CHUNK\_SPHERE\_RADIUS = H_{CHUNK\_SIZE} \times \sqrt{3}$. Typical value: $24 \times \sqrt{3} \approx 41.57$ [S3, unofficial].
++- $factor\_x, factor\_y$: Scaling factors for the frustum plane distances, often derived from the camera's field of view and aspect ratio [S3, unofficial].
++- $tan\_x, tan\_y$: Tangents of half the horizontal and vertical field of view angles [S3, unofficial].
+ 
+-**Algorithm Steps:**
+-1.  Compute the vector from the camera position to the sphere center: $\mathbf{v} = \mathbf{c} - \mathbf{p}$ [S2, unofficial].
+-2.  Project $\mathbf{v}$ onto the camera's forward, up, and right axes to get coordinates in the camera's local space:
+-    *   $z_{cam} = \mathbf{v} \cdot \mathbf{f}$ [S2, unofficial]
+-    *   $y_{cam} = \mathbf{v} \cdot \mathbf{u}$ [S2, unofficial]
+-    *   $x_{cam} = \mathbf{v} \cdot \mathbf{r}$ [S2, unofficial]
+-3.  **Far/Near Plane Test:** Check if the sphere is within the depth range of the frustum, accounting for its radius. The sphere is outside if $z_{cam} < d_{near} - r$ or $z_{cam} > d_{far} + r$ [S2, unofficial].
+-4.  **Side Plane Tests:** Check if the sphere is within the horizontal and vertical extents of the frustum at depth $z_{cam}$. The frustum width and height at depth $z_{cam}$ are proportional to $z_{cam} \times \tan(\theta)$ [S2, unofficial].
+-    *   Calculate the maximum allowed horizontal extent at $z_{cam}$: $W_{max} = r + z_{cam} \times \text{tan\_x} \times \text{factor\_x}$ [S2, unofficial].
+-    *   Calculate the maximum allowed vertical extent at $z_{cam}$: $H_{max} = r + z_{cam} \times \text{tan\_y} \times \text{factor\_y}$ [S2, unofficial].
+-    *   The sphere is outside if $|x_{cam}| > W_{max}$ or $|y_{cam}| > H_{max}$ [S2, unofficial].
+-5.  If the sphere passes all tests, it is retained for further intersection testing [S1].
++**Steps:**
++1. **Iterate** over all entities or chunks in the scene [S2, unofficial].
++2. **Calculate Entity Bounding Sphere:** Determine the sphere's center $C$ and radius $r$. For chunks, the center is the chunk's geometric center, and the radius is $CHUNK\_SPHERE\_RADIUS$ [S2, S3, unofficial].
++3. **Coarse Culling (Optional):** If a camera bounding sphere is used, check if the entity's bounding sphere intersects it. If not, discard the entity [S2, unofficial].
++4. **Frustum Plane Test:** For each plane of the view frustum:
++   a. Calculate the vector from the camera position (or a reference point on the plane) to the sphere center $C$.
++   b. Compute the signed distance $d$ from $C$ to the plane normal.
++   c. If $d > r$, the sphere is completely outside the frustum on that side. Discard the entity [S1].
++5. **Refined Culling (for chunks/enlarged frustum):** If the sphere passed the coarse test but its radius is smaller than $r_{max}$, or if using chunk-based culling:
++   a. Project the sphere center onto the camera's forward, right, and up axes [S3, unofficial].
++   b. Check if the projected position lies within the expanded bounds defined by the near/far planes and the side planes, accounting for the sphere's radius [S3, unofficial].
++   c. Specifically for chunks, check if the sphere center's projection on the forward axis is within $[NEAR - R_{CHUNK}, FAR + R_{CHUNK}]$ [S3, unofficial].
++   d. Check if the projections on the right and up axes are within the frustum's width and height at that depth, expanded by the radius [S3, unofficial].
++6. **Set Visibility:** If the sphere passes all frustum tests, set visibility to true; otherwise, set it to false [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def is_sphere_in_frustum(sphere_center, sphere_radius, camera):
++    """
++    Checks if a sphere is inside the camera's view frustum.
++    sphere_center: vec3 (x, y, z)
++    sphere_radius: float
++    camera: object with attributes position, forward, right, up, near, far, tan_x, tan_y, factor_x, factor_y
++    """
+     # Vector from camera to sphere center
+-    v = sphere_center - camera.position
++    vec_to_sphere = sphere_center - camera.position
+     
+-    # Project onto camera axes
+-    sz = dot(v, camera.forward)
+-    sy = dot(v, camera.up)
+-    sx = dot(v, camera.right)
++    # Project onto forward axis (z-axis in camera space)
++    sz = dot(vec_to_sphere, camera.forward)
+     
+-    # Far/Near plane test
+-    if sz < camera.near - sphere_radius or sz > camera.far + sphere_radius:
++    # Check near and far planes
++    # Expand bounds by radius to account for sphere extent
++    if not (camera.near - sphere_radius <= sz <= camera.far + sphere_radius):
+         return False
+     
+-    # Side plane tests
+-    # Note: Reference implementation uses a fixed CHUNK_SPHERE_RADIUS for the offset [S2, unofficial]
+-    max_x = sphere_radius + sz * camera.tan_x * camera.factor_x
+-    if sx < -max_x or sx > max_x:
++    # Project onto right axis (x-axis in camera space)
++    sx = dot(vec_to_sphere, camera.right)
++    # Calculate the half-width of the frustum at depth sz, expanded by radius
++    # factor_x and tan_x are precomputed from camera FOV and aspect ratio
++    dist_x = camera.factor_x * sphere_radius + sz * camera.tan_x
++    if not (-dist_x <= sx <= dist_x):
+         return False
++    
++    # Project onto up axis (y-axis in camera space)
++    sy = dot(vec_to_sphere, camera.up)
++    # Calculate the half-height of the frustum at depth sz, expanded by radius
++    dist_y = camera.factor_y * sphere_radius + sz * camera.tan_y
++    if not (-dist_y <= sy <= dist_y):
++        return False
++    
++    return True
++
++def cull_entities(entities, camera):
++    visible_count = 0
++    for entity in entities:
++        # Get entity's bounding sphere
++        center = entity.position
++        radius = entity.bounding_sphere_radius * entity.scale
+         
+-    max_y = sphere_radius + sz * camera.tan_y * camera.factor_y
+-    if sy < -max_y or sy > max_y:
+-        return False
+-        
+-    return True
++        # Optional coarse culling with camera bounding sphere
++        if not camera.bounding_sphere.intersects(center, radius):
++            entity.visible = False
++            continue
++            
++        # Frustum culling
++        if is_sphere_in_frustum(center, radius, camera):
++            entity.visible = True
++            visible_count += 1
++        else:
++            entity.visible = False
++            
++    return visible_count
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Floating-point precision errors can cause spheres on the boundary of the frustum to be incorrectly culled or retained. Using a small epsilon tolerance in comparisons can help, but the standard test is robust for most rendering scenarios [G].
+-*   **Degenerate Input:** If the camera's forward, up, or right vectors are not orthogonal or normalized, the projection calculations will be incorrect. Ensure these vectors are properly normalized and orthogonalized [G].
+-*   **Small Radii:** Spheres with radii smaller than $R_{max}$ (the radius used to define the "enlarged frustum" in some contexts) may pass the enlarged frustum test but fail the original frustum test. This method handles this by using the actual sphere radius $r$ in the calculations, ensuring accurate culling for all sphere sizes [S1].
++- **Precision:** Floating-point errors in dot products may cause spheres very close to frustum planes to be incorrectly culled or included. Using a small epsilon tolerance in comparisons can mitigate this [G].
++- **Degenerate Input:** If the camera's forward, right, or up vectors are not orthogonal or normalized, the frustum plane calculations will be incorrect. Ensure camera basis vectors are orthonormal [S2, unofficial].
++- **Radius Smaller than $r_{max}$:** A sphere with radius $r < r_{max}$ might pass an enlarged frustum test but fail the original frustum test. The algorithm must handle this by performing the precise test if the coarse test passes [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per sphere. The test involves a constant number of vector operations (dot products, additions, comparisons) [G].
+-*   **Memory Complexity:** $O(1)$ additional memory per sphere, as no auxiliary data structures are required [G].
+-*   **Performance:** This test is significantly faster than ray-sphere intersection tests, which involve square roots and quadratic equation solving [G]. It is particularly effective in scenes with many small spheres or chunks, where a large fraction of objects are outside the view frustum [S1].
+-*   **Strengths:** Simple to implement, computationally inexpensive, and effective for spherical bounding volumes [S1].
+-*   **Limitations:** Only applicable to spherical bounding volumes. For non-spherical volumes, other culling techniques (e.g., AABB culling) may be more appropriate [G].
+-*   **When to Use:** Use this method when rendering scenes with many spherical objects or when using bounding spheres for acceleration structures in volume rendering [S1].
++- **Time Complexity:** $O(N)$, where $N$ is the number of entities or chunks. Each entity requires a constant number of dot products and comparisons [S1].
++- **Memory Complexity:** $O(1)$ additional memory per entity, as only the sphere parameters and camera vectors are needed [S1].
++- **Performance:** Significantly reduces the number of ray-sphere intersection tests, which are computationally expensive. The reduction in visible objects depends on the scene density and camera position [S1].
++- **Strengths:** Simple to implement, works for any spherical bounding volume, and is efficient for large numbers of objects [S1].
++- **Limitations:** Only effective for spherical bounding volumes. For non-spherical objects, a bounding sphere approximation may lead to false positives (objects included but not visible) [S1].
+ 
+ ## Background
+-Frustum culling for spheres was introduced as a simpler alternative to SIMD shaft culling, which is limited to primitives with planar edges like triangles [S1]. The technique is described in the context of the Coherent Grid Traversal (CGT) algorithm for visualizing particle data, where it is used to efficiently reject non-overlapping spheres during ray traversal [S1]. The method leverages the geometric properties of spheres and the camera frustum to perform a quick rejection test before more expensive intersection calculations [S1].
++Frustum culling for spheres was introduced as a simpler alternative to SIMD shaft culling for particle visualization. The original CGT algorithm used SIMD shaft culling for triangles, but this technique is not applicable to spheres. The sphere/frustum culling test was proposed to efficiently reject non-overlapping spheres in the Coherent Grid Traversal (CGT) approach [S1]. It is commonly used in volume rendering and particle systems to optimize ray traversal by eliminating objects outside the view frustum [S1][S2, unofficial].
+ 
+ ## Sources
+ [S1] A Coherent Grid Traversal Approach to Visualizing Particle ..., https://www.sci.utah.edu/~thiago/papers/pcgt_revised.pdf, fetched 2026-10-25
+-[S2] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)+[S2] mmalesadev/svo_renderer, https://github.com/mmalesadev/svo_renderer, fetched 2026-10-26 (unofficial)
++[S3] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)

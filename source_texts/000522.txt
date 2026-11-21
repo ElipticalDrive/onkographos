@@ -1,0 +1,284 @@
+This article explains how we optimised the ray marching algorithm in Sector's Edge that handles collision detection for tens of thousands of particles.
+
+Optimised CPU Ray Marching
+This article explains how we optimised the ray marching algorithm in Sector's Edge that handles collision detection for tens of thousands of particles.
+The full source code for this article is available here on GitHub.
+Overview
+The voxel world is divided into groups of 32 x 32 x 32 blocks, each of which are managed by a separate Chunk class instance. This structure is especially useful for:
+Rendering optimisations, as chunks outside the current viewport can be skipped
+Fast mesh regeneration when blocks in a chunk are changed
+Memory optimisations, as chunks that contain no blocks are left uninitialised
+This voxel ray marching algorithm is based on A Fast Voxel Traversal Algorithm for Ray Tracing by John Amanatides and Andrew Woo and has been optimised by keeping block lookups within the current working chunk. As this algorithm is quite long, we will analyse it in sections.
+Map Structure
+Chunks are stored in a three-dimensional array within the Map class, however Blocks are stored in a one-dimensional array in the Chunk for fast lookup:
+```
+public class Map
+{
+    Chunk[,,] chunks;
+}
+
+public class Chunk
+{
+    const int CHUNK_SIZE = 32;
+    const int CHUNK_SIZE_SQUARED = 1024;
+    const int CHUNK_SIZE_CUBED = 32768;
+    Block[] data = new Block[CHUNK_SIZE_CUBED];
+}
+
+public struct Block
+{
+    byte kind;  // e.g. empty, dirt, metal, etc.
+}
+```
+Blocks within the Chunk are accessed as follows:
+```
+int access = j + i * CHUNK_SIZE + k * CHUNK_SIZE_SQUARED;
+Block b = data[access];
+```
+For clarity, i, j and k refer to chunk-relative positions (range 0-31)
+and x, y and z refer to map-relative positions (range 0-511)
+Ray Marching
+The problem with the original ray marching algorithm in Sector's Edge was that it worked with map-relative positions. This meant that every time the algorithm checked if a block existed at a specific position, it had to calculate which chunk the block belonged to and then convert the map-relative position to a chunk-relative position:
+```
+const int SHIFT = 5;
+const int MASK = 0x1f;
+public Block GetBlock(int x, int y, int z)
+{
+    // Get the chunk the block belongs to
+    var c = chunks[x >> SHIFT, y >> SHIFT, z >> SHIFT];
+
+    if (c == null)
+        return true;
+
+    // Bitmask to get the chunk-relative position
+    return c.data[(y & MASK) +
+                  (x & MASK) * CHUNK_SIZE +
+                  (z & MASK) * CHUNK_SIZE_SQUARED];
+}
+```
+The new algorithm obtains a reference to the chunk at the beginning of the function and only updates it when the ray enters a new chunk. This chunk is referred to as the current working chunk.
+The second optimisation was to add two exit checks at the beginning of the function that check if the ray starts outside the map, or if the ray begins and ends at the same map-relative position:
+Exit if the ray starts outside the map bounds as there are no blocks to collide with. There will never be a case where the ray starts outside the map and travels towards the centre of the map
+Exit if the start and end position of the ray both lie on the same coordinate on the voxel grid. This check saves a lot of time for particles, as they are often at rest on the top of a block
+The RayMarch(...) function parameters are as follows:
+in Vector3 start - the start position of the ray
+Vector3 velocity - the direction of the ray
+in double max - the maximum length that the ray can travel
+ref bool hit - set to true if the ray collides with a solid block
+ref Axis axis - set to either Axis.X, Axis.Y or Axis.Z depending on which block face the ray hit
+```
+public void RayMarch(in Vector3 start, Vector3 velocity, in double max, ref bool hit, ref Axis axis)
+{
+    // Convert the start position to integer voxel coordinates
+    int x = (int)start.X;
+    int y = (int)start.Y;
+    int z = (int)start.Z;
+
+    // If the start coordinate is outside the map, there is nothing to hit.
+    if (y < 0 || y >= Constants.MAP_SIZE_Y ||
+        x < 0 || x >= Constants.MAP_SIZE_X ||
+        z < 0 || z >= Constants.MAP_SIZE_Z)
+    {
+        hit = false;
+        return;
+    }
+    
+    // Determine the index of the current working chunk in the Map by
+    // bit-shifting the map-relative block coordinates
+    int chunkIndexX = x >> 5;
+    int chunkIndexY = y >> 5;
+    int chunkIndexZ = z >> 5;
+
+    // Get a reference to the current working chunk
+    var c = chunks[chunkIndexX, chunkIndexY, chunkIndexZ];
+
+    // Determine the chunk-relative position of the ray with a bit-mask
+    int i = x & 0x1f;
+    int j = y & 0x1f;
+    int k = z & 0x1f;
+
+    // Calculate the access position of this block in the Chunk's data[] array
+    int access = j + i * Constants.CHUNK_SIZE + k * Constants.CHUNK_SIZE_SQUARED;
+
+    // Calculate the end position of the ray
+    var end = start + velocity;
+
+    // If the start and end positions of the ray both lie on the same coordinate on the voxel grid
+    if (x == (int)end.X && y == (int)end.Y && z == (int)end.Z)
+    {
+        // The chunk is null if it contains no blocks
+        if (c == null)
+        {
+            hit = false;
+        }
+
+        // If the block is empty
+        else if (c.data[access].kind == 0)
+        {
+            hit = false;
+        }
+
+        // Else the ray begins and ends within the same non-empty block
+        else
+        {
+            hit = true;
+        }
+        
+        return;
+    }
+    
+    ...
+}
+```
+After this stage we can confirm that the ray will start and end at different voxel coordinates and therefore a ray march is required. To improve ray marching efficiency, we pre-calculate the following variables:
+```
+// These variables are used to determine whether the ray has left the current working chunk.
+//  For example when travelling in the negative Y direction,
+//  if j == -1 then we have left the current working chunk
+int iComparison, jComparison, kComparison;
+
+// When leaving the current working chunk, the chunk-relative position must be reset.
+//  For example when travelling in the negative Y direction,
+//  j should be reset to CHUNK_SIZE - 1 when entering the new current working chunk
+int iReset, jReset, kReset;
+
+// When leaving the current working chunk, the access variable must also be updated.
+//  These values store how much to add or subtract from the access, depending on
+//  the direction of the ray:
+int xAccessReset, yAccessReset, zAccessReset;
+
+// The amount to increase i, j and k in each axis (either 1 or -1)
+int iStep, jStep, kStep;
+
+// When incrementing j, the chunk access is simply increased by 1
+// When incrementing i, the chunk access is increased by 32 (CHUNK_SIZE)
+// When incrementing k, the chunk access is increased by 1024 (CHUNK_SIZE_SQUARED)
+// These variables store whether to increase or decrease by the above amounts
+int xAccessIncrement, zAccessIncrement;
+
+// The distance to the closest voxel boundary in map units
+double xDist, yDist, zDist;
+
+if (velocity.Y > 0)
+{
+    jStep = 1;
+    jComparison = Constants.CHUNK_SIZE;
+    jReset = 0;
+    yAccessReset = -Constants.CHUNK_SIZE;
+    yDist = (y - start.Y + 1);
+}
+else
+{
+    jStep = -1;
+    jComparison = -1;
+    jReset = Constants.CHUNK_SIZE - 1;
+    yAccessReset = Constants.CHUNK_SIZE;
+    yDist = (start.Y - y);
+}
+
+// Same for velocity.X and velocity.Z
+...
+
+// This variable stores the current progress throughout the ray march
+double t = 0.0;
+
+velocity.Normalize();
+double xInverted = Math.Abs(1 / velocity.X);
+double yInverted = Math.Abs(1 / velocity.Y);
+double zInverted = Math.Abs(1 / velocity.Z);
+
+// Determine the distance to the closest voxel boundary in units of t
+//  - These values indicate how far we have to travel along the ray to reach the next voxel
+//  - If any component of the direction is perpendicular to an axis, the distance is double.PositiveInfinity
+double xDistance = velocity.X == 0 ? double.PositiveInfinity : xInverted * xDist;
+double yDistance = velocity.Y == 0 ? double.PositiveInfinity : yInverted * yDist;
+double zDistance = velocity.Z == 0 ? double.PositiveInfinity : zInverted * zDist;
+```
+The algorithm then runs in a loop until either:
+t has reached the max length of the ray
+a non-empty block is found
+the ray exits the map
+```
+while (t <= max)
+{
+    // Exit when we find a non-empty block
+    if (c != null && c.data[access].kind != 0)
+    {
+        hit = true;
+        return;
+    }
+    
+    // Determine the closest voxel boundary
+    if (yDistance < xDistance)
+    {
+        if (yDistance < zDistance)
+        {
+            // Advance to the closest voxel boundary in the Y direction
+            
+            // Increment the chunk-relative position and the block access position
+            j += jStep;
+            access += jStep;
+
+            // Check if we have exited the current working chunk.
+            // This means that j is either -1 or 32
+            if (j == jComparison)
+            {
+                // If moving in the positive direction, reset j to 0.
+                // If moving in the negative Y direction, reset j to 31
+                j = jReset;
+                
+                // Reset the chunk access
+                access += yAccessReset;
+
+                // Calculate the new chunk index
+                chunkIndexY += jStep;
+
+                // If the new chunk is outside the map, exit
+                if (chunkIndexY < 0 || chunkIndexY >= Constants.CHUNK_AMOUNT_Y)
+                {
+                    hit = false;
+                    return;
+                }
+
+                // Get a reference to the new working chunk
+                c = chunks[chunkIndexX, chunkIndexY, chunkIndexZ];
+            }
+
+            // Update our progress in the ray 
+            t = yDistance;
+            
+            // Set the new distance to the next voxel Y boundary
+            yDistance += yInverted;
+            
+            // For collision purposes we also store the last axis that the ray collided with
+            // This allows us to reflect particle velocity on the correct axis
+            axis = Axis.Y;
+        }
+        else
+        {
+            // Advance to the closest voxel boundary in the Z direction
+            ...
+        }
+    }
+    else if (xDistance < zDistance)
+    {
+        // Advance to the closest voxel boundary in the X direction
+        ...
+    }
+    else
+    {    
+        // Advance to the closest voxel boundary in the Z direction
+        ...
+    }
+}
+```
+Benchmarks
+The following benchmarks were run on a Ryzen 5 1600 CPU.
+The average particle collision ray march in Sector's Edge travels 1-10 blocks and takes 250 nanoseconds to run. At 60 frames per second, this allows for 64000 rays per frame per thread.
+For stress testing, 100,000 rays were cast in random directions across the map. The average ray length was 200-400 blocks and takes 3400 nanoseconds to run. At 60 frames per second, this allows for 4700 rays per frame per thread.
+In Practice
+The full source code for this article is available here on GitHub.
+In Sector's Edge, ray marching is required for particle collisions and hit detection between projectiles and the map. See it in action in our latest video below:
+Sign up for more like this.
+Enter your email
+Subscribe

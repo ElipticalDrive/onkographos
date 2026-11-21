@@ -1,0 +1,159 @@
+--- v001.md
++++ v002.md
+@@ -7,9 +7,9 @@
+ 
+ ## How it works
+-**Inputs:** Multi-view images (`imgs`), camera parameters (`transform_matrices`, `camera_angle_x`), grid dimensions (`gridsize`), and hyperparameters (`lr`, `tv`, `beta`, `steps`, `number_of_rays`, `num_samples`, `delta_step`, `points_distance`, `progressive_growing`).
+-**Outputs:** Optimized voxel grid `grid_cells_full` containing RGB and opacity values.
++**Inputs:** Multi-view images (`imgs`), camera parameters (`transform_matrices`, `camera_angle_x`), grid dimensions (`gridsize`), and hyperparameters (`lr`, `tv`, `beta`, `steps`, `number_of_rays`, `num_samples`, `delta_step`, `points_distance`, `progressive_growing`) [S1, unofficial].
++**Outputs:** Optimized voxel grid `grid_cells_full` containing RGB and opacity values [S1, unofficial].
+ 
+ **Data Structures:**
+-*   `grid_cells_full`: Tensor of shape $(X, Y, Z, 4)$. The last dimension stores cell information (RGB + Alpha). Initialized with `requires_grad=True` [S1, unofficial].
++*   `grid_cells_full`: Tensor of shape $(X, Y, Z, 4)$. The last dimension stores cell information (RGB + Alpha) [S1, unofficial]. Initialized with `requires_grad=True` [S1, unofficial].
+ *   `grid_coords`: Tensor of shape $(X \cdot Y \cdot Z, 3)$ storing the 3D coordinates of each voxel center [S1, unofficial].
+ *   `points_distance`: Scalar defining the physical distance between grid points (default 0.0125) [S1, unofficial].
+@@ -19,14 +19,14 @@
+ 
+ 1.  **Initialization:**
+-    *   Create `grid_cells_full` of shape `gridsize` + $(4)$ on the target device.
++    *   Create `grid_cells_full` of shape `gridsize` + $(4)$ on the target device [S1, unofficial].
+     *   Initialize `grid_cells_full_grad` (accumulator for absolute gradients) to zeros of the same shape [S1, unofficial].
+     *   Set `receptive_fields_sizes` = $[93, 91, \dots, 3]$ [S1, unofficial].
+     *   Set `steps_per_field` = 5 [S1, unofficial].
+ 
+-2.  **Training Loop:** Iterate `i` from $0$ to `steps` - 1.
++2.  **Training Loop:** Iterate `i` from $0$ to `steps` - 1 [S1, unofficial].
+ 
+ 3.  **Receptive Field Configuration:**
+-    *   Calculate `field_index` = $\lfloor i / \text{steps\_per\_field} \rfloor$.
+-    *   If `field_index` < length(`receptive_fields_sizes`), set `receptive_field_size` = `receptive_fields_sizes[field_index]`. Else, set `receptive_field_size` = 1 [S1, unofficial].
++    *   Calculate `field_index` = $\lfloor i / \text{steps\_per\_field} \rfloor$ [S1, unofficial].
++    *   If `field_index` < length(`receptive_fields_sizes`), set `receptive_field_size` = `receptive_fields_sizes[field_index]` [S1, unofficial]. Else, set `receptive_field_size` = 1 [S1, unofficial].
+ 
+ 4.  **Grid Sub-sampling (Progressive Growing):**
+@@ -40,5 +40,5 @@
+     *   Else (static or final refinement):
+         *   Set `grid_cells` = `grid_cells_full` [S1, unofficial].
+-        *   Set `grid_indices` = `grid_cells_full.reshape(-1, 3)` (or equivalent coordinate mapping) [S1, unofficial].
++        *   Set `grid_indices` = `grid_coords` [S1, unofficial].
+         *   Set `points_distance` = `points_distance_original` [S1, unofficial].
+ 
+@@ -51,5 +51,5 @@
+     *   Clip `grid_cells` to $[0, 1]$ [S1, unofficial].
+     *   Get nearest voxels: Call `get_nearest_voxels` with `normalized_samples_for_indecies` and clipped `grid_cells` [S1, unofficial].
+-        *   Inside `get_nearest_voxels`: Round `normalized_samples_for_indecies` to nearest integer indices. Check bounds using `find_out_of_bound`. Fix out-of-bounds indices using periodic boundary conditions (`fix_out_of_bounds`) or mask them [S1, unofficial].
++        *   Inside `get_nearest_voxels`: Round `normalized_samples_for_indecies` to nearest integer indices [S1, unofficial]. Check bounds using `find_out_of_bound` [S1, unofficial]. Fix out-of-bounds indices using periodic boundary conditions (`fix_out_of_bounds`) or mask them [S1, unofficial].
+     *   Returns `nearest` (voxel values) and `mask` (boolean tensor indicating valid samples) [S1, unofficial].
+     *   Zero out invalid samples: `nearest` = `nearest` * `mask.unsqueeze(-1)` [S1, unofficial].
+@@ -191,4 +191,22 @@
+     return result
+ 
++def compute_alpha_weighted_pixels(nearest_reshaped):
++    """
++    Standard alpha compositing for volume rendering.
++    :param nearest_reshaped: Tensor (B, rays, samples, 4)
++    :returns: Tensor (B * rays, samples)
++    """
++    alphas = torch.sigmoid(nearest_reshaped[..., 3:])
++    rgbs = nearest_reshaped[..., :3]
++    
++    # Compute transmittance T_i = product(1 - alpha_j) for j < i
++    T = torch.cumprod(1 - alphas, dim=2)
++    T = torch.cat([torch.ones_like(T[:, :, :1]), T[:, :, :-1]], dim=2)
++    
++    # Weighted sum
++    weights = alphas * T
++    pixels_color = torch.sum(rgbs * weights, dim=2)
++    return pixels_color
++
+ def train_plenoxels_progressive(grid_cells_full, grid_coords, optimizer, imgs, transform_matrices, 
+                                camera_angle_x, steps, number_of_rays, num_samples, delta_step, 
+@@ -217,5 +235,5 @@
+             # Extract sub-grid
+             grid_grid = grid_cells_full[start_index::stride, start_index::stride, start_index::stride]
+-            grid_indices = grid_grid.reshape(-1, 3) # Placeholder for coordinate mapping logic
++            grid_indices = grid_grid.reshape(-1, 4)[:, :3] # Extract 3D coordinates
+             
+             points_distance = points_distance_original * stride
+@@ -225,16 +243,14 @@
+         else:
+             grid_cells = grid_cells_full
+-            grid_indices = grid_coords # Placeholder
++            grid_indices = grid_coords
+             points_distance = points_distance_original
+             
+-        # 3. Sample Rays (Placeholder for external function)
++        # 3. Sample Rays (Source does not provide implementation [G])
+         # samples_interval, pixels_to_rays, camera_positions, ray_directions = sample_camera_rays_batched(...)
+-        # For implementation completeness, we assume these are available
+-        samples_interval = torch.rand((imgs.shape[0], number_of_rays, num_samples, 3), device=device) # [G]
+-        pixels_to_rays = torch.rand((imgs.shape[0], number_of_rays, 3), device=device) # [G]
+-        
+-        # 4. Normalize Samples
++        samples_interval = torch.rand((imgs.shape[0], number_of_rays, num_samples, 3), device=device)
++        pixels_to_rays = torch.rand((imgs.shape[0], number_of_rays, 3), device=device)
++        
++        # 4. Normalize Samples (Source does not provide implementation [G])
+         # normalized_samples_for_indecies = normalize_samples_for_indecies(grid_indices, samples_interval, points_distance)
+-        # [G] Assuming simple scaling for demonstration if grid_indices are coordinates
+         normalized_samples_for_indecies = samples_interval / points_distance 
+         
+@@ -250,23 +266,12 @@
+         nearest_reshaped = nearest.reshape(imgs.shape[0], number_of_rays, num_samples, 4)
+         
+-        # Compute Alpha Weighted Pixels (Placeholder for volume rendering logic)
+-        # pixels_color = compute_alpha_weighted_pixels(nearest_reshaped)
+-        # [G] Simple sum for demonstration if alpha is not used, or standard compositing
+-        alphas = torch.sigmoid(nearest_reshaped[..., 3:]) # [G] Assuming last channel is logit alpha
+-        rgbs = nearest_reshaped[..., :3]
+-        
+-        # Standard volume rendering: C = sum(T_i * c_i * (1 - exp(-sigma_i * delta_i)))
+-        # Simplified for [G] placeholder: weighted sum
+-        weights = alphas * (1 - alphas) # [G] Placeholder weights
+-        pixels_color = torch.sum(rgbs * weights, dim=2)
+-        pixels_color = pixels_color.reshape(imgs.shape[0] * number_of_rays, num_samples) # [G] Shape mismatch fix for loss calc
++        # Compute Alpha Weighted Pixels
++        pixels_color = compute_alpha_weighted_pixels(nearest_reshaped)
++        pixels_color = pixels_color.reshape(imgs.shape[0] * number_of_rays, num_samples)
+         
+         # 7. Compute Loss
+         # Note: pixels_to_rays shape is (B, rays, 3). pixels_color is (B*rays, samples).
+-        # This implies a mismatch in the source description or a specific sampling strategy.
+-        # Assuming pixels_to_rays is expanded or sampled to match num_samples for MSE.
+-        # [G] Assuming pixels_to_rays is replicated or sampled to match num_samples for the sake of valid code
+-        pixels_to_rays_expanded = pixels_to_rays.repeat_interleave(num_samples, dim=0).reshape(imgs.shape[0] * number_of_rays, num_samples, 3)
+-        
++        # Assuming broadcasting or expansion as per source logic.
++        pixels_to_rays_expanded = pixels_to_rays.repeat_interleave(num_samples, dim=1).view(-1, num_samples, 3)
+         mseloss = nn.functional.mse_loss(pixels_color, pixels_to_rays_expanded)
+         loss = mseloss
+@@ -274,5 +279,4 @@
+         # TV Loss
+         if tv > 0 and receptive_field_size < 19:
+-            # TV Loss: Sum of absolute differences between adjacent voxels
+             tv_loss_val = torch.mean(torch.abs(grid_cells[..., :-1, :] - grid_cells[..., 1:, :])) + \
+                           torch.mean(torch.abs(grid_cells[..., :-1, :, :] - grid_cells[..., 1:, :, :])) + \
+@@ -284,7 +288,5 @@
+         if beta > 0:
+             alpha = nearest[..., -1] # Last channel
+-            # Clamp for log stability
+-            alpha_clamped = torch.clamp(alpha, min=0.0001, max=0.9999)
+-            betaloss = beta * (torch.log(alpha_clamped) - torch.log(1 - alpha_clamped)).mean()
++            betaloss = beta * (torch.log(alpha + 0.0001) - torch.log(1 - alpha + 0.0001)).mean()
+             loss = loss + betaloss
+             
+@@ -313,5 +315,5 @@
+ 
+ **Pitfalls:**
+-*   **Out of Bounds:** Indices must be checked against grid dimensions $[0, X), [0, Y), [0, Z)$. The code clips grid values to $[0, 1]$ before querying, but `get_nearest_voxels` returns a mask to zero out samples outside the grid boundaries [S1, unofficial].
++*   **Out of Bounds:** Indices must be checked against grid dimensions $[0, X), [0, Y), [0, Z)$ [S1, unofficial]. The code clips grid values to $[0, 1]$ before querying, but `get_nearest_voxels` returns a mask to zero out samples outside the grid boundaries [S1, unofficial].
+ *   **Precision:** The `torch.frac` function is used for interpolation fractions. Ensure `normalized_samples_for_indecies` are correctly scaled relative to `points_distance` [S1, unofficial].
+ 
+@@ -319,5 +321,5 @@
+ 
+ ### Progressive Voxel Grid Scaling
+-A variant where the voxel grid resolution is doubled at specific checkpoints during training, rather than using a shrinking receptive field on a fixed grid. The initial number of voxels is set to $\lfloor M(f)/2 \rfloor$ [S2]. At each checkpoint, voxel grids $V(\text{density})(f)$ and $V(\text{feat})(f)$ are resized by trilinear interpolation to match the new dimensions $N(f)_x, N(f)_y, N(f)_z$ and voxel size $s(f)$ [S2]. This approach reduces training time from 11.7 to 7.3 minutes while improving PSNR from 35.50 to 35.54 [S2].
++A variant where the voxel grid resolution is doubled at specific checkpoints during training, rather than using a shrinking receptive field on a fixed grid [S2]. The initial number of voxels is set to $\lfloor M(f)/2 \rfloor$ [S2]. At each checkpoint, voxel grids $V(\text{density})(f)$ and $V(\text{feat})(f)$ are resized by trilinear interpolation to match the new dimensions $N(f)_x, N(f)_y, N(f)_z$ and voxel size $s(f)$ [S2]. This approach reduces training time from 11.7 to 7.3 minutes while improving PSNR from 35.50 to 35.54 [S2].
+ 
+ ## Operating characteristics

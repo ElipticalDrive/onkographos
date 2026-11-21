@@ -1,0 +1,2354 @@
+### GPURenderDemo.cxx
+```
+/*=========================================================================
+
+  Program:   Visualization Toolkit
+  Module:    GPURenderDemo.cxx
+
+  Copyright (c) Ken Martin, Will Schroeder, Bill Lorensen
+  All rights reserved.
+  See Copyright.txt or http://www.kitware.com/Copyright.htm for details.
+
+     This software is distributed WITHOUT ANY WARRANTY; without even
+     the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+     PURPOSE.  See the above copyright notice for more information.
+
+=========================================================================*/
+// VTK includes
+#include "vtkBoxWidget.h"
+#include "vtkCamera.h"
+#include "vtkCommand.h"
+#include "vtkColorTransferFunction.h"
+#include "vtkDICOMImageReader.h"
+#include "vtkImageData.h"
+#include "vtkImageResample.h"
+#include "vtkMetaImageReader.h"
+#include "vtkPiecewiseFunction.h"
+#include "vtkPlanes.h"
+#include "vtkProperty.h"
+#include "vtkRenderer.h"
+#include "vtkRenderWindow.h"
+#include "vtkRenderWindowInteractor.h"
+#include "vtkVolume.h"
+#include "vtkVolumeProperty.h"
+#include "vtkXMLImageDataReader.h"
+#include "vtkSmartVolumeMapper.h"
+
+#define VTI_FILETYPE 1
+#define MHA_FILETYPE 2
+
+// Callback for moving the planes from the box widget to the mapper
+class vtkBoxWidgetCallback : public vtkCommand
+{
+public:
+  static vtkBoxWidgetCallback *New()
+    { return new vtkBoxWidgetCallback; }
+  virtual void Execute(vtkObject *caller, unsigned long, void*)
+    {
+      vtkBoxWidget *widget = reinterpret_cast<vtkBoxWidget*>(caller);
+      if (this->Mapper)
+        {
+        vtkPlanes *planes = vtkPlanes::New();
+        widget->GetPlanes(planes);
+        this->Mapper->SetClippingPlanes(planes);
+        planes->Delete();
+        }
+    }
+  void SetMapper(vtkSmartVolumeMapper* m) 
+    { this->Mapper = m; }
+
+protected:
+  vtkBoxWidgetCallback() 
+    { this->Mapper = 0; }
+
+  vtkSmartVolumeMapper *Mapper;
+};
+
+void PrintUsage()
+{
+  cout << "Usage: " << endl;
+  cout << endl;
+  cout << "  GPURenderDemo <options>" << endl;
+  cout << endl;
+  cout << "where options may include: " << endl;
+  cout << endl;
+  cout << "  -DICOM <directory>" << endl;
+  cout << "  -VTI <filename>" << endl;
+  cout << "  -MHA <filename>" << endl;
+  cout << "  -DependentComponents" << endl;
+  cout << "  -Clip" << endl;
+  cout << "  -MIP <window> <level>" << endl;
+  cout << "  -CompositeRamp <window> <level>" << endl;
+  cout << "  -CompositeShadeRamp <window> <level>" << endl;
+  cout << "  -CT_Skin" << endl;
+  cout << "  -CT_Bone" << endl;
+  cout << "  -CT_Muscle" << endl;
+  cout << "  -FrameRate <rate>" << endl;
+  cout << "  -DataReduction <factor>" << endl;
+  cout << endl;
+  cout << "You must use either the -DICOM option to specify the directory where" << endl;
+  cout << "the data is located or the -VTI or -MHA option to specify the path of a .vti file." << endl;
+  cout << endl;
+  cout << "By default, the program assumes that the file has independent components," << endl;
+  cout << "use -DependentComponents to specify that the file has dependent components." << endl;
+  cout << endl;
+  cout << "Use the -Clip option to display a cube widget for clipping the volume." << endl;
+  cout << "Use the -FrameRate option with a desired frame rate (in frames per second)" << endl;
+  cout << "which will control the interactive rendering rate." << endl;
+  cout << "Use the -DataReduction option with a reduction factor (greater than zero and" << endl;
+  cout << "less than one) to reduce the data before rendering." << endl;
+  cout << "Use one of the remaining options to specify the blend function" << endl;
+  cout << "and transfer functions. The -MIP option utilizes a maximum intensity" << endl;
+  cout << "projection method, while the others utilize compositing. The" << endl;
+  cout << "-CompositeRamp option is unshaded compositing, while the other" << endl;
+  cout << "compositing options employ shading." << endl;
+  cout << endl;
+  cout << "Note: MIP, CompositeRamp, CompositeShadeRamp, CT_Skin, CT_Bone," << endl;
+  cout << "and CT_Muscle are appropriate for DICOM data. MIP, CompositeRamp," << endl;
+  cout << "and RGB_Composite are appropriate for RGB data." << endl;
+  cout << endl;
+  cout << "Example: GPURenderDemo -DICOM CTNeck -MIP 4096 1024" << endl;
+  cout << endl;
+}
+
+int main(int argc, char *argv[])
+{
+  // Parse the parameters
+  
+  int count = 1;
+  char *dirname = NULL;
+  double opacityWindow = 4096;
+  double opacityLevel = 2048;
+  int blendType = 0;
+  int clip = 0;
+  double reductionFactor = 1.0;
+  double frameRate = 10.0;
+  char *fileName=0;
+  int fileType=0;
+  
+  bool independentComponents=true;
+  
+  while ( count < argc )
+    {
+    if ( !strcmp( argv[count], "?" ) )
+      {
+      PrintUsage();
+      exit(EXIT_SUCCESS);
+      }
+    else if ( !strcmp( argv[count], "-DICOM" ) )
+      {
+      dirname = new char[strlen(argv[count+1])+1];
+      sprintf( dirname, "%s", argv[count+1] );
+      count += 2;
+      }
+    else if ( !strcmp( argv[count], "-VTI" ) )
+      {
+      fileName = new char[strlen(argv[count+1])+1];
+      fileType = VTI_FILETYPE;
+      sprintf( fileName, "%s", argv[count+1] );
+      count += 2;
+      }
+    else if ( !strcmp( argv[count], "-MHA" ) )
+      {
+      fileName = new char[strlen(argv[count+1])+1];
+      fileType = MHA_FILETYPE;
+      sprintf( fileName, "%s", argv[count+1] );
+      count += 2;
+      }
+    else if ( !strcmp( argv[count], "-Clip") )
+      {
+      clip = 1;
+      count++;
+      }
+    else if ( !strcmp( argv[count], "-MIP" ) )
+      {
+      opacityWindow = atof( argv[count+1] );
+      opacityLevel  = atof( argv[count+2] );
+      blendType = 0;
+      count += 3;
+      }
+    else if ( !strcmp( argv[count], "-CompositeRamp" ) )
+      {
+      opacityWindow = atof( argv[count+1] );
+      opacityLevel  = atof( argv[count+2] );
+      blendType = 1;
+      count += 3;
+      }
+    else if ( !strcmp( argv[count], "-CompositeShadeRamp" ) )
+      {
+      opacityWindow = atof( argv[count+1] );
+      opacityLevel  = atof( argv[count+2] );
+      blendType = 2;
+      count += 3;
+      }
+    else if ( !strcmp( argv[count], "-CT_Skin" ) )
+      {
+      blendType = 3;
+      count += 1;
+      }
+    else if ( !strcmp( argv[count], "-CT_Bone" ) )
+      {
+      blendType = 4;
+      count += 1;
+      }
+    else if ( !strcmp( argv[count], "-CT_Muscle" ) )
+      {
+      blendType = 5;
+      count += 1;
+      }
+    else if ( !strcmp( argv[count], "-RGB_Composite" ) )
+      {
+      blendType = 6;
+      count += 1;
+      }    
+    else if ( !strcmp( argv[count], "-FrameRate") )
+      {
+      frameRate = atof( argv[count+1] );
+      if ( frameRate < 0.01 || frameRate > 60.0 )
+        {
+        cout << "Invalid frame rate - use a number between 0.01 and 60.0" << endl;
+        cout << "Using default frame rate of 10 frames per second." << endl;
+        frameRate = 10.0;
+        }
+      count += 2;
+      }
+    else if ( !strcmp( argv[count], "-ReductionFactor") )
+      {
+      reductionFactor = atof( argv[count+1] );
+      if ( reductionFactor <= 0.0 || reductionFactor >= 1.0 )
+        {
+        cout << "Invalid reduction factor - use a number between 0 and 1 (exclusive)" << endl;
+        cout << "Using the default of no reduction." << endl;
+        reductionFactor = 1.0;
+        }
+      count += 2;
+      }
+     else if ( !strcmp( argv[count], "-DependentComponents") )
+      {
+      independentComponents=false;
+      count += 1;
+      }
+    else
+      {
+      cout << "Unrecognized option: " << argv[count] << endl;
+      cout << endl;
+      PrintUsage();
+      exit(EXIT_FAILURE);
+      }    
+    }
+  
+  if ( !dirname && !fileName)
+    {
+    cout << "Error: you must specify a directory of DICOM data or a .vti file or a .mha!" << endl;
+    cout << endl;
+    PrintUsage();
+    exit(EXIT_FAILURE);    
+    }
+  
+  // Create the renderer, render window and interactor
+  vtkRenderer *renderer = vtkRenderer::New();
+  vtkRenderWindow *renWin = vtkRenderWindow::New();
+  renWin->AddRenderer(renderer);
+
+  // Connect it all. Note that funny arithematic on the 
+  // SetDesiredUpdateRate - the vtkRenderWindow divides it
+  // allocated time across all renderers, and the renderer
+  // divides it time across all props. If clip is
+  // true then there are two props
+  vtkRenderWindowInteractor *iren = vtkRenderWindowInteractor::New();
+  iren->SetRenderWindow(renWin);
+  iren->SetDesiredUpdateRate(frameRate / (1+clip) );
+  
+  iren->GetInteractorStyle()->SetDefaultRenderer(renderer);
+
+  // Read the data
+  vtkAlgorithm *reader=0;
+  vtkImageData *input=0;
+  if(dirname)
+    {
+    vtkDICOMImageReader *dicomReader = vtkDICOMImageReader::New();
+    dicomReader->SetDirectoryName(dirname);
+    dicomReader->Update();
+    input=dicomReader->GetOutput();
+    reader=dicomReader;
+    }
+  else if ( fileType == VTI_FILETYPE )
+    {
+    vtkXMLImageDataReader *xmlReader = vtkXMLImageDataReader::New();
+    xmlReader->SetFileName(fileName);
+    xmlReader->Update();
+    input=xmlReader->GetOutput();
+    reader=xmlReader;
+    }
+  else if ( fileType == MHA_FILETYPE )
+    {
+    vtkMetaImageReader *metaReader = vtkMetaImageReader::New();
+    metaReader->SetFileName(fileName);
+    metaReader->Update();
+    input=metaReader->GetOutput();
+    reader=metaReader;
+    }
+  else
+    {
+    cout << "Error! Not VTI or MHA!" << endl;
+    exit(EXIT_FAILURE);
+    }
+  
+  // Verify that we actually have a volume
+  int dim[3];
+  input->GetDimensions(dim);
+  if ( dim[0] < 2 ||
+       dim[1] < 2 ||
+       dim[2] < 2 )
+    {
+    cout << "Error loading data!" << endl;
+    exit(EXIT_FAILURE);    
+    }
+  
+  vtkImageResample *resample = vtkImageResample::New();
+  if ( reductionFactor < 1.0 )
+    {
+    resample->SetInputConnection( reader->GetOutputPort() );
+    resample->SetAxisMagnificationFactor(0, reductionFactor);
+    resample->SetAxisMagnificationFactor(1, reductionFactor);
+    resample->SetAxisMagnificationFactor(2, reductionFactor);    
+    }
+  
+  // Create our volume and mapper
+  vtkVolume *volume = vtkVolume::New();
+  vtkSmartVolumeMapper *mapper = vtkSmartVolumeMapper::New();
+  
+  // Add a box widget if the clip option was selected
+  vtkBoxWidget *box = vtkBoxWidget::New();
+  if (clip)
+    {
+    box->SetInteractor(iren);
+    box->SetPlaceFactor(1.01);
+    if ( reductionFactor < 1.0 )
+      {      
+      box->SetInput(resample->GetOutput());
+      }
+    else
+      {
+      box->SetInput(input);
+      }
+    
+    box->SetDefaultRenderer(renderer);
+    box->InsideOutOn();
+    box->PlaceWidget();
+    vtkBoxWidgetCallback *callback = vtkBoxWidgetCallback::New();
+    callback->SetMapper(mapper);
+    box->AddObserver(vtkCommand::InteractionEvent, callback);
+    callback->Delete();
+    box->EnabledOn();
+    box->GetSelectedFaceProperty()->SetOpacity(0.0);
+    }
+
+  if ( reductionFactor < 1.0 )
+    {
+    mapper->SetInputConnection( resample->GetOutputPort() );
+    }
+  else
+    {
+    mapper->SetInputConnection( reader->GetOutputPort() );
+    }
+    
+  
+  // Set the sample distance on the ray to be 1/2 the average spacing
+  double spacing[3];
+  if ( reductionFactor < 1.0 )
+    {
+    resample->GetOutput()->GetSpacing(spacing);
+    }
+  else
+    {
+    input->GetSpacing(spacing);
+    }
+  
+//  mapper->SetSampleDistance( (spacing[0]+spacing[1]+spacing[2])/6.0 );
+//  mapper->SetMaximumImageSampleDistance(10.0);
+  
+
+  // Create our transfer function
+  vtkColorTransferFunction *colorFun = vtkColorTransferFunction::New();
+  vtkPiecewiseFunction *opacityFun = vtkPiecewiseFunction::New();
+  
+  // Create the property and attach the transfer functions
+  vtkVolumeProperty *property = vtkVolumeProperty::New();
+  property->SetIndependentComponents(independentComponents);
+  property->SetColor( colorFun );
+  property->SetScalarOpacity( opacityFun );
+  property->SetInterpolationTypeToLinear();
+
+  // connect up the volume to the property and the mapper
+  volume->SetProperty( property );
+  volume->SetMapper( mapper );
+
+  // Depending on the blend type selected as a command line option, 
+  // adjust the transfer function
+  switch ( blendType )
+    {
+    // MIP
+    // Create an opacity ramp from the window and level values.
+    // Color is white. Blending is MIP.
+    case 0:
+      colorFun->AddRGBSegment(0.0, 1.0, 1.0, 1.0, 255.0, 1.0, 1.0, 1.0 );
+      opacityFun->AddSegment( opacityLevel - 0.5*opacityWindow, 0.0, 
+                              opacityLevel + 0.5*opacityWindow, 1.0 );
+      mapper->SetBlendModeToMaximumIntensity();
+      break;
+      
+    // CompositeRamp
+    // Create a ramp from the window and level values. Use compositing
+    // without shading. Color is a ramp from black to white.
+    case 1:
+      colorFun->AddRGBSegment(opacityLevel - 0.5*opacityWindow, 0.0, 0.0, 0.0, 
+                              opacityLevel + 0.5*opacityWindow, 1.0, 1.0, 1.0 );
+      opacityFun->AddSegment( opacityLevel - 0.5*opacityWindow, 0.0, 
+                              opacityLevel + 0.5*opacityWindow, 1.0 );
+      mapper->SetBlendModeToComposite();
+      property->ShadeOff();
+      break;
+      
+    // CompositeShadeRamp
+    // Create a ramp from the window and level values. Use compositing
+    // with shading. Color is white.
+    case 2:
+      colorFun->AddRGBSegment(0.0, 1.0, 1.0, 1.0, 255.0, 1.0, 1.0, 1.0 );
+      opacityFun->AddSegment( opacityLevel - 0.5*opacityWindow, 0.0, 
+                              opacityLevel + 0.5*opacityWindow, 1.0 );
+      mapper->SetBlendModeToComposite();
+      property->ShadeOn();
+      break;
+
+    // CT_Skin
+    // Use compositing and functions set to highlight skin in CT data
+    // Not for use on RGB data
+    case 3:
+      colorFun->AddRGBPoint( -3024, 0, 0, 0, 0.5, 0.0 );
+      colorFun->AddRGBPoint( -1000, .62, .36, .18, 0.5, 0.0 );
+      colorFun->AddRGBPoint( -500, .88, .60, .29, 0.33, 0.45 );
+      colorFun->AddRGBPoint( 3071, .83, .66, 1, 0.5, 0.0 );
+      
+      opacityFun->AddPoint(-3024, 0, 0.5, 0.0 );
+      opacityFun->AddPoint(-1000, 0, 0.5, 0.0 );
+      opacityFun->AddPoint(-500, 1.0, 0.33, 0.45 );
+      opacityFun->AddPoint(3071, 1.0, 0.5, 0.0);
+
+      mapper->SetBlendModeToComposite();
+      property->ShadeOn();
+      property->SetAmbient(0.1);
+      property->SetDiffuse(0.9);
+      property->SetSpecular(0.2);
+      property->SetSpecularPower(10.0);
+      property->SetScalarOpacityUnitDistance(0.8919);
+      break;
+      
+    // CT_Bone
+    // Use compositing and functions set to highlight bone in CT data
+    // Not for use on RGB data
+    case 4:
+      colorFun->AddRGBPoint( -3024, 0, 0, 0, 0.5, 0.0 );
+      colorFun->AddRGBPoint( -16, 0.73, 0.25, 0.30, 0.49, .61 );
+      colorFun->AddRGBPoint( 641, .90, .82, .56, .5, 0.0 );
+      colorFun->AddRGBPoint( 3071, 1, 1, 1, .5, 0.0 );
+      
+      opacityFun->AddPoint(-3024, 0, 0.5, 0.0 );
+      opacityFun->AddPoint(-16, 0, .49, .61 );
+      opacityFun->AddPoint(641, .72, .5, 0.0 );
+      opacityFun->AddPoint(3071, .71, 0.5, 0.0);
+
+      mapper->SetBlendModeToComposite();
+      property->ShadeOn();
+      property->SetAmbient(0.1);
+      property->SetDiffuse(0.9);
+      property->SetSpecular(0.2);
+      property->SetSpecularPower(10.0);
+      property->SetScalarOpacityUnitDistance(0.8919);
+      break;
+      
+    // CT_Muscle
+    // Use compositing and functions set to highlight muscle in CT data
+    // Not for use on RGB data
+    case 5:
+      colorFun->AddRGBPoint( -3024, 0, 0, 0, 0.5, 0.0 );
+      colorFun->AddRGBPoint( -155, .55, .25, .15, 0.5, .92 );
+      colorFun->AddRGBPoint( 217, .88, .60, .29, 0.33, 0.45 );
+      colorFun->AddRGBPoint( 420, 1, .94, .95, 0.5, 0.0 );
+      colorFun->AddRGBPoint( 3071, .83, .66, 1, 0.5, 0.0 );
+      
+      opacityFun->AddPoint(-3024, 0, 0.5, 0.0 );
+      opacityFun->AddPoint(-155, 0, 0.5, 0.92 );
+      opacityFun->AddPoint(217, .68, 0.33, 0.45 );
+      opacityFun->AddPoint(420,.83, 0.5, 0.0);
+      opacityFun->AddPoint(3071, .80, 0.5, 0.0);
+
+      mapper->SetBlendModeToComposite();
+      property->ShadeOn();
+      property->SetAmbient(0.1);
+      property->SetDiffuse(0.9);
+      property->SetSpecular(0.2);
+      property->SetSpecularPower(10.0);
+      property->SetScalarOpacityUnitDistance(0.8919);
+      break;
+      
+    // RGB_Composite
+    // Use compositing and functions set to highlight red/green/blue regions
+    // in RGB data. Not for use on single component data
+    case 6:
+      opacityFun->AddPoint(0, 0.0);
+      opacityFun->AddPoint(5.0, 0.0);
+      opacityFun->AddPoint(30.0, 0.05);
+      opacityFun->AddPoint(31.0, 0.0);
+      opacityFun->AddPoint(90.0, 0.0);
+      opacityFun->AddPoint(100.0, 0.3);
+      opacityFun->AddPoint(110.0, 0.0);
+      opacityFun->AddPoint(190.0, 0.0);
+      opacityFun->AddPoint(200.0, 0.4);
+      opacityFun->AddPoint(210.0, 0.0);
+      opacityFun->AddPoint(245.0, 0.0);
+      opacityFun->AddPoint(255.0, 0.5);
+
+      mapper->SetBlendModeToComposite();
+      property->ShadeOff();
+      property->SetScalarOpacityUnitDistance(1.0);
+      break;
+    default:
+       vtkGenericWarningMacro("Unknown blend type.");
+       break;
+    }
+   
+  // Set the default window size
+  renWin->SetSize(600,600);
+  renWin->Render();
+
+  // Add the volume to the scene
+  renderer->AddVolume( volume );
+
+  renderer->ResetCamera();
+
+  // interact with data
+  renWin->Render();
+
+  iren->Start();
+  
+  opacityFun->Delete();
+  colorFun->Delete();
+  property->Delete();
+  
+  box->Delete();
+  volume->Delete();
+  mapper->Delete();
+  reader->Delete();
+  resample->Delete();
+  renderer->Delete();
+  renWin->Delete();
+  iren->Delete();
+
+  return 0;
+}
+```
+
+### imageImportFromArray.py
+```
+"""
+vtkImageImportFromArray: a NumPy front-end to vtkImageImport
+
+Load a python array into a vtk image.
+To use this class, you must have NumPy installed (http://numpy.scipy.org/)
+
+Methods:
+
+  GetOutput() -- connect to VTK image pipeline
+  SetArray()  -- set the array to load in
+  
+Convert python 'Int' to VTK_UNSIGNED_SHORT:
+(python doesn't support unsigned short, so this might be necessary)
+
+  SetConvertIntToUnsignedShort(yesno)
+  ConvertIntToUnsignedShortOn()
+  ConvertIntToUnsignedShortOff()
+
+Methods from vtkImageImport: 
+(if you don't set these, sensible defaults will be used)
+
+  SetDataExtent()
+  SetDataSpacing()
+  SetDataOrigin()
+"""
+
+import numpy 
+from vtk import vtkImageImport
+from vtk.util.vtkConstants import *
+
+class vtkImageImportFromArray:
+    def __init__(self):
+        self.__import = vtkImageImport()
+        self.__ConvertIntToUnsignedShort = False
+        self.__Array = None
+
+    # type dictionary: note that python doesn't support
+    # unsigned integers properly!
+    __typeDict = {'b':VTK_CHAR,             # int8
+                  'B':VTK_UNSIGNED_CHAR,    # uint8
+                  'h':VTK_SHORT,            # int16
+                  'H':VTK_UNSIGNED_SHORT,   # uint16
+                  'i':VTK_INT,              # int32
+                  'I':VTK_UNSIGNED_INT,     # uint32
+                  'l':VTK_LONG,             # int64
+                  'L':VTK_UNSIGNED_LONG,    # uint64
+                  'f':VTK_FLOAT,            # float32
+                  'd':VTK_DOUBLE,           # float64
+                  }
+
+    # convert 'Int32' to 'unsigned short'
+    def SetConvertIntToUnsignedShort(self, yesno):
+        self.__ConvertIntToUnsignedShort = yesno
+
+    def GetConvertIntToUnsignedShort(self):
+        return self.__ConvertIntToUnsignedShort
+    
+    def ConvertIntToUnsignedShortOn(self):
+        self.__ConvertIntToUnsignedShort = True
+
+    def ConvertIntToUnsignedShortOff(self):
+        self.__ConvertIntToUnsignedShort = False
+
+    # get the output
+    def GetOutputPort(self):
+        return self.__import.GetOutputPort()
+
+    # get the output
+    def GetOutput(self):
+        return self.__import.GetOutput()
+
+    # import an array
+    def SetArray(self, imArray):
+        self.__Array = imArray
+        imString = imArray.tostring()
+        numComponents = 1
+        dim = imArray.shape
+
+        if (len(dim) == 4):
+            numComponents = dim[3]
+            dim = (dim[0], dim[1], dim[2])
+
+
+        typecode = imArray.dtype.char
+       
+        ar_type = self.__typeDict[typecode]
+
+        if (typecode == 'F' or typecode == 'D'):
+            numComponents = numComponents * 2
+
+        if (self.__ConvertIntToUnsignedShort and typecode == 'i'):
+            imString = imArray.astype(numpy.core.numeric.int16).tostring()
+            ar_type = VTK_UNSIGNED_SHORT
+        else:
+            imString = imArray.tostring()
+            
+        self.__import.CopyImportVoidPointer(imString, len(imString))
+        self.__import.SetDataScalarType(ar_type)
+        self.__import.SetNumberOfScalarComponents(numComponents)
+        extent = self.__import.GetDataExtent()
+        self.__import.SetDataExtent(extent[0], extent[0] + dim[2] - 1,
+                                    extent[2], extent[2] + dim[1] - 1,
+                                    extent[4], extent[4] + dim[0] - 1)
+        self.__import.SetWholeExtent(extent[0], extent[0] + dim[2] - 1,
+                                     extent[2], extent[2] + dim[1] - 1,
+                                     extent[4], extent[4] + dim[0] - 1)
+        self.__import.SetDataScalarTypeToUnsignedShort()
+
+    def GetArray(self):
+        return self.__Array
+
+    def GetImport(self):
+        return self.__import
+        
+    # a whole bunch of methods copied from vtkImageImport
+    def SetDataExtent(self, extent):
+        self.__import.SetDataExtent(extent)
+
+    def GetDataExtent(self):
+        return self.__import.GetDataExtent()
+    
+    def SetDataSpacing(self, spacing):
+        self.__import.SetDataSpacing(spacing)
+
+    def GetDataSpacing(self):
+        return self.__import.GetDataSpacing()
+    
+    def SetDataOrigin(self, origin):
+        self.__import.SetDataOrigin(origin)
+
+    def GetDataOrigin(self):
+        return self.__import.GetDataOrigin()
+```
+
+### imgVolRender.py
+```
+#!/bin/env python
+
+import numpy, sys, vtk, wx
+from PyQt4 import QtCore, QtGui
+from vtk.qt4.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+  
+try:
+	from transfer_function import TransferFunctionWidget
+except ImportError:
+	print 'You need to get the TransferFunction from: "http://www.siafoo.net/snippet/122"'
+	exit(1)
+
+'''
+try:
+	from wxVTKRenderWindowInteractor import wxVTKRenderWindowInteractor
+except ImportError:
+	print 'Warning: If you are getting flickering get wxVTKRenderWindowInteractor from: "http://www.siafoo.net/snippet/312"'
+	from vtk.wx.wxVTKRenderWindowInteractor import wxVTKRenderWindowInteractor
+'''
+ 
+try:       
+	from imageImportFromArray import vtkImageImportFromArray
+except ImportError:
+	print 'You need to get the updated vtkImageImportFromArray from: "http://www.siafoo.net/snippet/313" '
+	exit(1)
+     
+class TransferGraph(wx.Dialog):
+	def __init__(self, parent, id=wx.ID_ANY, title="", pos=wx.DefaultPosition,
+                  size=wx.DefaultSize, style=wx.DEFAULT_FRAME_STYLE):
+ 
+		wx.Dialog.__init__(self, parent, id, title, pos, size, style)
+		self.mainPanel = wx.Panel(self, -1, pos)
+		self.mainPanel.SetAutoLayout(True)
+
+		# Create some CustomCheckBoxes
+		self.t_function = TransferFunctionWidget(self.mainPanel, -1, "TF Tunner", size=wx.Size(400, 250))
+
+		# Layout the items with sizers
+		mainSizer = wx.BoxSizer(wx.VERTICAL)
+		mainSizer.Add(self.mainPanel, 1, wx.EXPAND)
+
+		self.SetSizer(mainSizer)
+		mainSizer.Layout()
+         
+	def get_function(self):
+		return self.t_function
+ 
+#class imgVolRender(wxVTKRenderWindowInteractor):
+class imgVolRender:
+	def __init__(self, parent):
+		#wxVTKRenderWindowInteractor.__init__(self, parent, -1, size=parent.GetSize())
+		self.parent = parent
+		self.ren = vtk.vtkRenderer()
+
+		self.app = wx.App()
+		#self.frame = wx.Frame(None, -1, 'Volume Rendering with VTK', wx.DefaultPosition, wx.Size(600, 600))
+		self.frame = wx.Frame(None, -1, 'Volume Rendering with VTK', wx.Point(0,0), wx.Size(600, 600))
+		self.t_graph = TransferGraph(self.frame, -1, 'TF tunner', wx.Point(parent.pos().x()+parent.width(),parent.pos().y()))
+
+		# So we know when new values are added / changed on the tgraph
+		self.t_graph.Connect(-1, -1, wx.wxEVT_COMMAND_SLIDER_UPDATED, 
+						 self.OnTGraphUpdate)
+
+		style = vtk.vtkInteractorStyleTrackballCamera()
+		self.parent.m_ui.renderView.SetInteractorStyle(style)
+
+		self.volnum = 0
+
+	def addVol(self, data, header=None):
+		pix_diag = 5.0/10.0
+
+		img = vtkImageImportFromArray()
+		img.SetArray(data)
+		img.ConvertIntToUnsignedShortOn()
+		'''
+		Origin and Data spacing setting are essential for a normalized volume rendering of
+		the DWI image volumes
+		------- dawdling for a long time for addressing the problem that the volume is too thin
+		and even resorted to pre-resampling of the DWI volumes
+		'''
+		#img.GetImport().SetDataSpacing(0.9375, 0.9375, 4.5200)
+		img.GetImport().SetDataSpacing(header['pixdim'][1:4])
+		#img.GetImport().SetDataOrigin(128.0, 128.0, 68.50)
+		img.GetImport().SetDataOrigin( 
+				header['dim'][0]*header['pixdim'][0],
+				header['dim'][1]*header['pixdim'][1],
+				header['dim'][2]*header['pixdim'][2])
+		print img.GetDataExtent()
+ 
+		volMapper = vtk.vtkVolumeRayCastMapper()
+		compositeFunction = vtk.vtkVolumeRayCastCompositeFunction()
+		compositeFunction.SetCompositeMethodToInterpolateFirst()
+		#compositeFunction.SetCompositeMethodToClassifyFirst()
+		volMapper.SetVolumeRayCastFunction(compositeFunction)
+
+		volMapper.SetSampleDistance(pix_diag / 5.0)
+		volMapper.SetImageSampleDistance( 1.0 )
+		volMapper.SetInputConnection( img.GetOutputPort() )
+
+		# The property describes how the data will look
+		self.volProperty = volProperty = vtk.vtkVolumeProperty()
+		volProperty.SetColor(self.color_tf)
+		volProperty.SetScalarOpacity(self.opacity_tf)
+		volProperty.SetGradientOpacity(self.opacity_tf)
+		if self.parent.lighting:
+			volProperty.ShadeOn()
+		#volProperty.SetInterpolationTypeToLinear()
+		volProperty.SetInterpolationTypeToNearest()
+		volProperty.SetScalarOpacityUnitDistance(pix_diag/5.0)
+
+		vol = vtk.vtkVolume()
+		vol.SetMapper(volMapper)
+		vol.SetProperty(volProperty)
+
+		self.ren.AddVolume(vol)
+
+		boxWidget = vtk.vtkBoxWidget()
+		boxWidget.SetInteractor(self.parent.m_ui.renderView)
+		boxWidget.SetPlaceFactor(1.0)
+
+		planes = vtk.vtkPlanes()
+		def ClipVolumeRender(obj, event):
+			obj.GetPlanes(planes)
+			volMapper.SetClippingPlanes(planes)
+         
+		boxWidget.SetInput(img.GetOutput())
+		boxWidget.PlaceWidget(img.GetOutput().GetBounds())
+		boxWidget.InsideOutOn()
+		boxWidget.AddObserver("InteractionEvent", ClipVolumeRender)
+
+		outlineProperty = boxWidget.GetOutlineProperty()
+		outlineProperty.SetRepresentationToWireframe()
+		outlineProperty.SetAmbient(1.0)
+		outlineProperty.SetAmbientColor(1, 1, 1)
+		outlineProperty.SetLineWidth(3)
+
+		selectedOutlineProperty = boxWidget.GetSelectedOutlineProperty()
+		selectedOutlineProperty.SetRepresentationToWireframe()
+		selectedOutlineProperty.SetAmbient(1.0)
+		selectedOutlineProperty.SetAmbientColor(1, 0, 0)
+		selectedOutlineProperty.SetLineWidth(1)
+
+		outline = vtk.vtkOutlineFilter()
+		outline.SetInputConnection(img.GetOutputPort())
+		outlineMapper = vtk.vtkPolyDataMapper()
+		outlineMapper.SetInputConnection(outline.GetOutputPort())
+		outlineActor = vtk.vtkActor()
+		outlineActor.SetMapper(outlineMapper)
+
+		self.ren.AddActor(outlineActor)
+		self.volnum += 1
+
+	def mount(self, data_set):
+		if not data_set:
+			return self.ren
+
+		# Transfer Functions
+		self.opacity_tf = vtk.vtkPiecewiseFunction()
+		self.color_tf = vtk.vtkColorTransferFunction()
+
+		self.LoadVolumeData(data_set)
+
+		self.OnTGraphUpdate(None)
+
+		# This is the transfer graph
+		self.t_graph.Show()
+
+		return self.ren
+
+	def OnTGraphUpdate(self, event):
+		self.color_tf.RemoveAllPoints()
+		self.opacity_tf.RemoveAllPoints()
+
+		for p in self.t_graph.t_function.points:
+			rgba = p.get_rgba()
+			self.color_tf.AddRGBPoint(p.value, rgba[0]/255.0, 
+							 rgba[1]/255.0, rgba[2]/255.0)
+
+			self.opacity_tf.AddPoint(p.value, rgba[3])
+
+		#self.Refresh()
+		if event:
+			self.parent.m_ui.renderView.repaint()
+
+	def LoadVolumeData(self, data_set):
+		if data_set.endswith('nii') or data_set.endswith('nii.gz'):
+			try:
+				from nifti import NiftiImage
+			except ImportError:
+				print "Apparently you don't have PyNIfTI installed, see http://www.siafoo.net/snippet/310 for instructions"
+				exit(1)
+			nim = NiftiImage(data_set)
+
+			img_data = nim.data
+			img_header = nim.header
+			print nim.data.shape
+
+			if len(nim.data.shape) == 3: # single volume
+				pass
+			elif len(nim.data.shape) == 4: # multiple volume
+				alldata = numpy.array(nim.data[0])
+				print alldata.shape
+				for i in range(1, len(nim.data)):
+					#self.addVol( nim.data[i] )
+					#alldata = numpy.append( alldata, nim.data[i], axis=0)
+					alldata = numpy.add( alldata, nim.data[i])
+				print alldata.shape
+				img_data = alldata
+			elif len(nim.data.shape) == 5: # tensor field volume
+				alldata = numpy.array(nim.data[0][0])
+				print alldata.shape
+				for i in range(1, len(nim.data)):
+					#self.addVol( nim.data[i] )
+					#alldata = numpy.append( alldata, nim.data[i][0], axis=0)
+					alldata = numpy.add( alldata, nim.data[i][0])
+				print alldata.shape
+				img_data = alldata
+
+		elif data_set.endswith('hdr'):
+			# Use the header to figure out the shape of the data
+			# then load the raw data and reshape the array 
+			shape = [int(x) for x in open(data_set).readline().split()]
+			img_data = numpy.frombuffer(open(data_set.replace('.hdr', '.dat'), 'rb').read(),
+									numpy.uint8)\
+					.reshape((shape[2], shape[1], shape[0]))
+                        
+		self.addVol( img_data, img_header )
+		return 0
+```
+
+### imgVolRender_GPU.py
+```
+#!/bin/env python
+
+import numpy, sys, vtk, wx
+from PyQt4 import QtCore, QtGui
+from vtk.qt4.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+from vtk.volumerendering import *
+  
+try:
+	from transfer_function import TransferFunctionWidget
+except ImportError:
+	print 'You need to get the TransferFunction from: "http://www.siafoo.net/snippet/122"'
+	exit(1)
+
+'''
+try:
+	from wxVTKRenderWindowInteractor import wxVTKRenderWindowInteractor
+except ImportError:
+	print 'Warning: If you are getting flickering get wxVTKRenderWindowInteractor from: "http://www.siafoo.net/snippet/312"'
+	from vtk.wx.wxVTKRenderWindowInteractor import wxVTKRenderWindowInteractor
+'''
+ 
+try:       
+	from imageImportFromArray import vtkImageImportFromArray
+except ImportError:
+	print 'You need to get the updated vtkImageImportFromArray from: "http://www.siafoo.net/snippet/313" '
+	exit(1)
+     
+class TransferGraph(wx.Dialog):
+	def __init__(self, parent, id=wx.ID_ANY, title="", pos=wx.DefaultPosition,
+                  size=wx.DefaultSize, style=wx.DEFAULT_FRAME_STYLE):
+ 
+		wx.Dialog.__init__(self, parent, id, title, pos, size, style)
+		self.mainPanel = wx.Panel(self, -1, pos)
+		self.mainPanel.SetAutoLayout(True)
+
+		# Create some CustomCheckBoxes
+		self.t_function = TransferFunctionWidget(self.mainPanel, -1, "TF Tunner", size=wx.Size(400, 250))
+
+		# Layout the items with sizers
+		mainSizer = wx.BoxSizer(wx.VERTICAL)
+		mainSizer.Add(self.mainPanel, 1, wx.EXPAND)
+
+		self.SetSizer(mainSizer)
+		mainSizer.Layout()
+         
+	def get_function(self):
+		return self.t_function
+ 
+#class imgVolRender(wxVTKRenderWindowInteractor):
+class imgVolRender:
+	def __init__(self, parent):
+		#wxVTKRenderWindowInteractor.__init__(self, parent, -1, size=parent.GetSize())
+		self.parent = parent
+		self.ren = vtk.vtkRenderer()
+
+		self.app = wx.App()
+		#self.frame = wx.Frame(None, -1, 'Volume Rendering with VTK', wx.DefaultPosition, wx.Size(600, 600))
+		self.frame = wx.Frame(None, -1, 'Volume Rendering with VTK', wx.Point(0,0), wx.Size(600, 600))
+		self.t_graph = TransferGraph(self.frame, -1, 'TF tunner', wx.Point(parent.pos().x()+parent.width(),parent.pos().y()))
+
+		# So we know when new values are added / changed on the tgraph
+		self.t_graph.Connect(-1, -1, wx.wxEVT_COMMAND_SLIDER_UPDATED, 
+						 self.OnTGraphUpdate)
+
+		style = vtk.vtkInteractorStyleTrackballCamera()
+		self.parent.m_ui.renderView.SetInteractorStyle(style)
+
+		self.volnum = 0
+
+	def addVol(self, data, header=None):
+		pix_diag = 5.0/10.0
+
+		img = vtkImageImportFromArray()
+		img.SetArray(data)
+		img.ConvertIntToUnsignedShortOn()
+		'''
+		Origin and Data spacing setting are essential for a normalized volume rendering of
+		the DWI image volumes
+		------- dawdling for a long time for addressing the problem that the volume is too thin
+		and even resorted to pre-resampling of the DWI volumes
+		'''
+		#img.GetImport().SetDataSpacing(0.9375, 0.9375, 4.5200)
+		img.GetImport().SetDataSpacing(header['pixdim'][1:4])
+		#img.GetImport().SetDataOrigin(128.0, 128.0, 68.50)
+		img.GetImport().SetDataOrigin( 
+				header['dim'][0]*header['pixdim'][0],
+				header['dim'][1]*header['pixdim'][1],
+				header['dim'][2]*header['pixdim'][2])
+		print img.GetDataExtent()
+ 
+		volMapper = vtk.vtkGPUVolumeRayCastMapper()
+		compositeFunction = vtk.vtkVolumeRayCastCompositeFunction()
+		compositeFunction.SetCompositeMethodToInterpolateFirst()
+		#compositeFunction.SetCompositeMethodToClassifyFirst()
+		#volMapper.SetVolumeRayCastFunction(compositeFunction)
+
+		#volMapper.SetSampleDistance(pix_diag / 5.0)
+		volMapper.SetImageSampleDistance( .5 )
+		volMapper.SetSampleDistance(1.0)
+		volMapper.SetInputConnection( img.GetOutputPort() )
+		volMapper.SetBlendModeToComposite()
+
+		# The property describes how the data will look
+		self.volProperty = volProperty = vtk.vtkVolumeProperty()
+		volProperty.SetColor(self.color_tf)
+		volProperty.SetScalarOpacity(self.opacity_tf)
+		volProperty.SetGradientOpacity(self.opacity_tf)
+		if self.parent.lighting:
+			volProperty.ShadeOn()
+		#volProperty.SetInterpolationTypeToLinear()
+		volProperty.SetInterpolationTypeToNearest()
+		volProperty.SetScalarOpacityUnitDistance(pix_diag/5.0)
+
+		vol = vtk.vtkVolume()
+		vol.SetMapper(volMapper)
+		vol.SetProperty(volProperty)
+
+		self.ren.AddVolume(vol)
+
+		boxWidget = vtk.vtkBoxWidget()
+		boxWidget.SetInteractor(self.parent.m_ui.renderView)
+		boxWidget.SetPlaceFactor(1.0)
+
+		planes = vtk.vtkPlanes()
+		def ClipVolumeRender(obj, event):
+			obj.GetPlanes(planes)
+			volMapper.SetClippingPlanes(planes)
+         
+		boxWidget.SetInput(img.GetOutput())
+		boxWidget.PlaceWidget(img.GetOutput().GetBounds())
+		boxWidget.InsideOutOn()
+		boxWidget.AddObserver("InteractionEvent", ClipVolumeRender)
+
+		outlineProperty = boxWidget.GetOutlineProperty()
+		outlineProperty.SetRepresentationToWireframe()
+		outlineProperty.SetAmbient(1.0)
+		outlineProperty.SetAmbientColor(1, 1, 1)
+		outlineProperty.SetLineWidth(3)
+
+		selectedOutlineProperty = boxWidget.GetSelectedOutlineProperty()
+		selectedOutlineProperty.SetRepresentationToWireframe()
+		selectedOutlineProperty.SetAmbient(1.0)
+		selectedOutlineProperty.SetAmbientColor(1, 0, 0)
+		selectedOutlineProperty.SetLineWidth(1)
+
+		outline = vtk.vtkOutlineFilter()
+		outline.SetInputConnection(img.GetOutputPort())
+		outlineMapper = vtk.vtkPolyDataMapper()
+		outlineMapper.SetInputConnection(outline.GetOutputPort())
+		outlineActor = vtk.vtkActor()
+		outlineActor.SetMapper(outlineMapper)
+
+		self.ren.AddActor(outlineActor)
+		self.volnum += 1
+
+	def mount(self, data_set):
+		if not data_set:
+			return self.ren
+
+		# Transfer Functions
+		self.opacity_tf = vtk.vtkPiecewiseFunction()
+		self.color_tf = vtk.vtkColorTransferFunction()
+
+		self.LoadVolumeData(data_set)
+
+		self.OnTGraphUpdate(None)
+
+		# This is the transfer graph
+		self.t_graph.Show()
+
+		return self.ren
+
+	def OnTGraphUpdate(self, event):
+		self.color_tf.RemoveAllPoints()
+		self.opacity_tf.RemoveAllPoints()
+
+		for p in self.t_graph.t_function.points:
+			rgba = p.get_rgba()
+			self.color_tf.AddRGBPoint(p.value, rgba[0]/255.0, 
+							 rgba[1]/255.0, rgba[2]/255.0)
+
+			self.opacity_tf.AddPoint(p.value, rgba[3])
+
+		#self.Refresh()
+		if event:
+			self.parent.m_ui.renderView.repaint()
+
+	def LoadVolumeData(self, data_set):
+		if data_set.endswith('nii') or data_set.endswith('nii.gz'):
+			try:
+				from nifti import NiftiImage
+			except ImportError:
+				print "Apparently you don't have PyNIfTI installed, see http://www.siafoo.net/snippet/310 for instructions"
+				exit(1)
+			nim = NiftiImage(data_set)
+
+			img_data = nim.data
+			img_header = nim.header
+			print nim.data.shape
+
+			if len(nim.data.shape) == 3: # single volume
+				pass
+			elif len(nim.data.shape) == 4: # multiple volume
+				alldata = numpy.array(nim.data[0])
+				print alldata.shape
+				for i in range(1, len(nim.data)):
+					#self.addVol( nim.data[i] )
+					#alldata = numpy.append( alldata, nim.data[i], axis=0)
+					alldata = numpy.add( alldata, nim.data[i])
+				print alldata.shape
+				img_data = alldata
+			elif len(nim.data.shape) == 5: # tensor field volume
+				alldata = numpy.array(nim.data[0][0])
+				print alldata.shape
+				for i in range(1, len(nim.data)):
+					#self.addVol( nim.data[i] )
+					#alldata = numpy.append( alldata, nim.data[i][0], axis=0)
+					alldata = numpy.add( alldata, nim.data[i][0])
+				print alldata.shape
+				img_data = alldata
+
+		elif data_set.endswith('hdr'):
+			# Use the header to figure out the shape of the data
+			# then load the raw data and reshape the array 
+			shape = [int(x) for x in open(data_set).readline().split()]
+			img_data = numpy.frombuffer(open(data_set.replace('.hdr', '.dat'), 'rb').read(),
+									numpy.uint8)\
+					.reshape((shape[2], shape[1], shape[0]))
+                        
+		self.addVol( img_data, img_header )
+		return 0
+```
+
+### imgVolRender_fixedpoint.py
+```
+#!/bin/env python
+
+import numpy, sys, vtk, wx
+from PyQt4 import QtCore, QtGui
+from vtk.qt4.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+  
+try:
+	from transfer_function import TransferFunctionWidget
+except ImportError:
+	print 'You need to get the TransferFunction from: "http://www.siafoo.net/snippet/122"'
+	exit(1)
+
+'''
+try:
+	from wxVTKRenderWindowInteractor import wxVTKRenderWindowInteractor
+except ImportError:
+	print 'Warning: If you are getting flickering get wxVTKRenderWindowInteractor from: "http://www.siafoo.net/snippet/312"'
+	from vtk.wx.wxVTKRenderWindowInteractor import wxVTKRenderWindowInteractor
+'''
+ 
+try:       
+	from imageImportFromArray import vtkImageImportFromArray
+except ImportError:
+	print 'You need to get the updated vtkImageImportFromArray from: "http://www.siafoo.net/snippet/313" '
+	exit(1)
+     
+class TransferGraph(wx.Dialog):
+	def __init__(self, parent, id=wx.ID_ANY, title="", pos=wx.DefaultPosition,
+                  size=wx.DefaultSize, style=wx.DEFAULT_FRAME_STYLE):
+ 
+		wx.Dialog.__init__(self, parent, id, title, pos, size, style)
+		self.mainPanel = wx.Panel(self, -1, pos)
+		self.mainPanel.SetAutoLayout(True)
+
+		# Create some CustomCheckBoxes
+		self.t_function = TransferFunctionWidget(self.mainPanel, -1, "TF Tunner", size=wx.Size(400, 250))
+
+		# Layout the items with sizers
+		mainSizer = wx.BoxSizer(wx.VERTICAL)
+		mainSizer.Add(self.mainPanel, 1, wx.EXPAND)
+
+		self.SetSizer(mainSizer)
+		mainSizer.Layout()
+         
+	def get_function(self):
+		return self.t_function
+ 
+#class imgVolRender(wxVTKRenderWindowInteractor):
+class imgVolRender:
+	def __init__(self, parent):
+		#wxVTKRenderWindowInteractor.__init__(self, parent, -1, size=parent.GetSize())
+		self.parent = parent
+		self.ren = vtk.vtkRenderer()
+
+		self.app = wx.App()
+		#self.frame = wx.Frame(None, -1, 'Volume Rendering with VTK', wx.DefaultPosition, wx.Size(600, 600))
+		self.frame = wx.Frame(None, -1, 'Volume Rendering with VTK', wx.Point(0,0), wx.Size(600, 600))
+		self.t_graph = TransferGraph(self.frame, -1, 'TF tunner', wx.Point(parent.pos().x()+parent.width(),parent.pos().y()))
+
+		# So we know when new values are added / changed on the tgraph
+		self.t_graph.Connect(-1, -1, wx.wxEVT_COMMAND_SLIDER_UPDATED, 
+						 self.OnTGraphUpdate)
+
+		style = vtk.vtkInteractorStyleTrackballCamera()
+		self.parent.m_ui.renderView.SetInteractorStyle(style)
+
+		self.volnum = 0
+
+	def addVol(self, data, header=None):
+		pix_diag = 5.0/10.0
+
+		img = vtkImageImportFromArray()
+		img.SetArray(data)
+		img.ConvertIntToUnsignedShortOn()
+		'''
+		Origin and Data spacing setting are essential for a normalized volume rendering of
+		the DWI image volumes
+		------- dawdling for a long time for addressing the problem that the volume is too thin
+		and even resorted to pre-resampling of the DWI volumes
+		'''
+		#img.GetImport().SetDataSpacing(0.9375, 0.9375, 4.5200)
+		img.GetImport().SetDataSpacing(header['pixdim'][1:4])
+		#img.GetImport().SetDataOrigin(128.0, 128.0, 68.50)
+		img.GetImport().SetDataOrigin( 
+				header['dim'][0]*header['pixdim'][0],
+				header['dim'][1]*header['pixdim'][1],
+				header['dim'][2]*header['pixdim'][2])
+		print img.GetDataExtent()
+ 
+		volMapper = vtk.vtkFixedPointVolumeRayCastMapper()
+		#compositeFunction = vtk.vtkFixedPointVolumeRayCastCompositeHelper()
+		#compositeFunction.SetCompositeMethodToInterpolateFirst()
+		#compositeFunction.SetCompositeMethodToClassifyFirst()
+		#volMapper.SetVolumeRayCastFunction(compositeFunction)
+
+		volMapper.SetSampleDistance(pix_diag / 5.0)
+		volMapper.SetImageSampleDistance( 1.0 )
+		volMapper.SetInputConnection( img.GetOutputPort() )
+
+		# The property describes how the data will look
+		self.volProperty = volProperty = vtk.vtkVolumeProperty()
+		volProperty.SetColor(self.color_tf)
+		volProperty.SetScalarOpacity(self.opacity_tf)
+		volProperty.SetGradientOpacity(self.opacity_tf)
+		if self.parent.lighting:
+			volProperty.ShadeOn()
+		#volProperty.SetInterpolationTypeToLinear()
+		volProperty.SetInterpolationTypeToNearest()
+		volProperty.SetScalarOpacityUnitDistance(pix_diag/5.0)
+
+		vol = vtk.vtkVolume()
+		vol.SetMapper(volMapper)
+		vol.SetProperty(volProperty)
+
+		self.ren.AddVolume(vol)
+
+		boxWidget = vtk.vtkBoxWidget()
+		boxWidget.SetInteractor(self.parent.m_ui.renderView)
+		boxWidget.SetPlaceFactor(1.0)
+
+		planes = vtk.vtkPlanes()
+		def ClipVolumeRender(obj, event):
+			obj.GetPlanes(planes)
+			volMapper.SetClippingPlanes(planes)
+         
+		boxWidget.SetInput(img.GetOutput())
+		boxWidget.PlaceWidget(img.GetOutput().GetBounds())
+		boxWidget.InsideOutOn()
+		boxWidget.AddObserver("InteractionEvent", ClipVolumeRender)
+
+		outlineProperty = boxWidget.GetOutlineProperty()
+		outlineProperty.SetRepresentationToWireframe()
+		outlineProperty.SetAmbient(1.0)
+		outlineProperty.SetAmbientColor(1, 1, 1)
+		outlineProperty.SetLineWidth(3)
+
+		selectedOutlineProperty = boxWidget.GetSelectedOutlineProperty()
+		selectedOutlineProperty.SetRepresentationToWireframe()
+		selectedOutlineProperty.SetAmbient(1.0)
+		selectedOutlineProperty.SetAmbientColor(1, 0, 0)
+		selectedOutlineProperty.SetLineWidth(1)
+
+		outline = vtk.vtkOutlineFilter()
+		outline.SetInputConnection(img.GetOutputPort())
+		outlineMapper = vtk.vtkPolyDataMapper()
+		outlineMapper.SetInputConnection(outline.GetOutputPort())
+		outlineActor = vtk.vtkActor()
+		outlineActor.SetMapper(outlineMapper)
+
+		self.ren.AddActor(outlineActor)
+		self.volnum += 1
+
+	def mount(self, data_set):
+		if not data_set:
+			return self.ren
+
+		# Transfer Functions
+		self.opacity_tf = vtk.vtkPiecewiseFunction()
+		self.color_tf = vtk.vtkColorTransferFunction()
+
+		self.LoadVolumeData(data_set)
+
+		self.OnTGraphUpdate(None)
+
+		# This is the transfer graph
+		self.t_graph.Show()
+
+		return self.ren
+
+	def OnTGraphUpdate(self, event):
+		self.color_tf.RemoveAllPoints()
+		self.opacity_tf.RemoveAllPoints()
+
+		for p in self.t_graph.t_function.points:
+			rgba = p.get_rgba()
+			self.color_tf.AddRGBPoint(p.value, rgba[0]/255.0, 
+							 rgba[1]/255.0, rgba[2]/255.0)
+
+			self.opacity_tf.AddPoint(p.value, rgba[3])
+
+		#self.Refresh()
+		if event:
+			self.parent.m_ui.renderView.repaint()
+
+	def LoadVolumeData(self, data_set):
+		if data_set.endswith('nii') or data_set.endswith('nii.gz'):
+			try:
+				from nifti import NiftiImage
+			except ImportError:
+				print "Apparently you don't have PyNIfTI installed, see http://www.siafoo.net/snippet/310 for instructions"
+				exit(1)
+			nim = NiftiImage(data_set)
+
+			img_data = nim.data
+			img_header = nim.header
+			print nim.data.shape
+
+			if len(nim.data.shape) == 3: # single volume
+				pass
+			elif len(nim.data.shape) == 4: # multiple volume
+				alldata = numpy.array(nim.data[0])
+				print alldata.shape
+				for i in range(1, len(nim.data)):
+					#self.addVol( nim.data[i] )
+					#alldata = numpy.append( alldata, nim.data[i], axis=0)
+					alldata = numpy.add( alldata, nim.data[i])
+				print alldata.shape
+				img_data = alldata
+			elif len(nim.data.shape) == 5: # tensor field volume
+				alldata = numpy.array(nim.data[0][0])
+				print alldata.shape
+				for i in range(1, len(nim.data)):
+					#self.addVol( nim.data[i] )
+					#alldata = numpy.append( alldata, nim.data[i][0], axis=0)
+					alldata = numpy.add( alldata, nim.data[i][0])
+				print alldata.shape
+				img_data = alldata
+
+		elif data_set.endswith('hdr'):
+			# Use the header to figure out the shape of the data
+			# then load the raw data and reshape the array 
+			shape = [int(x) for x in open(data_set).readline().split()]
+			img_data = numpy.frombuffer(open(data_set.replace('.hdr', '.dat'), 'rb').read(),
+									numpy.uint8)\
+					.reshape((shape[2], shape[1], shape[0]))
+                        
+		self.addVol( img_data, img_header )
+		return 0
+```
+
+### stlineRender.py
+```
+#!/usr/bin/env python
+  
+import vtk
+from vtk.util.colors import *
+from tgdataReader import tgdataReader
+import sys
+  
+stlineModel = tgdataReader( sys.argv[1] )
+
+mapStreamLine = vtk.vtkPolyDataMapper()
+mapStreamLine.SetInput( stlineModel )
+streamLineActor = vtk.vtkActor()
+streamLineActor.SetMapper(mapStreamLine)
+streamLineActor.GetProperty().BackfaceCullingOn()
+  
+# Now create the usual graphics stuff.
+ren = vtk.vtkRenderer()
+renWin = vtk.vtkRenderWindow()
+renWin.AddRenderer(ren)
+iren = vtk.vtkRenderWindowInteractor()
+iren.SetRenderWindow(renWin)
+  
+ren.AddActor(streamLineActor)
+ren.SetBackground(slate_grey)
+  
+# Here we specify a particular view.
+# aCamera = vtk.vtkCamera()
+# aCamera.SetClippingRange(0.726079, 36.3039)
+# aCamera.SetFocalPoint(2.43584, 2.15046, 1.11104)
+# aCamera.SetPosition(-4.76183, -10.4426, 3.17203)
+# aCamera.SetViewUp(0.0511273, 0.132773, 0.989827)
+# aCamera.SetViewAngle(18.604)
+# aCamera.Zoom(1.2)
+# ren.SetActiveCamera(aCamera)
+
+renWin.SetSize(800, 600)
+  
+iren.Initialize()
+renWin.Render()
+iren.Start()
+```
+
+### tgdataReader.py
+```
+#!/usr/bin/env python
+'''
+read a DTI streamline model 
+Haipeng Cai @ Nov 5, 2011
+'''
+
+import os
+import sys
+import string
+import re
+
+import vtk
+
+split=string.split
+
+class tgdataReader(vtk.vtkPolyData):
+	def __init__(self, fndata=None):
+		#super(tgdataReader,self).__init__()
+
+		self.allPoints = vtk.vtkPoints()
+		self.allLines = vtk.vtkCellArray()
+
+		self.fndata = fndata
+		if self.fndata:
+			self.load( self.fndata )
+
+	def load(self, srcfn):
+		sfh = file(srcfn, 'r')
+		if None == sfh:
+			raise Exception, "Failed to open file - %s." % (srcfn)
+
+		try:
+			curline = "#"
+			LNo = 0
+			while curline:
+				curline = sfh.readline()
+				LNo += 1
+				curline = curline.lstrip().rstrip('\r\n')
+				if len(split(curline)) == 1 and curline not in ["#","//","/*","%"]:
+					break
+
+			lnTotal = int(curline)
+			lnCnt = 0
+			ptCnt = 0
+
+			while curline and lnCnt < lnTotal:
+				# read line by line, in order to avoid the memory swelling by otherwise loading all lines once
+				curline = sfh.readline()
+				LNo += 1
+				curline = curline.lstrip().rstrip('\r\n')
+				if len(curline) < 1 or curline in ["#","//","/*","%"]:
+					continue
+
+				vtTotal = int(curline)
+				vtCnt = 0
+				startPtId = ptCnt
+
+				while curline and vtCnt < vtTotal:
+					curline = sfh.readline()
+					LNo += 1
+					curline = curline.lstrip().rstrip('\r\n')
+					if len(curline) < 1 or curline in ["#","//","/*","%"]:
+						continue
+
+					# alway splitting a line with whitespace as the delimiter
+					words = split(curline)
+					if len(words) < 6: # not a vertex line
+						continue
+
+					self.allPoints.InsertNextPoint( float(words[0]), float(words[1]), float(words[2]) )
+					ptCnt += 1
+
+					vtCnt += 1
+
+				if vtCnt < vtTotal :
+					raise IOError, "Insufficient points on line No.%d, at file Line %d, aborted.\n" % (lnCnt, LNo)
+
+				vtkln = vtk.vtkPolyLine()
+				vtkln.GetPointIds().SetNumberOfIds(vtTotal)
+				for id in range(0, vtTotal):
+					vtkln.GetPointIds().SetId( id, id + startPtId )
+
+				self.allLines.InsertNextCell( vtkln )
+				lnCnt += 1
+
+			if lnCnt < lnTotal:
+				raise IOError, "Error encountered at file Line %d - Insufficient lines.\n" % (LNo)
+
+			self.SetPoints( self.allPoints )
+			self.SetLines ( self.allLines )
+
+			self.fndata = srcfn 
+
+		finally:
+			sfh.close()
+		
+# set ts=4 tw=100 sts=4 sw=4
+```
+
+### transfer_function.py
+```
+import wx
+import numpy
+
+class TransferPoint(object):
+    
+    def __init__(self, value, color, alpha, fixed = False):
+        self.value = value
+        # Color is 0 to 255
+        self.color = color
+        # Alpha is 0.0 to 1.0
+        self.alpha = alpha
+    
+        if len(color) != 3:
+            raise Exception, 'Color should have length of 3'
+
+        self.selected = False
+        self.pix_size = 4
+        self.fixed = fixed
+
+    def __cmp__(self, pt):
+        ''' Used by the sort method'''
+        if self.value < pt.value: return -1
+        elif self.value > pt.value: return 1
+        return 0
+    
+    def get_alpha(self):
+        return self.alpha
+
+    def get_rgba(self):
+        return [self.color[0], self.color[1], self.color[2], self.alpha]
+   
+    def is_selected(self):
+        return self.selected
+    
+    def set_selected(self, selected):
+        self.selected = selected       
+
+
+class TransferFunctionWidget(wx.PyControl):
+
+    def __init__(self, parent, id=wx.ID_ANY, label="TF widget", pos=wx.DefaultPosition,
+                 size=wx.DefaultSize, style=wx.NO_BORDER, validator=wx.DefaultValidator,
+                 name="TransferFunction"):
+        
+        wx.PyControl.__init__(self, parent, id, pos, size, style, validator, name)
+        
+        # Local Variables
+        self.m_BorderLeft = 20
+        self.m_BorderUp = 5
+        self.m_BorderRight = 5
+        self.m_BorderDown = 13
+
+        self.m_GridLines = 10
+        self.m_TickSize = 4
+        self.m_TickBorder = 2
+        self.m_labelFontPt = 10;
+
+        # The transfer points
+        self.points = []
+        self.points.append(TransferPoint(0, [255, 255, 255], 0, fixed=True))
+        self.points.append(TransferPoint(255, [0, 0, 0], 1.0, fixed=True))
+
+        self.m_MinMax = (0.0, 255.0)
+        
+        self.mouse_down = False
+        self.prev_x = 0
+        self.prev_y = 0
+        self.cur_pt = None
+
+        # This is always return -1 wtf.
+        self.x, self.y = self.GetPositionTuple()
+        width, height = self.GetClientSize()
+        
+        # The number of usable pixels on the graph
+        self.r_fieldWidth = (width - (self.m_BorderRight + self.m_BorderLeft))
+        self.r_fieldHeight = (height - (self.m_BorderUp + self.m_BorderDown))
+
+        # The number of value data points
+        self.r_rangeWidth = (self.m_MinMax[1] - self.m_MinMax[0])
+        # Pixels per value
+        self.pixel_per_value = float(self.r_fieldWidth) / self.r_rangeWidth
+
+        # Bind events
+        self.Bind(wx.EVT_PAINT, self.OnPaint)
+        self.Bind(wx.EVT_ERASE_BACKGROUND, self.OnEraseBackground)
+
+        self.Bind(wx.EVT_KEY_DOWN, self.OnKeyDown)
+        self.Bind(wx.EVT_LEFT_DOWN, self.OnMouseDown)
+        self.Bind(wx.EVT_LEFT_UP, self.OnMouseUp)
+        self.Bind(wx.EVT_MOTION, self.OnMouseMotion)
+
+    def OnKeyDown(self, event):
+        """ Handles the wx.EVT_KEY_DOWN event for CustomCheckBox. """
+
+        if event.GetKeyCode() == wx.WXK_SPACE:
+            # The spacebar has been pressed: toggle our state
+            self.SendCheckBoxEvent()
+            event.Skip()
+            return
+
+        event.Skip()
+       
+    def OnPaint(self, event):
+        """ Handles the wx.EVT_PAINT event for CustomCheckBox. """
+
+        dc = wx.BufferedPaintDC(self)
+        self.Draw(dc)
+        
+    def DrawPoints(self, dc):
+
+        dc.SetBrush(wx.Brush(wx.Color(255,0,0), wx.SOLID))
+        
+        x = self.x_from_value(self.m_MinMax[0])
+        y = self.y_from_alpha(0.0)
+        
+        for pt in self.points:
+            
+            x_c = self.x_from_value(pt.value)
+            y_c = self.y_from_alpha(pt.get_alpha())
+
+            dc.SetPen(wx.Pen(wx.Color(0,0,0)))   
+            dc.DrawLine(x, y, x_c, y_c)
+
+            if pt.selected:
+                dc.SetPen(wx.Pen(wx.Color(0, 0, 255), 2))
+                dc.DrawRectangle(x_c - 3, y_c -3, 6, 6)
+
+            dc.SetPen(wx.Pen(wx.Color(255,0,0)))
+            dc.DrawRectangle(x_c - 2, y_c -2, 4, 4)    
+
+            x = x_c 
+            y = y_c
+            
+    def DrawGrid(self, dc):
+        '''
+        Draw the grid lines
+        '''
+        
+        width, height = self.GetClientSize()
+        x, y = self.GetPositionTuple()
+        
+        spacing = height/(self.m_GridLines + 1)
+        
+        dc.SetPen(wx.Pen(wx.Color(218, 218, 218)))
+
+        for i in range(self.m_GridLines):
+            dc.DrawLine(x + self.m_BorderLeft, y + (1 + i)*spacing, 
+                        x + self.m_BorderLeft + self.r_fieldWidth, y + (1 + i)*spacing)
+
+    def DrawAxis(self, dc):
+
+        dc.SetPen(wx.Pen(wx.Color(218,218,218)))
+        
+        # Horizontal
+        dc.DrawLine(self.x + self.m_BorderLeft - 2, self.y + self.m_BorderUp, 
+                    self.x + self.m_BorderLeft + self.r_fieldWidth, self.y + self.m_BorderUp)
+        dc.DrawLine(self.x + self.m_BorderLeft - 2, self.y + self.r_fieldHeight + self.m_BorderUp, 
+                    self.x + self.m_BorderLeft + self.r_fieldWidth, self.y + self.r_fieldHeight + self.m_BorderUp)
+        # Vertical
+        dc.DrawLine(self.x + self.m_BorderLeft, self.y + self.m_BorderUp, 
+                    self.x + self.m_BorderLeft, self.y + self.m_BorderUp + self.r_fieldHeight);
+        dc.DrawLine(self.x + self.m_BorderLeft + self.r_fieldWidth, self.y + self.m_BorderUp, 
+                    self.x + self.m_BorderLeft + self.r_fieldWidth, self.y + self.m_BorderUp + self.r_fieldHeight);
+
+        dc.SetFont(wx.Font(self.m_labelFontPt, wx.FONTFAMILY_MODERN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+
+        dc.DrawText('1.0', self.x + 2, self.y + self.m_labelFontPt/2 )
+        dc.DrawText('0.0', self.x + 2, self.y + self.m_BorderUp +  self.r_fieldHeight)
+    
+        for i, t in enumerate('Opacity'):
+            dc.DrawText(t, self.x + 6, self.y + self.m_BorderUp + (2+i)*self.m_labelFontPt)
+
+    
+#        int strw = 0;
+#        int strh = 0;
+#    
+#        fl_measure(m_strRangeFrom.c_str(), strw, strh);
+#        fl_draw(m_strRangeFrom.c_str(), x() + m_BorderLeft - strw/2, y() + m_BorderUp + r_fieldHeight + m_labelFontPt);
+#        fl_measure(m_strRangeTo.c_str(), strw, strh);
+#        fl_draw(m_strRangeTo.c_str(), x() + m_BorderLeft + r_fieldWidth - strw , y() + m_BorderUp + r_fieldHeight + m_labelFontPt);
+
+        dc.DrawText('Values', (self.m_BorderLeft + self.r_fieldWidth)/2, self.y + self.m_BorderUp +  self.r_fieldHeight)
+
+    def DrawFill(self, dc):
+        ''' Draws the interpolated fill'''
+        yat = self.y_from_alpha(0.0)
+
+        for i in range(self.r_fieldWidth):
+            x = self.m_BorderLeft + self.x + i
+            rgba = self.rgba_from_value(self.value_from_x(x))
+            dc.SetPen(wx.Pen(wx.Color(rgba[0], rgba[1], rgba[2])))
+            dc.DrawLine(x, self.y_from_alpha(rgba[3]), x, yat)
+
+    def Draw(self, dc):
+
+        # Get the actual client size of ourselves
+        width, height = self.GetClientSize()
+        
+        if not width or not height:
+            # Nothing to do, we still don't have dimensions!
+            return
+
+        # Initialize the wx.BufferedPaintDC, assigning a background
+        # colour and a foreground colour (to draw the text)
+        dc.SetBackground(wx.WHITE_BRUSH)
+        dc.Clear()
+
+        # Draw the transfer function fill
+        self.DrawFill(dc)
+        # Draw the Grid
+        self.DrawGrid(dc)
+        # Draw the Axis
+        self.DrawAxis(dc)
+        # Draw Points
+        self.DrawPoints(dc)
+           
+    def OnEraseBackground(self, event):
+        ''' Called when the background is erased '''
+
+        # It is left blank to prevent flicker
+        pass
+
+    def OnMouseDown(self, event):
+        
+        x = event.GetX()
+        y = event.GetY()
+        
+        self.mouse_down = True
+
+        for pt in self.points:
+            if self.hit_test(x,y, pt):
+                self.cur_pt = pt
+                pt.selected = not pt.selected
+                self.prev_x = x
+                self.prev_y = y
+                return
+        
+        self.cur_pt = None
+            
+    def OnMouseUp(self, event):
+        x = event.GetX()
+        y = event.GetY()
+
+        if not self.cur_pt:
+            
+            color_picker = wx.ColourDialog(self)
+        
+            if color_picker.ShowModal() == wx.ID_OK:
+        
+                color = color_picker.GetColourData().GetColour().Get()
+                
+                self.points.append(TransferPoint(self.value_from_x(x), color, self.alpha_from_y(y)))
+                self.points.sort()
+                self.SendChangedEvent()
+
+        self.mouse_down = False
+        self.Refresh()
+
+    def OnMouseMotion(self, event):
+        x = event.GetX()
+        y = event.GetY()
+
+        if self.cur_pt and self.mouse_down:
+
+            self.cur_pt.alpha = self.alpha_from_y(y)
+
+            if not self.cur_pt.fixed:
+                self.cur_pt.value = self.value_from_x(x)
+                self.points.sort()
+            
+            self.SendChangedEvent()
+            self.Refresh()
+
+    def SendChangedEvent(self):
+
+        event = wx.CommandEvent(wx.wxEVT_COMMAND_SLIDER_UPDATED, self.GetId())
+
+        self.GetEventHandler().ProcessEvent(event)
+
+    # Manipulation functions
+    def x_from_value(self, value):
+        
+        if value > self.m_MinMax[1]:
+#            print 'Warning x_from_value value out of range', value
+            return self.r_fieldWidth + self.m_BorderLeft + self.x
+        
+        if value < self.m_MinMax[0]:
+#            print 'Warning x_from_value value out of range', value
+            return self.m_BorderLeft + self.x
+        
+        return self.m_BorderLeft + self.x + round(self.pixel_per_value * value)
+#        return self.m_BorderLeft + self.x + int(self.r_fieldWidth*((value - self.m_MinMax[0])/self.r_rangeWidth))
+    
+    def y_from_alpha(self, alpha):
+
+        if alpha < 0: 
+            return self.m_BorderUp + self.y
+        if alpha > 1.0:
+            return self.y
+
+        return self.m_BorderUp + self.y + int(self.r_fieldHeight*(1 - alpha))
+
+    def value_from_x(self, xc):
+
+        if not (xc >= self.x + self.m_BorderLeft):
+            return float(self.m_MinMax[0])            
+        if not (xc <= self.x + self.r_fieldWidth + self.m_BorderLeft):
+            return float(self.m_MinMax[1])
+
+        return float(self.m_MinMax[0]) + self.r_rangeWidth*float(float(xc - self.x - self.m_BorderLeft)/((self.r_fieldWidth)))
+
+    def alpha_from_y(self, yc):
+
+        if yc < self.y + self.m_BorderUp:
+            return 1.0
+        if yc > self.y + self.m_BorderUp + self.r_fieldHeight:
+            return 0.0
+
+        return 1.0 - float(yc - self.y - self.m_BorderUp)/self.r_fieldHeight;
+
+    def hit_test(self, x, y, pt):
+        x_c = self.x_from_value(pt.value)
+        y_c = self.y_from_alpha(pt.get_alpha())
+        sz = pt.pix_size
+
+        if x <= x_c + sz / 2 and x >= x_c - sz \
+            and y <= y_c + sz and y >= y_c - sz:
+                return True
+
+        return False
+     
+    def rgba_from_value(self, value):
+        
+        if not (value >= self.m_MinMax[0] and value <= self.m_MinMax[1]):
+            raise Exception, 'Value out of range: ' + str(value)
+
+        for pt_i in range(len(self.points)):
+            pt_cur = self.points[pt_i]
+            pt_next = self.points[pt_i + 1]
+            
+            value_cur = pt_cur.value
+            value_next = pt_next.value
+
+            if value_cur < value:
+                if value_next > value:
+                    target = (value - value_cur)/float(value_next - value_cur)
+                    
+                    cur_color = pt_cur.get_rgba()
+                    next_color = pt_next.get_rgba()
+                    return self.interpolate(target, cur_color, next_color)  
+                elif value_next == value:
+                    return pt_next.get_rgba()
+            elif value_cur == value:
+                return pt_cur.get_rgba() 
+            else:
+                print 'Value, ', value, value_cur 
+                raise Exception, 'Value is weird'
+
+        return []
+    
+    def interpolate(self, target, val1, val2):
+        return [target*(v2) + (1.0 - target)*v1 for v1, v2 in zip(val1, val2)]
+    
+    def get_map(self):
+        ''' Get the interpolated values '''
+        return numpy.array([self.rgba_from_value(i) for i in range(int(self.r_rangeWidth) + 1)], dtype=numpy.float32)
+
+# You don't need anything below this
+class TGraphDemo(wx.Frame):
+
+    def __init__(self, parent, id=wx.ID_ANY, title="", pos=wx.DefaultPosition,
+                 size=wx.DefaultSize, style=wx.DEFAULT_FRAME_STYLE):
+
+        wx.Frame.__init__(self, parent, id, title, pos, size, style)
+
+        panel = wx.Panel(self, -1)
+
+        # Initialize the widget
+        self.t_graph = TransferFunctionWidget(panel, -1,  "Transfer Function", size=wx.Size(300, 150))
+
+        mainSizer = wx.BoxSizer(wx.VERTICAL)
+        mainSizer.Add(panel , 1)
+        
+        self.SetSizer(mainSizer)
+        mainSizer.Layout()
+
+        # Bind the updated event
+        self.t_graph.Connect(-1, -1, wx.wxEVT_COMMAND_SLIDER_UPDATED, self.OnTGraphUpdate)
+
+    def OnTGraphUpdate(self, event):
+        # Use this to get an RGBA matrix
+        # self.t_graph.get_map()
+        print 'Yay new values!'
+
+if __name__ == '__main__':
+    app = wx.App()
+    frame = TGraphDemo(None, -1, 'Transfer Function Graph Demo', 
+                            wx.DefaultPosition, wx.Size(300,150))
+    frame.Show()
+    app.MainLoop()
+```
+
+### tubeRender.py
+```
+#!/usr/bin/env python
+  
+import vtk
+from vtk.util.colors import *
+from tgdataReader import tgdataReader
+import sys
+  
+stlineModel = tgdataReader( sys.argv[1] )
+
+# The tube is wrapped around the generated streamline. By varying the
+# radius by the inverse of vector magnitude, we are creating a tube
+# whose radius is proportional to mass flux (in incompressible flow).
+streamTube = vtk.vtkTubeFilter()
+streamTube.SetInput( stlineModel )
+streamTube.SetRadius(0.25)
+streamTube.SetNumberOfSides(12)
+#streamTube.SetVaryRadiusToVaryRadiusByVector()
+
+mapStreamTube = vtk.vtkPolyDataMapper()
+mapStreamTube.SetInputConnection(streamTube.GetOutputPort())
+#mapStreamTube.SetScalarRange(reader.GetOutput().GetPointData().GetScalars().GetRange())
+#mapStreamTube.SetScalarRange(reader.GetPolys().GetData().GetValueRange())
+streamTubeActor = vtk.vtkActor()
+streamTubeActor.SetMapper(mapStreamTube)
+streamTubeActor.GetProperty().BackfaceCullingOn()
+  
+# Now create the usual graphics stuff.
+ren = vtk.vtkRenderer()
+renWin = vtk.vtkRenderWindow()
+renWin.AddRenderer(ren)
+iren = vtk.vtkRenderWindowInteractor()
+iren.SetRenderWindow(renWin)
+  
+ren.AddActor(streamTubeActor)
+ren.SetBackground(slate_grey)
+  
+# Here we specify a particular view.
+'''
+aCamera = vtk.vtkCamera()
+aCamera.SetClippingRange(0.726079, 36.3039)
+aCamera.SetFocalPoint(2.43584, 2.15046, 1.11104)
+aCamera.SetPosition(-4.76183, -10.4426, 3.17203)
+aCamera.SetViewUp(0.0511273, 0.132773, 0.989827)
+aCamera.SetViewAngle(18.604)
+aCamera.Zoom(1.2)
+ren.SetActiveCamera(aCamera)
+'''
+
+renWin.SetSize(800, 600)
+  
+iren.Initialize()
+renWin.Render()
+iren.Start()
+```
+
+### ui_testbed.py
+```
+# -*- coding: utf-8 -*-
+
+# Form implementation generated from reading ui file 'testbed.ui'
+#
+# Created: Wed Nov  2 16:24:22 2011
+#      by: PyQt4 UI code generator 4.8.5
+#
+# WARNING! All changes made in this file will be lost!
+
+from PyQt4 import QtCore, QtGui
+import vtk
+from vtk.qt4.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+
+try:
+    _fromUtf8 = QtCore.QString.fromUtf8
+except AttributeError:
+    _fromUtf8 = lambda s: s
+
+class Ui_TestbedWindow(object):
+    def setupUi(self, TestbedWindow):
+        TestbedWindow.setObjectName(_fromUtf8("TestbedWindow"))
+        TestbedWindow.resize(789, 590)
+        TestbedWindow.setWindowTitle(QtGui.QApplication.translate("TestbedWindow", "MainWindow", None, QtGui.QApplication.UnicodeUTF8))
+        self.centralwidget = QtGui.QWidget(TestbedWindow)
+        self.centralwidget.setObjectName(_fromUtf8("centralwidget"))
+
+        self.renderView = QVTKRenderWindowInteractor(self.centralwidget)
+        self.renderView.setGeometry(QtCore.QRect(0, 0, 781, 541))
+        self.renderView.setObjectName(_fromUtf8("renderView"))
+
+        TestbedWindow.setCentralWidget(self.centralwidget)
+        self.menubar = QtGui.QMenuBar(TestbedWindow)
+        self.menubar.setGeometry(QtCore.QRect(0, 0, 789, 27))
+        self.menubar.setObjectName(_fromUtf8("menubar"))
+        self.menuData = QtGui.QMenu(self.menubar)
+        self.menuData.setTitle(QtGui.QApplication.translate("TestbedWindow", "Data", None, QtGui.QApplication.UnicodeUTF8))
+        self.menuData.setObjectName(_fromUtf8("menuData"))
+        TestbedWindow.setMenuBar(self.menubar)
+        self.statusbar = QtGui.QStatusBar(TestbedWindow)
+        self.statusbar.setObjectName(_fromUtf8("statusbar"))
+        TestbedWindow.setStatusBar(self.statusbar)
+        self.actionLoad = QtGui.QAction(TestbedWindow)
+        self.actionLoad.setCheckable(False)
+        self.actionLoad.setText(QtGui.QApplication.translate("TestbedWindow", "Load...", None, QtGui.QApplication.UnicodeUTF8))
+        self.actionLoad.setToolTip(QtGui.QApplication.translate("TestbedWindow", "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\" \"http://www.w3.org/TR/REC-html40/strict.dtd\">\n"
+"<html><head><meta name=\"qrichtext\" content=\"1\" /><style type=\"text/css\">\n"
+"p, li { white-space: pre-wrap; }\n"
+"</style></head><body style=\" font-family:\'Sans Serif\'; font-size:10pt; font-weight:400; font-style:normal;\">\n"
+"<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-style:italic;\">Load dataset</span></p></body></html>", None, QtGui.QApplication.UnicodeUTF8))
+        self.actionLoad.setShortcut(QtGui.QApplication.translate("TestbedWindow", "F2", None, QtGui.QApplication.UnicodeUTF8))
+        self.actionLoad.setObjectName(_fromUtf8("actionLoad"))
+        self.menuData.addAction(self.actionLoad)
+        self.menubar.addAction(self.menuData.menuAction())
+
+        self.retranslateUi(TestbedWindow)
+        QtCore.QMetaObject.connectSlotsByName(TestbedWindow)
+
+    def retranslateUi(self, TestbedWindow):
+        pass
+```
+
+### vmDTIRender.py
+```
+#!/bin/env python
+
+import vtk
+import PyQt4
+
+from PyQt4 import QtCore, QtGui
+from vtk.util.colors import *
+from vtk.qt4.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+
+from ui_testbed import Ui_TestbedWindow
+from imgVolRender import imgVolRender
+
+class MainWindow (QtGui.QMainWindow):
+	def __init__(self, dataset=None, parent=None):
+		super(MainWindow, self).__init__ (parent)
+		self.setWindowTitle( "GUItestbed for LegiDTI v1.0" )
+
+		self.m_ui = Ui_TestbedWindow()
+		self.m_ui.setupUi( self )
+		self.m_ui.statusbar.setStatusTip ( "ready to load" )
+		self.m_ui.renderView.Initialize()
+		self.m_ui.renderView.Start()
+
+		self.oldsz = None
+		self.imgVRender = imgVolRender(self)
+		self.dataset = dataset
+		self.render = None
+		self.lighting = True
+
+	def event(self, e):
+		if e.type == QtCore.QEvent.KeyPress and e.text() == "l":
+			self.lighting = not self.lighting
+		else:
+			return super(MainWindow, self).event(e)
+		return True
+
+	def resizeEvent(self, QResizeEvent):
+		if not self.oldsz:
+			self.oldsz = QResizeEvent.size()
+		else:
+			#sz = QResizeEvent.size() - QtCore.QSize(10, 3*self.m_ui.statusbar.size().height())
+			sz = QResizeEvent.size()
+			#osz = QResizeEvent.oldSize() 
+			osz = self.oldsz
+
+			wf = sz.width()*1.0/osz.width()
+			hf = sz.height()*1.0/osz.height()
+
+			orsz = self.m_ui.renderView.size()
+			orsz.setWidth ( orsz.width() * wf )
+			orsz.setHeight( orsz.height() * hf )
+			self.m_ui.renderView.resize( orsz )
+			'''
+			orect = self.m_ui.renderView.geometry()
+			rect = QtCore.QRect( orect.x() * wf, orect.y() * hf, orsz.width(), orsz.height() )
+			self.m_ui.renderView.setGeometry( rect )
+			'''
+
+			self.oldsz = sz
+
+	@QtCore.pyqtSlot()
+	def on_actionLoad_triggered(self):
+		#QtGui.QMessageBox.information(self, "Load...", "Load source dataset.")
+		fndata = QtGui.QFileDialog.getOpenFileName(filter="All (*.*);; NIfTI (*.nii *.nii.gz)")
+		print fndata
+		self.dataset = str(fndata)
+		self.draw()
+
+	def draw(self):
+		if self.render:
+			self.m_ui.renderView.GetRenderWindow().RemoveRenderer(self.render)
+		self.render = self.imgVRender.mount(self.dataset) 
+		self.render.SetBackground(slate_grey)
+		self.m_ui.renderView.GetRenderWindow().AddRenderer(self.render)
+		print "Numer of Volumes in the render: %d" % (self.render.VisibleVolumeCount()/2)
+
+	def show(self):
+		super(MainWindow, self).show()
+		self.draw()
+
+if __name__ == "__main__":
+	import sys
+	if len(sys.argv) < 2:
+		print >>sys.stderr, "No data provided, bailed out."
+		sys.exit(1)
+
+	app = QtGui.QApplication( sys.argv )
+
+	win = MainWindow(sys.argv[1])
+	win.show()
+
+	ret = app.exec_()
+	sys.exit( ret  )
+	
+
+#/* sts=8 ts=8 sw=80 tw=8 */
+```
+
+### vmDTIRender_GPU.py
+```
+#!/bin/env python
+
+import vtk
+import PyQt4
+
+from PyQt4 import QtCore, QtGui
+from vtk.util.colors import *
+from vtk.qt4.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+
+from ui_testbed import Ui_TestbedWindow
+from imgVolRender_GPU import imgVolRender
+
+class MainWindow (QtGui.QMainWindow):
+	def __init__(self, dataset=None, parent=None):
+		super(MainWindow, self).__init__ (parent)
+		self.setWindowTitle( "GUItestbed for LegiDTI v1.0" )
+
+		self.m_ui = Ui_TestbedWindow()
+		self.m_ui.setupUi( self )
+		self.m_ui.statusbar.setStatusTip ( "ready to load" )
+		self.m_ui.renderView.Initialize()
+		self.m_ui.renderView.Start()
+
+		self.oldsz = None
+		self.imgVRender = imgVolRender(self)
+		self.dataset = dataset
+		self.render = None
+		self.lighting = True
+
+	def event(self, e):
+		if e.type == QtCore.QEvent.KeyPress and e.text() == "l":
+			self.lighting = not self.lighting
+		else:
+			return super(MainWindow, self).event(e)
+		return True
+
+	def resizeEvent(self, QResizeEvent):
+		if not self.oldsz:
+			self.oldsz = QResizeEvent.size()
+		else:
+			#sz = QResizeEvent.size() - QtCore.QSize(10, 3*self.m_ui.statusbar.size().height())
+			sz = QResizeEvent.size()
+			#osz = QResizeEvent.oldSize() 
+			osz = self.oldsz
+
+			wf = sz.width()*1.0/osz.width()
+			hf = sz.height()*1.0/osz.height()
+
+			orsz = self.m_ui.renderView.size()
+			orsz.setWidth ( orsz.width() * wf )
+			orsz.setHeight( orsz.height() * hf )
+			self.m_ui.renderView.resize( orsz )
+			'''
+			orect = self.m_ui.renderView.geometry()
+			rect = QtCore.QRect( orect.x() * wf, orect.y() * hf, orsz.width(), orsz.height() )
+			self.m_ui.renderView.setGeometry( rect )
+			'''
+
+			self.oldsz = sz
+
+	@QtCore.pyqtSlot()
+	def on_actionLoad_triggered(self):
+		#QtGui.QMessageBox.information(self, "Load...", "Load source dataset.")
+		fndata = QtGui.QFileDialog.getOpenFileName(filter="All (*.*);; NIfTI (*.nii *.nii.gz)")
+		print fndata
+		self.dataset = str(fndata)
+		self.draw()
+
+	def draw(self):
+		if self.render:
+			self.m_ui.renderView.GetRenderWindow().RemoveRenderer(self.render)
+		self.render = self.imgVRender.mount(self.dataset) 
+		self.render.SetBackground(slate_grey)
+		self.m_ui.renderView.GetRenderWindow().AddRenderer(self.render)
+		print "Numer of Volumes in the render: %d" % (self.render.VisibleVolumeCount()/2)
+
+	def show(self):
+		super(MainWindow, self).show()
+		self.draw()
+
+if __name__ == "__main__":
+	import sys
+	if len(sys.argv) < 2:
+		print >>sys.stderr, "No data provided, bailed out."
+		sys.exit(1)
+
+	app = QtGui.QApplication( sys.argv )
+
+	win = MainWindow(sys.argv[1])
+	win.show()
+
+	ret = app.exec_()
+	sys.exit( ret  )
+	
+
+#/* sts=8 ts=8 sw=80 tw=8 */
+```
+
+### vmDTIRender_fixedpoint.py
+```
+#!/bin/env python
+
+import vtk
+import PyQt4
+
+from PyQt4 import QtCore, QtGui
+from vtk.util.colors import *
+from vtk.qt4.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+
+from ui_testbed import Ui_TestbedWindow
+from imgVolRender_fixedpoint import imgVolRender
+
+class MainWindow (QtGui.QMainWindow):
+	def __init__(self, dataset=None, parent=None):
+		super(MainWindow, self).__init__ (parent)
+		self.setWindowTitle( "GUItestbed for LegiDTI v1.0" )
+
+		self.m_ui = Ui_TestbedWindow()
+		self.m_ui.setupUi( self )
+		self.m_ui.statusbar.setStatusTip ( "ready to load" )
+		self.m_ui.renderView.Initialize()
+		self.m_ui.renderView.Start()
+
+		self.oldsz = None
+		self.imgVRender = imgVolRender(self)
+		self.dataset = dataset
+		self.render = None
+		self.lighting = True
+
+	def event(self, e):
+		if e.type == QtCore.QEvent.KeyPress and e.text() == "l":
+			self.lighting = not self.lighting
+		else:
+			return super(MainWindow, self).event(e)
+		return True
+
+	def resizeEvent(self, QResizeEvent):
+		if not self.oldsz:
+			self.oldsz = QResizeEvent.size()
+		else:
+			#sz = QResizeEvent.size() - QtCore.QSize(10, 3*self.m_ui.statusbar.size().height())
+			sz = QResizeEvent.size()
+			#osz = QResizeEvent.oldSize() 
+			osz = self.oldsz
+
+			wf = sz.width()*1.0/osz.width()
+			hf = sz.height()*1.0/osz.height()
+
+			orsz = self.m_ui.renderView.size()
+			orsz.setWidth ( orsz.width() * wf )
+			orsz.setHeight( orsz.height() * hf )
+			self.m_ui.renderView.resize( orsz )
+			'''
+			orect = self.m_ui.renderView.geometry()
+			rect = QtCore.QRect( orect.x() * wf, orect.y() * hf, orsz.width(), orsz.height() )
+			self.m_ui.renderView.setGeometry( rect )
+			'''
+
+			self.oldsz = sz
+
+	@QtCore.pyqtSlot()
+	def on_actionLoad_triggered(self):
+		#QtGui.QMessageBox.information(self, "Load...", "Load source dataset.")
+		fndata = QtGui.QFileDialog.getOpenFileName(filter="All (*.*);; NIfTI (*.nii *.nii.gz)")
+		print fndata
+		self.dataset = str(fndata)
+		self.draw()
+
+	def draw(self):
+		if self.render:
+			self.m_ui.renderView.GetRenderWindow().RemoveRenderer(self.render)
+		self.render = self.imgVRender.mount(self.dataset) 
+		self.render.SetBackground(slate_grey)
+		self.m_ui.renderView.GetRenderWindow().AddRenderer(self.render)
+		print "Numer of Volumes in the render: %d" % (self.render.VisibleVolumeCount()/2)
+
+	def show(self):
+		super(MainWindow, self).show()
+		self.draw()
+
+if __name__ == "__main__":
+	import sys
+	if len(sys.argv) < 2:
+		print >>sys.stderr, "No data provided, bailed out."
+		sys.exit(1)
+
+	app = QtGui.QApplication( sys.argv )
+
+	win = MainWindow(sys.argv[1])
+	win.show()
+
+	ret = app.exec_()
+	sys.exit( ret  )
+	
+
+#/* sts=8 ts=8 sw=80 tw=8 */
+```

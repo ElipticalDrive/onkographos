@@ -1,0 +1,199 @@
+--- v001.md
++++ v002.md
+@@ -36,7 +36,7 @@
+ 
+ **Parameters:**
+-*   $M$: Number of samples per pixel. Typical values depend on noise tolerance; low sample counts are used for iterative optimization [S1, unofficial][S2].
++*   $M$: Number of samples per pixel. Low sample counts are used for faster iterations in optimization [S1, unofficial].
+ *   $K$: Maximum number of bounces. Not given in the sources.
+-*   $\alpha$: Albedo parameter. Not given in the sources.
++*   $\alpha$: Albedo parameter. The method often uses a modified lower albedo $\alpha_s < \alpha_t$ to reduce noise variance [S3].
+ 
+ **Numbered Steps:**
+@@ -45,5 +45,5 @@
+     a. Sample a path $\tilde{p}_i$ from the camera through the scene to a light source, recording bounce points $x_0, \dots, x_K$ and directions $\omega_0, \dots, \omega_K$ [S2].
+     b. Compute the path contribution $f(\tilde{p}_i)$ using the product of weights $w_k$ and scattering terms $g(\omega_{k-1}, \omega_k)$ as defined above [S2].
+-    c. Compute the gradient of the contribution with respect to albedo $\alpha$, $\frac{\partial f(\tilde{p}_i)}{\partial \alpha}$. This is done using automatic differentiation (autodiff) tools (e.g., Eigen C++ library) to compute both radiance and gradient simultaneously along the sampled path [S2].
++    c. Compute the gradient of the contribution with respect to albedo $\alpha$, $\frac{\partial f(\tilde{p}_i)}{\partial \alpha}$, using automatic differentiation tools (e.g., Eigen C++ library) to compute both radiance and gradient simultaneously along the sampled path [S2].
+     d. Compute the importance sampling weight $1/\text{pdf}(\tilde{p}_i)$ [S2].
+     e. Update the pixel accumulators:
+@@ -57,103 +57,83 @@
+ **Pseudocode:**
+ ```python
++import math
++
++PI = math.pi
++
+ def differentiable_volumetric_path_tracing(camera, scene, num_samples):
+-    # Initialize accumulators for the pixel
+     radiance_sum = 0.0
+     gradient_sum = 0.0
+-    
++
+     for i in range(num_samples):
+         # Sample a path from camera to light
+-        # Returns sequence of points x[0..K] and directions omega[0..K]
+-        path = sample_path(camera, scene)
+-        K = len(path.points) - 1
+-        
+-        # Compute path contribution and its gradient w.r.t. albedo alpha
+-        # Using automatic differentiation to compute both simultaneously
+-        # f is the unnormalized contribution
+-        # df_dalpha is the derivative of f w.r.t. alpha
+-        f, df_dalpha = compute_path_contribution_and_gradient(path, scene)
+-        
++        # Path sampling strategy (e.g., delta tracking) is not specified in the sources [G]
++        path_points = []
++        path_dirs = []
++        # ... path generation logic ...
++        # For self-containment, assume path_points and path_dirs are populated
++        # K is the number of bounces
++        K = len(path_points) - 1
++
++        alpha = scene.albedo
++        f = 1.0
++        df_dalpha = 0.0
++
++        for k in range(1, K + 1):
++            x_prev = path_points[k-1]
++            x_curr = path_points[k]
++            w_prev = path_dirs[k-1]
++            w_curr = path_dirs[k]
++
++            # Compute transmittance Tr(x_{k-1} <-> x_k)
++            # Assuming exponential transmittance: Tr = exp(-sigma_t * distance)
++            dist = math.sqrt(sum((a-b)**2 for a, b in zip(x_curr, x_prev)))
++            sigma_t = scene.extinction_coefficient(x_curr)
++            tr = math.exp(-sigma_t * dist)
++
++            # Determine weight w_k
++            # is_in_medium check is not specified in the sources [G]
++            in_medium = True # Placeholder for medium check logic
++            if in_medium:
++                w_k = alpha * sigma_t * tr
++                dw_k_dalpha = sigma_t * tr
++            else:
++                w_k = tr
++                dw_k_dalpha = 0.0
++
++            # Compute scattering term g
++            if in_medium:
++                g = scene.phase_function(w_prev, w_curr)
++                dg_dalpha = 0.0
++            else:
++                bsdf = scene.bsdf(x_curr, w_prev, w_curr)
++                normal = scene.surface_normal(x_curr)
++                cos_theta = max(0.0, sum(n*d for n, d in zip(normal, w_curr)))
++                g = bsdf * cos_theta / (4.0 * PI)
++                dg_dalpha = 0.0
++
++            # Update contribution and gradient
++            # f_new = f_old * w_k * g
++            # df_new = df_old * w_k * g + f_old * dw_k_dalpha * g
++            f_new = f * w_k * g
++            df_dalpha_new = df_dalpha * w_k * g + f * dw_k_dalpha * g
++
++            f = f_new
++            df_dalpha = df_dalpha_new
++
+         # Compute PDF of the sampled path
+-        pdf = compute_path_pdf(path, scene)
+-        
+-        # Avoid division by zero
+-        if pdf == 0:
++        # Path PDF computation is not specified in the sources [G]
++        pdf = 1.0 # Placeholder for path PDF calculation
++
++        if pdf == 0.0:
+             continue
+-            
+-        # Weighted contribution
++
+         weight = 1.0 / pdf
+-        
+-        # Accumulate
+         radiance_sum += f * weight
+         gradient_sum += df_dalpha * weight
+-        
+-    # Average over samples
++
+     radiance = radiance_sum / num_samples
+     gradient = gradient_sum / num_samples
+-    
+     return radiance, gradient
+-
+-def compute_path_contribution_and_gradient(path, scene):
+-    # Initialize contribution and its gradient
+-    # Using autodiff, we track operations on alpha
+-    alpha = scene.albedo
+-    f = 1.0
+-    df_dalpha = 0.0
+-    
+-    for k in range(1, len(path.points)):
+-        x_prev = path.points[k-1]
+-        x_curr = path.points[k]
+-        omega_prev = path.directions[k-1]
+-        omega_curr = path.directions[k]
+-        
+-        # Compute transmittance
+-        tr = compute_transmittance(x_prev, x_curr, scene)
+-        
+-        # Determine weight w_k based on whether x_curr is in medium or surface
+-        if is_in_medium(x_curr, scene):
+-            # w_k = alpha * sigma_t * Tr
+-            sigma_t = scene.extinction_coefficient(x_curr)
+-            w_k = alpha * sigma_t * tr
+-            # dw_k/dalpha = sigma_t * Tr
+-            dw_k_dalpha = sigma_t * tr
+-        else:
+-            # w_k = Tr
+-            w_k = tr
+-            dw_k_dalpha = 0.0
+-            
+-        # Compute scattering term g
+-        if is_in_medium(x_curr, scene):
+-            # g = p(omega_prev, omega_curr)
+-            g = scene.phase_function(omega_prev, omega_curr)
+-            dg_dalpha = 0.0
+-        else:
+-            # g = rho(omega_prev, omega_curr) * cos(theta) / 4pi
+-            bsdf = scene.bsdf(x_curr, omega_prev, omega_curr)
+-            normal = scene.surface_normal(x_curr)
+-            cos_theta = max(0.0, dot(normal, omega_curr))
+-            g = bsdf * cos_theta / (4.0 * PI)
+-            dg_dalpha = 0.0
+-            
+-        # Update contribution f = f * w_k * g
+-        # df_dalpha = df_dalpha * w_k * g + f * dw_k_dalpha * g
+-        # Note: g is independent of alpha, so dg_dalpha is 0
+-        
+-        f = f * w_k * g
+-        df_dalpha = df_dalpha * w_k * g + f * dw_k_dalpha * g # Wait, f is updated after?
+-        # Correct update:
+-        # Let f_old = f, df_old = df_dalpha
+-        # f_new = f_old * w_k * g
+-        # df_new = df_old * w_k * g + f_old * dw_k_dalpha * g
+-        
+-        # Re-calculate to avoid using updated f in derivative term
+-        f_new = f * w_k * g
+-        df_dalpha_new = df_dalpha * w_k * g + f * dw_k_dalpha * g
+-        
+-        f = f_new
+-        df_dalpha = df_dalpha_new
+-        
+-    return f, df_dalpha
+ ```
+-*Note: The pseudocode above uses a simplified autodiff logic. In practice, automatic differentiation libraries handle the chain rule automatically if the operations are recorded in a computational graph [S2]. The explicit derivative calculation shown is for illustration of the mathematical dependency.*
+ 
+ **Edge Cases and Pitfalls:**
+@@ -177,8 +157,8 @@
+ *   **Limitations:** High variance in gradient estimates, especially for high albedo media; assumptions of exponential transmittance; difficulty with ideal specular surfaces [S1, unofficial][S2].
+ *   **When to use:** When gradients of radiance with respect to scene parameters (like albedo) are needed for inverse rendering or optimization in scenes with participating media [S1, unofficial][S2].
+-*   **When not to use:** When only radiance estimation is needed (use standard VPT); when non-exponential transmittance is present without modification; when real-time performance is critical and noise cannot be tolerated [S1, unofficial][S2].
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-The method is based on the "Differential Theory of Radiative Transfer," introduced in a paper by [S1, unofficial]. It was developed to enable inverse rendering in participating media by providing unbiased Monte Carlo estimators for scene derivatives. The technique has been applied to imaging-inspired and design-inspired inverse rendering examples, optimizing scene parameters such as material properties [S1, unofficial]. Another related work by [S2] focuses on efficient participating media rendering by using differentiable volumetric path tracing to compute gradients with respect to albedo for temporal denoising in video rendering.
++The method is based on the "Differential Theory of Radiative Transfer," introduced in a paper by [S1, unofficial]. It was developed to enable inverse rendering in participating media by providing unbiased Monte Carlo estimators for scene derivatives [S1, unofficial]. The technique has been applied to imaging-inspired and design-inspired inverse rendering examples, optimizing scene parameters such as material properties [S1, unofficial]. Another related work by [S2] focuses on efficient participating media rendering by using differentiable volumetric path tracing to compute gradients with respect to albedo for temporal denoising in video rendering [S2].
+ 
+ ## Sources

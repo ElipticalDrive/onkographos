@@ -1,0 +1,190 @@
+--- v009.md
++++ v010.md
+@@ -4,84 +4,111 @@
+ 
+ ## Overview
+-Backward projection (also known as backward mapping) is an image-order rendering strategy that iterates over all pixels of the output image to determine the contributions of the volume integral to the current pixel [S2, unofficial]. It solves the problem of mapping 3D volumetric data to a 2D image plane by casting rays from the camera through each pixel into the volume [S2, unofficial]. It is distinguished from its siblings, such as [Front-to-Back Layer Traversal](1212-front-to-back-layer-traversal.md), by its explicit iteration over the output space (pixels) rather than the input space (voxels), which naturally aligns with rasterization hardware and allows for efficient early termination when opacity thresholds are met [S2, unofficial].
++Backward projection (also known as backward mapping or image-order rendering) is a volume rendering strategy that iterates over the output image pixels to determine their color and opacity contributions from the 3D volume data [S2, unofficial]. It solves the problem of mapping 3D volumetric information to a 2D image plane by casting rays from the camera through each pixel into the volume [S2, unofficial]. It is distinguished from forward projection methods by processing the image buffer directly, allowing for efficient early termination when a ray becomes fully opaque, a key advantage for standard absorption-based rendering [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volume dataset $V$, camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$ per pixel), and transfer functions for opacity $\alpha$ and color $c$.
+-*   **Output:** A 2D image buffer $I$ with dimensions $H \times W$.
++- Input: A 3D volume dataset $V$ (scalar or vector values), camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$ per pixel), and transfer functions for opacity $\alpha$ and color $c$.
++- Output: A 2D image buffer $I$ with dimensions $H \times W$ and channels (e.g., RGB).
+ 
+ **Data Structures:**
+-*   **Volume $V$:** Typically stored as a 3D array or grid. Access is performed via trilinear interpolation or nearest-neighbor sampling based on the ray's position.
+-*   **Image Buffer $I$:** A 2D array of size $H \times W \times C$ (where $C$ is channels, e.g., 3 for RGB).
++- Volume $V$: Stored as a 3D array or grid. Access is typically via trilinear interpolation for non-integer coordinates.
++- Image Buffer $I$: A 2D array of size $H \times W \times C$, where $C$ is the number of color channels.
+ 
+-**Numbered Steps:**
+-1.  Initialize the image buffer $I$ to zero.
+-2.  For each pixel $(i, j)$ in the image grid ($0 \le i < H, 0 \le j < W$):
+-    a.  Compute the ray origin $\mathbf{o}_{i,j}$ and direction $\mathbf{d}_{i,j}$ corresponding to pixel $(i, j)$.
+-    b.  Initialize the accumulated color $C_{acc} = 0$ and accumulated opacity $\alpha_{acc} = 0$.
+-    c.  Traverse the ray through the volume. For each sample point $\mathbf{x}_k$ along the ray:
+-        i.  Sample the volume density $\rho_k = V(\mathbf{x}_k)$.
+-        ii. Map $\rho_k$ to opacity $\alpha_k$ and color $c_k$ using transfer functions.
+-        iii. Apply the front-to-back compositing equation:
+-        $$ C_{acc} = C_{acc} + c_k \cdot \alpha_k \cdot (1 - \alpha_{acc}) $$
+-        $$ \alpha_{acc} = \alpha_{acc} + \alpha_k \cdot (1 - \alpha_{acc}) $$
+-        iv. If $\alpha_{acc} \ge 1.0$ (or a predefined threshold), terminate the ray traversal for this pixel [S2, unofficial].
+-    d.  Store $C_{acc}$ in $I[i, j]$.
++**Steps:**
++1. Initialize the image buffer $I$ to zero (or background color).
++2. For each pixel $(i, j)$ in the image grid ($0 \le i < H, 0 \le j < W$):
++    a. Compute the ray origin $\mathbf{o}_{i,j}$ and direction $\mathbf{d}_{i,j}$ based on camera projection matrices.
++    b. Determine the entry and exit points of the ray with the volume bounding box. Let the parametric range be $[t_{start}, t_{end}]$.
++    c. Initialize front-to-back accumulation variables: accumulated opacity $\alpha_{acc} = 0$, accumulated color $C_{acc} = (0, 0, 0)$.
++    d. Sample the volume along the ray from $t_{start}$ to $t_{end}$ with step size $\Delta t$. For each sample point $\mathbf{x}(t)$:
++        i. Retrieve the volume value $v = V(\mathbf{x}(t))$ using interpolation.
++        ii. Compute opacity $\alpha = \alpha(v)$ and color $c = c(v)$ using transfer functions.
++        iii. Update accumulation:
++        $$ \beta = \alpha \cdot (1 - \alpha_{acc}) $$
++        $$ C_{acc} = C_{acc} + c \cdot \beta $$
++        $$ \alpha_{acc} = \alpha_{acc} + \beta $$
++        iv. If $\alpha_{acc} \ge 1 - \epsilon$ (where $\epsilon$ is a small threshold, e.g., $10^{-4}$), terminate the ray early [S2, unofficial].
++    e. Store the final accumulated color $C_{acc}$ in $I[i, j]$.
++
++**Formulas:**
++The standard front-to-back compositing equation for a ray is:
++$$ I(\hat{x}) = \sum_{l=1}^{N} c(x_l) \alpha_l \prod_{j=1}^{l-1} (1 - \alpha_j) $$
++where $c(x_l)$ is the color at sample $l$, $\alpha_l$ is the opacity at sample $l$, and $N$ is the number of samples [S2, unofficial].
++
++**Parameters:**
++- $\Delta t$: Step size along the ray. Typical values depend on volume resolution and desired quality (e.g., 1 voxel spacing or sub-voxel steps).
++- $\epsilon$: Early termination threshold. Typical value: $10^{-4}$ to $10^{-2}$.
++
++**Edge Cases and Pitfalls:**
++- **Precision:** Floating-point precision errors in ray marching can cause gaps or overlaps if step sizes are not aligned with voxel boundaries.
++- **Boundaries:** Rays that do not intersect the volume must be handled to avoid out-of-bounds memory access.
++- **Degenerate Input:** Empty volumes or volumes with zero opacity everywhere result in a black or background-colored image.
+ 
+ **Pseudocode:**
+ ```python
+-def backward_projection(volume, camera, height, width):
+-    # Initialize output image
+-    image = zeros((height, width, 3))
++def backward_projection(volume, camera, height, width, channels, transfer_func, step_size=1.0, epsilon=1e-4):
++    """
++    Perform backward projection volume rendering.
++    
++    Args:
++        volume: 3D array of shape (D, H_v, W_v) containing scalar values.
++        camera: Object with methods get_ray_origin(i, j) and get_ray_direction(i, j).
++        height: Integer, height of the output image.
++        width: Integer, width of the output image.
++        channels: Integer, number of color channels (e.g., 3 for RGB).
++        transfer_func: Function that takes a scalar value and returns (color, opacity).
++        step_size: Float, step size along the ray in world units.
++        epsilon: Float, threshold for early termination.
++        
++    Returns:
++        image: 2D array of shape (height, width, channels).
++    """
++    image = np.zeros((height, width, channels), dtype=np.float32)
+     
+     for i in range(height):
+         for j in range(width):
+-            # 1. Determine ray for pixel (i, j)
+-            ray_origin, ray_direction = camera.get_ray(i, j)
++            # Get ray parameters for this pixel
++            origin = camera.get_ray_origin(i, j)
++            direction = camera.get_ray_direction(i, j)
+             
+-            accumulated_color = [0.0, 0.0, 0.0]
+-            accumulated_alpha = 0.0
++            # Compute ray-volume intersection
++            t_min, t_max = compute_ray_box_intersection(origin, direction, volume.bounds)
+             
+-            # 2. Traverse ray through volume
+-            # Note: Exact step size and bounds depend on volume geometry
+-            t = 0.0
+-            while t < max_distance:
+-                # Sample position
+-                pos = ray_origin + t * ray_direction
++            if t_min > t_max:
++                continue  # Ray does not intersect volume
++            
++            # Initialize accumulation
++            acc_color = np.zeros(channels, dtype=np.float32)
++            acc_opacity = 0.0
++            
++            # March along the ray
++            t = t_min
++            while t <= t_max:
++                # Sample point in world coordinates
++                point = origin + t * direction
+                 
+-                # Check if pos is inside volume bounds
+-                if not volume.contains(pos):
+-                    break
++                # Interpolate volume value at point
++                # Note: Implementation of trilinear interpolation is assumed
++                val = interpolate_volume(volume, point)
+                 
+-                # Sample volume value
+-                density = volume.sample_trilinear(pos)
+-                
+-                # Map to color and opacity
+-                color, alpha = transfer_function(density)
++                # Get color and opacity from transfer function
++                color, opacity = transfer_func(val)
+                 
+                 # Front-to-back compositing
+-                weight = alpha * (1.0 - accumulated_alpha)
+-                accumulated_color = accumulated_color + color * weight
+-                accumulated_alpha = accumulated_alpha + weight
++                beta = opacity * (1.0 - acc_opacity)
++                acc_color = acc_color + color * beta
++                acc_opacity = acc_opacity + beta
+                 
+                 # Early termination
+-                if accumulated_alpha >= 1.0:
++                if acc_opacity >= 1.0 - epsilon:
+                     break
+                 
+                 t += step_size
+             
+-            image[i, j] = accumulated_color
++            # Store result
++            image[i, j, :] = acc_color
+             
+     return image
+ ```
+-
+-**Parameters:**
+-*   **Step Size:** The distance between samples along the ray. Typical values depend on the volume resolution and desired quality (e.g., 1 voxel width or sub-voxel). Not given in the sources.
+-*   **Threshold:** The opacity value at which to terminate the ray. Typically 1.0 or 0.99. Not given in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Floating-point precision errors in ray traversal can cause gaps or overlaps in the volume sampling.
+-*   **Boundaries:** Rays may miss the volume entirely or intersect it partially. Proper bounding box checks are required.
+-*   **Degenerate Input:** If the volume is empty or the camera is inside the volume, special handling is needed. Not given in the sources.
+ 
+ ## Subtopics
+@@ -99,12 +126,19 @@
+ Circular Integral Convolution generates a blurred image from a scan by integrating ray values across all angles for each point, effectively filtering the true image with a $1/r$-weighted kernel. It serves as a pre-processing step for deconvolution-based reconstruction rather than a full reconstruction method itself.
+ 
+-### Visibility Thresholding for Scale Backprojection
++#### Visibility Thresholding for Scale Backprojection
+ Visibility Thresholding for Scale Backprojection is a method to prevent scale information from being backprojected to voxels that do not correspond to the target feature (e.g., vessels), improving classification accuracy by using a visibility parameter [S4]. A voxel is determined to be not visible from the Laplacian of Gaussian (LoG) extrema if, at some point along the ray connecting the two positions, the intensity is below the threshold $\tau$ [S4]. Alternatively, thresholding can be based on gradient magnitude [S4]. The parameter $\tau$ (tau) is a visibility parameter used to control the sensitivity of the visibility test, and it is a thresholding value based on scalar value or gradient magnitude [S4]. This is a fast approximation; more accurate results can be obtained with a region growing approach added as a post-process based on the initial size-based classification [S4].
+ 
+ ## Operating characteristics
+-Backward projection is generally more efficient for rendering than forward projection when the output image resolution is lower than the volume resolution, as it avoids writing to scattered memory locations [S2, unofficial]. It allows for early termination, which can significantly reduce computation time for opaque regions [S2, unofficial]. However, it may suffer from aliasing if the sampling rate is insufficient [S2, unofficial]. The method is well-suited for hardware acceleration due to its regular memory access patterns [S2, unofficial].
++- **Time Complexity:** $O(H \cdot W \cdot N)$, where $H$ and $W$ are image dimensions and $N$ is the number of samples per ray. Early termination can reduce the average $N$.
++- **Memory Complexity:** $O(H \cdot W \cdot C)$ for the image buffer, plus $O(V)$ for the volume data.
++- **Measured Performance:** Performance depends heavily on the efficiency of ray-volume intersection and interpolation. Hardware-accelerated implementations (e.g., GPU) can achieve interactive frame rates for moderate resolutions [S1, unofficial].
++- **Scaling:** Scales linearly with image resolution and volume depth. Parallelization is straightforward across pixels.
++- **Strengths:** Simple implementation, efficient early termination for opaque regions, natural fit for hardware rasterization pipelines.
++- **Limitations:** Can suffer from aliasing if step size is too large; requires careful handling of ray-volume intersections.
++- **When to Use:** Standard volume rendering where visual accuracy and performance are balanced, especially when early termination is beneficial.
++- **When Not to Use:** When forward projection is required (e.g., for reconstruction algorithms) or when specific geometric primitives need to be projected directly.
+ 
+ ## Background
+-Backward projection, also known as backward mapping, was introduced as one of two algorithms for high quality and efficient texture mapping featuring backward and forward processing orders [S1, unofficial]. It is also referred to as image-order algorithms [S2, unofficial]. The method has been widely used in volume rendering, with notable contributions from Levoy (1988), Sabella (1988), and Danskin and Hanrahan (1992) [S2, unofficial]. It is a fundamental technique in computer graphics for rendering 3D data to 2D images.
++Backward projection, also known as backward mapping, was introduced as one of two algorithms for high-quality and efficient texture mapping featuring backward and forward processing orders [S1, unofficial]. It is based on the work of Levoy (1988), Sabella (1988), and Danskin and Hanrahan (1992) [S2, unofficial]. The method is widely used in volume rendering frameworks for its simplicity and effectiveness in producing visually accurate results [S2, unofficial].
+ 
+ ## Sources

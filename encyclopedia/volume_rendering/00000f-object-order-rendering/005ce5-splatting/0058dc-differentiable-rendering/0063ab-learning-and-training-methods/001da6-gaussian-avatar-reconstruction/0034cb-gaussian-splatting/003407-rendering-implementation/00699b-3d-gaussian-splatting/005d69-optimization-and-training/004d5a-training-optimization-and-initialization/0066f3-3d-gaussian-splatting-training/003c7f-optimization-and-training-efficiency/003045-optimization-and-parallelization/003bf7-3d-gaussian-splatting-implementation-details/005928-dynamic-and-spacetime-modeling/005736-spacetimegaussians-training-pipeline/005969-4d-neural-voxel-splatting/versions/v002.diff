@@ -1,0 +1,326 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-4D Neural Voxel Splatting (4D-NVS) is a dynamic scene rendering method that combines voxel-based representations with neural Gaussian splatting to decouple spatial structure from temporal dynamics [S1]. Unlike static methods like Scaffold-GS or methods that replicate Gaussians across time, 4D-NVS generates time-varying Gaussians on-demand from persistent voxel anchors using a unified deformation field, reducing memory complexity from $O(N \cdot T)$ to $O(fV + F)$ [S1]. This approach enables real-time rendering of dynamic scenes with significantly lower memory consumption and faster training times compared to existing radiance-field optimization techniques [S1].
++4D Neural Voxel Splatting (4D-NVS) is a dynamic scene rendering method that combines voxel-based representations with neural Gaussian splatting to decouple spatial structure from temporal dynamics [S1]. It generates neural Gaussians on-demand from persistent voxel anchors and applies unified deformations via a HexPlane encoder, reducing memory complexity to $O(fV + F)$ compared to the $O(N \cdot T)$ scaling of replicating Gaussians across timestamps [S1]. Unlike Scaffold-GS which generates static Gaussians, 4D-NVS produces time-varying Gaussians through learned temporal features, enabling real-time rendering with significantly lower memory consumption [S1].
+ 
+ ## How it works
+@@ -12,18 +12,8 @@
+ 
+ **Data Structures:**
+-1.  **Neural Voxels:** A 4D voxel grid. Each voxel $v$ has a center position $x_v \in \mathbb{R}^3$, a spatial extent (scale factor) $l_v \in \mathbb{R}^3$, and a learnable feature vector $f_v \in \mathbb{R}^{32}$ [S1].
+-2.  **Gaussian Offsets:** For each voxel, $k$ learnable offset vectors $O_i \in \mathbb{R}^3$ ($i=0 \dots k-1$) define the relative positions of spawned Gaussians [S1].
+-3.  **HexPlane Grids:** A decomposition of the 4D space into 2D planes (XY, XZ, YZ, XT, YT, ZT) with specific resolutions (e.g., [64, 64, 64, 150] for DyNeRF) and scale multipliers [1, 2] [S1].
+-4.  **Refinement Stack:** A list of problematic viewpoints with metadata: failure type (quality vs. gradient), severity score, and temporal consistency flags [S1].
+-
+-**Parameters:**
+-*   $k$: Number of Gaussians per neural voxel. Typical value: 10 [S1].
+-*   $f_v$: Feature dimension of the neural voxel. Type: $\mathbb{R}^{32}$ [S1].
+-*   $\gamma$: PSNR threshold decay factor. Starts at 0.05, decays to 0.02 [S1].
+-*   Momentum for EMA: 0.4 [S1].
+-*   Densification threshold $\tau_g$: 0.0002 (coarse), 0.0001 (refinement) [S1].
+-*   Opacity threshold $\tau_\alpha$: 0.05 (coarse), 0.03 (refinement) [S1] [G].
+-*   Learning rates: Gaussian offsets 0.01, color MLP 0.008, opacity MLP 0.002, rotation/scaling MLPs 0.004, HexPlane grids 0.0016, deformation MLPs 0.00016 [S1]. All decay to 1/10 by iteration 14,000 [S1].
+-*   Loss weights: Volume regularization $\lambda_{vol} = 0.015$, Total variation $\lambda_{tv} = 0.0002$ [S1].
++1.  **Neural Voxels:** A 4D voxel grid. Each voxel $v$ has a center position $x_v \in \mathbb{R}^3$, a spatial extent (scale factor) $l_v \in \mathbb{R}^3$, and a learnable feature vector $f_v \in \mathbb{R}^{f_v}$ [S1]. The feature dimension $f_v$ is 32 [S1].
++2.  **Gaussian Offsets:** For each voxel, $k$ learnable offset vectors $O_i \in \mathbb{R}^3$ for $i=0,\dots,k-1$ [S1].
++3.  **HexPlane Grids:** A decomposition of the 4D space into 2D planes (XY, XZ, YZ, XT, YT, ZT) with specific resolutions [S1].
++4.  **Refinement Stack:** Stores metadata for problematic viewpoints, including failure type (quality vs. gradient), severity score, and temporal consistency flags [S1].
+ 
+ **Numbered Steps:**
+@@ -31,5 +21,5 @@
+ 1.  **Initialization:**
+     *   Perform COLMAP initialization from the first frame (for Neu3D) or 200 random frames (for HyperNeRF) to yield 5,000–20,000 initial points [S1].
+-    *   Distribute voxel centers to ensure comprehensive spatial coverage using the sparse point cloud [S1].
++    *   Distribute voxel centers to ensure comprehensive spatial coverage using the sparse point cloud $P \in \mathbb{R}^{M \times 3}$ and voxel size $\epsilon$: $V = \{ \lfloor p/\epsilon \rfloor \cdot \epsilon \mid p \in P \}$ [S1].
+     *   Train the scene using Scaffold-GS for 3,000 iterations with mixed timestamp samples to establish a foundational geometric representation without temporal deformation [S1].
+ 
+@@ -40,176 +30,137 @@
+ 3.  **Neural Gaussian Generation:**
+     *   For each visible voxel $v$, generate $k$ neural Gaussians [S1].
+-    *   Compute Gaussian positions: $\mu_i = x_v + O_i \cdot l_v$ for $i = 0, \dots, k-1$ [S1].
+-    *   Decode attributes using dedicated MLPs taking anchor features $f_v$, viewing distance $\delta_{vc}$, and directional vector $d_{vc}$:
+-        $$ \{\alpha_0 \dots \alpha_{k-1}\} = F_\alpha(f_v, \delta_{vc}, d_{vc}) $$
+-        $$ \{c_0 \dots c_{k-1}\} = F_c(f_v, \delta_{vc}, d_{vc}) $$
+-        $$ \{s_0 \dots s_{k-1}\} = F_s(f_v, \delta_{vc}, d_{vc}) $$
+-        $$ \{r_0 \dots r_{k-1}\} = F_r(f_v, \delta_{vc}, d_{vc}) $$
++    *   Compute positions: $\mu_i = x_v + O_i \cdot l_v$ for $i=0,\dots,k-1$ [S1].
++    *   Decode attributes using dedicated MLPs taking anchor features $f_v$, viewing distance $\delta_{vc}$, and directional vector $\hat{d}_{vc}$ as input [S1]:
++        $$ \{\alpha_0,\dots,\alpha_{k-1}\} = F_\alpha(f_v, \delta_{vc}, \hat{d}_{vc}) $$
++        $$ \{c_0,\dots,c_{k-1}\} = F_c(f_v, \delta_{vc}, \hat{d}_{vc}) $$
++        $$ \{s_0,\dots,s_{k-1}\} = F_s(f_v, \delta_{vc}, \hat{d}_{vc}) $$
++        $$ \{r_0,\dots,r_{k-1}\} = F_r(f_v, \delta_{vc}, \hat{d}_{vc}) $$
+         where $F_\alpha, F_c, F_s, F_r$ are MLPs for opacity, color, scale, and rotation respectively [S1].
+ 
+-4.  **Deformation (HexPlane Encoder):**
+-    *   Extract features from HexPlane grids [S1].
+-    *   Integrate features using a shallow network (MLP) $\phi_d$: $f_d = \phi_d(f_h)$, where $f_h$ are input features and $f_d$ are integrated features [S1].
++4.  **Deformation (Selective Strategy):**
++    *   Integrate HexPlane features $f_h$ into integrated features $f_d$ using a shallow network $\phi_d$: $f_d = \phi_d(f_h)$ [S1].
+     *   Predict offsets using single-layer MLPs $\phi_x, \phi_r, \phi_s$:
+-        $$ \Delta\mu = \phi_x(f_d) $$
+-        $$ \Delta r = \phi_r(f_d) $$
+-        $$ \Delta s = \phi_s(f_d) $$
+-        where $\phi_x, \phi_r, \phi_s$ output 3D position offsets, quaternion rotations, and 3D scale factors respectively [S1].
+-    *   Apply selective deformation: Only geometric attributes are deformed. Color and opacity remain unchanged [S1].
+-    *   Compute final deformed parameters:
+-        $$ (\mu', r', s') = (\mu + \Delta\mu, r + \Delta r, s + \Delta s) $$
+-        Color and opacity remain unchanged [S1].
++        $$ \Delta\mu = \phi_x(f_d), \quad \Delta r = \phi_r(f_d), \quad \Delta s = \phi_s(f_d) $$
++        where $\phi_x$ outputs 3D position offsets, $\phi_r$ outputs quaternion rotations, and $\phi_s$ outputs 3D scale factors [S1].
++    *   Apply deformation only to geometric attributes:
++        $$ (\mu', r', s') = (\mu+\Delta\mu, r+\Delta r, s+\Delta s) $$
++    *   Keep color $c$ and opacity $\alpha$ unchanged to prevent training instability [S1].
+ 
+-5.  **Optimization:**
+-    *   Minimize loss $L_{color} = L_1 + \lambda_{SSIM} L_{SSIM}$ for pixel accuracy and structural coherence [S1].
+-    *   Apply volume regularization loss $L_{vol} = \sum_{i=1}^{n_g} sx_i \cdot sy_i \cdot sz_i$ to prevent oversized Gaussians [S1].
+-    *   Apply total variation loss $L_{tv}$ to enforce spatial smoothness in the HexPlane [S1].
+-    *   Perform density control: Grow anchors in high-gradient regions and prune those producing consistently low-opacity Gaussians [S1].
++5.  **Density Control:**
++    *   Grow anchors in high-gradient regions and prune those producing consistently low-opacity Gaussians [S1].
++    *   Use densification threshold $\tau_g$ and opacity threshold $\tau_\alpha$ [S1].
+ 
+ 6.  **View Refinement (Stage 3):**
+-    *   **Crude View Selection:** Identify underperforming viewpoints using two strategies [S1]:
+-        *   PSNR-based: $PSNR_i < (1 + \gamma) \cdot EMA_{PSNR}$, where $EMA_{PSNR} = 0.4 \cdot PSNR_{current} + 0.6 \cdot EMA_{PSNR}$ [S1].
+-        *   Gradient-based: $\|\nabla L_{view}\| > (1 + \gamma) \cdot EMA_{grad}$, where $\nabla L_{view}$ is the gradient magnitude of viewspace points and $EMA_{grad}$ is the exponential moving average of gradients [S1].
++    *   Identify crude viewpoints using PSNR-based detection: $PSNR_i < (1 + \gamma) \cdot EMA_{PSNR}$, where $\gamma$ decays from 0.05 to 0.02 and $EMA_{PSNR} = 0.4 \cdot PSNR_{current} + 0.6 \cdot EMA_{PSNR}$ [S1].
++    *   Identify crude viewpoints using gradient-based detection: $\|\nabla L_{view}\| > (1 + \gamma) \cdot EMA_{grad}$ [S1].
+     *   Add identified viewpoints to the refinement stack with metadata [S1].
+-    *   **Focused Training:** Use only crude viewpoints for training in a dedicated stage (14,000 iterations), with sampling probability weighted by severity scores [S1].
+-    *   **Adjusted Thresholds:** Use more aggressive densification parameters (lower $\tau_g$ and $\tau_\alpha$) to encourage Gaussian splitting and pruning in challenging regions [S1].
++    *   Perform focused training on crude viewpoints with sampling probability weighted by severity scores [S1].
++    *   Use adjusted thresholds ($\tau_g=0.0001, \tau_\alpha=0.03$) for enhanced Gaussian generation in challenging regions [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def initialize_voxels(sparse_points):
+-    # COLMAP initialization yields 5,000-20,000 points
+-    voxel_centers = distribute_centers(sparse_points)
+-    voxel_features = init_features(voxel_centers) # R32
+-    voxel_offsets = init_offsets(k=10) # R3 per voxel
+-    return voxel_centers, voxel_features, voxel_offsets
++# Initialization
++voxels = initialize_from_sfm(sparse_point_cloud)
++train_scaffold_gs(voxels, iterations=3000)
+ 
+-def train_initialization(voxel_centers, voxel_features, voxel_offsets, timestamps, cameras, iterations=3000):
+-    # Scaffold-GS training with mixed timestamp samples
+-    for i in range(iterations):
+-        t = sample_timestamp(timestamps)
+-        cam = sample_camera(cameras)
+-        visible_voxels = cull_frustum(voxel_centers, cam)
+-        gaussians = generate_gaussians(visible_voxels, voxel_features, voxel_offsets, cam)
+-        image = render(gaussians, cam)
+-        target = get_ground_truth(t, cam)
+-        loss = compute_loss(image, target)
+-        update_parameters(loss)
+-    return voxel_centers, voxel_features, voxel_offsets
++# Main Training Loop
++for iteration in range(14000):
++    # 1. Visibility Culling
++    visible_voxels = cull_frustum(voxels, camera_pose)
++    
++    # 2. Generate Gaussians
++    gaussians = []
++    for v in visible_voxels:
++        # Position
++        for i in range(k):
++            mu_i = v.center + v.offsets[i] * v.scale
++            # Attributes via MLPs
++            alpha_i, color_i, scale_i, rot_i = decode_attributes(v.feature, delta_vc, d_vc)
++            gaussians.append(Gaussian(mu_i, alpha_i, color_i, scale_i, rot_i))
++    
++    # 3. Deformation
++    hex_features = get_hex_plane_features(voxels, timestamp)
++    integrated_features = shallow_mlp(hex_features)
++    for g in gaussians:
++        delta_mu = position_mlp(integrated_features)
++        delta_rot = rotation_mlp(integrated_features)
++        delta_scale = scale_mlp(integrated_features)
++        # Selective deformation: only geometric
++        g.mu = g.mu + delta_mu
++        g.rot = g.rot + delta_rot
++        g.scale = g.scale + delta_scale
++        # Color and opacity remain unchanged
++    
++    # 4. Render and Loss
++    rendered_image = rasterize(gaussians, camera_pose)
++    loss = compute_loss(rendered_image, ground_truth)
++    loss += lambda_vol * volume_regularization_loss(gaussians)
++    loss += lambda_tv * total_variation_loss(hex_features)
++    update_parameters(loss)
++    
++    # 5. Density Control
++    densify_gaussians(gaussians, threshold=0.0002)
++    prune_gaussians(gaussians, opacity_threshold=0.05)
+ 
+-def train_main(voxel_centers, voxel_features, voxel_offsets, timestamps, cameras, iterations=14000):
+-    for i in range(iterations):
+-        t = sample_timestamp(timestamps)
+-        cam = sample_camera(cameras)
+-        visible_voxels = cull_frustum(voxel_centers, cam)
++# View Refinement Loop
++for iteration in range(14000):
++    # Identify crude views
++    crude_views = []
++    for view in camera_list:
++        psnr = compute_psnr(render(view))
++        ema_psnr = 0.4 * psnr + 0.6 * ema_psnr
++        if psnr < (1 + gamma) * ema_psnr:
++            crude_views.append(view)
+         
+-        # Generate base Gaussians
+-        gaussians = generate_gaussians(visible_voxels, voxel_features, voxel_offsets, cam)
+-        
+-        # Apply deformation
+-        hex_features = extract_hex_features(t, visible_voxels)
+-        integrated_features = phi_d(hex_features)
+-        delta_mu = phi_x(integrated_features)
+-        delta_r = phi_r(integrated_features)
+-        delta_s = phi_s(integrated_features)
+-        
+-        deformed_gaussians = apply_deformation(gaussians, delta_mu, delta_r, delta_s)
+-        # Color and opacity remain unchanged
+-        
+-        image = render(deformed_gaussians, cam)
+-        target = get_ground_truth(t, cam)
+-        
+-        # Loss computation
+-        loss_color = L1(image, target) + lambda_ssim * SSIM(image, target)
+-        loss_vol = volume_regularization(deformed_gaussians)
+-        loss_tv = total_variation(hex_features)
+-        loss = loss_color + lambda_vol * loss_vol + lambda_tv * loss_tv
+-        
++        grad_mag = compute_gradient_magnitude(view)
++        if grad_mag > (1 + gamma) * ema_grad:
++            crude_views.append(view)
++    
++    # Focused training on crude views
++    for view in sample(crude_views, weights=severity_scores):
++        visible_voxels = cull_frustum(voxels, view.pose)
++        gaussians = generate_gaussians(visible_voxels)
++        gaussians = deform_gaussians(gaussians)
++        rendered_image = rasterize(gaussians, view.pose)
++        loss = compute_loss(rendered_image, view.gt)
+         update_parameters(loss)
+         
+-        # Density control
+-        grow_anchors_in_high_gradient_regions()
+-        prune_low_opacity_gaussians()
+-        
+-    return voxel_centers, voxel_features, voxel_offsets
++        # Adjusted thresholds for refinement
++        densify_gaussians(gaussians, threshold=0.0001)
++        prune_gaussians(gaussians, opacity_threshold=0.03)
++```
+ 
+-def train_refinement(voxel_centers, voxel_features, voxel_offsets, timestamps, cameras, iterations=14000):
+-    ema_psnr = 0
+-    ema_grad = 0
+-    refinement_stack = []
+-    
+-    for i in range(iterations):
+-        # Identify crude views
+-        crude_views = []
+-        for cam in cameras:
+-            t = sample_timestamp(timestamps)
+-            visible_voxels = cull_frustum(voxel_centers, cam)
+-            gaussians = generate_gaussians(visible_voxels, voxel_features, voxel_offsets, cam)
+-            hex_features = extract_hex_features(t, visible_voxels)
+-            integrated_features = phi_d(hex_features)
+-            delta_mu = phi_x(integrated_features)
+-            delta_r = phi_r(integrated_features)
+-            delta_s = phi_s(integrated_features)
+-            deformed_gaussians = apply_deformation(gaussians, delta_mu, delta_r, delta_s)
+-            
+-            image = render(deformed_gaussians, cam)
+-            target = get_ground_truth(t, cam)
+-            
+-            # Compute metrics
+-            psnr = compute_psnr(image, target)
+-            grad_mag = compute_gradient_magnitude(image, target)
+-            
+-            # Update EMAs
+-            ema_psnr = 0.4 * psnr + 0.6 * ema_psnr
+-            ema_grad = 0.4 * grad_mag + 0.6 * ema_grad
+-            
+-            # Check thresholds
+-            gamma = decay_gamma(i) # 0.05 to 0.02
+-            if psnr < (1 + gamma) * ema_psnr:
+-                crude_views.append((cam, 'quality', psnr))
+-            if grad_mag > (1 + gamma) * ema_grad:
+-                crude_views.append((cam, 'gradient', grad_mag))
+-                
+-        if not crude_views:
+-            continue
+-            
+-        # Focused training on crude views
+-        for cam, failure_type, severity in crude_views:
+-            t = sample_timestamp(timestamps)
+-            visible_voxels = cull_frustum(voxel_centers, cam)
+-            gaussians = generate_gaussians(visible_voxels, voxel_features, voxel_offsets, cam)
+-            hex_features = extract_hex_features(t, visible_voxels)
+-            integrated_features = phi_d(hex_features)
+-            delta_mu = phi_x(integrated_features)
+-            delta_r = phi_r(integrated_features)
+-            delta_s = phi_s(integrated_features)
+-            deformed_gaussians = apply_deformation(gaussians, delta_mu, delta_r, delta_s)
+-            
+-            image = render(deformed_gaussians, cam)
+-            target = get_ground_truth(t, cam)
+-            
+-            loss = compute_loss(image, target)
+-            update_parameters(loss)
+-            
+-            # Aggressive densification
+-            grow_anchors_in_high_gradient_regions(threshold=0.0001)
+-            prune_low_opacity_gaussians(threshold=0.03)
+-```
++**Parameters:**
++*   $k$ (Gaussians per voxel): 10 [S1].
++*   $f_v$ (Feature dimension): 32 [S1].
++*   HexPlane resolution: [64, 64, 64, 150] for DyNeRF; [64, 64, 64, 25] for HyperNeRF [S1].
++*   HexPlane scale multipliers: [1, 2] [S1].
++*   Learning rates: Gaussian offsets 0.01, color MLP 0.008, opacity MLP 0.002, rotation/scaling MLPs 0.004, HexPlane grids 0.0016, deformation MLPs 0.00016 [S1].
++*   Learning rate decay: All rates decay to 1/10 of initial values by iteration 14,000 [S1].
++*   $\lambda_{vol}$ (Volume regularization): 0.015 [S1].
++*   $\lambda_{tv}$ (Total variation): 0.0002 [S1].
++*   $\tau_g$ (Densification threshold): 0.0002 (coarse), 0.0001 (refinement) [S1].
++*   $\tau_\alpha$ (Opacity threshold): 0.05 (coarse), 0.03 (refinement) [S1].
++*   EMA momentum: 0.4 [S1].
++*   $\gamma$ (PSNR threshold): Starts at 0.05, decays to 0.02 [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Training Instability:** Deforming all Gaussian properties (including color and opacity) leads to instability and error accumulation because appearance properties are highly sensitive to deformation errors [S1]. The method fixes color and opacity to maintain stable gradients [S1].
++*   **Large Motions:** Absence of initial points and inaccuracies in camera poses make optimization challenging [S1].
++*   **Popping Artifacts:** View-dependent sorting solves the "static" part of popping artifacts but does not eliminate them entirely [S1].
++*   **Blurry Effects:** Without volume regularization ($L_{vol}$), large Gaussians float in front of the camera causing blurry effects [S1].
+ 
+ ## Operating characteristics
+ *   **Memory Complexity:** $O(fV + F)$, where $V$ is the number of voxels, $f$ is the feature dimension per voxel, and $F$ represents the deformation network parameters [S1]. This is a significant reduction from the traditional $O(N \cdot T)$ scaling [S1].
+-*   **Measured Performance:**
+-    *   Memory usage: 3,050 MiB (86% reduction vs TiNeuVox-B, 32% vs 4D-GS) [S1].
+-    *   Training time: 17 minutes with refinement (13 minutes without) (94% speedup vs HyperNeRF, 32% vs 4D-GS, 89% vs GaGS) [S1].
+-    *   Rendering performance: 43 FPS on Neu3D dataset at 1,352x1,014 resolution (order of magnitude faster than Im4D and MSTH) [S1].
+-    *   Quality on HyperNeRF: 28.5 PSNR and 0.872 MS-SSIM at 960x540 resolution [S1].
+-    *   Quality on Neu3D: 33.12 PSNR and 0.021 D-SSIM at 1,352x1,014 resolution [S1].
++*   **Memory Usage:** 3,050 MiB on HyperNeRF [S1]. This is an 86% reduction vs TiNeuVox-B (21,558 MiB) and 32% vs 4D-GS (4,500 MiB) [S1].
++*   **Training Time:** 17 minutes with refinement (13 minutes without) on HyperNeRF [S1]. This is a 94% speedup vs HyperNeRF (32 hours), 32% vs 4D-GS (25 minutes), and 89% vs GaGS (120 minutes) [S1].
++*   **Rendering Performance:** 43 FPS on Neu3D dataset at 1,352x1,014 resolution [S1]. This is an order of magnitude faster than Im4D (5 FPS) and MSTH (2 FPS) [S1].
++*   **Quality:** 28.5 PSNR and 0.872 MS-SSIM on HyperNeRF at 960x540 resolution [S1]. 33.12 PSNR and 0.021 D-SSIM on Neu3D at 1,352x1,014 resolution [S1].
+ *   **Strengths:** Real-time rendering, low memory footprint, fast training, stable convergence due to selective deformation [S1].
+-*   **Limitations:** Large motions can be challenging due to absence of initial points and camera pose inaccuracies; popping artifacts are not entirely eliminated [S1].
+-*   **When to use:** Real-time dynamic scene visualization on consumer hardware [S1].
+-*   **When not to use:** Scenes with extremely large motions where initial point estimation is poor, or where popping artifacts are unacceptable without further rasterization enhancements [S1].
++*   **Limitations:** Popping artifacts are not fully eliminated; large motions with poor initial points remain challenging [S1].
+ 
+ ## Background
+-4D Neural Voxel Splatting was proposed by the authors of the paper "4D Neural Voxel Splatting: Dynamic Scene Rendering with Voxelized Guassian Splatting" [S1]. It builds on established techniques such as Scaffold-GS for voxel-based generation and HexPlane decomposition for temporal modeling [S1]. The method addresses the substantial memory overhead of extending 3D Gaussian Splatting to dynamic scenes by replicating Gaussians across frames [S1].
++4D Neural Voxel Splatting was introduced in the paper "4D Neural Voxel Splatting: Dynamic Scene Rendering with Voxelized Gaussian Splatting" [S1]. It builds upon established techniques such as Scaffold-GS for voxel-based generation and HexPlane decomposition for temporal modeling [S1]. The method addresses the substantial memory overhead of extending 3D Gaussian Splatting to dynamic scenes by replicating Gaussians across frames [S1].
+ 
+ ## Sources

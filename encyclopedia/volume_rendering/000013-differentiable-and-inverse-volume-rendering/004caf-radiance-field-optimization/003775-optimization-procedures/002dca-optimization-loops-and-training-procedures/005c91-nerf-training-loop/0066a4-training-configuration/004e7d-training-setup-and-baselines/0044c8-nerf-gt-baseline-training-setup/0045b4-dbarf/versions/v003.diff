@@ -1,0 +1,112 @@
+--- v002.md
++++ v003.md
+@@ -8,17 +8,16 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of unposed images $\{I_i\}$ for a scene.
+-*   **Outputs:** Optimized relative camera poses $\{P_{ij}\}$, depth maps $\{D_i\}$, and rendered novel views.
++*   **Inputs:** A set of unposed images $\{I_i\}$ for a scene [S1].
++*   **Outputs:** Optimized relative camera poses $\{P_{ij}\}$, depth maps $\{D_i\}$, and rendered novel views [S1].
+ 
+ **Data Structures:**
+-*   **Scene Graph:** A graph where nodes are images and edges connect "nearby" views. Constructed once per scene using SuperPoint keypoints and SuperGlue matches, filtered by epipolar constraints, and sorted by inlier count [S1].
++*   **Scene Graph:** A graph where nodes are images and edges connect "nearby" views [S1]. Constructed once per scene using SuperPoint keypoints and SuperGlue matches, filtered by epipolar constraints, and sorted by inlier count [S1].
+ *   **Feature Maps:** Extracted using a ResNet-like backbone with a Feature Pyramid Network (FPN) [S1].
+ *   **Cost Map:** A 2D map representing feature inconsistency between the target view and nearby views [S1].
+ 
+ **Algorithm Steps:**
+-
+ 1.  **Scene Graph Construction:** For a target view $i$, select nearby views $\mathcal{N}(i)$ from the precomputed scene graph based on the number of inlier matches [S1].
+ 2.  **Feature Extraction:** Extract image features $\mathbf{F}_i$ for the target view and $\mathbf{F}_j$ for each nearby view $j \in \mathcal{N}(i)$ using the FPN backbone [S1].
+-3.  **3D Point Sampling:** For each target pixel $\mathbf{u}_i$, sample a patch $\mathcal{S}(\mathbf{u}_i)$ from the target view. Compute 3D points $\mathbf{X}_{\mathcal{S}(\mathbf{u}_i)}$ using the predicted depth map $D_i$ for the target view [S1].
++3.  **3D Point Sampling:** For each target pixel $\mathbf{u}_i$, sample a patch $\mathcal{S}(\mathbf{u}_i)$ from the target view [S1]. Compute 3D points $\mathbf{X}_{\mathcal{S}(\mathbf{u}_i)}$ using the predicted depth map $D_i$ for the target view [S1].
+ 4.  **Initialization:** Initialize relative poses $\mathbf{P}_{ij}^0$ and depth $D_i^0$ randomly [S1].
+ 5.  **Cost Map Computation:** Compute the initial cost map $\mathcal{C}^0$ using the feature difference between the warped nearby features and the target features [S1]:
+@@ -27,17 +26,16 @@
+     $$
+     where $\mathbf{K}_j$ is the intrinsics matrix, $\mathbf{P}_{ij} = \mathbf{P}_j \mathbf{P}_i^{-1}$ is the relative pose, $\chi$ is differentiable bilinear interpolation, and $\mathbf{X}_{\mathcal{S}(\mathbf{u}_i)}$ are 3D points derived from $D_i$ [S1].
+-6.  **Recurrent Pose and Depth Optimization:** Use a GRU (following RAFT-like architecture) to predict corrections $\Delta \mathbf{P}_{ij}$ and $\Delta D_i$ based on the cost map. Update poses and depth for $t$ iterations:
++6.  **Recurrent Pose and Depth Optimization:** Use a GRU (following RAFT-like architecture) to predict corrections $\Delta \mathbf{P}_{ij}$ and $\Delta D_i$ based on the cost map [S1]. Update poses and depth for $t$ iterations:
+     $$
+     \mathbf{P}_{ij}^{t+1} = \mathbf{P}_{ij}^t + \Delta \mathbf{P}_{ij}, \quad \mathbf{D}_i^{t+1} = \mathbf{D}_i^t + \Delta \mathbf{D}_i
+     $$
+     The cost map is updated after each iteration using the current poses and depth [S1].
+-7.  **Volume Rendering:** Use the optimized poses and features in a GeNeRF (e.g., IBRNet) to predict volume density and pixel color. Render the target image using volume rendering [S1].
++7.  **Volume Rendering:** Use the optimized poses and features in a GeNeRF (e.g., IBRNet) to predict volume density and pixel color [S1]. Render the target image using volume rendering [S1].
+ 8.  **Joint Training:** The pose optimizer and GeNeRF are jointly learned [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+ def dbarf_training(images, scene_graph, ge_nerf, feature_backbone, pose_estimator, 
+-                   num_nearby_views, num_recurrent_iters, beta, lr_extractor, lr_ge_nerf, lr_pose):
++                   num_nearby_views, num_recurrent_iters, beta, lr_extractor, lr_ge_nerf, lr_pose, alpha):
+     """
+     DBARF Training Loop.
+@@ -47,7 +45,8 @@
+     feature_backbone: ResNet-like FPN for feature extraction.
+     pose_estimator: GRU-based network for pose/depth correction.
+-    num_nearby_views: Number of nearby views to use (5 for pretraining, 10 for fine-tuning).
++    num_nearby_views: Number of nearby views to use (5 for pretraining, 10 for fine-tuning) [S1].
+     num_recurrent_iters: Number of recurrent iterations for pose optimization (4) [S1].
+     beta: Coefficient for loss weighting schedule (-1e5) [S1].
++    alpha: Weight for SSIM vs L1 in photometric loss [S1].
+     """
+     # Standard gradient descent optimizers [G]
+@@ -89,5 +88,5 @@
+             # 5. Loss Computation [S1]
+             L_depth = compute_depth_smoothness_loss(D_target, target_img)
+-            L_photo = compute_photometric_loss(rendered_img, target_img, nearby_imgs, P_ij)
++            L_photo = compute_photometric_loss(rendered_img, target_img, nearby_imgs, P_ij, alpha)
+             L_rgb = compute_rgb_loss(rendered_img, target_img)
+             
+@@ -113,7 +112,7 @@
+         # Project 3D points to nearby view coordinates [S1]
+         proj_coords = K @ (P_ij[j] @ X_S)
+-        # Sample features from nearby view using bilinear interpolation [S1]
++        # Sample features from nearby view using bilinear interpolation [G]
+         F_j_warped = bilinear_interpolate(F_j, proj_coords)
+-        # Sample features from target view patch [S1]
++        # Sample features from target view patch [G]
+         F_target_patch = bilinear_interpolate(F_target, X_S)
+         # Compute L2 norm difference [S1]
+@@ -129,9 +128,8 @@
+     return abs(dD_x) * exp(-abs(dI_x)) + abs(dD_y) * exp(-abs(dI_y))
+ 
+-def compute_photometric_loss(rendered_img, target_img, nearby_imgs, P_ij):
++def compute_photometric_loss(rendered_img, target_img, nearby_imgs, P_ij, alpha):
+     """
+     Warped photometric loss. Matches Eq. 14 in [S1].
+     """
+-    alpha = 0.85
+     loss_sum = 0.0
+     for j, nearby_img in enumerate(nearby_imgs):
+@@ -153,4 +151,5 @@
+ # Helper definitions [G]
+ def bilinear_interpolate(feature_map, coords):
++    # [G] Standard differentiable bilinear interpolation of feature map at normalized coordinates
+     return feature_map[coords]
+ 
+@@ -162,7 +161,9 @@
+ 
+ def warp_image(img, pose, intrinsics):
++    # [G] Standard projective warping using pose and intrinsics
+     return img
+ 
+ def structural_similarity(a, b):
++    # [G] Standard SSIM computation
+     return 1.0
+ 
+@@ -174,4 +175,5 @@
+ 
+ def depth_to_3d_points(depth, intrinsics):
++    # [G] Standard back-projection of depth map to 3D points using inverse intrinsics
+     return depth
+ 
+@@ -203,5 +205,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of nearby views, recurrent iterations, and GeNeRF inference. The recurrent optimization adds a fixed overhead per batch (4 iterations) [S1].
++*   **Time Complexity:** Depends on the number of nearby views, recurrent iterations, and GeNeRF inference [S1]. The recurrent optimization adds a fixed overhead per batch (4 iterations) [S1].
+ *   **Memory Complexity:** Requires storing feature maps for target and nearby views, and intermediate cost maps during recurrent updates [S1].
+ *   **Performance:** Evaluated on NVIDIA RTX A5000 GPU [S1].

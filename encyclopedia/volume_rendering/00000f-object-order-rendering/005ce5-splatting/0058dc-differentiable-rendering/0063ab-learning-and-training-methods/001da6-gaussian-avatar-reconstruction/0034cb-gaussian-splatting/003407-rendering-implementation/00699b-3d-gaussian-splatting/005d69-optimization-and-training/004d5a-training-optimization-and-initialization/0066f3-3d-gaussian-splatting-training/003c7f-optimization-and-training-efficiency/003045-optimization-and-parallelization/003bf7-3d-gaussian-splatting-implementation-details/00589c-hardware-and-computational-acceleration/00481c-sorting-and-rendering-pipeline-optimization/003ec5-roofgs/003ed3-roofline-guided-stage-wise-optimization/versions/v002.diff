@@ -1,0 +1,148 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,4 @@
+ # Roofline-guided stage-wise optimization
+ 
+-Also called: Roofline-guided optimization
+ 
+ ## Overview
+@@ -8,10 +7,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** The baseline 3D Gaussian Splatting (3DGS) rendering pipeline stages (preprocessing, sorting, rasterization), hardware specifications (peak compute throughput $P_{\text{peak}}$, memory bandwidth $BW$), and kernel execution traces.
+-*   **Output:** An optimized pipeline where specific stages are modified to address their identified bottlenecks.
++*   **Input:** Baseline 3D Gaussian Splatting (3DGS) pipeline stages, hardware specifications (peak compute throughput $P_{\text{peak}}$, memory bandwidth $BW$), and kernel execution traces [S1, unofficial].
++*   **Output:** An optimized pipeline where specific stages are modified to address their identified bottlenecks [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Sorting Key:** A dynamic 32-bit integer packing tile index and quantized depth [S1, unofficial].
+-*   **Attributes:** Compressed Spherical Harmonics (SH) and geometric attributes [S1, unofficial].
++*   **Sorting Key:** A dynamic 32-bit integer packing the tile index and quantized depth [S1, unofficial].
++*   **Attributes:** Compressed spherical harmonics (SH) and geometric attributes [S1, unofficial].
+ 
+ **Method Steps:**
+@@ -47,67 +46,56 @@
+ **Pseudocode:**
+ ```python
+-def roofline_guided_optimization(pipeline_stages, hardware_specs):
++def roofline_guided_optimization(stages, P_peak, BW):
+     """
+     Applies Roofline-guided optimizations to a rendering pipeline.
+     
+     Args:
+-        pipeline_stages: List of stage objects with 'name', 'flops', 'bytes' attributes.
+-        hardware_specs: Dict with 'P_peak' (TFLOPS) and 'BW' (GB/s).
++        stages: List of stage objects with 'name', 'flops', 'bytes' attributes.
++        P_peak: Peak compute throughput (TFLOPS).
++        BW: Memory bandwidth (GB/s).
+         
+     Returns:
+-        optimized_pipeline: List of optimized stage configurations.
++        optimized_stages: List of optimized stage configurations.
+     """
+-    P_peak = hardware_specs['P_peak']
+-    BW = hardware_specs['BW']
+     I_knee = P_peak / BW
+-    
+     optimized_stages = []
+     
+-    for stage in pipeline_stages:
++    for stage in stages:
+         # Calculate arithmetic intensity
+-        # I = F / B, where F is total FLOPS, B is total bytes transferred
+         I_stage = stage.flops / stage.bytes
+         
+         if I_stage < I_knee:
+             # Bandwidth-bound: Optimize for memory traffic reduction
+-            optimized_stage = optimize_bandwidth_bound_stage(stage)
++            stage.attrs = compress_sh_and_geometry(stage.attrs)
++            stage.sort_key = pack_tile_index_and_depth(stage.tile_idx, stage.quant_depth)
++            stage.kernel = fuse_preprocess_tile_dup_key(stage)
+         else:
+             # Compute-bound: Optimize for arithmetic intensity/ILP
+-            optimized_stage = optimize_compute_bound_stage(stage)
++            stage.pixel_proc = eval_two_adjacent_pixels(stage.pixel_proc)
++            stage.blend_op = bit_level_alpha_approx(stage.blend_op)
+             
+-        optimized_stages.append(optimized_stage)
++        optimized_stages.append(stage)
+         
+     return optimized_stages
+ 
+-def optimize_bandwidth_bound_stage(stage):
+-    """
+-    Applies memory-centric optimizations.
+-    """
+-    if stage.name == "preprocessing":
+-        # Compress SH and geometric attributes
+-        stage.attributes = compress_attributes(stage.attributes)
+-        
+-        # Fuse preprocessing, tile duplication, and key generation
+-        stage.kernel = fuse_kernels([stage.preprocessing_kernel, 
+-                                     stage.tile_duplication_kernel, 
+-                                     stage.key_generation_kernel])
+-        
+-        # Pack tile index and quantized depth into 32-bit key
+-        stage.sort_key = pack_tile_index_and_depth(stage.tile_index, stage.quantized_depth)
+-        
+-    return stage
++def compress_sh_and_geometry(attrs):
++    """Compress spherical harmonics and geometric attributes to reduce memory footprint."""
++    return quantize_and_pack(attrs, bits=16)
+ 
+-def optimize_compute_bound_stage(stage):
+-    """
+-    Applies compute-centric optimizations.
+-    """
+-    if stage.name == "rasterization":
+-        # Evaluate two adjacent pixels for ILP
+-        stage.pixel_processing = process_two_adjacent_pixels
+-        
+-        # Replace exp with bit-level approximation for alpha blending
+-        stage.blending_op = bit_level_alpha_approximation
+-        
+-    return stage
++def pack_tile_index_and_depth(tile_idx, quant_depth):
++    """Pack tile index and quantized depth into a single dynamic 32-bit sorting key."""
++    return (tile_idx << 16) | (quant_depth & 0xFFFF)
++
++def fuse_preprocess_tile_dup_key(stage):
++    """Fuse preprocessing, tile duplication, and key generation into a single kernel."""
++    return stage.merge_kernels(['preprocess', 'tile_dup', 'key_gen'])
++
++def eval_two_adjacent_pixels(proc):
++    """Evaluate two adjacent pixels simultaneously to increase instruction-level parallelism."""
++    return proc.process_warp_pair()
++
++def bit_level_alpha_approx(blend):
++    """Replace standard exponential operation with a bit-level approximation tailored to alpha-thresholded blending."""
++    return blend.replace_exp_with_bitwise_approx()
+ ```
+ 
+@@ -119,10 +107,9 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   The complexity depends on the specific stage optimizations. Sorting is typically $O(N \log N)$ or $O(N)$ with radix sort, where $N$ is the number of Gaussians [S1, unofficial]. Rasterization is $O(N \cdot T)$, where $T$ is the number of tiles [S1, unofficial].
+-*   Memory usage is reduced in the front end due to attribute compression and key packing [S1, unofficial].
++*   Not given in the sources. Memory usage is reduced in the front end due to attribute compression and key packing [S1, unofficial].
+ 
+ **Measured Performance:**
+ *   On an NVIDIA RTX 4090 GPU, the FP32-DRAM balance point is approximately 81.9 FLOPS/Byte [S1, unofficial].
+-*   In the Synthetic Scale-Up Stress Diagnostic, TileGS (the implementation of these optimizations) showed consistent improvements in sort and raster stages as workload increased [S2].
++*   In the Synthetic Scale-Up Stress Diagnostic, TileGS showed consistent improvements in sort and raster stages as workload increased [S2].
+ 
+ **Scaling:**
+@@ -131,5 +118,5 @@
+ 
+ **Strengths and Limitations:**
+-*   **Strengths:** Tailors optimizations to specific hardware bottlenecks, leading to significant speedups in critical stages (sort, raster) [S1, unofficial].
++*   **Strengths:** Tailors optimizations to specific hardware bottlenecks, leading to significant speedups in critical stages [S1, unofficial].
+ *   **Limitations:** The total-frame speedup may be limited by non-optimized auxiliary overheads [S2]. The method requires detailed hardware-specific knowledge (e.g., $P_{\text{peak}}$, $BW$) [S1, unofficial].
+ 
+@@ -143,5 +130,5 @@
+ 
+ ## Background
+-Roofline-guided stage-wise optimization is part of the RoofGS framework, presented in "RoofGS: Roofline-Guided End-to-End Acceleration of 3D Gaussian Splatting" [S1, unofficial]. It builds on the Roofline model [42, cited in S1] to identify dominant bottlenecks in the 3DGS rendering pipeline. The method addresses the limited attention to coordinated software optimization across the whole rendering pipeline in prior work [S1, unofficial]. It is used in the context of 3D Gaussian Splatting rendering acceleration [S1, unofficial].
++Roofline-guided stage-wise optimization is part of the RoofGS framework, presented in "RoofGS: Roofline-Guided End-to-End Acceleration of 3D Gaussian Splatting" [S1, unofficial]. It builds on the Roofline model to identify dominant bottlenecks in the 3DGS rendering pipeline. The method addresses the limited attention to coordinated software optimization across the whole rendering pipeline in prior work [S1, unofficial]. It is used in the context of 3D Gaussian Splatting rendering acceleration [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,201 @@
+Splats ghost under TAA/FSR2 with a moving camera: the module publishes no depth write-back, no motion vectors and no reactive mask. This is the post-alpha half of #929 and the thing that ends the §8.1 disclosure that PR for #929 introduc...
+
+Splats ghost under TAA/FSR2 in motion: no depth write-back, no motion vectors, no reactive mask (post-#929 residual) · Issue #1025 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Splats ghost under TAA/FSR2 in motion: no depth write-back, no motion vectors, no reactive mask (post-#929 residual) #1025
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Splats ghost under TAA/FSR2 in motion: no depth write-back, no motion vectors, no reactive mask (post-#929 residual)#1025
+Copy link
+Labels
+area:rendererRendering pipelineRendering pipelineneeds-adrRequires an approved design record before implementationRequires an approved design record before implementationpriority:P1High priorityHigh priorityprogram:prod-readyProduction-readiness program (audit 2026-07-07)Production-readiness program (audit 2026-07-07)user-facingDirectly affects external users, docs, or public repo surfaceDirectly affects external users, docs, or public repo surface
+Description
+klausi3D
+opened on Sep 17, 2026
+Issue body actions
+Splats ghost under TAA/FSR2 with a moving camera: the module publishes no depth write-back, no motion vectors and no reactive mask. This is the post-alpha half of #929 and the thing that ends the §8.1 disclosure that PR for #929 introduces.
+What already landed, and what this is not
+#929 fixed the static-camera half: GaussianSplatRenderer::build_render_projection() now applies scene_data->taa_jitter, the reuse key carries the GPU projection, and the QA suite gates the sub-pixel displacement of the splat layer against an in-frame mesh control. That change is complete and measured; this issue does not revisit it.
+What remains is everything else the temporal stages consume. servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp feeds FSR2 four inputs — params.color, params.depth, params.velocity, params.reactive — and TAA binds colour, depth, velocity, last-velocity and history. Splats supply colour only.
+modules/gaussian_splatting/shaders/viewport_blit.glsl reads the scene depth for its depth test and writes exactly one thing: u_destination_image, the single imageStore at :215 — the file's only write.
+modules/gaussian_splatting/shaders/painterly_composite.glsl:21 declares one output, layout(location = 0) out vec4 out_color, into a colour-only framebuffer built from framebuffer_cache->get_cache(scene_color) in interfaces/painterly_renderer.cpp — no depth attachment, no gl_FragDepth.
+A grep of modules/gaussian_splatting/ for velocity / motion_vector / reactive returns zero writes to any engine buffer; every hit is a streaming camera-speed heuristic (core/gaussian_streaming.cpp:4338, core/streaming_diagnostics_surface.cpp:241, core/performance_monitors.cpp:430-431).
+raster_output.depth is the tile rasterizer's own depth texture (render_pipeline_stages.cpp → renderer->get_painterly_depth_texture()). It is the GS-internal depth the composite tests against the scene depth. It is not written back into rb->get_depth_texture(), so FSR2 never sees it.
+The user-visible consequence, which is what the §8.1 row discloses: with TAA or FSR2 on and the camera or the content moving, splat regions ghost. Godot's TAA has no reactive input at all — the entire push constant at servers/rendering/renderer_rd/shaders/effects/taa_resolve.glsl:50-55 is {vec2 resolution; float disocclusion_threshold; float disocclusion_scale;} — so it reprojects with whatever velocity it is given, which for splats is zero, and smears.
+Design sketch (the ladder, in the order it should be climbed)
+Step A — depth write-back. R3, ADR first.
+Publish the GS depth into rb->get_depth_texture() at the pre-upscale seam so FSR2's disocclusion and lock logic can see splat surfaces at all. This is the prerequisite for B: a velocity buffer without a matching depth buffer gives the resolve inconsistent geometry.
+Where: alongside the existing "Gaussian Splats Pre-Upscale" block in render_forward_clustered.cpp, which tests/ci/check_gs_pre_upscale_hook.py already guards by seven literal anchors. If this moves any of them they get updated in the same commit, never relaxed (that guard's own docstring requires it).
+Semantics to decide in the ADR, not in code review: GS depth is linear view-space, the engine buffer is reverse-Z; the conversion has to be exact or every later depth consumer (SSAO, SSR, volumetric fog, the next frame's composite) silently degrades. Depth write-back changes what every later consumer sees, which is why it is R3 and why it goes first and alone.
+Risk to name up front: the composite currently reads the scene depth to reject occluded splat texels. Writing back into the same texture in the same pass is a read-write hazard of exactly the shape rendering: mesh/splat compositing has blocky artifacts at depth boundaries #256 hit (imageLoad on a live destination).
+Step B — per-pixel motion vectors. R3.
+The module caches no previous-frame camera state at all today, so this starts with plumbing, not shaders:
+Keep prev_view_projection (and the previous instance transform per node, for moving splat nodes) in the renderer's view state, updated once per frame at the same place last_camera_projection is written — and reset on device-generation change, teardown, and every early-return, per renderer/AGENTS.md.
+In the composite, reconstruct a world position from the GS depth written in step A, project it with the previous view-projection, and emit curr_ndc - prev_ndc into the velocity target. The engine's own convention, including whether the jitter is included in each end of the difference, must be copied from RenderSceneDataRD rather than re-derived — the same verbatim-value argument that made the GPU-001 follow-up: splat projection is unjittered while feeding temporal consumers (TAA/FSR2/MetalFX) — subpixel mismatch vs meshes #929 fix correct.
+Static splats under a moving camera are the common case and only need (1) + camera reprojection. Moving GaussianSplatNode3Ds need the per-node previous transform; a node that has no previous transform yet (first frame after spawn) must emit zero velocity and be marked reactive rather than guessing.
+A wrong velocity is worse than none: it smears confidently and looks like a renderer bug rather than a missing feature. So step B needs a discriminating oracle before it needs an implementation — the natural one is the #929 QA rig with a moving camera, asserting that the splat layer's displacement tracks the mesh control's through the motion instead of lagging it.
+Step C — FSR2 reactive-mask contribution. R2/R3.
+Mark thin, high-alpha-variance splat regions reactive so the resolve trusts history less there. This is a quality trade, not a fix, and must come last: a fully reactive region gets no temporal accumulation, so splats would stay aliased by construction. It is worth having only once A and B make the accumulation correct in the first place.
+Why not in the #929 PR
+Scope and risk class. #929's fix is R2 and confined to the module. Every step here edits servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp and changes what engine-side consumers see, which is R3: ADR, two independent reviews, CODEOWNER. Bundling them would have put a three-line, measured, self-gating change behind an engine-boundary review.
+Not measured
+The moving-camera case has never been measured in this repo. The #929 rig is static-camera by design, so everything above about ghosting is code-reading, not measurement. The first task on this issue is to measure it, with the moving-camera oracle described in step B, before any of A/B/C is implemented — otherwise there is no way to tell whether a fix worked.
+Also unmeasured and out of scope here: MetalFX-temporal (macOS only, outside the alpha platforms), multiview, Forward Mobile, and any GPU other than an RTX 3090.
+Refs #929
+Refs #921
+🤖 Generated with Claude Code
+https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+Reactions are currently unavailable
+Activity
+Next
+klausi3D
+added
+area:rendererRendering pipelineRendering pipeline
+user-facingDirectly affects external users, docs, or public repo surfaceDirectly affects external users, docs, or public repo surface
+program:prod-readyProduction-readiness program (audit 2026-07-07)Production-readiness program (audit 2026-07-07)
+needs-adrRequires an approved design record before implementationRequires an approved design record before implementation
+on Sep 17, 2026
+klausi3D
+added a commit that references this issue on Sep 17, 2026
+gaussian_splatting: render splats with the engine's TAA jitter, and k…
+...
+65132c9
+klausi3D
+added
+priority:P1High priorityHigh priority
+on Sep 19, 2026
+klausi3D commented on Sep 19, 2026
+klausi3D
+on Sep 19, 2026
+OwnerAuthor
+More actions
+Labelled priority:P1 so the release gate actually asks about this issue, and noting what is still missing for the disclosure to mean anything at tag time.
+Verified in the gate itself, not assumed:
+docs/reference/renderer_release_gate_manifest.json:26-30 sets required_issue_query.classification_labels_any = ["priority:P0", "priority:P1", "release blocker"], and _candidate_issue_is_relevant() (tests/ci/check_renderer_release_gates.py:1759-1766) returns early on that list when it is non-empty. With only program:prod-ready this issue was never presented to the candidate gate — an accepted-limitation row for an issue the machine does not ask about. priority:P1 fixes that; it makes the issue presented, not automatically blocking (blocking-ness comes from the classification the evidence bundle assigns, not from the label).
+An accepted_alpha_limitation classification additionally needs docs_path present, resolving inside the repo, and string-equal to the manifest's known_limitations_page, which is docs/development/known-public-alpha-limitations.md (manifest:120; check at check_renderer_release_gates.py:1800-1826).
+And the issue must appear in public_alpha_issue_ledger.tracked_issues, which today holds only Audit P0: make render route, fallback, and stage failure contracts explicit #351, Audit P0: close GPU resource leaks and shutdown lifetime hazards #352, Audit P3: define and enforce public alpha release acceptance gates #360, Audit P0: repair opaque qlty check failures blocking renderer PRs #369 (manifest, validated at check_renderer_release_gates.py:257-300). Adding an entry there is an R3 manifest edit.
+So the §8.1 row PR #1026 adds is necessary but not sufficient: this issue also needs the ledger entry before it can be classified as an accepted alpha limitation rather than a blocker. That R3 edit is deliberately not in #1026 — it is being recorded with the rest of the widening mechanism in #1020. Credit for spotting the label gap goes to the #1022 author.
+Until a human records the acceptance described in release-acceptance-bar.md §10.1 condition 4, this issue is a §4 blocker, which is the fail-closed reading and the one #1026's text now states.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+klausi3D
+added 8 commits that reference this issue on Sep 19, 2026
+docs: correct what the candidate gate actually enforces, and name the…
+...
+1bc4d2e
+gaussian_splatting: render splats with the engine's TAA jitter, and k…
+...
+c340b25
+gaussian_splatting: render splats with the engine's TAA jitter, and k…
+...
+e280274
+docs: re-measure the ledger cost after #1025 was labelled, and record…
+...
+cbeb37c
+docs: record the TAA/FSR2 motion residual and the get_statistics cras…
+...
+0182d92
+docs: record the TAA/FSR2 motion residual and the get_statistics cras…
+...
+f34b190
+docs: fence the unaccepted #1025 entry, and narrow three claims Codex…
+...
+83474cf
+gaussian_splatting: render splats with the engine's TAA jitter, and k…
+...
+73b305c
+7 remaining items
+Load more
+klausi3D
+added 5 commits that reference this issue on Sep 20, 2026
+gaussian_splatting: render splats with the engine's TAA jitter, and k…
+...
+7c16775
+docs: record the TAA/FSR2 motion residual and the get_statistics cras…
+...
+c999d48
+docs: fence the unaccepted #1025 entry, and narrow three claims Codex…
+...
+61342d5
+docs: correct the #1025 entry - FSR2 does not ghost, and the old text…
+...
+cd77e94
+docs: state the alpha's API promise, its real limitations, and fix do…
+...
+bc77ce3
+klausi3D commented on Sep 20, 2026
+klausi3D
+on Sep 20, 2026
+OwnerAuthor
+More actions
+Accepted as a public-alpha limitation (§10.1 condition 4)
+Recording the maintainer's disposition. Relayed by Claude Code on the maintainer's instruction in session — the maintainer's own line, if they add one, supersedes this transcription.
+Decision: accepted as a disclosed alpha limitation. Asked whether to accept this residual or keep it a blocker, the maintainer answered: "Yes then please continue with that."
+What is being accepted, as measured on 2026-09-20 (#1025 (comment)), not as originally described:
+Under TAA, splat detail trails its true position by ≈1.5 px while the camera or content moves (0.27–0.87 frames stale, 6–26× an in-frame geometry control). The trail does not grow with camera speed: 1.48 px at 15°/s, 1.65 px at 56°/s.
+Under FSR2 there is no ghosting at either scale — 0.000 frames of staleness at scale 1.0 on two pans, 0.04 px on a dolly, at the control's floor. The earlier claim that FSR2 ghosts was wrong and was withdrawn before gaussian_splatting: render splats with the engine's TAA jitter, and key the render cache on the matrix that carries it (#929) #1026 merged.
+TAA is off by default; the workaround is to leave it off. FSR2 needs no workaround.
+On the real scan measured, the trail is not visible without ~10× amplification because the content is soft. The trail is content-independent in pixels, so a sharper scan may read worse — that has not been measured.
+Consequences, per the acceptance bar's own text:
+The #929 residual row in §8.1 loses its proposed marker and becomes a real disclosure.
+The limitation is listed on the known-limitations page, which is the docs_path §9.1 requires.
+GPU-001 follow-up: splat projection is unjittered while feeding temporal consumers (TAA/FSR2/MetalFX) — subpixel mismatch vs meshes #929 is closed by hand; §11 item 5 is struck and the status line re-counted.
+Splats ghost under TAA/FSR2 in motion: no depth write-back, no motion vectors, no reactive mask (post-#929 residual) #1025 stays open as the tracking issue for the remaining work, and still needs a public_alpha_issue_ledger entry before any release candidate can classify it — that is an R3 manifest edit and is not done yet.
+Condition 4 is met with this comment; conditions 1–3 were already established in #1026.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+klausi3D
+added 9 commits that reference this issue on Sep 20, 2026
+docs: answer both reviews on the #1025 acceptance recording (#1025, #929
+...
+f65b421
+docs: reflow two long lines in the acceptance-bar edits
+...
+f731722
+docs: record the #1025 acceptance and make the 8.1 row a real disclos…
+...
+6f45520
+release-gate: answer the five review findings on the #1025 ledger ent…
+...
+f3dc581
+release-gate: make #1025's accepted alpha limitation visible to the c…
+...
+24eb769
+docs+release-gate: address the #1068 review of the #54 acceptance record
+...
+5758eaa
+docs+release-gate: record #54's acceptance as a public-alpha limitati…
+...
+af74949
+docs: describe the limitations page as it is, and soften the match cl…
+...
+24526a2
+docs: point the recurring-issues runbook at the known-limitations page (
+...
+92a8983
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:rendererRendering pipelineRendering pipelineneeds-adrRequires an approved design record before implementationRequires an approved design record before implementationpriority:P1High priorityHigh priorityprogram:prod-readyProduction-readiness program (audit 2026-07-07)Production-readiness program (audit 2026-07-07)user-facingDirectly affects external users, docs, or public repo surfaceDirectly affects external users, docs, or public repo surface
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

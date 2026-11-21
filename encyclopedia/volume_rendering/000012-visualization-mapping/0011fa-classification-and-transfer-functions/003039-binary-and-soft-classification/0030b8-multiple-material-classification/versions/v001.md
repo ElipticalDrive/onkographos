@@ -1,0 +1,60 @@
+# Multiple Material Classification
+Also called: Multi-material classification
+
+## Overview
+Multiple Material Classification is a technique for segmenting and rendering more than one material class within a volume simultaneously, allowing distinct opacity and color assignments for each [S1]. It solves the problem of distinguishing overlapping or adjacent materials that may share similar scalar intensities by employing multiple independent classifiers [S1]. Unlike [Binary Classification](931-binary-classification.md), which isolates a single target against a background, this method generates separate classification results for each material, which are then composited during rendering [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input**: A scalar volume dataset $V$ and a set of $N$ material classes $\{M_1, M_2, \dots, M_N\}$. For each class $M_i$, a set of training sample points $S_i$ is provided, typically acquired via user interaction (e.g., painting) [S1].
+*   **Output**: A set of $N$ classification maps (or transfer function parameters), one for each material class, used to determine opacity and color during rendering [S1].
+
+**Data Structures**
+The method maintains $N$ separate classifiers. Each classifier $C_i$ is defined by its specific training set $S_i$ and the resulting classification function parameters. The structure of the classifier itself depends on the underlying classification algorithm (e.g., the intelligent system approach described in [S1]), but the multi-material extension requires storing these $N$ instances independently [S1].
+
+**Steps**
+1.  **Initialize Classifiers**: Create $N$ distinct classifiers, one for each target material class $M_i$.
+2.  **Train Classifiers**: For each material class $M_i$, perform the training process using its specific sample set $S_i$. The training algorithm learns the statistical properties or decision boundaries for that specific material [S1].
+    *   *Note*: Training is performed only on the newest material class being added. The training time remains equivalent to that of a single-material classification, regardless of the total number of materials $N$ [S1].
+3.  **Render Volume**: Perform volume rendering using multiple passes, one for each material class $M_i$.
+    *   In each pass $i$, evaluate the volume data against classifier $C_i$ to determine the opacity $\alpha_i$ and color $c_i$ for each voxel or sample point [S1].
+    *   Composite the results of all $N$ passes to produce the final image, allowing materials to be displayed with different opacities (e.g., high opacity for a target organ, low opacity for context) [S1].
+
+**Formulas**
+Let $V(\mathbf{x})$ be the scalar value at position $\mathbf{x}$.
+For each material class $i \in \{1, \dots, N\}$, the classification function $f_i$ maps the input data to an opacity $\alpha_i$:
+$$ \alpha_i(\mathbf{x}) = f_i(V(\mathbf{x}), \text{params}_i) $$
+where $\text{params}_i$ are the parameters learned from the training set $S_i$ [S1].
+
+The final pixel color $C_{final}$ is computed by compositing the contributions from all $N$ materials. Assuming standard front-to-back alpha compositing across the $N$ material layers (or passes):
+$$ C_{final} = \sum_{i=1}^{N} c_i \cdot \alpha_i \cdot \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+where $c_i$ is the color assigned to material $i$ [S1, G].
+
+**Parameters**
+*   **Number of Materials ($N$)**: The count of distinct material classes to be classified.
+*   **Training Samples ($S_i$)**: The number of sample points provided by the user for each material. The sources do not specify a minimum or typical count, only that they are "groups of sample points" [S1].
+
+**Edge Cases and Pitfalls**
+*   **Intensity Overlap**: Materials with similar scalar intensities (e.g., brain tissue near the skull) may be difficult to distinguish without careful sample selection or advanced classification techniques [S1].
+*   **Rendering Complexity**: Rendering requires $N$ passes or a combined evaluation of $N$ classifiers, increasing computational cost linearly with the number of materials [S1].
+
+## Subtopics
+
+### [Graph Construction for Multi-material Segmentation](8290-graph-construction-for-multi-material-segmentation.md)
+This variant uses a graph-based approach where a terminal node $s$ represents the specific material $i$ to be classified in the current iteration, and a terminal node $t$ represents the collection of all other materials ($\bar{M}$) [8290-graph-construction-for-multi-material-segmentation.md]. It is chosen when a min-cut/max-flow optimization is preferred over statistical classification for separating a target material from the rest of the volume.
+
+### Multi-sample Transfer Function for Material Classification
+This method extends the classification domain by using the sample's scalar value and additional scalar values read along the gradient direction to specify color and opacity [S2]. It is designed to classify voxels at transitions between materials with similar densities (e.g., wood and air) by considering the values on both sides of a boundary [S2]. It is chosen when conventional 1D transfer functions misclassify transition regions (e.g., labeling regions surrounding branches as leaves due to blur, resulting in a "moss-like" appearance) [S2]. It is better suited than gradient magnitude estimation for non-linear variations in scalar values at material transitions because it accounts for the actual distribution of scalar values directly, at the cost of additional scalar value reads [S2].
+
+## Operating characteristics
+*   **Time Complexity**: Training time is $O(1)$ relative to the number of materials $N$, as it is performed only for the newest class [S1]. Rendering time is $O(N \cdot V)$, where $V$ is the number of voxels, due to the multiple passes or classifiers required [S1].
+*   **Memory Complexity**: $O(N)$ to store the parameters for $N$ classifiers [S1].
+*   **Strengths**: Allows flexible visualization of multiple structures with independent opacity controls; training efficiency does not degrade with more materials [S1].
+*   **Limitations**: Requires multiple rendering passes; susceptible to misclassification if materials have overlapping intensity distributions and insufficient training data [S1].
+
+## Background
+The method was described by Westermann et al. in 2005 as an extension of their intelligent system approach to volume classification [S1]. It addresses the common visualization need to display multiple anatomical or material structures simultaneously, such as highlighting a specific organ while keeping surrounding context visible [S1].
+
+## Sources
+[S1] An Intelligent System Approach to Higher-Dimensional Classification of Volume Data, https://doi.org/10.1109/tvcg.2005.38, fetched 2026-10-27
+[S2] PDF Lighting Transfer Functions Using Gradient Aligned Sampling, https://www.cs.ucdavis.edu/~ma/papers/lightingtf.pdf, fetched 2026-10-29

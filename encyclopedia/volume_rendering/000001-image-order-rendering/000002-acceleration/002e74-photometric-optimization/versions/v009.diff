@@ -1,0 +1,137 @@
+--- v008.md
++++ v009.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The method minimizes a photometric loss function to update scene parameters. The standard emission-absorption model computes the color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$ as:
++The method minimizes a photometric loss function to update scene parameters [S1][S2]. The standard emission-absorption model computes the color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$ as [G], building on [Radiance-field optimization](44-radiance-field-optimization.md):
+ 
+ $$
+@@ -13,5 +13,5 @@
+ $$
+ 
+-where $\sigma_i$ is the density, $\delta_i$ is the step size, $\mathbf{c}_i$ is the color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance [44-radiance-field-optimization.md].
++where $\sigma_i$ is the density, $\delta_i$ is the step size, $\mathbf{c}_i$ is the color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance.
+ 
+ ### Inputs and Outputs
+@@ -20,5 +20,5 @@
+ 
+ ### Data Structures
+-*   **Voxel Grid:** Stores volume properties. For example, in [S1], a 3D grid of voxels stores extinction, albedo, and emission.
++*   **Voxel Grid:** Stores volume properties such as extinction, albedo, and emission [S1].
+ *   **Feature Grids:** In methods like EgoNeRF [S2], balanced spherical grids $G_\sigma, G_a$ store density and appearance features.
+ *   **Ray Batch:** A set of randomly sampled rays $\mathcal{R}$ for each optimization step [S2].
+@@ -31,5 +31,5 @@
+     \mathcal{L} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \| \hat{C}(\mathbf{r}) - C(\mathbf{r}) \|_2^2
+     $$
+-4.  **Regularization (Optional):** Apply regularization terms to improve stability and reduce artifacts.
++4.  **Regularization (Optional):** Apply regularization terms to improve stability and reduce artifacts [S1][S2].
+     *   **Laplacian Regularizer:** In [S1], a weak Laplacian regularizer is applied to introduce diffusion between neighboring voxels, reducing stripe and edge artifacts without smoothing intricate detail.
+     *   **Total Variation (TV) Loss:** In [S2], TV loss is applied to feature grids to reduce noise, especially for real-world datasets with imperfect camera poses.
+@@ -55,4 +55,12 @@
+ ### Pseudocode
+ ```python
++class Ray:
++    def __init__(self, camera_id, origin, direction, u, v):
++        self.camera_id = camera_id
++        self.origin = origin
++        self.direction = direction
++        self.u = u
++        self.v = v
++
+ def photometric_optimization(scene_params, target_images, camera_poses, num_iterations):
+     """
+@@ -84,17 +92,26 @@
+     return scene_params
+ 
+-def sample_rays(images, poses):
+-    # Returns a batch of rays sampled uniformly from the image plane for each pose
+-    return [(pose, random_pixel_coords()) for _ in range(batch_size)]
++def sample_rays(images, poses, batch_size=256):
++    """Sample rays uniformly from the image plane for each pose."""
++    rays = []
++    for _ in range(batch_size):
++        pose_idx = random.randint(0, len(poses) - 1)
++        u, v = random.uniform(0, 1), random.uniform(0, 1)
++        origin = poses[pose_idx].cam_to_world[:3, 3]
++        direction = poses[pose_idx].cam_to_world[:3, :3] @ np.array([u - 0.5, v - 0.5, 1.0])
++        rays.append(Ray(pose_idx, origin, direction, u, v))
++    return rays
+ 
+ def volume_render(rays, params):
+-    # Computes color using alpha compositing along each ray
++    """Computes color using alpha compositing along each ray."""
+     colors = []
+     for ray in rays:
+         T = 1.0
+         color = np.zeros(3)
+-        for step in ray.steps:
+-            sigma, c = params.query(step.position)
+-            alpha = 1.0 - np.exp(-sigma * step.delta)
++        for step in range(params.num_steps):
++            t = step * params.step_size
++            pos = ray.origin + ray.direction * t
++            sigma, c = params.query(pos)
++            alpha = 1.0 - np.exp(-sigma * params.step_size)
+             color += T * alpha * c
+             T *= (1.0 - alpha)
+@@ -103,5 +120,6 @@
+ 
+ def get_ground_truth_colors(rays, images):
+-    return np.array([images[ray.camera_id][ray.pixel_coords] for ray in rays])
++    """Retrieve ground truth colors for sampled pixels."""
++    return np.array([images[ray.camera_id][ray.u, ray.v] for ray in rays])
+ 
+ def mean_squared_error(rendered, ground_truth):
+@@ -109,21 +127,25 @@
+ 
+ def laplacian_regularization(params):
+-    # Weak Laplacian regularizer for diffusion between neighboring voxels
+-    return np.sum(np.diff(params.grid, axis=0) ** 2) + \
+-           np.sum(np.diff(params.grid, axis=1) ** 2) + \
+-           np.sum(np.diff(params.grid, axis=2) ** 2)
++    """Weak Laplacian regularizer for diffusion between neighboring voxels."""
++    grid = params.grid
++    diff_x = np.diff(grid, axis=0)
++    diff_y = np.diff(grid, axis=1)
++    diff_z = np.diff(grid, axis=2)
++    return np.sum(diff_x ** 2) + np.sum(diff_y ** 2) + np.sum(diff_z ** 2)
+ 
+ def total_variation_loss(params):
+-    # Total variation loss to reduce noise in feature grids
+-    return np.sum(np.abs(np.diff(params.grid, axis=0))) + \
+-           np.sum(np.abs(np.diff(params.grid, axis=1))) + \
+-           np.sum(np.abs(np.diff(params.grid, axis=2)))
++    """Total variation loss to reduce noise in feature grids."""
++    grid = params.grid
++    diff_x = np.diff(grid, axis=0)
++    diff_y = np.diff(grid, axis=1)
++    diff_z = np.diff(grid, axis=2)
++    return np.sum(np.abs(diff_x)) + np.sum(np.abs(diff_y)) + np.sum(np.abs(diff_z))
+ 
+ def compute_gradients(loss, params):
+-    # Computes gradients via automatic differentiation or conjugate gradient solver
++    """Computes gradients via automatic differentiation or conjugate gradient solver."""
+     return params.compute_gradient(loss)
+ 
+ def update_parameters(params, gradients):
+-    # Updates parameters using conjugate gradient or Adam optimizer
++    """Updates parameters using conjugate gradient or Adam optimizer."""
+     return params.apply_optimizer(gradients)
+ ```
+@@ -159,6 +181,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Scales with the number of voxels, ray marching steps, and number of views. For 128^3 voxels, 256 ray marching steps, and 460K constraint pixels (2 views), the result is computed in less than two seconds. With 2.3M constraint pixels (10 views), computation takes seven seconds [S1].
+-*   **Memory Complexity:** Depends on the scene representation. Voxel grids require $O(V)$ memory where $V$ is the number of voxels. Neural networks require memory proportional to the number of parameters.
++*   **Time Complexity:** Scales with the number of voxels, ray marching steps, and number of views [S1]. For 128^3 voxels, 256 ray marching steps, and 460K constraint pixels (2 views), the result is computed in less than two seconds [S1]. With 2.3M constraint pixels (10 views), computation takes seven seconds [S1].
++*   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:** Optimizing for 16 light coefficients on a 128^3 volume with 2.3M constraint pixels (10 views) takes around three seconds [S1].
+ *   **Scaling:** Volume optimization can reconstruct higher frequencies than light optimization because it modifies the volume locally [S1]. EgoNeRF does not need a coarse-to-fine reconstruction approach for robust optimization because the balanced feature grid guarantees a nearly uniform ray-grid hitting rate [S2].
+@@ -169,5 +191,5 @@
+ 
+ ## Background
+-Photometric optimization for volume rendering was introduced in the context of volume stylization and property manipulation. The method was proposed by [S1] for static volume stylization using a painting metaphor, allowing users to modify albedo, emission, and extinction to match target images. It has since been applied to various domains, including cloud synthesis [S4], egocentric view synthesis [S2], dynamic scene representation [S5], and inverse rendering [S3]. It is used for adding imprinted logos to smoke volumes, modifying volcano smoke appearance, and reconstructing extinction for refractive volumes [S1].
++Photometric optimization for volume rendering was introduced in the context of volume stylization and property manipulation [S1]. The method was proposed by [S1] for static volume stylization using a painting metaphor, allowing users to modify albedo, emission, and extinction to match target images. It has since been applied to various domains, including cloud synthesis [S4], egocentric view synthesis [S2], dynamic scene representation [S5], and inverse rendering [S3]. It is used for adding imprinted logos to smoke volumes, modifying volcano smoke appearance, and reconstructing extinction for refractive volumes [S1].
+ 
+ ## Sources

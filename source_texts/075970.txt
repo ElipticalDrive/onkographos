@@ -1,0 +1,314 @@
+
+ (This Image is What I want to implement) 
+ I am attempting Post Processing using Compute Shader to implement Light Shaft for multiple Spot Lights in the DX12 framework. 
+ The first thing I tried was the method at the following link: https://gitlab.com/tomasoh/100_procent_more_volume/-/blob/master/shaders/volumetric.frag 
+ It's a very complicated and hard-to-understand kind of shader, but it's basically built on the premise of using multiple lights, so it's a kind of example for the purpose. 
+ However, since the game I'm making has 32 light source limitations, considering that excessive amount of Frame Drop will occur in the part of calculating Visibility by making Shadow Map for all light sources, I decided to implement Visibility as 1.0 Constant and did not get the desired result. (Of course it's a result.) 
+ Down below is how I did this thing: 
+ #include "lighting.hlsl"
+
+Texture2D<float4> inputTexture : register(t0);
+Texture2D<float> depthTexture : register(t1);
+RWTexture2D<float4> outputTexture : register(u0);
+
+#define PI 3.141592653589793238f
+
+cbuffer VolumetricCB : register(b1)
+{
+    float absorptionTau : packoffset(c0);
+    float3 absorptionColor : packoffset(c0.y);
+    int scatteringSamples : packoffset(c1.x);
+    float scatteringTau : packoffset(c1.y);
+    float scatteringZFar : packoffset(c1.z);
+    
+    float3 scatteringColor : packoffset(c2);
+    
+    matrix gInvProj : packoffset(c3);
+    matrix gInvView : packoffset(c7);
+    float3 gCameraPos : packoffset(c11);
+    
+    Light gLights[NUM_LIGHTS] : packoffset(c12);
+}
+
+float random(float2 co)
+{
+    return frac(sin(dot(co.xy, float2(12.9898, 78.233))) * 43758.5453123);
+}
+
+
+float3 PixelWorldPos(float depthValue, int2 pixel)
+{
+    uint width, height;
+    inputTexture.GetDimensions(width, height);
+    
+    float2 fPixel = float2(pixel.x, pixel.y);
+    
+    float x = (fPixel.x / width * 2) - 1;
+    float y = (fPixel.y / height * (-2)) + 1;
+    float z = depthValue;
+    
+    float4 ndcCoords = float4(x, y, z, 1.0f);
+
+    float4 p = mul(ndcCoords, gInvProj);
+    
+    p /= p.w;
+    
+    float4 worldCoords = mul(p, gInvView);
+    
+    return worldCoords.xyz;
+}
+
+float3 absorptionTransmittance(float dist)
+{
+    return absorptionColor * exp(-dist * (absorptionTau + scatteringTau));
+}
+
+float phaseFunction(float3 inDir, float3 outDir)
+{
+    float cosAngle = dot(inDir, outDir) / (length(inDir) * length(outDir));
+    float x = (1.0 + cosAngle) / 2.0;
+    float x2 = x * x;
+    float x4 = x2 * x2;
+    float x8 = x4 * x4;
+    float x16 = x8 * x8;
+    float x32 = x16 * x16;
+    float nom = 0.5 + 16.5 * x32;
+    float factor = 1.0 / (4.0 * PI);
+    return nom * factor;
+}
+
+float3 volumetricScattering(float3 worldPosition, Light light)
+{
+    float3 result = float3(0.0, 0.0, 0.0);
+    float3 camToFrag = worldPosition - gCameraPos;
+    if (length(camToFrag) > scatteringZFar)
+    {
+        camToFrag = normalize(camToFrag) * scatteringZFar;
+    }
+    float3 deltaStep = camToFrag / (scatteringSamples + 1);
+    float3 fragToCamNorm = normalize(gCameraPos - worldPosition);
+    float3 x = gCameraPos;
+    
+    float rand = random(worldPosition.xy + worldPosition.z);
+    x += (deltaStep * rand);
+    
+    for (int i = 0; i < scatteringSamples; ++i)
+    {
+        float visibility = 1.0;
+        float3 lightToX = x - light.Position;
+        float lightDist = length(lightToX);
+        float omega = 4 * PI * lightDist * lightDist;
+        float3 Lin = absorptionTransmittance(lightDist) * visibility * light.Diffuse * light.SpotPower / omega;
+        float3 Li = Lin * scatteringTau * scatteringColor * phaseFunction(normalize(lightToX), fragToCamNorm);
+        result += Li * absorptionTransmittance(distance(x, gCameraPos)) * length(deltaStep);
+        x += deltaStep;
+    }
+    
+    return result;
+}
+
+[numthreads(32, 32, 1)]
+void CS(uint3 dispatchID : SV_DispatchThreadID)
+{
+    int2 pixel = int2(dispatchID.x, dispatchID.y);
+    
+    float4 volumetricColor = float4(0.0, 0.0, 0.0, 1.0);
+    float depthValue = depthTexture[pixel].r;
+    float3 worldPosition = PixelWorldPos(depthValue, pixel);
+    
+    float fragCamDist = distance(worldPosition, gCameraPos);
+    
+    for (int i = 0; i < NUM_LIGHTS; ++i)
+    {
+        if (gLights[i].Type == SPOT_LIGHT && gLights[i].FalloffEnd > length(gLights[i].Position - worldPosition))
+            volumetricColor += float4(volumetricScattering(worldPosition, gLights[i]), 0.0);
+    }
+    
+    outputTexture[pixel] = volumetricColor + inputTexture[pixel];
+}  
+ 
+ 
+ 
+ (AbsorptionTau = -0.061f, ScatteringTau = 0.059f)
+All these Codes for that Tiny Spot... 
+ The second method was shown in Chapter 13 of GPU GEM3.
+It was a method of drawing only Light Source on a separate Render Target, processing the Render Target using Post Processing Shder to create light scattering, and then merging it with a back buffer. (At least that's how I understand it.) 
+ However, this method was designed only for one very strong light, and to fix it, I modified the code as below, but it didn't work well. 
+ [numthreads(32, 32, 1)]
+void CS(uint3 dispatchID : SV_DispatchThreadID)
+{    
+
+    uint2 pixel = dispatchID.xy;
+    uint width, height;
+    inputTexture.GetDimensions(width, height);
+    float4 result = inputTexture[pixel];
+
+    for (int i = 0; i < NUM_LIGHTS; ++i)
+    {
+        if(gLights[i].Type == SPOT_LIGHT)
+        {
+            float2 texCoord = float2(pixel.x / width, pixel.y / height);
+        
+            float2 deltaTexCoord = (texCoord - mul(mul(float4(gLights[i].Position, 1.0f), gView), gProj).xy);
+        
+            deltaTexCoord *= 1.0f / NUM_SAMPLES * Density;
+        
+            float3 color = inputTexture[pixel].rgb;
+        
+            float illuminationDecay = 1.0f;
+        
+            for (int j = 0; j < NUM_SAMPLES; j++)
+            {
+                texCoord -= deltaTexCoord;
+                
+                uint2 modifiedPixel = uint2(texCoord.x * width, texCoord.y * height);
+                float3 sample = inputTexture[modifiedPixel].rgb;
+                sample *= illuminationDecay * Weight;
+                color += sample;
+                illuminationDecay *= Decay;
+            }
+            result += float4(color * Exposure, 1);
+        }
+    }
+    outputTexture[pixel] = result;
+}
+ 
+ this just 'Blur' these light source map, and surely it's not what I wanted. 
+ Is there a similar kind of example to the implementation that I want, or is there a simpler way to do this? I've spent a week on this issue, but I haven't achieved much. 
+ edit :
+I did it! but there's some error about direction of light volume. 
+ [numthreads(32, 32, 1)]
+void CS(uint3 dispatchID : SV_DispatchThreadID)
+{
+    float4 result = { 0.0f, 0.0f, 0.0f, 0.0f };
+    
+    uint2 pixel = dispatchID.xy;
+    
+    uint width, height;
+    
+    inputTexture.GetDimensions(width, height);
+    
+    float2 texCoord = (float2(pixel) + 0.5f) / float2(width, height);
+    float depth = depthTexture[pixel].r;
+    float3 screenPos = GetPositionVS(texCoord, depth);
+    float3 rayEnd = float3(0.0f, 0.0f, 0.0f);
+    
+    const uint sampleCount = 16;
+    const float stepSize = length(screenPos - rayEnd) / sampleCount;
+    
+    // Perform ray marching to integrate light volume along view ray:
+    [loop]
+    for (uint i = 0; i < NUM_LIGHTS; ++i)
+    {
+        [branch]
+        if (gLights[i].Type == SPOT_LIGHT)
+        {
+            float3 V = float3(0.0f, 0.0f, 0.0f) - screenPos;
+            float cameraDistance = length(V);
+        
+            V /= cameraDistance;
+    
+            float marchedDistance = 0;
+            float accumulation = 0;
+        
+            float3 P = screenPos + V * stepSize * dither(pixel.xy);
+        
+            for (uint j = 0; j < sampleCount; ++j)
+            {
+                float3 L = mul(float4(gLights[i].Position, 1.0f), gView).xyz - P;
+                const float dist2 = dot(L, L);
+                const float dist = sqrt(dist2);
+                L /= dist;
+
+                //float3 viewDir = mul(float4(gLights[i].Direction, 1.0f), gView).xyz;
+                float3 viewDir = gLights[i].Direction;
+                
+                float SpotFactor = dot(L, normalize(-viewDir));
+                float spotCutOff = gLights[i].outerCosine;
+
+                [branch]
+                if (SpotFactor > spotCutOff)
+                {
+                    float attenuation = DoAttenuation(dist, gLights[i].Range);
+                
+                    float conAtt = saturate((SpotFactor - gLights[i].outerCosine) / (gLights[i].innerCosine - gLights[i].outerCosine));
+                    conAtt *= conAtt;
+
+                    attenuation *= conAtt;
+                    
+                    attenuation *= ExponentialFog(cameraDistance - marchedDistance);
+                    
+                    accumulation += attenuation;
+                }
+
+                marchedDistance += stepSize;
+                P = P + V * stepSize;
+            }
+            accumulation /= sampleCount;
+    
+            result += max(0, float4(accumulation * gLights[i].Color * gLights[i].VolumetricStrength, 1));
+        }
+    }
+    
+    outputTexture[pixel] = inputTexture[pixel] + result;
+}
+ 
+ this is my compute shader, but when I doesn't multiply view matrix to direction, it goes wrong like this :
+ 
+ as you can see, street lamp's volume direction is good, but vehicle's headlight's volume direction is different from it's spot light direction. 
+ and when I multiply view matrix to direction :
+ 
+ head lights gone wrong AND street lamp goes wrong too. 
+ I still finding where's wrong in my cpu codes, but I haven't find anything. 
+ this might be helpful. here's my shader code about spot lighting. 
+ float CalcAttenuation(float d, float falloffStart, float falloffEnd)
+{
+    return saturate((falloffEnd - d) / (falloffEnd - falloffStart));
+}
+
+float3 BlinnPhongModelLighting(float3 lightDiff, float3 lightVec, float3 normal, float3 view, Material mat)
+{
+    const float m = mat.Exponent;
+    const float f = ((mat.IOR - 1) * (mat.IOR - 1)) / ((mat.IOR + 1) * (mat.IOR + 1));
+    const float3 fresnel0 = float3(f, f, f);
+    
+    float3 halfVec = normalize(view + lightVec);
+    
+    float roughness = (m + 8.0f) * pow(saturate(dot(halfVec, normal)), m) / 8.0f;
+    float3 fresnel = CalcReflectPercent(fresnel0, halfVec, lightVec);
+    float3 specular = fresnel * roughness;
+    specular = specular / (specular + 1.0f);
+    
+    return (mat.Diffuse.rgb + specular * mat.Specular) * lightDiff;
+}
+float3 ComputeSpotLight(Light light, Material mat, float3 pos, float3 normal, float3 view)
+{
+    float3 result = float3(0.0f, 0.0f, 0.0f);
+    bool bCompute = true;
+    
+    float3 lightVec = light.Position - pos;
+    
+    float d = length(lightVec);
+    
+    if (d > light.FalloffEnd)
+        bCompute = false;
+    
+    if (bCompute)
+    {
+        lightVec /= d;
+    
+        float ndotl = max(dot(lightVec, normal), 0.0f);
+        float3 lightDiffuse = light.Diffuse * ndotl;
+    
+        float att = CalcAttenuation(d, light.FalloffStart, light.FalloffEnd);
+        lightDiffuse *= att;
+    
+        float spotFactor = pow(max(dot(-lightVec, light.Direction), 0.0f), light.SpotPower);
+        lightDiffuse *= spotFactor;
+
+        result = BlinnPhongModelLighting(lightDiffuse, lightVec, normal, view, mat);
+    }
+    
+    return result;
+}
+ 

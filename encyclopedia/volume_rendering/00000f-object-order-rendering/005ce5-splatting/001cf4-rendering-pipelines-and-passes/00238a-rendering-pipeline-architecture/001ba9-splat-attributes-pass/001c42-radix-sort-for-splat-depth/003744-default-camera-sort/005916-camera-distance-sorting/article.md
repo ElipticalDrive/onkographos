@@ -1,0 +1,81 @@
+# Camera Distance Sorting
+
+Also called: Mesh Sorting by Camera Distance
+
+## Overview
+Camera Distance Sorting is a method for ordering visible meshes in a scene based on their proximity to the camera. It solves the problem of correct rendering order for opaque or transparent geometry by ensuring that closer objects are processed appropriately relative to further ones. It sets itself apart from general-purpose sorting by specifically utilizing squared Euclidean distance to the camera position as the primary key, optimizing for the common case of perspective projection where depth correlates with distance.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A list of visible meshes (or splats), each with a known position in world space and a camera position.
+- Output: The same list of meshes, sorted in ascending order of distance from the camera.
+
+**Data Structures:**
+- Mesh: Contains a position field (e.g., `glm::vec3` or `float[3]`) representing its center or origin.
+- Camera: Contains a position field (e.g., `glm::vec3` or `float[3]`).
+
+**Steps:**
+1. For each mesh in the visible list, calculate the squared distance between the mesh's position and the camera's position.
+2. Sort the list of meshes based on these calculated squared distances in ascending order (smallest distance first).
+
+**Formulas:**
+Let $P_m$ be the position of a mesh and $P_c$ be the position of the camera. The squared distance $D^2$ is calculated as:
+$$ D^2 = \| P_m - P_c \|^2 = (x_m - x_c)^2 + (y_m - y_c)^2 + (z_m - z_c)^2 $$
+where $(x_m, y_m, z_m)$ and $(x_c, y_c, z_c)$ are the respective coordinates.
+
+**Parameters:**
+- Sorting order: Ascending (nearest to furthest).
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Using squared distance avoids the computational cost and potential precision issues of square roots, as the relative order remains unchanged.
+- **Identical Distances:** The sort is not guaranteed to be stable unless a stable sorting algorithm is used. Ties in distance may result in arbitrary ordering among meshes at the same distance.
+- **Camera Position:** The camera position must be in the same coordinate space as the mesh positions.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def camera_distance_sort(meshes, camera_position):
+    """
+    Sorts a list of meshes by their squared distance to the camera.
+    
+    Args:
+        meshes: List of objects with a 'position' attribute (vec3).
+        camera_position: The camera's position (vec3).
+        
+    Returns:
+        List of meshes sorted by ascending distance to the camera.
+    """
+    # Calculate squared distance for each mesh
+    # Using a list of tuples (squared_distance, mesh_index, mesh) to preserve original reference
+    distance_list = []
+    for i, mesh in enumerate(meshes):
+        dx = mesh.position.x - camera_position.x
+        dy = mesh.position.y - camera_position.y
+        dz = mesh.position.z - camera_position.z
+        squared_dist = dx*dx + dy*dy + dz*dz
+        distance_list.append((squared_dist, i, mesh))
+    
+    # Sort by squared distance (ascending)
+    # Note: Python's sort is stable, so original order is preserved for ties
+    distance_list.sort(key=lambda x: x[0])
+    
+    # Extract sorted meshes
+    sorted_meshes = [item[2] for item in distance_list]
+    
+    return sorted_meshes
+```
+
+## Subtopics
+## Operating characteristics
+- **Time Complexity:** $O(N \log N)$ for sorting $N$ meshes, where each distance calculation is $O(1)$.
+- **Memory Complexity:** $O(N)$ to store the distance values during sorting.
+- **Performance:** Efficient for moderate numbers of meshes. The avoidance of square roots makes the distance calculation very fast.
+- **Strengths:** Simple to implement, computationally inexpensive, effective for perspective cameras.
+- **Limitations:** Does not account for occlusion or depth buffer interactions directly; assumes distance is a sufficient proxy for rendering order. Not suitable for orthographic cameras where depth is independent of distance in the same way.
+
+## Background
+This method is derived from the `leven` project by Nick Gildea, which implements a voxel-based rendering engine. The specific step of sorting visible meshes by squared distance to the camera is documented in the project's source code and associated notes [S1, unofficial]. It represents a standard optimization in real-time rendering pipelines where depth sorting is required for transparency or correct occlusion handling.
+
+## Sources
+[S1] nickgildea/leven, https://github.com/nickgildea/leven, fetched 2026-10-26 (unofficial)

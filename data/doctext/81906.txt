@@ -1,0 +1,4215 @@
+# NeRF MLP Implementation
+
+A PyTorch implementation of Neural Radiance Fields (NeRF) using Multi-Layer Perceptrons (MLPs), optimized for Apple Silicon (MPS) and designed for benchmarking different raymarching techniques.
+
+## References
+
+- **Original Paper**: [NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis](https://arxiv.org/pdf/2003.08934) (Mildenhall et al., ECCV 2020)
+- **Official Implementation**: [bmild/nerf](https://github.com/bmild/nerf) (TensorFlow)
+
+## Overview
+
+This project implements the core NeRF architecture from the original paper using PyTorch, with several key features:
+
+### MLP Architecture Description
+
+The neural network is a **fully connected Multi-Layer Perceptron (MLP)** that takes 5D coordinates (3D position + 2D viewing direction) as input and outputs color and density for volume rendering. Here's how it works:
+
+1. **Input Processing**:
+
+   - 3D positions are encoded using positional encoding with 10 frequency bands (L=10)
+   - 2D viewing directions are encoded with 4 frequency bands (L=4)
+   - This transforms the inputs from 3+2=5 dimensions to 63+27=90 dimensions
+
+2. **Network Structure**:
+
+   - **8 fully connected layers** with 256 hidden units each
+   - **ReLU activations** between layers
+   - **Skip connections** at layer 4 (residual connections for better gradient flow)
+   - **Two-stage output**: density (σ) and view-dependent color (RGB)
+
+3. **Volume Rendering**:
+   - Uses classical volume rendering to integrate colors and densities along rays
+   - Supports hierarchical sampling (coarse + fine networks)
+   - Dynamic near/far plane calculation based on camera positions
+
+The MLP acts as a continuous 3D representation of the scene, allowing novel view synthesis by querying the network at any 3D point and viewing direction.
+
+## Project Structure
+
+```
+nerf-mlp/
+├── nerfmlp/                    # Core NeRF implementation
+│   ├── __init__.py            # Package initialization
+│   ├── model.py               # NeRF MLP model architecture
+│   ├── data.py                # Dataset loading and processing
+│   └── renderer.py            # Volume rendering implementation
+├── scripts/                   # Training and utility scripts
+│   ├── train.py               # Main training script with validation
+│   ├── train_only.py          # Training-only script (no validation)
+│   ├── render_example.py      # Test rendering script
+│   ├── plot_training_progress.py  # Real-time training progress plotting
+│   ├── view_progress.py       # Quick progress viewer
+│   └── README_plotting.md     # Plotting tools documentation
+├── data/                      # Dataset files
+│   └── lego/                  # Lego dataset (synthetic)
+├── outputs/                   # All outputs
+│   ├── checkpoints/           # Model checkpoints and metrics
+│   └── test_retrain/          # Test training outputs
+├── example/                   # Example code and weights
+└── requirements.txt           # Python dependencies
+```
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.8+
+- PyTorch 2.0+ with MPS support
+- Apple Silicon Mac (M1/M2/M3) for MPS acceleration
+- NumPy, Matplotlib, scikit-image
+
+### Installation
+
+```bash
+# Clone the repository
+git clone <repository-url>
+cd nerf-mlp
+
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+### Training
+
+```bash
+# Train with default settings (Lego dataset)
+python scripts/train.py --datadir data/lego
+
+# Train with custom settings
+python scripts/train.py \
+    --datadir data/lego \
+    --img_wh 512 512 \
+    --batch_size 512 \
+    --iters 200000 \
+    --lr 5e-4 \
+    --save_dir outputs/my_experiment
+
+# Training-only (no validation) for quick testing
+python scripts/train_only.py --datadir data/lego --iters 5000
+```
+
+### Resuming Training
+
+The training script supports automatic resumption from checkpoints, allowing you to continue training if it's interrupted:
+
+```bash
+# Resume from latest checkpoint (recommended)
+python scripts/train.py --datadir data/lego --resume outputs/checkpoints/metrics_latest.pth
+
+# Resume from best model
+python scripts/train.py --datadir data/lego --resume outputs/checkpoints/model_best.pth
+
+# Resume from specific step
+python scripts/train.py --datadir data/lego --resume outputs/checkpoints/model_5000_latest.pth
+
+# Resume with different parameters (e.g., continue for more iterations)
+python scripts/train.py --datadir data/lego --iters 300000 --lr 1e-4 --resume outputs/checkpoints/metrics_latest.pth
+```
+
+**Available Checkpoints for Resumption:**
+
+- `metrics_latest.pth` - Complete checkpoint (model + optimizer + metrics) - **Recommended**
+- `model_best.pth` - Best model based on validation PSNR
+- `model_{step}_latest.pth` - Model at specific step (every 1000 steps)
+- `model_{step}.pth` - Model at specific step (every 10000 steps)
+- `model_final.pth` - Final model after training
+
+**What Gets Restored:**
+
+- Model weights and optimizer state
+- Training step number (continues from exact point)
+- All training and validation metrics history
+- Timing data for accurate ETA calculations
+- Best validation PSNR tracking
+
+**Important Notes:**
+
+- Use the same dataset path when resuming
+- You can change training parameters (learning rate, iterations, etc.) when resuming
+- Progress will be shown: "Resuming training from step X (target: Y)"
+- ETA calculations remain accurate since timing data is preserved
+
+### Monitoring Training Progress
+
+```bash
+# Quick status check
+python scripts/view_progress.py
+
+# Generate training plots
+python scripts/plot_training_progress.py
+
+# Live monitoring with auto-updates
+python scripts/plot_training_progress.py --live
+```
+
+### Rendering Test Images
+
+```bash
+# Render test images from best checkpoint
+python scripts/render_example.py
+
+# Render from specific checkpoint
+python scripts/render_example.py --model_path outputs/checkpoints/model_1000_latest.pth
+
+# Render with custom resolution
+python scripts/render_example.py --img_wh 400 400
+
+# Render multiple views with custom output prefix
+python scripts/render_example.py --out_prefix outputs/my_test --num_views 10
+```
+
+**Features:**
+
+- **Spherical Camera Detection**: Automatically handles datasets with cameras on spheres
+- **Progress Testing**: Test different checkpoints as training progresses
+- **Multiple Views**: Renders 5 different camera angles by default
+
+**Testing Training Progress:**
+
+```bash
+# Test every 1000 steps
+python scripts/render_example.py --model_path outputs/checkpoints/model_1000_latest.pth --out_prefix outputs/progress_1000
+
+# Test every 5000 steps
+python scripts/render_example.py --model_path outputs/checkpoints/model_5000_latest.pth --out_prefix outputs/progress_5000
+
+# Test best model so far
+python scripts/render_example.py --model_path outputs/checkpoints/model_best.pth --out_prefix outputs/progress_best
+```
+
+**Expected Results:**
+
+- **Early training (1000-5000 steps)**: Dark images - normal for early NeRF training
+- **Mid training (10,000-20,000 steps)**: Gradually brighter images as model learns
+- **Late training (50,000+ steps)**: Bright, colorful images with good detail
+
+## Configuration
+
+### Successful Training Configurations
+
+Based on extensive testing, here are the proven configurations that work well:
+
+#### **High Resolution Training (1024x1024)**
+
+```bash
+python scripts/train.py \
+    --datadir data/lego \
+    --img_wh 1024 1024 \
+    --batch_size 512 \
+    --lr 1e-4 \
+    --iters 200000
+```
+
+**Key Parameters:**
+
+- **Batch Size**: 512 (2x increase for 16x resolution increase)
+- **Learning Rate**: 1e-4 (4x reduction for stability)
+- **Expected PSNR**: 20-25+ dB after 20,000+ iterations
+- **Training Time**: ~4 hours for 200,000 iterations
+
+#### **Quick Testing (64x64)**
+
+```bash
+python scripts/train.py \
+    --datadir data/lego \
+    --img_wh 64 64 \
+    --batch_size 128 \
+    --iters 10000
+```
+
+**Key Parameters:**
+
+- **Batch Size**: 128 (proportional to resolution)
+- **Learning Rate**: 5e-4 (standard for low resolution)
+- **Expected PSNR**: 15-20 dB after 5,000+ iterations
+- **Training Time**: ~10 minutes for 10,000 iterations
+
+#### **Medium Resolution (512x512)**
+
+```bash
+python scripts/train.py \
+    --datadir data/lego \
+    --img_wh 512 512 \
+    --batch_size 256 \
+    --lr 2e-4 \
+    --iters 100000
+```
+
+### Training Parameters
+
+| Parameter              | Default             | Description                                |
+| ---------------------- | ------------------- | ------------------------------------------ |
+| `--datadir`            | Required            | Path to dataset directory                  |
+| `--img_wh`             | 1024 1024           | Image width and height                     |
+| `--batch_size`         | 256                 | Batch size (increase for lower resolution) |
+| `--iters`              | 200000              | Number of training iterations              |
+| `--lr`                 | 5e-4                | Learning rate                              |
+| `--save_dir`           | outputs/checkpoints | Directory to save checkpoints              |
+| `--quick_val_interval` | 1000                | Quick validation interval                  |
+| `--quick_val_res`      | 256 256             | Quick validation resolution                |
+| `--quick_val_subset`   | 10                  | Number of images for quick validation      |
+| `--full_val_interval`  | 10000               | Full validation interval                   |
+| `--resume`             | None                | Path to checkpoint to resume from          |
+
+### Model Architecture Details
+
+- **Positional Encoding**: L=10 for position (3D → 63D), L=4 for view direction (3D → 27D)
+- **Network Depth**: 8 fully connected layers
+- **Hidden Units**: 256 per layer
+- **Skip Connections**: At layer 4 for better gradient flow
+- **Activation**: ReLU
+- **Output**: RGB (3) + density (1) = 4 values per 3D point
+
+## Training Features
+
+### Progress Monitoring
+
+The training script provides comprehensive monitoring:
+
+- **Real-time Console Output**: Every 100 iterations shows current loss, PSNR, learning rate, gradient norm, memory usage, and iteration time
+- **Summary Reports**: Every 1000 iterations shows average training metrics and most recent validation results
+- **Validation**: Quick validation every 1000 iterations, full validation every 10000 iterations
+- **ETA Calculation**: Based on training steps only (excludes validation time for accuracy)
+
+### Metrics Tracked
+
+- **Training Loss**: MSE loss on training data
+- **Training PSNR**: Peak Signal-to-Noise Ratio on training data
+- **Validation Loss**: MSE loss on validation data
+- **Validation PSNR**: Peak Signal-to-Noise Ratio on validation data
+- **Validation SSIM**: Structural Similarity Index on validation data
+- **Iteration Times**: Time per training iteration
+- **Best Validation PSNR**: Highest PSNR achieved during training
+
+### Visualization Tools
+
+- **Convergence Plots**: Training vs validation loss and PSNR over time
+- **Overfitting Detection**: Shows gap between training and validation loss
+- **Performance Monitoring**: Iteration times and learning rate schedule
+- **Real-time Updates**: Live plotting during training
+
+## Outputs
+
+All outputs are saved to the `outputs/` directory:
+
+### Checkpoints (`outputs/checkpoints/`)
+
+- `model_best.pth`: Best model based on validation PSNR
+- `model_final.pth`: Final model after training
+- `model_<step>.pth`: Periodic checkpoints every 1000 steps
+- `metrics_latest.json`: Latest training metrics
+- `comprehensive_metrics.json`: Complete training history
+
+### Plots (`outputs/checkpoints/`)
+
+- `convergence_plot.png`: Training vs validation loss and PSNR
+- `comprehensive_metrics.png`: Multi-panel training overview
+- `training_progress.png`: Real-time progress monitoring
+
+### Rendered Images (`outputs/`)
+
+- `rendered_example_*.png`: Test renders from trained model
+
+## Performance Optimization
+
+### Apple Silicon (M1/M2/M3, including MacBook M3 Pro) Support
+
+This project is fully compatible with Apple Silicon, including the 2023 MacBook M3 Pro (used by the author to complete this project), and requires no special concessions or model simplification:
+
+- **Device Selection:** Automatically uses Metal Performance Shaders (MPS) if available, with fallback to CPU. No CUDA-specific code is used.
+- **Batch Size Tuning:** Batch size is chosen to fit within the available unified memory. For 1024x1024 images, a batch size of 512 is optimal for the M3 Pro.
+- **Full Model Fidelity:** The model architecture and training resolution are identical to the original NeRF paper—no reduction in quality or complexity.
+- **No Platform-Specific Hacks:** All code is standard PyTorch/NumPy, relying on Apple's official MPS backend. No custom Metal kernels or manual memory management required.
+- **Performance Monitoring:** The training script prints memory usage and iteration time to help you monitor hardware utilization.
+
+**Summary:**
+You get the full NeRF experience on Apple Silicon, with high-quality results and no loss of fidelity. The only adjustment is batch size tuning, which is standard for any hardware platform.
+
+### Dynamic Near/Far Planes
+
+- Automatically calculates optimal near/far bounds from camera positions
+- Prevents the model from learning to output zeros everywhere
+- More robust than static near/far values
+
+### Validation Strategies
+
+- **Quick Validation**: Low resolution (256x256) on subset of images for fast feedback
+- **Full Validation**: High resolution on all validation images for accurate metrics
+- **Configurable Intervals**: Balance between monitoring frequency and training speed
+
+## Troubleshooting
+
+### Common Issues
+
+1. **White or Black Rendered Images**:
+
+   - **Cause**: Incorrect near/far plane calculation for spherical camera arrangements
+   - **Solution**: The renderer now automatically detects spherical cameras and uses scene-based near/far bounds
+   - **Detection**: Look for "📐 Detected spherical camera arrangement" in render output
+   - **Expected**: Near/far should be ~2.4-9.5 for Lego dataset (not 3.5-4.5)
+
+2. **Dark Rendered Images in Early Training**:
+
+   - **Cause**: Normal for early NeRF training (iterations 1,000-10,000)
+   - **Solution**: Continue training - images get brighter as model learns
+   - **Expected**: Images get brighter as training progresses (20,000+ iterations)
+
+3. **High Memory Usage**: Reduce batch size or image resolution
+4. **Slow Training**: Use lower resolution for quick experiments, increase batch size if memory allows
+5. **Poor Convergence**: Check learning rate, ensure validation data is properly loaded
+
+### Camera Position and Near/Far Plane Fix
+
+**Problem**: The original near/far calculation failed for datasets with spherical camera arrangements (like Lego), where all cameras are at the same distance from the scene center.
+
+**Symptoms**:
+
+- All cameras at distance 4.031 (perfect sphere)
+- Near/far range of only 1.0 units (3.531 to 4.531)
+- White or black rendered images
+- Training PSNR stuck at ~1.0 dB
+
+**Solution Implemented**:
+
+```python
+# Automatic detection of spherical camera arrangements
+if dist_std < 0.01:  # Cameras are on a sphere
+    scene_center = np.mean(positions, axis=0)
+    scene_radius = np.linalg.norm(positions - scene_center, axis=1).max()
+    near = max(0.1, scene_radius * 0.5)  # Start at half scene radius
+    far = scene_radius * 2.0  # Extend to twice scene radius
+```
+
+**Results**:
+
+- **Before**: Near=3.531, Far=4.531 (1.0 unit range)
+- **After**: Near=2.365, Far=9.458 (7.1 unit range)
+- **Training**: PSNR improved from 1.0 dB to 17+ dB
+- **Rendering**: No more white/black images
+
+### Performance Tips
+
+- Start with lower resolution (e.g., 256x256) for quick experiments
+- Use `train_only.py` for initial testing without validation overhead
+- Monitor memory usage and adjust batch size accordingly
+- Use the live plotting feature to catch issues early
+- For high resolution training, use the proven configurations above
+
+## Future Work
+
+This implementation serves as a foundation for benchmarking different raymarching techniques in GLSL shaders. Planned extensions include:
+
+- Web-based benchmarking interface
+- Multiple raymarching shader implementations
+- Performance comparison tools
+- Real-time rendering capabilities
+
+## Citation
+
+If you use this implementation in your research, please cite the original NeRF paper:
+
+```bibtex
+@inproceedings{mildenhall2020nerf,
+  title={NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis},
+  author={Ben Mildenhall and Pratul P. Srinivasan and Matthew Tancik and Jonathan T. Barron and Ravi Ramamoorthi and Ren Ng},
+  year={2020},
+  booktitle={ECCV},
+}
+```
+
+# nerf-mlp
+
+## Rendering Script Parameters
+
+### `scripts/render_example.py`
+
+| Parameter    | Type    | Default                            | Description                                              |
+| ------------ | ------- | ---------------------------------- | -------------------------------------------------------- |
+| --model_path | str     | outputs/checkpoints/model_best.pth | Path to model checkpoint to load                         |
+| --datadir    | str     | ./data/lego                        | Path to dataset directory                                |
+| --split      | str     | train                              | Dataset split to use (train/val/test)                    |
+| --img_wh     | int int | 400 400                            | Image width and height                                   |
+| --num_views  | int     | 5                                  | Number of views to render                                |
+| --out_prefix | str     | outputs/rendered_example           | Output file prefix for rendered images                   |
+| --view_idx   | int     | None                               | Index of the view to render (overrides num_views if set) |
+
+### `scripts/compare_single_view.py`
+
+| Parameter    | Type    | Default         | Description                                |
+| ------------ | ------- | --------------- | ------------------------------------------ |
+| --view_idx   | int     | (required)      | Index of the view to compare (e.g., 10)    |
+| --model_path | str     | (required)      | Path to NeRF model checkpoint              |
+| --datadir    | str     | data/lego       | Path to dataset directory                  |
+| --img_wh     | int int | 400 400         | Image width and height                     |
+| --output     | str     | (required)      | Path to save side-by-side comparison image |
+| --gt_dir     | str     | data/lego/train | Directory for ground truth images          |
+
+**Example usage:**
+
+Render a specific view:
+
+```bash
+python scripts/render_example.py --model_path outputs/checkpoints/model_best.pth --datadir data/lego --img_wh 400 400 --view_idx 10 --out_prefix outputs/rendered_trainview
+```
+
+Compare a rendered view to ground truth:
+
+```bash
+python scripts/compare_single_view.py --view_idx 10 --model_path outputs/checkpoints/model_best.pth --datadir data/lego --img_wh 400 400 --output outputs/side_by_side_10.png
+```
+
+### zoom_example.py
+```
+#!/usr/bin/env python3
+"""
+Demonstration of zoomed-in novel view rendering.
+Shows how to create custom camera positions for close-up shots.
+"""
+
+import numpy as np
+import torch
+from PIL import Image
+import os
+import sys
+
+# Add the project root to the path so we can import our modules
+sys.path.append('.')
+
+from nerfmlp.model import NeRFMLP
+from nerfmlp.renderer import NeRFRenderer
+from nerfmlp.data import NeRFDataset
+
+
+def look_at_matrix(eye, target, up=np.array([0, 1, 0])):
+    """Create a camera pose matrix using look-at parameters."""
+    forward = target - eye
+    forward = forward / np.linalg.norm(forward)
+    
+    right = np.cross(forward, up)
+    right = right / np.linalg.norm(right)
+    
+    up_corrected = np.cross(right, forward)
+    up_corrected = up_corrected / np.linalg.norm(up_corrected)
+    
+    # NeRF uses -Z as forward direction
+    pose = np.eye(4)
+    pose[:3, 0] = right
+    pose[:3, 1] = up_corrected
+    pose[:3, 2] = -forward  # Negative for NeRF convention
+    pose[:3, 3] = eye
+    
+    return pose[:3, :]  # Return 3x4 matrix like NeRF expects
+
+
+def main():
+    # Configuration
+    device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+    model_path = 'data/lego_example_weights/model_fine_200000.npy'
+    output_dir = 'outputs/zoom_examples'
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Load model
+    print("Loading model...")
+    model = NeRFMLP().to(device)
+    
+    if model_path.endswith('.npy'):
+        weights = np.load(model_path, allow_pickle=True)
+        if isinstance(weights, np.lib.npyio.NpzFile):
+            weights = [weights[key] for key in weights.files]
+        elif isinstance(weights, np.ndarray) and weights.dtype == object:
+            weights = list(weights)
+        model.load_from_numpy(weights)
+        print("Loaded weights from .npy file")
+    else:
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        print("Loaded weights from .pth file")
+    
+    model.eval()
+    
+    # Load dataset to get original focal length
+    dataset = NeRFDataset('data/lego', split='train', img_wh=(400, 400))
+    original_focal = dataset.focal
+    
+    print(f"Original focal length: {original_focal:.2f}")
+    
+    # Define different zoom scenarios
+    scenarios = [
+        {
+            'name': 'normal_distance',
+            'camera_pos': np.array([2.0, 2.0, 2.0]),  # Closer than training (~4.03)
+            'focal_multiplier': 1.0,
+            'description': 'Closer camera, normal focal length'
+        },
+        {
+            'name': 'telephoto_zoom',
+            'camera_pos': np.array([3.0, 3.0, 3.0]),  # Moderate distance
+            'focal_multiplier': 2.5,
+            'description': 'Moderate distance, telephoto lens'
+        },
+        {
+            'name': 'extreme_closeup',
+            'camera_pos': np.array([1.2, 1.2, 1.2]),  # Very close
+            'focal_multiplier': 1.5,
+            'description': 'Very close camera with slight zoom'
+        },
+        {
+            'name': 'detail_shot',
+            'camera_pos': np.array([0.8, 1.5, 0.8]),  # Close from slight angle
+            'focal_multiplier': 3.0,
+            'description': 'Close angled view with strong telephoto'
+        }
+    ]
+    
+    # Model center (LEGO bulldozer is roughly at origin)
+    target = np.array([0.0, 0.0, 0.0])
+    
+    print("\nRendering zoom scenarios...")
+    print("=" * 60)
+    
+    for scenario in scenarios:
+        print(f"\n📸 {scenario['name']}: {scenario['description']}")
+        
+        # Create camera pose
+        camera_pos = scenario['camera_pos']
+        pose = look_at_matrix(camera_pos, target)
+        
+        # Calculate focal length
+        focal = original_focal * scenario['focal_multiplier']
+        
+        # Calculate distance for near/far bounds
+        distance_to_target = float(np.linalg.norm(camera_pos - target))
+        near = max(0.1, distance_to_target - 1.5)
+        far = distance_to_target + 1.5
+        
+        print(f"   Camera position: {camera_pos}")
+        print(f"   Distance to target: {distance_to_target:.2f}")
+        print(f"   Focal length: {focal:.2f} (multiplier: {scenario['focal_multiplier']}x)")
+        print(f"   Near/Far bounds: {near:.2f} / {far:.2f}")
+        
+        # Create renderer
+        renderer = NeRFRenderer(
+            model, device,
+            near=near, far=far,
+            N_samples=64, N_importance=64,
+            white_bkgd=True,
+            perturb=0.0,  # No noise for clean inference
+            raw_noise_std=0.0
+        )
+        
+        # Render the view
+        H, W = 400, 400
+        
+        with torch.no_grad():
+            # Generate rays
+            i, j = np.meshgrid(np.arange(W), np.arange(H), indexing='xy')
+            dirs = np.stack([(i - W/2)/focal, -(j - H/2)/focal, -np.ones_like(i)], -1)
+            rays_d = (dirs @ pose[:3, :3].T).reshape(-1, 3)
+            rays_o = np.broadcast_to(pose[:3, 3], rays_d.shape)
+            
+            # Convert to tensors
+            rays_o = torch.from_numpy(rays_o.copy()).float().to(device)
+            rays_d = torch.from_numpy(rays_d).float().to(device)
+            
+            # Render
+            print("   Rendering...")
+            rgb = renderer.render(rays_o, rays_d, H, W, focal)
+            rgb = rgb.cpu().numpy()
+            
+            # Statistics
+            print(f"   RGB range: {rgb.min():.3f} to {rgb.max():.3f}")
+            print(f"   RGB mean: {rgb.mean():.3f}")
+            
+            # Save image
+            rgb = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
+            output_path = os.path.join(output_dir, f"{scenario['name']}.png")
+            Image.fromarray(rgb).save(output_path)
+            print(f"   ✅ Saved: {output_path}")
+    
+    print(f"\n🎉 All zoom examples saved to: {output_dir}/")
+    print("\nCompare the different zoom techniques:")
+    for scenario in scenarios:
+        print(f"   • {scenario['name']}.png - {scenario['description']}")
+
+
+if __name__ == '__main__':
+    main()
+```
+
+### example/run_nerf.py
+```
+import os
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+
+import sys
+import tensorflow as tf
+import numpy as np
+import imageio
+import json
+import random
+import time
+from run_nerf_helpers import *
+from load_llff import load_llff_data
+from load_deepvoxels import load_dv_data
+from load_blender import load_blender_data
+
+
+tf.compat.v1.enable_eager_execution()
+
+
+def batchify(fn, chunk):
+    """Constructs a version of 'fn' that applies to smaller batches."""
+    if chunk is None:
+        return fn
+
+    def ret(inputs):
+        return tf.concat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
+    return ret
+
+
+def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
+    """Prepares inputs and applies network 'fn'."""
+
+    inputs_flat = tf.reshape(inputs, [-1, inputs.shape[-1]])
+
+    embedded = embed_fn(inputs_flat)
+    if viewdirs is not None:
+        input_dirs = tf.broadcast_to(viewdirs[:, None], inputs.shape)
+        input_dirs_flat = tf.reshape(input_dirs, [-1, input_dirs.shape[-1]])
+        embedded_dirs = embeddirs_fn(input_dirs_flat)
+        embedded = tf.concat([embedded, embedded_dirs], -1)
+
+    outputs_flat = batchify(fn, netchunk)(embedded)
+    outputs = tf.reshape(outputs_flat, list(
+        inputs.shape[:-1]) + [outputs_flat.shape[-1]])
+    return outputs
+
+
+def render_rays(ray_batch,
+                network_fn,
+                network_query_fn,
+                N_samples,
+                retraw=False,
+                lindisp=False,
+                perturb=0.,
+                N_importance=0,
+                network_fine=None,
+                white_bkgd=False,
+                raw_noise_std=0.,
+                verbose=False):
+    """Volumetric rendering.
+
+    Args:
+      ray_batch: array of shape [batch_size, ...]. All information necessary
+        for sampling along a ray, including: ray origin, ray direction, min
+        dist, max dist, and unit-magnitude viewing direction.
+      network_fn: function. Model for predicting RGB and density at each point
+        in space.
+      network_query_fn: function used for passing queries to network_fn.
+      N_samples: int. Number of different times to sample along each ray.
+      retraw: bool. If True, include model's raw, unprocessed predictions.
+      lindisp: bool. If True, sample linearly in inverse depth rather than in depth.
+      perturb: float, 0 or 1. If non-zero, each ray is sampled at stratified
+        random points in time.
+      N_importance: int. Number of additional times to sample along each ray.
+        These samples are only passed to network_fine.
+      network_fine: "fine" network with same spec as network_fn.
+      white_bkgd: bool. If True, assume a white background.
+      raw_noise_std: ...
+      verbose: bool. If True, print more debugging info.
+
+    Returns:
+      rgb_map: [num_rays, 3]. Estimated RGB color of a ray. Comes from fine model.
+      disp_map: [num_rays]. Disparity map. 1 / depth.
+      acc_map: [num_rays]. Accumulated opacity along each ray. Comes from fine model.
+      raw: [num_rays, num_samples, 4]. Raw predictions from model.
+      rgb0: See rgb_map. Output for coarse model.
+      disp0: See disp_map. Output for coarse model.
+      acc0: See acc_map. Output for coarse model.
+      z_std: [num_rays]. Standard deviation of distances along ray for each
+        sample.
+    """
+
+    def raw2outputs(raw, z_vals, rays_d):
+        """Transforms model's predictions to semantically meaningful values.
+
+        Args:
+          raw: [num_rays, num_samples along ray, 4]. Prediction from model.
+          z_vals: [num_rays, num_samples along ray]. Integration time.
+          rays_d: [num_rays, 3]. Direction of each ray.
+
+        Returns:
+          rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
+          disp_map: [num_rays]. Disparity map. Inverse of depth map.
+          acc_map: [num_rays]. Sum of weights along each ray.
+          weights: [num_rays, num_samples]. Weights assigned to each sampled color.
+          depth_map: [num_rays]. Estimated distance to object.
+        """
+        # Function for computing density from model prediction. This value is
+        # strictly between [0, 1].
+        def raw2alpha(raw, dists, act_fn=tf.nn.relu): return 1.0 - \
+            tf.exp(-act_fn(raw) * dists)
+
+        # Compute 'distance' (in time) between each integration time along a ray.
+        dists = z_vals[..., 1:] - z_vals[..., :-1]
+
+        # The 'distance' from the last integration time is infinity.
+        dists = tf.concat(
+            [dists, tf.broadcast_to([1e10], dists[..., :1].shape)],
+            axis=-1)  # [N_rays, N_samples]
+
+        # Multiply each distance by the norm of its corresponding direction ray
+        # to convert to real world distance (accounts for non-unit directions).
+        dists = dists * tf.linalg.norm(rays_d[..., None, :], axis=-1)
+
+        # Extract RGB of each sample position along each ray.
+        rgb = tf.math.sigmoid(raw[..., :3])  # [N_rays, N_samples, 3]
+
+        # Add noise to model's predictions for density. Can be used to 
+        # regularize network during training (prevents floater artifacts).
+        noise = 0.
+        if raw_noise_std > 0.:
+            noise = tf.random.normal(raw[..., 3].shape) * raw_noise_std
+
+        # Predict density of each sample along each ray. Higher values imply
+        # higher likelihood of being absorbed at this point.
+        alpha = raw2alpha(raw[..., 3] + noise, dists)  # [N_rays, N_samples]
+
+        # Compute weight for RGB of each sample along each ray.  A cumprod() is
+        # used to express the idea of the ray not having reflected up to this
+        # sample yet.
+        # [N_rays, N_samples]
+        weights = alpha * \
+            tf.math.cumprod(1.-alpha + 1e-10, axis=-1, exclusive=True)
+
+        # Computed weighted color of each sample along each ray.
+        rgb_map = tf.reduce_sum(
+            weights[..., None] * rgb, axis=-2)  # [N_rays, 3]
+
+        # Estimated depth map is expected distance.
+        depth_map = tf.reduce_sum(weights * z_vals, axis=-1)
+
+        # Disparity map is inverse depth.
+        disp_map = 1./tf.maximum(1e-10, depth_map /
+                                 tf.reduce_sum(weights, axis=-1))
+
+        # Sum of weights along each ray. This value is in [0, 1] up to numerical error.
+        acc_map = tf.reduce_sum(weights, -1)
+
+        # To composite onto a white background, use the accumulated alpha map.
+        if white_bkgd:
+            rgb_map = rgb_map + (1.-acc_map[..., None])
+
+        return rgb_map, disp_map, acc_map, weights, depth_map
+
+    ###############################
+    # batch size
+    N_rays = ray_batch.shape[0]
+
+    # Extract ray origin, direction.
+    rays_o, rays_d = ray_batch[:, 0:3], ray_batch[:, 3:6]  # [N_rays, 3] each
+
+    # Extract unit-normalized viewing direction.
+    viewdirs = ray_batch[:, -3:] if ray_batch.shape[-1] > 8 else None
+
+    # Extract lower, upper bound for ray distance.
+    bounds = tf.reshape(ray_batch[..., 6:8], [-1, 1, 2])
+    near, far = bounds[..., 0], bounds[..., 1]  # [-1,1]
+
+    # Decide where to sample along each ray. Under the logic, all rays will be sampled at
+    # the same times.
+    t_vals = tf.linspace(0., 1., N_samples)
+    if not lindisp:
+        # Space integration times linearly between 'near' and 'far'. Same
+        # integration points will be used for all rays.
+        z_vals = near * (1.-t_vals) + far * (t_vals)
+    else:
+        # Sample linearly in inverse depth (disparity).
+        z_vals = 1./(1./near * (1.-t_vals) + 1./far * (t_vals))
+    z_vals = tf.broadcast_to(z_vals, [N_rays, N_samples])
+
+    # Perturb sampling time along each ray.
+    if perturb > 0.:
+        # get intervals between samples
+        mids = .5 * (z_vals[..., 1:] + z_vals[..., :-1])
+        upper = tf.concat([mids, z_vals[..., -1:]], -1)
+        lower = tf.concat([z_vals[..., :1], mids], -1)
+        # stratified samples in those intervals
+        t_rand = tf.random.uniform(z_vals.shape)
+        z_vals = lower + (upper - lower) * t_rand
+
+    # Points in space to evaluate model at.
+    pts = rays_o[..., None, :] + rays_d[..., None, :] * \
+        z_vals[..., :, None]  # [N_rays, N_samples, 3]
+
+    # Evaluate model at each point.
+    raw = network_query_fn(pts, viewdirs, network_fn)  # [N_rays, N_samples, 4]
+    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(
+        raw, z_vals, rays_d)
+
+    if N_importance > 0:
+        rgb_map_0, disp_map_0, acc_map_0 = rgb_map, disp_map, acc_map
+
+        # Obtain additional integration times to evaluate based on the weights
+        # assigned to colors in the coarse model.
+        z_vals_mid = .5 * (z_vals[..., 1:] + z_vals[..., :-1])
+        z_samples = sample_pdf(
+            z_vals_mid, weights[..., 1:-1], N_importance, det=(perturb == 0.))
+        z_samples = tf.stop_gradient(z_samples)
+
+        # Obtain all points to evaluate color, density at.
+        z_vals = tf.sort(tf.concat([z_vals, z_samples], -1), -1)
+        pts = rays_o[..., None, :] + rays_d[..., None, :] * \
+            z_vals[..., :, None]  # [N_rays, N_samples + N_importance, 3]
+
+        # Make predictions with network_fine.
+        run_fn = network_fn if network_fine is None else network_fine
+        raw = network_query_fn(pts, viewdirs, run_fn)
+        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(
+            raw, z_vals, rays_d)
+
+    ret = {'rgb_map': rgb_map, 'disp_map': disp_map, 'acc_map': acc_map}
+    if retraw:
+        ret['raw'] = raw
+    if N_importance > 0:
+        ret['rgb0'] = rgb_map_0
+        ret['disp0'] = disp_map_0
+        ret['acc0'] = acc_map_0
+        ret['z_std'] = tf.math.reduce_std(z_samples, -1)  # [N_rays]
+
+    for k in ret:
+        tf.debugging.check_numerics(ret[k], 'output {}'.format(k))
+
+    return ret
+
+
+def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
+    """Render rays in smaller minibatches to avoid OOM."""
+    all_ret = {}
+    for i in range(0, rays_flat.shape[0], chunk):
+        ret = render_rays(rays_flat[i:i+chunk], **kwargs)
+        for k in ret:
+            if k not in all_ret:
+                all_ret[k] = []
+            all_ret[k].append(ret[k])
+
+    all_ret = {k: tf.concat(all_ret[k], 0) for k in all_ret}
+    return all_ret
+
+
+def render(H, W, focal,
+           chunk=1024*32, rays=None, c2w=None, ndc=True,
+           near=0., far=1.,
+           use_viewdirs=False, c2w_staticcam=None,
+           **kwargs):
+    """Render rays
+
+    Args:
+      H: int. Height of image in pixels.
+      W: int. Width of image in pixels.
+      focal: float. Focal length of pinhole camera.
+      chunk: int. Maximum number of rays to process simultaneously. Used to
+        control maximum memory usage. Does not affect final results.
+      rays: array of shape [2, batch_size, 3]. Ray origin and direction for
+        each example in batch.
+      c2w: array of shape [3, 4]. Camera-to-world transformation matrix.
+      ndc: bool. If True, represent ray origin, direction in NDC coordinates.
+      near: float or array of shape [batch_size]. Nearest distance for a ray.
+      far: float or array of shape [batch_size]. Farthest distance for a ray.
+      use_viewdirs: bool. If True, use viewing direction of a point in space in model.
+      c2w_staticcam: array of shape [3, 4]. If not None, use this transformation matrix for 
+       camera while using other c2w argument for viewing directions.
+
+    Returns:
+      rgb_map: [batch_size, 3]. Predicted RGB values for rays.
+      disp_map: [batch_size]. Disparity map. Inverse of depth.
+      acc_map: [batch_size]. Accumulated opacity (alpha) along a ray.
+      extras: dict with everything returned by render_rays().
+    """
+
+    if c2w is not None:
+        # special case to render full image
+        rays_o, rays_d = get_rays(H, W, focal, c2w)
+    else:
+        # use provided ray batch
+        rays_o, rays_d = rays
+
+    if use_viewdirs:
+        # provide ray directions as input
+        viewdirs = rays_d
+        if c2w_staticcam is not None:
+            # special case to visualize effect of viewdirs
+            rays_o, rays_d = get_rays(H, W, focal, c2w_staticcam)
+
+        # Make all directions unit magnitude.
+        # shape: [batch_size, 3]
+        viewdirs = viewdirs / tf.linalg.norm(viewdirs, axis=-1, keepdims=True)
+        viewdirs = tf.cast(tf.reshape(viewdirs, [-1, 3]), dtype=tf.float32)
+
+    sh = rays_d.shape  # [..., 3]
+    if ndc:
+        # for forward facing scenes
+        rays_o, rays_d = ndc_rays(
+            H, W, focal, tf.cast(1., tf.float32), rays_o, rays_d)
+
+    # Create ray batch
+    rays_o = tf.cast(tf.reshape(rays_o, [-1, 3]), dtype=tf.float32)
+    rays_d = tf.cast(tf.reshape(rays_d, [-1, 3]), dtype=tf.float32)
+    near, far = near * \
+        tf.ones_like(rays_d[..., :1]), far * tf.ones_like(rays_d[..., :1])
+
+    # (ray origin, ray direction, min dist, max dist) for each ray
+    rays = tf.concat([rays_o, rays_d, near, far], axis=-1)
+    if use_viewdirs:
+        # (ray origin, ray direction, min dist, max dist, normalized viewing direction)
+        rays = tf.concat([rays, viewdirs], axis=-1)
+
+    # Render and reshape
+    all_ret = batchify_rays(rays, chunk, **kwargs)
+    for k in all_ret:
+        k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
+        all_ret[k] = tf.reshape(all_ret[k], k_sh)
+
+    k_extract = ['rgb_map', 'disp_map', 'acc_map']
+    ret_list = [all_ret[k] for k in k_extract]
+    ret_dict = {k: all_ret[k] for k in all_ret if k not in k_extract}
+    return ret_list + [ret_dict]
+
+
+def render_path(render_poses, hwf, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
+
+    H, W, focal = hwf
+
+    if render_factor != 0:
+        # Render downsampled for speed
+        H = H//render_factor
+        W = W//render_factor
+        focal = focal/render_factor
+
+    rgbs = []
+    disps = []
+
+    t = time.time()
+    for i, c2w in enumerate(render_poses):
+        print(i, time.time() - t)
+        t = time.time()
+        rgb, disp, acc, _ = render(
+            H, W, focal, chunk=chunk, c2w=c2w[:3, :4], **render_kwargs)
+        rgbs.append(rgb.numpy())
+        disps.append(disp.numpy())
+        if i == 0:
+            print(rgb.shape, disp.shape)
+
+        if gt_imgs is not None and render_factor == 0:
+            p = -10. * np.log10(np.mean(np.square(rgb - gt_imgs[i])))
+            print(p)
+
+        if savedir is not None:
+            rgb8 = to8b(rgbs[-1])
+            filename = os.path.join(savedir, '{:03d}.png'.format(i))
+            imageio.imwrite(filename, rgb8)
+
+    rgbs = np.stack(rgbs, 0)
+    disps = np.stack(disps, 0)
+
+    return rgbs, disps
+
+
+def create_nerf(args):
+    """Instantiate NeRF's MLP model."""
+
+    embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
+
+    input_ch_views = 0
+    embeddirs_fn = None
+    if args.use_viewdirs:
+        embeddirs_fn, input_ch_views = get_embedder(
+            args.multires_views, args.i_embed)
+    output_ch = 4
+    skips = [4]
+    model = init_nerf_model(
+        D=args.netdepth, W=args.netwidth,
+        input_ch=input_ch, output_ch=output_ch, skips=skips,
+        input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs)
+    grad_vars = model.trainable_variables
+    models = {'model': model}
+
+    model_fine = None
+    if args.N_importance > 0:
+        model_fine = init_nerf_model(
+            D=args.netdepth_fine, W=args.netwidth_fine,
+            input_ch=input_ch, output_ch=output_ch, skips=skips,
+            input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs)
+        grad_vars += model_fine.trainable_variables
+        models['model_fine'] = model_fine
+
+    def network_query_fn(inputs, viewdirs, network_fn): return run_network(
+        inputs, viewdirs, network_fn,
+        embed_fn=embed_fn,
+        embeddirs_fn=embeddirs_fn,
+        netchunk=args.netchunk)
+
+    render_kwargs_train = {
+        'network_query_fn': network_query_fn,
+        'perturb': args.perturb,
+        'N_importance': args.N_importance,
+        'network_fine': model_fine,
+        'N_samples': args.N_samples,
+        'network_fn': model,
+        'use_viewdirs': args.use_viewdirs,
+        'white_bkgd': args.white_bkgd,
+        'raw_noise_std': args.raw_noise_std,
+    }
+
+    # NDC only good for LLFF-style forward facing data
+    if args.dataset_type != 'llff' or args.no_ndc:
+        print('Not ndc!')
+        render_kwargs_train['ndc'] = False
+        render_kwargs_train['lindisp'] = args.lindisp
+
+    render_kwargs_test = {
+        k: render_kwargs_train[k] for k in render_kwargs_train}
+    render_kwargs_test['perturb'] = False
+    render_kwargs_test['raw_noise_std'] = 0.
+
+    start = 0
+    basedir = args.basedir
+    expname = args.expname
+
+    if args.ft_path is not None and args.ft_path != 'None':
+        ckpts = [args.ft_path]
+    else:
+        ckpts = [os.path.join(basedir, expname, f) for f in sorted(os.listdir(os.path.join(basedir, expname))) if
+                 ('model_' in f and 'fine' not in f and 'optimizer' not in f)]
+    print('Found ckpts', ckpts)
+    if len(ckpts) > 0 and not args.no_reload:
+        ft_weights = ckpts[-1]
+        print('Reloading from', ft_weights)
+        model.set_weights(np.load(ft_weights, allow_pickle=True))
+        start = int(ft_weights[-10:-4]) + 1
+        print('Resetting step to', start)
+
+        if model_fine is not None:
+            ft_weights_fine = '{}_fine_{}'.format(
+                ft_weights[:-11], ft_weights[-10:])
+            print('Reloading fine from', ft_weights_fine)
+            model_fine.set_weights(np.load(ft_weights_fine, allow_pickle=True))
+
+    return render_kwargs_train, render_kwargs_test, start, grad_vars, models
+
+
+def config_parser():
+
+    import configargparse
+    parser = configargparse.ArgumentParser()
+    parser.add_argument('--config', is_config_file=True,
+                        help='config file path')
+    parser.add_argument("--expname", type=str, help='experiment name')
+    parser.add_argument("--basedir", type=str, default='./logs/',
+                        help='where to store ckpts and logs')
+    parser.add_argument("--datadir", type=str,
+                        default='./data/llff/fern', help='input data directory')
+
+    # training options
+    parser.add_argument("--netdepth", type=int, default=8,
+                        help='layers in network')
+    parser.add_argument("--netwidth", type=int, default=256,
+                        help='channels per layer')
+    parser.add_argument("--netdepth_fine", type=int,
+                        default=8, help='layers in fine network')
+    parser.add_argument("--netwidth_fine", type=int, default=256,
+                        help='channels per layer in fine network')
+    parser.add_argument("--N_rand", type=int, default=32*32*4,
+                        help='batch size (number of random rays per gradient step)')
+    parser.add_argument("--lrate", type=float,
+                        default=5e-4, help='learning rate')
+    parser.add_argument("--lrate_decay", type=int, default=250,
+                        help='exponential learning rate decay (in 1000s)')
+    parser.add_argument("--chunk", type=int, default=1024*32,
+                        help='number of rays processed in parallel, decrease if running out of memory')
+    parser.add_argument("--netchunk", type=int, default=1024*64,
+                        help='number of pts sent through network in parallel, decrease if running out of memory')
+    parser.add_argument("--no_batching", action='store_true',
+                        help='only take random rays from 1 image at a time')
+    parser.add_argument("--no_reload", action='store_true',
+                        help='do not reload weights from saved ckpt')
+    parser.add_argument("--ft_path", type=str, default=None,
+                        help='specific weights npy file to reload for coarse network')
+    parser.add_argument("--random_seed", type=int, default=None,
+                        help='fix random seed for repeatability')
+    
+    # pre-crop options
+    parser.add_argument("--precrop_iters", type=int, default=0,
+                        help='number of steps to train on central crops')
+    parser.add_argument("--precrop_frac", type=float,
+                        default=.5, help='fraction of img taken for central crops')    
+
+    # rendering options
+    parser.add_argument("--N_samples", type=int, default=64,
+                        help='number of coarse samples per ray')
+    parser.add_argument("--N_importance", type=int, default=0,
+                        help='number of additional fine samples per ray')
+    parser.add_argument("--perturb", type=float, default=1.,
+                        help='set to 0. for no jitter, 1. for jitter')
+    parser.add_argument("--use_viewdirs", action='store_true',
+                        help='use full 5D input instead of 3D')
+    parser.add_argument("--i_embed", type=int, default=0,
+                        help='set 0 for default positional encoding, -1 for none')
+    parser.add_argument("--multires", type=int, default=10,
+                        help='log2 of max freq for positional encoding (3D location)')
+    parser.add_argument("--multires_views", type=int, default=4,
+                        help='log2 of max freq for positional encoding (2D direction)')
+    parser.add_argument("--raw_noise_std", type=float, default=0.,
+                        help='std dev of noise added to regularize sigma_a output, 1e0 recommended')
+
+    parser.add_argument("--render_only", action='store_true',
+                        help='do not optimize, reload weights and render out render_poses path')
+    parser.add_argument("--render_test", action='store_true',
+                        help='render the test set instead of render_poses path')
+    parser.add_argument("--render_factor", type=int, default=0,
+                        help='downsampling factor to speed up rendering, set 4 or 8 for fast preview')
+
+    # dataset options
+    parser.add_argument("--dataset_type", type=str, default='llff',
+                        help='options: llff / blender / deepvoxels')
+    parser.add_argument("--testskip", type=int, default=8,
+                        help='will load 1/N images from test/val sets, useful for large datasets like deepvoxels')
+
+    # deepvoxels flags
+    parser.add_argument("--shape", type=str, default='greek',
+                        help='options : armchair / cube / greek / vase')
+
+    # blender flags
+    parser.add_argument("--white_bkgd", action='store_true',
+                        help='set to render synthetic data on a white bkgd (always use for dvoxels)')
+    parser.add_argument("--half_res", action='store_true',
+                        help='load blender synthetic data at 400x400 instead of 800x800')
+
+    # llff flags
+    parser.add_argument("--factor", type=int, default=8,
+                        help='downsample factor for LLFF images')
+    parser.add_argument("--no_ndc", action='store_true',
+                        help='do not use normalized device coordinates (set for non-forward facing scenes)')
+    parser.add_argument("--lindisp", action='store_true',
+                        help='sampling linearly in disparity rather than depth')
+    parser.add_argument("--spherify", action='store_true',
+                        help='set for spherical 360 scenes')
+    parser.add_argument("--llffhold", type=int, default=8,
+                        help='will take every 1/N images as LLFF test set, paper uses 8')
+
+    # logging/saving options
+    parser.add_argument("--i_print",   type=int, default=100,
+                        help='frequency of console printout and metric loggin')
+    parser.add_argument("--i_img",     type=int, default=500,
+                        help='frequency of tensorboard image logging')
+    parser.add_argument("--i_weights", type=int, default=10000,
+                        help='frequency of weight ckpt saving')
+    parser.add_argument("--i_testset", type=int, default=50000,
+                        help='frequency of testset saving')
+    parser.add_argument("--i_video",   type=int, default=50000,
+                        help='frequency of render_poses video saving')
+
+    return parser
+
+
+def train():
+
+    parser = config_parser()
+    args = parser.parse_args()
+    
+    if args.random_seed is not None:
+        print('Fixing random seed', args.random_seed)
+        np.random.seed(args.random_seed)
+        tf.compat.v1.set_random_seed(args.random_seed)
+
+    # Load data
+
+    if args.dataset_type == 'llff':
+        images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
+                                                                  recenter=True, bd_factor=.75,
+                                                                  spherify=args.spherify)
+        hwf = poses[0, :3, -1]
+        poses = poses[:, :3, :4]
+        print('Loaded llff', images.shape,
+              render_poses.shape, hwf, args.datadir)
+        if not isinstance(i_test, list):
+            i_test = [i_test]
+
+        if args.llffhold > 0:
+            print('Auto LLFF holdout,', args.llffhold)
+            i_test = np.arange(images.shape[0])[::args.llffhold]
+
+        i_val = i_test
+        i_train = np.array([i for i in np.arange(int(images.shape[0])) if
+                            (i not in i_test and i not in i_val)])
+
+        print('DEFINING BOUNDS')
+        if args.no_ndc:
+            near = tf.reduce_min(bds) * .9
+            far = tf.reduce_max(bds) * 1.
+        else:
+            near = 0.
+            far = 1.
+        print('NEAR FAR', near, far)
+
+    elif args.dataset_type == 'blender':
+        images, poses, render_poses, hwf, i_split = load_blender_data(
+            args.datadir, args.half_res, args.testskip)
+        print('Loaded blender', images.shape,
+              render_poses.shape, hwf, args.datadir)
+        i_train, i_val, i_test = i_split
+
+        near = 2.
+        far = 6.
+
+        if args.white_bkgd:
+            images = images[..., :3]*images[..., -1:] + (1.-images[..., -1:])
+        else:
+            images = images[..., :3]
+
+    elif args.dataset_type == 'deepvoxels':
+
+        images, poses, render_poses, hwf, i_split = load_dv_data(scene=args.shape,
+                                                                 basedir=args.datadir,
+                                                                 testskip=args.testskip)
+
+        print('Loaded deepvoxels', images.shape,
+              render_poses.shape, hwf, args.datadir)
+        i_train, i_val, i_test = i_split
+
+        hemi_R = np.mean(np.linalg.norm(poses[:, :3, -1], axis=-1))
+        near = hemi_R-1.
+        far = hemi_R+1.
+
+    else:
+        print('Unknown dataset type', args.dataset_type, 'exiting')
+        return
+
+    # Cast intrinsics to right types
+    H, W, focal = hwf
+    H, W = int(H), int(W)
+    hwf = [H, W, focal]
+
+    if args.render_test:
+        render_poses = np.array(poses[i_test])
+
+    # Create log dir and copy the config file
+    basedir = args.basedir
+    expname = args.expname
+    os.makedirs(os.path.join(basedir, expname), exist_ok=True)
+    f = os.path.join(basedir, expname, 'args.txt')
+    with open(f, 'w') as file:
+        for arg in sorted(vars(args)):
+            attr = getattr(args, arg)
+            file.write('{} = {}\n'.format(arg, attr))
+    if args.config is not None:
+        f = os.path.join(basedir, expname, 'config.txt')
+        with open(f, 'w') as file:
+            file.write(open(args.config, 'r').read())
+
+    # Create nerf model
+    render_kwargs_train, render_kwargs_test, start, grad_vars, models = create_nerf(
+        args)
+
+    bds_dict = {
+        'near': tf.cast(near, tf.float32),
+        'far': tf.cast(far, tf.float32),
+    }
+    render_kwargs_train.update(bds_dict)
+    render_kwargs_test.update(bds_dict)
+
+    # Short circuit if only rendering out from trained model
+    if args.render_only:
+        print('RENDER ONLY')
+        if args.render_test:
+            # render_test switches to test poses
+            images = images[i_test]
+        else:
+            # Default is smoother render_poses path
+            images = None
+
+        testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
+            'test' if args.render_test else 'path', start))
+        os.makedirs(testsavedir, exist_ok=True)
+        print('test poses shape', render_poses.shape)
+
+        rgbs, _ = render_path(render_poses, hwf, args.chunk, render_kwargs_test,
+                              gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
+        print('Done rendering', testsavedir)
+        imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'),
+                         to8b(rgbs), fps=30, quality=8)
+
+        return
+
+    # Create optimizer
+    lrate = args.lrate
+    if args.lrate_decay > 0:
+        lrate = tf.keras.optimizers.schedules.ExponentialDecay(lrate,
+                                                               decay_steps=args.lrate_decay * 1000, decay_rate=0.1)
+    optimizer = tf.keras.optimizers.Adam(lrate)
+    models['optimizer'] = optimizer
+
+    global_step = tf.compat.v1.train.get_or_create_global_step()
+    global_step.assign(start)
+
+    # Prepare raybatch tensor if batching random rays
+    N_rand = args.N_rand
+    use_batching = not args.no_batching
+    if use_batching:
+        # For random ray batching.
+        #
+        # Constructs an array 'rays_rgb' of shape [N*H*W, 3, 3] where axis=1 is
+        # interpreted as,
+        #   axis=0: ray origin in world space
+        #   axis=1: ray direction in world space
+        #   axis=2: observed RGB color of pixel
+        print('get rays')
+        # get_rays_np() returns rays_origin=[H, W, 3], rays_direction=[H, W, 3]
+        # for each pixel in the image. This stack() adds a new dimension.
+        rays = [get_rays_np(H, W, focal, p) for p in poses[:, :3, :4]]
+        rays = np.stack(rays, axis=0)  # [N, ro+rd, H, W, 3]
+        print('done, concats')
+        # [N, ro+rd+rgb, H, W, 3]
+        rays_rgb = np.concatenate([rays, images[:, None, ...]], 1)
+        # [N, H, W, ro+rd+rgb, 3]
+        rays_rgb = np.transpose(rays_rgb, [0, 2, 3, 1, 4])
+        rays_rgb = np.stack([rays_rgb[i]
+                             for i in i_train], axis=0)  # train images only
+        # [(N-1)*H*W, ro+rd+rgb, 3]
+        rays_rgb = np.reshape(rays_rgb, [-1, 3, 3])
+        rays_rgb = rays_rgb.astype(np.float32)
+        print('shuffle rays')
+        np.random.shuffle(rays_rgb)
+        print('done')
+        i_batch = 0
+
+    N_iters = 1000000
+    print('Begin')
+    print('TRAIN views are', i_train)
+    print('TEST views are', i_test)
+    print('VAL views are', i_val)
+
+    # Summary writers
+    writer = tf.contrib.summary.create_file_writer(
+        os.path.join(basedir, 'summaries', expname))
+    writer.set_as_default()
+
+    for i in range(start, N_iters):
+        time0 = time.time()
+
+        # Sample random ray batch
+
+        if use_batching:
+            # Random over all images
+            batch = rays_rgb[i_batch:i_batch+N_rand]  # [B, 2+1, 3*?]
+            batch = tf.transpose(batch, [1, 0, 2])
+
+            # batch_rays[i, n, xyz] = ray origin or direction, example_id, 3D position
+            # target_s[n, rgb] = example_id, observed color.
+            batch_rays, target_s = batch[:2], batch[2]
+
+            i_batch += N_rand
+            if i_batch >= rays_rgb.shape[0]:
+                np.random.shuffle(rays_rgb)
+                i_batch = 0
+
+        else:
+            # Random from one image
+            img_i = np.random.choice(i_train)
+            target = images[img_i]
+            pose = poses[img_i, :3, :4]
+
+            if N_rand is not None:
+                rays_o, rays_d = get_rays(H, W, focal, pose)
+                if i < args.precrop_iters:
+                    dH = int(H//2 * args.precrop_frac)
+                    dW = int(W//2 * args.precrop_frac)
+                    coords = tf.stack(tf.meshgrid(
+                        tf.range(H//2 - dH, H//2 + dH), 
+                        tf.range(W//2 - dW, W//2 + dW), 
+                        indexing='ij'), -1)
+                    if i < 10:
+                        print('precrop', dH, dW, coords[0,0], coords[-1,-1])
+                else:
+                    coords = tf.stack(tf.meshgrid(
+                        tf.range(H), tf.range(W), indexing='ij'), -1)
+                coords = tf.reshape(coords, [-1, 2])
+                select_inds = np.random.choice(
+                    coords.shape[0], size=[N_rand], replace=False)
+                select_inds = tf.gather_nd(coords, select_inds[:, tf.newaxis])
+                rays_o = tf.gather_nd(rays_o, select_inds)
+                rays_d = tf.gather_nd(rays_d, select_inds)
+                batch_rays = tf.stack([rays_o, rays_d], 0)
+                target_s = tf.gather_nd(target, select_inds)
+
+        #####  Core optimization loop  #####
+
+        with tf.GradientTape() as tape:
+
+            # Make predictions for color, disparity, accumulated opacity.
+            rgb, disp, acc, extras = render(
+                H, W, focal, chunk=args.chunk, rays=batch_rays,
+                verbose=i < 10, retraw=True, **render_kwargs_train)
+
+            # Compute MSE loss between predicted and true RGB.
+            img_loss = img2mse(rgb, target_s)
+            trans = extras['raw'][..., -1]
+            loss = img_loss
+            psnr = mse2psnr(img_loss)
+
+            # Add MSE loss for coarse-grained model
+            if 'rgb0' in extras:
+                img_loss0 = img2mse(extras['rgb0'], target_s)
+                loss += img_loss0
+                psnr0 = mse2psnr(img_loss0)
+
+        gradients = tape.gradient(loss, grad_vars)
+        optimizer.apply_gradients(zip(gradients, grad_vars))
+
+        dt = time.time()-time0
+
+        #####           end            #####
+
+        # Rest is logging
+
+        def save_weights(net, prefix, i):
+            path = os.path.join(
+                basedir, expname, '{}_{:06d}.npy'.format(prefix, i))
+            np.save(path, net.get_weights())
+            print('saved weights at', path)
+
+        if i % args.i_weights == 0:
+            for k in models:
+                save_weights(models[k], k, i)
+
+        if i % args.i_video == 0 and i > 0:
+
+            rgbs, disps = render_path(
+                render_poses, hwf, args.chunk, render_kwargs_test)
+            print('Done, saving', rgbs.shape, disps.shape)
+            moviebase = os.path.join(
+                basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
+            imageio.mimwrite(moviebase + 'rgb.mp4',
+                             to8b(rgbs), fps=30, quality=8)
+            imageio.mimwrite(moviebase + 'disp.mp4',
+                             to8b(disps / np.max(disps)), fps=30, quality=8)
+
+            if args.use_viewdirs:
+                render_kwargs_test['c2w_staticcam'] = render_poses[0][:3, :4]
+                rgbs_still, _ = render_path(
+                    render_poses, hwf, args.chunk, render_kwargs_test)
+                render_kwargs_test['c2w_staticcam'] = None
+                imageio.mimwrite(moviebase + 'rgb_still.mp4',
+                                 to8b(rgbs_still), fps=30, quality=8)
+
+        if i % args.i_testset == 0 and i > 0:
+            testsavedir = os.path.join(
+                basedir, expname, 'testset_{:06d}'.format(i))
+            os.makedirs(testsavedir, exist_ok=True)
+            print('test poses shape', poses[i_test].shape)
+            render_path(poses[i_test], hwf, args.chunk, render_kwargs_test,
+                        gt_imgs=images[i_test], savedir=testsavedir)
+            print('Saved test set')
+
+        if i % args.i_print == 0 or i < 10:
+
+            print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
+            print('iter time {:.05f}'.format(dt))
+            with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_print):
+                tf.contrib.summary.scalar('loss', loss)
+                tf.contrib.summary.scalar('psnr', psnr)
+                tf.contrib.summary.histogram('tran', trans)
+                if args.N_importance > 0:
+                    tf.contrib.summary.scalar('psnr0', psnr0)
+
+            if i % args.i_img == 0:
+
+                # Log a rendered validation view to Tensorboard
+                img_i = np.random.choice(i_val)
+                target = images[img_i]
+                pose = poses[img_i, :3, :4]
+
+                rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, c2w=pose,
+                                                **render_kwargs_test)
+
+                psnr = mse2psnr(img2mse(rgb, target))
+                
+                # Save out the validation image for Tensorboard-free monitoring
+                testimgdir = os.path.join(basedir, expname, 'tboard_val_imgs')
+                if i==0:
+                    os.makedirs(testimgdir, exist_ok=True)
+                imageio.imwrite(os.path.join(testimgdir, '{:06d}.png'.format(i)), to8b(rgb))
+
+                with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
+
+                    tf.contrib.summary.image('rgb', to8b(rgb)[tf.newaxis])
+                    tf.contrib.summary.image(
+                        'disp', disp[tf.newaxis, ..., tf.newaxis])
+                    tf.contrib.summary.image(
+                        'acc', acc[tf.newaxis, ..., tf.newaxis])
+
+                    tf.contrib.summary.scalar('psnr_holdout', psnr)
+                    tf.contrib.summary.image('rgb_holdout', target[tf.newaxis])
+
+                if args.N_importance > 0:
+
+                    with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
+                        tf.contrib.summary.image(
+                            'rgb0', to8b(extras['rgb0'])[tf.newaxis])
+                        tf.contrib.summary.image(
+                            'disp0', extras['disp0'][tf.newaxis, ..., tf.newaxis])
+                        tf.contrib.summary.image(
+                            'z_std', extras['z_std'][tf.newaxis, ..., tf.newaxis])
+
+        global_step.assign_add(1)
+
+
+if __name__ == '__main__':
+    train()
+```
+
+### example/run_nerf_helpers.py
+```
+import os
+import sys
+import tensorflow as tf
+import numpy as np
+import imageio
+import json
+
+
+# Misc utils
+
+def img2mse(x, y): return tf.reduce_mean(tf.square(x - y))
+
+
+def mse2psnr(x): return -10.*tf.log(x)/tf.log(10.)
+
+
+def to8b(x): return (255*np.clip(x, 0, 1)).astype(np.uint8)
+
+
+# Positional encoding
+
+class Embedder:
+
+    def __init__(self, **kwargs):
+
+        self.kwargs = kwargs
+        self.create_embedding_fn()
+
+    def create_embedding_fn(self):
+
+        embed_fns = []
+        d = self.kwargs['input_dims']
+        out_dim = 0
+        if self.kwargs['include_input']:
+            embed_fns.append(lambda x: x)
+            out_dim += d
+
+        max_freq = self.kwargs['max_freq_log2']
+        N_freqs = self.kwargs['num_freqs']
+
+        if self.kwargs['log_sampling']:
+            freq_bands = 2.**tf.linspace(0., max_freq, N_freqs)
+        else:
+            freq_bands = tf.linspace(2.**0., 2.**max_freq, N_freqs)
+
+        for freq in freq_bands:
+            for p_fn in self.kwargs['periodic_fns']:
+                embed_fns.append(lambda x, p_fn=p_fn,
+                                 freq=freq: p_fn(x * freq))
+                out_dim += d
+
+        self.embed_fns = embed_fns
+        self.out_dim = out_dim
+
+    def embed(self, inputs):
+        return tf.concat([fn(inputs) for fn in self.embed_fns], -1)
+
+
+def get_embedder(multires, i=0):
+
+    if i == -1:
+        return tf.identity, 3
+
+    embed_kwargs = {
+        'include_input': True,
+        'input_dims': 3,
+        'max_freq_log2': multires-1,
+        'num_freqs': multires,
+        'log_sampling': True,
+        'periodic_fns': [tf.math.sin, tf.math.cos],
+    }
+
+    embedder_obj = Embedder(**embed_kwargs)
+    def embed(x, eo=embedder_obj): return eo.embed(x)
+    return embed, embedder_obj.out_dim
+
+
+# Model architecture
+
+def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
+
+    relu = tf.keras.layers.ReLU()
+    def dense(W, act=relu): return tf.keras.layers.Dense(W, activation=act)
+
+    print('MODEL', input_ch, input_ch_views, type(
+        input_ch), type(input_ch_views), use_viewdirs)
+    input_ch = int(input_ch)
+    input_ch_views = int(input_ch_views)
+
+    inputs = tf.keras.Input(shape=(input_ch + input_ch_views))
+    inputs_pts, inputs_views = tf.split(inputs, [input_ch, input_ch_views], -1)
+    inputs_pts.set_shape([None, input_ch])
+    inputs_views.set_shape([None, input_ch_views])
+
+    print(inputs.shape, inputs_pts.shape, inputs_views.shape)
+    outputs = inputs_pts
+    for i in range(D):
+        outputs = dense(W)(outputs)
+        if i in skips:
+            outputs = tf.concat([inputs_pts, outputs], -1)
+
+    if use_viewdirs:
+        alpha_out = dense(1, act=None)(outputs)
+        bottleneck = dense(256, act=None)(outputs)
+        inputs_viewdirs = tf.concat(
+            [bottleneck, inputs_views], -1)  # concat viewdirs
+        outputs = inputs_viewdirs
+        # The supplement to the paper states there are 4 hidden layers here, but this is an error since
+        # the experiments were actually run with 1 hidden layer, so we will leave it as 1.
+        for i in range(1):
+            outputs = dense(W//2)(outputs)
+        outputs = dense(3, act=None)(outputs)
+        outputs = tf.concat([outputs, alpha_out], -1)
+    else:
+        outputs = dense(output_ch, act=None)(outputs)
+
+    model = tf.keras.Model(inputs=inputs, outputs=outputs)
+    return model
+
+
+# Ray helpers
+
+def get_rays(H, W, focal, c2w):
+    """Get ray origins, directions from a pinhole camera."""
+    i, j = tf.meshgrid(tf.range(W, dtype=tf.float32),
+                       tf.range(H, dtype=tf.float32), indexing='xy')
+    dirs = tf.stack([(i-W*.5)/focal, -(j-H*.5)/focal, -tf.ones_like(i)], -1)
+    rays_d = tf.reduce_sum(dirs[..., np.newaxis, :] * c2w[:3, :3], -1)
+    rays_o = tf.broadcast_to(c2w[:3, -1], tf.shape(rays_d))
+    return rays_o, rays_d
+
+
+def get_rays_np(H, W, focal, c2w):
+    """Get ray origins, directions from a pinhole camera."""
+    i, j = np.meshgrid(np.arange(W, dtype=np.float32),
+                       np.arange(H, dtype=np.float32), indexing='xy')
+    dirs = np.stack([(i-W*.5)/focal, -(j-H*.5)/focal, -np.ones_like(i)], -1)
+    rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3, :3], -1)
+    rays_o = np.broadcast_to(c2w[:3, -1], np.shape(rays_d))
+    return rays_o, rays_d
+
+
+def ndc_rays(H, W, focal, near, rays_o, rays_d):
+    """Normalized device coordinate rays.
+
+    Space such that the canvas is a cube with sides [-1, 1] in each axis.
+
+    Args:
+      H: int. Height in pixels.
+      W: int. Width in pixels.
+      focal: float. Focal length of pinhole camera.
+      near: float or array of shape[batch_size]. Near depth bound for the scene.
+      rays_o: array of shape [batch_size, 3]. Camera origin.
+      rays_d: array of shape [batch_size, 3]. Ray direction.
+
+    Returns:
+      rays_o: array of shape [batch_size, 3]. Camera origin in NDC.
+      rays_d: array of shape [batch_size, 3]. Ray direction in NDC.
+    """
+    # Shift ray origins to near plane
+    t = -(near + rays_o[..., 2]) / rays_d[..., 2]
+    rays_o = rays_o + t[..., None] * rays_d
+
+    # Projection
+    o0 = -1./(W/(2.*focal)) * rays_o[..., 0] / rays_o[..., 2]
+    o1 = -1./(H/(2.*focal)) * rays_o[..., 1] / rays_o[..., 2]
+    o2 = 1. + 2. * near / rays_o[..., 2]
+
+    d0 = -1./(W/(2.*focal)) * \
+        (rays_d[..., 0]/rays_d[..., 2] - rays_o[..., 0]/rays_o[..., 2])
+    d1 = -1./(H/(2.*focal)) * \
+        (rays_d[..., 1]/rays_d[..., 2] - rays_o[..., 1]/rays_o[..., 2])
+    d2 = -2. * near / rays_o[..., 2]
+
+    rays_o = tf.stack([o0, o1, o2], -1)
+    rays_d = tf.stack([d0, d1, d2], -1)
+
+    return rays_o, rays_d
+
+
+# Hierarchical sampling helper
+
+def sample_pdf(bins, weights, N_samples, det=False):
+
+    # Get pdf
+    weights += 1e-5  # prevent nans
+    pdf = weights / tf.reduce_sum(weights, -1, keepdims=True)
+    cdf = tf.cumsum(pdf, -1)
+    cdf = tf.concat([tf.zeros_like(cdf[..., :1]), cdf], -1)
+
+    # Take uniform samples
+    if det:
+        u = tf.linspace(0., 1., N_samples)
+        u = tf.broadcast_to(u, list(cdf.shape[:-1]) + [N_samples])
+    else:
+        u = tf.random.uniform(list(cdf.shape[:-1]) + [N_samples])
+
+    # Invert CDF
+    inds = tf.searchsorted(cdf, u, side='right')
+    below = tf.maximum(0, inds-1)
+    above = tf.minimum(cdf.shape[-1]-1, inds)
+    inds_g = tf.stack([below, above], -1)
+    cdf_g = tf.gather(cdf, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
+    bins_g = tf.gather(bins, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
+
+    denom = (cdf_g[..., 1]-cdf_g[..., 0])
+    denom = tf.where(denom < 1e-5, tf.ones_like(denom), denom)
+    t = (u-cdf_g[..., 0])/denom
+    samples = bins_g[..., 0] + t * (bins_g[..., 1]-bins_g[..., 0])
+
+    return samples
+```
+
+### nerfmlp/__init__.py
+```
+"""
+NeRF MLP Package
+
+A PyTorch implementation of Neural Radiance Fields (NeRF) using MLPs.
+"""
+
+from .model import NeRFMLP
+from .renderer import NeRFRenderer
+from .data import NeRFDataset, auto_tune_batch_size
+
+__version__ = "1.0.0"
+__all__ = ["NeRFMLP", "NeRFRenderer", "NeRFDataset", "auto_tune_batch_size"]
+```
+
+### nerfmlp/data.py
+```
+import os
+import json
+import numpy as np
+from PIL import Image
+import torch
+from torch.utils.data import Dataset
+
+def srgb_to_linear(img):
+    """
+    Convert sRGB image to linear RGB with proper gamma correction.
+    
+    The standard sRGB to linear conversion as used in NeRF:
+    - For values <= 0.04045: linear = srgb / 12.92
+    - For values > 0.04045: linear = ((srgb + 0.055) / 1.055)^2.4
+    """
+    img = img.astype(np.float32)
+    linear = np.where(
+        img <= 0.04045,
+        img / 12.92,
+        np.power((img + 0.055) / 1.055, 2.4)
+    )
+    return linear
+
+class NeRFDataset(Dataset):
+    def __init__(self, datadir, split='train', img_wh=(400, 400), white_bkgd=True):
+        super().__init__()
+        self.datadir = datadir
+        self.split = split
+        self.img_wh = img_wh
+        self.white_bkgd = white_bkgd
+        self._load_meta()
+        self._load_images_and_poses()
+        self._generate_rays()
+
+    def _load_meta(self):
+        # Load transforms JSON
+        with open(os.path.join(self.datadir, f'transforms_{self.split}.json'), 'r') as f:
+            self.meta = json.load(f)
+
+    def _load_images_and_poses(self):
+        self.images = []
+        self.poses = []
+        for i, frame in enumerate(self.meta['frames']):
+            fname = os.path.join(self.datadir, self.split, frame['file_path'].split('/')[-1] + '.png')
+            img = Image.open(fname).convert('RGBA')  # Load with alpha channel
+            img = img.resize(self.img_wh, Image.Resampling.LANCZOS)
+            img = np.array(img) / 255.0  # Convert to 0-1 range first
+            
+            # Handle alpha compositing with white background (standard NeRF preprocessing)
+            if img.shape[2] == 4:  # RGBA
+                rgb = img[..., :3]
+                alpha = img[..., 3:]
+                if self.white_bkgd:
+                    # Composite with white background: rgb = rgb * alpha + white * (1 - alpha)
+                    rgb = rgb * alpha + (1 - alpha)  # white background = 1
+                else:
+                    # Keep alpha channel
+                    rgb = np.concatenate([rgb, alpha], axis=-1)
+                img = rgb
+            
+            # Convert from sRGB to linear RGB (proper gamma correction)
+            img = srgb_to_linear(img)
+            
+            self.images.append(img)
+            pose = np.array(frame['transform_matrix'], dtype=np.float32)
+            self.poses.append(pose)
+        # Convert to numpy arrays and check shapes
+        self.images = np.stack(self.images, axis=0)  # (N_images, H, W, 3)
+        self.poses = np.stack(self.poses, axis=0)    # (N_images, 4, 4)
+        
+        # Print shape information for debugging
+        print(f"Loaded {len(self.images)} images with shape: {self.images.shape}")
+        print(f"Image value range: [{self.images.min():.3f}, {self.images.max():.3f}]")
+        self.focal = 0.5 * self.img_wh[0] / np.tan(0.5 * self.meta['camera_angle_x'])
+
+    def _generate_rays(self):
+        # Generate rays for all images
+        H, W = self.img_wh
+        i, j = np.meshgrid(np.arange(W), np.arange(H), indexing='xy')
+        dirs = np.stack([(i - W/2)/self.focal, -(j - H/2)/self.focal, -np.ones_like(i)], -1)  # (H, W, 3)
+        self.all_rays_o = []
+        self.all_rays_d = []
+        self.all_rgbs = []
+        for img_idx in range(len(self.images)):
+            pose = self.poses[img_idx]
+            rays_d = (dirs @ pose[:3, :3].T).reshape(-1, 3)
+            rays_o = np.broadcast_to(pose[:3, 3], rays_d.shape)
+            rgb_flat = self.images[img_idx].reshape(-1, 3)
+            self.all_rays_o.append(rays_o)
+            self.all_rays_d.append(rays_d)
+            self.all_rgbs.append(rgb_flat)
+        self.all_rays_o = np.concatenate(self.all_rays_o, axis=0)
+        self.all_rays_d = np.concatenate(self.all_rays_d, axis=0)
+        self.all_rgbs = np.concatenate(self.all_rgbs, axis=0)
+
+    def __len__(self):
+        return self.all_rays_o.shape[0]
+
+    def __getitem__(self, idx):
+        return {
+            'ray_o': torch.from_numpy(self.all_rays_o[idx]).float(),
+            'ray_d': torch.from_numpy(self.all_rays_d[idx]).float(),
+            'rgb': torch.from_numpy(self.all_rgbs[idx]).float()
+        }
+
+def auto_tune_batch_size(dataset, max_mem_gb=32, min_batch=64, max_batch=4096):
+    # Dummy function: in practice, you would try increasing batch size until OOM, then back off
+    # Here, just return a safe default
+    return min(max_batch, max(min_batch, int(1e6 / len(dataset))))
+```
+
+### nerfmlp/model.py
+```
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, num_freqs, include_input=True, log_sampling=True):
+        super().__init__()
+        self.num_freqs = num_freqs
+        self.include_input = include_input
+        self.log_sampling = log_sampling
+        
+        if log_sampling:
+            # Match official implementation exactly: tf.linspace(0., max_freq, N_freqs)
+            # This creates frequencies: [2^0, 2^1, 2^2, ..., 2^(num_freqs-1)]
+            self.freq_bands = 2.0 ** torch.linspace(0., num_freqs-1, num_freqs)
+        else:
+            # Linear sampling: tf.linspace(2.**0., 2.**max_freq, N_freqs)
+            self.freq_bands = torch.linspace(2.**0, 2.**(num_freqs-1), num_freqs)
+
+    def forward(self, x):
+        # x: (..., input_dim)
+        out = [x] if self.include_input else []
+        for freq in self.freq_bands:
+            out.append(torch.sin(freq * x))  # Match official - no pi multiplication
+            out.append(torch.cos(freq * x))
+        return torch.cat(out, dim=-1)
+
+class NeRFMLP(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=63, input_ch_views=27, skips=[5],
+                 use_viewdirs=True, output_ch=4):
+        super().__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.input_ch_views = input_ch_views
+        self.skips = skips
+        self.use_viewdirs = use_viewdirs
+
+        # Main MLP layers - REVERT: skip at layer 5 (index 5) to match saved weights
+        self.pts_linears = nn.ModuleList(
+            [nn.Linear(input_ch, W)] +                    # Layer 0
+            [nn.Linear(W, W) for _ in range(1, 5)] +      # Layers 1-4  
+            [nn.Linear(W + input_ch, W)] +                # Layer 5 (skip layer)
+            [nn.Linear(W, W) for _ in range(6, D)]        # Layers 6-7
+        )
+        
+        if use_viewdirs:
+            # Match official architecture: separate sigma and bottleneck branches
+            self.sigma_linear = nn.Linear(W, 1)  # Alpha/sigma branch
+            self.bottleneck_linear = nn.Linear(W, 256)  # Bottleneck for viewdirs
+            # Viewdirs branch: bottleneck + viewdirs -> 1 hidden layer (128) -> RGB
+            self.view_linear = nn.Linear(256 + input_ch_views, W//2)  # W//2 = 128
+            self.rgb_linear = nn.Linear(W//2, 3)
+        else:
+            self.output_linear = nn.Linear(W, output_ch)
+
+    def forward(self, x, viewdirs=None):
+        # x: (N_rays*N_samples, input_ch)
+        # viewdirs: (N_rays*N_samples, input_ch_views)
+        h = x
+        for i, l in enumerate(self.pts_linears):
+            if i == 5:  # REVERT: Skip at layer 5 to match saved weights
+                h = torch.cat([x, h], -1)
+            h = l(h)
+            h = F.relu(h)
+        
+        if self.use_viewdirs and viewdirs is not None:
+            # Match official architecture exactly
+            sigma = self.sigma_linear(h)  # Alpha/sigma branch
+            bottleneck = self.bottleneck_linear(h)  # Bottleneck branch
+            # Concatenate bottleneck with viewdirs
+            h = torch.cat([bottleneck, viewdirs], -1)
+            h = self.view_linear(h)
+            h = F.relu(h)
+            rgb = self.rgb_linear(h)
+            # Concatenate RGB and sigma (sigma last, matching official)
+            outputs = torch.cat([rgb, sigma], -1)
+        else:
+            outputs = self.output_linear(h)
+        
+        return outputs
+
+    def load_from_numpy(self, np_arrays):
+        # Load weights from a list of numpy arrays in the order found in the .npy files
+        # Official order (FIXED to match skip at layer 4):
+        # 0-15: main MLP (8 layers) - with skip at layer 4
+        # 16-17: bottleneck_linear (256,256), (256,)
+        # 18-19: view_linear (283,128), (128,)
+        # 20-21: rgb_linear (128,3), (3,)
+        # 22-23: sigma_linear (256,1), (1,)
+        idx = 0
+        # Main MLP layers
+        for i, l in enumerate(self.pts_linears):
+            print(f"Loading pts_linears[{i}].weight with shape {l.weight.data.shape} from np_arrays[{idx}].T {np_arrays[idx].shape}")
+            l.weight.data.copy_(torch.from_numpy(np_arrays[idx].T))
+            print(f"Loading pts_linears[{i}].bias with shape {l.bias.data.shape} from np_arrays[{idx+1}].shape {np_arrays[idx+1].shape}")
+            l.bias.data.copy_(torch.from_numpy(np_arrays[idx+1]))
+            idx += 2
+        if self.use_viewdirs:
+            # Bottleneck
+            print(f"Loading bottleneck_linear.weight with shape {self.bottleneck_linear.weight.data.shape} from np_arrays[{idx}].T {np_arrays[idx].shape}")
+            self.bottleneck_linear.weight.data.copy_(torch.from_numpy(np_arrays[idx].T))
+            print(f"Loading bottleneck_linear.bias with shape {self.bottleneck_linear.bias.data.shape} from np_arrays[{idx+1}].shape {np_arrays[idx+1].shape}")
+            self.bottleneck_linear.bias.data.copy_(torch.from_numpy(np_arrays[idx+1]))
+            idx += 2
+            # Viewdirs
+            print(f"Loading view_linear.weight with shape {self.view_linear.weight.data.shape} from np_arrays[{idx}].T {np_arrays[idx].shape}")
+            self.view_linear.weight.data.copy_(torch.from_numpy(np_arrays[idx].T))
+            print(f"Loading view_linear.bias with shape {self.view_linear.bias.data.shape} from np_arrays[{idx+1}].shape {np_arrays[idx+1].shape}")
+            self.view_linear.bias.data.copy_(torch.from_numpy(np_arrays[idx+1]))
+            idx += 2
+            # RGB
+            print(f"Loading rgb_linear.weight with shape {self.rgb_linear.weight.data.shape} from np_arrays[{idx}].T {np_arrays[idx].shape}")
+            self.rgb_linear.weight.data.copy_(torch.from_numpy(np_arrays[idx].T))
+            print(f"Loading rgb_linear.bias with shape {self.rgb_linear.bias.data.shape} from np_arrays[{idx+1}].shape {np_arrays[idx+1].shape}")
+            self.rgb_linear.bias.data.copy_(torch.from_numpy(np_arrays[idx+1]))
+            idx += 2
+            # Sigma
+            print(f"Loading sigma_linear.weight with shape {self.sigma_linear.weight.data.shape} from np_arrays[{idx}].T {np_arrays[idx].shape}")
+            self.sigma_linear.weight.data.copy_(torch.from_numpy(np_arrays[idx].T))
+            print(f"Loading sigma_linear.bias with shape {self.sigma_linear.bias.data.shape} from np_arrays[{idx+1}].shape {np_arrays[idx+1].shape}")
+            self.sigma_linear.bias.data.copy_(torch.from_numpy(np_arrays[idx+1]))
+        else:
+            print(f"Loading output_linear.weight with shape {self.output_linear.weight.data.shape} from np_arrays[{idx}].T {np_arrays[idx].shape}")
+            self.output_linear.weight.data.copy_(torch.from_numpy(np_arrays[idx].T))
+            print(f"Loading output_linear.bias with shape {self.output_linear.bias.data.shape} from np_arrays[{idx+1}].shape {np_arrays[idx+1].shape}")
+            self.output_linear.bias.data.copy_(torch.from_numpy(np_arrays[idx+1]))
+```
+
+### nerfmlp/renderer.py
+```
+import torch
+import torch.nn.functional as F
+from .model import PositionalEncoding
+
+class NeRFRenderer:
+    def __init__(self, model, device, 
+                 pos_enc_L=10, dir_enc_L=4, 
+                 N_samples=64, N_importance=128, 
+                 near=2.0, far=6.0, white_bkgd=True, perturb=1.0, raw_noise_std=0.0, coord_scale=1.0):
+        self.model = model
+        self.device = device
+        self.N_samples = N_samples
+        self.N_importance = N_importance
+        self.near = near
+        self.far = far
+        self.white_bkgd = white_bkgd
+        self.perturb = perturb
+        self.raw_noise_std = raw_noise_std
+        self.coord_scale = coord_scale  # New: coordinate scaling factor
+        self.pos_enc = PositionalEncoding(pos_enc_L).to(device)
+        self.dir_enc = PositionalEncoding(dir_enc_L).to(device)
+
+    def render(self, rays_o, rays_d, H, W, focal, chunk=1024*16):
+        """
+        rays_o: (N_rays, 3) ray origins
+        rays_d: (N_rays, 3) ray directions
+        H, W: image height and width
+        focal: focal length
+        chunk: process rays in chunks to avoid OOM (optimized for M3 Pro)
+        Returns: (H, W, 3) image
+        """
+        N_rays = rays_o.shape[0]
+        results = []
+        
+        # Optimize for M3 Pro MPS
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            # Use smaller chunks for better M3 Pro performance
+            chunk = min(chunk, 1024*8)
+        
+        for i in range(0, N_rays, chunk):
+            with torch.no_grad():  # Ensure inference mode for better performance
+                results.append(self._render_rays(
+                    rays_o[i:i+chunk], rays_d[i:i+chunk]))
+        rgb_map = torch.cat([r['rgb_map'] for r in results], 0)
+        return rgb_map.view(H, W, 3)
+
+    def _render_rays(self, rays_o, rays_d):
+        N_rays = rays_o.shape[0]
+        device = self.device
+        
+        # === Coarse sampling ===
+        t_vals = torch.linspace(0., 1., steps=self.N_samples, device=device)
+        z_vals = self.near * (1.-t_vals) + self.far * t_vals
+        z_vals = z_vals.expand([N_rays, self.N_samples])
+        
+        if self.perturb > 0:
+            mids = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
+            upper = torch.cat([mids, z_vals[..., -1:]], -1)
+            lower = torch.cat([z_vals[..., :1], mids], -1)
+            t_rand = torch.rand(z_vals.shape, device=device)
+            z_vals = lower + (upper - lower) * t_rand
+
+        pts = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * z_vals.unsqueeze(2)  # (N_rays, N_samples, 3)
+        pts_flat = pts.reshape(-1, 3)
+        
+        # Apply coordinate scaling to match model expectations
+        if self.coord_scale != 1.0:
+            pts_flat = pts_flat * self.coord_scale
+        
+        pts_enc = self.pos_enc(pts_flat)
+        
+        viewdirs = rays_d / (rays_d.norm(dim=-1, keepdim=True) + 1e-8)
+        viewdirs_enc = self.dir_enc(viewdirs)
+        viewdirs_enc = viewdirs_enc.unsqueeze(1).expand(-1, self.N_samples, -1).reshape(-1, viewdirs_enc.shape[-1])
+        
+        raw = self.model(pts_enc, viewdirs_enc)
+        raw = raw.view(N_rays, self.N_samples, 4)
+        
+        rgb_map_coarse, depth_map_coarse, acc_map_coarse, weights = self._raw2outputs(
+            raw, z_vals, rays_d)
+
+        # === Fine sampling (hierarchical) ===
+        if self.N_importance > 0:
+            rgb_map_0, depth_map_0, acc_map_0 = rgb_map_coarse, depth_map_coarse, acc_map_coarse
+            
+            z_vals_mid = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
+            z_samples = self._sample_pdf(z_vals_mid, weights[..., 1:-1], self.N_importance, det=(self.perturb == 0.))
+            z_samples = z_samples.detach()
+
+            z_vals_fine, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
+            pts_fine = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * z_vals_fine.unsqueeze(2)
+            pts_fine_flat = pts_fine.reshape(-1, 3)
+            
+            # Apply coordinate scaling to match model expectations
+            if self.coord_scale != 1.0:
+                pts_fine_flat = pts_fine_flat * self.coord_scale
+            
+            pts_fine_enc = self.pos_enc(pts_fine_flat)
+            
+            viewdirs_fine_enc = self.dir_enc(viewdirs)
+            viewdirs_fine_enc = viewdirs_fine_enc.unsqueeze(1).expand(-1, z_vals_fine.shape[1], -1).reshape(-1, viewdirs_fine_enc.shape[-1])
+            
+            raw_fine = self.model(pts_fine_enc, viewdirs_fine_enc)
+            raw_fine = raw_fine.view(N_rays, z_vals_fine.shape[1], 4)
+            
+            rgb_map_fine, depth_map_fine, acc_map_fine, weights_fine = self._raw2outputs(
+                raw_fine, z_vals_fine, rays_d)
+                
+            return {'rgb_map': rgb_map_fine, 'depth_map': depth_map_fine, 'acc_map': acc_map_fine,
+                    'rgb_map_coarse': rgb_map_0, 'depth_map_coarse': depth_map_0, 'acc_map_coarse': acc_map_0}
+        else:
+            return {'rgb_map': rgb_map_coarse, 'depth_map': depth_map_coarse, 'acc_map': acc_map_coarse}
+
+    def _raw2outputs(self, raw, z_vals, rays_d):
+        """
+        Transforms model's predictions to semantically meaningful values.
+        Based exactly on the official NeRF implementation.
+        """
+        # Compute 'distance' (in time) between each integration time along a ray.
+        dists = z_vals[..., 1:] - z_vals[..., :-1]
+        
+        # The 'distance' from the last integration time is infinity.
+        dists = torch.cat([dists, torch.full_like(dists[..., :1], 1e10)], -1)
+        
+        # Multiply each distance by the norm of its corresponding direction ray
+        # to convert to real world distance (accounts for non-unit directions).
+        dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
+        
+        # Extract RGB of each sample position along each ray.
+        rgb = torch.sigmoid(raw[..., :3])  # [N_rays, N_samples, 3]
+        
+        # Add noise to model's predictions for density. Can be used to 
+        # regularize network during training (prevents floater artifacts).
+        noise = 0.
+        if self.raw_noise_std > 0.:
+            noise = torch.randn_like(raw[..., 3]) * self.raw_noise_std
+        
+        # Predict density of each sample along each ray. Higher values imply
+        # higher likelihood of being absorbed at this point.
+        alpha = 1.0 - torch.exp(-F.relu(raw[..., 3] + noise) * dists)
+        
+        # Compute weight for RGB of each sample along each ray. A cumprod() is
+        # used to express the idea of the ray not having reflected up to this
+        # sample yet.
+        # This is the key fix: use exclusive=True equivalent
+        ones = torch.ones_like(alpha[..., :1])
+        transmittance = torch.cumprod(torch.cat([ones, 1. - alpha + 1e-10], -1), -1)[..., :-1]
+        weights = alpha * transmittance
+        
+        # Computed weighted color of each sample along each ray.
+        rgb_map = torch.sum(weights.unsqueeze(-1) * rgb, dim=-2)
+        
+        # Estimated depth map is expected distance.
+        depth_map = torch.sum(weights * z_vals, dim=-1)
+        
+        # Sum of weights along each ray. This value is in [0, 1] up to numerical error.
+        acc_map = torch.sum(weights, -1)
+        
+        # To composite onto a white background, use the accumulated alpha map.
+        if self.white_bkgd:
+            rgb_map = rgb_map + (1. - acc_map.unsqueeze(-1))
+        
+        return rgb_map, depth_map, acc_map, weights
+
+    def _sample_pdf(self, bins, weights, N_samples, det=False):
+        """
+        Hierarchical sampling based on the official NeRF implementation.
+        """
+        device = weights.device
+        
+        # Get pdf
+        weights = weights + 1e-5  # prevent nans
+        pdf = weights / torch.sum(weights, -1, keepdim=True)
+        cdf = torch.cumsum(pdf, -1)
+        cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], -1)
+        
+        # Take uniform samples
+        if det:
+            u = torch.linspace(0., 1., N_samples, device=device)
+            u = u.expand(list(cdf.shape[:-1]) + [N_samples])
+        else:
+            u = torch.rand(list(cdf.shape[:-1]) + [N_samples], device=device)
+        
+        # Invert CDF
+        inds = torch.searchsorted(cdf, u, right=True)
+        below = torch.clamp(inds - 1, 0)
+        above = torch.clamp(inds, max=cdf.shape[-1] - 1)
+        inds_g = torch.stack([below, above], -1)
+        
+        matched_shape = list(inds_g.shape[:-1]) + [cdf.shape[-1]]
+        cdf_g = torch.gather(cdf.unsqueeze(-2).expand(matched_shape), -1, inds_g)
+        bins_g = torch.gather(bins.unsqueeze(-2).expand(matched_shape), -1, inds_g)
+        
+        denom = cdf_g[..., 1] - cdf_g[..., 0]
+        denom = torch.where(denom < 1e-5, torch.ones_like(denom), denom)
+        t = (u - cdf_g[..., 0]) / denom
+        samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
+        
+        return samples
+```
+
+### scripts/compare_single_view.py
+```
+import argparse
+import os
+import sys
+# Add the project root to Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import numpy as np
+from PIL import Image
+import torch
+from nerfmlp import NeRFMLP, NeRFRenderer, NeRFDataset
+
+def main():
+    parser = argparse.ArgumentParser(description='Compare NeRF rendering to ground truth for a single view.')
+    parser.add_argument('--view_idx', type=int, required=True, help='Index of the view to compare (e.g., 10)')
+    parser.add_argument('--model_path', type=str, required=True, help='Path to NeRF model checkpoint')
+    parser.add_argument('--datadir', type=str, default='data/lego', help='Path to dataset directory')
+    parser.add_argument('--img_wh', type=int, nargs=2, default=[400, 400], help='Image width and height')
+    parser.add_argument('--output', type=str, required=True, help='Path to save side-by-side comparison image')
+    parser.add_argument('--gt_dir', type=str, default=None, help='Directory for ground truth images (default: data/lego/train)')
+    args = parser.parse_args()
+
+    device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+    img_wh = tuple(args.img_wh)
+    gt_dir = args.gt_dir or os.path.join(args.datadir, 'train')
+    gt_path = os.path.join(gt_dir, f"r_{args.view_idx}.png")
+    if not os.path.exists(gt_path):
+        print(f"Error: Ground truth image {gt_path} does not exist.")
+        exit(1)
+    gt_img = Image.open(gt_path).convert('RGB')
+
+    # Load dataset and get pose
+    dataset = NeRFDataset(args.datadir, split='train', img_wh=img_wh)
+    poses = dataset.poses
+    n_poses = len(poses)
+    pose_idx = args.view_idx % n_poses
+    pose = poses[pose_idx]
+    focal = dataset.focal
+    H, W = img_wh
+
+    # Dynamic near/far (copied from render_example.py)
+    positions = np.array([p[:3, 3] for p in poses])
+    dists = np.linalg.norm(positions, axis=1)
+    dist_std = dists.std()
+    if dist_std < 0.01:
+        scene_center = np.mean(positions, axis=0)
+        scene_radius = np.linalg.norm(positions - scene_center, axis=1).max()
+        near = max(0.1, scene_radius * 0.5)
+        far = scene_radius * 2.0
+    else:
+        near = max(0.1, dists.min() - 0.5)
+        far = dists.max() + 0.5
+
+    # Load model with support for both .npy and .pth formats
+    model = NeRFMLP().to(device)
+    
+    print(f"Loading model from: {args.model_path}")
+    if args.model_path.endswith('.npy'):
+        # Load weights from numpy file (official example weights)
+        weights = np.load(args.model_path, allow_pickle=True)
+        if isinstance(weights, np.lib.npyio.NpzFile):
+            weights = [weights[key] for key in weights.files]
+        elif isinstance(weights, np.ndarray) and weights.dtype == object:
+            weights = list(weights)
+        model.load_from_numpy(weights)
+        print("✅ Loaded weights from .npy file using load_from_numpy")
+        # Configure for official weights
+        N_samples, N_importance = 64, 64
+    else:
+        # Load PyTorch checkpoint
+        model.load_state_dict(torch.load(args.model_path, map_location=device))
+        print("✅ Loaded weights from .pth file")
+        # Configure for custom weights  
+        N_samples, N_importance = 64, 128
+    
+    model.eval()
+    renderer = NeRFRenderer(model, device, near=near, far=far, 
+                           N_samples=N_samples, N_importance=N_importance)
+
+    # Render the view
+    with torch.no_grad():
+        i, j = np.meshgrid(np.arange(W), np.arange(H), indexing='xy')
+        dirs = np.stack([(i - W/2)/focal, -(j - H/2)/focal, -np.ones_like(i)], -1)
+        rays_d = (dirs @ pose[:3, :3].T).reshape(-1, 3)
+        rays_o = np.broadcast_to(pose[:3, 3], rays_d.shape)
+        rays_o = torch.from_numpy(rays_o.copy()).float().to(device)
+        rays_d = torch.from_numpy(rays_d).float().to(device)
+        rgb = renderer.render(rays_o, rays_d, H, W, focal)
+        rgb = rgb.cpu().numpy()
+        rgb = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
+        pred_img = Image.fromarray(rgb)
+
+    # Resize to match ground truth
+    pred_img = pred_img.resize(gt_img.size)
+    side_by_side = np.concatenate([np.array(gt_img), np.array(pred_img)], axis=1)
+    Image.fromarray(side_by_side).save(args.output)
+    print(f"Saved side-by-side comparison to {args.output}")
+
+if __name__ == '__main__':
+    main()
+```
+
+### scripts/plot_training_progress.py
+```
+#!/usr/bin/env python3
+"""
+Real-time training progress plotting script.
+This script can be run during training to monitor progress by reading the metrics files.
+"""
+
+import json
+import os
+import time
+import argparse
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+import numpy as np
+
+def load_metrics(metrics_file):
+    """Load metrics from JSON file."""
+    if not os.path.exists(metrics_file):
+        return None
+    
+    try:
+        with open(metrics_file, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading metrics: {e}")
+        return None
+
+def create_progress_plot(metrics, save_dir, show_plot=True):
+    """Create a comprehensive training progress plot."""
+    if not metrics:
+        print("No metrics data available.")
+        return
+    
+    # Extract data
+    train_losses = metrics.get('train_losses', [])
+    train_psnrs = metrics.get('train_psnrs', [])
+    quick_val_losses = metrics.get('quick_val_losses', [])
+    quick_val_psnrs = metrics.get('quick_val_psnrs', [])
+    quick_val_ssims = metrics.get('quick_val_ssims', [])
+    val_steps = metrics.get('val_steps', [])
+    iteration_times = metrics.get('iteration_times', [])
+    
+    if not val_steps:
+        print("No validation steps found in metrics.")
+        return
+    
+    # Create figure with subplots
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig.suptitle('NeRF Training Progress', fontsize=16, fontweight='bold')
+    
+    # 1. Loss convergence (top left, larger)
+    ax1 = axes[0, 0]
+    if train_losses and quick_val_losses:
+        ax1.plot(val_steps, train_losses, label='Training Loss', marker='o', markersize=3, linewidth=1.5, color='blue', alpha=0.8)
+        ax1.plot(val_steps, quick_val_losses, label='Validation Loss', marker='s', markersize=3, linewidth=1.5, color='red', alpha=0.8)
+        ax1.set_xlabel('Iteration')
+        ax1.set_ylabel('Loss')
+        ax1.set_title('Training vs Validation Loss')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax1.set_yscale('log')
+    
+    # 2. PSNR convergence (top middle)
+    ax2 = axes[0, 1]
+    if train_psnrs and quick_val_psnrs:
+        ax2.plot(val_steps, train_psnrs, label='Training PSNR', marker='o', markersize=3, linewidth=1.5, color='green', alpha=0.8)
+        ax2.plot(val_steps, quick_val_psnrs, label='Validation PSNR', marker='s', markersize=3, linewidth=1.5, color='orange', alpha=0.8)
+        ax2.set_xlabel('Iteration')
+        ax2.set_ylabel('PSNR (dB)')
+        ax2.set_title('Training vs Validation PSNR')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+    
+    # 3. SSIM progress (top right)
+    ax3 = axes[0, 2]
+    if quick_val_ssims:
+        ax3.plot(val_steps, quick_val_ssims, label='Validation SSIM', marker='s', markersize=3, color='purple', alpha=0.8)
+        ax3.set_xlabel('Iteration')
+        ax3.set_ylabel('SSIM')
+        ax3.set_title('SSIM Progress')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+    
+    # 4. Overfitting indicator (bottom left)
+    ax4 = axes[1, 0]
+    if train_losses and quick_val_losses and len(train_losses) == len(quick_val_losses):
+        loss_diff = [abs(t - v) for t, v in zip(train_losses, quick_val_losses)]
+        ax4.plot(val_steps, loss_diff, marker='o', markersize=3, color='purple', alpha=0.8)
+        ax4.set_xlabel('Iteration')
+        ax4.set_ylabel('|Train - Val Loss|')
+        ax4.set_title('Overfitting Indicator')
+        ax4.grid(True, alpha=0.3)
+        ax4.set_yscale('log')
+    
+    # 5. Training time per iteration (bottom middle)
+    ax5 = axes[1, 1]
+    if iteration_times and len(iteration_times) > 10:
+        recent_times = iteration_times[-100:]  # Last 100 iterations
+        ax5.plot(recent_times, alpha=0.6, color='brown')
+        ax5.set_xlabel('Recent Iterations')
+        ax5.set_ylabel('Time (seconds)')
+        ax5.set_title('Training Time per Iteration')
+        ax5.grid(True, alpha=0.3)
+    
+    # 6. Convergence summary (bottom right)
+    ax6 = axes[1, 2]
+    ax6.axis('off')
+    
+    # Calculate summary statistics
+    if train_losses and quick_val_losses and train_psnrs and quick_val_psnrs:
+        current_train_loss = train_losses[-1] if train_losses else 0
+        current_val_loss = quick_val_losses[-1] if quick_val_losses else 0
+        current_train_psnr = train_psnrs[-1] if train_psnrs else 0
+        current_val_psnr = quick_val_psnrs[-1] if quick_val_psnrs else 0
+        
+        # Calculate improvement
+        if len(train_losses) > 1:
+            loss_improvement = ((train_losses[0] - current_train_loss) / train_losses[0]) * 100
+        else:
+            loss_improvement = 0
+        
+        if len(train_psnrs) > 1:
+            psnr_improvement = current_train_psnr - train_psnrs[0]
+        else:
+            psnr_improvement = 0
+        
+        summary_text = f"""
+Current Status:
+• Iteration: {val_steps[-1] if val_steps else 0}
+• Training Loss: {current_train_loss:.6f}
+• Validation Loss: {current_val_loss:.6f}
+• Training PSNR: {current_train_psnr:.2f} dB
+• Validation PSNR: {current_val_psnr:.2f} dB
+
+Improvement:
+• Loss: {loss_improvement:.1f}% reduction
+• PSNR: {psnr_improvement:+.2f} dB gain
+
+Best Validation PSNR: {metrics.get('best_val_psnr', 0):.2f} dB
+        """
+        
+        ax6.text(0.1, 0.9, summary_text, transform=ax6.transAxes, fontsize=10,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.8))
+    
+    plt.tight_layout()
+    
+    # Save plot
+    if save_dir:
+        plot_path = os.path.join(save_dir, 'training_progress.png')
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+        print(f"Progress plot saved to: {plot_path}")
+    
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+
+def animate_progress(metrics_file, save_dir, interval=5000):
+    """Create an animated plot that updates automatically."""
+    import matplotlib
+    
+    # Try different backends in order of preference
+    backends_to_try = ['Qt5Agg', 'MacOSX', 'Agg']
+    backend_set = False
+    
+    for backend in backends_to_try:
+        try:
+            matplotlib.use(backend)
+            backend_set = True
+            print(f"Using matplotlib backend: {backend}")
+            break
+        except ImportError:
+            continue
+    
+    if not backend_set:
+        print("Warning: Could not set a GUI backend for live plotting. Using default.")
+    
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig.suptitle('NeRF Training Progress (Live)', fontsize=16, fontweight='bold')
+    
+    def update(frame):
+        # Load latest metrics
+        metrics = load_metrics(metrics_file)
+        if not metrics:
+            return []
+        
+        # Clear all axes
+        for ax in axes.flat:
+            ax.clear()
+        
+        # Recreate plots with current data
+        artists = _create_plots_on_axes(metrics, axes)
+        
+        plt.tight_layout()
+        return artists if artists else []
+    
+    # Create animation with explicit save_count to avoid warning
+    ani = FuncAnimation(fig, update, interval=interval, repeat=True, 
+                       cache_frame_data=False, save_count=100)
+    
+    try:
+        plt.show()
+    except Exception as e:
+        print(f"Error displaying live plot: {e}")
+        print("Try using the static plotting instead: python scripts/plot_training_progress.py")
+    
+    return ani
+
+def _create_plots_on_axes(metrics, axes):
+    """Helper function to create plots on provided axes."""
+    if not metrics:
+        return []
+    
+    # Extract data
+    train_losses = metrics.get('train_losses', [])
+    train_psnrs = metrics.get('train_psnrs', [])
+    quick_val_losses = metrics.get('quick_val_losses', [])
+    quick_val_psnrs = metrics.get('quick_val_psnrs', [])
+    quick_val_ssims = metrics.get('quick_val_ssims', [])
+    val_steps = metrics.get('val_steps', [])
+    iteration_times = metrics.get('iteration_times', [])
+    
+    if not val_steps:
+        return []
+    
+    # 1. Loss convergence
+    ax1 = axes[0, 0]
+    if train_losses and quick_val_losses:
+        ax1.plot(val_steps, train_losses, label='Training Loss', marker='o', markersize=3, linewidth=1.5, color='blue', alpha=0.8)
+        ax1.plot(val_steps, quick_val_losses, label='Validation Loss', marker='s', markersize=3, linewidth=1.5, color='red', alpha=0.8)
+        ax1.set_xlabel('Iteration')
+        ax1.set_ylabel('Loss')
+        ax1.set_title('Training vs Validation Loss')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax1.set_yscale('log')
+    
+    # 2. PSNR convergence
+    ax2 = axes[0, 1]
+    if train_psnrs and quick_val_psnrs:
+        ax2.plot(val_steps, train_psnrs, label='Training PSNR', marker='o', markersize=3, linewidth=1.5, color='green', alpha=0.8)
+        ax2.plot(val_steps, quick_val_psnrs, label='Validation PSNR', marker='s', markersize=3, linewidth=1.5, color='orange', alpha=0.8)
+        ax2.set_xlabel('Iteration')
+        ax2.set_ylabel('PSNR (dB)')
+        ax2.set_title('Training vs Validation PSNR')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+    
+    # 3. SSIM progress
+    ax3 = axes[0, 2]
+    if quick_val_ssims:
+        ax3.plot(val_steps, quick_val_ssims, label='Validation SSIM', marker='s', markersize=3, color='purple', alpha=0.8)
+        ax3.set_xlabel('Iteration')
+        ax3.set_ylabel('SSIM')
+        ax3.set_title('SSIM Progress')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+    
+    # 4. Overfitting indicator
+    ax4 = axes[1, 0]
+    if train_losses and quick_val_losses and len(train_losses) == len(quick_val_losses):
+        loss_diff = [abs(t - v) for t, v in zip(train_losses, quick_val_losses)]
+        ax4.plot(val_steps, loss_diff, marker='o', markersize=3, color='purple', alpha=0.8)
+        ax4.set_xlabel('Iteration')
+        ax4.set_ylabel('|Train - Val Loss|')
+        ax4.set_title('Overfitting Indicator')
+        ax4.grid(True, alpha=0.3)
+        ax4.set_yscale('log')
+    
+    # 5. Training time per iteration
+    ax5 = axes[1, 1]
+    if iteration_times and len(iteration_times) > 10:
+        recent_times = iteration_times[-100:]
+        ax5.plot(recent_times, alpha=0.6, color='brown')
+        ax5.set_xlabel('Recent Iterations')
+        ax5.set_ylabel('Time (seconds)')
+        ax5.set_title('Training Time per Iteration')
+        ax5.grid(True, alpha=0.3)
+    
+    # 6. Summary
+    ax6 = axes[1, 2]
+    ax6.axis('off')
+    
+    if train_losses and quick_val_losses and train_psnrs and quick_val_psnrs:
+        current_train_loss = train_losses[-1]
+        current_val_loss = quick_val_losses[-1]
+        current_train_psnr = train_psnrs[-1]
+        current_val_psnr = quick_val_psnrs[-1]
+        
+        loss_improvement = ((train_losses[0] - current_train_loss) / train_losses[0]) * 100 if len(train_losses) > 1 else 0
+        psnr_improvement = current_train_psnr - train_psnrs[0] if len(train_psnrs) > 1 else 0
+        
+        summary_text = f"""
+Current Status:
+• Iteration: {val_steps[-1]}
+• Training Loss: {current_train_loss:.6f}
+• Validation Loss: {current_val_loss:.6f}
+• Training PSNR: {current_train_psnr:.2f} dB
+• Validation PSNR: {current_val_psnr:.2f} dB
+
+Improvement:
+• Loss: {loss_improvement:.1f}% reduction
+• PSNR: {psnr_improvement:+.2f} dB gain
+
+Best Validation PSNR: {metrics.get('best_val_psnr', 0):.2f} dB
+        """
+        
+        ax6.text(0.1, 0.9, summary_text, transform=ax6.transAxes, fontsize=10,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.8))
+
+    return [ax1, ax2, ax3, ax4, ax5, ax6]
+
+def main():
+    parser = argparse.ArgumentParser(description='Plot NeRF training progress')
+    parser.add_argument('--metrics-file', type=str, 
+                       default='outputs/checkpoints/metrics_latest.json',
+                       help='Path to metrics JSON file')
+    parser.add_argument('--save-dir', type=str, 
+                       default='outputs/checkpoints',
+                       help='Directory to save plots')
+    parser.add_argument('--live', action='store_true',
+                       help='Run in live mode with automatic updates')
+    parser.add_argument('--interval', type=int, default=5000,
+                       help='Update interval in milliseconds (for live mode)')
+    
+    args = parser.parse_args()
+    
+    if args.live:
+        print(f"Starting live monitoring of {args.metrics_file}")
+        print("Press Ctrl+C to stop")
+        try:
+            animate_progress(args.metrics_file, args.save_dir, args.interval)
+        except KeyboardInterrupt:
+            print("\nLive monitoring stopped.")
+    else:
+        # Single plot
+        metrics = load_metrics(args.metrics_file)
+        create_progress_plot(metrics, args.save_dir)
+
+if __name__ == '__main__':
+    main()
+```
+
+### scripts/render_example.py
+```
+import os
+import sys
+# Add the project root to Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import argparse
+import torch
+import numpy as np
+from PIL import Image
+from nerfmlp import NeRFMLP, NeRFRenderer, NeRFDataset
+
+def linear_to_srgb(img):
+    """
+    Convert linear RGB to sRGB with proper gamma correction.
+    
+    The standard linear to sRGB conversion (inverse of sRGB to linear):
+    - For values <= 0.0031308: srgb = linear * 12.92
+    - For values > 0.0031308: srgb = 1.055 * linear^(1/2.4) - 0.055
+    """
+    img = img.astype(np.float32)
+    srgb = np.where(
+        img <= 0.0031308,
+        img * 12.92,
+        1.055 * np.power(img, 1/2.4) - 0.055
+    )
+    return srgb
+
+def main():
+    parser = argparse.ArgumentParser(description='Render test images from trained NeRF model')
+    parser.add_argument('--model_path', type=str, default='outputs/checkpoints/model_best.pth',
+                       help='Path to model checkpoint (default: outputs/checkpoints/model_best.pth)')
+    parser.add_argument('--use_fine_weights', action='store_true',
+                       help='Use fine model weights from lego_example_weights')
+    parser.add_argument('--N_samples', type=int, default=None,
+                       help='Number of coarse samples per ray (default: auto-detect)')
+    parser.add_argument('--N_importance', type=int, default=None,
+                       help='Number of fine samples per ray (default: auto-detect)')
+    parser.add_argument('--white_bkgd', action='store_true',
+                       help='Use white background (default: auto-detect)')
+    parser.add_argument('--no_white_bkgd', action='store_true',
+                       help='Use black background')
+    parser.add_argument('--datadir', type=str, default='./data/lego',
+                       help='Path to dataset directory (default: ./data/lego)')
+    parser.add_argument('--split', type=str, default='train',
+                       help='Dataset split to use (default: train)')
+    parser.add_argument('--img_wh', type=int, nargs=2, default=[400, 400],
+                       help='Image width and height (default: 400 400)')
+    parser.add_argument('--num_views', type=int, default=5,
+                       help='Number of views to render')
+    parser.add_argument('--out_prefix', type=str, default='rendered_example',
+                       help='Output filename prefix')
+    parser.add_argument('--view_idx', type=int, default=None,
+                       help='Specific view index to render (if not specified, renders multiple views)')
+    parser.add_argument('--near', type=float, default=None, help='Near bound override')
+    parser.add_argument('--far', type=float, default=None, help='Far bound override')
+    parser.add_argument('--coord_scale', type=float, default=None, help='Coordinate scaling factor to match model expectations')
+    parser.add_argument('--gamma_correction', action='store_true', help='Apply linear to sRGB gamma correction (can wash out colors)')
+    parser.add_argument('--brightness_boost', type=float, default=1.0, help='Brightness multiplier (default: 1.0, try 1.1-1.3 for subtle boost)')
+    args = parser.parse_args()
+
+    # --- Config ---
+    datadir = args.datadir
+    split = args.split
+    img_wh = tuple(args.img_wh)
+    model_path = args.model_path
+    out_prefix = args.out_prefix
+    num_views = args.num_views
+    view_idx = args.view_idx
+    use_fine_weights = args.use_fine_weights
+    N_samples = args.N_samples
+    N_importance = args.N_importance
+    white_bkgd = args.white_bkgd
+    no_white_bkgd = args.no_white_bkgd
+    near = args.near
+    far = args.far
+    coord_scale = args.coord_scale
+
+    device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+
+    # --- Load dataset for camera poses ---
+    dataset = NeRFDataset(datadir, split=split, img_wh=img_wh)
+    H, W = img_wh
+    focal = dataset.focal
+    poses = np.array(dataset.poses)  # Convert to numpy array
+    
+    print(f"Loaded {len(poses)} poses from {args.split} split")
+    print(f"Focal length: {focal}")
+    print(f"Image dimensions: ({H}, {W})")
+
+    # Apply coordinate scaling to camera poses if specified
+    if coord_scale is not None:
+        print(f"🔧 Using coordinate scaling factor: {coord_scale}")
+        poses_original = poses.copy()
+        poses_for_bounds = poses.copy()
+        poses_for_bounds[:, :3, 3] *= coord_scale  # Scale camera positions ONLY for bounds calculation
+        print(f"Original camera range: X[{poses_original[:, 0, 3].min():.3f}, {poses_original[:, 0, 3].max():.3f}] Y[{poses_original[:, 1, 3].min():.3f}, {poses_original[:, 1, 3].max():.3f}] Z[{poses_original[:, 2, 3].min():.3f}, {poses_original[:, 2, 3].max():.3f}]")
+        print(f"Scaled camera range: X[{poses_for_bounds[:, 0, 3].min():.3f}, {poses_for_bounds[:, 0, 3].max():.3f}] Y[{poses_for_bounds[:, 1, 3].min():.3f}, {poses_for_bounds[:, 1, 3].max():.3f}] Z[{poses_for_bounds[:, 2, 3].min():.3f}, {poses_for_bounds[:, 2, 3].max():.3f}]")
+        # IMPORTANT: Keep original poses for ray generation!
+        poses_for_rendering = poses_original.copy()
+    else:
+        coord_scale = 1.0  # Default to no scaling
+        poses_for_bounds = poses.copy()
+        poses_for_rendering = poses.copy()
+    
+    # Print first few camera positions for debugging  
+    for i in range(min(3, len(poses_for_rendering))):
+        pos = poses_for_rendering[i, :3, 3]
+        print(f"Camera {i} position (for rendering): {pos}")
+
+    # Calculate dynamic near/far bounds based on SCALED scene geometry
+    scene_center = np.array([pose[:3, 3] for pose in poses_for_bounds]).mean(axis=0)
+    camera_distances = np.linalg.norm(np.array([pose[:3, 3] for pose in poses_for_bounds]) - scene_center, axis=1)
+    scene_radius = camera_distances.max()
+    
+    # Use training-consistent bounds, with command line overrides if provided
+    if near is not None and far is not None:
+        dynamic_near, dynamic_far = near, far
+        print(f"Using command line bounds: near={dynamic_near}, far={dynamic_far}")
+    else:
+        # Use training bounds (2.0, 6.0) instead of dynamic calculation
+        # Dynamic bounds often mismatch what the model learned during training
+        dynamic_near, dynamic_far = 2.0, 6.0
+        print(f'Using training-consistent bounds: near={dynamic_near}, far={dynamic_far}')
+        print(f'(Dynamic would have been: near={float(camera_distances.min() - scene_radius):.3f}, far={float(camera_distances.max() + scene_radius):.3f})')
+    
+    # Ensure reasonable bounds for 360° spherical scenes
+    dynamic_near = max(dynamic_near, 0.01)  # Prevent negative or zero near
+    dynamic_far = max(dynamic_far, dynamic_near + 0.1)  # Ensure far > near
+
+    # --- Load model ---
+    model = NeRFMLP().to(device)
+    
+    # Check if we should use the fine example weights
+    if use_fine_weights:
+        model_path = 'data/lego_example_weights/model_fine_200000.npy'
+        if not os.path.exists(model_path):
+            print(f"Error: Fine weights not found at {model_path}")
+            return
+    elif not os.path.exists(model_path):
+        # If the user-specified model doesn't exist, show error and available options
+        print(f"Error: Specified model not found at {model_path}")
+        
+        # Show available models as suggestions
+        checkpoint_dir = 'outputs/checkpoints/'
+        if os.path.exists(checkpoint_dir):
+            print("Available models in outputs/checkpoints/:")
+            for f in sorted(os.listdir(checkpoint_dir)):
+                if f.endswith('.pth'):
+                    print(f"  - {checkpoint_dir}{f}")
+        
+        # Check for other common locations
+        other_locations = ['outputs/lego_full_training/', 'outputs/test_fixed_preprocessing/']
+        for loc in other_locations:
+            if os.path.exists(loc):
+                models = [f for f in os.listdir(loc) if f.endswith('.pth')]
+                if models:
+                    print(f"Available models in {loc}:")
+                    for f in sorted(models):
+                        print(f"  - {loc}{f}")
+        
+        print(f"\nTip: Use --use_fine_weights to load the official example weights")
+        print(f"Or specify a valid model path with --model_path")
+        return
+    
+    print(f"Loading model from: {model_path}")
+    if model_path.endswith('.npy'):
+        # Load weights from numpy file (assume list of arrays)
+        weights = np.load(model_path, allow_pickle=True)
+        if isinstance(weights, np.lib.npyio.NpzFile):
+            weights = [weights[key] for key in weights.files]
+        elif isinstance(weights, np.ndarray) and weights.dtype == object:
+            weights = list(weights)
+        print("Shapes of loaded .npy arrays:")
+        for i, arr in enumerate(weights):
+            print(f"  Weight {i}: {arr.shape}")
+        print("Model parameter names/types and shapes (expected):")
+        param_list = []
+        param_names = []
+        for idx, l in enumerate(model.pts_linears):
+            param_list.append(l.weight.data)
+            param_names.append(f"pts_linears[{idx}].weight")
+            param_list.append(l.bias.data)
+            param_names.append(f"pts_linears[{idx}].bias")
+        param_list.append(model.bottleneck_linear.weight.data)
+        param_names.append("bottleneck_linear.weight")
+        param_list.append(model.bottleneck_linear.bias.data)
+        param_names.append("bottleneck_linear.bias")
+        param_list.append(model.sigma_linear.weight.data)
+        param_names.append("sigma_linear.weight")
+        param_list.append(model.sigma_linear.bias.data)
+        param_names.append("sigma_linear.bias")
+        if model.use_viewdirs:
+            param_list.append(model.view_linear.weight.data)
+            param_names.append("view_linear.weight")
+            param_list.append(model.view_linear.bias.data)
+            param_names.append("view_linear.bias")
+        param_list.append(model.rgb_linear.weight.data)
+        param_names.append("rgb_linear.weight")
+        param_list.append(model.rgb_linear.bias.data)
+        param_names.append("rgb_linear.bias")
+        for i, (p, n) in enumerate(zip(param_list, param_names)):
+            print(f"  Model param {i}: {n} {tuple(p.shape)}")
+        # Now try loading (should work)
+        model.load_from_numpy(weights)
+        print("Loaded weights from .npy file using load_from_numpy.")
+    else:
+        model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
+    
+    # Configure renderer parameters
+    # Auto-detect configuration based on model type
+    if use_fine_weights:
+        # Official example weights configuration
+        render_N_samples = N_samples if N_samples is not None else 64
+        render_N_importance = N_importance if N_importance is not None else 64
+        render_white_bkgd = True if white_bkgd else (False if no_white_bkgd else True)
+        print("🎯 Using official example weights configuration")
+    else:
+        # Your custom weights - use more standard NeRF settings
+        render_N_samples = N_samples if N_samples is not None else 64
+        render_N_importance = N_importance if N_importance is not None else 128
+        render_white_bkgd = True if white_bkgd else (False if no_white_bkgd else True)
+        print("🎯 Using custom weights configuration")
+    
+    print(f"📊 Renderer config: N_samples={render_N_samples}, N_importance={render_N_importance}, white_bkgd={render_white_bkgd}")
+    
+    renderer = NeRFRenderer(
+        model, device, 
+        near=dynamic_near, far=dynamic_far, 
+        N_samples=render_N_samples,
+        N_importance=render_N_importance,
+        white_bkgd=render_white_bkgd,
+        perturb=0.0,           # DISABLE perturbation during inference
+        raw_noise_std=0.0,     # DISABLE noise during inference
+        coord_scale=coord_scale  # Apply coordinate scaling
+    )
+
+    # --- Render multiple views ---
+    with torch.no_grad():
+        if view_idx is not None:
+            pose_idx = view_idx % len(poses_for_rendering)
+            pose = poses_for_rendering[pose_idx]
+            print(f"Rendering view {pose_idx} (user-specified)")
+            print(f"Camera position: {pose[:3, 3]}")
+            i, j = np.meshgrid(np.arange(W), np.arange(H), indexing='xy')
+            dirs = np.stack([(i - W/2)/focal, -(j - H/2)/focal, -np.ones_like(i)], -1)
+            rays_d = (dirs @ pose[:3, :3].T).reshape(-1, 3)
+            rays_o = np.broadcast_to(pose[:3, 3], rays_d.shape)
+            rays_o = torch.from_numpy(rays_o.copy()).float().to(device)
+            rays_d = torch.from_numpy(rays_d).float().to(device)
+            rgb = renderer.render(rays_o, rays_d, H, W, focal)
+            rgb = rgb.cpu().numpy()
+            print(f"Rendered RGB range (linear): {rgb.min():.3f} to {rgb.max():.3f}")
+            print(f"Rendered RGB mean (linear): {rgb.mean():.3f}")
+            
+            # Apply brightness boost if requested
+            if args.brightness_boost != 1.0:
+                rgb = rgb * args.brightness_boost
+                print(f"Applied brightness boost: {args.brightness_boost}x")
+            
+            if args.gamma_correction:
+                # Convert from linear RGB to sRGB for proper display
+                rgb_srgb = linear_to_srgb(rgb)
+                print(f"Rendered RGB range (sRGB): {rgb_srgb.min():.3f} to {rgb_srgb.max():.3f}")
+                print(f"Rendered RGB mean (sRGB): {rgb_srgb.mean():.3f}")
+                rgb_final = rgb_srgb
+            else:
+                print("Using linear RGB output (default - no gamma correction)")
+                rgb_final = rgb
+            
+            rgb = (np.clip(rgb_final, 0, 1) * 255).astype(np.uint8)
+            out_path = f'{out_prefix}_view{pose_idx}.png'
+            Image.fromarray(rgb).save(out_path)
+            print(f"Rendered image saved to {out_path}")
+            print("---")
+        else:
+            for idx in range(num_views):
+                pose_idx = idx % len(poses_for_rendering)  # cycle if fewer than 5 poses
+                pose = poses_for_rendering[pose_idx]
+                print(f"Rendering view {idx} using pose {pose_idx}")
+                print(f"Camera position: {pose[:3, 3]}")
+                i, j = np.meshgrid(np.arange(W), np.arange(H), indexing='xy')
+                dirs = np.stack([(i - W/2)/focal, -(j - H/2)/focal, -np.ones_like(i)], -1)
+                rays_d = (dirs @ pose[:3, :3].T).reshape(-1, 3)
+                rays_o = np.broadcast_to(pose[:3, 3], rays_d.shape)
+                rays_o = torch.from_numpy(rays_o.copy()).float().to(device)
+                rays_d = torch.from_numpy(rays_d).float().to(device)
+                rgb = renderer.render(rays_o, rays_d, H, W, focal)
+                rgb = rgb.cpu().numpy()
+                print(f"Rendered RGB range (linear): {rgb.min():.3f} to {rgb.max():.3f}")
+                print(f"Rendered RGB mean (linear): {rgb.mean():.3f}")
+                
+                # Apply brightness boost if requested
+                if args.brightness_boost != 1.0:
+                    rgb = rgb * args.brightness_boost
+                    print(f"Applied brightness boost: {args.brightness_boost}x")
+                
+                if args.gamma_correction:
+                    # Convert from linear RGB to sRGB for proper display
+                    rgb_srgb = linear_to_srgb(rgb)
+                    print(f"Rendered RGB range (sRGB): {rgb_srgb.min():.3f} to {rgb_srgb.max():.3f}")
+                    print(f"Rendered RGB mean (sRGB): {rgb_srgb.mean():.3f}")
+                    rgb_final = rgb_srgb
+                else:
+                    print("Using linear RGB output (default - no gamma correction)")
+                    rgb_final = rgb
+                
+                rgb = (np.clip(rgb_final, 0, 1) * 255).astype(np.uint8)
+                out_path = f'{out_prefix}_{idx}.png'
+                Image.fromarray(rgb).save(out_path)
+                print(f"Rendered image saved to {out_path}")
+                print("---")
+
+if __name__ == '__main__':
+    main()
+```
+
+### scripts/side_by_side_compare.py
+```
+import sys
+from PIL import Image
+import numpy as np
+import os
+
+# Usage: python side_by_side_compare.py <rendered.png> <output.png> --gt_idx <index> [--gt_dir <dir>]
+#    or: python side_by_side_compare.py <ground_truth.png> <rendered.png> <output.png>
+
+def get_gt_path(gt_arg, gt_idx=None, gt_dir=None):
+    if gt_idx is not None:
+        # Default directory if not provided
+        if gt_dir is None:
+            gt_dir = 'data/lego/train'
+        gt_path = os.path.join(gt_dir, f"r_{gt_idx}.png")
+        if not os.path.exists(gt_path):
+            print(f"Error: Ground truth image {gt_path} does not exist.")
+            sys.exit(1)
+        return gt_path
+    else:
+        if not os.path.exists(gt_arg):
+            print(f"Error: Ground truth image {gt_arg} does not exist.")
+            sys.exit(1)
+        return gt_arg
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Create a side-by-side comparison of ground truth and rendered images.")
+    parser.add_argument('rendered', type=str, help='Path to rendered image')
+    parser.add_argument('output', type=str, help='Path to save side-by-side image')
+    parser.add_argument('--gt_idx', type=int, default=None, help='Index of ground truth image (e.g., 10 for r_10.png)')
+    parser.add_argument('--gt_dir', type=str, default=None, help='Directory for ground truth images (default: data/lego/train)')
+    parser.add_argument('--gt_path', type=str, default=None, help='Explicit path to ground truth image (overrides gt_idx)')
+    args = parser.parse_args()
+
+    if args.gt_path:
+        gt_path = get_gt_path(args.gt_path)
+    elif args.gt_idx is not None:
+        gt_path = get_gt_path(None, args.gt_idx, args.gt_dir)
+    else:
+        print("Error: You must provide either --gt_path or --gt_idx.")
+        sys.exit(1)
+
+    if not isinstance(gt_path, str) or not gt_path:
+        print("Error: Computed ground truth path is invalid.")
+        sys.exit(1)
+
+    pred = Image.open(args.rendered)
+    gt = Image.open(gt_path)
+    pred = pred.resize(gt.size)
+    side_by_side = np.concatenate([np.array(gt), np.array(pred)], axis=1)
+    Image.fromarray(side_by_side).save(args.output)
+    print(f"Saved side-by-side comparison to {args.output}")
+```
+
+### scripts/train.py
+```
+import sys
+import os
+# Add the current directory to Python path for module imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import argparse
+import torch
+from torch.utils.data import DataLoader
+from nerfmlp import NeRFMLP, NeRFDataset, NeRFRenderer, auto_tune_batch_size
+from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+import time
+import psutil
+import numpy as np
+from skimage.metrics import structural_similarity as ssim
+from skimage.metrics import peak_signal_noise_ratio as psnr
+
+def convert_for_json(obj):
+    """Recursively convert numpy types to Python native types for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: convert_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_for_json(v) for v in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    else:
+        return obj
+
+def calculate_psnr(pred, target):
+    """Calculate PSNR between predicted and target images"""
+    pred_np = pred.detach().cpu().numpy()
+    target_np = target.detach().cpu().numpy()
+    return psnr(target_np, pred_np, data_range=1.0)
+
+def calculate_ssim(pred, target):
+    """Calculate SSIM between predicted and target images"""
+    pred_np = pred.detach().cpu().numpy()
+    target_np = target.detach().cpu().numpy()
+    
+    # Handle small images by adjusting window size
+    min_dim = min(pred_np.shape[0], pred_np.shape[1])
+    win_size = min(7, min_dim) if min_dim >= 7 else 3
+    
+    try:
+        # Try with channel_axis parameter (newer scikit-image versions)
+        return ssim(target_np, pred_np, data_range=1.0, win_size=win_size, channel_axis=-1)
+    except TypeError:
+        # Fallback to multichannel parameter (older versions)
+        return ssim(target_np, pred_np, data_range=1.0, win_size=win_size, multichannel=True)
+
+def get_memory_usage():
+    """Get current memory usage in GB"""
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / 1024 / 1024 / 1024
+
+def get_gradient_norm(model):
+    """Calculate the L2 norm of gradients"""
+    total_norm = 0
+    for p in model.parameters():
+        if p.grad is not None:
+            param_norm = p.grad.data.norm(2)
+            total_norm += param_norm.item() ** 2
+    return total_norm ** 0.5
+
+def format_time_duration(seconds):
+    """Format time duration in a human-readable format"""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    elif seconds < 3600:
+        minutes = seconds / 60
+        return f"{minutes:.1f}m"
+    else:
+        hours = seconds / 3600
+        return f"{hours:.1f}h"
+
+def calculate_etc(current_step, total_steps, start_time, iteration_times):
+    """Calculate estimated time of completion using robust statistics."""
+    if not iteration_times or current_step == 0:
+        return None
+    # Use rolling median to avoid outliers
+    recent_times = iteration_times[-100:]
+    median_iter_time = float(np.median(recent_times))
+    mean_iter_time = float(np.mean(recent_times))
+    
+    # Sanity checks for unrealistic ETAs
+    eta_unstable = False
+    
+    # Check if mean is much larger than median (indicating validation/checkpointing skew)
+    if mean_iter_time > 3 * median_iter_time:
+        eta_unstable = True
+    
+    # Use median for more robust estimation
+    avg_iter_time = median_iter_time
+    remaining_iterations = total_steps - current_step
+    estimated_remaining_seconds = remaining_iterations * avg_iter_time
+    
+    # Check for unrealistic ETA (more than 1 year)
+    max_reasonable_eta = 365 * 24 * 3600  # 1 year in seconds
+    if estimated_remaining_seconds > max_reasonable_eta:
+        estimated_remaining_seconds = max_reasonable_eta
+    
+    # Check for negative or very small ETA
+    if estimated_remaining_seconds <= 0:
+        estimated_remaining_seconds = 0
+    
+    completion_time = datetime.now() + timedelta(seconds=estimated_remaining_seconds)
+    return {
+        'remaining_time': estimated_remaining_seconds,
+        'completion_time': completion_time,
+        'avg_iter_time': avg_iter_time,
+        'progress_percent': (current_step / total_steps) * 100,
+        'eta_unstable': eta_unstable,
+        'mean_iter_time': mean_iter_time,
+        'median_iter_time': median_iter_time
+    }
+
+def validate(model, renderer, val_loader, device, subset_size=None, show_progress=True):
+    """
+    Validate model with optional subset sampling for faster validation
+    Returns comprehensive metrics
+    """
+    model.eval()
+    val_loss = 0
+    val_psnr = 0
+    val_ssim = 0
+    count = 0
+    subset_count = 0
+    
+    # Calculate total iterations for progress bar
+    total_batches = len(val_loader)
+    if subset_size is not None:
+        total_batches = min(total_batches, subset_size)
+    
+    # Create progress bar if requested
+    if show_progress:
+        from tqdm import tqdm
+        pbar = tqdm(total=total_batches, desc="Validation", unit="batch")
+    
+    with torch.no_grad():
+        for batch in val_loader:
+            if subset_size is not None and subset_count >= subset_size:
+                break
+            ray_o = batch['ray_o'].to(device)
+            ray_d = batch['ray_d'].to(device)
+            target_rgb = batch['rgb'].to(device)
+            rgb_pred = renderer._render_rays(ray_o, ray_d)['rgb_map']
+            # Calculate metrics
+            loss = torch.mean((rgb_pred - target_rgb) ** 2)
+            batch_psnr = calculate_psnr(rgb_pred, target_rgb)
+            batch_ssim = calculate_ssim(rgb_pred, target_rgb)
+            val_loss += loss.item() * ray_o.shape[0]
+            val_psnr += batch_psnr * ray_o.shape[0]
+            val_ssim += batch_ssim * ray_o.shape[0]
+            count += ray_o.shape[0]
+            subset_count += 1
+            
+            # Update progress bar
+            if show_progress:
+                pbar.update(1)
+                # Update description with current metrics
+                current_loss = val_loss / count if count > 0 else 0
+                current_psnr = val_psnr / count if count > 0 else 0
+                pbar.set_description(f"Validation (Loss: {current_loss:.4f}, PSNR: {current_psnr:.2f})")
+    
+    if show_progress:
+        pbar.close()
+    
+    model.train()
+    return {
+        'loss': val_loss / count if count > 0 else 0,
+        'psnr': val_psnr / count if count > 0 else 0,
+        'ssim': val_ssim / count if count > 0 else 0
+    }
+
+def main():
+    parser = argparse.ArgumentParser(description='Train NeRF MLP')
+    parser.add_argument('--datadir', type=str, required=True, help='Path to dataset directory')
+    parser.add_argument('--split', type=str, default='train', help='Dataset split (train/val/test)')
+    parser.add_argument('--img_wh', type=int, nargs=2, default=[1024, 1024], help='Image width and height (e.g., 1024 1024 for high-res, 400 400 for fast)')
+    parser.add_argument('--batch_size', type=int, default=1024, help='Batch size (default 1024 for NeRF)')
+    parser.add_argument('--iters', type=int, default=200000, help='Number of training iterations')
+    parser.add_argument('--lr', type=float, default=5e-4, help='Learning rate')
+    parser.add_argument('--save_dir', type=str, default='outputs/checkpoints', help='Directory to save checkpoints')
+    parser.add_argument('--quick_val_interval', type=int, default=1000, help='Quick validation every N iterations (default: 1000)')
+    parser.add_argument('--full_val_interval', type=int, default=10000, help='Full validation every N iterations (default: 10000)')
+    parser.add_argument('--quick_val_res', type=int, nargs=2, default=[256, 256], help='Quick validation resolution (default: 256 256)')
+    parser.add_argument('--quick_val_subset', type=int, default=10, help='Number of images for quick validation (default: 10)')
+    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from (e.g., outputs/checkpoints/metrics_latest.pth)')
+    args = parser.parse_args()
+
+    # Warn about high-resolution training
+    if args.img_wh[0] >= 1024 or args.img_wh[1] >= 1024:
+        print("⚠️  WARNING: High resolution training detected!")
+        print("   For 1024x1024 resolution, consider these optimized parameters:")
+        print("   • Batch size: 512-1024 (instead of 256)")
+        print("   • Learning rate: 1e-4 (instead of 5e-4)")
+        print("   • Current settings: batch_size={}, lr={:.1e}".format(args.batch_size, args.lr))
+        if args.batch_size < 512:
+            print("   ⚠️  Batch size may be too small for high resolution")
+        if args.lr > 2e-4:
+            print("   ⚠️  Learning rate may be too high for high resolution")
+        print()
+
+    device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+    print(f'Using device: {device}')
+
+    # Load datasets with proper white background preprocessing
+    dataset = NeRFDataset(args.datadir, split=args.split, img_wh=tuple(args.img_wh), white_bkgd=True)
+    val_dataset = NeRFDataset(args.datadir, split='val', img_wh=tuple(args.img_wh), white_bkgd=True)
+    
+    # Quick validation dataset (lower resolution, subset)
+    quick_val_dataset = NeRFDataset(args.datadir, split='val', img_wh=tuple(args.quick_val_res), white_bkgd=True)
+    
+    batch_size = args.batch_size
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    quick_val_loader = DataLoader(quick_val_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+
+    print(f"Total rays: {len(dataset)} | Batch size: {batch_size}")
+    print(f"Quick validation: {args.quick_val_res[0]}x{args.quick_val_res[1]} resolution, {args.quick_val_subset} images")
+    print(f"Full validation: {args.img_wh[0]}x{args.img_wh[1]} resolution, all images")
+    print(f"Target iterations: {args.iters:,}")
+
+    # Model and renderer
+    model = NeRFMLP().to(device)
+    
+    # Calculate dynamic near/far based on camera positions
+    poses = dataset.poses
+    positions = np.array([pose[:3, 3] for pose in poses])
+    
+    # Check if cameras are on a sphere (common in NeRF datasets)
+    dists = np.linalg.norm(positions, axis=1)
+    dist_std = dists.std()
+    
+    if dist_std < 0.01:  # Cameras are on a sphere
+        print(f"📐 Detected spherical camera arrangement (distance std: {dist_std:.6f})")
+        # Use scene bounds instead of camera distances
+        scene_center = np.mean(positions, axis=0)
+        scene_radius = np.linalg.norm(positions - scene_center, axis=1).max()
+        
+        # For spherical scenes, use a wider range that covers the scene
+        near = max(0.1, scene_radius * 0.5)  # Start at half the scene radius
+        far = scene_radius * 2.0  # Extend to twice the scene radius
+        print(f"🎯 Scene-based near/far: near={near:.3f}, far={far:.3f} (scene_radius={scene_radius:.3f})")
+    else:
+        # Original calculation for non-spherical scenes
+        near = max(0.1, dists.min() - 0.5)
+        far = dists.max() + 0.5
+        print(f"📐 Camera-based near/far: near={near:.3f}, far={far:.3f}")
+    
+    print(f"Dynamic near: {near}, far: {far}")
+    
+    renderer = NeRFRenderer(model, device, near=near, far=far, N_samples=64, N_importance=128)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # Learning rate decay: decay by 0.1 every 250,000 steps
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=250000, gamma=0.1)
+
+    # Checkpoint resumption
+    step = 0
+    train_losses = []
+    train_psnrs = []
+    quick_val_losses = []
+    quick_val_psnrs = []
+    quick_val_ssims = []
+    full_val_losses = []
+    full_val_psnrs = []
+    full_val_ssims = []
+    val_steps = []
+    best_val_loss = float('inf')
+    best_val_psnr = 0
+    running_train_loss = 0
+    running_train_psnr = 0
+    running_train_count = 0
+    
+    # Timing and performance tracking
+    start_time = time.time()
+    iteration_times = []
+    summary_interval = 1000  # Print summary every 1000 steps
+    last_val_loss = None
+    last_val_psnr = None
+    last_val_step = None
+    training_step_times = []  # Only training step times (exclude validation/checkpoint)
+    # Add summary interval counters
+    summary_train_loss = 0
+    summary_train_psnr = 0
+    summary_train_count = 0
+    
+    # Resume from checkpoint if specified
+    if args.resume:
+        if os.path.exists(args.resume):
+            print(f"🔄 Resuming from checkpoint: {args.resume}")
+            checkpoint = torch.load(args.resume, map_location=device)
+            
+            # Load model state
+            if 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+                print(f"✅ Model state loaded")
+            
+            # Load optimizer state
+            if 'optimizer_state_dict' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                print(f"✅ Optimizer state loaded")
+            
+            # Load training state
+            if 'metrics' in checkpoint:
+                metrics = checkpoint['metrics']
+                step = metrics.get('step', 0)
+                train_losses = metrics.get('train_losses', [])
+                train_psnrs = metrics.get('train_psnrs', [])
+                quick_val_losses = metrics.get('quick_val_losses', [])
+                quick_val_psnrs = metrics.get('quick_val_psnrs', [])
+                quick_val_ssims = metrics.get('quick_val_ssims', [])
+                val_steps = metrics.get('val_steps', [])
+                iteration_times = metrics.get('iteration_times', [])
+                best_val_psnr = metrics.get('best_val_psnr', 0)
+                
+                # Convert back from JSON format if needed
+                if isinstance(train_losses, list) and len(train_losses) > 0 and isinstance(train_losses[0], str):
+                    train_losses = [float(x) for x in train_losses]
+                if isinstance(train_psnrs, list) and len(train_psnrs) > 0 and isinstance(train_psnrs[0], str):
+                    train_psnrs = [float(x) for x in train_psnrs]
+                if isinstance(quick_val_losses, list) and len(quick_val_losses) > 0 and isinstance(quick_val_losses[0], str):
+                    quick_val_losses = [float(x) for x in quick_val_losses]
+                if isinstance(quick_val_psnrs, list) and len(quick_val_psnrs) > 0 and isinstance(quick_val_psnrs[0], str):
+                    quick_val_psnrs = [float(x) for x in quick_val_psnrs]
+                if isinstance(quick_val_ssims, list) and len(quick_val_ssims) > 0 and isinstance(quick_val_ssims[0], str):
+                    quick_val_ssims = [float(x) for x in quick_val_ssims]
+                if isinstance(val_steps, list) and len(val_steps) > 0 and isinstance(val_steps[0], str):
+                    val_steps = [int(x) for x in val_steps]
+                if isinstance(iteration_times, list) and len(iteration_times) > 0 and isinstance(iteration_times[0], str):
+                    iteration_times = [float(x) for x in iteration_times]
+                
+                print(f"✅ Training state loaded: step {step:,}, {len(train_losses)} train metrics, {len(quick_val_losses)} val metrics")
+                print(f"✅ Best validation PSNR: {best_val_psnr:.2f}")
+                
+                # Set timing variables
+                if iteration_times:
+                    training_step_times = iteration_times.copy()
+                    print(f"✅ Timing data loaded: {len(iteration_times)} iterations")
+                
+                # Set last validation info
+                if quick_val_losses and quick_val_psnrs and val_steps:
+                    last_val_loss = quick_val_losses[-1]
+                    last_val_psnr = quick_val_psnrs[-1]
+                    last_val_step = val_steps[-1]
+                    print(f"✅ Last validation: step {last_val_step:,}, loss {last_val_loss:.6f}, PSNR {last_val_psnr:.2f}")
+            else:
+                # Fallback: try to load just step number
+                step = checkpoint.get('step', 0)
+                print(f"⚠️  No metrics found, starting from step {step:,}")
+            
+            print(f"🔄 Resuming training from step {step:,} (target: {args.iters:,})")
+            print(f"📊 Progress: {(step / args.iters) * 100:.1f}% complete")
+            
+        else:
+            print(f"❌ Checkpoint not found: {args.resume}")
+            print("Starting training from scratch...")
+
+    os.makedirs(args.save_dir, exist_ok=True)
+    
+    while step < args.iters:
+        iter_start_time = time.time()
+        
+        for batch in dataloader:
+            ray_o = batch['ray_o'].to(device)
+            ray_d = batch['ray_d'].to(device)
+            target_rgb = batch['rgb'].to(device)
+            
+            # Render
+            rgb_pred = renderer._render_rays(ray_o, ray_d)['rgb_map']
+            # MSE loss on linear RGB
+            loss = torch.mean((rgb_pred - target_rgb) ** 2)
+            
+            # Calculate training metrics
+            batch_psnr = calculate_psnr(rgb_pred, target_rgb)
+            
+            optimizer.zero_grad()
+            loss.backward()
+            
+            # Calculate gradient norm before optimizer step
+            grad_norm = get_gradient_norm(model)
+            
+            optimizer.step()
+            scheduler.step()
+            
+            running_train_loss += loss.item() * ray_o.shape[0]
+            running_train_psnr += batch_psnr * ray_o.shape[0]
+            running_train_count += ray_o.shape[0]
+            
+            # Update summary counters
+            summary_train_loss += loss.item() * ray_o.shape[0]
+            summary_train_psnr += batch_psnr * ray_o.shape[0]
+            summary_train_count += ray_o.shape[0]
+            
+            if step % 100 == 0:
+                current_lr = optimizer.param_groups[0]['lr']
+                memory_gb = get_memory_usage()
+                avg_iter_time = np.median(training_step_times[-100:]) if training_step_times else 0
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Iter {step:,} | "
+                      f"Loss: {loss.item():.6f} | PSNR: {batch_psnr:.2f} | "
+                      f"LR: {current_lr:.2e} | Grad: {grad_norm:.4f} | "
+                      f"Mem: {memory_gb:.1f}GB | Time: {avg_iter_time:.3f}s (median)")
+            
+            # Quick validation for monitoring progress
+            if step % args.quick_val_interval == 0 and step > 0:
+                avg_train_loss = running_train_loss / running_train_count
+                avg_train_psnr = running_train_psnr / running_train_count
+                train_losses.append(avg_train_loss)
+                train_psnrs.append(avg_train_psnr)
+                running_train_loss = 0
+                running_train_psnr = 0
+                running_train_count = 0
+                
+                quick_metrics = validate(model, renderer, quick_val_loader, device, args.quick_val_subset, show_progress=False)
+                quick_val_losses.append(quick_metrics['loss'])
+                quick_val_psnrs.append(quick_metrics['psnr'])
+                quick_val_ssims.append(quick_metrics['ssim'])
+                val_steps.append(step)
+                last_val_loss = quick_metrics['loss']
+                last_val_psnr = quick_metrics['psnr']
+                last_val_step = step
+                
+                # Calculate ETC
+                etc_info = calculate_etc(step, args.iters, start_time, iteration_times)
+                # Convergence score: % improvement in quick val loss/PSNR over last 5 validations
+                convergence_str = ""
+                if len(quick_val_losses) > 5:
+                    prev_loss = quick_val_losses[-6]
+                    prev_psnr = quick_val_psnrs[-6]
+                    loss_impr = 100 * (prev_loss - quick_metrics['loss']) / (abs(prev_loss) + 1e-8)
+                    psnr_impr = quick_metrics['psnr'] - prev_psnr
+                    convergence_str = f" | ΔLoss(5): {loss_impr:+.2f}% | ΔPSNR(5): {psnr_impr:+.2f}dB"
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Iter {step:,} | "
+                      f"Avg Train Loss: {avg_train_loss:.6f} | Avg Train PSNR: {avg_train_psnr:.2f} | "
+                      f"Quick Val Loss: {quick_metrics['loss']:.6f} | Quick Val PSNR: {quick_metrics['psnr']:.2f} | "
+                      f"Quick Val SSIM: {quick_metrics['ssim']:.4f}{convergence_str}")
+                if etc_info:
+                    eta_str = etc_info['completion_time'].strftime('%Y-%m-%d %H:%M:%S')
+                    eta_human = format_time_duration(etc_info['remaining_time'])
+                    print(f"📊 Progress: {etc_info['progress_percent']:.1f}% | ETA: {eta_human} ({eta_str}) | Avg: {etc_info['median_iter_time']:.3f}s/iter (median)")
+                    if etc_info['eta_unstable']:
+                        print(f"⚠️ ETA may be unstable (mean iter time {etc_info['mean_iter_time']:.3f}s > 3x median {etc_info['median_iter_time']:.3f}s). Validation/checkpointing may be skewing estimate.")
+                else:
+                    print(f"📊 Progress: {(step / args.iters) * 100:.1f}% | ETA: Calculating...")
+                
+                # Save best model based on quick validation PSNR (better metric than loss)
+                if quick_metrics['psnr'] > best_val_psnr:
+                    best_val_psnr = quick_metrics['psnr']
+                    torch.save(model.state_dict(), os.path.join(args.save_dir, 'model_best.pth'))
+                    print(f"🏆 Best model saved at iter {step:,} with quick val PSNR {quick_metrics['psnr']:.2f}")
+                
+                # Periodic metrics/model save for in-progress assessment
+                metrics_state = {
+                    'step': step,
+                    'train_losses': convert_for_json(train_losses),
+                    'train_psnrs': convert_for_json(train_psnrs),
+                    'quick_val_losses': convert_for_json(quick_val_losses),
+                    'quick_val_psnrs': convert_for_json(quick_val_psnrs),
+                    'quick_val_ssims': convert_for_json(quick_val_ssims),
+                    'val_steps': convert_for_json(val_steps),
+                    'iteration_times': convert_for_json(iteration_times),
+                    'best_val_psnr': float(best_val_psnr)
+                }
+                torch.save({
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'metrics': metrics_state
+                }, os.path.join(args.save_dir, 'metrics_latest.pth'))
+                import json
+                with open(os.path.join(args.save_dir, 'metrics_latest.json'), 'w') as f:
+                    json.dump(metrics_state, f, indent=2)
+                
+                print("-" * 80)  # Separator for better readability
+            
+            # Save model and metrics every 1000 steps for redundancy
+            if step % 1000 == 0 and step > 0:
+                torch.save(model.state_dict(), os.path.join(args.save_dir, f'model_{step}_latest.pth'))
+                metrics_state = {
+                    'step': step,
+                    'train_losses': convert_for_json(train_losses),
+                    'train_psnrs': convert_for_json(train_psnrs),
+                    'quick_val_losses': convert_for_json(quick_val_losses),
+                    'quick_val_psnrs': convert_for_json(quick_val_psnrs),
+                    'quick_val_ssims': convert_for_json(quick_val_ssims),
+                    'val_steps': convert_for_json(val_steps),
+                    'iteration_times': convert_for_json(iteration_times),
+                    'best_val_psnr': float(best_val_psnr)
+                }
+                import json
+                with open(os.path.join(args.save_dir, f'metrics_{step}_latest.json'), 'w') as f:
+                    json.dump(metrics_state, f, indent=2)
+            
+            if step % 10000 == 0 and step > 0:
+                torch.save(model.state_dict(), os.path.join(args.save_dir, f'model_{step}.pth'))
+            
+            if step % summary_interval == 0 and step > 0:
+                avg_train_loss = summary_train_loss / summary_train_count if summary_train_count > 0 else float('nan')
+                avg_train_psnr = summary_train_psnr / summary_train_count if summary_train_count > 0 else float('nan')
+                # ETA based only on training step times
+                if training_step_times:
+                    median_train_time = np.median(training_step_times[-100:])
+                    mean_train_time = np.mean(training_step_times[-100:])
+                    remaining_steps = args.iters - step
+                    eta_seconds = remaining_steps * median_train_time
+                    
+                    # Sanity checks for unrealistic ETAs
+                    eta_unstable = False
+                    eta_warning = ""
+                    
+                    # Check if mean is much larger than median (indicating validation/checkpointing skew)
+                    if mean_train_time > 3 * median_train_time:
+                        eta_unstable = True
+                        eta_warning = f" (unstable: mean {mean_train_time:.3f}s > 3x median {median_train_time:.3f}s)"
+                    
+                    # Check for unrealistic ETA (more than 1 year)
+                    max_reasonable_eta = 365 * 24 * 3600  # 1 year in seconds
+                    if eta_seconds > max_reasonable_eta:
+                        eta_seconds = max_reasonable_eta
+                        eta_warning += " (capped at 1 year - timing may be skewed)"
+                    
+                    # Check for negative or very small ETA
+                    if eta_seconds <= 0:
+                        eta_seconds = 0
+                        eta_warning += " (negative ETA - timing issue detected)"
+                    
+                    eta_str = format_time_duration(eta_seconds)
+                    eta_time = (datetime.now() + timedelta(seconds=eta_seconds)).strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    # Add debug info for timing issues
+                    if eta_unstable or eta_warning:
+                        print(f"  ⚠️  Timing Debug: median={median_train_time:.3f}s, mean={mean_train_time:.3f}s, last 100 times range=[{min(training_step_times[-100:]):.3f}s, {max(training_step_times[-100:]):.3f}s]")
+                else:
+                    eta_str = 'N/A'
+                    eta_time = 'N/A'
+                    eta_warning = ""
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | SUMMARY @ Iter {step:,}")
+                print(f"  Avg Train Loss (last {summary_interval}): {avg_train_loss:.6f}")
+                print(f"  Avg Train PSNR (last {summary_interval}): {avg_train_psnr:.2f}")
+                if last_val_loss is not None:
+                    print(f"  Last Validation @ Iter {last_val_step:,}: Loss={last_val_loss:.6f}, PSNR={last_val_psnr:.2f}")
+                else:
+                    print("  Last Validation: (not yet run)")
+                print(f"  ETA: {eta_str} (approx {eta_time}) [based on training steps only]{eta_warning}")
+                print("=" * 80)
+                # Reset summary counters
+                summary_train_loss = 0
+                summary_train_psnr = 0
+                summary_train_count = 0
+            
+            # Measure iteration time (after batch loop ends)
+            iter_time = time.time() - iter_start_time
+            iteration_times.append(iter_time)
+            training_step_times.append(iter_time)
+            
+            step += 1
+            if step >= args.iters:
+                break
+    
+    # Final save
+    torch.save(model.state_dict(), os.path.join(args.save_dir, 'model_final.pth'))
+    total_time = time.time() - start_time
+    print(f'🎉 Training complete in {total_time/3600:.2f} hours ({total_time:.0f} seconds)')
+
+    # Always run a final full validation at the end
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Running final full validation at end of training...")
+    final_full_metrics = validate(model, renderer, val_loader, device)
+    full_val_losses.append(float(final_full_metrics['loss']))
+    full_val_psnrs.append(float(final_full_metrics['psnr']))
+    full_val_ssims.append(float(final_full_metrics['ssim']))
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | FINAL | Full Val Loss: {final_full_metrics['loss']:.6f} | Full Val PSNR: {final_full_metrics['psnr']:.2f} | Full Val SSIM: {final_full_metrics['ssim']:.4f}")
+    # Save final full validation checkpoint
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'step': step,
+        'full_val_loss': float(final_full_metrics['loss']),
+        'full_val_psnr': float(final_full_metrics['psnr']),
+        'full_val_ssim': float(final_full_metrics['ssim']),
+        'quick_val_loss': quick_val_losses[-1] if quick_val_losses else None,
+        'quick_val_psnr': quick_val_psnrs[-1] if quick_val_psnrs else None
+    }, os.path.join(args.save_dir, f'model_full_val_final.pth'))
+
+    # Plotting
+    print("Generating comprehensive plots...")
+    
+    # Create a larger figure with better organization
+    fig = plt.figure(figsize=(20, 16))
+    
+    # Main convergence plot (larger, more prominent)
+    ax1 = plt.subplot(3, 3, (1, 2))  # Spans 2 columns
+    ax1.plot(val_steps, train_losses, label='Training Loss', marker='o', markersize=4, linewidth=2, color='blue', alpha=0.8)
+    ax1.plot(val_steps, quick_val_losses, label='Validation Loss', marker='s', markersize=4, linewidth=2, color='red', alpha=0.8)
+    ax1.set_xlabel('Iteration', fontsize=12)
+    ax1.set_ylabel('Loss', fontsize=12)
+    ax1.set_title('Training vs Validation Loss Convergence', fontsize=14, fontweight='bold')
+    ax1.legend(fontsize=11)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_yscale('log')  # Log scale for better visualization of loss changes
+    
+    # PSNR convergence
+    ax2 = plt.subplot(3, 3, (1, 3))  # Spans 2 columns
+    ax2.plot(val_steps, train_psnrs, label='Training PSNR', marker='o', markersize=4, linewidth=2, color='green', alpha=0.8)
+    ax2.plot(val_steps, quick_val_psnrs, label='Validation PSNR', marker='s', markersize=4, linewidth=2, color='orange', alpha=0.8)
+    ax2.set_xlabel('Iteration', fontsize=12)
+    ax2.set_ylabel('PSNR (dB)', fontsize=12)
+    ax2.set_title('Training vs Validation PSNR', fontsize=14, fontweight='bold')
+    ax2.legend(fontsize=11)
+    ax2.grid(True, alpha=0.3)
+    
+    # Loss difference (overfitting indicator)
+    ax3 = plt.subplot(3, 3, 4)
+    if len(train_losses) == len(quick_val_losses):
+        loss_diff = [abs(t - v) for t, v in zip(train_losses, quick_val_losses)]
+        ax3.plot(val_steps, loss_diff, marker='o', markersize=3, color='purple', alpha=0.8)
+        ax3.set_xlabel('Iteration', fontsize=10)
+        ax3.set_ylabel('|Train - Val Loss|', fontsize=10)
+        ax3.set_title('Overfitting Indicator', fontsize=12, fontweight='bold')
+        ax3.grid(True, alpha=0.3)
+        ax3.set_yscale('log')
+    
+    # Learning rate schedule (if applicable)
+    ax4 = plt.subplot(3, 3, 5)
+    # For now, plot constant LR, but this could be enhanced for LR scheduling
+    lr_values = [args.lr] * len(val_steps)
+    ax4.plot(val_steps, lr_values, marker='o', markersize=3, color='brown', alpha=0.8)
+    ax4.set_xlabel('Iteration', fontsize=10)
+    ax4.set_ylabel('Learning Rate', fontsize=10)
+    ax4.set_title('Learning Rate Schedule', fontsize=12, fontweight='bold')
+    ax4.grid(True, alpha=0.3)
+    ax4.set_yscale('log')
+    
+    # SSIM Progress
+    ax5 = plt.subplot(3, 3, 6)
+    if quick_val_ssims:
+        ax5.plot(val_steps, quick_val_ssims, label='Quick Val SSIM', marker='s', markersize=3, color='green', alpha=0.8)
+        if full_val_ssims:
+            full_val_steps = [args.full_val_interval * (i+1) for i in range(len(full_val_ssims))]
+            ax5.plot(full_val_steps, full_val_ssims, label='Full Val SSIM', marker='^', markersize=4, color='orange', alpha=0.8)
+        ax5.set_xlabel('Iteration', fontsize=10)
+        ax5.set_ylabel('SSIM', fontsize=10)
+        ax5.set_title('SSIM Progress', fontsize=12, fontweight='bold')
+        ax5.legend(fontsize=10)
+        ax5.grid(True, alpha=0.3)
+    
+    # Training time per iteration
+    ax6 = plt.subplot(3, 3, 7)
+    if len(iteration_times) > 100:
+        recent_times = iteration_times[-1000:]  # Last 1000 iterations
+        ax6.plot(recent_times, alpha=0.6, color='purple')
+        ax6.set_xlabel('Recent Iterations', fontsize=10)
+        ax6.set_ylabel('Time (seconds)', fontsize=10)
+        ax6.set_title('Training Time per Iteration', fontsize=12, fontweight='bold')
+        ax6.grid(True, alpha=0.3)
+    
+    # Full validation metrics (if available)
+    if full_val_losses:
+        ax7 = plt.subplot(3, 3, 8)
+        full_val_steps = [args.full_val_interval * (i+1) for i in range(len(full_val_losses))]
+        ax7.plot(full_val_steps, full_val_losses, label='Full Val Loss', marker='^', markersize=4, color='red', alpha=0.8)
+        ax7.set_xlabel('Iteration', fontsize=10)
+        ax7.set_ylabel('Loss', fontsize=10)
+        ax7.set_title('Full Validation Loss', fontsize=12, fontweight='bold')
+        ax7.legend(fontsize=10)
+        ax7.grid(True, alpha=0.3)
+        ax7.set_yscale('log')
+        
+        ax8 = plt.subplot(3, 3, 9)
+        ax8.plot(full_val_steps, full_val_psnrs, label='Full Val PSNR', marker='^', markersize=4, color='orange', alpha=0.8)
+        ax8.set_xlabel('Iteration', fontsize=10)
+        ax8.set_ylabel('PSNR (dB)', fontsize=10)
+        ax8.set_title('Full Validation PSNR', fontsize=12, fontweight='bold')
+        ax8.legend(fontsize=10)
+        ax8.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(args.save_dir, 'comprehensive_metrics.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # Create a separate, focused convergence plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Loss convergence (prominent)
+    ax1.plot(val_steps, train_losses, label='Training Loss', marker='o', markersize=4, linewidth=2, color='blue')
+    ax1.plot(val_steps, quick_val_losses, label='Validation Loss', marker='s', markersize=4, linewidth=2, color='red')
+    ax1.set_xlabel('Iteration', fontsize=12)
+    ax1.set_ylabel('Loss', fontsize=12)
+    ax1.set_title('Training vs Validation Loss', fontsize=14, fontweight='bold')
+    ax1.legend(fontsize=11)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_yscale('log')
+    
+    # PSNR convergence (prominent)
+    ax2.plot(val_steps, train_psnrs, label='Training PSNR', marker='o', markersize=4, linewidth=2, color='green')
+    ax2.plot(val_steps, quick_val_psnrs, label='Validation PSNR', marker='s', markersize=4, linewidth=2, color='orange')
+    ax2.set_xlabel('Iteration', fontsize=12)
+    ax2.set_ylabel('PSNR (dB)', fontsize=12)
+    ax2.set_title('Training vs Validation PSNR', fontsize=14, fontweight='bold')
+    ax2.legend(fontsize=11)
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(args.save_dir, 'convergence_plot.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # Save comprehensive validation data
+    validation_data = {
+        'train_losses': convert_for_json(train_losses),
+        'train_psnrs': convert_for_json(train_psnrs),
+        'quick_val_losses': convert_for_json(quick_val_losses),
+        'quick_val_psnrs': convert_for_json(quick_val_psnrs),
+        'quick_val_ssims': convert_for_json(quick_val_ssims),
+        'full_val_losses': convert_for_json(full_val_losses),
+        'full_val_psnrs': convert_for_json(full_val_psnrs),
+        'full_val_ssims': convert_for_json(full_val_ssims),
+        'val_steps': convert_for_json(val_steps),
+        'iteration_times': convert_for_json(iteration_times),
+        'total_training_time': float(total_time),
+        'best_val_psnr': float(best_val_psnr),
+        'config': {
+            'quick_val_res': [int(x) for x in args.quick_val_res],
+            'quick_val_subset': int(args.quick_val_subset),
+            'full_val_res': [int(x) for x in args.img_wh],
+            'quick_val_interval': int(args.quick_val_interval),
+            'full_val_interval': int(args.full_val_interval),
+            'batch_size': int(args.batch_size),
+            'learning_rate': float(args.lr),
+            'total_iterations': int(args.iters)
+        }
+    }
+    
+    with open(os.path.join(args.save_dir, 'comprehensive_metrics.json'), 'w') as f:
+        json.dump(validation_data, f, indent=2)
+    
+    print(f"Comprehensive plots and metrics saved to {args.save_dir}")
+    print(f"📊 Main convergence plot: {os.path.join(args.save_dir, 'convergence_plot.png')}")
+    print(f"📊 Detailed metrics plot: {os.path.join(args.save_dir, 'comprehensive_metrics.png')}")
+
+if __name__ == '__main__':
+    main()
+```
+
+### scripts/train_only.py
+```
+#!/usr/bin/env python3
+"""
+Training-only script for NeRF MLP model.
+This version removes all validation to test if the model can learn properly.
+"""
+
+import sys
+import os
+# Add the current directory to Python path for module imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import argparse
+import torch
+from torch.utils.data import DataLoader
+from nerfmlp import NeRFMLP, NeRFDataset, NeRFRenderer, auto_tune_batch_size
+from datetime import datetime
+import matplotlib.pyplot as plt
+import time
+import psutil
+import numpy as np
+from skimage.metrics import peak_signal_noise_ratio as psnr
+
+def calculate_psnr(pred, target):
+    """Calculate PSNR between predicted and target images"""
+    with torch.no_grad():
+        mse = torch.mean((pred - target) ** 2)
+        if mse == 0:
+            return float('inf')
+        return 20 * torch.log10(1.0 / torch.sqrt(mse)).item()
+
+def get_memory_usage():
+    """Get current memory usage in GB"""
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / 1024 / 1024 / 1024
+
+def get_gradient_norm(model):
+    """Calculate the L2 norm of gradients"""
+    total_norm = 0
+    for p in model.parameters():
+        if p.grad is not None:
+            param_norm = p.grad.data.norm(2)
+            total_norm += param_norm.item() ** 2
+    return total_norm ** 0.5
+
+def main():
+    parser = argparse.ArgumentParser(description='Train NeRF MLP model (training only)')
+    parser.add_argument('--datadir', type=str, required=True, help='Path to dataset directory')
+    parser.add_argument('--img_wh', nargs=2, type=int, default=[64, 64], help='Image width and height')
+    parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
+    parser.add_argument('--iters', type=int, default=10000, help='Number of training iterations')
+    parser.add_argument('--lr', type=float, default=5e-4, help='Learning rate')
+    parser.add_argument('--save_dir', type=str, default='outputs/train_only', help='Directory to save checkpoints')
+    
+    args = parser.parse_args()
+    
+    # Create save directory
+    os.makedirs(args.save_dir, exist_ok=True)
+    
+    # Device setup
+    device = torch.device('mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'Using device: {device}')
+    
+    # Dataset and dataloader with proper white background preprocessing
+    dataset = NeRFDataset(args.datadir, img_wh=args.img_wh, white_bkgd=True)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    
+    print(f'Total rays: {len(dataset)} | Batch size: {args.batch_size}')
+    print(f'Target iterations: {args.iters:,}')
+    
+    # Model and renderer
+    model = NeRFMLP().to(device)
+    
+    # Calculate dynamic near/far based on camera positions
+    poses = dataset.poses
+    positions = np.array([pose[:3, 3] for pose in poses])
+    
+    # Check if cameras are on a sphere (common in NeRF datasets)
+    dists = np.linalg.norm(positions, axis=1)
+    dist_std = dists.std()
+    
+    if dist_std < 0.01:  # Cameras are on a sphere
+        print(f"📐 Detected spherical camera arrangement (distance std: {dist_std:.6f})")
+        # Use scene bounds instead of camera distances
+        scene_center = np.mean(positions, axis=0)
+        scene_radius = np.linalg.norm(positions - scene_center, axis=1).max()
+        
+        # For spherical scenes, use a wider range that covers the scene
+        near = max(0.1, scene_radius * 0.5)  # Start at half the scene radius
+        far = scene_radius * 2.0  # Extend to twice the scene radius
+        print(f"🎯 Scene-based near/far: near={near:.3f}, far={far:.3f} (scene_radius={scene_radius:.3f})")
+    else:
+        # Original calculation for non-spherical scenes
+        near = max(0.1, dists.min() - 0.5)
+        far = dists.max() + 0.5
+        print(f"📐 Camera-based near/far: near={near:.3f}, far={far:.3f}")
+    
+    print(f"Dynamic near: {near}, far: {far}")
+    
+    renderer = NeRFRenderer(model, device, near=near, far=far)
+    
+    # Optimizer
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    
+    # Training loop
+    model.train()
+    start_time = time.time()
+    
+    # Metrics tracking
+    train_losses = []
+    train_psnrs = []
+    iteration_times = []
+    
+    step = 0
+    data_iter = iter(dataloader)
+    
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Starting training...")
+    
+    while step < args.iters:
+        try:
+            batch = next(data_iter)
+        except StopIteration:
+            data_iter = iter(dataloader)
+            batch = next(data_iter)
+        
+        iter_start_time = time.time()
+        
+        # Move batch to device
+        rays_o = batch['ray_o'].to(device)
+        rays_d = batch['ray_d'].to(device)
+        target_rgbs = batch['rgb'].to(device)
+        
+        # Forward pass
+        optimizer.zero_grad()
+        pred_rgbs = renderer._render_rays(rays_o, rays_d)['rgb_map']
+        
+        # Loss calculation
+        loss = torch.mean((pred_rgbs - target_rgbs) ** 2)
+        
+        # Backward pass
+        loss.backward()
+        optimizer.step()
+        
+        # Calculate metrics
+        with torch.no_grad():
+            current_psnr = calculate_psnr(pred_rgbs, target_rgbs)
+        
+        # Record metrics
+        train_losses.append(loss.item())
+        train_psnrs.append(current_psnr)
+        iteration_times.append(time.time() - iter_start_time)
+        
+        # Print progress
+        if step % 100 == 0:
+            memory_usage = get_memory_usage()
+            grad_norm = get_gradient_norm(model)
+            current_time = time.time() - start_time
+            
+            # Calculate rolling median for time
+            recent_times = iteration_times[-100:] if len(iteration_times) >= 100 else iteration_times
+            median_time = float(np.median(recent_times))
+            
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Iter {step:,} | "
+                  f"Loss: {loss.item():.6f} | PSNR: {current_psnr:.2f} | "
+                  f"LR: {optimizer.param_groups[0]['lr']:.2e} | "
+                  f"Grad: {grad_norm:.4f} | Mem: {memory_usage:.1f}GB | "
+                  f"Time: {median_time:.3f}s (median)")
+        
+        # Save checkpoint every 1000 steps
+        if step % 1000 == 0 and step > 0:
+            torch.save(model.state_dict(), os.path.join(args.save_dir, f'model_{step}.pth'))
+            
+            # Save metrics
+            metrics = {
+                'step': step,
+                'train_losses': train_losses,
+                'train_psnrs': train_psnrs,
+                'iteration_times': iteration_times,
+                'config': {
+                    'batch_size': args.batch_size,
+                    'learning_rate': args.lr,
+                    'total_iterations': args.iters,
+                    'img_wh': args.img_wh
+                }
+            }
+            
+            import json
+            def convert_for_json(obj):
+                """Recursively convert numpy types to Python native types for JSON serialization."""
+                if isinstance(obj, dict):
+                    return {k: convert_for_json(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_for_json(v) for v in obj]
+                elif isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif isinstance(obj, np.floating):
+                    return float(obj)
+                elif isinstance(obj, np.integer):
+                    return int(obj)
+                else:
+                    return obj
+            
+            with open(os.path.join(args.save_dir, f'metrics_{step}.json'), 'w') as f:
+                json.dump(convert_for_json(metrics), f, indent=2)
+            
+            print(f"💾 Checkpoint saved at iteration {step:,}")
+        
+        step += 1
+    
+    # Final save
+    total_time = time.time() - start_time
+    torch.save(model.state_dict(), os.path.join(args.save_dir, 'model_final.pth'))
+    print(f'🎉 Training complete in {total_time/3600:.2f} hours ({total_time:.0f} seconds)')
+    
+    # Plot training progress
+    print("Generating training plots...")
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+    
+    # Training Loss
+    ax1.plot(train_losses, label='Train Loss', color='blue')
+    ax1.set_xlabel('Iteration')
+    ax1.set_ylabel('Loss')
+    ax1.set_title('Training Loss')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Training PSNR
+    ax2.plot(train_psnrs, label='Train PSNR', color='green')
+    ax2.set_xlabel('Iteration')
+    ax2.set_ylabel('PSNR (dB)')
+    ax2.set_title('Training PSNR')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(args.save_dir, 'training_progress.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # Save final metrics
+    final_metrics = {
+        'train_losses': convert_for_json(train_losses),
+        'train_psnrs': convert_for_json(train_psnrs),
+        'iteration_times': convert_for_json(iteration_times),
+        'total_training_time': float(total_time),
+        'final_loss': float(train_losses[-1]) if train_losses else None,
+        'final_psnr': float(train_psnrs[-1]) if train_psnrs else None,
+        'config': {
+            'batch_size': int(args.batch_size),
+            'learning_rate': float(args.lr),
+            'total_iterations': int(args.iters),
+            'img_wh': [int(x) for x in args.img_wh]
+        }
+    }
+    
+    with open(os.path.join(args.save_dir, 'final_metrics.json'), 'w') as f:
+        json.dump(final_metrics, f, indent=2)
+    
+    print(f"Training plots and metrics saved to {args.save_dir}")
+    print(f"Final Loss: {train_losses[-1]:.6f}")
+    print(f"Final PSNR: {train_psnrs[-1]:.2f} dB")
+
+if __name__ == '__main__':
+    main()
+```
+
+### scripts/view_progress.py
+```
+#!/usr/bin/env python3
+"""
+Quick script to view the latest training progress.
+"""
+
+import json
+import os
+import argparse
+from datetime import datetime
+
+def load_latest_metrics(metrics_dir):
+    """Load the latest metrics file."""
+    metrics_file = os.path.join(metrics_dir, 'metrics_latest.json')
+    if not os.path.exists(metrics_file):
+        print(f"Metrics file not found: {metrics_file}")
+        return None
+    
+    try:
+        with open(metrics_file, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading metrics: {e}")
+        return None
+
+def display_progress(metrics):
+    """Display training progress in a readable format."""
+    if not metrics:
+        return
+    
+    print("=" * 80)
+    print("NERF TRAINING PROGRESS")
+    print("=" * 80)
+    
+    # Basic info
+    step = metrics.get('step', 0)
+    best_psnr = metrics.get('best_val_psnr', 0)
+    
+    print(f"Current Iteration: {step:,}")
+    print(f"Best Validation PSNR: {best_psnr:.2f} dB")
+    
+    # Latest metrics
+    train_losses = metrics.get('train_losses', [])
+    train_psnrs = metrics.get('train_psnrs', [])
+    quick_val_losses = metrics.get('quick_val_losses', [])
+    quick_val_psnrs = metrics.get('quick_val_psnrs', [])
+    quick_val_ssims = metrics.get('quick_val_ssims', [])
+    
+    if train_losses and quick_val_losses:
+        current_train_loss = train_losses[-1]
+        current_val_loss = quick_val_losses[-1]
+        current_train_psnr = train_psnrs[-1] if train_psnrs else 0
+        current_val_psnr = quick_val_psnrs[-1] if quick_val_psnrs else 0
+        current_ssim = quick_val_ssims[-1] if quick_val_ssims else 0
+        
+        print(f"\nLatest Metrics:")
+        print(f"  Training Loss: {current_train_loss:.6f}")
+        print(f"  Validation Loss: {current_val_loss:.6f}")
+        print(f"  Training PSNR: {current_train_psnr:.2f} dB")
+        print(f"  Validation PSNR: {current_val_psnr:.2f} dB")
+        print(f"  Validation SSIM: {current_ssim:.4f}")
+        
+        # Calculate improvements
+        if len(train_losses) > 1:
+            loss_improvement = ((train_losses[0] - current_train_loss) / train_losses[0]) * 100
+            print(f"\nImprovement:")
+            print(f"  Loss reduction: {loss_improvement:.1f}%")
+        
+        if len(train_psnrs) > 1:
+            psnr_improvement = current_train_psnr - train_psnrs[0]
+            print(f"  PSNR gain: {psnr_improvement:+.2f} dB")
+        
+        # Overfitting check
+        loss_gap = abs(current_train_loss - current_val_loss)
+        print(f"  Train-Val Loss gap: {loss_gap:.6f}")
+        
+        if loss_gap > current_val_loss * 0.5:
+            print("  ⚠️  Potential overfitting detected!")
+    
+    # Training time info
+    iteration_times = metrics.get('iteration_times', [])
+    if iteration_times:
+        avg_time = sum(iteration_times[-100:]) / min(100, len(iteration_times))
+        print(f"\nPerformance:")
+        print(f"  Average iteration time: {avg_time:.3f} seconds")
+        print(f"  Iterations per hour: {3600/avg_time:.1f}")
+    
+    # Configuration
+    config = metrics.get('config', {})
+    if config:
+        print(f"\nConfiguration:")
+        print(f"  Quick validation resolution: {config.get('quick_val_res', 'N/A')}")
+        print(f"  Quick validation subset: {config.get('quick_val_subset', 'N/A')}")
+        print(f"  Full validation resolution: {config.get('full_val_res', 'N/A')}")
+        print(f"  Batch size: {config.get('batch_size', 'N/A')}")
+        print(f"  Learning rate: {config.get('learning_rate', 'N/A')}")
+        print(f"  Total iterations: {config.get('total_iterations', 'N/A')}")
+    
+    print("=" * 80)
+
+def main():
+    parser = argparse.ArgumentParser(description='Quick view of training progress')
+    parser.add_argument('--metrics-dir', type=str, 
+                       default='outputs/lego_full_training',
+                       help='Directory containing metrics files')
+    
+    args = parser.parse_args()
+    
+    metrics = load_latest_metrics(args.metrics_dir)
+    display_progress(metrics)
+
+if __name__ == '__main__':
+    main()
+```

@@ -1,0 +1,1225 @@
+# MedViewer — Modular Medical Volume Viewer
+
+A lightweight, ITK-SNAP-style desktop application for inspecting 3D medical volumes (CT / MRI / PET) alongside their segmentation label maps. Three synchronised multi-planar (Axial / Coronal / Sagittal) views, a rotatable Marching-Cubes 3D surface panel, an editable label table, and a live coordinate/intensity readout — in under 1000 lines of Python across 7 files.
+
+Built on **PyQt6**, **VTK**, **SimpleITK**, and **scikit-image**. Any integer label map is auto-detected and auto-coloured on load — no hard-coded organ list.
+
+> Screenshots below use the public **FLARE22** abdominal CT dataset. No patient or clinical data is included in this repository.
+
+---
+
+## Screenshots
+
+**Full application — three synchronised MPR views + auto-built 3D surfaces**
+
+![MedViewer full view with FLARE22 CT and 13-label segmentation](figs/full.png)
+
+*A FLARE22 CT volume with a 13-label segmentation: synchronised Axial/Coronal/Sagittal reslices, the auto-built 3D surface scene, and the per-label control table on the right.*
+
+**3D surface scene — one Marching-Cubes mesh per label**
+
+![3D multi-organ surface rendering](figs/3d.png)
+
+*Each segmentation label is extracted with Marching Cubes and Laplacian-smoothed into an individually coloured, semi-transparent mesh — rotatable and zoomable for at-a-glance anatomical inspection.*
+
+---
+
+## Features
+
+- **Three synchronised 2D MPR views** — Axial, Coronal, Sagittal, sharing one crosshair. A click in any panel repositions all others instantly.
+- **Rotatable 3D surface panel** — one Marching-Cubes mesh per label, with Laplacian smoothing and per-label colour/opacity/visibility.
+- **Editable segmentation label table** — rename, recolour, toggle visibility, and set opacity per label; changes apply live to both the 2D overlays and the 3D meshes.
+- **Live coordinate/intensity bar** — voxel index, world-space (mm) coordinate, raw intensity (HU for CT), and the label under the cursor.
+- **Auto modality + label detection** — CT/MRI inferred from intensity range; any integer label map supported with zero configuration.
+- **Radiological interaction conventions** — left-click to navigate, right-drag for window/level, wheel to scroll slices.
+
+---
+
+## Install
+
+```bash
+pip install PyQt6 vtk SimpleITK scikit-image nibabel numpy
+```
+
+## Run
+
+```bash
+# Open the viewer, then load data via the File menu
+python main.py
+
+# Pre-load an image
+python main.py image.nii.gz
+
+# Pre-load an image + segmentation (auto-builds the 3D scene)
+python main.py image.nii.gz segmentation.nii.gz
+```
+
+---
+
+## Controls
+
+| Action | Effect |
+|--------|--------|
+| Mouse wheel (Axial / Coronal / Sagittal) | Scroll Z / Y / X slices |
+| Left click (2D panel) | Move crosshair — syncs all views |
+| Right drag (2D panel) | Window / Level (L–R width, U–D center) |
+| Left drag (3D panel) | Rotate |
+| Right drag (3D panel) | Zoom |
+| ↑ ↓ / ← → | Scroll axial / sagittal slices |
+| V | Toggle segmentation overlay |
+| B | Build / rebuild 3D surfaces |
+| R | Reset all cameras |
+| J | Jump to voxel coordinate |
+| Ctrl+O / Ctrl+Shift+O | Open image / segmentation |
+| Ctrl+S | Save screenshot |
+| Ctrl+Q | Quit |
+
+---
+
+## Architecture
+
+Strict **model–view separation**. All volumetric data and per-label metadata live in a single data-model module with no Qt/VTK UI dependency; every other module is a view/controller that reads from it and re-renders on change.
+
+```
+medviewer_app/
+├── main.py           ← Entry point
+├── main_window.py    ← Window layout, menus, crosshair-sync hub
+├── slice_widget.py   ← 2D MPR slice viewer (×3: Axial/Coronal/Sagittal)
+├── view3d_widget.py  ← Rotatable 3D surface panel (Marching Cubes)
+├── seg_panel.py      ← Segmentation label table (colour/opacity/visibility)
+├── info_bar.py       ← Coordinate / intensity status bar
+└── data.py           ← Data model: ImageVolume, SegmentationVolume
+```
+
+All views are kept consistent through a single hub: any widget that moves the
+current voxel emits a `crosshairMoved(i, j, k)` signal, and one subscriber in
+`main_window.py` pushes the new position out to every panel — a hub-and-spoke
+pattern that makes adding further synchronised views straightforward.
+
+---
+
+## Supported Formats
+
+- NIfTI (`.nii`, `.nii.gz`)
+- CT / MRI / PET — auto-detected from intensity range
+- Any integer label map — labels auto-detected, no hard-coding
+
+---
+
+## Technical Report
+
+A detailed technical report documenting the architecture, the core algorithms
+(image reslicing, window/level mapping, Marching Cubes, Laplacian mesh smoothing,
+voxel-to-world mapping), and an annotated walkthrough is available here:
+
+📄 **[MedViewer — Technical Report (PDF)](https://drive.google.com/file/d/1iN-IQdf--dA23rZ8Zf0H8brIbxGVYCtW/view?usp=drive_link)**
+
+---
+
+## Citation
+
+If you use MedViewer, please cite it. A `CITATION.cff` file is included, so you can
+use the **"Cite this repository"** button in the GitHub sidebar, or:
+
+> Leonard, C. S. (2026). *MedViewer: A Modular, ITK-SNAP-Style Medical Volume Viewer.* GitHub repository.
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE) — free to use, modify, and distribute with attribution.
+
+---
+
+## Notes & Limitations
+
+- Uses voxel **spacing** only; does not yet apply the full NIfTI direction/origin
+  affine, so obliquely acquired scans may be displayed in an approximate frame.
+- One image volume + one segmentation at a time (no side-by-side comparison yet).
+- NIfTI only — DICOM series need converting upstream (e.g. `dcm2niix`).
+- The tool **reads** label maps produced upstream (MOOSE / TotalSegmentator /
+  VoxTell / etc.); it performs no segmentation or reconstruction itself.
+
+---
+
+## Acknowledgements
+
+Screenshots use the public FLARE22 dataset. The viewer is built on the open-source
+PyQt6, VTK, SimpleITK, and scikit-image projects.
+
+### medviewer_app/data.py
+```
+"""
+data.py — Medical volume data model.
+Loads NIfTI images and segmentations via SimpleITK.
+"""
+
+import numpy as np
+import SimpleITK as sitk
+import vtk
+from vtk.util import numpy_support
+
+
+# ── Colour palette (up to 20 distinct labels) ────────────
+_PALETTE = [
+    (1.00, 0.25, 0.25), (0.20, 0.85, 0.85), (0.95, 0.65, 0.20),
+    (0.55, 0.30, 0.65), (0.30, 0.80, 0.40), (0.95, 0.85, 0.30),
+    (0.25, 0.65, 0.85), (0.85, 0.30, 0.40), (1.00, 0.70, 0.40),
+    (0.60, 0.40, 1.00), (0.40, 1.00, 0.70), (1.00, 0.40, 0.70),
+    (0.30, 0.60, 1.00), (0.80, 1.00, 0.20), (1.00, 0.60, 0.20),
+    (0.40, 0.70, 1.00), (0.80, 0.20, 1.00), (0.20, 1.00, 0.80),
+    (1.00, 0.20, 0.40), (0.70, 1.00, 0.20),
+]
+
+def label_color(lid: int):
+    return _PALETTE[(lid - 1) % len(_PALETTE)]
+
+
+# ── Helper: numpy (X,Y,Z) → vtkImageData ─────────────────
+def numpy_to_vtk_image(arr: np.ndarray, spacing, vtk_type=vtk.VTK_FLOAT):
+    flat = arr.flatten(order='F')
+    va   = numpy_support.numpy_to_vtk(flat, deep=True, array_type=vtk_type)
+    img  = vtk.vtkImageData()
+    img.SetDimensions(arr.shape[0], arr.shape[1], arr.shape[2])
+    img.SetSpacing(float(spacing[0]), float(spacing[1]), float(spacing[2]))
+    img.SetOrigin(0.0, 0.0, 0.0)
+    img.GetPointData().SetScalars(va)
+    return img
+
+
+class ImageVolume:
+    """Holds a loaded medical image (CT / MRI / PET)."""
+
+    def __init__(self):
+        self.array    = None      # numpy float32 (X,Y,Z)
+        self.spacing  = None      # (sx,sy,sz) mm
+        self.shape    = None      # (X,Y,Z)
+        self.modality = 'Unknown'
+        self.path     = ''
+        self.vtk_img  = None      # vtkImageData
+
+    def load(self, path: str) -> bool:
+        try:
+            sitk_img  = sitk.ReadImage(path)
+            arr       = sitk.GetArrayFromImage(sitk_img)   # Z,Y,X
+            arr       = np.transpose(arr, (2, 1, 0))       # → X,Y,Z
+            self.array   = arr.astype(np.float32)
+            self.spacing = np.array(sitk_img.GetSpacing(), dtype=np.float64)
+            self.shape   = self.array.shape
+            self.path    = path
+            self._detect_modality()
+            self.vtk_img = numpy_to_vtk_image(self.array, self.spacing)
+            return True
+        except Exception as e:
+            print(f'[ImageVolume] Error loading {path}: {e}')
+            return False
+
+    def _detect_modality(self):
+        mn = self.array.min()
+        self.modality = 'CT' if mn < -500 else 'MRI'
+
+    def default_window_level(self):
+        if self.modality == 'CT':
+            return 400.0, 40.0          # abdomen
+        mn, mx = float(self.array.min()), float(self.array.max())
+        w = mx - mn
+        return w, mn + w / 2.0
+
+    def value_at(self, i, j, k):
+        i = int(np.clip(i, 0, self.shape[0] - 1))
+        j = int(np.clip(j, 0, self.shape[1] - 1))
+        k = int(np.clip(k, 0, self.shape[2] - 1))
+        return float(self.array[i, j, k])
+
+
+class SegmentationVolume:
+    """Holds a loaded label map and per-label display settings."""
+
+    def __init__(self):
+        self.array   = None      # numpy int32 (X,Y,Z)
+        self.spacing = None
+        self.shape   = None
+        self.path    = ''
+        self.labels  = {}        # {lid: {name,color,opacity,visible}}
+        self.vtk_rgba = None     # vtkImageData RGBA overlay
+
+    def load(self, path: str) -> bool:
+        try:
+            sitk_img  = sitk.ReadImage(path)
+            arr       = sitk.GetArrayFromImage(sitk_img)
+            arr       = np.transpose(arr, (2, 1, 0))
+            self.array   = arr.astype(np.int32)
+            self.spacing = np.array(sitk_img.GetSpacing(), dtype=np.float64)
+            self.shape   = self.array.shape
+            self.path    = path
+            self._detect_labels()
+            self._build_rgba()
+            return True
+        except Exception as e:
+            print(f'[SegmentationVolume] Error loading {path}: {e}')
+            return False
+
+    def _detect_labels(self):
+        unique = np.unique(self.array)
+        unique = unique[unique > 0]
+        self.labels = {}
+        for lid in unique:
+            lid = int(lid)
+            self.labels[lid] = {
+                'name':    f'Label {lid}',
+                'color':   label_color(lid),
+                'opacity': 0.55,
+                'visible': True,
+                'count':   int((self.array == lid).sum()),
+            }
+
+    def _build_rgba(self):
+        sh   = self.array.shape
+        rgba = np.zeros((*sh, 4), dtype=np.uint8)
+        for lid, info in self.labels.items():
+            if not info['visible']:
+                continue
+            m     = (self.array == lid)
+            c     = info['color']
+            alpha = int(info['opacity'] * 255)
+            rgba[m, 0] = int(c[0] * 255)
+            rgba[m, 1] = int(c[1] * 255)
+            rgba[m, 2] = int(c[2] * 255)
+            rgba[m, 3] = alpha
+
+        flat = rgba.flatten(order='F')
+        va   = numpy_support.numpy_to_vtk(flat, deep=True,
+                                           array_type=vtk.VTK_UNSIGNED_CHAR)
+        va.SetNumberOfComponents(4)
+        img  = vtk.vtkImageData()
+        img.SetDimensions(sh[0], sh[1], sh[2])
+        img.SetSpacing(self.spacing[0], self.spacing[1], self.spacing[2])
+        img.SetOrigin(0.0, 0.0, 0.0)
+        img.GetPointData().SetScalars(va)
+        self.vtk_rgba = img
+
+    def rebuild_rgba(self):
+        self._build_rgba()
+
+    def label_at(self, i, j, k):
+        if self.array is None:
+            return 0
+        i = int(np.clip(i, 0, self.shape[0] - 1))
+        j = int(np.clip(j, 0, self.shape[1] - 1))
+        k = int(np.clip(k, 0, self.shape[2] - 1))
+        return int(self.array[i, j, k])
+```
+
+### medviewer_app/info_bar.py
+```
+"""
+info_bar.py — Bottom status bar showing live coordinate and intensity info.
+
+Displays:
+  Voxel: (i, j, k)
+  World: (x, y, z) mm
+  Intensity: HU or raw value
+  Label: name of segmentation label under cursor
+"""
+
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel
+from PyQt6.QtCore import Qt
+
+
+class InfoBar(QWidget):
+    """Thin horizontal bar with coordinate / intensity display."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(28)
+        self.setStyleSheet(
+            'background:#050510;'
+        )
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 2, 10, 2)
+        lay.setSpacing(30)
+
+        self._vox_lbl = self._make_label('Voxel: —')
+        self._wld_lbl = self._make_label('World: —')
+        self._hu_lbl  = self._make_label('Value: —')
+        self._seg_lbl = self._make_label('')
+        self._seg_lbl.setStyleSheet('color:#50ee80; font-size:12px;')
+
+        lay.addWidget(self._vox_lbl)
+        lay.addWidget(self._wld_lbl)
+        lay.addWidget(self._hu_lbl)
+        lay.addStretch()
+        lay.addWidget(self._seg_lbl)
+
+    def _make_label(self, text):
+        lbl = QLabel(text)
+        lbl.setStyleSheet(
+            'color:#FFE033; font-family:monospace; font-size:12px;')
+        return lbl
+
+    def update(self, vol, seg, i, j, k):
+        """Refresh all fields from current voxel position."""
+        if vol is None:
+            return
+        sp = vol.spacing
+        wx, wy, wz = i*sp[0], j*sp[1], k*sp[2]
+        val  = vol.value_at(i, j, k)
+        unit = 'HU' if vol.modality == 'CT' else 'val'
+
+        self._vox_lbl.setText(f'Voxel: ({i}, {j}, {k})')
+        self._wld_lbl.setText(
+            f'World: ({wx:.1f}, {wy:.1f}, {wz:.1f}) mm')
+        self._hu_lbl.setText(f'{unit}: {val:.1f}')
+
+        if seg is not None:
+            lid = seg.label_at(i, j, k)
+            if lid > 0 and lid in seg.labels:
+                name = seg.labels[lid]['name']
+                self._seg_lbl.setText(f'▶  {name}  [Label {lid}]')
+            else:
+                self._seg_lbl.setText('')
+        else:
+            self._seg_lbl.setText('')
+
+    def set_default(self):
+        self._vox_lbl.setText('Voxel: —')
+        self._wld_lbl.setText('World: —')
+        self._hu_lbl.setText('Value: —')
+        self._seg_lbl.setText('Open image: File → Open Image')
+```
+
+### medviewer_app/main.py
+```
+"""
+main.py — Entry point for MedViewer.
+
+Usage:
+    python main.py
+    python main.py image.nii.gz
+    python main.py image.nii.gz segmentation.nii.gz
+
+Install dependencies:
+    pip install PyQt6 vtk SimpleITK scikit-image nibabel numpy
+"""
+
+import sys
+import os
+import traceback
+
+# ── Must set these BEFORE any Qt or VTK import ──────────
+os.environ['VTK_SILENCE_GET_VOID_POINTER_WARNINGS'] = '1'
+
+# Force VTK to use the same Qt version as PyQt6
+os.environ['QT_API'] = 'pyqt6'
+
+from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtCore import Qt
+
+
+def main():
+    # Create QApplication FIRST before any VTK widget
+    app = QApplication(sys.argv)
+    app.setApplicationName('MedViewer')
+    app.setStyle('Fusion')
+    app.setStyleSheet("""
+        QWidget { background: #090912; color: white; }
+        QScrollBar:vertical { background:#111; width:10px; }
+        QScrollBar::handle:vertical { background:#333; border-radius:4px; }
+        QMenuBar { background:#0d0d1a; color:white; }
+        QMenu { background:#0d0d1a; color:white; }
+        QMenu::item:selected { background:#2E5FA3; }
+    """)
+
+    # Import MainWindow AFTER QApplication exists
+    try:
+        from main_window import MainWindow
+    except Exception as e:
+        QMessageBox.critical(None, 'Import Error', f'{e}\n\n{traceback.format_exc()}')
+        sys.exit(1)
+
+    try:
+        win = MainWindow()
+        win.show()
+    except Exception as e:
+        QMessageBox.critical(None, 'Startup Error', f'{e}\n\n{traceback.format_exc()}')
+        sys.exit(1)
+
+    # Handle command-line file arguments
+    args = sys.argv[1:]
+    if args:
+        win._load_image(args[0])
+    if len(args) >= 2:
+        win._load_seg(args[1])
+
+    sys.exit(app.exec())
+
+
+if __name__ == '__main__':
+    main()
+```
+
+### medviewer_app/seg_panel.py
+```
+"""
+seg_panel.py — Segmentation label control panel (PyQt6 widget).
+
+Shows a table of all detected labels with:
+  - Label ID and name (editable)
+  - Color swatch (click to change)
+  - Visibility checkbox
+  - Opacity spinbox
+  - Build 3D button
+"""
+
+import numpy as np
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QTableWidget, QTableWidgetItem,
+    QCheckBox, QDoubleSpinBox, QColorDialog,
+    QHeaderView, QSizePolicy,
+)
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor
+
+
+class SegPanel(QWidget):
+    """Side-panel for segmentation label management."""
+
+    # Emitted when any label property changes (colour/opacity/visibility)
+    labelsChanged = pyqtSignal()
+    buildRequested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._seg     = None
+        self._view3d  = None   # set externally
+        self._slices  = []     # slice widgets — set externally
+        self._setup_ui()
+
+    def set_view3d(self, w):
+        self._view3d = w
+
+    def set_slice_widgets(self, widgets):
+        self._slices = widgets
+
+    # ── UI ───────────────────────────────────────────────
+    def _setup_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setSpacing(6)
+
+        # Title
+        title = QLabel('Segmentation Labels')
+        title.setStyleSheet(
+            'color:#5DADE2; font-weight:bold; font-size:13px;')
+        lay.addWidget(title)
+
+        # Table
+        self.table = QTableWidget()
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(
+            ['ID', 'Name', 'Color', 'Vis', 'Opacity'])
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setStyleSheet("""
+            QTableWidget {
+                background:#0a0a12; color:white;
+                gridline-color:#2a2a3a; font-size:11px;
+            }
+            QHeaderView::section {
+                background:#12122a; color:#5DADE2;
+                font-weight:bold; padding:3px;
+            }
+            QTableWidget::item:selected { background:#1a3a5a; }
+        """)
+        lay.addWidget(self.table, stretch=1)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        self.btn_build = QPushButton('⬡  Build 3D')
+        self.btn_build.setStyleSheet(
+            'background:#2E5FA3; color:white; padding:6px; '
+            'border-radius:4px; font-size:12px;')
+        self.btn_build.clicked.connect(self.buildRequested.emit)
+        btn_row.addWidget(self.btn_build)
+
+        btn_all = QPushButton('All On')
+        btn_all.setStyleSheet(
+            'background:#1a5c2a; color:white; padding:6px; '
+            'border-radius:4px;')
+        btn_all.clicked.connect(lambda: self._all_visible(True))
+        btn_row.addWidget(btn_all)
+
+        btn_off = QPushButton('All Off')
+        btn_off.setStyleSheet(
+            'background:#5c1a1a; color:white; padding:6px; '
+            'border-radius:4px;')
+        btn_off.clicked.connect(lambda: self._all_visible(False))
+        btn_row.addWidget(btn_off)
+        lay.addLayout(btn_row)
+
+    def populate(self, seg):
+        """Fill table from a SegmentationVolume."""
+        self._seg = seg
+        self.table.blockSignals(True)
+        self.table.setRowCount(0)
+
+        for lid, info in seg.labels.items():
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+
+            # ID (read-only)
+            id_item = QTableWidgetItem(str(lid))
+            id_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.table.setItem(row, 0, id_item)
+
+            # Name (editable)
+            name_item = QTableWidgetItem(info['name'])
+            self.table.setItem(row, 1, name_item)
+            name_item.lid = lid
+
+            # Color button
+            c = info['color']
+            btn = QPushButton()
+            btn.setFixedSize(36, 20)
+            btn.setStyleSheet(
+                f'background:rgb({int(c[0]*255)},'
+                f'{int(c[1]*255)},{int(c[2]*255)});'
+                f'border:1px solid #555;')
+            btn.clicked.connect(
+                lambda _, l=lid, r=row: self._pick_color(l, r))
+            self.table.setCellWidget(row, 2, btn)
+
+            # Visible checkbox
+            cb = QCheckBox()
+            cb.setChecked(info['visible'])
+            cb.stateChanged.connect(
+                lambda st, l=lid: self._set_visible(
+                    l, st == Qt.CheckState.Checked.value))
+            cw = QWidget()
+            cl = QHBoxLayout(cw)
+            cl.addWidget(cb)
+            cl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cl.setContentsMargins(0,0,0,0)
+            self.table.setCellWidget(row, 3, cw)
+
+            # Opacity spinbox
+            sp = QDoubleSpinBox()
+            sp.setRange(0.0, 1.0)
+            sp.setSingleStep(0.05)
+            sp.setDecimals(2)
+            sp.setValue(info['opacity'])
+            sp.setFixedWidth(60)
+            sp.setStyleSheet('background:#0a0a12; color:white;')
+            sp.valueChanged.connect(
+                lambda v, l=lid: self._set_opacity(l, v))
+            self.table.setCellWidget(row, 4, sp)
+
+        # Connect name edits
+        self.table.itemChanged.connect(self._on_name_changed)
+        self.table.blockSignals(False)
+
+    def _on_name_changed(self, item):
+        if self._seg is None:
+            return
+        if item.column() == 1 and hasattr(item, 'lid'):
+            self._seg.labels[item.lid]['name'] = item.text()
+
+    def _pick_color(self, lid, row):
+        if self._seg is None:
+            return
+        c = self._seg.labels[lid]['color']
+        qc = QColorDialog.getColor(
+            QColor(int(c[0]*255), int(c[1]*255), int(c[2]*255)), self)
+        if qc.isValid():
+            nc = (qc.redF(), qc.greenF(), qc.blueF())
+            self._seg.labels[lid]['color'] = nc
+            btn = self.table.cellWidget(row, 2)
+            btn.setStyleSheet(
+                f'background:rgb({qc.red()},{qc.green()},{qc.blue()});'
+                f'border:1px solid #555;')
+            if self._view3d:
+                self._view3d.set_label_color(lid, nc)
+            self._rebuild()
+
+    def _set_visible(self, lid, v):
+        if self._seg is None:
+            return
+        self._seg.labels[lid]['visible'] = v
+        if self._view3d:
+            self._view3d.set_label_visible(lid, v)
+        self._rebuild()
+
+    def _set_opacity(self, lid, val):
+        if self._seg is None:
+            return
+        self._seg.labels[lid]['opacity'] = val
+        if self._view3d:
+            self._view3d.set_label_opacity(lid, val)
+        self._rebuild()
+
+    def _all_visible(self, v):
+        if self._seg is None:
+            return
+        for lid in self._seg.labels:
+            self._seg.labels[lid]['visible'] = v
+        self.populate(self._seg)
+        self._rebuild()
+
+    def _rebuild(self):
+        if self._seg:
+            self._seg.rebuild_rgba()
+        for sw in self._slices:
+            sw.refresh_seg()
+        self.labelsChanged.emit()
+```
+
+### medviewer_app/slice_widget.py
+```
+"""
+slice_widget.py — Pure 2D MPR slice viewer.
+
+Uses vtkResliceImageViewer for true flat 2D rendering.
+No 3D planes. No perspective. No rotation.
+Mouse wheel scrolls slices. Left click moves crosshair.
+Right drag adjusts window/level.
+"""
+
+import numpy as np
+import vtk
+from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+from PyQt6.QtCore import pyqtSignal, Qt
+
+
+# axis indices
+AXIAL    = 2   # scroll Z
+CORONAL  = 1   # scroll Y
+SAGITTAL = 0   # scroll X
+
+AXIS_NAMES = {AXIAL: 'Axial', CORONAL: 'Coronal', SAGITTAL: 'Sagittal'}
+
+# Crosshair colour: blue dashed like ITK-SNAP
+CH_COLOR = (0.2, 0.5, 1.0)
+
+# Orientation label colours
+LABEL_COLOR = (1.0, 0.85, 0.0)   # yellow
+
+
+def _make_line(color=CH_COLOR, width=1.2):
+    pts  = vtk.vtkPoints()
+    pts.InsertNextPoint(0, 0, 0)
+    pts.InsertNextPoint(1, 0, 0)
+    line = vtk.vtkLine()
+    line.GetPointIds().SetId(0, 0)
+    line.GetPointIds().SetId(1, 1)
+    cells = vtk.vtkCellArray()
+    cells.InsertNextCell(line)
+    pd = vtk.vtkPolyData()
+    pd.SetPoints(pts)
+    pd.SetLines(cells)
+    mp = vtk.vtkPolyDataMapper()
+    mp.SetInputData(pd)
+    ac = vtk.vtkActor()
+    ac.SetMapper(mp)
+    ac.GetProperty().SetColor(*color)
+    ac.GetProperty().SetLineWidth(width)
+    # Dashed pattern — matches ITK-SNAP style
+    ac.GetProperty().SetLineStipplePattern(0xF0F0)
+    ac.GetProperty().SetLineStippleRepeatFactor(1)
+    return ac, pd
+
+
+def _set_line(pd, p0, p1):
+    pts = pd.GetPoints()
+    pts.SetPoint(0, *p0)
+    pts.SetPoint(1, *p1)
+    pts.Modified()
+    pd.Modified()
+
+
+def _orient_label(ren, text, nx, ny, color=LABEL_COLOR):
+    """Place an orientation label at normalised viewport position."""
+    a = vtk.vtkTextActor()
+    a.SetInput(text)
+    a.GetTextProperty().SetFontSize(14)
+    a.GetTextProperty().SetColor(*color)
+    a.GetTextProperty().BoldOn()
+    c = a.GetPositionCoordinate()
+    c.SetCoordinateSystemToNormalizedViewport()
+    a.SetPosition(nx, ny)
+    ren.AddActor2D(a)
+    return a
+
+
+class SliceWidget(QVTKRenderWindowInteractor):
+    """
+    One orthographic 2D slice panel.
+
+    axis: AXIAL=2, CORONAL=1, SAGITTAL=0
+    Emits crosshairMoved(i,j,k) when the crosshair position changes.
+    """
+
+    crosshairMoved = pyqtSignal(int, int, int)
+
+    # Orientation labels per axis: [left, right, bottom, top]
+    _ORIENT = {
+        AXIAL:    ['R', 'L', 'P', 'A'],
+        CORONAL:  ['R', 'L', 'I', 'S'],
+        SAGITTAL: ['A', 'P', 'I', 'S'],
+    }
+
+    def __init__(self, axis: int, parent=None):
+        super().__init__(parent)
+        self.axis   = axis
+        self.vox    = [0, 0, 0]      # shared cursor [i,j,k]
+        self._vol   = None
+        self._seg   = None
+        self._wl_w  = 400.0
+        self._wl_l  = 40.0
+        self._dragging = False
+        self._drag_start = None
+
+        self._setup_vtk()
+
+    # ── VTK pipeline ─────────────────────────────────────
+    def _setup_vtk(self):
+        rw  = self.GetRenderWindow()
+        rw.SetMultiSamples(0)
+
+        # Primary renderer — orthographic, no rotation
+        self._ren = vtk.vtkRenderer()
+        self._ren.SetBackground(0, 0, 0)
+        cam = self._ren.GetActiveCamera()
+        cam.ParallelProjectionOn()
+        rw.AddRenderer(self._ren)
+
+        # Disable default style; we override all events
+        self.GetRenderWindow().GetInteractor()\
+            .SetInteractorStyle(vtk.vtkInteractorStyleUser())
+
+        # CT reslice → W/L map → image actor
+        self._rs_ct = vtk.vtkImageReslice()
+        self._rs_ct.SetOutputDimensionality(2)
+        self._rs_ct.SetInterpolationModeToLinear()
+        self._rs_ct.AutoCropOutputOn()
+        self._apply_reslice_orientation(self._rs_ct)
+
+        self._wl = vtk.vtkImageMapToWindowLevelColors()
+        self._wl.SetInputConnection(self._rs_ct.GetOutputPort())
+        self._wl.SetWindow(self._wl_w)
+        self._wl.SetLevel(self._wl_l)
+
+        self._ct_actor = vtk.vtkImageActor()
+        self._ct_actor.GetMapper().SetInputConnection(self._wl.GetOutputPort())
+        self._ct_actor.ForceOpaqueOn()
+        self._ren.AddActor(self._ct_actor)
+
+        # Segmentation reslice → image actor (translucent RGBA)
+        self._rs_seg = vtk.vtkImageReslice()
+        self._rs_seg.SetOutputDimensionality(2)
+        self._rs_seg.SetInterpolationModeToNearestNeighbor()
+        self._rs_seg.AutoCropOutputOn()
+        self._apply_reslice_orientation(self._rs_seg)
+
+        self._seg_actor = vtk.vtkImageActor()
+        self._seg_actor.GetMapper().SetInputConnection(
+            self._rs_seg.GetOutputPort())
+        self._seg_actor.SetOpacity(0.55)
+        self._seg_actor.ForceTranslucentOn()
+        self._seg_actor.VisibilityOff()
+        self._ren.AddActor(self._seg_actor)
+
+        # Crosshair: two lines (H + V)
+        self._ch_h = _make_line()
+        self._ch_v = _make_line()
+        self._ren.AddActor(self._ch_h[0])
+        self._ren.AddActor(self._ch_v[0])
+
+        # Orientation labels
+        ol = self._ORIENT[self.axis]
+        _orient_label(self._ren, ol[0], 0.02, 0.47)   # left
+        _orient_label(self._ren, ol[1], 0.93, 0.47)   # right
+        _orient_label(self._ren, ol[2], 0.47, 0.02)   # bottom
+        _orient_label(self._ren, ol[3], 0.47, 0.93)   # top
+
+        # Slice counter  e.g. "127 of 340"
+        self._slice_txt = vtk.vtkTextActor()
+        self._slice_txt.SetInput('— of —')
+        self._slice_txt.GetTextProperty().SetFontSize(12)
+        self._slice_txt.GetTextProperty().SetColor(0.0, 0.85, 0.0)
+        c = self._slice_txt.GetPositionCoordinate()
+        c.SetCoordinateSystemToNormalizedViewport()
+        self._slice_txt.SetPosition(0.35, 0.01)
+        self._ren.AddActor2D(self._slice_txt)
+
+        # W/L text
+        self._wl_txt = vtk.vtkTextActor()
+        self._wl_txt.SetInput('')
+        self._wl_txt.GetTextProperty().SetFontSize(11)
+        self._wl_txt.GetTextProperty().SetColor(0.7, 0.7, 0.7)
+        self._wl_txt.SetPosition(8, 8)
+        self._ren.AddActor2D(self._wl_txt)
+
+        # Panel name (top-left corner)
+        name_lbl = vtk.vtkTextActor()
+        name_lbl.SetInput(AXIS_NAMES[self.axis].upper())
+        name_lbl.GetTextProperty().SetFontSize(13)
+        name_lbl.GetTextProperty().SetColor(
+            *{AXIAL:(0.36,0.68,0.91),
+              CORONAL:(0.35,0.84,0.54),
+              SAGITTAL:(0.95,0.57,0.54)}[self.axis])
+        name_lbl.GetTextProperty().BoldOn()
+        c2 = name_lbl.GetPositionCoordinate()
+        c2.SetCoordinateSystemToNormalizedViewport()
+        name_lbl.SetPosition(0.01, 0.95)
+        self._ren.AddActor2D(name_lbl)
+
+    def _apply_reslice_orientation(self, rs):
+        """Set the reslice plane normal for this axis."""
+        if self.axis == AXIAL:      # XY plane
+            rs.SetResliceAxesDirectionCosines(1,0,0, 0,1,0, 0,0,1)
+        elif self.axis == CORONAL:  # XZ plane
+            rs.SetResliceAxesDirectionCosines(1,0,0, 0,0,1, 0,-1,0)
+        else:                       # YZ plane
+            rs.SetResliceAxesDirectionCosines(0,1,0, 0,0,1, 1,0,0)
+
+    def _update_origin(self, rs, sp):
+        i, j, k = self.vox
+        if self.axis == AXIAL:
+            rs.SetResliceAxesOrigin(0, 0, k * sp[2])
+        elif self.axis == CORONAL:
+            rs.SetResliceAxesOrigin(0, j * sp[1], 0)
+        else:
+            rs.SetResliceAxesOrigin(i * sp[0], 0, 0)
+        rs.Update()
+
+    # ── Public API ───────────────────────────────────────
+    def set_volume(self, vol):
+        self._vol  = vol
+        self._wl_w, self._wl_l = vol.default_window_level()
+        self._rs_ct.SetInputData(vol.vtk_img)
+        self._wl.SetWindow(self._wl_w)
+        self._wl.SetLevel(self._wl_l)
+        self.vox = [vol.shape[0]//2, vol.shape[1]//2, vol.shape[2]//2]
+        self._update_origin(self._rs_ct, vol.spacing)
+        self._ren.ResetCamera()
+        self._update_wl_text()
+        self.GetRenderWindow().Render()
+
+    def set_segmentation(self, seg):
+        self._seg = seg
+        if seg is not None and seg.vtk_rgba is not None:
+            self._rs_seg.SetInputData(seg.vtk_rgba)
+            self._update_origin(self._rs_seg, seg.spacing)
+            self._seg_actor.VisibilityOn()
+        else:
+            self._seg_actor.VisibilityOff()
+        self.GetRenderWindow().Render()
+
+    def set_voxel(self, i, j, k):
+        """Move slice and crosshair to voxel (i,j,k) — called externally."""
+        self.vox = [i, j, k]
+        if self._vol:
+            self._update_origin(self._rs_ct, self._vol.spacing)
+        if self._seg:
+            self._update_origin(self._rs_seg, self._seg.spacing)
+        self._update_crosshair()
+        self._update_slice_text()
+        self.GetRenderWindow().Render()
+
+    def refresh_seg(self):
+        """Reload seg overlay after colour/opacity change."""
+        if self._seg and self._seg.vtk_rgba:
+            self._rs_seg.SetInputData(self._seg.vtk_rgba)
+            self._rs_seg.Modified()
+            self._rs_seg.Update()
+        self.GetRenderWindow().Render()
+
+    def set_seg_visible(self, v: bool):
+        self._seg_actor.SetVisibility(v)
+        self.GetRenderWindow().Render()
+
+    def reset_camera(self):
+        self._ren.ResetCamera()
+        self.GetRenderWindow().Render()
+
+    # ── Crosshair drawing ────────────────────────────────
+    def _update_crosshair(self):
+        if self._vol is None:
+            return
+        sp = self._vol.spacing
+        sh = self._vol.shape
+        i, j, k = self.vox
+        px, py, pz = i*sp[0], j*sp[1], k*sp[2]
+        ex, ey, ez = sh[0]*sp[0], sh[1]*sp[1], sh[2]*sp[2]
+
+        if self.axis == AXIAL:
+            _set_line(self._ch_h[1], (0, py, pz),  (ex, py, pz))
+            _set_line(self._ch_v[1], (px, 0, pz),  (px, ey, pz))
+        elif self.axis == CORONAL:
+            _set_line(self._ch_h[1], (0, py, 0),   (ex, py, ez))
+            _set_line(self._ch_v[1], (px, py, 0),  (px, py, ez))
+        else:
+            _set_line(self._ch_h[1], (px, 0, 0),   (px, ey, 0))
+            _set_line(self._ch_v[1], (px, py, 0),  (px, py, ez))
+
+    def _update_slice_text(self):
+        if self._vol is None:
+            return
+        sh = self._vol.shape
+        if self.axis == AXIAL:
+            s, mx = self.vox[2], sh[2]
+        elif self.axis == CORONAL:
+            s, mx = self.vox[1], sh[1]
+        else:
+            s, mx = self.vox[0], sh[0]
+        self._slice_txt.SetInput(f'{s + 1} of {mx}')
+
+    def _update_wl_text(self):
+        self._wl_txt.SetInput(f'W:{self._wl_w:.0f}  L:{self._wl_l:.0f}')
+
+    # ── Mouse events — Qt handles these, not VTK ─────────
+    def wheelEvent(self, event):
+        if self._vol is None:
+            return
+        delta = 1 if event.angleDelta().y() > 0 else -1
+        sh = self._vol.shape
+        if self.axis == AXIAL:
+            self.vox[2] = int(np.clip(self.vox[2] + delta, 0, sh[2]-1))
+        elif self.axis == CORONAL:
+            self.vox[1] = int(np.clip(self.vox[1] + delta, 0, sh[1]-1))
+        else:
+            self.vox[0] = int(np.clip(self.vox[0] + delta, 0, sh[0]-1))
+        self.set_voxel(*self.vox)
+        self.crosshairMoved.emit(*self.vox)
+
+    def mousePressEvent(self, event):
+        if self._vol is None:
+            return
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging   = True
+            self._drag_start = (event.position().x(), event.position().y())
+            self._pick(event.position().x(), event.position().y())
+        elif event.button() == Qt.MouseButton.RightButton:
+            self._dragging   = True
+            self._drag_start = (event.position().x(), event.position().y())
+
+    def mouseMoveEvent(self, event):
+        if not self._dragging or self._vol is None:
+            return
+        x, y = event.position().x(), event.position().y()
+        dx = x - self._drag_start[0]
+        dy = y - self._drag_start[1]
+        self._drag_start = (x, y)
+
+        if event.buttons() == Qt.MouseButton.LeftButton:
+            self._pick(x, y)
+        elif event.buttons() == Qt.MouseButton.RightButton:
+            # Right drag → window/level
+            self._wl_w = max(1.0, self._wl_w + dx * 3.0)
+            self._wl_l = self._wl_l - dy * 3.0
+            self._wl.SetWindow(self._wl_w)
+            self._wl.SetLevel(self._wl_l)
+            self._update_wl_text()
+            self.GetRenderWindow().Render()
+
+    def mouseReleaseEvent(self, event):
+        self._dragging = False
+
+    def _pick(self, sx, sy):
+        """Convert screen click → world → voxel → emit crosshairMoved."""
+        ren = self._ren
+        h   = self.GetRenderWindow().GetSize()[1]
+        sy_vtk = h - int(sy)
+
+        ren.SetDisplayPoint(sx, sy_vtk, 0)
+        ren.DisplayToWorld()
+        wp = ren.GetWorldPoint()
+        if abs(wp[3]) < 1e-10:
+            return
+        wx = wp[0] / wp[3]
+        wy = wp[1] / wp[3]
+        wz = wp[2] / wp[3]
+
+        sp = self._vol.spacing
+        sh = self._vol.shape
+        ni = int(round(wx / sp[0]))
+        nj = int(round(wy / sp[1]))
+        nk = int(round(wz / sp[2]))
+
+        i, j, k = self.vox
+        if self.axis == AXIAL:
+            i = int(np.clip(ni, 0, sh[0]-1))
+            j = int(np.clip(nj, 0, sh[1]-1))
+        elif self.axis == CORONAL:
+            i = int(np.clip(ni, 0, sh[0]-1))
+            k = int(np.clip(nk, 0, sh[2]-1))
+        else:
+            j = int(np.clip(nj, 0, sh[1]-1))
+            k = int(np.clip(nk, 0, sh[2]-1))
+
+        self.set_voxel(i, j, k)
+        self.crosshairMoved.emit(i, j, k)
+```
+
+### medviewer_app/view3d_widget.py
+```
+"""
+view3d_widget.py — Rotatable 3D surface rendering panel.
+
+Builds one mesh per segmentation label using Marching Cubes.
+Supports rotation, zoom, pan.
+Shows a yellow crosshair sphere at the current voxel position.
+"""
+
+import numpy as np
+import vtk
+from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+from skimage import measure
+
+
+class View3DWidget(QVTKRenderWindowInteractor):
+    """3D rendering panel — rotate/zoom/pan only."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._meshes = {}     # {label_id: vtkActor}
+        self._sph_src = None
+        self._setup_vtk()
+
+    def _setup_vtk(self):
+        rw  = self.GetRenderWindow()
+        rw.SetMultiSamples(0)
+
+        self._ren = vtk.vtkRenderer()
+        self._ren.SetBackground(0.0, 0.0, 0.0)
+        rw.AddRenderer(self._ren)
+
+        # Trackball camera — rotate/zoom/pan in 3D only
+        style = vtk.vtkInteractorStyleTrackballCamera()
+        rw.GetInteractor().SetInteractorStyle(style)
+
+        # Crosshair sphere
+        self._sph_src = vtk.vtkSphereSource()
+        self._sph_src.SetRadius(3.5)
+        self._sph_src.Update()
+        smp = vtk.vtkPolyDataMapper()
+        smp.SetInputConnection(self._sph_src.GetOutputPort())
+        self._sph_ac = vtk.vtkActor()
+        self._sph_ac.SetMapper(smp)
+        self._sph_ac.GetProperty().SetColor(1, 1, 0)
+        self._sph_ac.VisibilityOff()
+        self._ren.AddActor(self._sph_ac)
+
+        # Orientation axes
+        ax = vtk.vtkAxesActor()
+        ax.SetTotalLength(20, 20, 20)
+        self._ren.AddActor(ax)
+
+        # Panel label
+        lbl = vtk.vtkTextActor()
+        lbl.SetInput('3D  |  Drag=rotate  Wheel=zoom  B=build')
+        lbl.GetTextProperty().SetFontSize(11)
+        lbl.GetTextProperty().SetColor(0.6, 0.6, 0.6)
+        lbl.SetPosition(8, 8)
+        self._ren.AddActor2D(lbl)
+
+    # ── Public API ───────────────────────────────────────
+    def build_surfaces(self, seg):
+        """Build marching cubes mesh for each label."""
+        print('[3D] Building surfaces...')
+        for ac in self._meshes.values():
+            self._ren.RemoveActor(ac)
+        self._meshes.clear()
+
+        sp = seg.spacing
+        for lid, info in seg.labels.items():
+            binary = (seg.array == lid).astype(np.float32)
+            if binary.sum() < 50:
+                continue
+            try:
+                verts, faces, _, _ = measure.marching_cubes(
+                    binary, level=0.5,
+                    spacing=(sp[0], sp[1], sp[2])
+                )
+                pts = vtk.vtkPoints()
+                for v in verts:
+                    pts.InsertNextPoint(float(v[0]), float(v[1]), float(v[2]))
+
+                cel = vtk.vtkCellArray()
+                for f in faces:
+                    cel.InsertNextCell(3)
+                    cel.InsertCellPoint(int(f[0]))
+                    cel.InsertCellPoint(int(f[1]))
+                    cel.InsertCellPoint(int(f[2]))
+
+                pd = vtk.vtkPolyData()
+                pd.SetPoints(pts)
+                pd.SetPolys(cel)
+
+                sm = vtk.vtkSmoothPolyDataFilter()
+                sm.SetInputData(pd)
+                sm.SetNumberOfIterations(25)
+                sm.SetRelaxationFactor(0.1)
+                sm.Update()
+
+                nm = vtk.vtkPolyDataNormals()
+                nm.SetInputConnection(sm.GetOutputPort())
+                nm.AutoOrientNormalsOn()
+                nm.Update()
+
+                mp = vtk.vtkPolyDataMapper()
+                mp.SetInputConnection(nm.GetOutputPort())
+
+                ac = vtk.vtkActor()
+                ac.SetMapper(mp)
+                c = info['color']
+                ac.GetProperty().SetColor(c[0], c[1], c[2])
+                ac.GetProperty().SetOpacity(0.85)
+                ac.GetProperty().SetSpecular(0.35)
+                ac.GetProperty().SetAmbient(0.2)
+                ac.SetVisibility(info['visible'])
+
+                self._ren.AddActor(ac)
+                self._meshes[lid] = ac
+                print(f'  Label {lid} ({info["name"]}): OK')
+            except Exception as e:
+                print(f'  Label {lid}: {e}')
+
+        self._sph_ac.VisibilityOn()
+        self._ren.ResetCamera()
+        self.GetRenderWindow().Render()
+
+    def update_crosshair(self, i, j, k, spacing):
+        """Move crosshair sphere to current voxel position."""
+        self._sph_src.SetCenter(
+            i * spacing[0],
+            j * spacing[1],
+            k * spacing[2]
+        )
+        self._sph_src.Update()
+        self.GetRenderWindow().Render()
+
+    def set_label_visible(self, lid, visible):
+        if lid in self._meshes:
+            self._meshes[lid].SetVisibility(visible)
+            self.GetRenderWindow().Render()
+
+    def set_label_color(self, lid, color):
+        if lid in self._meshes:
+            self._meshes[lid].GetProperty().SetColor(*color)
+            self.GetRenderWindow().Render()
+
+    def set_label_opacity(self, lid, opacity):
+        if lid in self._meshes:
+            self._meshes[lid].GetProperty().SetOpacity(opacity)
+            self.GetRenderWindow().Render()
+
+    def reset_camera(self):
+        self._ren.ResetCamera()
+        self.GetRenderWindow().Render()
+```

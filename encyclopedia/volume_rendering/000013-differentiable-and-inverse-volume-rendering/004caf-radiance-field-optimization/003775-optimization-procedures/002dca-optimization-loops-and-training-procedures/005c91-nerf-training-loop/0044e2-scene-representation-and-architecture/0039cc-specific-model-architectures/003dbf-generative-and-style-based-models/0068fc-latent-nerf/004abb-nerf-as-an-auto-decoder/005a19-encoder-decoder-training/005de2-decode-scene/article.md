@@ -1,0 +1,89 @@
+# Decode-Scene
+
+Also called: Latent-NeRF with RGB supervision
+
+## Overview
+Decode-Scene is a method for training neural radiance fields (NeRFs) in a latent space by supervising the pipeline with RGB images directly, rendering in the latent space and then decoding to RGB for the loss computation [S1, unofficial]. It differs from its sibling [Encode-Scene](17508-encode-scene.md) by caching latent representations, which avoids differentiating through the decoder during training and significantly accelerates the optimization process [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Input RGB images $x_p$ with corresponding camera poses $p$. A pre-trained or jointly trained decoder network $D_\phi$ that maps latent images to RGB space.
+*   **Outputs:** Optimized latent scene representation parameters $\alpha$ (e.g., Tri-Plane weights) and $T$ (Tri-Plane structure/weights).
+
+**Data Structures:**
+*   **Latent NeRF ($R_\alpha$):** A neural radiance field that outputs a latent vector (e.g., from a 3D-aware autoencoder) instead of RGB color. The specific latent dimension is not given in the sources [G].
+*   **Decoder ($D_\phi$):** A neural network with trainable parameters $\phi$ that maps the rendered latent image to RGB space [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Render Latent Image:** For a given camera pose $p$ and latent scene representation $(\alpha, T)$, render a latent image $L = R_\alpha(T, p)$ [S1, unofficial].
+2.  **Decode to RGB:** Pass the rendered latent image $L$ through the decoder network to obtain the predicted RGB image: $\hat{x} = D_\phi(L)$ [S1, unofficial].
+3.  **Compute Loss:** Calculate the photometric loss between the decoded RGB image $\hat{x}$ and the ground truth input image $x_p$ [S1, unofficial].
+
+**Formula:**
+The optimization objective is defined as:
+$$ \min_{\alpha, T} L_D(\alpha, T) = \mathbb{E}_{x, p} \| x_p - D(R_\alpha(T, p)) \| $$
+where:
+*   $L_D(\alpha, T)$ is the Decode-Scene loss [S1, unofficial].
+*   $x_p$ is the input RGB image for pose $p$ [S1, unofficial].
+*   $D$ is the decoder network [S1, unofficial].
+*   $R_\alpha(T, p)$ is the rendered latent image from the latent NeRF [S1, unofficial].
+*   The norm $\| \cdot \|$ is typically the $L_1$ or $L_2$ norm, though the source notation $\| \cdot \|$ is generic [S1, unofficial].
+
+**Parameters:**
+*   $\phi$: Trainable parameters of the decoder network $D_\phi$ [S1, unofficial].
+*   $\alpha, T$: Parameters of the latent NeRF (e.g., Tri-Planes) [S1, unofficial].
+
+**Pitfalls:**
+*   **Performance:** This method is generally slower than [Encode-Scene](17508-encode-scene.md) because no latent images can be cached. A gradient step requires differentiation through all the parameters of the decoder for every training step [S1, unofficial].
+*   **Precision:** Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def decode_scene_step(input_rgb, camera_pose, latent_nerf, decoder, alpha, T, phi):
+    """
+    One training step for Decode-Scene.
+    
+    Args:
+        input_rgb: Ground truth RGB image tensor.
+        camera_pose: Camera pose parameters.
+        latent_nerf: The latent NeRF function R_alpha.
+        decoder: The decoder network D_phi.
+        alpha: NeRF parameters.
+        T: Tri-Plane structure/weights.
+        phi: Decoder parameters.
+        
+    Returns:
+        loss: Scalar photometric loss.
+    """
+    # Step 1: Render latent image from the latent NeRF
+    # R_alpha(T, p) renders a latent image given pose p and representation (alpha, T)
+    latent_image = latent_nerf(alpha, T, camera_pose)
+    
+    # Step 2: Decode the latent image to RGB space
+    # D_phi maps the latent image to RGB
+    decoded_rgb = decoder(latent_image, phi)
+    
+    # Step 3: Compute photometric loss in RGB space
+    # Loss between decoded images and target RGB images
+    loss = mean_squared_error(decoded_rgb, input_rgb)
+    
+    return loss
+```
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** Slower than [Encode-Scene](17508-encode-scene.md) because the decoder must be evaluated and differentiated for every training step [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Supervises the pipeline with RGB images directly, ensuring high-fidelity color images in the output space [S1, unofficial].
+*   **Limitations:** Computationally expensive due to the lack of caching and the need to backpropagate through the decoder [S1, unofficial].
+*   **When to use:** When RGB fidelity is prioritized over training speed, or when a high-quality decoder is already available [S1, unofficial].
+*   **When not:** When training speed is critical or when latent space supervision ([Encode-Scene](17508-encode-scene.md)) is sufficient for the application [S1, unofficial].
+
+## Background
+Decode-Scene was introduced in the context of exploring 3D-aware latent spaces for efficiently learning numerous scenes [S1, unofficial]. It is part of a family of methods that train NeRFs in a latent space, contrasting with [Encode-Scene](17508-encode-scene.md) and [Encode-Decode-Scene](17509-encode-decode-scene.md) [S1, unofficial].
+
+## Sources
+[S1] Exploring 3D-aware Latent Spaces for Efficiently Learning Numerous Scenes, https://doi.org/10.48550/arXiv.2403.11678, fetched 2026-10-29 (unofficial)

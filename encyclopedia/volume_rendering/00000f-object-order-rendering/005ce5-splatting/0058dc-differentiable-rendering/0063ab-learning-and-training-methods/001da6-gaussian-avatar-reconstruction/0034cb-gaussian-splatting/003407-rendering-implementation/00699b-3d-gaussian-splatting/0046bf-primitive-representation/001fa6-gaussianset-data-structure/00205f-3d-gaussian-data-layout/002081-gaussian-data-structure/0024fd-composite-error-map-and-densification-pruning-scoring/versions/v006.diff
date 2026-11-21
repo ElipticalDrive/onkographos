@@ -1,0 +1,243 @@
+--- v005.md
++++ v006.md
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures:**
+-*   **Gaussian Primitive $i$:** Contains opacity $o_i$, learnable scale-modulation factor $\gamma_i$, unconstrained modulation parameter $\beta_i$ (where $\gamma_i = 2 \text{sigmoid}(\beta_i)$), positional gradient, base-scale components, and other attributes (position, rotation, scale, color) as defined in [Gaussian Data Structure](2273-gaussian-data-structure.md) [S1, unofficial].
++*   **Gaussian Primitive $i$:** Contains opacity $o_i$, learnable scale-modulation factor $\gamma_i$, unconstrained modulation parameter $\beta_i$ (where $\gamma_i = 2 \text{sigmoid}(\beta_i)$), positional gradient, base-scale components, and other attributes (position, rotation, scale, color) as defined in [Gaussian Data Structure](2273-gaussian-data-structure.md) [G].
+ *   **Active Primitive Set $\mathcal{A}_t$:** Subset of $\mathcal{G}_t$ containing primitives with valid projected footprints in sampled views [S1, unofficial].
+ *   **Composite Error Mask $M_{\text{err}}^j$:** Binary mask per view $j$ indicating pixels with significant reconstruction error [S1, unofficial].
+@@ -51,4 +51,5 @@
+     *   Normalize pruning score over active set $\mathcal{A}_t$:
+         $$s_p^i = \mathcal{N}_{\mathcal{A}_t}[Q](i)$$
++    *   Note: Densification uses a valid-view average ($C_i$) of weighted counts, whereas pruning retains summed, loss-weighted counts ($Q_i$) [S1, unofficial].
+ 
+ 5.  **Pruning:**
+@@ -92,29 +93,115 @@
+ 
+ def min_max_normalize(tensor):
+-    flat = [val for row in tensor for val in row]
++    flat = [v for row in tensor for v in row]
+     min_val, max_val = min(flat), max(flat)
+     if max_val == min_val:
+-        return [[0.0]*len(row) for row in tensor]
++        return [[0.0] * len(row) for row in tensor]
+     return [[(v - min_val) / (max_val - min_val) for v in row] for row in tensor]
+ 
+-def get_contributing_pixels(primitive_idx, view_idx):
+-    # Returns list of (r, c) pixels where primitive contributes during compositing
+-    return rasterizer.get_contributing_pixels(primitive_idx, view_idx)
+-
+-def projected_radius(primitive_idx, view_idx):
+-    return rasterizer.get_projected_radius(primitive_idx, view_idx)
+-
+-def max_base_scale_component(primitive_idx):
+-    return max(gaussians[primitive_idx].base_scale)
+-
+-def clone_and_shift(primitive_idx):
+-    new_g = copy(gaussians[primitive_idx])
+-    new_g.position += 0.01 * new_g.position_gradient
+-    return new_g
+-
+-def split_into_two(primitive_idx):
+-    g1, g2 = copy(gaussians[primitive_idx]), copy(gaussians[primitive_idx])
+-    g1.scale *= 0.5; g2.scale *= 0.5
+-    return g1, g2
++def density_control(gaussians, views, rendered_images, gt_images, freq_masks, tau, tau_p, tau_d, tau_s, rho, lambda_dssim, schedule_weight):
++    # Step 1: Compute Active Primitives
++    active_primitives = []
++    for i in range(len(gaussians)):
++        valid_count = 0
++        for j in views:
++            r_ij = rasterizer_get_projected_radius(i, j) # [G]
++            if r_ij > 0:
++                valid_count += 1
++        if valid_count > 0:
++            active_primitives.append(i)
++            
++    if not active_primitives:
++        return gaussians
++
++    # Step 2: Compute Composite Error Maps
++    composite_error_masks = {}
++    for j in views:
++        H, W = len(rendered_images[j]), len(rendered_images[j][0])
++        raw_err = [[0.0] * W for _ in range(H)]
++        for r in range(H):
++            for c in range(W):
++                raw_err[r][c] = (1/3) * sum(abs(rendered_images[j][r][c][ch] - gt_images[j][r][c][ch]) for ch in range(3))
++        composite_error_masks[j] = min_max_normalize(raw_err)
++
++    # Step 3: Compute Densification Scores
++    densification_scores = {}
++    for i in active_primitives:
++        valid_views = [j for j in views if rasterizer_get_projected_radius(i, j) > 0] # [G]
++        if not valid_views: continue
++        counts = []
++        for j in valid_views:
++            contributing_pixels = rasterizer_get_contributing_pixels(i, j) # [G]
++            n_ij = sum(composite_error_masks[j][r][c] for r, c in contributing_pixels)
++            counts.append(n_ij)
++        C_i = sum(counts) / len(counts)
++        densification_scores[i] = schedule_weight * C_i
++
++    # Step 4: Compute Pruning Scores
++    photo_losses = {}
++    for j in views:
++        H, W = len(rendered_images[j]), len(rendered_images[j][0])
++        raw_err = [[0.0] * W for _ in range(H)]
++        for r in range(H):
++            for c in range(W):
++                raw_err[r][c] = (1/3) * sum(abs(rendered_images[j][r][c][ch] - gt_images[j][r][c][ch]) for ch in range(3))
++        flat_err = [v for row in raw_err for v in row]
++        mean_l1 = sum(flat_err) / len(flat_err)
++        ssim_val = compute_ssim(rendered_images[j], gt_images[j]) # [G]
++        photo_losses[j] = (1 - lambda_dssim) * mean_l1 + lambda_dssim * (1 - ssim_val)
++
++    pruning_scores = {}
++    for i in active_primitives:
++        valid_views = [j for j in views if rasterizer_get_projected_radius(i, j) > 0] # [G]
++        if not valid_views: continue
++        Q_i = 0
++        for j in valid_views:
++            contributing_pixels = rasterizer_get_contributing_pixels(i, j) # [G]
++            n_ij = sum(composite_error_masks[j][r][c] for r, c in contributing_pixels)
++            Q_i += n_ij * photo_losses[j]
++        pruning_scores[i] = Q_i
++
++    # Normalize pruning scores
++    if pruning_scores:
++        min_s, max_s = min(pruning_scores.values()), max(pruning_scores.values())
++        if max_s == min_s:
++            normalized_scores = {i: 0.0 for i in pruning_scores}
++        else:
++            normalized_scores = {i: (pruning_scores[i] - min_s) / (max_s - min_s) for i in pruning_scores}
++    else:
++        normalized_scores = {}
++
++    # Step 5: Pruning
++    mandatory_removals = set(i for i in active_primitives if gaussians[i].opacity < 0.1 or gaussians[i].gamma < 0.01)
++    candidates = [i for i in active_primitives if i not in mandatory_removals and normalized_scores.get(i, 0) > tau_p]
++    b_t = math.floor(rho * len(candidates))
++    sampled_candidates = weighted_sample_without_replacement(candidates, [normalized_scores[i] for i in candidates], b_t)
++    removal_set = mandatory_removals.union(sampled_candidates)
++
++    # Step 6: Densification
++    new_gaussians = []
++    for i in active_primitives:
++        if i in removal_set:
++            continue
++        if densification_scores.get(i, 0) > tau_d:
++            if gaussians[i].max_base_scale < tau_s:
++                new_g = copy(gaussians[i])
++                new_g.position += gaussians[i].position_gradient # [G]
++                new_g.beta = gaussians[i].beta
++                new_g.gamma = 2 * sigmoid(new_g.beta)
++                new_gaussians.append(new_g)
++            else:
++                g1, g2 = split_into_two(gaussians[i]) # [G]
++                g1.beta = gaussians[i].beta; g1.gamma = 2 * sigmoid(g1.beta)
++                g2.beta = gaussians[i].beta; g2.gamma = 2 * sigmoid(g2.beta)
++                new_gaussians.extend([g1, g2])
++        else:
++            new_gaussians.append(gaussians[i])
++            
++    # Append primitives outside active set unchanged
++    for i in range(len(gaussians)):
++        if i not in active_primitives:
++            new_gaussians.append(gaussians[i])
++            
++    return new_gaussians
+ 
+ def weighted_sample_without_replacement(items, weights, k):
+@@ -132,64 +219,8 @@
+     return selected
+ 
+-def density_control(gaussians, views, rendered_images, gt_images, freq_masks, tau, tau_p, tau_d, tau_s, rho, lambda_dssim, schedule_weight):
+-    # Step 1: Compute Active Primitives
+-    active_primitives = [i for i in range(len(gaussians)) if sum(1 for j in views if projected_radius(i, j) > 0) > 0]
+-    if not active_primitives: return gaussians
+-
+-    # Step 2: Compute Composite Error Maps
+-    composite_error_masks = {j: min_max_normalize(
+-        [[(1/3)*sum(abs(rendered_images[j][r][c][ch] - gt_images[j][r][c][ch]) for ch in range(3)) for c in range(W)] for r in range(H)]
+-    ) for j in views}
+-
+-    # Step 3: Compute Densification Scores
+-    densification_scores = {}
+-    for i in active_primitives:
+-        valid_views = [j for j in views if projected_radius(i, j) > 0]
+-        if not valid_views: continue
+-        counts = [sum(composite_error_masks[j][r][c] for r, c in get_contributing_pixels(i, j)) for j in valid_views]
+-        densification_scores[i] = schedule_weight * (sum(counts) / len(counts))
+-
+-    # Step 4: Compute Pruning Scores
+-    photo_losses = {}
+-    for j in views:
+-        raw_err = [[(1/3)*sum(abs(rendered_images[j][r][c][ch] - gt_images[j][r][c][ch]) for ch in range(3)) for c in range(W)] for r in range(H)]
+-        flat_err = [v for row in raw_err for v in row]
+-        mean_l1 = sum(flat_err) / len(flat_err)
+-        ssim_val = ssim(rendered_images[j], gt_images[j]) # Standard Structural Similarity Index
+-        photo_losses[j] = (1 - lambda_dssim) * mean_l1 + lambda_dssim * (1 - ssim_val)
+-
+-    pruning_scores = {}
+-    for i in active_primitives:
+-        valid_views = [j for j in views if projected_radius(i, j) > 0]
+-        if not valid_views: continue
+-        pruning_scores[i] = sum(sum(composite_error_masks[j][r][c] for r, c in get_contributing_pixels(i, j)) * photo_losses[j] for j in valid_views)
+-
+-    min_s, max_s = min(pruning_scores.values()), max(pruning_scores.values())
+-    normalized_scores = {i: 0 if max_s == min_s else (pruning_scores[i] - min_s) / (max_s - min_s) for i in pruning_scores}
+-
+-    # Step 5: Pruning
+-    mandatory_removals = [i for i in active_primitives if gaussians[i].opacity < 0.1 or gaussians[i].gamma < 0.01]
+-    candidates = [i for i in active_primitives if i not in mandatory_removals and normalized_scores.get(i, 0) > tau_p]
+-    sampled_candidates = weighted_sample_without_replacement(candidates, [normalized_scores[i] for i in candidates], math.floor(rho * len(candidates)))
+-    removal_set = set(mandatory_removals + sampled_candidates)
+-
+-    # Step 6: Densification
+-    new_gaussians = []
+-    for i in active_primitives:
+-        if i in removal_set: continue
+-        if densification_scores.get(i, 0) > tau_d:
+-            if max_base_scale_component(i) < tau_s:
+-                new_g = clone_and_shift(i)
+-                new_g.beta = gaussians[i].beta
+-                new_g.gamma = 2 * sigmoid(new_g.beta)
+-                new_gaussians.append(new_g)
+-            else:
+-                g1, g2 = split_into_two(i)
+-                g1.beta = gaussians[i].beta; g1.gamma = 2 * sigmoid(g1.beta)
+-                g2.beta = gaussians[i].beta; g2.gamma = 2 * sigmoid(g2.beta)
+-                new_gaussians.extend([g1, g2])
+-        else:
+-            new_gaussians.append(gaussians[i])
+-    return new_gaussians
++def split_into_two(g): # [G]
++    g1, g2 = copy(g), copy(g)
++    g1.scale *= 0.5; g2.scale *= 0.5
++    return g1, g2
+ ```
+ 
+@@ -203,14 +234,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of sampled views $K$, the number of primitives $N$, and the image resolution. Computing error maps and masks is $O(K \cdot H \cdot W)$ where $H, W$ are image dimensions. Computing scores is $O(N \cdot K)$. Pruning and densification are $O(N)$.
+-*   **Memory Complexity:** Requires storing error maps and masks for $K$ views, adding $O(K \cdot H \cdot W)$ memory overhead. No Hessian matrices are stored, unlike some pruning methods.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:** Improves fidelity compared to vanilla 3DGS and reduces redundancy [S1, unofficial].
+-*   **Strengths:** Reduces redundant primitives, improves fidelity, avoids Hessian storage overhead.
+-*   **Limitations:** Requires sampling views and computing error maps, adding computational overhead during density control steps.
+-*   **When to Use:** When training 3D Gaussian Splatting models and aiming to reduce redundancy and improve reconstruction fidelity.
+-*   **When Not to Use:** When computational resources are extremely limited and the overhead of error map computation is prohibitive, or when real-time inference speed is the primary concern and training-time optimization is less critical.
++*   **Strengths:** Reduces redundant primitives, improves fidelity, avoids Hessian storage overhead [S1, unofficial].
++*   **Limitations:** Requires sampling views and computing error maps, adding computational overhead during density control steps [S1, unofficial].
++*   **When to Use:** When training 3D Gaussian Splatting models and aiming to reduce redundancy and improve reconstruction fidelity [S1, unofficial].
++*   **When Not to Use:** When computational resources are extremely limited and the overhead of error map computation is prohibitive, or when real-time inference speed is the primary concern and training-time optimization is less critical [S1, unofficial].
+ 
+ ## Background
+-Originated in EffGS: Efficient and High-Fidelity Gaussian Splatting [S1, unofficial]. It builds on [Gaussian Data Structure](2273-gaussian-data-structure.md) and addresses limitations in vanilla 3DGS density control by incorporating frequency-aware masks and photometric loss weighting.
++Originated in EffGS: Efficient and High-Fidelity Gaussian Splatting [S1, unofficial]. It addresses limitations in vanilla 3DGS density control by incorporating frequency-aware masks and photometric loss weighting to reduce redundancy and improve fidelity [S1, unofficial].
+ 
+ ## Sources

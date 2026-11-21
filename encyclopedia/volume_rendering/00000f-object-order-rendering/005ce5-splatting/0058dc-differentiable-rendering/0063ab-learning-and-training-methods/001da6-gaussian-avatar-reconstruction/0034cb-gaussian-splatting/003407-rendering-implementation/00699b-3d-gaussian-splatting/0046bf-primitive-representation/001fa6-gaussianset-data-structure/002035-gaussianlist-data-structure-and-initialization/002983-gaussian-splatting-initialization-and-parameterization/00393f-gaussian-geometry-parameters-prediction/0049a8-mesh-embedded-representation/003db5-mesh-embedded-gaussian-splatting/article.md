@@ -1,0 +1,178 @@
+# Mesh-Embedded Gaussian Splatting
+
+Also called: Gaussian Mesh Splatting, Gaussian-Mesh association
+
+## Overview
+Mesh-Embedded Gaussian Splatting is a hybrid 3D representation that parameterizes 3D Gaussians relative to an explicit canonical triangle mesh $\mathcal{M}$ to disentangle motion from appearance [S2, unofficial]. It solves the problem of coherent, large-scale deformation in Gaussian Splatting by tying Gaussian position, rotation, and scale to mesh geometry via barycentric embeddings, avoiding the artifacts and rigidity of implicit MLP-based skinning fields [S2, unofficial]. Unlike sibling methods that may rely on implicit deformation fields or separate optimization pipelines, this method explicitly controls Gaussian pose through mesh warping, enabling compatibility with skeletal animation, blend shapes, and direct mesh editing [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A canonical triangle mesh $\mathcal{M}$ with vertices $V$, per-vertex normals $n$, and faces $F$; monocular video frames of the subject in various poses; initial Gaussian parameters.
+*   **Output:** A set of 3D Gaussians defined by embedding tuples $E_i$, optimized Gaussian attributes (opacity, color, canonical rotation/scale), and a renderer capable of real-time synthesis [S2, unofficial].
+
+**Data Structures:**
+Each Gaussian $i$ is defined by an embedding tuple $E_i = \{k, u, v, d\}$ [S2, unofficial]:
+*   $k$: Integer index of the triangle $k \in F$ in the canonical mesh.
+*   $(u, v)$: Barycentric coordinates within triangle $k$, constrained such that $u \ge 0, v \ge 0, u+v \le 1$.
+*   $d$: Scalar normal displacement along the interpolated surface normal.
+
+Additionally, each Gaussian stores pose-invariant attributes: canonical rotation $\bar{q}$, canonical scale $\bar{s}$, opacity $o$, and color $c$ [S2, unofficial].
+
+**Canonical Position and Normal:**
+The canonical mean $\mu_{cano}$ and normal $n_{cano}$ are computed via Phong interpolation on the canonical mesh [S2, unofficial]:
+$$
+\mu_{cano} = \mathcal{V}(k, u, v) = u V_1 + v V_2 + (1 - u - v) V_3
+$$
+$$
+n_{cano} = \mathcal{N}(k, u, v) = u n_1 + v n_2 + (1 - u - v) n_3
+$$
+where $V_j$ and $n_j$ are the vertices and per-vertex normals of triangle $k$ [S2, unofficial].
+
+**Posed State Computation:**
+When the mesh is deformed by an animation function $\text{Deform}(\cdot)$ (e.g., skeletal animation), the posed position $\mu_{pose}$ is derived by applying the deformation to the displaced canonical position [S2, unofficial]:
+$$
+\mu_{pose} = \text{Deform}(\mu_{cano} + d \cdot n_{cano})
+$$
+The posed rotation $q_{pose}$ and scale $s_{pose}$ are derived from mesh attributes to maintain coherence [S2, unofficial]:
+*   **Rotation:** Per-vertex quaternions $q_1, q_2, q_3$ are interpolated using barycentric weights to get $\delta q$, which is then combined with the canonical rotation $\bar{q}$:
+    $$
+    q_{pose} = \delta q * \bar{q}, \quad \delta q = u q_1 + v q_2 + (1 - u - v) q_3
+    $$
+*   **Scale:** Scale is proportional to the area change of the embedded triangle relative to the canonical state:
+    $$
+    s_{pose} = \left( \frac{A_{pose}}{A_{cano}} \right) \bar{s}
+    $$
+    where $A_{pose}$ and $A_{cano}$ are the areas of the triangle in the posed and canonical states, respectively [S2, unofficial].
+
+**Optimization and Adaptation:**
+During training, Gaussian parameters and embedding parameters are updated simultaneously [S2, unofficial]. The method adapts the clone and split scheme of 3D Gaussians to suit the mesh-embedded representation [S2, unofficial].
+
+**Cross-Triangle Handling:**
+Barycentric coordinates are differentiable only within a single triangle. If optimization moves an embedding point across a boundary ($u < 0$, $v < 0$, or $u+v > 1$), the embedding must be re-expressed in the neighboring triangle to maintain differentiability [S2, unofficial]. This is achieved via "lifted optimization," where embedding points "walk" on the triangle mesh [S2, unofficial]. Failure to handle this causes Gaussians to stick to boundaries and pile up [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_posed_gaussian(gaussian, mesh, pose_transform):
+    """
+    Computes the posed position, rotation, and scale for a single Gaussian.
+    
+    Args:
+        gaussian: Object containing embedding E={k, u, v, d} and invariant attributes {q_bar, s_bar}.
+        mesh: Object containing vertices V, normals n, faces F, and vertex quaternions q_verts.
+        pose_transform: Function that applies skeletal/blend shape deformation to mesh vertices.
+        
+    Returns:
+        mu_pose: Posed mean position.
+        q_pose: Posed rotation quaternion.
+        s_pose: Posed scale vector.
+    """
+    # 1. Retrieve canonical triangle data
+    k = gaussian.embedding.k
+    u = gaussian.embedding.u
+    v = gaussian.embedding.v
+    d = gaussian.embedding.d
+    
+    # Get triangle vertices and normals
+    V1, V2, V3 = mesh.faces[k].vertices
+    n1, n2, n3 = mesh.faces[k].vertex_normals
+    
+    # 2. Compute canonical position and normal (Phong interpolation)
+    mu_cano = u * V1 + v * V2 + (1 - u - v) * V3
+    n_cano = u * n1 + v * n2 + (1 - u - v) * n3
+    
+    # 3. Compute posed position
+    # Apply deformation to the displaced canonical position
+    displaced_pos = mu_cano + d * n_cano
+    mu_pose = pose_transform(displaced_pos)
+    
+    # 4. Compute posed rotation
+    # Interpolate per-vertex quaternions
+    q1, q2, q3 = mesh.faces[k].vertex_quaternions
+    delta_q = u * q1 + v * q2 + (1 - u - v) * q3
+    # Combine with canonical rotation
+    q_pose = delta_q * gaussian.invariant.q_bar
+    
+    # 5. Compute posed scale
+    # Calculate area of triangle in posed state
+    # Note: pose_transform must return deformed vertices to compute area
+    V1_pose, V2_pose, V3_pose = pose_transform(V1), pose_transform(V2), pose_transform(V3)
+    A_pose = triangle_area(V1_pose, V2_pose, V3_pose)
+    A_cano = triangle_area(V1, V2, V3)
+    
+    s_pose = (A_pose / A_cano) * gaussian.invariant.s_bar
+    
+    return mu_pose, q_pose, s_pose
+
+def handle_cross_triangle_update(embedding, mesh, gradient_u, gradient_v):
+    """
+    Handles the case where barycentric update moves the point outside the current triangle.
+    Re-expresses the embedding in the neighboring triangle.
+    
+    Args:
+        embedding: Current E={k, u, v, d}.
+        mesh: Mesh structure with adjacency info.
+        gradient_u, gradient_v: Gradients of the loss w.r.t u and v.
+        
+    Returns:
+        New embedding tuple.
+    """
+    k = embedding.k
+    u = embedding.u
+    v = embedding.v
+    
+    # Check boundary conditions
+    if u < 0 or v < 0 or u + v > 1:
+        # Find neighboring triangle that contains the projected point or is adjacent
+        # In lifted optimization, this involves walking to the adjacent face
+        neighbor_k = mesh.get_neighbor(k, u, v)
+        
+        # Re-express barycentric coordinates in the new triangle
+        # This requires mapping the point from old barycentric coords to new ones
+        u_new, v_new = mesh.remap_barycentric(k, neighbor_k, u, v)
+        
+        # Update embedding
+        new_embedding = {
+            'k': neighbor_k,
+            'u': u_new,
+            'v': v_new,
+            'd': embedding.d
+        }
+        return new_embedding
+    else:
+        return embedding
+```
+
+## Subtopics
+
+### [GaussianMesh](11812-gaussianmesh.md)
+Defines 3D Gaussians over an explicit triangle mesh for large-scale, interactive deformations driven by mesh editing. It sets itself apart by utilizing a reconstructed explicit mesh for initialization and employing specific face-split and normal-guidance strategies to handle large deformations without relying on implicit MLP-based skinning.
+
+### [Mesh-Embedded Gaussian Initialization and Deformation](9559-mesh-embedded-gaussian-initialization-and-deformation.md)
+Focuses on the initialization and deformation mechanics of mesh-embedded Gaussians.
+
+### [GaMeS (Gaussian Mesh Splatting)](12542-games-gaussian-mesh-splatting.md)
+Introduces a hybrid "Gaussian Mesh Splatting" representation where each Gaussian is parameterized by the vertices of a mesh face, inducing coherent changes via classical mesh operations.
+
+### [SuGaR / Gaussian Frosting](13542-sugar-gaussian-frosting.md)
+A method for extracting Gaussian splats from meshes, focusing on the conversion process.
+
+### [Mesh to DRK Conversion](13700-mesh-to-drk-conversion.md)
+Details the conversion of mesh data into a differentiable radiance kernel format.
+
+### [Gaussian Extraction Algorithm](15577-gaussian-extraction-algorithm.md)
+Algorithms for extracting Gaussian primitives from mesh-based representations.
+
+## Operating characteristics
+*   **Performance:** Achieves over 300 FPS on an NVIDIA RTX 3090 GPU and 30 FPS on an iPhone 13 [S2, unofficial].
+*   **Strengths:** Explicit motion control allows compatibility with various animation techniques (skeletal animation, blend shapes, mesh editing) [S2, unofficial]. The mesh represents low-frequency motion while Gaussians capture high-frequency geometry and appearance [S2, unofficial].
+*   **Limitations:** Relies on accurate semantic labels or mesh proxies for initialization [S1]. Cross-triangle updates require careful handling to maintain differentiability [S2, unofficial].
+*   **Usage:** Ported to Unity for real-time rendering [S2, unofficial].
+
+## Background
+Originating from the SplattingAvatar paper [S2, unofficial], this method was developed to create realistic, real-time human avatars from monocular videos. It builds on the principles of 3D Gaussian Splatting [23] and Phong surfaces [38], addressing the limitations of MLP-based linear blend skinning (LBS) fields for motion [S2, unofficial]. The approach disentangles motion and appearance by embedding Gaussians on a canonical triangle mesh, allowing for explicit control via mesh deformation [S2, unofficial].
+
+## Sources
+[S1] A Survey on 3D Gaussian Splatting, https://doi.org/10.1145/3807511, fetched 2026-10-27
+[S2] SplattingAvatar, https://arxiv.org/abs/2403.05087, fetched 2026-10-27 (unofficial)

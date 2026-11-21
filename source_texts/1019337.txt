@@ -1,0 +1,146 @@
+# gs-merger
+
+基于人工对应地标和 Sim(3) 的多模型 3D Gaussian Splatting 拼接工具。
+
+一个 shell 命令依次执行：读取高斯 PLY → 导出密集 RGB 中心点云 → Open3D
+人工选择对应点 → 估计 Sim(3) → 查看对齐 → 变换完整高斯属性并合并 → 下一轮。
+
+本项目可以独立安装和部署，所有运行代码都位于 `src/gs_merger/`。
+只依赖 NumPy、plyfile 和 Open3D，不需要上一级工程、配准网络或训练权重。
+输入和输出均为标准 Graphdeco 3DGS PLY；保留所有高斯及完整属性。
+最终直接报告最后一轮 `merged.ply` 的实际路径，不创建软链接。
+
+安装、平台要求、离线打包和 GitHub 发布见 [部署说明](INSTALL.md)。
+已有命令和会话的迁移方法见 [迁移说明](docs/MIGRATION.md)。
+
+关于 10 对点为什么能约束完整模型、Sim(3) 的 SVD 求解、高斯与球谐属性怎样变换，
+见 [原理详解：从控制点到完整 3DGS 拼接](docs/SIM3_AND_GAUSSIANS.md)。
+
+## 开源使用、作者与联系
+
+本项目采用 [MIT License](LICENSE)。你可以按许可证直接使用、修改和分发本项目，
+包括商业用途；应保留许可证要求的版权和许可声明。使用前无需联系作者，
+也无需逐项申请书面授权。第三方运行库适用其各自的许可证，见
+[依赖与算法参考](THIRD_PARTY_NOTICES.md)。
+
+作者：[**thsdgsq**](https://github.com/thsdgsq)。
+联系邮箱：[1609303328@qq.com](mailto:1609303328@qq.com)。
+欢迎通过 [GitHub Issues](https://github.com/thsdgsq/gs-merger/issues) 反馈问题、分享应用场景或讨论合作。
+提问时请附操作系统、Python/Open3D 版本、执行命令、完整报错和简要复现步骤。
+
+如果这个工具帮助了你的研究或工程工作，欢迎在论文或项目说明中引用它。
+引用元数据见 [CITATION.cff](CITATION.cff)；发布到 GitHub 后可通过仓库侧栏的
+“Cite this repository”查看引用格式。引用和联系是自愿的，不额外限制 MIT 许可授予的使用权。
+
+## 启动
+
+推荐在 Linux 图形桌面上使用 Python 3.11，在本项目根目录安装：
+
+```bash
+conda create -n gs-merger python=3.11 pip -y
+conda activate gs-merger
+python -m pip install .
+```
+
+运行依赖也直接列在 [requirements.txt](requirements.txt) 中；
+`pip install .` 会读取相同的依赖并安装命令入口。
+
+在项目根目录直接指定模型顺序和每轮对应点数：
+
+```bash
+bash stitch.sh \
+  --models data/model1.ply data/model2.ply \
+           data/model3.ply data/model4.ply \
+  --pairs 10 \
+  --output-dir results/site
+```
+
+安装后也可以使用 `gs-merger`，参数与 Shell 入口相同：
+
+```bash
+gs-merger --help
+python -m gs_merger --help
+```
+
+将示例模型路径替换为真实路径。可将 `--models` 后面增加到任意数量，至少两个。
+带空格的文件路径必须加引号。命令行中的相对路径以当前工作目录为基准。
+可从任意目录运行脚本，不要求先 `cd` 到本目录。
+
+也可以先复制并编辑配置：
+
+```bash
+cp configs/models.example.json configs/local.json
+# 编辑 configs/local.json 中的模型路径、顺序、输出目录和参数后执行：
+bash stitch.sh --config configs/local.json
+```
+
+配置文件内的相对路径**以配置文件所在目录为基准**。
+`models` 数组即拼接顺序；`pairs_per_step` 可以是整数（每轮相同），
+也可以是长度等于模型数减一的数组，例如四个模型使用 `[6, 8, 6]`。
+`--pairs 6` 可以覆盖配置中的全部轮次点数。
+
+可先检查路径、字段、配置和依赖，检查模式不打开窗口、不写模型：
+
+```bash
+bash stitch.sh --config configs/local.json --check
+```
+
+`--check` 不验证桌面/OpenGL，也不执行完整模型的所有数值检查；实际写入前会检查
+高斯属性的有限性和四元数。需要指定解释器时：
+
+```bash
+bash stitch.sh \
+  --python /absolute/path/to/venv/bin/python \
+  --config configs/local.json
+```
+
+## 每轮如何操作
+
+四个模型的顺序为：
+
+```text
+第 1 轮：target=model1，source=model2 → steps/001/merged.ply（merge1）
+第 2 轮：target=merge1，source=model3 → steps/002/merged.ply（merge2）
+第 3 轮：target=merge2，source=model4 → steps/003/merged.ply（最终结果）
+```
+
+**始终固定第一个模型的坐标系。** 每轮只变换新加入的 source，已有 target 保持不动。
+相邻模型不必全部互相重叠，但每个新模型必须与当时的累计模型有足够的可辨认共同地物。
+
+1. 自动导出本轮 target 和 source 的密集彩色中心点云。
+2. **同时打开两个窗口**：左侧 target（已有模型），右侧 source（新模型）。
+   可以分别旋转、平移和缩放，来回对照；推荐左侧选 A 后立即在右侧选 A，再选 B、C……。
+3. 两侧分别选够指定数量。关闭任一选点窗口，在终端输入 `y` 确认本侧（仅在内存中），
+   或输入 `r` 重选。**两侧窗口都关闭且有一侧点数不足时，只输入一次 `r`，就同时
+   重开 target 和 source，两侧从零选取。** 如果另一侧窗口仍开着，`r` 只重开当前侧。
+4. 如果一侧已确认、另一侧仍在窗口中选取，已确认侧会以只读对照窗口重新打开。
+   对照窗口标题含 `comparison only`，不修改已确认点；两侧已关闭并选满时，
+   依次确认即可，不额外重开第一个模型。
+5. **只有两侧都选满要求数量并确认后，才一次性保存完整点对 JSON**，然后求 Sim(3)、
+   打印每对点的残差和内点标记，并关闭只读对照窗口。
+6. 自动显示对齐预览：橙色是新模型，蓝色是累计模型。关闭窗口后回到终端。
+7. 内点达标时输入 `a` 写入本轮完整高斯合并结果；未达标时可输入 `f` 尝试合并。
+   合并完成后自动进入下一轮。
+
+Open3D 选点窗口操作：
+
+- `Shift + 左键`：加入一个点；顺序就是对应点顺序。
+- `Shift + 右键`：撤销最后一个点。
+- 窗口顶部 **Point size 滑块**或键盘 `+` / `-`：实时调整 RGB 点云大小（1～20 像素）。
+- **Marker size 滑块**：独立调整彩色选点标记大小（1～30 像素），不影响点云大小。
+- 已选点显示高亮颜色和深色底编号；两窗的第 N 个点颜色相同，不同点对使用不同颜色。
+- 顶部 `next #N` 提示下一个编号，便于发现某次点击未选中导致两窗点数不同。
+- `Undo`：撤销最后一个点；`Reset`：清空这一侧当前选点。
+- `Finish`：选满后返回终端；不足指定数量时该按钮禁用。
+- `Q`、`Esc` 或窗口关闭按钮：返回终端，**不会自动确认或合并**。
+- 鼠标旋转、缩放和平移视角；按住 Shift 点击用于选点或撤销。
+
+**例如 `--pairs 10` 时，任一侧不足 10 点就关闭：本侧点全部丢弃，不保存坐标，
+如果另一侧窗口仍开着，输入 `r` 重新打开这一侧，从零选取。
+如果两侧都关了，输入一次 `r` 同时重新打开两侧。** 另一侧开着时可以继续作为对照。
+如果此时退出整个流程，未凑齐的整组都不保存；下次运行重新选择两侧。
+重复坐标不加入选择，选满后不能继续添加，需先 Undo 或 Reset。
+选点窗口使用独立的 OpenGL 事件循环，因此在终端确认一侧时，另一侧窗口仍可操作。
+本界面基于 Open3D GUI 的
+[深度拾取接口](https://github.com/isl-org/Open3D/blob/main/examples/python/visualization/mouse_and_point_coord.py)，
+拾取后吸附到点云中的最近中心，保存该中心的原始 XYZ 与点击顺序，不直接保存深度反投影坐标。

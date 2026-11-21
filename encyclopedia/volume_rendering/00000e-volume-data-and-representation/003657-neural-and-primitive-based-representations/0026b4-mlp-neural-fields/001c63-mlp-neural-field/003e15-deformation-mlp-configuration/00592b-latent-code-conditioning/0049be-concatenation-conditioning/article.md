@@ -1,0 +1,95 @@
+# Concatenation Conditioning
+Also called: Latent Code Concatenation
+## Overview
+Concatenation Conditioning is a method for injecting instance-specific information into a Neural Field decoder by appending a latent code vector to the input feature tensor. It solves the problem of enabling a single shared decoder network to represent multiple distinct instances (e.g., different volumes or shapes) without retraining or changing weights. It is distinguished from [HyperNetwork Conditioning](12585-hypernetwork-conditioning.md) by modifying the input space rather than the network parameters, and from [Autoencoder/Autodecoder Conditioning](12588-autoencoder-autodecoder-conditioning.md) by treating the latent code as an explicit input feature rather than an implicit initialization or bias term.
+## How it works
+### Inputs and Outputs
+- **Input:** A query point $x \in \mathbb{R}^3$ (spatial coordinates), an optional explicit descriptor $d_x$ (e.g., Transfer Function parameters), and an instance-specific latent code $z_i \in \mathbb{R}^D$.
+- **Output:** The predicted value $y_i$ (e.g., density, color, or illumination) for the instance $i$ at point $x$.
+
+### Data Structures
+- **Latent Code ($z_i$):** A fixed-size vector. Typical dimensions are $D=512$ for volumetric applications [S1] and $D=256$ for shape space learning [S1].
+- **Explicit Descriptor ($d_x$):** A vector containing instance-specific properties not captured by spatial coordinates, such as Transfer Function (TF) parameters [S1].
+
+### Steps
+1. **Encode (Optional):** If the latent code is derived from data, process the input volume with an encoder (e.g., a convolutional feature extractor) to extract a low-dimensional latent vector $z_i$ [S1].
+2. **Concatenate:** Form the conditioned input vector $c_i$ by concatenating the latent code $z_i$ with the spatial coordinates $x$ and any explicit descriptors $d_x$:
+   $$ c_i = [x; d_x; z_i] $$
+   [S1][S2, unofficial]
+3. **Decode:** Feed the concatenated vector $c_i$ into the first layer of the shared Neural Field decoder $f_\theta$:
+   $$ y_i = f_\theta(c_i) $$
+   [S1][S2, unofficial]
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def concatenate_conditioning_decode(x, z_i, d_x=None, decoder):
+    """
+    Decode a query point using concatenation conditioning.
+    
+    Args:
+        x: Spatial coordinates, shape (3,)
+        z_i: Instance latent code, shape (D,)
+        d_x: Optional explicit descriptor (e.g., TF params), shape (K,)
+        decoder: The shared MLP neural field function
+        
+    Returns:
+        y_i: Predicted value for instance i
+    """
+    # Step 1: Prepare input components
+    # x is shape (3,)
+    # z_i is shape (D,)
+    
+    # Step 2: Concatenate
+    # If explicit descriptor is provided, concatenate it as well
+    if d_x is not None:
+        # Concatenate x, d_x, and z_i along the feature dimension
+        # Resulting shape: (3 + K + D,)
+        input_vector = concatenate([x, d_x, z_i])
+    else:
+        # Concatenate x and z_i
+        # Resulting shape: (3 + D,)
+        input_vector = concatenate([x, z_i])
+        
+    # Step 3: Feed into decoder
+    # The decoder processes this combined vector
+    y_i = decoder(input_vector)
+    
+    return y_i
+```
+
+### Parameters
+- **Latent Dimension ($D$):** Hyperparameter. $D=512$ is common for volumes [S1]; $D=256$ for shapes [S1].
+- **Decoder Architecture:** Typically an MLP. The first layer must accept an input dimension of $3 + D$ (or $3 + K + D$ if using explicit descriptors).
+
+### Edge Cases and Pitfalls
+- **Limited Influence:** Only the first layer of the decoder directly incorporates the condition. Remaining layers operate only on internal feature representations, requiring the network to distinguish samples based on the input alone [S2, unofficial].
+- **Inference Efficiency:** When using explicit descriptors like Transfer Functions, the TF extractor and decoder must be re-executed upon TF updates, although the compressed volume representation from the encoder remains constant [S1].
+- **Precision:** Ensure consistent data types when concatenating coordinates (often float32) with latent codes.
+
+## Subtopics
+
+### HyperNetwork Conditioning
+Generates decoder weights from the latent code instead of concatenating it. Choose when instance variations are complex and require distinct network parameters. [HyperNetwork Conditioning](12585-hypernetwork-conditioning.md)
+
+### Autoencoder/Autodecoder Conditioning
+Initializes the decoder's state or biases with the latent code. Choose when the latent code represents a global shape prior rather than an input feature. [Autoencoder/Autodecoder Conditioning](12588-autoencoder-autodecoder-conditioning.md)
+
+### Global Conditioning
+Uses a separate network to map the latent code to a global bias or scale. Choose when you want to modulate features at multiple layers without changing weights. [Global Conditioning](12589-global-conditioning.md)
+
+## Operating characteristics
+- **Time Complexity:** $O(D)$ for concatenation; decoding complexity is unchanged from the base decoder.
+- **Memory Complexity:** $O(D)$ per instance to store the latent code. No additional memory for network weights.
+- **Strengths:** Simple to implement; allows a single shared decoder to handle multiple instances; efficient inference if the latent code is pre-computed [S1].
+- **Limitations:** The condition only enters at the first layer, which may limit the decoder's ability to model complex instance-specific variations compared to weight conditioning [S2, unofficial].
+- **When to Use:** When instance variations are moderate and can be captured by modifying the input space; when computational resources for multiple decoders are limited.
+- **When Not to Use:** When instances require fundamentally different network behaviors or when the first layer's input dimension becomes prohibitively large.
+
+## Background
+Concatenation Conditioning is a standard technique in conditional generative modeling [S1]. It has been applied to volumetric ambient occlusion prediction, where a latent vector encoding global volume information is concatenated with Transfer Function descriptors to condition a generative decoder [S1]. It is also used in neural field representations for 3D shape learning, where latent codes are concatenated with spatial coordinates to enable multi-shape representation [S2, unofficial].
+
+## Sources
+[S1] Deep Volumetric Ambient Occlusion, https://arxiv.org/abs/2008.08345v2, fetched 2026-10-26
+[S2] Introduction to Neural Fields - inovex GmbH, https://www.inovex.de/de/blog/introduction-to-neural-fields/, fetched 2026-10-29 (unofficial)

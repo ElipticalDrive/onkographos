@@ -1,0 +1,128 @@
+# GRU Volume Fusion
+
+Also called: Fusing Volumes for Global Reconstruction, NeRFusion, Recurrent Fusion Module, Recurrent Neural Fusion
+
+## Overview
+GRU Volume Fusion is a method for incremental 3D reconstruction that fuses sequentially estimated local radiance fields into a single global sparse representation using a Gated Recurrent Unit (GRU) [S1, S2]. It solves the problem of accumulating errors and outliers in sequential reconstruction by adaptively updating a global volume with new local observations, setting it apart from its sibling [Bi-level Fusion](14766-bi-level-fusion.md) which uses explicit weighted averaging followed by optimization rather than recurrent neural updates [S1]. It builds on [Neural Volumes](912-neural-volumes.md) by replacing static optimization with a learned recurrent fusion process [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A sequence of local sparse feature volumes $\{\mathcal{V}_t\}$, where each $\mathcal{V}_t$ represents the local radiance field estimated from the $t$-th frame's input images. The global volume $\mathcal{V}_0^g$ is initialized (typically to zeros or a small random value).
+*   **Output:** The final global sparse feature volume $\mathcal{V}_T^g$ after processing $T$ frames. This volume conditions density and color MLPs for rendering [S1].
+
+**Data Structures:**
+*   **Local Volume $\mathcal{V}_t$:** A sparse 3D tensor containing feature vectors for voxels visible in frame $t$. The sparsity pattern is determined by the camera pose and geometry estimation for that frame.
+*   **Global Volume $\mathcal{V}_t^g$:** A sparse 3D tensor of the same spatial resolution and feature dimension as $\mathcal{V}_t$. It stores the accumulated global features. Voxels not covered by the current local volume $\mathcal{V}_t$ remain unchanged from $\mathcal{V}_{t-1}^g$.
+*   **Gate Volumes ($z_t, r_t$):** Sparse 3D tensors of the same shape as $\mathcal{V}_t^g$, containing values in $[0, 1]$ for the update and reset gates.
+*   **Candidate Volume $\tilde{\mathcal{V}}_t^g$:** Sparse 3D tensor of the same shape as $\mathcal{V}_t^g$, containing candidate feature updates.
+
+**Network Components:**
+Three deep neural networks with sparse 3D convolution layers are used:
+1.  $M_z$: Computes the update gate. Ends with a sigmoid activation.
+2.  $M_r$: Computes the reset gate. Ends with a sigmoid activation.
+3.  $M_t$: Computes the candidate volume. Ends with a tanh activation.
+
+**Numbered Steps:**
+For each frame $t = 1, \dots, T$:
+1.  **Input:** Take the local sparse volume $\mathcal{V}_t$ and the previous global volume $\mathcal{V}_{t-1}^g$.
+2.  **Compute Update Gate:** Concatenate the previous global volume and the local volume along the feature dimension: $[\mathcal{V}_{t-1}^g, \mathcal{V}_t]$. Pass this through $M_z$ to get the update gate $z_t$:
+    $$z_t = M_z([\mathcal{V}_{t-1}^g, \mathcal{V}_t])$$
+3.  **Compute Reset Gate:** Pass the same concatenated input through $M_r$ to get the reset gate $r_t$:
+    $$r_t = M_r([\mathcal{V}_{t-1}^g, \mathcal{V}_t])$$
+4.  **Compute Candidate Volume:** Element-wise multiply the previous global volume by the reset gate: $r_t * \mathcal{V}_{t-1}^g$. Concatenate this result with the local volume: $[r_t * \mathcal{V}_{t-1}^g, \mathcal{V}_t]$. Pass this through $M_t$ to get the candidate volume $\tilde{\mathcal{V}}_t^g$:
+    $$\tilde{\mathcal{V}}_t^g = M_t([r_t * \mathcal{V}_{t-1}^g, \mathcal{V}_t])$$
+5.  **Update Global Volume:** Combine the previous global volume and the candidate volume using the update gate:
+    $$\mathcal{V}_t^g = (1 - z_t) * \mathcal{V}_{t-1}^g + z_t * \tilde{\mathcal{V}}_t^g$$
+6.  **Sparse Application:** Steps 2-5 are applied only to voxels covered by the local volume $\mathcal{V}_t$. All other voxels in the global volume remain unchanged from $\mathcal{V}_{t-1}^g$ [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gru_volume_fusion(local_volumes: List[SparseTensor], 
+                      initial_global: SparseTensor,
+                      M_z: SparseCNN, M_r: SparseCNN, M_t: SparseCNN) -> SparseTensor:
+    """
+    Incrementally fuses local sparse volumes into a global volume using GRU.
+    
+    Args:
+        local_volumes: List of sparse 3D tensors V_t, one per frame.
+        initial_global: Sparse 3D tensor V_0^g, initialized to zeros or small random values.
+        M_z, M_r, M_t: Sparse 3D CNN networks for update, reset, and candidate gates.
+        
+    Returns:
+        Final global sparse volume V_T^g.
+    """
+    global_volume = initial_global
+    
+    for t, local_vol in enumerate(local_volumes):
+        # Identify voxels present in the local volume
+        # Note: Sparse tensors handle this implicitly; operations are only defined on existing entries.
+        # Concatenation must align sparse indices.
+        
+        # 1. Compute Update Gate z_t
+        # Concatenate along feature dimension. Only voxels in local_vol are processed.
+        # Voxels in global_volume but not in local_vol are ignored for this step.
+        z_t = M_z(concat(global_volume, local_vol))
+        
+        # 2. Compute Reset Gate r_t
+        r_t = M_r(concat(global_volume, local_vol))
+        
+        # 3. Compute Candidate Volume V_tilde
+        # Element-wise multiply reset gate with previous global volume
+        reset_global = elementwise_multiply(r_t, global_volume)
+        # Concatenate with local volume
+        candidate_input = concat(reset_global, local_vol)
+        # Apply tanh activation via M_t
+        candidate_vol = M_t(candidate_input)
+        
+        # 4. Update Global Volume
+        # V_t^g = (1 - z_t) * V_{t-1}^g + z_t * V_tilde
+        # Note: For voxels not in local_vol, z_t and candidate_vol are undefined/zero.
+        # The update should only affect voxels in local_vol.
+        # Voxels not in local_vol remain as global_volume.
+        
+        # Create a mask or use sparse operations to update only relevant voxels
+        # In a sparse tensor implementation, we can construct a new global volume
+        # by merging the unchanged parts and the updated parts.
+        
+        # Update voxels present in local_vol
+        updated_global = merge(global_volume, 
+                               elementwise_multiply(elementwise_multiply(1 - z_t, global_volume), 
+                                                    elementwise_multiply(z_t, candidate_vol)),
+                               mask=local_vol.indices)
+        
+        global_volume = updated_global
+        
+    return global_volume
+```
+
+**Parameters:**
+*   The network is generalizable and pre-trained across scenes, allowing it to handle arbitrary scene scales and arbitrary numbers of input images [S2].
+*   Typical training datasets: ScanNet, DTU, Google Scanned Object [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Sparsity Alignment:** The concatenation and element-wise operations must correctly handle the sparse structure. Voxels present in the global volume but not in the local volume must be preserved without modification [S2].
+*   **Initialization:** The initial global volume $\mathcal{V}_0^g$ must be properly initialized (e.g., zeros) to avoid biasing the first update [G].
+*   **Precision:** Using sparse 3D CNNs requires careful handling of memory and computation for large scenes to maintain real-time performance [S2].
+
+## Subtopics
+
+### [Bi-level Fusion](14766-bi-level-fusion.md)
+An online 3D reconstruction method that represents geometry using implicit neural volumes, combining local-level fusion for efficient depth map integration and global-level fusion framed as neural rendering for consistent reconstruction. It solves the problem of accumulating errors and outliers in sequential reconstruction by first fusing latent codes via weighted averaging and then optimizing the global volume against depth measurements. It sets itself apart from its sibling [GRU Volume Fusion](7543-gru-volume-fusion.md) by using explicit weighted averaging of latent codes followed by an optimization step, rather than recurrent neural network updates.
+
+## Operating characteristics
+*   **Time Complexity:** The recurrent fusion runs in real-time at 22 fps [S2].
+*   **Memory Complexity:** Uses sparse 3D representations, which are memory-efficient for large-scale scenes with sparse observations.
+*   **Measured Performance:** Achieves state-of-the-art quality on both large-scale indoor and small-scale object scenes, with substantially faster reconstruction than NeRF and other recent methods [S2]. Outperforms baseline NeRF, NeRFingMVS, and MVSNeRF on ScanNet, DTU, and NeRF Synthetic datasets [S1].
+*   **Strengths:** Real-time incremental reconstruction, handles arbitrary scene scales and numbers of input images, adaptive feature updating [S1, S2].
+*   **Limitations:** Requires pre-training on a diverse dataset for generalization [S1]. Quality can be further boosted by fine-tuning the predicted voxel features per scene [S2].
+*   **When to use:** Large-scale scene reconstruction from image sequences where real-time or near-real-time incremental updates are needed.
+*   **When not to use:** When high-quality single-scene optimization is preferred over incremental reconstruction, or when no pre-trained model is available and per-scene training is not feasible.
+
+## Background
+GRU Volume Fusion, also known as NeRFusion, was introduced in 2022 [S1, S2]. It combines the advantages of NeRF and TSDF-based fusion techniques to achieve efficient large-scale reconstruction and photo-realistic rendering [S2]. The method was trained end-to-end with only rendering losses on a combination of scenes from the ScanNet, DTU, and Google Scanned Object datasets [S2]. It addresses the challenges of reconstructing and rendering large-scale indoor scenes from RGB images, which are crucial for applications in AR/VR, e-commerce, and robotics [S2].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] NeRFusion: Fusing Radiance Fields for Large-Scale Scene Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00537, fetched 2026-10-26

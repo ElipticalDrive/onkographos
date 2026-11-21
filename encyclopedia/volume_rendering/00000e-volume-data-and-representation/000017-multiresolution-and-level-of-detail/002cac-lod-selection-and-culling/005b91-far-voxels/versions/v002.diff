@@ -1,0 +1,361 @@
+--- v001.md
++++ v002.md
+@@ -3,48 +3,76 @@
+ 
+ ## Overview
+-Far Voxels is a hierarchical level-of-detail (HLOD) technique for visualizing massive 3D models, particularly CAD data with hundreds of millions of triangles, by replacing distant geometry with coarse voxel representations [S1]. It solves the performance bottleneck of rendering large-scale scenes by leveraging culling, occlusion, and out-of-core storage to maintain interactive frame rates [S1]. Unlike sibling methods that often rely on spatial partitioning of the volume domain or frequency-domain transforms, Far Voxels constructs a hierarchy based on surface-area heuristics and generates view-dependent shader models during a preprocessing phase to approximate surface appearance from a distance [S1].
++Far Voxels is a hierarchical level-of-detail (HLOD) technique for massive model visualization that replaces detailed geometry with coarse voxel representations for distant viewing [S1]. It solves the performance bottleneck of rendering hundreds of millions of triangles by culling, occluding, and simplifying sub-models into out-of-core manageable voxel blocks [S1]. Unlike sibling methods that rely on spatial hierarchies like octrees or frequency-domain transforms, Far Voxels constructs its hierarchy via recursive subdivision based on a surface-area heuristic and uses ray-traced sampling to generate direction-aware shader models for each voxel [S1]. Its primary distinction is the use of environmental occlusion and multi-directional material interpolation to maintain visual quality at a distance, though it suffers from aliasing artifacts on thin objects [S1].
+ 
+ ## How it works
+-The method operates in two distinct phases: a preprocessing phase that builds the hierarchy and generates voxel shaders, and a visualization phase that traverses the hierarchy to render the model.
++The method operates in two distinct phases: Preprocessing (offline) and Visualization (runtime).
+ 
+ ### Inputs and Outputs
+-*   **Input:** A massive triangle mesh (e.g., CAD model).
+-*   **Output:** A data file containing an HLOD hierarchy and voxel/triangle data, and a rendered image at interactive rates.
++*   **Input:** A high-resolution triangle mesh (CAD model) containing potentially hundreds of millions of triangles [S1].
++*   **Output:** A data file containing:
++    1.  HLOD hierarchy traversal information [S1].
++    2.  Model representation data: lists of voxels for internal nodes and lists of triangles/triangle-strips for leaf nodes [S1].
+ 
+ ### Data Structures
+-The generated data file is divided into two parts [S1]:
+-1.  **HLOD Hierarchy:** Contains traversal information. Nodes are organized in a tree structure.
+-2.  **Model Representation Data:**
+-    *   **Internal Nodes:** Lists of voxels.
+-    *   **Leaf Nodes:** Lists of triangles or triangle-strips.
+-
+-**Voxel Shader Models:**
+-Each voxel stores one of two shader types, selected based on surface complexity [S1]:
+-*   **Type 1 (Flat Surfaces):** Parameterized by a single normal vector $\mathbf{n}$ and two materials ($M_1, M_2$), one for each primary viewing direction.
+-*   **Type 2 (Complex Surfaces):** Composed of 6 materials ($M_{\pm x}, M_{\pm y}, M_{\pm z}$) and 6 normals ($\mathbf{n}_{\pm x}, \mathbf{n}_{\pm y}, \mathbf{n}_{\pm z}$), each associated with one of the main viewing directions ($\pm x, \pm y, \pm z$).
+-
+-### Preprocessing Phase
++
++**1. HLOD Hierarchy Node**
++Each node in the hierarchy represents a spatial region.
++*   **Children:** Two child nodes created by axis-aligned subdivision [S1].
++*   **Leaf Status:** Boolean flag indicating if the node contains fewer than a predefined threshold of triangles [S1].
++*   **Representation:**
++    *   If Internal: A list of voxels.
++    *   If Leaf: A list of triangles or triangle-strips [S1].
++
++**2. Voxel Structure**
++Voxels are organized on a uniform grid within a node [S1]. Each voxel stores parameters for a shader model. There are two types:
++*   **Type 1 (Flat/Almost Flat Surfaces):**
++    *   `normal`: Single 3D vector [S1].
++    *   `material_1`: Material properties for one viewing direction [S1].
++    *   `material_2`: Material properties for the opposite viewing direction [S1].
++*   **Type 2 (Complex Surfaces):**
++    *   `normals`: Array of 6 3D vectors, corresponding to main viewing directions ($\pm x, \pm y, \pm z$) [S1].
++    *   `materials`: Array of 6 material properties, associated with the same 6 directions [S1].
++
++**3. Raytracing Configuration**
++*   **Volume $V$:** The 3D region being sampled (the node's spatial extent) [S1].
++*   **Surface $S$:** A boundary surface surrounding $V$.
++*   **$d_{min}$:** The minimum distance from the viewer to $V$ required to use the voxel representation. $S$ is positioned at distance $d_{min}$ from $V$ [S1].
++*   **Occluders:** All objects inside $S$ act as occluders for the raytracer, assuming the viewer is always outside $S$ [S1].
++
++### Algorithm Steps
++
++#### Preprocessing Phase
++
+ 1.  **Hierarchy Construction:**
+-    *   Start with all triangles of the model at the root node [S1].
+-    *   Recursively subdivide the node using axis-aligned planes positioned according to the surface-area heuristic [S1].
+-    *   Split existing triangles between the two new child nodes.
+-    *   Terminate subdivision when a node contains fewer than a predefined threshold of triangles; this node becomes a leaf [S1].
++    *   Start with all triangles of the model assigned to the root node [S1].
++    *   Recursively subdivide nodes using axis-aligned planes positioned according to the surface-area heuristic [S1].
++    *   Split existing triangles between the two new child nodes [S1].
++    *   Terminate subdivision when a node contains fewer than a predefined number of triangles; mark this node as a leaf [S1].
+ 
+ 2.  **Voxel Generation (for Internal Nodes):**
+-    *   Define a sampling volume $V$ corresponding to the region of the node [S1].
+-    *   Define a surface $S$ surrounding $V$. The distance $d_{min}$ from $S$ to $V$ is set to the minimum distance from which the voxel representation is intended to be used [S1].
+-    *   Assume the viewer is always outside $S$; objects inside $S$ act as occluders for the sampling rays [S1].
+-    *   Use a CPU-based raytracer to shoot rays from surface $S$ into volume $V$ to sample visible surfaces [S1].
+-    *   **Environmental Occlusion:** Discard voxels corresponding to surfaces never hit by sampling rays, as these surfaces are assumed to be hidden from external views [S1]. This can discard 25–57% of voxels [S1].
+-    *   For hit voxels, analyze the radiance (color) and geometry from all sampled directions [S1].
+-    *   Select the appropriate shader model (Type 1 or Type 2) based on the criterion that the voxel should project to approximately one pixel at distance $d_{min}$ [S1].
+-    *   Store the selected materials and normals for each voxel [S1].
+-
+-### Visualization Phase
+-1.  **Traversal:**
++    *   Define the sampling volume $V$ and surface $S$ with distance $d_{min}$ [S1].
++    *   Launch a CPU-based raytracer from surface $S$ into volume $V$ [S1].
++    *   **Environmental Occlusion:** Discard any voxels in $V$ that are never hit by sampling rays. This assumes the view is always from outside $S$, so hidden surfaces do not need representation [S1]. (Typical discard rate: 25–43%, up to 57% in tested models) [S1].
++    *   For all hit voxels, compute radiance/colors from all intersection directions [S1].
++
++3.  **Shader Model Selection:**
++    *   Analyze the stored colors/radiance for each hit voxel to determine the appropriate shader model type (Type 1 or Type 2) [S1].
++    *   Selection criterion: The model should project to approximately one pixel at the minimum viewing distance [S1].
++    *   **Type 1 Selection:** If the surface is flat/almost flat, assign a single normal and two materials [S1].
++    *   **Type 2 Selection:** If the surface is complex, assign 6 normals and 6 materials corresponding to $\pm x, \pm y, \pm z$ [S1].
++
++4.  **Interpolation Preparation:**
++    *   For voxels using Type 2 models, prepare for intermediate viewing directions by storing normals and materials for the 6 cardinal directions [S1].
++    *   The runtime shader will interpolate these values based on direction cosines for non-cardinal views [S1].
++
++5.  **Storage:**
++    *   Write the HLOD hierarchy and voxel/triangle data to disk [S1].
++
++#### Visualization Phase
++
++1.  **Hierarchy Traversal:**
+     *   Traverse the HLOD hierarchy starting from the root [S1].
+     *   For each node, decide whether to render its voxel representation or traverse its children for higher precision [S1].
+-    *   The decision is based on a user-defined parameter: the maximum projected size of a voxel on the screen [S1].
+-    *   Descend the hierarchy until voxels are smaller than the desired projected size or a leaf node is reached [S1].
++    *   **Decision Criterion:** Continue descending until the projected size of the voxels is smaller than a user-defined threshold or a leaf node is reached [S1].
+ 
+ 2.  **Occlusion Culling:**
+@@ -54,10 +82,7 @@
+ 3.  **Rendering:**
+     *   For each voxel node, bind the appropriate vertex shader (Type 1 or Type 2) [S1].
+-    *   Pass additional parameters (materials, normals) using VertexAttributes [S1].
++    *   Pass additional parameters (normals, materials) via VertexAttributes [S1].
+     *   Draw all voxels in the node with a single call to `glDrawArrays` [S1].
+-    *   For leaf nodes, render the stored triangles/triangle-strips directly [S1].
+-
+-### Interpolation
+-When viewing a Type 2 voxel from an intermediate direction, the material and normal are interpolated from the nearest viewing directions weighted by their respective direction cosines [S1].
++    *   For leaf nodes, render the stored triangles/triangle-strips [S1].
+ 
+ ### Pseudocode
+@@ -65,15 +90,20 @@
+ ```python
+ # Preprocessing Phase
+-def preprocess(model_triangles):
+-    # 1. Build HLOD Hierarchy
+-    root = Node(triangles=model_triangles)
++
++def build_hlod_hierarchy(triangles):
++    """
++    Recursively subdivide triangles into an HLOD tree.
++    """
++    root = Node(triangles=triangles)
+     queue = [root]
+     
+     while queue:
+         node = queue.pop(0)
+-        if node.triangle_count < PREDEFINED_THRESHOLD:
++        
++        # Check leaf condition
++        if len(node.triangles) < PREDEFINED_TRIANGLE_THRESHOLD:
+             node.is_leaf = True
+             continue
+-        
++            
+         # Subdivide using surface-area heuristic
+         plane = compute_surface_area_heuristic_plane(node.bounding_box)
+@@ -82,93 +112,136 @@
+         left_child = Node(triangles=left_triangles, parent=node)
+         right_child = Node(triangles=right_triangles, parent=node)
++        
+         node.children = [left_child, right_child]
++        node.is_leaf = False
+         
+         queue.append(left_child)
+         queue.append(right_child)
+-
+-    # 2. Generate Voxels for Internal Nodes
+-    for node in get_internal_nodes(root):
+-        volume_V = node.bounding_box
+-        # d_min is the minimum distance for which this LOD is valid
+-        d_min = compute_min_viewing_distance(node)
+-        surface_S = expand_bounding_box(volume_V, d_min)
+-        
+-        # Sample visible surfaces using CPU raytracer
+-        # Rays originate from surface_S into volume_V
+-        hit_data = raytrace_surfaces(surface_S, volume_V, model_triangles)
+-        
+-        # Environmental Occlusion: discard voxels with no hits
+-        hit_voxels = filter_by_hits(volume_V, hit_data)
+-        
+-        for voxel in hit_voxels:
+-            # Analyze radiance and geometry from all hit directions
+-            directions = get_hit_directions(voxel, hit_data)
+-            
+-            # Select shader model based on projected size ~ 1 pixel at d_min
+-            if is_flat_surface(voxel, directions):
+-                # Type 1: Single normal, two materials
+-                voxel.normal = compute_average_normal(directions)
+-                voxel.materials = [get_material(directions[0]), get_material(directions[1])]
+-                voxel.shader_type = 1
+-            else:
+-                # Type 2: 6 materials, 6 normals for +/- x, y, z
+-                voxel.materials = [get_material(dir) for dir in MAIN_DIRECTIONS]
+-                voxel.normals = [compute_normal(dir) for dir in MAIN_DIRECTIONS]
+-                voxel.shader_type = 2
+-            
+-            store_voxel_data(voxel)
++        
++    return root
++
++def generate_voxel_representation(node):
++    """
++    Generate voxel data for an internal node using raytracing.
++    """
++    volume_V = node.bounding_box
++    d_min = compute_minimum_viewing_distance(node)
++    surface_S = create_boundary_surface(volume_V, d_min)
++    
++    # Initialize voxel grid for volume_V
++    voxel_grid = create_uniform_grid(volume_V)
++    
++    # Raytracing from surface_S into volume_V
++    # Objects inside S act as occluders
++    rays = generate_rays_from_surface(surface_S, density=HIGH)
++    
++    hit_voxels = set()
++    voxel_radiance_data = {}
++    
++    for ray in rays:
++        intersection = raytrace(ray, scene_objects_inside_S)
++        if intersection:
++            voxel_id = get_voxel_id(intersection.point, voxel_grid)
++            hit_voxels.add(voxel_id)
++            if voxel_id not in voxel_radiance_data:
++                voxel_radiance_data[voxel_id] = []
++            voxel_radiance_data[voxel_id].append(intersection.color)
++            
++    # Environmental Occlusion: discard non-hit voxels
++    for voxel_id in voxel_grid.keys():
++        if voxel_id not in hit_voxels:
++            voxel_grid.pop(voxel_id)
++            
++    # Shader Model Selection
++    for voxel_id, colors in voxel_radiance_data.items():
++        voxel = voxel_grid[voxel_id]
++        
++        # Analyze colors to determine surface complexity
++        if is_flat_surface(colors):
++            # Type 1: Flat/Almost Flat
++            voxel.normal = compute_average_normal(colors)
++            voxel.material_1 = compute_material(colors, direction_1)
++            voxel.material_2 = compute_material(colors, direction_2)
++            voxel.shader_type = 1
++        else:
++            # Type 2: Complex
++            voxel.normals = [compute_normal_for_direction(colors, dir) for dir in CARDINAL_DIRECTIONS]
++            voxel.materials = [compute_material_for_direction(colors, dir) for dir in CARDINAL_DIRECTIONS]
++            voxel.shader_type = 2
++            
++    return voxel_grid
+ 
+ # Visualization Phase
+-def visualize(camera_position, camera_frustum):
+-    render_queue = []
+-    traverse(root, camera_position, camera_frustum, render_queue)
+-    
+-    for node in render_queue:
++
++def render_hlod(node, camera, screen_threshold):
++    """
++    Traverse HLOD and render.
++    """
++    # Occlusion Culling
++    if not is_visible(node.bounding_box, camera):
++        return
++        
++    # LOD Decision
++    projected_size = compute_projected_size(node.bounding_box, camera)
++    
++    if node.is_leaf or projected_size < screen_threshold:
+         if node.is_leaf:
+-            # Render triangles directly
+-            draw_triangles(node.triangles)
++            render_triangles(node.triangles, camera)
+         else:
+-            # Determine shader type based on dominant voxel type in node
+-            # Bind appropriate vertex shader
+-            shader = get_shader(node.voxel_type)
+-            
+-            # Pass parameters via VertexAttributes
+-            set_vertex_attributes(node.voxels)
+-            
+-            # Draw all voxels in a single call
+-            draw_arrays(node.voxels, shader)
+-
+-def traverse(node, camera_pos, frustum, queue):
+-    # 1. Occlusion Culling
+-    if not is_visible(node.bounding_box, camera_pos, frustum):
+-        return
+-    
+-    # 2. LOD Decision
+-    projected_size = compute_projected_size(node.voxel_size, camera_pos)
+-    
+-    if projected_size > MAX_PROJECTED_SIZE and not node.is_leaf:
+-        # Traverse children for higher precision
++            render_voxels(node.voxels, camera)
++    else:
+         for child in node.children:
+-            traverse(child, camera_pos, frustum, queue)
+-    else:
+-        # Use current node's representation
+-        queue.append(node)
++            render_hlod(child, camera, screen_threshold)
++
++def render_voxels(voxels, camera):
++    """
++    Render voxels using appropriate shader.
++    """
++    # Group voxels by shader type for single draw calls
++    type_1_voxels = [v for v in voxels if v.shader_type == 1]
++    type_2_voxels = [v for v in voxels if v.shader_type == 2]
++    
++    if type_1_voxels:
++        bind_shader(ShaderType1)
++        set_vertex_attributes(type_1_voxels)
++        glDrawArrays(GL_POINTS, 0, len(type_1_voxels))
++        
++    if type_2_voxels:
++        bind_shader(ShaderType2)
++        set_vertex_attributes(type_2_voxels)
++        glDrawArrays(GL_POINTS, 0, len(type_2_voxels))
+ ```
+ 
++### Parameters and Typical Values
++*   **Predefined Triangle Threshold:** Not given in the sources.
++*   **$d_{min}$:** Not given in the sources.
++*   **Screen Threshold:** User-defined parameter indicating the projected size of voxels [S1].
++*   **Ray Density:** High density used for sampling [S1].
++*   **Occlusion Discard Rate:** 25% to 43% typically, up to 57% in tested models [S1].
++
+ ### Edge Cases and Pitfalls
+-*   **Aliasing:** Thin objects represented as voxels create representations larger than the original geometry, causing popping artifacts during LOD transitions [S1]. This is a severe alias problem in the original algorithm [S1].
+-*   **Temporal Aliasing:** The distortion caused by voxelizing thin objects is aggravated during model navigation, causing objects to seem to move between consecutive frames [S1].
++*   **Aliasing on Thin Objects:** The original Far Voxels algorithm suffers from severe aliasing when representing small or thin objects. Voxels create representations larger than the original geometry, causing "popping" artifacts during LOD transitions [S1].
++*   **Temporal Aliasing:** The distortion of thin objects is aggravated during navigation, causing them to appear to move between consecutive frames [S1].
++*   **Hidden Surfaces:** If the assumption that the viewer is always outside surface $S$ is violated, hidden surfaces may incorrectly influence the voxel appearance or be incorrectly culled [S1].
++
++## Subtopics
++
++### [Flat blocking multi-resolution volume rendering](6428-flat-blocking-multi-resolution-volume-rendering.md)
++A strategy dividing volume into sub-blocks of constant spatial size but varying resolution. It differs from Far Voxels by maintaining fixed block dimensions where lower resolution blocks contain fewer samples, achieving higher data reduction ratios (3.8:1) compared to hierarchical methods.
++
++### [Hierarchical Chunk LOD System](17123-hierarchical-chunk-lod-system.md)
++A recursive LOD system using octree-like chunk subdivision. It differs from Far Voxels by using a dynamic, recursive tree structure for consistent surface approximation, whereas Far Voxels uses a fixed hierarchy with ray-traced voxel generation.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Preprocessing is expensive due to CPU-based raytracing and hierarchy construction. Visualization is efficient, relying on single draw calls per node and hardware occlusion queries [S1].
+-*   **Memory Complexity:** Depends on the number of voxels and the hierarchy depth. Environmental occlusion reduces voxel count by 25–57% [S1].
+-*   **Performance:** Yields interactive rates for large datasets (hundreds of millions of triangles) by handling levels of detail, culling, and out-of-core storage [S1].
+-*   **Strengths:** Effective for massive models; reduces draw calls; handles occlusion well.
+-*   **Limitations:** Severe aliasing artifacts for thin/small objects; preprocessing time; view-dependent shader complexity [S1].
+-*   **When to use:** Large-scale CAD visualization where interactive frame rates are required and objects are generally not extremely thin.
+-*   **When not to use:** Scenes with many thin structures where visual fidelity during LOD transitions is critical without additional anti-aliasing techniques [S1].
++*   **Time Complexity:** Preprocessing is dominated by CPU-based raytracing and hierarchy construction via surface-area heuristic. Visualization traversal is logarithmic with respect to the hierarchy depth, with rendering cost proportional to the number of visible voxels/triangles [S1].
++*   **Memory Complexity:** Depends on the number of voxels stored for internal nodes and triangles for leaf nodes. Environmental occlusion reduces voxel count by 25–57% [S1].
++*   **Measured Performance:** Yields interactive rates for large datasets (hundreds of millions of triangles) by handling levels of detail, culling, and out-of-core storage [S1].
++*   **Strengths:** Effective for massive CAD models; reduces data size via occlusion; supports out-of-core storage; single draw calls for voxels improve GPU efficiency [S1].
++*   **Limitations:** Severe aliasing artifacts on thin/small objects during LOD transitions; requires CPU-based raytracing for preprocessing; assumes viewer is always outside the sampling volume [S1].
++*   **When to Use:** Visualization of large-scale CAD models where interactive frame rates are required and objects are generally large/complex.
++*   **When Not to Use:** Scenes with many thin, small, or delicate geometric features where aliasing artifacts are unacceptable [S1].
+ 
+ ## Background
+-The Far Voxels algorithm was introduced in the paper "An Anti-aliasing Technique for Voxel-Based Massive Model Visualization Strategies" [S1]. It addresses the challenges of visualizing CAD models in engineering activities, where model sizes can easily reach hundreds of millions of triangles [S1]. The method builds on the concept of using voxels to create coarse representations of sub-models to yield interactive rates [S1].
++The Far Voxels algorithm was introduced in the context of visualizing massive Computer Aided Design (CAD) models, which can contain hundreds of millions of triangles [S1]. It was developed to address the problems of model size and visualization quality in engineering activities [S1]. The method builds on the concept of using voxels to create coarse representations of sub-models, leveraging hierarchical level-of-detail (HLOD) structures [S1]. The specific anti-aliasing improvements and detailed shader model selection described in the sources were presented in a paper by G.N. Wagner, A. Raposo, and M. Gattass [S1].
+ 
+ ## Sources

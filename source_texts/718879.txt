@@ -1,0 +1,283 @@
+Contribute to Metallic-Club/studio development by creating an account on GitHub.
+
+render: draw parts with instancing, materials and the camera (#77) by ItsMattoid · Pull Request #105 · Metallic-Club/studio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ItsMattoid
+commented
+Nov 3, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Closes #77
+What changed
+Parts are drawn now. The renderer draws the GPU-resident scene (#76) with one instanced draw per mesh kind per shading model, a data-driven material table, PBR-lite shading, a sorted transparent pass, and the view from Workspace.CurrentCamera. metallic_engine::SceneRenderer draws, and the windowed example shows a small scene with a camera that a script moves.
+Design
+Meshes (parts::mesh). Block, Ball (32 segments × 16 rings, with the degenerate pole triangles left out), Cylinder along X (32 segments, flat caps) and Wedge (slopes down towards −Z) live in one vertex buffer and one index buffer. They are unit-sized and stretched by Size through the instance affine. Indices are absolute u32 with base vertex 0, because GLES has no base vertex. There is one LOD for now (render: primitive LOD by screen size #80).
+Material table (parts::material). It is a 256-row uniform buffer, 32 bytes per row (roughness, metalness, emissive, glass flag, plus 16 bytes reserved for custom materials). The instance's material row indexes it.
+Rows are filled by name from the scene's Material enum items (MaterialParams::builtin). Unknown names fall back to plastic.
+MaterialTable::set replaces any row, so custom materials only add rows.
+The table is uploaded only when it changes. A uniform buffer is readable on every backend, GLES included.
+Draw lists: the visible-list mechanism for render: CPU culling (frustum, distance, screen size) #79. The scene keeps one dense list of entries per mesh kind, plus one transparent list.
+An entry is a slot id with bit 31 set for the dynamic region, so one list covers both regions.
+Lists are updated in InstanceScene::coalesce, from the same dirty slots, in O(1) per slot: push on entry, swap-remove on exit, and each slot records its list and position. Nothing scans the scene.
+GpuScene::upload uploads only the changed entries into one buffer with a segment per kind (list_segments()). A segment's capacity doubles, and the buffer is laid out again only when a list outgrows its segment.
+A kind's draw is draw_indexed(mesh range, 0, first..first+len) over its segment.
+render: CPU culling (frustum, distance, screen size) #79 fills the same segments with visible entries: CPU culling writes the lists, GPU culling writes them plus the counts into indirect args.
+Two instance paths.
+Storage path: the instance index reads an entry, and the entry names the slot in the static or dynamic region buffer. No instance data is copied or compacted. An entry changes only when a slot starts or stops being drawn as that kind, so moving parts upload nothing extra.
+Vertex-buffer fallback (GLES): vertex buffers cannot be indexed through a list, so the lists hold copies of the instances (64 B), which are read as per-instance attributes. Changed instances also mark their list positions on this path.
+InstanceBinding::for_context picks the path. It also requires 3 vertex-stage storage buffers.
+The new ContextOptions::force_vertex_instances forces the fallback on any backend, for tests.
+Transparency. Parts with 0 < Transparency < 1 go into the transparent pass: depth test on, depth write off, premultiplied alpha.
+They are sorted back to front per instance (camera to instance centre), only when the camera moved or one of them changed.
+The pass makes one draw per run of consecutive same-mesh instances, so the order is exact across mesh kinds.
+Glass keeps its reflections at full strength while its body fades.
+Transparency = 1 is not drawn at all.
+Shading (parts.wgsl).
+Lambert diffuse plus GGX specular (height-correlated Smith visibility, Schlick Fresnel), using the cofactor normal matrix, which is correct under non-uniform Size.
+One temporary directional light and a sky/ground hemisphere ambient with a split-sum environment term (SceneLight; render: sun, ambient, sky and Lighting properties #81 replaces it with Lighting). Neon's emission comes from the material row.
+sRGB-correct: the instance's sRGB bytes are decoded to linear in the shader, and the output is encoded by the sRGB target, or by the shader when the format is not sRGB.
+Camera (parts::camera). CameraReader reads Workspace.CurrentCamera → CFrame and FieldOfView, looking property ids up only when the camera or the data model changes.
+The projection is reverse-Z with an infinite far plane, built from the FOV and the target's aspect ratio. The view is rotation only.
+camera − scene origin goes into the frame uniform, so positions reach the projection relative to the camera. A test renders the demo 50 km out and gets the same image.
+A missing camera draws nothing and does not panic: the frame is the clear colour.
+Renderer. The new Renderer::render_scene(target, &mut GpuScene, Option<&Camera>) uploads, prepares and draws in one submission. draw_stats() reports draws per pass, instances and triangles.
+Every pipeline (depth prepass, opaque, opaque after a prepass with GreaterEqual, transparent) is created up front and recreated only when the format or MSAA count changes (ADR 0008 §9).
+The depth prepass, when on, draws the opaque lists. Sky, post and UI draw nothing yet.
+Bind group layouts state their minimum binding sizes. Without them, wgpu-core tracks "late-sized" bindings in every pass. The allocation test caught this: it cost 4 allocations per frame.
+Draw count (from the_draw_count_does_not_depend_on_the_part_count; 1% round shapes and wedges, 2% see-through blocks)
+Parts
+Opaque draws
+Transparent draws
+Instances
+Triangles
+1,000
+4
+1
+1,000
+22,600
+10,000
+4
+1
+10,000
+226,000
+100,000
+4
+1
+100,000
+2,260,000
+The opaque draws are always one per mesh kind that has instances (≤ 4). The transparent draws are one per run of same-mesh instances in back-to-front order, which is 1 when all see-through parts share a mesh. With see-through blocks and balls interleaved it is more: 43 runs for 80 see-through parts in the allocation test.
+Bench baseline for #79
+cargo bench -p metallic_render --bench draw_parts. Dev PC: Ryzen 5 5500, RX 6650 XT, 1920×1080 offscreen, nothing culled, all in view.
+The scene is 70% blocks, 10% each of balls, cylinders and wedges, and 1% see-through blocks.
+CPU is the wall time of render_scene (upload, uniform, sort, record, submit).
+GPU is timestamps for the frame and for the opaque pass.
+"Moving" changes the camera every frame, which re-sorts the see-through parts.
+Parts (triangles)
+Camera
+Vulkan CPU p50 / p99
+Vulkan GPU frame / opaque
+DX12 CPU p50 / p99
+DX12 GPU frame / opaque
+10k (1.18 M)
+still
+0.078 / 0.121 ms
+0.141 / 0.134 ms
+0.091 / 0.158 ms
+0.117 / 0.112 ms
+10k (1.18 M)
+moving
+0.087 / 0.105 ms
+0.140 / 0.133 ms
+0.117 / 0.200 ms
+0.118 / 0.114 ms
+100k (11.8 M)
+still
+0.091 / 0.124 ms
+1.069 / 1.060 ms
+0.109 / 0.128 ms
+0.778 / 0.775 ms
+100k (11.8 M)
+moving
+0.126 / 0.172 ms
+1.066 / 1.057 ms
+0.136 / 0.169 ms
+0.797 / 0.793 ms
+The CPU cost is almost independent of the part count, and well inside the 1.5 ms High budget. The GPU cost is vertex-bound on the unculled triangles, which is what culling and LOD target.
+The scene sync is unchanged within noise with the list maintenance added: sync/100k_1pct_moving 75 µs (was 74) and scattered 114 µs (was 115). The numbers are also in docs/perf.md.
+Perf gate:
+Workload
+Base
+Head
+Change
+render_sync_moving
+123,957 Ir
+128,226 Ir
++3.44%
+render_sync_scattered
+135,670 Ir
+139,941 Ir
++3.15%
+Both pass the 5% limit. The extra instructions are the O(1) draw-list update per dirty slot in coalesce; the dirty list is lent out, not copied.
+Tests
+Image tests (tests/parts.rs, 256×256, Rgba8UnormSrgb). The demo scene (every shape; concrete, plastic, smooth plastic, metal, wood, grass, neon; a glass pane and a see-through ball; one fully transparent part) is compared with the committed tests/reference/parts.png.
+Tolerance: at most 1% of pixels may differ by more than 12 levels, and the mean difference must be at most 1.0.
+Measured against the reference: RX 6650 XT on Vulkan, DX12 and GL max diff 0; WARP (software D3D12) max diff 1, mean 0.037. I have no lavapipe locally; CI runs it.
+The same reference is checked with a depth prepass and 50 km from the origin (max diff 1).
+Also tested: no camera draws nothing (clear colour, zero draws); moving CurrentCamera changes the view.
+METALLIC_UPDATE_REFERENCES=1 rewrites the reference. On a mismatch the test writes the image to CARGO_TARGET_TMPDIR.
+The fallback path renders the same image. force_vertex_instances gives a device on the vertex-buffer path. Its image matches the storage path's exactly (max diff 0, on Vulkan, DX12, GL and WARP) and matches the reference.
+Draw count is constant from 1k to 100k parts (table above).
+Draw lists.
+Unit test: 3,000 random edits (create, destroy, shape and transparency changes, reparenting out of and into the world, promotions) with the lists checked against a full slot scan every 5 edits, then after a rebuild.
+GPU readback test on both paths: the list buffer equals the scene's lists through growth/relayout, removals, shape changes, recolours and promotions.
+Allocations (tests/no_alloc.rs).
+A render_scene frame with a moving camera (so the uniform write, the transparent sort and the list write happen every frame) is compared with the same wgpu calls written by hand, using the renderer's own shader.
+Two workloads: 2,000 parts with 4 opaque + 43 transparent draws, and 6,000 parts with 4 + 377.
+On every dev-PC adapter (Vulkan, DX12, GL, WARP) ours equals the hand version exactly: 103 = 103 and 106 = 106.
+The test requires our excess over the hand version to be the same for both workloads, so nothing we do allocates per part, per draw, per sorted instance or per run, and to be at most MACHINE_NOISE = 4.
+CI's lavapipe and WARP showed a constant +4 and +3 on the first workload, deterministically. This happened even with every frame waited for, while the dev PC's WARP shows 0. The cause is in the runner environment and is not identified; no validation message was reported. render: wgpu bootstrap, reverse-Z, async GPU timestamps (#75) #93's test already allows 2 for a similar lavapipe offset.
+Over 100 frames with 1% of parts moving and the camera orbiting, the heap grew by −5.6 KB (no growth).
+The existing scene tests are unchanged and still pass (0 allocations in sync and coalesce).
+wgpu errors. The image tests collect wgpu's log, which carries the validation layers' messages where they are installed, and fail on any error. The Vulkan loader's own setup messages are ignored. CI reported no validation messages.
+Unit tests: mesh validity, outward winding, area and the wedge's orientation; material parameters and table size; CameraReader (reads, follows changes, a missing camera is None); the projection looks down −Z with reverse-Z.
+Manual check
+cargo run -p metallic_engine --example windowed -- 8 on the dev PC (Vulkan, Bgra8UnormSrgb, 960×540, 60 fps cap).
+The script builds the scene with Instance.new and sets workspace.CurrentCamera.CFrame = CFrame.lookAt(...) on RenderStepped. The camera circled the scene and the view followed it.
+Parts were lit and coloured: shading on every face, specular highlights on the balls, the glass pane and the red ball see-through, the neon cube glowing.
+It printed 4 opaque + 2 transparent draws, 9 instances, 3064 triangles, GPU 0.098 ms, with 59–61 RenderStepped per second.
+Screenshot (captured from the window): docs/screenshots/77-windowed-parts.png.
+Deviations and notes
+No indirect draws yet. Draws are direct draw_indexed over the list segments.
+The segments are laid out for indirect args: one buffer of entries, first_instance = segment start.
+Nothing on the GPU writes counts until render: CPU culling (frustum, distance, screen size) #79, so indirect draws would only add wgpu's indirect-argument validation pass (on by default, also in release).
+render: CPU culling (frustum, distance, screen size) #79's GPU culling switches to multi_draw_indexed_indirect over the same segments.
+The fallback copies instances into its lists. On GLES the region buffers from render: GPU-resident scene with stable slots #76 are still uploaded but not read by the draws. Dropping that upload on the vertex path is a possible follow-up; the path is GLES-only.
+Transparent draws are per run, not per kind. This keeps the back-to-front order exact across meshes. The count is bounded by the number of see-through parts and is 1 when they share a mesh. Opaque draws are constant as asked.
+No tone mapping yet. The output is linear, clamped by the target, until the post chain exists.
+ContextOptions gained a field (force_vertex_instances), which breaks struct literals without ..Default::default(). There were none outside the render tests.
+New dev-dependency: png 0.18 (MIT/Apache-2.0), for the reference images. cargo deny passes.
+Checklist
+Only what the issue's "Done when" list asks for (follow-ups are filed as new issues)
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings (and cargo clippy -p metallic_render --bench perf_gate -- -D warnings)
+cargo test --workspace
+cargo xtask check-layout
+Crate boundaries from docs/adr/0001-project-layout.md respected (metallic_render still depends only on metallic_core; png is a dev-dependency)
+Public items documented
+Also checked: cargo xtask api-dump --check, the headless engine build, cargo deny check, and cargo check of metallic_render and of metallic_engine (render,physics) for aarch64-linux-android and aarch64-apple-ios. The perf gate cannot run on Windows; the sync bench above is the local proxy.
+🤖 Generated with Claude Code
+mattoid
+and others
+added 4 commits
+November 3, 2026 05:21
+render: draw parts with instancing, materials and the camera (#77)
+…
+7705dc8
+```
+Primitive meshes (Block, Ball, Cylinder, Wedge) in one vertex/index pool, a
+data-driven material table, PBR-lite shading, a sorted transparent pass and
+the camera from Workspace.CurrentCamera. One instanced draw per mesh kind per
+shading model, over per-kind draw lists the scene keeps current from its dirty
+slots; the vertex-buffer fallback holds instance copies in the same lists.
+SceneRenderer now draws, and the windowed example shows a scripted camera.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+render: finish each frame before the next in the parts allocation test (
+…
+44d776b
+```
+#77)
+
+On CI's software rasterisers the renderer's frames carry real triangles while
+the hand-written frame's draws are degenerate, so with two frames in flight
+wgpu's staging memory was still busy on one side only and its allocator
+bookkeeping differed (+3 on WARP, +4 on lavapipe). Waiting for each frame
+outside the measurement gives both sides an idle queue.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+render: compare two workloads in the parts allocation test, catch wgp…
+…
+e3d2772
+```
+…u errors (#77)
+
+CI's lavapipe and WARP allocate a constant 4 and 3 more than the hand-written
+frame on every frame, deterministically, while every adapter on the dev PC
+(WARP included) shows 0. The test now runs two workloads with very different
+part, draw and sort counts and requires the renderer's excess to be the same
+for both (nothing scales with the work) and within that machine noise.
+
+The image tests now collect wgpu's log, which carries the validation layers'
+messages where they are installed, and fail on any error.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+render: ignore the Vulkan loader's setup messages in the image tests (#…
+…
+d420acb
+```
+…77)
+
+On a runner without a Vulkan driver the loader reports "Found no drivers" as
+an error while the instance is made; that says nothing about the frames.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+ItsMattoid
+merged commit dcc89d0
+into
+main
+Nov 3, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+ItsMattoid
+deleted the
+77-draw-parts
+branch
+November 3, 2026 10:53
+This was referenced Nov 3, 2026
+render: bound the transparent pass's draw count
+#106
+Open
+render: skip the unused region upload on the vertex-buffer fallback
+#107
+Open
+render: primitive LOD by screen size
+#80
+Closed
+render: graphics settings, Auto preset and dynamic resolution
+#84
+Closed
+render: HDR post chain, AA and upscaling
+#85
+Closed
+render: DirectionalLight instances as extra suns
+#123
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

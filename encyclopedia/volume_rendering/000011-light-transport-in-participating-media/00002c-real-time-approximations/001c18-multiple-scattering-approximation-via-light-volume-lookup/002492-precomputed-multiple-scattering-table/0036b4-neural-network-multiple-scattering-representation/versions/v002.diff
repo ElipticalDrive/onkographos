@@ -1,0 +1,305 @@
+--- v001.md
++++ v002.md
+@@ -1,185 +1,162 @@
+ # Neural Network Multiple Scattering Representation
+ 
+-Also called: Compact Representation for Multiple Scattering using Neural Networks, Neural Network Representation of Multiple Scattering
++Also called: Neural Network Representation of Multiple Scattering, Multiple Scattering Neural Network Approximation, Neural network model for multiple scattering, Compact Representation for Multiple Scattering using Neural Networks
+ 
+ ## Overview
+-This method encodes multiple scattering effects in participating media using a trained neural network, replacing large precomputed lookup tables with a compact model to reduce memory usage from tens of megabytes (or gigabytes for extended parameter spaces) to kilobytes [S1, S2]. It solves the storage bottleneck of precomputed multiple scattering by approximating the complex mapping from spatial/directional coordinates to radiance [S1]. Unlike [Precomputed Multiple Scattering Table](3324-precomputed-multiple-scattering-table.md), which stores discrete samples, this method generalizes the function via regression, allowing for similar visual quality with a fraction of the memory cost [S1].
++This method encodes multiple scattering effects in participating media using a trained neural network, replacing large precomputed lookup tables with a compact model [S1, S3]. It solves the high storage cost of explicit tables (which can exceed 50 GB) by treating the multiple scattering response as a regression problem to learn the function over the entire parameter space [S3]. It sets itself apart from table-based approaches like [Precomputed Multiple Scattering Table](3324-precomputed-multiple-scattering-table.md) by storing the entire parameter space in kilobytes rather than megabytes, and from diffusion-based methods by handling arbitrary geometry and phase functions without assuming isotropic response or flat surfaces [S1, S3].
+ 
+ ## How it works
+-The method consists of two phases: precomputation of reference data and training of the neural network to approximate the multiple scattering function. During rendering, the network is queried to generate the multiple scattering contribution.
++**Inputs and Outputs:**
++*   **Inputs:** Material parameters (scattering albedo $\alpha$, anisotropy $g$), spatial position $r(\rho, z)$, and outgoing direction $(\theta, \phi)$.
++*   **Outputs:** Radiance $\Phi$ (RGB channels).
+ 
+-### Inputs and Outputs
+-*   **Precomputation Input:** An infinite participating medium with a Dirac delta light source in position and direction [S1].
+-*   **Precomputation Output:** Multiple scattering radiance values stored in a table [S1].
+-*   **Network Input:** Spatial and directional coordinates. In the primary implementation, these are cylindrical coordinates for position $(\rho, z)$ and spherical coordinates for direction $(\theta, \phi)$ [S1]. In extended implementations, the input also includes material properties: anisotropy $g$ and scattering albedo $\alpha$ [S2].
+-*   **Network Output:** Radiance values in RGB channels [S1, S2].
++**Data Structures:**
++The method uses a feed-forward neural network. Two variants are cited regarding structure:
++1.  **Compact Model (S1):** Two fully connected hidden layers with 20 nodes each. Input layer has 4 dimensions $(\rho, z, \theta, \phi)$. Output layer has 3 dimensions (RGB). Activation: $\tanh$. Size: 6490 bytes (1623 floats) [S1].
++2.  **General Parameter Space Model (S3):** Two fully connected hidden layers with 50 nodes each. Input layer has 6 dimensions $(\rho, z, \theta, \phi, \alpha, g)$. Output layer has 1 dimension (intensity, later expanded to RGB). Activation: $\tanh$. Size: 11.8 KB for multiple scattering, 11.8 KB for double scattering [S3].
+ 
+-### Data Structures
+-**Neural Network Structure (Primary Implementation):**
+-*   **Type:** Feed-forward fully connected neural network [S1].
+-*   **Layers:**
+-    *   Input Layer: 4 dimensions $(\rho, z, \theta, \phi)$ [S1].
+-    *   Hidden Layer 1: 20 nodes [S1].
+-    *   Hidden Layer 2: 20 nodes [S1].
+-    *   Output Layer: 3 dimensions (RGB) [S1].
+-*   **Activation Function:** Hyperbolic tangent ($\tanh$) for hidden layers [S1].
+-*   **Parameters:** Weights and biases $w$. Total size: 6490 bytes (1623 floats) [S1].
++**Precomputation and Training Steps:**
++1.  **Precompute Reference Data:** Compute multiple scattering effects assuming a light source with a Dirac delta in position and direction in an infinite homogeneous participating medium [S1, S3].
++2.  **Parametrization:** Use cylindrical coordinates for position $r(\rho, z)$ and spherical coordinates for direction $(\theta, \phi)$ [S1, S3]. Normalize all spatial dimensions by the material mean-free path $l$ (where $1/l = \sigma_t = \sigma_s + \sigma_a$) [S3].
++3.  **Sampling:** Sample the homogeneous media space with varying anisotropy $g$ and scattering albedo $\alpha$ [S3].
++    *   $g \in \{0.0, 0.1, \dots, 0.99\}$
++    *   $\alpha \in \{0.01, 0.1, \dots, 0.995\}$
++    *   Total 156 materials [S3].
++4.  **Data Collection:** Shoot photons (e.g., 500 million per material) and accumulate contributions in a table [S3]. For double scattering, store only the first two scattering events [S3].
++5.  **Preprocessing:** Apply logarithm operator to radiance for training: $\Phi' = \log(\Phi + 1)$ [S3].
++6.  **Normalization:** Normalize input parameters into $[0, 1]$ (or $[-1.0, 1.0]^4$ for the 4D variant) and shuffle them [S1, S3].
++7.  **Training:** Train the neural network $\Phi_N$ to minimize the L2 error:
++    $$ E = \sum_i ||r_i - \Phi_N(\rho, z, \theta, \phi, \alpha, g, w)||^2 $$
++    where $r_i$ is the target radiance, $\Phi_N$ is the network output, and $w$ are weights and biases [S1, S3].
++    *   **Optimizer:** ADAM [S1, S3].
++    *   **Learning Rate:** 0.01 (multiple scattering), 0.001 (double scattering) [S1, S3].
++    *   **Batch Size:** 30K (multiple scattering), 4K (double scattering) [S3].
++    *   **Epochs/Iterations:** 64 epochs (9513 batches) for multiple scattering [S3]; 10,000 iterations for the compact model [S1]; 1024 epochs for double scattering [S3].
++8.  **Reconstruction:** At runtime, apply exponential operator to reconstruct radiance: $\hat{\Phi} = \exp(\hat{\Phi}_N) - 1$, where $\hat{\Phi}_N$ is the network output [S3].
+ 
+-**Neural Network Structure (Extended Implementation):**
+-*   **Input:** 7 dimensions: anisotropy $g$, scattering albedo $\alpha$, location $r(\rho, z)$, and direction $(\theta, \phi)$ [S2].
+-*   **Structure:** Four-layer neural network [S2].
+-*   **Output:** Radiance [S2].
+-*   **Storage:** 23.6 kB for double and multiple scattering combined [S2].
+-
+-### Steps
+-1.  **Precompute Reference Data:**
+-    *   Compute multiple scattering effects assuming an infinite participating medium with a Dirac delta light source in position and direction [S1].
+-    *   Store results using cylindrical coordinates for position $r$ $(\rho, z)$ and spherical coordinates for direction $(\theta, \phi)$ [S1].
+-    *   This step takes approximately 8 minutes for a given material [S1].
+-
+-2.  **Normalize Inputs:**
+-    *   Normalize input parameters $(\rho, z, \theta, \phi)$ to the range $[-1.0, 1.0]^4$ [S1].
+-    *   Shuffle the data [S1].
+-
+-3.  **Transform Outputs:**
+-    *   Switch output parameters (radiance) to the log domain to ensure well-distributed values [S1].
+-
+-4.  **Split Data:**
+-    *   Split the precomputed table data into 70% for training and 30% for validation [S1].
+-
+-5.  **Train Network:**
+-    *   Define the neural network $\Phi_N$ with weights and biases $w$ [S1].
+-    *   Minimize the L2 error loss function:
+-        $$ E = \sum_i \| r_i - \Phi_N(\rho, z, \theta, \phi, w) \|^2 $$
+-        where $r_i$ is the target radiance and $\Phi_N$ is the predicted radiance [S1].
+-    *   Use the ADAM optimizer with a learning rate of 0.01 [S1].
+-    *   Train for 10,000 iterations [S1].
+-    *   Training time is approximately 25 minutes per material [S1].
+-
+-6.  **Render:**
+-    *   During rendering, use the trained neural network to generate multiple scattering radiance [S1].
+-    *   Alternatively, reproduce the precomputed table for a specific medium from the neural network and use the table for computation [S2].
+-    *   Integrate with low-order scattering methods (e.g., Virtual Ray Lights) [S1, S2].
+-
+-### Pseudocode
++**Pseudocode:**
+ 
+ ```python
+ import math
+-import random
++import numpy as np
+ 
+-def normalize_input(val, min_val, max_val):
+-    """Normalize value to [-1.0, 1.0]"""
+-    return 2.0 * (val - min_val) / (max_val - min_val) - 1.0
++def preprocess_radiance(radiance):
++    """Apply log transform to radiance for training stability."""
++    return np.log(radiance + 1.0)
+ 
+-def log_transform(val):
+-    """Switch output to log domain"""
+-    # Assuming val > 0 for radiance
+-    return math.log(val)
++def postprocess_radiance(network_output):
++    """Apply exp transform to reconstruct radiance from network output."""
++    return np.exp(network_output) - 1.0
+ 
+-def tanh(x):
+-    """Hyperbolic tangent activation"""
+-    return math.tanh(x)
++def normalize_inputs(inputs, min_val=0.0, max_val=1.0):
++    """
++    Normalize input parameters to [0, 1].
++    Inputs: array of shape (N, 6) for general model or (N, 4) for compact model.
++    """
++    # Assuming inputs are already scaled by mean-free path for spatial coords
++    # and within valid physical ranges for alpha/g
++    return (inputs - min_val) / (max_val - min_val)
+ 
+ def neural_network_forward(x, weights, biases):
+     """
+-    Forward pass for the primary 4D network.
+-    x: list of 4 inputs [rho, z, theta, phi]
+-    weights: list of weight matrices
+-    biases: list of bias vectors
++    Forward pass for a 2-hidden-layer MLP with tanh activation.
++    x: input vector
++    weights: list of [W1, W2, W3]
++    biases: list of [b1, b2, b3]
+     """
+-    # Input layer to Hidden Layer 1 (20 nodes)
+-    h1 = []
+-    for j in range(20):
+-        sum_val = biases[0][j]
+-        for k in range(4):
+-            sum_val += weights[0][j][k] * x[k]
+-        h1.append(tanh(sum_val))
+-    
+-    # Hidden Layer 1 to Hidden Layer 2 (20 nodes)
+-    h2 = []
+-    for j in range(20):
+-        sum_val = biases[1][j]
+-        for k in range(20):
+-            sum_val += weights[1][j][k] * h1[k]
+-        h2.append(tanh(sum_val))
+-        
+-    # Hidden Layer 2 to Output Layer (3 nodes: RGB)
+-    output = []
+-    for j in range(3):
+-        sum_val = biases[2][j]
+-        for k in range(20):
+-            sum_val += weights[2][j][k] * h2[k]
+-        output.append(tanh(sum_val)) # Output activation also tanh as per standard practice for bounded range, 
+-                                     # though source specifies tanh for hidden. 
+-                                     # Note: Source [S1] says "Activation function is Hyperbolic tangent (tanh)" 
+-                                     # generally for the network.
++    # Hidden Layer 1
++    h1 = np.tanh(np.dot(x, weights[0]) + biases[0])
++    # Hidden Layer 2
++    h2 = np.tanh(np.dot(h1, weights[1]) + biases[1])
++    # Output Layer
++    output = np.dot(h2, weights[2]) + biases[2]
+     return output
+ 
+-def train_network(data_points, target_radiance, iterations=10000, lr=0.01):
++def train_network(data_X, data_Y, lr=0.01, epochs=64, batch_size=30000):
+     """
+-    Simplified training loop description.
+-    data_points: list of [rho, z, theta, phi]
+-    target_radiance: list of [r, g, b]
++    Train the neural network using ADAM optimizer and L2 loss.
++    data_X: normalized input parameters (N, 6)
++    data_Y: preprocessed radiance (N, 1)
+     """
+     # Initialize weights and biases [G]
+-    # In practice, use ADAM optimizer as specified in [S1]
+-    # The source specifies ADAM with lr=0.01, 10000 iterations, L2 loss.
+-    pass
++    # Note: Specific initialization scheme not given in sources, 
++    # standard Xavier/He initialization is implied for convergence.
++    weights = initialize_weights() 
++    biases = initialize_biases()
++    
++    n_samples = data_X.shape[0]
++    
++    for epoch in range(epochs):
++        # Shuffle data [S3]
++        indices = np.random.permutation(n_samples)
++        shuffled_X = data_X[indices]
++        shuffled_Y = data_Y[indices]
++        
++        for i in range(0, n_samples, batch_size):
++            batch_X = shuffled_X[i:i+batch_size]
++            batch_Y = shuffled_Y[i:i+batch_size]
++            
++            # Forward pass
++            predictions = []
++            for x in batch_X:
++                pred = neural_network_forward(x, weights, biases)
++                predictions.append(pred)
++            predictions = np.array(predictions)
++            
++            # Compute L2 Loss
++            loss = np.mean((predictions - batch_Y) ** 2)
++            
++            # Backpropagation and ADAM update [S1, S3]
++            # [G] Standard ADAM update step using gradients of loss w.r.t weights/biases
++            weights, biases = adam_update(weights, biases, lr, loss)
++            
++    return weights, biases
+ 
+-def render_multiple_scattering(rho, z, theta, phi, trained_weights, trained_biases):
++def render_multiple_scattering(pos_rho, pos_z, dir_theta, dir_phi, alpha, g, weights, biases):
+     """
+-    Query the network for multiple scattering radiance.
++    Render multiple scattering for a specific point and direction.
+     """
+-    # 1. Normalize inputs
+-    # Note: Exact min/max values for rho, z, theta, phi depend on the precomputation domain.
+-    # Assuming normalized inputs are expected by the network.
+-    x_norm = [normalize_input(v, -1.0, 1.0) for v in [rho, z, theta, phi]]
++    # 1. Normalize inputs [S3]
++    inputs = np.array([[pos_rho, pos_z, dir_theta, dir_phi, alpha, g]])
++    inputs_norm = normalize_inputs(inputs)
+     
+     # 2. Forward pass
+-    rgb_log = neural_network_forward(x_norm, trained_weights, trained_biases)
++    output = neural_network_forward(inputs_norm[0], weights, biases)
+     
+-    # 3. Inverse log transform to get radiance
+-    rgb = [math.exp(v) for v in rgb_log]
++    # 3. Reconstruct radiance [S3]
++    radiance = postprocess_radiance(output)
+     
+-    return rgb
++    return radiance
+ ```
+ 
+-### Parameters
+-*   **Network Size:** 2 hidden layers, 20 nodes each [S1].
+-*   **Optimizer:** ADAM [S1].
+-*   **Learning Rate:** 0.01 [S1].
+-*   **Iterations:** 10,000 [S1].
+-*   **Data Split:** 70% training, 30% validation [S1].
+-*   **Input Normalization:** $[-1.0, 1.0]^4$ [S1].
+-*   **Output Transformation:** Log domain [S1].
+-
+-### Edge Cases and Pitfalls
+-*   **Precision:** The log domain transformation is critical for well-distributed values due to the exponential falloff of radiance [S1].
+-*   **Boundaries:** The method assumes an infinite medium for precomputation [S1]. Boundary effects in finite media must be handled by the integration with other algorithms (e.g., VRL) [S1].
+-*   **Material Dependence:** The primary implementation is material-specific (trained per material) [S1]. Extended versions attempt to generalize over albedo and anisotropy [S2].
++**Edge Cases and Pitfalls:**
++*   **Bias in Combined Networks:** Representing double and multiple scattering in a single network introduces bias because double scattering has higher frequency content. They must be trained separately [S3].
++*   **Infinite Medium Assumption:** The precomputation assumes an infinite participating medium. This avoids handling scene shape but may not account for boundary effects directly in the table [S3].
++*   **Precision:** The log/exp transformation is critical for handling the exponential falloff of radiance and ensuring well-distributed values for training [S1, S3].
+ 
+ ## Subtopics
+ 
+-### Bounced Multiple Scattering
+-Handles specific bounce counts; chooses when explicit bounce control is needed over statistical approximation. [Bounced Multiple Scattering](3532-bounced-multiple-scattering.md)
++### [Neural Network Model for Participating Media Scattering](15850-neural-network-model-for-participating-media-scattering.md)
++A method for interactive simulation of scattering effects in participating media that uses a neural network to evaluate multiple and double scattering, combined with a single scattering approximation. It sets itself apart from table-based approaches like [Neural Network Multiple Scattering Representation](7796-neural-network-multiple-scattering-representation.md) by storing the entire parameter space in kilobytes rather than megabytes, and from Virtual Ray Lights by avoiding the artifact-prone need for massive light counts.
+ 
+-### GPU Implementation of Precomputed Multiple Scattering
+-Optimizes table lookup on GPU; chooses when hardware supports fast texture sampling. [GPU Implementation of Precomputed Multiple Scattering](4706-gpu-implementation-of-precomputed-multiple-scattering.md)
+-
+-### Multiple Scattering Precomputation
+-The base method of storing scattering data; chooses when memory is not a constraint. [Multiple Scattering Precomputation](9418-multiple-scattering-precomputation.md)
++### Double Scattering Neural Network
++A separate neural network trained to express double scattering response, which has higher frequency than multiple scattering, to avoid bias from representing them together [S3].
++*   **Data Collection:** Shoot photons, store only the first two scattering events in the precomputed table [S3].
++*   **Structure:** Same as multiple scattering network (two hidden layers, 50 nodes each, tanh activation) [S3].
++*   **Training Parameters:** Learning rate 0.001. Mini-batches: 19521 with size 4K. Epochs: 1024 [S3].
+ 
+ ## Operating characteristics
+-*   **Memory Usage:** Reduces storage from 40 MB (precomputed table) to 6490 bytes (1623 floats) for a single material [S1]. Extended versions reduce storage from 50 GB to 23.6 kB for double and multiple scattering combined [S2].
+-*   **Training Time:** Approximately 25 minutes per material on a standard CPU [S1].
+-*   **Precomputation Time:** Approximately 8 minutes per material to generate the reference data [S1].
+-*   **Rendering Performance:** Provides similar results to precomputed tables with significantly lower memory footprint, enabling integration with real-time or interactive rendering pipelines (e.g., VRL with GPU implementation) [S1, S2].
+-*   **Strengths:** Compact representation, fast runtime evaluation (neural network forward pass), compatibility with existing rendering algorithms [S1].
+-*   **Limitations:** Requires precomputation and training step; bias introduced by the neural network approximation [S2]; primary implementation is material-specific [S1].
++*   **Memory Usage:** Reduces storage from 50 GB (explicit tables) to 23.6 KB total (11.8 KB for multiple scattering, 11.8 KB for double scattering) [S3]. The compact 4D model uses only 6490 bytes (1623 floats) [S1].
++*   **Rendering Time:** 50 ms per frame in typical scenes [S3].
++*   **Training Time:** 45 minutes on a 2.20GHz Intel Xeon E5-2699 (44 cores) with Nvidia TITAN RTX GPU for the 6D model [S3]. 25 minutes for the compact 4D model [S1].
++*   **Strengths:** Extremely compact representation; handles arbitrary geometry and phase functions (unlike diffusion methods); integrates with existing algorithms like Virtual Ray Lights (VRL) [S1, S3].
++*   **Limitations:** Requires precomputation step; assumes infinite medium for precomputation; separate networks needed for double and multiple scattering [S3].
++*   **When to use:** When memory is constrained and interactive rates are required for dense media where multiple scattering dominates [S3].
+ 
+ ## Background
+-The method was proposed by Ge et al. in 2018 [S1]. It addresses the storage inefficiency of precomputed multiple scattering tables, which were previously used in conjunction with algorithms like Virtual Ray Lights (VRL) [S1]. The approach builds on the symmetry of revolution in infinite media to reduce the dimensionality of the problem [S1]. It is integrated with the Mitsuba Renderer [S1].
++The method originates from the need to efficiently store precomputed multiple scattering data, which previously required tens of megabytes to gigabytes [S1, S3]. It builds on [Precomputed Multiple Scattering Table](3324-precomputed-multiple-scattering-table.md) by replacing the table with a neural network [S1]. It was demonstrated integrated with the Mitsuba Renderer and Virtual Ray Lights (VRL) [S1, S3]. The approach treats the scattering response as a regression problem, leveraging neural networks to generalize across the entire parameter space of homogeneous media [S3].
+ 
+ ## Sources
+ [S1] A compact representation for multiple scattering in participating media using neural networks, https://doi.org/10.1145/3214745.3214758, fetched 2026-10-26
+-[S2] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26+[S2] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26
++[S3] Interactive Simulation of Scattering Effects in Participating Media Using a Neural Network Model, https://doi.org/10.1109/TVCG.2019.2963015, fetched 2026-10-26

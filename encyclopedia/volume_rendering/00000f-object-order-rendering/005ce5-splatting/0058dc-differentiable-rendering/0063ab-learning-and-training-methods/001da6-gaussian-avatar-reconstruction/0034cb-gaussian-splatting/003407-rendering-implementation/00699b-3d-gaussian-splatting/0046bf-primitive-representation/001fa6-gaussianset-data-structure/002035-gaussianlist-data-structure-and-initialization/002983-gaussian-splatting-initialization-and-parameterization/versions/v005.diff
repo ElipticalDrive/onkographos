@@ -1,0 +1,408 @@
+--- v004.md
++++ v005.md
+@@ -1,83 +1,103 @@
+ # Gaussian Splatting Initialization and Parameterization
+ 
+-Also called: Gaussian Initialization, 3D Gaussian Initialization, Gaussian Parameter Initialization, Gaussian Splatting Training Initialization, 3D Gaussian Splatting Training Initialization
++Also called: SfM Initialization, Structure from Motion Initialization
+ 
+ ## Overview
+-Gaussian Splatting Initialization and Parameterization establishes the initial state of a 3D Gaussian Splatting representation from input data, typically a sparse point cloud, to begin differentiable optimization [S3, S5, unofficial]. It differs from [Random Large-Variance Initialization](6129-random-large-variance-initialization.md) by using structured geometric priors rather than random noise, and from [Gaussian Geometry Parameters Prediction](8442-gaussian-geometry-parameters-prediction.md) by relying on explicit data mapping rather than learned prediction networks [S3, S5, unofficial]. It serves as the foundational step for [Gaussian Splatting Initialization and Parameterization](2313-gaussian-splatting-initialization-and-parameterization.md).
++Gaussian Splatting Initialization and Parameterization establishes the initial state of a 3D Gaussian Splatting representation from input data, typically a sparse point cloud, to begin differentiable optimization [S3, S6, unofficial]. It differs from [Random Large-Variance Initialization](6129-random-large-variance-initialization.md) by using structured geometric priors rather than random noise, and from [Gaussian Geometry Parameters Prediction](8442-gaussian-geometry-parameters-prediction.md) by relying on explicit data mapping rather than learned prediction networks [S3, S6, unofficial]. It serves as the foundational step for [Gaussian Splatting Initialization and Parameterization](2313-gaussian-splatting-initialization-and-parameterization.md).
+ 
+ ## How it works
+ **Inputs:**
+-*   Input point cloud data: $N$ points with 3D coordinates $\mathbf{xyz} \in \mathbb{R}^N$ and RGB colors $\mathbf{c} \in \mathbb{R}^N$ (e.g., from COLMAP) [S1, S5, unofficial].
+-*   Optional: Depth maps for normal estimation [S2, unofficial].
+-*   Configuration: Base distance for scaling, initial opacity target, SH degree [S1, S3, S5, unofficial].
++1.  Input images (for SfM) or a pre-computed 3D point cloud (e.g., from COLMAP) containing XYZ coordinates and RGB colors [S3, S5, S6, unofficial].
++2.  Camera parameters (intrinsics and extrinsics) if performing SfM [S6, unofficial].
++3.  Optional depth maps and normal maps if using depth-guided initialization [S2, unofficial].
+ 
+ **Outputs:**
+-*   Learnable parameters for $N$ Gaussians:
+-    *   Means: $\mathbf{\mu} \in \mathbb{R}^{N \times 3}$ [S3, S5, unofficial].
+-    *   Scales (log-space): $\mathbf{s} \in \mathbb{R}^{N \times 3}$ (or $\mathbb{R}^{N \times 1}$ for isotropic) [S3, S5, unofficial].
+-    *   Rotations (quaternions): $\mathbf{q} \in \mathbb{R}^{N \times 4}$ [S3, S5, unofficial].
+-    *   Opacities (logits): $\alpha_{logit} \in \mathbb{R}^{N}$ [S3, S5, unofficial].
+-    *   Colors (SH coefficients): $\mathbf{c}_{dc} \in \mathbb{R}^{N \times 3}$ (degree 0) and $\mathbf{c}_{rest} \in \mathbb{R}^{N \times 3 \times D}$ (higher degrees) [S1, S3, S5, unofficial].
++A set of $N$ learnable 3D Gaussian parameters ready for training:
++*   Positions: $\mathbf{xyz} \in \mathbb{R}^{N \times 3}$
++*   Scales: $\mathbf{s} \in \mathbb{R}^{N \times 3}$ (log-space pre-activation)
++*   Rotations: $\mathbf{q} \in \mathbb{R}^{N \times 4}$ (quaternions)
++*   Opacities: $\alpha \in \mathbb{R}^{N}$ (logit pre-activation)
++*   Colors: $\mathbf{c} \in \mathbb{R}^{N \times 3}$ (SH degree 0) and $\mathbf{f}_{rest} \in \mathbb{R}^{N \times (N_{SH}-1) \times 3}$ (higher degrees) [S3, S5, unofficial].
+ 
+ **Data Structures:**
+ Parameters are stored as differentiable tensors (e.g., `nn.Parameter` in PyTorch) on the GPU [S5, unofficial].
+-*   `_xyz`: Shape $(N, 3)$ [S5, unofficial].
+-*   `_features_dc`: Shape $(N, 1, 3)$ [S5, unofficial].
+-*   `_scaling`: Shape $(N, 3)$ [S5, unofficial].
+-*   `_rotation`: Shape $(N, 4)$, format $[w, x, y, z]$ [S5, unofficial].
+-*   `_opacity`: Shape $(N, 1)$ [S5, unofficial].
++*   `_xyz`: Shape $(N, 3)$, float32.
++*   `_scaling`: Shape $(N, 3)$, float32.
++*   `_rotation`: Shape $(N, 4)$, float32.
++*   `_opacity`: Shape $(N, 1)$, float32.
++*   `_features_dc`: Shape $(N, 1, 3)$, float32.
++*   `_features_rest`: Shape $(N, N_{SH}-1, 3)$, float32 [S5, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Initialize Means:** Copy input XYZ coordinates directly to GPU memory [S1, S5, unofficial]. If the point cloud is not centered, subtract the mean: $\mathbf{\mu}_i \leftarrow \mathbf{\mu}_i - \frac{1}{N}\sum_{j=1}^N \mathbf{\mu}_j$ [S3, unofficial].
+-
+-2.  **Initialize Rotations:**
+-    *   *Standard:* Set all quaternions to identity: $\mathbf{q}_i = [1, 0, 0, 0]$ [S3, S5, unofficial].
+-    *   *Random:* Generate random unit quaternions using [Sho94]:
++1.  **Position Initialization:**
++    *   If using SfM/COLMAP: Extract XYZ coordinates from the 3D point cloud and copy them directly to the GPU memory as the initial means $\mathbf{xyz}$ [S1, S5, S6, unofficial].
++    *   If using Depth-guided: Estimate normal maps from spatial gradients of depth maps (e.g., from Depth Anything) to orient initial surfels. Initialize positions from the depth map points [S2, unofficial].
++    *   If using Random: Generate points in a bounding volume (not covered in detail here, see [Random Large-Variance Initialization](6129-random-large-variance-initialization.md)) [S3, unofficial].
++
++2.  **Rotation Initialization:**
++    *   **Identity (Standard):** Initialize all quaternions to identity $[1, 0, 0, 0]$ [S3, S5, unofficial].
++    *   **Normal-Aligned (Depth-guided):** Compute the quaternion that aligns the local z-axis with the estimated surface normal for each point [S2, unofficial].
++    *   **Random (Fallback):** If no geometric prior is available, generate random unit quaternions using the method from [Sho94]:
+         $$
+         \begin{aligned}
+-        u_1, u_2, u_3 &\sim \text{Uniform}[0, 1] \\
+-        q_0 &= \sqrt{1-u_1} \sin(2\pi u_2) \\
+-        q_1 &= \sqrt{1-u_1} \cos(2\pi u_2) \\
+-        q_2 &= \sqrt{u_1} \sin(2\pi u_3) \\
+-        q_3 &= \sqrt{u_1} \cos(2\pi u_3)
++        q_0 &= \sqrt{1-u} \sin(2\pi v) \\
++        q_1 &= \sqrt{1-u} \cos(2\pi v) \\
++        q_2 &= \sqrt{u} \sin(2\pi w) \\
++        q_3 &= \sqrt{u} \cos(2\pi w)
+         \end{aligned}
+         $$
+-        [S1, unofficial].
+-    *   *Normal-Aligned:* If depth maps are available, estimate normal maps from spatial gradients [S2, unofficial]. Compute the quaternion that aligns the local z-axis with the estimated surface normal [S2, unofficial].
+-
+-3.  **Initialize Scales:**
+-    *   *KNN-based:* Compute the mean distance to $K$ nearest neighbors (e.g., $K=50$) [S3, unofficial]. Let this be $d_{knn}$. Set pre-activation scales: $\mathbf{s}_i = \log(\sqrt{d_{knn}})$ repeated for 3 dimensions [S1, S3, unofficial].
+-    *   *Fixed Base:* Use a fixed base distance $d_{base} = 0.1$ [S5, unofficial]. Compute $dist2 = \max(0.1, \min(d_{knn}, \infty))$ (clamped min $10^{-7}$) [S5, unofficial]. Set $\mathbf{s}_i = \log(\sqrt{dist2})$ for each dimension [S5, unofficial].
+-    *   *Isotropic Factor:* In some variants, tangent scales are set to the mean orientation-aware KNN distance multiplied by a scale factor $s_{init} = 1.5$ [S2, unofficial].
+-    *   *Random:* For random initialization, $\mathbf{s}_i = \log((\text{rand}() + 10^{-6}) \times 0.01)$ [S3, unofficial].
+-
+-4.  **Initialize Opacities:**
+-    *   Set pre-activation opacity (logit) to a value that yields a sigmoid output close to 1.0 but not exactly 1.0. A common value is $8.0$, since $\sigma(8.0) \approx 0.9997$ [S3, unofficial].
+-    *   Alternatively, target an initial opacity of $0.5$ or $0.1$. For $0.5$, the logit is $\log(0.5/0.5) = 0$. For $0.1$, the logit is $\log(0.1/0.9) \approx -2.197$ [S1, unofficial].
+-    *   Clamp the initial logit value to the range $[\log(10^{-4}/0.99), \log(0.99/10^{-4})]$ to prevent extreme values [S5, unofficial]. Specifically, clamp to $[\log(10^{-4}), \log(0.99)]$ is often cited as $[10^{-4}, 0.99]$ for the probability, implying logit clamping [S5, unofficial].
+-
+-5.  **Initialize Colors (SH Features):**
+-    *   Normalize input RGB colors to $[-0.5, 0.5]$ [S1, unofficial].
+-    *   Compute degree-0 SH coefficient: $\mathbf{c}_{dc, i} = \frac{\mathbf{c}_i}{C_0}$, where $C_0 = 0.28209479177387814$ [S1, S3, unofficial].
+-    *   Initialize higher-degree coefficients ($\mathbf{c}_{rest}$) to zeros [S1, S3, unofficial].
+-
+-6.  **Construct Covariance Matrices (for rendering/optimization):**
+-    *   Compute the scaling matrix $\mathbf{S} = \text{diag}(\exp(\mathbf{s}_i))$ [S5, unofficial]. Clamp $\exp(\mathbf{s}_i)$ to max $10.0$ to prevent excessively large Gaussians [S5, unofficial].
+-    *   Convert quaternion $\mathbf{q}_i$ to rotation matrix $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$ [S5, unofficial]. Normalize $\mathbf{q}_i$ first [S5, unofficial].
+-    *   Compute 3D covariance: $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T$ [S5, unofficial].
+-
+-7.  **Project to 2D (for rasterization):**
+-    *   Transform means to camera coordinates: $\mathbf{xyz}_{cam} = \mathbf{R}_{cam} \mathbf{\mu}_i + \mathbf{T}_{cam}$ [S5, unofficial].
+-    *   Compute Jacobian $\mathbf{J}$ of the perspective projection. With focal length $f$ and depth $z_i = \mathbf{xyz}_{cam}[2] + 10^{-7}$ (clamped to avoid division by zero) [S5, unofficial]:
+-        $$
+-        \mathbf{J} = \begin{bmatrix}
+-        f/z_i & 0 & -(f \cdot x_i)/z_i^2 \\
+-        0 & f/z_i & -(f \cdot y_i)/z_i^2
++        where $u, v, w$ are uniform random numbers in $[0, 1]$ [S1, unofficial].
++
++3.  **Scale Initialization:**
++    *   Compute the distance to the $k$-nearest neighbors (KNN) for each point in the input cloud. Common $k$ is 50 [S3, unofficial].
++    *   Calculate the mean KNN distance $d$.
++    *   Apply a scaling factor $s_{init}$ (typically 1.5 for depth-guided, or derived from a base distance) [S2, S5, unofficial].
++    *   Compute the log-scale pre-activation:
++        $$
++        \mathbf{s} = \log(\sqrt{d^2}) \quad \text{or} \quad \mathbf{s} = \log(\sqrt{\max(d^2, \epsilon)})
++        $$
++        where $\epsilon = 10^{-7}$ prevents numerical instability [S5, unofficial].
++    *   Replicate this value across the three dimensions (x, y, z) for isotropic scaling, or use distinct distances for anisotropic scaling [S1, S3, unofficial].
++    *   **Clamping:** During training, actual scales are clamped to a maximum value (e.g., 10.0) to prevent excessively large Gaussians [S5, unofficial].
++
++4.  **Opacity Initialization:**
++    *   Initialize the logit pre-activation value.
++    *   **Standard:** Set to 8.0, which yields $\sigma(8.0) \approx 0.9997$ [S3, unofficial].
++    *   **Alternative:** Set to the logit of 0.1, i.e., $\log(0.1 / 0.9)$ [S1, unofficial].
++    *   **Clamping:** Clamp the initial logit value to the range $[\log(10^{-4}/0.99), \log(0.99/10^{-4})]$ to prevent extreme values during optimization [S5, unofficial].
++
++5.  **Color (SH) Initialization:**
++    *   **Degree 0 ($f_{dc}$):** Convert input RGB colors (normalized to $[-0.5, 0.5]$) by dividing by the SH basis constant $C_0 = 0.28209479177387814$:
++        $$
++        f_{dc} = \frac{\mathbf{c}_{rgb}}{C_0}
++        $$
++    *   **Higher Degrees ($f_{rest}$):** Initialize to zeros [S1, S5, unofficial].
++    *   **Metallic/Roughness (if applicable):** Initialize metallic to 0.5 and roughness to 0.1 [S2, unofficial].
++
++6.  **Covariance Construction (Runtime/Forward Pass):**
++    *   Construct the diagonal scaling matrix $S = \text{diag}(e^{\mathbf{s}})$ [S5, unofficial].
++    *   Normalize the rotation quaternion $\mathbf{q}$ to unit length and convert to a rotation matrix $R \in \mathbb{R}^{3 \times 3}$ [S5, unofficial].
++    *   Compute the 3D covariance matrix:
++        $$
++        \Sigma = R S S^T R^T
++        $$
++    *   **2D Projection:** For rendering, transform to camera space. Let $W$ be the world-to-camera rotation matrix and $J$ be the Jacobian of the perspective projection:
++        $$
++        J = \begin{bmatrix}
++        f/z & 0 & -f x/z^2 \\
++        0 & f/z & -f y/z^2
+         \end{bmatrix}
+         $$
++        where $f$ is focal length, $z$ is depth (clamped with $10^{-7}$), and $(x,y)$ are camera-space coordinates [S5, unofficial].
++    *   Compute 2D covariance:
++        $$
++        \Sigma' = J W \Sigma W^T J^T
++        $$
++    *   Add numerical stability bias $\beta = 0.3$ to the diagonal elements:
++        $$
++        \Sigma'_{ii} \leftarrow \Sigma'_{ii} + 0.3 \quad \text{for } i \in \{0, 1\}
++        $$
+         [S5, unofficial].
+-    *   Compute 2D covariance: $\mathbf{\Sigma}'_i = \mathbf{J} \mathbf{W} \mathbf{\Sigma}_i \mathbf{W}^T \mathbf{J}^T$, where $\mathbf{W}$ is the world-to-camera rotation matrix [S5, unofficial].
+-    *   Add numerical stability bias: $\mathbf{\Sigma}'_i[0,0] += 0.3$, $\mathbf{\Sigma}'_i[1,1] += 0.3$ [S5, unofficial].
+ 
+ **Pseudocode:**
+@@ -87,63 +107,59 @@
+ import numpy as np
+ 
+-def initialize_gaussians(points_xyz, points_rgb, num_gaussians=None):
+-    """
+-    Initialize 3D Gaussian parameters from a point cloud.
++def initialize_gaussians(point_cloud_xyz, point_cloud_rgb, num_neighbors=50):
++    """
++    Initialize 3D Gaussian parameters from a COLMAP-style point cloud.
+     
+     Args:
+-        points_xyz: (N, 3) array of XYZ coordinates.
+-        points_rgb: (N, 3) array of RGB colors in [0, 1].
++        point_cloud_xyz: numpy array of shape (N, 3)
++        point_cloud_rgb: numpy array of shape (N, 3), values in [0, 1]
++        num_neighbors: int, number of neighbors for KNN distance estimation
+         
+     Returns:
+-        Dictionary of initialized parameters.
+-    """
+-    N = points_xyz.shape[0]
++        dict of initialized torch tensors
++    """
++    N = point_cloud_xyz.shape[0]
+     device = torch.device('cuda')
+     
+-    # 1. Means
+-    xyz = torch.tensor(points_xyz, dtype=torch.float32, device=device)
+-    # Center the point cloud
+-    xyz = xyz - xyz.mean(dim=0, keepdim=True)
+-    
+-    # 2. Rotations (Identity)
++    # 1. Positions
++    xyz = torch.tensor(point_cloud_xyz, dtype=torch.float32, device=device)
++    
++    # 2. Scales (Isotropic from KNN)
++    # Compute KNN distances (simplified: using Euclidean distance to all points for demo)
++    # In practice, use a KD-tree for efficiency
++    dists = torch.cdist(xyz, xyz)
++    # Exclude self (distance 0) by setting diagonal to inf
++    dists.fill_diagonal_(float('inf'))
++    # Get mean of k nearest neighbors
++    k_dists, _ = torch.topk(dists, k=num_neighbors, largest=False)
++    mean_knn_dist = torch.mean(k_dists, dim=1) # Shape (N,)
++    
++    # Log-scale initialization
++    # Clamp minimum distance to avoid log(0)
++    min_dist = 1e-7
++    log_scales = torch.log(torch.sqrt(torch.clamp(mean_knn_dist, min=min_dist)))
++    
++    # Replicate to 3 dimensions for isotropic scaling
++    scaling = log_scales.unsqueeze(1).repeat(1, 3)
++    
++    # 3. Rotations (Identity)
+     rotation = torch.zeros((N, 4), dtype=torch.float32, device=device)
+-    rotation[:, 0] = 1.0  # w=1, x=y=z=0
+-    
+-    # 3. Scales (KNN-based or Fixed Base)
+-    # Compute KNN distances (simplified for demo; use KDTree in practice)
+-    # Assuming points_xyz is already centered
+-    dists = torch.cdist(xyz, xyz)
+-    # Exclude self (diagonal is 0)
+-    dists = dists + torch.eye(N, device=device) * 1e9
+-    k = 50
+-    knn_dists, _ = torch.topk(dists, k, dim=1, largest=False)
+-    mean_knn_dist = knn_dists[:, :k].mean(dim=1)
+-    
+-    # Fixed base distance approach [S5, unofficial]
+-    base_dist = 0.1
+-    dist2 = torch.clamp(mean_knn_dist, min=1e-7)
+-    # Use max(0.1, dist2) as per source logic description, though source says "clamped minimum of 0.1"
+-    # Source [S5, unofficial]: "dist2 as clamped minimum of 0.1 (min 1e-7)" -> likely means clamp dist2 to >= 1e-7, 
+-    # but also mentions base distance 0.1. Let's follow [S5, unofficial] strictly:
+-    # "Compute dist2 as clamped minimum of 0.1 (min 1e-7)" is ambiguous. 
+-    # Another interpretation: dist2 = max(0.1, knn_dist). 
+-    # Let's use the explicit formula from [S5, unofficial]: log(sqrt(dist2)) where dist2 is derived from KNN.
+-    # We will use the mean KNN distance directly, clamped.
+-    dist2 = torch.clamp(mean_knn_dist, min=1e-7)
+-    
+-    scaling = torch.log(torch.sqrt(dist2)).unsqueeze(1).repeat(1, 3)
+-    
+-    # 4. Opacities (Logits)
+-    # Target sigmoid value ~0.9997 -> logit 8.0 [S3, unofficial]
+-    opacity_logit = torch.full((N, 1), 8.0, dtype=torch.float32, device=device)
+-    # Clamp to [1e-4, 0.99] probability range -> logit range
+-    # log(1e-4/0.99) ~ -9.21, log(0.99/1e-4) ~ 9.21
+-    opacity_logit = torch.clamp(opacity_logit, min=-9.21, max=9.21)
++    rotation[:, 0] = 1.0 # w=1, x=y=z=0
++    
++    # 4. Opacity (Logit of 0.5 or 8.0)
++    # Using 8.0 as per [S3, unofficial]
++    opacity = torch.full((N, 1), 8.0, dtype=torch.float32, device=device)
+     
+     # 5. Colors (SH Degree 0)
+     C0 = 0.28209479177387814
+-    rgb_normalized = (torch.tensor(points_rgb, dtype=torch.float32, device=device) - 0.5) / 0.5 # Normalize to [-0.5, 0.5]
++    # Normalize RGB to [-0.5, 0.5] then divide by C0
++    rgb_normalized = torch.tensor(point_cloud_rgb, dtype=torch.float32, device=device) * 2.0 - 1.0
+     features_dc = rgb_normalized / C0
+-    features_rest = torch.zeros((N, 3, 15), dtype=torch.float32, device=device) # Assuming SH degree 3
++    features_dc = features_dc.unsqueeze(1) # Shape (N, 1, 3)
++    
++    # Higher degree SH coefficients initialized to 0
++    # Assuming degree 3, there are 15 coefficients total, 1 is dc, so 14 rest
++    num_rest_coeffs = 14
++    features_rest = torch.zeros((N, num_rest_coeffs, 3), dtype=torch.float32, device=device)
+     
+     return {
+@@ -151,5 +167,5 @@
+         'scaling': scaling,
+         'rotation': rotation,
+-        'opacity': opacity_logit,
++        'opacity': opacity,
+         'features_dc': features_dc,
+         'features_rest': features_rest
+@@ -159,18 +175,38 @@
+     """
+     Compute 3D covariance matrix from scaling and rotation.
+-    """
+-    # Scaling to matrix
+-    s = torch.exp(scaling)
+-    # Clamp max scale
+-    s = torch.clamp(s, max=10.0)
+-    S = torch.diag_embed(s)
+-    
+-    # Rotation from quaternion
++    
++    Args:
++        scaling: tensor (N, 3)
++        rotation: tensor (N, 4)
++        
++    Returns:
++        covariance: tensor (N, 3, 3)
++    """
++    # Convert quaternions to rotation matrices
++    # Assuming a standard quaternion_to_rotation_matrix function
++    R = quaternion_to_rotation_matrix(rotation) # Shape (N, 3, 3)
++    
++    # Create diagonal scaling matrix
++    # S = diag(exp(scaling))
++    s = torch.exp(scaling) # Shape (N, 3)
++    S = torch.diag_embed(s) # Shape (N, 3, 3)
++    
++    # Sigma = R S S^T R^T
++    # Since S is diagonal, S S^T = diag(s^2)
++    SS_T = torch.diag_embed(s**2)
++    covariance = R @ SS_T @ R.transpose(1, 2)
++    
++    return covariance
++
++def quaternion_to_rotation_matrix(q):
++    """
++    Convert quaternions to rotation matrices.
++    q: (N, 4) with format [w, x, y, z]
++    """
+     # Normalize quaternions
+-    q = torch.nn.functional.normalize(rotation, dim=1)
+-    # Convert to rotation matrix (simplified for demo, use standard library in practice)
+-    # q = [w, x, y, z]
+-    w, x, y, z = q[:, 0:1], q[:, 1:2], q[:, 2:3], q[:, 3:4]
+-    
++    q = torch.nn.functional.normalize(q, dim=1)
++    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
++    
++    # Standard formula
+     R = torch.zeros((q.shape[0], 3, 3), device=q.device)
+     R[:, 0, 0] = 1 - 2 * (y**2 + z**2)
+@@ -184,7 +220,5 @@
+     R[:, 2, 2] = 1 - 2 * (x**2 + y**2)
+     
+-    # Sigma = R S S^T R^T
+-    Sigma = R @ S @ S.transpose(1, 2) @ R.transpose(1, 2)
+-    return Sigma
++    return R
+ ```
+ 
+@@ -198,32 +232,43 @@
+ 
+ ### [Temporal Point Cloud Initialization via Chamfer Distance Minimization](6954-temporal-point-cloud-initialization-via-chamfer-distance-min.md)
+-A technique to reduce training time for dynamic video scenes by initializing the point cloud of the current frame using the learned model from the previous frame, leveraging temporal correlation between nearby frames.
++This method reduces training time for dynamic video scenes by initializing the point cloud of the current frame using the learned model from the previous frame, leveraging temporal correlation between nearby frames. It sets itself apart from static initialization methods by explicitly optimizing geometric alignment between consecutive frames via Chamfer distance minimization before refining radiance parameters.
+ 
+ ### [Gaussian Geometry Parameters Prediction](8442-gaussian-geometry-parameters-prediction.md)
+-Gaussian Geometry Parameters Prediction is a feed-forward method for initializing and refining 3D Gaussian primitives in a unified global volume, primarily designed for urban scene reconstruction. It solves the problem of redundant, inconsistent, and ghosted primitives that arise in existing pixel-aligned feed-forward methods by accumulating depth priors into a global point cloud and refining geometry via a 3D convolutional network. Unlike [Gaussian Splatting Initialization and Parameterization](2313-gaussian-splatting-initialization-and-parameterization.md), which typically relies on per-scene optimization or simple static initialization, this method predicts geometry parameters (position offsets, opacity, covariance) directly from a learned feature volume, enabling fast, consistent reconstruction without iterative optimization.
++Gaussian Geometry Parameters Prediction is a feed-forward method that predicts the geometric attributes (position, opacity, and covariance) of 3D Gaussians from a global volumetric feature representation, rather than regressing them per-pixel from 2D features. It solves the problem of multi-view inconsistencies and ghosting artifacts common in pixel-aligned 3DGS methods by accumulating depth information into a unified global volume and refining Gaussian locations in 3D space. Unlike standard initialization which fixes geometry from point clouds, this method learns to adjust initial noisy positions via recursive offset prediction to achieve faithful reconstruction.
+ 
+ ### [Background Hemisphere Initialization](8446-background-hemisphere-initialization.md)
+ Background Hemisphere Initialization addresses the problem of rendering distant background regions (typically hundreds of meters away) in large-scale urban or outdoor scenes where standard foreground Gaussian splatting fails due to sparsity and occlusion. It models the background as a fixed-radius hemisphere that moves with the camera to maintain a constant relative distance, allowing for efficient regression of Gaussian parameters from projected 2D colors. It differs from sibling methods like [Gaussian Model Initialization](2349-gaussian-model-initialization.md) and [Random Large-Variance Initialization](6129-random-large-variance-initialization.md) by explicitly structuring the background geometry as a moving hemisphere rather than initializing points within the foreground volume or randomly in space.
+ 
++### [ReSplat Initialization](10957-resplat-initialization.md)
++ReSplat Initialization predicts an initial set of 3D Gaussians from a sparse point cloud by aggregating local and global 3D context to compensate for information loss incurred by downsampling the input point cloud by 16x. Unlike naive prediction methods that directly map point features to Gaussian parameters, this method uses a transformer-based encoder to enrich features with neighborhood context before decoding. It sets the stage for the subsequent Recurrent Gaussian Update by providing a structured initial state $\mathcal{G}^0$.
++
+ ### Neural Point Cloud Initialization from COLMAP
+-A method to initialize the neural point cloud and their features for Point-NeRF using an external point cloud reconstruction (specifically COLMAP). It solves the problem of how to provide initial positions, variances, and feature vectors for the neural points [S6].
+-1.  Initialize the variance parameter $\gamma_i$ for each point $p_i$ to $0.3$ [S6].
+-2.  During optimization, the confidence score of valid points is pushed to $1$ [S6].
+-3.  To acquire the feature vector $f_i$ for a point $p_i$, first rule out all views where the point is occluded by other points [S6].
+-4.  Find the view where the camera is closest to the point $p_i$ [S6].
+-5.  Unproject the point $p_i$ onto the feature maps extracted by the Image Feature Extraction 2D CNN (Gf) from the selected closest view to obtain $f_i$ [S6].
++A method to initialize the neural point cloud and their features for Point-NeRF using an external point cloud reconstruction (specifically COLMAP). It solves the problem of how to provide initial positions, variances, and feature vectors for the neural points. Initialize the variance parameter $\gamma_i$ for each point $p_i$ to 0.3. During optimization, the confidence score of valid points is pushed to 1. To acquire the feature vector $f_i$ for a point $p_i$, first rule out all views where the point is occluded by other points. Find the view where the camera is closest to the point $p_i$. Unproject the point $p_i$ onto the feature maps extracted by the Image Feature Extraction 2D CNN (Gf) from the selected closest view to obtain $f_i$ [S7].
+ 
+ ### Binary Gaussian Hierarchy Construction
+-The hierarchy is a binary tree. Leaf nodes contain the full set of optimized Gaussian properties (base color, SH coefficients, position, covariance). Internal nodes store merged approximations of their two child nodes [S7, unofficial].
++The hierarchy is a binary tree. Leaf nodes contain the full set of optimized Gaussian properties (base color, SH coefficients, position, covariance). Internal nodes store merged approximations of their two child nodes [S8, unofficial].
++
++### Single Ellipsoid Initialization
++Initializes a single ellipsoid from a set of 3D points using Principal Component Analysis (PCA) to determine orientation, center, and radii. $r_{\min}$: Minimum allowed radius to avoid numerical problems. Typical value: 0.005. $\alpha$: Scaling factor to ensure points are mostly covered. Typical value: 3 [S9].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Initialization is $O(N \log N)$ or $O(N^2)$ depending on the KNN implementation, where $N$ is the number of input points [S1, S3, unofficial]. Random initialization is $O(N)$ [S4, unofficial].
+-*   **Memory Complexity:** $O(N)$ to store the Gaussian parameters [S3, S5, unofficial].
+-*   **Performance:** COLMAP initialization yields acceptable reconstruction quality (35.201 PSNR) but has slow initialization time (6.0 min) and slower inference (60.28 FPS) compared to random initialization (6.023 PSNR, 0.1 sec init, 197.78 FPS) [S4, unofficial]. EndoGaussian's method achieves best quality (37.849 PSNR) with fast init (2.0 sec) and fast inference (195.09 FPS) [S4, unofficial].
+-*   **Strengths:** Structured initialization from SfM points leads to faster convergence and better final quality than random initialization [S4, unofficial].
+-*   **Limitations:** Requires a good SfM reconstruction. If SfM is sparse or absent, random or alternative initialization is needed [S1, unofficial].
++**Time and Memory Complexity:**
++*   Initialization time is dominated by the SfM process if not pre-computed. SfM initialization takes approximately 6.0 minutes on average scenes, compared to 0.1 seconds for random initialization [S4, unofficial].
++*   Memory usage is linear with respect to the number of Gaussians $N$, storing position, scale, rotation, opacity, and SH coefficients [S5, unofficial].
++
++**Measured Performance:**
++*   On the Average-30K dataset, SfM initialization achieves a PSNR of 26.05, while random initialization drops to 20.42 [S6, unofficial].
++*   In EndoGaussian, COLMAP initialization yields 35.201 PSNR but with slow inference (60.28 FPS), while their optimized method achieves 37.849 PSNR with fast inference (195.09 FPS) [S4, unofficial].
++
++**Strengths and Limitations:**
++*   **Strengths:** Provides geometrically accurate starting points, significantly improving reconstruction quality and convergence speed compared to random initialization [S6, unofficial].
++*   **Limitations:** Requires high-quality SfM data; fails or degrades background quality if SfM points are sparse or missing [S6, unofficial]. Random initialization avoids complete failure but degrades background quality [S6, unofficial].
++
++**When to Use:**
++*   Use SfM initialization for static scenes with sufficient image overlap and texture.
++*   Use Random or Depth-guided initialization when SfM fails or for dynamic scenes where temporal initialization is preferred [S1, S2, unofficial].
+ 
+ ## Background
+-3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S7, unofficial]. The initialization method described here is based on the standard implementation using COLMAP point clouds [S1, S5, unofficial]. Variants like RAIN-GS [S1, unofficial] and EndoGaussian [S4, unofficial] have been developed to address specific limitations.
++Originating from the 3D Gaussian Splatting paper (Kerbl et al., 2023), the method relies on Structure from Motion (SfM) to provide initial 3D points [S6, unofficial]. SfM estimates camera poses, intrinsic parameters, and 3D feature point locations from input images [S6, unofficial]. These points serve as the initial positions for the Gaussian distribution, replacing the random initialization used in earlier neural rendering methods [S6, unofficial]. The approach has been extended to depth-guided initialization using normal maps from depth estimators like Depth Anything [S2, unofficial], and to hierarchical or predictive methods for large-scale or dynamic scenes [S1, S2, S8, unofficial].
+ 
+ ## Sources
+@@ -233,4 +278,6 @@
+ [S4] EndoGaussian: Real-time Gaussian Splatting for Dynamic Endoscopic Scene Reconstruction, https://huggingface.co/papers/2401.12561, fetched 2026-10-30 (unofficial)
+ [S5] metin-yat/mini-splat, https://github.com/metin-yat/mini-splat, fetched 2026-10-28 (unofficial)
+-[S6] Point-NeRF: Point-based Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00536, fetched 2026-10-26
+-[S7] A LoD of Gaussians: Unified Training and Rendering for Ultra-Large Scale Reconstruction with External Memory, https://doi.org/10.48550/arXiv.2507.01110, fetched 2026-10-28 (unofficial)+[S6] GaussianSplatting論文のAblationについての解説・考察, https://qiita.com/kotauchisunsun/items/f1e89f28aa770b8d3b19, fetched 2026-10-29 (unofficial)
++[S7] Point-NeRF: Point-based Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00536, fetched 2026-10-26
++[S8] A LoD of Gaussians: Unified Training and Rendering for Ultra-Large Scale Reconstruction with External Memory, https://doi.org/10.48550/arXiv.2507.01110, fetched 2026-10-28 (unofficial)
++[S9] Learning Scene-Level Signed Directional Distance Function With Ellipsoidal Priors and Neural Residuals., https://doi.org/10.1109/tpami.2026.3688658, fetched 2026-10-26

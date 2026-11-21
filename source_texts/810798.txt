@@ -1,0 +1,1354 @@
+1
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+Uncertainty-Aware RL-Controlled Adaptive
+3D Mapping
+Alpay Ozkan1
+1
+ETH Zurich
+Zurich, Switzerland
+2
+Microsoft
+Zurich, Switzerland
+3
+ETH AI Center
+Zurich, Switzerland
+aoezkan@inf.ethz.ch
+arXiv:2610.00188v1 [cs.LG] 17 Sep 2026
+Tunc Ozan Aydin1
+tunc.aydin@inf.ethz.ch
+Marc Pollefeys1,2
+marc.pollefeys@inf.ethz.ch
+⋆
+Jelena Trisovic 1,3
+jelena.trisovic@inf.ethz.ch
+⋆
+Daniel Barath 1
+danielbela.barath@inf.ethz.ch
+1
+Abstract
+Voxel-based volumetric mapping is fundamental to 3D reconstruction, yet fixedresolution grids remain inherently inefficient – wasting memory in uniform regions and
+losing detail in complex ones. Existing adaptive methods, such as MAP-ADAPT, partially address this by varying resolution based on geometry and user-defined semantic
+class lists, but these heuristics require expert tuning, lack generalization to unseen objects, and provide no explicit mechanism to control memory usage. We propose an adaptive framework that refines voxels based on semantic entropy, which captures label uncertainty, together with geometric curvature and texture richness as scene complexity cues,
+yielding principled resolution allocation without reliance on semantic taxonomies. To
+make the accuracy-memory trade-off explicit and user-controlled, we further introduce a
+reinforcement learning agent that learns voxel subdivision policies under a user-specified
+target memory budget, replacing hand-tuned thresholds with a single intuitive control parameter. The resulting multi-resolution TSDF achieves higher geometric accuracy, better semantic consistency, and improved memory-accuracy trade-offs compared to MAPADAPT and fixed-resolution baselines on both synthetic and real-world datasets. Our
+code and models are available at https://github.com/alpayozkan/UnRL.
+Introduction
+Autonomous systems rely on 3D maps that capture geometry, color, and semantics to perceive, navigate, and interact with their environment. Volumetric representations based on
+Truncated Signed Distance Fields (TSDFs) [17, 18, 19] have become the standard for dense
+reconstruction, offering accurate geometry and consistent integration over time. However,
+conventional TSDF pipelines employ a fixed voxel resolution, which leads to redundant storage in large homogeneous regions (e.g., walls or floors) and loss of detail in complex areas.
+© 2026. The copyright of this document resides with its authors.
+It may be distributed unchanged freely in print or electronic forms.
+⋆ Equal supervision
+2
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+I have a memory
+budget…
+RGB-D
+Frames
+Sem.
+Compl.
+Geom.
+Compl.
+Reconstruction
+Memory
+Consumption
+Texture
+Compl.
+Multi-Resolution Semantic
+and RGB Mesh
+Figure 1: Given RGB-D input frames, our method computes semantic entropy, geometric
+complexity, and texture complexity as voxel-level subdivision signals. Semantic entropy
+highlights object boundaries where multiple labels compete; geometric complexity responds
+to corners and curved surfaces (e.g., sofa armrests); and texture complexity activates on visually detailed regions such as carpets. These complexity cues drive selective voxel refinement,
+while a reinforcement learning agent uses a user-specified target memory budget to balance
+reconstruction fidelity and storage cost. The resulting multi-resolution TSDF mesh preserves
+high-quality geometry, semantics, and appearance where it matters most.
+Recent work has therefore shifted toward adaptive mapping, where voxel resolution is
+adjusted according to scene complexity. MAP-ADAPT [31] represents an important step in
+this direction, combining geometric cues and manually defined semantic classes to control
+voxel subdivision. By allocating higher resolution to semantically meaningful regions, it
+achieves compact multi-resolution 3D voxel maps while maintaining fidelity. However, its
+refinement policy remains tied to user-specified semantic classes and fixed geometric rules,
+requiring dataset- or task-specific design choices and providing no class-agnostic measure
+of semantic ambiguity or texture complexity. Moreover, these deterministic rules provide no
+principled mechanism to manage the trade-off between reconstruction quality and limited
+storage capacity.
+We address these limitations by reformulating adaptive mapping as a data-driven refinement problem guided by semantic uncertainty and geometric/texture complexity. Each voxel
+maintains a semantic class distribution whose entropy quantifies label uncertainty, complemented by geometric curvature and texture richness scores that capture local scene complexity. Subdivision is triggered when semantic uncertainty is high or when scene complexity
+indicates that coarse resolution cannot faithfully represent the local geometry or appearance,
+ensuring that memory is devoted to informative regions rather than predefined object categories. This data-driven refinement produces adaptive maps that respond dynamically to
+scene complexity, semantic ambiguity, and visual richness.
+While these signals provide a principled refinement criterion, the deterministic variant
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+3
+relies on threshold selection and provides no direct mechanism to target a desired memory
+operating point. To overcome this, we introduce a reinforcement learning agent that learns to
+control subdivision under a user-defined target storage budget. The agent observes local and
+global voxel statistics and learns subdivision policies that maximize reconstruction accuracy
+while penalizing budget overuse (see Figure 1). The target budget corresponds directly to a
+physical memory amount (e.g., in megabytes), providing an intuitive interface for resourceaware mapping.
+Our main contributions are as follows:
+• Unified adaptive mapping framework: We integrate geometric, semantic, and texture complexity signals into a multi-resolution TSDF representation that generalizes
+beyond class-based heuristics and scales with available memory.
+• Uncertainty- and complexity-driven adaptivity: We trigger voxel refinement using semantic entropy as a measure of label uncertainty, complemented by geometric
+curvature and texture richness as scene complexity signals, providing a unified and
+data-driven subdivision criterion.
+• Reinforcement-learned subdivision policy: We train an RL agent using Proximal
+Policy Optimization (PPO) [24] to decide when and where to subdivide, learning
+budget-aware policies that trade map fidelity against storage cost.
+2
+Related Work
+Volumetric Mapping. Volumetric 3D reconstruction based on Truncated Signed Distance
+Fields (TSDFs) is widely used for dense scene mapping [17, 18, 19]. These methods integrate RGB-D observations into voxel grids, providing continuous surface representations
+and free-space reasoning. To mitigate the memory footprint of dense grids, hierarchical data
+structures such as voxel hashing [8, 18] and octrees [6, 27] have been proposed to allocate
+voxels only near surfaces. While these systems achieve real-time performance and scalable
+mapping, they typically rely on a fixed voxel resolution, which limits their ability to represent both fine local details and large-scale environments efficiently. Neural implicit methods
+such as NeRF [15] and 3D Gaussian Splatting [9] target image rendering rather than explicit volumetric mapping, and do not produce TSDF grids, semantic labels, or free-space
+representations required for planning and navigation.
+Semantic Mapping. Integrating semantic understanding into 3D mapping has been central to advancing scene perception. Early works like SemanticFusion [12] fused per-frame
+semantic predictions into surfel-based reconstructions, while Kimera [22] combined realtime metric reconstruction with semantic fusion into a unified volumetric mesh. Instanceand panoptic-level methods [5, 13, 16, 28] further extended these ideas by maintaining perobject volumes or combining instance labels. However, these pipelines generally operate at
+uniform spatial resolution, distributing computational and memory resources equally across
+all regions, independent of their semantic or geometric complexity.
+Adaptive Mapping. To improve efficiency, adaptive techniques dynamically adjust voxel
+resolution based on scene content or task relevance. Geometry-based adaptivity refines regions of high curvature, surface density, or structural complexity [25, 26, 27, 33]. These
+approaches improve geometric fidelity near surfaces but lack semantic or visual awareness.
+Semantic-based adaptivity extends this idea by incorporating object information to guide
+4
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+table
+potted plant
+picture
+chest of drawers
+RGB image
+3D camera pose
+RGB image
+(i) 3D Camera Pose
+chair
+cushion
+bed
+background
+Sem./geo./tex. complexity
+UnRL
+Memory budget
+Block selection
+Voxel subdivision
+Sample blocks
+Semantic
+Semantic3D
+3DMesh
+mesh
+RL policy
+SLAM
+UnRL
+SLAM
+RefineNet
+Refinenet
+Entropies > Thresholds
+8x
+Depth image
+Depth image
+(ii) 2D semantic
+segmentation
+2D semantic
+segmentation
+(iv) w/
+Point cloud
+w/ geoPoint cloud
+sem./geo.
+/tex-/sem-entropy
+/tex. complexity
+512x
+Voxel subdivision
+Un-Map-Adapt
+(a) Input
+(b) Preprocessing
+RGB 3D mesh
+Thresholds
+(c) Semantic Adaptive Mapping
+(d) Output
+Figure 2: Overview. (a) RGB-D frames are fed into (b) a preprocessing stage that estimates
+camera poses via SLAM (similar to [31]), performs 2D semantic segmentation [11], and
+computes per-voxel complexity cues (semantic, geometric, and texture) that highlight object
+boundaries, geometric curvature, and textured regions. (c) Our adaptive mapping refines map
+resolution either through deterministic complexity thresholds (Un-Map-Adapt) or through
+a reinforcement-learning policy (UnRL) allocating resolution under a user-specified target
+memory budget. The RL agent predicts subdivision thresholds for budget-aware refinement.
+(d) The final multi-resolution TSDF map is converted into a high-fidelity mesh.
+subdivision. Panoptic Multi-TSDFs [23] reconstruct separate TSDF volumes per object instance, while MAP-ADAPT [31] combines geometric and semantic cues into a single multiresolution TSDF map. MAP-ADAPT demonstrates real-time adaptive reconstruction by refining user-specified semantic classes, but its reliance on manually defined rules limits generalization to unseen categories and neglects uncertainty in semantic or textural predictions
+that could indicate ambiguous or informative regions.
+Uncertainty and Learning-Based Adaptivity. Several works have incorporated uncertainty
+into mapping, active exploration, and reconstruction. SemanticFusion [12] and Kimera [22]
+maintain probabilistic class distributions per voxel, though uncertainty is not used to influence map structure. Information-theoretic formulations [1, 2] employ entropy and mutual
+information to guide exploration; notably, semantic entropy within a Bayesian Octree has
+been used to drive active exploration via mutual information maximization [1]. Reinforcement learning has similarly been applied to active exploration and mapping [3, 21, 32],
+demonstrating that learned policies can balance performance and efficiency. However, these
+exploration-focused methods determine where to move next rather than how to allocate reconstruction resolution along a fixed trajectory. In contrast, we formulate voxel subdivision
+as an uncertainty-driven refinement problem and leverage reinforcement learning to learn
+adaptive, budget-aware subdivision policies that directly regulate the trade-off between reconstruction fidelity and storage capacity.
+3
+Proposed Method
+We propose an adaptive 3D semantic mapping framework that refines voxel resolution by
+explicitly targeting high-uncertainty regions. We build upon MAP-ADAPT [31], which op-
+5
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+erates on an adaptively subdivided voxel grid and controls subdivision via manually defined
+semantic classes and geometric complexity. In contrast, we (i) reformulate voxel subdivision as an uncertainty-driven refinement problem, using semantic, geometric, and textural
+complexity as proxies to trigger adaptive resolution allocation, and (ii) learn a budget-aware,
+soft-constrained subdivision policy with reinforcement learning (RL) that replaces handtuned thresholds with a single intuitive parameter: the target storage budget.
+Preliminaries. We consider a sequence of RGB-D frames {(Ik , Dk )}Kk=1 with camera poses
+{Ck } and per-frame semantic predictions {Pk }, where Ik and Dk are the input image and
+depth in the k-th frame. The goal is to reconstruct an adaptive-resolution TSDF map M that
+allocates fine resolution only where it meaningfully reduces uncertainty. We adopt a hierarchical voxel hashing structure in the spirit of MAP-ADAPT [31], with three resolution levels
+(coarse: 8 cm, medium: 4 cm, fine: 1 cm voxels). Each voxel vi stores vi = {di , Si , gi ,ti },
+where di ∈ R is the TSDF value, Si ∈ RC denotes the semantic log-scores over C classes,
+gi ∈ R a geometric complexity scalar, and ti ∈ R a texture complexity scalar. Semantic entropy Hisem is derived on-the-fly from the normalized semantic distribution P̂isem obtained
+from Si , while the combined uncertainty proxy hi used by the RL agent is computed from all
+three modalities as defined in Section 3.3. The pipeline is shown in Figure 2.
+3.1
+Uncertainty-Driven Adaptive Mapping
+We propose our uncertainty-aware adaptive mapping pipeline Un-Map-Adapt.
+Voxel uncertainty and complexity measures. Each voxel vi maintains a semantic class
+distribution; geometric and texture complexity are fused as scalar attributes computed in
+the observation domain. Semantic entropy captures label uncertainty across observations,
+motivating refinement at class boundaries; geometric curvature identifies edges and corners
+where coarse voxels lose structural detail; and texture richness flags visually dense regions
+where low resolution causes blurring.
+Semantic entropy. In each voxel, we fuse per-frame class probabilities into semantic logscores Si using a Bayesian update similar to SemanticFusion [12] and Kimera [22]. After
+fusion, the normalized class probabilities are as follows:
+P̂isem (c) =
+exp(Si (c))
+∑Cc′ =1 exp(Si (c′ ))
+,
+c = 1, . . . ,C.
+(1)
+The semantic entropy is then as follows:
+C
+Hisem = − ∑ P̂isem (c) log P̂isem (c).
+(2)
+c=1
+We use entropy as a class-agnostic measure of predictive ambiguity: it increases when
+probability mass is distributed across competing labels and does not depend on which semantic class is most likely, thereby highlighting regions that may benefit from finer resolution.
+Geometric complexity. We estimate geometric complexity using the change-of-curvature
+(CoC) descriptor [20], similar to [31]. For each depth frame, pixels are back-projected to
+3D at stride 2 for efficiency, producing a subsampled point cloud. For each 3D point p, we
+find all neighbors within radius r=0.1 m using a KD-tree and compute the local covariance
+matrix as
+1 n
+C(p) = ∑ (pi − p̄)(pi − p̄)⊤ ,
+(3)
+n i=1
+6
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+where p̄ is the local centroid and n is the number of neighbors. Let λ1 ≥ λ2 ≥ λ3 ≥ 0 be
+the eigenvalues of C(p); the CoC is defined as: CoC(p) = λ3 /(λ1 + λ2 + λ3 ) ∈ [0, 0.33],
+where CoC≈0 indicates a locally planar surface and CoC≈0.33 indicates an isotropic, maximally complex neighborhood. The per-point CoC values are stored at their original pixel
+coordinates (u, v), producing a per-frame 2D complexity map. These per-observation values
+are then fused into each voxel vi as a single scalar gi via confidence-weighted accumulation
+(weight w j = 1/z2j , where z j is the observation depth, downweighting distant measurements)
+as:
+wi gi + w j CoC(p j )
+.
+(4)
+gi ←
+wi + w j
+High gi indicates geometrically complex or curved regions, such as edges and corners, that
+benefit from finer voxel resolution.
+Texture complexity. We compute a per-pixel texture complexity map for each RGB frame using local gradient entropy. We apply 3×3 Sobel filters to obtain horizontal
+and vertical grap
+dients Gx , Gy , and compute per-pixel gradient magnitudes m(u, v) = Gx (u, v)2 + Gy (u, v)2 .
+For each pixel (u, v), we extract a 5×5 neighborhood (with reflect padding at borders), yielding 25 gradient magnitude samples. These are binned into a 20-bin histogram spanning the
+local [mmin , mmax ] range of the window, normalized to a probability distribution {p j }20
+j=1 , and
+Shannon entropy is computed as:
+20
+H tex (u, v) = − ∑ p j log(p j + ε),
+ε = 10−6 .
+(5)
+j=1
+Intuitively, flat textureless regions concentrate gradients in a single bin (low entropy), while
+richly textured regions spread mass across bins (high entropy). The resulting entropy map is
+z-normalized per image over valid pixels as:
+t(u, v) =
+H tex (u, v) − µH
+,
+σH
+(6)
+where µH and σH are the mean and standard deviation computed over all valid pixels in the
+frame, making complexity values comparable across images with different overall texture
+levels. Positive per-pixel values are then projected into 3D and fused into each voxel vi as
+a single scalar ti via confidence-weighted accumulation (weight w j = 1/z2j ) as ti ← (wi ti +
+w j t(u j , v j ))/(wi + w j ). High ti indicates visually rich regions like boundaries and textured
+surfaces that are prioritized for subdivision even when geometric complexity is low.
+Deterministic complexity-threshold subdivision. MAP-ADAPT subdivides voxels according to manually specified semantic classes and geometric complexity thresholds. We
+replace these class-based rules with per-modality complexity thresholds. For a voxel at level
+ℓ ∈ {coarse, medium}, subdivision is triggered if any of the following holds: Hisem > τℓsem ,
+geo
+gi > τℓ , ti > τℓtex . If subdivision is triggered, the parent vi is replaced by nℓ of its children
+(k) n
+ℓ
+{vi }k=1
+, whose initial TSDF and semantic fields are interpolated from the parent and neighboring voxels. This can be interpreted as refining voxels in which at least one modality exhibits high complexity. The semantic threshold is shared across both levels, while the geometry and texture thresholds are level-specific for the coarse-to-medium and medium-to-fine
+geo
+geo
+transitions. Defaults are τ sem =0.10, τlo =0.05, τhi =0.10, τlotex =1.0, τhitex =2.0, calibrated
+by inspecting complexity distributions on a held-out training scene. This deterministic variant removes dependence on predefined class lists from [31], but it still requires hand-tuning
+7
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+thresholds and is not budget-aware. Table 9 analyzes sensitivity to these thresholds, showing
+that their selection jointly determines the accuracy–memory operating point.
+3.2
+TSDF Integration and Field Updates
+For each frame k, we lift pixels (u, v) with depth z into 3D points p = π −1 (u, v, z) and cast
+rays from the camera center to p into the voxel grid. Voxels whose centers fall within a
+truncation band [z − µ, z + µ] are updated. Each observation j contributes with weight w j =
+1/z2j (downweighting distant measurements). For a voxel vi , the TSDF value di and its
+weight wi are updated as
+di ←
+wi di + w j d j
+,
+wi + w j
+wi ← wi + w j .
+(7)
+Semantic fusion (logit accumulation). Instead of directly accumulating probabilities, each
+voxel maintains a vector of log-scores (logits) Si ∈ RC . Given a per-frame class probability vector Pj ∈ [0, 1]C at the projected point (with ∑c Pj (c) = 1), we form an updated logit
+proposal as
+
+prop
+Si (c) = Si (c) + w j log Pj (c) + ε ,
+(8)
+where w j is the observation weight and ε is a small constant to avoid log 0. We apply an
+exponential moving average:
+prop
+Si (c) ← (1 − λ ) Si (c) + λ Si
+(c),
+(9)
+with fusion rate λ ∈ (0, 1]. Setting λ = 1 recovers simple additive accumulation Si ← Si +
+w j log Pj . To obtain a normalized class distribution for entropy or rendering, we compute the
+stable softmax as:
+
+exp Si (c) − mi
+,
+P̂isem (c) =
+mi = max Si (c).
+(10)
+c
+∑c′ exp Si (c′ ) − mi
+Finally, semantic entropy is obtained by:
+C
+Hisem = − ∑ P̂isem (c) log P̂isem (c).
+(11)
+c=1
+3.3
+Budget-Aware RL Subdivision Policy (UnRL)
+Although the uncertainty formulation above is principled, it still requires manual threshold
+selection and provides no direct mechanism to target a desired global storage budget. Thus,
+we cast adaptive subdivision as a sequential decision problem and train an RL agent to choose
+complexity thresholds per region while penalizing budget overuse.
+Spatial blocking and uncertainty proxy. For each frame, we cluster voxels into spatial
+blocks of fixed size (e.g., 0.5 m) using a grid index. Let B = {1, . . . , B} be the set of blocks
+and Vb the voxels assigned to block b. For each voxel vi ∈ Vb , we compute a normalized
+uncertainty proxy as hi = w̃sem H̃isem + w̃geo g̃i + w̃text˜i , where H̃isem = Hisem / logC, with C
+the number of semantic classes, g̃i = min(gi , 0.333)/0.333, and t˜i = min(ti , 3.0)/3.0 denote
+the per-voxel semantic entropy, geometric complexity, and texture complexity normalized to
+[0, 1], and w̃sem = w̃geo = w̃tex = 0.33 are fixed equal weights used across all datasets.
+8
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+For each block b, we compute its mean and standard deviation as:
+s
+1
+1
+µb =
+hi , σb =
+∑ (hi − µb )2 .
+|Vb | i∈∑
+|V
+b | i∈Vb
+Vb
+(12)
+We then importance-sample N blocks with probabilities proportional to µb , focusing the
+agent on informative regions over large uniform areas. Tables 6 and 7 analyze the spatial
+block size and number of sampled blocks, respectively, showing stable performance around
+the default configuration.
+Observation space. The agent observes the statistics of N sampled blocks and global summary variables. The observation state is as follows:
+s = [µ1 , σ1 , . . . , µN , σN , h̄, σ (h), ρused , ρbudget ],
+(13)
+where h̄ and σ (h) are the mean and standard deviation of hi over all voxels in the frame,
+ρused ∈ [0, 1] is the fraction of the voxel budget currently consumed, and ρbudget is the fixed
+target budget ratio for the current agent.
+Action space and subdivision rule. For each sampled block b, the agent predicts a pair
+of complexity thresholds (τ0,b , τ1,b ) from a discrete set T = {0.0, 0.025, 0.05, 0.1, 0.25, 0.5}.
+The environment encodes this as a MultiDiscrete action over 2N indices into T . For voxels
+in block b, the predicted thresholds induce a three-level decision:
+
+
+hi ≤ τ0,b ,
+coarse,
+level(vi ) = medium, τ0,b < hi ≤ τ1,b ,
+(14)
+
+
+fine,
+hi > τ1,b .
+Each subdivision decision updates a voxel budget counter, with coarse, medium, and fine
+levels incurring different costs; the medium level contributes a fraction αmid ∈ (0, 1) of the
+fine-level budget cost, serving as a cost-effective intermediate.
+Supervision losses and reward. To provide a training signal, we precompute high-resolution
+reference reconstructions at 1 cm voxel size using Voxblox [19]. Each coarse (8 cm) parent
+voxel maintains up to 83 child slots at the finest (1 cm) resolution, populated from this reference; only children with nonzero observation weight contribute to the loss computation.
+For each lower-resolution voxel, we derive per-voxel losses by comparing its semantic label,
+RGB color, and TSDF value to these aggregated child voxels.
+Concretely, Lsem is the fraction of child voxels whose semantic label differs from the
+parent (indicator-based, range
+√ [0, 1]); Ltex is the mean L2 RGB distance between parent
+and children normalized by 3 (range [0, 1]); and Lgeo is the mean L1 TSDF difference
+normalized by the truncation distance 2µ (range [0, 1]). We denote these normalized losses
+by Lsem , Ltex , Lgeo ∈ [0, 1]. They are combined into a single reconstruction loss as follows:
+L = wsem Lsem + wtex Ltex + wgeo Lgeo ,
+(15)
+with equal weights wsem = wtex = wgeo = 0.33, fixed across all datasets and shared with the
+proxy weights used in hi . Table 8 evaluates sensitivity to the reward-weight configuration
+and shows that balanced settings yield similar performance. For voxel vi , we denote the
+resulting combined loss by Li .
+At each step, we compute a per-voxel reward that encourages subdivision where it reduces reconstruction loss while penalizing unnecessary refinement. For a voxel assigned to
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+level ℓ ∈ {coarse, medium, fine}, we use:
+
+
+ℓ = coarse,
+−Li ,
+(ℓ)
+ri = αmid (Li − λsub ), ℓ = medium,
+
+
+Li − λsub ,
+ℓ = fine,
+9
+(16)
+where λsub > 0 is a subdivision penalty and αmid ∈ (0, 1) downweights the effect of medium
+resolution relative to fine. Intuitively, subdividing is only beneficial when the expected improvement in reconstruction outweighs the subdivision cost. The step reward is obtained
+by averaging over all updated voxels and computing a temporal difference relative to the
+previous step to stabilize learning.
+Budget penalty. Let Nlarge be the number of 8 cm voxels required to fill the bounding box of
+the scene, computed once at episode initialization from the known scene extent. We define a
+per-scene budget as Nbudget = ρbudget Nlarge , where ρbudget ∈ (0, 1] is the fixed budget ratio for
+the current agent. Given the fixed storage footprint sv (in bytes) per voxel, this corresponds to
+a target memory Mtarget = Nbudget sv , i.e., a target storage budget in MB or GB. Let Nsub denote
+the current effective number of subdivided voxels (medium and fine levels, accounting
+ for
+their relative cost). We compute the used fraction as ρused = min Nsub /Nbudget , 1.0 . A
+penalty is applied when ρused exceeds an offset ρ0 (e.g., 0.7 of the allocated memory) as:
+(
+0,
+ρused ≤ ρ0 ,
+rbudget =
+(17)
+βbudget (ρused − ρ0 ), ρused > ρ0 ,
+where βbudget < 0 controls the severity of overuse. The total reward becomes rt = rt +
+rbudget , with rt denoting the mean voxel-level reward. This formulation applies a budgetaware soft constraint: rather than a formal hard constraint with satisfaction guarantees, the
+penalty makes sustained budget violations suboptimal during training, empirically yielding
+tight budget adherence at inference.
+Training. We train the policy using PPO [24], following a reinforcement-learning formulation in which each episode corresponds to a complete scene and the agent sequentially selects
+thresholds for blocks across frames. We train separate agents for different fixed budget ratios
+ρbudget , each targeting a different memory regime.
+Inspired by RL-VO [14], which uses cross-attention for variable-length RL observations,
+we adopt a PerceiverIO architecture [7] for the variable number of sampled blocks N. Each
+block’s (µb , σb ) pair is a key–value input; four learned latent queries compress all block
+features into a fixed 256-dim representation processed by an MLP to produce the action
+distribution over 2N threshold indices. The value network additionally receives the global
+critic features (h̄, σ (h), ρused , ρbudget ), focusing the critic on budget context.
+We train our reinforcement-learning agent on 50 scenes randomly sampled from the
+ScanNet training split [4], disjoint from all evaluation scenes. Each scene provides a sequence of RGB-D frames with corresponding camera poses and precomputed 1 cm Voxblox
+reference reconstructions used for reward computation. Training is performed for a total of
+10 million environment steps. Each policy is trained separately for approximately 24 hours
+on a single consumer-grade RTX 3080 (10 GB), using the precomputed 1 cm reference reconstructions for reward supervision. At inference, these references are no longer required:
+the user simply selects a desired storage-budget regime, and the corresponding policy predicts subdivision thresholds directly from the observed block uncertainty statistics {µb , σb }.
+Additional training details, including hardware and total training cost, are provided in Appendix C.
+10
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+Table 1: Accuracy and efficiency on ScanNet. We report geometric reconstruction quality
+(completion error and completion ratio within 5 cm), semantic accuracy, and texture fidelity
+(MS-SSIM, LPIPS), all obtained from mesh renderings in held-out test views. Efficiency
+metrics include total voxel count and peak memory usage in gigabytes. Our complexity- and
+uncertainty-driven method (U N -M AP -A DAPT (O URS )) outperforms MAP-ADAPT in all
+accuracy metrics while avoiding reliance on manually specified semantic class lists. The RLbased variants enable explicit control of memory through voxel-budget constraints, offering
+competitive accuracy with reduced memory.
+Method
+Compl. Err↓ Compl.<5cm (%)↑
+Fixed-Resolution Baselines
+VOXBLOX (8 CM ) [19]
+VOXBLOX (4 CM ) [19]
+VOXBLOX (1 CM ) [19]
+3.09
+2.17
+1.44
+81.05
+91.43
+99.24
+Adaptive Methods (w/o Budget Constraint)
+M AP -A DAPT [31]
+1.57
+98.05
+M AP -A DAPT-S PLIT-AVG 1.57 ± 0.038
+98.16 ± 0.332
+U N -M AP -A DAPT (O URS )
+1.48
+98.87
+Adaptive Methods (w/ Budget Constraint)
+U N RL (O URS ) (75%)
+1.72
+U N RL (O URS ) (25%)
+2.48
+95.54
+88.18
+Sem. Acc.↑
+MS-SSIM↑
+LPIPS↓
+0.605
+0.625
+0.628
+0.61
+0.64
+0.65
+0.52
+0.46
+0.40
+0.623
+0.64
+0.42
+0.622 ± 0.001 0.64 ± 0.001 0.43 ± 0.001
+0.624
+0.65
+0.41
+0.610
+0.599
+0.61
+0.59
+0.45
+0.50
+Total Voxels (M) Memory (GB)↓
+0.64
+1.12
+35.5
+0.15
+0.26
+8.46
+26.6
+28.20 ± 0.283
+33.7
+6.35
+6.724 ± 0.672
+8.05
+12.1
+3.8
+2.88
+0.92
+Table 2: Accuracy and efficiency on HSSD. Evaluation on synthetic HSSD scenes, where
+the RL models are not trained on HSSD but transferred directly from ScanNet. We measure
+geometric (completion error and ratio <5 cm), semantic, and texture (MS-SSIM, LPIPS)
+accuracy, together with efficiency (voxel count, memory). Our complexity- and uncertaintydriven method surpasses MAP-ADAPT without requiring any dataset-specific semantic class
+list. The RL-based variants maintain strong performance under strict memory budgets and
+generalize robustly to unseen synthetic environments.
+Method
+Fixed-Resolution Baselines
+VOXBLOX (8 CM ) [19]
+VOXBLOX (1 CM ) [19]
+Compl. Err↓ Compl.<5cm (%)↑ Sem. Acc.↑ MS-SSIM↑ LPIPS↓ Total Voxels (M) Memory (GB)↓
+76.90
+86.55
+0.61
+0.62
+0.69
+0.72
+0.45
+0.31
+0.7
+98.1
+0.16
+23.39
+Adaptive Methods (w/o Budget Constraint)
+M AP -A DAPT [31]
+3.52
+U N -M AP -A DAPT (O URS )
+3.35
+82.33
+84.36
+0.61
+0.62
+0.69
+0.69
+0.39
+0.35
+26.6
+67.3
+6.34
+16.05
+Adaptive Methods (w/ Budget Constraint)
+U N RL (O URS ) (75%)
+3.49
+U N RL (O URS ) (25%)
+3.75
+82.69
+78.75
+0.61
+0.60
+0.67
+0.67
+0.36
+0.44
+59.5
+7.7
+14.20
+1.85
+4
+3.88
+3.18
+Experiments
+We evaluate geometric reconstruction, semantic accuracy, texture fidelity, and efficiency
+on both synthetic and real-world benchmarks, comparing fixed-resolution baselines, MAPADAPT, and our uncertainty- and RL-driven variants.
+Datasets. Following MAP-ADAPT [31], we evaluate on 81 scenes (all disjoint from the 50
+ScanNet scenes used for RL training): (i) HSSD [10] provides photorealistic synthetic indoor
+scenes with noise-free ground-truth geometry, semantics, and textures. (ii) ScanNet [4] contains real-world RGB-D scans with measurement noise, missing depth, and partial semantic
+annotations, testing robustness under realistic conditions.
+Metrics. All metrics are computed on meshes extracted from the adaptive TSDF grids. (i)
+Geometry: mean completion error and completion ratio within 5 cm. (ii) Semantics: vertex
+labels from the fused voxel distribution are rendered into held-out test views via raycasting
+and compared to ground-truth semantic projections, penalizing both label errors and geometric misalignment. (iii) Texture: MS-SSIM and LPIPS [30] on raycasted color renderings.
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+11
+(iv) Efficiency: total voxel count, peak memory, and per-frame integration time. All adaptive
+methods share the same TSDF integration and meshing pipelines [31].
+Baselines and Ablations.
+• Voxblox (8 cm, 4 cm, 1 cm) [19]: Fixed-resolution baselines at each of the three levels
+that the adaptive methods select among during subdivision. The 1 cm grid provides a
+quality upper bound at prohibitive memory cost.
+• M AP -A DAPT [31]: Uses geometric CoC [20] and a manually selected semantic class
+list, limiting generalization. We use the official HSSD configuration; for ScanNet, we
+adopt the same list with unknown classes assigned to coarse resolution.
+• M AP -A DAPT-S PLIT-AVG [31]: MAP-ADAPT averaged over 5 runs with randomly
+sampled semantic class lists, where each list specifies which class labels trigger fineresolution subdivision. This evaluates sensitivity to class list selection when no datasetspecific configuration is available.
+• U N -M AP -A DAPT (O URS ): Our method using semantic entropy, geometric complexity, and texture complexity as subdivision signals, without user-defined class lists.
+• U N RL (O URS ): Budget-aware RL refinement trained at 25% and 75% target voxelbudget regimes, providing budget-aware refinement at inference.
+We omit Multi-TSDF [23], which has been shown to underperform MAP-ADAPT. We further evaluate robustness to the semantic segmentation backbone by replacing RefineNet with
+SegFormer; Table 5 shows consistent accuracy–memory behavior with the alternative backbone.
+Results on ScanNet. Table 1 shows that our uncertainty-driven refinement outperforms
+MAP-ADAPT on almost all metrics. U N -M AP -A DAPT (O URS ) achieves lower completion
+error and higher Compl. <5cm than MAP-ADAPT, and also improves semantic accuracy
+and photometric quality. These improvements primarily arise from automatically identifying informative or uncertain regions for refinement, rather than relying on a preselected class
+list. Importantly, this enables generalization to scenes containing object categories not explicitly known during system design. Because our method additionally refines texture-rich
+regions, which are ignored entirely by MAP-ADAPT, the unconstrained variant naturally allocates more voxels, as expected. This additional cost directly motivates the budget-aware
+RL variant, which recovers the efficiency advantage while preserving the broader refinement
+criteria.
+The RL-based variant learns predictable trade-offs between memory and accuracy. At
+75% of the voxel budget, the reconstruction quality is close to our deterministic model, while
+memory is reduced by more than half. These results confirm that the agent learns to allocate
+resources where they most reduce reconstruction loss. At extreme budgets (25%), the policy
+prioritizes high uncertainty and complexity regions, maintaining key structural and semantic
+details, and gracefully reducing resolution elsewhere.
+Results on HSSD. Table 2 reports results on the synthetic HSSD scenes. Although the
+RL agent and all hyperparameters were trained on ScanNet, our uncertainty-driven model
+again surpasses MAP-ADAPT across geometric and texture metrics. This demonstrates a
+key strength of our formulation: since voxel refinement is triggered by modality-specific
+uncertainty and complexity signals rather than predefined semantic categories, the method
+naturally generalizes to scenes containing previously unseen objects, materials, and textures.
+12
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+Table 3: Ablation of refinement criteria on ScanNet [4]. Adding geometric complexity
+improves reconstruction completeness and semantic consistency, while incorporating texture complexity further enhances all metrics, demonstrating that all three refinement criteria
+contribute complementary information.
+Method
+Compl. Err↓
+Sem. Acc.↑
+MS-SSIM↑
+1.624
+1.546
+1.483
+0.620
+0.622
+0.624
+0.637
+0.642
+0.645
+S EM
+S EM+G EO
+S EM+G EO+T EX
+Table 4: Per-frame integration speed (FPS) on ScanNet. All methods run in real time.
+FPS
+VOX B LOX (8 cm)
+VOX B LOX (1 cm)
+MAP-ADAPT
+U N -M AP -A DAPT (O URS )
+U N RL (O URS ) (25%)
+U N RL (O URS ) (75%)
+37.94
+28.75
+26.24
+23.77
+24.01
+19.16
+The RL-based models show the same trend observed on ScanNet. With a moderate budget (75%), reconstruction accuracy remains nearly indistinguishable from the unconstrained
+version, while memory usage is substantially reduced. Even under tight budgets (25%), the
+policy maintains stable reconstructions, consistently preserving fine geometric structures and
+semantically meaningful regions despite the reduced allocation of high-resolution voxels.
+Runtime. The average per-frame integration times are shown in Table 4. Voxblox with
+large voxels (VOXBLOX (8 CM )) achieves the highest throughput, but at the cost of substantially lower reconstruction accuracy. The uniform fine-resolution baseline (VOXBLOX (1
+CM )) remains computationally efficient, but requires considerably higher memory. Across
+all adaptive methods, runtime remains within a similar range of 19-26 FPS. This demonstrates that both heuristic and learned adaptive subdivision preserve real-time performance.
+The RL-based approach achieves a favorable trade-off: it adapts refinement to the available
+voxel budget, avoiding unnecessary refinement and maintaining consistent frame rates even
+under tight memory settings.
+Memory. Uniform fine-grid reconstruction (VOXBLOX (1 CM )) requires between 20–25 GB
+on larger HSSD scenes, making it impractical for memory-constrained real-time systems. As
+shown in Tables 1 and 2, our deterministic uncertainty-driven method (U N -M AP -A DAPT)
+prioritizes reconstruction quality by refining regions according to semantic uncertainty, geometric complexity, and texture complexity, but does not explicitly constrain memory usage. The RL-based variants address this limitation by targeting scene-specific voxel budgets
+and providing explicit control over the memory–accuracy trade-off. Under the 25% setting, U N RL reduces memory by 9.2× on ScanNet and 12.6× on HSSD relative to the fineresolution Voxblox baseline, while trading some reconstruction accuracy for substantially
+lower memory usage. This budget-aware behavior makes the RL policies particularly wellsuited for systems operating under strict memory constraints, such as mobile or embedded
+platforms.
+Ablation Study. We further ablate the contribution of the proposed refinement criteria
+used for adaptive subdivision. Specifically, we evaluate three variants of our approach: (1)
+using only semantic entropy (Sem), (2) combining semantic entropy and geometric complexity (Sem+Geo), and (3) the full model that additionally incorporates texture complexity
+(Sem+Geo+Tex).
+Table 3 reports the results on ScanNet, where introducing geometric complexity improves completeness and semantic accuracy by focusing refinement on curved or structurally
+intricate geometry. Adding texture complexity further enhances reconstruction fidelity and
+overall stability, as the model allocates fine voxels to visually rich regions. These results con-
+13
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+VOXBLOX (8cm)
+U N RL (25%)
+U N RL (75%)
+M AP -A DAPT
+U N -M AP -A DAPT
+VOXBLOX (1cm)
+Figure 3: Qualitative comparison on HSSD (top three rows) and ScanNet (bottom).
+Columns show increasing reconstruction quality and detail from coarse VOXBLOX (8 cm)
+to the fine-grained 1 cm baseline. Our deterministic uncertainty-driven method (U N -M AP A DAPT) and our budget-aware RL model (U N RL) recover sharper geometry, cleaner object
+boundaries, and more stable textures than M AP -A DAPT, without requiring a hand-crafted
+semantic class list. The RL variants (25%, 75%) adaptively preserve high uncertainty and
+complexity regions while respecting memory budgets, demonstrating controlled degradation
+under tight constraints.
+firm that integrating complementary refinement criteria leads to more balanced optimization
+between geometry, appearance, and semantics.
+Qualitative Results. Figure 3 presents qualitative reconstructions on both ScanNet and
+HSSD, illustrating the effect of adaptive subdivision on geometric detail and texture fidelity.
+Coarse Voxblox (8 cm) produces heavily oversmoothed surfaces, while the fine 1 cm grid
+recovers sharp structure but at prohibitive memory cost (as seen in Tables 1 and 2). Our
+deterministic uncertainty-driven variant (Un-Map-Adapt) yields visibly sharper object contours, cleaner planar regions, and more stable texture reconstructions, particularly around
+edges where semantic entropy, geometric complexity, and texture complexity jointly signal
+the need for fine resolution. The RL-based policies further demonstrate controlled adaptation: with moderate budgets (e.g., 75%), reconstructions closely match the unconstrained
+model, whereas under tight constraints (e.g., 25%), the system preserves the most informative regions such as object boundaries, high-curvature geometry, and textured surfaces, while
+simplifying homogeneous areas. Across all settings, our method achieves a good balance be-
+14
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+tween detail and compactness, and generalizes to HSSD despite the RL agent being trained
+only on ScanNet.
+5
+Conclusion
+This work tackles the absence of explicit, user-controllable accuracy–memory trade-offs in
+current volumetric mapping pipelines. MAP-ADAPT offers limited control through manual
+class lists and class-dependent subdivision levels, but this requires expert tuning, fails to generalize, and becomes impractical in scenes with many small or unseen objects. Our method
+provides a principled and fully automatic alternative: uncertainty- and complexity-driven
+refinement removes dependence on semantic taxonomies, while a reinforcement-learning
+policy enables direct specification of a desired memory budget, with the system allocating
+resolution accordingly. Experiments on real and synthetic datasets show that our approach
+matches or surpasses MAP-ADAPT in geometric, semantic, and texture accuracy, while delivering predictable and stable performance under varying storage constraints. By making
+the target memory budget the primary user-facing parameter, our framework provides a flexible and scalable approach to adaptive 3D mapping. Our evaluation is currently limited to
+the indoor RGB-D setting of ScanNet and HSSD. Nevertheless, the semantic, geometric,
+and texture cues exploited by our approach are not intrinsically tied to indoor scene categories. Extending and adapting the method to outdoor and larger-scale mapping scenarios is
+an important direction for future work.
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+A
+15
+Experiments with SegFormer
+This section provides additional experiments and visualizations. We evaluate our method
+using SegFormer [29], a stronger but heavier segmentation model than RefineNet [11] used
+in the main paper. We present extended qualitative comparisons, and analyze the behavior
+and generalization of the reinforcement learning (RL) agents. Our goal is to demonstrate that
+(i) the proposed entropy-driven framework is robust to changes in the semantic backbone, (ii)
+the accuracy-memory trade-off remains consistent under different segmentation signals, and
+(iii) methods relying on fixed semantic class heuristics, such as MAP-ADAPT, are inherently
+brittle across datasets and segmentation models.
+A.1
+Qualitative Comparisons
+Figure 4 and Figure 5 present visualizations on HSSD and ScanNet for RefineNet and SegFormer, respectively. We visualize textured reconstructions and semantic renderings from
+multiple viewpoints and across all ablations.
+The coarse Voxblox baseline loses fine structure and produces over-smoothed surfaces.
+MAP-ADAPT improves detail, but remains sensitive to its hand-crafted class list, which often fails in the presence of new or ambiguous object categories. Our entropy-based variant
+yields crisp object boundaries and improved structural detail, while the RL models preserve
+high-entropy regions even under strong memory constraints. The 25% and 50% policies
+demonstrate controlled simplification, whereas the 75% policy closely matches the fullresolution entropy-driven method.
+Using SegFormer sharpens semantic boundaries and reveals a clearer separation between the methods: improvements in semantic quality are most visible for U N -M AP -A DAPT
+(O URS ) and its RL variants, confirming the relevance of entropy-driven subdivision.
+A.2
+ScanNet Benchmark with SegFormer
+Table 5 reports quantitative results on ScanNet with SegFormer. Reconstruction and texture
+metrics remain consistent with the main paper, while semantic accuracy increases across all
+methods due to the improved segmentation model. We additionally evaluate an RL agent
+with a 50% budget. As expected, accuracy increases smoothly from 25% to 75%, showing
+that the learned policy produces a stable and monotonic accuracy – memory trade-off.
+To study MAP-ADAPT’s sensitivity to class heuristics, we introduce a random classto-resolution assignment. Performance degrades sharply across all metrics, underscoring
+the method’s reliance on user-engineered class lists and highlighting its lack of adaptability.
+As scenes, datasets, or segmentation backbones change, these heuristics may not transfer
+reliably. In contrast, our uncertainty- and complexity-driven method is class agnostic and
+relies on observed semantic, geometric, and texture cues rather than predefined semantic
+class assignments, supporting transfer across the tested segmentation backbones.
+A.3
+Generalization of the RL Agents
+A key question is whether the RL policies learned on RefineNet generalize to SegFormer.
+The policy does not consume semantic class identities. Instead, its semantic component is
+based on normalized prediction entropy, while geometric and texture complexity provide
+16
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+complementary class-independent cues. Specifically, the per-voxel proxy used to compute
+the block-level statistics observed by the policy is
+hi = w̃sem H̃isem + w̃geo g̃i + w̃text˜i ,
+H̃isem = −
+1 C sem
+∑ P̂i (c) log P̂isem (c).
+logC c=1
+(18)
+Here, H̃isem depends only on the shape of the predicted class-probability distribution rather
+than the identity or ordering of the classes, while g̃i and t˜i are independent of semantic class
+identities. The reward similarly combines semantic, geometric, and texture reconstruction
+losses. Consequently, the policy representation does not rely on a particular semantic class
+configuration.
+Results in Table 5 confirm this: the RL policies trained entirely on RefineNet preserve their ordering, monotonicity, and accuracy–memory trade-off when deployed with
+SegFormer, despite the two backbones differing substantially in architecture, capacity, and
+prediction characteristics. This demonstrates that the agent learns a structural refinement
+strategy based on class-agnostic uncertainty and complexity cues, rather than overfitting to
+the statistics of a particular pretrained network.
+A.4
+Qualitative Comparison: Semantic Maps
+Figure 4 provides semantic renderings for the same scenes and ablations as in Fig. 3 of the
+main paper, which presents qualitative texture reconstruction comparisons. HSSD contains
+fewer object categories dominated by background classes, which reduces the impact of semantic refinement. Conversely, ScanNet contains a richer class distribution but is limited by
+RefineNet accuracy. SegFormer alleviates this limitation, producing sharper maps and making the benefits of our adaptive strategy more apparent. Figure 6 presents the corresponding
+semantic renderings using SegFormer, where the improved backbone yields sharper class
+boundaries and a more visible separation between the adaptive methods.
+B
+Sensitivity Analysis
+We conduct a sensitivity analysis of the key hyperparameters for both the RL-based variant (UnRL) and our deterministic method (UN-MAP-ADAPT). All ablations are evaluated
+on the ScanNet validation set using SegFormer as the segmentation backbone. The UnRL
+ablations (Appendix B.1) are averaged over 10 scenes, while the UN-MAP-ADAPT threshold sweep (Appendix B.2) is averaged over 5 scenes. We first ablate block size, number of
+blocks, and reward weight configuration for UnRL (Appendix B.1), then sweep the subdivision threshold settings for UN-MAP-ADAPT (Appendix B.2). Our goal is to demonstrate
+that both methods are robust to reasonable hyperparameter choices, and that the RL agent’s
+advantage lies precisely in eliminating the need for manual threshold tuning.
+B.1
+UNRL Parameter Sensitivity
+The U N RL (O URS ) agent has three key design parameters: the spatial block size s, the number of sampled blocks N per frame, and the reward weight configuration (wgeo , wsem , wtex )
+that aggregates the three loss modalities into a single scalar reward. We ablate each parameter independently while keeping all others at their default values.
+17
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+G ROUND T RUTH
+VOXBLOX (8cm) U N RL (O URS ) (25%) U N RL (O URS ) (75%)
+M AP -A DAPT
+U N -M AP -A DAPT (O URS ) VOXBLOX (1cm)
+Figure 4: Semantic segmentations rendered from the reconstructed scene meshes on HSSD
+(top three rows) and ScanNet (bottom) using RefineNet [11] to provide per-frame semantic segmentations. Columns show increasing reconstruction quality and detail from coarse
+VOXBLOX (8 cm) to the fine-grained 1 cm baseline. Our deterministic entropy-based method
+(U N -M AP -A DAPT) and our budget-aware RL model (U N RL) recover sharper geometry,
+cleaner object boundaries, and more stable textures than M AP -A DAPT, without requiring
+a hand-crafted semantic class list. The RL variants (25%, 75%) adaptively preserve highuncertainty regions while respecting memory budgets, demonstrating controlled degradation
+under tight constraints.
+Block size. The block size s controls the spatial granularity of the agent’s decisions: all
+voxels within a block share the same thresholds on the complexity proxy. Table 6 reports
+results for s ∈ {0.1, 0.25, 0.5, 1.0} m. Very small blocks (s=0.1 m) underperform because
+each block contains too few voxels for reliable uncertainty and complexity statistics, leading
+to noisy observations and poor decisions. Performance improves substantially from 0.1 m to
+0.5 m and plateaus at 1.0 m. Although s=1.0 m is marginally better on completion metrics,
+we select s=0.5 m as the default because it provides finer spatial control: the agent can assign
+different thresholds to neighboring regions that a 1.0 m block would merge. The accuracy
+gap between the two (<0.01 cm in completion error) confirms that the method is not sensitive
+to this choice within a reasonable range.
+18
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+G ROUND T RUTH
+VOXBLOX (8cm) U N RL (O URS ) (25%) U N RL (O URS ) (50%) U N RL (O URS ) (75%)
+M AP -A DAPT
+U N -M AP -A DAPT (O URS ) VOXBLOX (4cm)
+VOXBLOX (1cm)
+Figure 5: Rendered images on the ScanNet dataset from reconstructed meshes using SegFormer [29] for semantic labeling. Columns show increasing reconstruction quality from
+coarse VOXBLOX (8 cm), through adaptive methods and a mid-resolution VOXBLOX (4 cm),
+to the fine-grained 1 cm baseline. Our deterministic entropy-based method (U N -M AP A DAPT) and the budget-aware RL model (U N RL) recover sharper geometry, cleaner object
+boundaries, and more stable textures than M AP -A DAPT, without relying on hand-crafted semantic class lists. The RL variants (25%, 50%, 75%) demonstrate controlled degradation by
+prioritizing high-uncertainty regions under increasing memory constraints.
+Table 6: Ablation on block size s. All other hyperparameters are fixed to default. † denotes
+the default configuration. Averaged over 10 ScanNet validation scenes.
+Block Size Compl. Err↓ Compl. <5cm↑ Sem. Acc↑ MS-SSIM↑ LPIPS↓ Voxels (M)↑ Mem. (GB)
+s (m)
+(cm)
+(%)
+(%)
+0.1
+0.25
+0.5†
+1.0
+1.880
+1.466
+1.366
+1.360
+93.90
+97.77
+98.96
+99.12
+70.45
+71.03
+71.72
+71.78
+0.611
+0.618
+0.626
+0.623
+0.434
+0.422
+0.403
+0.402
+12.17
+24.97
+26.76
+27.21
+2.90
+5.94
+6.37
+6.48
+Number of blocks. The number of sampled blocks N determines how many spatial regions
+the agent observes and acts on per frame. Since the policy network uses a Perceiver-based
+attention mechanism, computational cost scales quadratically with N, which motivates keeping the observation compact. Table 7 shows that increasing N from 10 to 50 yields only
+modest improvement, while increasing both training and inference cost. We use N=25 as
+the default, which balances observation coverage with computational efficiency. Notably,
+even N=10 achieves competitive results, suggesting that the proxy-weighted importance
+sampling effectively directs attention to the most informative blocks regardless of the total
+sample count.
+19
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+G ROUND T RUTH
+VOXBLOX (8cm) U N RL (O URS ) (25%) U N RL (O URS ) (50%) U N RL (O URS ) (75%)
+M AP -A DAPT
+U N -M AP -A DAPT (O URS ) VOXBLOX (4cm)
+VOXBLOX (1cm)
+Figure 6: Semantic segmentations on the ScanNet dataset rendered from reconstructed
+meshes using SegFormer [29]. Columns show increasing reconstruction quality from coarse
+VOXBLOX (8 cm), through adaptive methods and a mid-resolution VOXBLOX (4 cm), to the
+fine-grained 1 cm baseline. Our deterministic entropy-based method (U N -M AP -A DAPT) and
+the budget-aware RL model (U N RL) recover cleaner object boundaries and more spatially
+consistent semantic regions than M AP -A DAPT, without relying on hand-crafted semantic
+class lists. The RL variants (25%, 50%, 75%) demonstrate controlled degradation by prioritizing high-uncertainty regions under increasing memory constraints.
+Table 7: Ablation on number of blocks N. All other hyperparameters are fixed to default. †
+denotes the default configuration. Averaged over 10 ScanNet validation scenes.
+Num. Blocks Compl. Err↓ Compl. <5cm↑ Sem. Acc↑ MS-SSIM↑ LPIPS↓ Voxels (M)↑ Mem. (GB)
+N
+(cm)
+(%)
+(%)
+10
+25†
+50
+1.472
+1.366
+1.353
+97.71
+98.96
+99.10
+71.44
+71.72
+71.74
+0.625
+0.626
+0.622
+0.408
+0.403
+0.407
+25.92
+26.76
+26.84
+6.17
+6.37
+6.39
+Reward weights. The reward weights (wgeo , wsem , wtex ) control how the agent aggregates
+the three loss modalities into a single scalar reward. The combined loss used as the RL
+training signal is:
+L = wgeo · Lgeo + wsem · Lsem + wtex · Ltex ,
+(19)
+where Lgeo , Lsem , and Ltex denote the geometric, semantic, and texture reconstruction losses,
+respectively.
+Table 8 shows that single-modality rewards (top three rows) perform noticeably worse
+than any balanced combination, confirming that all three signals carry complementary information about where subdivision is beneficial. Among the balanced configurations (bottom
+four rows), performance differences are minimal: completion error varies by only 0.012 cm
+20
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+Table 5: Accuracy and efficiency on ScanNet with SegFormer [29] providing the perframe semantic segmentations. We report geometric reconstruction quality (completion
+error and completion ratio within 5 cm), semantic accuracy, and texture fidelity (MS-SSIM,
+LPIPS), all obtained from mesh renderings in held-out test views. Efficiency metrics include
+total voxel count and peak memory usage in gigabytes. We also show MAP-ADAPT with
+random semantic-to-resolution assignments, demonstrating its sensitivity to user-defined
+class lists. Our full entropy-driven method (U N -M AP -A DAPT (O URS )) outperforms MAPADAPT in all accuracy metrics while avoiding reliance on manually specified semantic class
+lists. The RL-based variants enable explicit control of memory through voxel-budget constraints, offering competitive accuracy with reduced memory.
+Method
+Compl. Err↓ Compl.<5cm (%)↑ Sem. Acc.↑ MS-SSIM↑ LPIPS↓ Total Voxels (M) Memory (GB)↓
+Fixed-Resolution Baselines
+VOXBLOX (8 CM ) [19]
+VOXBLOX (4 CM ) [19]
+VOXBLOX (1 CM ) [19]
+81.050
+91.306
+99.246
+0.674
+0.701
+0.705
+0.611
+0.647
+0.65
+0.52
+0.47
+0.40
+0.57
+1.12
+35.50
+0.137
+0.267
+8.464
+Adaptive Methods (w/o Budget Constraint)
+M AP -A DAPT [31]
+1.58
+M AP -A DAPT [31] (Random)
+1.70
+U N -M AP -A DAPT (O URS )
+1.49
+98.03
+96.99
+98.81
+0.699
+0.690
+0.700
+0.64
+0.63
+0.64
+0.43
+0.45
+0.42
+25.2
+21.9
+33.4
+6.01
+5.21
+7.97
+Adaptive Methods (w/ Budget Constraint)
+U N RL (O URS ) (75%)
+1.56
+U N RL (O URS ) (50%)
+1.82
+U N RL (O URS ) (25%)
+2.76
+97.26
+94.60
+84.81
+0.701
+0.696
+0.679
+0.65
+0.64
+0.62
+0.41
+0.43
+0.50
+32.0
+15.9
+1.1
+7.64
+3.80
+0.25
+3.093
+2.209
+1.448
+and semantic accuracy by 0.15 percentage points. This insensitivity is a desirable property;
+the weights serve primarily as an aggregation mechanism rather than a sensitive hyperparameter requiring careful tuning. We adopt equal weights (0.33, 0.33, 0.33) as the default for
+simplicity, noting that slightly emphasizing semantic loss (0.25, 0.50, 0.25) yields virtually
+identical results.
+Table 8: Ablation on reward weight configuration (wgeo , wsem , wtex ). † denotes the default
+configuration. Averaged over 10 ScanNet validation scenes.
+Compl. Err↓ Compl. <5cm↑ Sem. Acc↑ MS-SSIM↑ LPIPS↓
+(cm)
+(%)
+(%)
+wgeo wsem
+wtex
+1.00 0.00
+0.00 1.00
+0.00 0.00
+0.00
+0.00
+1.00
+1.430
+1.513
+1.515
+98.24
+97.83
+97.33
+71.32
+71.31
+71.04
+0.621
+0.620
+0.618
+0.411
+0.413
+0.421
+0.50
+0.25
+0.33
+0.25
+0.25 0.25
+0.25 0.50
+0.33 0.33†
+0.50 0.25
+1.378
+1.376
+1.366
+1.366
+98.80
+98.74
+98.96
+98.96
+71.68
+71.57
+71.71
+71.72
+0.625
+0.625
+0.626
+0.626
+0.403
+0.404
+0.403
+0.403
+B.2
+UN-MAP-ADAPT Parameter Sensitivity
+UN-MAP-ADAPT uses five hand-tuned thresholds that control when a voxel is subdivided
+based on its semantic entropy (τ sem ), texture complexity (τlotex , τhitex ), and geometric comgeo
+geo
+plexity (τlo , τhi ). Unlike UnRL, which learns a subdivision strategy end-to-end, UNMAP-ADAPT requires these thresholds to be specified manually and jointly determines the
+accuracy–memory operating point.
+21
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+Table 9 sweeps all five thresholds from loose (top rows, fewer subdivisions, low memory) to strict (bottom rows, more subdivisions, high memory). Loose settings dramatically
+reduce memory but at significant accuracy cost: the loosest configuration degrades completion error to 2.22 cm and semantic accuracy to 71.17%. As thresholds tighten, accuracy
+improves rapidly up to the default configuration (highlighted), after which returns diminish:
+below τ sem =0.10, further tightening yields less than 0.03 cm improvement in completion
+error while continuing to increase memory from 5.32 GB toward 5.69 GB.
+This sweep illustrates the core motivation for our RL-based approach. The optimal
+threshold configuration depends on the target memory budget, scene complexity, and downstream task requirements, and must be re-tuned whenever any of these factors change. U N RL
+(O URS ) replaces this manual search with a learned policy that automatically discovers the
+appropriate subdivision strategy for a given budget constraint, removing the need for perdeployment threshold engineering.
+Table 9: Threshold sensitivity analysis across configurations, averaged over 5 ScanNet validation scenes. The default configuration is highlighted in gray. Best values per metric are
+shown in bold.
+geo
+geo
+τ sem τlotex
+τhitex
+τlo
+τhi
+1.00
+0.50
+0.30
+0.20
+0.10
+0.08
+0.06
+0.04
+0.02
+0.01
+4.00
+2.00
+1.50
+1.25
+1.00
+0.75
+0.50
+0.30
+0.15
+0.10
+6.00
+4.00
+3.00
+2.50
+2.00
+1.50
+1.00
+0.60
+0.30
+0.20
+0.15
+0.10
+0.08
+0.06
+0.05
+0.04
+0.04
+0.03
+0.02
+0.01
+0.25
+0.20
+0.15
+0.12
+0.10
+0.08
+0.07
+0.05
+0.04
+0.03
+C
+Training Hardware and Runtime
+Compl. Err ↓ Compl. <5cm ↑ Sem. Acc ↑ MS-SSIM ↑ Voxels (M) ↑ Mem. (GB)
+2.22
+1.66
+1.36
+1.24
+1.20
+1.18
+1.17
+1.17
+1.17
+1.17
+90.68
+96.16
+98.43
+99.07
+99.37
+99.44
+99.53
+99.54
+99.55
+99.55
+71.17
+72.86
+73.54
+74.02
+74.55
+74.85
+74.86
+74.94
+74.98
+75.00
+0.584
+0.604
+0.606
+0.612
+0.617
+0.625
+0.624
+0.625
+0.626
+0.625
+0.7
+6.5
+16.0
+20.0
+22.3
+23.1
+23.6
+23.8
+23.8
+23.8
+0.17
+1.54
+3.82
+4.78
+5.32
+5.51
+5.62
+5.67
+5.68
+5.69
+All experiments, including both 3D semantic scene reconstruction and RL policy training,
+were conducted on a single workstation equipped with an Intel Core i7-14700K processor
+(20 cores, 28 threads) and an NVIDIA GeForce RTX 3080 GPU (10 GB VRAM, CUDA
+12.2).
+For RL training, we used PPO with 4 parallel environments via SubprocVecEnv,
+training for 10M timesteps per experiment. Evaluation was performed every 50k steps on a
+held-out validation set of 5 episodes, with model checkpoints saved every 250k steps. Each
+training run took approximately 24 hours.
+The 3D reconstruction pipeline, which generates the RL dataset by processing ScanNet
+scenes into per-frame voxel observations and reconstruction losses, was executed on the
+same machine.
+References
+[1] Arash Asgharivaskasi and Nikolay Atanasov. Semantic OcTree mapping and Shannon
+mutual information computation for robot exploration. IEEE TRO, 2023.
+22
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+[2] Benjamin Charrow, Sikang Liu, Vijay Kumar, and Nathan Michael. Informationtheoretic mapping using Cauchy-Schwarz quadratic mutual information. In ICRA,
+2015.
+[3] Fanfei Chen, Shi Bai, Tixiao Shan, and Brendan Englot. Self-learning exploration and
+mapping for mobile robots via deep reinforcement learning. In AIAA SciTech Forum,
+2019.
+[4] Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, and
+Matthias Nießner. ScanNet: Richly-annotated 3D reconstructions of indoor scenes. In
+CVPR, 2017.
+[5] Margarita Grinvald, Fadri Furrer, Tonci Novkovic, Jen Jen Chung, Cesar Cadena,
+Roland Siegwart, and Juan Nieto. Volumetric instance-aware semantic mapping and
+3D object discovery. IEEE RA-L, 2019.
+[6] Armin Hornung, Kai M. Wurm, Maren Bennewitz, Cyrill Stachniss, and Wolfram Burgard. OctoMap: an efficient probabilistic 3D mapping framework based on octrees.
+Auton. Robots, 2013.
+[7] Andrew Jaegle, Sebastian Borgeaud, Jean-Baptiste Alayrac, Carl Doersch, Catalin
+Ionescu, David Ding, Skanda Koppula, Daniel Zoran, Andrew Brock, Evan Shelhamer,
+Olivier J. Hénaff, Matthew Botvinick, Andrew Zisserman, Oriol Vinyals, and João Carreira. Perceiver IO: A general architecture for structured inputs & outputs. In ICLR,
+2022.
+[8] Olaf Kähler, Victor Prisacariu, Julien Valentin, and David Murray. Hierarchical voxel
+block hashing for efficient integration of depth images. IEEE RA-L, 2016.
+[9] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3D
+Gaussian splatting for real-time radiance field rendering. ACM TOG, 2023.
+[10] Mukul Khanna, Yongsen Mao, Hanxiao Jiang, Sanjay Haresh, Brennan Shacklett,
+Dhruv Batra, Alexander Clegg, Eric Undersander, Angel X. Chang, and Manolis Savva.
+Habitat Synthetic Scenes Dataset (HSSD-200): An analysis of 3D scene scale and realism tradeoffs for ObjectGoal navigation. In CVPR, 2024.
+[11] Guosheng Lin, Anton Milan, Chunhua Shen, and Ian Reid. RefineNet: Multi-path
+refinement networks for high-resolution semantic segmentation. In CVPR, 2017.
+[12] John McCormac, Ankur Handa, Andrew Davison, and Stefan Leutenegger. SemanticFusion: Dense 3D semantic mapping with convolutional neural networks. In ICRA,
+2017.
+[13] John McCormac, Ronald Clark, Michael Bloesch, Andrew Davison, and Stefan
+Leutenegger. Fusion++: Volumetric object-level SLAM. In 3DV, 2018.
+[14] Nico Messikommer, Giovanni Cioffi, Mathias Gehrig, and Davide Scaramuzza. Reinforcement learning meets visual odometry. In ECCV, 2024.
+[15] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. NeRF: Representing scenes as neural radiance fields for view
+synthesis. In ECCV, 2020.
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+23
+[16] Gaku Narita, Takashi Seno, Tomoya Ishikawa, and Yohsuke Kaji. PanopticFusion:
+Online volumetric semantic mapping at the level of stuff and things. In IROS, 2019.
+[17] Richard A. Newcombe, Shahram Izadi, Otmar Hilliges, David Molyneaux, David
+Kim, Andrew J. Davison, Pushmeet Kohli, Jamie Shotton, Steve Hodges, and Andrew
+Fitzgibbon. KinectFusion: Real-time dense surface mapping and tracking. In ISMAR,
+2011.
+[18] Matthias Nießner, Michael Zollhöfer, Shahram Izadi, and Marc Stamminger. Real-time
+3D reconstruction at scale using voxel hashing. ACM TOG, 2013.
+[19] Helen Oleynikova, Zachary Taylor, Marius Fehr, Roland Siegwart, and Juan Nieto.
+Voxblox: Incremental 3D Euclidean signed distance fields for on-board MAV planning.
+In IROS, 2017.
+[20] Mark Pauly, Markus Gross, and Leif P. Kobbelt. Efficient simplification of pointsampled surfaces. In IEEE Vis., 2002.
+[21] Julio A Placed and José A Castellanos. A deep reinforcement learning approach for
+active SLAM. Applied Sciences, 2020.
+[22] Antoni Rosinol, Marcus Abate, Yun Chang, and Luca Carlone. Kimera: an open-source
+library for real-time metric-semantic localization and mapping. In ICRA, 2020.
+[23] Lukas Schmid, Jeffrey Delmerico, Johannes L. Schönberger, Juan Nieto, Marc Pollefeys, Roland Siegwart, and Cesar Cadena. Panoptic multi-TSDFs: a flexible representation for online multi-resolution volumetric mapping and long-term dynamic scene
+consistency. In ICRA, 2022.
+[24] John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov.
+Proximal policy optimization algorithms. arXiv preprint arXiv:1707.06347, 2017.
+[25] Frank Steinbrücker, Jürgen Sturm, and Daniel Cremers. Volumetric 3D mapping in
+real-time on a CPU. In ICRA, 2014.
+[26] Jörg Stückler and Sven Behnke. Multi-resolution surfel maps for efficient dense 3D
+modeling and tracking. JVCIR, 2014.
+[27] Emanuele Vespa, Nils Funk, Paul Kelly, and Stefan Leutenegger. Adaptive-resolution
+octree-based volumetric SLAM. In 3DV, 2019.
+[28] Shun-Cheng Wu, Johanna Wald, Keisuke Tateno, Nassir Navab, and Federico Tombari.
+SceneGraphFusion: Incremental 3D scene graph prediction from RGB-D sequences. In
+CVPR, 2021.
+[29] Enze Xie, Wenhai Wang, Zhiding Yu, Anima Anandkumar, Jose M. Alvarez, and Ping
+Luo. SegFormer: Simple and efficient design for semantic segmentation with transformers. In NeurIPS, 2021.
+[30] Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, and Oliver Wang. The
+unreasonable effectiveness of deep features as a perceptual metric. In CVPR, 2018.
+24
+OZKAN ET AL.: UNRL: ADAPTIVE 3D MAPPING
+[31] Jianhao Zheng, Daniel Barath, Marc Pollefeys, and Iro Armeni. MAP-ADAPT: Realtime quality-adaptive semantic 3D maps. In ECCV, 2024.
+[32] Yuke Zhu, Roozbeh Mottaghi, Eric Kolve, Joseph J. Lim, Abhinav Gupta, Li Fei-Fei,
+and Ali Farhadi. Target-driven visual navigation in indoor scenes using deep reinforcement learning. In ICRA, 2017.
+[33] Jacek Zienkiewicz, Akis Tsiotsios, Andrew Davison, and Stefan Leutenegger. Monocular, real-time surface reconstruction using dynamic level of detail. In 3DV, 2016.

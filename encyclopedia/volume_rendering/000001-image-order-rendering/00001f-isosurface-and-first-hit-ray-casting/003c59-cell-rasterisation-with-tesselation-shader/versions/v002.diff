@@ -1,0 +1,249 @@
+--- v001.md
++++ v002.md
+@@ -4,158 +4,142 @@
+ 
+ ## Overview
+-Cell Rasterisation with Tesselation Shader is an image-order rendering technique for isosurfaces that replaces traditional vertex shaders with a tesselation shader to efficiently rasterize clusters of grid cells as point sprites. It solves the performance bottleneck of rendering large volumes by grouping active cells into clusters, expanding them into individual points, and performing ray-box intersection and volume sampling in the fragment shader. Unlike sibling methods that rely on vertex shaders for individual cell rendering or complex mesh generation, this method leverages hardware tesselation to handle cluster expansion and uses a visibility buffer to cull occluded clusters, providing the same isosurface accuracy as isosurface raycasting with reduced overhead [S1].
++Cell Rasterisation with Tesselation Shader is an image-order rendering technique for isosurfaces that replaces traditional vertex shaders with tessellation shaders to efficiently rasterize clusters of grid cells as point sprites. It solves the performance bottleneck of rendering large volumes by grouping active cells into clusters, expanding them into individual points in the tessellation stage, and performing ray-box intersection and volume sampling in the fragment shader. Unlike its sibling [Volumetric Isosurface Rendering with Intersection Refinement](958-volumetric-isosurface-rendering-with-intersection-refinement.md) which relies on precise ray marching, this method leverages hardware rasterization of point primitives to determine surface intersections, offering a balance between the speed of billboard splatting and the accuracy of raycasting.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Input:** A Clustered Grid Cell (CGC) data structure containing metacells and grid cells. Each cluster is represented as a single `GL_PATCHES` primitive. The volume scalar field data is stored in GPU memory.
+-*   **Output:** A rendered image with isosurface shading, typically via a deferred shading pass using a Geometry Buffer (G-buffer).
++*   **Output:** A color buffer with the rendered isosurface and a G-buffer containing geometric attributes (normals, positions) for deferred shading.
+ 
+ **Data Structures:**
+-*   **Cluster Bound:** The last metacell of each cluster stores the cluster bounding box instead of cell metadata.
+-*   **Grid Position Storage:** 16 bits per component (x, y, z). This allows representation of a maximum grid size of $128K \times 128K \times 128K$ voxels [S1].
+-*   **Corner Values:** Two RGBA values per cell are stored to allow interpolation of scalar values in the fragment shader [S1].
++*   **Cluster Patch:** A single `GL_PATCHES` primitive per cluster. The tessellation shader expands this into points for each cell in the cluster.
++*   **Metacell/Cell Metadata:**
++    *   Grid position: 16 bits per component (x, y, z). This limits the maximum representable grid size to $128K \times 128K \times 128K$ voxels [S1].
++    *   Corner values: Two RGBA values per cell are stored to allow interpolation of scalar values in the fragment shader [S1].
++    *   Cluster Bound: The last metacell of each cluster stores the cluster bounding box instead of cell metadata [S1].
+ *   **Visibility Buffer:** An `RG32UI` texture storing a bit per cluster to indicate visibility status across frames [S1].
+ 
+-**Numbered Steps:**
++**Algorithm Steps:**
+ 
+-1.  **Tesselation Shader Expansion:**
+-    The tesselation shader receives one `GL_PATCHES` primitive per cluster. It expands this patch into individual points representing the cells within the cluster. For each cell, a normal is computed from the stored corner values. This normal is used for back-face culling [S1].
++1.  **Tessellation (Cluster Expansion):**
++    The tessellation shader receives one `GL_PATCHES` primitive per cluster. It iterates through the cells defined in the cluster's metadata. For each active cell, it generates a point primitive.
++    *   **Cell Normal Computation:** The tessellation shader computes a normal vector for the cell using the stored corner scalar values. This normal is used for back-face culling [S1].
++    *   **Culling:** If the cell is back-facing relative to the camera, it is discarded [S1].
+ 
+-2.  **Culling and Rate Adjustment:**
+-    Clusters that were culled in the previous frame are rendered at a reduced rate of 1/8, with at most one point per metacell per frame, until they become visible again. This optimization prevents unnecessary computation for occluded geometry [S1].
++2.  **Rasterization (Billboard Splatting):**
++    The generated points are rasterized as billboards (point sprites). The size of the billboard corresponds to the cell's spatial extent.
++    *   **Reduced Rate Rendering:** Clusters that were culled in the previous frame are rendered at a reduced rate (1/8th) with at most one point per metacell per frame until they become visible again [S1].
+ 
+-3.  **Rasterization:**
+-    The expanded points are rasterized as point sprites (billboards). Each fragment corresponds to a potential intersection with the cell's bounding box [S1].
++3.  **Fragment Shader (Ray-Box Intersection):**
++    For each rasterized fragment of the billboard:
++    *   **Ray Definition:** Define the view ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ originating from the camera.
++    *   **Ray-Box Intersection:** Perform a ray-box intersection test between the view ray and the cell's bounding box. The implementation uses the efficient slab test described by Majercik et al. [S1]. If no intersection occurs, the fragment is discarded.
++    *   **Intersection Point:** Calculate the entry and exit points of the ray within the cell's bounding box.
+ 
+-4.  **Ray-Box Intersection:**
+-    For each rasterized fragment, a ray-box intersection test is performed with the cell. The method uses the efficient slab test described by Majercik et al. [16]. This test determines if the camera ray intersects the cell's bounding box [S1].
++4.  **Volume Sampling and Isosurface Detection:**
++    *   **Interpolation:** Sample the scalar field $f(\mathbf{p})$ along the ray segment inside the cell. The scalar values are obtained by manually performing tri-linear interpolation using the stored corner values in the fragment shader [S1].
++    *   **Sample Count:** The method uses a fixed number of samples per ray. The sources specify that **3 samples** per ray are used, which was found sufficient for accurate intersection detection [S1].
++    *   **Intersection Check:** Detect the isosurface intersection where $f(\mathbf{p}) = \tau$ (threshold). This is typically identified by a sign change or threshold crossing between consecutive samples [G].
+ 
+-5.  **Volume Sampling and Intersection:**
+-    If an intersection is found, the original volume data is sampled along the ray using tri-linear interpolation to find the isosurface intersection. The method stores corner values (two RGBA values per cell) and performs manual tri-linear interpolation in the fragment shader to determine the exact intersection point and compute smooth attribute interpolation [S1]. Typically, 3 samples per ray are used, which is found sufficient for accuracy [S1].
++5.  **Normal Computation:**
++    *   Compute the gradient $\nabla f$ at the intersection point using the tri-linearly interpolated scalar values. This gradient serves as the surface normal for shading [S1].
+ 
+-6.  **Normal Computation:**
+-    The surface normal is computed from the gradient $\nabla f$ of the volume data at the intersection point. This is achieved by computing the gradient from the interpolated scalar values. The normal is used for shading [S1].
++6.  **G-Buffer Writing:**
++    *   Rasterize the cell's geometric attributes (position, normal) to a Geometry Buffer (G-buffer) [S1].
+ 
+-7.  **G-Buffer Rasterization:**
+-    Cells are rasterized to a Geometry Buffer (G-buffer) containing position, normal, and other attributes. This allows for deferred shading [S1].
+-
+-8.  **Deferred Shading:**
+-    In a separate pass, normalized Blinn-Phong shading is computed using the data from the G-buffer. This includes ambient, diffuse, and specular lighting components [S1].
+-
+-9.  **Visibility Buffer Update:**
+-    After the cell rasterization pass, the visibility buffer is updated. An `RG32UI` texture captures cluster IDs of visible cells. A compute shader pass clears the current visibility buffer bits and updates them based on the ID texture, marking clusters as visible or occluded for the next frame [S1].
++7.  **Deferred Shading:**
++    *   In a separate pass, compute normalized Blinn-Phong shading using the data from the G-buffer. This includes ambient, diffuse, and specular components [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# Tesselation Shader (per cluster patch)
+-def tesselation_shader(cluster_patch):
+-    # cluster_patch contains metadata for a cluster of cells
+-    cells = cluster_patch.cells
+-    normals = []
+-    
+-    for cell in cells:
+-        # Compute cell normal from corner values for back-face culling
+-        # Corner values are stored in the cell metadata
+-        corner_values = cell.get_corner_values()
+-        normal = compute_normal_from_corners(corner_values)
+-        normals.append(normal)
++# Tessellation Shader
++def tessellation_shader(cluster_patch):
++    # cluster_patch contains metadata for all cells in the cluster
++    for cell in cluster_patch.cells:
++        # Compute cell normal from stored corner values
++        normal = compute_cell_normal(cell.corner_values)
++        
++        # Back-face culling
++        if dot(normal, view_direction) > 0:
++            discard()
+         
+         # Emit point for the cell
+-        emit_point(cell.position, normal)
++        emit_point(cell.position, cell.size, normal)
+ 
+-# Fragment Shader (per rasterized fragment)
+-def fragment_shader(fragment):
+-    # fragment contains the point position and normal from tesselation shader
++# Fragment Shader
++def fragment_shader(point_sprite):
++    # 1. Ray-Box Intersection
++    # Ray is defined by camera origin and direction
++    hit = ray_box_intersection_slab_test(ray, point_sprite.bounding_box)
+     
+-    # 1. Ray-Box Intersection
+-    # Ray is defined by camera origin and direction through fragment
+-    ray_origin = camera.get_origin()
+-    ray_direction = camera.get_direction(fragment.screen_pos)
++    if not hit.intersects:
++        discard()
+     
+-    # Use slab test (Majercik et al.) to check intersection with cell bounding box
+-    # Cell bounding box is derived from cell position and grid spacing
+-    cell_bbox = get_cell_bbox(fragment.point_position)
++    t_start, t_end = hit.entry_t, hit.exit_t
+     
+-    t_min, t_max = slab_test(ray_origin, ray_direction, cell_bbox)
++    # 2. Volume Sampling (Fixed 3 samples)
++    num_samples = 3
++    samples = []
++    for i in range(num_samples):
++        t = lerp(t_start, t_end, i / (num_samples - 1))
++        p = ray.origin + t * ray.direction
++        
++        # Manual tri-linear interpolation of scalar value from corner values
++        scalar = tri_linear_interpolate(p, point_sprite.corner_values)
++        samples.append((p, scalar))
+     
+-    if t_min > t_max or t_max < 0:
+-        discard() # No intersection
+-    
+-    # 2. Volume Sampling
+-    # Sample volume along the ray segment [t_min, t_max]
+-    # Typically 3 samples are used
+-    num_samples = 3
+-    isosurface_value = 0.5 # Example isovalue
+-    
++    # 3. Isosurface Detection
+     intersection_found = False
+     intersection_point = None
+     intersection_normal = None
+     
+-    for i in range(num_samples):
+-        t = lerp(t_min, t_max, i / (num_samples - 1))
+-        sample_point = ray_origin + ray_direction * t
++    for i in range(len(samples) - 1):
++        p1, s1 = samples[i]
++        p2, s2 = samples[i+1]
+         
+-        # Manual tri-linear interpolation using stored corner values
+-        scalar_value = tri_linear_interpolate(sample_point, fragment.point_position)
+-        
+-        # Check for isosurface crossing
+-        if scalar_value >= isosurface_value:
+-            intersection_point = sample_point
++        # Check for threshold crossing
++        if (s1 - threshold) * (s2 - threshold) < 0:
++            # Linear interpolation to refine intersection point
++            t_refine = (threshold - s1) / (s2 - s1)
++            intersection_point = lerp(p1, p2, t_refine)
++            
++            # Compute normal from interpolated samples
++            intersection_normal = compute_gradient(intersection_point, point_sprite.corner_values)
+             intersection_found = True
+             break
+-            
++    
+     if not intersection_found:
+-        discard() # No isosurface intersection in this cell
+-    
+-    # 3. Normal Computation
+-    # Compute gradient from interpolated samples
+-    intersection_normal = compute_gradient(intersection_point)
+-    intersection_normal = normalize(intersection_normal)
++        discard()
+     
+     # 4. Write to G-Buffer
+-    g_buffer.write_position(intersection_point)
+-    g_buffer.write_normal(intersection_normal)
+-    g_buffer.write_cluster_id(fragment.cluster_id)
+-
+-# Visibility Buffer Update (Compute Shader)
+-def update_visibility_buffer():
+-    # Read cluster IDs from G-buffer or ID texture
+-    visible_clusters = read_cluster_ids_from_g_buffer()
+-    
+-    # Clear current visibility buffer
+-    visibility_buffer.clear()
+-    
+-    # Update visibility buffer with visible clusters
+-    for cluster_id in visible_clusters:
+-        visibility_buffer.set_bit(cluster_id, 1)
++    write_gbuffer(intersection_point, intersection_normal)
+ ```
+ 
+ **Parameters:**
+ *   **Samples per ray:** 3 [S1].
+-*   **Grid position bit depth:** 16 bits per component [S1].
+-*   **Culling rate:** 1/8 for culled clusters [S1].
++*   **Grid Position Storage:** 16 bits per component [S1].
++*   **Culling Rate:** 1/8 for previously culled clusters [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The 16-bit storage for grid positions limits the maximum grid size to $128K \times 128K \times 128K$ voxels. Larger grids require higher precision or different storage strategies [S1].
+-*   **Culling:** Culled clusters are rendered at a reduced rate (1/8) to avoid flickering when they re-enter the view. This requires maintaining state between frames [S1].
+-*   **Intersection Accuracy:** Using only 3 samples per ray may miss thin features or result in discretization artifacts. However, it was found sufficient for the intended use cases [S1].
++*   **Precision:** The 16-bit storage for grid positions limits the maximum grid resolution to $128K^3$ [S1].
++*   **Culled Clusters:** To avoid flickering, culled clusters are rendered at a reduced rate rather than being completely skipped [S1].
++*   **Sample Sufficiency:** Only 3 samples are used; this may lead to aliasing or missed intersections in highly detailed regions, though the source claims it is sufficient for their use case [S1].
+ 
+ ## Subtopics
+ 
+ ### Cell Rasterisation via Billboard Splatting
+-A variant of the method where active grid cells are rasterized as point sprites (billboards) using a vertex shader instead of a tesselation shader. It performs ray-box intersection and interpolates samples along the ray using stored corner values to find isosurface intersections. It uses 3 samples per ray and computes normals from interpolated samples. This variant is simpler but lacks the cluster-based optimization and visibility buffer culling of the tesselation shader version [S1].
++A variant of the method that uses a vertex shader instead of a tessellation shader to render active grid cells as `GL_POINTS` primitives. It performs ray-box intersection and interpolates samples along the ray using stored corner values (two RGBA values per cell) to find intersections and compute normals. It uses 3 samples per ray [S1]. This variant is simpler but less efficient for large clusters compared to the tessellation-based approach which expands clusters in the tessellation stage [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of active cells and clusters. The tesselation shader expands clusters into points, and the fragment shader performs ray-box intersection and volume sampling. The visibility buffer reduces the number of clusters processed in subsequent frames.
+-*   **Memory Complexity:** Requires storage for the CGC data structure, including metacells, grid cells, and corner values. The visibility buffer adds minimal overhead.
+-*   **Performance:** Provides fast rendering of isosurfaces by leveraging hardware tesselation and deferred shading. The visibility buffer improves performance by culling occluded clusters.
+-*   **Strengths:** Efficient handling of large volumes, reduced overhead compared to mesh-based methods, accurate isosurface rendering.
+-*   **Limitations:** Limited by the 16-bit grid position storage, potential discretization artifacts with few samples per ray.
+-*   **When to use:** Suitable for real-time isosurface rendering of large volumes where performance is critical and the grid size fits within the 16-bit precision limit.
+-*   **When not to use:** Not suitable for grids larger than $128K^3$ without modification, or when higher precision is required for thin features.
++*   **Time Complexity:** Depends on the number of active cells and clusters. The tessellation shader expands clusters, and the fragment shader performs a fixed number of samples (3) per ray. The use of a visibility buffer reduces redundant rasterization of occluded clusters [S1].
++*   **Memory Complexity:** Requires storage for the CGC data structure, including 16-bit grid positions and corner values for each cell. The visibility buffer adds minimal overhead [S1].
++*   **Performance:** Fast due to hardware rasterization of point sprites and deferred shading. The tessellation shader approach is more efficient than vertex shader-based billboard splatting for large clusters [S1].
++*   **Strengths:** High performance for large volumes; leverages GPU hardware rasterization; deferred shading allows for efficient lighting calculations [S1].
++*   **Limitations:** Limited to 16-bit grid positions; fixed sample count may affect accuracy; requires a visibility buffer for optimal performance [S1].
++*   **When to use:** Real-time isosurface rendering of large volumes where performance is critical and moderate accuracy is acceptable.
++*   **When not to use:** When high precision is required (e.g., scientific visualization requiring sub-voxel accuracy) or when grid sizes exceed $128K^3$.
+ 
+ ## Background
+-Cell Rasterisation was proposed by Liu et al. [13] as a fast method for rasterizing active grid cells of a volume. The technique was later enhanced with the Clustered Grid Cell (CGC) data structure and tesselation shaders to improve performance and reduce overhead. The method builds on the principles of image-order rendering and isosurface detection, integrating visibility buffering and deferred shading for efficient real-time rendering [S1].
++Cell Rasterisation was proposed by Liu et al. [13] as a fast method for rasterizing active grid cells of a volume. The technique was originally implemented using vertex shaders for billboard splatting. The variant using tessellation shaders and the Clustered Grid Cell (CGC) data structure was developed to improve performance by reducing the number of draw calls and leveraging the tessellation pipeline for cluster expansion. The method is part of the broader family of image-order rendering techniques for isosurfaces.
+ 
+ ## Sources

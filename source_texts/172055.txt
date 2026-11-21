@@ -1,0 +1,169 @@
+c++ - 3D Rendering Engine architecture for multipass rendering - Software Engineering Stack Exchange
+3D Rendering Engine architecture for multipass rendering
+Ask Question
+Asked
+8 years, 3 months ago
+Modified
+7 years, 11 months ago
+Viewed
+4k times
+This question shows research effort; it is useful and clear
+4
+This question does not show any research effort; it is unclear or not useful
+Save this question.
+Show activity on this post.
+I'm implementing a simple 3D rendering engine for my game, I'm using DirectX11. I created a simple architecture for the rendering engine, with a central rendering system (RenderingSystem class, a singleton) that contains and manages specific renderers, and each of them has a render queue and can draw a particular entity (a terrain, a skybox, a player and so on). It's a simple and maybe naive architecture but after spending a lot of time reading about ECS or how inheritance is bad for a game engine I opted for a simple buf efficient solution.
+The RenderingSystem class has a general Render() member function/method that coordinates all the work of the other renderers (it calls the Render method of every renderer, passing the needed parameters).
+Having a "centralized" renderer allows me to set render states, and decide the order of rendering where this has some importance (I render the SkyBox first, disabling depth test, then render the scene for example).
+Now, I need to render reflections on mirrors. The situation is like this:
+I'm stuck on how to proceed. My RenderingSystem can call the Render() function of all different renderers, thereby rendering all entities. It also has some Framebuffer/RenderToTexture members, to perform offscreen rendering to a texture.
+So what I want to do is (in the Render() method of RenderingSystem) to set a framebuffer, render the reflected entities/scene to it from a reflected point of view.
+I can do this by setting a state (flag) in my camera class (of which the RenderingSystem has a reference that is passed along to the specific renderers), so when specific renderers call Camera::GetViewMatrix() they get the normal or reflected variant, but to do this I need to pass to the camera the PLANE about which the scene is to be reflected (the method is Camara::EnableReflection(plane)).
+Problem is, the plane is a member in the Mirror class (with a getter for it), and the MirrorRenderer has a list of mirrors to be rendered.
+So I can't get the plane in the RenderingSystem but I need to perform the rendering there because it has the ability to render all the other entitites to the off screen buffer.
+How can I prepare the reflection texture in a first render pass, then pass it to the MirrorRenderer for EVERY reflective surface/mirror it has in the list?
+Sure I could ask the renderer for the list, get the planes, render to one texture per plane and then send it to the renderer in a dynamic array/vector, but should I use a more elegant pattern/solution?
+I'm using C++.
+architecture
+c++
+3d
+rendering
+Share
+Share a link to this question
+Copy linkCC BY-SA 4.0
+Short permalink to this question
+Improve this question
+Follow
+Follow this question to receive notifications
+asked Jul 26, 2018 at 18:40
+Luca
+20133 silver badges77 bronze badges
+Add a comment
+|
+1 Answer 1
+Sorted by:
+Reset to default
+Highest score (default)
+Date modified (newest first)
+Date created (oldest first)
+This answer is useful
+5
+This answer is not useful
+Save this answer.
+Loading when this answer was accepted…
+Show activity on this post.
+Real-time rendering pipelines are some of the most difficult things I've ever encountered in my career as far as design (though I also had the further requirements of users being able to program their own rendering passes and shaders). The implementation wasn't the most difficult but balancing the pros and cons of every possible design decision was one of the most difficult things I ever had to balance in my career because no rendering design decision discovered/published so far in the realm of real-time rendering is without huge glaring cons. They all tend to have big cons like the difficulty of transparency with deferred rendering or the multiplied complexity of combining forward and deferred rendering. I couldn't even find the equivalent of a one-size fits all oversized t-shirt which sorta fits me (willing to compromise a lot on fit) without it coming with like unicorns for a logo and flowers and glitter all over it.
+I just wanted to start that off as a primer/caveat, if only as a means of consolation, because you're treading towards very difficult design territory regardless of what sort of language or architecture or paradigm you use if you're creating your own engine. If your engine gets more elaborate to the point of wanting to handle soft shadows, DOF, area lights, indirect lighting, diffuse reflections, etc, the design decisions are going to become increasingly difficult to make, and sometimes you have to kind of grit your teeth and go with one and make the best of it to avoid becoming paralyzed while reading endless papers and articles from experienced devs who all have different ideas while overwhelmed about what path to take. I ended up going with a deferred pipeline using stochastic transparency and a DSEL as a shading language (somewhat similar to Shadertoy's approach from Inigo Quilez though we worked on these things independently and before either of our products existed) that allows users and internal devs to program their own deferred rendering/shading passes which ended up turning into a visual, nodal programming language later on not too unlike Unreal's Blueprints. Now I'm already rethinking it all for voxel cone tracing and I suspect each generation of AAA game engines was predominantly prompted by desires to change the fundamental structure of the rendering pipeline.
+Anyway, with that aside, there are a couple of things I suspect could help you with your immediate design problem, though they might require substantially rethinking some things. I don't mean to come off dogmatic except that I lack the expertise to compare all possible solutions, though it is not as though I didn't try some of the alternatives originally. So here goes:
+1. Don't tell the renderers what to render, especially in an ECS.
+Let the renderers traverse the scene (or spatial index if one is available) and figure out what to render based on what they're supposed to render and what's available in the scene to render. This should eliminate some of the concern of how to pass the geometry (ex: planes) you need to render for a forward reflection pass. If the planes already exist in the scene (in some form, maybe just as triangles with a material marked as reflective), the renderer can query the scene and discover those reflective planes to render to an offscreen reflection texture/frame buffer. This does come with the con of coupling your renderer to your particular engine and scene rep or at least interface, but for real-time renderers, I think this is often a practical necessity to get the most out of it. As a practical example you can't necessarily expect UE 4 to render scene data from CryEngine 3 even with an adapter; real-time renderers are just too difficult and too cutting-edge (lacking standardization) to program in a way to generalize and decouple them to this degree.
+2. I think inevitably you have to hardcode the number of output buffers/textures you have for your particular engine and what they store. For deferred engines many devs go with a g-buffer representation like this:
+Either way it simplifies things a tremendous deal to decide on what you need in a G-Buffer or analogical equivalent upfront (it might not be a compacted G-Buffer but just an array of textures of particular types to output/input, like "Diffuse" texture vs. "Specular/Reflection" vs. "Shadows" or whatever you need for your engine). Then each renderer can read from it and output whatever it needs before the next renderer might read some of this stuff and output to separate parts ultimately for it to all be composited to the final framebuffer output to the user. This way you sort of have a reflection (aka specular) texture data always available for renderers to input and output so that your reflection pass can just output to the relevant texture(s) and the subsequent renderer(s) and passes can input it/them and use it/them to render a combined result.
+Lots of your current concerns seem to be with passing like special-case data in some exceptional use case from one renderer to the next or from the scene to the particular renderer, and that becomes simple and straightforward if every renderer just has access to all that data upfront it could possibly ever need without having to be uniquely passed the sort of data it specifically needs. That does violate some sound engineer practices to give each renderer such a wide access to disparate types of data, but with renderers the needs are so difficult to anticipate upfront that you tend to save more time just giving them access to everything they could possibly need upfront and let them read and write (though for writing just textures/G-Buffer) to whatever they need for their particular purpose. Otherwise you could find yourself as you are now just trying to figure out ways to pass all this data through the pipeline while constantly tempted to make changes both inside and outside these renderers to give them the needed inputs and feed the needed outputs to the next pass.
+Share
+Share a link to this answer
+Copy linkCC BY-SA 4.0
+Short permalink to this answer
+Improve this answer
+Follow
+Follow this answer to receive notifications
+edited Dec 4, 2018 at 13:45
+answered Dec 4, 2018 at 13:08
+user321630
+7
+1
+This is a good answer, thank you. Do you know good reference books that can teach me how to structure a 3d pipeline? For example I'm now trying to learn how to do volumetric fog and I'm lost among lots of papers but no algorithm or implementation or how to include it into my current pipeline. God, making a simple engine is quite a feat!
+Luca
+–
+Luca
+2018-12-11 22:40:10 +00:00
+Commented
+Dec 11, 2018 at 22:40
+I'm afraid I don't know of any comprehensive books on the subject, though there are lots of articles that I found useful just starting with search terms like deferred and forward rendering, and sometimes you get a lot of insight searching for articles from devs on very specific subjects like SSS: derschmale.com/2014/06/02/…
+user321630
+–
+user321630
+2018-12-12 14:42:15 +00:00
+Commented
+Dec 12, 2018 at 14:42
+The tricky part is kind of looking at what all these devs are doing and piecing it together and adapting it in a way that works for your engine, since often the types of effects they can achieve is so much the result of their particular design choices and how they structured everything. For volumetric effects, a very old school/cheap technique is layering transparent sprites together. Then much more sophisticated by also much more computationally involved would be volumetric raymarching. Looking at Shadertoy examples can be very helpful too...
+user321630
+–
+user321630
+2018-12-12 14:44:41 +00:00
+Commented
+Dec 12, 2018 at 14:44
+Like this for volumetric lighting with single scattering: shadertoy.com/view/ltj3zW
+user321630
+–
+user321630
+2018-12-12 14:47:35 +00:00
+Commented
+Dec 12, 2018 at 14:47
+Fundamentally though for multipass rendering, this is the sort of signature I found most useful: render_pass(scene, gbuffer). That gives the rendering pass whatever info it wants from the scene (full access), and its implementation might even involve more than one shader. Then the pass outputs one or more textures to the gbuffer it receives. Then you call the next rendering pass and the next pass has access to the new gbuffer, and so forth. The final pass is often some sort of compositing pass which combines all the textures rendered to the gbuffer into a single output for the user.
+user321630
+–
+user321630
+2018-12-14 12:36:06 +00:00
+Commented
+Dec 14, 2018 at 12:36
+|
+Show 2 more comments
+Start asking to get answers
+Find the answer to your question by asking.
+Ask question
+Explore related questions
+architecture
+c++
+3d
+rendering
+See similar questions with these tags.
+The Overflow Blog
+A JSON schema Is not an AI governance layer
+It’s ok that computers are (sometimes) better than us
+Featured on Meta
+We’ve reworked automatic question deletion. Let’s talk about why
+How can we improve duplicate handling?
+Related
+9
+Rendering trillions of "atoms" instead of polygons?
+4
+Global Texture Container
+0
+Inheritance and polymorphysm conundrum
+3
+Is there any benefit to minimal functional style?
+1
+Calling a static method from constructor's member initializer list
+4
+Design pattern to create a shared lib architecture
+0
+Which approach do I choose for representing objects and scenes in my 3D drawing library?
+Hot Network Questions
+Sudoku GUI in C Win32
+What are more ways to learn about quantum information as a beginner?
+Different results in Cox regression with step functions
+What's the harmonic function of the VI-VII-v-i progression in minor?
+Has anyone paid $45 to download an article?
+How do professors feel about using AI for email drafting in PhD applications lately?
+Lite r al Interpretation
+What is the mechanism behind this phish that gives me a code to enter after I log into M365, and what is the end goal?
+What commandment of God did the Pharisees nullify in Mark 7:9–13?
+What does Paul mean by "be known to God" in Galatians 4:9?
+Limits Definition
+Why does Agda reject pattern matching on stuck constructors?
+Compiling only the last section
+Statistical Feasibility of Comparing Treatments in a Small Clinical Dataset
+What is the standard anthology of Greek mythology in English?
+Maximum sum in a Latin 5x5 Minesweeper grid
+How can I pass my floating tcolorbox to \listof{}?
+Cutting one region using another as a tool (Vanilla vs UTCG)
+When reading a textbook, how do I approach "learning" mathematical definitions?
+Can skirmish apply to each attack here, or does the volley rules block that?
+How do I disable STRICT_TRANS_TABLES in the MariaDB config file?
+Is emergence as a phenomenon just something we project onto reality?
+Rotating the wheel while keeping the freehub fixed creates a jerky feeling/movement, is this a typical sign of worn/damaged freehub?
+Making \tl_step_inline:Nn in expl3
+Question feed
+lang-cpp
+Report this ad

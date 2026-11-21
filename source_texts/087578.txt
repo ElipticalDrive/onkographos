@@ -1,0 +1,110 @@
+Set of classes and utilities based on research and software developed at the Computational Visualization Center. - Port volrover's volren software raycaster to cvc::volren by transfix · Pull Request #320 · transfix/libcvc
+
+Port volrover's volren software raycaster to cvc::volren by transfix · Pull Request #320 · transfix/libcvc · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+transfix
+commented
+Sep 3, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Modern C++ port of volrover's legacy C volren software raycast volume renderer into libcvc as cvc::volren (inc/cvc/volren/ + src/cvc/volren/, following the nav/vis module layout), per the modernization roadmap. The ray/isosurface-intersection subset of libiso (the only part the renderer used — one call site, iso_intersectW) is absorbed as an internal detail; libiso's mesh-extraction role stays with the existing cvc::iso(). Full design + fidelity notes: docs/VOLREN_API.md.
+Design
+No globals, no singletons: the legacy VolRenEnv/MultiVolRenEnv aggregate becomes value types owned by a raycaster instance; every #define is a typed constant (defaults::/limits::); the header-static MC/specular tables are inline constexpr; the spline-gradient cache that forced vrCopyEnv per OpenMP thread is a per-ray stack object.
+cvc objects at the boundary: cvc::volume in (shallow copy, buffer pinned via active_storage() for the render), cvc::image out — RGBA8 color (top-left origin) + f32 eye-space depth map with depth_to_window_z() for a later gl_FragDepth composite.
+cvcGL-compatible camera: eye/focal/up pose (CameraController::getPose() feeds straight in), vertical fov in degrees (vtkCamera::ViewAngle), SetParallelScale ortho semantics.
+Scene-graph transforms: each volume carries a mat4 model_transform in exactly cvcGL's convention (row-major double[16], column-vector points — the GraphicsNode matrix state-key encoding). Object-space raycasting through the affine inverse; iso hits keep world-comparable ray parameters so the depth map stays consistent; normals return via the inverse-transpose.
+State tree for all settings: state_settings two-way binds the full surface at <prefix>.volren.* (state_object pattern, synchronized seeding via state_init_scope, mutex-guarded snapshot). Transfer functions use VolumeNode's transfer_function.color/.opacity flat-CSV encoding so the same editors drive both renderers.
+Modern threading: tile-parallel via cvc::thread_pool (a private pool by default — thread_pool supports only one in-flight parallel_for, so borrowing the shared computePool() blindly can deadlock; flagged separately for a core fix). Output is byte-identical for any thread count; progress through app::threadProgress; boost interruption between slabs; exceptions in pool tasks are captured and rethrown on the orchestrator.
+Fidelity vs legacy (full catalogue in the doc)
+Preserved: per-cell (not per-sample) contribution, front-to-back associated-color compositing with 0.95 early termination, quadratic-B-spline (de Boor) gradients, MC cell intersection with the VTK table family (consistent with cvc::iso(..., FASTCONTOURING)), gradient-magnitude opacity modulation, Blinn-Phong with the 0.9 gain.
+Fixed: multi-light overwrite (= vs +=), blue-diffuse-from-green-light, env[0] iso frames in multi-volume, FLOAT assert(0) (all cvc::data_types render), ignored shininess, cut planes (declared-but-dead in the tracer) now implemented, raster rounding to 32 / dropped remainder tiles, divide-by-alpha saturation hack, camera-inside-volume rendering.
+Dropped: materials/ColorMode (never consumed by the tracer), the .cnf format, vrLoadVolume's format zoo (superseded by cvc::volume_file_io), MPI drivers, RawV multi-variable volumes (future work).
+Testing
+144 tests across six new gtest suites (registered per the 4-step pattern): camera math (38), transfer functions (27), kernels vs analytic fields — trilinear exactness, spline gradient recovering linear-field gradients, MC tables cross-validated against the legacy headers, cell intersection vs closed forms (26), math/mat4/depth (24), end-to-end renders (21) incl. thread-count byte-invariance, transform equivalence, depth-map latching, cut planes, multi-volume, and state binding (8). An adversarial multi-agent review (5 dimensions, every finding independently verified) produced regression tests + fixes for: translucent-iso depth latching, NaN-voxel/pose hardening (no UB casts, no unbounded march), the state-binding plateau drop, CSV precision, and the pool-sharing deadlock hazard.
+Full local suite passes except three pre-existing ImageMagick codec tests that fail against the local deps prefix (delegates missing; master's build-debug against system IM6 passes them) — unrelated to this change.
+Follow-ups
+cvcGL drop-in node: textured quad + depth texture + //VTK::Depth::Impl replacement using depth_to_window_z (integration recipe in the doc); the node composes its scene-graph world matrix and hands it to volume_settings::model_transform.
+CUDA path per the voxels_kernels.cu precedent.
+Core cvc::thread_pool concurrent-parallel_for deadlock (separate task).
+transfix
+added 2 commits
+September 2, 2026 20:30
+Port volrover's volren software raycaster to cvc::volren
+…
+64b1ee1
+```
+Modern C++ port of the legacy C volren library plus the ray/isosurface-
+intersection subset of libiso (per the modernization roadmap: volren ->
+libcvc, libiso's mesh-extraction role stays with cvc::iso()).
+
+Design:
+- No globals/singletons: legacy VolRenEnv/MultiVolRenEnv become value types
+  owned by a raycaster instance; the header-static tables are inline
+  constexpr; the spline-gradient cache that forced per-thread env copies is
+  per-ray stack state.
+- cvc objects at the boundary: cvc::volume in (buffer pinned via
+  active_storage for the render), cvc::image out (RGBA8 color + f32
+  eye-space depth map for depth-aware compositing).
+- Camera is cvcGL/VTK-parameterized (eye/focal/up pose, vertical fov in
+  degrees, SetParallelScale ortho semantics) with depth_to_window_z for a
+  later gl_FragDepth composite; per-volume model_transform takes a cvcGL
+  scene-graph node's row-major world matrix verbatim (object-space
+  raycasting through the affine inverse, normals via inverse-transpose).
+- All settings two-way bound to the app state tree at <prefix>.volren.*
+  (state_object pattern; transfer functions use VolumeNode's
+  transfer_function.color/.opacity CSV encoding).
+- Tiles render on cvc::thread_pool (private pool by default; the shared
+  computePool allows only one in-flight parallel_for) with byte-identical
+  output for any thread count, progress via app::threadProgress, boost
+  interruption between slabs.
+
+Legacy defects fixed (catalogued in docs/VOLREN_API.md): multi-light
+overwrite, blue-diffuse-from-green-light, env[0] iso frames in multi-volume,
+FLOAT assert(0), ignored shininess, dead cut planes now implemented, raster
+rounding/dropped tiles, divide-by-alpha saturation hack, camera-inside-
+volume miss. Dropped: materials/ColorMode (parsed but never consumed), the
+.cnf format, the vrLoadVolume format zoo, MPI drivers, RawV multi-variable
+volumes (future work).
+
+144 unit tests across six suites (camera math, transfer functions, sampling/
+spline-gradient/MC kernels vs analytic fields, end-to-end renders, state
+binding), including regressions from an adversarial review: translucent-iso
+depth latching, NaN-voxel hardening, non-finite pose/transform rejection,
+concurrent renders on separate raycasters.
+```
+Apply clang-format to the volren module and tests
+14646f5
+Hide details
+View details
+transfix
+merged commit 55db980
+into
+master
+Sep 3, 2026
+13 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+transfix
+mentioned this pull request
+Sep 3, 2026
+cvcGL VolRenNode, CUDA raycast backend, and the volren_bunny demo
+#323
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

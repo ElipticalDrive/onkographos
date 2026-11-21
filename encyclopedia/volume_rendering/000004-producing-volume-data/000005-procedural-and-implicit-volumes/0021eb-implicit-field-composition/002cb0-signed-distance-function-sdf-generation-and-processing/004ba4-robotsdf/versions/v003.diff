@@ -1,0 +1,270 @@
+--- v002.md
++++ v003.md
+@@ -1,44 +1,44 @@
+ # RobotSDF
+ Also called: Robot Model to SDF
++## Overview
++RobotSDF generates a Signed Distance Field (SDF) representation of a multi-link robot model conditioned on a specific joint configuration [S1, unofficial]. It solves the problem of creating differentiable, batched geometric representations for robotic arms to enable gradient-based planning and collision checking [S1, unofficial]. It differs from static SDF methods by dynamically composing link-level SDFs via forward kinematics transforms, allowing the volume to change shape as joint angles vary [S1, unofficial].
++## How it works
++**Inputs:**
++- `chain`: A `pytorch_kinematics.Chain` object describing the robot. Links must be of mesh type; non-mesh geometries are ignored [S1, unofficial].
++- `default_joint_config`: Optional initial joint values (None defaults to zeros) [S1, unofficial].
++- `path_prefix`: Directory path for resolving relative mesh file paths in the URDF [S1, unofficial].
++- `link_sdf_cls`: Factory class for individual link SDFs (default: `sdf.MeshSDF`) [S1, unofficial].
++- `points_in_object_frame`: Query points $\mathbf{P} \in \mathbb{R}^{N \times 3}$ in the robot's base frame [S1, unofficial].
++- `compute_grad`: Boolean flag to enable/disable gradient computation [S1, unofficial].
+ 
+-## Overview
+-RobotSDF generates a Signed Distance Field (SDF) representation of a multi-link robot model conditioned on a specific joint configuration, supporting batched queries across multiple configurations and spatial points [S1, unofficial]. It differs from its siblings by explicitly composing individual link SDFs via forward kinematics transforms rather than treating the robot as a static mesh or a simple volumetric union; it builds on [Signed Distance Function (SDF) Generation and Processing](5342-signed-distance-function-sdf-generation-and-processing.md) by managing the dynamic composition of these implicit volumes. Trade-offs include higher computational cost per query compared to pre-baked volumes, but it provides exact geometric fidelity for any joint state without discretization artifacts inherent to voxelization [S1, unofficial].
+-
+-## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A `pytorch_kinematics.Chain` object describing the robot topology and link geometries (meshes); a joint configuration vector (or batch of vectors); query points in the object frame.
+-*   **Output:** SDF values $d(\mathbf{x})$ for each query point; optionally, gradients $\nabla d(\mathbf{x})$ and surface normals.
++**Outputs:**
++- `distance`: SDF values $d(\mathbf{x})$ for each query point [S1, unofficial].
++- `gradient`: Surface normals $\nabla d(\mathbf{x})$ if `compute_grad` is True [S1, unofficial].
+ 
+ **Data Structures:**
+-*   `RobotSDF`: Inherits from `sdf.ObjectFrameSDF`.
+-*   `link_sdf_cls`: A factory function (default `sdf.MeshSDF`) that creates an `ObjectFrameSDF` instance for each visual link.
+-*   `ComposedSDF`: An internal structure holding a list of link SDFs and their corresponding object-to-link transformation matrices.
+-*   `configuration_batch`: Stores multiple joint configurations reshaped to $(-1, M)$ where $M$ is the number of joints.
++- `ComposedSDF`: Holds a list of link SDFs and their corresponding object-to-link transformation matrices [S1, unofficial].
++- `MeshObjectFactory`: Manages the underlying mesh geometry and raycasting scene for a single link [S1, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Initialization:**
+-    *   Iterate over frame names in the `chain`.
+-    *   For each visual geometry of type 'mesh', instantiate a `MeshObjectFactory` and create a link SDF using `link_sdf_cls`.
+-    *   Store the link names and their initial offsets.
+-    *   Stack offset transforms and create a `ComposedSDF` instance from the list of link SDFs and object-to-link frames [S1, unofficial].
++1. **Initialization**:
++   - Iterate over frame names in the `chain`.
++   - For each visual geometry of type 'mesh', instantiate a `MeshObjectFactory` and create a link SDF using `link_sdf_cls` [S1, unofficial].
++   - Store offsets and link names [S1, unofficial].
++   - Stack offset transforms and create a `ComposedSDF` from the list of link SDFs and object-to-link frames [S1, unofficial].
++   - If `link_sdf_cls` is `CachedSDF` or `TSDF`, call `s.compile()` on each link SDF to optimize the `_forward_no_grad` method using `torch.compile` [S1, unofficial].
+ 
+-2.  **Set Joint Configuration:**
+-    *   If `joint_config` has multiple batch dimensions, save them in `configuration_batch` and reshape to $(-1, M)$.
+-    *   Compute forward kinematics using `pk.build_serial_chain_from_urdf` or equivalent. If using `SerialChain`, set `end_only=False` to retrieve all link transforms; otherwise use default behavior [S1, unofficial].
+-    *   Extract transformation matrices $T_{link}$ for each link name.
+-    *   Compute the object-to-link frame transforms: $T_{obj \to link} = T_{offset}^{-1} \cdot T_{link}$.
+-    *   If `configuration_batch` exists, expand the offset transform matrix dimensions and repeat to match the batch size before reshaping [S1, unofficial].
++2. **Set Joint Configuration**:
++   - If `joint_config` has multiple batch dimensions, save them in `configuration_batch` and reshape to $(-1, M)$ where $M$ is the number of joints [S1, unofficial].
++   - Compute forward kinematics using `SerialChain` with `end_only=False` (or default for other chain types) [S1, unofficial].
++   - Extract transformation matrices for each link name [S1, unofficial].
++   - Inverse offset transforms and compose with link transforms to get `object_to_link_frames` [S1, unofficial].
++   - If `configuration_batch` exists, expand offset transform matrix dimensions and repeat to match batch size before reshaping [S1, unofficial].
+ 
+-3.  **Query (SDF Evaluation):**
+-    *   Pass `points_in_object_frame` and `compute_grad` flag to the underlying `ComposedSDF`.
+-    *   For each link SDF, evaluate the distance to the query point in the link's local frame.
+-    *   Transform the query point to the link's frame using $T_{obj \to link}$.
+-    *   The global SDF value is the minimum of the local SDF values across all links:
+-        $$ d_{global}(\mathbf{x}) = \min_{i} d_{link_i}(T_{obj \to link_i} \mathbf{x}) $$
+-    *   If gradients are requested, compute the gradient for each link and transform it back to the object frame using the Jacobian of the transformation. The global gradient is the gradient corresponding to the minimum distance link [S1, unofficial].
+-
+-4.  **Optimization (Compilation):**
+-    *   For each link SDF, if it is a `CachedSDF`, compile its `_forward_no_grad` method using `torch.compile` for faster queries [S1, unofficial].
++3. **Query (SDF Evaluation)**:
++   - Pass `points_in_object_frame` and `compute_grad` flag to the underlying `ComposedSDF` [S1, unofficial].
++   - For each link, transform query points to the link's local frame using the current `object_to_link_frames` [S1, unofficial].
++   - Evaluate the link's SDF at the transformed points [S1, unofficial].
++   - Compose results from all links (typically taking the minimum distance for the union of solids) [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -50,131 +50,89 @@
+ 
+ class RobotSDF:
+-    def __init__(self, chain, default_joint_config=None, path_prefix='',
++    def __init__(self, chain: pk.Chain, default_joint_config=None, path_prefix='',
+                  link_sdf_cls=sdf.MeshSDF):
+         self.chain = chain
+         self.link_sdfs = []
+-        self.link_names = []
+-        self.offset_transforms = []
++        self.object_to_link_frames = []
+         
+-        # Initialization: Create SDFs for each mesh link
++        # Initialization: Build link SDFs
+         for frame_name in chain.frame_names:
+-            # Check if frame has visual mesh geometry
+-            if chain.get_visual_geometry(frame_name) is not None:
+-                # Create factory and SDF for this link
+-                factory = sdf.MeshObjectFactory(
+-                    path_prefix=path_prefix,
+-                    geometry=chain.get_visual_geometry(frame_name)
+-                )
+-                link_sdf = link_sdf_cls(factory)
+-                self.link_sdfs.append(link_sdf)
+-                self.link_names.append(frame_name)
+-                # Store initial offset (identity or base transform)
+-                self.offset_transforms.append(torch.eye(4))
++            # Assuming chain provides access to visual geometries
++            # Create MeshObjectFactory and link SDF
++            # Store offsets and link names
++            # link_sdf = link_sdf_cls(mesh_factory)
++            # self.link_sdfs.append(link_sdf)
++            pass 
+         
+-        self.num_links = len(self.link_sdfs)
+-        self.joint_config = default_joint_config if default_joint_config is not None else torch.zeros(self.chain.num_joints)
++        # Create ComposedSDF
++        # self.composed_sdf = ComposedSDF(self.link_sdfs, self.object_to_link_frames)
+         
+-    def set_joint_configuration(self, joint_config):
+-        """Compute forward kinematics and update link transforms."""
+-        # Handle batched configurations
++        # Compile if using CachedSDF/TSDF
++        # for s in self.link_sdfs:
++        #     if isinstance(s, CachedSDF):
++        #         s.compile()
++
++    def set_joint_configuration(self, joint_config: torch.Tensor):
++        """
++        joint_config: shape (M,) or (B, M) where M is number of joints
++        """
++        # Handle batch dimensions
+         if joint_config.dim() > 1:
+             self.configuration_batch = joint_config
+-            joint_config = joint_config.view(-1, self.chain.num_joints)
++            joint_config = joint_config.reshape(-1, joint_config.shape[-1])
+         else:
+-            self.configuration_batch = None
++            joint_config = joint_config.unsqueeze(0)
+             
+-        # Compute forward kinematics
+-        fk_matrices = self.chain.forward_kinematics(joint_config, end_only=False)
++        # Compute Forward Kinematics
++        # fk_matrices = self.chain.forward_kinematics(joint_config, end_only=False)
+         
+-        # Extract and compose transforms for each link
+-        self.link_transforms = []
+-        for name in self.link_names:
+-            # Get transform from base to link
+-            T_base_to_link = fk_matrices[name]
+-            # Apply offset inverse and compose
+-            T_obj_to_link = torch.linalg.inv(self.offset_transforms[self.link_names.index(name)]) @ T_base_to_link
+-            self.link_transforms.append(T_obj_to_link)
+-            
+-    def __call__(self, points_in_object_frame, compute_grad=False):
+-        """Query the SDF for points in the object frame."""
+-        if self.configuration_batch is not None:
+-            # Handle batched queries
+-            # Expand link transforms to match batch size
+-            B = self.configuration_batch.shape[0]
+-            expanded_transforms = [T.unsqueeze(0).expand(B, -1, -1) for T in self.link_transforms]
+-        else:
+-            expanded_transforms = self.link_transforms
+-            
+-        # Initialize results
+-        min_distances = torch.full((points_in_object_frame.shape[0],), float('inf'), device=points_in_object_frame.device)
+-        gradients = None
++        # Extract transformation matrices for each link
++        # Inverse offset transforms and compose with link transforms
++        # self.object_to_link_frames = ...
+         
+-        # Iterate over each link
+-        for i, link_sdf in enumerate(self.link_sdfs):
+-            T = expanded_transforms[i]
+-            
+-            # Transform points to link frame
+-            # points_link = T_inv @ points_object (homogeneous)
+-            # Simplified: assume T is 4x4, points are Nx3
+-            points_homogeneous = torch.cat([points_in_object_frame, torch.ones_like(points_in_object_frame[:, :1])], dim=1)
+-            points_link_homogeneous = (T.inverse() @ points_homogeneous.T).T
+-            points_link = points_link_homogeneous[:, :3]
+-            
+-            # Query link SDF
+-            dist, grad = link_sdf(points_link, compute_grad=True)
+-            
+-            # Update minimum distance
+-            mask = dist < min_distances
+-            min_distances[mask] = dist[mask]
+-            
+-            if compute_grad:
+-                # Transform gradient back to object frame
+-                # grad_obj = T @ grad_link
+-                grad_homogeneous = torch.cat([grad, torch.zeros_like(grad[:, :1])], dim=1)
+-                grad_obj_homogeneous = (T @ grad_homogeneous.T).T
+-                grad_obj = grad_obj_homogeneous[:, :3]
+-                
+-                if gradients is None:
+-                    gradients = torch.zeros_like(points_in_object_frame)
+-                gradients[mask] = grad_obj[mask]
+-                
+-        return min_distances, gradients
++        # Handle batch expansion for offsets if needed
++        # if self.configuration_batch is not None:
++        #     expand and repeat offset transforms
+ 
+-    def compile(self):
+-        """Compile CachedSDFs for speedup."""
+-        for link_sdf in self.link_sdfs:
+-            if isinstance(link_sdf, sdf.CachedSDF):
+-                link_sdf.compile()
++    def __call__(self, points_in_object_frame: torch.Tensor, compute_grad: bool = False):
++        """
++        points_in_object_frame: shape (N, 3) or (B, N, 3)
++        Returns: distance, gradient (optional)
++        """
++        # Pass to ComposedSDF
++        # distance, gradient = self.composed_sdf(points_in_object_frame, self.object_to_link_frames, compute_grad)
++        # return distance, gradient
++        pass
++
++# Example Usage
++# chain = pk.build_serial_chain_from_urdf(urdf_string, root_link)
++# robot_sdf = RobotSDF(chain, link_sdf_cls=sdf.MeshSDF)
++# robot_sdf.set_joint_configuration(joint_angles)
++# dist, grad = robot_sdf(query_points, compute_grad=True)
+ ```
+ 
+ **Parameters:**
+-*   `chain`: Robot description (pytorch_kinematics Chain). Non-mesh geometries are ignored [S1, unofficial].
+-*   `link_sdf_cls`: Factory for link SDFs. Default `sdf.MeshSDF`. Supports `CachedSDF` or `TSDF` for performance [S1, unofficial].
+-*   `compute_grad`: Boolean. If `False`, only SDF values are returned, improving performance [S1, unofficial].
+-*   `resolution`: Grid resolution for `CachedSDF`/`TSDF`. Default 0.02 [S1, unofficial].
+-*   `truncation_distance`: Truncation distance for `TSDF`. Default 0.1 [S1, unofficial].
++- `resolution`: Grid resolution for `CachedSDF`/`TSDF`. Default: 0.02 [S1, unofficial].
++- `truncation_distance`: Truncation distance for `TSDF`. Default: 0.1 [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Points very close to the surface ($|d| < 10^{-3}$) may have noisy gradients due to closest-point estimation. The implementation fixes this by using surface normals for these points [S1, unofficial].
+-*   **Inside/Outside:** Determined by ray casting intersection counts. Points with odd intersections are inside [S1, unofficial].
+-*   **Batching:** Joint configurations must be reshaped to $(-1, M)$ if multiple batches are provided. Transform matrices must be expanded to match the batch dimension [S1, unofficial].
++- Non-mesh geometries in the URDF are ignored [S1, unofficial].
++- Points very close to the surface ($|d| < 10^{-3}$) may have noisy gradients from closest-point raycasting; these are corrected using surface normals [S1, unofficial].
++- Gradient direction is flipped for interior points to ensure $\nabla d$ points outward [S1, unofficial].
++- Ray destinations for intersection tests are extended outside the bounding box with small random noise to reduce artifacts [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [TetraSDF Skeleton Generation](14203-tetrasdf-skeleton-generation.md)
+-Extracts topological skeletons from the SDF volume produced by RobotSDF. It differs by operating on the resulting grid data rather than the implicit representation. Choose when centerlines are needed for path planning.
++Extracts topological skeletons from the SDF volume produced by RobotSDF. Choose this when centerlines are needed for path planning.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot L)$ per query, where $N$ is the number of query points and $L$ is the number of links. Each link SDF query is $O(1)$ for mesh-based SDFs (raycasting) or $O(\log V)$ for tree-based structures.
+-*   **Memory Complexity:** $O(L \cdot V)$, where $V$ is the voxel count if `CachedSDF` is used. `MeshSDF` stores only mesh data, which is typically smaller.
+-*   **Measured Performance:** Using `CachedSDF` with `torch.compile` provides approximately a 2x GPU speedup for no-gradient queries compared to default `MeshSDF` [S1, unofficial].
+-*   **Strengths:** Exact geometric representation for any joint configuration; supports batched queries; differentiable (if gradients are computed).
+-*   **Limitations:** Slower than pre-baked voxel grids for static scenes; requires forward kinematics computation for each configuration; memory usage scales with number of links if caching is enabled.
+-*   **When to Use:** Robot motion planning, collision detection in dynamic environments, inverse kinematics with geometric constraints.
+-*   **When Not to Use:** Static scenes where pre-computed SDFs are sufficient; real-time applications with strict latency constraints and many links where caching overhead is prohibitive.
+-
++- **Time Complexity**: Depends on the number of links $L$, query points $N$, and the underlying link SDF implementation. MeshSDF is slower due to per-point raycasting; CachedSDF/TSDF are faster due to grid lookups [S1, unofficial].
++- **Memory Complexity**: Proportional to the number of links and the resolution of cached grids [S1, unofficial].
++- **Performance**: Using `CachedSDF` or `TSDF` with `torch.compile()` provides approximately a 2x speedup on GPU for no-gradient queries [S1, unofficial].
++- **Strengths**: Differentiable, batched, supports arbitrary joint configurations [S1, unofficial].
++- **Limitations**: Only supports mesh geometries; performance degrades with high-resolution grids or many links if not cached [S1, unofficial].
+ ## Background
+-RobotSDF was introduced as part of the `pytorch_volumetric` library by the UM-ARM-Lab [S1, unofficial]. It addresses the need for differentiable, geometry-accurate collision checking in robot learning and control tasks, where traditional voxel-based methods may lack precision or require frequent recomputation. The method leverages `pytorch_kinematics` for efficient forward kinematics and integrates with PyTorch for GPU acceleration [S1, unofficial].
+-
++RobotSDF is part of the `pytorch_volumetric` library developed by the University of Michigan ARM Lab [S1, unofficial]. It enables the use of implicit representations for robotic kinematics and collision detection in deep learning pipelines [S1, unofficial].
+ ## Sources
+ [S1] GitHub - UM-ARM-Lab/pytorch_volumetric: Volumetric structures such as ..., https://github.com/UM-ARM-Lab/pytorch_volumetric, fetched 2026-10-30 (unofficial)

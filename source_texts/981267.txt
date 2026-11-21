@@ -1,0 +1,258 @@
+Automatically exported from code.google.com/p/v-hacd - Performance improvements, code cleanup, and bug fix to V-HACD by jratcliff63367 · Pull Request #81 · kmammou/v-hacd
+
+Performance improvements, code cleanup, and bug fix to V-HACD by jratcliff63367 · Pull Request #81 · kmammou/v-hacd · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jratcliff63367
+commented
+Apr 17, 2020
+Copy link
+Copy Markdown
+Collaborator
+// Changes for version 3.0 : April 17, 2020 : John W. Ratcliff mailto:jratcliffscarab@gmail.com
+//
+// * Some code cleanup was done, removed obsolete OpenCL, OpenMP and SIMD code.
+// * The purpose of this change was to make the code more vanilla C++ and to make it easier to maintain
+// * Removed the obsolete tetrahedral 'mode' as the library currently only supports voxels.
+// * Again this was to make the code base smaller and easier to maintain.
+// *
+// * A new optional virtual interface called 'IUserProfiler' was provided.
+// * This allows the user to provide an optional profiling callback interface to assist in
+// * diagnosing performance issues. This change was made by engineers at Epic for the UE4 integration.
+// * Some profiling macros were also declared in support of this feature.
+// *
+// * Another new optional virtual interface called 'IUserTaskRunner' was provided.
+// * This interface is used to run logical 'tasks' in a background thread. If none is provided
+// * than a default implementation using std::thread will be executed.
+// * This change was made by engineers at Epic to speed up the voxelization step.
+// *
+// * Some performance optimizations were made to the code. They include the following:
+// *
+// * During the voxelization step there was code to rotate every point in the source mesh.
+// * However this feature was not actually being used, so it was removed to improve performance
+// * during the voxelization stage.
+// *
+// * Some of the voxelization steps were made to run in parallel to improve overall performance as well.
+// * This change was made by engineers at Epic.
+// *
+// * During the voxelization phase, the original implementation would attempt to voxelize the input mesh
+// * multiple times until it hit some target number of voxels. This step was not needed, as the number of
+// * of desired voxels implies a certain voxel resolution so instead it just does the voxelization step
+// * in a single pass at the specified detail level.
+// *
+// * The final performance optimization was to unroll the ComputeACD step so it can be run in parallel.
+// * A new helper class was introduced called 'SimpleJobSystem' which can run tasks across multiple threads.
+// * When computing the ACD (approximate convex decomposition) the code iterates through all input sub-meshes
+// * and computes the concavity, the optimal splitting plane and, optionally, splits the input mesh by a plane.
+// * This can happen hundreds of even thousands of times. The original code did this in a for loop using a single
+// * thread. The change made was so that this operation could be done in parallel. Since this operation is extremely
+// * memory bound, it onl provides about a 2x performance improvement, but that is still twice as fast at least.
+// * After the voxelization optimizations the ComputeACD step remained slowest part of V-HACD.
+// *
+// * A new feature was introduced called the 'FillMode'. By default V-HACD performs a flood fill operation after
+// * the voxelization step to determine which voxels lie 'inside' the source mesh surface and which are 'outside'.
+// * Most of the time this flood fill approach works fine. However, if the source mesh has a hole anywhere in it
+// * it can result in no voxels being marked as 'inside the surface'. When this happens the convex decomposition
+// * will treat the mesh as being 'hollow' inside. A good example of this failure case is the Stanford bunny which
+// * has a hole on the bottom.
+// *
+// * A new FillMode was introduced called 'RAYCAST_FILL' which can correct for this. If the FillMode is set to
+// * 'RAYCAST_FILL' then rather than doing a flood fill, instead each voxel will be categorized by performing
+// * a raycast in the six cardinal directions. If 3 or more of those raycasts hit the 'inside' of the source mesh
+// * then that voxel will be marked as being 'inside'. This can correct for the edge case when the source mesh has
+// * a voxel sized hole in it.
+// *
+// * Finally, there are some cases where you might actually want the source mesh to be treated as being a 'hollow'
+// * object. For certain types of simulations this is actually desirable. So, there is a new FillMode called
+// * 'SURFACE_ONLY' which will not mark any voxel as being 'inside' which will treat any source mesh as being 'hollow'
+// * inside and any deep recursion of the convex decomposition will converge towards the 'skin' of the object.
+// * For example, here is a video clip showing a simulation of a torus, without any holes, as a hollow object.
+// * https://www.youtube.com/watch?v=CIOoWN4CDb4
+// *
+// * Finally an important bug fix is included with this update.
+// * When using V-HACD by default, it works by converting the source mesh into a voxel grid and the performing
+// * the convex decomposition relative to that voxelization. This has a number of benefits, both performance as
+// * well as it greatly simplifies the plane splitting step vs. trying to perform a full CSG operation on an
+// * arbitrary triangle mesh.
+// *
+// * However, one downside of doing this is that the resulting convex hulls suffer a loss of precision. Each
+// * point in the final convex hull does not rest on the original source mesh but, instead, is based on the voxel
+// * resolution. If you use extremely high voxel resolutions then this loss of precision is less of an issue but
+// * using high voxel resolutions can make V-HACD run much more slowly. If you use a low voxel resolution V-HACD
+// * can run much more quickly but the output convex hull points will not be coplanar to the original source mesh
+// * and can result in poor simulation behavior.
+// *
+// * To fix this a new option was introduced called 'm_projectHullVertices'. If th is bool is set to true then
+// * as a final step each point on the convex hull output will be 'projected' onto the source mesh. In the previous
+// * release of V-HACD this 'projection' was done by performing a raycast operation. However, it was discovered that
+// * on some types of meshes this operation could fail producing completely bad convex hulls.
+// *
+// * This bug was fixed by switching to a 'closest point' algorithm instead of a raycast. A new code snippet was
+// * introduced called 'aabbtree', originally written by Miles Macklin, that can compute the closest point on a triangle
+// * mesh, within a radius, in a highly efficient manner.
+// Changes for version 3.0 : April 17, 2020 : John W. Ratcliff mailto…
+…
+cb63b79
+```
+…:jratcliffscarab@gmail.com
+
+//
+// * Some code cleanup was done, removed obsolete OpenCL, OpenMP and SIMD code.
+// * The purpose of this change was to make the code more vanilla C++ and to make it easier to maintain
+// * Removed the obsolete tetrahedral 'mode' as the library currently only supports voxels.
+// * Again this was to make the code base smaller and easier to maintain.
+// *
+// * A new optional virtual interface called 'IUserProfiler' was provided.
+// * This allows the user to provide an optional profiling callback interface to assist in
+// * diagnosing performance issues. This change was made by engineers at Epic for the UE4 integration.
+// * Some profiling macros were also declared in support of this feature.
+// *
+// * Another new optional virtual interface called 'IUserTaskRunner' was provided.
+// * This interface is used to run logical 'tasks' in a background thread. If none is provided
+// * than a default implementation using std::thread will be executed.
+// * This change was made by engineers at Epic to speed up the voxelization step.
+// *
+// * Some performance optimizations were made to the code. They include the following:
+// *
+// * During the voxelization step there was code to rotate every point in the source mesh.
+// * However this feature was not actually being used, so it was removed to improve performance
+// * during the voxelization stage.
+// *
+// * Some of the voxelization steps were made to run in parallel to improve overall performance as well.
+// * This change was made by engineers at Epic.
+// *
+// * During the voxelization phase, the original implementation would attempt to voxelize the input mesh
+// * multiple times until it hit some target number of voxels. This step was not needed, as the number of
+// * of desired voxels implies a certain voxel resolution so instead it just does the voxelization step
+// * in a single pass at the specified detail level.
+// *
+// * The final performance optimization was to unroll the ComputeACD step so it can be run in parallel.
+// * A new helper class was introduced called 'SimpleJobSystem' which can run tasks across multiple threads.
+// * When computing the ACD (approximate convex decomposition) the code iterates through all input sub-meshes
+// * and computes the concavity, the optimal splitting plane and, optionally, splits the input mesh by a plane.
+// * This can happen hundreds of even thousands of times. The original code did this in a for loop using a single
+// * thread. The change made was so that this operation could be done in parallel. Since this operation is extremely
+// * memory bound, it onl provides about a 2x performance improvement, but that is still twice as fast at least.
+// * After the voxelization optimizations the ComputeACD step remained slowest part of V-HACD.
+// *
+// * A new feature was introduced called the 'FillMode'. By default V-HACD performs a flood fill operation after
+// * the voxelization step to determine which voxels lie 'inside' the source mesh surface and which are 'outside'.
+// * Most of the time this flood fill approach works fine. However, if the source mesh has a hole anywhere in it
+// * it can result in no voxels being marked as 'inside the surface'.  When this happens the convex decomposition
+// * will treat the mesh as being 'hollow' inside. A good example of this failure case is the Stanford bunny which
+// * has a hole on the bottom.
+// *
+// * A new FillMode was introduced called 'RAYCAST_FILL' which can correct for this. If the FillMode is set to
+// * 'RAYCAST_FILL' then rather than doing a flood fill, instead each voxel will be categorized by performing
+// * a raycast in the six cardinal directions. If 3 or more of those raycasts hit the 'inside' of the source mesh
+// * then that voxel will be marked as being 'inside'. This can correct for the edge case when the source mesh has
+// * a voxel sized hole in it.
+// *
+// * Finally, there are some cases where you might actually want the source mesh to be treated as being a 'hollow'
+// * object.  For certain types of simulations this is actually desirable. So, there is a new FillMode called
+// * 'SURFACE_ONLY' which will not mark any voxel as being 'inside' which will treat any source mesh as being 'hollow'
+// * inside and any deep recursion of the convex decomposition will converge towards the 'skin' of the object.
+// * For example, here is a video clip showing a simulation of a torus, without any holes, as a hollow object.
+// *     https://www.youtube.com/watch?v=CIOoWN4CDb4
+// *
+// * Finally an important bug fix is included with this update.
+// * When using V-HACD by default, it works by converting the source mesh into a voxel grid and the performing
+// * the convex decomposition relative to that voxelization. This has a number of benefits, both performance as
+// * well as it greatly simplifies the plane splitting step vs. trying to perform a full CSG operation on an
+// * arbitrary triangle mesh.
+// *
+// * However, one downside of doing this is that the resulting convex hulls suffer a loss of precision. Each
+// * point in the final convex hull does not rest on the original source mesh but, instead, is based on the voxel
+// * resolution. If you use extremely high voxel resolutions then this loss of precision is less of an issue but
+// * using high voxel resolutions can make V-HACD run much more slowly.  If you use a low voxel resolution V-HACD
+// * can run much more quickly but the output convex hull points will not be coplanar to the original source mesh
+// * and can result in poor simulation behavior.
+// *
+// * To fix this a new option was introduced called 'm_projectHullVertices'. If th is bool is set to true then
+// * as a final step each point on the convex hull output will be 'projected' onto the source mesh. In the previous
+// * release of V-HACD this 'projection' was done by performing a raycast operation. However, it was discovered that
+// * on some types of meshes this operation could fail producing completely bad convex hulls.
+// *
+// * This bug was fixed by switching to a 'closest point' algorithm instead of a raycast. A new code snippet was
+// * introduced called 'aabbtree', originally written by Miles Macklin, that can compute the closest point on a triangle
+// * mesh, within a radius, in a highly efficient manner.
+```
+jratcliff63367
+commented
+Apr 17, 2020
+Copy link
+Copy Markdown
+Collaborator
+Author
+Khaled,
+This branch does the following:
+Integrates some optimizations made by engineers at Epic
+Exposes a new virtual interface and macros for profiling
+Exposes a new virtual interface for task management
+Adds a simple class to run logical 'jobs' on multiple threads
+Adds a class to do high speed AABB raycasting and closest point detection
+Removes obsolete code for the purposes of keeping the project easier to maintain; removed OpenCL, OpenMP, and SIMD references
+Removes tetrahedral support as it was not being actively used
+Added a new 'FillMode' option, described in the comments
+Includes an optimization from Epic to run some of the voxelization work in parallel
+Includes an optimization to run the ComputeACD operation in parallel
+Removed the code to rotate points from the source mesh during the voxelization step as it was not being used and had performance considerations
+Fixed a bug in the 'project hull vertices' option which could fail on some edge cases, now uses a 'nearest point' classification instead of a raycast
+Thanks,
+John
+jratcliff63367
+added 5 commits
+April 21, 2020 10:13
+Merging latest, SkeletonRig support etc.
+4246ce2
+Revised comments
+15adf9a
+Revised the SkeletonRig algorithm to use a closest point method inste…
+…
+e2b82d8
+```
+…ad of a raycast for more reliable bone weightings.
+```
+Added an optional callback notification event when the V-HACD operati…
+…
+6032ff3
+```
+…on is completed in the asynchronous background task
+```
+Fixed a build error
+bcc43d1
+jratcliff63367
+closed this
+May 1, 2020
+v-wewei
+commented
+May 10, 2020
+Copy link
+Copy Markdown
+Hi, @jratcliff63367
+i have test the highperformance branch but it seems generator more convexhull than the master branch.
+And some of the result just generator two much pices of small convex hull than the master.
+would you like to provide a more detailed information for your branch.
+jratcliff63367
+commented
+May 10, 2020
+Copy link
+Copy Markdown
+Collaborator
+Author
+It's probably just because of changes to the default values. You can directly control how many hulls are output. Send me an example mesh file and the settings you are using.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

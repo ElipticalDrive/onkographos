@@ -1,0 +1,285 @@
+--- v001.md
++++ v002.md
+@@ -3,189 +3,126 @@
+ 
+ ## Overview
+-Neural-PIL is a neural network module that replaces the costly numerical integration of incoming light with a simple network query, predicting pre-integrated light $\tilde{L}_i(\omega_r, b_r)$ directly from an illumination embedding, direction, and roughness [S1, unofficial]. Unlike spherical Gaussian (SG) or spherical harmonic (SH) light representations which suffer from lack of fine details or high memory costs, Neural-PIL is an MLP that directly produces pre-integrated light, representing finer details in illumination [S1, unofficial].
++Neural-PIL replaces the costly numerical integration of incoming light with a simple neural network query, predicting pre-integrated light $\tilde{L}_i$ directly from illumination embedding, direction, and roughness [S1, unofficial]. Unlike Spherical Harmonics (SH) or Spherical Gaussian (SG) light representations which suffer from lack of fine details or high memory costs, Neural-PIL is an MLP that directly produces pre-integrated light, representing finer details in illumination [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs:**
+-    *   Illumination embedding $\mathbf{z}_l \in \mathbb{R}^{128}$ [S1, unofficial].
+-    *   Incoming light direction (mirrored view direction) $\omega_r \in \mathbb{R}^3$ [S1, unofficial].
+-    *   Roughness $b_r$ (scalar) [S1, unofficial].
+-*   **Output:**
+-    *   Pre-integrated light $\tilde{L}_i(\omega_r, b_r)$ [S1, unofficial].
++*   **Inputs:** Illumination embedding $\mathbf{z}_l \in \mathbb{R}^{128}$, incoming light direction $\omega_r \in \mathbb{R}^3$, and roughness $b_r$ (scalar) [S1, unofficial].
++*   **Output:** Pre-integrated light $\tilde{L}_i(\omega_r, b_r)$ [S1, unofficial].
+ 
+ **Data Structures**
+-The architecture consists of:
+-1.  **Neural-PIL Network:** A coordinate-based MLP using FiLM-SIREN layers.
+-2.  **Mapping Network 1:** Predicts modulating parameters for the first few layers of the Neural-PIL based on $\mathbf{z}_l$.
+-3.  **Mapping Network 2:** Predicts modulating parameters for the penultimate layer of the Neural-PIL based on $b_r$.
+-4.  **Light-SMAE (Light Smooth Manifold Auto-encoder):** A CNN encoder/decoder used to generate $\mathbf{z}_l$ from environment maps. This is trained separately and frozen during Neural-PIL training to ease memory requirements [S1, unofficial].
++The method uses a coordinate-based Multi-Layer Perceptron (MLP) architecture based on pi-GAN with FiLM-SIREN layers [S1, unofficial].
++*   **FiLM-SIREN Layer:** Takes modulating parameters (scalar $\lambda_0$ and vectors $\beta, \gamma$) to modulate the output $y$ of an earlier linear layer followed by sine computation [S1, unofficial].
++*   **Mapping Networks:** Two separate networks predict the modulating parameters $(\gamma, \beta)$ for the FiLM-SIREN layers [S1, unofficial].
++
++**Numbered Steps**
++1.  **Illumination Decoding:** The network takes the direction $\omega_r$ as input. The first few layers decode illumination information for the given direction. The first mapping network generates modulating parameters $(\gamma, \beta)$ for these first layers from the illumination embedding $\mathbf{z}_l$ [S1, unofficial].
++2.  **Light Integration:** A later layer (specifically the penultimate layer) performs light integration conditioned on the material roughness $b_r$. The second mapping network generates modulating parameters for this penultimate layer from the roughness $b_r$ [S1, unofficial].
++3.  **Query:** The network outputs $\tilde{L}_i(\omega_r, b_r)$, which is used in the rendering equation [S1, unofficial].
+ 
+ **Formulas**
+-The pre-integrated light $\tilde{L}_i(\omega_r, b_r)$ is defined as:
++The rendering equation approximates the outgoing radiance $L_o(x, \omega_o)$ using the pre-integrated light $\tilde{L}_i$ [S1, unofficial]:
++
+ $$
+-\tilde{L}_i(\omega_r, b_r) = \int_{\Omega} D(b_r, \omega_i, \omega_r) L_i(x, \omega_i) d\omega_i
++L_o(x, \omega_o) \approx \frac{b_d}{\pi}\tilde{L}_i(n, 1) + b_s \left( F_0(\omega_o, n)B_0(\omega_o \cdot n, b_r) + B_1(\omega_o \cdot n, b_r) \right) \tilde{L}_i(\omega_r, b_r)
+ $$
+-where $D$ describes the microfacet distribution [S1, unofficial].
+ 
+-The rendered radiance $L_o(x, \omega_o)$ approximates the full BRDF integration using this pre-integrated light:
+-$$
+-L_o(x, \omega_o) \approx (b_d / \pi)\tilde{L}_i(n, 1) + b_s (F_0(\omega_o, n)B_0(\omega_o \cdot n, b_r) + B_1(\omega_o \cdot n, b_r))\tilde{L}_i(\omega_r, b_r)
+-$$
+-where:
+-*   $b_d, b_s$ are diffuse and specular albedo components.
++Where:
++*   The first term is the diffuse component, parameterized by surface normal $n \in \mathbb{R}^3$ and a diffuse roughness of 1 [S1, unofficial].
++*   The second term is the specular component [S1, unofficial].
+ *   $F_0(\omega_o, n) = (1 - \omega_o \cdot h)^5$ with $h = (\omega_i + \omega_o)/\|\omega_i + \omega_o\|$ [S1, unofficial].
+-*   $B_0, B_1$ are 2D lookup textures indexed by $(\omega_o \cdot n)$ and roughness $b_r$ [S1, unofficial].
+-*   The diffuse part queries $\tilde{L}_i(n, 1)$ (roughness 1), while the specular part queries $\tilde{L}_i(\omega_r, b_r)$ [S1, unofficial].
++*   $B_0$ and $B_1$ are 2D lookup textures indexed by $(\omega_o \cdot n)$ and roughness $b_r$ [S1, unofficial].
++*   The pre-integrated light is defined as:
++    $$
++    \tilde{L}_i(\omega_r, b_r) = \int_{\Omega} D(b_r, \omega_i, \omega_r) L_i(x, \omega_i) d\omega_i
++    $$
++    where $D$ describes the microfacet distribution [S1, unofficial].
+ 
+-The core activation function for the Neural-PIL layers is the FiLM-SIREN layer:
++The activation function for the FiLM-SIREN layers is:
+ $$
+ \phi(y) = \sin(\lambda_0 \gamma \odot y + \beta)
+ $$
+-where $\odot$ denotes the Hadamard product, and $\lambda_0, \beta, \gamma$ are modulating parameters [S1, unofficial].
+-
+-**Steps**
+-1.  **Encode Illumination:** Map a 2D environment map (e.g., $128 \times 256$) to a 128-dimensional smooth latent space $\mathbf{z}_l$ using the frozen Light-SMAE encoder [S1, unofficial].
+-2.  **Generate Modulating Parameters:**
+-    *   Pass $\mathbf{z}_l$ through Mapping Network 1 to generate parameters $(\gamma, \beta)$ for the first few layers of the Neural-PIL.
+-    *   Pass roughness $b_r$ through Mapping Network 2 to generate parameters $(\gamma, \beta)$ for the penultimate layer [S1, unofficial].
+-3.  **Forward Pass Neural-PIL:**
+-    *   Input $\omega_r$ into the first layer.
+-    *   Apply FiLM-SIREN layers. For the first few layers, use parameters from Mapping Network 1. For the penultimate layer, use parameters from Mapping Network 2.
+-    *   Output $\tilde{L}_i(\omega_r, b_r)$ [S1, unofficial].
+-4.  **Render:** Use $\tilde{L}_i(\omega_r, b_r)$ in the radiance equation to compute pixel color [S1, unofficial].
++where $\odot$ denotes a Hadamard product [S1, unofficial].
+ 
+ **Pseudocode**
+ ```python
+-import torch
+-import torch.nn as nn
+-import torch.nn.functional as F
+-
+-class FiLMSIREN(nn.Module):
+-    """FiLM-SIREN layer: phi(y) = sin(lambda0 * (gamma * y) + beta)"""
+-    def __init__(self, in_features, out_features):
+-        super().__init__()
+-        self.linear = nn.Linear(in_features, out_features)
+-        # Modulating parameters are provided at forward time from mapping networks
+-        # lambda0 is a scalar, beta and gamma are vectors of size out_features
+-
+-    def forward(self, x, lam0, beta, gamma):
+-        y = self.linear(x)
+-        # Hadamard product gamma * y
+-        modulated = lam0 * (gamma * y) + beta
+-        return torch.sin(modulated)
+-
+-class MappingNetwork(nn.Module):
+-    """Predicts modulating parameters from conditioning vector"""
+-    def __init__(self, cond_dim, layer_dim, num_layers):
+-        super().__init__()
+-        self.layers = nn.ModuleList()
+-        for i in range(num_layers):
+-            self.layers.append(nn.Linear(cond_dim if i == 0 else layer_dim, layer_dim))
+-            self.layers.append(nn.ReLU())
+-        self.out_layer = nn.Linear(layer_dim, 3 * layer_dim) # Outputs lambda0, beta, gamma
+-
+-    def forward(self, x):
+-        for layer in self.layers:
+-            x = layer(x)
+-        params = self.out_layer(x)
+-        # Split into lambda0 (scalar per sample, but here treated as broadcastable or per-feature)
+-        # Note: Source says lambda0 is scalar, beta/gamma are vectors.
+-        # Implementation detail: lambda0 might be a single scalar or per-feature.
+-        # Assuming per-feature for stability in FiLM, or scalar broadcast.
+-        # Source: "scalar lambda0 and vectors beta and gamma"
+-        # We reshape to match layer_dim.
+-        lam0 = params[:, :1] # Scalar per sample, shape (B, 1)
+-        beta = params[:, 1:layer_dim+1]
+-        gamma = params[:, layer_dim+1:]
+-        return lam0, beta, gamma
+-
+-class NeuralPIL(nn.Module):
++def neural_pil_query(z_l, omega_r, b_r):
+     """
+-    Neural Pre-Integrated Lighting
+-    Inputs: z_l (128), omega_r (3), b_r (scalar)
+-    Output: L_tilde (3, RGB)
++    Predicts pre-integrated light using Neural-PIL.
++    
++    Args:
++        z_l: Illumination embedding, shape (128,)
++        omega_r: Incoming light direction, shape (3,)
++        b_r: Roughness scalar
++        
++    Returns:
++        L_tilde: Pre-integrated light value
+     """
+-    def __init__(self, z_dim=128, hidden_dim=256, num_hidden_layers=4):
+-        super().__init__()
+-        self.z_dim = z_dim
+-        self.num_hidden_layers = num_hidden_layers
++    # Mapping Network 1: Generates parameters for first layers from illumination embedding
++    # Note: Specific architecture of mapping networks is not detailed in sources [G]
++    params_first_layers = mapping_network_1(z_l) 
++    
++    # Mapping Network 2: Generates parameters for penultimate layer from roughness
++    # Note: Specific architecture of mapping networks is not detailed in sources [G]
++    params_penultimate = mapping_network_2(b_r)
++    
++    # Neural-PIL Forward Pass
++    # Input to network is omega_r
++    x = omega_r
++    
++    # First few layers: Conditioned by params_first_layers
++    # These layers decode illumination information for the given direction
++    for layer in first_layers:
++        # Apply FiLM-SIREN modulation
++        # layer.linear computes y = Wx + b
++        y = layer.linear(x)
++        # Apply sine activation with modulation
++        # params_first_layers contains lambda_0, gamma, beta for this layer
++        lambda_0, gamma, beta = params_first_layers[layer.id]
++        x = sin(lambda_0 * (gamma * y) + beta)
+         
+-        # Mapping Networks
+-        # Map 1: z_l -> params for first few layers
+-        self.map1 = MappingNetwork(z_dim, hidden_dim, num_layers=2)
+-        # Map 2: b_r -> params for penultimate layer
+-        # b_r is scalar, so cond_dim=1
+-        self.map2 = MappingNetwork(1, hidden_dim, num_layers=2)
++    # Intermediate layers (standard SIREN or similar)
++    # Note: Exact intermediate layer definitions are not detailed in sources [G]
++    for layer in intermediate_layers:
++        x = sin(layer.linear(x))
+         
+-        # Neural-PIL Layers
+-        # Input dim: 3 (omega_r)
+-        # First layer uses map1 params
+-        self.layers = nn.ModuleList()
+-        
+-        # First layer
+-        self.layers.append(FiLMSIREN(3, hidden_dim))
+-        
+-        # Hidden layers
+-        for _ in range(num_hidden_layers - 2):
+-            self.layers.append(FiLMSIREN(hidden_dim, hidden_dim))
+-            
+-        # Penultimate layer (uses map2 params)
+-        self.layers.append(FiLMSIREN(hidden_dim, hidden_dim))
+-        
+-        # Final layer (standard SIREN or linear? Source implies MLP output)
+-        # Source says "predicts pre-integrated light". Usually final layer is linear or sin.
+-        # Assuming standard linear output for RGB, or sin if consistent.
+-        # Given "MLP that directly produces", and SIREN context, often final is linear.
+-        self.final_layer = nn.Linear(hidden_dim, 3)
+-
+-    def forward(self, z_l, omega_r, b_r):
+-        # z_l: (B, 128)
+-        # omega_r: (B, 3)
+-        # b_r: (B,)
+-        
+-        # Get params for first layers from z_l
+-        lam0_1, beta_1, gamma_1 = self.map1(z_l)
+-        
+-        # Get params for penultimate layer from b_r
+-        lam0_2, beta_2, gamma_2 = self.map2(b_r.unsqueeze(1))
+-        
+-        x = omega_r
+-        
+-        # First layer: conditioned by z_l
+-        x = self.layers[0](x, lam0_1, beta_1, gamma_1)
+-        
+-        # Intermediate layers: no conditioning mentioned, assume standard SIREN or pass identity params?
+-        # Source: "condition the first few layers... condition a later layer...".
+-        # Implies middle layers are unconditioned or use default params.
+-        # Default SIREN: sin(Wx + b). We can set lam0=1, beta=0, gamma=1 for unconditioned.
+-        lam0_default = torch.ones_like(lam0_1)
+-        beta_default = torch.zeros_like(beta_1)
+-        gamma_default = torch.ones_like(gamma_1)
+-        
+-        for i in range(1, self.num_hidden_layers - 1):
+-            x = self.layers[i](x, lam0_default, beta_default, gamma_default)
+-            
+-        # Penultimate layer: conditioned by b_r
+-        x = self.layers[self.num_hidden_layers - 1](x, lam0_2, beta_2, gamma_2)
+-        
+-        # Final output
+-        out = self.final_layer(x)
+-        return out
++    # Penultimate layer: Conditioned by params_penultimate
++    # This layer performs light integration conditioned on roughness
++    y = penultimate_layer.linear(x)
++    lambda_0, gamma, beta = params_penultimate
++    x = sin(lambda_0 * (gamma * y) + beta)
++    
++    # Final layer outputs the pre-integrated light
++    L_tilde = final_layer(x)
++    
++    return L_tilde
+ ```
+ 
++**Parameters**
++*   Illumination embedding dimension: 128 [S1, unofficial].
++*   Direction dimension: 3 [S1, unofficial].
++*   Roughness: Scalar [S1, unofficial].
++
+ **Edge Cases and Pitfalls**
+-*   **Precision:** The use of sine activations requires careful initialization (SIREN initialization) to avoid vanishing gradients [S1, unofficial].
+-*   **Boundary Conditions:** The roughness $b_r$ is a scalar; ensure it is clamped to valid BRDF roughness ranges (e.g., [0, 1]) to prevent out-of-distribution queries [G].
+-*   **Memory:** Training Neural-PIL jointly with other networks is memory-intensive; the source recommends freezing the Light-SMAE encoder [S1, unofficial].
++*   The pre-integrated light $\tilde{L}_i$ is queried twice: once for the diffuse part (with normal $n$ and roughness 1) and once for the specular part (with mirrored view direction $\omega_r$ and roughness $b_r$) [S1, unofficial].
++*   The method relies on a frozen Light-SMAE encoder to provide the illumination embedding $\mathbf{z}_l$, ensuring a smooth embedding space [S1, unofficial].
++
++## Subtopics
++
++### Lighting and Appearance Models
++The parent category. Neural-PIL is a modification within this category that replaces standard lighting representations with a learned neural approximation. See [Lighting and Appearance Models](14522-lighting-and-appearance-models.md).
++
++### Spherical Harmonics NeRF
++A sibling method that uses spherical harmonics to represent lighting. Neural-PIL is preferred when fine illumination details are required, as SH suffers from lack of fine details or high memory costs. See [Spherical Harmonics NeRF](14480-spherical-harmonics-nerf.md).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Inference is $O(1)$ relative to the number of light samples, as it replaces numerical integration with a single network forward pass [S1, unofficial].
+-*   **Memory Complexity:** Depends on the size of the Neural-PIL MLP and the two mapping networks. Significantly lower than storing high-resolution environment maps or high-band SH coefficients [S1, unofficial].
+-*   **Strengths:** Captures fine illumination details that SG/SH representations miss without the associated memory and speed penalties [S1, unofficial].
+-*   **Limitations:** Requires training a separate autoencoder (Light-SMAE) for the illumination embedding [S1, unofficial].
+-*   **When to use:** When high-fidelity reflectance decomposition is needed and differentiable rendering frameworks lack native support for fine-detail light integration [S1, unofficial].
++*   **Time Complexity:** The method replaces costly numerical integration or convolution on environment maps with a simple neural network query, significantly reducing rendering time per pixel compared to direct integration [S1, unofficial].
++*   **Memory Complexity:** Avoids the high memory costs associated with high-band SH or SG representations needed for fine details [S1, unofficial].
++*   **Strengths:** Represents finer details in illumination compared to SG or SH representations [S1, unofficial].
++*   **Limitations:** Requires training a separate Light-SMAE and BRDF-SMAE beforehand, and the Neural-PIL network itself, which adds complexity to the training pipeline [S1, unofficial].
++*   **When to use:** When differentiable rendering requires high-fidelity illumination details that SH/SG cannot provide efficiently, and computational resources allow for the pre-training of the embedding networks [S1, unofficial].
++*   **When not to use:** When fine illumination details are not critical, or when memory constraints prevent storing the additional neural networks and embeddings [S1, unofficial].
+ 
+ ## Background
+-Neural-PIL was introduced in the paper "Neural-PIL: Neural Pre-Integrated Lighting for Reflectance Decomposition" [S1, unofficial]. It addresses the limitation of standard differentiable rendering frameworks that rely on SG or SH light representations, which lack fine details or incur high memory costs [S1, unofficial]. The method leverages a pi-GAN-like architecture with FiLM-SIREN layers [S1, unofficial].
++Neural-PIL was introduced in the paper "Neural-PIL: Neural Pre-Integrated Lighting for Reflectance Decomposition" [S1, unofficial]. The method addresses the impracticality of costly numerical accumulation or convolution on complete environment maps within differential rendering engines [S1, unofficial]. It leverages a pi-GAN-like architecture with FiLM-SIREN layers [S1, unofficial]. The illumination embedding $\mathbf{z}_l$ is derived from a Light-SMAE (Smooth Manifold Auto-encoder) trained on a dataset of 320 environment maps [S1, unofficial]. The Neural-PIL network is trained with the manifold created by the frozen Light-SMAE encoder, separated from the BRDF-SMAE to ease memory requirements [S1, unofficial].
+ 
+ ## Sources

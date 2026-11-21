@@ -1,0 +1,234 @@
+--- v001.md
++++ v002.md
+@@ -8,143 +8,119 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of all camera views $Q = \{q_k | k = 1, 2, ..., N\}$, where each $q_k$ includes a camera pose estimate and an associated image. A classification of each view as either "superior" ($Q_s$) or "inferior" ($Q_i$) based on a prior quality criterion [S1].
++*   **Input:** A set of all camera views $Q = \{q_k | k = 1, 2, ..., N\}$, where each $q_k$ includes a camera pose estimate and an associated image [S1]. A classification of each view as either "superior" ($Q_s$) or "inferior" ($Q_i$) based on a prior quality criterion [S1].
+ *   **Output:** An updated set of camera pose estimates $\tilde{Q} = \{\tilde{q}_k | k = 1, 2, ..., N\}$ where inferior poses have been replaced [S1].
+ 
+ **Data Structures:**
+ *   $Q$: List of $N$ views.
+-*   $Q_s$: Subset of superior views.
+-*   $Q_i$: Subset of inferior views.
++*   $Q_s, Q_i$: Subsets of superior and inferior views.
+ *   $\tilde{Q}_s, \tilde{Q}_i$: Updated subsets after non-maxima suppression.
+-*   `replacement_memory`: A set or map tracking poses already used for replacement to prevent redundancy [S1].
++*   `used_poses`: A set tracking IDs of poses already utilized for replacement to prevent redundancy [S1].
+ 
+ **Steps:**
+ 
+ 1.  **Identify Inferior Views:**
+-    Apply the quality criterion from the preceding "Erroneous Pose Detection" step (referenced in [S1] Sec. III-B) to label views in $Q$ as superior ($Q_s$) or inferior ($Q_i$) [S1].
++    Apply the quality criterion from the preceding "Erroneous Pose Detection" step to label views in $Q$ as superior ($Q_s$) or inferior ($Q_i$) [S1].
+ 
+ 2.  **Non-Maxima Suppression:**
+-    Inaccurate poses affect neighboring views, causing them to also appear low-quality. To prevent mislabeling accurate neighbors as inferior:
+-    *   For any cluster of neighboring views labeled as inferior, identify the view with the lowest quality score.
+-    *   Assume only this lowest-scoring view is truly inaccurate.
+-    *   Discard the "inferior" label for the other neighboring views, reclassifying them as superior.
+-    *   Update the sets to $\tilde{Q}_s$ and $\tilde{Q}_i$ [S1].
++    Inaccurate poses affect neighboring views, causing them to also appear low-quality [S1]. To prevent mislabeling accurate neighbors as inferior, when multiple neighboring camera poses are assigned low scores, assume only the one with the lowest score is inaccurate [S1]. Discard misidentified low-scoring poses to update classifications to $\tilde{Q}_s$ and $\tilde{Q}_i$ [S1].
+ 
+ 3.  **Neighbor Search:**
+-    For each inferior view $q^e_i \in \tilde{Q}_i$:
+-    *   Search for the nearest neighbor view $q^e_{sim}$ in the full set $Q$ [S1].
+-    *   **Similarity Metric:** Use the combined criterion from the Erroneous Pose Detection step to measure similarity between $q^e_i$ and candidate views [S1].
+-    *   **Rotation Matching:** To expand the search space and improve accuracy, perform matching on rotated images with their corresponding camera poses equivalently rotated [S1]. This involves rotating the image and the pose by the same angle to find the best match under rotational ambiguity [S1].
++    For each inferior view $q^e_i \in \tilde{Q}_i$, search for the nearest neighbor view $q^e_{sim}$ in the full set $Q$ [S1]. Measure similarity using the combined criterion from Erroneous Pose Detection [S1]. Perform matching on rotated images with equivalently rotating camera poses to expand the search space and improve matching accuracy [S1].
+ 
+ 4.  **Pose Replacement:**
+-    *   Replace the pose of $q^e_i$ with the pose of its nearest neighbor $q^e_{sim}$ [S1].
+-    *   Form the updated set $\tilde{Q} = \{\tilde{q}_k | k = 1, 2, ..., N\}$ [S1].
++    Replace camera poses in $\tilde{Q}_i$ with their nearest neighbors in $Q$ [S1]. Obtain the updated set $\tilde{Q} = \{\tilde{q}_k | k = 1, 2, ..., N\}$ [S1].
+ 
+-5.  **Replacement Memory (Guard):**
+-    *   Maintain a record of poses used for replacement for each erroneous viewpoint [S1].
+-    *   If a candidate neighbor pose has already been utilized for a previous replacement, skip it to prevent redundant erroneous replacements and optimization stagnation [S1].
++5.  **Replacement Memory:**
++    Keep track of the pose used for replacement for each erroneous viewpoint and skip poses that have already been utilized to prevent redundant erroneous replacements and optimization stagnation [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def neighbor_replacement(all_views, quality_scores, rotation_angles):
++def neighbor_replacement(views, scores, angles, threshold, radius):
+     """
+-    all_views: List of view objects, each with .pose, .image, .id
+-    quality_scores: Dict mapping view.id -> float (lower is worse)
+-    rotation_angles: List of angles to test for rotational matching
+-    
+-    Returns:
+-    updated_views: List of view objects with potentially replaced poses
++    views: list of dicts {'id': int, 'pose': list, 'image': array}
++    scores: dict mapping view id to float (lower is worse)
++    angles: list of rotation angles in radians
++    threshold: quality threshold from prior step
++    radius: spatial radius for neighbor grouping in NMS
++    Returns: updated_views: list of view dicts with replaced poses
+     """
+     # Step 1: Initial Classification
+-    superior_views = []
+-    inferior_views = []
+-    for view in all_views:
+-        if quality_scores[view.id] > threshold: # Threshold defined in prior step
+-            superior_views.append(view)
+-        else:
+-            inferior_views.append(view)
+-            
++    superior = [v for v in views if scores[v['id']] > threshold]
++    inferior = [v for v in views if scores[v['id']] <= threshold]
++
+     # Step 2: Non-Maxima Suppression
+-    # Group inferior views by spatial neighborhood (e.g., k-nearest neighbors in pose space)
+-    # For each group, keep only the one with the absolute lowest score as inferior
+-    # Re-classify others as superior
+-    processed_inferior = []
+-    processed_superior = superior_views.copy()
+-    
+-    # Simple implementation of NMS for poses
+-    # Assume get_neighbors returns indices of k nearest poses in the current inferior set
+-    remaining_inferior = list(inferior_views)
+-    while remaining_inferior:
+-        # Find the view with the minimum score among remaining
+-        min_view = min(remaining_inferior, key=lambda v: quality_scores[v.id])
+-        processed_inferior.append(min_view)
+-        
+-        # Identify neighbors of min_view in the remaining set
+-        neighbors = get_neighbors(min_view, remaining_inferior, k=8) # k=8 typical for grid
+-        
+-        # Remove neighbors from remaining_inferior and add to processed_superior
+-        # because they are likely misidentified due to the min_view's error
+-        for neighbor in neighbors:
+-            if neighbor in remaining_inferior:
+-                remaining_inferior.remove(neighbor)
+-                processed_superior.append(neighbor)
+-                
++    final_inferior = []
++    final_superior = list(superior)
++    remaining = list(inferior)
++
++    while remaining:
++        # Find view with lowest score
++        min_view = min(remaining, key=lambda v: scores[v['id']])
++        final_inferior.append(min_view)
++
++        # Identify neighbors in remaining set within spatial radius
++        neighbors = [v for v in remaining if v is not min_view and pose_distance(min_view['pose'], v['pose']) < radius]
++        for n in neighbors:
++            remaining.remove(n)
++            final_superior.append(n)
++
+     # Step 3 & 4: Replacement with Memory
+-    replacement_memory = set() # Stores IDs of poses already used as replacements
++    used_poses = set()
+     updated_views = []
+-    
+-    for inferior_view in processed_inferior:
+-        best_similar_view = None
+-        best_score = -infinity
+-        
+-        # Search for nearest neighbor in ALL views (Q)
+-        for candidate in all_views:
+-            # Skip if this candidate's pose was already used
+-            if candidate.id in replacement_memory:
++
++    for inf_view in final_inferior:
++        best_sim_view = None
++        best_score = -float('inf')
++
++        for cand in views:
++            if cand['id'] in used_poses:
+                 continue
+-                
+-            # Calculate similarity with rotation matching
+-            # Simulate rotating candidate image and pose by each angle
+-            current_score = -infinity
+-            for angle in rotation_angles:
+-                # Rotate candidate image and pose
+-                rotated_img = rotate_image(candidate.image, angle)
+-                rotated_pose = rotate_pose(candidate.pose, angle)
+-                
+-                # Compute similarity between inferior_view and rotated candidate
+-                # Using the combined criterion from Erroneous Pose Detection
+-                sim = compute_similarity(inferior_view.image, rotated_img, 
+-                                         inferior_view.pose, rotated_pose)
++
++            current_score = -float('inf')
++            for angle in angles:
++                rot_img = rotate_image(cand['image'], angle)
++                rot_pose = rotate_pose(cand['pose'], angle)
++                sim = compute_similarity(inf_view['image'], rot_img, inf_view['pose'], rot_pose)
+                 if sim > current_score:
+                     current_score = sim
+-            
++
+             if current_score > best_score:
+                 best_score = current_score
+-                best_similar_view = candidate
+-        
+-        # Perform replacement
+-        if best_similar_view is not None:
+-            # Create a copy of the inferior view with the new pose
+-            new_view = copy_view(inferior_view)
+-            new_view.pose = best_similar_view.pose
++                best_sim_view = cand
++
++        if best_sim_view is not None:
++            new_view = dict(inf_view)
++            new_view['pose'] = best_sim_view['pose']
+             updated_views.append(new_view)
+-            
+-            # Record the used pose to prevent reuse
+-            replacement_memory.add(best_similar_view.id)
++            used_poses.add(best_sim_view['id'])
+         else:
+-            # Fallback: keep original pose if no valid neighbor found
+-            updated_views.append(inferior_view)
+-            
+-    # Add back the superior views (unchanged)
+-    for view in processed_superior:
+-        updated_views.append(view)
+-        
++            updated_views.append(inf_view)
++
++    for v in final_superior:
++        updated_views.append(v)
++
+     return updated_views
++
++def pose_distance(p1, p2):
++    return sum((a - b)**2 for a, b in zip(p1, p2))**0.5
++
++def rotate_image(img, angle):
++    # Standard image rotation operation [G]
++    return img
++
++def rotate_pose(pose, angle):
++    # Standard pose rotation operation [G]
++    return pose
++
++def compute_similarity(img1, img2, pose1, pose2):
++    # Combined criterion from Erroneous Pose Detection [G]
++    return 0.0
+ ```
+ 
+ **Parameters:**
++*   **Threshold:** Quality score threshold for initial classification. Defined in the Erroneous Pose Detection step [S1].
+ *   **Rotation Angles:** Discrete angles tested for rotational matching. Not given in the sources.
+-*   **Neighbor Count (k):** Number of neighbors considered in non-maxima suppression. Not given in the sources.
+-*   **Threshold:** Quality score threshold for initial classification. Defined in the "Erroneous Pose Detection" step [S1].
++*   **Radius:** Spatial radius for neighbor grouping in non-maxima suppression. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+@@ -154,10 +130,7 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of inferior views $N_i$ and the number of candidates $N$. For each inferior view, similarity is computed against all candidates with multiple rotations. Complexity is roughly $O(N_i \cdot N \cdot R)$, where $R$ is the number of rotation angles [S1].
+-*   **Memory Complexity:** $O(N)$ to store views and $O(N)$ for replacement memory [S1].
+ *   **Strengths:** Significantly improves pose optimization in the presence of large camera pose noise [S1]. Enhances the initialization for subsequent BA stages in a cascade [S1].
+ *   **Limitations:** Relies on the accuracy of the initial quality criterion [S1]. May fail if the nearest neighbor is also inaccurate and not caught by memory/guards [S1].
+ *   **When to Use:** When initial camera poses are noisy or insufficient, and ground-truth poses are unavailable [S1].
+-*   **When Not to Use:** When poses are already accurate, or when computational cost of repeated similarity checks is prohibitive [S1].
+ 
+ ## Background

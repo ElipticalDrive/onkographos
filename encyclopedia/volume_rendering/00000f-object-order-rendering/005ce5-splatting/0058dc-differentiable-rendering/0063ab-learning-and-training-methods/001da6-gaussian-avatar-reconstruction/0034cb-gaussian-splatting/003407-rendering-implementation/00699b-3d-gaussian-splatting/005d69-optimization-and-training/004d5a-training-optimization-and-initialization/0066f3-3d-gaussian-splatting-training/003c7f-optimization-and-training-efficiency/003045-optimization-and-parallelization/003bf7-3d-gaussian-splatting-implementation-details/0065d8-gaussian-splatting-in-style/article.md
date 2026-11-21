@@ -1,0 +1,204 @@
+# Gaussian Splatting in Style
+
+
+## Overview
+Gaussian Splatting in Style (GSS) is a method for stylizing complex 3D scenes by learning a mapping between 3D Gaussians and a queried style image, generating novel views conditioned on an input style image while preserving geometric consistency [S1]. Unlike methods that apply 2D stylization post-rendering or train separate models per style, GSS learns a unified 3D color module that predicts stylized RGB colors based on scene geometry and a style latent code, enabling real-time rendering of arbitrary styles [S1]. It sets itself apart from [GS-Ada](12925-desplat.md) by conditioning the color prediction on the style rather than applying AdaIN to rendered views, and from [Ada-GS](12925-desplat.md) by learning a generalizable mapping rather than training on 2D stylized images for specific styles [S1].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** 3D Gaussian scene parameters (mean positions $\mu$, covariance, opacity, spherical harmonics for base geometry), a style image $I_{style}$, and training views (ground truth images $I_{gt}$).
+- **Outputs:** Stylized novel views $I_{gen}$ rendered from the 3D Gaussian scene with colors predicted by the 3D Color module.
+
+**Data Structures:**
+1.  **3D Gaussians:** Standard 3DGS representation [S1]. Mean positions $\mu$ are used as input to the color module.
+2.  **Multi-Resolution Hash Grid (MHG):** Used to encode spatial information from $\mu$. Configuration: 16 levels, with each level having a feature vector of length 2 [S1].
+3.  **Style Latent Code:** A vector representing the style image, obtained from a pretrained encoder [S1].
+4.  **3D Color Module:** An MLP consisting of 2 fully connected layers with 64 neurons each [S1].
+
+**Numbered Steps:**
+
+1.  **Warm-up Phase (Geometry Initialization):**
+    - Initialize the scene using vanilla 3D Gaussian Splatting [33, 38] without the 3D Color module.
+    - Train for 3000 iterations on unstyled training views to establish geometric consistency [S1].
+    - Fix the number of Gaussians in the scene after this phase [S1].
+
+2.  **2D Stylization Module Setup (Guide Generation):**
+    - Pass the input style image $I_{style}$ and the original ground truth view $I_{gt}$ through a pretrained VGG encoder [72, 16] to obtain feature representations [S1].
+    - Pass these features through an Adaptive Instance Normalization (AdaIN) layer [27] and a convolutional decoder to obtain the 2D stylized image $I_{style2d}$ [S1]. This image serves as a guide for the 3D color module [S1].
+
+3.  **3D Color Module Training:**
+    - For each training iteration, compute the input to the 3D Color module:
+        - Encode the style image $I_{style}$ using a pretrained image encoder [65, 28] to get the style latent code.
+        - Extract mean positions $\mu$ of the 3D Gaussians.
+        - Feed $\mu$ into the MHG to get spatial features.
+        - Feed the style latent code into a Fully Connected (FC) layer.
+        - Concatenate the MHG features and FC features.
+        - Pass the concatenated tensor through the MLP (2 FC layers, 64 neurons each) to predict the new RGB color for each Gaussian [S1].
+    - Render the scene using the 3DGS pipeline with the predicted RGB colors to generate the stylized view $I_{gen}$ [S1].
+    - Compute the Guide Loss $L_g$:
+      $$L_g = ||I_{style2d} - I_{gen}||$$
+      where $I_{style2d}$ is the 2D stylized image from the 2D stylization module and $I_{gen}$ is the stylized view from the pipeline [S1].
+    - Optimize the 3D Color module parameters using the Guide Loss.
+
+4.  **Inference:**
+    - To generate a novel view for a new style image:
+        - Encode the new style image to get its latent code.
+        - Pass the scene's mean positions $\mu$ and the new style latent code through the trained 3D Color module to get RGB colors.
+        - Render the scene using the standard 3DGS pipeline [S1].
+
+**Parameters:**
+- **Optimizer:** Adam optimizer [34].
+- **Learning Rate:** $1e-4$ [S1].
+- **Training Iterations:** 150,000 iterations for the 3D Color module, starting after the 3000-iteration warm-up phase [S1].
+- **Hardware:** Experiments run on Nvidia A4500 GPU [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class MHG(nn.Module):
+    """
+    Multi-Resolution Hash Grid encoder.
+    Not given in the sources: Implementation details of the hash grid itself.
+    We assume a standard implementation as per [54].
+    """
+    def __init__(self, num_levels=16, level_channels=2):
+        super().__init__()
+        self.num_levels = num_levels
+        self.level_channels = level_channels
+        # Placeholder for actual hash grid implementation
+        self.grid = None 
+
+    def forward(self, positions):
+        # positions: (N, 3)
+        # Returns features: (N, num_levels * level_channels)
+        # Not given in the sources: Exact hashing and interpolation logic.
+        return self.grid(positions)
+
+class FCStyleEncoder(nn.Module):
+    """
+    Fully Connected layer for style latent code.
+    """
+    def __init__(self, latent_dim=512, out_dim=64): # latent_dim assumed from typical VGG encoders
+        super().__init__()
+        self.fc = nn.Linear(latent_dim, out_dim)
+
+    def forward(self, style_latent):
+        return self.fc(style_latent)
+
+class ColorMLP(nn.Module):
+    """
+    2 fully connected layers with 64 neurons each.
+    """
+    def __init__(self, input_dim, hidden_dim=64, output_dim=3):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, output_dim)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.relu(self.fc2(x))
+        return torch.sigmoid(self.fc3(x)) # Output RGB in [0, 1]
+
+class GaussianSplattingInStyle:
+    def __init__(self, gaussians, style_encoder, vgg_encoder, decoder):
+        self.gaussians = gaussians
+        self.style_encoder = style_encoder
+        self.vgg_encoder = vgg_encoder
+        self.decoder = decoder
+        
+        # Initialize modules
+        self.mhg = MHG(num_levels=16, level_channels=2)
+        self.fc_style = FCStyleEncoder()
+        # Input dim = MHG features (16*2=32) + FC style features (64) = 96
+        self.color_mlp = ColorMLP(input_dim=96)
+        
+        self.optimizer = optim.Adam(list(self.mhg.parameters()) + 
+                                    list(self.fc_style.parameters()) + 
+                                    list(self.color_mlp.parameters()), lr=1e-4)
+
+    def get_style_latent(self, style_image):
+        return self.style_encoder(style_image)
+
+    def get_2d_style_guide(self, style_image, gt_view):
+        style_feat = self.vgg_encoder(style_image)
+        gt_feat = self.vgg_encoder(gt_view)
+        # AdaIN and decoder
+        # Not given in the sources: Exact AdaIN and decoder implementation details.
+        # Assuming standard AdaIN [27] and decoder [28]
+        styled_feat = self.adain(style_feat, gt_feat)
+        i_style2d = self.decoder(styled_feat)
+        return i_style2d
+
+    def train_step(self, gt_views, style_image):
+        # 1. Get 2D style guide
+        i_style2d = self.get_2d_style_guide(style_image, gt_views)
+        
+        # 2. Get style latent
+        style_latent = self.get_style_latent(style_image)
+        
+        # 3. Get Gaussian means
+        means = self.gaussians.means # (N, 3)
+        
+        # 4. Encode inputs
+        mhg_features = self.mhg(means) # (N, 32)
+        style_features = self.fc_style(style_latent).unsqueeze(1).expand(-1, means.shape[0], -1) # (N, 64)
+        
+        # 5. Concatenate and predict colors
+        combined = torch.cat([mhg_features, style_features], dim=-1) # (N, 96)
+        rgb = self.color_mlp(combined) # (N, 3)
+        
+        # 6. Render scene with new colors
+        # Not given in the sources: Exact 3DGS rendering function.
+        # Assuming a differentiable rasterizer that takes means, covariances, opacities, and colors.
+        i_gen = render_3dgs(self.gaussians, rgb)
+        
+        # 7. Compute Loss
+        loss = torch.norm(i_style2d - i_gen)
+        
+        # 8. Optimize
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        
+        return loss.item()
+
+    def render(self, style_image, camera_params):
+        style_latent = self.get_style_latent(style_image)
+        means = self.gaussians.means
+        mhg_features = self.mhg(means)
+        style_features = self.fc_style(style_latent).unsqueeze(1).expand(-1, means.shape[0], -1)
+        combined = torch.cat([mhg_features, style_features], dim=-1)
+        rgb = self.color_mlp(combined)
+        # Render with standard 3DGS pipeline
+        return render_3dgs(self.gaussians, rgb, camera_params)
+```
+
+**Edge Cases and Pitfalls:**
+- **2D Stylization Insufficiency:** Simply applying 2D stylization to rendered novel views (GS-Ada) is insufficient for 3D consistency, resulting in lower consistency metrics [S1].
+- **Over-smoothing:** Methods like StylizedNeRF may generate views with high blur and loss of details, leading to artificially high consistency scores despite poor visual quality [S1].
+- **Aggressive Style Transfer:** Methods like ARF may be too aggressive, leading to loss of scene information and neglecting far-away objects [S1].
+- **Geometry Consistency:** The warm-up phase is critical; skipping it may result in poor geometric consistency [S1].
+
+## Operating characteristics
+- **Time Complexity:** Training requires roughly 4 hours per scene on an Nvidia A4500 GPU [S1].
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** GSS achieves an average rendering speed of 157 FPS, approximately 4x faster than the second fastest method (LSNV at 40 FPS) [S1].
+- **Scaling:** The use of MHG and a tiny MLP allows handling large scenes with millions of Gaussians, such as those in the Tanks and Temples (TnT) dataset [S1].
+- **Strengths:** Preserves geometric details, faithful to style images, real-time rendering, 3D consistency [S1].
+- **Limitations:** Requires a warm-up phase; relies on pretrained encoders for style and VGG features [S1].
+- **When to use:** When real-time stylized novel view synthesis is required with high geometric consistency [S1].
+- **When not to use:** When per-scene style optimization is acceptable and real-time performance is not critical (e.g., ARF) [S1].
+
+## Background
+Gaussian Splatting in Style (GSS) was introduced by A. Saroha et al. in a paper published in 2025 [S1]. It builds on the principles of 3D Gaussian Splatting [33, 38] and previous work in neural radiance field stylization such as StylizedNeRF [28, 24] and StyleRF [43]. The method addresses the limitations of existing 3D stylization techniques, which often suffer from blurriness, over-smoothing, or lack of 3D consistency [S1]. It is used for stylizing complex 3D scenes from real-world datasets like LLFF [49] and TnT [36], using style images from the WikiArt dataset [68].
+
+## Sources
+[S1] Gaussian Splatting in Style, https://doi.org/10.1007/978-3-031-85187-2_15, fetched 2026-10-26

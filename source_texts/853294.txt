@@ -1,0 +1,161 @@
+Problem OpenGL generation erases an explicit float-to-half conversion when the result is widened back to float. This changes numerical results even when every input and output buffer has the same float32 physical layout. Native validatio...
+
+Preserve half-precision narrowing when GLSL uses float storage · Issue #1992 · CrossGL/crosstl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Preserve half-precision narrowing when GLSL uses float storage #1992
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Preserve half-precision narrowing when GLSL uses float storage#1992
+Copy link
+Labels
+area:codegenCode generatorsCode generatorsbackend:glslOpenGL and WebGL GLSLOpenGL and WebGL GLSLbugWrong output, a crash or a regressionWrong output, a crash or a regression
+Description
+NripeshN
+opened on Oct 1, 2026
+Issue body actions
+Problem
+OpenGL generation erases an explicit float-to-half conversion when the result is widened back to float. This changes numerical results even when every input and output buffer has the same float32 physical layout. Native validation succeeds because the emitted GLSL is legal.
+Reproduced at 0f71a622. This is the GLSL counterpart to the HLSL conversion work in #1802, not a buffer-packing problem. #1488 separately tracks bfloat16 semantics.
+Minimal Reproduction
+```
+#include <metal_stdlib>
+using namespace metal;
+kernel void narrow_half(const device float* input [[buffer(0)]],
+                        device float* output [[buffer(1)]],
+                        uint index [[thread_position_in_grid]]) {
+    output[index] = float(half(input[index]));
+}
+```
+Translate through translate_project with target opengl, workgroup size (4, 1, 1) and no source rewrites or target precision overrides. The generated body is:
+```
+output_[index] = float(float(input_[index]));
+```
+Both SSBOs are float32, so no half-storage upload or readback conversion is involved.
+Native Evidence
+The original Metal source compiles with xcrun metal -Werror and executes with the following exact results. The generated GLSL passes glslangValidator -G -S comp, then executes through OpenGLComputeRuntime on Linux/Mesa using the same input words:
+Input
+Original Metal / binary16 RNE reference
+Generated OpenGL
+1.00048828125
+1.0
+1.00048828125
+1.00146484375
+1.001953125
+1.00146484375
+-1.00048828125
+-1.0
+-1.00048828125
+1.0009765625
+1.0009765625
+1.0009765625
+The first two cases distinguish ties-to-even in opposite directions. The fourth is an already-representable control. Output guards remain unchanged on both paths. This is a numerical mismatch, not a compiler or device-availability failure.
+Expected Behavior
+Preserve explicit binary16 narrowing, including when the narrowed value is subsequently promoted to float32 or stored in an emulated float32 resource.
+Use native half support only when the target profile and capabilities establish the required semantics; otherwise use explicit rounding/emulation or emit an actionable unsupported-profile diagnostic.
+Do not repair the result solely during host readback: later shader arithmetic can observe the narrowed value before any store.
+Preserve single evaluation and cover constructors, explicit casts, assignments, helper arguments/returns and applicable vector forms.
+Add native numerical tests for representable controls, midpoint ties, signed values, signed zero, overflow and supported subnormal behavior. State the precision profile where device behavior differs.
+MLX Impact
+At MLX 9c3d35571ac450a8ecf5c17b4d0e3fac52c08bc8, scaled_dot_product_attention_vjp.metal explicitly casts accumulated float values to the output storage type in sdpa_vjp_reduce. The translated sdpa_vjp_reduce_set_float16_t and sdpa_vjp_reduce_add_float16_t entries expose float SSBOs and emit out_[uint(ai)] = float(total), without the required half narrowing. The minimal reproduction above isolates the same lost conversion without templates, wide indices, MLX headers or mixed-field uniforms. A general conversion fix is required before these entries can establish numerical parity.
+Activity
+NripeshN
+added a commit that references this issue on Oct 1, 2026
+Preserve binary16 rounding in OpenGL expressions
+...
+5b9e5d3
+NripeshN commented on Oct 1, 2026
+NripeshN
+on Oct 1, 2026
+MemberAuthor
+More actions
+Implemented in 5b9e5d3 on #1974. Scalar/vector narrowing now uses explicit nearest-even binary16 rounding while keeping float32 physical storage. Casts, assignments, helper boundaries and arithmetic retain the rounding boundary; literal constants remain valid constant expressions, and bit reinterpretations retain their source type. Local Linux/Mesa and original/generated Metal checks independently verify 774,318 outputs from identical input bytes. A pinned MLX float32/float16 reduction set/add/add probe also passes on all three paths with actual fractional narrowing. Required native Linux/macOS CI has been added and is pending. Packed storage, half matrices and bfloat16 are not claimed. This issue remains open pending review and merge.
+NripeshN commented on Oct 1, 2026
+NripeshN
+on Oct 1, 2026
+MemberAuthor
+More actions
+The required native half-conversion steps have now passed at exact head 5b9e5d3: Linux OpenGL in run 36802645995 and original/generated Metal in run 36802646264. The overall workflows are still running. Their final retained artifacts will be audited separately; this does not resolve the independent Windows rounding issue #1993.
+NripeshN
+added a commit that references this issue on Oct 4, 2026
+Preserve half-copy identity and result precision in OpenGL
+...
+5231bc1
+NripeshN commented on Oct 6, 2026
+NripeshN
+on Oct 6, 2026
+MemberAuthor
+More actions
+The checkpoint's explicit casts and stored-half boundaries pass, but nested half arithmetic still loses an intermediate narrowing boundary. Reproduced at f0ba6add while reviewing the historical GLSL Sigmoid bodies; this is additional evidence for this issue, not a new issue.
+```
+#include <metal_stdlib>
+using namespace metal;
+kernel void half_divide(device const uint* values [[buffer(0)]],
+                       device uint* results [[buffer(1)]],
+                       uint i [[thread_position_in_grid]]) {
+  half x = as_type<half>(ushort(values[i]));
+  auto nested = 1 / (1 + x);
+  half denominator = 1 + x;
+  half explicit_value = 1 / denominator;
+  results[i] = uint(as_type<ushort>(nested)) |
+      (uint(as_type<ushort>(explicit_value)) << 16u);
+}
+```
+The public translator emits:
+```
+float nested = crossgl_round_half1((1 / (1 + x)));
+float denominator = crossgl_round_half1((1 + x));
+float explicit_value = crossgl_round_half1((1 / denominator));
+```
+The result of 1 + x has source type half, even with an integer literal operand. A separate unchanged Metal compilation verifies the half type with static_assert(sizeof(1 + x) == 2); the native result below establishes the observable rounding difference independently of that type check.
+Original Metal and generated Metal execute all 65,536 half payloads with identical outputs. On both paths, the nested and explicitly stored forms also agree for the entire domain. On Linux/Mesa OpenGL, the explicitly stored form still matches original Metal for every payload, but the nested form differs on 11,229 inputs. Each path preserves all 64 output guards. Comparisons are bit-exact for non-NaNs and classification-only for NaNs.
+For input payload 0x0c01, both original outputs are 0x3c00; the generated nested result is 0x3bff, while its stored-denominator control remains 0x3c00. Both input and result are normal finite values. The original and translated Metal libraries are byte-identical under Metal 3.1 with fast math disabled. Generated GLSL passes glslangValidator -G and spirv-val --target-env opengl4.5; its SHA-256 is 1100fbf9bfa142029e33405bf07b2bbe15305ef17a974dd1cd5ac212a0c55db8. HLSL also compiles under strict DXC with native 16-bit types, but no Windows numerical result is claimed for this probe.
+Please include source-typed nested arithmetic, mixed integer literals, vector forms, helper expressions and single-evaluation controls in the general half-rounding contract. Rounding only at declarations, returns or explicit constructors is insufficient. The historical MLX Sigmoid<half> body contains this denominator pattern; no new GLSL reference has been accepted for it. The reduced arithmetic failure does not require MLX, transcendental functions, packed-half buffers or a host conversion.
+NripeshN commented on Oct 6, 2026
+NripeshN
+on Oct 6, 2026
+MemberAuthor
+More actions
+The checkpoint branch for #1974 now preserves the logical half type for mixed half/integer expressions, converts integer operands before arithmetic, and applies the same rule to conditional arms. Float/double/bfloat promotion still uses the existing conversion rules.
+Local numerical checks execute all 65,536 half input encodings with nested division, scalar/vector arithmetic, integer midpoint conversions, comparison, value selection, and side-effecting conditional arms. Original Metal, generated Metal and Linux/Mesa OpenGL each match 917,504 reference values; all 96 output guard words pass. Calls execute once and unselected conditional calls do not execute. NaNs are compared by classification, not payload. Original/generated Metal use -std=metal3.1 -fno-fast-math -Werror for this rounding contract. The default fast-math compilation was tested first and did not preserve all vector intermediate roundings, so that result is not included as strict evidence.
+The source-type/compiler regressions pass locally, including Python 3.8. This case runs within existing native jobs; no runner is added. Required hosted execution of the new case is not yet claimed.
+Fresh public-pipeline generation strictly compiles all 34 historical Exp/Sigmoid GLSL artifacts. Complete source and interface comparison against the immediately preceding generated set shows exactly the five half Sigmoid bodies changing, with 29 artifacts byte-identical and every reflected interface unchanged. No checked-in corpus identity is accepted by this comparison.
+The unchanged historical v_Sigmoidfloat16float16 entry at 846d176227a0ac13d2667e58d2bb68b322109ab0 was also executed separately over all 63,490 non-NaN half values. Original/generated Metal agree throughout. OpenGL still differs at four inputs, with guards intact; that remaining numerical investigation belongs to #2068. This is not a full Sigmoid parity claim. A separate nested HLSL conditional narrowing defect is retained under #2099; this OpenGL correction does not change that backend.
+NripeshN
+added a commit that references this issue on Oct 6, 2026
+Preserve half precision in GLSL mixed arithmetic
+...
+e139c6f
+NripeshN
+added
+bugWrong output, a crash or a regressionWrong output, a crash or a regression
+backend:glslOpenGL and WebGL GLSLOpenGL and WebGL GLSL
+area:codegenCode generatorsCode generators
+on Oct 20, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:codegenCode generatorsCode generatorsbackend:glslOpenGL and WebGL GLSLOpenGL and WebGL GLSLbugWrong output, a crash or a regressionWrong output, a crash or a regression
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,173 @@
+--- v003.md
++++ v004.md
+@@ -4,111 +4,86 @@
+ 
+ ## Overview
+-Multi-scale joint training parameters refer to the specific hyperparameter configuration used to balance photometric and uncertainty-based losses across multiple stages of a dynamically growing neural radiance field. This method addresses the instability of training deep, adaptive networks by jointly optimizing coarse and fine representations, ensuring that uncertainty estimates guide the structural growth of the model while maintaining reconstruction fidelity. It is distinct from static loss weighting by coupling the loss coefficients ($\beta_1, \beta_2$) with a multi-stage optimization loop where the number of active stages $D$ increases dynamically.
++Multi-scale joint training parameters refer to the specific weighting coefficients and structural configurations used to balance photometric and auxiliary losses across different spatial resolutions or training stages in inverse rendering optimization. This method addresses the instability of gradient-based optimization in multi-view settings by ensuring that coarse-scale features are learned before fine-scale details are refined. It sets itself apart from single-scale training by explicitly decoupling the optimization burden across a hierarchy of scales, preventing the model from getting stuck in local minima caused by high-frequency noise or insufficient initial constraints [S1, S2].
+ 
+ ## How it works
+-The method operates within a recursive or dynamically growing NeRF framework. It combines a Mean Squared Error (MSE) loss with an uncertainty-aware loss term, weighted by specific constants, across all currently active network stages.
++The method operates by defining a total loss function that aggregates errors from multiple scales or stages, each weighted by specific hyperparameters. In the context of dynamic growth networks, the loss is computed over $D$ stages, where $D$ corresponds to the current number of sub-networks or growth iterations [S1].
+ 
+ **Inputs and Outputs:**
+-*   **Input:** Ground truth image $I_{gt}$, predicted image $I_{pred}$ from stage $i$, uncertainty map $\sigma_i$ (or equivalent uncertainty metric) for stage $i$, and the current total number of active stages $D$.
+-*   **Output:** The total multi-scale joint training loss $\mathcal{L}$.
++*   **Inputs:** Rendered images from $D$ stages, ground truth images, uncertainty maps for each stage, and hyperparameters $\beta_1, \beta_2$.
++*   **Outputs:** Scalar total loss value $\mathcal{L}$ used for backpropagation.
+ 
+ **Data Structures:**
+-*   **Loss Weights:** Two scalar hyperparameters $\beta_1$ and $\beta_2$.
+-*   **Stage Counter:** An integer $D$ representing the current depth of the network or the number of active sub-networks.
+-
+-**Parameters:**
+-*   $\beta_1 = 1.0$: Weight for the MSE loss component.
+-*   $\beta_2 = 0.1$: Weight for the uncertainty loss component.
+-*   $D$: Current number of stages. This value determines the summation range. In the source context, $D-1$ corresponds to the number of network growth events.
++*   **Loss Components:**
++    *   $\mathcal{L}_{MSE}^i$: Mean Squared Error loss for the output image of stage $i$.
++    *   $\mathcal{L}_{unct}^i$: Uncertainty loss for stage $i$, derived from the model's predicted uncertainty at that stage.
++*   **Parameters:**
++    *   $\beta_1$: Weight for the photometric (MSE) term.
++    *   $\beta_2$: Weight for the uncertainty regularization term.
+ 
+ **Formulas:**
+-The total loss $\mathcal{L}$ is computed as the sum of losses over all $D$ stages:
++The total loss is defined as [S1]:
+ $$
+ \mathcal{L} = \sum_{i=1}^D \left( \beta_1 \mathcal{L}_{MSE}^i + \beta_2 \mathcal{L}_{unct}^i \right)
+ $$
+ Where:
+-*   $\mathcal{L}_{MSE}^i$ is the Mean Squared Error loss for the output image of stage $i$.
+-*   $\mathcal{L}_{unct}^i$ is the uncertainty loss for the output image of stage $i$.
++*   $D$ is the current number of stages (also equal to $D-1$ times the network growth count).
++*   $\mathcal{L}_{MSE}^i$ is the MSE loss for the image output of layer/stage $i$.
++*   $\mathcal{L}_{unct}^i$ is the uncertainty loss for layer/stage $i$.
++*   $\beta_1 = 1.0$ and $\beta_2 = 0.1$ are the standard weights [S1].
+ 
+-**Numbered Steps:**
+-1.  Initialize the network with a base stage (e.g., $D=1$).
+-2.  During the forward pass, generate predictions and uncertainty estimates for each active stage $i \in \{1, \dots, D\}$.
+-3.  Compute $\mathcal{L}_{MSE}^i$ for each stage by comparing the predicted image against the ground truth.
+-4.  Compute $\mathcal{L}_{unct}^i$ for each stage based on the model's uncertainty output.
+-5.  Calculate the weighted sum using $\beta_1 = 1.0$ and $\beta_2 = 0.1$ as defined in the formula above.
+-6.  Backpropagate the total loss $\mathcal{L}$ to update network parameters.
+-7.  Periodically evaluate uncertainty to trigger dynamic growth (adding a new stage), incrementing $D$.
++**Steps:**
++1.  Initialize the network with $D=1$ (or the initial stage count).
++2.  For each training iteration:
++    a. Render images from all active stages $i \in \{1, \dots, D\}$.
++    b. Compute $\mathcal{L}_{MSE}^i$ between the rendered image and ground truth for each stage.
++    c. Compute $\mathcal{L}_{unct}^i$ based on the uncertainty predictions for each stage.
++    d. Calculate the total loss $\mathcal{L}$ using the weighted sum formula.
++    e. Backpropagate $\mathcal{L}$ to update network parameters.
++3.  If dynamic growth is triggered (e.g., based on uncertainty clustering), increment $D$ and repeat [S1].
+ 
+-**Pseudocode:**
+-```python
+-def compute_multi_scale_joint_loss(predictions, uncertainties, ground_truths, beta1=1.0, beta2=0.1):
+-    """
+-    Computes the multi-scale joint training loss for a dynamically growing NeRF.
+-    
+-    Args:
+-        predictions: List of predicted images for each stage i=1..D.
+-        uncertainties: List of uncertainty maps for each stage i=1..D.
+-        ground_truths: List of ground truth images for each stage i=1..D.
+-        beta1: Weight for MSE loss (default 1.0).
+-        beta2: Weight for uncertainty loss (default 0.1).
+-        
+-    Returns:
+-        Total scalar loss.
+-    """
+-    total_loss = 0.0
+-    D = len(predictions)  # Current number of stages
+-    
+-    for i in range(D):
+-        # Compute MSE loss for stage i
+-        # Assuming standard pixel-wise MSE
+-        mse_loss = mean_squared_error(predictions[i], ground_truths[i])
+-        
+-        # Compute uncertainty loss for stage i
+-        # Note: The exact formulation of L_unct is not detailed in the source,
+-        # but it is derived from the uncertainty output of stage i.
+-        # [G] Typically, uncertainty loss involves terms like log(sigma) + error^2/sigma^2
+-        # or similar probabilistic formulations. We assume a function `compute_uncertainty_loss`
+-        # exists which takes the uncertainty map and potentially the error.
+-        unct_loss = compute_uncertainty_loss(uncertainties[i], predictions[i], ground_truths[i])
+-        
+-        # Weighted sum for this stage
+-        stage_loss = beta1 * mse_loss + beta2 * unct_loss
+-        total_loss += stage_loss
+-        
+-    return total_loss
+-```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Dynamic Growth:** The value of $D$ changes during training. The loss function must dynamically adjust the summation range to include only active stages.
+-*   **Uncertainty Loss Definition:** The source cites $\mathcal{L}_{unct}^i$ but does not provide the explicit mathematical formula for the uncertainty loss term itself. Implementers must refer to the specific Recursive-NeRF implementation or standard uncertainty-aware loss formulations [S1].
++**Pitfalls:**
++*   **Weight Imbalance:** Incorrectly setting $\beta_2$ too high may cause the optimizer to prioritize uncertainty minimization over photometric accuracy, leading to blurry or structurally incorrect results. Conversely, too low a $\beta_2$ may fail to regularize the model effectively [S1].
++*   **Stage Count:** The number of stages $D$ must be managed carefully; excessive stages without proper growth criteria can lead to overfitting or computational waste [S1].
+ 
+ ## Subtopics
+ 
++### [Multi-stage Training Protocol](14692-multi-stage-training-protocol.md)
++This protocol structures the optimization of inverse rendering models into sequential phases to ensure stable convergence of coupled components. It addresses the dependency of lighting estimation on accurate geometry and appearance by decoupling the training of Direct Prediction (geometry/appearance) and Lighting Joint Prediction modules. Unlike end-to-end training which may suffer from gradient conflicts or poor initialization, this method progressively introduces complexity, starting with isolated component training before joint optimization and final refinement [14692-multi-stage-training-protocol.md].
++
+ ### Cross-intrinsic Guidance
+-A coarse-to-fine training scheme that uses different camera intrinsic parameters to construct an image pyramid, enhancing multi-scale feature learning. It sets apart from standard multi-scale methods by modifying the camera matrix $K$ rather than just the image resolution. Choose this when multi-view consistency is critical and view-dependent noise is a concern. Link: [Cross-intrinsic Guidance](14692-cross-intrinsic-guidance.md) (Note: No dedicated article exists, details below).
++A coarse-to-fine training scheme that uses different camera intrinsic parameters (focal length and principal point) to construct an image pyramid, enhancing multi-scale feature learning [S2].
+ 
+-*   **Definition:** A method that constructs a 4-layer image pyramid by reconfiguring camera intrinsics (focal length $f$ and principal point $c_x, c_y$) for each layer $s \in S$.
+-*   **Steps:**
+-    1.  Define downsampling factors $S = \{2^{k-1} \mid k = 4, 3, 2, 1\} = \{8, 4, 2, 1\}$.
+-    2.  For each layer $s$, reconfigure the intrinsic matrix $K'_s$:
+-        $$
+-        K'_s = \begin{bmatrix} f/s & 0 & c_x/s \\ 0 & f/s & c_y/s \\ 0 & 0 & 1 \end{bmatrix}
+-        $$
+-    3.  Assign matched multi-view settings $M_s = \{M_4, M_3, M_2, M_1\}$ to each layer. Larger $s$ (coarser layers) use more views for stronger constraints.
+-    4.  Run a few thousand iterations per stage for the first three coarse stages ($s=8, 4, 2$).
+-    5.  Start fine training ($s=1$) to refine details.
+-*   **Parameters:** $S = \{1, 2, 4, 8\}$. The largest factor $s=8$ is empirically sufficient. $s=1$ means no downsampling.
+-*   **Pitfalls:** Excessively large downsampling factors lead to blurry ground truth, decreasing fidelity and increasing refinement difficulty.
++**Definition:**
++The method constructs a 4-layer image pyramid by reconfiguring the camera intrinsic matrix $K$ for each layer $s$ in the set of downsampling factors $S$. The modified intrinsic matrix $K'_s$ is defined as [S2]:
++$$
++K'_s = \begin{bmatrix} f/s & 0 & c_x/s \\ 0 & f/s & c_y/s \\ 0 & 0 & 1 \end{bmatrix}, \quad s \in \mathbf{S}
++$$
++Where $f$ is the focal length, and $c_x, c_y$ are the principal point coordinates.
++
++**Steps:**
++1.  Define the set of downsampling factors $S = \{2^{k-1} \mid k = 4, 3, 2, 1\} = \{8, 4, 2, 1\}$ [S2].
++2.  For each layer $s \in S$:
++    a. Reconfigure the intrinsic matrix $K$ to $K'_s$ by dividing $f, c_x, c_y$ by $s$.
++    b. Assign a matched multi-view setting $M_s$ to the layer. Larger downsampling factors (coarser layers) use more views to provide stronger multi-view constraints [S2].
++    c. Run a few thousand iterations for the coarse stages ($s=8, 4, 2$) without fully training the model, treating them as coarse training phases [S2].
++    d. Start fine training at $s=1$ (no downsampling) to refine details [S2].
++
++**Parameters:**
++*   $S$: Set of downsampling factors $\{1, 2, 4, 8\}$. The largest factor $s=8$ is empirically sufficient [S2].
++*   $s=1$: Indicates no downsampling operation [S2].
++
++**Pitfalls:**
++*   **Blurry Ground Truth:** Excessively large downsampling factors lead to blurry ground truth images, decreasing the fidelity of reconstructed features (e.g., 3D Gaussians) and increasing the difficulty for later refinement stages [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of active stages $D$. As the network grows dynamically, the computational cost per iteration increases proportionally to $D$.
+-*   **Memory Complexity:** Increases with $D$ as more sub-networks and their parameters are stored.
+-*   **Strengths:** Stabilizes gradient-based optimization in multi-view settings by reinforcing scene features and minimizing view-dependent noise. The joint weighting prevents any single stage from dominating the gradient flow prematurely.
+-*   **Limitations:** Requires careful management of the dynamic growth schedule. The uncertainty loss formulation is not explicitly defined in the source, potentially requiring implementation guesswork [G].
+-*   **When to use:** When training dynamically growing NeRFs (like Recursive-NeRF) where uncertainty-guided densification is used.
+-*   **When not to use:** For static NeRF architectures or when computational resources are extremely limited and dynamic growth is not feasible.
++*   **Time Complexity:** In multi-stage protocols, the total training time is the sum of iterations across all stages. Cross-intrinsic guidance adds overhead for intrinsic matrix reconfiguration and multi-view setting management but reduces the number of iterations needed for convergence at fine scales by providing better initial constraints [S1, S2].
++*   **Memory Complexity:** Dynamic growth (Recursive-NeRF) increases memory usage as $D$ grows, as new sub-networks are added. Cross-intrinsic guidance requires storing multiple versions of intrinsic matrices and potentially multiple sets of multi-view settings, but does not inherently increase model parameter count [S1, S2].
++*   **Strengths:** Improves convergence stability in multi-view settings; reduces view-dependent noise; ensures coarse features are learned before fine details [S1, S2].
++*   **Limitations:** Requires careful tuning of stage counts and downsampling factors; may introduce complexity in implementation due to dynamic growth or multi-stage logic [S1, S2].
++*   **When to use:** When training inverse rendering models with coupled components (geometry, appearance, lighting) or when multi-view consistency is critical and prone to instability [S1, S2, 14692-multi-stage-training-protocol.md].
++*   **When not to use:** For simple single-view or low-complexity scenes where standard end-to-end training converges reliably [S1, S2].
+ 
+ ## Background
+-The method originates from **Recursive-NeRF**, an efficient and dynamically growing NeRF architecture. It was proposed to address the instability of training deep, adaptive networks by using uncertainty to guide the growth of the network structure. The specific loss weighting ($\beta_1=1.0, \beta_2=0.1$) is designed to balance pixel-level accuracy with the probabilistic confidence of the model.
++The concept of multi-scale training and dynamic growth in neural radiance fields originated with Recursive-NeRF, which introduced an adaptive dynamic growth strategy based on uncertainty clustering [S1]. This was later extended in methods like MVGS (Multi-view-regulated Gaussian Splatting), which proposed cross-intrinsic guidance to leverage multi-view constraints at different scales [S2]. The multi-stage training protocol further generalizes this by decoupling optimization phases for coupled components [14692-multi-stage-training-protocol.md].
+ 
+ ## Sources

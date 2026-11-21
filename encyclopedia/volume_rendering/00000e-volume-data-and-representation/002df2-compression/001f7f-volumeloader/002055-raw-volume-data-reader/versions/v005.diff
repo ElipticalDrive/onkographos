@@ -1,0 +1,308 @@
+--- v004.md
++++ v005.md
+@@ -4,186 +4,154 @@
+ 
+ ## Overview
+-The Raw Volume Data Reader ingests raw binary volume data (typically from CT scanners or specific model formats) into memory, applies domain-specific quantization to reduce precision, and prepares the data for GPU transfer or further processing [S1, S2, S3, S4, S5, S6, S7, S8, unofficial]. It solves the problem of converting raw sensor data into a format suitable for real-time raycasting or sparse voxel octree construction, often involving thresholding and bit-depth reduction [S1, S2, S3, S4, S5, S6, S7, S8, unofficial]. It differs from generic loaders by embedding specific quantization logic (scaling and thresholding) directly into the loading pipeline rather than treating data as opaque bytes [S1, S3, S4, S5, S6, S7, S8, unofficial].
++The Raw Volume Data Reader loads raw binary volume data into memory, parsing dimensions and converting high-precision integer values (typically 8-bit or 16-bit) into normalized floats or GPU-compatible textures [S1, S2, S3, S4, S5, S7, S8, S9, unofficial]. It solves the problem of transferring large, high-bit-depth medical imaging datasets (such as CT scans) into the graphics pipeline by providing a direct, format-agnostic binary interface [S2, S3, S4, S7, unofficial]. Unlike structured metadata parsers like [HDF5 JSON (H5J) File Parsing](2922-hdf5-json-h5j-file-parsing.md), it operates directly on raw binary slices without intermediate schema interpretation, serving as the foundation for subsequent bit-depth reduction and normalization steps [S1, S3, S10, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A raw binary file containing voxel data. The file format may vary:
+-    *   Format A: A header of 3 integers (grid dimensions $X, Y, Z$) and 3 floats (bounding box size), followed by $X \times Y \times Z$ floats in row-major order (X fastest, Z slowest) [S7, unofficial].
+-    *   Format B: A sequence of 2-byte unsigned shorts representing the volume [S4, S5, unofficial].
+-    *   Format C: A sequence of 8-bit unsigned integers representing slices (e.g., 512x512 pixels per slice) [S3, S6, unofficial].
+-*   **Output:** A contiguous memory buffer (CPU or GPU) containing the processed voxel data, ready for texture upload or raycasting [S2, S4, S6, S7, unofficial].
++- **Input:** A raw binary file (`.raw`, `.ima`, or similar) containing voxel data, optionally preceded by a header or accompanied by a metadata text file.
++- **Output:** A memory buffer (CPU or GPU) containing volume data as floats, unsigned integers, or a 3D texture object.
+ 
+ **Data Structures:**
+-*   **RawReader (C++):** Contains a private field `m_data` of type `unsigned short*` pointing to a contiguous memory block of size $Z \times Y \times X \times \text{sizeof(unsigned short)}$ [S4, unofficial].
+-*   **VolumeSampleData (CUDA):** A managed CUDA memory array of size `grid_dim.x * grid_dim.y * grid_dim.z` storing processed voxel samples [S7, unofficial].
+-*   **GLubyte Buffer:** A dynamically allocated array of size `dimension.x * dimension.y * dimension.z` used for OpenGL texture upload [S6, unofficial].
++- **RawReader (C++):** Contains a private field `m_data` of type `unsigned short*` pointing to a contiguous memory block of size $Z \times Y \times X \times \text{sizeof(unsigned short)}$ [S5, unofficial].
++- **Volume Type (JavaScript/WebGL):** An object `{ size: { x: number; y: number; z: number }; data: Uint8Array; }` or `Uint16Array` [S1, unofficial].
++- **RawInf_t (C):** Contains `fileName` (char[60]), `res` (Res_t: x,y,z), `sampleType` (SAMPLETYPE), `ratio` (Ratio_t: x,y,z), `endian` (ENDIAN), and `size` (int) [S10, unofficial].
++- **RawData_t (C):** Contains `intensity` (float array), `maxInt`, `minInt`, `gradient` (Gradient_t array), `maxGra`, `minGra` [S10, unofficial].
++- **GL Texture (OpenGL):** `GLubyte *m_LocalBuffer` of size `dimension.x * dimension.y * dimension.z` [S7, unofficial].
+ 
+-**Steps:**
++**Numbered Steps:**
+ 
+-1.  **Open and Validate File:**
+-    *   Open the file in binary read mode [S4, S6, unofficial].
+-    *   Determine file size. If the format is known (e.g., Format B), assert that `file_size == Z * Y * X * sizeof(unsigned short)` [S4, unofficial].
+-    *   If a header is present (Format A), read the first 12 bytes to extract grid dimensions ($X, Y, Z$) and bounding box dimensions [S7, unofficial].
++1. **Open File:** Open the binary file in read mode. In C++, use `std::ifstream file(filename, std::ios::in | std::ios::binary | std::ios::ate)` to allow seeking for size determination [S5, unofficial]. In C#, use `BinaryReader` with `FileMode.Open` [S4, unofficial]. In JavaScript, fetch the URL and convert to an `ArrayBuffer` [S1, S3, unofficial].
++2. **Determine Dimensions and Format:**
++   - If a header exists (e.g., 3 ints for grid dimensions, 3 floats for bounding box), read these first [S8, unofficial].
++   - If no header, dimensions may be inferred from file size and known voxel type, or parsed from an accompanying metadata file (e.g., parsing "WxHxD" resolution string) [S10, unofficial].
++   - Determine voxel bit-depth (8-bit `GLubyte`/`unsigned char` or 16-bit `unsigned short`/`short`) [S2, S4, S5, S7, S9, unofficial].
++3. **Read Binary Data:**
++   - Calculate total elements: $N = X \times Y \times Z$ [S5, S6, unofficial].
++   - Read $N$ elements into a buffer. For 16-bit data, read as `unsigned short` or `short` [S5, S6, unofficial]. For 8-bit, read as `unsigned char` or `GLubyte` [S2, S4, S7, unofficial].
++   - **Endianness Handling:** If the file's byte order differs from the system's native order, swap bytes. Read two bytes `b1` and `b2` using `in.readByte() & 0xff`. If `!isCorrectEndian`, combine as `(b2 << 8) | b1`; else `(b1 << 8) | b2` [S9, unofficial]. **Pitfall:** Failing to mask with `0xff` when reading bytes will sign-extend negative bytes to 16-bit integers, corrupting the value [S9, unofficial].
++4. **Convert and Normalize:**
++   - **To Floats:** Convert each integer element to a float. For 16-bit data, normalize by dividing by the maximum possible value (e.g., 65535.0) or applying a shift: `val = (x << 4) / 65535.0` [S3, unofficial]. For 8-bit, `scalars[i] = (float)pData[i]` [S2, unofficial].
++   - **Clamping:** Clamp density values to a defined range $[VOLUME\_MIN\_DENSITY, VOLUME\_MAX\_DENSITY]$ [S8, unofficial]. Apply iso-clamping: if `tmp < iso_min` or `tmp > iso_max`, set `tmp = 0` (or a background value) [S6, unofficial].
++   - **Scaling:** Compute final density value: $val = tmp \times m\_density\_mult \times multiply / max$, where $multiply$ accounts for resolution scaling between file and volume grid [S6, unofficial].
++5. **Allocate and Upload (GPU):**
++   - Allocate GPU memory (e.g., CUDA managed memory or OpenGL buffer) [S8, unofficial].
++   - Create a 3D texture object. Bind to `GL_TEXTURE_3D` [S7, unofficial].
++   - Set filters: `GL_TEXTURE_MAG_FILTER` and `GL_TEXTURE_MIN_FILTER` to `GL_LINEAR` [S7, unofficial].
++   - Set wrap modes: `GL_TEXTURE_WRAP_S`, `GL_TEXTURE_WRAP_T`, `GL_TEXTURE_WRAP_R` to `GL_REPEAT` (or `GL_CLAMP_TO_BORDER`) [S7, unofficial].
++   - Upload data using `glTexImage3D(GL_TEXTURE_3D, 0, GL_RED, dimension.x, dimension.y, dimension.z, 0, GL_RED, GL_UNSIGNED_BYTE, m_LocalBuffer)` for 8-bit data [S7, unofficial]. For 16-bit or float, adjust internal format (e.g., `GL_RGBA32F`) and type accordingly [S10, unofficial].
++6. **Cleanup:** Free CPU-allocated memory (e.g., `free(m_data)`) after upload [S5, unofficial].
+ 
+-2.  **Allocate Memory:**
+-    *   Allocate a buffer `m_data` of size $Z \times Y \times X \times \text{sizeof(unsigned short)}$ [S4, unofficial].
+-    *   Alternatively, allocate a `GLubyte` buffer of size $X \times Y \times Z$ for 8-bit data [S6, unofficial].
+-    *   For CUDA implementations, allocate managed memory for `VolumeSampleData` [S7, unofficial].
++**Pseudocode (JavaScript/WebGL Style):**
+ 
+-3.  **Read Raw Data:**
+-    *   Read the entire file content into the allocated buffer [S4, S6, unofficial].
+-    *   If the data is 16-bit unsigned short, read it directly [S4, S5, unofficial].
+-    *   If the data is 8-bit, read it into a byte array `pix08` [S3, unofficial].
++```javascript
++async function loadRawVolume(filePath, width, height, depth, bitDepth = 16) {
++    // 1. Fetch and read binary data
++    const response = await fetch(filePath);
++    const buffer = await response.arrayBuffer();
++    
++    let data;
++    if (bitDepth === 8) {
++        data = new Uint8Array(buffer);
++    } else if (bitDepth === 16) {
++        data = new Uint16Array(buffer);
++    } else {
++        throw new Error("Unsupported bit depth");
++    }
+ 
+-4.  **Process and Quantize (Per-Voxel):**
+-    *   Iterate through the raw data. The indexing depends on the source format:
+-        *   For 2D slice-based data (Format C): Iterate through slices. For each slice, create a bitmap source using `BitmapSource.Create(width, height, 96, 96, PixelFormats.Gray8, null, singleImage, stride)` where `stride = (width * 8) / 8` [S3, unofficial].
+-        *   For 3D volume data (Format A/B): Iterate through indices $i$ (X), $j$ (Z), $k$ (Y) [S3, S5, unofficial].
+-    *   **Clamping and Scaling:**
+-        *   Find min and max values in the buffer to determine normalization range [S5, unofficial].
+-        *   Apply iso-clamping: If `tmp < iso_min` or `tmp > iso_max`, set `tmp = 0` [S3, S5, unofficial].
+-        *   Compute density value: $val = tmp \times m\_density\_mult \times multiply / max$ [S3, unofficial].
+-        *   For CUDA loading: Clamp float values to $[VOLUME\_MIN\_DENSITY, VOLUME\_MAX\_DENSITY]$ [S7, unofficial].
+-    *   **Coordinate Transformation (if applicable):**
+-        *   Calculate 3D voxel coordinates:
+-            $$x = i \times multiply$$
+-            $$y = vol\_res.y() - y\_val - 1$$
+-            $$z = j \times multiply$$
+-            where $multiply = vol\_res.x() / file\_res.x()$ [S3, unofficial].
++    // 2. Validate size
++    const expectedSize = width * height * depth;
++    if (data.length !== expectedSize) {
++        throw new Error(`Data size mismatch: expected ${expectedSize}, got ${data.length}`);
++    }
+ 
+-5.  **Transfer to GPU (Optional):**
+-    *   Allocate a `GLubyte` buffer of size $X \times Y \times Z$ [S6, unofficial].
+-    *   Read size bytes into the buffer [S6, unofficial].
+-    *   Create an OpenGL texture object and bind it to `GL_TEXTURE_3D` [S6, unofficial].
+-    *   Set filters: `GL_TEXTURE_MAG_FILTER` and `GL_TEXTURE_MIN_FILTER` to `GL_LINEAR` [S6, unofficial].
+-    *   Set wrap modes: `GL_TEXTURE_WRAP_S`, `GL_TEXTURE_WRAP_T`, and `GL_TEXTURE_WRAP_R` to `GL_REPEAT` [S6, unofficial].
+-    *   Upload data using `glTexImage3D(GL_TEXTURE_3D, 0, GL_RED, dimension.x, dimension.y, dimension.z, 0, GL_RED, GL_UNSIGNED_BYTE, m_LocalBuffer)` [S6, unofficial].
+-    *   Delete the CPU buffer [S6, unofficial].
++    // 3. Convert to normalized floats (0.0 to 1.0)
++    const maxVal = bitDepth === 8 ? 255.0 : 65535.0;
++    const floatData = new Float32Array(expectedSize);
++    
++    for (let i = 0; i < expectedSize; i++) {
++        // Optional: Apply clamping or iso-clamping here
++        // if (data[i] < iso_min || data[i] > iso_max) floatData[i] = 0;
++        // else
++        floatData[i] = data[i] / maxVal;
++    }
+ 
+-6.  **Cleanup:**
+-    *   Close the file [S4, unofficial].
+-    *   Free allocated memory (e.g., `free(m_data)`) in the destructor [S4, unofficial].
++    // 4. Return structured volume data
++    return {
++        size: { x: width, y: height, z: depth },
++        data: floatData
++    };
++}
++```
+ 
+-**Parameters:**
+-*   `dimension` (glm::vec3): Dimensions of the volume in voxels (x, y, z) [S6, unofficial].
+-*   `texture_path` (std::string): File path to the raw data [S6, unofficial].
+-*   `VOLUME_MIN_DENSITY`, `VOLUME_MAX_DENSITY`: Constants defining the clamping range for volume density values [S7, unofficial].
+-*   `iso_min`, `iso_max`: Thresholds for iso-clamping [S3, S5, unofficial].
+-*   `m_density_mult`: Density multiplication factor [S3, unofficial].
+-*   Slice dimensions: Typically 512x512 pixels, assumed constant in some implementations [S3, unofficial].
+-*   Pixel format: 8-bit grayscale (`PixelFormats.Gray8`) [S3, unofficial].
++**Pseudocode (C++/OpenGL Style):**
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision Mismatch:** Ensure the data type in the file (e.g., 16-bit unsigned short) matches the expected size in the assertion [S4, unofficial].
+-*   **Coordinate System:** The Y-axis inversion ($y = vol\_res.y() - y\_val - 1$) is critical for correct orientation in some medical imaging contexts [S3, unofficial].
+-*   **Memory Overflow:** Assert file size matches expected volume size to prevent buffer overflows or incomplete reads [S4, unofficial].
+-*   **Endianness:** Reading raw bytes without masking with `0xff` will sign-extend negative bytes to 16-bit integers, corrupting the value. The code must explicitly mask: `& 0xff` [S8, unofficial].
++```cpp
++void loadRawVolumeToGL(const std::string& filename, glm::vec3 dimension) {
++    // 1. Open file
++    std::ifstream file(filename, std::ios::in | std::ios::binary | std::ios::ate);
++    if (!file.is_open()) throw std::runtime_error("Cannot open file");
+ 
+-**Pseudocode:**
+-```python
+-def load_raw_volume(file_path, dimensions, is_16bit=False, iso_min=0, iso_max=65535, density_mult=1.0):
+-    # 1. Open and validate file
+-    with open(file_path, 'rb') as f:
+-        file_size = f.seek(0, 2)
+-        f.seek(0)
+-        if is_16bit:
+-            expected_size = dimensions.x * dimensions.y * dimensions.z * 2
+-            assert file_size == expected_size, "File size mismatch"
+-        
+-        # Read header if Format A (3 ints + 3 floats)
+-        if file_size > 24:
+-            header_bytes = f.read(24)
+-            # Parse grid_dims and bbox from header_bytes as needed
++    // 2. Get size and allocate buffer
++    size_t size = file.tellg();
++    file.seekg(0, std::ios::beg);
++    
++    // Assuming 8-bit unsigned char for this example
++    GLubyte* m_LocalBuffer = new GLubyte[size];
++    file.read(reinterpret_cast<char*>(m_LocalBuffer), size);
++    file.close();
+ 
+-        # 2. Allocate memory
+-        num_voxels = dimensions.x * dimensions.y * dimensions.z
+-        raw_data = bytearray(f.read(num_voxels * (2 if is_16bit else 1)))
++    // 3. Create and upload 3D texture
++    GLuint texture;
++    glGenTextures(1, &texture);
++    glBindTexture(GL_TEXTURE_3D, texture);
+ 
+-    # 3. Process and quantize
+-    processed_data = []
+-    min_val = float('inf')
+-    max_val = float('-inf')
+-    
+-    for i in range(dimensions.x):
+-        for j in range(dimensions.z):
+-            for k in range(dimensions.y):
+-                if is_16bit:
+-                    idx = (j * dimensions.x + i) * 2
+-                    # Mask with 0xff to prevent sign-extension during byte combination
+-                    val = (raw_data[idx] | (raw_data[idx+1] << 8)) & 0xFFFF
+-                else:
+-                    idx = k * dimensions.x * dimensions.z + j * dimensions.x + i
+-                    val = raw_data[idx]
+-                
+-                # Iso-clamping
+-                if val < iso_min or val > iso_max:
+-                    val = 0
+-                
+-                # Coordinate transformation
+-                multiply = dimensions.x / dimensions.x  # Simplified; use file_res.x if available
+-                x = i * multiply
+-                y = dimensions.y - k - 1
+-                z = j * multiply
+-                
+-                # Density calculation
+-                if max_val == float('-inf'):
+-                    max_val = val
+-                density = val * density_mult * multiply / max_val if max_val > 0 else 0
+-                
+-                processed_data.append({'x': x, 'y': y, 'z': z, 'density': density})
+-                min_val = min(min_val, val)
+-                max_val = max(max_val, val)
++    glTexImage3D(GL_TEXTURE_3D, 0, GL_RED, 
++                 dimension.x, dimension.y, dimension.z, 
++                 0, GL_RED, GL_UNSIGNED_BYTE, m_LocalBuffer);
+ 
+-    # 4. Transfer to GPU (Optional)
+-    gpu_texture = create_gpu_texture(dimensions, processed_data)
+-    return gpu_texture
++    // 4. Set parameters
++    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
++    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
++    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+ 
+-def create_gpu_texture(dimensions, data):
+-    # Allocate CPU buffer
+-    buffer = [voxel['density'] for voxel in data]
+-    # Create texture object
+-    texture_id = allocate_texture_object()
+-    bind_texture(texture_id, target=TEXTURE_3D)
+-    # Set filters
+-    set_filter(texture_id, MAG_FILTER, LINEAR)
+-    set_filter(texture_id, MIN_FILTER, LINEAR)
+-    # Set wrap modes
+-    set_wrap(texture_id, S, REPEAT)
+-    set_wrap(texture_id, T, REPEAT)
+-    set_wrap(texture_id, R, REPEAT)
+-    # Upload data
+-    upload_3d_texture(texture_id, dimensions.x, dimensions.y, dimensions.z, buffer)
+-    # Cleanup CPU buffer
+-    free(buffer)
+-    return texture_id
++    // 5. Cleanup
++    delete[] m_LocalBuffer;
++}
+ ```
+ 
+ ## Subtopics
+ 
+-### [Voxel data loading and quantization](2478-voxel-data-loading-and-quantization.md)
+-Defines the procedure for ingesting raw binary volume data, applying domain-specific quantization to reduce precision, and preparing the data for GPU transfer. It differs from generic loaders by embedding specific quantization logic (scaling and thresholding) directly into the loading pipeline.
++### Raw Volume Data Reader with Endianness Handling
++This variant explicitly handles byte-order swapping for 16-bit signed integer (`short`) data, which is common in medical imaging files generated on different architectures [S9, unofficial]. It differs from the base reader by iterating through each voxel, reading two bytes individually, masking them with `0xff` to prevent sign-extension errors, and combining them based on an `isCorrectEndian` flag [S9, unofficial]. Choose this when loading raw CT data that may have been saved with swapped byte order [S9, unofficial].
+ 
+-### Raw Volume Data Reader with Endianness Handling
+-Handles byte-order conversion for 16-bit signed integer data. Initializes min/max, iterates through axes, reads two bytes per voxel, masks with `0xff`, combines based on `isCorrectEndian` flag, casts to `short`, and updates min/max. Data structure is `short[][][] volume` [S8, unofficial].
++### Raw Data Parsing and Gradient Computation
++This variant extends the reader by parsing an accompanying metadata text file to extract resolution, sample type, ratio, and endian information, then computes gradients and records min/max intensity values [S10, unofficial]. It differs from the base reader by integrating metadata parsing and gradient calculation into the loading process [S10, unofficial]. Choose this when the raw binary file lacks an internal header and metadata is stored externally [S10, unofficial].
++
++### Raw 2D Image Stream Loading
++This variant accepts a list of files containing raw 2D images (voxel streams in row-major order, possibly with a fixed-length header) instead of a single 3D file [S11]. It differs from the base reader by processing multiple 2D slices sequentially and assembling them into a 3D volume [S11]. Choose this when the data is split across multiple files or when processing a stream of 2D slices [S11].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, for reading, processing, and uploading [G].
+-*   **Memory Complexity:** $O(N)$ for storing the raw data buffer and the processed data buffer [G].
+-*   **Performance:** Loading speed is limited by disk I/O and memory bandwidth. GPU upload speed depends on PCIe bandwidth and texture upload efficiency [G].
+-*   **Strengths:** Simple implementation, direct mapping to raw sensor data, efficient for fixed-format data [G].
+-*   **Limitations:** Lacks support for complex metadata (DICOM tags), compression, or variable slice thickness without additional logic. Requires prior knowledge of data format (header structure, byte order, bit depth) [G].
+-*   **When to Use:** When data is already in a raw binary format and no complex metadata parsing is required [G].
+-*   **When Not to Use:** When data is compressed, contains complex metadata, or requires resampling/interpolation during loading [G].
++- **Time Complexity:** $O(N)$, where $N$ is the total number of voxels, for reading and converting data [S1, S2, S3, S5, S7, unofficial].
++- **Memory Complexity:** $O(N)$, storing the entire volume in memory during loading and upload [S1, S2, S3, S5, S7, unofficial].
++- **Performance:** Loading speed is limited by disk I/O and memory bandwidth. GPU upload speed depends on PCIe bandwidth and texture format [S2, S7, unofficial].
++- **Strengths:** Simple, fast, and format-agnostic; no dependency on complex libraries like DICOM or VTK [S1, S3, S4, S7, unofficial].
++- **Limitations:** No built-in support for metadata (spacing, orientation) unless parsed separately; requires manual handling of endianness and bit-depth [S1, S3, S9, S10, unofficial].
++- **When to use:** When data is already in raw binary format and metadata is known or handled separately [S1, S3, S4, S7, unofficial].
++- **When not to use:** When data is in DICOM, NIfTI, or other structured formats requiring complex header parsing [S3, S10, unofficial].
+ 
+ ## Background
+-The Raw Volume Data Reader is a fundamental component in volume rendering pipelines, particularly in medical imaging and scientific visualization [G]. It originated from the need to efficiently load raw CT scan data, which is often stored in proprietary or simple binary formats without complex headers [G]. The method has been implemented in various research projects and educational examples, such as marching cubes implementations and CUDA-based volume renderers [S1, S2, S3, S4, S5, S6, S7, S8, unofficial].
++The Raw Volume Data Reader is a fundamental method in volume rendering, originating from the need to load raw binary data from CT scanners and other imaging devices directly into graphics pipelines [S1, S2, S3, S4, S5, S7, S8, S9, S10, unofficial][S11]. It is widely used in research prototypes and custom rendering engines where simplicity and performance are prioritized over format compatibility [S1, S2, S3, S7, S8, S9, S10, unofficial]. Variants have been developed to handle specific challenges like endianness, metadata parsing, and 2D stream processing [S9, S10, unofficial][S11].
+ 
+ ## Sources
+ [S1] jaanonim/volume-rendering, https://github.com/jaanonim/volume-rendering, fetched 2026-10-26 (unofficial)
+ [S2] CSE-333-Computer-Graphics-2020/VolumeRayCasting, https://github.com/CSE-333-Computer-Graphics-2020/VolumeRayCasting, fetched 2026-10-26 (unofficial)
+-[S3] How to generate 3D mesh from CT Slices (.raw) using marching cubes algorithm in C#?, https://stackoverflow.com/questions/65498236/how-to-generate-3d-mesh-from-ct-slices-raw-using-marching-cubes-algorithm-in, fetched 2026-10-27 (unofficial)
+-[S4] upupming/marching-cubes, https://github.com/upupming/marching-cubes, fetched 2026-10-27 (unofficial)
+-[S5] cgibson/Mr-Voxel, https://github.com/cgibson/Mr-Voxel, fetched 2026-10-27 (unofficial)
+-[S6] Conradyen/Slice-Base-Volume-Rendering, https://github.com/Conradyen/Slice-Base-Volume-Rendering, fetched 2026-10-27 (unofficial)
+-[S7] GitHub - yuehaowang/volume_renderer: CUDA-based interactive volume ..., https://github.com/yuehaowang/volume_renderer, fetched 2026-10-29 (unofficial)
+-[S8] joshcodd/volume-rendering, https://github.com/joshcodd/volume-rendering, fetched 2026-10-26 (unofficial)+[S3] CS247-KAUST/Bonus_Assignment, https://github.com/CS247-KAUST/Bonus_Assignment, fetched 2026-10-26 (unofficial)
++[S4] How to generate 3D mesh from CT Slices (.raw) using marching cubes algorithm in C#?, https://stackoverflow.com/questions/65498236/how-to-generate-3d-mesh-from-ct-slices-raw-using-marching-cubes-algorithm-in, fetched 2026-10-27 (unofficial)
++[S5] upupming/marching-cubes, https://github.com/upupming/marching-cubes, fetched 2026-10-27 (unofficial)
++[S6] cgibson/Mr-Voxel, https://github.com/cgibson/Mr-Voxel, fetched 2026-10-27 (unofficial)
++[S7] Conradyen/Slice-Base-Volume-Rendering, https://github.com/Conradyen/Slice-Base-Volume-Rendering, fetched 2026-10-27 (unofficial)
++[S8] GitHub - yuehaowang/volume_renderer: CUDA-based interactive volume ..., https://github.com/yuehaowang/volume_renderer, fetched 2026-10-29 (unofficial)
++[S9] joshcodd/volume-rendering, https://github.com/joshcodd/volume-rendering, fetched 2026-10-26 (unofficial)
++[S10] extrovert7986/Scientific-visualization-Slicing-volume-rendering, https://github.com/extrovert7986/Scientific-visualization-Slicing-volume-rendering, fetched 2026-10-26 (unofficial)
++[S11] Appendix A. Volume Rendering Examples, https://techpubs.jurassic.nl/library/manuals/3000/007-3720-002/sgi_html/apa.html, fetched 2026-10-30

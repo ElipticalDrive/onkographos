@@ -1,0 +1,118 @@
+--- v001.md
++++ v002.md
+@@ -1,26 +1,26 @@
+ # Scalar Field Normalization
+ 
+-Also called: Global Min-Max Scaling, Image Normalization & Whitening, Min-Max Normalization, Volume Sampling Normalization
++Also called: Global Min-Max Scaling, Image Normalization & Whitening, Min-Max Normalization, Normalise Function, Universal Threshold Normalization, Volume Sampling Normalization, normalise
+ 
+ ## Overview
+-Scalar Field Normalization maps a volume's scalar values to a canonical range, typically $[0, 1]$, to ensure numerical stability and consistent contrast across different datasets [S1, S3, unofficial]. It differs from non-linear methods like [Power Transformation](2346-power-transformation.md) by preserving the linear relationship between input intensity and output value, and from [Scaling and Biasing](2888-scaling-and-biasing.md) by lacking an explicit bias term in its core definition, though biasing is often applied subsequently [S2287-scaling.md].
++Scalar Field Normalization maps a volume's scalar values to a canonical range, typically $[0, 1]$, to ensure numerical stability and consistent contrast across different datasets [S1, S3, S5, unofficial]. It preserves the linear relationship between input intensity and output value, distinguishing it from non-linear transfer function methods [G].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A volume tensor (3D array) of scalar values, typically integer or float.
++- Input: A volume tensor of scalar values, typically integer or float.
+ - Output: A volume tensor of the same shape and dimensions, with values normalized to the target range.
+ 
+ **Data Structures:**
+-- The input is treated as a contiguous array of voxels.
++- The input is treated as a contiguous array of voxels [G].
+ - The output is allocated in `float32` precision to maintain dynamic range [S1, unofficial].
+ 
+ **Steps:**
+ 1. **Data Type Conversion:** Cast the input volume to `float32` [S1, unofficial].
+-2. **Boundary Check (for sampling):** If accessing a voxel at coordinates $(x, y, z)$, check if coordinates are within bounds. If $x < 0$, $x \ge \text{width}$, $y < 0$, $y \ge \text{height}$, or $z < 0$, $z \ge \text{depth}$, return $0.0$ [S2, unofficial].
+-3. **Compute Statistics:** Iterate over all valid data elements to find the global minimum (`field_min`) and global maximum (`field_max`) [S3, unofficial].
++2. **Compute Statistics:** Iterate over all data elements to find the global minimum (`field_min`) and global maximum (`field_max`) [S3, S4, unofficial].
++3. **Degenerate Case Check:** Compute `denom = field_max - field_min`. If `denom == 0`, return an array of zeros to avoid division by zero [S1, S3, unofficial].
+ 4. **Normalization:** Apply the linear transformation:
+-   $$ \text{data}[i] = \frac{\text{data}[i] - \text{field\_min}}{\text{field\_max} - \text{field\_min}} $$
+-   [S3, unofficial]
+-5. **Edge Case Handling:** If `field_max` equals `field_min` (or standard deviation is zero for whitening), return an array of zeros to avoid division by zero [S1, S3, unofficial].
++   $$ v_{norm} = \frac{(b-a)(v - field\_min)}{denom} + a $$
++   [S5, unofficial] For the standard $[0, 1]$ range, $a=0$ and $b=1$, simplifying to $v_{norm} = \frac{v - field\_min}{field\_max - field\_min}$ [S1, S3, unofficial].
++5. **Boundary Check (for sampling):** When sampling a voxel at coordinates $(x, y, z)$ during rendering, if coordinates fall outside the dataset bounds ($x<0$, $x\ge\text{width}$, etc.), return $0.0$ [S3, unofficial].
+ 
+ **Pseudocode:**
+@@ -28,7 +28,8 @@
+ import numpy as np
+ 
+-def normalize_scalar_field(volume: np.ndarray) -> np.ndarray:
++def normalize_scalar_field(volume: np.ndarray, a: float = 0.0, b: float = 1.0) -> np.ndarray:
+     """
+-    Normalizes a 3D volume scalar field to [0, 1] using global min-max scaling.
++    Normalizes a 3D volume scalar field to [a, b] using global min-max scaling.
++    Defaults to [0, 1].
+     """
+     # 1. Cast to float32
+@@ -40,9 +41,10 @@
+     
+     # 3. Handle degenerate case (constant volume)
+-    if field_max == field_min:
++    denom = field_max - field_min
++    if denom == 0.0:
+         return np.zeros_like(vol_float)
+     
+     # 4. Apply normalization formula
+-    normalized = (vol_float - field_min) / (field_max - field_min)
++    normalized = ((b - a) * (vol_float - field_min) / denom) + a
+     
+     return normalized
+@@ -60,39 +62,37 @@
+         return 0.0
+     
+-    return norm_volume[y, x, z]
++    return float(norm_volume[y, x, z])
+ ```
+ 
+ **Parameters:**
++- `a`: Lowest normalized value, typically $0$ [S5, unofficial].
++- `b`: Highest normalized value, typically $1$ [S5, unofficial].
+ - `dtype`: Input is cast to `np.float32` [S1, unofficial].
+ 
+ **Pitfalls:**
+-- **Division by Zero:** Occurs if all voxel values are identical. Guarded by checking `max > min` or `std > 0` [S1, unofficial].
+-- **Outlier Sensitivity:** Global min/max can be skewed by extreme outliers, compressing the useful dynamic range of the majority of the data [S4, unofficial].
++- **Division by Zero:** Occurs if all voxel values are identical. Guarded by checking `max > min` or `std > 0` before normalization [S1, S3, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Scaling](2287-scaling.md)
+-Scaling is a fundamental scalar field normalization technique that maps input data values to a target range, typically $[0, 1]$, by dividing by a scale factor. It serves as the base linear transformation for volume data representation, ensuring numerical stability and consistent contrast across different datasets. It differs from non-linear methods like [Power Transformation](2346-power-transformation.md) by preserving the linear relationship between input intensity and output value, and from [Scaling and Biasing](2888-scaling-and-biasing.md) by lacking an explicit bias term in its core definition, though biasing is often applied subsequently.
++Scaling is a specific instance of Scalar Field Normalization that maps input data to the range $[0, 1]$ using the global minimum and maximum values. It serves as the foundational linear transformation for volume data preprocessing, distinct from non-linear methods like [Percentile-based Normalization](5158-percentile-based-normalization.md) which ignore outliers.
+ 
+-### Percentile-based Normalization
+-This variant uses percentiles (e.g., 5th and 95th) instead of global min/max to mitigate the effect of outliers [S4, unofficial].
+-**Steps:**
+-1. Calculate `min_val` and `max_val` as the 5th and 95th percentiles of the image data [S4, unofficial].
+-2. Clip image values to `[min_val, max_val]` [S4, unofficial].
+-3. Normalize: $image\_normalized = (image\_clipped - min\_val) / (max\_val - min\_val + 1e-8)$ [S4, unofficial].
+-4. Scale to 0-255 and cast to uint8: $image\_8bit = (image\_normalized * 255).astype(np.uint8)$ [S4, unofficial].
++### [Percentile-based Normalization](5158-percentile-based-normalization.md)
++This variant uses percentiles (e.g., 5th and 95th) instead of global min/max to mitigate the effect of outliers [G].
++**Steps:** Not given in the sources.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$, where $N$ is the number of voxels, to compute min/max. Normalization is also $O(N)$.
+-- **Memory Complexity:** $O(N)$ for the output array in `float32` [S1, unofficial].
+-- **Strengths:** Simple, fast, and preserves linear intensity relationships [S2287-scaling.md].
+-- **Limitations:** Highly sensitive to outliers; a single extreme value can compress the visible range of the rest of the data [S4, unofficial]. Not suitable for data with significant noise spikes unless clipped [S4, unofficial].
++- **Time Complexity:** $O(N)$, where $N$ is the number of voxels, to compute min/max and apply the transformation [G].
++- **Memory Complexity:** $O(N)$ for the output array in `float32` [G].
++- **Strengths:** Simple, fast, and preserves linear intensity relationships [G].
++- **Limitations:** Highly sensitive to outliers; a single extreme value can compress the visible range of the rest of the data [G].
+ 
+ ## Background
+-Scalar field normalization is a standard preprocessing step in volume rendering and medical imaging to ensure that rendering parameters (like transfer functions) work consistently across different datasets [S1, S3, unofficial]. It is often used in conjunction with compression and rendering pipelines [S2, S3, unofficial].
++Scalar field normalization is a standard preprocessing step in volume rendering and medical imaging to ensure that rendering parameters and transfer functions work consistently across different datasets [S1, S3, S5, unofficial].
+ 
+ ## Sources
+ [S1] wskingdom/DGR, https://github.com/wskingdom/DGR, fetched 2026-10-26 (unofficial)
+-[S2] Torbenhjl/Marching-Tetrahedra-on-CT-headscan, https://github.com/Torbenhjl/Marching-Tetrahedra-on-CT-headscan, fetched 2026-10-27 (unofficial)
+-[S3] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)
+-[S4] 医疗影像开发实战:如何用光线投射算法快速生成DRR图像(附Python代码), https://un.csdn.net/98nhkcg5t04h, fetched 2026-10-26 (unofficial)+[S2] imanfs/inverse-problems-CT-scans - GitHub, https://github.com/imanfs/inverse-problems-CT-scans, fetched 2026-10-07 (unofficial)
++[S3] Torbenhjl/Marching-Tetrahedra-on-CT-headscan, https://github.com/Torbenhjl/Marching-Tetrahedra-on-CT-headscan, fetched 2026-10-27 (unofficial)
++[S4] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)
++[S5] Segmentation Assisted Object Distinction for Direct Volume Rendering, https://doi.org/10.22044/jadm.2019.7207.1854, fetched 2026-10-29 (unofficial)

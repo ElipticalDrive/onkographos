@@ -1,0 +1,98 @@
+# Reduced Resolution Ray Casting
+
+Also called: Incremental Multi-resolution Ray Casting, Interaction-aware Resolution Scaling, incremental ray casting, multi-resolution ray casting
+
+## Overview
+Reduced Resolution Ray Casting is an interactive rendering technique that trades image accuracy for speed to enable low-latency, continuous feedback during 3D navigation [S1, unofficial][S2, book]. It differs from sibling methods by explicitly decoupling the ray sampling rate from the final display resolution, using interpolation to upscale a sparsely sampled image rather than simply lowering the pixel grid of a fully sampled image.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D volume data, camera parameters (viewpoint, orientation, zoom), and interaction state (active/inactive).
+*   **Output:** A full-resolution image displayed to the user.
+
+**Data Structures:**
+*   **Depth Buffer (Z-buffer):** Maintains the current projection depth for each pixel to map cursor positions $(x, y)$ to 3D coordinates $(x, y, z)$ [S1, unofficial].
+*   **Image Buffer:** Stores the rendered color/intensity values. During interaction, this may store values at reduced resolution or interpolated values.
+
+**Steps:**
+1.  **Determine Resolution:** If the user is interacting (moving camera/zooming), reduce the number of rays cast. Specifically, cast rays at a reduced rate, often by a factor of two along each image dimension [S2, book].
+2.  **Ray Casting:** Perform incremental ray casting in a multi-resolution fashion. For each active ray, traverse the volume and compute the transfer function value. The rendering mode can be surface shaded (gradient shaded) or perspective Maximum Intensity Projection (MIP) [S1, unofficial].
+3.  **Interpolation (Upsampling):** Generate the full-size image from the reduced-resolution ray casting results.
+    *   If **nearest neighbor** interpolation is used, the reduced image is simply expanded.
+    *   If **bilinear interpolation** is used, the reduced resolution image is upsampled to full size [S2, book].
+4.  **Progressive Refinement (Optional):** If the number of samples along each ray is *not* reduced, only every $n^{th}$ ray is computed during interaction. The remaining pixels are filled via interpolation. When interaction stops, these interpolated pixels are progressively replaced with actual ray-cast values [S2, book].
+5.  **Termination:** When interaction ceases, the system restores full resolution and full sampling density to produce the final high-quality image [S2, book].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_frame(volume, camera, is_interacting):
+    # Determine ray step based on interaction state
+    if is_interacting:
+        # Reduce rays by factor of 2 along each dimension for 4x speedup
+        # This results in 1/4 the total rays
+        ray_step_x = 2
+        ray_step_y = 2
+        use_bilinear = True
+    else:
+        ray_step_x = 1
+        ray_step_y = 1
+        use_bilinear = False
+
+    # Initialize reduced resolution buffers
+    # Width and Height are half of full screen if interacting
+    reduced_width = screen_width // ray_step_x
+    reduced_height = screen_height // ray_step_y
+    
+    reduced_image = empty_buffer(reduced_width, reduced_height)
+    depth_buffer = empty_buffer(reduced_width, reduced_height)
+
+    # Cast rays at reduced resolution
+    for y in range(reduced_height):
+        for x in range(reduced_width):
+            # Map reduced pixel to full screen coordinates
+            full_x = x * ray_step_x
+            full_y = y * ray_step_y
+            
+            # Generate ray from camera through (full_x, full_y)
+            ray = camera.generate_ray(full_x, full_y)
+            
+            # Perform ray casting (MIP or Surface Shaded)
+            # Returns color and depth
+            color, depth = cast_ray(volume, ray)
+            
+            reduced_image[y, x] = color
+            depth_buffer[y, x] = depth
+
+    # Upsample to full resolution
+    if use_bilinear:
+        full_image = bilinear_interpolate(reduced_image, screen_width, screen_height)
+    else:
+        full_image = nearest_neighbor_interpolate(reduced_image, screen_width, screen_height)
+
+    return full_image, depth_buffer
+```
+
+**Parameters:**
+*   **Reduction Factor:** A factor of two along each dimension is typical, yielding a four-times speed-up [S2, book].
+*   **Interpolation Method:** Nearest neighbor or bilinear [S2, book].
+
+**Pitfalls:**
+*   Further speed-ups with larger reductions result in blurry, less detailed images [S2, book].
+*   Precision issues may arise if the depth buffer is not maintained correctly for cursor mapping [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Reducing rays by a factor of two along each dimension results in a four-times speed-up [S2, book].
+*   **Memory Complexity:** Requires storage for a reduced-resolution image buffer and a depth buffer.
+*   **Strengths:** Enables low-latency, continuous feedback essential for effective 3D navigation [S1, unofficial]. Scales seamlessly over multi-processor SMP architectures [S1, unofficial].
+*   **Limitations:** Image quality degrades with larger reductions; not suitable for final publication-quality rendering during interaction [S2, book].
+*   **When to use:** During active camera manipulation (pan, zoom, rotate) to maintain frame rate.
+*   **When not to use:** When static, high-quality visualization is required.
+
+## Background
+This technique was developed as part of the Angiotool project for interactive visualization of MRI vector and tensor fields [S1, unofficial]. It addresses the computational expense of brute-force ray casting by allowing temporary trade-offs in rendering accuracy [S1, unofficial]. It is also discussed in the context of VTK's advanced computer graphics capabilities [S2, book].
+
+## Sources
+[S1] Angiotool : a tool for interactive visualization of MRI vector and tensor fields, https://doi.org/10.82444/warw.33642268, fetched 2026-10-26 (unofficial)
+[S2] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)

@@ -1,0 +1,225 @@
+--- v010.md
++++ v011.md
+@@ -8,21 +8,18 @@
+ ## How it works
+ **Inputs:**
+-- `points`: A tensor or array of $N$ points in normalized or grid-space coordinates, shape $(N, 3)$, representing $(x, y, z)$ [S1, S2, unofficial].
+-- `grid_dims`: A tuple or array $(D_x, D_y, D_z)$ defining the dimensions of the voxel grid [S1, S2, unofficial].
+-- `grid_data`: The dense tensor containing scalar or vector values at grid vertices [S1, S2, unofficial].
++- `points`: A list or array of $N$ points in grid-space coordinates, shape $(N, 3)$, representing $(x, y, z)$ [S1, S2, unofficial].
++- `grid_dims`: A tuple $(D_x, D_y, D_z)$ defining the dimensions of the voxel grid [S1, S2, unofficial].
++- `grid_data`: A 4D array containing scalar or vector values at grid vertices, shape $(D_x, D_y, D_z, C)$ [S1, S2, unofficial].
+ 
+ **Outputs:**
+-- `corner_values`: A tensor of shape $(N, 8, C)$, where $C$ is the channel dimension (e.g., 1 for scalar, 3 for position) [S1, S2, unofficial].
+-- `corner_indices`: A tensor of shape $(N, 8, 3)$ containing the integer grid coordinates of the 8 corners for each point [S1, unofficial].
++- `corner_values`: A list of lists of shape $(N, 8, C)$, containing the retrieved values for each point's corners [S1, S2, unofficial].
++- `corner_indices`: A list of lists of shape $(N, 8, 3)$, containing the integer grid coordinates of the 8 corners for each point [S1, unofficial].
+ 
+ **Data Structures:**
+-- **VoxSample** (from [S2, unofficial]): A struct used to hold the collected data. It contains two arrays of size 8:
+-  - `values`: `float[8]` storing the scalar values at the corners.
+-  - `positions`: `vec3[8]` storing the 3D world or grid positions of the corners.
+-  - Indexing convention: Indices 0–3 correspond to the lowest Z-plane corners (sw, se, ne, nw), and indices 4–7 correspond to the highest Z-plane corners (sw, se, ne, nw) [S2, unofficial].
++- The output tensors store corners in a fixed order: indices 0–3 correspond to the lowest Z-plane corners (sw, se, ne, nw), and indices 4–7 correspond to the highest Z-plane corners (sw, se, ne, nw) [S2, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1. **Coordinate Discretization**: For each point $p_i = (x_i, y_i, z_i)$, compute the floor and ceiling coordinates along each axis.
++1. **Coordinate Discretization**: For each point $p_i = (x_i, y_i, z_i)$, compute the floor and ceiling coordinates along each axis [S1, unofficial].
+    $$
+    \begin{aligned}
+@@ -34,5 +31,5 @@
+    [S1, unofficial]
+ 
+-2. **Corner Index Generation**: Generate all $2^3=8$ combinations of the floor/ceil coordinates to form the corner indices for the enclosing cell.
++2. **Corner Index Generation**: Generate all $2^3=8$ combinations of the floor/ceil coordinates to form the corner indices for the enclosing cell [S1, unofficial].
+    $$
+    \text{Indices}_i = \{ (x_a, y_b, z_c) \mid x_a \in \{x_{floor}, x_{ceil}\}, y_b \in \{y_{floor}, y_{ceil}\}, z_c \in \{z_{floor}, z_{ceil}\} \}
+@@ -40,20 +37,14 @@
+    [S1, unofficial]
+ 
+-3. **Boundary Handling**: Fix out-of-bounds indices. Common strategies include:
+-   - **Periodic Boundary Conditions**: Wrap indices using modulo arithmetic with grid dimensions [S1, unofficial].
+-   - **Clamping/Constant Fill**: Clamp indices to $[0, D-1]$ or use a constant value for out-of-bounds accesses [S3, unofficial].
+-   - **Error Handling**: In some implementations (e.g., [S4, unofficial]), if a corner is out of bounds, the corresponding entry remains uninitialized (default value), requiring the caller to handle the failure [S4, unofficial].
++3. **Boundary Handling**: Fix out-of-bounds indices using periodic boundary conditions [S1, unofficial]. Alternative strategies include constant value filling for out-of-bounds accesses [S3, unofficial]. In some implementations, out-of-bounds accesses leave entries uninitialized, requiring caller-side validation [S4, unofficial].
+ 
+-4. **Data Retrieval**: Index into `grid_data` using the fixed corner indices to retrieve the values and/or positions.
+-   - If retrieving positions, compute the world position as:
+-     $$
+-     \text{WorldPos}_k = \text{LocalOrigin} + \text{LookupTables.CubeCorners}[k] \times \text{VoxelSize}
+-     $$
+-     where $k$ is the corner index 0–7 [S4, unofficial].
++4. **Data Retrieval**: Index into `grid_data` using the fixed corner indices to retrieve the values and/or positions [S1, unofficial]. For position retrieval, compute the world position as $\text{WorldPos}_k = \text{LocalOrigin} + \text{LookupTables.CubeCorners}[k] \times \text{VoxelSize}$, where $k$ is the corner index 0–7 [S4, unofficial].
+ 
+-5. **Structuring Output**: Organize the retrieved data into the output structure (e.g., `VoxSample` or tensor) following the specified indexing order (lowest Z-plane first, then highest Z-plane) [S2, unofficial].
++5. **Structuring Output**: Organize the retrieved data into the output structure following the specified indexing order (indices 0–3 for the lowest Z-plane, indices 4–7 for the highest Z-plane) [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++import math
++
+ def collect_corner_indices(points, grid_dims, grid_data):
+     """
+@@ -61,101 +52,48 @@
+     
+     Args:
+-        points: Tensor of shape (N, 3) with normalized or grid coordinates.
++        points: List of (x, y, z) tuples.
+         grid_dims: Tuple (Dx, Dy, Dz) of grid dimensions.
+-        grid_data: Tensor of shape (Dx, Dy, Dz, C) containing grid values.
++        grid_data: 4D list/array of shape (Dx, Dy, Dz, C).
+         
+     Returns:
+-        corner_values: Tensor of shape (N, 8, C).
+-        corner_indices: Tensor of shape (N, 8, 3) with integer grid coordinates.
++        corner_values: List of lists of shape (N, 8, C).
++        corner_indices: List of lists of shape (N, 8, 3).
+     """
+-    N = points.shape[0]
++    N = len(points)
+     Dx, Dy, Dz = grid_dims
++    C = len(grid_data[0][0][0])
+     
+-    # Step 1: Compute floor and ceil coordinates
+-    # Ensure inputs are floats for correct floor/ceil behavior
+-    x = points[:, 0]
+-    y = points[:, 1]
+-    z = points[:, 2]
++    corner_values = []
++    corner_indices = []
+     
+-    x_floor = torch.floor(x)
+-    x_ceil = torch.ceil(x)
+-    y_floor = torch.floor(y)
+-    y_ceil = torch.ceil(y)
+-    z_floor = torch.floor(z)
+-    z_ceil = torch.ceil(z)
+-    
+-    # Step 2: Generate all 8 combinations
+-    # Create lists of coordinates for each corner
+-    corners_x = []
+-    corners_y = []
+-    corners_z = []
+-    
+-    for xf in [x_floor, x_ceil]:
+-        for yf in [y_floor, y_ceil]:
+-            for zf in [z_floor, z_ceil]:
+-                corners_x.append(xf)
+-                corners_y.append(yf)
+-                corners_z.append(zf)
+-                
+-    # Stack into (N, 8, 3)
+-    corner_indices = torch.stack([
+-        torch.stack(corners_x, dim=1),
+-        torch.stack(corners_y, dim=1),
+-        torch.stack(corners_z, dim=1)
+-    ], dim=2).long()
+-    
+-    # Step 3: Boundary Handling (Periodic)
+-    corner_indices[:, :, 0] = corner_indices[:, :, 0] % Dx
+-    corner_indices[:, :, 1] = corner_indices[:, :, 1] % Dy
+-    corner_indices[:, :, 2] = corner_indices[:, :, 2] % Dz
+-    
+-    # Step 4: Index into grid_data
+-    # grid_data shape: (Dx, Dy, Dz, C)
+-    # We need to gather values for each of the 8 corners for each of the N points
+-    
+-    # Expand dimensions for advanced indexing
+-    # corner_indices shape: (N, 8, 3)
+-    # We want output shape: (N, 8, C)
+-    
+-    # Extract x, y, z indices
+-    idx_x = corner_indices[:, :, 0] # (N, 8)
+-    idx_y = corner_indices[:, :, 1] # (N, 8)
+-    idx_z = corner_indices[:, :, 2] # (N, 8)
+-    
+-    # Gather values
+-    # grid_data[idx_x, idx_y, idx_z] requires broadcasting or advanced indexing
+-    # Using torch.gather or direct indexing if supported
+-    
+-    # Direct indexing for dense grids (assuming grid_data is on same device)
+-    # Note: In PyTorch, grid_data[idx_x, idx_y, idx_z] works if indices are long tensors
+-    # and grid_data is 4D (Dx, Dy, Dz, C)
+-    
+-    # However, standard advanced indexing might not support 3 index tensors directly for 4D tensor
+-    # We reshape to linear indices or use torch.nn.functional.grid_sample logic adapted
+-    
+-    # Alternative: Reshape corner_indices to flat list, index, then reshape
+-    flat_indices = corner_indices.reshape(-1, 3) # (N*8, 3)
+-    
+-    # Convert to linear indices if grid_data is flattened, or use multi-dimensional indexing
+-    # Assuming grid_data is (Dx, Dy, Dz, C)
+-    # We can use torch.take_along_dim or similar, but direct indexing is clearer
+-    
+-    # Let's use a loop or vectorized gather for clarity
+-    # Vectorized approach:
+-    # Create a tensor of shape (N, 8, C)
+-    corner_values = torch.zeros(N, 8, grid_data.shape[3], device=grid_data.device)
+-    
+-    # Efficient gathering:
+-    # Reshape grid_data to (Dx*Dy*Dz, C)
+-    grid_flat = grid_data.reshape(-1, grid_data.shape[3])
+-    
+-    # Compute linear indices: x + y*Dx + z*Dx*Dy
+-    Dx_dy = Dx * Dy
+-    linear_indices = idx_x + idx_y * Dx + idx_z * Dx_dy # (N, 8)
+-    
+-    # Gather from flat grid
+-    # linear_indices needs to be expanded to (N, 8, 1) for gather
+-    corner_values = torch.gather(grid_flat.unsqueeze(0).expand(N, -1, -1), 1, linear_indices.unsqueeze(-1).expand(-1, -1, grid_data.shape[3]))
+-    
++    for p in points:
++        x, y, z = p
++        x_floor, x_ceil = math.floor(x), math.ceil(x)
++        y_floor, y_ceil = math.floor(y), math.ceil(y)
++        z_floor, z_ceil = math.floor(z), math.ceil(z)
++        
++        # Step 2: Generate all 8 combinations
++        corners = []
++        for xf in [x_floor, x_ceil]:
++            for yf in [y_floor, y_ceil]:
++                for zf in [z_floor, z_ceil]:
++                    corners.append((xf, yf, zf))
++        
++        # Step 3: Boundary Handling (Periodic)
++        fixed_corners = []
++        for xf, yf, zf in corners:
++            fx = xf % Dx
++            fy = yf % Dy
++            fz = zf % Dz
++            fixed_corners.append((fx, fy, fz))
++        
++        # Step 4: Data Retrieval
++        vals = []
++        for fx, fy, fz in fixed_corners:
++            vals.append(grid_data[fx][fy][fz])
++        
++        corner_values.append(vals)
++        corner_indices.append(fixed_corners)
++        
+     return corner_values, corner_indices
+ ```
+@@ -166,7 +104,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision**: Floating-point errors in coordinate calculation can cause `floor` and `ceil` to be equal for integer coordinates, resulting in duplicate corners. This is generally handled correctly by the algorithm but may waste computation [S1, unofficial].
+ - **Out-of-Bounds**: If boundary handling is not implemented, accessing indices outside $[0, D-1]$ causes memory errors or undefined behavior [S4, unofficial].
+-- **Degenerate Input**: Points exactly on grid boundaries may have ambiguous corner selection if not handled consistently (e.g., floor vs ceil) [S1, unofficial].
++- **Integer Coordinates**: Points exactly on integer grid coordinates yield identical floor and ceil values, producing duplicate corner indices that the algorithm processes deterministically [S1, unofficial].
+ 
+ ## Subtopics
+@@ -209,10 +146,10 @@
+ - **Scaling**: Scales linearly with the number of points and grid resolution (for memory access patterns). However, cache efficiency depends on the spatial coherence of the input points [S3, unofficial].
+ - **Strengths**: Simple to implement, differentiable (if using continuous interpolation), and provides the necessary data for higher-order reconstruction [S1, S2, unofficial].
+-- **Limitations**: Requires explicit boundary handling, which can be complex for non-uniform grids [S1, unofficial]. Performance may degrade if points are scattered and cause cache misses [S3, unofficial].
++- **Limitations**: Requires explicit boundary handling for out-of-bounds indices [S1, unofficial]. Performance may degrade if points are scattered and cause cache misses [S3, unofficial].
+ - **When to Use**: When trilinear interpolation or surface extraction is required, and the grid is dense and regular [S1, S2, unofficial].
+ - **When Not to Use**: For sparse grids where sparse data structures (e.g., Octrees) are more efficient [S1, unofficial].
+ 
+ ## Background
+-Grid Cell Collection via Corner Indices is a fundamental technique in volume rendering and computer graphics, originating from the need to sample dense voxel grids efficiently [S1, S2, unofficial]. It is widely used in neural rendering frameworks (e.g., Plenoxels) where differentiable trilinear interpolation is required for training neural fields [S1, unofficial]. The method has been adapted for various hardware architectures, including SIMD-optimized CPU implementations and GPU kernels for brick-structured volumes [S3, S1, unofficial].
++Grid Cell Collection via Corner Indices is a fundamental technique in volume rendering and computer graphics, originating from the need to sample dense voxel grids efficiently [S1, S2, unofficial]. The method has been adapted for various hardware architectures, including SIMD-optimized CPU implementations and GPU kernels for brick-structured volumes [S3, S1, unofficial].
+ 
+ ## Sources

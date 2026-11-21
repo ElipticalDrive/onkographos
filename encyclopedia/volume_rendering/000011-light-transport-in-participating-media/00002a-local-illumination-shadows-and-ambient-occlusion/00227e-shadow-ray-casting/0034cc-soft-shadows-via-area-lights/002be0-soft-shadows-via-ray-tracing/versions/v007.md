@@ -1,0 +1,51 @@
+# Soft Shadows via Ray Tracing
+
+Also called: Packet-based Soft Shadow Ray Tracing
+
+## Overview
+This method generates soft shadows from area light sources by tracing coherent packets of shadow rays from primary ray hit points to samples on the light source [S1]. It differs from hard shadow casting by enabling smooth transitions between shadowed and unshadowed regions, providing visual cues about object positioning [S1]. Unlike rasterization-based impostor approaches, this technique integrates global effects easily due to its ray tracing basis [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Primary ray hit points ($P$), area light source geometry (defined by a set of samples or a parametric surface), and a user-defined number of shadow rays ($N$) per hit point.
+*   **Output:** Shadow factor (visibility) for each hit point, resulting in soft shadow boundaries.
+
+**Data Structures:**
+*   **Ray Packet:** A structure containing $N$ rays sharing a common origin $P$. Each ray $i$ ($0 \le i < N$) has a direction vector $\vec{d}_i$ pointing towards a specific sample $L_i$ on the area light source.
+    *   Layout: `origin` (3 floats), `directions` (array of $N$ vectors, each 3 floats).
+
+**Steps:**
+1.  **Generate Shadow Ray Packets:** For each primary ray hit point $P$, generate $N$ shadow rays. Each ray $i$ connects $P$ to a sample $L_i$ on the area light source. The direction $\vec{d}_i$ is calculated as:
+    $$ \vec{d}_i = \frac{L_i - P}{\|L_i - P\|} $$
+    where $L_i$ is the position of the $i$-th sample on the light source [S1].
+2.  **Traverse Shadow Rays:** Traverse the generated shadow rays in a manner identical to primary ray packets. Since all rays in the packet share the common origin $P$, they can be processed together using coherent traversal logic [S1].
+3.  **Evaluate Occlusion:** For each ray $i$ in the packet, determine if it intersects any occluder in the scene before reaching $L_i$.
+4.  **Compute Shadow Factor:** The shadow factor for hit point $P$ is the ratio of unoccluded rays to the total number of rays $N$. If $k$ rays are unoccluded, the factor is $k/N$ [G].
+
+**Parameters:**
+*   **Number of shadow rays ($N$):** Controls the quality of the soft shadow. Higher $N$ yields smoother shadows but increases computational cost. Controlled interactively by the user [S1].
+*   **Light Source Size:** The spatial extent of the area light source. Larger sources produce softer shadows. Controlled interactively by the user [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** When $P$ is very close to the light source, numerical instability may occur in direction calculation. [G]
+*   **Degenerate Input:** If the light source has no samples or $N=0$, the method fails. [G]
+
+## Subtopics
+
+### [Soft Shadows via Ray Packets](5179-soft-shadows-via-ray-packets.md)
+Generates soft shadows by organizing shadow rays into coherent packets to maintain traversal efficiency. It builds on this method by specifically structuring the rays for optimized traversal.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot T)$, where $N$ is the number of shadow rays per hit point and $T$ is the cost of traversing the scene for one ray. The coherent traversal of packets may reduce $T$ due to cache efficiency.
+*   **Memory Complexity:** $O(N)$ per hit point to store the ray packet.
+*   **Performance:** Performance depends heavily on the number of shadow rays and the complexity of the scene. The coherent traversal approach improves efficiency compared to independent shadow rays.
+*   **Strengths:** Easy integration of global effects; smooth shadow transitions; interactive control over quality/performance trade-off.
+*   **Limitations:** Computationally expensive for high $N$; requires ray tracing infrastructure.
+*   **When to use:** When soft shadows from area lights are required and ray tracing is available.
+*   **When not to use:** When real-time performance is critical and $N$ must be very low, or when hard shadows suffice.
+
+## Background
+This method is part of the broader field of ray tracing for volume rendering and light transport. It was discussed in the context of coherent grid traversal approaches for visualizing particle data, where soft shadows were generated to enhance visual quality [S1]. The approach leverages the inherent flexibility of ray tracing to handle complex lighting effects that are difficult to implement in rasterization systems.
+
+## Sources
+[S1] A Coherent Grid Traversal Approach to Visualizing Particle ..., https://www.sci.utah.edu/~thiago/papers/pcgt_revised.pdf, fetched 2026-10-25

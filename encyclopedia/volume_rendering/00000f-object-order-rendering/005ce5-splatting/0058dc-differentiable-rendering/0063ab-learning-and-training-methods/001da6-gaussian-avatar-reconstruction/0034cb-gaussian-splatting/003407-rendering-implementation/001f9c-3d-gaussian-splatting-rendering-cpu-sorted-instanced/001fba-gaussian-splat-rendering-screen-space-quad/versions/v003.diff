@@ -1,0 +1,261 @@
+--- v002.md
++++ v003.md
+@@ -4,122 +4,127 @@
+ 
+ ## Overview
+-This method renders 3D Gaussian Splatting scenes by projecting 3D Gaussian distributions into 2D screen-space quads, utilizing a pre-sorted order buffer and view-space projection data to handle transparency via alpha blending [S2, unofficial]. Unlike its parent [3D Gaussian Splatting Rendering (CPU-Sorted, Instanced)](2058-3d-gaussian-splatting-rendering-cpu-sorted-instanced.md), which uses instanced drawing with standard alpha blending, this method explicitly constructs screen-space quads in the vertex shader to allow for precise frustum culling and selection highlighting, and it differs from the sibling [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md) by not using tiled memory optimizations or screen-space depth sorting [S2, unofficial].
++This method renders 3D Gaussian Splatting scenes by projecting 3D Gaussian distributions into 2D screen-space quads, utilizing a pre-sorted order buffer and view-space projection data to handle transparency via alpha blending [S2, unofficial]. It is identical in geometry generation to Circle Splat [S1, unofficial]. Unlike its parent [3D Gaussian Splatting Rendering (CPU-Sorted, Instanced)](2058-3d-gaussian-splatting-rendering-cpu-sorted-instanced.md), which relies on instanced drawing with standard alpha blending, this method explicitly constructs screen-space quads in the vertex shader to allow for precise per-pixel Gaussian falloff evaluation and selection highlighting in the fragment shader [S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A pre-sorted order buffer (`_OrderBuffer`) mapping instance IDs to splat indices, and view-space projection data (`_SplatViewData`) containing camera-space positions, axes, and colors for each splat [S2, unofficial].
+-*   **Output:** A framebuffer with composited colors and alpha values, where splats are drawn as screen-space quads [S2, unofficial].
++**Inputs:**
++*   A pre-sorted order buffer (`_OrderBuffer`) mapping instance IDs to splat indices [S2, unofficial].
++*   View-space projection data (`_SplatViewData`) containing axis vectors (`axis1`, `axis2`), center clip position, and compressed color for each splat [S2, unofficial].
++*   Optional selection bits (`_SplatSelectedBits`) for debugging [S2, unofficial].
++*   Uniforms: Model-View matrix (`MV`), Projection matrix (`P`), Screen resolution (`_ScreenParams.xy`), Splat size (`splatSize`), Scale, Grid length, and Frustum culling border parameters [S1, unofficial][S2, unofficial].
++
++**Outputs:**
++*   Framebuffer with composited splat colors and alpha [S2, unofficial].
+ 
+ **Data Structures:**
+-*   `_OrderBuffer`: An array of integers where the index corresponds to the draw call instance ID, and the value is the index into the splat data buffer [S2, unofficial].
+-*   `_SplatViewData`: A structure containing pre-computed view-space data for each splat [S2, unofficial]. Fields include `centerClipPos` (clip-space position for depth and behind-camera checks), `axis1` and `axis2` (2D vectors for projected Gaussian axes), `color` (packed color and opacity, often stored as half-floats), and `pos` (normalized screen-space position for falloff calculation) [S2, unofficial].
++*   `SplatViewData`: Contains `axis1` (vec2), `axis2` (vec2), `centerClipPos` (vec4), and `color` (compressed half-floats) [S2, unofficial].
++*   `_OrderBuffer`: Array of integers mapping draw call instance IDs to splat indices [S2, unofficial].
+ 
+-**Numbered Steps:**
++**Steps:**
+ 
+-1.  **Vertex Shader: Instance Mapping and Validation**
+-    *   Map instance ID to splat index: `instID = _OrderBuffer[instanceID]` [S2, unofficial].
+-    *   Load view data: `view = _SplatViewData[instID]` [S2, unofficial].
+-    *   Check if behind camera: `if view.centerClipPos.w <= 0` [S2, unofficial].
+-    *   If behind, output a NaN vertex to discard the primitive [S2, unofficial].
++1.  **Vertex Shader: Index Mapping and Visibility Check**
++    *   Map the hardware instance ID to the splat index using the order buffer: `instID = _OrderBuffer[instanceID]` [S2, unofficial].
++    *   Load the corresponding `SplatViewData` for `instID` [S2, unofficial].
++    *   Check if the splat center is behind the camera (`centerClipPos.w <= 0`). If true, output a NaN vertex (`asfloat(0x7fc00000)`) to discard the primitive [S2, unofficial].
+ 
+-2.  **Vertex Shader: Quad Position Calculation**
+-    *   Decompress color from `view.color` (half-floats) into `o.col.rgba` [S2, unofficial].
+-    *   Calculate quad position in clip space: `quadPos = float2(instanceID & 1, (instanceID >> 1) & 1) * 2.0 - 1.0` [S2, unofficial].
+-    *   Scale quad position: `quadPos *= 2.0` [S2, unofficial].
+-    *   Calculate screen delta: `deltaScreenPos = (quadPos.x * view.axis1 + quadPos.y * view.axis2) * 2.0 / _ScreenParams.xy` [S2, unofficial].
+-    *   Apply delta: `o.vertex.xy += deltaScreenPos * view.centerClipPos.w` [S2, unofficial].
++2.  **Vertex Shader: Quad Construction**
++    *   Decompress the color from `view.color` (half-floats) into `o.col.rgba` using `f16tof32` [S2, unofficial].
++    *   Determine the quad corner index `idx` (0-3) based on the primitive ID within the triangle strip.
++    *   Calculate the normalized quad position in clip space: `quadPos = float2(idx & 1, (idx >> 1) & 1) * 2.0 - 1.0` [S2, unofficial].
++    *   Scale the quad position: `quadPos *= 2.0` [S2, unofficial].
++    *   Calculate the screen-space delta using the view-space axes and screen resolution: `deltaScreenPos = (quadPos.x * view.axis1 + quadPos.y * view.axis2) * 2.0 / _ScreenParams.xy` [S2, unofficial].
++    *   Apply the delta to the vertex position in clip space, scaled by the clip-space w: `o.vertex.xy += deltaScreenPos * centerClipPos.w` [S2, unofficial].
+ 
+-3.  **Vertex Shader: Selection Highlighting (Optional)**
+-    *   If `_SplatBitsValid` is true, calculate `wordIdx = instID // 32` and `bitIdx = instID & 31` [S2, unofficial].
+-    *   Load selection word: `selVal = _SplatSelectedBits.Load(wordIdx * 4)` [S2, unofficial].
+-    *   If bit set, set `o.col.a = -1` to mark as selected [S2, unofficial].
++3.  **Vertex Shader: Selection Highlight (Optional)**
++    *   If `_SplatBitsValid` is true, calculate the word and bit index: `wordIdx = instID / 32`, `bitIdx = instID & 31` [S2, unofficial].
++    *   Load the selection word and check the bit: `selVal = _SplatSelectedBits.Load(wordIdx * 4)` [S2, unofficial].
++    *   If `(selVal & (1 << bitIdx))` is true, set `o.col.a = -1` to mark the splat as selected [S2, unofficial].
+ 
+-4.  **Fragment Shader: Gaussian Evaluation and Compositing**
+-    *   Calculate falloff: `power = -dot(i.pos, i.pos)` [S2, unofficial].
++4.  **Fragment Shader: Gaussian Evaluation**
++    *   Calculate the Gaussian falloff power using the fragment's local position `i.pos` (relative to quad center): `power = -dot(i.pos, i.pos)` [S2, unofficial].
+     *   Compute alpha: `alpha = exp(power)` [S2, unofficial].
+-    *   If not selected (`i.col.a >= 0`), saturate alpha: `alpha = saturate(alpha * i.col.a)` [S2, unofficial].
+-    *   If selected (`i.col.a < 0`), apply magenta outline: if `alpha > 7.0/255.0`, set `alpha = 1` and `i.col.rgb = selectedColor` if `alpha < 10.0/255.0`; otherwise `alpha = saturate(alpha + 0.3)` and tint `i.col.rgb = lerp(i.col.rgb, selectedColor, 0.5)` [S2, unofficial].
+-    *   Discard if `alpha < 1.0/255.0` [S2, unofficial].
+-    *   Output final color: `res = half4(i.col.rgb * alpha, alpha)` [S2, unofficial].
+-
+-**Formulas:**
+-*   **Screen Delta Calculation:**
+-    $$ \text{deltaScreenPos} = \frac{(\text{quadPos}_x \cdot \text{axis1} + \text{quadPos}_y \cdot \text{axis2}) \cdot 2}{\text{ScreenResolution}} $$
+-    Where `quadPos` is the normalized quad corner (-1 to 1), `axis1` and `axis2` are the projected Gaussian axes in screen space, and `ScreenResolution` is the pixel dimensions [S2, unofficial].
+-
+-*   **Gaussian Alpha:**
+-    $$ \alpha = e^{-\|\mathbf{p}\|^2} $$
+-    Where $\mathbf{p}$ is the normalized screen-space position relative to the splat center [S2, unofficial].
+-
+-**Parameters:**
+-*   `_ScreenParams.xy`: Screen resolution in pixels [S2, unofficial].
+-*   `selectedColor`: Magenta color vector for highlighting selected splats [S2, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Behind Camera:** Splats with clip-space $w \le 0$ must be discarded to prevent rendering artifacts, handled by outputting a NaN vertex [S2, unofficial].
+-*   **Precision:** Half-float decompression must be handled correctly to avoid color banding or incorrect alpha values [S2, unofficial].
+-*   **Selection Logic:** The selection bit logic relies on a 32-bit word array, so instance IDs must be correctly mapped to word and bit indices [S2, unofficial].
++    *   **Selection Logic:**
++        *   If not selected (`i.col.a >= 0`): Saturate alpha: `alpha = saturate(alpha * i.col.a)` [S2, unofficial].
++        *   If selected (`i.col.a < 0`):
++            *   If `alpha > 7.0/255.0`: Set `alpha = 1` and `i.col.rgb = selectedColor` (magenta) if `alpha < 10.0/255.0`; otherwise, set `alpha = saturate(alpha + 0.3)` and tint `i.col.rgb = lerp(i.col.rgb, selectedColor, 0.5)` [S2, unofficial].
++    *   **Discard:** Discard the fragment if `alpha < 1.0/255.0` [S2, unofficial].
++    *   **Output:** Return `res = half4(i.col.rgb * alpha, alpha)` [S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import math
++# Vertex Shader
++def vertex_shader(instance_id, primitive_id):
++    # 1. Map instance ID to splat index
++    splat_index = OrderBuffer[instance_id]
++    
++    # 2. Load view data
++    view = SplatViewData[splat_index]
++    
++    # 3. Check visibility (behind camera)
++    if view.centerClipPos.w <= 0:
++        return NaN_VERTEX
++    
++    # 4. Decompress color
++    color_rgba = f16tof32(view.color)
++    
++    # 5. Calculate quad corner
++    idx = primitive_id % 4
++    quad_pos = float2((idx & 1), ((idx >> 1) & 1)) * 2.0 - 1.0
++    quad_pos *= 2.0
++    
++    # 6. Calculate screen delta
++    delta_screen = (quad_pos.x * view.axis1 + quad_pos.y * view.axis2) * 2.0 / ScreenParams.xy
++    
++    # 7. Apply delta to clip space position
++    final_vertex = view.centerClipPos
++    final_vertex.xy += delta_screen * view.centerClipPos.w
++    
++    # 8. Selection highlight
++    if SplatBitsValid:
++        word_idx = splat_index // 32
++        bit_idx = splat_index & 31
++        sel_val = SplatSelectedBits.Load(word_idx * 4)
++        if (sel_val & (1 << bit_idx)):
++            color_rgba.a = -1.0
++            
++    return VertexOutput(vertex=final_vertex, color=color_rgba)
+ 
+-class Vec2:
+-    def __init__(self, x, y): self.x, self.y = x, y
+-class Vec3:
+-    def __init__(self, r, g, b): self.r, self.g, self.b = r, g, b
+-class Vec4:
+-    def __init__(self, x, y, z, w): self.x, self.y, self.z, self.w = x, y, z, w
+-
+-def dot(v1, v2): return v1.x * v2.x + v1.y * v2.y + v1.z * v2.z
+-def saturate(v): return max(0.0, min(1.0, v))
+-def lerp(a, b, t): return a + (b - a) * t
+-def decompress_half_float(half_val): return half_val  # Conceptual decompression
+-DISCARD_PRIMITIVE = object()
+-DISCARD_FRAGMENT = object()
+-SELECTED_COLOR = Vec3(1.0, 0.0, 1.0)  # Magenta
+-
+-def vertex_shader(instance_id, order_buffer, splat_view_data, screen_params, splat_bits_valid, splat_selected_bits):
+-    inst_id = order_buffer[instance_id]
+-    view = splat_view_data[inst_id]
+-    if view.center_clip_pos.w <= 0:
+-        return DISCARD_PRIMITIVE
+-    o_col = decompress_half_float(view.color)
+-    quad_x = instance_id & 1
+-    quad_y = (instance_id >> 1) & 1
+-    quad_pos = Vec2(quad_x, quad_y) * 2.0 - 1.0
+-    quad_pos = Vec2(quad_pos.x * 2.0, quad_pos.y * 2.0)
+-    delta = Vec2((quad_pos.x * view.axis1.x + quad_pos.y * view.axis2.x) * 2.0 / screen_params.x,
+-                 (quad_pos.x * view.axis1.y + quad_pos.y * view.axis2.y) * 2.0 / screen_params.y)
+-    o_vertex = Vec2(view.center_clip_pos.x + delta.x * view.center_clip_pos.w,
+-                    view.center_clip_pos.y + delta.y * view.center_clip_pos.w)
+-    if splat_bits_valid:
+-        word_idx = inst_id // 32
+-        bit_idx = inst_id & 31
+-        sel_val = splat_selected_bits.Load(word_idx * 4)
+-        if (sel_val & (1 << bit_idx)):
+-            o_col.a = -1.0
+-    return {'vertex': o_vertex, 'color': o_col, 'pos': view.pos}
+-
+-def fragment_shader(input_data):
+-    power = -dot(input_data['pos'], input_data['pos'])
+-    alpha = math.exp(power)
+-    if input_data['color'].a >= 0:
+-        alpha = saturate(alpha * input_data['color'].a)
++# Fragment Shader
++def fragment_shader(input_color, local_pos):
++    # 1. Calculate Gaussian falloff
++    power = -dot(local_pos, local_pos)
++    alpha = exp(power)
++    
++    # 2. Handle selection
++    if input_color.a >= 0:
++        # Not selected
++        alpha = saturate(alpha * input_color.a)
+     else:
++        # Selected
+         if alpha > 7.0 / 255.0:
+             if alpha < 10.0 / 255.0:
+                 alpha = 1.0
+-                rgb = SELECTED_COLOR
++                rgb = SelectedColor # Magenta
+             else:
+                 alpha = saturate(alpha + 0.3)
+-                rgb = lerp(input_data['color'].rgb, SELECTED_COLOR, 0.5)
++                rgb = lerp(input_color.rgb, SelectedColor, 0.5)
+         else:
+-            rgb = input_data['color'].rgb
++            rgb = input_color.rgb
++            
++    # 3. Discard low alpha
+     if alpha < 1.0 / 255.0:
+-        raise DISCARD_FRAGMENT
+-    return Vec4(rgb.r * alpha, rgb.g * alpha, rgb.b * alpha, alpha)
++        discard()
++        
++    # 4. Output
++    return half4(rgb * alpha, alpha)
+ ```
++
++**Parameters:**
++*   `_ScreenParams.xy`: Screen resolution in pixels, used to normalize the screen-space delta of the quad [S2, unofficial].
++*   `splatSize`, `scale`, `gridLength`: Used in alternative geometry generation methods (e.g., Circle Splat) to calculate voxel offset [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   Splats behind the camera (`clip-space w <= 0`) must be discarded to prevent rendering artifacts. This is handled by outputting a NaN vertex in the vertex shader [S2, unofficial].
++*   Precision issues in half-float decompression may affect color accuracy; `f16tof32` should be used for conversion [S2, unofficial].
+ 
+ ## Subtopics
+@@ -131,25 +136,22 @@
+ The Gaussian Splat Fragment Shader evaluates the 2D Gaussian alpha value at each fragment to determine splat coverage and modulates the fragment color accordingly. It composites the new splat over the existing framebuffer color using pre-multiplied alpha blending. It is distinguished from its parent method by handling the per-pixel transparency logic, alpha cutoffs, and framebuffer packing directly in the fragment stage, rather than relying on CPU-side sorting or generic quad rasterization [G].
+ 
++### [Gaussian Splat Shader Property Configuration](3596-gaussian-splat-shader-property-configuration.md)
++Configures the material property block (or uniform buffer) with splat count, spherical harmonic (SH) degree, brightness, scale, antialiasing, transform matrix, and optional skinning/volume lighting data for the GPU render pass. It ensures that the fragment shader receives valid sampled resources even when advanced features like rigging are disabled, preventing compilation or runtime errors.
++
+ ### Debug Splat Point Rendering
+-Debug Splat Point Rendering renders small quads at the center of each splat for debugging, optionally displaying the splat index as color [S2, unofficial]. The vertex shader loads splat data, transforms the center to world and clip space, and applies a small offset in screen space based on `_SplatSize` and `_ScreenParams.xy` [S2, unofficial]. If `_DisplayIndex` is true, the splat index is encoded into the RGB color channels for visualization [S2, unofficial].
+-
+-### Gaussian Splat Shader Property Configuration
+-Gaussian Splat Shader Property Configuration configures the material property block with splat count, SH degree, brightness, scale, antialiasing, transform matrix, and optional skinning/volume lighting data for the GPU render pass [S3, unofficial]. Key parameters include `shDegree` (capped by the asset's `SHBands` property), `brightness` (default 1.0f), and `scaleFactor` (default 1.0f) [S3, unofficial]. A pitfall is that portable shader variants require valid sampled resources even when skinning is disabled; binding null or uninitialized buffers causes shader compilation/runtime errors [S3, unofficial].
++Renders small quads at the center of each splat for debugging, optionally displaying the splat index as color [S2, unofficial]. The vertex shader loads splat data, transforms the center to world and then clip space, and applies a small offset in screen space based on `_SplatSize` and `_ScreenParams.xy` [S2, unofficial]. If `_DisplayIndex` is true, the splat index is encoded into the RGB color channels (`r = frac(index / count * 100)`, `g = frac(index / count * 10)`, `b = index / count`) [S2, unofficial]. Inputs include `float _SplatSize`, `bool _DisplayIndex`, and `int _SplatCount` [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of splats, as each splat is processed once in the vertex shader and potentially once in the fragment shader [S2, unofficial].
+-*   **Memory Complexity:** $O(N)$ for storing the order buffer and view-space projection data [S2, unofficial].
+-*   **Measured Performance:** Performance is highly dependent on the number of splats and the efficiency of the pre-sorted order buffer [S2, unofficial].
+-*   **Scaling:** Scales linearly with the number of splats [S2, unofficial].
+-*   **Strengths:** Simple implementation, efficient use of standard rasterization pipelines, effective frustum culling, and support for selection highlighting [S2, unofficial].
+-*   **Limitations:** Requires CPU-side sorting, which can be a bottleneck for very large scenes [S2, unofficial].
+-*   **When to Use:** Ideal for real-time visualization of 3DGS scenes in desktop and mobile applications where simplicity and compatibility are prioritized [S2, unofficial].
+-*   **When Not to Use:** Not suitable for scenes requiring dynamic, per-frame sorting or complex lighting effects that cannot be captured by the simple Gaussian falloff model [S2, unofficial].
++*   **Time Complexity:** Dominated by the vertex shader per-splat processing and fragment shader evaluation. Sorting is performed on the CPU (inherited from parent method).
++*   **Memory Complexity:** Requires storage for the order buffer, view data, and selection bits.
++*   **Strengths:** Precise control over per-pixel Gaussian falloff and selection highlighting. Efficient use of standard alpha blending.
++*   **Limitations:** Relies on CPU-side sorting. Performance may degrade with very high splat counts due to vertex/fragment shader overhead.
++*   **When to use:** When precise visual feedback (e.g., selection outlines) and exact Gaussian falloff are required.
++*   **When not to use:** When extreme performance is needed and selection/debugging features are not required; consider instanced rendering or tiled rasterization.
+ 
+ ## Background
+-The method originates from the broader field of 3D Gaussian Splatting, introduced by Kerbl et al. in 2023 [S1, S2, unofficial]. The specific implementation of screen-space quad rendering with pre-sorted order buffers was popularized by open-source projects such as UnityGaussianSplatting [S2, unofficial] and svo_renderer [S1, unofficial]. It is widely used in web-based viewers (e.g., WebGL Gaussian Splatting) and desktop applications (e.g., UnitySplats) for real-time visualization of photorealistic 3D reconstructions [S1, S3, unofficial].
++This method is used for Gaussian Splat visualization, projecting voxels as 2D quads [S1, unofficial]. It is implemented in Unity-based Gaussian Splatting tools [S2, unofficial].
+ 
+ ## Sources
+ [S1] mmalesadev/svo_renderer, https://github.com/mmalesadev/svo_renderer, fetched 2026-10-26 (unofficial)
+-[S2] aras-p/UnityGaussianSplatting, https://github.com/aras-p/UnityGaussianSplatting, fetched 2026-10-26 (unofficial)
+-[S3] arloopa/UnitySplats, https://github.com/arloopa/UnitySplats, fetched 2026-10-27 (unofficial)+[S2] aras-p/UnityGaussianSplatting, https://github.com/aras-p/UnityGaussianSplatting, fetched 2026-10-26 (unofficial)

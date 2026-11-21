@@ -1,0 +1,153 @@
+--- v001.md
++++ v002.md
+@@ -28,5 +28,5 @@
+ 
+ **Rendering Process:**
+-For a ray $r$, sample $N$ points $t_i$ along the ray. Calculate the distance between adjacent samples $\delta_i = t_{i+1} - t_i$. Compute accumulated transmittance $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ [S1].
++For a ray $r$, sample $N$ points $t_i$ along the ray [S1]. Calculate the distance between adjacent samples $\delta_i = t_{i+1} - t_i$ [S1]. Compute accumulated transmittance $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ [S1].
+ 
+ The rendered expected depth $\hat{D}(r)$, intensity $I(r)$, and ray-drop probability $\hat{P}(r)$ are computed as:
+@@ -48,7 +48,7 @@
+ $$
+ where:
+-*   $L_{distance}(r) = \sum_{r \in R} || \hat{D}(r) - D(r) ||_1$
+-*   $L_{intensity}(r) = \sum_{r \in R} || I(r) - I_{gt}(r) ||_2^2$ (Note: Source text contains typo $I(r) - I(r)$, interpreted as rendered vs ground truth) [S1]
+-*   $L_{raydrop}(r) = \sum_{r \in R} || \hat{P}(r) - P_{gt}(r) ||_2^2$
++*   $L_{distance}(r) = \sum_{r \in R} || \hat{D}(r) - D(r) ||_1$ [S1]
++*   $L_{intensity}(r) = \sum_{r \in R} || I(r) - I_{gt}(r) ||_2^2$ [S1]
++*   $L_{raydrop}(r) = \sum_{r \in R} || \hat{P}(r) - P_{gt}(r) ||_2^2$ [S1]
+ *   $R$ is the set of training rays [S1].
+ 
+@@ -62,48 +62,59 @@
+ **Pseudocode:**
+ ```python
+-def lidar_nerf_forward(ray_origins, ray_directions, scene_config):
+-    """
+-    Renders a novel LiDAR view given ray origins and directions.
+-    scene_config contains the trained MLPs for density/distance and intensity/ray-drop.
+-    """
+-    # 1. Sample points along the ray
+-    # t_i are sample positions, delta_i is distance between samples
+-    samples, deltas = sample_points_along_ray(ray_origins, ray_directions, num_samples=768) # Coarse
+-    
+-    # 2. Query Radiance Field
+-    # f(x, theta) returns (sigma, d, intensity, ray_drop_prob)
+-    # Note: In implementation, theta is derived from ray_directions
+-    sigma, expected_dist, intensity, ray_drop_prob = query_radiance_field(samples, ray_directions, scene_config)
+-    
+-    # 3. Compute Transmittance
+-    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
+-    transmittance = compute_accumulated_transmittance(sigma, deltas)
+-    
+-    # 4. Volume Rendering
+-    # Weight w_i = T_i * (1 - exp(-sigma_i * delta_i))
+-    weights = transmittance * (1 - torch.exp(-sigma * deltas))
+-    
+-    # Rendered Depth
+-    rendered_depth = torch.sum(weights * samples, dim=-1)
+-    
+-    # Rendered Intensity
+-    rendered_intensity = torch.sum(weights * intensity, dim=-1)
+-    
+-    # Rendered Ray-Drop Probability
+-    rendered_ray_drop = torch.sum(weights * ray_drop_prob, dim=-1)
+-    
+-    return rendered_depth, rendered_intensity, rendered_ray_drop
++import math
+ 
+-def compute_structural_regularization_loss(rendered_depth, ground_truth_depth, mask):
+-    """
+-    Computes L_reg = || G_M(R) - G_M(R_gt) ||_1
+-    Restricts gradient loss to low-texture areas defined by mask.
+-    """
+-    # Apply mask to gradients
+-    grad_rendered = apply_gradient_mask(rendered_depth, mask)
+-    gt_grad = apply_gradient_mask(ground_truth_depth, mask)
+-    
+-    loss = torch.abs(grad_rendered - gt_grad).mean()
+-    return loss
++def compute_accumulated_transmittance(sigma, deltas):
++    """T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)"""
++    T = [1.0]
++    for i in range(1, len(sigma)):
++        T.append(T[-1] * math.exp(-sigma[i-1] * deltas[i-1]))
++    return T
++
++def query_radiance_field(point, direction):
++    """Returns (sigma, expected_distance, intensity, ray_drop_probability) from the trained MLPs."""
++    # Implementation depends on the specific network architecture (e.g., hash grid + MLP or standard MLP)
++    # Returns the four predicted values for the given 3D point and viewing direction.
++    pass
++
++def sample_points_along_ray(origin, direction, num_samples):
++    """Samples points t_i along the ray and returns positions and inter-sample distances."""
++    # Assumes uniform sampling along the ray direction for simplicity
++    t_vals = [i * (1.0 / num_samples) for i in range(1, num_samples + 1)]
++    samples = [(origin[0] + t * direction[0], origin[1] + t * direction[1], origin[2] + t * direction[2]) for t in t_vals]
++    deltas = [t_vals[i] - t_vals[i-1] for i in range(1, len(t_vals))]
++    deltas.insert(0, t_vals[0])
++    return samples, deltas, t_vals
++
++def render_lidar_view(ray_origins, ray_directions, coarse_samples, fine_samples):
++    """Renders depth, intensity, and ray-drop probability for a batch of rays."""
++    rendered_depths, rendered_intensities, rendered_ray_drops = [], [], []
++
++    for origin, direction in zip(ray_origins, ray_directions):
++        # Coarse pass
++        samples, deltas, t_vals = sample_points_along_ray(origin, direction, coarse_samples)
++        sigma, d, intensity, ray_drop = [], [], [], []
++        for x in samples:
++            s, dist, i_val, p_val = query_radiance_field(x, direction)
++            sigma.append(s); d.append(dist); intensity.append(i_val); ray_drop.append(p_val)
++
++        T = compute_accumulated_transmittance(sigma, deltas)
++        weights = [T[i] * (1.0 - math.exp(-sigma[i] * deltas[i])) for i in range(len(sigma))]
++
++        depth = sum(w * t_vals[i] for w, i in zip(weights, range(len(t_vals))))
++        intensity_out = sum(w * intensity[i] for w, i in zip(weights, range(len(intensity))))
++        ray_drop_out = sum(w * ray_drop[i] for w, i in zip(weights, range(len(ray_drop))))
++
++        rendered_depths.append(depth)
++        rendered_intensities.append(intensity_out)
++        rendered_ray_drops.append(ray_drop_out)
++
++    return rendered_depths, rendered_intensities, rendered_ray_drops
++
++def compute_structural_regularization_loss(rendered_depth, ground_truth_depth, low_texture_mask):
++    """L_reg = || G_M(R) - G_M(R_gt) ||_1"""
++    # Apply gradient mask to restrict regularization to low-texture areas
++    grad_rendered = [abs(rendered_depth[i] - rendered_depth[i-1]) if mask else 0.0 for i, mask in enumerate(low_texture_mask)]
++    gt_grad = [abs(ground_truth_depth[i] - ground_truth_depth[i-1]) if mask else 0.0 for i, mask in enumerate(low_texture_mask)]
++    return sum(abs(a - b) for a, b in zip(grad_rendered, gt_grad)) / len(low_texture_mask)
+ ```
+ 
+@@ -111,5 +122,5 @@
+ 
+ ### [LidaRF Network Architecture](12866-lidarf-network-architecture.md)
+-A neural network architecture for LiDAR-based NeRF decomposed into four main parts: proposal sampler, Lidar encoding, density network, and color network.
++A specialized neural network design for LiDAR-based NeRF that jointly learns geometry and 3D point attributes (distance, intensity, ray-drop probability) without explicit 3D reconstruction. It distinguishes itself from standard NeRF variants by integrating a 3D sparse UNet for LiDAR geometry encoding with a multi-resolution hash grid for density prediction, enabling efficient processing of sparse LiDAR point clouds. Choose this architecture when efficient processing of sparse LiDAR data is required for differentiable LiDAR view synthesis. Builds on [LiDAR-NeRF](11289-lidar-nerf.md) by providing the specific network components required for differentiable LiDAR view synthesis.
+ 
+ ## Operating characteristics
+@@ -118,16 +129,16 @@
+ 
+ **Measured Performance:**
+-*   **LiDAR-NeRF (w iNGP):** Implemented based on torch-ngp. Optimized per scene using a single NVIDIA GeForce RTX 3090 GPU. Total of 30k steps. Coarse network samples 768 samples per ray; fine network samples 64 samples per ray. Hash encoding finest resolution: 32768. Patch-wise training with patch size 2x8. [S1]
+-*   **LiDAR-NeRF (w NeRF):** Implemented based on nerf-pytorch. Optimized for 400k iterations with batch size 2048. Coarse network samples 64 times; fine network samples 128 times. Highest frequency of coordinates set to $2^{15}$. [S1]
++*   **LiDAR-NeRF (w iNGP):** Implemented based on torch-ngp [S1]. Optimized per scene using a single NVIDIA GeForce RTX 3090 GPU [S1]. Total of 30k steps [S1]. Coarse network samples 768 samples per ray; fine network samples 64 samples per ray [S1]. Hash encoding finest resolution: 32768 [S1]. Patch-wise training with patch size 2x8 and mask gradients smaller than threshold 0.1 [S1].
++*   **LiDAR-NeRF (w NeRF):** Implemented based on nerf-pytorch [S1]. Optimized for 400k iterations with batch size 2048 [S1]. Coarse network samples 64 times; fine network samples 128 times [S1]. Highest frequency of coordinates set to $2^{15}$ [S1].
+ 
+ **Strengths and Limitations:**
+-*   **Strengths:** Enables end-to-end optimization without explicit 3D reconstruction or game engine usage. Produces realistic LiDAR patterns by accounting for beam penetration through glass and loss due to surface material/normal direction. Outperforms explicit 3D reconstruction and ray-tracing baselines (LiDARsim, PCGen) [S1].
+-*   **Limitations:** Standard geometry regularization techniques (smoothness-loss, TV-loss) are ineffective in large-scale scenes. Standard gradient loss is dominated by rich-texture areas, making it insufficient for guiding geometry in low-texture regions without the proposed structural regularization [S1].
++*   **Strengths:** Enables end-to-end optimization without explicit 3D reconstruction or game engine usage [S1]. Produces realistic LiDAR patterns by accounting for beam penetration through glass and loss due to surface material/normal direction [S1]. Outperforms explicit 3D reconstruction and ray-tracing baselines (LiDARsim, PCGen) [S1].
++*   **Limitations:** Standard geometry regularization techniques (smoothness-loss, TV-loss) are ineffective in large-scale scenes [S1]. Standard gradient loss is dominated by rich-texture areas, making it insufficient for guiding geometry in low-texture regions without structural regularization [S1].
+ 
+ **When to use:**
+-Use for novel LiDAR view synthesis where realistic geometry, intensity, and ray-drop probability are required, particularly in scenarios where explicit reconstruction fails to capture LiDAR-specific artifacts [S1].
++Use for novel LiDAR view synthesis where realistic geometry, intensity, and ray-drop probability are required, particularly where explicit reconstruction fails to capture LiDAR-specific artifacts [S1].
+ 
+ ## Background
+-LiDAR-NeRF was introduced by Tang Tao, Longfei Gao, Guangrun Wang, Yixing Lao, Peng Chen, Hengshuang Zhao, Dayang Hao, Xiaodan Liang, Mathieu Salzmann, and Kaicheng Yu in the paper "LiDAR-NeRF: Novel LiDAR View Synthesis via Neural Radiance Fields" (arXiv:2304.10406v2, July 14, 2023) [S1]. The work addresses the challenge that traditional model-based LiDAR simulators suffer from limited scalability and fail to produce realistic LiDAR patterns, while traditional NeRFs are not directly applicable to point clouds [S1]. The authors also introduced the NeRF-MVL dataset for object-centric LiDAR view synthesis [S1].
++LiDAR-NeRF was introduced by Tang Tao, Longfei Gao, Guangrun Wang, Yixing Lao, Peng Chen, Hengshuang Zhao, Dayang Hao, Xiaodan Liang, Mathieu Salzmann, and Kaicheng Yu in "LiDAR-NeRF: Novel LiDAR View Synthesis via Neural Radiance Fields" (arXiv:2304.10406v2, July 14, 2023) [S1]. The work addresses the challenge that traditional model-based LiDAR simulators suffer from limited scalability and fail to produce realistic LiDAR patterns, while traditional NeRFs are not directly applicable to point clouds [S1]. The authors established an object-centric synthesis approach for traffic objects to validate the framework [S1].
+ 
+ ## Sources

@@ -1,0 +1,274 @@
+--- v001.md
++++ v002.md
+@@ -4,131 +4,164 @@
+ 
+ ## Overview
+-An out-of-core rendering approach based on an octree structure, extending the single-channel method of Crassin et al. to support multiple visible channels by storing pointers and culling metadata in each node [S1, unofficial]. It differs from the [Multi-Channel Page-Table Hierarchy](5196-multi-channel-page-table-hierarchy.md) by using a hierarchical tree traversal for every channel to ensure subtree residency, whereas the page-table approach uses direct indexing [S1, unofficial].
++An out-of-core rendering approach based on an octree structure, extending the single-channel method of Crassin et al. to support multiple visible channels by storing pointers and culling metadata in each node [S1, unofficial]. It solves the problem of managing brick residency and performing address translation for out-of-core volume rendering by using a hierarchical tree structure [S1, unofficial]. Unlike its sibling [Residency Octree](5269-residency-octree.md), which uses a more compact representation, this method enforces that the whole subtree is resident in the cache for high-resolution rendering, leading to a higher memory footprint but comparable performance for single-channel data [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and outputs:**
+-*   **Input:** Multi-channel volume data set; camera parameters; transfer function; cache size limit.
+-*   **Output:** Rendered image.
++**Inputs and Outputs:**
++- Input: Multi-channel volume dataset with $m$ visible channels, brick size $B$, cache size $C$, and ray origin/direction.
++- Output: Rendered image pixels.
+ 
+-**Data structures:**
+-*   **Octree Node:**
+-    *   `m` pointers to bricks (one per visible channel, $m$).
+-    *   Culling metadata: minimum and maximum scalar values for each of the $m$ channels.
+-    *   Child pointers (for non-leaf nodes).
+-*   **Brick:** $32^3$ voxels per channel.
+-*   **Mapping:** One-to-one mapping between octree nodes and bricks [S1, unofficial].
++**Data Structures:**
++- **Octree Node:** Contains $m$ pointers to bricks (one per visible channel) and culling metadata (minimum and maximum scalar values for each of the $m$ channels) [S1, unofficial].
++- **Brick:** A 3D block of voxels. The brick size is approximately equal to the leaf-node size [S1, unofficial].
++- **Mapping:** One-to-one mapping of bricks and octree nodes [S1, unofficial].
+ 
+ **Parameters:**
+-*   Cache size: 4 GB [S1, unofficial].
+-*   Brick size (and approximate leaf-node size): $32^3$ voxels [S1, unofficial].
+-*   Traversal start level: Third subdivision level counting from the root node [S1, unofficial].
++- Cache size: 4 GB [S1, unofficial].
++- Brick size (and approximate leaf-node size): $32^3$ voxels [S1, unofficial].
++- Traversal start level: Third subdivision level counting from the root node [S1, unofficial].
+ 
+-**Algorithm:**
+-1.  **Initialization:** Load the root of the octree. Start traversal at the third subdivision level [S1, unofficial].
+-2.  **Ray Casting Loop:** For each pixel, cast a ray.
+-3.  **Sample Traversal:**
+-    *   Determine the current node in the octree for the ray sample. Access the correct node for a ray sample in each subdivision level directly using a full octree implementation [S1, unofficial].
+-    *   If the traversal does not start at the root for each sample, start from the parent node’s subdivision level in the tree structure of the last node visited for the last sample [S1, unofficial].
+-    *   For each visible channel $c \in \{1, \dots, m\}$:
+-        *   Traverse the subtree for channel $c$ to ensure the whole subtree is resident in the cache [S1, unofficial].
+-        *   Check culling metadata (min/max values) for channel $c$ in the current node. If the ray sample is outside the range, skip the brick [S1, unofficial].
+-        *   If the brick for channel $c$ is missing in the desired resolution, render the next lower resolution instead [S1, unofficial].
+-        *   If the brick is present, load it into the cache if not already resident.
+-        *   Perform volume integration for channel $c$ using the loaded brick data.
+-4.  **Cache Management:** Ensure that the whole subtree is resident in the cache for high-resolution rendering [S1, unofficial]. Bricks containing at least one non-zero value are not considered EMPTY and must be kept in memory even if transparent under current viewing conditions [S1, unofficial].
++**Steps:**
++1. **Initialization:** Start the residency octree and octree traversal at the third subdivision level counting from the root node [S1, unofficial].
++2. **Ray Sample Processing:** For each ray sample:
++   a. Determine the current node in the octree. Access the correct node for a ray sample in each subdivision level directly using a full octree implementation [S1, unofficial].
++   b. **Culling:** Use the stored minimum and maximum scalar values for each channel to cull empty or transparent regions [S1, unofficial]. Note: Bricks containing at least one non-zero value are not considered EMPTY and must be kept in memory, even if transparent under current viewing conditions [S1, unofficial].
++   c. **Residency Enforcement:** To ensure high-resolution rendering, the whole subtree must be resident in the cache. Restart the tree traversal for each visible channel when evaluating a ray sample [S1, unofficial].
++   d. **Fallback:** In case of a missing brick in the desired resolution, render the next lower resolution instead [S1, unofficial].
++   e. **Optimization:** Do not start tree traversal at the root level for each sample. Instead, start from the parent node’s subdivision level in the tree structure of the last node visited for the last sample [S1, unofficial].
++3. **Rendering:** Render the voxel data from the resident bricks using the appropriate transfer function [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def render_octree_out_of_core(volume_data, camera, cache, num_channels):
+-    # Initialize octree traversal state
+-    # Start at third subdivision level from root
+-    current_node = get_node_at_level(root_octree, level=3)
+-    last_visited_node = current_node
++def render_octree_out_of_core(volume_data, ray_origin, ray_direction, cache, brick_size=32, num_channels, start_level=3):
++    """
++    Renders a multi-channel volume using an octree-based out-of-core approach.
+     
+-    for pixel in pixels:
+-        ray = cast_ray(camera, pixel)
+-        sample_pos = ray.origin
++    Args:
++        volume_data: The multi-channel volume dataset.
++        ray_origin: The origin of the ray.
++        ray_direction: The direction of the ray.
++        cache: The out-of-core cache managing brick residency.
++        brick_size: The size of each brick (default 32).
++        num_channels: The number of visible channels (m).
++        start_level: The subdivision level to start traversal (default 3).
+         
+-        # Start traversal from last visited node's parent level
+-        # to avoid restarting from root for every sample
+-        node_level = get_level(last_visited_node)
++    Returns:
++        The rendered pixel value.
++    """
++    # Initialize traversal state
++    current_node = get_root_node(volume_data)
++    current_level = 0
++    
++    # Optimization: Start from the last visited node's parent level if available
++    # [G] Assuming a global state variable `last_visited_node` and `last_visited_level`
++    if last_visited_node is not None:
++        current_node = last_visited_node.parent
++        current_level = last_visited_level
++    else:
++        current_node = get_root_node(volume_data)
++        current_level = 0
++
++    # Traverse to the start level
++    while current_level < start_level:
++        current_node = get_child_node(current_node, ray_origin, ray_direction)
++        current_level += 1
++        if current_node is None:
++            return 0.0 # Out of bounds
++
++    # Process ray samples
++    accumulated_color = 0.0
++    accumulated_opacity = 0.0
++    
++    while accumulated_opacity < 1.0:
++        # Access correct node for current ray sample
++        # [G] Assuming ray advances along direction
++        ray_pos = ray_origin + ray_direction * sample_distance
+         
+-        for channel in range(num_channels):
+-            # Traverse subtree for this channel to ensure residency
+-            node = current_node
+-            while node is not None:
+-                # Check culling metadata for this channel
+-                min_val = node.culling_min[channel]
+-                max_val = node.culling_max[channel]
++        # Ensure we are at the correct node level
++        # [G] In a full octree, we can jump directly to the node at the current level
++        # based on the ray position.
++        current_node = get_node_at_level(volume_data, ray_pos, current_level)
++        
++        if current_node is None:
++            break
++            
++        # Culling check using min/max metadata for each channel
++        cull = False
++        for c in range(num_channels):
++            if not is_in_range(ray_pos, current_node.min_values[c], current_node.max_values[c]):
++                cull = True
++                break
++        
++        if cull:
++            # Skip to next node
++            current_node = get_next_node(current_node, ray_direction)
++            continue
++            
++        # Enforce subtree residency: Restart traversal for each channel
++        # [G] This implies loading all child bricks for the current node into cache
++        # for all m channels.
++        for c in range(num_channels):
++            brick = current_node.bricks[c]
++            if brick is not None:
++                cache.load(brick)
++            else:
++                # Fallback to lower resolution if brick missing
++                # [G] Assuming a mechanism to access lower resolution bricks
++                lower_brick = get_lower_resolution_brick(current_node, c)
++                if lower_brick:
++                    cache.load(lower_brick)
++        
++        # Sample the volume
++        color = 0.0
++        opacity = 0.0
++        for c in range(num_channels):
++            brick = cache.get_brick(current_node.bricks[c])
++            if brick is None:
++                # Fallback already handled, but if still missing, use lower res
++                brick = cache.get_brick(get_lower_resolution_brick(current_node, c))
++            
++            if brick is not None:
++                voxel_value = sample_voxel(brick, ray_pos)
++                channel_color = apply_transfer_function(voxel_value, c)
++                channel_opacity = compute_opacity(voxel_value, c)
+                 
+-                if not is_in_range(sample_pos, min_val, max_val):
+-                    # Skip this branch for this channel
+-                    break
+-                
+-                # Check if brick is resident
+-                brick = cache.get_brick(node, channel)
+-                if brick is None:
+-                    # Load brick or use lower resolution if missing
+-                    if node.has_children:
+-                        node = get_child(node, ray.direction)
+-                        continue
+-                    else:
+-                        # Leaf node, brick missing in desired resolution
+-                        # Render next lower resolution
+-                        brick = load_lower_resolution_brick(node, channel)
+-                
+-                # Integrate sample
+-                color = integrate_sample(brick, sample_pos, channel)
+-                accumulate_color(pixel, color)
+-                
+-                # Move to next sample along ray
+-                sample_pos = ray.step(sample_pos)
+-                
+-                # Update last visited node for optimization
+-                last_visited_node = node
+-                node_level = get_level(node)
++                # Front-to-back compositing
++                alpha = channel_opacity * 1.0 # Simplified
++                color += channel_color * alpha * (1.0 - accumulated_opacity)
++                accumulated_opacity += alpha * (1.0 - accumulated_opacity)
++        
++        accumulated_color += color
++        accumulated_opacity += opacity # Simplified accumulation
++        
++        # Advance ray
++        ray_origin = ray_origin + ray_direction * brick_size / 2.0 # Step size approx brick size
++        
++        # Update last visited node for optimization
++        last_visited_node = current_node
++        last_visited_level = current_level
++        
++        # Move to next node
++        current_node = get_next_node(current_node, ray_direction)
++        
++    return accumulated_color
+ ```
+-
+-**Edge cases and pitfalls:**
+-*   **Multiple channels:** The octree has to be traversed for each channel to ensure that all subtrees are resident in the cache, leading to worse performance compared to single-channel rendering [S1, unofficial].
+-*   **Memory footprint:** Whole subtrees have to be resident in the cache for rendering the volume in high resolution, resulting in a higher memory footprint in terms of the number of bricks in the working set compared to the residency octree [S1, unofficial].
+-*   **Empty space:** Bricks containing at least one non-zero value are not considered EMPTY and thus have to be kept in memory even though they might be completely transparent under the current viewing conditions [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### [Multi-Channel Page-Table Hierarchy](5196-multi-channel-page-table-hierarchy.md)
+-A data structure that virtualizes a bricked multi-volume hierarchy by implementing a paged 3D address space. It uses one page-table hierarchy per channel to keep track of brick locations in a shared brick cache, allowing direct access to any brick without traversing a tree structure. Choose this when performance on multi-channel data is critical and cache locality can be managed via page tables rather than tree traversal.
+-
+ ## Operating characteristics
+-**Time and memory complexity:**
+-*   **Time:** $O(N \cdot m)$ where $N$ is the number of ray samples and $m$ is the number of visible channels, due to traversing the tree for each channel [S1, unofficial].
+-*   **Memory:** Higher memory footprint than the residency octree because whole subtrees must be resident in the cache [S1, unofficial].
+-
+-**Measured performance:**
+-*   Hardware: Not given in the sources.
+-*   Resolution: Varies by dataset (see below).
+-*   Scene: See Table 1.
+-*   Scaling: Performance degrades with increasing number of channels due to repeated tree traversal [S1, unofficial].
+-
+-**Strengths and limitations:**
+-*   **Strengths:** Comparable performance to the author's method for single-channel rendering due to similar empty-space skipping strategy [S1, unofficial].
+-*   **Limitations:** Performs worse than the author's method for multiple channels due to the need to restart tree traversal for each channel [S1, unofficial].
+-
+-**When to use it and when not:**
+-*   Use for single-channel or low-channel count out-of-core rendering where simplicity of implementation is preferred.
+-*   Do not use for high-channel count biomedical data sets where performance is critical, as it is significantly slower than the page-table hierarchy approach [S1, unofficial].
+-
+-**Performance Data (ms/frame):**
+-| Dataset | Channels | Octree |
+-| :--- | :--- | :--- |
+-| Aneurism | 1 | 4.8 |
+-| Bonsai | 1 | 4.5 |
+-| Kingsnake | 1 | 11.6 |
+-| CyCIF Small | 16 | 122.8 |
+-| CyCIF Medium | 15 | 155.1 |
+-| CyCIF Large | 4 | 123.5 |
++- **Time Complexity:** Depends on the tree traversal depth and the number of visible channels. For multiple channels, the octree has to be traversed for each channel to ensure that all subtrees are resident in the cache, leading to worse performance compared to single-channel rendering [S1, unofficial].
++- **Memory Complexity:** Higher memory footprint in terms of the number of bricks in the working set compared to the residency octree because whole subtrees have to be resident in the cache for rendering the volume in high resolution [S1, unofficial].
++- **Measured Performance:**
++  - CyCIF Small (16 channels): 122.8 ms/frame [S1, unofficial].
++  - CyCIF Medium (15 channels): 155.1 ms/frame [S1, unofficial].
++  - CyCIF Large (4 channels): 123.5 ms/frame [S1, unofficial].
++  - Kingsnake (1 channel): 11.6 ms/frame [S1, unofficial].
++  - Bonsai (1 channel): 4.5 ms/frame [S1, unofficial].
++  - Aneurism (1 channel): 4.8 ms/frame [S1, unofficial].
++- **Strengths:** Comparable performance to other methods for single-channel data due to similar empty-space skipping strategy [S1, unofficial].
++- **Limitations:** Performs worse than the author's method for multiple channels due to the need to restart tree traversal for each channel [S1, unofficial]. Bricks with non-zero values are not considered EMPTY and must be kept in memory even if transparent, which can lead to unnecessary memory usage [S1, unofficial].
+ 
+ ## Background
+-Origin: Based on the out-of-core renderer presented by Crassin et al. [CNLE09] and similar to the octree-based method discussed by Brix et al. [BPH14] [S1, unofficial]. Extended by the author to support multiple visible channels [S1, unofficial].
++The method is based on the out-of-core renderer presented by Crassin et al. [CNLE09] and is similar to the octree-based method discussed by Brix et al. [BPH14] [S1, unofficial]. It was extended by the author to support multiple visible channels [S1, unofficial].
+ 
+ ## Sources

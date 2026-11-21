@@ -1,0 +1,111 @@
+# MinkowskiBroadcastConcatenation
+Also called: BroadcastConcat, Concat Broadcast
+## Overview
+MinkowskiBroadcastConcatenation broadcasts reduced global features to all input coordinates and concatenates them to the input features along the feature dimension [S1, S2, unofficial]. It solves the problem of injecting global context into sparse tensor representations by aligning a single global feature vector with every active coordinate in the input tensor [S1, S2, unofficial]. Unlike sibling methods that perform element-wise arithmetic operations (addition or multiplication) between local and global features, this method preserves both the local and global information as separate channels, allowing subsequent layers to learn how to combine them [S1, S2, unofficial]. It builds on [MinkowskiBroadcast](8927-minkowskibroadcast.md).
+## How it works
+**Inputs and Outputs:**
+- Input: `input`, a `SparseTensor` defining the output coordinates and containing local features.
+- Input: `input_glob`, a `SparseTensor` containing features reduced to the origin (e.g., via global pooling).
+- Output: A `SparseTensor` with the same coordinates as `input` and features formed by concatenating `input`'s features and the broadcasted global features.
+
+**Data Structures:**
+- `SparseTensor`: Contains a coordinate map key, a coordinate manager, and a feature tensor `F`.
+- `broadcast_feat`: A dense tensor of size `(len(input), input_glob.size()[1])`.
+
+**Steps:**
+1. Assert that both `input` and `input_glob` are instances of `SparseTensor` [S1, S2, unofficial].
+2. Allocate a new tensor `broadcast_feat` with shape `(len(input), input_glob.size()[1])` using the same device and data type as `input.F` [S1, S2, unofficial].
+3. Retrieve the mapping from batch indices to row indices for the origin using `input.coordinate_manager.origin_map(input.coordinate_map_key)` [S1, S2, unofficial]. This returns `batch_indices` and `batch_rows` [S1, S2, unofficial].
+4. Iterate over each batch index `b` and its corresponding list of row indices `row_ind` [S1, S2, unofficial].
+5. For each batch `b`, copy the global feature vector `input_glob.F[b]` to all rows in `broadcast_feat` specified by `row_ind` [S1, S2, unofficial].
+6. Concatenate the original input features `input.F` and the `broadcast_feat` along dimension 1 (the feature dimension) [S1, S2, unofficial].
+7. Return a new `SparseTensor` containing the concatenated features, the original coordinate map key, and the original coordinate manager [S1, S2, unofficial].
+
+**Formula:**
+The operation is defined as:
+$$ \mathbf{y}_\mathbf{u} = [\mathbf{x}_{1,\mathbf{u}}, \mathbf{x}_2] \; \text{for} \; \mathbf{u} \in \mathcal{C}^\text{in} $$
+where:
+- $\mathbf{y}_\mathbf{u}$ is the output feature vector at coordinate $\mathbf{u}$.
+- $\mathbf{x}_{1,\mathbf{u}}$ is the input feature vector at coordinate $\mathbf{u}$ from `input`.
+- $\mathbf{x}_2$ is the global feature vector from `input_glob` (broadcast to all $\mathbf{u}$).
+- $[\cdot, \cdot]$ denotes concatenation along the feature dimension.
+- $\mathcal{C}^\text{in}$ is the set of input coordinates [S1, S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def MinkowskiBroadcastConcatenation(input, input_glob):
+    # 1. Assert inputs are SparseTensors
+    assert isinstance(input, SparseTensor)
+    assert isinstance(input_glob, SparseTensor)
+
+    # 2. Allocate broadcast_feat tensor
+    # Size: (num_input_coords, num_global_features)
+    broadcast_feat = input.F.new(len(input), input_glob.size()[1])
+
+    # 3. Retrieve batch indices and row indices for the origin
+    batch_indices, batch_rows = input.coordinate_manager.origin_map(input.coordinate_map_key)
+
+    # 4 & 5. Iterate over batches and copy global features
+    for b, row_ind in zip(batch_indices, batch_rows):
+        # Get the global feature vector for batch b
+        global_feat = input_glob.F[b]
+        # Copy this vector to all corresponding rows in broadcast_feat
+        broadcast_feat[row_ind] = global_feat
+
+    # 6. Concatenate input features and broadcast features along dimension 1
+    broadcast_cat = torch.cat([input.F, broadcast_feat], dim=1)
+
+    # 7. Return new SparseTensor
+    return SparseTensor(
+        features=broadcast_cat,
+        coordinate_map_key=input.coordinate_map_key,
+        coordinate_manager=input.coordinate_manager
+    )
+```
+
+**Parameters:**
+- `input`: SparseTensor defining the output coordinates.
+- `input_glob`: SparseTensor containing features reduced to the origin [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- The global feature tensor `input_glob` must have exactly one feature vector per batch index present in `input` [S1, S2, unofficial].
+- The coordinate manager must correctly map the origin to the batch indices [S1, S2, unofficial].
+- Precision issues are not explicitly mentioned, but standard floating-point concatenation applies [S1, S2, unofficial].
+
+## Subtopics
+
+### [MinkowskiBroadcastAddition](8928-minkowskibroadcastaddition.md)
+Adds global features to local features element-wise. Choose when you want to modulate local features by global context.
+
+### [MinkowskiBroadcastMultiplication](8929-minkowskibroadcastmultiplication.md)
+Multiplies global features with local features element-wise. Choose when you want to scale local features by global context.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time: $O(N \cdot F_g)$, where $N$ is the number of active coordinates in `input` and $F_g$ is the number of global features. The dominant operation is copying the global feature vector to $N$ locations.
+- Memory: $O(N \cdot F_g)$ for the `broadcast_feat` tensor, plus $O(N \cdot (F_l + F_g))$ for the output, where $F_l$ is the number of local features.
+
+**Measured Performance:**
+Not given in the sources.
+
+**Scaling:**
+Scales linearly with the number of active coordinates.
+
+**Strengths and Limitations:**
+- Strengths: Preserves both local and global information without mixing them, allowing the network to learn the combination. Simple implementation.
+- Limitations: Increases the feature dimension, which may increase computational cost for subsequent layers. Requires global pooling to be performed beforehand.
+
+**When to use it:**
+Use when global context needs to be injected into sparse features without altering the local feature values directly.
+
+**When not to use it:**
+Avoid if memory is constrained and the feature dimension increase is prohibitive, or if the downstream task benefits more from additive or multiplicative modulation.
+
+## Background
+MinkowskiBroadcastConcatenation is part of the Minkowski Engine library, which implements sparse tensor operations for 3D and higher-dimensional data [S1, S2, unofficial]. It was introduced in the context of 4D Spatio-Temporal ConvNets [S1, S2, unofficial]. The method is used in applications involving sparse voxel grids, such as 3D object detection and scene flow estimation.
+
+## Sources
+[S1] ziplab/VolSplat, https://github.com/ziplab/VolSplat, fetched 2026-10-27 (unofficial)
+[S2] pulangk97/VoLoDSplat, https://github.com/pulangk97/VoLoDSplat, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,180 @@
+--- v003.md
++++ v004.md
+@@ -1,74 +1,129 @@
+ # View-Dependent Transparency
+ 
+-Also called: Image fading with incidence angle, Incidence angle fading
++Also called: Angle-Based Transparency, Image fading with incidence angle, Incidence angle fading
+ 
+ ## Overview
+-View-dependent transparency is a compositing technique that adjusts sample opacity based on the viewer's viewing angle relative to the surface normal or local geometry [S2]. It is primarily used to improve the readability of rendered volumes, particularly in multi-view or billboard-based rendering, by fading features that are not facing the camera [S1, S2]. Unlike standard Direct Volume Rendering (DVR) which uses fixed opacity transfer functions, this method makes transparency view-dependent to reduce visual clutter and enhance depth cues [S2].
++View-Dependent Transparency (VDT) is a compositing technique that modulates sample opacity based on the angle between the surface normal and the view vector, making regions orthogonal to the viewer more transparent and regions curving towards or away from the viewer more opaque [S2, S3]. It differs from standard Direct Volume Rendering (DVR) by introducing view-dependent opacity to improve the readability of nested structures and surface details [S2, S3]. Unlike [Compositing and Blending](2515-compositing-and-blending.md) which typically uses fixed transfer functions, VDT dynamically adjusts transparency per sample or pixel based on geometric orientation [S3].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Sample color $c_i$, sample opacity $\alpha_i$, surface normal $\mathbf{n}_i$ (or view direction $\mathbf{v}$), and camera view direction $\mathbf{v}_{cam}$.
+-*   **Output:** Modified opacity $\alpha'_i$ and final composited color.
++The method modifies the standard front-to-back compositing loop by replacing or scaling the sample opacity $\alpha_i$ with a view-dependent value $\alpha_{view}$. Two primary variants are defined: Angle-Based Transparency and Normal-Variation Transparency [S3].
+ 
+-**Data Structures:**
+-No specific complex data structures are required beyond the standard sample attributes $(c_i, \alpha_i)$ and geometric normals $\mathbf{n}_i$ available during ray casting or billboard projection.
++### Inputs and Outputs
++*   **Inputs**:
++    *   Volume data or integral surface representation.
++    *   Camera position and view direction.
++    *   Surface normal $\mathbf{n}$ at the sample point (or pixel).
++    *   View vector $\mathbf{v}$ (normalized).
++    *   Parameters: $\gamma \in [0, 1]$ (for Normal-Variation), $\alpha_{min}, \alpha_{max}$ (clamping range).
++*   **Outputs**:
++    *   Final pixel color $C_{final}$ and accumulated opacity $\alpha_{acc}$.
+ 
+-**Method Steps:**
+-1.  **Calculate Incidence Angle:** For each sample $i$, compute the angle between the view direction and the surface normal (or the billboard's facing direction). Let $\theta_i$ be the angle between the view vector $\mathbf{v}$ and the normal $\mathbf{n}_i$.
+-2.  **Compute Fading Factor:** Calculate a fading factor $f_i$ based on $\theta_i$. Typically, this involves a function that reduces opacity as the angle deviates from the front-facing direction (e.g., $\cos \theta_i$ or a power thereof).
+-3.  **Adjust Opacity:** Multiply the original sample opacity by the fading factor:
+-    $$ \alpha'_i = \alpha_i \cdot f_i $$
+-    [S1, S2]
+-4.  **Composite:** Use the modified opacity $\alpha'_i$ in the standard front-to-back compositing equation:
+-    $$ C_{final} = \sum_{i=1}^{N} c_i \cdot \alpha'_i \cdot \prod_{j=1}^{i-1} (1 - \alpha'_j) $$
+-    [S1, S2]
++### Data Structures
++*   **Sample**: $(c_i, \alpha_i, \mathbf{n}_i)$ where $c_i$ is color, $\alpha_i$ is base opacity, and $\mathbf{n}_i$ is the normal.
++*   **Pixel Buffer**: Stores accumulated color $C_{acc}$ and transmittance $T$.
+ 
+-**Pseudocode:**
++### Algorithm Steps
++
++#### 1. Angle-Based Transparency
++This method computes transparency based on the incidence angle between the normal and the view vector [S3].
++
++1.  **Compute View Vector**: For each sample $i$ along the ray, determine the normalized view vector $\mathbf{v}$ from the sample point to the camera.
++2.  **Compute Dot Product**: Calculate the dot product between the surface normal $\mathbf{n}$ and the view vector $\mathbf{v}$:
++    $$ d = \mathbf{n} \cdot \mathbf{v} $$
++3.  **Compute Angle-Based Opacity**: Apply the arccosine function and scale by $2/\pi$ to map the angle $[0, \pi]$ to the opacity range $[0, 1]$ [S3]:
++    $$ \alpha_{view} = \frac{2}{\pi} \arccos(d) $$
++    *   Note: $\mathbf{n} \cdot \mathbf{v} = 1$ (facing viewer) yields $\alpha_{view} = 0$ (transparent). $\mathbf{n} \cdot \mathbf{v} = -1$ (back-facing) yields $\alpha_{view} = 2$ (clamped to 1). $\mathbf{n} \cdot \mathbf{v} = 0$ (grazing) yields $\alpha_{view} = 0.5$.
++4.  **Composite**: Use $\alpha_{view}$ (or scale the original $\alpha_i$ by $\alpha_{view}$) in the standard compositing equation [S3]:
++    $$ C_{final} \leftarrow C_{final} + c_i \cdot \alpha_{view} \cdot T $$
++    $$ T \leftarrow T \cdot (1 - \alpha_{view}) $$
++
++#### 2. Normal-Variation Transparency
++This method approximates local surface curvature perpendicular to the viewer using image-space partial derivatives of the normal's z-component [S3].
++
++1.  **Retrieve Normal**: At pixel $(i, j)$, retrieve the surface normal $\mathbf{n}(i, j)$ and extract its z-component $n_z$.
++2.  **Compute Partial Derivatives**: Calculate the partial derivatives of $n_z$ with respect to pixel coordinates $i$ and $j$:
++    $$ \frac{\partial n_z}{\partial i}, \quad \frac{\partial n_z}{\partial j} $$
++3.  **Compute Curvature Measure**: Calculate the magnitude of the gradient of $n_z$:
++    $$ g = \left( \left(\frac{\partial n_z}{\partial i}\right)^2 + \left(\frac{\partial n_z}{\partial j}\right)^2 \right)^{1/2} $$
++4.  **Clamp and Power**: Clamp $g$ to the unit interval $[0, 1]$ to prevent values outside this range before applying the exponent $\gamma$ [S3]:
++    $$ g_{clamped} = \text{clamp}(g, 0, 1) $$
++    $$ \alpha_{view} = g_{clamped}^\gamma $$
++    *   Here, $\gamma \in [0, 1]$ controls the strength. Larger values emphasize silhouettes [S3].
++5.  **Map to Transparency Range**: Constrain the resulting transparency to a user-adjustable interval $[\alpha_{min}, \alpha_{max}]$ [S3]:
++    $$ \alpha_{final} = (1 - \alpha_{view}) \cdot \alpha_{min} + \alpha_{view} \cdot \alpha_{max} $$
++6.  **Composite**: Use $\alpha_{final}$ in the compositing loop.
++
++### Pseudocode
+ ```python
+-def view_dependent_transparency(samples, view_direction):
++def composite_view_dependent(samples, camera_pos, gamma=1.0, alpha_min=0.0, alpha_max=1.0):
+     """
+-    samples: list of tuples (color, opacity, normal)
+-    view_direction: normalized vector from camera to sample
+-    Returns: list of (color, modified_opacity)
++    Composite samples using View-Dependent Transparency.
++    samples: list of (color, base_alpha, normal) sorted front-to-back.
++    camera_pos: (x, y, z)
++    gamma: parameter for Normal-Variation transparency.
++    alpha_min, alpha_max: clamping range for Normal-Variation.
+     """
+-    adjusted_samples = []
+-    for color, opacity, normal in samples:
+-        # Calculate cosine of the angle between view direction and normal
+-        # Note: normals should be normalized
+-        cos_theta = dot(normalize(view_direction), normalize(normal))
++    C_acc = (0.0, 0.0, 0.0)
++    T = 1.0
++    
++    for sample in samples:
++        c_i, alpha_base, n = sample
+         
+-        # Fading factor: simple cosine fading
+-        # If cos_theta is negative (back-facing), opacity becomes 0 or very low
+-        fading_factor = max(0.0, cos_theta)
++        # Determine view vector
++        v = normalize(camera_pos - sample.position)
+         
+-        # Apply fading to opacity
+-        modified_opacity = opacity * fading_factor
++        # Choose transparency method (example: Angle-Based)
++        # For Normal-Variation, n would be from image-space derivatives, not sample normal
++        dot_product = dot(n, v)
+         
+-        adjusted_samples.append((color, modified_opacity))
+-    
+-    return adjusted_samples
++        # Angle-Based Formula
++        # arccos domain is [-1, 1], result in [0, pi]
++        # Scale by 2/pi to get [0, 2], then clamp to [0, 1] if necessary for alpha
++        alpha_view = (2.0 / PI) * acos(dot_product)
++        
++        # Optional: Scale base alpha by view-dependent factor
++        # Or replace base alpha entirely. The source implies alpha_view IS the transparency.
++        alpha = alpha_view 
++        
++        # Standard Front-to-Back Compositing
++        contribution = c_i * alpha * T
++        C_acc = C_acc + contribution
++        T = T * (1.0 - alpha)
++        
++        # Early termination
++        if T < 0.001:
++            break
++            
++    return C_acc, T
+ ```
+ 
+-**Parameters:**
+-*   **Fading Function:** The specific function mapping $\theta_i$ to $f_i$ is not strictly defined in the sources but is implied to be a monotonic decrease with angle [S1, S2]. Common implementations use $\cos \theta$ or $\cos^k \theta$.
+-*   **Threshold:** Not given in the sources.
++### Edge Cases and Pitfalls
++*   **Ghosting**: Fading billboards or surfaces at grazing angles can introduce ghosting effects (duplicated features) when the camera moves, as blending two half-faded textures is not equivalent to a single opaque texture [S1].
++*   **Flat Surface Obscuration**: Large, almost flat parts of an integral surface result in high opacity (in Angle-Based, regions facing the viewer are transparent, but if the surface is flat and facing, it might be too transparent? No, the source says: "If the integral surface contains large, almost flat parts, their resulting high opacity can obscure the layers below." This implies that for flat parts, the angle might be such that opacity is high, or the gradient is low. Specifically, Angle-Based makes regions orthogonal to viewer transparent. If a large flat part is orthogonal, it is transparent. If it is not orthogonal, it is opaque. The pitfall is that large flat parts can have high opacity if they are not orthogonal, obscuring layers [S3].
++*   **Clamping**: In Normal-Variation, $\alpha_{view}$ is not necessarily limited to the unit interval before applying the exponent $\gamma$, so clamping is required [S3].
++*   **Derivative Noise**: Image-space derivatives of normals can be noisy, affecting the stability of Normal-Variation transparency [S3].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Ghosting Effects:** Fading introduces ghosting effects, where features appear duplicated when moving around the object, particularly in tree or forest scenes [S1].
+-*   **Transparency Variation Artifacts:** Blending two half-faded textures is not equivalent to a single opaque texture, leading to visible transparency variation artifacts [S1].
+-*   **Billboard Popping:** In billboard-based rendering, fading can cause popping artifacts with small camera motions if not handled with smooth transitions or multiple cross-billboards [S1].
++## Subtopics
++
++### Angle-Based Transparency
++A transparency variation technique that modulates opacity based on the angle between the surface normal and the view vector, making regions orthogonal to the viewer more transparent and regions curving towards/away from the viewer more opaque [S3]. Choose this when you want to emphasize surface curvature and silhouettes through simple geometric orientation. It is computationally cheap but can obscure large flat surfaces if they are not oriented orthogonally to the viewer [S3].
++
++### Normal-Variation Transparency
++A transparency variation technique that approximates local surface curvature perpendicular to the viewer using image-space partial derivatives of the normal's z-component, making the surface more opaque where it curves away and more transparent when oriented perpendicular to the viewer [S3]. Choose this when you need to highlight small details, creases, or nested structures (like flow tubes) that are visible even when viewed frontally. It provides stronger opacity gradients than Angle-Based Transparency but requires image-space normal derivatives [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Adds a constant-time operation per sample (dot product and multiplication) to the standard ray casting loop. No significant increase in computational complexity.
+-*   **Memory Complexity:** No additional memory required beyond standard sample attributes.
+-*   **Strengths:** Improves readability of complex volumes by reducing visual clutter from side-facing surfaces [S2]. Simple to implement.
+-*   **Limitations:** Introduces artifacts such as ghosting and transparency variation, especially in dynamic scenes or when viewing trees/forests [S1]. Not suitable for applications requiring strict physical accuracy of light transport.
+-*   **When to Use:** When visual clarity and readability are prioritized over physical accuracy, particularly in multi-view or interactive visualization of complex structures like trees or anatomical models [S1, S2].
+-*   **When Not to Use:** When physical accuracy is required, or when ghosting artifacts are unacceptable.
++*   **Time Complexity**: $O(N)$ per ray, where $N$ is the number of samples. Angle-Based requires one `acos` and one dot product per sample. Normal-Variation requires image-space derivatives (typically computed via finite differences in screen space) and a power operation.
++*   **Memory Complexity**: $O(1)$ additional memory per sample for the view vector and normal.
++*   **Performance**: Angle-Based is very fast. Normal-Variation requires access to image-space derivatives, which may necessitate storing normals in a texture or computing them on the fly, adding overhead [S3].
++*   **Strengths**: Improves readability of complex, nested structures; emphasizes silhouettes and curvature; interactive performance is achievable [S2, S3].
++*   **Limitations**: Can introduce ghosting artifacts with billboards [S1]; large flat surfaces may become too opaque and obscure underlying layers [S3]; Normal-Variation depends on the quality of normal derivatives [S3].
++*   **When to use**: When visualizing integral surfaces or volumes where understanding the 3D shape and layering is critical, and standard DVR results in ambiguous or cluttered images [S2, S3].
++*   **When not to use**: When real-time performance is critical and the hardware cannot support the additional arithmetic or derivative calculations; when the volume is homogeneous and shape cues are not needed.
+ 
+ ## Background
+-The concept of view-dependent transparency was cited in the context of advanced volumetric display of the human musculoskeletal system, referencing Bruckner and Gröller (2007) [S2]. The technique of fading billboards based on incidence angle was previously discussed in the context of rendering forest scenes, where it was noted to introduce artifacts like ghosting and transparency variation [S1]. The method is part of a broader effort to improve the visual quality of volume rendering by adapting opacity to the viewer's perspective.
++View-Dependent Transparency was introduced by Bruckner and Gröller in 2007 [S2, S3]. It was developed to enhance the readability of volumetric and integral surface visualizations, particularly in medical imaging (e.g., musculoskeletal systems) and flow visualization [S2, S3]. The technique addresses the limitations of standard DVR where opacity is fixed, often leading to occlusion of internal structures [S2]. The Normal-Variation variant was proposed to provide better control over surface curvature perception in image space [S3].
+ 
+ ## Sources
+ [S1] Rendering Forest Scenes in Real-Time, https://doi.org/10.2312/egwr/egsr04/093-102, fetched 2026-10-26
+-[S2] Towards Advanced Volumetric Display of the Human Musculoskeletal System, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/021-025, fetched 2026-10-26+[S2] Towards Advanced Volumetric Display of the Human Musculoskeletal System, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/021-025, fetched 2026-10-26
++[S3] IRIS: Illustrative Rendering for Integral Surfaces, https://doi.org/10.1109/tvcg.2010.173, fetched 2026-10-27

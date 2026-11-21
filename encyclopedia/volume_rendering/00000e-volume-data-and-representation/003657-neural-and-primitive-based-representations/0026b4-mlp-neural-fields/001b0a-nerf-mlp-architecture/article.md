@@ -1,0 +1,205 @@
+# NeRF MLP Architecture
+
+Also called: NeRF MLP, Neural Radiance Field MLP, standard NeRF network, NeRF Network Architecture
+
+## Overview
+The NeRF MLP Architecture is a multi-layer perceptron (MLP) that maps 3D spatial coordinates and viewing directions to volume density and view-dependent emitted color, serving as the core implicit representation for Neural Radiance Fields [S1, S2, S3]. It solves the problem of representing complex 3D scenes with continuous functions that support differentiable volume rendering from sparse input views [S2]. It sets itself apart from siblings like [Scene Representation Networks (SRN)](1150-scene-representation-networks-srn.md) by using a fully-connected deep network without convolutional layers, and from [SIREN Neural Field](1250-siren-neural-field.md) by relying on Fourier feature positional encoding with ReLU activations rather than periodic sine activations [S2][S19, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+The network $F_\Theta$ takes a 5D input consisting of a 3D spatial location $\mathbf{x} = (x, y, z)$ and a 3D Cartesian unit vector $\mathbf{d}$ representing the viewing direction (derived from spherical coordinates $\theta, \phi$) [S2]. It outputs a scalar volume density $\sigma$ and a 3D RGB color vector $\mathbf{c} = (r, g, b)$ [S2][S11, unofficial].
+
+**Data Structures and Layout:**
+The architecture consists of two main branches: a position-only branch for density and an intermediate feature vector, and a view-dependent branch for color [S2][S12, unofficial].
+
+1.  **Positional Encoding:** Inputs are expanded using Fourier features (positional encoding) [S2][S17, unofficial]. For a coordinate $x$, the encoding $\gamma(x)$ is:
+    $$ \gamma(x) = [\sin(2^0 \pi x), \cos(2^0 \pi x), \dots, \sin(2^{L-1} \pi x), \cos(2^{L-1} \pi x)] $$
+    [S3][S17, unofficial]. The standard configuration uses $L_{pos}=10$ for position (expanding 3D to 63D) and $L_{dir}=4$ or $6$ for direction (expanding 3D to 27D or 39D) [S11, S17, unofficial].
+2.  **Position MLP (Density Backbone):**
+    *   **Layers:** 8 fully-connected layers with 256 hidden units each [S2][S12, unofficial].
+    *   **Activation:** ReLU for all layers except the final output heads [S2][S12, unofficial].
+    *   **Skip Connections:** The original encoded position input $\gamma(\mathbf{x})$ is concatenated to the output of the 5th layer (index 4, 0-based) [S2][S12, unofficial].
+    *   **Output Heads:** The final layer of the position MLP (layer 8) outputs two vectors:
+        *   Density $\sigma$: A single scalar.
+        *   Feature Vector $\mathbf{e}$: A 256-dimensional vector.
+3.  **Color Head (View-Dependent Branch):**
+    *   **Input:** Concatenation of the feature vector $\mathbf{e}$ and the encoded viewing direction $\gamma(\mathbf{d})$ [S2].
+    *   **Layers:** 1 fully-connected layer with 128 hidden units [S2][S12, unofficial].
+    *   **Activation:** ReLU for the hidden layer [S2].
+    *   **Output:** A final linear layer with Sigmoid activation outputs the RGB color $\mathbf{c}$ [S2][S12, unofficial].
+
+**Numbered Steps:**
+1.  Normalize spatial coordinates $\mathbf{x}$ and viewing direction $\mathbf{d}$ to the range $[-1, 1]$ [S4, S2].
+2.  Apply positional encoding $\gamma(\mathbf{x})$ to $\mathbf{x}$ and $\gamma(\mathbf{d})$ to $\mathbf{d}$ [S2][S17, unofficial].
+3.  Pass $\gamma(\mathbf{x})$ through the first 4 layers of the Position MLP ($256 \times 256$ linear + ReLU) [S2][S12, unofficial].
+4.  Concatenate $\gamma(\mathbf{x})$ to the output of layer 4 [S2][S12, unofficial].
+5.  Pass the concatenated vector through layers 5, 6, and 7 ($256 \times 256$ linear + ReLU) [S2][S12, unofficial].
+6.  Pass the output of layer 7 through layer 8 ($256 \times 256$ linear + ReLU) [S2][S12, unofficial].
+7.  Extract density $\sigma$ and feature $\mathbf{e}$ from the output of layer 8. Apply ReLU to $\sigma$ to ensure non-negativity [S2][S17, unofficial]. Some implementations use $\sigma = \text{softplus}(h - 1)$ for sparser initialization [S9, unofficial].
+8.  Concatenate $\mathbf{e}$ and $\gamma(\mathbf{d})$ [S2].
+9.  Pass the concatenated vector through the Color Head layer ($256 + D_{dir} \to 128$ linear + ReLU) [S2][S12, unofficial].
+10. Pass the result through the final linear layer ($128 \to 3$) and apply Sigmoid to clamp RGB to $[0, 1]$ [S2][S12, unofficial].
+
+**Formulas:**
+The scene function is defined as:
+$$ F_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\mathbf{c}, \sigma) $$
+[S2][S11, unofficial].
+
+Density activation (alternative):
+$$ \sigma = \text{softplus}(h - 1) $$
+where $h$ is the raw output of the density head [S9, unofficial].
+
+Color activation:
+$$ \mathbf{c} = \text{sigmoid}(\text{MLP}_{\text{color}}([\mathbf{e}, \gamma(\mathbf{d})])) $$
+[S9, unofficial].
+
+**Parameters:**
+*   Hidden layer width: 256 [S2][S12, unofficial].
+*   Number of position layers: 8 [S2][S12, unofficial].
+*   Number of color layers: 1 (hidden) + 1 (output) [S2][S12, unofficial].
+*   Positional encoding frequencies ($L$): 10 for position, 4-6 for direction [S11, S17, unofficial].
+*   Weight initialization: Uniform $[-1/\sqrt{\text{out\_features}}, 1/\sqrt{\text{out\_features}}]$, bias 0 [S17, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **View Independence:** Density $\sigma$ must be predicted solely from position $\mathbf{x}$ to enforce multiview consistency [S2, S13].
+*   **Normalization:** Coordinates must be normalized to $[-1, 1]$ for effective training [S4, S2].
+*   **High Frequencies:** Without positional encoding, the network struggles with high-frequency details due to spectral bias [S2][S17, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def positional_encoding(x, num_frequencies):
+    """Expands input x of shape (..., 3) using Fourier features."""
+    freq_bands = torch.tensor([2.0**i for i in range(num_frequencies)], dtype=x.dtype, device=x.device)
+    scaled_inputs = x.unsqueeze(-1) * freq_bands.unsqueeze(0).unsqueeze(0)
+    encoded = torch.cat([torch.sin(scaled_inputs), torch.cos(scaled_inputs)], dim=-1)
+    return torch.cat([x, encoded], dim=-1)
+
+class NeRFMLP(nn.Module):
+    def __init__(self, pos_enc_freqs=10, dir_enc_freqs=4, hidden_dim=256):
+        super().__init__()
+        self.pos_enc_freqs = pos_enc_freqs
+        self.dir_enc_freqs = dir_enc_freqs
+        self.pos_input_dim = 3 * (1 + 2 * pos_enc_freqs)
+        self.dir_input_dim = 3 * (1 + 2 * dir_enc_freqs)
+        
+        self.pos_layers = nn.ModuleList()
+        self.pos_layers.append(nn.Linear(self.pos_input_dim, hidden_dim))
+        for _ in range(3):
+            self.pos_layers.append(nn.Linear(hidden_dim, hidden_dim))
+        self.pos_layers.append(nn.Linear(hidden_dim + self.pos_input_dim, hidden_dim))
+        for _ in range(3):
+            self.pos_layers.append(nn.Linear(hidden_dim, hidden_dim))
+            
+        self.sigma_head = nn.Linear(hidden_dim, 1)
+        self.feature_head = nn.Linear(hidden_dim, hidden_dim)
+        
+        self.color_head = nn.Sequential(
+            nn.Linear(hidden_dim + self.dir_input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 3)
+        )
+
+    def forward(self, x, d):
+        x_enc = positional_encoding(x, self.pos_enc_freqs)
+        d_enc = positional_encoding(d, self.dir_enc_freqs)
+        
+        h = x_enc
+        for i, layer in enumerate(self.pos_layers):
+            h = F.relu(layer(h))
+            if i == 4:
+                h = torch.cat([h, x_enc], dim=-1)
+                
+        sigma_raw = self.sigma_head(h)
+        sigma = F.relu(sigma_raw)
+        feature = self.feature_head(h)
+        
+        color_input = torch.cat([feature, d_enc], dim=-1)
+        rgb = torch.sigmoid(self.color_head(color_input))
+        
+        return sigma, rgb
+```
+
+## Subtopics
+
+### [Unbounded inward-facing scene parameterization](957-unbounded-inward-facing-scene-parameterization.md)
+Parameterizes unbounded 3D scenes into a bounded coordinate space to enable finite-domain encodings. It differs from standard normalization by preserving angular direction while non-linearly compressing radial distance, ensuring points at infinity map to the boundary. Choose it when using hash-based or voxel encodings that require finite domains.
+
+### [Position-Only NeRF Field](1253-position-only-nerf-field.md)
+Maps a 3D spatial coordinate directly to volume density and emitted color, omitting the viewing direction input. Unlike the full NeRF architecture which models view-dependent effects, this variant assumes isotropic appearance. Choose it for scenes with uniform lighting or negligible view dependence to trade accuracy for efficiency.
+
+### [Tiny NeRF](1275-tiny-nerf.md)
+A compression pipeline for voxel-based neural radiance fields that transforms voxel grids into the frequency domain via block-wise Discrete Cosine Transformation (DCT), then prunes and quantizes coefficients to reduce storage by over 100x. Unlike sibling methods that prune empty spatial voxels, Tiny NeRF operates on frequency coefficients to overcome foreground-background ratio limitations. Choose it when storage reduction is prioritized over architectural optimization.
+
+### [MLPRender_Fea](2414-mlprender-fea.md)
+Predicts RGB color from input features, view directions, and optional positional encodings using an MLP. It sets itself apart from its parent [NeRF MLP Architecture](910-nerf-mlp-architecture.md) by explicitly decoupling the input representation to accept pre-computed features rather than raw coordinates. Choose it for local feature-to-color mapping in neural implicit representations.
+
+### [View-Dependent MLP](2444-view-dependent-mlp.md)
+Replaces the small view-dependent bottleneck in InstantNGP with a larger MLP to better express view-dependent effects and reduce floaters. It addresses insufficient bottleneck capacity that forces spurious semi-transparent geometry reconstruction. Choose it when the standard bottleneck fails to capture complex angular color variations.
+
+### [NeUDF Network Architecture](3732-neudf-network-architecture.md)
+Represents 3D geometry as an Unsigned Distance Field (UDF) and color as a separate radiance field using two distinct MLPs. It differs from standard NeRF by modeling unsigned distance rather than volume density, allowing explicit surface extraction via the zero-level set. Choose it for handling non-manifold geometries and occlusions without prior surface intersection assumptions.
+
+### [InstantNGP Network Architecture](5049-instantngp-network-architecture.md)
+Designed for real-time training and rendering by replacing traditional positional encoding with a multiresolution hash grid. Unlike the parent [NeRF MLP Architecture](910-nerf-mlp-architecture.md) which maps raw coordinates to density and color, InstantNGP encodes positions into high-dimensional feature vectors via hash lookups processed by a lightweight MLP. Choose it when training convergence in seconds rather than hours is required.
+
+### Recursive Neural Field
+A sub-network that takes its parent branch's output and viewing direction as inputs to predict color, density, uncertainty, and a latent vector [S23, unofficial]. It differs from standard MLPs by dynamically growing and routing high-uncertainty points to specialized sub-networks based on cluster distances [S23, unofficial]. Choose it for efficient representation of complex scenes requiring dynamic capacity allocation [S23, unofficial].
+
+### VFR Network Architecture
+Uses a Multiresolution Hash Grid for feature representation alongside a Spatial MLP and Directional MLP with GELU activations [S24]. It sets itself apart from standard NeRF by decoupling spatial and directional processing into separate MLP branches [S24]. Choose it for fast neural radiance field reconstruction with hash-based features [S24].
+
+### CT-NeRF Network Architecture
+Follows the BARF approach with a single 8-layer MLP network with a width of 128 [S25]. It differs from the standard 256-width architecture by using a narrower network optimized for incremental pose and field optimization [S25]. Choose it for complex trajectory optimization with incremental NeRF updates [S25].
+
+### Soft Zero-Skipping Gate
+A differentiable gate applied to the MLP decoder output to enforce zero density for zero features, preventing non-zero densities from sparse inputs [S26]. It uses a tanh-based transition controlled by a scheduled steepness parameter $\alpha$, unlike hard gates that cause abrupt gradient changes [S26]. Choose it when pruning hashgrid-based NeRFs requires smooth, differentiable density suppression [S26].
+
+### DoubleField Network
+A joint implicit function represented by MLPs that fits a surface field and radiance field simultaneously, conditioned on pixel-aligned image features [S27, unofficial]. It sets itself apart from standard NeRF by using a shared MLP to produce a double embedding, followed by separate Geometry and Texture MLPs for occupancy/density and color [S27, unofficial]. Choose it for high-fidelity human reconstruction and rendering where surface and radiance fields must be jointly optimized [S27, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Training is slow, typically taking 12+ hours per scene on a single GPU [S2]. Rendering is also slow, taking approximately 30 seconds per frame on an NVIDIA V100 for 150-200 million network queries [S2].
+*   **Memory Complexity:** The network weights are small, approximately 5 MB, which is a 3000x compression compared to voxel-based methods like LLFF [S2].
+*   **Performance:** Achieves state-of-the-art results for novel view synthesis on complex scenes [S2].
+*   **Strengths:** High quality, continuous representation, multiview consistency, small storage footprint [S2].
+*   **Limitations:** Slow training and rendering, requires positional encoding for high frequencies, sensitive to coordinate normalization [S2][S17, unofficial].
+*   **When to use:** When high-quality novel view synthesis is required and computational resources allow for long training times [S2].
+*   **When not to use:** When real-time training or rendering is required, or when scene is unbounded without parameterization [S2, S1].
+
+## Background
+The NeRF MLP Architecture was introduced by Mildenhall et al. in the paper "NeRF: Representing scenes as neural radiance fields for view synthesis" (ECCV 2020) [S2][S9, unofficial]. It represents a static scene as a continuous 5D function that outputs radiance and density, optimized using a fully-connected deep network (MLP) [S2]. The method leverages positional encoding to overcome spectral bias and enforces multiview consistency by predicting density from position only [S2]. It has become the foundational architecture for many subsequent neural rendering methods [S3].
+
+## Sources
+[S1] Efficient View Synthesis with Neural Radiance Distribution Field, https://doi.org/10.1109/iccv51070.2023.01696, fetched 2026-10-26
+[S2] NeRF: Representing scenes as neural radiance fields for view synthesis, http://www.matthewtancik.com/nerf, fetched 2026-10-27
+[S3] ScanNeRF: a Scalable Benchmark for Neural Radiance Fields, https://doi.org/10.1109/wacv56688.2023.00088, fetched 2026-10-26
+[S4] Non-line-of-Sight Imaging via Neural Transient Fields, https://doi.org/10.1109/tpami.2021.3076062, fetched 2026-10-26
+[S5] omkarchittar/Neural_Radiance_Fields, https://github.com/omkarchittar/Neural_Radiance_Fields, fetched 2026-10-26 (unofficial)
+[S6] bmild/nerf, https://github.com/bmild/nerf, fetched 2026-10-26 (unofficial)
+[S7] yenchenlin/nerf-pytorch, https://github.com/yenchenlin/nerf-pytorch, fetched 2026-10-26 (unofficial)
+[S8] samirangode/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/samirangode/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+[S9] emmanueladutwum123/nerf-from-scratch, https://github.com/emmanueladutwum123/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+[S10] Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+[S11] damn8daniel/nerf-from-scratch, https://github.com/damn8daniel/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+[S12] yashtmy/nerf-3d-vision, https://github.com/yashtmy/nerf-3d-vision, fetched 2026-10-26 (unofficial)
+[S13] 3D volumetric rendering with NeRF - Keras, https://keras.io/examples/vision/nerf/, fetched 2026-10-26
+[S14] Neural Radiance Field-based Visual Rendering: a Comprehensive Review, https://ieeexplore.ieee.org/abstract/document/11455380, fetched 2026-10-30
+[S15] weiyithu/NerfingMVS, https://github.com/weiyithu/NerfingMVS, fetched 2026-10-27 (unofficial)
+[S16] rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, https://github.com/rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, fetched 2026-10-27 (unofficial)
+[S17] charan2598/NeRF-PyTorch, https://github.com/charan2598/NeRF-PyTorch, fetched 2026-10-27 (unofficial)
+[S18] dgsmith7/nerf-mlp, https://github.com/dgsmith7/nerf-mlp, fetched 2026-10-27 (unofficial)
+[S19] sr-bang/NeRF, https://github.com/sr-bang/NeRF, fetched 2026-10-27 (unofficial)
+[S20] MultiPlaneNeRF: Neural radiance field with non-trainable representation, https://doi.org/10.1016/j.eswa.2025.127350, fetched 2026-10-29 (unofficial)
+[S21] NeuMan: Neural Human Radiance Field from a Single Video, https://doi.org/10.1007/978-3-031-19824-3_24, fetched 2026-10-29
+[S22] MELON: NeRF with Unposed Images in SO(3), https://doi.org/10.1109/3dv62453.2024.00084, fetched 2026-10-30
+[S23] Recursive-NeRF: An Efficient and Dynamically Growing NeRF, https://doi.org/10.1109/tvcg.2022.3204608, fetched 2026-10-26 (unofficial)
+[S24] PDF Volume Feature Rendering for Fast Neural Radiance Field Reconstruction, https://papers.neurips.cc/paper_files/paper/2023/file/ce182e31662883d4decc84a0255335b6-Paper-Conference.pdf, fetched 2026-10-27
+[S25] CT-NeRF: Incremental Optimizing Neural Radiance Field and Poses with Complex Trajectory, https://doi.org/10.48550/arxiv.2404.13896, fetched 2026-10-26
+[S26] HollowNeRF: Pruning Hashgrid-Based NeRFs with Trainable Collision Mitigation, https://doi.org/10.1109/iccv51070.2023.00322, fetched 2026-10-26
+[S27] DoubleField: Bridging the Neural Surface and Radiance Fields for High-fidelity Human Reconstruction and Rendering, https://doi.org/10.1109/cvpr52688.2022.01541, fetched 2026-10-29 (unofficial)

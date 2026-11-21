@@ -1,0 +1,279 @@
+--- v006.md
++++ v007.md
+@@ -4,96 +4,208 @@
+ 
+ ## Overview
+-Shading models for volume rendering apply local illumination calculations to ray-cast volume data to enhance the perception of 3D shape, surface detail, and orientation [S1, unofficial]. Unlike methods that simulate complex light transport or scattering, this approach treats the volume's scalar field gradient as a pseudo-surface normal to compute diffuse and specular reflections [S1, unofficial]. It sets itself apart from [Gradient-based Shading with Phase Functions](1020-gradient-based-shading-with-phase-functions.md) by using standard reflection models rather than phase functions, and from [Frequency Domain Directional Shading](852-frequency-domain-directional-shading.md) by operating in the spatial domain [S1, unofficial].
++Shading models for volume rendering apply local illumination calculations to enhance the perception of 3D shape and surface orientation within volumetric data [S1, unofficial]. Unlike global illumination techniques that simulate light transport through participating media, this method approximates surface-like appearance by treating scalar field gradients as pseudo-normals and applying standard reflection models (diffuse and specular) to the volume samples [S1, unofficial]. It sets itself apart from [Gradient-based Shading with Phase Functions](1020-gradient-based-shading-with-phase-functions.md) by using simplified local reflection rather than complex phase functions, and from [Frequency Domain Directional Shading](852-frequency-domain-directional-shading.md) by operating in the spatial domain [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   Scalar volume data $V(\mathbf{x})$.
+-*   Transfer function $TF(v)$ mapping data values to color.
+-*   Shading parameters: diffuse amount $k_d$, specular amount $k_s$, specular shininess $\alpha$, shading opacity $\omega$, shading range $[v_{min}, v_{max}]$, and minimum gradient magnitude threshold $g_{min}$ [S1, unofficial].
+-
+-**Outputs:**
+-*   Shaded color contribution for a ray segment.
+-
+-**Data Structures:**
+-*   **Gradient:** A 3D vector $\mathbf{g} = \nabla V$. In the reference implementation, this is derived from the derivative of the trilinear interpolation function used for ray marching [S1, unofficial].
+-
+-**Steps:**
+-1.  **Ray Intersection:** Cast a ray through the volume. Identify the entry point $\mathbf{p}_{in}$ and exit point $\mathbf{p}_{out}$ of the ray segment within the current voxel or cell boundary [S1, unofficial].
+-2.  **Gradient Calculation:** Compute the gradient vectors $\mathbf{g}_{in} = \nabla V(\mathbf{p}_{in})$ and $\mathbf{g}_{out} = \nabla V(\mathbf{p}_{out})$ [S1, unofficial].
+-3.  **Thresholding:** Check if shading should be applied:
+-    *   Condition A: Either $V(\mathbf{p}_{in})$ or $V(\mathbf{p}_{out})$ is within $[v_{min}, v_{max}]$.
+-    *   Condition B: Either $\|\mathbf{g}_{in}\|$ or $\|\mathbf{g}_{out}\|$ is greater than $g_{min}$ [S1, unofficial].
+-    *   If both conditions are not met, no shading is applied for this segment [S1, unofficial].
+-4.  **Averaging:**
+-    *   Calculate the effective data value $v_{shade}$:
+-        $$ v_{shade} = \frac{V(\mathbf{p}_{in}) + V(\mathbf{p}_{out})}{2} $$
+-    *   Calculate the effective gradient $\mathbf{g}_{shade}$:
+-        *   If both $\|\mathbf{g}_{in}\|$ and $\|\mathbf{g}_{out}\|$ are within valid ranges (implied by being above threshold or generally usable), average them:
+-            $$ \mathbf{g}_{shade} = \frac{\mathbf{g}_{in} + \mathbf{g}_{out}}{2} $$
+-        *   If one gradient magnitude is out of range (e.g., below threshold or discontinuous), use the gradient that is within range [S1, unofficial].
+-5.  **Normal Approximation:** Normalize the effective gradient to obtain the pseudo-normal:
+-    $$ \mathbf{n} = \frac{\mathbf{g}_{shade}}{\|\mathbf{g}_{shade}\|} $$
+-    [G] If $\|\mathbf{g}_{shade}\|$ is zero, the normal is undefined; skip shading or use a default normal.
+-6.  **Lighting Calculation:**
+-    *   **Diffuse:** The diffuse reflectivity color is taken directly from the transfer function at the shaded value:
+-        $$ \mathbf{c}_{diffuse} = TF(v_{shade}) $$
+-        [S1, unofficial]
+-    *   **Specular:** Assumed to be white ($\mathbf{c}_{specular} = [1, 1, 1]$) [S1, unofficial].
+-    *   Compute the final shaded color contribution $\mathbf{c}_{shade}$ using the standard Phong-like model (assuming light direction $\mathbf{l}$ and view direction $\mathbf{v}$):
+-        $$ \mathbf{c}_{shade} = k_d \cdot \mathbf{c}_{diffuse} \cdot \max(0, \mathbf{n} \cdot \mathbf{l}) + k_s \cdot \mathbf{c}_{specular} \cdot \max(0, \mathbf{r} \cdot \mathbf{v})^\alpha $$
+-        where $\mathbf{r} = 2(\mathbf{n} \cdot \mathbf{l})\mathbf{n} - \mathbf{l}$ is the reflection vector [S1, unofficial].
+-7.  **Blending:** Modulate the result by the shading opacity $\omega$ and blend it into the final volume color [S1, unofficial].
+-
+-**Parameters:**
+-*   $k_d, k_s$: Weights for diffuse and specular components.
+-*   $\alpha$: Shininess exponent.
+-*   $\omega$: Opacity of the shading contribution.
+-*   $[v_{min}, v_{max}]$: Range of data values eligible for shading.
+-*   $g_{min}$: Minimum gradient magnitude required for shading [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Gradient Discontinuity:** Using the derivative of the trilinear function means gradients at shared cell faces may not be continuous, potentially introducing artifacts [S1, unofficial].
+-*   **Zero Gradient:** If the gradient magnitude is zero, normalization fails.
+-*   **Out of Range:** Gradients outside the specified range or data values outside the shading range are ignored [S1, unofficial].
++The method evaluates shading contributions along a ray traversing the volume. It determines whether a region of the ray should be shaded based on data values and gradient magnitudes at the entry and exit points of that region. If shading is applied, it computes diffuse and specular components using averaged data values and gradients from the region boundaries.
++
++### Inputs and Outputs
++*   **Inputs**:
++    *   Scalar volume data $V$.
++    *   Ray segment defined by entry point $\mathbf{p}_{in}$ and exit point $\mathbf{p}_{out}$.
++    *   Shading parameters: diffuse amount $k_d$, specular amount $k_s$, specular shininess $\alpha$, shading opacity $\beta$, shading range $[v_{min}, v_{max}]$, and minimum gradient threshold $g_{min}$.
++    *   Light direction $\mathbf{l}$ (assumed uniform or local).
++    *   View direction $\mathbf{v}$ (assumed uniform or local).
++*   **Outputs**:
++    *   Shading color contribution $C_{shade}$ (RGB).
++
++### Data Structures
++The implementation requires access to the scalar field $V(\mathbf{x})$ and its gradient $\nabla V(\mathbf{x})$.
++*   **Scalar Value**: $v = V(\mathbf{x})$.
++*   **Gradient Vector**: $\mathbf{g} = \nabla V(\mathbf{x}) = [\frac{\partial V}{\partial x}, \frac{\partial V}{\partial y}, \frac{\partial V}{\partial z}]$.
++*   **Gradient Magnitude**: $|\mathbf{g}| = \sqrt{\mathbf{g} \cdot \mathbf{g}}$.
++
++The gradient is typically computed as the derivative of the interpolation function used to sample the volume (e.g., trilinear interpolation) [S1, unofficial].
++
++### Steps
++1.  **Evaluate Boundary Properties**:
++    For the current ray segment (defined by entry $\mathbf{p}_{in}$ and exit $\mathbf{p}_{out}$):
++    *   Compute scalar values: $v_{in} = V(\mathbf{p}_{in})$, $v_{out} = V(\mathbf{p}_{out})$.
++    *   Compute gradient vectors: $\mathbf{g}_{in} = \nabla V(\mathbf{p}_{in})$, $\mathbf{g}_{out} = \nabla V(\mathbf{p}_{out})$.
++    *   Compute gradient magnitudes: $g_{in} = |\mathbf{g}_{in}|$, $g_{out} = |\mathbf{g}_{out}|$.
++
++2.  **Determine Shading Eligibility**:
++    Shading is applied if:
++    *   ($v_{in} \in [v_{min}, v_{max}]$ OR $v_{out} \in [v_{min}, v_{max}]$)
++    *   AND ($g_{in} > g_{min}$ OR $g_{out} > g_{min}$) [S1, unofficial].
++    If not eligible, return $C_{shade} = \mathbf{0}$.
++
++3.  **Compute Averaged Data Value**:
++    Calculate the diffuse reflectivity value $v_{shade}$:
++    $$ v_{shade} = \frac{v_{in} + v_{out}}{2} $$
++    [S1, unofficial].
++
++4.  **Compute Averaged Gradient**:
++    Determine the shading normal $\mathbf{n}$:
++    *   If both $g_{in} > g_{min}$ and $g_{out} > g_{min}$:
++        $$ \mathbf{g}_{avg} = \frac{\mathbf{g}_{in} + \mathbf{g}_{out}}{2} $$
++    *   Else if only $g_{in} > g_{min}$:
++        $$ \mathbf{g}_{avg} = \mathbf{g}_{in} $$
++    *   Else if only $g_{out} > g_{min}$:
++        $$ \mathbf{g}_{avg} = \mathbf{g}_{out} $$
++    *   Else (should not happen if step 2 passed, but for safety):
++        $$ \mathbf{g}_{avg} = \mathbf{0} $$
++    Normalize the gradient to get the pseudo-normal:
++    $$ \mathbf{n} = \frac{\mathbf{g}_{avg}}{|\mathbf{g}_{avg}|} $$
++    [S1, unofficial].
++
++5.  **Calculate Diffuse Component**:
++    *   Diffuse color $C_{diff}$ is the color from the transfer function evaluated at $v_{shade}$. Let this be $TF(v_{shade})$.
++    *   Compute diffuse factor: $L_d = \max(0, \mathbf{n} \cdot \mathbf{l})$.
++    *   Diffuse contribution: $C_{diff\_comp} = k_d \cdot L_d \cdot C_{diff}$.
++
++6.  **Calculate Specular Component**:
++    *   Specular color is assumed to be white ($\mathbf{1}$) [S1, unofficial].
++    *   Compute reflection vector $\mathbf{r}$:
++        $$ \mathbf{r} = 2(\mathbf{n} \cdot \mathbf{l})\mathbf{n} - \mathbf{l} $$
++    *   Compute specular factor: $L_s = \max(0, \mathbf{r} \cdot \mathbf{v})^\alpha$.
++    *   Specular contribution: $C_{spec\_comp} = k_s \cdot L_s$.
++
++7.  **Combine and Apply Opacity**:
++    *   Total shading color: $C_{total} = C_{diff\_comp} + C_{spec\_comp}$.
++    *   Apply shading opacity $\beta$:
++        $$ C_{shade} = \beta \cdot C_{total} $$
++    [S1, unofficial].
++
++### Pseudocode
++```python
++def compute_shading(p_in, p_out, volume_data, shading_params, light_dir, view_dir):
++    """
++    Computes shading for a ray segment in a volume.
++    
++    Args:
++        p_in: Entry point of the ray segment.
++        p_out: Exit point of the ray segment.
++        volume_data: Object providing V(p) and grad_V(p).
++        shading_params: Dict with keys:
++            k_d: float (diffuse amount)
++            k_s: float (specular amount)
++            alpha: float (specular shininess)
++            beta: float (shading opacity)
++            v_min: float
++            v_max: float
++            g_min: float
++        light_dir: Normalized vector.
++        view_dir: Normalized vector.
++        
++    Returns:
++        RGB color vector for shading contribution.
++    """
++    # Step 1: Evaluate boundary properties
++    v_in = volume_data.get_value(p_in)
++    v_out = volume_data.get_value(p_out)
++    
++    g_in = volume_data.get_gradient(p_in)
++    g_out = volume_data.get_gradient(p_out)
++    
++    g_in_mag = length(g_in)
++    g_out_mag = length(g_out)
++    
++    # Step 2: Determine shading eligibility
++    in_range = v_min <= v_in <= v_max
++    out_range = v_min <= v_out <= v_max
++    in_thresh = g_in_mag > g_min
++    out_thresh = g_out_mag > g_min
++    
++    if not ((in_range or out_range) and (in_thresh or out_thresh)):
++        return [0.0, 0.0, 0.0]
++    
++    # Step 3: Compute averaged data value
++    v_shade = (v_in + v_out) / 2.0
++    
++    # Step 4: Compute averaged gradient
++    if in_thresh and out_thresh:
++        g_avg = (g_in + g_out) / 2.0
++    elif in_thresh:
++        g_avg = g_in
++    elif out_thresh:
++        g_avg = g_out
++    else:
++        # Fallback, though logic above should prevent this if eligible
++        return [0.0, 0.0, 0.0]
++        
++    n = normalize(g_avg)
++    
++    # Step 5: Calculate Diffuse Component
++    # Assume transfer function returns RGB
++    c_diff = transfer_function(v_shade)
++    l_d = max(0.0, dot(n, light_dir))
++    c_diff_comp = shading_params.k_d * l_d * c_diff
++    
++    # Step 6: Calculate Specular Component
++    # Specular color is white
++    r = 2.0 * dot(n, light_dir) * n - light_dir
++    l_s = max(0.0, dot(r, view_dir)) ** shading_params.alpha
++    c_spec_comp = shading_params.k_s * l_s
++    
++    # Step 7: Combine and Apply Opacity
++    c_total = c_diff_comp + c_spec_comp
++    c_shade = shading_params.beta * c_total
++    
++    return c_shade
++```
++
++### Parameters
++*   **Diffuse Amount ($k_d$)**: Controls the intensity of the diffuse reflection.
++*   **Specular Amount ($k_s$)**: Controls the intensity of the specular highlight.
++*   **Specular Shininess ($\alpha$)**: Exponent for the specular term; higher values produce sharper highlights.
++*   **Shading Opacity ($\beta$)**: Controls the transparency of the shading contribution, allowing it to blend with the underlying volume color.
++*   **Shading Range ($[v_{min}, v_{max}]$)**: Scalar value range within which shading is considered.
++*   **Minimum Gradient Threshold ($g_{min}$)**: Minimum gradient magnitude required to apply shading, filtering out flat regions.
++*   **Diffuse Color**: Derived from the transfer function at the averaged data value $v_{shade}$ [S1, unofficial].
++*   **Specular Color**: Fixed to white [S1, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Gradient Discontinuity**: Using the derivative of the trilinear interpolation function for gradients can cause discontinuities at shared cell faces, potentially introducing artifacts [S1, unofficial]. Finite differences are an alternative but more expensive.
++*   **Zero Gradient**: If the averaged gradient is zero (e.g., in a perfectly flat region where both gradients are zero or cancel out), normalization fails. The logic in Step 4 handles cases where one gradient is valid, but if both are zero, the region is not shaded (Step 2).
++*   **Out of Range Gradients**: The logic explicitly handles cases where one boundary gradient is below the threshold and the other is above, using only the valid one [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Frequency Domain Directional Shading](852-frequency-domain-directional-shading.md)
+-A technique for implementing directional diffuse reflection in volume rendering by performing shading computations entirely in the frequency domain. It solves the problem of applying shape cues to volume data without the computational overhead of spatial domain differentiation or the nonlinearity of standard Lambertian models. Unlike [Simplified Phong Lighting Model](885-simplified-phong-lighting-model.md) or [Gradient-based Shading with Phase Functions](1020-gradient-based-shading-with-phase-functions.md) which typically operate in the spatial domain, this method leverages the property that spatial differentiation is equivalent to frequency multiplication by a linear ramp, allowing the shading term to be computed as a moment of the spectrum. It builds on [Shading models](837-shading-models.md) by replacing spatial gradient calculations with frequency domain operations.
++A technique for implementing directional diffuse reflection in volume rendering by performing shading computations entirely in the frequency domain. It solves the problem of applying shape cues without spatial differentiation overhead. Choose when computational efficiency in the frequency domain is preferred over spatial gradient calculation.
+ 
+ ### [Simplified Phong Lighting Model](885-simplified-phong-lighting-model.md)
+-A local illumination technique used in volume rendering to enhance the perception of 3D shape and surface detail by modulating the color of volumetric samples with diffuse and specular lighting components. It solves the problem of flat, unstructured appearance in ray-cast volumes by treating the gradient of the scalar field at the first significant surface intersection as a pseudo-surface normal. Unlike [Frequency Domain Directional Shading](852-frequency-domain-directional-shading.md), which operates in the Fourier domain, or [Gradient-based Shading with Phase Functions](1020-gradient-based-shading-with-phase-functions.md), which models complex light scattering, this method applies a standard local reflection model directly to the volume data. It differs from [Lambert Shading with Shadow Rays](1133-lambert-shading-with-shadow-rays.md) by typically omitting shadow calculations to maintain performance, and from the [Volume Shading Model](2991-volume-shading-model.md) by focusing on surface-like highlights rather than participating media absorption.
++A local illumination technique that modulates volumetric samples with diffuse and specular components, treating the gradient at the first significant surface intersection as a pseudo-surface normal. It differs by typically omitting shadow calculations for performance. Choose for fast, surface-like highlights in ray-cast volumes.
+ 
+ ### [Gradient-based Shading with Phase Functions](1020-gradient-based-shading-with-phase-functions.md)
+-Gradient-based shading with phase functions adds an illumination term to the emissive term of the volume rendering integral to simulate single-scattering effects, or computes shading for implicit iso-surfaces. It distinguishes itself from sibling methods by explicitly deriving surface normals from the scalar field gradient and applying phase functions (such as Lambert's law or Henyey-Greenstein) to model light interaction, rather than relying solely on frequency domain approximations or simplified Phong models.
++Adds an illumination term to the emissive term to simulate single-scattering effects or computes shading for implicit iso-surfaces using phase functions like Henyey-Greenstein. Choose when angular scattering properties are important for the appearance of the volume.
+ 
+ ### [Lambert Shading with Shadow Rays](1133-lambert-shading-with-shadow-rays.md)
+-Lambert Shading with Shadow Rays is a local illumination technique for isosurface rendering that computes diffuse lighting using the Lambertian reflectance model and enhances depth perception by casting shadow rays to detect occlusion. It distinguishes itself from sibling models like [Simplified Phong Lighting Model](885-simplified-phong-lighting-model.md) by focusing exclusively on diffuse reflection without specular highlights, and from [Gradient-based Shading with Phase Functions](1020-gradient-based-shading-with-phase-functions.md) by treating the volume as an opaque isosurface rather than a participating medium for light transport.
++Computes diffuse lighting using the Lambertian reflectance model and enhances depth perception by casting shadow rays. It treats the volume as an opaque isosurface. Choose when only diffuse reflection and accurate shadows are needed, without specular highlights.
+ 
+ ### [Volume Shading Model](2991-volume-shading-model.md)
+-The Volume Shading Model is a local illumination technique implemented within ray casting volume renderers that calculates diffuse and specular contributions based on scalar data values and their gradients. It computes the final fragment color by combining indirect diffuse, indirect specular, emissivity, transparency/refraction, and direct light contributions, applying shadow blending and gamma correction. It differs from its siblings by explicitly managing the interplay between material opacity and light transport modes (indirect vs. direct) within a single shading pass, whereas [Simplified Phong Lighting Model](885-simplified-phong-lighting-model.md) focuses on surface-like reflection approximations and [Gradient-based Shading with Phase Functions](1020-gradient-based-shading-with-phase-functions.md) emphasizes angular scattering properties.
++A local illumination technique that calculates diffuse and specular contributions based on scalar data values and their gradients, managing the interplay between material opacity and light transport modes (indirect vs. direct) within a single shading pass. Choose when a comprehensive local shading model that handles both indirect and direct lighting components is required.
+ 
+ ### [Colored Stochastic Shadow Mapping for Volume Rendering](9816-colored-stochastic-shadow-mapping-for-volume-rendering.md)
+-Colored Stochastic Shadow Mapping (CSSM) is a two-step rendering technique for Direct Volume Rendering (DVR) that generates colored, translucent shadows using stochastic sampling. Unlike traditional shadow maps that produce binary, opaque shadows, CSSM allows translucent objects to cast partial shadows with accurate color information by adapting probabilistic photon traversal events to volumetric data. It sets itself apart from Deep Shadow Maps (DSM) by using significantly less texture memory (storing one depth value per color channel instead of piecewise linear control points) while producing higher-quality, softer colored shadows.
++A two-step rendering technique that generates colored, translucent shadows using stochastic sampling. It sets itself apart by producing softer, colored shadows with less memory than Deep Shadow Maps. Choose when accurate, colored, translucent shadows are needed for direct volume rendering.
+ 
+ ### [Gradient-based shading](13956-gradient-based-shading.md)
+-Gradient-based shading is a direct volume rendering (DVR) technique that approximates surface lighting by estimating normals from the scalar field gradient and applying a Phong illumination model. It solves the problem of flat, unstructured appearance in ray-cast volumes by providing realistic surface orientation and specular highlights with low computational cost. Unlike volumetric shading methods that account for media occlusion or scattering, this method only considers adjacent voxels, making it unsuitable for capturing translucent scattering effects or global shadows.
++A local illumination technique for direct volume rendering that approximates surface lighting by estimating normals from the scalar field gradient and applying a Phong-like reflection model. It is computationally efficient but limited to local surface properties. Choose for fast, crisp depth cues in non-translucent media.
+ 
+ ### [Volumetric Shading](14079-volumetric-shading.md)
+-A shading technique that calculates global occlusion by branching a secondary ray from each sample point towards the light source. It creates global ambient occlusion.
+-
+-### Fire Shading Model
+-A shading model that combines Lambertian diffuse lighting, ambient light, and rim lighting, modulated by a fire-colored palette driven by animated fBM noise [S2, unofficial]. It computes the surface normal `N` using `distance_field_normal(hit)`, the light direction `L` from the hit point to the light, and the view direction `V` from the hit point to the camera. The Lambertian diffuse factor is `max(0.0, dot(N, L))` and the rim light factor is `pow(max(0.0, 1.0 - max(0.0, dot(N, V))), 2.0)`. The total light intensity is `ambient + 0.9 * lambert + 0.4 * rim`. The fire color value `fval` is computed by evaluating fBM at the hit point with a time offset, mapped to a fire color via `palette_fire(fval)`. The final color is `fire * light_intensity` [S2, unofficial]. Parameter `ambient` is a constant ambient light factor [S2, unofficial].
++Captures shadow information and global occlusion effects by branching a secondary ray towards the light source at each primary ray sample location. It computes transmittance at runtime. Choose when global ambient occlusion and runtime shadow computation are preferred over pre-computed shadow maps.
+ 
+ ## Operating characteristics
+-*   **Complexity:** The shading calculation per sample is $O(1)$, involving vector operations and a transfer function lookup. The cost is dominated by the ray marching and gradient computation.
+-*   **Performance:** Shading helps considerably in bringing out features in the data and establishing orientations [S1, unofficial]. It is relatively cheap to evaluate compared to full participating media scattering models [S1, unofficial].
+-*   **Strengths:** Enhances shape perception; easy to implement within existing ray casters; provides intuitive surface-like appearance.
+-*   **Limitations:** Does not account for light transport within the volume (scattering, absorption shadows); gradients may be discontinuous at cell boundaries if using trilinear derivatives [S1, unofficial].
+-*   **When to use:** When visual clarity of internal structures and boundaries is prioritized over physical accuracy of light transport.
+-*   **When not to use:** When translucent scattering, subsurface scattering, or accurate shadowing within the volume is required.
++*   **Time Complexity**: $O(1)$ per shading evaluation, assuming gradient computation is $O(1)$ (e.g., via trilinear derivative). The cost is added to the ray casting loop.
++*   **Memory Complexity**: $O(1)$ additional memory for shading calculations.
++*   **Measured Performance**: Shading adds computational overhead to ray casting but is generally cheaper than global illumination techniques. It helps considerably in bringing out features and establishing orientations [S1, unofficial].
++*   **Scaling**: Performance scales linearly with the number of ray samples. Parallelization is effective as each ray's shading computation is independent [S1, unofficial].
++*   **Strengths**: Enhances perception of 3D shape and surface detail; computationally efficient; easy to implement within existing ray casting frameworks.
++*   **Limitations**: Approximates surface-like appearance; does not account for subsurface scattering or global light transport; gradient discontinuities may cause artifacts; limited to local illumination.
++*   **When to Use**: When enhancing visual clarity of features in volumetric data is prioritized over physical accuracy of light transport.
++*   **When Not to Use**: When accurate simulation of participating media light transport (e.g., subsurface scattering, global illumination) is required.
+ 
+ ## Background
+-The method was implemented within a hierarchically accelerated ray casting volume renderer [S1, unofficial]. The approach uses the derivative of the trilinear function as the gradient of the data, leveraging the fact that the function is already being used to model data at interior nodes of the tree [S1, unofficial]. It was compared with other rendering methods such as 3D texture mapping and coherent projection, noting that while 3D texture mapping produces crisp edges, it does not easily accommodate shading [S1, unofficial].
++The method was implemented within a ray casting volume renderer to calculate diffuse and specular contributions based on data values and gradients [S1, unofficial]. It builds on the principle that shading helps considerably in bringing out features in the data and establishing orientations [S1, unofficial]. The approach uses the derivative of the trilinear function as the gradient of the data, leveraging the fact that the function is already being used to model data at interior nodes of the tree [S1, unofficial].
+ 
+ ## Sources

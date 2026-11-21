@@ -1,0 +1,160 @@
+--- v001.md
++++ v002.md
+@@ -4,92 +4,96 @@
+ 
+ ## Overview
+-Anisotropic noise is a procedural noise function designed to support high-quality anisotropic filtering, addressing the trade-off between aliasing artifacts and detail loss inherent in isotropic noise methods [S1]. It partitions the frequency domain into oriented subbands using steerable filters, allowing the noise content to adapt to non-uniform perspective distortions and parametric surface distortions by adjusting subband weights during rendering [S1].
++Anisotropic noise is a procedural noise function designed to support high-quality anisotropic filtering, addressing the trade-off between aliasing artifacts and detail loss inherent in isotropic noise methods [S1]. Unlike isotropic noise, which treats all directions equally, this method tiles the frequency domain into oriented subbands, allowing noise content to adapt to non-uniform perspective distortions and parametric surface distortions [S1].
+ 
+ ## How it works
+-**Inputs:**
+-- Pre-computed oriented noise subband textures.
+-- Surface position and derivative information (Jacobian) to determine local anisotropic filter characteristics.
+-
+-**Outputs:**
+-- A scalar noise value for a given 3D or 2D location.
++**Inputs and Outputs:**
++*   **Input:** A set of pre-computed oriented noise subband textures; a target anisotropic filter profile (defined by orientation and scale) at each surface point.
++*   **Output:** A scalar noise value for each surface point/pixel.
+ 
+ **Data Structures:**
+-- **Subband Textures:** Each oriented subband is stored in a 32-bit RGBA image. Four orientations are packed into the R, G, B, and A channels of a single texture [S1].
+-- **Scale:** Subbands are precomputed at a single scale. Other scales are generated on-the-fly by scaling the texture coordinates [S1].
++*   **Subband Textures:** Each oriented subband is stored as a 2D texture. To optimize storage, four oriented subbands are packed into the Red, Green, Blue, and Alpha channels of a single 32-bit RGBA image [S1].
++*   **Scale:** Subbands are precomputed at a single base scale. Higher or lower scales are generated on the fly by scaling the texture coordinates of the precomputed textures [S1].
+ 
+-**Algorithm:**
++**Algorithm Steps:**
++1.  **Preprocessing (Offline):**
++    1.  Partition the frequency domain using steerable filters [SF95, PS00] to create oriented subbands that are tightly localized in both scale and orientation [S1].
++    2.  Synthesize noise tiles for each subband. The noise generation typically involves creating a random noise image $R$, downsampling it to $R_{\downarrow}$, upsampling it back to $R_{\downarrow\uparrow}$, and computing the difference $N = R - R_{\downarrow\uparrow}$ to ensure band-limiting [S1, CD05].
++    3.  Pack the resulting oriented subband images into RGBA channels of textures. Typically, 4 or 8 bands (1 or 2 textures) are used [S1].
+ 
+-1.  **Preprocessing (Offline):**
+-    1.  Partition the frequency domain using steerable filters [SF95, PS00] to create oriented subbands that are tightly localized in scale and orientation [S1].
+-    2.  Synthesize noise tiles for each subband. The construction ensures the filters implement an invertible transform, allowing exact signal recovery [S1].
+-    3.  Pack each oriented subband image into one channel of a 32-bit RGBA image. This yields four orientations per texture [S1].
+-    4.  Typically, use four or eight bands (one or two textures) to balance storage, speed, and quality [S1].
++2.  **Runtime (Per Pixel/Surface Point):**
++    1.  Determine the local anisotropic filter requirements (orientation and scale) based on the surface geometry and viewing perspective [S1].
++    2.  Sample the pre-computed subband textures at the current location, applying appropriate texture coordinate scaling for the desired scale [S1].
++    3.  Compute the weights for each oriented subband. These weights are adapted with respect to the anisotropic filter to match the desired frequency spectrum [S1].
++    4.  Compute the final noise value $N_{final}$ as the weighted sum of the sampled subband values:
++        $$ N_{final} = \sum_{i=1}^{K} w_i \cdot S_i $$
++        Where $K$ is the number of subbands (e.g., 4 or 8), $w_i$ is the weight for subband $i$, and $S_i$ is the sampled value from subband $i$ [S1].
+ 
+-2.  **Runtime (Per-Pixel/Per-Point):**
+-    1.  Determine the local anisotropic filter requirements based on the surface geometry (e.g., parametric distortion or perspective projection) [S1].
+-    2.  Compute the appropriate weighted combination of the oriented subbands at the current location. The weights are adapted with respect to the anisotropic filter to approximate the desired frequency spectrum on the surface [S1].
+-    3.  Sample the pre-computed subband textures at the scaled coordinates.
+-    4.  Compute the final noise value as the weighted sum of the sampled subband values [S1].
++**Parameters:**
++*   **Number of Bands:** Typically 4 or 8 bands [S1].
++*   **Scale:** Single base scale for precomputation; runtime scaling via texture coordinates [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Precision:** The method relies on the invertibility of the steerable filter transform to exactly recover signals, but practical implementation must ensure numerical stability when blending subbands [S1].
++*   **Boundaries:** Texture wrapping modes must be consistent with the noise generation process to avoid artifacts at tile boundaries [G].
+ 
+ **Pseudocode:**
++```python
++# Precomputed data:
++# subband_textures: List of 2D textures, each containing 4 channels (RGBA)
++#                   representing 4 oriented subbands.
++# num_bands_per_texture: 4
+ 
+-```python
+-def evaluate_anisotropic_noise(x, y, weights):
++def sample_anisotropic_noise(uv, scale, orientation_weights, subband_textures):
+     """
+-    Evaluates anisotropic noise at (x, y) using pre-computed subband textures.
++    Computes anisotropic noise value at UV coordinates.
+     
+     Args:
+-        x, y: Coordinates in the texture space (scaled for desired frequency).
+-        weights: A list of 4 floating-point weights [w_r, w_g, w_b, w_a] 
+-                 corresponding to the four oriented subbands packed in RGBA.
+-                 These weights are derived from the local anisotropic filter 
+-                 characteristics.
+-    
++        uv: (u, v) texture coordinates.
++        scale: Scaling factor for the noise frequency.
++        orientation_weights: List of weights [w0, w1, ..., wK-1] corresponding 
++                             to the oriented subbands.
++        subband_textures: List of RGBA textures containing precomputed subbands.
++        
+     Returns:
+         float: The final noise value.
+     """
+-    # Sample the four oriented subbands from the packed RGBA texture
+-    # Note: In a real implementation, texture sampling handles interpolation.
+-    # Here we assume a function `sample_texture(u, v)` that returns RGBA.
+-    rgba = sample_texture(x, y)
++    total_noise = 0.0
++    band_index = 0
+     
+-    r = rgba.r
+-    g = rgba.g
+-    b = rgba.b
+-    a = rgba.a
+-    
+-    # Compute weighted sum
+-    noise_value = (r * weights[0] + 
+-                   g * weights[1] + 
+-                   b * weights[2] + 
+-                   a * weights[3])
+-    
+-    return noise_value
++    for texture in subband_textures:
++        # Scale the UV coordinates for the current scale
++        scaled_uv = (uv[0] * scale, uv[1] * scale)
++        
++        # Sample the 4 channels of the texture
++        # Assuming standard texture sampling returns (R, G, B, A)
++        samples = texture.sample(scaled_uv)
++        
++        # Apply weights to each subband (channel)
++        # orientation_weights should have length equal to total number of bands
++        for i in range(4):
++            if band_index < len(orientation_weights):
++                total_noise += orientation_weights[band_index] * samples[i]
++            band_index += 1
++            
++    return total_noise
+ ```
+-
+-**Parameters:**
+-- **Number of Bands:** Typically 4 or 8 bands (1 or 2 textures) [S1].
+-- **Scale:** Precomputed at a single scale; other scales are handled by texture coordinate scaling [S1].
+-
+-**Edge Cases and Pitfalls:**
+-- **Precision:** The method relies on linear interpolation of filters to avoid artifacts when blending subbands [S1].
+-- **Boundaries:** The invertible transform property ensures exact recovery, but practical implementation must handle texture wrapping correctly [S1].
+-- **Degenerate Input:** If the surface has no anisotropy (isotropic), the weights should be uniform or adjusted to match isotropic filtering requirements [S1].
+ 
+ ## Subtopics
+ 
+ ### [Fourier Spectral Synthesis](16451-fourier-spectral-synthesis.md)
+-A method that generates noise with a specific power spectrum by filtering white noise in the frequency domain.
++Fourier Spectral Synthesis generates noise with a specific power spectrum by filtering white noise in the frequency domain. It is distinguished from spatial-domain noise methods by its direct control over the spectral density, making it ideal for generating random fractals and simulating natural phenomena with precise statistical properties.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Runtime is efficient, involving a weighted sum of a few texture samples (typically 4-8) per pixel [S1].
+-- **Memory Complexity:** Storage is proportional to the number of subbands. Four or eight bands (1-2 RGBA textures) provide a good trade-off [S1].
+-- **Performance:** High-quality anisotropic filtering with minimal aliasing on tilted surfaces [S1].
+-- **Strengths:** Adapts to non-uniform perspective distortions and parametric surface distortions [S1].
+-- **Limitations:** Requires pre-computation of oriented subbands [S1].
++*   **Time Complexity:** Runtime is $O(K)$ per pixel, where $K$ is the number of subbands (typically 4 or 8), involving texture sampling and weighted summation [S1].
++*   **Memory Complexity:** Storage is proportional to the number of subbands. Packing 4 bands into one RGBA texture reduces memory overhead [S1].
++*   **Performance:** Using 4 or 8 bands provides a good trade-off between storage, rendering speed, and image quality [S1].
++*   **Strengths:** Supports high-quality anisotropic filtering; adapts to non-uniform perspective distortions; avoids interpolation artifacts in orientation blending due to steerable filter properties [S1].
++*   **Limitations:** Requires offline preprocessing to generate subbands; precomputed at a single scale, requiring runtime texture scaling [S1].
++*   **When to use:** When anisotropic filtering is required, such as on tilted surfaces or under perspective distortion, to avoid aliasing or over-blurring [S1].
++*   **When not to use:** For isotropic filtering where simpler noise functions suffice [S1].
+ 
+ ## Background
+-Anisotropic noise was introduced by Goldberg et al. in 2008 [GZD08] [S1]. It builds on the concept of wavelet noise [CD05] but extends it to support anisotropic filtering, which existing isotropic noise functions could not handle without compromising between aliasing and blurring [S1]. The method uses steerable filters [SF95, PS00] to partition the frequency domain into oriented subbands [S1].
++Anisotropic noise was introduced by Goldberg et al. in 2008 [GZD08]. It was developed to address the limitations of existing noise functions, which only supported isotropic filtering, leading to compromises between aliasing and detail loss on tilted surfaces [S1]. The method is based on steerable filters [SF95, PS00] that partition the frequency domain into oriented subbands [S1]. It has been used for surface noise via 2D texture mapping and anisotropic analytic filtering [S1].
+ 
+ ## Sources
+-[S1] A Survey of Procedural Noise Functions, https://www.cs.umd.edu/~zwicker/publications/SurveyProceduralNoise-CGF10.pdf, fetched 2026-10-27+[S1] PDF A Survey of Procedural Noise Functions, https://www.cs.umd.edu/~zwicker/publications/SurveyProceduralNoise-CGF10.pdf, fetched 2026-10-27

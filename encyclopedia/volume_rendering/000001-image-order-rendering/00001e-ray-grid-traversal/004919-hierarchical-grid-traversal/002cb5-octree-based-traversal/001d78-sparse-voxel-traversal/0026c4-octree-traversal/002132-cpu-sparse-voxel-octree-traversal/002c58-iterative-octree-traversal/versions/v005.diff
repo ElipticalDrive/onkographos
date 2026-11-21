@@ -1,0 +1,267 @@
+--- v004.md
++++ v005.md
+@@ -9,15 +9,14 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   An octree data structure (root node pointer/address) [S2, S4, unofficial].
++*   An octree data structure with a root node pointer/address [S2, S4, unofficial].
+ *   A ray defined by origin $(o_x, o_y, o_z)$ and direction $(d_x, d_y, d_z)$ [S2, S4, unofficial].
+-*   Maximum iteration count `maxIterations` to limit search depth [S2, unofficial].
+-*   (Optional) Fixed-point scaling factor `tnum_scale` (e.g., 10000) for integer-based traversal [S5, unofficial].
++*   Maximum iteration count `maxIterations` to limit search depth in greedy implementations [S2, unofficial].
+ 
+ **Outputs:**
+-*   Intersection distance $t$ to the closest leaf voxel, or $-\infty$ (or -1) if no hit is found [S4, unofficial].
++*   Intersection distance $t$ to the closest leaf voxel, or $-1$ if no hit is found [S4, unofficial].
+ *   (In rendering contexts) Color and alpha values written to a pixel buffer [S2, unofficial].
+ 
+ ### Data Structures
+-The method requires state management to replace recursion. Implementations vary between explicit stack objects and fixed-size parallel arrays.
++The method requires explicit state management to replace recursion. Implementations vary between dynamic stack objects and fixed-size parallel arrays [S2, S5, unofficial].
+ 
+ 1.  **Explicit Stack (GPU/General):**
+@@ -37,32 +36,35 @@
+ ### Steps
+ 
+-1.  **Ray Normalization and Preprocessing:**
+-    *   If any ray direction component is zero, add a small epsilon (e.g., 0.001) to avoid division by zero [S2, S5, unofficial].
+-    *   If a direction component is negative, negate the corresponding origin and direction components. Set a `dir_mask` bit (x=4, y=2, z=1) to track this flip [S2, S5, unofficial].
+-    *   Compute slab entry/exit distances for the octree bounds:
++1.  **Ray Preprocessing and Slab Initialization:**
++    *   If any ray direction component is zero, add a small epsilon (e.g., 0.001) to avoid division by zero [S5, unofficial].
++    *   Compute slab entry/exit distances for the octree bounds along each axis:
+         $$tx_0 = \frac{min_x - o_x}{d_x}, \quad tx_1 = \frac{max_x - o_x}{d_x}$$
+         $$ty_0 = \frac{min_y - o_y}{d_y}, \quad ty_1 = \frac{max_y - o_y}{d_y}$$
+         $$tz_0 = \frac{min_z - o_z}{d_z}, \quad tz_1 = \frac{max_z - o_z}{d_z}$$
+         [S2, S4, S5, unofficial]
+-    *   (Optional) Scale slab boundaries by `tnum_scale` (e.g., 10000) to convert to integer coordinates for fixed-point traversal [S5, unofficial].
++    *   If a direction component is negative, swap the corresponding slab entry and exit values to maintain $t_{entry} \le t_{exit}$ [S4, unofficial].
++    *   (Optional) Scale all slab boundaries by a fixed-point factor (e.g., `tnum_scale = 10000`) to convert them to integer coordinates for traversal [S5, unofficial].
+ 
+ 2.  **Initialization:**
+-    *   Initialize the stack with the octree root node [S4, unofficial].
++    *   Initialize the stack with the octree root node and its computed slab boundaries [S4, unofficial].
+     *   Set initial traversal distance $t = +\infty$ [S4, unofficial].
+-    *   Initialize depth counters and parent pointers [S2, unofficial].
++    *   Initialize depth counters and parent pointers if using the greedy array-based approach [S2, unofficial].
+ 
+ 3.  **Traversal Loop:**
+     *   While the stack is not empty:
+         1.  Pop the current node $n$ from the stack [S4, unofficial].
+-        2.  Perform Ray-AABB intersection test between ray $r$ and node box $b$, yielding $t'$ [S4, unofficial].
+-        3.  If $t' \in (0, t)$ (valid intersection closer than current best):
++        2.  Compute ray-AABB intersection for the node's slab boundaries, yielding $t_{enter}$ and $t_{exit}$ [S4, unofficial].
++        3.  If $t_{exit} < 0$ or $t_{enter} > t_{exit}$, the ray misses the node; continue to the next iteration [S4, unofficial].
++        4.  Determine hit distance $t_{hit} = t_{enter}$ if $t_{enter} > 0$, else $t_{exit}$ (origin inside box) [S4, unofficial].
++        5.  If $t_{hit} < t$ (valid intersection closer than current best):
+             *   If $n$ is a leaf (voxel):
+-                *   Update $t = t'$ [S4, unofficial].
+-                *   (In rendering) Extract color data and write to buffer [S2, unofficial].
+-                *   Break or continue depending on whether multiple hits are required [S2, unofficial].
++                *   Update $t = t_{hit}$ [S4, unofficial].
++                *   Extract color data and write to buffer if required [S2, unofficial].
++                *   Do not break immediately; continue traversal to ensure no closer voxel exists in other branches [S2, unofficial].
+             *   If $n$ is an internal node:
+-                *   Determine the order of children to push onto the stack.
+-                *   **Ray-Direction Child Ordering:** Calculate start indices based on direction signs ($s_x, s_y, s_z$). Iterate $i, j, k$ to compute child index $4i + 2j + k + 1$. Push children in reverse order so the closest child is popped first [S4, unofficial].
+-                *   **Non-Intersectable Node Omission:** Calculate child slab boundaries using midpoints ($txm, tym, tzm$). Skip pushing a child if its minimum slab boundary $t_{i1} < t_{min}$ or maximum $t_{i0} > t_{max}$ [S4, unofficial].
++                *   Compute child slab midpoints: $txm = (tx_0 + tx_1) \times 0.5$, $tym = (ty_0 + ty_1) \times 0.5$, $tzm = (tz_0 + tz_1) \times 0.5$ [S4, unofficial].
++                *   Determine child order based on direction signs ($s_x, s_y, s_z$) to push closer children last so they pop first [S4, unofficial].
++                *   Calculate child slab boundaries using the midpoints and octant bits [S4, unofficial].
++                *   Apply Non-Intersectable Node Omission: skip pushing a child if its minimum slab boundary $t_{i1} < t_{hit}$ or maximum $t_{i0} > t_{exit}$ [S4, unofficial].
+                 *   Push valid children onto the stack [S4, unofficial].
+ 
+@@ -70,5 +72,5 @@
+     *   Instead of a standard stack, use a greedy approach with fixed-size arrays [S2, unofficial].
+     *   Iterate up to `maxIterations`.
+-    *   Identify the child with the shortest distance to the viewer.
++    *   Identify the child with the shortest distance to the viewer [S2, unofficial].
+     *   If a false positive occurs (parent hit, but no child hit or a sibling's child is closer):
+         *   Backtrack to the parent using `parentListPerDepth` and `positionListPerDepth` [S2, unofficial].
+@@ -77,103 +79,91 @@
+ 
+ 5.  **Termination:**
+-    *   If stack is empty and no hit found, return $-\infty$ (or -1) [S4, unofficial].
++    *   If the stack is empty and no hit found, return $-1$ [S4, unofficial].
+     *   If a hit is found, return $t$ [S4, unofficial].
+ 
+ ### Pseudocode
+ ```python
+-def iterative_octree_traversal(ray, octree_root, max_iterations=100):
+-    # 1. Preprocessing
+-    origin = ray.origin
+-    direction = ray.direction
++def iterative_octree_traversal(ray_origin, ray_direction, octree_root, max_iterations=100):
++    # 1. Preprocess ray direction
++    d = list(ray_direction)
++    o = list(ray_origin)
++    for axis in range(3):
++        if d[axis] == 0:
++            d[axis] = 0.001  # Avoid division by zero [S5, unofficial]
++            
++    # 2. Compute initial slab boundaries for root
++    tx0 = (octree_root.min[0] - o[0]) / d[0]
++    tx1 = (octree_root.max[0] - o[0]) / d[0]
++    ty0 = (octree_root.min[1] - o[1]) / d[1]
++    ty1 = (octree_root.max[1] - o[1]) / d[1]
++    tz0 = (octree_root.min[2] - o[2]) / d[2]
++    tz1 = (octree_root.max[2] - o[2]) / d[2]
+     
+-    # Handle zero/negative direction components
+-    dir_mask = 0
+-    if direction.x == 0: direction.x = 0.001
+-    if direction.y == 0: direction.y = 0.001
+-    if direction.z == 0: direction.z = 0.001
++    # Swap if direction is negative to maintain t_enter <= t_exit [S4, unofficial]
++    if ray_direction[0] < 0: tx0, tx1 = tx1, tx0
++    if ray_direction[1] < 0: ty0, ty1 = ty1, ty0
++    if ray_direction[2] < 0: tz0, tz1 = tz1, tz0
+     
+-    if direction.x < 0:
+-        origin.x = -origin.x
+-        direction.x = -direction.x
+-        dir_mask |= 4
+-    if direction.y < 0:
+-        origin.y = -origin.y
+-        direction.y = -direction.y
+-        dir_mask |= 2
+-    if direction.z < 0:
+-        origin.z = -origin.z
+-        direction.z = -direction.z
+-        dir_mask |= 1
+-
+-    # 2. Initialize Stack
+-    stack = []
+-    stack.append({
+-        'node': octree_root,
+-        'tx0': (octree_root.min_x - origin.x) / direction.x,
+-        'tx1': (octree_root.max_x - origin.x) / direction.x,
+-        'ty0': (octree_root.min_y - origin.y) / direction.y,
+-        'ty1': (octree_root.max_y - origin.y) / direction.y,
+-        'tz0': (octree_root.min_z - origin.z) / direction.z,
+-        'tz1': (octree_root.max_z - origin.z) / direction.z,
+-        'child_idx': 0
+-    })
+-    
++    stack = [{'node': octree_root, 'tx0': tx0, 'tx1': tx1, 'ty0': ty0, 'ty1': ty1, 'tz0': tz0, 'tz1': tz1}]
+     best_t = float('inf')
+     
+-    # 3. Traversal Loop
++    # 3. Traversal loop
+     while stack:
+         current = stack.pop()
+         node = current['node']
+         
+-        # Ray-AABB Intersection
+-        t_min = max(current['tx0'], current['ty0'], current['tz0'])
+-        t_max = min(current['tx1'], current['ty1'], current['tz1'])
++        # Ray-AABB intersection
++        t_enter = max(current['tx0'], current['ty0'], current['tz0'])
++        t_exit = min(current['tx1'], current['ty1'], current['tz1'])
+         
+-        if t_max < 0 or t_min >= t_max:
++        if t_exit < 0 or t_enter > t_exit:
+             continue
+             
+-        t_hit = t_min if t_min > 0 else t_max # Origin inside box case
++        t_hit = t_enter if t_enter > 0 else t_exit
+         
+         if t_hit < best_t:
+             if node.is_leaf():
+                 best_t = t_hit
+-                # Process leaf data (color, etc.)
+-                break # Stop if only closest hit is needed
++                # Process leaf data (e.g., color extraction) [S2, unofficial]
++                # Continue traversal to check other branches for closer hits [S2, unofficial]
+             else:
+-                # Internal node: Push children
+-                # Calculate midpoints for child slabs
++                # Internal node: compute child slab boundaries
+                 tm_x = (current['tx0'] + current['tx1']) / 2.0
+                 tm_y = (current['ty0'] + current['ty1']) / 2.0
+                 tm_z = (current['tz0'] + current['tz1']) / 2.0
+                 
+-                # Determine child order based on direction (Ray-Direction Child Ordering)
+-                # Push in reverse order so closest is popped first
+                 children_to_push = []
+                 for i in range(8):
+-                    # Compute child slab boundaries based on octant i
+-                    # Simplified: check if child intersects ray within current bounds
+-                    child_bounds = get_child_bounds(node, i, tm_x, tm_y, tm_z)
+-                    child_t_min = max(child_bounds.tx0, child_bounds.ty0, child_bounds.tz0)
+-                    child_t_max = min(child_bounds.tx1, child_bounds.ty1, child_bounds.tz1)
+-                    
+-                    # Non-Intersectable Node Omission
+-                    if child_t_max > t_hit and child_t_min < best_t:
+-                        children_to_push.append((child_t_min, node.children[i]))
++                    # Determine child octant boundaries based on bits of i
++                    x_bit = (i >> 2) & 1
++                    y_bit = (i >> 1) & 1
++                    z_bit = i & 1
++                    
++                    c_tx0 = current['tx0'] if x_bit == 0 else tm_x
++                    c_tx1 = tm_x if x_bit == 0 else current['tx1']
++                    c_ty0 = current['ty0'] if y_bit == 0 else tm_y
++                    c_ty1 = tm_y if y_bit == 0 else current['ty1']
++                    c_tz0 = current['tz0'] if z_bit == 0 else tm_z
++                    c_tz1 = tm_z if z_bit == 0 else current['tz1']
++                    
++                    c_t_enter = max(c_tx0, c_ty0, c_tz0)
++                    c_t_exit = min(c_tx1, c_ty1, c_tz1)
++                    
++                    # Non-Intersectable Node Omission [S4, unofficial]
++                    if c_t_exit > t_hit and c_t_enter < best_t:
++                        child_node = node.children[i]
++                        if child_node is not None:
++                            children_to_push.append((c_t_enter, child_node))
+                 
+-                # Sort by distance (closest first) and push
++                # Ray-Direction Child Ordering: push closer children last so they pop first [S4, unofficial]
+                 children_to_push.sort(key=lambda x: x[0])
+                 for _, child_node in reversed(children_to_push):
+-                    if child_node:
+-                        stack.append({
+-                            'node': child_node,
+-                            'tx0': child_bounds.tx0,
+-                            'tx1': child_bounds.tx1,
+-                            'ty0': child_bounds.ty0,
+-                            'ty1': child_bounds.ty1,
+-                            'tz0': child_bounds.tz0,
+-                            'tz1': child_bounds.tz1,
+-                            'child_idx': 0
+-                        })
+-                        
++                    stack.append({
++                        'node': child_node,
++                        'tx0': c_tx0, 'tx1': c_tx1,
++                        'ty0': c_ty0, 'ty1': c_ty1,
++                        'tz0': c_tz0, 'tz1': c_tz1
++                    })
++                    
+     return best_t if best_t != float('inf') else -1
+ ```
+@@ -185,7 +175,7 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Zero Ray Direction:** Division by zero in slab intersection. Handled by adding 0.001 to the component [S5, unofficial].
+-*   **Negative Ray Direction:** Requires flipping ray origin/direction and tracking via `dir_mask` to maintain consistent traversal order [S5, unofficial].
+-*   **False Positives:** A parent node may have the shortest distance, but its children might not be hit, or a sibling's child might be closer. The algorithm handles this by backtracking to the parent and checking the next best child [S2, unofficial].
++*   **Zero Ray Direction:** Division by zero in slab intersection. Handled by adding 0.001 to the component, which may slightly alter the ray path for exact grid alignments [S5, unofficial].
++*   **Negative Ray Direction:** Requires swapping slab entry/exit bounds to maintain consistent traversal order [S4, unofficial].
++*   **False Positives:** A parent node may have the shortest distance, but its children might not be hit, or a sibling's child might be closer. The algorithm handles this by continuing traversal or backtracking to the parent and checking the next best child [S2, unofficial].
+ *   **Recursion Limits:** HLSL and some GPU architectures do not support general method recursion, necessitating this iterative approach [S2, unofficial].
+ 
+@@ -196,5 +186,5 @@
+ 
+ ### [Octree Traversal with LOD & Constant Nodes](4181-octree-traversal-with-lod-constant-nodes.md)
+-This method renders a Sparse Voxel Octree (SVO) on the CPU by traversing the hierarchy to project voxels into a color buffer, using depth-sorted traversal and hierarchical culling based on projected size. It distinguishes itself from sibling methods by supporting Level of Detail (LOD) switching between constant-value nodes and textured bricks, and by using a hybrid rendering primitive strategy (points vs. rectangles) based on the projected voxel size relative to screen resolution. It builds on [Iterative Octree Traversal](2618-iterative-octree-traversal.md) by adding specific logic for constant node handling and brick texture sampling.
++This method renders a Sparse Voxel Octree (SVO) on the CPU by traversing the hierarchy to project voxels into a color buffer, using depth-sorted traversal and hierarchical culling based on projected size. It distinguishes itself from sibling methods by supporting Level of Detail (LOD) switching between constant-value nodes and textured bricks. It builds on [Iterative Octree Traversal](2618-iterative-octree-traversal.md) by adding specific logic for constant node handling and brick texture sampling.
+ 
+ ### [Ordered List Generation via N3-Tree Traversal](5023-ordered-list-generation-via-n3-tree-traversal.md)
+@@ -202,5 +192,5 @@
+ 
+ ### [Hierarchical Ray Marching](5238-hierarchical-ray-marching.md)
+-Hierarchical Ray Marching is a sparse voxel traversal technique that dynamically switches between octree node traversal and direct voxel sampling to optimize ray-marching performance. It differs from fixed-leaf or constant-node approaches by adapting the traversal granularity (level) based on whether the ray is currently inside or outside occupied space, allowing it to skip empty regions rapidly at coarse levels and sample details precisely at fine levels.
++Hierarchical Ray Marching is a sparse voxel traversal technique that dynamically switches between octree levels and voxel levels to optimize ray-marching performance. It differs from sibling methods by adjusting the traversal granularity up or down based on hit/miss status, allowing rapid skipping of empty regions at coarse levels and precise sampling at fine levels.
+ 
+ ## Operating characteristics

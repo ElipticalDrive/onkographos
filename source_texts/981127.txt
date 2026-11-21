@@ -1,0 +1,275 @@
+Intervals coupled with algebra of set to handle adaptive mesh refinement and operators on it. - feat: exact reconstruction across refinement (LBM stream, FV fluxes, reconstruction()) by gouarin · Pull Request #486 · hpc-maths/samurai
+
+feat: exact reconstruction across refinement (LBM stream, FV fluxes, reconstruction()) by gouarin · Pull Request #486 · hpc-maths/samurai · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+gouarin
+commented
+Jul 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Description
+On an adapted mesh, reconstructing a value across a refinement boundary (the LBM stream, the FV finer-level fluxes, reconstruction()) uses a flat prediction from the donor's own level. When the level gap is >= 2 and the prediction cone crosses the boundary, it ignores the finer leaves that are present there and their details.
+This PR adds an exact reconstruction that uses those finer cells. The LBM and FV schemes follow the global option --exact-reconstruction (args::exact_reconstruction); set_exact_reconstruction() overrides it per scheme. The flat reconstruction stays the default, and the exact one runs the flat stream then only corrects the band of cells whose prediction cone reaches a refinement.
+reconstruction.hpp: make_real_backed_lca, reconstruct_exact (scalar reference) and the vectorised dense cascade detail::reconstruct_box, shared by reconstruct_flat_box and reconstruct_exact_box through an is_stored predicate. reconstruction(field, exact) reconstructs each leaf region with the cascade when exact is set.
+lbm_scheme.hpp: stream_exact_reconstruction runs the flat stream then recomputes the interface band with reconstruct_exact_box; the halo depends on the level gap, through the prediction support.
+flux_based_scheme__nonlin.hpp: with --finer-level-flux, the finer-level flux reconstructs the whole stencil block of an interface in one dense cascade (reconstruct_flat_box or reconstruct_exact_box) instead of one portion() per fine cell, and reads each stencil value from it, with a scalar fallback. This applies to linear and non-linear flux functions; it is about 20 % faster on a 2D WENO5 max-level-flux case, more at larger level gaps.
+docs/source/reference/reconstruction.md ("Prediction and reconstruction"): the prediction stencil and its memoisation, portion in its scalar and summed-slice forms, and reconstruction() flat and exact, with the capped cascade A(m, i) written out. Three figures show the one-level stencil, the prediction cone, and the flat/exact difference at a refinement boundary.
+On Rayleigh-Taylor, the exact reconstruction restores the discrete mass conservation that the flat multi-level stream breaks (drift 1.9e-7 -> 4.9e-15).
+How has this been tested?
+tests/test_portion.cpp: portion_exact.graded_staircase_1D, portion_exact.adapted_mesh_2D, portion_exact.box_matches_scalar_1D.
+tests/test_lbm.cpp: lbm_d2q4 exact-reconstruction consistency.
+Demos: demos/LBM/new_D2Q5444_euler_rayleigh_taylor.cpp (mass drift), demos/FiniteVolume/burgers_mra.cpp (FV finer-level flux, exact reconstruction).
+Code of Conduct
+By submitting this PR, you agree to follow our Code of Conduct
+I agree to follow this project's Code of Conduct
+codacy-production
+Bot
+commented
+Jul 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Not up to standards ⛔
+🔴 Issues 1 minor
+Alerts:
+⚠ 1 issue (≤ 0 issues of at least minor severity)
+Results:
+1 new issue
+Category
+Results
+BestPractice
+1 minor
+View in Codacy
+🟢 Metrics 0 complexity · 13 duplication
+Metric
+Results
+Complexity
+0
+Duplication
+13
+View in Codacy
+NEW Get contextual insights on your PRs based on Codacy's metrics, along with PR and Jira context, without leaving GitHub. Enable AI reviewer
+TIP This summary will be updated as you push new changes.
+gouarin
+force-pushed
+the
+lbm-reconstruction-real-aware
+branch
+2 times, most recently
+from
+532f1f7 to
+ac8f497
+Compare
+July 27, 2026 08:41
+gouarin
+added 8 commits
+September 2, 2026 09:34
+feat: exact reconstruction across refinement (LBM stream, FV fluxes, …
+…
+3e57ad2
+```
+…reconstruction())
+
+On an adapted mesh, reconstructing a value across a refinement boundary (the LBM
+stream, the FV finer-level fluxes, reconstruction()) uses a flat prediction from
+the donor's own level: when the level gap is >= 2 and the prediction cone crosses
+the boundary, it ignores the real detail carried by the finer leaves that are
+actually present, propagating a projection error.
+
+Add an opt-in "exact reconstruction" that uses those real finer cells, behind a
+global --exact-reconstruction option (args::exact_reconstruction), the default for
+the LBM and FV schemes; a per-scheme set_exact_reconstruction() still overrides it.
+Built on the flat stream of hpc-maths#484 (kept as the fast default), the exact path only
+corrects the sparse band of cells whose cone reaches a refinement.
+
+- reconstruction.hpp: make_real_backed_lca, reconstruct_exact (scalar reference) and
+  the vectorised dense cascade detail::reconstruct_box (reconstruct_flat_box /
+  reconstruct_exact_box share it via an is_stored predicate). reconstruction(field,
+  exact) reconstructs each leaf region with the cascade when exact.
+- lbm_scheme.hpp: stream_exact_reconstruction runs the flat stream then recomputes
+  the interface band with reconstruct_exact_box; the halo is level-dependent (reach
+  scales with the prediction support at the level gap).
+- flux_based_scheme__nonlin.hpp: the finer-level flux reconstructs the whole stencil
+  block of an interface in one dense cascade (reconstruct_flat_box for flat,
+  reconstruct_exact_box for exact) instead of one portion() per fine cell, and reads
+  each stencil value from it (scalar fallback for safety). Both linear and non-linear
+  flux functions benefit; only when --finer-level-flux is active. ~20% faster on a 2D
+  WENO5 max-level-flux case, more at larger level gaps.
+- tests: portion_exact.{graded_staircase_1D, adapted_mesh_2D, box_matches_scalar_1D}
+  and lbm_d2q4 exact-reconstruction consistency.
+
+On Rayleigh-Taylor the correction restores discrete mass conservation the flat
+multi-level stream violates (drift 1.9e-7 -> 4.9e-15); the flat default is unchanged.
+```
+docs: prediction, portions and reconstruction reference page
+…
+078ffa2
+```
+Add docs/source/reference/reconstruction.md, describing the three layers
+built on the interpolating wavelet:
+
+- prediction: the sparse linear stencil (prediction_map), its memoisation
+  and its composition over a level gap;
+- portion: applying such a stencil to a field, in its scalar and summed
+  slice forms;
+- reconstruction: projecting an adapted field onto a uniform fine mesh,
+  flat or exact across refinement boundaries, with the capped cascade
+  A(m, i) written out and its building blocks listed.
+
+Three figures illustrate the one-level stencil, the prediction cone and
+the flat/exact difference at a refinement boundary.
+
+Also simplify make_real_backed_lca: build each level's
+cells + proj_cells set through the LevelCellArray set-expression
+constructor instead of filling a LevelCellList by hand.
+```
+docs: satisfy markdownlint on the reconstruction page
+…
+73b99c7
+```
+Codacy runs markdownlint on the diff and reported 14 findings on the new
+page. Fix all the actionable ones:
+
+- remove a stray unterminated code fence at the end of the file (MD031,
+  MD040), which also produced a spurious empty code block;
+- separate the MyST anchors from the headings they target with a blank
+  line, which is the canonical form (MD022);
+- rewrap the prose lines over 80 columns (MD013);
+- turn the summary table into a bullet list, since table rows cannot be
+  wrapped within the column limit (MD013).
+
+markdownlint now reports no issue on the file with its default rules.
+
+The remaining finding, MD043 (required-headings) on the title, is not
+actionable here: Codacy enables that rule with an empty heading list, so
+it fires on every Markdown file in the repository that has a heading
+(17 pre-existing occurrences, README.md and CHANGELOG.md included).
+```
+fix(lbm): size the exact-reconstruction band with the true prediction…
+…
+8c2460f
+```
+… support
+
+stream_exact_reconstruction recomputes the streamed value on the band of cells
+whose reconstruction cone reaches a refined cell, and sized that band's halo with
+min(2r, r + j - 1) cells of prediction support. The composed support is not linear
+in the level gap j: unrolling the per-level box growth of reconstruct_box gives
+S_0 = 0, S_{k+1} = r + ceil(S_k / 2), a geometric widening r + r/2 + r/4 + ...
+that saturates at 2r. The linear form matches it only for r <= 2, and
+under-estimates it from r = 3 on.
+
+The band still covered at r = 3 and r = 4, but only through two unrelated
+margins: a spare +1, and maxvel added undivided where the shift is worth
+ceil(maxvel / 2^j) cells at that level. At r = 5 the deficit exceeds both, so
+cells whose cone crosses a refinement boundary silently kept the flat value
+(measured against reconstruct_box: 6 escaping reads in 1D, 228 in 2D).
+
+Extract the recursion as composed_prediction_support() next to reconstruct_box,
+express the velocity shift in the level's own units, and keep the +1 as a stated
+margin instead of a load-bearing one. Bound the loop to level < max_level too: at
+max_level the cascade has depth 0, so the correction is the identity there (and
+proj_cells is empty), which the halo formula had no reason to express.
+
+NOT bit-identical for schemes with maxvel >= 2 (D1Q5, D1Q222): the band tightens
+by one cell at j >= 2, so a few cells now keep the flat single-stencil value
+rather than the level-by-level cascade, and those agree only up to rounding.
+Measured at 1 ulp on the D1Q5 dam break (1.8e-15 on h, scale 2), with an
+identical mesh and identical time steps. maxvel == 1 (D2Q4, D2Q9, D2Q5444) stays
+bit-identical, verified on the Rayleigh-Taylor case.
+
+- reconstruction.hpp: composed_prediction_support(); also make the header
+  self-contained, it named args::exact_reconstruction without including
+  arguments.hpp and only compiled through the include order of existing TUs.
+- tests: the recursion table for r = 0..5 with the two assertions that a linear
+  form would break, and the halo-coverage property measured on reconstruct_box
+  itself through a recording reader (1D/2D/3D, every velocity of
+  [-maxvel, maxvel]^dim, checked against the tight bound with no margin).
+```
+test(lbm): drop the local pi shadowing the namespace-level one
+…
+66e80ee
+```
+run_d2q5444_rt redeclared pi with the same value as the one in the anonymous
+namespace, which -Wshadow reports and the build treats as noise.
+```
+fix: make the schemes naming args:: include arguments.hpp
+…
+50d2c03
+```
+lbm_scheme.hpp and flux_based_scheme__nonlin.hpp default their exact-reconstruction
+flag to args::exact_reconstruction without declaring where it comes from; both only
+compiled through the include order of the existing translation units. Checked by
+compiling each header alone in its own TU.
+```
+docs(fv): record why the finer-level flux has no interface band
+…
+232370f
+```
+The LBM stream corrects only a band of cells across a refinement boundary; the
+same idea applied here would be safe (over-inclusion is bit-neutral, the two
+cascades differ only by the is_stored predicate) but not worth it. Three-point
+measurement on the 2D WENO5 burgers case, min_level 2 / max_level 8, three
+interleaved runs each:
+
+  no finer-level flux         10.26 s
+  --finer-level-flux -1       24.85 s
+  ... --exact-reconstruction  25.33 s
+
+So the is_stored lookups a band would target are 0.48 s (1.9% of the run, 3.3% of
+the machinery), while the finer-level flux machinery is 14.6 s (59%). The 1.9% is
+a ceiling no implementation can beat, and a band would only reclaim part of it
+while adding a coverage invariant to maintain - the same invariant that was
+silently wrong in the LBM stream.
+```
+refactor: silence two pre-existing compiler warnings
+…
+ddbf351
+```
+Both are unrelated to the exact-reconstruction work; the full rebuild caused by the
+rebase onto main is what exposed them.
+
+- graduation.hpp: exchange_graded_level took an int phase, so the MPI tag
+  max_size * (1 + phase) + ll mixed signedness (-Wsign-conversion). The two call
+  sites pass 0 and 1, so make the parameter a size_t and let the whole expression
+  be unsigned, rather than casting the warning away.
+- apply_field_bc.hpp: update_outer_corners_by_polynomial_extrapolation declared a
+  `domain` it never used (-Wunused-variable). It also shadowed the `domain` of a
+  neighbouring function, which is why a `domain2` was introduced next to it.
+```
+gouarin
+force-pushed
+the
+lbm-reconstruction-real-aware
+branch
+from
+ac8f497 to
+ddbf351
+Compare
+September 2, 2026 08:09
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,95 @@
+--- v001.md
++++ v002.md
+@@ -4,33 +4,30 @@
+ 
+ ## Overview
+-Context-based Probability Ray Sampling is a non-uniform ray sampling strategy that allocates more rays to image regions with high visual complexity (edges, texture) and fewer rays to trivial regions (uniform backgrounds) [S1]. It differs from [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by using local image statistics to guide ray density, and from [Pixel-guided ray sampling](7551-pixel-guided-ray-sampling.md) by relying on pre-computed spatial variance rather than learned or iterative error metrics.
++Context-based Probability Ray Sampling is a non-uniform ray sampling strategy that allocates more rays to image regions with high visual complexity (edges, texture) and fewer rays to trivial regions (uniform backgrounds) [S1]. It differs from [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by sampling more rays in areas with large probability (complex shapes/colors) and fewer rays in trivial areas (white background, walls, floors) rather than uniformly [S1].
+ 
+ ## How it works
+ **Inputs:**
+-- Input image $I_i$ with height $H_i$ and width $W_i$.
+-- Color channel data $c(x, y)$ for each pixel.
+-- Threshold parameter $s$.
++- Input image $I_i$ with height $H_i$ and width $W_i$ [S1].
++- Color channel data $c(x, y)$ for each pixel [S1].
++- Threshold parameter $s$ [S1].
+ 
+ **Outputs:**
+-- A set of rays $r_i(u, v)$ sampled from pixel coordinates $(u, v)$ according to a probability distribution.
++- A set of rays $r_i(u, v)$ sampled from pixel coordinates $(u, v)$ according to a probability distribution [S1].
+ 
+ **Data Structures:**
+-- A 2D probability map $g'(u, v)$ of size $H_i \times W_i$, normalized to $[0, 1]$.
+-- A cumulative distribution function (CDF) derived from $g'(u, v)$ for sampling.
++- A 2D probability map $g'(u, v)$ of size $H_i \times W_i$, normalized to $[0, 1]$ [S1].
++- A cumulative distribution function (CDF) derived from $g'(u, v)$ for sampling [G].
+ 
+ **Steps:**
+-1. **Compute Local Mean Color:** For each pixel $(u, v)$, calculate the mean color $\bar{c}$ of the $3 \times 3$ patch centered at $(u, v)$. The patch includes pixels $(x, y)$ where $x \in \{u-1, u, u+1\}$ and $y \in \{v-1, v, v+1\}$ [S1].
+-   $$ \bar{c} = \frac{1}{9} \sum_{x,y} c(x, y) $$
+-   *Note: Boundary handling for pixels near image edges is not specified in the source [G]. A common implementation is zero-padding or reflection padding.*
++1. **Compute Local Mean Color:** For each pixel $(u, v)$, calculate the mean color $\bar{c}$ of the $3 \times 3$ patch centered at $(u, v)$ [S1]. The patch includes pixels $(x, y)$ where $x \in \{u-1, u, u+1\}$ and $y \in \{v-1, v, v+1\}$ [S1].
++2. **Compute Standard Deviation (Context Metric):** Calculate the standard deviation $g(u, v)$ of the color values within the same $3 \times 3$ patch [S1]. This metric represents the local color variance, where high values indicate edges or texture and low values indicate uniform areas [S1].
++3. **Normalize and Clamp:** Normalize $g(u, v)$ to the interval $[0, 1]$ and apply a lower-bound clamp to prevent trivial areas from receiving zero rays [S1].
++4. **Sample Rays:** Generate rays $r_i(u, v)$ for pixel $(u, v)$ by sampling from the distribution $g'(u, v)$ [S1]. In practice, this involves constructing a CDF from $g'$ and using inverse transform sampling or stratified sampling to select ray origins or densities [G].
+ 
+-2. **Compute Standard Deviation (Context Metric):** Calculate the standard deviation $g(u, v)$ of the color values within the same $3 \times 3$ patch [S1].
+-   $$ g(u, v) = \sqrt{\frac{1}{9} \sum_{x,y} [c(x, y) - \bar{c}]^2} $$
+-   This metric represents the local color variance. High values indicate edges or texture; low values indicate uniform areas [S1].
+-
+-3. **Normalize and Clamp:** Normalize $g(u, v)$ to the interval $[0, 1]$ and apply a lower-bound clamp to prevent trivial areas from receiving zero rays [S1].
+-   $$ g'(u, v) = \frac{\text{clamp}(s, \max(g))}{\max(g)} $$
+-   Where $\text{clamp}(s, \max(g))$ replaces any value in $g(u, v)$ less than $s$ with $s$. The result is then divided by the global maximum of $g$ [S1].
+-
+-4. **Sample Rays:** Generate rays $r_i(u, v)$ for pixel $(u, v)$ by sampling from the distribution $g'(u, v)$ [S1]. In practice, this involves constructing a CDF from $g'$ and using inverse transform sampling or stratified sampling to select ray origins or densities [G].
++**Formulas:**
++- Mean color: $\bar{c} = \frac{1}{9} \sum_{x,y} c(x, y)$, where $x \in \{u-1, u, u+1\}$ and $y \in \{v-1, v, v+1\}$ [S1].
++- Context probability: $g(u, v) = \sqrt{\frac{1}{9} \sum_{x,y} [c(x, y) - \bar{c}]^2}$ [S1].
++- Normalized probability: $g'(u, v) = \frac{\text{clamp}(s, \max(g))}{\max(g)}$, where $\text{clamp}(s, \max(g))$ replaces any value in $g(u, v)$ less than $s$ with $s$ [S1]. The result is distributed in $[0, 1]$ [S1].
++- Ray sampling: $r_i(u, v) \sim g'(u, v)$ for $u \in [0, H_i]$ and $v \in [0, W_i]$ [S1].
+ 
+ **Parameters:**
+@@ -44,10 +41,37 @@
+ - **Metric Choice:** Standard Deviation is sensitive to outliers. Entropy and Variance were tested as alternatives but Standard Deviation was selected for the final method [S1].
+ 
++**Pseudocode:**
++```python
++def compute_probability_map(image, patch_size=3, threshold_factor=0.01):
++    H, W, C = image.shape
++    prob_map = np.zeros((H, W))
++    half = patch_size // 2
++    padded = np.pad(image, half, mode='reflect') # [G]
++    for u in range(H):
++        for v in range(W):
++            patch = padded[u:u+patch_size, v:v+patch_size, :]
++            mean_c = np.mean(patch)
++            std_c = np.std(patch)
++            prob_map[u, v] = std_c
++    max_g = np.max(prob_map)
++    mean_g = np.mean(prob_map)
++    s = threshold_factor * mean_g
++    prob_map = np.clip(prob_map, s, max_g) / max_g # [S1]
++    return prob_map
++
++def sample_rays(prob_map, num_rays):
++    flat_probs = prob_map.flatten()
++    flat_probs /= flat_probs.sum() # [G]
++    pixel_indices = np.random.choice(flat_probs.size, size=num_rays, p=flat_probs) # [G]
++    rays = np.unravel_index(pixel_indices, prob_map.shape) # [G]
++    return rays
++```
++
+ ## Operating characteristics
+-- **Time Complexity:** $O(H \times W \times K^2)$ to compute the probability map, where $K$ is the patch size (typically 3). Sampling is $O(N)$ where $N$ is the number of rays.
+-- **Memory Complexity:** $O(H \times W)$ to store the probability map $g'(u, v)$ [S1].
+-- **Performance:** Reduces training time by sampling fewer rays in trivial areas while maintaining accuracy in complex regions [S1]. Evaluated on Plenoxels, it significantly improves performance over methods without probability sampling [S1].
+-- **Strengths:** Simple to implement; leverages existing image data; reduces computational load in low-information areas.
+-- **Limitations:** Requires access to the input image context; may not adapt to 3D geometry changes that do not affect 2D image variance; boundary handling is ambiguous.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Measured Performance:** Evaluated on Plenoxels, it significantly improves performance over methods without probability sampling [S1]. Reduces training time by sampling fewer rays in trivial areas while maintaining accuracy in complex regions [S1]. Hardware, resolution, and scene specifics are not given in the sources.
++- **Strengths:** Simple to implement; leverages existing image data; reduces computational load in low-information areas [S1].
++- **Limitations:** Requires access to the input image context; may not adapt to 3D geometry changes that do not affect 2D image variance; boundary handling is ambiguous [G].
+ 
+ ## Background

@@ -1,0 +1,153 @@
+# Binary Greedy Meshing with Transparency Support
+
+Also called: Binary Greedy Mesher with Transparency Support, NE/NETC Face Culling, Transparent Voxel Greedy Mesher
+
+## Overview
+Binary greedy meshing with transparency support extends standard binary greedy meshing to correctly render voxel chunks containing partially transparent blocks (e.g., glass) and opaque blocks with internal gaps (e.g., doors) [S1, unofficial]. It solves the problem of over-culling faces that are visible through transparent voxels by generating face masks that include transparent voxels adjacent to solid ones, ensuring correct visibility while maintaining minimal face count [S1, unofficial]. Unlike its sibling [Binary Greedy Voxel Meshing without Ambient Occlusion](4536-binary-greedy-voxel-meshing-without-ambient-occlusion.md), which treats all non-air blocks as opaque for culling purposes, this method distinguishes between solid and transparent states to preserve necessary geometry for rendering pipelines that respect depth testing [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- A chunk of voxel data, where each voxel has a `BlockData` structure containing:
+  - `is_solid()`: Boolean indicating if the block occupies space.
+  - `is_transparent()`: Boolean indicating if the block allows light/visibility through it.
+  - `opaque_faces_bitset`: A `u8` bitmask where bits 0–5 correspond to the up, down, left, right, front, and back faces respectively. A bit is set if that specific face is opaque [S1, unofficial].
+- `CHUNK_SIZE`: The logical dimension of the chunk (e.g., 16, 32).
+- `CHUNK_SIZE_P`: The padded dimension used for array layouts, typically `CHUNK_SIZE + 2` to handle boundary padding [S1, unofficial].
+
+**Outputs:**
+- A set of face masks (`col_face_masks` or `face_cols`) that determine which voxel positions contribute to mesh vertices for each of the 6 face directions.
+- Mesh vertices generated from these masks, mapped to world coordinates.
+
+### Data Structures
+The algorithm relies on 64-bit integer bitmasks to represent voxel occupancy along each axis. The layout assumes a chunk size of 64 or less per axis to fit within `u64`.
+
+1.  **`axis_cols`**: `[[[u64; CHUNK_SIZE_P]; CHUNK_SIZE_P]; 3]`
+    -   Stores bitmasks for all solid voxels.
+    -   Index `[axis][coord1][coord2]` contains a `u64` where the bit at position `coord3` is set if the voxel at `(coord1, coord2, coord3)` is solid.
+    -   Axis mapping:
+        -   Axis 0 (X): `axis_cols[0][z][x]` has bit `y` set.
+        -   Axis 1 (Y): `axis_cols[1][y][z]` has bit `x` set.
+        -   Axis 2 (Z): `axis_cols[2][y][x]` has bit `z` set.
+
+2.  **`axis_cols_opaque`**: `[[[u64; CHUNK_SIZE_P]; CHUNK_SIZE_P]; 3]`
+    -   Stores bitmasks for solid AND non-transparent voxels.
+    -   Layout identical to `axis_cols`, but bits are only set if the voxel is solid and `is_transparent()` is false [S1, unofficial].
+
+3.  **`col_face_masks`**: `[[[u64; CHUNK_SIZE_P]; CHUNK_SIZE_P]; 6]`
+    -   Stores the final culling masks for mesh generation.
+    -   Index `2 * axis + 0` corresponds to the descending face mask (e.g., bottom face for Y-axis).
+    -   Index `2 * axis + 1` corresponds to the ascending face mask (e.g., top face for Y-axis) [S1, unofficial].
+
+4.  **`face_cols`** (Optional, for per-face transparency): `[[[u64; CHUNK_SIZE_P]; CHUNK_SIZE_P]; 6]`
+    -   Stores bitmasks for solid voxels, indexed by specific face direction (0–5) rather than axis [S1, unofficial].
+
+5.  **`face_cols_opaque`** (Optional, for per-face transparency): `[[[u64; CHUNK_SIZE_P]; CHUNK_SIZE_P]; 6]`
+    -   Stores bitmasks for solid and opaque voxels, indexed by specific face direction [S1, unofficial].
+
+### Steps
+
+1.  **Initialize Arrays**:
+    Initialize `axis_cols`, `axis_cols_opaque`, `col_face_masks`, `face_cols`, and `face_cols_opaque` to zero.
+
+2.  **Populate Column Masks**:
+    Iterate over every voxel `(x, y, z)` in the chunk. For each voxel with `BlockData b`:
+    -   If `b.is_solid()` is true:
+        -   Set the corresponding bit in `axis_cols` for all three axes:
+            ```python
+            axis_cols[0][z][x] |= 1u64 << y
+            axis_cols[1][y][z] |= 1u64 << x
+            axis_cols[2][y][x] |= 1u64 << z
+            ```
+        -   If using per-face transparency, set bits in `face_cols` for all 6 faces:
+            ```python
+            face_cols[0][z][x] |= 1u64 << y  # Up
+            face_cols[1][z][x] |= 1u64 << y  # Down
+            face_cols[2][y][z] |= 1u64 << x  # Left
+            face_cols[3][y][z] |= 1u64 << x  # Right
+            face_cols[4][y][x] |= 1u64 << z  # Front
+            face_cols[5][y][x] |= 1u64 << z  # Back
+            ```
+    -   If `b.is_solid()` and `not b.is_transparent()` (or specific face is opaque):
+        -   Set the corresponding bit in `axis_cols_opaque`:
+            ```python
+            axis_cols_opaque[0][z][x] |= 1u64 << y
+            axis_cols_opaque[1][y][z] |= 1u64 << x
+            axis_cols_opaque[2][y][x] |= 1u64 << z
+            ```
+        -   If using per-face transparency, use `opaque_faces_bitset` to set bits in `face_cols_opaque`:
+            ```python
+            # Helper to check bit i in bitset
+            def bitset_at(bitset, i):
+                return (bitset >> i) & 1
+
+            # Up/Down (Axis 0)
+            face_cols_opaque[0][z][x] |= bitset_at(b.opaque_faces_bitset, 0) << y
+            face_cols_opaque[1][z][x] |= bitset_at(b.opaque_faces_bitset, 1) << y
+            # Left/Right (Axis 1)
+            face_cols_opaque[2][y][z] |= bitset_at(b.opaque_faces_bitset, 2) << x
+            face_cols_opaque[3][y][z] |= bitset_at(b.opaque_faces_bitset, 3) << x
+            # Front/Back (Axis 2)
+            face_cols_opaque[4][y][x] |= bitset_at(b.opaque_faces_bitset, 4) << z
+            face_cols_opaque[5][y][x] |= bitset_at(b.opaque_faces_bitset, 5) << z
+            ```
+
+3.  **Compute Face Masks**:
+    Iterate over each axis `a` in `0..3`, and coordinates `z`, `x` in `0..CHUNK_SIZE_P`.
+    -   Retrieve the solid column mask: `col = axis_cols[a][z][x]`.
+    -   Compute the opaque column mask: `col_opaque = col & axis_cols_opaque[a][z][x]`.
+    -   Compute solid face masks using bitwise shifts to detect transitions from solid to air:
+        -   Descending (e.g., bottom face): `solid_descending = col & !(col << 1)`
+        -   Ascending (e.g., top face): `solid_ascending = col & !(col >> 1)`
+    -   Compute opaque face masks:
+        -   Descending: `opaque_descending = col_opaque & !(col_opaque << 1)`
+        -   Ascending: `opaque_ascending = col_opaque & !(col_opaque >> 1)`
+    -   Combine masks to allow faces where either a solid-to-air transition occurs OR an opaque-to-air transition occurs (preserving visibility through transparent voxels):
+        ```python
+        col_face_masks[2 * a + 0][z][x] = solid_descending | opaque_descending
+        col_face_masks[2 * a + 1][z][x] = solid_ascending | opaque_ascending
+        ```
+    -   *Note*: If using per-face transparency (`face_cols`), replace `axis_cols` with `face_cols` and `axis_cols_opaque` with `face_cols_opaque` in the above calculations, iterating over face indices `0..5` instead of axes [S1, unofficial].
+
+4.  **Generate Mesh**:
+    Iterate over the face masks to generate vertices. For each axis `a` and coordinates `z`, `x`:
+    -   Retrieve the mask: `col = col_face_masks[a][z + 1][x + 1]`.
+    -   Remove padding bits:
+        -   Shift right by 1 to remove right padding: `col >>= 1`.
+        -   AND with inverse of `1 << CHUNK_SIZE` to remove left padding: `col &= !(1 << CHUNK_SIZE)`.
+    -   While `col != 0`:
+        -   Get the axial coordinate: `y = col.trailing_zeros()`.
+        -   Clear the least significant bit: `col &= col - 1`.
+        -   Map to voxel position:
+            ```python
+            if a in [0, 1]: # X or Y axis faces
+                voxel_pos = (x, y, z)
+            elif a in [2, 3]: # Z or other axis faces depending on mapping
+                voxel_pos = (y, z, x)
+            else:
+                voxel_pos = (x, z, y)
+            ```
+        -   Generate mesh geometry for the face at `voxel_pos` [S1, unofficial].
+
+### Parameters
+-   `CHUNK_SIZE`: Logical chunk dimension. Must be $\le 64$ for `u64` bitmasks.
+-   `CHUNK_SIZE_P`: Padded dimension, typically `CHUNK_SIZE + 2`.
+-   `opaque_faces_bitset`: Block-specific `u8` bitmask for per-face opacity [S1, unofficial].
+
+### Edge Cases and Pitfalls
+-   **Padding Removal**: Failure to remove padding bits from the column mask before processing leads to invalid voxel positions. Right padding is removed by shifting right by 1, and left padding by ANDing with the inverse of `1 << CHUNK_SIZE` [S1, unofficial].
+-   **Transparency Ordering**: The rendering pipeline must respect transparency ordering (e.g., via depth testing and sorting transparent faces back-to-front) to correctly render the generated transparent faces. Without this, visual artifacts may occur [S1, unofficial].
+-   **Block Type Consistency**: Greedy meshing typically requires adjacent faces to have the same block type and ambient occlusion settings to be merged. This method only handles the visibility culling; merging logic remains separate [S1, unofficial].
+
+## Operating characteristics
+-   **Time Complexity**: $O(V)$ where $V$ is the number of voxels in the chunk, for the population phase. The mask generation is $O(C^2)$ where $C$ is the chunk dimension, due to the 2D iteration over axes. Mesh generation is proportional to the number of exposed faces.
+-   **Memory Complexity**: $O(C^2)$ for the bitmasks. Specifically, $3 \times C_P^2 \times 8$ bytes for `axis_cols` and `axis_cols_opaque`, and $6 \times C_P^2 \times 8$ bytes for `col_face_masks`.
+-   **Strengths**: Significantly reduces over-culling in scenes with transparent blocks compared to standard binary greedy meshing. Maintains the performance benefits of bit-parallel operations.
+-   **Limitations**: Requires a rendering pipeline that supports transparency sorting. Per-face transparency adds complexity and memory overhead.
+-   **When to use**: When rendering voxel worlds with glass, water, or other transparent materials where standard greedy meshing would incorrectly hide visible faces behind transparent blocks.
+
+## Background
+This method was developed as an extension to binary greedy meshing to address the limitations of treating all non-air blocks as opaque for culling purposes. It was discussed in the context of the `binary_greedy_mesher_demo` repository, aiming to support transparent voxel textures like glass and opaque blocks with gaps like doors [S1, unofficial]. The technique leverages bitwise operations to efficiently compute face masks that account for transparency, ensuring minimal face count while preserving visual correctness.
+
+## Sources
+[S1] Supporting Transparent Voxel Textures, https://github.com/TanTanDev/binary_greedy_mesher_demo/issues/5, fetched 2026-10-27 (unofficial)

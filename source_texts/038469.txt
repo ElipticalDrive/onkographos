@@ -1,0 +1,373 @@
+# WebSplatter: Enabling Cross-Device Efficient Gaussian Splatting in Web Browsers via WebGPU
+
+Yudong Han hanyd@pku.edu.cn Institute for Artificial Intelligence, Peking University China
+
+Chao Xu eric.xc@alibaba-inc.com Tongyi Lab, Alibaba Group China
+
+Xiaodan Ye doris.yxd@alibaba-inc.com Tongyi Lab, Alibaba Group China
+
+Weichen Bi biweichen@pku.edu.cn Institute for Artificial Intelligence, Peking University China
+
+Zilong Dong list.dzl@alibaba-inc.com Tongyi Lab, Alibaba Group China
+
+Yun Ma mayun@pku.edu.cn Institute for Artificial Intelligence, Peking University China
+
+### Abstract
+
+We present WebSplatter, an end-to-end GPU rendering pipeline for the heterogeneous web ecosystem. Unlike naive ports, WebSplatter introduces a wait-free hierarchical radix sort that circumvents the lack of global atomics in WebGPU, ensuring deterministic execution across diverse hardware. Furthermore, we propose an opacityaware geometry culling stage that dynamically prunes splats before rasterization, significantly reducing overdraw and peak memory footprint. Evaluation demonstrates that WebSplatter consistently achieves 1.2× to 4.5× speedups over state-of-the-art web viewers.
+
+### 1 Introduction
+
+The web has become one of the dominant platforms for interactive 3D experiences, driven by its accessibility, zero-install deployment, and cross-platform sharing [28, 39]. As browser technologies and graphics APIs continue to evolve, rendering complex, large-scale scenes directly on the web has shifted from a niche capability to a mainstream demand. To meet this need for both high fidelity and real-time performance, 3D Gaussian Splatting (3DGS) [16] has emerged as a revolutionary technique, rapidly gaining traction within the web ecosystem. Its differentiable nature makes it particularly appealing for generative and reconstruction tasks, where models learn to synthesize or reconstruct 3D scenes from images, videos, or text prompts. Therefore, 3DGS is rapidly becoming a building block in the emerging ecosystem of generative 3D modeling [21, 33, 40], supporting applications for high-fidelity reconstruction, neural rendering, text-to-3D generation, and interactive content creation in the browser. This trend is further amplified by Marble [38], a creative platform recently introduced by Li Fei-Fei's WorldLabs, in which creators generate entire virtual worlds and export them as Gaussian splats for reuse in downstream projects. This convergence of web-native deployment, real-time rendering, and generative 3D modeling is reshaping the landscape of immersive content creation. By enabling seamless distribution and easy access through the browser, it lowers the barrier to producing and sharing high-quality 3D scenes. As a result, bringing 3DGS to the web is no longer a novelty but an essential and timely research direction [31, 41].
+
+Despite the growing interest in 3DGS, building a high-performance and portable renderer for the web is still challenging and unexplored. The difficulty lies in a fundamental mismatch between traditional graphics pipelines and neural rendering. WebGL [12, 13], the conventional web graphics API, follows a fixed-function design optimized for triangle meshes. In contrast, 3DGS requires intensive, frame-dependent computations, such as depth sorting and view-adaptive color evaluation. Since WebGL lacks generalpurpose compute capabilities, these tasks are offloaded to the CPU via JavaScript or WebAssembly, introducing latency and bandwidth overheads that scale poorly with scene complexity [41]. Consequently, real-time rendering of large-scale 3DGS scenes remains impractical under the WebGL API.
+
+The emergence of WebGPU [35] offers an opportunity to overcome these limitations by introducing modern GPU features to the web browser. These features include compute shaders, storage buffers, and fine-grained resource control, which enable complex workloads such as sorting and shading to be executed entirely in parallel on the GPU, thereby eliminating most CPU-GPU synchronization overheads. However, recent WebGPU-based 3DGS renders have encountered new challenges. Many of these ports are directly adapted from CUDA or Vulkan code. However, the web is heterogeneous, spanning a wide range of devices from high-end discrete GPUs to mobile SoCs. This diversity often leads to performance degradation or even synchronization failures on certain platforms. As a result, despite the modern GPU capabilities, achieving robust and efficient 3DGS rendering across browsers and devices remains a significant open problem.
+
+To address this gap, we propose WebSplatter1 , a WebGPU-based framework for real-time 3DGS. WebSplatter addresses web-specific challenges in WebGPU and leverages a fully GPU compute-render pipeline to overcome the performance and portability limitations of WebGL-based approaches. Designed for heterogeneous hardware and vendor-neutral execution, it enables efficient rendering across desktop and mobile platforms. The main contributions are summarized as follows:
+
+- An end-to-endWebGPU framework for 3D Gaussian Splatting. We present WebSplatter, the first framework that bridges the gap between native GPU capabilities and the sandboxed web
+
+1The source code is available at [https://anonymous.4open.science/r/webgs.](https://anonymous.4open.science/r/webgs)
+
+environment. Unlike direct ports of native algorithms, which fail due to the lack of low-level thread interlocks in browsers, Web-Splatter employs a wait-free, multi-stage parallel pipeline designed specifically to guarantee synchronization and deadlockfree execution on the Web.
+
+- Optimization for cross-platform WebGPU backends. We propose a set of techniques that ensure stable and efficient performance across diverse devices. A wait-free radix sort eliminates inter-workgroup spin waiting and guarantees deadlockfree execution on GPUs from different vendors. Screen-space culling and opacity-driven quad sizing further reduce the overall computational workload and improve runtime efficiency.
+- Comprehensive Evaluation on Performance. We evaluate WebSplatter across diverse hardware platforms. The framework achieves speedups ranging from 1.18× to 4.5× over state-ofthe-art baselines. Furthermore, we demonstrate that WebSplatter reduces peak memory consumption compared to existing WebGPU ports, preventing crashes on memory-constrained devices.
+
+The remainder of this paper is organized as follows. Section 2 introduces the fundamentals of 3DGS and the challenges of implementing it on WebGPU. Section 3 presents the architecture of WebSplatter. Section 4 reports evaluation results and performance analyses across multiple hardware platforms. Section 5 reviews existing studies on WebGPU, acceleration techniques for Gaussian Splatting, and web-based 3D rendering. Finally, Section 6 concludes the paper.
+
+### 2 Background
+
+### 2.1 3D Gaussian Splatting
+
+The field of novel view synthesis has seen a progression from traditional explicit representations like meshes to implicit neural models such as Neural Radiance Fields (NeRF) [25]. While NeRF offers high quality, its reliance on computationally intensive ray sampling and MLP queries limits real-time applications. 3D Gaussian Splatting (3DGS) [16] introduces an alternative by employing an explicit representation composed of 3D splats. This approach establishes a differentiable rendering pipeline, achieving both high-quality rendering and superior performance. However, this method introduces its own computational demands. To ensure correct rendering order, all Gaussians must be sorted by their distance from the camera. Similarly, simulating realistic lighting and reflections depends on view-dependent color calculations.
+
+As an explicit 3D representation, 3DGS models a scene using a collection of 3D Gaussians, each defined by a set of geometric and appearance properties. The geometry distribution of each Gaussian is specified by its center position �� and a 3D covariance matrix Σ:
+
+$$G(\mathbf{x}) = e^{-\frac{1}{2}(\mathbf{x}-X)^T \Sigma^{-1}(\mathbf{x}-X)}$$
+
+The covariance matrix Σ is decomposed into a rotation quaternion and a scaling vector to define the ellipsoid's orientation and extent. The appearance of each Gaussian is captured by an opacity attribute �� and view-dependent color, represented by Spherical Harmonics (SH) coefficients. To render an image from a given camera viewpoint, the 3D Gaussians are first projected onto the 2D image plane. The splatting opacity �� for each Gaussian's contribution to
+
+a pixel is calculated based on its learned peak opacity �� and the projected 2D covariance matrix Σ ′ :
+
+$$\alpha = \sigma e^{-\frac{1}{2}\mathbf{x}'^T \Sigma' - 1},$$
+
+where x ′ is the distance vector from the pixel center to the projected Gaussian center. The color ���� of each Gaussian is determined by evaluating its SH coefficients using the viewing direction d from the camera to the Gaussian's center:
+
+$$c_i = \text{SH}(k_i, \mathbf{d})$$
+
+Here, SH represents the evaluation of the Spherical Harmonics basis functions with the learned coefficients ���� for the specific camera view direction d. This enables the Gaussian Splats to simulate reflection effects.
+
+The final color �� for each pixel is then computed by alphablending the �� contributing Gaussians, which are sorted by depth to the camera from back to front:
+
+$$C = \sum_{i \in N} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j).$$
+
+### 2.2 Web Graphics Rendering API
+
+Introduced by the Khronos Group in 2011, WebGL [12] is a graphics API for web browsers, derived from OpenGL ES [17]. WebGL's programming model faces significant performance limitations on modern hardware [14]. To further leverage modern GPUs, WebGPU was officially introduced in 2021 [35] as the next-generation graphics API for web browsers, offering a declarative programming model with more fine-grained resource management. The programming model of WebGPU is inspired by modern native APIs such as Vulkan, Metal, and DirectX 12.
+
+WebGPU Rendering Process. The rendering process in WebGPU involves defining all necessary resources through descriptors. These descriptors are then used to construct WebGPU resources, which are filled in the GPU command buffers. A central WebGPU resource is the Pipeline, which encapsulates the vertex and fragment shaders. The vertex shader is responsible for computing vertex positions and organizing them into primitives like triangles. The fragment shader processes each pixel, interpolating vectors passed from the vertex shader (such as color or the distance vector x within a Gaussian splat). The BindGroup defines the layout for rendering data, such as RGB colors, positions, or splat centers. These individual resources are assembled into a RenderPass. Finally, a command encoder compiles the render pass into a command buffer, which is submitted to the GPU for execution. A detailed overview of the WebGPU rendering workflow is provided in Appendix A.
+
+WebGPU Compute Shaders. One of the pivotal advancements of WebGPU over WebGL is its native support for general-purpose computation via compute shaders. Since WebGL does not support general GPU computation, complex workloads like sorting or physics simulation must run on the CPU (through JavaScript or WebAssembly), leading to high data transfer overheads. In contrast, WebGPU's compute shaders provide direct access to the GPU's Single-Instruction-Multiple-Thread (SIMT) programming architecture. They execute on a grid of workgroups, where each workgroup comprises multiple threads that run in parallel and can communicate efficiently using shared memory. This powerful computational model is essential for
+
+
+
+Figure 1: System overview of WebSplatter. The architecture follows a hybrid compute-render pipeline: blue stages represent compute passes, and gray stages represent render passes.
+
+modern rendering techniques that require massive data processing before rasterization, such as the GPU-based sorting algorithm and color calculation.
+
+
+
+### 3 Design
+
+This section introduces the design of WebSplatter, including an overview of its workflow and details of the modules.
+
+#### 3.1 Overview
+
+As illustrated in Figure 1, the architecture of WebSplatter is designed as a hybrid compute-render pipeline. This design fully leverages the capabilities of heterogeneous GPUs while maintaining broad hardware compatibility.
+
+The pipeline consists of three stages. The Pre-processing Stage uses compute shaders for view-dependent culling, 2D projection, and color computation of visible splats. The Sort Stage performs a GPU-based radix sort on view-space depth using a wait-free algorithm that remains efficient across different GPU architectures. The Rasterization Stage employs the hardware rendering pipeline to draw 2D Gaussians, reducing overhead by estimating each splat’s bounding box from its opacity to minimize redundant fragment processing.
+
+#### 3.2 Pre-processing Stage
+
+The goal of the Pre-processing Stage is to transform the raw 3D Gaussian data into a compacted, view-dependent set of 2D primitives ready for sorting and rasterization. As shown in Figure 1, this stage is composed of Bounding Box Culling and View-dependent Color Calculation.
+
+Bounding Box Culling. For each Gaussian, we project its 3D center and covariance matrix into 2D screen space. This projection yields a 2D ellipse, for which we compute an axis-aligned bounding box (AABB). We drop the Gaussian whose bounding box does not intersect the camera viewport. The alive primitives are then written
+
+into a buffer for the subsequent stages. During this culling, WebSplatter also calculates the major and minor axes of its projected 2D ellipse. We then compress and pack these two vectors into a pair of 32-bit unsigned integers (using 16-bit floats for each vector component) and pass them to the Rasterization Stage. We also calculate the depth for each primitive during the culling pass and store this depth as a 32-bit floating point into a dedicated buffer.
+
+View-Dependent Color Calculation. For each splat, we evaluate its Spherical Harmonics (SH) coefficients based on the current viewing direction to compute the final RGB color. The resulting floating-point color and the splat’s opacity are then compressed and packed into a single 32-bit unsigned integer using an RGBA8 format. This data compression significantly reduces the memory bandwidth required during the final rendering stage.
+
+#### 3.3 Sort Stage
+
+Following the pre-processing stage, WebSplatter generates a list of visible splats. These splats must be rendered in back-to-front order to achieve correct alpha blending.
+
+3.3.1 The Challenge of Sorting on WebGPU. In parallel radix sort, the computational bottleneck often lies in the efficiency of the prefix-sum (scan) primitive, which is used to calculate the starting offset for each element in the output array in parallel [2, 29, 32]. However, directly porting native GPU implementations is impractical because the WebGPU standard, designed for cross-platform compatibility, provides no guarantee on workgroup scheduling order or the fine-grained behavior of atomic operations. As a result, algorithms that rely on specific scheduling assumptions may perform inconsistently across devices.
+
+A typical example is the inter-workgroup spin-wait pattern, where each workgroup computes local sums and then continuously polls a global atomic flag in a while(true) loop, waiting for other workgroups to finish. This approach implicitly assumes a fixed scheduling order; on devices without such guarantees, it
+
+degenerates into a busy-wait, wasting GPU cycles and memory bandwidth.
+
+3.3.2 A Wait-Free Radix Sort. We design our sorting algorithm based on a wait-free, hierarchical Blelloch scan.
+
+Design. The core principle of the algorithm is that the final position (denoted as ������) for an element originally at index i during each sorting pass is determined by the formula:
+
+$$pos = \text{base}_d + \text{rank}_i$$
+
+In this formula, �� represents the specific digit value of the element being processed during the current pass of the radix sort. base�� is a global offset for a given digit value, which is equal to the total count of all elements with a digit value less than ��. rank�� is defined as the count of elements that appear before index �� in the input array and share the same digit value ��. This calculation of ������ guarantees that elements with identical digits are placed into the output array in the same relative order in which they appeared in the input.
+
+To compute rank�� efficiently, we decompose its calculation into two parts: an inter-workgroup component and an intra-workgroup component. This decomposition is the key to our parallel framework:
+
+$$\text{rank}_i = \text{prefix}_{wg} + \text{rank}_{\text{local}_i}$$
+
+$$\text{rank}_i = \text{prefix}_{w_g} + \text{rank}_{\text{local}},$$
+
+Where prefix���� is the inter-workgroup rank, representing the total count of elements with digit �� that appear in all workgroups processed before the current one; and rank\_local�� is the intraworkgroup rank, representing the number of elements with digit �� that appear within the current workgroup but before ��. Both the base�� and prefix���� values are outputs of a global prefix sum.
+
+Implementation. We apply our sorting design to the depth of each splat. We perform the full 32-bit sort by executing four consecutive passes of an 8-bit radix sort with a radix size of 256. Starting from the least significant bits, each pass stably sorts the keys by an 8-bit segment of the depth value. Specifically, the ��-th pass processes bits �� × 8 to (�� + 1) × 8 − 1 of the key. Each of the four passes is composed of a three-step pipeline using WebGPU compute shaders. In the first step, Local Histogram, each workgroup counts digit frequencies within each workgroup. In the second step, Prefix Scan, the hierarchical Blelloch scan processes the histograms to compute the two required offsets for the scatter phase: the interworkgroup prefix, prefix����, and the global base�� . In the third step, Scatter, the algorithm writes each element to its new position ������ in the sorted array.
+
+As shown in the Sort Stage in Figure 1, we compute the perdigit offsets with a two-phase hierarchical Blelloch scan. In the forward pass (upsweep), level ��0 performs an exclusive scan inside each workgroup tile of size wg over the indicator stream for digit ��. This produces tile sums, which form an array of length ��/wg. Level ��1 runs the same Blelloch scan on this array to obtain prefixes across tiles, and the process recurses until a single level remains. The last level provides global counts for all digits; from these, we read base�� as the sum of counts of digits smaller than ��. In the backward pass (downsweep), the prefixes computed at level ��1 are added back to their corresponding ��0 tiles, and then to individual elements, yielding the inter-workgroup offset prefix����. Each level is executed as an independent compute dispatch that consumes the previous level's buffers, with only intra-workgroup barriers inside
+
+a tile. There is no cross-workgroup polling, so the algorithm makes linear work ��(��), uses ��(��/wg) auxiliary storage, and avoids spin waiting across heterogeneous GPU schedulers.
+
+#### 3.4 Rasterization Stage
+
+The final stage of our pipeline is responsible for rendering the sorted 2D Gaussians into the final image.
+
+A key design choice in WebSplatter is to use the hardwareaccelerated vertex and fragment shader pipeline instead of a tilebased rasterizer. Tile-based methods, common in CUDA implementations, build and process a large buffer of ⟨���������� , ������������⟩ pairs that map screen tiles to intersecting splats. Generating and sorting this buffer incurs heavy memory traffic. On heterogeneous devices such as laptops and mobile phones, limited bandwidth makes this step a major bottleneck. By relying on the standard rendering pipeline, WebSplatter avoids this cost and achieves better scalability in web environments.
+
+As shown in Figure 1, we render each Gaussian by submitting a single quad (composed of two triangles) via an instanced draw call. Since each Gaussian represents a 3D ellipse with a spatial extent that projects differently depending on the camera view, a key challenge is to determine the appropriate screen-space size for each quad. Ideally, the quad's bounds should tightly bound the area where the Gaussian's color and alpha contribution are significant. WebSplatter derives this size from the Gaussian's opacity. The alpha contribution of a 2D Gaussian at a squared distance �� 2 from its center is proportional to �� −�� 2 . The final opacity of a fragment is the product of this Gaussian decay and the splat's peak opacity, ��. We define the cutoff radius as the point where this final opacity drops below a minimum threshold, such as 1/255:
+
+$$\frac{1}{255} = \sigma \cdot e^{-r^2}$$
+
+Solving for the radius �� gives the required scaling factor for the quad's vertices:
+
+$$r = \sqrt{\ln(255 \cdot \sigma)}$$
+
+This�� is computed in the vertex shader to size each quad, ensuring a tight bound dynamically. Gaussians with �� &lt; 1/255 are culled in the pre-processing stage, as their contribution is below the quantization threshold.
+
+A key insight in our rasterization is to evaluate the Gaussian function efficiently by reusing the hardware's linear interpolators delivered by the render pipeline. As shown in 1, the vertex shader passes a local coordinate for each of the four quad vertices to the fragment shader. During rasterization, the hardware interpolates this local coordinate for each fragment, assigning each fragment its own position relative to the Gaussian center. For a fragment with barycentric coordinates (��, ��,��) within a triangle defined by vertices (��0, ��1, ��2), its interpolated local coordinate �� is:
+
+$$p = \alpha v_0 + \beta v_1 + \gamma v_2$$
+
+In the fragment shader, we then compute the dot product of this interpolated local coordinate with itself to get the squared distance from the center, denoted as ��. This value �� is used directly in the Gaussian function �� −�� to calculate the final color and alpha contribution for that specific pixel, reconstructing the splat efficiently.
+
+#### 4 Evaluation
+
+#### 4.1 Experimental Setup
+
+We implement WebSplatter in TypeScript and WGSL with approximately 6,600 lines of code. We employ Vite [7] to compile the source code. WebSplatter reads and renders Gaussian splatting scenes from standard PLY [34] files.
+
+Devices. We select a diverse range of devices to ensure our evaluation is representative of the heterogeneous hardware landscape of the modern web ecosystem.
+
+- Desktop. We use a high-end workstation with an Nvidia RTX 3070 GPU to establish the upper performance bound, and an Intel NUC mini-PC with an integrated Core i9-9980HK GPU to represent systems without discrete graphics.
+- Laptops. We select laptops from both macOS and Windows ecosystems. We use a MacBook Pro (M1) and a MacBook Air (M4) to cover two generations of Apple Silicon. We also use a Lenovo laptop with an entry-level Nvidia MX350 GPU, representing typical thin-and-light Windows notebooks.
+- Mobile Devices. We utilize three smartphones: an iPhone 15 Pro Max, a Redmi K70 Pro (Snapdragon 8 Gen 3), and an Oppo Find X2 (Snapdragon 865), representing current and previous hardware generations.
+
+Browsers. We evaluate browsers with WebGPU available out of the box. Google Chrome has shipped WebGPU by default since version 113, released in April 2023 [5]. In September 2025, Apple officially introduced native WebGPU support in Safari on iOS 26 and macOS 26, covering both mobile and desktop platforms [3, 37]. Firefox provides WebGPU support starting from version 141, currently limited to Windows platforms [23, 24]. Therefore, our evaluation is primarily conducted on Chrome. All experiments are performed with Vertical Synchronization (V-Sync) enabled to avoid tearing and ensure consistent frame presentation.
+
+Baselines. Web-based 3DGS currently lacks published academic baselines; existing works are community implementations derived from the original 3DGS paper. These implementations differ in engineering choices such as asynchronous scheduling or parameter packing. Therefore, we select the most widely adopted and actively maintained open-source viewers that represent the de facto state-ofthe-art on the Web. For WebGL, we choose antimatter15/splat (S1) and mkkellogg/GaussianSplats3D (S2). For WebGPU, we select KeKsBoTer/web-splat (W1) and MarcusAndreasSvensson/ gaussian-splatting-webgpu (W2). As of October 2025, these represent the dominant approaches in the ecosystem.
+
+Benchmark Scenes. Following previous work [8, 16, 22, 27, 36], we evaluate WebSplatter's performance on a set of commonly used benchmark scenes to ensure a fair and comprehensive comparison. The scenes include bicycle (6,131,954 splats), garden (5,834,784 splats), truck (2,541,226 splats), bonsai (1,244,819 splats), train (1,026,508 splats), and a cleaned version of the bicycle scene, bicycle-c (1,063,091 splats). In addition to this collection, we also include the Van Gogh Room (341,294 splats), a synthetic indoor scene from the Habitat test suite [30]. This selection of scenes provides a wide range of complexity, with splat counts spanning from approximately 340,000 to over 6 million, allowing us to evaluate the scalability of WebSplatter thoroughly.
+
+Table 1: Overall performance comparison showing total frame time in milliseconds (ms). Lower is better. Results are collected in Chrome unless annotated; (S) indicates Safari and (F) indicates Firefox. A dashed line indicates a crash. Abbreviations are defined in § 4.1.
+
+| Device                | Scene     | Ours  | S1    | S2    | W1    | W2     |
+|-----------------------|-----------|-------|-------|-------|-------|--------|
+| RTX 3070              | garden    | 9.5   | 62.4  | 88.8  | 14.4  | 15.1   |
+| RTX 3070 (F)          | garden    | 11.4  | 54.9  | 67.8  | —     | —      |
+| MacBook Air M4        | garden    | 63.7  | 80.1  | 144.3 | 67.8  | 268.3  |
+| MacBook Air M4 (S)    | garden    | 68.6  | 78.5  | 111.6 | 81.3  | —      |
+| MacBook Pro M1        | garden    | 112.0 | 124.4 | 225.2 | 510.8 | 402.3  |
+| Nvidia MX350          | garden    | 164.3 | 180.0 | 869.5 | 341.0 | —      |
+| Intel NUC (iGPU)      | garden    | 151.2 | 341.7 | 368.4 | 404.0 | —      |
+| iPhone 15 Pro Max (S) | bicycle-c | 38.5  | 50.5  | —     | 45.7  | —      |
+| Redmi K70 Pro         | bicycle-c | 33.6  | 55.3  | 76.4  | 39.5  | —      |
+| Oppo Find X2          | bicycle-c | 105.2 | 112.7 | 182.6 | —     | 4553.6 |
+
+#### 4.2 Cross-Platform Performance
+
+In this section, we present the evaluation results to answer three research questions. We begin with an overall performance comparison, followed by an analysis of scalability.
+
+The overall performance across the test devices is presented in Table 1. We report the median total frame time for each test, encompassing the pre-processing, sorting, and rendering stages. The results demonstrate that WebSplatter consistently and outperforms all baselines on every device, from high-end desktops to mobile phones. On the high-performance desktop with an Nvidia RTX 3070, WebSplatter achieves a frame time of 9.497 ms on the garden scene, representing a 1.52× speedup over the fastest competing WebGPU implementation. This performance advantage extends across all hardware specifications. For instance, WebSplatter is 1.06× faster on the MacBook Air M4, 1.18× faster on the flagship Redmi K70 Pro mobile phone, and achieves its most substantial relative gain on the Intel NUC with integrated graphics, where it is 2.26× faster than the best-performing baseline. Notably, the performance gap is even wider on the MacBook Pro M1. The KeKsBoTer/web-splat baseline, which uses a spin-wait-based sort ported from native Fuchsia, performs poorly on Apple M1 chips. The lack of guarantees for workgroup execution order on this architecture leads to significant busy-waiting, highlighting the importance of our waitfree design. In this case, our method is over 4.5× faster than the WebGPU baseline.
+
+To further evaluate the stability of our system and address the concern that average frame times may obscure latency spikes, we analyzed the statistical distribution of frame times on the MacBook Air M4 using the computationally demanding garden scene (5.8M splats). WebSplatter exhibits remarkable consistency, with a standard deviation of only 22.303 ms and a 99th-percentile (P99) latency of 116.851 ms. In contrast, the baseline methods show significant jitter, primarily due to garbage collection overheads in WebGL or synchronization stalls in naive WebGPU ports. This low variance confirms that our wait-free sorting mitigates micro-stuttering, ensuring a fluid interactive experience even under heavy loads.
+
+Furthermore, we find that Firefox remains unstable within the current WebGPU ecosystem. On the RTX 3070, WebSplatter runs in Firefox with a slightly higher frame time (11.4 ms), whereas both
+
+
+
+Figure 2: Scalability comparison of WebSplatter against baselines across three devices. Each bar group shows the median frame time (ms) for a specific scene. Lower is better. The KeKsBoTer/web-splat baseline crashes when rendering the truck scene on the Redmi K70 Pro, and its result is omitted.
+
+Table 2: Performance breakdown of WebSplatter across representative devices. Results are collected in Chrome unless annotated; (F) indicates Firefox. Total frame times are in milliseconds (ms). Percentages denote the fraction of time spent in each stage.
+
+| Device           | Scene     | Total | Pre-process | Sort  | Render |
+|------------------|-----------|-------|-------------|-------|--------|
+| RTX 3070         | garden    | 9.5   | 13.1%       | 24.3% | 62.6%  |
+| RTX 3070 (F)     | garden    | 11.4  | 5.6%        | 37.7% | 56.8%  |
+| MacBook Air M4   | garden    | 63.7  | 30.1%       | 18.1% | 51.8%  |
+| MacBook Pro M1   | garden    | 112.0 | 24.3%       | 17.0% | 58.7%  |
+| Nvidia MX350     | garden    | 164.3 | 47.2%       | 27.6% | 25.3%  |
+| Intel NUC (iGPU) | garden    | 151.2 | 40.0%       | 29.2% | 30.8%  |
+| Redmi K70 Pro    | bicycle-c | 33.6  | 10.2%       | 28.8% | 61.0%  |
+| Oppo Find X2     | bicycle-c | 105.2 | 13.4%       | 37.7% | 48.8%  |
+
+WebGPU baselines (W1 and W2) crash. On our Lenovo MX350 system, Firefox blocks WebGPU at startup with the error "WebGPU is disabled by blocklist". Meanwhile, on the Intel NUC device, WebGPU timestamp queries in Firefox appear unreliable: while the built-in queries report a frame time of 2.8 ms, the JavaScript API measures 258.36 ms. This discrepancy has been confirmed as a Firefox bug [1]. Due to these issues, we omit Firefox results for both the Lenovo MX350 and Intel NUC systems.
+
+Beyond rendering speed, viewer availability is critical for webbased applications. WebSplatter successfully renders all scenes on all test devices, demonstrating its wide compatibility. In contrast, several baselines fail on certain devices due to excessive memory requirements that surpass hardware limitations. For instance, the WebGPU-based KeKsBoTer/web-splat viewer crashes on the Oppo Find X2. Although its pre-processing and sorting stages are complete, the application fails upon entering the rendering stage. Similarly, the WebGL-based mkkellogg/GaussianSplatsD viewer repeatedly causes the browser to crash on the iPhone 15 Pro Max.
+
+Bottleneck analysis. We present an analysis of the bottleneck on different devices in Table 2. On systems with high-end graphics capabilities (including Nvidia RTX 3070, Apple M-series, and
+
+even contemporary mobile Redmi K70 Pro), the system is primarily render-bound. The rasterization stage on these devices is the most expensive, accounting for 51.8% to 62.6% of the total frame time. In contrast, on systems with less powerful GPUs, such as the Nvidia MX350 and the Intel NUC's integrated graphics, the bottleneck shifts to the pre-processing stage, consuming up to 47.2% of the frame time. This shift is because a large number of raw splats need to be scanned in the pre-processing stage. The limited memory throughput of these low-end devices causes performance degradation. Meanwhile, WebSplatter never becomes sort-bound across all tested hardware. This result demonstrates the efficiency of our wait-free sorting algorithm.
+
+Rendering Quality. In addition to performance, we also assess the visual fidelity of our renderer. Figure 3 presents a side-by-side comparison between the official native CUDA implementation and WebSplatter. The results show that our WebGPU pipeline achieves a visual quality comparable to the native baseline, suggesting that our optimizations effectively maintain the rendering characteristics of the original 3DGS algorithm.
+
+#### 4.3 Scalability with Scene Complexity.
+
+We evaluate how the performance of WebSplatter scales with increasing scene complexity. We select three representative devices, exhibiting two different bottlenecks as identified in our overall analysis: the render-bound MacBook Air M4, the render-bound K70 Pro for mobile, and the pre-process-bound Nvidia MX350. On these platforms, we compare WebSplatter against two key baselines: KeKsBoTer/web-splat, as the strongest WebGPU competitor, and antimatter15/splat, representing a traditional WebGL viewer with CPU-based sorting. We utilize our full set of benchmark scenes to offer a range of complexities. The number of splats (denoted as ��) ranges from approximately 340,000 to over 6 million. For each scene on each device, we maintain a fixed resolution and camera position. We measure the median frame time and the breakdown of time for WebSplatter and other baselines.
+
+The overall scalability comparison is demonstrated in Figure 2. The results show that the performance of WebSplatter scales more
+
+
+
+Figure 3: Visual correctness verification on the garden scene. Left: Output rendered by the official native CUDA implementation. Right: Output rendered by WebSplatter in Google Chrome.
+
+effectively with increasing scene complexity compared to both the WebGPU and WebGL baselines across all three representative device tiers. For the pre-process-bound Nvidia MX350, as scene complexity increases from the van gogh scene (0.3M splats) to the garden scene (5.8M splats), the frame time for the KeKsBoTer/web-splat baseline increases by over 280 ms. In contrast, the frame time for WebSplatter increases by a much smaller margin of approximately 143 ms, resulting in a 2.1× speedup in the largest scene. Furthermore, our approach demonstrates greater stability. On the mobile Redmi K70 Pro, WebSplatter renders the complex truck scene (2.5M splats) in 52.7 ms, while the competing WebGPU viewer crashes under the same load. The antimatter15 baseline exhibits a high frame time. Specifically, its rendering time rises to 188.4 ms on the Lenovo MX350 and 137.37 ms on the Redmi K70 Pro, and 51.4 ms on the MacBook Air M4.
+
+Furthermore, for WebSplatter, the results reveal a consistent scaling trend as scene complexity increases. As shown in Table 3, in low-complexity scenes such as van gogh (0.34 M splats), the system remains render-bound across all devices. The rendering stage accounts for about 84% of the total frame time on the Redmi K70 Pro (24.4 ms of 28.9 ms), 78% on the MacBook Air M4 (8.8 ms of 11.7 ms), and roughly 50% on the Lenovo MX350 (10.5 ms of 20.9 ms). As the splat count grows to a million-level, the preprocessing cost increases more rapidly than the rendering cost. This increase is particularly evident on the MX350: the pre-processing stage expands from 1.36 ms (7%) in the van gogh scene to 77.5 ms (47%) in the garden scene, where the total frame time reaches 164.3 ms. These results suggest that, for highly complex web scenes, optimizing data preparation and splats culling becomes as critical as optimizing the rasterization pipeline.
+
+### 4.4 Ablation Study
+
+To further underscore the contribution of our sorting design, we first present a direct comparison of the sort stage time against all baselines. As shown in Table 4, our sort stage consistently incurs lower overhead than all baselines across Chrome, Safari, and Firefox. The results highlight two key advantages of our approach. First,
+
+Table 3: Median times (ms) across scenes with different splat counts, broken down by three pipeline stages.
+
+| Scene Device:  | Splats MacBook Air | (N) Total M4 (Render-Bound) | WebSplatter Pre-proc | (ms) Sort | Render |
+|----------------|--------------------|-----------------------------|----------------------|-----------|--------|
+| van gogh       | 341,294            | 11.654                      | 0.761                | 2.046     | 8.847  |
+| train          | 1,026,508          | 31.518                      | 5.332                | 8.522     | 17.664 |
+| bonsai         | 1,244,819          | 13.088                      | 1.349                | 1.746     | 9.993  |
+| truck          | 2,541,226          | 30.350                      | 7.715                | 6.805     | 15.830 |
+| bicycle        | 6,131,954          | 56.013                      | 19.640               | 7.683     | 28.690 |
+| garden         | 5,834,784          | 63.737                      | 19.183               | 11.518    | 33.036 |
+| Device: Redmi  | K70 Pro            | (Render-Bound)              |                      |           |        |
+| van gogh       | 341,294            | 28.960                      | 0.422                | 4.171     | 24.367 |
+| train          | 1,026,508          | 76.369                      | 2.185                | 5.066     | 69.118 |
+| bicycle-c      | 1,063,091          | 33.633                      | 3.431                | 9.673     | 20.529 |
+| bonsai         | 1,244,819          | 52.874                      | 2.290                | 5.688     | 44.896 |
+| truck          | 2,541,226          | 52.719                      | 2.101                | 4.435     | 46.183 |
+| Device: Lenovo | MX350              | (Pre-process-Bound)         |                      |           |        |
+| van gogh       | 341,294            | 20.946                      | 1.360                | 9.104     | 10.482 |
+| train          | 1,026,508          | 76.791                      | 22.861               | 15.985    | 37.945 |
+| bonsai         | 1,244,819          | 47.665                      | 15.439               | 11.297    | 20.929 |
+| truck          | 2,541,226          | 81.666                      | 29.702               | 18.650    | 33.314 |
+| bicycle        | 6,131,954          | 142.771                     | 67.336               | 38.659    | 36.776 |
+| garden         | 5,834,784          | 164.255                     | 77.452               | 45.253    | 41.550 |
+
+leveraging the hardware acceleration through WebGPU compute shaders, our GPU-based sorting is much more efficient than CPUbased sorting. On the Nvidia RTX 3070, our GPU-based radix sort is over 24× faster than the CPU-based sort in antimatter15/splat (2.3 ms vs. 55.8 ms) and over 31× faster than the WASM-based sort in mkkellogg/GaussianSplats3D. Second, our sorting algorithm is designed to achieve excellent performance without relying on the specific thread scheduling implementation of the underlying hardware. On the MacBook Pro M1, for instance, our sort is over 24× faster than the spin-wait-based implementation in KeKsBoTer/web-splat (19.0 ms vs. 458.4 ms).
+
+Table 4: Sort stage time (ms) across devices. Results are collected in Chrome unless annotated; (S) indicates Safari and (F) indicates Firefox. A dashed line indicates a crash. Abbreviations are defined in § 4.1.
+
+| Device             | Ours   | S1   | S2    | W1      | W2      |
+|--------------------|--------|------|-------|---------|---------|
+| RTX 3070           | 2.306  | 55.8 | 72.0  | 5.374   | 5.308   |
+| RTX 3070 (F)       | 4.307  | 49.0 | 50.6  | —       | —       |
+| Redmi K70 Pro      | 9.673  | 39.7 | 48.6  | 17.629  | —       |
+| MacBook Air M4 (S) | 15.022 | 32.0 | 48.6  | 20.557  | —       |
+| MacBook Pro M1     | 19.027 | 58.7 | 154.2 | 458.424 | 261.816 |
+| Lenovo MX350       | 45.253 | 98.5 | 556.2 | 150.733 | —       |
+
+Table 5: Ablation study results on the MacBook Air M4 with the garden scene. All timings are in milliseconds (ms).
+
+|             | Pipeline Stage | FULL  | -CULL | -RADIUS |
+|-------------|----------------|-------|-------|---------|
+| Pre-process | (ms)           | 19.18 | 21.79 | 20.42   |
+| Sort        | (ms)           | 11.52 | 11.05 | 13.59   |
+| Render      | (ms)           | 33.04 | 34.52 | 39.20   |
+| Total       | Time (ms)      | 63.74 | 67.36 | 73.20   |
+
+We now analyze the impact of our other major optimizations. To isolate the impact of each component, we start with our fully optimized pipeline (denoted as "FULL") and create separate configurations where each key optimization is disabled one at a time. We focus on two features:
+
+To analyze the culling mechanism of our approach, we perform an ablation study on the remaining optimization components. Starting from the fully optimized pipeline (denoted as "FULL"), we disable each component in turn to isolate its contribution.
+
+- -CULL: We disable the screen-space AABB culling in this revision, retaining only the initial view frustum culling. As a result, the sort and render stages process a larger number of splats.
+- -RADIUS: We disable the opacity-based dynamic quad sizing in the vertex shader in this revision. All splats are rendered with a fixed-size bounding box.
+
+We conduct this experiment on the MacBook Air M4, a representative render-bound platform. We use the garden scene to ensure the performance impact of each optimization is measurable. As shown in Table 5, disabling the visibility culling pass (-CULL) has a more modest, though still clear, impact on this platform, increasing the total frame time by 5.8% (from 63.7 ms to 67.4 ms). As predicted, the performance cost is primarily absorbed by the Pre-process stage. This is because the process stage must process all splats that pass the initial frustum cull.
+
+Disabling the dynamic radius sizing (-RADIUS) has the most significant performance impact, increasing the total frame time by 15% (from 63.7 ms to 73.2 ms). This performance loss is almost entirely isolated to the Render stage, whose workload increases by 18.8% (from 33.0 ms to 39.2 ms). This is because rendering all splats with a larger, fixed-size quad leads to significant overdraw and increases the total number of pixels processed by the fragment shader. This demonstrates the effectiveness of our opacity-based tight bounding in optimizing pixel throughput. In summary, the ablation study confirms that both optimizations contribute positively to performance, with the tight bounding mechanism being particularly crucial for reducing rasterization costs.
+
+#### 4.5 Memory Efficiency
+
+A critical factor for web-based deployment, particularly on mobile devices, is the consumption of video memory (VRAM). Excessive memory usage in existing WebGPU ports often results in browser context loss or crashes on lower-end hardware.
+
+To quantify this, we measure the peak GPU memory usage on the garden scene using an Nvidia RTX 3070 on Windows. WebSplatter consumes approximately 1.20 GB of VRAM, which is more efficient than competing WebGPU implementations: it reduces memory usage by 36% compared to W1 (1.90 GB) and by over 57% compared to W2 (&gt; 2.80 GB). Furthermore, our memory footprint remains comparable to the lightweight WebGL viewers S2 (1.19 GB) and S1 (0.83 GB), despite offering the high-performance benefits of a computedriven pipeline. This efficient memory management explains the stability results observed in Table 1, where WebSplatter successfully runs on memory-constrained mobile devices (e.g., iPhone 15 Pro Max, Oppo Find X2) while the unoptimized WebGPU baselines frequently crash due to out-of-memory errors.
+
+### 5 Related Work
+
+### 5.1 The WebGPU API.
+
+In recent years, there has been a surge in research focusing on WebGPU, aiming for shader testing, security enhancements, and rendering performance improvements. Levine et al. introduced a technique for testing memory consistency in WebGPU Shader Language (WGSL) [19, 20]. FusionRender [4] enhances end-to-end performance by merging object signatures in WebGPU. NNJit [15] enables just-in-time (JIT) auto-generation of optimized WGSL kernels for edge devices. On the security front, Ferguson et al. explored cache attacks in WebGPU to identify browser clients through sidechannel attacks [9], and Giner et al. employed similar techniques to conduct memory leakage attacks [10]. GL2GPU [14] focuses on dynamically translating WebGL applications to WebGPU within the JavaScript runtime to boost end-to-end rendering performance. While many works study the API's capabilities and potential vulnerabilities, our work provides a practical design of WebGPU's advanced compute features to solve a demanding, real-world rendering challenge.
+
+### 5.2 3D Gaussian Splatting (3DGS) Acceleration.
+
+The original 3DGS [16] achieved an unprecedented balance of rendering quality and speed. Subsequent research has focused on further optimizing its performance, primarily through two avenues: model compression and rasterization pipeline enhancement.
+
+- Model Compression. Many work aims to reduce the model size or the memory footprint of 3DGS. These methods reduce the number of Gaussians through pruning strategies based on importance metrics [6, 18] or by modifying the densification process during training [11]. While effective at reducing model size, these approaches can sometimes compromise rendering
+
+quality and do not address the computation bottlenecks of the
+
+- rendering itself.
+- Fast Rendering Pipeline. Another line of research focuses on accelerating the rasterization pipeline, which is essential for handling large-scale scenes. AdR-Gaussian [36] and FlashGS [8] identify that the initial Gaussian-tile intersection test is a major source of inefficiency. They propose using more precise intersection algorithms to reduce the number of redundant Gaussian-tile pairs that enter the sorting and rendering stages. StopThePop [27] addresses temporal flickering artifacts by introducing a more view-consistent sorting key, highlighting the critical role of the sorting stage. These methods, however, are typically implemented in CUDA for native applications. In contrast, our work focuses on redesigning the core components of the WebGPU pipeline in a cross-platform manner. 5.3 Web-Based 3DGS Viewers. The accessibility of the web has led to the development of several 3DGS viewers [31, 41]. Early implementations primarily relied on WebGL. Due to WebGL's lack of compute shaders, computationally intensive tasks like per-frame depth sorting must be offloaded to the CPU (via JavaScript or WebAssembly), creating a significant bottleneck that prevents real-time rendering of large-scale scenes. Some web viewers focus on reducing network transmission overhead by employing quantization techniques to compress the Gaussian data [26]. However, these efforts primarily address data loading rather than the core rendering performance. Existing web-based viewers have not fully leveraged the capabilities of modern web graphics APIs to tackle the challenges of the 3DGS pipeline. 6 Conclusion In this paper, we have presented WebSplatter, a WebGPU-based framework that leverages advanced compute shaders to enable high-performance, fully GPU-driven 3D Gaussian Splatting in web browsers. Through a hybrid compute-render pipeline and a waitfree sorting algorithm, WebSplatter have addressed web-specific challenges in WebGPU and achieved stable and efficient performance across heterogeneous hardware. Compared with the stateof-the-art baselines, our evaluation shows speedups ranging from 1.06 to 2.26 times across devices from high-end desktops to mobile phones. These results demonstrate that WebSplatter effectively harnesses the computational power of WebGPU to deliver realtime, high-fidelity rendering while substantially improving crossplatform performance within the modern web graphics ecosystem. References [1] 2025. Timestamp queries seem to be off by a constant factor. [https://bugzilla.](https://bugzilla.mozilla.org/show_bug.cgi?id=1986745) [mozilla.org/show\\_bug.cgi?id=1986745.](https://bugzilla.mozilla.org/show_bug.cgi?id=1986745) Bugzilla bug #1986745, Mozilla. [2] AMD. 2025. Boosting GPU Radix Sort performance: A memory-efficient extension to Onesweep with circular buffers. [https://gpuopen.com/learn/boosting\\_gpu\\_radix\\_](https://gpuopen.com/learn/boosting_gpu_radix_sort/) [sort/](https://gpuopen.com/learn/boosting_gpu_radix_sort/) [3] Apple Developer Documentation. 2025. Safari 26.0 Release Notes. [https://developer.apple.com/documentation/safari-release-notes/safari-](https://developer.apple.com/documentation/safari-release-notes/safari-26-release-notes)[26-release-notes](https://developer.apple.com/documentation/safari-release-notes/safari-26-release-notes) Added support for WebGPU. [4] Weichen Bi, Yun Ma, Yudong Han, Yifan Chen, Deyu Tian, and Jiaqi Du. 2024. FusionRender: Harnessing WebGPU's Power for Enhanced Graphics Performance on Web Browsers. In Proceedings of the ACM Web Conference 2024 (Singapore, Singapore) (WWW '24). Association for Computing Machinery, New York, NY, USA, 2890–2901. [5] Chrome for Developers. 2023. Chrome Ships WebGPU — WebGPU Available by Default in Chrome 113. First default-enabled WebGPU release in Chrome 113. [6] Sankeerth Durvasula, Adrian Zhao, Fan Chen, Ruofan Liang, Pawan Kumar Sanjaya, and Nandita Vijaykumar. 2023-12-01. DISTWAR: Fast Differentiable Rendering on Raster-based Rendering Pipelines. arXiv[:2401.05345 [cs]](https://arxiv.org/abs/2401.05345 [cs]) [doi:10.](https://doi.org/10.48550/arXiv.2401.05345) [48550/arXiv.2401.05345](https://doi.org/10.48550/arXiv.2401.05345) [7] Evan. 2025. Vite: Next generation frontend tooling. urlhttps://vitejs.dev/. Accessed: 2025-10-06. [8] Guofeng Feng, Siyan Chen, Rong Fu, Zimu Liao, Yi Wang, Tao Liu, Boni Hu, Linning Xu, Zhilin Pei, Hengjie Li, Xiuhong Li, Ninghui Sun, Xingcheng Zhang, and Bo Dai. 2025. FlashGS: Efficient 3D Gaussian Splatting for Large-scale and High-resolution Rendering. 26652–26662. [9] Ethan Ferguson, Adam Wilson, and Hoda Naghibijouybari. 2024. WebGPU-SPY: Finding Fingerprints in the Sandbox through GPU Cache Attacks. In Proceedings of the 19th ACM Asia Conference on Computer and Communications Security. Association for Computing Machinery, New York, NY, USA, 158–171. [doi:10.](https://doi.org/10.1145/3634737.3637648) [1145/3634737.3637648](https://doi.org/10.1145/3634737.3637648) [10] Lukas Giner, Roland Czerny, Christoph Gruber, Fabian Rauscher, Andreas Kogler, Daniel De Almeida Braga, and Daniel Gruss. 2024. Generic and Automated Driveby GPU Cache Attacks from the Browser. In Proceedings of the 19th ACM Asia Conference on Computer and Communications Security. Association for Computing Machinery, New York, NY, USA, 128–140. [doi:10.1145/3634737.3656283](https://doi.org/10.1145/3634737.3656283) [11] Sharath Girish, Kamal Gupta, and Abhinav Shrivastava. 2024. EAGLES: Efficient Accelerated 3D Gaussians with Lightweight Encoding. In Computer Vision – ECCV 2024: 18th European Conference, Milan, Italy, September 29–October 4, 2024, Proceedings, Part LXIII (Milan, Italy). Springer-Verlag, Berlin, Heidelberg, 54–71. [doi:10.1007/978-3-031-73036-8\\_4](https://doi.org/10.1007/978-3-031-73036-8_4) [12] Khronos Group. 2011. WebGL 1.0. [13] Khronos Group. 2017. WebGL 2.0. [https://registry.khronos.org/webgl/specs/](https://registry.khronos.org/webgl/specs/latest/2.0/) [latest/2.0/](https://registry.khronos.org/webgl/specs/latest/2.0/) [14] Yudong Han, Weichen Bi, Ruibo An, Deyu Tian, Qi Yang, and Yun Ma. 2025. GL2GPU: Accelerating WebGL Applications via Dynamic API Translation to WebGPU. In Proceedings of the ACM on Web Conference 2025 (New York, NY, USA, 2025-04-22) (WWW '25). Association for Computing Machinery, 751–762. [doi:10.1145/3696410.3714785](https://doi.org/10.1145/3696410.3714785) [15] Fucheng Jia, Shiqi Jiang, Ting Cao, Wei Cui, Tianrui Xia, Xu Cao, Yuanchun Li, Qipeng Wang, Deyu Zhang, Ju Ren, Yunxin Liu, Lili Qiu, and Mao Yang. 2024. Empowering In-Browser Deep Learning Inference on Edge Through Just-In-Time Kernel Optimization. In Proceedings of the 22nd Annual International Conference on Mobile Systems, Applications and Services. Association for Computing Machinery, New York, NY, USA, 438–450. [doi:10.1145/3643832.3661892](https://doi.org/10.1145/3643832.3661892) [16] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuehler, and George Drettakis. 2023. 3D Gaussian Splatting for Real-Time Radiance Field Rendering. ACM Trans. Graph. 42, 4, Article 139 (July 2023), 14 pages. [doi:10.1145/3592433](https://doi.org/10.1145/3592433) [17] Khronos. 2023. OpenGL ES Overview The Khronos Group Inc. [https://www.](https://www.khronos.org/opengles/) [khronos.org/opengles/](https://www.khronos.org/opengles/) [18] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko, and Eunbyung Park. 2024. Compact 3D Gaussian Representation for Radiance Field. In 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). 21719–21728. [doi:10.1109/CVPR52733.2024.02052](https://doi.org/10.1109/CVPR52733.2024.02052) [19] Reese Levine, Mingun Cho, Devon McKee, Andrew Quinn, and Tyler Sorensen. 2023. GPUHarbor: Testing GPU Memory Consistency at Large (Experience Paper). In Proceedings of the 32nd ACM SIGSOFT International Symposium on Software Testing and Analysis (Seattle, WA, USA) (ISSTA 2023). Association for Computing Machinery, New York, NY, USA, 779–791. [doi:10.1145/3597926.3598095](https://doi.org/10.1145/3597926.3598095) [20] Reese Levine, Tianhao Guo, Mingun Cho, Alan Baker, Raph Levien, David Neto, Andrew Quinn, and Tyler Sorensen. 2023. MC Mutants: Evaluating and Improving Testing for Memory Consistency Specifications. In Proceedings of the 28th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 (Vancouver, BC, Canada) (ASPLOS 2023). Association for Computing Machinery, New York, NY, USA, 473–488. [doi:10.1145/3575693.](https://doi.org/10.1145/3575693.3575750) [3575750](https://doi.org/10.1145/3575693.3575750) [21] Chenguo Lin, Panwang Pan, Bangbang Yang, Zeming Li, and Yadong Mu. 2025. DiffSplat: Repurposing Image Diffusion Models for Scalable Gaussian Splat Generation. In International Conference on Learning Representations (ICLR). DiffSplat directly generates 3D Gaussian splats using pretrained text-to-image diffusion models. [22] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai. 2024-06. Scaffold-GS: Structured 3D Gaussians for View-Adaptive Rendering. In 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). 20654–20664. [doi:10.1109/CVPR52733.2024.01952](https://doi.org/10.1109/CVPR52733.2024.01952) [23] MDN contributors. 2025. WebGPU API — Browser compatibility. [https://developer.](https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API) [mozilla.org/en-US/docs/Web/API/WebGPU\\_API](https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API) Compatibility table shows Firefox partial support (Firefox 141). [24] Mozilla Gfx Team. 2025. Shipping WebGPU on Windows in Firefox
+  - 141. [https://mozillagfx.wordpress.com/2025/07/15/shipping-webgpu-on](https://mozillagfx.wordpress.com/2025/07/15/shipping-webgpu-on-windows-in-firefox-141/)[windows-in-firefox-141/](https://mozillagfx.wordpress.com/2025/07/15/shipping-webgpu-on-windows-in-firefox-141/) Firefox 141 enables WebGPU on Windows; Mac/Linux
+
+
+
+
+
+planned. [25] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. 2022. Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph. 41, 4, Article 102 (July 2022), 15 pages. [doi:10.1145/3528223.3530127](https://doi.org/10.1145/3528223.3530127) [26] Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann. 2024. Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 10349–10358. [27] Lukas Radl, Michael Steiner, Mathias Parger, Alexander Weinrauch, Bernhard Kerbl, and Markus Steinberger. 2024-07-19. StopThePop: Sorted Gaussian Splatting for View-Consistent Real-time Rendering. 43, 4 (2024-07-19), 64:1–64:17. [doi:10.1145/3658187](https://doi.org/10.1145/3658187) [28] Alejandro Rodríguez, Pablo Luis García, Juan Sebastián Marquerie, Ricardo Marques, and Josep Blat. 2025. A Cross-Platform, WebGPU-Based 3D Engine for Real-Time Rendering and XR Applications. In Proceedings of the 30th International Conference on 3D Web Technology (Web3D '25). Association for Computing Machinery, New York, NY, USA, 1–9. [doi:10.1145/3746237.3746305](https://doi.org/10.1145/3746237.3746305) [29] Nadathur Satish, Mark Harris, and Michael Garland. 2009. Designing efficient sorting algorithms for manycore GPUs. In 2009 IEEE International Symposium on Parallel & Distributed Processing. 1–10. [doi:10.1109/IPDPS.2009.5161005](https://doi.org/10.1109/IPDPS.2009.5161005) [30] Manolis Savva, Abhishek Kadian, Oleksandr Maksymets, Yili Zhao, Erik Wijmans, Bhavana Jain, Julian Straub, Jia Liu, Vladlen Koltun, Jitendra Malik, Devi Parikh, and Dhruv Batra. 2019. Habitat: A Platform for Embodied AI Research. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV). [31] Saptarshi Neil Sinha, Julius Kühn, Holger Graf, and Michael Weinmann. 2024. SpectralSplatsViewer: An Interactive Web-Based Tool for Visualizing Cross-Spectral Gaussian Splats. In Proceedings of the 29th International ACM Conference on 3D Web Technology (New York, NY, USA) (Web3D '24). Association for Computing Machinery, 1–10. [doi:10.1145/3665318.3677151](https://doi.org/10.1145/3665318.3677151) [32] Elias Stehle and Hans-Arno Jacobsen. 2017. A Memory Bandwidth-Efficient Hybrid Radix Sort on GPUs. In Proceedings of the 2017 ACM International Conference on Management of Data (Chicago, Illinois, USA) (SIGMOD '17). Association for Computing Machinery, New York, NY, USA, 417–432. [doi:10.1145/3035918.](https://doi.org/10.1145/3035918.3064043) [3064043](https://doi.org/10.1145/3035918.3064043) [33] Jiaxiang Tang, Jiawei Ren, Hang Zhou, Ziwei Liu, and Gang Zeng. 2023. Dream-Gaussian: Generative Gaussian Splatting for Efficient 3D Content Creation. arXiv preprint arXiv:2309.16653 (2023). DreamGaussian introduces a generative 3DGS model with mesh extraction and texture refinement. [34] Greg Turk. 1994. The PLY Polygon File Format. Technical Report. Stanford University, Stanford, CA. Technical Report. Copyright © 1994 The Board of Trustees of The Leland Stanford Junior University. All rights reserved.. [35] W3C. 2021. WebGPU. [36] Xinzhe Wang, Ran Yi, and Lizhuang Ma. 2024. AdR-Gaussian: Accelerating Gaussian Splatting with Adaptive Radius. In SIGGRAPH Asia 2024 Conference Papers (New York, NY, USA) (SA '24). Association for Computing Machinery, 1–10. [doi:10.1145/3680528.3687675](https://doi.org/10.1145/3680528.3687675) [37] WebKit Team. 2025. WebKit Features in Safari 26.0. [https://webkit.org/blog/](https://webkit.org/blog/17333/webkit-features-in-safari-26-0/) [17333/webkit-features-in-safari-26-0/](https://webkit.org/blog/17333/webkit-features-in-safari-26-0/) [38] World Labs. 2025. Marble: Generative Worlds. [https://marble.worldlabs.ai.](https://marble.worldlabs.ai) Accessed: October 5, 2025. [39] Geng Yu, Chang Liu, Ting Fang, Jinyuan Jia, Enming Lin, Yiqiang He, Siyuan Fu, Long Wang, Lei Wei, and Qingyu Huang. 2023. A survey of real-time rendering on Web3D application. Virtual Reality & Intelligent Hardware 5, 5 (2023), 379–394. [doi:10.1016/j.vrih.2022.04.002](https://doi.org/10.1016/j.vrih.2022.04.002) [40] Junsheng Zhou, Weiqi Zhang, and Yu-Shen Liu. 2024. DiffGS: Functional Gaussian Splatting Diffusion. arXiv preprint arXiv:2410.19657 (2024). DiffGS models Gaussian Splatting in a continuous functional space and uses latent diffusion for generation. [41] Mufeng Zhu and Yao Liu. 2025. Rendering 3D Gaussian Splatting in Web Browser: Impacts of Spherical Harmonics and Gaussian Counts. (2025), 1–7. [doi:10.1109/](https://doi.org/10.1109/MIC.2025.3577578) [MIC.2025.3577578](https://doi.org/10.1109/MIC.2025.3577578)
+
+## A Rendering Workflow of WebGPU
+
+The design of WebGPU emphasizes explicit resource management and the pre-compilation of state to minimize CPU overhead during the per-frame render loop. The entire process is asynchronous and revolves around creating command buffers that are submitted to the GPU for execution. The following steps outline this workflow in detail.
+
+Initialization and Device Acquisition The entry point to the API is the asynchronous request for a GPUAdapter, which represents a specific physical GPU on the system. From this adapter, a GPUDevice is requested, also asynchronously. The GPUDevice is the primary interface for creating all WebGPU resources, such as buffers, textures, and pipelines. Associated with the device is a GPUQueue, which is the channel for submitting commands to the GPU for execution.
+
+One-Time Setup Resources and Pipelines Before rendering can occur, all necessary state and data must be defined and, where possible, uploaded to the GPU. This setup phase is typically performed once at application load time.
+
+First, data such as vertex coordinates, normals, or uniform variables are stored in GPUBuffer objects, created via createBuffer(). A descriptor specifies the buffer's size and usage flags, which inform the driver how to optimize memory management.
+
+Second, the core of the rendering state is encapsulated in a GPURenderPipeline. Its creation is a significant step where the GPU driver pre-compiles and validates the entire rendering configuration for maximum performance. This involves creating a detailed descriptor that specifies:
+
+- The vertex and fragment shaders, provided as a GPUShaderModule containing WGSL code.
+- The layout of vertex data, including the stride of the vertex buffer and the format of each attribute.
+- The format of the render target (e.g., the swap chain texture format) and depth/stencil buffer.
+- The layout of bind groups (GPUBindGroupLayout), which defines the interface for connecting data like uniforms and textures to the shaders.
+
+Data Binding WebGPU uses a two-part system to bind resources to shaders. The GPUBindGroupLayout defines a "template" or interface for a group of resources, specifying their type and binding point within the shader (e.g., '@binding(0) uniform Params'). This layout is part of the pre-compiled pipeline. The actual resources (e.g., a specific GPUBuffer) are then linked to this template by creating a GPUBindGroup instance. This separation allows efficient switching of data sources at render time without re-validating the pipeline.
+
+Command Encoding The work for each frame is recorded into a command buffer. This process begins by creating a GPUCommandEncoder. To perform graphics rendering, a GPURenderPassEncoder is started from the command encoder via beginRenderPass(). This encoder requires a descriptor specifying the color attachments (the texture to draw on) and depth attachments.
+
+Inside the render pass, a sequence of commands is recorded to instruct the GPU what to draw:
+
+- (1) passEncoder.setPipeline(myPipeline): Activates the precompiled render pipeline.
+- (2) passEncoder.setVertexBuffer(slot, myBuffer): Binds a vertex buffer to a specific input slot.
+- (3) passEncoder.setBindGroup(index, myBindGroup): Binds a group of resources.
+- (4) passEncoder.draw(vertexCount, instanceCount): Issues a draw call, which triggers the execution of the vertex and fragment shaders for the specified number of vertices and instances.
+
+Once all draw calls are recorded, the render pass is concluded with passEncoder.end().
+
+Submission and Execution After all render passes and compute passes are recorded, the command encoder is finalized using encoder.finish(), which returns an immutable GPUCommandBuffer. This buffer is then submitted to the device's GPUQueue. The submission is non-blocking, meaning the CPU is immediately free to continue processing the next frame while the GPU works asynchronously to execute the submitted commands.
+
+### B Introduction to the Baselines
+
+As baselines, we select the two most-starred open-source Gaussian splatting projects for each of the two primary web graphics APIs: WebGL and WebGPU. To ensure the reproducibility of our experiments, we benchmark against specific commit versions of each project as detailed below.
+
+- antimatter15/splat: A minimalist WebGL implementation with no external dependencies that performs sorting on the CPU via a web worker. The version used in our evaluation is based on commit 367a943 from [https://github.com/antimatter15/splat.](https://github.com/antimatter15/splat)
+
+- mkkellogg/GaussianSplats3D: A feature-rich viewer built on Three.js that is optimized with WASM-powered sorting and octree-based culling. The version used is based on commit 2dfc83e from [https://github.com/mkkellogg/GaussianSplats3D.](https://github.com/mkkellogg/GaussianSplats3D)
+- KeKsBoTer/web-splat: A high-performance WebGPU renderer built with Rust featuring an efficient GPU-based radix sort. The version used is based on commit 959a3ec from [https://github.](https://github.com/KeKsBoTer/web-splat) [com/KeKsBoTer/web-splat.](https://github.com/KeKsBoTer/web-splat)
+- MarcusAndreasSvensson/gaussian-splatting-webgpu: A faithful WebGPU implementation of the original paper's methodology. The version used is based on commit f22ae04 from [https://](https://github.com/MarcusAndreasSvensson/gaussian-splatting-webgpu) [github.com/MarcusAndreasSvensson/gaussian-splatting-webgpu.](https://github.com/MarcusAndreasSvensson/gaussian-splatting-webgpu)
+
+To ensure a fair and accurate comparison of rendering performance, we instrumented each baseline framework to measure GPU execution time precisely. This process isolates the time spent on GPU workloads from other factors such as CPU-side logic or JavaScript framework overhead. Our modifications were minimal and targeted only at performance profiling, using the standard APIs available for each graphics backend.

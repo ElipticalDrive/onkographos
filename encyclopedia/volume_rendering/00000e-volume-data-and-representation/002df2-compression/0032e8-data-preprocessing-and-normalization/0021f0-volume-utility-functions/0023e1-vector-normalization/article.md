@@ -1,0 +1,155 @@
+# Vector Normalization
+
+Also called: MaxIndex, Normalize 3-tuple, PV.unitize, Sun Direction Normalization
+
+## Overview
+Vector normalization converts a 3D vector to unit length or identifies its dominant axis, serving as a fundamental preprocessing step for vector field visualization, compression, and geometric calculations in volume rendering [S1][S3, unofficial][S5][S6, unofficial]. The method encompasses standard Euclidean normalization (unitizing), maximum-index identification, and L-infinity normalization for specific eigenvector storage contexts [S1][S2, S3, S6, unofficial].
+
+## How it works
+The method encompasses two primary operations: standard Euclidean normalization (unitizing) and maximum-index identification [S1][S2, S3, unofficial]. A third variant, L-infinity normalization, is used for specific eigenvector storage contexts [S6, unofficial].
+
+### Inputs and Outputs
+*   **Input:** A 3D vector $\mathbf{v} = (v_x, v_y, v_z)$ of type $T$ (typically `float` or `double`) [S1].
+*   **Output:** 
+    *   For normalization: A vector $\mathbf{u}$ such that $\|\mathbf{u}\| = 1$, or a zero vector if $\mathbf{v}$ is degenerate [S3, unofficial].
+    *   For MaxIndex: An integer index $i \in \{0, 1, 2\}$ corresponding to the component with the largest value [S1].
+
+### Data Structures
+*   **Vector:** A contiguous array or struct of three numeric values [G]. In grid-based volume data, these are stored per-voxel in the grid data structure [S3, unofficial].
+
+### Steps and Formulas
+
+#### 1. Standard Euclidean Normalization
+This operation scales the vector to unit length [S2, unofficial].
+
+1.  Compute the Euclidean magnitude (L2 norm) of the input vector $\mathbf{v}$:
+    $$ n = \|\mathbf{v}\| = \sqrt{v_x^2 + v_y^2 + v_z^2} $$
+2.  Check for degeneracy. Let $\epsilon(T)$ be the machine epsilon or a small threshold for type $T$ [S3, unofficial].
+3.  If $n < \epsilon(T)$, return the zero vector $\mathbf{0} = (0, 0, 0)$ [S3, unofficial].
+4.  Otherwise, compute the normalized components:
+    $$ u_i \leftarrow \frac{v_i}{n} \quad \text{for } i \in \{0, 1, 2\} \text{ [S2, unofficial]} $$
+    (Note: Source [S3, unofficial] uses 1-based indexing in its formula, but implementations use 0-based indexing.)
+5.  Return $\mathbf{u}$.
+
+**Pseudocode (In-place):**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def normalize_vector_inplace(v, eps):
+    """
+    Normalizes vector v in-place to unit length.
+    Returns True if normalized, False if zero vector was returned due to small magnitude.
+    """
+    mag_sq = v[0]*v[0] + v[1]*v[1] + v[2]*v[2]
+    mag = math.sqrt(mag_sq)
+    
+    if mag < eps:
+        v[0] = 0.0
+        v[1] = 0.0
+        v[2] = 0.0
+        return False
+    
+    inv_mag = 1.0 / mag
+    v[0] *= inv_mag
+    v[1] *= inv_mag
+    v[2] *= inv_mag
+    return True
+```
+
+**Pseudocode (Grid-based Volume Data):**
+When normalizing a vector field stored in a sparse grid (e.g., VDB):
+1.  Iterate over all active voxels $(c, v)$ in the grid tree, where $c$ is the coordinate and $v$ is the vector value [S3, unofficial].
+2.  Apply the standard normalization function to $v$ [S3, unofficial].
+3.  Store the result in a dictionary keyed by coordinate [S3, unofficial].
+4.  Build the result grid using the computed data, a background value of zero vector $(0,0,0)$, and the original grid's voxel size [S3, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def normalize_grid(grid, eps):
+    """
+    Normalizes all active vectors in a sparse grid.
+    Returns a new grid with normalized vectors.
+    """
+    normalized_data = {}
+    for c, v in grid.active_voxels():
+        normalized_data[c] = normalize_vector_inplace(v, eps)
+    return Grid(data=normalized_data, background=(0.0, 0.0, 0.0), voxel_size=grid.voxel_size)
+```
+
+#### 2. MaxIndex (Dominant Axis Identification)
+This operation returns the index of the component with the largest value [S1].
+
+1.  Compare components: $v_x, v_y, v_z$.
+2.  Return the index $i$ corresponding to $\max(v_x, v_y, v_z)$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def max_index(v):
+    """
+    Returns the index (0, 1, or 2) of the component with the largest value.
+    """
+    if v[0] >= v[1] and v[0] >= v[2]:
+        return 0
+    elif v[1] >= v[0] and v[1] >= v[2]:
+        return 1
+    else:
+        return 2
+```
+
+#### 3. Sun Direction Normalization
+A specific application for directional light vectors [S4, unofficial].
+
+1.  Calculate the length of the sun direction vector $\mathbf{d}$ using `Math.hypot(d.x, d.y, d.z)` [S4, unofficial].
+2.  Normalize components:
+    $$ d_i \leftarrow \frac{d_i}{\text{len}} $$
+    [S4, unofficial]
+
+### Parameters
+*   **v:** Input 3D vector [S1].
+*   **eps(T):** Threshold for zero-magnitude check. Not given in the sources as a fixed constant, but implied to be type-dependent [S3, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Zero Vector:** Normalizing a zero vector results in division by zero. The method must explicitly check for magnitude $< \epsilon$ and return a zero vector or handle it as a special case [S3, unofficial].
+*   **Numerical Instability in L-Infinity:** When using L-infinity normalization for eigenvectors, if the vector is perpendicular to the view direction, the L-infinity norm can be 0. This case is typically ignored or assumed not to occur in valid rendering contexts [S6, unofficial].
+*   **Precision:** For high-precision requirements, intermediate calculations (like magnitude squared) should be performed in a higher precision type if the input is low precision (e.g., `float` input, `double` intermediate) to avoid premature underflow or overflow [G].
+
+## Subtopics
+
+### [Octahedral Normal Decoding](3373-octahedral-normal-decoding.md)
+Decodes a 2D octahedral coordinate into a 3D unit vector. It serves as the inverse operation for octahedral normal encoding, reconstructing surface normals from compressed 2D representations. It differs from [Octahedral Normal Encoding](5029-octahedral-normal-encoding.md) by performing the inverse mapping rather than the forward mapping, and from [Data-Dependent Normal Vector Quantizer (Simulated Annealing)](5865-data-dependent-normal-vector-quantizer-simulated-annealing.md) by using a fixed geometric distribution rather than a data-driven one.
+
+### Vector Normalization for Simplification
+A preprocessing step applied to vector field data before mesh simplification to standardize magnitude and range [S5]. Find the vector with the maximum length in the dataset, scale all vectors so that the maximum length becomes 1, and shift the scaled vectors into the unit interval $[0, 1]$ using the affine transformation $0.5 \mathbf{v} + 0.5$, where $\mathbf{v}$ is the vector after scaling the maximum length to 1 [S5]. This ensures consistent visualization and extraction ranges for streamlines and other vector field techniques on simplified meshes [S5].
+
+### L-Infinity Vector Normalization
+Scales projected eigenvectors using the L-infinity norm to ensure one component is exactly 1 or -1, preventing numerical instability and allowing storage in 8-bit textures [S6, unofficial]. The formula is $v_{\lambda_i}'' = \frac{v_{\lambda_i}'}{\|v_{\lambda_i}'\|_\infty}$, where $v_{\lambda_i}''$ is the scaled eigenvector, $v_{\lambda_i}'$ is the projected eigenvector, and $\|v\|_\infty = \max(|v_x|, |v_y|)$ for a 2D vector [S6, unofficial]. The scaled eigenvectors are mapped to range $[0,1]$ and stored in RGBA channels of an 8-bit texture [S6, unofficial]. If the surface normal is perpendicular to the view direction, the L-infinity norm is 0; this case is ignored or handled by not scaling [S6, unofficial].
+
+### Direction Normalization for SH
+Normalizes direction vectors for spherical harmonics by mapping them from $[-1, 1]$ to $[0, 1]$ using the formula $\text{dir\_norm} = (\text{dir} + 1) / 2$ [S7, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per vector for standard normalization and MaxIndex, and $O(N)$ for grid-wide normalization where $N$ is the number of active voxels [G].
+*   **Memory Complexity:** $O(1)$ auxiliary space for in-place normalization, and $O(N)$ for grid-wide normalization if a new grid is allocated [G].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Fast, numerically stable with epsilon checks, essential for lighting calculations and vector field visualization [G].
+*   **Limitations:** Loses magnitude information, which may be critical for physical simulations or flow speed visualizations [G].
+*   **When to use:** Lighting calculations, normal mapping, vector field streamline generation, preprocessing for compression [G].
+*   **When not to use:** When magnitude is a critical data attribute [G].
+
+## Background
+Vector normalization is a fundamental linear algebra operation widely used in computer graphics [G]. In volume rendering and vector field visualization, it standardizes directional data [G]. Specific implementations appear in various libraries and research papers: OpenVDB provides `MaxIndex` and generic vector math utilities in its `nanovdb::math` namespace [S1]. Lyr.jl implements grid-based vector normalization for GPU rendering [S3, unofficial]. The method is used in mesh simplification pipelines for vector fields [S5] and in LIC-like methods for tensor field visualization using L-infinity normalization for efficient storage [S6, unofficial]. It is also applied to spherical harmonics direction normalization [S7, unofficial].
+
+## Sources
+[S1] OpenVDB: nanovdb::math Namespace Reference, https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html, fetched 2026-10-24
+[S2] chloearluck/volume_rendering, https://github.com/chloearluck/volume_rendering, fetched 2026-10-24 (unofficial)
+[S3] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)
+[S4] mingderwang/theme1, https://github.com/mingderwang/theme1, fetched 2026-10-27 (unofficial)
+[S5] Segment-based tetrahedral meshing and rendering, https://doi.org/10.1145/1174429.1174507, fetched 2026-11-06
+[S6] Image-Space Tensor Field Visualization Using a LIC-like Method, https://doi.org/10.1007/978-3-642-21608-4_11, fetched 2026-10-27 (unofficial)
+[S7] ElenaViewSynthesis/4dgs, https://github.com/ElenaViewSynthesis/4dgs, fetched 2026-10-28 (unofficial)

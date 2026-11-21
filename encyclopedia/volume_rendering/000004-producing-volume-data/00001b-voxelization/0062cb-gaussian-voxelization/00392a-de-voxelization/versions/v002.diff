@@ -1,0 +1,110 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-De-voxelization aggregates network predictions computed on a sparse set of unique voxels back to the original dense voxel grid, and subsequently reduces these per-voxel predictions into per-Gaussian predictions [S1, unofficial]. It serves as the inverse operation to 3D Gaussian Voxelization, enabling efficient processing by 3D networks that operate on voxelized representations while preserving the native Gaussian structure for final rendering [S1, unofficial]. Unlike direct Gaussian processing, this method leverages the spatial locality and computational efficiency of voxel-based convolutions before mapping results back to the continuous Gaussian domain [S1, unofficial].
++De-voxelization aggregates network predictions computed on a sparse set of unique voxels back to the original dense voxel grid, and subsequently reduces these per-voxel predictions into per-Gaussian predictions [S1, unofficial]. It serves as the inverse operation to 3D Gaussian Voxelization, enabling efficient processing by 3D networks that operate on voxelized representations while preserving the native Gaussian structure for final rendering [S1, unofficial].
+ 
+ ## How it works
+@@ -10,5 +10,5 @@
+ 
+ ### Inputs and Outputs
+-*   **Input `uni_voxels_pred`**: A tensor of shape $(N_{unique}, C)$, where $N_{unique}$ is the number of unique voxels and $C$ is the dimensionality of the prediction (e.g., feature channels) [S1, unofficial].
++*   **Input `uni_voxels_pred`**: A tensor of shape $(N_{\text{unique}}, C)$, where $N_{\text{unique}}$ is the number of unique voxels and $C$ is the dimensionality of the prediction (e.g., feature channels) [S1, unofficial].
+ *   **Input `inverse_indices`**: A 1D tensor of shape $(M)$, where $M$ is the total number of voxels (including duplicates) [S1, unofficial]. Each element maps an original voxel to its corresponding index in the unique voxel array [S1, unofficial].
+ *   **Input `num_voxels_per_g`**: A 1D tensor of shape $(G)$, where $G$ is the number of Gaussians, indicating the number of voxels belonging to each Gaussian [S1, unofficial].
+@@ -20,5 +20,5 @@
+ ### Data Structures and Layout
+ The method relies on three primary tensors:
+-1.  `uni_voxels_pred`: Shape $(N_{unique}, C)$.
++1.  `uni_voxels_pred`: Shape $(N_{\text{unique}}, C)$.
+ 2.  `inverse_indices`: Shape $(M)$.
+ 3.  `num_voxels_per_g`: Shape $(G)$.
+@@ -29,7 +29,7 @@
+ 1.  **Expand Unique Voxels to All Voxels**: Use a scatter operation to expand the predictions from the unique-voxel level back to the original list of all voxels. This is achieved by indexing into `uni_voxels_pred` using `inverse_indices`. The `scatter` function combines values according to the `REDUCE` rule [S1, unofficial].
+     *   Formula: $\text{voxels\_pred} = \text{scatter}(\text{uni\_voxels\_pred}, \text{index}=\text{inverse\_indices}, \text{reduce}=\text{REDUCE})$
+-    *   The output shape is $(M, C)$ [S1, unofficial].
++    *   The intermediate output shape is $(M, C)$ [S1, unofficial].
+ 
+-2.  **Reduce to Gaussian Level**: Combine per-voxel predictions into Gaussian-level predictions using a segment-sparse operation.
++2.  **Reduce to Gaussian Level**: Combine per-voxel predictions into Gaussian-level predictions using a segment-sparse operation [S1, unofficial].
+     *   Compute offsets by taking the cumulative sum of `num_voxels_per_g` along dimension 0: $\text{offset} = \text{cumsum}(\text{num\_voxels\_per\_g}, \text{dim}=0)$ [S1, unofficial].
+     *   Apply `segment_csr` to group voxel predictions into Gaussian predictions. The `segment_csr` function takes `voxels_pred` and the computed `offset` pointer tensor, grouping voxel predictions into Gaussian predictions and reducing via the `REDUCE` rule [S1, unofficial].
+@@ -40,6 +40,6 @@
+ from typing import Literal
+ import torch
++from torch_scatter import scatter, segment_csr
+ 
+-# Global reduction mode (could also be passed as a parameter)
+ REDUCE: Literal["mean", "max"] = "max"
+ 
+@@ -50,57 +50,31 @@
+     Aggregate network predictions from unique voxels back to full voxel predictions,
+     and then further reduce them into per Gaussian predictions.
+-    
+-    Args:
+-        uni_voxels_pred : torch.Tensor
+-            A tensor containing the predicted values for each unique voxel.
+-            Shape: (N_unique, C)
+-        inverse_indices : torch.Tensor
+-            A 1D tensor of indices mapping every original voxel to its corresponding
+-            index in the unique voxel array. Shape: (M,)
+-        num_voxels_per_g : torch.Tensor
+-            A 1D tensor indicating how many voxels belong to each Gaussian.
+-            Shape: (G,)
+-            
+-    Returns:
+-        gs_pred : torch.Tensor
+-            A tensor containing the final predictions at the Gaussian level.
+-            Shape: (G, C)
+     """
+     # Step 1: Unique Voxels -> All Voxels
+     # Uses scatter to expand predictions from unique-voxel level back to all voxels
+     # by indexing through inverse_indices. The method of combination is determined by REDUCE.
+-    voxels_pred = torch.ops.torch_scatter.scatter(
+-        src=uni_voxels_pred, 
+-        index=inverse_indices, 
+-        dim=0, 
+-        reduce=REDUCE
+-    )
+-    
++    voxels_pred = scatter(src=uni_voxels_pred, index=inverse_indices, reduce=REDUCE)
++
+     # Step 2: All Voxels -> Gaussians
+     # Combine per-voxel predictions into Gaussian-level predictions using segment_csr.
+     # Compute offsets with cumulative sums of the number of voxels in each Gaussian.
+     offset = torch.cumsum(num_voxels_per_g, dim=0)
+-    
++
+     # segment_csr segments voxel predictions into groups corresponding to each Gaussian,
+     # reducing via the same REDUCE rule.
+-    gs_pred = torch.ops.torch_scatter.segment_csr(
+-        src=voxels_pred, 
+-        ptr=offset, 
+-        reduce=REDUCE
+-    )
+-    
++    gs_pred = segment_csr(src=voxels_pred, ptr=offset, reduce=REDUCE)
++
+     return gs_pred
+ ```
+-*Note: The implementation assumes access to `torch_scatter` operations. If `torch_scatter` is not available, `scatter` and `segment_csr` must be implemented using standard PyTorch indexing and sorting operations, though this is not provided in the source [S1, unofficial].*
+ 
+ ### Edge Cases and Pitfalls
+-*   **Empty Gaussians**: If a Gaussian has zero voxels, `num_voxels_per_g` will contain a zero. The cumulative sum offset will have duplicate values for that Gaussian. The behavior of `segment_csr` on empty segments depends on the implementation; typically, it may return zeros or undefined values. The source does not specify handling for this case [S1, unofficial].
+-*   **Precision**: The choice of `REDUCE` mode affects precision. `"max"` is robust to noise but may ignore subtle features, while `"mean"` smooths predictions but may dilute strong signals [S1, unofficial].
+-*   **Index Bounds**: `inverse_indices` must contain valid indices within the range $[0, N_{unique})$. Out-of-bounds indices will cause errors [S1, unofficial].
++*   **Empty Gaussians**: If a Gaussian has zero voxels, `num_voxels_per_g` will contain a zero, causing duplicate values in the cumulative sum offset. The behavior of `segment_csr` on empty segments depends on the implementation; typically, it may return zeros or undefined values. Not given in the sources.
++*   **Index Bounds**: `inverse_indices` must contain valid indices within the range $[0, N_{\text{unique}})$. Out-of-bounds indices will cause errors [G].
++*   **Precision**: The choice of `REDUCE` mode affects precision. `"max"` and `"mean"` are the supported options [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The scatter operation is $O(M)$, where $M$ is the total number of voxels. The cumulative sum is $O(G)$, where $G$ is the number of Gaussians. The segment operation is $O(M)$. Overall complexity is linear with respect to the number of voxels and Gaussians [S1, unofficial].
+-*   **Memory Complexity**: Requires storage for `uni_voxels_pred` ($N_{unique} \times C$), `inverse_indices` ($M$), `num_voxels_per_g` ($G$), and intermediate `voxels_pred` ($M \times C$). The output is $G \times C$ [S1, unofficial].
+-*   **Strengths**: Efficiently maps dense voxel computations back to sparse Gaussian representations. Leverages optimized scatter operations for performance [S1, unofficial].
++*   **Time Complexity**: Not given in the sources.
++*   **Memory Complexity**: Not given in the sources.
++*   **Strengths**: Efficiently maps dense voxel computations back to sparse Gaussian representations [S1, unofficial].
+ *   **Limitations**: Requires the `torch_scatter` library or equivalent implementation. The reduction mode is global, meaning all Gaussians use the same aggregation strategy [S1, unofficial].
+ *   **When to use**: When using 3D networks that operate on voxelized data but the final representation requires per-Gaussian features for rendering [S1, unofficial].

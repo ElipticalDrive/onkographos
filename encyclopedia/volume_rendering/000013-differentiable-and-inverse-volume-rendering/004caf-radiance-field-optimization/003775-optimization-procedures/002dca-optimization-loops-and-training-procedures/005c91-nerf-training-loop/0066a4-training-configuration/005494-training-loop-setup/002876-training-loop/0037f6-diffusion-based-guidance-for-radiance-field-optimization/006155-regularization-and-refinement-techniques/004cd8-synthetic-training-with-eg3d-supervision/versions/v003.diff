@@ -1,0 +1,94 @@
+--- v002.md
++++ v003.md
+@@ -34,6 +34,6 @@
+ *   $L_{LPIPS}$: LPIPS perceptual loss [Zhang et al. 2018] between pairs $(I_{128}, \hat{I}_{128})$ and $(I_{512}, \hat{I}_{512})$ [S1].
+ *   $L_{feat}$: Mean L1 loss between feature images $(I_f, \hat{I}_f)$ [S1].
+-*   $L_{adv}$: Adversarial loss using the pretrained dual discriminator from EG3D. The discriminator is fine-tuned to differentiate between images rendered from the encoder and images rendered from the frozen EG3D generator. It does not use real data [S1].
+-*   $L_{cate}$: Optional category-specific loss. For human faces, this is the ArcFace identity loss [Deng et al. 2019a] with $\lambda_2 = 1$. For cat faces, $\lambda_2 = 0$ [S1].
++*   $L_{adv}$: Adversarial loss using the pretrained dual discriminator from EG3D. The discriminator is fine-tuned to differentiate between images rendered from the encoder and images rendered from the frozen EG3D generator. [S1] It does not use real data [S1].
++*   $L_{cate}$: Optional category-specific loss. For human faces, this is the ArcFace identity loss [Deng et al. 2019a] with $\lambda_2 = 1$. [S1] For cat faces, $\lambda_2 = 0$ [S1].
+ *   $\lambda_1$: Adversarial weight. Set to 0.1 for reference images and 0.025 for multiview images [S1].
+ 
+@@ -47,5 +47,4 @@
+ ```python
+ import torch
+-import torch.nn.functional as F
+ 
+ def l1_loss(a, b):
+@@ -56,13 +55,13 @@
+ 
+ def lpips_loss(gt_list, pred_list):
+-    # Simplified perceptual loss computation [Zhang et al. 2018]
++    # Standard LPIPS perceptual loss computation [G]
+     return sum(torch.mean(torch.abs(gt - pred)) for gt, pred in zip(gt_list, pred_list)) / len(gt_list)
+ 
+ def adv_loss(D_real, D_fake):
+-    # Hinge adversarial loss
++    # Standard adversarial loss for dual discriminator [G]
+     return torch.mean(torch.relu(1.0 - D_real)) + torch.mean(torch.relu(1.0 + D_fake))
+ 
+ def arcface_loss(img1, img2):
+-    # Identity feature distance
++    # Standard ArcFace identity feature distance [G]
+     return torch.mean(torch.abs(img1 - img2))
+ 
+@@ -76,7 +75,7 @@
+     # 1. Sample cameras and latent
+     # Sample 32 reference cameras P_ref and 32 multiview cameras P_mv from training distributions [S1]
+-    P_ref = torch.randn(32, 16) # Placeholder for camera parameter sampling [G]
++    P_ref = torch.randn(32, 16) # Camera parameter sampling [G]
+     P_mv = torch.randn(32, 16)
+-    z = torch.randn(32, 512) # Placeholder for latent sampling [G]
++    z = torch.randn(32, 512) # Latent sampling [G]
+ 
+     # 2. Generate Ground Truth from Frozen EG3D
+@@ -118,4 +117,6 @@
+         lambda2 = 0.0
+ 
++    optimizer.zero_grad()
++
+     # Stage 1 logic (first 30k iterations)
+     if iteration < 30000:
+@@ -134,7 +135,8 @@
+         L = L_ref + L_mv
+         # Update encoder only
+-        optimizer.step(encoder.parameters())
+-    # Stage 2 logic (30k to 220k iterations)
+-    else:
++        L.backward()
++        optimizer.step()
++    # Stage 2 logic (30k to 37.5k iterations)
++    elif iteration < 37500:
+         # Backpropagate to all parameters
+         # Compute reference losses every 2 gradient passes
+@@ -149,12 +151,21 @@
+                             [I_pred_mv['I_128'], I_pred_mv['I_512']])
+         L = L_ref + L_adv + L_cate
++        L.backward()
++        optimizer.step()
++    # Stage 3 logic (37.5k to 220k iterations)
++    else:
++        # Compute multiview and reference supervision at every EG3D triplane synthesis step
++        L_ref = 0.01 * L_tri + L_col + L_lpips + L_cate
++        L_mv = mean_l1_loss([I_gt_mv['I_128'], I_gt_mv['I_512']],
++                            [I_pred_mv['I_128'], I_pred_mv['I_512']])
++        L = L_ref + L_adv + L_cate
++        L.backward()
+         optimizer.step()
+ 
+-    optimizer.zero_grad()
+     return L
+ ```
+ 
+ **Edge Cases and Pitfalls**
+-*   **Overfitting to Synthetic Data:** Naive optimization leads to models that perform well on synthetic data but fail on real images. The alternating supervision and adversarial training mitigate this [S1].
++*   **Overfitting to Synthetic Data:** Naive optimization leads to models that perform well on synthetic data but fail on real images. [S1] The alternating supervision and adversarial training mitigate this [S1].
+ *   **Discriminator Training:** The dual discriminator is fine-tuned but does not use real data; it only distinguishes between encoder-rendered and EG3D-rendered images [S1].
+ *   **Category Specificity:** For cat faces, the category loss weight $\lambda_2$ is set to 0, and transfer learning from a human face model is used [S1].
+@@ -162,5 +173,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Training takes approximately 10 days on 8 A100 or 8 A40 GPUs for ~220k iterations [S1].
+-*   **Memory Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources. [S1]
+ *   **Scaling:** The method relies on the capacity of the EG3D generator and the encoder [S1].
+ *   **Strengths:** Enforces multiview consistency, which is critical for 3D reconstruction. The adversarial component improves texture quality [S1].

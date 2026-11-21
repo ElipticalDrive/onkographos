@@ -1,0 +1,147 @@
+# Parametric Quadtree Traversal
+Also called: Parametric Quadtree Ray Traversal, parametric algorithm for octree traversal (2D variant), quadtree-raycast
+## Overview
+Parametric quadtree traversal is a top-down ray-quadtree intersection algorithm that uses parametric ray coordinates to determine the entry and exit points of a ray within a node and its children [S1, unofficial]. It solves the problem of efficiently traversing non-uniform depth quadtrees without branching on ray direction signs for every step, by normalizing coordinates via flipping [S1, unofficial]. It sets itself apart from sibling methods by operating on 2D spatial hierarchies (quadtrees) rather than 3D volumes (octrees), while sharing the same parametric coordinate logic as [Parametric Octree Traversal](2361-parametric-octree-traversal.md) [S1, unofficial].
+## How it works
+### Inputs and Outputs
+- **Inputs**: Ray origin $(start_x, start_y)$, ray direction $(dir_x, dir_y)$, quadtree root node, and the spatial bounds of the root node $(quad\_pos_x, quad\_pos_y, size)$ [S1, unofficial].
+- **Outputs**: A list of leaf nodes (or nodes with no children) intersected by the ray, in traversal order [S1, unofficial].
+
+### Data Structures
+- **Quadtree Node**: Contains a boolean or pointer indicating if it has children (`children.is_none()` implies leaf) [S1, unofficial]. If it has children, it contains an array of 4 child nodes indexed 0-3 [S1, unofficial].
+- **Indexing**: Children are indexed as: 0 (bottom-left), 1 (bottom-right), 2 (top-left), 3 (top-right). This is the standard raster order [G].
+
+### Parameters
+- **EXIT**: The integer constant `4`, used to signal that no further children should be visited [S1, unofficial].
+- **Mask**: A 2-bit integer (0-3) tracking coordinate flips. Bit 0 corresponds to X, Bit 1 to Y [S1, unofficial].
+
+### Steps
+1. **Coordinate Flipping (Normalization)**: To handle arbitrary ray directions without conditional branching inside the loop, flip the ray origin if the direction component is negative [S1, unofficial].
+   - If $dir_x < 0$: $start_x \leftarrow 2 \cdot quad\_pos_x + size - start_x$ and $mask \leftarrow mask \ | \ 1$ [S1, unofficial].
+   - If $dir_y < 0$: $start_y \leftarrow 2 \cdot quad\_pos_y + size - start_y$ and $mask \leftarrow mask \ | \ 2$ [S1, unofficial].
+   - The direction vector components are used as absolute values $|dir_x|$ and $|dir_y|$ for all subsequent parametric calculations [S1, unofficial].
+2. **Parametric Bounds Calculation**: Compute the parametric distances $t$ along the ray to the entry and exit planes of the current node [S1, unofficial].
+   - $tx0 = \frac{quad\_pos_x - start_x}{|dir_x|}$ [S1, unofficial].
+   - $tx1 = \frac{quad\_pos_x + size - start_x}{|dir_x|}$ [S1, unofficial].
+   - $ty0 = \frac{quad\_pos_y - start_y}{|dir_y|}$ [S1, unofficial].
+   - $ty1 = \frac{quad\_pos_y + size - start_y}{|dir_y|}$ [S1, unofficial].
+3. **Node Intersection Test**: $t_{min} = \max(tx0, ty0)$ and $t_{max} = \min(tx1, ty1)$ [S1, unofficial]. If $t_{min} \ge t_{max}$, the ray does not intersect the node; return empty list [S1, unofficial].
+4. **Leaf Check**: If the current node has no children, return a list containing the current node [S1, unofficial].
+5. **Midpoint Calculation**: $txm = \frac{tx0 + tx1}{2}$ and $tym = \frac{ty0 + ty1}{2}$ [S1, unofficial].
+6. **Initial Child Selection**: Determine the first child to visit based on the entry point $(tx0, ty0)$ relative to the midpoints $(txm, tym)$ [S1, unofficial].
+   - If $tx0 > ty0$: if $tx0 < tym$, $curr\_node = 0$; else $curr\_node = 2$ [S1, unofficial].
+   - Else ($tx0 \le ty0$): if $ty0 < txm$, $curr\_node = 0$; else $curr\_node = 1$ [S1, unofficial].
+7. **Traversal Loop**: While $curr\_node \neq EXIT$ (4):
+   - **Access Child**: The actual child index in memory is $idx = curr\_node \oplus mask$ [S1, unofficial]. Let $child$ be the node at `node.children[idx]` [S1, unofficial].
+   - **Process Child**: Recursively call the traversal function on $child$ with updated parametric bounds based on the quadrant [S1, unofficial].
+     - If $curr\_node = 0$: bounds are $(tx0, ty0, txm, tym)$ [S1, unofficial].
+     - If $curr\_node = 1$: bounds are $(txm, ty0, tx1, tym)$ [S1, unofficial].
+     - If $curr\_node = 2$: bounds are $(tx0, tym, txm, ty1)$ [S1, unofficial].
+     - If $curr\_node = 3$: bounds are $(txm, tym, tx1, ty1)$ [S1, unofficial].
+   - **Next Node Selection**: Use the lookup table $L$ to find the next node to visit [S1, unofficial].
+     - $L = \begin{bmatrix} 1 & 2 \\ 4 & 3 \\ 3 & 4 \\ 4 & 4 \end{bmatrix}$ where 4 is EXIT [S1, unofficial].
+     - If $txm \le tym$, $next\_node = L[curr\_node][0]$; else $next\_node = L[curr\_node][1]$ [S1, unofficial].
+     - $curr\_node = next\_node$ [S1, unofficial].
+8. **Return**: Return the accumulated list of leaf nodes [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def parametric_quadtree_traversal(ray_origin, ray_dir, node, quad_pos, size):
+    """
+    ray_origin: (x, y)
+    ray_dir: (x, y)
+    node: QuadtreeNode object
+    quad_pos: (x, y) position of the current node's bottom-left corner
+    size: float, side length of the current node
+    """
+    start_x, start_y = ray_origin
+    dir_x, dir_y = ray_dir
+    mask = 0
+
+    # 1. Coordinate Flipping
+    if dir_x < 0:
+        start_x = 2 * quad_pos[0] + size - start_x
+        mask |= 1
+    if dir_y < 0:
+        start_y = 2 * quad_pos[1] + size - start_y
+        mask |= 2
+
+    # 2. Parametric Bounds
+    abs_dir_x = abs(dir_x) if dir_x != 0.0 else 1e-9
+    abs_dir_y = abs(dir_y) if dir_y != 0.0 else 1e-9
+    tx0 = (quad_pos[0] - start_x) / abs_dir_x
+    tx1 = (quad_pos[0] + size - start_x) / abs_dir_x
+    ty0 = (quad_pos[1] - start_y) / abs_dir_y
+    ty1 = (quad_pos[1] + size - start_y) / abs_dir_y
+
+    return _traverse(node, tx0, ty0, tx1, ty1, mask)
+
+def _traverse(node, tx0, ty0, tx1, ty1, mask):
+    # 3. Intersection Test
+    t_min = max(tx0, ty0)
+    t_max = min(tx1, ty1)
+    if t_min >= t_max:
+        return []
+
+    # 4. Base Case
+    if node.children is None:
+        return [node]
+
+    # 5. Midpoints
+    txm = (tx0 + tx1) / 2
+    tym = (ty0 + ty1) / 2
+
+    # 6. Initial Child Selection
+    if tx0 > ty0:
+        curr_node = 0 if tx0 < tym else 2
+    else:
+        curr_node = 0 if ty0 < txm else 1
+
+    results = []
+    EXIT = 4
+    next_lookup = [[1, 2], [4, 3], [3, 4], [4, 4]]
+
+    # 7. Traversal Loop
+    while curr_node != EXIT:
+        idx = curr_node ^ mask
+        child = node.children[idx]
+
+        if curr_node == 0:
+            c_tx0, c_ty0, c_tx1, c_ty1 = tx0, ty0, txm, tym
+        elif curr_node == 1:
+            c_tx0, c_ty0, c_tx1, c_ty1 = txm, ty0, tx1, tym
+        elif curr_node == 2:
+            c_tx0, c_ty0, c_tx1, c_ty1 = tx0, tym, txm, ty1
+        elif curr_node == 3:
+            c_tx0, c_ty0, c_tx1, c_ty1 = txm, tym, tx1, ty1
+
+        results.extend(_traverse(child, c_tx0, c_ty0, c_tx1, c_ty1, mask))
+
+        if txm <= tym:
+            curr_node = next_lookup[curr_node][0]
+        else:
+            curr_node = next_lookup[curr_node][1]
+
+    return results
+```
+
+### Edge Cases and Pitfalls
+- **Zero Direction Components**: If $dir_x = 0$ or $dir_y = 0$, division by zero occurs [S1, unofficial]. The implementation should handle this by treating the ray as parallel to the axis, effectively ignoring the parametric constraint for that axis or using a large epsilon [G].
+- **Mask Logic**: The XOR with mask correctly maps the logical quadrant index to the physical child index in memory when coordinates are flipped [S1, unofficial]. Forgetting to flip the mask or the origin leads to visiting the wrong child [S1, unofficial].
+- **Precision**: Floating-point precision errors in $txm$ and $tym$ comparisons can lead to incorrect child selection at boundaries [G]. Using a small epsilon for comparisons might be necessary [G].
+
+## Operating characteristics
+- **Time Complexity**: Not given in the sources.
+- **Memory Complexity**: Not given in the sources.
+- **Performance**: Not given in the sources.
+- **Strengths**: Not given in the sources.
+- **Limitations**: Not given in the sources.
+
+## Background
+The algorithm is based on "An Efficient Parametric Algorithm for Octree Traversal" [S1, unofficial]. It is a 2D variant of the parametric octree traversal method [S1, unofficial]. The provided implementation is a Rust port visualized using minifb [S1, unofficial].
+
+## Sources
+[S1] Musta-Kissa/quadtree-raycast, https://github.com/Musta-Kissa/quadtree-raycast, fetched 2026-10-24 (unofficial)

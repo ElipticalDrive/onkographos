@@ -1,0 +1,120 @@
+--- v003.md
++++ v004.md
+@@ -1,5 +1,5 @@
+ # Voxel Deformation with Spherical Falloff
+ 
+-Also called: Spherical Voxel Deformation, Voxel Falloff Modification
++Also called: Runtime Digging, Runtime Terrain Digging, Spherical Edits, Spherical Voxel Deformation, Voxel Falloff Modification
+ 
+ ## Overview
+@@ -15,4 +15,5 @@
+ - `densityField`: The array of scalar density values for the voxels [S2, unofficial].
+ - `dimensions`: The dimensions of the voxel grid [S2, unofficial].
++- `chunkSize`: The size of a terrain chunk in voxels [G].
+ 
+ **Outputs:**
+@@ -21,10 +22,10 @@
+ 
+ **Data Structures:**
+-- `densityField`: A 1D array or 3D tensor of floats representing voxel density. The mapping from 3D coordinates $(x, y, z)$ to array index is implementation-specific but typically follows row-major or column-major ordering [S1, S2, unofficial].
++- `densityField`: A 1D array or 3D tensor of floats or bytes representing voxel density. The mapping from 3D coordinates $(x, y, z)$ to array index is implementation-specific but typically follows row-major or column-major ordering [S2, unofficial].
+ - `TerrainChunk`: A structure representing a sub-volume of the world, containing a subset of the density field and a mesh [S2, unofficial].
+ 
+ **Steps:**
+ 
+-1. **Raycast and Hit Detection:** Cast a ray from the camera position along the camera's forward direction with a maximum range. If the ray hits a terrain collider, record the hit point `worldPos` [S1, S2, unofficial].
++1. **Raycast and Hit Detection:** Cast a ray from the camera position along the camera's forward direction with a maximum range. If the ray hits a terrain collider, record the hit point `worldPos` [S2, unofficial].
+ 2. **Coordinate Conversion:** Convert `worldPos` to local voxel coordinates. If the voxel grid is offset from the world origin, apply the inverse transform:
+    $$
+@@ -39,5 +40,5 @@
+    \end{aligned}
+    $$
+-   Clamp these bounds to the world dimensions $[0, \text{dimensions}_i]$ [S1, S2, unofficial].
++   Clamp these bounds to the world dimensions $[0, \text{dimensions}_i - 1]$ [S2, unofficial].
+ 4. **Iteration:** Iterate over all voxels $(x, y, z)$ within the bounding box [S1, S2, unofficial].
+ 5. **Distance Check:** Calculate the Euclidean distance $d$ from the voxel center to the brush center:
+@@ -69,16 +70,15 @@
+ 
+ ```python
+-def deform_voxel_field(density_field, dimensions, voxel_size, world_pos, radius, delta, mode):
++def deform_voxel_field(density_field, dimensions, voxel_size, world_pos, radius, delta, mode, chunk_size):
+     # 1. Convert world position to local voxel coordinates
+-    # Assuming origin at (0,0,0) for simplicity; adjust if offset exists
+     local_pos = world_pos / voxel_size
+     
+     # 2. Calculate bounding box
+-    min_x = floor(local_pos.x - radius)
+-    max_x = ceil(local_pos.x + radius)
+-    min_y = floor(local_pos.y - radius)
+-    max_y = ceil(local_pos.y + radius)
+-    min_z = floor(local_pos.z - radius)
+-    max_z = ceil(local_pos.z + radius)
++    min_x = int(local_pos.x - radius)
++    max_x = int(local_pos.x + radius)
++    min_y = int(local_pos.y - radius)
++    max_y = int(local_pos.y + radius)
++    min_z = int(local_pos.z - radius)
++    max_z = int(local_pos.z + radius)
+     
+     # Clamp to world bounds
+@@ -100,5 +100,5 @@
+                 dy = y - local_pos.y
+                 dz = z - local_pos.z
+-                dist = sqrt(dx*dx + dy*dy + dz*dz)
++                dist = (dx*dx + dy*dy + dz*dz) ** 0.5
+                 
+                 # 5. Skip if outside radius
+@@ -106,10 +106,9 @@
+                     continue
+                 
+-                # 6. Calculate falloff
+-                # SmoothStep(1, 0, t) = 3t^2 - 2t^3 for t in [0,1]
++                # 6. Calculate falloff (SmoothStep)
+                 t = dist / radius
+-                if t > 1.0:
++                if t >= 1.0:
+                     falloff = 0.0
+-                elif t < 0.0:
++                elif t <= 0.0:
+                     falloff = 1.0
+                 else:
+@@ -122,11 +121,8 @@
+                         continue # Guard against division by zero [S1, unofficial]
+                     modification_amount = delta / dist
+-                    # Assuming density is stored as 0-255 byte values normalized to 0-1 for calculation
+-                    # Reconstructing [S1, unofficial] formula: v_new = clamp((v_old/255 - mod) * 255, 0, 255)
+-                    # Here we assume density_field stores 0-255 integers
+                     v_old = density_field[x, y, z]
+                     v_normalized = v_old / 255.0
+                     v_new_normalized = v_normalized - modification_amount
+-                    v_new = clamp(v_new_normalized * 255.0, 0, 255)
++                    v_new = max(0, min(255, v_new_normalized * 255.0))
+                     density_field[x, y, z] = int(v_new)
+                     
+@@ -139,5 +135,5 @@
+                     v_normalized = v_old / 255.0
+                     v_new_normalized = v_normalized + modification_amount
+-                    v_new = clamp(v_new_normalized * 255.0, 0, 255)
++                    v_new = max(0, min(255, v_new_normalized * 255.0))
+                     density_field[x, y, z] = int(v_new)
+                     
+@@ -147,5 +143,4 @@
+                 
+                 # 8. Mark chunks as dirty
+-                # Determine which chunk this voxel belongs to
+                 chunk_x = x // chunk_size
+                 chunk_y = y // chunk_size
+@@ -166,6 +161,6 @@
+ **Edge Cases and Pitfalls:**
+ - **Division by Zero:** If the raycast hit point exactly matches a voxel center, the distance $d$ becomes 0. In [S1, unofficial], this causes `modificationAmount` to become infinite. The code does not explicitly guard against `distance == 0` before division, which is a pitfall [S1, unofficial]. Implementers should add a check: `if dist == 0: continue` or use a minimum distance threshold [G].
+-- **Border Voxels:** Iterating over the bounding box may include voxels outside the valid world bounds if not clamped. The bounding box calculation must be clamped to the world dimensions [S1, S2, unofficial].
+-- **Precision:** Using floating-point arithmetic for distance and falloff is standard. However, converting between world coordinates and voxel indices must be handled carefully to avoid off-by-one errors [S2, unofficial].
++- **Border Voxels:** Iterating over the bounding box may include voxels outside the valid world bounds if not clamped. The bounding box calculation must be clamped to the world dimensions [S2, unofficial].
++- **Precision:** Using floating-point arithmetic for distance and falloff is standard [G].
+ 
+ ## Subtopics
+@@ -189,3 +184,4 @@
+ ## Sources
+ [S1] Eldemarkki/Marching-Cubes-Terrain, https://github.com/Eldemarkki/Marching-Cubes-Terrain, fetched 2026-10-26 (unofficial)
+-[S2] Rabidus4k/UnityVoxelTerrain, https://github.com/Rabidus4k/UnityVoxelTerrain, fetched 2026-10-28 (unofficial)+[S2] TsokasGit/primitive-voxels-godot, https://github.com/TsokasGit/primitive-voxels-godot, fetched 2026-10-27 (unofficial)
++[S3] Rabidus4k/UnityVoxelTerrain, https://github.com/Rabidus4k/UnityVoxelTerrain, fetched 2026-10-28 (unofficial)

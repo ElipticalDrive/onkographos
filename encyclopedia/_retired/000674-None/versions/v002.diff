@@ -1,0 +1,282 @@
+--- v001.md
++++ v002.md
+@@ -4,160 +4,150 @@
+ 
+ ## Overview
+-Shading for Semi-Transparent Volumes is a technique that enables local diffuse illumination for semi-transparent volume rendering using multi-stage rasterization hardware, specifically leveraging register combiners [S1, unofficial][S2]. It solves the problem of computing per-voxel lighting without requiring a frame buffer copy or multi-pass rendering, allowing for interactive frame rates on early PC hardware [S1, unofficial][S2]. It sets itself apart from sibling methods by sacrificing real trilinear interpolation to fit gradient and color data into separate 2D textures, whereas alternatives like the method in [9] likely use 3D textures or multi-pass techniques to preserve interpolation quality [S1, unofficial][S2].
++Shading for Semi-Transparent Volumes is a technique that enables local diffuse illumination for semi-transparent volume rendering using multi-stage rasterization hardware, specifically targeting the register combiners architecture found in early 2000s GPUs [S1, unofficial][S2]. It solves the problem of computing per-voxel lighting without requiring a frame buffer copy or multi-pass rendering, which was previously necessary to handle signed gradient vectors or complex interpolation [S2]. Unlike standard isosurface shading which uses alpha-testing, this method employs alpha-blending to composite the shaded volume [S1, unofficial]. It sets itself apart from sibling methods by achieving interactive frame rates via single-pass rendering and hardware-supported dot products, though it sacrifices real trilinear interpolation to accommodate the separate texture requirement for gradients and colors [S1, unofficial][S2].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Input:** A 3D volume dataset containing gradient vectors and scalar values (mapped to color/opacity). A light direction vector $\mathbf{L}$.
+-*   **Output:** A shaded 2D image with alpha blending, where each fragment color includes ambient and diffuse components based on the local gradient.
++The method relies on the principle that a surface normal approximation can be derived from the volume data gradient $\mathbf{g} = \nabla V$. In this specific hardware implementation, the gradient is not computed via finite differences in shader code but is pre-computed or stored directly in texture data to leverage the fixed-function pipeline's combiner units [S1, unofficial][S2].
+ 
+-**Data Structures**
+-The method requires two separate 2D textures to store volume data, as hardware limits input textures to two at a time, preventing real trilinear interpolation [S1, unofficial][S2].
++### Inputs and Outputs
++*   **Input 1:** A 3D volume dataset containing scalar values.
++*   **Input 2:** A light direction vector $\mathbf{l}$.
++*   **Input 3:** A global diffuse color $C_{diffuse}$.
++*   **Output:** A shaded, semi-transparent image where each fragment's color includes ambient and diffuse contributions based on the local gradient.
++
++### Data Structures and Layout
++The technique requires two separate 2D textures (representing slices or interpolated planes) due to hardware limitations on the number of simultaneous texture inputs [S1, unofficial][S2].
+ 
+ 1.  **Texture 0 (Gradient Texture):**
+     *   **Format:** RGB.
+-    *   **Content:** Stores the gradient vector $(\frac{\partial V}{\partial x}, \frac{\partial V}{\partial y}, \frac{\partial V}{\partial z})$ for each voxel.
+-    *   **Mapping:** Gradient components are typically mapped to the range $[0, 1]$ for RGB storage, as hardware combiners often expect unsigned normalized inputs [S1, unofficial][S2]. Note: Signed vector components are supported by hardware via specific combiner operations, avoiding large-scale workarounds [S2].
++    *   **Content:** Stores the gradient vector $\mathbf{g}$ for each voxel. The RGB channels correspond to the $x, y, z$ components of the gradient.
++    *   **Note:** This texture does *not* contain color or opacity information.
+ 
+ 2.  **Texture 1 (Color/Opacity Texture):**
+-    *   **Format:** RGBA or Paletted (RGB indices + Alpha).
+-    *   **Content:** Stores the ambient color and opacity for each voxel.
+-    *   **Mapping:** The RGB channels store the ambient color $C_{ambient}$. The Alpha channel stores the opacity $\alpha$.
+-    *   **Constraint:** The hardware does not provide a component-wise color lookup table. Therefore, it is not possible to use the alpha component as a color index to specify ambient color for each voxel independently if using a paletted texture for gradients [S2]. However, Texture 1 can be a paletted texture of color indices to save memory, with the same memory requirements as the isosurface algorithm (excluding the color table) [S1, unofficial][S2].
++    *   **Format:** RGBA (or paletted RGB with alpha).
++    *   **Content:** Stores the ambient color $C_{ambient}$ and opacity $\alpha$ for each voxel.
++    *   **Note:** The RGB channels represent the ambient color. The alpha channel represents the voxel's opacity. This texture can be a paletted texture of color indices to save memory [S1, unofficial][S2].
+ 
+-**Register Combiner Setup**
+-The shading is computed in a single pass using two combiner stages: General Combiner 0 and the Final Combiner.
++### Combiner Setup
++The rendering pipeline uses two combiner stages: **General Combiner 0** and the **Final Combiner**.
+ 
+-*   **General Combiner 0:**
+-    *   **Input A:** Texture 0 (Gradient vector $\mathbf{G}$).
+-    *   **Input B:** Light direction vector $\mathbf{L}$ (passed as a constant or varying).
+-    *   **Input C:** ZERO.
+-    *   **Operation:** Computes the dot product $\mathbf{G} \cdot \mathbf{L}$.
+-    *   **Output:** $A_{comb0} = \mathbf{G} \cdot \mathbf{L}$.
++**General Combiner 0:**
++*   **Input A:** Texture 0 (Gradient $\mathbf{g}$).
++*   **Input B:** Light Direction $\mathbf{l}$ (passed as a vertex attribute or constant).
++*   **Input C:** ZERO.
++*   **Operation:** Computes the dot product of the gradient and the light direction.
++    $$ \text{Output}_0 = \mathbf{g} \cdot \mathbf{l} $$
++*   **Note:** The hardware supports signed vector components, so no workaround for negative dot products is needed [S2].
+ 
+-*   **Final Combiner:**
+-    *   **Input A:** Output from General Combiner 0 ($A_{comb0}$).
+-    *   **Input B:** Primary Color (Diffuse Color $C_{diffuse}$). This is typically a constant color representing the light's diffuse intensity.
+-    *   **Input C:** ZERO.
+-    *   **Input D:** Texture 1 (Ambient Color $C_{ambient}$).
+-    *   **Operation:** Sums the ambient color and the product of the diffuse color and the dot product.
+-    *   **Output:** $C_{final} = C_{diffuse} \cdot (\mathbf{G} \cdot \mathbf{L}) + C_{ambient}$.
+-    *   **Note on Formula:** The source diagram [S1, unofficial] shows the final combiner output as $AB + (1-A)C + D$. With $C=ZERO$, this simplifies to $AB + D$. Here, $A$ is the dot product, $B$ is the diffuse color, and $D$ is the ambient color from Texture 1.
++**Final Combiner:**
++*   **Input A:** Output from General Combiner 0 (the dot product $d = \mathbf{g} \cdot \mathbf{l}$).
++*   **Input B:** Primary Color (Diffuse Color $C_{diffuse}$). This is typically passed as a constant color or vertex color.
++*   **Input C:** ZERO.
++*   **Input D:** Texture 1 (Ambient Color $C_{ambient}$ and Opacity $\alpha$).
++*   **Operation:** Sums the ambient color and the product of the diffuse color and the dot product.
++    $$ \text{Output}_{final} = d \cdot C_{diffuse} + (1 - d) \cdot 0 + C_{ambient} $$
++    Simplified:
++    $$ C_{shade} = C_{ambient} + (\mathbf{g} \cdot \mathbf{l}) C_{diffuse} $$
++*   **Alpha Handling:** The alpha channel from Texture 1 is passed through to control the blending of the fragment with the background [S1, unofficial].
+ 
+-**Pseudocode**
+-The following pseudocode describes the configuration of the register combiners and the rendering loop. It assumes a fixed-function pipeline with multi-texturing support.
++### Pseudocode
++The following pseudocode describes the configuration of the register combiners. It assumes a fixed-function pipeline API (e.g., OpenGL 1.2+ with `ARB_register_combiners`).
+ 
+ ```python
+-def setup_shading_for_semi_transparent_volumes():
+-    """
+-    Configures the register combiners for shaded semi-transparent volume rendering.
+-    Assumes hardware supports 2D multi-texturing and register combiners.
+-    """
++# Assume 'gl' is the graphics context and 'tex0', 'tex1' are bound textures.
++
++def setup_combiners(light_direction, diffuse_color):
++    # Enable register combiners
++    gl.enable(gl.REGISTER_COMBINERS_NV)
++
++    # --- General Combiner 0 ---
++    # Computes dot product of Gradient (Tex0) and Light Direction
++    gl.combiner_input_nv(gl.COMBINER0_RGB, gl.VARIABLE_A, gl.TEXTURE0, gl.RGB)
++    gl.combiner_input_nv(gl.COMBINER0_RGB, gl.VARIABLE_B, gl.CONSTANT, gl.RGB)
++    # Light direction is passed as a constant color or vertex attribute mapped to B
++    # For simplicity, assume light direction is set as a constant color uniform
++    gl.combiner_constant_color0_nv(light_direction) 
+     
+-    # 1. Texture Setup
+-    # Texture 0: Gradient information (RGB)
+-    # Texture 1: Ambient color (RGB) and Opacity (Alpha)
+-    # Note: Real trilinear interpolation is not possible because hardware 
+-    # only supports two input textures at a time [S1, unofficial][S2].
++    gl.combiner_input_nv(gl.COMBINER0_RGB, gl.VARIABLE_C, gl.CONSTANT, gl.RGB)
++    gl.combiner_constant_color0_nv([0.0, 0.0, 0.0]) # ZERO
+     
+-    bind_texture(0, gradient_texture) # RGB: Gradient vector G
+-    bind_texture(1, color_opacity_texture) # RGBA: Ambient color C_ambient, Alpha alpha
++    gl.combiner_output_nv(gl.COMBINER0_RGB, gl.NONE, gl.RGB, gl.RGB, gl.RGB, gl.NONE)
++    # Output is A * B = Gradient . Light
+ 
+-    # 2. General Combiner 0 Setup
+-    # Computes dot product of Light Vector (B) and Gradient from Texture 0 (A)
+-    set_combiner_stage(0, 
+-        input_a=TEXTURE0, 
+-        input_b=LIGHT_DIRECTION, 
+-        input_c=ZERO, 
+-        input_d=ZERO,
+-        operation=DOT_PRODUCT
+-    )
+-    # Output of Stage 0: A_dot = G . L
++    # --- Final Combiner ---
++    # Computes Ambient + Diffuse * DotProduct
++    gl.combiner_input_nv(gl.COMBINER_FINAL_RGB, gl.VARIABLE_A, gl.COMBINER0, gl.RGB)
++    # Variable A is the dot product from Combiner 0
++    
++    gl.combiner_input_nv(gl.COMBINER_FINAL_RGB, gl.VARIABLE_B, gl.CONSTANT, gl.RGB)
++    # Variable B is the Diffuse Color
++    gl.combiner_constant_color0_nv(diffuse_color)
++    
++    gl.combiner_input_nv(gl.COMBINER_FINAL_RGB, gl.VARIABLE_C, gl.CONSTANT, gl.RGB)
++    gl.combiner_constant_color0_nv([0.0, 0.0, 0.0]) # ZERO
++    
++    gl.combiner_input_nv(gl.COMBINER_FINAL_RGB, gl.VARIABLE_D, gl.TEXTURE1, gl.RGB)
++    # Variable D is the Ambient Color from Texture 1
++    
++    # Formula: A*B + (1-A)*C + D
++    # Since C is ZERO, this simplifies to: A*B + D
++    # Which is: (Gradient . Light) * Diffuse + Ambient
++    gl.combiner_rgb_nv(gl.COMBINER_FINAL_RGB, gl.MULTIPLY, gl.VARIABLE_A, gl.VARIABLE_B, gl.ZERO, gl.MULTIPLY, gl.VARIABLE_C, gl.ADD)
++    gl.combiner_alpha_nv(gl.COMBINER_FINAL_RGB, gl.REPLACE, gl.VARIABLE_D, gl.NONE, gl.NONE, gl.NONE, gl.NONE)
++    # Alpha is taken from Texture 1 (Variable D's alpha)
+ 
+-    # 3. Final Combiner Setup
+-    # Sums Ambient Color (D from Texture 1) and Diffuse Color (B) * Dot Product (A from Stage 0)
+-    # Formula: C_final = C_diffuse * (G . L) + C_ambient
+-    set_combiner_stage(FINAL, 
+-        input_a=COMBINER0_OUTPUT, # The dot product
+-        input_b=DIFUSE_COLOR,     # Constant diffuse light color
+-        input_c=ZERO, 
+-        input_d=TEXTURE1,         # Ambient color from Texture 1
+-        operation=COMBINE_ADD
+-    )
+-    # Final Output: RGB = C_diffuse * (G . L) + C_ambient
+-    # Alpha is handled by standard alpha blending from Texture 1
+-
+-    # 4. Additional Light Support (Optional)
+-    # Variables C and D of the first combiner stage can be used to compute 
+-    # diffuse illumination for a second colored light source, since the input 
+-    # registers for secondary color and constant color 1 are unused [S1, unofficial].
+-    # This requires sacrificing either trilinear interpolation or separate 
+-    # ambient/diffuse color specification if not using the two-texture approach.
+-
+-def render_volume_slices():
+-    """
+-    Renders the volume using slice-based rendering with the configured shading.
+-    """
+-    enable_alpha_blending()
+-    enable_multi_texturing()
++def render_slice(slice_data, gradient_data):
++    # Bind Gradient Texture to Unit 0
++    gl.active_texture(gl.TEXTURE0)
++    gl.bind_texture(gl.TEXTURE_2D, gradient_data)
+     
+-    # For each slice in the volume:
+-    for slice in volume_slices:
+-        # Calculate cross-section of slicing plane with bounding box
+-        # Cut polygon into stripes
+-        # Specify alpha values for the slice
+-        
+-        # Apply multi-texture rendering
+-        # The fragment shader/combiner pipeline automatically computes shading
+-        # based on the gradient and light direction
+-        draw_polygon_stripes(slice)
++    # Bind Color/Opacity Texture to Unit 1
++    gl.active_texture(gl.TEXTURE1)
++    gl.bind_texture(gl.TEXTURE_2D, slice_data)
++    
++    # Enable multi-texturing
++    gl.enable(gl.TEXTURE_2D)
++    gl.enable(gl.MULTITEXTURE)
++    
++    # Enable Alpha Blending for semi-transparency
++    gl.enable(gl.BLEND)
++    gl.blend_func(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
++    
++    # Draw the slice geometry (e.g., a quad or polygon strip)
++    # The fragment shader/combiner logic runs per fragment
++    draw_geometry()
+ ```
+ 
+-**Parameters and Typical Values**
+-*   **Light Direction ($\mathbf{L}$):** Typically normalized.
+-*   **Diffuse Color ($C_{diffuse}$):** Constant color, e.g., white $(1, 1, 1)$ for neutral lighting.
+-*   **Ambient Color ($C_{ambient}$):** Per-voxel, stored in Texture 1.
+-*   **Gradient Mapping:** Gradient components must be mapped to $[0, 1]$ if the hardware combiner expects unsigned inputs, or handled via signed extensions if supported [S2].
++### Parameters and Typical Values
++*   **Light Direction:** Normalized 3D vector.
++*   **Diffuse Color:** RGB vector, typically white or light gray.
++*   **Ambient Color:** RGB vector, typically a dimmer version of the diffuse color or a base material color.
++*   **Opacity:** Alpha value from Texture 1, typically in range $[0, 1]$.
+ 
+-**Edge Cases and Pitfalls**
+-*   **No Real Trilinear Interpolation:** Because the hardware limits input textures to two, and both gradient and color/opacity must be stored separately, real trilinear interpolation of the volume data is not possible [S1, unofficial][S2]. This is the main drawback, leading to limited image quality compared to methods using 3D textures or multi-pass techniques [S1, unofficial][S2].
+-*   **No Per-Voxel Ambient Color via Alpha Index:** The hardware does not provide a component-wise color lookup table. It is not possible to use the alpha component as a color index to specify ambient color for each voxel independently if using a paletted texture for gradients [S2].
+-*   **Signed Vector Components:** While early workarounds were needed, modern (for the time) hardware supports signed vector components directly, avoiding large-scale workarounds [S2].
+-*   **Limited Lighting:** Adding a second colored diffuse light source requires sacrificing either trilinear interpolation or the specification of separate colors for ambient and diffuse light if not using the two-texture approach [S1, unofficial].
++### Edge Cases and Pitfalls
++1.  **No Real Trilinear Interpolation:** The hardware only supports two input textures simultaneously. Therefore, it is impossible to perform real trilinear interpolation of the volume data while also accessing the gradient and color textures [S1, unofficial][S2]. The method typically uses bilinear interpolation on the 2D slice textures, which degrades image quality compared to true 3D interpolation [S1, unofficial][S2].
++2.  **No Per-Voxel Ambient Color via Alpha Index:** The hardware does not provide a component-wise color lookup table. It is not possible to use the alpha channel of the gradient texture as an index to look up a per-voxel ambient color. Ambient color must be stored directly in the RGB channels of Texture 1 [S1, unofficial][S2].
++3.  **Limited Lighting:** With the standard setup, only one diffuse light source can be computed per pass. A second colored light source can be added by utilizing the unused input registers (C and D) of the first combiner stage, but this requires sacrificing either trilinear interpolation or the specification of separate colors for ambient and diffuse light [S1, unofficial].
++4.  **Signed Vectors:** Unlike previous software-based methods, this hardware approach natively supports signed vector components for the gradient, eliminating the need for large-scale workarounds to handle negative dot products [S2].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity**
+-*   **Time Complexity:** Single-pass rendering. The dot product is computed directly by hardware, avoiding multi-pass overhead [S1, unofficial][S2].
+-*   **Memory Complexity:** Requires two 2D textures. Memory requirements are similar to the isosurface algorithm, disregarding the memory allocated for the color table if a paletted texture is used for Texture 1 [S1, unofficial][S2].
+-
+-**Measured Performance**
+-Performance on a GeForce 256 with a viewport size of $600 \times 600$ pixels [S1, unofficial]:
+-*   $128 \times 128 \times 64$: 22.5 fps
+-*   $256 \times 256 \times 128$: 4.1 fps
+-*   $256 \times 256 \times 256$: 2.0 fps
+-
+-**Scaling**
+-Performance scales with resolution and viewport size. The method achieves interactive frame rates for moderate resolutions but degrades significantly for larger volumes due to the single-pass nature and texture bandwidth limitations [S1, unofficial].
+-
+-**Strengths and Limitations**
+-*   **Strengths:** Interactive frame rates via single-pass rendering; hardware-supported dot products; no large-scale workarounds for signed vector components [S1, unofficial][S2].
+-*   **Limitations:** Limited image quality due to missing real trilinear interpolation; inability to assign ambient color for every data value independently using RGB channels for gradient and alpha for opacity [S1, unofficial][S2].
+-
+-**When to Use**
+-Use this method when interactive frame rates are required on hardware with limited texturing units (e.g., early PC graphics cards) and when the loss of trilinear interpolation is acceptable. It is suitable for applications where local diffuse illumination is desired without the overhead of multi-pass rendering [S1, unofficial][S2].
+-
+-**When Not to Use**
+-Do not use this method when high image quality is critical, particularly if smooth interpolation is required. Alternatives using 3D textures or multi-pass techniques (like the method in [9]) should be considered if hardware supports them [S1, unofficial][S2].
++*   **Time Complexity:** Single-pass rendering. The lighting calculation is performed in hardware during rasterization, resulting in $O(1)$ per fragment overhead relative to the combiner logic.
++*   **Memory Complexity:** Requires two texture copies of the volume data (or slice representations): one for gradients and one for colors/opacity. This doubles the memory bandwidth requirement compared to single-texture approaches [S1, unofficial].
++*   **Measured Performance:** On a GeForce 256 with a 600x600 viewport:
++    *   128x128x64 volume: 22.5 fps [S1, unofficial].
++    *   256x256x128 volume: 4.1 fps [S1, unofficial].
++    *   256x256x256 volume: 2.0 fps [S1, unofficial].
++*   **Strengths:**
++    *   Interactive frame rates achieved via single-pass rendering [S1, unofficial][S2].
++    *   Hardware-supported dot products avoid software computation overhead [S2].
++    *   Native support for signed gradient vectors [S2].
++*   **Limitations:**
++    *   Limited image quality due to the absence of real trilinear interpolation [S1, unofficial][S2].
++    *   Restricted to two texture inputs, limiting the complexity of lighting models (e.g., limited to one diffuse light in the basic setup) [S1, unofficial].
++    *   Dependent on specific hardware features (Register Combiners) that are obsolete in modern GPUs [S1, unofficial].
+ 
+ ## Background
+-**Origin**
+-The technique was introduced in the context of interactive volume rendering on standard PC graphics hardware [S1, unofficial][S2]. It builds on the fast algorithm for displaying isosurfaces, adapting it for semi-transparent volume rendering by using alpha blending instead of alpha testing [S1, unofficial][S2].
+-
+-**History and Development**
+-The method was developed to leverage multi-stage rasterization hardware (register combiners) available on early PC GPUs (e.g., GeForce 256) [S1, unofficial][S2]. It addresses the limitations of previous methods that required large-scale workarounds for signed vector components or multi-pass rendering [S1, unofficial][S2]. The authors note that future hardware would likely provide a higher number of texturing units or 3D-texturing capabilities, which would resolve the trilinear interpolation limitation [S1, unofficial][S2].
+-
+-**Applications**
+-The technique is used in medical imaging and scientific visualization, where interactive volume rendering is essential for multi-planar reformatting (MPR) and real-time exploration of 3D datasets [S1, unofficial][S2].
++The technique was introduced in the context of interactive volume rendering on standard PC graphics hardware around 2000 [S1, unofficial][S2]. It was developed to leverage the emerging multi-texturing and register combiner capabilities of GPUs like the NVIDIA GeForce 256. The method builds on the fast algorithm for displaying isosurfaces, adapting it for semi-transparent rendering by replacing alpha-testing with alpha-blending [S1, unofficial]. It was presented as an improvement over previous software-based or multi-pass hardware implementations, which suffered from poor performance due to large-scale workarounds for signed vectors or excessive texture binding operations [S1, unofficial][S2].
+ 
+ ## Sources
+-[S1] Interactive Volume Rendering On PC Hardware, http://gd.tuwien.ac.at/visual/OpenQVis/Publ.2000.5.pdf, fetched 2026-10-27 (unofficial)
++[S1] Interactive Volume Rendering On PC Hardware (PDF), http://gd.tuwien.ac.at/visual/OpenQVis/Publ.2000.5.pdf, fetched 2026-10-27 (unofficial)
+ [S2] Interactive Volume Rendering on Standard PC Graphics ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/VolVisforPCHardware.pdf, fetched 2026-10-28
